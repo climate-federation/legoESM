@@ -1449,15 +1449,17 @@ def main() -> int:
                             tri_args, _tri_out = tri_calls[0]
                             a_tri, b_tri, c_tri, _rhs_tri = map(
                                 np.asarray, tri_args)
-                            if a_tri.shape[-1] != npr + 2:
+                            nmat = npr - 1
+                            wet_mat = wet_pr[..., :nmat]
+                            if a_tri.shape[-1] != npr + 1:
                                 raise AssertionError(
                                     "row-12 expected virtual surface + 35 "
                                     f"TKE rows, got {a_tri.shape[-1]}")
                             # Drop the virtual surface identity row. The next
                             # 34 rows are Fortran jk=2..jpkm1.
-                            lw_l = a_tri[..., 1:1 + npr]
-                            diag_l = b_tri[..., 1:1 + npr]
-                            up_l = c_tri[..., 1:1 + npr]
+                            lw_l = a_tri[..., 1:1 + nmat]
+                            diag_l = b_tri[..., 1:1 + nmat]
+                            up_l = c_tri[..., 1:1 + nmat]
 
                             with xr.open_dataset(
                                     RUN / "mesh_mask.nc",
@@ -1468,18 +1470,18 @@ def main() -> int:
                                     ds["tmask"].isel(time_counter=0)), 0, -1)
                             stretch_m = np.asarray(zrw_stretch)
                             e3t_m = e3t0_m * stretch_m[..., None]
-                            e3w_m = np.asarray(e3w)[..., :npr]
+                            e3w_m = np.asarray(e3w)[..., :nmat]
                             avm_full = avm_n_full
                             dissl_full = base._load_interior(
                                 str(RUN / "tke_dump_dissl.bin"), ni, nj)
-                            avm_jk = avm_full[..., 1:1 + npr]
-                            avm_up = avm_full[..., 2:2 + npr]
-                            avm_lw = avm_full[..., :npr]
-                            e3t_jk = e3t_m[..., 1:1 + npr]
-                            e3t_lw = e3t_m[..., :npr]
-                            tmask_jk = tmask_m[..., 1:1 + npr]
-                            dissl_jk = dissl_full[..., 1:1 + npr]
-                            wmask_jk = wet_pr.astype(np.float64)
+                            avm_jk = avm_full[..., 1:1 + nmat]
+                            avm_up = avm_full[..., 2:2 + nmat]
+                            avm_lw = avm_full[..., :nmat]
+                            e3t_jk = e3t_m[..., 1:1 + nmat]
+                            e3t_lw = e3t_m[..., :nmat]
+                            tmask_jk = tmask_m[..., 1:1 + nmat]
+                            dissl_jk = dissl_full[..., 1:1 + nmat]
+                            wmask_jk = wet_mat.astype(np.float64)
                             dt64 = np.float64(kamm.DT)
                             ediss64 = np.float64(tke_cfg.c_eps)
                             zcof_n = (-np.float64(0.5) * dt64) * tmask_jk
@@ -1497,39 +1499,39 @@ def main() -> int:
 
                             solve_kwargs = tke_capture["solve_calls"][0][0]
                             avm_operand_l = np.asarray(
-                                solve_kwargs["K_M_old"])[..., :npr]
+                                solve_kwargs["K_M_old"])[..., :nmat]
                             e3w_operand_l = np.asarray(
-                                solve_kwargs["dz_half"])[..., :npr]
+                                solve_kwargs["dz_half"])[..., :nmat]
                             e3t_operand_l = np.asarray(
-                                solve_kwargs["dz_cell"])[..., 1:1 + npr]
+                                solve_kwargs["dz_cell"])[..., 1:1 + nmat]
                             dissl_operand_l = (
                                 np.sqrt(np.maximum(
-                                    np.asarray(solve_kwargs["e_old"])[..., :npr],
+                                    np.asarray(solve_kwargs["e_old"])[..., :nmat],
                                     np.float64(tke_cfg.tke_background)))
                                 / np.maximum(
-                                    np.asarray(solve_kwargs["l_eps"])[..., :npr],
+                                    np.asarray(solve_kwargs["l_eps"])[..., :nmat],
                                     np.float64(tke_cfg.mxl_min)))
                             row12_operands = {
                                 "p_avm_jk": metrics(
-                                    avm_operand_l, avm_jk, wet_pr, focus,
+                                    avm_operand_l, avm_jk, wet_mat, focus,
                                     POINTWISE_BAR),
                                 "e3t_jk_Kmm": metrics(
-                                    e3t_operand_l, e3t_jk, wet_pr, focus,
+                                    e3t_operand_l, e3t_jk, wet_mat, focus,
                                     POINTWISE_BAR),
                                 "e3w_jk_Kmm": metrics(
-                                    e3w_operand_l, e3w_m, wet_pr, focus,
+                                    e3w_operand_l, e3w_m, wet_mat, focus,
                                     POINTWISE_BAR),
                                 "dissl_jk": metrics(
-                                    dissl_operand_l, dissl_jk, wet_pr, focus,
+                                    dissl_operand_l, dissl_jk, wet_mat, focus,
                                     POINTWISE_BAR),
                             }
                             row12_coefficients = {
                                 "zd_up": metrics(
-                                    up_l, up_n, wet_pr, focus, POINTWISE_BAR),
+                                    up_l, up_n, wet_mat, focus, POINTWISE_BAR),
                                 "zd_lw": metrics(
-                                    lw_l, lw_n, wet_pr, focus, POINTWISE_BAR),
+                                    lw_l, lw_n, wet_mat, focus, POINTWISE_BAR),
                                 "zdiag": metrics(
-                                    diag_l, diag_n, wet_pr, focus,
+                                    diag_l, diag_n, wet_mat, focus,
                                     POINTWISE_BAR),
                             }
                             first_coeff = next(
@@ -1549,7 +1551,7 @@ def main() -> int:
                             }
                             row12_primary["controls"] = {
                                 name: planted_controls(
-                                    ref, ref, wet_pr, POINTWISE_BAR)
+                                    ref, ref, wet_mat, POINTWISE_BAR)
                                 for name, ref in (
                                     ("zd_up", up_n), ("zd_lw", lw_n),
                                     ("zdiag", diag_n))
