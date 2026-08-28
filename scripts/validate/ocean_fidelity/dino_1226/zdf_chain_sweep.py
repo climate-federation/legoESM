@@ -73,8 +73,11 @@ def sha256(path: Path) -> str:
 
 
 def git_sha() -> str:
-    # The sandboxed worktree's administrative Git directory is read-only, but
-    # its checked-out parent SHA is still the state this probe executes.
+    override = os.environ.get("ZDF_SWEEP_TREE_SHA")
+    if override is not None:
+        if len(override) != 40 or any(c not in "0123456789abcdef" for c in override):
+            raise SystemExit("ZDF_SWEEP_TREE_SHA must be a lowercase 40-hex commit")
+        return override
     return subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=HERE.parents[3], text=True
     ).strip()
