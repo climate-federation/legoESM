@@ -2043,6 +2043,35 @@ def main() -> int:
                                                         offset_counts)
                                                 },
                                             }
+                                        rhs_jk2 = np.asarray(
+                                            tri_args[3])[..., 1]
+                                        lw_jk2 = a_tri[..., 1]
+                                        surface_recip = (
+                                            1.0 / np.asarray(surface_n))
+                                        nemo_work_jk2 = work_n[..., 1]
+                                        jk2_associations = {
+                                            "source_divide_then_multiply":
+                                                rhs_jk2
+                                                - lw_jk2 / surface_recip
+                                                * np.float64(1.0),
+                                            "factored_lower_times_surface":
+                                                rhs_jk2
+                                                - lw_jk2
+                                                * np.asarray(surface_n),
+                                            "multiply_then_divide":
+                                                rhs_jk2
+                                                - (lw_jk2 * np.float64(1.0))
+                                                / surface_recip,
+                                        }
+                                        jk2_association_metrics = {
+                                            name: metrics(
+                                                value[..., None],
+                                                nemo_work_jk2[..., None],
+                                                wet2[..., None], focus,
+                                                POINTWISE_BAR)
+                                            for name, value in
+                                            jk2_associations.items()
+                                        }
                                         recurrence_metric = metrics(
                                             literal_recurrence[..., :nrhs],
                                             postsolve_n, wet_rhs, focus,
@@ -2069,6 +2098,8 @@ def main() -> int:
                                                 forward_diag_metric,
                                             "literal_forward_rhs":
                                                 forward_rhs_metric,
+                                            "jk2_rhs_association_discriminator":
+                                                jk2_association_metrics,
                                             "solver_rhs_bottom_scatter":
                                                 rhs_bottom_scatter,
                                             "solver_bottom_matrix_identity":
