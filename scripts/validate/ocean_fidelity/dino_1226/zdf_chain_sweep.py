@@ -1856,6 +1856,14 @@ def main() -> int:
                                         postsolve_l = np.asarray(
                                             tke_capture["solve_calls"][0][1])[
                                                 ..., :nrhs]
+                                        rhs_l = np.asarray(
+                                            tri_args[3])[..., 1:1 + nrhs]
+                                        rhs_n = en_n + dt64 * (
+                                            p_sh2_n + strat_n + diss_rhs_n
+                                        ) * wet_rhs.astype(np.float64)
+                                        rhs_metric = metrics(
+                                            rhs_l, rhs_n, wet_rhs, focus,
+                                            POINTWISE_BAR)
                                         row17m = metrics(
                                             postsolve_l, postsolve_n, wet_rhs,
                                             focus, 1.0e-12)
@@ -1869,6 +1877,13 @@ def main() -> int:
                                         row17m["controls"] = planted_controls(
                                             postsolve_n, postsolve_n, wet_rhs,
                                             1.0e-12)
+                                        row17m["operand_metrics"] = {
+                                            "literal_composite_rhs": rhs_metric,
+                                            "matrix": row12_primary,
+                                            "rhs_shear": row13m,
+                                            "rhs_stratification": row14m,
+                                            "rhs_dissipation": row15m,
+                                        }
                                         bracket17 = restart_numeric_identity(
                                             args.row17_bracket_instrument_restart,
                                             args.row17_bracket_off_restart)
@@ -1910,12 +1925,8 @@ def main() -> int:
                                                         "name": (
                                                             "Thomas solve/"
                                                             "postsolve floor")},
-                                                    "operand_localization": {
-                                                        "matrix": row12_primary,
-                                                        "rhs_shear": row13m,
-                                                        "rhs_stratification": row14m,
-                                                        "rhs_dissipation": row15m,
-                                                    },
+                                                    "operand_localization":
+                                                        row17m["operand_metrics"],
                                                     "controls": row17m["controls"],
                                                     "next_round_fix_design": {
                                                         "status": (

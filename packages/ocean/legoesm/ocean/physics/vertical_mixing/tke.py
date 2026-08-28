@@ -1301,8 +1301,17 @@ def _solve_tke_backward_euler(
     # production (zero in the default in-situ mode) + previous-step e
     # + the external energy-recycling source ``forc`` (eke_diss_iw + K_diss_bot,
     # Veros integrate_tke; zero / None ⇒ bit-identical).
-    rhs = e_old + dt * (P_s + buoy_source)
-    if _disc == "nemo_1p5_split":
+    if literal_matrix:
+        # Literal zdftke.F90:513-516 association: all three RHS tendencies
+        # share one parenthesized sum and its trailing wmask.  Keeping the
+        # dissipation add-back in a later statement changes the matched-step
+        # Thomas RHS even when each isolated operand is bit-identical.
+        rhs = e_old + dt * (
+            P_s + buoy_source + 0.5 * diss_rate * e_old
+        ) * jnp.asarray(w_active, dtype=e_old.dtype)
+    else:
+        rhs = e_old + dt * (P_s + buoy_source)
+    if _disc == "nemo_1p5_split" and not literal_matrix:
         # zfact3·dissl·en explicit add-back (NEMO zdftke.F90:419).
         rhs = rhs + dt * 0.5 * diss_rate * e_old
     if external_source is not None:
