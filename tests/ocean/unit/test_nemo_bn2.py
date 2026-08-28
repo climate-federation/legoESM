@@ -414,7 +414,7 @@ def test_native_e3w_coordinate_validation_wrappers_and_ad():
     partial = create_partial_cell_coordinate(z, jnp.array([150.0]))
     full = create_full_step_coordinate(z, jnp.array([3]))
     for wrapped in (partial, full):
-        assert wrapped.nemo_e3w_source == "mesh_reference"
+        assert wrapped.nemo_e3w_mesh_reference is True
         assert np.array_equal(np.asarray(wrapped.nemo_gdept_0), gd)
         assert np.array_equal(np.asarray(wrapped.nemo_e3w_0), ew)
 

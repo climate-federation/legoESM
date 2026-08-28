@@ -680,12 +680,8 @@ def nemo_e3w_from_live_gdept(
     interior: bool = True,
 ) -> jnp.ndarray:
     """Select NEMO W spacing once for bn2 and every paired consumer."""
-    source = getattr(z_coord, "nemo_e3w_source", "mesh_reference")
-    if source not in ("mesh_reference", "depth_difference"):
-        raise ValueError(
-            f"unknown nemo_e3w_source {source!r}; expected 'mesh_reference' "
-            "or 'depth_difference'")
-    if source == "depth_difference":
+    mesh_reference = getattr(z_coord, "nemo_e3w_mesh_reference", True)
+    if not mesh_reference:
         if interior:
             return jnp.diff(live_gdept, axis=-1)
         return jnp.concatenate(

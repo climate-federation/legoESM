@@ -99,7 +99,7 @@ class OceanZStarCoordinate(NamedTuple):
     # explicit legacy opt-in for consumers without a NEMO mesh.
     nemo_gdept_0: jnp.ndarray | None = None
     nemo_e3w_0: jnp.ndarray | None = None
-    nemo_e3w_source: str = "mesh_reference"
+    nemo_e3w_mesh_reference: bool = True
 
 
 def create_ocean_z_star(
@@ -289,7 +289,7 @@ def create_z_star_from_thicknesses(
         t_depth_ref=t_depth_ref,
         nemo_gdept_0=nemo_gdept_0,
         nemo_e3w_0=nemo_e3w_0,
-        nemo_e3w_source=nemo_e3w_source,
+        nemo_e3w_mesh_reference=(nemo_e3w_source == "mesh_reference"),
     )
 
 
@@ -491,7 +491,7 @@ class OceanPartialCellCoordinate(NamedTuple):
     t_depth_ref: jnp.ndarray | None = None
     nemo_gdept_0: jnp.ndarray | None = None
     nemo_e3w_0: jnp.ndarray | None = None
-    nemo_e3w_source: str = "mesh_reference"
+    nemo_e3w_mesh_reference: bool = True
 
 
 def create_partial_cell_coordinate(
@@ -602,7 +602,8 @@ def create_partial_cell_coordinate(
         t_depth_ref=getattr(z_coord, "t_depth_ref", None),
         nemo_gdept_0=getattr(z_coord, "nemo_gdept_0", None),
         nemo_e3w_0=getattr(z_coord, "nemo_e3w_0", None),
-        nemo_e3w_source=getattr(z_coord, "nemo_e3w_source", "mesh_reference"),
+        nemo_e3w_mesh_reference=getattr(
+            z_coord, "nemo_e3w_mesh_reference", True),
     )
 
 
@@ -670,7 +671,8 @@ def create_full_step_coordinate(
         t_depth_ref=getattr(z_coord, "t_depth_ref", None),
         nemo_gdept_0=getattr(z_coord, "nemo_gdept_0", None),
         nemo_e3w_0=getattr(z_coord, "nemo_e3w_0", None),
-        nemo_e3w_source=getattr(z_coord, "nemo_e3w_source", "mesh_reference"),
+        nemo_e3w_mesh_reference=getattr(
+            z_coord, "nemo_e3w_mesh_reference", True),
     )
 
 
