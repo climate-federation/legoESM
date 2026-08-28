@@ -54,9 +54,20 @@ columns failing. The first coefficient in source order, `zd_up`, fails with
 maximum normalized column error `8.829184`; `zd_lw` and `zdiag` also fail in
 all columns. The operand walk localizes the first failure to the denominator
 at `zdftke.F90:504`: production supplies no live `e3t(jk,Kmm)` to the solve.
-Its legacy branch reuses a shifted `e3w`-derived `dz_int_eff` in that slot;
-that effective operand fails all 9,920 columns with maximum `0.6806799`.
-The adjacent carried `p_avm` and live `e3w(Kmm)` operands are exact at zero.
+Its legacy branch places the incoming `e3w` in the face-gradient slot used as
+that `e3t` operand; the slot fails all 9,920 columns with maximum `0.2484444`.
+The preceding `zcof`, `p_avm`, and clipped upper viscosity sum are exact at
+zero. The lower `e3t(jk-1,Kmm)` slot fails all columns (max `0.2394656`), and
+the shifted/repeated `e3w` control-volume slot fails all columns (max
+`0.4662894`). The independently scored incoming `e3w(Kmm)` is exact at zero,
+but is assigned to the wrong coefficient role.
+
+**LOUD RETRACTION (2026-08-28):** the first post-measurement draft scored one
+shifted `dz_int_eff` approximation against `e3t` and reported max
+`0.6806799`. Review found that this was not coefficient-aware and omitted
+registered `zcof` and viscosity-sum checkpoints. Before any production fix,
+the committed probe was corrected and rerun. The figures above replace that
+draft; the owner remains the line-504 `e3t(jk,Kmm)` slot.
 
 The independently checked `dissl` operand also fails all columns (maximum
 `0.1088969`), but it occurs later, in `zdiag` at line 510, and cannot displace

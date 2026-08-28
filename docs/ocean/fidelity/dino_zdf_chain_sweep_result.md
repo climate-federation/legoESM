@@ -79,7 +79,8 @@ Scope is narrow:
 The red-capable suite includes the hand-computed matched-step source-order
 case, a cancelled-ratio violation, reciprocal-versus-quotient separation,
 full 3-D W-ladder bridge pins, JIT/gradient checks, and unchanged-card pins.
-The focused physics/bridge run reports 83/83 passing tests; no GPU was used.
+The post-review focused physics/bridge run reports 69/69 passing tests; no GPU
+was used.
 
 ### First divergence: row-12 live `e3t` denominator is absent
 
@@ -95,12 +96,26 @@ zdiag(ji,jk) = 1._wp-zzd_lw-zzd_up + zfact2*dissl(ji,jj,jk)*wmask(ji,jj,jk)
 ```
 
 The production solve receives `dz_cell=None`, so its legacy matrix branch
-reuses a shifted `e3w`-derived `dz_int_eff` where NEMO reads live
-`e3t(jk,Kmm)`. That first operand fails **9,920/9,920**, maximum `0.6806799`,
-including every focus column. The adjacent operands are decisive controls:
-carried `p_avm` and live `e3w(Kmm)` each pass at exact zero. The resulting
-`zd_up`, `zd_lw`, and `zdiag` each fail every column; their maxima are
-`8.829184`, `9.372063`, and `5.965324`, respectively.
+feeds the incoming `e3w` into the face-gradient slot where NEMO reads live
+`e3t(jk,Kmm)`, then feeds a shifted/repeated `e3w` ladder into the control-
+volume slot where NEMO reads `e3w(jk,Kmm)`. In coefficient evaluation order,
+`zcof`, `p_avm`, and both clipped viscosity sums pass at exact zero. The first
+failure is therefore the `zd_up` `e3t(jk,Kmm)` operand at the quoted line 504:
+**9,920/9,920**, maximum `0.2484444`, including every focus column. The lower
+`e3t(jk-1,Kmm)` slot similarly fails 9,920/9,920 (max `0.2394656`), and the
+effective `e3w(jk,Kmm)` control-volume slot fails 9,920/9,920 (max
+`0.4662894`). The independently captured incoming live `e3w(Kmm)` remains an
+exact-zero control; it is present but production assigns it to the wrong
+coefficient role. The resulting `zd_up`, `zd_lw`, and `zdiag` each fail every
+column; their maxima are `8.829184`, `9.372063`, and `5.965324`, respectively.
+
+**LOUD RETRACTION:** the first row-12 artifact draft scored one shifted
+`dz_int_eff` approximation against `e3t` and reported max `0.6806799`; it did
+not score every actual coefficient slot separately. The corrected committed
+probe now records `zcof`, upper/lower viscosity sums, upper/lower `e3t`, the
+effective control-volume `e3w`, and the incoming `e3w` control, and selects
+the first failing operand separately for each coefficient. The corrected
+line-504 owner is `up_e3t_jk_Kmm`, max `0.2484444`.
 
 The later `dissl` operand also fails all columns (maximum `0.1088969`), but it
 first enters `zdiag` at line 510. It cannot displace the earlier line-504
@@ -130,8 +145,8 @@ not run either GPU arm yet.
 Artifacts: round 7 SHA256
 `47ce1337a23f677e391137b3c4ff971d6fdac412b39f29ba5dcf783b0ed0d108`;
 round 8 SHA256
-`685bdfa72e18d0208c8408e3dc53523fe65f34591d7a92ac20997343646a168a`.
-The round-8 parent/probe SHA is `846d8e711d7` and the artifact carries all
+`ed49f0a54fd0bf782237c08cc5043b7126b7f6665ff6b4b7a018a399aa0fbed6`.
+The round-8 parent/probe SHA is `5ebd141b0fe` and the artifact carries all
 source, input, dump, environment, time-level, focus, and control stamps.
 
 ## Round-6 result: row 10 closed; ordered stop at row 11
