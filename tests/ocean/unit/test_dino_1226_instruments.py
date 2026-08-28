@@ -288,7 +288,7 @@ def test_parse_args_bridge_tke_flag(instruments):
 # ---------------------------------------------------------------------------
 # kamm_twin_90d: --bridge-before (#1317 leap-frog before-level bridge)
 # ---------------------------------------------------------------------------
-def test_before_level_bridge_is_ON_by_default(instruments):
+def test_before_level_bridge_is_on_by_default(instruments):
     """#1455 (2026-08-24): the before-level bridge defaults ON, on BOTH the
     python surface and the CLI.
 
