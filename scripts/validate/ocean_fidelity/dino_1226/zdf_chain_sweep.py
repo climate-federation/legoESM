@@ -846,6 +846,26 @@ def main() -> int:
                             POINTWISE_BAR),
                         "e3w_Kmm": metrics(
                             dz_l_np, dz_n_lc, wet_lc, focus, POINTWISE_BAR),
+                        "rn2b_vs_verified_row2_production": metrics(
+                            n2_l_np, np.asarray(n2)[..., :nlc], wet_lc,
+                            focus, POINTWISE_BAR),
+                        "gdepw_vs_row2_live_geometry": metrics(
+                            depth_l_np, np.asarray(gdepw)[..., :nlc], wet_lc,
+                            focus, POINTWISE_BAR),
+                        "e3w_vs_row2_live_geometry": metrics(
+                            dz_l_np, np.asarray(e3w)[..., :nlc], wet_lc,
+                            focus, POINTWISE_BAR),
+                        "rn2b_offset0": metrics(
+                            n2_l_np, n2_n_full[..., :nlc], wet_lc,
+                            focus, POINTWISE_BAR),
+                        "gdepw_offset0": metrics(
+                            depth_l_np,
+                            gdepw0_lc[..., :nlc] * stretch_lc[..., None],
+                            wet_lc, focus, POINTWISE_BAR),
+                        "e3w_offset0": metrics(
+                            dz_l_np,
+                            e3w0_lc[..., :nlc] * stretch_lc[..., None],
+                            wet_lc, focus, POINTWISE_BAR),
                     }
                     row4["continuation_preview"]["rows"][
                         "10_langmuir_source"] = row10m
