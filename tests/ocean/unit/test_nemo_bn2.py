@@ -411,6 +411,36 @@ def test_bn2_literal_zrw_matches_hand_computed_nemo_source_order():
     assert cancelled != expected
 
 
+def test_bn2_literal_path_uses_raw_depth_for_eos_rab_too():
+    """The raw-depth multiply must feed both eos_rab and bn2 interpolation."""
+    T = jnp.asarray([[12.0, 8.0]])
+    S = jnp.asarray([[35.1, 34.9]])
+    gdept0 = jnp.asarray([25.95864807194812, 37.01406258301722])
+    gdepw0 = jnp.asarray([31.428849032898142])
+    stretch = jnp.asarray([0.9996588545248404])
+    literal_depth = gdept0 * stretch[..., None]
+    # Plant an incompatible preassembled depth: a regression that uses this
+    # argument for eos_rab instead of raw_depth*stretch must turn red.
+    preassembled = literal_depth.at[..., 0].set(
+        literal_depth[..., 0] * (1.0 + 1.0e-10))
+    e3w = jnp.asarray([[11.0]])
+    got = compute_buoyancy_frequency_nemo_bn2(
+        T, S, preassembled, gdepw0 * stretch[..., None],
+        e3w_int=e3w, zrw_evaluation="nemo_literal",
+        zrw_gdept_0=gdept0, zrw_gdepw_0=gdepw0,
+        zrw_stretch=stretch)
+    expected = compute_buoyancy_frequency_nemo_bn2(
+        T, S, literal_depth, gdepw0 * stretch[..., None],
+        e3w_int=e3w, zrw_evaluation="nemo_literal",
+        zrw_gdept_0=gdept0, zrw_gdepw_0=gdepw0,
+        zrw_stretch=stretch)
+    legacy = compute_buoyancy_frequency_nemo_bn2(
+        T, S, preassembled, gdepw0 * stretch[..., None],
+        e3w_int=e3w, zrw_evaluation="preassembled_live")
+    np.testing.assert_array_equal(got, expected)
+    assert not np.array_equal(np.asarray(got), np.asarray(legacy))
+
+
 def test_nemo_reciprocal_r3t_is_selectable_jittable_and_differentiable():
     """Only the explicit selector transcribes domain:158 -> domqco:160."""
     import jax
@@ -449,6 +479,7 @@ def test_native_e3w_coordinate_validation_wrappers_and_ad():
 
     dz = np.array([10.0, 20.0, 40.0, 80.0])
     gd = np.array([4.0, 18.0, 48.0, 108.0])
+    gw0 = np.array([0.0, 10.0, 30.0, 70.0])
     ew = np.array([8.0, 14.0, 30.0, 60.0])
     with pytest.raises(ValueError, match="unknown nemo_e3w_source"):
         create_z_star_from_thicknesses(dz, nemo_e3w_source="typo")
@@ -464,12 +495,14 @@ def test_native_e3w_coordinate_validation_wrappers_and_ad():
 
     z = create_z_star_from_thicknesses(
         dz, t_depth_ref_m=gd, nemo_gdept_0_m=gd,
+        nemo_gdepw_0_m=gw0,
         nemo_e3w_0_m=ew)
     partial = create_partial_cell_coordinate(z, jnp.array([150.0]))
     full = create_full_step_coordinate(z, jnp.array([3]))
     for wrapped in (partial, full):
         assert wrapped.nemo_e3w_mesh_reference is True
         assert np.array_equal(np.asarray(wrapped.nemo_gdept_0), gd)
+        assert np.array_equal(np.asarray(wrapped.nemo_gdepw_0), gw0)
         assert np.array_equal(np.asarray(wrapped.nemo_e3w_0), ew)
 
     T = jnp.array([[12.0, 10.0, 7.0, 4.0]])

@@ -679,16 +679,26 @@ def compute_buoyancy_frequency_nemo_bn2(
             "invalid; expected 'seos' (the 3-term simplified EOS) or "
             "'teos10' (NEMO's Roquet polynomial with the TEOS-10 coefficient "
             "set, which is what ORCA1 runs: ln_teos10=.true.).")
+    eos_gdept = jnp.asarray(gdept)
+    if zrw_evaluation == "nemo_literal":
+        if zrw_gdept_0 is None or zrw_stretch is None:
+            raise ValueError(
+                "zrw_evaluation='nemo_literal' requires zrw_gdept_0 and "
+                "zrw_stretch for the literal eos_rab depth")
+        eos_gdept = lax.optimization_barrier(
+            jnp.asarray(zrw_gdept_0)
+            * jnp.asarray(zrw_stretch)[..., jnp.newaxis])
     if eos_form == "teos10":
         # NEMO's rab_3d takes the GEOMETRIC depth, and both alpha and beta come
         # from the polynomial rather than the 3-term fit. Everything below this
         # line -- the zrw interpolation, the /e3w, the sign convention -- is
         # unchanged, because NEMO's bn2_t is shared across EOS branches.
-        alpha, beta = nemo_roquet_alpha_beta(T, S, gdept)
+        alpha, beta = nemo_roquet_alpha_beta(T, S, eos_gdept)
     else:
         if cfg is None:
             cfg = NemoSEOSConfig()
-        alpha, beta = nemo_seos_alpha_beta(T, S, gdept, cfg)  # (..., nlev)
+        alpha, beta = nemo_seos_alpha_beta(
+            T, S, eos_gdept, cfg)  # (..., nlev)
     gd = jnp.asarray(gdept)
     gd_up = gd[..., :-1]                                       # cell i  (upper)
     gd_lo = gd[..., 1:]                                        # cell i+1 (lower)

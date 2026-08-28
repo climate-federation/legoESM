@@ -67,6 +67,7 @@ class NemoGrid(NamedTuple):
     # unnoticed.
     e3t_0: np.ndarray | None = None      # (n_lat, n_lon, nlev) [m]
     gdept_0: np.ndarray | None = None    # (n_lat, n_lon, nlev) [m]
+    gdepw_0: np.ndarray | None = None    # (n_lat, n_lon, nlev) [m]
     gphiv: np.ndarray | None = None
     # #1226 item 2 (dom_qco_r3c r3u/r3v): NEMO's reference u-/v-column depths
     # ``hu_0 = sum_k(e3u_0*umask)`` / ``hv_0 = sum_k(e3v_0*vmask)``
@@ -200,6 +201,7 @@ def read_nemo_mesh_mask(path: str, *, nn_hls: int = 1) -> NemoGrid:
         tmask=m3("tmask"), umask=umask_3d, vmask=vmask_3d,
         e3t_0=(m3("e3t_0") if "e3t_0" in m else None),
         gdept_0=(m3("gdept_0") if "gdept_0" in m else None),
+        gdepw_0=(m3("gdepw_0") if "gdepw_0" in m else None),
         gphiv=(h2("gphiv") if "gphiv" in m else None),
         seam_wall_rows=_seam_wall,
         e3u_0=e3u_0_arr, e3v_0=e3v_0_arr, hu_0=hu_0_arr, hv_0=hv_0_arr,

@@ -40,6 +40,8 @@ def _synthetic():
         vmask=np.ones((NY, NX, NZ)),
         gdept_0=np.broadcast_to(
             np.array([5.0, 20.0, 45.0]), (NY, NX, NZ)),
+        gdepw_0=np.broadcast_to(
+            np.array([0.0, 10.0, 30.0]), (NY, NX, NZ)),
         e3w_0=np.broadcast_to(
             np.array([10.0, 15.0, 25.0]), (NY, NX, NZ)),
     )
@@ -67,6 +69,8 @@ def test_bridge_geometry_and_staggering():
     assert out.z_coord.nemo_e3w_mesh_reference is True
     assert np.array_equal(
         np.asarray(out.z_coord.nemo_e3w_0), grid.e3w_0)
+    assert np.array_equal(
+        np.asarray(out.z_coord.nemo_gdepw_0), grid.gdepw_0)
 
     # Staggering. legoESM u[j,i] is the WEST face of T-cell (j,i)
     # (latlon_cgrid_operators.py:3623); NEMO u(i) is the EAST face = west face of

@@ -47,6 +47,7 @@ def _write_mesh_mask(path, with_e3uv_0=False, with_e3w_0=False):
         data["e3v_0"] = d3_const
     if with_e3w_0:
         data["e3w_0"] = d3
+        data["gdepw_0"] = d3
     ds = xr.Dataset(data)
     ds.to_netcdf(path)
 
@@ -96,6 +97,9 @@ def test_mesh_mask_e3w0_halo_strip_and_axis_order(tmp_path):
     assert g.e3w_0 is not None
     assert g.e3w_0.shape == (IY, IX, NZ)
     assert g.e3w_0[1, 2, 2] == 2 * 100 + (1 + 1) * 10 + (2 + 1)
+    assert g.gdepw_0 is not None
+    assert g.gdepw_0.shape == (IY, IX, NZ)
+    assert g.gdepw_0[1, 2, 2] == 2 * 100 + (1 + 1) * 10 + (2 + 1)
 
 
 def test_mesh_mask_hu0_hv0_derived_from_e3u0_e3v0(tmp_path):
