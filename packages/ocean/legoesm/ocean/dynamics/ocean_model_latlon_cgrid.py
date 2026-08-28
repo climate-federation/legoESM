@@ -5786,7 +5786,7 @@ class LatLonCGridOceanModel:
 
     def _tke_step_entry_p_sh2(
         self, state, *, eta_now=None, u_now=None, v_now=None,
-        z_coord=None, config=None,
+        z_coord=None, config=None, grid=None,
     ):
         """Freeze NEMO ``p_sh2`` from the step-entry NOW/BEFORE faces."""
         _zc = self.z_coord if z_coord is None else z_coord
@@ -5844,9 +5844,64 @@ class LatLonCGridOceanModel:
         dz_half = jnp.broadcast_to(
             _zc.dz_half_ref * J[..., jnp.newaxis],
             state.T.data.shape[:-1] + (_zc.n_levels - 1,))
+        metric_source = getattr(
+            tke_cfg, "tke_shear_metric_source", "tpoint_jacobian")
+        if metric_source not in ("tpoint_jacobian", "nemo_qco_live_face"):
+            raise ValueError(
+                "Unknown TKEConfig.tke_shear_metric_source: expected "
+                "'tpoint_jacobian' or 'nemo_qco_live_face', got "
+                f"{metric_source!r}.")
+        face_metrics = None
+        if metric_source == "nemo_qco_live_face":
+            if state.eta_before is None:
+                raise ValueError(
+                    "tke_shear_metric_source='nemo_qco_live_face' requires "
+                    "state.eta_before for the Kbb face metric.")
+            e3w0 = getattr(_zc, "nemo_e3w_0", None)
+            if e3w0 is None or not bool(getattr(
+                    _zc, "nemo_e3w_mesh_reference", False)):
+                raise ValueError(
+                    "tke_shear_metric_source='nemo_qco_live_face' requires "
+                    "the raw mesh nemo_e3w_0 reference field.")
+            _grid = self.grid if grid is None else grid
+            from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+                nemo_ssh_avg_face_depth,
+            )
+            dtype = state.T.data.dtype
+            zero_eta = jnp.zeros_like(_eta_now)
+            depth_args = (
+                state.H_bathy.data, state.land_mask.data,
+                state.u_mask.data, state.v_mask.data, _grid,
+                _grid.area_T.astype(dtype), dtype)
+            hu0, hv0 = nemo_ssh_avg_face_depth(zero_eta, *depth_args)
+            hun, hvn = nemo_ssh_avg_face_depth(_eta_now, *depth_args)
+            hub, hvb = nemo_ssh_avg_face_depth(
+                state.eta_before.data, *depth_args)
+            eps = jnp.asarray(1.0e-10, dtype=dtype)
+            r3un = jnp.where(state.u_mask.data > 0.5,
+                             hun / jnp.maximum(hu0, eps) - 1.0, 0.0)
+            r3ub = jnp.where(state.u_mask.data > 0.5,
+                             hub / jnp.maximum(hu0, eps) - 1.0, 0.0)
+            r3vn = jnp.where(state.v_mask.data > 0.5,
+                             hvn / jnp.maximum(hv0, eps) - 1.0, 0.0)
+            r3vb = jnp.where(state.v_mask.data > 0.5,
+                             hvb / jnp.maximum(hv0, eps) - 1.0, 0.0)
+            # DINO full-step z has e3uw_0 == e3vw_0 == raw mesh e3w_0
+            # bit-for-bit; map NEMO east/north-face indexing to legoESM's
+            # west/south raw-face arrays before applying each live factor.
+            ref = jnp.asarray(e3w0[..., 1:], dtype=dtype)
+            ref_u = jnp.concatenate([ref[:, -1:, :], ref], axis=1)
+            ref_v = jnp.concatenate([ref[:1, :, :], ref], axis=0)
+            face_metrics = (
+                ref_u * (1.0 + r3un[..., None]),
+                ref_u * (1.0 + r3ub[..., None]),
+                ref_v * (1.0 + r3vn[..., None]),
+                ref_v * (1.0 + r3vb[..., None]),
+            )
         return avm_weighted_shear_production(
             _u_now, _v_now, state.u_before.data, state.v_before.data,
-            dz_half, u_mask, v_mask, state.tke_avm.data)
+            dz_half, u_mask, v_mask, state.tke_avm.data,
+            face_metrics=face_metrics)
 
     def _tke_realized_kdiss_active(self) -> bool:
         """True iff the post-mixing TKE charges the REALIZED implicit-friction
@@ -6601,7 +6656,7 @@ class LatLonCGridOceanModel:
             if _tke_prognostic:
                 _tke_p_sh2 = self._tke_step_entry_p_sh2(
                     state, eta_now=eta_now, u_now=u_now, v_now=v_now,
-                    z_coord=_zc, config=_cfg_b)
+                    z_coord=_zc, config=_cfg_b, grid=_grid)
                 K_v_cell, A_v_cell, tke_new = compute_vertical_K_profiles(
                     cc_state, _zc, surface_forcing, physics_config,
                     A_v_background=float(_cfg_b.A_v),

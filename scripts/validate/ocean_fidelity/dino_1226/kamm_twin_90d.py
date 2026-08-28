@@ -1077,6 +1077,7 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                        surface_tendency_placement: str | None = None,
                        tke_preclosure_coeff_source: str | None = None,
                        tke_shear_evaluation_stage: str | None = None,
+                       tke_shear_metric_source: str | None = None,
                        u_m: float | None = None,
                        restart_file: str = RESTART_FILE,
                        e3t_mode: str | None = None):
@@ -1150,6 +1151,14 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                 "'implicit_solve_state'")
         cfg = dataclasses.replace(
             cfg, tke_shear_evaluation_stage=tke_shear_evaluation_stage)
+    if tke_shear_metric_source is not None:
+        if tke_shear_metric_source not in (
+                "nemo_qco_live_face", "tpoint_jacobian"):
+            raise ValueError(
+                "tke_shear_metric_source must be 'nemo_qco_live_face' or "
+                "'tpoint_jacobian'")
+        cfg = dataclasses.replace(
+            cfg, tke_shear_metric_source=tke_shear_metric_source)
     if u_m is not None:
         if not (u_m > 0.0):
             raise ValueError(f"u_m (rn_Uv) must be > 0, got {u_m!r}")
@@ -1325,6 +1334,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
              surface_tendency_placement: str | None = None,
              tke_preclosure_coeff_source: str | None = None,
              tke_shear_evaluation_stage: str | None = None,
+             tke_shear_metric_source: str | None = None,
              u_m: float | None = None,
              restart_file: str = RESTART_FILE,
              perturb_seed: int | None = None,
@@ -1389,6 +1399,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         surface_tendency_placement=surface_tendency_placement,
         tke_preclosure_coeff_source=tke_preclosure_coeff_source,
         tke_shear_evaluation_stage=tke_shear_evaluation_stage,
+        tke_shear_metric_source=tke_shear_metric_source,
         u_m=u_m, e3t_mode=ladder_mode)
 
     # #1455 review: the stamp must be a RECEIPT, not a restatement of the flag.
@@ -1893,6 +1904,12 @@ def _parse_args(argv=None):
         help="override the zdf_sh2 evaluation lifetime; default None uses "
              "the recipe (complete DINO NEMO cards freeze step-entry p_sh2; "
              "implicit_solve_state is historical reproduction)")
+    p.add_argument(
+        "--tke-shear-metric-source", default=None,
+        choices=("nemo_qco_live_face", "tpoint_jacobian"),
+        help="override zdf_sh2 vertical face metrics; default None uses the "
+             "recipe (DINO NEMO cards use live NOW/BEFORE QCO metrics; "
+             "tpoint_jacobian is historical reproduction)")
     p.add_argument("--u-m", dest="u_m", type=float, default=None,
                    help="override DINOConfig.U_M (NEMO rn_Uv, the lateral "
                         "viscous velocity [m/s]; card default 0.27). The "
@@ -2123,6 +2140,7 @@ def main(argv=None):
               surface_tendency_placement=args.surface_tendency_placement,
               tke_preclosure_coeff_source=args.tke_preclosure_coeff_source,
               tke_shear_evaluation_stage=args.tke_shear_evaluation_stage,
+              tke_shear_metric_source=args.tke_shear_metric_source,
               u_m=args.u_m,
               perturb_seed=args.perturb_seed, perturb_eps=args.perturb_eps,
               perturb_baro=args.perturb_baro,

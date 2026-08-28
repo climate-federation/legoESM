@@ -314,6 +314,9 @@ def avm_weighted_shear_production(
     dz_half: jnp.ndarray,
     u_mask: jnp.ndarray, v_mask: jnp.ndarray,
     kappaM_T: jnp.ndarray,
+    *,
+    face_metrics: tuple[jnp.ndarray, jnp.ndarray,
+                        jnp.ndarray, jnp.ndarray] | None = None,
 ) -> jnp.ndarray:
     r"""NEMO ``zdf_sh2`` shear-PRODUCTION term ``p_sh2`` with the viscosity
     face-averaged INSIDE the face sum, exactly as ``zdfsh2.F90:80-94``
@@ -386,11 +389,30 @@ def avm_weighted_shear_production(
         du_bef = u_face_b[..., :-1] - u_face_b[..., 1:]
         return du_now * du_bef / dz_sq_face
 
-    dz_sq_u = jnp.concatenate([dz_sq, dz_sq[:, -1:, :]], axis=1)
-    dz_sq_v = jnp.concatenate([dz_sq, dz_sq[-1:, :, :]], axis=0)
+    if face_metrics is None:
+        dz_sq_u = jnp.concatenate([dz_sq, dz_sq[:, -1:, :]], axis=1)
+        dz_sq_v = jnp.concatenate([dz_sq, dz_sq[-1:, :, :]], axis=0)
+    else:
+        if len(face_metrics) != 4:
+            raise ValueError("face_metrics must contain e3u_now/e3u_before/"
+                             "e3v_now/e3v_before")
+        e3u_now, e3u_before, e3v_now, e3v_before = face_metrics
+        expected_u = u_face_now.shape[:-1] + (u_face_now.shape[-1] - 1,)
+        expected_v = v_face_now.shape[:-1] + (v_face_now.shape[-1] - 1,)
+        if (e3u_now.shape != expected_u or e3u_before.shape != expected_u
+                or e3v_now.shape != expected_v or e3v_before.shape != expected_v):
+            raise ValueError(
+                "live zdf_sh2 face metrics have wrong shape: expected "
+                f"u={expected_u}, v={expected_v}; got "
+                f"{e3u_now.shape}/{e3u_before.shape}/"
+                f"{e3v_now.shape}/{e3v_before.shape}")
+        dz_sq_u = jnp.maximum(e3u_now, _EPS) * jnp.maximum(e3u_before, _EPS)
+        dz_sq_v = jnp.maximum(e3v_now, _EPS) * jnp.maximum(e3v_before, _EPS)
 
-    zsh2u_bare = _face_shear_over_dzsq(u_face_now, u_face_before, dz_sq_u) * wumask
-    zsh2v_bare = _face_shear_over_dzsq(v_face_now, v_face_before, dz_sq_v) * wvmask
+    zsh2u_bare = _face_shear_over_dzsq(
+        u_face_now, u_face_before, dz_sq_u) * wumask
+    zsh2v_bare = _face_shear_over_dzsq(
+        v_face_now, v_face_before, dz_sq_v) * wvmask
 
     coast_u = 2.0 - u_mask[:, :-1, 1:] * u_mask[:, 1:, 1:]
     coast_v = 2.0 - v_mask[:-1, :, 1:] * v_mask[1:, :, 1:]

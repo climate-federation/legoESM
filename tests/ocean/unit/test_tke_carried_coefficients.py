@@ -11,6 +11,7 @@ import pytest
 
 from legoesm.core.field import Field
 import legoesm.ocean.physics.vertical_mixing.tke as tke_mod
+import legoesm.ocean.physics.vertical_mixing._shared as shared_mod
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 import legoesm.ocean.experiments.dino as dino_mod
 from legoesm.ocean.experiments.dino import DINO_RECIPES, dino_config_for_recipe
@@ -121,6 +122,9 @@ def test_only_complete_dino_nemo_cards_freeze_step_entry_shear():
             built = dino_mod._dino_vertical_mixing_config(
                 dino_config_for_recipe(name)).tke
             assert built.tke_shear_evaluation_stage == resolved, name
+            expected_metric = ("nemo_qco_live_face" if name in faithful
+                               else "tpoint_jacobian")
+            assert built.tke_shear_metric_source == expected_metric, name
 
     # Every independently constructed TKE card reachable outside the two
     # complete DINO oracle recipes remains on the byte-identical legacy path.
@@ -128,6 +132,36 @@ def test_only_complete_dino_nemo_cards_freeze_step_entry_shear():
                  ACC_BASIC_TKE_CONFIG)
     assert all(c.tke_shear_evaluation_stage == "implicit_solve_state"
                for c in unchanged)
+    assert all(c.tke_shear_metric_source == "tpoint_jacobian"
+               for c in unchanged)
+
+
+def test_live_face_metric_product_matches_hand_computed_sh2():
+    # Two identical U faces, no V shear. du_now=[-2,-3], du_before=[-4,-6],
+    # avm face sums=[6,10]. The 0.25 two-face collapse gives [24,90]
+    # before division; NOW*BEFORE metrics are [2*4,3*5] => [3,6].
+    u_now = jnp.asarray([[[0.0, 2.0, 5.0], [0.0, 2.0, 5.0]]])
+    u_before = jnp.asarray([[[0.0, 4.0, 10.0], [0.0, 4.0, 10.0]]])
+    v_now = jnp.zeros((2, 1, 3))
+    v_before = jnp.zeros((2, 1, 3))
+    masks_u = jnp.ones_like(u_now)
+    masks_v = jnp.ones_like(v_now)
+    avm = jnp.asarray([[[3.0, 5.0]]])
+    e3un = jnp.broadcast_to(jnp.asarray([2.0, 3.0]), (1, 2, 2))
+    e3ub = jnp.broadcast_to(jnp.asarray([4.0, 5.0]), (1, 2, 2))
+    e3vn = jnp.ones((2, 1, 2))
+    e3vb = jnp.ones((2, 1, 2))
+    got = shared_mod.avm_weighted_shear_production(
+        u_now, v_now, u_before, v_before, jnp.ones((1, 1, 2)),
+        masks_u, masks_v, avm,
+        face_metrics=(e3un, e3ub, e3vn, e3vb))
+    np.testing.assert_array_equal(got, np.asarray([[[3.0, 6.0]]]))
+
+    with pytest.raises(ValueError, match="wrong shape"):
+        shared_mod.avm_weighted_shear_production(
+            u_now, v_now, u_before, v_before, jnp.ones((1, 1, 2)),
+            masks_u, masks_v, avm,
+            face_metrics=(e3un[..., :1], e3ub, e3vn, e3vb))
 
 
 def test_step_entry_p_sh2_is_frozen_for_rhs_and_prandtl(monkeypatch):
