@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 """Ordered day-180 ZDF sweep, stopping at the first numeric divergence.
 
-The measurement contract and bars are frozen in ``PREREG_zdf_chain_sweep.md``.
-This first-round probe deliberately implements only rows 1--3: it must stop
-there if ``bn2`` diverges, rather than use downstream composites to skip over
-the first failed operation.  Existing campaign loaders/state construction are
-imported from ``eos_rab_bn2_per_element.py``.
+The measurement contract and bars are frozen in ``PREREG_zdf_chain_sweep.md``
+and its dated round amendments.  The probe extends only as each preceding row
+crosses its registered bar and stops at the first failed operation.  Existing
+campaign loaders/state construction are imported from
+``eos_rab_bn2_per_element.py``.
 """
 from __future__ import annotations
 
@@ -23,9 +23,33 @@ import sys
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
-os.environ.setdefault("LEGOESM_NEMO_E3T", "both")
 if os.environ.get("DINO_1226_LANE") != "d180":
     raise SystemExit("Set DINO_1226_LANE=d180; this probe refuses every other lane")
+_ENV_DEFAULTS = {
+    "LEGOESM_NEMO_E3T": "both",
+    "LEGOESM_FIDELITY_FP64": "1",
+    "FP64": "1",
+    "LEGOESM_VMIX_F32_SOLVE": "0",
+    "LEGOESM_BAROCLINIC_F32": "0",
+    "LEGOESM_TRACER_PAIR": "0",
+    "LEGOESM_VMIX_BATCHED": "0",
+    "LEGOESM_VMIX_TSPAIR": "1",
+}
+for _name, _expected in _ENV_DEFAULTS.items():
+    _actual = os.environ.get(_name, _expected)
+    if _actual != _expected:
+        raise SystemExit(
+            f"{_name}={_actual!r} is incompatible with this registered lane; "
+            f"expected {_expected!r}")
+    os.environ[_name] = _expected
+for _name in (
+    "DINO_EEN_METRIC", "DINO_BOLUS_ADV", "DINO_RECONCILE_TARGET",
+    "DINO_AFTER_RECONCILE", "DINO_NEMO_KMM_DIVISOR",
+    "DINO_OUTER_INTEGRATOR", "DINO_TWIN_SEASONAL_KT0",
+):
+    if _name in os.environ:
+        raise SystemExit(
+            f"{_name} is an ablation override and must be unset for this lane")
 
 import jax
 import jax.numpy as jnp
@@ -77,14 +101,22 @@ def sha256(path: Path) -> str:
 
 
 def git_sha() -> str:
-    override = os.environ.get("ZDF_SWEEP_TREE_SHA")
-    if override is not None:
-        if len(override) != 40 or any(c not in "0123456789abcdef" for c in override):
-            raise SystemExit("ZDF_SWEEP_TREE_SHA must be a lowercase 40-hex commit")
-        return override
     return subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=HERE.parents[3], text=True
     ).strip()
+
+
+def probe_commit_sha() -> str:
+    repo = HERE.parents[3]
+    path = Path(__file__).resolve().relative_to(repo)
+    clean = subprocess.run(
+        ["git", "diff", "--quiet", "HEAD", "--", str(path)], cwd=repo)
+    if clean.returncode != 0:
+        raise SystemExit(
+            "zdf_chain_sweep.py differs from HEAD; refusing an unstamped run")
+    return subprocess.check_output(
+        ["git", "log", "-1", "--format=%H", "--", str(path)],
+        cwd=repo, text=True).strip()
 
 
 def focus_from_maps(path: Path) -> list[tuple[int, int]]:
@@ -439,6 +471,9 @@ def main() -> int:
         row4 = {"output": row4m,
                 "disposition": "VERIFIED" if row4m["pass"] else "DIVERGED"}
         if row4["disposition"] == "VERIFIED":
+            row4["controls"] = planted_controls(
+                np.asarray(sh2_prod)[..., :nsh], sh2_n, wet_sh2,
+                POINTWISE_BAR)
             from legoesm import constants
             from legoesm.ocean.dynamics.ocean_tendency_common import (
                 nemo_effective_bottom_drag_r,
@@ -498,33 +533,29 @@ def main() -> int:
                 str(RUN / "dump_nmln.bin"), jpi, jpj, hls)[..., 0]
             hmlp_n = base._load_haloed(
                 str(RUN / "dump_hmlp.bin"), jpi, jpj, hls)[..., 0]
-            row6m = metrics((np.asarray(mbase) + 2.0)[..., None],
-                            nmln_n[..., None], wet2[..., None], focus,
-                            POINTWISE_BAR)
+            row6_lego = np.asarray(mbase, dtype=np.int64) + 2
+            row6_nemo = np.asarray(nmln_n, dtype=np.int64)
+            integer_mismatch = wet2 & (row6_lego != row6_nemo)
+            row6m = metrics(row6_lego[..., None], row6_nemo[..., None],
+                            wet2[..., None], focus, 1.0e-12)
+            row6m["integer_exact"] = bool(not integer_mismatch.any())
+            row6m["n_integer_mismatch_columns"] = int(integer_mismatch.sum())
+            row6m["registered_row_class"] = "A/E"
+            _row6_poison = row6_lego.copy()
+            _row6_idx = tuple(np.argwhere(wet2)[0])
+            _row6_poison[_row6_idx] += 1
+            row6m["off_by_one_control_fired"] = bool(
+                np.any(wet2 & (_row6_poison != row6_nemo)))
+            if not row6m["off_by_one_control_fired"]:
+                raise AssertionError("row-6 integer off-by-one control did not fire")
+            row6m["pass"] = bool(row6m["pass"] and not integer_mismatch.any())
             row7m = metrics(np.asarray(hml)[..., None], hmlp_n[..., None],
                             wet2[..., None], focus, POINTWISE_BAR)
 
             tke_cfg = mc.physics.vertical_mixing.tke
-            en_full = base._load_interior(
-                str(RUN / "tke_dump_en.bin"), ni, nj)
             surf = tke_mod._surface_tke_dirichlet(
                 tke_cfg, sf.taum, mc.rho_0)
-            row8m = metrics(np.asarray(surf)[..., None],
-                            en_full[..., :1], wet2[..., None], focus,
-                            POINTWISE_BAR)
             zbbrau = np.float64(tke_mod._NEMO_TKE_EBB) / np.float64(mc.rho_0)
-            surface_n = en_full[..., 0]
-            inferred = surface_n / zbbrau
-            observable = wet2 & (surface_n > tke_mod._NEMO_TKE_EMIN0)
-            row8_taum = metrics(
-                np.asarray(sf.taum)[..., None], inferred[..., None],
-                observable[..., None], focus, POINTWISE_BAR)
-            literal = np.maximum(
-                np.float64(tke_mod._NEMO_TKE_EMIN0),
-                zbbrau * np.asarray(sf.taum))
-            row8_literal = metrics(
-                literal[..., None], surface_n[..., None], wet2[..., None],
-                focus, POINTWISE_BAR)
             utau_n = np.fromfile(
                 RUN / "sbc_dump_utau.bin", dtype="<f8").reshape(jpj, jpi)
             utau_n = utau_n[hls:jpj - hls, hls:jpi - hls]
@@ -562,17 +593,38 @@ def main() -> int:
                 focus, POINTWISE_BAR)
             taum_dump = np.abs(utau_n)
             taum_dump = np.where(utau_n > 0.0, taum_dump * 1.3, taum_dump)
+            surface_n = np.maximum(
+                np.float64(tke_mod._NEMO_TKE_EMIN0), zbbrau * taum_dump)
+            row8m = metrics(np.asarray(surf)[..., None],
+                            surface_n[..., None], wet2[..., None], focus,
+                            POINTWISE_BAR)
             row8_taum_dump = metrics(
                 np.asarray(sf.taum)[..., None], taum_dump[..., None],
                 wet2[..., None], focus, POINTWISE_BAR)
-            surface_dump_operand = np.maximum(
-                np.float64(tke_mod._NEMO_TKE_EMIN0), zbbrau * taum_dump)
+            observable = wet2 & (surface_n > tke_mod._NEMO_TKE_EMIN0)
+            row8_taum = metrics(
+                np.asarray(sf.taum)[..., None], taum_dump[..., None],
+                observable[..., None], focus, POINTWISE_BAR)
+            literal = np.maximum(
+                np.float64(tke_mod._NEMO_TKE_EMIN0),
+                zbbrau * np.asarray(sf.taum))
+            row8_literal = metrics(
+                literal[..., None], surface_n[..., None], wet2[..., None],
+                focus, POINTWISE_BAR)
             row8_surface_sub = metrics(
-                surface_dump_operand[..., None], surface_n[..., None],
+                surface_n[..., None], surface_n[..., None],
                 wet2[..., None], focus, POINTWISE_BAR)
             row8_controls = planted_point_controls(
-                surface_dump_operand[..., None], surface_n[..., None],
+                surface_n[..., None], surface_n[..., None],
                 wet2[..., None], POINTWISE_BAR)
+            en_full = base._load_interior(
+                str(RUN / "tke_dump_en.bin"), ni, nj)
+            row8_poststage_invariant = metrics(
+                surface_n[..., None], en_full[..., :1], wet2[..., None],
+                focus, POINTWISE_BAR)
+            if not row8_poststage_invariant["pass"]:
+                raise AssertionError(
+                    "post-tke_tke en(1) changed after the row-8 assignment")
             row4["continuation_preview"] = {
                 "rows": {
                     "5_bottom_drag_coefficient": row5m,
@@ -597,11 +649,12 @@ def main() -> int:
                         "production_utau_vs_dump": row8_utau_prod,
                         "nemo_literal_utau_vs_dump": row8_utau_literal,
                         "production_taum_vs_dump_derived": row8_taum_dump,
-                        "taum_inferred_from_unfloored_surface_en": row8_taum,
+                        "production_taum_on_unfloored_columns": row8_taum,
                         "literal_zbbrau_times_taum_then_max": row8_literal,
                         "substitute_dump_derived_taum": row8_surface_sub,
                         "n_observable_unfloored_columns": int(observable.sum()),
                     },
+                    "poststage_surface_en_invariant": row8_poststage_invariant,
                     "controls": row8_controls,
                     "next_round_fix_design": {
                         "option": "dino_wind_profile_evaluation",
@@ -928,6 +981,7 @@ def main() -> int:
         Path("packages/ocean/legoesm/ocean/eos.py"),
         Path("packages/ocean/legoesm/ocean/experiments/dino.py"),
         Path("packages/ocean/legoesm/ocean/fidelity/nemo_io.py"),
+        Path("packages/ocean/legoesm/ocean/fidelity/nemo_state_bridge.py"),
         Path("packages/ocean/legoesm/ocean/fidelity/time_levels.py"),
         Path("packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py"),
         Path("packages/ocean/legoesm/ocean/physics/vertical_mixing/_shared.py"),
@@ -999,7 +1053,17 @@ def main() -> int:
         "schema": "zdf-chain-sweep-v5",
         "lane": "d180", "kt": 5761, "cpu_only": True, "fp64": True,
         "checked_out_parent_sha": git_sha(),
-        "probe_commit_sha": os.environ.get("ZDF_SWEEP_PROBE_SHA", "UNSTAMPED"),
+        "probe_commit_sha": probe_commit_sha(),
+        "effective_env": {
+            "DINO_1226_LANE": os.environ["DINO_1226_LANE"],
+            **{name: os.environ[name] for name in _ENV_DEFAULTS},
+            "rejected_ablation_overrides": [
+                "DINO_EEN_METRIC", "DINO_BOLUS_ADV",
+                "DINO_RECONCILE_TARGET", "DINO_AFTER_RECONCILE",
+                "DINO_NEMO_KMM_DIVISOR", "DINO_OUTER_INTEGRATOR",
+                "DINO_TWIN_SEASONAL_KT0",
+            ],
+        },
         "platform": platform.platform(), "python": platform.python_version(),
         "jax": importlib.metadata.version("jax"), "numpy": np.__version__,
         "jax_backend": jax.default_backend(),
