@@ -31,8 +31,12 @@ import acceptance_gate_90d as G  # noqa: E402, N812
 import basin_seasonal_decomp as B  # noqa: E402, N812
 import kamm_twin_90d as K  # noqa: E402, N812
 
-BASELINE = {90: -0.4257848785815366, 360: -0.9519122331848315}
-FLOOR = {90: 0.00014499002386242506, 360: 0.06173656216045926}
+# Day 90 was re-registered only after the hash-bound EEN x bridge-Omega fourth
+# corner owned the historical/current epoch.  Its old floor is intentionally
+# invalidated: the paired T-carry verdict cannot run until seeds 1/2/3 bind a
+# current-SHA replacement.
+BASELINE = {90: -0.43908550999203477, 360: -0.9519122331848315}
+FLOOR = {90: float("nan"), 360: 0.06173656216045926}
 EXPECTED_T_HASH = "b6a08b8395017c8e3f8df0b8b13eefa75fdfe7be3770d788beaaf1ca514127ae"
 FLOOR_RECEIPT = "/tmp/dino_basin_seasonal_decomp.json"
 FLOOR_RECEIPT_SHA256 = "63d4e60dd68281bc6101a35f86cb3f4406cb2ddbc27848b74473876226e85849"
@@ -358,6 +362,10 @@ def _nemo(day: int) -> dict[str, np.ndarray]:
 
 
 def _check_floor_receipt(path: str, day: int) -> None:
+    if not np.isfinite(FLOOR[day]):
+        raise SystemExit(
+            "STOP current-SHA F90 is UNMEASURED; bind and score the registered "
+            "control plus seeds 1/2/3 before the T-carry basin verdict")
     got_hash = sha256(path)
     if got_hash != FLOOR_RECEIPT_SHA256:
         raise SystemExit(f"STOP floor receipt hash {got_hash} != {FLOOR_RECEIPT_SHA256}")
@@ -378,6 +386,10 @@ def _check_floor_receipt(path: str, day: int) -> None:
 
 def _check_baseline(value: float, day: int) -> None:
     _require_finite("legacy baseline", value)
+    if not np.isfinite(FLOOR[day]):
+        raise SystemExit(
+            "STOP current-SHA F90 is UNMEASURED; baseline is registered but "
+            "its reproduction band is not")
     if abs(value - BASELINE[day]) > 2.0 * FLOOR[day]:
         raise SystemExit(f"STOP legacy baseline {value:.17g} misses registered "
                          f"{BASELINE[day]:.17g} by more than 2F")

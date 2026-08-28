@@ -171,3 +171,20 @@ No baseline/floor changes and no corrected-T score follow from this result.
 STOP remains active.  The next registered arm is the missing legacy-rounded
 Omega plus EEN-off corner, which measures the EEN-by-Omega interaction without
 transferring either response across trajectories.
+
+## 2026-08-28 fourth corner owns the epoch
+
+The hash-bound legacy-rounded-Omega plus EEN-off corner measured
+`G = -0.42606954856856305 Sv`.  Its miss from the frozen historical endpoint
+is `0.0002846699870264757 Sv`, just inside the unchanged
+`0.0002899800477248501 Sv` band, so the preregistered result is
+**CONFIRMED_COMBINED_EEN_OMEGA_OWNERSHIP**.  All four acceptance gates passed
+5/5 and the locked A/B/C corners reproduced exactly.
+
+The composition is strongly non-additive: additive transfer predicts
+`-0.34198873921143225 Sv`, while the measured interaction is
+`I = -0.0840808093571308 Sv`.  The current legacy baseline is therefore
+re-registered as `Glegacy90 = -0.43908550999203477 Sv`, but its historical
+floor is invalidated rather than transferred.  STOP now belongs only to the
+unmeasured current-SHA floor: seed arms 1/2/3 remain, followed by one CPU
+floor reduction and one CPU re-score of the retained corrected-T pair.
