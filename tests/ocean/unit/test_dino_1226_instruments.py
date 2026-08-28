@@ -50,6 +50,18 @@ def instruments():
             tcarry_omega=tcarry_omega,
             tcarry_een=tcarry_een,
         )
+    except (SystemExit, FileNotFoundError) as _e:
+        # The dino instrument chain loads the DINO oracle build (mesh_mask,
+        # trajectories) at import.  Where that build is absent (any account
+        # other than the producer's, or CI without the data) the data-path
+        # tests cannot run -- skip them rather than erroring the whole module.
+        # But if DINO_DIR was set EXPLICITLY, a missing/broken file is a config
+        # error, not an absence: fail loudly so it is never silently skipped.
+        # Only FileNotFoundError (absence) is caught -- a corrupt/unreadable
+        # file raises another OSError and propagates as a real failure.
+        if os.environ.get("DINO_DIR"):
+            raise
+        pytest.skip(f"DINO oracle data absent (set DINO_DIR): {_e}")
     finally:
         try:
             sys.path.remove(str(SCRIPTS_DIR))
@@ -1825,7 +1837,12 @@ def contract_check():
     try:
         import fp64_snapshot_contract_check as C
         return C
-    except SystemExit as exc:                       # no NEMO mesh on this box
+    except (SystemExit, FileNotFoundError) as exc:  # no NEMO mesh on this box
+        # DINO_DIR set explicitly => a missing/broken file is a config error, not
+        # absence: fail loudly rather than silently skip (corrupt files raise a
+        # non-FileNotFoundError OSError and already propagate).
+        if os.environ.get("DINO_DIR"):
+            raise
         pytest.skip(f"NEMO mesh unavailable: {exc}")
     finally:
         try:
