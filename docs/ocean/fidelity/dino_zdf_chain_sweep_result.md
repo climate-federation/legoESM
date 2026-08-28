@@ -50,21 +50,24 @@ ordered operand walk stops at `p_avm` before considering the later velocity,
 alone does not close the composite because later operands remain non-identical;
 that is recorded rather than misreported as a failed localization.
 
-Next-round design: add `tke_shear_avm_source` with faithful default
+Next-round design: add `tke_preclosure_coeff_source` with faithful default
 `carried_previous_step` and explicit legacy `current_subiteration`.  Carry
-`avm/avt` closure fields across steps, seed a bridged run from restart
-`avm/avt`, and thread carried `avm` into both `zdf_sh2` and the
-`rn2b*p_avm` Prandtl numerator while current `K_M` continues to drive the TKE
-solve and closure update.  Required red tests distinguish carried/current
-arrays, prove restart identity and next-step carry, lock legacy bits, and keep
-JIT/grad finite.  Per the ordered discipline, this is design only; row 4 is
-not fixed in this round.
+`avm/avt` closure fields across steps and seed a bridged run from restart
+`avm/avt`.  Before `tke_avn`, carried `p_avm` must feed `zdf_sh2`, the
+`rn2b*p_avm` Prandtl numerator, TKE matrix diagonals (`zdftke.F90:503-506`),
+and wave surface denominator (`:538`); carried `p_avt` must feed the
+`-p_avt*rn2` RHS (`:514`).  Only the post-solve `tke_avn` overwrite at line
+621 and below constructs the coefficients carried into the next step.
+Required red tests distinguish carried/current arrays at every consumer,
+prove restart identity and next-step carry, lock post-solve sequencing and
+legacy bits, and keep JIT/grad finite.  Per the ordered discipline, this is
+design only; row 4 is not fixed in this round.
 
 Round-2 machine-readable result:
 `docs/ocean/fidelity/dino_zdf_chain_sweep_round2_artifact.json`, SHA256
-`43a72cd4acc7570790858a0d3185440c30320e785205de776c93b3a44c069842`.
+`bab31d7a8e322e855b187dcfdf0ad19cdb36b4232f1782c15be3c64730234384`.
 The stamped probe/tree SHA is
-`70aab3e28f476ffd9a187a92679908748efd5eb3`.  All planted controls fired.
+`a58c33d5c7b7d4788f921d8626d9f499e29ff445`.  All planted controls fired.
 
 The remainder of this document preserves the accepted round-1 evidence and
 design history; its statement that the sweep stopped at row 2 is historical.

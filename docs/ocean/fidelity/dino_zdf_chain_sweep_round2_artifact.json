@@ -4,7 +4,7 @@
     "pointwise_column": 1e-15,
     "rms_ratio_epsilon": 1e-06
   },
-  "checked_out_parent_sha": "70aab3e28f476ffd9a187a92679908748efd5eb3",
+  "checked_out_parent_sha": "a58c33d5c7b7d4788f921d8626d9f499e29ff445",
   "controls": {
     "baseline_pass": true,
     "nonfinite_fired": true,
@@ -181,12 +181,14 @@
       ],
       "next_round_fix_design": {
         "faithful_default": "carried_previous_step",
-        "kernel_change": "thread carried avm into zdf_sh2 and the rn2b*p_avm Prandtl numerator while leaving current K_M for the TKE solve/closure update",
+        "kernel_change": "thread carried p_avm through zdf_sh2, the rn2b*p_avm Prandtl numerator, TKE matrix diagonals, and wave surface denominator; thread carried p_avt through the -p_avt*rn2 RHS. Only tke_avn after the solve overwrites the closure fields for the next step",
         "legacy_opt_in": "current_subiteration",
-        "option": "tke_shear_avm_source",
+        "option": "tke_preclosure_coeff_source",
         "required_red_tests": [
           "distinct carried/current arrays select carried bits",
           "restart avm bridge identity and next-step carry",
+          "matrix, RHS, and wave denominator consume carried fields",
+          "tke_avn overwrite happens only after the solve",
           "legacy arm reproduces current-subiteration bits",
           "JIT and finite gradients"
         ],
@@ -320,7 +322,7 @@
   "lane": "d180",
   "numpy": "2.4.4",
   "platform": "Linux-5.14.0-611.36.1.el9_7.x86_64-x86_64-with-glibc2.34",
-  "probe_commit_sha": "70aab3e28f476ffd9a187a92679908748efd5eb3",
+  "probe_commit_sha": "a58c33d5c7b7d4788f921d8626d9f499e29ff445",
   "python": "3.13.0",
   "row4_localization": {
     "first_diverging_operand": {
@@ -485,12 +487,14 @@
     ],
     "next_round_fix_design": {
       "faithful_default": "carried_previous_step",
-      "kernel_change": "thread carried avm into zdf_sh2 and the rn2b*p_avm Prandtl numerator while leaving current K_M for the TKE solve/closure update",
+      "kernel_change": "thread carried p_avm through zdf_sh2, the rn2b*p_avm Prandtl numerator, TKE matrix diagonals, and wave surface denominator; thread carried p_avt through the -p_avt*rn2 RHS. Only tke_avn after the solve overwrites the closure fields for the next step",
       "legacy_opt_in": "current_subiteration",
-      "option": "tke_shear_avm_source",
+      "option": "tke_preclosure_coeff_source",
       "required_red_tests": [
         "distinct carried/current arrays select carried bits",
         "restart avm bridge identity and next-step carry",
+        "matrix, RHS, and wave denominator consume carried fields",
+        "tke_avn overwrite happens only after the solve",
         "legacy arm reproduces current-subiteration bits",
         "JIT and finite gradients"
       ],
@@ -910,6 +914,7 @@
   "schema": "zdf-chain-sweep-v2",
   "sha256": {
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/MY_SRC/stpmlf.F90": "26849c4fa34305317881959dd5a1e41af9b13aa4f96a290a998add955a73a283",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/MY_SRC/zdftke.F90": "5623a7444048927c766b0fd23ba4cc5854028e2ead67f1750febd789105c025e",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/dump_alpha_b.bin": "a2444bff1eb42a9dc1727502e673052ae7ca850ca5027091bb3e7399c6705fad",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/dump_beta_b.bin": "0be9b5d9feee9f995456ebcca322ca7681b1c3160b4b445bd7262ebc8a674ad0",
@@ -921,11 +926,14 @@
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/tke_dump_rn2.bin": "df573f8c07abab1cc0a2fc7fd2093dd8276dccf0319d3375220340d91b5a6004",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/tke_dump_rn2b.bin": "fcd7ddee9e94b6158085f2ff5d174b2cb01e1b22a8524faa1b5be31a2b798961",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/tke_dump_sh2.bin": "2c18e0926b2b81c07ba3c5c371067d051ffea2d2fad0cc75c444af1654746f53",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/WORK/zdfphy.F90": "76eeec2a280d56c55bec9e59b579e5290623c408c03962d04652e406334b45fd",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/WORK/zdfsh2.F90": "c31f062e282b8710a0b565be7aecbc35b8e741b05a96a393402fcd5a737f28f8",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src/OCE/TRA/eosbn2.F90": "689f8fdf5482e2bc6c7ecc59544ff7384fda6e4551e32be898e715501e55977d",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src/OCE/ZDF/zdfsh2.F90": "c31f062e282b8710a0b565be7aecbc35b8e741b05a96a393402fcd5a737f28f8",
     "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/dump_lane.py": "41252d898b0d09b350c086aa678ddb890c7e6232fa2b46e88093a3b108a9bf62",
     "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/eos_rab_bn2_per_element.py": "3a82b0ef216fccf1b9112bfbac0005096eee491f15693d80f82320d3d80febda",
     "/tmp/dino_mld_audit_codex/mld_maps.npz": "9fb7344d1e6f92232d211f6a52ff8636022f0d9b0b05acea2b0bae6e6afd9bf0",
-    "packages/ocean/legoesm/ocean/eos.py": "51457db6a3cc4c3177efe1e4b0100c05368fbaafdad10df464fa7d6279e263bf",
+    "packages/ocean/legoesm/ocean/eos.py": "d8d3054b49bcc6c5a828dd0c53b1e0047ec8e6a13145790e9552c7f6f942139d",
     "packages/ocean/legoesm/ocean/fidelity/time_levels.py": "810c731be7df80374b34075c67f97278c2fab51889b2c9e7be684238980a5b27"
   },
   "time_levels": {
