@@ -315,17 +315,61 @@ does not prove, a placement-swap startup shock against an explicit-consistent
 bridged restart.
 
 The discard-32 proposal is **retracted as a decisive ownership test** because
-it only hides the now-measured U-as-T bridge shock. The preregistered follow-up
-first adds fail-closed `--bridge-before-stress-tpoint`, reconstructs prior
-T-point analytic stress at the restart's seasonal clock, and requires a
-same-state CPU counterfactual to remove 99.9999% of the `(1,49)` excess while
-a planted legacy-stagger swap restores it to `1e-6` relative error. Only then
-may the coordinator run the exact five-day explicit/implicit commands in
-`PREREG_endwall_wind_placement.md`. The primary bars remain corrected-explicit
-ratio `[2.60,3.18]`, share `[0.38,0.59]`; implicit CONFIRM requires ratio
-`<=1.25` and share `<=0.17`, REFUTE requires ratio `>=2.30` and share `>=0.38`.
-Samples 33--40/33--160 are descriptive only. The selector is not implemented,
-so this lane stops without another GPU run.
+it only hides the now-measured U-as-T bridge shock. Round 3 implements the
+fail-closed `--bridge-before-stress-tpoint`, reconstructs prior T-point analytic
+stress at the restart's own `15,552,000 s` seasonal time, and stamps stagger,
+time and array-content hash. It does not invert `utau_b/vtau_b`, edit a
+prognostic, or alter the later-step carry path.
+
+The committed same-state CPU gate at Git
+`73ad090d411027ae3815f6ae8ea7b7ff0f85f0dc` passed:
+
+| Registered CPU quantity | Legacy U-as-T | Reconstructed T carry |
+|---|---:|---:|
+| direct `(1,49)` increment | `1.510160880233664e-4` | `1.2081287041869309e-4 m/s` |
+| direct excess versus NEMO | `3.0203216696068663e-5` | `-9.086046395519534e-13 m/s` |
+| `F_slow` `(1,49)` | `1.439415861637953e-10` | `1.1515326893097271e-10 m/s2` |
+| `F_slow` excess versus NEMO | `2.8788317232756413e-11` | `-6.617444900424221e-23 m/s2` |
+
+The direct excess removal is `0.9999999699169579`
+(`99.9999969917%`), above the frozen `99.9999%` bar. Replanting the legacy
+stagger restores the entire excess with relative error `0`, below `1e-6`.
+The donor prediction, direct correction and `F_slow` correction each have 154
+wet material faces; both prediction-support Jaccards are `1.0`. All 15 other
+state leaves, geometry, ladders, config, forcing and external tendency are
+bit-identical; a planted eta edit makes that identity check fail.
+
+The retained CPU-gate log SHA-256 is
+`b24c13bb745b1ae6dd06417f77e2b09ed0594423c70cf6a1612d00a9e9b0b86f`.
+The reconstructed T carry has SHA-256
+`b6a08b8395017c8e3f8df0b8b13eefa75fdfe7be3770d788beaaf1ca514127ae`.
+A zero-step artifact smoke serialized `bridge_before_stress_stagger="T"`,
+reconstruction time `15552000.0`, the same content hash, and explicit placement;
+artifact/log SHA-256 are `f8a55cd59aa4f5dd6474786acc412d7202d1277b98a9bcfce23412eaced936f8`
+and `a68998694ce091b44d0bf60c38e900f80433e9bb4d10a570fae48c8f39b0822e`.
+
+This defect is **bridge/mimicry glue, not model configuration**. The
+oracle-recipe doctrine's §3 rule B puts oracle-only time-level/stagger handling
+in the bridge/harness, using the test “would a user pursuing a different goal
+ever select this?”; here the answer is no. Rule C likewise reserves convention
+re-encoding for I/O boundaries while keeping one canonical model
+representation (`docs/ocean/fidelity/oracle_recipe_strategy.md:141-161`;
+`CLAUDE.md`, “Oracle-Recipe Fidelity”). Therefore no model-config field or
+production solver branch was added.
+
+The reuse audit searched for `_restart_elapsed_seconds`,
+`dino_lat_lon_surface_forcing_arrays`, `dino_step_surface_forcing`,
+`tau_x_prev`, and `_seed_centred_forcing_carry`. It found and reused the
+restart `adatrj/kt` cross-check and the existing analytic forcing/sign loaders
+in `kamm_twin_90d.py` and `dino.py`; later-step carry remains the existing
+`ocean_model_latlon_cgrid.py:8690-8699` path.
+
+The passing CPU gate authorizes the coordinator's exact five-day
+explicit/implicit commands in `PREREG_endwall_wind_placement.md`. The primary
+bars remain corrected-explicit ratio `[2.60,3.18]`, share `[0.38,0.59]`;
+implicit CONFIRM requires ratio `<=1.25` and share `<=0.17`, REFUTE requires
+ratio `>=2.30` and share `>=0.38`. Placement ownership remains **UNRESOLVED**
+until those GPU arms run; none ran in this round.
 
 ## Review disposition and retractions
 
@@ -402,6 +446,10 @@ claims before these findings were finalized.
   donor, donor-overlap, entry/helper/order/slot, and structural-zero controls
   all fire/pass. Independent mechanism-review rerun also exited zero (log
   SHA-256 `c91d054ac58103d5dc27743ba287b8dd4ae9fd7dfb436dda51ab4ff2b78b595f`).
+- Round-3 T-point bridge CPU gate at clean commit `73ad090d4`: PASS; direct
+  excess removal `99.9999969917%`, planted-stagger restoration relative error
+  `0`, and both donor-support Jaccards `1.0`. The removal and restoration
+  scoring paths each have planted reachable REFUTE controls.
 - Python compile and ruff on the new probe: PASS; E501 check on the legacy twin
   harness: PASS.
 - Twin selector/config smoke and implicit-arm construction on CPU: PASS. The

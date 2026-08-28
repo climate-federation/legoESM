@@ -334,5 +334,6 @@ otherwise **UNRESOLVED**. Both conditions require amplitude and locus. If the
 corrected explicit control is outside its band, STOP without classifying the
 implicit arm. Samples 33--40 and 33--160 may be printed as descriptive
 companions but cannot change the primary verdict. The selector does not exist
-yet: this is a preregistered design and mandatory STOP, not authorization to
-run either command in this sandbox.
+yet at registration. Round 3 implemented it and the committed CPU prerequisite
+passed without changing these frozen bars. The two GPU commands are now
+authorized for the coordinator, but neither was run in this CPU-only sandbox.
