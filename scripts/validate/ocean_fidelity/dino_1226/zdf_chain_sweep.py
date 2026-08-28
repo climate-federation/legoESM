@@ -1960,11 +1960,14 @@ def main() -> int:
                                     str(args.row17_postlc_dump), ni, nj)
                                 postlc_n_int = postlc_n_full[
                                     ..., 1:1 + nrhs]
-                                postlc_l = np.array(en_l, copy=True)
-                                if solve_kwargs[
-                                        "external_source"] is not None:
-                                    postlc_l = postlc_l + dt64 * np.asarray(
-                                        solve_kwargs["external_source"])
+                                literal_rhs_l = solve_kwargs.get(
+                                    "literal_external_rhs")
+                                if literal_rhs_l is None:
+                                    raise AssertionError(
+                                        "row 15 requires production's literal "
+                                        "line-463 post-Langmuir en operand")
+                                postlc_l = np.asarray(
+                                    literal_rhs_l)[..., :nrhs]
                                 zfact3 = np.float64(0.5) * ediss64
                                 diss_rhs_l = zfact3 * dissl_l * postlc_l
                                 diss_rhs_n = zfact3 * dissl_n * postlc_n_int
@@ -2120,16 +2123,12 @@ def main() -> int:
                                             en_n_with_bc,
                                             bottom_level[..., None],
                                             bottom_prod[..., None], axis=-1)
-                                        rhs_n = en_n_with_bc
-                                        if solve_kwargs["external_source"] is not None:
-                                            # Langmuir source is applied to en
-                                            # before matrix assembly at
-                                            # zdftke.F90:401-468, before the
-                                            # parenthesized budget statement
-                                            # at :513-516.  This association
-                                            # is itself a scored row-17 input.
-                                            rhs_n = rhs_n + dt64 * np.asarray(
-                                                solve_kwargs["external_source"])
+                                        # The direct dump is NEMO's exact
+                                        # post-line-463 en, including its
+                                        # source association and boundary
+                                        # state. It is the row-17 RHS base.
+                                        rhs_n = postlc_n_full[
+                                            ..., 1:1 + nrhs]
                                         rhs_n = rhs_n + dt64 * (
                                             p_sh2_n + strat_n + diss_rhs_n
                                         ) * wet_rhs.astype(np.float64)
@@ -2209,13 +2208,10 @@ def main() -> int:
                                                 wet_forward, focus,
                                                 POINTWISE_BAR),
                                         }
-                                        postlc_l = np.array(
-                                            en_n_with_bc, copy=True)
-                                        if solve_kwargs[
-                                                "external_source"] is not None:
-                                            postlc_l = postlc_l + dt64 * np.asarray(
-                                                solve_kwargs[
-                                                    "external_source"])
+                                        postlc_l = np.asarray(
+                                            solve_kwargs[
+                                                "literal_external_rhs"])[
+                                                    ..., :nrhs]
                                         postlc_metric = metrics(
                                             postlc_l, postlc_n[
                                                 ..., 1:1 + nrhs],
