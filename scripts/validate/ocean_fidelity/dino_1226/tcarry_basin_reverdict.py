@@ -33,14 +33,24 @@ import kamm_twin_90d as K  # noqa: E402, N812
 
 # Day 90 was re-registered only after the hash-bound EEN x bridge-Omega fourth
 # corner owned the historical/current epoch.  Its old floor is intentionally
-# invalidated: the paired T-carry verdict cannot run until seeds 1/2/3 bind a
-# current-SHA replacement.
+# invalidated until the bound control+seed ensemble supplied its current-SHA
+# replacement.
 BASELINE = {90: -0.43908550999203477, 360: -0.9519122331848315}
-FLOOR = {90: float("nan"), 360: 0.06173656216045926}
+FLOOR = {90: 0.00015266693430725714, 360: 0.06173656216045926}
 EXPECTED_T_HASH = "b6a08b8395017c8e3f8df0b8b13eefa75fdfe7be3770d788beaaf1ca514127ae"
-FLOOR_RECEIPT = "/tmp/dino_basin_seasonal_decomp.json"
-FLOOR_RECEIPT_SHA256 = "63d4e60dd68281bc6101a35f86cb3f4406cb2ddbc27848b74473876226e85849"
+FLOOR_RECEIPT = {
+    90: "/tmp/tcarry_basin_floor90.json",
+    360: "/tmp/dino_basin_seasonal_decomp.json",
+}
+FLOOR_RECEIPT_SHA256 = {
+    90: "5d5ba993775b0db381b2d0afa7236ef349749d15ef2eac8427a1473381aedf7d",
+    360: "63d4e60dd68281bc6101a35f86cb3f4406cb2ddbc27848b74473876226e85849",
+}
 STAGE1_PRODUCER_GIT_SHA = "d6dc89e91c9ae6b07d146991d2cb6c850f261bb0"
+STAGE1_ARTIFACT_SHA256 = {
+    "legacy": "ae114e7c71f530da253083e4f07f83e94bb66ed1d89c06c27909da9b36fc1e37",
+    "corrected": "2f2e22fe3ca48bf9f923eccd412295a96b0d84b5781103f5f8fe71117532702e",
+}
 IDENTICAL_STAMPS = (
     "control_dtype",
     "nemo_ladder_mode",
@@ -362,18 +372,20 @@ def _nemo(day: int) -> dict[str, np.ndarray]:
 
 
 def _check_floor_receipt(path: str, day: int) -> None:
-    if not np.isfinite(FLOOR[day]):
-        raise SystemExit(
-            "STOP current-SHA F90 is UNMEASURED; bind and score the registered "
-            "control plus seeds 1/2/3 before the T-carry basin verdict")
     got_hash = sha256(path)
-    if got_hash != FLOOR_RECEIPT_SHA256:
-        raise SystemExit(f"STOP floor receipt hash {got_hash} != {FLOOR_RECEIPT_SHA256}")
+    if got_hash != FLOOR_RECEIPT_SHA256[day]:
+        raise SystemExit(
+            f"STOP floor receipt hash {got_hash} != {FLOOR_RECEIPT_SHA256[day]}")
     data = json.loads(Path(path).read_text())
     try:
-        pos = data["days"].index(day)
-        got_gap = float(data["gap"][pos])
-        got_floor = float(data["floor"][pos])
+        if day == 90:
+            got_gap = (float(data["lego_absolute_sv"][0])
+                       - float(data["nemo_absolute_sv"][0]))
+            got_floor = float(data["F90_current_sv"])
+        else:
+            pos = data["days"].index(day)
+            got_gap = float(data["gap"][pos])
+            got_floor = float(data["floor"][pos])
     except (KeyError, TypeError, ValueError) as exc:
         raise SystemExit(f"STOP floor receipt cannot supply day {day}: {exc}") from exc
     if got_gap != BASELINE[day] or got_floor != FLOOR[day]:
@@ -386,10 +398,6 @@ def _check_floor_receipt(path: str, day: int) -> None:
 
 def _check_baseline(value: float, day: int) -> None:
     _require_finite("legacy baseline", value)
-    if not np.isfinite(FLOOR[day]):
-        raise SystemExit(
-            "STOP current-SHA F90 is UNMEASURED; baseline is registered but "
-            "its reproduction band is not")
     if abs(value - BASELINE[day]) > 2.0 * FLOOR[day]:
         raise SystemExit(f"STOP legacy baseline {value:.17g} misses registered "
                          f"{BASELINE[day]:.17g} by more than 2F")
@@ -474,13 +482,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("corrected", nargs="?")
     ap.add_argument("--day", type=int, choices=(90, 360), default=90)
     ap.add_argument("--out")
-    ap.add_argument("--floor-receipt", default=FLOOR_RECEIPT)
+    ap.add_argument("--floor-receipt")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args(argv)
     if args.self_test:
         return _self_test()
     if not args.legacy or not args.corrected or not args.out:
         ap.error("legacy, corrected, and --out are required unless --self-test")
+    if args.floor_receipt is None:
+        args.floor_receipt = FLOOR_RECEIPT[args.day]
 
     git_sha = subprocess.run(
         ["git", "-C", str(_DIR), "rev-parse", "HEAD"],
@@ -501,6 +511,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[PROVENANCE] dirty_tracked_files={len(dirty.splitlines()) if dirty else 0}")
     if dirty:
         raise SystemExit("STOP scorer checkout has dirty tracked files")
+    if args.day == 90:
+        for label, path in (("legacy", args.legacy), ("corrected", args.corrected)):
+            got = sha256(path)
+            if got != STAGE1_ARTIFACT_SHA256[label]:
+                raise SystemExit(f"STOP {label} artifact hash {got} != "
+                                 f"{STAGE1_ARTIFACT_SHA256[label]}")
+        print("[CONTROL PASS] retained Stage-1 artifact hashes")
     _check_floor_receipt(args.floor_receipt, args.day)
 
     with np.load(args.legacy) as legacy_npz, np.load(args.corrected) as corrected_npz:

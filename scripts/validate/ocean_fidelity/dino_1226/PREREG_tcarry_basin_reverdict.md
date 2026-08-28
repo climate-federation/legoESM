@@ -39,6 +39,48 @@ classification threshold, compensation rule, or decision order changes in
 this binding amendment.  Commit the floor instrument and this binding before
 opening a seed artifact.
 
+### 2026-08-28 current floor measured and registered
+
+The committed floor scorer ran at clean commit
+`f873a7cc60a008723ddf16964831211985ec19ff`, scorer SHA-256
+`8ebd99862285fd28abe1ed97f2146388b311504cdbb5584ebcc38821af24e684`.
+It measured the exact legoESM absolute-transport member set
+
+`[8.400753233279739, 8.400398404915238, 8.400493373055788,
+8.400491317473405] Sv`
+
+and sample standard deviation
+`s_lego = 0.0001526669333485373 Sv` (`ddof=1`).  It reloaded the unchanged
+NEMO members `RUN_VERDICT360_M0..M3` through
+`basin_seasonal_decomp.nemo_state`, the same four-member side used by the old
+floor, rather than copying or assuming that side.  Their absolute transports
+are
+
+`[8.839838743271773, 8.839838714018859, 8.83983874992388,
+8.839838749808038] Sv`
+
+and `s_nemo = 1.7109343555843327e-08 Sv` (`ddof=1`).  Therefore register
+
+`F90_current = hypot(s_lego, s_nemo) = 0.00015266693430725714 Sv`.
+
+This is the same two-sided convention as the old floor: each model's own
+four-member sample standard deviation, RSS-combined.  The NEMO side is
+unchanged and was directly re-derived; it contributes negligibly but is not
+dropped or replaced by `sqrt(2)`.  All four legoESM members passed the
+acceptance gate `PASS 5 | FAIL 0` at 5x.  Output
+`/tmp/tcarry_basin_floor90.json` has SHA-256
+`5d5ba993775b0db381b2d0afa7236ef349749d15ef2eac8427a1473381aedf7d`.
+
+Before the paired score, bind the retained Stage-1 artifacts themselves:
+legacy SHA-256
+`ae114e7c71f530da253083e4f07f83e94bb66ed1d89c06c27909da9b36fc1e37`
+and corrected-T SHA-256
+`2f2e22fe3ca48bf9f923eccd412295a96b0d84b5781103f5f8fe71117532702e`.
+No corrected-T basin endpoint or verdict was computed before this floor and
+artifact-binding amendment.  The paired scorer now carries the new baseline,
+new floor, floor-output hash, and both retained artifact hashes; its frozen
+classifier and compensation rules are unchanged.
+
 ## 2026-08-28 baseline re-registration after epoch ownership
 
 The hash-bound EEN-by-bridge-Omega fourth corner measured
