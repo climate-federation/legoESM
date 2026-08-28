@@ -5,6 +5,40 @@ runs. The five-day result is not used as a basin outcome. This registration
 asks whether the now-confirmed bridge representation defect contributes
 materially to the recorded southern-basin transport deficit.
 
+## 2026-08-28 floor-seed binding amendment before score
+
+All three registered seed arms completed, but no seed NPZ has been opened and
+no member basin value, spread, RSS floor, corrected-T endpoint, or T-carry
+classification has been computed or seen before this amendment.  Bind clean
+producer `820e3500bf3317c1cc19ce61484497391e4b1f6b` and these receipts:
+
+| member | artifact SHA-256 | log SHA-256 |
+|---|---|---|
+| seed 1 | `67f04b2e04a7e7d13f4e9e5cfa4f4ab128dcdf17ccd0eed27bb554d2efd694ee` | `11b96452254544fb9c882590526ec133a93121c26ba3ec62c70852fb5abf6138` |
+| seed 2 | `7420d121f8a3f0e631f563ac869daff9d242e1a8ce14de62e4d35e41f182e595` | `f628c4b44cbaed686df1ccab2f619bcee359fd56a70d4318ace1e30d1b887982` |
+| seed 3 | `c4688539ee33042a1dc41fbff9605fd43bd30b0a880e8327d6ff1e010d046fa9` | `47838be749fb9e572277c77307a9b6327386b3c25d11d73d9b3f142e41ce884c` |
+
+Hashing all six files and reading only the logs before this commit confirmed
+clean producer, fp64/both/bridged/15552000 s, default NEMO bridge Omega,
+resolved NEMO EEN weighting, legacy U-as-T carry, 2880 steps, and
+`STABLE=True` for every seed.
+
+The earlier handoff text named the retained `d6dc89e91...` Stage-1 control as
+the same-producer target, while the executor ran the exact registered commands
+at the later instrument commit above.  Resolve that receipt difference without
+transferring a response: use the already hash-bound unperturbed NEMO-Omega arm
+`tcarry_omega90_nemo.npz` from producer `9e339ad1b...` as member zero.
+`git diff --stat 9e339ad1b..820e3500b -- packages/ src/
+scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py` is empty, so these
+four artifacts share the same model and harness.  The exact legoESM member set
+is therefore control plus seeds 1/2/3; no Stage-1 corrected artifact enters
+the floor.
+
+No metric, `ddof=1` convention, NEMO member set, RSS formula, baseline,
+classification threshold, compensation rule, or decision order changes in
+this binding amendment.  Commit the floor instrument and this binding before
+opening a seed artifact.
+
 ## 2026-08-28 baseline re-registration after epoch ownership
 
 The hash-bound EEN-by-bridge-Omega fourth corner measured
