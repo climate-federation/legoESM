@@ -344,9 +344,11 @@ def capture_face_sh2_call(model, state, forcing):
     real = shared.avm_weighted_shear_production
     real_mxl = tke_mod.compute_mixing_lengths
     real_solve = tke_mod._solve_tke_backward_euler
+    real_lc = tke_mod.nemo_langmuir_tke_source
     calls = []
     mxl_calls = []
     solve_calls = []
+    lc_calls = []
 
     def spy(*args, **kwargs):
         out = real(*args, **kwargs)
@@ -363,9 +365,15 @@ def capture_face_sh2_call(model, state, forcing):
         solve_calls.append((kwargs, out))
         return out
 
+    def spy_lc(*args, **kwargs):
+        out = real_lc(*args, **kwargs)
+        lc_calls.append((args, kwargs, out))
+        return out
+
     shared.avm_weighted_shear_production = spy
     tke_mod.compute_mixing_lengths = spy_mxl
     tke_mod._solve_tke_backward_euler = spy_solve
+    tke_mod.nemo_langmuir_tke_source = spy_lc
     try:
         with jax.disable_jit():
             model.step(state, kamm.DT, surface_forcing=forcing)
@@ -373,11 +381,15 @@ def capture_face_sh2_call(model, state, forcing):
         shared.avm_weighted_shear_production = real
         tke_mod.compute_mixing_lengths = real_mxl
         tke_mod._solve_tke_backward_euler = real_solve
+        tke_mod.nemo_langmuir_tke_source = real_lc
     if not calls:
         raise AssertionError("avm_weighted_shear_production never fired")
-    if not mxl_calls or not solve_calls:
-        raise AssertionError("TKE mixing-length/solve stages never fired")
-    return real, calls[0], {"mxl_calls": mxl_calls, "solve_calls": solve_calls}
+    if not mxl_calls or not solve_calls or not lc_calls:
+        raise AssertionError("TKE mixing-length/Langmuir/solve stages never fired")
+    return real, calls[0], {
+        "mxl_calls": mxl_calls, "lc_calls": lc_calls,
+        "solve_calls": solve_calls,
+    }
 
 
 def main() -> int:
@@ -754,6 +766,110 @@ def main() -> int:
                         },
                         "controls": row9_controls,
                     }
+                else:
+                    # Row 10: literal ln_lc chain, zdftke.F90:401-468.
+                    # The capture is production's actual call; the oracle
+                    # side is reconstructed in source order from registered
+                    # dumps/raw mesh operands, including NEMO's per-column
+                    # mbkt+1 fallback for imlc.
+                    lc_args, lc_kwargs, lc_out = tke_capture["lc_calls"][0]
+                    if lc_kwargs:
+                        ice_lc = lc_kwargs.get("ice_frac")
+                        if ice_lc is not None and np.any(np.asarray(ice_lc)):
+                            raise AssertionError(
+                                "row 10 preregisters DINO's no-ice branch")
+                    taum_l, n2_l, depth_l, dz_l, lc_cfg = lc_args[:5]
+                    nlc = lc_out.shape[-1]
+
+                    def _as_lc_3d(value):
+                        arr = np.asarray(value)
+                        return np.broadcast_to(
+                            arr, (wet2.shape[0], wet2.shape[1], nlc))
+
+                    n2_l_np = _as_lc_3d(n2_l)
+                    depth_l_np = _as_lc_3d(depth_l)
+                    dz_l_np = _as_lc_3d(dz_l)
+                    with xr.open_dataset(
+                            RUN / "mesh_mask.nc", decode_times=False) as ds:
+                        gdepw0_lc = np.moveaxis(np.asarray(
+                            ds["gdepw_0"].isel(time_counter=0)), 0, -1)
+                    stretch_lc = np.asarray(nemo_r3t_stretch(
+                        br.z_coord, twin_state.eta.data,
+                        twin_state.H_bathy.data))
+                    depth_n_lc = (gdepw0_lc[..., 1:1 + nlc]
+                                  * stretch_lc[..., None])
+                    dz_n_lc = e3w_n_full[..., 1:1 + nlc]
+                    n2_n_lc = n2_n_full[..., 1:1 + nlc]
+                    wet_lc = wet_w_all[..., :nlc]
+
+                    zcsd = (np.float64(0.5) * np.float64(0.016)
+                            * np.float64(0.016)
+                            / (np.float64(1.22) * np.float64(1.5e-3)))
+                    half_n = zcsd * taum_dump
+                    pe_n = np.cumsum(
+                        np.maximum(n2_n_lc, 0.0) * depth_n_lc * dz_n_lc,
+                        axis=-1)
+                    exceeded_n = pe_n > half_n[..., None]
+                    first_n = np.argmax(exceeded_n, axis=-1)
+                    fallback_n = np.clip(bottom_level, 0, nlc - 1)
+                    imlc_n = np.where(
+                        np.any(exceeded_n, axis=-1), first_n, fallback_n)
+                    hlc_n = np.take_along_axis(
+                        depth_n_lc, imlc_n[..., None], axis=-1)[..., 0]
+                    us_n = np.sqrt(np.float64(2.0) * half_n)
+                    us3_n = us_n * us_n * us_n
+                    zwlc_n = (np.float64(lc_cfg.lc_coeff)
+                              * np.sin(np.float64(np.pi)
+                                       * depth_n_lc / hlc_n[..., None]))
+                    src_n = (us3_n[..., None]
+                             * (zwlc_n * zwlc_n * zwlc_n)
+                             / hlc_n[..., None])
+                    src_n = np.where(
+                        (depth_n_lc - hlc_n[..., None] < 0.0) & wet_lc,
+                        src_n, 0.0)
+
+                    row10m = metrics(
+                        np.asarray(lc_out), src_n, wet_lc, focus,
+                        POINTWISE_BAR)
+                    row10_inputs = {
+                        "taum": metrics(
+                            np.asarray(taum_l)[..., None],
+                            taum_dump[..., None], wet2[..., None], focus,
+                            POINTWISE_BAR),
+                        "rn2b": metrics(
+                            n2_l_np, n2_n_lc, wet_lc, focus, POINTWISE_BAR),
+                        "gdepw_Kmm": metrics(
+                            depth_l_np, depth_n_lc, wet_lc, focus,
+                            POINTWISE_BAR),
+                        "e3w_Kmm": metrics(
+                            dz_l_np, dz_n_lc, wet_lc, focus, POINTWISE_BAR),
+                    }
+                    row4["continuation_preview"]["rows"][
+                        "10_langmuir_source"] = row10m
+                    if not row10m["pass"]:
+                        row4["continuation_preview"]["first_divergence"] = {
+                            "row": 10,
+                            "operation": "Langmuir TKE source",
+                            "nemo_line":
+                                "cfgs/DINO/MY_SRC/zdftke.F90:401-468",
+                            "output": row10m,
+                            "first_failing_operand": {
+                                "name": "Langmuir chain after registered inputs",
+                                "nemo_line":
+                                    "cfgs/DINO/MY_SRC/zdftke.F90:428,436-463",
+                            },
+                            "operand_localization": row10_inputs,
+                            "next_round_fix_design": {
+                                "status": "localize the first arithmetic or "
+                                    "imlc-fallback suboperand before changing "
+                                    "production",
+                                "required_source_order": [
+                                    "zWlc2", "zpelc", "imlc", "zhlc",
+                                    "zus3", "zwlc", "source"],
+                            },
+                            "controls": planted_controls(
+                                src_n, src_n, wet_lc, POINTWISE_BAR),
+                        }
         if row4["disposition"] == "DIVERGED":
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
                 LatLonCGridOceanModel,
