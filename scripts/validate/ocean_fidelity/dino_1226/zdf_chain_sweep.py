@@ -366,7 +366,9 @@ def main() -> int:
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
                 LatLonCGridOceanModel,
             )
-            cfg_legacy = tke_cfg._replace(tke_shear_avm_weighting="tpoint")
+            cfg_legacy = tke_cfg._replace(
+                tke_shear_avm_weighting="tpoint",
+                tke_shear_evaluation_stage="implicit_solve_state")
             mc_legacy = mc._replace(
                 physics=mc.physics._replace(
                     vertical_mixing=mc.physics.vertical_mixing._replace(
