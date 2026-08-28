@@ -283,23 +283,44 @@ def planted_controls(lego, nemo, wet, bar) -> dict:
 def capture_face_sh2_call(model, state, forcing):
     """Capture production's exact zdfsh2 call operands and first result."""
     import legoesm.ocean.physics.vertical_mixing._shared as shared
+    import legoesm.ocean.physics.vertical_mixing.tke as tke_mod
     real = shared.avm_weighted_shear_production
+    real_mxl = tke_mod.compute_mixing_lengths
+    real_solve = tke_mod._solve_tke_backward_euler
     calls = []
+    mxl_calls = []
+    solve_calls = []
 
     def spy(*args, **kwargs):
         out = real(*args, **kwargs)
         calls.append((args, kwargs, out))
         return out
 
+    def spy_mxl(*args, **kwargs):
+        out = real_mxl(*args, **kwargs)
+        mxl_calls.append((args, kwargs, out))
+        return out
+
+    def spy_solve(**kwargs):
+        out = real_solve(**kwargs)
+        solve_calls.append((kwargs, out))
+        return out
+
     shared.avm_weighted_shear_production = spy
+    tke_mod.compute_mixing_lengths = spy_mxl
+    tke_mod._solve_tke_backward_euler = spy_solve
     try:
         with jax.disable_jit():
             model.step(state, kamm.DT, surface_forcing=forcing)
     finally:
         shared.avm_weighted_shear_production = real
+        tke_mod.compute_mixing_lengths = real_mxl
+        tke_mod._solve_tke_backward_euler = real_solve
     if not calls:
         raise AssertionError("avm_weighted_shear_production never fired")
-    return real, calls[0]
+    if not mxl_calls or not solve_calls:
+        raise AssertionError("TKE mixing-length/solve stages never fired")
+    return real, calls[0], {"mxl_calls": mxl_calls, "solve_calls": solve_calls}
 
 
 def main() -> int:
@@ -382,7 +403,7 @@ def main() -> int:
             raise AssertionError(
                 "row-4 production path changed: expected face-native shear "
                 "with face-averaged avm weighting")
-        sh2_fn, (sh2_args, sh2_kwargs, sh2_prod) = capture_face_sh2_call(
+        sh2_fn, (sh2_args, sh2_kwargs, sh2_prod), tke_capture = capture_face_sh2_call(
             model, twin_state, sf)
         sh2_n_full = base._load_interior(
             str(RUN / "tke_dump_sh2.bin"), ni, nj)
@@ -393,6 +414,21 @@ def main() -> int:
                         focus, POINTWISE_BAR)
         row4 = {"output": row4m,
                 "disposition": "VERIFIED" if row4m["pass"] else "DIVERGED"}
+        if row4["disposition"] == "VERIFIED":
+            dissl_full = base._load_interior(
+                str(RUN / "tke_dump_dissl.bin"), ni, nj)
+            pre_l_eps = np.asarray(tke_capture["mxl_calls"][0][2][1])
+            nk_d = min(pre_l_eps.shape[-1], dissl_full.shape[-1] - 1)
+            dissl_n = dissl_full[..., 1:1 + nk_d]
+            row12_dissl = metrics(
+                pre_l_eps[..., :nk_d], dissl_n,
+                wet_w_all[..., :nk_d], focus, POINTWISE_BAR)
+            row4["continuation_preview"] = {
+                "first_pre_solve_mixing_length_vs_carried_dissl": row12_dissl,
+                "nemo_line": "cfgs/DINO/MY_SRC/zdftke.F90:510,515",
+                "production_operand": "newly diagnosed pre-solve l_eps",
+                "oracle_operand": "carried previous-step dissl",
+            }
         if row4["disposition"] == "DIVERGED":
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
                 LatLonCGridOceanModel,
@@ -724,6 +760,7 @@ def main() -> int:
         RUN / "tke_dump_rn2.bin",
         RUN / "tke_dump_sh2.bin",
         RUN / "tke_dump_avm_in.bin",
+        RUN / "tke_dump_dissl.bin",
         RUN / "eiv_dump_gdept.bin", RUN / "eiv_dump_e3w.bin", args.mld_maps,
     ]
     artifact = {
@@ -804,6 +841,12 @@ def main() -> int:
                     print(f"  {candidate['subrow']} substitute {candidate['operand']}: "
                           f"pass={cm['pass']} max={cm['max_column_error']:.6e} "
                           f"bad_columns={cm['n_diverged_columns']}/{cm['n_wet_columns']}")
+        preview = row4.get("continuation_preview")
+        if preview is not None:
+            dm = preview["first_pre_solve_mixing_length_vs_carried_dissl"]
+            print(f"  continuation preview dissl operand: pass={dm['pass']} "
+                  f"max={dm['max_column_error']:.6e} "
+                  f"bad_columns={dm['n_diverged_columns']}/{dm['n_wet_columns']}")
     if localization:
         for c in localization["candidates_in_nemo_evaluation_order"]:
             print(f"  substitute {c['substitution']}: pass={c['metrics']['pass']} "
