@@ -42,6 +42,28 @@ current-SHA control plus seeds 1/2/3 still must measure `F90_current`.  On
 REFUTE, leave the STOP active and preregister the old/new bridge-Omega arm.
 No threshold, floor, metric, or classifier changed in this binding amendment.
 
+### 2026-08-28 scored result — REFUTED and STOP
+
+The committed hash-bound scorer at clean commit `d49747097054946e50553862fbdf9d90b68a5cc6`
+(SHA-256 `a9cb7ce96266ab73ee5ec2eea32c4484a5ea287338a5b4e86bb948e9b616df2a`)
+measured:
+
+`Goff_current90 = -0.3484425774226274 Sv`.
+
+Its distance from the frozen historical baseline is
+`0.07734230115890917 Sv`, 266.71 times the registered
+`0.0002899800477248501 Sv` band.  Therefore full EEN ownership is
+**REFUTED**.  The row-transport and `g_south` implementations agree within
+`1.7763568394002505e-15 Sv` on each absolute endpoint, every reducer plant
+passed, and the acceptance gate certified `PASS 5 | FAIL 0` at 5x.
+
+Output `/tmp/tcarry_een_off_discriminator.json` has SHA-256
+`35332f72823b76127972d76b039e039fd5c8de36db71ae42b64349cc89f7b1a1`.
+This result does **not** re-register `BASELINE[90]` or `FLOOR[90]`; the STOP
+remains active.  The seed floor arms below remain registered but must wait
+until the baseline epoch is owned.  The next discriminator is preregistered
+in `PREREG_tcarry_bridge_omega_discriminator.md`.
+
 ## 2026-08-27 Rule-1e reconciliation amendment after Stage-1 STOP #2
 
 The amended scorer correctly stopped after measuring the retained legacy arm:
