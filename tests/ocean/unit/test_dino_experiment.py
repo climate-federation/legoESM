@@ -774,6 +774,37 @@ class TestDinoWindStress:
             dino.dino_lat_lon_surface_forcing_arrays(
                 grid, cfg, wind_lat_deg=raw[:-1])
 
+    def test_literal_forcing_default_reconstructs_nemo_raw_gphiu(self):
+        cfg = dino_config_for_recipe("nemo_dino_kamm")
+        grid = dino_lat_lon_grid(cfg)
+        implicit = dino.dino_lat_lon_surface_forcing_arrays(grid, cfg)
+
+        # Hand-computed usrdef_hgr.F90:95-107 source construction.  This is
+        # intentionally scalar math: replacing it with degrees(grid.lat)
+        # makes this red on the active 195-row NEMO card.
+        import math
+        rad = math.pi / 180.0
+        raw = np.asarray([
+            (1.0 / rad) * math.asin(math.tanh(rad * float(j - 97)))
+            for j in range(195)
+        ], dtype=np.float64)
+        explicit = dino.dino_lat_lon_surface_forcing_arrays(
+            grid, cfg, wind_lat_deg=raw)
+        assert np.array_equal(np.asarray(implicit["tau_u_cell_2d"]),
+                              np.asarray(explicit["tau_u_cell_2d"]))
+
+        lossy = np.asarray(dino_wind_stress(
+            jnp.degrees(grid.lat), cfg))
+        assert not np.array_equal(
+            np.asarray(implicit["tau_u_cell_2d"][:, 0]), lossy)
+
+    def test_literal_forcing_fails_closed_without_raw_or_complete_card(self):
+        cfg = dataclasses.replace(
+            DINOConfig(), dino_wind_profile_evaluation="nemo_literal")
+        grid = dino_lat_lon_grid(cfg, n_lon=4)
+        with pytest.raises(ValueError, match="refusing a lossy"):
+            dino.dino_lat_lon_surface_forcing_arrays(grid, cfg)
+
     def test_hits_knots(self):
         cfg = DINOConfig()
         for lat_knot, tau_knot in zip(cfg.wind_tau_lats_deg, cfg.wind_tau_values):

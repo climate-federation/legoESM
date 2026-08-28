@@ -3833,8 +3833,35 @@ def dino_lat_lon_surface_forcing_arrays(
 
     lat_1d = jnp.degrees(grid.lat)               # (n_lat,)
     wind_lat_1d = lat_1d
-    if (cfg.dino_wind_profile_evaluation == "nemo_literal"
-            and wind_lat_deg is not None):
+    if cfg.dino_wind_profile_evaluation == "nemo_literal":
+        if wind_lat_deg is None:
+            # usrdef_hgr.F90:95-107 constructs DINO's stored degree-valued
+            # gphiu directly, before any radians representation exists.  Do
+            # the same for the complete NEMO card.  A lat(rad)->degrees
+            # round-trip moves 154 row-8 columns across the 1e-15 bar.
+            # Scalar ``math`` follows the same libm path as the active NEMO
+            # build (and is bit-identical to its 195 raw gphiu rows); NumPy's
+            # vector transcendental dispatch is not bit-identical here.
+            if not cfg.nemo_faithful_grid:
+                raise ValueError(
+                    "dino_wind_profile_evaluation='nemo_literal' requires "
+                    "wind_lat_deg or the complete nemo_faithful_grid card; "
+                    "refusing a lossy radians-to-degrees fallback")
+            import math
+            if grid.n_lat != _NEMO_DINO_NLAT or grid.n_lon != _NEMO_DINO_NLON:
+                raise ValueError(
+                    "nemo_literal implicit gphiu construction requires the "
+                    f"{_NEMO_DINO_NLAT}x{_NEMO_DINO_NLON} DINO grid, got "
+                    f"{grid.n_lat}x{grid.n_lon}")
+            rad = math.pi / 180.0
+            rn_e1_deg = ((cfg.lon_east_deg - cfg.lon_west_deg)
+                         / float(grid.n_lon))
+            jeq = grid.n_lat // 2
+            wind_lat_deg = [
+                (1.0 / rad) * math.asin(math.tanh(
+                    rn_e1_deg * rad * float(j - jeq)))
+                for j in range(grid.n_lat)
+            ]
         wind_lat_1d = jnp.asarray(wind_lat_deg, dtype=jnp.float64)
         if wind_lat_1d.shape != lat_1d.shape:
             raise ValueError(

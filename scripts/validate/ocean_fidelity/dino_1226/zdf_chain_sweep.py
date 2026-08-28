@@ -641,6 +641,7 @@ def main() -> int:
             row8_controls = planted_point_controls(
                 surface_n[..., None], surface_n[..., None],
                 wet2[..., None], POINTWISE_BAR)
+            row8m["controls"] = row8_controls
             en_full = base._load_interior(
                 str(RUN / "tke_dump_en.bin"), ni, nj)
             row8_poststage_invariant = metrics(
@@ -721,7 +722,27 @@ def main() -> int:
                         ds["umask"].isel(time_counter=0)), 0, -1)
                     vmask_b = np.moveaxis(np.asarray(
                         ds["vmask"].isel(time_counter=0)), 0, -1)
-                kb = bottom_level[..., None]
+                    # NEMO's mbkt is independently initialized from mbathy.
+                    # mesh_mask stores 1-based deepest wet T levels, whereas
+                    # legoESM bottom_level is 0-based.
+                    nemo_bottom_level = np.asarray(
+                        ds["mbathy"].isel(time_counter=0), dtype=np.int64)
+                nemo_bottom_level = nemo_bottom_level[
+                    hls:jpj - hls, hls:jpi - hls] - 1
+                bottom_index_mismatch = wet2 & (
+                    bottom_level != nemo_bottom_level)
+                bottom_index_identity = {
+                    "pass": not bool(np.any(bottom_index_mismatch)),
+                    "n_mismatch_wet_columns": int(
+                        np.count_nonzero(bottom_index_mismatch)),
+                    "n_wet_columns": int(np.count_nonzero(wet2)),
+                    "nemo_source": "mesh_mask.nc:mbathy - 1",
+                }
+                if not bottom_index_identity["pass"]:
+                    raise AssertionError(
+                        "legoESM bottom_level != independent NEMO mbathy-1")
+                kb = np.clip(nemo_bottom_level, 0,
+                             before.u.shape[-1] - 1)[..., None]
                 ub_i = np.take_along_axis(before.u, kb, axis=-1)[..., 0]
                 ub_w = np.take_along_axis(
                     np.roll(before.u, 1, axis=1), kb, axis=-1)[..., 0]
@@ -744,9 +765,19 @@ def main() -> int:
                 row9m = metrics(
                     bottom_prod[..., None], bottom_literal[..., None],
                     wet2[..., None], focus, POINTWISE_BAR)
-                row9_controls = planted_point_controls(
+                row9_controls = planted_controls(
                     bottom_literal[..., None], bottom_literal[..., None],
                     wet2[..., None], POINTWISE_BAR)
+                index_poison = nemo_bottom_level.copy()
+                poison_ji = tuple(np.argwhere(wet2)[0])
+                index_poison[poison_ji] += 1
+                bottom_index_identity["off_by_one_control_fired"] = bool(
+                    index_poison[poison_ji] != bottom_level[poison_ji])
+                if not bottom_index_identity["off_by_one_control_fired"]:
+                    raise AssertionError(
+                        "row-9 independent-index red control did not fire")
+                row9m["bottom_index_identity"] = bottom_index_identity
+                row9m["controls"] = row9_controls
                 row4["continuation_preview"]["rows"][
                     "9_bottom_tke_boundary"] = row9m
                 if not row9m["pass"]:
@@ -767,11 +798,10 @@ def main() -> int:
                         "controls": row9_controls,
                     }
                 else:
-                    # Row 10: literal ln_lc chain, zdftke.F90:401-468.
-                    # The capture is production's actual call; the oracle
-                    # side is reconstructed in source order from registered
-                    # dumps/raw mesh operands, including NEMO's per-column
-                    # mbkt+1 fallback for imlc.
+                    # Row 10: stop on the first dumped operand in the literal
+                    # ln_lc chain, zdftke.F90:401-468.  The full source is not
+                    # dispositioned without a NEMO stage dump; its offline
+                    # reconstruction below is diagnostic only.
                     lc_args, lc_kwargs, lc_out = tke_capture["lc_calls"][0]
                     if lc_kwargs:
                         ice_lc = lc_kwargs.get("ice_frac")
@@ -814,7 +844,7 @@ def main() -> int:
                         axis=-1)
                     exceeded_n = pe_n > half_n[..., None]
                     first_n = np.argmax(exceeded_n, axis=-1)
-                    fallback_n = np.clip(bottom_level, 0, nlc - 1)
+                    fallback_n = np.clip(nemo_bottom_level, 0, nlc - 1)
                     imlc_n = np.where(
                         np.any(exceeded_n, axis=-1), first_n, fallback_n)
                     hlc_n = np.take_along_axis(
@@ -867,15 +897,27 @@ def main() -> int:
                             e3w0_lc[..., :nlc] * stretch_lc[..., None],
                             wet_lc, focus, POINTWISE_BAR),
                     }
+                    # The independently dumped rn2b is the first source-order
+                    # operand, so its comparison -- not the undumped offline
+                    # composite -- owns the row disposition.
+                    row10_operand = row10_inputs["rn2b"]
+                    row10_operand["controls"] = planted_controls(
+                        np.asarray(n2)[..., :nlc], n2_n_lc, wet_lc,
+                        POINTWISE_BAR)
+                    row10_operand["offline_composite_diagnostic"] = {
+                        "dispositive": False,
+                        "reason": "no NEMO post-ln_lc stage dump",
+                        "metrics": row10m,
+                    }
                     row4["continuation_preview"]["rows"][
-                        "10_langmuir_source"] = row10m
-                    if not row10m["pass"]:
+                        "10_langmuir_rn2b_operand"] = row10_operand
+                    if not row10_operand["pass"]:
                         row4["continuation_preview"]["first_divergence"] = {
                             "row": 10,
-                            "operation": "Langmuir TKE source",
+                            "operation": "Langmuir TKE source rn2b operand",
                             "nemo_line":
-                                "cfgs/DINO/MY_SRC/zdftke.F90:401-468",
-                            "output": row10m,
+                                "cfgs/DINO/MY_SRC/zdftke.F90:436-440",
+                            "output": row10_operand,
                             "first_failing_operand": {
                                 "name": "rn2b evaluation lifetime/geometry",
                                 "nemo_line":
@@ -886,6 +928,11 @@ def main() -> int:
                                     "vertical_mixing/k_profiles.py:827-831",
                             },
                             "operand_localization": row10_inputs,
+                            "offline_composite_diagnostic": {
+                                "dispositive": False,
+                                "reason": "no NEMO post-ln_lc stage dump",
+                                "metrics": row10m,
+                            },
                             "next_round_fix_design": {
                                 "option": "tke_n2_evaluation_stage",
                                 "faithful_default_on_complete_dino_nemo_cards":
@@ -1215,6 +1262,7 @@ def main() -> int:
 
     source_paths = [
         Path(__file__).resolve(),
+        HERE / "PREREG_zdf_chain_sweep.md",
         HERE / "PREREG_zdf_chain_sweep_round3.md",
         HERE / "PREREG_zdf_chain_sweep_round4.md",
         HERE / "kamm_twin_90d.py",

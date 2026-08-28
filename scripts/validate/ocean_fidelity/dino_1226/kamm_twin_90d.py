@@ -1494,6 +1494,14 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         "bridge_tke": bool(bridge_tke), "bridge_before": bool(bridge_before),
         "vmix_scheme": vmix_scheme, "use_gm_redi": use_gm_redi,
         "surface_tendency_placement": surface_tendency_placement,
+        # Resolved production selectors, not merely the optional CLI
+        # overrides.  These receipts make the faithful and legacy climate
+        # arms distinguishable even when both are launched from defaults.
+        "tke_preclosure_coeff_source": cfg.tke_preclosure_coeff_source,
+        "tke_shear_evaluation_stage": cfg.tke_shear_evaluation_stage,
+        "tke_shear_metric_source": cfg.tke_shear_metric_source,
+        "dino_wind_profile_evaluation":
+            cfg.dino_wind_profile_evaluation,
         "perturb_seed": perturb_seed, "perturb_eps": float(perturb_eps),
         # DELIBERATELY NOT recorded here: --fp64-3d. run_config is compared
         # BYTE-FOR-BYTE between two arms by twin_seasonal_clock_ab.py, which

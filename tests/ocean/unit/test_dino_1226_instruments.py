@@ -1449,6 +1449,13 @@ def test_run_twin_stamps_the_reference_clock_and_the_run_configuration(
     src = inspect.getsource(kamm_twin_90d.run_twin)
     assert "seasonal_t0_reference_seconds=" in src
     assert "run_config=" in src
+    for selector in (
+        "tke_preclosure_coeff_source",
+        "tke_shear_evaluation_stage",
+        "tke_shear_metric_source",
+        "dino_wind_profile_evaluation",
+    ):
+        assert f'"{selector}"' in src
     # the reference must come from the restart, not from the same override the
     # twin itself used -- otherwise the pair-check compares a value to itself
     assert "restart_elapsed_seconds(" in src
