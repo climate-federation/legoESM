@@ -63,3 +63,48 @@ provably inapplicable and written as WAIVED.
 
 Climate arms remain unauthorized. The frozen prediction and eventual command
 pair are unchanged until an end-to-end row-32 pass.
+
+## Dated amendment: measured owner and registered production fix
+
+Date: 2026-08-28. Written after the first instrumented row-11 run and before
+the production change or post-fix rerun.
+
+The first numeric divergence is `zrw`: 9,920/9,920 wet columns fail its
+`1e-15` bar (maximum normalized column error `6.470553e-15`), including all
+four focus columns. Against `eosbn2.F90:1459-1460`, NEMO expands the qco macros
+literally as four independently rounded `raw_depth*(1+r3t)` operands. Its
+`r3t` is itself `pssh*r1_ht_0` (`domqco.F90:160`), where `r1_ht_0` was stored
+earlier as the reciprocal in `domain.F90:158`. legoESM instead formed
+`eta/H_bathy`, then passed preassembled live ladders into the ratio. The
+mathematically cancelling stretch therefore had a different fp64 association.
+An offline source-order control using `eta*(1/H_bathy)` and the four raw-mesh
+multiplications reproduces the new NEMO `zrw` stream bit-for-bit; the old
+static/cancelled ratio differs in every wet column.
+
+The registered fix is confined to the already selected
+`tke_n2_evaluation_stage="step_entry"` bundle. It constructs `r3t` in NEMO's
+reciprocal-then-multiply order, carries the raw `gdept_0/gdepw_0` operands,
+and evaluates `zrw` from four separately materialized
+`raw_depth*(1+r3t)` values before `zaw/zbw`. JAX optimization barriers may be
+used only at those four rounding boundaries to prevent algebraic cancellation;
+JIT and gradients must remain live. `implicit_solve_state`, all non-oracle
+cards, and all other `nemo_r3t_stretch` consumers retain their old quotient
+and preassembled-ladder path byte-for-byte. The selector is not widened.
+
+Red tests require a hand-computed column where reciprocal/multiply differs
+from quotient, the old cancelled-`zrw` alternative to fail, the NEMO source
+order to pass, JIT/gradient finiteness, and unchanged-card array identity.
+The post-fix row-11 target remains 0/9,920 at `1e-15` and 4/4 focus; the exact
+NEMO `zrw` stream is additionally expected bit-identical. Only then may row
+12 be measured.
+
+**LOUD RETRACTION of one instrumentation-control clause.** The initial text
+required every numeric restart variable to match an older certified binary.
+That binary has 95 numeric restart variables; this sandbox's same-source
+dump-on/off builds have 131 because they already include the campaign budget
+accumulators, and their pre-existing literal-tau work changes only
+`utrd_tau`. The older binary is therefore not the bracket for this patch.
+The valid controlled pair is identical-source dump-on versus dump-off:
+131/131 variables present and 0 differing. The committed probe prints the
+certified comparison as `RETRACTED` and lists `utrd_tau`; it cannot print the
+withdrawn all-numeric claim. The planted wrong-field comparison fires.
