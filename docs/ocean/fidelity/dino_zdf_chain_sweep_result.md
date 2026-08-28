@@ -3,6 +3,72 @@
 Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 (`RUN_SEQDUMP_D180_1R`, `kt=5761`).
 
+## Round-2 result (supersedes the row-2 stop below)
+
+The registered raw-mesh fix is now production code.  A NEMO bridge preserves
+`mesh_mask.nc:e3w_0`, and the default `mesh_reference` construction supplies
+`e3w_0*(1+r3t)` to every `nemo_bn2` path and to the paired `zdf_mxl`
+multiplication.  The former `diff(live_gdept)` construction remains available
+only through the explicit `depth_difference` option.  Missing, malformed, or
+nonpositive native geometry fails closed.
+
+The row-2 rerun is `VERIFIED`: 0/9,920 wet columns fail, maximum column error
+`5.968673256056548e-16`, and all four southern focus columns pass.  The
+explicit legacy control reproduces the accepted baseline exactly: 4,630/9,920
+fail with maximum `6.366584806460317e-15`.  Row 3
+`eos_rab/bn2(Nnn)` is also `VERIFIED`, 0/9,920 failures and maximum
+`5.968545325803916e-16`.
+
+The next and therefore current first divergence is row 4, `zdf_sh2`:
+
+| Row | Operation | Disposition | Whole-domain per-column result | Southern focus |
+|---:|---|---|---|---|
+| 1 | `eos_rab(Nbb)` | `VERIFIED` | 0/9,920 failed | 4/4 pass |
+| 2 | `bn2(Nbb)` native `e3w` | `VERIFIED` | 0/9,920; max `5.968673e-16` | 4/4 pass |
+| 3 | `eos_rab/bn2(Nnn)` | `VERIFIED` | 0/9,920; max `5.968545e-16` | 4/4 pass |
+| 4 | `zdf_sh2` | `DIVERGED` | 9,920/9,920; max `7.329361e+01` | 4/4 fail (`3.036e-4` to `3.988e-3`) |
+| 5 onward | bottom drag through implicit solves | `UNMEASURED` | ordered stop at row 4 | ordered stop |
+
+### Row-4 first operand
+
+NEMO starts its active no-Stokes expression with the carried pre-step
+viscosity:
+
+```fortran
+zsh2u(ji,jj) = ( p_avm(ji+1,jj,jk) + p_avm(ji,jj,jk) ) &
+```
+
+Source: NEMO 5.0.2 `src/OCE/ZDF/zdfsh2.F90:80`; the full face products and
+four-face assembly are at lines 80-94.  legoESM instead supplies the newly
+reconstructed current sub-iteration `K_M_curr`.  That operand comparison is
+already `DIVERGED` in 9,920/9,920 wet columns (max column error
+`3.3486302069727913`, correlation `0.9984439417185291`, RMS ratio
+`1.0146340961467346`); all four focus columns fail (`1.0224e-5` through
+`6.8126e-5`).  The day-0 now/before velocity bridge is bit-identical, so the
+ordered operand walk stops at `p_avm` before considering the later velocity,
+`e3uw/e3vw`, and four-face operands.  Substituting NEMO's carried `p_avm`
+alone does not close the composite because later operands remain non-identical;
+that is recorded rather than misreported as a failed localization.
+
+Next-round design: add `tke_shear_avm_source` with faithful default
+`carried_previous_step` and explicit legacy `current_subiteration`.  Carry
+`avm/avt` closure fields across steps, seed a bridged run from restart
+`avm/avt`, and thread carried `avm` into both `zdf_sh2` and the
+`rn2b*p_avm` Prandtl numerator while current `K_M` continues to drive the TKE
+solve and closure update.  Required red tests distinguish carried/current
+arrays, prove restart identity and next-step carry, lock legacy bits, and keep
+JIT/grad finite.  Per the ordered discipline, this is design only; row 4 is
+not fixed in this round.
+
+Round-2 machine-readable result:
+`docs/ocean/fidelity/dino_zdf_chain_sweep_round2_artifact.json`, SHA256
+`43a72cd4acc7570790858a0d3185440c30320e785205de776c93b3a44c069842`.
+The stamped probe/tree SHA is
+`70aab3e28f476ffd9a187a92679908748efd5eb3`.  All planted controls fired.
+
+The remainder of this document preserves the accepted round-1 evidence and
+design history; its statement that the sweep stopped at row 2 is historical.
+
 ## Verdict
 
 The sweep stopped at row 2, `bn2(Nbb)`.  `eos_rab(Nbb)` is `VERIFIED`; `bn2`
