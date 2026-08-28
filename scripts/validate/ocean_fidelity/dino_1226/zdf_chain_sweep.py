@@ -1828,9 +1828,24 @@ def main() -> int:
                                     solve_kwargs["dissl_old"])[..., :nrhs]
                                 dissl_n = np.asarray(
                                     _rdissl)[..., 1:1 + nrhs]
+                                if (args.row17_postlc_dump is None
+                                        or not args.row17_postlc_dump.is_file()):
+                                    raise FileNotFoundError(
+                                        "row 15 requires --row17-postlc-dump "
+                                        "because zdftke.F90:546 consumes the "
+                                        "post-Langmuir en")
+                                postlc_n_full = base._load_interior(
+                                    str(args.row17_postlc_dump), ni, nj)
+                                postlc_n_int = postlc_n_full[
+                                    ..., 1:1 + nrhs]
+                                postlc_l = np.array(en_l, copy=True)
+                                if solve_kwargs[
+                                        "external_source"] is not None:
+                                    postlc_l = postlc_l + dt64 * np.asarray(
+                                        solve_kwargs["external_source"])
                                 zfact3 = np.float64(0.5) * ediss64
-                                diss_rhs_l = zfact3 * dissl_l * en_l
-                                diss_rhs_n = zfact3 * dissl_n * en_n
+                                diss_rhs_l = zfact3 * dissl_l * postlc_l
+                                diss_rhs_n = zfact3 * dissl_n * postlc_n_int
                                 row15m = metrics(
                                     diss_rhs_l, diss_rhs_n, wet_rhs, focus,
                                     POINTWISE_BAR)
@@ -1838,8 +1853,8 @@ def main() -> int:
                                     "carried_dissl": metrics(
                                         dissl_l, dissl_n, wet_rhs, focus,
                                         POINTWISE_BAR),
-                                    "incoming_en": metrics(
-                                        en_l, en_n, wet_rhs, focus,
+                                    "post_langmuir_en": metrics(
+                                        postlc_l, postlc_n_int, wet_rhs, focus,
                                         POINTWISE_BAR),
                                 }
                                 row15m["controls"] = planted_controls(
@@ -1977,9 +1992,7 @@ def main() -> int:
                                         pre_rhs_n = base._load_interior(
                                             str(args.row17_pre_rhs_dump),
                                             ni, nj)
-                                        postlc_n = base._load_interior(
-                                            str(args.row17_postlc_dump),
-                                            ni, nj)
+                                        postlc_n = postlc_n_full
                                         n_forward = literal_diag.shape[-1] - 1
                                         wet_forward = np.concatenate(
                                             (wet2[..., None],
