@@ -23,6 +23,38 @@ fp64/both/bridged/15552000 s legacy stress-carry receipts, 2880 steps,
 changes no metric, locked corner, reducer, baseline, floor, validity bar,
 ownership bar, interaction label, control, or decision branch.
 
+## 2026-08-28 scored result — epoch owned
+
+The committed hash-bound four-corner scorer ran at clean commit
+`820e3500bf3317c1cc19ce61484497391e4b1f6b`, scorer SHA-256
+`c82a4e9d87ea3fe89f0f066952da624ef1811e7f6d7f846101e2ea453481303e`.
+All four locked artifact/log hashes, producer/config receipts, day-0 fields,
+independent reducers, planted violations, and four separate 5x acceptance
+gates passed.  The three locked corners reproduced exactly at printed
+precision and the measured fourth corner is:
+
+`D = GoldOmega_EENoff90 = -0.42606954856856305 Sv`.
+
+Its distance from the frozen historical baseline is
+`0.0002846699870264757 Sv`, inside the unchanged
+`2F = 0.0002899800477248501 Sv` band.  The registered verdict is therefore
+**CONFIRMED_COMBINED_EEN_OMEGA_OWNERSHIP**.  This margin is only
+`0.0000053100606983744 Sv` inside the bar; the classification is mechanical,
+not a claim of excess precision.
+
+The additive prediction was `Dadd = -0.34198873921143225 Sv`.  Both registered
+interaction formulas give
+`I = A - B - C + D = D - Dadd = -0.0840808093571308 Sv`, so the separate
+label is **NON_ADDITIVE**.  The row-transport and `g_south` reducers agree
+within `1.7763568394002505e-15 Sv` on the fourth corner.  Output
+`/tmp/tcarry_een_omega_interaction_score.json` has SHA-256
+`846706fadaf1ef12623f243049901a5d52bff65abde4b6845042b73c25fb80dc`.
+
+Per the frozen CONFIRM branch, re-register
+`Glegacy90 = -0.43908550999203477 Sv`.  Do not transfer the historical floor:
+`F90_current` remains UNMEASURED and the T-carry basin verdict remains STOPPED
+until the registered control plus seeds 1/2/3 floor ensemble is complete.
+
 ## Why this is the next discriminator
 
 Three corners of the current-harness 2x2 are now hash-bound and measured:

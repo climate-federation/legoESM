@@ -5,6 +5,34 @@ runs. The five-day result is not used as a basin outcome. This registration
 asks whether the now-confirmed bridge representation defect contributes
 materially to the recorded southern-basin transport deficit.
 
+## 2026-08-28 baseline re-registration after epoch ownership
+
+The hash-bound EEN-by-bridge-Omega fourth corner measured
+`-0.42606954856856305 Sv`, within `0.0002846699870264757 Sv` of the frozen
+historical endpoint and therefore inside the unchanged
+`0.0002899800477248501 Sv` ownership band.  The registered combined-ownership
+branch fired, with interaction
+`I = -0.0840808093571308 Sv` (**NON_ADDITIVE**).  Scorer SHA-256 is
+`c82a4e9d87ea3fe89f0f066952da624ef1811e7f6d7f846101e2ea453481303e`;
+output SHA-256 is
+`846706fadaf1ef12623f243049901a5d52bff65abde4b6845042b73c25fb80dc`.
+
+Re-register `Glegacy90 = -0.43908550999203477 Sv`.  The scorer now carries
+that exact baseline but sets day-90 `FLOOR` to non-finite/UNMEASURED, so it
+fails closed before loading the corrected endpoint.  The historical
+`0.00014499002386242506 Sv` floor is not transferred.
+
+Exactly three GPU integrations remain before the T-carry basin verdict can be
+scored: the already-registered seed 1, seed 2, and seed 3 arms below, at the
+same `d6dc89e91...` producer as the retained unperturbed legacy control and
+corrected-T arm.  No new control or corrected-T integration is required while
+those retained hash-bound artifacts remain available.  After binding the
+three seed receipts, one CPU floor reduction must compute `F90_current` from
+the control-plus-seeds legoESM sample standard deviation RSS-combined with the
+unchanged four-member NEMO sample standard deviation.  Then the existing
+retained legacy/corrected pair must be re-scored once on CPU with the new
+baseline and floor.  No corrected-arm basin number has yet been adopted.
+
 ## 2026-08-28 EEN-off artifact binding before score
 
 The registered current-trajectory EEN-off arm has completed, but neither its
