@@ -1973,6 +1973,76 @@ def main() -> int:
                                             work_n[..., :n_forward],
                                             wet_forward, focus,
                                             POINTWISE_BAR)
+                                        bottom_ext = (
+                                            bottom_level[..., None] + 1)
+                                        rhs_bottom_scatter = metrics(
+                                            np.take_along_axis(
+                                                np.asarray(tri_args[3]),
+                                                bottom_ext, axis=-1),
+                                            bottom_prod[..., None],
+                                            wet2[..., None], focus,
+                                            POINTWISE_BAR)
+                                        bottom_matrix_identity = {
+                                            "a": metrics(
+                                                np.take_along_axis(
+                                                    a_tri, bottom_ext,
+                                                    axis=-1),
+                                                np.zeros_like(
+                                                    bottom_prod[..., None]),
+                                                wet2[..., None], focus,
+                                                POINTWISE_BAR),
+                                            "diag": metrics(
+                                                np.take_along_axis(
+                                                    b_tri, bottom_ext,
+                                                    axis=-1),
+                                                np.ones_like(
+                                                    bottom_prod[..., None]),
+                                                wet2[..., None], focus,
+                                                POINTWISE_BAR),
+                                            "c": metrics(
+                                                np.take_along_axis(
+                                                    c_tri, bottom_ext,
+                                                    axis=-1),
+                                                np.zeros_like(
+                                                    bottom_prod[..., None]),
+                                                wet2[..., None], focus,
+                                                POINTWISE_BAR),
+                                        }
+                                        forward_scale = np.sqrt(np.mean(
+                                            work_n[..., :n_forward][
+                                                wet_forward] ** 2))
+                                        forward_bad = wet_forward & (
+                                            np.abs(literal_work[
+                                                ..., :n_forward]
+                                                - work_n[..., :n_forward])
+                                            / forward_scale > POINTWISE_BAR)
+                                        first_bad = np.argmax(
+                                            forward_bad, axis=-1)
+                                        bad_columns = np.any(
+                                            forward_bad, axis=-1)
+                                        offsets = (
+                                            first_bad[bad_columns]
+                                            - bottom_ext[..., 0][bad_columns])
+                                        offset_values, offset_counts = (
+                                            np.unique(offsets,
+                                                      return_counts=True))
+                                        forward_rhs_metric[
+                                            "first_bad_level_census"] = {
+                                                "nemo_jk_by_python_ext_k": {
+                                                    str(k): int(np.count_nonzero(
+                                                        bad_columns
+                                                        & (first_bad == k)))
+                                                    for k in range(n_forward)
+                                                    if np.any(bad_columns
+                                                              & (first_bad == k))
+                                                },
+                                                "first_bad_minus_bottom_ext": {
+                                                    str(int(k)): int(v)
+                                                    for k, v in zip(
+                                                        offset_values,
+                                                        offset_counts)
+                                                },
+                                            }
                                         recurrence_metric = metrics(
                                             literal_recurrence[..., :nrhs],
                                             postsolve_n, wet_rhs, focus,
@@ -1999,6 +2069,10 @@ def main() -> int:
                                                 forward_diag_metric,
                                             "literal_forward_rhs":
                                                 forward_rhs_metric,
+                                            "solver_rhs_bottom_scatter":
+                                                rhs_bottom_scatter,
+                                            "solver_bottom_matrix_identity":
+                                                bottom_matrix_identity,
                                         }
                                         bracket17 = restart_numeric_identity(
                                             args.row17_bracket_instrument_restart,
