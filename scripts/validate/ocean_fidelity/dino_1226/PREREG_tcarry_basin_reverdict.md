@@ -5,6 +5,31 @@ runs. The five-day result is not used as a basin outcome. This registration
 asks whether the now-confirmed bridge representation defect contributes
 materially to the recorded southern-basin transport deficit.
 
+## 2026-08-27 instrument-only amendment after Stage-1 STOP
+
+The executor completed both registered 90-day arms cleanly and both separate
+acceptance gates certified `PASS 5 | FAIL 0`. The paired basin scorer then
+crashed in its **first planted receipt control**, before loading/scoring either
+day-90 endpoint: its `_Swap` NPZ overlay implemented keyed access but not
+membership, so `certifiable_grid_and_precision` triggered Python's integer
+iteration fallback and the real archive raised `KeyError('0 is not a file in
+the archive')`. **No `Gbasin90`, row profile, delta, ratio, or basin verdict was
+produced or seen before this amendment.**
+
+Amended scorer SHA-256:
+`f09629792aed293bdea0b7b7004617f45c2390a9865cb393550031e51560a9d5`.
+The overlay now supplies `.files`, `__contains__`, keyed access, iteration,
+length, `.keys()`, and `.get()`. Its self-test opens two synthetic NPZ files on
+disk and sends every receipt plant through the same overlay/consumer path.
+The retained Stage-1 arms remain bound to their exact producing commit
+`d6dc89e91c9ae6b07d146991d2cb6c850f261bb0`; the amended scorer prints its
+own distinct HEAD and accepts only that registered producer for day 90. Future
+conditional day-360 arms remain bound to the scorer HEAD that produces them.
+**Diff scope:** mapping protocol, test coverage, and this exact retained-arm
+producer receipt only. The basin metric, reducers, baselines, floors,
+thresholds, classification order, acceptance safety rule, arm contents, and
+GPU commands are unchanged.
+
 ## Reuse audit and exact metric
 
 The search terms were `acc_driver_decomp`, `group_transport`, `g_south`,
