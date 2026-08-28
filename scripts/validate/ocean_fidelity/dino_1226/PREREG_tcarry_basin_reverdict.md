@@ -5,6 +5,43 @@ runs. The five-day result is not used as a basin outcome. This registration
 asks whether the now-confirmed bridge representation defect contributes
 materially to the recorded southern-basin transport deficit.
 
+## 2026-08-28 EEN-off artifact binding before score
+
+The registered current-trajectory EEN-off arm has completed, but neither its
+NPZ payload nor any basin endpoint has been loaded or scored before this
+binding amendment.  Bind:
+
+- artifact `results/dino_1455/tcarry_basin90_legacy_een_off.npz`, SHA-256
+  `a7f3bf5555ec1f6a7ed58792ede8b9f10188c93c21ff81f0553b2fb3cc400dd4`;
+- log `results/dino_1455/tcarry_basin90_legacy_een_off.log`, SHA-256
+  `465c01c104dfb8e8f82dc5f6bd0ae70eb50d009ec125457ac259a5f0168e0d02`;
+- clean producer
+  `6c64f261aa33b43c372b81b30d4569481116766d`.
+
+The scorer is
+`scripts/validate/ocean_fidelity/dino_1226/tcarry_een_off_discriminator.py`.
+It must hash both inputs before loading, require the registered EEN-off log
+banner and legacy-carry/grid/precision/clock/stability receipts, and verify
+that `git diff --stat d6dc89e91..6c64f261a -- packages/ src/` is empty.  It
+then loads member-zero NEMO day 90 and computes exactly one number,
+`Goff_current90`, with the existing `tcarry_basin_reverdict._reduce` basin
+functional.  That reducer must print agreement between its row sum and
+`acc_driver_decomp.rowset()["g_south"]` to `1e-12 Sv`.  The existing dry/wet
+reducer plants and the five-metric 5x acceptance gate must pass.
+
+The frozen decision is unchanged:
+
+- **CONFIRM full EEN ownership** iff
+  `|Goff_current90 - (-0.4257848785815366)| <= 0.0002899800477248501 Sv`;
+- **REFUTE full EEN ownership** otherwise.
+
+The classifier self-test must prove both states are reachable.  On CONFIRM,
+re-register `Glegacy90 = -0.43908550999203477 Sv` with the EEN ownership
+receipt, but do not transfer the historical floor: the already-registered
+current-SHA control plus seeds 1/2/3 still must measure `F90_current`.  On
+REFUTE, leave the STOP active and preregister the old/new bridge-Omega arm.
+No threshold, floor, metric, or classifier changed in this binding amendment.
+
 ## 2026-08-27 Rule-1e reconciliation amendment after Stage-1 STOP #2
 
 The amended scorer correctly stopped after measuring the retained legacy arm:
