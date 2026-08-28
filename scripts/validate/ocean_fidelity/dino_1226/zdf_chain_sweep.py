@@ -54,6 +54,7 @@ def _import_sibling(name: str, filename: str):
 base = _import_sibling("_zdf_bn2_base", "eos_rab_bn2_per_element.py")
 kamm = _import_sibling("_zdf_kamm_twin", "kamm_twin_90d.py")
 sh2_probe = _import_sibling("_zdf_sh2_capture", "sh2_canonical.py")
+sh2_walk = _import_sibling("_zdf_sh2_walk", "sh2_walk.py")
 from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
 from legoesm.ocean.eos import (
     NemoSEOSConfig,
@@ -209,6 +210,36 @@ def face_difference_metrics(
     out["operand"] = "velocity(k-1)-velocity(k)"
     out["focus_semantics"] = "maximum over the two surrounding wet faces"
     return out
+
+
+def assemble_sh2_with_metrics(
+    u_now, v_now, u_before, v_before, avm,
+    e3u_now, e3u_before, e3v_now, e3v_before,
+    u_mask, v_mask,
+):
+    """Literal legoESM-face-index form of zdfsh2.F90:80-94.
+
+    Separate NOW/BEFORE face metrics make lines 83/88 independently
+    substitutable; keeping this in the committed probe prevents a metric
+    diagnosis from being inferred from a downstream composite.
+    """
+    du_n = u_now[..., :-1] - u_now[..., 1:]
+    du_b = u_before[..., :-1] - u_before[..., 1:]
+    dv_n = v_now[..., :-1] - v_now[..., 1:]
+    dv_b = v_before[..., :-1] - v_before[..., 1:]
+    wumask = u_mask[..., :-1] * u_mask[..., 1:]
+    wvmask = v_mask[..., :-1] * v_mask[..., 1:]
+    km_u = (jnp.concatenate([avm[:, -1:, :], avm], axis=1)
+            + jnp.concatenate([avm, avm[:, :1, :]], axis=1))
+    km_v = (jnp.concatenate([avm[:1, :, :], avm], axis=0)
+            + jnp.concatenate([avm, avm[-1:, :, :]], axis=0))
+    z_u = km_u * du_n * du_b / (e3u_now * e3u_before) * wumask
+    z_v = km_v * dv_n * dv_b / (e3v_now * e3v_before) * wvmask
+    coast_u = 2.0 - u_mask[:, :-1, 1:] * u_mask[:, 1:, 1:]
+    coast_v = 2.0 - v_mask[:-1, :, 1:] * v_mask[1:, :, 1:]
+    return 0.25 * (
+        (z_u[:, :-1, :] + z_u[:, 1:, :]) * coast_u
+        + (z_v[:-1, :, :] + z_v[1:, :, :]) * coast_v)
 
 
 def assemble_bn2(alpha, beta, T, S, gdept, gdepw, e3w):
@@ -399,6 +430,20 @@ def main() -> int:
                         ds["umask"].isel(time_counter=0)), 0, -1)
                     vmask = np.moveaxis(np.asarray(
                         ds["vmask"].isel(time_counter=0)), 0, -1)
+                    e3u_0 = np.moveaxis(np.asarray(
+                        ds["e3u_0"].isel(time_counter=0)), 0, -1)
+                    e3v_0 = np.moveaxis(np.asarray(
+                        ds["e3v_0"].isel(time_counter=0)), 0, -1)
+                    e3uw_0 = np.moveaxis(np.asarray(
+                        ds["e3uw_0"].isel(time_counter=0)), 0, -1)
+                    e3vw_0 = np.moveaxis(np.asarray(
+                        ds["e3vw_0"].isel(time_counter=0)), 0, -1)
+                    e1t = np.asarray(ds["e1t"].isel(time_counter=0)).squeeze()
+                    e2t = np.asarray(ds["e2t"].isel(time_counter=0)).squeeze()
+                    e1u = np.asarray(ds["e1u"].isel(time_counter=0)).squeeze()
+                    e2u = np.asarray(ds["e2u"].isel(time_counter=0)).squeeze()
+                    e1v = np.asarray(ds["e1v"].isel(time_counter=0)).squeeze()
+                    e2v = np.asarray(ds["e2v"].isel(time_counter=0)).squeeze()
                 u_now_arg, v_now_arg, u_b_arg, v_b_arg = sh2_args[:4]
                 u_now = np.asarray(u_now_arg)[:, 1:, :]
                 v_now = np.asarray(v_now_arg)[1:, :, :]
@@ -420,12 +465,97 @@ def main() -> int:
                 now_sub_m = metrics(
                     np.asarray(now_sub)[..., :nsh], sh2_n, wet_sh2,
                     focus, POINTWISE_BAR)
+
+                # Continue after the now-velocity fix in literal line order:
+                # NOW metric, BEFORE metric, masks, then four-face assembly.
+                hu_0 = (e3u_0 * umask).sum(axis=-1)
+                hv_0 = (e3v_0 * vmask).sum(axis=-1)
+                ssumask = (umask.max(axis=-1) > 0).astype(np.float64)
+                ssvmask = (vmask.max(axis=-1) > 0).astype(np.float64)
+                r3u_n, r3v_n = sh2_walk.qco_r3(
+                    now.ssh, e1t, e2t, e1u, e2u, e1v, e2v,
+                    hu_0, hv_0, ssumask, ssvmask)
+                r3u_b, r3v_b = sh2_walk.qco_r3(
+                    before.ssh, e1t, e2t, e1u, e2u, e1v, e2v,
+                    hu_0, hv_0, ssumask, ssvmask)
+
+                def _u_raw(metric):
+                    metric = metric[..., 1:]
+                    return jnp.asarray(np.concatenate(
+                        [metric[:, -1:, :], metric], axis=1))
+
+                def _v_raw(metric):
+                    metric = metric[..., 1:]
+                    return jnp.asarray(np.concatenate(
+                        [metric[:1, :, :], metric], axis=0))
+
+                e3un = _u_raw(e3uw_0 * (1.0 + r3u_n[..., None]))
+                e3ub = _u_raw(e3uw_0 * (1.0 + r3u_b[..., None]))
+                e3vn = _v_raw(e3vw_0 * (1.0 + r3v_n[..., None]))
+                e3vb = _v_raw(e3vw_0 * (1.0 + r3v_b[..., None]))
+                dz = sh2_args[4]
+                e3u_legacy = jnp.concatenate([dz, dz[:, -1:, :]], axis=1)
+                e3v_legacy = jnp.concatenate([dz, dz[-1:, :, :]], axis=0)
+                u_mask_arg, v_mask_arg = sh2_args[5:7]
+                avm_arg = sh2_args[-1]
+
+                def _score_candidate(eun, eub, evn, evb, um, vm):
+                    value = assemble_sh2_with_metrics(
+                        twin_state.u.data, twin_state.v.data,
+                        sh2_args[2], sh2_args[3], avm_arg,
+                        eun, eub, evn, evb, um, vm)
+                    return metrics(np.asarray(value)[..., :nsh], sh2_n,
+                                   wet_sh2, focus, POINTWISE_BAR)
+
+                metric_candidates = []
+                now_metric_m = _score_candidate(
+                    e3un, e3u_legacy, e3vn, e3v_legacy,
+                    u_mask_arg, v_mask_arg)
+                metric_candidates.append({
+                    "subrow": "4c", "operand": "live NOW e3uw/e3vw(Kmm)",
+                    "nemo_line": "cfgs/DINO/WORK/zdfsh2.F90:83,88",
+                    "metrics": now_metric_m})
+                both_metric_m = _score_candidate(
+                    e3un, e3ub, e3vn, e3vb, u_mask_arg, v_mask_arg)
+                metric_candidates.append({
+                    "subrow": "4d", "operand": "live BEFORE e3uw/e3vw(Kbb)",
+                    "nemo_line": "cfgs/DINO/WORK/zdfsh2.F90:83,88",
+                    "metrics": both_metric_m})
+
+                u_mask_exact = jnp.asarray(np.concatenate(
+                    [umask[:, -1:, :], umask], axis=1))
+                v_mask_exact = jnp.asarray(np.concatenate(
+                    [vmask[:1, :, :], vmask], axis=0))
+                exact_mask_m = _score_candidate(
+                    e3un, e3ub, e3vn, e3vb,
+                    u_mask_exact, v_mask_exact)
+                metric_candidates.append({
+                    "subrow": "4e", "operand": "wumask/wvmask",
+                    "nemo_line": "cfgs/DINO/WORK/zdfsh2.F90:84,89",
+                    "metrics": exact_mask_m})
+
+                exact_nemo = sh2_walk.zdf_sh2_reconstruct(
+                    now.u, now.v, before.u, before.v,
+                    avm_n_full,
+                    e3uw_0 * (1.0 + r3u_n[..., None]),
+                    e3uw_0 * (1.0 + r3u_b[..., None]),
+                    e3vw_0 * (1.0 + r3v_n[..., None]),
+                    e3vw_0 * (1.0 + r3v_b[..., None]),
+                    umask, vmask)
+                exact_assembly_m = metrics(
+                    exact_nemo[..., 1:1 + nsh], sh2_n, wet_sh2,
+                    focus, POINTWISE_BAR)
+                metric_candidates.append({
+                    "subrow": "4f", "operand": "four-face/coastal assembly",
+                    "nemo_line": "cfgs/DINO/WORK/zdfsh2.F90:92-94",
+                    "metrics": exact_assembly_m})
                 next_operand = {
                     "name": "NOW face-velocity differences at zdf_phy entry",
                     "nemo_line": "cfgs/DINO/WORK/zdfsh2.F90:81-82,86-87",
                     "legoesm_operand": "post-explicit/pre-implicit-solve u/v",
                     "velocity_difference_operands": velocity_differences,
                     "substitute_step_entry_now_velocities": now_sub_m,
+                    "remaining_operand_substitutions": metric_candidates,
                     "next_round_fix_design": {
                         "option": "tke_shear_evaluation_stage",
                         "faithful_default_on_complete_dino_nemo_cards":
@@ -568,6 +698,7 @@ def main() -> int:
     source_paths = [
         Path(__file__).resolve(),
         HERE / "PREREG_zdf_chain_sweep_round3.md",
+        HERE / "PREREG_zdf_chain_sweep_round4.md",
         HERE / "kamm_twin_90d.py",
         Path("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py"),
         Path("packages/ocean/legoesm/ocean/eos.py"),
@@ -596,7 +727,7 @@ def main() -> int:
         RUN / "eiv_dump_gdept.bin", RUN / "eiv_dump_e3w.bin", args.mld_maps,
     ]
     artifact = {
-        "schema": "zdf-chain-sweep-v3",
+        "schema": "zdf-chain-sweep-v4",
         "lane": "d180", "kt": 5761, "cpu_only": True, "fp64": True,
         "checked_out_parent_sha": git_sha(),
         "probe_commit_sha": os.environ.get("ZDF_SWEEP_PROBE_SHA", "UNSTAMPED"),
@@ -668,6 +799,11 @@ def main() -> int:
                 print(f"  substitute step-entry NOW velocities: pass={sm['pass']} "
                       f"max={sm['max_column_error']:.6e} "
                       f"bad_columns={sm['n_diverged_columns']}/{sm['n_wet_columns']}")
+                for candidate in nxt.get("remaining_operand_substitutions", []):
+                    cm = candidate["metrics"]
+                    print(f"  {candidate['subrow']} substitute {candidate['operand']}: "
+                          f"pass={cm['pass']} max={cm['max_column_error']:.6e} "
+                          f"bad_columns={cm['n_diverged_columns']}/{cm['n_wet_columns']}")
     if localization:
         for c in localization["candidates_in_nemo_evaluation_order"]:
             print(f"  substitute {c['substitution']}: pass={c['metrics']['pass']} "
