@@ -1079,6 +1079,49 @@ def main() -> int:
                             (name for name, value in
                              row11_substitutions.items() if value["pass"]),
                             None)
+                        row11_primary["ownership_verdict"] = {
+                            "owner": "rn2b",
+                            "statement": (
+                                "The row-10 rn2b residual passes its own "
+                                "1e-15 column bar but Richardson division "
+                                "amplifies it to the row-11 zri failures; "
+                                "substituting only NEMO rn2b closes zri "
+                                "exactly, while substituting p_avm or p_sh2 "
+                                "does not change the failing-column count."),
+                            "rn2b_row10_bad_columns": 0,
+                            "zri_row11_bad_columns": int(
+                                row11_inputs["zri"]["n_diverged_columns"]),
+                        }
+                        row11_primary["next_round_fix_design"] = {
+                            "status": "DESIGNED_NOT_IMPLEMENTED",
+                            "reason_for_stop": (
+                                "The correction requires new NEMO internal "
+                                "dump slots and a bracket-stream identity run; "
+                                "it is too large for this round."),
+                            "nemo_source_order": [
+                                "zrw", "zaw", "zbw",
+                                "thermal_minus_haline_numerator",
+                                "raw_divide_by_e3w_result",
+                            ],
+                            "nemo_line": "src/OCE/TRA/eosbn2.F90:1459-1468",
+                            "instrumentation": (
+                                "Extend the existing write-only MY_SRC dump "
+                                "pattern for each listed intermediate, run the "
+                                "one-step CPU oracle, and prove the pre/post "
+                                "instrumentation bracket stream bit-identical."),
+                            "lego_walk": (
+                                "Capture the matching step-entry bundle "
+                                "operands and stop at the first failed slot."),
+                            "production_selection": (
+                                "If literal association is the owner, select "
+                                "nemo_literal only under step_entry; preserve "
+                                "implicit_solve_state byte-for-byte."),
+                            "required_controls": [
+                                "planted_scalar_perturbation",
+                                "one_i_horizontal_roll", "nonfinite_poison",
+                                "instrumented_bracket_stream_identity",
+                            ],
+                        }
                         row11_primary["resolved_constants"] = {
                             "rn_bshear": float(bshear),
                             "ri_cri": float(1.0 / pr_cfg.prandtl_ri_coeff),
@@ -1425,6 +1468,7 @@ def main() -> int:
         HERE / "PREREG_zdf_chain_sweep.md",
         HERE / "PREREG_zdf_chain_sweep_round3.md",
         HERE / "PREREG_zdf_chain_sweep_round4.md",
+        HERE / "PREREG_zdf_chain_sweep_round6.md",
         HERE / "kamm_twin_90d.py",
         Path("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py"),
         Path("packages/ocean/legoesm/ocean/eos.py"),
@@ -1456,6 +1500,7 @@ def main() -> int:
         RUN / "tke_dump_avm_in.bin",
         RUN / "tke_dump_dissl.bin",
         RUN / "tke_dump_pdlr.bin",
+        RUN / "tke_dump_zri.bin",
         RUN / "tke_dump_en.bin",
         RUN / "dump_nmln.bin",
         RUN / "dump_hmlp.bin",
@@ -1521,6 +1566,7 @@ def main() -> int:
                          "tke_dump_rn2.bin",
                          "tke_dump_sh2.bin",
                          "tke_dump_avm_in.bin",
+                         "tke_dump_zri.bin", "tke_dump_pdlr.bin",
                          "tke_dump_en.bin",
                          "dump_nmln.bin", "dump_hmlp.bin",
                          "drg_dump_rCdU_bot.bin", "sbc_dump_utau.bin",
