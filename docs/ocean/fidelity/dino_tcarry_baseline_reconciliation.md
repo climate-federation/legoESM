@@ -145,3 +145,29 @@ corrected-T arm remains unread, and STOP remains active.  The paired old/new
 bridge-Omega discriminator is frozen in
 `PREREG_tcarry_bridge_omega_discriminator.md`; do not run the seed-floor arms
 until that baseline reconciliation succeeds.
+
+## 2026-08-28 paired bridge-Omega discriminator
+
+Both registered arms passed all receipts, day-0 identity, independent basin
+reducers, and separate 5x acceptance gates.  The NEMO-Omega arm exactly
+reproduced the retained current baseline, making the ownership comparison
+valid:
+
+| quantity | measured [Sv] | frozen target [Sv] |
+|---|---:|---:|
+| `GnewOmega90` | `-0.4390855099920348` | `-0.43908550999203477` |
+| `GoldOmega90` | `-0.4326316717808396` | `-0.4257848785815366` |
+| `Domega90` | `+0.006453838211195162` | `+0.01330063141049817` |
+
+The old bridge rate explains 48.52% of the signed epoch target.  Its endpoint
+and delta each miss by `0.0068467931993030 Sv`, 23.61 times the frozen band,
+so **REFUTED_BRIDGE_OMEGA_OWNERSHIP** is the mechanical verdict.  Scorer
+SHA-256 is
+`783f7c6c16bb5ddb273a433b47952ccaa3e9253b5b42b4e69d64e5cc2aec5741`;
+output SHA-256 is
+`d8bdb1dcd87e9dcc2b051d163a2b7e0268b25bd8f479dbe5c0fdc06db7ba18b8`.
+
+No baseline/floor changes and no corrected-T score follow from this result.
+STOP remains active.  The next registered arm is the missing legacy-rounded
+Omega plus EEN-off corner, which measures the EEN-by-Omega interaction without
+transferring either response across trajectories.

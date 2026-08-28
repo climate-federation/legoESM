@@ -39,6 +39,33 @@ stress-carry receipts, resolved NEMO EEN weighting, 2880 steps, and
 metric, reducer, baseline, floor, validity bar, ownership bar, or classifier
 changes in this binding amendment.
 
+## 2026-08-28 scored result — REFUTED and STOP
+
+The bound scorer ran at clean commit
+`eee4b9cee2d8a37f8438206e97b84bee52b13aa2`, scorer SHA-256
+`783f7c6c16bb5ddb273a433b47952ccaa3e9253b5b42b4e69d64e5cc2aec5741`.
+All receipt plants fired, paired day-0 fields were bit-identical, both basin
+implementations agreed at or below `1.7763568394002505e-15 Sv`, and both
+acceptance gates certified `PASS 5 | FAIL 0` at 5x.
+
+The frozen outputs are:
+
+- `GnewOmega90 = -0.4390855099920348 Sv`, exact reproduction of the retained
+  current baseline at printed precision;
+- `GoldOmega90 = -0.4326316717808396 Sv`;
+- `Domega90 = +0.006453838211195162 Sv`.
+
+Validity therefore PASSES, but the old-Omega endpoint misses the historical
+baseline by `0.006846793199303036 Sv`, and the paired delta misses its target
+by `0.0068467931993030084 Sv`: both are 23.61 times the frozen band.  The
+registered outcome is **REFUTED_BRIDGE_OMEGA_OWNERSHIP**.  Output
+`/tmp/tcarry_bridge_omega_score.json` has SHA-256
+`d8bdb1dcd87e9dcc2b051d163a2b7e0268b25bd8f479dbe5c0fdc06db7ba18b8`.
+
+No baseline or floor is re-registered; STOP remains active.  The next
+discriminator is the missing fourth corner of the current-SHA EEN-by-bridge-
+Omega 2x2, preregistered in `PREREG_tcarry_een_omega_interaction.md`.
+
 ## Question and exact output
 
 The historical legacy-carry baseline is
