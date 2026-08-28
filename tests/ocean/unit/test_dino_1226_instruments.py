@@ -252,15 +252,18 @@ def test_bridge_tke_coefficients_preserves_surface_and_interior(instruments):
     en = np.arange(n_lat * n_lon * jpk, dtype=float).reshape(n_lat, n_lon, jpk)
     avm = en + 100.0
     avt = en + 200.0
+    dissl = en + 300.0
     st = _fake_state(np.zeros((n_lat, n_lon, jpk)),
                      np.zeros((n_lat, n_lon)),
                      np.zeros((n_lat, n_lon + 1, jpk)),
                      np.zeros((n_lat + 1, n_lon, jpk)))
     out = kamm.bridge_tke_from_restart(
-        st, en, wet, restart_avm=avm, restart_avt=avt)
+        st, en, wet, restart_avm=avm, restart_avt=avt,
+        restart_dissl=dissl)
     np.testing.assert_array_equal(out.tke_avm.data, avm[..., 1:])
     np.testing.assert_array_equal(out.tke_avt.data, avt[..., 1:])
     np.testing.assert_array_equal(out.tke_avm_surface.data, avm[..., 0])
+    np.testing.assert_array_equal(out.tke_dissl.data, dissl[..., 1:])
 
 
 def test_build_twin_state_default_bridge_tke_off(instruments, monkeypatch):

@@ -588,6 +588,7 @@ class DINOConfig:
     # recipes retain the historical current-subiteration path; complete NEMO
     # cards explicitly select the carried restart/previous-step pair.
     tke_preclosure_coeff_source: str = "current_subiteration"
+    tke_matrix_evaluation: str = "factored"
     tke_shear_evaluation_stage: str = "implicit_solve_state"
     tke_shear_metric_source: str = "tpoint_jacobian"
     tke_n2_evaluation_stage: str = "implicit_solve_state"
@@ -1168,6 +1169,7 @@ DINO_RECIPES: dict[str, dict] = {
         "tke_bottom_bc": True,                   # en(mbkt+1) bottom-friction BC (zdftke:279-288)
         "tke_kappaM_max": float("inf"),          # T21: tke_avn has NO avm ceiling
         "tke_preclosure_coeff_source": "carried_previous_step",
+        "tke_matrix_evaluation": "nemo_literal",
         "tke_shear_evaluation_stage": "step_entry",
         "tke_shear_metric_source": "nemo_qco_live_face",
         "tke_n2_evaluation_stage": "step_entry",
@@ -2999,6 +3001,7 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
             tke_shear_production=cfg.tke_shear_production,
             tke_shear_avm_weighting=cfg.tke_shear_avm_weighting,
             tke_preclosure_coeff_source=cfg.tke_preclosure_coeff_source,
+            tke_matrix_evaluation=cfg.tke_matrix_evaluation,
             tke_shear_evaluation_stage=cfg.tke_shear_evaluation_stage,
             tke_shear_metric_source=cfg.tke_shear_metric_source,
             tke_n2_time_level=cfg.tke_n2_time_level,

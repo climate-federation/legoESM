@@ -300,17 +300,17 @@ def read_nemo_restart_en(path: str, *, nn_hls: int = 1) -> np.ndarray:
 
 def read_nemo_restart_tke_coefficients(
     path: str, *, nn_hls: int = 1,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Read NEMO restart ``avm_k``/``avt_k`` closure memory on all W levels."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Read restart ``avm_k``/``avt_k``/``dissl`` memory on all W levels."""
     r = xr.open_dataset(path, decode_times=False)
-    missing = [name for name in ("avm_k", "avt_k") if name not in r]
+    missing = [name for name in ("avm_k", "avt_k", "dissl") if name not in r]
     if missing:
         raise ValueError(
             f"NEMO restart lacks required TKE coefficient memory {missing}: "
             f"{path}")
     return tuple(
         _to_latlon_lev(np.asarray(r[name].values).squeeze(), nn_hls)
-        for name in ("avm_k", "avt_k")
+        for name in ("avm_k", "avt_k", "dissl")
     )
 
 

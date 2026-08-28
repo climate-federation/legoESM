@@ -329,6 +329,7 @@ class TKEOutput(NamedTuple):
     tke_new: jnp.ndarray   # (..., nlev-1) updated TKE at interfaces
     l_eps: jnp.ndarray     # (..., nlev-1) dissipation mixing length (diagnostic)
     K_M_surface: jnp.ndarray | None = None  # (...) post-tke_avn surface avm_k
+    dissl: jnp.ndarray | None = None  # (...) carried post-tke_avn sqrt(en)/zmxld
 
 
 class TKEEntryN2Bundle(NamedTuple):
@@ -343,14 +344,16 @@ class TKEEntryN2Bundle(NamedTuple):
     rn2b: jnp.ndarray
     gdepw_Kmm: jnp.ndarray
     e3w_Kmm: jnp.ndarray
+    e3t_Kmm: jnp.ndarray
 
 
 class TKECarryOutput(NamedTuple):
-    """Prognostic TKE plus NEMO's post-``tke_avn`` closure-memory pair."""
+    """Prognostic TKE plus NEMO's post-``tke_avn`` closure memory."""
     tke_new: jnp.ndarray
     K_M: jnp.ndarray
     K_H: jnp.ndarray
     K_M_surface: jnp.ndarray | None
+    dissl: jnp.ndarray | None = None
 
 
 class TKEPostMixingContext(NamedTuple):
@@ -907,6 +910,8 @@ def _solve_tke_backward_euler(
     K_M_surface: jnp.ndarray | None = None,
     bottom_level: jnp.ndarray | None = None,
     w_active: jnp.ndarray | None = None,
+    nemo_e3t: jnp.ndarray | None = None,
+    dissl_old: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Backward-Euler tridiagonal solve for one TKE time step.
 
@@ -1039,6 +1044,30 @@ def _solve_tke_backward_euler(
     # slot feature) is keyed off dz_cell alone, unaffected.
     veros_slots = dz_cell is not None
     N = e_old.shape[-1]   # number of interfaces
+    matrix_evaluation = getattr(cfg, "tke_matrix_evaluation", "factored")
+    if matrix_evaluation not in ("factored", "nemo_literal"):
+        raise ValueError(
+            "Unknown TKEConfig.tke_matrix_evaluation: expected 'factored' "
+            f"or 'nemo_literal', got {matrix_evaluation!r}.")
+    literal_matrix = matrix_evaluation == "nemo_literal"
+    if literal_matrix:
+        if nemo_e3t is None or dissl_old is None or w_active is None:
+            raise ValueError(
+                "tke_matrix_evaluation='nemo_literal' requires nemo_e3t, "
+                "dissl_old, and w_active operands.")
+        expected_e3t_shape = e_old.shape[:-1] + (N + 1,)
+        if nemo_e3t.shape != expected_e3t_shape:
+            raise ValueError(
+                "nemo_e3t must contain the full live T-cell ladder; got "
+                f"{nemo_e3t.shape} vs {expected_e3t_shape}.")
+        if dissl_old.shape != e_old.shape:
+            raise ValueError(
+                "dissl_old must match e_old shape; got "
+                f"{dissl_old.shape} vs {e_old.shape}.")
+        if surface_bc_level != "nemo_z0" or K_M_surface is None:
+            raise ValueError(
+                "tke_matrix_evaluation='nemo_literal' requires the NEMO "
+                "z=0 row and carried surface avm.")
     # Dtype hygiene: surface_flux / external_source can promote to f64 (tau or
     # the EKE-diss source built at default precision) while e_old runs at the
     # storage policy's f32 — cast them down so the tridiagonal RHS scatter does
@@ -1075,8 +1104,13 @@ def _solve_tke_backward_euler(
             e_old > 0.0, jnp.sqrt(jnp.where(e_old > 0.0, e_old, 1.0)), 0.0)
     else:
         e_sqrt = jnp.sqrt(jnp.maximum(e_old, cfg.tke_background))
-    # Linearised dissipation rate (per unit e_new):
-    diss_rate = cfg.c_eps * e_sqrt / jnp.maximum(l_eps, cfg.mxl_min)
+    # Linearised dissipation rate (per unit e_new).  NEMO's literal matrix
+    # consumes the SAVE'd preceding-step ``dissl`` and only overwrites it in
+    # post-solve tke_avn (zdftke.F90:499-510,832-837).
+    if literal_matrix:
+        diss_rate = cfg.c_eps * jnp.asarray(dissl_old, dtype=e_old.dtype)
+    else:
+        diss_rate = cfg.c_eps * e_sqrt / jnp.maximum(l_eps, cfg.mxl_min)
     _buoy_disc = getattr(cfg, "tke_buoyancy_sink", "implicit_linearized")
     if _buoy_disc not in ("implicit_linearized", "nemo_explicit"):
         raise ValueError(
@@ -1145,7 +1179,36 @@ def _solve_tke_backward_euler(
     b_diff = jnp.zeros_like(e_old)
     c_diff = jnp.zeros_like(e_old)
 
-    if veros_slots and N >= 2:
+    literal_lw = None
+    if literal_matrix and N >= 2:
+        # Literal transcription of DINO MY_SRC/zdftke.F90:499-510.  The
+        # source carries signed zzd_up/zzd_lw (both <= 0), places e3t(jk,Kmm)
+        # in the upper denominator and e3t(jk-1,Kmm) in the lower, and forms
+        # zdiag in this exact source association before the Thomas solve.
+        zcof = (-0.5 * dt) * jnp.asarray(
+            w_active[..., :N - 1], dtype=e_old.dtype)
+        avm_min = jnp.asarray(2.0e-5, dtype=e_old.dtype)  # coeff-ok: zdftke:503,505
+        e3w_rows = jnp.asarray(dz_half[..., :N - 1], dtype=e_old.dtype)
+        e3t = jnp.asarray(nemo_e3t, dtype=e_old.dtype)
+        upper_sum = jnp.maximum(
+            K_M_old[..., 1:N] + K_M_old[..., :N - 1], avm_min)
+        lower_neighbour = jnp.concatenate(
+            [jnp.asarray(K_M_surface, dtype=e_old.dtype)[..., None],
+             K_M_old[..., :N - 2]], axis=-1)
+        lower_sum = jnp.maximum(
+            K_M_old[..., :N - 1] + lower_neighbour, avm_min)
+        literal_up = (zcof * upper_sum
+                      / (e3t[..., 1:N] * e3w_rows))
+        literal_lw = (zcof * lower_sum
+                      / (e3t[..., :N - 1] * e3w_rows))
+        a_diff = jnp.concatenate(
+            [jnp.zeros_like(literal_lw[..., :1]),
+             literal_lw[..., 1:],
+             jnp.zeros_like(literal_lw[..., :1])], axis=-1)
+        c_diff = jnp.concatenate(
+            [literal_up, jnp.zeros_like(literal_up[..., :1])], axis=-1)
+        b_diff = jnp.zeros_like(e_old)
+    elif veros_slots and N >= 2:
         # ---- Veros-faithful assembly (tke.py:199-222), top-down ----
         # Control volume of interface k = dz_half[k] (Veros dzw, the W-cell
         # volume). Flux through the face between interfaces k and k+1 is
@@ -1213,7 +1276,19 @@ def _solve_tke_backward_euler(
     #     Kolmogoroff dissipation is split, matching NEMO. Mirrors the identical
     #     split already used in tke_integrate_post_mixing (the Veros step order).
     _disc = getattr(cfg, "dissipation_discretization", "backward_euler")
-    if _disc == "nemo_1p5_split":
+    if literal_matrix:
+        if _disc != "nemo_1p5_split":
+            raise ValueError(
+                "tke_matrix_evaluation='nemo_literal' requires "
+                "dissipation_discretization='nemo_1p5_split'.")
+        dissl = jnp.asarray(dissl_old, dtype=e_old.dtype)
+        literal_diag = (1.0 - literal_lw - literal_up
+                        + ((1.5 * dt) * cfg.c_eps)
+                        * dissl[..., :N - 1]
+                        * jnp.asarray(w_active[..., :N - 1], dtype=e_old.dtype))
+        diag = jnp.concatenate(
+            [literal_diag, jnp.ones_like(literal_diag[..., :1])], axis=-1)
+    elif _disc == "nemo_1p5_split":
         diag = 1.0 + dt * (1.5 * diss_rate + buoy_sink_rate) + b_diff  # coeff-ok: NEMO zdftke semi-implicit dissipation split weight (zfact2=1.5·rn_ediss, zdftke.F90:241)
     elif _disc == "backward_euler":
         diag = 1.0 + dt * (diss_rate + buoy_sink_rate) + b_diff
@@ -1312,9 +1387,16 @@ def _solve_tke_backward_euler(
         # only where the surface and first-interior viscosities coincide).
         _avm1 = K_M_old[..., 0] if K_M_surface is None else jnp.asarray(
             K_M_surface, dtype=e_old.dtype)
-        K_face_sfc = cfg.alpha_tke * 0.5 * (K_M_old[..., 0] + _avm1)
-        delta_sfc = dt * K_face_sfc / dz_face_sfc      # (...,) flux coeff.
-        row0_coupling = delta_sfc / vol0               # a[row 0] magnitude
+        if literal_matrix:
+            # zzd_lw(jk=2) was already formed above with the literal e3t(1)
+            # and e3w(2) slots.  Its sign is the tridiagonal subdiagonal;
+            # the positive coupling magnitude is only needed by the virtual
+            # surface-row representation below.
+            row0_coupling = -literal_lw[..., 0]
+        else:
+            K_face_sfc = cfg.alpha_tke * 0.5 * (K_M_old[..., 0] + _avm1)
+            delta_sfc = dt * K_face_sfc / dz_face_sfc  # (...,) flux coeff.
+            row0_coupling = delta_sfc / vol0           # a[row 0] magnitude
         if bottom_dirichlet is not None and bottom_level is not None:
             # Degenerate-column guard: when the T15 bottom Dirichlet pin
             # ALSO lands on interior interface 0 (a 1-interior-interface
@@ -1347,7 +1429,8 @@ def _solve_tke_backward_euler(
         # symptom (the exact avm(1) is large enough to push the solved
         # profile above ``tke_surface_min``/``tke_background``, where the
         # prior 2x error becomes visible instead of hidden by the floor).
-        b0 = diag[..., 0] + row0_coupling
+        b0 = (diag[..., 0] if literal_matrix
+              else diag[..., 0] + row0_coupling)
 
         # Assemble the (N+1)-row system: row 0 = virtual surface (identity,
         # Dirichlet: a=0, b=1, c=0); rows 1..N = the original N rows, with
@@ -1893,6 +1976,7 @@ def tke_vertical_mixing(
     preclosure_K_M: jnp.ndarray | None = None,
     preclosure_K_H: jnp.ndarray | None = None,
     preclosure_K_M_surface: jnp.ndarray | None = None,
+    preclosure_dissl: jnp.ndarray | None = None,
     precomputed_p_sh2: jnp.ndarray | None = None,
     precomputed_n2_bundle: TKEEntryN2Bundle | None = None,
 ) -> TKEOutput:
@@ -2102,12 +2186,18 @@ def tke_vertical_mixing(
             raise ValueError(
                 "tke_n2_evaluation_stage='step_entry' requires "
                 "precomputed_n2_bundle from the physical step entry.")
-        for _name, _value in zip(
-                TKEEntryN2Bundle._fields, precomputed_n2_bundle):
+        for _name in ("rn2", "rn2b", "gdepw_Kmm", "e3w_Kmm"):
+            _value = getattr(precomputed_n2_bundle, _name)
             if _value.shape != tke_old.shape:
                 raise ValueError(
                     f"precomputed_n2_bundle.{_name} must match tke_old "
                     f"shape; got {_value.shape} vs {tke_old.shape}.")
+        _e3t_shape = tke_old.shape[:-1] + (tke_old.shape[-1] + 1,)
+        if precomputed_n2_bundle.e3t_Kmm.shape != _e3t_shape:
+            raise ValueError(
+                "precomputed_n2_bundle.e3t_Kmm must contain every live "
+                f"T-cell slot; got {precomputed_n2_bundle.e3t_Kmm.shape} "
+                f"vs {_e3t_shape}.")
 
     _shear_stage = getattr(
         cfg, "tke_shear_evaluation_stage", "implicit_solve_state")
@@ -2139,8 +2229,13 @@ def tke_vertical_mixing(
             "'current_subiteration' or 'carried_previous_step', got "
             f"{_coeff_source!r}.")
     _carried_coeffs = _coeff_source == "carried_previous_step"
+    _matrix_eval = getattr(cfg, "tke_matrix_evaluation", "factored")
+    if _matrix_eval not in ("factored", "nemo_literal"):
+        raise ValueError(
+            "Unknown TKEConfig.tke_matrix_evaluation: expected 'factored' "
+            f"or 'nemo_literal', got {_matrix_eval!r}.")
     _supplied_carry = (preclosure_K_M, preclosure_K_H,
-                       preclosure_K_M_surface)
+                       preclosure_K_M_surface, preclosure_dissl)
     if not _carried_coeffs and any(x is not None for x in _supplied_carry):
         raise ValueError(
             "preclosure K fields were supplied while "
@@ -2165,6 +2260,26 @@ def tke_vertical_mixing(
                 "carried preclosure avm_k/avt_k must match tke_old shape; "
                 f"got {preclosure_K_M.shape}/{preclosure_K_H.shape} vs "
                 f"{tke_old.shape}.")
+    if _matrix_eval == "nemo_literal":
+        if not _carried_coeffs:
+            raise ValueError(
+                "tke_matrix_evaluation='nemo_literal' requires "
+                "tke_preclosure_coeff_source='carried_previous_step'.")
+        if _n2_stage != "step_entry":
+            raise ValueError(
+                "tke_matrix_evaluation='nemo_literal' requires "
+                "tke_n2_evaluation_stage='step_entry' for live e3t/e3w.")
+        if preclosure_dissl is None or preclosure_dissl.shape != tke_old.shape:
+            raise ValueError(
+                "tke_matrix_evaluation='nemo_literal' requires carried "
+                "preclosure_dissl matching tke_old shape; got "
+                f"{None if preclosure_dissl is None else preclosure_dissl.shape} "
+                f"vs {tke_old.shape}.")
+    elif preclosure_dissl is not None:
+        raise ValueError(
+            "preclosure_dissl was supplied while "
+            "tke_matrix_evaluation='factored'; select 'nemo_literal' to "
+            "consume it.")
 
     # Shear-production discretization (T4, Phase-2 #1317; face-native
     # #1226 sh2_walk.py Candidate E/F): "squared_centered" (default,
@@ -2450,6 +2565,10 @@ def tke_vertical_mixing(
                          if _carried_coeffs else _K_M_surface),
             bottom_level=bottom_level,
             w_active=w_active,
+            nemo_e3t=(precomputed_n2_bundle.e3t_Kmm
+                      if _matrix_eval == "nemo_literal" else None),
+            dissl_old=(preclosure_dissl
+                       if _matrix_eval == "nemo_literal" else None),
         )
 
     if _etau_on:
@@ -2474,8 +2593,14 @@ def tke_vertical_mixing(
         p_sh2_override=_p_sh2_face_fn,
         prandtl_K_M=(preclosure_K_M if _carried_coeffs else None))
 
+    dissl_new = None
+    if _matrix_eval == "nemo_literal":
+        # Post-solve tke_avn overwrite, MY_SRC/zdftke.F90:832-837.  Keep the
+        # source association: zsqen=SQRT(en), then dissl=zsqen/zmxld.
+        dissl_new = jnp.sqrt(tke_curr) / l_eps_final
     return TKEOutput(K_M=K_M, K_H=K_H, tke_new=tke_curr,
-                     l_eps=l_eps_final, K_M_surface=_K_M_surface)
+                     l_eps=l_eps_final, K_M_surface=_K_M_surface,
+                     dissl=dissl_new)
 
 
 # ---------------------------------------------------------------------------

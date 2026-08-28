@@ -558,6 +558,10 @@ class LatLonCGridOceanState(NamedTuple):
     # next step when tke_preclosure_coeff_source="carried_previous_step".
     tke_avm: object = None
     tke_avt: object = None
+    # NEMO's SAVE'd ``dissl`` = sqrt(en)/zmxld closure memory.  The literal
+    # zdftke matrix/RHS consumes this carried value before post-solve tke_avn
+    # overwrites it; None remains inert on every non-literal card.
+    tke_dissl: object = None
     # Surface W-level avm_k used by NEMO's z=0 TKE matrix/wave denominator.
     tke_avm_surface: object = None
     # Prior-step ADVECTIVE TKE tendency [m^2/s^3] at the interior interfaces

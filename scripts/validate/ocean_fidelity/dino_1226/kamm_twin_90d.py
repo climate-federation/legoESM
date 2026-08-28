@@ -270,7 +270,8 @@ def verify_day0_matches_restart(st, restart_state, land_mask, *, tol: float = 1e
 
 
 def bridge_tke_from_restart(st, restart_en, land_mask, *,
-                            restart_avm=None, restart_avt=None):
+                            restart_avm=None, restart_avt=None,
+                            restart_dissl=None):
     """Seed ``st.tke`` from a NEMO restart's ``en`` (TKE closure integrator memory).
 
     ``restart_en`` is the raw ``(n_lat, n_lon, jpk)`` array from
@@ -287,15 +288,20 @@ def bridge_tke_from_restart(st, restart_en, land_mask, *,
     tke_data = jnp.asarray(np.where(wet, en_interior, 0.0), dtype=st.T.data.dtype)
     updates = dict(tke=Field(data=tke_data, name="tke",
                             dims=("lat", "lon", "level"), units="m^2/s^2"))
-    if (restart_avm is None) != (restart_avt is None):
-        raise ValueError("restart_avm and restart_avt must be supplied together")
+    supplied = (restart_avm, restart_avt, restart_dissl)
+    if any(x is not None for x in supplied) and any(x is None for x in supplied):
+        raise ValueError(
+            "restart_avm, restart_avt, and restart_dissl must be supplied "
+            "together")
     if restart_avm is not None:
         avm = np.asarray(restart_avm, dtype=np.float64)
         avt = np.asarray(restart_avt, dtype=np.float64)
-        if avm.shape != restart_en.shape or avt.shape != restart_en.shape:
+        dissl = np.asarray(restart_dissl, dtype=np.float64)
+        if (avm.shape != restart_en.shape or avt.shape != restart_en.shape
+                or dissl.shape != restart_en.shape):
             raise ValueError(
-                "restart avm_k/avt_k must match en shape; got "
-                f"{avm.shape}/{avt.shape} vs {restart_en.shape}")
+                "restart avm_k/avt_k/dissl must match en shape; got "
+                f"{avm.shape}/{avt.shape}/{dissl.shape} vs {restart_en.shape}")
         updates.update(
             tke_avm=Field(
                 data=jnp.asarray(np.where(wet, avm[..., 1:], 0.0),
@@ -309,6 +315,10 @@ def bridge_tke_from_restart(st, restart_en, land_mask, *,
                 data=jnp.asarray(np.where(wet[..., 0], avm[..., 0], 0.0),
                                  dtype=st.T.data.dtype),
                 name="tke_avm_surface", dims=("lat", "lon"), units="m^2/s"),
+            tke_dissl=Field(
+                data=jnp.asarray(np.where(wet, dissl[..., 1:], 0.0),
+                                 dtype=st.T.data.dtype),
+                name="tke_dissl", dims=("lat", "lon", "level"), units="s^-1"),
         )
     return st._replace(**updates)
 
@@ -1076,6 +1086,7 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                        use_gm_redi: bool | None = None,
                        surface_tendency_placement: str | None = None,
                        tke_preclosure_coeff_source: str | None = None,
+                       tke_matrix_evaluation: str | None = None,
                        tke_shear_evaluation_stage: str | None = None,
                        tke_shear_metric_source: str | None = None,
                        tke_n2_evaluation_stage: str | None = None,
@@ -1145,6 +1156,12 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                 "'carried_previous_step' or 'current_subiteration'")
         cfg = dataclasses.replace(
             cfg, tke_preclosure_coeff_source=tke_preclosure_coeff_source)
+    if tke_matrix_evaluation is not None:
+        if tke_matrix_evaluation not in ("nemo_literal", "factored"):
+            raise ValueError(
+                "tke_matrix_evaluation must be 'nemo_literal' or 'factored'")
+        cfg = dataclasses.replace(
+            cfg, tke_matrix_evaluation=tke_matrix_evaluation)
     if tke_shear_evaluation_stage is not None:
         if tke_shear_evaluation_stage not in (
                 "step_entry", "implicit_solve_state"):
@@ -1272,13 +1289,16 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
         _carry_coeffs = (cfg.tke_preclosure_coeff_source
                          == "carried_previous_step")
         if _carry_coeffs:
-            avm_restart, avt_restart = read_nemo_restart_tke_coefficients(
+            avm_restart, avt_restart, dissl_restart = (
+                read_nemo_restart_tke_coefficients(
                 f"{run_stepdump}/{restart_file}", nn_hls=0)
+            )
         else:
-            avm_restart = avt_restart = None
+            avm_restart = avt_restart = dissl_restart = None
         st = bridge_tke_from_restart(
             st, en_restart, br.land_mask,
-            restart_avm=avm_restart, restart_avt=avt_restart)
+            restart_avm=avm_restart, restart_avt=avt_restart,
+            restart_dissl=dissl_restart)
         wet = np.asarray(br.land_mask) > 0.5
         d_en = float(np.max(np.abs(
             np.asarray(st.tke.data)[wet] - en_restart[..., 1:][wet])))
@@ -1290,9 +1310,13 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                 np.asarray(st.tke_avm.data)[wet] - avm_restart[..., 1:][wet])))
             d_avt = float(np.max(np.abs(
                 np.asarray(st.tke_avt.data)[wet] - avt_restart[..., 1:][wet])))
-            print("TKE COEFFICIENT BRIDGE: restart avm_k/avt_k -> carried "
+            d_dissl = float(np.max(np.abs(
+                np.asarray(st.tke_dissl.data)[wet]
+                - dissl_restart[..., 1:][wet])))
+            print("TKE COEFFICIENT BRIDGE: restart avm_k/avt_k/dissl -> carried "
                   f"closure pair max|d_avm|={d_avm:.3e} "
-                  f"max|d_avt|={d_avt:.3e}", flush=True)
+                  f"max|d_avt|={d_avt:.3e} max|d_dissl|={d_dissl:.3e}",
+                  flush=True)
 
     mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
     if os.environ.get("DINO_NEMO_KMM_DIVISOR") is not None:
@@ -1355,6 +1379,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
              use_gm_redi: bool | None = None,
              surface_tendency_placement: str | None = None,
              tke_preclosure_coeff_source: str | None = None,
+             tke_matrix_evaluation: str | None = None,
              tke_shear_evaluation_stage: str | None = None,
              tke_shear_metric_source: str | None = None,
              tke_n2_evaluation_stage: str | None = None,
@@ -1422,6 +1447,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         use_gm_redi=use_gm_redi, restart_file=restart_file,
         surface_tendency_placement=surface_tendency_placement,
         tke_preclosure_coeff_source=tke_preclosure_coeff_source,
+        tke_matrix_evaluation=tke_matrix_evaluation,
         tke_shear_evaluation_stage=tke_shear_evaluation_stage,
         tke_shear_metric_source=tke_shear_metric_source,
         tke_n2_evaluation_stage=tke_n2_evaluation_stage,
@@ -1509,6 +1535,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         # overrides.  These receipts make the faithful and legacy climate
         # arms distinguishable even when both are launched from defaults.
         "tke_preclosure_coeff_source": cfg.tke_preclosure_coeff_source,
+        "tke_matrix_evaluation": cfg.tke_matrix_evaluation,
         "tke_shear_evaluation_stage": cfg.tke_shear_evaluation_stage,
         "tke_shear_metric_source": cfg.tke_shear_metric_source,
         "tke_n2_evaluation_stage": cfg.tke_n2_evaluation_stage,
@@ -1934,6 +1961,12 @@ def _parse_args(argv=None):
              "uses the recipe (DINO NEMO cards carry the previous-step pair; "
              "current_subiteration is historical reproduction)")
     p.add_argument(
+        "--tke-matrix-evaluation", default=None,
+        choices=("nemo_literal", "factored"),
+        help="override the TKE matrix construction; default None uses the "
+             "recipe (DINO NEMO cards use literal zdftke source order; "
+             "factored is historical reproduction)")
+    p.add_argument(
         "--tke-shear-evaluation-stage", default=None,
         choices=("step_entry", "implicit_solve_state"),
         help="override the zdf_sh2 evaluation lifetime; default None uses "
@@ -2187,6 +2220,7 @@ def main(argv=None):
               vmix_scheme=args.vmix_scheme, use_gm_redi=args.use_gm_redi,
               surface_tendency_placement=args.surface_tendency_placement,
               tke_preclosure_coeff_source=args.tke_preclosure_coeff_source,
+              tke_matrix_evaluation=args.tke_matrix_evaluation,
               tke_shear_evaluation_stage=args.tke_shear_evaluation_stage,
               tke_shear_metric_source=args.tke_shear_metric_source,
               tke_n2_evaluation_stage=args.tke_n2_evaluation_stage,

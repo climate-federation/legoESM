@@ -37,11 +37,13 @@ def _step_entry_helper_fixture(tke_cfg):
     gdepw0[0, 1, 1:] = np.asarray([0.9, 2.8])
     e3w0 = np.broadcast_to(
         np.asarray([1.0, 1.5, 2.5]), (ny, nx, nz)).copy()
+    e3t0 = np.broadcast_to(
+        np.asarray([1.0, 2.0, 3.0]), (ny, nx, nz)).copy()
     horizontal = np.ones((ny, nx))
     raw = create_z_star_from_thicknesses(
         [1.0, 2.0, 3.0], nemo_gdept_0_m=gdept0,
         nemo_gdepw_0_m=gdepw0,
-        nemo_e3w_0_m=e3w0, nemo_hu_0_m=horizontal,
+        nemo_e3t_0_m=e3t0, nemo_e3w_0_m=e3w0, nemo_hu_0_m=horizontal,
         nemo_hv_0_m=horizontal, nemo_e1e2t_m=horizontal,
         nemo_e1e2u_m=horizontal, nemo_e1e2v_m=horizontal)
     H = jnp.full((ny, nx), raw.H_max)
@@ -179,6 +181,22 @@ def test_only_complete_dino_nemo_cards_change_coefficient_lifetime():
     assert _nemo_tke_config().tke_preclosure_coeff_source == "current_subiteration"
 
 
+def test_only_complete_dino_nemo_cards_select_literal_tke_matrix():
+    faithful = {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}
+    for name, values in DINO_RECIPES.items():
+        resolved = values.get("tke_matrix_evaluation", "factored")
+        assert resolved == (
+            "nemo_literal" if name in faithful else "factored"), name
+        if values.get("vmix_scheme") == "tke":
+            built = dino_mod._dino_vertical_mixing_config(
+                dino_config_for_recipe(name)).tke
+            assert built.tke_matrix_evaluation == resolved, name
+
+    unchanged = (TKEConfig(), _nemo_tke_config(), ACC_TKE_CONFIG,
+                 ACC_BASIC_TKE_CONFIG)
+    assert all(c.tke_matrix_evaluation == "factored" for c in unchanged)
+
+
 def test_only_complete_dino_nemo_cards_freeze_step_entry_shear():
     faithful = {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}
     for name, values in DINO_RECIPES.items():
@@ -253,6 +271,9 @@ def test_step_entry_n2_bundle_matches_live_geometry_construction():
         g=constants.g, e3w_int=e3w, e3w_source="mesh_reference", **literal)
     np.testing.assert_array_equal(got.rn2, expected_now)
     np.testing.assert_array_equal(got.rn2b, expected_before)
+    np.testing.assert_array_equal(
+        got.e3t_Kmm,
+        np.asarray(model.z_coord.nemo_e3t_0) * np.asarray(stretch)[..., None])
     np.testing.assert_array_equal(got.gdepw_Kmm, gdepw)
     np.testing.assert_array_equal(got.e3w_Kmm, e3w)
 
@@ -433,6 +454,7 @@ def test_step_entry_n2_bundle_feeds_every_registered_tke_consumer(monkeypatch):
         rn2b=jnp.asarray([[3.0, 5.0]]),
         gdepw_Kmm=jnp.asarray([[1.5, 4.0]]),
         e3w_Kmm=jnp.asarray([[1.5, 2.5]]),
+        e3t_Kmm=jnp.asarray([[1.0, 2.0, 3.0]]),
     )
     seen = {"mxl": [], "closure": []}
 
@@ -517,7 +539,8 @@ def test_step_entry_selector_guards_and_legacy_stage_bit_identity():
         tke_mod.tke_vertical_mixing(**_column_kwargs(missing))
 
     bundle = tke_mod.TKEEntryN2Bundle(
-        *(jnp.ones((1, 2)) for _ in range(4)))
+        *(jnp.ones((1, 2)) for _ in range(4)),
+        e3t_Kmm=jnp.ones((1, 3)))
     with pytest.raises(ValueError, match="precomputed_n2_bundle was supplied"):
         tke_mod.tke_vertical_mixing(
             **_column_kwargs(base), precomputed_n2_bundle=bundle)
@@ -543,6 +566,55 @@ def test_explicit_legacy_selector_is_bit_identical_to_old_default():
     selected = tke_mod.tke_vertical_mixing(**_column_kwargs(explicit_legacy))
     for field in ("K_M", "K_H", "tke_new", "l_eps"):
         np.testing.assert_array_equal(getattr(selected, field), getattr(old, field))
+
+
+def test_nemo_literal_matrix_matches_hand_computed_source_order(monkeypatch):
+    """Nonuniform-e3t case pins every zdftke:499-510 operand and can go red."""
+    cfg = TKEConfig(
+        tke_matrix_evaluation="nemo_literal",
+        dissipation_discretization="nemo_1p5_split",
+        alpha_tke=1.0, c_eps=0.7,
+        tke_background=0.0, tke_surface_min=0.0,
+    )
+    captured = []
+
+    def capture(a, b, c, rhs):
+        captured.append(tuple(np.asarray(x) for x in (a, b, c, rhs)))
+        return rhs
+
+    monkeypatch.setattr(tke_mod, "_tridiag_thomas", capture)
+    base = dict(
+        e_old=jnp.asarray([[1.0, 2.0, 3.0]]),
+        K_M_old=jnp.asarray([[4.0, 6.0, 10.0]]),
+        K_H_old=jnp.zeros((1, 3)), P_s=jnp.zeros((1, 3)),
+        N2=jnp.zeros((1, 3)), l_eps=jnp.ones((1, 3)),
+        dz_half=jnp.asarray([[11.0, 13.0, 17.0]]),
+        surface_flux=jnp.zeros((1,)), dt=2.0, cfg=cfg,
+        dz_surface=jnp.ones((1,)), surface_dirichlet=jnp.asarray([8.0]),
+        surface_bc_level="nemo_z0", bottom_dirichlet=jnp.asarray([9.0]),
+        K_M_surface=jnp.asarray([2.0]), w_active=jnp.ones((1, 3)),
+        nemo_e3t=jnp.asarray([[2.0, 3.0, 5.0, 7.0]]),
+        dissl_old=jnp.asarray([[0.1, 0.2, 0.3]]),
+    )
+    tke_mod._solve_tke_backward_euler(**base)
+    a, b, c, rhs = captured[-1]
+    lw0, lw1 = -3.0 / 11.0, -10.0 / 39.0
+    up0, up1 = -10.0 / 33.0, -16.0 / 65.0
+    diag0 = 1.0 - lw0 - up0 + 3.0 * 0.7 * 0.1
+    diag1 = 1.0 - lw1 - up1 + 3.0 * 0.7 * 0.2
+    np.testing.assert_allclose(a, [[0.0, lw0, lw1, 0.0]], rtol=0, atol=1e-15)
+    np.testing.assert_allclose(b, [[1.0, diag0, diag1, 1.0]], rtol=0, atol=1e-15)
+    np.testing.assert_allclose(c, [[0.0, up0, up1, 0.0]], rtol=0, atol=1e-15)
+    np.testing.assert_allclose(rhs, [[8.0, 1.07, 2.28, 9.0]], rtol=0, atol=1e-15)
+
+    # Planted wrong-slot control: replacing live e3w by e3t must trip the
+    # captured coefficient comparison (the fields are deliberately unequal).
+    captured.clear()
+    tke_mod._solve_tke_backward_euler(
+        **{**base, "dz_half": base["nemo_e3t"][..., :3]})
+    _, wrong_b, wrong_c, _ = captured[-1]
+    assert not np.array_equal(wrong_b, b)
+    assert not np.array_equal(wrong_c, c)
 
 
 def test_carried_coefficients_are_jittable_and_differentiable():

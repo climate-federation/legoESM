@@ -1516,12 +1516,20 @@ def main() -> int:
                                 np.float64(2.0e-5))
                             zcof_l = (
                                 -np.float64(0.5) * dt64
-                                * np.float64(tke_cfg.alpha_tke)
-                                * np.ones_like(tmask_jk))
+                                * np.asarray(
+                                    solve_kwargs["w_active"])[..., :nmat])
                             incoming_e3w_l = np.asarray(
                                 solve_kwargs["dz_half"])[..., :nmat]
-                            dz_cell_operand = solve_kwargs["dz_cell"]
-                            if dz_cell_operand is None:
+                            nemo_e3t_operand = solve_kwargs.get("nemo_e3t")
+                            if nemo_e3t_operand is not None:
+                                nemo_e3t_operand = np.asarray(nemo_e3t_operand)
+                                up_e3t_operand_l = (
+                                    nemo_e3t_operand[..., 1:1 + nmat])
+                                lw_e3t_operand_l = nemo_e3t_operand[..., :nmat]
+                                effective_e3w_l = incoming_e3w_l
+                                metric_operand_source = (
+                                    "literal live nemo_e3t and step-entry e3w")
+                            elif solve_kwargs["dz_cell"] is None:
                                 # Legacy assembly feeds e3w into the face-
                                 # gradient slot where NEMO reads e3t. Its
                                 # control-volume slot is the first e3w row
@@ -1540,19 +1548,28 @@ def main() -> int:
                                     "legacy dz_face/dz_int_eff; dz_cell=None")
                             else:
                                 up_e3t_operand_l = np.asarray(
-                                    dz_cell_operand)[..., 1:1 + nmat]
+                                    solve_kwargs["dz_cell"])[..., 1:1 + nmat]
                                 lw_e3t_operand_l = np.asarray(
-                                    dz_cell_operand)[..., :nmat]
+                                    solve_kwargs["dz_cell"])[..., :nmat]
                                 effective_e3w_l = incoming_e3w_l
                                 metric_operand_source = (
                                     "live dz_cell and dz_half")
-                            dissl_operand_l = (
-                                np.sqrt(np.maximum(
-                                    np.asarray(solve_kwargs["e_old"])[..., :nmat],
-                                    np.float64(tke_cfg.tke_background)))
-                                / np.maximum(
-                                    np.asarray(solve_kwargs["l_eps"])[..., :nmat],
-                                    np.float64(tke_cfg.mxl_min)))
+                            if solve_kwargs.get("dissl_old") is not None:
+                                dissl_operand_l = np.asarray(
+                                    solve_kwargs["dissl_old"])[..., :nmat]
+                                dissl_operand_source = (
+                                    "restart/previous-step carried dissl")
+                            else:
+                                dissl_operand_l = (
+                                    np.sqrt(np.maximum(
+                                        np.asarray(solve_kwargs["e_old"])
+                                        [..., :nmat],
+                                        np.float64(tke_cfg.tke_background)))
+                                    / np.maximum(
+                                        np.asarray(solve_kwargs["l_eps"])
+                                        [..., :nmat],
+                                        np.float64(tke_cfg.mxl_min)))
+                                dissl_operand_source = "factored sqrt(en)/zmxld"
                             row12_operands = {
                                 "zcof_tmask": metrics(
                                     zcof_l, zcof_n, wet_mat, focus,
@@ -1607,6 +1624,8 @@ def main() -> int:
                                 "minimum_avm_sum": 2.0e-5,
                                 "production_metric_operand_source":
                                     metric_operand_source,
+                                "production_dissl_operand_source":
+                                    dissl_operand_source,
                             }
                             row12_primary["controls"] = {
                                 name: planted_controls(
@@ -1983,6 +2002,7 @@ def main() -> int:
         HERE / "PREREG_zdf_chain_sweep_round6.md",
         HERE / "PREREG_zdf_chain_sweep_round7.md",
         HERE / "PREREG_zdf_chain_sweep_round8.md",
+        HERE / "PREREG_zdf_chain_sweep_round9.md",
         HERE / "kamm_twin_90d.py",
         Path("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py"),
         Path("packages/ocean/legoesm/ocean/eos.py"),

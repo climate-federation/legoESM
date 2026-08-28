@@ -584,6 +584,12 @@ class TKEConfig(NamedTuple):
     # carried from the preceding step feeds zdf_sh2, Prandtl, the TKE matrix
     # and RHS, and is overwritten only by post-solve tke_avn.
     tke_preclosure_coeff_source: str = "current_subiteration"
+    # TKE diffusion-matrix evaluation. ``factored`` is the historical shared
+    # solver construction. ``nemo_literal`` evaluates zdftke.F90:499-510 in
+    # source order from carried avm/dissl and raw live e3t/e3w operands.
+    # Complete DINO NEMO cards select the literal form; every generic and
+    # non-oracle card retains the byte-identical factored default.
+    tke_matrix_evaluation: str = "factored"
     # Evaluation lifetime of NEMO's zdf_sh2 operand.  The historical path
     # evaluates from the state handed to the implicit solve.  Complete DINO
     # NEMO cards instead freeze p_sh2 from the step-entry NOW/BEFORE faces and

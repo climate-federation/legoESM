@@ -974,6 +974,9 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 preclosure_K_M_surface=(
                     state.tke_avm_surface.data
                     if getattr(state, "tke_avm_surface", None) is not None else None),
+                preclosure_dissl=(
+                    state.tke_dissl.data
+                    if getattr(state, "tke_dissl", None) is not None else None),
                 precomputed_p_sh2=tke_p_sh2,
                 precomputed_n2_bundle=tke_n2_bundle,
             )
@@ -984,7 +987,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 )
                 _carry = TKECarryOutput(
                     tke_new=tke_out.tke_new, K_M=tke_out.K_M,
-                    K_H=tke_out.K_H, K_M_surface=tke_out.K_M_surface)
+                    K_H=tke_out.K_H, K_M_surface=tke_out.K_M_surface,
+                    dissl=tke_out.dissl)
                 return tke_out.K_H, tke_out.K_M, _carry
             return tke_out.K_H, tke_out.K_M, tke_out.tke_new
         # Mode B (DIAGNOSTIC / quasi-steady, default): ``tke_old=None`` seeds at

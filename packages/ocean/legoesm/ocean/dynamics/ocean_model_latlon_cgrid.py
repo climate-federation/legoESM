@@ -5742,15 +5742,20 @@ class LatLonCGridOceanModel:
         if (getattr(tke_cfg, "tke_preclosure_coeff_source",
                     "current_subiteration") != "carried_previous_step"):
             return state
+        literal_matrix = (getattr(tke_cfg, "tke_matrix_evaluation", "factored")
+                          == "nemo_literal")
         carry_fields = (state.tke_avm, state.tke_avt,
-                        state.tke_avm_surface)
+                        state.tke_avm_surface) + (
+                            (getattr(state, "tke_dissl", None),)
+                            if literal_matrix else ())
         n_present = sum(field is not None for field in carry_fields)
         if n_present == len(carry_fields):
             return state
         if n_present:
             raise ValueError(
                 "carried_previous_step coefficient memory is partially "
-                "populated: tke_avm, tke_avt, and tke_avm_surface must be "
+                "populated: tke_avm, tke_avt, tke_avm_surface, and any "
+                "literal-matrix tke_dissl must be "
                 "all present for a restart/continued state or all None for "
                 "a true cold start")
 
@@ -5788,6 +5793,12 @@ class LatLonCGridOceanModel:
             state = state._replace(tke_avm_surface=Field(
                 data=avms0, name="tke_avm_surface",
                 dims=("lat", "lon"), units="m^2/s"))
+        if literal_matrix and getattr(state, "tke_dissl", None) is None:
+            # zdf_phy_alloc_init cold-start value before the first tke_avn.
+            dissl0 = jnp.asarray(1.0e-12, dtype=dtype)  # coeff-ok: NEMO init
+            state = state._replace(tke_dissl=Field(
+                data=jnp.where(wet_w, dissl0, 0.0), name="tke_dissl",
+                dims=("lat", "lon", "level"), units="s^-1"))
         return state
 
     def _tke_step_entry_n2_bundle(
@@ -5835,11 +5846,13 @@ class LatLonCGridOceanModel:
             r3t_evaluation="nemo_reciprocal")
         gdept_0 = getattr(_zc, "nemo_gdept_0", None)
         gdepw_0 = getattr(_zc, "nemo_gdepw_0", None)
-        if gdept_0 is None or gdepw_0 is None:
+        e3t_0 = getattr(_zc, "nemo_e3t_0", None)
+        if gdept_0 is None or gdepw_0 is None or e3t_0 is None:
             raise ValueError(
                 "tke_n2_evaluation_stage='step_entry' requires raw NEMO "
-                "nemo_gdept_0/nemo_gdepw_0 mesh fields; the 1-D/reconstructed "
-                "ladder is not a faithful eosbn2 operand")
+                "nemo_gdept_0/nemo_gdepw_0/nemo_e3t_0 mesh fields; the "
+                "1-D/reconstructed ladder is not a faithful eosbn2/zdftke "
+                "operand")
         # The raw NEMO W ladder includes the zero-depth surface point;
         # eosbn2 starts at jk=2, so its first operand is gdepw_0(2).
         gdepw_0 = gdepw_0[..., 1:]
@@ -5870,8 +5883,10 @@ class LatLonCGridOceanModel:
                 S_before = extrapolate_below_seafloor(S_before, _zc)
             rn2b = compute_buoyancy_frequency_nemo_bn2(
                 T_before, S_before, gdept, gdepw, **_n2_kwargs)
+        e3t = jnp.asarray(e3t_0) * zrw_stretch[..., jnp.newaxis]
         return TKEEntryN2Bundle(
-            rn2=rn2, rn2b=rn2b, gdepw_Kmm=gdepw, e3w_Kmm=e3w)
+            rn2=rn2, rn2b=rn2b, gdepw_Kmm=gdepw, e3w_Kmm=e3w,
+            e3t_Kmm=e3t)
 
     def _tke_step_entry_p_sh2(
         self, state, *, eta_now=None, u_now=None, v_now=None,
@@ -7475,6 +7490,10 @@ class LatLonCGridOceanModel:
                     Field(data=_tke_coeff_new.K_M_surface,
                           name="tke_avm_surface", dims=("lat", "lon"),
                           units="m^2/s")),
+                tke_dissl=(
+                    None if _tke_coeff_new.dissl is None else
+                    Field(data=_tke_coeff_new.dissl, name="tke_dissl",
+                          dims=("lat", "lon", "level"), units="s^-1")),
             )
         if return_K_diss_v:
             return state_out, K_diss_v_w

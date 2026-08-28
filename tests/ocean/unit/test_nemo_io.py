@@ -65,6 +65,7 @@ def _write_restart(path, with_rhd=True, with_en=False, with_tke_coeffs=False,
     if with_tke_coeffs:
         data["avm_k"] = (("z", "y", "x"), _encode(None) + 1000.0)
         data["avt_k"] = (("z", "y", "x"), _encode(None) + 2000.0)
+        data["dissl"] = (("z", "y", "x"), _encode(None) + 3000.0)
     if with_before:
         # Distinct pattern (offset +1) so a reader bug that accidentally
         # reads the now-level fields is caught by value, not just shape.
@@ -219,10 +220,11 @@ def test_read_nemo_restart_en_missing_raises(tmp_path):
 def test_read_nemo_restart_tke_coefficients_axis_order_and_missing(tmp_path):
     p = tmp_path / "restart_coeff.nc"
     _write_restart(p, with_rhd=False, with_tke_coeffs=True)
-    avm, avt = read_nemo_restart_tke_coefficients(str(p), nn_hls=1)
-    assert avm.shape == avt.shape == (IY, IX, NZ)
+    avm, avt, dissl = read_nemo_restart_tke_coefficients(str(p), nn_hls=1)
+    assert avm.shape == avt.shape == dissl.shape == (IY, IX, NZ)
     assert avm[1, 2, 0] == 1023.0
     assert avt[1, 2, 0] == 2023.0
+    assert dissl[1, 2, 0] == 3023.0
     q = tmp_path / "restart_no_coeff.nc"
     _write_restart(q, with_rhd=False)
     with pytest.raises(ValueError, match="avm_k"):
