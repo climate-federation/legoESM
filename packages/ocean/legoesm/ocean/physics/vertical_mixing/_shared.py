@@ -433,8 +433,21 @@ def avm_weighted_shear_production(
     kM_right_v = jnp.concatenate([kappaM_T, kappaM_T[-1:, :, :]], axis=0)
     kM_face_v = kM_left_v + kM_right_v          # (n_lat+1, n_lon, nlev-1)
 
-    zsh2u = kM_face_u * zsh2u_bare
-    zsh2v = kM_face_v * zsh2v_bare
+    if face_metrics is None:
+        # Historical association, kept byte-identical for every unchanged
+        # card: form the bare shear first, then multiply by face avm.
+        zsh2u = kM_face_u * zsh2u_bare
+        zsh2v = kM_face_v * zsh2v_bare
+    else:
+        # Literal zdfsh2.F90:80-89 association.  At the 1e-15 bar,
+        # ``avm*(du*du/divisor)`` is observably different from NEMO's
+        # ``avm*du*du/divisor`` even though they are algebraically equal.
+        du_n = u_face_now[..., :-1] - u_face_now[..., 1:]
+        du_b = u_face_before[..., :-1] - u_face_before[..., 1:]
+        dv_n = v_face_now[..., :-1] - v_face_now[..., 1:]
+        dv_b = v_face_before[..., :-1] - v_face_before[..., 1:]
+        zsh2u = kM_face_u * du_n * du_b / dz_sq_u * wumask
+        zsh2v = kM_face_v * dv_n * dv_b / dz_sq_v * wvmask
 
     p_sh2 = 0.25 * (
         (zsh2u[:, :-1, :] + zsh2u[:, 1:, :]) * coast_u
