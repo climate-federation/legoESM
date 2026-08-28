@@ -66,6 +66,12 @@ also not VERIFIED at its diagnostic bar (3 failing columns); only `zaw` and
 the final `/e3w` result are VERIFIED. The row-11 disposition is based on that
 final result and the downstream `zri/pdlr`, both 0/9,920 at the bar.
 
+**TRACKED NOTE — open arithmetic-association debt:** retain the 3/9,920
+intermediate-numerator misses (max `1.174266e-15`) in every later chain
+handoff. They do not change row 11's VERIFIED disposition because the next
+literal `/e3w` operation closes the final `bn2` result to 0/9,920, but they
+must not be silently promoted to exact identity or dropped from the ledger.
+
 Scope is narrow:
 
 | Reachable card/config | Literal raw-mesh N2 path | Numerical change |
