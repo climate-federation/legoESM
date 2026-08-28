@@ -4,6 +4,25 @@ Written 2026-08-28 after bridge-Omega ownership was REFUTED and before the
 missing fourth arm is run.  The corrected-T endpoint remains unread and
 unscored.  This is a GPU handoff design; STOP after committing it.
 
+## 2026-08-28 post-run binding amendment before score
+
+The registered fourth-corner arm completed, but its NPZ has not been opened
+and no `D`, `I`, endpoint miss, or ownership classification has been computed
+or seen before this amendment.  Bind its clean producer
+`b14a17dd6f14592594daacc4b64c6a1de2a0a004` and exact receipts:
+
+- artifact `results/dino_1455/tcarry_omega90_legacy_een_off.npz`, SHA-256
+  `678a6a914367561596a259cc27a50f9294d14e7c0ed32c68aefe9ee6fff2a6f8`;
+- log `results/dino_1455/tcarry_omega90_legacy_een_off.log`, SHA-256
+  `9145e6100b8b4eaea38741209190ba08bfa71578406c21ae8fcee39ce7f83639`.
+
+Hashing both files and reading only the log before this commit confirmed the
+registered legacy-rounded bridge-Omega and EEN-off banners, clean producer,
+fp64/both/bridged/15552000 s legacy stress-carry receipts, 2880 steps,
+`STABLE=True`, and the standalone `PASS 5 | FAIL 0` gate at 5x.  This amendment
+changes no metric, locked corner, reducer, baseline, floor, validity bar,
+ownership bar, interaction label, control, or decision branch.
+
 ## Why this is the next discriminator
 
 Three corners of the current-harness 2x2 are now hash-bound and measured:
