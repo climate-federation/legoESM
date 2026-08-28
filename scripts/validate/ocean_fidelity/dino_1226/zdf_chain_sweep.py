@@ -2031,6 +2031,29 @@ def main() -> int:
                                                 ..., 1:1 + nrhs],
                                             wet_rhs, focus,
                                             POINTWISE_BAR)
+                                        postlc_n_int = postlc_n[
+                                            ..., 1:1 + nrhs]
+                                        budget_associations = {
+                                            "left_associated_terms":
+                                                postlc_n_int + dt64 * (
+                                                    (p_sh2_n + strat_n)
+                                                    + diss_rhs_n
+                                                ) * wet_rhs.astype(np.float64),
+                                            "right_associated_terms":
+                                                postlc_n_int + dt64 * (
+                                                    p_sh2_n
+                                                    + (strat_n + diss_rhs_n)
+                                                ) * wet_rhs.astype(np.float64),
+                                        }
+                                        budget_association_metrics = {
+                                            name: metrics(
+                                                value,
+                                                pre_rhs_n[..., 1:1 + nrhs],
+                                                wet_rhs, focus,
+                                                POINTWISE_BAR)
+                                            for name, value in
+                                            budget_associations.items()
+                                        }
                                         bottom_ext = (
                                             bottom_level[..., None] + 1)
                                         rhs_bottom_scatter = metrics(
@@ -2159,6 +2182,8 @@ def main() -> int:
                                             "pre_recurrence_inputs":
                                                 pre_stage_metrics,
                                             "post_langmuir_en": postlc_metric,
+                                            "budget_from_nemo_post_langmuir":
+                                                budget_association_metrics,
                                             "jk2_rhs_association_discriminator":
                                                 jk2_association_metrics,
                                             "solver_rhs_bottom_scatter":
