@@ -5,6 +5,13 @@ REFUTED full EEN ownership, and before an old/new bridge-Omega selector is
 implemented or either arm is run.  The corrected-T endpoint remains unread
 and unscored.  This is a GPU handoff design; STOP after committing it.
 
+## 2026-08-28 post-verdict default decision
+
+These completed historical arms intentionally used and stamped
+`U_AS_T_LEGACY` when that carry was the default.  After the human default flip,
+reproduction requires adding `--bridge-before-stress-legacy-u-as-t` to each
+command below.  Their receipts, measurements, and decision bars are unchanged.
+
 ## 2026-08-28 instrument-only receipt amendment before GPU
 
 Implementation inspection found that `LatLonCGridGeometry` stores three

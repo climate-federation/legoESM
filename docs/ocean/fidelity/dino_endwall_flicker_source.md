@@ -1,5 +1,33 @@
 # DINO end-wall 2dt source lane: wind operands measured, placement open
 
+## LANE STATUS — finished unit, 2026-08-28
+
+- **CONFIRMED:** the dominant wall-flicker source was a one-cell coastal-donor
+  double interpolation in bridge/mimicry glue.  NEMO's U-point prior stress
+  was stored as a T-point carry and interpolated to U again.  The faithful
+  fix reconstructs the prior analytic T-point stress, is now the harness
+  default, and stamps `T`, reconstruction time, and content hash.  Corrected
+  explicit GPU scoring moved flicker ratio `2.89x -> 1.16x` and wall share
+  `0.486 -> 0.119`.
+- **NULL at the measured resolution:** corrected T carry does not resolve a
+  change in the 90-day southern-basin gap.  Its measured
+  `Delta90 = +2.939395701062608e-05 Sv` is below
+  `F90_current = 1.5266693430725714e-04 Sv`; the frozen verdict is
+  **UNRESOLVED/FLOOR**.
+- **RECONCILED:** the historical/current basin-baseline epoch is owned by the
+  combined EEN-plus-bridge-Omega change, with measured non-additive interaction
+  `I = -0.0840808093571308 Sv`.  `Glegacy90` is re-registered as
+  `-0.43908550999203477 Sv` and its floor was re-measured at the current epoch.
+- **OPEN for a later branch:** the barotropic boundary/eta-fixer
+  counterfactuals are designed but not built; explicit-versus-implicit
+  placement ownership remains unresolved; and the approximately `200x`
+  corrected-carry implicit shock remains undiagnosed.
+
+**Standing human rule, DECIDED 2026-08-28:** when a faithful fix exists, the
+default selects it.  A known-wrong path is opt-in only.  Accordingly the
+reconstructed T-point carry is the default and historical U-as-T reproduction
+requires `--bridge-before-stress-legacy-u-as-t`.
+
 Branch: `fidelity/dino-basin-rectification-codex`. Oracle repository revision:
 `dcc7fb8`; legoESM base:
 `782b0d7887277c88bcaa9c1be24eedad5447d9ae`. Because DINO `MY_SRC` content is
@@ -409,8 +437,10 @@ then a one-step step-two substitution, planted restoration, and explicitly
 mapped 1%-material T-grid support decide the mechanism. No GPU rerun is
 authorized before that CPU gate.
 
-**Human decision required — current -> proposed:** keep the twin default as legacy U-as-T carry (known wrong) -> make reconstructed T carry the default?
-No default is changed in this lane.
+**DECIDED 2026-08-28:** reconstructed T carry is the default.  The known-wrong
+legacy U-as-T carry remains reachable only through
+`--bridge-before-stress-legacy-u-as-t`.  Standing rule: when a faithful fix
+exists the default selects it; historical defect paths are opt-in only.
 
 ## Review disposition and retractions
 

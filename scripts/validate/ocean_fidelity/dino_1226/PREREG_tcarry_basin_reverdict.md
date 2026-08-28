@@ -5,6 +5,16 @@ runs. The five-day result is not used as a basin outcome. This registration
 asks whether the now-confirmed bridge representation defect contributes
 materially to the recorded southern-basin transport deficit.
 
+## 2026-08-28 post-verdict default decision
+
+The human selected reconstructed T carry as the harness default after this
+measurement completed.  The frozen historical invocations below remain exact
+records of what ran when T reconstruction was opt-in; they must not be read as
+current-default examples.  To reproduce any legacy U-as-T arm now, add
+`--bridge-before-stress-legacy-u-as-t`.  Explicit
+`--bridge-before-stress-tpoint` remains accepted but is redundant on the new
+default.  No metric, artifact interpretation, floor, or verdict changes.
+
 ## 2026-08-28 floor-seed binding amendment before score
 
 All three registered seed arms completed, but no seed NPZ has been opened and
@@ -391,9 +401,11 @@ sample spreads from `/tmp/dino_verdict360/m{0..3}_*.npz` and
 Both arms use the standard `nemo_dino_kamm_mlf` twin, the same day-180 NEMO
 restart, bridged before level, fp64, NEMO ladders, explicit surface stress, and
 3-D snapshots. The sole selected variable is the initial before-stress carry:
-legacy U-as-T versus reconstructed analytic T. The legacy arm omits the
-opt-in selector and must stamp `U_AS_T_LEGACY`; the corrected arm adds it and
-must stamp `T`, `15552000.0`, and the registered content hash.
+legacy U-as-T versus reconstructed analytic T. At execution time the legacy
+arm omitted the then-opt-in selector and stamped `U_AS_T_LEGACY`; under the
+current default it instead requires `--bridge-before-stress-legacy-u-as-t`.
+The corrected arm explicitly selected T and stamped `T`, `15552000.0`, and the
+registered content hash.
 
 ```sh
 CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both \

@@ -887,7 +887,7 @@ def start_mode_of(stamped) -> str | None:
 
 def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                        bridge_tke: bool = False, bridge_before: bool = True,
-                       bridge_before_stress_tpoint: bool = False,
+                       bridge_before_stress_tpoint: bool = True,
                        vmix_scheme: str | None = None,
                        use_gm_redi: bool | None = None,
                        surface_stress_implicit: bool | None = None,
@@ -928,9 +928,11 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
     True routes the same centred stress through the implicit vertical solve.
 
     ``bridge_before_stress_tpoint``: bridge-only correction for NEMO's U/V
-    restart stress. Requires ``bridge_before`` and replaces only legoESM's
-    T-point previous-stress carry with the existing analytic DINO forcing at
-    the restart's own time. It is not a model-config selector.
+    restart stress, enabled by default. Requires ``bridge_before`` and
+    replaces only legoESM's T-point previous-stress carry with the existing
+    analytic DINO forcing at the restart's own time. ``False`` is the
+    known-wrong historical U-as-T reproduction path, not a model-config
+    selector.
 
     ``u_m``: optional override of ``DINOConfig.U_M`` (NEMO ``rn_Uv``, the
     lateral viscous velocity scale [m/s], card default 0.27).  It is the
@@ -1131,7 +1133,7 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
 def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = False,
              run_traj: str = RUN_TRAJ, run_stepdump: str = RUN_STEPDUMP,
              bridge_tke: bool = False, bridge_before: bool = True,
-             bridge_before_stress_tpoint: bool = False,
+             bridge_before_stress_tpoint: bool = True,
              vmix_scheme: str | None = None,
              use_gm_redi: bool | None = None,
              surface_stress_implicit: bool | None = None,
@@ -1193,8 +1195,9 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     every-step/float64 eta plus relative ``t_seconds`` for the campaign's
     Nyquist-safe 2dt scorer. The daily field remains under ``eta_daily``.
 
-    ``bridge_before_stress_tpoint`` reconstructs only the initial T-point
-    previous-stress carry. Later-step carry behavior remains the model's
+    ``bridge_before_stress_tpoint`` defaults on and reconstructs only the
+    initial T-point previous-stress carry. ``False`` reproduces the historical
+    U-as-T bridge defect. Later-step carry behavior remains the model's
     ordinary ``_seed_centred_forcing_carry`` path.
     """
     _producer_sha_entry, _producer_dirty_entry = _git_provenance()
@@ -1713,13 +1716,21 @@ def _parse_args(argv=None):
                          "earlier help string said it did; retracted). "
                          "--no-bridge-before is the legacy forward-Euler start "
                          "-- see --legacy-euler-start")
-    p.add_argument("--bridge-before-stress-tpoint", action="store_true",
-                   help="replace only the bridged NEMO U/V-point prior-stress "
-                        "carry with analytic DINO T-point stress reconstructed "
-                        "through the existing forcing loader at the restart's "
-                        "own prior seasonal time. Requires --bridge-before; "
-                        "stamps stagger/time/content identity. Does not change "
-                        "model config or later-step carry behavior")
+    stress_carry = p.add_mutually_exclusive_group()
+    stress_carry.add_argument(
+        "--bridge-before-stress-tpoint",
+        dest="bridge_before_stress_tpoint", action="store_true",
+        help="use the faithful analytic DINO T-point prior-stress reconstruction "
+             "at the restart's own prior seasonal time (DEFAULT ON since "
+             "2026-08-28). Requires --bridge-before; stamps stagger/time/content "
+             "identity. Does not change model config or later-step carry behavior")
+    stress_carry.add_argument(
+        "--bridge-before-stress-legacy-u-as-t",
+        dest="bridge_before_stress_tpoint", action="store_false",
+        help="opt into the known-wrong historical bridge that stores NEMO's "
+             "U/V-point prior stress as a T-point carry. Reproduction only; "
+             "artifacts stamp U_AS_T_LEGACY")
+    p.set_defaults(bridge_before_stress_tpoint=True)
     p.add_argument("--bridge-omega", choices=BRIDGE_OMEGA_MODES, default="nemo",
                    help="bridge-geometry Earth rotation only: 'nemo' is the "
                         "default NEMO sidereal rate; 'legacy-rounded' "

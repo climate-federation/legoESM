@@ -457,19 +457,28 @@ def test_print_before_bridge_verify_reports_zero_for_matched_state(instruments):
 # ---------------------------------------------------------------------------
 # kamm_twin_90d: --bridge-before-stress-tpoint (round-3 end-wall gate)
 # ---------------------------------------------------------------------------
-def test_tpoint_stress_selector_defaults_off_and_parses(instruments):
+def test_tpoint_stress_selector_defaults_corrected_and_legacy_is_opt_in(instruments):
     import inspect
 
     k = instruments.kamm_twin_90d
     build_sig = inspect.signature(k._build_twin_state)
     run_sig = inspect.signature(k.run_twin)
-    assert build_sig.parameters["bridge_before_stress_tpoint"].default is False
-    assert run_sig.parameters["bridge_before_stress_tpoint"].default is False
+    assert build_sig.parameters["bridge_before_stress_tpoint"].default is True
+    assert run_sig.parameters["bridge_before_stress_tpoint"].default is True
     base = k._parse_args(["nemo_dino_kamm_mlf", "out.npz"])
-    selected = k._parse_args([
+    explicit_corrected = k._parse_args([
         "nemo_dino_kamm_mlf", "out.npz", "--bridge-before-stress-tpoint"])
-    assert base.bridge_before_stress_tpoint is False
-    assert selected.bridge_before_stress_tpoint is True
+    legacy = k._parse_args([
+        "nemo_dino_kamm_mlf", "out.npz",
+        "--bridge-before-stress-legacy-u-as-t"])
+    assert base.bridge_before_stress_tpoint is True
+    assert explicit_corrected.bridge_before_stress_tpoint is True
+    assert legacy.bridge_before_stress_tpoint is False
+    with pytest.raises(SystemExit):
+        k._parse_args([
+            "nemo_dino_kamm_mlf", "out.npz",
+            "--bridge-before-stress-tpoint",
+            "--bridge-before-stress-legacy-u-as-t"])
 
 
 def test_tpoint_stress_reconstruction_reuses_loader_and_changes_only_carry(
@@ -559,9 +568,13 @@ def test_tpoint_stress_selector_threads_and_stamps_receipts(
     monkeypatch.setattr(k, "run_twin", _spy)
     monkeypatch.setattr(k, "provenance_gate", lambda: None)
     monkeypatch.setattr(k, "_precision_gate", lambda: None)
-    k.main([
-        "nemo_dino_kamm_mlf", "out.npz", "--bridge-before-stress-tpoint"])
+    k.main(["nemo_dino_kamm_mlf", "out.npz"])
     assert seen["bridge_before_stress_tpoint"] is True
+    seen.clear()
+    k.main([
+        "nemo_dino_kamm_mlf", "out.npz",
+        "--bridge-before-stress-legacy-u-as-t"])
+    assert seen["bridge_before_stress_tpoint"] is False
 
     assert 'bridge_before_stress_stagger = "T"' in src
     assert "np.array_equal(np.asarray(st.tau_x_prev)" in src
