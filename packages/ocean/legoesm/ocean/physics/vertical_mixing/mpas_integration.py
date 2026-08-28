@@ -119,10 +119,10 @@ def _bn2_ladder_kwargs(cfg, z_coord, state):
     """
     if getattr(cfg, "n2_mode", "insitu") != "nemo_bn2":
         return {}
-    from legoesm.ocean.eos import nemo_bn2_live_ladders
-    t_depth, w_depth = nemo_bn2_live_ladders(
+    from legoesm.ocean.eos import nemo_bn2_live_geometry
+    t_depth, w_depth, e3w_int = nemo_bn2_live_geometry(
         z_coord, state.eta.data, state.H_bathy.data)
-    return {"t_depth": t_depth, "w_depth": w_depth}
+    return {"t_depth": t_depth, "w_depth": w_depth, "e3w_int": e3w_int}
 
 
 def _mpas_surface_buoyancy_flux(q_net, fw, salt, T_3d, S_3d, eos_fn=None,

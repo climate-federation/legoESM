@@ -92,6 +92,14 @@ class OceanZStarCoordinate(NamedTuple):
     # STATIC Python bool — gates are `if` branches (never jnp.where); the
     # coordinate is constructor-captured, not traced.
     linear_free_surface: bool = False
+    # NEMO fidelity geometry.  These retain the RAW mesh_mask fields, including
+    # their last-bit horizontal variation; averaging them to a 1-D ladder and
+    # differencing changes the operation order in eosbn2.F90.  ``mesh_reference``
+    # is the faithful/default construction.  ``depth_difference`` is the
+    # explicit legacy opt-in for consumers without a NEMO mesh.
+    nemo_gdept_0: jnp.ndarray | None = None
+    nemo_e3w_0: jnp.ndarray | None = None
+    nemo_e3w_source: str = "mesh_reference"
 
 
 def create_ocean_z_star(
@@ -178,7 +186,8 @@ def create_ocean_z_star(
 
 
 def create_z_star_from_thicknesses(
-    dz_ref_m, t_depth_ref_m=None,
+    dz_ref_m, t_depth_ref_m=None, *, nemo_gdept_0_m=None,
+    nemo_e3w_0_m=None, nemo_e3w_source="mesh_reference",
 ) -> OceanZStarCoordinate:
     """Build a z* coordinate from EXPLICIT reference layer thicknesses.
 
@@ -210,6 +219,11 @@ def create_z_star_from_thicknesses(
     -------
     OceanZStarCoordinate
     """
+    if nemo_e3w_source not in ("mesh_reference", "depth_difference"):
+        raise ValueError(
+            f"unknown nemo_e3w_source {nemo_e3w_source!r}; expected "
+            "'mesh_reference' or 'depth_difference'")
+
     # Check ndim on the ORIGINAL array BEFORE any ravel -- a 2-D array would
     # otherwise be silently flattened and accepted as 1-D (codex HIGH).
     dz_np = np.asarray(dz_ref_m, dtype=np.float64)
@@ -251,6 +265,20 @@ def create_z_star_from_thicknesses(
             raise ValueError("t_depth_ref_m depths must be strictly increasing")
         t_depth_ref = jnp.asarray(t_np, dtype=get_policy().control)
 
+    def _raw_mesh_field(value, name):
+        if value is None:
+            return None
+        arr = np.asarray(value, dtype=np.float64)
+        if arr.ndim < 1 or arr.shape[-1] != n_levels:
+            raise ValueError(
+                f"{name} must have trailing dimension n_levels={n_levels}, "
+                f"got shape {arr.shape}")
+        if not np.all(np.isfinite(arr)) or not np.all(arr > 0.0):
+            raise ValueError(f"{name} must contain only finite values > 0")
+        return jnp.asarray(arr, dtype=get_policy().control)
+
+    nemo_gdept_0 = _raw_mesh_field(nemo_gdept_0_m, "nemo_gdept_0_m")
+    nemo_e3w_0 = _raw_mesh_field(nemo_e3w_0_m, "nemo_e3w_0_m")
     return OceanZStarCoordinate(
         n_levels=n_levels,
         H_max=H_max,
@@ -259,6 +287,9 @@ def create_z_star_from_thicknesses(
         dz_ref=dz_ref,
         dz_half_ref=dz_half_ref,
         t_depth_ref=t_depth_ref,
+        nemo_gdept_0=nemo_gdept_0,
+        nemo_e3w_0=nemo_e3w_0,
+        nemo_e3w_source=nemo_e3w_source,
     )
 
 
@@ -458,6 +489,9 @@ class OceanPartialCellCoordinate(NamedTuple):
     # midpoint grids → HPG reverts to interface-midpoint depths. Trailing +
     # defaulted so existing constructions stay backward-compatible.
     t_depth_ref: jnp.ndarray | None = None
+    nemo_gdept_0: jnp.ndarray | None = None
+    nemo_e3w_0: jnp.ndarray | None = None
+    nemo_e3w_source: str = "mesh_reference"
 
 
 def create_partial_cell_coordinate(
@@ -566,6 +600,9 @@ def create_partial_cell_coordinate(
         # gate-N2 pressure geometry, and any future partial-cell PGF
         # fidelity).  ``getattr``: plain midpoint z* coords carry None.
         t_depth_ref=getattr(z_coord, "t_depth_ref", None),
+        nemo_gdept_0=getattr(z_coord, "nemo_gdept_0", None),
+        nemo_e3w_0=getattr(z_coord, "nemo_e3w_0", None),
+        nemo_e3w_source=getattr(z_coord, "nemo_e3w_source", "mesh_reference"),
     )
 
 
@@ -631,6 +668,9 @@ def create_full_step_coordinate(
         bottom_level=bl,
         is_active=is_active,
         t_depth_ref=getattr(z_coord, "t_depth_ref", None),
+        nemo_gdept_0=getattr(z_coord, "nemo_gdept_0", None),
+        nemo_e3w_0=getattr(z_coord, "nemo_e3w_0", None),
+        nemo_e3w_source=getattr(z_coord, "nemo_e3w_source", "mesh_reference"),
     )
 
 

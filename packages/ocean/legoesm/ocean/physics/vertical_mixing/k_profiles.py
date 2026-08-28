@@ -812,10 +812,10 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         # z* Jacobian J above: that is (eta + H)/H_max, normalised by the
         # GLOBAL maximum depth, and is off by 1.1e-1 vs 2.5e-8 relative
         # against NEMO's own gdept(Kmm) dump (#1226).
-        _bn2_t_depth = _bn2_w_depth = None
+        _bn2_t_depth = _bn2_w_depth = _bn2_e3w = None
         if getattr(vmix_cfg.tke, "n2_mode", "insitu") == "nemo_bn2":
-            from legoesm.ocean.eos import nemo_bn2_live_ladders
-            _bn2_t_depth, _bn2_w_depth = nemo_bn2_live_ladders(
+            from legoesm.ocean.eos import nemo_bn2_live_geometry
+            _bn2_t_depth, _bn2_w_depth, _bn2_e3w = nemo_bn2_live_geometry(
                 z_coord, state.eta.data, state.H_bathy.data)
         tke_cfg = vmix_cfg.tke
         prognostic = bool(getattr(tke_cfg, "prognostic", False))
@@ -920,6 +920,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     eos_fn=eos_fn, z_interface=z_coord.z_half_ref[1:-1],
                     dz_surface=dz_surface, boundary_cap=_mxl1_cap,
                     T_n2=T_n2, S_n2=S_n2,
+                    t_depth=_bn2_t_depth, w_depth=_bn2_w_depth,
+                    e3w_int=_bn2_e3w,
                     ice_frac=_tke_ice_fr,
                 )
                 return K_H_old, K_M_old, _tke_ctx
@@ -938,6 +940,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 lat_deg=lat_deg,
                 T_n2=T_n2, S_n2=S_n2,
                 t_depth=_bn2_t_depth, w_depth=_bn2_w_depth,
+                e3w_int=_bn2_e3w,
                 ice_frac=_tke_ice_fr,
                 bottom_dirichlet=tke_bottom_dirichlet,
                 bottom_level=tke_bottom_level,
@@ -982,6 +985,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             lat_deg=lat_deg,
             T_n2=T_n2, S_n2=S_n2,
             t_depth=_bn2_t_depth, w_depth=_bn2_w_depth,
+            e3w_int=_bn2_e3w,
             ice_frac=_tke_ice_fr,
             # T8/T13 (tke_n2_time_level="nemo_before") + T4
             # (tke_shear_production="nemo_burchard"): Mode A (prognostic)
@@ -1153,10 +1157,10 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
     # (gdept / interior gdepw); ignored by every other n2_mode.  gdept(Kmm)
     # under z* is gdept_0*(1 + eta/ht_0) -- see eos.nemo_bn2_live_ladders.
     # NOT the z* Jacobian J above ((eta + H)/H_max, global normalisation).
-    ed_t_depth = ed_w_depth = None
+    ed_t_depth = ed_w_depth = ed_e3w = None
     if getattr(cfg, "n2_mode", "insitu") == "nemo_bn2":
-        from legoesm.ocean.eos import nemo_bn2_live_ladders
-        ed_t_depth, ed_w_depth = nemo_bn2_live_ladders(
+        from legoesm.ocean.eos import nemo_bn2_live_geometry
+        ed_t_depth, ed_w_depth, ed_e3w = nemo_bn2_live_geometry(
             z_coord, state.eta.data, state.H_bathy.data)
     # Shared, AD-safe helper — bit-for-bit identical to the explicit
     # ``enhanced_diffusion_convection`` path (no duplicated numerics).
@@ -1166,7 +1170,7 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
     K, A, _ = convective_K_A_flag(
         rho, z_coord.dz_ref, J, cfg,
         T=state.T.data, S=state.S.data, p_cell=ed_p_cell, eos_fn=eos_fn,
-        t_depth=ed_t_depth, w_depth=ed_w_depth,
+        t_depth=ed_t_depth, w_depth=ed_w_depth, e3w_int=ed_e3w,
         g=cc.g, rho_ref=cc.rho_0,
     )
     if getattr(cfg, "two_level_trigger", False) and before_tracers is not None:
@@ -1193,7 +1197,7 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
         K_b, A_b, _ = convective_K_A_flag(
             rho_b, z_coord.dz_ref, J, cfg,
             T=T_b, S=S_b, p_cell=ed_p_cell_b, eos_fn=eos_fn,
-            t_depth=ed_t_depth, w_depth=ed_w_depth,
+            t_depth=ed_t_depth, w_depth=ed_w_depth, e3w_int=ed_e3w,
             g=cc.g, rho_ref=cc.rho_0,
         )
         K = jnp.maximum(K, K_b)

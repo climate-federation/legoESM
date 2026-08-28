@@ -557,6 +557,9 @@ def compute_buoyancy_frequency_nemo_bn2(
     cfg: NemoSEOSConfig | None = None,
     g: float = constants.g,
     eos_form: str = "seos",
+    *,
+    e3w_int: jnp.ndarray | None = None,
+    e3w_source: str = "mesh_reference",
 ) -> jnp.ndarray:
     r"""Brunt-Väisälä ``N²`` by NEMO's exact ``bn2``.
 
@@ -606,6 +609,25 @@ def compute_buoyancy_frequency_nemo_bn2(
     -------
     array : signed ``N²`` at interior interfaces [1/s²], shape ``(..., nlev-1)``.
     """
+    if e3w_source not in ("mesh_reference", "depth_difference"):
+        raise ValueError(
+            f"unknown e3w_source {e3w_source!r}; expected 'mesh_reference' "
+            "or 'depth_difference'")
+    if e3w_source == "mesh_reference":
+        if e3w_int is None:
+            raise ValueError(
+                "e3w_source='mesh_reference' requires raw-mesh e3w_int; "
+                "the depth-difference construction is legacy opt-in")
+        e3w = jnp.asarray(e3w_int)
+        if e3w.shape[-1] != T.shape[-1] - 1:
+            raise ValueError(
+                f"e3w_int trailing size {e3w.shape[-1]} != nlev-1="
+                f"{T.shape[-1] - 1}")
+    else:
+        if e3w_int is not None:
+            raise ValueError(
+                "e3w_int must be omitted when e3w_source='depth_difference'")
+        e3w = None
     if eos_form not in ("seos", "teos10"):
         raise ValueError(
             f"compute_buoyancy_frequency_nemo_bn2 eos_form={eos_form!r} "
@@ -629,10 +651,62 @@ def compute_buoyancy_frequency_nemo_bn2(
     zrw = (gdepw_int - gd_lo) / (gd_up - gd_lo)               # (..., nlev-1)
     a_w = alpha[..., 1:] * (1.0 - zrw) + alpha[..., :-1] * zrw
     b_w = beta[..., 1:] * (1.0 - zrw) + beta[..., :-1] * zrw
-    e3w = gd_lo - gd_up                                        # centre spacing (>0)
+    if e3w is None:
+        e3w = gd_lo - gd_up                                    # explicit legacy
     dT = T[..., :-1] - T[..., 1:]                              # T_upper - T_lower
     dS = S[..., :-1] - S[..., 1:]
     return g * (a_w * dT - b_w * dS) / jnp.maximum(e3w, 1.0e-12)
+
+
+def nemo_bn2_live_geometry(
+    z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Return canonical live ``(gdept, gdepw_int, e3w_int)`` for NEMO bn2.
+
+    The faithful/default divisor is the raw mesh ``e3w_0(:,:,jk)`` multiplied
+    by NEMO's live ``1+r3t``.  ``depth_difference`` is an explicit legacy
+    coordinate option and reproduces the former ``diff(gdept)`` construction.
+    """
+    gdept, gdepw_int = nemo_bn2_live_ladders(z_coord, eta, H_bathy)
+    stretch = (None if getattr(z_coord, "linear_free_surface", False)
+               else nemo_r3t_stretch(z_coord, eta, H_bathy))
+    e3w = nemo_e3w_from_live_gdept(
+        z_coord, gdept, stretch=stretch, interior=True)
+    return gdept, gdepw_int, e3w
+
+
+def nemo_e3w_from_live_gdept(
+    z_coord, live_gdept: jnp.ndarray, *, stretch: jnp.ndarray | None,
+    interior: bool = True,
+) -> jnp.ndarray:
+    """Select NEMO W spacing once for bn2 and every paired consumer."""
+    source = getattr(z_coord, "nemo_e3w_source", "mesh_reference")
+    if source not in ("mesh_reference", "depth_difference"):
+        raise ValueError(
+            f"unknown nemo_e3w_source {source!r}; expected 'mesh_reference' "
+            "or 'depth_difference'")
+    if source == "depth_difference":
+        if interior:
+            return jnp.diff(live_gdept, axis=-1)
+        return jnp.concatenate(
+            [2.0 * live_gdept[..., :1], jnp.diff(live_gdept, axis=-1)],
+            axis=-1)
+    raw = getattr(z_coord, "nemo_e3w_0", None)
+    if raw is None:
+        raise ValueError(
+            "nemo_e3w_source='mesh_reference' requires z_coord.nemo_e3w_0; "
+            "use the legacy option explicitly only when no raw mesh exists")
+    raw = jnp.asarray(raw)
+    if raw.shape[-1] != z_coord.n_levels:
+        raise ValueError(
+            f"z_coord.nemo_e3w_0 trailing size {raw.shape[-1]} != n_levels="
+            f"{z_coord.n_levels}")
+    # NEMO jk=2..jpk maps to Python raw[...,1:] for the interior bn2 rows;
+    # ldf_slp also needs jk=1 and requests the complete raw field.
+    e3w = raw[..., 1:] if interior else raw
+    if stretch is not None:
+        e3w = e3w * jnp.asarray(stretch)[..., None]
+    return e3w
 
 
 def nemo_bn2_depth_ladders(z_coord) -> tuple[jnp.ndarray, jnp.ndarray]:

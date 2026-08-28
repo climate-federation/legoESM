@@ -486,6 +486,7 @@ def compute_N2(
     adiabatic_over_dz_half: bool = False,
     t_depth: jnp.ndarray | None = None,
     w_depth: jnp.ndarray | None = None,
+    e3w_int: jnp.ndarray | None = None,
     n2_eos_form: str = "seos",
 ) -> jnp.ndarray:
     """N^2 at interfaces (shared by the TKE and CATKE closures).
@@ -535,7 +536,7 @@ def compute_N2(
         # NEMO's rn2 feeds BOTH zdfevd and zdftke, so the TKE closure consumes
         # the same trigger as convection.
         if (T_cell is None or S_cell is None
-                or t_depth is None or w_depth is None):
+                or t_depth is None or w_depth is None or e3w_int is None):
             raise ValueError(
                 "n2_mode='nemo_bn2' requires T_cell, S_cell and the geometric "
                 "depth ladders t_depth (gdept) / w_depth (interior gdepw) — "
@@ -568,6 +569,7 @@ def compute_N2(
         from legoesm.ocean.eos import compute_buoyancy_frequency_nemo_bn2
         return compute_buoyancy_frequency_nemo_bn2(
             T_cell, S_cell, t_depth, w_depth, g=g, eos_form=n2_eos_form,
+            e3w_int=e3w_int,
         )
     raise ValueError(
         f"Unknown n2_mode={n2_mode!r}; expected 'insitu', 'insitu_signed', "

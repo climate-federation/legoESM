@@ -459,6 +459,7 @@ def bridge_nemo_to_legoesm_topo(
     metric_convention: str = "auto",
     coriolis_placement: str = "cell_average",
     e3t_mode: str | None = None,
+    nemo_e3w_source: str = "mesh_reference",
 ) -> NemoBridgeOutput:
     """Bridge a NEMO **Mercator + topography** config (e.g. DINO) to legoESM.
 
@@ -545,6 +546,10 @@ def bridge_nemo_to_legoesm_topo(
     # Validate HERE, on the static argument, rather than ~180 lines further in
     # when the vertical grid is built: a typo should stop the call, not surface
     # after the geometry has been constructed.
+    if nemo_e3w_source not in ("mesh_reference", "depth_difference"):
+        raise ValueError(
+            f"unknown nemo_e3w_source {nemo_e3w_source!r}; expected "
+            "'mesh_reference' or 'depth_difference'")
     if e3t_mode is not None and e3t_mode not in NEMO_E3T_MODES:
         raise ValueError(
             f"unknown e3t_mode {e3t_mode!r}; expected None or one of "
@@ -690,6 +695,9 @@ def bridge_nemo_to_legoesm_topo(
 
     z_coord = create_z_star_from_thicknesses(
         e3t_1d, t_depth_ref_m=_t_depth,
+        nemo_gdept_0_m=grid.gdept_0,
+        nemo_e3w_0_m=grid.e3w_0,
+        nemo_e3w_source=nemo_e3w_source,
     )
 
     # NEMO ln_zco FULL-STEP-z: fixed reference levels everywhere + a

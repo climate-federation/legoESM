@@ -1831,6 +1831,7 @@ def tke_vertical_mixing(
     S_n2: jnp.ndarray | None = None,
     t_depth: jnp.ndarray | None = None,
     w_depth: jnp.ndarray | None = None,
+    e3w_int: jnp.ndarray | None = None,
     ice_frac: jnp.ndarray | None = None,
     bottom_dirichlet: jnp.ndarray | None = None,
     bottom_level: jnp.ndarray | None = None,
@@ -2161,6 +2162,7 @@ def tke_vertical_mixing(
         n2_eos_form=getattr(cfg, "n2_eos_form", "seos"),
         adiabatic_over_dz_half=veros_slots,
         t_depth=t_depth, w_depth=w_depth,
+        e3w_int=e3w_int,
     )
 
     # ----- rn2b (T8/T13, NEMO's TRUE before/Nbb level) -----
@@ -2188,6 +2190,7 @@ def tke_vertical_mixing(
             n2_eos_form=getattr(cfg, "n2_eos_form", "seos"),
             adiabatic_over_dz_half=veros_slots,
             t_depth=t_depth, w_depth=w_depth,
+            e3w_int=e3w_int,
         )
     else:
         N2b = N2
@@ -2454,6 +2457,9 @@ def tke_set_diffusivities(
     boundary_cap: jnp.ndarray | None = None,
     T_n2: jnp.ndarray | None = None,
     S_n2: jnp.ndarray | None = None,
+    t_depth: jnp.ndarray | None = None,
+    w_depth: jnp.ndarray | None = None,
+    e3w_int: jnp.ndarray | None = None,
     ice_frac: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, TKEPostMixingContext]:
     """Veros ``set_tke_diffusivities`` (tke.py:20-113) from the CARRIED TKE.
@@ -2499,6 +2505,7 @@ def tke_set_diffusivities(
         T_cell=_Tn2, S_cell=_Sn2, p_cell=p_cell,
         dz_ref=dz_ref, jacobian=jacobian, eos_fn=eos_fn,
         n2_mode=cfg.n2_mode, adiabatic_over_dz_half=True,
+        t_depth=t_depth, w_depth=w_depth, e3w_int=e3w_int,
     )
     if taum_surface is not None:
         # NEMO taum channel (see tke_vertical_mixing).

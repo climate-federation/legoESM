@@ -486,7 +486,8 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
     _use_nemo_bn2 = getattr(z_coord, "t_depth_ref", None) is not None
     if _use_nemo_bn2:
         from legoesm.ocean.eos import (
-            compute_buoyancy_frequency_nemo_bn2, NemoSEOSConfig,
+            compute_buoyancy_frequency_nemo_bn2, nemo_e3w_from_live_gdept,
+            NemoSEOSConfig,
         )
         _gdept = jnp.asarray(z_coord.t_depth_ref, dtype=dtype)
         # NEMO evaluates alpha/beta at the LIVE gdept(Kmm) = gdept_0*(1+r3t)
@@ -515,8 +516,14 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
             _J = jnp.asarray(jacobian, dtype)[..., None]     # (nlat,nlon,1)
             _gdept = _gdept[None, None, :] * _J
             _gdepw_int = _gdepw_int[None, None, :] * _J
+            _stretch = jnp.asarray(jacobian, dtype)
+        else:
+            _stretch = None
+        e3w = nemo_e3w_from_live_gdept(
+            z_coord, _gdept, stretch=_stretch, interior=True)
         n2_int = compute_buoyancy_frequency_nemo_bn2(
-            T_filled, S_filled, _gdept, _gdepw_int, NemoSEOSConfig(), g=g)
+            T_filled, S_filled, _gdept, _gdepw_int, NemoSEOSConfig(), g=g,
+            e3w_int=e3w)
     else:
         n2_int = compute_buoyancy_frequency_adiabatic(
             T_filled, S_filled, p_cell, dz_ref, J1, eos_fn=eos_fn,
@@ -529,12 +536,7 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
     # up to 11.3 m.  Mixing them left a residual that survived every other fix
     # and produced 14 mismatched MLD columns whose below-threshold decisions
     # were otherwise identical to NEMO's at every level (#1226).
-    if _use_nemo_bn2:
-        # axis=-1: _gdept may be (nlev,) or, with a live-grid jacobian,
-        # (nlat, nlon, nlev).  Either way this stays THE SAME ladder bn2
-        # divides by, preserving the exact cancellation.
-        e3w = jnp.diff(_gdept, axis=-1)              # (..., nlev-1)
-    else:
+    if not _use_nemo_bn2:
         e3w = z_centers[1:] - z_centers[:-1]         # (nlev-1,)
     # The MLD CRITERION is thickness-free, and that is not an approximation --
     # it is an identity in NEMO.  eosbn2 divides by the live e3w and zdfmxl
@@ -805,7 +807,7 @@ def _nemo_wpoint_e3w_wmask_n2(rho, T, S, z_coord, eos_fn, rho_0, g, act,
     # the DINO twin, day-10 max|u| 0.6027 -> 0.6036 -- the old ladder's
     # gdept_1d is not the arithmetic midpoint either (5.28 m apart), so the
     # derived form was wrong in BOTH modes.
-    e3w = jnp.concatenate([2.0 * gdept[:1], gdept[1:] - gdept[:-1]])  # NEMO e3w(k)
+    from legoesm.ocean.eos import nemo_e3w_from_live_gdept
     # #1226 blocker 1: e3w(Kmm) = e3w_0*(1+r3t) is LIVE everywhere ldfslp.F90 /
     # ldftra.F90 read it (the :131 Time() macro applies to e3w unconditionally,
     # not just the rn2b division above) -- the slope-stability bound
@@ -818,7 +820,13 @@ def _nemo_wpoint_e3w_wmask_n2(rho, T, S, z_coord, eos_fn, rho_0, g, act,
     _live_e3w = (jacobian is not None
                  and isinstance(z_coord, OceanPartialCellCoordinate))
     if _live_e3w:
-        e3w = e3w[None, None, :] * jnp.asarray(jacobian, dtype)[..., None]
+        _stretch = jnp.asarray(jacobian, dtype)
+        _gdept_live = gdept[None, None, :] * _stretch[..., None]
+    else:
+        _stretch = None
+        _gdept_live = gdept
+    e3w = nemo_e3w_from_live_gdept(
+        z_coord, _gdept_live, stretch=_stretch, interior=False)
 
     wmask3 = act * jnp.roll(act, +1, axis=2)
     wmask3 = wmask3.at[:, :, 0].set(act[:, :, 0])
@@ -853,7 +861,8 @@ def _nemo_wpoint_e3w_wmask_n2(rho, T, S, z_coord, eos_fn, rho_0, g, act,
         else:
             _gdept_n2, _gdepw_n2 = gdept, _gdepw_int
         n2_int = compute_buoyancy_frequency_nemo_bn2(
-            T, S, _gdept_n2, _gdepw_n2, NemoSEOSConfig(), g=g)     # (...,nlev-1)
+            T, S, _gdept_n2, _gdepw_n2, NemoSEOSConfig(), g=g,
+            e3w_int=e3w[..., 1:])                           # (...,nlev-1)
         # HISTORICAL (superseded 2026-07-28, kept for provenance):
         # this branch used to divide n2_int by the jacobian --
         #     NEMO divides by the LIVE e3w(jk,Kmm) = e3w_0*(1+r3t)
