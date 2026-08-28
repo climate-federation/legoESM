@@ -1460,6 +1460,7 @@ def main() -> int:
                             lw_l = a_tri[..., 1:1 + nmat]
                             diag_l = b_tri[..., 1:1 + nmat]
                             up_l = c_tri[..., 1:1 + nmat]
+                            solve_kwargs = tke_capture["solve_calls"][0][0]
 
                             with xr.open_dataset(
                                     RUN / "mesh_mask.nc",
@@ -1482,7 +1483,12 @@ def main() -> int:
                             tmask_jk = tmask_m[..., 1:1 + nmat]
                             dissl_jk = dissl_full[..., 1:1 + nmat]
                             wmask_jk = wet_mat.astype(np.float64)
-                            dt64 = np.float64(kamm.DT)
+                            # Score the timestep actually handed to zdftke.
+                            # NEMO's TKE equation uses base rn_Dt=2700 even
+                            # while MLF tracer/momentum solves use
+                            # rDt=2*rn_Dt (dom_oce.F90:69-71;
+                            # MY_SRC/zdftke.F90:336-337).
+                            dt64 = np.float64(solve_kwargs["dt"])
                             ediss64 = np.float64(tke_cfg.c_eps)
                             zcof_n = (-np.float64(0.5) * dt64) * tmask_jk
                             avm_up_sum_n = np.maximum(
@@ -1497,7 +1503,6 @@ def main() -> int:
                                       + (np.float64(1.5) * dt64 * ediss64)
                                       * dissl_jk * wmask_jk)
 
-                            solve_kwargs = tke_capture["solve_calls"][0][0]
                             avm_old_l = np.asarray(solve_kwargs["K_M_old"])
                             avm_operand_l = avm_old_l[..., :nmat]
                             avm_up_sum_l = np.maximum(
@@ -1620,12 +1625,22 @@ def main() -> int:
                             row12_primary["operand_metrics"] = row12_operands
                             row12_primary["resolved_constants"] = {
                                 "rn_Dt": float(dt64),
+                                "expected_nemo_rn_Dt": float(kamm.DT),
                                 "rn_ediss": float(ediss64),
                                 "minimum_avm_sum": 2.0e-5,
                                 "production_metric_operand_source":
                                     metric_operand_source,
                                 "production_dissl_operand_source":
                                     dissl_operand_source,
+                                "loud_retraction": (
+                                    "RETRACTED: the first round-9 run called "
+                                    "the literal coefficient association the "
+                                    "owner while reconstructing zcof with "
+                                    "2700 s but failing to score the solver's "
+                                    "consumed 5400 s MLF dt. The corrected "
+                                    "probe scores solve_kwargs['dt']; the "
+                                    "production MLF path now threads NEMO's "
+                                    "base rn_Dt only to nemo_literal TKE."),
                             }
                             row12_primary["controls"] = {
                                 name: planted_controls(

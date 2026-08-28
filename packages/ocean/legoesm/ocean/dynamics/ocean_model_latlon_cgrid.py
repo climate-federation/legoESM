@@ -6546,6 +6546,7 @@ class LatLonCGridOceanModel:
         K33_iso=None,
         *,
         dt_mom=None,
+        tke_rn_dt=None,
         surface_tracer_forcing=None,
         tracer_source=None,
         do_tracers: bool = True,
@@ -6808,7 +6809,12 @@ class LatLonCGridOceanModel:
                     A_v_background=float(_cfg_b.A_v),
                     K_v_background=float(_cfg_b.K_v),
                     eos_fn=_vmix_eos_fn,
-                    tke_old=tke_old, dt_tke=dt_mom,
+                    tke_old=tke_old,
+                    dt_tke=(tke_rn_dt if (
+                        _vmix_cfg.scheme == "tke"
+                        and getattr(_vmix_cfg.tke, "tke_matrix_evaluation",
+                                    "factored") == "nemo_literal"
+                        and tke_rn_dt is not None) else dt_mom),
                     tke_source=tke_source, return_tke=True,
                     # T-point latitudes [deg] for the NEMO etau_htau_mode=
                     # "latitude" penetration profile (unused otherwise).
@@ -8963,6 +8969,12 @@ class LatLonCGridOceanModel:
                 naa_expl, rdt, surface_forcing,
                 K_v_phys=K_v_phys, A_v_phys=A_v_phys, K33_iso=k33_implicit,
                 dt_mom=dt_mom,
+                # zdftke advances en with the base rn_Dt even though the
+                # surrounding MLF tracer/momentum implicit solves use
+                # rDt=2*rn_Dt (dom_oce.F90:69-71; zdftke.F90:336-337).
+                # Only nemo_literal consumes this override; every factored
+                # TKE/CATKE/non-TKE card remains on dt_mom byte-for-byte.
+                tke_rn_dt=dt,
                 surface_tracer_forcing=surface_tracer_forcing,
                 tracer_source=tracer_source,
                 tke_old=_tke_old, tke_source=tke_source,
@@ -9300,6 +9312,7 @@ class LatLonCGridOceanModel:
                 naa_expl, rdt, surface_forcing,
                 K_v_phys=K_v_phys, A_v_phys=A_v_phys, K33_iso=k33_implicit,
                 dt_mom=dt_mom,
+                tke_rn_dt=dt,
                 surface_tracer_forcing=surface_tracer_forcing,
                 tracer_source=tracer_source,
                 tke_old=_tke_old, tke_source=tke_source,
