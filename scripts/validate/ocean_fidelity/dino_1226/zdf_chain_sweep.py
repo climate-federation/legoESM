@@ -62,6 +62,7 @@ from legoesm.ocean.eos import (
     nemo_seos_alpha_beta,
 )
 from legoesm.ocean.fidelity.time_levels import time_level_for_dump
+from legoesm.ocean.fidelity.nemo_io import read_nemo_restart
 
 
 def sha256(path: Path) -> str:
@@ -236,6 +237,22 @@ def main() -> int:
                 np.asarray(n2_legacy), n2_n, wet_w_all, focus, POINTWISE_BAR),
             "disposition": "VERIFIED" if row2m["pass"] else "DIVERGED"}
 
+    # Row 3: the same eos_rab/bn2 operation on Nnn tracers.  The restart's
+    # tn/sn are the registered "now" operands; geometry remains Kmm=Nnn.
+    now = read_nemo_restart(str(RUN / "DINO_00005760_restart.nc"), nn_hls=0)
+    T_now = jnp.asarray(np.asarray(now.T).reshape(T.shape), dtype=T.dtype)
+    S_now = jnp.asarray(np.asarray(now.S).reshape(S.shape), dtype=S.dtype)
+    n2_now = compute_buoyancy_frequency_nemo_bn2(
+        T_now, S_now, gdept, gdepw, NemoSEOSConfig(),
+        g=NEMO_CONSTANTS_CONFIG.g, e3w_int=e3w)
+    n2_now_n_full = base._load_interior(
+        str(RUN / "tke_dump_rn2.bin"), ni, nj)
+    n2_now_n = n2_now_n_full[..., 1:1 + n2_now.shape[-1]]
+    row3m = metrics(np.asarray(n2_now), n2_now_n, wet_w_all, focus,
+                    POINTWISE_BAR)
+    row3 = {"output": row3m,
+            "disposition": "VERIFIED" if row3m["pass"] else "DIVERGED"}
+
     localization = None
     if row1["disposition"] == "VERIFIED" and row2["disposition"] == "DIVERGED":
         # Exact dumps cover NEMO jk=1..35.  Score interfaces jk=2..35, i.e.
@@ -359,6 +376,7 @@ def main() -> int:
     input_paths = [
         RUN / "DINO_00005760_restart.nc", RUN / "mesh_mask.nc", RUN / "ocean.output",
         RUN / "dump_alpha_b.bin", RUN / "dump_beta_b.bin", RUN / "tke_dump_rn2b.bin",
+        RUN / "tke_dump_rn2.bin",
         RUN / "eiv_dump_gdept.bin", RUN / "eiv_dump_e3w.bin", args.mld_maps,
     ]
     artifact = {
@@ -371,18 +389,24 @@ def main() -> int:
         "jax_backend": jax.default_backend(),
         "time_levels": {x: time_level_for_dump(x) for x in
                         ("dump_alpha_b.bin", "dump_beta_b.bin", "tke_dump_rn2b.bin",
+                         "tke_dump_rn2.bin",
                          "eiv_dump_gdept.bin", "eiv_dump_e3w.bin")},
         "focus_columns_ji": [list(x) for x in focus],
         "bars": {"pointwise_column": POINTWISE_BAR, "corr": CORR_BAR,
                  "rms_ratio_epsilon": RATIO_EPS},
         "controls": controls,
         "rows": {"1_eos_rab_before": row1, "2_bn2_before": row2,
-                 "3_eos_rab_bn2_now": {"disposition": "UNMEASURED",
-                                         "reason": "stop at first divergence"}},
+                 "3_eos_rab_bn2_now": row3,
+                 "4_zdf_sh2": {"disposition": "UNMEASURED",
+                                 "reason": "probe extension stops after row 3"}},
         "first_divergence": ({"row": 2, "operation": "bn2(Nbb)",
                               "nemo_line": "src/OCE/TRA/eosbn2.F90:1467",
                               "localization": localization}
-                             if row2["disposition"] == "DIVERGED" else None),
+                             if row2["disposition"] == "DIVERGED" else
+                             ({"row": 3, "operation": "eos_rab/bn2(Nnn)",
+                               "nemo_line": "src/OCE/TRA/eosbn2.F90:1467",
+                               "localization": None}
+                              if row3["disposition"] == "DIVERGED" else None)),
         "sha256": {str(p): sha256(p) for p in source_paths + input_paths},
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -392,6 +416,9 @@ def main() -> int:
           f"beta_max={row1b['max_column_error']:.6e}")
     print(f"row 2 bn2: {row2['disposition']} max={row2m['max_column_error']:.6e} "
           f"bad_columns={row2m['n_diverged_columns']}/{row2m['n_wet_columns']}")
+    print(f"row 3 eos_rab/bn2 now: {row3['disposition']} "
+          f"max={row3m['max_column_error']:.6e} "
+          f"bad_columns={row3m['n_diverged_columns']}/{row3m['n_wet_columns']}")
     if localization:
         for c in localization["candidates_in_nemo_evaluation_order"]:
             print(f"  substitute {c['substitution']}: pass={c['metrics']['pass']} "
