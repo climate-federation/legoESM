@@ -5886,10 +5886,16 @@ class LatLonCGridOceanModel:
                     a_t * eta + jnp.roll(a_t * eta, -1, axis=0))
                 wet_u = hu0 > 0.0
                 wet_v = hv0 > 0.0
-                r3u_nemo = jnp.where(
-                    wet_u, num_u / (hu0 * a_u), 0.0)
-                r3v_nemo = jnp.where(
-                    wet_v, num_v / (hv0 * a_v), 0.0)
+                wet_u_f = wet_u.astype(dtype)
+                wet_v_f = wet_v.astype(dtype)
+                # Preserve domqco/domain.F90 operation order exactly:
+                # r1_hu_0 = mask/(hu_0 + 1 - mask), then
+                # r3u = numerator * r1_hu_0 / e1e2u.  Combining the two
+                # divisors changes the last bits and fails the 1e-15 bar.
+                r1_hu0 = wet_u_f / (hu0 + 1.0 - wet_u_f)
+                r1_hv0 = wet_v_f / (hv0 + 1.0 - wet_v_f)
+                r3u_nemo = num_u * r1_hu0 / a_u
+                r3v_nemo = num_v * r1_hv0 / a_v
                 # NEMO arrays name the east/north face of T(i,j); legoESM
                 # arrays name the west/south face.  Prefix the periodic/wall
                 # face to convert without changing arithmetic in r3 itself.
