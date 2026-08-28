@@ -138,3 +138,29 @@ one additional required opt-out:
 
 Omitting that flag would no longer reproduce the old row-4 chain and invalidates
 the control. The faithful command remains option-free.
+
+### 2026-08-28 row-8 localization amendment, before operand measurement
+
+The corrected row-4 composite and rows 5--7 have crossed their registered
+bars.  The first subsequent output checked by the existing row table, the TKE
+surface Dirichlet boundary at row 8, fails narrowly (`154/9,920` columns,
+maximum normalized column error `1.638670e-15`).  Rows 9 onward are therefore
+not citable measurements from that exploratory run and remain unmeasured.
+
+Before rerunning, row 8 is split in NEMO's literal order
+(`MY_SRC/zdftke.F90:334,360-364`):
+
+1. infer NEMO's live `taum` from unfloored dumped surface `en` using the
+   separately evaluated `zbbrau`, and compare it to legoESM's supplied
+   `SurfaceForcing.taum`;
+2. evaluate `zbbrau = rn_ebb / rho0` with the resolved double-precision
+   operands and compare the inferred input/output relation;
+3. evaluate the product and `MAX(rn_emin0, zbbrau*taum)` with literal NEMO
+   association.
+
+Every comparison retains the pointwise per-column `1e-15` bar and the four
+southern focus scores.  A failed input identity localizes row 8 to the forcing
+operand; an input pass followed by an output failure localizes it to arithmetic
+association.  A planted one-cell perturbation and nonfinite injection must
+fail.  The ordered sweep stops at row 8 unless the literal construction passes
+at `0/9,920`; no row 9+ result may be promoted across a row-8 miss.
