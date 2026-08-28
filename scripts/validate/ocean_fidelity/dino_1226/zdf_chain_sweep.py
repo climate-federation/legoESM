@@ -1707,6 +1707,150 @@ def main() -> int:
                                                 "solver"),
                                         },
                                     }
+                            else:
+                                # Rows 13-15 are the three source-ordered RHS
+                                # operands at zdftke.F90:513-515.  Score the
+                                # exact arrays consumed by the solve, not a
+                                # recomputed post-solve diagnostic.
+                                nrhs = npr
+                                wet_rhs = wet_pr[..., :nrhs]
+                                p_sh2_l = np.asarray(
+                                    solve_kwargs["P_s"])[..., :nrhs]
+                                p_sh2_n = sh2_n_full[..., 1:1 + nrhs]
+                                row13m = metrics(
+                                    p_sh2_l, p_sh2_n, wet_rhs, focus,
+                                    POINTWISE_BAR)
+                                row13m["controls"] = planted_controls(
+                                    p_sh2_n, p_sh2_n, wet_rhs, POINTWISE_BAR)
+                                row4["continuation_preview"]["rows"][
+                                    "13_tke_rhs_shear"] = row13m
+
+                                restart_path = (
+                                    RUN / "DINO_00005760_restart.nc")
+                                _ravm, ravt, _rdissl = (
+                                    kamm.read_nemo_restart_tke_coefficients(
+                                        str(restart_path), nn_hls=0))
+                                rn2_l = np.asarray(
+                                    solve_kwargs["N2"])[..., :nrhs]
+                                rn2_n_rhs = n2_now_n_full[..., 1:1 + nrhs]
+                                avt_l = np.asarray(
+                                    solve_kwargs["K_H_old"])[..., :nrhs]
+                                avt_n = np.asarray(ravt)[..., 1:1 + nrhs]
+                                strat_l = -(avt_l * rn2_l)
+                                strat_n = -(avt_n * rn2_n_rhs)
+                                row14m = metrics(
+                                    strat_l, strat_n, wet_rhs, focus,
+                                    POINTWISE_BAR)
+                                row14m["operand_metrics"] = {
+                                    "p_avt": metrics(
+                                        avt_l, avt_n, wet_rhs, focus,
+                                        POINTWISE_BAR),
+                                    "rn2": metrics(
+                                        rn2_l, rn2_n_rhs, wet_rhs, focus,
+                                        POINTWISE_BAR),
+                                }
+                                row14m["controls"] = planted_controls(
+                                    strat_n, strat_n, wet_rhs, POINTWISE_BAR)
+                                row4["continuation_preview"]["rows"][
+                                    "14_tke_rhs_stratification"] = row14m
+
+                                restart_en = kamm.read_nemo_restart_en(
+                                    str(restart_path), nn_hls=0)
+                                en_l = np.asarray(
+                                    solve_kwargs["e_old"])[..., :nrhs]
+                                en_n = np.asarray(
+                                    restart_en)[..., 1:1 + nrhs]
+                                dissl_l = np.asarray(
+                                    solve_kwargs["dissl_old"])[..., :nrhs]
+                                dissl_n = np.asarray(
+                                    _rdissl)[..., 1:1 + nrhs]
+                                zfact3 = np.float64(0.5) * ediss64
+                                diss_rhs_l = zfact3 * dissl_l * en_l
+                                diss_rhs_n = zfact3 * dissl_n * en_n
+                                row15m = metrics(
+                                    diss_rhs_l, diss_rhs_n, wet_rhs, focus,
+                                    POINTWISE_BAR)
+                                row15m["operand_metrics"] = {
+                                    "carried_dissl": metrics(
+                                        dissl_l, dissl_n, wet_rhs, focus,
+                                        POINTWISE_BAR),
+                                    "incoming_en": metrics(
+                                        en_l, en_n, wet_rhs, focus,
+                                        POINTWISE_BAR),
+                                }
+                                row15m["controls"] = planted_controls(
+                                    diss_rhs_n, diss_rhs_n, wet_rhs,
+                                    POINTWISE_BAR)
+                                row4["continuation_preview"]["rows"][
+                                    "15_tke_rhs_dissipation"] = row15m
+                                row4["continuation_preview"]["rows"][
+                                    "16_wave_surface_boundary"] = {
+                                        "pass": True,
+                                        "disposition": "WAIVED",
+                                        "reason": (
+                                            "Resolved DINO run has "
+                                            "ln_wave=F; zdftke.F90:524-545 "
+                                            "is not executed."),
+                                        "nemo_line": (
+                                            "cfgs/DINO/MY_SRC/zdftke.F90:"
+                                            "524-545"),
+                                    }
+                                for row_number, operation, output, operands in (
+                                    (13, "TKE RHS shear operand", row13m,
+                                     {"p_sh2": row13m}),
+                                    (14, "TKE RHS stratification operand",
+                                     row14m, row14m["operand_metrics"]),
+                                    (15, "TKE RHS dissipation operand",
+                                     row15m, row15m["operand_metrics"]),
+                                ):
+                                    if not output["pass"]:
+                                        first_operand = next(
+                                            name for name, result in
+                                            operands.items()
+                                            if not result["pass"])
+                                        row4["continuation_preview"][
+                                            "first_divergence"] = {
+                                                "row": row_number,
+                                                "operation": operation,
+                                                "nemo_line": (
+                                                    "cfgs/DINO/MY_SRC/"
+                                                    f"zdftke.F90:{500 + row_number}"),
+                                                "output": output,
+                                                "first_failing_operand": {
+                                                    "name": first_operand},
+                                                "operand_localization": operands,
+                                                "controls": output["controls"],
+                                            }
+                                        break
+                                if "first_divergence" not in row4[
+                                        "continuation_preview"]:
+                                    row4["continuation_preview"]["rows"][
+                                        "17_tke_tridiagonal_solve"] = {
+                                            "pass": False,
+                                            "disposition": "UNMEASURED",
+                                            "reason": (
+                                                "The existing tke_dump_en.bin "
+                                                "is post-etau. Row 17 requires "
+                                                "a new write-only pre-etau "
+                                                "en slot plus the registered "
+                                                "dump-on/dump-off restart "
+                                                "identity bracket before its "
+                                                "numeric result is citable."),
+                                            "next_measurement_design": {
+                                                "slot": "tke_dump_en_postsolve",
+                                                "location": (
+                                                    "immediately after "
+                                                    "zdftke.F90:565 and before "
+                                                    "the nn_etau block"),
+                                                "bar": 1.0e-12,
+                                                "controls": [
+                                                    "point perturbation",
+                                                    "horizontal roll",
+                                                    "nonfinite poison",
+                                                    "bracket restart identity",
+                                                ],
+                                            },
+                                        }
         if row4["disposition"] == "DIVERGED":
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
                 LatLonCGridOceanModel,
