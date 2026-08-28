@@ -36,6 +36,16 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     "dump_alpha_b.bin": ("before", "stpmlf.F90:184 eos_rab(ts(...,Nbb), rab_b, Nnn)"),
     "dump_beta_b.bin": ("before", "stpmlf.F90:184 eos_rab(ts(...,Nbb), rab_b, Nnn)"),
     "tke_dump_rn2b.bin": ("before", "rn2b = bn2(ts(...,Nbb)); zdfmxl.F90:98 integrates rn2b"),
+    "bn2_dump_zrw.bin": ("before", "eosbn2.F90:1459-1460 zrw in the first "
+                                      "stpmlf bn2(ts(...,Nbb),rab_b,rn2b,Nnn) call"),
+    "bn2_dump_zaw.bin": ("before", "eosbn2.F90:1462 thermal interpolation in "
+                                      "the Nbb-tracer/Nnn-geometry bn2 call"),
+    "bn2_dump_zbw.bin": ("before", "eosbn2.F90:1463 saline interpolation in "
+                                      "the Nbb-tracer/Nnn-geometry bn2 call"),
+    "bn2_dump_numerator.bin": ("before", "eosbn2.F90:1465-1467 numerator in "
+                                            "the Nbb-tracer/Nnn-geometry bn2 call"),
+    "bn2_dump_result.bin": ("before", "eosbn2.F90:1465-1468 assigned rn2b in "
+                                         "the Nbb-tracer/Nnn-geometry bn2 call"),
     # Geometry paired with the before T/S above is nevertheless Kmm=Nnn.
     # ldftra's instrumentation writes the live arrays verbatim at the same
     # step; register geometry by its own level instead of inheriting the T/S

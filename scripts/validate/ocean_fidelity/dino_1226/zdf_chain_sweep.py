@@ -185,6 +185,79 @@ def metrics(lego: np.ndarray, nemo: np.ndarray, wet: np.ndarray,
     }
 
 
+def exact_difference_census(
+    lego: np.ndarray,
+    nemo: np.ndarray,
+    wet: np.ndarray,
+    focus: list[tuple[int, int]],
+) -> dict:
+    """Bitwise companion to the registered tolerance bar.
+
+    This does not change a row's VERIFIED/DIVERGED disposition.  It names the
+    first numeric operand difference that a later division may amplify.
+    """
+    lego = np.asarray(lego)
+    nemo = np.asarray(nemo)
+    wet = np.asarray(wet, dtype=bool)
+    unequal = wet & ~((lego == nemo) | (np.isnan(lego) & np.isnan(nemo)))
+    bad_columns = np.any(unequal, axis=-1)
+    abs_diff = np.where(wet, np.abs(lego - nemo), 0.0)
+    return {
+        "n_unequal_wet_elements": int(unequal.sum()),
+        "n_unequal_wet_columns": int(bad_columns.sum()),
+        "max_absolute_difference": float(np.max(abs_diff)),
+        "focus": [
+            {"j": j, "i": i, "exact": bool(not bad_columns[j, i])}
+            for j, i in focus
+        ],
+        "bit_identical": bool(not unequal.any()),
+    }
+
+
+def restart_numeric_identity(instrument: Path, other: Path) -> dict:
+    """Compare NetCDF numeric state, deliberately ignoring container bytes."""
+    with xr.open_dataset(instrument, decode_times=False) as left, \
+            xr.open_dataset(other, decode_times=False) as right:
+        left_numeric = {
+            name for name in left.variables
+            if np.issubdtype(left[name].dtype, np.number)
+        }
+        right_numeric = {
+            name for name in right.variables
+            if np.issubdtype(right[name].dtype, np.number)
+        }
+        common = sorted(left_numeric & right_numeric)
+        differences = []
+        for name in common:
+            a = np.asarray(left[name])
+            b = np.asarray(right[name])
+            same = (a.shape == b.shape
+                    and np.array_equal(a, b, equal_nan=True))
+            if not same:
+                differences.append({
+                    "name": name,
+                    "left_shape": list(a.shape),
+                    "right_shape": list(b.shape),
+                    "max_absolute_difference": (
+                        float(np.nanmax(np.abs(a - b)))
+                        if a.shape == b.shape else None),
+                })
+        return {
+            "instrument": str(instrument),
+            "other": str(other),
+            "instrument_numeric_variables": len(left_numeric),
+            "other_numeric_variables": len(right_numeric),
+            "missing_from_other": sorted(left_numeric - right_numeric),
+            "missing_from_instrument": sorted(right_numeric - left_numeric),
+            "common_numeric_variables": len(common),
+            "n_different_common_variables": len(differences),
+            "differences": differences,
+            "common_variables_bit_identical": not differences,
+            "same_numeric_variable_set": left_numeric == right_numeric,
+            "pass": not differences and left_numeric == right_numeric,
+        }
+
+
 def face_difference_metrics(
     lego_velocity: np.ndarray,
     nemo_velocity: np.ndarray,
@@ -405,7 +478,19 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--mld-maps", type=Path, required=True)
     ap.add_argument("--output", type=Path, required=True)
+    ap.add_argument("--bn2-chain-dir", type=Path)
+    ap.add_argument("--bn2-bracket-off-restart", type=Path)
+    ap.add_argument("--bn2-bracket-instrument-restart", type=Path)
+    ap.add_argument("--bn2-certified-restart", type=Path)
     args = ap.parse_args()
+    bracket_args = (
+        args.bn2_bracket_off_restart,
+        args.bn2_bracket_instrument_restart,
+        args.bn2_certified_restart,
+    )
+    if args.bn2_chain_dir is not None and any(x is None for x in bracket_args):
+        raise SystemExit(
+            "--bn2-chain-dir requires both bracket restarts and the certified restart")
 
     if jax.default_backend() != "cpu" or not jax.config.x64_enabled:
         raise SystemExit(f"CPU/fp64 required; backend={jax.default_backend()} x64={jax.config.x64_enabled}")
@@ -1068,6 +1153,160 @@ def main() -> int:
                                           POINTWISE_BAR)
                             for name, value in substitution_arrays.items()
                         }
+                        bn2_chain = None
+                        if args.bn2_chain_dir is not None:
+                            chain_files = {
+                                name: args.bn2_chain_dir / f"bn2_dump_{name}.bin"
+                                for name in (
+                                    "zrw", "zaw", "zbw", "numerator", "result")
+                            }
+                            missing = [str(path) for path in chain_files.values()
+                                       if not path.is_file()]
+                            if missing:
+                                raise FileNotFoundError(
+                                    f"missing registered row-11 dumps: {missing}")
+                            chain_n_full = {
+                                name: base._load_haloed(str(path), jpi, jpj, hls)
+                                for name, path in chain_files.items()
+                            }
+                            chain_n = {
+                                name: value[..., 1:1 + npr]
+                                for name, value in chain_n_full.items()
+                            }
+                            if not np.array_equal(
+                                    chain_n["result"], rn2b_n_pr,
+                                    equal_nan=True):
+                                raise AssertionError(
+                                    "bn2 result stream is not bit-identical to "
+                                    "the independent tke_dump_rn2b time-level pin")
+
+                            gd_up = np.asarray(gdept)[..., :npr]
+                            gd_lo = np.asarray(gdept)[..., 1:1 + npr]
+                            gw_l = np.asarray(gdepw)[..., :npr]
+                            aa_up = np.asarray(alpha)[..., :npr]
+                            aa_lo = np.asarray(alpha)[..., 1:1 + npr]
+                            bb_up = np.asarray(beta)[..., :npr]
+                            bb_lo = np.asarray(beta)[..., 1:1 + npr]
+                            e3_l = np.asarray(e3w)[..., :npr]
+                            t_up = np.asarray(T)[..., :npr]
+                            t_lo = np.asarray(T)[..., 1:1 + npr]
+                            s_up = np.asarray(S)[..., :npr]
+                            s_lo = np.asarray(S)[..., 1:1 + npr]
+                            zrw_l = (gw_l - gd_lo) / (gd_up - gd_lo)
+                            zaw_l = aa_lo * (1.0 - zrw_l) + aa_up * zrw_l
+                            zbw_l = bb_lo * (1.0 - zrw_l) + bb_up * zrw_l
+                            num_l = np.float64(NEMO_CONSTANTS_CONFIG.g) * (
+                                zaw_l * (t_up - t_lo)
+                                - zbw_l * (s_up - s_lo))
+                            result_l = num_l / e3_l
+                            chain_l = {
+                                "zrw": zrw_l,
+                                "zaw": zaw_l,
+                                "zbw": zbw_l,
+                                "numerator": num_l,
+                                "result": result_l,
+                            }
+                            checkpoints = {}
+                            for name in (
+                                    "zrw", "zaw", "zbw", "numerator", "result"):
+                                checkpoint = metrics(
+                                    chain_l[name], chain_n[name], wet_pr,
+                                    focus, POINTWISE_BAR)
+                                checkpoint["exact"] = exact_difference_census(
+                                    chain_l[name], chain_n[name], wet_pr, focus)
+                                checkpoint["controls"] = planted_controls(
+                                    chain_n[name], chain_n[name], wet_pr,
+                                    POINTWISE_BAR)
+                                checkpoints[name] = checkpoint
+
+                            # Suffix substitutions answer which earliest NEMO
+                            # checkpoint is sufficient to close the amplified
+                            # Richardson zri failure.
+                            zaw_from_nemo_zrw = (
+                                aa_lo * (1.0 - chain_n["zrw"])
+                                + aa_up * chain_n["zrw"])
+                            zbw_from_nemo_zrw = (
+                                bb_lo * (1.0 - chain_n["zrw"])
+                                + bb_up * chain_n["zrw"])
+                            result_from_zrw = (
+                                np.float64(NEMO_CONSTANTS_CONFIG.g) * (
+                                    zaw_from_nemo_zrw * (t_up - t_lo)
+                                    - zbw_from_nemo_zrw * (s_up - s_lo)) / e3_l)
+                            result_from_zaw_zbw = (
+                                np.float64(NEMO_CONSTANTS_CONFIG.g) * (
+                                    chain_n["zaw"] * (t_up - t_lo)
+                                    - chain_n["zbw"] * (s_up - s_lo)) / e3_l)
+                            result_from_numerator = chain_n["numerator"] / e3_l
+                            suffix_results = {
+                                "zrw": result_from_zrw,
+                                "zaw_zbw": result_from_zaw_zbw,
+                                "numerator": result_from_numerator,
+                                "result": chain_n["result"],
+                            }
+                            zri_suffix = {
+                                name: metrics(
+                                    literal_zri(value, avm_l, sh2_l),
+                                    zri_n, wet_pr, focus, POINTWISE_BAR)
+                                for name, value in suffix_results.items()
+                            }
+                            first_exact = next(
+                                (name for name in (
+                                    "zrw", "zaw", "zbw", "numerator", "result")
+                                 if not checkpoints[name]["exact"]["bit_identical"]),
+                                None)
+                            first_closing = next(
+                                (name for name in (
+                                    "zrw", "zaw_zbw", "numerator", "result")
+                                 if zri_suffix[name]["pass"]), None)
+
+                            bracket = restart_numeric_identity(
+                                args.bn2_bracket_instrument_restart,
+                                args.bn2_bracket_off_restart)
+                            if not bracket["pass"]:
+                                raise AssertionError(
+                                    "dump-on/dump-off numeric restart bracket failed")
+                            certified = restart_numeric_identity(
+                                args.bn2_bracket_instrument_restart,
+                                args.bn2_certified_restart)
+                            with xr.open_dataset(
+                                    args.bn2_bracket_instrument_restart,
+                                    decode_times=False) as ds:
+                                planted_left = np.asarray(ds["tb"])
+                                planted_right = np.asarray(ds["sb"])
+                            planted_wrong_field_fires = not np.array_equal(
+                                planted_left, planted_right, equal_nan=True)
+                            if not planted_wrong_field_fires:
+                                raise AssertionError(
+                                    "restart bracket planted wrong-field control did not fire")
+                            bn2_chain = {
+                                "nemo_line": "src/OCE/TRA/eosbn2.F90:1459-1468",
+                                "ordered_checkpoints": checkpoints,
+                                "first_bitwise_diverging_checkpoint": first_exact,
+                                "zri_suffix_substitutions": zri_suffix,
+                                "first_zri_closing_substitution": first_closing,
+                                "result_stream_vs_tke_rn2b_bit_identical": True,
+                                "instrumentation_bracket": bracket,
+                                "certified_comparison": certified,
+                                "certified_all_numeric_identity_claim_retracted": (
+                                    not certified["pass"]),
+                                "certified_retraction_reason": (
+                                    "the sandbox already carries the registered "
+                                    "literal tau diagnostic, whereas the older "
+                                    "certified binary does not; only the same-source "
+                                    "dump-off build is a valid instrumentation bracket"
+                                    if not certified["pass"] else None),
+                                "planted_wrong_field_control_fires": (
+                                    planted_wrong_field_fires),
+                                "sha256": {
+                                    str(path): sha256(path)
+                                    for path in [
+                                        *chain_files.values(),
+                                        args.bn2_bracket_off_restart,
+                                        args.bn2_bracket_instrument_restart,
+                                        args.bn2_certified_restart,
+                                    ]
+                                },
+                            }
                         row11_primary = dict(
                             row11_inputs["zri"]
                             if not row11_inputs["zri"]["pass"]
@@ -1134,6 +1373,8 @@ def main() -> int:
                             "p_pdlr": planted_controls(
                                 pdlr_n, pdlr_n, wet_pr, POINTWISE_BAR),
                         }
+                        if bn2_chain is not None:
+                            row11_primary["bn2_operand_chain"] = bn2_chain
                         row4["continuation_preview"]["rows"][
                             "11_prandtl_zri_pdlr"] = row11_primary
                         if not row11_primary["pass"]:
@@ -1469,6 +1710,7 @@ def main() -> int:
         HERE / "PREREG_zdf_chain_sweep_round3.md",
         HERE / "PREREG_zdf_chain_sweep_round4.md",
         HERE / "PREREG_zdf_chain_sweep_round6.md",
+        HERE / "PREREG_zdf_chain_sweep_round7.md",
         HERE / "kamm_twin_90d.py",
         Path("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py"),
         Path("packages/ocean/legoesm/ocean/eos.py"),
@@ -1508,6 +1750,14 @@ def main() -> int:
         RUN / "sbc_dump_utau.bin",
         RUN / "eiv_dump_gdept.bin", RUN / "eiv_dump_e3w.bin", args.mld_maps,
     ]
+    if args.bn2_chain_dir is not None:
+        input_paths.extend([
+            *(args.bn2_chain_dir / f"bn2_dump_{name}.bin" for name in
+              ("zrw", "zaw", "zbw", "numerator", "result")),
+            args.bn2_bracket_off_restart,
+            args.bn2_bracket_instrument_restart,
+            args.bn2_certified_restart,
+        ])
     continuation = row4.get("continuation_preview")
     rows = {"1_eos_rab_before": row1, "2_bn2_before": row2,
             "3_eos_rab_bn2_now": row3, "4_zdf_sh2": row4}
@@ -1544,7 +1794,7 @@ def main() -> int:
     else:
         first_divergence = None
     artifact = {
-        "schema": "zdf-chain-sweep-v6",
+        "schema": "zdf-chain-sweep-v7",
         "lane": "d180", "kt": 5761, "cpu_only": True, "fp64": True,
         "checked_out_parent_sha": git_sha(),
         "probe_commit_sha": probe_commit_sha(),
@@ -1570,7 +1820,10 @@ def main() -> int:
                          "tke_dump_en.bin",
                          "dump_nmln.bin", "dump_hmlp.bin",
                          "drg_dump_rCdU_bot.bin", "sbc_dump_utau.bin",
-                         "eiv_dump_gdept.bin", "eiv_dump_e3w.bin")},
+                         "eiv_dump_gdept.bin", "eiv_dump_e3w.bin",
+                         "bn2_dump_zrw.bin", "bn2_dump_zaw.bin",
+                         "bn2_dump_zbw.bin", "bn2_dump_numerator.bin",
+                         "bn2_dump_result.bin")},
         "focus_columns_ji": [list(x) for x in focus],
         "bars": {"pointwise_column": POINTWISE_BAR, "corr": CORR_BAR,
                  "rms_ratio_epsilon": RATIO_EPS},
@@ -1644,6 +1897,22 @@ def main() -> int:
                 if "first_passing_substitution" in first["output"]:
                     print("    first_passing_substitution="
                           f"{first['output']['first_passing_substitution']}")
+                chain = first["output"].get("bn2_operand_chain")
+                if chain is not None:
+                    print("    bn2 first bitwise divergence="
+                          f"{chain['first_bitwise_diverging_checkpoint']}")
+                    for name, cm in chain["ordered_checkpoints"].items():
+                        exact = cm["exact"]
+                        print(f"    bn2 {name}: pass={cm['pass']} "
+                              f"bad_columns={cm['n_diverged_columns']}/"
+                              f"{cm['n_wet_columns']} exact_bad_columns="
+                              f"{exact['n_unequal_wet_columns']}")
+                    print("    first zri-closing bn2 substitution="
+                          f"{chain['first_zri_closing_substitution']}")
+                    print("    dump-on/off bracket pass="
+                          f"{chain['instrumentation_bracket']['pass']}")
+                    print("    certified all-numeric claim retracted="
+                          f"{chain['certified_all_numeric_identity_claim_retracted']}")
     if localization:
         for c in localization["candidates_in_nemo_evaluation_order"]:
             print(f"  substitute {c['substitution']}: pass={c['metrics']['pass']} "
