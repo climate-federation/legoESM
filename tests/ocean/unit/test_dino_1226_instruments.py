@@ -5,6 +5,8 @@ session scratchpad (``scripts/validate/ocean_fidelity/dino_1226/``):
 mode projector). All synthetic -- no NEMO artifacts, CPU-fast.
 """
 import importlib
+import inspect
+import json
 import os
 import sys
 import types
@@ -1432,3 +1434,362 @@ def test_run_twin_stamps_the_reference_clock_and_the_run_configuration(
     # the reference must come from the restart, not from the same override the
     # twin itself used -- otherwise the pair-check compares a value to itself
     assert "restart_elapsed_seconds(" in src
+
+
+# ---------------------------------------------------------------------------
+# kamm_twin_90d -- fp64 snapshot storage and the always-on fp64 reduced series
+#
+# WHY THESE EXIST: the campaign's single-precision snapshot storage repeatedly
+# capped what was measurable (lego's early ensemble spread was 2 differing
+# cells of 342134 at day 10; ensemble members tie exactly on max-type metrics
+# at the storage quantum). The fix has two halves and each is tested here --
+# the opt-in float64 3-D block, and the always-on float64 REDUCED series that
+# is computed from the LIVE state before the storage cast.
+# ---------------------------------------------------------------------------
+def test_snapshot_storage_defaults_to_float32_and_the_flag_makes_it_float64(
+        instruments):
+    """REVERT-RED ON THE DEFAULT. Doubling every recorded twin's artifact by
+    accident is the one regression this feature could cause, so the default is
+    asserted as tightly as the flag."""
+    K = instruments.kamm_twin_90d
+    assert K.snapshot_dtype(False) is np.float32
+    assert K.snapshot_dtype(True) is np.float64
+    assert K._parse_args(["r", "o.npz"]).fp64_3d is False
+    assert K._parse_args(["r", "o.npz", "--fp64-3d"]).fp64_3d is True
+
+
+def test_storage_dtype_stamp_defaults_to_the_legacy_all_float32_map(instruments):
+    """EXTEND-ONLY. Every artifact recorded before the stamp existed was
+    all-float32, so an unstamped artifact must resolve to exactly that -- a
+    consumer reading it must not change any recorded score."""
+    K = instruments.kamm_twin_90d
+    assert K.snapshot_storage_dtypes({}) == K.LEGACY_STORAGE_DTYPES
+    assert all(v == "float32" for v in K.LEGACY_STORAGE_DTYPES.values())
+    stamped = {"storage_dtypes": np.str_(
+        '{"T3d": "float64", "S3d": "float64", "u3d": "float64", '
+        '"reduced": "float64"}')}
+    got = K.snapshot_storage_dtypes(stamped)
+    assert got["u3d"] == "float64" and got["reduced"] == "float64"
+
+
+_WET = np.ones((6, 5), dtype=np.float64)
+
+
+def _two_states_apart_by(delta):
+    """Two 3-D u fields differing by `delta` on ONE face, everything else
+    identical. `delta` is chosen sub-quantum by the caller."""
+    a = np.full((6, 5, 4), 0.25, dtype=np.float64)
+    b = a.copy()
+    b[2, 3, 1] += delta
+    return a, b
+
+
+def _sum_reducer(f64):
+    """A stand-in for the mesh-backed reducer: a masked weighted column sum,
+    i.e. the same SHAPE of reduction (a masked transport integral) the real one
+    takes, with no NEMO mesh required.
+
+    It reads ``land_mask`` deliberately. The real reducer needs the wet domain
+    for every one of its eleven metrics, and a 5-day verification run caught
+    the wiring gap where the harness handed it only the 3-D fields -- a stub
+    that ignored the mask would have kept that green.
+    """
+    w = np.arange(1, f64["u"].shape[2] + 1, dtype=np.float64)
+    m = f64["land_mask"] > 0.5
+    return {"x": float(np.einsum("jik,k->", np.where(m[:, :, None],
+                                                     f64["u"], 0.0), w))}
+
+
+def test_capture_snapshot_stores_at_the_requested_dtype(instruments):
+    K = instruments.kamm_twin_90d
+    a, _ = _two_states_apart_by(0.0)
+    fields = {"T": a, "S": a, "eta": a[:, :, 0], "u": a, "v": a}
+    for fp64, want in ((False, np.float32), (True, np.float64)):
+        stored, red, status = K.capture_snapshot(
+            fields, snap_dtype=K.snapshot_dtype(fp64), reducer=_sum_reducer,
+            land_mask=_WET)
+        assert status == "ok"
+        assert {v.dtype for v in stored.values()} == {np.dtype(want)}
+        # the land mask is a reducer INPUT, never a stored snapshot field --
+        # it is time-invariant and already written once per run
+        assert set(stored) == {"T", "S", "eta", "u", "v"}
+        assert red["x"] == pytest.approx(
+            _sum_reducer({"u": a, "land_mask": _WET})["x"])
+    stored, red, status = K.capture_snapshot(
+        fields, snap_dtype=np.float32, reducer=None, land_mask=_WET)
+    assert red is None and status == "no reducer"
+    # the mask is REQUIRED -- it was optional for one commit and a call site
+    # that forgot it shipped, crashing every snapshot run
+    with pytest.raises(TypeError):
+        K.capture_snapshot(fields, snap_dtype=np.float32,
+                           reducer=_sum_reducer)
+
+
+def test_the_reducer_is_handed_the_wet_domain(instruments):
+    """The reductions are all masked integrals, so a reducer that never sees
+    the land mask cannot produce the gate's quantity. A 5-day verification run
+    caught exactly this wiring gap after the first round of unit tests were
+    green, so it is pinned here."""
+    K = instruments.kamm_twin_90d
+    a, _ = _two_states_apart_by(0.0)
+    fields = {"T": a, "S": a, "eta": a[:, :, 0], "u": a, "v": a}
+    seen = {}
+
+    def spy(f64):
+        seen.update(f64)
+        return {"x": 0.0}
+
+    K.capture_snapshot(fields, snap_dtype=np.float32, reducer=spy,
+                       land_mask=_WET)
+    assert "land_mask" in seen, "the reducer was not handed the wet domain"
+    assert seen["land_mask"].dtype == np.float64
+    # masking must actually bite, or the check above is decorative
+    half = _WET.copy()
+    half[3:, :] = 0.0
+    full = K.capture_snapshot(fields, snap_dtype=np.float32,
+                              reducer=_sum_reducer, land_mask=_WET)[1]["x"]
+    part = K.capture_snapshot(fields, snap_dtype=np.float32,
+                              reducer=_sum_reducer, land_mask=half)[1]["x"]
+    assert part < full
+
+
+def test_the_fp64_reduced_series_resolves_a_perturbation_the_fp32_block_cannot(
+        instruments):
+    """THE POINT OF THE WHOLE CHANGE, stated as a measurement.
+
+    Plant a perturbation strictly BELOW the float32 storage quantum of the
+    field it perturbs. Then:
+
+      * the float32-stored 3-D block is BIT-IDENTICAL between the two states,
+        so ANY metric reduced from storage ties exactly -- this is the recorded
+        campaign's "2 differing cells of 342134" and its exact ensemble ties;
+      * the float64 REDUCED series, computed from the live state before the
+        cast, separates them -- so an ensemble spread built from it is a
+        measurement rather than a report of the npz dtype;
+      * with --fp64-3d the stored block separates them too.
+
+    The perturbation is checked to be genuinely sub-quantum first: a test that
+    planted a RESOLVABLE perturbation would pass while proving nothing.
+    """
+    K = instruments.kamm_twin_90d
+    a, _ = _two_states_apart_by(0.0)
+    quantum = np.spacing(np.float32(a[2, 3, 1]))
+    delta = 0.01 * float(quantum)
+    a, b = _two_states_apart_by(delta)
+    assert delta > 0.0, "the planted perturbation must be nonzero"
+    assert np.float32(a[2, 3, 1]) == np.float32(b[2, 3, 1]), (
+        "the perturbation is NOT sub-quantum -- this test would pass "
+        "vacuously")
+
+    def cap(state, fp64):
+        return K.capture_snapshot(
+            {"T": state, "S": state, "eta": state[:, :, 0],
+             "u": state, "v": state},
+            snap_dtype=K.snapshot_dtype(fp64), reducer=_sum_reducer,
+            land_mask=_WET)
+
+    s32a, r64a, _ = cap(a, False)
+    s32b, r64b, _ = cap(b, False)
+    # 1. float32 storage ties the two states, bit for bit.
+    assert np.array_equal(s32a["u"], s32b["u"])
+    # ... and therefore so does any metric reduced from the STORED field.
+    assert (_sum_reducer({"u": s32a["u"].astype(np.float64),
+                          "land_mask": _WET})["x"]
+            == _sum_reducer({"u": s32b["u"].astype(np.float64),
+                             "land_mask": _WET})["x"])
+    # 2. the fp64 reduced series does not.
+    assert r64a["x"] != r64b["x"]
+    assert r64b["x"] - r64a["x"] == pytest.approx(delta * 2.0, rel=1e-9)
+    # 3. --fp64-3d also separates the stored block.
+    s64a, _, _ = cap(a, True)
+    s64b, _, _ = cap(b, True)
+    assert not np.array_equal(s64a["u"], s64b["u"])
+
+
+def test_reduced_series_keys_cover_every_scored_metric(instruments):
+    """The stored series must cover what the scorers actually reduce. If
+    verdict360 grows a metric and the series does not, a future ensemble is
+    back to reducing float32 for that one -- so the two lists are pinned
+    against each other rather than maintained in parallel by hand."""
+    K = instruments.kamm_twin_90d
+    pytest.importorskip("netCDF4")
+    sys.path.insert(0, str(SCRIPTS_DIR / "validate" / "ocean_fidelity" / "dino_1226"))
+    try:
+        import verdict360
+    except SystemExit as exc:                       # no NEMO mesh on this box
+        pytest.skip(f"NEMO mesh unavailable: {exc}")
+    finally:
+        try:
+            sys.path.remove(
+                str(SCRIPTS_DIR / "validate" / "ocean_fidelity" / "dino_1226"))
+        except ValueError:
+            pass
+    assert tuple(K.REDUCED_KEYS) == tuple(verdict360.KEYS)
+
+
+def test_the_real_reducer_reproduces_the_recorded_scorers_exactly(instruments):
+    """IDENTITY, not similarity. The stored series is only trustworthy if it is
+    the SAME number the recorded scorer would produce from the same state at
+    the same precision -- otherwise it is a second spelling of ten reductions,
+    which is this campaign's most expensive defect class. Driven on a synthetic
+    but physically-ranged state, on the real NEMO mesh."""
+    K = instruments.kamm_twin_90d
+    pytest.importorskip("netCDF4")
+    d = str(SCRIPTS_DIR / "validate" / "ocean_fidelity" / "dino_1226")
+    sys.path.insert(0, d)
+    try:
+        import acc_thermal_wind as A
+        import verdict360
+        reducer, status = K.build_snapshot_reducer(
+            os.path.dirname(A.mm.filepath()))
+    except SystemExit as exc:
+        pytest.skip(f"NEMO mesh unavailable: {exc}")
+    finally:
+        try:
+            sys.path.remove(d)
+        except ValueError:
+            pass
+    assert status == "ok" and reducer is not None
+    ny, nx, nz = A.tmask.shape
+    rng = np.random.default_rng(0)
+    z = np.arange(nz, dtype=np.float64)
+    T = 4.0 + 16.0 * np.exp(-z / 6.0)[None, None, :] + 0.05 * rng.standard_normal((ny, nx, nz))
+    S = 34.5 + 0.5 * np.exp(-z / 10.0)[None, None, :] + 0.01 * rng.standard_normal((ny, nx, nz))
+    u = 0.05 * rng.standard_normal((ny, nx + 1, nz))
+    mask = np.asarray(A.tmask[:, :, 0], dtype=np.float64)
+    got = reducer({"T": T, "S": S, "u": u, "land_mask": mask})
+    st = {"T": T, "S": S, "u": u[:, 1:nx + 1, :], "land_mask": mask}
+    want = verdict360.all_metrics(st, A.tmask & (mask > 0.5)[:, :, None])
+    for k in K.REDUCED_KEYS:
+        assert got[k] == want[k], k
+    # the per-row profile must PARTITION the metric it decomposes
+    rows = got[K.REDUCED_ROW_KEY]
+    assert rows.shape == (ny,)
+    assert float(rows.sum()) == pytest.approx(want["acc_mean"], rel=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# fp64_snapshot_contract_check.py -- the verification instrument itself
+# ---------------------------------------------------------------------------
+@pytest.fixture(scope="module")
+def contract_check():
+    d = str(SCRIPTS_DIR / "validate" / "ocean_fidelity" / "dino_1226")
+    sys.path.insert(0, d)
+    try:
+        import fp64_snapshot_contract_check as C
+        return C
+    except SystemExit as exc:                       # no NEMO mesh on this box
+        pytest.skip(f"NEMO mesh unavailable: {exc}")
+    finally:
+        try:
+            sys.path.remove(d)
+        except ValueError:
+            pass
+
+
+def test_the_contract_instrument_passes_its_own_self_check(contract_check):
+    """The instrument decides what we believe about the resolution claim, so
+    it is gated here rather than trusted from one run. Its self-check plants a
+    perturbation VERIFIED invisible to float32 storage on every field and
+    fails unless at least one metric that float32 ties is resolved at fp64."""
+    assert contract_check._self_check() == 0
+
+
+def test_a_metric_tied_at_both_precisions_is_not_counted_as_a_gain(
+        contract_check, monkeypatch):
+    """The instrument's first run scored four metrics as `UNMEASURABLE at
+    fp32` that were simply untouched by the perturbation -- tied in BOTH
+    columns. A metric the perturbation never reached is not a precision win,
+    and counting it would let this instrument report a result for doing
+    nothing."""
+    C = contract_check
+    keys = ("acc", "up", "deep")
+    monkeypatch.setattr(C.K, "REDUCED_KEYS", keys)
+    monkeypatch.setattr(C, "metrics_from_storage",
+                        lambda q, day, cast: {"acc": 1.0, "up": 2.0,
+                                              "deep": 3.0 + q})
+    monkeypatch.setattr(C, "stored_series",
+                        lambda q, day: {"acc": 1.0 + q, "up": 2.0,
+                                        "deep": 3.0 + q})
+    rows, gained = C.resolution_table(0.0, 1e-9, 5)
+    assert {k: (d32 == 0.0, d64 > 0.0) for k, d32, d64 in rows} == {
+        "acc": (True, True),      # tied at fp32, resolved at fp64 -> a gain
+        "up": (True, False),      # tied at BOTH -> not a gain
+        "deep": (False, True),    # resolved at both -> not a gain
+    }
+    assert gained == 1
+
+
+# ---------------------------------------------------------------------------
+# The artifact-assembly seams. Both reviews found real defects here that every
+# earlier test missed, because the earlier tests INJECT a reducer and never
+# cross the seam between the harness and the real one.
+# ---------------------------------------------------------------------------
+def test_the_stamp_never_promises_a_series_the_artifact_does_not_carry(
+        instruments):
+    """The stamp and the series keys must be built from ONE day list. They
+    were computed thirty lines apart, so a run whose snapshot grid excluded
+    day 0 and which then stopped before its first requested day stamped a
+    series as present while writing none."""
+    K = instruments.kamm_twin_90d
+    row = np.zeros(3)
+    made = {k: 1.0 for k in K.REDUCED_KEYS} | {K.REDUCED_ROW_KEY: row}
+    # day 0 was captured (it always is under --save-3d) but is NOT a requested
+    # snapshot day, and the run never reached day 30
+    kw = K.reduced_series_kwargs({0: made}, [30, 60, 90])
+    assert kw == {}, "a day outside the requested grid must not be written"
+    stamp = json.loads(K.storage_stamp("absent", "absent" if not kw else "x"))
+    assert stamp["reduced"] == "absent"
+    # and when a requested day IS present, the keys and the stamp agree
+    kw = K.reduced_series_kwargs({0: made, 30: made}, [30, 60, 90])
+    assert list(kw["reduced_days"]) == [30]
+    assert all(kw[f"reduced_{k}"].shape == (1,) for k in K.REDUCED_KEYS)
+    assert kw[f"reduced_{K.REDUCED_ROW_KEY}"].shape == (1, 3)
+    assert json.loads(K.storage_stamp("float32", "float64"))["reduced"] \
+        == "float64"
+
+
+def test_a_failing_reduction_loses_its_day_and_never_the_run(instruments):
+    """The reduction is a diagnostic written alongside the primary data, and
+    the artifact is only saved after the whole time loop. A reducer that
+    raised at day 90 of a 90-day twin would delete 90 days of compute to
+    protect a few kB of annotation."""
+    K = instruments.kamm_twin_90d
+
+    def boom(live):
+        raise SystemExit("the three latitude groups do not partition")
+
+    red, status = K.safe_reduce(boom, {"u": np.zeros(3)})
+    assert red is None
+    assert "SystemExit" in status and "partition" in status
+    # a SystemExit is an exception, so it must be caught like any other --
+    # this is the exact type the real reducer raises
+    stored, red, status = K.capture_snapshot(
+        {"u": np.zeros((2, 2, 2))}, snap_dtype=np.float32, reducer=boom,
+        land_mask=np.ones((2, 2)))
+    assert stored["u"].dtype == np.float32, "the 3-D block must still be kept"
+    assert red is None and status.startswith("reduction failed")
+
+
+def test_the_series_resolution_is_stamped_not_the_container(instruments):
+    """The series is ALWAYS stored in a float64 array, but its resolution is
+    the precision the arm was BUILT at. On a deliberate FP64=0 arm it is
+    float64-stored and float32-resolved, and a consumer told "float64" would
+    credit it with resolution it does not have."""
+    K = instruments.kamm_twin_90d
+    assert json.loads(K.storage_stamp("float32", "float32"))["reduced"] \
+        == "float32"
+    assert json.loads(K.storage_stamp("float32", "float64"))["reduced"] \
+        == "float64"
+
+
+def test_a_storage_only_flag_stays_out_of_the_run_config_string(instruments):
+    """The recorded configuration string is compared BYTE-FOR-BYTE between two
+    arms by the seasonal-clock A/B, which hard-aborts on any difference as a
+    confound. A key added for a storage-only setting would make every
+    recorded-arm-vs-new-arm comparison abort forever."""
+    K = instruments.kamm_twin_90d
+    src = inspect.getsource(K.run_twin)
+    cfg = src.split("run_config = json.dumps(")[1].split("}, sort_keys=True)")[0]
+    assert "fp64_3d" not in cfg
+    assert "perturb_seed" in cfg, "wrong block located -- this test is vacuous"
