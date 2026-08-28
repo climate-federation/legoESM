@@ -150,7 +150,12 @@ def reads_stored_vface_metric(grid) -> bool:
     metric from ``cos(grid.lat)``, which is WRONG on a Cartesian **beta-plane**
     (whose stored metric is the uniform ``dx_m`` but whose pseudo-lat is a
     nonzero ``y_c/radius``) and merely redundant on a spherical rich geometry
-    (whose stored ``dx_v`` is bit-identical to the recompute in the core).
+    built with ``metric_convention="exact"`` (whose stored ``dx_v`` is
+    bit-identical to the recompute in the core).  Under
+    ``metric_convention="nemo_isotropic"`` it is NOT redundant: that geometry
+    stores the width at NEMO's own V-point Mercator latitude, which the
+    recompute (an average of the two adjacent tracer latitudes) does not
+    reproduce (#1455).  Reading stored is what keeps the two from mixing.
 
     Reads stored when the grid carries an explicit 2D ``dx_v`` (any rich
     geometry) EXCEPT under a meridionally-periodic (y-reentrant) topology,

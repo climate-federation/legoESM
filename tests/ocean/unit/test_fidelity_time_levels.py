@@ -53,6 +53,14 @@ def test_full_paths_are_accepted():
     assert time_level_for_dump("/a/b/RUN_GDB/dump_alpha_b.bin") == "before"
 
 
+def test_realized_vmix_dumps_are_current_zdf_phy_outputs():
+    """A10: closure copied then EVD-composited in the current zdf_phy call."""
+    for name in ("dump_avm.bin", "dump_avt.bin"):
+        assert time_level_for_dump(name) == "now"
+        src = _DUMP_TIME_LEVEL[name][1]
+        assert "stpmlf.F90:210" in src and "ldftra.F90:95" in src, src
+
+
 def test_unregistered_dump_raises_and_never_defaults():
     """Fail-closed: a silent 'now' default is the original bug."""
     with pytest.raises(ValueError, match="no registered NEMO time level"):

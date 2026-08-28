@@ -307,8 +307,17 @@ def _assert_same_entry_state(day: int, kt: int, lane: str, tiles: str) -> dict:
 
 
 def _run_one(day: int, kt: int, lane: str, tiles: str, *,
-             t_seconds: float | None, log_dir: str) -> dict:
-    """One child run of the committed instrument at one bridged state."""
+             t_seconds: float | None, log_dir: str,
+             map_dir: str | None = None) -> dict:
+    """One child run of the committed instrument at one bridged state.
+
+    ``map_dir`` asks the child for its PER-CELL deposit map as well as the
+    scalars this walk parses.  The map is what a per-cell two-step projection
+    needs: this wrapper's regexes recover only band-reduced scalars, and a
+    band sum annihilates an alternating signal whose sign varies along the
+    wall (measured at 44x-80000x in the zonal-wall budget).  Off by default so
+    the existing scalar arms are byte-unchanged.
+    """
     seq = os.path.join(_DINO, lane)
     tdir = os.path.join(_DINO, tiles)
     for p in (seq, tdir, os.path.join(seq, "substep_dump.bin"),
@@ -333,6 +342,13 @@ def _run_one(day: int, kt: int, lane: str, tiles: str, *,
         env["DINO_1226_T_SECONDS"] = repr(float(t_seconds))
     else:
         env.pop("DINO_1226_T_SECONDS", None)
+    map_path = None
+    if map_dir is not None:
+        os.makedirs(map_dir, exist_ok=True)
+        map_path = os.path.join(map_dir, f"deposit_map_kt{kt}.npz")
+        env["DINO_1455_DEPOSIT_MAP"] = map_path
+    else:
+        env.pop("DINO_1455_DEPOSIT_MAP", None)
 
     t0 = time.time()
     proc = subprocess.run([sys.executable, _INSTRUMENT], env=env,
@@ -369,6 +385,13 @@ def _run_one(day: int, kt: int, lane: str, tiles: str, *,
     }
     rec.update(entry)
     rec["forcing"] = rec["total"] - rec["in_loop"]
+    if map_path is not None:
+        if not os.path.exists(map_path):
+            raise SystemExit(
+                f"FATAL day {day}: the child was asked for a deposit map at "
+                f"{map_path} and did not write one. A missing map must never "
+                "become a dropped state in a time projection.")
+        rec["deposit_map"] = map_path
     # the wind must be ON in every child (the whole #1455 wind-off retraction),
     # and the clock must be the one this state's kt implies unless the legacy
     # arm asked otherwise.
@@ -640,6 +663,11 @@ def main(argv=None) -> int:
                     help="run the four CONSECUTIVE NEMO steps at day 180 "
                          "instead of the 10-day grid, to test whether the "
                          "in-loop share's constancy is aliasing")
+    ap.add_argument("--deposit-map-dir", default="",
+                    help="also write each child's PER-CELL deposit map into "
+                         "this directory (deposit_map_kt<KT>.npz). Needed for "
+                         "a per-cell two-step projection; the scalars this "
+                         "walk parses are band sums and cannot carry one.")
     ap.add_argument("--clock-ab", action="store_true",
                     help="also run day 180 under the LEGACY bare-dt clock. "
                          "This does NOT size anything: the clock has no path "
@@ -699,7 +727,8 @@ def main(argv=None) -> int:
               "within-step forcing-to-transport response ratio against a ramp "
               "model; that substitution is retracted in 4c14b4d91.)")
 
-    recs = [_run_one(day, kt, lane, tiles, t_seconds=None, log_dir=log_dir)
+    recs = [_run_one(day, kt, lane, tiles, t_seconds=None, log_dir=log_dir,
+                     map_dir=args.deposit_map_dir or None)
             for (day, kt, lane, tiles) in states]
 
     ab = None

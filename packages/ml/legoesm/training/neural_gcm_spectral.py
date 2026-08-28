@@ -1065,6 +1065,12 @@ def _make_spectral_integrator(pe_config, grid, sigma_coord, dt, integrator_name)
     ``_do_step``), sub-stepping at ``dt / si_substeps`` with SI matrices built for
     that sub-step dt.
     """
+    # Refuse configs whose explicit advection is unstable (the T63 dt=1800
+    # blowup class): the CI deck gate cannot see ad-hoc YAMLs or CLI dt
+    # overrides, so the bound is enforced where the integrator is built.
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import check_advective_cfl
+    check_advective_cfl(int(grid.n_max), dt, pe_config)
+
     if not pe_config.semi_implicit:
         def _integrate_explicit(state, tendency_fn):
             return dispatch_integrator(state, tendency_fn, dt, integrator_name)
@@ -1088,6 +1094,14 @@ def _make_spectral_integrator(pe_config, grid, sigma_coord, dt, integrator_name)
         if n_sub == 1:
             return ssp_rk3_step_si(state, tendency_fn, dt_si, si_data, grid)
 
+        # Each substep is checkpointed: XLA cannot rematerialize INTO the scan
+        # body, so without this the backward pass materializes every
+        # substep's tendency intermediates at once — measured 202 GiB for
+        # n_sub=3 at T63/L32 (job 27182008, OOM on an 80 GB card) against
+        # ~45 GiB for the single-step path. With the checkpoint the backward
+        # recomputes one substep at a time; memory returns to the
+        # single-substep envelope for one extra forward per substep.
+        @jax.checkpoint
         def _one(s, _):
             return ssp_rk3_step_si(s, tendency_fn, dt_si, si_data, grid), None
 

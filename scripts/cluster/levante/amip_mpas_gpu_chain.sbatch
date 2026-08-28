@@ -153,6 +153,26 @@ if [[ -z "${NCCL_MIN_NCHANNELS:-}" && -z "${NCCL_MAX_NCHANNELS:-}" && -z "${NCCL
 else
     echo "[nccl-recipe] manual override kept: NCCL_MIN_NCHANNELS=${NCCL_MIN_NCHANNELS:-} NCCL_MAX_NCHANNELS=${NCCL_MAX_NCHANNELS:-} NCCL_P2P_NET_CHUNKSIZE=${NCCL_P2P_NET_CHUNKSIZE:-}"
 fi
+
+# Lane-confirmed halo comm-wins (measured, opt-in; adopted alongside the NCCL
+# recipe of PR #1671). Dormant at gpu:1 (no halo exchange); they engage only
+# when a run is scaled to multiple GPUs. Each respects a manual override.
+if (( _IS_LATLON )); then
+    # ${VAR-1}: unset -> on; set '0' (the sanctioned off-value for BOTH flags;
+    # fused-halo honours only '0', packed-exchange also '') stays off.
+    export LEGOESM_LATLON_PACKED_EXCHANGE="${LEGOESM_LATLON_PACKED_EXCHANGE-1}"
+    export LEGOESM_LATLON_SPMD_FUSED_HALO="${LEGOESM_LATLON_SPMD_FUSED_HALO-1}"
+    echo "[comm-recipe] lat-lon: packed stage-entry exchange (25->13 CPs) + fused halo on"
+else
+    # MPAS wide-halo (-14% @64) is deliberately NOT defaulted: it RAISES on the
+    # *_scan integrators (packages/core/.../sharded_dynamics.py: wide-halo needs
+    # the unrolled spelling to thread its shrinking masks), and production MPAS
+    # runs a scan integrator (--time-integrator auto). Adopting it first needs a
+    # switch to an unrolled integrator (e.g. ssp_rk3), a separate decision with
+    # its own local-step tradeoff. Set LEGOESM_MPAS_WIDE_HALO=1 manually only
+    # with an unrolled integrator.
+    :
+fi
 echo "  This link runs to/for ${DAYS_THIS_JOB} days (target ${TARGET_DAYS}, resume day ${LATEST_DAY})"
 # The run-manifest guard hashes the FULL config incl. --days, so the
 # remaining-days convention makes every link a "different config" in the

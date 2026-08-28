@@ -1349,8 +1349,53 @@ class LatLonCGridOceanModel:
         # geometry carries fold descriptor and rotation angles.
         # ``metric_convention`` (#1226) is validated above, so the raise on
         # an unknown value happens before this call.
+        # THE SILENT-IGNORE CASE, refused rather than documented away.
+        # ``ensure_geometry`` passes a pre-built LatLonCGridGeometry through
+        # UNCHANGED, so a non-default placement requested on the config would
+        # do nothing at all -- the model would run the default convention while
+        # its own config said otherwise.  A supplied geometry is therefore
+        # CHECKED against the request, by the one identity that separates the
+        # conventions without needing the face latitudes: under "cell_average"
+        # the interior ``f_v`` IS the mean of the two adjacent ``f_T`` rows, to
+        # the arithmetic that built it.
+        if (self.config.coriolis_placement != "cell_average"
+                and hasattr(grid, "f_v") and hasattr(grid, "f_T")):
+            _fT = jnp.asarray(grid.f_T)
+            _fv_int = jnp.asarray(grid.f_v)[1:-1]
+            _gap = float(jnp.max(jnp.abs(
+                _fv_int - 0.5 * (_fT[:-1] + _fT[1:]))))
+            _scale = float(jnp.max(jnp.abs(_fT))) or 1.0
+            # AND ONLY WHEN THE TWO CONVENTIONS ACTUALLY DIFFER ON THIS GRID.
+            # The cell average equals the face value EXACTLY wherever f is
+            # LINEAR between the rows -- every beta-plane and every f-plane.
+            # There the setting is not being ignored, it is indistinguishable,
+            # and raising would abort a perfectly valid run (adversarial
+            # review, round 2, measured: beta-plane and f-plane both gap 0.0
+            # and both tripped the guard).  Curvature of f along the rows is
+            # the discriminator, and on a lat-lon grid it is exactly the second
+            # difference of f_T.
+            _curv = (float(jnp.max(jnp.abs(_fT[2:] - 2.0 * _fT[1:-1] + _fT[:-2])))
+                     if _fT.shape[0] >= 3 else 0.0)
+            _conventions_differ = _curv > 1e-12 * _scale
+            if _conventions_differ and _gap <= 1e-12 * _scale:
+                raise ValueError(
+                    "coriolis_placement="
+                    f"{self.config.coriolis_placement!r} was requested, but "
+                    "the grid handed to this model is an ALREADY-BUILT "
+                    "LatLonCGridGeometry whose f_v is the cell average (max "
+                    f"departure {_gap:.3e} <= {1e-12 * _scale:.3e}). "
+                    "ensure_geometry passes a pre-built geometry through "
+                    "unchanged, so this setting would be silently ignored "
+                    f"(f_T curvature {_curv:.3e} shows the two conventions DO "
+                    "differ on this grid, so this is a real no-op and not a "
+                    "beta-plane coincidence). "
+                    "Select the placement where the geometry is built "
+                    "(create_latlon_geometry / ensure_geometry / "
+                    "bridge_nemo_to_legoesm_topo)."
+                )
         self.grid = ensure_geometry(
-            grid, metric_convention=self.config.metric_convention)
+            grid, metric_convention=self.config.metric_convention,
+            coriolis_placement=self.config.coriolis_placement)
         # Push the meridionally-FLAT (Oceananigans `Flat`-y) mode to the grid-
         # operators backend PROCESS-GLOBAL (same pattern as the halo backend).
         # CONSTRAINT: this is process-global, so it assumes ONE lat-lon ocean model
@@ -1729,6 +1774,14 @@ class LatLonCGridOceanModel:
                 "metric_convention must be 'exact' or 'nemo_isotropic', got "
                 f"{config.metric_convention!r}"
             )
+
+        # #1455: the vertex-Coriolis placement, same dispatch pattern.
+        if config.coriolis_placement not in ("cell_average", "face_latitude"):
+            raise ValueError(
+                "coriolis_placement must be 'cell_average' or "
+                f"'face_latitude', got {config.coriolis_placement!r}"
+            )
+
 
         # Lateral mixing on the lat-lon C-grid is a DYNAMICS-level concern:
         # horizontal viscosity via config.lateral_viscosity.A_h/config.lateral_viscosity.B_h, GM/Redi via the
@@ -3248,6 +3301,7 @@ class LatLonCGridOceanModel:
     def tendencies_with_diagnostics(
         self, state: LatLonCGridOceanState, surface_forcing=None,
         sponge=None, dt=300.0, *, grid=None, vertex_mask=None,
+        ldf_state=None,
         z_coord=None, config=None,
     ):
         """Compute baroclinic tendencies + per-term momentum-tendency
@@ -3271,9 +3325,24 @@ class LatLonCGridOceanModel:
         time-mean budget this converges to the actually-applied
         tendency at O(dt) accuracy.
 
-        ``grid``/``vertex_mask`` (optional, SPMD): default ``None`` →
+        ``grid``/``vertex_mask`` (optional, SPMD): default ``None`` ->
         ``self.grid``/``self._vertex_mask`` (bit-identical); a band-local
         grid is injected by a future ``shard_map`` wrapper.
+
+        ``ldf_state`` (T, S, u, v at the BEFORE level), forwarded verbatim to
+        ``tendencies``, which has always accepted it.  IT MATTERS FOR ANY
+        ORACLE COMPARISON: NEMO evaluates lateral friction at the before level
+        (``dyn_ldf(kstp, Nbb, Nnn, ...)``, stpmlf.F90:319 -- a leapfrog-centred
+        diffusion is unconditionally unstable, so this is required rather than
+        incidental), and legoESM's production leapfrog path matches it.  This
+        wrapper omitted the parameter, so every caller silently got NOW-level
+        lateral friction while comparing against NEMO's BEFORE-level trend,
+        measuring ``A_h*lap(u_now - u_before)`` -- a quantity the instrument
+        manufactured.  Found 2026-08-25 by adversarial review of the
+        zonal-wall momentum budget; the affected term was the only one in that
+        budget whose difference was time-noisy.  Leave it ``None`` only for a
+        non-leapfrog card or when the now/before distinction is genuinely
+        irrelevant.
         """
         _zc = self.z_coord if z_coord is None else z_coord  # SPMD band override
         _cfg_b = self.config if config is None else config  # SPMD band override
@@ -3288,6 +3357,7 @@ class LatLonCGridOceanModel:
             diagnose_momentum=True,
             surface_tracer_forcing_fn=self._surface_tracer_forcing_fn,
             vertex_mask=_vmask,
+            ldf_state=ldf_state,
         )
 
     def _step_impl(self, state: LatLonCGridOceanState, dt: float,

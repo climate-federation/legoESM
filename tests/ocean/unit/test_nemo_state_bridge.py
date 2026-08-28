@@ -114,12 +114,17 @@ LON0, DLON_D = 0.0, 5.0
 
 def _synthetic_topo():
     from legoesm import constants
+    from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
     lat_deg = LAT0 + DLAT_D * np.arange(TNY)         # (TNY,)
     lon_deg = LON0 + DLON_D * np.arange(TNX)
     gphit = lat_deg[:, None] * np.ones((1, TNX))
     glamt = lon_deg[None, :] * np.ones((TNY, 1))
     gphiv = (lat_deg + 0.5 * DLAT_D)[:, None] * np.ones((1, TNX))  # north faces
-    R, Om = constants.R_earth, constants.Omega
+    # A stand-in for a NEMO mesh_mask must carry NEMO'S OWN rotation rate: the
+    # bridge builds f from NEMO's Earth by default (#1455), and a fixture on
+    # legoESM's rounded constant would be testing that the bridge reproduces
+    # the wrong planet.  That is exactly the defect the default fixes.
+    R, Om = constants.R_earth, NEMO_CONSTANTS_CONFIG.Omega
     lat_r = np.deg2rad(lat_deg)
     # Metrics from the sphere formulas create_latlon_geometry uses -> exact match.
     e1t = (R * np.deg2rad(DLON_D) * np.cos(lat_r))[:, None] * np.ones((1, TNX))
@@ -249,7 +254,12 @@ def _synthetic_topo_mercator():
     lat_face (latlon.py:1319), so this is the case that catches a face sign-flip /
     off-by-one / N-S swap in the ``2*lat_1d[0]-gphiv[0]`` reflection."""
     from legoesm import constants
-    R, Om = constants.R_earth, constants.Omega
+    from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
+    # A stand-in for a NEMO mesh_mask must carry NEMO'S OWN rotation rate: the
+    # bridge builds f from NEMO's Earth by default (#1455), and a fixture on
+    # legoESM's rounded constant would be testing that the bridge reproduces
+    # the wrong planet.  That is exactly the defect the default fixes.
+    R, Om = constants.R_earth, NEMO_CONSTANTS_CONFIG.Omega
     # Mercator: uniform in the Mercator y-coordinate -> stretched latitude faces.
     y = -0.6 + 0.18 * np.arange(TNY + 1)              # (TNY+1,) uniform Mercator y
     lat_face = 2.0 * np.arctan(np.exp(y)) - np.pi / 2.0   # (TNY+1,) rad, stretched

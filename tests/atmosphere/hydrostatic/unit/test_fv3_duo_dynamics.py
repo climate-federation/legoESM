@@ -306,7 +306,9 @@ class TestComponentFactoryDispatch:
         # step); the NH combination stays refused as uncertified.
         (dict(held_suarez_forcing=True, model_type="nonhydrostatic"),
          "hydrostatic-only"),
-        (dict(distributed=True), "single-process"),
+        # distributed now legal with mode spmd; the DEFAULT mode (mpi)
+        # is refused with the SPMD-only message (PR #1656 driver wiring).
+        (dict(distributed=True), "SPMD-only"),
     ])
     def test_slice1_refusals_fire(self, bad, frag):
         """Every refusal raises BEFORE any (expensive) duo grid build,
@@ -950,3 +952,57 @@ def test_the_driver_can_only_build_the_certified_split_counts():
     # And the defaults it therefore gets are the ones the parity was run at.
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import FV3DuoConfig
     assert (FV3DuoConfig().k_split, FV3DuoConfig().n_split) == (1, 8)
+
+
+class TestFV3DuoSpmdDriver:
+    """--distributed --distributed-mode spmd on the duo lane: factory
+    builds the model with the three dual-reviewed SPMD knobs over the
+    local devices; mpi mode and multi-process are refused loudly."""
+
+    def _cfg(self, tmp_path, **over):
+        return _fv3_duo_config(output_dir=str(tmp_path),
+                               distributed=True,
+                               distributed_mode="spmd", **over)
+
+    def test_mpi_mode_refused(self, tmp_path):
+        from legoesm.driver.model_driver import ModelDriver
+        cfg = _fv3_duo_config(output_dir=str(tmp_path), distributed=True,
+                              distributed_mode="mpi")
+        drv = ModelDriver(cfg, output_dir=tmp_path)
+        # Two loud exits, both correct: on envs WITH mpi4jax the factory's
+        # SPMD-only ValueError; on this venv the mpi runtime's ImportError
+        # fires first (mpi4jax lives only in the legoesm-mpi venv). Either
+        # way duo+mpi cannot run silently.
+        with pytest.raises((ValueError, ImportError),
+                           match="SPMD-only|mpi4jax"):
+            drv.setup()
+
+    def test_spmd_constructs_with_the_knobs(self, tmp_path):
+        """NON-VACUOUS (codex MAJOR: the first cut asserted something
+        true of the serial model too): the knobs must PROVABLY have
+        taken -- a ring-enabled context distinct from the bundle's, its
+        tables carrying a ring_comm whose mesh spans the local
+        devices."""
+        import jax
+        if len(jax.local_devices()) < 2 or 6 % len(jax.local_devices()):
+            pytest.skip("needs 2/3/6 local devices")
+        from legoesm.driver.model_driver import ModelDriver
+        drv = ModelDriver(self._cfg(tmp_path), output_dir=tmp_path)
+        drv.setup()
+        ctx = drv.model._ctx_jax
+        assert ctx is not drv.model.grid.ctx_jax, \
+            "spmd model reused the bundle's serial context"
+        rc = ctx.tab.ring_comm
+        assert rc is not None, "ring_comm not attached"
+        assert tuple(rc.mesh.axis_names) == ("face",)
+        assert rc.mesh.size == len(jax.local_devices())
+
+    def test_spmd_short_run_completes(self, tmp_path):
+        import jax
+        if len(jax.local_devices()) < 2 or 6 % len(jax.local_devices()):
+            pytest.skip("needs 2/3/6 local devices "
+                        "(xla_force_host_platform_device_count)")
+        from legoesm.driver.model_driver import ModelDriver
+        drv = ModelDriver(self._cfg(tmp_path), output_dir=tmp_path)
+        drv.setup()
+        assert drv.run() == "COMPLETED"

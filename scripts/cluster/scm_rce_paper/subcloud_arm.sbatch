@@ -48,6 +48,11 @@ cd $WT || exit 90
 HEAD_SHA=$(git rev-parse HEAD)
 echo "PINNED sha: $HEAD_SHA"; echo "host: $(hostname)"; echo "task $SLURM_ARRAY_TASK_ID"
 [ "$HEAD_SHA" = "$PIN" ] || { echo "PREFLIGHT FAIL: $HEAD_SHA != $PIN"; exit 91; }
+git diff --quiet && git diff --cached --quiet || {
+  echo "PREFLIGHT FAIL: DIRTY TREE at $HEAD_SHA — uncommitted edits would run"
+  git status --porcelain | head -20
+  exit 94
+}
 
 case $SLURM_ARRAY_TASK_ID in
   0) SCHEME=emanuel;  DD="--no-emanuel-unsaturated-downdraft"; TAG=emanuel_dd_off ;;

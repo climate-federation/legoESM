@@ -103,6 +103,24 @@ stamped into the npz as ``nemo_ladder_mode``.
 Usage
 -----
     python kamm_twin_90d.py <recipe> <out.npz> [--days 90] [--save-3d]
+                            [--fp64-3d]
+
+SNAPSHOT PRECISION.  NOTE, so the claim is not read wider than it is: no
+scorer READS the reduced series yet -- ``verdict360`` and ``floor90_ensemble``
+still reduce the 3-D block, so the series removes the storage quantum from the
+ARTIFACT, not yet from any number the campaign prints. Wiring a consumer is a
+separate change (both reviews).
+
+The 3-D block is stored float32 BY DEFAULT and that has
+not changed; ``--fp64-3d`` stores it float64 and roughly doubles the artifact.
+Independently of that flag, every snapshot day also carries an fp64 REDUCED
+series -- the five acceptance-gate metrics, the six section/band/latitude-group
+transports, and the per-latitude-row transport profile -- computed from the
+LIVE model state before the storage cast.  Those are the quantities the scorers
+reduce the 3-D block to anyway, so storing them directly removes the float32
+storage quantum from all of them for a few kB.  Per-field storage dtypes are
+stamped as ``storage_dtypes``; ``control_dtype`` remains the precision the arm
+was BUILT at, which is a different thing.
 
 NEMO artifact paths default to the machine-local oracle-build tree and can be
 overridden via env vars (``DINO_NEMO_RUN_TRAJ``, ``DINO_NEMO_RUN_STEPDUMP``) or
@@ -162,6 +180,27 @@ PERTURB_EPS_DEFAULT = 1e-14
 DT = float(__import__("os").environ.get("DINO_DT", "2700.0"))
 STEPS_PER_DAY = 32  # 32 * 2700s = 86400s = 1 day
 SNAP_DAYS = (0, 30, 60, 90)  # full 3-D T/S snapshot days when --save-3d
+
+# The scalar reductions every recorded scorer takes of a 3-D snapshot, in the
+# order verdict360.KEYS declares them: the five acceptance-gate metrics, then
+# the six section/band/latitude-group transports the verdict adds.  They are
+# stored as fp64 TIME SERIES next to the snapshots (see
+# :func:`build_snapshot_reducer`) so a future ensemble can measure a spread
+# that the float32 3-D storage quantum would otherwise swallow.
+REDUCED_KEYS = ("acc", "up", "deep", "smax", "smean",
+                "acc_mean", "band", "band_c", "g_south", "g_band", "g_north")
+# Extra per-latitude-row transport profile stored alongside them.  One
+# full-section profile covers the channel band and both flanking groups (the
+# consumer slices it), so there is exactly one array and no second spelling of
+# the row reduction.
+REDUCED_ROW_KEY = "row_sv"
+# Which 3-D fields a legacy (unstamped) artifact stored in float32.  Read by
+# the quantum gates in verdict360/floor90_ensemble: an artifact written before
+# the storage stamp existed gets today's behaviour, unchanged.
+LEGACY_STORAGE_DTYPES = {"T3d": "float32", "S3d": "float32", "eta3d": "float32",
+                         "u3d": "float32", "v3d": "float32",
+                         "eta": "float32", "sst": "float32",
+                         "u": "float32", "v": "float32"}
 
 
 def verify_day0_matches_restart(st, restart_state, land_mask, *, tol: float = 1e-8) -> None:
@@ -437,7 +476,7 @@ def certifiable_grid_and_precision(stamped) -> tuple:
     return (not reasons), reasons, ladder, dtype
 
 
-def _restart_elapsed_seconds(path: str) -> float:
+def restart_elapsed_seconds(path: str) -> float:
     """Model seconds elapsed at the restart, read from the restart ITSELF.
 
     NEMO writes both ``adatrj`` (elapsed days) and ``kt`` (step index) into the
@@ -505,7 +544,7 @@ def seasonal_t0_seconds(restart_path: str) -> float:
     """
     env = os.environ.get("DINO_TWIN_SEASONAL_KT0")
     if env is None or env == "restart":
-        t0_sec = _restart_elapsed_seconds(restart_path)
+        t0_sec = restart_elapsed_seconds(restart_path)
         source = "restart adatrj" + ("" if env is None else " (explicit)")
     else:
         try:
@@ -560,6 +599,221 @@ def resolve_snap_days(snap_days, n_days: int, save_3d: bool) -> tuple[int, ...]:
         return ()
     grid = SNAP_DAYS if snap_days is None else tuple(int(d) for d in snap_days)
     return tuple(d for d in grid if d <= n_days)
+
+
+def snapshot_dtype(fp64_3d: bool):
+    """Storage dtype for the 3-D snapshot block.
+
+    DEFAULT IS FLOAT32 AND STAYS FLOAT32.  The 3-D block is by far the largest
+    thing in the artifact and doubling every recorded twin would buy nothing
+    for the scores that are already resolved -- the fp64 REDUCED SERIES
+    (:func:`build_snapshot_reducer`) is the always-on cheap win.  ``--fp64-3d``
+    is for the runs where measuring the SPREAD between near-identical members
+    is the point, which is exactly where float32 storage has capped the
+    campaign (2 differing cells of 342134 at day 10; members tying at the
+    storage quantum on max-type metrics).
+    """
+    return np.float64 if fp64_3d else np.float32
+
+
+def storage_stamp(snap_name: str, reduced_resolution: str) -> str:
+    """The per-field storage stamp, as the ONE json spelling every writer uses.
+
+    ``snap_name`` is the 3-D block's storage dtype, or ``"absent"`` when no
+    block was written -- a field with no snapshot on disk must not be stamped
+    with the dtype it would have had.
+
+    ``reduced_resolution`` is deliberately NOT "float64 because we stored it in
+    a float64 array".  The series is always stored float64, but its RESOLUTION
+    is the precision the arm was BUILT at: on a deliberate ``FP64=0`` arm the
+    series is float64-stored and float32-resolved, and a consumer that read
+    "float64" here would credit it with resolution it does not have (physics
+    review). ``"absent"`` when no series was written.
+
+    Factored out because the verification instrument used to hand-write this
+    same json -- a second spelling of the very thing it exists to check, which
+    could not notice a change to the real one (code review).
+    """
+    return json.dumps(
+        {"T3d": snap_name, "S3d": snap_name, "eta3d": snap_name,
+         "u3d": snap_name, "v3d": snap_name,
+         "eta": "float32", "sst": "float32", "u": "float32", "v": "float32",
+         "reduced": reduced_resolution},
+        sort_keys=True)
+
+
+def reduced_series_kwargs(reduced, days) -> dict:
+    """The npz keys for the fp64 reduced series, restricted to ``days``.
+
+    Separated from :func:`run_twin` so the stamp and the CONTENT are computed
+    from ONE day list.  They were computed thirty lines apart, and a run whose
+    snapshot grid excluded day 0 but which then blew up before its first
+    requested day stamped a series as present while writing none -- exactly the
+    "missing key with no stated reason" this change exists to remove (code
+    review).
+    """
+    days = [d for d in sorted(days) if d in reduced]
+    if not days:
+        return {}
+    out = {"reduced_days": np.asarray(days, dtype=np.int32)}
+    for k in REDUCED_KEYS:
+        out[f"reduced_{k}"] = np.asarray([reduced[d][k] for d in days],
+                                         dtype=np.float64)
+    out[f"reduced_{REDUCED_ROW_KEY}"] = np.asarray(
+        [reduced[d][REDUCED_ROW_KEY] for d in days], dtype=np.float64)
+    return out
+
+
+def snapshot_storage_dtypes(stamped) -> dict:
+    """Per-field STORAGE dtypes of an artifact, honestly.
+
+    ``control_dtype`` records the precision the arm was BUILT at; it says
+    nothing about what was written to disk, and for every artifact recorded
+    before this stamp the two differ (fp64 compute, fp32 storage).  This reads
+    the per-field ``storage_dtypes`` stamp; an artifact that predates it gets
+    :data:`LEGACY_STORAGE_DTYPES`, i.e. today's behaviour unchanged.
+    """
+    raw = stamped["storage_dtypes"] if "storage_dtypes" in stamped else None
+    if raw is None:
+        return dict(LEGACY_STORAGE_DTYPES)
+    return json.loads(str(raw))
+
+
+def build_snapshot_reducer(run_traj: str):
+    """``(reducer, status)`` -- the fp64 scalar reductions of a 3-D snapshot.
+
+    Every reduction here is IMPORTED from the recorded scorers
+    (``acceptance_gate_90d``, ``acc_driver_decomp``, ``floor90_ensemble``,
+    ``basin_seasonal_decomp``) and none is re-spelled.  A second spelling of
+    any of them is a reduction drift, which is the defect class this campaign
+    has spent the most time on; the ACC pair in :func:`run_twin` imports its
+    reducer for the same reason.
+
+    WHAT THE RESOLUTION ADVANTAGE ACTUALLY IS, stated because it is
+    conditional: the reduction runs on the LIVE model state before the storage
+    cast, so it carries whatever precision the arm was built at.  On an fp64
+    arm (the campaign default, ``FP64=1``) that is strictly more resolution
+    than reducing the stored float32 field.  On a deliberate ``FP64=0`` fp32
+    arm the stored field is already lossless and the series buys nothing --
+    ``control_dtype`` is the stamp that says which.
+
+    The imports are deferred: ``acceptance_gate_90d`` imports THIS module, and
+    ``acc_thermal_wind`` opens a hard-coded mesh at import time.  If the
+    scorers cannot be loaded, or describe a different mesh than this run, the
+    reducer is ``None`` and ``status`` says why -- the reason is STAMPED into
+    the artifact so a consumer reads it instead of guessing at a missing key.
+    """
+    import sys
+    d = os.path.dirname(os.path.abspath(__file__))
+    if d not in sys.path:
+        sys.path.insert(0, d)
+    try:
+        import acc_thermal_wind as A
+        import acceptance_gate_90d as G
+        import acc_driver_decomp as D
+        import floor90_ensemble as F
+        import basin_seasonal_decomp as B
+    except Exception as exc:                      # pragma: no cover - env-dependent
+        return None, f"scorers unimportable: {type(exc).__name__}: {exc}"
+    mesh = os.path.abspath(f"{run_traj}/mesh_mask.nc")
+    got = os.path.abspath(A.mm.filepath())
+    if got != mesh:
+        # Same refusal the daily-ACC reducer makes: two meshes are two
+        # geometries, and a series reduced on the wrong one is a confidently
+        # wrong number rather than a missing one.
+        return None, f"scorer mesh {got} is not this run's mesh {mesh}"
+
+    def reducer(f64):
+        """{metric: float} + the per-row profile, from live fp64 arrays."""
+        # The u slice is load_candidate's, verbatim: faces 1..52 map to NEMO's
+        # u columns.  (load_candidate then writes u[:,47,:] = lU[:,48,:], which
+        # is a NO-OP after this slice -- index 47 already IS original column 48
+        # -- and is deliberately not reproduced, same call as _acc_pair's.)
+        u = f64["u"][:, 1:53, :]
+        # The GATE's mask (acceptance_gate_90d.main:356), not A.tmask alone:
+        # both sides of the recorded gate are scored on this intersection, and
+        # on these artifacts the two are bit-identical (verdict360.lego_state
+        # asserts exactly that).  Using the gate's spelling means the stored
+        # series IS the gate's quantity on any card, including one whose land
+        # differs.
+        wet = A.tmask & (f64["land_mask"] > 0.5)[:, :, None]
+        st = {"T": f64["T"], "S": f64["S"], "u": u,
+              "land_mask": f64["land_mask"]}
+        m = dict(G.metrics(st, wet))
+        m["acc_mean"] = D._avg(D.section_total(u, A.umask))
+        m["band"] = F.band_transport(u, A.umask)
+        m["band_c"] = F.band_transport_campaign(u, A.umask)
+        for key, (_name, rows) in zip(("g_south", "g_band", "g_north"),
+                                      D.LAT_GROUPS):
+            m[key] = D._avg(D.group_transport(u, A.umask, rows))
+        resid = abs(m["g_south"] + m["g_band"] + m["g_north"] - m["acc_mean"])
+        if resid > 1e-9:
+            raise SystemExit(
+                f"FATAL: the three latitude groups do not partition the full "
+                f"section: residual {resid:.3e} Sv")
+        missing = [k for k in REDUCED_KEYS if k not in m]
+        if missing:
+            raise SystemExit(f"FATAL: reducer produced no {missing}")
+        m[REDUCED_ROW_KEY] = B.row_transport(u, A.umask, slice(0, A.NY))
+        return m
+
+    return reducer, "ok"
+
+
+def capture_snapshot(fields, *, snap_dtype, reducer, land_mask):
+    """``(stored, reduced, status)`` for one snapshot day.
+
+    ``stored`` is the 3-D block cast to ``snap_dtype`` (what goes in the npz);
+    ``reduced`` is the scalar series computed from float64 views of the SAME
+    arrays BEFORE that cast, so the series keeps the trajectory's own
+    resolution even when the block is stored float32.  That ordering is the
+    whole point and it is why this is one function rather than two call sites.
+
+    ``land_mask`` is a reducer INPUT, not a snapshot field: the reductions all
+    need the wet domain, but the mask is time-invariant and is already written
+    once per run, so it is never cast to ``snap_dtype`` and never appears in
+    ``stored``.  It is REQUIRED, deliberately: it was optional for exactly one
+    commit and a call site that forgot it shipped, crashing every snapshot run
+    (both reviews asked for this).  A default would re-arm that bug and let a
+    future caller reduce on no mask at all.
+
+    ``reduced`` is ``None`` exactly when ``status`` says why -- the return
+    shape never changes with the outcome, so a caller cannot accidentally
+    unpack two different things.
+
+    ``reducer`` is injected so the storage contract is testable without the
+    NEMO mesh :func:`build_snapshot_reducer` loads.
+    """
+    stored = {k: np.asarray(v, dtype=snap_dtype) for k, v in fields.items()}
+    if reducer is None:
+        return stored, None, "no reducer"
+    live = {k: np.asarray(v, dtype=np.float64) for k, v in fields.items()}
+    live["land_mask"] = np.asarray(land_mask, dtype=np.float64)
+    red, status = safe_reduce(reducer, live)
+    return stored, red, status
+
+
+def safe_reduce(reducer, live):
+    """``(metrics or None, status)`` -- run one day's reduction, and NEVER let
+    it kill the integration.
+
+    The reduction is a DIAGNOSTIC written alongside the primary data, and the
+    npz is only written after the whole time loop.  A reducer that raised at
+    day 90 of a 90-day twin would therefore delete 90 days of compute to
+    protect a few kB of annotation -- a diagnostic destroying the data it
+    annotates (both reviews).  So a failing day loses its series and says why;
+    the status is stamped into the artifact.
+    """
+    try:
+        return reducer(live), "ok"
+    except (Exception, SystemExit) as exc:         # noqa: BLE001 - see below
+        # SystemExit is a BaseException, NOT an Exception, and it is exactly
+        # what the reducer raises on a partition-residual failure -- a bare
+        # `except Exception` here caught nothing and the run still died. Found
+        # by the unit test, after the first version of this fix. KeyboardInterrupt
+        # is deliberately still allowed through: a human asking the run to stop
+        # must not be turned into a dropped diagnostic.
+        return None, f"reduction failed: {type(exc).__name__}: {exc}"
 
 
 def resolve_ladder_mode(legacy_1d_ladder: bool = False) -> str:
@@ -1017,6 +1271,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
              perturb_baro_scale: float = 1.0,
              daily_acc: bool = False,
              snap_days: tuple[int, ...] | None = None,
+             fp64_3d: bool = False,
              legacy_1d_ladder: bool = False) -> bool:
     """Run the state-initialized twin for ``n_days`` and save an npz. Returns stable.
 
@@ -1137,7 +1392,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     # The clock the NEMO run this twin is scored against is actually on, read
     # from the same restart.  Stamping it next to the clock the twin USED lets
     # a scorer reject ANY offset that is not NEMO's, not merely t0=0.
-    t0_reference_sec = _restart_elapsed_seconds(f"{run_stepdump}/{restart_file}")
+    t0_reference_sec = restart_elapsed_seconds(f"{run_stepdump}/{restart_file}")
     # Everything about this run a comparison must hold fixed.  A two-arm A/B
     # that changes the clock and something else is a confound, and nothing in
     # the artifact could see it before this stamp existed.
@@ -1149,6 +1404,12 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         "vmix_scheme": vmix_scheme, "use_gm_redi": use_gm_redi,
         "surface_tendency_placement": surface_tendency_placement,
         "perturb_seed": perturb_seed, "perturb_eps": float(perturb_eps),
+        # DELIBERATELY NOT recorded here: --fp64-3d. run_config is compared
+        # BYTE-FOR-BYTE between two arms by twin_seasonal_clock_ab.py, which
+        # hard-aborts on any difference as a confound; a new key would make
+        # every recorded-arm-vs-new-arm A/B abort forever (code review). The
+        # flag changes STORAGE only, never the trajectory, and it is recorded
+        # in the storage_dtypes stamp where a storage fact belongs.
     }, sort_keys=True)
 
     land_mask = np.asarray(st.land_mask.data)
@@ -1275,17 +1536,48 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     v_daily = np.full((n_days, n_lat, n_lon), np.nan, dtype=np.float32)
 
     snaps = resolve_snap_days(snap_days, n_days, save_3d)
+    snap_np = snapshot_dtype(fp64_3d)
+    snap_name = np.dtype(snap_np).name
     t3d, s3d, eta3d, u3d, v3d = {}, {}, {}, {}, {}
+    # The fp64 reduced series is ALWAYS built (it is ~2 kB per snapshot day and
+    # is what makes an ensemble spread measurable below the storage quantum);
+    # --fp64-3d only changes the big 3-D block.
+    _reducer, _reduced_status = (build_snapshot_reducer(run_traj) if snaps
+                                 else (None, "no snapshot days requested"))
+    _reduced = {}
+    print(f"3-D snapshot storage dtype = {snap_name}; fp64 reduced series: "
+          f"{_reduced_status}", flush=True)
+    if snaps and _reducer is None:
+        print("WARNING: no fp64 reduced series will be stored for this run "
+              f"({_reduced_status}); the reason is stamped as "
+              "reduced_series_status", flush=True)
+
+    _reduce_fail = {}
+
+    def _snap(day):
+        """Store the day's 3-D block and reduce the LIVE state at fp64."""
+        stored, red, why = capture_snapshot(
+            {"T": st.T.data, "S": st.S.data, "eta": st.eta.data,
+             "u": st.u.data, "v": st.v.data},
+            snap_dtype=snap_np, reducer=_reducer, land_mask=land_mask)
+        t3d[day], s3d[day] = stored["T"], stored["S"]
+        eta3d[day], u3d[day], v3d[day] = stored["eta"], stored["u"], stored["v"]
+        if _reducer is None:
+            return
+        if red is None:
+            _reduce_fail[day] = why
+            print(f"  WARNING day {day}: {why} -- no reduced series for this "
+                  f"day; the 3-D block is unaffected", flush=True)
+        else:
+            _reduced[day] = red
+
     if save_3d:
-        t3d[0] = np.asarray(st.T.data, dtype=np.float32)
-        s3d[0] = np.asarray(st.S.data, dtype=np.float32)
-        eta3d[0] = np.asarray(st.eta.data, dtype=np.float32)
-        # full-depth u/v faces (NOT just the surface level captured by
-        # u_daily/v_daily below) -- required for ACC (acc_thermal_wind.py's
-        # acc_full integrates over all NZ levels), so a snapshot day's u/v
-        # must carry the whole water column, matching T3d/S3d's full depth.
-        u3d[0] = np.asarray(st.u.data, dtype=np.float32)
-        v3d[0] = np.asarray(st.v.data, dtype=np.float32)
+        _snap(0)
+        # _snap stores full-depth u/v faces (NOT just the surface level
+        # captured by u_daily/v_daily below) -- required for ACC
+        # (acc_thermal_wind.py's acc_full integrates over all NZ levels), so a
+        # snapshot day's u/v must carry the whole water column, matching
+        # T3d/S3d's full depth.
         print("captured day-0 3-D T/S/u/v snapshot", flush=True)
 
     blew_up_at = None
@@ -1334,11 +1626,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
             v_daily[day_idx] = v_now
 
             if save_3d and day_num in snaps:
-                t3d[day_num] = np.asarray(st.T.data, dtype=np.float32)
-                s3d[day_num] = np.asarray(st.S.data, dtype=np.float32)
-                eta3d[day_num] = np.asarray(st.eta.data, dtype=np.float32)
-                u3d[day_num] = np.asarray(st.u.data, dtype=np.float32)
-                v3d[day_num] = np.asarray(st.v.data, dtype=np.float32)
+                _snap(day_num)
                 print(f"  captured day {day_num} full 3-D T/S/u/v snapshot", flush=True)
 
             print(f"  day {(k+1)*DT/86400:6.1f}  T[{tmin:.1f},{tmax:.1f}] finite={finite} "
@@ -1356,6 +1644,24 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     print(f"DONE {'blew up at step ' + str(blew_up_at) if blew_up_at else 'nsteps=' + str(nsteps)} "
           f"STABLE={stable}  wall={time.time()-t0:.0f}s", flush=True)
 
+    # Which snapshot days actually have a 3-D block on disk, resolved ONCE:
+    # the storage stamp, the write loop and the size line must all agree, and
+    # three spellings of "day 0 is captured whenever --save-3d but only saved
+    # if it is in the requested grid" would be three chances to disagree.
+    _stored_days = [d for d in snaps if d in t3d]
+    _snap_stamp = snap_name if _stored_days else "absent"
+    # THE SERIES KEYS AND THE STAMP ARE BUILT FROM THE SAME CALL, so the stamp
+    # can never promise a series the artifact does not carry (code review: the
+    # two used to be computed thirty lines apart).
+    _red_kwargs = reduced_series_kwargs(_reduced, snaps)
+    _red_days = [int(d) for d in _red_kwargs.get("reduced_days", ())]
+    # The series is stored float64 but RESOLVED at the precision the arm was
+    # built at -- stamp the resolution, not the container (physics review).
+    _red_stamp = control_dtype_stamp if _red_kwargs else "absent"
+    if _reduce_fail:
+        _reduced_status = (f"{_reduced_status}; reduction failed on days "
+                           f"{sorted(_reduce_fail)}: "
+                           f"{_reduce_fail[sorted(_reduce_fail)[0]]}")
     save_kwargs = dict(
         eta=eta_daily, sst=sst_daily, u=u_daily, v=v_daily,
         land_mask=land_mask.astype(np.float32),
@@ -1393,6 +1699,21 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         # decidable rather than asserted -- nemo_ladder_mode records intent,
         # this records the numbers.
         vertical_ladder_sha256=np.str_(vertical_ladder_sha256(br.z_coord)),
+        # PER-FIELD STORAGE dtypes, stamped honestly.  control_dtype above
+        # records the precision the arm was BUILT at and says nothing about
+        # what was written to disk -- for every artifact recorded before this
+        # stamp the two differ (fp64 compute, fp32 storage), which is exactly
+        # the gap that made the quantum machinery in verdict360/floor90 read
+        # the wrong thing off control_dtype.  Consumers read this through
+        # snapshot_storage_dtypes(); an artifact without it gets
+        # LEGACY_STORAGE_DTYPES, i.e. today's behaviour unchanged.
+        storage_dtypes=np.str_(storage_stamp(_snap_stamp, _red_stamp)),
+        # Why a reduced series is or is not present.  A missing key with no
+        # reason is a consumer guessing; this makes it readable.  NOT named
+        # reduced_* : the data series all share that prefix and a consumer
+        # globbing it would get a string mixed in with the floats (code
+        # review) -- the size accounting already had to special-case it.
+        snapshot_reduction_status=np.str_(_reduced_status),
         # #1455 follow-up: the clock NEMO is on, and the rest of the recipe.
         seasonal_t0_reference_seconds=np.float64(t0_reference_sec),
         run_config=np.str_(run_config),
@@ -1409,17 +1730,35 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         # The MEASURED injected transport, the number every retention factor
         # divides by.  Stamped so the scorer never has to be told it.
         save_kwargs["injected_sv"] = np.float64(_injected_sv)
-    for d in snaps:
-        if d in t3d:
-            save_kwargs[f"T3d_day{d}"] = t3d[d]
-            save_kwargs[f"S3d_day{d}"] = s3d[d]
-            save_kwargs[f"eta3d_day{d}"] = eta3d[d]
-            save_kwargs[f"u3d_day{d}"] = u3d[d]
-            save_kwargs[f"v3d_day{d}"] = v3d[d]
+    for d in _stored_days:
+        save_kwargs[f"T3d_day{d}"] = t3d[d]
+        save_kwargs[f"S3d_day{d}"] = s3d[d]
+        save_kwargs[f"eta3d_day{d}"] = eta3d[d]
+        save_kwargs[f"u3d_day{d}"] = u3d[d]
+        save_kwargs[f"v3d_day{d}"] = v3d[d]
+
+    # THE ALWAYS-ON CHEAP WIN: the gate/verdict scalars and the per-row
+    # transport profile, at float64, on every snapshot day.  These are the
+    # quantities the scorers reduce the 3-D block down to anyway, so storing
+    # them directly removes the storage quantum from every one of them at a
+    # cost of a few kB -- the fp32 3-D block stays the default.
+    save_kwargs.update(_red_kwargs)
 
     np.savez(out_path, **save_kwargs)
+    # SIZE ACCOUNTING, printed rather than argued: the fp64 3-D flag roughly
+    # doubles the artifact, the reduced series is noise next to it.
+    _b3d = sum(int(a.nbytes) for d in _stored_days
+               for a in (t3d[d], s3d[d], eta3d[d], u3d[d], v3d[d]))
+    _bred = sum(int(v.nbytes) for v in _red_kwargs.values())
+    _itemsize = np.dtype(snap_np).itemsize
+    print(f"SIZE: 3-D block {_b3d / 1e6:.1f} MB at {snap_name} "
+          f"({len(_stored_days)} days x 5 fields; would be "
+          f"{_b3d * 4 / _itemsize / 1e6:.1f} MB at float32, "
+          f"{_b3d * 8 / _itemsize / 1e6:.1f} MB at float64)  |  "
+          f"fp64 reduced series {_bred / 1e3:.1f} kB", flush=True)
     print(f"SAVED {out_path}  stable={stable}  "
-          f"3-D snapshots at days={sorted(snaps)}", flush=True)
+          f"3-D snapshots at days={sorted(snaps)}  "
+          f"fp64 reduced series at days={_red_days}", flush=True)
     return stable
 
 
@@ -1520,6 +1859,17 @@ def _parse_args(argv=None):
                    help="comma-separated days for the --save-3d 3-D snapshots "
                         "(default: the recorded 0,30,60,90 grid). Days past "
                         "--days are dropped.")
+    p.add_argument("--fp64-3d", dest="fp64_3d", action="store_true",
+                   help="store the 3-D T/S/eta/u/v snapshot block at float64 "
+                        "instead of float32. Roughly DOUBLES the artifact, so "
+                        "it is off by default; turn it on for ensemble runs "
+                        "where measuring the SPREAD between near-identical "
+                        "members is the point, which is where float32 storage "
+                        "has capped this campaign (members tying at the "
+                        "storage quantum on max-type metrics). The fp64 "
+                        "REDUCED time series is stored either way and is the "
+                        "cheap win -- this flag only matters for a metric "
+                        "nobody has reduced yet.")
     p.add_argument("--daily-acc", action="store_true",
                    help="#1455 Phase-2: store the ACC transport EVERY day under "
                         "both the deposit's reducer and the recorded gate's. "
@@ -1702,6 +2052,7 @@ def main(argv=None):
               daily_acc=args.daily_acc,
               snap_days=(None if args.snap_days is None else
                          tuple(int(x) for x in args.snap_days.split(","))),
+              fp64_3d=args.fp64_3d,
               legacy_1d_ladder=args.legacy_1d_ladder)
 
 

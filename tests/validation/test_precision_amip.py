@@ -113,7 +113,7 @@ def amip_runs(tmp_path_factory):
     """
     tmp_dir = str(tmp_path_factory.mktemp("precision_amip"))
     results = {}
-    for mode in ("fp64", "fp32", "mixed"):
+    for mode in ("fp64", "fp32"):  # #1665: mixed refused (fast refuse test below)
         # Reset precision state before each run to avoid cross-contamination.
         clear_module_overrides()
         set_policy(PrecisionPolicy.fp32())
@@ -142,9 +142,13 @@ class TestPrecisionAMIPStability:
         """fp32 run should complete without blow-up."""
         assert amip_runs["fp32"]._run_status == "COMPLETED"
 
-    def test_mixed_completes(self, amip_runs):
-        """mixed-precision run should complete without blow-up."""
-        assert amip_runs["mixed"]._run_status == "COMPLETED"
+    def test_mixed_is_refused(self):
+        """#1665 interim: mixed is refused loudly (was: mixed AMIP completes).
+        Fast — no simulation; the fp64-vs-mixed AMIP validation is the tracked
+        mixed-consistency campaign."""
+        from legoesm.runtime.precision import apply_precision
+        with pytest.raises(NotImplementedError, match="disabled"):
+            apply_precision("mixed")
 
 
 @pytest.mark.slow
@@ -162,7 +166,7 @@ class TestPrecisionAMIPPhysicalBounds:
     PS_MIN = 40_000.0
     PS_MAX = 115_000.0
 
-    @pytest.mark.parametrize("mode", ["fp64", "fp32", "mixed"])
+    @pytest.mark.parametrize("mode", ["fp64", "fp32"])
     def test_temperature_bounds(self, amip_runs, mode):
         """Temperature must stay within [150, 400] K in all precision modes."""
         T = _extract_T(amip_runs[mode])
@@ -174,7 +178,7 @@ class TestPrecisionAMIPPhysicalBounds:
             f"{mode}: T_max={np.max(T):.1f} K > {self.T_MAX} K"
         )
 
-    @pytest.mark.parametrize("mode", ["fp64", "fp32", "mixed"])
+    @pytest.mark.parametrize("mode", ["fp64", "fp32"])
     def test_surface_pressure_bounds(self, amip_runs, mode):
         """Surface pressure must stay within [40, 115] kPa in all modes."""
         ps = _extract_ps(amip_runs[mode])
@@ -193,19 +197,6 @@ class TestPrecisionAMIPPhysicalBounds:
 class TestPrecisionAMIPCrossComparison:
     """Cross-compare precision modes against the fp64 reference."""
 
-    def test_mixed_vs_fp64_temperature_rms(self, amip_runs):
-        """Mixed vs fp64 RMS temperature difference should be < 1.0 K.
-
-        Mixed precision uses fp32 storage/compute with fp64 accumulation
-        and control, so after 5 days of integration the temperature field
-        should remain very close to the fp64 reference.
-        """
-        T_ref = _extract_T(amip_runs["fp64"])
-        T_mix = _extract_T(amip_runs["mixed"])
-        rms = np.sqrt(np.mean((T_ref - T_mix) ** 2))
-        assert rms < 1.0, (
-            f"mixed vs fp64 RMS T difference = {rms:.4f} K >= 1.0 K"
-        )
 
     def test_fp32_vs_fp64_finite(self, amip_runs):
         """fp32 vs fp64 may diverge but must remain finite.
@@ -221,114 +212,3 @@ class TestPrecisionAMIPCrossComparison:
         # Log the divergence for diagnostic purposes (not a hard failure).
         print(f"  fp32 vs fp64 RMS T difference: {rms:.4f} K")
 
-    def test_mixed_vs_fp64_surface_pressure_rms(self, amip_runs):
-        """Mixed vs fp64 RMS surface pressure difference should be < 100 Pa.
-
-        Surface pressure is smoother than temperature and should track
-        the fp64 reference closely in mixed mode.
-        """
-        ps_ref = _extract_ps(amip_runs["fp64"])
-        ps_mix = _extract_ps(amip_runs["mixed"])
-        rms = np.sqrt(np.mean((ps_ref - ps_mix) ** 2))
-        assert rms < 100.0, (
-            f"mixed vs fp64 RMS p_s difference = {rms:.2f} Pa >= 100 Pa"
-        )
-
-
-@pytest.mark.slow
-class TestPrecisionOverridesActive:
-    """Verify per-module precision overrides are correctly configured."""
-
-    def test_mixed_mode_sets_policy(self, amip_runs):
-        """After mixed-mode run, verify apply_precision sets the right policy."""
-        # Re-apply mixed precision to inspect the policy.
-        policy = apply_precision("mixed")
-        assert policy.storage == jnp.float32
-        assert policy.compute == jnp.float32
-        assert policy.accumulate == jnp.float64
-        assert policy.control == jnp.float64
-        # Clean up.
-        clear_module_overrides()
-        set_policy(PrecisionPolicy.fp32())
-
-    def test_mixed_mode_has_module_overrides(self, amip_runs):
-        """Mixed mode must set per-module overrides for sensitive kernels."""
-        apply_precision("mixed")
-        overrides = get_module_overrides()
-
-        # Atmosphere-critical overrides
-        assert "spectral_transform" in overrides, (
-            "spectral_transform missing from mixed-mode overrides"
-        )
-        assert "semi_implicit" in overrides, (
-            "semi_implicit missing from mixed-mode overrides"
-        )
-        assert "atm_pressure_gradient" in overrides, (
-            "atm_pressure_gradient missing from mixed-mode overrides"
-        )
-
-        # Ocean-critical overrides
-        assert "barotropic_solver" in overrides, (
-            "barotropic_solver missing from mixed-mode overrides"
-        )
-        assert "pressure_gradient" in overrides, (
-            "pressure_gradient missing from mixed-mode overrides"
-        )
-        assert "equation_of_state" in overrides, (
-            "equation_of_state missing from mixed-mode overrides"
-        )
-
-        # Land / ice overrides
-        assert "carbon_pools" in overrides, (
-            "carbon_pools missing from mixed-mode overrides"
-        )
-        assert "evp_solver" in overrides, (
-            "evp_solver missing from mixed-mode overrides"
-        )
-
-        # Clean up.
-        clear_module_overrides()
-        set_policy(PrecisionPolicy.fp32())
-
-    def test_fp32_mode_no_overrides(self, amip_runs):
-        """fp32 mode should have no per-module overrides."""
-        apply_precision("fp32")
-        overrides = get_module_overrides()
-        assert overrides == {}, (
-            f"fp32 mode should have no overrides, got: {list(overrides.keys())}"
-        )
-        # Clean up.
-        set_policy(PrecisionPolicy.fp32())
-
-    def test_fp64_mode_no_overrides(self, amip_runs):
-        """fp64 mode should have no per-module overrides."""
-        apply_precision("fp64")
-        overrides = get_module_overrides()
-        assert overrides == {}, (
-            f"fp64 mode should have no overrides, got: {list(overrides.keys())}"
-        )
-        # Clean up.
-        clear_module_overrides()
-        set_policy(PrecisionPolicy.fp32())
-
-    def test_mixed_overrides_have_fp64_compute(self, amip_runs):
-        """Sensitive kernels in mixed mode should use fp64 for compute."""
-        apply_precision("mixed")
-        overrides = get_module_overrides()
-
-        fp64_compute_modules = [
-            "barotropic_solver",
-            "pressure_gradient",
-            "equation_of_state",
-            "semi_implicit",
-        ]
-        for mod in fp64_compute_modules:
-            assert mod in overrides, f"{mod} missing from overrides"
-            assert overrides[mod].get("compute") == jnp.float64, (
-                f"{mod} compute should be fp64 in mixed mode, "
-                f"got {overrides[mod].get('compute')}"
-            )
-
-        # Clean up.
-        clear_module_overrides()
-        set_policy(PrecisionPolicy.fp32())

@@ -126,6 +126,18 @@ def _parse_args():
              "(background-only; also NaNs ~day 230). Both grids.",
     )
     p.add_argument(
+        "--coriolis-placement", choices=("cell_average", "face_latitude"),
+        default=None,
+        help="Where the vertex Coriolis is EVALUATED (#1455; "
+             "DINOConfig.coriolis_placement). 'cell_average' (default) is the "
+             "mean of the two adjacent tracer rows; 'face_latitude' evaluates "
+             "f = 2*Omega*sin(phi_face) AT the v-face latitude, which is "
+             "NEMO's own ff_f convention. NB 'face_latitude' is 10x less "
+             "consistent with the discrete curl of solid-body rotation "
+             "(planetary-vorticity/Kelvin consistency) and is intended for "
+             "oracle-matching only -- see create_latlon_geometry's docstring.",
+    )
+    p.add_argument(
         "--eos", choices=("wright", "nemo_seos"), default=None,
         help="Equation of state (DINOConfig.eos): 'wright' (legoESM default, "
              "Wright 1997 full nonlinear EOS) or 'nemo_seos' (the paper/NEMO "
@@ -538,6 +550,9 @@ def main():
         cfg = dataclasses.replace(cfg, vmix_scheme=args.vmix)
     if args.eos is not None:
         cfg = dataclasses.replace(cfg, eos=args.eos)
+    if args.coriolis_placement is not None:
+        cfg = dataclasses.replace(
+            cfg, coriolis_placement=args.coriolis_placement)
     if args.tke_momentum_visc_bg is not None:
         cfg = dataclasses.replace(
             cfg, tke_momentum_visc_bg=args.tke_momentum_visc_bg)

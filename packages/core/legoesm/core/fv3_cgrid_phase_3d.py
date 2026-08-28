@@ -85,6 +85,20 @@ C2. **The face loop and the LEVEL loop are Python loops, not ``vmap``.**
     Cost of the choice, stated: at ``km = 4`` this traces 24 ``c_sw``
     bodies, so compile time is minutes rather than seconds.
 
+C2a. **The FACE loop has an OPT-IN vmapped arm** (face-batching ladder
+    steps 1-2), ``batched=True`` on each phase function, built on
+    :func:`legoesm.core.fv3_phase3d_common.build_batched_gs`'s stacked
+    view of the six gridstructs.  Motivation is measured, not
+    aesthetic: under SPMD the per-face traced reads ``x[t]`` are the
+    2-GPU wall (a masked select + all-reduce per read, and every device
+    computes all six faces); ``vmap`` over a leading ``(6,)`` axis lets
+    GSPMD partition the face axis with zero communication.  The DEFAULT
+    is ``batched=False`` -- the certified loop path, byte for byte --
+    and the equivalence gate C2 asked for is
+    ``test_*_batched_matches_loop`` (rtol 1e-13 / atol 1e-12; the
+    few-ulp slack is XLA reassociating across the added batch axis).
+    The LEVEL loop stays a Python loop on both arms.
+
 C3. **Static/dynamic split.**  ``ctx``, ``km`` and every deck constant
     or Python-branch selector are STATIC; the field data and ``dt2`` are
     DYNAMIC.  ``dt2`` stays dynamic (the stepper's deviation D3
@@ -183,6 +197,7 @@ from legoesm.core.fv3_nh_core import riem_solver_c, update_dz_c
 from legoesm.core.fv3_pgrad import geopk, p_grad_c
 from legoesm.core.fv3_phase3d_common import (
     CSW_OUT_LIKE,
+    build_batched_gs,
     require_bool,
     require_f64_jax,
     require_km,
@@ -367,7 +382,8 @@ def state_3d_to_numpy(states: dict) -> list:
 
 def csw_phase_3d(ctx, states: dict, dt2, km, *, nord: int = 2,
                  duogrid: bool = True, hydrostatic: bool = True,
-                 remap_follows: bool = False) -> dict:
+                 remap_follows: bool = False,
+                 batched: bool = False) -> dict:
     """Per-level ``c_sw`` on all six faces; returns 3-D C-grid outputs.
 
     ``ctx`` is the JAX lane's ONE static context,
@@ -396,11 +412,17 @@ def csw_phase_3d(ctx, states: dict, dt2, km, *, nord: int = 2,
     ``wc`` on the NH arm.  ``delp``/``pt``/``w`` corner ghosts that
     ``c_sw`` fills internally are NOT returned -- ``c_sw`` does not
     export them, in either lane.
+
+    ``batched`` (STATIC, default False) selects the vmap-over-faces arm
+    (C2a): same kernel, same level loop, the face loop replaced by
+    ``jax.vmap`` over :func:`build_batched_gs`'s stacked view.  False is
+    the certified loop path, untouched.
     """
     km = require_km("csw_phase_3d", km)
     require_bool("csw_phase_3d", "remap_follows", remap_follows)
     require_no_remap_needed(km, remap_follows=remap_follows)
-    for nm, vv in (("duogrid", duogrid), ("hydrostatic", hydrostatic)):
+    for nm, vv in (("duogrid", duogrid), ("hydrostatic", hydrostatic),
+                   ("batched", batched)):
         require_bool("csw_phase_3d", nm, vv)
     nord = require_nord("csw_phase_3d", "nord", nord)
     _require_grid_type_zero("csw_phase_3d", ctx)
@@ -413,6 +435,11 @@ def csw_phase_3d(ctx, states: dict, dt2, km, *, nord: int = 2,
 
     n, ng, npx = ctx.n, ctx.ng, ctx.npx
     names = CSW_OUT_2D + (() if hydrostatic else ("wc",))
+
+    if batched:
+        return _csw_phase_3d_batched(ctx, states, dt2, km, names=names,
+                                     nord=nord, duogrid=duogrid,
+                                     hydrostatic=hydrostatic)
 
     per_face = []
     # R1a, face axis: `c_sw` reads only face t's own fields and
@@ -457,6 +484,62 @@ def csw_phase_3d(ctx, states: dict, dt2, km, *, nord: int = 2,
     return stack_faces("csw_phase_3d", per_face)
 
 
+def _csw_phase_3d_batched(ctx, states, dt2, km, *, names, nord,
+                          duogrid, hydrostatic) -> dict:
+    """The vmap-over-faces arm of :func:`csw_phase_3d` (C2a).
+
+    Entry gates already ran in the caller.  The FACE loop becomes one
+    ``jax.vmap`` per level over the batched gridstruct view; the LEVEL
+    loop stays Python, exactly as on the loop path (the oracle's own
+    ``do k=1,npz``, dyn_core.F90:488).  ``bounded_domain`` is passed as
+    ONE static value: it is uniform across faces by
+    ``build_batched_gs``'s common-mode gate, and ``c_sw`` branches on it
+    in Python, so it could not be batched anyway.
+
+    in_axes: the five state planes and the gridstruct dict are 0 (per
+    face); ``bd``/``npx``/``dt2``/``nord``/``hydrostatic``/``duogrid``/
+    ``bounded_domain`` are closed over (face-invariant -- ``dt2`` is
+    traced but shared, the rest are static Python values).
+    """
+    bview = build_batched_gs(ctx)
+    bounded = bview["flags"]["bounded_domain"]
+    n, ng, npx, bd = ctx.n, ctx.ng, ctx.npx, ctx.bd
+
+    def one_face(delp2, pt2, w2, u2, v2, gs_t):
+        return c_sw(delp2, pt2, w2, u2, v2, gs_t, bd, npx, npx, dt2,
+                    nord=nord, hydrostatic=hydrostatic, duogrid=duogrid,
+                    bounded_domain=bounded)
+
+    vf = jax.vmap(one_face, in_axes=(0, 0, 0, 0, 0, 0))
+    per_level = {name: [] for name in names}
+    for k in range(km):
+        got = vf(states["delp"][:, :, :, k], states["pt"][:, :, :, k],
+                 states["w"][:, :, :, k], states["u"][:, :, :, k],
+                 states["v"][:, :, :, k], bview["gs"])
+        for name in names:
+            if name not in got:
+                raise KeyError(
+                    f"c_sw returned no {name!r}; keys are "
+                    f"{sorted(got)}. The 3-D assembler must not "
+                    f"silently drop a stage output.")
+            per_level[name].append(got[name])
+    out = {}
+    for name in names:
+        want = (6,) + field_shape(CSW_OUT_LIKE[name], n, ng, km)[:2]
+        for k, arr in enumerate(per_level[name]):
+            if tuple(arr.shape) != want:
+                raise ValueError(
+                    f"csw_phase_3d[batched]: level {k} output {name!r} "
+                    f"has shape {arr.shape}, the face-batched container "
+                    f"expects {want}. A stagger or window mismatch here "
+                    f"would broadcast, not raise.")
+        # Level axis at position 3 == the loop path's per-face axis 2
+        # with the face axis prepended, so both arms return the SAME
+        # (6, i, j, km) layout.
+        out[name] = jnp.stack(per_level[name], axis=3)
+    return out
+
+
 # ---------------------------------------------------------------------
 # stage 2a -- hydrostatic pressure (dyn_core.F90:533 then :629)
 # ---------------------------------------------------------------------
@@ -465,7 +548,8 @@ def cgrid_pressure_phase_3d(ctx, csw_outs: dict, km, *, dt2, ptop: float,
                             akap: float, cp_air: float, a2b_ord: int = 4,
                             hydrostatic: bool = True,
                             remap_follows: bool = False,
-                            check_delpc: bool = True) -> dict:
+                            check_delpc: bool = True,
+                            batched: bool = False) -> dict:
     """C-grid ``geopk`` then ``p_grad_c``, once per face over the column.
 
     ``dyn_core.F90:533`` calls geopk with ``CG = .true.`` (the literal
@@ -499,7 +583,8 @@ def cgrid_pressure_phase_3d(ctx, csw_outs: dict, km, *, dt2, ptop: float,
     km = require_km("cgrid_pressure_phase_3d", km)
     for nm, vv in (("hydrostatic", hydrostatic),
                    ("remap_follows", remap_follows),
-                   ("check_delpc", check_delpc)):
+                   ("check_delpc", check_delpc),
+                   ("batched", batched)):
         require_bool("cgrid_pressure_phase_3d", nm, vv)
     require_no_remap_needed(km, remap_follows=remap_follows)
     _refuse_nh_pressure("cgrid_pressure_phase_3d", hydrostatic)
@@ -515,6 +600,11 @@ def cgrid_pressure_phase_3d(ctx, csw_outs: dict, km, *, dt2, ptop: float,
     if check_delpc:
         _check_delpc_positive("cgrid_pressure_phase_3d",
                               csw_outs["delpc"], bd)
+
+    if batched:
+        return _cgrid_pressure_phase_3d_batched(
+            ctx, csw_outs, km, dt2=dt2, ptop=ptop, akap=akap,
+            cp_air=cp_air, a2b_ord=a2b_ord)
 
     per_face = []
     # R1a, face axis: geopk and p_grad_c read one face's delpc/ptc/hs
@@ -532,6 +622,40 @@ def cgrid_pressure_phase_3d(ctx, csw_outs: dict, km, *, dt2, ptop: float,
                               npz=km, hydrostatic=True)
         per_face.append({**got, "uc": uc_t, "vc": vc_t})
     return stack_faces("cgrid_pressure_phase_3d", per_face)
+
+
+def _cgrid_pressure_phase_3d_batched(ctx, csw_outs, km, *, dt2, ptop,
+                                     akap, cp_air, a2b_ord) -> dict:
+    """The vmap-over-faces arm of :func:`cgrid_pressure_phase_3d` (C2a).
+
+    Entry gates (including ``check_delpc``) already ran in the caller.
+    One ``jax.vmap`` replaces the face loop; the per-face body is
+    IDENTICAL to the loop path's -- ``geopk`` then ``p_grad_c``, same
+    keyword values.
+
+    in_axes: ``delpc``/``ptc``/``hs``/``uc``/``vc`` and the gridstruct
+    dict are 0 (per face).  Closed over (face-invariant): ``bd`` and
+    every ``geopk`` keyword (static Python values -- ``geopk`` takes no
+    gridstruct at all), plus ``dt2`` (traced but shared) and
+    ``npz=km``/``hydrostatic`` for ``p_grad_c``.
+    """
+    bview = build_batched_gs(ctx)
+    bd = ctx.bd
+
+    def one_face(delpc_t, ptc_t, hs_t, uc_t, vc_t, gs_t):
+        got = geopk(delpc_t, ptc_t, hs_t, bd, km=km, ptop=ptop,
+                    akap=akap, cp_air=cp_air, cg=True, duogrid=True,
+                    computehalo=False, npx=bd.ie + 1, npy=bd.je + 1,
+                    a2b_ord=a2b_ord, bounded_domain=False,
+                    sw_dynamics=False)
+        uc_o, vc_o = p_grad_c(dt2, delpc_t, got["pk"], got["gz"],
+                              uc_t, vc_t, gs_t, bd, npz=km,
+                              hydrostatic=True)
+        return {**got, "uc": uc_o, "vc": vc_o}
+
+    return jax.vmap(one_face, in_axes=(0, 0, 0, 0, 0, 0))(
+        csw_outs["delpc"], csw_outs["ptc"], ctx.hs6,
+        csw_outs["uc"], csw_outs["vc"], bview["gs"])
 
 
 def _check_delpc_positive(fname: str, delpc6, bd) -> None:
@@ -565,8 +689,8 @@ def _check_delpc_positive(fname: str, delpc6, bd) -> None:
 def cgrid_nh_pressure_phase_3d(ctx, csw_outs: dict, gz6, ws3_6, km, *,
                                dt2, ptop: float, akap: float,
                                cp_air: float, p_fac: float, a_imp: float,
-                               dp0, zs6, remap_follows: bool = False
-                               ) -> dict:
+                               dp0, zs6, remap_follows: bool = False,
+                               batched: bool = False) -> dict:
     """NH C-grid pressure: ``update_dz_c`` -> ``Riem_Solver_C`` -> NH
     ``p_grad_c``, per face (``dyn_core.F90:584``, ``:590``, then
     ``:629``).
@@ -603,6 +727,7 @@ def cgrid_nh_pressure_phase_3d(ctx, csw_outs: dict, gz6, ws3_6, km, *,
     km = require_km("cgrid_nh_pressure_phase_3d", km)
     require_bool("cgrid_nh_pressure_phase_3d", "remap_follows",
                   remap_follows)
+    require_bool("cgrid_nh_pressure_phase_3d", "batched", batched)
     require_no_remap_needed(km, remap_follows=remap_follows)
 
     validate_stacked("cgrid_nh_pressure_phase_3d", csw_outs, ctx, km,
@@ -643,6 +768,13 @@ def cgrid_nh_pressure_phase_3d(ctx, csw_outs: dict, gz6, ws3_6, km, *,
     npx = ctx.npx
     pkc_shape = field_shape("pk", n, ng, km)
 
+    if batched:
+        return _cgrid_nh_pressure_phase_3d_batched(
+            ctx, csw_outs, gz6, ws3_6, km=km, dt2=dt2, ptop=ptop,
+            akap=akap, cp_air=cp_air, p_fac=p_fac, a_imp=a_imp,
+            dp0=dp0, zs6=zs6, bounds=bounds, npx=npx,
+            pkc_shape=pkc_shape)
+
     per_face = []
     # R1a, face axis: each face's update_dz_c / Riem_Solver_C /
     # p_grad_c read and write that face's arrays only.  Functional
@@ -671,6 +803,61 @@ def cgrid_nh_pressure_phase_3d(ctx, csw_outs: dict, gz6, ws3_6, km, *,
     return stack_faces("cgrid_nh_pressure_phase_3d", per_face)
 
 
+def _cgrid_nh_pressure_phase_3d_batched(ctx, csw_outs, gz6, ws3_6, *,
+                                        km, dt2, ptop, akap, cp_air,
+                                        p_fac, a_imp, dp0, zs6, bounds,
+                                        npx, pkc_shape) -> dict:
+    """The vmap-over-faces arm of :func:`cgrid_nh_pressure_phase_3d`.
+
+    Entry gates already ran in the caller.  One ``jax.vmap`` replaces
+    the face loop; the per-face body is IDENTICAL to the loop path's --
+    ``update_dz_c`` -> ``riem_solver_c`` -> NH ``p_grad_c``.
+
+    ``grid_type`` is passed as ONE static value: the loop path reads
+    ``ctx.flags6[t].grid_type`` per face, and ``build_batched_gs``'s
+    common-mode gate guarantees the six are equal (it RAISES otherwise),
+    so the shared value is the same value -- and ``update_dz_c``
+    branches on it in Python, so it could not be batched anyway.  The
+    corner flags are the loop path's hardcoded ``False`` (see the
+    caller's docstring).
+
+    in_axes: ``zs``/``ut``/``vt``/``gz``/``ws3``/``hs``/``wc``/``ptc``/
+    ``delpc``/``uc``/``vc`` and the gridstruct dict (``area`` for
+    ``update_dz_c``, the metric arrays for ``p_grad_c``) are 0 (per
+    face).  Closed over (face-invariant): ``bounds``/``km``/``npx``/
+    ``akap``/``cp_air``/``ptop``/``p_fac``/``a_imp``/``bd`` (static
+    Python values -- ``a_imp`` selects a Python branch inside
+    ``riem_solver_c``), plus ``dt2`` and ``dp0`` (traced but shared: one
+    half step and ONE reference-thickness column for all six faces,
+    exactly as on the loop path).
+    """
+    bview = build_batched_gs(ctx)
+    grid_type = bview["flags"]["grid_type"]
+    bd = ctx.bd
+
+    def one_face(zs_t, ut_t, vt_t, gz_t, ws_t, hs_t, wc_t, ptc_t,
+                 delpc_t, uc_t, vc_t, gs_t):
+        gz1, ws1 = update_dz_c(
+            bounds, km, dt2, dp0, zs_t, gs_t["area"], ut_t, vt_t,
+            gz_t, ws_t, npx, npx,
+            sw_corner=False, se_corner=False,
+            ne_corner=False, nw_corner=False,
+            grid_type=grid_type)
+        pkc0 = jnp.zeros(pkc_shape, dtype=jnp.float64)
+        gz2, pkc_t = riem_solver_c(
+            1, dt2, bounds, km, akap, cp_air, ptop, hs_t, wc_t,
+            ptc_t, delpc_t, gz1, pkc0, ws1, p_fac, a_imp)
+        uc_o, vc_o = p_grad_c(dt2, delpc_t, pkc_t, gz2, uc_t, vc_t,
+                              gs_t, bd, npz=km, hydrostatic=False)
+        return {"pkc": pkc_t, "gz": gz2, "ws3": ws1,
+                "uc": uc_o, "vc": vc_o}
+
+    return jax.vmap(one_face, in_axes=(0,) * 12)(
+        zs6, csw_outs["ut"], csw_outs["vt"], gz6, ws3_6, ctx.hs6,
+        csw_outs["wc"], csw_outs["ptc"], csw_outs["delpc"],
+        csw_outs["uc"], csw_outs["vc"], bview["gs"])
+
+
 # ---------------------------------------------------------------------
 # jit factories -- ONE policy per public routine, declared here so a
 # call site can never invent a different static split.
@@ -691,7 +878,8 @@ def make_csw_phase_3d_jit(fn=csw_phase_3d):
     ``remap_follows``.  ``states`` and ``dt2`` dynamic."""
     return jax.jit(fn, static_argnums=(0, 3),
                    static_argnames=("km", "nord", "duogrid",
-                                    "hydrostatic", "remap_follows"))
+                                    "hydrostatic", "remap_follows",
+                                    "batched"))
 
 
 def make_cgrid_pressure_phase_3d_jit(fn=cgrid_pressure_phase_3d):
@@ -705,7 +893,8 @@ def make_cgrid_pressure_phase_3d_jit(fn=cgrid_pressure_phase_3d):
     return jax.jit(fn, static_argnums=(0, 2),
                    static_argnames=("km", "ptop", "akap", "cp_air",
                                     "a2b_ord", "hydrostatic",
-                                    "remap_follows", "check_delpc"))
+                                    "remap_follows", "check_delpc",
+                                    "batched"))
 
 
 def make_cgrid_nh_pressure_phase_3d_jit(fn=cgrid_nh_pressure_phase_3d):
@@ -718,4 +907,5 @@ def make_cgrid_nh_pressure_phase_3d_jit(fn=cgrid_nh_pressure_phase_3d):
     """
     return jax.jit(fn, static_argnums=(0, 4),
                    static_argnames=("km", "ptop", "akap", "cp_air",
-                                    "p_fac", "a_imp", "remap_follows"))
+                                    "p_fac", "a_imp", "remap_follows",
+                                    "batched"))

@@ -1878,6 +1878,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             if self.config.implicit_grav_wave_use_pcg:
                 from legoesm.atmosphere.dynamics.gcm.semi_implicit_cdgrid import (
                     cg_helmholtz_solve,
+                    cg_metric_residual_floor,
                 )
                 # Production tolerance 1e-10 — CG reaches it in ~10
                 # iterations at α dt / dx² ≤ 5, two orders of
@@ -1901,7 +1902,12 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                     maxiter=200,
                     return_residual=True,
                 )
-                _converged = _rel_res <= _pcg_tol
+                # Accept a solve down to the metric-dtype backward-error floor
+                # (float32 metrics in mixed floor the residual at ~1e-7); a
+                # bare 1e-10 gate would reject every mixed-mode solve and drop
+                # the damping every step.  Byte-identical in fp64 (floor 0).
+                _converged = _rel_res <= max(
+                    _pcg_tol, cg_metric_residual_floor(self.cdgrid))
                 def _maybe_audit(rel_res):
                     def _warn(rel):
                         import warnings

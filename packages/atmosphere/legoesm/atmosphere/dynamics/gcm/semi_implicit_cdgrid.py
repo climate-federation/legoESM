@@ -62,6 +62,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm.core.operators_cdgrid import cgrid_divergence
+from legoesm.core.precision import cast
 from legoesm.grids.halo import pad_halo
 
 
@@ -240,6 +241,26 @@ def make_helmholtz_op(coeff, cdgrid) -> Callable[[jnp.ndarray], jnp.ndarray]:
     return A
 
 
+def cg_metric_residual_floor(cdgrid) -> float:
+    """Backward-error floor of ``cg_helmholtz_solve`` set by the metric dtype.
+
+    ``cdgrid_scalar_laplacian`` reads the grid's metric arrays, which carry the
+    grid's storage dtype.  With float32 metrics the operator coefficients are
+    only ~1e-7 accurate, so the relative residual cannot beat ~1e-6 regardless
+    of ``tol`` — a benign backward error, not under-convergence.  A caller's
+    convergence gate should accept a solve down to this floor instead of
+    treating it as failure (which would drop the semi-implicit damping every
+    step).  Returns 0.0 for float64 metrics (the requested tol is achievable).
+    """
+    # Check an ACTUAL operator metric (rdxc), not base.area — the Laplacian
+    # reads rdxc/rdyc/dx_edge_y/dy_edge_x, and metric_dtype can make those f32
+    # on an f64 base grid, so base.area would miss the floor there.
+    metric = getattr(cdgrid, "rdxc", None)
+    if metric is None or jnp.dtype(metric.dtype).itemsize >= 8:
+        return 0.0
+    return 1.0e-6
+
+
 def cg_helmholtz_solve(
     rhs,
     coeff,
@@ -303,7 +324,24 @@ def cg_helmholtz_solve(
     rel_res : jax.Array, optional
         Final externally verified relative residual.
     """
-    area = cdgrid.base.area.astype(rhs.dtype)
+    # Semi-implicit Helmholtz solve runs at the CONTROL role precision (float64
+    # in mixed/fp64).  The operator is stiff (condition number ~1e6); float32
+    # loses the high-wavenumber correction that stabilises it.  ``cast`` UPCASTS
+    # to control and skips downcasts, so an f64 caller (default-policy fp64 grid)
+    # is never demoted, while a mixed-mode f32 rhs is promoted to f64.  The
+    # solution is cast back to the caller's dtype at return so bulk dynamics
+    # stay at compute.  NOTE: the grid metrics inside cdgrid_scalar_laplacian
+    # carry the grid's storage dtype (f32 in mixed), so the residual floors at
+    # ~1e-7 metric precision in mixed (a benign BACKWARD error, per review — the
+    # operator coefficients are only f32-accurate, not under-convergence).  The
+    # effective solution error is ~ kappa * 1e-7 worst case; re-evaluate if a
+    # future config raises dt (raises the Helmholtz condition number kappa).
+    # Callers gate on cg_metric_residual_floor() so a floor-limited solve is
+    # accepted; building the grid fp64 restores a 1e-10 solve.
+    _in_dtype = rhs.dtype
+    rhs = cast(rhs, None, "control")
+    coeff = cast(jnp.asarray(coeff), None, "control")
+    area = cast(cdgrid.base.area, None, "control")
     sqrt_area = jnp.sqrt(area)
     inv_sqrt_area = 1.0 / sqrt_area
 
@@ -323,22 +361,27 @@ def cg_helmholtz_solve(
         B_op, tilde_rhs, x0=tilde_x0, tol=tol, maxiter=maxiter,
     )
     sol = inv_sqrt_area * tilde_sol
+    sol_ret = sol.astype(_in_dtype)
 
     if return_residual:
-        # External verification in *physical* space so the reported
-        # residual is the quantity the caller cares about, not the
-        # M^{1/2}-transformed one.
+        # External verification in *physical* space, on the RETURNED
+        # (caller-dtype) solution — not the control-f64 one — so the production
+        # gate reads the residual of the array it will actually use.  The
+        # measurement itself runs at control precision (upcast the returned
+        # solution) so it reports the true backward error, not f32 arithmetic
+        # noise on top of it.
         def A_phys(p):
             return p - coeff * cdgrid_scalar_laplacian(p, cdgrid)
 
+        _s = sol_ret.astype(rhs.dtype)
         rhs_norm = jnp.maximum(
             jnp.linalg.norm(rhs.ravel()), 1.0e-30,
         )
         rel_res = jnp.linalg.norm(
-            (rhs - A_phys(sol)).ravel(),
+            (rhs - A_phys(_s)).ravel(),
         ) / rhs_norm
-        return sol, rel_res
-    return sol
+        return sol_ret, rel_res
+    return sol_ret
 
 
 def richardson_helmholtz_solve(

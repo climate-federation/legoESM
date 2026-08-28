@@ -87,7 +87,13 @@ class FV3DuoDynamicsModel:
     """
 
     def __init__(self, grid, config: FV3DuoConfig | None = None, *,
-                 step_out_shardings=None):
+                 step_out_shardings=None, step_spmd_mesh=None,
+                 step_face_batched: bool = False):
+        # step_face_batched: ENGINEERING knob (face-batching ladder) --
+        # routes the 3-D phases' per-face loops through their vmapped
+        # arms (batched==loop gated at rtol 1e-13 per phase). Selects no
+        # scientific configuration; default False = the certified loop
+        # trace, byte-identical.
         # step_out_shardings: ENGINEERING knob -- ONE jax.sharding.Sharding
         # applied to each face-stacked output leaf (state/press/q/omga/nh;
         # NOT a jit out_shardings pytree prefix).  It selects no scientific
@@ -98,6 +104,17 @@ class FV3DuoDynamicsModel:
         # unconstrained jit resolves sharded-input outputs REPLICATED
         # (measured, spmd_face_shard_parity 2026-08-24) and a stepping
         # loop then decays after one step.
+        # step_spmd_mesh: ENGINEERING knob (M3) -- a jax.sharding.Mesh
+        # with one 'face' axis.  When set, the jitted step's halo
+        # exchanges route through the O(halo) shard_map ring built on
+        # that mesh (bitwise-equal to the certified exchanges,
+        # test_fv3_duo_spmd), instead of leaving the face-stacked
+        # gathers to GSPMD.  Selects no scientific configuration.
+        # Default None = the certified single-device trace, byte-
+        # identical.  SPMD callers (spmd_face_shard_parity --ring) pass
+        # BOTH knobs -- the mesh for the interior exchanges and
+        # step_out_shardings for the output boundary; they are not
+        # coupled here.
         if config is None:
             config = FV3DuoConfig()
         if not isinstance(config, FV3DuoConfig):
@@ -134,13 +151,33 @@ class FV3DuoDynamicsModel:
 
         self.grid = grid
         self.config = config
+        # Retained (not just consumed) so a multi-process restart loader
+        # can reconstruct GSPMD-sharded arrays against the EXACT sharding
+        # object the compiled step uses, instead of an independently
+        # rebuilt "similar" one that could drift in mesh/device order
+        # (codex MAJOR, mp-driver-io design review 2026-08-27).
+        self.step_out_shardings = step_out_shardings
+        self.step_spmd_mesh = step_spmd_mesh
+        # The grid bundle's ctx_jax was built WITHOUT a mesh; a ring-
+        # enabled context is rebuilt here from ctx_np rather than
+        # mutating the shared bundle's tables in place (the tables hash
+        # by identity as a STATIC jit arg, so mutating them under an
+        # already-traced certified step would leave a stale cache).
+        if step_spmd_mesh is None:
+            self._ctx_jax = grid.ctx_jax
+        else:
+            from legoesm.core.fv3_duo_stepper import (
+                build_jax_duo_stepper_context,
+            )
+            self._ctx_jax = build_jax_duo_stepper_context(
+                grid.ctx_np, spmd_mesh=step_spmd_mesh)
         self._ak = np.asarray(ak, dtype=np.float64)
         self._bk = np.asarray(bk, dtype=np.float64)
         self._ptop = float(ptop)
         # The resolved NH deck runs W_LIMITER=T (fv_mapz.F90:368); the core
         # refuses hydrostatic=False without an explicit choice.
         self._step_fn = make_fv_dynamics_step_jit(
-            grid.ctx_jax, config.km,
+            self._ctx_jax, config.km,
             k_split=config.k_split, n_split=config.n_split,
             ptop=self._ptop, ak=self._ak, bk=self._bk,
             akap=FV3_KAPPA, cp_air=FV3_CP_AIR,
@@ -149,6 +186,7 @@ class FV3DuoDynamicsModel:
             hydrostatic=config.hydrostatic,
             w_limiter=(None if config.hydrostatic else True),
             out_shardings=step_out_shardings,
+            batched=step_face_batched,
         )
 
     # ------------------------------------------------------------------
@@ -221,8 +259,8 @@ class FV3DuoDynamicsModel:
             press = p_var_nonhydrostatic(
                 jstate["delp"], jstate["delz"], jstate["pt"],
                 ptop=self._ptop, akap=FV3_KAPPA, n=n, ng=ng, km=cfg.km)
-            nh = build_nh_carry(self.grid.ctx_jax, cfg.km,
-                                self.grid.ctx_jax.hs6)
+            nh = build_nh_carry(self._ctx_jax, cfg.km,
+                                self._ctx_jax.hs6)
         q = [jnp.asarray(np.stack(sphum6))]
         omga = jnp.zeros(
             (6,) + tuple(field_shape("delp", n, ng, cfg.km)),

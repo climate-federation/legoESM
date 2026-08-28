@@ -22,6 +22,8 @@ from legoesm.ocean.physics.vertical_mixing.tke import (
     _NEMO_TKE_EBB,
     _NEMO_TKE_EMIN0,
     _NEMO_TKE_LC_CSD,
+    _solve_tke_backward_euler,
+    _surface_tke_dirichlet,
     nemo_etau_injection,
     nemo_langmuir_tke_source,
     tke_vertical_mixing,
@@ -541,6 +543,88 @@ class TestNemoZ0SurfaceBCPlacement:
         return (u, v, T, S, rho, dz_half, z_interface, tau_x, tau_y,
                 dz_ref, jacobian, dz_surface)
 
+    @staticmethod
+    def _floor_only_solve(*, surface_bc_level, surface_dirichlet):
+        """Two uncoupled interior rows isolating the post-solve floor.
+
+        K_M=K_H=P_s=N2=0, so the virtual surface row cannot influence either
+        interior row.  Dissipation makes the raw result slightly less than
+        e_old=1e-6, hence NEMO's ordinary interior ``rn_emin`` floor gives the
+        hand-computed exact result [1e-6, 1e-6].  A non-NEMO surface path is
+        expected to retain legoESM's historical first-interface 1e-4 floor.
+        """
+        shape = (1, 1, 2)
+        cfg = TKEConfig(tke_background=1.0e-6, tke_surface_min=1.0e-4)
+        zeros = jnp.zeros(shape)
+        return np.asarray(_solve_tke_backward_euler(
+            e_old=jnp.full(shape, 1.0e-6),
+            K_M_old=zeros, K_H_old=zeros, P_s=zeros, N2=zeros,
+            l_eps=jnp.ones(shape), dz_half=jnp.ones(shape),
+            surface_flux=jnp.zeros((1, 1)), dt=1.0, cfg=cfg,
+            dz_surface=jnp.ones((1, 1)),
+            surface_dirichlet=(None if surface_dirichlet is None else
+                               jnp.full((1, 1), surface_dirichlet)),
+            surface_bc_level=surface_bc_level,
+            K_M_surface=(jnp.zeros((1, 1))
+                         if surface_bc_level == "nemo_z0" else None),
+        ))[0, 0]
+
+    def test_nemo_z0_first_interior_uses_rn_emin_not_rn_emin0(self):
+        """Regression: rn_emin0 belongs only to virtual surface jk=1.
+
+        With zero coupling, the hand-computed solved jk=2/jk=3 values are
+        both the ordinary interior floor rn_emin=1e-6.  Before the fix,
+        legoESM incorrectly repinned jk=2 (carried interface 0) to 1e-4.
+        NEMO MY_SRC/zdftke.F90:361 vs :564-565.
+        """
+        actual = self._floor_only_solve(
+            surface_bc_level="nemo_z0", surface_dirichlet=1.0e-4)
+        np.testing.assert_array_equal(actual, np.asarray([1.0e-6, 1.0e-6]))
+
+    def test_nemo_z0_surface_min_knob_is_live_at_virtual_dirichlet_row(self):
+        """Changing tke_surface_min changes the coupled nemo_z0 solution.
+
+        The field is NEMO's rn_emin0 and therefore belongs to the virtual
+        surface Dirichlet row, not the first solved interior interface.  This
+        catches the dead-knob regression where the row read a module constant
+        and silently ignored the configuration field.
+        """
+        shape = (1, 1, 2)
+        zeros = jnp.zeros(shape)
+        taum = jnp.zeros((1, 1))
+
+        def solve(surface_min):
+            cfg = TKEConfig(
+                surface_bc="nemo_dirichlet",
+                tke_surface_bc_level="nemo_z0",
+                tke_surface_min=surface_min,
+                c_eps=0.0,
+            )
+            surface = _surface_tke_dirichlet(cfg, taum, _RHO0)
+            return np.asarray(_solve_tke_backward_euler(
+                e_old=jnp.full(shape, cfg.tke_background),
+                K_M_old=jnp.full(shape, 1.0e-3), K_H_old=zeros,
+                P_s=zeros, N2=zeros, l_eps=jnp.ones(shape),
+                dz_half=jnp.ones(shape), surface_flux=jnp.zeros((1, 1)),
+                dt=1.0, cfg=cfg, dz_surface=jnp.ones((1, 1)),
+                surface_dirichlet=surface, surface_bc_level="nemo_z0",
+                K_M_surface=jnp.full((1, 1), 1.0e-3),
+            ))
+
+        low = solve(1.0e-4)
+        high = solve(4.0e-4)
+        assert high[0, 0, 0] > low[0, 0, 0]
+        assert not np.array_equal(low, high)
+
+    @pytest.mark.parametrize("surface_dirichlet", [None, 5.0e-5])
+    def test_non_nemo_z0_paths_retain_first_interface_surface_min_byte_pin(
+            self, surface_dirichlet):
+        """Byte pin: flux/default and interior-pinned paths do not change."""
+        actual = self._floor_only_solve(
+            surface_bc_level="interior_pinned",
+            surface_dirichlet=surface_dirichlet)
+        np.testing.assert_array_equal(actual, np.asarray([1.0e-4, 1.0e-6]))
+
     def test_nemo_z0_matches_hand_derived_solve(self):
         """One prognostic step: nemo_z0's solved row-0 EXACTLY matches an
         independently hand-derived NEMO (N+1)-row Thomas solve (formulas
@@ -581,12 +665,9 @@ class TestNemoZ0SurfaceBCPlacement:
             e_old_np, np.asarray(K_M)[0, 0], N2_arr[0, 0],
             np.asarray(l_eps)[0, 0], 10.0, e_sfc, 1800.0, cfg.c_eps,
             cfg.alpha_tke, shear_sq=shear_sq_np)
-        # Floors applied by the orchestrator's tail (tke_background,
-        # tke_surface_min) — apply the SAME floors to the hand-solve before
-        # comparing (both floors are no-ops here since the raw solve already
-        # sits well above them, but keep the comparison honest).
+        # NEMO's solved jk=2..jpkm1 rows receive only rn_emin; rn_emin0 is
+        # owned by the separate virtual surface row (zdftke.F90:361,564-565).
         expected = np.maximum(expected, cfg.tke_background)
-        expected[0] = max(expected[0], cfg.tke_surface_min)
         np.testing.assert_allclose(
             np.asarray(out.tke_new)[0, 0], expected, rtol=1e-10)
 
@@ -640,7 +721,6 @@ class TestNemoZ0SurfaceBCPlacement:
             np.asarray(l_eps)[0, 0], 10.0, e_sfc, 1800.0, cfg.c_eps,
             cfg.alpha_tke, avm1=avm1, shear_sq=shear_sq_np)
         expected = np.maximum(expected, cfg.tke_background)
-        expected[0] = max(expected[0], cfg.tke_surface_min)
         np.testing.assert_allclose(
             np.asarray(out.tke_new)[0, 0], expected, rtol=1e-9)
         # And it must NOT equal the approximation (avm1 != K_M[0] generically
