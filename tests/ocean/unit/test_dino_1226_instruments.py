@@ -1966,3 +1966,25 @@ def test_tcarry_basin_rejects_unregistered_common_config(instruments):
     planted = dict(valid, perturb_baro="/tmp/plant.npz",
                    perturb_baro_sha256="0" * 64)
     assert any("perturb_baro" in error for error in check(planted, "arm", 90))
+
+
+def test_tcarry_selftest_runs_every_receipt_plant_through_real_npz(
+        instruments, capsys):
+    """Regression for the Stage-1 crash: a dict-only test cannot expose an
+    NPZ overlay whose missing membership dunder triggers integer iteration."""
+    assert instruments.tcarry_reverdict._self_test() == 0
+    out = capsys.readouterr().out
+    assert "planted corrected-T -> U_AS_T_LEGACY" in out
+    assert "planted corrected float64 -> float32" in out
+    assert "planted corrected rn_Uv 0.27 -> 0.54" in out
+    assert "planted unregistered perturb_baro" in out
+    assert "every receipt plant passed through real NPZ files" in out
+
+
+def test_tcarry_retained_stage1_producer_is_independent_of_amended_scorer_head(
+        instruments):
+    scorer = "e" * 40
+    expected = instruments.tcarry_reverdict._expected_producer_sha
+    assert expected(90, scorer) == instruments.tcarry_reverdict.STAGE1_PRODUCER_GIT_SHA
+    assert expected(90, scorer) != scorer
+    assert expected(360, scorer) == scorer

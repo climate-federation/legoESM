@@ -13,6 +13,8 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import numpy as np
@@ -34,6 +36,7 @@ FLOOR = {90: 0.00014499002386242506, 360: 0.06173656216045926}
 EXPECTED_T_HASH = "b6a08b8395017c8e3f8df0b8b13eefa75fdfe7be3770d788beaaf1ca514127ae"
 FLOOR_RECEIPT = "/tmp/dino_basin_seasonal_decomp.json"
 FLOOR_RECEIPT_SHA256 = "63d4e60dd68281bc6101a35f86cb3f4406cb2ddbc27848b74473876226e85849"
+STAGE1_PRODUCER_GIT_SHA = "d6dc89e91c9ae6b07d146991d2cb6c850f261bb0"
 IDENTICAL_STAMPS = (
     "control_dtype",
     "nemo_ladder_mode",
@@ -86,6 +89,47 @@ def _scalar(z: np.lib.npyio.NpzFile, key: str):
     return np.asarray(z[key]).item()
 
 
+class _Swap(Mapping[str, object]):
+    """Read-only NPZ overlay used by the planted receipt controls.
+
+    The receipt consumers use ``.files``, membership, keyed access, and may
+    evolve toward the ordinary mapping helpers. Implement the complete
+    read-only Mapping surface so ``key in overlay`` never falls back to
+    Python's integer-index iteration protocol (the Stage-1 crash).
+    """
+
+    def __init__(self, backing, overrides: Mapping[str, object]):
+        self._backing = backing
+        self._overrides = dict(overrides)
+
+    @property
+    def files(self) -> list[str]:
+        backing_keys = (list(self._backing.files)
+                        if hasattr(self._backing, "files")
+                        else list(self._backing.keys()))
+        return list(dict.fromkeys([*backing_keys, *self._overrides]))
+
+    def __getitem__(self, key: str):
+        if key in self._overrides:
+            return np.asarray(self._overrides[key])
+        return self._backing[key]
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._overrides or key in self.files
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.files)
+
+    def __len__(self) -> int:
+        return len(self.files)
+
+    def keys(self):
+        return self.files
+
+    def get(self, key: str, default=None):
+        return self[key] if key in self else default
+
+
 def _registered_config_errors(config: dict, tag: str, day: int) -> list[str]:
     expected = {
         "recipe": "nemo_dino_kamm_mlf",
@@ -108,6 +152,11 @@ def _registered_config_errors(config: dict, tag: str, day: int) -> list[str]:
     }
     return [f"{tag} run_config {key}={config.get(key)!r}, expected {want!r}"
             for key, want in expected.items() if config.get(key, object()) != want]
+
+
+def _expected_producer_sha(day: int, scorer_sha: str) -> str:
+    """Bind retained Stage 1; future conditional Stage 2 binds its scorer."""
+    return STAGE1_PRODUCER_GIT_SHA if day == 90 else scorer_sha
 
 
 def _receipt_errors(legacy: np.lib.npyio.NpzFile,
@@ -160,7 +209,7 @@ def _receipt_errors(legacy: np.lib.npyio.NpzFile,
         if len(producer_sha) != 40 or any(c not in "0123456789abcdef" for c in producer_sha):
             errors.append(f"{tag} producer_git_sha is not a full SHA-1: {producer_sha!r}")
         if expected_sha is not None and producer_sha != expected_sha:
-            errors.append(f"{tag} producer_git_sha {producer_sha} != scorer HEAD "
+            errors.append(f"{tag} producer_git_sha {producer_sha} != registered producer "
                           f"{expected_sha}")
 
     try:
@@ -199,30 +248,19 @@ def _check_receipts(legacy: np.lib.npyio.NpzFile,
 
     # Planted stagger swap: a receipt that labels the corrected arm as legacy
     # must be rejected. This proves the selector control can fail.
-    class _Swap:
-        files = corrected.files
-
-        def __init__(self, overrides):
-            self.overrides = overrides
-
-        def __getitem__(self, key):
-            if key in self.overrides:
-                return np.asarray(self.overrides[key])
-            return corrected[key]
-
     planted_errors = _receipt_errors(
-        legacy, _Swap({"bridge_before_stress_stagger": "U_AS_T_LEGACY"}), day,
+        legacy, _Swap(corrected, {"bridge_before_stress_stagger": "U_AS_T_LEGACY"}), day,
         expected_sha)
     if not any("corrected.bridge_before_stress_stagger" in x for x in planted_errors):
         raise SystemExit("STOP planted selector swap did not fire")
     print("[CONTROL PASS] planted corrected-T -> U_AS_T_LEGACY stamp swap rejected")
     offclaim_errors = _receipt_errors(
-        legacy, _Swap({"control_dtype": "float32"}), day, expected_sha)
+        legacy, _Swap(corrected, {"control_dtype": "float32"}), day, expected_sha)
     if not any("control dtype" in x for x in offclaim_errors):
         raise SystemExit("STOP planted off-claim precision did not fire")
     print("[CONTROL PASS] planted corrected float64 -> float32 claim violation rejected")
     viscosity_errors = _receipt_errors(
-        legacy, _Swap({"rn_Uv": 0.54}), day, expected_sha)
+        legacy, _Swap(corrected, {"rn_Uv": 0.54}), day, expected_sha)
     if not any("corrected.rn_Uv" in x or "stamp rn_Uv differs" in x
                for x in viscosity_errors):
         raise SystemExit("STOP planted rn_Uv confound did not fire")
@@ -231,7 +269,7 @@ def _check_receipts(legacy: np.lib.npyio.NpzFile,
     bad_config["perturb_baro"] = "/tmp/planted.npz"
     bad_config["perturb_baro_sha256"] = "0" * 64
     perturb_errors = _receipt_errors(
-        legacy, _Swap({"run_config": json.dumps(bad_config, sort_keys=True)}),
+        legacy, _Swap(corrected, {"run_config": json.dumps(bad_config, sort_keys=True)}),
         day, expected_sha)
     if not any("perturb_baro" in x for x in perturb_errors):
         raise SystemExit("STOP planted barotropic perturbation confound did not fire")
@@ -366,7 +404,55 @@ def _self_test() -> int:
             raise SystemExit("non-finite classifier plant did not fire")
     if _bit_identical(np.array([1.0]), np.array([np.nan])):
         raise SystemExit("non-finite day-0 plant did not fire")
-    print("SELF-TEST PASS: floor/confirm/refute/intermediate/compensation are exclusive")
+
+    # Exercise the exact real-NpzFile -> overlay -> receipt-consumer path that
+    # crashed before any Stage-1 metric was read. This runs every receipt plant
+    # in _check_receipts, not a dict imitation of the archive interface.
+    producer_sha = "a" * 40
+    common_config = {
+        "recipe": "nemo_dino_kamm_mlf", "n_days": 90,
+        "run_traj": str(K.RUN_TRAJ), "run_stepdump": str(K.RUN_STEPDUMP),
+        "restart_file": str(K.RESTART_FILE), "bridge_tke": False,
+        "bridge_before": True, "vmix_scheme": None, "use_gm_redi": None,
+        "surface_stress_implicit": False, "surface_tendency_placement": None,
+        "save_step_eta": False, "perturb_seed": None, "perturb_eps": 1e-14,
+        "perturb_baro": None, "perturb_baro_sha256": None,
+        "perturb_baro_key": "dU_avg", "perturb_baro_scale": 1.0,
+        "daily_acc": False, "u_m": None,
+    }
+    common_stamps = {
+        "control_dtype": "float64", "nemo_ladder_mode": "both",
+        "seasonal_t0_reference_seconds": 15552000.0,
+        "seasonal_t0_seconds": 15552000.0, "surface_stress_implicit": False,
+        "twin_start_mode": "bridged", "vertical_ladder_sha256": "b" * 64,
+        "rn_Uv": 0.27, "producer_git_sha": producer_sha,
+        "producer_dirty_tracked_files": 0, "stable": True,
+    }
+    legacy_config = dict(common_config, bridge_before_stress_tpoint=False)
+    corrected_config = dict(common_config, bridge_before_stress_tpoint=True)
+    with tempfile.TemporaryDirectory(prefix="tcarry-reverdict-selftest-") as tmp:
+        legacy_path = Path(tmp) / "legacy.npz"
+        corrected_path = Path(tmp) / "corrected.npz"
+        np.savez(
+            legacy_path, **common_stamps,
+            bridge_before_stress_stagger="U_AS_T_LEGACY",
+            bridge_before_stress_reconstruction_seconds=np.nan,
+            bridge_before_stress_sha256="c" * 64,
+            run_config=json.dumps(legacy_config, sort_keys=True))
+        np.savez(
+            corrected_path, **common_stamps,
+            bridge_before_stress_stagger="T",
+            bridge_before_stress_reconstruction_seconds=15552000.0,
+            bridge_before_stress_sha256=EXPECTED_T_HASH,
+            run_config=json.dumps(corrected_config, sort_keys=True))
+        with np.load(legacy_path) as legacy, np.load(corrected_path) as corrected:
+            overlay = _Swap(corrected, {"control_dtype": "float32"})
+            if ("nemo_ladder_mode" not in overlay
+                    or overlay.get("missing", "sentinel") != "sentinel"
+                    or set(iter(overlay)) != set(overlay.keys())):
+                raise SystemExit("synthetic-NPZ overlay mapping contract failed")
+            _check_receipts(legacy, corrected, 90, producer_sha)
+    print("SELF-TEST PASS: classifier and every receipt plant passed through real NPZ files")
     return 0
 
 
@@ -388,6 +474,8 @@ def main(argv: list[str] | None = None) -> int:
         ["git", "-C", str(_DIR), "rev-parse", "HEAD"],
         capture_output=True, check=False, text=True).stdout.strip()
     print(f"[PROVENANCE] git_sha={git_sha}")
+    expected_producer_sha = _expected_producer_sha(args.day, git_sha)
+    print(f"[PROVENANCE] registered_producer_git_sha={expected_producer_sha}")
     print(f"[PROVENANCE] scorer={Path(__file__).resolve()} sha256={sha256(__file__)}")
     print(f"[PROVENANCE] legacy={Path(args.legacy).resolve()} sha256={sha256(args.legacy)}")
     print(f"[PROVENANCE] corrected={Path(args.corrected).resolve()} "
@@ -404,7 +492,7 @@ def main(argv: list[str] | None = None) -> int:
     _check_floor_receipt(args.floor_receipt, args.day)
 
     with np.load(args.legacy) as legacy_npz, np.load(args.corrected) as corrected_npz:
-        _check_receipts(legacy_npz, corrected_npz, args.day, git_sha)
+        _check_receipts(legacy_npz, corrected_npz, args.day, expected_producer_sha)
         _check_day0(legacy_npz, corrected_npz)
         for key in ("land_mask",):
             if not _bit_identical(legacy_npz[key], corrected_npz[key]):
