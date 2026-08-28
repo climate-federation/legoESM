@@ -775,7 +775,8 @@ class TestDinoWindStress:
                 grid, cfg, wind_lat_deg=raw[:-1])
 
     def test_literal_forcing_default_reconstructs_nemo_raw_gphiu(self):
-        cfg = dino_config_for_recipe("nemo_dino_kamm")
+        cfg = nemo_faithful_dino_config(
+            base=dino_config_for_recipe("nemo_dino_kamm"))
         grid = dino_lat_lon_grid(cfg)
         implicit = dino.dino_lat_lon_surface_forcing_arrays(grid, cfg)
 
@@ -798,12 +799,24 @@ class TestDinoWindStress:
         assert not np.array_equal(
             np.asarray(implicit["tau_u_cell_2d"][:, 0]), lossy)
 
-    def test_literal_forcing_fails_closed_without_raw_or_complete_card(self):
+    def test_literal_forcing_nonoracle_grid_still_uses_source_degrees(self):
         cfg = dataclasses.replace(
             DINOConfig(), dino_wind_profile_evaluation="nemo_literal")
         grid = dino_lat_lon_grid(cfg, n_lon=4)
-        with pytest.raises(ValueError, match="refusing a lossy"):
-            dino.dino_lat_lon_surface_forcing_arrays(grid, cfg)
+        got = dino.dino_lat_lon_surface_forcing_arrays(grid, cfg)
+        import math
+        rad = math.pi / 180.0
+        dlon_deg = ((cfg.lon_east_deg - cfg.lon_west_deg) / grid.n_lon)
+        jeq = grid.n_lat // 2
+        half_offset = 0.0 if grid.n_lat % 2 else 0.5
+        raw = np.asarray([
+            (1.0 / rad) * math.asin(math.tanh(
+                dlon_deg * rad * float(j - jeq + half_offset)))
+            for j in range(grid.n_lat)
+        ], dtype=np.float64)
+        want = dino_wind_stress(jnp.asarray(raw), cfg)
+        assert np.array_equal(np.asarray(got["tau_u_cell_2d"][:, 0]),
+                              np.asarray(want))
 
     def test_hits_knots(self):
         cfg = DINOConfig()
