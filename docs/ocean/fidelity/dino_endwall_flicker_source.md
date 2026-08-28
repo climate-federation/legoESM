@@ -321,8 +321,8 @@ stress at the restart's own `15,552,000 s` seasonal time, and stamps stagger,
 time and array-content hash. It does not invert `utau_b/vtau_b`, edit a
 prognostic, or alter the later-step carry path.
 
-The committed same-state CPU gate at Git
-`73ad090d411027ae3815f6ae8ea7b7ff0f85f0dc` passed:
+The retained same-state CPU gate at clean Git
+`fd0e83c40a28a8cb34be8c6db0582b0e474bdfde` passed:
 
 | Registered CPU quantity | Legacy U-as-T | Reconstructed T carry |
 |---|---:|---:|
@@ -340,7 +340,7 @@ state leaves, geometry, ladders, config, forcing and external tendency are
 bit-identical; a planted eta edit makes that identity check fail.
 
 The retained CPU-gate log SHA-256 is
-`b24c13bb745b1ae6dd06417f77e2b09ed0594423c70cf6a1612d00a9e9b0b86f`.
+`4cb84d20b7b0236b842932f5683a13e7be82c7bca748e40bd824d694bdbc030c`.
 The reconstructed T carry has SHA-256
 `b6a08b8395017c8e3f8df0b8b13eefa75fdfe7be3770d788beaaf1ca514127ae`.
 A zero-step artifact smoke serialized `bridge_before_stress_stagger="T"`,
@@ -446,7 +446,7 @@ claims before these findings were finalized.
   donor, donor-overlap, entry/helper/order/slot, and structural-zero controls
   all fire/pass. Independent mechanism-review rerun also exited zero (log
   SHA-256 `c91d054ac58103d5dc27743ba287b8dd4ae9fd7dfb436dda51ab4ff2b78b595f`).
-- Round-3 T-point bridge CPU gate at clean commit `73ad090d4`: PASS; direct
+- Round-3 T-point bridge CPU gate at clean commit `fd0e83c40`: PASS; direct
   excess removal `99.9999969917%`, planted-stagger restoration relative error
   `0`, and both donor-support Jaccards `1.0`. The removal and restoration
   scoring paths each have planted reachable REFUTE controls.
