@@ -198,22 +198,12 @@ def nemo_literal_tke_recurrence(
     forward recurrence at ``jpkm1``, seeds that row directly, back-substitutes
     through level 2, and only then applies the floor/mask.
     """
-    a = np.asarray(a_ext)
-    diag = np.array(b_ext, copy=True)
+    diag, work = nemo_literal_tke_forward_stages(
+        a_ext, b_ext, c_ext, rhs_ext, surface_en)
     up = np.asarray(c_ext)
     rhs = np.asarray(rhs_ext)
-    work = np.array(rhs, copy=True)
     n_ext = diag.shape[-1]
     last_solved = n_ext - 2
-    diag[..., 0] = 1.0 / np.asarray(surface_en)
-    work[..., 0] = 1.0
-    for k in range(1, last_solved + 1):
-        diag[..., k] = (
-            diag[..., k]
-            - a[..., k] * up[..., k - 1] / diag[..., k - 1])
-        work[..., k] = (
-            rhs[..., k]
-            - a[..., k] / diag[..., k - 1] * work[..., k - 1])
     solved = np.array(rhs, copy=True)
     solved[..., last_solved] = (
         work[..., last_solved] / diag[..., last_solved])
@@ -223,6 +213,30 @@ def nemo_literal_tke_recurrence(
         ) / diag[..., k]
     interior = solved[..., 1:]
     return np.maximum(interior, np.float64(floor)) * np.asarray(w_active)
+
+
+def nemo_literal_tke_forward_stages(
+    a_ext: np.ndarray, b_ext: np.ndarray, c_ext: np.ndarray,
+    rhs_ext: np.ndarray, surface_en: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Literal zdftke.F90:560-569 forward diagonal and RHS recurrences."""
+    a = np.asarray(a_ext)
+    diag = np.array(b_ext, copy=True)
+    up = np.asarray(c_ext)
+    rhs = np.asarray(rhs_ext)
+    work = np.array(rhs, copy=True)
+    last_solved = diag.shape[-1] - 2
+    diag[..., 0] = 1.0 / np.asarray(surface_en)
+    work[..., 0] = 1.0
+    for k in range(1, last_solved + 1):
+        diag[..., k] = (
+            diag[..., k]
+            - a[..., k] * up[..., k - 1] / diag[..., k - 1])
+    for k in range(1, last_solved + 1):
+        work[..., k] = (
+            rhs[..., k]
+            - a[..., k] / diag[..., k - 1] * work[..., k - 1])
+    return diag, work
 
 
 def exact_difference_census(
@@ -533,6 +547,8 @@ def main() -> int:
     ap.add_argument("--bn2-bracket-instrument-restart", type=Path)
     ap.add_argument("--bn2-certified-restart", type=Path)
     ap.add_argument("--row17-postsolve-dump", type=Path)
+    ap.add_argument("--row17-forward-diag-dump", type=Path)
+    ap.add_argument("--row17-forward-rhs-dump", type=Path)
     ap.add_argument("--row17-bracket-off-restart", type=Path)
     ap.add_argument("--row17-bracket-instrument-restart", type=Path)
     ap.add_argument("--row17-instrument-source", type=Path)
@@ -1870,6 +1886,8 @@ def main() -> int:
                                         "continuation_preview"]:
                                     row17_args = (
                                         args.row17_postsolve_dump,
+                                        args.row17_forward_diag_dump,
+                                        args.row17_forward_rhs_dump,
                                         args.row17_bracket_off_restart,
                                         args.row17_bracket_instrument_restart,
                                         args.row17_instrument_source,
@@ -1930,6 +1948,31 @@ def main() -> int:
                                                 np.asarray(
                                                     solve_kwargs["w_active"]),
                                                 tke_cfg.tke_background))
+                                        literal_diag, literal_work = (
+                                            nemo_literal_tke_forward_stages(
+                                                a_tri, b_tri, c_tri,
+                                                tri_args[3], surface_n))
+                                        diag_n = base._load_interior(
+                                            str(args.row17_forward_diag_dump),
+                                            ni, nj)
+                                        work_n = base._load_interior(
+                                            str(args.row17_forward_rhs_dump),
+                                            ni, nj)
+                                        n_forward = literal_diag.shape[-1] - 1
+                                        wet_forward = np.concatenate(
+                                            (wet2[..., None],
+                                             wet_rhs[..., :n_forward - 1]),
+                                            axis=-1)
+                                        forward_diag_metric = metrics(
+                                            literal_diag[..., :n_forward],
+                                            diag_n[..., :n_forward],
+                                            wet_forward, focus,
+                                            POINTWISE_BAR)
+                                        forward_rhs_metric = metrics(
+                                            literal_work[..., :n_forward],
+                                            work_n[..., :n_forward],
+                                            wet_forward, focus,
+                                            POINTWISE_BAR)
                                         recurrence_metric = metrics(
                                             literal_recurrence[..., :nrhs],
                                             postsolve_n, wet_rhs, focus,
@@ -1952,6 +1995,10 @@ def main() -> int:
                                             "rhs_dissipation": row15m,
                                             "posthoc_nemo_literal_recurrence":
                                                 recurrence_metric,
+                                            "literal_forward_diagonal":
+                                                forward_diag_metric,
+                                            "literal_forward_rhs":
+                                                forward_rhs_metric,
                                         }
                                         bracket17 = restart_numeric_identity(
                                             args.row17_bracket_instrument_restart,
@@ -1971,6 +2018,8 @@ def main() -> int:
                                                 str(path): sha256(path)
                                                 for path in (
                                                     args.row17_postsolve_dump,
+                                                    args.row17_forward_diag_dump,
+                                                    args.row17_forward_rhs_dump,
                                                     args.row17_instrument_source,
                                                     args.row17_instrument_binary,
                                                     args.row17_bracket_off_restart,
