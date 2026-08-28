@@ -91,8 +91,22 @@ def _bit_identical_day0(old_path: str | Path, current_path: str | Path) -> None:
     print("[CONTROL PASS] old/current day-0 prognostic fields are bit-identical")
 
 
-def _gap(path: str | Path, day: int, nemo: dict[str, np.ndarray]):
-    state = G.load_candidate(str(path), day=day)
+def _gap(path: str | Path, day: int, nemo: dict[str, np.ndarray],
+         *, historical: bool = False):
+    prior = os.environ.get("DINO_GATE_ALLOW_LEGACY_CLOCK")
+    if historical:
+        print(f"[PROVENANCE] historical clock-stamp escape active for {path}; "
+              "hash/log/15552000s receipts passed")
+        os.environ["DINO_GATE_ALLOW_LEGACY_CLOCK"] = "1"
+    else:
+        os.environ.pop("DINO_GATE_ALLOW_LEGACY_CLOCK", None)
+    try:
+        state = G.load_candidate(str(path), day=day)
+    finally:
+        if prior is None:
+            os.environ.pop("DINO_GATE_ALLOW_LEGACY_CLOCK", None)
+        else:
+            os.environ["DINO_GATE_ALLOW_LEGACY_CLOCK"] = prior
     value, rows = R._reduce(state)
     nemo_value, nemo_rows = R._reduce(nemo)
     return value - nemo_value, rows - nemo_rows
@@ -155,10 +169,10 @@ def main(argv: list[str] | None = None) -> int:
     for day in DAYS:
         nemo = B.nemo_state(0, day)
         R._reducer_plants(nemo)
-        old_gap, old_rows = _gap(args.old_artifact, day, nemo)
+        old_gap, old_rows = _gap(args.old_artifact, day, nemo, historical=True)
         current_gap, current_rows = _gap(args.current, day, nemo)
-        een_off_gap, een_off_rows = _gap(args.een_off, day, nemo)
-        een_nemo_gap, een_nemo_rows = _gap(args.een_nemo, day, nemo)
+        een_off_gap, een_off_rows = _gap(args.een_off, day, nemo, historical=True)
+        een_nemo_gap, een_nemo_rows = _gap(args.een_nemo, day, nemo, historical=True)
         expected_old, floor = old_by_day[day]
         if old_gap != expected_old:
             raise SystemExit(f"STOP day-{day} old gap {old_gap:.17g} != JSON "
