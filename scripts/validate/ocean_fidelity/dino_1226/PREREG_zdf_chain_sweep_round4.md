@@ -164,3 +164,13 @@ operand; an input pass followed by an output failure localizes it to arithmetic
 association.  A planted one-cell perturbation and nonfinite injection must
 fail.  The ordered sweep stops at row 8 unless the literal construction passes
 at `0/9,920`; no row 9+ result may be promoted across a row-8 miss.
+
+The first registered peel above localizes the miss to supplied `taum` in the
+same 154 unfloored columns.  Before looking inside that operand, its source is
+therefore split in the literal `usrdef_sbc.F90:221-223` order: `gphiu`, nearest
+knot/interval selection, `zs`, the left-associated cubic expression
+`val_s + (val_n-val_s)*(3-2*zs)*zs**2`, `ABS(utau)`, then the conditional
+`*1.3`.  `sbc_dump_utau.bin` is the oracle input.  The NEMO-literal
+reconstruction must match that dump at the same `1e-15` column bar, and
+substituting the dump-derived `taum` into row 8 must give `0/9,920` failures;
+otherwise attribution stops at the earliest failed suboperand.
