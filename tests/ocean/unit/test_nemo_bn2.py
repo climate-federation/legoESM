@@ -107,7 +107,8 @@ def test_bn2_matches_numpy_transcription():
     ref = _numpy_bn2(T, S, gdept, gdepw_int, cfg, g)
     got = np.asarray(compute_buoyancy_frequency_nemo_bn2(
         jnp.asarray(T), jnp.asarray(S), jnp.asarray(gdept),
-        jnp.asarray(gdepw_int), cfg=cfg, g=g))
+        jnp.asarray(gdepw_int), cfg=cfg, g=g,
+        e3w_source="depth_difference"))
     assert got.shape == (len(gdept) - 1,)
     assert np.allclose(got, ref, rtol=0, atol=1e-18), np.max(np.abs(got - ref))
 
@@ -120,7 +121,8 @@ def test_bn2_batched_broadcasts():
     Sb = np.broadcast_to(S, (4, 3, len(S))).copy()
     got = np.asarray(compute_buoyancy_frequency_nemo_bn2(
         jnp.asarray(Tb), jnp.asarray(Sb), jnp.asarray(gdept),
-        jnp.asarray(gdepw_int), cfg=cfg))
+        jnp.asarray(gdepw_int), cfg=cfg,
+        e3w_source="depth_difference"))
     ref = _numpy_bn2(Tb, Sb, gdept, gdepw_int, cfg, constants.g)
     assert got.shape == (4, 3, len(gdept) - 1)
     assert np.allclose(got, ref, atol=1e-18)
@@ -132,7 +134,8 @@ def test_bn2_sign_is_convection_trigger():
     T, S, gdept, gdepw_int = _column()
     n2 = np.asarray(compute_buoyancy_frequency_nemo_bn2(
         jnp.asarray(T), jnp.asarray(S), jnp.asarray(gdept),
-        jnp.asarray(gdepw_int), cfg=cfg))
+        jnp.asarray(gdepw_int), cfg=cfg,
+        e3w_source="depth_difference"))
     assert n2[3] < 0.0                       # unstable interface fires
     assert (n2[:3] > 0.0).all()              # stable stratification above
 
@@ -196,6 +199,7 @@ def test_shared_compute_N2_nemo_bn2_branch():
         jnp.zeros_like(Tj), jnp.ones((1, len(T) - 1)), cfg.rho0,
         T_cell=Tj, S_cell=Sj,
         t_depth=jnp.asarray(gdept), w_depth=jnp.asarray(gdepw_int),
+        e3w_int=jnp.diff(jnp.asarray(gdept)),
         n2_mode="nemo_bn2"))
     ref = _numpy_bn2(T[None, :], S[None, :], gdept, gdepw_int, cfg, constants.g)
     assert np.allclose(n2, ref, atol=1e-18)
@@ -225,6 +229,7 @@ def test_shared_compute_N2_nemo_bn2_jacobian_stretches_live_gdept():
         jnp.zeros_like(Tj), jnp.ones((1, len(T) - 1)), cfg.rho0,
         T_cell=Tj, S_cell=Sj,
         t_depth=jnp.asarray(gdept) * J, w_depth=jnp.asarray(gdepw_int) * J,
+        e3w_int=jnp.diff(jnp.asarray(gdept)) * J,
         jacobian=Jj, n2_mode="nemo_bn2"))
     ref_live = _numpy_bn2(
         T[None, :], S[None, :], gdept * J, gdepw_int * J, cfg, constants.g,
@@ -235,6 +240,7 @@ def test_shared_compute_N2_nemo_bn2_jacobian_stretches_live_gdept():
         jnp.zeros_like(Tj), jnp.ones((1, len(T) - 1)), cfg.rho0,
         T_cell=Tj, S_cell=Sj,
         t_depth=jnp.asarray(gdept), w_depth=jnp.asarray(gdepw_int),
+        e3w_int=jnp.diff(jnp.asarray(gdept)),
         n2_mode="nemo_bn2"))
     assert not np.allclose(n2_live, n2_static, atol=1e-8)
     # Dominant effect of the stretch is the 1/e3w scaling -> n2_live ~ n2_static/J,
@@ -280,6 +286,7 @@ def test_nemo_bn2_ladder_is_pure_jacobian_stretch_not_eta_shift():
         jnp.zeros_like(Tj), jnp.ones((1, len(T) - 1)), cfg.rho0,
         T_cell=Tj, S_cell=Sj,
         t_depth=jnp.asarray(gdept) * J, w_depth=jnp.asarray(gdepw_int) * J,
+        e3w_int=jnp.diff(jnp.asarray(gdept)) * J,
         n2_mode="nemo_bn2"))
     assert np.allclose(n2_correct, ref_true, atol=1e-12)
 
@@ -289,6 +296,7 @@ def test_nemo_bn2_ladder_is_pure_jacobian_stretch_not_eta_shift():
         T_cell=Tj, S_cell=Sj,
         t_depth=jnp.asarray(gdept) * J - eta,
         w_depth=jnp.asarray(gdepw_int) * J - eta,
+        e3w_int=jnp.diff(jnp.asarray(gdept)) * J,
         n2_mode="nemo_bn2"))
     err_correct = np.max(np.abs(n2_correct - ref_true) / np.abs(ref_true))
     err_eta_shifted = np.max(
@@ -356,6 +364,73 @@ def test_nemo_bn2_live_ladders_dry_column_is_inert():
     assert np.all(np.isfinite(np.asarray(t_live)))
     assert np.all(np.isfinite(np.asarray(w_live)))
     assert np.allclose(np.asarray(t_live)[0], np.asarray(_Z().t_depth_ref))
+
+
+def test_native_e3w_default_and_explicit_legacy_are_distinguishable():
+    """Default bn2 consumes the independent mesh spacing; legacy is opt-in."""
+    T, S, gdept, gdepw = _column()
+    derived = np.diff(gdept)
+    native = np.nextafter(derived, np.inf)
+    default = np.asarray(compute_buoyancy_frequency_nemo_bn2(
+        jnp.asarray(T), jnp.asarray(S), jnp.asarray(gdept), jnp.asarray(gdepw),
+        e3w_int=jnp.asarray(native)))
+    legacy = np.asarray(compute_buoyancy_frequency_nemo_bn2(
+        jnp.asarray(T), jnp.asarray(S), jnp.asarray(gdept), jnp.asarray(gdepw),
+        e3w_source="depth_difference"))
+    assert not np.array_equal(default, legacy)
+    with pytest.raises(ValueError, match="requires raw-mesh e3w_int"):
+        compute_buoyancy_frequency_nemo_bn2(
+            jnp.asarray(T), jnp.asarray(S), jnp.asarray(gdept),
+            jnp.asarray(gdepw))
+    with pytest.raises(ValueError, match="unknown e3w_source"):
+        compute_buoyancy_frequency_nemo_bn2(
+            jnp.asarray(T), jnp.asarray(S), jnp.asarray(gdept),
+            jnp.asarray(gdepw), e3w_source="typo")
+
+
+def test_native_e3w_coordinate_validation_wrappers_and_ad():
+    """Raw mesh fields survive both wrappers; JIT and T/S/eta gradients work."""
+    import jax
+    from legoesm.ocean.eos import nemo_bn2_live_geometry
+    from legoesm.ocean.vertical import (
+        create_full_step_coordinate, create_partial_cell_coordinate,
+        create_z_star_from_thicknesses,
+    )
+
+    dz = np.array([10.0, 20.0, 40.0, 80.0])
+    gd = np.array([4.0, 18.0, 48.0, 108.0])
+    ew = np.array([8.0, 14.0, 30.0, 60.0])
+    with pytest.raises(ValueError, match="unknown nemo_e3w_source"):
+        create_z_star_from_thicknesses(dz, nemo_e3w_source="typo")
+    with pytest.raises(ValueError, match="trailing dimension"):
+        create_z_star_from_thicknesses(dz, nemo_e3w_0_m=ew[:-1])
+    with pytest.raises(ValueError, match="finite values > 0"):
+        create_z_star_from_thicknesses(dz, nemo_e3w_0_m=ew.at[0].set(-1)
+                                       if hasattr(ew, "at") else [-1, 14, 30, 60])
+
+    z = create_z_star_from_thicknesses(
+        dz, t_depth_ref_m=gd, nemo_gdept_0_m=gd,
+        nemo_e3w_0_m=ew)
+    partial = create_partial_cell_coordinate(z, jnp.array([150.0]))
+    full = create_full_step_coordinate(z, jnp.array([3]))
+    for wrapped in (partial, full):
+        assert wrapped.nemo_e3w_source == "mesh_reference"
+        assert np.array_equal(np.asarray(wrapped.nemo_gdept_0), gd)
+        assert np.array_equal(np.asarray(wrapped.nemo_e3w_0), ew)
+
+    T = jnp.array([[12.0, 10.0, 7.0, 4.0]])
+    S = jnp.array([[35.2, 35.1, 35.0, 34.9]])
+    H = jnp.array([150.0])
+
+    def total(Tv, Sv, eta):
+        gt, gw, e3w = nemo_bn2_live_geometry(z, eta, H)
+        return jnp.sum(compute_buoyancy_frequency_nemo_bn2(
+            Tv, Sv, gt, gw, e3w_int=e3w))
+
+    value = jax.jit(total)(T, S, jnp.array([0.2]))
+    grads = jax.grad(total, argnums=(0, 1, 2))(T, S, jnp.array([0.2]))
+    assert np.isfinite(np.asarray(value)).all()
+    assert all(np.isfinite(np.asarray(g)).all() for g in grads)
 
 
 def test_enhanced_diffusion_nemo_bn2_requires_eta_and_H_bathy():

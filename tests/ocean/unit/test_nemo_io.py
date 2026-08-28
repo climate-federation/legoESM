@@ -28,7 +28,7 @@ def _encode(zyx: np.ndarray) -> np.ndarray:
     return (z * 100 + y * 10 + x).astype(np.float64)
 
 
-def _write_mesh_mask(path, with_e3uv_0=False):
+def _write_mesh_mask(path, with_e3uv_0=False, with_e3w_0=False):
     d2 = (("y", "x"), np.arange(NY * NX).reshape(NY, NX).astype(np.float64))
     d3 = (("z", "y", "x"), _encode(None))
     d1 = (("z",), np.arange(NZ).astype(np.float64) + 0.5)
@@ -44,6 +44,8 @@ def _write_mesh_mask(path, with_e3uv_0=False):
         d3_const = (("z", "y", "x"), np.ones((NZ, NY, NX)))
         data["e3u_0"] = d3_const
         data["e3v_0"] = d3_const
+    if with_e3w_0:
+        data["e3w_0"] = d3
     ds = xr.Dataset(data)
     ds.to_netcdf(path)
 
@@ -80,6 +82,15 @@ def test_mesh_mask_halo_strip_and_axis_order(tmp_path):
     assert g.glamt[0, 0] == 1 * NX + 1
     # 3-D pattern z*100+y*10+x at interior (iy,ix,iz) -> global (iz, iy+1, ix+1)
     assert g.tmask[1, 2, 0] == 0 * 100 + (1 + 1) * 10 + (2 + 1)   # = 23
+
+
+def test_mesh_mask_e3w0_halo_strip_and_axis_order(tmp_path):
+    p = tmp_path / "mesh_mask_e3w0.nc"
+    _write_mesh_mask(p, with_e3w_0=True)
+    g = read_nemo_mesh_mask(str(p), nn_hls=1)
+    assert g.e3w_0 is not None
+    assert g.e3w_0.shape == (IY, IX, NZ)
+    assert g.e3w_0[1, 2, 2] == 2 * 100 + (1 + 1) * 10 + (2 + 1)
 
 
 def test_mesh_mask_hu0_hv0_derived_from_e3u0_e3v0(tmp_path):
