@@ -415,19 +415,179 @@ def main() -> int:
         row4 = {"output": row4m,
                 "disposition": "VERIFIED" if row4m["pass"] else "DIVERGED"}
         if row4["disposition"] == "VERIFIED":
-            dissl_full = base._load_interior(
-                str(RUN / "tke_dump_dissl.bin"), ni, nj)
-            pre_l_eps = np.asarray(tke_capture["mxl_calls"][0][2][1])
-            nk_d = min(pre_l_eps.shape[-1], dissl_full.shape[-1] - 1)
-            dissl_n = dissl_full[..., 1:1 + nk_d]
-            row12_dissl = metrics(
-                pre_l_eps[..., :nk_d], dissl_n,
-                wet_w_all[..., :nk_d], focus, POINTWISE_BAR)
+            from legoesm import constants
+            from legoesm.ocean.dynamics.ocean_tendency_common import (
+                nemo_effective_bottom_drag_r,
+            )
+            from legoesm.ocean.eos import make_eos_fn
+            from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+                _nemo_mld_from_n2_integral, _nemo_native_active_3d,
+                gm_redi_density_and_jacobian,
+            )
+            import legoesm.ocean.physics.vertical_mixing.tke as tke_mod
+
+            wet2 = np.asarray(twin_state.land_mask.data) > 0.5
+            bl = np.maximum(np.asarray(br.z_coord.bottom_level), 0)
+            idx = bl[..., None]
+            ucc = 0.5 * (twin_state.u.data[:, :-1, :]
+                         + twin_state.u.data[:, 1:, :])
+            vcc = 0.5 * (twin_state.v.data[:-1, :, :]
+                         + twin_state.v.data[1:, :, :])
+            u_bot = jnp.take_along_axis(ucc, idx, axis=-1)[..., 0]
+            v_bot = jnp.take_along_axis(vcc, idx, axis=-1)[..., 0]
+            h_bot = jnp.take_along_axis(
+                br.z_coord.h_partial, idx, axis=-1)[..., 0]
+            drag_cfg = mc.bottom_drag
+            r_drag = nemo_effective_bottom_drag_r(
+                u_bot, v_bot, h_bot,
+                scheme=drag_cfg.bottom_drag_scheme,
+                cd0=float(drag_cfg.bottom_drag_cd0),
+                cd_max=float(drag_cfg.bottom_drag_cdmax),
+                z0=float(drag_cfg.bottom_drag_z0),
+                ke0=float(drag_cfg.bottom_drag_ke0),
+                von_karman=constants.kappa_von_karman)
+            rcdu = np.fromfile(
+                RUN / "drg_dump_rCdU_bot.bin", dtype="<f8").reshape(jpj, jpi)
+            rcdu = rcdu[hls:-hls, hls:-hls]
+            row5m = metrics(np.asarray(r_drag)[..., None],
+                            (-rcdu)[..., None], wet2[..., None],
+                            focus, POINTWISE_BAR)
+
+            before = kamm.read_nemo_restart_before(
+                str(RUN / "DINO_00005760_restart.nc"), nn_hls=0)
+            Tb = jnp.asarray(before.T, dtype=twin_state.T.data.dtype)
+            Sb = jnp.asarray(before.S, dtype=twin_state.S.data.dtype)
+            eos_fn = make_eos_fn(mc.eos, mc.eos_linear)
+            _, jac_mld = gm_redi_density_and_jacobian(
+                Tb, Sb, twin_state.eta.data, twin_state.H_bathy.data,
+                br.geometry, br.z_coord, eos=mc.eos,
+                eos_linear=mc.eos_linear, mask=twin_state.land_mask.data,
+                rho_0=mc.rho_0, g=mc.g)
+            active_mld = _nemo_native_active_3d(
+                twin_state.land_mask.data, br.z_coord,
+                twin_state.H_bathy.data, Tb.dtype)
+            hml, mbase = _nemo_mld_from_n2_integral(
+                Tb, Sb, twin_state.land_mask.data, br.z_coord, eos_fn,
+                mc.gm_redi.mld_rho_c, mc.g, mc.rho_0,
+                active_3d=active_mld, jacobian=jac_mld)
+            nmln_n = base._load_haloed(
+                str(RUN / "dump_nmln.bin"), jpi, jpj, hls)[..., 0]
+            hmlp_n = base._load_haloed(
+                str(RUN / "dump_hmlp.bin"), jpi, jpj, hls)[..., 0]
+            row6m = metrics((np.asarray(mbase) + 2.0)[..., None],
+                            nmln_n[..., None], wet2[..., None], focus,
+                            POINTWISE_BAR)
+            row7m = metrics(np.asarray(hml)[..., None], hmlp_n[..., None],
+                            wet2[..., None], focus, POINTWISE_BAR)
+
+            tke_cfg = mc.physics.vertical_mixing.tke
+            en_full = base._load_interior(
+                str(RUN / "tke_dump_en.bin"), ni, nj)
+            surf = tke_mod._surface_tke_dirichlet(
+                tke_cfg, sf.taum, mc.rho_0)
+            row8m = metrics(np.asarray(surf)[..., None],
+                            en_full[..., :1], wet2[..., None], focus,
+                            POINTWISE_BAR)
+            zbbrau = np.float64(tke_mod._NEMO_TKE_EBB) / np.float64(mc.rho_0)
+            surface_n = en_full[..., 0]
+            inferred = surface_n / zbbrau
+            observable = wet2 & (surface_n > tke_mod._NEMO_TKE_EMIN0)
+            row8_taum = metrics(
+                np.asarray(sf.taum)[..., None], inferred[..., None],
+                observable[..., None], focus, POINTWISE_BAR)
+            literal = np.maximum(
+                np.float64(tke_mod._NEMO_TKE_EMIN0),
+                zbbrau * np.asarray(sf.taum))
+            row8_literal = metrics(
+                literal[..., None], surface_n[..., None], wet2[..., None],
+                focus, POINTWISE_BAR)
+            utau_n = np.fromfile(
+                RUN / "sbc_dump_utau.bin", dtype="<f8").reshape(jpj, jpi)
+            utau_n = utau_n[hls:jpj - hls, hls:jpi - hls]
+            with xr.open_dataset(RUN / "mesh_mask.nc", decode_times=False) as ds:
+                gphiu = np.asarray(
+                    ds["gphiu"].isel(time_counter=0), dtype=np.float64)
+            lego_lat = np.broadcast_to(
+                np.asarray(forcing["lat_deg_1d"], dtype=np.float64)[:, None],
+                gphiu.shape)
+            row8_gphiu = metrics(
+                lego_lat[..., None], gphiu[..., None], wet2[..., None],
+                focus, POINTWISE_BAR)
+
+            nodes = np.asarray(cfg.wind_tau_lats_deg, dtype=np.float64)
+            values = np.asarray(cfg.wind_tau_values, dtype=np.float64)
+            utau_literal = np.empty_like(gphiu)
+            for flat_index, phi in enumerate(gphiu.flat):
+                zdphi = nodes - phi
+                kmin = int(np.argmin(np.abs(zdphi)))
+                if zdphi[kmin] <= 0.0:
+                    ks, kn = kmin, kmin + 1
+                else:
+                    ks, kn = kmin - 1, kmin
+                zs = min(1.0, max(
+                    0.0, (phi - nodes[ks]) / (nodes[kn] - nodes[ks])))
+                utau_literal.flat[flat_index] = (
+                    values[ks]
+                    + (values[kn] - values[ks]) * (3.0 - 2.0 * zs)
+                    * zs ** 2)
+            row8_utau_prod = metrics(
+                np.asarray(forcing["tau_u_cell_2d"])[..., None],
+                utau_n[..., None], wet2[..., None], focus, POINTWISE_BAR)
+            row8_utau_literal = metrics(
+                utau_literal[..., None], utau_n[..., None], wet2[..., None],
+                focus, POINTWISE_BAR)
+            taum_dump = np.abs(utau_n)
+            taum_dump = np.where(utau_n > 0.0, taum_dump * 1.3, taum_dump)
+            row8_taum_dump = metrics(
+                np.asarray(sf.taum)[..., None], taum_dump[..., None],
+                wet2[..., None], focus, POINTWISE_BAR)
+            surface_dump_operand = np.maximum(
+                np.float64(tke_mod._NEMO_TKE_EMIN0), zbbrau * taum_dump)
+            row8_surface_sub = metrics(
+                surface_dump_operand[..., None], surface_n[..., None],
+                wet2[..., None], focus, POINTWISE_BAR)
             row4["continuation_preview"] = {
-                "first_pre_solve_mixing_length_vs_carried_dissl": row12_dissl,
-                "nemo_line": "cfgs/DINO/MY_SRC/zdftke.F90:510,515",
-                "production_operand": "newly diagnosed pre-solve l_eps",
-                "oracle_operand": "carried previous-step dissl",
+                "rows": {
+                    "5_bottom_drag_coefficient": row5m,
+                    "6_native_mld_index": row6m,
+                    "7_native_mld_depth": row7m,
+                    "8_surface_tke_boundary": row8m,
+                },
+                "first_divergence": {
+                    "row": 8,
+                    "operation": "TKE surface Dirichlet boundary",
+                    "nemo_line": "cfgs/DINO/MY_SRC/zdftke.F90:334,360-364",
+                    "output": row8m,
+                    "first_failing_operand": {
+                        "name": "utau cubic-profile arithmetic association",
+                        "nemo_line":
+                            "cfgs/DINO/MY_SRC/usrdef_sbc.F90:221-223,632",
+                        "legoesm_line":
+                            "packages/ocean/legoesm/ocean/experiments/dino.py:2086-2088",
+                    },
+                    "operand_localization": {
+                        "gphiu": row8_gphiu,
+                        "production_utau_vs_dump": row8_utau_prod,
+                        "nemo_literal_utau_vs_dump": row8_utau_literal,
+                        "production_taum_vs_dump_derived": row8_taum_dump,
+                        "taum_inferred_from_unfloored_surface_en": row8_taum,
+                        "literal_zbbrau_times_taum_then_max": row8_literal,
+                        "substitute_dump_derived_taum": row8_surface_sub,
+                        "n_observable_unfloored_columns": int(observable.sum()),
+                    },
+                    "next_round_fix_design": {
+                        "option": "dino_wind_profile_evaluation",
+                        "faithful_default_on_complete_dino_nemo_cards":
+                            "nemo_literal",
+                        "legacy_default_everywhere_else": "factored_smoothstep",
+                        "legacy_opt_in_on_dino_nemo_cards":
+                            "factored_smoothstep",
+                        "construction": "preserve NEMO's nearest-node interval "
+                            "selection and left-associated expression "
+                            "tau_s + (tau_n-tau_s)*(3-2*s)*s**2 before ABS "
+                            "and the conditional 1.3 westerly multiplier",
+                    },
+                },
             }
         if row4["disposition"] == "DIVERGED":
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -742,12 +902,15 @@ def main() -> int:
         Path("packages/ocean/legoesm/ocean/fidelity/nemo_io.py"),
         Path("packages/ocean/legoesm/ocean/fidelity/time_levels.py"),
         Path("packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py"),
+        Path("packages/ocean/legoesm/ocean/physics/vertical_mixing/_shared.py"),
         Path("packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py"),
         Path("packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py"),
+        Path("packages/ocean/legoesm/ocean/vertical.py"),
         Path("packages/ocean/legoesm/ocean/state.py"),
         HERE / "dump_lane.py",
         HERE / "eos_rab_bn2_per_element.py",
         ORACLE / "cfgs/DINO/MY_SRC/stpmlf.F90",
+        ORACLE / "cfgs/DINO/MY_SRC/usrdef_sbc.F90",
         ORACLE / "cfgs/DINO/MY_SRC/zdftke.F90",
         ORACLE / "cfgs/DINO/WORK/zdfphy.F90",
         ORACLE / "cfgs/DINO/WORK/zdfsh2.F90",
@@ -761,10 +924,51 @@ def main() -> int:
         RUN / "tke_dump_sh2.bin",
         RUN / "tke_dump_avm_in.bin",
         RUN / "tke_dump_dissl.bin",
+        RUN / "tke_dump_pdlr.bin",
+        RUN / "tke_dump_en.bin",
+        RUN / "dump_nmln.bin",
+        RUN / "dump_hmlp.bin",
+        RUN / "drg_dump_rCdU_bot.bin",
+        RUN / "sbc_dump_utau.bin",
         RUN / "eiv_dump_gdept.bin", RUN / "eiv_dump_e3w.bin", args.mld_maps,
     ]
+    continuation = row4.get("continuation_preview")
+    rows = {"1_eos_rab_before": row1, "2_bn2_before": row2,
+            "3_eos_rab_bn2_now": row3, "4_zdf_sh2": row4}
+    if continuation is not None:
+        for name, value in continuation["rows"].items():
+            rows[name] = {
+                "output": value,
+                "disposition": "VERIFIED" if value["pass"] else "DIVERGED",
+            }
+    elif row4["disposition"] == "DIVERGED":
+        rows["5_bottom_drag_coefficient"] = {
+            "disposition": "UNMEASURED", "reason": "stop at row 4"}
+
+    if row2["disposition"] == "DIVERGED":
+        first_divergence = {
+            "row": 2, "operation": "bn2(Nbb)",
+            "nemo_line": "src/OCE/TRA/eosbn2.F90:1467",
+            "localization": localization,
+        }
+    elif row3["disposition"] == "DIVERGED":
+        first_divergence = {
+            "row": 3, "operation": "eos_rab/bn2(Nnn)",
+            "nemo_line": "src/OCE/TRA/eosbn2.F90:1467",
+            "localization": None,
+        }
+    elif row4["disposition"] == "DIVERGED":
+        first_divergence = {
+            "row": 4, "operation": "zdf_sh2",
+            "nemo_line": "src/OCE/ZDF/zdfsh2.F90:80-94",
+            "localization": sh2_localization,
+        }
+    elif continuation is not None:
+        first_divergence = continuation.get("first_divergence")
+    else:
+        first_divergence = None
     artifact = {
-        "schema": "zdf-chain-sweep-v4",
+        "schema": "zdf-chain-sweep-v5",
         "lane": "d180", "kt": 5761, "cpu_only": True, "fp64": True,
         "checked_out_parent_sha": git_sha(),
         "probe_commit_sha": os.environ.get("ZDF_SWEEP_PROBE_SHA", "UNSTAMPED"),
@@ -776,29 +980,16 @@ def main() -> int:
                          "tke_dump_rn2.bin",
                          "tke_dump_sh2.bin",
                          "tke_dump_avm_in.bin",
+                         "tke_dump_en.bin",
+                         "dump_nmln.bin", "dump_hmlp.bin",
+                         "drg_dump_rCdU_bot.bin", "sbc_dump_utau.bin",
                          "eiv_dump_gdept.bin", "eiv_dump_e3w.bin")},
         "focus_columns_ji": [list(x) for x in focus],
         "bars": {"pointwise_column": POINTWISE_BAR, "corr": CORR_BAR,
                  "rms_ratio_epsilon": RATIO_EPS},
         "controls": controls,
-        "rows": {"1_eos_rab_before": row1, "2_bn2_before": row2,
-                 "3_eos_rab_bn2_now": row3,
-                 "4_zdf_sh2": row4,
-                 "5_bottom_drag_operands": {"disposition": "UNMEASURED",
-                    "reason": "stop at row 4" if row4["disposition"] == "DIVERGED"
-                    else "probe extension stops after row 4"}},
-        "first_divergence": ({"row": 2, "operation": "bn2(Nbb)",
-                              "nemo_line": "src/OCE/TRA/eosbn2.F90:1467",
-                              "localization": localization}
-                             if row2["disposition"] == "DIVERGED" else
-                             ({"row": 3, "operation": "eos_rab/bn2(Nnn)",
-                               "nemo_line": "src/OCE/TRA/eosbn2.F90:1467",
-                               "localization": None}
-                              if row3["disposition"] == "DIVERGED" else
-                              ({"row": 4, "operation": "zdf_sh2",
-                                "nemo_line": "src/OCE/ZDF/zdfsh2.F90:80-94",
-                                "localization": sh2_localization}
-                               if row4["disposition"] == "DIVERGED" else None))),
+        "rows": rows,
+        "first_divergence": first_divergence,
         "row4_localization": sh2_localization,
         "sha256": {str(p): sha256(p) for p in source_paths + input_paths},
     }
@@ -843,10 +1034,20 @@ def main() -> int:
                           f"bad_columns={cm['n_diverged_columns']}/{cm['n_wet_columns']}")
         preview = row4.get("continuation_preview")
         if preview is not None:
-            dm = preview["first_pre_solve_mixing_length_vs_carried_dissl"]
-            print(f"  continuation preview dissl operand: pass={dm['pass']} "
-                  f"max={dm['max_column_error']:.6e} "
-                  f"bad_columns={dm['n_diverged_columns']}/{dm['n_wet_columns']}")
+            for name, cm in preview["rows"].items():
+                print(f"row {name}: {'VERIFIED' if cm['pass'] else 'DIVERGED'} "
+                      f"max={cm['max_column_error']:.6e} "
+                      f"bad_columns={cm['n_diverged_columns']}/{cm['n_wet_columns']}")
+            first = preview.get("first_divergence")
+            if first is not None:
+                print(f"  first divergence row {first['row']}: "
+                      f"{first['operation']}")
+                for name, cm in first["operand_localization"].items():
+                    if isinstance(cm, dict) and "pass" in cm:
+                        print(f"    {name}: pass={cm['pass']} "
+                              f"max={cm['max_column_error']:.6e} "
+                              f"bad_columns={cm['n_diverged_columns']}/"
+                              f"{cm['n_wet_columns']}")
     if localization:
         for c in localization["candidates_in_nemo_evaluation_order"]:
             print(f"  substitute {c['substitution']}: pass={c['metrics']['pass']} "
