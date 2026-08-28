@@ -93,6 +93,12 @@ reproduced `tke_dump_zri.bin` and `tke_dump_pdlr.bin` bit-for-bit with the
 registered expressions; this diagnostic is targeting only and is not the
 post-fix score.
 
+Scope is tied to the already registered `tke_n2_evaluation_stage` selector:
+the two complete DINO NEMO cards select `step_entry` and therefore literal
+NEMO arithmetic; `implicit_solve_state` retains the historical association
+byte-for-byte. Thus no additional card changes and the legacy climate control
+continues to opt out with the same single N2-stage flag.
+
 The post-fix row-11 bar remains unchanged: 0/9,920 failing columns, maximum
 normalized column error `<=1e-15`, 4/4 focus columns passing, and every
 control firing. Only after that pass may row 12 be measured.
