@@ -216,6 +216,17 @@ def _stress_content_sha256(tau_x, tau_y) -> str:
     return digest.hexdigest()
 
 
+def _file_content_sha256(path: str | None) -> str | None:
+    """Hash an optional forcing/perturbation file for run-config identity."""
+    if path is None:
+        return None
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def _analytic_dino_tpoint_stress(grid, cfg, *, t_seconds: float):
     """Load analytic DINO T-point stress and bind it to one seasonal time."""
     if not np.isfinite(t_seconds) or t_seconds < 0.0:
@@ -1407,6 +1418,11 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     previous-stress carry. Later-step carry behavior remains the model's
     ordinary ``_seed_centred_forcing_carry`` path.
     """
+    _producer_sha_entry, _producer_dirty_entry = _git_provenance()
+    if (_producer_dirty_entry
+            and os.environ.get("LEGOESM_ALLOW_DIRTY") != "1"):
+        raise SystemExit("REFUSING run_twin from a dirty tracked tree; the "
+                         "artifact producer identity would be ambiguous")
     # Resolved here and handed DOWN as an argument -- nothing is written into the
     # environment, so two ladders can be built in one process without either
     # inheriting the other's setting.
@@ -1531,6 +1547,12 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         "surface_tendency_placement": surface_tendency_placement,
         "save_step_eta": bool(save_step_eta),
         "perturb_seed": perturb_seed, "perturb_eps": float(perturb_eps),
+        "perturb_baro": perturb_baro,
+        "perturb_baro_sha256": _file_content_sha256(perturb_baro),
+        "perturb_baro_key": perturb_baro_key,
+        "perturb_baro_scale": float(perturb_baro_scale),
+        "daily_acc": bool(daily_acc),
+        "u_m": u_m,
         # DELIBERATELY NOT recorded here: --fp64-3d. run_config is compared
         # BYTE-FOR-BYTE between two arms by twin_seasonal_clock_ab.py, which
         # hard-aborts on any difference as a confound; a new key would make
@@ -1805,6 +1827,13 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         _reduced_status = (f"{_reduced_status}; reduction failed on days "
                            f"{sorted(_reduce_fail)}: "
                            f"{_reduce_fail[sorted(_reduce_fail)[0]]}")
+    _producer_sha_exit, _producer_dirty_exit = _git_provenance()
+    if (_producer_sha_exit != _producer_sha_entry
+            or _producer_dirty_exit != _producer_dirty_entry):
+        raise SystemExit(
+            "REFUSING to save: producing checkout changed during integration "
+            f"(entry={_producer_sha_entry}/{_producer_dirty_entry}, "
+            f"exit={_producer_sha_exit}/{_producer_dirty_exit})")
     save_kwargs = dict(
         eta=eta_daily, sst=sst_daily, u=u_daily, v=v_daily,
         land_mask=land_mask.astype(np.float32),
@@ -1870,6 +1899,11 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         # #1455 follow-up: the clock NEMO is on, and the rest of the recipe.
         seasonal_t0_reference_seconds=np.float64(t0_reference_sec),
         run_config=np.str_(run_config),
+        # Bind the producing checkout to the artifact, not only its run log.
+        # ``main`` has already made a dirty tracked tree fatal; programmatic
+        # callers still stamp their dirt count so downstream gates can refuse.
+        producer_git_sha=np.str_(_producer_sha_entry),
+        producer_dirty_tracked_files=np.int32(_producer_dirty_entry),
     )
     if daily_acc:
         # #1455 Phase-2: stamp the perturbation next to the response it caused,
@@ -2161,6 +2195,19 @@ def _eq_leaf(a, b) -> bool:
         return bool(_np.array_equal(_np.asarray(a), _np.asarray(b)))
     except Exception:
         return a is b or a == b
+
+
+def _git_provenance() -> tuple[str, int]:
+    """Return producing HEAD and tracked-dirt count for log/artifact stamps."""
+    import subprocess
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))))
+    sha = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+    dirt = subprocess.run(
+        ["git", "-C", repo, "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True, text=True).stdout.strip()
+    return sha, len(dirt.splitlines()) if dirt else 0
 
 
 def provenance_gate() -> None:
