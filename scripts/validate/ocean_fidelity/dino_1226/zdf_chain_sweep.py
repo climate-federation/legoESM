@@ -151,6 +151,66 @@ def metrics(lego: np.ndarray, nemo: np.ndarray, wet: np.ndarray,
     }
 
 
+def face_difference_metrics(
+    lego_velocity: np.ndarray,
+    nemo_velocity: np.ndarray,
+    face_mask: np.ndarray,
+    focus: list[tuple[int, int]],
+    orientation: str,
+) -> dict:
+    """Score the literal zdf_sh2 vertical-difference operand on wet faces.
+
+    The whole-domain population is one column per U or V face.  A registered
+    focus item is a T column, so its focus score is the maximum over its two
+    surrounding wet faces (west/east for U, south/north for V), matching the
+    later four-face assembly rather than arbitrarily naming only one face.
+    """
+    lego_velocity = np.asarray(lego_velocity)
+    nemo_velocity = np.asarray(nemo_velocity)
+    face_mask = np.asarray(face_mask)
+    if lego_velocity.shape != nemo_velocity.shape or face_mask.shape != nemo_velocity.shape:
+        raise AssertionError(
+            "velocity/mask shape mismatch for direct difference operand: "
+            f"lego={lego_velocity.shape} nemo={nemo_velocity.shape} "
+            f"mask={face_mask.shape}")
+    lego_diff = lego_velocity[..., :-1] - lego_velocity[..., 1:]
+    nemo_diff = nemo_velocity[..., :-1] - nemo_velocity[..., 1:]
+    wet = (face_mask[..., :-1] > 0.5) & (face_mask[..., 1:] > 0.5)
+    out = metrics(lego_diff, nemo_diff, wet, focus, POINTWISE_BAR)
+
+    scale = out["reference_rms"]
+    focus_rows = []
+    ny, nx = wet.shape[:2]
+    for j, i in focus:
+        if orientation == "u":
+            faces = ((j, (i - 1) % nx), (j, i % nx))
+        elif orientation == "v":
+            faces = ((max(j - 1, 0), i), (min(j, ny - 1), i))
+        else:
+            raise ValueError(f"unknown face orientation {orientation!r}")
+        scored = []
+        for fj, fi in faces:
+            active = bool(np.any(wet[fj, fi]))
+            err = (float(np.max(np.abs(
+                lego_diff[fj, fi][wet[fj, fi]]
+                - nemo_diff[fj, fi][wet[fj, fi]])) / scale)
+                   if active and scale else (0.0 if active else None))
+            scored.append({"j": int(fj), "i": int(fi), "wet": active,
+                           "column_error": err,
+                           "pass": bool(active and err <= POINTWISE_BAR)})
+        active_scores = [x["column_error"] for x in scored if x["wet"]]
+        focus_rows.append({
+            "j": j, "i": i, "wet": bool(active_scores),
+            "column_error": max(active_scores) if active_scores else None,
+            "pass": bool(active_scores and max(active_scores) <= POINTWISE_BAR),
+            "surrounding_faces": scored,
+        })
+    out["focus"] = focus_rows
+    out["operand"] = "velocity(k-1)-velocity(k)"
+    out["focus_semantics"] = "maximum over the two surrounding wet faces"
+    return out
+
+
 def assemble_bn2(alpha, beta, T, S, gdept, gdepw, e3w):
     """NEMO eosbn2.F90:1459-1467 in the same expression order as production."""
     gd_up, gd_lo = gdept[..., :-1], gdept[..., 1:]
@@ -342,13 +402,15 @@ def main() -> int:
                 v_now = np.asarray(v_now_arg)[1:, :, :]
                 u_before = np.asarray(u_b_arg)[:, 1:, :]
                 v_before = np.asarray(v_b_arg)[1:, :, :]
-                velocity_identity = {
-                    "u_now": metrics(u_now, now.u, umask > 0.5,
-                                     focus, POINTWISE_BAR),
-                    "v_now": metrics(v_now, now.v, vmask > 0.5,
-                                     focus, POINTWISE_BAR),
-                    "u_before_max_abs": float(np.max(np.abs(u_before - before.u))),
-                    "v_before_max_abs": float(np.max(np.abs(v_before - before.v))),
+                velocity_differences = {
+                    "u_now": face_difference_metrics(
+                        u_now, now.u, umask, focus, "u"),
+                    "v_now": face_difference_metrics(
+                        v_now, now.v, vmask, focus, "v"),
+                    "u_before": face_difference_metrics(
+                        u_before, before.u, umask, focus, "u"),
+                    "v_before": face_difference_metrics(
+                        v_before, before.v, vmask, focus, "v"),
                 }
                 now_sub = sh2_fn(
                     twin_state.u.data, twin_state.v.data,
@@ -360,7 +422,7 @@ def main() -> int:
                     "name": "NOW face-velocity differences at zdf_phy entry",
                     "nemo_line": "cfgs/DINO/WORK/zdfsh2.F90:81-82,86-87",
                     "legoesm_operand": "post-explicit/pre-implicit-solve u/v",
-                    "velocity_operand_identity": velocity_identity,
+                    "velocity_difference_operands": velocity_differences,
                     "substitute_step_entry_now_velocities": now_sub_m,
                     "next_round_fix_design": {
                         "option": "tke_shear_evaluation_stage",
@@ -383,9 +445,8 @@ def main() -> int:
                     "metrics": avm_operand_m,
                 },
                 "first_diverging_operand": next_operand,
-                "production_face_averaged_avm": row4m,
-                "input_avm_current_subiteration_vs_nemo_carried": avm_operand_m,
-                "substitute_nemo_carried_avm": avm_sub_m,
+                "production_composite": row4m,
+                "composite_with_verified_carried_avm": avm_sub_m,
                 "legacy_substitute_tpoint_avm": legacy_m,
                 "first_passing_substitution": None,
             }
@@ -593,8 +654,8 @@ def main() -> int:
                   f"bad_columns={am['n_diverged_columns']}/{am['n_wet_columns']}")
             nxt = sh2_localization["first_diverging_operand"]
             if nxt is not None:
-                u = nxt["velocity_operand_identity"]["u_now"]
-                v = nxt["velocity_operand_identity"]["v_now"]
+                u = nxt["velocity_difference_operands"]["u_now"]
+                v = nxt["velocity_difference_operands"]["v_now"]
                 sm = nxt["substitute_step_entry_now_velocities"]
                 print(f"  next operand NOW u: pass={u['pass']} "
                       f"max={u['max_column_error']:.6e} "
