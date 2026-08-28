@@ -877,16 +877,34 @@ def main() -> int:
                                 "cfgs/DINO/MY_SRC/zdftke.F90:401-468",
                             "output": row10m,
                             "first_failing_operand": {
-                                "name": "Langmuir chain after registered inputs",
+                                "name": "rn2b evaluation lifetime/geometry",
                                 "nemo_line":
-                                    "cfgs/DINO/MY_SRC/zdftke.F90:428,436-463",
+                                    "cfgs/DINO/MY_SRC/stpmlf.F90:204-210; "
+                                    "cfgs/DINO/MY_SRC/zdftke.F90:436-440",
+                                "legoesm_line":
+                                    "packages/ocean/legoesm/ocean/physics/"
+                                    "vertical_mixing/k_profiles.py:827-831",
                             },
                             "operand_localization": row10_inputs,
                             "next_round_fix_design": {
-                                "status": "localize the first arithmetic or "
-                                    "imlc-fallback suboperand before changing "
-                                    "production",
-                                "required_source_order": [
+                                "option": "tke_n2_evaluation_stage",
+                                "faithful_default_on_complete_dino_nemo_cards":
+                                    "step_entry",
+                                "legacy_default_everywhere_else":
+                                    "implicit_solve_state",
+                                "legacy_opt_in_on_dino_nemo_cards":
+                                    "implicit_solve_state",
+                                "construction": "at model-step entry compute "
+                                    "and freeze the exact (rn2, rn2b, "
+                                    "gdepw_Kmm, e3w_Kmm) bundle from the "
+                                    "registered raw-mesh live geometry; carry "
+                                    "it through zdf_mxl and every zdf_tke "
+                                    "consumer. Langmuir must receive frozen "
+                                    "gdepw_Kmm/e3w_Kmm rather than "
+                                    "-z_interface/dz_half. Non-oracle cards "
+                                    "retain the present recomputation and "
+                                    "metric slots byte-for-byte.",
+                                "required_source_order_after_fix": [
                                     "zWlc2", "zpelc", "imlc", "zhlc",
                                     "zus3", "zwlc", "source"],
                             },
@@ -1273,7 +1291,7 @@ def main() -> int:
     else:
         first_divergence = None
     artifact = {
-        "schema": "zdf-chain-sweep-v5",
+        "schema": "zdf-chain-sweep-v6",
         "lane": "d180", "kt": 5761, "cpu_only": True, "fp64": True,
         "checked_out_parent_sha": git_sha(),
         "probe_commit_sha": probe_commit_sha(),
