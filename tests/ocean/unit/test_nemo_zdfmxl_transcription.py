@@ -50,6 +50,7 @@ def _z_coord(dz, n_lat, n_lon, k_bot):
         t_depth_ref=jnp.asarray(gdept),
         is_active=jnp.asarray(is_active),
         h_partial=jnp.broadcast_to(jnp.asarray(dz), (n_lat, n_lon, nlev)),
+        nemo_e3w_mesh_reference=False,
     )
 
 
@@ -202,7 +203,8 @@ def test_alpha_beta_use_true_gdepw_not_the_gdept_midpoint():
     T = 10.0 + np.cumsum(rng.uniform(0.05, 0.4, (4, 3, nlev)), axis=-1)[:, :, ::-1]
     S = 35.0 + rng.uniform(-0.1, 0.1, (4, 3, nlev))
 
-    kw = dict(cfg=NemoSEOSConfig(), g=9.80665)
+    kw = dict(cfg=NemoSEOSConfig(), g=9.80665,
+              e3w_source="depth_difference")
     n2_true = np.asarray(compute_buoyancy_frequency_nemo_bn2(
         jnp.asarray(T), jnp.asarray(S), jnp.asarray(gdept),
         jnp.asarray(z_iface[:-1]), **kw))
@@ -342,7 +344,8 @@ def test_nemo_bn2_matches_an_independent_numpy_transcription():
 
     got = np.asarray(compute_buoyancy_frequency_nemo_bn2(
         jnp.asarray(T), jnp.asarray(S), jnp.asarray(gdept),
-        jnp.asarray(gdepw), NemoSEOSConfig(), g=grav))
+        jnp.asarray(gdepw), NemoSEOSConfig(), g=grav,
+        e3w_source="depth_difference"))
 
     # --- independent port of eosbn2.F90:1459-1466 ---
     a, b = nemo_seos_alpha_beta(jnp.asarray(T), jnp.asarray(S),
