@@ -345,10 +345,12 @@ def capture_face_sh2_call(model, state, forcing):
     real_mxl = tke_mod.compute_mixing_lengths
     real_solve = tke_mod._solve_tke_backward_euler
     real_lc = tke_mod.nemo_langmuir_tke_source
+    real_prandtl = tke_mod._prandtl_number
     calls = []
     mxl_calls = []
     solve_calls = []
     lc_calls = []
+    prandtl_calls = []
 
     def spy(*args, **kwargs):
         out = real(*args, **kwargs)
@@ -370,10 +372,16 @@ def capture_face_sh2_call(model, state, forcing):
         lc_calls.append((args, kwargs, out))
         return out
 
+    def spy_prandtl(*args, **kwargs):
+        out = real_prandtl(*args, **kwargs)
+        prandtl_calls.append((args, kwargs, out))
+        return out
+
     shared.avm_weighted_shear_production = spy
     tke_mod.compute_mixing_lengths = spy_mxl
     tke_mod._solve_tke_backward_euler = spy_solve
     tke_mod.nemo_langmuir_tke_source = spy_lc
+    tke_mod._prandtl_number = spy_prandtl
     try:
         with jax.disable_jit():
             model.step(state, kamm.DT, surface_forcing=forcing)
@@ -382,13 +390,14 @@ def capture_face_sh2_call(model, state, forcing):
         tke_mod.compute_mixing_lengths = real_mxl
         tke_mod._solve_tke_backward_euler = real_solve
         tke_mod.nemo_langmuir_tke_source = real_lc
+        tke_mod._prandtl_number = real_prandtl
     if not calls:
         raise AssertionError("avm_weighted_shear_production never fired")
-    if not mxl_calls or not solve_calls or not lc_calls:
+    if not mxl_calls or not solve_calls or not lc_calls or not prandtl_calls:
         raise AssertionError("TKE mixing-length/Langmuir/solve stages never fired")
     return real, calls[0], {
         "mxl_calls": mxl_calls, "lc_calls": lc_calls,
-        "solve_calls": solve_calls,
+        "solve_calls": solve_calls, "prandtl_calls": prandtl_calls,
     }
 
 
@@ -977,6 +986,102 @@ def main() -> int:
                             "controls": planted_controls(
                                 src_n, src_n, wet_lc, POINTWISE_BAR),
                         }
+                    else:
+                        # Row 11: literal nn_pdl=1 Richardson / inverse-
+                        # Prandtl chain. The first production call is the
+                        # pre-solve call using carried p_avm and frozen p_sh2;
+                        # the second is tke_avn after the solve (row 22).
+                        pr_args, pr_kwargs, pr_out = (
+                            tke_capture["prandtl_calls"][0])
+                        if pr_kwargs or len(pr_args) != 5:
+                            raise AssertionError(
+                                "unexpected _prandtl_number call contract")
+                        rn2b_l, _shear_l, avm_l, pr_cfg, sh2_l = pr_args
+                        npr = np.asarray(pr_out).shape[-1]
+                        rn2b_l = np.asarray(rn2b_l)[..., :npr]
+                        avm_l = np.asarray(avm_l)[..., :npr]
+                        sh2_l = np.asarray(sh2_l)[..., :npr]
+                        pdlr_l = 1.0 / np.asarray(pr_out)[..., :npr]
+                        bshear = np.float64(pr_cfg.bshear_floor)
+                        zdiv_l = sh2_l + bshear
+                        safe_zdiv_l = np.where(zdiv_l == 0.0, 1.0, zdiv_l)
+                        zri_strat_l = rn2b_l * avm_l * np.where(
+                            zdiv_l == 0.0, 1.0 / bshear,
+                            1.0 / safe_zdiv_l)
+                        zri_l = np.where(rn2b_l <= 0.0, 0.0, zri_strat_l)
+
+                        zri_n_full = base._load_interior(
+                            str(RUN / "tke_dump_zri.bin"), ni, nj)
+                        pdlr_n_full = base._load_interior(
+                            str(RUN / "tke_dump_pdlr.bin"), ni, nj)
+                        avm_n_full = base._load_interior(
+                            str(RUN / "tke_dump_avm_in.bin"), ni, nj)
+                        sh2_n_full = base._load_interior(
+                            str(RUN / "tke_dump_sh2.bin"), ni, nj)
+                        zri_n = zri_n_full[..., 1:1 + npr]
+                        pdlr_n = pdlr_n_full[..., 1:1 + npr]
+                        avm_n = avm_n_full[..., 1:1 + npr]
+                        sh2_n_pr = sh2_n_full[..., 1:1 + npr]
+                        rn2b_n_pr = n2_n_full[..., 1:1 + npr]
+                        wet_pr = wet_w_all[..., :npr]
+
+                        row11_inputs = {
+                            "rn2b": metrics(
+                                rn2b_l, rn2b_n_pr, wet_pr, focus,
+                                POINTWISE_BAR),
+                            "p_avm": metrics(
+                                avm_l, avm_n, wet_pr, focus, POINTWISE_BAR),
+                            "p_sh2": metrics(
+                                sh2_l, sh2_n_pr, wet_pr, focus,
+                                POINTWISE_BAR),
+                            "zri": metrics(
+                                zri_l, zri_n, wet_pr, focus, POINTWISE_BAR),
+                            "p_pdlr": metrics(
+                                pdlr_l, pdlr_n, wet_pr, focus,
+                                POINTWISE_BAR),
+                        }
+                        row11_primary = (
+                            row11_inputs["zri"]
+                            if not row11_inputs["zri"]["pass"]
+                            else row11_inputs["p_pdlr"])
+                        row11_primary["operand_metrics"] = row11_inputs
+                        row11_primary["resolved_constants"] = {
+                            "rn_bshear": float(bshear),
+                            "ri_cri": float(1.0 / pr_cfg.prandtl_ri_coeff),
+                        }
+                        row11_primary["controls"] = {
+                            "zri": planted_controls(
+                                zri_n, zri_n, wet_pr, POINTWISE_BAR),
+                            "p_pdlr": planted_controls(
+                                pdlr_n, pdlr_n, wet_pr, POINTWISE_BAR),
+                        }
+                        row4["continuation_preview"]["rows"][
+                            "11_prandtl_zri_pdlr"] = row11_primary
+                        if not row11_primary["pass"]:
+                            first_name = next(
+                                name for name in (
+                                    "rn2b", "p_avm", "p_sh2", "zri",
+                                    "p_pdlr")
+                                if not row11_inputs[name]["pass"])
+                            row4["continuation_preview"][
+                                "first_divergence"] = {
+                                    "row": 11,
+                                    "operation": (
+                                        "Richardson and inverse-Prandtl "
+                                        "assembly"),
+                                    "nemo_line": (
+                                        "cfgs/DINO/MY_SRC/zdftke.F90:"
+                                        "477-496"),
+                                    "output": row11_primary,
+                                    "first_failing_operand": {
+                                        "name": first_name,
+                                        "nemo_line": (
+                                            "cfgs/DINO/MY_SRC/zdftke.F90:"
+                                            "480-495"),
+                                    },
+                                    "operand_localization": row11_inputs,
+                                    "controls": row11_primary["controls"],
+                                }
         if row4["disposition"] == "DIVERGED":
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
                 LatLonCGridOceanModel,
