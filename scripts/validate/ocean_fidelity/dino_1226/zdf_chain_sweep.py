@@ -493,6 +493,11 @@ def main() -> int:
     ap.add_argument("--bn2-bracket-off-restart", type=Path)
     ap.add_argument("--bn2-bracket-instrument-restart", type=Path)
     ap.add_argument("--bn2-certified-restart", type=Path)
+    ap.add_argument("--row17-postsolve-dump", type=Path)
+    ap.add_argument("--row17-bracket-off-restart", type=Path)
+    ap.add_argument("--row17-bracket-instrument-restart", type=Path)
+    ap.add_argument("--row17-instrument-source", type=Path)
+    ap.add_argument("--row17-instrument-binary", type=Path)
     args = ap.parse_args()
     bracket_args = (
         args.bn2_bracket_off_restart,
@@ -1824,33 +1829,116 @@ def main() -> int:
                                         break
                                 if "first_divergence" not in row4[
                                         "continuation_preview"]:
-                                    row4["continuation_preview"]["rows"][
-                                        "17_tke_tridiagonal_solve"] = {
+                                    row17_args = (
+                                        args.row17_postsolve_dump,
+                                        args.row17_bracket_off_restart,
+                                        args.row17_bracket_instrument_restart,
+                                        args.row17_instrument_source,
+                                        args.row17_instrument_binary,
+                                    )
+                                    if any(x is None for x in row17_args):
+                                        row17m = {
                                             "pass": False,
                                             "disposition": "UNMEASURED",
                                             "reason": (
-                                                "The existing tke_dump_en.bin "
-                                                "is post-etau. Row 17 requires "
-                                                "a new write-only pre-etau "
-                                                "en slot plus the registered "
-                                                "dump-on/dump-off restart "
-                                                "identity bracket before its "
-                                                "numeric result is citable."),
-                                            "next_measurement_design": {
-                                                "slot": "tke_dump_en_postsolve",
-                                                "location": (
-                                                    "immediately after "
-                                                    "zdftke.F90:565 and before "
-                                                    "the nn_etau block"),
-                                                "bar": 1.0e-12,
-                                                "controls": [
-                                                    "point perturbation",
-                                                    "horizontal roll",
-                                                    "nonfinite poison",
-                                                    "bracket restart identity",
-                                                ],
+                                                "Row 17 requires all five "
+                                                "--row17-* provenance paths."),
+                                        }
+                                    else:
+                                        for path in row17_args:
+                                            if not path.is_file():
+                                                raise FileNotFoundError(path)
+                                        postsolve_n_full = base._load_interior(
+                                            str(args.row17_postsolve_dump),
+                                            ni, nj)
+                                        postsolve_n = postsolve_n_full[
+                                            ..., 1:1 + nrhs]
+                                        postsolve_l = np.asarray(
+                                            tke_capture["solve_calls"][0][1])[
+                                                ..., :nrhs]
+                                        row17m = metrics(
+                                            postsolve_l, postsolve_n, wet_rhs,
+                                            focus, 1.0e-12)
+                                        row17m["disposition"] = (
+                                            "VERIFIED" if row17m["pass"]
+                                            else "DIVERGED")
+                                        row17m["exact"] = (
+                                            exact_difference_census(
+                                                postsolve_l, postsolve_n,
+                                                wet_rhs, focus))
+                                        row17m["controls"] = planted_controls(
+                                            postsolve_n, postsolve_n, wet_rhs,
+                                            1.0e-12)
+                                        bracket17 = restart_numeric_identity(
+                                            args.row17_bracket_instrument_restart,
+                                            args.row17_bracket_off_restart)
+                                        if not bracket17["pass"]:
+                                            raise AssertionError(
+                                                "row-17 dump-on/dump-off "
+                                                "numeric restart bracket failed")
+                                        row17m["instrumentation_bracket"] = bracket17
+                                        row17m["instrumentation"] = {
+                                            "slot": "tke_dump_en_postsolve.bin",
+                                            "location": (
+                                                "immediately after "
+                                                "zdftke.F90:565 and before "
+                                                "nn_etau at :588"),
+                                            "sha256": {
+                                                str(path): sha256(path)
+                                                for path in (
+                                                    args.row17_postsolve_dump,
+                                                    args.row17_instrument_source,
+                                                    args.row17_instrument_binary,
+                                                    args.row17_bracket_off_restart,
+                                                    args.row17_bracket_instrument_restart,
+                                                )
                                             },
                                         }
+                                        if not row17m["pass"]:
+                                            row4["continuation_preview"][
+                                                "first_divergence"] = {
+                                                    "row": 17,
+                                                    "operation": (
+                                                        "TKE tridiagonal "
+                                                        "forward/back solve "
+                                                        "and floor/mask"),
+                                                    "nemo_line": (
+                                                        "cfgs/DINO/MY_SRC/"
+                                                        "zdftke.F90:547-566"),
+                                                    "output": row17m,
+                                                    "first_failing_operand": {
+                                                        "name": (
+                                                            "Thomas solve/"
+                                                            "postsolve floor")},
+                                                    "operand_localization": {
+                                                        "matrix": row12_primary,
+                                                        "rhs_shear": row13m,
+                                                        "rhs_stratification": row14m,
+                                                        "rhs_dissipation": row15m,
+                                                    },
+                                                    "controls": row17m["controls"],
+                                                    "next_round_fix_design": {
+                                                        "status": (
+                                                            "DESIGN_AFTER_"
+                                                            "SOLVE_OPERAND_WALK"),
+                                                        "walk_order": [
+                                                            "forward diagonal",
+                                                            "forward RHS",
+                                                            "bottom seed",
+                                                            "back substitution",
+                                                            "rn_emin floor",
+                                                            "wmask",
+                                                        ],
+                                                        "rule": (
+                                                            "Instrument the "
+                                                            "first mismatching "
+                                                            "Thomas recurrence "
+                                                            "slot before any "
+                                                            "production fix."),
+                                                    },
+                                                }
+                                    row4["continuation_preview"]["rows"][
+                                        "17_tke_tridiagonal_solve"] = row17m
         if row4["disposition"] == "DIVERGED":
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
                 LatLonCGridOceanModel,
@@ -2327,9 +2415,15 @@ def main() -> int:
         preview = row4.get("continuation_preview")
         if preview is not None:
             for name, cm in preview["rows"].items():
-                print(f"row {name}: {'VERIFIED' if cm['pass'] else 'DIVERGED'} "
-                      f"max={cm['max_column_error']:.6e} "
-                      f"bad_columns={cm['n_diverged_columns']}/{cm['n_wet_columns']}")
+                disposition = cm.get(
+                    "disposition", "VERIFIED" if cm["pass"] else "DIVERGED")
+                if "max_column_error" in cm:
+                    print(f"row {name}: {disposition} "
+                          f"max={cm['max_column_error']:.6e} "
+                          f"bad_columns={cm['n_diverged_columns']}/"
+                          f"{cm['n_wet_columns']}")
+                else:
+                    print(f"row {name}: {disposition} reason={cm['reason']}")
             first = preview.get("first_divergence")
             if first is not None:
                 print(f"  first divergence row {first['row']}: "
