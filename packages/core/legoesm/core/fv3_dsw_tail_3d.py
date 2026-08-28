@@ -619,8 +619,13 @@ def dgrid_pressure_phase_3d(ctx, dsw_outs, tail_outs, km, *, dt, ptop, akap,
         # output, and writes only its own returned arrays; no face
         # reads what another wrote -- so batching would be legal but is
         # an optimisation, not a translation.
-        hs = (jnp.asarray(hs6[t], dtype=jnp.float64) if hs6 is not None
-              else jnp.zeros((m, m), dtype=jnp.float64))
+        # hs follows the run's storage dtype (fp32/mixed increment 2):
+        # ctx.hs6 is already cast by the context builder, so DON'T force
+        # f64 here (that would promote the f32 geopk column back to f64
+        # and trip the uniformity gate). fp64 default: hs6 is f64 ->
+        # byte-identical. The zeros fallback follows a field (delp).
+        hs = (jnp.asarray(hs6[t]) if hs6 is not None
+              else jnp.zeros((m, m), dtype=dsw_outs["delp"].dtype))
         got = geopk(dsw_outs["delp"][t], dsw_outs["pt"][t], hs, bd,
                     km=km, ptop=ptop, akap=akap, cp_air=cp_air,
                     cg=False, duogrid=True, computehalo=False,
@@ -635,7 +640,8 @@ def dgrid_pressure_phase_3d(ctx, dsw_outs, tail_outs, km, *, dt, ptop, akap,
             # dyn_core.F90:1511-1519, taken BEFORE :1531 one_grad_p.
             pk_remap = pk_pre
         # divg2 freshly zero per face, exactly the spec's loop body.
-        divg2 = jnp.zeros((m + 1, m + 1), dtype=jnp.float64)
+        # dtype follows storage (fp32/fp64), from dsw_outs["delp"]
+        divg2 = jnp.zeros((m + 1, m + 1), dtype=dsw_outs["delp"].dtype)
         u_t, v_t, pk_t, gz_t = one_grad_p(
             tail_outs["u"][t], tail_outs["v"][t], got["pk"], got["gz"],
             divg2, dsw_outs["delp"][t], ctx.gs6[t], bd,
@@ -676,8 +682,9 @@ def _dgrid_pressure_phase_3d_batched(ctx, dsw_outs, tail_outs, km, *,
     n, ng = ctx.n, ctx.ng
     m = n + 2 * ng
     hs6 = getattr(ctx, "hs6", None)
-    hs_stack = (jnp.asarray(hs6, dtype=jnp.float64) if hs6 is not None
-                else jnp.zeros((6, m, m), dtype=jnp.float64))
+    # follow storage dtype (ctx.hs6 already cast); zeros fallback -> field
+    hs_stack = (jnp.asarray(hs6) if hs6 is not None
+                else jnp.zeros((6, m, m), dtype=dsw_outs["delp"].dtype))
 
     def one_face(delp_t, pt_t, hs_t, u_t, v_t, gs_t):
         got = geopk(delp_t, pt_t, hs_t, bd, km=km, ptop=ptop,
@@ -686,7 +693,8 @@ def _dgrid_pressure_phase_3d_batched(ctx, dsw_outs, tail_outs, km, *,
                     a2b_ord=a2b_ord, bounded_domain=False,
                     sw_dynamics=False)
         pk_pre, gz_pre = got["pk"], got["gz"]
-        divg2 = jnp.zeros((m + 1, m + 1), dtype=jnp.float64)
+        # dtype follows storage (fp32/fp64), from delp_t
+        divg2 = jnp.zeros((m + 1, m + 1), dtype=delp_t.dtype)
         u_o, v_o, pk_t, gz_t = one_grad_p(
             u_t, v_t, got["pk"], got["gz"], divg2, delp_t, gs_t, bd,
             npx=bd.ie + 1, npy=bd.je + 1, npz=km, dt=dt, ptop=ptop,
@@ -808,7 +816,10 @@ def nh_exchanged_area6(ctx):
     for t in range(6):
         require_real_area(ctx.gs6[t]["area"], t)
     return jnp.stack(
-        [jnp.asarray(ctx.gs6[t]["area"], dtype=jnp.float64)
+        # follow storage dtype: ctx.gs6 area is already cast by the
+        # context builder (fp64 default -> byte-identical); DON'T re-force
+        # f64 or it promotes the f32 divergence back to f64.
+        [jnp.asarray(ctx.gs6[t]["area"])
          for t in range(6)], axis=0)
 
 

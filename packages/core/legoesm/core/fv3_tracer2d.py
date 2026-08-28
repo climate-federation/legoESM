@@ -117,7 +117,8 @@ def require_tracer_2d_1l_lane(*, z_tracer: bool, q_split: int,
             f"TRDM2=0.0.")
 
 
-def alloc_flux_capacitors(n: int, ng: int, km: int) -> dict:
+def alloc_flux_capacitors(n: int, ng: int, km: int, *,
+                          dtype=jnp.float64) -> dict:
     """The zeroed mfx/mfy/cx/cy capacitors (dyn_core.F90:313-316),
     face-stacked per C1: face axis 0, the spec's per-level d_sw1 dummy
     shapes with a trailing km axis --
@@ -131,12 +132,16 @@ def alloc_flux_capacitors(n: int, ng: int, km: int) -> dict:
     NOT field_shape-table fields (rule 10): check face axis 6 and level
     axis km only.  The structurally-zero mfx columns past je / mfy rows
     past ie exist because the caller-side arrays are rectangular."""
+    # dtype follows the run's storage dtype (fp32/mixed increment 2):
+    # these capacitors accumulate f32/f64 mass fluxes from d_sw1; a
+    # hardcoded float64 would mix with an f32 carry. fp64 default is
+    # byte-identical.
     npx = n + 1
     m_a = n + 2 * ng
-    return {"mfx": jnp.zeros((6, npx, m_a, km), dtype=jnp.float64),
-            "mfy": jnp.zeros((6, m_a, npx, km), dtype=jnp.float64),
-            "cx": jnp.zeros((6, npx, m_a, km), dtype=jnp.float64),
-            "cy": jnp.zeros((6, m_a, npx, km), dtype=jnp.float64)}
+    return {"mfx": jnp.zeros((6, npx, m_a, km), dtype=dtype),
+            "mfy": jnp.zeros((6, m_a, npx, km), dtype=dtype),
+            "cx": jnp.zeros((6, npx, m_a, km), dtype=dtype),
+            "cy": jnp.zeros((6, m_a, npx, km), dtype=dtype)}
 
 
 def check_nsplt_schedule(out: dict) -> None:

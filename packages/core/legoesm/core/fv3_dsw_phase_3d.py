@@ -590,10 +590,12 @@ def dsw_transport_phase_3d(ctx, states: dict, csw_outs: dict, dt, km, *,
     # level at a time, and the oracle's own barrier block is a
     # `do k=1,npz` (dyn_core.F90:857 / :877).
     per_face_levels: list[list[dict]] = []
-    zx = jnp.zeros((npx, n), dtype=jnp.float64)
-    zy = jnp.zeros((n, npx), dtype=jnp.float64)
-    zcx = jnp.zeros((npx, m_a), dtype=jnp.float64)
-    zcy = jnp.zeros((m_a, npx), dtype=jnp.float64)
+    # dtype follows storage (fp32/fp64), from states["delp"]
+    _sdt = states["delp"].dtype
+    zx = jnp.zeros((npx, n), dtype=_sdt)
+    zy = jnp.zeros((n, npx), dtype=_sdt)
+    zcx = jnp.zeros((npx, m_a), dtype=_sdt)
+    zcy = jnp.zeros((m_a, npx), dtype=_sdt)
     # R1a, face axis: `d_sw1_duo` reads only face t's own fields,
     # gridstruct and flags and writes only face t's outputs -- no
     # iteration reads a location another writes, and this lane is
@@ -812,10 +814,12 @@ def _dsw_transport_phase_3d_batched(ctx, states, uc6, vc6, divgd6, dt,
                          workspace_sentinel=0.0)
 
     vf1 = jax.vmap(one_face_sw1, in_axes=(0,) * 12)
-    zx6 = jnp.zeros((6, npx, n), dtype=jnp.float64)
-    zy6 = jnp.zeros((6, n, npx), dtype=jnp.float64)
-    zcx6 = jnp.zeros((6, npx, m_a), dtype=jnp.float64)
-    zcy6 = jnp.zeros((6, m_a, npx), dtype=jnp.float64)
+    # dtype follows storage (fp32/fp64), from states["delp"]
+    _sdt = states["delp"].dtype
+    zx6 = jnp.zeros((6, npx, n), dtype=_sdt)
+    zy6 = jnp.zeros((6, n, npx), dtype=_sdt)
+    zcx6 = jnp.zeros((6, npx, m_a), dtype=_sdt)
+    zcy6 = jnp.zeros((6, m_a, npx), dtype=_sdt)
     per_level = []
     for k in range(km):
         if flux_cap is None:

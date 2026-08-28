@@ -247,7 +247,16 @@ def _require_f64_jax(fname: str, arrays: dict) -> None:
     for name, a in arrays.items():
         if a is None:
             continue
-        dt = jnp.asarray(a).dtype
+        _arr = jnp.asarray(a)
+        if _arr.ndim == 0:
+            # scalar timestep / damping coeff (dt, dt2, kgb, ...):
+            # weak-promoting, not a field -- it does not drive the
+            # phase's storage dtype, so it is not part of the field
+            # uniformity invariant (fp32/mixed increment 2). A real
+            # strong-f64 scalar leaking still surfaces as an f64 FIELD
+            # at the next phase's gate.
+            continue
+        dt = _arr.dtype
         if dt not in (jnp.float32, jnp.float64):
             raise TypeError(
                 f"{fname}: {name} must be float32 or float64 (got {dt})")
@@ -1226,7 +1235,8 @@ class DuoHaloTables:
 
 def build_jax_duo_halo_tables(ectx: dict, gs6: list | None = None, *,
                               nq: int = 0,
-                              skip_b_endpoints: bool = False
+                              skip_b_endpoints: bool = False,
+                              dtype=None,
                               ) -> DuoHaloTables:
     """Convert the NumPy setup (``build_ext_context``) into JAX tables.
 
@@ -1444,13 +1454,24 @@ def build_jax_duo_halo_tables(ectx: dict, gs6: list | None = None, *,
         "fill_corners_agrid_pair")
 
     # --- grid metrics (constants; never traced, never differentiated) -----
-    tab.amat = np.stack([np.stack(a, axis=0) for a in ectx["amat6"]], axis=0)
-    tab.dx = np.stack([np.asarray(a) for a in ectx["dx6"]], axis=0)
-    tab.dy = np.stack([np.asarray(a) for a in ectx["dy6"]], axis=0)
-    tab.vlon4 = np.asarray(ectx["vlon4"])
-    tab.vlat4 = np.asarray(ectx["vlat4"])
-    tab.ew4 = np.asarray(ectx["ew4"])
-    tab.es4 = np.asarray(ectx["es4"])
+    # dtype (fp32/mixed increment 2): these projection/metric arrays are
+    # multiplied into the winds by a2d_project / a2c_project / c2l (e.g.
+    # `ug6 * tab.vlon4`), so an fp64 metric promotes an f32 wind back to
+    # f64 and trips the uniformity gates. Cast every INEXACT metric to the
+    # run's storage dtype; None keeps f64 -> byte-identical certified path.
+    # (The exchange-WEIGHT records are cast separately, on demand.)
+    def _m(a):
+        a = np.asarray(a)
+        return (a.astype(dtype)
+                if dtype is not None and np.issubdtype(a.dtype, np.inexact)
+                else a)
+    tab.amat = _m(np.stack([np.stack(a, axis=0) for a in ectx["amat6"]], axis=0))
+    tab.dx = _m(np.stack([np.asarray(a) for a in ectx["dx6"]], axis=0))
+    tab.dy = _m(np.stack([np.asarray(a) for a in ectx["dy6"]], axis=0))
+    tab.vlon4 = _m(ectx["vlon4"])
+    tab.vlat4 = _m(ectx["vlat4"])
+    tab.ew4 = _m(ectx["ew4"])
+    tab.es4 = _m(ectx["es4"])
     # c2l window: Fortran is-1 .. ie+1 in numpy coordinates
     tab.c2l_s = (1 - 1) - (1 - ng)
     tab.c2l_e = (n + 1) - (1 - ng)

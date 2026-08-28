@@ -792,7 +792,8 @@ def cgrid_nh_pressure_phase_3d(ctx, csw_outs: dict, gz6, ws3_6, km, *,
             grid_type=ctx.flags6[t].grid_type)
         # `pkc` is intent(out)-shaped scratch in the oracle; allocate it
         # here rather than asking the caller for a buffer (R4).
-        pkc0 = jnp.zeros(pkc_shape, dtype=jnp.float64)
+        # dtype follows storage (fp32/fp64), from csw_outs["delpc"]
+        pkc0 = jnp.zeros(pkc_shape, dtype=csw_outs["delpc"][t].dtype)
         gz_t, pkc_t = riem_solver_c(
             1, dt2, bounds, km, akap, cp_air, ptop, ctx.hs6[t],
             csw_outs["wc"][t], csw_outs["ptc"][t], csw_outs["delpc"][t],
@@ -845,7 +846,8 @@ def _cgrid_nh_pressure_phase_3d_batched(ctx, csw_outs, gz6, ws3_6, *,
             sw_corner=False, se_corner=False,
             ne_corner=False, nw_corner=False,
             grid_type=grid_type)
-        pkc0 = jnp.zeros(pkc_shape, dtype=jnp.float64)
+        # dtype follows storage (fp32/fp64), from delpc_t
+        pkc0 = jnp.zeros(pkc_shape, dtype=delpc_t.dtype)
         gz2, pkc_t = riem_solver_c(
             1, dt2, bounds, km, akap, cp_air, ptop, hs_t, wc_t,
             ptc_t, delpc_t, gz1, pkc0, ws1, p_fac, a_imp)

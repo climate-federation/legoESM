@@ -154,18 +154,12 @@ class FV3DuoDynamicsModel:
         # single source of truth the per-step boundary guard checks the
         # incoming carry against.
         self._storage_dtype = np.dtype(config.storage_dtype)
-        if self._storage_dtype != np.float64:
+        if self._storage_dtype not in (np.float32, np.float64):
             raise NotImplementedError(
-                f"fv3_duo storage_dtype={config.storage_dtype!r}: the "
-                f"coarse fp32/mixed precision FOUNDATION is in place (dtype-"
-                f"uniformity gates + this config field + factory "
-                f"acceptance), but the RUNTIME is not yet wired -- the "
-                f"in-phase fp64 workspace allocations and the fp64 grid "
-                f"metrics/halo tables must be threaded to storage_dtype "
-                f"(and the pressure column / energy fixer kept fp64 for a "
-                f"true mixed mode) before an fp32 step passes the "
-                f"uniformity gates. Use storage_dtype='float64' (the "
-                f"certified default). Tracked: fv3 fp32/mixed increment 2.")
+                f"fv3_duo storage_dtype={config.storage_dtype!r}: only "
+                f"'float32' (coarse fp32) and 'float64' (certified default) "
+                f"are wired. A true per-op MIXED mode (fp64 pressure column "
+                f"/ energy fixer, fp32 elsewhere) is a later increment.")
         for attr in ("ctx_np", "ctx_jax", "n", "ng"):
             if not hasattr(grid, attr):
                 raise TypeError(
@@ -208,16 +202,27 @@ class FV3DuoDynamicsModel:
         # mutating the shared bundle's tables in place (the tables hash
         # by identity as a STATIC jit arg, so mutating them under an
         # already-traced certified step would leave a stale cache).
-        if step_spmd_mesh is None:
+        # Context dtype (fp32/mixed increment 2): the grid metrics are fp64
+        # host constants; for a coarse fp32 run they must be cast to the
+        # storage dtype or they promote the f32 state back to f64 (and trip
+        # the uniformity gates). Rebuild the context at storage_dtype when
+        # it is not fp64. For the certified fp64 default we keep the shared
+        # grid.ctx_jax verbatim (no rebuild -> byte-identical). A ring
+        # (spmd_mesh) run already rebuilds; it now also carries the dtype.
+        _fp32 = self._storage_dtype == np.float32
+        _ctx_dtype = jnp.float32 if _fp32 else None   # None = uncast f64
+        if step_spmd_mesh is None and not _fp32:
             self._ctx_jax = grid.ctx_jax
         else:
             from legoesm.core.fv3_duo_stepper import (
                 build_jax_duo_stepper_context,
             )
             self._ctx_jax = build_jax_duo_stepper_context(
-                grid.ctx_np, spmd_mesh=step_spmd_mesh)
-        self._ak = np.asarray(ak, dtype=np.float64)
-        self._bk = np.asarray(bk, dtype=np.float64)
+                grid.ctx_np, spmd_mesh=step_spmd_mesh, dtype=_ctx_dtype)
+        # ak/bk (eta coefficients) enter p_var alongside delp -> they must
+        # be the storage dtype too. fp64 default is byte-identical.
+        self._ak = np.asarray(ak, dtype=self._storage_dtype)
+        self._bk = np.asarray(bk, dtype=self._storage_dtype)
         self._ptop = float(ptop)
         # The resolved NH deck runs W_LIMITER=T (fv_mapz.F90:368); the core
         # refuses hydrostatic=False without an explicit choice.

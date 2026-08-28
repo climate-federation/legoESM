@@ -256,19 +256,26 @@ def build_nh_carry(ctx, km: int, hs6) -> dict:
                     {f"hs6[{t}]": h for t, h in enumerate(hs6)})
     n, ng = ctx.n, ctx.ng
     m_a = n + 2 * ng
-    hs6 = jnp.asarray(hs6, dtype=jnp.float64)   # list of faces OR stacked
+    # The NH carry follows the run's STORAGE dtype (fp32/mixed increment
+    # 2): it seeds from hs6 (the topography, already cast to storage dtype
+    # by the context builder) and threads through the f32/f64 step, so its
+    # workspace zeros take hs6's dtype -- NOT a hardcoded float64 that
+    # would mix with an f32 carry. For the certified fp64 run hs6 is f64,
+    # so this is byte-identical (was jnp.asarray(hs6, dtype=jnp.float64)).
+    hs6 = jnp.asarray(hs6)   # list of faces OR stacked; keep incoming dtype
+    _cdt = hs6.dtype
     return {
         "zs": hs6 / FV3_GRAV,
-        "gz": jnp.zeros((6, m_a, m_a, km + 1), dtype=jnp.float64),
-        "zh": jnp.zeros((6, m_a, m_a, km + 1), dtype=jnp.float64),
-        "ws3": jnp.zeros((6, m_a, m_a), dtype=jnp.float64),
-        "ws": jnp.zeros((6, n, n), dtype=jnp.float64),
-        "pk3": jnp.zeros((6, m_a, m_a, km + 1), dtype=jnp.float64),
+        "gz": jnp.zeros((6, m_a, m_a, km + 1), dtype=_cdt),
+        "zh": jnp.zeros((6, m_a, m_a, km + 1), dtype=_cdt),
+        "ws3": jnp.zeros((6, m_a, m_a), dtype=_cdt),
+        "ws": jnp.zeros((6, n, n), dtype=_cdt),
+        "pk3": jnp.zeros((6, m_a, m_a, km + 1), dtype=_cdt),
         "pe": jnp.zeros((6,) + tuple(field_shape("pe", n, ng, km)),
-                        dtype=jnp.float64),
-        "pk": jnp.zeros((6, n, n, km + 1), dtype=jnp.float64),
+                        dtype=_cdt),
+        "pk": jnp.zeros((6, n, n, km + 1), dtype=_cdt),
         "peln": jnp.zeros((6,) + tuple(field_shape("peln", n, ng, km)),
-                          dtype=jnp.float64),
+                          dtype=_cdt),
     }
 
 
@@ -346,6 +353,12 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
     if a2b_ord not in (2, 4):
         raise ValueError(
             f"acoustic_substep_3d: unknown a2b_ord {a2b_ord!r}")
+    # The timestep enters jit as a traced float64 (x64 default), so every
+    # dt-derived scalar (dt2, rdt, the sim1/riem multipliers) would be f64
+    # and promote the f32 carry (fp32/mixed increment 2). Cast dt to the
+    # run's STORAGE dtype once, here, so all derived quantities follow. For
+    # the certified fp64 run the carry is f64 -> byte-identical.
+    dt = jnp.asarray(dt, dtype=state["delp"].dtype)
     dt2 = 0.5 * dt
     if not hydrostatic and (nh is None or dp0 is None):
         raise ValueError(

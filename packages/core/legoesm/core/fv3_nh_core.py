@@ -180,7 +180,16 @@ def _require_f64_jax(fname: str, arrays: dict) -> None:
     for name, a in arrays.items():
         if a is None:
             continue
-        dt = jnp.asarray(a).dtype
+        _arr = jnp.asarray(a)
+        if _arr.ndim == 0:
+            # scalar timestep / damping coeff (dt, dt2, kgb, ...):
+            # weak-promoting, not a field -- it does not drive the
+            # phase's storage dtype, so it is not part of the field
+            # uniformity invariant (fp32/mixed increment 2). A real
+            # strong-f64 scalar leaking still surfaces as an f64 FIELD
+            # at the next phase's gate.
+            continue
+        dt = _arr.dtype
         if dt not in (jnp.float32, jnp.float64):
             raise TypeError(
                 f"{fname}: {name} must be float32 or float64 (got {dt})")

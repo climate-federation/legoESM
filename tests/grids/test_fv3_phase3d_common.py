@@ -68,6 +68,21 @@ def test_require_uniform_rejects_non_float():
             "t", {"a": jnp.zeros(3, dtype=jnp.int32)})
 
 
+def test_require_uniform_skips_0d_scalars():
+    # A 0-dim scalar (timestep dt / damping coeff kgb) is weak-promoting
+    # and NOT part of the field uniformity invariant (fp32/mixed
+    # increment 2): an f64 scalar among f32 FIELDS must NOT trip the gate.
+    common.require_uniform_float_jax(
+        "t", {"delp": jnp.zeros(3, dtype=jnp.float32),
+              "dt": jnp.asarray(120.0),          # 0-dim, f64 under x64
+              "kgb": jnp.asarray(0.15)})         # 0-dim, f64
+    # ...but a 1-D f64 field among f32 fields STILL trips it.
+    with pytest.raises(TypeError, match="MIXED float dtypes"):
+        common.require_uniform_float_jax(
+            "t", {"delp": jnp.zeros(3, dtype=jnp.float32),
+                  "metric": jnp.zeros(3, dtype=jnp.float64)})
+
+
 def test_require_f64_alias_points_at_uniform_gate():
     # Back-compat: the historical name is an alias, so the ~40 call sites
     # and the private copies keep working.

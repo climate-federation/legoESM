@@ -626,7 +626,8 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
     w_limiter = bool(w_limiter) if w_limiter is not None else False
 
     if omga is None:
-        omga = jnp.zeros(want_delp, dtype=jnp.float64)
+        # dtype follows storage (fp32/fp64), from state["delp"]
+        omga = jnp.zeros(want_delp, dtype=state["delp"].dtype)
     ak = jnp.asarray(ak)
     bk = jnp.asarray(bk)
     require_f64_jax("fv_dynamics_step",
@@ -731,7 +732,8 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
         # dyn_core.F90:313-316 sits INSIDE dyn_core: one zeroing per n_map
         # call (never per acoustic sub-step); k_split=1 makes it once per
         # fv_dynamics_step.  This module owns the zeroing (D3).
-        fc = alloc_flux_capacitors(n, ng, km) if nq > 0 else None
+        fc = (alloc_flux_capacitors(n, ng, km, dtype=st["delp"].dtype)
+              if nq > 0 else None)
         # :502 dyn_core; press_out's role is taken by ac["press"] (the
         # callee contract supplies it, replacing the spec's length check)
         ac = acoustic_loop_3d(ctx, st, mdt, km, batched=batched,
