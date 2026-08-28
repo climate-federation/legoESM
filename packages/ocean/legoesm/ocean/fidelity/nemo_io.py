@@ -89,6 +89,8 @@ class NemoGrid(NamedTuple):
     # Raw W-point scale factor used by eosbn2.F90.  Keep it 3-D and unaveraged:
     # last-bit column variation is observable at the pointwise fidelity bar.
     e3w_0: np.ndarray | None = None      # (n_lat, n_lon, nlev) [m]
+    e2u: np.ndarray | None = None        # u-face meridional extent [m]
+    e1v: np.ndarray | None = None        # v-face zonal extent [m]
 
 
 class NemoState(NamedTuple):
@@ -202,6 +204,8 @@ def read_nemo_mesh_mask(path: str, *, nn_hls: int = 1) -> NemoGrid:
         seam_wall_rows=_seam_wall,
         e3u_0=e3u_0_arr, e3v_0=e3v_0_arr, hu_0=hu_0_arr, hv_0=hv_0_arr,
         e3w_0=(m3("e3w_0") if "e3w_0" in m else None),
+        e2u=(h2("e2u") if "e2u" in m else None),
+        e1v=(h2("e1v") if "e1v" in m else None),
     )
 
 

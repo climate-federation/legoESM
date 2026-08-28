@@ -5863,29 +5863,43 @@ class LatLonCGridOceanModel:
                 raise ValueError(
                     "tke_shear_metric_source='nemo_qco_live_face' requires "
                     "the raw mesh nemo_e3w_0 reference field.")
-            _grid = self.grid if grid is None else grid
-            from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
-                nemo_ssh_avg_face_depth,
-            )
             dtype = state.T.data.dtype
-            zero_eta = jnp.zeros_like(_eta_now)
-            depth_args = (
-                state.H_bathy.data, state.land_mask.data,
-                state.u_mask.data, state.v_mask.data, _grid,
-                _grid.area_T.astype(dtype), dtype)
-            hu0, hv0 = nemo_ssh_avg_face_depth(zero_eta, *depth_args)
-            hun, hvn = nemo_ssh_avg_face_depth(_eta_now, *depth_args)
-            hub, hvb = nemo_ssh_avg_face_depth(
-                state.eta_before.data, *depth_args)
-            eps = jnp.asarray(1.0e-10, dtype=dtype)
-            r3un = jnp.where(state.u_mask.data > 0.5,
-                             hun / jnp.maximum(hu0, eps) - 1.0, 0.0)
-            r3ub = jnp.where(state.u_mask.data > 0.5,
-                             hub / jnp.maximum(hu0, eps) - 1.0, 0.0)
-            r3vn = jnp.where(state.v_mask.data > 0.5,
-                             hvn / jnp.maximum(hv0, eps) - 1.0, 0.0)
-            r3vb = jnp.where(state.v_mask.data > 0.5,
-                             hvb / jnp.maximum(hv0, eps) - 1.0, 0.0)
+            hu0 = getattr(_zc, "nemo_hu_0", None)
+            hv0 = getattr(_zc, "nemo_hv_0", None)
+            a_t = getattr(_zc, "nemo_e1e2t", None)
+            a_u = getattr(_zc, "nemo_e1e2u", None)
+            a_v = getattr(_zc, "nemo_e1e2v", None)
+            if any(x is None for x in (hu0, hv0, a_t, a_u, a_v)):
+                raise ValueError(
+                    "tke_shear_metric_source='nemo_qco_live_face' requires "
+                    "raw mesh hu_0/hv_0 and e1e2t/e1e2u/e1e2v fields.")
+            hu0 = jnp.asarray(hu0, dtype=dtype)
+            hv0 = jnp.asarray(hv0, dtype=dtype)
+            a_t = jnp.asarray(a_t, dtype=dtype)
+            a_u = jnp.asarray(a_u, dtype=dtype)
+            a_v = jnp.asarray(a_v, dtype=dtype)
+
+            def _qco_r3(eta):
+                num_u = 0.5 * (
+                    a_t * eta + jnp.roll(a_t * eta, -1, axis=1))
+                num_v = 0.5 * (
+                    a_t * eta + jnp.roll(a_t * eta, -1, axis=0))
+                wet_u = hu0 > 0.0
+                wet_v = hv0 > 0.0
+                r3u_nemo = jnp.where(
+                    wet_u, num_u / (hu0 * a_u), 0.0)
+                r3v_nemo = jnp.where(
+                    wet_v, num_v / (hv0 * a_v), 0.0)
+                # NEMO arrays name the east/north face of T(i,j); legoESM
+                # arrays name the west/south face.  Prefix the periodic/wall
+                # face to convert without changing arithmetic in r3 itself.
+                return (
+                    jnp.concatenate([r3u_nemo[:, -1:], r3u_nemo], axis=1),
+                    jnp.concatenate([r3v_nemo[:1, :], r3v_nemo], axis=0),
+                )
+
+            r3un, r3vn = _qco_r3(_eta_now)
+            r3ub, r3vb = _qco_r3(state.eta_before.data)
             # DINO full-step z has e3uw_0 == e3vw_0 == raw mesh e3w_0
             # bit-for-bit; map NEMO east/north-face indexing to legoESM's
             # west/south raw-face arrays before applying each live factor.

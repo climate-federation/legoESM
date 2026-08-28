@@ -175,6 +175,12 @@ def bridge_nemo_to_legoesm(
         t_depth_ref_m=np.asarray(grid.gdept_1d).ravel(),
         nemo_gdept_0_m=grid.gdept_0,
         nemo_e3w_0_m=grid.e3w_0,
+        nemo_hu_0_m=grid.hu_0, nemo_hv_0_m=grid.hv_0,
+        nemo_e1e2t_m=np.asarray(grid.e1t) * np.asarray(grid.e2t),
+        nemo_e1e2u_m=(None if grid.e2u is None else
+                      np.asarray(grid.e1u) * np.asarray(grid.e2u)),
+        nemo_e1e2v_m=(None if grid.e1v is None else
+                      np.asarray(grid.e1v) * np.asarray(grid.e2v)),
         nemo_e3w_source="mesh_reference",
     )
     H_max = float(np.sum(np.asarray(grid.e3t_1d)[:n_wet]))   # depth of the n_wet wet cells
@@ -700,6 +706,12 @@ def bridge_nemo_to_legoesm_topo(
         e3t_1d, t_depth_ref_m=_t_depth,
         nemo_gdept_0_m=grid.gdept_0,
         nemo_e3w_0_m=grid.e3w_0,
+        nemo_hu_0_m=grid.hu_0, nemo_hv_0_m=grid.hv_0,
+        nemo_e1e2t_m=np.asarray(grid.e1t) * np.asarray(grid.e2t),
+        nemo_e1e2u_m=(None if grid.e2u is None else
+                      np.asarray(grid.e1u) * np.asarray(grid.e2u)),
+        nemo_e1e2v_m=(None if grid.e1v is None else
+                      np.asarray(grid.e1v) * np.asarray(grid.e2v)),
         nemo_e3w_source=nemo_e3w_source,
     )
 

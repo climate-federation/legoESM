@@ -100,6 +100,11 @@ class OceanZStarCoordinate(NamedTuple):
     nemo_gdept_0: jnp.ndarray | None = None
     nemo_e3w_0: jnp.ndarray | None = None
     nemo_e3w_mesh_reference: bool = False
+    nemo_hu_0: jnp.ndarray | None = None
+    nemo_hv_0: jnp.ndarray | None = None
+    nemo_e1e2t: jnp.ndarray | None = None
+    nemo_e1e2u: jnp.ndarray | None = None
+    nemo_e1e2v: jnp.ndarray | None = None
 
 
 def create_ocean_z_star(
@@ -200,6 +205,8 @@ def create_ocean_z_star(
 def create_z_star_from_thicknesses(
     dz_ref_m, t_depth_ref_m=None, *, nemo_gdept_0_m=None,
     nemo_e3w_0_m=None, nemo_e3w_source="mesh_reference",
+    nemo_hu_0_m=None, nemo_hv_0_m=None, nemo_e1e2t_m=None,
+    nemo_e1e2u_m=None, nemo_e1e2v_m=None,
 ) -> OceanZStarCoordinate:
     """Build a z* coordinate from EXPLICIT reference layer thicknesses.
 
@@ -291,6 +298,19 @@ def create_z_star_from_thicknesses(
 
     nemo_gdept_0 = _raw_mesh_field(nemo_gdept_0_m, "nemo_gdept_0_m")
     nemo_e3w_0 = _raw_mesh_field(nemo_e3w_0_m, "nemo_e3w_0_m")
+    def _raw_horizontal(value, name):
+        if value is None:
+            return None
+        arr = np.asarray(value, dtype=np.float64)
+        if arr.ndim != 2 or not np.all(np.isfinite(arr)) or not np.all(arr >= 0.0):
+            raise ValueError(f"{name} must be a finite nonnegative 2-D field")
+        return jnp.asarray(arr, dtype=get_policy().control)
+
+    nemo_hu_0 = _raw_horizontal(nemo_hu_0_m, "nemo_hu_0_m")
+    nemo_hv_0 = _raw_horizontal(nemo_hv_0_m, "nemo_hv_0_m")
+    nemo_e1e2t = _raw_horizontal(nemo_e1e2t_m, "nemo_e1e2t_m")
+    nemo_e1e2u = _raw_horizontal(nemo_e1e2u_m, "nemo_e1e2u_m")
+    nemo_e1e2v = _raw_horizontal(nemo_e1e2v_m, "nemo_e1e2v_m")
     if nemo_gdept_0 is not None and nemo_e3w_0 is not None:
         gdept_np = np.asarray(nemo_gdept_0)
         e3w_np = np.asarray(nemo_e3w_0)
@@ -314,6 +334,9 @@ def create_z_star_from_thicknesses(
         nemo_gdept_0=nemo_gdept_0,
         nemo_e3w_0=nemo_e3w_0,
         nemo_e3w_mesh_reference=(nemo_e3w_source == "mesh_reference"),
+        nemo_hu_0=nemo_hu_0, nemo_hv_0=nemo_hv_0,
+        nemo_e1e2t=nemo_e1e2t, nemo_e1e2u=nemo_e1e2u,
+        nemo_e1e2v=nemo_e1e2v,
     )
 
 
@@ -516,6 +539,11 @@ class OceanPartialCellCoordinate(NamedTuple):
     nemo_gdept_0: jnp.ndarray | None = None
     nemo_e3w_0: jnp.ndarray | None = None
     nemo_e3w_mesh_reference: bool = False
+    nemo_hu_0: jnp.ndarray | None = None
+    nemo_hv_0: jnp.ndarray | None = None
+    nemo_e1e2t: jnp.ndarray | None = None
+    nemo_e1e2u: jnp.ndarray | None = None
+    nemo_e1e2v: jnp.ndarray | None = None
 
 
 def create_partial_cell_coordinate(
@@ -628,6 +656,11 @@ def create_partial_cell_coordinate(
         nemo_e3w_0=getattr(z_coord, "nemo_e3w_0", None),
         nemo_e3w_mesh_reference=getattr(
             z_coord, "nemo_e3w_mesh_reference", False),
+        nemo_hu_0=getattr(z_coord, "nemo_hu_0", None),
+        nemo_hv_0=getattr(z_coord, "nemo_hv_0", None),
+        nemo_e1e2t=getattr(z_coord, "nemo_e1e2t", None),
+        nemo_e1e2u=getattr(z_coord, "nemo_e1e2u", None),
+        nemo_e1e2v=getattr(z_coord, "nemo_e1e2v", None),
     )
 
 
@@ -697,6 +730,11 @@ def create_full_step_coordinate(
         nemo_e3w_0=getattr(z_coord, "nemo_e3w_0", None),
         nemo_e3w_mesh_reference=getattr(
             z_coord, "nemo_e3w_mesh_reference", False),
+        nemo_hu_0=getattr(z_coord, "nemo_hu_0", None),
+        nemo_hv_0=getattr(z_coord, "nemo_hv_0", None),
+        nemo_e1e2t=getattr(z_coord, "nemo_e1e2t", None),
+        nemo_e1e2u=getattr(z_coord, "nemo_e1e2u", None),
+        nemo_e1e2v=getattr(z_coord, "nemo_e1e2v", None),
     )
 
 
