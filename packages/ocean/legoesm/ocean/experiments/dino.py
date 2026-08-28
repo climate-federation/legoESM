@@ -1329,7 +1329,12 @@ DINO_RECIPES: dict[str, dict] = {
         # +9.5e-6) / e1e2t (-2.5e-5..+4.1e-5) mesh_mask residual to ~1e-7
         # (roundoff) on the DINO R1 48x195 mesh. See
         # legoesm.grids.latlon.create_mercator_grid's docstring for the
-        # NEMO citation. Does NOT touch the #516 v-face metric.
+        # NEMO citation. Since #1455 it ALSO puts the two v-face scale
+        # factors on NEMO's own V-point Mercator latitude gphiv
+        # (usrdef_hgr.F90:113/:117) instead of the mean of the two adjacent
+        # tracer latitudes -- worth 3.3e-05 relative at the walls, and it
+        # makes the F-point lateral-viscosity coefficient exact. The #516
+        # transport contract is unchanged: the two end v-faces stay zero.
         "metric_convention": "nemo_isotropic",
         "redi_S_max": 0.01,                      # rn_slpmax (namtra_ldf ref default)
         # -- Momentum (namdyn_adv: ln_dynadv_vec + nn_dynkeg=1; namdyn_vor: ln_dynvor_een) --
