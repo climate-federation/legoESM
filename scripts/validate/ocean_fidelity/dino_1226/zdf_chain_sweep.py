@@ -500,13 +500,20 @@ def main() -> int:
     nj, ni = st["ni_ni"]
     T, S = st["T"], st["S"]
     gdept, gdepw, e3w = nemo_bn2_live_geometry(
-        st["z_coord"], st["eta"], st["H_bathy"])
+        st["z_coord"], st["eta"], st["H_bathy"],
+        r3t_evaluation="nemo_reciprocal")
+    zrw_gdept_0, zrw_gdepw_0 = nemo_bn2_depth_ladders(st["z_coord"])
+    zrw_stretch = nemo_r3t_stretch(
+        st["z_coord"], st["eta"], st["H_bathy"],
+        evaluation="nemo_reciprocal")
     gdept = jnp.asarray(gdept, dtype=T.dtype)
     gdepw = jnp.asarray(gdepw, dtype=T.dtype)
     alpha, beta = nemo_seos_alpha_beta(T, S, gdept, NemoSEOSConfig())
     n2 = compute_buoyancy_frequency_nemo_bn2(
         T, S, gdept, gdepw, NemoSEOSConfig(), g=NEMO_CONSTANTS_CONFIG.g,
-        e3w_int=e3w)
+        e3w_int=e3w, zrw_evaluation="nemo_literal",
+        zrw_gdept_0=zrw_gdept_0, zrw_gdepw_0=zrw_gdepw_0,
+        zrw_stretch=zrw_stretch)
     n2_legacy = compute_buoyancy_frequency_nemo_bn2(
         T, S, gdept, gdepw, NemoSEOSConfig(), g=NEMO_CONSTANTS_CONFIG.g,
         e3w_source="depth_difference")
@@ -543,7 +550,10 @@ def main() -> int:
     S_now = jnp.asarray(np.asarray(now.S).reshape(S.shape), dtype=S.dtype)
     n2_now = compute_buoyancy_frequency_nemo_bn2(
         T_now, S_now, gdept, gdepw, NemoSEOSConfig(),
-        g=NEMO_CONSTANTS_CONFIG.g, e3w_int=e3w)
+        g=NEMO_CONSTANTS_CONFIG.g, e3w_int=e3w,
+        zrw_evaluation="nemo_literal",
+        zrw_gdept_0=zrw_gdept_0, zrw_gdepw_0=zrw_gdepw_0,
+        zrw_stretch=zrw_stretch)
     n2_now_n_full = base._load_interior(
         str(RUN / "tke_dump_rn2.bin"), ni, nj)
     n2_now_n = n2_now_n_full[..., 1:1 + n2_now.shape[-1]]
@@ -940,7 +950,8 @@ def main() -> int:
                             ds["e3w_0"].isel(time_counter=0)), 0, -1)
                     stretch_lc = np.asarray(nemo_r3t_stretch(
                         br.z_coord, twin_state.eta.data,
-                        twin_state.H_bathy.data))
+                        twin_state.H_bathy.data,
+                        evaluation="nemo_reciprocal"))
                     depth_n_lc = (gdepw0_lc[..., 1:1 + nlc]
                                   * stretch_lc[..., None])
                     dz_n_lc = (e3w0_lc[..., 1:1 + nlc]

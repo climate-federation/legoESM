@@ -5818,7 +5818,9 @@ class LatLonCGridOceanModel:
 
         from legoesm.ocean.eos import (
             compute_buoyancy_frequency_nemo_bn2,
+            nemo_bn2_depth_ladders,
             nemo_bn2_live_geometry,
+            nemo_r3t_stretch,
         )
         from legoesm.ocean.physics.vertical_mixing.tke import TKEEntryN2Bundle
         from legoesm.ocean.vertical import extrapolate_below_seafloor
@@ -5829,12 +5831,21 @@ class LatLonCGridOceanModel:
             T_now = extrapolate_below_seafloor(T_now, _zc)
             S_now = extrapolate_below_seafloor(S_now, _zc)
         gdept, gdepw, e3w = nemo_bn2_live_geometry(
-            _zc, state.eta.data, state.H_bathy.data)
+            _zc, state.eta.data, state.H_bathy.data,
+            r3t_evaluation="nemo_reciprocal")
+        gdept_0, gdepw_0 = nemo_bn2_depth_ladders(_zc)
+        zrw_stretch = nemo_r3t_stretch(
+            _zc, state.eta.data, state.H_bathy.data,
+            evaluation="nemo_reciprocal")
         _n2_kwargs = dict(
             g=_cfg_b.constants.g,
             eos_form=getattr(tke_cfg, "n2_eos_form", "seos"),
             e3w_int=e3w,
             e3w_source="mesh_reference",
+            zrw_evaluation="nemo_literal",
+            zrw_gdept_0=gdept_0,
+            zrw_gdepw_0=gdepw_0,
+            zrw_stretch=zrw_stretch,
         )
         rn2 = compute_buoyancy_frequency_nemo_bn2(
             T_now, S_now, gdept, gdepw, **_n2_kwargs)

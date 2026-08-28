@@ -219,7 +219,9 @@ def test_only_complete_dino_nemo_cards_freeze_step_entry_n2_bundle():
 def test_step_entry_n2_bundle_matches_live_geometry_construction():
     from legoesm.ocean.eos import (
         compute_buoyancy_frequency_nemo_bn2,
+        nemo_bn2_depth_ladders,
         nemo_bn2_live_geometry,
+        nemo_r3t_stretch,
     )
 
     tke_cfg = dino_mod._dino_vertical_mixing_config(
@@ -227,13 +229,21 @@ def test_step_entry_n2_bundle_matches_live_geometry_construction():
     model, state = _step_entry_helper_fixture(tke_cfg)
     got = LatLonCGridOceanModel._tke_step_entry_n2_bundle(model, state)
     gdept, gdepw, e3w = nemo_bn2_live_geometry(
-        model.z_coord, state.eta.data, state.H_bathy.data)
+        model.z_coord, state.eta.data, state.H_bathy.data,
+        r3t_evaluation="nemo_reciprocal")
+    gdept0, gdepw0 = nemo_bn2_depth_ladders(model.z_coord)
+    stretch = nemo_r3t_stretch(
+        model.z_coord, state.eta.data, state.H_bathy.data,
+        evaluation="nemo_reciprocal")
+    literal = dict(
+        zrw_evaluation="nemo_literal", zrw_gdept_0=gdept0,
+        zrw_gdepw_0=gdepw0, zrw_stretch=stretch)
     expected_now = compute_buoyancy_frequency_nemo_bn2(
         state.T.data, state.S.data, gdept, gdepw, g=constants.g,
-        e3w_int=e3w, e3w_source="mesh_reference")
+        e3w_int=e3w, e3w_source="mesh_reference", **literal)
     expected_before = compute_buoyancy_frequency_nemo_bn2(
         state.T_before.data, state.S_before.data, gdept, gdepw,
-        g=constants.g, e3w_int=e3w, e3w_source="mesh_reference")
+        g=constants.g, e3w_int=e3w, e3w_source="mesh_reference", **literal)
     np.testing.assert_array_equal(got.rn2, expected_now)
     np.testing.assert_array_equal(got.rn2b, expected_before)
     np.testing.assert_array_equal(got.gdepw_Kmm, gdepw)

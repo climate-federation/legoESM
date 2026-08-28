@@ -34,6 +34,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import equinox as eqx
+from jax import lax
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -550,6 +551,40 @@ def nemo_seos_alpha_beta(
     return alpha, beta
 
 
+def _nemo_bn2_zrw(
+    gdept: jnp.ndarray,
+    gdepw_int: jnp.ndarray,
+    *,
+    evaluation: str,
+    gdept_0: jnp.ndarray | None = None,
+    gdepw_0: jnp.ndarray | None = None,
+    stretch: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Evaluate eosbn2.F90:1459-1460 with a selectable rounding boundary."""
+    gd = jnp.asarray(gdept)
+    if evaluation == "preassembled_live":
+        if any(value is not None for value in (gdept_0, gdepw_0, stretch)):
+            raise ValueError(
+                "raw zrw operands require evaluation='nemo_literal'")
+        return ((jnp.asarray(gdepw_int) - gd[..., 1:])
+                / (gd[..., :-1] - gd[..., 1:]))
+    if evaluation != "nemo_literal":
+        raise ValueError(
+            f"unknown zrw_evaluation {evaluation!r}; expected "
+            "'preassembled_live' or 'nemo_literal'")
+    if any(value is None for value in (gdept_0, gdepw_0, stretch)):
+        raise ValueError(
+            "zrw_evaluation='nemo_literal' requires zrw_gdept_0, "
+            "zrw_gdepw_0, and zrw_stretch")
+    stretch3 = jnp.asarray(stretch)[..., jnp.newaxis]
+    gd0 = jnp.asarray(gdept_0)
+    gw0 = jnp.asarray(gdepw_0)
+    gd_up = lax.optimization_barrier(gd0[..., :-1] * stretch3)
+    gd_lo = lax.optimization_barrier(gd0[..., 1:] * stretch3)
+    gw = lax.optimization_barrier(gw0 * stretch3)
+    return (gw - gd_lo) / (gd_up - gd_lo)
+
+
 def compute_buoyancy_frequency_nemo_bn2(
     T: jnp.ndarray,
     S: jnp.ndarray,
@@ -561,6 +596,10 @@ def compute_buoyancy_frequency_nemo_bn2(
     *,
     e3w_int: jnp.ndarray | None = None,
     e3w_source: str = "mesh_reference",
+    zrw_evaluation: str = "preassembled_live",
+    zrw_gdept_0: jnp.ndarray | None = None,
+    zrw_gdepw_0: jnp.ndarray | None = None,
+    zrw_stretch: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     r"""Brunt-Väisälä ``N²`` by NEMO's exact ``bn2``.
 
@@ -653,8 +692,10 @@ def compute_buoyancy_frequency_nemo_bn2(
     gd = jnp.asarray(gdept)
     gd_up = gd[..., :-1]                                       # cell i  (upper)
     gd_lo = gd[..., 1:]                                        # cell i+1 (lower)
-    # Geometric w-point weight (NEMO zrw); denominator < 0, numerator < 0 -> (0,1).
-    zrw = (gdepw_int - gd_lo) / (gd_up - gd_lo)               # (..., nlev-1)
+    zrw = _nemo_bn2_zrw(
+        gd, gdepw_int, evaluation=zrw_evaluation,
+        gdept_0=zrw_gdept_0, gdepw_0=zrw_gdepw_0,
+        stretch=zrw_stretch)
     a_w = alpha[..., 1:] * (1.0 - zrw) + alpha[..., :-1] * zrw
     b_w = beta[..., 1:] * (1.0 - zrw) + beta[..., :-1] * zrw
     if e3w is None:
@@ -666,6 +707,7 @@ def compute_buoyancy_frequency_nemo_bn2(
 
 def nemo_bn2_live_geometry(
     z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray,
+    *, r3t_evaluation: str = "quotient",
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Return canonical live ``(gdept, gdepw_int, e3w_int)`` for NEMO bn2.
 
@@ -673,9 +715,12 @@ def nemo_bn2_live_geometry(
     by NEMO's live ``1+r3t``.  ``depth_difference`` is an explicit legacy
     coordinate option and reproduces the former ``diff(gdept)`` construction.
     """
-    gdept, gdepw_int = nemo_bn2_live_ladders(z_coord, eta, H_bathy)
+    gdept, gdepw_int = nemo_bn2_live_ladders(
+        z_coord, eta, H_bathy, r3t_evaluation=r3t_evaluation)
     stretch = (None if getattr(z_coord, "linear_free_surface", False)
-               else nemo_r3t_stretch(z_coord, eta, H_bathy))
+               else nemo_r3t_stretch(
+                   z_coord, eta, H_bathy,
+                   evaluation=r3t_evaluation))
     e3w = nemo_e3w_from_live_gdept(
         z_coord, gdept, stretch=stretch, interior=True)
     return gdept, gdepw_int, e3w
@@ -735,7 +780,10 @@ def nemo_bn2_depth_ladders(z_coord) -> tuple[jnp.ndarray, jnp.ndarray]:
     return gdept, gdepw_int
 
 
-def nemo_r3t_stretch(z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray) -> jnp.ndarray:
+def nemo_r3t_stretch(
+    z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray, *,
+    evaluation: str = "quotient",
+) -> jnp.ndarray:
     """NEMO ``key_qco`` T-point z* stretch factor ``(1 + r3t)``.
 
     ``r3t = ssh/ht_0`` (``domqco.F90:160``, ``dom_qco_r3c``), used throughout
@@ -765,6 +813,10 @@ def nemo_r3t_stretch(z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray) -> jnp.nda
     -------
     array ``(...)`` — the stretch factor ``(1 + r3t)``, floored at 1e-6.
     """
+    if evaluation not in ("quotient", "nemo_reciprocal"):
+        raise ValueError(
+            f"unknown r3t evaluation {evaluation!r}; expected 'quotient' "
+            "or 'nemo_reciprocal'")
     if getattr(z_coord, "linear_free_surface", False):
         # NEMO key_linssh: domqco is NOT active, so r3t == 0 -- the column
         # never stretches.  Mirrors the same special case in
@@ -773,7 +825,15 @@ def nemo_r3t_stretch(z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray) -> jnp.nda
     # Dry columns (H_bathy == 0) -> r3t = 0 (inert; all their cells are masked)
     # rather than eta/0 -> inf/NaN poisoning the downstream chain.
     H = jnp.asarray(H_bathy)
-    r3t = jnp.where(H > 0.0, jnp.asarray(eta) / jnp.where(H > 0.0, H, 1.0), 0.0)
+    wet_H = H > 0.0
+    safe_H = jnp.where(wet_H, H, 1.0)
+    if evaluation == "nemo_reciprocal":
+        # domain.F90:158 stores r1_ht_0 before domqco.F90:160 multiplies it
+        # by ssh.  The barrier preserves that fp64 boundary under JIT.
+        r1_H = lax.optimization_barrier(1.0 / safe_H)
+        r3t = jnp.where(wet_H, jnp.asarray(eta) * r1_H, 0.0)
+    else:
+        r3t = jnp.where(wet_H, jnp.asarray(eta) / safe_H, 0.0)
     # Safety floor on the stretch, NOT on r3t: a column driven to
     # eta + H_bathy <= 0 (unclamped restart/IC, wetting-drying) would give a
     # NON-POSITIVE geometric depth/thickness, which silently flips the sign
@@ -785,6 +845,7 @@ def nemo_r3t_stretch(z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray) -> jnp.nda
 
 def nemo_bn2_live_ladders(
     z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray,
+    *, r3t_evaluation: str = "quotient",
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """``(gdept, gdepw_int)`` at NEMO's LIVE ``gdept(Kmm)`` under z*.
 
@@ -819,7 +880,9 @@ def nemo_bn2_live_ladders(
         # review finding F1 regression guard,
         # test_linear_free_surface_column_never_stretches).
         return gdept, gdepw_int
-    stretch = nemo_r3t_stretch(z_coord, eta, H_bathy)[..., jnp.newaxis]
+    stretch = nemo_r3t_stretch(
+        z_coord, eta, H_bathy,
+        evaluation=r3t_evaluation)[..., jnp.newaxis]
     return gdept * stretch, gdepw_int * stretch
 
 

@@ -16,8 +16,10 @@ import pytest
 
 from legoesm import constants
 from legoesm.ocean.eos import (
+    _nemo_bn2_zrw,
     NemoSEOSConfig,
     compute_buoyancy_frequency_nemo_bn2,
+    nemo_r3t_stretch,
     nemo_seos_alpha_beta,
     nemo_seos_eos,
 )
@@ -386,6 +388,54 @@ def test_native_e3w_default_and_explicit_legacy_are_distinguishable():
         compute_buoyancy_frequency_nemo_bn2(
             jnp.asarray(T), jnp.asarray(S), jnp.asarray(gdept),
             jnp.asarray(gdepw), e3w_source="typo")
+
+
+def test_bn2_literal_zrw_matches_hand_computed_nemo_source_order():
+    """eosbn2:1459 macro products round before subtraction; cancellation is red."""
+    upper = np.float64(25.95864807194812)
+    lower = np.float64(37.01406258301722)
+    wpoint = np.float64(31.428849032898142)
+    stretch = np.float64(0.9996588545248404)
+    expected = ((wpoint * stretch - lower * stretch)
+                / (upper * stretch - lower * stretch))
+    got = np.asarray(_nemo_bn2_zrw(
+        jnp.asarray([upper * stretch, lower * stretch]),
+        jnp.asarray([wpoint * stretch]), evaluation="nemo_literal",
+        gdept_0=jnp.asarray([upper, lower]),
+        gdepw_0=jnp.asarray([wpoint]),
+        stretch=jnp.asarray(stretch)))[0]
+    assert got == expected
+
+    # Planted former association: algebraically cancel the common stretch.
+    cancelled = (wpoint - lower) / (upper - lower)
+    assert cancelled != expected
+
+
+def test_nemo_reciprocal_r3t_is_selectable_jittable_and_differentiable():
+    """Only the explicit selector transcribes domain:158 -> domqco:160."""
+    import jax
+
+    class _Z:
+        linear_free_surface = False
+
+    eta = jnp.asarray([-0.7711205157415337])
+    H = jnp.asarray([2260.386175078943])
+    legacy = nemo_r3t_stretch(_Z(), eta, H)
+    explicit_legacy = nemo_r3t_stretch(
+        _Z(), eta, H, evaluation="quotient")
+    assert np.array_equal(np.asarray(legacy), np.asarray(explicit_legacy))
+
+    expected = np.maximum(
+        1.0 + np.asarray(eta) * (1.0 / np.asarray(H)), 1.0e-6)
+    faithful = jax.jit(lambda e: nemo_r3t_stretch(
+        _Z(), e, H, evaluation="nemo_reciprocal"))(eta)
+    assert np.array_equal(np.asarray(faithful), expected)
+    grad = jax.grad(lambda e: jnp.sum(nemo_r3t_stretch(
+        _Z(), e, H, evaluation="nemo_reciprocal")))(eta)
+    assert np.all(np.isfinite(np.asarray(grad)))
+
+    with pytest.raises(ValueError, match="unknown r3t evaluation"):
+        nemo_r3t_stretch(_Z(), eta, H, evaluation="typo")
 
 
 def test_native_e3w_coordinate_validation_wrappers_and_ad():
