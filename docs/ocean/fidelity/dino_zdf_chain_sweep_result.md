@@ -134,7 +134,7 @@ CUDA_VISIBLE_DEVICES=<gpu> JAX_ENABLE_X64=1 python scripts/validate/ocean_fideli
 The last flag is the registered next-round interface and does not exist yet;
 therefore these are frozen handoff commands, not authorization to run them.
 Round-9 artifact SHA256:
-`3f6cd6246530e68908b7321f6bfd55ef7829a44640a6eaaa794a165c78dce50f`.
+`8b001296c8fc8c0fa72ba202a52bc43a89b3e775bf39ade3644da196545444ec`.
 
 ## Round-8 result: row 11 closed; ordered stop at row 12
 

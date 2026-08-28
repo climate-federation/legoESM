@@ -4,7 +4,7 @@
     "pointwise_column": 1e-15,
     "rms_ratio_epsilon": 1e-06
   },
-  "checked_out_parent_sha": "782b0d7887277c88bcaa9c1be24eedad5447d9ae",
+  "checked_out_parent_sha": "55bd1c04f5370f51629ffcb1f0fe5de34d42e1e2",
   "controls": {
     "baseline_pass": true,
     "nonfinite_fired": true,
@@ -358,7 +358,7 @@
   "lane": "d180",
   "numpy": "2.4.4",
   "platform": "Linux-5.14.0-611.36.1.el9_7.x86_64-x86_64-with-glibc2.34",
-  "probe_commit_sha": "",
+  "probe_commit_sha": "4372ce20c8af704faf0c801c7811f9958ea481a9",
   "python": "3.13.0",
   "row4_localization": null,
   "rows": {
