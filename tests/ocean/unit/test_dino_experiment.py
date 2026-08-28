@@ -716,6 +716,42 @@ class TestDinoBathymetry:
 # ---------------------------------------------------------------------
 
 class TestDinoWindStress:
+    def test_profile_evaluation_scope_and_legacy_identity(self):
+        faithful = {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}
+        for recipe in DINO_RECIPES:
+            got = dino_config_for_recipe(recipe).dino_wind_profile_evaluation
+            assert got == ("nemo_literal" if recipe in faithful
+                           else "factored_smoothstep"), recipe
+
+        lat = jnp.asarray([-66.29941237113401, -12.5, 18.25], dtype=jnp.float64)
+        default = dino_wind_stress(lat, DINOConfig())
+        explicit_legacy = dino_wind_stress(
+            lat, dataclasses.replace(
+                DINOConfig(),
+                dino_wind_profile_evaluation="factored_smoothstep"))
+        assert np.array_equal(np.asarray(default), np.asarray(explicit_legacy))
+
+    def test_nemo_literal_preserves_fortran_association(self):
+        phi = jnp.asarray(-66.29941237113401, dtype=jnp.float64)
+        cfg = dataclasses.replace(
+            DINOConfig(), dino_wind_profile_evaluation="nemo_literal")
+        got = np.asarray(dino_wind_stress(phi, cfg))
+        s = (np.float64(phi) - np.float64(-70.0)) / np.float64(25.0)
+        want = (np.float64(0.0)
+                + (np.float64(0.2) - np.float64(0.0))
+                * (np.float64(3.0) - np.float64(2.0) * s) * s ** 2)
+        legacy = np.asarray(dino_wind_stress(
+            phi, dataclasses.replace(
+                cfg, dino_wind_profile_evaluation="factored_smoothstep")))
+        assert got.view(np.uint64) == np.asarray(want).view(np.uint64)
+        assert got.view(np.uint64) != legacy.view(np.uint64)
+
+    def test_unknown_profile_evaluation_raises(self):
+        cfg = dataclasses.replace(
+            DINOConfig(), dino_wind_profile_evaluation="typo")
+        with pytest.raises(ValueError, match="dino_wind_profile_evaluation"):
+            dino_wind_stress(jnp.asarray(0.0), cfg)
+
     def test_hits_knots(self):
         cfg = DINOConfig()
         for lat_knot, tau_knot in zip(cfg.wind_tau_lats_deg, cfg.wind_tau_values):

@@ -179,6 +179,10 @@ class DINOConfig:
     wind_tau_values: tuple[float, ...] = (
         0.0, 0.2, -0.1, -0.02, -0.1, 0.1, 0.0,
     )  # [N/m²]
+    # Arithmetic/interval convention for the analytic profile.  The complete
+    # NEMO cards select ``nemo_literal``; the default preserves every other
+    # DINO consumer's existing arrays byte-for-byte.
+    dino_wind_profile_evaluation: str = "factored_smoothstep"
 
     # ------------------------------------------------------------------
     # Surface forcing — restoring (Sect 2.3, eqs 8-9; Appendix B eqs B1-B2)
@@ -1165,6 +1169,7 @@ DINO_RECIPES: dict[str, dict] = {
         "tke_preclosure_coeff_source": "carried_previous_step",
         "tke_shear_evaluation_stage": "step_entry",
         "tke_shear_metric_source": "nemo_qco_live_face",
+        "dino_wind_profile_evaluation": "nemo_literal",
         # -- Convection (namzdf: ln_zdfevd=T, rn_evd=100, nn_evdm=1; hard rn2<0 on eosbn2) --
         # NEMO's zdfevd trigger consumes rn2/rn2b from eosbn2 bn2 (eosbn2.F90:
         # 1459-1467): LOCAL alpha/beta evaluated at each cell's own gdept,
@@ -2076,20 +2081,39 @@ def dino_wind_stress(lat_deg, cfg: DINOConfig | None = None):
     lats = jnp.asarray(cfg.wind_tau_lats_deg, dtype=jnp.float64)
     taus = jnp.asarray(cfg.wind_tau_values, dtype=jnp.float64)
 
-    # Find the segment containing each lat (vectorized).
-    # For each lat point: locate the index ks s.t. lats[ks] <= lat <= lats[ks+1].
-    # Use right-side searchsorted so that lat == lats[i] maps to segment [i-1, i].
-    idx = jnp.clip(
-        jnp.searchsorted(lats, lat_deg, side="right") - 1,
-        0, lats.shape[0] - 2,
-    )
+    if cfg.dino_wind_profile_evaluation == "factored_smoothstep":
+        # Legacy interval construction.  Keep its tie behaviour and arithmetic
+        # graph intact for every non-oracle card.
+        idx = jnp.clip(
+            jnp.searchsorted(lats, lat_deg, side="right") - 1,
+            0, lats.shape[0] - 2,
+        )
+    elif cfg.dino_wind_profile_evaluation == "nemo_literal":
+        # usrdef_sbc.F90:611-623: choose the closest node, then the adjacent
+        # node on the side containing phi.  DINO grid latitudes remain inside
+        # the endpoint nodes; clipping also preserves the documented constant
+        # continuation for direct callers outside that interval.
+        nearest = jnp.argmin(
+            jnp.abs(lat_deg[..., None] - lats), axis=-1)
+        idx = jnp.where(lats[nearest] - lat_deg <= 0.0,
+                        nearest, nearest - 1)
+        idx = jnp.clip(idx, 0, lats.shape[0] - 2)
+    else:
+        raise ValueError(
+            "dino_wind_profile_evaluation must be 'nemo_literal' or "
+            f"'factored_smoothstep', got "
+            f"{cfg.dino_wind_profile_evaluation!r}")
     lat_lo = lats[idx]
     lat_hi = lats[idx + 1]
     tau_lo = taus[idx]
     tau_hi = taus[idx + 1]
 
     s = jnp.clip((lat_deg - lat_lo) / (lat_hi - lat_lo), 0.0, 1.0)
-    weight = (3.0 - 2.0 * s) * s ** 2  # cubic Hermite smooth-step
+    if cfg.dino_wind_profile_evaluation == "nemo_literal":
+        # Preserve the left-associated Fortran expression at
+        # cfgs/DINO/MY_SRC/usrdef_sbc.F90:632.
+        return tau_lo + (tau_hi - tau_lo) * (3.0 - 2.0 * s) * s ** 2
+    weight = (3.0 - 2.0 * s) * s ** 2
     return tau_lo + (tau_hi - tau_lo) * weight
 
 

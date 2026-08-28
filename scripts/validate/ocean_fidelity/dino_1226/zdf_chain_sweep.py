@@ -10,6 +10,7 @@ campaign loaders/state construction are imported from
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import hashlib
 import importlib.metadata
 import importlib.util
@@ -591,6 +592,14 @@ def main() -> int:
             row8_utau_literal = metrics(
                 utau_literal[..., None], utau_n[..., None], wet2[..., None],
                 focus, POINTWISE_BAR)
+            from legoesm.ocean.experiments.dino import dino_wind_stress
+            legacy_cfg = dataclasses.replace(
+                cfg, dino_wind_profile_evaluation="factored_smoothstep")
+            legacy_utau = np.asarray(dino_wind_stress(
+                jnp.asarray(gphiu), legacy_cfg))
+            row8_legacy_utau = metrics(
+                legacy_utau[..., None], utau_n[..., None], wet2[..., None],
+                focus, POINTWISE_BAR)
             taum_dump = np.abs(utau_n)
             taum_dump = np.where(utau_n > 0.0, taum_dump * 1.3, taum_dump)
             surface_n = np.maximum(
@@ -625,6 +634,15 @@ def main() -> int:
             if not row8_poststage_invariant["pass"]:
                 raise AssertionError(
                     "post-tke_tke en(1) changed after the row-8 assignment")
+            if row8m["pass"]:
+                if row8_legacy_utau["pass"]:
+                    raise AssertionError(
+                        "row-8 legacy profile control did not reproduce the "
+                        "registered sbc_dump_utau.bin failure")
+                if not row8_utau_literal["pass"]:
+                    raise AssertionError(
+                        "row-8 production passed but the independent literal "
+                        "wind reconstruction did not")
             row4["continuation_preview"] = {
                 "rows": {
                     "5_bottom_drag_coefficient": row5m,
@@ -632,7 +650,10 @@ def main() -> int:
                     "7_native_mld_depth": row7m,
                     "8_surface_tke_boundary": row8m,
                 },
-                "first_divergence": {
+                "row8_legacy_dump_control": row8_legacy_utau,
+            }
+            if not row8m["pass"]:
+                row4["continuation_preview"]["first_divergence"] = {
                     "row": 8,
                     "operation": "TKE surface Dirichlet boundary",
                     "nemo_line": "cfgs/DINO/MY_SRC/zdftke.F90:334,360-364",
@@ -653,6 +674,7 @@ def main() -> int:
                         "literal_zbbrau_times_taum_then_max": row8_literal,
                         "substitute_dump_derived_taum": row8_surface_sub,
                         "n_observable_unfloored_columns": int(observable.sum()),
+                        "legacy_factored_utau_vs_dump": row8_legacy_utau,
                     },
                     "poststage_surface_en_invariant": row8_poststage_invariant,
                     "controls": row8_controls,
@@ -668,8 +690,7 @@ def main() -> int:
                             "tau_s + (tau_n-tau_s)*(3-2*s)*s**2 before ABS "
                             "and the conditional 1.3 westerly multiplier",
                     },
-                },
-            }
+                }
         if row4["disposition"] == "DIVERGED":
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
                 LatLonCGridOceanModel,
