@@ -469,6 +469,16 @@ def compute_vertical_K_profiles(
             # (phase 1; no tke array to mask yet) — the model step masks the
             # post-solve tke_new with the same wet-interface guard.
             tke_new = tke_new * _wet_if
+        elif tke_new is not None and hasattr(tke_new, "K_M"):
+            # NEMO carried-coefficient mode returns the post-tke_avn closure
+            # pair separately from the EVD/IWM-composed solve coefficients.
+            tke_new = tke_new._replace(
+                tke_new=tke_new.tke_new * _wet_if,
+                K_M=tke_new.K_M * _wet_if,
+                K_H=tke_new.K_H * _wet_if,
+                K_M_surface=(None if tke_new.K_M_surface is None else
+                             tke_new.K_M_surface * state.land_mask.data),
+            )
 
     if return_tke:
         return K_v_total, A_v_total, tke_new
@@ -950,7 +960,25 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 u_face_before=u_face_before, v_face_before=v_face_before,
                 face_masks_3d=_face_masks_3d,
                 w_active=_dry_wmask,
+                preclosure_K_M=(
+                    state.tke_avm.data
+                    if getattr(state, "tke_avm", None) is not None else None),
+                preclosure_K_H=(
+                    state.tke_avt.data
+                    if getattr(state, "tke_avt", None) is not None else None),
+                preclosure_K_M_surface=(
+                    state.tke_avm_surface.data
+                    if getattr(state, "tke_avm_surface", None) is not None else None),
             )
+            if (getattr(tke_cfg, "tke_preclosure_coeff_source",
+                        "current_subiteration") == "carried_previous_step"):
+                from legoesm.ocean.physics.vertical_mixing.tke import (
+                    TKECarryOutput,
+                )
+                _carry = TKECarryOutput(
+                    tke_new=tke_out.tke_new, K_M=tke_out.K_M,
+                    K_H=tke_out.K_H, K_M_surface=tke_out.K_M_surface)
+                return tke_out.K_H, tke_out.K_M, _carry
             return tke_out.K_H, tke_out.K_M, tke_out.tke_new
         # Mode B (DIAGNOSTIC / quasi-steady, default): ``tke_old=None`` seeds at
         # background and 3 iterations of the same backward-Euler step bring TKE

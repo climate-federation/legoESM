@@ -149,6 +149,7 @@ from legoesm.ocean.fidelity.nemo_io import (
     read_nemo_restart,
     read_nemo_restart_before,
     read_nemo_restart_en,
+    read_nemo_restart_tke_coefficients,
 )
 from legoesm.ocean.fidelity.nemo_state_bridge import (
     NEMO_E3T_MODES,
@@ -268,7 +269,8 @@ def verify_day0_matches_restart(st, restart_state, land_mask, *, tol: float = 1e
         )
 
 
-def bridge_tke_from_restart(st, restart_en, land_mask):
+def bridge_tke_from_restart(st, restart_en, land_mask, *,
+                            restart_avm=None, restart_avt=None):
     """Seed ``st.tke`` from a NEMO restart's ``en`` (TKE closure integrator memory).
 
     ``restart_en`` is the raw ``(n_lat, n_lon, jpk)`` array from
@@ -283,8 +285,32 @@ def bridge_tke_from_restart(st, restart_en, land_mask):
     en_interior = np.asarray(restart_en, dtype=np.float64)[..., 1:]  # drop w-level 0 (surface)
     wet = (np.asarray(land_mask) > 0.5)[:, :, None]
     tke_data = jnp.asarray(np.where(wet, en_interior, 0.0), dtype=st.T.data.dtype)
-    return st._replace(tke=Field(data=tke_data, name="tke",
-                                  dims=("lat", "lon", "level"), units="m^2/s^2"))
+    updates = dict(tke=Field(data=tke_data, name="tke",
+                            dims=("lat", "lon", "level"), units="m^2/s^2"))
+    if (restart_avm is None) != (restart_avt is None):
+        raise ValueError("restart_avm and restart_avt must be supplied together")
+    if restart_avm is not None:
+        avm = np.asarray(restart_avm, dtype=np.float64)
+        avt = np.asarray(restart_avt, dtype=np.float64)
+        if avm.shape != restart_en.shape or avt.shape != restart_en.shape:
+            raise ValueError(
+                "restart avm_k/avt_k must match en shape; got "
+                f"{avm.shape}/{avt.shape} vs {restart_en.shape}")
+        updates.update(
+            tke_avm=Field(
+                data=jnp.asarray(np.where(wet, avm[..., 1:], 0.0),
+                                 dtype=st.T.data.dtype),
+                name="tke_avm", dims=("lat", "lon", "level"), units="m^2/s"),
+            tke_avt=Field(
+                data=jnp.asarray(np.where(wet, avt[..., 1:], 0.0),
+                                 dtype=st.T.data.dtype),
+                name="tke_avt", dims=("lat", "lon", "level"), units="m^2/s"),
+            tke_avm_surface=Field(
+                data=jnp.asarray(np.where(wet[..., 0], avm[..., 0], 0.0),
+                                 dtype=st.T.data.dtype),
+                name="tke_avm_surface", dims=("lat", "lon"), units="m^2/s"),
+        )
+    return st._replace(**updates)
 
 
 def _print_before_bridge_verify(st, before, grid) -> None:
@@ -1049,6 +1075,7 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                        vmix_scheme: str | None = None,
                        use_gm_redi: bool | None = None,
                        surface_tendency_placement: str | None = None,
+                       tke_preclosure_coeff_source: str | None = None,
                        u_m: float | None = None,
                        restart_file: str = RESTART_FILE,
                        e3t_mode: str | None = None):
@@ -1106,6 +1133,14 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
         cfg = dataclasses.replace(cfg, use_gm_redi=use_gm_redi)
     if surface_tendency_placement is not None:
         cfg = dataclasses.replace(cfg, surface_tendency_placement=surface_tendency_placement)
+    if tke_preclosure_coeff_source is not None:
+        if tke_preclosure_coeff_source not in (
+                "carried_previous_step", "current_subiteration"):
+            raise ValueError(
+                "tke_preclosure_coeff_source must be "
+                "'carried_previous_step' or 'current_subiteration'")
+        cfg = dataclasses.replace(
+            cfg, tke_preclosure_coeff_source=tke_preclosure_coeff_source)
     if u_m is not None:
         if not (u_m > 0.0):
             raise ValueError(f"u_m (rn_Uv) must be > 0, got {u_m!r}")
@@ -1198,13 +1233,30 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
     # not a silent behavior change.
     if bridge_tke:
         en_restart = read_nemo_restart_en(f"{run_stepdump}/{restart_file}", nn_hls=0)
-        st = bridge_tke_from_restart(st, en_restart, br.land_mask)
+        _carry_coeffs = (cfg.tke_preclosure_coeff_source
+                         == "carried_previous_step")
+        if _carry_coeffs:
+            avm_restart, avt_restart = read_nemo_restart_tke_coefficients(
+                f"{run_stepdump}/{restart_file}", nn_hls=0)
+        else:
+            avm_restart = avt_restart = None
+        st = bridge_tke_from_restart(
+            st, en_restart, br.land_mask,
+            restart_avm=avm_restart, restart_avt=avt_restart)
         wet = np.asarray(br.land_mask) > 0.5
         d_en = float(np.max(np.abs(
             np.asarray(st.tke.data)[wet] - en_restart[..., 1:][wet])))
         print(f"TKE BRIDGE: seeded state.tke from NEMO restart en "
               f"(w-level 1..{en_restart.shape[-1]-1} -> interior interface "
               f"0..{en_restart.shape[-1]-2})  max|d_en|={d_en:.3e}", flush=True)
+        if _carry_coeffs:
+            d_avm = float(np.max(np.abs(
+                np.asarray(st.tke_avm.data)[wet] - avm_restart[..., 1:][wet])))
+            d_avt = float(np.max(np.abs(
+                np.asarray(st.tke_avt.data)[wet] - avt_restart[..., 1:][wet])))
+            print("TKE COEFFICIENT BRIDGE: restart avm_k/avt_k -> carried "
+                  f"closure pair max|d_avm|={d_avm:.3e} "
+                  f"max|d_avt|={d_avt:.3e}", flush=True)
 
     mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
     if os.environ.get("DINO_NEMO_KMM_DIVISOR") is not None:
@@ -1262,6 +1314,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
              vmix_scheme: str | None = None,
              use_gm_redi: bool | None = None,
              surface_tendency_placement: str | None = None,
+             tke_preclosure_coeff_source: str | None = None,
              u_m: float | None = None,
              restart_file: str = RESTART_FILE,
              perturb_seed: int | None = None,
@@ -1324,6 +1377,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         bridge_before=bridge_before, vmix_scheme=vmix_scheme,
         use_gm_redi=use_gm_redi, restart_file=restart_file,
         surface_tendency_placement=surface_tendency_placement,
+        tke_preclosure_coeff_source=tke_preclosure_coeff_source,
         u_m=u_m, e3t_mode=ladder_mode)
 
     # #1455 review: the stamp must be a RECEIPT, not a restatement of the flag.
@@ -1816,6 +1870,12 @@ def _parse_args(argv=None):
                          "(#1492 A/B: 'applied_now' legacy defect vs "
                          "'leapfrog_rhs' NEMO-faithful fix); default None "
                          "leaves the recipe's own value")
+    p.add_argument(
+        "--tke-preclosure-coeff-source", default=None,
+        choices=("carried_previous_step", "current_subiteration"),
+        help="override the TKE pre-solve avm_k/avt_k lifetime; default None "
+             "uses the recipe (DINO NEMO cards carry the previous-step pair; "
+             "current_subiteration is historical reproduction)")
     p.add_argument("--u-m", dest="u_m", type=float, default=None,
                    help="override DINOConfig.U_M (NEMO rn_Uv, the lateral "
                         "viscous velocity [m/s]; card default 0.27). The "
@@ -2044,6 +2104,7 @@ def main(argv=None):
               bridge_tke=args.bridge_tke, bridge_before=args.bridge_before,
               vmix_scheme=args.vmix_scheme, use_gm_redi=args.use_gm_redi,
               surface_tendency_placement=args.surface_tendency_placement,
+              tke_preclosure_coeff_source=args.tke_preclosure_coeff_source,
               u_m=args.u_m,
               perturb_seed=args.perturb_seed, perturb_eps=args.perturb_eps,
               perturb_baro=args.perturb_baro,

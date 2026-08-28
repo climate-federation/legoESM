@@ -245,6 +245,24 @@ def test_bridge_tke_from_restart_mapping_round_trip(instruments):
     assert tke[0, 0, :].max() == 0.0
 
 
+def test_bridge_tke_coefficients_preserves_surface_and_interior(instruments):
+    kamm = instruments.kamm_twin_90d
+    n_lat, n_lon, jpk = 2, 3, 4
+    wet = np.ones((n_lat, n_lon))
+    en = np.arange(n_lat * n_lon * jpk, dtype=float).reshape(n_lat, n_lon, jpk)
+    avm = en + 100.0
+    avt = en + 200.0
+    st = _fake_state(np.zeros((n_lat, n_lon, jpk)),
+                     np.zeros((n_lat, n_lon)),
+                     np.zeros((n_lat, n_lon + 1, jpk)),
+                     np.zeros((n_lat + 1, n_lon, jpk)))
+    out = kamm.bridge_tke_from_restart(
+        st, en, wet, restart_avm=avm, restart_avt=avt)
+    np.testing.assert_array_equal(out.tke_avm.data, avm[..., 1:])
+    np.testing.assert_array_equal(out.tke_avt.data, avt[..., 1:])
+    np.testing.assert_array_equal(out.tke_avm_surface.data, avm[..., 0])
+
+
 def test_build_twin_state_default_bridge_tke_off(instruments, monkeypatch):
     """--bridge-tke defaults False: the module must not call
     read_nemo_restart_en/bridge_tke_from_restart on the default path -- the

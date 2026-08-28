@@ -580,6 +580,10 @@ class DINOConfig:
     # own seafloor. Without the mask every dry row re-widens the ldown carry
     # and the bottom limitation never arrives.
     tke_dry_wmask: bool = False                  # True = NEMO wmask'd en
+    # Coefficients read before tke_avn overwrites them. Generic/diagnostic
+    # recipes retain the historical current-subiteration path; complete NEMO
+    # cards explicitly select the carried restart/previous-step pair.
+    tke_preclosure_coeff_source: str = "current_subiteration"
     # T15 — bottom TKE BC: en(mbkt+1)=max(0.001875*CdU_bot*|u_bot|,rn_emin)
     # (zdftke.F90:279-288), reusing the shared nemo_effective_bottom_drag_r.
     # Deep/not entrainment-relevant (Phase-1 ranking) but implemented for
@@ -1156,6 +1160,7 @@ DINO_RECIPES: dict[str, dict] = {
         "tke_dry_wmask": True,
         "tke_bottom_bc": True,                   # en(mbkt+1) bottom-friction BC (zdftke:279-288)
         "tke_kappaM_max": float("inf"),          # T21: tke_avn has NO avm ceiling
+        "tke_preclosure_coeff_source": "carried_previous_step",
         # -- Convection (namzdf: ln_zdfevd=T, rn_evd=100, nn_evdm=1; hard rn2<0 on eosbn2) --
         # NEMO's zdfevd trigger consumes rn2/rn2b from eosbn2 bn2 (eosbn2.F90:
         # 1459-1467): LOCAL alpha/beta evaluated at each cell's own gdept,
@@ -2963,6 +2968,7 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
             bottom_tke_bc=cfg.tke_bottom_bc,
             tke_shear_production=cfg.tke_shear_production,
             tke_shear_avm_weighting=cfg.tke_shear_avm_weighting,
+            tke_preclosure_coeff_source=cfg.tke_preclosure_coeff_source,
             tke_n2_time_level=cfg.tke_n2_time_level,
         )
         if cfg.tke_alpha is not None:

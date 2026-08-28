@@ -553,6 +553,13 @@ class LatLonCGridOceanState(NamedTuple):
     # (dt = dt_mom) seeded from this field and stores the updated TKE back.
     # Default None -> inert (Mode-B diagnostic chain): zero behaviour change.
     tke: object = None
+    # NEMO TKE-closure coefficient memory (avm_k/avt_k). These are the
+    # post-tke_avn closure values, before EVD/IWM composition, carried to the
+    # next step when tke_preclosure_coeff_source="carried_previous_step".
+    tke_avm: object = None
+    tke_avt: object = None
+    # Surface W-level avm_k used by NEMO's z=0 TKE matrix/wave denominator.
+    tke_avm_surface: object = None
     # Prior-step ADVECTIVE TKE tendency [m^2/s^3] at the interior interfaces
     # (W-grid), 3-D Field (n_lat, n_lon, nlev-1) — the Adams-Bashforth history
     # dtke^{n-1} for the prognostic-TKE superbee advection (Veros vs.dtke,

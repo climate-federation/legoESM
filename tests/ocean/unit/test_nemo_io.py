@@ -13,6 +13,7 @@ from legoesm.ocean.fidelity.nemo_io import (
     read_nemo_restart,
     read_nemo_restart_before,
     read_nemo_restart_en,
+    read_nemo_restart_tke_coefficients,
 )
 
 # Global-with-halo dims: nn_hls=1 -> interior (ny-2, nx-2) = (4, 3).
@@ -50,7 +51,8 @@ def _write_mesh_mask(path, with_e3uv_0=False, with_e3w_0=False):
     ds.to_netcdf(path)
 
 
-def _write_restart(path, with_rhd=True, with_en=False, with_before=False,
+def _write_restart(path, with_rhd=True, with_en=False, with_tke_coeffs=False,
+                    with_before=False,
                     with_before_forcing=False):
     d2 = (("y", "x"), np.arange(NY * NX).reshape(NY, NX).astype(np.float64))
     d3 = (("z", "y", "x"), _encode(None))
@@ -59,6 +61,9 @@ def _write_restart(path, with_rhd=True, with_en=False, with_before=False,
         data["rhd"] = d3
     if with_en:
         data["en"] = d3
+    if with_tke_coeffs:
+        data["avm_k"] = (("z", "y", "x"), _encode(None) + 1000.0)
+        data["avt_k"] = (("z", "y", "x"), _encode(None) + 2000.0)
     if with_before:
         # Distinct pattern (offset +1) so a reader bug that accidentally
         # reads the now-level fields is caught by value, not just shape.
@@ -205,6 +210,19 @@ def test_read_nemo_restart_en_missing_raises(tmp_path):
     _write_restart(p, with_rhd=False, with_en=False)
     with pytest.raises(KeyError):
         read_nemo_restart_en(str(p), nn_hls=1)
+
+
+def test_read_nemo_restart_tke_coefficients_axis_order_and_missing(tmp_path):
+    p = tmp_path / "restart_coeff.nc"
+    _write_restart(p, with_rhd=False, with_tke_coeffs=True)
+    avm, avt = read_nemo_restart_tke_coefficients(str(p), nn_hls=1)
+    assert avm.shape == avt.shape == (IY, IX, NZ)
+    assert avm[1, 2, 0] == 1023.0
+    assert avt[1, 2, 0] == 2023.0
+    q = tmp_path / "restart_no_coeff.nc"
+    _write_restart(q, with_rhd=False)
+    with pytest.raises(ValueError, match="avm_k"):
+        read_nemo_restart_tke_coefficients(str(q), nn_hls=1)
 
 
 class TestHalolessFiles:

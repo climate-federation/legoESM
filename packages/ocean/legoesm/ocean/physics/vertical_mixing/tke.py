@@ -328,6 +328,15 @@ class TKEOutput(NamedTuple):
     K_H: jnp.ndarray       # (..., nlev-1) tracer eddy diffusivity at interfaces
     tke_new: jnp.ndarray   # (..., nlev-1) updated TKE at interfaces
     l_eps: jnp.ndarray     # (..., nlev-1) dissipation mixing length (diagnostic)
+    K_M_surface: jnp.ndarray | None = None  # (...) post-tke_avn surface avm_k
+
+
+class TKECarryOutput(NamedTuple):
+    """Prognostic TKE plus NEMO's post-``tke_avn`` closure-memory pair."""
+    tke_new: jnp.ndarray
+    K_M: jnp.ndarray
+    K_H: jnp.ndarray
+    K_M_surface: jnp.ndarray | None
 
 
 class TKEPostMixingContext(NamedTuple):
@@ -1567,6 +1576,7 @@ def compute_K_from_tke(
     z_interface: jnp.ndarray | None = None,
     N2_prandtl: jnp.ndarray | None = None,
     p_sh2_override: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+    prandtl_K_M: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     r"""Compute K_M and K_H from TKE and the mixing length.
 
@@ -1644,8 +1654,14 @@ def compute_K_from_tke(
                 f"shear_sq for the Prandtl-number computation."
             )
         _N2_pr = N2 if N2_prandtl is None else N2_prandtl
-        _p_sh2_pr = None if p_sh2_override is None else p_sh2_override(K_M)
-        Pr = _prandtl_number(_N2_pr, shear_sq, K_M, cfg, _p_sh2_pr)
+        _K_M_pr = K_M if prandtl_K_M is None else prandtl_K_M
+        if _K_M_pr.shape != K_M.shape:
+            raise ValueError(
+                "compute_K_from_tke: prandtl_K_M must match K_M shape; "
+                f"got {_K_M_pr.shape} vs {K_M.shape}.")
+        _p_sh2_pr = (None if p_sh2_override is None
+                     else p_sh2_override(_K_M_pr))
+        Pr = _prandtl_number(_N2_pr, shear_sq, _K_M_pr, cfg, _p_sh2_pr)
         # Tracer floor is INDEPENDENT of the momentum floor (NEMO zdftke:
         # avt = max(avtb, pdlr*zav), avm = max(avmb, zav), both from the raw K).
         # Divide the ceilinged-but-UN-kappaM_min-floored K_M by Pr, then floor at
@@ -1845,6 +1861,9 @@ def tke_vertical_mixing(
     v_face_before: jnp.ndarray | None = None,
     face_masks_3d: tuple[jnp.ndarray, jnp.ndarray] | None = None,
     w_active: jnp.ndarray | None = None,
+    preclosure_K_M: jnp.ndarray | None = None,
+    preclosure_K_H: jnp.ndarray | None = None,
+    preclosure_K_M_surface: jnp.ndarray | None = None,
 ) -> TKEOutput:
     """Advance the TKE closure and return new K_M, K_H, TKE.
 
@@ -2034,6 +2053,41 @@ def tke_vertical_mixing(
             cfg.tke_background,
             dtype=rho_cell.dtype,
         )
+
+    _coeff_source = getattr(
+        cfg, "tke_preclosure_coeff_source", "current_subiteration")
+    if _coeff_source not in ("current_subiteration", "carried_previous_step"):
+        raise ValueError(
+            "Unknown TKEConfig.tke_preclosure_coeff_source: expected "
+            "'current_subiteration' or 'carried_previous_step', got "
+            f"{_coeff_source!r}.")
+    _carried_coeffs = _coeff_source == "carried_previous_step"
+    _supplied_carry = (preclosure_K_M, preclosure_K_H,
+                       preclosure_K_M_surface)
+    if not _carried_coeffs and any(x is not None for x in _supplied_carry):
+        raise ValueError(
+            "preclosure K fields were supplied while "
+            "tke_preclosure_coeff_source='current_subiteration'; select "
+            "'carried_previous_step' to consume them.")
+    if _carried_coeffs:
+        if not bool(getattr(cfg, "prognostic", False)):
+            raise ValueError(
+                "tke_preclosure_coeff_source='carried_previous_step' requires "
+                "TKEConfig.prognostic=True.")
+        if int(n_iterations) != 1:
+            raise ValueError(
+                "carried_previous_step is a one-physical-step NEMO lifetime "
+                "and requires n_iterations=1.")
+        if preclosure_K_M is None or preclosure_K_H is None:
+            raise ValueError(
+                "carried_previous_step requires both preclosure_K_M (avm_k) "
+                "and preclosure_K_H (avt_k).")
+        if (preclosure_K_M.shape != tke_old.shape
+                or preclosure_K_H.shape != tke_old.shape):
+            raise ValueError(
+                "carried preclosure avm_k/avt_k must match tke_old shape; "
+                f"got {preclosure_K_M.shape}/{preclosure_K_H.shape} vs "
+                f"{tke_old.shape}.")
 
     # Shear-production discretization (T4, Phase-2 #1317; face-native
     # #1226 sh2_walk.py Candidate E/F): "squared_centered" (default,
@@ -2249,6 +2303,16 @@ def tke_vertical_mixing(
     _K_M_surface = None
     if _surf_bc_level == "nemo_z0" and _l_anchor is not None:
         _K_M_surface = nemo_surface_avm(cfg, surface_dirichlet, _l_anchor)
+    if _carried_coeffs and _surf_bc_level == "nemo_z0":
+        if preclosure_K_M_surface is None:
+            raise ValueError(
+                "carried_previous_step with tke_surface_bc_level='nemo_z0' "
+                "requires preclosure_K_M_surface (restart/previous avm_k at "
+                "the surface W level).")
+        if preclosure_K_M_surface.shape != tke_old.shape[:-1]:
+            raise ValueError(
+                "preclosure_K_M_surface must match the horizontal TKE shape; "
+                f"got {preclosure_K_M_surface.shape} vs {tke_old.shape[:-1]}.")
     for _ in range(max(1, int(n_iterations))):
         l_k, l_eps = compute_mixing_lengths(
             tke_curr, N2, dz_half, cfg, signed_n2=signed_n2,
@@ -2257,12 +2321,15 @@ def tke_vertical_mixing(
         K_M_curr, K_H_curr = compute_K_from_tke(
             tke_curr, l_k, cfg, N2=N2, shear_sq=shear_sq,
             z_interface=z_interface, N2_prandtl=N2b,
-            p_sh2_override=_p_sh2_face_fn)
-        P_s_curr = (K_M_curr * shear_sq if _p_sh2_face_fn is None
-                    else _p_sh2_face_fn(K_M_curr))
+            p_sh2_override=_p_sh2_face_fn,
+            prandtl_K_M=(preclosure_K_M if _carried_coeffs else None))
+        _K_M_pre = preclosure_K_M if _carried_coeffs else K_M_curr
+        _K_H_pre = preclosure_K_H if _carried_coeffs else K_H_curr
+        P_s_curr = (_K_M_pre * shear_sq if _p_sh2_face_fn is None
+                    else _p_sh2_face_fn(_K_M_pre))
         tke_curr = _solve_tke_backward_euler(
             e_old=tke_curr,
-            K_M_old=K_M_curr, K_H_old=K_H_curr,
+            K_M_old=_K_M_pre, K_H_old=_K_H_pre,
             P_s=P_s_curr, N2=N2, l_eps=l_eps,
             dz_half=dz_half,
             surface_flux=surface_flux,
@@ -2275,7 +2342,8 @@ def tke_vertical_mixing(
             surface_dirichlet=surface_dirichlet,
             surface_bc_level=_surf_bc_level,
             bottom_dirichlet=bottom_dirichlet,
-            K_M_surface=_K_M_surface,
+            K_M_surface=(preclosure_K_M_surface
+                         if _carried_coeffs else _K_M_surface),
             bottom_level=bottom_level,
             w_active=w_active,
         )
@@ -2299,9 +2367,11 @@ def tke_vertical_mixing(
     K_M, K_H = compute_K_from_tke(
         tke_curr, l_k_final, cfg, N2=N2, shear_sq=shear_sq,
         z_interface=z_interface, N2_prandtl=N2b,
-        p_sh2_override=_p_sh2_face_fn)
+        p_sh2_override=_p_sh2_face_fn,
+        prandtl_K_M=(preclosure_K_M if _carried_coeffs else None))
 
-    return TKEOutput(K_M=K_M, K_H=K_H, tke_new=tke_curr, l_eps=l_eps_final)
+    return TKEOutput(K_M=K_M, K_H=K_H, tke_new=tke_curr,
+                     l_eps=l_eps_final, K_M_surface=_K_M_surface)
 
 
 # ---------------------------------------------------------------------------

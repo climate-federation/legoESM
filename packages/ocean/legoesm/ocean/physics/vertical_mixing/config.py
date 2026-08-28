@@ -572,6 +572,12 @@ class TKEConfig(NamedTuple):
     #   geometry; construction raises otherwise) and the same raw C-grid
     #   face state that mode already requires.
     tke_shear_avm_weighting: str = "tpoint"
+    # Which closure coefficients feed the PRE-solve zdftke chain.
+    # ``current_subiteration`` is the historical legoESM formulation.
+    # ``carried_previous_step`` is NEMO's avm_k/avt_k lifetime: the pair
+    # carried from the preceding step feeds zdf_sh2, Prandtl, the TKE matrix
+    # and RHS, and is overwritten only by post-solve tke_avn.
+    tke_preclosure_coeff_source: str = "current_subiteration"
     # ----- Tracer/momentum Prandtl chain (abyssal over-diffusion fix) -----
     # ``"unit"`` (default, BIT-IDENTICAL legacy): K_H = max(K_M, kappaH_min)
     #   -- the MOMENTUM floor ``kappaM_min`` leaks into the TRACER floor

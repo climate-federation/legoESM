@@ -6342,6 +6342,7 @@ class LatLonCGridOceanModel:
                 "_apply_implicit_vertical_mixing: return_K_diss_v is for the "
                 "momentum-only call (return_tke must be False).")
         tke_new = None
+        _tke_coeff_new = None
         _post_mixing = self._tke_post_mixing_active()
         _tke_ctx = None
         from legoesm.ocean.physics.vertical_mixing import (
@@ -6494,6 +6495,11 @@ class LatLonCGridOceanModel:
                     # "nemo_now_before"); ignored by every other selection.
                     eta_now=eta_now,
                 )
+                if (tke_new is not None
+                        and hasattr(tke_new, "K_M")
+                        and hasattr(tke_new, "tke_new")):
+                    _tke_coeff_new = tke_new
+                    tke_new = _tke_coeff_new.tke_new
                 if _post_mixing:
                     # Phase 1 only (Veros set_tke_diffusivities from the
                     # carried tke[tau]): the third slot is the post-mixing
@@ -7138,6 +7144,19 @@ class LatLonCGridOceanModel:
             T=state.T.replace(data=T_new),
             S=state.S.replace(data=S_new),
         )
+        if _tke_coeff_new is not None:
+            from legoesm.core.field import Field
+            state_out = state_out._replace(
+                tke_avm=Field(data=_tke_coeff_new.K_M, name="tke_avm",
+                              dims=("lat", "lon", "level"), units="m^2/s"),
+                tke_avt=Field(data=_tke_coeff_new.K_H, name="tke_avt",
+                              dims=("lat", "lon", "level"), units="m^2/s"),
+                tke_avm_surface=(
+                    None if _tke_coeff_new.K_M_surface is None else
+                    Field(data=_tke_coeff_new.K_M_surface,
+                          name="tke_avm_surface", dims=("lat", "lon"),
+                          units="m^2/s")),
+            )
         if return_K_diss_v:
             return state_out, K_diss_v_w
         if return_tke:
@@ -9571,7 +9590,41 @@ class LatLonCGridOceanModel:
                 state = state._replace(
                     eke_diss=Field(data=ediss0, name="eke_diss",
                                    dims=("lat", "lon", "level"),
-                                   units="m^2/s^3"))
+                    units="m^2/s^3"))
+
+        # NEMO carries the post-tke_avn avm_k/avt_k pair independently of en.
+        # Seed a true cold start exactly like zdf_phy_init (background closure
+        # values); restart twins replace these fields with restart avm_k/avt_k
+        # before reaching this point.
+        if self._tke_prognostic_active():
+            tke_cfg = self.config.physics.vertical_mixing.tke
+            if (getattr(tke_cfg, "tke_preclosure_coeff_source",
+                        "current_subiteration") == "carried_previous_step"):
+                from legoesm.core.field import Field
+                lm = state.land_mask.data
+                nlev = state.T.data.shape[-1]
+                dtype = state.T.data.dtype
+                wet3 = (lm[..., None] > 0.5)
+                if state.tke_avm is None:
+                    avm0 = (jnp.ones((1, 1, nlev - 1), dtype=dtype)
+                            * jnp.asarray(tke_cfg.kappaM_min, dtype=dtype))
+                    avm0 = jnp.where(wet3, avm0, 0.0)
+                    state = state._replace(tke_avm=Field(
+                        data=avm0, name="tke_avm",
+                        dims=("lat", "lon", "level"), units="m^2/s"))
+                if state.tke_avt is None:
+                    avt0 = (jnp.ones((1, 1, nlev - 1), dtype=dtype)
+                            * jnp.asarray(tke_cfg.kappaH_min, dtype=dtype))
+                    avt0 = jnp.where(wet3, avt0, 0.0)
+                    state = state._replace(tke_avt=Field(
+                        data=avt0, name="tke_avt",
+                        dims=("lat", "lon", "level"), units="m^2/s"))
+                if state.tke_avm_surface is None:
+                    avms0 = (jnp.asarray(tke_cfg.kappaM_min, dtype=dtype)
+                             * lm.astype(dtype))
+                    state = state._replace(tke_avm_surface=Field(
+                        data=avms0, name="tke_avm_surface",
+                        dims=("lat", "lon"), units="m^2/s"))
 
         # TKE-advection AB2 carry: seed the prior advective tendency dtke to
         # zero (Veros's zero-initialised dtke[taum1]) so the scan pytree stays
