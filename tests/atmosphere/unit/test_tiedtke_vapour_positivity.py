@@ -52,21 +52,34 @@ def test_vapour_stays_nonnegative_over_the_step():
 
 
 def test_limiter_is_a_noop_when_no_level_overshoots():
-    """A long q_v / short dt (no level can go negative) must leave the tendency
-    exactly as the unlimited kernel produced it -- scale == 1."""
-    T, q_v, p_full, p_half = _column()
-    # Tiny dt: dt*|dq_v_dt| << q_v everywhere, so the positivity scale is 1.
+    """On the SAME convecting column but a tiny dt, no level can go negative, so
+    the positivity scale is 1 and the tendency is the raw kernel output.
+
+    Proven non-vacuously: the tendency is compared against an even-tinier-dt run
+    (both non-binding, so the RATE must be identical), and it must be
+    substantially non-zero -- a limiter that scaled every tendency to zero would
+    give an identical (zero) result and fail the magnitude check.
+    """
+    T, q_v, p_full, p_half = _column()   # the convecting column
     z = jnp.zeros_like(T)
-    out = tiedtke_convection(
-        T=T, q_v=q_v * 10.0, p_full=p_full, p_half=p_half, u=z, v=z,
-        conv_prog_profile=z, dt=1.0, config=TiedtkeConfig())
-    out = out if hasattr(out, "dq_v_dt") else out[0]
-    q_new = np.asarray(q_v * 10.0 + 1.0 * out.dq_v_dt)
+
+    def run(dt):
+        out = tiedtke_convection(
+            T=T, q_v=q_v, p_full=p_full, p_half=p_half, u=z, v=z,
+            conv_prog_profile=z, dt=dt, config=TiedtkeConfig())
+        return out if hasattr(out, "dq_v_dt") else out[0]
+
+    o1 = run(1.0)        # dt*|dq_v_dt| << q_v -> positivity cannot bind
+    q_new = np.asarray(q_v + 1.0 * o1.dq_v_dt)
     assert q_new.min() >= 0.0
-    # Non-vacuity: the scheme must still be DOING something -- a limiter that
-    # zeroed every tendency would also pass the positivity line above (codex).
-    assert np.abs(np.asarray(out.dq_v_dt)).max() > 1e-10, (
-        "tendency is ~zero: the limiter is not a no-op, it killed convection")
+    assert np.abs(np.asarray(o1.dq_v_dt)).max() > 1e-10, (
+        "tendency is ~zero: a scale-to-zero limiter would pass vacuously")
+    # dq_v_dt is a RATE: with the limiter inactive it must not depend on dt.
+    o2 = run(0.25)
+    np.testing.assert_allclose(
+        np.asarray(o1.dq_v_dt), np.asarray(o2.dq_v_dt), rtol=1e-9,
+        err_msg="tendency changed with dt in the non-binding regime -- the "
+                "limiter is scaling when it should be a no-op")
 
 
 def test_tendency_is_finite_and_differentiable():
