@@ -5805,20 +5805,6 @@ class LatLonCGridOceanModel:
                 "Unknown TKEConfig.tke_shear_evaluation_stage: expected "
                 "'implicit_solve_state' or 'step_entry', got "
                 f"{stage!r}.")
-        if getattr(tke_cfg, "tke_shear_production", "squared_centered") \
-                != "nemo_face_native":
-            raise ValueError(
-                "tke_shear_evaluation_stage='step_entry' requires "
-                "tke_shear_production='nemo_face_native'.")
-        if getattr(tke_cfg, "tke_shear_avm_weighting", "tpoint") \
-                != "nemo_face":
-            raise ValueError(
-                "tke_shear_evaluation_stage='step_entry' requires "
-                "tke_shear_avm_weighting='nemo_face'.")
-        if state.u_before is None or state.v_before is None:
-            raise ValueError(
-                "tke_shear_evaluation_stage='step_entry' requires carried "
-                "state.u_before/v_before face velocities.")
         if state.tke_avm is None:
             raise ValueError(
                 "tke_shear_evaluation_stage='step_entry' requires carried "
@@ -5828,6 +5814,45 @@ class LatLonCGridOceanModel:
         _v_now = state.v.data if v_now is None else v_now
         _eta_now = state.eta.data if eta_now is None else eta_now
         from legoesm.ocean.vertical import compute_ocean_jacobian
+        J = compute_ocean_jacobian(_eta_now, state.H_bathy.data, _zc)
+        dz_half = jnp.broadcast_to(
+            _zc.dz_half_ref * J[..., jnp.newaxis],
+            state.T.data.shape[:-1] + (_zc.n_levels - 1,))
+        shear_disc = getattr(
+            tke_cfg, "tke_shear_production", "squared_centered")
+        avm_weighting = getattr(
+            tke_cfg, "tke_shear_avm_weighting", "tpoint")
+        if shear_disc == "squared_centered":
+            if avm_weighting != "tpoint":
+                raise ValueError(
+                    "step-entry squared_centered shear requires "
+                    "tke_shear_avm_weighting='tpoint'.")
+            from legoesm.ocean.physics.vertical_mixing._shared import (
+                vertical_shear_squared,
+            )
+            u_cell = 0.5 * (_u_now[:, :-1, :] + _u_now[:, 1:, :])
+            v_cell = 0.5 * (_v_now[:-1, :, :] + _v_now[1:, :, :])
+            return state.tke_avm.data * vertical_shear_squared(
+                u_cell, v_cell, dz_half)
+
+        if shear_disc not in ("nemo_face_native", "nemo_face_native_now2"):
+            raise ValueError(
+                "tke_shear_evaluation_stage='step_entry' supports "
+                "'squared_centered', 'nemo_face_native', or "
+                f"'nemo_face_native_now2'; got {shear_disc!r}.")
+        if avm_weighting != "nemo_face":
+            raise ValueError(
+                "step-entry face-native shear requires "
+                "tke_shear_avm_weighting='nemo_face'.")
+        if shear_disc == "nemo_face_native":
+            if state.u_before is None or state.v_before is None:
+                raise ValueError(
+                    "tke_shear_production='nemo_face_native' at step entry "
+                    "requires carried state.u_before/v_before face velocities.")
+            _u_before = state.u_before.data
+            _v_before = state.v_before.data
+        else:
+            _u_before, _v_before = _u_now, _v_now
         from legoesm.ocean.dynamics.latlon_cgrid_operators import (
             compute_face_masks_3d,
         )
@@ -5837,13 +5862,9 @@ class LatLonCGridOceanModel:
         is_active = getattr(_zc, "is_active", None)
         if is_active is None:
             raise ValueError(
-                "tke_shear_evaluation_stage='step_entry' requires "
-                "z_coord.is_active for NEMO face masks.")
+                "step-entry face-native shear requires z_coord.is_active "
+                "for NEMO face masks.")
         u_mask, v_mask = compute_face_masks_3d(is_active)
-        J = compute_ocean_jacobian(_eta_now, state.H_bathy.data, _zc)
-        dz_half = jnp.broadcast_to(
-            _zc.dz_half_ref * J[..., jnp.newaxis],
-            state.T.data.shape[:-1] + (_zc.n_levels - 1,))
         metric_source = getattr(
             tke_cfg, "tke_shear_metric_source", "tpoint_jacobian")
         if metric_source not in ("tpoint_jacobian", "nemo_qco_live_face"):
@@ -5919,7 +5940,7 @@ class LatLonCGridOceanModel:
                 ref_v * (1.0 + r3vb[..., None]),
             )
         return avm_weighted_shear_production(
-            _u_now, _v_now, state.u_before.data, state.v_before.data,
+            _u_now, _v_now, _u_before, _v_before,
             dz_half, u_mask, v_mask, state.tke_avm.data,
             face_metrics=face_metrics)
 

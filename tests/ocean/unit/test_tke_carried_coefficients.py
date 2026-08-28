@@ -21,6 +21,56 @@ from legoesm.ocean.fidelity.veros_acc_basic_recipe import ACC_BASIC_TKE_CONFIG
 from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
 
 
+def _step_entry_helper_fixture(tke_cfg):
+    from legoesm.ocean.vertical import (
+        create_partial_cell_coordinate, create_z_star_from_thicknesses,
+    )
+
+    ny, nx, nz = 2, 2, 3
+    gdept0 = np.broadcast_to(
+        np.asarray([0.5, 2.0, 4.5]), (ny, nx, nz)).copy()
+    e3w0 = np.broadcast_to(
+        np.asarray([1.0, 1.5, 2.5]), (ny, nx, nz)).copy()
+    horizontal = np.ones((ny, nx))
+    raw = create_z_star_from_thicknesses(
+        [1.0, 2.0, 3.0], nemo_gdept_0_m=gdept0,
+        nemo_e3w_0_m=e3w0, nemo_hu_0_m=horizontal,
+        nemo_hv_0_m=horizontal, nemo_e1e2t_m=horizontal,
+        nemo_e1e2u_m=horizontal, nemo_e1e2v_m=horizontal)
+    H = jnp.full((ny, nx), raw.H_max)
+    z_coord = create_partial_cell_coordinate(raw, H)
+    cfg = SimpleNamespace(physics=SimpleNamespace(vertical_mixing=
+        SimpleNamespace(scheme="tke", tke=tke_cfg)))
+    model = SimpleNamespace(config=cfg, z_coord=z_coord)
+    dims3 = ("lat", "lon", "level")
+    dims2 = ("lat", "lon")
+    u_now = jnp.asarray([
+        [[0.0, 1.0, 3.0], [0.2, 2.0, 5.0], [0.0, 1.0, 4.0]],
+        [[0.5, 1.5, 4.0], [0.1, 1.0, 2.0], [0.5, 2.5, 3.5]],
+    ])
+    v_now = jnp.asarray([
+        [[0.0, 0.5, 2.0], [0.2, 1.0, 3.0]],
+        [[0.1, 1.0, 2.5], [0.4, 1.5, 4.0]],
+        [[0.0, 0.7, 3.0], [0.3, 2.0, 3.5]],
+    ])
+    state = SimpleNamespace(
+        T=Field(jnp.zeros((ny, nx, nz)), "T", dims3, "K"),
+        H_bathy=Field(H, "H_bathy", dims2, "m"),
+        eta=Field(jnp.asarray([[0.2, -0.1], [0.05, 0.15]]),
+                  "eta", dims2, "m"),
+        eta_before=Field(jnp.asarray([[-0.05, 0.1], [0.02, -0.08]]),
+                         "eta_before", dims2, "m"),
+        u=Field(u_now, "u", dims3, "m/s"),
+        v=Field(v_now, "v", dims3, "m/s"),
+        u_before=Field(u_now * 0.8 + 0.03, "u_before", dims3, "m/s"),
+        v_before=Field(v_now * 1.1 - 0.02, "v_before", dims3, "m/s"),
+        tke_avm=Field(jnp.asarray([[[0.3, 0.5], [0.2, 0.6]],
+                                   [[0.4, 0.7], [0.25, 0.45]]]),
+                      "tke_avm", dims3, "m2/s"),
+    )
+    return model, state
+
+
 def _column_kwargs(cfg):
     z = jnp.zeros((1, 3), dtype=jnp.float64)
     return dict(
@@ -134,6 +184,67 @@ def test_only_complete_dino_nemo_cards_freeze_step_entry_shear():
                for c in unchanged)
     assert all(c.tke_shear_metric_source == "tpoint_jacobian"
                for c in unchanged)
+
+
+def test_base_dino_fe_card_constructs_its_step_entry_squared_shear():
+    tke_cfg = dino_mod._dino_vertical_mixing_config(
+        dino_config_for_recipe("nemo_dino_kamm")).tke
+    assert tke_cfg.tke_shear_production == "squared_centered"
+    assert tke_cfg.tke_shear_avm_weighting == "tpoint"
+    model, state = _step_entry_helper_fixture(tke_cfg)
+    got = LatLonCGridOceanModel._tke_step_entry_p_sh2(model, state)
+
+    from legoesm.ocean.vertical import compute_ocean_jacobian
+    J = compute_ocean_jacobian(
+        state.eta.data, state.H_bathy.data, model.z_coord)
+    dz = model.z_coord.dz_half_ref * J[..., None]
+    u_cell = 0.5 * (state.u.data[:, :-1] + state.u.data[:, 1:])
+    v_cell = 0.5 * (state.v.data[:-1] + state.v.data[1:])
+    expected = state.tke_avm.data * shared_mod.vertical_shear_squared(
+        u_cell, v_cell, dz)
+    np.testing.assert_array_equal(got, expected)
+
+
+def test_live_qco_step_entry_helper_is_jittable_and_differentiable():
+    tke_cfg = dino_mod._dino_vertical_mixing_config(
+        dino_config_for_recipe("nemo_dino_kamm_mlf")).tke
+    model, template = _step_entry_helper_fixture(tke_cfg)
+
+    def loss(u_now, v_now, u_before, v_before, eta_now, eta_before):
+        state = SimpleNamespace(
+            **{**template.__dict__,
+               "u": template.u.replace(data=u_now),
+               "v": template.v.replace(data=v_now),
+               "u_before": template.u_before.replace(data=u_before),
+               "v_before": template.v_before.replace(data=v_before),
+               "eta": template.eta.replace(data=eta_now),
+               "eta_before": template.eta_before.replace(data=eta_before)})
+        return jnp.sum(LatLonCGridOceanModel._tke_step_entry_p_sh2(
+            model, state))
+
+    args = (template.u.data, template.v.data, template.u_before.data,
+            template.v_before.data, template.eta.data,
+            template.eta_before.data)
+    value, grads = jax.jit(jax.value_and_grad(
+        loss, argnums=(0, 1, 2, 3, 4, 5)))(*args)
+    assert bool(jnp.isfinite(value))
+    assert all(bool(jnp.all(jnp.isfinite(g))) for g in grads)
+    assert all(float(jnp.max(jnp.abs(g))) > 0.0 for g in grads)
+
+    legacy_metric = tke_cfg._replace(tke_shear_metric_source="tpoint_jacobian")
+    legacy_model, legacy_state = _step_entry_helper_fixture(legacy_metric)
+    legacy_value = LatLonCGridOceanModel._tke_step_entry_p_sh2(
+        legacy_model, legacy_state)
+    faithful_value = LatLonCGridOceanModel._tke_step_entry_p_sh2(
+        model, template)
+    assert not np.array_equal(np.asarray(faithful_value),
+                              np.asarray(legacy_value))
+
+    implicit = tke_cfg._replace(
+        tke_shear_evaluation_stage="implicit_solve_state")
+    implicit_model, implicit_state = _step_entry_helper_fixture(implicit)
+    assert LatLonCGridOceanModel._tke_step_entry_p_sh2(
+        implicit_model, implicit_state) is None
 
 
 def test_live_face_metric_product_matches_hand_computed_sh2():

@@ -368,10 +368,10 @@ def avm_weighted_shear_production(
         viscosity — face-summed here via array rolls, matching NEMO's
         ``avm(ji+1,jj,jk)+avm(ji,jj,jk)`` exactly; NOT new staggered state.
         NB time level: NEMO computes ``zdf_sh2`` ONCE per step from the
-        previous-step ``p_avm``; legoESM's orchestrator wires the CURRENT
-        sub-iteration ``K_M_curr`` (same convention its pre-existing tpoint
-        path uses) — a documented deviation of the sub-iteration loop
-        structure, not of this function.
+        previous-step ``p_avm``.  The faithful ``step_entry`` orchestrator
+        supplies that carried field and freezes this function's result; the
+        explicit legacy ``implicit_solve_state`` path supplies the current
+        sub-iteration ``K_M_curr``.
 
     Returns
     -------
