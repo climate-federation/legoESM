@@ -3,6 +3,120 @@
 Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 (`RUN_SEQDUMP_D180_1R`, `kt=5761`).
 
+## Round-4 result: row 4 closed; ordered stop at row 8
+
+The registered `tke_shear_evaluation_stage=step_entry` implementation is now
+production code.  On the two complete DINO NEMO cards it evaluates `p_sh2`
+once from step-entry NOW velocities, carried BEFORE velocities, and carried
+previous-step `p_avm`; the frozen array feeds both the TKE shear RHS and the
+Prandtl denominator.  The same cards now select
+`tke_shear_metric_source=nemo_qco_live_face`, preserving NEMO's independent
+raw `e3uw_0/e3vw_0` operands and applying the NOW and BEFORE QCO face stretches
+with the literal divisor and four-face association.
+
+The scope is deliberately narrow:
+
+| Reachable card/config | Shear stage | Metric source | Numerical change |
+|---|---|---|---|
+| `nemo_dino_kamm`, `nemo_dino_kamm_mlf` | `step_entry` | `nemo_qco_live_face` | faithful defaults enabled |
+| DINO `nemo_paper`, `veros` | `implicit_solve_state` | `tpoint_jacobian` | byte-identical legacy path |
+| DINO `legoesm_default`, `mitgcm`, `oceananigans` | not this TKE path or legacy selectors | legacy | unchanged |
+| generic `TKEConfig`, ORCA-oriented `nemo_recipe`, ACC/ACC-basic TKE, MPAS | `implicit_solve_state` | `tpoint_jacobian` | byte-identical legacy path |
+
+The red-capable tests cover a hand-computed matched-step case, poisoned current
+velocity, missing/shape-invalid frozen operands, invalid selectors, legacy
+silent-no-op rejection, exact default-versus-explicit-legacy arrays, resolved
+selectors for every DINO card and every independently constructed reachable
+TKE config, live-face arithmetic, JIT, and finite gradients.  The final two
+CPU/fp64 batches pass **313 tests** (132 + 181).
+
+### Ordered rerun
+
+| Row | Operation | Disposition | Whole-domain per-column result | Southern focus |
+|---:|---|---|---|---|
+| 1 | `eos_rab(Nbb)` | `VERIFIED` | 0/9,920 failed; alpha max `3.087467e-16` | 4/4 pass |
+| 2 | `bn2(Nbb)` | `VERIFIED` | 0/9,920; max `5.968673e-16` | 4/4 pass |
+| 3 | `eos_rab/bn2(Nnn)` | `VERIFIED` | 0/9,920; max `5.968545e-16` | 4/4 pass |
+| 4 | complete `zdf_sh2` | **`VERIFIED`** | **0/9,920; max `0`** | **4/4 pass at zero** |
+| 5 | bottom-drag coefficient | `VERIFIED` | 0/9,920; max `0` | 4/4 pass at zero |
+| 6 | native MLD index `nmln` | `VERIFIED` | 0/9,920; max `0` | 4/4 pass at zero |
+| 7 | native MLD depth `hmlp` | `VERIFIED` | 0/9,920; max `5.670461e-16` | 4/4 pass at zero |
+| 8 | surface TKE Dirichlet boundary | **`DIVERGED`** | **154/9,920; max `1.638670e-15`** | 4/4 pass at zero |
+| 9 onward | bottom TKE boundary through EVD and implicit solves | `UNMEASURED` | ordered stop at row 8 | ordered stop |
+
+The row-4 target is therefore met exactly: **0/9,920 failures at the registered
+`1e-15` bar**, including every southern focus column.  Rows 5--7 also cross
+their bars.  Row 8 is the next, and thus current, first divergence even though
+its aggregate statistics and all four focus columns pass.  The general planted
+perturbation, i-roll, and nonfinite controls fire.  Row 8 has its own exact
+substitution baseline: the one-cell and nonfinite poisons fire; the i-roll is
+explicitly waived because DINO's analytic wind is zonally invariant.
+
+### First failing operand at row 8
+
+NEMO constructs the wind and modulus at
+`cfgs/DINO/MY_SRC/usrdef_sbc.F90:221-223` and preserves this arithmetic at
+line 632:
+
+```fortran
+utau(ji,jj) = znl_cbc(znds_wnd_phi, znds_wnd_val, gphiu(ji,jj))
+taum(ji,jj) = ABS( utau(ji,jj) )
+IF( utau(ji,jj) > 0 ) taum(ji,jj) = taum(ji,jj) * 1.3_wp
+pprofile = pnodes_val(ks) + ( pnodes_val(kn) - pnodes_val(ks) ) * ( 3 - 2 * zs ) * zs ** 2
+```
+
+The surface boundary then uses the carried modulus at
+`cfgs/DINO/MY_SRC/zdftke.F90:334,361`:
+
+```fortran
+zbbrau = rn_ebb / rho0
+en(ji,jj,1) = MAX( rn_emin0, zbbrau * taum(ji,jj) )
+```
+
+The operand walk is decisive.  `gphiu` passes in 9,920/9,920 columns (max
+`3.104929e-16`).  legoESM's production `utau` fails in 154/9,920 columns (max
+`1.552068e-15`), and its derived `taum` fails in the same 154 columns (max
+`1.609541e-15`).  A literal NEMO reconstruction using the same latitude and
+knots matches `sbc_dump_utau.bin` exactly, 0/9,920 failures.  Substituting the
+dump-derived `taum` makes row 8 exact, also 0/9,920.  The failure is therefore
+the factored smoothstep in `dino_wind_stress`—`weight=(3-2s)*s**2` followed by
+`delta*weight`—versus NEMO's left-associated
+`delta*(3-2s)*s**2`, not geometry, knot selection, the 1.3 boost, or the TKE
+boundary formula.
+
+Next-round design: add `DINOConfig.dino_wind_profile_evaluation` with
+`nemo_literal` as the faithful default only on `nemo_dino_kamm` and
+`nemo_dino_kamm_mlf`; retain `factored_smoothstep` as the default everywhere
+else and as the explicit legacy opt-in on those two cards.  The literal branch
+uses NEMO's nearest-node interval selection and left-associated cubic before
+`ABS` and the conditional westerly multiplier.  Required tests pin every
+unchanged card byte-for-byte and hand-compute a latitude at which reassociation
+changes the last bits.
+
+### Climate prediction remains frozen; GPU is not the next step
+
+The registered climate bands do not change: baseline `22.479491 m`, CONFIRM
+`<=11.2397455 m`, and REFUTE `>=20.2775 m`, with the previously frozen
+acceptance-floor, pass-tally, legacy-baseline, and southern-density conditions.
+The faithful command remains option-free.  The legacy control still requires
+all three implemented row-4 opt-outs:
+
+```text
+--tke-preclosure-coeff-source current_subiteration
+--tke-shear-evaluation-stage implicit_solve_state
+--tke-shear-metric-source tpoint_jacobian
+```
+
+**Do not run the climate arms yet.**  The chain is not clean enough: the
+registered next step is the row-8 literal-wind implementation and rerun, then
+the ordered continuation at row 9.  A future implemented row-8 option will
+also require its legacy selector in the control command before GPU execution.
+
+Round-4 artifact:
+`docs/ocean/fidelity/dino_zdf_chain_sweep_round4_artifact.json`, SHA256
+`c706c802a094a7e8ed0c39a1b420fce41cbdf03ad8bef054e172fc6f5d62ea46`.
+Stamped probe/tree SHA: `d19d16d4988981030c6dffeb29308182d198bd57`.
+
 ## Round-3 result: carried coefficients fixed; row 4 stops again
 
 The registered `carried_previous_step` construction is now the production
