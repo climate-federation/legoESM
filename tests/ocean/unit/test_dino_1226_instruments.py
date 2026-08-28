@@ -1433,7 +1433,7 @@ def test_run_twin_stamps_the_reference_clock_and_the_run_configuration(
     assert "run_config=" in src
     # the reference must come from the restart, not from the same override the
     # twin itself used -- otherwise the pair-check compares a value to itself
-    assert "_restart_elapsed_seconds(" in src
+    assert "restart_elapsed_seconds(" in src
 
 
 # ---------------------------------------------------------------------------

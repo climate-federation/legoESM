@@ -140,6 +140,18 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
                                         "IF(nn_pdl==1) block) -- purely now-derived "
                                         "(en, zmxlm). Captured at zdf_tke routine "
                                         "exit alongside tke_dump_avt_final.bin."),
+    # Realized coefficients consumed after the current step's closure+EVD
+    # assembly. stpmlf calls zdf_phy with Kmm=Nnn at MY_SRC stpmlf.F90:210;
+    # zdfphy.F90:311-323 copies closure outputs then applies EVD; ldftra writes
+    # those global arrays verbatim at MY_SRC ldftra.F90:955-956. EVD's
+    # MIN(rn2,rn2b) trigger mixes now/before, but the field is registered
+    # "now" for the current zdf_phy call that owns and publishes it.
+    "dump_avt.bin": ("now", "MY_SRC stpmlf.F90:210 calls zdf_phy(Kbb=Nbb,Kmm=Nnn); "
+                              "zdfphy.F90:311-323 copies avt_k then applies EVD; "
+                              "MY_SRC ldftra.F90:955 writes realized avt verbatim"),
+    "dump_avm.bin": ("now", "MY_SRC stpmlf.F90:210 calls zdf_phy(Kbb=Nbb,Kmm=Nnn); "
+                              "zdfphy.F90:311-323 copies avm_k then applies EVD; "
+                              "MY_SRC ldftra.F90:956 writes realized avm verbatim"),
 
     # --- #1226 batched-rebuild dumps (2026-07-30, MY_SRC line numbers). ---
     "tke_dump_rn2.bin": ("now", "rn2 = bn2(ts(...,Nnn), rab_n, Nnn) at MY_SRC "
