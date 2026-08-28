@@ -27,13 +27,28 @@ def instruments():
         import validate.ocean_fidelity.dino_1226.heat_discriminator as heat_discriminator
         import validate.ocean_fidelity.dino_1226.kamm_twin_90d as kamm_twin_90d
         import validate.ocean_fidelity.dino_1226.mode_projection as mode_projection
+        import validate.ocean_fidelity.dino_1226.tcarry_baseline_reconcile as tcarry_reconcile
+        import validate.ocean_fidelity.dino_1226.tcarry_basin_floor90 as tcarry_floor
+        import validate.ocean_fidelity.dino_1226.tcarry_basin_reverdict as tcarry_reverdict
+        import validate.ocean_fidelity.dino_1226.tcarry_bridge_omega_score as tcarry_omega
+        import validate.ocean_fidelity.dino_1226.tcarry_een_off_discriminator as tcarry_een
         importlib.reload(mode_projection)
         importlib.reload(heat_discriminator)
         importlib.reload(kamm_twin_90d)
+        importlib.reload(tcarry_reconcile)
+        importlib.reload(tcarry_floor)
+        importlib.reload(tcarry_reverdict)
+        importlib.reload(tcarry_omega)
+        importlib.reload(tcarry_een)
         return types.SimpleNamespace(
             kamm_twin_90d=kamm_twin_90d,
             heat_discriminator=heat_discriminator,
             mode_projection=mode_projection,
+            tcarry_reconcile=tcarry_reconcile,
+            tcarry_floor=tcarry_floor,
+            tcarry_reverdict=tcarry_reverdict,
+            tcarry_omega=tcarry_omega,
+            tcarry_een=tcarry_een,
         )
     finally:
         try:
@@ -278,7 +293,7 @@ def test_parse_args_bridge_tke_flag(instruments):
 # ---------------------------------------------------------------------------
 # kamm_twin_90d: --bridge-before (#1317 leap-frog before-level bridge)
 # ---------------------------------------------------------------------------
-def test_before_level_bridge_is_ON_by_default(instruments):
+def test_before_level_bridge_is_on_by_default(instruments):
     """#1455 (2026-08-24): the before-level bridge defaults ON, on BOTH the
     python surface and the CLI.
 
@@ -439,6 +454,135 @@ def test_print_before_bridge_verify_reports_zero_for_matched_state(instruments):
     # must not raise, and must print the zero-diff line (captured via capsys
     # in the caller if desired -- here just confirm no exception).
     kamm_twin_90d._print_before_bridge_verify(st, before, grid)
+
+
+# ---------------------------------------------------------------------------
+# kamm_twin_90d: --bridge-before-stress-tpoint (round-3 end-wall gate)
+# ---------------------------------------------------------------------------
+def test_tpoint_stress_selector_defaults_corrected_and_legacy_is_opt_in(instruments):
+    import inspect
+
+    k = instruments.kamm_twin_90d
+    build_sig = inspect.signature(k._build_twin_state)
+    run_sig = inspect.signature(k.run_twin)
+    assert build_sig.parameters["bridge_before_stress_tpoint"].default is True
+    assert run_sig.parameters["bridge_before_stress_tpoint"].default is True
+    base = k._parse_args(["nemo_dino_kamm_mlf", "out.npz"])
+    explicit_corrected = k._parse_args([
+        "nemo_dino_kamm_mlf", "out.npz", "--bridge-before-stress-tpoint"])
+    legacy = k._parse_args([
+        "nemo_dino_kamm_mlf", "out.npz",
+        "--bridge-before-stress-legacy-u-as-t"])
+    assert base.bridge_before_stress_tpoint is True
+    assert explicit_corrected.bridge_before_stress_tpoint is True
+    assert legacy.bridge_before_stress_tpoint is False
+    with pytest.raises(SystemExit):
+        k._parse_args([
+            "nemo_dino_kamm_mlf", "out.npz",
+            "--bridge-before-stress-tpoint",
+            "--bridge-before-stress-legacy-u-as-t"])
+
+
+def test_tpoint_stress_reconstruction_reuses_loader_and_changes_only_carry(
+        instruments, monkeypatch):
+    """Red if the selector inverts utau_b, edits a prognostic, or bypasses
+    either existing DINO forcing loader."""
+    from collections import namedtuple
+
+    k = instruments.kamm_twin_90d
+    calls = []
+    forcing_token = object()
+    expected_x = np.array([[-1.0, -2.0], [-3.0, -4.0]])
+    expected_y = np.zeros_like(expected_x)
+
+    def _arrays(grid, cfg):
+        calls.append(("arrays", grid, cfg))
+        return forcing_token
+
+    def _surface(forcing):
+        calls.append(("surface", forcing))
+        return types.SimpleNamespace(tau_x=expected_x, tau_y=expected_y)
+
+    monkeypatch.setattr(k, "dino_lat_lon_surface_forcing_arrays", _arrays)
+    monkeypatch.setattr(k, "dino_step_surface_forcing", _surface)
+    State = namedtuple(
+        "State", "T S u v eta tau_x_prev tau_y_prev tke")
+    sentinel_fields = [object() for _ in range(6)]
+    state = State(
+        *sentinel_fields[:5], np.full_like(expected_x, 99.0),
+        np.full_like(expected_y, 88.0), sentinel_fields[5])
+    grid, cfg = object(), object()
+
+    rebuilt, receipt = k.reconstruct_dino_before_stress_tpoint(
+        state, grid, cfg, t_seconds=15_552_000.0)
+    assert calls == [("arrays", grid, cfg), ("surface", forcing_token)]
+    assert np.array_equal(np.asarray(rebuilt.tau_x_prev), expected_x)
+    assert np.array_equal(np.asarray(rebuilt.tau_y_prev), expected_y)
+    # Exact sign is load-bearing: negating the analytic T field to mimic the
+    # raw NEMO face convention makes this assertion red.
+    assert float(np.asarray(rebuilt.tau_x_prev)[0, 0]) == -1.0
+    for name in ("T", "S", "u", "v", "eta", "tke"):
+        assert getattr(rebuilt, name) is getattr(state, name)
+    assert receipt["bridge_before_stress_stagger"] == "T"
+    assert receipt["bridge_before_stress_reconstruction_seconds"] == 15_552_000.0
+    assert receipt["bridge_before_stress_sha256"] == k._stress_content_sha256(
+        expected_x, expected_y)
+
+
+def test_tpoint_stress_hash_and_time_controls_can_fail(instruments):
+    k = instruments.kamm_twin_90d
+    x = np.arange(6.0).reshape(2, 3)
+    y = np.zeros_like(x)
+    planted = x.copy()
+    planted[0, 0] = np.nextafter(planted[0, 0], np.inf)
+    assert k._stress_content_sha256(x, y) != k._stress_content_sha256(planted, y)
+    with pytest.raises(ValueError, match="finite and >=0"):
+        k._analytic_dino_tpoint_stress(object(), object(), t_seconds=-1.0)
+
+
+def test_tpoint_stress_selector_refuses_euler_start_before_io(
+        instruments, monkeypatch):
+    k = instruments.kamm_twin_90d
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("selector must refuse before reading an oracle file")
+
+    monkeypatch.setattr(k, "read_nemo_mesh_mask", _boom)
+    with pytest.raises(SystemExit, match="requires --bridge-before"):
+        k._build_twin_state(
+            "nemo_dino_kamm_mlf", "/unused", "/unused",
+            bridge_before=False, bridge_before_stress_tpoint=True)
+
+
+def test_tpoint_stress_selector_threads_and_stamps_receipts(
+        instruments, monkeypatch):
+    """Red if the CLI goes inert or artifacts omit any registered receipt."""
+    import inspect
+
+    k = instruments.kamm_twin_90d
+    seen = {}
+    src = inspect.getsource(k.run_twin)
+
+    def _spy(*args, **kwargs):
+        seen.update(kwargs)
+        return True
+
+    monkeypatch.setattr(k, "run_twin", _spy)
+    monkeypatch.setattr(k, "provenance_gate", lambda: None)
+    monkeypatch.setattr(k, "_precision_gate", lambda: None)
+    k.main(["nemo_dino_kamm_mlf", "out.npz"])
+    assert seen["bridge_before_stress_tpoint"] is True
+    seen.clear()
+    k.main([
+        "nemo_dino_kamm_mlf", "out.npz",
+        "--bridge-before-stress-legacy-u-as-t"])
+    assert seen["bridge_before_stress_tpoint"] is False
+
+    assert 'bridge_before_stress_stagger = "T"' in src
+    assert "np.array_equal(np.asarray(st.tau_x_prev)" in src
+    assert "bridge_before_stress_stagger=np.str_(bridge_before_stress_stagger)" in src
+    assert "bridge_before_stress_reconstruction_seconds=np.float64(" in src
+    assert "bridge_before_stress_sha256=np.str_(bridge_before_stress_sha256)" in src
 
 
 # ---------------------------------------------------------------------------
@@ -1023,9 +1167,9 @@ def test_uncertified_gate_prints_no_verdict_token_anywhere(instruments):
     version that suppressed only the tally would still have issued one five
     times over.  This asserts no verdict token survives anywhere in the
     output, and (non-vacuity) that the certified call still emits them."""
+    import contextlib
     import importlib
     import io
-    import contextlib
     _dir = (Path(__file__).resolve().parents[3] / "scripts" / "validate"
             / "ocean_fidelity" / "dino_1226")
     stub = types.ModuleType("acc_thermal_wind")
@@ -1164,6 +1308,7 @@ def test_run_twin_refuses_a_start_mode_the_built_state_contradicts(instruments,
 
     monkeypatch.setattr(kamm_twin_90d, "_build_twin_state", _fake_build)
     monkeypatch.setattr(kamm_twin_90d, "seasonal_t0_seconds", lambda *a, **k: 0.0)
+    monkeypatch.setattr(kamm_twin_90d, "_git_provenance", lambda: ("a" * 40, 0))
     with pytest.raises(SystemExit, match="START-MODE MISMATCH"):
         kamm_twin_90d.run_twin("nemo_dino_kamm_mlf", "o.npz", bridge_before=True)
 
@@ -1431,6 +1576,8 @@ def test_run_twin_stamps_the_reference_clock_and_the_run_configuration(
     src = inspect.getsource(kamm_twin_90d.run_twin)
     assert "seasonal_t0_reference_seconds=" in src
     assert "run_config=" in src
+    assert "producer_git_sha=" in src
+    assert "producer_dirty_tracked_files=" in src
     # the reference must come from the restart, not from the same override the
     # twin itself used -- otherwise the pair-check compares a value to itself
     assert "restart_elapsed_seconds(" in src
@@ -1793,3 +1940,182 @@ def test_a_storage_only_flag_stays_out_of_the_run_config_string(instruments):
     cfg = src.split("run_config = json.dumps(")[1].split("}, sort_keys=True)")[0]
     assert "fp64_3d" not in cfg
     assert "perturb_seed" in cfg, "wrong block located -- this test is vacuous"
+
+
+# paired corrected-T-carry basin verdict
+# ---------------------------------------------------------------------------
+def test_tcarry_basin_floor_has_priority_over_refute(instruments):
+    """Zero response was previously both REFUTE and floor-limited."""
+    score = instruments.tcarry_reverdict.classify
+    assert score(0.0, -1.0, 0.1, True) == "UNRESOLVED/FLOOR"
+    assert score(0.01, -1.0, 0.001, True) == "REFUTED"
+
+
+def test_tcarry_basin_floor_instrument_self_test_is_red_capable(instruments):
+    assert instruments.tcarry_floor._self_test() == 0
+
+
+def test_tcarry_basin_compensation_blocks_confirm(instruments):
+    score = instruments.tcarry_reverdict.classify
+    assert score(0.25, -1.0, 0.01, True) == "CONFIRMED"
+    assert score(0.25, -1.0, 0.01, False) == "UNRESOLVED/COMPENSATION"
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+def test_tcarry_basin_nonfinite_classifier_is_fatal(instruments, bad):
+    with pytest.raises(SystemExit, match="non-finite"):
+        instruments.tcarry_reverdict.classify(bad, -1.0, 0.1, True)
+
+
+def test_tcarry_basin_day0_identity_rejects_nonfinite_and_changed_bits(instruments):
+    identical = instruments.tcarry_reverdict._bit_identical
+    assert identical(np.array([1.0]), np.array([1.0]))
+    assert not identical(np.array([1.0]), np.array([np.nan]))
+    assert not identical(np.array([0.0]), np.array([-0.0]))
+
+
+def test_tcarry_basin_baseline_gate_can_fail(instruments):
+    gate = instruments.tcarry_reverdict._check_baseline
+    assert instruments.tcarry_reverdict.BASELINE[90] == -0.43908550999203477
+    assert instruments.tcarry_reverdict.FLOOR[90] == 0.00015266693430725714
+    gate(instruments.tcarry_reverdict.BASELINE[90], 90)
+    with pytest.raises(SystemExit, match="misses registered"):
+        gate(instruments.tcarry_reverdict.BASELINE[90] + 3.0, 90)
+    gate(instruments.tcarry_reverdict.BASELINE[360], 360)
+    with pytest.raises(SystemExit, match="misses registered"):
+        gate(instruments.tcarry_reverdict.BASELINE[360] + 3.0, 360)
+
+
+def test_tcarry_basin_rejects_unregistered_common_config(instruments):
+    check = instruments.tcarry_reverdict._registered_config_errors
+    valid = {
+        "recipe": "nemo_dino_kamm_mlf", "n_days": 90,
+        "bridge_tke": False, "bridge_before": True,
+        "vmix_scheme": None, "use_gm_redi": None,
+        "surface_stress_implicit": False, "surface_tendency_placement": None,
+        "save_step_eta": False, "perturb_seed": None, "perturb_eps": 1e-14,
+        "perturb_baro": None, "perturb_baro_sha256": None,
+        "perturb_baro_key": "dU_avg", "perturb_baro_scale": 1.0,
+        "daily_acc": False, "u_m": None,
+    }
+    assert check(valid, "arm", 90) == []
+    planted = dict(valid, perturb_baro="/tmp/plant.npz",
+                   perturb_baro_sha256="0" * 64)
+    assert any("perturb_baro" in error for error in check(planted, "arm", 90))
+
+
+def test_tcarry_selftest_runs_every_receipt_plant_through_real_npz(
+        instruments, capsys):
+    """Regression for the Stage-1 crash: a dict-only test cannot expose an
+    NPZ overlay whose missing membership dunder triggers integer iteration."""
+    assert instruments.tcarry_reverdict._self_test() == 0
+    out = capsys.readouterr().out
+    assert "planted corrected-T -> U_AS_T_LEGACY" in out
+    assert "planted corrected float64 -> float32" in out
+    assert "planted corrected rn_Uv 0.27 -> 0.54" in out
+    assert "planted unregistered perturb_baro" in out
+    assert "every receipt plant passed through real NPZ files" in out
+
+
+def test_tcarry_retained_stage1_producer_is_independent_of_amended_scorer_head(
+        instruments):
+    scorer = "e" * 40
+    expected = instruments.tcarry_reverdict._expected_producer_sha
+    assert expected(90, scorer) == instruments.tcarry_reverdict.STAGE1_PRODUCER_GIT_SHA
+    assert expected(90, scorer) != scorer
+    assert expected(360, scorer) == scorer
+
+
+def test_tcarry_reconciliation_old_gap_receipt_is_numeric_and_red_capable(
+        instruments):
+    gate = instruments.tcarry_reconcile._old_gap_matches
+    expected = -0.010717232432999602
+    assert gate(expected + 8.9e-16, expected)
+    assert not gate(expected + 1.0e-6, expected)
+    assert not gate(np.nan, expected)
+
+
+def test_tcarry_reconciliation_clock_escape_is_scoped_to_historical_artifact(
+        instruments, monkeypatch):
+    reconcile = instruments.tcarry_reconcile
+    seen = []
+
+    def fake_load(_path, day):
+        seen.append((day, os.environ.get("DINO_GATE_ALLOW_LEGACY_CLOCK")))
+        return {"u": np.zeros(1)}
+
+    monkeypatch.delenv("DINO_GATE_ALLOW_LEGACY_CLOCK", raising=False)
+    monkeypatch.setattr(reconcile.G, "load_candidate", fake_load)
+    monkeypatch.setattr(reconcile.R, "_reduce", lambda state: (0.0, np.zeros(14)))
+    nemo = {"u": np.zeros(1)}
+    reconcile._gap("old.npz", 30, nemo, historical=True)
+    reconcile._gap("current.npz", 30, nemo, historical=False)
+    assert seen == [(30, "1"), (30, None)]
+    assert "DINO_GATE_ALLOW_LEGACY_CLOCK" not in os.environ
+
+
+def test_tcarry_een_off_ownership_classifier_has_reachable_both_states(
+        instruments):
+    scorer = instruments.tcarry_een
+    assert scorer.classify_ownership(scorer.HISTORICAL_BASELINE) == (
+        "CONFIRMED_FULL_EEN_OWNERSHIP")
+    outside = scorer.HISTORICAL_BASELINE + 2.0 * scorer.OWNERSHIP_BAND
+    assert scorer.classify_ownership(outside) == "REFUTED_FULL_EEN_OWNERSHIP"
+    with pytest.raises(SystemExit, match="non-finite"):
+        scorer.classify_ownership(np.nan)
+
+
+def test_bridge_omega_cli_default_is_explicit_nemo_bit_identical(instruments):
+    harness = instruments.kamm_twin_90d
+    omitted = harness._parse_args(["nemo_dino_kamm_mlf", "out.npz"])
+    explicit = harness._parse_args(
+        ["nemo_dino_kamm_mlf", "out.npz", "--bridge-omega", "nemo"])
+    assert vars(omitted) == vars(explicit)
+    assert omitted.bridge_omega == "nemo"
+
+
+def test_bridge_omega_selector_changes_only_registered_constant(instruments):
+    harness = instruments.kamm_twin_90d
+    config = harness.dino_config_for_recipe("nemo_dino_kamm_mlf")
+    nemo_omega, nemo_reference = harness.resolve_bridge_omega("nemo")
+    old_omega, old_reference = harness.resolve_bridge_omega("legacy-rounded")
+    assert nemo_omega == harness.NEMO_CONSTANTS_CONFIG.Omega
+    assert old_omega == harness.constants.Omega
+    assert nemo_reference == "nemo"
+    assert old_reference == "selected_omega"
+    assert old_omega != nemo_omega
+    assert config.omega == harness.NEMO_CONSTANTS_CONFIG.Omega
+    with pytest.raises(ValueError, match="bridge_omega"):
+        harness.resolve_bridge_omega("rounded-ish")
+
+
+def test_tcarry_bridge_omega_scorer_self_test_is_red_capable(instruments):
+    assert instruments.tcarry_omega._self_test() == 0
+
+
+def test_tcarry_bridge_omega_scorer_has_complete_committed_bindings(instruments):
+    scorer = instruments.tcarry_omega
+    assert scorer._require_bound() is None
+    assert scorer.BOUND_PRODUCER_SHA == (
+        "9e339ad1b2032bc47ec132fb2ad6f00ea071bbb9")
+    assert scorer.FOURTH_PRODUCER_SHA == (
+        "b14a17dd6f14592594daacc4b64c6a1de2a0a004")
+    assert scorer.FOURTH_ARTIFACT_SHA256 == (
+        "678a6a914367561596a259cc27a50f9294d14e7c0ed32c68aefe9ee6fff2a6f8")
+
+
+def test_tcarry_een_omega_interaction_decision_tree_is_red_capable(instruments):
+    scorer = instruments.tcarry_omega
+    locked = (scorer.LOCKED_A, scorer.LOCKED_B, scorer.LOCKED_C)
+    assert scorer.classify_interaction(
+        *locked, scorer.HISTORICAL_BASELINE) == (
+            "CONFIRMED_COMBINED_EEN_OMEGA_OWNERSHIP")
+    assert scorer.classify_interaction(
+        *locked, scorer.HISTORICAL_BASELINE + 2.0 * scorer.TWO_F) == (
+            "REFUTED_COMBINED_EEN_OMEGA_OWNERSHIP")
+    assert scorer.classify_interaction(
+        scorer.LOCKED_A + 2.0 * scorer.LOCKED_TOL,
+        scorer.LOCKED_B, scorer.LOCKED_C, scorer.HISTORICAL_BASELINE) == (
+            "INVALID_STOP_LOCKED_CORNER")
+    assert scorer.classify_additivity(0.0) == "ADDITIVE_BELOW_BAND"
+    assert scorer.classify_additivity(2.0 * scorer.TWO_F) == "NON_ADDITIVE"
