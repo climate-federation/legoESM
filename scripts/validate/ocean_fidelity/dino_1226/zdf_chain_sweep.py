@@ -1858,7 +1858,12 @@ def main() -> int:
                                                 ..., :nrhs]
                                         rhs_l = np.asarray(
                                             tri_args[3])[..., 1:1 + nrhs]
-                                        rhs_n = en_n + dt64 * (
+                                        en_n_with_bc = np.array(en_n, copy=True)
+                                        np.put_along_axis(
+                                            en_n_with_bc,
+                                            bottom_level[..., None],
+                                            bottom_prod[..., None], axis=-1)
+                                        rhs_n = en_n_with_bc + dt64 * (
                                             p_sh2_n + strat_n + diss_rhs_n
                                         ) * wet_rhs.astype(np.float64)
                                         rhs_metric = metrics(
