@@ -592,11 +592,14 @@ def main() -> int:
             row8_utau_literal = metrics(
                 utau_literal[..., None], utau_n[..., None], wet2[..., None],
                 focus, POINTWISE_BAR)
-            from legoesm.ocean.experiments.dino import dino_wind_stress
+            from legoesm.ocean.experiments.dino import (
+                dino_lat_lon_surface_forcing_arrays,
+            )
             legacy_cfg = dataclasses.replace(
                 cfg, dino_wind_profile_evaluation="factored_smoothstep")
-            legacy_utau = np.asarray(dino_wind_stress(
-                jnp.asarray(gphiu), legacy_cfg))
+            legacy_utau = np.asarray(dino_lat_lon_surface_forcing_arrays(
+                br.geometry, legacy_cfg,
+                wind_lat_deg=gphiu[:, 0])["tau_u_cell_2d"])
             row8_legacy_utau = metrics(
                 legacy_utau[..., None], utau_n[..., None], wet2[..., None],
                 focus, POINTWISE_BAR)
