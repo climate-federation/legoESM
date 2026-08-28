@@ -1302,11 +1302,16 @@ def _solve_tke_backward_euler(
     # + the external energy-recycling source ``forc`` (eke_diss_iw + K_diss_bot,
     # Veros integrate_tke; zero / None ⇒ bit-identical).
     if literal_matrix:
-        # Literal zdftke.F90:513-516 association: all three RHS tendencies
-        # share one parenthesized sum and its trailing wmask.  Keeping the
-        # dissipation add-back in a later statement changes the matched-step
-        # Thomas RHS even when each isolated operand is bit-identical.
-        rhs = e_old + dt * (
+        # Literal zdftke.F90 source association.  Langmuir circulation first
+        # updates en in its own statement (:421-486); only then does the TKE
+        # budget add the parenthesized shear/stratification/dissipation sum
+        # with its trailing wmask (:525-528).  Reversing those two additions
+        # is numerically visible at the first Thomas RHS recurrence even when
+        # each isolated term is bit-identical.
+        rhs_base = e_old
+        if external_source is not None:
+            rhs_base = rhs_base + dt * external_source
+        rhs = rhs_base + dt * (
             P_s + buoy_source + 0.5 * diss_rate * e_old
         ) * jnp.asarray(w_active, dtype=e_old.dtype)
     else:
@@ -1314,7 +1319,7 @@ def _solve_tke_backward_euler(
     if _disc == "nemo_1p5_split" and not literal_matrix:
         # zfact3·dissl·en explicit add-back (NEMO zdftke.F90:419).
         rhs = rhs + dt * 0.5 * diss_rate * e_old
-    if external_source is not None:
+    if external_source is not None and not literal_matrix:
         rhs = rhs + dt * external_source
 
     if bottom_dirichlet is not None:

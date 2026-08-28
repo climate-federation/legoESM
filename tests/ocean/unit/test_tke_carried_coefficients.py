@@ -617,6 +617,53 @@ def test_nemo_literal_matrix_matches_hand_computed_source_order(monkeypatch):
     assert not np.array_equal(wrong_c, c)
 
 
+def test_nemo_literal_rhs_applies_langmuir_before_budget(monkeypatch):
+    """Matched-step arithmetic pins zdftke's two-statement RHS association."""
+    cfg = TKEConfig(
+        tke_matrix_evaluation="nemo_literal",
+        dissipation_discretization="nemo_1p5_split",
+        alpha_tke=1.0, c_eps=0.7,
+        tke_background=0.0, tke_surface_min=0.0,
+    )
+    captured = []
+
+    def capture(a, b, c, rhs):
+        captured.append(np.asarray(rhs))
+        return rhs
+
+    monkeypatch.setattr(tke_mod, "_tridiag_thomas", capture)
+    e_old = jnp.asarray([[1.0, 1.0e16, 3.0]], dtype=jnp.float64)
+    p_s = jnp.asarray([[0.0, -1.5, 0.0]], dtype=jnp.float64)
+    source = jnp.asarray([[0.0, 1.0, 0.0]], dtype=jnp.float64)
+    tke_mod._solve_tke_backward_euler(
+        e_old=e_old,
+        K_M_old=jnp.zeros((1, 3), dtype=jnp.float64),
+        K_H_old=jnp.zeros((1, 3), dtype=jnp.float64),
+        P_s=p_s, N2=jnp.zeros((1, 3), dtype=jnp.float64),
+        l_eps=jnp.ones((1, 3), dtype=jnp.float64),
+        dz_half=jnp.ones((1, 3), dtype=jnp.float64),
+        surface_flux=jnp.zeros((1,), dtype=jnp.float64),
+        dt=2.0, cfg=cfg,
+        dz_surface=jnp.ones((1,), dtype=jnp.float64),
+        surface_dirichlet=jnp.asarray([8.0], dtype=jnp.float64),
+        surface_bc_level="nemo_z0",
+        bottom_dirichlet=jnp.asarray([9.0], dtype=jnp.float64),
+        K_M_surface=jnp.zeros((1,), dtype=jnp.float64),
+        w_active=jnp.ones((1, 3), dtype=bool),
+        nemo_e3t=jnp.ones((1, 4), dtype=jnp.float64),
+        dissl_old=jnp.zeros((1, 3), dtype=jnp.float64),
+        external_source=source,
+    )
+    rhs = captured[-1]
+    expected = ((np.float64(1.0e16) + np.float64(2.0))
+                + np.float64(2.0) * np.float64(-1.5))
+    legacy_wrong = ((np.float64(1.0e16)
+                     + np.float64(2.0) * np.float64(-1.5))
+                    + np.float64(2.0))
+    assert rhs[0, 2] == expected
+    assert rhs[0, 2] != legacy_wrong  # planted association control
+
+
 def test_carried_coefficients_are_jittable_and_differentiable():
     cfg = TKEConfig(
         prognostic=True,
