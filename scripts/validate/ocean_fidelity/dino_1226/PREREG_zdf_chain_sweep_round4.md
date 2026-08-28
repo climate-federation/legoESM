@@ -120,3 +120,21 @@ The climate arms are **not yet authorized**: row 4 must first be clean at its
 registered bar, and the ordered sweep must either reach the implicit-solve
 application or stop at a newly localized later divergence with no unmeasured
 upstream operand.
+
+### 2026-08-28 amendment after registered 4c/4d measurement, before fix/GPU
+
+The sequential substitution measured 4c (NOW face metric) at `9,920/9,920`
+failures, maximum `1.549657e-02`; adding 4d (BEFORE face metric) produced
+`0/9,920`, maximum `0.0`, with every focus column passing. Therefore the
+preregistered `nemo_qco_live_face` metric option is now authorized for
+implementation and becomes the default on the same two complete DINO NEMO
+cards. The legacy selector is `tpoint_jacobian`; all other cards retain it.
+The numerical climate bands remain unchanged. The legacy GPU command gains
+one additional required opt-out:
+
+```text
+--tke-shear-metric-source tpoint_jacobian
+```
+
+Omitting that flag would no longer reproduce the old row-4 chain and invalidates
+the control. The faithful command remains option-free.
