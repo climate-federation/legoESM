@@ -19,6 +19,17 @@ producer logs and 15552000 s artifact stamps.  The current retained artifact
 is still read with the escape absent and must pass the current clock guard.
 No input, metric, reducer, candidate prediction, or decision bar changed.
 
+The amended invocation then stopped before printing any reconciliation metric
+because the old day-30 gap recomputed through the current independent reducer
+was `-0.010717232432998713 Sv`, while the JSON serialization is
+`-0.010717232432999602 Sv`: an `8.9e-16 Sv` arithmetic-order difference.  The
+registered bit-for-bit cross-implementation receipt was therefore
+unsatisfiable.  It is replaced by the same `1e-12 Sv` agreement bar already
+owned by `tcarry_basin_reverdict._reduce`; a planted `1e-6 Sv` receipt shift
+must fail that check.  This changes only the receipt equality operator.  No
+input, computed metric, candidate prediction, or scientific decision bar
+changed, and no day result or verdict printed before this amendment.
+
 ## Inputs and provenance question
 
 The published `-0.4257848785815366 Sv` is an analysis value in
@@ -80,8 +91,8 @@ At days 30, 60, and 90 the probe prints, at full precision:
    `|G_old| * |Omega_NEMO/Omega_rounded - 1|`, where the bridge changed from
    `7.292e-5` to NEMO's measured `7.292115083046e-5`.
 
-The old JSON values at all three days must reproduce bit-for-bit from the old
-member reduction.  The day-0 prognostic arrays of old and current artifacts
+The old JSON values at all three days must reproduce within `1e-12 Sv` from
+the independent old-member reduction.  The day-0 prognostic arrays of old and current artifacts
 must be bit-identical.  Artifact hashes, log producer SHAs/config receipts,
 flags, current Git SHA, and dirty tracked count print before any metric.
 Dry-face plants must leave the score unchanged and a wet-face plant must move

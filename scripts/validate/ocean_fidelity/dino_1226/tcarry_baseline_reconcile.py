@@ -39,6 +39,7 @@ CURRENT_PRODUCER = "d6dc89e91c9ae6b07d146991d2cb6c850f261bb0"
 EEN_PRODUCER = "a6a07a9e2b4c31201691bd829bceb4984f374d62"
 OMEGA_ROUNDED = 7.292e-5  # const-ok: historical legoESM bridge receipt
 OMEGA_NEMO = 7.292115083046e-5  # const-ok: NEMO ff_f inversion receipt
+OLD_REPRO_TOL = 1.0e-12
 
 
 def _sha256(path: str | Path) -> str:
@@ -89,6 +90,11 @@ def _bit_identical_day0(old_path: str | Path, current_path: str | Path) -> None:
             if not R._bit_identical(old[key], current[key]):
                 raise SystemExit(f"STOP old/current day-0 field differs: {key}")
     print("[CONTROL PASS] old/current day-0 prognostic fields are bit-identical")
+
+
+def _old_gap_matches(value: float, expected: float) -> bool:
+    return bool(np.isfinite(value) and np.isfinite(expected)
+                and abs(value - expected) <= OLD_REPRO_TOL)
 
 
 def _gap(path: str | Path, day: int, nemo: dict[str, np.ndarray],
@@ -164,6 +170,9 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("STOP old analysis receipt HEAD changed")
     old_by_day = {int(day): (float(receipt["gap"][i]), float(receipt["floor"][i]))
                   for i, day in enumerate(receipt["days"])}
+    if _old_gap_matches(old_by_day[90][0] + 1.0e-6, old_by_day[90][0]):
+        raise SystemExit("STOP planted 1e-6 Sv old-gap receipt violation did not fire")
+    print("[CONTROL PASS] planted +1e-6 Sv old-gap receipt violation rejected")
 
     results = []
     for day in DAYS:
@@ -174,9 +183,11 @@ def main(argv: list[str] | None = None) -> int:
         een_off_gap, een_off_rows = _gap(args.een_off, day, nemo, historical=True)
         een_nemo_gap, een_nemo_rows = _gap(args.een_nemo, day, nemo, historical=True)
         expected_old, floor = old_by_day[day]
-        if old_gap != expected_old:
-            raise SystemExit(f"STOP day-{day} old gap {old_gap:.17g} != JSON "
-                             f"{expected_old:.17g}")
+        if not _old_gap_matches(old_gap, expected_old):
+            raise SystemExit(f"STOP day-{day} old gap {old_gap:.17g} differs from JSON "
+                             f"{expected_old:.17g} by more than {OLD_REPRO_TOL:.1e} Sv")
+        print(f"[CONTROL PASS] day-{day} old gap reproduces JSON: "
+              f"difference={old_gap - expected_old:.17g} Sv")
         epoch = current_gap - old_gap
         een = een_nemo_gap - een_off_gap
         remainder = epoch - een
