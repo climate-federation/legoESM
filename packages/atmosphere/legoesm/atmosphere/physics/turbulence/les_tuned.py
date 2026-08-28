@@ -85,8 +85,12 @@ def load_les_tuned_overrides(
     """
     import yaml
 
+    from . import clubb as _clubb          # CLUBB's coefficients (CLUBBParams)
+    # live in a SEPARATE spec + a NESTED sub-config (CLUBBConfig.params), not in
+    # the flat turbulence config spec. Merge the two so CLUBBParams / CLUBBConfig
+    # keys validate; the algebraic schemes are unaffected.
     text, src = _read_tuned_yaml_text(path)
-    spec = _turb_config.__param_spec__
+    spec = {**_turb_config.__param_spec__, **_clubb.__param_spec__}
     raw = yaml.safe_load(text) or {}
     grouped: dict[str, dict[str, float]] = {}
     for qual, value in raw.items():
@@ -146,19 +150,41 @@ def apply_les_tuned_turbulence(
     overrides = load_les_tuned_overrides(path)
     field = _subconfig_field_for_scheme(turb, turb.scheme)
     sub = getattr(turb, field)
+    if sub is None and turb.scheme == "clubb":
+        # CLUBB's sub-config defaults to None (opt-in) and to the DIAGNOSTIC path
+        # (prognostic=False). Its tuned coefficients were fit on the PROGNOSTIC
+        # path, so the tuned config must be prognostic to be valid -- instantiate
+        # it here. les_tuned=False keeps the library default (None / diagnostic).
+        from .clubb import CLUBBConfig
+        sub = CLUBBConfig(prognostic=True)
     cls_name = type(sub).__name__
-    scheme_overrides = overrides.get(cls_name)
-    if not scheme_overrides:
-        # No tuned entry for the ACTIVE scheme (e.g. CLUBB, campaign unfinished).
-        # Returning library defaults is correct, but "les_tuned" then silently
-        # runs untuned physics -- warn so the label can't mislead (P1 #3).
+
+    # Splice overrides for the sub-config's OWN class, plus one level of nesting:
+    # CLUBB's tunable coefficients live in ``CLUBBConfig.params`` (a CLUBBParams),
+    # keyed under ``CLUBBParams`` in the YAML, not on CLUBBConfig itself. Every
+    # other closure is flat (the overrides land directly on ``sub``).
+    applied = False
+    direct = overrides.get(cls_name)
+    if direct:
+        sub = apply_param_overrides(sub, direct)
+        applied = True
+    nested = getattr(sub, "params", None)
+    if nested is not None:
+        nested_over = overrides.get(type(nested).__name__)
+        if nested_over:
+            sub = sub._replace(params=apply_param_overrides(nested, nested_over))
+            applied = True
+
+    if not applied:
+        # No tuned entry for the ACTIVE scheme. Returning library defaults is
+        # correct, but "les_tuned" then silently runs untuned physics -- warn so
+        # the label can't mislead (P1 #3).
         _log.warning(
             "les_tuned: scheme %r (%s) has no tuned entry in the LES YAML; "
             "running LIBRARY DEFAULTS untuned. Tuned schemes: %s.",
             turb.scheme, cls_name, sorted(overrides))
         return turb
-    tuned_sub = apply_param_overrides(sub, scheme_overrides)
-    return turb._replace(**{field: tuned_sub})
+    return turb._replace(**{field: sub})
 
 
 def write_active_scheme_params(scheme: str, out_path: str,
@@ -175,14 +201,25 @@ def write_active_scheme_params(scheme: str, out_path: str,
 
     probe = TurbulenceConfig(scheme=scheme)
     field = _subconfig_field_for_scheme(probe, scheme)
-    cls_name = type(getattr(probe, field)).__name__
-    overrides = load_les_tuned_overrides(path).get(cls_name)
-    if not overrides:
+    sub = getattr(probe, field)
+    if sub is None and scheme == "clubb":
+        from .clubb import CLUBBConfig      # None-default sub-config; probe its
+        sub = CLUBBConfig()                 # class + nested CLUBBParams for keys
+    all_over = load_les_tuned_overrides(path)
+    # The active scheme's own class, plus one nesting level (CLUBBParams under
+    # CLUBBConfig.params) -- mirrors the splice in apply_les_tuned_turbulence, so
+    # CLUBB's slice carries its CLUBBParams coefficients rather than nothing.
+    classes = [type(sub).__name__]
+    nested = getattr(sub, "params", None)
+    if nested is not None:
+        classes.append(type(nested).__name__)
+    slice_doc = {f"{_QUAL_PREFIX}{cls}.{f}": v
+                 for cls in classes
+                 for f, v in sorted(all_over.get(cls, {}).items())}
+    if not slice_doc:
         raise ValueError(
-            f"scheme {scheme!r} ({cls_name}) has no tuned entry in the LES YAML; "
-            f"tuned schemes: {sorted(load_les_tuned_overrides(path))}.")
-    slice_doc = {f"{_QUAL_PREFIX}{cls_name}.{f}": v
-                 for f, v in sorted(overrides.items())}
+            f"scheme {scheme!r} ({'/'.join(classes)}) has no tuned entry in the "
+            f"LES YAML; tuned schemes: {sorted(all_over)}.")
     dest = Path(out_path)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(yaml.safe_dump(slice_doc, sort_keys=True), encoding='utf-8')
