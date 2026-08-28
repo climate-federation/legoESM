@@ -664,6 +664,46 @@ def test_nemo_literal_rhs_applies_langmuir_before_budget(monkeypatch):
     assert rhs[0, 2] != legacy_wrong  # planted association control
 
 
+def test_nemo_literal_dissipation_uses_post_langmuir_energy(monkeypatch):
+    """zdftke:494 then :544-547 reuses the Langmuir-updated en operand."""
+    cfg = TKEConfig(
+        tke_matrix_evaluation="nemo_literal",
+        dissipation_discretization="nemo_1p5_split",
+        alpha_tke=1.0, c_eps=0.5,
+        tke_background=0.0, tke_surface_min=0.0,
+    )
+    captured = []
+
+    def capture(a, b, c, rhs):
+        captured.append(np.asarray(rhs))
+        return rhs
+
+    monkeypatch.setattr(tke_mod, "_tridiag_thomas", capture)
+    tke_mod._solve_tke_backward_euler(
+        e_old=jnp.ones((1, 3), dtype=jnp.float64),
+        K_M_old=jnp.zeros((1, 3), dtype=jnp.float64),
+        K_H_old=jnp.zeros((1, 3), dtype=jnp.float64),
+        P_s=jnp.zeros((1, 3), dtype=jnp.float64),
+        N2=jnp.zeros((1, 3), dtype=jnp.float64),
+        l_eps=jnp.ones((1, 3), dtype=jnp.float64),
+        dz_half=jnp.ones((1, 3), dtype=jnp.float64),
+        surface_flux=jnp.zeros((1,), dtype=jnp.float64),
+        dt=3.0, cfg=cfg,
+        dz_surface=jnp.ones((1,), dtype=jnp.float64),
+        surface_dirichlet=jnp.asarray([8.0], dtype=jnp.float64),
+        surface_bc_level="nemo_z0",
+        bottom_dirichlet=jnp.asarray([9.0], dtype=jnp.float64),
+        K_M_surface=jnp.zeros((1,), dtype=jnp.float64),
+        w_active=jnp.ones((1, 3), dtype=bool),
+        nemo_e3t=jnp.ones((1, 4), dtype=jnp.float64),
+        dissl_old=jnp.full((1, 3), 0.4, dtype=jnp.float64),
+        external_source=jnp.asarray([[0.0, 2.0, 0.0]], dtype=jnp.float64),
+    )
+    # post-LC en = 1 + 3*2 = 7; diss add-back = 3*(.5*.5*.4*7)=2.1.
+    assert captured[-1][0, 2] == np.float64(9.1)
+    assert captured[-1][0, 2] != np.float64(7.3)  # old e_old operand
+
+
 def test_carried_coefficients_are_jittable_and_differentiable():
     cfg = TKEConfig(
         prognostic=True,

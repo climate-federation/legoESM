@@ -1312,7 +1312,7 @@ def _solve_tke_backward_euler(
         if external_source is not None:
             rhs_base = rhs_base + dt * external_source
         rhs = rhs_base + dt * (
-            P_s + buoy_source + 0.5 * diss_rate * e_old
+            P_s + buoy_source + 0.5 * diss_rate * rhs_base
         ) * jnp.asarray(w_active, dtype=e_old.dtype)
     else:
         rhs = e_old + dt * (P_s + buoy_source)
