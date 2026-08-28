@@ -5,6 +5,20 @@ Written 2026-08-27 after the retained Stage-1 legacy arm stopped at
 row profile, or historical EEN-arm basin value was computed.  The paired
 corrected-T arm remains unread and unscored until this disagreement is owned.
 
+## 2026-08-27 instrument-only amendment after reconciliation STOP
+
+The first invocation stopped before producing any metric.  The reused
+`load_candidate` refused the three historical artifacts because they predate
+the later `seasonal_t0_reference_seconds` stamp, even though their clean logs
+and artifact `seasonal_t0_seconds` fields record the exact 15552000 s clock.
+No day-30/day-60/day-90 gap, row, EEN basin value, or reconciliation verdict
+printed before this amendment.  The probe now uses that loader's existing
+`DINO_GATE_ALLOW_LEGACY_CLOCK=1` escape only while reading the three
+hash-bound historical artifacts, after independently checking their clean
+producer logs and 15552000 s artifact stamps.  The current retained artifact
+is still read with the escape absent and must pass the current clock guard.
+No input, metric, reducer, candidate prediction, or decision bar changed.
+
 ## Inputs and provenance question
 
 The published `-0.4257848785815366 Sv` is an analysis value in
