@@ -46,6 +46,9 @@ def test_vapour_stays_nonnegative_over_the_step():
     q_new = np.asarray(q_v + dt * out.dq_v_dt)
     assert q_new.min() >= -1e-12, (
         f"tiedtke drove q_v negative: min={q_new.min():.3e}")
+    assert np.abs(np.asarray(out.dq_v_dt)).max() > 1e-10, (
+        "no convective tendency -- a zero-returning limiter would pass "
+        "positivity vacuously")
 
 
 def test_limiter_is_a_noop_when_no_level_overshoots():
@@ -60,6 +63,10 @@ def test_limiter_is_a_noop_when_no_level_overshoots():
     out = out if hasattr(out, "dq_v_dt") else out[0]
     q_new = np.asarray(q_v * 10.0 + 1.0 * out.dq_v_dt)
     assert q_new.min() >= 0.0
+    # Non-vacuity: the scheme must still be DOING something -- a limiter that
+    # zeroed every tendency would also pass the positivity line above (codex).
+    assert np.abs(np.asarray(out.dq_v_dt)).max() > 1e-10, (
+        "tendency is ~zero: the limiter is not a no-op, it killed convection")
 
 
 def test_tendency_is_finite_and_differentiable():

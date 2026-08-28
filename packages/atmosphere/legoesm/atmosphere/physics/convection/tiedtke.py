@@ -567,12 +567,18 @@ def tiedtke_convection(
     # dq_c_pos / dq_r_conv_dt inherit the scaling; col_scale == 1 wherever no
     # level overshoots, so a stable column is byte-unchanged.  Same
     # construction as the kuo.py limiter.
-    _pos_demand = jnp.clip(-dt * dq_v_dt, 0.0, None)
+    _pos_demand = jnp.clip(-dt * dq_v_dt, 0.0, None)   # vapour the SINK removes
     _pos_avail = jnp.clip(q_v, 0.0, None)
+    # ratio = 1 wherever there is NO sink (demand == 0): a level that is a
+    # source, even at q_v == 0, imposes no positivity constraint and must not
+    # drag the column scale to zero (codex 2026-08-28).  Where there IS a sink,
+    # ratio = available / demanded, clipped into [0, 1] by the outer clip.
+    _pos_ratio = jnp.where(
+        _pos_demand > 0.0,
+        _pos_avail / jnp.maximum(_pos_demand, 1e-20),
+        1.0)
     _pos_col_scale = jnp.clip(
-        jnp.min(_pos_avail / jnp.maximum(_pos_demand, 1e-20),
-                axis=-1, keepdims=True),
-        0.0, 1.0)
+        jnp.min(_pos_ratio, axis=-1, keepdims=True), 0.0, 1.0)
     dT_dt = dT_dt * _pos_col_scale
     dq_v_dt = dq_v_dt * _pos_col_scale
     dq_c_conv_dt = dq_c_conv_dt * _pos_col_scale
