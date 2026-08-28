@@ -23,6 +23,9 @@ WT=/burg-archive/glab/users/pg2328/legoESM_wt_emin_$LABEL
 git -C "$ROOT" worktree prune
 [ -d "$WT" ] && git -C "$ROOT" worktree remove --force "$WT" 2>/dev/null || true
 git -C "$ROOT" worktree add --detach "$WT" "$PIN" || { echo "FATAL: worktree add failed"; exit 1; }
+# gitignored runtime data (mesh etc.) is absent in the worktree -> symlink from main
+mkdir -p "$WT/data"
+ln -sfn "$ROOT/data/grids" "$WT/data/grids"
 cd "$WT" || exit 1
 HEAD=$(git rev-parse HEAD)
 [ "$HEAD" = "$(git -C "$ROOT" rev-parse "$PIN")" ] || { echo "FATAL: HEAD $HEAD != pin"; exit 1; }
@@ -36,7 +39,7 @@ NEMOIN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS
 OUT=$ROOT/results/omip_nemo/ab_emin_$LABEL
 
 JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
-  --mesh $ROOT/data/grids/eORCA1.2_mesh_mask.nc --dt 150 --min-levels 2 \
+  --mesh data/grids/eORCA1.2_mesh_mask.nc --dt 150 --min-levels 2 \
   --C-smag-lap 3.0 --smag-cfl-safety 0.125 \
   --ew-cyclic-overlap --nemo-vertical --partial-cell --pgf-scheme smc03 \
   --adaptive-implicit-vertadv --momentum-rk3 --geothermal --runoff \
