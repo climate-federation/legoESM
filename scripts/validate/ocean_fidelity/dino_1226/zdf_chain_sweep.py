@@ -598,15 +598,24 @@ def main() -> int:
                     values[ks]
                     + (values[kn] - values[ks]) * (3.0 - 2.0 * zs)
                     * zs ** 2)
+            from legoesm.ocean.experiments.dino import (
+                dino_lat_lon_surface_forcing_arrays,
+            )
             row8_utau_prod = metrics(
                 np.asarray(forcing["tau_u_cell_2d"])[..., None],
+                utau_n[..., None], wet2[..., None], focus, POINTWISE_BAR)
+            # Exercise the ordinary production default without the harness's
+            # explicit mesh donor.  This must reconstruct usrdef_hgr's raw
+            # degree operand and match the same sbc dump at the registered bar.
+            implicit_literal_forcing = dino_lat_lon_surface_forcing_arrays(
+                br.geometry, cfg)
+            row8_utau_default_literal = metrics(
+                np.asarray(implicit_literal_forcing[
+                    "tau_u_cell_2d"])[..., None],
                 utau_n[..., None], wet2[..., None], focus, POINTWISE_BAR)
             row8_utau_literal = metrics(
                 utau_literal[..., None], utau_n[..., None], wet2[..., None],
                 focus, POINTWISE_BAR)
-            from legoesm.ocean.experiments.dino import (
-                dino_lat_lon_surface_forcing_arrays,
-            )
             legacy_cfg = dataclasses.replace(
                 cfg, dino_wind_profile_evaluation="factored_smoothstep")
             legacy_utau = np.asarray(dino_lat_lon_surface_forcing_arrays(
@@ -659,6 +668,10 @@ def main() -> int:
                     raise AssertionError(
                         "row-8 production passed but the independent literal "
                         "wind reconstruction did not")
+                if not row8_utau_default_literal["pass"]:
+                    raise AssertionError(
+                        "row-8 default literal source construction did not "
+                        "match sbc_dump_utau.bin")
             row4["continuation_preview"] = {
                 "rows": {
                     "5_bottom_drag_coefficient": row5m,
@@ -684,6 +697,8 @@ def main() -> int:
                     "operand_localization": {
                         "gphiu": row8_gphiu,
                         "production_utau_vs_dump": row8_utau_prod,
+                        "default_literal_utau_vs_dump":
+                            row8_utau_default_literal,
                         "nemo_literal_utau_vs_dump": row8_utau_literal,
                         "production_taum_vs_dump_derived": row8_taum_dump,
                         "production_taum_on_unfloored_columns": row8_taum,
