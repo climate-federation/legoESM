@@ -2,19 +2,26 @@
 """Offline climate-level DINO mixed-layer-depth audit against NEMO 5.0.2.
 
 This probe applies the already-certified production transcription of NEMO's
-``zdf_mxl`` density-integral diagnostic to matching NOW-level T/S/ssh states.
-It does not reimplement the MLD criterion and does not substitute a density
-diagnostic for the ``avt``-based turbocline ``hmld``.
+``zdf_mxl`` density-integral criterion symmetrically to matching NOW-level
+T/S/ssh states. This is a standardized offline state diagnostic, not NEMO's
+online time-level combination: executed DINO builds ``rn2b`` from BEFORE T/S
+and combines it with NOW geometry. Because the legoESM snapshots do not carry
+BEFORE T/S, the native online combination cannot be scored symmetrically. An
+unscored NEMO BEFORE-vs-NOW sensitivity is emitted to bound that limitation.
+The probe does not reimplement the MLD criterion and does not substitute a
+density diagnostic for the ``avt``-based turbocline ``hmld``.
 
 Oracle source (NEMO 5.0.2, executed DINO configuration):
 
-* ``src/OCE/ZDF/zdfmxl.F90:90-104``: ``hmlp`` integrates
+* ``cfgs/DINO/WORK/zdfmxl.F90:90-104``: ``hmlp`` integrates
   ``MAX(rn2b,0)*e3w`` from ``nlb10`` against ``grav*rho_c/rho0`` and returns
   live ``gdepw(nmln)``; ``rho_c=0.01`` is at line 34.
-* ``src/OCE/DOM/domzgr.F90:367-371``: the nominal 10 m reference and ``nlb10``.
-* ``src/OCE/ZDF/zdfmxl.F90:123-152``: turbocline ``hmld`` scans composed
+* ``cfgs/DINO/WORK/domzgr.F90:367-371``: nominal 10 m reference and ``nlb10``.
+* ``cfgs/DINO/WORK/zdfmxl.F90:123-152``: turbocline ``hmld`` scans composed
   ``avt`` against ``avt_c=5e-4`` (line 35). The supplied snapshots lack
   ``avt``, so that diagnostic remains UNMEASURED.
+* ``cfgs/DINO/WORK/stpmlf.F90:204-210``: online ``rn2b`` comes from BEFORE
+  T/S while ``zdf_phy`` receives the NOW geometry level.
 
 Run from the repository root, on CPU only::
 
@@ -71,6 +78,8 @@ PREREG = HERE / "PREREG_mld_climate_audit.md"
 NEMO_ROOT = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2")
 RUN = NEMO_ROOT / "cfgs/DINO/RUN_VERDICT360_M0"
 MESH = NEMO_ROOT / "cfgs/DINO/RUN_TRAJ/mesh_mask.nc"
+WORK = NEMO_ROOT / "cfgs/DINO/WORK"
+MY_SRC = NEMO_ROOT / "cfgs/DINO/MY_SRC"
 DAYS = (0, 30, 60, 90)
 KT0 = 5760
 STEPS_PER_DAY = 32
@@ -147,17 +156,20 @@ def restart_paths(day: int) -> list[Path]:
     return paths
 
 
-def load_rebuild_helper():
-    path = ROOT / "scripts/validate/ocean_fidelity/rebuild_nemo_restart.py"
-    spec = importlib.util.spec_from_file_location("_mld_restart_rebuild", path)
+def load_script_module(filename: str, module_name: str):
+    path = ROOT / "scripts/validate/ocean_fidelity" / filename
+    spec = importlib.util.spec_from_file_location(module_name, path)
     require(spec is not None and spec.loader is not None, f"cannot import {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    return module.rebuild
+    return module
 
 
-REBUILD = load_rebuild_helper()
+REBUILD = load_script_module(
+    "rebuild_nemo_restart.py", "_mld_restart_rebuild").rebuild
+VERTICAL_LADDER_SHA256 = load_script_module(
+    "dino_1226/kamm_twin_90d.py", "_mld_kamm_twin").vertical_ladder_sha256
 
 
 def scalar(d: np.lib.npyio.NpzFile, key: str):
@@ -190,6 +202,9 @@ def validate_arm(name: str, path: Path, log_path: Path) -> dict[str, object]:
         if "producer_dirty_tracked_files" in d.files:
             require(int(scalar(d, "producer_dirty_tracked_files")) == 0,
                     f"{name}: dirty producer recorded in NPZ")
+        ladder_sha = str(scalar(d, "vertical_ladder_sha256"))
+        require(re.fullmatch(r"[0-9a-f]{64}", ladder_sha) is not None,
+                f"{name}: malformed vertical ladder SHA-256")
         run_config = json.loads(str(scalar(d, "run_config")))
         land_mask = np.asarray(d["land_mask"], dtype=np.float64)
 
@@ -201,6 +216,7 @@ def validate_arm(name: str, path: Path, log_path: Path) -> dict[str, object]:
     return {
         "producer_git_sha": match.group(1),
         "producer_dirty_tracked_files": int(match.group(2)),
+        "vertical_ladder_sha256": ladder_sha,
         "run_config": run_config,
         "land_mask": land_mask,
     }
@@ -263,7 +279,7 @@ def synthetic_controls(g: float, rho0: float, rho_c: float) -> dict[str, object]
     require(false_expectation_fired,
             "deliberately false expected level did not fire")
     return {
-        "threshold_m2_s2": threshold,
+        "threshold_m_s2": threshold,
         "baseline_fraction": 0.99,
         "baseline_base_index": 1,
         "baseline_mld_m": 20.0,
@@ -310,6 +326,42 @@ def region_metrics(lego: np.ndarray, nemo: np.ndarray, weights: np.ndarray,
             "nemo_mean_m": float(np.sum(w * nemo[wet]) / sw),
             "mean_bias_m": float(np.sum(w * diff) / sw),
             "rms_difference_m": float(np.sqrt(np.sum(w * diff * diff) / sw)),
+        }
+    return result
+
+
+def global_map_gate(hml: np.ndarray, base: np.ndarray, weights: np.ndarray,
+                    wet: np.ndarray, nlev: int, label: str) -> None:
+    """Enforce the preregistered all-wet-domain map contract."""
+    require(hml.shape == wet.shape and base.shape == wet.shape,
+            f"{label}: map shape mismatch")
+    require(hml.dtype == np.float64, f"{label}: MLD is not float64")
+    require(np.issubdtype(base.dtype, np.integer),
+            f"{label}: base index is not integer")
+    require(np.isfinite(hml[wet]).all(), f"{label}: non-finite wet MLD")
+    require(np.isfinite(weights[wet]).all() and np.all(weights[wet] > 0.0),
+            f"{label}: invalid wet area weight")
+    require(np.all((base[wet] >= 0) & (base[wet] <= nlev - 2)),
+            f"{label}: wet base index outside [0,{nlev - 2}]")
+
+
+def difference_metrics(first: np.ndarray, second: np.ndarray,
+                       weights: np.ndarray,
+                       common_wet: np.ndarray) -> dict[str, dict[str, float]]:
+    """Unscored regional sensitivity of one NEMO time level to another."""
+    result: dict[str, dict[str, float]] = {}
+    for name, rows in REGION_ROWS.items():
+        select = np.zeros(common_wet.shape, dtype=bool)
+        select[rows, :] = True
+        wet = select & common_wet
+        w = weights[wet]
+        diff = first[wet] - second[wet]
+        result[name] = {
+            "mean_before_minus_now_m": float(np.sum(w * diff) / np.sum(w)),
+            "rms_before_minus_now_m": float(
+                np.sqrt(np.sum(w * diff * diff) / np.sum(w))),
+            "max_abs_before_minus_now_m": float(np.max(np.abs(diff))),
+            "changed_wet_columns": int(np.count_nonzero(diff)),
         }
     return result
 
@@ -430,6 +482,22 @@ def main() -> int:
     active_3d = _nemo_native_active_3d(
         mask, z_coord, h_bathy, jnp.float64,
     )
+    ladder_sha = VERTICAL_LADDER_SHA256(z_coord)
+    for name, meta in arm_meta.items():
+        require(meta["vertical_ladder_sha256"] == ladder_sha,
+                f"{name}: saved ladder differs from freshly built bridge")
+
+    executed_source_pairs = (
+        (NEMO_ROOT / "src/OCE/ZDF/zdfmxl.F90", WORK / "zdfmxl.F90"),
+        (NEMO_ROOT / "src/OCE/ZDF/zdfphy.F90", WORK / "zdfphy.F90"),
+        (NEMO_ROOT / "src/OCE/DOM/domzgr.F90", WORK / "domzgr.F90"),
+        (MY_SRC / "stpmlf.F90", WORK / "stpmlf.F90"),
+    )
+    for source, executed in executed_source_pairs:
+        require(source.is_file() and executed.is_file(),
+                f"missing oracle source pair: {source}, {executed}")
+        require(sha256(source) == sha256(executed),
+                f"executed DINO WORK source differs from quoted source: {executed}")
 
     resolved_h1 = float(np.asarray(jnp.cumsum(z_coord.dz_ref))[0])
     require(abs(resolved_h1 - H1) <= 1.0e-12,
@@ -452,21 +520,27 @@ def main() -> int:
         weights, common_wet_by_arm["basin_legacy"])
 
     nemo_fields: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    nemo_online_fields: dict[int, tuple[np.ndarray, np.ndarray]] = {}
     nemo_states: dict[int, dict[str, np.ndarray]] = {}
     for day in DAYS:
         pattern = str(RUN / f"DINO_{KT0 + STEPS_PER_DAY * day:08d}_restart*.nc")
-        raw = REBUILD(pattern, ["tn", "sn", "sshn"])
-        require(set(raw) == {"tn", "sn", "sshn"},
+        raw = REBUILD(pattern, ["tn", "sn", "tb", "sb", "sshn"])
+        require(set(raw) == {"tn", "sn", "tb", "sb", "sshn"},
                 f"day {day}: incomplete NEMO comparator state {sorted(raw)}")
         temp_n = np.moveaxis(raw["tn"], 0, -1)
         salt_n = np.moveaxis(raw["sn"], 0, -1)
+        temp_b = np.moveaxis(raw["tb"], 0, -1)
+        salt_b = np.moveaxis(raw["sb"], 0, -1)
         etan = raw["sshn"]
         require(np.isfinite(temp_n).all() and np.isfinite(salt_n).all()
+                and np.isfinite(temp_b).all() and np.isfinite(salt_b).all()
                 and np.isfinite(etan).all(),
                 f"day {day}: incomplete stitched NEMO state")
         nemo_states[day] = {"T": temp_n, "S": salt_n, "eta": etan}
         nemo_fields[day] = compute_mld(
             temp_n, salt_n, etan, mask, h_bathy, z_coord, eos_fn, mc, active_3d)
+        nemo_online_fields[day] = compute_mld(
+            temp_b, salt_b, etan, mask, h_bathy, z_coord, eos_fn, mc, active_3d)
 
     day0_identity: dict[str, dict[str, float]] = {}
     nemo0 = nemo_states[0]
@@ -495,11 +569,26 @@ def main() -> int:
     stats: dict[str, dict[str, dict[str, dict[str, float]]]] = {}
     maps: dict[str, np.ndarray] = {}
     day90_biases: dict[str, np.ndarray] = {}
+    time_level_sensitivity: dict[str, dict[str, dict[str, float]]] = {}
+    nlev = int(np.asarray(z_coord.dz_ref).size)
     for day in DAYS:
         nemo_hml, nemo_base = nemo_fields[day]
+        online_hml, online_base = nemo_online_fields[day]
+        global_map_gate(nemo_hml, nemo_base, weights, nemo_surface_wet,
+                        nlev, f"NEMO NOW day {day}")
+        global_map_gate(online_hml, online_base, weights, nemo_surface_wet,
+                        nlev, f"NEMO BEFORE/online day {day}")
         maps[f"nemo_hmlp_day{day}"] = np.where(nemo_surface_wet, nemo_hml, np.nan)
         maps[f"nemo_base_index_day{day}"] = np.where(
             nemo_surface_wet, nemo_base, -1).astype(np.int32)
+        maps[f"nemo_online_time_level_hmlp_day{day}"] = np.where(
+            nemo_surface_wet, online_hml, np.nan)
+        maps[f"nemo_online_time_level_base_index_day{day}"] = np.where(
+            nemo_surface_wet, online_base, -1).astype(np.int32)
+        maps[f"nemo_before_minus_now_hmlp_day{day}"] = np.where(
+            nemo_surface_wet, online_hml - nemo_hml, np.nan)
+        time_level_sensitivity[str(day)] = difference_metrics(
+            online_hml, nemo_hml, weights, nemo_surface_wet)
     for name, path in ARMS.items():
         stats[name] = {}
         common = common_wet_by_arm[name]
@@ -512,7 +601,11 @@ def main() -> int:
                     mask, h_bathy, z_coord, eos_fn, mc, active_3d,
                 )
                 nemo_hml, _ = nemo_fields[day]
+                global_map_gate(hml, base, weights, common, nlev,
+                                f"{name} day {day}")
                 bias = np.where(common, hml - nemo_hml, np.nan)
+                require(bias.dtype == np.float64 and np.isfinite(bias[common]).all(),
+                        f"{name} day {day}: invalid full-domain wet bias")
                 stats[name][str(day)] = region_metrics(hml, nemo_hml, weights, common)
                 maps[f"{name}_hmlp_day{day}"] = np.where(common, hml, np.nan)
                 maps[f"{name}_base_index_day{day}"] = np.where(
@@ -532,9 +625,12 @@ def main() -> int:
         Path(__file__).resolve(), PREREG, MESH,
         ROOT / "packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py",
         ROOT / "scripts/validate/ocean_fidelity/rebuild_nemo_restart.py",
+        ROOT / "scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py",
         NEMO_ROOT / "src/OCE/ZDF/zdfmxl.F90",
         NEMO_ROOT / "src/OCE/ZDF/zdfphy.F90",
         NEMO_ROOT / "src/OCE/DOM/domzgr.F90",
+        WORK / "zdfmxl.F90", WORK / "zdfphy.F90", WORK / "domzgr.F90",
+        WORK / "stpmlf.F90", MY_SRC / "stpmlf.F90",
         RUN / "namelist_cfg", RUN / "ocean.output",
         *ARMS.values(), *LOGS.values(),
     ]
@@ -552,13 +648,29 @@ def main() -> int:
         "mld_bias_day90.png": sha256(args.out_dir / "mld_bias_day90.png"),
     }
     result = {
+        "scope": {
+            "scored_time_level": "symmetric offline NOW T/S with NOW ssh",
+            "native_online_time_level": (
+                "NEMO BEFORE T/S-derived rn2b with NOW geometry; unscored because "
+                "legoesm snapshots lack BEFORE T/S"),
+            "claim": "exact zdf_mxl criterion, not native online hmlp",
+        },
         "diagnostic": {
-            "scored": "NEMO hmlp: exact zdf_mxl N2-integral density criterion",
+            "scored": (
+                "symmetric offline NOW-state application of NEMO's exact "
+                "zdf_mxl N2-integral density criterion"),
             "turbocline_hmld": "UNMEASURED_INPUT_HAS_NO_AVT",
+            "dino_vertical_closures": {
+                "TKE": True,
+                "EVD": True,
+                "DDM": False,
+                "surface_wave_mixing": False,
+                "internal_wave_mixing": False,
+            },
             "rho_c_kg_m3": float(mc.gm_redi.mld_rho_c),
             "g_m_s2": float(mc.g),
             "rho0_kg_m3": float(mc.rho_0),
-            "threshold_m2_s2": float(mc.g * mc.gm_redi.mld_rho_c / mc.rho_0),
+            "threshold_m_s2": float(mc.g * mc.gm_redi.mld_rho_c / mc.rho_0),
             "first_resolved_w_depth_m": resolved_h1,
         },
         "registered_thresholds": {
@@ -570,6 +682,7 @@ def main() -> int:
         },
         "controls": controls,
         "stats": stats,
+        "post_review_unscored_nemo_time_level_sensitivity": time_level_sensitivity,
         "classifications_day90": classifications,
         "tke_floor_equatorial_day90": {
             "prefix_rms_m": prefix_rms,
@@ -582,6 +695,7 @@ def main() -> int:
             "nemo_repo": nemo_git_stamp(),
             "jax_backend": jax.default_backend(),
             "jax_x64": bool(jax.config.x64_enabled),
+            "vertical_ladder_sha256": ladder_sha,
             "input_sha256": hashes,
             "producer_stamps": {
                 name: {k: v for k, v in meta.items() if k != "land_mask"}
@@ -594,6 +708,8 @@ def main() -> int:
     result_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
 
     print("SELF_CONTROLS: PASS")
+    print("RETRACTION: native-online-hmlp wording withdrawn; the scored field is "
+          "a symmetric offline NOW-state application of the exact criterion")
     for name in ARMS:
         print(f"DAY90_MLD {name}: {classifications[name]}")
         for region in REGION_ROWS:
@@ -603,6 +719,14 @@ def main() -> int:
     print(f"TKE_FLOOR_EQUATOR_MLD: {direction} "
           f"delta_RMS={delta_rms:.9f} m "
           f"prefix={prefix_rms:.9f} m fix={fix_rms:.9f} m")
+    print("POST_REVIEW_UNSCORED_NEMO_TIME_LEVEL_SENSITIVITY:")
+    for day in DAYS:
+        fields = []
+        for region in REGION_ROWS:
+            value = time_level_sensitivity[str(day)][region][
+                "rms_before_minus_now_m"]
+            fields.append(f"{region}={value:.9f} m")
+        print(f"  day {day}: " + " ".join(fields))
     print("TURBOCLINE_HMLD: UNMEASURED_INPUT_HAS_NO_AVT")
     print(f"RESULT_JSON: {result_path}")
     print(f"MAPS_NPZ: {args.out_dir / 'mld_maps.npz'}")
