@@ -25,13 +25,16 @@ def instruments():
         import validate.ocean_fidelity.dino_1226.heat_discriminator as heat_discriminator
         import validate.ocean_fidelity.dino_1226.kamm_twin_90d as kamm_twin_90d
         import validate.ocean_fidelity.dino_1226.mode_projection as mode_projection
+        import validate.ocean_fidelity.dino_1226.tcarry_basin_reverdict as tcarry_reverdict
         importlib.reload(mode_projection)
         importlib.reload(heat_discriminator)
         importlib.reload(kamm_twin_90d)
+        importlib.reload(tcarry_reverdict)
         return types.SimpleNamespace(
             kamm_twin_90d=kamm_twin_90d,
             heat_discriminator=heat_discriminator,
             mode_projection=mode_projection,
+            tcarry_reverdict=tcarry_reverdict,
         )
     finally:
         try:
@@ -1278,6 +1281,7 @@ def test_run_twin_refuses_a_start_mode_the_built_state_contradicts(instruments,
 
     monkeypatch.setattr(kamm_twin_90d, "_build_twin_state", _fake_build)
     monkeypatch.setattr(kamm_twin_90d, "seasonal_t0_seconds", lambda *a, **k: 0.0)
+    monkeypatch.setattr(kamm_twin_90d, "_git_provenance", lambda: ("a" * 40, 0))
     with pytest.raises(SystemExit, match="START-MODE MISMATCH"):
         kamm_twin_90d.run_twin("nemo_dino_kamm_mlf", "o.npz", bridge_before=True)
 
@@ -1545,6 +1549,61 @@ def test_run_twin_stamps_the_reference_clock_and_the_run_configuration(
     src = inspect.getsource(kamm_twin_90d.run_twin)
     assert "seasonal_t0_reference_seconds=" in src
     assert "run_config=" in src
+    assert "producer_git_sha=" in src
+    assert "producer_dirty_tracked_files=" in src
     # the reference must come from the restart, not from the same override the
     # twin itself used -- otherwise the pair-check compares a value to itself
     assert "_restart_elapsed_seconds(" in src
+
+
+# paired corrected-T-carry basin verdict
+# ---------------------------------------------------------------------------
+def test_tcarry_basin_floor_has_priority_over_refute(instruments):
+    """Zero response was previously both REFUTE and floor-limited."""
+    score = instruments.tcarry_reverdict.classify
+    assert score(0.0, -1.0, 0.1, True) == "UNRESOLVED/FLOOR"
+    assert score(0.01, -1.0, 0.001, True) == "REFUTED"
+
+
+def test_tcarry_basin_compensation_blocks_confirm(instruments):
+    score = instruments.tcarry_reverdict.classify
+    assert score(0.25, -1.0, 0.01, True) == "CONFIRMED"
+    assert score(0.25, -1.0, 0.01, False) == "UNRESOLVED/COMPENSATION"
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+def test_tcarry_basin_nonfinite_classifier_is_fatal(instruments, bad):
+    with pytest.raises(SystemExit, match="non-finite"):
+        instruments.tcarry_reverdict.classify(bad, -1.0, 0.1, True)
+
+
+def test_tcarry_basin_day0_identity_rejects_nonfinite_and_changed_bits(instruments):
+    identical = instruments.tcarry_reverdict._bit_identical
+    assert identical(np.array([1.0]), np.array([1.0]))
+    assert not identical(np.array([1.0]), np.array([np.nan]))
+    assert not identical(np.array([0.0]), np.array([-0.0]))
+
+
+def test_tcarry_basin_baseline_gate_can_fail(instruments):
+    gate = instruments.tcarry_reverdict._check_baseline
+    gate(instruments.tcarry_reverdict.BASELINE[90], 90)
+    with pytest.raises(SystemExit, match="misses registered"):
+        gate(instruments.tcarry_reverdict.BASELINE[90] + 3.0, 90)
+
+
+def test_tcarry_basin_rejects_unregistered_common_config(instruments):
+    check = instruments.tcarry_reverdict._registered_config_errors
+    valid = {
+        "recipe": "nemo_dino_kamm_mlf", "n_days": 90,
+        "bridge_tke": False, "bridge_before": True,
+        "vmix_scheme": None, "use_gm_redi": None,
+        "surface_stress_implicit": False, "surface_tendency_placement": None,
+        "save_step_eta": False, "perturb_seed": None, "perturb_eps": 1e-14,
+        "perturb_baro": None, "perturb_baro_sha256": None,
+        "perturb_baro_key": "dU_avg", "perturb_baro_scale": 1.0,
+        "daily_acc": False, "u_m": None,
+    }
+    assert check(valid, "arm", 90) == []
+    planted = dict(valid, perturb_baro="/tmp/plant.npz",
+                   perturb_baro_sha256="0" * 64)
+    assert any("perturb_baro" in error for error in check(planted, "arm", 90))

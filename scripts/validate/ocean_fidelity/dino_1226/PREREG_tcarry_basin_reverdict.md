@@ -89,8 +89,8 @@ deficit) and `R90 = Delta90/abs(Glegacy90)`.
   also be REFUTE.
 - Otherwise **CONFIRMS material deficit contribution** iff `R90 >= 0.10`
   (`Delta90 >= 0.04257848785815366 Sv`), `|Delta90| > 2*F90`, and no
-  acceptance-gate metric's absolute NEMO gap degrades by more than its own
-  registered tolerance relative to legacy.
+  acceptance-gate metric's absolute NEMO gap degrades by more than its exact
+  committed `1x acceptance_gate_90d.FLOORS` value relative to legacy.
 - Otherwise **REFUTES material deficit contribution** iff `R90 <= 0.02`
   (`Delta90 <= 0.008515697571630731 Sv`). A negative material change is
   reported additionally as a material compensator, not silently folded into
