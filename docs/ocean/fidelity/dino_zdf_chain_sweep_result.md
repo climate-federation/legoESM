@@ -7,8 +7,11 @@ Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 
 `dino_wind_profile_evaluation="nemo_literal"` is now the default on the
 complete `nemo_dino_kamm` and `nemo_dino_kamm_mlf` cards.  It retains NEMO's
-raw degree-valued `gphiu` operand from `mesh_mask.nc`, uses NEMO's nearest-node
-interval selection, and preserves the left-associated cubic at
+raw degree-valued `gphiu` operand from `mesh_mask.nc` in the matched-state
+harness; ordinary production runs reconstruct that source-degree operand with
+the same scalar `usrdef_hgr.F90:95-107` expression rather than fall back to
+`degrees(grid.lat)`.  It uses NEMO's nearest-node interval
+selection and preserves the left-associated cubic at
 `usrdef_sbc.F90:632`.  `factored_smoothstep` remains byte-identical by default
 on all five other DINO cards and is the explicit legacy opt-in on the two
 complete cards.  A matched-state dump control proves the historical
@@ -26,8 +29,8 @@ The ordered rerun is:
 | 6 | native MLD index `nmln` | `VERIFIED` | exact integer equality; 0/9,920 | 4/4 pass at zero |
 | 7 | native MLD depth `hmlp` | `VERIFIED` | 0/9,920; max `5.670461e-16` | 4/4 pass at zero |
 | 8 | surface TKE Dirichlet boundary | **`VERIFIED`** | **0/9,920; max `0`** | **4/4 pass at zero** |
-| 9 | bottom TKE Dirichlet boundary | `VERIFIED` | 0/9,920; max `0` | 4/4 pass at zero |
-| 10 | Langmuir PE/depth/source | **`DIVERGED`** | **9,155/9,920; max `3.861848`** | **4/4 fail** |
+| 9 | bottom TKE Dirichlet boundary | `VERIFIED` | 0/9,920; max `0`; independent `mbathy-1` identity 0/9,920 mismatches | 4/4 pass at zero |
+| 10 | Langmuir `rn2b` operand | **`DIVERGED`** | **9,920/9,920; max `4.150232e-07`** | **4/4 fail** |
 | 11--32 | Prandtl through EVD, coefficient assembly, `ldf_slp`, and both implicit solves | `UNMEASURED` | ordered stop at row 10 | ordered stop |
 
 ### First failing row-10 operand
@@ -60,7 +63,11 @@ captured `rn2b`, `gdepw`, and `e3w` fail in all 9,920 columns, with normalized
 maxima `4.150232e-07`, `6.294510e-04`, and `1.197581e-02`; all four southern
 focus columns fail each operand.  Offset-zero controls are much worse, ruling
 out an indexing explanation.  Perturbation, i-roll, and nonfinite controls all
-fire.
+fire.  The previously reported 9,155/9,920 full-source count came from an
+offline reconstruction without a NEMO post-`ln_lc` stage dump; it is retained
+in the artifact only as a non-dispositive diagnostic.  The ordered verdict
+stops at the first independently dumped failing operand, `rn2b`, at
+`zdftke.F90:436-440`.
 
 Registered next-round design: add `tke_n2_evaluation_stage`, with
 `step_entry` the faithful default on the two complete DINO NEMO cards and
@@ -97,9 +104,9 @@ CUDA_VISIBLE_DEVICES=<gpu> JAX_ENABLE_X64=1 python scripts/validate/ocean_fideli
 
 Round-5 artifact:
 `docs/ocean/fidelity/dino_zdf_chain_sweep_round5_artifact.json`, SHA256
-`dc6046b7760adb1555dca89d830cd1770b4fb45bf95e21f705fd9e5bffbe33d0`.
+`c611a4ee1961af071adee0f5edebaf8371c2a15a134a6c3907c0584d4ff3d833`.
 Its stamped parent/probe SHA is
-`bfe13b64c6ffc288b122431e33fb81dc46b2e88f`.
+`1551b3055b2c5f34944bf13d1268330ed073fb96`.
 
 ## Round-4 result: row 4 closed; ordered stop at row 8
 

@@ -4,7 +4,7 @@
     "pointwise_column": 1e-15,
     "rms_ratio_epsilon": 1e-06
   },
-  "checked_out_parent_sha": "bfe13b64c6ffc288b122431e33fb81dc46b2e88f",
+  "checked_out_parent_sha": "1551b3055b2c5f34944bf13d1268330ed073fb96",
   "controls": {
     "baseline_pass": true,
     "nonfinite_fired": true,
@@ -54,7 +54,7 @@
       "name": "rn2b evaluation lifetime/geometry",
       "nemo_line": "cfgs/DINO/MY_SRC/stpmlf.F90:204-210; cfgs/DINO/MY_SRC/zdftke.F90:436-440"
     },
-    "nemo_line": "cfgs/DINO/MY_SRC/zdftke.F90:401-468",
+    "nemo_line": "cfgs/DINO/MY_SRC/zdftke.F90:436-440",
     "next_round_fix_design": {
       "construction": "at model-step entry compute and freeze the exact (rn2, rn2b, gdepw_Kmm, e3w_Kmm) bundle from the registered raw-mesh live geometry; carry it through zdf_mxl and every zdf_tke consumer. Langmuir must receive frozen gdepw_Kmm/e3w_Kmm rather than -z_interface/dz_half. Non-oracle cards retain the present recomputation and metric slots byte-for-byte.",
       "faithful_default_on_complete_dino_nemo_cards": "step_entry",
@@ -70,6 +70,59 @@
         "zwlc",
         "source"
       ]
+    },
+    "offline_composite_diagnostic": {
+      "dispositive": false,
+      "metrics": {
+        "aggregate_bar_pass": false,
+        "bar": 1e-15,
+        "column_bar_pass": false,
+        "correlation": 0.9999434374311064,
+        "focus": [
+          {
+            "column_error": 7.921765987042532e-06,
+            "i": 1,
+            "j": 11,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 1.0216078875948975e-05,
+            "i": 1,
+            "j": 12,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 1.1159353126930354e-05,
+            "i": 1,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 5.33422621208234e-06,
+            "i": 23,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          }
+        ],
+        "max_column_error": 3.861848456925888,
+        "n_diverged_columns": 9155,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 765,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": false,
+        "reference_rms": 3.021261226904126e-08,
+        "rms_ratio": 0.9999931933889146,
+        "worst_column_ji": [
+          50,
+          48
+        ]
+      },
+      "reason": "no NEMO post-ln_lc stage dump"
     },
     "operand_localization": {
       "e3w_Kmm": {
@@ -370,6 +423,17 @@
         "aggregate_bar_pass": true,
         "bar": 1e-15,
         "column_bar_pass": false,
+        "controls": {
+          "baseline_pass": true,
+          "nonfinite_fired": true,
+          "one_i_roll_fired": true,
+          "perturbation_fired": true,
+          "perturbed_ji_k": [
+            1,
+            1,
+            0
+          ]
+        },
         "correlation": 0.9999999999999983,
         "focus": [
           {
@@ -407,6 +471,59 @@
         "n_verified_columns": 0,
         "n_wet_columns": 9920,
         "n_wet_elements": 332214,
+        "offline_composite_diagnostic": {
+          "dispositive": false,
+          "metrics": {
+            "aggregate_bar_pass": false,
+            "bar": 1e-15,
+            "column_bar_pass": false,
+            "correlation": 0.9999434374311064,
+            "focus": [
+              {
+                "column_error": 7.921765987042532e-06,
+                "i": 1,
+                "j": 11,
+                "pass": false,
+                "wet": true
+              },
+              {
+                "column_error": 1.0216078875948975e-05,
+                "i": 1,
+                "j": 12,
+                "pass": false,
+                "wet": true
+              },
+              {
+                "column_error": 1.1159353126930354e-05,
+                "i": 1,
+                "j": 13,
+                "pass": false,
+                "wet": true
+              },
+              {
+                "column_error": 5.33422621208234e-06,
+                "i": 23,
+                "j": 13,
+                "pass": false,
+                "wet": true
+              }
+            ],
+            "max_column_error": 3.861848456925888,
+            "n_diverged_columns": 9155,
+            "n_nonfinite_wet_elements": 0,
+            "n_verified_columns": 765,
+            "n_wet_columns": 9920,
+            "n_wet_elements": 332214,
+            "pass": false,
+            "reference_rms": 3.021261226904126e-08,
+            "rms_ratio": 0.9999931933889146,
+            "worst_column_ji": [
+              50,
+              48
+            ]
+          },
+          "reason": "no NEMO post-ln_lc stage dump"
+        },
         "pass": false,
         "reference_rms": 6.811828981750718e-05,
         "rms_ratio": 1.000000000691871,
@@ -563,54 +680,118 @@
         ]
       }
     },
-    "operation": "Langmuir TKE source",
+    "operation": "Langmuir TKE source rn2b operand",
     "output": {
-      "aggregate_bar_pass": false,
+      "aggregate_bar_pass": true,
       "bar": 1e-15,
       "column_bar_pass": false,
-      "correlation": 0.9999434374311064,
+      "controls": {
+        "baseline_pass": true,
+        "nonfinite_fired": true,
+        "one_i_roll_fired": true,
+        "perturbation_fired": true,
+        "perturbed_ji_k": [
+          1,
+          1,
+          0
+        ]
+      },
+      "correlation": 0.9999999999999983,
       "focus": [
         {
-          "column_error": 7.921765987042532e-06,
+          "column_error": 2.000840798268687e-11,
           "i": 1,
           "j": 11,
           "pass": false,
           "wet": true
         },
         {
-          "column_error": 1.0216078875948975e-05,
+          "column_error": 2.6372659721814548e-11,
           "i": 1,
           "j": 12,
           "pass": false,
           "wet": true
         },
         {
-          "column_error": 1.1159353126930354e-05,
+          "column_error": 2.789836063283117e-11,
           "i": 1,
           "j": 13,
           "pass": false,
           "wet": true
         },
         {
-          "column_error": 5.33422621208234e-06,
+          "column_error": 8.686227287301026e-12,
           "i": 23,
           "j": 13,
           "pass": false,
           "wet": true
         }
       ],
-      "max_column_error": 3.861848456925888,
-      "n_diverged_columns": 9155,
+      "max_column_error": 4.150231540863742e-07,
+      "n_diverged_columns": 9920,
       "n_nonfinite_wet_elements": 0,
-      "n_verified_columns": 765,
+      "n_verified_columns": 0,
       "n_wet_columns": 9920,
       "n_wet_elements": 332214,
+      "offline_composite_diagnostic": {
+        "dispositive": false,
+        "metrics": {
+          "aggregate_bar_pass": false,
+          "bar": 1e-15,
+          "column_bar_pass": false,
+          "correlation": 0.9999434374311064,
+          "focus": [
+            {
+              "column_error": 7.921765987042532e-06,
+              "i": 1,
+              "j": 11,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 1.0216078875948975e-05,
+              "i": 1,
+              "j": 12,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 1.1159353126930354e-05,
+              "i": 1,
+              "j": 13,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 5.33422621208234e-06,
+              "i": 23,
+              "j": 13,
+              "pass": false,
+              "wet": true
+            }
+          ],
+          "max_column_error": 3.861848456925888,
+          "n_diverged_columns": 9155,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 765,
+          "n_wet_columns": 9920,
+          "n_wet_elements": 332214,
+          "pass": false,
+          "reference_rms": 3.021261226904126e-08,
+          "rms_ratio": 0.9999931933889146,
+          "worst_column_ji": [
+            50,
+            48
+          ]
+        },
+        "reason": "no NEMO post-ln_lc stage dump"
+      },
       "pass": false,
-      "reference_rms": 3.021261226904126e-08,
-      "rms_ratio": 0.9999931933889146,
+      "reference_rms": 6.811828981750718e-05,
+      "rms_ratio": 1.000000000691871,
       "worst_column_ji": [
-        50,
-        48
+        113,
+        50
       ]
     },
     "row": 10
@@ -640,59 +821,123 @@
   "lane": "d180",
   "numpy": "2.4.4",
   "platform": "Linux-5.14.0-611.36.1.el9_7.x86_64-x86_64-with-glibc2.34",
-  "probe_commit_sha": "bfe13b64c6ffc288b122431e33fb81dc46b2e88f",
+  "probe_commit_sha": "1551b3055b2c5f34944bf13d1268330ed073fb96",
   "python": "3.13.0",
   "row4_localization": null,
   "rows": {
-    "10_langmuir_source": {
+    "10_langmuir_rn2b_operand": {
       "disposition": "DIVERGED",
       "output": {
-        "aggregate_bar_pass": false,
+        "aggregate_bar_pass": true,
         "bar": 1e-15,
         "column_bar_pass": false,
-        "correlation": 0.9999434374311064,
+        "controls": {
+          "baseline_pass": true,
+          "nonfinite_fired": true,
+          "one_i_roll_fired": true,
+          "perturbation_fired": true,
+          "perturbed_ji_k": [
+            1,
+            1,
+            0
+          ]
+        },
+        "correlation": 0.9999999999999983,
         "focus": [
           {
-            "column_error": 7.921765987042532e-06,
+            "column_error": 2.000840798268687e-11,
             "i": 1,
             "j": 11,
             "pass": false,
             "wet": true
           },
           {
-            "column_error": 1.0216078875948975e-05,
+            "column_error": 2.6372659721814548e-11,
             "i": 1,
             "j": 12,
             "pass": false,
             "wet": true
           },
           {
-            "column_error": 1.1159353126930354e-05,
+            "column_error": 2.789836063283117e-11,
             "i": 1,
             "j": 13,
             "pass": false,
             "wet": true
           },
           {
-            "column_error": 5.33422621208234e-06,
+            "column_error": 8.686227287301026e-12,
             "i": 23,
             "j": 13,
             "pass": false,
             "wet": true
           }
         ],
-        "max_column_error": 3.861848456925888,
-        "n_diverged_columns": 9155,
+        "max_column_error": 4.150231540863742e-07,
+        "n_diverged_columns": 9920,
         "n_nonfinite_wet_elements": 0,
-        "n_verified_columns": 765,
+        "n_verified_columns": 0,
         "n_wet_columns": 9920,
         "n_wet_elements": 332214,
+        "offline_composite_diagnostic": {
+          "dispositive": false,
+          "metrics": {
+            "aggregate_bar_pass": false,
+            "bar": 1e-15,
+            "column_bar_pass": false,
+            "correlation": 0.9999434374311064,
+            "focus": [
+              {
+                "column_error": 7.921765987042532e-06,
+                "i": 1,
+                "j": 11,
+                "pass": false,
+                "wet": true
+              },
+              {
+                "column_error": 1.0216078875948975e-05,
+                "i": 1,
+                "j": 12,
+                "pass": false,
+                "wet": true
+              },
+              {
+                "column_error": 1.1159353126930354e-05,
+                "i": 1,
+                "j": 13,
+                "pass": false,
+                "wet": true
+              },
+              {
+                "column_error": 5.33422621208234e-06,
+                "i": 23,
+                "j": 13,
+                "pass": false,
+                "wet": true
+              }
+            ],
+            "max_column_error": 3.861848456925888,
+            "n_diverged_columns": 9155,
+            "n_nonfinite_wet_elements": 0,
+            "n_verified_columns": 765,
+            "n_wet_columns": 9920,
+            "n_wet_elements": 332214,
+            "pass": false,
+            "reference_rms": 3.021261226904126e-08,
+            "rms_ratio": 0.9999931933889146,
+            "worst_column_ji": [
+              50,
+              48
+            ]
+          },
+          "reason": "no NEMO post-ln_lc stage dump"
+        },
         "pass": false,
-        "reference_rms": 3.021261226904126e-08,
-        "rms_ratio": 0.9999931933889146,
+        "reference_rms": 6.811828981750718e-05,
+        "rms_ratio": 1.000000000691871,
         "worst_column_ji": [
-          50,
-          48
+          113,
+          50
         ]
       }
     },
@@ -969,7 +1214,7 @@
             "name": "rn2b evaluation lifetime/geometry",
             "nemo_line": "cfgs/DINO/MY_SRC/stpmlf.F90:204-210; cfgs/DINO/MY_SRC/zdftke.F90:436-440"
           },
-          "nemo_line": "cfgs/DINO/MY_SRC/zdftke.F90:401-468",
+          "nemo_line": "cfgs/DINO/MY_SRC/zdftke.F90:436-440",
           "next_round_fix_design": {
             "construction": "at model-step entry compute and freeze the exact (rn2, rn2b, gdepw_Kmm, e3w_Kmm) bundle from the registered raw-mesh live geometry; carry it through zdf_mxl and every zdf_tke consumer. Langmuir must receive frozen gdepw_Kmm/e3w_Kmm rather than -z_interface/dz_half. Non-oracle cards retain the present recomputation and metric slots byte-for-byte.",
             "faithful_default_on_complete_dino_nemo_cards": "step_entry",
@@ -985,6 +1230,59 @@
               "zwlc",
               "source"
             ]
+          },
+          "offline_composite_diagnostic": {
+            "dispositive": false,
+            "metrics": {
+              "aggregate_bar_pass": false,
+              "bar": 1e-15,
+              "column_bar_pass": false,
+              "correlation": 0.9999434374311064,
+              "focus": [
+                {
+                  "column_error": 7.921765987042532e-06,
+                  "i": 1,
+                  "j": 11,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 1.0216078875948975e-05,
+                  "i": 1,
+                  "j": 12,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 1.1159353126930354e-05,
+                  "i": 1,
+                  "j": 13,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 5.33422621208234e-06,
+                  "i": 23,
+                  "j": 13,
+                  "pass": false,
+                  "wet": true
+                }
+              ],
+              "max_column_error": 3.861848456925888,
+              "n_diverged_columns": 9155,
+              "n_nonfinite_wet_elements": 0,
+              "n_verified_columns": 765,
+              "n_wet_columns": 9920,
+              "n_wet_elements": 332214,
+              "pass": false,
+              "reference_rms": 3.021261226904126e-08,
+              "rms_ratio": 0.9999931933889146,
+              "worst_column_ji": [
+                50,
+                48
+              ]
+            },
+            "reason": "no NEMO post-ln_lc stage dump"
           },
           "operand_localization": {
             "e3w_Kmm": {
@@ -1285,6 +1583,17 @@
               "aggregate_bar_pass": true,
               "bar": 1e-15,
               "column_bar_pass": false,
+              "controls": {
+                "baseline_pass": true,
+                "nonfinite_fired": true,
+                "one_i_roll_fired": true,
+                "perturbation_fired": true,
+                "perturbed_ji_k": [
+                  1,
+                  1,
+                  0
+                ]
+              },
               "correlation": 0.9999999999999983,
               "focus": [
                 {
@@ -1322,6 +1631,59 @@
               "n_verified_columns": 0,
               "n_wet_columns": 9920,
               "n_wet_elements": 332214,
+              "offline_composite_diagnostic": {
+                "dispositive": false,
+                "metrics": {
+                  "aggregate_bar_pass": false,
+                  "bar": 1e-15,
+                  "column_bar_pass": false,
+                  "correlation": 0.9999434374311064,
+                  "focus": [
+                    {
+                      "column_error": 7.921765987042532e-06,
+                      "i": 1,
+                      "j": 11,
+                      "pass": false,
+                      "wet": true
+                    },
+                    {
+                      "column_error": 1.0216078875948975e-05,
+                      "i": 1,
+                      "j": 12,
+                      "pass": false,
+                      "wet": true
+                    },
+                    {
+                      "column_error": 1.1159353126930354e-05,
+                      "i": 1,
+                      "j": 13,
+                      "pass": false,
+                      "wet": true
+                    },
+                    {
+                      "column_error": 5.33422621208234e-06,
+                      "i": 23,
+                      "j": 13,
+                      "pass": false,
+                      "wet": true
+                    }
+                  ],
+                  "max_column_error": 3.861848456925888,
+                  "n_diverged_columns": 9155,
+                  "n_nonfinite_wet_elements": 0,
+                  "n_verified_columns": 765,
+                  "n_wet_columns": 9920,
+                  "n_wet_elements": 332214,
+                  "pass": false,
+                  "reference_rms": 3.021261226904126e-08,
+                  "rms_ratio": 0.9999931933889146,
+                  "worst_column_ji": [
+                    50,
+                    48
+                  ]
+                },
+                "reason": "no NEMO post-ln_lc stage dump"
+              },
               "pass": false,
               "reference_rms": 6.811828981750718e-05,
               "rms_ratio": 1.000000000691871,
@@ -1478,54 +1840,118 @@
               ]
             }
           },
-          "operation": "Langmuir TKE source",
+          "operation": "Langmuir TKE source rn2b operand",
           "output": {
-            "aggregate_bar_pass": false,
+            "aggregate_bar_pass": true,
             "bar": 1e-15,
             "column_bar_pass": false,
-            "correlation": 0.9999434374311064,
+            "controls": {
+              "baseline_pass": true,
+              "nonfinite_fired": true,
+              "one_i_roll_fired": true,
+              "perturbation_fired": true,
+              "perturbed_ji_k": [
+                1,
+                1,
+                0
+              ]
+            },
+            "correlation": 0.9999999999999983,
             "focus": [
               {
-                "column_error": 7.921765987042532e-06,
+                "column_error": 2.000840798268687e-11,
                 "i": 1,
                 "j": 11,
                 "pass": false,
                 "wet": true
               },
               {
-                "column_error": 1.0216078875948975e-05,
+                "column_error": 2.6372659721814548e-11,
                 "i": 1,
                 "j": 12,
                 "pass": false,
                 "wet": true
               },
               {
-                "column_error": 1.1159353126930354e-05,
+                "column_error": 2.789836063283117e-11,
                 "i": 1,
                 "j": 13,
                 "pass": false,
                 "wet": true
               },
               {
-                "column_error": 5.33422621208234e-06,
+                "column_error": 8.686227287301026e-12,
                 "i": 23,
                 "j": 13,
                 "pass": false,
                 "wet": true
               }
             ],
-            "max_column_error": 3.861848456925888,
-            "n_diverged_columns": 9155,
+            "max_column_error": 4.150231540863742e-07,
+            "n_diverged_columns": 9920,
             "n_nonfinite_wet_elements": 0,
-            "n_verified_columns": 765,
+            "n_verified_columns": 0,
             "n_wet_columns": 9920,
             "n_wet_elements": 332214,
+            "offline_composite_diagnostic": {
+              "dispositive": false,
+              "metrics": {
+                "aggregate_bar_pass": false,
+                "bar": 1e-15,
+                "column_bar_pass": false,
+                "correlation": 0.9999434374311064,
+                "focus": [
+                  {
+                    "column_error": 7.921765987042532e-06,
+                    "i": 1,
+                    "j": 11,
+                    "pass": false,
+                    "wet": true
+                  },
+                  {
+                    "column_error": 1.0216078875948975e-05,
+                    "i": 1,
+                    "j": 12,
+                    "pass": false,
+                    "wet": true
+                  },
+                  {
+                    "column_error": 1.1159353126930354e-05,
+                    "i": 1,
+                    "j": 13,
+                    "pass": false,
+                    "wet": true
+                  },
+                  {
+                    "column_error": 5.33422621208234e-06,
+                    "i": 23,
+                    "j": 13,
+                    "pass": false,
+                    "wet": true
+                  }
+                ],
+                "max_column_error": 3.861848456925888,
+                "n_diverged_columns": 9155,
+                "n_nonfinite_wet_elements": 0,
+                "n_verified_columns": 765,
+                "n_wet_columns": 9920,
+                "n_wet_elements": 332214,
+                "pass": false,
+                "reference_rms": 3.021261226904126e-08,
+                "rms_ratio": 0.9999931933889146,
+                "worst_column_ji": [
+                  50,
+                  48
+                ]
+              },
+              "reason": "no NEMO post-ln_lc stage dump"
+            },
             "pass": false,
-            "reference_rms": 3.021261226904126e-08,
-            "rms_ratio": 0.9999931933889146,
+            "reference_rms": 6.811828981750718e-05,
+            "rms_ratio": 1.000000000691871,
             "worst_column_ji": [
-              50,
-              48
+              113,
+              50
             ]
           },
           "row": 10
@@ -1580,53 +2006,117 @@
           ]
         },
         "rows": {
-          "10_langmuir_source": {
-            "aggregate_bar_pass": false,
+          "10_langmuir_rn2b_operand": {
+            "aggregate_bar_pass": true,
             "bar": 1e-15,
             "column_bar_pass": false,
-            "correlation": 0.9999434374311064,
+            "controls": {
+              "baseline_pass": true,
+              "nonfinite_fired": true,
+              "one_i_roll_fired": true,
+              "perturbation_fired": true,
+              "perturbed_ji_k": [
+                1,
+                1,
+                0
+              ]
+            },
+            "correlation": 0.9999999999999983,
             "focus": [
               {
-                "column_error": 7.921765987042532e-06,
+                "column_error": 2.000840798268687e-11,
                 "i": 1,
                 "j": 11,
                 "pass": false,
                 "wet": true
               },
               {
-                "column_error": 1.0216078875948975e-05,
+                "column_error": 2.6372659721814548e-11,
                 "i": 1,
                 "j": 12,
                 "pass": false,
                 "wet": true
               },
               {
-                "column_error": 1.1159353126930354e-05,
+                "column_error": 2.789836063283117e-11,
                 "i": 1,
                 "j": 13,
                 "pass": false,
                 "wet": true
               },
               {
-                "column_error": 5.33422621208234e-06,
+                "column_error": 8.686227287301026e-12,
                 "i": 23,
                 "j": 13,
                 "pass": false,
                 "wet": true
               }
             ],
-            "max_column_error": 3.861848456925888,
-            "n_diverged_columns": 9155,
+            "max_column_error": 4.150231540863742e-07,
+            "n_diverged_columns": 9920,
             "n_nonfinite_wet_elements": 0,
-            "n_verified_columns": 765,
+            "n_verified_columns": 0,
             "n_wet_columns": 9920,
             "n_wet_elements": 332214,
+            "offline_composite_diagnostic": {
+              "dispositive": false,
+              "metrics": {
+                "aggregate_bar_pass": false,
+                "bar": 1e-15,
+                "column_bar_pass": false,
+                "correlation": 0.9999434374311064,
+                "focus": [
+                  {
+                    "column_error": 7.921765987042532e-06,
+                    "i": 1,
+                    "j": 11,
+                    "pass": false,
+                    "wet": true
+                  },
+                  {
+                    "column_error": 1.0216078875948975e-05,
+                    "i": 1,
+                    "j": 12,
+                    "pass": false,
+                    "wet": true
+                  },
+                  {
+                    "column_error": 1.1159353126930354e-05,
+                    "i": 1,
+                    "j": 13,
+                    "pass": false,
+                    "wet": true
+                  },
+                  {
+                    "column_error": 5.33422621208234e-06,
+                    "i": 23,
+                    "j": 13,
+                    "pass": false,
+                    "wet": true
+                  }
+                ],
+                "max_column_error": 3.861848456925888,
+                "n_diverged_columns": 9155,
+                "n_nonfinite_wet_elements": 0,
+                "n_verified_columns": 765,
+                "n_wet_columns": 9920,
+                "n_wet_elements": 332214,
+                "pass": false,
+                "reference_rms": 3.021261226904126e-08,
+                "rms_ratio": 0.9999931933889146,
+                "worst_column_ji": [
+                  50,
+                  48
+                ]
+              },
+              "reason": "no NEMO post-ln_lc stage dump"
+            },
             "pass": false,
-            "reference_rms": 3.021261226904126e-08,
-            "rms_ratio": 0.9999931933889146,
+            "reference_rms": 6.811828981750718e-05,
+            "rms_ratio": 1.000000000691871,
             "worst_column_ji": [
-              50,
-              48
+              113,
+              50
             ]
           },
           "5_bottom_drag_coefficient": {
@@ -1784,7 +2274,67 @@
             "aggregate_bar_pass": true,
             "bar": 1e-15,
             "column_bar_pass": true,
+            "controls": {
+              "baseline_pass": true,
+              "horizontal_roll": "WAIVED: DINO analytic wind is zonally invariant",
+              "nonfinite_fired": true,
+              "perturbation_fired": true,
+              "perturbed_ji_k": [
+                1,
+                1,
+                0
+              ]
+            },
             "correlation": 1.0,
+            "default_literal_utau_vs_sbc_dump": {
+              "aggregate_bar_pass": true,
+              "bar": 1e-15,
+              "column_bar_pass": true,
+              "correlation": 0.9999999999999998,
+              "focus": [
+                {
+                  "column_error": 0.0,
+                  "i": 1,
+                  "j": 11,
+                  "pass": true,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0,
+                  "i": 1,
+                  "j": 12,
+                  "pass": true,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0,
+                  "i": 1,
+                  "j": 13,
+                  "pass": true,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0,
+                  "i": 23,
+                  "j": 13,
+                  "pass": true,
+                  "wet": true
+                }
+              ],
+              "max_column_error": 0.0,
+              "n_diverged_columns": 0,
+              "n_nonfinite_wet_elements": 0,
+              "n_verified_columns": 9920,
+              "n_wet_columns": 9920,
+              "n_wet_elements": 9920,
+              "pass": true,
+              "reference_rms": 0.08941482531068491,
+              "rms_ratio": 1.0,
+              "worst_column_ji": [
+                1,
+                1
+              ]
+            },
             "focus": [
               {
                 "column_error": 0.0,
@@ -1815,6 +2365,55 @@
                 "wet": true
               }
             ],
+            "legacy_factored_utau_vs_sbc_dump": {
+              "aggregate_bar_pass": true,
+              "bar": 1e-15,
+              "column_bar_pass": false,
+              "correlation": 0.9999999999999998,
+              "focus": [
+                {
+                  "column_error": 0.0,
+                  "i": 1,
+                  "j": 11,
+                  "pass": true,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0,
+                  "i": 1,
+                  "j": 12,
+                  "pass": true,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0,
+                  "i": 1,
+                  "j": 13,
+                  "pass": true,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0,
+                  "i": 23,
+                  "j": 13,
+                  "pass": true,
+                  "wet": true
+                }
+              ],
+              "max_column_error": 1.552067876841905e-15,
+              "n_diverged_columns": 154,
+              "n_nonfinite_wet_elements": 0,
+              "n_verified_columns": 9766,
+              "n_wet_columns": 9920,
+              "n_wet_elements": 9920,
+              "pass": false,
+              "reference_rms": 0.08941482531068491,
+              "rms_ratio": 1.0,
+              "worst_column_ji": [
+                65,
+                1
+              ]
+            },
             "max_column_error": 0.0,
             "n_diverged_columns": 0,
             "n_nonfinite_wet_elements": 0,
@@ -1832,7 +2431,25 @@
           "9_bottom_tke_boundary": {
             "aggregate_bar_pass": true,
             "bar": 1e-15,
+            "bottom_index_identity": {
+              "n_mismatch_wet_columns": 0,
+              "n_wet_columns": 9920,
+              "nemo_source": "mesh_mask.nc:mbathy - 1",
+              "off_by_one_control_fired": true,
+              "pass": true
+            },
             "column_bar_pass": true,
+            "controls": {
+              "baseline_pass": true,
+              "nonfinite_fired": true,
+              "one_i_roll_fired": true,
+              "perturbation_fired": true,
+              "perturbed_ji_k": [
+                1,
+                1,
+                0
+              ]
+            },
             "correlation": null,
             "focus": [
               {
@@ -2108,7 +2725,67 @@
         "aggregate_bar_pass": true,
         "bar": 1e-15,
         "column_bar_pass": true,
+        "controls": {
+          "baseline_pass": true,
+          "horizontal_roll": "WAIVED: DINO analytic wind is zonally invariant",
+          "nonfinite_fired": true,
+          "perturbation_fired": true,
+          "perturbed_ji_k": [
+            1,
+            1,
+            0
+          ]
+        },
         "correlation": 1.0,
+        "default_literal_utau_vs_sbc_dump": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-15,
+          "column_bar_pass": true,
+          "correlation": 0.9999999999999998,
+          "focus": [
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 11,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 12,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 23,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            }
+          ],
+          "max_column_error": 0.0,
+          "n_diverged_columns": 0,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 9920,
+          "n_wet_columns": 9920,
+          "n_wet_elements": 9920,
+          "pass": true,
+          "reference_rms": 0.08941482531068491,
+          "rms_ratio": 1.0,
+          "worst_column_ji": [
+            1,
+            1
+          ]
+        },
         "focus": [
           {
             "column_error": 0.0,
@@ -2139,6 +2816,55 @@
             "wet": true
           }
         ],
+        "legacy_factored_utau_vs_sbc_dump": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-15,
+          "column_bar_pass": false,
+          "correlation": 0.9999999999999998,
+          "focus": [
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 11,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 12,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 23,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            }
+          ],
+          "max_column_error": 1.552067876841905e-15,
+          "n_diverged_columns": 154,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 9766,
+          "n_wet_columns": 9920,
+          "n_wet_elements": 9920,
+          "pass": false,
+          "reference_rms": 0.08941482531068491,
+          "rms_ratio": 1.0,
+          "worst_column_ji": [
+            65,
+            1
+          ]
+        },
         "max_column_error": 0.0,
         "n_diverged_columns": 0,
         "n_nonfinite_wet_elements": 0,
@@ -2159,7 +2885,25 @@
       "output": {
         "aggregate_bar_pass": true,
         "bar": 1e-15,
+        "bottom_index_identity": {
+          "n_mismatch_wet_columns": 0,
+          "n_wet_columns": 9920,
+          "nemo_source": "mesh_mask.nc:mbathy - 1",
+          "off_by_one_control_fired": true,
+          "pass": true
+        },
         "column_bar_pass": true,
+        "controls": {
+          "baseline_pass": true,
+          "nonfinite_fired": true,
+          "one_i_roll_fired": true,
+          "perturbation_fired": true,
+          "perturbed_ji_k": [
+            1,
+            1,
+            0
+          ]
+        },
         "correlation": null,
         "focus": [
           {
@@ -2234,16 +2978,17 @@
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/WORK/zdfsh2.F90": "c31f062e282b8710a0b565be7aecbc35b8e741b05a96a393402fcd5a737f28f8",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src/OCE/TRA/eosbn2.F90": "689f8fdf5482e2bc6c7ecc59544ff7384fda6e4551e32be898e715501e55977d",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src/OCE/ZDF/zdfsh2.F90": "c31f062e282b8710a0b565be7aecbc35b8e741b05a96a393402fcd5a737f28f8",
+    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/PREREG_zdf_chain_sweep.md": "0c3ebc401280390250f1b71e86f026ac70db9565d085874aee5cc27e1cf963aa",
     "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/PREREG_zdf_chain_sweep_round3.md": "71c8b22ddd0a1a6e4616b45f3e563212a5b6baeac391d9df54880d14898d421c",
     "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/PREREG_zdf_chain_sweep_round4.md": "37e60cba17bbd8df00f651661f48d5b582e7a8c2573183e118f9567e62e76bf1",
     "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/dump_lane.py": "41252d898b0d09b350c086aa678ddb890c7e6232fa2b46e88093a3b108a9bf62",
     "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/eos_rab_bn2_per_element.py": "3a82b0ef216fccf1b9112bfbac0005096eee491f15693d80f82320d3d80febda",
-    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py": "0b0e87c5bececf84ea5b6d8b8e96318a24c61bd55bb1f1cbf02c2e256af3e593",
-    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/zdf_chain_sweep.py": "1b11efa41cadbbff54dc24cddde14ad5b24f9c859ab724f9cc324473c1c71a18",
+    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py": "5e1d00ca06c480c275cf9a8704f45a842bc5a7a07f9b36ba71c33e835d915be6",
+    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/zdf_chain_sweep.py": "c0b06fbb924f809825c3cc50a3611ad23f0eb867ea8a9ab46e349ca963510b97",
     "/tmp/dino_mld_audit_codex/mld_maps.npz": "9fb7344d1e6f92232d211f6a52ff8636022f0d9b0b05acea2b0bae6e6afd9bf0",
     "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py": "bd90cdb19a8a727eb1b212c2b2fcd4ae619c02af89be1419e6d0aa8685bf0040",
     "packages/ocean/legoesm/ocean/eos.py": "d8d3054b49bcc6c5a828dd0c53b1e0047ec8e6a13145790e9552c7f6f942139d",
-    "packages/ocean/legoesm/ocean/experiments/dino.py": "5f49277543d13f42ef0b4013b3d20c6ff2bcc0d638acd4038eb99962b44f891c",
+    "packages/ocean/legoesm/ocean/experiments/dino.py": "8bd76051440ded46134ffdd04101738853d078bc1b28d6cd77afea3a2a1f609d",
     "packages/ocean/legoesm/ocean/fidelity/nemo_io.py": "8ba2cbd28ca284e6bc3e2b6a93d3b35c5df001ee95646af3169f3e76c1080419",
     "packages/ocean/legoesm/ocean/fidelity/nemo_state_bridge.py": "ed5c7df3fe9b810dfe1f21ae5f3934483b26d75f9f71a787234ddad8ad1c7900",
     "packages/ocean/legoesm/ocean/fidelity/time_levels.py": "810c731be7df80374b34075c67f97278c2fab51889b2c9e7be684238980a5b27",
