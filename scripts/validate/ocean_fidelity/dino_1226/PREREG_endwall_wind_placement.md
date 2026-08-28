@@ -337,3 +337,88 @@ companions but cannot change the primary verdict. The selector does not exist
 yet at registration. Round 3 implemented it and the committed CPU prerequisite
 passed without changing these frozen bars. The two GPU commands are now
 authorized for the coordinator, but neither was run in this CPU-only sandbox.
+
+## Round-4 result: frozen STOP, descriptive ownership, and re-freeze
+
+The coordinator ran the two exact commands above. Both artifacts are clean at
+Git `9ca58a379afe65f4ee485615622c541c06d5d7c7`, fp64, stable for 160 samples,
+and stamp `bridge_before_stress_stagger="T"`, reconstruction time
+`15552000.0`, content hash
+`b6a08b8395017c8e3f8df0b8b13eefa75fdfe7be3770d788beaaf1ca514127ae`,
+and the requested explicit/implicit selector. Comparator and scorer hashes
+match the registration.
+
+The corrected explicit arm measured ratio `1.1607251697830108` and wall share
+`0.11941867158491266`. Both miss the frozen control bands, so the registered
+result is **STOP/control-invalid** and the implicit arm is **not classified**.
+The implicit numbers (`200.41106914842686`, `0.05585390128091391`; last-half
+ratio `10.545129752846789`, CI90 `[8.67094529695706,12.53280691395405]`) are
+descriptive only.
+
+**DESCRIPTIVE pending re-frozen bars:** compared with the round-1 uncorrected
+explicit baseline (`2.882400001277192`, `0.4855027387838016`), the corrected
+T carry removes `91.4616888188504%` of the excess-over-one amplitude and
+`87.8167530444577%` of the excess wall share above NEMO
+(`0.0686300413685866`). The bridge representation defect, not wind placement,
+owned most of the baseline wall flicker. The old measurements are not
+retracted; they describe the old bridge.
+
+### Corrected-explicit control band
+
+The new control band uses the same asymmetric fractional half-widths as the
+old band, applied to the measured corrected-explicit baseline. No rounding is
+used in the decision:
+
+| quantity | old lower/upper fractional half-width | corrected control band |
+|---|---:|---:|
+| first-eight ratio | `0.0979739110297185` / `0.10324729343288278` | `[1.0470043852687352,1.2805669019825299]` |
+| first-eight wall share | `0.21730616607454992` / `0.21523516320004085` | `[0.0934682579050795,0.14512176885262343]` |
+
+The repaired same-HEAD explicit arm must fall inside both intervals or STOP.
+
+The old CONFIRM/REFUTE bars are transferred by preserving their fraction of
+the old explicit-to-NEMO excess. For amplitude the reference is ratio `1`; for
+locus it is NEMO wall share `0.0686300413685866`. This gives:
+
+- **CONFIRMS placement ownership** only if repaired implicit ratio is
+  `<=1.021345777952874` and wall share is `<=0.08098019376738272`.
+- **REFUTES placement ownership** only if repaired implicit ratio is
+  `>=1.1109980453549448` and wall share is `>=0.10656501237402145`.
+- Otherwise **UNRESOLVED**. Both amplitude and locus are mandatory.
+
+### Mandatory one-step implicit-shock diagnosis
+
+No replacement implicit GPU arm is authorized until a committed CPU probe
+tests this source-derived hypothesis. Under `surface_stress_implicit=True`,
+`ocean_model_latlon_cgrid.py:3616-3640` adds the centred wind
+`tau/(rho H)` to barotropic `F_slow`, after the stress has been withheld from
+the 3-D `du_dt`; lines `3642-3647` then subtract the *augmented* `F_slow` from
+that stress-free `du_dt`. The candidate inconsistent state is therefore the
+provisional baroclinic after velocity `u_naa`, through its `du_dt_pert` input,
+not the already-corrected `tau_x_prev` carry.
+
+The one-step CPU counterfactual starts both arms from the identical corrected-T
+bridge and implicit-placement config. Arm A is the current construction. Arm B
+keeps augmented `F_slow` for the barotropic solver and keeps the same implicit
+top-cell stress deposit, but forms `du_dt_pert` using the pre-augmentation
+stress-free depth mean. No persistent state, coefficient, forcing, or later
+carry differs. A planted arm restores the current augmented subtraction.
+
+The probe must print, on wet support and at `(j=1,i=49)`, current/corrected/
+planted `du_dt_pert`, provisional `u_naa`, `F_slow`, post-step `u`, and eta;
+the primary number is wet-domain RMS of one-step
+`eta_implicit - eta_explicit` from the same corrected bridge. It also prints
+the material-support Jaccard between the `du_dt_pert` correction and the eta
+response. The retained first-step max-absolute controls are
+`0.0012013470296322257 m` implicit versus NEMO and
+`7.03693132994565e-06 m` explicit versus NEMO.
+
+- **CONFIRMS this shock source** iff Arm B removes at least `99%` of the
+  current implicit-minus-explicit eta RMS, the planted old subtraction restores
+  that RMS within `1e-6` relative error, and support Jaccard is `>=0.99`.
+- **REFUTES** iff Arm B removes `<=10%` of that RMS.
+- Otherwise **UNRESOLVED**. All other state leaves and build inputs must be
+  bit-identical, with planted state/config and decision-bar failures.
+
+Only a passing CPU diagnosis may authorize a same-HEAD explicit/implicit GPU
+rerun and application of the re-frozen placement bars above.

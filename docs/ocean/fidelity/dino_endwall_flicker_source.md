@@ -364,12 +364,47 @@ restart `adatrj/kt` cross-check and the existing analytic forcing/sign loaders
 in `kamm_twin_90d.py` and `dino.py`; later-step carry remains the existing
 `ocean_model_latlon_cgrid.py:8690-8699` path.
 
-The passing CPU gate authorizes the coordinator's exact five-day
-explicit/implicit commands in `PREREG_endwall_wind_placement.md`. The primary
-bars remain corrected-explicit ratio `[2.60,3.18]`, share `[0.38,0.59]`;
-implicit CONFIRM requires ratio `<=1.25` and share `<=0.17`, REFUTE requires
-ratio `>=2.30` and share `>=0.38`. Placement ownership remains **UNRESOLVED**
-until those GPU arms run; none ran in this round.
+## Round-4 GPU disposition
+
+**Registered verdict: STOP/control-invalid.** The corrected explicit control
+measured first-eight ratio `1.1607251697830108` and aggregate-wall share
+`0.11941867158491266`, both outside the frozen `[2.60,3.18]` and
+`[0.38,0.59]` control bands. The preregistered STOP therefore fired and the
+corrected implicit arm is **not classified**. Its ratio `200.41106914842686`,
+wall share `0.05585390128091391`, last-half ratio `10.545129752846789`, and
+last-half bootstrap CI90 `[8.67094529695706,12.53280691395405]` are
+descriptive shock evidence only.
+
+**DESCRIPTIVE pending re-frozen bars:** against the round-1 uncorrected
+explicit baseline (`2.882400001277192`, `0.4855027387838016`), the T-carry
+bridge correction removed `91.4616888188504%` of the excess-over-one flicker
+ratio and `87.8167530444577%` of the excess wall share above NEMO
+(`0.0686300413685866`). Thus the bridge representation defect, not wind
+placement, owned most of the baseline wall flicker. This is not a registered
+placement verdict. The round-1 numbers remain true of the uncorrected bridge;
+nothing is retracted.
+
+Both five-day arms were clean at Git `9ca58a379afe65f4ee485615622c541c06d5d7c7`,
+fp64, stable for 160 samples, and stamped T carry, reconstruction time
+`15552000.0 s`, and content hash
+`b6a08b8395017c8e3f8df0b8b13eefa75fdfe7be3770d788beaaf1ca514127ae`.
+The explicit/implicit NPZ SHA-256 values are
+`8b290ff1a2bd06bb757366d5e08d51a81f8bc4259975d26e376241a42ab97cc7`
+and `ffd77c118772d3d6cc859995c2c75a791eceeb556caae86f8d7678d27f86f58d`;
+their scorer JSON hashes are
+`5fd033345548dd5b80390293b0ee786d3c23f2a68055ae86afe2b616ad4e5dd0`
+and `b2727b02c402b0746eb2ac8ca44440b47eaece84cdf855d271597c1130c23060`.
+
+The carry-independent implicit shock must pass the one-step CPU diagnosis in
+the amended placement preregistration before a replacement GPU arm may be
+classified. Source inspection makes the provisional 3-D baroclinic momentum
+state `u_naa` (formed from `du_dt_pert`) the discriminating state: the implicit
+branch withholds stress from `du_dt`, augments `F_slow` with `tau/(rho H)`, then
+subtracts that augmented value from the stress-free `du_dt`. This is a
+preregistered hypothesis, not yet a finding.
+
+**Human decision required — current -> proposed:** keep the twin default as legacy U-as-T carry (known wrong) -> make reconstructed T carry the default?
+No default is changed in this lane.
 
 ## Review disposition and retractions
 
