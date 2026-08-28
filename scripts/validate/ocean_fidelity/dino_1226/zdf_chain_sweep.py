@@ -54,6 +54,7 @@ def _import_sibling(name: str, filename: str):
 base = _import_sibling("_zdf_bn2_base", "eos_rab_bn2_per_element.py")
 kamm = _import_sibling("_zdf_kamm_twin", "kamm_twin_90d.py")
 sh2_probe = _import_sibling("_zdf_sh2_capture", "sh2_canonical.py")
+sh2_walk = _import_sibling("_zdf_sh2_walk", "sh2_walk.py")
 from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
 from legoesm.ocean.eos import (
     NemoSEOSConfig,
@@ -328,47 +329,111 @@ def main() -> int:
             avm_sub_m = metrics(
                 np.asarray(sh2_with_nemo_avm)[..., :nsh], sh2_n,
                 wet_sh2, focus, POINTWISE_BAR)
+            next_operand = None
+            if avm_operand_m["pass"]:
+                before = kamm.read_nemo_restart_before(
+                    str(RUN / "DINO_00005760_restart.nc"), nn_hls=0)
+                avm_restart, _ = kamm.read_nemo_restart_tke_coefficients(
+                    str(RUN / "DINO_00005760_restart.nc"), nn_hls=0)
+                with xr.open_dataset(RUN / "mesh_mask.nc", decode_times=False) as ds:
+                    def llz(name):
+                        return np.moveaxis(
+                            np.asarray(ds[name].isel(time_counter=0)), 0, -1)
+                    def yyx(name):
+                        return np.asarray(ds[name].isel(time_counter=0))
+                    umask = llz("umask")
+                    vmask = llz("vmask")
+                    e3u0, e3v0 = llz("e3u_0"), llz("e3v_0")
+                    e3uw0, e3vw0 = llz("e3uw_0"), llz("e3vw_0")
+                    e1t, e2t = yyx("e1t"), yyx("e2t")
+                    e1u, e2u = yyx("e1u"), yyx("e2u")
+                    e1v, e2v = yyx("e1v"), yyx("e2v")
+                hu0 = np.sum(e3u0 * umask, axis=-1)
+                hv0 = np.sum(e3v0 * vmask, axis=-1)
+                ssumask = (np.max(umask, axis=-1) > 0).astype(np.float64)
+                ssvmask = (np.max(vmask, axis=-1) > 0).astype(np.float64)
+                r3u_n, r3v_n = sh2_walk.qco_r3(
+                    now.ssh, e1t, e2t, e1u, e2u, e1v, e2v,
+                    hu0, hv0, ssumask, ssvmask)
+                r3u_b, r3v_b = sh2_walk.qco_r3(
+                    before.ssh, e1t, e2t, e1u, e2u, e1v, e2v,
+                    hu0, hv0, ssumask, ssvmask)
+                e3uw_n, e3uw_b = (e3uw0 * (1.0 + r3u_n[..., None]),
+                                   e3uw0 * (1.0 + r3u_b[..., None]))
+                e3vw_n, e3vw_b = (e3vw0 * (1.0 + r3v_n[..., None]),
+                                   e3vw0 * (1.0 + r3v_b[..., None]))
+                faithful = sh2_walk.zdf_sh2_reconstruct(
+                    now.u, now.v, before.u, before.v, avm_restart,
+                    e3uw_n, e3uw_b, e3vw_n, e3vw_b, umask, vmask)
+                exact_m = metrics(
+                    faithful[..., 1:1 + nsh], sh2_n, wet_sh2,
+                    focus, POINTWISE_BAR)
+
+                # Prove the velocity operands have already passed before
+                # naming the subsequent face-metric divisor.
+                u_now_arg, v_now_arg, u_b_arg, v_b_arg, dz_arg = sh2_args[:5]
+                velocity_identity = {
+                    "u_now_max_abs": float(np.max(np.abs(
+                        np.asarray(u_now_arg)[:, 1:, :] - now.u))),
+                    "v_now_max_abs": float(np.max(np.abs(
+                        np.asarray(v_now_arg)[1:, :, :] - now.v))),
+                    "u_before_max_abs": float(np.max(np.abs(
+                        np.asarray(u_b_arg)[:, 1:, :] - before.u))),
+                    "v_before_max_abs": float(np.max(np.abs(
+                        np.asarray(v_b_arg)[1:, :, :] - before.v))),
+                }
+                if any(value != 0.0 for value in velocity_identity.values()):
+                    raise AssertionError(
+                        "row-4 velocity identity failed before metric operand: "
+                        f"{velocity_identity}")
+                dz2 = np.asarray(dz_arg) ** 2
+                dz2u = np.concatenate([dz2, dz2[:, -1:, :]], axis=1)[:, 1:, :]
+                dz2v = np.concatenate([dz2, dz2[-1:, :, :]], axis=0)[1:, :, :]
+                wu = sh2_walk.build_wmask_from_uv(umask)[..., 1:1 + nsh] > 0
+                wv = sh2_walk.build_wmask_from_uv(vmask)[..., 1:1 + nsh] > 0
+                metric_u = metrics(
+                    dz2u[..., :nsh],
+                    (e3uw_n * e3uw_b)[..., 1:1 + nsh], wu,
+                    focus, POINTWISE_BAR)
+                metric_v = metrics(
+                    dz2v[..., :nsh],
+                    (e3vw_n * e3vw_b)[..., 1:1 + nsh], wv,
+                    focus, POINTWISE_BAR)
+                next_operand = {
+                    "name": "live e3uw(Kmm)*e3uw(Kbb) and e3vw product",
+                    "nemo_line": "cfgs/DINO/WORK/zdfsh2.F90:84,90",
+                    "velocity_operand_identity": velocity_identity,
+                    "u_divisor_current_T_metric_vs_nemo_live_face": metric_u,
+                    "v_divisor_current_T_metric_vs_nemo_live_face": metric_v,
+                    "substitute_full_live_face_metrics": exact_m,
+                    "next_round_fix_design": {
+                        "option": "tke_shear_vertical_metric",
+                        "faithful_default_on_complete_dino_nemo_cards":
+                            "live_face_now_before",
+                        "legacy_opt_in": "tpoint_static_squared",
+                        "construction": "preserve mesh e3uw_0/e3vw_0 and form "
+                            "each face divisor with independent NOW and BEFORE "
+                            "QCO r3u/r3v factors; thread only into zdf_sh2",
+                    },
+                }
             sh2_localization = {
                 "nemo_operand_order": [
                     "face avm averages", "face velocity differences",
                     "e3uw/e3vw divisors", "four-face sum"],
-                "first_diverging_operand": {
+                "fixed_operand": {
                     "name": "p_avm carried pre-step viscosity",
                     "nemo_line": "src/OCE/ZDF/zdfsh2.F90:80",
-                    "legoesm_operand": "current sub-iteration K_M_curr",
                     "metrics": avm_operand_m,
-                    "note": "substitution does not close the composite because "
-                            "later e3uw/e3vw operands remain non-identical; "
-                            "ordered localization stops at this first input",
                 },
+                "first_diverging_operand": next_operand,
                 "production_face_averaged_avm": row4m,
                 "input_avm_current_subiteration_vs_nemo_carried": avm_operand_m,
                 "substitute_nemo_carried_avm": avm_sub_m,
                 "legacy_substitute_tpoint_avm": legacy_m,
                 "first_passing_substitution": (
-                    "NEMO carried p_avm" if avm_sub_m["pass"] else None),
-                "next_round_fix_design": {
-                    "option": "tke_preclosure_coeff_source",
-                    "faithful_default": "carried_previous_step",
-                    "legacy_opt_in": "current_subiteration",
-                    "state_change": "carry avm/avt closure fields across steps; "
-                                    "seed bridged runs from restart avm/avt",
-                    "kernel_change": "thread carried p_avm through zdf_sh2, "
-                                     "the rn2b*p_avm Prandtl numerator, TKE "
-                                     "matrix diagonals, and wave surface "
-                                     "denominator; thread carried p_avt through "
-                                     "the -p_avt*rn2 RHS. Only tke_avn after "
-                                     "the solve overwrites the closure fields "
-                                     "for the next step",
-                    "required_red_tests": [
-                        "distinct carried/current arrays select carried bits",
-                        "restart avm bridge identity and next-step carry",
-                        "matrix, RHS, and wave denominator consume carried fields",
-                        "tke_avn overwrite happens only after the solve",
-                        "legacy arm reproduces current-subiteration bits",
-                        "JIT and finite gradients",
-                    ],
-                },
+                    "full live face metrics" if next_operand is not None and
+                    next_operand["substitute_full_live_face_metrics"]["pass"]
+                    else None),
             }
 
     localization = None
@@ -504,7 +569,7 @@ def main() -> int:
         RUN / "eiv_dump_gdept.bin", RUN / "eiv_dump_e3w.bin", args.mld_maps,
     ]
     artifact = {
-        "schema": "zdf-chain-sweep-v2",
+        "schema": "zdf-chain-sweep-v3",
         "lane": "d180", "kt": 5761, "cpu_only": True, "fp64": True,
         "checked_out_parent_sha": git_sha(),
         "probe_commit_sha": os.environ.get("ZDF_SWEEP_PROBE_SHA", "UNSTAMPED"),
