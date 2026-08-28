@@ -1543,10 +1543,25 @@ def _prandtl_number(
         # never let the safe substitute leak into the selected result.
         is_zero_zdiv = p_sh2 + bshear == 0.0
         safe_zdiv = jnp.where(is_zero_zdiv, 1.0, p_sh2 + bshear)  # avoid 1/0
-        zri_stratified = N2 * kappaM * jnp.where(
-            is_zero_zdiv, 1.0 / bshear, 1.0 / safe_zdiv)
+        numerator = N2 * kappaM
+        if cfg.tke_n2_evaluation_stage == "step_entry":
+            # DINO/NEMO literal evaluation order, zdftke.F90:489-495.
+            # Do not replace division with multiplication by a reciprocal:
+            # the matched-state row-11 bar resolves that one-ulp difference.
+            zri_stratified = jnp.where(
+                is_zero_zdiv, numerator / bshear, numerator / safe_zdiv)
+        else:
+            # Historical association retained exactly for every card outside
+            # the two complete DINO NEMO recipes.
+            zri_stratified = numerator * jnp.where(
+                is_zero_zdiv, 1.0 / bshear, 1.0 / safe_zdiv)
         zri = jnp.where(N2 > 0.0, zri_stratified, 0.0)
-        return jnp.maximum(1.0, jnp.minimum(10.0, cfg.prandtl_ri_coeff * zri))
+        if cfg.tke_n2_evaluation_stage == "step_entry":
+            ri_cri = jnp.asarray(1.0 / cfg.prandtl_ri_coeff, dtype=N2.dtype)
+            pdlr = jnp.maximum(0.1, ri_cri / jnp.maximum(ri_cri, zri))
+            return 1.0 / pdlr
+        return jnp.maximum(
+            1.0, jnp.minimum(10.0, cfg.prandtl_ri_coeff * zri))
     raise ValueError(
         f"Unknown prandtl_mode={cfg.prandtl_mode!r}; expected 'unit', "
         f"'constant', 'richardson' or 'nemo_ri'."
