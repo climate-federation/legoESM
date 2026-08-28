@@ -80,6 +80,13 @@ substitution, and the final floor/mask. This is a new differentiable solver
 path with boundary, JIT, and gradient obligations and is too large for this
 round, so the ordered sweep stops here.
 
+Two independent adversarial reviews returned PASS. The physics reviewer
+re-ran 164 CPU/fp64 tests and confirmed the literal source/update order and
+row-17 recurrence localization. The scope reviewer confirmed the two-card
+default boundary, unchanged-card pins, mixed-source guards, provenance,
+ordered stop, and climate hold. The author's focused CPU/fp64 suite passes
+180/180 tests.
+
 ### Climate status
 
 **CLIMATE ARMS NOT AUTHORIZED.** Rows 18--32 are unmeasured. The frozen
