@@ -1042,11 +1042,43 @@ def main() -> int:
                                 pdlr_l, pdlr_n, wet_pr, focus,
                                 POINTWISE_BAR),
                         }
+                        def literal_zri(n2_operand, avm_operand, sh2_operand):
+                            zdiv = sh2_operand + bshear
+                            numerator = n2_operand * avm_operand
+                            safe_zdiv = np.where(zdiv == 0.0, 1.0, zdiv)
+                            stratified = np.where(
+                                zdiv == 0.0,
+                                numerator / bshear,
+                                numerator / safe_zdiv)
+                            return np.where(
+                                n2_operand <= 0.0, 0.0, stratified)
+
+                        substitution_arrays = {
+                            "rn2b": literal_zri(
+                                rn2b_n_pr, avm_l, sh2_l),
+                            "p_avm": literal_zri(
+                                rn2b_l, avm_n, sh2_l),
+                            "p_sh2": literal_zri(
+                                rn2b_l, avm_l, sh2_n_pr),
+                            "all_three_oracle_operands": literal_zri(
+                                rn2b_n_pr, avm_n, sh2_n_pr),
+                        }
+                        row11_substitutions = {
+                            name: metrics(value, zri_n, wet_pr, focus,
+                                          POINTWISE_BAR)
+                            for name, value in substitution_arrays.items()
+                        }
                         row11_primary = dict(
                             row11_inputs["zri"]
                             if not row11_inputs["zri"]["pass"]
                             else row11_inputs["p_pdlr"])
                         row11_primary["operand_metrics"] = row11_inputs
+                        row11_primary["single_operand_substitutions"] = (
+                            row11_substitutions)
+                        row11_primary["first_passing_substitution"] = next(
+                            (name for name, value in
+                             row11_substitutions.items() if value["pass"]),
+                            None)
                         row11_primary["resolved_constants"] = {
                             "rn_bshear": float(bshear),
                             "ri_cri": float(1.0 / pr_cfg.prandtl_ri_coeff),
@@ -1557,6 +1589,15 @@ def main() -> int:
                               f"max={cm['max_column_error']:.6e} "
                               f"bad_columns={cm['n_diverged_columns']}/"
                               f"{cm['n_wet_columns']}")
+                for name, cm in first["output"].get(
+                        "single_operand_substitutions", {}).items():
+                    print(f"    substitute {name}: pass={cm['pass']} "
+                          f"max={cm['max_column_error']:.6e} "
+                          f"bad_columns={cm['n_diverged_columns']}/"
+                          f"{cm['n_wet_columns']}")
+                if "first_passing_substitution" in first["output"]:
+                    print("    first_passing_substitution="
+                          f"{first['output']['first_passing_substitution']}")
     if localization:
         for c in localization["candidates_in_nemo_evaluation_order"]:
             print(f"  substitute {c['substitution']}: pass={c['metrics']['pass']} "
