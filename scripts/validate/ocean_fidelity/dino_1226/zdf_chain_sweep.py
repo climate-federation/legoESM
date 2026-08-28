@@ -1040,7 +1040,7 @@ def main() -> int:
                                 pdlr_l, pdlr_n, wet_pr, focus,
                                 POINTWISE_BAR),
                         }
-                        row11_primary = (
+                        row11_primary = dict(
                             row11_inputs["zri"]
                             if not row11_inputs["zri"]["pass"]
                             else row11_inputs["p_pdlr"])
