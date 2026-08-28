@@ -450,6 +450,13 @@ claims before these findings were finalized.
   excess removal `99.9999969917%`, planted-stagger restoration relative error
   `0`, and both donor-support Jaccards `1.0`. The removal and restoration
   scoring paths each have planted reachable REFUTE controls.
+- Independent Round-3 evidence review: PASS; frozen bars, direct/`F_slow`
+  conventions, clean input hashes, other-leaf identity, and all planted
+  decision/support/order controls were checked with no hold.
+- Independent Round-3 mechanism review: PASS; NEMO U/V restart staggering,
+  existing DINO loader/sign chain, restart clock, fail-closed selector, later
+  carry path, serialized receipts, oracle-recipe classification, and exact GPU
+  handoff were checked with no hold.
 - Python compile and ruff on the new probe: PASS; E501 check on the legacy twin
   harness: PASS.
 - Twin selector/config smoke and implicit-arm construction on CPU: PASS. The
