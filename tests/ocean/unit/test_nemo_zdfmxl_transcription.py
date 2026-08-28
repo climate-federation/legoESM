@@ -87,6 +87,33 @@ def _nemo_nmln_reference(n2_by_level, mbkt, thresh, nlb10=2):
     return nmln
 
 
+def test_native_bn2_divide_and_mld_multiply_share_one_e3w():
+    """Changing native e3w alone cancels between bn2 and zdf_mxl exactly."""
+    dz = np.array([8.0, 12.0, 20.0, 35.0, 55.0, 80.0])
+    nlev = len(dz)
+    gd = np.cumsum(dz) - 0.45 * dz
+    active = jnp.ones((1, 1, nlev))
+    T = jnp.asarray(np.linspace(14.0, 4.0, nlev)[None, None, :])
+    S = jnp.asarray(np.linspace(35.3, 34.8, nlev)[None, None, :])
+
+    def run(native_e3w):
+        z = types.SimpleNamespace(
+            dz_ref=jnp.asarray(dz), t_depth_ref=jnp.asarray(gd),
+            is_active=active, h_partial=jnp.asarray(dz)[None, None, :],
+            nemo_e3w_mesh_reference=True,
+            nemo_e3w_0=jnp.asarray(native_e3w), n_levels=nlev,
+        )
+        return _nemo_mld_from_n2_integral(
+            T, S, jnp.ones((1, 1)), z, None, 0.01, 9.80665, 1026.0,
+            active_3d=active)
+
+    e3w = np.concatenate([[2.0 * gd[0]], np.diff(gd)])
+    h1, k1 = run(e3w)
+    h2, k2 = run(2.0 * e3w)
+    assert np.array_equal(np.asarray(k1), np.asarray(k2))
+    assert np.array_equal(np.asarray(h1), np.asarray(h2))
+
+
 def test_unstratified_column_stops_at_the_seafloor_not_the_last_interface():
     """A column that never reaches zN2_c must give nmln = mbkt+1 (NEMO's cap).
 
