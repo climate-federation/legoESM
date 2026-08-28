@@ -30,6 +30,7 @@ if os.environ.get("DINO_1226_LANE") != "d180":
 import jax
 import jax.numpy as jnp
 import numpy as np
+import xarray as xr
 
 HERE = Path(__file__).resolve().parent
 ORACLE = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2")
@@ -254,6 +255,15 @@ def main() -> int:
         e3w_factorized = e3w_ref[None, None, :] * stretch[..., None]
         add("factorized e3w_0*(1+r3t) divisor", assemble_bn2(
             aa, bb, TT, SS, gd, gw, e3w_factorized))
+        # Unlike NemoGrid today, mesh_mask.nc already carries NEMO's actual
+        # 3-D e3w_0 operand.  Test the implementable design directly: preserve
+        # that independent reference field and apply the live qco stretch.
+        with xr.open_dataset(RUN / "mesh_mask.nc", decode_times=False) as ds:
+            e3w0_mesh = np.asarray(ds["e3w_0"].isel(time_counter=0))
+        e3w0_mesh = jnp.asarray(np.moveaxis(e3w0_mesh, 0, -1), dtype=T.dtype)
+        e3w_mesh_live = e3w0_mesh[..., 1:1 + nk] * stretch[..., None]
+        add("mesh e3w_0*(1+r3t) divisor", assemble_bn2(
+            aa, bb, TT, SS, gd, gw, e3w_mesh_live))
         e3w_dump = jnp.asarray(e3w_n_full[..., 1:1 + nk], dtype=T.dtype)
         add("NEMO live e3w(Kmm) divisor", assemble_bn2(aa, bb, TT, SS, gd, gw,
                                                        e3w_dump))
@@ -266,6 +276,9 @@ def main() -> int:
                                             np.asarray(e3w_dump), wet, focus,
                                             POINTWISE_BAR),
             "factorized_e3w_vs_dump": metrics(np.asarray(e3w_factorized),
+                                               np.asarray(e3w_dump), wet, focus,
+                                               POINTWISE_BAR),
+            "mesh_e3w0_live_vs_dump": metrics(np.asarray(e3w_mesh_live),
                                                np.asarray(e3w_dump), wet, focus,
                                                POINTWISE_BAR),
             "candidates_in_nemo_evaluation_order": candidates,
