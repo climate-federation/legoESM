@@ -5720,6 +5720,62 @@ class LatLonCGridOceanModel:
             return None
         return _zc.bottom_level
 
+    def _seed_tke_preclosure_carry(self, state):
+        """Seed NEMO's cold-start ``avm_k/avt_k`` coefficient memory.
+
+        This helper is intentionally shared by direct :meth:`step` and
+        :meth:`seed_scan_carry`: restart bridges arrive with the fields
+        populated and are left untouched, while a true cold start reproduces
+        ``zdf_phy_init``'s background-times-``wmask`` construction.  Interior
+        legoESM W index ``k`` is NEMO W level ``k+2``, so the exact partial-
+        depth mask is ``is_active[..., 1:]``.
+        """
+        if not self._tke_prognostic_active():
+            return state
+        tke_cfg = self.config.physics.vertical_mixing.tke
+        if (getattr(tke_cfg, "tke_preclosure_coeff_source",
+                    "current_subiteration") != "carried_previous_step"):
+            return state
+        if (state.tke_avm is not None and state.tke_avt is not None
+                and state.tke_avm_surface is not None):
+            return state
+
+        from legoesm.core.field import Field
+        lm = state.land_mask.data
+        nlev = state.T.data.shape[-1]
+        dtype = state.T.data.dtype
+        is_active = getattr(self.z_coord, "is_active", None)
+        if is_active is None:
+            wet_w = ((lm[..., None] > 0.5)
+                     * jnp.ones((1, 1, nlev - 1), dtype=bool))
+        else:
+            wet_w = jnp.asarray(is_active[..., 1:], dtype=bool)
+            if wet_w.shape != lm.shape + (nlev - 1,):
+                raise ValueError(
+                    "partial-cell W mask shape does not match TKE carry: "
+                    f"got {wet_w.shape}, expected {lm.shape + (nlev - 1,)}")
+            wet_w = wet_w & (lm[..., None] > 0.5)
+
+        if state.tke_avm is None:
+            avm0 = (jnp.ones((1, 1, nlev - 1), dtype=dtype)
+                    * jnp.asarray(tke_cfg.kappaM_min, dtype=dtype))
+            state = state._replace(tke_avm=Field(
+                data=jnp.where(wet_w, avm0, 0.0), name="tke_avm",
+                dims=("lat", "lon", "level"), units="m^2/s"))
+        if state.tke_avt is None:
+            avt0 = (jnp.ones((1, 1, nlev - 1), dtype=dtype)
+                    * jnp.asarray(tke_cfg.kappaH_min, dtype=dtype))
+            state = state._replace(tke_avt=Field(
+                data=jnp.where(wet_w, avt0, 0.0), name="tke_avt",
+                dims=("lat", "lon", "level"), units="m^2/s"))
+        if state.tke_avm_surface is None:
+            avms0 = (jnp.asarray(tke_cfg.kappaM_min, dtype=dtype)
+                     * lm.astype(dtype))
+            state = state._replace(tke_avm_surface=Field(
+                data=avms0, name="tke_avm_surface",
+                dims=("lat", "lon"), units="m^2/s"))
+        return state
+
     def _tke_realized_kdiss_active(self) -> bool:
         """True iff the post-mixing TKE charges the REALIZED implicit-friction
         dissipation (Veros K_diss_v, friction.py:131-151) instead of the
@@ -7251,6 +7307,12 @@ class LatLonCGridOceanModel:
         -------
         LatLonCGridOceanState
         """
+        # A direct eager step is also a valid cold-start driver.  Seed the
+        # NEMO pre-tke_avn coefficient memory here as well as in
+        # seed_scan_carry(); otherwise only scan/restart drivers get the
+        # faithful avm_k/avt_k lifetime and a bare step fails on its first
+        # closure call.
+        state = self._seed_tke_preclosure_carry(state)
         if self.config.barotropic.barotropic_solver == "rigid_lid":
             # Eager fail-fast (host-side, before the jitted body): the rigid-lid
             # streamfunction solve is single-rank only.  The in-body guard runs
@@ -9592,39 +9654,9 @@ class LatLonCGridOceanModel:
                                    dims=("lat", "lon", "level"),
                     units="m^2/s^3"))
 
-        # NEMO carries the post-tke_avn avm_k/avt_k pair independently of en.
-        # Seed a true cold start exactly like zdf_phy_init (background closure
-        # values); restart twins replace these fields with restart avm_k/avt_k
-        # before reaching this point.
-        if self._tke_prognostic_active():
-            tke_cfg = self.config.physics.vertical_mixing.tke
-            if (getattr(tke_cfg, "tke_preclosure_coeff_source",
-                        "current_subiteration") == "carried_previous_step"):
-                from legoesm.core.field import Field
-                lm = state.land_mask.data
-                nlev = state.T.data.shape[-1]
-                dtype = state.T.data.dtype
-                wet3 = (lm[..., None] > 0.5)
-                if state.tke_avm is None:
-                    avm0 = (jnp.ones((1, 1, nlev - 1), dtype=dtype)
-                            * jnp.asarray(tke_cfg.kappaM_min, dtype=dtype))
-                    avm0 = jnp.where(wet3, avm0, 0.0)
-                    state = state._replace(tke_avm=Field(
-                        data=avm0, name="tke_avm",
-                        dims=("lat", "lon", "level"), units="m^2/s"))
-                if state.tke_avt is None:
-                    avt0 = (jnp.ones((1, 1, nlev - 1), dtype=dtype)
-                            * jnp.asarray(tke_cfg.kappaH_min, dtype=dtype))
-                    avt0 = jnp.where(wet3, avt0, 0.0)
-                    state = state._replace(tke_avt=Field(
-                        data=avt0, name="tke_avt",
-                        dims=("lat", "lon", "level"), units="m^2/s"))
-                if state.tke_avm_surface is None:
-                    avms0 = (jnp.asarray(tke_cfg.kappaM_min, dtype=dtype)
-                             * lm.astype(dtype))
-                    state = state._replace(tke_avm_surface=Field(
-                        data=avms0, name="tke_avm_surface",
-                        dims=("lat", "lon"), units="m^2/s"))
+        # Same cold-start coefficient memory as direct step(); idempotent for
+        # restart bridges and already-seeded scan carries.
+        state = self._seed_tke_preclosure_carry(state)
 
         # TKE-advection AB2 carry: seed the prior advective tendency dtke to
         # zero (Veros's zero-initialised dtke[taum1]) so the scan pytree stays
