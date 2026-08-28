@@ -52,6 +52,8 @@ def _import_sibling(name: str, filename: str):
 
 
 base = _import_sibling("_zdf_bn2_base", "eos_rab_bn2_per_element.py")
+kamm = _import_sibling("_zdf_kamm_twin", "kamm_twin_90d.py")
+sh2_probe = _import_sibling("_zdf_sh2_capture", "sh2_canonical.py")
 from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
 from legoesm.ocean.eos import (
     NemoSEOSConfig,
@@ -253,6 +255,55 @@ def main() -> int:
     row3 = {"output": row3m,
             "disposition": "VERIFIED" if row3m["pass"] else "DIVERGED"}
 
+    row4 = {"disposition": "UNMEASURED",
+            "reason": "an upstream row diverged"}
+    sh2_localization = None
+    if all(r["disposition"] == "VERIFIED" for r in (row1, row2, row3)):
+        br, cfg, mc, model, forcing, sf, twin_state = kamm._build_twin_state(
+            "nemo_dino_kamm_mlf", str(RUN), str(RUN), bridge_tke=True,
+            bridge_before=True, restart_file="DINO_00005760_restart.nc",
+            e3t_mode="both")
+        tke_cfg = mc.physics.vertical_mixing.tke
+        if (tke_cfg.tke_shear_production != "nemo_face_native"
+                or tke_cfg.tke_shear_avm_weighting != "tpoint"):
+            raise AssertionError(
+                "row-4 production path changed: expected face-native shear "
+                "with T-point avm weighting")
+        sh2_prod = sh2_probe.run_and_capture_sh2(
+            model, twin_state, sf, avm_weighting="tpoint")
+        sh2_n_full = base._load_interior(
+            str(RUN / "tke_dump_sh2.bin"), ni, nj)
+        nsh = min(sh2_prod.shape[-1], sh2_n_full.shape[-1] - 1)
+        sh2_n = sh2_n_full[..., 1:1 + nsh]
+        wet_sh2 = wet_w_all[..., :nsh]
+        row4m = metrics(np.asarray(sh2_prod)[..., :nsh], sh2_n, wet_sh2,
+                        focus, POINTWISE_BAR)
+        row4 = {"output": row4m,
+                "disposition": "VERIFIED" if row4m["pass"] else "DIVERGED"}
+        if row4["disposition"] == "DIVERGED":
+            from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+                LatLonCGridOceanModel,
+            )
+            cfg_face = tke_cfg._replace(tke_shear_avm_weighting="nemo_face")
+            mc_face = mc._replace(
+                physics=mc.physics._replace(
+                    vertical_mixing=mc.physics.vertical_mixing._replace(
+                        tke=cfg_face)))
+            model_face = LatLonCGridOceanModel(br.geometry, br.z_coord, mc_face)
+            sh2_face = sh2_probe.run_and_capture_sh2(
+                model_face, twin_state, sf, avm_weighting="nemo_face")
+            face_m = metrics(np.asarray(sh2_face)[..., :nsh], sh2_n,
+                             wet_sh2, focus, POINTWISE_BAR)
+            sh2_localization = {
+                "nemo_operand_order": [
+                    "face velocity differences", "e3uw/e3vw divisors",
+                    "face avm averages", "four-face sum"],
+                "production_tpoint_avm": row4m,
+                "substitute_face_averaged_avm": face_m,
+                "first_passing_substitution": (
+                    "face avm averages" if face_m["pass"] else None),
+            }
+
     localization = None
     if row1["disposition"] == "VERIFIED" and row2["disposition"] == "DIVERGED":
         # Exact dumps cover NEMO jk=1..35.  Score interfaces jk=2..35, i.e.
@@ -377,6 +428,7 @@ def main() -> int:
         RUN / "DINO_00005760_restart.nc", RUN / "mesh_mask.nc", RUN / "ocean.output",
         RUN / "dump_alpha_b.bin", RUN / "dump_beta_b.bin", RUN / "tke_dump_rn2b.bin",
         RUN / "tke_dump_rn2.bin",
+        RUN / "tke_dump_sh2.bin",
         RUN / "eiv_dump_gdept.bin", RUN / "eiv_dump_e3w.bin", args.mld_maps,
     ]
     artifact = {
@@ -390,6 +442,7 @@ def main() -> int:
         "time_levels": {x: time_level_for_dump(x) for x in
                         ("dump_alpha_b.bin", "dump_beta_b.bin", "tke_dump_rn2b.bin",
                          "tke_dump_rn2.bin",
+                         "tke_dump_sh2.bin",
                          "eiv_dump_gdept.bin", "eiv_dump_e3w.bin")},
         "focus_columns_ji": [list(x) for x in focus],
         "bars": {"pointwise_column": POINTWISE_BAR, "corr": CORR_BAR,
@@ -397,8 +450,10 @@ def main() -> int:
         "controls": controls,
         "rows": {"1_eos_rab_before": row1, "2_bn2_before": row2,
                  "3_eos_rab_bn2_now": row3,
-                 "4_zdf_sh2": {"disposition": "UNMEASURED",
-                                 "reason": "probe extension stops after row 3"}},
+                 "4_zdf_sh2": row4,
+                 "5_bottom_drag_operands": {"disposition": "UNMEASURED",
+                    "reason": "stop at row 4" if row4["disposition"] == "DIVERGED"
+                    else "probe extension stops after row 4"}},
         "first_divergence": ({"row": 2, "operation": "bn2(Nbb)",
                               "nemo_line": "src/OCE/TRA/eosbn2.F90:1467",
                               "localization": localization}
@@ -406,7 +461,12 @@ def main() -> int:
                              ({"row": 3, "operation": "eos_rab/bn2(Nnn)",
                                "nemo_line": "src/OCE/TRA/eosbn2.F90:1467",
                                "localization": None}
-                              if row3["disposition"] == "DIVERGED" else None)),
+                              if row3["disposition"] == "DIVERGED" else
+                              ({"row": 4, "operation": "zdf_sh2",
+                                "nemo_line": "src/OCE/ZDF/zdfsh2.F90:80-94",
+                                "localization": sh2_localization}
+                               if row4["disposition"] == "DIVERGED" else None))),
+        "row4_localization": sh2_localization,
         "sha256": {str(p): sha256(p) for p in source_paths + input_paths},
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -419,6 +479,16 @@ def main() -> int:
     print(f"row 3 eos_rab/bn2 now: {row3['disposition']} "
           f"max={row3m['max_column_error']:.6e} "
           f"bad_columns={row3m['n_diverged_columns']}/{row3m['n_wet_columns']}")
+    if row4["disposition"] != "UNMEASURED":
+        row4m = row4["output"]
+        print(f"row 4 zdf_sh2: {row4['disposition']} "
+              f"max={row4m['max_column_error']:.6e} "
+              f"bad_columns={row4m['n_diverged_columns']}/{row4m['n_wet_columns']}")
+        if sh2_localization is not None:
+            fm = sh2_localization["substitute_face_averaged_avm"]
+            print(f"  substitute face avm averages: pass={fm['pass']} "
+                  f"max={fm['max_column_error']:.6e} "
+                  f"bad_columns={fm['n_diverged_columns']}/{fm['n_wet_columns']}")
     if localization:
         for c in localization["candidates_in_nemo_evaluation_order"]:
             print(f"  substitute {c['substitution']}: pass={c['metrics']['pass']} "
