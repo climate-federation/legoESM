@@ -29,17 +29,20 @@ def instruments():
         import validate.ocean_fidelity.dino_1226.mode_projection as mode_projection
         import validate.ocean_fidelity.dino_1226.tcarry_baseline_reconcile as tcarry_reconcile
         import validate.ocean_fidelity.dino_1226.tcarry_basin_reverdict as tcarry_reverdict
+        import validate.ocean_fidelity.dino_1226.tcarry_een_off_discriminator as tcarry_een
         importlib.reload(mode_projection)
         importlib.reload(heat_discriminator)
         importlib.reload(kamm_twin_90d)
         importlib.reload(tcarry_reconcile)
         importlib.reload(tcarry_reverdict)
+        importlib.reload(tcarry_een)
         return types.SimpleNamespace(
             kamm_twin_90d=kamm_twin_90d,
             heat_discriminator=heat_discriminator,
             mode_projection=mode_projection,
             tcarry_reconcile=tcarry_reconcile,
             tcarry_reverdict=tcarry_reverdict,
+            tcarry_een=tcarry_een,
         )
     finally:
         try:
@@ -2019,3 +2022,14 @@ def test_tcarry_reconciliation_clock_escape_is_scoped_to_historical_artifact(
     reconcile._gap("current.npz", 30, nemo, historical=False)
     assert seen == [(30, "1"), (30, None)]
     assert "DINO_GATE_ALLOW_LEGACY_CLOCK" not in os.environ
+
+
+def test_tcarry_een_off_ownership_classifier_has_reachable_both_states(
+        instruments):
+    scorer = instruments.tcarry_een
+    assert scorer.classify_ownership(scorer.HISTORICAL_BASELINE) == (
+        "CONFIRMED_FULL_EEN_OWNERSHIP")
+    outside = scorer.HISTORICAL_BASELINE + 2.0 * scorer.OWNERSHIP_BAND
+    assert scorer.classify_ownership(outside) == "REFUTED_FULL_EEN_OWNERSHIP"
+    with pytest.raises(SystemExit, match="non-finite"):
+        scorer.classify_ownership(np.nan)
