@@ -259,8 +259,10 @@ def main() -> int:
         # mesh_mask carries gdepw_0/e3w_0 as independent NEMO operands.
         with xr.open_dataset(RUN / "mesh_mask.nc", decode_times=False) as ds:
             gdepw0_mesh = np.asarray(ds["gdepw_0"].isel(time_counter=0))
+            gdept0_mesh = np.asarray(ds["gdept_0"].isel(time_counter=0))
             e3w0_mesh = np.asarray(ds["e3w_0"].isel(time_counter=0))
         gdepw0_mesh = jnp.asarray(np.moveaxis(gdepw0_mesh, 0, -1), dtype=T.dtype)
+        gdept0_mesh = jnp.asarray(np.moveaxis(gdept0_mesh, 0, -1), dtype=T.dtype)
         e3w0_mesh = jnp.asarray(np.moveaxis(e3w0_mesh, 0, -1), dtype=T.dtype)
         stretch = nemo_r3t_stretch(st["z_coord"], st["eta"], st["H_bathy"])
         gdepw_mesh_live = gdepw0_mesh[..., 1:1 + nk] * stretch[..., None]
@@ -286,6 +288,11 @@ def main() -> int:
         e3w_factorized = e3w_ref[None, None, :] * stretch[..., None]
         add("factorized e3w_0*(1+r3t) divisor", assemble_bn2(
             aa, bb, TT, SS, gd, gw, e3w_factorized))
+        raw_mesh_diff = (gdept0_mesh[..., 1:nk + 1]
+                         - gdept0_mesh[..., :nk])
+        e3w_rawdiff_live = raw_mesh_diff * stretch[..., None]
+        add("raw mesh diff(gdept_0)*(1+r3t) divisor", assemble_bn2(
+            aa, bb, TT, SS, gd, gw, e3w_rawdiff_live))
         # Unlike NemoGrid today, mesh_mask.nc already carries NEMO's actual
         # 3-D e3w_0 operand.  Test the implementable design directly: preserve
         # that independent reference field and apply the live qco stretch.
@@ -312,6 +319,21 @@ def main() -> int:
             "mesh_e3w0_live_vs_dump": metrics(np.asarray(e3w_mesh_live),
                                                np.asarray(e3w_dump), wet, focus,
                                                POINTWISE_BAR),
+            "construction_diagnosis": {
+                "raw_mesh_diff_gdept0_vs_e3w0": metrics(
+                    np.asarray(raw_mesh_diff),
+                    np.asarray(e3w0_mesh[..., 1:1 + nk]), wet, focus,
+                    POINTWISE_BAR),
+                "bridged_gdept_ref_vs_raw_mesh_gdept0": metrics(
+                    np.asarray(jnp.broadcast_to(
+                        jnp.asarray(gd_ref, dtype=T.dtype)[None, None, :nk + 1],
+                        gdept0_mesh[..., :nk + 1].shape)),
+                    np.asarray(gdept0_mesh[..., :nk + 1]),
+                    active[..., :nk + 1], focus, POINTWISE_BAR),
+                "raw_mesh_diff_live_vs_dump": metrics(
+                    np.asarray(e3w_rawdiff_live), np.asarray(e3w_dump),
+                    wet, focus, POINTWISE_BAR),
+            },
             "candidates_in_nemo_evaluation_order": candidates,
             "first_passing_substitution": first_passing,
         }
