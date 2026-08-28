@@ -57,7 +57,7 @@ from legoesm.ocean.eos import (
     NemoSEOSConfig,
     compute_buoyancy_frequency_nemo_bn2,
     nemo_bn2_depth_ladders,
-    nemo_bn2_live_ladders,
+    nemo_bn2_live_geometry,
     nemo_r3t_stretch,
     nemo_seos_alpha_beta,
 )
@@ -196,12 +196,17 @@ def main() -> int:
     jpi, jpj, jpk, hls = st["jpi"], st["jpj"], st["jpk"], st["hls"]
     nj, ni = st["ni_ni"]
     T, S = st["T"], st["S"]
-    gdept, gdepw = nemo_bn2_live_ladders(st["z_coord"], st["eta"], st["H_bathy"])
+    gdept, gdepw, e3w = nemo_bn2_live_geometry(
+        st["z_coord"], st["eta"], st["H_bathy"])
     gdept = jnp.asarray(gdept, dtype=T.dtype)
     gdepw = jnp.asarray(gdepw, dtype=T.dtype)
     alpha, beta = nemo_seos_alpha_beta(T, S, gdept, NemoSEOSConfig())
     n2 = compute_buoyancy_frequency_nemo_bn2(
-        T, S, gdept, gdepw, NemoSEOSConfig(), g=NEMO_CONSTANTS_CONFIG.g)
+        T, S, gdept, gdepw, NemoSEOSConfig(), g=NEMO_CONSTANTS_CONFIG.g,
+        e3w_int=e3w)
+    n2_legacy = compute_buoyancy_frequency_nemo_bn2(
+        T, S, gdept, gdepw, NemoSEOSConfig(), g=NEMO_CONSTANTS_CONFIG.g,
+        e3w_source="depth_difference")
 
     alpha_n = base._load_haloed(str(RUN / "dump_alpha_b.bin"), jpi, jpj, hls)
     beta_n = base._load_haloed(str(RUN / "dump_beta_b.bin"), jpi, jpj, hls)
@@ -224,6 +229,8 @@ def main() -> int:
     n2_n = n2_n_full[..., 1:1 + n2.shape[-1]]
     row2m = metrics(np.asarray(n2), n2_n, wet_w_all, focus, POINTWISE_BAR)
     row2 = {"output": row2m,
+            "legacy_depth_difference": metrics(
+                np.asarray(n2_legacy), n2_n, wet_w_all, focus, POINTWISE_BAR),
             "disposition": "VERIFIED" if row2m["pass"] else "DIVERGED"}
 
     localization = None
@@ -352,7 +359,7 @@ def main() -> int:
         RUN / "eiv_dump_gdept.bin", RUN / "eiv_dump_e3w.bin", args.mld_maps,
     ]
     artifact = {
-        "schema": "zdf-chain-sweep-v1",
+        "schema": "zdf-chain-sweep-v2",
         "lane": "d180", "kt": 5761, "cpu_only": True, "fp64": True,
         "checked_out_parent_sha": git_sha(),
         "probe_commit_sha": os.environ.get("ZDF_SWEEP_PROBE_SHA", "UNSTAMPED"),
