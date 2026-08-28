@@ -54,7 +54,6 @@ def _import_sibling(name: str, filename: str):
 base = _import_sibling("_zdf_bn2_base", "eos_rab_bn2_per_element.py")
 kamm = _import_sibling("_zdf_kamm_twin", "kamm_twin_90d.py")
 sh2_probe = _import_sibling("_zdf_sh2_capture", "sh2_canonical.py")
-sh2_walk = _import_sibling("_zdf_sh2_walk", "sh2_walk.py")
 from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
 from legoesm.ocean.eos import (
     NemoSEOSConfig,
@@ -333,87 +332,45 @@ def main() -> int:
             if avm_operand_m["pass"]:
                 before = kamm.read_nemo_restart_before(
                     str(RUN / "DINO_00005760_restart.nc"), nn_hls=0)
-                avm_restart, _ = kamm.read_nemo_restart_tke_coefficients(
-                    str(RUN / "DINO_00005760_restart.nc"), nn_hls=0)
                 with xr.open_dataset(RUN / "mesh_mask.nc", decode_times=False) as ds:
-                    def llz(name):
-                        return np.moveaxis(
-                            np.asarray(ds[name].isel(time_counter=0)), 0, -1)
-                    def yyx(name):
-                        return np.asarray(ds[name].isel(time_counter=0))
-                    umask = llz("umask")
-                    vmask = llz("vmask")
-                    e3u0, e3v0 = llz("e3u_0"), llz("e3v_0")
-                    e3uw0, e3vw0 = llz("e3uw_0"), llz("e3vw_0")
-                    e1t, e2t = yyx("e1t"), yyx("e2t")
-                    e1u, e2u = yyx("e1u"), yyx("e2u")
-                    e1v, e2v = yyx("e1v"), yyx("e2v")
-                hu0 = np.sum(e3u0 * umask, axis=-1)
-                hv0 = np.sum(e3v0 * vmask, axis=-1)
-                ssumask = (np.max(umask, axis=-1) > 0).astype(np.float64)
-                ssvmask = (np.max(vmask, axis=-1) > 0).astype(np.float64)
-                r3u_n, r3v_n = sh2_walk.qco_r3(
-                    now.ssh, e1t, e2t, e1u, e2u, e1v, e2v,
-                    hu0, hv0, ssumask, ssvmask)
-                r3u_b, r3v_b = sh2_walk.qco_r3(
-                    before.ssh, e1t, e2t, e1u, e2u, e1v, e2v,
-                    hu0, hv0, ssumask, ssvmask)
-                e3uw_n, e3uw_b = (e3uw0 * (1.0 + r3u_n[..., None]),
-                                   e3uw0 * (1.0 + r3u_b[..., None]))
-                e3vw_n, e3vw_b = (e3vw0 * (1.0 + r3v_n[..., None]),
-                                   e3vw0 * (1.0 + r3v_b[..., None]))
-                faithful = sh2_walk.zdf_sh2_reconstruct(
-                    now.u, now.v, before.u, before.v, avm_restart,
-                    e3uw_n, e3uw_b, e3vw_n, e3vw_b, umask, vmask)
-                exact_m = metrics(
-                    faithful[..., 1:1 + nsh], sh2_n, wet_sh2,
-                    focus, POINTWISE_BAR)
-
-                # Prove the velocity operands have already passed before
-                # naming the subsequent face-metric divisor.
-                u_now_arg, v_now_arg, u_b_arg, v_b_arg, dz_arg = sh2_args[:5]
+                    umask = np.moveaxis(np.asarray(
+                        ds["umask"].isel(time_counter=0)), 0, -1)
+                    vmask = np.moveaxis(np.asarray(
+                        ds["vmask"].isel(time_counter=0)), 0, -1)
+                u_now_arg, v_now_arg, u_b_arg, v_b_arg = sh2_args[:4]
+                u_now = np.asarray(u_now_arg)[:, 1:, :]
+                v_now = np.asarray(v_now_arg)[1:, :, :]
+                u_before = np.asarray(u_b_arg)[:, 1:, :]
+                v_before = np.asarray(v_b_arg)[1:, :, :]
                 velocity_identity = {
-                    "u_now_max_abs": float(np.max(np.abs(
-                        np.asarray(u_now_arg)[:, 1:, :] - now.u))),
-                    "v_now_max_abs": float(np.max(np.abs(
-                        np.asarray(v_now_arg)[1:, :, :] - now.v))),
-                    "u_before_max_abs": float(np.max(np.abs(
-                        np.asarray(u_b_arg)[:, 1:, :] - before.u))),
-                    "v_before_max_abs": float(np.max(np.abs(
-                        np.asarray(v_b_arg)[1:, :, :] - before.v))),
+                    "u_now": metrics(u_now, now.u, umask > 0.5,
+                                     focus, POINTWISE_BAR),
+                    "v_now": metrics(v_now, now.v, vmask > 0.5,
+                                     focus, POINTWISE_BAR),
+                    "u_before_max_abs": float(np.max(np.abs(u_before - before.u))),
+                    "v_before_max_abs": float(np.max(np.abs(v_before - before.v))),
                 }
-                if any(value != 0.0 for value in velocity_identity.values()):
-                    raise AssertionError(
-                        "row-4 velocity identity failed before metric operand: "
-                        f"{velocity_identity}")
-                dz2 = np.asarray(dz_arg) ** 2
-                dz2u = np.concatenate([dz2, dz2[:, -1:, :]], axis=1)[:, 1:, :]
-                dz2v = np.concatenate([dz2, dz2[-1:, :, :]], axis=0)[1:, :, :]
-                wu = sh2_walk.build_wmask_from_uv(umask)[..., 1:1 + nsh] > 0
-                wv = sh2_walk.build_wmask_from_uv(vmask)[..., 1:1 + nsh] > 0
-                metric_u = metrics(
-                    dz2u[..., :nsh],
-                    (e3uw_n * e3uw_b)[..., 1:1 + nsh], wu,
-                    focus, POINTWISE_BAR)
-                metric_v = metrics(
-                    dz2v[..., :nsh],
-                    (e3vw_n * e3vw_b)[..., 1:1 + nsh], wv,
+                now_sub = sh2_fn(
+                    twin_state.u.data, twin_state.v.data,
+                    *sh2_args[2:], **sh2_kwargs)
+                now_sub_m = metrics(
+                    np.asarray(now_sub)[..., :nsh], sh2_n, wet_sh2,
                     focus, POINTWISE_BAR)
                 next_operand = {
-                    "name": "live e3uw(Kmm)*e3uw(Kbb) and e3vw product",
-                    "nemo_line": "cfgs/DINO/WORK/zdfsh2.F90:84,90",
+                    "name": "NOW face-velocity differences at zdf_phy entry",
+                    "nemo_line": "cfgs/DINO/WORK/zdfsh2.F90:81-82,86-87",
+                    "legoesm_operand": "post-explicit/pre-implicit-solve u/v",
                     "velocity_operand_identity": velocity_identity,
-                    "u_divisor_current_T_metric_vs_nemo_live_face": metric_u,
-                    "v_divisor_current_T_metric_vs_nemo_live_face": metric_v,
-                    "substitute_full_live_face_metrics": exact_m,
+                    "substitute_step_entry_now_velocities": now_sub_m,
                     "next_round_fix_design": {
-                        "option": "tke_shear_vertical_metric",
+                        "option": "tke_shear_evaluation_stage",
                         "faithful_default_on_complete_dino_nemo_cards":
-                            "live_face_now_before",
-                        "legacy_opt_in": "tpoint_static_squared",
-                        "construction": "preserve mesh e3uw_0/e3vw_0 and form "
-                            "each face divisor with independent NOW and BEFORE "
-                            "QCO r3u/r3v factors; thread only into zdf_sh2",
+                            "step_entry",
+                        "legacy_opt_in": "implicit_solve_state",
+                        "construction": "evaluate and carry p_sh2 at the "
+                            "step-entry state, before explicit dynamics and "
+                            "advection, then feed that frozen field to both "
+                            "the TKE shear RHS and Prandtl denominator",
                     },
                 }
             sh2_localization = {
@@ -430,10 +387,7 @@ def main() -> int:
                 "input_avm_current_subiteration_vs_nemo_carried": avm_operand_m,
                 "substitute_nemo_carried_avm": avm_sub_m,
                 "legacy_substitute_tpoint_avm": legacy_m,
-                "first_passing_substitution": (
-                    "full live face metrics" if next_operand is not None and
-                    next_operand["substitute_full_live_face_metrics"]["pass"]
-                    else None),
+                "first_passing_substitution": None,
             }
 
     localization = None
