@@ -189,6 +189,28 @@ def planted_controls(lego, nemo, wet, bar) -> dict:
     }
 
 
+def capture_face_sh2_call(model, state, forcing):
+    """Capture production's exact zdfsh2 call operands and first result."""
+    import legoesm.ocean.physics.vertical_mixing._shared as shared
+    real = shared.avm_weighted_shear_production
+    calls = []
+
+    def spy(*args, **kwargs):
+        out = real(*args, **kwargs)
+        calls.append((args, kwargs, out))
+        return out
+
+    shared.avm_weighted_shear_production = spy
+    try:
+        with jax.disable_jit():
+            model.step(state, kamm.DT, surface_forcing=forcing)
+    finally:
+        shared.avm_weighted_shear_production = real
+    if not calls:
+        raise AssertionError("avm_weighted_shear_production never fired")
+    return real, calls[0]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--mld-maps", type=Path, required=True)
@@ -269,8 +291,8 @@ def main() -> int:
             raise AssertionError(
                 "row-4 production path changed: expected face-native shear "
                 "with face-averaged avm weighting")
-        sh2_prod = sh2_probe.run_and_capture_sh2(
-            model, twin_state, sf, avm_weighting="nemo_face")
+        sh2_fn, (sh2_args, sh2_kwargs, sh2_prod) = capture_face_sh2_call(
+            model, twin_state, sf)
         sh2_n_full = base._load_interior(
             str(RUN / "tke_dump_sh2.bin"), ni, nj)
         nsh = min(sh2_prod.shape[-1], sh2_n_full.shape[-1] - 1)
@@ -295,13 +317,27 @@ def main() -> int:
                 model_legacy, twin_state, sf, avm_weighting="tpoint")
             legacy_m = metrics(np.asarray(sh2_legacy)[..., :nsh], sh2_n,
                                wet_sh2, focus, POINTWISE_BAR)
+            avm_n_full = base._load_interior(
+                str(RUN / "tke_dump_avm_in.bin"), ni, nj)
+            avm_n = avm_n_full[..., 1:1 + sh2_args[-1].shape[-1]]
+            avm_operand_m = metrics(
+                np.asarray(sh2_args[-1]), avm_n, wet_sh2, focus,
+                POINTWISE_BAR)
+            sh2_with_nemo_avm = sh2_fn(
+                *sh2_args[:-1], jnp.asarray(avm_n), **sh2_kwargs)
+            avm_sub_m = metrics(
+                np.asarray(sh2_with_nemo_avm)[..., :nsh], sh2_n,
+                wet_sh2, focus, POINTWISE_BAR)
             sh2_localization = {
                 "nemo_operand_order": [
                     "face velocity differences", "e3uw/e3vw divisors",
                     "face avm averages", "four-face sum"],
                 "production_face_averaged_avm": row4m,
+                "input_avm_current_subiteration_vs_nemo_carried": avm_operand_m,
+                "substitute_nemo_carried_avm": avm_sub_m,
                 "legacy_substitute_tpoint_avm": legacy_m,
-                "first_passing_substitution": None,
+                "first_passing_substitution": (
+                    "NEMO carried p_avm" if avm_sub_m["pass"] else None),
             }
 
     localization = None
@@ -429,6 +465,7 @@ def main() -> int:
         RUN / "dump_alpha_b.bin", RUN / "dump_beta_b.bin", RUN / "tke_dump_rn2b.bin",
         RUN / "tke_dump_rn2.bin",
         RUN / "tke_dump_sh2.bin",
+        RUN / "tke_dump_avm_in.bin",
         RUN / "eiv_dump_gdept.bin", RUN / "eiv_dump_e3w.bin", args.mld_maps,
     ]
     artifact = {
@@ -443,6 +480,7 @@ def main() -> int:
                         ("dump_alpha_b.bin", "dump_beta_b.bin", "tke_dump_rn2b.bin",
                          "tke_dump_rn2.bin",
                          "tke_dump_sh2.bin",
+                         "tke_dump_avm_in.bin",
                          "eiv_dump_gdept.bin", "eiv_dump_e3w.bin")},
         "focus_columns_ji": [list(x) for x in focus],
         "bars": {"pointwise_column": POINTWISE_BAR, "corr": CORR_BAR,
@@ -489,6 +527,10 @@ def main() -> int:
             print(f"  legacy substitute T-point avm: pass={lm['pass']} "
                   f"max={lm['max_column_error']:.6e} "
                   f"bad_columns={lm['n_diverged_columns']}/{lm['n_wet_columns']}")
+            am = sh2_localization["substitute_nemo_carried_avm"]
+            print(f"  substitute NEMO carried p_avm: pass={am['pass']} "
+                  f"max={am['max_column_error']:.6e} "
+                  f"bad_columns={am['n_diverged_columns']}/{am['n_wet_columns']}")
     if localization:
         for c in localization["candidates_in_nemo_evaluation_order"]:
             print(f"  substitute {c['substitution']}: pass={c['metrics']['pass']} "
