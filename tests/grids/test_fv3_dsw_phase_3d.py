@@ -1302,19 +1302,32 @@ def test_f64_gate_is_non_vacuous(jctx, jstate, jcsw, monkeypatch):
     of the same gate stops it.
 
     So the discriminator is the routine NAME, not the wording: every
-    copy of this gate in the campaign says "must be float64", and
-    asserting on the wording would pass whichever one fired.  What this
-    proves is that the CLEAN, early refusal comes from the 3-D lane's
-    gate rather than from luck three frames deeper.
+    copy of this (now dtype-UNIFORMITY) gate prefixes its message with
+    its ``{fname}:``, and a MIXED-dtype dict (an f32 pt among f64 leaves)
+    still raises; asserting on the wording would pass whichever one fired.
+    What this proves is that the CLEAN, early refusal comes from the 3-D
+    lane's gate rather than from luck three frames deeper.
     """
     monkeypatch.setattr(jdsw, "require_f64_jax", lambda *a, **k: None)
     bad = dict(jstate)
     bad["pt"] = jstate["pt"].astype(jnp.float32)
     with pytest.raises(Exception) as ei:
         jdsw.dsw_transport_phase_3d(jctx, bad, jcsw, DT, KM)
-    assert "dsw_transport_phase_3d:" not in str(ei.value), (
-        f"the 3-D lane's f64 gate still fired after being neutered: "
-        f"{ei.value}")
+    msg = str(ei.value)
+    # (1) the 3-D lane's own gate did NOT fire (it was neutered)...
+    assert "dsw_transport_phase_3d:" not in msg, (
+        f"the 3-D lane's dtype gate still fired after being neutered: "
+        f"{msg}")
+    # (2) ...and the refusal that DID fire is a DEEPER dtype gate catching
+    #     the f32 pt among f64 leaves -- i.e. a MIXED-dtype refusal, not an
+    #     unrelated crash (codex MAJOR 2026-08-28: the old assert only
+    #     proved "some exception", which a shape/None bug would also
+    #     satisfy). The uniformity gate's signature is "MIXED float dtypes";
+    #     it is prefixed by the DEEPER routine's own fname, never the
+    #     neutered 3-D one.
+    assert "MIXED float dtypes" in msg, (
+        f"expected a deeper dtype-uniformity gate to catch the f32 pt, but "
+        f"the exception was not a mixed-dtype refusal: {msg}")
 
 
 def test_flux_cap_missing_a_capacitor_names_it(jctx, jstate, jcsw):

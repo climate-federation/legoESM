@@ -760,7 +760,7 @@ def create_atmosphere_dycore(
         # coupling (zvir != 0) on both arms now, but this lane never
         # passes it and never routes tracers, so slice 1 stays dry by
         # construction; consv_te != 0 still raises in the core, and
-        # require_f64_jax gates every leaf.
+        # the dtype-uniformity gate checks every leaf.
         # This lane never routes physics tendencies, so any active scheme
         # would be SILENTLY inert — the exact failure mode dispatch
         # hardening exists to prevent.
@@ -791,12 +791,48 @@ def create_atmosphere_dycore(
                 f"{model_type!r} + held_suarez_forcing is uncertified. "
                 "Use model_type='hydrostatic' or drop "
                 "--held-suarez-forcing.")
-        if config.precision != "fp64":
+        # Precision -> FV3DuoConfig.storage_dtype (coarse policy,
+        # 2026-08-28). fp64 is the certified default. fp32/mixed are
+        # accepted here and mapped; the MODEL then gives the authoritative
+        # "runtime not yet wired" message (the dtype-uniformity gates + the
+        # config field are in place, but the in-phase fp64 workspaces + grid
+        # metrics are not yet threaded). Mapping rather than refusing here
+        # keeps the single source of truth in FV3DuoDynamicsModel.__init__.
+        _PRECISION_TO_DTYPE = {
+            "fp64": "float64", "float64": "float64",
+            # mixed_fp64_storage keeps fp64 STORAGE (only compute/accumulate
+            # differ in the general policy) -> uniform fp64 here = the
+            # certified path, runnable today.
+            "mixed_fp64_storage": "float64",
+            "fp32": "float32", "float32": "float32",
+            # "mixed" resolves to fp32 storage; a true per-op mixed split
+            # (fp64 pressure column / energy fixer) is a later increment,
+            # so the model refuses it with that note until then.
+            "mixed": "float32",
+        }
+        _storage_dtype = _PRECISION_TO_DTYPE.get(config.precision)
+        if _storage_dtype is None:
             raise ValueError(
-                f"fv3_duo requires precision='fp64' (require_f64_jax gates "
-                f"every state leaf in the certified lane; an f32 IC is a "
-                f"run that lost bits before step 1), got "
-                f"config.precision={config.precision!r}.")
+                f"fv3_duo: unsupported precision={config.precision!r}; "
+                f"expected one of {sorted(_PRECISION_TO_DTYPE)}.")
+        if _storage_dtype != "float64":
+            # fp32 / mixed (fp32-storage) map through, but the RUNTIME is
+            # not yet wired (the ~57 in-phase fp64 workspace allocations +
+            # the fp64 grid metrics/halo tables must be threaded to the
+            # storage dtype, and the pressure column / energy fixer kept
+            # fp64 for a true mixed mode). Refuse at the FACTORY (config
+            # level) so a driver run fails on the config, not deep in the
+            # model -- keeping "fp64" in the message as the supported
+            # value. The model carries an independent NotImplementedError
+            # guard for a DIRECT FV3DuoConfig(storage_dtype=...)
+            # construction that bypasses this factory. Tracked: fv3
+            # fp32/mixed increment 2.
+            raise ValueError(
+                f"fv3_duo currently runs precision='fp64' only "
+                f"(mixed_fp64_storage also resolves to uniform fp64); "
+                f"precision={config.precision!r} -> storage_dtype="
+                f"{_storage_dtype!r} needs the fp32/mixed RUNTIME which is "
+                f"not yet wired. Use fp64.")
         if config.distributed and config.distributed_mode != "spmd":
             raise ValueError(
                 f"fv3_duo distributed runs are SPMD-only "
@@ -839,6 +875,7 @@ def create_atmosphere_dycore(
         cfg = FV3DuoConfig(
             km=km,
             hydrostatic=(model_type == "hydrostatic"),
+            storage_dtype=_storage_dtype,
         )
         # AUTO-ADAPT the execution layout to the VISIBLE devices (user
         # 2026-08-28: "adjust automatically to the number of devices").

@@ -50,6 +50,7 @@ __all__ = [
     "PER_FACE_FLAG_FIELDS",
     "build_batched_gs",
     "require_f64_jax",
+    "require_uniform_float_jax",
     "require_bool",
     "require_km",
     "require_nord",
@@ -212,22 +213,52 @@ def build_batched_gs(ctx) -> dict:
 # entry gates
 # ---------------------------------------------------------------------
 
-def require_f64_jax(fname: str, arrays: dict) -> None:
-    """Static-dtype gate mirroring the NumPy lane's ``_require_f64``.
+def require_uniform_float_jax(fname: str, arrays: dict) -> None:
+    """Static-dtype gate: every operand of a phase shares ONE floating
+    dtype, and it is float32 or float64.
 
-    Reads only ``.dtype`` (static under jit): a float32 operand would
-    otherwise be silently upcast -- or, with ``jax_enable_x64``
-    disabled, the whole phase would silently run in float32 -- and the
-    oracle build is ``-fdefault-real-8``.
+    WAS a strict-float64 gate; RELAXED (2026-08-28) for the coarse
+    fv3_duo precision policy (``FV3DuoConfig.storage_dtype``). The
+    original guarantee it protected -- "no silent float32 downcast of a
+    run that intends fp64" -- now lives at the MODEL BOUNDARY
+    (``FV3DuoDynamicsModel`` asserts the IC dtype equals the configured
+    storage dtype). What THIS gate now catches is the harder mixed-
+    precision failure: an f64 grid metric / workspace leaking into an
+    f32 phase (or vice-versa), which JAX would silently promote to f64
+    -- defeating the fp32 run and, under ``lax.scan``, raising a carry
+    dtype mismatch far from the cause. A single-precision-uniform phase
+    is the invariant.
+
+    Reads only ``.dtype`` (static under jit). The certified fp64 deck is
+    unchanged: every operand is float64, uniform, so this passes exactly
+    where the old gate did.
     """
+    seen = None
     for name, a in arrays.items():
         if a is None:
             continue
-        if jnp.asarray(a).dtype != jnp.float64:
+        dt = jnp.asarray(a).dtype
+        if dt not in (jnp.float32, jnp.float64):
             raise TypeError(
-                f"{fname}: {name} must be float64 (got "
-                f"{jnp.asarray(a).dtype}); enable jax_enable_x64 and pass "
-                f"f64 operands (oracle build is -fdefault-real-8)")
+                f"{fname}: {name} must be float32 or float64 (got {dt}); "
+                f"the duo lane runs a single uniform float dtype "
+                f"(FV3DuoConfig.storage_dtype).")
+        if seen is None:
+            seen = dt
+        elif dt != seen:
+            raise TypeError(
+                f"{fname}: MIXED float dtypes -- {name} is {dt} but an "
+                f"earlier operand was {seen}. A phase must be single-"
+                f"precision-uniform; an f64 metric/workspace leaking into "
+                f"an f32 phase would silently promote to f64 (and break a "
+                f"lax.scan carry). Downcast the odd operand to the run's "
+                f"storage dtype (FV3DuoConfig.storage_dtype).")
+
+
+# Back-compat alias: the historical name is used at ~40 call sites and in
+# every private per-module copy. Keep it pointing at the generalised gate
+# so the certified fp64 path is byte-identical and no call site churns.
+require_f64_jax = require_uniform_float_jax
 
 
 def require_bool(fname: str, name: str, value) -> None:
