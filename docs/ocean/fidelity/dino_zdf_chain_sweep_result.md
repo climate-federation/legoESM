@@ -3,6 +3,98 @@
 Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 (`RUN_SEQDUMP_D180_1R`, `kt=5761`).
 
+## Round-6 result: row 10 closed; ordered stop at row 11
+
+`tke_n2_evaluation_stage="step_entry"` is now the default on the complete
+`nemo_dino_kamm` and `nemo_dino_kamm_mlf` cards. It freezes one
+`(rn2, rn2b, gdepw_Kmm, e3w_Kmm)` bundle at physical step entry and carries it
+across the outer MLF implicit solve into `zdf_mxl` and every registered TKE
+consumer. The MLF card constructs genuine Nbb `rn2b`; the FE card retains its
+documented `rn2b == rn2` ceiling. `implicit_solve_state` is the unchanged
+generic/default path for every other card and the explicit legacy opt-in.
+
+The ordered CPU/fp64 rerun is:
+
+| Row | Operation | Disposition | Whole-domain per-column result | Southern focus |
+|---:|---|---|---|---|
+| 1 | `eos_rab(Nbb)` | `VERIFIED` | 0/9,920; alpha max `3.087467e-16` | 4/4 pass |
+| 2 | `bn2(Nbb)` | `VERIFIED` | 0/9,920; max `5.968673e-16` | 4/4 pass |
+| 3 | `eos_rab/bn2(Nnn)` | `VERIFIED` | 0/9,920; max `5.968545e-16` | 4/4 pass |
+| 4 | complete `zdf_sh2` | `VERIFIED` | 0/9,920; max `0` | 4/4 pass at zero |
+| 5 | bottom-drag coefficient | `VERIFIED` | 0/9,920; max `0` | 4/4 pass at zero |
+| 6 | native MLD index `nmln` | `VERIFIED` | exact integer equality; 0/9,920 | 4/4 pass at zero |
+| 7 | native MLD depth `hmlp` | `VERIFIED` | 0/9,920; max `5.670461e-16` | 4/4 pass |
+| 8 | surface TKE boundary | `VERIFIED` | 0/9,920; max `0` | 4/4 pass at zero |
+| 9 | bottom TKE boundary | `VERIFIED` | 0/9,920; max `0` | 4/4 pass at zero |
+| 10 | Langmuir `rn2b` operand | **`VERIFIED`** | **0/9,920; max `5.968673e-16`** | **4/4 pass** |
+| 11 | Richardson `zri` / inverse Prandtl `p_pdlr` | **`DIVERGED`** | `zri`: **86/9,920**, max `3.473067e-14`; `p_pdlr`: 15/9,920, max `4.152660e-13` | 4/4 pass |
+| 12--32 | TKE matrix through EVD, assembly, `ldf_slp`, and both implicit applications | `UNMEASURED` | ordered stop at row 11 | ordered stop |
+
+All planted perturbation, horizontal-roll, and nonfinite controls fire. Row
+10 therefore meets its requested target exactly: **0/9,920 failures at the
+registered `1e-15` bar**, with all southern focus columns retained.
+
+### Row-11 arithmetic fix and remaining operand
+
+The first row-11 pass exposed and fixed a literal-association difference.
+NEMO evaluates (`cfgs/DINO/MY_SRC/zdftke.F90:477-495`):
+
+```fortran
+zdiv = p_sh2(ji,jj,jk) + rn_bshear
+zri = rn2b(ji,jj,jk) * p_avm(ji,jj,jk) / zdiv
+p_pdlr(ji,jj,jk) = MAX( 0.1_wp, ri_cri / MAX( ri_cri, zri ) )
+```
+
+The two complete DINO cards now retain those divisions and construct literal
+`p_pdlr` before returning `Pr=1/p_pdlr`; the historical reciprocal-first and
+algebraically collapsed path remains byte-identical under
+`implicit_solve_state`. A hexadecimal hand case turns red by one ulp under
+either shortcut and is exact under the faithful path. The first post-fix
+probe mistakenly retained reciprocal-first arithmetic in its own diagnostic;
+that output was retracted in the probe before the final artifact was made.
+
+The final one-at-a-time substitution localizes the remaining row-11 failure
+to the carried `rn2b` value: substituting NEMO `rn2b` alone gives bit-exact
+`zri` in all 9,920 columns; substituting `p_avm` or `p_sh2` changes no failed
+column, while those two operands are already bit-exact. The N² residual passed
+row 10's own bar but is amplified by Richardson division. The source operation
+is NEMO `src/OCE/TRA/eosbn2.F90:1459-1468`:
+
+```fortran
+zrw = ( gdepw(ji,jj,jk,Kmm) - gdept(ji,jj,jk,Kmm) ) / &
+      ( gdept(ji,jj,jk-1,Kmm) - gdept(ji,jj,jk,Kmm) )
+zaw = pab(ji,jj,jk,jp_tem) * (1. - zrw) + pab(ji,jj,jk-1,jp_tem) * zrw
+zbw = pab(ji,jj,jk,jp_sal) * (1. - zrw) + pab(ji,jj,jk-1,jp_sal) * zrw
+pn2(ji,jj,jk) = grav * ( zaw * (T_upper-T_lower) - zbw * (S_upper-S_lower) ) &
+                 / e3w(ji,jj,jk,Kmm) * wmask(ji,jj,jk)
+```
+
+The next fix is deliberately not guessed from the final `rn2b` residual. It
+requires extending the existing write-only NEMO instrumentation with ordered
+`zrw`, `zaw`, `zbw`, pre-division numerator, and final-division slots, proving
+the instrumented one-step bracket stream bit-identical, then walking those
+operands against the existing legoESM entry bundle. The first failed slot will
+select a `nemo_literal` association only on `step_entry`; all
+`implicit_solve_state` cards remain byte-identical. That instrumented oracle
+run and its red-capable production correction are too large to complete in
+this round, so the ordered sweep stops here.
+
+### Round-6 climate status
+
+**CLIMATE ARMS NOT AUTHORIZED.** Rows 12--32 have not been measured. The
+prediction remains frozen: baseline `22.479491 m`, CONFIRM
+`<=11.2397455 m`, REFUTE `>=20.2775 m`, with the previously registered
+acceptance-floor, pass-tally, legacy-baseline, and southern-density conditions
+unchanged. The faithful command remains option-free but is not authorized;
+the eventual legacy command additionally selects
+`--tke-n2-evaluation-stage implicit_solve_state`.
+
+Round-6 artifact:
+`docs/ocean/fidelity/dino_zdf_chain_sweep_round6_artifact.json`, SHA256
+`ba8a52e002aaa92cee8d4f69eb01224e9b9437bc74175a077b79f163b67988d7`.
+Its stamped parent SHA is `51859bd19e9`; the full artifact carries the probe,
+input, dump, map, environment, dtype, time-level, and control receipts.
+
 ## Round-5 result: row 8 closed; ordered stop at row 10
 
 `dino_wind_profile_evaluation="nemo_literal"` is now the default on the
