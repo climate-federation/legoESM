@@ -793,12 +793,15 @@ def main() -> int:
                             RUN / "mesh_mask.nc", decode_times=False) as ds:
                         gdepw0_lc = np.moveaxis(np.asarray(
                             ds["gdepw_0"].isel(time_counter=0)), 0, -1)
+                        e3w0_lc = np.moveaxis(np.asarray(
+                            ds["e3w_0"].isel(time_counter=0)), 0, -1)
                     stretch_lc = np.asarray(nemo_r3t_stretch(
                         br.z_coord, twin_state.eta.data,
                         twin_state.H_bathy.data))
                     depth_n_lc = (gdepw0_lc[..., 1:1 + nlc]
                                   * stretch_lc[..., None])
-                    dz_n_lc = e3w_n_full[..., 1:1 + nlc]
+                    dz_n_lc = (e3w0_lc[..., 1:1 + nlc]
+                               * stretch_lc[..., None])
                     n2_n_lc = n2_n_full[..., 1:1 + nlc]
                     wet_lc = wet_w_all[..., :nlc]
 
