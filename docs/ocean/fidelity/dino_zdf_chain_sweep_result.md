@@ -3,6 +3,127 @@
 Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 (`RUN_SEQDUMP_D180_1R`, `kt=5761`).
 
+## Round-8 result: row 11 closed; ordered stop at row 12
+
+The instrumented `eosbn2.F90:1459-1468` walk and production rerun close row
+11. The faithful `step_entry` path now carries the full column-dependent raw
+`gdepw_0`, not the 1-D reference ladder, constructs NEMO's reciprocal-first
+qco stretch, and evaluates both `eos_rab` depth and `zrw` from separately
+rounded raw-mesh products. The row-11 `zri/p_pdlr` composite is **0/9,920**
+at the bar, maximum `2.877796e-16`, with 4/4 focus columns passing.
+
+The ordered rerun is:
+
+| Row | Operation | Disposition | Whole-domain per-column result | Southern focus |
+|---:|---|---|---|---|
+| 1 | `eos_rab(Nbb)` | `VERIFIED` | 0/9,920; alpha max `3.087467e-16` | 4/4 pass |
+| 2 | `bn2(Nbb)` | `VERIFIED` | 0/9,920; max `0` | 4/4 pass at zero |
+| 3 | `eos_rab/bn2(Nnn)` | `VERIFIED` | 0/9,920; max `0` | 4/4 pass at zero |
+| 4 | complete `zdf_sh2` | `VERIFIED` | 0/9,920; max `0` | 4/4 pass at zero |
+| 5 | bottom-drag coefficient | `VERIFIED` | 0/9,920; max `0` | 4/4 pass at zero |
+| 6 | native MLD index `nmln` | `VERIFIED` | exact; 0/9,920 | 4/4 pass |
+| 7 | native MLD depth `hmlp` | `VERIFIED` | 0/9,920; max `5.670461e-16` | 4/4 pass |
+| 8 | surface TKE boundary | `VERIFIED` | 0/9,920; max `0` | 4/4 pass at zero |
+| 9 | bottom TKE boundary | `VERIFIED` | 0/9,920; max `0` | 4/4 pass at zero |
+| 10 | Langmuir `rn2b` operand | `VERIFIED` | 0/9,920; max `0` | 4/4 pass at zero |
+| 11 | Richardson `zri/p_pdlr` | **`VERIFIED`** | **0/9,920; max `2.877796e-16`** | **4/4 pass** |
+| 12 | TKE diffusion matrix | **`DIVERGED`** | **9,920/9,920; `zd_up` max `8.829184`** | **4/4 fail** |
+| 13--32 | TKE RHS through both implicit applications | `UNMEASURED` | ordered stop at row 12 | ordered stop |
+
+### Row-11 instrumentation and fix receipt
+
+The write-only NEMO stream records `zrw -> zaw/zbw -> numerator -> /e3w` for
+the first Nbb call. The dump-on and same-source dump-off one-step restarts have
+131/131 numeric variables and zero differences. The older 95-variable
+certified binary is explicitly not this bracket; the probe prints that claim
+as retracted and identifies its pre-existing `utrd_tau` difference. The
+planted wrong-field control fires.
+
+Against the active NEMO lines:
+
+```fortran
+zrw = ( gdepw(ji,jj,jk,Kmm) - gdept(ji,jj,jk,Kmm) ) / &
+      ( gdept(ji,jj,jk-1,Kmm) - gdept(ji,jj,jk,Kmm) )
+zaw = pab(ji,jj,jk,jp_tem) * (1. - zrw) + pab(ji,jj,jk-1,jp_tem) * zrw
+zbw = pab(ji,jj,jk,jp_sal) * (1. - zrw) + pab(ji,jj,jk-1,jp_sal) * zrw
+pn2(ji,jj,jk) = grav * (zaw*dT-zbw*dS) / e3w(ji,jj,jk,Kmm) * wmask(ji,jj,jk)
+```
+
+the full 3-D `gdepw_0` is essential at partial cells. The initial use of
+`gdepw_1d` was rejected by the probe before a result was admitted. With the
+raw W ladder and raw `gdept_0*(1+r3t)` feeding `eos_rab`, the NEMO `zrw`,
+`zaw`, `zbw`, numerator, and result streams are bit-identical on all scored
+wet points. Rows 2, 3, and 10 consequently also improve from sub-bar residuals
+to exact zero.
+
+Scope is narrow:
+
+| Reachable card/config | Literal raw-mesh N2 path | Numerical change |
+|---|---|---|
+| `nemo_dino_kamm` | `step_entry`, faithful default | raw `gdept_0/gdepw_0` source association |
+| `nemo_dino_kamm_mlf` | inherited `step_entry`, faithful default | same, with genuine Nbb tracers |
+| DINO `nemo_paper`, `veros` | `implicit_solve_state` | byte-identical legacy path |
+| all non-TKE DINO cards | unreachable | unchanged |
+| generic/ORCA/ACC/MPAS TKE | no DINO `step_entry` selector | unchanged |
+
+The red-capable suite includes the hand-computed matched-step source-order
+case, a cancelled-ratio violation, reciprocal-versus-quotient separation,
+full 3-D W-ladder bridge pins, JIT/gradient checks, and unchanged-card pins.
+The focused physics/bridge run reports 83/83 passing tests; no GPU was used.
+
+### First divergence: row-12 live `e3t` denominator is absent
+
+NEMO assembles (`cfgs/DINO/MY_SRC/zdftke.F90:499-510`):
+
+```fortran
+zcof   = zfact1 * tmask(ji,jj,jk)
+zzd_up = zcof * MAX(p_avm(ji,jj,jk+1)+p_avm(ji,jj,jk),2.e-5_wp) / &
+         (e3t(ji,jj,jk,Kmm)*e3w(ji,jj,jk,Kmm))
+zzd_lw = zcof * MAX(p_avm(ji,jj,jk)+p_avm(ji,jj,jk-1),2.e-5_wp) / &
+         (e3t(ji,jj,jk-1,Kmm)*e3w(ji,jj,jk,Kmm))
+zdiag(ji,jk) = 1._wp-zzd_lw-zzd_up + zfact2*dissl(ji,jj,jk)*wmask(ji,jj,jk)
+```
+
+The production solve receives `dz_cell=None`, so its legacy matrix branch
+reuses a shifted `e3w`-derived `dz_int_eff` where NEMO reads live
+`e3t(jk,Kmm)`. That first operand fails **9,920/9,920**, maximum `0.6806799`,
+including every focus column. The adjacent operands are decisive controls:
+carried `p_avm` and live `e3w(Kmm)` each pass at exact zero. The resulting
+`zd_up`, `zd_lw`, and `zdiag` each fail every column; their maxima are
+`8.829184`, `9.372063`, and `5.965324`, respectively.
+
+The later `dissl` operand also fails all columns (maximum `0.1088969`), but it
+first enters `zdiag` at line 510. It cannot displace the earlier line-504
+metric owner and is the registered next operand after the metric fix.
+
+The next-round design is
+`tke_matrix_evaluation="nemo_literal"`: carry live raw-mesh
+`e3t_0*(1+r3t)` with the step-entry geometry and assemble `zcof`, `zd_up`,
+`zd_lw`, and `zdiag` in literal source order before the unchanged Thomas
+solve. It becomes the default only on `nemo_dino_kamm` and
+`nemo_dino_kamm_mlf`; `factored` is their legacy opt-in and remains the
+byte-identical default everywhere else. A dedicated selector avoids enabling
+the unrelated N2, surface-volume, and mixing-length semantics bundled under
+`veros_dz_slots`. Required tests use a hand-computed nonuniform column with
+`e3t != e3w`, a planted shifted-W denominator, exact coefficient values,
+JIT/grad checks, and pins for every unchanged card. This fix plus the ordered
+`dissl` peel is too large for this round, so rows 13--32 are not measured.
+
+### Round-8 climate status
+
+**CLIMATE ARMS NOT AUTHORIZED.** The chain is not verified past row 12. The
+frozen prediction remains baseline `22.479491 m`, CONFIRM
+`<=11.2397455 m`, REFUTE `>=20.2775 m`, with the registered legacy-baseline,
+acceptance-floor, pass-tally, and southern-density conditions unchanged. Do
+not run either GPU arm yet.
+
+Artifacts: round 7 SHA256
+`47ce1337a23f677e391137b3c4ff971d6fdac412b39f29ba5dcf783b0ed0d108`;
+round 8 SHA256
+`685bdfa72e18d0208c8408e3dc53523fe65f34591d7a92ac20997343646a168a`.
+The round-8 parent/probe SHA is `846d8e711d7` and the artifact carries all
+source, input, dump, environment, time-level, focus, and control stamps.
+
 ## Round-6 result: row 10 closed; ordered stop at row 11
 
 `tke_n2_evaluation_stage="step_entry"` is now the default on the complete

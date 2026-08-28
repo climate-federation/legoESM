@@ -43,3 +43,40 @@ implemented until the first operand is measured. If row 12 verifies, row 13
 inherits the canonical preregistration and the sweep continues in order.
 
 Climate arms remain unauthorized until row 32 is VERIFIED.
+
+## Dated amendment: measured row-12 owner and next-round design
+
+Date: 2026-08-28. Written after the registered row-12 measurement and before
+any row-12 production change.
+
+Row 12 is DIVERGED in 9,920/9,920 wet columns, with all four southern focus
+columns failing. The first coefficient in source order, `zd_up`, fails with
+maximum normalized column error `8.829184`; `zd_lw` and `zdiag` also fail in
+all columns. The operand walk localizes the first failure to the denominator
+at `zdftke.F90:504`: production supplies no live `e3t(jk,Kmm)` to the solve.
+Its legacy branch reuses a shifted `e3w`-derived `dz_int_eff` in that slot;
+that effective operand fails all 9,920 columns with maximum `0.6806799`.
+The adjacent carried `p_avm` and live `e3w(Kmm)` operands are exact at zero.
+
+The independently checked `dissl` operand also fails all columns (maximum
+`0.1088969`), but it occurs later, in `zdiag` at line 510, and cannot displace
+the earlier line-504 owner. It remains the next row-12 operand after the
+metric fix is rerun.
+
+The next-round production design is a new
+`tke_matrix_evaluation="nemo_literal"` path. It carries live raw-mesh
+`e3t_0*(1+r3t)` at the same step-entry lifetime as the verified N2 geometry,
+then evaluates `zcof`, `zd_up`, `zd_lw`, and `zdiag` in NEMO source order
+before calling the unchanged differentiable Thomas solver. The two complete
+DINO NEMO cards select `nemo_literal` by default; their explicit legacy opt-in
+is `factored`. Generic `TKEConfig`, DINO `nemo_paper`/`veros`, ORCA recipes,
+ACC recipes, and MPAS retain `factored` byte-for-byte. This is deliberately a
+matrix selector, not a blanket activation of `veros_dz_slots`, because that
+flag owns additional Veros N2, surface-volume, and mixing-length semantics.
+
+Required red tests are a hand-computed nonuniform column where `e3t != e3w`,
+a planted shifted-`e3w` denominator that fails, exact source-order coefficient
+values, JIT/gradient finiteness, and byte-identity pins for every unchanged
+card. The post-fix rerun must first close `zd_up` and `zd_lw`; it then resumes
+at `dissl/zdiag`. Rows 13--32 remain ordered-unmeasured. Climate arms remain
+unauthorized.
