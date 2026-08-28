@@ -1900,6 +1900,61 @@ def main() -> int:
                                                 "operand_localization": operands,
                                                 "controls": output["controls"],
                                             }
+                                        if row_number == 15:
+                                            row4["continuation_preview"][
+                                                "first_divergence"].update({
+                                                "loud_retraction": (
+                                                    "RETRACTED: the earlier "
+                                                    "row-15 scorer multiplied "
+                                                    "carried dissl by step-entry "
+                                                    "en. zdftke.F90:463 first "
+                                                    "adds Langmuir energy and "
+                                                    ":515 consumes that updated "
+                                                    "en in the dissipation "
+                                                    "add-back. The corrected "
+                                                    "scorer uses the direct "
+                                                    "post-Langmuir dump."),
+                                                "next_round_fix_design": {
+                                                    "status":
+                                                        "DESIGNED_NOT_IMPLEMENTED",
+                                                    "option":
+                                                        "tke_langmuir_evaluation",
+                                                    "faithful_default_on_complete_"
+                                                    "dino_nemo_cards":
+                                                        "nemo_literal",
+                                                    "legacy_default_everywhere_"
+                                                    "else": "vectorized",
+                                                    "legacy_opt_in_on_dino_nemo_"
+                                                    "cards": "vectorized",
+                                                    "construction": (
+                                                        "Transcribe zWlc2, the "
+                                                        "top-down zpelc recurrence, "
+                                                        "bottom-up imlc selection, "
+                                                        "zhlc, zus/zus3, zwlc and "
+                                                        "the en update at "
+                                                        "zdftke.F90:432-463 as "
+                                                        "ordered JAX scans; pass "
+                                                        "the resulting post-LC en "
+                                                        "unchanged into the line-"
+                                                        "515 dissipation operand."),
+                                                    "required_red_tests": [
+                                                        "hand-computed multi-level "
+                                                        "zpelc/imlc tie case",
+                                                        "planted first-vs-last "
+                                                        "threshold crossing",
+                                                        "direct post-LC dump census",
+                                                        "JIT and finite gradient",
+                                                        "unchanged-card byte identity",
+                                                    ],
+                                                    "reason_for_stop": (
+                                                        "The literal cumulative/"
+                                                        "reverse-selection source "
+                                                        "path and its AD/JIT tests "
+                                                        "are a single fix too large "
+                                                        "for the remainder of this "
+                                                        "round."),
+                                                },
+                                            })
                                         break
                                 if "first_divergence" not in row4[
                                         "continuation_preview"]:
