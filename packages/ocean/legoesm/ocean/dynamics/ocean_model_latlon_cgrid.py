@@ -5736,9 +5736,17 @@ class LatLonCGridOceanModel:
         if (getattr(tke_cfg, "tke_preclosure_coeff_source",
                     "current_subiteration") != "carried_previous_step"):
             return state
-        if (state.tke_avm is not None and state.tke_avt is not None
-                and state.tke_avm_surface is not None):
+        carry_fields = (state.tke_avm, state.tke_avt,
+                        state.tke_avm_surface)
+        n_present = sum(field is not None for field in carry_fields)
+        if n_present == len(carry_fields):
             return state
+        if n_present:
+            raise ValueError(
+                "carried_previous_step coefficient memory is partially "
+                "populated: tke_avm, tke_avt, and tke_avm_surface must be "
+                "all present for a restart/continued state or all None for "
+                "a true cold start")
 
         from legoesm.core.field import Field
         lm = state.land_mask.data

@@ -172,6 +172,10 @@ def test_cold_start_carry_uses_nemo_wmask_on_partial_depth_columns():
                                                        [0.0, 0.0, 0.0]]])
     np.testing.assert_array_equal(out.tke_avm_surface.data, [[3.0, 0.0]])
 
+    partial = state._replace(tke_avm=out.tke_avm)
+    with pytest.raises(ValueError, match="partially populated"):
+        LatLonCGridOceanModel._seed_tke_preclosure_carry(dummy, partial)
+
 
 def test_postsolve_carry_is_closure_output_not_evd_composite():
     from legoesm.grids.latlon import create_latlon_grid
