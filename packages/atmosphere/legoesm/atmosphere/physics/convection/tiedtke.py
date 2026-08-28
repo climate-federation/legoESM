@@ -206,6 +206,29 @@ __physics_contract__ = {
 }
 
 
+def vapour_positivity_column_scale(q_v, dq_v_dt, dt):
+    """Per-column factor in [0, 1] that keeps ``q_v + dt*dq_v_dt >= 0`` everywhere.
+
+    The convective vapour SINK (chiefly the compensating-subsidence term
+    ``(M/rho)*dq_dz`` in ``apply_mass_flux_kernel``) has no ``q_v/dt`` bound and
+    can remove more vapour than exists at a near-dry level.  Scaling every
+    coupled thermodynamic tendency by this ONE factor -- the tightest per-level
+    ratio of available vapour to demanded sink -- restores positivity while
+    preserving the scheme's column water and MSE relations exactly.
+
+    A level that is a SOURCE (``dq_v_dt >= 0``, so ``demand == 0``) imposes no
+    constraint and contributes ratio 1, so a dry source level cannot drag the
+    column scale to zero.  Returns shape ``(ncol, 1)``; equals 1 wherever no
+    level overshoots, so a stable column is unchanged.  Static-shape and
+    AD-safe: only ``clip``/``maximum``/``where``/``min`` with a finite
+    denominator floor.
+    """
+    demand = jnp.clip(-dt * dq_v_dt, 0.0, None)
+    avail = jnp.clip(q_v, 0.0, None)
+    ratio = jnp.where(demand > 0.0, avail / jnp.maximum(demand, 1e-20), 1.0)
+    return jnp.clip(jnp.min(ratio, axis=-1, keepdims=True), 0.0, 1.0)
+
+
 def tiedtke_convection(
     T: jax.Array,
     q_v: jax.Array,
@@ -567,18 +590,7 @@ def tiedtke_convection(
     # dq_c_pos / dq_r_conv_dt inherit the scaling; col_scale == 1 wherever no
     # level overshoots, so a stable column is byte-unchanged.  Same
     # construction as the kuo.py limiter.
-    _pos_demand = jnp.clip(-dt * dq_v_dt, 0.0, None)   # vapour the SINK removes
-    _pos_avail = jnp.clip(q_v, 0.0, None)
-    # ratio = 1 wherever there is NO sink (demand == 0): a level that is a
-    # source, even at q_v == 0, imposes no positivity constraint and must not
-    # drag the column scale to zero (codex 2026-08-28).  Where there IS a sink,
-    # ratio = available / demanded, clipped into [0, 1] by the outer clip.
-    _pos_ratio = jnp.where(
-        _pos_demand > 0.0,
-        _pos_avail / jnp.maximum(_pos_demand, 1e-20),
-        1.0)
-    _pos_col_scale = jnp.clip(
-        jnp.min(_pos_ratio, axis=-1, keepdims=True), 0.0, 1.0)
+    _pos_col_scale = vapour_positivity_column_scale(q_v, dq_v_dt, dt)
     dT_dt = dT_dt * _pos_col_scale
     dq_v_dt = dq_v_dt * _pos_col_scale
     dq_c_conv_dt = dq_c_conv_dt * _pos_col_scale
