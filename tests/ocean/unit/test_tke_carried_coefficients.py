@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import numpy as np
+import jax
 import jax.numpy as jnp
 import pytest
 
@@ -86,3 +87,27 @@ def test_only_complete_dino_nemo_cards_change_coefficient_lifetime():
         assert resolved == (
             "carried_previous_step" if name in faithful
             else "current_subiteration"), name
+
+
+def test_carried_coefficients_are_jittable_and_differentiable():
+    cfg = TKEConfig(
+        prognostic=True,
+        tke_preclosure_coeff_source="carried_previous_step",
+        prandtl_mode="constant", kappa_convention="veros_sqrte",
+        enable_kappaH_profile=False, bottom_tke_bc=False,
+    )
+
+    def loss(tke_old, avm, avt):
+        kw = _column_kwargs(cfg)
+        kw["tke_old"] = tke_old
+        out = tke_mod.tke_vertical_mixing(
+            **kw, preclosure_K_M=avm, preclosure_K_H=avt)
+        return jnp.sum(out.tke_new) + jnp.sum(out.K_M) + jnp.sum(out.K_H)
+
+    tke_old = jnp.asarray([[0.2, 0.3]], dtype=jnp.float64)
+    avm = jnp.asarray([[0.01, 0.02]], dtype=jnp.float64)
+    avt = jnp.asarray([[0.005, 0.006]], dtype=jnp.float64)
+    value, grads = jax.jit(jax.value_and_grad(loss, argnums=(0, 1, 2)))(
+        tke_old, avm, avt)
+    assert bool(jnp.isfinite(value))
+    assert all(bool(jnp.all(jnp.isfinite(grad))) for grad in grads)

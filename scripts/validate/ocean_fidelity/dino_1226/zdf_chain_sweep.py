@@ -503,8 +503,16 @@ def main() -> int:
         }
 
     source_paths = [
+        Path(__file__).resolve(),
+        HERE / "PREREG_zdf_chain_sweep_round3.md",
         Path("packages/ocean/legoesm/ocean/eos.py"),
+        Path("packages/ocean/legoesm/ocean/experiments/dino.py"),
+        Path("packages/ocean/legoesm/ocean/fidelity/nemo_io.py"),
         Path("packages/ocean/legoesm/ocean/fidelity/time_levels.py"),
+        Path("packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py"),
+        Path("packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py"),
+        Path("packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py"),
+        Path("packages/ocean/legoesm/ocean/state.py"),
         HERE / "dump_lane.py",
         HERE / "eos_rab_bn2_per_element.py",
         ORACLE / "cfgs/DINO/MY_SRC/stpmlf.F90",
@@ -577,14 +585,24 @@ def main() -> int:
               f"max={row4m['max_column_error']:.6e} "
               f"bad_columns={row4m['n_diverged_columns']}/{row4m['n_wet_columns']}")
         if sh2_localization is not None:
-            lm = sh2_localization["legacy_substitute_tpoint_avm"]
-            print(f"  legacy substitute T-point avm: pass={lm['pass']} "
-                  f"max={lm['max_column_error']:.6e} "
-                  f"bad_columns={lm['n_diverged_columns']}/{lm['n_wet_columns']}")
-            am = sh2_localization["substitute_nemo_carried_avm"]
-            print(f"  substitute NEMO carried p_avm: pass={am['pass']} "
+            am = sh2_localization["fixed_operand"]["metrics"]
+            print(f"  fixed carried p_avm operand: pass={am['pass']} "
                   f"max={am['max_column_error']:.6e} "
                   f"bad_columns={am['n_diverged_columns']}/{am['n_wet_columns']}")
+            nxt = sh2_localization["first_diverging_operand"]
+            if nxt is not None:
+                u = nxt["velocity_operand_identity"]["u_now"]
+                v = nxt["velocity_operand_identity"]["v_now"]
+                sm = nxt["substitute_step_entry_now_velocities"]
+                print(f"  next operand NOW u: pass={u['pass']} "
+                      f"max={u['max_column_error']:.6e} "
+                      f"bad_columns={u['n_diverged_columns']}/{u['n_wet_columns']}")
+                print(f"  next operand NOW v: pass={v['pass']} "
+                      f"max={v['max_column_error']:.6e} "
+                      f"bad_columns={v['n_diverged_columns']}/{v['n_wet_columns']}")
+                print(f"  substitute step-entry NOW velocities: pass={sm['pass']} "
+                      f"max={sm['max_column_error']:.6e} "
+                      f"bad_columns={sm['n_diverged_columns']}/{sm['n_wet_columns']}")
     if localization:
         for c in localization["candidates_in_nemo_evaluation_order"]:
             print(f"  substitute {c['substitution']}: pass={c['metrics']['pass']} "
