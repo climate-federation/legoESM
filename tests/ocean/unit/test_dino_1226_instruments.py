@@ -26,6 +26,7 @@ def instruments():
         import validate.ocean_fidelity.dino_1226.kamm_twin_90d as kamm_twin_90d
         import validate.ocean_fidelity.dino_1226.mode_projection as mode_projection
         import validate.ocean_fidelity.dino_1226.tcarry_baseline_reconcile as tcarry_reconcile
+        import validate.ocean_fidelity.dino_1226.tcarry_basin_floor90 as tcarry_floor
         import validate.ocean_fidelity.dino_1226.tcarry_basin_reverdict as tcarry_reverdict
         import validate.ocean_fidelity.dino_1226.tcarry_bridge_omega_score as tcarry_omega
         import validate.ocean_fidelity.dino_1226.tcarry_een_off_discriminator as tcarry_een
@@ -33,6 +34,7 @@ def instruments():
         importlib.reload(heat_discriminator)
         importlib.reload(kamm_twin_90d)
         importlib.reload(tcarry_reconcile)
+        importlib.reload(tcarry_floor)
         importlib.reload(tcarry_reverdict)
         importlib.reload(tcarry_omega)
         importlib.reload(tcarry_een)
@@ -41,6 +43,7 @@ def instruments():
             heat_discriminator=heat_discriminator,
             mode_projection=mode_projection,
             tcarry_reconcile=tcarry_reconcile,
+            tcarry_floor=tcarry_floor,
             tcarry_reverdict=tcarry_reverdict,
             tcarry_omega=tcarry_omega,
             tcarry_een=tcarry_een,
@@ -1572,6 +1575,10 @@ def test_tcarry_basin_floor_has_priority_over_refute(instruments):
     score = instruments.tcarry_reverdict.classify
     assert score(0.0, -1.0, 0.1, True) == "UNRESOLVED/FLOOR"
     assert score(0.01, -1.0, 0.001, True) == "REFUTED"
+
+
+def test_tcarry_basin_floor_instrument_self_test_is_red_capable(instruments):
+    assert instruments.tcarry_floor._self_test() == 0
 
 
 def test_tcarry_basin_compensation_blocks_confirm(instruments):
