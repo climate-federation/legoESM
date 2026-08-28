@@ -578,6 +578,12 @@ class TKEConfig(NamedTuple):
     # carried from the preceding step feeds zdf_sh2, Prandtl, the TKE matrix
     # and RHS, and is overwritten only by post-solve tke_avn.
     tke_preclosure_coeff_source: str = "current_subiteration"
+    # Evaluation lifetime of NEMO's zdf_sh2 operand.  The historical path
+    # evaluates from the state handed to the implicit solve.  Complete DINO
+    # NEMO cards instead freeze p_sh2 from the step-entry NOW/BEFORE faces and
+    # carried avm_k, matching zdfphy.F90:268 before the explicit update reaches
+    # zdftke.F90.  Kept legacy by default so all other cards remain unchanged.
+    tke_shear_evaluation_stage: str = "implicit_solve_state"
     # ----- Tracer/momentum Prandtl chain (abyssal over-diffusion fix) -----
     # ``"unit"`` (default, BIT-IDENTICAL legacy): K_H = max(K_M, kappaH_min)
     #   -- the MOMENTUM floor ``kappaM_min`` leaks into the TRACER floor

@@ -5784,6 +5784,70 @@ class LatLonCGridOceanModel:
                 dims=("lat", "lon"), units="m^2/s"))
         return state
 
+    def _tke_step_entry_p_sh2(
+        self, state, *, eta_now=None, u_now=None, v_now=None,
+        z_coord=None, config=None,
+    ):
+        """Freeze NEMO ``p_sh2`` from the step-entry NOW/BEFORE faces."""
+        _zc = self.z_coord if z_coord is None else z_coord
+        _cfg_b = self.config if config is None else config
+        vmix = getattr(getattr(_cfg_b, "physics", None),
+                       "vertical_mixing", None)
+        if vmix is None or vmix.scheme != "tke":
+            return None
+        tke_cfg = vmix.tke
+        stage = getattr(
+            tke_cfg, "tke_shear_evaluation_stage", "implicit_solve_state")
+        if stage == "implicit_solve_state":
+            return None
+        if stage != "step_entry":
+            raise ValueError(
+                "Unknown TKEConfig.tke_shear_evaluation_stage: expected "
+                "'implicit_solve_state' or 'step_entry', got "
+                f"{stage!r}.")
+        if getattr(tke_cfg, "tke_shear_production", "squared_centered") \
+                != "nemo_face_native":
+            raise ValueError(
+                "tke_shear_evaluation_stage='step_entry' requires "
+                "tke_shear_production='nemo_face_native'.")
+        if getattr(tke_cfg, "tke_shear_avm_weighting", "tpoint") \
+                != "nemo_face":
+            raise ValueError(
+                "tke_shear_evaluation_stage='step_entry' requires "
+                "tke_shear_avm_weighting='nemo_face'.")
+        if state.u_before is None or state.v_before is None:
+            raise ValueError(
+                "tke_shear_evaluation_stage='step_entry' requires carried "
+                "state.u_before/v_before face velocities.")
+        if state.tke_avm is None:
+            raise ValueError(
+                "tke_shear_evaluation_stage='step_entry' requires carried "
+                "state.tke_avm (NEMO avm_k).")
+
+        _u_now = state.u.data if u_now is None else u_now
+        _v_now = state.v.data if v_now is None else v_now
+        _eta_now = state.eta.data if eta_now is None else eta_now
+        from legoesm.ocean.vertical import compute_ocean_jacobian
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            compute_face_masks_3d,
+        )
+        from legoesm.ocean.physics.vertical_mixing._shared import (
+            avm_weighted_shear_production,
+        )
+        is_active = getattr(_zc, "is_active", None)
+        if is_active is None:
+            raise ValueError(
+                "tke_shear_evaluation_stage='step_entry' requires "
+                "z_coord.is_active for NEMO face masks.")
+        u_mask, v_mask = compute_face_masks_3d(is_active)
+        J = compute_ocean_jacobian(_eta_now, state.H_bathy.data, _zc)
+        dz_half = jnp.broadcast_to(
+            _zc.dz_half_ref * J[..., jnp.newaxis],
+            state.T.data.shape[:-1] + (_zc.n_levels - 1,))
+        return avm_weighted_shear_production(
+            _u_now, _v_now, state.u_before.data, state.v_before.data,
+            dz_half, u_mask, v_mask, state.tke_avm.data)
+
     def _tke_realized_kdiss_active(self) -> bool:
         """True iff the post-mixing TKE charges the REALIZED implicit-friction
         dissipation (Veros K_diss_v, friction.py:131-151) instead of the
@@ -6535,6 +6599,9 @@ class LatLonCGridOceanModel:
                     and bool(getattr(_vmix_cfg.tke, "prognostic", False)))
             )
             if _tke_prognostic:
+                _tke_p_sh2 = self._tke_step_entry_p_sh2(
+                    state, eta_now=eta_now, u_now=u_now, v_now=v_now,
+                    z_coord=_zc, config=_cfg_b)
                 K_v_cell, A_v_cell, tke_new = compute_vertical_K_profiles(
                     cc_state, _zc, surface_forcing, physics_config,
                     A_v_background=float(_cfg_b.A_v),
@@ -6558,6 +6625,7 @@ class LatLonCGridOceanModel:
                     # (EnhancedDiffusionConfig.evd_n2_time_level=
                     # "nemo_now_before"); ignored by every other selection.
                     eta_now=eta_now,
+                    tke_p_sh2=_tke_p_sh2,
                 )
                 if (tke_new is not None
                         and hasattr(tke_new, "K_M")

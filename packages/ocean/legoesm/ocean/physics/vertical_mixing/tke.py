@@ -1864,6 +1864,7 @@ def tke_vertical_mixing(
     preclosure_K_M: jnp.ndarray | None = None,
     preclosure_K_H: jnp.ndarray | None = None,
     preclosure_K_M_surface: jnp.ndarray | None = None,
+    precomputed_p_sh2: jnp.ndarray | None = None,
 ) -> TKEOutput:
     """Advance the TKE closure and return new K_M, K_H, TKE.
 
@@ -2054,6 +2055,28 @@ def tke_vertical_mixing(
             dtype=rho_cell.dtype,
         )
 
+    _shear_stage = getattr(
+        cfg, "tke_shear_evaluation_stage", "implicit_solve_state")
+    if _shear_stage not in ("implicit_solve_state", "step_entry"):
+        raise ValueError(
+            "Unknown TKEConfig.tke_shear_evaluation_stage: expected "
+            "'implicit_solve_state' or 'step_entry', got "
+            f"{_shear_stage!r}.")
+    if _shear_stage == "implicit_solve_state" and precomputed_p_sh2 is not None:
+        raise ValueError(
+            "precomputed_p_sh2 was supplied while "
+            "tke_shear_evaluation_stage='implicit_solve_state'; select "
+            "'step_entry' to consume the frozen operand.")
+    if _shear_stage == "step_entry":
+        if precomputed_p_sh2 is None:
+            raise ValueError(
+                "tke_shear_evaluation_stage='step_entry' requires "
+                "precomputed_p_sh2 from the step-entry NOW/BEFORE faces.")
+        if precomputed_p_sh2.shape != tke_old.shape:
+            raise ValueError(
+                "precomputed_p_sh2 must match tke_old shape; got "
+                f"{precomputed_p_sh2.shape} vs {tke_old.shape}.")
+
     _coeff_source = getattr(
         cfg, "tke_preclosure_coeff_source", "current_subiteration")
     if _coeff_source not in ("current_subiteration", "carried_previous_step"):
@@ -2117,20 +2140,26 @@ def tke_vertical_mixing(
                 "requires u_before_cell and v_before_cell (the carried "
                 "leap-frog before-velocities) to be passed to "
                 "tke_vertical_mixing.")
-        if any(x is None for x in _face_native_inputs):
+        if (_shear_stage == "implicit_solve_state"
+                and any(x is None for x in _face_native_inputs)):
             raise ValueError(
                 "TKEConfig.tke_shear_production='nemo_face_native' requires "
                 "u_face_now, v_face_now, u_face_before, v_face_before and "
                 "face_masks_3d (the RAW C-grid face state + per-level "
                 "wumask/wvmask/coast masks, zdfsh2.F90:78-94) to be passed "
                 "to tke_vertical_mixing.")
-        from legoesm.ocean.physics.vertical_mixing._shared import (
-            vertical_shear_face_native as _vertical_shear_face_native,
-        )
-        u_mask_3d, v_mask_3d = face_masks_3d
-        shear_sq = _vertical_shear_face_native(
-            u_face_now, v_face_now, u_face_before, v_face_before,
-            dz_half, u_mask_3d, v_mask_3d)
+        if _shear_stage == "implicit_solve_state":
+            from legoesm.ocean.physics.vertical_mixing._shared import (
+                vertical_shear_face_native as _vertical_shear_face_native,
+            )
+            u_mask_3d, v_mask_3d = face_masks_3d
+            shear_sq = _vertical_shear_face_native(
+                u_face_now, v_face_now, u_face_before, v_face_before,
+                dz_half, u_mask_3d, v_mask_3d)
+        else:
+            # A placeholder only: both p_sh2 consumers below use the frozen
+            # field.  Do not touch the implicit-solve velocity operands.
+            shear_sq = jnp.zeros_like(precomputed_p_sh2)
     elif _shear_disc == "nemo_burchard":
         if u_before_cell is None or v_before_cell is None:
             raise ValueError(
@@ -2190,14 +2219,23 @@ def tke_vertical_mixing(
                 f"face-averaging is only meaningful with the matching "
                 f"face-native shear geometry), got tke_shear_production="
                 f"{_shear_disc!r}.")
-        from legoesm.ocean.physics.vertical_mixing._shared import (
-            avm_weighted_shear_production as _avm_weighted_shear_production,
-        )
+        if _shear_stage == "step_entry":
+            def _p_sh2_face_fn(_kappaM_T):
+                return precomputed_p_sh2
+        else:
+            from legoesm.ocean.physics.vertical_mixing._shared import (
+                avm_weighted_shear_production as _avm_weighted_shear_production,
+            )
 
-        def _p_sh2_face_fn(kappaM_T):
-            return _avm_weighted_shear_production(
-                u_face_now, v_face_now, u_face_before, v_face_before,
-                dz_half, u_mask_3d, v_mask_3d, kappaM_T)
+            def _p_sh2_face_fn(kappaM_T):
+                return _avm_weighted_shear_production(
+                    u_face_now, v_face_now, u_face_before, v_face_before,
+                    dz_half, u_mask_3d, v_mask_3d, kappaM_T)
+    elif _shear_stage == "step_entry":
+        raise ValueError(
+            "tke_shear_evaluation_stage='step_entry' requires "
+            "tke_shear_avm_weighting='nemo_face' so the frozen p_sh2 "
+            "contains NEMO's carried face-weighted avm operand.")
 
     # Static stability N^2. ``"insitu"`` (default) is the clipped in-situ
     # form (BIT-IDENTICAL); ``"adiabatic"`` is the SIGNED Veros parcel-

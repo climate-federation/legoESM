@@ -15,6 +15,8 @@ from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanMode
 import legoesm.ocean.experiments.dino as dino_mod
 from legoesm.ocean.experiments.dino import DINO_RECIPES, dino_config_for_recipe
 from legoesm.ocean.fidelity.nemo_recipe import _nemo_tke_config
+from legoesm.ocean.fidelity.veros_acc_recipe import ACC_TKE_CONFIG
+from legoesm.ocean.fidelity.veros_acc_basic_recipe import ACC_BASIC_TKE_CONFIG
 from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
 
 
@@ -106,6 +108,100 @@ def test_only_complete_dino_nemo_cards_change_coefficient_lifetime():
     # The generic/ORCA-oriented fidelity recipe has a separate certificate and
     # deliberately retains the pre-fix numerical lifetime in this DINO lane.
     assert _nemo_tke_config().tke_preclosure_coeff_source == "current_subiteration"
+
+
+def test_only_complete_dino_nemo_cards_freeze_step_entry_shear():
+    faithful = {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}
+    for name, values in DINO_RECIPES.items():
+        resolved = values.get(
+            "tke_shear_evaluation_stage", "implicit_solve_state")
+        assert resolved == (
+            "step_entry" if name in faithful else "implicit_solve_state"), name
+        if values.get("vmix_scheme") == "tke":
+            built = dino_mod._dino_vertical_mixing_config(
+                dino_config_for_recipe(name)).tke
+            assert built.tke_shear_evaluation_stage == resolved, name
+
+    # Every independently constructed TKE card reachable outside the two
+    # complete DINO oracle recipes remains on the byte-identical legacy path.
+    unchanged = (TKEConfig(), _nemo_tke_config(), ACC_TKE_CONFIG,
+                 ACC_BASIC_TKE_CONFIG)
+    assert all(c.tke_shear_evaluation_stage == "implicit_solve_state"
+               for c in unchanged)
+
+
+def test_step_entry_p_sh2_is_frozen_for_rhs_and_prandtl(monkeypatch):
+    """Hand case: p_sh2=[12,20] survives a deliberately different solve state."""
+    cfg = TKEConfig(
+        prognostic=True,
+        tke_preclosure_coeff_source="carried_previous_step",
+        tke_shear_production="nemo_face_native",
+        tke_shear_avm_weighting="nemo_face",
+        tke_shear_evaluation_stage="step_entry",
+        prandtl_mode="nemo_ri", prandtl_ri_coeff=1.0,
+        kappa_convention="veros_sqrte", c_k=1.0,
+        kappaM_min=0.0, kappaH_min=0.0,
+        enable_kappaH_profile=False,
+    )
+    frozen = jnp.asarray([[12.0, 20.0]])
+    avm = jnp.asarray([[3.0, 5.0]])
+    avt = jnp.asarray([[7.0, 11.0]])
+    monkeypatch.setattr(tke_mod, "_compute_N2",
+                        lambda *a, **k: jnp.asarray([[2.0, 4.0]]))
+    monkeypatch.setattr(
+        tke_mod, "compute_mixing_lengths",
+        lambda *a, **k: (jnp.ones_like(frozen), jnp.ones_like(frozen)))
+
+    prandtl_seen = []
+
+    def fake_compute_K(*args, **kwargs):
+        prandtl_seen.append(np.asarray(
+            kwargs["p_sh2_override"](jnp.full_like(frozen, 999.0))))
+        return jnp.ones_like(frozen), jnp.ones_like(frozen)
+
+    solve_seen = {}
+    monkeypatch.setattr(tke_mod, "compute_K_from_tke", fake_compute_K)
+    monkeypatch.setattr(
+        tke_mod, "_solve_tke_backward_euler",
+        lambda **kw: solve_seen.setdefault("P_s", kw["P_s"]) * 0.0 + kw["e_old"])
+
+    kw = _column_kwargs(cfg)
+    # These cell-centred arrays intentionally describe a different
+    # implicit-solve state.  Frozen mode must not use them for p_sh2.
+    kw["u_cell"] = jnp.asarray([[0.0, 100.0, -50.0]])
+    out = tke_mod.tke_vertical_mixing(
+        **kw, u_before_cell=jnp.zeros((1, 3)),
+        v_before_cell=jnp.zeros((1, 3)),
+        preclosure_K_M=avm, preclosure_K_H=avt,
+        precomputed_p_sh2=frozen)
+    np.testing.assert_array_equal(solve_seen["P_s"], frozen)
+    assert len(prandtl_seen) == 2  # pre-solve and post-solve tke_avn
+    for seen in prandtl_seen:
+        np.testing.assert_array_equal(seen, frozen)
+    np.testing.assert_array_equal(out.tke_new, kw["tke_old"])
+
+
+def test_step_entry_selector_guards_and_legacy_stage_bit_identity():
+    base = TKEConfig(prognostic=True)
+    explicit = base._replace(
+        tke_shear_evaluation_stage="implicit_solve_state")
+    old = tke_mod.tke_vertical_mixing(**_column_kwargs(base))
+    selected = tke_mod.tke_vertical_mixing(**_column_kwargs(explicit))
+    for field in ("K_M", "K_H", "tke_new", "l_eps"):
+        np.testing.assert_array_equal(getattr(selected, field), getattr(old, field))
+
+    with pytest.raises(ValueError, match="precomputed_p_sh2 was supplied"):
+        tke_mod.tke_vertical_mixing(
+            **_column_kwargs(base), precomputed_p_sh2=jnp.ones((1, 2)))
+    bad = base._replace(tke_shear_evaluation_stage="not-a-stage")
+    with pytest.raises(ValueError, match="Unknown TKEConfig.tke_shear"):
+        tke_mod.tke_vertical_mixing(**_column_kwargs(bad))
+    missing = TKEConfig(
+        prognostic=True, tke_shear_evaluation_stage="step_entry",
+        tke_shear_production="nemo_face_native",
+        tke_shear_avm_weighting="nemo_face")
+    with pytest.raises(ValueError, match="requires precomputed_p_sh2"):
+        tke_mod.tke_vertical_mixing(**_column_kwargs(missing))
 
 
 def test_explicit_legacy_selector_is_bit_identical_to_old_default():

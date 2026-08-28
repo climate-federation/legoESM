@@ -125,6 +125,7 @@ def compute_vertical_K_profiles(
     tke_bottom_level=None,
     n2_tracers_before=None,
     eta_now=None,
+    tke_p_sh2=None,
 ) -> (
     tuple[jnp.ndarray, jnp.ndarray]
     | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
@@ -310,7 +311,8 @@ def compute_vertical_K_profiles(
             lat_deg=lat_deg, n2_tracers=n2_tracers,
             tke_bottom_dirichlet=tke_bottom_dirichlet,
             tke_bottom_level=tke_bottom_level,
-            n2_tracers_before=n2_tracers_before)
+            n2_tracers_before=n2_tracers_before,
+            tke_p_sh2=tke_p_sh2)
         if _nemo_floor:
             K_v_total = jnp.maximum(K_v_total, K_vmix)
             A_v_total = jnp.maximum(A_v_total, A_vmix)
@@ -532,7 +534,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                      *, tke_old=None, dt_tke=None, tke_source=None,
                      lat_deg=None, n2_tracers=None,
                      tke_bottom_dirichlet=None, tke_bottom_level=None,
-                     n2_tracers_before=None):
+                     n2_tracers_before=None, tke_p_sh2=None):
     """Re-compute K_v, A_v at interfaces for the chosen vmix scheme.
 
     For ``constant`` / ``richardson`` this duplicates only the K
@@ -969,6 +971,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 preclosure_K_M_surface=(
                     state.tke_avm_surface.data
                     if getattr(state, "tke_avm_surface", None) is not None else None),
+                precomputed_p_sh2=tke_p_sh2,
             )
             if (getattr(tke_cfg, "tke_preclosure_coeff_source",
                         "current_subiteration") == "carried_previous_step"):
