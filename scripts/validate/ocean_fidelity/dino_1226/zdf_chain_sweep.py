@@ -330,14 +330,39 @@ def main() -> int:
                 wet_sh2, focus, POINTWISE_BAR)
             sh2_localization = {
                 "nemo_operand_order": [
-                    "face velocity differences", "e3uw/e3vw divisors",
-                    "face avm averages", "four-face sum"],
+                    "face avm averages", "face velocity differences",
+                    "e3uw/e3vw divisors", "four-face sum"],
+                "first_diverging_operand": {
+                    "name": "p_avm carried pre-step viscosity",
+                    "nemo_line": "src/OCE/ZDF/zdfsh2.F90:80",
+                    "legoesm_operand": "current sub-iteration K_M_curr",
+                    "metrics": avm_operand_m,
+                    "note": "substitution does not close the composite because "
+                            "later e3uw/e3vw operands remain non-identical; "
+                            "ordered localization stops at this first input",
+                },
                 "production_face_averaged_avm": row4m,
                 "input_avm_current_subiteration_vs_nemo_carried": avm_operand_m,
                 "substitute_nemo_carried_avm": avm_sub_m,
                 "legacy_substitute_tpoint_avm": legacy_m,
                 "first_passing_substitution": (
                     "NEMO carried p_avm" if avm_sub_m["pass"] else None),
+                "next_round_fix_design": {
+                    "option": "tke_shear_avm_source",
+                    "faithful_default": "carried_previous_step",
+                    "legacy_opt_in": "current_subiteration",
+                    "state_change": "carry avm/avt closure fields across steps; "
+                                    "seed bridged runs from restart avm/avt",
+                    "kernel_change": "thread carried avm into zdf_sh2 and the "
+                                     "rn2b*p_avm Prandtl numerator while leaving "
+                                     "current K_M for the TKE solve/closure update",
+                    "required_red_tests": [
+                        "distinct carried/current arrays select carried bits",
+                        "restart avm bridge identity and next-step carry",
+                        "legacy arm reproduces current-subiteration bits",
+                        "JIT and finite gradients",
+                    ],
+                },
             }
 
     localization = None
