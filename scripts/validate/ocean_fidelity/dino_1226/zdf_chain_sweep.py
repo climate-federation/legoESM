@@ -265,12 +265,12 @@ def main() -> int:
             e3t_mode="both")
         tke_cfg = mc.physics.vertical_mixing.tke
         if (tke_cfg.tke_shear_production != "nemo_face_native"
-                or tke_cfg.tke_shear_avm_weighting != "tpoint"):
+                or tke_cfg.tke_shear_avm_weighting != "nemo_face"):
             raise AssertionError(
                 "row-4 production path changed: expected face-native shear "
-                "with T-point avm weighting")
+                "with face-averaged avm weighting")
         sh2_prod = sh2_probe.run_and_capture_sh2(
-            model, twin_state, sf, avm_weighting="tpoint")
+            model, twin_state, sf, avm_weighting="nemo_face")
         sh2_n_full = base._load_interior(
             str(RUN / "tke_dump_sh2.bin"), ni, nj)
         nsh = min(sh2_prod.shape[-1], sh2_n_full.shape[-1] - 1)
@@ -284,24 +284,24 @@ def main() -> int:
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
                 LatLonCGridOceanModel,
             )
-            cfg_face = tke_cfg._replace(tke_shear_avm_weighting="nemo_face")
-            mc_face = mc._replace(
+            cfg_legacy = tke_cfg._replace(tke_shear_avm_weighting="tpoint")
+            mc_legacy = mc._replace(
                 physics=mc.physics._replace(
                     vertical_mixing=mc.physics.vertical_mixing._replace(
-                        tke=cfg_face)))
-            model_face = LatLonCGridOceanModel(br.geometry, br.z_coord, mc_face)
-            sh2_face = sh2_probe.run_and_capture_sh2(
-                model_face, twin_state, sf, avm_weighting="nemo_face")
-            face_m = metrics(np.asarray(sh2_face)[..., :nsh], sh2_n,
-                             wet_sh2, focus, POINTWISE_BAR)
+                        tke=cfg_legacy)))
+            model_legacy = LatLonCGridOceanModel(
+                br.geometry, br.z_coord, mc_legacy)
+            sh2_legacy = sh2_probe.run_and_capture_sh2(
+                model_legacy, twin_state, sf, avm_weighting="tpoint")
+            legacy_m = metrics(np.asarray(sh2_legacy)[..., :nsh], sh2_n,
+                               wet_sh2, focus, POINTWISE_BAR)
             sh2_localization = {
                 "nemo_operand_order": [
                     "face velocity differences", "e3uw/e3vw divisors",
                     "face avm averages", "four-face sum"],
-                "production_tpoint_avm": row4m,
-                "substitute_face_averaged_avm": face_m,
-                "first_passing_substitution": (
-                    "face avm averages" if face_m["pass"] else None),
+                "production_face_averaged_avm": row4m,
+                "legacy_substitute_tpoint_avm": legacy_m,
+                "first_passing_substitution": None,
             }
 
     localization = None
@@ -485,10 +485,10 @@ def main() -> int:
               f"max={row4m['max_column_error']:.6e} "
               f"bad_columns={row4m['n_diverged_columns']}/{row4m['n_wet_columns']}")
         if sh2_localization is not None:
-            fm = sh2_localization["substitute_face_averaged_avm"]
-            print(f"  substitute face avm averages: pass={fm['pass']} "
-                  f"max={fm['max_column_error']:.6e} "
-                  f"bad_columns={fm['n_diverged_columns']}/{fm['n_wet_columns']}")
+            lm = sh2_localization["legacy_substitute_tpoint_avm"]
+            print(f"  legacy substitute T-point avm: pass={lm['pass']} "
+                  f"max={lm['max_column_error']:.6e} "
+                  f"bad_columns={lm['n_diverged_columns']}/{lm['n_wet_columns']}")
     if localization:
         for c in localization["candidates_in_nemo_evaluation_order"]:
             print(f"  substitute {c['substitution']}: pass={c['metrics']['pass']} "
