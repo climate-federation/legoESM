@@ -1502,8 +1502,24 @@ def main() -> int:
                                 solve_kwargs["K_M_old"])[..., :nmat]
                             e3w_operand_l = np.asarray(
                                 solve_kwargs["dz_half"])[..., :nmat]
-                            e3t_operand_l = np.asarray(
-                                solve_kwargs["dz_cell"])[..., 1:1 + nmat]
+                            dz_cell_operand = solve_kwargs["dz_cell"]
+                            if dz_cell_operand is None:
+                                # Legacy assembly has no e3t operand. For its
+                                # upper coefficient, dz_int_eff is the first
+                                # e3w row repeated, then the preceding e3w
+                                # row. Score that actual effective denominator
+                                # against NEMO's explicit e3t(jk,Kmm).
+                                dz_legacy = np.asarray(
+                                    solve_kwargs["dz_half"])
+                                e3t_operand_l = np.concatenate(
+                                    [dz_legacy[..., :1],
+                                     dz_legacy[..., :nmat - 1]], axis=-1)
+                                e3t_operand_source = (
+                                    "legacy effective dz_int_eff; dz_cell=None")
+                            else:
+                                e3t_operand_l = np.asarray(
+                                    dz_cell_operand)[..., 1:1 + nmat]
+                                e3t_operand_source = "live dz_cell jk"
                             dissl_operand_l = (
                                 np.sqrt(np.maximum(
                                     np.asarray(solve_kwargs["e_old"])[..., :nmat],
@@ -1548,6 +1564,8 @@ def main() -> int:
                                 "rn_Dt": float(dt64),
                                 "rn_ediss": float(ediss64),
                                 "minimum_avm_sum": 2.0e-5,
+                                "production_e3t_operand_source":
+                                    e3t_operand_source,
                             }
                             row12_primary["controls"] = {
                                 name: planted_controls(
