@@ -552,6 +552,7 @@ def main() -> int:
     ap.add_argument("--row17-pre-diag-dump", type=Path)
     ap.add_argument("--row17-pre-lower-dump", type=Path)
     ap.add_argument("--row17-pre-rhs-dump", type=Path)
+    ap.add_argument("--row17-postlc-dump", type=Path)
     ap.add_argument("--row17-bracket-off-restart", type=Path)
     ap.add_argument("--row17-bracket-instrument-restart", type=Path)
     ap.add_argument("--row17-instrument-source", type=Path)
@@ -1894,6 +1895,7 @@ def main() -> int:
                                         args.row17_pre_diag_dump,
                                         args.row17_pre_lower_dump,
                                         args.row17_pre_rhs_dump,
+                                        args.row17_postlc_dump,
                                         args.row17_bracket_off_restart,
                                         args.row17_bracket_instrument_restart,
                                         args.row17_instrument_source,
@@ -1975,6 +1977,9 @@ def main() -> int:
                                         pre_rhs_n = base._load_interior(
                                             str(args.row17_pre_rhs_dump),
                                             ni, nj)
+                                        postlc_n = base._load_interior(
+                                            str(args.row17_postlc_dump),
+                                            ni, nj)
                                         n_forward = literal_diag.shape[-1] - 1
                                         wet_forward = np.concatenate(
                                             (wet2[..., None],
@@ -2014,6 +2019,18 @@ def main() -> int:
                                                 wet_forward, focus,
                                                 POINTWISE_BAR),
                                         }
+                                        postlc_l = np.array(
+                                            en_n_with_bc, copy=True)
+                                        if solve_kwargs[
+                                                "external_source"] is not None:
+                                            postlc_l = postlc_l + dt64 * np.asarray(
+                                                solve_kwargs[
+                                                    "external_source"])
+                                        postlc_metric = metrics(
+                                            postlc_l, postlc_n[
+                                                ..., 1:1 + nrhs],
+                                            wet_rhs, focus,
+                                            POINTWISE_BAR)
                                         bottom_ext = (
                                             bottom_level[..., None] + 1)
                                         rhs_bottom_scatter = metrics(
@@ -2141,6 +2158,7 @@ def main() -> int:
                                                 forward_rhs_metric,
                                             "pre_recurrence_inputs":
                                                 pre_stage_metrics,
+                                            "post_langmuir_en": postlc_metric,
                                             "jk2_rhs_association_discriminator":
                                                 jk2_association_metrics,
                                             "solver_rhs_bottom_scatter":
@@ -2171,6 +2189,7 @@ def main() -> int:
                                                     args.row17_pre_diag_dump,
                                                     args.row17_pre_lower_dump,
                                                     args.row17_pre_rhs_dump,
+                                                    args.row17_postlc_dump,
                                                     args.row17_instrument_source,
                                                     args.row17_instrument_binary,
                                                     args.row17_bracket_off_restart,
