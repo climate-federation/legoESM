@@ -505,6 +505,8 @@ def main() -> int:
     source_paths = [
         Path(__file__).resolve(),
         HERE / "PREREG_zdf_chain_sweep_round3.md",
+        HERE / "kamm_twin_90d.py",
+        Path("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py"),
         Path("packages/ocean/legoesm/ocean/eos.py"),
         Path("packages/ocean/legoesm/ocean/experiments/dino.py"),
         Path("packages/ocean/legoesm/ocean/fidelity/nemo_io.py"),
