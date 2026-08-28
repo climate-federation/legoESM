@@ -590,6 +590,11 @@ class TKEConfig(NamedTuple):
     # Complete DINO NEMO cards select the literal form; every generic and
     # non-oracle card retains the byte-identical factored default.
     tke_matrix_evaluation: str = "factored"
+    # Langmuir source evaluation. ``vectorized`` is the historical shared
+    # construction. ``nemo_literal`` preserves zdftke.F90:422-463 operation
+    # order, including the per-column mbkt+1 no-crossing fallback. Only the
+    # complete DINO NEMO cards select it; all other cards remain vectorized.
+    tke_langmuir_evaluation: str = "vectorized"
     # Evaluation lifetime of NEMO's zdf_sh2 operand.  The historical path
     # evaluates from the state handed to the implicit solve.  Complete DINO
     # NEMO cards instead freeze p_sh2 from the step-entry NOW/BEFORE faces and

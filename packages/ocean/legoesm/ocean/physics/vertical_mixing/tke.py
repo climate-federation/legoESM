@@ -1826,6 +1826,8 @@ def nemo_langmuir_tke_source(
     dz_w: jnp.ndarray,
     cfg: TKEConfig,
     ice_frac: jnp.ndarray | None = None,
+    bottom_level: jnp.ndarray | None = None,
+    w_active: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     r"""Langmuir-circulation TKE source [m²/s³] (Axell 2002; NEMO ln_lc).
 
@@ -1852,31 +1854,109 @@ def nemo_langmuir_tke_source(
     depth_w : (nlev-1,) or (..., nlev-1) interface depths [m, positive down].
     dz_w : (..., nlev-1) interface control-volume thicknesses (≈ e3w).
     cfg : TKEConfig (uses ``lc_coeff``).
+    bottom_level : (...,) int or None
+        Python 0-based deepest wet T-cell index. Required by
+        ``tke_langmuir_evaluation="nemo_literal"``: it maps exactly to
+        NEMO's per-column ``imlc=mbkt+1`` no-crossing W-level fallback.
+    w_active : (..., nlev-1) bool or None
+        NEMO interior ``wmask``. Required by the literal evaluation.
 
     Returns
     -------
     (..., nlev-1) TKE source, feedable as ``external_source`` (the RHS gets
     ``+dt·source``, exactly NEMO's ``en += rn_Dt·source``).
     """
-    half_wlc2 = _NEMO_TKE_LC_CSD * jnp.maximum(taum, 0.0)         # ½W_lc² ≥ 0
-    # Axell Eq. 47 LHS: cumulative PE from the surface down (z positive down).
-    pe = jnp.cumsum(jnp.maximum(N2, 0.0) * depth_w * dz_w, axis=-1)
-    # h_lc: first (shallowest) interface where PE exceeds ½W_lc²; fall back to
-    # the deepest interface when the whole column's PE is below it (NEMO
-    # initialises imlc to the bottom).  argmax(mask) returns the FIRST True.
-    exceeded = pe > half_wlc2[..., None]
-    first = jnp.argmax(exceeded, axis=-1)
-    depth_b = jnp.broadcast_to(depth_w, pe.shape)
-    h_first = jnp.take_along_axis(depth_b, first[..., None], axis=-1)[..., 0]
-    h_lc = jnp.where(jnp.any(exceeded, axis=-1), h_first, depth_b[..., -1])
+    evaluation = getattr(cfg, "tke_langmuir_evaluation", "vectorized")
+    if evaluation not in ("vectorized", "nemo_literal"):
+        raise ValueError(
+            "Unknown TKEConfig.tke_langmuir_evaluation: expected "
+            f"'vectorized' or 'nemo_literal', got {evaluation!r}.")
+
+    if evaluation == "vectorized":
+        # Historical shared construction. Keep this arm expression-for-
+        # expression unchanged: every non-DINO card remains byte-identical.
+        half_wlc2 = _NEMO_TKE_LC_CSD * jnp.maximum(taum, 0.0)
+        pe = jnp.cumsum(
+            jnp.maximum(N2, 0.0) * depth_w * dz_w, axis=-1)
+        exceeded = pe > half_wlc2[..., None]
+        first = jnp.argmax(exceeded, axis=-1)
+        depth_b = jnp.broadcast_to(depth_w, pe.shape)
+        h_first = jnp.take_along_axis(
+            depth_b, first[..., None], axis=-1)[..., 0]
+        h_lc = jnp.where(
+            jnp.any(exceeded, axis=-1), h_first, depth_b[..., -1])
+        h_lc = jnp.maximum(h_lc, _EPS)
+        us3 = (2.0 * half_wlc2) ** 1.5
+        if ice_frac is not None:
+            us3 = us3 * jnp.maximum(0.0, 1.0 - ice_frac)
+        w_lc = cfg.lc_coeff * jnp.sin(
+            jnp.pi * depth_b / h_lc[..., None])
+        src = us3[..., None] * (w_lc ** 3) / h_lc[..., None]
+        return jnp.where(depth_b < h_lc[..., None], src, 0.0)
+
+    if bottom_level is None or w_active is None:
+        raise ValueError(
+            "tke_langmuir_evaluation='nemo_literal' requires bottom_level "
+            "and w_active for the per-column mbkt+1 fallback and wmask.")
+    if w_active.shape != N2.shape:
+        raise ValueError(
+            "literal Langmuir w_active must match N2 shape; got "
+            f"{w_active.shape} vs {N2.shape}.")
+    if bottom_level.shape != N2.shape[:-1]:
+        raise ValueError(
+            "literal Langmuir bottom_level must match the horizontal N2 "
+            f"shape; got {bottom_level.shape} vs {N2.shape[:-1]}.")
+
+    # Literal active DINO arm, zdftke.F90:422-463. Depth is positive down;
+    # every returned term is a positive TKE source. NEMO's vertical loops are
+    # deliberately scans so floating-point association follows source order.
+    half_wlc2 = _NEMO_TKE_LC_CSD * taum
+    depth_b = jnp.broadcast_to(depth_w, N2.shape)
+    dz_b = jnp.broadcast_to(dz_w, N2.shape)
+    pe_term = jnp.maximum(N2, 0.0) * depth_b * dz_b
+
+    def accumulate_pe(carry, term):
+        updated = carry + term
+        return updated, updated
+
+    _, pe_vertical = jax.lax.scan(
+        accumulate_pe,
+        jnp.zeros_like(pe_term[..., 0]),
+        jnp.moveaxis(pe_term, -1, 0),
+    )
+    pe = jnp.moveaxis(pe_vertical, 0, -1)
+
+    # NEMO initializes imlc=mbkt+1 independently in every column, then walks
+    # jk=jpkm1..2. Since this array starts at Fortran jk=2, bottom_level is
+    # already the matching Python fallback index and the last array row
+    # (Fortran jpk) is excluded from the reverse threshold scan.
+    fallback = jnp.clip(
+        jnp.asarray(bottom_level, dtype=jnp.int32), 0, N2.shape[-1] - 1)
+    reverse_pe = jnp.moveaxis(pe[..., :-1][..., ::-1], -1, 0)
+    reverse_k = jnp.arange(N2.shape[-1] - 2, -1, -1, dtype=jnp.int32)
+
+    def select_imlc(imlc, operands):
+        pe_at_k, k = operands
+        return jnp.where(pe_at_k > half_wlc2, k, imlc), None
+
+    imlc, _ = jax.lax.scan(select_imlc, fallback, (reverse_pe, reverse_k))
+    h_lc = jnp.take_along_axis(
+        depth_b, imlc[..., None], axis=-1)[..., 0]
     h_lc = jnp.maximum(h_lc, _EPS)
-    # u_s³ = (2·½W_lc²)^{3/2}; d/dx x^{3/2} → 0 at 0, AD-safe without a guard.
-    us3 = (2.0 * half_wlc2) ** 1.5
-    if ice_frac is not None:
-        us3 = us3 * jnp.maximum(0.0, 1.0 - ice_frac)
-    w_lc = cfg.lc_coeff * jnp.sin(jnp.pi * depth_b / h_lc[..., None])
-    src = us3[..., None] * (w_lc ** 3) / h_lc[..., None]
-    return jnp.where(depth_b < h_lc[..., None], src, 0.0)
+
+    zus = jnp.sqrt(2.0 * half_wlc2)
+    ice_scale = (jnp.ones_like(zus) if ice_frac is None
+                 else jnp.maximum(0.0, 1.0 - ice_frac))
+    surface_wet = jnp.asarray(w_active[..., 0], dtype=N2.dtype)
+    zus3 = ice_scale * zus * zus * zus * surface_wet
+    zwlc = cfg.lc_coeff * jnp.sin(
+        jnp.pi * depth_b / h_lc[..., None])
+    src = (zus3[..., None] * (zwlc * zwlc * zwlc)
+           / h_lc[..., None])
+    apply = ((zus3[..., None] != 0.0)
+             & ((depth_b - h_lc[..., None]) < 0.0)
+             & jnp.asarray(w_active, dtype=bool))
+    return jnp.where(apply, src, 0.0)
 
 
 def nemo_etau_injection(
@@ -2248,6 +2328,11 @@ def tke_vertical_mixing(
         raise ValueError(
             "Unknown TKEConfig.tke_matrix_evaluation: expected 'factored' "
             f"or 'nemo_literal', got {_matrix_eval!r}.")
+    _lc_eval = getattr(cfg, "tke_langmuir_evaluation", "vectorized")
+    if _lc_eval not in ("vectorized", "nemo_literal"):
+        raise ValueError(
+            "Unknown TKEConfig.tke_langmuir_evaluation: expected "
+            f"'vectorized' or 'nemo_literal', got {_lc_eval!r}.")
     _supplied_carry = (preclosure_K_M, preclosure_K_H,
                        preclosure_K_M_surface, preclosure_dissl)
     if not _carried_coeffs and any(x is not None for x in _supplied_carry):
@@ -2517,8 +2602,25 @@ def tke_vertical_mixing(
         # pre-solve ``en += rn_Dt·source`` (zdftke.F90:367). NEMO's PE
         # integral (:340,344) reads ``rn2b`` (the BEFORE/Nbb level) — N2b
         # (defaults to N2 when T_n2b/S_n2b are not supplied, T8/T13).
-        _lc_src = nemo_langmuir_tke_source(taum, N2b, _depth_w, _surface_e3w, cfg,
-                                           ice_frac=ice_frac)
+        if _lc_eval == "nemo_literal":
+            if _n2_stage != "step_entry":
+                raise ValueError(
+                    "tke_langmuir_evaluation='nemo_literal' requires "
+                    "tke_n2_evaluation_stage='step_entry' for carried live "
+                    "rn2b/gdepw/e3w operands.")
+            if bottom_level is None or w_active is None:
+                raise ValueError(
+                    "tke_langmuir_evaluation='nemo_literal' requires "
+                    "bottom_level and w_active.")
+            if external_source is not None:
+                raise ValueError(
+                    "tke_langmuir_evaluation='nemo_literal' cannot merge "
+                    "Langmuir with a generic external TKE source; keep the "
+                    "source channels separate before selecting this path.")
+        _lc_src = nemo_langmuir_tke_source(
+            taum, N2b, _depth_w, _surface_e3w, cfg,
+            ice_frac=ice_frac, bottom_level=bottom_level,
+            w_active=w_active)
         external_source = (_lc_src if external_source is None
                            else external_source + _lc_src)
 

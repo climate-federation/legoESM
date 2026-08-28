@@ -197,6 +197,22 @@ def test_only_complete_dino_nemo_cards_select_literal_tke_matrix():
     assert all(c.tke_matrix_evaluation == "factored" for c in unchanged)
 
 
+def test_only_complete_dino_nemo_cards_select_literal_langmuir():
+    faithful = {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}
+    for name, values in DINO_RECIPES.items():
+        resolved = values.get("tke_langmuir_evaluation", "vectorized")
+        assert resolved == (
+            "nemo_literal" if name in faithful else "vectorized"), name
+        if values.get("vmix_scheme") == "tke":
+            built = dino_mod._dino_vertical_mixing_config(
+                dino_config_for_recipe(name)).tke
+            assert built.tke_langmuir_evaluation == resolved, name
+
+    unchanged = (TKEConfig(), _nemo_tke_config(), ACC_TKE_CONFIG,
+                 ACC_BASIC_TKE_CONFIG)
+    assert all(c.tke_langmuir_evaluation == "vectorized" for c in unchanged)
+
+
 def test_only_complete_dino_nemo_cards_freeze_step_entry_shear():
     faithful = {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}
     for name, values in DINO_RECIPES.items():

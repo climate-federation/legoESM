@@ -1457,6 +1457,7 @@ def test_run_twin_stamps_the_reference_clock_and_the_run_configuration(
         "tke_shear_evaluation_stage",
         "tke_shear_metric_source",
         "tke_n2_evaluation_stage",
+        "tke_langmuir_evaluation",
         "dino_wind_profile_evaluation",
     ):
         assert f'"{selector}"' in src
@@ -1822,3 +1823,14 @@ def test_a_storage_only_flag_stays_out_of_the_run_config_string(instruments):
     cfg = src.split("run_config = json.dumps(")[1].split("}, sort_keys=True)")[0]
     assert "fp64_3d" not in cfg
     assert "perturb_seed" in cfg, "wrong block located -- this test is vacuous"
+
+
+def test_twin_cli_exposes_literal_and_legacy_langmuir_arms(instruments):
+    k = instruments.kamm_twin_90d
+    default = k._parse_args(["nemo_dino_kamm_mlf", "out.npz"])
+    legacy = k._parse_args([
+        "nemo_dino_kamm_mlf", "out.npz",
+        "--tke-langmuir-evaluation", "vectorized",
+    ])
+    assert default.tke_langmuir_evaluation is None
+    assert legacy.tke_langmuir_evaluation == "vectorized"

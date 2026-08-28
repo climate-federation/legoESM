@@ -1048,7 +1048,7 @@ def main() -> int:
                     pe_n = np.cumsum(
                         np.maximum(n2_n_lc, 0.0) * depth_n_lc * dz_n_lc,
                         axis=-1)
-                    exceeded_n = pe_n > half_n[..., None]
+                    exceeded_n = pe_n[..., :-1] > half_n[..., None]
                     first_n = np.argmax(exceeded_n, axis=-1)
                     fallback_n = np.clip(nemo_bottom_level, 0, nlc - 1)
                     imlc_n = np.where(
@@ -1172,6 +1172,8 @@ def main() -> int:
                             str(path): sha256(path)
                             for path in row10_provenance
                         },
+                        "resolved_evaluation":
+                            lc_cfg.tke_langmuir_evaluation,
                     }
                     row4["continuation_preview"]["rows"][
                         "10_langmuir_source_output"] = row10_output
@@ -2787,6 +2789,7 @@ def main() -> int:
         HERE / "PREREG_zdf_chain_sweep_round7.md",
         HERE / "PREREG_zdf_chain_sweep_round8.md",
         HERE / "PREREG_zdf_chain_sweep_round9.md",
+        HERE / "PREREG_zdf_chain_sweep_round10.md",
         HERE / "kamm_twin_90d.py",
         Path("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py"),
         Path("packages/ocean/legoesm/ocean/eos.py"),

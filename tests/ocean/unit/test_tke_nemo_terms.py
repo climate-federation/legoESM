@@ -24,6 +24,7 @@ from legoesm.ocean.physics.vertical_mixing.tke import (
     _NEMO_TKE_LC_CSD,
     _solve_tke_backward_euler,
     _surface_tke_dirichlet,
+    TKEEntryN2Bundle,
     nemo_etau_injection,
     nemo_langmuir_tke_source,
     tke_vertical_mixing,
@@ -47,6 +48,96 @@ def _col(nlev=6):
 
 
 class TestLangmuirSource:
+    def test_explicit_vectorized_selector_is_exact_legacy_default(self):
+        """The selector must not perturb cards that retain the old path."""
+        depth_w, dz_w = _col()
+        taum = jnp.asarray([0.07, 0.13])
+        N2 = jnp.asarray([[1.0e-5, -2.0e-6, 3.0e-5, 0.0, 1.0e-6],
+                          [0.0, 2.0e-5, 0.0, 3.0e-6, -1.0e-6]])
+        default = nemo_langmuir_tke_source(
+            taum, N2, depth_w, dz_w, TKEConfig(lc=True))
+        explicit = nemo_langmuir_tke_source(
+            taum, N2, depth_w, dz_w,
+            TKEConfig(lc=True, tke_langmuir_evaluation="vectorized"))
+        np.testing.assert_array_equal(default, explicit)
+
+    def test_literal_strict_crossing_and_source_order_hand_case(self):
+        """A PE tie does not cross; the next level sets h_lc (NEMO ``>``)."""
+        depth_w, dz_w = _col()
+        # half_wlc2=1 exactly. The first PE contribution is exactly one, so
+        # a >= transcription would choose h=10 and return zero everywhere;
+        # NEMO's strict > chooses h=20 after the second contribution.
+        taum = jnp.asarray([1.0 / float(_NEMO_TKE_LC_CSD)])
+        N2 = jnp.asarray([[0.01, 0.001, 0.0, 0.0, 0.0]])
+        cfg = TKEConfig(lc=True, tke_langmuir_evaluation="nemo_literal")
+        src = np.asarray(nemo_langmuir_tke_source(
+            taum, N2, depth_w, dz_w, cfg,
+            bottom_level=jnp.asarray([4], dtype=jnp.int32),
+            w_active=jnp.ones_like(N2, dtype=bool)))[0]
+        us = np.sqrt(2.0)
+        want0 = ((us * us * us)
+                 * (cfg.lc_coeff * np.sin(np.pi * 10.0 / 20.0)) ** 3
+                 / 20.0)
+        np.testing.assert_allclose(src[0], want0, rtol=2e-15, atol=0.0)
+        np.testing.assert_array_equal(src[1:], 0.0)
+
+    def test_literal_unequal_depth_no_crossing_is_per_column(self):
+        """No-crossing fallback is each column's mbkt+1, never global."""
+        depth_w, dz_w = _col()
+        N2 = jnp.zeros((2, 5))
+        taum = jnp.asarray([0.1, 0.1])
+        bottom = jnp.asarray([2, 4], dtype=jnp.int32)
+        wet = jnp.asarray([[True, True, False, False, False],
+                           [True, True, True, True, False]])
+        cfg = TKEConfig(lc=True, tke_langmuir_evaluation="nemo_literal")
+        actual = np.asarray(nemo_langmuir_tke_source(
+            taum, N2, depth_w, dz_w, cfg,
+            bottom_level=bottom, w_active=wet))
+
+        half = float(_NEMO_TKE_LC_CSD) * 0.1
+        us = np.sqrt(2.0 * half)
+        expected = np.zeros((2, 5))
+        for column, h_lc in enumerate((30.0, 50.0)):
+            for k, depth in enumerate(np.asarray(depth_w)):
+                if wet[column, k] and depth < h_lc:
+                    zwlc = cfg.lc_coeff * np.sin(np.pi * depth / h_lc)
+                    expected[column, k] = us * us * us * zwlc * zwlc * zwlc / h_lc
+        np.testing.assert_allclose(actual, expected, rtol=2e-15, atol=0.0)
+
+        # Red control: the historical global-deepest fallback gives the
+        # shallow column h=50 and must demonstrably disagree.
+        historical = np.asarray(nemo_langmuir_tke_source(
+            taum, N2, depth_w, dz_w,
+            TKEConfig(lc=True, tke_langmuir_evaluation="vectorized")))
+        assert not np.array_equal(historical[0], expected[0])
+
+    def test_literal_eager_jit_and_grad(self):
+        depth_w, dz_w = _col()
+        N2 = jnp.zeros((2, 5))
+        bottom = jnp.asarray([2, 4], dtype=jnp.int32)
+        wet = jnp.asarray([[True, True, False, False, False],
+                           [True, True, True, True, False]])
+        cfg = TKEConfig(lc=True, tke_langmuir_evaluation="nemo_literal")
+
+        def total(taum):
+            return jnp.sum(nemo_langmuir_tke_source(
+                taum, N2, depth_w, dz_w, cfg,
+                bottom_level=bottom, w_active=wet))
+
+        taum = jnp.asarray([0.1, 0.2])
+        eager = jax.value_and_grad(total)(taum)
+        compiled = jax.jit(jax.value_and_grad(total))(taum)
+        np.testing.assert_allclose(compiled[0], eager[0], rtol=2e-15, atol=0.0)
+        np.testing.assert_allclose(compiled[1], eager[1], rtol=2e-15, atol=0.0)
+        assert np.isfinite(np.asarray(compiled[1])).all()
+
+    def test_literal_requires_column_bottom_and_wmask(self):
+        depth_w, dz_w = _col()
+        cfg = TKEConfig(lc=True, tke_langmuir_evaluation="nemo_literal")
+        with pytest.raises(ValueError, match="bottom_level and w_active"):
+            nemo_langmuir_tke_source(
+                jnp.asarray([0.1]), jnp.zeros((1, 5)), depth_w, dz_w, cfg)
+
     def test_zero_wind_zero_source(self):
         depth_w, dz_w = _col()
         N2 = jnp.full((1, 5), 1e-5)
@@ -199,6 +290,27 @@ def _orchestrator_inputs(nlev=8):
 
 
 class TestOrchestratorWiring:
+    def test_literal_langmuir_rejects_mixed_generic_source(self):
+        u, v, T, S, rho, dz_half, z_int, tx, ty = _orchestrator_inputs(4)
+        shape_w = dz_half.shape
+        shape_t = T.shape
+        cfg = TKEConfig(
+            lc=True, tke_langmuir_evaluation="nemo_literal",
+            tke_n2_evaluation_stage="step_entry", bottom_tke_bc=True)
+        bundle = TKEEntryN2Bundle(
+            rn2=jnp.zeros(shape_w), rn2b=jnp.zeros(shape_w),
+            gdepw_Kmm=jnp.broadcast_to(-z_int, shape_w),
+            e3w_Kmm=dz_half, e3t_Kmm=jnp.ones(shape_t))
+        with pytest.raises(ValueError, match="cannot merge"):
+            tke_vertical_mixing(
+                u, v, T, S, rho, dz_half, None, tx, ty,
+                dt=3600.0, cfg=cfg, rho_0=_RHO0, n_iterations=1,
+                z_interface=z_int, external_source=jnp.ones(shape_w),
+                bottom_dirichlet=jnp.zeros(shape_t[:-1]),
+                bottom_level=jnp.full(shape_t[:-1], 2, dtype=jnp.int32),
+                w_active=jnp.ones(shape_w, dtype=bool),
+                precomputed_n2_bundle=bundle)
+
     def test_lc_and_etau_change_output(self):
         u, v, T, S, rho, dz_half, z_int, tx, ty = _orchestrator_inputs()
         base = tke_vertical_mixing(u, v, T, S, rho, dz_half, None, tx, ty,
