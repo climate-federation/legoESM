@@ -3460,8 +3460,10 @@ class LatLonCGridOceanModel:
         # (bit-identical single-device path).
         _grid = grid if grid is not None else self.grid
         _vmask = vertex_mask if vertex_mask is not None else self._vertex_mask
-        _tke_n2_bundle = self._tke_step_entry_n2_bundle(
-            state, z_coord=_zc, config=_cfg_b)
+        _tke_n2_bundle = (
+            self._tke_step_entry_n2_bundle(
+                state, z_coord=_zc, config=_cfg_b)
+            if _apply_implicit_vmix else None)
         # Prescribed-flow lever (config.prescribed_flow, validated at
         # construction).  STATIC Python gate on the config value (CLAUDE.md
         # feature-gating exception): None (default) leaves every gated block
@@ -8704,6 +8706,8 @@ class LatLonCGridOceanModel:
         # --- LEAP-FROG + Asselin.
         rdt = 2.0 * dt
         gamma = _cfg_b.asselin_gamma
+        _tke_n2_bundle = self._tke_step_entry_n2_bundle(
+            state, z_coord=_zc, config=_cfg_b)
         u_mask3 = state.u_mask.data[..., jnp.newaxis]
         v_mask3 = state.v_mask.data[..., jnp.newaxis]
         cmask = state.land_mask.data
@@ -8926,6 +8930,7 @@ class LatLonCGridOceanModel:
                 return_tke=_tke_prog, grid=_grid,
                 n2_tracers=self._n2_before_advection_tracers(state, z_coord=z_coord, config=config),
                 n2_tracers_before=self._n2_nemo_before_tracers(state, z_coord=z_coord, config=config),
+                tke_n2_bundle=_tke_n2_bundle,
                 # NEMO e3w(Kmm) divisor (config.implicit_vmix_e3t_now_divisor,
                 # #1226 W1): naa_expl.eta is the barotropic AFTER/Kaa level
                 # ("h at state_expl.eta is the Kaa thickness" above);
@@ -9135,6 +9140,8 @@ class LatLonCGridOceanModel:
         # --- LEAP-FROG + Asselin.
         rdt = 2.0 * dt
         gamma = _cfg_b.asselin_gamma
+        _tke_n2_bundle = self._tke_step_entry_n2_bundle(
+            state, z_coord=_zc, config=_cfg_b)
         u_mask3 = state.u_mask.data[..., jnp.newaxis]
         v_mask3 = state.v_mask.data[..., jnp.newaxis]
         cmask = state.land_mask.data
@@ -9260,6 +9267,7 @@ class LatLonCGridOceanModel:
                 return_tke=_tke_prog, grid=_grid,
                 n2_tracers=self._n2_before_advection_tracers(state, z_coord=z_coord, config=config),
                 n2_tracers_before=self._n2_nemo_before_tracers(state, z_coord=z_coord, config=config),
+                tke_n2_bundle=_tke_n2_bundle,
                 eta_now=state.eta.data,
                 u_now=state.u.data, v_now=state.v.data,
             z_coord=z_coord, config=config, iwm_fields=iwm_fields)
