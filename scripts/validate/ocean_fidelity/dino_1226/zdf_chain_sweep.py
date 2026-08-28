@@ -418,11 +418,13 @@ def capture_face_sh2_call(model, state, forcing):
     real = shared.avm_weighted_shear_production
     real_mxl = tke_mod.compute_mixing_lengths
     real_solve = tke_mod._solve_tke_backward_euler
+    real_tri = tke_mod._tridiag_thomas
     real_lc = tke_mod.nemo_langmuir_tke_source
     real_prandtl = tke_mod._prandtl_number
     calls = []
     mxl_calls = []
     solve_calls = []
+    tri_calls = []
     lc_calls = []
     prandtl_calls = []
 
@@ -441,6 +443,11 @@ def capture_face_sh2_call(model, state, forcing):
         solve_calls.append((kwargs, out))
         return out
 
+    def spy_tri(a, b, c, d):
+        out = real_tri(a, b, c, d)
+        tri_calls.append(((a, b, c, d), out))
+        return out
+
     def spy_lc(*args, **kwargs):
         out = real_lc(*args, **kwargs)
         lc_calls.append((args, kwargs, out))
@@ -454,6 +461,7 @@ def capture_face_sh2_call(model, state, forcing):
     shared.avm_weighted_shear_production = spy
     tke_mod.compute_mixing_lengths = spy_mxl
     tke_mod._solve_tke_backward_euler = spy_solve
+    tke_mod._tridiag_thomas = spy_tri
     tke_mod.nemo_langmuir_tke_source = spy_lc
     tke_mod._prandtl_number = spy_prandtl
     try:
@@ -463,6 +471,7 @@ def capture_face_sh2_call(model, state, forcing):
         shared.avm_weighted_shear_production = real
         tke_mod.compute_mixing_lengths = real_mxl
         tke_mod._solve_tke_backward_euler = real_solve
+        tke_mod._tridiag_thomas = real_tri
         tke_mod.nemo_langmuir_tke_source = real_lc
         tke_mod._prandtl_number = real_prandtl
     if not calls:
@@ -471,7 +480,8 @@ def capture_face_sh2_call(model, state, forcing):
         raise AssertionError("TKE mixing-length/Langmuir/solve stages never fired")
     return real, calls[0], {
         "mxl_calls": mxl_calls, "lc_calls": lc_calls,
-        "solve_calls": solve_calls, "prandtl_calls": prandtl_calls,
+        "solve_calls": solve_calls, "tri_calls": tri_calls,
+        "prandtl_calls": prandtl_calls,
     }
 
 
@@ -1428,6 +1438,170 @@ def main() -> int:
                                     "operand_localization": row11_inputs,
                                     "controls": row11_primary["controls"],
                                 }
+                        else:
+                            # Row 12: compare the production matrix actually
+                            # handed to Thomas against zdftke.F90:499-510,
+                            # reconstructed from independent dumped operands.
+                            tri_calls = tke_capture["tri_calls"]
+                            if not tri_calls:
+                                raise AssertionError(
+                                    "TKE tridiagonal solve was not captured")
+                            tri_args, _tri_out = tri_calls[0]
+                            a_tri, b_tri, c_tri, _rhs_tri = map(
+                                np.asarray, tri_args)
+                            if a_tri.shape[-1] != npr + 2:
+                                raise AssertionError(
+                                    "row-12 expected virtual surface + 35 "
+                                    f"TKE rows, got {a_tri.shape[-1]}")
+                            # Drop the virtual surface identity row. The next
+                            # 34 rows are Fortran jk=2..jpkm1.
+                            lw_l = a_tri[..., 1:1 + npr]
+                            diag_l = b_tri[..., 1:1 + npr]
+                            up_l = c_tri[..., 1:1 + npr]
+
+                            with xr.open_dataset(
+                                    RUN / "mesh_mask.nc",
+                                    decode_times=False) as ds:
+                                e3t0_m = np.moveaxis(np.asarray(
+                                    ds["e3t_0"].isel(time_counter=0)), 0, -1)
+                                tmask_m = np.moveaxis(np.asarray(
+                                    ds["tmask"].isel(time_counter=0)), 0, -1)
+                            stretch_m = np.asarray(zrw_stretch)
+                            e3t_m = e3t0_m * stretch_m[..., None]
+                            e3w_m = np.asarray(e3w)[..., :npr]
+                            avm_full = avm_n_full
+                            dissl_full = base._load_interior(
+                                str(RUN / "tke_dump_dissl.bin"), ni, nj)
+                            avm_jk = avm_full[..., 1:1 + npr]
+                            avm_up = avm_full[..., 2:2 + npr]
+                            avm_lw = avm_full[..., :npr]
+                            e3t_jk = e3t_m[..., 1:1 + npr]
+                            e3t_lw = e3t_m[..., :npr]
+                            tmask_jk = tmask_m[..., 1:1 + npr]
+                            dissl_jk = dissl_full[..., 1:1 + npr]
+                            wmask_jk = wet_pr.astype(np.float64)
+                            dt64 = np.float64(kamm.DT)
+                            ediss64 = np.float64(tke_cfg.c_eps)
+                            zcof_n = (-np.float64(0.5) * dt64) * tmask_jk
+                            avm_up_sum_n = np.maximum(
+                                avm_up + avm_jk, np.float64(2.0e-5))
+                            avm_lw_sum_n = np.maximum(
+                                avm_jk + avm_lw, np.float64(2.0e-5))
+                            up_n = (zcof_n * avm_up_sum_n
+                                    / (e3t_jk * e3w_m))
+                            lw_n = (zcof_n * avm_lw_sum_n
+                                    / (e3t_lw * e3w_m))
+                            diag_n = (np.float64(1.0) - lw_n - up_n
+                                      + (np.float64(1.5) * dt64 * ediss64)
+                                      * dissl_jk * wmask_jk)
+
+                            solve_kwargs = tke_capture["solve_calls"][0][0]
+                            avm_operand_l = np.asarray(
+                                solve_kwargs["K_M_old"])[..., :npr]
+                            e3w_operand_l = np.asarray(
+                                solve_kwargs["dz_half"])[..., :npr]
+                            e3t_operand_l = np.asarray(
+                                solve_kwargs["dz_cell"])[..., 1:1 + npr]
+                            dissl_operand_l = (
+                                np.sqrt(np.maximum(
+                                    np.asarray(solve_kwargs["e_old"])[..., :npr],
+                                    np.float64(tke_cfg.tke_background)))
+                                / np.maximum(
+                                    np.asarray(solve_kwargs["l_eps"])[..., :npr],
+                                    np.float64(tke_cfg.mxl_min)))
+                            row12_operands = {
+                                "p_avm_jk": metrics(
+                                    avm_operand_l, avm_jk, wet_pr, focus,
+                                    POINTWISE_BAR),
+                                "e3t_jk_Kmm": metrics(
+                                    e3t_operand_l, e3t_jk, wet_pr, focus,
+                                    POINTWISE_BAR),
+                                "e3w_jk_Kmm": metrics(
+                                    e3w_operand_l, e3w_m, wet_pr, focus,
+                                    POINTWISE_BAR),
+                                "dissl_jk": metrics(
+                                    dissl_operand_l, dissl_jk, wet_pr, focus,
+                                    POINTWISE_BAR),
+                            }
+                            row12_coefficients = {
+                                "zd_up": metrics(
+                                    up_l, up_n, wet_pr, focus, POINTWISE_BAR),
+                                "zd_lw": metrics(
+                                    lw_l, lw_n, wet_pr, focus, POINTWISE_BAR),
+                                "zdiag": metrics(
+                                    diag_l, diag_n, wet_pr, focus,
+                                    POINTWISE_BAR),
+                            }
+                            first_coeff = next(
+                                (name for name in ("zd_up", "zd_lw", "zdiag")
+                                 if not row12_coefficients[name]["pass"]),
+                                None)
+                            primary_name = first_coeff or "zdiag"
+                            row12_primary = dict(
+                                row12_coefficients[primary_name])
+                            row12_primary["coefficient_metrics"] = (
+                                row12_coefficients)
+                            row12_primary["operand_metrics"] = row12_operands
+                            row12_primary["resolved_constants"] = {
+                                "rn_Dt": float(dt64),
+                                "rn_ediss": float(ediss64),
+                                "minimum_avm_sum": 2.0e-5,
+                            }
+                            row12_primary["controls"] = {
+                                name: planted_controls(
+                                    ref, ref, wet_pr, POINTWISE_BAR)
+                                for name, ref in (
+                                    ("zd_up", up_n), ("zd_lw", lw_n),
+                                    ("zdiag", diag_n))
+                            }
+                            row4["continuation_preview"]["rows"][
+                                "12_tke_diffusion_matrix"] = row12_primary
+                            if first_coeff is not None:
+                                first_operand = next(
+                                    (name for name in (
+                                        "p_avm_jk", "e3t_jk_Kmm",
+                                        "e3w_jk_Kmm", "dissl_jk")
+                                     if not row12_operands[name]["pass"]),
+                                    "literal coefficient evaluation order")
+                                row4["continuation_preview"][
+                                    "first_divergence"] = {
+                                        "row": 12,
+                                        "operation": (
+                                            "TKE diffusion matrix lower/upper/"
+                                            "diagonal coefficients"),
+                                        "nemo_line": (
+                                            "cfgs/DINO/MY_SRC/zdftke.F90:"
+                                            "499-510"),
+                                        "output": row12_primary,
+                                        "first_failing_operand": {
+                                            "name": first_operand,
+                                            "first_failing_coefficient":
+                                                first_coeff,
+                                            "nemo_line": (
+                                                "cfgs/DINO/MY_SRC/zdftke.F90:"
+                                                "500-510"),
+                                        },
+                                        "operand_localization": row12_operands,
+                                        "controls": row12_primary["controls"],
+                                        "next_round_fix_design": {
+                                            "option":
+                                                "tke_matrix_evaluation",
+                                            "faithful_default_on_complete_"
+                                            "dino_nemo_cards": "nemo_literal",
+                                            "legacy_default_everywhere_else":
+                                                "factored",
+                                            "legacy_opt_in_on_dino_nemo_cards":
+                                                "factored",
+                                            "construction": (
+                                                "assemble zcof, zd_up, zd_lw "
+                                                "and zdiag in zdftke.F90 "
+                                                "source order from carried "
+                                                "p_avm/dissl and live Kmm "
+                                                "metrics before calling the "
+                                                "same differentiable Thomas "
+                                                "solver"),
+                                        },
+                                    }
         if row4["disposition"] == "DIVERGED":
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
                 LatLonCGridOceanModel,
@@ -1737,6 +1911,7 @@ def main() -> int:
         HERE / "PREREG_zdf_chain_sweep_round4.md",
         HERE / "PREREG_zdf_chain_sweep_round6.md",
         HERE / "PREREG_zdf_chain_sweep_round7.md",
+        HERE / "PREREG_zdf_chain_sweep_round8.md",
         HERE / "kamm_twin_90d.py",
         Path("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py"),
         Path("packages/ocean/legoesm/ocean/eos.py"),
@@ -1820,7 +1995,7 @@ def main() -> int:
     else:
         first_divergence = None
     artifact = {
-        "schema": "zdf-chain-sweep-v7",
+        "schema": "zdf-chain-sweep-v8",
         "lane": "d180", "kt": 5761, "cpu_only": True, "fp64": True,
         "checked_out_parent_sha": git_sha(),
         "probe_commit_sha": probe_commit_sha(),
@@ -1842,6 +2017,7 @@ def main() -> int:
                          "tke_dump_rn2.bin",
                          "tke_dump_sh2.bin",
                          "tke_dump_avm_in.bin",
+                         "tke_dump_dissl.bin",
                          "tke_dump_zri.bin", "tke_dump_pdlr.bin",
                          "tke_dump_en.bin",
                          "dump_nmln.bin", "dump_hmlp.bin",
