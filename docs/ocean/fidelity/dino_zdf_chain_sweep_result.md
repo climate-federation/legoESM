@@ -3,6 +3,155 @@
 Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 (`RUN_SEQDUMP_D180_1R`, `kt=5761`).
 
+## Round-3 result: carried coefficients fixed; row 4 stops again
+
+The registered `carried_previous_step` construction is now the production
+default on the complete DINO NEMO cards, `nemo_dino_kamm` and its inherited
+`nemo_dino_kamm_mlf` card.  A NEMO restart bridge reads `avm_k` and `avt_k`
+without inference.  During the step the carried pair feeds face-weighted shear,
+the Prandtl numerator, TKE matrix diagonals, the stratification RHS, and (when
+active) the wave denominator.  Only the post-solve closure output is stored as
+the next step's pair; EVD and other enhancements remain downstream composition
+and cannot leak into the carry.
+
+This follows NEMO's active lifetime: `zdf_phy` calls
+`zdf_sh2(Kbb,Kmm,avm_k)` before `zdf_tke(...,avm_k,avt_k)` at
+`cfgs/DINO/WORK/zdfphy.F90:268,286`; `zdftke.F90:489,503-506,514,538` consumes
+the incoming pair and `zdftke.F90:832-844` overwrites it after the solve.
+
+The generic `TKEConfig` default remains `current_subiteration`.  Therefore the
+partial DINO `nemo_paper` card, the DINO `veros` card, the NEMO-recipe/ORCA
+path, every Veros ACC/global recipe, and MPAS when configured with this common
+TKE kernel keep their previous numerical path and array values.  No non-oracle
+card selects the new behavior.  In particular, `fidelity/nemo_recipe.py` is a
+partial, non-DINO NEMO-oriented recipe with its own certificate; it remains on
+`current_subiteration` rather than borrowing this DINO matched-state result.
+The common state pytree necessarily gains
+three optional carry slots, but they remain `None` and are not read on those
+cards; this is a schema extension, not a numerical-path change.
+
+The red-capable regression set includes a hand-computed two-interface case
+with deliberately different carried/current coefficients.  It proves that
+carried `avm=[3,5]` is observed as shear production and the momentum matrix
+operand, carried `avt=[7,11]` is the stratification operand, and the post-solve
+`en=4` produces the next `avm=[2,2]`, `avt=[1,0.5]`.  Missing carry, an ignored
+carry on the legacy selector, and selector/surface shape violations fail
+loudly.  Restart axis/halo identity, DINO-card selection, JIT, and finite
+gradients are also covered.  The final focused CPU/fp64 run passed 145 tests.
+
+### Ordered rerun
+
+The requested composite target was **not reached**.  The corrected carried
+`p_avm` operand itself is `VERIFIED` at exactly 0/9,920 failures, zero maximum
+column error, and 4/4 southern focus columns passing.  Continuing to the next
+operand in the same row shows that row 4 as a whole is still `DIVERGED`:
+
+| Row | Operation | Disposition | Whole-domain per-column result | Southern focus |
+|---:|---|---|---|---|
+| 1 | `eos_rab(Nbb)` | `VERIFIED` | 0/9,920 failed; alpha max `3.087467e-16` | 4/4 pass |
+| 2 | `bn2(Nbb)` | `VERIFIED` | 0/9,920; max `5.968673e-16` | 4/4 pass |
+| 3 | `eos_rab/bn2(Nnn)` | `VERIFIED` | 0/9,920; max `5.968545e-16` | 4/4 pass |
+| 4a | carried `p_avm` operand | `VERIFIED` | **0/9,920; max `0`** | **4/4 pass** |
+| 4 | complete `zdf_sh2` | `DIVERGED` | **9,920/9,920; max `73.29360955`** | **4/4 fail** |
+| 5 onward | remaining TKE terms through implicit solves | `UNMEASURED` | ordered stop at row 4 | ordered stop |
+
+All planted controls remain live: the baseline passes and the wet-cell
+perturbation, one-i roll, and nonfinite injection each fire.
+
+### New first operand: step-entry NOW velocities
+
+After exact carried viscosity, NEMO's next factors are
+
+```fortran
+* ( uu(ji,jj,jk-1,Kmm) - uu(ji,jj,jk,Kmm) )
+* ( uu(ji,jj,jk-1,Kbb) - uu(ji,jj,jk,Kbb) )
+```
+
+with the analogous `vv` factors at
+`cfgs/DINO/WORK/zdfsh2.F90:81-82,86-87`.  NEMO evaluates `zdf_phy` at step
+entry.  legoESM currently reaches the TKE closure after its explicit
+dynamics/advection update, so its NOW factors are post-explicit and
+pre-implicit-solve.
+
+The directly scored BEFORE vertical-difference operands are bit-identical
+(0 failed U or V face columns, zero maximum error).  The NOW difference
+operand is not: 9,758/9,758 wet U columns and 9,868/9,868 wet V columns fail.
+Scoring the literal `velocity(k-1)-velocity(k)` gives maxima `12.59807570`
+(U) and `4.530529912` (V).  Each southern T-column focus score is the maximum
+over its two surrounding wet faces; all four fail both operands.  U focus
+errors are `1.1925297`, `0.9549570`, `1.1168380`, and `1.1182779`; V errors
+are `0.1037876`, `0.1000737`, `0.1000737`, and `0.4359260`.  Substituting the
+exact step-entry NOW velocities reduces the
+complete shear maximum to `0.03098204` but does not close it (9,920/9,920
+still fail), so later metric/four-face operands remain deliberately
+unattributed.  The ordered walk stops at the first failing velocity operand.
+
+Next-round design: add the static option `tke_shear_evaluation_stage`, with
+`step_entry` as the faithful default on the two complete DINO NEMO cards and
+`implicit_solve_state` as explicit legacy opt-in.  Evaluate and freeze
+`p_sh2` from step-entry NOW/BEFORE velocities before explicit dynamics and
+advection, carry that field to the closure, and use the same frozen field for
+both the TKE shear RHS and Prandtl denominator.  Re-run row 4 before examining
+the next `e3uw/e3vw` operand; the present substitution proves velocity timing
+is first, not that it is the only remaining row-4 defect.
+
+### Frozen climate prediction and GPU handoff
+
+The prospective registration remains frozen even though the ordered
+matched-state sweep found a later row-4 defect.  Baseline southern-basin
+day-90 MLD RMS is `22.479491 m` (`22.4795 m` headline).
+
+- `CONFIRM`: faithful RMS `<=11.2397455 m`; legacy control within `0.001 m` of
+  `22.479491 m`; no acceptance error worsens versus control by more than its
+  one-floor value; the 5x pass tally does not decrease; and at least one of the
+  two southern surface-density errors improves by one floor.
+- `REFUTE`: faithful RMS `>=20.2775 m`, or the legacy baseline control fails,
+  or any acceptance metric worsens by more than one floor, or the 5x pass tally
+  decreases.
+- Between the RMS bands with valid controls is `PARTIAL/INDETERMINATE`.
+
+The frozen one-floor values are ACC `0.091 Sv`, upper density contrast
+`1.1e-4 kg m-3`, deep contrast `4.5e-5 kg m-3`, southern surface sigma maximum
+`9.5e-5 kg m-3`, and mean `9.5e-5 kg m-3`.
+
+Exact arm commands:
+
+```bash
+CUDA_VISIBLE_DEVICES=<gpu> JAX_ENABLE_X64=1 python scripts/validate/ocean_fidelity/run_fp64.py \
+  scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py \
+  nemo_dino_kamm_mlf /tmp/zdf_carry_faithful_d90.npz --days 90 --save-3d \
+  --bridge-tke
+
+CUDA_VISIBLE_DEVICES=<gpu> JAX_ENABLE_X64=1 python scripts/validate/ocean_fidelity/run_fp64.py \
+  scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py \
+  nemo_dino_kamm_mlf /tmp/zdf_carry_legacy_d90.npz --days 90 --save-3d \
+  --bridge-tke --tke-preclosure-coeff-source current_subiteration
+
+python scripts/validate/ocean_fidelity/dino_1226/acceptance_gate_90d.py \
+  /tmp/zdf_carry_faithful_d90.npz --level 5
+python scripts/validate/ocean_fidelity/dino_1226/acceptance_gate_90d.py \
+  /tmp/zdf_carry_legacy_d90.npz --level 5
+```
+
+The exact MLD scorer remains the audit's symmetric NOW-state criterion with
+its NEMO area/mask and southern region.  This round ran no GPU arm.
+
+Round-3 artifact:
+`docs/ocean/fidelity/dino_zdf_chain_sweep_round3_artifact.json`, SHA256
+`695efe3c8f1f65634795be7ddf99b82ea90afc7ae3b990ccf7d495e03191ab43`.
+Probe/tree SHA: `57c6b21e3bbb61fccd915c8575c2cadcc8ac6de0`.
+
+### Round-3 adversarial review
+
+Two independent read-only rereviews ended `NON-HOLD`.  The measurement
+reviewer reproduced the artifact byte-for-byte, checked all 32 provenance
+hashes, the exact difference/focus populations, live controls, and the ordered
+stop.  The physics reviewer checked the active NEMO lifetime against source,
+the partial-depth cold-start mask, restart/pass-through and partial-carry
+failures, resolved-card scope, legacy identity, surface consumption, JIT/AD,
+and separation of the post-solve closure carry from EVD.  `dissl` remains a
+later ordered operand; this round makes no claim that it is closed.
+
 ## Round-2 result (supersedes the row-2 stop below)
 
 The registered raw-mesh fix is now production code.  A NEMO bridge preserves
