@@ -186,6 +186,45 @@ def metrics(lego: np.ndarray, nemo: np.ndarray, wet: np.ndarray,
     }
 
 
+def nemo_literal_tke_recurrence(
+    a_ext: np.ndarray, b_ext: np.ndarray, c_ext: np.ndarray,
+    rhs_ext: np.ndarray, surface_en: np.ndarray,
+    w_active: np.ndarray, floor: float,
+) -> np.ndarray:
+    """Post-hoc row-17 discriminator for zdftke.F90:547-565 source order.
+
+    This is deliberately a NumPy scorer, not production physics.  It preserves
+    NEMO's reciprocal surface seed ``zdiag(1)=1/en(1), zd_lw(1)=1``, stops the
+    forward recurrence at ``jpkm1``, seeds that row directly, back-substitutes
+    through level 2, and only then applies the floor/mask.
+    """
+    a = np.asarray(a_ext)
+    diag = np.array(b_ext, copy=True)
+    up = np.asarray(c_ext)
+    rhs = np.asarray(rhs_ext)
+    work = np.array(rhs, copy=True)
+    n_ext = diag.shape[-1]
+    last_solved = n_ext - 2
+    diag[..., 0] = 1.0 / np.asarray(surface_en)
+    work[..., 0] = 1.0
+    for k in range(1, last_solved + 1):
+        diag[..., k] = (
+            diag[..., k]
+            - a[..., k] * up[..., k - 1] / diag[..., k - 1])
+        work[..., k] = (
+            rhs[..., k]
+            - a[..., k] / diag[..., k - 1] * work[..., k - 1])
+    solved = np.array(rhs, copy=True)
+    solved[..., last_solved] = (
+        work[..., last_solved] / diag[..., last_solved])
+    for k in range(last_solved - 1, 0, -1):
+        solved[..., k] = (
+            work[..., k] - up[..., k] * solved[..., k + 1]
+        ) / diag[..., k]
+    interior = solved[..., 1:]
+    return np.maximum(interior, np.float64(floor)) * np.asarray(w_active)
+
+
 def exact_difference_census(
     lego: np.ndarray,
     nemo: np.ndarray,
@@ -1884,6 +1923,17 @@ def main() -> int:
                                         row17m = metrics(
                                             postsolve_l, postsolve_n, wet_rhs,
                                             focus, 1.0e-12)
+                                        literal_recurrence = (
+                                            nemo_literal_tke_recurrence(
+                                                a_tri, b_tri, c_tri,
+                                                tri_args[3], surface_n,
+                                                np.asarray(
+                                                    solve_kwargs["w_active"]),
+                                                tke_cfg.tke_background))
+                                        recurrence_metric = metrics(
+                                            literal_recurrence[..., :nrhs],
+                                            postsolve_n, wet_rhs, focus,
+                                            1.0e-12)
                                         row17m["disposition"] = (
                                             "VERIFIED" if row17m["pass"]
                                             else "DIVERGED")
@@ -1900,6 +1950,8 @@ def main() -> int:
                                             "rhs_shear": row13m,
                                             "rhs_stratification": row14m,
                                             "rhs_dissipation": row15m,
+                                            "posthoc_nemo_literal_recurrence":
+                                                recurrence_metric,
                                         }
                                         bracket17 = restart_numeric_identity(
                                             args.row17_bracket_instrument_restart,
@@ -1940,15 +1992,38 @@ def main() -> int:
                                                     "output": row17m,
                                                     "first_failing_operand": {
                                                         "name": (
-                                                            "Thomas solve/"
-                                                            "postsolve floor")},
+                                                            "shared normalized "
+                                                            "Thomas recurrence "
+                                                            "instead of NEMO's "
+                                                            "reciprocal-surface/"
+                                                            "jpkm1-terminal "
+                                                            "recurrence"),
+                                                        "discriminator_pass":
+                                                            recurrence_metric[
+                                                                "pass"],
+                                                        "nemo_line": (
+                                                            "cfgs/DINO/MY_SRC/"
+                                                            "zdftke.F90:547-565")},
                                                     "operand_localization":
                                                         row17m["operand_metrics"],
                                                     "controls": row17m["controls"],
                                                     "next_round_fix_design": {
                                                         "status": (
-                                                            "DESIGN_AFTER_"
-                                                            "SOLVE_OPERAND_WALK"),
+                                                            "DESIGNED_NOT_"
+                                                            "IMPLEMENTED"),
+                                                        "option": (
+                                                            "tke_solver_"
+                                                            "evaluation"),
+                                                        "faithful_default_on_"
+                                                        "complete_dino_nemo_"
+                                                        "cards": (
+                                                            "nemo_literal"),
+                                                        "legacy_default_"
+                                                        "everywhere_else": (
+                                                            "shared_thomas"),
+                                                        "legacy_opt_in_on_"
+                                                        "dino_nemo_cards": (
+                                                            "shared_thomas"),
                                                         "walk_order": [
                                                             "forward diagonal",
                                                             "forward RHS",
@@ -1958,11 +2033,24 @@ def main() -> int:
                                                             "wmask",
                                                         ],
                                                         "rule": (
-                                                            "Instrument the "
-                                                            "first mismatching "
-                                                            "Thomas recurrence "
-                                                            "slot before any "
-                                                            "production fix."),
+                                                            "Transcribe the "
+                                                            "reciprocal surface "
+                                                            "seed, two forward "
+                                                            "recurrences, direct "
+                                                            "jpkm1 seed, reverse "
+                                                            "substitution and "
+                                                            "postsolve floor/mask "
+                                                            "as JAX scans; keep "
+                                                            "the shared solver "
+                                                            "untouched elsewhere."),
+                                                        "reason_for_stop": (
+                                                            "A new differentiable "
+                                                            "solver path plus "
+                                                            "JIT/grad and boundary "
+                                                            "tests is a single fix "
+                                                            "too large to add after "
+                                                            "localization in this "
+                                                            "round."),
                                                     },
                                                 }
                                     row4["continuation_preview"]["rows"][
