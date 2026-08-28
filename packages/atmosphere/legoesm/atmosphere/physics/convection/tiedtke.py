@@ -552,6 +552,31 @@ def tiedtke_convection(
             dq_c_conv_dt > 0.0, dq_c_conv_dt * rain_scale, dq_c_conv_dt,
         )
 
+    # -- Vapour positivity ------------------------------------------------
+    # The compensating-subsidence sink (M/rho)*dq_dz in apply_mass_flux_kernel
+    # (mass_flux.py) is an explicit vapour sink with NO q_v/dt bound.  At the
+    # near-dry cold point (q_v ~ 1e-4 kg/kg) it can remove more vapour than
+    # exists over dt, driving q_v < 0 (measured -6.8e-5 kg/kg, which fails the
+    # RCE run at all SSTs; single-SST tuning merely stumbled onto params that
+    # avoid it).  Scale ALL coupled convective thermodynamic tendencies
+    # (dT, dq_v, dq_c) by ONE per-column factor -- the tightest per-level
+    # positivity ratio -- so q_v stays >= 0 while every column water and MSE
+    # relation is preserved EXACTLY.  A per-level clip would orphan the
+    # condensate/latent bookkeeping and break the subsidence flux telescoping
+    # (GLM + codex 2026-08-28).  Placed before the cloud/rain split so
+    # dq_c_pos / dq_r_conv_dt inherit the scaling; col_scale == 1 wherever no
+    # level overshoots, so a stable column is byte-unchanged.  Same
+    # construction as the kuo.py limiter.
+    _pos_demand = jnp.clip(-dt * dq_v_dt, 0.0, None)
+    _pos_avail = jnp.clip(q_v, 0.0, None)
+    _pos_col_scale = jnp.clip(
+        jnp.min(_pos_avail / jnp.maximum(_pos_demand, 1e-20),
+                axis=-1, keepdims=True),
+        0.0, 1.0)
+    dT_dt = dT_dt * _pos_col_scale
+    dq_v_dt = dq_v_dt * _pos_col_scale
+    dq_c_conv_dt = dq_c_conv_dt * _pos_col_scale
+
     # -- CMT --------------------------------------------------------------
     if config.enable_cmt:
         if config.enable_downdraft:
