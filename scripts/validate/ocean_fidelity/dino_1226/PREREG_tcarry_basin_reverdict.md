@@ -60,7 +60,7 @@ CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both \
   --no-surface-stress-implicit
 ```
 
-Exact existing scorer invocations:
+Exact gate and paired-scorer invocations:
 
 ```sh
 .venv/bin/python scripts/validate/ocean_fidelity/dino_1226/acceptance_gate_90d.py \
@@ -69,11 +69,11 @@ Exact existing scorer invocations:
   results/dino_1455/tcarry_basin90_corrected.npz --level 5
 
 CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
-  .venv/bin/python -m \
-  scripts.validate.ocean_fidelity.dino_1226.wall_visc_ablation_gap \
+  .venv/bin/python \
+  scripts/validate/ocean_fidelity/dino_1226/tcarry_basin_reverdict.py \
   results/dino_1455/tcarry_basin90_legacy.npz \
   results/dino_1455/tcarry_basin90_corrected.npz \
-  --labels legacy-U-as-T,corrected-T
+  --day 90 --out results/dino_1455/tcarry_basin90_reverdict.json
 ```
 
 Before classification, both acceptance-gate artifacts must certify the claim's
@@ -85,16 +85,18 @@ The scorer's dry/wet planted controls must pass.
 Define `Delta90 = Gcorrected90 - Glegacy90` (positive reduces the negative
 deficit) and `R90 = Delta90/abs(Glegacy90)`.
 
-- **CONFIRMS material deficit contribution** iff `R90 >= 0.10`
+- **UNRESOLVED/FLOOR** has first priority iff `|Delta90| <= 2*F90`; it cannot
+  also be REFUTE.
+- Otherwise **CONFIRMS material deficit contribution** iff `R90 >= 0.10`
   (`Delta90 >= 0.04257848785815366 Sv`), `|Delta90| > 2*F90`, and no
   acceptance-gate metric's absolute NEMO gap degrades by more than its own
   registered tolerance relative to legacy.
-- **REFUTES material deficit contribution** iff `R90 <= 0.02`
-  (`Delta90 <= 0.008515697571630733 Sv`). A negative material change is
+- Otherwise **REFUTES material deficit contribution** iff `R90 <= 0.02`
+  (`Delta90 <= 0.008515697571630731 Sv`). A negative material change is
   reported additionally as a material compensator, not silently folded into
   “no effect”.
 - `0.02 < R90 < 0.10`, or a transport gain accompanied by a gate regression,
-  is **UNRESOLVED**. Any `|Delta90| <= 2*F90` is explicitly floor-limited.
+  is **UNRESOLVED**.
 
 The acceptance result and all five metric deltas are printed in the same table
 as `Gbasin90`, `G4`, and rows `0..13`; transport alone cannot earn a clean fix
@@ -126,12 +128,37 @@ The endpoint uses the same `g_south`/row metric at day 360. The exact recorded
 legacy baseline is `-0.9519122331848315 Sv`; the directly measured two-sided
 floor is `F360 = 0.06173656216045926 Sv`, from the same retained four-member
 artifacts and series. The legacy endpoint must reproduce within `2*F360 =
-0.12347312432091852 Sv` or STOP. Define `Delta360` and `R360` as above:
-CONFIRM requires `R360 >= 0.10` and `Delta360 > 2*F360`; REFUTE requires
-`R360 <= 0.02`; everything between, any result inside `2*F360`, or a
-compensating density/gate regression is UNRESOLVED. The final-90-day mean over
+0.12347312432091852 Sv` or STOP. Define `Delta360` and `R360` as above. The
+exact 10% threshold is `0.09519122331848316 Sv`; the exact 2% threshold is
+`0.01903824466369663 Sv`. Classification order is the same and mutually
+exclusive: `|Delta360| <= 2*F360` is **UNRESOLVED/FLOOR**; otherwise CONFIRM
+requires `R360 >= 0.10`; otherwise REFUTE requires `R360 <= 0.02`; everything
+between is UNRESOLVED. At both endpoints a compensation safety failure means
+UNRESOLVED: for any of the five `acceptance_gate_90d.metrics` quantities, the
+corrected absolute NEMO gap exceeds the legacy absolute gap by more than that
+metric's committed `acceptance_gate_90d.FLOORS` value. The final-90-day mean over
 days `280..360` is descriptive unless a same-functional ensemble floor is
 computed from the retained verdict members; the endpoint alone controls this
 registered attribution verdict.
+
+Exact conditional day-360 scorer invocation:
+
+```sh
+CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
+  .venv/bin/python \
+  scripts/validate/ocean_fidelity/dino_1226/tcarry_basin_reverdict.py \
+  results/dino_1455/tcarry_basin360_legacy.npz \
+  results/dino_1455/tcarry_basin360_corrected.npz \
+  --day 360 --out results/dino_1455/tcarry_basin360_reverdict.json
+```
+
+The paired scorer is fail-closed. It reuses `acceptance_gate_90d.load_candidate`
+and `.metrics`, `acc_driver_decomp.group_transport`, and
+`basin_seasonal_decomp.row_transport`; checks their two reductions to
+`1e-12 Sv`; prints full-precision rows, `G4`, `Gbasin`, metric deltas, hashes,
+and stamps; enforces paired day-0 identity, selector identity, legacy baseline,
+and floor controls; and runs non-vacuous dry/wet transport and selector-swap
+plants on every invocation. `--self-test` exercises the mutually exclusive
+classifier and controls without reading a GPU result.
 
 No arm in either stage runs in this CPU-only preregistration round.
