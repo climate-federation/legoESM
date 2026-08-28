@@ -5,9 +5,9 @@ Self-contained: builds a small synthetic beta-plane ``NemoGrid``/``NemoState``
 velocity staggering (NEMO east/north face -> legoESM u/v faces), and the state
 placement.
 """
+import jax
 import numpy as np
 import pytest
-
 from legoesm.ocean.fidelity.nemo_io import NemoBeforeState, NemoGrid, NemoState
 from legoesm.ocean.fidelity.nemo_state_bridge import (
     bridge_before_state_topo,
@@ -113,8 +113,9 @@ LON0, DLON_D = 0.0, 5.0
 
 
 def _synthetic_topo():
-    from legoesm import constants
     from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
+
+    from legoesm import constants
     lat_deg = LAT0 + DLAT_D * np.arange(TNY)         # (TNY,)
     lon_deg = LON0 + DLON_D * np.arange(TNX)
     gphit = lat_deg[:, None] * np.ones((1, TNX))
@@ -174,6 +175,74 @@ def test_topo_bridge_metric_convention_default_is_bit_identical():
     for f in ("dx_T", "dy_T", "area_T", "dx_v", "dy_v", "area_q"):
         np.testing.assert_array_equal(
             getattr(out_default.geometry, f), getattr(out_exact.geometry, f))
+
+
+def test_topo_bridge_omega_reference_default_is_bit_identical():
+    """Omitting the counterfactual reference mode is byte-identical to NEMO."""
+    from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
+
+    grid, state, _ = _synthetic_topo()
+    default = bridge_nemo_to_legoesm_topo(grid, state, periodic_i=True)
+    explicit = bridge_nemo_to_legoesm_topo(
+        grid, state, periodic_i=True,
+        omega=NEMO_CONSTANTS_CONFIG.Omega, f_reference_mode="nemo")
+    default_leaves = jax.tree_util.tree_leaves(default)
+    explicit_leaves = jax.tree_util.tree_leaves(explicit)
+    assert len(default_leaves) == len(explicit_leaves)
+    for left, right in zip(default_leaves, explicit_leaves, strict=True):
+        np.testing.assert_array_equal(np.asarray(left), np.asarray(right))
+
+
+def test_topo_bridge_legacy_omega_changes_only_registered_geometry_fields():
+    """The old-Earth selector moves only Ω and its three Coriolis arrays."""
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
+
+    from legoesm import constants
+
+    previous = get_policy()
+    set_policy(PrecisionPolicy.fp64())
+    try:
+        grid, state, _ = _synthetic_topo()
+        nemo = bridge_nemo_to_legoesm_topo(grid, state, periodic_i=True)
+        legacy = bridge_nemo_to_legoesm_topo(
+            grid, state, periodic_i=True, omega=constants.Omega,
+            f_reference_mode="selected_omega")
+    finally:
+        set_policy(previous)
+    registered = {"f_T", "f_u", "f_v", "omega"}
+    for field in nemo.geometry._fields:
+        if field in registered:
+            continue
+        left = jax.tree_util.tree_leaves(getattr(nemo.geometry, field))
+        right = jax.tree_util.tree_leaves(getattr(legacy.geometry, field))
+        assert len(left) == len(right), field
+        for a, b in zip(left, right, strict=True):
+            np.testing.assert_array_equal(np.asarray(a), np.asarray(b), err_msg=field)
+    assert float(nemo.geometry.omega) == NEMO_CONSTANTS_CONFIG.Omega
+    assert float(legacy.geometry.omega) == constants.Omega
+    ratio = constants.Omega / NEMO_CONSTANTS_CONFIG.Omega
+    for field in ("f_T", "f_u", "f_v"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(legacy.geometry, field)),
+            ratio * np.asarray(getattr(nemo.geometry, field)), rtol=1e-14, atol=0.0)
+    for field in ("T", "S", "u", "v", "eta", "H_bathy"):
+        np.testing.assert_array_equal(
+            getattr(legacy.state, field).data, getattr(nemo.state, field).data)
+
+
+def test_topo_bridge_legacy_omega_with_nemo_reference_is_rejected():
+    """Planted selector/reference disagreement must trip the original tight guard."""
+    from legoesm import constants
+
+    grid, state, _ = _synthetic_topo()
+    with pytest.raises(ValueError, match="Coriolis mismatch"):
+        bridge_nemo_to_legoesm_topo(
+            grid, state, periodic_i=True, omega=constants.Omega,
+            f_reference_mode="nemo")
+    with pytest.raises(ValueError, match="f_reference_mode"):
+        bridge_nemo_to_legoesm_topo(
+            grid, state, periodic_i=True, f_reference_mode="relaxed")
 
 
 def test_topo_bridge_metric_convention_isotropic_forwards_and_raises():
@@ -253,8 +322,9 @@ def _synthetic_topo_mercator():
     drives ``dy_T`` — the whole reason gphiv was added.  Uniform-dlat grids ignore
     lat_face (latlon.py:1319), so this is the case that catches a face sign-flip /
     off-by-one / N-S swap in the ``2*lat_1d[0]-gphiv[0]`` reflection."""
-    from legoesm import constants
     from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
+
+    from legoesm import constants
     # A stand-in for a NEMO mesh_mask must carry NEMO'S OWN rotation rate: the
     # bridge builds f from NEMO's Earth by default (#1455), and a fixture on
     # legoESM's rounded constant would be testing that the bridge reproduces

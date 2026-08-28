@@ -137,6 +137,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from legoesm.core.field import Field
+from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.experiments.dino import (
     apply_dino_lat_lon_surface_forcing,
@@ -156,6 +157,8 @@ from legoesm.ocean.fidelity.nemo_state_bridge import (
     bridge_before_state_topo,
     bridge_nemo_to_legoesm_topo,
 )
+
+from legoesm import constants
 
 # NEMO oracle-build artifact roots (mesh/restart donors). Override via env var
 # or --run-traj/--run-stepdump for a different machine/build layout.
@@ -181,6 +184,28 @@ PERTURB_EPS_DEFAULT = 1e-14
 DT = float(__import__("os").environ.get("DINO_DT", "2700.0"))
 STEPS_PER_DAY = 32  # 32 * 2700s = 86400s = 1 day
 SNAP_DAYS = (0, 30, 60, 90)  # full 3-D T/S snapshot days when --save-3d
+BRIDGE_OMEGA_MODES = ("nemo", "legacy-rounded")
+
+
+def resolve_bridge_omega(mode: str) -> tuple[float, str]:
+    """Return the bridge-only Omega and its fail-closed reference mode."""
+    if mode == "nemo":
+        return NEMO_CONSTANTS_CONFIG.Omega, "nemo"
+    if mode == "legacy-rounded":
+        return constants.Omega, "selected_omega"
+    raise ValueError(
+        f"bridge_omega must be one of {BRIDGE_OMEGA_MODES}, got {mode!r}")
+
+
+def _array_content_sha256(name: str, value) -> str:
+    """Content identity for one materialized array, including shape/dtype."""
+    digest = hashlib.sha256()
+    array = np.ascontiguousarray(np.asarray(value))
+    digest.update(name.encode("ascii"))
+    digest.update(str(array.dtype).encode("ascii"))
+    digest.update(json.dumps(array.shape).encode("ascii"))
+    digest.update(array.tobytes(order="C"))
+    return digest.hexdigest()
 
 # The scalar reductions every recorded scorer takes of a 3-D snapshot, in the
 # order verdict360.KEYS declares them: the five acceptance-gate metrics, then
@@ -1123,7 +1148,8 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                        surface_tendency_placement: str | None = None,
                        u_m: float | None = None,
                        restart_file: str = RESTART_FILE,
-                       e3t_mode: str | None = None):
+                       e3t_mode: str | None = None,
+                       bridge_omega: str = "nemo"):
     """Bridge the NEMO restart into a legoESM state and run the day-0 gate.
 
     ``restart_file``: basename of the (rebuilt, single-file) NEMO restart
@@ -1179,10 +1205,16 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
         raise SystemExit(
             "--bridge-before-stress-tpoint requires --bridge-before; a "
             "T-point prior-stress carry cannot be attached to an Euler start")
+    bridge_omega_value, f_reference_mode = resolve_bridge_omega(bridge_omega)
     g = read_nemo_mesh_mask(f"{run_traj}/mesh_mask.nc", nn_hls=0)
     s = read_nemo_restart(f"{run_stepdump}/{restart_file}", nn_hls=0)
     br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True,
-                                     e3t_mode=e3t_mode)
+                                     e3t_mode=e3t_mode,
+                                     omega=bridge_omega_value,
+                                     f_reference_mode=f_reference_mode)
+    print(f"ARM: bridge_omega={bridge_omega} "
+          f"omega={bridge_omega_value:.17g} "
+          f"f_reference_mode={f_reference_mode}", flush=True)
     cfg = dataclasses.replace(dino_config_for_recipe(recipe),
         lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)
     if vmix_scheme is not None:
@@ -1210,6 +1242,7 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                 f"DINO_EEN_METRIC must be 'off' or 'nemo', got {_em!r}")
         cfg = dataclasses.replace(cfg, een_metric_weighting=_em)
         print(f"ARM: een_metric_weighting={_em}")
+    print(f"resolved EEN metric weighting={cfg.een_metric_weighting}", flush=True)
     _ba = os.environ.get("DINO_BOLUS_ADV")
     if _ba:
         # #1226: "through_fct" folds the GM bolus into the ADVECTING MASS FLUX;
@@ -1368,7 +1401,8 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
              save_step_eta: bool = False,
              snap_days: tuple[int, ...] | None = None,
              fp64_3d: bool = False,
-             legacy_1d_ladder: bool = False) -> bool:
+             legacy_1d_ladder: bool = False,
+             bridge_omega: str = "nemo") -> bool:
     """Run the state-initialized twin for ``n_days`` and save an npz. Returns stable.
 
     ``perturb_seed``: optional #1492 item-2.2 noise-control lane -- if set,
@@ -1428,6 +1462,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     # inheriting the other's setting.
     ladder_mode = resolve_ladder_mode(legacy_1d_ladder)
     requested_start = resolve_start_mode(bridge_before)
+    bridge_omega_value, _ = resolve_bridge_omega(bridge_omega)
     br, cfg, mc, model, forcing, sf, st = _build_twin_state(
         recipe, run_traj, run_stepdump, bridge_tke=bridge_tke,
         bridge_before=bridge_before, vmix_scheme=vmix_scheme,
@@ -1435,7 +1470,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         use_gm_redi=use_gm_redi, restart_file=restart_file,
         surface_stress_implicit=surface_stress_implicit,
         surface_tendency_placement=surface_tendency_placement,
-        u_m=u_m, e3t_mode=ladder_mode)
+        u_m=u_m, e3t_mode=ladder_mode, bridge_omega=bridge_omega)
 
     # #1455 review: the stamp must be a RECEIPT, not a restatement of the flag.
     # ``resolve_start_mode`` reads the CLI; what actually seeds the before level
@@ -1462,6 +1497,28 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
             "to stamp either answer -- the twin's start mode and the state it "
             "actually starts from must agree.")
     start_mode = observed_start
+
+    # Observe the built geometry and model config only after the pre-existing
+    # start-mode receipt has passed. This preserves that gate's priority while
+    # making the new selector a content receipt rather than a CLI restatement.
+    built_bridge_omega = float(br.geometry.omega)
+    config_omega = float(mc.constants.Omega)
+    if built_bridge_omega != float(bridge_omega_value):
+        raise SystemExit(
+            f"bridge Omega receipt mismatch: built={built_bridge_omega:.17g} "
+            f"selected={bridge_omega_value:.17g}")
+    if config_omega != float(NEMO_CONSTANTS_CONFIG.Omega):
+        raise SystemExit(
+            "bridge-Omega arm changed model-config Omega: "
+            f"{config_omega:.17g} != NEMO {NEMO_CONSTANTS_CONFIG.Omega:.17g}")
+    bridge_f_t_sha256 = _array_content_sha256("f_T", br.geometry.f_T)
+    bridge_f_u_sha256 = _array_content_sha256("f_u", br.geometry.f_u)
+    bridge_f_v_sha256 = _array_content_sha256("f_v", br.geometry.f_v)
+    print("BRIDGE OMEGA RECEIPT: "
+          f"mode={bridge_omega} bridge={built_bridge_omega:.17g} "
+          f"config={config_omega:.17g} f_T_sha256={bridge_f_t_sha256} "
+          f"f_u_sha256={bridge_f_u_sha256} "
+          f"f_v_sha256={bridge_f_v_sha256}", flush=True)
 
     # Receipt, not a restatement of the selector: reconstruct the expected
     # analytic T field through the same loaders and compare it to the carry
@@ -1542,6 +1599,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         "restart_file": restart_file,
         "bridge_tke": bool(bridge_tke), "bridge_before": bool(bridge_before),
         "bridge_before_stress_tpoint": bool(bridge_before_stress_tpoint),
+        "bridge_omega": bridge_omega,
         "vmix_scheme": vmix_scheme, "use_gm_redi": use_gm_redi,
         "surface_stress_implicit": surface_stress_implicit,
         "surface_tendency_placement": surface_tendency_placement,
@@ -1580,8 +1638,8 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     _acc_pair = None
     _injected_sv = 0.0
     if daily_acc or perturb_baro is not None:
-        import netCDF4 as _nc
         import acc_thermal_wind as _A
+        import netCDF4 as _nc
         _mmp = f"{run_traj}/mesh_mask.nc"
         # The gate reducer loads its OWN mesh at import time from a hardcoded
         # path.  If that is not the mesh this run was built on, the two
@@ -1865,6 +1923,16 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         bridge_before_stress_reconstruction_seconds=np.float64(
             reconstruction_time),
         bridge_before_stress_sha256=np.str_(bridge_before_stress_sha256),
+        # Bridge-only two-Earth counterfactual receipts. The geometry's own
+        # scalar and Coriolis content hashes make the selector's effect
+        # decidable; config_omega proves the model card stayed on NEMO Earth.
+        bridge_omega_mode=np.str_(bridge_omega),
+        bridge_omega_rad_s=np.float64(built_bridge_omega),
+        bridge_f_T_sha256=np.str_(bridge_f_t_sha256),
+        bridge_f_u_sha256=np.str_(bridge_f_u_sha256),
+        bridge_f_v_sha256=np.str_(bridge_f_v_sha256),
+        config_omega_rad_s=np.float64(config_omega),
+        een_metric_weighting=np.str_(cfg.een_metric_weighting),
         # #1455 512517fdc: stamp the precision the arm was built at.
         control_dtype=np.str_(control_dtype_stamp),
         # #1455: stamp the lateral viscous velocity the arm ran at (NEMO's
@@ -1991,6 +2059,12 @@ def _parse_args(argv=None):
                         "own prior seasonal time. Requires --bridge-before; "
                         "stamps stagger/time/content identity. Does not change "
                         "model config or later-step carry behavior")
+    p.add_argument("--bridge-omega", choices=BRIDGE_OMEGA_MODES, default="nemo",
+                   help="bridge-geometry Earth rotation only: 'nemo' is the "
+                        "default NEMO sidereal rate; 'legacy-rounded' "
+                        "reproduces the historical rounded-constants bridge "
+                        "while leaving model-config Omega on NEMO. Both modes "
+                        "stamp scalar and f_T/f_u/f_v content identities")
     p.add_argument("--legacy-euler-start", dest="bridge_before",
                    action="store_false",
                    help="start the twin from a forward-Euler step instead of "
@@ -2145,8 +2219,7 @@ def _smoke_check_vmix_scheme_override():
     # and that the quantity it feeds (the lateral-viscosity coefficient the
     # dycore actually reads) moves by the same factor -- a field that changed
     # while A_h did not would be a vacuous knob.
-    from legoesm.ocean.experiments.dino import (
-        dino_lat_lon_grid, dino_lat_lon_model_config)
+    from legoesm.ocean.experiments.dino import dino_lat_lon_grid, dino_lat_lon_model_config
     doubled = dataclasses.replace(base, U_M=2.0 * base.U_M)
     assert doubled.U_M == 2.0 * base.U_M
     assert base.U_M == 0.27, f"expected card rn_Uv=0.27, got {base.U_M}"
@@ -2289,7 +2362,8 @@ def main(argv=None):
               snap_days=(None if args.snap_days is None else
                          tuple(int(x) for x in args.snap_days.split(","))),
               fp64_3d=args.fp64_3d,
-              legacy_1d_ladder=args.legacy_1d_ladder)
+              legacy_1d_ladder=args.legacy_1d_ladder,
+              bridge_omega=args.bridge_omega)
 
 
 if __name__ == "__main__":

@@ -29,12 +29,14 @@ def instruments():
         import validate.ocean_fidelity.dino_1226.mode_projection as mode_projection
         import validate.ocean_fidelity.dino_1226.tcarry_baseline_reconcile as tcarry_reconcile
         import validate.ocean_fidelity.dino_1226.tcarry_basin_reverdict as tcarry_reverdict
+        import validate.ocean_fidelity.dino_1226.tcarry_bridge_omega_score as tcarry_omega
         import validate.ocean_fidelity.dino_1226.tcarry_een_off_discriminator as tcarry_een
         importlib.reload(mode_projection)
         importlib.reload(heat_discriminator)
         importlib.reload(kamm_twin_90d)
         importlib.reload(tcarry_reconcile)
         importlib.reload(tcarry_reverdict)
+        importlib.reload(tcarry_omega)
         importlib.reload(tcarry_een)
         return types.SimpleNamespace(
             kamm_twin_90d=kamm_twin_90d,
@@ -42,6 +44,7 @@ def instruments():
             mode_projection=mode_projection,
             tcarry_reconcile=tcarry_reconcile,
             tcarry_reverdict=tcarry_reverdict,
+            tcarry_omega=tcarry_omega,
             tcarry_een=tcarry_een,
         )
     finally:
@@ -1148,9 +1151,9 @@ def test_uncertified_gate_prints_no_verdict_token_anywhere(instruments):
     version that suppressed only the tally would still have issued one five
     times over.  This asserts no verdict token survives anywhere in the
     output, and (non-vacuity) that the certified call still emits them."""
+    import contextlib
     import importlib
     import io
-    import contextlib
     _dir = (Path(__file__).resolve().parents[3] / "scripts" / "validate"
             / "ocean_fidelity" / "dino_1226")
     stub = types.ModuleType("acc_thermal_wind")
@@ -2033,3 +2036,36 @@ def test_tcarry_een_off_ownership_classifier_has_reachable_both_states(
     assert scorer.classify_ownership(outside) == "REFUTED_FULL_EEN_OWNERSHIP"
     with pytest.raises(SystemExit, match="non-finite"):
         scorer.classify_ownership(np.nan)
+
+
+def test_bridge_omega_cli_default_is_explicit_nemo_bit_identical(instruments):
+    harness = instruments.kamm_twin_90d
+    omitted = harness._parse_args(["nemo_dino_kamm_mlf", "out.npz"])
+    explicit = harness._parse_args(
+        ["nemo_dino_kamm_mlf", "out.npz", "--bridge-omega", "nemo"])
+    assert vars(omitted) == vars(explicit)
+    assert omitted.bridge_omega == "nemo"
+
+
+def test_bridge_omega_selector_changes_only_registered_constant(instruments):
+    harness = instruments.kamm_twin_90d
+    config = harness.dino_config_for_recipe("nemo_dino_kamm_mlf")
+    nemo_omega, nemo_reference = harness.resolve_bridge_omega("nemo")
+    old_omega, old_reference = harness.resolve_bridge_omega("legacy-rounded")
+    assert nemo_omega == harness.NEMO_CONSTANTS_CONFIG.Omega
+    assert old_omega == harness.constants.Omega
+    assert nemo_reference == "nemo"
+    assert old_reference == "selected_omega"
+    assert old_omega != nemo_omega
+    assert config.omega == harness.NEMO_CONSTANTS_CONFIG.Omega
+    with pytest.raises(ValueError, match="bridge_omega"):
+        harness.resolve_bridge_omega("rounded-ish")
+
+
+def test_tcarry_bridge_omega_scorer_self_test_is_red_capable(instruments):
+    assert instruments.tcarry_omega._self_test() == 0
+
+
+def test_tcarry_bridge_omega_scorer_refuses_unbound_artifacts(instruments):
+    with pytest.raises(SystemExit, match="artifacts are unbound"):
+        instruments.tcarry_omega._require_bound()

@@ -5,6 +5,17 @@ REFUTED full EEN ownership, and before an old/new bridge-Omega selector is
 implemented or either arm is run.  The corrected-T endpoint remains unread
 and unscored.  This is a GPU handoff design; STOP after committing it.
 
+## 2026-08-28 instrument-only receipt amendment before GPU
+
+Implementation inspection found that `LatLonCGridGeometry` stores three
+Coriolis arrays, `f_T`, `f_u`, and `f_v`, plus its scalar `omega`.  The initial
+text below incorrectly said the selector changes "the two bridge Coriolis
+arrays" because it named only the T and v content hashes.  No arm has run and
+no metric has been seen.  Correct the receipt scope to the geometry scalar and
+all three deterministic Coriolis arrays; add `bridge_f_u_sha256`.  Every other
+geometry/state/config leaf must remain bit-identical.  No scientific output,
+baseline, floor, threshold, validity rule, or classifier changes.
+
 ## Question and exact output
 
 The historical legacy-carry baseline is
@@ -55,12 +66,14 @@ Every artifact must stamp content, not only intent:
 
 - `bridge_omega_mode` (`nemo` or `legacy-rounded`);
 - `bridge_omega_rad_s`;
-- `bridge_f_T_sha256` and `bridge_f_v_sha256`;
-- `config_omega_rad_s` (identical NEMO value in both arms).
+- `bridge_f_T_sha256`, `bridge_f_u_sha256`, and `bridge_f_v_sha256`;
+- `config_omega_rad_s` (identical NEMO value in both arms);
+- `een_metric_weighting` (identical `nemo` in both arms).
 
 Unit tests must prove the default is bit-identical, the selector changes only
-the two bridge Coriolis arrays, the config-side rate remains identical, and a
-planted stamp/rate swap is rejected.  The paired scorer must compare day-0
+the geometry's registered `omega` scalar and `f_T/f_u/f_v` arrays, the
+config-side rate remains identical, and a planted stamp/rate swap is rejected.
+The paired scorer must compare day-0
 T/S/eta/u/v bit-for-bit and require all ordinary run-config leaves identical;
 only the registered bridge-Omega stamps and their Coriolis hashes may differ.
 
