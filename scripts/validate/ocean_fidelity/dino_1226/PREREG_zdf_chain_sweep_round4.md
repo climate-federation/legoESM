@@ -174,3 +174,32 @@ knot/interval selection, `zs`, the left-associated cubic expression
 reconstruction must match that dump at the same `1e-15` column bar, and
 substituting the dump-derived `taum` into row 8 must give `0/9,920` failures;
 otherwise attribution stops at the earliest failed suboperand.
+
+### 2026-08-28 review amendment, before the final rerun
+
+Adversarial review found three specification/execution gaps; this amendment is
+committed before their corrected measurement:
+
+- The `nemo_dino_kamm` forward-Euler card retains its registered
+  `squared_centered` shear discretization and has no leapfrog BEFORE velocity.
+  Its `step_entry` stage therefore freezes *that configured formulation* at
+  entry, `carried_avm * squared_centered_shear(NOW)`.  The MLF card alone
+  freezes the measured face-native NOW x BEFORE formulation.  Both feed their
+  frozen `p_sh2` to RHS and Prandtl.  This is a scope clarification, not a
+  selector change.  An actual resolved-FE-card helper test and a JIT/gradient
+  test of the MLF live-QCO helper are required before rerun.
+- Row 6 is an accumulating/exact-index row.  It is rescored at its registered
+  `1e-12` A bar **and** exact integer equality, with an off-by-one planted
+  control.  The prior `1e-15` float presentation is retracted from the final
+  artifact (its exact-zero result did not change the disposition).
+- `tke_dump_en.bin` is post-`tke_tke`, so it cannot be row 8's primary oracle.
+  The corrected row-8 reference is independently constructed from the
+  registered `sbc_dump_utau.bin` and resolved `rn_ebb/rho0/rn_emin0` at
+  `zdftke.F90:334,361`.  Equality to poststage `en(:,:,1)` is retained only as
+  a separately labeled downstream-invariance check.  The final probe also
+  rejects all effective ablation/precision environment overrides, derives its
+  git/probe SHAs rather than accepting arbitrary stamps, and includes the NEMO
+  state-bridge source in provenance.
+
+The bars, focus registry, first-divergence stop rule, climate prediction, and
+GPU commands remain unchanged.
