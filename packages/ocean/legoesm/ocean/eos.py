@@ -33,6 +33,7 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+import equinox as eqx
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -623,6 +624,11 @@ def compute_buoyancy_frequency_nemo_bn2(
             raise ValueError(
                 f"e3w_int trailing size {e3w.shape[-1]} != nlev-1="
                 f"{T.shape[-1] - 1}")
+        e3w = eqx.error_if(
+            e3w,
+            ~jnp.all(jnp.isfinite(e3w) & (e3w > 0.0)),
+            "raw-mesh e3w_int must contain only finite values > 0",
+        )
     else:
         if e3w_int is not None:
             raise ValueError(
@@ -655,7 +661,7 @@ def compute_buoyancy_frequency_nemo_bn2(
         e3w = gd_lo - gd_up                                    # explicit legacy
     dT = T[..., :-1] - T[..., 1:]                              # T_upper - T_lower
     dS = S[..., :-1] - S[..., 1:]
-    return g * (a_w * dT - b_w * dS) / jnp.maximum(e3w, 1.0e-12)
+    return g * (a_w * dT - b_w * dS) / e3w
 
 
 def nemo_bn2_live_geometry(
@@ -680,7 +686,7 @@ def nemo_e3w_from_live_gdept(
     interior: bool = True,
 ) -> jnp.ndarray:
     """Select NEMO W spacing once for bn2 and every paired consumer."""
-    mesh_reference = getattr(z_coord, "nemo_e3w_mesh_reference", True)
+    mesh_reference = getattr(z_coord, "nemo_e3w_mesh_reference", False)
     if not mesh_reference:
         if interior:
             return jnp.diff(live_gdept, axis=-1)

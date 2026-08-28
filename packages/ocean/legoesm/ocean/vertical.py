@@ -99,7 +99,7 @@ class OceanZStarCoordinate(NamedTuple):
     # explicit legacy opt-in for consumers without a NEMO mesh.
     nemo_gdept_0: jnp.ndarray | None = None
     nemo_e3w_0: jnp.ndarray | None = None
-    nemo_e3w_mesh_reference: bool = True
+    nemo_e3w_mesh_reference: bool = False
 
 
 def create_ocean_z_star(
@@ -107,6 +107,8 @@ def create_ocean_z_star(
     H_max: float = 5500.0,
     dz_surface: float = 10.0,
     dz_deep: float = 200.0,
+    *,
+    nemo_e3w_source: str = "depth_difference",
 ) -> OceanZStarCoordinate:
     """Create a stretched ocean z-star coordinate.
 
@@ -123,11 +125,20 @@ def create_ocean_z_star(
         Target layer thickness near surface [m].
     dz_deep : float
         Target layer thickness at depth [m].
+    nemo_e3w_source : {"depth_difference"}
+        Generic coordinates have no raw NEMO mesh field and therefore select
+        the explicit legacy construction.  Use
+        :func:`create_z_star_from_thicknesses` for ``"mesh_reference"``.
 
     Returns
     -------
     OceanZStarCoordinate : The vertical coordinate.
     """
+    if nemo_e3w_source != "depth_difference":
+        raise ValueError(
+            "create_ocean_z_star has no raw NEMO mesh operand; "
+            "nemo_e3w_source must be 'depth_difference' (use "
+            "create_z_star_from_thicknesses for 'mesh_reference')")
     if n_levels < 1:
         raise ValueError(
             f"n_levels must be >= 1, got {n_levels!r}",
@@ -182,6 +193,7 @@ def create_ocean_z_star(
         z_half_ref=z_half_ref,
         dz_ref=dz_ref,
         dz_half_ref=dz_half_ref,
+        nemo_e3w_mesh_reference=False,
     )
 
 
@@ -279,6 +291,18 @@ def create_z_star_from_thicknesses(
 
     nemo_gdept_0 = _raw_mesh_field(nemo_gdept_0_m, "nemo_gdept_0_m")
     nemo_e3w_0 = _raw_mesh_field(nemo_e3w_0_m, "nemo_e3w_0_m")
+    if nemo_gdept_0 is not None and nemo_e3w_0 is not None:
+        gdept_np = np.asarray(nemo_gdept_0)
+        e3w_np = np.asarray(nemo_e3w_0)
+        if gdept_np.shape != e3w_np.shape:
+            raise ValueError(
+                "nemo_gdept_0_m and nemo_e3w_0_m must have identical shapes, "
+                f"got {gdept_np.shape} and {e3w_np.shape}")
+        if not np.array_equal(
+                np.diff(gdept_np, axis=-1), e3w_np[..., 1:]):
+            raise ValueError(
+                "nemo_gdept_0_m differences must exactly equal interior "
+                "nemo_e3w_0_m where mesh_reference identity is claimed")
     return OceanZStarCoordinate(
         n_levels=n_levels,
         H_max=H_max,
@@ -491,7 +515,7 @@ class OceanPartialCellCoordinate(NamedTuple):
     t_depth_ref: jnp.ndarray | None = None
     nemo_gdept_0: jnp.ndarray | None = None
     nemo_e3w_0: jnp.ndarray | None = None
-    nemo_e3w_mesh_reference: bool = True
+    nemo_e3w_mesh_reference: bool = False
 
 
 def create_partial_cell_coordinate(
@@ -603,7 +627,7 @@ def create_partial_cell_coordinate(
         nemo_gdept_0=getattr(z_coord, "nemo_gdept_0", None),
         nemo_e3w_0=getattr(z_coord, "nemo_e3w_0", None),
         nemo_e3w_mesh_reference=getattr(
-            z_coord, "nemo_e3w_mesh_reference", True),
+            z_coord, "nemo_e3w_mesh_reference", False),
     )
 
 
@@ -672,7 +696,7 @@ def create_full_step_coordinate(
         nemo_gdept_0=getattr(z_coord, "nemo_gdept_0", None),
         nemo_e3w_0=getattr(z_coord, "nemo_e3w_0", None),
         nemo_e3w_mesh_reference=getattr(
-            z_coord, "nemo_e3w_mesh_reference", True),
+            z_coord, "nemo_e3w_mesh_reference", False),
     )
 
 

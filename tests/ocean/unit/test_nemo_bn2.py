@@ -407,6 +407,10 @@ def test_native_e3w_coordinate_validation_wrappers_and_ad():
     with pytest.raises(ValueError, match="finite values > 0"):
         create_z_star_from_thicknesses(dz, nemo_e3w_0_m=ew.at[0].set(-1)
                                        if hasattr(ew, "at") else [-1, 14, 30, 60])
+    with pytest.raises(ValueError, match="differences must exactly equal"):
+        create_z_star_from_thicknesses(
+            dz, nemo_gdept_0_m=gd,
+            nemo_e3w_0_m=np.array([8.0, 14.0, 30.0, 61.0]))
 
     z = create_z_star_from_thicknesses(
         dz, t_depth_ref_m=gd, nemo_gdept_0_m=gd,
@@ -431,6 +435,24 @@ def test_native_e3w_coordinate_validation_wrappers_and_ad():
     grads = jax.grad(total, argnums=(0, 1, 2))(T, S, jnp.array([0.2]))
     assert np.isfinite(np.asarray(value)).all()
     assert all(np.isfinite(np.asarray(g)).all() for g in grads)
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, np.nan, np.inf])
+def test_native_e3w_kernel_rejects_nonpositive_or_nonfinite(bad):
+    """The low-level faithful operand fails closed, including under JIT."""
+    import jax
+
+    T, S, gdept, gdepw = _column()
+    e3w = jnp.asarray(np.diff(gdept)).at[2].set(bad)
+
+    @jax.jit
+    def run(native_e3w):
+        return compute_buoyancy_frequency_nemo_bn2(
+            jnp.asarray(T), jnp.asarray(S), jnp.asarray(gdept),
+            jnp.asarray(gdepw), e3w_int=native_e3w)
+
+    with pytest.raises(Exception, match="finite values > 0"):
+        run(e3w)
 
 
 def test_enhanced_diffusion_nemo_bn2_requires_eta_and_H_bathy():

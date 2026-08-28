@@ -88,7 +88,9 @@ def _nemo_nmln_reference(n2_by_level, mbkt, thresh, nlb10=2):
 
 
 def test_native_bn2_divide_and_mld_multiply_share_one_e3w():
-    """Changing native e3w alone cancels between bn2 and zdf_mxl exactly."""
+    """Native e3w is consumed, and only the shared multiply cancels it."""
+    from legoesm.ocean.eos import compute_buoyancy_frequency_nemo_bn2
+
     dz = np.array([8.0, 12.0, 20.0, 35.0, 55.0, 80.0])
     nlev = len(dz)
     gd = np.cumsum(dz) - 0.45 * dz
@@ -108,6 +110,28 @@ def test_native_bn2_divide_and_mld_multiply_share_one_e3w():
             active_3d=active)
 
     e3w = np.concatenate([[2.0 * gd[0]], np.diff(gd)])
+    gdepw = np.cumsum(dz)[:-1]
+    n2_1 = np.asarray(compute_buoyancy_frequency_nemo_bn2(
+        T, S, jnp.asarray(gd), jnp.asarray(gdepw),
+        e3w_int=jnp.asarray(e3w[1:])))
+    n2_2 = np.asarray(compute_buoyancy_frequency_nemo_bn2(
+        T, S, jnp.asarray(gd), jnp.asarray(gdepw),
+        e3w_int=jnp.asarray(2.0 * e3w[1:])))
+    assert not np.array_equal(n2_1, n2_2), (
+        "doubling native e3w did not change bn2, so the supplied divisor "
+        "is not actually consumed")
+    paired_1 = n2_1 * e3w[1:]
+    paired_2 = n2_2 * (2.0 * e3w[1:])
+    mismatched = n2_2 * e3w[1:]
+    assert np.array_equal(paired_1, paired_2)
+    assert not np.array_equal(paired_1, mismatched), (
+        "a deliberately different MLD multiplier did not break cancellation")
+    # Red-capable threshold control: the fixture must make the mismatched
+    # product choose the opposite side at its first eligible interface.
+    threshold = 0.75 * paired_1[..., 0]
+    assert np.all(paired_1[..., 0] > threshold)
+    assert np.all(mismatched[..., 0] < threshold)
+
     h1, k1 = run(e3w)
     h2, k2 = run(2.0 * e3w)
     assert np.array_equal(np.asarray(k1), np.asarray(k2))
