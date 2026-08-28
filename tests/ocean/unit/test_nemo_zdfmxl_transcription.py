@@ -106,7 +106,7 @@ def test_native_bn2_divide_and_mld_multiply_share_one_e3w():
             nemo_e3w_0=jnp.asarray(native_e3w), n_levels=nlev,
         )
         return _nemo_mld_from_n2_integral(
-            T, S, jnp.ones((1, 1)), z, None, 0.01, 9.80665, 1026.0,
+            T, S, jnp.ones((1, 1)), z, None, 0.2, 9.80665, 1026.0,
             active_3d=active)
 
     e3w = np.concatenate([[2.0 * gd[0]], np.diff(gd)])
@@ -128,9 +128,13 @@ def test_native_bn2_divide_and_mld_multiply_share_one_e3w():
         "a deliberately different MLD multiplier did not break cancellation")
     # Red-capable threshold control: the fixture must make the mismatched
     # product choose the opposite side at its first eligible interface.
-    threshold = 0.75 * paired_1[..., 0]
-    assert np.all(paired_1[..., 0] > threshold)
-    assert np.all(mismatched[..., 0] < threshold)
+    # The production loop begins at its second interior contribution.  The
+    # actual rho_c=0.2 threshold is between the matched and mismatched values,
+    # so rebuilding the production multiplier from a fixed ladder makes the
+    # two run() results below choose different MLD levels.
+    threshold = 9.80665 / 1026.0 * 0.2
+    assert np.all(paired_1[..., 1] > threshold)
+    assert np.all(mismatched[..., 1] < threshold)
 
     h1, k1 = run(e3w)
     h2, k2 = run(2.0 * e3w)

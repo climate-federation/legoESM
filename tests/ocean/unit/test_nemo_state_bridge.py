@@ -38,6 +38,10 @@ def _synthetic():
         gdepw_1d=np.array([0.0, 10.0, 30.0]),
         tmask=np.ones((NY, NX, NZ)), umask=np.ones((NY, NX, NZ)),
         vmask=np.ones((NY, NX, NZ)),
+        gdept_0=np.broadcast_to(
+            np.array([5.0, 20.0, 45.0]), (NY, NX, NZ)),
+        e3w_0=np.broadcast_to(
+            np.array([10.0, 15.0, 25.0]), (NY, NX, NZ)),
     )
     rng = np.random.default_rng(0)
     state = NemoState(
@@ -60,6 +64,9 @@ def test_bridge_geometry_and_staggering():
     assert st.u.data.shape == (NY, NX + 1, NZ)      # west-face array, n_lon+1
     assert st.v.data.shape == (NY + 1, NX, NZ)      # south-face array, n_lat+1
     assert st.eta.data.shape == (NY, NX)
+    assert out.z_coord.nemo_e3w_mesh_reference is True
+    assert np.array_equal(
+        np.asarray(out.z_coord.nemo_e3w_0), grid.e3w_0)
 
     # Staggering. legoESM u[j,i] is the WEST face of T-cell (j,i)
     # (latlon_cgrid_operators.py:3623); NEMO u(i) is the EAST face = west face of

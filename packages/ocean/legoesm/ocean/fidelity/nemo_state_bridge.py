@@ -173,6 +173,9 @@ def bridge_nemo_to_legoesm(
     z_coord = create_z_star_from_thicknesses(
         np.asarray(grid.e3t_1d),
         t_depth_ref_m=np.asarray(grid.gdept_1d).ravel(),
+        nemo_gdept_0_m=grid.gdept_0,
+        nemo_e3w_0_m=grid.e3w_0,
+        nemo_e3w_source="mesh_reference",
     )
     H_max = float(np.sum(np.asarray(grid.e3t_1d)[:n_wet]))   # depth of the n_wet wet cells
 
