@@ -4,7 +4,7 @@
     "pointwise_column": 1e-15,
     "rms_ratio_epsilon": 1e-06
   },
-  "checked_out_parent_sha": "d19d16d4988981030c6dffeb29308182d198bd57",
+  "checked_out_parent_sha": "9a9ebc25f1da5c140c67641b481a6ec842adabbf",
   "controls": {
     "baseline_pass": true,
     "nonfinite_fired": true,
@@ -17,6 +17,26 @@
     ]
   },
   "cpu_only": true,
+  "effective_env": {
+    "DINO_1226_LANE": "d180",
+    "FP64": "1",
+    "LEGOESM_BAROCLINIC_F32": "0",
+    "LEGOESM_FIDELITY_FP64": "1",
+    "LEGOESM_NEMO_E3T": "both",
+    "LEGOESM_TRACER_PAIR": "0",
+    "LEGOESM_VMIX_BATCHED": "0",
+    "LEGOESM_VMIX_F32_SOLVE": "0",
+    "LEGOESM_VMIX_TSPAIR": "1",
+    "rejected_ablation_overrides": [
+      "DINO_EEN_METRIC",
+      "DINO_BOLUS_ADV",
+      "DINO_RECONCILE_TARGET",
+      "DINO_AFTER_RECONCILE",
+      "DINO_NEMO_KMM_DIVISOR",
+      "DINO_OUTER_INTEGRATOR",
+      "DINO_TWIN_SEASONAL_KT0"
+    ]
+  },
   "first_divergence": {
     "controls": {
       "baseline_pass": true,
@@ -191,6 +211,55 @@
           1
         ]
       },
+      "production_taum_on_unfloored_columns": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": false,
+        "correlation": 1.0,
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 1.5850175184355468e-15,
+        "n_diverged_columns": 154,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9466,
+        "n_wet_columns": 9620,
+        "n_wet_elements": 9620,
+        "pass": false,
+        "reference_rms": 0.11382286908706125,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          65,
+          1
+        ]
+      },
       "production_taum_vs_dump_derived": {
         "aggregate_bar_pass": true,
         "bar": 1e-15,
@@ -337,55 +406,6 @@
           1,
           1
         ]
-      },
-      "taum_inferred_from_unfloored_surface_en": {
-        "aggregate_bar_pass": true,
-        "bar": 1e-15,
-        "column_bar_pass": false,
-        "correlation": 1.0,
-        "focus": [
-          {
-            "column_error": 0.0,
-            "i": 1,
-            "j": 11,
-            "pass": true,
-            "wet": true
-          },
-          {
-            "column_error": 0.0,
-            "i": 1,
-            "j": 12,
-            "pass": true,
-            "wet": true
-          },
-          {
-            "column_error": 0.0,
-            "i": 1,
-            "j": 13,
-            "pass": true,
-            "wet": true
-          },
-          {
-            "column_error": 0.0,
-            "i": 23,
-            "j": 13,
-            "pass": true,
-            "wet": true
-          }
-        ],
-        "max_column_error": 1.5850175184355468e-15,
-        "n_diverged_columns": 154,
-        "n_nonfinite_wet_elements": 0,
-        "n_verified_columns": 9466,
-        "n_wet_columns": 9620,
-        "n_wet_elements": 9620,
-        "pass": false,
-        "reference_rms": 0.11382286908706125,
-        "rms_ratio": 1.0,
-        "worst_column_ji": [
-          65,
-          1
-        ]
       }
     },
     "operation": "TKE surface Dirichlet boundary",
@@ -438,6 +458,55 @@
         1
       ]
     },
+    "poststage_surface_en_invariant": {
+      "aggregate_bar_pass": true,
+      "bar": 1e-15,
+      "column_bar_pass": true,
+      "correlation": 1.0,
+      "focus": [
+        {
+          "column_error": 0.0,
+          "i": 1,
+          "j": 11,
+          "pass": true,
+          "wet": true
+        },
+        {
+          "column_error": 0.0,
+          "i": 1,
+          "j": 12,
+          "pass": true,
+          "wet": true
+        },
+        {
+          "column_error": 0.0,
+          "i": 1,
+          "j": 13,
+          "pass": true,
+          "wet": true
+        },
+        {
+          "column_error": 0.0,
+          "i": 23,
+          "j": 13,
+          "pass": true,
+          "wet": true
+        }
+      ],
+      "max_column_error": 0.0,
+      "n_diverged_columns": 0,
+      "n_nonfinite_wet_elements": 0,
+      "n_verified_columns": 9920,
+      "n_wet_columns": 9920,
+      "n_wet_elements": 9920,
+      "pass": true,
+      "reference_rms": 0.00741031860229885,
+      "rms_ratio": 1.0,
+      "worst_column_ji": [
+        1,
+        1
+      ]
+    },
     "row": 8
   },
   "focus_columns_ji": [
@@ -465,7 +534,7 @@
   "lane": "d180",
   "numpy": "2.4.4",
   "platform": "Linux-5.14.0-611.36.1.el9_7.x86_64-x86_64-with-glibc2.34",
-  "probe_commit_sha": "d19d16d4988981030c6dffeb29308182d198bd57",
+  "probe_commit_sha": "9a9ebc25f1da5c140c67641b481a6ec842adabbf",
   "python": "3.13.0",
   "row4_localization": null,
   "rows": {
@@ -899,6 +968,55 @@
                 1
               ]
             },
+            "production_taum_on_unfloored_columns": {
+              "aggregate_bar_pass": true,
+              "bar": 1e-15,
+              "column_bar_pass": false,
+              "correlation": 1.0,
+              "focus": [
+                {
+                  "column_error": 0.0,
+                  "i": 1,
+                  "j": 11,
+                  "pass": true,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0,
+                  "i": 1,
+                  "j": 12,
+                  "pass": true,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0,
+                  "i": 1,
+                  "j": 13,
+                  "pass": true,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0,
+                  "i": 23,
+                  "j": 13,
+                  "pass": true,
+                  "wet": true
+                }
+              ],
+              "max_column_error": 1.5850175184355468e-15,
+              "n_diverged_columns": 154,
+              "n_nonfinite_wet_elements": 0,
+              "n_verified_columns": 9466,
+              "n_wet_columns": 9620,
+              "n_wet_elements": 9620,
+              "pass": false,
+              "reference_rms": 0.11382286908706125,
+              "rms_ratio": 1.0,
+              "worst_column_ji": [
+                65,
+                1
+              ]
+            },
             "production_taum_vs_dump_derived": {
               "aggregate_bar_pass": true,
               "bar": 1e-15,
@@ -1045,55 +1163,6 @@
                 1,
                 1
               ]
-            },
-            "taum_inferred_from_unfloored_surface_en": {
-              "aggregate_bar_pass": true,
-              "bar": 1e-15,
-              "column_bar_pass": false,
-              "correlation": 1.0,
-              "focus": [
-                {
-                  "column_error": 0.0,
-                  "i": 1,
-                  "j": 11,
-                  "pass": true,
-                  "wet": true
-                },
-                {
-                  "column_error": 0.0,
-                  "i": 1,
-                  "j": 12,
-                  "pass": true,
-                  "wet": true
-                },
-                {
-                  "column_error": 0.0,
-                  "i": 1,
-                  "j": 13,
-                  "pass": true,
-                  "wet": true
-                },
-                {
-                  "column_error": 0.0,
-                  "i": 23,
-                  "j": 13,
-                  "pass": true,
-                  "wet": true
-                }
-              ],
-              "max_column_error": 1.5850175184355468e-15,
-              "n_diverged_columns": 154,
-              "n_nonfinite_wet_elements": 0,
-              "n_verified_columns": 9466,
-              "n_wet_columns": 9620,
-              "n_wet_elements": 9620,
-              "pass": false,
-              "reference_rms": 0.11382286908706125,
-              "rms_ratio": 1.0,
-              "worst_column_ji": [
-                65,
-                1
-              ]
             }
           },
           "operation": "TKE surface Dirichlet boundary",
@@ -1143,6 +1212,55 @@
             "rms_ratio": 1.0,
             "worst_column_ji": [
               65,
+              1
+            ]
+          },
+          "poststage_surface_en_invariant": {
+            "aggregate_bar_pass": true,
+            "bar": 1e-15,
+            "column_bar_pass": true,
+            "correlation": 1.0,
+            "focus": [
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 11,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 12,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 13,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 23,
+                "j": 13,
+                "pass": true,
+                "wet": true
+              }
+            ],
+            "max_column_error": 0.0,
+            "n_diverged_columns": 0,
+            "n_nonfinite_wet_elements": 0,
+            "n_verified_columns": 9920,
+            "n_wet_columns": 9920,
+            "n_wet_elements": 9920,
+            "pass": true,
+            "reference_rms": 0.00741031860229885,
+            "rms_ratio": 1.0,
+            "worst_column_ji": [
+              1,
               1
             ]
           },
@@ -1200,7 +1318,7 @@
           },
           "6_native_mld_index": {
             "aggregate_bar_pass": true,
-            "bar": 1e-15,
+            "bar": 1e-12,
             "column_bar_pass": true,
             "correlation": 1.0,
             "focus": [
@@ -1233,14 +1351,18 @@
                 "wet": true
               }
             ],
+            "integer_exact": true,
             "max_column_error": 0.0,
             "n_diverged_columns": 0,
+            "n_integer_mismatch_columns": 0,
             "n_nonfinite_wet_elements": 0,
             "n_verified_columns": 9920,
             "n_wet_columns": 9920,
             "n_wet_elements": 9920,
+            "off_by_one_control_fired": true,
             "pass": true,
             "reference_rms": 11.409646809721178,
+            "registered_row_class": "A/E",
             "rms_ratio": 1.0,
             "worst_column_ji": [
               1,
@@ -1346,6 +1468,17 @@
             ]
           }
         }
+      },
+      "controls": {
+        "baseline_pass": true,
+        "nonfinite_fired": true,
+        "one_i_roll_fired": true,
+        "perturbation_fired": true,
+        "perturbed_ji_k": [
+          1,
+          1,
+          0
+        ]
       },
       "disposition": "VERIFIED",
       "output": {
@@ -1454,7 +1587,7 @@
       "disposition": "VERIFIED",
       "output": {
         "aggregate_bar_pass": true,
-        "bar": 1e-15,
+        "bar": 1e-12,
         "column_bar_pass": true,
         "correlation": 1.0,
         "focus": [
@@ -1487,14 +1620,18 @@
             "wet": true
           }
         ],
+        "integer_exact": true,
         "max_column_error": 0.0,
         "n_diverged_columns": 0,
+        "n_integer_mismatch_columns": 0,
         "n_nonfinite_wet_elements": 0,
         "n_verified_columns": 9920,
         "n_wet_columns": 9920,
         "n_wet_elements": 9920,
+        "off_by_one_control_fired": true,
         "pass": true,
         "reference_rms": 11.409646809721178,
+        "registered_row_class": "A/E",
         "rms_ratio": 1.0,
         "worst_column_ji": [
           1,
@@ -1635,21 +1772,22 @@
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src/OCE/TRA/eosbn2.F90": "689f8fdf5482e2bc6c7ecc59544ff7384fda6e4551e32be898e715501e55977d",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src/OCE/ZDF/zdfsh2.F90": "c31f062e282b8710a0b565be7aecbc35b8e741b05a96a393402fcd5a737f28f8",
     "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/PREREG_zdf_chain_sweep_round3.md": "71c8b22ddd0a1a6e4616b45f3e563212a5b6baeac391d9df54880d14898d421c",
-    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/PREREG_zdf_chain_sweep_round4.md": "7fb74b55404ea35b21ff3efef27210df09e5475d6d411af864cdaa1fbc9fe366",
+    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/PREREG_zdf_chain_sweep_round4.md": "37e60cba17bbd8df00f651661f48d5b582e7a8c2573183e118f9567e62e76bf1",
     "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/dump_lane.py": "41252d898b0d09b350c086aa678ddb890c7e6232fa2b46e88093a3b108a9bf62",
     "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/eos_rab_bn2_per_element.py": "3a82b0ef216fccf1b9112bfbac0005096eee491f15693d80f82320d3d80febda",
     "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py": "0b463be8d7edd5f90959431ca2941416b8dd825a89011096d4e066273f793636",
-    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/zdf_chain_sweep.py": "cb14388150a9dc8cf0e2850c885225616c5effda70c2c82d49b9f746d6d6d18b",
+    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/zdf_chain_sweep.py": "3fbd468e8fc6afd30cbb755c90732728aae8bcbc25ac22c5d39950c432091a59",
     "/tmp/dino_mld_audit_codex/mld_maps.npz": "9fb7344d1e6f92232d211f6a52ff8636022f0d9b0b05acea2b0bae6e6afd9bf0",
-    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py": "0f6eb1e4d6295a00f8604b6033ddfdd9979e20fcccddc12fb9cb4af4ccc9c282",
+    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py": "bd90cdb19a8a727eb1b212c2b2fcd4ae619c02af89be1419e6d0aa8685bf0040",
     "packages/ocean/legoesm/ocean/eos.py": "d8d3054b49bcc6c5a828dd0c53b1e0047ec8e6a13145790e9552c7f6f942139d",
     "packages/ocean/legoesm/ocean/experiments/dino.py": "98421fb474e7ef3edf3e82cd2fb83c47268643f300807b1efe572296f8497a19",
     "packages/ocean/legoesm/ocean/fidelity/nemo_io.py": "8ba2cbd28ca284e6bc3e2b6a93d3b35c5df001ee95646af3169f3e76c1080419",
+    "packages/ocean/legoesm/ocean/fidelity/nemo_state_bridge.py": "ed5c7df3fe9b810dfe1f21ae5f3934483b26d75f9f71a787234ddad8ad1c7900",
     "packages/ocean/legoesm/ocean/fidelity/time_levels.py": "810c731be7df80374b34075c67f97278c2fab51889b2c9e7be684238980a5b27",
-    "packages/ocean/legoesm/ocean/physics/vertical_mixing/_shared.py": "fe3e722be68a39b4bde378112c14b274d550878eb7687bd299ea4eb42762eac6",
+    "packages/ocean/legoesm/ocean/physics/vertical_mixing/_shared.py": "1ae34a95fd6c49e65109dac46175cfea6870c97918798e7ed786b77679046b46",
     "packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py": "2e8a8e1f1bc2de01dc7a35359ca2545be2e337f32f6fe2c1e0afbff5d9d73ea0",
     "packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py": "c147490fcba6e1d20f1c73eff0102a882933b3898bb6c960a5665832db65fff5",
-    "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py": "829a3698333176c0cbffd4d745686001c7856ec8c10e05c112400b07e91047c8",
+    "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py": "dd049b0cab0272e1c2e52369bd8d2e5196dee3c0ccbc5c90aaa7f3cefabfd2a5",
     "packages/ocean/legoesm/ocean/state.py": "0ef038bb3ac493b82585ac8bd3fcc0c9bf8e8800888e7c2e5f3dc0bd991d18b8",
     "packages/ocean/legoesm/ocean/vertical.py": "65d7b597be3a89e3700ea1e3425b00614a3c36b7a0cfe2188f444fd820382265"
   },

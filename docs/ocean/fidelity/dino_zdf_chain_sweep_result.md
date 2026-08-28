@@ -7,18 +7,21 @@ Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 
 The registered `tke_shear_evaluation_stage=step_entry` implementation is now
 production code.  On the two complete DINO NEMO cards it evaluates `p_sh2`
-once from step-entry NOW velocities, carried BEFORE velocities, and carried
+once at step entry with each card's configured shear formulation and carried
 previous-step `p_avm`; the frozen array feeds both the TKE shear RHS and the
-Prandtl denominator.  The same cards now select
-`tke_shear_metric_source=nemo_qco_live_face`, preserving NEMO's independent
-raw `e3uw_0/e3vw_0` operands and applying the NOW and BEFORE QCO face stretches
-with the literal divisor and four-face association.
+Prandtl denominator.  The MLF card uses the measured face-native NOW x BEFORE
+form and `tke_shear_metric_source=nemo_qco_live_face`, preserving NEMO's
+independent raw `e3uw_0/e3vw_0` operands and applying the two QCO face
+stretches with the literal divisor and four-face association.  The FE card has
+no leapfrog BEFORE velocity and freezes its pre-existing `squared_centered`
+NOW formulation at entry.
 
 The scope is deliberately narrow:
 
 | Reachable card/config | Shear stage | Metric source | Numerical change |
 |---|---|---|---|
-| `nemo_dino_kamm`, `nemo_dino_kamm_mlf` | `step_entry` | `nemo_qco_live_face` | faithful defaults enabled |
+| `nemo_dino_kamm` (FE) | `step_entry`, `squared_centered` NOW | `nemo_qco_live_face` resolved but inactive for T-point shear | stage timing changes; configured FE shear retained |
+| `nemo_dino_kamm_mlf` | `step_entry`, face-native NOW x BEFORE | `nemo_qco_live_face` active | measured faithful defaults enabled |
 | DINO `nemo_paper`, `veros` | `implicit_solve_state` | `tpoint_jacobian` | byte-identical legacy path |
 | DINO `legoesm_default`, `mitgcm`, `oceananigans` | not this TKE path or legacy selectors | legacy | unchanged |
 | generic `TKEConfig`, ORCA-oriented `nemo_recipe`, ACC/ACC-basic TKE, MPAS | `implicit_solve_state` | `tpoint_jacobian` | byte-identical legacy path |
@@ -28,7 +31,9 @@ velocity, missing/shape-invalid frozen operands, invalid selectors, legacy
 silent-no-op rejection, exact default-versus-explicit-legacy arrays, resolved
 selectors for every DINO card and every independently constructed reachable
 TKE config, live-face arithmetic, JIT, and finite gradients.  The final two
-CPU/fp64 batches pass **313 tests** (132 + 181).
+CPU/fp64 batches pass **315 tests** (134 + 181).  A real matched-state CPU
+step of `nemo_dino_kamm` also completes with finite tracer and TKE arrays,
+proving the resolved FE card no longer reaches the review-caught rejection.
 
 ### Ordered rerun
 
@@ -39,7 +44,7 @@ CPU/fp64 batches pass **313 tests** (132 + 181).
 | 3 | `eos_rab/bn2(Nnn)` | `VERIFIED` | 0/9,920; max `5.968545e-16` | 4/4 pass |
 | 4 | complete `zdf_sh2` | **`VERIFIED`** | **0/9,920; max `0`** | **4/4 pass at zero** |
 | 5 | bottom-drag coefficient | `VERIFIED` | 0/9,920; max `0` | 4/4 pass at zero |
-| 6 | native MLD index `nmln` | `VERIFIED` | 0/9,920; max `0` | 4/4 pass at zero |
+| 6 | native MLD index `nmln` | `VERIFIED` | exact integer equality; 0/9,920 at A-bar `1e-12` | 4/4 pass at zero |
 | 7 | native MLD depth `hmlp` | `VERIFIED` | 0/9,920; max `5.670461e-16` | 4/4 pass at zero |
 | 8 | surface TKE Dirichlet boundary | **`DIVERGED`** | **154/9,920; max `1.638670e-15`** | 4/4 pass at zero |
 | 9 onward | bottom TKE boundary through EVD and implicit solves | `UNMEASURED` | ordered stop at row 8 | ordered stop |
@@ -77,8 +82,11 @@ The operand walk is decisive.  `gphiu` passes in 9,920/9,920 columns (max
 `3.104929e-16`).  legoESM's production `utau` fails in 154/9,920 columns (max
 `1.552068e-15`), and its derived `taum` fails in the same 154 columns (max
 `1.609541e-15`).  A literal NEMO reconstruction using the same latitude and
-knots matches `sbc_dump_utau.bin` exactly, 0/9,920 failures.  Substituting the
-dump-derived `taum` makes row 8 exact, also 0/9,920.  The failure is therefore
+knots matches `sbc_dump_utau.bin` exactly, 0/9,920 failures.  The row-8 oracle
+is independently formed from that dump and resolved `rn_ebb/rho0/rn_emin0`;
+it also matches the later post-`tke_tke` surface `en` exactly as a separately
+labeled downstream-invariance check.  Substituting the dump-derived `taum`
+makes row 8 exact, also 0/9,920.  The failure is therefore
 the factored smoothstep in `dino_wind_stress`—`weight=(3-2s)*s**2` followed by
 `delta*weight`—versus NEMO's left-associated
 `delta*(3-2s)*s**2`, not geometry, knot selection, the 1.3 boost, or the TKE
@@ -101,10 +109,18 @@ acceptance-floor, pass-tally, legacy-baseline, and southern-density conditions.
 The faithful command remains option-free.  The legacy control still requires
 all three implemented row-4 opt-outs:
 
-```text
---tke-preclosure-coeff-source current_subiteration
---tke-shear-evaluation-stage implicit_solve_state
---tke-shear-metric-source tpoint_jacobian
+```bash
+CUDA_VISIBLE_DEVICES=<gpu> JAX_ENABLE_X64=1 python scripts/validate/ocean_fidelity/run_fp64.py \
+  scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py \
+  nemo_dino_kamm_mlf /tmp/zdf_row4_faithful_d90.npz --days 90 --save-3d \
+  --bridge-tke
+
+CUDA_VISIBLE_DEVICES=<gpu> JAX_ENABLE_X64=1 python scripts/validate/ocean_fidelity/run_fp64.py \
+  scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py \
+  nemo_dino_kamm_mlf /tmp/zdf_row4_legacy_d90.npz --days 90 --save-3d \
+  --bridge-tke --tke-preclosure-coeff-source current_subiteration \
+  --tke-shear-evaluation-stage implicit_solve_state \
+  --tke-shear-metric-source tpoint_jacobian
 ```
 
 **Do not run the climate arms yet.**  The chain is not clean enough: the
@@ -114,8 +130,12 @@ also require its legacy selector in the control command before GPU execution.
 
 Round-4 artifact:
 `docs/ocean/fidelity/dino_zdf_chain_sweep_round4_artifact.json`, SHA256
-`c706c802a094a7e8ed0c39a1b420fce41cbdf03ad8bef054e172fc6f5d62ea46`.
-Stamped probe/tree SHA: `d19d16d4988981030c6dffeb29308182d198bd57`.
+`f4ecff6d1fec9cbb5c0aacd15f8e5ab583276966a5452de8f9a3a08d0eaa121e`.
+Derived probe/tree SHA: `9a9ebc25f1da5c140c67641b481a6ec842adabbf`.
+The sandbox run exported the authoritative shadow
+`GIT_DIR=/tmp/zdf-sweep-git.cJQ6wi/repo.git` and
+`GIT_WORK_TREE=/tmp/codex-zdf-sweep`; the probe derived both SHAs from that
+metadata and rejected dirty probe code and every effective ablation override.
 
 ## Round-3 result: carried coefficients fixed; row 4 stops again
 
