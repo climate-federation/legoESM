@@ -101,6 +101,15 @@ prior committed receipt's intermediate numerator misses 3/9,920 columns
 (maximum `1.174266e-15`) even though the subsequent `/e3w` and final
 `zri/pdlr` composite passed. It is not silently upgraded to bit identity.
 
+### Adversarial review and tests
+
+Two independent reviews returned PASS after corrections. The physics review
+required the per-column `mbkt+1` no-crossing fallback, corrected active-source
+line citations, and the mixed-source guard. The scope review required the loud
+row-10 ordered-stop retraction, global stream/source/binary/bracket provenance,
+and literal JIT/AD plus explicit-factored output pins. The focused CPU/fp64
+suite passes 123/123 tests.
+
 ### Climate status
 
 **CLIMATE ARMS NOT AUTHORIZED.** The chain is not verified end-to-end. The
@@ -133,7 +142,8 @@ CUDA_VISIBLE_DEVICES=<gpu> JAX_ENABLE_X64=1 python scripts/validate/ocean_fideli
 
 The last flag is the registered next-round interface and does not exist yet;
 therefore these are frozen handoff commands, not authorization to run them.
-Round-9 artifact SHA256: `PENDING_FINAL_RERUN`.
+Round-9 artifact SHA256:
+`b7c3d2de46935da9a05ab8e2e8ef483ba2f125c0774493f1bf376b716aa15229`.
 
 ## Round-8 result: row 11 closed; ordered stop at row 12
 
