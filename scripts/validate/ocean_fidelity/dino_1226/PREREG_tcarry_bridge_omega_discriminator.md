@@ -16,6 +16,29 @@ all three deterministic Coriolis arrays; add `bridge_f_u_sha256`.  Every other
 geometry/state/config leaf must remain bit-identical.  No scientific output,
 baseline, floor, threshold, validity rule, or classifier changes.
 
+## 2026-08-28 post-run binding amendment before score
+
+Both registered arms completed, but neither NPZ has been opened and no
+`GnewOmega90`, `GoldOmega90`, or `Domega90` value has been computed or seen
+before this amendment.  Bind the clean common producer
+`9e339ad1b2032bc47ec132fb2ad6f00ea071bbb9` and these exact files:
+
+- NEMO-Omega artifact SHA-256
+  `862debedf76b5e4ff686655f89ee9d33eec56c87a8a05c3f7cffff1502dc53d6`;
+- NEMO-Omega log SHA-256
+  `4081b4950d3e551937ee492541573f48b0fcc19ee8c4d3eee90f0e45254beaf4`;
+- legacy-rounded artifact SHA-256
+  `dc11a5f831f4dec573b3c04d1b2f3b73ea8e74bfd1a30f3c20029757c5928a94`;
+- legacy-rounded log SHA-256
+  `52045b52fee947dd8fdbd682773726d6e88ae6152f82f9a42446f99949d14b7d`.
+
+Hashing the files and reading the logs before this commit confirmed the
+registered arm banners, clean producer, fp64/both/bridged/15552000 s legacy
+stress-carry receipts, resolved NEMO EEN weighting, 2880 steps, and
+`STABLE=True`.  That log-only verification did not open either artifact.  No
+metric, reducer, baseline, floor, validity bar, ownership bar, or classifier
+changes in this binding amendment.
+
 ## Question and exact output
 
 The historical legacy-carry baseline is
