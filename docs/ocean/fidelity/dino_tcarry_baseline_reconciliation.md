@@ -107,3 +107,41 @@ trajectory-dependent chaotic spread, and the trajectory has measurably moved.
 A current-SHA control plus seeds 1/2/3 must remeasure the legoESM side before
 the corrected-T deficit verdict is classified.  The NEMO member artifacts are
 unchanged and may supply the hash-bound NEMO side of the same RSS formula.
+
+## 2026-08-28 current-trajectory EEN-off discriminator
+
+The registered arm was bound before scoring to artifact SHA-256
+`a7f3bf5555ec1f6a7ed58792ede8b9f10188c93c21ff81f0553b2fb3cc400dd4`
+and log SHA-256
+`465c01c104dfb8e8f82dc5f6bd0ae70eb50d009ec125457ac259a5f0168e0d02`.
+Its clean producer is `6c64f261aa33b43c372b81b30d4569481116766d`.
+The requested content audit,
+`git diff --stat d6dc89e91..6c64f261a -- packages/ src/`, is empty: the
+producer interval contains only docs, validation scripts, and tests, with no
+model-package or `src/` change.
+
+The committed discriminator measured:
+
+| registered quantity | result |
+|---|---:|
+| `Goff_current90` | `-0.3484425774226274 Sv` |
+| distance from historical baseline | `0.07734230115890917 Sv` |
+| frozen ownership band | `0.0002899800477248501 Sv` |
+| miss / band | `266.71` |
+| row versus `g_south` absolute-endpoint disagreement | `1.7763568394002505e-15 Sv` |
+| acceptance gate | `PASS 5 | FAIL 0` at 5x |
+
+The frozen outcome is **REFUTED_FULL_EEN_OWNERSHIP**.  EEN's response is
+strongly trajectory-dependent: at the current trajectory, selecting NEMO
+weighting moves the basin gap by
+`-0.43908550999203477 - (-0.3484425774226274) = -0.09064293256940737 Sv`,
+not the historical pair's `-0.006565231376747249 Sv`.  This is descriptive;
+it does not assign the epoch shift to EEN or Omega.
+
+The output `/tmp/tcarry_een_off_discriminator.json` has SHA-256
+`35332f72823b76127972d76b039e039fd5c8de36db71ae42b64349cc89f7b1a1`.
+The current baseline is **not re-registered**, the floor is unchanged, the
+corrected-T arm remains unread, and STOP remains active.  The paired old/new
+bridge-Omega discriminator is frozen in
+`PREREG_tcarry_bridge_omega_discriminator.md`; do not run the seed-floor arms
+until that baseline reconciliation succeeds.

@@ -1,0 +1,111 @@
+# PRE-REGISTRATION — paired bridge-Omega baseline discriminator
+
+Written 2026-08-28 after the hash-bound current-trajectory EEN-off arm
+REFUTED full EEN ownership, and before an old/new bridge-Omega selector is
+implemented or either arm is run.  The corrected-T endpoint remains unread
+and unscored.  This is a GPU handoff design; STOP after committing it.
+
+## Question and exact output
+
+The historical legacy-carry baseline is
+`Ghistorical90 = -0.4257848785815366 Sv`, produced when the NEMO bridge built
+its Coriolis geometry with rounded legoESM Earth rotation.  The retained
+current legacy-carry baseline is
+`Gcurrent90 = -0.43908550999203477 Sv`, with the NEMO sidereal rate.  Their
+signed old-minus-new target is:
+
+`Dtarget = +0.01330063141049817 Sv`.
+
+The paired scorer will produce exactly three scientific numbers with the
+existing `tcarry_basin_reverdict._reduce` functional:
+
+1. `GnewOmega90`, the NEMO-sidereal bridge arm minus retained NEMO member 0;
+2. `GoldOmega90`, the rounded-legacy bridge arm minus the same NEMO member;
+3. `Domega90 = GoldOmega90 - GnewOmega90`.
+
+Both row-transport and `acc_driver_decomp.rowset()["g_south"]`
+implementations must agree within `1e-12 Sv` for every endpoint.
+
+## Selector to build, exactly
+
+Add a fail-closed `kamm_twin_90d.py` CLI selector:
+
+```text
+--bridge-omega {nemo,legacy-rounded}
+```
+
+Its default is `nemo`, preserving every existing invocation bit-for-bit.
+It changes only the `omega=` supplied to
+`bridge_nemo_to_legoesm_topo`: `NEMO_CONSTANTS_CONFIG.Omega` for `nemo`, and
+`legoesm.constants.Omega` for `legacy-rounded`.  It must not change
+`DINOConfig.omega`, the model config's constants, forcing, restart fields,
+EEN weighting, stress carry, or any prognostic value.  Thus the legacy arm
+recreates only the historical CONFIG-versus-GEOMETRY two-Earth split; both
+arms keep the current NEMO config-side rate.
+
+Do not relax the bridge's NEMO-f guard.  Extend it with an opt-in
+counterfactual reference mode used only by `legacy-rounded`: validate the
+built `f_T` against NEMO `ff_t` scaled by
+`legoesm.constants.Omega / NEMO_CONSTANTS_CONFIG.Omega` at the existing
+precision-aware tolerance, while still printing the intentional unscaled
+NEMO mismatch.  Default `nemo` validation is unchanged.  A planted mode/rate
+swap must fail this guard.
+
+Every artifact must stamp content, not only intent:
+
+- `bridge_omega_mode` (`nemo` or `legacy-rounded`);
+- `bridge_omega_rad_s`;
+- `bridge_f_T_sha256` and `bridge_f_v_sha256`;
+- `config_omega_rad_s` (identical NEMO value in both arms).
+
+Unit tests must prove the default is bit-identical, the selector changes only
+the two bridge Coriolis arrays, the config-side rate remains identical, and a
+planted stamp/rate swap is rejected.  The paired scorer must compare day-0
+T/S/eta/u/v bit-for-bit and require all ordinary run-config leaves identical;
+only the registered bridge-Omega stamps and their Coriolis hashes may differ.
+
+## Exact GPU invocations
+
+Build and commit the selector and paired scorer first.  Run both arms from
+that same clean producer, with no `DINO_EEN_METRIC` environment override:
+
+```sh
+CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both \
+  .venv/bin/python scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py \
+  nemo_dino_kamm_mlf results/dino_1455/tcarry_omega90_nemo.npz \
+  --days 90 --bridge-before --save-3d --no-surface-stress-implicit \
+  --bridge-omega nemo
+
+CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both \
+  .venv/bin/python scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py \
+  nemo_dino_kamm_mlf results/dino_1455/tcarry_omega90_legacy_rounded.npz \
+  --days 90 --bridge-before --save-3d --no-surface-stress-implicit \
+  --bridge-omega legacy-rounded
+```
+
+Both logs must show clean identical producer SHAs, fp64, `both`, bridged,
+seasonal 15552000 s, `U_AS_T_LEGACY`, default NEMO EEN weighting, 2880 steps,
+and `STABLE=True`.  Both separate acceptance gates must certify `PASS 5 |
+FAIL 0` at 5x.  Bind artifact and log SHA-256s in a committed amendment before
+the scorer loads either NPZ.
+
+## Frozen validity and decision bars
+
+The reproduction/ownership band remains the already-registered historical
+`2F = 0.0002899800477248501 Sv`; it is not a new floor estimate.
+
+- **INVALID/STOP before ownership scoring** if
+  `|GnewOmega90 - (-0.43908550999203477)| > 2F`, either acceptance gate is
+  uncertified, any paired receipt differs off-axis, or either independent
+  reducer misses `1e-12 Sv`.
+- **CONFIRM bridge-Omega ownership** iff valid and both
+  `|GoldOmega90 - (-0.4257848785815366)| <= 2F` and
+  `|Domega90 - 0.01330063141049817| <= 2F`.
+- **REFUTE bridge-Omega ownership** iff valid but either CONFIRM inequality
+  misses its band.
+
+Both scientific outcomes are reachable in the scorer self-test.  On CONFIRM,
+the epoch is owned and `Glegacy90` may be re-registered at the current
+baseline; the current-SHA floor ensemble must still run before the corrected-T
+basin verdict.  On REFUTE, STOP and inventory other model-relevant changes or
+non-commuting EEN/Omega interactions before any baseline adoption.
