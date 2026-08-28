@@ -4,6 +4,14 @@ Written 2026-08-28 after bridge-Omega ownership was REFUTED and before the
 missing fourth arm is run.  The corrected-T endpoint remains unread and
 unscored.  This is a GPU handoff design; STOP after committing it.
 
+## 2026-08-28 post-verdict default decision
+
+The completed fourth-corner arm intentionally used and stamped
+`U_AS_T_LEGACY` when that carry was the default.  Following the human decision
+to default to faithful reconstructed T carry, reproducing its command now also
+requires `--bridge-before-stress-legacy-u-as-t`.  No historical receipt,
+metric, or verdict changes.
+
 ## 2026-08-28 post-run binding amendment before score
 
 The registered fourth-corner arm completed, but its NPZ has not been opened

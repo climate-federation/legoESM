@@ -55,7 +55,7 @@ measured decomposition below.
 | twin start default | default changed after the old run | bridged | MATCH in artifacts; both logs certify bridged starts |
 | after-reconcile face thickness | minimum | arithmetic mean | MATCH on open DINO full-step faces; commit `19590b454` records bit identity there |
 | SPMD/OMIP/ORCA additions | absent | present | INACTIVE in this serial DINO recipe |
-| corrected T stress carry | absent | opt-in selector | MATCH for legacy arm; selector omitted and stamp is `U_AS_T_LEGACY` |
+| corrected T stress carry | absent | then-opt-in selector; default since the 2026-08-28 human decision | MATCH for the historical legacy arm; its omitted selector and `U_AS_T_LEGACY` stamp predate the default flip, and reproduction now requires the explicit legacy flag |
 
 ## Discriminating offline measurement
 
