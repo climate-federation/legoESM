@@ -349,6 +349,12 @@ class TKEConfig(NamedTuple):
     #   ``T_n2b``/``S_n2b`` to ``tke_vertical_mixing``; Prandtl zri and the
     #   Langmuir PE integral are evaluated on that TRUE Nbb level.
     tke_n2_time_level: str = "step_entry"
+    # Evaluation lifetime of NEMO's rn2/rn2b and live W-grid geometry.
+    # ``implicit_solve_state`` (default, BIT-IDENTICAL legacy) rebuilds them
+    # from the state presented to the implicit solve. ``step_entry`` consumes
+    # a frozen TKEEntryN2Bundle built before the explicit update, matching
+    # stpmlf.F90:204-210 -> zdf_phy. Complete DINO NEMO cards select it.
+    tke_n2_evaluation_stage: str = "implicit_solve_state"
     # ----- Veros vertical-metric slots (the TKE metric-consistency fix) -----
     # legoESM's historical TKE chain mixes vertical-metric conventions: it
     # uses the centre spacing ``dz_half`` (Veros dzw) in slots where Veros

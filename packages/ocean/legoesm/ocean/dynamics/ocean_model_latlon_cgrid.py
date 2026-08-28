@@ -3460,6 +3460,8 @@ class LatLonCGridOceanModel:
         # (bit-identical single-device path).
         _grid = grid if grid is not None else self.grid
         _vmask = vertex_mask if vertex_mask is not None else self._vertex_mask
+        _tke_n2_bundle = self._tke_step_entry_n2_bundle(
+            state, z_coord=_zc, config=_cfg_b)
         # Prescribed-flow lever (config.prescribed_flow, validated at
         # construction).  STATIC Python gate on the config value (CLAUDE.md
         # feature-gating exception): None (default) leaves every gated block
@@ -5313,6 +5315,7 @@ class LatLonCGridOceanModel:
                     tke_old=_tke_old, tke_source=_tke_source, return_tke=True,
                     grid=_grid, n2_tracers=_n2_tracers,
                     n2_tracers_before=_n2_tracers_before,
+                    tke_n2_bundle=_tke_n2_bundle,
                     # NEMO e3w(Kmm) divisor (#1226 W1): state_new is the
                     # post-update AFTER state; state.eta is NOW. No-op when
                     # implicit_vmix_e3t_now_divisor is off.
@@ -5330,6 +5333,7 @@ class LatLonCGridOceanModel:
                     tracer_source=tend.tracer_source,
                     grid=_grid, n2_tracers=_n2_tracers,
                     n2_tracers_before=_n2_tracers_before,
+                    tke_n2_bundle=_tke_n2_bundle,
                     # NEMO e3w(Kmm) divisor (#1226 W1): see the sibling call.
                     eta_now=state.eta.data,
                     u_now=state.u.data, v_now=state.v.data,
@@ -5783,6 +5787,69 @@ class LatLonCGridOceanModel:
                 data=avms0, name="tke_avm_surface",
                 dims=("lat", "lon"), units="m^2/s"))
         return state
+
+    def _tke_step_entry_n2_bundle(
+        self, state, *, z_coord=None, config=None,
+    ):
+        """Build NEMO's pre-``zdf_phy`` rn2/rn2b/live-geometry bundle."""
+        _zc = self.z_coord if z_coord is None else z_coord
+        _cfg_b = self.config if config is None else config
+        vmix = getattr(getattr(_cfg_b, "physics", None),
+                       "vertical_mixing", None)
+        if vmix is None or vmix.scheme != "tke":
+            return None
+        tke_cfg = vmix.tke
+        stage = getattr(
+            tke_cfg, "tke_n2_evaluation_stage", "implicit_solve_state")
+        if stage == "implicit_solve_state":
+            return None
+        if stage != "step_entry":
+            raise ValueError(
+                "Unknown TKEConfig.tke_n2_evaluation_stage: expected "
+                "'implicit_solve_state' or 'step_entry', got "
+                f"{stage!r}.")
+        if getattr(tke_cfg, "n2_mode", "insitu") != "nemo_bn2":
+            raise ValueError(
+                "tke_n2_evaluation_stage='step_entry' currently requires "
+                "n2_mode='nemo_bn2', the NEMO eosbn2 construction; got "
+                f"{tke_cfg.n2_mode!r}.")
+
+        from legoesm.ocean.eos import (
+            compute_buoyancy_frequency_nemo_bn2,
+            nemo_bn2_live_geometry,
+        )
+        from legoesm.ocean.physics.vertical_mixing.tke import TKEEntryN2Bundle
+        from legoesm.ocean.vertical import extrapolate_below_seafloor
+
+        T_now = state.T.data
+        S_now = state.S.data
+        if getattr(_zc, "is_active", None) is not None:
+            T_now = extrapolate_below_seafloor(T_now, _zc)
+            S_now = extrapolate_below_seafloor(S_now, _zc)
+        gdept, gdepw, e3w = nemo_bn2_live_geometry(
+            _zc, state.eta.data, state.H_bathy.data)
+        _n2_kwargs = dict(
+            g=_cfg_b.constants.g,
+            eos_form=getattr(tke_cfg, "n2_eos_form", "seos"),
+            e3w_int=e3w,
+            e3w_source="mesh_reference",
+        )
+        rn2 = compute_buoyancy_frequency_nemo_bn2(
+            T_now, S_now, gdept, gdepw, **_n2_kwargs)
+
+        before = self._n2_nemo_before_tracers(
+            state, z_coord=_zc, config=_cfg_b)
+        if before is None:
+            rn2b = rn2
+        else:
+            T_before, S_before = before
+            if getattr(_zc, "is_active", None) is not None:
+                T_before = extrapolate_below_seafloor(T_before, _zc)
+                S_before = extrapolate_below_seafloor(S_before, _zc)
+            rn2b = compute_buoyancy_frequency_nemo_bn2(
+                T_before, S_before, gdept, gdepw, **_n2_kwargs)
+        return TKEEntryN2Bundle(
+            rn2=rn2, rn2b=rn2b, gdepw_Kmm=gdepw, e3w_Kmm=e3w)
 
     def _tke_step_entry_p_sh2(
         self, state, *, eta_now=None, u_now=None, v_now=None,
@@ -6455,6 +6522,7 @@ class LatLonCGridOceanModel:
         grid=None,
         n2_tracers=None,
         n2_tracers_before=None,
+        tke_n2_bundle=None,
         eta_now=None,
         u_now=None,
         v_now=None,
@@ -6717,6 +6785,7 @@ class LatLonCGridOceanModel:
                     tke_bottom_dirichlet=self._tke_bottom_dirichlet(state, z_coord=z_coord, config=config, grid=_grid),
                     tke_bottom_level=self._tke_bottom_level(z_coord=z_coord, config=config),
                     n2_tracers_before=n2_tracers_before,
+                    tke_n2_bundle=tke_n2_bundle,
                     # NOW (Nnn) eta for the zdfevd trigger geometry
                     # (EnhancedDiffusionConfig.evd_n2_time_level=
                     # "nemo_now_before"); ignored by every other selection.

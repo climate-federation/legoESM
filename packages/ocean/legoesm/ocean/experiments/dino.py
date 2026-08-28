@@ -590,6 +590,7 @@ class DINOConfig:
     tke_preclosure_coeff_source: str = "current_subiteration"
     tke_shear_evaluation_stage: str = "implicit_solve_state"
     tke_shear_metric_source: str = "tpoint_jacobian"
+    tke_n2_evaluation_stage: str = "implicit_solve_state"
     # T15 — bottom TKE BC: en(mbkt+1)=max(0.001875*CdU_bot*|u_bot|,rn_emin)
     # (zdftke.F90:279-288), reusing the shared nemo_effective_bottom_drag_r.
     # Deep/not entrainment-relevant (Phase-1 ranking) but implemented for
@@ -1169,6 +1170,7 @@ DINO_RECIPES: dict[str, dict] = {
         "tke_preclosure_coeff_source": "carried_previous_step",
         "tke_shear_evaluation_stage": "step_entry",
         "tke_shear_metric_source": "nemo_qco_live_face",
+        "tke_n2_evaluation_stage": "step_entry",
         "dino_wind_profile_evaluation": "nemo_literal",
         # -- Convection (namzdf: ln_zdfevd=T, rn_evd=100, nn_evdm=1; hard rn2<0 on eosbn2) --
         # NEMO's zdfevd trigger consumes rn2/rn2b from eosbn2 bn2 (eosbn2.F90:
@@ -3000,6 +3002,7 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
             tke_shear_evaluation_stage=cfg.tke_shear_evaluation_stage,
             tke_shear_metric_source=cfg.tke_shear_metric_source,
             tke_n2_time_level=cfg.tke_n2_time_level,
+            tke_n2_evaluation_stage=cfg.tke_n2_evaluation_stage,
         )
         if cfg.tke_alpha is not None:
             # NEMO en self-diffusion uses 0.5·(avm[k+1]+avm[k]) (alpha_tke=1),

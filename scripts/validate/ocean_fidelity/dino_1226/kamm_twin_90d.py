@@ -1078,6 +1078,7 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                        tke_preclosure_coeff_source: str | None = None,
                        tke_shear_evaluation_stage: str | None = None,
                        tke_shear_metric_source: str | None = None,
+                       tke_n2_evaluation_stage: str | None = None,
                        dino_wind_profile_evaluation: str | None = None,
                        u_m: float | None = None,
                        restart_file: str = RESTART_FILE,
@@ -1160,6 +1161,14 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                 "'tpoint_jacobian'")
         cfg = dataclasses.replace(
             cfg, tke_shear_metric_source=tke_shear_metric_source)
+    if tke_n2_evaluation_stage is not None:
+        if tke_n2_evaluation_stage not in (
+                "step_entry", "implicit_solve_state"):
+            raise ValueError(
+                "tke_n2_evaluation_stage must be 'step_entry' or "
+                "'implicit_solve_state'")
+        cfg = dataclasses.replace(
+            cfg, tke_n2_evaluation_stage=tke_n2_evaluation_stage)
     if dino_wind_profile_evaluation is not None:
         if dino_wind_profile_evaluation not in (
                 "nemo_literal", "factored_smoothstep"):
@@ -1348,6 +1357,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
              tke_preclosure_coeff_source: str | None = None,
              tke_shear_evaluation_stage: str | None = None,
              tke_shear_metric_source: str | None = None,
+             tke_n2_evaluation_stage: str | None = None,
              dino_wind_profile_evaluation: str | None = None,
              u_m: float | None = None,
              restart_file: str = RESTART_FILE,
@@ -1414,6 +1424,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         tke_preclosure_coeff_source=tke_preclosure_coeff_source,
         tke_shear_evaluation_stage=tke_shear_evaluation_stage,
         tke_shear_metric_source=tke_shear_metric_source,
+        tke_n2_evaluation_stage=tke_n2_evaluation_stage,
         dino_wind_profile_evaluation=dino_wind_profile_evaluation,
         u_m=u_m, e3t_mode=ladder_mode)
 
@@ -1500,6 +1511,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         "tke_preclosure_coeff_source": cfg.tke_preclosure_coeff_source,
         "tke_shear_evaluation_stage": cfg.tke_shear_evaluation_stage,
         "tke_shear_metric_source": cfg.tke_shear_metric_source,
+        "tke_n2_evaluation_stage": cfg.tke_n2_evaluation_stage,
         "dino_wind_profile_evaluation":
             cfg.dino_wind_profile_evaluation,
         "perturb_seed": perturb_seed, "perturb_eps": float(perturb_eps),
@@ -1934,6 +1946,13 @@ def _parse_args(argv=None):
              "recipe (DINO NEMO cards use live NOW/BEFORE QCO metrics; "
              "tpoint_jacobian is historical reproduction)")
     p.add_argument(
+        "--tke-n2-evaluation-stage", default=None,
+        choices=("step_entry", "implicit_solve_state"),
+        help="override rn2/rn2b/live-geometry evaluation lifetime; default "
+             "None uses the recipe (complete DINO NEMO cards retain the "
+             "step-entry bundle; implicit_solve_state is historical "
+             "reproduction)")
+    p.add_argument(
         "--dino-wind-profile-evaluation", default=None,
         choices=("nemo_literal", "factored_smoothstep"),
         help="override DINO's wind-profile evaluation; default None uses the "
@@ -2170,6 +2189,7 @@ def main(argv=None):
               tke_preclosure_coeff_source=args.tke_preclosure_coeff_source,
               tke_shear_evaluation_stage=args.tke_shear_evaluation_stage,
               tke_shear_metric_source=args.tke_shear_metric_source,
+              tke_n2_evaluation_stage=args.tke_n2_evaluation_stage,
               dino_wind_profile_evaluation=args.dino_wind_profile_evaluation,
               u_m=args.u_m,
               perturb_seed=args.perturb_seed, perturb_eps=args.perturb_eps,

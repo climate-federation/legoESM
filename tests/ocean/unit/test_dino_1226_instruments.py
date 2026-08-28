@@ -1453,6 +1453,7 @@ def test_run_twin_stamps_the_reference_clock_and_the_run_configuration(
         "tke_preclosure_coeff_source",
         "tke_shear_evaluation_stage",
         "tke_shear_metric_source",
+        "tke_n2_evaluation_stage",
         "dino_wind_profile_evaluation",
     ):
         assert f'"{selector}"' in src

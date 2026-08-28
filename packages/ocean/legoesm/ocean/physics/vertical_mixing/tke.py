@@ -331,6 +331,20 @@ class TKEOutput(NamedTuple):
     K_M_surface: jnp.ndarray | None = None  # (...) post-tke_avn surface avm_k
 
 
+class TKEEntryN2Bundle(NamedTuple):
+    """Step-entry NEMO stability and live W-grid operands.
+
+    NEMO evaluates ``rn2``/``rn2b`` before ``zdf_phy`` and then keeps the
+    effective ``Kmm`` geometry unchanged while ``zdf_mxl``/``zdf_tke`` run.
+    This trace-local bundle gives legoESM the same operand lifetime without
+    adding prognostic state.
+    """
+    rn2: jnp.ndarray
+    rn2b: jnp.ndarray
+    gdepw_Kmm: jnp.ndarray
+    e3w_Kmm: jnp.ndarray
+
+
 class TKECarryOutput(NamedTuple):
     """Prognostic TKE plus NEMO's post-``tke_avn`` closure-memory pair."""
     tke_new: jnp.ndarray
@@ -1865,6 +1879,7 @@ def tke_vertical_mixing(
     preclosure_K_H: jnp.ndarray | None = None,
     preclosure_K_M_surface: jnp.ndarray | None = None,
     precomputed_p_sh2: jnp.ndarray | None = None,
+    precomputed_n2_bundle: TKEEntryN2Bundle | None = None,
 ) -> TKEOutput:
     """Advance the TKE closure and return new K_M, K_H, TKE.
 
@@ -2054,6 +2069,30 @@ def tke_vertical_mixing(
             cfg.tke_background,
             dtype=rho_cell.dtype,
         )
+
+    _n2_stage = getattr(
+        cfg, "tke_n2_evaluation_stage", "implicit_solve_state")
+    if _n2_stage not in ("implicit_solve_state", "step_entry"):
+        raise ValueError(
+            "Unknown TKEConfig.tke_n2_evaluation_stage: expected "
+            "'implicit_solve_state' or 'step_entry', got "
+            f"{_n2_stage!r}.")
+    if _n2_stage == "implicit_solve_state" and precomputed_n2_bundle is not None:
+        raise ValueError(
+            "precomputed_n2_bundle was supplied while "
+            "tke_n2_evaluation_stage='implicit_solve_state'; select "
+            "'step_entry' to consume the frozen operands.")
+    if _n2_stage == "step_entry":
+        if precomputed_n2_bundle is None:
+            raise ValueError(
+                "tke_n2_evaluation_stage='step_entry' requires "
+                "precomputed_n2_bundle from the physical step entry.")
+        for _name, _value in zip(
+                TKEEntryN2Bundle._fields, precomputed_n2_bundle):
+            if _value.shape != tke_old.shape:
+                raise ValueError(
+                    f"precomputed_n2_bundle.{_name} must match tke_old "
+                    f"shape; got {_value.shape} vs {tke_old.shape}.")
 
     _shear_stage = getattr(
         cfg, "tke_shear_evaluation_stage", "implicit_solve_state")
@@ -2249,16 +2288,19 @@ def tke_vertical_mixing(
     # tke_set_diffusivities). Python-static; None ⇒ BIT-IDENTICAL.
     _Tn2 = T_cell if T_n2 is None else T_n2
     _Sn2 = S_cell if S_n2 is None else S_n2
-    N2 = _compute_N2(
-        rho_cell, dz_half, rho_0, g,
-        T_cell=_Tn2, S_cell=_Sn2, p_cell=p_cell,
-        dz_ref=dz_ref, jacobian=jacobian, eos_fn=eos_fn,
-        n2_mode=cfg.n2_mode,
-        n2_eos_form=getattr(cfg, "n2_eos_form", "seos"),
-        adiabatic_over_dz_half=veros_slots,
-        t_depth=t_depth, w_depth=w_depth,
-        e3w_int=e3w_int,
-    )
+    if _n2_stage == "step_entry":
+        N2 = precomputed_n2_bundle.rn2
+    else:
+        N2 = _compute_N2(
+            rho_cell, dz_half, rho_0, g,
+            T_cell=_Tn2, S_cell=_Sn2, p_cell=p_cell,
+            dz_ref=dz_ref, jacobian=jacobian, eos_fn=eos_fn,
+            n2_mode=cfg.n2_mode,
+            n2_eos_form=getattr(cfg, "n2_eos_form", "seos"),
+            adiabatic_over_dz_half=veros_slots,
+            t_depth=t_depth, w_depth=w_depth,
+            e3w_int=e3w_int,
+        )
 
     # ----- rn2b (T8/T13, NEMO's TRUE before/Nbb level) -----
     # NEMO's ``rn2`` (this ``N2`` — step-entry Nnow T/S, via T_n2/S_n2) feeds
@@ -2272,7 +2314,9 @@ def tke_vertical_mixing(
     # behaviour) let the caller supply the true Nbb tracers (leapfrog
     # ``state.T_before``/``S_before``) so those two consumers get NEMO's
     # actual time level instead.
-    if T_n2b is not None or S_n2b is not None:
+    if _n2_stage == "step_entry":
+        N2b = precomputed_n2_bundle.rn2b
+    elif T_n2b is not None or S_n2b is not None:
         if T_n2b is None or S_n2b is None:
             raise ValueError(
                 "tke_vertical_mixing: T_n2b and S_n2b must be supplied "
@@ -2320,13 +2364,16 @@ def tke_vertical_mixing(
                 "z_coord.z_half_ref[1:-1].")
         # z_interface holds NEGATIVE reference heights; NEMO's gdepw is
         # positive-down depth.
-        _depth_w = -z_interface
+        _depth_w = (-z_interface if _n2_stage == "implicit_solve_state"
+                    else precomputed_n2_bundle.gdepw_Kmm)
+        _surface_e3w = (dz_half if _n2_stage == "implicit_solve_state"
+                        else precomputed_n2_bundle.e3w_Kmm)
     if _lc_on:
         # Langmuir source enters the RHS as +dt·source — exactly NEMO's
         # pre-solve ``en += rn_Dt·source`` (zdftke.F90:367). NEMO's PE
         # integral (:340,344) reads ``rn2b`` (the BEFORE/Nbb level) — N2b
         # (defaults to N2 when T_n2b/S_n2b are not supplied, T8/T13).
-        _lc_src = nemo_langmuir_tke_source(taum, N2b, _depth_w, dz_half, cfg,
+        _lc_src = nemo_langmuir_tke_source(taum, N2b, _depth_w, _surface_e3w, cfg,
                                            ice_frac=ice_frac)
         external_source = (_lc_src if external_source is None
                            else external_source + _lc_src)
@@ -2372,7 +2419,8 @@ def tke_vertical_mixing(
             e_old=tke_curr,
             K_M_old=_K_M_pre, K_H_old=_K_H_pre,
             P_s=P_s_curr, N2=N2, l_eps=l_eps,
-            dz_half=dz_half,
+            dz_half=(precomputed_n2_bundle.e3w_Kmm
+                     if _n2_stage == "step_entry" else dz_half),
             surface_flux=surface_flux,
             dt=dt, cfg=cfg,
             external_source=external_source,

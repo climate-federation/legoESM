@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections import namedtuple
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import numpy as np
 import jax
@@ -10,6 +10,7 @@ import jax.numpy as jnp
 import pytest
 
 from legoesm.core.field import Field
+from legoesm import constants
 import legoesm.ocean.physics.vertical_mixing.tke as tke_mod
 import legoesm.ocean.physics.vertical_mixing._shared as shared_mod
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
@@ -39,8 +40,10 @@ def _step_entry_helper_fixture(tke_cfg):
         nemo_e1e2u_m=horizontal, nemo_e1e2v_m=horizontal)
     H = jnp.full((ny, nx), raw.H_max)
     z_coord = create_partial_cell_coordinate(raw, H)
-    cfg = SimpleNamespace(physics=SimpleNamespace(vertical_mixing=
-        SimpleNamespace(scheme="tke", tke=tke_cfg)))
+    cfg = SimpleNamespace(
+        physics=SimpleNamespace(vertical_mixing=
+            SimpleNamespace(scheme="tke", tke=tke_cfg)),
+        constants=SimpleNamespace(g=constants.g))
     model = SimpleNamespace(config=cfg, z_coord=z_coord)
     dims3 = ("lat", "lon", "level")
     dims2 = ("lat", "lon")
@@ -53,8 +56,15 @@ def _step_entry_helper_fixture(tke_cfg):
         [[0.1, 1.0, 2.5], [0.4, 1.5, 4.0]],
         [[0.0, 0.7, 3.0], [0.3, 2.0, 3.5]],
     ])
+    T_now = jnp.asarray([[[12.0, 11.0, 9.0], [13.0, 11.5, 8.5]],
+                         [[10.0, 9.0, 7.5], [14.0, 12.0, 10.0]]])
+    S_now = jnp.asarray([[[35.0, 35.1, 35.2], [34.9, 35.0, 35.3]],
+                         [[35.2, 35.25, 35.4], [34.8, 35.0, 35.1]]])
     state = SimpleNamespace(
-        T=Field(jnp.zeros((ny, nx, nz)), "T", dims3, "K"),
+        T=Field(T_now, "T", dims3, "degC"),
+        S=Field(S_now, "S", dims3, "PSU"),
+        T_before=Field(T_now + 0.2, "T_before", dims3, "degC"),
+        S_before=Field(S_now - 0.03, "S_before", dims3, "PSU"),
         H_bathy=Field(H, "H_bathy", dims2, "m"),
         eta=Field(jnp.asarray([[0.2, -0.1], [0.05, 0.15]]),
                   "eta", dims2, "m"),
@@ -68,6 +78,8 @@ def _step_entry_helper_fixture(tke_cfg):
                                    [[0.4, 0.7], [0.25, 0.45]]]),
                       "tke_avm", dims3, "m2/s"),
     )
+    model._n2_nemo_before_tracers = MethodType(
+        LatLonCGridOceanModel._n2_nemo_before_tracers, model)
     return model, state
 
 
@@ -184,6 +196,53 @@ def test_only_complete_dino_nemo_cards_freeze_step_entry_shear():
                for c in unchanged)
     assert all(c.tke_shear_metric_source == "tpoint_jacobian"
                for c in unchanged)
+
+
+def test_only_complete_dino_nemo_cards_freeze_step_entry_n2_bundle():
+    faithful = {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}
+    for name, values in DINO_RECIPES.items():
+        resolved = values.get(
+            "tke_n2_evaluation_stage", "implicit_solve_state")
+        assert resolved == (
+            "step_entry" if name in faithful else "implicit_solve_state"), name
+        if values.get("vmix_scheme") == "tke":
+            built = dino_mod._dino_vertical_mixing_config(
+                dino_config_for_recipe(name)).tke
+            assert built.tke_n2_evaluation_stage == resolved, name
+
+    unchanged = (TKEConfig(), _nemo_tke_config(), ACC_TKE_CONFIG,
+                 ACC_BASIC_TKE_CONFIG)
+    assert all(c.tke_n2_evaluation_stage == "implicit_solve_state"
+               for c in unchanged)
+
+
+def test_step_entry_n2_bundle_matches_live_geometry_construction():
+    from legoesm.ocean.eos import (
+        compute_buoyancy_frequency_nemo_bn2,
+        nemo_bn2_live_geometry,
+    )
+
+    tke_cfg = dino_mod._dino_vertical_mixing_config(
+        dino_config_for_recipe("nemo_dino_kamm_mlf")).tke
+    model, state = _step_entry_helper_fixture(tke_cfg)
+    got = LatLonCGridOceanModel._tke_step_entry_n2_bundle(model, state)
+    gdept, gdepw, e3w = nemo_bn2_live_geometry(
+        model.z_coord, state.eta.data, state.H_bathy.data)
+    expected_now = compute_buoyancy_frequency_nemo_bn2(
+        state.T.data, state.S.data, gdept, gdepw, g=constants.g,
+        e3w_int=e3w, e3w_source="mesh_reference")
+    expected_before = compute_buoyancy_frequency_nemo_bn2(
+        state.T_before.data, state.S_before.data, gdept, gdepw,
+        g=constants.g, e3w_int=e3w, e3w_source="mesh_reference")
+    np.testing.assert_array_equal(got.rn2, expected_now)
+    np.testing.assert_array_equal(got.rn2b, expected_before)
+    np.testing.assert_array_equal(got.gdepw_Kmm, gdepw)
+    np.testing.assert_array_equal(got.e3w_Kmm, e3w)
+
+    legacy_model, legacy_state = _step_entry_helper_fixture(
+        tke_cfg._replace(tke_n2_evaluation_stage="implicit_solve_state"))
+    assert LatLonCGridOceanModel._tke_step_entry_n2_bundle(
+        legacy_model, legacy_state) is None
 
 
 def test_base_dino_fe_card_constructs_its_step_entry_squared_shear():
@@ -326,6 +385,73 @@ def test_step_entry_p_sh2_is_frozen_for_rhs_and_prandtl(monkeypatch):
     np.testing.assert_array_equal(out.tke_new, kw["tke_old"])
 
 
+def test_step_entry_n2_bundle_feeds_every_registered_tke_consumer(monkeypatch):
+    """Hand case: frozen rn2/rn2b/gdepw/e3w survive a poisoned solve state."""
+    cfg = TKEConfig(
+        prognostic=True, n2_mode="nemo_bn2",
+        tke_n2_evaluation_stage="step_entry",
+        lc=True, etau_mode="below_ml",
+        kappaM_min=0.0, kappaH_min=0.0,
+        enable_kappaH_profile=False,
+    )
+    bundle = tke_mod.TKEEntryN2Bundle(
+        rn2=jnp.asarray([[2.0, 4.0]]),
+        rn2b=jnp.asarray([[3.0, 5.0]]),
+        gdepw_Kmm=jnp.asarray([[1.5, 4.0]]),
+        e3w_Kmm=jnp.asarray([[1.5, 2.5]]),
+    )
+    seen = {"mxl": [], "closure": []}
+
+    def fake_mxl(e, n2, *args, **kwargs):
+        seen["mxl"].append(np.asarray(n2))
+        return jnp.ones_like(e), jnp.ones_like(e)
+
+    def fake_closure(*args, **kwargs):
+        seen["closure"].append((
+            np.asarray(kwargs["N2"]), np.asarray(kwargs["N2_prandtl"])))
+        return jnp.ones_like(args[0]), jnp.ones_like(args[0])
+
+    def fake_lc(taum, rn2b, depth, e3w, *args, **kwargs):
+        seen["lc"] = tuple(np.asarray(x) for x in (rn2b, depth, e3w))
+        return jnp.zeros_like(rn2b)
+
+    def fake_solve(**kwargs):
+        seen["solve"] = {
+            "N2": np.asarray(kwargs["N2"]),
+            "e3w": np.asarray(kwargs["dz_half"]),
+        }
+        return kwargs["e_old"]
+
+    def fake_etau(e, taum, depth, *args, **kwargs):
+        seen["etau_depth"] = np.asarray(depth)
+        return e
+
+    monkeypatch.setattr(tke_mod, "compute_mixing_lengths", fake_mxl)
+    monkeypatch.setattr(tke_mod, "compute_K_from_tke", fake_closure)
+    monkeypatch.setattr(tke_mod, "nemo_langmuir_tke_source", fake_lc)
+    monkeypatch.setattr(tke_mod, "_solve_tke_backward_euler", fake_solve)
+    monkeypatch.setattr(tke_mod, "nemo_etau_injection", fake_etau)
+
+    kw = _column_kwargs(cfg)
+    kw["T_cell"] = jnp.asarray([[99.0, -50.0, 7.0]])
+    kw["S_cell"] = jnp.asarray([[-20.0, 88.0, 1.0]])
+    tke_mod.tke_vertical_mixing(
+        **kw, z_interface=jnp.asarray([-7.0, -9.0]),
+        lat_deg=jnp.asarray([45.0]), precomputed_n2_bundle=bundle)
+
+    for actual in seen["mxl"]:
+        np.testing.assert_array_equal(actual, bundle.rn2)
+    for actual, actual_before in seen["closure"]:
+        np.testing.assert_array_equal(actual, bundle.rn2)
+        np.testing.assert_array_equal(actual_before, bundle.rn2b)
+    for actual, expected in zip(
+            seen["lc"], (bundle.rn2b, bundle.gdepw_Kmm, bundle.e3w_Kmm)):
+        np.testing.assert_array_equal(actual, expected)
+    np.testing.assert_array_equal(seen["solve"]["N2"], bundle.rn2)
+    np.testing.assert_array_equal(seen["solve"]["e3w"], bundle.e3w_Kmm)
+    np.testing.assert_array_equal(seen["etau_depth"], bundle.gdepw_Kmm)
+
+
 def test_step_entry_selector_guards_and_legacy_stage_bit_identity():
     base = TKEConfig(prognostic=True)
     explicit = base._replace(
@@ -334,6 +460,14 @@ def test_step_entry_selector_guards_and_legacy_stage_bit_identity():
     selected = tke_mod.tke_vertical_mixing(**_column_kwargs(explicit))
     for field in ("K_M", "K_H", "tke_new", "l_eps"):
         np.testing.assert_array_equal(getattr(selected, field), getattr(old, field))
+
+    n2_explicit = base._replace(
+        tke_n2_evaluation_stage="implicit_solve_state")
+    n2_selected = tke_mod.tke_vertical_mixing(
+        **_column_kwargs(n2_explicit))
+    for field in ("K_M", "K_H", "tke_new", "l_eps"):
+        np.testing.assert_array_equal(
+            getattr(n2_selected, field), getattr(old, field))
 
     with pytest.raises(ValueError, match="precomputed_p_sh2 was supplied"):
         tke_mod.tke_vertical_mixing(
@@ -347,6 +481,22 @@ def test_step_entry_selector_guards_and_legacy_stage_bit_identity():
         tke_shear_avm_weighting="nemo_face")
     with pytest.raises(ValueError, match="requires precomputed_p_sh2"):
         tke_mod.tke_vertical_mixing(**_column_kwargs(missing))
+
+    bundle = tke_mod.TKEEntryN2Bundle(
+        *(jnp.ones((1, 2)) for _ in range(4)))
+    with pytest.raises(ValueError, match="precomputed_n2_bundle was supplied"):
+        tke_mod.tke_vertical_mixing(
+            **_column_kwargs(base), precomputed_n2_bundle=bundle)
+    bad_n2 = base._replace(tke_n2_evaluation_stage="not-a-stage")
+    with pytest.raises(ValueError, match="Unknown TKEConfig.tke_n2"):
+        tke_mod.tke_vertical_mixing(**_column_kwargs(bad_n2))
+    missing_n2 = base._replace(tke_n2_evaluation_stage="step_entry")
+    with pytest.raises(ValueError, match="requires precomputed_n2_bundle"):
+        tke_mod.tke_vertical_mixing(**_column_kwargs(missing_n2))
+    bad_shape = bundle._replace(rn2=jnp.ones((1, 1)))
+    with pytest.raises(ValueError, match="bundle.rn2 must match"):
+        tke_mod.tke_vertical_mixing(
+            **_column_kwargs(missing_n2), precomputed_n2_bundle=bad_shape)
 
 
 def test_explicit_legacy_selector_is_bit_identical_to_old_default():
