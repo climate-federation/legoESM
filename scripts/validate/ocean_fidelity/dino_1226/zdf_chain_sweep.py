@@ -280,6 +280,30 @@ def planted_controls(lego, nemo, wet, bar) -> dict:
     }
 
 
+def planted_point_controls(lego, nemo, wet, bar) -> dict:
+    """Red controls for a zonally invariant field where an i-roll is inert."""
+    baseline = metrics(lego, nemo, wet, [], bar)
+    if not baseline["pass"]:
+        raise AssertionError("point control requires a verified baseline row")
+    idx = np.argwhere(wet)[0]
+    planted = lego.copy()
+    planted[tuple(idx)] += 100.0 * bar * baseline["reference_rms"]
+    poison = metrics(planted, nemo, wet, [], bar)
+    nonfinite = lego.copy()
+    nonfinite[tuple(idx)] = np.nan
+    nan_poison = metrics(nonfinite, nemo, wet, [], bar)
+    if poison["pass"] or nan_poison["pass"]:
+        raise AssertionError("a planted point violation failed to fire")
+    return {
+        "baseline_pass": True,
+        "perturbed_ji_k": [int(x) for x in idx],
+        "perturbation_fired": not poison["pass"],
+        "nonfinite_fired": (not nan_poison["pass"]
+                            and nan_poison["n_nonfinite_wet_elements"] == 1),
+        "horizontal_roll": "WAIVED: DINO analytic wind is zonally invariant",
+    }
+
+
 def capture_face_sh2_call(model, state, forcing):
     """Capture production's exact zdfsh2 call operands and first result."""
     import legoesm.ocean.physics.vertical_mixing._shared as shared
@@ -546,7 +570,7 @@ def main() -> int:
             row8_surface_sub = metrics(
                 surface_dump_operand[..., None], surface_n[..., None],
                 wet2[..., None], focus, POINTWISE_BAR)
-            row8_controls = planted_controls(
+            row8_controls = planted_point_controls(
                 surface_dump_operand[..., None], surface_n[..., None],
                 wet2[..., None], POINTWISE_BAR)
             row4["continuation_preview"] = {
