@@ -1933,10 +1933,10 @@ def main() -> int:
                                         rhs_n = rhs_n + dt64 * (
                                             p_sh2_n + strat_n + diss_rhs_n
                                         ) * wet_rhs.astype(np.float64)
-                                            np.put_along_axis(
-                                                rhs_n,
-                                                bottom_level[..., None],
-                                                bottom_prod[..., None], axis=-1)
+                                        np.put_along_axis(
+                                            rhs_n,
+                                            bottom_level[..., None],
+                                            bottom_prod[..., None], axis=-1)
                                         rhs_metric = metrics(
                                             rhs_l, rhs_n, wet_rhs, focus,
                                             POINTWISE_BAR)
