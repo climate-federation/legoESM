@@ -561,7 +561,8 @@ def test_explicit_legacy_selector_is_bit_identical_to_old_default():
         prognostic=True, prandtl_mode="constant",
         kappa_convention="veros_sqrte", enable_kappaH_profile=False)
     explicit_legacy = implicit_legacy._replace(
-        tke_preclosure_coeff_source="current_subiteration")
+        tke_preclosure_coeff_source="current_subiteration",
+        tke_matrix_evaluation="factored")
     old = tke_mod.tke_vertical_mixing(**_column_kwargs(implicit_legacy))
     selected = tke_mod.tke_vertical_mixing(**_column_kwargs(explicit_legacy))
     for field in ("K_M", "K_H", "tke_new", "l_eps"):
@@ -665,7 +666,7 @@ def test_nemo_literal_rhs_applies_langmuir_before_budget(monkeypatch):
 
 
 def test_nemo_literal_dissipation_uses_post_langmuir_energy(monkeypatch):
-    """zdftke:494 then :544-547 reuses the Langmuir-updated en operand."""
+    """zdftke:463 then :513-516 reuses the Langmuir-updated en operand."""
     cfg = TKEConfig(
         tke_matrix_evaluation="nemo_literal",
         dissipation_discretization="nemo_1p5_split",
@@ -702,6 +703,50 @@ def test_nemo_literal_dissipation_uses_post_langmuir_energy(monkeypatch):
     # post-LC en = 1 + 3*2 = 7; diss add-back = 3*(.5*.5*.4*7)=2.1.
     assert captured[-1][0, 2] == np.float64(9.1)
     assert captured[-1][0, 2] != np.float64(7.3)  # old e_old operand
+
+
+def test_nemo_literal_matrix_is_jittable_and_differentiable():
+    """Exercise the faithful matrix branch itself under JIT and reverse AD."""
+    cfg = TKEConfig(
+        tke_matrix_evaluation="nemo_literal",
+        dissipation_discretization="nemo_1p5_split",
+        alpha_tke=1.0, c_eps=0.7,
+        tke_background=1.0e-12, tke_surface_min=0.0,
+    )
+
+    def loss(e_old, avm_old, dissl_old):
+        out = tke_mod._solve_tke_backward_euler(
+            e_old=e_old,
+            K_M_old=avm_old,
+            K_H_old=jnp.zeros_like(e_old),
+            P_s=jnp.asarray([[0.2, 0.1, 0.0]], dtype=jnp.float64),
+            N2=jnp.zeros_like(e_old),
+            l_eps=jnp.ones_like(e_old),
+            dz_half=jnp.asarray([[2.0, 3.0, 5.0]], dtype=jnp.float64),
+            surface_flux=jnp.zeros((1,), dtype=jnp.float64),
+            dt=2.0, cfg=cfg,
+            dz_surface=jnp.ones((1,), dtype=jnp.float64),
+            surface_dirichlet=jnp.asarray([0.8], dtype=jnp.float64),
+            surface_bc_level="nemo_z0",
+            bottom_dirichlet=jnp.asarray([0.4], dtype=jnp.float64),
+            K_M_surface=jnp.asarray([0.03], dtype=jnp.float64),
+            bottom_level=jnp.asarray([2]),
+            w_active=jnp.ones((1, 3), dtype=bool),
+            nemo_e3t=jnp.asarray([[1.0, 2.0, 4.0, 7.0]], dtype=jnp.float64),
+            dissl_old=dissl_old,
+            external_source=jnp.asarray([[0.0, 0.01, 0.0]], dtype=jnp.float64),
+        )
+        return jnp.sum(out)
+
+    operands = (
+        jnp.asarray([[0.5, 0.4, 0.3]], dtype=jnp.float64),
+        jnp.asarray([[0.02, 0.03, 0.04]], dtype=jnp.float64),
+        jnp.asarray([[0.1, 0.2, 0.3]], dtype=jnp.float64),
+    )
+    value, grads = jax.jit(jax.value_and_grad(loss, argnums=(0, 1, 2)))(
+        *operands)
+    assert bool(jnp.isfinite(value))
+    assert all(bool(jnp.all(jnp.isfinite(grad))) for grad in grads)
 
 
 def test_carried_coefficients_are_jittable_and_differentiable():

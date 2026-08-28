@@ -1103,67 +1103,176 @@ def main() -> int:
                             e3w0_lc[..., :nlc] * stretch_lc[..., None],
                             wet_lc, focus, POINTWISE_BAR),
                     }
-                    # The independently dumped rn2b is the first source-order
-                    # operand, so its comparison -- not the undumped offline
-                    # composite -- owns the row disposition.
-                    row10_operand = row10_inputs["rn2b"]
-                    row10_operand["controls"] = planted_controls(
-                        np.asarray(n2)[..., :nlc], n2_n_lc, wet_lc,
-                        POINTWISE_BAR)
-                    row10_operand["offline_composite_diagnostic"] = {
-                        "dispositive": False,
-                        "reason": "no NEMO post-ln_lc stage dump",
-                        "metrics": row10m,
+                    # Row 10 is the ENTIRE registered ln_lc operation through
+                    # the line-463 en update, not merely its rn2b input.  The
+                    # direct post-LC stream is therefore dispositive.  Fail
+                    # closed on every path needed to prove the write-only
+                    # bracket and source/binary provenance even though the
+                    # later row-17 recurrence is not reached.
+                    row10_provenance = (
+                        args.row17_postlc_dump,
+                        args.row17_bracket_off_restart,
+                        args.row17_bracket_instrument_restart,
+                        args.row17_instrument_source,
+                        args.row17_instrument_binary,
+                    )
+                    if any(path is None for path in row10_provenance):
+                        raise FileNotFoundError(
+                            "row 10 requires the post-Langmuir dump plus "
+                            "instrument source/binary and both bracket restarts")
+                    for path in row10_provenance:
+                        if not path.is_file():
+                            raise FileNotFoundError(path)
+                    bracket10 = restart_numeric_identity(
+                        args.row17_bracket_instrument_restart,
+                        args.row17_bracket_off_restart)
+                    if not bracket10["pass"]:
+                        raise AssertionError(
+                            "row-10 post-LC dump-on/dump-off numeric restart "
+                            "bracket failed")
+                    if solve_kwargs.get("external_source") is None:
+                        raise AssertionError(
+                            "row 10 reached ln_lc=T without a solver source")
+                    solver_source = np.asarray(
+                        solve_kwargs["external_source"])[..., :nlc]
+                    lc_source = np.asarray(lc_out)
+                    # On the two DINO oracle cards the generic Veros EKE and
+                    # bottom-dissipation source flags are disabled, so the
+                    # solver source must be exactly the Langmuir source.  Do
+                    # not silently generalize this association to a future
+                    # mixed-source card.
+                    if not np.array_equal(solver_source, lc_source):
+                        raise AssertionError(
+                            "DINO row 10 expected external_source to contain "
+                            "only the captured Langmuir source")
+                    dt10 = np.float64(solve_kwargs["dt"])
+                    en_entry = np.asarray(solve_kwargs["e_old"])[..., :nlc]
+                    postlc_l = en_entry + dt10 * solver_source
+                    postlc_n_full = base._load_interior(
+                        str(args.row17_postlc_dump), ni, nj)
+                    postlc_n = postlc_n_full[..., 1:1 + nlc]
+                    row10_output = metrics(
+                        postlc_l, postlc_n, wet_lc, focus, POINTWISE_BAR)
+                    row10_inputs["langmuir_source_composite"] = row10m
+                    row10_inputs["solver_source_equals_captured_langmuir"] = (
+                        metrics(solver_source, lc_source, wet_lc, focus,
+                                POINTWISE_BAR))
+                    row10_output["operand_metrics"] = row10_inputs
+                    row10_output["controls"] = planted_controls(
+                        postlc_n, postlc_n, wet_lc, POINTWISE_BAR)
+                    row10_output["instrumentation_bracket"] = bracket10
+                    row10_output["instrumentation"] = {
+                        "slot": "tke_dump_en_postlc.bin",
+                        "time_level": time_level_for_dump(
+                            "tke_dump_en_postlc.bin"),
+                        "location": (
+                            "immediately after active base zdftke.F90:401-468; "
+                            "line 463 is the source output update"),
+                        "sha256": {
+                            str(path): sha256(path)
+                            for path in row10_provenance
+                        },
                     }
                     row4["continuation_preview"]["rows"][
-                        "10_langmuir_rn2b_operand"] = row10_operand
-                    if not row10_operand["pass"]:
+                        "10_langmuir_source_output"] = row10_output
+                    if not row10_output["pass"]:
                         row4["continuation_preview"]["first_divergence"] = {
                             "row": 10,
-                            "operation": "Langmuir TKE source rn2b operand",
+                            "operation": "Langmuir TKE source output",
                             "nemo_line":
-                                "cfgs/DINO/MY_SRC/zdftke.F90:436-440",
-                            "output": row10_operand,
+                                "cfgs/DINO/MY_SRC/zdftke.F90:401-468 "
+                                "(en update at :463)",
+                            "output": row10_output,
                             "first_failing_operand": {
-                                "name": "rn2b evaluation lifetime/geometry",
+                                "name": "vectorized Langmuir source composite",
                                 "nemo_line":
-                                    "cfgs/DINO/MY_SRC/stpmlf.F90:204-210; "
-                                    "cfgs/DINO/MY_SRC/zdftke.F90:436-440",
+                                    "cfgs/DINO/MY_SRC/zdftke.F90:422-463",
                                 "legoesm_line":
                                     "packages/ocean/legoesm/ocean/physics/"
-                                    "vertical_mixing/k_profiles.py:827-831",
+                                    "vertical_mixing/tke.py:1809-1890",
                             },
                             "operand_localization": row10_inputs,
-                            "offline_composite_diagnostic": {
-                                "dispositive": False,
-                                "reason": "no NEMO post-ln_lc stage dump",
-                                "metrics": row10m,
-                            },
                             "next_round_fix_design": {
-                                "option": "tke_n2_evaluation_stage",
+                                "status": "DESIGNED_NOT_IMPLEMENTED",
+                                "option": "tke_langmuir_evaluation",
                                 "faithful_default_on_complete_dino_nemo_cards":
-                                    "step_entry",
-                                "legacy_default_everywhere_else":
-                                    "implicit_solve_state",
+                                    "nemo_literal",
+                                "legacy_default_everywhere_else": "vectorized",
                                 "legacy_opt_in_on_dino_nemo_cards":
-                                    "implicit_solve_state",
-                                "construction": "at model-step entry compute "
-                                    "and freeze the exact (rn2, rn2b, "
-                                    "gdepw_Kmm, e3w_Kmm) bundle from the "
-                                    "registered raw-mesh live geometry; carry "
-                                    "it through zdf_mxl and every zdf_tke "
-                                    "consumer. Langmuir must receive frozen "
-                                    "gdepw_Kmm/e3w_Kmm rather than "
-                                    "-z_interface/dz_half. Non-oracle cards "
-                                    "retain the present recomputation and "
-                                    "metric slots byte-for-byte.",
-                                "required_source_order_after_fix": [
-                                    "zWlc2", "zpelc", "imlc", "zhlc",
-                                    "zus3", "zwlc", "source"],
+                                    "vectorized",
+                                "construction": (
+                                    "Transcribe the active no-Stokes zWlc2 "
+                                    "arm and zpelc top-down recurrence, then "
+                                    "initialize imlc per column to mbkt+1 "
+                                    "from carried bottom_level and perform "
+                                    "NEMO's bottom-up overwrite scan. Continue "
+                                    "with zhlc, zus/zus3, zwlc, and the line-"
+                                    "463 en update in source order. This per-"
+                                    "column fallback is required for unequal-"
+                                    "depth no-crossing columns; a global "
+                                    "deepest-interface fallback is not NEMO."),
+                                "source_scope_guard": (
+                                    "The two DINO oracle cards currently have "
+                                    "generic EKE-recycling and bottom-"
+                                    "dissipation sources disabled. Keep "
+                                    "Langmuir separate from generic external "
+                                    "sources, or fail closed, before enabling "
+                                    "nemo_literal on any mixed-source card."),
+                                "required_red_tests": [
+                                    "hand-computed multi-level zpelc/imlc tie case",
+                                    "planted first-versus-last threshold crossing",
+                                    "unequal shallow/deep no-crossing columns "
+                                    "using each column's mbkt+1 fallback",
+                                    "direct post-LC dump census",
+                                    "JIT and finite gradient",
+                                    "unchanged-card byte identity",
+                                ],
+                                "reason_for_stop": (
+                                    "The ordered cumulative/reverse-selection "
+                                    "source path and its AD/JIT tests are a "
+                                    "single fix too large for this round."),
                             },
-                            "controls": planted_controls(
-                                src_n, src_n, wet_lc, POINTWISE_BAR),
+                            "controls": row10_output["controls"],
+                            "loud_retraction": (
+                                "RETRACTED: round 9 initially marked only "
+                                "row 10's rn2b operand VERIFIED and promoted "
+                                "rows 11-14. The preregistered row is the full "
+                                "Langmuir operation through line 463; its "
+                                "direct output diverges, so rows 11-32 are "
+                                "UNMEASURED under the ordered stop rule."),
                         }
+                        later_operations = {
+                            11: "Richardson and inverse-Prandtl assembly",
+                            12: "TKE diffusion matrix",
+                            13: "TKE RHS shear",
+                            14: "TKE RHS stratification",
+                            15: "TKE RHS dissipation",
+                            16: "wave-coupled surface boundary",
+                            17: "TKE implicit solve and floor/mask",
+                            18: "nn_etau penetration",
+                            19: "buoyancy mixing length",
+                            20: "nn_mxl=3 limiting scans",
+                            21: "base avm/avt/dissl assembly",
+                            22: "inverse-Prandtl avt correction",
+                            23: "closure coefficient copy",
+                            24: "river-mouth enhancement",
+                            25: "EVD tracer overwrite",
+                            26: "EVD momentum overwrite",
+                            27: "avs and disabled enhancements",
+                            28: "turbocline scan and hmld",
+                            29: "avm lateral boundary update",
+                            30: "ldf_slp",
+                            31: "momentum implicit solve application",
+                            32: "tracer implicit solve application",
+                        }
+                        for number, operation in later_operations.items():
+                            row4["continuation_preview"]["rows"][
+                                f"{number}_ordered_stop"] = {
+                                    "pass": False,
+                                    "disposition": "UNMEASURED",
+                                    "operation": operation,
+                                    "reason": "ordered stop at row 10",
+                                }
                     else:
                         # Row 11: literal nn_pdl=1 Richardson / inverse-
                         # Prandtl chain. The first production call is the
@@ -1932,7 +2041,7 @@ def main() -> int:
                                                         "bottom-up imlc selection, "
                                                         "zhlc, zus/zus3, zwlc and "
                                                         "the en update at "
-                                                        "zdftke.F90:432-463 as "
+                                                        "zdftke.F90:422-463 as "
                                                         "ordered JAX scans; pass "
                                                         "the resulting post-LC en "
                                                         "unchanged into the line-"
@@ -2002,9 +2111,9 @@ def main() -> int:
                                         if solve_kwargs["external_source"] is not None:
                                             # Langmuir source is applied to en
                                             # before matrix assembly at
-                                            # zdftke.F90:421-486, before the
+                                            # zdftke.F90:401-468, before the
                                             # parenthesized budget statement
-                                            # at :525-528.  This association
+                                            # at :513-516.  This association
                                             # is itself a scored row-17 input.
                                             rhs_n = rhs_n + dt64 * np.asarray(
                                                 solve_kwargs["external_source"])
@@ -2725,6 +2834,20 @@ def main() -> int:
             args.bn2_bracket_instrument_restart,
             args.bn2_certified_restart,
         ])
+    round9_instrument_paths = tuple(path for path in (
+        args.row17_postsolve_dump,
+        args.row17_forward_diag_dump,
+        args.row17_forward_rhs_dump,
+        args.row17_pre_diag_dump,
+        args.row17_pre_lower_dump,
+        args.row17_pre_rhs_dump,
+        args.row17_postlc_dump,
+        args.row17_bracket_off_restart,
+        args.row17_bracket_instrument_restart,
+        args.row17_instrument_source,
+        args.row17_instrument_binary,
+    ) if path is not None)
+    input_paths.extend(round9_instrument_paths)
     continuation = row4.get("continuation_preview")
     rows = {"1_eos_rab_before": row1, "2_bn2_before": row2,
             "3_eos_rab_bn2_now": row3, "4_zdf_sh2": row4}
@@ -2732,7 +2855,9 @@ def main() -> int:
         for name, value in continuation["rows"].items():
             rows[name] = {
                 "output": value,
-                "disposition": "VERIFIED" if value["pass"] else "DIVERGED",
+                "disposition": value.get(
+                    "disposition",
+                    "VERIFIED" if value["pass"] else "DIVERGED"),
             }
     elif row4["disposition"] == "DIVERGED":
         rows["5_bottom_drag_coefficient"] = {
@@ -2761,7 +2886,7 @@ def main() -> int:
     else:
         first_divergence = None
     artifact = {
-        "schema": "zdf-chain-sweep-v8",
+        "schema": "zdf-chain-sweep-v9",
         "lane": "d180", "kt": 5761, "cpu_only": True, "fp64": True,
         "checked_out_parent_sha": git_sha(),
         "probe_commit_sha": probe_commit_sha(),
@@ -2786,6 +2911,13 @@ def main() -> int:
                          "tke_dump_dissl.bin",
                          "tke_dump_zri.bin", "tke_dump_pdlr.bin",
                          "tke_dump_en.bin",
+                         "tke_dump_en_postlc.bin",
+                         "tke_dump_zdiag_pre.bin",
+                         "tke_dump_zlw_pre.bin",
+                         "tke_dump_en_pre.bin",
+                         "tke_dump_zdiag_forward.bin",
+                         "tke_dump_zrhs_forward.bin",
+                         "tke_dump_en_postsolve.bin",
                          "dump_nmln.bin", "dump_hmlp.bin",
                          "drg_dump_rCdU_bot.bin", "sbc_dump_utau.bin",
                          "eiv_dump_gdept.bin", "eiv_dump_e3w.bin",
@@ -2798,6 +2930,25 @@ def main() -> int:
         "controls": controls,
         "rows": rows,
         "first_divergence": first_divergence,
+        "prior_committed_receipts": {
+            "provenance_commit": "7de1be2cc74",
+            "artifact_sha256": (
+                "8b001296c8fc8c0fa72ba202a52bc43a89b3e775bf39ade3644da196545444ec"),
+            "ordered_status": (
+                "post-hoc receipts only; rows 11+ are not promoted past "
+                "the corrected row-10 stop"),
+            "row11": {
+                "composite": "0/9920 at 1e-15; max 2.877796e-16",
+                "tracked_qualification": (
+                    "intermediate bn2 numerator misses 3/9920; max "
+                    "1.174266e-15"),
+            },
+            "row12": {
+                "matrix": "0/9920 at 1e-15; max 0",
+                "coefficients": "zd_up=0/9920; zd_lw=0/9920; zdiag=0/9920",
+                "line_510_dissl_operand": "0/9920; max 0",
+            },
+        },
         "row4_localization": sh2_localization,
         "sha256": {str(p): sha256(p) for p in source_paths + input_paths},
     }

@@ -3,109 +3,109 @@
 Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 (`RUN_SEQDUMP_D180_1R`, `kt=5761`).
 
-## Round-9 result: row 12 closed; ordered stop at row 15
+## Round-9 result: matrix receipt closed; ordered stop corrected to row 10
 
-`tke_matrix_evaluation="nemo_literal"` is implemented and is the default only
-on `nemo_dino_kamm` and `nemo_dino_kamm_mlf`. It carries live raw-mesh
+`tke_matrix_evaluation="nemo_literal"` is implemented and defaults only on
+`nemo_dino_kamm` and `nemo_dino_kamm_mlf`. It carries live raw-mesh
 `e3t(Kmm)` and previous-step `dissl`, uses NEMO's base `rn_Dt=2700 s` under
-MLF, and assembles `zcof/zd_up/zd_lw/zdiag` in source order. `factored` remains
-the byte-identical default everywhere else and the explicit opt-in on those
-two cards. The red-capable hand calculation uses nonuniform `e3t != e3w` and
-a planted wrong-W-slot denominator. A second matched-step test pins NEMO's
-Langmuir-before-budget ordering and a third proves that the line-515
-dissipation operand is the post-Langmuir energy rather than step-entry energy.
+MLF, and assembles `zcof/zd_up/zd_lw/zdiag` in source order. `factored` stays
+the byte-identical default everywhere else and remains an explicit opt-in on
+the two DINO oracle cards. Red-capable tests cover nonuniform `e3t != e3w`, a
+wrong-slot denominator, source-order association, literal-path JIT/reverse AD,
+and default-versus-explicit-factored output identity.
 
-The corrected ordered CPU/fp64 rerun is:
+The corrected ordered CPU/fp64 disposition is:
 
 | Row | Operation | Disposition | Whole-domain per-column result | Southern focus |
 |---:|---|---|---|---|
-| 1--11 | `eos_rab` through Richardson `zri/p_pdlr` | `VERIFIED` | unchanged; row 11 is 0/9,920 at bar, max `2.877796e-16` | 4/4 pass |
-| 12 | literal TKE matrix, including `dissl` in `zdiag` at line 510 | **`VERIFIED`** | **0/9,920; max `0`** for `zd_up`, `zd_lw`, and `zdiag`; every scored operand max `0` | **4/4 pass at zero** |
-| 13 | TKE RHS shear | **`VERIFIED`** | **0/9,920; max `0`** | **4/4 pass at zero** |
-| 14 | TKE RHS stratification | **`VERIFIED`** | **0/9,920; max `0`** | **4/4 pass at zero** |
-| 15 | TKE RHS dissipation | **`DIVERGED`** | **426/9,920; max `1.335005e-06`** | **4/4 pass at zero** |
-| 16 | wave-coupled surface boundary | `WAIVED` | resolved `ln_wave=F`; branch dead | written waiver |
-| 17--32 | TKE solve through EVD, assembly, `ldf_slp`, tracer and momentum applications | `UNMEASURED` | ordered stop at row 15 | ordered stop |
+| 1--9 | `eos_rab` through bottom TKE boundary | `VERIFIED` | unchanged | 4/4 pass |
+| 10 | complete Langmuir operation through the `en` update | **`DIVERGED`** | **329/9,920; max `4.344518e-04`** | **4/4 pass at zero** |
+| 11--32 | Richardson chain through EVD, assembly, `ldf_slp`, and both implicit applications | `UNMEASURED` | ordered stop at row 10 | ordered stop |
 
-### Row-12 receipt and loud timestep retraction
+**LOUD RETRACTION:** the first round-9 report treated row 10 as only its
+`rn2b` operand, marked that operand `VERIFIED`, and promoted rows 11--14 before
+stopping at row 15. The preregistered row 10 is the entire active Langmuir
+operation at `zdftke.F90:401-468`. The direct post-Langmuir stream proves that
+row 10 itself diverges, so rows 11--32 are now `UNMEASURED`. The committed
+probe can no longer print the stale row-15-first result.
 
-Against `cfgs/DINO/MY_SRC/zdftke.F90:499-516`, the carried viscosity sums,
-live `e3t/e3w`, carried `dissl`, `zd_up`, `zd_lw`, and `zdiag` all score exact
-zero. In particular the requested line-510 dissipation contribution is no
-longer latent debt: `dissl`, `zfact2`, and the assembled diagonal all pass
-0/9,920, including every focus column.
+### Row-12 requested receipt (post-hoc, not an ordered promotion)
 
-**LOUD RETRACTION:** the first round-9 draft reconstructed `zcof` with NEMO's
-2700 s base step but let the production MLF solve consume 5400 s, then called
-the coefficient association the owner. The corrected committed scorer reads
-the solve's actual `dt`; production now threads base `rn_Dt` only to the
-`nemo_literal` TKE path. Row 12 then closes exactly. The artifact retains this
-retraction under `resolved_constants` so the stale diagnosis cannot print.
+Before the ordered-stop correction, the implemented matrix was rerun against
+`zdftke.F90:499-510`: `zd_up`, `zd_lw`, and `zdiag` each scored **0/9,920** at
+the `1e-15` bar, maximum zero, with all four focus columns exact. The carried
+`dissl` operand in the line-510 diagonal also scored **0/9,920**, maximum zero.
+This remains a citable post-hoc receipt from commit `7de1be2cc74` and artifact
+SHA256 `8b001296c8fc8c0fa72ba202a52bc43a89b3e775bf39ade3644da196545444ec`;
+it is not a row-12 `VERIFIED` disposition past the row-10 stop.
 
-### First divergence: row-15 post-Langmuir `en`
+The earlier timestep diagnosis is also loudly retracted: the first draft used
+2700 s to reconstruct `zcof` while production consumed the MLF 5400 s step.
+Production now threads NEMO's base `rn_Dt` only to `nemo_literal`; with the
+actual solver timestep scored, the matrix receipt closes exactly.
 
-The active NEMO source order is:
+### First divergence: row-10 Langmuir source output
+
+The active oracle source says:
 
 ```fortran
-en(ji,jj,jk) = en(ji,jj,jk) + rn_Dt * zus3(ji) * &
-               ( zwlc * zwlc * zwlc ) / zhlc(ji)       ! zdftke.F90:463
+imlc(:) = mbkt(T1Di(0),jj) + 1                         ! zdftke.F90:444
+DO_2Dik( 0, 0, jpkm1, 2, -1 )
+   IF( zpelc(ji,jk) > zWlc2(ji) ) imlc(ji) = jk       ! :445-446
+END_2D
 ...
-en(ji,jj,jk) = en(ji,jj,jk) + rn_Dt * ( ...      &
-               + zfact3 * dissl(ji,jj,jk) * en(ji,jj,jk) ) * wmask(ji,jj,jk)
-                                                       ! zdftke.F90:513-516
+en(ji,jj,jk) = en(ji,jj,jk) + rn_Dt * zus3(ji) * &
+               ( zwlc * zwlc * zwlc ) / zhlc(ji)      ! :463
 ```
 
-The production correction in this round now performs the same lifetime
-association: it adds Langmuir energy before the budget statement and uses
-that post-Langmuir value in the dissipation add-back. This corrects a real
-source-order defect but does not close the row because the full Langmuir
-composite itself is not bit-faithful. Directly against the new
-`tke_dump_en_postlc.bin` stream, post-Langmuir `en` fails 329/9,920 columns,
-maximum `4.344518e-04`; carried `dissl` is exact, 0/9,920. Multiplication by
-the exact carried `dissl` produces the dispositive row-15 result: 426/9,920
-columns fail at the `1e-15` bar, maximum `1.335005e-06`. All four registered
-southern focus columns pass at zero; the whole-domain census is therefore
-essential to expose this owner.
+Against `tke_dump_en_postlc.bin`, legoESM's post-Langmuir `en` fails
+**329/9,920** columns, maximum normalized column error `4.344518e-04`; all four
+registered southern focus columns pass exactly. The already-fixed `rn2b`,
+`gdepw(Kmm)`, and `e3w(Kmm)` inputs pass, localizing the remaining operand to
+the vectorized Langmuir source composite produced at line 463. The offline
+source-only reconstruction fails 1,562/9,920 and is localization evidence,
+not the dispositive row score.
 
-**LOUD RETRACTION:** earlier round-9 drafts scored the line-515 dissipation
-term against step-entry `en` and called it exact. NEMO has already modified
-`en` at line 463. The measuring tool now requires the direct post-Langmuir
-stream and can no longer print that stale result.
-
-The new NEMO slots cover post-Langmuir `en`, pre-recurrence `en/zdiag/zd_lw`,
-forward diagonal/RHS work, and post-solve `en`. The write-enabled restart is
-bit-identical to the write-disabled control across all 131 shared numeric
-variables (0 differences). This brackets the streams as write-only. The
-post-Langmuir dump SHA256 is
-`663bbe155f9e358b224bd93cc31a0a6b15e2f6cd209a4c145b75112a49cecccb`;
-the complete provenance and every stream/source/binary hash are stamped in
-the round-9 artifact.
+The write-enabled restart remains bit-identical to the write-disabled control
+across all 131 shared numeric variables (0 differences). The probe now fails
+closed unless the post-LC stream, instrument source/binary, and both bracket
+restarts exist; their paths and SHA256 values are stamped globally even though
+row 17 is not reached. `tke_dump_en_postlc.bin` is registered at the `now`
+time level. Its SHA256 is
+`663bbe155f9e358b224bd93cc31a0a6b15e2f6cd209a4c145b75112a49cecccb`.
 
 ### Stop design
 
 The next option is `tke_langmuir_evaluation`. `nemo_literal` becomes the
 default only on `nemo_dino_kamm` and `nemo_dino_kamm_mlf`; `vectorized`
-remains byte-identical everywhere else and is the explicit legacy opt-in on
-those two cards. The literal path must transcribe `zWlc2`, the top-down
-`zpelc` recurrence, bottom-up `imlc` selection, `zhlc`, `zus/zus3`, `zwlc`,
-and the line-463 `en` update as ordered JAX scans, then pass the resulting
-energy unchanged to line 515. Required red tests include a hand-computed
-multi-level threshold/tie case, a planted first-versus-last crossing, direct
-post-LC census, JIT and finite-gradient checks, and byte-identity pins for
-every unchanged card. This cumulative/reverse-selection production path is a
-single fix too large for the remainder of this round, so the sweep stops at
-row 15 and rows 16--32 are not promoted.
+remains byte-identical elsewhere and is the explicit legacy opt-in on those
+two cards. The literal path must transcribe the active no-Stokes `zWlc2` arm
+at `zdftke.F90:422-429`, the top-down `zpelc` recurrence, and the bottom-up
+`imlc` scan. Critically, it must carry each column's `bottom_level/mbkt` and
+initialize no-crossing fallback to that column's `mbkt+1` exactly as line 444
+does; a global deepest-interface fallback is wrong for unequal-depth columns.
+It then evaluates `zhlc`, `zus/zus3`, `zwlc`, and the line-463 update in source
+order using differentiable scans.
 
-The row-11 qualification remains tracked: its intermediate numerator misses
-3/9,920 columns (max `1.174266e-15`) even though the subsequent exact `/e3w`
-closes row 11 and `zri/pdlr` passes. It is not retracted or silently promoted
-to bit identity.
+Required red tests include a hand threshold/tie case, first-versus-last
+crossing, unequal shallow/deep no-crossing columns, direct post-LC census,
+JIT/finite gradients, and unchanged-card byte identity. The two DINO cards
+currently have generic EKE-recycling and bottom-dissipation sources disabled;
+the literal implementation must keep Langmuir separate from generic external
+sources or fail closed before any mixed-source card can select it. This
+cumulative/reverse-selection fix is too large for this round, so work stops at
+row 10.
+
+The row-11 qualification remains tracked, without an ordered promotion: the
+prior committed receipt's intermediate numerator misses 3/9,920 columns
+(maximum `1.174266e-15`) even though the subsequent `/e3w` and final
+`zri/pdlr` composite passed. It is not silently upgraded to bit identity.
 
 ### Climate status
 
-**CLIMATE ARMS NOT AUTHORIZED.** The chain is not verified end-to-end, so the
-registered next step is the literal Langmuir implementation and row-15 rerun,
-not a GPU integration. The frozen prediction is unchanged: baseline southern
+**CLIMATE ARMS NOT AUTHORIZED.** The chain is not verified end-to-end. The
+registered next step is the literal Langmuir implementation and row-10 rerun,
+not a GPU integration. The frozen prediction remains: baseline southern
 day-90 MLD RMS `22.479491 m`; CONFIRM `<=11.2397455 m`; REFUTE
 `>=20.2775 m`; the legacy-baseline (`0.001 m`), acceptance-floor, 5x pass
 tally, and southern-density conditions remain as previously registered.
@@ -133,8 +133,7 @@ CUDA_VISIBLE_DEVICES=<gpu> JAX_ENABLE_X64=1 python scripts/validate/ocean_fideli
 
 The last flag is the registered next-round interface and does not exist yet;
 therefore these are frozen handoff commands, not authorization to run them.
-Round-9 artifact SHA256:
-`8b001296c8fc8c0fa72ba202a52bc43a89b3e775bf39ade3644da196545444ec`.
+Round-9 artifact SHA256: `PENDING_FINAL_RERUN`.
 
 ## Round-8 result: row 11 closed; ordered stop at row 12
 

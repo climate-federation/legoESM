@@ -189,6 +189,29 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
                                    "side. No leapfrog index of its own; 'now' "
                                    "for its governing en/rn2 stage, as for "
                                    "tke_dump_en.bin. Interior 52x199, jk=1..jpk."),
+    "tke_dump_en_postlc.bin": ("now", "MY_SRC zdftke.F90:505 captures en "
+                                      "immediately after the active base-source "
+                                      "Langmuir block at :401-468 (line :463 "
+                                      "updates en), before Prandtl/matrix/RHS; "
+                                      "en is the current TKE state."),
+    "tke_dump_zdiag_pre.bin": ("now", "MY_SRC zdftke.F90:583 captures zdiag "
+                                      "after literal matrix/RHS assembly and "
+                                      "before the Thomas forward recurrence."),
+    "tke_dump_zlw_pre.bin": ("now", "MY_SRC zdftke.F90:584 captures zd_lw "
+                                    "after literal matrix/RHS assembly and "
+                                    "before the Thomas forward recurrence."),
+    "tke_dump_en_pre.bin": ("now", "MY_SRC zdftke.F90:585 captures en after "
+                                   "Langmuir and the TKE budget, immediately "
+                                   "before the Thomas forward recurrence."),
+    "tke_dump_zdiag_forward.bin": ("now", "MY_SRC zdftke.F90:591 captures "
+                                          "the diagonal after NEMO's forward "
+                                          "Thomas recurrence."),
+    "tke_dump_zrhs_forward.bin": ("now", "MY_SRC zdftke.F90:599 captures "
+                                         "the forward-recurring RHS work held "
+                                         "in zd_lw."),
+    "tke_dump_en_postsolve.bin": ("now", "MY_SRC zdftke.F90:609 captures en "
+                                         "after back substitution, floor, and "
+                                         "wmask, before nn_etau penetration."),
     "wzv_dump_ww_call1.bin": ("now", "wzv_MLF diagnoses NOW w: pww integrated "
                                       "from hdiv with e3t(:,:,:,Kmm) (sshwzv."
                                       "F90:211), Kmm=Nnn. WRITE at MY_SRC "

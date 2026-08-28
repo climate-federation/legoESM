@@ -1303,9 +1303,9 @@ def _solve_tke_backward_euler(
     # Veros integrate_tke; zero / None ⇒ bit-identical).
     if literal_matrix:
         # Literal zdftke.F90 source association.  Langmuir circulation first
-        # updates en in its own statement (:421-486); only then does the TKE
-        # budget add the parenthesized shear/stratification/dissipation sum
-        # with its trailing wmask (:525-528).  Reversing those two additions
+        # updates en in its own statement (:401-468, update at :463); only
+        # then does the TKE budget add the parenthesized shear/stratification/
+        # dissipation sum with its trailing wmask (:513-516). Reversing the additions
         # is numerically visible at the first Thomas RHS recurrence even when
         # each isolated term is bit-identical.
         rhs_base = e_old
