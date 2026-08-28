@@ -651,6 +651,9 @@ def main() -> int:
                 surface_n[..., None], surface_n[..., None],
                 wet2[..., None], POINTWISE_BAR)
             row8m["controls"] = row8_controls
+            row8m["default_literal_utau_vs_sbc_dump"] = (
+                row8_utau_default_literal)
+            row8m["legacy_factored_utau_vs_sbc_dump"] = row8_legacy_utau
             en_full = base._load_interior(
                 str(RUN / "tke_dump_en.bin"), ni, nj)
             row8_poststage_invariant = metrics(
