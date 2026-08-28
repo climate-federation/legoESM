@@ -92,6 +92,15 @@ def _jaccard(a: np.ndarray, b: np.ndarray) -> float:
     return float((a & b).sum() / union) if union else 1.0
 
 
+def _removal_fraction(legacy_excess: float, candidate_excess: float) -> float:
+    return 1.0 - abs(candidate_excess) / abs(legacy_excess)
+
+
+def _restore_relative_error(
+        legacy_excess: float, candidate_excess: float) -> float:
+    return abs(candidate_excess - legacy_excess) / abs(legacy_excess)
+
+
 def _direct(cap: dict, rho0: float) -> np.ndarray:
     tau = np.asarray(cap["tau_i_u"], dtype=np.float64)
     dz = np.asarray(cap["dz0_u"], dtype=np.float64)
@@ -263,17 +272,19 @@ def main() -> int:
     legacy_excess = float(direct_l[RECEIVER] - nemo_direct[RECEIVER])
     corrected_excess = float(direct_t[RECEIVER] - nemo_direct[RECEIVER])
     planted_excess = float(direct_p[RECEIVER] - nemo_direct[RECEIVER])
-    removal_fraction = 1.0 - abs(corrected_excess) / abs(legacy_excess)
-    planted_restore_relative_error = abs(
-        planted_excess - legacy_excess) / abs(legacy_excess)
+    removal_fraction = _removal_fraction(legacy_excess, corrected_excess)
+    planted_restore_relative_error = _restore_relative_error(
+        legacy_excess, planted_excess)
     removal_ok = removal_fraction >= REMOVAL_BAR
     planted_restore_ok = planted_restore_relative_error <= RESTORE_RELATIVE_BAR
     # Reachability: leaving the corrected carry in place must fail the restore
     # condition, and scoring the legacy carry as "corrected" must fail removal.
-    unplanted_restore_error = abs(
-        corrected_excess - legacy_excess) / abs(legacy_excess)
+    unplanted_restore_error = _restore_relative_error(
+        legacy_excess, corrected_excess)
     restoration_refute_reachable = unplanted_restore_error > RESTORE_RELATIVE_BAR
-    removal_refute_reachable = 0.0 < REMOVAL_BAR
+    legacy_as_candidate_removal = _removal_fraction(
+        legacy_excess, legacy_excess)
+    removal_refute_reachable = legacy_as_candidate_removal < REMOVAL_BAR
 
     # The support reducer itself exercises both exact decision extremes.
     synthetic_a = np.zeros_like(wet)
@@ -287,7 +298,9 @@ def main() -> int:
         and _jaccard(synthetic_a, synthetic_c) == 0.0)
     print("CONTROL registered bars: "
           f"removal_refute_reachable={removal_refute_reachable} "
+          f"legacy_as_candidate_removal={legacy_as_candidate_removal:.17g} "
           f"restoration_refute_reachable={restoration_refute_reachable} "
+          f"unplanted_restore_error={unplanted_restore_error:.17g} "
           f"support_controls_fire={support_controls_fire}")
     if not (removal_refute_reachable and restoration_refute_reachable
             and support_controls_fire):
@@ -343,7 +356,9 @@ def main() -> int:
             "build_context_exact": build_context_exact,
             "prognostic_plant_fires": prog_plant_fires,
             "removal_refute_reachable": removal_refute_reachable,
+            "legacy_as_candidate_removal": legacy_as_candidate_removal,
             "restoration_refute_reachable": restoration_refute_reachable,
+            "unplanted_restore_error": unplanted_restore_error,
             "support_controls_fire": support_controls_fire,
         },
     }
