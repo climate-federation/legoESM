@@ -5,6 +5,107 @@ runs. The five-day result is not used as a basin outcome. This registration
 asks whether the now-confirmed bridge representation defect contributes
 materially to the recorded southern-basin transport deficit.
 
+## 2026-08-27 Rule-1e reconciliation amendment after Stage-1 STOP #2
+
+The amended scorer correctly stopped after measuring the retained legacy arm:
+`G_basin90 = -0.43908550999203477 Sv`, a `-0.01330063141049817 Sv` miss from
+the registered historical baseline, 45.87 times its `2F` reproduction band.
+It did not load or score the corrected-T endpoint.  Therefore no T-carry basin
+delta or verdict exists yet.
+
+The historical JSON's analysis HEAD is `1d68fb289d6457e74ced8a1c71ab7eaceb8a29b1`.
+Its underlying four legoESM artifacts were produced cleanly at
+`a7b940f75c04d824b478de4e1728220e3a71989e`, not at the analysis HEAD.  The
+resolved model protocol is recorded in
+`docs/ocean/fidelity/dino_tcarry_baseline_reconciliation.md`.
+
+The committed offline reconciliation probe, preregistered before it scored
+the historical EEN artifacts, measured the day-90 epoch shift as:
+
+`-0.013300631410499975 = -0.006565231376747249 (EEN) + -0.006735400033752725 (remainder) Sv`.
+
+EEN is PARTIAL at 49.36% under the registered 80–120% dominant-owner band.
+The remainder is 1002 times the direct rotation-rate scale and changes sign
+over days 30/60/90, so direct linear Omega ownership is REFUTED and nonlinear
+Omega ownership remains UNRESOLVED.  Output SHA-256:
+`c9a8306d086648a1bdb82e303040462b15371dafcdf9a8752106f7c6830f9842`.
+
+**No baseline or floor is re-registered in this amendment.**  `BASELINE[90]`
+and `FLOOR[90]` in the scorer remain historical receipts that deliberately
+keep the STOP active.  Adopting the new legacy number now would violate Rule
+1e rather than resolve it.
+
+### Registered next GPU arm — current-trajectory EEN discriminator
+
+Run at the retained arms' exact clean producer
+`d6dc89e91c9ae6b07d146991d2cb6c850f261bb0`.  The existing arm selector is
+reused; no model edit or new selector is required.  It keeps the legacy
+U-as-T carry and differs from the retained legacy artifact only by
+`een_metric_weighting: nemo -> off`:
+
+```sh
+DINO_EEN_METRIC=off CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 \
+  LEGOESM_NEMO_E3T=both \
+  .venv/bin/python \
+  scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py \
+  nemo_dino_kamm_mlf results/dino_1455/tcarry_basin90_legacy_een_off.npz \
+  --days 90 --bridge-before --save-3d --no-surface-stress-implicit
+```
+
+The log must stamp producer `d6dc89e91...`, dirty tracked count zero,
+`ARM: een_metric_weighting=off`, `U_AS_T_LEGACY`, fp64, `both`, bridged,
+15552000 s, and `STABLE=True`.  The acceptance gate must still certify 5/5.
+Before scoring, amend the reconciliation probe with the returned artifact and
+log SHA-256s; do not score an unbound file.
+
+Let `Goff_current90` be its same-functional basin gap.
+
+- **CONFIRM EEN owns the full epoch mismatch at the current trajectory** iff
+  `|Goff_current90 - (-0.4257848785815366)| <= 0.0002899800477248501 Sv`.
+  Equivalently, the current same-SHA EEN response must reproduce the observed
+  `-0.01330063141049817 Sv` epoch shift within that same band.
+- **REFUTE full ownership** iff it misses that historical baseline by more
+  than the band.  The already-measured PARTIAL historical response still
+  stands; the remaining discriminator is then a current-SHA old/new bridge
+  Omega arm, which requires a fail-closed selector and a separate prereg before
+  implementation.
+
+Only after this arm owns the baseline epoch may `Glegacy90` be re-registered.
+Threshold fractions (10% CONFIRM, 2% REFUTE), compensation rules, metric
+definition, and classification order remain unchanged.
+
+### Registered floor remeasurement — required after baseline ownership
+
+The old four-member floor predates both live changes and is not plausibly
+SHA-stable: its own same-functional spread grows by more than three orders
+between days 30 and 90.  Retain the existing unperturbed current legacy arm and
+produce seeds 1, 2, and 3 at the same `d6dc89e91...` producer, default EEN on,
+legacy U-as-T carry:
+
+```sh
+CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both \
+  .venv/bin/python scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py \
+  nemo_dino_kamm_mlf results/dino_1455/tcarry_floor90_seed1.npz \
+  --days 90 --bridge-before --save-3d --no-surface-stress-implicit --perturb-seed 1
+
+CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both \
+  .venv/bin/python scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py \
+  nemo_dino_kamm_mlf results/dino_1455/tcarry_floor90_seed2.npz \
+  --days 90 --bridge-before --save-3d --no-surface-stress-implicit --perturb-seed 2
+
+CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both \
+  .venv/bin/python scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py \
+  nemo_dino_kamm_mlf results/dino_1455/tcarry_floor90_seed3.npz \
+  --days 90 --bridge-before --save-3d --no-surface-stress-implicit --perturb-seed 3
+```
+
+After their hashes are bound, compute the sample standard deviation of the
+same `G_basin90` functional across control+seeds and combine it by RSS with the
+unchanged hash-bound four-member NEMO standard deviation.  That measured value
+becomes `F90_current`; no transfer, `sqrt(2)` shortcut, or old legoESM spread
+is permitted.  Until it exists, the corrected-T deficit classification stays
+STOPPED even if the baseline epoch is owned.
+
 ## 2026-08-27 instrument-only amendment after Stage-1 STOP
 
 The executor completed both registered 90-day arms cleanly and both separate
