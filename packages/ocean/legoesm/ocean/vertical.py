@@ -98,6 +98,7 @@ class OceanZStarCoordinate(NamedTuple):
     # is the faithful/default construction.  ``depth_difference`` is the
     # explicit legacy opt-in for consumers without a NEMO mesh.
     nemo_gdept_0: jnp.ndarray | None = None
+    nemo_gdepw_0: jnp.ndarray | None = None
     nemo_e3w_0: jnp.ndarray | None = None
     nemo_e3w_mesh_reference: bool = False
     nemo_hu_0: jnp.ndarray | None = None
@@ -204,7 +205,7 @@ def create_ocean_z_star(
 
 def create_z_star_from_thicknesses(
     dz_ref_m, t_depth_ref_m=None, *, nemo_gdept_0_m=None,
-    nemo_e3w_0_m=None, nemo_e3w_source="mesh_reference",
+    nemo_gdepw_0_m=None, nemo_e3w_0_m=None, nemo_e3w_source="mesh_reference",
     nemo_hu_0_m=None, nemo_hv_0_m=None, nemo_e1e2t_m=None,
     nemo_e1e2u_m=None, nemo_e1e2v_m=None,
 ) -> OceanZStarCoordinate:
@@ -284,7 +285,7 @@ def create_z_star_from_thicknesses(
             raise ValueError("t_depth_ref_m depths must be strictly increasing")
         t_depth_ref = jnp.asarray(t_np, dtype=get_policy().control)
 
-    def _raw_mesh_field(value, name):
+    def _raw_mesh_field(value, name, *, allow_surface_zero=False):
         if value is None:
             return None
         arr = np.asarray(value, dtype=np.float64)
@@ -292,11 +293,16 @@ def create_z_star_from_thicknesses(
             raise ValueError(
                 f"{name} must have trailing dimension n_levels={n_levels}, "
                 f"got shape {arr.shape}")
-        if not np.all(np.isfinite(arr)) or not np.all(arr > 0.0):
-            raise ValueError(f"{name} must contain only finite values > 0")
+        valid = np.all(arr >= 0.0) if allow_surface_zero else np.all(arr > 0.0)
+        if not np.all(np.isfinite(arr)) or not valid:
+            relation = ">= 0" if allow_surface_zero else "> 0"
+            raise ValueError(
+                f"{name} must contain only finite values {relation}")
         return jnp.asarray(arr, dtype=get_policy().control)
 
     nemo_gdept_0 = _raw_mesh_field(nemo_gdept_0_m, "nemo_gdept_0_m")
+    nemo_gdepw_0 = _raw_mesh_field(
+        nemo_gdepw_0_m, "nemo_gdepw_0_m", allow_surface_zero=True)
     nemo_e3w_0 = _raw_mesh_field(nemo_e3w_0_m, "nemo_e3w_0_m")
     def _raw_horizontal(value, name):
         if value is None:
@@ -332,6 +338,7 @@ def create_z_star_from_thicknesses(
         dz_half_ref=dz_half_ref,
         t_depth_ref=t_depth_ref,
         nemo_gdept_0=nemo_gdept_0,
+        nemo_gdepw_0=nemo_gdepw_0,
         nemo_e3w_0=nemo_e3w_0,
         nemo_e3w_mesh_reference=(nemo_e3w_source == "mesh_reference"),
         nemo_hu_0=nemo_hu_0, nemo_hv_0=nemo_hv_0,
@@ -537,6 +544,7 @@ class OceanPartialCellCoordinate(NamedTuple):
     # defaulted so existing constructions stay backward-compatible.
     t_depth_ref: jnp.ndarray | None = None
     nemo_gdept_0: jnp.ndarray | None = None
+    nemo_gdepw_0: jnp.ndarray | None = None
     nemo_e3w_0: jnp.ndarray | None = None
     nemo_e3w_mesh_reference: bool = False
     nemo_hu_0: jnp.ndarray | None = None
@@ -653,6 +661,7 @@ def create_partial_cell_coordinate(
         # fidelity).  ``getattr``: plain midpoint z* coords carry None.
         t_depth_ref=getattr(z_coord, "t_depth_ref", None),
         nemo_gdept_0=getattr(z_coord, "nemo_gdept_0", None),
+        nemo_gdepw_0=getattr(z_coord, "nemo_gdepw_0", None),
         nemo_e3w_0=getattr(z_coord, "nemo_e3w_0", None),
         nemo_e3w_mesh_reference=getattr(
             z_coord, "nemo_e3w_mesh_reference", False),
@@ -727,6 +736,7 @@ def create_full_step_coordinate(
         is_active=is_active,
         t_depth_ref=getattr(z_coord, "t_depth_ref", None),
         nemo_gdept_0=getattr(z_coord, "nemo_gdept_0", None),
+        nemo_gdepw_0=getattr(z_coord, "nemo_gdepw_0", None),
         nemo_e3w_0=getattr(z_coord, "nemo_e3w_0", None),
         nemo_e3w_mesh_reference=getattr(
             z_coord, "nemo_e3w_mesh_reference", False),

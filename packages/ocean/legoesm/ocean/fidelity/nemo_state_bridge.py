@@ -174,6 +174,7 @@ def bridge_nemo_to_legoesm(
         np.asarray(grid.e3t_1d),
         t_depth_ref_m=np.asarray(grid.gdept_1d).ravel(),
         nemo_gdept_0_m=grid.gdept_0,
+        nemo_gdepw_0_m=np.asarray(grid.gdepw_1d).ravel(),
         nemo_e3w_0_m=grid.e3w_0,
         nemo_hu_0_m=grid.hu_0, nemo_hv_0_m=grid.hv_0,
         nemo_e1e2t_m=np.asarray(grid.e1t) * np.asarray(grid.e2t),
@@ -705,6 +706,7 @@ def bridge_nemo_to_legoesm_topo(
     z_coord = create_z_star_from_thicknesses(
         e3t_1d, t_depth_ref_m=_t_depth,
         nemo_gdept_0_m=grid.gdept_0,
+        nemo_gdepw_0_m=np.asarray(grid.gdepw_1d).ravel(),
         nemo_e3w_0_m=grid.e3w_0,
         nemo_hu_0_m=grid.hu_0, nemo_hv_0_m=grid.hv_0,
         nemo_e1e2t_m=np.asarray(grid.e1t) * np.asarray(grid.e2t),

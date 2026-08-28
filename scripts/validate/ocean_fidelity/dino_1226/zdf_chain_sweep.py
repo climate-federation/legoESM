@@ -503,7 +503,14 @@ def main() -> int:
     gdept, gdepw, e3w = nemo_bn2_live_geometry(
         st["z_coord"], st["eta"], st["H_bathy"],
         r3t_evaluation="nemo_reciprocal")
-    zrw_gdept_0, zrw_gdepw_0 = nemo_bn2_depth_ladders(st["z_coord"])
+    zrw_gdept_0 = getattr(st["z_coord"], "nemo_gdept_0", None)
+    zrw_gdepw_0 = getattr(st["z_coord"], "nemo_gdepw_0", None)
+    if zrw_gdept_0 is None or zrw_gdepw_0 is None:
+        raise AssertionError(
+            "DINO row-11 literal zrw requires raw gdept_0/gdepw_0")
+    # The stored raw W ladder includes NEMO's zero-depth surface point, while
+    # eosbn2's jk=2 first evaluated interface is array index one.
+    zrw_gdepw_0 = zrw_gdepw_0[..., 1:]
     zrw_stretch = nemo_r3t_stretch(
         st["z_coord"], st["eta"], st["H_bathy"],
         evaluation="nemo_reciprocal")
