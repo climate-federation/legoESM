@@ -546,6 +546,9 @@ def main() -> int:
             row8_surface_sub = metrics(
                 surface_dump_operand[..., None], surface_n[..., None],
                 wet2[..., None], focus, POINTWISE_BAR)
+            row8_controls = planted_controls(
+                surface_dump_operand[..., None], surface_n[..., None],
+                wet2[..., None], POINTWISE_BAR)
             row4["continuation_preview"] = {
                 "rows": {
                     "5_bottom_drag_coefficient": row5m,
@@ -575,6 +578,7 @@ def main() -> int:
                         "substitute_dump_derived_taum": row8_surface_sub,
                         "n_observable_unfloored_columns": int(observable.sum()),
                     },
+                    "controls": row8_controls,
                     "next_round_fix_design": {
                         "option": "dino_wind_profile_evaluation",
                         "faithful_default_on_complete_dino_nemo_cards":
