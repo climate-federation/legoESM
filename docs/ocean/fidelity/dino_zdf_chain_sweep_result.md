@@ -91,8 +91,8 @@ the eventual legacy command additionally selects
 
 Round-6 artifact:
 `docs/ocean/fidelity/dino_zdf_chain_sweep_round6_artifact.json`, SHA256
-`ba8a52e002aaa92cee8d4f69eb01224e9b9437bc74175a077b79f163b67988d7`.
-Its stamped parent SHA is `51859bd19e9`; the full artifact carries the probe,
+`baa1d31d933d7055010c073df7f638ef708e81920350cb11e456105daf4e80e1`.
+Its stamped parent SHA is `4e79e71109c`; the full artifact carries the probe,
 input, dump, map, environment, dtype, time-level, and control receipts.
 
 ## Round-5 result: row 8 closed; ordered stop at row 10

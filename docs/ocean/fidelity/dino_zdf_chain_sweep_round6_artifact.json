@@ -4,7 +4,7 @@
     "pointwise_column": 1e-15,
     "rms_ratio_epsilon": 1e-06
   },
-  "checked_out_parent_sha": "51859bd19e9b1b21220868ee3510a34c6bc948df",
+  "checked_out_parent_sha": "4e79e71109c59fa3b90b241de0fa7ea63600ef20",
   "controls": {
     "baseline_pass": true,
     "nonfinite_fired": true,
@@ -381,6 +381,27 @@
       "n_verified_columns": 9834,
       "n_wet_columns": 9920,
       "n_wet_elements": 332214,
+      "next_round_fix_design": {
+        "instrumentation": "Extend the existing write-only MY_SRC dump pattern for each listed intermediate, run the one-step CPU oracle, and prove the pre/post instrumentation bracket stream bit-identical.",
+        "lego_walk": "Capture the matching step-entry bundle operands and stop at the first failed slot.",
+        "nemo_line": "src/OCE/TRA/eosbn2.F90:1459-1468",
+        "nemo_source_order": [
+          "zrw",
+          "zaw",
+          "zbw",
+          "thermal_minus_haline_numerator",
+          "raw_divide_by_e3w_result"
+        ],
+        "production_selection": "If literal association is the owner, select nemo_literal only under step_entry; preserve implicit_solve_state byte-for-byte.",
+        "reason_for_stop": "The correction requires new NEMO internal dump slots and a bracket-stream identity run; it is too large for this round.",
+        "required_controls": [
+          "planted_scalar_perturbation",
+          "one_i_horizontal_roll",
+          "nonfinite_poison",
+          "instrumented_bracket_stream_identity"
+        ],
+        "status": "DESIGNED_NOT_IMPLEMENTED"
+      },
       "operand_metrics": {
         "p_avm": {
           "aggregate_bar_pass": true,
@@ -628,6 +649,12 @@
           ]
         }
       },
+      "ownership_verdict": {
+        "owner": "rn2b",
+        "rn2b_row10_bad_columns": 0,
+        "statement": "The row-10 rn2b residual passes its own 1e-15 column bar but Richardson division amplifies it to the row-11 zri failures; substituting only NEMO rn2b closes zri exactly, while substituting p_avm or p_sh2 does not change the failing-column count.",
+        "zri_row11_bad_columns": 86
+      },
       "pass": false,
       "reference_rms": 1716196.1887056807,
       "resolved_constants": {
@@ -866,7 +893,7 @@
   "lane": "d180",
   "numpy": "2.4.4",
   "platform": "Linux-5.14.0-611.36.1.el9_7.x86_64-x86_64-with-glibc2.34",
-  "probe_commit_sha": "51859bd19e9b1b21220868ee3510a34c6bc948df",
+  "probe_commit_sha": "4e79e71109c59fa3b90b241de0fa7ea63600ef20",
   "python": "3.13.0",
   "row4_localization": null,
   "rows": {
@@ -1054,6 +1081,27 @@
         "n_verified_columns": 9834,
         "n_wet_columns": 9920,
         "n_wet_elements": 332214,
+        "next_round_fix_design": {
+          "instrumentation": "Extend the existing write-only MY_SRC dump pattern for each listed intermediate, run the one-step CPU oracle, and prove the pre/post instrumentation bracket stream bit-identical.",
+          "lego_walk": "Capture the matching step-entry bundle operands and stop at the first failed slot.",
+          "nemo_line": "src/OCE/TRA/eosbn2.F90:1459-1468",
+          "nemo_source_order": [
+            "zrw",
+            "zaw",
+            "zbw",
+            "thermal_minus_haline_numerator",
+            "raw_divide_by_e3w_result"
+          ],
+          "production_selection": "If literal association is the owner, select nemo_literal only under step_entry; preserve implicit_solve_state byte-for-byte.",
+          "reason_for_stop": "The correction requires new NEMO internal dump slots and a bracket-stream identity run; it is too large for this round.",
+          "required_controls": [
+            "planted_scalar_perturbation",
+            "one_i_horizontal_roll",
+            "nonfinite_poison",
+            "instrumented_bracket_stream_identity"
+          ],
+          "status": "DESIGNED_NOT_IMPLEMENTED"
+        },
         "operand_metrics": {
           "p_avm": {
             "aggregate_bar_pass": true,
@@ -1300,6 +1348,12 @@
               34
             ]
           }
+        },
+        "ownership_verdict": {
+          "owner": "rn2b",
+          "rn2b_row10_bad_columns": 0,
+          "statement": "The row-10 rn2b residual passes its own 1e-15 column bar but Richardson division amplifies it to the row-11 zri failures; substituting only NEMO rn2b closes zri exactly, while substituting p_avm or p_sh2 does not change the failing-column count.",
+          "zri_row11_bad_columns": 86
         },
         "pass": false,
         "reference_rms": 1716196.1887056807,
@@ -2113,6 +2167,27 @@
             "n_verified_columns": 9834,
             "n_wet_columns": 9920,
             "n_wet_elements": 332214,
+            "next_round_fix_design": {
+              "instrumentation": "Extend the existing write-only MY_SRC dump pattern for each listed intermediate, run the one-step CPU oracle, and prove the pre/post instrumentation bracket stream bit-identical.",
+              "lego_walk": "Capture the matching step-entry bundle operands and stop at the first failed slot.",
+              "nemo_line": "src/OCE/TRA/eosbn2.F90:1459-1468",
+              "nemo_source_order": [
+                "zrw",
+                "zaw",
+                "zbw",
+                "thermal_minus_haline_numerator",
+                "raw_divide_by_e3w_result"
+              ],
+              "production_selection": "If literal association is the owner, select nemo_literal only under step_entry; preserve implicit_solve_state byte-for-byte.",
+              "reason_for_stop": "The correction requires new NEMO internal dump slots and a bracket-stream identity run; it is too large for this round.",
+              "required_controls": [
+                "planted_scalar_perturbation",
+                "one_i_horizontal_roll",
+                "nonfinite_poison",
+                "instrumented_bracket_stream_identity"
+              ],
+              "status": "DESIGNED_NOT_IMPLEMENTED"
+            },
             "operand_metrics": {
               "p_avm": {
                 "aggregate_bar_pass": true,
@@ -2359,6 +2434,12 @@
                   34
                 ]
               }
+            },
+            "ownership_verdict": {
+              "owner": "rn2b",
+              "rn2b_row10_bad_columns": 0,
+              "statement": "The row-10 rn2b residual passes its own 1e-15 column bar but Richardson division amplifies it to the row-11 zri failures; substituting only NEMO rn2b closes zri exactly, while substituting p_avm or p_sh2 does not change the failing-column count.",
+              "zri_row11_bad_columns": 86
             },
             "pass": false,
             "reference_rms": 1716196.1887056807,
@@ -2802,6 +2883,27 @@
             "n_verified_columns": 9834,
             "n_wet_columns": 9920,
             "n_wet_elements": 332214,
+            "next_round_fix_design": {
+              "instrumentation": "Extend the existing write-only MY_SRC dump pattern for each listed intermediate, run the one-step CPU oracle, and prove the pre/post instrumentation bracket stream bit-identical.",
+              "lego_walk": "Capture the matching step-entry bundle operands and stop at the first failed slot.",
+              "nemo_line": "src/OCE/TRA/eosbn2.F90:1459-1468",
+              "nemo_source_order": [
+                "zrw",
+                "zaw",
+                "zbw",
+                "thermal_minus_haline_numerator",
+                "raw_divide_by_e3w_result"
+              ],
+              "production_selection": "If literal association is the owner, select nemo_literal only under step_entry; preserve implicit_solve_state byte-for-byte.",
+              "reason_for_stop": "The correction requires new NEMO internal dump slots and a bracket-stream identity run; it is too large for this round.",
+              "required_controls": [
+                "planted_scalar_perturbation",
+                "one_i_horizontal_roll",
+                "nonfinite_poison",
+                "instrumented_bracket_stream_identity"
+              ],
+              "status": "DESIGNED_NOT_IMPLEMENTED"
+            },
             "operand_metrics": {
               "p_avm": {
                 "aggregate_bar_pass": true,
@@ -3048,6 +3150,12 @@
                   34
                 ]
               }
+            },
+            "ownership_verdict": {
+              "owner": "rn2b",
+              "rn2b_row10_bad_columns": 0,
+              "statement": "The row-10 rn2b residual passes its own 1e-15 column bar but Richardson division amplifies it to the row-11 zri failures; substituting only NEMO rn2b closes zri exactly, while substituting p_avm or p_sh2 does not change the failing-column count.",
+              "zri_row11_bad_columns": 86
             },
             "pass": false,
             "reference_rms": 1716196.1887056807,
@@ -4115,6 +4223,7 @@
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/tke_dump_rn2.bin": "df573f8c07abab1cc0a2fc7fd2093dd8276dccf0319d3375220340d91b5a6004",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/tke_dump_rn2b.bin": "fcd7ddee9e94b6158085f2ff5d174b2cb01e1b22a8524faa1b5be31a2b798961",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/tke_dump_sh2.bin": "2c18e0926b2b81c07ba3c5c371067d051ffea2d2fad0cc75c444af1654746f53",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/tke_dump_zri.bin": "e082d90b29a65ddda9a505f036599ff9868f0550780ca5d7b41e82e0b9f57e95",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/WORK/zdfphy.F90": "76eeec2a280d56c55bec9e59b579e5290623c408c03962d04652e406334b45fd",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/WORK/zdfsh2.F90": "c31f062e282b8710a0b565be7aecbc35b8e741b05a96a393402fcd5a737f28f8",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src/OCE/TRA/eosbn2.F90": "689f8fdf5482e2bc6c7ecc59544ff7384fda6e4551e32be898e715501e55977d",
@@ -4122,10 +4231,11 @@
     "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/PREREG_zdf_chain_sweep.md": "0c3ebc401280390250f1b71e86f026ac70db9565d085874aee5cc27e1cf963aa",
     "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/PREREG_zdf_chain_sweep_round3.md": "71c8b22ddd0a1a6e4616b45f3e563212a5b6baeac391d9df54880d14898d421c",
     "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/PREREG_zdf_chain_sweep_round4.md": "37e60cba17bbd8df00f651661f48d5b582e7a8c2573183e118f9567e62e76bf1",
+    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/PREREG_zdf_chain_sweep_round6.md": "78fda75f81234ece948cc66bd2f6c3575add149a9ea3cfa671ef1c5bb888f3d3",
     "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/dump_lane.py": "41252d898b0d09b350c086aa678ddb890c7e6232fa2b46e88093a3b108a9bf62",
     "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/eos_rab_bn2_per_element.py": "3a82b0ef216fccf1b9112bfbac0005096eee491f15693d80f82320d3d80febda",
     "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py": "25c827ff6d6eef4679c89283268eb8bc5a608d12dca1303dcba8e0464ff87055",
-    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/zdf_chain_sweep.py": "66de1c07d6c3dbbc44634f962d257b135ba88e587520897a6132d003c23d49c7",
+    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/zdf_chain_sweep.py": "978e669af505277cdce5906d172795153d9a05b3823abbff0c3dfc314a4dc3df",
     "/tmp/dino_mld_audit_codex/mld_maps.npz": "9fb7344d1e6f92232d211f6a52ff8636022f0d9b0b05acea2b0bae6e6afd9bf0",
     "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py": "ac7c5b349938967bb64bbc71dadb31feb7b8e1420da1440dcedcb7dd5d64b35d",
     "packages/ocean/legoesm/ocean/eos.py": "d8d3054b49bcc6c5a828dd0c53b1e0047ec8e6a13145790e9552c7f6f942139d",
@@ -4151,8 +4261,10 @@
     "sbc_dump_utau.bin": "now",
     "tke_dump_avm_in.bin": "before",
     "tke_dump_en.bin": "now",
+    "tke_dump_pdlr.bin": "before",
     "tke_dump_rn2.bin": "now",
     "tke_dump_rn2b.bin": "before",
-    "tke_dump_sh2.bin": "before"
+    "tke_dump_sh2.bin": "before",
+    "tke_dump_zri.bin": "before"
   }
 }
