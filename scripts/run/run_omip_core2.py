@@ -581,12 +581,24 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         # wave field IS the interior background (matches the model-level
         # A_v/K_v override in the build_tripole iwm block).
         avmb, avtb = _const.nu_ocean_molecular, 1.0e-10
+        # zdftke.F90:840-843 — ln_zdfiwm ALSO forces the TKE and mixing-length
+        # FLOORS, overriding &namzdf_tke: rn_emin 1e-6 -> 1e-10 and rmxl_min ->
+        # 1e-3 (associated avt minimum = molecular salt diffusivity 1e-9). ORCA1
+        # runs ln_zdfiwm=T, so these are the run's real floors. Without them our
+        # equatorial en pins at rn_emin=1e-6, ~100x NEMO's ~1e-8, over-mixing the
+        # 65-105 m entrainment zone (avm 15x) and damping the EUC -> warm cold
+        # tongue. Localised by the frozen-column TKE twin + state-swap
+        # decomposition (2026-08-27); NEMO's avm_k uses en floored at rn_emin
+        # (order zdftke.F90:182-184,469).
+        rn_emin, rmxl_min = 1.0e-10, 1.0e-3
     else:
         avmb, avtb = 1.2e-4, 1.2e-5     # &namzdf rn_avm0 / rn_avt0
+        rn_emin, rmxl_min = 1.0e-6, 1.0e-8   # rn_emin (standard); model mxl_min default
     _cfg = TKEConfig(
         c_k=rn_ediff,
         c_eps=rn_ediss,
-        tke_background=1.0e-6,          # rn_emin
+        tke_background=rn_emin,         # rn_emin (1e-10 under ln_zdfiwm, else 1e-6)
+        mxl_min=rmxl_min,               # rmxl_min (1e-3 under ln_zdfiwm, else model default)
         tke_surface_min=1.0e-4,         # rn_emin0
         # nn_mxl: choice=3 IS the NEMO nn_mxl construction (lup/ldown |dl/dz|<=e3t
         # sweeps) WITH the ln_mxl0 wind-stress surface anchor that NEMO ORCA1 runs
@@ -777,7 +789,8 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         # SCOPE OF "exact", stated narrowly on purpose (codex 9400815 #2):
         # `veros_sqrte` is c_k*l_k*sqrt(max(0,e)) and is EXACT against NEMO on
         # wet rows of this card's normal trajectory, because positivity="floor"
-        # ends every solve at e >= tke_background = 1e-6 = rn_emin, so
+        # ends every solve at e >= tke_background = rn_emin (1e-6, or 1e-10 under
+        # --iwm per zdftke.F90:840), so
         # sqrt(max(0,e)) == sqrt(e) there.  It is NOT globally identical: NEMO
         # zeroes dry rows via *wmask while this card leaves tke_dry_wmask=False
         # and keeps the background there, and the e<=0 branch differs (ours
