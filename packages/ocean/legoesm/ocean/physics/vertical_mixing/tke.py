@@ -902,6 +902,7 @@ def _solve_tke_backward_euler(
     dt: float,
     cfg: TKEConfig,
     external_source: jnp.ndarray | None = None,
+    literal_external_rhs: jnp.ndarray | None = None,
     dz_cell: jnp.ndarray | None = None,
     dz_surface: jnp.ndarray | None = None,
     surface_dirichlet: jnp.ndarray | None = None,
@@ -939,6 +940,10 @@ def _solve_tke_backward_euler(
         ``forc = ... + eke_diss_iw + K_diss_bot``). Enters the RHS explicitly
         (already-dissipated mechanical energy, ≥ 0). ``None`` ⇒ no source ⇒
         BIT-IDENTICAL to the prior form.
+    literal_external_rhs : (..., nlev-1) or None
+        Pre-updated ``en`` after NEMO's literal Langmuir statement. This is
+        accepted only with the literal matrix and a matching diagnostic
+        ``external_source``; it preserves line 463's multiply/divide order.
     dz_cell : (..., nlev) or None — ACTUAL cell thicknesses ``dzt·J``. When
         given (with ``dz_surface``; ``TKEConfig.veros_dz_slots=True``) the
         tridiagonal assembly uses the Veros metric slots
@@ -1076,6 +1081,16 @@ def _solve_tke_backward_euler(
     surface_flux = surface_flux.astype(e_old.dtype)
     if external_source is not None:
         external_source = external_source.astype(e_old.dtype)
+    if literal_external_rhs is not None:
+        if not literal_matrix or external_source is None:
+            raise ValueError(
+                "literal_external_rhs requires the literal TKE matrix and "
+                "a diagnostic external_source")
+        if literal_external_rhs.shape != e_old.shape:
+            raise ValueError(
+                "literal_external_rhs must match e_old shape; got "
+                f"{literal_external_rhs.shape} vs {e_old.shape}.")
+        literal_external_rhs = literal_external_rhs.astype(e_old.dtype)
     positivity = getattr(cfg, "positivity", "floor")
     if positivity not in ("floor", "veros_surface_correction"):
         raise ValueError(
@@ -1309,7 +1324,9 @@ def _solve_tke_backward_euler(
         # is numerically visible at the first Thomas RHS recurrence even when
         # each isolated term is bit-identical.
         rhs_base = e_old
-        if external_source is not None:
+        if literal_external_rhs is not None:
+            rhs_base = literal_external_rhs
+        elif external_source is not None:
             rhs_base = rhs_base + dt * external_source
         rhs = rhs_base + dt * (
             P_s + buoy_source + 0.5 * diss_rate * rhs_base
@@ -1819,6 +1836,80 @@ def compute_K_from_tke(
 # ---------------------------------------------------------------------------
 
 
+def _nemo_literal_langmuir_operands(
+    taum: jnp.ndarray,
+    N2: jnp.ndarray,
+    depth_w: jnp.ndarray,
+    dz_w: jnp.ndarray,
+    cfg: TKEConfig,
+    ice_frac: jnp.ndarray | None,
+    bottom_level: jnp.ndarray | None,
+    w_active: jnp.ndarray | None,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Return literal ``zus3, zwlc, zhlc, apply`` operands for line 463."""
+    if bottom_level is None or w_active is None:
+        raise ValueError(
+            "tke_langmuir_evaluation='nemo_literal' requires bottom_level "
+            "and w_active for the per-column mbkt+1 fallback and wmask.")
+    if w_active.shape != N2.shape:
+        raise ValueError(
+            "literal Langmuir w_active must match N2 shape; got "
+            f"{w_active.shape} vs {N2.shape}.")
+    if bottom_level.shape != N2.shape[:-1]:
+        raise ValueError(
+            "literal Langmuir bottom_level must match the horizontal N2 "
+            f"shape; got {bottom_level.shape} vs {N2.shape[:-1]}.")
+
+    # Literal active DINO arm, zdftke.F90:422-463. Depth is positive down;
+    # the vertical loops are deliberately scans so floating-point association
+    # follows the oracle source order.
+    half_wlc2 = _NEMO_TKE_LC_CSD * taum
+    depth_b = jnp.broadcast_to(depth_w, N2.shape)
+    dz_b = jnp.broadcast_to(dz_w, N2.shape)
+    pe_term = jnp.maximum(N2, 0.0) * depth_b * dz_b
+
+    def accumulate_pe(carry, term):
+        updated = carry + term
+        return updated, updated
+
+    _, pe_vertical = jax.lax.scan(
+        accumulate_pe,
+        jnp.zeros_like(pe_term[..., 0]),
+        jnp.moveaxis(pe_term, -1, 0),
+    )
+    pe = jnp.moveaxis(pe_vertical, 0, -1)
+
+    # NEMO initializes imlc=mbkt+1 independently in every column, then walks
+    # jk=jpkm1..2. Since this array starts at Fortran jk=2, bottom_level is
+    # already the matching Python fallback index and the last array row
+    # (Fortran jpk) is excluded from the reverse threshold scan.
+    fallback = jnp.clip(
+        jnp.asarray(bottom_level, dtype=jnp.int32), 0, N2.shape[-1] - 1)
+    reverse_pe = jnp.moveaxis(pe[..., :-1][..., ::-1], -1, 0)
+    reverse_k = jnp.arange(N2.shape[-1] - 2, -1, -1, dtype=jnp.int32)
+
+    def select_imlc(imlc, operands):
+        pe_at_k, k = operands
+        return jnp.where(pe_at_k > half_wlc2, k, imlc), None
+
+    imlc, _ = jax.lax.scan(select_imlc, fallback, (reverse_pe, reverse_k))
+    h_lc = jnp.take_along_axis(
+        depth_b, imlc[..., None], axis=-1)[..., 0]
+    h_lc = jnp.maximum(h_lc, _EPS)
+
+    zus = jnp.sqrt(2.0 * half_wlc2)
+    ice_scale = (jnp.ones_like(zus) if ice_frac is None
+                 else jnp.maximum(0.0, 1.0 - ice_frac))
+    surface_wet = jnp.asarray(w_active[..., 0], dtype=N2.dtype)
+    zus3 = ice_scale * zus * zus * zus * surface_wet
+    zwlc = cfg.lc_coeff * jnp.sin(
+        jnp.pi * depth_b / h_lc[..., None])
+    apply = ((zus3[..., None] != 0.0)
+             & ((depth_b - h_lc[..., None]) < 0.0)
+             & jnp.asarray(w_active, dtype=bool))
+    return zus3, zwlc, h_lc, apply
+
+
 def nemo_langmuir_tke_source(
     taum: jnp.ndarray,
     N2: jnp.ndarray,
@@ -1894,69 +1985,32 @@ def nemo_langmuir_tke_source(
         src = us3[..., None] * (w_lc ** 3) / h_lc[..., None]
         return jnp.where(depth_b < h_lc[..., None], src, 0.0)
 
-    if bottom_level is None or w_active is None:
-        raise ValueError(
-            "tke_langmuir_evaluation='nemo_literal' requires bottom_level "
-            "and w_active for the per-column mbkt+1 fallback and wmask.")
-    if w_active.shape != N2.shape:
-        raise ValueError(
-            "literal Langmuir w_active must match N2 shape; got "
-            f"{w_active.shape} vs {N2.shape}.")
-    if bottom_level.shape != N2.shape[:-1]:
-        raise ValueError(
-            "literal Langmuir bottom_level must match the horizontal N2 "
-            f"shape; got {bottom_level.shape} vs {N2.shape[:-1]}.")
-
-    # Literal active DINO arm, zdftke.F90:422-463. Depth is positive down;
-    # every returned term is a positive TKE source. NEMO's vertical loops are
-    # deliberately scans so floating-point association follows source order.
-    half_wlc2 = _NEMO_TKE_LC_CSD * taum
-    depth_b = jnp.broadcast_to(depth_w, N2.shape)
-    dz_b = jnp.broadcast_to(dz_w, N2.shape)
-    pe_term = jnp.maximum(N2, 0.0) * depth_b * dz_b
-
-    def accumulate_pe(carry, term):
-        updated = carry + term
-        return updated, updated
-
-    _, pe_vertical = jax.lax.scan(
-        accumulate_pe,
-        jnp.zeros_like(pe_term[..., 0]),
-        jnp.moveaxis(pe_term, -1, 0),
-    )
-    pe = jnp.moveaxis(pe_vertical, 0, -1)
-
-    # NEMO initializes imlc=mbkt+1 independently in every column, then walks
-    # jk=jpkm1..2. Since this array starts at Fortran jk=2, bottom_level is
-    # already the matching Python fallback index and the last array row
-    # (Fortran jpk) is excluded from the reverse threshold scan.
-    fallback = jnp.clip(
-        jnp.asarray(bottom_level, dtype=jnp.int32), 0, N2.shape[-1] - 1)
-    reverse_pe = jnp.moveaxis(pe[..., :-1][..., ::-1], -1, 0)
-    reverse_k = jnp.arange(N2.shape[-1] - 2, -1, -1, dtype=jnp.int32)
-
-    def select_imlc(imlc, operands):
-        pe_at_k, k = operands
-        return jnp.where(pe_at_k > half_wlc2, k, imlc), None
-
-    imlc, _ = jax.lax.scan(select_imlc, fallback, (reverse_pe, reverse_k))
-    h_lc = jnp.take_along_axis(
-        depth_b, imlc[..., None], axis=-1)[..., 0]
-    h_lc = jnp.maximum(h_lc, _EPS)
-
-    zus = jnp.sqrt(2.0 * half_wlc2)
-    ice_scale = (jnp.ones_like(zus) if ice_frac is None
-                 else jnp.maximum(0.0, 1.0 - ice_frac))
-    surface_wet = jnp.asarray(w_active[..., 0], dtype=N2.dtype)
-    zus3 = ice_scale * zus * zus * zus * surface_wet
-    zwlc = cfg.lc_coeff * jnp.sin(
-        jnp.pi * depth_b / h_lc[..., None])
+    zus3, zwlc, h_lc, apply = _nemo_literal_langmuir_operands(
+        taum, N2, depth_w, dz_w, cfg, ice_frac, bottom_level, w_active)
     src = (zus3[..., None] * (zwlc * zwlc * zwlc)
            / h_lc[..., None])
-    apply = ((zus3[..., None] != 0.0)
-             & ((depth_b - h_lc[..., None]) < 0.0)
-             & jnp.asarray(w_active, dtype=bool))
     return jnp.where(apply, src, 0.0)
+
+
+def nemo_literal_langmuir_tke_update(
+    e_old: jnp.ndarray,
+    dt: float,
+    taum: jnp.ndarray,
+    N2: jnp.ndarray,
+    depth_w: jnp.ndarray,
+    dz_w: jnp.ndarray,
+    cfg: TKEConfig,
+    ice_frac: jnp.ndarray | None = None,
+    bottom_level: jnp.ndarray | None = None,
+    w_active: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Apply active ``zdftke.F90:463`` in its literal association order."""
+    zus3, zwlc, h_lc, apply = _nemo_literal_langmuir_operands(
+        taum, N2, depth_w, dz_w, cfg, ice_frac, bottom_level, w_active)
+    # NEMO: en = en + rn_Dt * zus3 * (zwlc*zwlc*zwlc) / zhlc.
+    increment = (((jnp.asarray(dt, dtype=e_old.dtype) * zus3[..., None])
+                  * (zwlc * zwlc * zwlc)) / h_lc[..., None])
+    return jnp.where(apply, e_old + increment, e_old)
 
 
 def nemo_etau_injection(
@@ -2617,6 +2671,11 @@ def tke_vertical_mixing(
                     "tke_langmuir_evaluation='nemo_literal' cannot merge "
                     "Langmuir with a generic external TKE source; keep the "
                     "source channels separate before selecting this path.")
+            if _matrix_eval != "nemo_literal" or int(n_iterations) != 1:
+                raise ValueError(
+                    "tke_langmuir_evaluation='nemo_literal' requires the "
+                    "literal TKE matrix and one prognostic iteration so the "
+                    "line-463 en update is consumed exactly once.")
         _lc_src = nemo_langmuir_tke_source(
             taum, N2b, _depth_w, _surface_e3w, cfg,
             ice_frac=ice_frac, bottom_level=bottom_level,
@@ -2661,6 +2720,12 @@ def tke_vertical_mixing(
         _K_H_pre = preclosure_K_H if _carried_coeffs else K_H_curr
         P_s_curr = (_K_M_pre * shear_sq if _p_sh2_face_fn is None
                     else _p_sh2_face_fn(_K_M_pre))
+        _literal_external_rhs = None
+        if _lc_on and _lc_eval == "nemo_literal":
+            _literal_external_rhs = nemo_literal_langmuir_tke_update(
+                tke_curr, dt, taum, N2b, _depth_w, _surface_e3w, cfg,
+                ice_frac=ice_frac, bottom_level=bottom_level,
+                w_active=w_active)
         tke_curr = _solve_tke_backward_euler(
             e_old=tke_curr,
             K_M_old=_K_M_pre, K_H_old=_K_H_pre,
@@ -2670,6 +2735,7 @@ def tke_vertical_mixing(
             surface_flux=surface_flux,
             dt=dt, cfg=cfg,
             external_source=external_source,
+            literal_external_rhs=_literal_external_rhs,
             dz_cell=dz_cell,
             dz_surface=(dz_surface if (veros_slots
                                         or _surf_bc_level == "nemo_z0")

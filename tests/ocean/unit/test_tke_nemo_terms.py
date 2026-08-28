@@ -27,6 +27,7 @@ from legoesm.ocean.physics.vertical_mixing.tke import (
     TKEEntryN2Bundle,
     nemo_etau_injection,
     nemo_langmuir_tke_source,
+    nemo_literal_langmuir_tke_update,
     tke_vertical_mixing,
 )
 
@@ -130,6 +131,35 @@ class TestLangmuirSource:
         np.testing.assert_allclose(compiled[0], eager[0], rtol=2e-15, atol=0.0)
         np.testing.assert_allclose(compiled[1], eager[1], rtol=2e-15, atol=0.0)
         assert np.isfinite(np.asarray(compiled[1])).all()
+
+    def test_literal_line463_update_order_is_red_against_rate_first(self):
+        depth_w, dz_w = _col()
+        N2 = jnp.zeros((2, 5))
+        taum = jnp.asarray([0.1, 0.2])
+        bottom = jnp.asarray([2, 4], dtype=jnp.int32)
+        wet = jnp.asarray([[True, True, False, False, False],
+                           [True, True, True, True, False]])
+        e_old = jnp.asarray([[1e-4, 2e-4, 3e-4, 4e-4, 5e-4],
+                             [5e-4, 4e-4, 3e-4, 2e-4, 1e-4]])
+        cfg = TKEConfig(lc=True, tke_langmuir_evaluation="nemo_literal")
+        actual = nemo_literal_langmuir_tke_update(
+            e_old, 2700.0, taum, N2, depth_w, dz_w, cfg,
+            bottom_level=bottom, w_active=wet)
+
+        source = nemo_langmuir_tke_source(
+            taum, N2, depth_w, dz_w, cfg,
+            bottom_level=bottom, w_active=wet)
+        rate_first = e_old + 2700.0 * source
+        # This exact element is the red control for moving /h before dt.
+        assert np.asarray(actual)[0, 0] != np.asarray(rate_first)[0, 0]
+
+        half = float(_NEMO_TKE_LC_CSD) * 0.1
+        zus = np.sqrt(2.0 * half)
+        zwlc = cfg.lc_coeff * np.sin(np.pi * 10.0 / 30.0)
+        want = (float(e_old[0, 0])
+                + ((2700.0 * zus * zus * zus)
+                   * (zwlc * zwlc * zwlc)) / 30.0)
+        np.testing.assert_array_equal(np.asarray(actual)[0, 0], want)
 
     def test_literal_requires_column_bottom_and_wmask(self):
         depth_w, dz_w = _col()

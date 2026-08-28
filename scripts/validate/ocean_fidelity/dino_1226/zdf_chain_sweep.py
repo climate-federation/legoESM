@@ -1147,13 +1147,24 @@ def main() -> int:
                             "only the captured Langmuir source")
                     dt10 = np.float64(solve_kwargs["dt"])
                     en_entry = np.asarray(solve_kwargs["e_old"])[..., :nlc]
-                    postlc_l = en_entry + dt10 * solver_source
+                    literal_rhs = solve_kwargs.get("literal_external_rhs")
+                    if literal_rhs is None:
+                        raise AssertionError(
+                            "row 10 literal source reached the solver without "
+                            "the source-ordered line-463 en update")
+                    postlc_l = np.asarray(literal_rhs)[..., :nlc]
+                    rate_first_postlc = en_entry + dt10 * solver_source
                     postlc_n_full = base._load_interior(
                         str(args.row17_postlc_dump), ni, nj)
                     postlc_n = postlc_n_full[..., 1:1 + nlc]
                     row10_output = metrics(
                         postlc_l, postlc_n, wet_lc, focus, POINTWISE_BAR)
                     row10_inputs["langmuir_source_composite"] = row10m
+                    row10_inputs["legacy_rate_first_line463_update"] = metrics(
+                        rate_first_postlc, postlc_n, wet_lc, focus,
+                        POINTWISE_BAR)
+                    row10_inputs["literal_line463_update"] = metrics(
+                        postlc_l, postlc_n, wet_lc, focus, POINTWISE_BAR)
                     row10_inputs["solver_source_equals_captured_langmuir"] = (
                         metrics(solver_source, lc_source, wet_lc, focus,
                                 POINTWISE_BAR))
@@ -2790,6 +2801,7 @@ def main() -> int:
         HERE / "PREREG_zdf_chain_sweep_round8.md",
         HERE / "PREREG_zdf_chain_sweep_round9.md",
         HERE / "PREREG_zdf_chain_sweep_round10.md",
+        HERE / "PREREG_zdf_chain_sweep_round10_update.md",
         HERE / "kamm_twin_90d.py",
         Path("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py"),
         Path("packages/ocean/legoesm/ocean/eos.py"),
