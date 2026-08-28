@@ -18,7 +18,8 @@ from legoesm.atmosphere.physics.turbulence.les_tuned import (
     scm_turbulence_config,
 )
 
-# Schemes present in the committed YAML (CLUBB is intentionally absent).
+# The 8 FLAT closures (params land directly on the sub-config). CLUBB is tuned
+# too but nested (CLUBBParams) — covered by dedicated tests below, not here.
 _TUNED_SCHEMES = ["smagorinsky", "louis", "tke", "mynn25", "clubb_lite",
                   "holtslag_boville", "ysu", "edmf"]
 
@@ -27,9 +28,10 @@ def test_yaml_exists_and_parses():
     # packaged resource resolves (raises if missing); loader validates fully
     _read_tuned_yaml_text(None)
     grouped = load_les_tuned_overrides()
-    # 8 scheme config classes, CLUBB absent
-    assert len(grouped) == 8
-    assert "CLUBBConfig" not in grouped
+    # 8 flat scheme classes + CLUBB's nested CLUBBParams = 9 override groups
+    assert len(grouped) == 9
+    assert "CLUBBParams" in grouped        # CLUBB now tuned (nested)
+    assert len(grouped["CLUBBParams"]) >= 30
 
 
 @pytest.mark.parametrize("scheme", _TUNED_SCHEMES)
@@ -60,18 +62,29 @@ def test_inactive_schemes_untouched():
     assert tuned.smagorinsky == base.smagorinsky
 
 
-def test_clubb_returned_unchanged():
-    """CLUBB has no tuned entry yet -> no error, config unchanged."""
-    turb = TurbulenceConfig(scheme="clubb")
-    assert apply_les_tuned_turbulence(turb) == turb
+def test_clubb_applies_nested_tuned_prognostic():
+    """CLUBB is tuned: its coefficients live in the nested CLUBBParams, and
+    the tuned config must be prognostic (that is how they were fit)."""
+    tuned = scm_turbulence_config("clubb")
+    plain = scm_turbulence_config("clubb", les_tuned=False)
+    assert plain.clubb is None                 # library default: opt-in / off
+    assert tuned.clubb is not None and tuned.clubb.prognostic is True
+    dflt = type(tuned.clubb.params)()
+    moved = [f for f in tuned.clubb.params._fields
+             if getattr(tuned.clubb.params, f) != getattr(dflt, f)]
+    assert len(moved) >= 30, moved
 
 
 def test_every_value_in_spec_bounds():
     """Each tuned value must sit inside its __param_spec__ (lo, hi)."""
     from legoesm.atmosphere.physics.turbulence import config as turb_config
+    from legoesm.atmosphere.physics.turbulence import clubb as clubb_mod
+    # CLUBBParams is spec'd in clubb.py, the flat classes in config.py -- the
+    # loader merges both, so the bounds check must too.
+    merged = {**turb_config.__param_spec__, **clubb_mod.__param_spec__}
     grouped = load_les_tuned_overrides()
     for cls_name, fields in grouped.items():
-        spec = turb_config.__param_spec__[cls_name]["params"]
+        spec = merged[cls_name]["params"]
         for field, value in fields.items():
             lo, hi = spec[field]["bounds"]
             assert lo <= value <= hi, (
@@ -138,7 +151,37 @@ def test_write_active_scheme_params_is_single_scheme_slice(tmp_path):
 
 
 def test_write_active_scheme_params_raises_for_untuned_scheme(tmp_path):
+    """A scheme absent from the (custom) YAML must raise, not emit nothing."""
     from legoesm.atmosphere.physics.turbulence.les_tuned import (
         write_active_scheme_params)
+    only_ysu = tmp_path / "only_ysu.yaml"
+    only_ysu.write_text("atm.turb.YSUConfig.Pr_t: 0.6\n")
     with pytest.raises(ValueError, match="no tuned entry"):
-        write_active_scheme_params("clubb", str(tmp_path / "x.yaml"))
+        write_active_scheme_params("louis", str(tmp_path / "x.yaml"),
+                                   path=str(only_ysu))
+
+
+def test_clubb_amip_slice_refused(tmp_path):
+    """CLUBB opt-in via a --params slice alone is UNSAFE (cannot set prognostic)
+    and must raise, not emit a slice that runs diagnostic physics."""
+    from legoesm.atmosphere.physics.turbulence.les_tuned import (
+        write_active_scheme_params)
+    with pytest.raises(ValueError, match="CLUBB cannot be opted into"):
+        write_active_scheme_params("clubb", str(tmp_path / "clubb.yaml"))
+
+
+def test_clubb_diagnostic_config_refused():
+    """Prognostic-fit CLUBB coefficients must not be applied to a diagnostic config."""
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+    turb = TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(prognostic=False))
+    with pytest.raises(ValueError, match="prognostic"):
+        apply_les_tuned_turbulence(turb)
+
+
+def test_clubb_missing_clubbparams_raises(tmp_path):
+    """CLUBB selected but the YAML has no CLUBBParams -> raise, not silent default."""
+    only_ysu = tmp_path / "only_ysu.yaml"
+    only_ysu.write_text("atm.turb.YSUConfig.Pr_t: 0.6\n")
+    turb = TurbulenceConfig(scheme="clubb")
+    with pytest.raises(ValueError, match="no CLUBBParams entry"):
+        apply_les_tuned_turbulence(turb, path=str(only_ysu))

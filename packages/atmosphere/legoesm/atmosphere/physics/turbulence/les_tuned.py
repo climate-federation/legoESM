@@ -85,8 +85,18 @@ def load_les_tuned_overrides(
     """
     import yaml
 
+    from . import clubb as _clubb          # CLUBB's coefficients (CLUBBParams)
+    # live in a SEPARATE spec + a NESTED sub-config (CLUBBConfig.params), not in
+    # the flat turbulence config spec. Merge the two so CLUBBParams / CLUBBConfig
+    # keys validate; the algebraic schemes are unaffected.
     text, src = _read_tuned_yaml_text(path)
-    spec = _turb_config.__param_spec__
+    _dup = set(_turb_config.__param_spec__) & set(_clubb.__param_spec__)
+    if _dup:
+        raise ValueError(
+            f"turbulence config and clubb __param_spec__ share class name(s) "
+            f"{sorted(_dup)}; the merge would silently shadow one. Disambiguate "
+            "before trusting bounds validation.")
+    spec = {**_turb_config.__param_spec__, **_clubb.__param_spec__}
     raw = yaml.safe_load(text) or {}
     grouped: dict[str, dict[str, float]] = {}
     for qual, value in raw.items():
@@ -146,41 +156,102 @@ def apply_les_tuned_turbulence(
     overrides = load_les_tuned_overrides(path)
     field = _subconfig_field_for_scheme(turb, turb.scheme)
     sub = getattr(turb, field)
+
+    # CLUBB is the ONE scheme whose tuned coefficients are NESTED
+    # (``CLUBBConfig.params`` : ``CLUBBParams``, keyed ``CLUBBParams`` in the
+    # YAML) rather than flat on the sub-config. Handled explicitly -- an
+    # allowlist, not a duck-typed ``.params`` probe, so a future sub-config that
+    # happens to grow a ``.params`` field cannot be spliced by accident.
+    if turb.scheme == "clubb":
+        return _apply_clubb(turb, field, sub, overrides)
+
     cls_name = type(sub).__name__
     scheme_overrides = overrides.get(cls_name)
     if not scheme_overrides:
-        # No tuned entry for the ACTIVE scheme (e.g. CLUBB, campaign unfinished).
-        # Returning library defaults is correct, but "les_tuned" then silently
-        # runs untuned physics -- warn so the label can't mislead (P1 #3).
+        # No tuned entry for the ACTIVE scheme. Returning library defaults is
+        # correct, but "les_tuned" then silently runs untuned physics -- warn so
+        # the label can't mislead (P1 #3).
         _log.warning(
             "les_tuned: scheme %r (%s) has no tuned entry in the LES YAML; "
             "running LIBRARY DEFAULTS untuned. Tuned schemes: %s.",
             turb.scheme, cls_name, sorted(overrides))
         return turb
-    tuned_sub = apply_param_overrides(sub, scheme_overrides)
-    return turb._replace(**{field: tuned_sub})
+    return turb._replace(**{field: apply_param_overrides(sub, scheme_overrides)})
+
+
+def _apply_clubb(turb, field, sub, overrides):
+    """Splice CLUBB's nested tuned coefficients (``CLUBBParams``).
+
+    CLUBB's coefficients were fit on the PROGNOSTIC path and live in
+    ``CLUBBConfig.params``. Correctness rules that avoid a silent physics
+    mismatch (GLM review):
+      * a ``CLUBBParams`` entry MUST be present -- CLUBB's tuning is the nested
+        group, so a missing one is not "library defaults" but a broken YAML, and
+        raises (never a prognostic-CLUBB-with-default-coefficients fall-through);
+      * ``sub is None`` (the opt-in default) becomes ``CLUBBConfig(prognostic=True)``;
+      * an explicit DIAGNOSTIC ``CLUBBConfig`` (``prognostic=False``) is REFUSED --
+        applying prognostic-fit coefficients to the diagnostic path is an
+        out-of-sample regime mismatch. Pass ``prognostic=True`` or ``les_tuned=False``.
+    """
+    from .clubb import CLUBBConfig
+
+    nested_over = overrides.get("CLUBBParams")
+    if not nested_over:
+        raise ValueError(
+            "les_tuned: CLUBB selected but the LES YAML has no CLUBBParams entry. "
+            f"Tuned groups: {sorted(overrides)}. Regenerate the YAML or pass "
+            "les_tuned=False.")
+    if sub is None:
+        sub = CLUBBConfig(prognostic=True)
+    elif not sub.prognostic:
+        raise ValueError(
+            "les_tuned: CLUBB tuned coefficients were fit on the PROGNOSTIC path, "
+            "but the supplied CLUBBConfig has prognostic=False. Pass "
+            "prognostic=True or les_tuned=False.")
+    # A CLUBBConfig-level group (rare/none today) also splices, for symmetry.
+    direct = overrides.get("CLUBBConfig")
+    if direct:
+        sub = apply_param_overrides(sub, direct)
+    sub = sub._replace(params=apply_param_overrides(sub.params, nested_over))
+    return turb._replace(**{field: sub})
 
 
 def write_active_scheme_params(scheme: str, out_path: str,
                                *, path: str | None = None) -> int:
     """Write the tuned params for ONE ``scheme`` as a ``run_amip --params`` slice.
 
-    The tracked YAML holds all eight closures; the generic ``--params`` router
-    aborts on any param whose scheme is not selected for the run, so an AMIP
-    opt-in must pass only the active scheme's slice.  This writes that slice
+    The tracked YAML holds all closures; the generic ``--params`` router aborts
+    on any param whose scheme is not selected for the run, so an AMIP opt-in must
+    pass only the active scheme's slice.  This writes that slice
     (``atm.turb.<ActiveClass>.<field>: value``) and returns the count.  Raises if
     ``scheme`` has no tuned entry (nothing to opt into).
+
+    CLUBB is REFUSED: its coefficients were fit on the prognostic path, but
+    ``--params`` sets only scalar param values and cannot flip
+    ``CLUBBConfig.prognostic`` (a structural config field). A ``--params`` slice
+    alone would therefore apply the fitted coefficients to a DIAGNOSTIC CLUBB --
+    silently the wrong physics (codex review). Opt CLUBB in via a two-step:
+    ``--config`` to select prognostic CLUBB, then ``--params`` for the
+    coefficients; this function will not emit a slice that is unsafe by itself.
     """
     import yaml
 
+    if scheme == "clubb":
+        raise ValueError(
+            "CLUBB cannot be opted into via a --params slice alone: its tuned "
+            "coefficients are prognostic-fit and --params cannot set "
+            "CLUBBConfig.prognostic. Enable prognostic CLUBB via --config, then "
+            "pass the coefficients. (The SCM path scm_turbulence_config handles "
+            "this automatically.)")
     probe = TurbulenceConfig(scheme=scheme)
     field = _subconfig_field_for_scheme(probe, scheme)
-    cls_name = type(getattr(probe, field)).__name__
-    overrides = load_les_tuned_overrides(path).get(cls_name)
+    cls_name = type(getattr(probe, field)).__name__   # flat schemes only here
+    all_over = load_les_tuned_overrides(path)
+    overrides = all_over.get(cls_name)
     if not overrides:
         raise ValueError(
             f"scheme {scheme!r} ({cls_name}) has no tuned entry in the LES YAML; "
-            f"tuned schemes: {sorted(load_les_tuned_overrides(path))}.")
+            f"tuned schemes: {sorted(all_over)}.")
     slice_doc = {f"{_QUAL_PREFIX}{cls_name}.{f}": v
                  for f, v in sorted(overrides.items())}
     dest = Path(out_path)
