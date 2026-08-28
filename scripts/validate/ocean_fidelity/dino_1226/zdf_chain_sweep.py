@@ -94,37 +94,41 @@ def focus_from_maps(path: Path) -> list[tuple[int, int]]:
 
 def metrics(lego: np.ndarray, nemo: np.ndarray, wet: np.ndarray,
             focus: list[tuple[int, int]], bar: float) -> dict:
-    wet = wet & np.isfinite(lego) & np.isfinite(nemo)
-    ne = nemo[wet]
-    lo = lego[wet]
+    registered = np.asarray(wet, dtype=bool)
+    nonfinite = registered & (~np.isfinite(lego) | ~np.isfinite(nemo))
+    finite_wet = registered & ~nonfinite
+    ne = nemo[finite_wet]
+    lo = lego[finite_wet]
     if ne.size == 0:
         raise AssertionError("empty wet comparison")
     scale = float(np.sqrt(np.mean(ne * ne)))
     if scale == 0.0:
-        column = np.where(np.any(wet, axis=-1),
-                          np.max(np.where(wet, np.abs(lego - nemo), 0.0), axis=-1),
+        column = np.where(np.any(registered, axis=-1),
+                          np.max(np.where(finite_wet, np.abs(lego - nemo), 0.0), axis=-1),
                           np.nan)
         threshold = 0.0
     else:
-        column = np.where(np.any(wet, axis=-1),
-                          np.max(np.where(wet, np.abs(lego - nemo), 0.0), axis=-1) / scale,
+        column = np.where(np.any(registered, axis=-1),
+                          np.max(np.where(finite_wet, np.abs(lego - nemo), 0.0), axis=-1) / scale,
                           np.nan)
         threshold = bar
     rms_ratio = float(np.sqrt(np.mean(lo * lo)) / scale) if scale else (
         1.0 if np.array_equal(lo, ne) else float("inf"))
     corr = float(np.corrcoef(lo, ne)[0, 1]) if np.std(lo) and np.std(ne) else None
-    wet_columns = np.isfinite(column)
-    bad = wet_columns & (column > threshold)
+    wet_columns = np.any(registered, axis=-1)
+    bad = wet_columns & ((column > threshold) | np.any(nonfinite, axis=-1))
     focus_rows = []
     for j, i in focus:
         focus_rows.append({"j": j, "i": i, "wet": bool(wet_columns[j, i]),
                            "column_error": (float(column[j, i])
                                             if wet_columns[j, i] else None),
-                           "pass": bool(wet_columns[j, i] and column[j, i] <= threshold)})
+                           "pass": bool(wet_columns[j, i] and not bad[j, i])})
     aggregate_pass = ((corr is None or corr >= CORR_BAR)
-                      and abs(rms_ratio - 1.0) <= RATIO_EPS)
+                      and abs(rms_ratio - 1.0) <= RATIO_EPS
+                      and not nonfinite.any())
     return {
-        "n_wet_elements": int(wet.sum()),
+        "n_wet_elements": int(registered.sum()),
+        "n_nonfinite_wet_elements": int(nonfinite.sum()),
         "n_wet_columns": int(wet_columns.sum()),
         "n_diverged_columns": int(bad.sum()),
         "n_verified_columns": int(wet_columns.sum() - bad.sum()),
@@ -164,13 +168,18 @@ def planted_controls(lego, nemo, wet, bar) -> dict:
     poison = metrics(planted, nemo, wet, [], bar)
     rolled = np.roll(lego, 1, axis=1)
     roll = metrics(rolled, nemo, wet, [], bar)
-    if poison["pass"] or roll["pass"]:
+    nonfinite = lego.copy()
+    nonfinite[tuple(idx)] = np.nan
+    nan_poison = metrics(nonfinite, nemo, wet, [], bar)
+    if poison["pass"] or roll["pass"] or nan_poison["pass"]:
         raise AssertionError("a planted violation failed to fire")
     return {
         "baseline_pass": True,
         "perturbed_ji_k": [int(x) for x in idx],
         "perturbation_fired": not poison["pass"],
         "one_i_roll_fired": not roll["pass"],
+        "nonfinite_fired": (not nan_poison["pass"]
+                            and nan_poison["n_nonfinite_wet_elements"] == 1),
     }
 
 
@@ -240,7 +249,25 @@ def main() -> int:
                                                   wet, focus, POINTWISE_BAR)})
         # NEMO evaluation order: zrw geometry, alpha/beta interpolation,
         # T/S numerator, then the live-e3w divisor.
+        restart_path = RUN / "DINO_00005760_restart.nc"
+        with xr.open_dataset(restart_path, decode_times=False) as ds:
+            tb_raw = np.moveaxis(np.asarray(ds["tb"].isel(time_counter=0)), 0, -1)
+            sb_raw = np.moveaxis(np.asarray(ds["sb"].isel(time_counter=0)), 0, -1)
+        t_identity = metrics(np.asarray(T), tb_raw, active, focus, POINTWISE_BAR)
+        s_identity = metrics(np.asarray(S), sb_raw, active, focus, POINTWISE_BAR)
         gd_dump = jnp.asarray(gdept_n[..., :nk + 1], dtype=T.dtype)
+        # mesh_mask carries gdepw_0/e3w_0 as independent NEMO operands.
+        with xr.open_dataset(RUN / "mesh_mask.nc", decode_times=False) as ds:
+            gdepw0_mesh = np.asarray(ds["gdepw_0"].isel(time_counter=0))
+            e3w0_mesh = np.asarray(ds["e3w_0"].isel(time_counter=0))
+        gdepw0_mesh = jnp.asarray(np.moveaxis(gdepw0_mesh, 0, -1), dtype=T.dtype)
+        e3w0_mesh = jnp.asarray(np.moveaxis(e3w0_mesh, 0, -1), dtype=T.dtype)
+        stretch = nemo_r3t_stretch(st["z_coord"], st["eta"], st["H_bathy"])
+        gdepw_mesh_live = gdepw0_mesh[..., 1:1 + nk] * stretch[..., None]
+        gdepw_identity = metrics(np.asarray(gw), np.asarray(gdepw_mesh_live),
+                                 wet, focus, POINTWISE_BAR)
+        add("mesh gdepw_0*(1+r3t) in zrw", assemble_bn2(
+            aa, bb, TT, SS, gd, gdepw_mesh_live, derived_e3w))
         add("NEMO gdept(Kmm) in zrw", assemble_bn2(aa, bb, TT, SS, gd_dump, gw,
                                                    derived_e3w))
         add("NEMO dumped alpha/beta", assemble_bn2(
@@ -251,16 +278,12 @@ def main() -> int:
         # and distinguishes that operation order from diff(gdept_0*stretch).
         gd_ref, _ = nemo_bn2_depth_ladders(st["z_coord"])
         e3w_ref = jnp.diff(jnp.asarray(gd_ref, dtype=T.dtype))[..., :nk]
-        stretch = nemo_r3t_stretch(st["z_coord"], st["eta"], st["H_bathy"])
         e3w_factorized = e3w_ref[None, None, :] * stretch[..., None]
         add("factorized e3w_0*(1+r3t) divisor", assemble_bn2(
             aa, bb, TT, SS, gd, gw, e3w_factorized))
         # Unlike NemoGrid today, mesh_mask.nc already carries NEMO's actual
         # 3-D e3w_0 operand.  Test the implementable design directly: preserve
         # that independent reference field and apply the live qco stretch.
-        with xr.open_dataset(RUN / "mesh_mask.nc", decode_times=False) as ds:
-            e3w0_mesh = np.asarray(ds["e3w_0"].isel(time_counter=0))
-        e3w0_mesh = jnp.asarray(np.moveaxis(e3w0_mesh, 0, -1), dtype=T.dtype)
         e3w_mesh_live = e3w0_mesh[..., 1:1 + nk] * stretch[..., None]
         add("mesh e3w_0*(1+r3t) divisor", assemble_bn2(
             aa, bb, TT, SS, gd, gw, e3w_mesh_live))
@@ -272,6 +295,9 @@ def main() -> int:
         localization = {
             "scored_interfaces": nk,
             "omitted_deepest_wet_elements": int(wet_w_all[..., nk:].sum()),
+            "input_identity": {"T_before_restart": t_identity,
+                               "S_before_restart": s_identity,
+                               "gdepw_mesh_live": gdepw_identity},
             "derived_e3w_vs_dump": metrics(np.asarray(derived_e3w),
                                             np.asarray(e3w_dump), wet, focus,
                                             POINTWISE_BAR),

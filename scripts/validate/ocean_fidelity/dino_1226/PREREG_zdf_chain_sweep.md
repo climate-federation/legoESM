@@ -89,7 +89,7 @@ can be cited.
 | 2 | `bn2(Nbb)`: interpolation weight, alpha, beta, T/S numerator, **live `e3w(Kmm)` divisor**, mask, then `rn2b` | `stpmlf.F90:206`; `src/OCE/TRA/eosbn2.F90:1458-1467` | P | `tke_dump_rn2b.bin`; existing bn2 loaders |
 | 3 | `eos_rab(Nnn)` and `bn2(Nnn)` producing `rn2`, with the same live divisor | `stpmlf.F90:205,207`; `eosbn2.F90:1458-1467` | P | `tke_dump_rn2.bin` |
 | 4 | shear production `sh2`: NOW×BEFORE velocity differences, live NOW×BEFORE `e3uw/e3vw`, wet-only coastal interpolation | `cfgs/DINO/WORK/zdfphy.F90:264-269`; `cfgs/DINO/WORK/zdfsh2.F90:68-99` | P | `tke_dump_sh2.bin` |
-| 5 | bottom-drag coefficient update used by TKE bottom boundary | `zdfphy.F90:277`; `cfgs/DINO/WORK/zdfdrg.F90` live bottom arm | P | restart operands; add slot if reached |
+| 5 | bottom-drag coefficient update used by TKE bottom boundary | `zdfphy.F90:277`; `cfgs/DINO/WORK/zdfdrg.F90:103-109` dispatch, nonlinear bottom operands `:171-190` | P | restart operands; add slot if reached |
 | 6 | native MLD `nmln`: positive-`rn2b` integral with live `e3w(Kmm)` and density threshold | `zdfphy.F90:280`; `cfgs/DINO/WORK/zdfmxl.F90:90-100` | A/E | restart + `tke_dump_rn2b.bin`; add `nmln` slot if reached |
 | 7 | native MLD depth `hmlp=gdepw(nmln,Kmm)` | `zdfmxl.F90:101-105` | P | add `hmlp` slot if reached |
 | 8 | TKE surface Dirichlet boundary `max(rn_emin0,rn_ebb/rho0*taum)` | `cfgs/DINO/MY_SRC/zdftke.F90:334-365` | P | restart operands; add slot if reached |
