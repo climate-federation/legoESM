@@ -1,0 +1,61 @@
+{
+  "schema": "dino-full-step-zdf-receipts-v1",
+  "source_artifact": {
+    "branch": "origin/fidelity/dino-zdf-sweep-codex",
+    "commit": "c4ee39a799459d0fc9e18559bd43074c2fa49216",
+    "path": "docs/ocean/fidelity/dino_zdf_chain_sweep_round6_artifact.json",
+    "sha256": "baa1d31d933d7055010c073df7f638ef708e81920350cb11e456105daf4e80e1"
+  },
+  "producer_sha": "4e79e71109c59fa3b90b241de0fa7ea63600ef20",
+  "probe_path": "scripts/validate/ocean_fidelity/dino_1226/zdf_chain_sweep.py",
+  "precision": "fp64",
+  "backend": "cpu",
+  "receipts": {
+    "eos_rab_before": {
+      "source_row": "1_eos_rab_before",
+      "measured_number": "max_column_error(alpha)=3.0874669417540936e-16; max_column_error(beta)=0.0",
+      "bar": "max_column_error <= 1e-15 for every wet column",
+      "pass": true
+    },
+    "bn2_now": {
+      "source_row": "3_eos_rab_bn2_now",
+      "measured_number": "max_column_error=5.968545325803916e-16",
+      "bar": "max_column_error <= 1e-15 for every wet column",
+      "pass": true
+    },
+    "bn2_before": {
+      "source_row": "2_bn2_before",
+      "measured_number": "max_column_error=5.968673256056548e-16",
+      "bar": "max_column_error <= 1e-15 for every wet column",
+      "pass": true
+    },
+    "zdf_sh2": {
+      "source_row": "4_zdf_sh2",
+      "measured_number": "max_column_error=0.0",
+      "bar": "max_column_error <= 1e-15 for every wet column",
+      "pass": true
+    },
+    "bottom_drag_coefficient": {
+      "source_row": "5_bottom_drag_coefficient",
+      "measured_number": "max_column_error=0.0",
+      "bar": "max_column_error <= 1e-15 for every wet column",
+      "pass": true
+    },
+    "native_mld": {
+      "source_rows": [
+        "6_native_mld_index",
+        "7_native_mld_depth"
+      ],
+      "measured_number": "index exact; depth max_column_error=5.67046062233333e-16",
+      "bar": "index exact and depth max_column_error <= 1e-15 for every wet column",
+      "pass": true
+    }
+  },
+  "excluded_first_divergence": {
+    "source_row": "11_prandtl_zri_pdlr",
+    "measured_number": "max_column_error=3.4730670751776466e-14; 86/9920 columns diverged",
+    "bar": "max_column_error <= 1e-15 for every wet column",
+    "disposition": "DIVERGED",
+    "effect": "zdf_tke and all downstream ZDF calls remain UNMEASURED"
+  }
+}
