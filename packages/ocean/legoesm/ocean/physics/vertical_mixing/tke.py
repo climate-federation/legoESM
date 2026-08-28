@@ -240,7 +240,7 @@ def _surface_tke_dirichlet(cfg: "TKEConfig", taum, rho_0: float):
     _sbc = getattr(cfg, "surface_bc", "veros_flux")
     if _sbc == "nemo_dirichlet":
         return jnp.maximum(
-            jnp.asarray(_NEMO_TKE_EMIN0, dtype=taum.dtype),
+            jnp.asarray(cfg.tke_surface_min, dtype=taum.dtype),
             _NEMO_TKE_EBB / rho_0 * taum)
     if _sbc == "veros_flux":
         return None
@@ -1375,15 +1375,23 @@ def _solve_tke_backward_euler(
     # DROPPED the `* wmask`; ``w_active`` (TKEConfig.tke_dry_wmask) restores
     # it. None ⇒ BIT-IDENTICAL legacy.
     e_new = jnp.maximum(e_new, cfg.tke_background)
-    # Floor at surface_min on the topmost interface only.
-    e_new = e_new.at[..., 0].set(
-        jnp.maximum(e_new[..., 0], cfg.tke_surface_min),
-    )
+    # The legoESM surface slot is interface 0 only for the historical
+    # ``interior_pinned`` layout.  Under ``nemo_z0`` the true surface is the
+    # separate virtual Dirichlet row assembled above: NEMO applies rn_emin0
+    # there (MY_SRC/zdftke.F90:361), then applies only rn_emin to the solved
+    # interior jk=2..jpkm1 (:564-565).  Reapplying tke_surface_min here would
+    # incorrectly pin NEMO jk=2 to the surface floor.
+    if surface_bc_level == "interior_pinned":
+        e_new = e_new.at[..., 0].set(
+            jnp.maximum(e_new[..., 0], cfg.tke_surface_min),
+        )
     if w_active is not None:
         # LAST statement, exactly as at :565 (the `* wmask` closes tke_tke);
-        # this also masks interface 0 (NEMO's jk=2) on a wholly-dry column,
-        # which the legoESM-only tke_surface_min floor above would otherwise
-        # re-inflate.
+        # this removes either post-solve floor on dry interfaces. With masking
+        # disabled, ``interior_pinned`` retains the historical unmasked
+        # surface floor, while ``nemo_z0`` now retains only tke_background at
+        # dry interface 0 instead of the formerly misplaced surface floor.
+        # Both shipped nemo_z0 DINO cards enable tke_dry_wmask.
         e_new = e_new * jnp.asarray(w_active, dtype=e_new.dtype)
     return e_new
 
