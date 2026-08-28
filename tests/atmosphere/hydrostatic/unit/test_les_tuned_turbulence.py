@@ -161,12 +161,27 @@ def test_write_active_scheme_params_raises_for_untuned_scheme(tmp_path):
                                    path=str(only_ysu))
 
 
-def test_clubb_amip_slice_has_nested_keys(tmp_path):
-    """CLUBB's --params slice must carry its CLUBBParams coefficients."""
+def test_clubb_amip_slice_refused(tmp_path):
+    """CLUBB opt-in via a --params slice alone is UNSAFE (cannot set prognostic)
+    and must raise, not emit a slice that runs diagnostic physics."""
     from legoesm.atmosphere.physics.turbulence.les_tuned import (
         write_active_scheme_params)
-    out = tmp_path / "clubb.yaml"
-    n = write_active_scheme_params("clubb", str(out))
-    assert n >= 30
-    body = out.read_text()
-    assert "atm.turb.CLUBBParams." in body
+    with pytest.raises(ValueError, match="CLUBB cannot be opted into"):
+        write_active_scheme_params("clubb", str(tmp_path / "clubb.yaml"))
+
+
+def test_clubb_diagnostic_config_refused():
+    """Prognostic-fit CLUBB coefficients must not be applied to a diagnostic config."""
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+    turb = TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(prognostic=False))
+    with pytest.raises(ValueError, match="prognostic"):
+        apply_les_tuned_turbulence(turb)
+
+
+def test_clubb_missing_clubbparams_raises(tmp_path):
+    """CLUBB selected but the YAML has no CLUBBParams -> raise, not silent default."""
+    only_ysu = tmp_path / "only_ysu.yaml"
+    only_ysu.write_text("atm.turb.YSUConfig.Pr_t: 0.6\n")
+    turb = TurbulenceConfig(scheme="clubb")
+    with pytest.raises(ValueError, match="no CLUBBParams entry"):
+        apply_les_tuned_turbulence(turb, path=str(only_ysu))
