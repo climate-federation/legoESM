@@ -694,6 +694,66 @@ def main() -> int:
                             "and the conditional 1.3 westerly multiplier",
                     },
                 }
+            else:
+                # Row 9, and no later row, is evaluated until this boundary
+                # crosses its registered pointwise bar.  Reconstruct
+                # zdftke.F90:377-384 from NEMO's own Kbb face velocities,
+                # bottom masks/index and dumped rCdU_bot.
+                solve_kwargs = tke_capture["solve_calls"][0][0]
+                bottom_prod = np.asarray(solve_kwargs["bottom_dirichlet"])
+                bottom_level = np.asarray(
+                    solve_kwargs["bottom_level"], dtype=np.int64)
+                with xr.open_dataset(
+                        RUN / "mesh_mask.nc", decode_times=False) as ds:
+                    umask_b = np.moveaxis(np.asarray(
+                        ds["umask"].isel(time_counter=0)), 0, -1)
+                    vmask_b = np.moveaxis(np.asarray(
+                        ds["vmask"].isel(time_counter=0)), 0, -1)
+                kb = bottom_level[..., None]
+                ub_i = np.take_along_axis(before.u, kb, axis=-1)[..., 0]
+                ub_w = np.take_along_axis(
+                    np.roll(before.u, 1, axis=1), kb, axis=-1)[..., 0]
+                vb_i = np.take_along_axis(before.v, kb, axis=-1)[..., 0]
+                vb_s = np.take_along_axis(
+                    np.roll(before.v, 1, axis=0), kb, axis=-1)[..., 0]
+                um_i = np.take_along_axis(umask_b, kb, axis=-1)[..., 0]
+                um_w = np.take_along_axis(
+                    np.roll(umask_b, 1, axis=1), kb, axis=-1)[..., 0]
+                vm_i = np.take_along_axis(vmask_b, kb, axis=-1)[..., 0]
+                vm_s = np.take_along_axis(
+                    np.roll(vmask_b, 1, axis=0), kb, axis=-1)[..., 0]
+                zmsku = 2.0 - um_w * um_i
+                zmskv = 2.0 - vm_s * vm_i
+                bottom_literal = np.maximum(
+                    -np.float64(0.001875) * rcdu
+                    * np.sqrt((zmsku * (ub_i + ub_w)) ** 2
+                              + (zmskv * (vb_i + vb_s)) ** 2),
+                    np.float64(tke_cfg.tke_background)) * wet2
+                row9m = metrics(
+                    bottom_prod[..., None], bottom_literal[..., None],
+                    wet2[..., None], focus, POINTWISE_BAR)
+                row9_controls = planted_point_controls(
+                    bottom_literal[..., None], bottom_literal[..., None],
+                    wet2[..., None], POINTWISE_BAR)
+                row4["continuation_preview"]["rows"][
+                    "9_bottom_tke_boundary"] = row9m
+                if not row9m["pass"]:
+                    row4["continuation_preview"]["first_divergence"] = {
+                        "row": 9,
+                        "operation": "bottom TKE Dirichlet boundary",
+                        "nemo_line":
+                            "cfgs/DINO/MY_SRC/zdftke.F90:377-384",
+                        "output": row9m,
+                        "first_failing_operand": {
+                            "name": "bottom boundary composite",
+                            "nemo_line":
+                                "cfgs/DINO/MY_SRC/zdftke.F90:378-383",
+                        },
+                        "operand_localization": {
+                            "production_vs_literal": row9m,
+                        },
+                        "controls": row9_controls,
+                    }
         if row4["disposition"] == "DIVERGED":
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
                 LatLonCGridOceanModel,
