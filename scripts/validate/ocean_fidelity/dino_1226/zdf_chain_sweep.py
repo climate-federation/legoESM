@@ -549,6 +549,9 @@ def main() -> int:
     ap.add_argument("--row17-postsolve-dump", type=Path)
     ap.add_argument("--row17-forward-diag-dump", type=Path)
     ap.add_argument("--row17-forward-rhs-dump", type=Path)
+    ap.add_argument("--row17-pre-diag-dump", type=Path)
+    ap.add_argument("--row17-pre-lower-dump", type=Path)
+    ap.add_argument("--row17-pre-rhs-dump", type=Path)
     ap.add_argument("--row17-bracket-off-restart", type=Path)
     ap.add_argument("--row17-bracket-instrument-restart", type=Path)
     ap.add_argument("--row17-instrument-source", type=Path)
@@ -1888,6 +1891,9 @@ def main() -> int:
                                         args.row17_postsolve_dump,
                                         args.row17_forward_diag_dump,
                                         args.row17_forward_rhs_dump,
+                                        args.row17_pre_diag_dump,
+                                        args.row17_pre_lower_dump,
+                                        args.row17_pre_rhs_dump,
                                         args.row17_bracket_off_restart,
                                         args.row17_bracket_instrument_restart,
                                         args.row17_instrument_source,
@@ -1960,6 +1966,15 @@ def main() -> int:
                                         work_n = base._load_interior(
                                             str(args.row17_forward_rhs_dump),
                                             ni, nj)
+                                        pre_diag_n = base._load_interior(
+                                            str(args.row17_pre_diag_dump),
+                                            ni, nj)
+                                        pre_lw_n = base._load_interior(
+                                            str(args.row17_pre_lower_dump),
+                                            ni, nj)
+                                        pre_rhs_n = base._load_interior(
+                                            str(args.row17_pre_rhs_dump),
+                                            ni, nj)
                                         n_forward = literal_diag.shape[-1] - 1
                                         wet_forward = np.concatenate(
                                             (wet2[..., None],
@@ -1975,6 +1990,30 @@ def main() -> int:
                                             work_n[..., :n_forward],
                                             wet_forward, focus,
                                             POINTWISE_BAR)
+                                        pre_diag_l = np.array(
+                                            b_tri, copy=True)
+                                        pre_diag_l[..., 0] = (
+                                            1.0 / np.asarray(surface_n))
+                                        pre_lw_l = np.array(a_tri, copy=True)
+                                        pre_lw_l[..., 0] = 1.0
+                                        pre_stage_metrics = {
+                                            "zdiag": metrics(
+                                                pre_diag_l[..., :n_forward],
+                                                pre_diag_n[..., :n_forward],
+                                                wet_forward, focus,
+                                                POINTWISE_BAR),
+                                            "zd_lw": metrics(
+                                                pre_lw_l[..., :n_forward],
+                                                pre_lw_n[..., :n_forward],
+                                                wet_forward, focus,
+                                                POINTWISE_BAR),
+                                            "en_rhs": metrics(
+                                                np.asarray(tri_args[3])[
+                                                    ..., :n_forward],
+                                                pre_rhs_n[..., :n_forward],
+                                                wet_forward, focus,
+                                                POINTWISE_BAR),
+                                        }
                                         bottom_ext = (
                                             bottom_level[..., None] + 1)
                                         rhs_bottom_scatter = metrics(
@@ -2100,6 +2139,8 @@ def main() -> int:
                                                 forward_diag_metric,
                                             "literal_forward_rhs":
                                                 forward_rhs_metric,
+                                            "pre_recurrence_inputs":
+                                                pre_stage_metrics,
                                             "jk2_rhs_association_discriminator":
                                                 jk2_association_metrics,
                                             "solver_rhs_bottom_scatter":
@@ -2127,6 +2168,9 @@ def main() -> int:
                                                     args.row17_postsolve_dump,
                                                     args.row17_forward_diag_dump,
                                                     args.row17_forward_rhs_dump,
+                                                    args.row17_pre_diag_dump,
+                                                    args.row17_pre_lower_dump,
+                                                    args.row17_pre_rhs_dump,
                                                     args.row17_instrument_source,
                                                     args.row17_instrument_binary,
                                                     args.row17_bracket_off_restart,
