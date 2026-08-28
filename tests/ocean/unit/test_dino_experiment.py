@@ -752,6 +752,28 @@ class TestDinoWindStress:
         with pytest.raises(ValueError, match="dino_wind_profile_evaluation"):
             dino_wind_stress(jnp.asarray(0.0), cfg)
 
+    def test_literal_forcing_uses_raw_mesh_latitude_only(self):
+        cfg = dino_config_for_recipe("nemo_dino_kamm")
+        grid = dino_lat_lon_grid(cfg, n_lon=4)
+        raw = np.asarray(jnp.degrees(grid.lat)).copy()
+        raw[3] = np.nextafter(raw[3], np.inf)
+        got = dino.dino_lat_lon_surface_forcing_arrays(
+            grid, cfg, wind_lat_deg=raw)
+        want = dino_wind_stress(jnp.asarray(raw), cfg)
+        assert np.array_equal(np.asarray(got["tau_u_cell_2d"][:, 0]),
+                              np.asarray(want))
+
+        legacy = dataclasses.replace(
+            cfg, dino_wind_profile_evaluation="factored_smoothstep")
+        base = dino.dino_lat_lon_surface_forcing_arrays(grid, legacy)
+        ignored = dino.dino_lat_lon_surface_forcing_arrays(
+            grid, legacy, wind_lat_deg=raw)
+        assert np.array_equal(np.asarray(base["tau_u_cell_2d"]),
+                              np.asarray(ignored["tau_u_cell_2d"]))
+        with pytest.raises(ValueError, match="wind_lat_deg shape"):
+            dino.dino_lat_lon_surface_forcing_arrays(
+                grid, cfg, wind_lat_deg=raw[:-1])
+
     def test_hits_knots(self):
         cfg = DINOConfig()
         for lat_knot, tau_knot in zip(cfg.wind_tau_lats_deg, cfg.wind_tau_values):

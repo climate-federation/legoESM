@@ -1327,7 +1327,11 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
           f"barotropic_drag_substep={mc.barotropic_drag_substep}", flush=True)
 
     model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)
-    forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
+    # NEMO evaluates the analytic wind at its stored gphiu operand.  Keep that
+    # raw degree-valued mesh field through the bridge: radians->degrees would
+    # perturb 154 row-8 columns beyond the registered 1e-15 bar.
+    forcing = dino_lat_lon_surface_forcing_arrays(
+        br.geometry, cfg, wind_lat_deg=g.gphit[:, 0])
     sf = dino_step_surface_forcing(forcing)
     print(f"slope_scheme={mc.gm_redi.slope_scheme} "
           f"kappa_GM_max={float(jnp.max(jnp.abs(mc.gm_redi.kappa_GM))):.1f}")

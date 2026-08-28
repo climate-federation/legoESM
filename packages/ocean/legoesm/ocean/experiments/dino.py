@@ -3817,7 +3817,9 @@ EXPERIMENT_CONFIG = {
 # doesn't subtract Q_sr per paper eq 8). See Decisions Log 2026-05-14.
 # ---------------------------------------------------------------------
 
-def dino_lat_lon_surface_forcing_arrays(grid, cfg: DINOConfig | None = None):
+def dino_lat_lon_surface_forcing_arrays(
+    grid, cfg: DINOConfig | None = None, *, wind_lat_deg=None,
+):
     """Pre-compute lat-lon Mercator forcing fields that don't depend on state.
 
     Returns dict with:
@@ -3830,13 +3832,21 @@ def dino_lat_lon_surface_forcing_arrays(grid, cfg: DINOConfig | None = None):
         cfg = DINOConfig()
 
     lat_1d = jnp.degrees(grid.lat)               # (n_lat,)
+    wind_lat_1d = lat_1d
+    if (cfg.dino_wind_profile_evaluation == "nemo_literal"
+            and wind_lat_deg is not None):
+        wind_lat_1d = jnp.asarray(wind_lat_deg, dtype=jnp.float64)
+        if wind_lat_1d.shape != lat_1d.shape:
+            raise ValueError(
+                f"wind_lat_deg shape {wind_lat_1d.shape} != grid latitude "
+                f"shape {lat_1d.shape}")
     T_star_1d = dino_T_star_annual_mean(lat_1d, cfg)
     S_star_1d = dino_S_star(lat_1d, cfg)
     Q_sr_1d = dino_Q_sr_annual_mean(lat_1d, cfg)
-    tau_u_1d = dino_wind_stress(lat_1d, cfg)     # (n_lat,)
+    tau_u_1d = dino_wind_stress(wind_lat_1d, cfg)     # (n_lat,)
 
     shape_2d = (grid.n_lat, grid.n_lon)
-    tau_u_cell_1d = dino_wind_stress(lat_1d, cfg)      # τ at CELL lats
+    tau_u_cell_1d = dino_wind_stress(wind_lat_1d, cfg)  # τ at CELL lats
     # NEMO taum (usrdef_sbc:222-223): |τ|, boosted x1.3 in the westerlies
     # (utau > 0) — the TKE surface input only, never the momentum stress.
     taum_1d = jnp.abs(tau_u_cell_1d) * jnp.where(
