@@ -1866,6 +1866,18 @@ def main() -> int:
                                         rhs_n = en_n_with_bc + dt64 * (
                                             p_sh2_n + strat_n + diss_rhs_n
                                         ) * wet_rhs.astype(np.float64)
+                                        if solve_kwargs["external_source"] is not None:
+                                            # Langmuir source is applied to en
+                                            # before matrix assembly at
+                                            # zdftke.F90:463, and legoESM adds
+                                            # that already-verified row-10
+                                            # source as a separate RHS statement.
+                                            rhs_n = rhs_n + dt64 * np.asarray(
+                                                solve_kwargs["external_source"])
+                                            np.put_along_axis(
+                                                rhs_n,
+                                                bottom_level[..., None],
+                                                bottom_prod[..., None], axis=-1)
                                         rhs_metric = metrics(
                                             rhs_l, rhs_n, wet_rhs, focus,
                                             POINTWISE_BAR)
