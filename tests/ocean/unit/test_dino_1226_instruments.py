@@ -2066,6 +2066,8 @@ def test_tcarry_bridge_omega_scorer_self_test_is_red_capable(instruments):
     assert instruments.tcarry_omega._self_test() == 0
 
 
-def test_tcarry_bridge_omega_scorer_refuses_unbound_artifacts(instruments):
-    with pytest.raises(SystemExit, match="artifacts are unbound"):
-        instruments.tcarry_omega._require_bound()
+def test_tcarry_bridge_omega_scorer_has_complete_committed_bindings(instruments):
+    scorer = instruments.tcarry_omega
+    assert scorer._require_bound() is None
+    assert scorer.BOUND_PRODUCER_SHA == (
+        "9e339ad1b2032bc47ec132fb2ad6f00ea071bbb9")

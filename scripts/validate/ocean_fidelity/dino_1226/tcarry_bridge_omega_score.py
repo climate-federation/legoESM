@@ -33,12 +33,12 @@ TARGET_DELTA = 0.01330063141049817
 TWO_F = 0.0002899800477248501
 DAY = 90
 
-# Bind only in a committed post-run amendment. None is a deliberate STOP.
-NEMO_ARTIFACT_SHA256: str | None = None
-LEGACY_ARTIFACT_SHA256: str | None = None
-NEMO_LOG_SHA256: str | None = None
-LEGACY_LOG_SHA256: str | None = None
-BOUND_PRODUCER_SHA: str | None = None
+# Bound 2026-08-28 in a committed amendment before either NPZ was loaded.
+NEMO_ARTIFACT_SHA256 = "862debedf76b5e4ff686655f89ee9d33eec56c87a8a05c3f7cffff1502dc53d6"
+LEGACY_ARTIFACT_SHA256 = "dc11a5f831f4dec573b3c04d1b2f3b73ea8e74bfd1a30f3c20029757c5928a94"
+NEMO_LOG_SHA256 = "4081b4950d3e551937ee492541573f48b0fcc19ee8c4d3eee90f0e45254beaf4"
+LEGACY_LOG_SHA256 = "52045b52fee947dd8fdbd682773726d6e88ae6152f82f9a42446f99949d14b7d"
+BOUND_PRODUCER_SHA = "9e339ad1b2032bc47ec132fb2ad6f00ea071bbb9"
 
 
 def sha256(path: str | Path) -> str:
