@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --account=glab
-#SBATCH -p short
+#SBATCH -p burst
 #SBATCH -c 4
 #SBATCH --mem=16G
 #SBATCH -t 20:00:00
