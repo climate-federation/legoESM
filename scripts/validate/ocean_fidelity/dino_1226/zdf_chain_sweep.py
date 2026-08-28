@@ -727,8 +727,9 @@ def main() -> int:
                     # legoESM bottom_level is 0-based.
                     nemo_bottom_level = np.asarray(
                         ds["mbathy"].isel(time_counter=0), dtype=np.int64)
-                nemo_bottom_level = nemo_bottom_level[
-                    hls:jpj - hls, hls:jpi - hls] - 1
+                # mesh_mask.nc is already the model-domain 199x52 array;
+                # unlike raw bracket streams it has no additional dump halo.
+                nemo_bottom_level = nemo_bottom_level - 1
                 bottom_index_mismatch = wet2 & (
                     bottom_level != nemo_bottom_level)
                 bottom_index_identity = {
