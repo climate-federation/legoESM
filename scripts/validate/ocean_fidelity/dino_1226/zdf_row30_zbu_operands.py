@@ -36,6 +36,7 @@ SHAS = {
     "tke_dump_rn2b.bin": "fcd7ddee9e94b6158085f2ff5d174b2cb01e1b22a8524faa1b5be31a2b798961",
     "tke_dump_rn2.bin": "df573f8c07abab1cc0a2fc7fd2093dd8276dccf0319d3375220340d91b5a6004",
     "eiv_dump_prd_arg.bin": "12e67ec2d5cb951cc5efe02e41d56e4aa6395d3d1def7f653d2b88c91957ab1b",
+    "eiv_dump_zgru_iik.bin": "d9d8d91277ae3766d9240642fae2abe5199552fa95e59c6254eb8a6b50543136",
     "eiv_dump_zbu_pre.bin": "df82610882fcc92c937ae0503b6ea45840731cebf16d9e2597400901e717f4ad",
     "seq_dump_rhd_nnn_kt00005761.bin": "81f60743004bbd52101227a66e6f358e2d85a98cbcf6d70d848e82f9f69d8232",
 }
@@ -133,6 +134,7 @@ def main() -> int:
     nemo_pn2 = loaders._load_interior(str(run / "tke_dump_rn2b.bin"), ni, nj)
     nemo_prd = loaders._load_haloed(str(run / "eiv_dump_prd_arg.bin"), jpi, jpj, hls)
     nemo_zbu = loaders._load_haloed(str(run / "eiv_dump_zbu_pre.bin"), jpi, jpj, hls)
+    nemo_zgru = loaders._load_haloed(str(run / "eiv_dump_zgru_iik.bin"), jpi, jpj, hls)
     nk = min(prod_pn2.shape[-1], nemo_pn2.shape[-1], nemo_prd.shape[-1], nemo_zbu.shape[-1])
     prod_pn2, nemo_pn2 = prod_pn2[..., :nk], nemo_pn2[..., :nk]
     prod_prd, nemo_prd = np.asarray(loc["prd"])[..., :nk], nemo_prd[..., :nk]
@@ -189,7 +191,11 @@ def main() -> int:
         "production_bundle_zbu": sweep.metrics(
             prod_face, nemo_zbu[..., :nk], wet_u, focus, BAR),
     }
-    controls = sweep.planted_controls(prod_face, nemo_zbu[..., :nk], wet_u, BAR)
+    # Controls use the independently verified upstream zgru row, never an
+    # output compared with itself and never the possibly-red stage under test.
+    control_actual = np.asarray(loc["zgru"])[..., :nk]
+    controls = sweep.planted_controls(
+        control_actual, nemo_zgru[..., :nk], wet_u, BAR)
     swap = npn + np.concatenate([npn[..., :1], npn[..., :-1]], axis=-1)
     controls["jk_jkp1_swap_fails"] = not sweep.metrics(
         zm1_g * nemo_prd1 * swap * mask_factor,
@@ -201,12 +207,14 @@ def main() -> int:
         str(run / "seq_dump_rhd_nnn_kt00005761.bin"), jpi, jpj, hls)[..., :nk]
     controls["current_prd_for_before_fails"] = not sweep.metrics(
         seq_now, nemo_prd, wet_t, focus, BAR)["pass"]
-    exact_before = int(np.count_nonzero(wet_u & (prod_face != nemo_zbu[..., :nk])))
-    ulp = prod_face.copy()
-    idx = tuple(np.argwhere(wet_u & (prod_face == nemo_zbu[..., :nk]) & (prod_face != 0.0))[0])
+    exact_before = int(np.count_nonzero(
+        wet_u & (control_actual != nemo_zgru[..., :nk])))
+    ulp = control_actual.copy()
+    idx = tuple(np.argwhere(
+        wet_u & (control_actual == nemo_zgru[..., :nk]) & (control_actual != 0.0))[0])
     ulp[idx] = np.nextafter(ulp[idx], np.inf)
     controls["one_ulp_exact_identity_fired"] = int(np.count_nonzero(
-        wet_u & (ulp != nemo_zbu[..., :nk]))) == exact_before + 1
+        wet_u & (ulp != nemo_zgru[..., :nk]))) == exact_before + 1
     if not all(v for v in controls.values() if isinstance(v, bool)):
         raise SystemExit("row30 zbu planted control did not fire")
 
@@ -232,6 +240,7 @@ def main() -> int:
             args.parent_artifact, args.nemo_source, args.nemo_binary, args.mld_maps,
             run / "mesh_mask.nc", run / "tke_dump_rn2b.bin",
             run / "tke_dump_rn2.bin", run / "eiv_dump_prd_arg.bin",
+            run / "eiv_dump_zgru_iik.bin",
             run / "eiv_dump_zbu_pre.bin", run / "seq_dump_rhd_nnn_kt00005761.bin",
             run / "DINO_00005760_restart.nc", run / "DINO_00005761_restart.nc",
             run / "run.attempt1.log", Path(__file__), Path(ldf.__file__))},
