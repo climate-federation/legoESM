@@ -33,6 +33,7 @@ import bn2_alpha_compare as loaders  # noqa: E402
 import dump_lane  # noqa: E402
 import ldf_slp_per_element as ldf_probe  # noqa: E402
 import legoesm.ocean.physics.vertical_mixing as vmix_mod  # noqa: E402
+import legoesm.ocean.physics.vertical_mixing.k_profiles as kprofiles_mod  # noqa: E402
 import zdf_chain_sweep as sweep  # noqa: E402
 from kamm_twin_90d import _build_twin_state  # noqa: E402
 from legoesm.core.precision import PrecisionPolicy, set_policy  # noqa: E402
@@ -141,20 +142,33 @@ def main() -> int:
         e3t_mode="both",
     )
     pair_calls = []
+    apply_calls = []
     real_pair = vmix_mod.implicit_vertical_diffusion_ocean_pair
+    model_cls = type(model)
+    real_apply = model_cls._apply_implicit_vertical_mixing
 
     def spy_pair(t_field, s_field, k_field, *pair_args, **pair_kwargs):
         pair_calls.append((t_field, s_field, k_field))
         return real_pair(t_field, s_field, k_field, *pair_args, **pair_kwargs)
 
+    def spy_apply(self, *apply_args, **apply_kwargs):
+        apply_calls.append((apply_args, apply_kwargs))
+        return real_apply(self, *apply_args, **apply_kwargs)
+
     vmix_mod.implicit_vertical_diffusion_ocean_pair = spy_pair
+    model_cls._apply_implicit_vertical_mixing = spy_apply
     try:
         _, _, captured = sweep.capture_face_sh2_call(model, state, sf)
     finally:
         vmix_mod.implicit_vertical_diffusion_ocean_pair = real_pair
+        model_cls._apply_implicit_vertical_mixing = real_apply
     if len(pair_calls) != 1:
         raise AssertionError(
             f"DINO production T/S pair solve fired {len(pair_calls)} times, expected 1"
+        )
+    if len(apply_calls) != 1:
+        raise AssertionError(
+            f"DINO production implicit call fired {len(apply_calls)} times, expected 1"
         )
     mxl_args, mxl_kwargs, _ = captured["mxl_calls"][-1]
     if len(mxl_args) != 4 or en.shape != np.asarray(mxl_args[0]).shape:
@@ -212,22 +226,78 @@ def main() -> int:
         raise AssertionError("active NEMO no-DDM avs=avt assignment changed")
     shared_k = np.asarray(pair_calls[0][2])
 
-    def shared_k_gate(k_heat, k_salt) -> bool:
-        return k_heat is k_salt and np.array_equal(k_heat, k_salt, equal_nan=True)
-
-    if not shared_k_gate(shared_k, shared_k):
-        raise AssertionError("production T/S call did not receive one shared K object")
-    separated_k = shared_k.copy()
-    wet_k = np.argwhere(np.isfinite(separated_k) & (separated_k != 0.0))
+    wet_k = np.argwhere(np.isfinite(shared_k) & (shared_k != 0.0))
     if wet_k.size == 0:
         raise AssertionError("row27 separated-salinity-K control found no finite nonzero K")
     control_index = tuple(int(x) for x in wet_k[0])
-    separated_k[control_index] = np.nextafter(
-        separated_k[control_index], np.inf
+
+    # Red production arm: enable DDM on the exact captured implicit-call
+    # operands, inject a +1-ULP salt-only delta, and require dispatch to switch
+    # from the pair solver to two scalar tracer solves whose K operands differ
+    # at exactly that point.  This re-enters the production selector; it is not
+    # a post-hoc object-identity predicate.
+    ddm_enabled = vmcfg.ddm._replace(enabled=True)
+    vmcfg_ddm = vmcfg._replace(ddm=ddm_enabled)
+    physics_ddm = mc.physics._replace(vertical_mixing=vmcfg_ddm)
+    mc_ddm = mc._replace(physics=physics_ddm)
+    zero_ddm = jnp.zeros_like(pair_calls[0][2])
+    salt_ddm = zero_ddm.at[control_index].set(
+        jnp.nextafter(zero_ddm[control_index], jnp.asarray(jnp.inf, zero_ddm.dtype))
     )
-    row27_control_fired = not shared_k_gate(shared_k, separated_k)
+    # A +1 ULP from zero can be flushed by later arithmetic; plant one ULP of
+    # the nonzero baseline K instead, while preserving a single-point delta.
+    salt_ddm = salt_ddm.at[control_index].set(
+        jnp.nextafter(
+            pair_calls[0][2][control_index],
+            jnp.asarray(jnp.inf, pair_calls[0][2].dtype),
+        )
+        - pair_calls[0][2][control_index]
+    )
+
+    def fake_ddm_profile(*ddm_args, **ddm_kwargs):
+        del ddm_args, ddm_kwargs
+        return zero_ddm, salt_ddm
+
+    control_pair_calls = []
+    control_scalar_calls = []
+    real_ddm_profile = kprofiles_mod.ddm_K_profile
+    real_scalar = vmix_mod.implicit_vertical_diffusion_ocean
+
+    def control_pair(*control_args, **control_kwargs):
+        control_pair_calls.append((control_args, control_kwargs))
+        return real_pair(*control_args, **control_kwargs)
+
+    def control_scalar(field, k_field, *scalar_args, **scalar_kwargs):
+        control_scalar_calls.append((field, k_field))
+        return real_scalar(field, k_field, *scalar_args, **scalar_kwargs)
+
+    control_args, control_kwargs = apply_calls[0]
+    control_kwargs = dict(control_kwargs)
+    control_kwargs["config"] = mc_ddm
+    kprofiles_mod.ddm_K_profile = fake_ddm_profile
+    vmix_mod.implicit_vertical_diffusion_ocean_pair = control_pair
+    vmix_mod.implicit_vertical_diffusion_ocean = control_scalar
+    try:
+        with jax.disable_jit():
+            real_apply(model, *control_args, **control_kwargs)
+    finally:
+        kprofiles_mod.ddm_K_profile = real_ddm_profile
+        vmix_mod.implicit_vertical_diffusion_ocean_pair = real_pair
+        vmix_mod.implicit_vertical_diffusion_ocean = real_scalar
+    if control_pair_calls:
+        raise AssertionError("DDM control incorrectly retained the production T/S pair solve")
+    if len(control_scalar_calls) < 2:
+        raise AssertionError("DDM control did not dispatch separate T/S scalar solves")
+    heat_k = np.asarray(control_scalar_calls[0][1])
+    salt_k = np.asarray(control_scalar_calls[1][1])
+    k_unequal = ~(heat_k == salt_k)
+    row27_control_fired = (
+        int(k_unequal.sum()) == 1 and bool(k_unequal[control_index])
+    )
     if not row27_control_fired:
-        raise AssertionError("row27 separated-salinity-K control did not fire")
+        raise AssertionError(
+            "row27 production DDM control did not isolate one salt-K coefficient"
+        )
     # zdfphy rows 23/25/26/29 are reconstructible from existing NEMO closure,
     # rn2/rn2b, mask, and composed-coefficient dumps.  These are deliberately
     # retained as ORACLE-SELFCHECK previews, not legoESM measurements: no
@@ -367,6 +437,9 @@ def main() -> int:
                     "fired": row27_control_fired,
                     "perturbed_index": list(control_index),
                     "perturbation": "+1 ULP",
+                    "production_pair_calls": len(control_pair_calls),
+                    "production_scalar_calls": len(control_scalar_calls),
+                    "K_unequal_elements": int(k_unequal.sum()),
                 },
             },
             "waived_inactive_enhancements": [
