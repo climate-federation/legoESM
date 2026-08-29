@@ -1794,6 +1794,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # LatLonCGridOceanModel._validate_config on an unknown value.
     metric_convention: str = "exact"
 
+    # Latitude used by the V-face zonal metric on variable-dlat,
+    # nemo_isotropic grids. ``nemo_vpoint`` is the corrected #1455 behavior;
+    # ``legacy_tracer_midpoint`` exists only as a controlled attribution arm.
+    # It is forwarded to ensure_geometry and affects dx_v only.
+    vface_zonal_metric_evaluation: str = "nemo_vpoint"
+
     # Where the Coriolis parameter at the v-point / vertex is EVALUATED
     # (#1455).  Fed to ``legoesm.grids.latlon.ensure_geometry`` at model
     # construction, exactly like ``metric_convention`` above.

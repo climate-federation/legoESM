@@ -123,6 +123,12 @@ class DINOConfig:
     # only the nemo_dino_kamm/_mlf DINO_RECIPES cards set "nemo_isotropic".
     metric_convention: str = "exact"
 
+    # One-variable reconstruction of the #1455 V-face Mercator defect.
+    # ``nemo_vpoint`` is production: e1v is evaluated at NEMO's own V-point
+    # latitude. ``legacy_tracer_midpoint`` is retained for frozen A/B arms and
+    # changes only dx_v, not the rest of the horizontal metric stack.
+    vface_zonal_metric_evaluation: str = "nemo_vpoint"
+
     # Where the vertex Coriolis is EVALUATED (#1455).  "cell_average"
     # (default, BIT-IDENTICAL to every prior DINO run) averages the two
     # adjacent tracer rows; "face_latitude" evaluates f AT the v-face
@@ -1393,6 +1399,7 @@ DINO_RECIPES: dict[str, dict] = {
         # makes the F-point lateral-viscosity coefficient exact. The #516
         # transport contract is unchanged: the two end v-faces stay zero.
         "metric_convention": "nemo_isotropic",
+        "vface_zonal_metric_evaluation": "nemo_vpoint",
         "redi_S_max": 0.01,                      # rn_slpmax (namtra_ldf ref default)
         # -- Momentum (namdyn_adv: ln_dynadv_vec + nn_dynkeg=1; namdyn_vor: ln_dynvor_een) --
         "ke_gradient_scheme": "hollingsworth",
@@ -3495,6 +3502,8 @@ def dino_lat_lon_model_config(
         # #1226: T/u-face metric convention (see DINOConfig.metric_convention
         # + LatLonCGridOceanConfig.metric_convention docstrings).
         metric_convention=cfg.metric_convention,
+        # #1455 one-variable V-face Mercator ownership selector.
+        vface_zonal_metric_evaluation=cfg.vface_zonal_metric_evaluation,
         # #1455: vertex-Coriolis placement (see the DINOConfig field).
         coriolis_placement=cfg.coriolis_placement,
         # NEMO dynzdf wind placement (see DINOConfig.surface_stress_implicit).

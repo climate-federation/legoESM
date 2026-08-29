@@ -1146,6 +1146,7 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                        use_gm_redi: bool | None = None,
                        surface_tendency_placement: str | None = None,
                        barotropic_continuity_evaluation: str | None = None,
+                       vface_zonal_metric_evaluation: str | None = None,
                        tke_preclosure_coeff_source: str | None = None,
                        tke_matrix_evaluation: str | None = None,
                        tke_solver_evaluation: str | None = None,
@@ -1225,6 +1226,10 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
     s = read_nemo_restart(f"{run_stepdump}/{restart_file}", nn_hls=0)
     br = bridge_nemo_to_legoesm_topo(
         g, s, periodic_i=True, full_step=True, e3t_mode=e3t_mode,
+        vface_zonal_metric_evaluation=(
+            vface_zonal_metric_evaluation
+            if vface_zonal_metric_evaluation is not None
+            else cfg.vface_zonal_metric_evaluation),
         carry_native_lat_deg=(cfg.tke_htau_evaluation == "nemo_literal"))
     if vmix_scheme is not None:
         cfg = dataclasses.replace(cfg, vmix_scheme=vmix_scheme)
@@ -1238,6 +1243,14 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                              "'generic' or 'nemo_literal'")
         cfg = dataclasses.replace(
             cfg, barotropic_continuity_evaluation=barotropic_continuity_evaluation)
+    if vface_zonal_metric_evaluation is not None:
+        if vface_zonal_metric_evaluation not in (
+                "legacy_tracer_midpoint", "nemo_vpoint"):
+            raise ValueError(
+                "vface_zonal_metric_evaluation must be "
+                "'legacy_tracer_midpoint' or 'nemo_vpoint'")
+        cfg = dataclasses.replace(
+            cfg, vface_zonal_metric_evaluation=vface_zonal_metric_evaluation)
     if tke_preclosure_coeff_source is not None:
         if tke_preclosure_coeff_source not in (
                 "carried_previous_step", "current_subiteration"):
@@ -1521,6 +1534,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
              use_gm_redi: bool | None = None,
              surface_tendency_placement: str | None = None,
              barotropic_continuity_evaluation: str | None = None,
+             vface_zonal_metric_evaluation: str | None = None,
              tke_preclosure_coeff_source: str | None = None,
              tke_matrix_evaluation: str | None = None,
              tke_solver_evaluation: str | None = None,
@@ -1616,6 +1630,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         use_gm_redi=use_gm_redi, restart_file=restart_file,
         surface_tendency_placement=surface_tendency_placement,
         barotropic_continuity_evaluation=barotropic_continuity_evaluation,
+        vface_zonal_metric_evaluation=vface_zonal_metric_evaluation,
         tke_preclosure_coeff_source=tke_preclosure_coeff_source,
         tke_matrix_evaluation=tke_matrix_evaluation,
         tke_solver_evaluation=tke_solver_evaluation,
@@ -1745,6 +1760,8 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         "surface_tendency_placement": surface_tendency_placement,
         "barotropic_continuity_evaluation":
             cfg.barotropic_continuity_evaluation,
+        "vface_zonal_metric_evaluation":
+            cfg.vface_zonal_metric_evaluation,
         "save_step_eta": bool(save_step_eta),
         # Resolved production selectors, not merely the optional CLI
         # overrides.  These receipts make the faithful and legacy climate
@@ -2248,6 +2265,11 @@ def _parse_args(argv=None):
         help="one-variable QCO continuity association selector; default None "
              "uses the recipe (NEMO cards use nemo_literal)")
     p.add_argument(
+        "--vface-zonal-metric-evaluation", default=None,
+        choices=("legacy_tracer_midpoint", "nemo_vpoint"),
+        help="one-variable V-face Mercator e1v selector; default None uses "
+             "the recipe (NEMO cards use nemo_vpoint)")
+    p.add_argument(
         "--tke-preclosure-coeff-source", default=None,
         choices=("carried_previous_step", "current_subiteration"),
         help="override the TKE pre-solve avm_k/avt_k lifetime; default None "
@@ -2571,6 +2593,8 @@ def main(argv=None):
               surface_tendency_placement=args.surface_tendency_placement,
               barotropic_continuity_evaluation=(
                   args.barotropic_continuity_evaluation),
+              vface_zonal_metric_evaluation=(
+                  args.vface_zonal_metric_evaluation),
               tke_preclosure_coeff_source=args.tke_preclosure_coeff_source,
               tke_matrix_evaluation=args.tke_matrix_evaluation,
               tke_solver_evaluation=args.tke_solver_evaluation,

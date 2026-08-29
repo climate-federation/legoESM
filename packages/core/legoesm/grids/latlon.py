@@ -1034,6 +1034,7 @@ def ensure_geometry(
     omega: float | None = None,
     *,
     metric_convention: str = "exact",
+    vface_zonal_metric_evaluation: str = "nemo_vpoint",
     coriolis_placement: str = "cell_average",
 ) -> "LatLonCGridGeometry":
     """Convert a ``LatLonGrid`` to ``LatLonCGridGeometry`` if needed.
@@ -1072,6 +1073,11 @@ def ensure_geometry(
         returns above skip conversion entirely, so an already-built
         geometry's convention cannot be changed here). Default
         ``"exact"`` is BIT-IDENTICAL to every existing caller.
+    vface_zonal_metric_evaluation : {"legacy_tracer_midpoint", "nemo_vpoint"}
+        Selects the latitude used for ``dx_v`` when ``metric_convention`` is
+        ``"nemo_isotropic"`` on a variable-dlat grid.  The default preserves
+        the NEMO-faithful V-point construction; the legacy value is an explicit
+        counterfactual for the #1455 climate attribution experiment.
 
     Returns
     -------
@@ -1108,6 +1114,7 @@ def ensure_geometry(
         # geometries are bit-unchanged.
         lat_face_1d=getattr(grid, "lat_v", None),
         metric_convention=metric_convention,
+        vface_zonal_metric_evaluation=vface_zonal_metric_evaluation,
         coriolis_placement=coriolis_placement,
     )
 
@@ -1439,6 +1446,7 @@ def create_latlon_geometry(
     lon_1d: jax.Array | None = None,
     lat_face_1d: jax.Array | None = None,
     metric_convention: str = "exact",
+    vface_zonal_metric_evaluation: str = "nemo_vpoint",
     coriolis_placement: str = "cell_average",
 ) -> LatLonCGridGeometry:
     """Create a regular lat-lon ``LatLonCGridGeometry``.
@@ -1522,6 +1530,12 @@ def create_latlon_geometry(
         Raises ``ValueError`` on any other value. Ignored
         on uniform-dlat grids (scalar-dlat branch has no ``dlat_1d``
         to override).
+    vface_zonal_metric_evaluation : {"legacy_tracer_midpoint", "nemo_vpoint"}
+        The one-variable #1455 selector for NEMO-isotropic, variable-dlat
+        grids. ``"nemo_vpoint"`` evaluates ``dx_v`` at NEMO's analytic
+        V-point Mercator latitude; ``"legacy_tracer_midpoint"`` reproduces
+        the prior adjacent-T-latitude midpoint.  It changes ``dx_v`` only:
+        T/u metrics, true face coordinates, and ``dy_v`` are held fixed.
 
     coriolis_placement : {"cell_average", "face_latitude"}, optional
         Where the Coriolis parameter at the v-point / vertex is
@@ -1594,6 +1608,13 @@ def create_latlon_geometry(
         raise ValueError(
             f"metric_convention must be 'exact' or 'nemo_isotropic', "
             f"got {metric_convention!r}"
+        )
+    if vface_zonal_metric_evaluation not in (
+            "legacy_tracer_midpoint", "nemo_vpoint"):
+        raise ValueError(
+            "vface_zonal_metric_evaluation must be "
+            "'legacy_tracer_midpoint' or 'nemo_vpoint', got "
+            f"{vface_zonal_metric_evaluation!r}"
         )
     if n_lon is None:
         n_lon = 2 * n_lat
@@ -1774,7 +1795,12 @@ def create_latlon_geometry(
     # v-face latitudes: midpoints between cell centers, with poles at
     # ends.  cos(lat_v) at poles is exactly 0 (wall BC in regular
     # lat-lon).  This matches the inline computation in divergence_cgrid.
-    if metric_convention == "nemo_isotropic" and _is_variable_dlat:
+    _use_nemo_vpoint = (
+        metric_convention == "nemo_isotropic"
+        and _is_variable_dlat
+        and vface_zonal_metric_evaluation == "nemo_vpoint"
+    )
+    if _use_nemo_vpoint:
         # GATED ON A NON-UNIFORM MERIDIONAL COORDINATE, deliberately
         # (adversarial review finding 1).  The whole defect below exists only
         # because the meridional coordinate is NONLINEAR: on a uniform-dlat
@@ -1831,7 +1857,7 @@ def create_latlon_geometry(
         cos_lat_v = jnp.pad(cos_lat_v_interior, (1, 1))  # (n_lat+1,)
 
     # dx_v = R * cos(lat_v) * dlon — zonal extent of the v-face
-    if metric_convention == "nemo_isotropic" and _is_variable_dlat:
+    if _use_nemo_vpoint:
         # Same gate as the cos_lat_v branch above: on a uniform-dlat grid this
         # convention leaves the v-face zonal width alone entirely.
         # ``(radius * dlon) * cos`` -- the SAME association order the

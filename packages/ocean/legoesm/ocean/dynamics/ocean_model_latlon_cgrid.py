@@ -1410,6 +1410,8 @@ class LatLonCGridOceanModel:
                 )
         self.grid = ensure_geometry(
             grid, metric_convention=self.config.metric_convention,
+            vface_zonal_metric_evaluation=(
+                self.config.vface_zonal_metric_evaluation),
             coriolis_placement=self.config.coriolis_placement)
         # Push the meridionally-FLAT (Oceananigans `Flat`-y) mode to the grid-
         # operators backend PROCESS-GLOBAL (same pattern as the halo backend).
@@ -1788,6 +1790,13 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "metric_convention must be 'exact' or 'nemo_isotropic', got "
                 f"{config.metric_convention!r}"
+            )
+        if config.vface_zonal_metric_evaluation not in (
+                "legacy_tracer_midpoint", "nemo_vpoint"):
+            raise ValueError(
+                "vface_zonal_metric_evaluation must be "
+                "'legacy_tracer_midpoint' or 'nemo_vpoint', got "
+                f"{config.vface_zonal_metric_evaluation!r}"
             )
 
         # #1455: the vertex-Coriolis placement, same dispatch pattern.

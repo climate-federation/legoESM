@@ -92,7 +92,7 @@ def _fp64_storage():
     set_policy(prev)
 
 
-def _dino_geometry(convention: str):
+def _dino_geometry(convention: str, vface_evaluation: str = "nemo_vpoint"):
     """The NEMO-faithful DINO R1 grid + its C-grid geometry."""
     cfg = dataclasses.replace(
         nemo_faithful_dino_config(), metric_convention=convention)
@@ -101,6 +101,7 @@ def _dino_geometry(convention: str):
         n_lat=g.n_lat, n_lon=g.n_lon, lat_1d=g.lat, lon_1d=g.lon,
         lat_face_1d=g.lat_v, radius=g.radius,
         metric_convention=convention,
+        vface_zonal_metric_evaluation=vface_evaluation,
     )
     return g, geom
 
@@ -118,7 +119,34 @@ def dino_exact(_fp64_storage):
     return _dino_geometry("exact")
 
 
+@pytest.fixture(scope="module")
+def dino_legacy_vface(_fp64_storage):
+    return _dino_geometry("nemo_isotropic", "legacy_tracer_midpoint")
+
+
 class TestConstructionMatchesNemo:
+    def test_attribution_selector_moves_only_dx_v(
+            self, dino_iso, dino_legacy_vface):
+        """The climate counterfactual changes only the diagnosed owner.
+
+        The true faces and every metric other than e1v/dx_v must remain
+        bit-identical, while dx_v must reproduce the historical midpoint gap.
+        """
+        g_new, new = dino_iso
+        g_old, old = dino_legacy_vface
+        np.testing.assert_array_equal(np.asarray(g_new.lat_v),
+                                      np.asarray(g_old.lat_v))
+        for name in ("dx_T", "dy_T", "area_T", "dx_u", "dy_u", "dy_v",
+                     "area_q", "f_T", "f_u", "f_v"):
+            np.testing.assert_array_equal(
+                np.asarray(getattr(new, name)), np.asarray(getattr(old, name)),
+                err_msg=f"V-face attribution selector unexpectedly moved {name}")
+        assert not np.array_equal(np.asarray(new.dx_v), np.asarray(old.dx_v))
+        j = 1
+        nemo_width = NEMO_E1V_AT_VFACE[j][1]
+        legacy_gap = abs(float(old.dx_v[j, 26]) - nemo_width) / nemo_width
+        assert legacy_gap > 1e-6
+
     def test_vface_latitudes_are_nemos_gphiv(self, dino_iso):
         """The correspondence is by LATITUDE, so the width comparison below
         is not resting on an assumed halo offset."""

@@ -468,6 +468,7 @@ def bridge_nemo_to_legoesm_topo(
     f_rtol: float = 1e-9,
     full_step: bool = False,
     metric_convention: str = "auto",
+    vface_zonal_metric_evaluation: str = "nemo_vpoint",
     coriolis_placement: str = "cell_average",
     e3t_mode: str | None = None,
     nemo_e3w_source: str = "mesh_reference",
@@ -533,6 +534,10 @@ def bridge_nemo_to_legoesm_topo(
         more exact but less NEMO-faithful) reconstruction. Does not touch
         the v-face metric (#516) or the Coriolis/``f_rtol`` check below,
         which reads ``geom.f_T`` (unaffected by this flag).
+    vface_zonal_metric_evaluation : {"legacy_tracer_midpoint", "nemo_vpoint"}
+        Forwarded to :func:`create_latlon_geometry`.  This isolates only the
+        #1455 V-face zonal-width reconstruction while holding the detected
+        T/u metric convention and all other geometry fixed.
 
     ``e3t_mode`` selects which vertical ladder to build on, forwarded verbatim to
     :func:`effective_vertical_scale_factors`. ``None`` (the default, and the
@@ -603,6 +608,7 @@ def bridge_nemo_to_legoesm_topo(
         lat_1d=jnp.asarray(lat_1d), lon_1d=jnp.asarray(lon_1d),
         lat_face_1d=jnp.asarray(lat_face),
         metric_convention=metric_convention,
+        vface_zonal_metric_evaluation=vface_zonal_metric_evaluation,
         # Where the vertex Coriolis is EVALUATED.  Default "cell_average" is
         # bit-identical to every bridge caller; "face_latitude" reproduces
         # NEMO's own ff_f convention (2*omega*sin(gphif)).  See
