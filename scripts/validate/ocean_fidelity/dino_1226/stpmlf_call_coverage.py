@@ -135,7 +135,12 @@ CALLS: list[CallEntry] = [
               '"zdftke pdlr", "zdftke composite avt/avm" -- zdfphy.F90:286, '
               "nzdf_phy==np_TKE selected because DINO &namzdf sets ln_zdftke=.true. "
               "(the only True closure flag; ln_zdfric/ln_zdfgls/ln_zdfosm all "
-              "default False in namelist_ref and DINO does not set them)."),
+              "default False in namelist_ref and DINO does not set them). "
+              "IMPORT NOTE 2026-08-29: row 29 post-zdf_phy avm interior is "
+              "VERIFIED 0/9920 with its own controls; the census excludes "
+              "halos and does not claim legoESM executes NEMO's LBC. Import "
+              "dino_zdf_chain_end_artifact.json SHA256 "
+              "326540e6e642c55c1d925fa8e1a281c21f7f35784060b2b25438c83ceeaa0498."),
     CallEntry(190, "zdf_phy -> zdf_evd", COVERED,
               "part of the zdf_mxl/zdftke composite avt/avm gate rows above -- "
               "zdfphy.F90:323, DINO &namzdf sets ln_zdfevd=.true. (enhanced "
@@ -166,8 +171,9 @@ CALLS: list[CallEntry] = [
               "(eos+ldf_slp), not ldf_slp_triad. IMPORT NOTE 2026-08-29: "
               "row-30 prd and dumped j/W operands pass except one non-focus "
               "wslpi column; complete uslp/vslp remains DIVERGED. Import "
-              "dino_zdf_chain_end_artifact.json without "
-              "promoting this call."),
+              "dino_zdf_chain_end_artifact.json without promoting this call "
+              "(SHA256 "
+              "326540e6e642c55c1d925fa8e1a281c21f7f35784060b2b25438c83ceeaa0498)."),
     CallEntry(203, "ldf_tra", COVERED,
               '"ldftra ahtu (Redi, nn_aht_ijk_t=20)", "ldftra ahtv (Redi, '
               'nn_aht_ijk_t=20)", "ldf_eiv kappa (aeiu)" -- l_ldftra_time/'
@@ -276,6 +282,8 @@ CALLS: list[CallEntry] = [
               "solve at 89/9758 U and 265/9868 V failing columns while the "
               "literal dynzdf recurrence is 0 for both; keep ordered-blocked "
               "behind row 30 and import dino_zdf_chain_end_artifact.json. "
+              "Receipt SHA256 "
+              "326540e6e642c55c1d925fa8e1a281c21f7f35784060b2b25438c83ceeaa0498; "
               "probe closes the loop into a gate row."),
     CallEntry(315, "wzv (Naa cross-level velocity, 2nd call)", COVERED_UNMEASURED,
               'same routine as line 244 -- covered by the same "wzv '
@@ -416,7 +424,8 @@ CALLS: list[CallEntry] = [
               "volume-form receipt has 627/9920 T and 23/9920 S failing "
               "columns, all focus columns passing; it remains ordered-blocked "
               "behind row 30 and row 31. Import "
-              "dino_zdf_chain_end_artifact.json."),
+              "dino_zdf_chain_end_artifact.json SHA256 "
+              "326540e6e642c55c1d925fa8e1a281c21f7f35784060b2b25438c83ceeaa0498."),
     CallEntry(436, "tra_npc", WAIVED, "ln_zdfnpc=.false. (namelist_ref default) -- dead branch."),
 
     # --- finalize: boundary conditions, filtering, restart (lines 457-482) ---

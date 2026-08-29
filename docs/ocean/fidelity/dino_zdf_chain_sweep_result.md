@@ -45,8 +45,9 @@ and **23/9,920** salinity columns; all focus columns pass. Its disposition is
 `TARGETING-BLOCKED-BY-EARLIER-ROW`, not VERIFIED.
 
 The combined machine receipt is
-`docs/ocean/fidelity/dino_zdf_chain_end_artifact.json` (SHA256 filled by the
-packaging commit). Its one-cell-roll, one-ULP, wrong-`rDt`, and wrong-e3t-slot
+`docs/ocean/fidelity/dino_zdf_chain_end_artifact.json`, SHA256
+`326540e6e642c55c1d925fa8e1a281c21f7f35784060b2b25438c83ceeaa0498`.
+Its one-cell-roll, one-ULP, wrong-`rDt`, and wrong-e3t-slot
 controls all fire. The receipt SHA-binds the focus map, resolved runtime
 namelists/output, resolved NEMO executable, consumed dumps, restarts, and
 quoted oracle sources.
