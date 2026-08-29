@@ -474,6 +474,7 @@ def capture_face_sh2_call(model, state, forcing):
     real_tri = tke_mod._tridiag_thomas
     real_literal_tri = tke_mod._nemo_literal_tke_solve
     real_lc = tke_mod.nemo_langmuir_tke_source
+    real_etau = tke_mod.nemo_etau_injection
     real_prandtl = tke_mod._prandtl_number
     calls = []
     mxl_calls = []
@@ -481,6 +482,7 @@ def capture_face_sh2_call(model, state, forcing):
     tri_calls = []
     literal_tri_calls = []
     lc_calls = []
+    etau_calls = []
     prandtl_calls = []
 
     def spy(*args, **kwargs):
@@ -513,6 +515,11 @@ def capture_face_sh2_call(model, state, forcing):
         lc_calls.append((args, kwargs, out))
         return out
 
+    def spy_etau(*args, **kwargs):
+        out = real_etau(*args, **kwargs)
+        etau_calls.append((args, kwargs, out))
+        return out
+
     def spy_prandtl(*args, **kwargs):
         out = real_prandtl(*args, **kwargs)
         prandtl_calls.append((args, kwargs, out))
@@ -524,6 +531,7 @@ def capture_face_sh2_call(model, state, forcing):
     tke_mod._tridiag_thomas = spy_tri
     tke_mod._nemo_literal_tke_solve = spy_literal_tri
     tke_mod.nemo_langmuir_tke_source = spy_lc
+    tke_mod.nemo_etau_injection = spy_etau
     tke_mod._prandtl_number = spy_prandtl
     try:
         with jax.disable_jit():
@@ -535,6 +543,7 @@ def capture_face_sh2_call(model, state, forcing):
         tke_mod._tridiag_thomas = real_tri
         tke_mod._nemo_literal_tke_solve = real_literal_tri
         tke_mod.nemo_langmuir_tke_source = real_lc
+        tke_mod.nemo_etau_injection = real_etau
         tke_mod._prandtl_number = real_prandtl
     if not calls:
         raise AssertionError("avm_weighted_shear_production never fired")
@@ -542,6 +551,7 @@ def capture_face_sh2_call(model, state, forcing):
         raise AssertionError("TKE mixing-length/Langmuir/solve stages never fired")
     return real, calls[0], {
         "mxl_calls": mxl_calls, "lc_calls": lc_calls,
+        "etau_calls": etau_calls,
         "solve_calls": solve_calls, "tri_calls": tri_calls,
         "literal_tri_calls": literal_tri_calls,
         "prandtl_calls": prandtl_calls,
@@ -2502,6 +2512,92 @@ def main() -> int:
                                                 }
                                     row4["continuation_preview"]["rows"][
                                         "17_tke_tridiagonal_solve"] = row17m
+                                    if (row17m.get("pass")
+                                            and tke_capture["etau_calls"]):
+                                        etau_args, etau_kwargs, etau_out = (
+                                            tke_capture["etau_calls"][-1])
+                                        if len(etau_args) != 4:
+                                            raise AssertionError(
+                                                "unexpected etau call contract")
+                                        pre_etau_l = np.asarray(etau_args[0])
+                                        post_etau_l = np.asarray(etau_out)
+                                        post_etau_n_full = base._load_interior(
+                                            str(RUN / "tke_dump_en.bin"),
+                                            ni, nj)
+                                        netau = min(
+                                            post_etau_l.shape[-1],
+                                            post_etau_n_full.shape[-1] - 1,
+                                            wet_w_all.shape[-1])
+                                        post_etau_n = post_etau_n_full[
+                                            ..., 1:1 + netau]
+                                        wet_etau = wet_w_all[..., :netau]
+                                        row18m = metrics(
+                                            post_etau_l[..., :netau],
+                                            post_etau_n, wet_etau, focus,
+                                            POINTWISE_BAR)
+                                        pre_etau_n = postsolve_n[..., :netau]
+                                        increment_l = (
+                                            post_etau_l[..., :netau]
+                                            - pre_etau_l[..., :netau])
+                                        increment_n = (
+                                            post_etau_n - pre_etau_n)
+                                        row18m["disposition"] = (
+                                            "VERIFIED" if row18m["pass"]
+                                            else "DIVERGED")
+                                        row18m["exact"] = (
+                                            exact_difference_census(
+                                                post_etau_l[..., :netau],
+                                                post_etau_n, wet_etau, focus))
+                                        row18m["controls"] = planted_controls(
+                                            post_etau_n, post_etau_n,
+                                            wet_etau, POINTWISE_BAR)
+                                        row18m["operand_metrics"] = {
+                                            "pre_etau_en": metrics(
+                                                pre_etau_l[..., :netau],
+                                                pre_etau_n, wet_etau, focus,
+                                                1.0e-12),
+                                            "etau_increment": metrics(
+                                                increment_l, increment_n,
+                                                wet_etau, focus,
+                                                POINTWISE_BAR),
+                                            "selector": {
+                                                "nn_etau": 1,
+                                                "etau_mode":
+                                                    etau_args[3].etau_mode,
+                                                "htau_mode": etau_args[
+                                                    3].etau_htau_mode,
+                                                "nemo_line": (
+                                                    "cfgs/DINO/MY_SRC/"
+                                                    "zdftke.F90:588-592"),
+                                            },
+                                        }
+                                        row4["continuation_preview"]["rows"][
+                                            "18_etau_penetration"] = row18m
+                                        if not row18m["pass"]:
+                                            row4["continuation_preview"][
+                                                "first_divergence"] = {
+                                                    "row": 18,
+                                                    "operation": (
+                                                        "nn_etau=1 surface-TKE "
+                                                        "penetration"),
+                                                    "nemo_line": (
+                                                        "cfgs/DINO/MY_SRC/"
+                                                        "zdftke.F90:588-592"),
+                                                    "output": row18m,
+                                                    "first_failing_operand": {
+                                                        "name": (
+                                                            "etau additive "
+                                                            "increment"),
+                                                        "nemo_line": (
+                                                            "cfgs/DINO/MY_SRC/"
+                                                            "zdftke.F90:590-591"),
+                                                    },
+                                                    "operand_localization":
+                                                        row18m[
+                                                            "operand_metrics"],
+                                                    "controls": row18m[
+                                                        "controls"],
+                                                }
         if row4["disposition"] == "DIVERGED":
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
                 LatLonCGridOceanModel,
