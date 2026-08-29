@@ -56,6 +56,65 @@ def test_literal_prd_is_jittable_and_differentiable():
     assert np.isfinite(np.asarray(jax.grad(fn)(x)))
 
 
+def test_full_literal_slope_with_carried_w_bundle_has_finite_jit_gradient():
+    """The unused restored surface W slot must not inject 0*inf into AD."""
+    from legoesm.grids.latlon import create_latlon_grid, ensure_geometry
+    from legoesm.ocean.eos import make_eos_fn
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        compute_nemo_native_slopes,
+    )
+    from legoesm.ocean.vertical import (
+        create_partial_cell_coordinate,
+        create_z_star_from_thicknesses,
+    )
+
+    nlat, nlon, nlev = 4, 4, 4
+    dz = np.asarray([1.0, 2.0, 3.0, 4.0])
+    shape = (nlat, nlon, nlev)
+    horizontal = np.ones((nlat, nlon))
+    gdept = np.broadcast_to(np.asarray([0.5, 2.0, 4.5, 8.0]), shape)
+    gdepw = np.broadcast_to(np.asarray([0.0, 1.0, 3.0, 6.0]), shape)
+    e3w_mesh = np.broadcast_to(np.asarray([1.0, 1.5, 2.5, 3.5]), shape)
+    raw = create_z_star_from_thicknesses(
+        dz, nemo_gdept_0_m=gdept, nemo_gdepw_0_m=gdepw,
+        nemo_e3t_0_m=np.broadcast_to(dz, shape),
+        nemo_e3w_0_m=e3w_mesh,
+        nemo_hu_0_m=horizontal, nemo_hv_0_m=horizontal,
+        nemo_e1e2t_m=horizontal, nemo_e1e2u_m=horizontal,
+        nemo_e1e2v_m=horizontal)
+    z_coord = create_partial_cell_coordinate(
+        raw, jnp.full((nlat, nlon), float(dz.sum())))
+    grid = ensure_geometry(create_latlon_grid(n_lat=nlat, n_lon=nlon))
+    lat = jnp.arange(nlat, dtype=jnp.float64)[:, None, None]
+    lon = jnp.arange(nlon, dtype=jnp.float64)[None, :, None]
+    lev = jnp.arange(nlev, dtype=jnp.float64)[None, None, :]
+    T = 12.0 - 0.4 * lev + 0.03 * lat + 0.02 * lon
+    S = 35.0 + 0.01 * lev - 0.002 * lat
+    mask = jnp.ones((nlat, nlon), dtype=jnp.float64)
+    umask = jnp.ones((nlat, nlon + 1), dtype=jnp.float64)
+    vmask = jnp.ones((nlat + 1, nlon), dtype=jnp.float64)
+    cfg = GMRediConfig(slope_prd_evaluation="nemo_literal")
+    eos_fn = make_eos_fn("nemo_seos", None, rho0=1026.0)
+    carried_n2 = jnp.full((nlat, nlon, nlev - 1), 1.0e-5)
+    carried_e3w = jnp.broadcast_to(
+        jnp.asarray([1.5, 2.5, 3.5]), carried_n2.shape)
+
+    def objective(temperature):
+        rho = 1026.0 + 0.2 * (10.0 - temperature)
+        slopes = compute_nemo_native_slopes(
+            rho, temperature, S, mask, umask, vmask, z_coord, grid, cfg,
+            eos_fn, active_3d=z_coord.is_active,
+            pn2_override=carried_n2, e3w_override=carried_e3w)
+        return sum(jnp.sum(field) for field in slopes)
+
+    eager = jax.grad(objective)(T)
+    compiled = jax.jit(jax.grad(objective))(T)
+    assert np.all(np.isfinite(np.asarray(eager)))
+    assert np.all(np.isfinite(np.asarray(compiled)))
+    np.testing.assert_allclose(np.asarray(compiled), np.asarray(eager),
+                               rtol=1.0e-12, atol=1.0e-14)
+
+
 def test_row30_selectors_are_scoped_to_the_two_dino_nemo_cards():
     faithful = {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}
     for name in DINO_RECIPES:

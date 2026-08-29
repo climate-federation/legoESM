@@ -1077,6 +1077,7 @@ def compute_nemo_native_slopes(
     e3w, wmask3, pn2 = _nemo_wpoint_e3w_wmask_n2(
         rho, T, S, z_coord, eos_fn, rho_0, g, act,
         slope_n2=getattr(cfg, 'slope_n2', 'adiabatic'), jacobian=jacobian)
+    _e3w_surface = e3w[..., :1]
     if pn2_override is not None:
         pn2 = jnp.asarray(pn2_override, dtype=dtype)
         # The step-entry eosbn2 bundle stores NEMO levels 2:jpk (nlev-1),
@@ -1093,10 +1094,14 @@ def compute_nemo_native_slopes(
         e3w = jnp.asarray(e3w_override, dtype=dtype)
         # The step-entry bundle stores the interior W interfaces (NEMO
         # levels 2:jpk), whereas ldf_slp's local array also has the unused
-        # surface slot.  Restore that slot without reconstructing any live
-        # geometry; the k=0 slope is prescribed zero below.
+        # surface slot.  Restore its finite live-geometry value: a zero
+        # placeholder would be primal-inert after the prescribed surface-slope
+        # overwrite, but the vectorized limiter evaluates 1/e3w first and
+        # reverse mode would see 0*inf -> NaN.
         if e3w.shape[-1] == nlev - 1:
-            e3w = jnp.concatenate([jnp.zeros_like(e3w[..., :1]), e3w], axis=-1)
+            surface_shape = e3w.shape[:-1] + (1,)
+            surface_e3w = jnp.broadcast_to(_e3w_surface, surface_shape)
+            e3w = jnp.concatenate([surface_e3w, e3w], axis=-1)
         elif e3w.shape[-1] != nlev:
             raise ValueError(
                 "e3w_override must contain nlev or nlev-1 W levels, got "
