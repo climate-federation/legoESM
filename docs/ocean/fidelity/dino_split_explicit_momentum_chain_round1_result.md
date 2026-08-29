@@ -73,7 +73,7 @@ no legoESM `F_slow_eta` while freshwater closure is inactive.
 - `fidelity_bar_gate.classify` supplied all verdicts. The receipt records its
   correlation, mean-absolute-ratio, and arithmetic-class per-element axes.
 - Clean Git commit before/after:
-  `c6cb3764d36bdeb0f993080227260aead9e1a52c`.
+  `69446f08f9bad339a3566a4e8ca391926d77365e`.
 - Identical arrays classified `AT BAR`; the planted `1e-6` RMS-scale offset
   traversed the same `fidelity_bar_gate.classify` path and classified `DEBT`;
   perturbing the actual legoESM binding also changed its score.

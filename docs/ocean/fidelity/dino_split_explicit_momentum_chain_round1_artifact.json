@@ -112,7 +112,7 @@
   "git": {
     "clean_after": true,
     "clean_before": true,
-    "commit": "c6cb3764d36bdeb0f993080227260aead9e1a52c"
+    "commit": "69446f08f9bad339a3566a4e8ca391926d77365e"
   },
   "jax_enable_x64": true,
   "lane": "d180",
@@ -327,7 +327,7 @@
   ],
   "provenance_sha256": {
     "fidelity_bar_gate": "a3cb0db9533155ee828a3ec87035f553be1f040509823dd94c85a4f9eba7a76d",
-    "inherited_probe": "0810ff2ffea4e55049df867c814ff24414248b9f3d23dbc37ffea66293d0b426",
+    "inherited_probe": "e35e323a5e90bf84d5370cd6389c38ca61edae4c333e7c03e1756fec4604a132",
     "nemo_dynspg_ts": "a64b32e7c9ce1c1be6c121597235b08f05c853961e83d52be6082ea7242f6275",
     "nemo_stpmlf": "26849c4fa34305317881959dd5a1e41af9b13aa4f96a290a998add955a73a283",
     "production_barotropic": "b837dea5562d5230401ee60c2f020b8146a20bcc266dbc5bf68738917a531598",
