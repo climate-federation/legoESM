@@ -3,6 +3,136 @@
 Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 (`RUN_SEQDUMP_D180_1R`, `kt=5761`).
 
+## Round-17 result: row 18 VERIFIED; ordered stop at row 19 bracket
+
+The native-degree carry and the pure-JAX transcription of the host's glibc
+2.34 `_ZGVbN2v_sin` are implemented.  The active IFUNC resolves to the SSE4
+two-lane implementation at `libmvec.so.1+0x3d70`; the production literal arm
+preserves its seven Horner coefficients and each binary64 multiply/add
+rounding point over DINO's geographic argument interval.  The NEMO bridge now
+carries `NemoGrid.gphit` in degrees without a radians round trip.  Generic
+geometry retains `native_lat_T_deg=None`.
+
+The production rerun of row 18 is **VERIFIED** at the preregistered `1e-15`
+per-column bar: **0/9,920** failing columns, maximum column error **0**, and
+**0/4** southern focus failures.  The exponential operand and complete
+injection also clear in the actual production selector.  The legacy
+native-degree-plus-JAX-sine red arm still fails 21/9,920 columns, so the test
+can detect removal of the literal vector sine.  The +1-ULP phase, +1-ULP
+operand, row-roll, nonfinite, and value controls all fire.
+
+NEMO's live line is:
+
+```fortran
+htau(:,:) = MAX( 0.5_wp, MIN( 30._wp, 45._wp * &
+   ABS( SIN( rpi/180._wp * gphit(A2D(0)) ) ) ) )
+```
+
+Source: upstream `src/OCE/ZDF/zdftke.F90:870`; active instrumented DINO
+override `cfgs/DINO/MY_SRC/zdftke.F90:1087` after the row-19 slot patch.
+
+Scope is fail-closed:
+
+| Reachable card/config | `tke_htau_evaluation` | Change |
+|---|---|---|
+| `nemo_dino_kamm` | `nemo_literal` | native degrees + glibc-vector-SIN arithmetic |
+| `nemo_dino_kamm_mlf` | inherited `nemo_literal` | same |
+| every other DINO card | `jax_expression` | byte-identical legacy expression |
+| generic/non-DINO TKE consumers | `jax_expression` | byte-identical legacy default |
+
+Selecting the literal arm without bridge-carried native degrees raises rather
+than silently reconstructing them.  The focused CPU/fp64 suite reports 57/57
+tests passing, including hard-coded ULP cases, eager/JIT identity, forward and
+reverse AD, legacy-expression identity, selector scope, and bridge/slicer
+coverage.  No GPU was used.
+
+### Ordered row-19 hold and provisional downstream census
+
+The preregistered `tke_dump_zmxlm_raw.bin` write-only patch is built and its
+committed scorer requires the registered 2,980,224-byte size, SHA-bound raw
+stream, byte-identical restart, identical shared physics streams, time-level
+registry entry, focus census, and three planted controls.  This managed
+sandbox cannot execute the required one-rank bracket: `mpirun -np 1` is denied
+while creating its PMIx listener socket.  Directly invoking the executable
+reaches the dump but fails during MPI shutdown and leaves an invalid restart;
+that raw stream was used only as a discriminator and is explicitly
+**non-citable**.
+
+The discriminator assigns the candidate row-19 owner exactly to NEMO's source
+association, including `rsmall=0.5*EPSILON(1.e0)` under
+`-fdefault-real-8`:
+
+```fortran
+zrn2 = MAX( rn2(ji,jj,jk), rsmall )
+zmxlm(ji,jk) = MAX( rmxl_min, SQRT( 2._wp * en(ji,jj,jk) / zrn2 ) )
+```
+
+Source before insertion: `cfgs/DINO/MY_SRC/zdftke.F90:831-833`; after the
+write-only insertion: `:833-834`.  The production option
+`tke_mxl_raw_evaluation="nemo_literal"` preserves that association and the
+`jpkm1` downward-scan seed.  It is selected only by the two complete DINO
+oracle cards; `factored` remains byte-identical everywhere else.  This remains
+a **provisional fix** until the clean bracket runs.
+
+**LOUD RETRACTION:** the earlier provisional row-20 all-column divergence was
+manufactured by comparing NEMO W rows `0:35` with the production bridge's
+rows `1:36`.  The committed tool now uses the bridge's actual `[...,1:jpk]`
+mapping.  With that mapping, the literal raw association, carried step-entry
+`e3t(Kmm)`, QCO's wet-only `Tmsk` stretch, and NEMO's untouched `jpk` seed,
+the production row-19+20 composite is exact: `zmxlm` **0/9,920** and `zmxld`
+**0/9,920**, maximum 0 for both, with all focus columns passing.  Its formal
+label is `PROVISIONAL-VERIFIED-BLOCKED-BY-ROW19`, not VERIFIED.
+
+The corrected no-new-dump tail also gives row 22 at 0/9,920 (maximum
+normalized error `2.333494e-16`) and row 27's source/object identity exact.
+Rows 21, 23, 25-26, 28-29 remain unmeasured because they lack a production
+operand slot or invoke only an oracle self-check.  Row 30 remains the first
+provisional later divergence: its `prd` operand fails 9,920/9,920, including
+all focus columns, before any slope recurrence.  Rows 31-32 remain deferred;
+their volume-form substitution probes cannot be promoted across the ordered
+row-19 stop (and row 32 additionally depends on row 30's K33/slopes).
+
+The exact outside-sandbox row-19 run is:
+
+```bash
+source /home/dbalwada/miniconda3/etc/profile.d/conda.sh
+conda activate nemo-build
+export TMPDIR=/tmp XDG_CACHE_HOME=/tmp/nemo-row19-xdg
+
+nemo_src=/tmp/nemo-row18-operands.FSpBiV
+test "$(sha256sum "$nemo_src/cfgs/DINO/MY_SRC/zdftke.F90" | awk '{print $1}')" = \
+  5cc4ce8b8d5c681b1bed22f1349fabbd3b6317e219c21519856d123695ac457
+test -x "$nemo_src/cfgs/DINO/BLD/bin/nemo.exe"
+
+run19=$(mktemp -d /tmp/RUN_ZDF19_RAW_ON.XXXXXX)
+cp -a /tmp/RUN_ZDF18_OPERANDS_ON.tnC9wz/. "$run19/"
+ln -sfn "$nemo_src/cfgs/DINO/BLD/bin/nemo.exe" "$run19/nemo"
+( cd "$run19" && mpirun -np 1 ./nemo > run.log 2>&1 )
+test "$(stat -c %s "$run19/tke_dump_zmxlm_raw.bin")" -eq 2980224
+sha256sum "$run19/DINO_00005761_restart.nc" \
+  "$run19/tke_dump_zmxlm_raw.bin"
+```
+
+Then bind those two printed SHAs with:
+
+```bash
+CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
+PYTHONPATH=packages/atmosphere:packages/core:packages/coupler:packages/ice:\
+packages/land:packages/ml:packages/ocean:packages/tools \
+python scripts/validate/ocean_fidelity/dino_1226/zdf_row19_raw_mxl.py \
+  --run-dir "$run19" \
+  --bracket-dir /tmp/RUN_ZDF18_OPERANDS_ON.tnC9wz \
+  --mld-maps /tmp/dino_mld_audit_codex/mld_maps.npz \
+  --nemo-source "$nemo_src/cfgs/DINO/MY_SRC/zdftke.F90" \
+  --expected-raw-sha RAW_SHA_PRINTED_ABOVE \
+  --expected-restart-sha 33c0c1a2e998161afdc9d4b71c5606f5cc5d869e54d53058fc0f64eeac7a115c \
+  --output /tmp/dino_zdf_row19_raw_mxl_artifact.json
+```
+
+The ordered frontier is row 19, so the climate arms remain unauthorized.
+The frozen prediction and arm commands are unchanged; running them now would
+violate the preregistered chain-clean condition.
+
 ## Round-16 result: row 18 localized to a two-operand `htau` interaction
 
 Row 18 remains the ordered stop, now with its owner fully localized. The
@@ -144,7 +274,7 @@ past the unresolved row 18.
 
 | Row | Operation | Qualified disposition | Whole-domain column result | Southern focus |
 |---:|---|---|---|---|
-| 19 | raw buoyancy length | `UNMEASURED-NEEDS-DUMP` | existing length slots are post-scan | needs raw slot |
+| 19 | raw buoyancy length | `UNMEASURED-NEEDS-CLEAN-BRACKET` | raw slot prepared; managed sandbox blocks PMIx | clean outside-sandbox rerun required |
 | 20 | `nn_mxl=3` scans, row-19+20 composite | `DIVERGED` | `zmxlm` and `zmxld`: 9,920/9,920 fail; maxima `2.042006` and `2.073254` | 4/4 fail both |
 | 21 | base `avm/avt/dissl` | `UNMEASURED-NEEDS-DUMP` | isolated base `avm` is exact, 0/9,920; pre-Prandtl `avt` and post-overwrite `dissl` lack slots | `avm` 4/4 exact |
 | 22 | inverse-Prandtl `avt` | `VERIFIED` | 0/9,920; max `2.367838e-16` | 4/4 pass |

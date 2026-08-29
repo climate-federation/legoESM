@@ -293,6 +293,87 @@ def test_only_complete_dino_nemo_cards_select_literal_etau_exp():
                for c in unchanged)
 
 
+def test_only_complete_dino_nemo_cards_select_literal_htau():
+    faithful = {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}
+    for name, values in DINO_RECIPES.items():
+        resolved = values.get("tke_htau_evaluation", "jax_expression")
+        assert resolved == (
+            "nemo_literal" if name in faithful else "jax_expression"), name
+        if values.get("vmix_scheme") == "tke":
+            built = dino_mod._dino_vertical_mixing_config(
+                dino_config_for_recipe(name)).tke
+            assert built.tke_htau_evaluation == resolved, name
+
+    # All independently constructed consumers retain their historical path.
+    unchanged = (TKEConfig(), _nemo_tke_config(), ACC_TKE_CONFIG,
+                 ACC_BASIC_TKE_CONFIG)
+    assert all(c.tke_htau_evaluation == "jax_expression" for c in unchanged)
+
+
+def test_only_complete_dino_nemo_cards_select_literal_raw_mxl():
+    faithful = {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}
+    for name, values in DINO_RECIPES.items():
+        resolved = values.get("tke_mxl_raw_evaluation", "factored")
+        assert resolved == (
+            "nemo_literal" if name in faithful else "factored"), name
+        if values.get("vmix_scheme") == "tke":
+            built = dino_mod._dino_vertical_mixing_config(
+                dino_config_for_recipe(name)).tke
+            assert built.tke_mxl_raw_evaluation == resolved, name
+    unchanged = (TKEConfig(), _nemo_tke_config(), ACC_TKE_CONFIG,
+                 ACC_BASIC_TKE_CONFIG)
+    assert all(c.tke_mxl_raw_evaluation == "factored" for c in unchanged)
+
+
+@pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
+def test_literal_raw_mxl_matches_hand_computed_source_order_and_red_control():
+    e = jnp.asarray([[float.fromhex("0x1.f59eccb1e87d9p-15"), 2.0e-6]])
+    n2 = jnp.asarray([[float.fromhex("-0x1.bb25cc435cf35p-32"), 1.0e-5]])
+    dz = jnp.full((1, 3), 1.0e12)
+    cfg = TKEConfig(tke_mxl_choice=3, mxl_min=0.01,
+                    tke_mxl_raw_evaluation="nemo_literal")
+    lk, _ = tke_mod.compute_mixing_lengths(e, n2, dz[..., :2], cfg,
+                                            dz_cell=dz)
+    rsmall = 0.5 * np.finfo(np.float64).eps
+    raw = np.maximum(0.01, np.sqrt((2.0 * np.asarray(e))
+                                   / np.maximum(np.asarray(n2), rsmall)))
+    # With a huge dz allowance, the scan retains the raw physical interior;
+    # the final carried slot is NEMO's untouched jpk pad.
+    raw[..., -1] = 0.01
+    np.testing.assert_array_equal(np.asarray(lk).view(np.uint64),
+                                  raw.view(np.uint64))
+
+    factored, _ = tke_mod.compute_mixing_lengths(
+        e, n2, dz[..., :2],
+        cfg._replace(tke_mxl_raw_evaluation="factored"), dz_cell=dz)
+    assert np.asarray(factored)[0, 0].view(np.uint64) != raw[0, 0].view(np.uint64)
+
+    with pytest.raises(ValueError, match="tke_mxl_raw_evaluation"):
+        tke_mod.compute_mixing_lengths(
+            e, n2, dz[..., :2],
+            cfg._replace(tke_mxl_raw_evaluation="unknown"), dz_cell=dz)
+
+
+def test_literal_mxl_ldown_keeps_jpk_terminal_seed_unmodified():
+    e = jnp.asarray([[2.0, 3.0, 1.0e8]])
+    n2 = jnp.full_like(e, 1.0e-12)
+    dz_cell = jnp.asarray([[1.0, 2.0, 3.0, 4.0]])
+    cfg = TKEConfig(tke_mxl_choice=3, mxl_min=0.01,
+                    mxl0_min_m=0.01,
+                    tke_mxl_raw_evaluation="nemo_literal")
+    lk, _ = tke_mod.compute_mixing_lengths(
+        e, n2, jnp.ones_like(e), cfg, dz_cell=dz_cell,
+        l_surface_anchor=jnp.asarray([0.01]))
+    # The final carried slot is NEMO's untouched jpk pad, not another raw
+    # buoyancy-length row.  The old recurrence produced 4.01 here.
+    assert float(lk[0, -1]) == 0.01
+    legacy, _ = tke_mod.compute_mixing_lengths(
+        e, n2, jnp.ones_like(e),
+        cfg._replace(tke_mxl_raw_evaluation="factored"),
+        dz_cell=dz_cell, l_surface_anchor=jnp.asarray([0.01]))
+    assert float(legacy[0, -1]) != 0.01
+
+
 @pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
 def test_literal_etau_exp_matches_oracle_bits_and_one_ulp_control_fires():
     # First selected row-18 ownership-control operand, plus ordinary-range
@@ -352,6 +433,58 @@ def test_literal_etau_exp_exceptional_range_guard_and_float32_fallback():
         np.asarray(jnp.exp(fp32)))
 
 
+@pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
+def test_literal_htau_sin_matches_glibc_vector_bits_and_ulp_control_fires():
+    # Native DINO gphit phases at rows 0, 48, the equator, 150 and 198.
+    # Expected values are the committed host glibc-2.34 _ZGVbN2v_sin receipt.
+    phase = np.asarray([
+        float.fromhex("-0x1.3819bd7e1e04dp+0"),
+        float.fromhex("-0x1.9547a4d0d912dp-1"),
+        0.0,
+        float.fromhex("0x1.9547a4d0d912dp-1"),
+        float.fromhex("0x1.3819bd7e1e04dp+0"),
+    ], dtype=np.float64)
+    expected = np.asarray([
+        float.fromhex("-0x1.e0aaf9456437fp-1"),
+        float.fromhex("-0x1.6c436eb8210dfp-1"),
+        0.0,
+        float.fromhex("0x1.6c436eb8210dfp-1"),
+        float.fromhex("0x1.e0aaf9456437fp-1"),
+    ], dtype=np.float64)
+    actual = np.asarray(jax.jit(tke_mod._nemo_glibc234_vector_sin)(
+        jnp.asarray(phase)))
+    np.testing.assert_array_equal(actual.view(np.uint64),
+                                  expected.view(np.uint64))
+
+    planted = phase.copy()
+    planted[0] = np.nextafter(planted[0], np.inf)
+    planted_actual = np.asarray(tke_mod._nemo_glibc234_vector_sin(
+        jnp.asarray(planted)))
+    assert planted_actual[0].view(np.uint64) != expected[0].view(np.uint64)
+
+
+@pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
+def test_literal_htau_sin_jit_ad_and_range_guard():
+    phase = jnp.asarray([-1.2, -0.3, 0.4, 1.2], dtype=jnp.float64)
+    eager = tke_mod._nemo_glibc234_vector_sin(phase)
+    compiled = jax.jit(tke_mod._nemo_glibc234_vector_sin)(phase)
+    np.testing.assert_array_equal(np.asarray(eager).view(np.uint64),
+                                  np.asarray(compiled).view(np.uint64))
+    assert np.all(np.isfinite(np.asarray(
+        jax.jacfwd(tke_mod._nemo_glibc234_vector_sin)(phase))))
+    assert np.all(np.isfinite(np.asarray(
+        jax.jacrev(tke_mod._nemo_glibc234_vector_sin)(phase))))
+
+    outside = jnp.asarray([2.0, -2.0], dtype=jnp.float64)
+    np.testing.assert_array_equal(
+        np.asarray(tke_mod._nemo_glibc234_vector_sin(outside)).view(np.uint64),
+        np.asarray(jnp.sin(outside)).view(np.uint64))
+    fp32 = jnp.asarray([-0.3, 0.4], dtype=jnp.float32)
+    np.testing.assert_array_equal(
+        np.asarray(tke_mod._nemo_glibc234_vector_sin(fp32)),
+        np.asarray(jnp.sin(fp32)))
+
+
 def test_etau_jax_expression_is_the_legacy_expression_byte_for_byte():
     e = jnp.asarray([[1.0e-6, 2.0e-6]])
     taum = jnp.asarray([0.08])
@@ -370,6 +503,23 @@ def test_etau_jax_expression_is_the_legacy_expression_byte_for_byte():
         tke_mod.nemo_etau_injection(
             e, taum, depth,
             cfg._replace(tke_etau_exponential_evaluation="unknown"))
+
+
+def test_htau_jax_expression_is_legacy_expression_byte_for_byte():
+    lat_deg = jnp.asarray([[-69.151, 0.0, 43.7]])
+    cfg = TKEConfig(tke_htau_evaluation="jax_expression")
+    actual = tke_mod._nemo_etau_htau(lat_deg, cfg, jnp.float64)
+    expected = jnp.maximum(
+        tke_mod._NEMO_TKE_HTAU_MIN_M,
+        jnp.minimum(
+            tke_mod._NEMO_TKE_HTAU_MAX_M,
+            tke_mod._NEMO_TKE_HTAU_SLOPE_M
+            * jnp.abs(jnp.sin(jnp.deg2rad(lat_deg)))))
+    np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+
+    with pytest.raises(ValueError, match="tke_htau_evaluation"):
+        tke_mod._nemo_etau_htau(
+            lat_deg, cfg._replace(tke_htau_evaluation="unknown"), jnp.float64)
 
 
 def test_only_complete_dino_nemo_cards_freeze_step_entry_shear():
@@ -446,9 +596,11 @@ def test_step_entry_n2_bundle_matches_live_geometry_construction():
         g=constants.g, e3w_int=e3w, e3w_source="mesh_reference", **literal)
     np.testing.assert_array_equal(got.rn2, expected_now)
     np.testing.assert_array_equal(got.rn2b, expected_before)
-    np.testing.assert_array_equal(
-        got.e3t_Kmm,
-        np.asarray(model.z_coord.nemo_e3t_0) * np.asarray(stretch)[..., None])
+    raw_e3t = np.asarray(model.z_coord.nemo_e3t_0)
+    wet_e3t = raw_e3t * np.asarray(stretch)[..., None]
+    expected_e3t = np.where(
+        np.asarray(model.z_coord.is_active, dtype=bool), wet_e3t, raw_e3t)
+    np.testing.assert_array_equal(got.e3t_Kmm, expected_e3t)
     np.testing.assert_array_equal(got.gdepw_Kmm, gdepw)
     np.testing.assert_array_equal(got.e3w_Kmm, e3w)
 

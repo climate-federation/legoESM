@@ -5883,7 +5883,19 @@ class LatLonCGridOceanModel:
                 S_before = extrapolate_below_seafloor(S_before, _zc)
             rn2b = compute_buoyancy_frequency_nemo_bn2(
                 T_before, S_before, gdept, gdepw, **_n2_kwargs)
-        e3t = jnp.asarray(e3t_0) * zrw_stretch[..., jnp.newaxis]
+        e3t_0_array = jnp.asarray(e3t_0)
+        tmask = getattr(_zc, "is_active", None)
+        if tmask is None:
+            e3t = e3t_0_array * zrw_stretch[..., jnp.newaxis]
+        else:
+            # key_qco macro, domzgr_substitute.h90:46/126:
+            # E3t_0 * (1 + r3t*tmask).  Dry/pad T slots stay at raw-mesh
+            # E3t_0; stretching them changed the ldown carry in shelf columns.
+            # where() preserves the already-verified wet multiplication bits.
+            e3t = jnp.where(
+                jnp.asarray(tmask, dtype=bool),
+                e3t_0_array * zrw_stretch[..., jnp.newaxis],
+                e3t_0_array)
         return TKEEntryN2Bundle(
             rn2=rn2, rn2b=rn2b, gdepw_Kmm=gdepw, e3w_Kmm=e3w,
             e3t_Kmm=e3t)
@@ -6800,6 +6812,17 @@ class LatLonCGridOceanModel:
                 or (_vmix_cfg.scheme == "tke"
                     and bool(getattr(_vmix_cfg.tke, "prognostic", False)))
             )
+            _tke_cfg = _vmix_cfg.tke
+            if (getattr(_tke_cfg, "tke_htau_evaluation", "jax_expression")
+                    == "nemo_literal"):
+                _tke_lat_deg = getattr(_grid, "native_lat_T_deg", None)
+                if _tke_lat_deg is None:
+                    raise ValueError(
+                        "tke_htau_evaluation='nemo_literal' requires native "
+                        "T-point degree latitudes carried by the NEMO state "
+                        "bridge; grid.native_lat_T_deg is None")
+            else:
+                _tke_lat_deg = jnp.degrees(_grid.lat_T)
             if _tke_prognostic:
                 _tke_p_sh2 = self._tke_step_entry_p_sh2(
                     state, eta_now=eta_now, u_now=u_now, v_now=v_now,
@@ -6822,7 +6845,7 @@ class LatLonCGridOceanModel:
                     # the legacy 1-D grid.lat is a row mean) — a 1-D (n_lat,)
                     # array cannot right-broadcast against the (n_lat, n_lon,
                     # nlev-1) columns inside nemo_etau_injection.
-                    lat_deg=jnp.degrees(_grid.lat_T),
+                    lat_deg=_tke_lat_deg,
                     iwm_fields=_iwm,
                     n2_tracers=n2_tracers,
                     tke_bottom_dirichlet=self._tke_bottom_dirichlet(state, z_coord=z_coord, config=config, grid=_grid),
@@ -6852,7 +6875,7 @@ class LatLonCGridOceanModel:
                     A_v_background=float(_cfg_b.A_v),
                     K_v_background=float(_cfg_b.K_v),
                     eos_fn=_vmix_eos_fn,
-                    lat_deg=jnp.degrees(_grid.lat_T),
+                    lat_deg=_tke_lat_deg,
                     iwm_fields=_iwm,
                     n2_tracers=n2_tracers,
                     n2_tracers_before=n2_tracers_before,

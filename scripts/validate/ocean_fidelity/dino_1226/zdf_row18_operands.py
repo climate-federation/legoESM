@@ -252,14 +252,10 @@ def main() -> int:
     exp_n = interior("tke_dump_etau_exp.bin")[..., 1:1 + netau]
     post_n = interior("tke_dump_en.bin")[..., 1:1 + netau]
 
-    htau_l_2d = np.asarray(jnp.maximum(
-        tke_mod._NEMO_TKE_HTAU_MIN_M,
-        jnp.minimum(
-            tke_mod._NEMO_TKE_HTAU_MAX_M,
-            tke_mod._NEMO_TKE_HTAU_SLOPE_M
-            * jnp.abs(jnp.sin(jnp.deg2rad(etau_kwargs["lat_deg"]))),
-        ),
-    ))
+    # Score the production selector, not a duplicated legacy expression.  The
+    # selected DINO card must receive the bridge-carried native gphit degrees.
+    htau_l_2d = np.asarray(tke_mod._nemo_etau_htau(
+        etau_kwargs["lat_deg"], etau_args[3], pre_l.dtype))
     htau_l = np.broadcast_to(htau_l_2d[..., None], gdepw_l.shape)[..., :netau]
     gdepw_l = gdepw_l[..., :netau]
 

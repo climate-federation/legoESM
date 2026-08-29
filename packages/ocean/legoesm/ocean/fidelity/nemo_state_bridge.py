@@ -604,6 +604,10 @@ def bridge_nemo_to_legoesm_topo(
         # create_latlon_geometry's docstring for the measured gap.
         coriolis_placement=coriolis_placement,
     )
+    # Preserve the oracle mesh's native degree values.  Reconstructing these
+    # later as degrees(lat_T) loses a few ULPs and changes NEMO's literal
+    # latitude-dependent etau profile on every wet column.
+    geom = geom._replace(native_lat_T_deg=jnp.asarray(gphit))
     # Partial-periodic seam wall (NEMO DINO): ALL interior cells are wet,
     # but the zonal seam u-face is closed outside the ACC channel — carried
     # on the geometry so every mask derivation (2-D/3-D face, vertex,

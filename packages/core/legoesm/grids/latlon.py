@@ -1313,6 +1313,14 @@ class LatLonCGridGeometry(NamedTuple):
     # ``n_lat`` (``None`` passes through unchanged).
     seam_wall_rows: jax.Array | None = None
 
+    # Optional native T-point latitude in degrees.  NEMO evaluates a few
+    # source profiles from the mesh's stored ``gphit`` values, before any
+    # degree->radian->degree coordinate round trip.  The bridge alone fills
+    # this field; regular/tripolar constructors retain ``None`` so existing
+    # grids have the same pytree leaves and arithmetic as before.  Appended
+    # at the NamedTuple end to preserve positional callers.
+    native_lat_T_deg: jax.Array | None = None
+
     # ------------------------------------------------------------------
     # GridProtocol properties
     # ------------------------------------------------------------------

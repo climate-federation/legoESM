@@ -174,6 +174,9 @@ def test_topo_bridge_geometry_matches_nemo_metrics():
     assert np.max(np.abs(np.asarray(geom.dx_T) - grid.e1t)) < 1e-4 * grid.e1t.max()
     assert np.max(np.abs(np.asarray(geom.dy_T) - grid.e2t)) < 1e-4 * grid.e2t.max()
     assert out.f_match_max_abs < 1e-3 * np.abs(grid.ff_t).max()
+    # Native degrees are a first-class oracle operand: a radian round trip is
+    # allowed to differ by ULPs, but this carried field must not.
+    np.testing.assert_array_equal(np.asarray(geom.native_lat_T_deg), grid.gphit)
 
 
 def test_topo_bridge_metric_convention_default_is_bit_identical():

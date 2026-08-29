@@ -598,6 +598,15 @@ class TKEConfig(NamedTuple):
     # ordinary-range glibc-2.34 vector EXP linked into the DINO oracle; only
     # the two complete DINO oracle cards select it.
     tke_etau_exponential_evaluation: str = "jax_expression"
+    # Latitude-profile arithmetic for nn_htau=1. ``jax_expression`` is the
+    # historical jnp.deg2rad+jnp.sin path. ``nemo_literal`` consumes native
+    # mesh degrees and transcribes glibc-2.34's two-lane vector SIN arithmetic.
+    # Only complete DINO oracle cards select it.
+    tke_htau_evaluation: str = "jax_expression"
+    # Raw nn_mxl buoyancy length. ``factored`` preserves the historical
+    # sqrt(2)*sqrt(e)/sqrt(max(N2,1e-12)) expression. ``nemo_literal`` uses
+    # zdftke.F90 source association and NEMO's runtime rsmall.
+    tke_mxl_raw_evaluation: str = "factored"
     # Langmuir source evaluation. ``vectorized`` is the historical shared
     # construction. ``nemo_literal`` preserves zdftke.F90:422-463 operation
     # order, including the per-column mbkt+1 no-crossing fallback. Only the

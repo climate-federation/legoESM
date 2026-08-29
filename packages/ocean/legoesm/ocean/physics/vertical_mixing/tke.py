@@ -726,10 +726,26 @@ def compute_mixing_lengths(
                 "bounding sweeps.")
         # buoyancy length sqrt(2e)/N at interior interfaces, AD-safe at the
         # negative-TKE debt (same double-where idiom as choice 1/2).
-        sqrt2e = jnp.sqrt(2.0) * jnp.where(
-            e > 0.0, jnp.sqrt(jnp.where(e > 0.0, e, 1.0)), 0.0)
-        N_safe = jnp.sqrt(jnp.maximum(N2, 1.0e-12))
-        l_int = jnp.maximum(sqrt2e / N_safe, cfg.mxl_min)     # (..., nlev-1)
+        raw_evaluation = getattr(cfg, "tke_mxl_raw_evaluation", "factored")
+        if raw_evaluation == "factored":
+            # Historical shared expression: keep byte-identical for every
+            # non-DINO consumer.
+            sqrt2e = jnp.sqrt(2.0) * jnp.where(
+                e > 0.0, jnp.sqrt(jnp.where(e > 0.0, e, 1.0)), 0.0)
+            N_safe = jnp.sqrt(jnp.maximum(N2, 1.0e-12))
+            l_int = jnp.maximum(sqrt2e / N_safe, cfg.mxl_min)
+        elif raw_evaluation == "nemo_literal":
+            # zdftke.F90:831-833, compiled under DINO's -fdefault-real-8:
+            # rsmall=0.5*EPSILON(1.e0), then SQRT((2*en)/zrn2).
+            rsmall = 0.5 * jnp.finfo(e.dtype).eps
+            zrn2 = jnp.maximum(N2, rsmall)
+            l_int = jnp.maximum(
+                jnp.sqrt((jnp.asarray(2.0, e.dtype) * e) / zrn2),
+                cfg.mxl_min)
+        else:
+            raise ValueError(
+                "Unknown TKEConfig.tke_mxl_raw_evaluation: expected "
+                f"'factored' or 'nemo_literal', got {raw_evaluation!r}.")
         # ln_mxl0 surface anchor l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum)
         # (zdftke:575+602), computed by the CALLER (which owns taum/rho_0/g)
         # and passed via l_surface_anchor; None => the rn_mxl0 floor (windless).
@@ -804,11 +820,22 @@ def compute_mixing_lengths(
         # documented, BOUNDED proxy (was UNBOUNDED before this fix).
         _seed = jnp.broadcast_to(
             jnp.asarray(cfg.mxl_min, dtype=lT.dtype), lT.shape[1:])
-        first_ldn = jnp.minimum(_seed + e3_bottom, lT[-1])
-        _, ldn_rest = jax.lax.scan(
-            _down, first_ldn, (lT[1:-1][::-1], e3T[2:][::-1]))
-        ldn = jnp.concatenate(
-            [lT[:1], ldn_rest[::-1], first_ldn[None]], axis=0)
+        if raw_evaluation == "nemo_literal":
+            # NEMO leaves zmxlm(jpk) at rmxl_min and uses that UNMODIFIED
+            # terminal pad as the carry for the first jk=jpkm1 iteration.
+            # Do not apply a fictitious update to jpk itself from raw en(jpk).
+            _, ldn_rest = jax.lax.scan(
+                _down, _seed, (lT[1:-1][::-1], e3T[2:][::-1]))
+            ldn = jnp.concatenate(
+                [lT[:1], ldn_rest[::-1], _seed[None]], axis=0)
+        else:
+            # Historical shared recurrence, retained bit-for-bit outside the
+            # two literal DINO cards.
+            first_ldn = jnp.minimum(_seed + e3_bottom, lT[-1])
+            _, ldn_rest = jax.lax.scan(
+                _down, first_ldn, (lT[1:-1][::-1], e3T[2:][::-1]))
+            ldn = jnp.concatenate(
+                [lT[:1], ldn_rest[::-1], first_ldn[None]], axis=0)
         lup = jnp.moveaxis(lup, 0, -1)[..., 1:]                    # interior
         ldn = jnp.moveaxis(ldn, 0, -1)[..., 1:]                    # interior
         l_k = jnp.maximum(jnp.minimum(lup, ldn), cfg.mxl_min)
@@ -2205,6 +2232,79 @@ def _nemo_glibc234_vector_exp(argument: jnp.ndarray) -> jnp.ndarray:
     return jnp.where(ordinary, literal, jnp.exp(argument))
 
 
+def _nemo_glibc234_vector_sin(argument: jnp.ndarray) -> jnp.ndarray:
+    """DINO oracle's glibc-2.34 two-lane SIN arithmetic for latitudes.
+
+    The active host IFUNC resolves ``_ZGVbN2v_sin`` to the SSE4 implementation
+    at ``libmvec.so.1+0x3d70``.  Geographic latitude phases lie in
+    ``[-pi/2, pi/2]``, where its integer range-reduction index is zero.  This
+    pure-JAX transcription therefore preserves the linked routine's seven
+    Horner coefficients and separate binary64 MUL/ADD rounding points without
+    carrying its irrelevant large-argument scalar fallback.  Values outside
+    the geographic interval retain the generic JAX sine.
+    """
+    if argument.dtype != jnp.float64:
+        return jnp.sin(argument)
+
+    rounded = _nemo_binary64_round
+    magnitude = jnp.abs(argument)
+    ordinary = magnitude <= float.fromhex("0x1.921fb54442d18p+0")
+    x = jnp.where(ordinary, magnitude, jnp.asarray(0.0, argument.dtype))
+    squared = rounded(x * x)
+
+    # libmvec.so.1 .rodata f840,f800,...,f6c0; each instruction below is
+    # one mulpd/addpd in the active glibc-2.34 SSE4 implementation.
+    poly = rounded(float.fromhex("-0x1.9f1517e9f65f0p-41") * squared)
+    poly = rounded(poly + float.fromhex("0x1.60e6bee01d83ep-33"))
+    poly = rounded(poly * squared)
+    poly = rounded(poly + float.fromhex("-0x1.ae6355aaa4a53p-26"))
+    poly = rounded(poly * squared)
+    poly = rounded(poly + float.fromhex("0x1.71de3806add1ap-19"))
+    poly = rounded(poly * squared)
+    poly = rounded(poly + float.fromhex("-0x1.a01a019a659ddp-13"))
+    poly = rounded(poly * squared)
+    poly = rounded(poly + float.fromhex("0x1.111111110a573p-7"))
+    poly = rounded(poly * squared)
+    poly = rounded(poly + float.fromhex("-0x1.55555555554a8p-3"))
+
+    correction = rounded(squared * poly)
+    correction = rounded(x * correction)
+    literal = rounded(x + correction)
+    literal = jnp.copysign(literal, argument)
+    return jnp.where(ordinary, literal, jnp.sin(argument))
+
+
+def _nemo_etau_htau(
+    lat_deg: jnp.ndarray,
+    cfg: TKEConfig,
+    dtype: jnp.dtype,
+) -> jnp.ndarray:
+    """Evaluate the nn_htau=1 latitude profile under its selected arithmetic."""
+    evaluation = getattr(cfg, "tke_htau_evaluation", "jax_expression")
+    if evaluation == "jax_expression":
+        # Historical expression: deliberately unchanged for every generic and
+        # non-oracle card.
+        sine = jnp.sin(jnp.deg2rad(lat_deg))
+    elif evaluation == "nemo_literal":
+        # NEMO zdftke.F90:493: rpi / 180._wp * gphit.  The caller guarantees
+        # that lat_deg is the bridge-carried native gphit array in this arm.
+        phase = _nemo_binary64_round(
+            jnp.asarray(lat_deg, dtype=dtype)
+            * float.fromhex("0x1.1df46a2529d39p-6"))
+        sine = _nemo_glibc234_vector_sin(phase)
+    else:
+        raise ValueError(
+            "Unknown TKEConfig.tke_htau_evaluation: expected "
+            f"'jax_expression' or 'nemo_literal', got {evaluation!r}.")
+    return jnp.maximum(
+        _NEMO_TKE_HTAU_MIN_M,
+        jnp.minimum(
+            _NEMO_TKE_HTAU_MAX_M,
+            _NEMO_TKE_HTAU_SLOPE_M * jnp.abs(sine),
+        ),
+    )
+
+
 def nemo_etau_injection(
     e: jnp.ndarray,
     taum: jnp.ndarray,
@@ -2245,13 +2345,7 @@ def nemo_etau_injection(
                 "TKEConfig.etau_htau_mode='latitude' requires lat_deg (the "
                 "column latitudes in degrees) to be threaded to the TKE "
                 "closure; got None. Use 'constant10m' or pass lat_deg.")
-        htau = jnp.maximum(
-            _NEMO_TKE_HTAU_MIN_M,
-            jnp.minimum(
-                _NEMO_TKE_HTAU_MAX_M,
-                _NEMO_TKE_HTAU_SLOPE_M
-                * jnp.abs(jnp.sin(jnp.deg2rad(lat_deg)))),
-        )[..., None]
+        htau = _nemo_etau_htau(lat_deg, cfg, e.dtype)[..., None]
     else:
         raise ValueError(
             f"Unknown TKEConfig.etau_htau_mode={htau_mode!r}; expected "
@@ -2548,6 +2642,11 @@ def tke_vertical_mixing(
                 "precomputed_n2_bundle.e3t_Kmm must contain every live "
                 f"T-cell slot; got {precomputed_n2_bundle.e3t_Kmm.shape} "
                 f"vs {_e3t_shape}.")
+        # zdf_mxl executes in the same carried Kmm geometry as rn2/gdepw/e3w.
+        # The prior step-entry implementation validated e3t_Kmm but left the
+        # length scans on the later implicit-solve Jacobian, so every sloping
+        # column used the wrong e3t operand at zdftke.F90:800-806.
+        dz_cell_mxl = precomputed_n2_bundle.e3t_Kmm
 
     _shear_stage = getattr(
         cfg, "tke_shear_evaluation_stage", "implicit_solve_state")

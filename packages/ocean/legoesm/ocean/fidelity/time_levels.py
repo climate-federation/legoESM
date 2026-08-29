@@ -137,6 +137,11 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
                                    "(rn2 = now, ts(...,Nnn)); captured after ALL "
                                    "nn_mxl constraint sweeps (tke_avn nn_mxl SELECT "
                                    "CASE, DINO nn_mxl=3 branch) have run."),
+    "tke_dump_zmxlm_raw.bin": ("now", "write-only row-19 slot captured at "
+                                       "zdftke.F90:831-833 immediately after "
+                                       "MAX(rmxl_min,SQRT(2*en/MAX(rn2,rsmall))) "
+                                       "and before every nn_mxl=3 constraint scan; "
+                                       "en/rn2 and geometry are Kmm=Nnn."),
     "tke_dump_zmxld.bin": ("now", "same rn2(now) dependency as tke_dump_zmxlm.bin "
                                    "(zdftke.F90:740); captured after ALL nn_mxl "
                                    "constraint sweeps, same insertion point."),

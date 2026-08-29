@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """Qualified ZDF rows 19--32 using only existing day-180 dumps.
 
-Row 18 is deliberately still open.  Results from this probe are therefore
-``PROVISIONAL-DOWNSTREAM`` receipts: they identify work that can be cleared or
-targeted without a NEMO rebuild, but cannot advance the ordered verified
-frontier beyond row 17.
+Row 18 is verified.  Row 19 still requires its clean write-only raw-length
+bracket, so results after it remain ``PROVISIONAL-DOWNSTREAM`` receipts: they
+identify work that can be cleared or targeted without another NEMO rebuild,
+but cannot advance the ordered verified frontier past row 18.
 """
 
 from __future__ import annotations
@@ -100,7 +100,11 @@ def main() -> int:
     wmask = np.zeros_like(tmask)
     wmask[..., 0] = tmask[..., 0]
     wmask[..., 1:] = tmask[..., 1:] & tmask[..., :-1]
-    wet_interior = wmask[..., : jpk - 1].copy()
+    # Production's TKE bridge drops NEMO's prescribed surface W row:
+    # restart/dump ``[..., 1:]`` -> lego interior interfaces ``0..jpk-2``.
+    # The former ``:jpk-1`` slice compared the wrong row at every level and
+    # manufactured the provisional all-column row-20 divergence.
+    wet_interior = wmask[..., 1:jpk].copy()
     # zdfphy closure-copy/EVD loops scored here start at Fortran jk=2.
     wet_zdfphy = wet_interior.copy()
     wet_zdfphy[..., 0] = False
@@ -121,7 +125,7 @@ def main() -> int:
     # distinct from the row-17 solve census, which excludes the prescribed
     # surface row and scores jk=2..jpkm1.  Including NEMO's never-written jpk
     # pad here manufactures one floor-sized miss in every column.
-    sl = slice(0, jpk - 1)
+    sl = slice(1, jpk)
     en = en_full[..., sl]
     rn2 = rn2_full[..., sl]
     rn2b = rn2b_full[..., sl]
@@ -352,17 +356,24 @@ def main() -> int:
     rows = {
         "19": {
             "operation": "raw buoyancy mixing length before scans",
-            "disposition": "UNMEASURED-NEEDS-DUMP",
-            "reason": "existing zmxlm/zmxld slots are post-scan; no raw pre-limit slot",
+            "disposition": "UNMEASURED-NEEDS-CLEAN-BRACKET",
+            "reason": (
+                "the raw slot and scorer are prepared, but the managed sandbox "
+                "cannot create PMIx sockets; the unbracketed direct-executable "
+                "diagnostic is deliberately non-citable"
+            ),
         },
         "20": {
             "operation": "nn_mxl=3 limiting scans (row19+20 composite)",
-            "disposition": ("VERIFIED" if row20_lk["pass"] and row20_leps["pass"] else "DIVERGED"),
+            "disposition": (
+                "PROVISIONAL-VERIFIED-BLOCKED-BY-ROW19"
+                if row20_lk["pass"] and row20_leps["pass"] else "DIVERGED"
+            ),
             "zmxlm": row20_lk,
             "zmxld": row20_leps,
             "qualification": (
-                "composite isolation using exact NEMO en/rn2; row19 cannot "
-                "be separated without a raw slot"
+                "production composite using exact NEMO en/rn2; numerical bar "
+                "is exact, but ordered promotion waits for row19's clean bracket"
             ),
         },
         "21": {
