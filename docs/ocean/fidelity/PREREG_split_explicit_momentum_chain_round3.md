@@ -110,3 +110,25 @@ No new NEMO instrumentation is required; all oracle operands are existing
 dumps and the BEFORE arm uses an existing production diagnostics hook.
 Therefore this round allocates no SLOT block.  Any future NEMO writer must be
 separately preregistered under the held-SLOT protocol before it is built.
+
+## Reviewer-required integration amendment before rerun
+
+The first accepted execution exposed two packaging defects under independent
+review, neither of which changes a science operand or bar.  Before the rerun:
+
+1. import the exact latest committed `PREREG_endwall_wind_placement.md` that
+   `endwall_tpoint_bridge_gate.py` names and hashes, so the reused #1695 gate is
+   executable from this branch rather than depending on a file outside it;
+2. resolve the T-point carry CLI default after parsing the start mode: the
+   faithful carry remains default for a bridged start, while
+   `--legacy-euler-start` selects no prior-stress carry.  An explicit request
+   for faithful prior stress with an Euler start must still fail closed;
+3. extend the machine selector receipt to require both legacy-Euler booleans
+   false, in addition to the four already-frozen default/legacy-carry fields.
+
+These are import-completeness and control-path repairs only.  The round-3 term
+ladder, source order, raw operands, attribution classifiers, cancellation
+bars, continuation rules, and all reported science thresholds above remain
+frozen.  The previous artifact is superseded; only a clean CPU/fp64 rerun from
+a commit containing this amendment and the selector-receipt extension may be
+packaged as the accepted result.
