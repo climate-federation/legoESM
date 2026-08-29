@@ -73,7 +73,7 @@ no legoESM `F_slow_eta` while freshwater closure is inactive.
 - `fidelity_bar_gate.classify` supplied all verdicts. The receipt records its
   correlation, mean-absolute-ratio, and arithmetic-class per-element axes.
 - Clean Git commit before/after:
-  `94d09060672c071ad06add7fe9ff9652ad068500`.
+  `c6cb3764d36bdeb0f993080227260aead9e1a52c`.
 - Identical arrays classified `AT BAR`; the planted `1e-6` RMS-scale offset
   traversed the same `fidelity_bar_gate.classify` path and classified `DEBT`;
   perturbing the actual legoESM binding also changed its score.
@@ -90,9 +90,10 @@ no legoESM `F_slow_eta` while freshwater closure is inactive.
   after two adversarial HOLD reviews. The first attempt at the hardened commit
   was rejected by its clean-tree gate before calculation. The first re-review
   retained HOLD on classifier-control and effective-config provenance; the
-  mechanism re-review then retained HOLD on a stale scalar-norm ownership
-  claim in the inherited probe. The final run after retracting that claim
-  exited zero and printed term attribution UNMEASURED.
+  mechanism re-review then retained HOLD on stale scalar-norm ownership and
+  accumulation claims in the inherited probe. The final run after retracting
+  both claims exited zero, labeled both norm comparisons non-causal, and
+  printed term attribution UNMEASURED.
 
 Machine receipt:
 `docs/ocean/fidelity/dino_split_explicit_momentum_chain_round1_artifact.json`.
