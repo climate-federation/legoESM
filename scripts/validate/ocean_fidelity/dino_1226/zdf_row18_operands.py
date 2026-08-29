@@ -10,6 +10,7 @@ scores both the exponent argument and the complete literal row-18 update.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import json
 import os
@@ -107,6 +108,31 @@ def negative_ratio(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray
     return result
 
 
+def glibc_vector_sin(phase: np.ndarray, library_path: Path) -> np.ndarray:
+    """Call the host's two-lane ``_ZGVbN2v_sin`` through its C ABI wrapper."""
+    phase = np.ascontiguousarray(phase, dtype=np.float64)
+    if phase.ndim != 2 or phase.shape[1] % 2:
+        raise ValueError("vector-SIN phase must be 2-D with an even i extent")
+    output = np.empty_like(phase)
+    library = ctypes.CDLL(str(library_path))
+    function = library.zdf_glibc_v2_sin_rows
+    array_pointer = np.ctypeslib.ndpointer(
+        dtype=np.float64, ndim=2, flags="C_CONTIGUOUS")
+    function.argtypes = [array_pointer, array_pointer,
+                         ctypes.c_size_t, ctypes.c_size_t]
+    function.restype = ctypes.c_int
+    status = function(phase, output, phase.shape[0], phase.shape[1])
+    if status != 0:
+        raise RuntimeError(f"glibc vector-SIN wrapper returned {status}")
+    return output
+
+
+def glibc_version() -> str:
+    libc = ctypes.CDLL("libc.so.6")
+    libc.gnu_get_libc_version.restype = ctypes.c_char_p
+    return libc.gnu_get_libc_version().decode("ascii")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-dir", type=Path, required=True)
@@ -116,6 +142,8 @@ def main() -> int:
     parser.add_argument("--mld-maps", type=Path, required=True)
     parser.add_argument("--nemo-source", type=Path, required=True)
     parser.add_argument("--nemo-binary", type=Path, required=True)
+    parser.add_argument("--vector-sin-library", type=Path, required=True)
+    parser.add_argument("--vector-sin-source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
@@ -234,6 +262,24 @@ def main() -> int:
     htau_l = np.broadcast_to(htau_l_2d[..., None], gdepw_l.shape)[..., :netau]
     gdepw_l = gdepw_l[..., :netau]
 
+    source_phase = (
+        np.float64(np.pi) / np.float64(180.0)
+        * np.asarray(etau_kwargs["lat_deg"], dtype=np.float64)
+    )
+    legacy_phase = np.asarray(
+        jnp.deg2rad(etau_kwargs["lat_deg"]), dtype=np.float64)
+    vector_sine = glibc_vector_sin(source_phase, args.vector_sin_library)
+    vector_htau_2d = np.maximum(
+        tke_mod._NEMO_TKE_HTAU_MIN_M,
+        np.minimum(
+            tke_mod._NEMO_TKE_HTAU_MAX_M,
+            tke_mod._NEMO_TKE_HTAU_SLOPE_M * np.abs(vector_sine),
+        ),
+    )
+    vector_htau = np.broadcast_to(
+        vector_htau_2d[..., None], gdepw_l.shape)[..., :netau]
+    wet_columns = np.any(wet, axis=-1)
+
     operands = {
         "gdepw_production_vs_nemo": sweep.metrics(
             gdepw_l, gdepw_n, wet, focus, POINTWISE),
@@ -249,6 +295,7 @@ def main() -> int:
         "substitute_gdepw": negative_ratio(gdepw_n, htau_l),
         "substitute_htau": negative_ratio(gdepw_l, htau_n),
         "substitute_both": negative_ratio(gdepw_n, htau_n),
+        "vector_sin_htau": negative_ratio(gdepw_l, vector_htau),
     }
 
     rounded = tke_mod._nemo_binary64_round
@@ -285,6 +332,14 @@ def main() -> int:
                 candidate, post_n, wet, focus, POINTWISE),
         }
 
+    vector_htau_metric = sweep.metrics(
+        vector_htau, htau_n, wet, focus, POINTWISE)
+    vector_htau_exact = exact_census(vector_htau, htau_n, wet)
+    vector_confirmed = (
+        vector_htau_exact["n_unequal_wet_elements"] == 0
+        and arms["vector_sin_htau"]["full_row"]["pass"]
+    )
+
     singles = [
         name for name in ("substitute_gdepw", "substitute_htau")
         if arms[name]["full_row"]["pass"]
@@ -315,6 +370,27 @@ def main() -> int:
             post_n, wet, POINTWISE,
         ),
     }
+    phase_planted = source_phase.copy()
+    phase_index = tuple(int(x) for x in np.argwhere(wet_columns)[0])
+    phase_planted[phase_index] = np.nextafter(
+        phase_planted[phase_index], np.inf)
+    planted_sine = glibc_vector_sin(phase_planted, args.vector_sin_library)
+    phase_control_mismatches = int(np.sum(
+        wet_columns
+        & (planted_sine.view(np.uint64) != vector_sine.view(np.uint64))))
+    if phase_control_mismatches < 1:
+        raise AssertionError("+1 ULP vector-SIN phase control did not fire")
+    rolled_htau = np.roll(vector_htau, 1, axis=0)
+    rolled_htau_metric = sweep.metrics(
+        rolled_htau, htau_n, wet, [], POINTWISE)
+    if rolled_htau_metric["pass"]:
+        raise AssertionError("one-j-row vector-htau roll control did not fail")
+    controls["vector_sin_phase_plus_one_ulp"] = {
+        "fired": True,
+        "perturbed_ji": list(phase_index),
+        "n_changed_wet_sine_elements": phase_control_mismatches,
+    }
+    controls["vector_htau_one_j_roll_fired"] = True
 
     provenance_paths = [
         gdepw_path, htau_path, on_restart, off_restart,
@@ -323,6 +399,7 @@ def main() -> int:
         run / "tke_dump_en_postlc.bin", run / "mesh_mask.nc",
         run / "ocean.output", args.mld_maps, args.nemo_source,
         args.nemo_binary, det_a / cor_name, det_b / cor_name,
+        args.vector_sin_library, args.vector_sin_source,
         det_a_restart, det_b_restart,
     ]
     artifact = {
@@ -335,6 +412,22 @@ def main() -> int:
         "bar": POINTWISE,
         "disposition": disposition,
         "owner": owner,
+        "vector_sin_discriminator": {
+            "disposition": (
+                "CONFIRM-VECTOR-SIN" if vector_confirmed
+                else "REFUTE-VECTOR-SIN"),
+            "glibc_version": glibc_version(),
+            "source_phase_vs_legacy_exact": exact_census(
+                source_phase[..., None], legacy_phase[..., None],
+                wet_columns[..., None]),
+            "vector_sin_vs_jax_exact": exact_census(
+                vector_sine[..., None],
+                np.asarray(jnp.sin(jnp.asarray(legacy_phase)))[..., None],
+                wet_columns[..., None]),
+            "htau": vector_htau_metric,
+            "htau_exact": vector_htau_exact,
+            "full_row": arms["vector_sin_htau"]["full_row"],
+        },
         "operands": operands,
         "arms": arms,
         "controls": controls,
