@@ -111,7 +111,13 @@ def main() -> int:
             wet2 & (production_iku != nemo_iku + offset)))
         for offset in (-1, 0, 1)
     }
-    gdept = jnp.asarray(nemo_gdept[..., :nk], dtype=state["T"].dtype)
+    # The canonical gdept dump contains the 35 evaluated NEMO slots; verify
+    # those against production, then use that verified production array's
+    # finite 36th sentinel so _uv_slp retains its registered full shape.
+    gdept_full = jnp.asarray(outer["_gd_col"], dtype=state["T"].dtype)
+    gdept = gdept_full
+    gdept_score = sweep.metrics(
+        np.asarray(gdept_full)[..., :nk], nemo_gdept[..., :nk], wet, focus, BAR)
     face_sum = jax.lax.optimization_barrier(
         gdept + jnp.roll(gdept, -1, axis=1))
     live_surface_e3u = jnp.asarray(outer["e3u_k"])[..., :1]
@@ -156,6 +162,7 @@ def main() -> int:
         "production_raw": production_score,
         "live_face_zdepu_raw": correct_score,
         "current_vs_live_face_zdepu": zdep_delta,
+        "gdept_existing_dump": gdept_score,
         "controls": controls,
         "repo_sha": args.expected_repo_sha,
         "source_quote": quote,
