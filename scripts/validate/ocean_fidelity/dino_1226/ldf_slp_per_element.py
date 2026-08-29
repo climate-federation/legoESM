@@ -366,7 +366,8 @@ def build_state():
         return compute_nemo_native_slopes(
             rho, T, S, mask, u_mask, v_mask, z_coord, br.geometry, gm_cfg,
             eos_fn, rho_0=mc.constants.rho_0, g=mc.constants.g, active_3d=active_3d,
-            jacobian=jacobian, eta=eta, prd_jacobian=slope_prd_jacobian,
+            jacobian=jacobian, eta=eta, H_bathy=H_bathy,
+            prd_jacobian=slope_prd_jacobian,
             pn2_override=slope_pn2,
             e3w_override=slope_e3w,
         )
