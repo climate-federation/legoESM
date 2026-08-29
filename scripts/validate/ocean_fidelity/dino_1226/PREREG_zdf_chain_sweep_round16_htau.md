@@ -31,8 +31,9 @@ element and the complete row to score 0/9,920, with all four focus columns
 passing.  Any candidate `htau` bit mismatch or any complete-row failure is
 `REFUTE-VECTOR-SIN`; no vector-SIN production option is then allowed.
 
-Controls must be red: perturb one wet phase argument by +1 ULP and require
-the glibc vector-SIN exact comparison to fail; roll the candidate latitude
+Controls must be red: locate the first wet phase for which a +1 ULP change
+changes the rounded glibc vector-SIN output, perturb that one argument only,
+and require the exact comparison to fail once; roll the candidate latitude
 field by one j-row and require the exact `htau` comparison to fail; retain the
 existing row-18 one-cell roll, nonfinite, and planted-value controls.  No
 downstream row is promoted by this discriminator alone.
@@ -41,3 +42,11 @@ Pre-measurement correction, 2026-08-28: the first version registered an
 adjacent-i exchange.  That control is retracted because DINO's T-point
 latitude is zonally constant, so exchanging adjacent i values cannot change
 the input and cannot fail.  The j-row roll above is the red-capable replacement.
+
+Pre-measurement correction 2, 2026-08-28: the first-wet phase itself is also
+an insensitive +1 ULP plant—the correctly rounded vector sine does not change
+there.  The aborted probe emitted no result.  An all-wet sensitivity census
+found 8,046 wet phases whose +1 ULP plant changes the vector result; the
+control now deterministically selects the first of those, then perturbs only
+that one argument.  This preserves the registered one-argument/one-ULP test
+without pretending an insensitive plant is red-capable.

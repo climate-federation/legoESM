@@ -370,8 +370,16 @@ def main() -> int:
             post_n, wet, POINTWISE,
         ),
     }
+    all_next_phase = np.nextafter(source_phase, np.inf)
+    all_next_sine = glibc_vector_sin(
+        all_next_phase, args.vector_sin_library)
+    sensitive = (
+        wet_columns
+        & (all_next_sine.view(np.uint64) != vector_sine.view(np.uint64)))
+    if not np.any(sensitive):
+        raise AssertionError("no +1 ULP-sensitive wet vector-SIN phase exists")
     phase_planted = source_phase.copy()
-    phase_index = tuple(int(x) for x in np.argwhere(wet_columns)[0])
+    phase_index = tuple(int(x) for x in np.argwhere(sensitive)[0])
     phase_planted[phase_index] = np.nextafter(
         phase_planted[phase_index], np.inf)
     planted_sine = glibc_vector_sin(phase_planted, args.vector_sin_library)
