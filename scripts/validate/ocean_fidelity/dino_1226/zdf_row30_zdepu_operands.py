@@ -136,6 +136,20 @@ def main() -> int:
         jnp.asarray(0.5, live_gdept.dtype)
         * jax.lax.optimization_barrier(live_pair - live_e3u))
 
+    def compiled_literal(ssh):
+        stretch_jit = nemo_r3t_stretch(
+            state["z_coord"], ssh, state["H_bathy"],
+            evaluation="nemo_reciprocal")
+        gd = jax.lax.optimization_barrier(
+            raw_gdept * stretch_jit[..., None])
+        pair = jax.lax.optimization_barrier(
+            gd + jnp.roll(gd, -1, axis=1))
+        return jax.lax.optimization_barrier(
+            jnp.asarray(0.5, gd.dtype)
+            * jax.lax.optimization_barrier(pair - live_e3u))
+
+    production_jit_literal = jax.jit(compiled_literal)(state["eta"])
+
     scores = {
         "current_production_zdepu": sweep.metrics(
             np.asarray(u_loc["zdep_face"])[..., :nk], expected, wet, focus, BAR),
@@ -145,6 +159,9 @@ def main() -> int:
             np.asarray(live_gdept)[..., :nk], dumped_gdept, wet, focus, BAR),
         "production_literal": sweep.metrics(
             np.asarray(production_literal)[..., :nk], expected, wet, focus, BAR),
+        "production_jit_literal": sweep.metrics(
+            np.asarray(production_jit_literal)[..., :nk], expected,
+            wet, focus, BAR),
     }
 
     old_association = np.float64(0.5) * dumped_pair - dumped_e3u
@@ -172,6 +189,7 @@ def main() -> int:
     confirmed = (scores["dumped_operand_literal"]["pass"]
                  and scores["production_live_gdept"]["pass"]
                  and scores["production_literal"]["pass"]
+                 and scores["production_jit_literal"]["pass"]
                  and not scores["current_production_zdepu"]["pass"])
     artifact = {
         "schema": "dino-zdf-row30-zdepu-operands-v1",

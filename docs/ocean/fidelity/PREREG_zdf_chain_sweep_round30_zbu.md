@@ -387,3 +387,15 @@ guards for every unchanged card are required before promotion.
 The ordered stop remains row 30. Rows 31--32 and climate are blocked until the
 complete raw U/V and post-Shapiro composite passes; focus membership creates
 no exception.
+
+### Compiled-lowering amendment
+
+Frozen before measuring the compiled arm. A synthetic unit fixture showed a
+one-ULP eager-versus-JIT difference in the face-depth expression, so eager
+agreement alone is insufficient. The production-computable expression from
+NOW SSH through stored-reciprocal stretch, raw `gdept_0`, face add, live
+`e3u(miku)`, subtract, and half multiply is now also evaluated by `jax.jit`.
+CONFIRM additionally requires compiled **0/9,758**, `focus_fail=0`; any compiled
+failure REFUTES the proposed implementation even when the eager arm passes.
+The eager/JIT synthetic unit test is exact only after the production lowering
+is made stable; tolerance-based promotion is forbidden.
