@@ -10,7 +10,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -111,6 +111,8 @@ def main() -> int:
     captured_pn2 = np.asarray(loc["pn2"])
     captured_zbu = 0.5 * (np.asarray(loc["zdzr"]) + np.roll(np.asarray(loc["zdzr"]), -1, axis=1))
     model = SimpleNamespace(z_coord=st["z_coord"], config=st["model_config"])
+    model._n2_nemo_before_tracers = MethodType(
+        LatLonCGridOceanModel._n2_nemo_before_tracers, model)
     bundle = LatLonCGridOceanModel._tke_step_entry_n2_bundle(
         model, st["bridge_state"])
     if bundle is None:
