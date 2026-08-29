@@ -228,6 +228,34 @@ def main() -> int:
     )
     if avs_copy is None:
         raise AssertionError("active NEMO no-DDM avs=avt assignment changed")
+    namelist_ref = (run / "namelist_ref").read_text(errors="strict")
+    def row24_inactive(output_text, namelist_text, source_text):
+        return (
+            re.search(r"ln_rnf\s*=\s*F(?:\s|$)", output_text) is not None
+            and re.search(
+                r"ln_rnf_mouth\s*=\s*\.false\.", namelist_text,
+                flags=re.IGNORECASE) is not None
+            and re.search(
+                r"IF\s*\(\s*ln_rnf_mouth\s*\)\s*THEN",
+                source_text) is not None)
+
+    rnf_disabled = re.search(
+        r"ln_rnf\s*=\s*F(?:\s|$)", ocean_output) is not None
+    rnf_mouth_disabled = re.search(
+        r"ln_rnf_mouth\s*=\s*\.false\.", namelist_ref,
+        flags=re.IGNORECASE) is not None
+    rnf_source_live = re.search(
+        r"IF\s*\(\s*ln_rnf_mouth\s*\)\s*THEN", zdfphy_text) is not None
+    if not (rnf_disabled and rnf_mouth_disabled and rnf_source_live):
+        raise AssertionError(
+            "row24 waiver preconditions changed: resolved ln_rnf, "
+            "ln_rnf_mouth, or active zdfphy branch")
+    planted_output = re.sub(
+        r"ln_rnf\s*=\s*F", "ln_rnf = T", ocean_output, count=1)
+    row24_control_fired = not row24_inactive(
+        planted_output, namelist_ref, zdfphy_text)
+    if not row24_control_fired:
+        raise AssertionError("row24 enabled-runoff control did not fail waiver")
     shared_k = np.asarray(pair_calls[0][2])
 
     wet_k = np.argwhere(np.isfinite(shared_k) & (shared_k != 0.0))
@@ -347,6 +375,7 @@ def main() -> int:
     numeric_controls = {
         "row20_lk": sweep.planted_controls(zmxlm, zmxlm, wet_interior, ACCUMULATING),
         "row22_avt": sweep.planted_controls(avt_closure, avt_closure, wet_interior, POINTWISE),
+        "row24_enabled_runoff_waiver_fired": row24_control_fired,
         "row25_avt": sweep.planted_controls(avt_composed, avt_composed, fired, POINTWISE),
         "row30_prd": sweep.planted_controls(
             prd_n[..., :nk_prd], prd_n[..., :nk_prd], wet_prd, POINTWISE
@@ -358,9 +387,9 @@ def main() -> int:
             "operation": "raw buoyancy mixing length before scans",
             "disposition": "UNMEASURED-NEEDS-CLEAN-BRACKET",
             "reason": (
-                "the raw slot and scorer are prepared, but the managed sandbox "
-                "cannot create PMIx sockets; the unbracketed direct-executable "
-                "diagnostic is deliberately non-citable"
+                "raw run exists and production arithmetic is diagnostic-exact, "
+                "but promotion waits for two fresh same-current-binary runs to "
+                "bind the 13-stream uninitialized-halo mechanism"
             ),
         },
         "20": {
@@ -388,7 +417,9 @@ def main() -> int:
         },
         "22": {
             "operation": "inverse-Prandtl avt correction",
-            "disposition": disposition(row22_avt),
+            "disposition": (
+                "PROVISIONAL-VERIFIED-BLOCKED-BY-ROW19"
+                if row22_avt["pass"] else "DIVERGED"),
             "avt": row22_avt,
         },
         "23": {
@@ -403,9 +434,10 @@ def main() -> int:
         },
         "24": {
             "operation": "river-mouth enhancement",
-            "disposition": "WAIVED",
+            "disposition": "PROVISIONAL-WAIVED-BLOCKED-BY-ROW19",
             "reason": (
-                "ln_rnf=F and reference ln_rnf_mouth=.false.; branch zdfphy.F90:317-321 is inactive"
+                "fail-closed parse confirms resolved ln_rnf=F, namelist_ref "
+                "ln_rnf_mouth=.false., and live zdfphy.F90:317-321 branch"
             ),
         },
         "25": {
@@ -424,7 +456,7 @@ def main() -> int:
         },
         "27": {
             "operation": "avs copy and optional enhancements",
-            "disposition": "VERIFIED",
+            "disposition": "PROVISIONAL-VERIFIED-BLOCKED-BY-ROW19",
             "source_identity": {
                 "bar": "exact source/object identity",
                 "n_verified_columns": 9920,
@@ -476,7 +508,9 @@ def main() -> int:
         "30": {
             "operation": "ldf_slp",
             "disposition": (
-                "VERIFIED" if all(x["pass"] for x in row30_fields.values()) else "DIVERGED"
+                "PROVISIONAL-VERIFIED-BLOCKED-BY-ROW19"
+                if all(x["pass"] for x in row30_fields.values())
+                else "PROVISIONAL-DIVERGED-BLOCKED-BY-ROW19"
             ),
             "fields": row30_fields,
             "first_failing_operand": {
@@ -488,7 +522,7 @@ def main() -> int:
                 "design": (
                     "separate the EOS-produced prd arithmetic from downstream "
                     "zgrv with the existing prd slot; literal SEOS association "
-                    "is the next targeted production option only after row18 closes"
+                    "is the next targeted production option only after row19 closes"
                 ),
             },
         },
@@ -559,7 +593,9 @@ def main() -> int:
         raise SystemExit(f"quoted NEMO source missing: {missing_sources}")
     artifact = {
         "schema": "dino-zdf-chain-tail-existing-v1",
-        "status": "PROVISIONAL-DOWNSTREAM; ordered frontier remains row 17 while row 18 is open",
+        "status": (
+            "PROVISIONAL-DOWNSTREAM; row 18 is VERIFIED and the ordered "
+            "frontier is row 19's same-current-binary bracket"),
         "repo_sha": git_sha(),
         "lane": dump_lane.banner(),
         "run_dir": str(run),

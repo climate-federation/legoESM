@@ -727,25 +727,7 @@ def compute_mixing_lengths(
         # buoyancy length sqrt(2e)/N at interior interfaces, AD-safe at the
         # negative-TKE debt (same double-where idiom as choice 1/2).
         raw_evaluation = getattr(cfg, "tke_mxl_raw_evaluation", "factored")
-        if raw_evaluation == "factored":
-            # Historical shared expression: keep byte-identical for every
-            # non-DINO consumer.
-            sqrt2e = jnp.sqrt(2.0) * jnp.where(
-                e > 0.0, jnp.sqrt(jnp.where(e > 0.0, e, 1.0)), 0.0)
-            N_safe = jnp.sqrt(jnp.maximum(N2, 1.0e-12))
-            l_int = jnp.maximum(sqrt2e / N_safe, cfg.mxl_min)
-        elif raw_evaluation == "nemo_literal":
-            # zdftke.F90:831-833, compiled under DINO's -fdefault-real-8:
-            # rsmall=0.5*EPSILON(1.e0), then SQRT((2*en)/zrn2).
-            rsmall = 0.5 * jnp.finfo(e.dtype).eps
-            zrn2 = jnp.maximum(N2, rsmall)
-            l_int = jnp.maximum(
-                jnp.sqrt((jnp.asarray(2.0, e.dtype) * e) / zrn2),
-                cfg.mxl_min)
-        else:
-            raise ValueError(
-                "Unknown TKEConfig.tke_mxl_raw_evaluation: expected "
-                f"'factored' or 'nemo_literal', got {raw_evaluation!r}.")
+        l_int = _tke_raw_mixing_length(e, N2, cfg)
         # ln_mxl0 surface anchor l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum)
         # (zdftke:575+602), computed by the CALLER (which owns taum/rho_0/g)
         # and passed via l_surface_anchor; None => the rn_mxl0 floor (windless).
@@ -896,6 +878,33 @@ def compute_mixing_lengths(
             f"(Veros), 3 (NEMO nn_mxl=3) or 4 (NEMO nn_mxl=2)."
         )
     return l_k, l_eps
+
+
+def _tke_raw_mixing_length(
+    e: jnp.ndarray,
+    n2: jnp.ndarray,
+    cfg: TKEConfig,
+) -> jnp.ndarray:
+    """Production selector for the pre-scan TKE buoyancy mixing length."""
+    raw_evaluation = getattr(cfg, "tke_mxl_raw_evaluation", "factored")
+    if raw_evaluation == "factored":
+        # Historical shared expression: keep byte-identical for every
+        # non-DINO consumer.
+        sqrt2e = jnp.sqrt(2.0) * jnp.where(
+            e > 0.0, jnp.sqrt(jnp.where(e > 0.0, e, 1.0)), 0.0)
+        n_safe = jnp.sqrt(jnp.maximum(n2, 1.0e-12))
+        return jnp.maximum(sqrt2e / n_safe, cfg.mxl_min)
+    if raw_evaluation == "nemo_literal":
+        # zdftke.F90:831-833, compiled under DINO's -fdefault-real-8:
+        # rsmall=0.5*EPSILON(1.e0), then SQRT((2*en)/zrn2).
+        rsmall = 0.5 * jnp.finfo(e.dtype).eps
+        zrn2 = jnp.maximum(n2, rsmall)
+        return jnp.maximum(
+            jnp.sqrt((jnp.asarray(2.0, e.dtype) * e) / zrn2),
+            cfg.mxl_min)
+    raise ValueError(
+        "Unknown TKEConfig.tke_mxl_raw_evaluation: expected "
+        f"'factored' or 'nemo_literal', got {raw_evaluation!r}.")
 
 
 # ---------------------------------------------------------------------------
@@ -2329,6 +2338,12 @@ def nemo_etau_injection(
     derives the mixing coefficients).  Additive and ≥ 0 ⇒ preserves TKE
     positivity.  Unknown modes raise (dispatch hardening).
     """
+    exp_evaluation = getattr(
+        cfg, "tke_etau_exponential_evaluation", "jax_expression")
+    if exp_evaluation not in ("jax_expression", "nemo_literal"):
+        raise ValueError(
+            "Unknown TKEConfig.tke_etau_exponential_evaluation: expected "
+            f"'jax_expression' or 'nemo_literal', got {exp_evaluation!r}.")
     mode = cfg.etau_mode
     if mode == "none":
         return e
@@ -2352,16 +2367,10 @@ def nemo_etau_injection(
             f"'constant10m' or 'latitude' (NEMO nn_htau 0/1).")
     e_sfc = jnp.maximum(_NEMO_TKE_EMIN0, _NEMO_TKE_EBB / rho_0
                         * jnp.maximum(taum, 0.0))
-    exp_evaluation = getattr(
-        cfg, "tke_etau_exponential_evaluation", "jax_expression")
     if exp_evaluation == "jax_expression":
         profile = jnp.exp(-depth_w / htau)
-    elif exp_evaluation == "nemo_literal":
+    else:  # validated above
         profile = _nemo_glibc234_vector_exp(-depth_w / htau)
-    else:
-        raise ValueError(
-            "Unknown TKEConfig.tke_etau_exponential_evaluation: expected "
-            f"'jax_expression' or 'nemo_literal', got {exp_evaluation!r}.")
     inj = cfg.etau_frac * e_sfc[..., None] * profile
     if ice_frac is not None:
         inj = inj * jnp.maximum(0.0, 1.0 - ice_frac[..., None])

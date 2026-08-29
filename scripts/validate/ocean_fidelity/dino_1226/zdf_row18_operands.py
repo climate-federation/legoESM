@@ -374,7 +374,14 @@ def main() -> int:
         name for name in ("substitute_gdepw", "substitute_htau")
         if arms[name]["full_row"]["pass"]
     ]
-    if arms["production"]["full_row"]["pass"]:
+    production_checks = [
+        operands["gdepw_production_vs_nemo"]["pass"],
+        operands["htau_production_vs_nemo"]["pass"],
+        arms["production"]["argument"]["pass"],
+        arms["production"]["literal_exp"]["pass"],
+        arms["production"]["full_row"]["pass"],
+    ]
+    if all(production_checks):
         disposition, owner = "VERIFIED", "none (production clears row)"
     elif singles == ["substitute_gdepw"]:
         disposition, owner = "VERIFIED-WITH-SUBSTITUTION", "gdepw(Kmm)"
@@ -523,7 +530,7 @@ def main() -> int:
             for name, value in arms.items()
         },
     }, indent=2, sort_keys=True))
-    return 0
+    return 0 if disposition == "VERIFIED" else 1
 
 
 if __name__ == "__main__":

@@ -168,7 +168,8 @@ def _synthetic_topo():
 def test_topo_bridge_geometry_matches_nemo_metrics():
     """Built geometry reproduces NEMO's e1t/e2t/ff_t (Mercator, from mesh arrays)."""
     grid, state, _ = _synthetic_topo()
-    out = bridge_nemo_to_legoesm_topo(grid, state, periodic_i=True)
+    out = bridge_nemo_to_legoesm_topo(
+        grid, state, periodic_i=True, carry_native_lat_deg=True)
     geom = out.geometry
     # dx_T = e1t, dy_T = e2t, f_T = ff_t to near-roundoff (x64).
     assert np.max(np.abs(np.asarray(geom.dx_T) - grid.e1t)) < 1e-4 * grid.e1t.max()
@@ -177,6 +178,11 @@ def test_topo_bridge_geometry_matches_nemo_metrics():
     # Native degrees are a first-class oracle operand: a radian round trip is
     # allowed to differ by ULPs, but this carried field must not.
     np.testing.assert_array_equal(np.asarray(geom.native_lat_T_deg), grid.gphit)
+
+    # Scope pin: generic/non-oracle NEMO bridges retain the historical
+    # geometry pytree and do not carry the optional degree-valued field.
+    generic = bridge_nemo_to_legoesm_topo(grid, state, periodic_i=True)
+    assert generic.geometry.native_lat_T_deg is None
 
 
 def test_topo_bridge_metric_convention_default_is_bit_identical():

@@ -405,6 +405,22 @@ def test_literal_etau_exp_matches_oracle_bits_and_one_ulp_control_fires():
     assert planted_actual[0].view(np.uint64) != expected[0].view(np.uint64)
 
 
+def test_glibc_exp_table_full_payload_sha_and_mutation_control():
+    import hashlib
+    import struct
+
+    from legoesm.ocean.physics.vertical_mixing._glibc234_exp_table import (
+        GLIBC234_EXP_TABLE_BITS,
+        GLIBC234_EXP_TABLE_SHA256,
+    )
+
+    payload = struct.pack("<1024Q", *GLIBC234_EXP_TABLE_BITS)
+    assert hashlib.sha256(payload).hexdigest() == GLIBC234_EXP_TABLE_SHA256
+    planted = bytearray(payload)
+    planted[8 * 511] ^= 1
+    assert hashlib.sha256(planted).hexdigest() != GLIBC234_EXP_TABLE_SHA256
+
+
 @pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
 def test_literal_etau_exp_jit_and_ad_are_finite():
     argument = jnp.asarray([-0.3, -1.0], dtype=jnp.float64)
@@ -503,6 +519,20 @@ def test_etau_jax_expression_is_the_legacy_expression_byte_for_byte():
         tke_mod.nemo_etau_injection(
             e, taum, depth,
             cfg._replace(tke_etau_exponential_evaluation="unknown"))
+    with pytest.raises(ValueError, match="tke_etau_exponential_evaluation"):
+        tke_mod.nemo_etau_injection(
+            e, taum, depth,
+            cfg._replace(etau_mode="none",
+                         tke_etau_exponential_evaluation="unknown"))
+
+    literal_cfg = cfg._replace(tke_etau_exponential_evaluation="nemo_literal")
+    literal = tke_mod.nemo_etau_injection(e, taum, depth, literal_cfg)
+    expected_literal = e + (
+        literal_cfg.etau_frac * e_sfc[..., None]
+        * tke_mod._nemo_glibc234_vector_exp(-depth / 10.0))
+    np.testing.assert_array_equal(
+        np.asarray(literal).view(np.uint64),
+        np.asarray(expected_literal).view(np.uint64))
 
 
 def test_htau_jax_expression_is_legacy_expression_byte_for_byte():

@@ -1138,12 +1138,13 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
     # recorded on; the twin default is applied in run_twin, one level up and
     # handed down through e3t_mode. e3t_mode=None keeps the bridge's own
     # resolution (LEGOESM_NEMO_E3T, else the 1-D ladder) exactly as before.
-    g = read_nemo_mesh_mask(f"{run_traj}/mesh_mask.nc", nn_hls=0)
-    s = read_nemo_restart(f"{run_stepdump}/{restart_file}", nn_hls=0)
-    br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True,
-                                     e3t_mode=e3t_mode)
     cfg = dataclasses.replace(dino_config_for_recipe(recipe),
         lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)
+    g = read_nemo_mesh_mask(f"{run_traj}/mesh_mask.nc", nn_hls=0)
+    s = read_nemo_restart(f"{run_stepdump}/{restart_file}", nn_hls=0)
+    br = bridge_nemo_to_legoesm_topo(
+        g, s, periodic_i=True, full_step=True, e3t_mode=e3t_mode,
+        carry_native_lat_deg=(cfg.tke_htau_evaluation == "nemo_literal"))
     if vmix_scheme is not None:
         cfg = dataclasses.replace(cfg, vmix_scheme=vmix_scheme)
     if use_gm_redi is not None:

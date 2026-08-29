@@ -471,6 +471,7 @@ def bridge_nemo_to_legoesm_topo(
     coriolis_placement: str = "cell_average",
     e3t_mode: str | None = None,
     nemo_e3w_source: str = "mesh_reference",
+    carry_native_lat_deg: bool = False,
 ) -> NemoBridgeOutput:
     """Bridge a NEMO **Mercator + topography** config (e.g. DINO) to legoESM.
 
@@ -514,6 +515,10 @@ def bridge_nemo_to_legoesm_topo(
     periodic_i : bool
         ``True`` for a zonally re-entrant grid (``ln_Iperio``); ``False`` closes
         the west/east boundaries with walls.
+    carry_native_lat_deg : bool
+        Opt in to carrying NEMO's native degree-valued ``gphit`` array for a
+        literal oracle consumer. The default is ``False`` so generic bridge
+        geometry retains its historical pytree structure.
     f_rtol : float
         Max relative error tolerance between the built ``f_T`` and NEMO ``ff_t``.
     metric_convention : {"exact", "nemo_isotropic"}, optional (#1226)
@@ -604,10 +609,12 @@ def bridge_nemo_to_legoesm_topo(
         # create_latlon_geometry's docstring for the measured gap.
         coriolis_placement=coriolis_placement,
     )
-    # Preserve the oracle mesh's native degree values.  Reconstructing these
-    # later as degrees(lat_T) loses a few ULPs and changes NEMO's literal
-    # latitude-dependent etau profile on every wet column.
-    geom = geom._replace(native_lat_T_deg=jnp.asarray(gphit))
+    # Preserve native degrees only for an explicitly selected oracle card.
+    # Generic NEMO bridges retain the historical geometry pytree exactly;
+    # reconstructing degrees(lat_T) is nevertheless too lossy for DINO's
+    # literal latitude-dependent etau profile.
+    if carry_native_lat_deg:
+        geom = geom._replace(native_lat_T_deg=jnp.asarray(gphit))
     # Partial-periodic seam wall (NEMO DINO): ALL interior cells are wet,
     # but the zonal seam u-face is closed outside the ACC channel — carried
     # on the geometry so every mask derivation (2-D/3-D face, vertex,
