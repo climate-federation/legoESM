@@ -49,6 +49,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     min_cell_to_vface,
     pad_ns_zero,
     pv_flux_al81_partial_cell,
+    vface_zonal_cos_lat,
     vertex_coriolis,
 )
 from legoesm.grids.halo_latlon import zero_polar_lat_ends as _zero_polar_lat_ends
@@ -325,6 +326,45 @@ def nemo_ssh_avg_face_depth(eta_dyn, H_bathy, mask, u_mask, v_mask, grid,
     """
     prep = _nemo_ssh_avg_prep(H_bathy, mask, grid, dtype)
     return _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep)
+
+
+def nemo_literal_continuity_divergence(
+    H_u, H_v, U, V, u_mask, v_mask, grid,
+):
+    """NEMO DINO's literal QCO metric-transport continuity expression.
+
+    The active oracle first assembles metric transports in operand order
+    (``dynspg_ts.F90:699-704``)::
+
+        zhU = e2u * ua_e * zhup2_e
+        zhV = e1v * va_e * zhvp2_e
+
+    and then evaluates (:722-724)::
+
+        zhdiv = ((zhU(i)-zhU(i-1)) + (zhV(j)-zhV(j-1))) * r1_e1e2t
+
+    This differs by a few ulps from sending ``H*U`` through the generic
+    velocity-divergence operator, which multiplies face metrics after the
+    depth/velocity product and divides by area after the flux sum.  Keep this
+    specialization beside the NEMO ssh-average depth rule: it returns only the
+    continuity divergence and does not change the non-metric ``H*U`` transport
+    accumulated for tracer advection.
+
+    Arrays use legoESM's full C-face layout, so ``[:, 1:]-[:, :-1]`` supplies
+    NEMO's periodic U east-minus-west difference and
+    ``[1:]-[:-1]`` supplies its closed-wall V north-minus-south difference.
+    """
+    e2u = (grid.dy * 0.5)[:, jnp.newaxis]
+    # Rich NEMO-faithful geometry carries e1v directly. Lean LatLonGrid tests
+    # and callers reconstruct the same canonical v-face width used by the
+    # generic divergence path.
+    e1v = (grid.dx_v if hasattr(grid, "dx_v")
+           else (grid.radius * grid.dlon * vface_zonal_cos_lat(grid))[:, jnp.newaxis])
+    zh_u = ((e2u * U) * H_u) * u_mask
+    zh_v = ((e1v * V) * H_v) * v_mask
+    du = zh_u[:, 1:] - zh_u[:, :-1]
+    dv = zh_v[1:] - zh_v[:-1]
+    return (du + dv) * (1.0 / grid.area)
 
 
 def _min_rule_face_depths(H_total, mask, grid, _nfold_mask):
@@ -855,9 +895,18 @@ def _run_substep_loop(
         Hu_sum_new = Hu_sum_c + w_tr_i * flux_u.astype(dtype)
         Hv_sum_new = Hv_sum_c + w_tr_i * flux_v.astype(dtype)
 
-        div_flux = divergence_cgrid(
-            flux_u, flux_v, grid, u_mask=u_mask, v_mask=v_mask,
-        ).astype(dtype)
+        if _face_depth_mode == "nemo_ssh_avg":
+            # DINO key_qco source order, confirmed from the directly dumped
+            # zhU/zhV/zhdiv operands (#1226 split-explicit rounds 11--12).
+            # The generic path is intentionally retained for every other face
+            # depth convention.
+            div_flux = nemo_literal_continuity_divergence(
+                H_u_flux, H_v_flux, U_mid, V_mid, u_mask, v_mask, grid,
+            ).astype(dtype)
+        else:
+            div_flux = divergence_cgrid(
+                flux_u, flux_v, grid, u_mask=u_mask, v_mask=v_mask,
+            ).astype(dtype)
         eta_unfloored = (eta_c - dt_s * div_flux + dt_s * F_slow_eta * mask) * mask
         if local_subcycle_clamp:
             # SOTA-local (MOM6/MPAS-O): LOCAL clamp per substep — NO allreduce.
