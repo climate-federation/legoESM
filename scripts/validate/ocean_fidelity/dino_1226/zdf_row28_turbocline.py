@@ -37,7 +37,7 @@ EXPECTED_SIZE = 90_944
 EXPECTED_ON_STREAMS = 203
 EXPECTED_OFF_STREAMS = 202
 RESTART_SHA256 = "33c0c1a2e998161afdc9d4b71c5606f5cc5d869e54d53058fc0f64eeac7a115c"
-TAIL_RECEIPT_SHA256 = "fdcc8f739788d9dba13fb86392047e0dc6fddfdf45daf00f7522f84bdd30bf21"
+TAIL_RECEIPT_SHA256 = "2f669e0b85b5902816bff57109555cc65fba4479f62e80c19fb82d48b208a91b"
 
 
 def sha256(path: Path) -> str:
@@ -304,13 +304,11 @@ def main() -> int:
         nan_plant, nemo_hmld, wet_columns, focus)["pass"]
     index_plant = nemo_imld.copy()
     index_plant[idx] += 1
-    index_baseline_pass = bool(not np.any(wet_columns & (nemo_imld != nemo_imld)))
     index_fired = int(np.count_nonzero(wet_columns & (index_plant != nemo_imld))) == 1
     controls = {
         "value_plant_fired": value_fired,
         "unequal_column_swap_fired": layout_fired,
         "nonfinite_fired": nonfinite_fired,
-        "index_baseline_pass": index_baseline_pass,
         "index_plant_fired": index_fired,
         "one_bit_shared_stream_fired": one_bit_fired,
         "missing_stream_inventory_fired": missing_fired,

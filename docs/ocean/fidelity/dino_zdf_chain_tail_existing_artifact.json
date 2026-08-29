@@ -15,6 +15,17 @@
         0
       ]
     },
+    "row21_actual_card_avm": {
+      "baseline_pass": true,
+      "nonfinite_fired": true,
+      "one_i_roll_fired": true,
+      "perturbation_fired": true,
+      "perturbed_ji_k": [
+        1,
+        1,
+        0
+      ]
+    },
     "row22_avt": {
       "baseline_pass": true,
       "nonfinite_fired": true,
@@ -62,6 +73,7 @@
       ]
     }
   },
+  "first_divergence": null,
   "focus_columns_ji": [
     [
       11,
@@ -101,7 +113,7 @@
   },
   "probe": {
     "path": "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/zdf_chain_tail_existing.py",
-    "sha256": "83ad8d1d746973ee5e426fe579ce886b380f0933e1ded19b8cd101a53eff9d85"
+    "sha256": "82b40ca3e74965775a9468d34e8e1dbc54d3655485f9569baa2b97dd108c8ab2"
   },
   "provenance_sha256": {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -125,7 +137,7 @@
     "tke_dump_zmxld.bin": "df9a09e7fcb9e11b7549fb523cb241a2a22a1e073182bcbcc00d56e0d5cfcde2",
     "tke_dump_zmxlm.bin": "60ed331574d813885fb29399b2dbf041a6913ea965d45c09e2890eef8b3ef830"
   },
-  "repo_sha": "d1ff39543755d69690bd8bd68c1af26aa74b7ebc",
+  "repo_sha": "78d54b3b76884f00d43f6346107cf25d6d07a58f",
   "row19_receipt": {
     "path": "/tmp/codex-zdf-sweep/docs/ocean/fidelity/dino_zdf_row19_raw_mxl_artifact.json",
     "repo_sha": "040a3437ea68cf1139f20774793cc3b9dd988695",

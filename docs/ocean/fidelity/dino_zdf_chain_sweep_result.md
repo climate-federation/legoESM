@@ -40,9 +40,17 @@ The ordered no-new-dump walk then gives:
 
 The updated tail receipt is
 `docs/ocean/fidelity/dino_zdf_chain_tail_existing_artifact.json`, SHA256
-`fdcc8f739788d9dba13fb86392047e0dc6fddfdf45daf00f7522f84bdd30bf21`.
+`2f669e0b85b5902816bff57109555cc65fba4479f62e80c19fb82d48b208a91b`.
 Every numeric row above is scored over the whole-domain column census and the
 four registered southern columns.
+
+Adversarial review found and closed two receipt defects before this restamp:
+the tail now makes a fresh production-card row-21 regression DIVERGED, and a
+first failed promoted row changes every later row to ordered-blocked and exits
+nonzero. A planted row-21 stop test proves both behaviors. The row-28 review
+also corrected the deterministic writer contract to the actual full-halo
+90,944-byte stream, switched the scorer to the halo-aware loader, and made the
+index control an exact-one planted mismatch against the NEMO reference.
 
 Row 28 is the ordered stop. The live oracle initializes and scans `imld`, then
 indexes the live `gdepw(Kmm)` ladder at `cfgs/DINO/WORK/zdfmxl.F90:145-152`.
