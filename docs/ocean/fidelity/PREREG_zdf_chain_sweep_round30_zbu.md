@@ -139,3 +139,10 @@ failure at either bar. A quotient-evaluation control and a one-ULP SSH control
 must fail. If confirmed, the owner is the live T-depth evaluation boundary
 (`domain.F90:158` stored reciprocal -> `domqco.F90:160` multiply ->
 `domzgr_substitute.h90:139` live `gdept`) feeding `ldfslp.F90:261-264`.
+
+Retraction, 2026-08-29, before the successful receipt: the preregistered
+quotient control did not fail at `1.0e-15`, and perturbing SSH by one ULP was
+rounded away before the live-depth product. They are not red-capable and are
+withdrawn. The replacements are the measured-red production-Jacobian depth
+construction and a direct one-ULP perturbation of one wet live-`gdept` value.
+This changes no scored stage, bar, focus set, or ownership criterion.

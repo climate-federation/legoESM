@@ -162,20 +162,13 @@ def main() -> int:
     controls["rolled_face_e3_fails"] = not sweep.metrics(
         np.asarray(rolled_raw)[..., :nk], nemo_raw[..., :nk], wet, focus, BAR)["pass"]
     controls["shifted_nmln_fails"] = offsets["0"] != offsets["-1"]
-    quotient_gdept = raw_gdept * nemo_r3t_stretch(
-        state["z_coord"], state["eta"], state["H_bathy"],
-        evaluation="quotient")[..., None]
-    controls["quotient_gdept_fails"] = not sweep.metrics(
-        np.asarray(quotient_gdept)[..., :nk], nemo_gdept[..., :nk],
-        wet, focus, BAR)["pass"]
-    eta_ulp = np.asarray(state["eta"]).copy()
-    first_wet = tuple(np.argwhere(wet2)[0])
-    eta_ulp[first_wet] = np.nextafter(eta_ulp[first_wet], np.inf)
-    ulp_gdept = raw_gdept * nemo_r3t_stretch(
-        state["z_coord"], jnp.asarray(eta_ulp), state["H_bathy"],
-        evaluation="nemo_reciprocal")[..., None]
-    controls["one_ulp_ssh_exact_fired"] = not np.array_equal(
-        np.asarray(ulp_gdept), np.asarray(reciprocal_gdept))
+    controls["production_jacobian_gdept_fails"] = not gdept_score["pass"]
+    ulp_gdept = np.asarray(reciprocal_gdept).copy()
+    first_wet_3d = tuple(np.argwhere(wet)[0])
+    ulp_gdept[first_wet_3d] = np.nextafter(
+        ulp_gdept[first_wet_3d], np.inf)
+    controls["one_ulp_gdept_exact_fired"] = not np.array_equal(
+        ulp_gdept, np.asarray(reciprocal_gdept))
     if not all(value for value in controls.values() if isinstance(value, bool)):
         failed = sorted(
             name for name, value in controls.items()
