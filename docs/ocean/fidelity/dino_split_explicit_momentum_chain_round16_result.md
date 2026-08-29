@@ -109,3 +109,21 @@ reported. No GPU arm was run in this round.
 The earlier round-13/14 artifacts are unbound diagnostics superseded by these
 hardened receipts. No NEMO process, GPU, `mpirun`, push, or new instrumentation
 was used.
+
+## Post-run climate receipt adjudication (2026-08-29)
+
+The four day-360 basin arms completed at clean producer
+`e013e95ca54957a4454878ed7118e623da0a19ba`; the scorer stopped before opening
+the climate statistic. Exact receipt replay confirms that the new stress hash
+`cad9b34958cba58812f1dce2c6c441c8fd6b5f2733c20b91065f4d60507592b7`
+is wholly attributable to the already-owned `nemo_literal` wind-profile
+arithmetic. Re-selecting only `factored_smoothstep` reproduces the frozen
+historical hash `b6a08b8395017c8e3f8df0b8b13eefa75fdfe7be3770d788beaaf1ca514127ae`.
+
+The actual STOP was the scorer expecting the descriptive string
+`BRIDGED_BEFORE` instead of the harness's canonical `twin_start_mode=bridged`.
+Both factorial scorers now use the canonical stamp and additionally bind the
+stress content hash to `dino_wind_profile_evaluation`, with red-capable plants
+for the start label and content hash. Blocks 1--2 and their artifacts are not
+rerun. The scoring blocks use a separate clean adjudication checkout so the
+producer checkout remains frozen at the commit that made the artifacts.

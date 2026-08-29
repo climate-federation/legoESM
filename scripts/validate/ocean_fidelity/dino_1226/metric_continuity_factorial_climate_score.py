@@ -36,14 +36,23 @@ def _validate(path, producer, metric_selector, association_selector):
             raise SystemExit(f"STOP {path} producer receipt")
         if not bool(_scalar(z, "stable")) \
                 or _scalar(z, "control_dtype") != "float64" \
-                or _scalar(z, "nemo_ladder_mode") != "both" \
-                or _scalar(z, "twin_start_mode") != "BRIDGED_BEFORE" \
-                or _scalar(z, "bridge_before_stress_stagger") != "T":
-            raise SystemExit(f"STOP {path} runtime/stagger receipt")
+                or _scalar(z, "nemo_ladder_mode") != "both":
+            raise SystemExit(f"STOP {path} runtime receipt")
         session = os.environ.get("CODEX_SESSION_ID")
         if not session or _scalar(z, "codex_session_id") != session:
             raise SystemExit(f"STOP {path} session receipt")
         cfg = json.loads(str(_scalar(z, "run_config")))
+        stress_receipt = {
+            key: _scalar(z, key) for key in (
+                "twin_start_mode", "bridge_before_stress_stagger",
+                "bridge_before_stress_reconstruction_seconds",
+                "bridge_before_stress_sha256")
+        }
+        stress_errors = T.tpoint_stress_receipt_errors(stress_receipt, cfg)
+        if stress_errors:
+            raise SystemExit(
+                f"STOP {path} start/stress receipt:\n  "
+                + "\n  ".join(stress_errors))
         if cfg.get("vface_zonal_metric_evaluation") != metric_selector \
                 or cfg.get("barotropic_continuity_evaluation") != association_selector \
                 or cfg.get("n_days") != 360 \
@@ -51,7 +60,7 @@ def _validate(path, producer, metric_selector, association_selector):
                 or cfg.get("snap_days") != [0, 360] \
                 or cfg.get("save_step_eta"):
             raise SystemExit(f"STOP {path} selector/day stamps")
-        return cfg, str(_scalar(z, "initial_state_sha256"))
+        return cfg, str(_scalar(z, "initial_state_sha256")), stress_receipt
 
 
 def _metric_safety(nemo, control, candidate):
@@ -111,6 +120,8 @@ def main() -> int:
     }
     configs = {arm: item[0] for arm, item in validated.items()}
     initial_hashes = {arm: item[1] for arm, item in validated.items()}
+    T.check_tpoint_stress_receipt_plants(
+        validated["legacy_generic"][2], configs["legacy_generic"])
     if len(set(initial_hashes.values())) != 1:
         raise SystemExit(f"STOP factorial initial-state hashes differ: {initial_hashes}")
     stripped = []

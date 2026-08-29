@@ -74,7 +74,7 @@ but no new post-hoc wall interaction threshold is permitted.
 ## Admission and controls
 
 Every NPZ must stamp the same clean producer commit, session, float64 storage,
-NEMO ladder `both`, `BRIDGED_BEFORE`, T-point stress carry, selector pair, run
+NEMO ladder `both`, bridged BEFORE state, T-point stress carry, selector pair, run
 length, and day-0 state. All non-selector run-config fields and masks must be
 bit-identical. The basin scorer retains the imported reducer plants and
 compensation gate. The wall scorer requires the certified NEMO file SHA-256
@@ -83,3 +83,35 @@ land-poison identity, and planted-amplitude recovery in `[0.95,1.05]`.
 
 No result outside these bars may be promoted. No arm has been run as of this
 commit.
+
+## 2026-08-29 receipt-only amendment after the Block-3 STOP
+
+Block 3 stopped before loading any day-360 field or computing any registered
+statistic. Its compressed `runtime/stagger` message was caused by a scorer
+literal: the harness stamps `twin_start_mode="bridged"`, while both factorial
+scorers required the descriptive label `"BRIDGED_BEFORE"`. The canonical
+harness admission code and artifacts use the former string.
+
+The STOP exposed a second omission before scoring: the factorial scorers did
+not bind the reconstructed T-point stress content to the resolved wind-profile
+selector. An exact CPU/fp64 replay through `_analytic_dino_tpoint_stress`, on
+the same bridged 199x52 geometry and reconstruction time 15552000 s, changed
+only `dino_wind_profile_evaluation` and reproduced:
+
+- `factored_smoothstep` ->
+  `b6a08b8395017c8e3f8df0b8b13eefa75fdfe7be3770d788beaaf1ca514127ae`;
+- `nemo_literal` ->
+  `cad9b34958cba58812f1dce2c6c441c8fd6b5f2733c20b91065f4d60507592b7`.
+
+The delta is confined to `tau_x`: 3,276 float64 elements differ, maximum
+absolute delta `1.3877787807814457e-16`, RMS delta
+`2.0276965279154703e-17`; `tau_y` is bit-identical. All four completed basin
+artifacts stamp `nemo_literal`, `cad9...`, time 15552000 s, the same initial
+state hash, and producer `e013e95ca54957a4454878ed7118e623da0a19ba`.
+
+Admission is therefore amended without changing a science bar: require the
+literal harness stamp `twin_start_mode="bridged"`, and bind the stress hash to
+the resolved selector. Pre-selector retained artifacts remain mapped to the
+historical factored hash; current complete-card `nemo_literal` artifacts map
+to `cad9...`. Planted start-label and content-hash swaps must both be rejected.
+No arm is rerun, and Blocks 1--2 remain valid.

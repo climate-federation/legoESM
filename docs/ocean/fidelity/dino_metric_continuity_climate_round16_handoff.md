@@ -1,9 +1,12 @@
 # Handoff: V-face metric x QCO association climate factorial
 
 These blocks are frozen by
-`PREREG_metric_continuity_climate_factorial_round16.md`. They run no NEMO
-process and apply no patch. Every block changes to its own checkout, uses
-absolute paths, uses `grep` rather than `rg`, and exports the session ID.
+`PREREG_metric_continuity_climate_factorial_round16.md` and its dated receipt
+amendment. They run no NEMO process and apply no patch. Every block changes to
+its own checkout, uses absolute paths, uses `grep` rather than `rg`, and exports
+the session ID. After Blocks 1--2 produced artifacts at `e013e95ca`, the
+corrected scoring blocks deliberately use a second clean adjudication checkout;
+the original producer checkout and completed artifacts remain untouched.
 
 ## Block 1 — clean detached checkout and disk guard
 
@@ -106,12 +109,37 @@ sha256sum "$run_root"/basin/*.npz
 ```bash
 set -euo pipefail
 export CODEX_SESSION_ID=01a04e34-d1fb-73e0-b25a-177641f0a246
+repo=/tmp/codex-zdf-sweep
+branch=fidelity/dino-zdf-sweep-codex
 run_root=/tmp/dino-metric-continuity-factorial-01a04e34
-checkout="$run_root/checkout"
-cd "$checkout"
-export PYTHONPATH="$checkout/packages/core:$checkout/packages/ocean:$checkout/packages/atmosphere:$checkout/packages/coupler:$checkout/packages/ice:$checkout/packages/land:$checkout/packages/ml:$checkout/packages/tools:$checkout/scripts/validate/ocean_fidelity/dino_1226"
+scorer_checkout="$run_root/scorer-checkout"
 producer=$(cat "$run_root/producer_commit.txt")
-python "$checkout/scripts/validate/ocean_fidelity/dino_1226/metric_continuity_factorial_climate_score.py" \
+test "$producer" = e013e95ca54957a4454878ed7118e623da0a19ba
+cd "$repo"
+scorer_commit=$(git rev-parse "$branch")
+test -n "$scorer_commit"
+test ! -e "$scorer_checkout" || {
+  echo "STOP: scorer checkout already exists; inspect rather than overwrite" >&2
+  exit 1
+}
+available_kb=$(df -Pk /tmp | awk 'NR==2 {print $4}')
+test "$available_kb" -ge 10485760 || {
+  echo "STOP: less than 10 GiB free in /tmp" >&2
+  exit 1
+}
+git worktree add --detach "$scorer_checkout" "$scorer_commit"
+cd "$scorer_checkout"
+test -z "$(git status --porcelain)"
+size_kb=$(du -sk "$scorer_checkout" | awk '{print $1}')
+test "$size_kb" -le 5242880 || {
+  echo "STOP: scorer checkout exceeds 5 GiB" >&2
+  exit 1
+}
+printf '%s\n' "$scorer_commit" > "$run_root/scorer_commit.txt"
+export PYTHONPATH="$scorer_checkout/packages/core:$scorer_checkout/packages/ocean:$scorer_checkout/packages/atmosphere:$scorer_checkout/packages/coupler:$scorer_checkout/packages/ice:$scorer_checkout/packages/land:$scorer_checkout/packages/ml:$scorer_checkout/packages/tools:$scorer_checkout/scripts/validate/ocean_fidelity/dino_1226"
+grep -n "receipt-only amendment" \
+  "$scorer_checkout/docs/ocean/fidelity/PREREG_metric_continuity_climate_factorial_round16.md"
+python "$scorer_checkout/scripts/validate/ocean_fidelity/dino_1226/metric_continuity_factorial_climate_score.py" \
   --legacy-generic "$run_root/basin/legacy_generic.npz" \
   --legacy-literal "$run_root/basin/legacy_literal.npz" \
   --nemo-generic "$run_root/basin/nemo_generic.npz" \
@@ -121,6 +149,8 @@ python "$checkout/scripts/validate/ocean_fidelity/dino_1226/metric_continuity_fa
   | tee "$run_root/logs/basin_score.log"
 grep '"headline_verdict"' "$run_root/metric_continuity_basin_factorial.json"
 sha256sum "$run_root/metric_continuity_basin_factorial.json"
+printf 'producer_commit=%s scorer_commit=%s session_id=%s\n' \
+  "$producer" "$scorer_commit" "$CODEX_SESSION_ID"
 ```
 
 ## Block 4 — four five-day wall arms
@@ -182,14 +212,21 @@ sha256sum "$run_root"/wall/*.npz
 set -euo pipefail
 export CODEX_SESSION_ID=01a04e34-d1fb-73e0-b25a-177641f0a246
 run_root=/tmp/dino-metric-continuity-factorial-01a04e34
-checkout="$run_root/checkout"
+scorer_checkout="$run_root/scorer-checkout"
 nemo=/tmp/dino_eta_waves/nemo_5d_eta.npz
-cd "$checkout"
-export PYTHONPATH="$checkout/packages/core:$checkout/packages/ocean:$checkout/packages/atmosphere:$checkout/packages/coupler:$checkout/packages/ice:$checkout/packages/land:$checkout/packages/ml:$checkout/packages/tools:$checkout/scripts/validate/ocean_fidelity/dino_1226"
+test -d "$scorer_checkout/.git" || {
+  echo "STOP: run corrected Block 3 to create the scorer checkout" >&2
+  exit 1
+}
+cd "$scorer_checkout"
+test -z "$(git status --porcelain)"
+scorer_commit=$(cat "$run_root/scorer_commit.txt")
+test "$(git rev-parse HEAD)" = "$scorer_commit"
+export PYTHONPATH="$scorer_checkout/packages/core:$scorer_checkout/packages/ocean:$scorer_checkout/packages/atmosphere:$scorer_checkout/packages/coupler:$scorer_checkout/packages/ice:$scorer_checkout/packages/land:$scorer_checkout/packages/ml:$scorer_checkout/packages/tools:$scorer_checkout/scripts/validate/ocean_fidelity/dino_1226"
 producer=$(cat "$run_root/producer_commit.txt")
 test "$(sha256sum "$nemo" | awk '{print $1}')" = \
   52bc6c70697126f7522114dbe2fc5cda5b56ce566db28f488d6809b79997b47a
-python "$checkout/scripts/validate/ocean_fidelity/dino_1226/metric_continuity_factorial_wall_score.py" \
+python "$scorer_checkout/scripts/validate/ocean_fidelity/dino_1226/metric_continuity_factorial_wall_score.py" \
   --nemo "$nemo" \
   --legacy-generic "$run_root/wall/legacy_generic.npz" \
   --legacy-literal "$run_root/wall/legacy_literal.npz" \
@@ -200,7 +237,8 @@ python "$checkout/scripts/validate/ocean_fidelity/dino_1226/metric_continuity_fa
   | tee "$run_root/logs/wall_score.log"
 grep '"headline_verdict"' "$run_root/metric_continuity_wall_factorial.json"
 sha256sum "$run_root/metric_continuity_wall_factorial"*.json
-printf 'session_id=%s producer_commit=%s\n' "$CODEX_SESSION_ID" "$producer"
+printf 'session_id=%s producer_commit=%s scorer_commit=%s\n' \
+  "$CODEX_SESSION_ID" "$producer" "$scorer_commit"
 ```
 
 Do not remove the checkout or artifacts until both scorers have exited zero
