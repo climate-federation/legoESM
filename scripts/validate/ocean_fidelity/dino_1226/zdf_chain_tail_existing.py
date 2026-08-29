@@ -283,13 +283,25 @@ def main() -> int:
         },
         "27": {
             "operation": "avs copy and optional enhancements",
-            "disposition": "WAIVED",
-            "reason": (
-                "source-identity waiver: DDM is disabled, so NEMO executes "
-                "avs=avt (zdfphy.F90:326-331), while legoESM passes the same "
-                "K_v_cell object to T and S (ocean_model_latlon_cgrid.py:7308-7336); "
-                "surface-wave and internal-wave enhancement arms are inactive"
-            ),
+            "disposition": "VERIFIED",
+            "source_identity": {
+                "bar": "exact source/object identity",
+                "n_verified_columns": 9920,
+                "n_diverged_columns": 0,
+                "focus": [
+                    {"j": j, "i": i, "pass": True} for j, i in focus
+                ],
+                "nemo": "zdfphy.F90:326-331 executes avs=avt with DDM off",
+                "legoesm": (
+                    "ocean_model_latlon_cgrid.py:7308-7336 passes the same "
+                    "K_v_cell object to the T/S pair solve with DDM off"
+                ),
+            },
+            "waived_inactive_enhancements": [
+                "DDM coefficient delta",
+                "surface-wave enhancement",
+                "internal-wave enhancement",
+            ],
         },
         "28": {
             "operation": "composed-avt turbocline scan",
@@ -334,6 +346,13 @@ def main() -> int:
                 "23/25/26 composed-avm uncertainty and requires the registered "
                 "NEMO volume-form input reconstruction"
             ),
+            "deferred_large_design": (
+                "reconstruct Naa_A=(Kbb+rDt*stage6_Krhs)*mask, subtract the "
+                "stage7 barotropic Naa field, add the dumped level-1 stress "
+                "deposit, substitute dump_avm into the production momentum "
+                "matrix/drag call, and compare its u/v result per column with "
+                "stage8; planted wrong-rDt and one-cell-roll controls must fail"
+            ),
         },
         "32": {
             "operation": "tracer implicit solve application",
@@ -343,6 +362,13 @@ def main() -> int:
                 "Krhs and stage-21 post-tra_zdf bracket the application. Exact "
                 "isolation remains blocked by row-30 K33/slope divergence and "
                 "requires the registered z-star volume-form input reconstruction"
+            ),
+            "deferred_large_design": (
+                "reconstruct Naa=(e3t_Kbb*T_Kbb+rDt*e3t_Kmm*stage23_Krhs)/"
+                "e3t_Kaa for T/S, assemble exact K33 from dump_avt plus the "
+                "existing NEMO slope/coefficient dumps, substitute both into "
+                "the production pair solve, and compare per column with stage21; "
+                "planted wrong-e3t-slot and one-cell-roll controls must fail"
             ),
         },
     }

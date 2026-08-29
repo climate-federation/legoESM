@@ -41,12 +41,24 @@ past the unresolved row 18.
 | 24 | river-mouth enhancement | `WAIVED` | `ln_rnf=F`, `ln_rnf_mouth=F` | inactive |
 | 25 | EVD tracer overwrite | `UNMEASURED-ORACLE-SELFCHECK` | NEMO reconstruction is exact over 39,293 fired wet elements; legoESM EVD was not invoked | preview only |
 | 26 | EVD momentum overwrite | `UNMEASURED-ORACLE-SELFCHECK` | NEMO reconstruction is exact over 39,293 fired wet elements; legoESM EVD was not invoked | preview only |
-| 27 | `avs=avt`; optional enhancements | `WAIVED` | DDM off: exact source identity on both sides; SWM/IWM arms inactive | source receipt |
+| 27 | `avs=avt`; optional enhancements | `VERIFIED` | exact source/object identity, 0/9,920; disabled DDM/SWM/IWM enhancements separately waived | 4/4 pass |
 | 28 | composed-`avt` turbocline | `UNMEASURED-NEEDS-DUMP` | no same-step `imld/hmld` slot | needs slot |
 | 29 | `avm` lateral boundary update | `UNMEASURED-ORACLE-SELFCHECK` | NEMO interior reconstruction exact; legoESM LBC path was not invoked | preview only |
 | 30 | `ldf_slp` | `DIVERGED` | `uslp/vslp/wslpi/wslpj` fail 9,306/9,412/9,462/9,462 columns | 4/4 fail each |
 | 31 | momentum implicit application | `UNMEASURED-EXISTING-BRACKET` | existing Kbb + stage-6 Krhs + stage-7 barotropic + stage-8 fields suffice; exact reconstruction is blocked by composed-`avm` uncertainty | no new dump |
 | 32 | tracer implicit application | `UNMEASURED-EXISTING-BRACKET` | existing Kbb/stage-23/stage-21 fields suffice; exact reconstruction is blocked by row-30 K33 divergence | no new dump |
+
+Rows 31--32 are the explicit large deferred stop for this held-instrumentation
+round, not dump requests. Row 31 will reconstruct
+`Naa_A=(Kbb+rDt*stage6_Krhs)*mask`, subtract stage-7 barotropic `Naa`, add the
+dumped level-1 stress deposit, substitute `dump_avm`, and score the production
+momentum matrix/drag call against stage 8. Row 32 will reconstruct the NEMO
+z-star volume input
+`(e3t_Kbb*T_Kbb+rDt*e3t_Kmm*stage23_Krhs)/e3t_Kaa`, assemble K33 from
+`dump_avt` plus the existing slope/coefficient dumps, and score the production
+T/S pair solve against stage 21. Both designs require per-column focus scores,
+wrong-slot controls, and one-cell-roll controls. They are a substantial new
+committed substitution probe, but require no new oracle output.
 
 Row 20 was isolated by feeding the real production mixing-length routine
 NEMO's dumped post-row-18 `en`, current `rn2`, and the captured production
