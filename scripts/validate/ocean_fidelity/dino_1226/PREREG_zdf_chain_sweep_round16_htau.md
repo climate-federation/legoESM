@@ -32,7 +32,12 @@ passing.  Any candidate `htau` bit mismatch or any complete-row failure is
 `REFUTE-VECTOR-SIN`; no vector-SIN production option is then allowed.
 
 Controls must be red: perturb one wet phase argument by +1 ULP and require
-the glibc vector-SIN exact comparison to fail; exchange one adjacent i-pair
-and require the exact `htau` comparison to fail; retain the existing row-18
-one-cell roll, nonfinite, and planted-value controls.  No downstream row is
-promoted by this discriminator alone.
+the glibc vector-SIN exact comparison to fail; roll the candidate latitude
+field by one j-row and require the exact `htau` comparison to fail; retain the
+existing row-18 one-cell roll, nonfinite, and planted-value controls.  No
+downstream row is promoted by this discriminator alone.
+
+Pre-measurement correction, 2026-08-28: the first version registered an
+adjacent-i exchange.  That control is retracted because DINO's T-point
+latitude is zonally constant, so exchanging adjacent i values cannot change
+the input and cannot fail.  The j-row roll above is the red-capable replacement.
