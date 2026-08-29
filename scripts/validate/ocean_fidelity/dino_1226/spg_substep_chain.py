@@ -1140,44 +1140,21 @@ def main() -> int:
     predicted_u_s1_from_forcing = rDt_e * diff_zufrc_rms / float(np.sqrt(np.mean(nemo_un_init[umask2] ** 2)))
     predicted_v_s1_from_forcing = rDt_e * diff_zvfrc_rms / float(np.sqrt(np.mean(nemo_vn_init[vmask2] ** 2)))
     print("\n" + "=" * 78)
-    print("=== STAGE 6b: THE DECISIVE ARITHMETIC (unit-consistent: rDt_e * forcing-error, "
-          "same [m/s] normalisation as ub_substep1/vb_substep1) ===")
-    print(f"  predicted substep-1 err_norm from forcing alone (rDt_e*|zu_frc diff|/RMS(un_e)):"
+    print("=== STAGE 6b: MAGNITUDE-ONLY arithmetic (unit-consistent: rDt_e * "
+          "forcing-error norm, same [m/s] normalisation as ub_substep1/vb_substep1) ===")
+    print(f"  forcing-difference norm scaled by rDt_e (rDt_e*|zu_frc diff|/RMS(un_e)):"
           f"  u={predicted_u_s1_from_forcing:.4e}  v={predicted_v_s1_from_forcing:.4e}")
     print(f"  MEASURED substep-1 err_norm (STAGE 2, same run)                              :"
           f"  u={e_ub_s1:.4e}  v={e_vb_s1:.4e}")
     ratio_u = predicted_u_s1_from_forcing / e_ub_s1 if e_ub_s1 else float("nan")
     ratio_v = predicted_v_s1_from_forcing / e_vb_s1 if e_vb_s1 else float("nan")
     print(f"  ratio predicted/measured: u={ratio_u:.3f}  v={ratio_v:.3f}  "
-          "(near 1.0 -> the forcing error, propagated through ONE substep's own "
-          "rDt_e, quantitatively reproduces the measured substep-1 error -- the "
-          "forcing owns it; far from 1.0 -> forcing does not explain substep-1, "
-          "a per-substep-recomputed term must instead)")
-    FORCING_OWNS_THRESHOLD_LO, FORCING_OWNS_THRESHOLD_HI = 0.5, 2.0  # order-of-magnitude match band
-    forcing_is_clean = e_zufrc < 1e-8 and e_zvfrc < 1e-8
-    forcing_owns_it = (FORCING_OWNS_THRESHOLD_LO < ratio_u < FORCING_OWNS_THRESHOLD_HI)
-    if forcing_is_clean:
-        print("\n  VERDICT: forcing is CLEAN (roundoff-level err_norm) -- the slow-"
-              "forcing hypothesis is FALSIFIED. zu_frc/zv_frc are NOT the source "
-              "of the linear accumulation; a per-substep term (SSH gradient zu_spg, "
-              "Coriolis+drag zu_trd, or the ssh/velocity update itself) must be "
-              "introducing a small error EACH iteration instead.")
-    elif forcing_owns_it:
-        print(f"\n  VERDICT: the slow forcing OWNS the substep-1 error. Propagating "
-              f"zu_frc's own measured error through exactly ONE substep's rDt_e "
-              f"predicts err_norm={predicted_u_s1_from_forcing:.4e} (u), matching the "
-              f"independently measured substep-1 err_norm={e_ub_s1:.4e} to "
-              f"{ratio_u:.2f}x. This localizes the first-substep divergence; it "
-              "does not by itself claim that unweighted multiplication by the "
-              "substep count predicts the filtered final state. The v-component "
-              "check is reported "
-              f"alongside (ratio={ratio_v:.2f}) for completeness, though it is "
-              "noisier because vn_e_init's own RMS is small.")
-    else:
-        print(f"\n  VERDICT: forcing does NOT quantitatively explain substep-1 (ratio "
-              f"{ratio_u:.3f}/{ratio_v:.3f}, outside the 0.5-2x match band) -- the "
-              "slow-forcing hypothesis is NOT confirmed by this measurement; a "
-              "per-substep-recomputed term is the more likely source instead.")
+          "(diagnostic only: scalar norm agreement discards vector direction and "
+          "cannot detect cancellation with pressure-gradient/Coriolis/drag errors)")
+    print("\n  NO CAUSAL VERDICT: the assembled forcing is independently DIVERGED, "
+          "but these norm ratios do not establish how much of the substep-output "
+          "difference it causes. A held-forcing counterfactual or vector "
+          "term-by-term residual is required.")
 
     # --- STAGE 6c (only meaningful if forcing is clean -- run regardless for
     # the record, since substep-1 state vs its NEMO dump is cheap and already
@@ -1186,26 +1163,17 @@ def main() -> int:
     # OUTPUT state; isolating which individual term -- zu_spg vs zu_trd vs
     # zu_frc -- caused it would need instrumenting each addend separately,
     # which is future work, not claimed here).
-    if not forcing_is_clean:
-        print("\n--- STAGE 6c: skipped (forcing hypothesis holds per 6b; no need to "
-              "search per-substep terms) ---")
-    else:
-        print("\n--- STAGE 6c: forcing falsified -- substep-1 state (already measured "
-              "in STAGE 2 above) is the next candidate. Per-substep terms in NEMO's "
-              "loop body (dynspg_ts.F90:591-916) that are recomputed EVERY jn (thus "
-              "candidates for a per-iteration bug, unlike the constant zu_frc/zv_frc):"
-              "\n    1. AB3-AM4 mid-step extrapolation (ua_e/va_e from un_e/ub_e/ubb_e, :610-616)"
-              "\n    2. SSH continuity update (ssha_e from sshn_e + flux divergence, :672-673)"
-              "\n    3. Back-interpolated SSH for the PGF, zsshp2_e (:747-749)"
-              "\n    4. Surface-pressure-gradient term zu_spg (:752-755)"
-              "\n    5. 2-D Coriolis zu_trd = dyn_cor_2D(ua_e,va_e) (:757), + tide (:770-774) "
-              "+ bottom drag zCdU_u*un_e*hur_e (:779-782)"
-              "\n    6. Velocity update ua_e = un_e + rDt_e*(zu_spg + zu_trd + zu_frc) (:802-808)"
-              f"\n  STAGE 2 above already measured the COMBINED substep-1 OUTPUT error "
-              f"(ub_substep1={e_ub_s1:.4e}, vb_substep1={e_vb_s1:.4e}, ssh_substep1="
-              f"{e_ssh_s1:.4e}) -- attributing it to ONE of terms 1-6 individually "
-              "would require dumping/comparing each addend separately (not done here; "
-              "flagged as follow-up, not claimed).")
+    print("\n--- STAGE 6c: term attribution remains UNMEASURED ---"
+          "\n    1. AB3-AM4 mid-step extrapolation (ua_e/va_e from un_e/ub_e/ubb_e, :610-616)"
+          "\n    2. SSH continuity update (ssha_e from sshn_e + flux divergence, :672-673)"
+          "\n    3. Back-interpolated SSH for the PGF, zsshp2_e (:747-749)"
+          "\n    4. Surface-pressure-gradient term zu_spg (:752-755)"
+          "\n    5. 2-D Coriolis zu_trd = dyn_cor_2D(ua_e,va_e) (:757), + tide (:770-774) "
+          "+ bottom drag zCdU_u*un_e*hur_e (:779-782)"
+          "\n    6. Velocity update ua_e = un_e + rDt_e*(zu_spg + zu_trd + zu_frc) (:802-808)"
+          f"\n  STAGE 2 measured only the COMBINED output error (ub_substep1={e_ub_s1:.4e}, "
+          f"vb_substep1={e_vb_s1:.4e}, ssh_substep1={e_ssh_s1:.4e}); no term "
+          "among 1-6 is assigned ownership here.")
 
     # --- STAGE 6d: consistency check -- does per-substep-constant * 68
     # explain the final error?
@@ -1235,8 +1203,8 @@ def main() -> int:
     print(f"  forcing err_norm         : zu_frc={e_zufrc:.4e}  zv_frc={e_zvfrc:.4e}")
     print(f"  substep-1 err_norm       : ub_substep1={e_ub_s1:.4e}  vb_substep1={e_vb_s1:.4e}")
     print(f"  final err_norm           : puu_b={e_puu:.4e}  pvv_b={e_pvv:.4e}")
-    print(f"  forcing_is_clean={forcing_is_clean}  forcing_owns_it={forcing_owns_it}  "
-          f"ratio(predicted_from_forcing/measured_substep1)=u:{ratio_u:.3f} v:{ratio_v:.3f}  "
+    print(f"  magnitude_ratio(scaled_forcing_norm/measured_substep1_norm), NONCAUSAL="
+          f"u:{ratio_u:.3f} v:{ratio_v:.3f}  "
           f"fraction_of_final_explained_by_linear(substep1*{n_substeps_final})="
           f"u:{frac_explained_u:.3f} v:{frac_explained_v:.3f}")
 

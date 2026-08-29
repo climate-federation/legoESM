@@ -125,3 +125,13 @@ and selected settings are recorded. Runtime Python/JAX/jaxlib/NumPy/platform/
 CPU-device fields, the NEMO executable, and resolved `output.namelist.dyn` are
 also stamped. Rows, bars, populations, numeric model code, and stop rule remain
 unchanged.
+
+## Instrument amendment after mechanism re-review
+
+The instrument reviewer returned SHIP, but the mechanism reviewer retained
+HOLD because inherited stage 6b still converted scalar RMS-magnitude agreement
+into forcing ownership and skipped term attribution. Before the next run, that
+claim is retracted in the executable probe: the ratios remain explicitly
+noncausal diagnostics, cancellation is named, and stage 6c always reports term
+ownership UNMEASURED pending a held-forcing or vector-residual test. No numeric
+calculation, registered row, gate, or stop rule changes.
