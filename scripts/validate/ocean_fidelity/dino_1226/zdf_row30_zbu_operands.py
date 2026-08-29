@@ -113,8 +113,15 @@ def main() -> int:
     model = SimpleNamespace(z_coord=st["z_coord"], config=st["model_config"])
     model._n2_nemo_before_tracers = MethodType(
         LatLonCGridOceanModel._n2_nemo_before_tracers, model)
+    # The standalone bridge object does not install its separately loaded
+    # NEMO tb/sb arrays into the leapfrog carry slots; the production twin's
+    # --bridge-before path does. Seed those exact arrays before invoking the
+    # production bundle, matching the real model-step precondition.
+    bridge_state = st["bridge_state"]._replace(
+        T_before=st["bridge_state"].T._replace(data=st["T"]),
+        S_before=st["bridge_state"].S._replace(data=st["S"]))
     bundle = LatLonCGridOceanModel._tke_step_entry_n2_bundle(
-        model, st["bridge_state"])
+        model, bridge_state)
     if bundle is None:
         raise SystemExit("production step-entry N2 bundle unexpectedly disabled")
     prod_pn2 = np.concatenate([
