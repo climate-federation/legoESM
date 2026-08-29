@@ -112,7 +112,6 @@ def main() -> int:
     zmxld_full = interior("tke_dump_zmxld.bin")
     avm_closure_full = interior("tke_dump_avm_final.bin")
     avt_closure_full = interior("tke_dump_avt_final.bin")
-    dissl_full = interior("tke_dump_dissl.bin")
 
     # The closure/TKE bridge maps its 35 W rows to NEMO jk=1..jpkm1.  This is
     # distinct from the row-17 solve census, which excludes the prescribed
@@ -129,7 +128,6 @@ def main() -> int:
     zmxld = zmxld_full[..., sl]
     avm_closure = avm_closure_full[..., sl]
     avt_closure = avt_closure_full[..., sl]
-    dissl = dissl_full[..., sl]
 
     br, cfg, mc, model, forcing, sf, state = _build_twin_state(
         "nemo_dino_kamm_mlf",
@@ -170,8 +168,6 @@ def main() -> int:
         prandtl_K_M=jnp.asarray(avm_in),
     )
     row21_avm = sweep.metrics(np.asarray(km), avm_closure, wet_interior, focus, POINTWISE)
-    dissl_lego = np.divide(np.sqrt(en), zmxld, out=np.zeros_like(en), where=zmxld > 0.0)
-    row21_dissl = sweep.metrics(dissl_lego, dissl, wet_interior, focus, POINTWISE)
     row22_avt = sweep.metrics(np.asarray(kh), avt_closure, wet_interior, focus, POINTWISE)
     row22_pdlr = sweep.metrics(np.asarray(km) * 0.0 + pdlr, pdlr, wet_interior, focus, POINTWISE)
 
@@ -244,8 +240,11 @@ def main() -> int:
             "operation": "base avm/avt/dissl assembly",
             "disposition": "UNMEASURED-NEEDS-DUMP",
             "avm_preview": row21_avm,
-            "dissl_preview": row21_dissl,
-            "reason": "avm and dissl are directly checkable; base pre-Prandtl avt is not dumped",
+            "reason": (
+                "base avm is directly checkable and passes; base pre-Prandtl "
+                "avt and post-tke_avn dissl are not dumped (the existing "
+                "dissl slot is the carried pre-overwrite row-15 operand)"
+            ),
         },
         "22": {
             "operation": "inverse-Prandtl avt correction",
@@ -349,7 +348,6 @@ def main() -> int:
         "tke_dump_zmxld.bin",
         "tke_dump_avm_final.bin",
         "tke_dump_avt_final.bin",
-        "tke_dump_dissl.bin",
         "dump_avm.bin",
         "dump_avt.bin",
         *ldf_probe.DUMP_META.values(),
