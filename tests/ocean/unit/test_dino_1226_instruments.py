@@ -479,9 +479,13 @@ def test_tpoint_stress_selector_defaults_corrected_and_legacy_is_opt_in(instrume
     legacy = k._parse_args([
         "nemo_dino_kamm_mlf", "out.npz",
         "--bridge-before-stress-legacy-u-as-t"])
+    legacy_euler = k._parse_args([
+        "nemo_dino_kamm_mlf", "out.npz", "--legacy-euler-start"])
     assert base.bridge_before_stress_tpoint is True
     assert explicit_corrected.bridge_before_stress_tpoint is True
     assert legacy.bridge_before_stress_tpoint is False
+    assert legacy_euler.bridge_before is False
+    assert legacy_euler.bridge_before_stress_tpoint is False
     with pytest.raises(SystemExit):
         k._parse_args([
             "nemo_dino_kamm_mlf", "out.npz",
@@ -558,6 +562,10 @@ def test_tpoint_stress_selector_refuses_euler_start_before_io(
         k._build_twin_state(
             "nemo_dino_kamm_mlf", "/unused", "/unused",
             bridge_before=False, bridge_before_stress_tpoint=True)
+    with pytest.raises(AssertionError, match="selector must refuse"):
+        k._build_twin_state(
+            "nemo_dino_kamm_mlf", "/unused", "/unused",
+            bridge_before=False, bridge_before_stress_tpoint=False)
 
 
 def test_tpoint_stress_selector_threads_and_stamps_receipts(
@@ -582,6 +590,11 @@ def test_tpoint_stress_selector_threads_and_stamps_receipts(
     k.main([
         "nemo_dino_kamm_mlf", "out.npz",
         "--bridge-before-stress-legacy-u-as-t"])
+    assert seen["bridge_before_stress_tpoint"] is False
+    seen.clear()
+    k.main([
+        "nemo_dino_kamm_mlf", "out.npz", "--legacy-euler-start"])
+    assert seen["bridge_before"] is False
     assert seen["bridge_before_stress_tpoint"] is False
 
     assert 'bridge_before_stress_stagger = "T"' in src

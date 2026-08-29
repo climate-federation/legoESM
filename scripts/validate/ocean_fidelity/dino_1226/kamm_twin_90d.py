@@ -2153,7 +2153,12 @@ def _parse_args(argv=None):
         help="opt into the known-wrong historical bridge that stores NEMO's "
              "U/V-point prior stress as a T-point carry. Reproduction only; "
              "artifacts stamp U_AS_T_LEGACY")
-    p.set_defaults(bridge_before_stress_tpoint=True)
+    # Resolve the default after parsing ``bridge_before``: a bridged start
+    # faithfully reconstructs the T-point carry by default, while an Euler
+    # start has no prior-stress carry to reconstruct.  An explicit
+    # ``--bridge-before-stress-tpoint --legacy-euler-start`` remains True and
+    # is refused by _build_twin_state's fail-closed compatibility gate.
+    p.set_defaults(bridge_before_stress_tpoint=None)
     p.add_argument("--legacy-euler-start", dest="bridge_before",
                    action="store_false",
                    help="start the twin from a forward-Euler step instead of "
@@ -2316,7 +2321,10 @@ def _parse_args(argv=None):
                         "The 0/30/60/90 snapshot grid cannot resolve a decay "
                         "timescale of days, which is what the retention "
                         "measurement is pre-registered to discriminate.")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.bridge_before_stress_tpoint is None:
+        args.bridge_before_stress_tpoint = bool(args.bridge_before)
+    return args
 
 
 def _smoke_check_vmix_scheme_override():
