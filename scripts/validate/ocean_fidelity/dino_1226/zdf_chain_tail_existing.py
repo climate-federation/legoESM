@@ -363,10 +363,10 @@ def main() -> int:
     ]
     source_root = args.nemo_source_root.resolve()
     source_names = {
-        "zdftke.F90": source_root / "MY_SRC" / "zdftke.F90",
-        "zdfphy.F90": source_root / "MY_SRC" / "zdfphy.F90",
-        "zdfevd.F90": source_root / "MY_SRC" / "zdfevd.F90",
-        "ldfslp.F90": source_root / "MY_SRC" / "ldfslp.F90",
+        "zdftke.F90": source_root / "cfgs" / "DINO" / "MY_SRC" / "zdftke.F90",
+        "zdfphy.F90": source_root / "src" / "OCE" / "ZDF" / "zdfphy.F90",
+        "zdfevd.F90": source_root / "src" / "OCE" / "ZDF" / "zdfevd.F90",
+        "ldfslp.F90": source_root / "cfgs" / "DINO" / "MY_SRC" / "ldfslp.F90",
     }
     missing_sources = [str(path) for path in source_names.values() if not path.is_file()]
     if missing_sources:
