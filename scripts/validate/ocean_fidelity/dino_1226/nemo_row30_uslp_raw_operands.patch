@@ -1,7 +1,7 @@
 diff --git a/cfgs/DINO/MY_SRC/ldfslp.F90 b/cfgs/DINO/MY_SRC/ldfslp.F90
 --- a/cfgs/DINO/MY_SRC/ldfslp.F90
 +++ b/cfgs/DINO/MY_SRC/ldfslp.F90
-@@ -88,5 +88,9 @@
+@@ -88,3 +88,7 @@
     REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   uslp_raw_dump, vslp_raw_dump
     REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   uslp_postshapiro_dump, vslp_postshapiro_dump
 +   ! #1226 row 30 continuation: write-only raw-U composite operands.
@@ -9,8 +9,6 @@ diff --git a/cfgs/DINO/MY_SRC/ldfslp.F90 b/cfgs/DINO/MY_SRC/ldfslp.F90
 +   REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   zuslp_hml_pre_dump, sint_u_dump
 +   REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   mlterm_u_dump, blend_u_dump
     LOGICAL, SAVE :: l_1226_raw_dump_done = .FALSE.
- 
-    !! * Substitutions
 @@ -199,3 +203,7 @@
              ALLOCATE( uslp_raw_dump(jpi,jpj,jpk), vslp_raw_dump(jpi,jpj,jpk) )
              ALLOCATE( uslp_postshapiro_dump(jpi,jpj,jpk), vslp_postshapiro_dump(jpi,jpj,jpk) )

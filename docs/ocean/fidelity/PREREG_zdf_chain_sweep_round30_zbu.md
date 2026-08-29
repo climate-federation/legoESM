@@ -167,7 +167,7 @@ base=/tmp/nemo-row30-manifest.OMUakO
 test "$(sha256sum "$base/cfgs/DINO/MY_SRC/ldfslp.F90" | awk '{print $1}')" = \
   8b4d8cffe35d66241eb77bdc508ef15d6dd90d8ff192fd60201ff83a7d523a29
 test "$(sha256sum scripts/validate/ocean_fidelity/dino_1226/nemo_row30_uslp_raw_operands.patch | awk '{print $1}')" = \
-  9e5877d03d6ae8b6274adc6f4ae2b06af05fe44eafe83008f1624aa72656c596
+  b3435410f3ce2dcd7a77d197f233682691cc8609276c2ffcae07782d0507cca9
 nemo_src=$(mktemp -d /tmp/nemo-row30-uslp.XXXXXX)
 cp -a "$base"/. "$nemo_src"/
 patch -p1 -d "$nemo_src" < \

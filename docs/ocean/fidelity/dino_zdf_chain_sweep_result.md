@@ -52,7 +52,7 @@ replacement production-Jacobian and one-ULP-live-depth controls fire.
 
 The held deterministic instrumentation writes the eight remaining operands.
 Patch SHA256 is
-`9e5877d03d6ae8b6274adc6f4ae2b06af05fe44eafe83008f1624aa72656c596`;
+`b3435410f3ce2dcd7a77d197f233682691cc8609276c2ffcae07782d0507cca9`;
 it dry-runs against row-30 deterministic source SHA256
 `8b4d8cffe35d66241eb77bdc508ef15d6dd90d8ff192fd60201ff83a7d523a29`
 and produces expected source SHA256
