@@ -92,7 +92,7 @@
       23
     ]
   ],
-  "lane": "DUMP LANE: d180  run_dir=/tmp/row21-tail-lane-root/RUN_SEQDUMP_D180_1R  restart=DINO_00005760_restart.nc  kt(nit000)=5761  t_seconds=15554700s (= day 180.03)",
+  "lane": "DUMP LANE: d180  run_dir=/tmp/zdf-tail-lane.Q1ZI7e/RUN_SEQDUMP_D180_1R  restart=DINO_00005760_restart.nc  kt(nit000)=5761  t_seconds=15554700s (= day 180.03)",
   "oracle_source_sha256": {
     "ldfslp.F90": {
       "path": "/tmp/nemo-row19-detwriter.kTFp14/cfgs/DINO/MY_SRC/ldfslp.F90",
@@ -113,7 +113,7 @@
   },
   "probe": {
     "path": "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/zdf_chain_tail_existing.py",
-    "sha256": "82b40ca3e74965775a9468d34e8e1dbc54d3655485f9569baa2b97dd108c8ab2"
+    "sha256": "f0cbc99bfa4f60acb7462b8c28787828f0c17c4f194e15d685594acfc56c3eb2"
   },
   "provenance_sha256": {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -137,14 +137,14 @@
     "tke_dump_zmxld.bin": "df9a09e7fcb9e11b7549fb523cb241a2a22a1e073182bcbcc00d56e0d5cfcde2",
     "tke_dump_zmxlm.bin": "60ed331574d813885fb29399b2dbf041a6913ea965d45c09e2890eef8b3ef830"
   },
-  "repo_sha": "78d54b3b76884f00d43f6346107cf25d6d07a58f",
+  "repo_sha": "2d9aa15577c005f15c7514ca429d43fb87ab0624",
   "row19_receipt": {
-    "path": "/tmp/codex-zdf-sweep/docs/ocean/fidelity/dino_zdf_row19_raw_mxl_artifact.json",
+    "path": "/tmp/dino_zdf_row19_raw_mxl_artifact.json",
     "repo_sha": "040a3437ea68cf1139f20774793cc3b9dd988695",
     "sha256": "f5e42f1d15cd9e823e81fa3f5b56a2b9eebd504c8ef823718c50dd9b9f3fc29b"
   },
   "row21_receipt": {
-    "path": "/tmp/codex-zdf-sweep/docs/ocean/fidelity/dino_zdf_row21_coeff_assembly_artifact.json",
+    "path": "/tmp/dino_zdf_row21_coeff_assembly_artifact.json",
     "repo_sha": "4352c1fd683450e8e2c9844493b2589b11b876e9",
     "sha256": "84885e45ecc149082606c0b44b411271f40942a99497996b0d4b35e051b6a97a"
   },
@@ -204,7 +204,7 @@
         ]
       },
       "operation": "raw buoyancy mixing length before scans",
-      "receipt": "/tmp/codex-zdf-sweep/docs/ocean/fidelity/dino_zdf_row19_raw_mxl_artifact.json",
+      "receipt": "/tmp/dino_zdf_row19_raw_mxl_artifact.json",
       "receipt_sha256": "f5e42f1d15cd9e823e81fa3f5b56a2b9eebd504c8ef823718c50dd9b9f3fc29b"
     },
     "20": {
@@ -609,7 +609,7 @@
           1
         ]
       },
-      "receipt": "/tmp/codex-zdf-sweep/docs/ocean/fidelity/dino_zdf_row21_coeff_assembly_artifact.json",
+      "receipt": "/tmp/dino_zdf_row21_coeff_assembly_artifact.json",
       "receipt_sha256": "84885e45ecc149082606c0b44b411271f40942a99497996b0d4b35e051b6a97a",
       "write_only_bracket": {
         "exclusions": [],
@@ -1028,9 +1028,20 @@
       "reason": "no same-step imld/hmld (mldkz5) slot exists"
     },
     "29": {
+      "controls": {
+        "baseline_pass": true,
+        "nonfinite_fired": true,
+        "one_i_roll_fired": true,
+        "perturbation_fired": true,
+        "perturbed_ji_k": [
+          1,
+          1,
+          0
+        ]
+      },
       "disposition": "UNMEASURED-BLOCKED-BY-ROW28",
       "operation": "avm lateral boundary update, interior census",
-      "reason": "production composed avm already matches the NEMO interior; ordered promotion waits for row 28",
+      "reason": "the registered census excludes halos, so NEMO's lateral boundary update is an interior no-op; the production-composed avm interior already matches and ordered promotion waits for row 28",
       "targeting_preview_avm_interior": {
         "aggregate_bar_pass": true,
         "bar": 1e-15,
@@ -1088,38 +1099,38 @@
           "aggregate_bar_pass": false,
           "bar": 1e-15,
           "column_bar_pass": false,
-          "correlation": 0.9999999970933962,
+          "correlation": 0.8642251706591872,
           "focus": [
             {
-              "column_error": 7.097513153481557e-05,
+              "column_error": 3.232928410315342,
               "i": 1,
               "j": 11,
               "pass": false,
               "wet": true
             },
             {
-              "column_error": 8.217965832784772e-05,
+              "column_error": 2.9518647982651274,
               "i": 1,
               "j": 12,
               "pass": false,
               "wet": true
             },
             {
-              "column_error": 8.15385628623353e-05,
+              "column_error": 2.3537191188821405,
               "i": 1,
               "j": 13,
               "pass": false,
               "wet": true
             },
             {
-              "column_error": 4.792731682551672e-06,
+              "column_error": 7.136350201415463,
               "i": 23,
               "j": 13,
               "pass": false,
               "wet": true
             }
           ],
-          "max_column_error": 0.0056076665529788735,
+          "max_column_error": 7.162375865580755,
           "n_diverged_columns": 9306,
           "n_nonfinite_wet_elements": 0,
           "n_verified_columns": 452,
@@ -1127,48 +1138,48 @@
           "n_wet_elements": 336338,
           "pass": false,
           "reference_rms": 0.0006980116051114225,
-          "rms_ratio": 1.000016117775148,
+          "rms_ratio": 1.1643185157362532,
           "worst_column_ji": [
-            99,
-            1
+            90,
+            38
           ]
         },
         "vslp": {
           "aggregate_bar_pass": false,
           "bar": 1e-15,
           "column_bar_pass": false,
-          "correlation": 0.9999999873985062,
+          "correlation": 0.8438524162560449,
           "focus": [
             {
-              "column_error": 3.540140438243519e-06,
+              "column_error": 1.1056606408453928,
               "i": 1,
               "j": 11,
               "pass": false,
               "wet": true
             },
             {
-              "column_error": 4.818681210104864e-06,
+              "column_error": 1.0859195442727163,
               "i": 1,
               "j": 12,
               "pass": false,
               "wet": true
             },
             {
-              "column_error": 1.296822892149376e-05,
+              "column_error": 0.7392033777973821,
               "i": 1,
               "j": 13,
               "pass": false,
               "wet": true
             },
             {
-              "column_error": 2.204031139388229e-05,
+              "column_error": 1.1655573060380948,
               "i": 23,
               "j": 13,
               "pass": false,
               "wet": true
             }
           ],
-          "max_column_error": 0.007863679543055986,
+          "max_column_error": 4.659745715735317,
           "n_diverged_columns": 9412,
           "n_nonfinite_wet_elements": 0,
           "n_verified_columns": 456,
@@ -1176,108 +1187,108 @@
           "n_wet_elements": 340271,
           "pass": false,
           "reference_rms": 0.0010729290935060534,
-          "rms_ratio": 1.0000139572167668,
+          "rms_ratio": 1.1912310207353995,
           "worst_column_ji": [
-            96,
-            17
+            90,
+            37
           ]
         },
         "wslpi": {
           "aggregate_bar_pass": true,
           "bar": 1e-15,
           "column_bar_pass": false,
-          "correlation": 0.9999999999887257,
+          "correlation": 1.0,
           "focus": [
             {
-              "column_error": 5.057536465055034e-07,
+              "column_error": 0.0,
               "i": 1,
               "j": 11,
-              "pass": false,
+              "pass": true,
               "wet": true
             },
             {
-              "column_error": 7.413534880942628e-07,
+              "column_error": 3.68485868864227e-17,
               "i": 1,
               "j": 12,
-              "pass": false,
+              "pass": true,
               "wet": true
             },
             {
-              "column_error": 9.062796179862453e-07,
+              "column_error": 1.473943475456908e-16,
               "i": 1,
               "j": 13,
-              "pass": false,
+              "pass": true,
               "wet": true
             },
             {
-              "column_error": 2.1090416601467285e-06,
+              "column_error": 1.842429344321135e-17,
               "i": 23,
               "j": 13,
-              "pass": false,
+              "pass": true,
               "wet": true
             }
           ],
-          "max_column_error": 0.0007938849266420253,
-          "n_diverged_columns": 9462,
+          "max_column_error": 1.1791547803655264e-15,
+          "n_diverged_columns": 1,
           "n_nonfinite_wet_elements": 0,
-          "n_verified_columns": 458,
+          "n_verified_columns": 9919,
           "n_wet_columns": 9920,
           "n_wet_elements": 342134,
           "pass": false,
           "reference_rms": 0.0007355792067598877,
-          "rms_ratio": 1.0000001780412238,
+          "rms_ratio": 1.0,
           "worst_column_ji": [
-            187,
-            2
+            23,
+            12
           ]
         },
         "wslpj": {
           "aggregate_bar_pass": true,
           "bar": 1e-15,
-          "column_bar_pass": false,
-          "correlation": 0.9999999999868688,
+          "column_bar_pass": true,
+          "correlation": 1.0,
           "focus": [
             {
-              "column_error": 1.267016736496796e-07,
+              "column_error": 0.0,
               "i": 1,
               "j": 11,
-              "pass": false,
+              "pass": true,
               "wet": true
             },
             {
-              "column_error": 1.0925076614520069e-07,
+              "column_error": 2.4164072371112776e-17,
               "i": 1,
               "j": 12,
-              "pass": false,
+              "pass": true,
               "wet": true
             },
             {
-              "column_error": 1.6928981210032577e-07,
+              "column_error": 4.832814474222555e-17,
               "i": 1,
               "j": 13,
-              "pass": false,
+              "pass": true,
               "wet": true
             },
             {
-              "column_error": 6.852219838063683e-05,
+              "column_error": 9.66562894844511e-17,
               "i": 23,
               "j": 13,
-              "pass": false,
+              "pass": true,
               "wet": true
             }
           ],
-          "max_column_error": 0.0006489893559666216,
-          "n_diverged_columns": 9462,
+          "max_column_error": 7.732503158756088e-16,
+          "n_diverged_columns": 0,
           "n_nonfinite_wet_elements": 0,
-          "n_verified_columns": 458,
+          "n_verified_columns": 9920,
           "n_wet_columns": 9920,
           "n_wet_elements": 342134,
-          "pass": false,
+          "pass": true,
           "reference_rms": 0.0011217088699229632,
-          "rms_ratio": 0.9999998577026715,
+          "rms_ratio": 1.0,
           "worst_column_ji": [
-            195,
-            3
+            23,
+            1
           ]
         }
       },
@@ -1286,49 +1297,49 @@
         "metric": {
           "aggregate_bar_pass": true,
           "bar": 1e-15,
-          "column_bar_pass": false,
+          "column_bar_pass": true,
           "correlation": 1.0,
           "focus": [
             {
-              "column_error": 1.5502745024712352e-09,
+              "column_error": 0.0,
               "i": 1,
               "j": 11,
-              "pass": false,
+              "pass": true,
               "wet": true
             },
             {
-              "column_error": 1.8246651425923079e-09,
+              "column_error": 0.0,
               "i": 1,
               "j": 12,
-              "pass": false,
+              "pass": true,
               "wet": true
             },
             {
-              "column_error": 1.8652119968837226e-09,
+              "column_error": 0.0,
               "i": 1,
               "j": 13,
-              "pass": false,
+              "pass": true,
               "wet": true
             },
             {
-              "column_error": 1.5109065648820862e-09,
+              "column_error": 0.0,
               "i": 23,
               "j": 13,
-              "pass": false,
+              "pass": true,
               "wet": true
             }
           ],
-          "max_column_error": 2.521742227478876e-08,
-          "n_diverged_columns": 9920,
+          "max_column_error": 0.0,
+          "n_diverged_columns": 0,
           "n_nonfinite_wet_elements": 0,
-          "n_verified_columns": 0,
+          "n_verified_columns": 9920,
           "n_wet_columns": 9920,
           "n_wet_elements": 332214,
-          "pass": false,
+          "pass": true,
           "reference_rms": 0.00090255402271627,
-          "rms_ratio": 1.0000000000159903,
+          "rms_ratio": 1.0,
           "worst_column_ji": [
-            186,
+            1,
             1
           ]
         },

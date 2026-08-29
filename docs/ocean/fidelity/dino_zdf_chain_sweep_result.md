@@ -96,7 +96,7 @@ The ordered no-new-dump walk then gives:
 
 The updated tail receipt is
 `docs/ocean/fidelity/dino_zdf_chain_tail_existing_artifact.json`, SHA256
-`2f669e0b85b5902816bff57109555cc65fba4479f62e80c19fb82d48b208a91b`.
+`074d311d198a1a796364c1237abcddd2eb7f3cc8463cc910f111fb669607daed`.
 Every numeric row above is scored over the whole-domain column census and the
 four registered southern columns.
 
