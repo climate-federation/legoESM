@@ -6,6 +6,22 @@
     "nemo_generic": "c8adcbeddbd941798b458ce367dd7205f9e4783fb62c7a1f1c91f76d67e624b2",
     "nemo_literal": "16cff390f7d1c5e4514ad9b02dd356e6d4e9f47d1da571e822de5a88a1f9b00e"
   },
+  "basin_score": {
+    "artifact": "/tmp/dino-metric-continuity-factorial-01a04e34/metric_continuity_basin_factorial.json",
+    "artifact_sha256": "d1974563f01cfec03e317dbeba6de1210935b184d8bc8a1dd5fa34984a6d30a6",
+    "basin_gap_sv": {
+      "legacy_generic": -0.951979116371497,
+      "legacy_literal": -0.9525728166480043,
+      "nemo_generic": -0.9769393653427283,
+      "nemo_literal": -0.9388829260453218
+    },
+    "combined_response_fraction": 0.0137568042207605,
+    "combined_sv": 0.013096190326175261,
+    "headline_verdict": "UNRESOLVED/FLOOR",
+    "interaction_sv": 0.03865013957391383,
+    "safety_metrics_all_pass": true,
+    "scorer_commit": "08414088412080679ea12c47e105f96c517e3f03"
+  },
   "date": "2026-08-29",
   "disposition": "OWNED_RECEIPT_DRIFT_AND_SCORER_LITERAL_FIXED",
   "field_delta": {

@@ -127,3 +127,17 @@ stress content hash to `dino_wind_profile_evaluation`, with red-capable plants
 for the start label and content hash. Blocks 1--2 and their artifacts are not
 rerun. The scoring blocks use a separate clean adjudication checkout so the
 producer checkout remains frozen at the commit that made the artifacts.
+
+The corrected basin scorer exits zero on those four retained artifacts. The
+M0A0 gap is `-0.951979116371497 Sv`; M1A1 is
+`-0.9388829260453218 Sv`, so the combined intervention improves the gap by
+`0.013096190326175261 Sv` (`1.37568042207605%`). This is below the registered
+`2F=0.12347312432091852 Sv` resolution threshold and is therefore
+**`UNRESOLVED/FLOOR`**, not a refutation or confirmation. All frozen
+compensation metrics pass. The metric alone at generic association worsens the
+gap by `-0.02496024897123128 Sv`; the interaction is
+`+0.03865013957391383 Sv`, leaving every registered component bounded at the
+same floor. The score artifact SHA-256 is
+`d1974563f01cfec03e317dbeba6de1210935b184d8bc8a1dd5fa34984a6d30a6`.
+The independently preregistered five-day wall factorial remains to be run in
+Blocks 4--5.
