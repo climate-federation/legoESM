@@ -1,16 +1,15 @@
 #!/usr/bin/env python
 """Score the preregistered day-180 ZDF row-19 raw mixing-length slot.
 
-The receipt is fail-closed on the write-only bracket: a byte-identical restart,
-identical initialized shared physics slots, the exact registered 13-stream/four-
-halo-slot oracle-writer defect signature, and exactly one new stream are required
-before a numerical result can be called VERIFIED.
+The receipt is fail-closed on the repaired write-only bracket: byte-identical
+restarts, byte-identical shared streams, byte-identical repeated executions,
+and exactly one new stream are required before a numerical result can be called
+VERIFIED. No uninitialized-memory exception is permitted.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import subprocess
@@ -29,37 +28,29 @@ import zdf_chain_sweep as sweep
 from legoesm.ocean.fidelity.time_levels import time_level_for_dump
 from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
 from legoesm.ocean.physics.vertical_mixing.tke import _tke_raw_mixing_length
+from zdf_stream_bracket import (
+    files_byte_identical,
+    manifest_sha256,
+    one_bit_file_control,
+    sha256,
+    stream_manifest,
+)
 
 BAR = 1.0e-15
 RAW_NAME = "tke_dump_zmxlm_raw.bin"
 EXPECTED_SIZE = 2_980_224
-UNINITIALIZED_HALO_STREAMS = frozenset({
-    "cor2d_dump_zu_trd_substep1.bin",
-    "cor2d_dump_zv_trd_substep1.bin",
-    "eiv_dump_zaeiw.bin",
-    "fct_dump_zwx_up.bin",
-    "fct_dump_zwy_up.bin",
-    "fct_dump_zwz_anti.bin",
-    "fct_dump_zwz_anti_sal.bin",
-    "fct_dump_zwz_up.bin",
-    "fct_dump_zwz_up_sal.bin",
-    "sbc_dump_qns.bin",
-    "sbc_dump_qsr.bin",
-    "sbc_dump_sfx.bin",
-    "sbc_dump_utau.bin",
-})
-
-
-def sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            h.update(block)
-    return h.hexdigest()
+EXPECTED_ON_STREAMS = 198
+EXPECTED_OFF_STREAMS = 197
 
 
 def git_sha() -> str:
     return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+
+
+def tracked_tree_clean() -> bool:
+    return not subprocess.check_output(
+        ["git", "status", "--porcelain", "--untracked-files=no"], text=True
+    ).strip()
 
 
 def absolute_metrics(
@@ -109,36 +100,6 @@ def absolute_metrics(
     }
 
 
-def differing_element_indices(a_path: Path, b_path: Path) -> np.ndarray:
-    """Return flat binary64 slots whose raw bits differ."""
-    a = np.fromfile(a_path, dtype="<u8")
-    b = np.fromfile(b_path, dtype="<u8")
-    if a.shape != b.shape:
-        raise SystemExit(f"stream size differs: {a_path} vs {b_path}")
-    return np.flatnonzero(a != b)
-
-
-def halo_only_difference(
-    a_path: Path,
-    b_path: Path,
-    *,
-    jpi: int,
-    jpj: int,
-    hls: int,
-) -> bool:
-    """True only when every changed binary64 slot is outside the interior."""
-    changed = differing_element_indices(a_path, b_path)
-    if changed.size == 0:
-        return True
-    nxy = jpi * jpj
-    if a_path.stat().st_size % (8 * nxy):
-        raise SystemExit(f"stream is not a haloed 2-D/3-D field: {a_path}")
-    nlev = a_path.stat().st_size // (8 * nxy)
-    mask = np.zeros((nlev, jpj, jpi), dtype=bool)
-    mask.reshape(-1)[changed] = True
-    return not bool(mask[:, hls:jpj-hls, hls:jpi-hls].any())
-
-
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-dir", type=Path, required=True)
@@ -147,15 +108,32 @@ def main() -> int:
     parser.add_argument("--determinism-b-dir", type=Path, required=True)
     parser.add_argument("--determinism-a-binary-receipt", type=Path, required=True)
     parser.add_argument("--determinism-b-binary-receipt", type=Path, required=True)
+    parser.add_argument("--run-binary-receipt", type=Path, required=True)
+    parser.add_argument("--bracket-binary-receipt", type=Path, required=True)
+    parser.add_argument("--on-build-binary-receipt", type=Path, required=True)
+    parser.add_argument("--off-build-binary-receipt", type=Path, required=True)
     parser.add_argument("--mld-maps", type=Path, required=True)
     parser.add_argument("--nemo-source", type=Path, required=True)
+    parser.add_argument("--bracket-nemo-source", type=Path, required=True)
     parser.add_argument("--nemo-binary", type=Path, required=True)
+    parser.add_argument("--bracket-nemo-binary", type=Path, required=True)
+    parser.add_argument("--writer-patch", type=Path, required=True)
+    parser.add_argument("--remove-patch", type=Path, required=True)
+    parser.add_argument("--on-source-manifest", type=Path, required=True)
+    parser.add_argument("--off-source-manifest", type=Path, required=True)
     parser.add_argument("--donor-restart", type=Path, required=True)
     parser.add_argument("--expected-raw-sha", required=True)
     parser.add_argument("--expected-restart-sha", required=True)
     parser.add_argument("--expected-source-sha", required=True)
+    parser.add_argument("--expected-bracket-source-sha", required=True)
     parser.add_argument("--expected-binary-sha", required=True)
+    parser.add_argument("--expected-bracket-binary-sha", required=True)
+    parser.add_argument("--expected-writer-patch-sha", required=True)
+    parser.add_argument("--expected-remove-patch-sha", required=True)
+    parser.add_argument("--expected-on-source-manifest-sha", required=True)
+    parser.add_argument("--expected-off-source-manifest-sha", required=True)
     parser.add_argument("--expected-donor-sha", required=True)
+    parser.add_argument("--expected-repo-sha", required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
@@ -165,6 +143,12 @@ def main() -> int:
     bracket = args.bracket_dir.resolve()
     det_a = args.determinism_a_dir.resolve()
     det_b = args.determinism_b_dir.resolve()
+    if run != det_a:
+        raise SystemExit("scored row-19 run must be determinism arm A")
+    if git_sha() != args.expected_repo_sha:
+        raise SystemExit("repository HEAD does not match the registered receipt")
+    if not tracked_tree_clean():
+        raise SystemExit("row-19 receipt refuses a dirty tracked worktree")
     raw_path = run / RAW_NAME
     if time_level_for_dump(RAW_NAME) != "now":
         raise SystemExit("raw MXL time-level registry changed")
@@ -174,13 +158,28 @@ def main() -> int:
         raise SystemExit("raw dump SHA does not match the human-bound receipt")
     if sha256(args.nemo_source) != args.expected_source_sha:
         raise SystemExit("active NEMO source SHA does not match the receipt")
+    if sha256(args.bracket_nemo_source) != args.expected_bracket_source_sha:
+        raise SystemExit("bracket NEMO source SHA does not match the receipt")
     if sha256(args.nemo_binary) != args.expected_binary_sha:
         raise SystemExit("NEMO executable SHA does not match the receipt")
+    if sha256(args.bracket_nemo_binary) != args.expected_bracket_binary_sha:
+        raise SystemExit("bracket NEMO executable SHA does not match the receipt")
+    if sha256(args.writer_patch) != args.expected_writer_patch_sha:
+        raise SystemExit("deterministic-writer patch SHA does not match the receipt")
+    if sha256(args.remove_patch) != args.expected_remove_patch_sha:
+        raise SystemExit("row-19 removal patch SHA does not match the receipt")
+    if sha256(args.on_source_manifest) != args.expected_on_source_manifest_sha:
+        raise SystemExit("ON source-manifest SHA does not match the receipt")
+    if sha256(args.off_source_manifest) != args.expected_off_source_manifest_sha:
+        raise SystemExit("OFF source-manifest SHA does not match the receipt")
     if sha256(args.donor_restart) != args.expected_donor_sha:
         raise SystemExit("donor restart SHA does not match the receipt")
     if args.nemo_binary.stat().st_mtime_ns < args.nemo_source.stat().st_mtime_ns:
         raise SystemExit("NEMO executable is older than the instrumented source")
+    if args.bracket_nemo_binary.stat().st_mtime_ns < args.bracket_nemo_source.stat().st_mtime_ns:
+        raise SystemExit("bracket NEMO executable is older than the OFF source")
     for receipt in (
+        args.run_binary_receipt,
         args.determinism_a_binary_receipt,
         args.determinism_b_binary_receipt,
     ):
@@ -188,6 +187,16 @@ def main() -> int:
         if not fields or fields[0] != args.expected_binary_sha:
             raise SystemExit(
                 f"determinism run binary receipt does not bind current binary: {receipt}")
+    bracket_fields = args.bracket_binary_receipt.read_text(errors="strict").split()
+    if (not bracket_fields
+            or bracket_fields[0] != args.expected_bracket_binary_sha):
+        raise SystemExit("bracket run binary receipt does not bind the OFF binary")
+    on_build_fields = args.on_build_binary_receipt.read_text(errors="strict").split()
+    off_build_fields = args.off_build_binary_receipt.read_text(errors="strict").split()
+    if not on_build_fields or on_build_fields[0] != args.expected_binary_sha:
+        raise SystemExit("ON build receipt does not bind the executed binary")
+    if not off_build_fields or off_build_fields[0] != args.expected_bracket_binary_sha:
+        raise SystemExit("OFF build receipt does not bind the executed binary")
     donor_name = "DINO_00005760_restart.nc"
     for control_dir in (bracket, det_a, det_b):
         if sha256(control_dir / donor_name) != args.expected_donor_sha:
@@ -197,6 +206,10 @@ def main() -> int:
         if sha256(control_dir / "nemo") != args.expected_binary_sha:
             raise SystemExit(
                 f"determinism run executable does not bind current binary: {control_dir}")
+    if sha256(run / "nemo") != args.expected_binary_sha:
+        raise SystemExit("row-19 run executable does not bind current binary")
+    if sha256(bracket / "nemo") != args.expected_bracket_binary_sha:
+        raise SystemExit("bracket run executable does not bind the OFF binary")
 
     restart_name = "DINO_00005761_restart.nc"
     restart_on = run / restart_name
@@ -210,60 +223,55 @@ def main() -> int:
 
     jpi, jpj, jpk, hls = loaders._read_dims(str(run))
 
-    new_bins = {p.name for p in run.glob("*.bin")}
-    old_bins = {p.name for p in bracket.glob("*.bin")}
-    if new_bins - old_bins != {RAW_NAME} or old_bins - new_bins:
+    new_manifest = stream_manifest(run)
+    old_manifest = stream_manifest(bracket)
+    det_b_manifest = stream_manifest(det_b)
+    new_bins = set(new_manifest)
+    old_bins = set(old_manifest)
+
+    def registered_inventory(on_names: set[str], off_names: set[str]) -> bool:
+        return (
+            len(on_names) == EXPECTED_ON_STREAMS
+            and len(off_names) == EXPECTED_OFF_STREAMS
+            and on_names - off_names == {RAW_NAME}
+            and not off_names - on_names
+        )
+
+    if not registered_inventory(new_bins, old_bins):
         raise SystemExit(
             "row-19 stream inventory changed: "
+            f"ON={len(new_bins)}, OFF={len(old_bins)}, "
             f"new={new_bins-old_bins}, missing={old_bins-new_bins}")
     shared = sorted(old_bins)
-    strict_equal = []
-    halo_exclusions = {}
-    for name in shared:
-        if sha256(run / name) == sha256(bracket / name):
-            strict_equal.append(name)
-            continue
-        if name not in UNINITIALIZED_HALO_STREAMS:
-            raise SystemExit(f"write-only shared-stream bracket failed: {name}")
-        current_changed = differing_element_indices(run / name, bracket / name)
-        control_changed = differing_element_indices(det_a / name, det_b / name)
-        if current_changed.size != 4 or control_changed.size != 4:
-            raise SystemExit(
-                f"registered four-slot halo signature changed for {name}: "
-                f"patch={current_changed.size}, control={control_changed.size}")
-        if not np.array_equal(current_changed, control_changed):
-            raise SystemExit(
-                f"patch/control changed-slot signature differs for {name}")
-        if not halo_only_difference(
-            run / name, bracket / name, jpi=jpi, jpj=jpj, hls=hls
-        ) or not halo_only_difference(
-            det_a / name, det_b / name, jpi=jpi, jpj=jpj, hls=hls
-        ):
-            raise SystemExit(f"physical-interior stream difference in {name}")
-        halo_exclusions[name] = {
-            "changed_binary64_slots": current_changed.tolist(),
-            "determinism_a_sha256": sha256(det_a / name),
-            "determinism_b_sha256": sha256(det_b / name),
-            "patch_sha256": sha256(run / name),
-            "bracket_sha256": sha256(bracket / name),
-        }
-    if set(halo_exclusions) != UNINITIALIZED_HALO_STREAMS:
+    unequal_bracket = [
+        name for name in shared
+        if not files_byte_identical(run / name, bracket / name)]
+    if unequal_bracket:
         raise SystemExit(
-            "registered uninitialized-halo inventory changed: "
-            f"observed={sorted(halo_exclusions)}")
+            f"repaired write-only shared-stream bracket failed: {unequal_bracket}")
+    for label, control_dir in (("A", det_a), ("B", det_b)):
+        control_bins = {p.name for p in control_dir.glob("*.bin")}
+        if len(control_bins) != EXPECTED_ON_STREAMS or control_bins != new_bins:
+            raise SystemExit(
+                f"determinism-{label} stream inventory changed: "
+                f"new={control_bins-new_bins}, missing={new_bins-control_bins}")
+    unequal_determinism = [
+        name for name in sorted(new_bins)
+        if not files_byte_identical(det_a / name, det_b / name)]
+    if unequal_determinism:
+        raise SystemExit(
+            f"repaired identical-binary stream determinism failed: "
+            f"{unequal_determinism}")
 
-    # Red bracket control: a changed physical-interior binary64 slot must not
-    # be accepted merely because its filename appears in the exclusion list.
-    control_name = sorted(UNINITIALIZED_HALO_STREAMS)[0]
-    control_data = np.fromfile(run / control_name, dtype="<u8").reshape(
-        -1, jpj, jpi)
-    control_copy = control_data.copy()
-    control_copy[0, hls, hls] ^= np.uint64(1)
-    bracket_control_fired = bool(np.any(
-        control_data[:, hls:jpj-hls, hls:jpi-hls]
-        != control_copy[:, hls:jpj-hls, hls:jpi-hls]))
-    if not bracket_control_fired:
-        raise SystemExit("physical-interior bracket control did not fire")
+    # Red controls use the same predicates as the production bracket.
+    control_name = shared[0]
+    bracket_control_fired = one_bit_file_control(run / control_name)
+    missing_control_fired = not registered_inventory(
+        new_bins - {control_name}, old_bins)
+    if not (bracket_control_fired and missing_control_fired):
+        raise SystemExit(
+            "exact bracket controls did not fire: "
+            f"one_bit={bracket_control_fired}, missing={missing_control_fired}")
 
     source = args.nemo_source.read_text(errors="strict")
     for literal in (
@@ -340,32 +348,72 @@ def main() -> int:
             "plus_one_ulp_exact_census_fired": ulp_control,
             "one_i_roll_fired": roll_control,
             "value_plant_fired": value_control,
-            "physical_interior_bracket_plant_fired": bracket_control_fired,
+            "one_bit_shared_stream_bracket_plant_fired": bracket_control_fired,
+            "missing_stream_inventory_plant_fired": missing_control_fired,
         },
         "bracket": {
             "restart_sha256": restart_sha,
             "shared_stream_count": len(shared),
-            "strict_byte_identical_stream_count": len(strict_equal),
+            "strict_byte_identical_stream_count": len(shared),
             "new_stream": RAW_NAME,
-            "uninitialized_halo_exclusions": halo_exclusions,
+            "determinism_stream_count": len(new_bins),
+            "on_stream_manifest_sha256": manifest_sha256(new_manifest),
+            "determinism_b_stream_manifest_sha256": manifest_sha256(
+                det_b_manifest
+            ),
+            "off_stream_manifest_sha256": manifest_sha256(old_manifest),
+            "on_stream_manifest": new_manifest,
+            "off_stream_manifest": old_manifest,
+            "uninitialized_memory_exclusions": [],
             "mechanism": (
-                "the same four out-of-interior binary64 slots differ in two "
-                "runs of the identical control binary; every physical "
-                "interior slot and both restart containers are exact"
+                "all instrumentation capture buffers are initialized before "
+                "interior fill; every shared stream and repeated-run stream "
+                "is required to be byte-identical without exclusions"
             ),
         },
-        "nemo_line": "cfgs/DINO/MY_SRC/zdftke.F90:831-833",
+        "nemo_line": "cfgs/DINO/MY_SRC/zdftke.F90:840-841",
         "provenance_sha256": {
             str(raw_path): sha256(raw_path),
             str(restart_on): restart_sha,
             str(args.mld_maps.resolve()): sha256(args.mld_maps.resolve()),
             str(args.nemo_source.resolve()): sha256(args.nemo_source.resolve()),
+            str(args.bracket_nemo_source.resolve()): sha256(
+                args.bracket_nemo_source.resolve()),
             str(args.nemo_binary.resolve()): sha256(args.nemo_binary.resolve()),
+            str(args.bracket_nemo_binary.resolve()): sha256(
+                args.bracket_nemo_binary.resolve()),
+            str(args.writer_patch.resolve()): sha256(args.writer_patch.resolve()),
+            str(args.remove_patch.resolve()): sha256(args.remove_patch.resolve()),
+            str(args.on_source_manifest.resolve()): sha256(
+                args.on_source_manifest.resolve()),
+            str(args.off_source_manifest.resolve()): sha256(
+                args.off_source_manifest.resolve()),
             str(args.donor_restart.resolve()): sha256(args.donor_restart.resolve()),
             str(args.determinism_a_binary_receipt.resolve()): sha256(
                 args.determinism_a_binary_receipt.resolve()),
             str(args.determinism_b_binary_receipt.resolve()): sha256(
                 args.determinism_b_binary_receipt.resolve()),
+            str(args.run_binary_receipt.resolve()): sha256(
+                args.run_binary_receipt.resolve()),
+            str(args.bracket_binary_receipt.resolve()): sha256(
+                args.bracket_binary_receipt.resolve()),
+            str(args.on_build_binary_receipt.resolve()): sha256(
+                args.on_build_binary_receipt.resolve()
+            ),
+            str(args.off_build_binary_receipt.resolve()): sha256(
+                args.off_build_binary_receipt.resolve()
+            ),
+            str(Path(__file__).resolve()): sha256(Path(__file__).resolve()),
+            str((Path(__file__).parent / "zdf_stream_bracket.py").resolve()): sha256(
+                (Path(__file__).parent / "zdf_stream_bracket.py").resolve()
+            ),
+            str(restart_off): sha256(restart_off),
+            str(det_a / restart_name): sha256(det_a / restart_name),
+            str(det_b / restart_name): sha256(det_b / restart_name),
+            str(det_a / "run.attempt1.log"): sha256(det_a / "run.attempt1.log"),
+            str(det_b / "run.attempt1.log"): sha256(det_b / "run.attempt1.log"),
+            str(bracket / "run.attempt1.log"): sha256(
+                bracket / "run.attempt1.log"),
         },
     }
     args.output.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n")

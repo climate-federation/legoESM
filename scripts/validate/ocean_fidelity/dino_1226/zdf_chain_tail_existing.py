@@ -385,11 +385,12 @@ def main() -> int:
     rows = {
         "19": {
             "operation": "raw buoyancy mixing length before scans",
-            "disposition": "UNMEASURED-NEEDS-CLEAN-BRACKET",
+            "disposition": "UNMEASURED-NEEDS-DETERMINISTIC-WRITER-BRACKET",
             "reason": (
                 "raw run exists and production arithmetic is diagnostic-exact, "
-                "but promotion waits for two fresh same-current-binary runs to "
-                "bind the 13-stream uninitialized-halo mechanism"
+                "but the fixed four-slot model was retracted; promotion waits "
+                "for strict ON/OFF and repeated-ON identity after deterministic "
+                "initialization of instrumentation capture buffers"
             ),
         },
         "20": {
@@ -402,7 +403,8 @@ def main() -> int:
             "zmxld": row20_leps,
             "qualification": (
                 "production composite using exact NEMO en/rn2; numerical bar "
-                "is exact, but ordered promotion waits for row19's clean bracket"
+                "is exact, but ordered promotion waits for row19's repaired "
+                "deterministic-writer bracket"
             ),
         },
         "21": {
@@ -595,7 +597,7 @@ def main() -> int:
         "schema": "dino-zdf-chain-tail-existing-v1",
         "status": (
             "PROVISIONAL-DOWNSTREAM; row 18 is VERIFIED and the ordered "
-            "frontier is row 19's same-current-binary bracket"),
+            "frontier is row 19's deterministic-writer bracket"),
         "repo_sha": git_sha(),
         "lane": dump_lane.banner(),
         "run_dir": str(run),

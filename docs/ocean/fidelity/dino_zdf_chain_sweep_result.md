@@ -3,7 +3,7 @@
 Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 (`RUN_SEQDUMP_D180_1R`, `kt=5761`).
 
-## Round-17 result: row 18 VERIFIED; ordered stop at row 19 bracket
+## Round-18 hold: instrument writers nondeterministic; row 19 remains unscored
 
 The native-degree carry and the pure-JAX transcription of the host's glibc
 2.34 `_ZGVbN2v_sin` are implemented.  The active IFUNC resolves to the SSE4
@@ -49,7 +49,7 @@ reviews completed on 2026-08-29. They found no defect in the literal EXP or SIN
 arithmetic, but requested evidence/tooling changes. The full-table EXP SHA,
 inactive-selector dispatch, native-degree bridge scope, row-18 fail-closed gate,
 row-24 waiver, row-19 production/bar/provenance, and stale tail labels are now
-fixed. Row 19 remains held on the fresh same-current-binary control below.
+fixed. Row 19 remains held on the deterministic-writer bracket below.
 
 ### Ordered row-19 hold and provisional downstream census
 
@@ -65,16 +65,47 @@ the prior command dropped one `d` and is retracted. The executable SHA is
 `e93774c31c8e828fbf89f852dc1dcdd435e27881e258be57b5f7a389e5e4eeeb`
 and its mtime is newer than the source.
 
-The first whole-file scorer stopped on 12 streams because it already excluded
-`cor2d_zu`. Direct comparison shows 13 affected streams in total. Every writer
-uses `STATUS='REPLACE'`, every affected stream differs at exactly four binary64
-slots outside the `nn_hls=2` physical interior, and all physical-interior slots
-are bit-identical. The historical identical-binary pair shows the same indices,
-so append mode and stale copied output are refuted. Nevertheless, review
-correctly requires two fresh runs of the **current** row-19 binary because the
-old row-18 executable path is a mutable symlink and no longer names its original
-binary. The diagnostic production result is 0/9,920 at the absolute `1e-15 m`
-bar, including all focus columns, but it is not promoted before that control.
+**LOUD RETRACTION — second bracket adjudication (2026-08-29):** the proposed
+13-stream/four-slot exclusion model is false. Fresh executions of the current
+row-19 binary changed 250 halo values in `sbc_dump_utau.bin`. They also revealed
+two TKE matrix captures omitted from the first stopped census:
+`tke_dump_zdiag_pre.bin` and `tke_dump_zdiag_forward.bin` each varied over their
+complete terminal 52x199 plane (10,348 values). The root defect is
+variable-extent emission of uninitialized instrumentation storage. No
+uninitialized-memory exception remains in the scorer.
+
+Arm A `/tmp/RUN_ZDF19_DET_A.PZWmLF` completed with 198 dumps. Arm B
+`/tmp/RUN_ZDF19_DET_B.tH3A7l` first segfaulted after 55 dumps on the identical
+binary and donor, then completed with 198 dumps on an immediate scrubbed retry.
+Both surviving clean executions reproduce restart SHA256
+`33c0c1a2e998161afdc9d4b71c5606f5cc5d869e54d53058fc0f64eeac7a115c`.
+The failed B log was overwritten by the retry, so the crash is explicitly a
+human-bound receipt rather than a SHA-stamped machine artifact. It may share
+the writer defect, but the repaired reruns are the registered discriminator;
+the causal claim is not yet made.
+
+The machine-generated receipt is
+`docs/ocean/fidelity/dino_zdf_row19_instrument_nondeterminism_receipt.json`;
+committed probe `zdf_dump_determinism_audit.py` binds both 198-stream
+name/size/SHA manifests, the binary, donor/output restarts, all 15 unequal
+stream censuses, and controls which reject a one-bit file plant and a missing
+stream. It preserves the crash qualification above. Receipt SHA256:
+`a068a1eb657228e34e59dfac7a2a50188dcb720368c5464423e3d0cdaebd937c`.
+
+The repair patch adds an instrumentation-only writer which starts from a
+fully zeroed haloed buffer and copies only `Nis0:Nie0,Njs0:Nje0`. All 155
+full-field raw writes (150 2-D records plus five 3-D BN2 fields) across the 14
+instrumented MY_SRC modules route through it; a static gate requires no direct
+full-halo writer outside the helper. TKE work-array captures are zeroed before filling, and matrix/RHS
+captures copy only their defined `1:jpkm1` levels. The fully defined
+production `en` field retains its complete literal capture. Production arrays
+are `INTENT(in)` to the writer and are never modified. The BN2 3-D helper
+copies only defined levels `2:jpkm1`; surface and terminal planes remain
+explicit zero, including `pn2`'s formally undefined `INTENT(out)` slots.
+
+The diagnostic production result remains 0/9,920 at the absolute `1e-15 m`
+bar, including all focus columns, but it is not promoted before the repaired
+strict bracket.
 
 The discriminator assigns the candidate row-19 owner exactly to NEMO's source
 association, including `rsmall=0.5*EPSILON(1.e0)` under
@@ -85,12 +116,13 @@ zrn2 = MAX( rn2(ji,jj,jk), rsmall )
 zmxlm(ji,jk) = MAX( rmxl_min, SQRT( 2._wp * en(ji,jj,jk) / zrn2 ) )
 ```
 
-Source before insertion: `cfgs/DINO/MY_SRC/zdftke.F90:831-833`; after the
-write-only insertion: `:833-834`.  The production option
+Source before the round-19 and deterministic-writer patches:
+`cfgs/DINO/MY_SRC/zdftke.F90:831-833`; active patched source: `:840-841`.
+The production option
 `tke_mxl_raw_evaluation="nemo_literal"` preserves that association and the
 `jpkm1` downward-scan seed.  It is selected only by the two complete DINO
-oracle cards; `factored` remains byte-identical everywhere else.  This remains
-a **provisional fix** until the clean bracket runs.
+oracle cards; `factored` remains byte-identical everywhere else. This remains
+a **provisional fix** until the deterministic-writer bracket runs.
 
 **LOUD RETRACTION:** the earlier provisional row-20 all-column divergence was
 manufactured by comparing NEMO W rows `0:35` with the production bridge's
@@ -110,75 +142,191 @@ all focus columns, before any slope recurrence.  Rows 31-32 remain deferred;
 their volume-form substitution probes cannot be promoted across the ordered
 row-19 stop (and row 32 additionally depends on row 30's K33/slopes).
 
-The remaining outside-sandbox discriminating control is:
+The remaining outside-sandbox deterministic-writer rebuild is:
+
+Two handoff corrections are now explicit: `makenemo` selects the existing
+configuration with `-n DINO`, not `-r`, and every standalone build/run shell
+block activates the `nemo-build` conda environment before use.
 
 ```bash
+set -euo pipefail
 source /home/dbalwada/miniconda3/etc/profile.d/conda.sh
 conda activate nemo-build
-export TMPDIR=/tmp XDG_CACHE_HOME=/tmp/nemo-row19-xdg
-nemo_src=/tmp/nemo-row18-operands.FSpBiV
-nemo_bin="$nemo_src/cfgs/DINO/BLD/bin/nemo.exe"
-test "$(sha256sum "$nemo_src/cfgs/DINO/MY_SRC/zdftke.F90" | awk '{print $1}')" = \
-  5cc4ce8b8d5c681b1bed22f1349fabdbd3b6317e219c21519856d123695ac457
-test "$(sha256sum "$nemo_bin" | awk '{print $1}')" = \
-  e93774c31c8e828fbf89f852dc1dcdd435e27881e258be57b5f7a389e5e4eeeb
+export TMPDIR=/tmp XDG_CACHE_HOME=/tmp/nemo-row19-detwriter-xdg
 
-for tag in A B; do
-  d=$(mktemp -d "/tmp/RUN_ZDF19_DET_${tag}.XXXXXX")
-  cp -a /tmp/RUN_ZDF18_OPERANDS_ON.tnC9wz/. "$d/"
-  case "$d" in /tmp/RUN_ZDF19_DET_*) ;; *) exit 2 ;; esac
-  find "$d" -maxdepth 1 -type f \( -name '*.bin' -o \
-    -name 'DINO_00005761_restart.nc' -o -name 'DINO_*_grid_*.nc' -o \
-    -name 'domain_cfg_out.nc' -o -name 'ocean.output' -o -name 'run.log' \) \
-    -delete
-  ln -sfn "$nemo_bin" "$d/nemo"
-  sha256sum "$nemo_bin" > "$d/.nemo_binary_sha256"
-  ( cd "$d" && mpirun -np 1 ./nemo > run.log 2>&1 )
-  test "$(sha256sum "$d/DINO_00005761_restart.nc" | awk '{print $1}')" = \
-    33c0c1a2e998161afdc9d4b71c5606f5cc5d869e54d53058fc0f64eeac7a115c
-  if test "$tag" = A; then A="$d"; else B="$d"; fi
-  if test "$tag" = A; then
-    printf '%s\n' "$d" > /tmp/row19-det-a-dir.txt
-  else
-    printf '%s\n' "$d" > /tmp/row19-det-b-dir.txt
-  fi
-  printf '%s=%s\n' "$tag" "$d"
-done
+repo=/tmp/codex-zdf-sweep
+writer_patch="$repo/scripts/validate/ocean_fidelity/dino_1226/nemo_deterministic_dump_buffers.patch"
+remove_patch="$repo/scripts/validate/ocean_fidelity/dino_1226/nemo_row19_raw_mxl_remove.patch"
+test "$(sha256sum "$writer_patch" | awk '{print $1}')" = 4f3674462d629d6174854545400d35669d43857ac170e82e64e4b7406daf3292
+test "$(sha256sum "$remove_patch" | awk '{print $1}')" = 2a913a15ed64b2e4e5d52fe4837115cd2e57f8f921f94415f8b449776c70e73d
+
+nemo_src=$(mktemp -d /tmp/nemo-row19-detwriter.XXXXXX)
+cp -a /tmp/nemo-row18-operands.FSpBiV/. "$nemo_src/"
+cd "$nemo_src"
+sha256sum cfgs/DINO/MY_SRC/*.F90 | sort > /tmp/row19-original-source-manifest.sha256
+test "$(sha256sum /tmp/row19-original-source-manifest.sha256 | awk '{print $1}')" = \
+  2e8bb172dd23c9e5805d100d86a546f3c2204b92db0857f153e6b7ba0751f123
+test ! -e cfgs/DINO/MY_SRC/dino_dump_zero.F90
+patch --dry-run -p1 < "$writer_patch"
+patch -p1 < "$writer_patch"
+test "$(rg -n 'WRITE\([^)]*\).*ji\s*=\s*1\s*,\s*jpi' \
+  cfgs/DINO/MY_SRC -g '*.F90' | grep -v dino_dump_zero.F90 | wc -l)" -eq 0
+test "$(rg -n 'WRITE\([^)]*\)\s+[A-Za-z]\w*\(:,\s*:\)' \
+  cfgs/DINO/MY_SRC -g '*.F90' | wc -l)" -eq 0
+test "$(rg -n 'CALL dino_dump_2d' cfgs/DINO/MY_SRC -g '*.F90' | wc -l)" -eq 150
+test "$(rg -n 'CALL dino_dump_3d' cfgs/DINO/MY_SRC -g '*.F90' | wc -l)" -eq 5
+on_manifest=/tmp/nemo-row19-detwriter-on-source-manifest.sha256
+sha256sum cfgs/DINO/MY_SRC/*.F90 | sort > "$on_manifest"
+test "$(sha256sum "$on_manifest" | awk '{print $1}')" = \
+  00eed95c076f420237f8758f880397e3efae42dd49a2b002d6e6b64e0077a3fd
+test "$(sha256sum cfgs/DINO/MY_SRC/zdftke.F90 | awk '{print $1}')" = \
+  213d9849e5aaddcb966302268d1fcb80835b80a2c9089e56d1ef00dd4aba67df
+
+./makenemo -m conda -n DINO -j 8 2>&1 | tee /tmp/nemo-row19-detwriter-on-build.log
+on_src=/tmp/zdftke-row19-detwriter-on.F90
+on_bin=/tmp/nemo-row19-detwriter-on.exe
+cp -p cfgs/DINO/MY_SRC/zdftke.F90 "$on_src"
+cp -p cfgs/DINO/BLD/bin/nemo.exe "$on_bin"
+test "$on_bin" -nt "$on_src"
+on_build_receipt=/tmp/nemo-row19-detwriter-on-build.sha256
+sha256sum "$on_bin" > "$on_build_receipt"
+
+patch --dry-run -p1 < "$remove_patch"
+patch -p1 < "$remove_patch"
+test "$(sha256sum cfgs/DINO/MY_SRC/zdftke.F90 | awk '{print $1}')" = \
+  6a33079678505c105cae1edb8a52b9d70d02012d0eb3395673f4b62fe657a9fd
+./makenemo -m conda -n DINO -j 8 2>&1 | tee /tmp/nemo-row19-detwriter-off-build.log
+off_src=/tmp/zdftke-row19-detwriter-off.F90
+off_bin=/tmp/nemo-row19-detwriter-off.exe
+off_manifest=/tmp/nemo-row19-detwriter-off-source-manifest.sha256
+sha256sum cfgs/DINO/MY_SRC/*.F90 | sort > "$off_manifest"
+test "$(sha256sum "$off_manifest" | awk '{print $1}')" = \
+  9ba38207a30758e92a7ad474c94899426d214d56d8feb16dd7d2911ae371312f
+cp -p cfgs/DINO/MY_SRC/zdftke.F90 "$off_src"
+cp -p cfgs/DINO/BLD/bin/nemo.exe "$off_bin"
+test "$off_bin" -nt "$off_src"
+off_build_receipt=/tmp/nemo-row19-detwriter-off-build.sha256
+sha256sum "$off_bin" > "$off_build_receipt"
+sha256sum "$on_src" "$on_bin" "$off_src" "$off_bin"
 ```
 
-Bind the printed `A`/`B` directories with the repo venv and explicit lane:
+Run two ON arms and one OFF bracket from independently scrubbed templates.
+This block intentionally has no automatic retry: a crash must preserve its
+directory and `run.attempt1.log` as a receipt.
 
 ```bash
+set -euo pipefail
+source /home/dbalwada/miniconda3/etc/profile.d/conda.sh
+conda activate nemo-build
+export TMPDIR=/tmp XDG_CACHE_HOME=/tmp/nemo-row19-detwriter-run-xdg
+on_bin=/tmp/nemo-row19-detwriter-on.exe
+off_bin=/tmp/nemo-row19-detwriter-off.exe
+on_build_receipt=/tmp/nemo-row19-detwriter-on-build.sha256
+off_build_receipt=/tmp/nemo-row19-detwriter-off-build.sha256
+test "$(awk 'NR==1 {print $1}' "$on_build_receipt")" = \
+  "$(sha256sum "$on_bin" | awk '{print $1}')"
+test "$(awk 'NR==1 {print $1}' "$off_build_receipt")" = \
+  "$(sha256sum "$off_bin" | awk '{print $1}')"
+A=$(mktemp -d /tmp/RUN_ZDF19_DETWRITER_ON_A.XXXXXX)
+B=$(mktemp -d /tmp/RUN_ZDF19_DETWRITER_ON_B.XXXXXX)
+OFF=$(mktemp -d /tmp/RUN_ZDF19_DETWRITER_OFF.XXXXXX)
+
+for spec in "ON_A:$A:$on_bin:198" "ON_B:$B:$on_bin:198" "OFF:$OFF:$off_bin:197"; do
+  IFS=: read -r tag d binary expected_count <<< "$spec"
+  printf 'starting %s in %s\n' "$tag" "$d"
+  cp -a /tmp/RUN_ZDF18_OPERANDS_ON.tnC9wz/. "$d/"
+  find "$d" -maxdepth 1 \( -type f -o -type l \) \( -name '*.bin' -o \
+    -name 'DINO_00005761_restart.nc' -o -name 'DINO_*_grid_*.nc' -o \
+    -name 'domain_cfg_out.nc' -o -name 'ocean.output' -o \
+    -name 'run*.log' -o -name '.nemo_binary_sha256' \) -delete
+  ln -sfn "$binary" "$d/nemo"
+  sha256sum "$binary" > "$d/.nemo_binary_sha256"
+  if ! ( cd "$d" && mpirun -np 1 ./nemo > run.attempt1.log 2>&1 ); then
+    printf 'HOLD: %s failed; preserve %s\n' "$tag" "$d" >&2
+    exit 1
+  fi
+  test "$(sha256sum "$d/DINO_00005761_restart.nc" | awk '{print $1}')" = \
+    33c0c1a2e998161afdc9d4b71c5606f5cc5d869e54d53058fc0f64eeac7a115c
+  test "$(find "$d" -maxdepth 1 -type f -name '*.bin' | wc -l)" -eq "$expected_count"
+done
+printf '%s\n' "$A" > /tmp/row19-detwriter-on-a-dir.txt
+printf '%s\n' "$B" > /tmp/row19-detwriter-on-b-dir.txt
+printf '%s\n' "$OFF" > /tmp/row19-detwriter-off-dir.txt
+```
+
+Only after all three runs finish, invoke the strict scorer:
+
+```bash
+set -euo pipefail
 cd /tmp/codex-zdf-sweep
-A=$(cat /tmp/row19-det-a-dir.txt)
-B=$(cat /tmp/row19-det-b-dir.txt)
-nemo_src=/tmp/nemo-row18-operands.FSpBiV
-nemo_bin="$nemo_src/cfgs/DINO/BLD/bin/nemo.exe"
+A=$(cat /tmp/row19-detwriter-on-a-dir.txt)
+B=$(cat /tmp/row19-detwriter-on-b-dir.txt)
+OFF=$(cat /tmp/row19-detwriter-off-dir.txt)
+on_src=/tmp/zdftke-row19-detwriter-on.F90
+off_src=/tmp/zdftke-row19-detwriter-off.F90
+on_bin=/tmp/nemo-row19-detwriter-on.exe
+off_bin=/tmp/nemo-row19-detwriter-off.exe
+on_sha=$(sha256sum "$on_bin" | awk '{print $1}')
+off_sha=$(sha256sum "$off_bin" | awk '{print $1}')
+writer_patch=scripts/validate/ocean_fidelity/dino_1226/nemo_deterministic_dump_buffers.patch
+remove_patch=scripts/validate/ocean_fidelity/dino_1226/nemo_row19_raw_mxl_remove.patch
+on_manifest=/tmp/nemo-row19-detwriter-on-source-manifest.sha256
+off_manifest=/tmp/nemo-row19-detwriter-off-source-manifest.sha256
+on_build_receipt=/tmp/nemo-row19-detwriter-on-build.sha256
+off_build_receipt=/tmp/nemo-row19-detwriter-off-build.sha256
+repo_sha=$(git --git-dir=/tmp/zdf-sweep-git.cJQ6wi/repo.git \
+  --work-tree=/tmp/codex-zdf-sweep rev-parse HEAD)
 DINO_1226_LANE=d180 CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
+GIT_DIR=/tmp/zdf-sweep-git.cJQ6wi/repo.git GIT_WORK_TREE=/tmp/codex-zdf-sweep \
 PYTHONPATH=packages/atmosphere:packages/core:packages/coupler:packages/ice:\
 packages/land:packages/ml:packages/ocean:packages/tools \
 /home/dbalwada/legoESM/.venv/bin/python \
   scripts/validate/ocean_fidelity/dino_1226/zdf_row19_raw_mxl.py \
-  --run-dir /tmp/RUN_ZDF19_RAW_ON.vkOVex \
-  --bracket-dir /tmp/RUN_ZDF18_OPERANDS_ON.tnC9wz \
+  --run-dir "$A" --bracket-dir "$OFF" \
   --determinism-a-dir "$A" --determinism-b-dir "$B" \
+  --run-binary-receipt "$A/.nemo_binary_sha256" \
   --determinism-a-binary-receipt "$A/.nemo_binary_sha256" \
   --determinism-b-binary-receipt "$B/.nemo_binary_sha256" \
+  --bracket-binary-receipt "$OFF/.nemo_binary_sha256" \
+  --on-build-binary-receipt "$on_build_receipt" \
+  --off-build-binary-receipt "$off_build_receipt" \
   --mld-maps /tmp/dino_mld_audit_codex/mld_maps.npz \
-  --nemo-source "$nemo_src/cfgs/DINO/MY_SRC/zdftke.F90" \
-  --nemo-binary "$nemo_bin" \
-  --donor-restart /tmp/RUN_ZDF19_RAW_ON.vkOVex/DINO_00005760_restart.nc \
+  --nemo-source "$on_src" --bracket-nemo-source "$off_src" \
+  --nemo-binary "$on_bin" --bracket-nemo-binary "$off_bin" \
+  --writer-patch "$writer_patch" --remove-patch "$remove_patch" \
+  --on-source-manifest "$on_manifest" --off-source-manifest "$off_manifest" \
+  --donor-restart "$A/DINO_00005760_restart.nc" \
   --expected-raw-sha 564d82e9d03bca21215bb5eb736dbacac58bf3ccd23875548bb512c5d3650929 \
   --expected-restart-sha 33c0c1a2e998161afdc9d4b71c5606f5cc5d869e54d53058fc0f64eeac7a115c \
-  --expected-source-sha 5cc4ce8b8d5c681b1bed22f1349fabdbd3b6317e219c21519856d123695ac457 \
-  --expected-binary-sha e93774c31c8e828fbf89f852dc1dcdd435e27881e258be57b5f7a389e5e4eeeb \
+  --expected-source-sha 213d9849e5aaddcb966302268d1fcb80835b80a2c9089e56d1ef00dd4aba67df \
+  --expected-bracket-source-sha 6a33079678505c105cae1edb8a52b9d70d02012d0eb3395673f4b62fe657a9fd \
+  --expected-binary-sha "$on_sha" --expected-bracket-binary-sha "$off_sha" \
+  --expected-writer-patch-sha 4f3674462d629d6174854545400d35669d43857ac170e82e64e4b7406daf3292 \
+  --expected-remove-patch-sha 2a913a15ed64b2e4e5d52fe4837115cd2e57f8f921f94415f8b449776c70e73d \
+  --expected-on-source-manifest-sha 00eed95c076f420237f8758f880397e3efae42dd49a2b002d6e6b64e0077a3fd \
+  --expected-off-source-manifest-sha 9ba38207a30758e92a7ad474c94899426d214d56d8feb16dd7d2911ae371312f \
   --expected-donor-sha 0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e \
+  --expected-repo-sha "$repo_sha" \
   --output /tmp/dino_zdf_row19_raw_mxl_artifact.json
 ```
 
 The ordered frontier is row 19, so the climate arms remain unauthorized.
 The frozen prediction and arm commands are unchanged; running them now would
 violate the preregistered chain-clean condition.
+
+The patch was compile-checked only (no model execution) in a scrubbed `/tmp`
+NEMO tree. Both `makenemo -m conda -n DINO -j 8` builds completed: row-19 ON
+binary SHA256 `b9bf23b63f6ab8d5300cca9c6b83a3b483cb22a077f505653a4dc5bfbf975f79`;
+row-19 OFF binary SHA256
+`4f28b00205658781d7c2a6bbc35362a5a19eb8d57d245bad28a9fbe96ebfafae`.
+The preserved `/tmp` compile logs are SHA256
+`7f818dcb790ac8fa3b33023bc885d14f41596bce8b6047fa22eab0ab21ea59b8`
+(ON) and
+`928a6a845e371d8a35918e20d6e4eaa352243e59d66983420599ddb423648dea`
+(OFF).
+These named logs, binaries, source manifests, and build receipts are present
+under `/tmp`. They do not substitute for the user-run runtime bracket; the
+run and scorer blocks require the immutable build receipts.
 
 Post-commit machine receipts (both stamp commit
 `ea4c6eb118f87b7652e462619c3ec9f25424c52f`) are:
@@ -262,12 +410,10 @@ by committed probe `45fd95c244ac8f41e5c4be10b94f8a841ea8db71`; full machine arti
 The +1-ULP sensitive-phase control, j-row roll, nonfinite plant, value plant,
 and operand-roll controls all fired.
 
-The bracket proof carries the explicit `cor2d_dump_zu_trd_substep1.bin`
-exclusion described below: identical-unpatched-binary determinism runs differ
-from byte 3 while both restart containers remain byte-identical. The 22 shared
-TKE streams and both restart containers are byte-identical. This is recorded
-as an oracle-instrumentation defect, likely an uninitialized write-only buffer,
-and cannot conceal a ZDF state change.
+The historical bracket's `cor2d_dump_zu_trd_substep1.bin` exception and its
+fixed-signature interpretation are retracted by the second qualification
+below. The row-18 numerical receipt rests on its consumed operand streams and
+restart identity, not on a global claim that every debug writer is deterministic.
 
 Rows 19--32 are not promoted past this unresolved production fix. **CLIMATE
 ARMS NOT AUTHORIZED.** Frozen bands and commands remain unchanged.
@@ -292,15 +438,15 @@ The two registered 2,980,224-byte operands are:
 - `tke_dump_etau_htau.bin`:
   `3b1e2574a9ea37deb500f9f1a94a56d71b428f9be5b5558dfdf842df1eedfa0d`.
 
-**LOUD QUALIFICATION (2026-08-29):** the row-18 scorer deliberately bracketed
-the 22 shared TKE streams, not every debug stream. Those TKE streams and both
-restarts are byte-identical. Its recorded `cor2d_zu` example was not a complete
-global inventory: the identical-binary controls actually expose 13 debug
-streams with four uninitialized halo slots each. The earlier phrase "one
-explicit oracle-instrument exclusion" is retracted globally. None of those 13
-streams is consumed by row 18, and no physical-interior or restart bit differs,
-so the row-18 result survives; row 19 now carries the complete fail-closed
-inventory and requires a fresh current-binary determinism pair.
+**LOUD SECOND QUALIFICATION (2026-08-29):** the fixed 13-stream/four-slot model
+is retracted. Fresh identical-binary runs produced 250 unequal `sbc_utau` halo
+values and variable complete terminal planes in two TKE matrix captures. The
+earlier row-18 run's 22 shared TKE files were byte-identical in that particular
+pair, but that is not a general determinism proof. Row 18's numerical result
+survives because its consumed `gdepw`, `htau`, argument, EXP, and full-row
+streams remain exact and both restart containers are exact; neither variable
+matrix terminal plane is a row-18 operand. Row 19 now requires the repaired
+strict bracket with no exceptions.
 
 ## Round-15 hold: row-18 operands instrumented on paper; existing tail scored
 
@@ -332,7 +478,7 @@ past the unresolved row 18.
 
 | Row | Operation | Qualified disposition | Whole-domain column result | Southern focus |
 |---:|---|---|---|---|
-| 19 | raw buoyancy length | `UNMEASURED-NEEDS-CLEAN-BRACKET` | raw slot prepared; managed sandbox blocks PMIx | clean outside-sandbox rerun required |
+| 19 | raw buoyancy length | `UNMEASURED-NEEDS-DETERMINISTIC-WRITER-BRACKET` | variable-extent uninitialized dump storage invalidated the exception model | strict repaired ON/OFF + repeated-ON runs required |
 | 20 | `nn_mxl=3` scans, row-19+20 composite | `DIVERGED` | `zmxlm` and `zmxld`: 9,920/9,920 fail; maxima `2.042006` and `2.073254` | 4/4 fail both |
 | 21 | base `avm/avt/dissl` | `UNMEASURED-NEEDS-DUMP` | isolated base `avm` is exact, 0/9,920; pre-Prandtl `avt` and post-overwrite `dissl` lack slots | `avm` 4/4 exact |
 | 22 | inverse-Prandtl `avt` | `VERIFIED` | 0/9,920; max `2.367838e-16` | 4/4 pass |
