@@ -401,6 +401,11 @@ class GMRediConfig(NamedTuple):
     # reciprocal as a separate fp64 value before multiplying, matching
     # domhgr.F90:140 + ldfslp.F90:242-243. The DINO NEMO cards opt in.
     slope_metric_evaluation: str = "division"
+    # Vertical face thickness used by ldfslp's 7 km stability limiter.
+    # ``static_face`` is the historical partial-cell min construction.
+    # ``nemo_qco_live`` applies NEMO's NOW-SSH r3u/r3v dilation to that raw
+    # full-step face thickness before the limiter. The DINO NEMO cards opt in.
+    slope_face_thickness_evaluation: str = "static_face"
     # NEMO ldfslp horizontal (1-2-1)⊗(1-2-1)/16 Shapiro smoother on the final
     # interface slopes (ldfslp.F90:304-315).  legoESM omitted it, leaving the
     # interior slope amplitude ~1.27x too large; wet-renormalized so land drops

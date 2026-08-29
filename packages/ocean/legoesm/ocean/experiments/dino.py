@@ -685,6 +685,9 @@ class DINOConfig:
     # Native ldf_slp U/V metric arithmetic. The global division default is
     # byte-identical; the two NEMO cards select stored reciprocal + multiply.
     gm_redi_slope_metric_evaluation: str = "division"
+    # ldfslp 7 km limiter face thickness: static legacy construction or the
+    # NEMO QCO live e3u/e3v built from NOW SSH. Only the NEMO cards select live.
+    gm_redi_slope_face_thickness_evaluation: str = "static_face"
     # GM eddy-induced (bolus) advection FORM for gm_redi_slope_scheme=
     # "nemo_iso_lap" (GMRediConfig.gm_bolus_advection): "centred" (default, byte-
     # identical — 2nd-order centred bolus flux inside the iso operator) or
@@ -1315,6 +1318,7 @@ DINO_RECIPES: dict[str, dict] = {
         "gm_redi_slope_prd_geometry_stage": "before_step",
         "gm_redi_slope_prd_evaluation": "nemo_literal",
         "gm_redi_slope_metric_evaluation": "nemo_reciprocal",
+        "gm_redi_slope_face_thickness_evaluation": "nemo_qco_live",
         "gm_bolus_kappa_face_average": True,
         # #1226 root cause: NEMO dynzad.F90 is the ADVECTIVE form w*du/dz,
         # not the FLUX form d(w*u)/dz that "centered_full" (and the default
@@ -3206,6 +3210,12 @@ def dino_lat_lon_model_config(
             "unknown DINOConfig.gm_redi_slope_metric_evaluation "
             f"{cfg.gm_redi_slope_metric_evaluation!r}; expected 'division' "
             "or 'nemo_reciprocal'")
+    if cfg.gm_redi_slope_face_thickness_evaluation not in (
+            "static_face", "nemo_qco_live"):
+        raise ValueError(
+            "unknown DINOConfig.gm_redi_slope_face_thickness_evaluation "
+            f"{cfg.gm_redi_slope_face_thickness_evaluation!r}; expected "
+            "'static_face' or 'nemo_qco_live'")
     if cfg.gm_redi_mld_criterion not in ("rho_c", "n2_integral"):
         raise ValueError(
             "unknown DINOConfig.gm_redi_mld_criterion "
@@ -3279,6 +3289,8 @@ def dino_lat_lon_model_config(
             slope_prd_geometry_stage=cfg.gm_redi_slope_prd_geometry_stage,
             slope_prd_evaluation=cfg.gm_redi_slope_prd_evaluation,
             slope_metric_evaluation=cfg.gm_redi_slope_metric_evaluation,
+            slope_face_thickness_evaluation=(
+                cfg.gm_redi_slope_face_thickness_evaluation),
             visbeck=VisbeckConfig(
                 enabled=(cfg.use_gm_redi
                          and cfg.gm_kappa_scheme == "visbeck"),
@@ -3313,6 +3325,8 @@ def dino_lat_lon_model_config(
             slope_prd_geometry_stage=cfg.gm_redi_slope_prd_geometry_stage,
             slope_prd_evaluation=cfg.gm_redi_slope_prd_evaluation,
             slope_metric_evaluation=cfg.gm_redi_slope_metric_evaluation,
+            slope_face_thickness_evaluation=(
+                cfg.gm_redi_slope_face_thickness_evaluation),
             # Exactly ONE adaptive-κ diagnostic on (the GM/Redi dispatch
             # raises if both are enabled): "visbeck" (historical) or
             # "treguier" (the NEMO nn_aei_ijk_t=21 oracle scaling, cap

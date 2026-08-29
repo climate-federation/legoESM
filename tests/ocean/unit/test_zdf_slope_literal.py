@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import dataclasses
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
@@ -126,21 +127,25 @@ def test_row30_selectors_are_scoped_to_the_two_dino_nemo_cards():
             assert cfg.gm_redi_slope_prd_geometry_stage == "before_step"
             assert cfg.gm_redi_slope_prd_evaluation == "nemo_literal"
             assert cfg.gm_redi_slope_metric_evaluation == "nemo_reciprocal"
+            assert cfg.gm_redi_slope_face_thickness_evaluation == "nemo_qco_live"
         else:
             assert cfg.gm_redi_slope_n2_evaluation == "recompute", name
             assert cfg.gm_redi_slope_prd_geometry_stage == "current_step", name
             assert cfg.gm_redi_slope_prd_evaluation == "density_roundtrip", name
             assert cfg.gm_redi_slope_metric_evaluation == "division", name
+            assert cfg.gm_redi_slope_face_thickness_evaluation == "static_face", name
 
     assert GMRediConfig().slope_n2_evaluation == "recompute"
     assert GMRediConfig().slope_prd_geometry_stage == "current_step"
     assert GMRediConfig().slope_prd_evaluation == "density_roundtrip"
     assert GMRediConfig().slope_metric_evaluation == "division"
+    assert GMRediConfig().slope_face_thickness_evaluation == "static_face"
     explicit_legacy = dataclasses.replace(
         DINOConfig(), gm_redi_slope_n2_evaluation="recompute",
         gm_redi_slope_prd_geometry_stage="current_step",
         gm_redi_slope_prd_evaluation="density_roundtrip",
-        gm_redi_slope_metric_evaluation="division")
+        gm_redi_slope_metric_evaluation="division",
+        gm_redi_slope_face_thickness_evaluation="static_face")
     assert explicit_legacy == DINOConfig()
 
     fe = dino_config_for_recipe("nemo_dino_kamm")
@@ -151,6 +156,52 @@ def test_row30_selectors_are_scoped_to_the_two_dino_nemo_cards():
     assert dino_lat_lon_model_config(
         dino_lat_lon_grid(mlf, n_lon=8), mlf, physics=True)[0].outer_integrator \
         == "leapfrog"
+
+
+def test_nemo_qco_live_face_thickness_matches_hand_source_order_and_is_red():
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        _nemo_qco_live_slope_face_thicknesses,
+    )
+
+    eta = jnp.asarray([[0.25, -0.125], [0.375, 0.0625]], dtype=jnp.float64)
+    hu0 = np.asarray([[10.0, 12.0], [15.0, 20.0]], dtype=np.float64)
+    hv0 = np.asarray([[11.0, 13.0], [17.0, 19.0]], dtype=np.float64)
+    area_t = np.asarray([[2.0, 3.0], [5.0, 7.0]], dtype=np.float64)
+    area_u = np.asarray([[11.0, 13.0], [17.0, 23.0]], dtype=np.float64)
+    area_v = np.asarray([[19.0, 29.0], [31.0, 37.0]], dtype=np.float64)
+    z_coord = SimpleNamespace(
+        nemo_hu_0=jnp.asarray(hu0), nemo_hv_0=jnp.asarray(hv0),
+        nemo_e1e2t=jnp.asarray(area_t), nemo_e1e2u=jnp.asarray(area_u),
+        nemo_e1e2v=jnp.asarray(area_v))
+    e3u0 = jnp.asarray(
+        [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]],
+        dtype=jnp.float64)
+    e3v0 = e3u0 + jnp.float64(0.5)
+    umask = jnp.ones_like(e3u0)
+    vmask = jnp.ones_like(e3v0)
+
+    def live(ssh):
+        return _nemo_qco_live_slope_face_thicknesses(
+            ssh, z_coord, e3u0, e3v0, umask, vmask)
+
+    got_u, got_v = jax.jit(live)(eta)
+    eta_np = np.asarray(eta)
+    weighted = area_t * eta_np
+    num_u = np.float64(0.5) * (weighted + np.roll(weighted, -1, axis=1))
+    num_v = np.float64(0.5) * (weighted + np.roll(weighted, -1, axis=0))
+    r1_hu0 = np.float64(1.0) / hu0
+    r1_hv0 = np.float64(1.0) / hv0
+    r1_area_u = np.float64(1.0) / area_u
+    r1_area_v = np.float64(1.0) / area_v
+    r3u = (num_u * r1_hu0) * r1_area_u
+    r3v = (num_v * r1_hv0) * r1_area_v
+    want_u = np.asarray(e3u0) * (np.float64(1.0) + r3u[..., None])
+    want_v = np.asarray(e3v0) * (np.float64(1.0) + r3v[..., None])
+    np.testing.assert_array_equal(np.asarray(got_u), want_u)
+    np.testing.assert_array_equal(np.asarray(got_v), want_v)
+    assert np.any(np.asarray(got_u).view(np.uint64) != np.asarray(e3u0).view(np.uint64))
+    tangent = jax.grad(lambda ssh: jnp.sum(live(ssh)[0]))(eta)
+    assert np.all(np.isfinite(np.asarray(tangent)))
 
 
 def test_nemo_reciprocal_metric_matches_hand_computed_rounding_and_is_red():

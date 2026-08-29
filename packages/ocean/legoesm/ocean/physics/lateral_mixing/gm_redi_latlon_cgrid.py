@@ -940,6 +940,58 @@ def _nemo_ml_anchor_index(first: jnp.ndarray, act: jnp.ndarray,
     return jnp.clip(first + 1, 1, jnp.minimum(mbkt + 1, nlev - 1))
 
 
+def _nemo_qco_live_slope_face_thicknesses(
+    eta: jnp.ndarray,
+    z_coord: OceanPartialCellCoordinate,
+    e3u_0: jnp.ndarray,
+    e3v_0: jnp.ndarray,
+    umask3: jnp.ndarray,
+    vmask3: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """NEMO dom_qco_r3c NOW-face dilation for ldfslp's live e3u/e3v."""
+    dtype = e3u_0.dtype
+    hu0 = getattr(z_coord, "nemo_hu_0", None)
+    hv0 = getattr(z_coord, "nemo_hv_0", None)
+    area_t = getattr(z_coord, "nemo_e1e2t", None)
+    area_u = getattr(z_coord, "nemo_e1e2u", None)
+    area_v = getattr(z_coord, "nemo_e1e2v", None)
+    if any(value is None for value in (hu0, hv0, area_t, area_u, area_v)):
+        raise ValueError(
+            "slope_face_thickness_evaluation='nemo_qco_live' requires "
+            "raw NEMO hu_0/hv_0 and e1e2t/e1e2u/e1e2v fields")
+    hu0 = jnp.asarray(hu0, dtype=dtype)
+    hv0 = jnp.asarray(hv0, dtype=dtype)
+    area_t = jnp.asarray(area_t, dtype=dtype)
+    area_u = jnp.asarray(area_u, dtype=dtype)
+    area_v = jnp.asarray(area_v, dtype=dtype)
+    eta_now = jnp.asarray(eta, dtype=dtype)
+    weighted_eta = lax.optimization_barrier(area_t * eta_now)
+    num_u = lax.optimization_barrier(
+        jnp.asarray(0.5, dtype=dtype)
+        * lax.optimization_barrier(
+            weighted_eta + jnp.roll(weighted_eta, -1, axis=1)))
+    num_v = lax.optimization_barrier(
+        jnp.asarray(0.5, dtype=dtype)
+        * lax.optimization_barrier(
+            weighted_eta + jnp.roll(weighted_eta, -1, axis=0)))
+    wet_u = (hu0 > 0.0).astype(dtype)
+    wet_v = (hv0 > 0.0).astype(dtype)
+    r1_hu0 = lax.optimization_barrier(wet_u / (hu0 + 1.0 - wet_u))
+    r1_hv0 = lax.optimization_barrier(wet_v / (hv0 + 1.0 - wet_v))
+    r1_area_u = lax.optimization_barrier(
+        jnp.asarray(1.0, dtype=dtype) / area_u)
+    r1_area_v = lax.optimization_barrier(
+        jnp.asarray(1.0, dtype=dtype) / area_v)
+    r3u = lax.optimization_barrier(
+        lax.optimization_barrier(num_u * r1_hu0) * r1_area_u)
+    r3v = lax.optimization_barrier(
+        lax.optimization_barrier(num_v * r1_hv0) * r1_area_v)
+    return (
+        e3u_0 * (1.0 + r3u[:, :, None] * umask3),
+        e3v_0 * (1.0 + r3v[:, :, None] * vmask3),
+    )
+
+
 def compute_nemo_native_slopes(
     rho: jnp.ndarray,
     T: jnp.ndarray,
@@ -955,6 +1007,7 @@ def compute_nemo_native_slopes(
     g: float = constants.g,
     active_3d: jnp.ndarray | None = None,
     jacobian: jnp.ndarray | None = None,
+    eta: jnp.ndarray | None = None,
     prd_jacobian: jnp.ndarray | None = None,
     prd_TS_override: tuple[jnp.ndarray, jnp.ndarray] | None = None,
     prd_override: jnp.ndarray | None = None,
@@ -1206,6 +1259,19 @@ def compute_nemo_native_slopes(
     else:                                    # z-star / flat: e3u = e3v = e3t
         e3u_k = dz[None, None, :]
         e3v_k = dz[None, None, :]
+    _face_e3_mode = getattr(
+        cfg, "slope_face_thickness_evaluation", "static_face")
+    if _face_e3_mode not in ("static_face", "nemo_qco_live"):
+        raise ValueError(
+            "unknown GMRediConfig.slope_face_thickness_evaluation "
+            f"{_face_e3_mode!r}; expected 'static_face' or 'nemo_qco_live'")
+    if _face_e3_mode == "nemo_qco_live":
+        if eta is None:
+            raise ValueError(
+                "slope_face_thickness_evaluation='nemo_qco_live' requires "
+                "the NOW sea-surface height")
+        e3u_k, e3v_k = _nemo_qco_live_slope_face_thicknesses(
+            eta, z_coord, e3u_k, e3v_k, umask3, vmask3)
     zdepu = 0.5 * (_gd_col + jnp.roll(_gd_col, -1, axis=1)) - _e3_top
     zdepv = 0.5 * (_gd_col + jnp.roll(_gd_col, -1, axis=0)) - _e3_top
     uslp = _uv_slp(zgru, zb_u, e1u, e3u_k, iku, r1_hmlu, zdepu, umask3)
@@ -3626,7 +3692,7 @@ def gm_redi_tracer_tendency_latlon(
             _act_kgm = _nemo_native_active_3d(mask, z_coord, H_bathy, T.dtype)
             _uslp_kgm, _vslp_kgm, _wslpi_kgm, _wslpj_kgm = compute_nemo_native_slopes(
                 rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg, eos_fn,
-                jacobian=jacobian, prd_jacobian=_native_prd_J,
+                jacobian=jacobian, eta=eta, prd_jacobian=_native_prd_J,
                 prd_TS_override=native_prd_TS,
                 pn2_override=native_slope_pn2,
                 e3w_override=native_slope_e3w,
@@ -3866,7 +3932,7 @@ def gm_redi_tracer_tendency_latlon(
             _nat = compute_nemo_native_slopes(
                 rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg,
                 eos_fn, rho_0=rho_0, g=g, active_3d=_active_3d,
-                jacobian=jacobian, prd_jacobian=_native_prd_J,
+                jacobian=jacobian, eta=eta, prd_jacobian=_native_prd_J,
                 prd_TS_override=native_prd_TS,
                 pn2_override=native_slope_pn2,
                 e3w_override=native_slope_e3w)
@@ -4051,7 +4117,7 @@ def compute_isoneutral_K33_latlon(
         _native_prd_J = _J if native_prd_jacobian is None else native_prd_jacobian
         _, _, _wi, _wj = compute_nemo_native_slopes(
             _rho, T, S, _m, _um, _vm, z_coord, grid, cfg, _eosfn,
-            jacobian=_J, prd_jacobian=_native_prd_J,
+            jacobian=_J, eta=eta, prd_jacobian=_native_prd_J,
             prd_TS_override=native_prd_TS,
             pn2_override=native_slope_pn2,
             e3w_override=native_slope_e3w,
