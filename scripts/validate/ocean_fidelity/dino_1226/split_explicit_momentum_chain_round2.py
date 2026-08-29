@@ -448,8 +448,32 @@ def main() -> int:
     ledger_control_v = round1._metric(
         ledger_v, nemo["v"]["final"], vmask2, EXPECTED_V
     )
-    if ledger_control_u["normalized_rms_error"] != 0.0 or ledger_control_v["normalized_rms_error"] != 0.0:
-        raise SystemExit("inferred-Coriolis ledger is not exact")
+    # The inferred term subtracts the final field and then reconstructs it;
+    # that inverse operation is algebraically exact but not bit-invertible.
+    # Bind acceptance to an explicit fp64 operation-count roundoff envelope,
+    # not to a relaxed campaign physics bar.
+    eps = np.finfo(np.float64).eps
+    ledger_diff_u = np.abs(ledger_u - nemo["u"]["final"])
+    ledger_diff_v = np.abs(ledger_v - nemo["v"]["final"])
+    ledger_bound_u = 8.0 * eps * (
+        np.abs(base_u) + np.abs(nemo_cor_u) + np.abs(nemo["u"]["drag"])
+        + np.abs(nemo["u"]["wind"]) + np.abs(nemo["u"]["final"])
+    )
+    ledger_bound_v = 8.0 * eps * (
+        np.abs(base_v) + np.abs(nemo_cor_v) + np.abs(nemo["v"]["drag"])
+        + np.abs(nemo["v"]["wind"]) + np.abs(nemo["v"]["final"])
+    )
+    ledger_roundoff_u = bool(np.all(ledger_diff_u[umask2] <= ledger_bound_u[umask2]))
+    ledger_roundoff_v = bool(np.all(ledger_diff_v[vmask2] <= ledger_bound_v[vmask2]))
+    # A material perturbation must breach the same bound.
+    ledger_plant_u = ledger_u.copy()
+    ledger_plant_u[umask2] += 1.0e-12 * _rms(nemo["u"]["final"][umask2])
+    ledger_plant_fires = bool(
+        np.any(np.abs(ledger_plant_u - nemo["u"]["final"])[umask2]
+               > ledger_bound_u[umask2])
+    )
+    if not (ledger_roundoff_u and ledger_roundoff_v and ledger_plant_fires):
+        raise SystemExit("inferred-Coriolis ledger exceeds fp64 roundoff envelope")
 
     drag_u, drag_v = _drag_contribution(
         legacy, h_k, jnp.asarray(h_u), jnp.asarray(h_v),
@@ -699,7 +723,17 @@ def main() -> int:
             repr(model_config).encode()
         ).hexdigest(),
         "nemo_base_reconstruction": {"u": base_control_u, "v": base_control_v},
-        "inferred_coriolis_ledger": {"u": ledger_control_u, "v": ledger_control_v},
+        "inferred_coriolis_ledger": {
+            "u": ledger_control_u,
+            "v": ledger_control_v,
+            "fp64_roundoff_envelope_pass_u": ledger_roundoff_u,
+            "fp64_roundoff_envelope_pass_v": ledger_roundoff_v,
+            "planted_material_offset_fires": ledger_plant_fires,
+            "max_abs_difference_u": float(np.max(ledger_diff_u[umask2])),
+            "max_abs_difference_v": float(np.max(ledger_diff_v[vmask2])),
+            "max_roundoff_bound_u": float(np.max(ledger_bound_u[umask2])),
+            "max_roundoff_bound_v": float(np.max(ledger_bound_v[vmask2])),
+        },
         "vertical_friction": {
             "status": "STRUCTURAL_ZERO_NOT_AN_OPERAND",
             "nemo_source": "stpmlf.F90:332 before :396; dynzdf.F90:134-337",
