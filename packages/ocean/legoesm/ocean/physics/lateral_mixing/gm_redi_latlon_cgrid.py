@@ -20,6 +20,7 @@ References
 from __future__ import annotations
 
 import jax
+from jax import lax
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -44,6 +45,8 @@ from legoesm.ocean.eos import (
     int_drhodTS_dynamic_enthalpy,
     make_eos_fn,
     nemo_bn2_live_ladders,
+    NemoSEOSConfig,
+    nemo_seos_prd_literal,
     rho_0 as _RHO_0,
 )
 from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
@@ -952,6 +955,11 @@ def compute_nemo_native_slopes(
     g: float = constants.g,
     active_3d: jnp.ndarray | None = None,
     jacobian: jnp.ndarray | None = None,
+    prd_jacobian: jnp.ndarray | None = None,
+    prd_TS_override: tuple[jnp.ndarray, jnp.ndarray] | None = None,
+    prd_override: jnp.ndarray | None = None,
+    pn2_override: jnp.ndarray | None = None,
+    e3w_override: jnp.ndarray | None = None,
 ):
     """NEMO ldfslp native four-position isopycnal slopes (uslp, vslp, wslpi,
     wslpj) — a direct transcription of ``ldfslp.F90`` (ldf_slp, NEMO 5.0.2)
@@ -1034,7 +1042,34 @@ def compute_nemo_native_slopes(
     umask3 = u_mask[:, 1:, None] * act * jnp.roll(act, -1, axis=1)
     vmask3 = v_mask[1:, :, None] * act * jnp.roll(act, -1, axis=0)
 
-    prd = rho / jnp.asarray(rho_0, dtype=dtype) - 1.0            # NEMO rhd
+    _prd_mode = getattr(cfg, "slope_prd_evaluation", "density_roundtrip")
+    if prd_override is not None:
+        prd = jnp.asarray(prd_override, dtype=dtype)
+    elif _prd_mode == "density_roundtrip":
+        prd = rho / jnp.asarray(rho_0, dtype=dtype) - 1.0        # legacy
+    elif _prd_mode == "nemo_literal":
+        if not isinstance(z_coord, OceanPartialCellCoordinate):
+            raise ValueError(
+                "slope_prd_evaluation='nemo_literal' requires the NEMO "
+                "partial-cell coordinate carrying t_depth_ref")
+        _raw_gdept = getattr(z_coord, "nemo_gdept_0", None)
+        if _raw_gdept is None:
+            raise ValueError(
+                "slope_prd_evaluation='nemo_literal' requires raw "
+                "z_coord.nemo_gdept_0; an averaged 1-D ladder changes the "
+                "last bits before horizontal differencing")
+        _gdept_prd = jnp.asarray(_raw_gdept, dtype=dtype)
+        _prd_stretch = (_stretch2d if prd_jacobian is None
+                        else jnp.asarray(prd_jacobian, dtype=dtype))
+        if _prd_stretch is not None:
+            _gdept_prd = _gdept_prd * _prd_stretch[..., jnp.newaxis]
+        _prd_T, _prd_S = (T, S) if prd_TS_override is None else prd_TS_override
+        prd = nemo_seos_prd_literal(
+            _prd_T, _prd_S, _gdept_prd, NemoSEOSConfig(rho0=rho_0)) * act
+    else:
+        raise ValueError(
+            "unknown GMRediConfig.slope_prd_evaluation "
+            f"{_prd_mode!r}; expected 'density_roundtrip' or 'nemo_literal'")
 
     # Shared W-point e3w / wmask3 / pn2 (NEMO ldf_eiv reuses exactly this
     # geometry + N² — factored so the adaptive-κ path below stays bit-
@@ -1042,6 +1077,30 @@ def compute_nemo_native_slopes(
     e3w, wmask3, pn2 = _nemo_wpoint_e3w_wmask_n2(
         rho, T, S, z_coord, eos_fn, rho_0, g, act,
         slope_n2=getattr(cfg, 'slope_n2', 'adiabatic'), jacobian=jacobian)
+    if pn2_override is not None:
+        pn2 = jnp.asarray(pn2_override, dtype=dtype)
+        # The step-entry eosbn2 bundle stores NEMO levels 2:jpk (nlev-1),
+        # while ldf_slp's local rn2b array includes the prescribed zero
+        # surface W slot.  Restore that exact slot before any full-level
+        # prd/rn2 arithmetic.
+        if pn2.shape[-1] == nlev - 1:
+            pn2 = jnp.concatenate([jnp.zeros_like(pn2[..., :1]), pn2], axis=-1)
+        elif pn2.shape[-1] != nlev:
+            raise ValueError(
+                "pn2_override must contain nlev or nlev-1 W levels, got "
+                f"{pn2.shape[-1]} for nlev={nlev}")
+    if e3w_override is not None:
+        e3w = jnp.asarray(e3w_override, dtype=dtype)
+        # The step-entry bundle stores the interior W interfaces (NEMO
+        # levels 2:jpk), whereas ldf_slp's local array also has the unused
+        # surface slot.  Restore that slot without reconstructing any live
+        # geometry; the k=0 slope is prescribed zero below.
+        if e3w.shape[-1] == nlev - 1:
+            e3w = jnp.concatenate([jnp.zeros_like(e3w[..., :1]), e3w], axis=-1)
+        elif e3w.shape[-1] != nlev:
+            raise ValueError(
+                "e3w_override must contain nlev or nlev-1 W levels, got "
+                f"{e3w.shape[-1]} for nlev={nlev}")
     pn2_kp1 = jnp.concatenate([pn2[:, :, 1:],
                                jnp.zeros((nlat, nlon, 1), dtype=dtype)], axis=-1)
 
@@ -1107,11 +1166,9 @@ def compute_nemo_native_slopes(
     if _stretch2d is not None:
         _gd_col = _gd_col * _stretch2d[:, :, None]
     _e3_top = 0.5 * dz[0]
+    # axis=1 is the i/lon direction (matches zb_u/iku above), axis=0 is j/lat.
     if _stretch2d is not None:
         _e3_top = _e3_top * _stretch2d[:, :, None]
-    # axis=1 is the i/lon direction (matches zb_u/iku above), axis=0 is j/lat.
-    zdepu = 0.5 * (_gd_col + jnp.roll(_gd_col, -1, axis=1)) - _e3_top
-    zdepv = 0.5 * (_gd_col + jnp.roll(_gd_col, -1, axis=0)) - _e3_top
     # NEMO's slope stability bound is -7e3/e3u(ji,jj,jk,Kmm)*|zau| (ldfslp.F90
     # :133-134) and it uses the U-FACE / V-FACE thickness, NOT the cell value.
     # At a staircase / partial-cell topography step the face thickness is the
@@ -1131,6 +1188,8 @@ def compute_nemo_native_slopes(
     else:                                    # z-star / flat: e3u = e3v = e3t
         e3u_k = dz[None, None, :]
         e3v_k = dz[None, None, :]
+    zdepu = 0.5 * (_gd_col + jnp.roll(_gd_col, -1, axis=1)) - _e3_top
+    zdepv = 0.5 * (_gd_col + jnp.roll(_gd_col, -1, axis=0)) - _e3_top
     uslp = _uv_slp(zgru, zb_u, e1u, e3u_k, iku, r1_hmlu, zdepu, umask3)
 
     # --- vslp ---
@@ -1155,8 +1214,23 @@ def compute_nemo_native_slopes(
         * e1t[:, :, None]
     zcj = jnp.maximum(vm_jm1 + vmask3 + _km1(vm_jm1) + _km1(vmask3), zeps) \
         * e2t[:, :, None]
-    zai = (zgru_im1 + zgru + _km1(zgru_im1) + _km1(zgru)) / zci * wmask3
-    zaj = (zgrv_jm1 + zgrv + _km1(zgrv_jm1) + _km1(zgrv)) / zcj * wmask3
+    # Preserve ldfslp.F90:311-314's explicit pairings.  The j expression is
+    # intentionally cross-paired (jm1@iik + local@iikm1, then the converse),
+    # not a left-associated sum of four faces.  The barriers make those source
+    # parentheses survive XLA lowering; this matters after the exact prd carry,
+    # where the remaining differences are a few ULP of a near-zero gradient.
+    if _prd_mode == "nemo_literal":
+        _zai_now = lax.optimization_barrier(zgru_im1 + zgru)
+        _zai_before = lax.optimization_barrier(_km1(zgru_im1) + _km1(zgru))
+        zai = (lax.optimization_barrier(_zai_now + _zai_before) / zci) * wmask3
+        _zaj_cross1 = lax.optimization_barrier(zgrv_jm1 + _km1(zgrv))
+        _zaj_cross2 = lax.optimization_barrier(_km1(zgrv_jm1) + zgrv)
+        zaj = (lax.optimization_barrier(_zaj_cross1 + _zaj_cross2) / zcj) * wmask3
+    else:
+        # Preserve the pre-row-30 expression byte-for-byte for every card
+        # outside the two literal DINO oracle selectors.
+        zai = (zgru_im1 + zgru + _km1(zgru_im1) + _km1(zgru)) / zci * wmask3
+        zaj = (zgrv_jm1 + zgrv + _km1(zgrv_jm1) + _km1(zgrv)) / zcj * wmask3
     zbw = (-0.5 / jnp.asarray(g, dtype)) * pn2 * (prd + _km1(prd) + 2.0)
     # e3w is (nlev,) (static ladder, jacobian=None) or (nlat,nlon,nlev) (live,
     # jacobian passed) -- shape is trace-time-static, branch is safe under JIT.
@@ -1187,7 +1261,7 @@ def compute_nemo_native_slopes(
     wslpj = wslpj.at[:, :, 0].set(0.0)
 
     # --- Shapiro 1/16 + coastal decrease, native mask factors ---
-    def _shap(f, cof):
+    def _shap(f, cof, literal_factors=None):
         # Lon (axis 1) ghost cells are PERIODIC: NEMO's slope loops compute
         # zwz/zww over the halo columns as well (DO_2D(1,1,1,1),
         # ldfslp.F90:203,265) from lbc-filled inputs (DINO ldIperio=.TRUE.),
@@ -1199,26 +1273,67 @@ def compute_nemo_native_slopes(
         # j on both sides, matching NEMO's masked halo there.
         fp = jnp.pad(f, ((0, 0), (1, 1), (0, 0)), mode="wrap")
         fp = jnp.pad(fp, ((1, 1), (0, 0), (0, 0)))
-        w = (1.0, 2.0, 1.0)
-        acc = jnp.zeros_like(f)
-        for a in range(3):
-            for b in range(3):
-                acc = acc + w[a] * w[b] * fp[a:a + nlat, b:b + nlon, :]
-        return acc * cof / 16.0  # coeff-ok: 16 = (1+2+1)^2 binomial weight sum (NEMO ldfslp z1_16), same as L486
+        if literal_factors is None:
+            w = (1.0, 2.0, 1.0)
+            acc = jnp.zeros_like(f)
+            for a in range(3):
+                for b in range(3):
+                    acc = acc + w[a] * w[b] * fp[a:a + nlat, b:b + nlon, :]
+            return acc * cof / 16.0  # coeff-ok: NEMO's 1/16 Shapiro weight
+
+        # ldfslp.F90:348-367 writes this association explicitly for
+        # reproducibility.  Keep its corner pairs, cardinal pairs, and
+        # left-to-right coefficient product intact on the literal path.
+        nw_ne = lax.optimization_barrier(
+            fp[:nlat, :nlon, :] + fp[:nlat, 2:, :])
+        sw_se = lax.optimization_barrier(
+            fp[2:, :nlon, :] + fp[2:, 2:, :])
+        corners = lax.optimization_barrier(nw_ne + sw_se)
+        n_w = lax.optimization_barrier(
+            fp[:nlat, 1:nlon + 1, :] + fp[1:nlat + 1, :nlon, :])
+        e_s = lax.optimization_barrier(
+            fp[1:nlat + 1, 2:, :] + fp[2:, 1:nlon + 1, :])
+        cardinals = lax.optimization_barrier(n_w + e_s)
+        acc = lax.optimization_barrier(
+            corners + 2.0 * cardinals
+            + 4.0 * fp[1:nlat + 1, 1:nlon + 1, :])
+        zcof = jnp.asarray(1.0 / 16.0, dtype=dtype)
+        for factor in literal_factors:
+            zcof = lax.optimization_barrier(zcof * factor)
+        return lax.optimization_barrier(acc * zcof)
 
     def _kp1m(a):  # mask at level k+1, zero at the bottom
         return jnp.concatenate(
             [a[:, :, 1:], jnp.zeros((nlat, nlon, 1), dtype=dtype)], axis=-1)
 
-    cof_u = 0.25 * (jnp.roll(umask3, -1, axis=0) + jnp.roll(umask3, +1, axis=0)) \
-        * (umask3 + _kp1m(umask3))
-    cof_v = 0.25 * (jnp.roll(vmask3, -1, axis=1) + jnp.roll(vmask3, +1, axis=1)) \
-        * (vmask3 + _kp1m(vmask3))
-    cof_w = 0.25 * wmask3 * (umask3 + um_im1) * (vmask3 + vm_jm1)
-    uslp = _shap(uslp, cof_u)
-    vslp = _shap(vslp, cof_v)
-    wslpi = _shap(wslpi, cof_w)
-    wslpj = _shap(wslpj, cof_w)
+    _u_lat = jnp.roll(umask3, -1, axis=0) + jnp.roll(umask3, +1, axis=0)
+    _u_vert = umask3 + _kp1m(umask3)
+    _v_lon = jnp.roll(vmask3, -1, axis=1) + jnp.roll(vmask3, +1, axis=1)
+    _v_vert = vmask3 + _kp1m(vmask3)
+    _w_u = umask3 + um_im1
+    _w_v = vmask3 + vm_jm1
+    cof_u = 0.25 * _u_lat * _u_vert
+    cof_v = 0.25 * _v_lon * _v_vert
+    cof_w = 0.25 * wmask3 * _w_u * _w_v
+    if _prd_mode == "nemo_literal":
+        half = jnp.asarray(0.5, dtype=dtype)
+        quarter = jnp.asarray(0.25, dtype=dtype)
+        uslp = _shap(uslp, cof_u, (_u_lat, half, _u_vert, half))
+        vslp = _shap(vslp, cof_v, (_v_lon, half, _v_vert, half))
+        wslpi = _shap(wslpi, cof_w, (wmask3, _w_u, _w_v, quarter))
+        wslpj = _shap(wslpj, cof_w, (wmask3, _w_u, _w_v, quarter))
+    else:
+        uslp = _shap(uslp, cof_u)
+        vslp = _shap(vslp, cof_v)
+        wslpi = _shap(wslpi, cof_w)
+        wslpj = _shap(wslpj, cof_w)
+    # ldfslp.F90:210 executes jk=jpkm1..2; U/V level 1 is never assigned and
+    # enters ldftra as its initialized zero.  The vectorized transcription
+    # otherwise evaluates that extra surface level.  Keep legacy cards byte-
+    # identical and prescribe the literal DINO slot only.
+    if _prd_mode == "nemo_literal":
+        uslp = uslp.at[..., 0].set(0.0)
+        vslp = vslp.at[..., 0].set(0.0)
     return uslp, vslp, wslpi, wslpj
 
 
@@ -3348,6 +3463,10 @@ def gm_redi_tracer_tendency_latlon(
     kappa_redi_override: jnp.ndarray | None = None,
     kappa_redi_v_override: jnp.ndarray | None = None,
     density_jacobian: tuple[jnp.ndarray, jnp.ndarray] | None = None,
+    native_prd_jacobian: jnp.ndarray | None = None,
+    native_prd_TS: tuple[jnp.ndarray, jnp.ndarray] | None = None,
+    native_slope_pn2: jnp.ndarray | None = None,
+    native_slope_e3w: jnp.ndarray | None = None,
     dt: float | None = None,
     return_bolus_transport: bool = False,
     eos_depth: str = "insitu",
@@ -3426,6 +3545,12 @@ def gm_redi_tracer_tendency_latlon(
         )
     else:
         rho, jacobian = density_jacobian
+    # Native ldf_slp is allowed to consume a different time level of z-star
+    # geometry than the later tracer-volume operator.  NEMO stp_MLF evaluates
+    # eos(ts,Nbb) and ldf_slp on gdept(Nbb), while tra_ldf subsequently applies
+    # those carried slopes in the current step.  None keeps every legacy path
+    # byte-identical.
+    _native_prd_J = jacobian if native_prd_jacobian is None else native_prd_jacobian
 
     slope_density = getattr(cfg, "slope_density", "in_situ")
 
@@ -3482,7 +3607,11 @@ def gm_redi_tracer_tendency_latlon(
                 and getattr(cfg, "slope_positions", "mode_b") == "nemo_native"):
             _act_kgm = _nemo_native_active_3d(mask, z_coord, H_bathy, T.dtype)
             _uslp_kgm, _vslp_kgm, _wslpi_kgm, _wslpj_kgm = compute_nemo_native_slopes(
-                rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg, eos_fn, jacobian=jacobian,
+                rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg, eos_fn,
+                jacobian=jacobian, prd_jacobian=_native_prd_J,
+                prd_TS_override=native_prd_TS,
+                pn2_override=native_slope_pn2,
+                e3w_override=native_slope_e3w,
                 rho_0=rho_0, g=g, active_3d=_act_kgm,
             )
             kappa_GM = compute_treguier_kappa_gm_nemo_native(
@@ -3719,7 +3848,10 @@ def gm_redi_tracer_tendency_latlon(
             _nat = compute_nemo_native_slopes(
                 rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg,
                 eos_fn, rho_0=rho_0, g=g, active_3d=_active_3d,
-                jacobian=jacobian)
+                jacobian=jacobian, prd_jacobian=_native_prd_J,
+                prd_TS_override=native_prd_TS,
+                pn2_override=native_slope_pn2,
+                e3w_override=native_slope_e3w)
             _msc = getattr(cfg, "msc_stabilize", False)
             _bolus = None
             _dT = nemo_iso_lap_tracer_tendency_latlon_cgrid(
@@ -3805,6 +3937,10 @@ def compute_isoneutral_K33_latlon(
     kappa_redi_override: jnp.ndarray | None = None,
     kappa_redi_v_override: jnp.ndarray | None = None,
     density_jacobian: tuple[jnp.ndarray, jnp.ndarray] | None = None,
+    native_prd_jacobian: jnp.ndarray | None = None,
+    native_prd_TS: tuple[jnp.ndarray, jnp.ndarray] | None = None,
+    native_slope_pn2: jnp.ndarray | None = None,
+    native_slope_e3w: jnp.ndarray | None = None,
     u_mask: jnp.ndarray | None = None,
     v_mask: jnp.ndarray | None = None,
     dt: float | None = None,
@@ -3894,8 +4030,13 @@ def compute_isoneutral_K33_latlon(
             _vm = _vm.at[1:-1, :].set(_m[:-1, :] * _m[1:, :])
         else:
             _vm = v_mask
+        _native_prd_J = _J if native_prd_jacobian is None else native_prd_jacobian
         _, _, _wi, _wj = compute_nemo_native_slopes(
-            _rho, T, S, _m, _um, _vm, z_coord, grid, cfg, _eosfn, jacobian=_J,
+            _rho, T, S, _m, _um, _vm, z_coord, grid, cfg, _eosfn,
+            jacobian=_J, prd_jacobian=_native_prd_J,
+            prd_TS_override=native_prd_TS,
+            pn2_override=native_slope_pn2,
+            e3w_override=native_slope_e3w,
             rho_0=rho_0, g=g, active_3d=_act)
         _kap = cfg.kappa_Redi if kappa_redi_override is None else kappa_redi_override
         # Center kappa broadcast IDENTICAL to the explicit operator's own

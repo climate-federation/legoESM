@@ -381,6 +381,21 @@ class GMRediConfig(NamedTuple):
     # bit-identical.  Dispatch raises on an unknown value
     # (gm_redi_latlon_cgrid._nemo_wpoint_e3w_wmask_n2).
     slope_n2: str = "adiabatic"
+    # Lifetime of rn2b used by native ldf_slp.  ``recompute`` is the historical
+    # path.  ``carried_step_entry`` consumes the already-built pre-zdf_phy
+    # bundle, matching stpmlf.F90's single rn2b field and avoiding a second
+    # evaluation with different rounding boundaries.
+    slope_n2_evaluation: str = "recompute"
+    # Time level of the z-star geometry used by the native NEMO ldf_slp
+    # producer.  ``"current_step"`` is the byte-identical historical path.
+    # ``"before_step"`` reproduces stpmlf.F90's CALL eos(ts,Nbb,rhd): both
+    # its T/S and gdept operand come from Nbb.  The DINO NEMO cards opt in.
+    slope_prd_geometry_stage: str = "current_step"
+    # Construction of the dimensionless density anomaly entering ldf_slp.
+    # ``"density_roundtrip"`` preserves the historical rho/rho0-1 path.
+    # ``"nemo_literal"`` evaluates eosbn2.F90's zn*r1_rho0 directly and is
+    # selected only by the DINO NEMO cards.
+    slope_prd_evaluation: str = "density_roundtrip"
     # NEMO ldfslp horizontal (1-2-1)⊗(1-2-1)/16 Shapiro smoother on the final
     # interface slopes (ldfslp.F90:304-315).  legoESM omitted it, leaving the
     # interior slope amplitude ~1.27x too large; wet-renormalized so land drops

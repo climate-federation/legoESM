@@ -676,6 +676,12 @@ class DINOConfig:
     # nemo_dino_kamm card selects "nemo_bn2".  Dispatch raises on an unknown
     # value.
     gm_redi_slope_n2: str = "adiabatic"
+    gm_redi_slope_n2_evaluation: str = "recompute"
+    # Native ldf_slp input construction.  Global defaults preserve the legacy
+    # current-geometry density round trip; the two DINO NEMO cards select the
+    # literal Nbb geometry + zn/rho0 construction below.
+    gm_redi_slope_prd_geometry_stage: str = "current_step"
+    gm_redi_slope_prd_evaluation: str = "density_roundtrip"
     # GM eddy-induced (bolus) advection FORM for gm_redi_slope_scheme=
     # "nemo_iso_lap" (GMRediConfig.gm_bolus_advection): "centred" (default, byte-
     # identical — 2nd-order centred bolus flux inside the iso operator) or
@@ -1302,6 +1308,9 @@ DINO_RECIPES: dict[str, dict] = {
         # ldfslp consumes rn2b, not a parcel-displacement N^2 (eosbn2.F90:1455).
         # DINO y5: |wslpi| ratio 1.0121 -> 0.9989, deep (k>=18) 1.0148 -> 0.9995.
         "gm_redi_slope_n2": "nemo_bn2",
+        "gm_redi_slope_n2_evaluation": "carried_step_entry",
+        "gm_redi_slope_prd_geometry_stage": "before_step",
+        "gm_redi_slope_prd_evaluation": "nemo_literal",
         "gm_bolus_kappa_face_average": True,
         # #1226 root cause: NEMO dynzad.F90 is the ADVECTIVE form w*du/dz,
         # not the FLUX form d(w*u)/dz that "centered_full" (and the default
@@ -3160,6 +3169,33 @@ def dino_lat_lon_model_config(
             f"(got eos={cfg.eos!r}): the NEMO bn2 uses the S-EOS alpha/beta "
             "polynomial, so any other EOS would give slopes inconsistent with "
             "the model's own density.")
+    if cfg.gm_redi_slope_n2_evaluation not in (
+            "recompute", "carried_step_entry"):
+        raise ValueError(
+            "unknown DINOConfig.gm_redi_slope_n2_evaluation "
+            f"{cfg.gm_redi_slope_n2_evaluation!r}; expected 'recompute' or "
+            "'carried_step_entry'")
+    if (cfg.gm_redi_slope_n2_evaluation == "carried_step_entry"
+            and cfg.gm_redi_slope_n2 != "nemo_bn2"):
+        raise ValueError(
+            "gm_redi_slope_n2_evaluation='carried_step_entry' requires "
+            "gm_redi_slope_n2='nemo_bn2'")
+    if cfg.gm_redi_slope_prd_geometry_stage not in ("current_step", "before_step"):
+        raise ValueError(
+            "unknown DINOConfig.gm_redi_slope_prd_geometry_stage "
+            f"{cfg.gm_redi_slope_prd_geometry_stage!r}; expected 'current_step' "
+            "or 'before_step'")
+    if cfg.gm_redi_slope_prd_evaluation not in (
+            "density_roundtrip", "nemo_literal"):
+        raise ValueError(
+            "unknown DINOConfig.gm_redi_slope_prd_evaluation "
+            f"{cfg.gm_redi_slope_prd_evaluation!r}; expected "
+            "'density_roundtrip' or 'nemo_literal'")
+    if (cfg.gm_redi_slope_prd_evaluation == "nemo_literal"
+            and cfg.eos != "nemo_seos"):
+        raise ValueError(
+            "DINOConfig.gm_redi_slope_prd_evaluation='nemo_literal' requires "
+            f"eos='nemo_seos' (got {cfg.eos!r})")
     if cfg.gm_redi_mld_criterion not in ("rho_c", "n2_integral"):
         raise ValueError(
             "unknown DINOConfig.gm_redi_mld_criterion "
@@ -3229,6 +3265,9 @@ def dino_lat_lon_model_config(
             msc_stabilize=True,
             mld_criterion=cfg.gm_redi_mld_criterion,
             slope_n2=cfg.gm_redi_slope_n2,
+            slope_n2_evaluation=cfg.gm_redi_slope_n2_evaluation,
+            slope_prd_geometry_stage=cfg.gm_redi_slope_prd_geometry_stage,
+            slope_prd_evaluation=cfg.gm_redi_slope_prd_evaluation,
             visbeck=VisbeckConfig(
                 enabled=(cfg.use_gm_redi
                          and cfg.gm_kappa_scheme == "visbeck"),
@@ -3259,6 +3298,9 @@ def dino_lat_lon_model_config(
             gm_bolus_kappa_face_average=cfg.gm_bolus_kappa_face_average,
             mld_criterion=cfg.gm_redi_mld_criterion,
             slope_n2=cfg.gm_redi_slope_n2,
+            slope_n2_evaluation=cfg.gm_redi_slope_n2_evaluation,
+            slope_prd_geometry_stage=cfg.gm_redi_slope_prd_geometry_stage,
+            slope_prd_evaluation=cfg.gm_redi_slope_prd_evaluation,
             # Exactly ONE adaptive-κ diagnostic on (the GM/Redi dispatch
             # raises if both are enabled): "visbeck" (historical) or
             # "treguier" (the NEMO nn_aei_ijk_t=21 oracle scaling, cap

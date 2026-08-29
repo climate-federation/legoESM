@@ -84,3 +84,14 @@ def test_zdf_mxl_turb_is_enumerated_and_covered():
     hits = [c for c in mod.CALLS if "zdf_mxl_turb" in c.routine]
     assert hits, "zdf_mxl_turb must be enumerated in the call list"
     assert all(c.disposition == mod.COVERED for c in hits)
+    assert all("row 28 VERIFIED 0/9920" in c.note for c in hits)
+
+
+def test_zdf_tail_import_notes_preserve_ordered_stop():
+    mod = _load_module()
+    by_name = {c.routine: c for c in mod.CALLS}
+    assert "complete uslp/vslp remains DIVERGED" in by_name["ldf_slp"].note
+    assert "ordered-blocked behind row 30" in by_name[
+        "dyn_zdf (dyn_zdf_imp, implicit)"].note
+    assert "ordered-blocked behind row 30 and row 31" in by_name[
+        "tra_zdf"].note

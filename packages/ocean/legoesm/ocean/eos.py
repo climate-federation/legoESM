@@ -501,6 +501,42 @@ def nemo_seos_eos(
     return cfg.rho0 + zn
 
 
+def nemo_seos_prd_literal(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    depth_m: jnp.ndarray,
+    cfg: NemoSEOSConfig | None = None,
+) -> jnp.ndarray:
+    """NEMO simplified-EOS density anomaly ``prd`` in literal association.
+
+    This is the quantity written by ``eosbn2.F90:301-305``: NEMO forms
+    ``zn`` directly from conservative temperature, salinity, and geometric
+    ``gdept``, then stores ``zn * r1_rho0``.  It deliberately does *not* call
+    :func:`nemo_seos_eos` and recover the anomaly through
+    ``(rho0 + zn) / rho0 - 1``; that non-oracle round trip loses bits to the
+    large reference-density offset before the anomaly is consumed by
+    ``ldf_slp``.
+
+    The helper is pure JAX and retains the source expression's written order,
+    so it is safe under JIT and reverse-mode AD.
+    """
+    if cfg is None:
+        cfg = NemoSEOSConfig()
+    zt = lax.optimization_barrier(T - cfg.T0)
+    zs = lax.optimization_barrier(S - cfg.S0)
+    t_linear = lax.optimization_barrier(0.5 * cfg.lambda1 * zt)
+    t_depth = lax.optimization_barrier(cfg.mu1 * depth_m)
+    t_factor = lax.optimization_barrier(1.0 + t_linear + t_depth)
+    t_term = lax.optimization_barrier(-cfg.a0 * t_factor * zt)
+    s_linear = lax.optimization_barrier(0.5 * cfg.lambda2 * zs)
+    s_depth = lax.optimization_barrier(cfg.mu2 * depth_m)
+    s_factor = lax.optimization_barrier(1.0 - s_linear - s_depth)
+    s_term = lax.optimization_barrier(cfg.b0 * s_factor * zs)
+    cross = lax.optimization_barrier(cfg.nu * zt * zs)
+    zn = lax.optimization_barrier(t_term + s_term - cross)
+    return lax.optimization_barrier(zn * (1.0 / cfg.rho0))
+
+
 def nemo_seos_alpha_beta(
     T: jnp.ndarray,
     S: jnp.ndarray,

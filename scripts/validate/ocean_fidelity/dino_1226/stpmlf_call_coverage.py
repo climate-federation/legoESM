@@ -144,11 +144,11 @@ CALLS: list[CallEntry] = [
               "into, so this is COVERED as part of that composite, not as its "
               "own independently-measured term.", ),
     CallEntry(190, "zdf_phy -> zdf_mxl_turb", COVERED,
-              '"zdf_mxl_turb" (row exists, UNMEASURED None/None) -- zdfphy.F90:338, '
-              "unconditional. TASK B verdict: no DINO-active consumer of its "
-              "output (hmld/mldkz5) exists, so this row is a candidate WAIVE, "
-              "not a defect -- see this file's module docstring addendum and the "
-              "companion consumer-grep report."),
+              "IMPORT NOTE 2026-08-29: ZDF sweep row 28 VERIFIED 0/9920 "
+              "depth columns, index_fail=0, focus_fail=0; import receipt "
+              "dino_zdf_row28_turbocline_artifact.json and dump SHA "
+              "d3a62643bc8e5ea0370a784a6659cc386410baa516b270f86cacedd0603edad9 "
+              "when the full-step registry is regenerated."),
 
     # --- lateral physics: slopes + coefficients (lines 194-208) ---
     CallEntry(199, "eos (Nbb, in-situ density for ldf_slp)", WAIVED,
@@ -163,7 +163,11 @@ CALLS: list[CallEntry] = [
               "DINO nldf_tra==np_lap_i since &namtra_ldf sets "
               "ln_traldf_lap=.true./ln_traldf_iso=.true.) and ln_traldf_triad="
               "'.false.' (DINO &namtra_ldf) selects the ELSE branch "
-              "(eos+ldf_slp), not ldf_slp_triad."),
+              "(eos+ldf_slp), not ldf_slp_triad. IMPORT NOTE 2026-08-29: "
+              "row-30 prd and dumped j/W operands pass except one non-focus "
+              "wslpi column; complete uslp/vslp remains DIVERGED. Import "
+              "dino_zdf_chain_end_artifact.json without "
+              "promoting this call."),
     CallEntry(203, "ldf_tra", COVERED,
               '"ldftra ahtu (Redi, nn_aht_ijk_t=20)", "ldftra ahtv (Redi, '
               'nn_aht_ijk_t=20)", "ldf_eiv kappa (aeiu)" -- l_ldftra_time/'
@@ -267,7 +271,11 @@ CALLS: list[CallEntry] = [
               "ln_drgimp.AND.ln_dynspg_ts dynzdf.F90:148-171, and vertical "
               "mixing into one solve) and the #1226 dump instrumentation "
               "(stp_dump_state_and_bt(dynzdf), line 312) exists specifically "
-              "because this stage was identified as needing scrutiny, yet no "
+              "because this stage was identified as needing scrutiny. IMPORT "
+              "NOTE 2026-08-29: targeting receipt reconstructs the production "
+              "solve at 89/9758 U and 265/9868 V failing columns while the "
+              "literal dynzdf recurrence is 0 for both; keep ordered-blocked "
+              "behind row 30 and import dino_zdf_chain_end_artifact.json. "
               "probe closes the loop into a gate row."),
     CallEntry(315, "wzv (Naa cross-level velocity, 2nd call)", COVERED_UNMEASURED,
               'same routine as line 244 -- covered by the same "wzv '
@@ -404,7 +412,11 @@ CALLS: list[CallEntry] = [
               "as dyn_zdf: this is the FINAL tracer-state-producing step "
               "every timestep, and the #1226 instrumentation "
               "(stp_dump_ts_krhs 'trazdf', line 435) exists specifically to "
-              "support closing this gap."),
+              "support closing this gap. IMPORT NOTE 2026-08-29: targeting "
+              "volume-form receipt has 627/9920 T and 23/9920 S failing "
+              "columns, all focus columns passing; it remains ordered-blocked "
+              "behind row 30 and row 31. Import "
+              "dino_zdf_chain_end_artifact.json."),
     CallEntry(436, "tra_npc", WAIVED, "ln_zdfnpc=.false. (namelist_ref default) -- dead branch."),
 
     # --- finalize: boundary conditions, filtering, restart (lines 457-482) ---

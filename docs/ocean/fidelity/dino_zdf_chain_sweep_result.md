@@ -3,6 +3,62 @@
 Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 (`RUN_SEQDUMP_D180_1R`, `kt=5761`).
 
+## Round-22 result: row 28 closes; complete row 30 remains the ordered stop
+
+The held row-28 run is bound at
+`/tmp/RUN_ZDF28_TURB_ON.Uh7AFw`. Its deterministic bracket and certified
+restart gates pass. The new `zdf_dump_hmld_turb.bin` has SHA256
+`d3a62643bc8e5ea0370a784a6659cc386410baa516b270f86cacedd0603edad9`.
+Row 28 is **VERIFIED**: **0/9,920** depth columns fail the absolute `1.0e-15 m`
+bar, `index_fail=0`, and every southern focus column passes. The bound machine
+receipt is `docs/ocean/fidelity/dino_zdf_row28_turbocline_artifact.json`,
+source-receipt SHA256
+`a64a0261e968f2a3467c8beef1a48c3dfc118df426ccf1c9368231a164bf63ff`.
+
+Row 29 is promoted **VERIFIED** from its registered interior preview:
+**0/9,920** columns fail and all focus columns pass. This is explicitly an
+interior-only census: halos are excluded, so it does not claim that legoESM
+executes NEMO's lateral-boundary update. Its own bar-scale, roll, and nonfinite
+controls fire.
+
+Row 30 is still **DIVERGED**. The literal BEFORE-geometry S-EOS `prd` input,
+both dumped `zgrv` slots, `zaj`, `zbw`, `zbj`, `zfk`, raw `zww`, and final
+`wslpj` each fail **0/9,920** columns. `wslpi` has one non-focus ULP-level
+column above the bar. The complete registered row also includes the earlier
+U/V block at `ldfslp.F90:217-293`: final `uslp` fails **9,306/9,758** wet
+columns and final `vslp` fails **9,412/9,868**; all four southern focus columns
+fail both fields. Thus the prior working shorthand “row 30 fixed” is loudly
+retracted. The first available failing operand is `uslp`, bounded after the
+exact `prd` input and before the final face slope; its `zgru` input is not
+dumped. The V sibling is bounded after exact `zgrv`. Exact ownership requires
+the preregistered deterministic slots for `zgru`, `zau/zav`,
+pre/post-bound `zbu/zbv`, raw U/V slopes, and the post-Shapiro result. No
+missing operand is inferred from the final field.
+
+Rows 31 and 32 were measured only as preregistered targeting probes; neither
+is promoted across row 30. Row 31's current production implicit solve fails
+**89/9,758** U and **265/9,868** V columns at the `1.0e-12` accumulating bar,
+while the literal `dynzdf.F90:199-214,340-380` matrix/ordered-Thomas
+discriminator fails **0** in both components. All focus columns pass both
+arms. Row 32's volume-form production probe fails **627/9,920** temperature
+and **23/9,920** salinity columns; all focus columns pass. Its disposition is
+`TARGETING-BLOCKED-BY-EARLIER-ROW`, not VERIFIED.
+
+The combined machine receipt is
+`docs/ocean/fidelity/dino_zdf_chain_end_artifact.json` (SHA256 filled by the
+packaging commit). Its one-cell-roll, one-ULP, wrong-`rDt`, and wrong-e3t-slot
+controls all fire. The receipt SHA-binds the focus map, resolved runtime
+namelists/output, resolved NEMO executable, consumed dumps, restarts, and
+quoted oracle sources.
+
+**CLIMATE ARMS NOT AUTHORIZED.** The frozen climate prediction remains
+baseline southern day-90 MLD RMS `22.479491 m`, CONFIRM
+`<=11.2397455 m`, REFUTE `>=20.2775 m`, with the previously registered
+acceptance-floor, pass-tally, legacy-baseline, and southern-density conditions
+unchanged. Exact GPU commands are deliberately withheld until rows 30--32 are
+promotable end-to-end; the registered next step is the row-30 intermediate
+operand dump, not a climate integration.
+
 ## Round-21 result: coefficient/EVD chain closes through row 27; row 28 held
 
 The row-21 outside-sandbox arm is bound at binary SHA256

@@ -41,6 +41,7 @@ from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     OceanPartialCellCoordinate,
     compute_layer_thickness,
+    compute_ocean_jacobian,
     diagnose_w_from_flux_div,
     flux_form_vertical_tracer_advection,
     flux_form_vertical_tracer_advection_tvd,
@@ -3369,7 +3370,8 @@ class LatLonCGridOceanModel:
                    _barotropic_before_state=None,
                    _fct_tracer_before=None,
                    _external_tracer_rate=None,
-                   _ldf_state=None, z_coord=None, config=None, iwm_fields=None):
+                   _ldf_state=None, _tke_n2_bundle_override=None,
+                   z_coord=None, config=None, iwm_fields=None):
         """Core step logic — no JIT wrapper.
 
         ``_external_tracer_rate`` (private, #1492 DINO ``surface_tendency_
@@ -3460,10 +3462,10 @@ class LatLonCGridOceanModel:
         # (bit-identical single-device path).
         _grid = grid if grid is not None else self.grid
         _vmask = vertex_mask if vertex_mask is not None else self._vertex_mask
-        _tke_n2_bundle = (
-            self._tke_step_entry_n2_bundle(
+        _tke_n2_bundle = _tke_n2_bundle_override
+        if _tke_n2_bundle is None and _apply_implicit_vmix:
+            _tke_n2_bundle = self._tke_step_entry_n2_bundle(
                 state, z_coord=_zc, config=_cfg_b)
-            if _apply_implicit_vmix else None)
         # Prescribed-flow lever (config.prescribed_flow, validated at
         # construction).  STATIC Python gate on the config value (CLAUDE.md
         # feature-gating exception): None (default) leaves every gated block
@@ -4698,6 +4700,51 @@ class LatLonCGridOceanModel:
             # (scaling review lever #3).  None when not implicit_K33 ⇒ the
             # tracer tendency computes them inline, bit-identical to before.
             _gm_dens_jac = None
+            _gm_native_prd_J = None
+            _gm_native_prd_TS = None
+            _gm_native_pn2 = None
+            _gm_native_e3w = None
+            if getattr(gm_cfg, "slope_prd_geometry_stage", "current_step") == "before_step":
+                # NEMO's Kbb operand maps to the shifting BEFORE fields only
+                # in the MLF integrator.  Forward Euler never advances those
+                # carry fields, so its step-entry current state is the Kbb-
+                # equivalent; reading a bridged eta_before/T_before there
+                # would freeze prd at the restart forever.
+                _use_mlf_before = (
+                    getattr(_cfg_b, "outer_integrator", "forward_euler")
+                    in ("leapfrog", "nemo_mlf"))
+                _eta_slope = (
+                    state.eta_before.data
+                    if _use_mlf_before and state.eta_before is not None
+                    else state.eta.data)
+                from legoesm.ocean.eos import nemo_r3t_stretch
+                _gm_native_prd_J = nemo_r3t_stretch(
+                    _zc, _eta_slope, state_new.H_bathy.data)
+                _gm_native_prd_TS = (
+                    state.T_before.data
+                    if _use_mlf_before and state.T_before is not None
+                    else state.T.data,
+                    state.S_before.data
+                    if _use_mlf_before and state.S_before is not None
+                    else state.S.data,
+                )
+            elif getattr(gm_cfg, "slope_prd_geometry_stage", "current_step") != "current_step":
+                raise ValueError(
+                    "GMRediConfig.slope_prd_geometry_stage must be 'current_step' "
+                    f"or 'before_step', got {gm_cfg.slope_prd_geometry_stage!r}")
+            _slope_n2_eval = getattr(
+                gm_cfg, "slope_n2_evaluation", "recompute")
+            if _slope_n2_eval == "carried_step_entry":
+                if _tke_n2_bundle is None:
+                    raise ValueError(
+                        "GMRediConfig.slope_n2_evaluation='carried_step_entry' "
+                        "requires the pre-zdf_phy TKE N2 bundle")
+                _gm_native_pn2 = _tke_n2_bundle.rn2b
+                _gm_native_e3w = _tke_n2_bundle.e3w_Kmm
+            elif _slope_n2_eval != "recompute":
+                raise ValueError(
+                    "GMRediConfig.slope_n2_evaluation must be 'recompute' or "
+                    f"'carried_step_entry', got {_slope_n2_eval!r}")
             if gm_cfg.implicit_K33:
                 # ``_T_gm_in``/``_S_gm_in`` (Nbb under nemo_mlf, else T_mid):
                 # this hoisted density/jacobian is reused by BOTH the K33
@@ -4743,6 +4790,10 @@ class LatLonCGridOceanModel:
                 kappa_redi_override=kappa_redi_override,
                 kappa_redi_v_override=kappa_redi_v_override,
                 density_jacobian=_gm_dens_jac,
+                native_prd_jacobian=_gm_native_prd_J,
+                native_prd_TS=_gm_native_prd_TS,
+                native_slope_pn2=_gm_native_pn2,
+                native_slope_e3w=_gm_native_e3w,
                 return_bolus_transport=_want_bolus,
                 dt=dt,
                 eos_depth=getattr(_cfg_b, "eos_depth", "insitu"),
@@ -4783,6 +4834,10 @@ class LatLonCGridOceanModel:
                     kappa_redi_override=kappa_redi_override,
                     kappa_redi_v_override=kappa_redi_v_override,
                     density_jacobian=_gm_dens_jac,
+                    native_prd_jacobian=_gm_native_prd_J,
+                    native_prd_TS=_gm_native_prd_TS,
+                    native_slope_pn2=_gm_native_pn2,
+                    native_slope_e3w=_gm_native_e3w,
                     # #1226: the SAME wall masks the tendency dispatcher uses,
                     # so the nemo_native K33 slopes/masks are bit-identical to
                     # the explicit operator's (staircase-aware; the K33-side
@@ -8849,7 +8904,9 @@ class LatLonCGridOceanModel:
             # externally-supplied surface tracer RHS into THIS (Nnn advective)
             # pass only, matching tra_sbc's Nnn-only call — see this method's
             # docstring and the ``step()`` param doc.
-            _external_tracer_rate=external_tracer_rate, z_coord=z_coord, config=config, iwm_fields=iwm_fields)
+            _external_tracer_rate=external_tracer_rate,
+            _tke_n2_bundle_override=_tke_n2_bundle,
+            z_coord=z_coord, config=config, iwm_fields=iwm_fields)
         # 1b. DISSIPATIVE Nbb pass — evaluate dyn_ldf(Kbb)/tra_ldf(Kbb) + the GM/eiv
         #     trend on the BEFORE state and keep ONLY its dissipative increment
         #     (2dt·diss(Nbb), applied forward-in-time). The GM/Redi destabiliser is
@@ -8871,7 +8928,9 @@ class LatLonCGridOceanModel:
             sponge=sponge, _apply_implicit_vmix=False, grid=_grid,
             vertex_mask=vertex_mask, t_seconds=t_seconds,
             _ab2_scope_override="advective",
-            _barotropic_substep_scale=_baro_scale, z_coord=z_coord, config=config, iwm_fields=iwm_fields)
+            _barotropic_substep_scale=_baro_scale,
+            _tke_n2_bundle_override=_tke_n2_bundle,
+            z_coord=z_coord, config=config, iwm_fields=iwm_fields)
 
         # 2. Explicit combine.  MOMENTUM: leap-frog the BAROCLINIC deviation only
         #    (u'(Naa) = u'(Nbb) + 2dt·RHS'), and take the BAROTROPIC mode + eta
@@ -9255,6 +9314,7 @@ class LatLonCGridOceanModel:
             _ldf_state=(
                 state.T_before.data, state.S_before.data,
                 state.u_before.data, state.v_before.data),
+            _tke_n2_bundle_override=_tke_n2_bundle,
         z_coord=z_coord, config=config, iwm_fields=iwm_fields)
 
         # 2. Explicit combine -- IDENTICAL algebra to ``_leapfrog_step`` (same

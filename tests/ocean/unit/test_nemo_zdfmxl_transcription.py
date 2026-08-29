@@ -676,6 +676,45 @@ def test_native_slopes_are_lon_translation_equivariant():
                     "(zero-ghost) dependence is back")
 
 
+def test_native_slope_legacy_selector_keeps_output_bits_and_skips_barriers(
+        monkeypatch):
+    """Explicit legacy selection retains the pre-row-30 numerical path."""
+    import legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid as gm
+    from legoesm.ocean.eos import make_eos_fn
+    from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+    from legoesm.grids.latlon import create_latlon_grid
+
+    nlat, nlon, nlev = 4, 5, 5
+    dz = np.geomspace(20.0, 180.0, nlev)
+    z = _z_coord(dz, nlat, nlon, np.full((nlat, nlon), nlev - 1))
+    rng = np.random.default_rng(31)
+    T = 8.0 + rng.uniform(-1.0, 1.0, (nlat, nlon, nlev))
+    S = 35.0 + rng.uniform(-0.1, 0.1, (nlat, nlon, nlev))
+    rho = jnp.asarray(1026.0 + 0.2 * (10.0 - T))
+    mask = jnp.ones((nlat, nlon))
+    umask = jnp.ones((nlat, nlon + 1))
+    vmask = jnp.ones((nlat + 1, nlon))
+    grid = create_latlon_grid(n_lat=nlat, n_lon=nlon)
+    eos_fn = make_eos_fn("nemo_seos", None, rho0=1026.0)
+    default = gm.compute_nemo_native_slopes(
+        rho, jnp.asarray(T), jnp.asarray(S), mask, umask, vmask, z, grid,
+        GMRediConfig(), eos_fn, active_3d=z.is_active)
+
+    def barrier_must_not_run(_value):
+        raise AssertionError("literal association reached the legacy card")
+
+    monkeypatch.setattr(gm.lax, "optimization_barrier", barrier_must_not_run)
+    explicit = gm.compute_nemo_native_slopes(
+        rho, jnp.asarray(T), jnp.asarray(S), mask, umask, vmask, z, grid,
+        GMRediConfig(
+            slope_prd_evaluation="density_roundtrip",
+            slope_prd_geometry_stage="current_step",
+            slope_n2_evaluation="recompute"),
+        eos_fn, active_3d=z.is_active)
+    for implicit, selected in zip(default, explicit):
+        np.testing.assert_array_equal(np.asarray(selected), np.asarray(implicit))
+
+
 def test_wslp_ml_anchor_never_reads_past_the_columns_own_bottom():
     """The w-slope ML-ramp anchor index (``kanc``, ldfslp.F90 ``nmln+1``) must
     never exceed the COLUMN'S OWN deepest wet level, not just the array's

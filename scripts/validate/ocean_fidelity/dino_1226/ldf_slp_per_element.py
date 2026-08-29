@@ -73,6 +73,12 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     compute_nemo_native_slopes, gm_redi_density_and_jacobian,
     _nemo_native_active_3d,
 )
+from legoesm.ocean.eos import (
+    NemoSEOSConfig,
+    compute_buoyancy_frequency_nemo_bn2,
+    nemo_bn2_live_geometry,
+    nemo_r3t_stretch,
+)
 
 # STATE / DUMP CONSISTENCY: read the restart from the SAME run directory as
 # the dumps. probe_all4_slopes.py (the throwaway predecessor) read mesh_mask
@@ -286,6 +292,38 @@ def build_state():
     env_override = os.environ.get("SLOPE_N2")
     slope_n2_used = env_override if env_override is not None else card_slope_n2
     gm_cfg = mc.gm_redi._replace(slope_n2=slope_n2_used)
+    slope_prd_geometry_stage = getattr(
+        gm_cfg, "slope_prd_geometry_stage", "current_step")
+    if slope_prd_geometry_stage == "before_step":
+        slope_prd_jacobian = nemo_r3t_stretch(
+            z_coord, jnp.asarray(np.asarray(bef.ssh).reshape(eta.shape)), H_bathy)
+    elif slope_prd_geometry_stage == "current_step":
+        slope_prd_jacobian = jacobian
+    else:
+        raise ValueError(
+            f"unknown slope_prd_geometry_stage {slope_prd_geometry_stage!r}")
+    slope_n2_evaluation = getattr(gm_cfg, "slope_n2_evaluation", "recompute")
+    slope_pn2 = None
+    slope_e3w = None
+    if slope_n2_evaluation == "carried_step_entry":
+        raw_gd = getattr(z_coord, "nemo_gdept_0", None)
+        raw_gw = getattr(z_coord, "nemo_gdepw_0", None)
+        if raw_gd is None or raw_gw is None:
+            raise ValueError("carried slope rn2b requires raw NEMO depth ladders")
+        gd_live, gw_live, e3w_live = nemo_bn2_live_geometry(
+            z_coord, eta, H_bathy, r3t_evaluation="nemo_reciprocal")
+        n2_stretch = nemo_r3t_stretch(
+            z_coord, eta, H_bathy, evaluation="nemo_reciprocal")
+        slope_pn2_int = compute_buoyancy_frequency_nemo_bn2(
+            T, S, gd_live, gw_live, NemoSEOSConfig(), g=mc.constants.g,
+            e3w_int=e3w_live, e3w_source="mesh_reference",
+            zrw_evaluation="nemo_literal", zrw_gdept_0=raw_gd,
+            zrw_gdepw_0=raw_gw[..., 1:], zrw_stretch=n2_stretch)
+        slope_pn2 = jnp.concatenate(
+            [jnp.zeros_like(slope_pn2_int[..., :1]), slope_pn2_int], axis=-1)
+        slope_e3w = e3w_live
+    elif slope_n2_evaluation != "recompute":
+        raise ValueError(f"unknown slope_n2_evaluation {slope_n2_evaluation!r}")
 
     # One argument bundle, called twice: once plain (stage B / the four rows)
     # and once under the _JnpCapture proxy (stage A / pre-Shapiro), so both
@@ -294,7 +332,9 @@ def build_state():
         return compute_nemo_native_slopes(
             rho, T, S, mask, u_mask, v_mask, z_coord, br.geometry, gm_cfg,
             eos_fn, rho_0=mc.constants.rho_0, g=mc.constants.g, active_3d=active_3d,
-            jacobian=jacobian,
+            jacobian=jacobian, prd_jacobian=slope_prd_jacobian,
+            pn2_override=slope_pn2,
+            e3w_override=slope_e3w,
         )
 
     uslp, vslp, wslpi, wslpj = recall()
@@ -315,6 +355,10 @@ def build_state():
         eta=eta, H_bathy=H_bathy,      # section (L): live-ladder reconstruction
         # section (M): i-vs-j asymmetry + the ldf_eiv aeiu row
         grid=br.geometry, gm_cfg=gm_cfg, rho=rho, jacobian=jacobian,
+        prd_jacobian=slope_prd_jacobian,
+        slope_pn2=slope_pn2, slope_n2_evaluation=slope_n2_evaluation,
+        slope_e3w=slope_e3w,
+        slope_prd_geometry_stage=slope_prd_geometry_stage,
         omega=cfg.omega, active_3d=active_3d, g=mc.constants.g,
     )
 

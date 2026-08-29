@@ -1670,7 +1670,26 @@ class TestSurfaceTendencyPlacement:
             dino_lat_lon_model_config, dino_lat_lon_surface_forcing_arrays,
             dino_config_for_recipe,
         )
-        cfg = dino_config_for_recipe("nemo_dino_kamm_mlf")
+        # This synthetic ten-column grid is not bridged from a NEMO mesh and
+        # therefore has none of the raw eosbn2 operands required by the
+        # oracle card's faithful step-entry N2 selection. The test isolates
+        # surface-tendency placement, so use the documented legacy N2 arm.
+        cfg = dataclasses.replace(
+            dino_config_for_recipe("nemo_dino_kamm_mlf"),
+            tke_preclosure_coeff_source="current_subiteration",
+            tke_matrix_evaluation="factored",
+            tke_solver_evaluation="shared_thomas",
+            tke_etau_exponential_evaluation="jax_expression",
+            tke_n2_evaluation_stage="implicit_solve_state",
+            tke_htau_evaluation="jax_expression",
+            tke_mxl_raw_evaluation="factored",
+            tke_langmuir_evaluation="vectorized",
+            tke_shear_evaluation_stage="implicit_solve_state",
+            tke_shear_metric_source="tpoint_jacobian",
+            dino_wind_profile_evaluation="factored_smoothstep",
+            gm_redi_slope_n2_evaluation="recompute",
+            gm_redi_slope_prd_geometry_stage="current_step",
+            gm_redi_slope_prd_evaluation="density_roundtrip")
         g = dino_lat_lon_grid(cfg, n_lon=10)
         z = dino_lat_lon_vertical(g, cfg)  # MLF card needs its matching
                                            # partial-cell/masked-zco coord,

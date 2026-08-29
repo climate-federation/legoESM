@@ -382,6 +382,13 @@ def main() -> int:
         profile_k, avt_composed_lego, wet_interior, focus, POINTWISE)
     row26 = sweep.metrics(
         profile_a, avm_composed_lego, wet_interior, focus, POINTWISE)
+    # Row 29 is the post-LBC INTERIOR census.  NEMO's lateral-boundary update
+    # changes only halos, which are deliberately outside this registered
+    # census; the compared interior is therefore the same production-composed
+    # avm pair as row 26.  Give the promoted row its own fail-capable controls
+    # rather than inheriting row 26's EVD branch-mask control.
+    row29_controls = sweep.planted_controls(
+        profile_a, avm_composed_lego, wet_interior, POINTWISE)
     nemo_evd_mask = wet_interior & (np.minimum(rn2, rn2b) <= -1.0e-12)
     lego_evd_mask = wet_interior & (evd_k == 100.0) & (evd_a == 100.0)
     evd_xor = wet_interior & (nemo_evd_mask != lego_evd_mask)
@@ -719,9 +726,11 @@ def main() -> int:
             "operation": "avm lateral boundary update, interior census",
             "disposition": "UNMEASURED-BLOCKED-BY-ROW28",
             "targeting_preview_avm_interior": row29,
+            "controls": row29_controls,
             "reason": (
-                "production composed avm already matches the NEMO interior; "
-                "ordered promotion waits for row 28"
+                "the registered census excludes halos, so NEMO's lateral "
+                "boundary update is an interior no-op; the production-composed "
+                "avm interior already matches and ordered promotion waits for row 28"
             ),
         },
         "30": {
