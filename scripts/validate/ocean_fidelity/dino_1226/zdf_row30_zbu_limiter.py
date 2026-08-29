@@ -107,16 +107,15 @@ def main() -> int:
     domqco_source = args.domqco_source.read_text(errors="strict")
     domzgr_source = args.domzgr_source.read_text(errors="strict")
     source_quotes = (
-        "zbu = MIN( zbu, -z1_slpmax * ABS( zau ),",
-        "-7.e+3_wp / e3u(ji,jj,jk,Kmm) * ABS( zau ) )",
+        "zbu = MIN(  zbu, - z1_slpmax * ABS( zau ) , -7.e+3_wp/e3u(ji,jj,jk,Kmm)* ABS( zau )  )",
         "pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)",
         "# define  e3u(i,j,k,t)      (E3u_0(i,j,k) Tmsk(r3u,umask,i,j,k,t))",
     )
-    if source_quotes[0] not in ldf_source or source_quotes[1] not in ldf_source:
+    if source_quotes[0] not in ldf_source:
         raise SystemExit("ldfslp.F90:247-248 quote changed")
-    if source_quotes[2] not in domqco_source:
+    if source_quotes[1] not in domqco_source:
         raise SystemExit("domqco.F90:166 quote changed")
-    if source_quotes[3] not in domzgr_source:
+    if source_quotes[2] not in domzgr_source:
         raise SystemExit("domzgr e3u macro changed")
 
     state = ldf.build_state()
