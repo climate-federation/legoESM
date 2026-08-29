@@ -32,6 +32,18 @@ The binding end receipt is `dino_zdf_chain_end_verified_artifact.json` SHA256
 The older `VERIFIED-EARLIER` labels below are superseded by these numeric
 receipts when the full-step lane imports ZDF coverage.
 
+**Climate import note (2026-08-29):** the complete matched-step closure did
+not transfer into the registered southern-basin MLD improvement.  The faithful
+90-day arm scores `22.479521394 m` RMS against NEMO (REFUTE boundary
+`20.2775 m`), while the bundled legacy control scores `18.686435517 m` and
+fails its required baseline-reproduction band by `3.793055483 m`.  Both
+five-metric acceptance gates pass 5/5 and the do-no-harm and southern-density
+conditions pass.  Per the frozen decision tree the ZDF ownership claim is
+**REFUTED**; because the legacy control itself failed, its displacement is
+OPEN mechanism work rather than a selector attribution.  Import receipt:
+`dino_zdf_climate_score_artifact.json` SHA256
+`19e7466d3efa47466c4208d52a0a8ded4db09f3cad705538ac6edf11f35a15de`.
+
 | order | stpmlf line | routine (concrete, DINO dispatch) | what it computes | status | evidence/reason |
 |---|---|---|---|---|---|
 | 1 | 160 | `day` | calendar advance | WAIVED:diagnostic | pure calendar bookkeeping, no physics |

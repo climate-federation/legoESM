@@ -3,6 +3,73 @@
 Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 (`RUN_SEQDUMP_D180_1R`, `kt=5761`).
 
+## Round-28 climate verdict: REFUTE
+
+The authorized 90-day arms completed stably for 2,880 steps at clean producer
+HEAD `e4ab87b422f89bdbf46ddb4aaf0e9db892ec4443`.  The faithful NPZ SHA256 is
+`daf1117e4a4151c4602947d763bdcf7ae9fadf224cbe7d50b70b2d8b4de80738`;
+the legacy NPZ SHA256 is
+`0a4f40bfc37ff5cd6d05610a1e90b5784d3050ba02945277d8c2c53accef6b4b`.
+The bound run logs have SHA256 `3f5c330c8dfdb6740c117c3d4a61e886aa0e1ebbd4c3d58e4d1d339cf36d123b`
+and `403fb626aa894cfc6aa413c505aeef69dd73a476fdf30b92dca92e2d5f16b86b`,
+respectively.  Both carry the `both` ladder, bridged start, NEMO seasonal
+clock, fp64 control, TKE bridge, and all 18 registered faithful/legacy run
+selections exactly.  The operator had to reset the real-metadata worktree to
+the authorized commit because the lane's earlier commits lived in writable
+shadow metadata; the producer stamps prove the actual arm tree was clean.
+
+The scorer imports the post-review MLD audit probe by SHA instead of
+transcribing its criterion.  Consequently this retains that audit's loud
+scope: the statistic is the symmetric offline NOW-state application of
+NEMO's exact `zdf_mxl` density-integral criterion, not native online `hmlp`
+(which combines BEFORE-derived `rn2b` with NOW geometry).  The published
+unrounded baseline `22.47949083389064 m` is bound from audit artifact SHA256
+`0f00f2c5bad331a871fbb2237aaddc75e789619ff0230c76a9fdd67b16657624`.
+
+Day-90 area-weighted results are:
+
+| arm | region | mean bias [m] | RMS difference [m] |
+|---|---|---:|---:|
+| faithful | southern basin | -1.899264578 | **22.479521394** |
+|  | channel | +0.606670056 | 8.993556437 |
+|  | equator | -0.000000476 | 0.000002333 |
+| legacy control | southern basin | -1.361433721 | **18.686435517** |
+|  | channel | -2.658706421 | 10.152160165 |
+|  | equator | -0.000001834 | 0.000002932 |
+
+The registered verdict is **REFUTE**, by two independent frozen conditions.
+The faithful southern-basin RMS is above the `20.2775 m` REFUTE boundary and
+is only `0.000030394 m` from the rounded baseline, so the now-exact matched-
+step ZDF chain did not reduce the 22.5 m climate pattern.  Separately, the
+legacy control misses its required `22.479491 +/- 0.001 m` reproduction band
+by `3.793055483 m`.  That control failure means the 3.793 m faithful-minus-
+legacy contrast cannot be attributed causally to the registered selector
+bundle; it is a failed control, not evidence that the legacy arithmetic is a
+climate fix.  The immediate scientific result is therefore narrower and
+stronger: the fixed ZDF bundle does **not** own the registered basin MLD error,
+and the unexpected legacy-control displacement must be understood before
+individual climate effects are assigned.
+
+The do-no-harm side conditions do not cause the REFUTE.  Both arms are
+certified `PASS 5 | FAIL 0` at 5x.  Faithful-minus-legacy changes in absolute
+error are ACC `-0.033425773 Sv`, upper contrast `-1.3664445e-4 kg m-3`, deep
+contrast `-3.6551e-7 kg m-3`, southern surface sigma max
+`+2.71398e-6 kg m-3`, and mean `-2.183793e-4 kg m-3`; every worsening is below
+one floor.  The pass tally is unchanged and the southern surface-mean error
+improves by more than its `9.5e-5 kg m-3` floor, so the registered surface-
+density improvement condition passes.  Acceptance receipts are SHA256
+`73b7bd5c82947bdeb8ff9e95b57baaf3bb8ccd1faea5ef98b782813fa3d00dcb`
+(faithful), `8a4740f7cd88248c48ad4666374deb79c7fc28a9d797bc46d1aab5051d7c1055`
+(legacy), and `1874c57276eb81fd30f53c7735159b8630ec40cb4dc297416a5135756fe2a4a7`
+(planted-failure self-test).
+
+The binding result is `dino_zdf_climate_score_artifact.json`, SHA256
+`19e7466d3efa47466c4208d52a0a8ded4db09f3cad705538ac6edf11f35a15de`.
+It binds the arms, producer logs, all 18 selections, the original MLD probe,
+preregistration and published artifact, NEMO day-90 restart tiles, current
+acceptance gate, three gate receipts, clean scoring HEAD, CPU/x64 policy, and
+red-capable criterion/decision/do-no-harm controls.
+
 ## Round-27 result: rows 30--32 close the ZDF chain
 
 The held row-30 repair rerun is fully green.  Its source-ordered U ladder is
