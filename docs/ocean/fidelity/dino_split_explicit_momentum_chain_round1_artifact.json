@@ -1,0 +1,199 @@
+{
+  "backend": "cpu",
+  "controls": {
+    "identical_array_zero": true,
+    "identical_error": 0.0,
+    "planted_error": 1.0000000000008017e-06,
+    "planted_offset_breaches_bar": true
+  },
+  "dump_sha256": {
+    "spg_dump_pssh_final.bin": "7db66cadeb8d04522885a766fd1dd77e010a9adcaa5e8c07ce832a5339928c70",
+    "spg_dump_puu_b_final.bin": "14d2085b34d027f13c6a489c1f1c39a09d1fd3cd56d1e3e1edb718fed458f50a",
+    "spg_dump_pvv_b_final.bin": "d3d2fca6d60cc9015ca120bf4a7e523f8bca18049198a44fb8fe8ac395b41ac3",
+    "spg_dump_ssh_frc.bin": "3cc49ea0c7056861a5bba840a61fe7fd6e76334ef23abbcf8575804dd858238e",
+    "spg_dump_ssh_substep1.bin": "c53bd8235d9702bfa3eeebab262264b7d943a61cd2ef4b1dd163354e3a4ad004",
+    "spg_dump_sshn_e_init.bin": "8d47f377ae40068a70f9f80b187d2c97d137f9916f884d37f94a4b3f52e3d0af",
+    "spg_dump_ub_substep1.bin": "ac68aa37ed42d81a09daa57a257e5eabfa882180e6ad1859ccfa2aefd671448f",
+    "spg_dump_un_adv_final.bin": "6f56785155886c7618b8c32fd3f4b9f391325ccdc6a4e7cc11bdbd654170a6fb",
+    "spg_dump_un_e_init.bin": "26a1946c9c0a5b413463b0e027cc6511bfb48c9236423a82d0b0f5bdd7ed210a",
+    "spg_dump_vb_substep1.bin": "b5162a1832f51715ad30c7eed19d407069949f8bbfa571eba4dd7e1aa9d12109",
+    "spg_dump_vn_adv_final.bin": "9abb35a32437797aecc60c2e6fea28f2abc1b609662b26b8a669c124f661dab0",
+    "spg_dump_vn_e_init.bin": "df8203ca3654edc64c2803929146343d1e905f00f3fcd7f5dd703a41a4743a42",
+    "spg_dump_zu_frc.bin": "13138faa46149968c009f0d6c20956b8d2457a904667686a1f6cb1a93d7bcca6",
+    "spg_dump_zv_frc.bin": "81d01381ad5164b1a0cc3fb5f22590f471b0e24bb9b68084290e0cb9e2ef4c0e"
+  },
+  "e3t_mode": "both",
+  "first_diverged_subrow": "1.1",
+  "jax_enable_x64": true,
+  "lane": "d180",
+  "later_rows": {
+    "2_div_hor": "ORDERED-BLOCKED",
+    "3_dom_qco_r3c": "ORDERED-BLOCKED",
+    "4_dyn_zdf": "ORDERED-BLOCKED",
+    "5_wzv_call2": "ORDERED-BLOCKED",
+    "6_mlf_baro_corr": "ORDERED-BLOCKED"
+  },
+  "measurements": [
+    {
+      "bar": 1e-15,
+      "correlation": 0.9999999661960921,
+      "field": "zu_frc",
+      "n": 9758,
+      "normalized_rms_error": 0.0002740311743349557,
+      "rms_ratio": 1.0000976381607058,
+      "status": "DIVERGED",
+      "subrow": "1.1"
+    },
+    {
+      "bar": 1e-15,
+      "correlation": 0.9999999997944569,
+      "field": "zv_frc",
+      "n": 9868,
+      "normalized_rms_error": 2.939336660178107e-05,
+      "rms_ratio": 0.9999785828768776,
+      "status": "DIVERGED",
+      "subrow": "1.1"
+    },
+    {
+      "bar": 1e-15,
+      "correlation": 1.0,
+      "field": "sshn_e_init",
+      "n": 9920,
+      "normalized_rms_error": 0.0,
+      "rms_ratio": 1.0,
+      "status": "MATCHED",
+      "subrow": "1.2"
+    },
+    {
+      "bar": 1e-15,
+      "correlation": 1.0,
+      "field": "un_e_init",
+      "n": 9758,
+      "normalized_rms_error": 2.29625968916112e-16,
+      "rms_ratio": 0.9999999999999998,
+      "status": "MATCHED",
+      "subrow": "1.2"
+    },
+    {
+      "bar": 1e-15,
+      "correlation": 1.0,
+      "field": "vn_e_init",
+      "n": 9868,
+      "normalized_rms_error": 2.2888243353878416e-16,
+      "rms_ratio": 1.0,
+      "status": "MATCHED",
+      "subrow": "1.2"
+    },
+    {
+      "bar": 1e-12,
+      "correlation": 0.9999999999997532,
+      "field": "ssh_substep1",
+      "n": 9920,
+      "normalized_rms_error": 6.204876300487743e-07,
+      "rms_ratio": 1.0000000041149284,
+      "status": "DIVERGED",
+      "subrow": "1.3"
+    },
+    {
+      "bar": 1e-12,
+      "correlation": 0.9999999999392883,
+      "field": "ub_substep1",
+      "n": 9758,
+      "normalized_rms_error": 1.100939578119499e-05,
+      "rms_ratio": 1.0000002876062122,
+      "status": "DIVERGED",
+      "subrow": "1.3"
+    },
+    {
+      "bar": 1e-12,
+      "correlation": 0.9999999999998381,
+      "field": "vb_substep1",
+      "n": 9868,
+      "normalized_rms_error": 5.706172276570908e-07,
+      "rms_ratio": 0.9999999576075874,
+      "status": "DIVERGED",
+      "subrow": "1.3"
+    },
+    {
+      "bar": 1e-12,
+      "correlation": 0.9999999990986951,
+      "field": "puu_b_final",
+      "n": 9758,
+      "normalized_rms_error": 4.3721192189279916e-05,
+      "rms_ratio": 1.0000106599989813,
+      "status": "DIVERGED",
+      "subrow": "1.4"
+    },
+    {
+      "bar": 1e-12,
+      "correlation": 0.9999999987667224,
+      "field": "pvv_b_final",
+      "n": 9868,
+      "normalized_rms_error": 4.966985717979302e-05,
+      "rms_ratio": 1.0000005478386977,
+      "status": "DIVERGED",
+      "subrow": "1.4"
+    },
+    {
+      "bar": 1e-12,
+      "correlation": 0.9999999997790596,
+      "field": "pssh_final",
+      "n": 9920,
+      "normalized_rms_error": 1.8597737330135592e-05,
+      "rms_ratio": 1.00000062665077,
+      "status": "DIVERGED",
+      "subrow": "1.4"
+    },
+    {
+      "bar": 1e-12,
+      "correlation": 0.9999999996476373,
+      "field": "un_adv_final (Hu_avg)",
+      "n": 9758,
+      "normalized_rms_error": 2.732316729735999e-05,
+      "rms_ratio": 1.000006964837423,
+      "status": "DIVERGED",
+      "subrow": "1.4"
+    },
+    {
+      "bar": 1e-12,
+      "correlation": 0.9999999996264044,
+      "field": "vn_adv_final (Hv_avg)",
+      "n": 9868,
+      "normalized_rms_error": 2.7375159925904965e-05,
+      "rms_ratio": 0.9999985634484645,
+      "status": "DIVERGED",
+      "subrow": "1.4"
+    }
+  ],
+  "ordered_subrows": [
+    {
+      "status": "DIVERGED",
+      "subrow": "1.1"
+    },
+    {
+      "status": "MATCHED",
+      "subrow": "1.2"
+    },
+    {
+      "status": "DIVERGED",
+      "subrow": "1.3"
+    },
+    {
+      "status": "DIVERGED",
+      "subrow": "1.4"
+    }
+  ],
+  "provenance_sha256": {
+    "inherited_probe": "087eb9858c376491dfc2d75265a797080ac930b6b04f9762f0f3e7f7d9e40a12",
+    "nemo_dynspg_ts": "a64b32e7c9ce1c1be6c121597235b08f05c853961e83d52be6082ea7242f6275",
+    "nemo_stpmlf": "26849c4fa34305317881959dd5a1e41af9b13aa4f96a290a998add955a73a283",
+    "wrapper": "b899709ecf95cff0e75cad21e43f8c8db18bfb71b97fde221303ac23098eb18f"
+  },
+  "row_1_status": "DIVERGED",
+  "run_dir": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R",
+  "schema": "dino-split-explicit-momentum-chain-round1-v1",
+  "session_id": "01a04e34-d1fb-73e0-b25a-177641f0a246",
+  "unmeasured": {
+    "ssh_frc": "NEMO dump exists, but the production recipe has no F_slow_eta because freshwater_closure is inactive"
+  }
+}
