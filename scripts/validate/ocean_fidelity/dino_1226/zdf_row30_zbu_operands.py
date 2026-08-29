@@ -140,9 +140,17 @@ def main() -> int:
     prod_prd, nemo_prd = np.asarray(loc["prd"])[..., :nk], nemo_prd[..., :nk]
     act = np.asarray(st["active"])[..., :nk]
     act_kp1 = _kp1(act.astype(np.float64))
-    wet_t = act.astype(bool)
-    wet_w = ldf.wet_w_mask(np.asarray(st["active"]))[..., :nk]
-    wet_u = ldf.wet_u_mask(np.asarray(st["active"]), st["u_mask"])[..., :nk]
+    # ldfslp's reverse jk loop is Fortran 2:jpkm1 only. Surface and dry
+    # sentinel slots are initialized zeros, not evaluated operands.
+    wet_t = np.zeros_like(act, dtype=bool)
+    wet_w = np.zeros_like(act, dtype=bool)
+    wet_u = np.zeros_like(act, dtype=bool)
+    wet_t[..., ldf.KLO:min(ldf.KHI, nk)] = act[..., ldf.KLO:min(ldf.KHI, nk)]
+    wet_w_full = ldf.wet_w_mask(np.asarray(st["active"]))[..., :nk]
+    wet_u_full = ldf.wet_u_mask(
+        np.asarray(st["active"]), st["u_mask"])[..., :nk]
+    wet_w[..., ldf.KLO:min(ldf.KHI, nk)] = wet_w_full[..., ldf.KLO:min(ldf.KHI, nk)]
+    wet_u[..., ldf.KLO:min(ldf.KHI, nk)] = wet_u_full[..., ldf.KLO:min(ldf.KHI, nk)]
     focus = sweep.focus_from_maps(args.mld_maps)
 
     # Oracle-derived intermediates in source order. Both sides intentionally
