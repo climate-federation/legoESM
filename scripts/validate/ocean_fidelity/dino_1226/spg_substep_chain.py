@@ -10,8 +10,8 @@ ladder) the seed is EXACT (2.19e-16) and the error instead GROWS through the
 substep loop -- the opposite finding, and the reason this stage exists: does
 the (now separately identified) per-substep growth come from the slow
 forcing zu_frc/zv_frc/ssh_frc (computed once, added unchanged every substep)
-or from a per-substep-recomputed term?  See STAGE 6's own comments for the
-measurement and the decisive forcing-vs-substep-1 ratio.  STAGE 4/5's own
+or from a per-substep-recomputed term?  STAGE 6 measures the forcing and
+reports scalar norm comparisons as non-causal diagnostics only.  STAGE 4/5's own
 seed-attribution conclusion is NOT retracted here (it was a real, correctly-
 measured result AT e3t='off' -- just not the mode this repo's current best
 answer uses); it is superseded as the operative e3t=both story, not deleted.
@@ -72,7 +72,7 @@ constructed by the depth-averaging operator, and (B) is exonerated.
 
 Targets the WORST remaining fidelity row, ``dyn_spg_ts puu_b`` (|x|ratio
 0.9872 -- the largest unexplained gap on the board), plus its siblings
-``un_adv`` (0.9916) and ``pssh`` (0.9986).  The decisive question: is the
+``un_adv`` (0.9916) and ``pssh`` (0.9986).  The ordering question: is the
 error already present after substep 1 (a per-substep TRANSCRIPTION bug), or
 does it grow over the ~68 substeps (an ACCUMULATION problem -- substep count,
 filter weights, or final averaging)?
@@ -1061,20 +1061,12 @@ def main() -> int:
           "the reconciled, e3t-mode-explicit measurement.")
 
     # =========================================================================
-    # STAGE 6 (this iteration): re-run the decisive seed/substep-1/final chain
-    # UNDER THE EXPLICIT e3t MODE PRECONDITION, and test the slow-forcing
-    # hypothesis directly: is zu_frc/zv_frc/ssh_frc (computed ONCE before the
-    # loop, dynspg_ts.F90:341-495, and added identically every substep at
-    # :802-812/831 "ua_e(ji,jj) = ... + zu_frc(ji,jj)") wrong by the same
-    # ~2.97e-04 (in the same err_norm units) that the substep-1 measurement
-    # already shows?  A linear-in-substep-count error (67.2x over 68 substeps)
-    # is exactly the signature of a constant per-substep addend being
-    # slightly wrong -- and zu_frc/zv_frc/ssh_frc ARE the only per-substep
-    # additive terms held constant across the whole jn=1..icycle loop (the
-    # SSH-gradient zu_spg and Coriolis+drag zu_trd terms are recomputed EVERY
-    # substep from the evolving un_e/ssh_e state, so they cannot themselves
-    # be "the same constant added 68 times" -- only zu_frc/zv_frc/ssh_frc fit
-    # that description; see the module docstring's substep-body term list).
+    # STAGE 6 (this iteration): re-run the seed/substep-1/final chain UNDER THE
+    # EXPLICIT e3t MODE PRECONDITION and measure the slow forcing assembled
+    # before the loop.  zu_frc/zv_frc are reused within the substep loop, while
+    # pressure-gradient, Coriolis, and drag depend on evolving state.  Scalar
+    # error-norm comparisons cannot preserve vector direction or cancellation,
+    # so they are descriptive only and do not assign causal ownership.
     print("\n" + "=" * 78)
     print("=== STAGE 6: slow-forcing (zu_frc/zv_frc/ssh_frc) direct measurement ===")
     print(f"    (LEGOESM_NEMO_E3T={e3t_mode!r})")
@@ -1114,7 +1106,7 @@ def main() -> int:
           "(near 1.0 -> seam-concentrated; near 0 -> spread through the interior, "
           "i.e. more consistent with a uniform per-column bug than a boundary artifact)")
 
-    # --- STAGE 6b: THE DECISIVE ARITHMETIC.  zu_frc/zv_frc carry UNITS of
+    # --- STAGE 6b: unit-consistent magnitude arithmetic.  zu_frc/zv_frc carry UNITS of
     # [m/s^2] (a momentum-trend forcing, dynspg_ts.F90:341-345 SUM(e3u*puu)*
     # r1_hu); ub_substep1/un_e carry units of [m/s].  A bare err_norm-to-
     # err_norm ratio conflates the two different physical quantities and is
@@ -1156,46 +1148,43 @@ def main() -> int:
           "difference it causes. A held-forcing counterfactual or vector "
           "term-by-term residual is required.")
 
-    # --- STAGE 6c (only meaningful if forcing is clean -- run regardless for
-    # the record, since substep-1 state vs its NEMO dump is cheap and already
-    # measured in STAGE 2 above as e_ssh_s1/e_ub_s1/e_vb_s1): term-by-term
-    # accounting is NOT re-derived here (STAGE 2 already isolates substep 1's
+    # --- STAGE 6c: term-by-term accounting is NOT re-derived here (STAGE 2
+    # already isolates substep 1's
     # OUTPUT state; isolating which individual term -- zu_spg vs zu_trd vs
     # zu_frc -- caused it would need instrumenting each addend separately,
     # which is future work, not claimed here).
     print("\n--- STAGE 6c: term attribution remains UNMEASURED ---"
-          "\n    1. AB3-AM4 mid-step extrapolation (ua_e/va_e from un_e/ub_e/ubb_e, :610-616)"
-          "\n    2. SSH continuity update (ssha_e from sshn_e + flux divergence, :672-673)"
-          "\n    3. Back-interpolated SSH for the PGF, zsshp2_e (:747-749)"
-          "\n    4. Surface-pressure-gradient term zu_spg (:752-755)"
-          "\n    5. 2-D Coriolis zu_trd = dyn_cor_2D(ua_e,va_e) (:757), + tide (:770-774) "
-          "+ bottom drag zCdU_u*un_e*hur_e (:779-782)"
-          "\n    6. Velocity update ua_e = un_e + rDt_e*(zu_spg + zu_trd + zu_frc) (:802-808)"
+          "\n    1. AB3-AM4 mid-step extrapolation (ua_e/va_e from un_e/ub_e/ubb_e, "
+          "cfgs/DINO/MY_SRC/dynspg_ts.F90:644-648)"
+          "\n    2. SSH continuity update (ssha_e from sshn_e + flux divergence, :722-725)"
+          "\n    3. Back-interpolated SSH for the PGF, zsshp2_e (:770-773)"
+          "\n    4. Surface-pressure-gradient term zu_spg/zv_spg (:776-780)"
+          "\n    5. 2-D Coriolis zu_trd/zv_trd (:784), tide (:810-817), and bottom drag "
+          "(:819-825)"
+          "\n    6. Vector velocity update (:838-850)"
           f"\n  STAGE 2 measured only the COMBINED output error (ub_substep1={e_ub_s1:.4e}, "
           f"vb_substep1={e_vb_s1:.4e}, ssh_substep1={e_ssh_s1:.4e}); no term "
           "among 1-6 is assigned ownership here.")
 
-    # --- STAGE 6d: consistency check -- does per-substep-constant * 68
-    # explain the final error?
+    # --- STAGE 6d: shape-only norm-growth diagnostic.  Multiplying the first
+    # substep's scalar error norm by the substep count is not a propagation
+    # model: it discards vector direction, filtering, and state feedback.
     print("\n" + "=" * 78)
     print("=== STAGE 6d: consistency check (linear-accumulation arithmetic) ===")
     n_substeps_final = icycle
-    per_substep_u = e_ub_s1  # substep-1 error IS (by definition) 1x the per-substep increment
-    predicted_final_u = per_substep_u * n_substeps_final
-    frac_explained_u = predicted_final_u / e_puu if e_puu else float("nan")
-    per_substep_v = e_vb_s1
-    predicted_final_v = per_substep_v * n_substeps_final
-    frac_explained_v = predicted_final_v / e_pvv if e_pvv else float("nan")
+    scaled_first_u = e_ub_s1 * n_substeps_final
+    scaled_to_final_u = scaled_first_u / e_puu if e_puu else float("nan")
+    scaled_first_v = e_vb_s1 * n_substeps_final
+    scaled_to_final_v = scaled_first_v / e_pvv if e_pvv else float("nan")
     print(f"  u: substep-1 err_norm={e_ub_s1:.4e} x {n_substeps_final} substeps = "
-          f"{predicted_final_u:.4e}  vs measured final(puu_b)={e_puu:.4e}  "
-          f"-> fraction explained={frac_explained_u:.3f}")
+          f"{scaled_first_u:.4e}  vs measured final(puu_b)={e_puu:.4e}  "
+          f"-> scalar ratio={scaled_to_final_u:.3f}")
     print(f"  v: substep-1 err_norm={e_vb_s1:.4e} x {n_substeps_final} substeps = "
-          f"{predicted_final_v:.4e}  vs measured final(pvv_b)={e_pvv:.4e}  "
-          f"-> fraction explained={frac_explained_v:.3f}")
-    print("  (fraction near 1.0 -> linear accumulation from a per-substep-constant "
-          "error fully explains the final gap; far from 1.0 -> the growth is not "
-          "purely linear/constant-per-substep, or e3t_mode/normalisation differs "
-          "between this run's substep-1 and final measurements)")
+          f"{scaled_first_v:.4e}  vs measured final(pvv_b)={e_pvv:.4e}  "
+          f"-> scalar ratio={scaled_to_final_v:.3f}")
+    print("  NONCAUSAL SHAPE CHECK ONLY: near-one scalar ratios neither identify a "
+          "constant increment nor explain the final vector gap. A causal result "
+          "requires a held-term counterfactual or vector recurrence residual.")
 
     print("\n" + "=" * 78)
     print("STAGE 6 SUMMARY:")
@@ -1205,8 +1194,8 @@ def main() -> int:
     print(f"  final err_norm           : puu_b={e_puu:.4e}  pvv_b={e_pvv:.4e}")
     print(f"  magnitude_ratio(scaled_forcing_norm/measured_substep1_norm), NONCAUSAL="
           f"u:{ratio_u:.3f} v:{ratio_v:.3f}  "
-          f"fraction_of_final_explained_by_linear(substep1*{n_substeps_final})="
-          f"u:{frac_explained_u:.3f} v:{frac_explained_v:.3f}")
+          f"noncausal_scalar_ratio((substep1_norm*{n_substeps_final})/final_norm)="
+          f"u:{scaled_to_final_u:.3f} v:{scaled_to_final_v:.3f}")
 
     return 0
 
