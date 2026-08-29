@@ -94,6 +94,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--with-ssh-forcing", action="store_true")
+    parser.add_argument("--with-continuity-localization", action="store_true")
     args = parser.parse_args()
     if os.environ.get("DINO_1226_LANE") != EXPECTED_LANE:
         raise SystemExit("DINO_1226_LANE=d180 is required")
@@ -131,6 +132,7 @@ def main() -> int:
     arm_captures: dict[str, dict[str, list[tuple[np.ndarray, np.ndarray, np.ndarray]]]] = {}
     runtime: dict[str, Any] = {}
     entry_counts: dict[str, int] = {}
+    step_dt: dict[str, float] = {}
     forcing_receipts: dict[str, Any] = {}
 
     arms = [("forcing_only", False, False), ("forcing_and_seed", True, False)]
@@ -146,6 +148,7 @@ def main() -> int:
             kw = dict(kw)
             if kw.get("eta_init") is not None:
                 calls += 1
+                step_dt.setdefault(arm, float(dt_s))
                 originals.append((np.asarray(kw["F_slow_u"]), np.asarray(kw["F_slow_v"])))
                 kw["F_slow_u"] = jnp.asarray(held["fu"], dtype=kw["F_slow_u"].dtype)
                 kw["F_slow_v"] = jnp.asarray(held["fv"], dtype=kw["F_slow_v"].dtype)
@@ -228,6 +231,50 @@ def main() -> int:
         if not held_ssh_metric["exact_zero_field_receipt"]:
             raise SystemExit("held signed SSH forcing reconstruction is not exact")
 
+    continuity_localization = None
+    if args.with_continuity_localization:
+        reports = arm_captures["forcing_and_seed"]
+        eta_seed_l, eta_seed_n, eta_mask = reports["sshn_e_init"][0]
+        eta_s1_l, eta_s1_n, eta_mask_s1 = reports["ssh_substep1"][0]
+        if not np.array_equal(eta_mask, eta_mask_s1):
+            raise SystemExit("seed/substep SSH masks differ")
+        dt_e = step_dt["forcing_and_seed"]
+        div_l = (eta_seed_l - eta_s1_l) / dt_e - nemo["feta"]
+        div_n = (eta_seed_n - eta_s1_n) / dt_e - nemo["feta"]
+        div_metric = base._metric(div_l, div_n, eta_mask, 9920)
+        div_gate = base._classify_metric(div_metric, "dyn_spg_ts pssh")
+        replay_residual = (
+            (eta_s1_l - eta_s1_n)
+            - (eta_seed_l - eta_seed_n)
+            + dt_e * (div_l - div_n)
+        )
+        replay_max = float(np.max(np.abs(replay_residual[eta_mask])))
+        ua_n = inherited._load_full(
+            str(run / "cor2d_dump_ua_e_in_substep1.bin"), jpi, jpj, hls)
+        va_n = inherited._load_full(
+            str(run / "cor2d_dump_va_e_in_substep1.bin"), jpi, jpj, hls)
+        u_mask = reports["ub_substep1"][0][2]
+        v_mask = reports["vb_substep1"][0][2]
+        ua_metric = base._metric(held["u"][:, 1:], ua_n, u_mask, 9758)
+        va_metric = base._metric(held["v"][1:], va_n, v_mask, 9868)
+        continuity_localization = {
+            "dt_s": dt_e,
+            "midstep_u": {**ua_metric,
+                          "gate_status": base._classify_metric(ua_metric, None)},
+            "midstep_v": {**va_metric,
+                          "gate_status": base._classify_metric(va_metric, None)},
+            "implied_flux_divergence": {**div_metric, "gate_status": div_gate},
+            "forward_replay_max_abs_residual": replay_max,
+            "status": (
+                "CONFIRMED_CONTINUITY_FLUX_COMPOSITION"
+                if (base._classify_metric(ua_metric, None) == "AT BAR"
+                    and base._classify_metric(va_metric, None) == "AT BAR"
+                    and div_gate != "AT BAR"
+                    and replay_max <= np.finfo(np.float64).eps)
+                else "REFUTED_OR_UNRESOLVED"
+            ),
+        }
+
     controls = base._controls(arm_captures["forcing_only"]["zu_frc"][0], 9758)
     required_controls = ("identical_array_zero", "planted_identity_flips_campaign_gate",
                          "actual_binding_perturbation_changes_score", "zero_shift_is_best")
@@ -258,6 +305,7 @@ def main() -> int:
         "spg_dump_ssh_substep1.bin", "spg_dump_ub_substep1.bin", "spg_dump_vb_substep1.bin",
         "spg_dump_puu_b_final.bin", "spg_dump_pvv_b_final.bin", "spg_dump_pssh_final.bin",
         "spg_dump_un_adv_final.bin", "spg_dump_vn_adv_final.bin",
+        "cor2d_dump_ua_e_in_substep1.bin", "cor2d_dump_va_e_in_substep1.bin",
         "stp_dump_07_dynspg_u.bin", "stp_dump_07_dynspg_v.bin",
         "stp_dump_07_dynspg_ub.bin", "stp_dump_07_dynspg_vb.bin",
     })
@@ -265,9 +313,11 @@ def main() -> int:
     if dirty_after:
         raise SystemExit("worktree changed during measurement")
     receipt = {
-        "schema": ("dino-split-explicit-momentum-chain-round7-v1"
-                   if args.with_ssh_forcing
-                   else "dino-split-explicit-momentum-chain-round6-v1"),
+        "schema": ("dino-split-explicit-momentum-chain-round8-v1"
+                   if args.with_continuity_localization
+                   else ("dino-split-explicit-momentum-chain-round7-v1"
+                         if args.with_ssh_forcing
+                         else "dino-split-explicit-momentum-chain-round6-v1")),
         "session_id": os.environ.get("CODEX_SESSION_ID", "unset"),
         "git": {"commit": git_sha, "clean_before": True, "clean_after": True},
         "lane": EXPECTED_LANE,
@@ -281,6 +331,7 @@ def main() -> int:
         "forcing_receipts": forcing_receipts,
         "held_forcing_metrics": held_forcing_metrics,
         "held_signed_ssh_forcing_metric": held_ssh_metric,
+        "continuity_localization": continuity_localization,
         "measurements": measurements,
         "literal_ordered_stop": first_stop,
         "later_rows": {str(i): "ORDERED-BLOCKED" if first_stop else "ELIGIBLE" for i in range(2, 7)},
