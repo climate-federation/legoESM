@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from legoesm.ocean.eos import NemoSEOSConfig, nemo_seos_prd_literal
 from legoesm.ocean.experiments.dino import (
@@ -123,7 +124,8 @@ def test_full_literal_slope_with_carried_w_bundle_has_finite_jit_gradient(
     # must remain numerically byte-identical through the active slope path.
     rho = 1026.0 + 0.2 * (10.0 - T)
     explicit_static = cfg._replace(
-        slope_face_thickness_evaluation="static_face")
+        slope_face_thickness_evaluation="static_face",
+        slope_depth_evaluation="legacy_jacobian_t_surface")
     default_out = compute_nemo_native_slopes(
         rho, T, S, mask, umask, vmask, z_coord, grid, cfg, eos_fn,
         active_3d=z_coord.is_active, pn2_override=carried_n2,
@@ -143,6 +145,8 @@ def test_full_literal_slope_with_carried_w_bundle_has_finite_jit_gradient(
 
     monkeypatch.setattr(
         gm, "_nemo_qco_live_slope_face_thicknesses", forbidden_live_helper)
+    monkeypatch.setattr(
+        gm, "_nemo_qco_live_slope_depths", forbidden_live_helper)
     faithful = {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}
     for name in DINO_RECIPES:
         if name in faithful:
@@ -150,7 +154,8 @@ def test_full_literal_slope_with_carried_w_bundle_has_finite_jit_gradient(
         card = dino_config_for_recipe(name)
         card_cfg = cfg._replace(
             slope_face_thickness_evaluation=
-            card.gm_redi_slope_face_thickness_evaluation)
+            card.gm_redi_slope_face_thickness_evaluation,
+            slope_depth_evaluation=card.gm_redi_slope_depth_evaluation)
         card_out = compute_nemo_native_slopes(
             rho, T, S, mask, umask, vmask, z_coord, grid, card_cfg,
             eos_fn, active_3d=z_coord.is_active, pn2_override=carried_n2,
@@ -170,24 +175,30 @@ def test_row30_selectors_are_scoped_to_the_two_dino_nemo_cards():
             assert cfg.gm_redi_slope_prd_evaluation == "nemo_literal"
             assert cfg.gm_redi_slope_metric_evaluation == "nemo_reciprocal"
             assert cfg.gm_redi_slope_face_thickness_evaluation == "nemo_qco_live"
+            assert cfg.gm_redi_slope_depth_evaluation == "nemo_qco_live_literal"
         else:
             assert cfg.gm_redi_slope_n2_evaluation == "recompute", name
             assert cfg.gm_redi_slope_prd_geometry_stage == "current_step", name
             assert cfg.gm_redi_slope_prd_evaluation == "density_roundtrip", name
             assert cfg.gm_redi_slope_metric_evaluation == "division", name
             assert cfg.gm_redi_slope_face_thickness_evaluation == "static_face", name
+            assert cfg.gm_redi_slope_depth_evaluation == \
+                "legacy_jacobian_t_surface", name
 
     assert GMRediConfig().slope_n2_evaluation == "recompute"
     assert GMRediConfig().slope_prd_geometry_stage == "current_step"
     assert GMRediConfig().slope_prd_evaluation == "density_roundtrip"
     assert GMRediConfig().slope_metric_evaluation == "division"
     assert GMRediConfig().slope_face_thickness_evaluation == "static_face"
+    assert GMRediConfig().slope_depth_evaluation == \
+        "legacy_jacobian_t_surface"
     explicit_legacy = dataclasses.replace(
         DINOConfig(), gm_redi_slope_n2_evaluation="recompute",
         gm_redi_slope_prd_geometry_stage="current_step",
         gm_redi_slope_prd_evaluation="density_roundtrip",
         gm_redi_slope_metric_evaluation="division",
-        gm_redi_slope_face_thickness_evaluation="static_face")
+        gm_redi_slope_face_thickness_evaluation="static_face",
+        gm_redi_slope_depth_evaluation="legacy_jacobian_t_surface")
     assert explicit_legacy == DINOConfig()
 
     fe = dino_config_for_recipe("nemo_dino_kamm")
@@ -198,6 +209,10 @@ def test_row30_selectors_are_scoped_to_the_two_dino_nemo_cards():
     assert dino_lat_lon_model_config(
         dino_lat_lon_grid(mlf, n_lon=8), mlf, physics=True)[0].outer_integrator \
         == "leapfrog"
+    bad = dataclasses.replace(
+        DINOConfig(), gm_redi_slope_depth_evaluation="silent_typo")
+    with pytest.raises(ValueError, match="gm_redi_slope_depth_evaluation"):
+        dino_lat_lon_model_config(dino_lat_lon_grid(bad, n_lon=8), bad)
 
 
 def test_nemo_qco_live_face_thickness_matches_hand_source_order_and_is_red():
@@ -243,6 +258,58 @@ def test_nemo_qco_live_face_thickness_matches_hand_source_order_and_is_red():
     np.testing.assert_array_equal(np.asarray(got_v), want_v)
     assert np.any(np.asarray(got_u).view(np.uint64) != np.asarray(e3u0).view(np.uint64))
     tangent = jax.grad(lambda ssh: jnp.sum(live(ssh)[0]))(eta)
+    assert np.all(np.isfinite(np.asarray(tangent)))
+
+
+def test_nemo_qco_live_depth_and_face_accumulation_are_literal_jit_ad_and_red():
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        _nemo_literal_slope_face_depth,
+        _nemo_qco_live_slope_depths,
+    )
+
+    eta = jnp.asarray([[0.25, -0.125], [0.375, 0.0625]], dtype=jnp.float64)
+    H = jnp.asarray([[10.0, 12.0], [15.0, 20.0]], dtype=jnp.float64)
+    gdept0 = np.asarray(
+        [[[0.5, 2.0, 4.5], [0.6, 2.1, 4.6]],
+         [[0.7, 2.2, 4.7], [0.8, 2.3, 4.8]]], dtype=np.float64)
+    gdepw0 = np.asarray(
+        [[[0.0, 1.0, 3.0], [0.0, 1.1, 3.1]],
+         [[0.0, 1.2, 3.2], [0.0, 1.3, 3.3]]], dtype=np.float64)
+    z_coord = SimpleNamespace(
+        nemo_gdept_0=jnp.asarray(gdept0), nemo_gdepw_0=jnp.asarray(gdepw0),
+        linear_free_surface=False)
+    e3u = jnp.asarray(
+        [[[1.2, 2.0, 3.0], [1.3, 2.0, 3.0]],
+         [[1.4, 2.0, 3.0], [1.5, 2.0, 3.0]]], dtype=jnp.float64)
+
+    def live(ssh):
+        gd, gw, stretch = _nemo_qco_live_slope_depths(
+            ssh, H, z_coord, jnp.float64)
+        zu = _nemo_literal_slope_face_depth(gd, e3u, axis=1)
+        return gd, gw, stretch, zu
+
+    gd, gw, stretch, zu = jax.jit(live)(eta)
+    eta_np, H_np = np.asarray(eta), np.asarray(H)
+    r1_H = np.float64(1.0) / H_np
+    want_stretch = np.maximum(
+        np.float64(1.0) + eta_np * r1_H, np.float64(1.0e-6))
+    want_gd = gdept0 * want_stretch[..., None]
+    want_gw = gdepw0 * want_stretch[..., None]
+    pair = want_gd + np.roll(want_gd, -1, axis=1)
+    want_zu = np.float64(0.5) * (pair - np.asarray(e3u)[..., :1])
+    np.testing.assert_array_equal(np.asarray(stretch), want_stretch)
+    np.testing.assert_array_equal(np.asarray(gd), want_gd)
+    np.testing.assert_array_equal(np.asarray(gw), want_gw)
+    eager_zu = np.asarray(live(eta)[3])
+    np.testing.assert_array_max_ulp(np.asarray(zu), eager_zu, maxulp=2)
+    np.testing.assert_allclose(
+        np.asarray(zu), want_zu, rtol=0.0, atol=np.float64(5.0e-16))
+
+    # Planted old association: subtracting the full surface thickness after
+    # the half multiply must differ at every represented wet column.
+    wrong = np.float64(0.5) * pair - np.asarray(e3u)[..., :1]
+    assert np.any(np.asarray(zu).view(np.uint64) != wrong.view(np.uint64))
+    tangent = jax.grad(lambda ssh: jnp.sum(live(ssh)[3]))(eta)
     assert np.all(np.isfinite(np.asarray(tangent)))
 
 

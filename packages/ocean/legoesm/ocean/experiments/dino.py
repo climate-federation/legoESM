@@ -688,6 +688,9 @@ class DINOConfig:
     # ldfslp 7 km limiter face thickness: static legacy construction or the
     # NEMO QCO live e3u/e3v built from NOW SSH. Only the NEMO cards select live.
     gm_redi_slope_face_thickness_evaluation: str = "static_face"
+    # ldfslp mixed-layer-ramp depth construction. Only the two DINO NEMO
+    # cards select raw-mesh NOW-QCO depths and literal face accumulation.
+    gm_redi_slope_depth_evaluation: str = "legacy_jacobian_t_surface"
     # GM eddy-induced (bolus) advection FORM for gm_redi_slope_scheme=
     # "nemo_iso_lap" (GMRediConfig.gm_bolus_advection): "centred" (default, byte-
     # identical — 2nd-order centred bolus flux inside the iso operator) or
@@ -1319,6 +1322,7 @@ DINO_RECIPES: dict[str, dict] = {
         "gm_redi_slope_prd_evaluation": "nemo_literal",
         "gm_redi_slope_metric_evaluation": "nemo_reciprocal",
         "gm_redi_slope_face_thickness_evaluation": "nemo_qco_live",
+        "gm_redi_slope_depth_evaluation": "nemo_qco_live_literal",
         "gm_bolus_kappa_face_average": True,
         # #1226 root cause: NEMO dynzad.F90 is the ADVECTIVE form w*du/dz,
         # not the FLUX form d(w*u)/dz that "centered_full" (and the default
@@ -3216,6 +3220,12 @@ def dino_lat_lon_model_config(
             "unknown DINOConfig.gm_redi_slope_face_thickness_evaluation "
             f"{cfg.gm_redi_slope_face_thickness_evaluation!r}; expected "
             "'static_face' or 'nemo_qco_live'")
+    if cfg.gm_redi_slope_depth_evaluation not in (
+            "legacy_jacobian_t_surface", "nemo_qco_live_literal"):
+        raise ValueError(
+            "unknown DINOConfig.gm_redi_slope_depth_evaluation "
+            f"{cfg.gm_redi_slope_depth_evaluation!r}; expected "
+            "'legacy_jacobian_t_surface' or 'nemo_qco_live_literal'")
     if cfg.gm_redi_mld_criterion not in ("rho_c", "n2_integral"):
         raise ValueError(
             "unknown DINOConfig.gm_redi_mld_criterion "
@@ -3291,6 +3301,7 @@ def dino_lat_lon_model_config(
             slope_metric_evaluation=cfg.gm_redi_slope_metric_evaluation,
             slope_face_thickness_evaluation=(
                 cfg.gm_redi_slope_face_thickness_evaluation),
+            slope_depth_evaluation=cfg.gm_redi_slope_depth_evaluation,
             visbeck=VisbeckConfig(
                 enabled=(cfg.use_gm_redi
                          and cfg.gm_kappa_scheme == "visbeck"),
@@ -3327,6 +3338,7 @@ def dino_lat_lon_model_config(
             slope_metric_evaluation=cfg.gm_redi_slope_metric_evaluation,
             slope_face_thickness_evaluation=(
                 cfg.gm_redi_slope_face_thickness_evaluation),
+            slope_depth_evaluation=cfg.gm_redi_slope_depth_evaluation,
             # Exactly ONE adaptive-κ diagnostic on (the GM/Redi dispatch
             # raises if both are enabled): "visbeck" (historical) or
             # "treguier" (the NEMO nn_aei_ijk_t=21 oracle scaling, cap
@@ -3364,8 +3376,17 @@ def dino_lat_lon_model_config(
         from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
         physics_cfg = OceanPhysicsConfig(
             vertical_mixing=_dino_vertical_mixing_config(cfg),
-            # GM/Redi goes on the model config directly, not here.
-            lateral_mixing=LateralMixingConfig(scheme="none"),
+            # GM/Redi executes from the model config directly. Keep the two
+            # newly selected literal-depth fields mirrored on this disabled
+            # shadow so config ratchets cannot report contradictory surfaces;
+            # scheme="none" means this copy remains behaviorally inert.
+            lateral_mixing=LateralMixingConfig(
+                scheme="none",
+                gm_redi=GMRediConfig(
+                    slope_face_thickness_evaluation=(
+                        cfg.gm_redi_slope_face_thickness_evaluation),
+                    slope_depth_evaluation=(
+                        cfg.gm_redi_slope_depth_evaluation))),
             convection=OceanConvectionConfig(
                 scheme="enhanced_diffusion",
                 # NEMO nn_evdm=1: EVD on tracers AND momentum (nu_conv =

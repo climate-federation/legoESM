@@ -45,6 +45,7 @@ from legoesm.ocean.eos import (
     int_drhodTS_dynamic_enthalpy,
     make_eos_fn,
     nemo_bn2_live_ladders,
+    nemo_r3t_stretch,
     NemoSEOSConfig,
     nemo_seos_prd_literal,
     rho_0 as _RHO_0,
@@ -992,6 +993,46 @@ def _nemo_qco_live_slope_face_thicknesses(
     )
 
 
+def _nemo_qco_live_slope_depths(
+    eta: jnp.ndarray,
+    H_bathy: jnp.ndarray,
+    z_coord: OceanPartialCellCoordinate,
+    dtype,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Raw NEMO T/W depth ladders times NOW ``1 + ssh*r1_ht_0``."""
+    gdept_0 = getattr(z_coord, "nemo_gdept_0", None)
+    gdepw_0 = getattr(z_coord, "nemo_gdepw_0", None)
+    if gdept_0 is None or gdepw_0 is None:
+        raise ValueError(
+            "slope_depth_evaluation='nemo_qco_live_literal' requires raw "
+            "NEMO gdept_0 and gdepw_0 fields")
+    stretch = nemo_r3t_stretch(
+        z_coord, jnp.asarray(eta, dtype=dtype),
+        jnp.asarray(H_bathy, dtype=dtype), evaluation="nemo_reciprocal")
+    stretch = lax.optimization_barrier(stretch)
+    return (
+        lax.optimization_barrier(
+            jnp.asarray(gdept_0, dtype=dtype) * stretch[..., None]),
+        lax.optimization_barrier(
+            jnp.asarray(gdepw_0, dtype=dtype) * stretch[..., None]),
+        stretch,
+    )
+
+
+def _nemo_literal_slope_face_depth(
+    gdept_live: jnp.ndarray,
+    e3face_live: jnp.ndarray,
+    *,
+    axis: int,
+) -> jnp.ndarray:
+    """DINO no-ice-shelf ldfslp ``zdep{u,v}`` source association."""
+    dtype = gdept_live.dtype
+    pair = lax.optimization_barrier(
+        gdept_live + jnp.roll(gdept_live, -1, axis=axis))
+    inner = lax.optimization_barrier(pair - e3face_live[..., :1])
+    return lax.optimization_barrier(jnp.asarray(0.5, dtype=dtype) * inner)
+
+
 def compute_nemo_native_slopes(
     rho: jnp.ndarray,
     T: jnp.ndarray,
@@ -1008,6 +1049,7 @@ def compute_nemo_native_slopes(
     active_3d: jnp.ndarray | None = None,
     jacobian: jnp.ndarray | None = None,
     eta: jnp.ndarray | None = None,
+    H_bathy: jnp.ndarray | None = None,
     prd_jacobian: jnp.ndarray | None = None,
     prd_TS_override: tuple[jnp.ndarray, jnp.ndarray] | None = None,
     prd_override: jnp.ndarray | None = None,
@@ -1083,6 +1125,23 @@ def compute_nemo_native_slopes(
                   if (jacobian is not None
                       and isinstance(z_coord, OceanPartialCellCoordinate))
                   else None)
+    _depth_mode = getattr(
+        cfg, "slope_depth_evaluation", "legacy_jacobian_t_surface")
+    if _depth_mode not in (
+            "legacy_jacobian_t_surface", "nemo_qco_live_literal"):
+        raise ValueError(
+            "unknown GMRediConfig.slope_depth_evaluation "
+            f"{_depth_mode!r}; expected 'legacy_jacobian_t_surface' or "
+            "'nemo_qco_live_literal'")
+    _live_gdept = None
+    _live_gdepw = None
+    if _depth_mode == "nemo_qco_live_literal":
+        if eta is None or H_bathy is None:
+            raise ValueError(
+                "slope_depth_evaluation='nemo_qco_live_literal' requires "
+                "NOW sea-surface height and local bathymetry")
+        _live_gdept, _live_gdepw, _ = _nemo_qco_live_slope_depths(
+            eta, H_bathy, z_coord, dtype)
 
     from legoesm.grids.latlon import ensure_geometry
     geom = ensure_geometry(grid)
@@ -1188,9 +1247,14 @@ def compute_nemo_native_slopes(
     # (ldfslp.F90:143) -- live gdept, so the static per-level gather is
     # stretched by the SAME per-column (1+r3t) factor afterward (stretch has
     # no level dependence, so gather-then-stretch == stretch-then-gather).
-    zhmlpt = jnp.take(gdept, jnp.clip(first - 1, 0, nlev - 1)) * mask
-    if _stretch2d is not None:
-        zhmlpt = zhmlpt * _stretch2d
+    if _depth_mode == "nemo_qco_live_literal":
+        zhmlpt = jnp.take_along_axis(
+            _live_gdept, jnp.clip(first - 1, 0, nlev - 1)[..., None],
+            axis=-1)[..., 0] * mask
+    else:
+        zhmlpt = jnp.take(gdept, jnp.clip(first - 1, 0, nlev - 1)) * mask
+        if _stretch2d is not None:
+            zhmlpt = zhmlpt * _stretch2d
 
     kidx = jnp.arange(nlev)[None, None, :]
 
@@ -1235,13 +1299,16 @@ def compute_nemo_native_slopes(
     # over the wrong axis entirely -- was a transcription defect (#1226).
     # Stretch per column FIRST, then face-average, so each column carries its
     # own (1+r3t) exactly as NEMO's live gdept does.
-    _gd_col = gdept[None, None, :] * jnp.ones_like(zgru)
-    if _stretch2d is not None:
-        _gd_col = _gd_col * _stretch2d[:, :, None]
-    _e3_top = 0.5 * dz[0]
-    # axis=1 is the i/lon direction (matches zb_u/iku above), axis=0 is j/lat.
-    if _stretch2d is not None:
-        _e3_top = _e3_top * _stretch2d[:, :, None]
+    if _depth_mode == "nemo_qco_live_literal":
+        _gd_col = _live_gdept
+    else:
+        _gd_col = gdept[None, None, :] * jnp.ones_like(zgru)
+        if _stretch2d is not None:
+            _gd_col = _gd_col * _stretch2d[:, :, None]
+        _e3_top = 0.5 * dz[0]
+        # axis=1 is i/lon, axis=0 is j/lat. Preserve legacy association.
+        if _stretch2d is not None:
+            _e3_top = _e3_top * _stretch2d[:, :, None]
     # NEMO's slope stability bound is -7e3/e3u(ji,jj,jk,Kmm)*|zau| (ldfslp.F90
     # :133-134) and it uses the U-FACE / V-FACE thickness, NOT the cell value.
     # At a staircase / partial-cell topography step the face thickness is the
@@ -1274,8 +1341,14 @@ def compute_nemo_native_slopes(
                 "the NOW sea-surface height")
         e3u_k, e3v_k = _nemo_qco_live_slope_face_thicknesses(
             eta, z_coord, e3u_k, e3v_k, umask3, vmask3)
-    zdepu = 0.5 * (_gd_col + jnp.roll(_gd_col, -1, axis=1)) - _e3_top
-    zdepv = 0.5 * (_gd_col + jnp.roll(_gd_col, -1, axis=0)) - _e3_top
+    if _depth_mode == "nemo_qco_live_literal":
+        zdepu = _nemo_literal_slope_face_depth(
+            _gd_col, e3u_k, axis=1)
+        zdepv = _nemo_literal_slope_face_depth(
+            _gd_col, e3v_k, axis=0)
+    else:
+        zdepu = 0.5 * (_gd_col + jnp.roll(_gd_col, -1, axis=1)) - _e3_top
+        zdepv = 0.5 * (_gd_col + jnp.roll(_gd_col, -1, axis=0)) - _e3_top
     uslp = _uv_slp(zgru, zb_u, e1u, e3u_k, iku, r1_hmlu, zdepu, umask3)
 
     # --- vslp ---
@@ -1337,9 +1410,12 @@ def compute_nemo_native_slopes(
     # zck = gdepw(jk,Kmm) - gdepw(mikt,Kmm) (ldfslp.F90:289); mikt=0 (no ice
     # shelf) and gdepw_top[0]=0, so this is the live gdepw_top -- same
     # per-column stretch as zhmlpt/zdepu above.
-    zck = gdepw_top[None, None, :]
-    if _stretch2d is not None:
-        zck = zck * _stretch2d[:, :, None]
+    if _depth_mode == "nemo_qco_live_literal":
+        zck = _live_gdepw - _live_gdepw[..., :1]
+    else:
+        zck = gdepw_top[None, None, :]
+        if _stretch2d is not None:
+            zck = zck * _stretch2d[:, :, None]
     in_ml_w = kidx < kanc[:, :, None]
     wslpi = jnp.where(in_ml_w, zck * anc_i[:, :, None], swi_int) * wmask3
     wslpj = jnp.where(in_ml_w, zck * anc_j[:, :, None], swj_int) * wmask3
@@ -3694,7 +3770,8 @@ def gm_redi_tracer_tendency_latlon(
             _act_kgm = _nemo_native_active_3d(mask, z_coord, H_bathy, T.dtype)
             _uslp_kgm, _vslp_kgm, _wslpi_kgm, _wslpj_kgm = compute_nemo_native_slopes(
                 rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg, eos_fn,
-                jacobian=jacobian, eta=eta, prd_jacobian=_native_prd_J,
+                jacobian=jacobian, eta=eta, H_bathy=H_bathy,
+                prd_jacobian=_native_prd_J,
                 prd_TS_override=native_prd_TS,
                 pn2_override=native_slope_pn2,
                 e3w_override=native_slope_e3w,
@@ -3934,7 +4011,8 @@ def gm_redi_tracer_tendency_latlon(
             _nat = compute_nemo_native_slopes(
                 rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg,
                 eos_fn, rho_0=rho_0, g=g, active_3d=_active_3d,
-                jacobian=jacobian, eta=eta, prd_jacobian=_native_prd_J,
+                jacobian=jacobian, eta=eta, H_bathy=H_bathy,
+                prd_jacobian=_native_prd_J,
                 prd_TS_override=native_prd_TS,
                 pn2_override=native_slope_pn2,
                 e3w_override=native_slope_e3w)
@@ -4119,7 +4197,8 @@ def compute_isoneutral_K33_latlon(
         _native_prd_J = _J if native_prd_jacobian is None else native_prd_jacobian
         _, _, _wi, _wj = compute_nemo_native_slopes(
             _rho, T, S, _m, _um, _vm, z_coord, grid, cfg, _eosfn,
-            jacobian=_J, eta=eta, prd_jacobian=_native_prd_J,
+            jacobian=_J, eta=eta, H_bathy=H_bathy,
+            prd_jacobian=_native_prd_J,
             prd_TS_override=native_prd_TS,
             pn2_override=native_slope_pn2,
             e3w_override=native_slope_e3w,

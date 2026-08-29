@@ -406,6 +406,11 @@ class GMRediConfig(NamedTuple):
     # ``nemo_qco_live`` applies NEMO's NOW-SSH r3u/r3v dilation to that raw
     # full-step face thickness before the limiter. The DINO NEMO cards opt in.
     slope_face_thickness_evaluation: str = "static_face"
+    # Live depths and U/V-point depth accumulation used by ldfslp's mixed-
+    # layer ramp. ``legacy_jacobian_t_surface`` preserves the historical
+    # Jacobian and T-column subtraction. ``nemo_qco_live_literal`` uses raw
+    # gdept/gdepw times NOW ssh*r1_ht_0 and NEMO's literal face expression.
+    slope_depth_evaluation: str = "legacy_jacobian_t_surface"
     # NEMO ldfslp horizontal (1-2-1)⊗(1-2-1)/16 Shapiro smoother on the final
     # interface slopes (ldfslp.F90:304-315).  legoESM omitted it, leaving the
     # interior slope amplitude ~1.27x too large; wet-renormalized so land drops

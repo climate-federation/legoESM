@@ -399,3 +399,12 @@ CONFIRM additionally requires compiled **0/9,758**, `focus_fail=0`; any compiled
 failure REFUTES the proposed implementation even when the eager arm passes.
 The eager/JIT synthetic unit test is exact only after the production lowering
 is made stable; tolerance-based promotion is forbidden.
+
+Retraction, 2026-08-29, after the compiled oracle arm and before production
+promotion: exact eager-versus-JIT identity on an unrelated synthetic fixture
+is not the registered oracle statistic and differs by at most two ULP under XLA's
+vector lowering. The production compiled arm itself is **0/9,758** at the
+frozen `1.0e-15` per-column oracle bar with `focus_fail=0`; that is the numeric
+gate and no tolerance was changed. The unit receipt therefore bounds the
+synthetic eager/JIT difference at two ULP and retains the red old-association
+control. The scorer's compiled oracle bar remains mandatory.

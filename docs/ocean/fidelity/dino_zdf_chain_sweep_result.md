@@ -3,6 +3,49 @@
 Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 (`RUN_SEQDUMP_D180_1R`, `kt=5761`).
 
+## Round-26 result: raw-U `zdepu` owned and production repair landed
+
+The held deterministic campaign passed its exact write-only bracket
+**197/197**. The bound parent scorer verifies `iku`, `zfi`, and
+`e3u(miku,Kmm)` at **0/9,758** each, then first diverges at `zdepu`:
+**9,758/9,758**, `focus_fail=4`. Its artifact SHA256 is
+`5c01587801a5ebc10f1522e33e425e9f81b53c60e465a981ccaf469e1c4f1c74`;
+the persisted bracket receipt SHA256 is
+`6eea10e2b3034ba81999c55c5dd2b37891f6e80cd48d56b43afe2b0cca45afbe`.
+
+The source-ordered discriminator closes ownership at instrumented
+`ldfslp.F90:298-301` (original `:260-263`):
+
+```fortran
+zdepu = 0.5_wp * ( ( gdept(ji,jj,jk,Kmm) + gdept(ji+1,jj,jk,Kmm) ) &
+   &              - 2 * MAX( risfdep(ji,jj), risfdep(ji+1,jj) )    &
+   &              - e3u(ji,jj,miku(ji,jj),Kmm) )
+```
+
+With DINO's zero ice-shelf depth, independently dumped `gdept(Kmm)` and
+`e3u(miku,Kmm)` reproduce dumped `zdepu` at **0/9,758**, focus zero. The
+production-computable raw `gdept_0*(1+ssh*r1_ht_0)` stored-reciprocal path is
+itself **0/9,758** against dumped `gdept`, and its literal face expression is
+**0/9,758** both eager and compiled, focus zero. The ownership artifact SHA256
+is `f561ae75959fc1b4d21fa071e6aec9e67312820c7b949563c756557e4f0d691c`.
+
+Production now exposes `slope_depth_evaluation`.
+`legacy_jacobian_t_surface` remains the global byte-identical default. Only
+`nemo_dino_kamm` and `nemo_dino_kamm_mlf` select
+`nemo_qco_live_literal`: NOW-SSH stored-reciprocal live `gdept/gdepw`, the
+same live depth for `zhmlpt`, `zdepu/zdepv`, and `zck`, and NEMO's literal
+face subtraction inside the half multiply. The disabled physics-config shadow
+mirrors the two selected slope fields but retains `scheme="none"`; it remains
+inert. Synthetic non-NEMO-mesh tests explicitly opt into the legacy path.
+Every other card retains the historical selector and is guarded through the
+active numerical entry point by byte-equality plus live-helper reachability
+tests. JIT, finite AD, hand arithmetic, typo rejection, and red wrong-
+association controls pass.
+
+This section records ownership and the landed repair. Row 30 is not promoted
+until the complete held scorer is rerun at the repair commit and every later
+raw-U operand plus the raw/post-Shapiro U/V composites passes in order.
+
 ## Round-25 result: `zbu` closed; raw-U composite held at nine columns
 
 The existing-dump post-bound peel owns row 30's `zbu` divergence at NEMO
