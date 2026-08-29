@@ -38,3 +38,33 @@ literal matrix and ordered Thomas path in production and U `0/9758`, V
 volume-form production T and S results both at `0/9920`. The unchanged-card
 scope and complete gates are frozen in
 `docs/ocean/fidelity/PREREG_zdf_chain_sweep_round30_uv_operands.md`.
+
+## Production implementation amendment (2026-08-29, before implementation)
+
+Row 30 is now closed by its held scorer and its independent raw/post-Shapiro
+composite.  The production option is frozen as
+`zdf_implicit_solver_evaluation`, with values `nemo_literal` and
+`shared_thomas`.  `shared_thomas` is the byte-identical historical default on
+every card.  Exactly `nemo_dino_kamm` and `nemo_dino_kamm_mlf` select
+`nemo_literal` by default; selecting `shared_thomas` on either is the legacy
+control.
+
+The faithful entry point preserves the oracle's two distinct written systems:
+
+- momentum builds face coefficients from the two T-point `avm` operands in
+  the association written at `dynzdf.F90:182-195,293-296`, then performs the
+  increasing-`k` diagonal and RHS recurrences and decreasing-`k` substitution
+  at `:322-345` (and the V sibling at `:356-371`);
+- tracers build the unnormalised content matrix with `e3t(Kaa)` on the
+  diagonal at `trazdf.F90:218-221`, consume the undivided content RHS written
+  at `:271-278`, share the matrix/factors between T and S when DDM is off, and
+  apply the ordered reverse recurrence at `:281-286`.
+
+The row-31 production bar remains U `0/9758`, V `0/9868` at `1.0e-12`; the
+row-32 production bar remains T and S `0/9920` at `1.0e-12`.  Both include all
+four focus columns.  Red controls are: `shared_thomas` must reproduce the
+registered row-31 miss, wrong `rDt` and a one-cell roll must fail, and for row
+32 a pre-normalised/incorrect-`e3t` RHS and a one-cell roll must fail.  Unit
+tests must include hand-computed unequal-thickness columns, JIT, finite AD,
+selector typo rejection, exact default-versus-explicit legacy identity, and
+resolved-card scope assertions.  No new NEMO dump is authorised or needed.
