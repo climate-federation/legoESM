@@ -108,7 +108,6 @@ def main() -> int:
     rn2b_full = interior("tke_dump_rn2b.bin")
     sh2_full = interior("tke_dump_sh2.bin")
     avm_in_full = interior("tke_dump_avm_in.bin")
-    pdlr_full = interior("tke_dump_pdlr.bin")
     zmxlm_full = interior("tke_dump_zmxlm.bin")
     zmxld_full = interior("tke_dump_zmxld.bin")
     avm_closure_full = interior("tke_dump_avm_final.bin")
@@ -124,7 +123,6 @@ def main() -> int:
     rn2b = rn2b_full[..., sl]
     sh2 = sh2_full[..., sl]
     avm_in = avm_in_full[..., sl]
-    pdlr = pdlr_full[..., sl]
     zmxlm = zmxlm_full[..., sl]
     zmxld = zmxld_full[..., sl]
     avm_closure = avm_closure_full[..., sl]
@@ -257,7 +255,10 @@ def main() -> int:
             "disposition": "UNMEASURED-ORACLE-SELFCHECK",
             "oracle_selfcheck_avt": row23_avt,
             "oracle_selfcheck_avm": row23_avm,
-            "reason": "NEMO closure and composed dumps self-consistent on stable subset; legoESM composition path not invoked",
+            "reason": (
+                "NEMO closure and composed dumps self-consistent on stable "
+                "subset; legoESM composition path not invoked"
+            ),
         },
         "24": {
             "operation": "river-mouth enhancement",
@@ -299,7 +300,10 @@ def main() -> int:
             "operation": "avm lateral boundary update, interior census",
             "disposition": "UNMEASURED-ORACLE-SELFCHECK",
             "oracle_selfcheck_avm_interior": row29,
-            "reason": "NEMO reconstructed interior compared to NEMO composed dump; legoESM LBC path not invoked",
+            "reason": (
+                "NEMO reconstructed interior compared to NEMO composed "
+                "dump; legoESM LBC path not invoked"
+            ),
         },
         "30": {
             "operation": "ldf_slp",
