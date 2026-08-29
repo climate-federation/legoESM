@@ -388,6 +388,10 @@ def build_state():
         slope_e3w=slope_e3w,
         slope_prd_geometry_stage=slope_prd_geometry_stage,
         omega=cfg.omega, active_3d=active_3d, g=mc.constants.g,
+        # Receipt-only handles used by ordered probes that must distinguish
+        # this helper's reconstruction from the real model step-entry bundle.
+        # Returning references changes no computed array or production call.
+        bridge_state=state, model_config=mc,
     )
 
 
