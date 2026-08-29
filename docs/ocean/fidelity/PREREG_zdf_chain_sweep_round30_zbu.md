@@ -337,3 +337,53 @@ on the new ladder itself: wrong `iku`, vertically shifted `zfi`, zonally
 rolled and wrong-level `e3u(miku)`, zonally rolled `zdepu`, and a wet NaN.
 The blend reconstruction uses the literal Fortran multiply/divide/add
 association rather than a post-hoc `where` selection.
+
+## Frozen continuation: `zdepu` ownership
+
+Date: 2026-08-29. Frozen after the held scorer first reported `zdepu`
+**9,758/9,758**, `focus_fail=4`, and before substituting any operand. The
+parent artifact SHA is
+`5c01587801a5ebc10f1522e33e425e9f81b53c60e465a981ccaf469e1c4f1c74`;
+the exact bracket receipt SHA is
+`6eea10e2b3034ba81999c55c5dd2b37891f6e80cd48d56b43afe2b0cca45afbe`.
+
+The executed NEMO expression is:
+
+```fortran
+! ldfslp.F90:298-301 (instrumented source; original :260-263)
+zdepu = 0.5_wp * ( ( gdept(ji,jj,jk,Kmm) + gdept(ji+1,jj,jk,Kmm) ) &
+   &              - 2 * MAX( risfdep(ji,jj), risfdep(ji+1,jj) )    &
+   &              - e3u(ji,jj,miku(ji,jj),Kmm) )
+```
+
+DINO has no ice shelf, so the registered order is: live `gdept(Kmm)` pair ->
+ordered add -> subtract independently dumped live `e3u(miku,Kmm)` -> multiply
+by literal `0.5_wp`. The probe first assembles that expression from the three
+independent NEMO dumps. It then substitutes the production-computable
+operands: raw `gdept_0` times NOW `1 + ssh*r1_ht_0`, with the stored reciprocal
+boundary, and the already verified live-QCO U-face thickness. Each stage uses
+the `1.0e-15` wet-U column bar over 9,758 columns and reports all four southern
+focus columns.
+
+CONFIRM is dumped-operand literal **0/9,758**, production-computable literal
+**0/9,758**, and `focus_fail=0` at both. Then the owner is the combined depth
+evaluation/association boundary: the current Jacobian-derived `gdept` plus
+post-average T-column subtraction is replaced by live
+`gdept_0*(1+ssh*r1_ht_0)` and literal face-thickness subtraction at
+`ldfslp.F90:298-301`. REFUTE is any failure at either literal stage; the first
+red operand remains open and no fix lands.
+
+The production design is selectable. `legacy_jacobian_t_surface` remains the
+global/default byte-identical path. Only `nemo_dino_kamm` and
+`nemo_dino_kamm_mlf` select `nemo_qco_live_literal`, which requires NOW SSH,
+the local bathymetry, raw `gdept_0`, and live `e3u/e3v`; it uses the same live
+stretch for `zhmlpt`, `zdepu/zdepv`, and `zck`. Unknown values fail closed.
+Red controls are: subtracting `e3u` after rather than inside the half multiply,
+using the current Jacobian depth, rolling the U-face thickness zonally, one
+wet NaN, and a one-ULP exact-identity perturbation. JIT and finite-AD tests plus
+default-vs-explicit legacy `assert_array_equal` and live-helper reachability
+guards for every unchanged card are required before promotion.
+
+The ordered stop remains row 30. Rows 31--32 and climate are blocked until the
+complete raw U/V and post-Shapiro composite passes; focus membership creates
+no exception.
