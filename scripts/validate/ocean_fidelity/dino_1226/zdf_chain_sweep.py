@@ -3243,11 +3243,12 @@ def main() -> int:
             "3_eos_rab_bn2_now": row3, "4_zdf_sh2": row4}
     if continuation is not None:
         for name, value in continuation["rows"].items():
+            disposition = value.get("disposition")
+            if disposition is None:
+                disposition = "VERIFIED" if value["pass"] else "DIVERGED"
             rows[name] = {
                 "output": value,
-                "disposition": value.get(
-                    "disposition",
-                    "VERIFIED" if value["pass"] else "DIVERGED"),
+                "disposition": disposition,
             }
     elif row4["disposition"] == "DIVERGED":
         rows["5_bottom_drag_coefficient"] = {
