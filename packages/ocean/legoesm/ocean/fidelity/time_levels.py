@@ -212,6 +212,9 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     "tke_dump_en_postsolve.bin": ("now", "MY_SRC zdftke.F90:609 captures en "
                                          "after back substitution, floor, and "
                                          "wmask, before nn_etau penetration."),
+    "tke_dump_etau_argument.bin": ("now", "write-only row-18 operand slot for "
+                                           "-gdepw(Kmm)/htau in the active "
+                                           "nn_etau=1 block, zdftke.F90:590."),
     "tke_dump_etau_exp.bin": ("now", "write-only row-18 operand slot for "
                                       "EXP(-gdepw(Kmm)/htau) in the active "
                                       "nn_etau=1 block, zdftke.F90:590."),

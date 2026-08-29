@@ -577,6 +577,7 @@ def main() -> int:
     ap.add_argument("--row17-bracket-instrument-restart", type=Path)
     ap.add_argument("--row17-instrument-source", type=Path)
     ap.add_argument("--row17-instrument-binary", type=Path)
+    ap.add_argument("--row18-argument-dump", type=Path)
     ap.add_argument("--row18-exp-dump", type=Path)
     ap.add_argument("--row18-increment-dump", type=Path)
     ap.add_argument("--row18-bracket-instrument-restart", type=Path)
@@ -2583,6 +2584,7 @@ def main() -> int:
                                             post_etau_n, wet_etau, focus,
                                             POINTWISE_BAR)
                                         row18_dump_args = (
+                                            args.row18_argument_dump,
                                             args.row18_exp_dump,
                                             args.row18_increment_dump,
                                             args.row18_bracket_instrument_restart,
@@ -2593,11 +2595,13 @@ def main() -> int:
                                                row18_dump_args):
                                             raise AssertionError(
                                                 "row 18 requires the direct "
-                                                "exp/increment dumps and "
+                                                "argument/exp/increment dumps and "
                                                 "instrument provenance")
                                         for path in row18_dump_args:
                                             if not path.is_file():
                                                 raise FileNotFoundError(path)
+                                        arg_n_full = base._load_interior(
+                                            str(args.row18_argument_dump), ni, nj)
                                         exp_n_full = base._load_interior(
                                             str(args.row18_exp_dump), ni, nj)
                                         inc_direct_n_full = (
@@ -2616,9 +2620,18 @@ def main() -> int:
                                             -etau_args[2]
                                             / degree_htau[..., None]))[
                                                 ..., :netau]
+                                        argument_l = np.asarray(
+                                            -etau_args[2]
+                                            / degree_htau[..., None])[
+                                                ..., :netau]
+                                        argument_n = arg_n_full[
+                                            ..., 1:1 + netau]
                                         exp_n = exp_n_full[..., 1:1 + netau]
                                         inc_direct_n = inc_direct_n_full[
                                             ..., 1:1 + netau]
+                                        argument_metric = metrics(
+                                            argument_l, argument_n, wet_etau,
+                                            focus, POINTWISE_BAR)
                                         exp_metric = metrics(
                                             exp_l, exp_n, wet_etau, focus,
                                             POINTWISE_BAR)
@@ -2693,6 +2706,8 @@ def main() -> int:
                                                 increment_l, increment_n,
                                                 wet_etau, focus,
                                                 POINTWISE_BAR),
+                                            "direct_nemo_exponent_argument":
+                                                argument_metric,
                                             "direct_nemo_exp": exp_metric,
                                             "diagnostic_numpy_libm_exp_degree":
                                                 numpy_exp_degree_metric,
@@ -2721,6 +2736,7 @@ def main() -> int:
                                             bracket18)
                                         row18m["instrumentation"] = {
                                             "slots": [
+                                                "tke_dump_etau_argument.bin",
                                                 "tke_dump_etau_exp.bin",
                                                 "tke_dump_etau_increment.bin",
                                             ],
@@ -2747,6 +2763,10 @@ def main() -> int:
                                                     "output": row18m,
                                                     "first_failing_operand": {
                                                         "name": (
+                                                            "-gdepw/htau"
+                                                            if not
+                                                            argument_metric[
+                                                                "pass"] else
                                                             "EXP(-gdepw/htau)"
                                                             if not exp_metric[
                                                                 "pass"] else
@@ -2762,8 +2782,12 @@ def main() -> int:
                                                         "nemo_line": (
                                                             "cfgs/DINO/MY_SRC/"
                                                             "zdftke.F90:590"
-                                                            if not exp_metric[
-                                                                "pass"] else
+                                                            if (not
+                                                                argument_metric[
+                                                                    "pass"] or
+                                                                not exp_metric[
+                                                                    "pass"])
+                                                            else
                                                             "zdftke.F90:1005"
                                                             if raw_rad_metric[
                                                                 "pass"] else
@@ -2775,32 +2799,62 @@ def main() -> int:
                                                     "controls": row18m[
                                                         "controls"],
                                                     "next_round_fix_design": {
-                                                        "status": (
-                                                            "IMPLIED" if
-                                                            raw_rad_metric[
-                                                                "pass"] else
-                                                            "NOT_YET_"
-                                                            "LOCALIZED"),
+                                                        "status": "DESIGNED",
                                                         "option": (
-                                                            "tke_htau_"
+                                                            "tke_etau_argument_"
+                                                            "evaluation" if
+                                                            not argument_metric[
+                                                                "pass"] else
+                                                            "tke_etau_"
+                                                            "exponential_"
                                                             "evaluation"),
                                                         "faithful_default_on_"
                                                         "complete_dino_nemo_"
                                                         "cards": (
-                                                            "nemo_literal_"
-                                                            "radians"),
+                                                            "nemo_literal"),
                                                         "legacy_default_"
                                                         "everywhere_else": (
-                                                            "degree_roundtrip"),
+                                                            "jax_expression"),
                                                         "rule": (
-                                                            "Thread the "
-                                                            "already-carried "
-                                                            "T-grid radians and "
-                                                            "evaluate SIN "
-                                                            "directly, matching "
-                                                            "rpi/180*gphit at "
-                                                            "zdftke.F90:1005."),
+                                                            "Reproduce the "
+                                                            "active NEMO "
+                                                            "source-ordered "
+                                                            "argument and EXP "
+                                                            "lowering in pure "
+                                                            "JAX, retaining JIT "
+                                                            "and reverse-mode "
+                                                            "autodiff; pin every "
+                                                            "unchanged card to "
+                                                            "the current path."),
                                                     },
+                                                }
+                                            ordered_tail = {
+                                                19: "buoyancy mixing length",
+                                                20: "nn_mxl=3 length limiting",
+                                                21: "base avm/avt/dissl assembly",
+                                                22: "inverse-Prandtl avt correction",
+                                                23: "closure coefficient copy",
+                                                24: "river-mouth enhancement",
+                                                25: "EVD tracer overwrite",
+                                                26: "EVD momentum overwrite",
+                                                27: "avs and wave enhancements",
+                                                28: "composed-avt turbocline scan",
+                                                29: "avm lateral-boundary update",
+                                                30: "ldf_slp",
+                                                31: "momentum implicit solve",
+                                                32: "tracer implicit solve",
+                                            }
+                                            for number, operation in (
+                                                    ordered_tail.items()):
+                                                row4[
+                                                    "continuation_preview"
+                                                ]["rows"][
+                                                    f"{number}_{operation.replace(' ', '_')}"
+                                                ] = {
+                                                    "disposition": "UNMEASURED",
+                                                    "reason": (
+                                                        "ordered stop at row 18"
+                                                    ),
                                                 }
         if row4["disposition"] == "DIVERGED":
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -3176,6 +3230,7 @@ def main() -> int:
         args.row17_bracket_instrument_restart,
         args.row17_instrument_source,
         args.row17_instrument_binary,
+        args.row18_argument_dump,
         args.row18_exp_dump,
         args.row18_increment_dump,
         args.row18_bracket_instrument_restart,
@@ -3253,6 +3308,7 @@ def main() -> int:
                          "tke_dump_zdiag_forward.bin",
                          "tke_dump_zrhs_forward.bin",
                          "tke_dump_en_postsolve.bin",
+                         "tke_dump_etau_argument.bin",
                          "tke_dump_etau_exp.bin",
                          "tke_dump_etau_increment.bin",
                          "dump_nmln.bin", "dump_hmlp.bin",
