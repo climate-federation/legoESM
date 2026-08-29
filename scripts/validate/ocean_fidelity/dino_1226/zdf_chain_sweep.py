@@ -2541,6 +2541,54 @@ def main() -> int:
                                             - pre_etau_l[..., :netau])
                                         increment_n = (
                                             post_etau_n - pre_etau_n)
+                                        raw_lat_rad = jnp.asarray(
+                                            model.grid.lat_T,
+                                            dtype=etau_args[0].dtype)
+                                        raw_htau = jnp.maximum(
+                                            tke_mod._NEMO_TKE_HTAU_MIN_M,
+                                            jnp.minimum(
+                                                tke_mod._NEMO_TKE_HTAU_MAX_M,
+                                                tke_mod._NEMO_TKE_HTAU_SLOPE_M
+                                                * jnp.abs(jnp.sin(
+                                                    raw_lat_rad))))
+                                        etau_rho0 = etau_kwargs["rho_0"]
+                                        surface_for_etau = jnp.maximum(
+                                            tke_mod._NEMO_TKE_EMIN0,
+                                            tke_mod._NEMO_TKE_EBB / etau_rho0
+                                            * jnp.maximum(etau_args[1], 0.0))
+                                        raw_rad_increment = (
+                                            (etau_args[3].etau_frac
+                                             * surface_for_etau[..., None])
+                                            * jnp.exp(
+                                                -etau_args[2]
+                                                / raw_htau[..., None]))
+                                        etau_ice = etau_kwargs["ice_frac"]
+                                        if etau_ice is not None:
+                                            raw_rad_increment = (
+                                                raw_rad_increment
+                                                * jnp.maximum(
+                                                    0.0,
+                                                    1.0
+                                                    - etau_ice[..., None]))
+                                        raw_rad_candidate = np.asarray(
+                                            etau_args[0]
+                                            + raw_rad_increment)
+                                        raw_rad_metric = metrics(
+                                            raw_rad_candidate[..., :netau],
+                                            post_etau_n, wet_etau, focus,
+                                            POINTWISE_BAR)
+                                        with xr.open_dataset(
+                                                RUN / "mesh_mask.nc",
+                                                decode_cf=False) as mesh_ds:
+                                            gphit_n = np.asarray(
+                                                mesh_ds["gphit"]).squeeze()
+                                        lat_deg_l = np.asarray(
+                                            etau_kwargs["lat_deg"])
+                                        lat_operand_metric = metrics(
+                                            lat_deg_l[..., None],
+                                            gphit_n[..., None],
+                                            wet2[..., None], focus,
+                                            POINTWISE_BAR)
                                         row18m["disposition"] = (
                                             "VERIFIED" if row18m["pass"]
                                             else "DIVERGED")
@@ -2560,6 +2608,10 @@ def main() -> int:
                                                 increment_l, increment_n,
                                                 wet_etau, focus,
                                                 POINTWISE_BAR),
+                                            "gphit_after_degree_roundtrip":
+                                                lat_operand_metric,
+                                            "substitute_raw_tgrid_radians":
+                                                raw_rad_metric,
                                             "selector": {
                                                 "nn_etau": 1,
                                                 "etau_mode":
@@ -2586,10 +2638,20 @@ def main() -> int:
                                                     "output": row18m,
                                                     "first_failing_operand": {
                                                         "name": (
+                                                            "htau latitude "
+                                                            "operand via a "
+                                                            "degree round trip"
+                                                            if raw_rad_metric[
+                                                                "pass"] else
                                                             "etau additive "
-                                                            "increment"),
+                                                            "increment after "
+                                                            "raw-radian "
+                                                            "substitution"),
                                                         "nemo_line": (
                                                             "cfgs/DINO/MY_SRC/"
+                                                            "zdftke.F90:1005"
+                                                            if raw_rad_metric[
+                                                                "pass"] else
                                                             "zdftke.F90:590-591"),
                                                     },
                                                     "operand_localization":
@@ -2597,6 +2659,33 @@ def main() -> int:
                                                             "operand_metrics"],
                                                     "controls": row18m[
                                                         "controls"],
+                                                    "next_round_fix_design": {
+                                                        "status": (
+                                                            "IMPLIED" if
+                                                            raw_rad_metric[
+                                                                "pass"] else
+                                                            "NOT_YET_"
+                                                            "LOCALIZED"),
+                                                        "option": (
+                                                            "tke_htau_"
+                                                            "evaluation"),
+                                                        "faithful_default_on_"
+                                                        "complete_dino_nemo_"
+                                                        "cards": (
+                                                            "nemo_literal_"
+                                                            "radians"),
+                                                        "legacy_default_"
+                                                        "everywhere_else": (
+                                                            "degree_roundtrip"),
+                                                        "rule": (
+                                                            "Thread the "
+                                                            "already-carried "
+                                                            "T-grid radians and "
+                                                            "evaluate SIN "
+                                                            "directly, matching "
+                                                            "rpi/180*gphit at "
+                                                            "zdftke.F90:1005."),
+                                                    },
                                                 }
         if row4["disposition"] == "DIVERGED":
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
