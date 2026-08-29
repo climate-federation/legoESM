@@ -3,6 +3,118 @@
 Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 (`RUN_SEQDUMP_D180_1R`, `kt=5761`).
 
+## Round-27 result: rows 30--32 close the ZDF chain
+
+The held row-30 repair rerun is fully green.  Its source-ordered U ladder is
+`iku -> zfi -> e3u(miku) -> zdepu -> zuslp_hml_pre -> sint_u -> mlterm_u ->
+blend_u`, with every stage **0/9,758** and every southern focus column passing.
+The independent final composite is also exact: raw/post-Shapiro U are
+**0/9,758**, raw/post-Shapiro V are **0/9,868**.  The bound receipts are
+`dino_zdf_row30_uslp_postdepthfix_artifact.json` (SHA256
+`8be5ec24beed64967b1a31646df516a40a1b6647f4e5c334d00852cb3e4f435e`)
+and `dino_zdf_row30_composite_close_artifact.json` (SHA256
+`e6286754aefb2fff6888388ba8986c76485cdef9b7d3f51474ced4a61ceacc67`).
+This supersedes Round 26's pending-promotion sentence and the older in-script
+targeting preview's three ULP-scale misses.
+
+Row 31 confirms the registered final momentum-solve owner.  The historical
+normalised matrix/shared Thomas path fails U **89/9,758** and V **265/9,868**.
+The selector-dispatched production `nemo_literal` path is U **0/9,758**, V
+**0/9,868**, focus zero, matching the independent NumPy literal discriminator.
+It preserves NEMO's written coefficients and three ordered recurrences:
+
+```fortran
+zzwi = - zDt_2 * ( avm(ji+1,jj,jk) + avm(ji,jj,jk) ) &
+   & / ( e3u(ji,jj,jk,Kaa) * e3uw(ji,jj,jk,Kmm) ) * wumask(ji,jj,jk)
+zwd(ji,jk) = zwd(ji,jk) - zwi(ji,jk) * zws(ji,jk-1) / zwd(ji,jk-1)
+puu(ji,jj,jk,Kaa) = puu(ji,jj,jk,Kaa) - zwi(ji,jk) / zwd(ji,jk-1) * puu(ji,jj,jk-1,Kaa)
+```
+
+Those are `dynzdf.F90:182-188,322-338`; terminal/reverse substitution is at
+`:341-345`, with the V sibling at `:356-371` and below.  Wrong-`rDt`, one-cell
+roll, and legacy-selector controls all fail.
+
+Row 32 closes the tracer application.  NEMO keeps the system in content form:
+
+```fortran
+zwi(ji,jk) = - p2dt * zwt(ji,jk) / e3w(ji,jj,jk,Kmm)
+zws(ji,jk) = - p2dt * zwt(ji,jk+1) / e3w(ji,jj,jk+1,Kmm)
+zwd(ji,jk) = e3t(ji,jj,jk,Kaa) - ( zwi(ji,jk) + zws(ji,jk) )
+zrhs = e3t(ji,jj,jk,Kbb) * pt(ji,jj,jk,jn,Kbb) + p2dt * e3t(ji,jj,jk,Kmm) * pt(ji,jj,jk,jn,Krhs)
+```
+
+These are `trazdf.F90:218-221,271-278`; the ordered factor/RHS/reverse loops
+are `:256-286`.  The first JAX literal attempt reduced the historical generic
+miss (T 627, S 23) to T **327/9,920**, S **0/9,920**, while an unfused NumPy
+source transcription was T/S **0/9,920**.  That discriminated compiled
+reassociation as the residual owner.  Barriers at the written multiply,
+divide, subtract, and recurrence boundaries make the production JIT path T/S
+**0/9,920**, with all four focus columns passing.  Wrong-`e3t`, one-cell roll,
+and legacy shared-Thomas controls fail.
+
+The production option is `zdf_implicit_solver_evaluation`.  `shared_thomas`
+is the byte-identical default everywhere else and the explicit legacy opt-in;
+only `nemo_dino_kamm` and `nemo_dino_kamm_mlf` default to `nemo_literal`.
+The literal tracer path consumes the undivided thickness-weighted leap-frog
+content already formed by production, so it never divides by `e3t(Kaa)` and
+multiplies it back.  Dry rows are identity-diagonal/masked, and the literal
+helpers pass hand arithmetic, JIT, finite AD, selector-typo, dry-row, resolved-
+card scope, and default-versus-explicit legacy identity tests.
+
+The final machine receipt is
+`dino_zdf_chain_end_verified_artifact.json`, SHA256
+`5c518b4666468855c520c248a58313c3645681dcf0f86d6b6971ff634373d647`.
+It binds both row-30 closure receipts, the full existing day-180 dump family,
+both resolved-card selectors, production-dispatch call counts, oracle source
+SHAs, bars, focus registry, and planted controls.  Rows 1--32 are now
+`VERIFIED` or `WAIVED` under the ordered ledger: there is no remaining red or
+unmeasured ZDF row.
+
+### Final climate authorization
+
+**CLIMATE ARMS AUTHORIZED.**  The prospective bands remain frozen: baseline
+southern-basin day-90 MLD RMS `22.479491 m`; `CONFIRM <=11.2397455 m`;
+`REFUTE >=20.2775 m`; values between are `PARTIAL/INDETERMINATE`.  The legacy
+control must remain within `0.001 m` of baseline.  No acceptance error may
+worsen versus control by more than one floor (ACC `0.091 Sv`, upper density
+contrast `1.1e-4 kg m-3`, deep contrast `4.5e-5 kg m-3`, southern surface
+sigma max and mean each `9.5e-5 kg m-3`), the 5x pass tally may not decrease,
+and at least one southern surface-density error must improve by one floor for
+`CONFIRM`.
+
+From this branch worktree, the exact two GPU commands are:
+
+```bash
+cd /tmp/codex-zdf-sweep
+CUDA_VISIBLE_DEVICES=<gpu> JAX_ENABLE_X64=1 /home/dbalwada/legoESM/.venv/bin/python \
+  scripts/validate/ocean_fidelity/run_fp64.py \
+  scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py \
+  nemo_dino_kamm_mlf /tmp/zdf_faithful_d90.npz --days 90 --save-3d --bridge-tke
+
+cd /tmp/codex-zdf-sweep
+CUDA_VISIBLE_DEVICES=<gpu> JAX_ENABLE_X64=1 /home/dbalwada/legoESM/.venv/bin/python \
+  scripts/validate/ocean_fidelity/run_fp64.py \
+  scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py \
+  nemo_dino_kamm_mlf /tmp/zdf_legacy_d90.npz --days 90 --save-3d --bridge-tke \
+  --tke-preclosure-coeff-source current_subiteration \
+  --tke-shear-evaluation-stage implicit_solve_state \
+  --tke-shear-metric-source tpoint_jacobian \
+  --dino-wind-profile-evaluation factored_smoothstep \
+  --tke-n2-evaluation-stage implicit_solve_state \
+  --tke-matrix-evaluation factored --tke-solver-evaluation shared_thomas \
+  --tke-etau-exponential-evaluation jax_expression \
+  --tke-htau-evaluation jax_expression --tke-mxl-raw-evaluation factored \
+  --tke-langmuir-evaluation vectorized \
+  --gm-redi-slope-n2-evaluation recompute \
+  --gm-redi-slope-prd-evaluation density_roundtrip \
+  --gm-redi-slope-metric-evaluation division \
+  --gm-redi-slope-face-thickness-evaluation static_face \
+  --gm-redi-slope-depth-evaluation legacy_jacobian_t_surface \
+  --zdf-implicit-solver-evaluation shared_thomas
+```
+
+This lane ran no GPU integration.
+
 ## Round-26 result: raw-U `zdepu` owned and production repair landed
 
 The held deterministic campaign passed its exact write-only bracket

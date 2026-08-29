@@ -20,17 +20,17 @@ FINAL BOARD, 2026-07-27, corr-to-1.0 bar) · **VERIFIED-EARLIER** (older doc/com
 re-certified at the 1.0 bar) · **WAIVED** (reason given) · **UNVERIFIED** (nobody has
 measured a number against this specific NEMO array).
 
-**Full-step import note (2026-08-29):** the newer matched-day-180 ZDF ledger is
+**Full-step import note (2026-08-29):** the matched-day-180 ZDF ledger is
 `dino_zdf_chain_sweep_result.md`, not the older aggregate labels in rows
-11/12/30/50 below. Its rows 1--29 are harvestable receipts. ZDF row 30 now
-verifies `zgru/zgrv`, `zau/zav`, and both post-bound `zbu/zbv` rows exactly.
-The ordered stop is `uslp_raw`: the existing-dump live-depth/face substitution
-reduces it from 8,387/9,758 to 9/9,758 failures and clears all focus columns,
-but exact operand ownership awaits the held eight-slot deterministic dump.
-The ZDF momentum/tracer implicit applications (ZDF rows 31--32,
-corresponding to full-step rows 30 and 50) remain targeting-only until that
-stop closes and their production volume-form gates pass. Do not promote the
-older `VERIFIED-EARLIER` structural claims over those numeric receipts.
+11/12/30/50 below. All 32 ZDF rows are now harvestable VERIFIED/WAIVED
+receipts. Row 30's complete raw/post-Shapiro slope composite is U `0/9,758`
+and V `0/9,868`; row 31's production literal momentum application is U
+`0/9,758`, V `0/9,868`; row 32's production literal content-form tracer
+application is T/S `0/9,920`, all with every southern focus column passing.
+The binding end receipt is `dino_zdf_chain_end_verified_artifact.json` SHA256
+`5c518b4666468855c520c248a58313c3645681dcf0f86d6b6971ff634373d647`.
+The older `VERIFIED-EARLIER` labels below are superseded by these numeric
+receipts when the full-step lane imports ZDF coverage.
 
 | order | stpmlf line | routine (concrete, DINO dispatch) | what it computes | status | evidence/reason |
 |---|---|---|---|---|---|
