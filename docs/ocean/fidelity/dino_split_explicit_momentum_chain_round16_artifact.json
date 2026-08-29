@@ -97,7 +97,7 @@
     }
   },
   "disposition": "ORDERED_STOP_1.2",
-  "git_commit": "3e76b2166e021263d2a0816c284d156bcd5f7565",
+  "git_commit": "50e2095d13d183fbe17b1f0052098613cb1ba585",
   "hardened_bindings": {
     "dump_sha256": {
       "qco_dump_zhU_substep1.bin": "569efde6dafe959e6ad49ae93ab1886ff90e20e18bab8d087879dafa0f637c5e",
@@ -113,6 +113,7 @@
     },
     "production_sha256": {
       "barotropic": "583776857172334a1347d5b7425355f598d22076a9abe56888cb317ee022f812",
+      "core_grid": "b0f17a864a123021d572a9c2fa05fc935f62a45080b5ba4291e2b08b97109f2f",
       "dino_card": "a72a7682488cab0ec46a5a57877c6ca33b5cdd047d1047d07fc128bfbcdca9a6",
       "inherited_probe": "698831d6e79c7cc225fa65cff2f8170fe64d2c1b3fd602cbe0e7aeee9157a247",
       "nemo_io": "cfa18c2991a4d6175a6e2f231031799aa00cebdb2ffe30b35b4ca6d076d804a2",
@@ -124,8 +125,8 @@
     "round12_sha256": "cc6dd626cdc37950164c9bdbe2cbf3678b3c3b31b5c2f4f53d12d9b030f54a0b"
   },
   "input_sha256": {
-    "full_recurrence": "315e7f93362b2d9694bfea4ab6636e6763c3b4e1dfa362fa0d01ba1d02d31121",
-    "hardened_acceptance": "a8da092619b04760071ddba66bd7a3f7a522824e9caa314025cc5f3a21cffb08"
+    "full_recurrence": "b2dcb7e151436b36ade81f69ad6ed43ec56d25cdcb76f2e289ba26168a167935",
+    "hardened_acceptance": "994acb1d382dcb221636895cebbc420c5e43da2e6ad710109658f54dc06a46a0"
   },
   "later_rows": {
     "2": "ORDERED-BLOCKED",

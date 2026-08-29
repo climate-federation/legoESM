@@ -2,7 +2,7 @@
 
 Date: 2026-08-29. Session
 `01a04e34-d1fb-73e0-b25a-177641f0a246`. Measured package commit
-`3e76b2166e0`.
+`50e2095d13d`.
 
 ## Association rows 9.4--9.6
 
@@ -100,11 +100,11 @@ reported. No GPU arm was run in this round.
 ## Bound artifacts
 
 - acceptance: SHA-256
-  `a8da092619b04760071ddba66bd7a3f7a522824e9caa314025cc5f3a21cffb08`
+  `994acb1d382dcb221636895cebbc420c5e43da2e6ad710109658f54dc06a46a0`
 - recurrence: SHA-256
-  `315e7f93362b2d9694bfea4ab6636e6763c3b4e1dfa362fa0d01ba1d02d31121`
+  `b2dcb7e151436b36ade81f69ad6ed43ec56d25cdcb76f2e289ba26168a167935`
 - combined adjudication: SHA-256
-  `21925ad16b32f6e7240243d6b08eb882bf835c772daccb7839382c558b6def2a`
+  `2ce41f04fc0620ba3e049b4b27fd399ee1ab1ef87452f5f06a0df7e54ac9a749`
 
 The earlier round-13/14 artifacts are unbound diagnostics superseded by these
 hardened receipts. No NEMO process, GPU, `mpirun`, push, or new instrumentation

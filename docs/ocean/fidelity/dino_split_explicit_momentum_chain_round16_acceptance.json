@@ -15,6 +15,7 @@
     },
     "production_sha256": {
       "barotropic": "583776857172334a1347d5b7425355f598d22076a9abe56888cb317ee022f812",
+      "core_grid": "b0f17a864a123021d572a9c2fa05fc935f62a45080b5ba4291e2b08b97109f2f",
       "dino_card": "a72a7682488cab0ec46a5a57877c6ca33b5cdd047d1047d07fc128bfbcdca9a6",
       "inherited_probe": "698831d6e79c7cc225fa65cff2f8170fe64d2c1b3fd602cbe0e7aeee9157a247",
       "nemo_io": "cfa18c2991a4d6175a6e2f231031799aa00cebdb2ffe30b35b4ca6d076d804a2",
@@ -32,7 +33,7 @@
   },
   "disposition": "ROW_1.3_ALL_OPERANDS_AT_BAR_RELEASE_1.4",
   "first_diverged_subrow": null,
-  "git_commit": "3e76b2166e021263d2a0816c284d156bcd5f7565",
+  "git_commit": "50e2095d13d183fbe17b1f0052098613cb1ba585",
   "jax_enable_x64": true,
   "later_rows": {
     "1.4": "RELEASED",
@@ -137,6 +138,7 @@
   ],
   "production_paths": {
     "barotropic": "/tmp/codex-zdf-round9-adjudicate/packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py",
+    "core_grid": "/tmp/codex-zdf-round9-adjudicate/packages/core/legoesm/grids/latlon.py",
     "dino_card": "/tmp/codex-zdf-round9-adjudicate/packages/ocean/legoesm/ocean/experiments/dino.py",
     "inherited_probe": "/tmp/codex-zdf-round9-adjudicate/scripts/validate/ocean_fidelity/dino_1226/spg_substep_chain.py",
     "nemo_io": "/tmp/codex-zdf-round9-adjudicate/packages/ocean/legoesm/ocean/fidelity/nemo_io.py",
