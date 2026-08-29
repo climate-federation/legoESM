@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Frozen four-group attribution score for the corrected-T wall epoch drift."""
+"""Frozen dependency-lattice attribution for corrected-T wall epoch drift."""
 from __future__ import annotations
 
 import argparse
@@ -53,23 +53,35 @@ FAITHFUL = {
     "gm_redi_slope_depth_evaluation": "nemo_qco_live_literal",
 }
 GROUPS = {
-    # The faithful slope N2 consumer cannot run without the carried entry N2
-    # bundle. This reachable arm therefore includes the one required dependent
-    # reversion. slope_n2_only below supplies the conditioning contrast.
-    "entry_dep": {
-        "tke_preclosure_coeff_source": "current_subiteration",
-        "tke_shear_evaluation_stage": "implicit_solve_state",
-        "tke_shear_metric_source": "tpoint_jacobian",
-        "tke_n2_evaluation_stage": "implicit_solve_state",
-        "gm_redi_slope_n2_evaluation": "recompute",
-    },
     "slope_n2_only": {
         "gm_redi_slope_n2_evaluation": "recompute",
     },
+    # Reverting the literal matrix is legal only with its literal solver and
+    # literal Langmuir consumers reverted too.
     "tke_core": {
         "tke_matrix_evaluation": "factored",
         "tke_solver_evaluation": "shared_thomas",
         "tke_langmuir_evaluation": "vectorized",
+    },
+    # Fourth corner for the reachable TKE-core x slope-N2 interaction.
+    "core_slope_n2": {
+        "tke_matrix_evaluation": "factored",
+        "tke_solver_evaluation": "shared_thomas",
+        "tke_langmuir_evaluation": "vectorized",
+        "gm_redi_slope_n2_evaluation": "recompute",
+    },
+    # Full dependency closure of the entry group.  Its effect is estimable
+    # only against core_slope_n2, where every forced downstream reversion is
+    # already held legacy.
+    "entry_closed": {
+        "tke_preclosure_coeff_source": "current_subiteration",
+        "tke_shear_evaluation_stage": "implicit_solve_state",
+        "tke_shear_metric_source": "tpoint_jacobian",
+        "tke_n2_evaluation_stage": "implicit_solve_state",
+        "tke_matrix_evaluation": "factored",
+        "tke_solver_evaluation": "shared_thomas",
+        "tke_langmuir_evaluation": "vectorized",
+        "gm_redi_slope_n2_evaluation": "recompute",
     },
     "mxl_zdf": {
         "tke_etau_exponential_evaluation": "jax_expression",
@@ -77,14 +89,53 @@ GROUPS = {
         "tke_mxl_raw_evaluation": "factored",
         "zdf_implicit_solver_evaluation": "shared_thomas",
     },
-    "slopes": {
-        "gm_redi_slope_n2_evaluation": "recompute",
+    "slope_rest": {
         "gm_redi_slope_prd_evaluation": "density_roundtrip",
         "gm_redi_slope_metric_evaluation": "division",
         "gm_redi_slope_face_thickness_evaluation": "static_face",
         "gm_redi_slope_depth_evaluation": "legacy_jacobian_t_surface",
     },
 }
+
+# Direct faithful-selector prerequisites transcribed from executable ValueError
+# guards.  A GROUPS arm is legal iff every selector left faithful also leaves
+# all of its prerequisites faithful.  The remaining ten selectors have no
+# selector-to-selector requirement in the validators.
+FAITHFUL_REQUIRES = {
+    "tke_matrix_evaluation": {
+        "tke_preclosure_coeff_source", "tke_n2_evaluation_stage"},
+    "tke_solver_evaluation": {"tke_matrix_evaluation"},
+    "tke_langmuir_evaluation": {
+        "tke_matrix_evaluation", "tke_n2_evaluation_stage"},
+    "gm_redi_slope_n2_evaluation": {"tke_n2_evaluation_stage"},
+}
+
+
+def _assert_legal_group_lattice() -> int:
+    """Prove registered arms are legal and return all legal subset count."""
+    for group, changes in GROUPS.items():
+        reverted = set(changes)
+        for selector, requirements in FAITHFUL_REQUIRES.items():
+            if selector not in reverted:
+                broken = requirements & reverted
+                if broken:
+                    raise SystemExit(
+                        f"STOP illegal group {group}: faithful {selector} "
+                        f"requires faithful {sorted(broken)}")
+    coupled = set(FAITHFUL_REQUIRES)
+    for requirements in FAITHFUL_REQUIRES.values():
+        coupled.update(requirements)
+    independent_count = len(FAITHFUL) - len(coupled)
+    legal_coupled = 0
+    coupled = sorted(coupled)
+    for mask in range(1 << len(coupled)):
+        reverted = {name for bit, name in enumerate(coupled)
+                    if mask & (1 << bit)}
+        legal = all(
+            selector in reverted or not (requirements & reverted)
+            for selector, requirements in FAITHFUL_REQUIRES.items())
+        legal_coupled += int(legal)
+    return legal_coupled * (1 << independent_count)
 
 
 def sha256(path: str | Path) -> str:
@@ -248,14 +299,20 @@ def _classifier_plants() -> dict[str, object]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true")
-    for name in ("nemo", "current", "entry_dep", "slope_n2_only",
-                 "tke_core", "mxl_zdf", "slopes", "historical_receipt",
-                 "producer_commit", "out"):
+    for name in ("nemo", "current", "slope_n2_only", "tke_core",
+                 "core_slope_n2", "entry_closed", "mxl_zdf", "slope_rest",
+                 "historical_receipt", "producer_commit", "out"):
         parser.add_argument("--" + name.replace("_", "-"))
     args = parser.parse_args()
     plants = _classifier_plants()
+    legal_selector_subsets = _assert_legal_group_lattice()
+    if legal_selector_subsets != 14336:
+        raise SystemExit(
+            f"STOP selector-lattice count {legal_selector_subsets} != 14336")
     if args.self_test:
-        print(json.dumps({"classifier_plants": plants}, sort_keys=True))
+        print(json.dumps({"classifier_plants": plants,
+                          "legal_selector_subsets": legal_selector_subsets},
+                         sort_keys=True))
         return 0
     missing = [name for name, value in vars(args).items()
                if name != "self_test" and value is None]
@@ -315,35 +372,46 @@ def main() -> int:
             / (CURRENT[key] - HISTORICAL[key]) for key in CURRENT}
 
     conditional = {
-        # The only reachable entry contrast: add four entry reversions while
-        # slope_n2 is already legacy. The absent faithful-slope corner means
-        # its interaction with slope_n2 cannot be estimated separately.
-        "entry_given_legacy_slope_n2": contrast_closure(
-            "slope_n2_only", "entry_dep"),
-        "slope_rest_given_legacy_slope_n2": contrast_closure(
-            "slope_n2_only", "slopes"),
+        # The only reachable entry contrast: add the entry reversions after
+        # every downstream selector forced by their dependency closure is
+        # already legacy.
+        "entry_given_legacy_core_and_slope_n2": contrast_closure(
+            "core_slope_n2", "entry_closed"),
+        "tke_core_given_legacy_slope_n2": contrast_closure(
+            "slope_n2_only", "core_slope_n2"),
+    }
+    core_slope_interaction = {
+        key: ((scores["slope_n2_only"][key]
+               - scores["core_slope_n2"][key])
+              - (CURRENT[key] - scores["tke_core"][key]))
+        / (CURRENT[key] - HISTORICAL[key])
+        for key in CURRENT
     }
     conditional_classes = {
         name: classify_closure(value) for name, value in conditional.items()}
     primitive = {
-        "tke_core": arm_closures["tke_core"],
+        "tke_core_at_faithful_slope_n2": arm_closures["tke_core"],
         "mxl_zdf": arm_closures["mxl_zdf"],
         "slope_n2_at_faithful_entry": arm_closures["slope_n2_only"],
-        **conditional,
+        "slope_rest_at_faithful_slope_n2": arm_closures["slope_rest"],
+        "entry_given_legacy_core_and_slope_n2": conditional[
+            "entry_given_legacy_core_and_slope_n2"],
     }
     primitive_classes = {
-        "tke_core": arm_classes["tke_core"],
+        "tke_core_at_faithful_slope_n2": arm_classes["tke_core"],
         "mxl_zdf": arm_classes["mxl_zdf"],
         "slope_n2_at_faithful_entry": arm_classes["slope_n2_only"],
-        **conditional_classes,
+        "slope_rest_at_faithful_slope_n2": arm_classes["slope_rest"],
+        "entry_given_legacy_core_and_slope_n2": conditional_classes[
+            "entry_given_legacy_core_and_slope_n2"],
     }
     owners = [name for name, value in primitive_classes.items()
               if value in ("EPOCH_RESTORED", "MAJORITY_OWNER",
                            "CONDITIONAL_MAJORITY_OWNER")]
-    if owners == ["entry_given_legacy_slope_n2"]:
-        disposition = "LOCALIZED_TO_ENTRY_CONDITIONAL_ON_LEGACY_SLOPE_N2"
-        next_action = ("split entry with slope_n2=recompute held in every "
-                       "reachable child; do not claim the missing interaction")
+    if owners == ["entry_given_legacy_core_and_slope_n2"]:
+        disposition = "LOCALIZED_TO_ENTRY_CONDITIONAL_ON_LEGACY_DEPENDENCIES"
+        next_action = ("split entry only through legal dependency closures; "
+                       "do not claim its unreachable independent main effect")
     elif len(owners) == 1:
         disposition = "LOCALIZED_TO_" + owners[0].upper()
         next_action = f"split {owners[0]} with dependency-coherent children"
@@ -354,7 +422,7 @@ def main() -> int:
         disposition = "OPEN_DISTRIBUTED_OR_INTERACTION"
         next_action = "run the all-16-legacy universe gate, then complement pairs"
     result = {
-        "schema": "zdf-wall-epoch-group-score-v1",
+        "schema": "zdf-wall-epoch-lattice-score-v2",
         "session_id": os.environ["CODEX_SESSION_ID"],
         "producer_commit": args.producer_commit,
         "current_producer": CURRENT_PRODUCER,
@@ -366,12 +434,24 @@ def main() -> int:
         "historical": HISTORICAL,
         "historical_band": HISTORICAL_BAND,
         "groups": GROUPS,
-        "structurally_unreachable_corner": {
-            "tke_n2_evaluation_stage": "implicit_solve_state",
-            "gm_redi_slope_n2_evaluation": "carried_step_entry",
-            "reason": "faithful slope N2 requires the pre-zdf_phy carried N2 bundle",
-            "interaction_status": "UNIDENTIFIABLE_FROM_REACHABLE_CORNERS",
-        },
+        "faithful_selector_requires": {
+            key: sorted(value) for key, value in FAITHFUL_REQUIRES.items()},
+        "legal_selector_subsets": legal_selector_subsets,
+        "structurally_unreachable_contrasts": [
+            {
+                "contrast": "legacy preclosure with faithful matrix",
+                "reason": "literal matrix requires carried-previous-step coefficients",
+            },
+            {
+                "contrast": "legacy N2 stage with faithful matrix/Langmuir/slope-N2",
+                "reason": "all three faithful consumers require the step-entry N2 bundle",
+            },
+            {
+                "contrast": "independent entry main effect at faithful downstream selectors",
+                "reason": "entry reversion forces the core and slope-N2 dependency closure",
+                "interaction_status": "UNIDENTIFIABLE_FROM_LEGAL_CORNERS",
+            },
+        ],
         "group_artifact_sha256": {
             name: sha256(path) for name, path in group_paths.items()},
         "scores": scores,
@@ -379,6 +459,7 @@ def main() -> int:
         "arm_classification": arm_classes,
         "conditional_closure_fraction": conditional,
         "conditional_classification": conditional_classes,
+        "tke_core_x_slope_n2_interaction_fraction": core_slope_interaction,
         "primitive_closure_fraction": primitive,
         "primitive_classification": primitive_classes,
         "disposition": disposition,
