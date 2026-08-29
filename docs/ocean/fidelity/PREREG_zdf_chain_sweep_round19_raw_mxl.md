@@ -48,3 +48,33 @@ already-adjudicated determinism exclusion: two executions of the identical
 unpatched binary differ beginning at byte 3 while their restarts are identical.
 The new raw stream must be the only additional TKE dump. SHA256 stamps bind the
 source, binaries, donor/output restarts, dump, maps, and active NEMO source.
+
+## Dated adjudication amendment — 2026-08-29
+
+This is a loud post-run amendment, not part of the original preregistration.
+The first row-19 run exposed a defect in the oracle's historical debug writers:
+13 shared streams (the formerly known `cor2d_zu` stream plus 12 more) write
+four uninitialized halo binary64 slots. The writers all use `STATUS='REPLACE'`;
+append mode and a stale copied stream are therefore refuted. Every physical
+interior slot is bit-identical, and two identical-binary controls show the same
+four changed indices. The original whole-file bracket is retracted for exactly
+these 13 streams only.
+
+Promotion now requires two fresh executions of the **current row-19 binary**
+from independent clean copies of the same donor/template. Each run records the
+binary SHA before execution. The scorer requires:
+
+- byte-identical output restarts and exact donor/source/binary SHA bindings;
+- exact byte identity for every ordinary shared stream;
+- for the 13 named defective streams, exactly four changed binary64 slots,
+  identical changed-index signatures between patch and current-binary control,
+  and zero changes inside the `nn_hls=2` physical interior;
+- a planted one-bit physical-interior change that must fail the exclusion;
+- the actual JIT-compiled production `_tke_raw_mixing_length` selector, not a
+  duplicated NumPy expression;
+- the original **absolute** per-column bar of `1e-15 m` (not RMS-normalized),
+  0/9,920 failures, all focus columns passing, and an exact census.
+
+The source-formula NumPy calculation remains only an operand-localization
+self-check. Until the same-current-binary pair exists, row 19 remains
+`UNMEASURED-NEEDS-CLEAN-BRACKET`; its diagnostic 0/9,920 result is not promoted.
