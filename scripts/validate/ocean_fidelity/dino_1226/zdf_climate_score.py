@@ -45,7 +45,50 @@ EXPECTED_AUDIT_PROBE_SHA256 = (
 EXPECTED_AUDIT_PREREG_SHA256 = (
     "7c4679398d3d2f029a5cfab1fbe4bbbdb970f305ec0b7d488cd3f62fb5afbfd0"
 )
+EXPECTED_AUDIT_ARTIFACT_SHA256 = (
+    "0f00f2c5bad331a871fbb2237aaddc75e789619ff0230c76a9fdd67b16657624"
+)
 EXPECTED_PRODUCER_HEAD = "e4ab87b422f89bdbf46ddb4aaf0e9db892ec4443"
+EXPECTED_FAITHFUL = {
+    "bridge_tke": True,
+    "tke_preclosure_coeff_source": "carried_previous_step",
+    "tke_shear_evaluation_stage": "step_entry",
+    "tke_shear_metric_source": "nemo_qco_live_face",
+    "dino_wind_profile_evaluation": "nemo_literal",
+    "tke_n2_evaluation_stage": "step_entry",
+    "tke_matrix_evaluation": "nemo_literal",
+    "tke_solver_evaluation": "nemo_literal",
+    "tke_etau_exponential_evaluation": "nemo_literal",
+    "tke_htau_evaluation": "nemo_literal",
+    "tke_mxl_raw_evaluation": "nemo_literal",
+    "tke_langmuir_evaluation": "nemo_literal",
+    "gm_redi_slope_n2_evaluation": "carried_step_entry",
+    "gm_redi_slope_prd_evaluation": "nemo_literal",
+    "gm_redi_slope_metric_evaluation": "nemo_reciprocal",
+    "gm_redi_slope_face_thickness_evaluation": "nemo_qco_live",
+    "gm_redi_slope_depth_evaluation": "nemo_qco_live_literal",
+    "zdf_implicit_solver_evaluation": "nemo_literal",
+}
+EXPECTED_LEGACY = {
+    "bridge_tke": True,
+    "tke_preclosure_coeff_source": "current_subiteration",
+    "tke_shear_evaluation_stage": "implicit_solve_state",
+    "tke_shear_metric_source": "tpoint_jacobian",
+    "dino_wind_profile_evaluation": "factored_smoothstep",
+    "tke_n2_evaluation_stage": "implicit_solve_state",
+    "tke_matrix_evaluation": "factored",
+    "tke_solver_evaluation": "shared_thomas",
+    "tke_etau_exponential_evaluation": "jax_expression",
+    "tke_htau_evaluation": "jax_expression",
+    "tke_mxl_raw_evaluation": "factored",
+    "tke_langmuir_evaluation": "vectorized",
+    "gm_redi_slope_n2_evaluation": "recompute",
+    "gm_redi_slope_prd_evaluation": "density_roundtrip",
+    "gm_redi_slope_metric_evaluation": "division",
+    "gm_redi_slope_face_thickness_evaluation": "static_face",
+    "gm_redi_slope_depth_evaluation": "legacy_jacobian_t_surface",
+    "zdf_implicit_solver_evaluation": "shared_thomas",
+}
 
 
 def require(condition: bool, message: str) -> None:
@@ -79,7 +122,8 @@ def scalar(data: np.lib.npyio.NpzFile, key: str):
 
 
 def validate_arm(path: Path, log: Path, expected_sha: str,
-                 expected_log_sha: str) -> dict[str, object]:
+                 expected_log_sha: str,
+                 expected_config: dict[str, object]) -> dict[str, object]:
     require(path.is_file() and log.is_file(), f"missing arm receipt: {path}, {log}")
     require(sha256(path) == expected_sha, f"arm SHA mismatch: {path}")
     require(sha256(log) == expected_log_sha, f"log SHA mismatch: {log}")
@@ -97,6 +141,10 @@ def validate_arm(path: Path, log: Path, expected_sha: str,
                 float(scalar(data, "seasonal_t0_reference_seconds")),
                 f"off-season arm: {path}")
         run_config = json.loads(str(scalar(data, "run_config")))
+        for key, expected in expected_config.items():
+            require(run_config.get(key) == expected,
+                    f"{path}: selector {key}={run_config.get(key)!r}, "
+                    f"expected {expected!r}")
         ladder_sha = str(scalar(data, "vertical_ladder_sha256"))
         require(re.fullmatch(r"[0-9a-f]{64}", ladder_sha) is not None,
                 f"bad ladder hash: {path}")
@@ -115,8 +163,29 @@ def validate_arm(path: Path, log: Path, expected_sha: str,
         "log": str(log), "log_sha256": expected_log_sha,
         "producer_head": match.group(1), "dirty_tracked_files": 0,
         "ladder_sha256": ladder_sha, "run_config": run_config,
+        "registered_selector_count": len(expected_config),
+        "registered_selectors_exact": True,
         "land_mask": land_mask,
     }
+
+
+def validate_acceptance_receipt(path: Path, expected_sha: str,
+                                candidate: Path | None) -> dict[str, object]:
+    require(path.is_file(), f"missing acceptance receipt {path}")
+    require(sha256(path) == expected_sha,
+            f"acceptance receipt SHA mismatch: {path}")
+    text = path.read_text(errors="replace")
+    if candidate is None:
+        require("SELF-TEST PASS" in text and "PASS 0 | FAIL 5" in text,
+                "acceptance self-test receipt did not fire")
+        kind = "self_test"
+    else:
+        require(f"candidate: {candidate}" in text,
+                f"wrong candidate in acceptance receipt {path}")
+        require("GATE 90D-TWIN: PASS 5 | FAIL 0 | level 5x | total 5" in text,
+                f"acceptance receipt is not certified 5/5: {path}")
+        kind = "candidate_5x"
+    return {"path": str(path), "sha256": expected_sha, "kind": kind}
 
 
 def decision(faithful_rms: float, legacy_rms: float,
@@ -201,6 +270,13 @@ def main() -> int:
     parser.add_argument("--legacy-log-sha256", required=True)
     parser.add_argument("--mld-audit-probe", type=Path, required=True)
     parser.add_argument("--mld-audit-prereg", type=Path, required=True)
+    parser.add_argument("--published-mld-artifact", type=Path, required=True)
+    parser.add_argument("--acceptance-selftest-log", type=Path, required=True)
+    parser.add_argument("--acceptance-selftest-log-sha256", required=True)
+    parser.add_argument("--faithful-acceptance-log", type=Path, required=True)
+    parser.add_argument("--faithful-acceptance-log-sha256", required=True)
+    parser.add_argument("--legacy-acceptance-log", type=Path, required=True)
+    parser.add_argument("--legacy-acceptance-log-sha256", required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
@@ -217,15 +293,23 @@ def main() -> int:
             "MLD audit probe SHA mismatch")
     require(sha256(args.mld_audit_prereg) == EXPECTED_AUDIT_PREREG_SHA256,
             "MLD audit prereg SHA mismatch")
+    require(sha256(args.published_mld_artifact) ==
+            EXPECTED_AUDIT_ARTIFACT_SHA256,
+            "published MLD audit artifact SHA mismatch")
+    published = json.loads(args.published_mld_artifact.read_text())
+    published_baseline = float(
+        published["stats"]["basin_legacy"]["90"]["basin"]["rms_difference_m"])
+    require(abs(published_baseline - BASELINE_M) <= 0.5e-6,
+            "published artifact does not support the rounded frozen baseline")
     audit = load_module(args.mld_audit_probe, "_zdf_bound_mld_audit")
 
     arms = {
         "faithful": validate_arm(
             args.faithful, args.faithful_log, args.faithful_sha256,
-            args.faithful_log_sha256),
+            args.faithful_log_sha256, EXPECTED_FAITHFUL),
         "legacy": validate_arm(
             args.legacy, args.legacy_log, args.legacy_sha256,
-            args.legacy_log_sha256),
+            args.legacy_log_sha256, EXPECTED_LEGACY),
     }
     require(arms["faithful"]["ladder_sha256"] == arms["legacy"]["ladder_sha256"],
             "arm vertical ladders differ")
@@ -287,6 +371,17 @@ def main() -> int:
         "faithful": acceptance_score(args.faithful),
         "legacy": acceptance_score(args.legacy),
     }
+    acceptance_receipts = {
+        "self_test": validate_acceptance_receipt(
+            args.acceptance_selftest_log,
+            args.acceptance_selftest_log_sha256, None),
+        "faithful": validate_acceptance_receipt(
+            args.faithful_acceptance_log,
+            args.faithful_acceptance_log_sha256, args.faithful),
+        "legacy": validate_acceptance_receipt(
+            args.legacy_acceptance_log,
+            args.legacy_acceptance_log_sha256, args.legacy),
+    }
     faithful_rms = mld_scores["faithful"]["basin"]["rms_difference_m"]
     legacy_rms = mld_scores["legacy"]["basin"]["rms_difference_m"]
     verdict, conditions = decision(
@@ -300,6 +395,8 @@ def main() -> int:
         Path(__file__).resolve(), args.faithful, args.legacy,
         args.faithful_log, args.legacy_log, args.mld_audit_probe,
         args.mld_audit_prereg, Path(gate.__file__).resolve(), audit.MESH,
+        args.published_mld_artifact, args.acceptance_selftest_log,
+        args.faithful_acceptance_log, args.legacy_acceptance_log,
         *audit.restart_paths(90),
     ]
     result = {
@@ -308,10 +405,12 @@ def main() -> int:
         "registered_bands_m": {
             "baseline": BASELINE_M, "legacy_tolerance": LEGACY_TOL_M,
             "confirm_max": CONFIRM_MAX_M, "refute_min": REFUTE_MIN_M,
+            "published_unrounded_baseline": published_baseline,
         },
         "scope": audit.__doc__.splitlines()[0],
         "mld_day90": mld_scores,
         "acceptance_gate_5x": acceptance,
+        "acceptance_receipts": acceptance_receipts,
         "registered_conditions": conditions,
         "controls": {
             "mld_audit": mld_controls,
