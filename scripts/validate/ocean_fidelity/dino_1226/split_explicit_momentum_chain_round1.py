@@ -14,6 +14,7 @@ import json
 import math
 import os
 from pathlib import Path
+import subprocess
 from typing import Any
 
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
@@ -24,7 +25,12 @@ os.environ.setdefault("DINO_1226_LANE", "d180")
 import jax
 import numpy as np
 
+import fidelity_bar_gate as bar_gate
 import spg_substep_chain as inherited
+import legoesm.ocean.dynamics.barotropic_latlon_cgrid as barotropic_module
+import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as ocean_model_module
+import legoesm.ocean.experiments.dino as dino_module
+import legoesm.ocean.fidelity.nemo_state_bridge as bridge_module
 
 
 DIRECT_BAR = 1.0e-15
@@ -40,38 +46,70 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _metric(lego: np.ndarray, nemo: np.ndarray, mask: np.ndarray) -> dict[str, Any]:
-    valid = np.asarray(mask, dtype=bool) & np.isfinite(lego) & np.isfinite(nemo)
-    left = np.asarray(lego)[valid]
-    right = np.asarray(nemo)[valid]
-    if left.size == 0:
-        raise RuntimeError("empty comparison population")
+def _metric(
+    lego: np.ndarray,
+    nemo: np.ndarray,
+    mask: np.ndarray,
+    expected_n: int,
+) -> dict[str, Any]:
+    lego = np.asarray(lego)
+    nemo = np.asarray(nemo)
+    wet = np.asarray(mask, dtype=bool)
+    if lego.shape != nemo.shape or lego.shape != wet.shape:
+        raise RuntimeError(
+            f"comparison shape mismatch: lego={lego.shape} nemo={nemo.shape} "
+            f"mask={wet.shape}"
+        )
+    if int(wet.sum()) != expected_n:
+        raise RuntimeError(f"wet population {int(wet.sum())} != expected {expected_n}")
+    if not np.isfinite(lego[wet]).all() or not np.isfinite(nemo[wet]).all():
+        raise RuntimeError("non-finite value in registered wet population")
+    left = lego[wet]
+    right = nemo[wet]
     nemo_rms = float(np.sqrt(np.mean(right**2)))
     lego_rms = float(np.sqrt(np.mean(left**2)))
     if not math.isfinite(nemo_rms) or nemo_rms == 0.0:
         raise RuntimeError("invalid NEMO RMS")
     error = float(np.sqrt(np.mean((left - right) ** 2))) / nemo_rms
     corr = float(np.corrcoef(left, right)[0, 1]) if left.size > 1 else math.nan
+    ratio = float(np.sum(np.abs(left)) / np.sum(np.abs(right)))
+    per_element = float(np.max(np.abs(left - right)) / nemo_rms)
     return {
         "n": int(left.size),
         "normalized_rms_error": error,
         "correlation": corr,
+        "mean_abs_ratio": ratio,
+        "per_element_max_error_over_nemo_rms": per_element,
         "rms_ratio": lego_rms / nemo_rms,
     }
 
 
-def _controls(sample: tuple[np.ndarray, np.ndarray, np.ndarray], bar: float) -> dict[str, Any]:
+def _controls(
+    sample: tuple[np.ndarray, np.ndarray, np.ndarray],
+    bar: float,
+    expected_n: int,
+) -> dict[str, Any]:
     lego, nemo, mask = sample
-    identical = _metric(nemo, nemo, mask)["normalized_rms_error"]
+    identical = _metric(nemo, nemo, mask, expected_n)["normalized_rms_error"]
     scale = float(np.sqrt(np.mean(np.asarray(nemo)[np.asarray(mask, dtype=bool)] ** 2)))
-    planted = np.asarray(nemo).copy()
+    planted = np.asarray(lego).copy()
     planted[np.asarray(mask, dtype=bool)] += 1.0e-6 * scale
-    planted_error = _metric(planted, nemo, mask)["normalized_rms_error"]
+    planted_error = _metric(planted, nemo, mask, expected_n)["normalized_rms_error"]
+    alignment: list[dict[str, Any]] = []
+    for dj in (-1, 0, 1):
+        for di in (-1, 0, 1):
+            shifted = np.roll(np.asarray(lego), (dj, di), axis=(0, 1))
+            score = _metric(shifted, nemo, mask, expected_n)["normalized_rms_error"]
+            alignment.append({"dj": dj, "di": di, "normalized_rms_error": score})
+    best = min(alignment, key=lambda item: item["normalized_rms_error"])
     return {
         "identical_array_zero": identical == 0.0,
         "planted_offset_breaches_bar": planted_error > bar,
+        "zero_shift_is_best": (best["dj"], best["di"]) == (0, 0),
         "identical_error": identical,
         "planted_error": planted_error,
+        "alignment_scan": alignment,
+        "alignment_best": best,
     }
 
 
@@ -86,6 +124,16 @@ def main() -> int:
         raise SystemExit("LEGOESM_NEMO_E3T=both is required")
     if jax.default_backend() != "cpu" or not bool(jax.config.jax_enable_x64):
         raise SystemExit("CPU + JAX x64 are required")
+
+    repo_root = Path(__file__).resolve().parents[4]
+    git_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repo_root, text=True
+    ).strip()
+    dirty_before = subprocess.check_output(
+        ["git", "status", "--porcelain"], cwd=repo_root, text=True
+    )
+    if dirty_before:
+        raise SystemExit("clean tracked and untracked worktree required")
 
     captured: dict[str, list[tuple[np.ndarray, np.ndarray, np.ndarray]]] = {}
     original_report = inherited._report
@@ -105,37 +153,47 @@ def main() -> int:
         inherited._report = original_report
     if inherited_exit != 0:
         raise SystemExit(f"inherited probe exited {inherited_exit}")
+    dirty_after = subprocess.check_output(
+        ["git", "status", "--porcelain"], cwd=repo_root, text=True
+    )
+    if dirty_after:
+        raise SystemExit("worktree changed during measurement")
 
     specifications = [
-        ("1.1", "zu_frc", DIRECT_BAR),
-        ("1.1", "zv_frc", DIRECT_BAR),
-        ("1.2", "sshn_e_init", DIRECT_BAR),
-        ("1.2", "un_e_init", DIRECT_BAR),
-        ("1.2", "vn_e_init", DIRECT_BAR),
-        ("1.3", "ssh_substep1", ACCUMULATION_BAR),
-        ("1.3", "ub_substep1", ACCUMULATION_BAR),
-        ("1.3", "vb_substep1", ACCUMULATION_BAR),
-        ("1.4", "puu_b_final", ACCUMULATION_BAR),
-        ("1.4", "pvv_b_final", ACCUMULATION_BAR),
-        ("1.4", "pssh_final", ACCUMULATION_BAR),
-        ("1.4", "un_adv_final (Hu_avg)", ACCUMULATION_BAR),
-        ("1.4", "vn_adv_final (Hv_avg)", ACCUMULATION_BAR),
+        ("1.1", "zu_frc", None, 9758),
+        ("1.1", "zv_frc", None, 9868),
+        ("1.2", "sshn_e_init", None, 9920),
+        ("1.2", "un_e_init", None, 9758),
+        ("1.2", "vn_e_init", None, 9868),
+        ("1.3", "ssh_substep1", "dyn_spg_ts pssh", 9920),
+        ("1.3", "ub_substep1", "dyn_spg_ts puu_b", 9758),
+        ("1.3", "vb_substep1", "dyn_spg_ts puu_b", 9868),
+        ("1.4", "puu_b_final", "dyn_spg_ts puu_b", 9758),
+        ("1.4", "pvv_b_final", "dyn_spg_ts puu_b", 9868),
+        ("1.4", "pssh_final", "dyn_spg_ts pssh", 9920),
+        ("1.4", "un_adv_final (Hu_avg)", "dyn_spg_ts un_adv", 9758),
+        ("1.4", "vn_adv_final (Hv_avg)", "dyn_spg_ts un_adv", 9868),
     ]
     measurements: list[dict[str, Any]] = []
-    for subrow, name, bar in specifications:
+    for subrow, name, gate_name, expected_n in specifications:
         if name not in captured:
             raise SystemExit(f"required inherited report missing: {name}")
-        metric = _metric(*captured[name][0])
+        metric = _metric(*captured[name][0], expected_n)
+        gate_status = bar_gate.classify(
+            metric["correlation"],
+            metric["mean_abs_ratio"],
+            metric["per_element_max_error_over_nemo_rms"],
+            name=gate_name,
+        )
+        bar = bar_gate.class_bar_for(gate_name)
         metric.update(
             {
                 "subrow": subrow,
                 "field": name,
-                "bar": bar,
-                "status": (
-                    "MATCHED"
-                    if metric["normalized_rms_error"] <= bar
-                    else "DIVERGED"
-                ),
+                "arithmetic_class_bar": bar,
+                "fidelity_bar_row": gate_name,
+                "gate_status": gate_status,
+                "status": "MATCHED" if gate_status == "AT BAR" else "DIVERGED",
             }
         )
         measurements.append(metric)
@@ -149,10 +207,14 @@ def main() -> int:
         if first_diverged is None and status == "DIVERGED":
             first_diverged = subrow
 
-    controls = _controls(captured["zu_frc"][0], DIRECT_BAR)
+    controls = _controls(captured["zu_frc"][0], DIRECT_BAR, 9758)
     if not all(
         controls[key]
-        for key in ("identical_array_zero", "planted_offset_breaches_bar")
+        for key in (
+            "identical_array_zero",
+            "planted_offset_breaches_bar",
+            "zero_shift_is_best",
+        )
     ):
         raise SystemExit(f"scorer controls failed: {controls}")
     if first_diverged is None:
@@ -177,22 +239,53 @@ def main() -> int:
         "spg_dump_pssh_final.bin",
         "spg_dump_un_adv_final.bin",
         "spg_dump_vn_adv_final.bin",
+        "stp_dump_07_dynspg_u.bin",
+        "stp_dump_07_dynspg_v.bin",
+        "stp_dump_07_dynspg_ub.bin",
+        "stp_dump_07_dynspg_vb.bin",
     ]
     run_dir = Path(inherited.RUN_DIR).resolve()
+    input_names = [
+        "mesh_mask.nc",
+        inherited.RESTART_FILE,
+        "ocean.output",
+        "namelist_cfg",
+        "namelist_ref",
+    ]
     provenance_paths = {
         "wrapper": Path(__file__).resolve(),
         "inherited_probe": script_dir / "spg_substep_chain.py",
+        "production_ocean_model": Path(ocean_model_module.__file__).resolve(),
+        "production_barotropic": Path(barotropic_module.__file__).resolve(),
+        "production_bridge": Path(bridge_module.__file__).resolve(),
+        "production_dino_card": Path(dino_module.__file__).resolve(),
+        "fidelity_bar_gate": Path(bar_gate.__file__).resolve(),
         "nemo_stpmlf": oracle / "cfgs/DINO/MY_SRC/stpmlf.F90",
         "nemo_dynspg_ts": oracle / "cfgs/DINO/MY_SRC/dynspg_ts.F90",
     }
+    recipe_repr = repr(dino_module.dino_config_for_recipe("nemo_dino_kamm_mlf"))
     receipt = {
-        "schema": "dino-split-explicit-momentum-chain-round1-v1",
+        "schema": "dino-split-explicit-momentum-chain-round1-v2",
         "session_id": os.environ.get("CODEX_SESSION_ID", "unset"),
+        "git": {
+            "commit": git_sha,
+            "clean_before": dirty_before == "",
+            "clean_after": dirty_after == "",
+        },
         "lane": EXPECTED_LANE,
         "run_dir": str(run_dir),
         "backend": jax.default_backend(),
         "jax_enable_x64": bool(jax.config.jax_enable_x64),
         "e3t_mode": os.environ.get("LEGOESM_NEMO_E3T"),
+        "recipe": "nemo_dino_kamm_mlf",
+        "recipe_repr_sha256": hashlib.sha256(recipe_repr.encode()).hexdigest(),
+        "bar_policy": {
+            "classifier": "fidelity_bar_gate.classify",
+            "correlation_min": bar_gate.BAR_CORR,
+            "mean_abs_ratio_epsilon": bar_gate.BAR_RATIO_EPS,
+            "pointwise_per_element": bar_gate.BAR_POINTWISE,
+            "accumulating_per_element": bar_gate.BAR_ACCUMULATING,
+        },
         "row_1_status": row_status,
         "first_diverged_subrow": first_diverged,
         "ordered_subrows": subrows,
@@ -209,6 +302,9 @@ def main() -> int:
         },
         "dump_sha256": {
             name: _sha256(run_dir / name) for name in dump_names
+        },
+        "run_input_sha256": {
+            name: _sha256(run_dir / name) for name in input_names
         },
         "later_rows": {
             "2_div_hor": "ORDERED-BLOCKED",
