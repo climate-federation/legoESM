@@ -162,3 +162,27 @@ Before attempt 2, store a shallow copy of the metric at interception and make
 the lookup ignore `campaign_gate` on both sides.  Add a uniqueness check and
 retain the existing exact residual-array identity check.  No operand, arm,
 bar, locked corner, ownership rule, control, or continuation rule changes.
+
+## Receipt amendment after withheld attempt 2
+
+Attempt 2 completed the matrix, but its artifact is withheld after an
+internal receipt audit.  Two issues are repaired before the accepted rerun:
+
+1. The preregistration required the eight-term closure to be fail-closed but
+   used the word "exact" without an executable fp64 association envelope.
+   Bind it now to the pointwise operation-count bound
+   `32*eps*(abs(r0)+sum(abs(e_i)))`.  This is derived from the eight additions,
+   subtractions, and separately associated total/term paths; it is not fitted
+   to the observed aggregate closure.  Every wet point must pass.  Adding
+   `1e-12*RMS(r0)` to one wet closure element must breach the same bound.
+2. Shapley values remain computable for a nonconfirming group, but the frozen
+   ownership labels apply only "under a confirmed trio."  For an unconfirmed
+   component, stamp every Shapley label
+   `DESCRIPTIVE_UNADMITTED_GROUP_UNRESOLVED` and retain
+   `UNRESOLVED_IN_COMPOSITE` in the term table.  This changes no number.
+
+Attempt 2's science values have been seen, so this amendment makes no new
+prediction and changes no operand, matrix arm, locked corner, ownership or
+interaction threshold, group classifier, term bound, or continuation rule.
+Only an artifact satisfying both executable receipt requirements may be
+accepted and cited.
