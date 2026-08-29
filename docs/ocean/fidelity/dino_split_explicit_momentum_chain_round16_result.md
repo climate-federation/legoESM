@@ -167,12 +167,17 @@ pair does not explain the deficit at the registered resolution.
 
 The wall control's rise from the corrected-T epoch (`1.1607/0.1194`) to the
 current epoch (`1.6512/0.1702`) opens a separate attribution lane. Sixteen
-ZDF-sweep changes have explicit legacy selectors. They are preregistered into
-four non-overlapping group reversions (entry lifetime, TKE core algebra,
-penetration/mixing-length/final ZDF, and GM/Redi slopes), with the current
-artifact and historical receipt hash-bound. A group owns the movement only if
-both observables clear the frozen closure rule; mixed responses escalate to an
-all-legacy universe gate and complement-paired interactions.
+ZDF-sweep changes have explicit legacy selectors. The first proposed four-way
+partition was not executable: reverting entry N2 removed the carried bundle
+required by faithful slope N2, and the `entry` arm stopped before producing an
+artifact. That independence claim is retracted. The stable `tke_core` arm is
+retained by hash. Four replacement arms form a dependency-conditioned design:
+`entry_dep` also reverts slope N2, while `slope_n2_only` supplies the reachable
+conditioning contrast; the other two arms retain the mixing/final-ZDF and
+remaining slope groups. The missing legacy-entry/faithful-slope corner is
+structurally unreachable, so its interaction is recorded as unidentifiable.
+Every model arm is pinned to producer `9ac2550d...`; mixed responses still
+escalate to an all-legacy universe gate and complement-paired interactions.
 
 ## COMPLETE-PR boundary
 
@@ -186,6 +191,7 @@ or wall climate ownership.
 The following remain open and are not merge conditions for that finished
 unit: the ordered chain stop at row 1.2; rows 1.3--6; the unknown owner of the
 `-0.95 Sv` basin deficit; and the new wall-epoch ZDF selector attribution. The
-last item has a frozen four-arm measurement package but no result, so execution
-and any individual-selector peel belong on a new follow-up branch/PR rather
-than as a tail appended after this PR opens.
+last item has a corrected four-replacement-arm measurement package plus one
+retained arm, but no result, so execution and any individual-selector peel
+belong on a new follow-up branch/PR rather than as a tail appended after this
+PR opens.

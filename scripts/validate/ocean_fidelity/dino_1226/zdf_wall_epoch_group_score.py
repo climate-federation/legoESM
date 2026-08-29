@@ -19,6 +19,8 @@ NEMO_SHA256 = "52bc6c70697126f7522114dbe2fc5cda5b56ce566db28f488d6809b79997b47a"
 CURRENT_PRODUCER = "e013e95ca54957a4454878ed7118e623da0a19ba"
 CURRENT_ARTIFACT_SHA256 = (
     "c8c7135a12a75332cb1662052dc7c346b6bae7523dabe75e0f2223c515ac616a")
+RETAINED_TKE_CORE_SHA256 = (
+    "1be9010230834eca71f349aa672c20c5704c2f6b0887ed19d0b4eff01e38ee3a")
 HISTORICAL_RECEIPT_SHA256 = (
     "5fd033345548dd5b80390293b0ee786d3c23f2a68055ae86afe2b616ad4e5dd0")
 CURRENT = {"ratio_first8": 1.6511846170859847,
@@ -53,11 +55,18 @@ FAITHFUL = {
     "gm_redi_slope_depth_evaluation": "nemo_qco_live_literal",
 }
 GROUPS = {
-    "entry": {
+    # The faithful slope N2 consumer cannot run without the carried entry N2
+    # bundle. This reachable arm therefore includes the one required dependent
+    # reversion. slope_n2_only below supplies the conditioning contrast.
+    "entry_dep": {
         "tke_preclosure_coeff_source": "current_subiteration",
         "tke_shear_evaluation_stage": "implicit_solve_state",
         "tke_shear_metric_source": "tpoint_jacobian",
         "tke_n2_evaluation_stage": "implicit_solve_state",
+        "gm_redi_slope_n2_evaluation": "recompute",
+    },
+    "slope_n2_only": {
+        "gm_redi_slope_n2_evaluation": "recompute",
     },
     "tke_core": {
         "tke_matrix_evaluation": "factored",
@@ -197,7 +206,16 @@ def classify(score: dict[str, float]) -> str:
     return "OPEN_MIXED_OR_PARTIAL"
 
 
-def _classifier_plants() -> dict[str, str]:
+def classify_closure(closure: dict[str, float]) -> str:
+    """Classify a conditional contrast without inventing a missing endpoint."""
+    if all(closure[key] >= 0.50 for key in CURRENT):
+        return "CONDITIONAL_MAJORITY_OWNER"
+    if all(abs(closure[key]) <= 0.10 for key in CURRENT):
+        return "BOUNDED_SMALL"
+    return "OPEN_MIXED_OR_PARTIAL"
+
+
+def _classifier_plants() -> dict[str, object]:
     majority = {key: CURRENT[key] - 0.60 * (CURRENT[key] - HISTORICAL[key])
                 for key in CURRENT}
     mixed = {"ratio_first8": majority["ratio_first8"],
@@ -212,14 +230,29 @@ def _classifier_plants() -> dict[str, str]:
                 "small": "BOUNDED_SMALL", "mixed": "OPEN_MIXED_OR_PARTIAL"}
     if plants != expected:
         raise SystemExit(f"STOP classifier plants failed: {plants}")
+    conditional = {
+        "majority": classify_closure({key: 0.60 for key in CURRENT}),
+        "small": classify_closure({key: 0.05 for key in CURRENT}),
+        "mixed": classify_closure(
+            {"ratio_first8": 0.60, "wall_share_first8": 0.0}),
+    }
+    expected_conditional = {
+        "majority": "CONDITIONAL_MAJORITY_OWNER",
+        "small": "BOUNDED_SMALL",
+        "mixed": "OPEN_MIXED_OR_PARTIAL",
+    }
+    if conditional != expected_conditional:
+        raise SystemExit(f"STOP conditional classifier plants failed: {conditional}")
+    plants["conditional"] = conditional
     return plants
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true")
-    for name in ("nemo", "current", "entry", "tke_core", "mxl_zdf",
-                 "slopes", "historical_receipt", "producer_commit", "out"):
+    for name in ("nemo", "current", "entry_dep", "slope_n2_only",
+                 "tke_core", "mxl_zdf", "slopes", "historical_receipt",
+                 "producer_commit", "out"):
         parser.add_argument("--" + name.replace("_", "-"))
     args = parser.parse_args()
     plants = _classifier_plants()
@@ -259,6 +292,8 @@ def main() -> int:
     current_config, initial_hash, land_mask, current_stress = _load_current(
         args.current)
     group_paths = {name: getattr(args, name) for name in GROUPS}
+    if sha256(group_paths["tke_core"]) != RETAINED_TKE_CORE_SHA256:
+        raise SystemExit("STOP retained tke_core artifact SHA mismatch")
     group_stress = {
         name: _load_group(path, args.producer_commit, name, current_config,
                           initial_hash, land_mask)
@@ -274,16 +309,51 @@ def main() -> int:
     scores = {name: _score(
         args.nemo, path, out.with_name(out.stem + f"_{name}.json"))
         for name, path in group_paths.items()}
-    closures = {name: _closure(score) for name, score in scores.items()}
-    classes = {name: classify(score) for name, score in scores.items()}
-    owners = [name for name, value in classes.items()
-              if value in ("EPOCH_RESTORED", "MAJORITY_OWNER")]
-    if len(owners) == 1:
+    arm_closures = {name: _closure(score) for name, score in scores.items()}
+    arm_classes = {name: classify(score) for name, score in scores.items()}
+
+    def contrast_closure(left: str, right: str) -> dict[str, float]:
+        """Closure added by moving from left endpoint to right endpoint."""
+        return {
+            key: (scores[left][key] - scores[right][key])
+            / (CURRENT[key] - HISTORICAL[key]) for key in CURRENT}
+
+    conditional = {
+        # The only reachable entry contrast: add four entry reversions while
+        # slope_n2 is already legacy. The absent faithful-slope corner means
+        # its interaction with slope_n2 cannot be estimated separately.
+        "entry_given_legacy_slope_n2": contrast_closure(
+            "slope_n2_only", "entry_dep"),
+        "slope_rest_given_legacy_slope_n2": contrast_closure(
+            "slope_n2_only", "slopes"),
+    }
+    conditional_classes = {
+        name: classify_closure(value) for name, value in conditional.items()}
+    primitive = {
+        "tke_core": arm_closures["tke_core"],
+        "mxl_zdf": arm_closures["mxl_zdf"],
+        "slope_n2_at_faithful_entry": arm_closures["slope_n2_only"],
+        **conditional,
+    }
+    primitive_classes = {
+        "tke_core": arm_classes["tke_core"],
+        "mxl_zdf": arm_classes["mxl_zdf"],
+        "slope_n2_at_faithful_entry": arm_classes["slope_n2_only"],
+        **conditional_classes,
+    }
+    owners = [name for name, value in primitive_classes.items()
+              if value in ("EPOCH_RESTORED", "MAJORITY_OWNER",
+                           "CONDITIONAL_MAJORITY_OWNER")]
+    if owners == ["entry_given_legacy_slope_n2"]:
+        disposition = "LOCALIZED_TO_ENTRY_CONDITIONAL_ON_LEGACY_SLOPE_N2"
+        next_action = ("split entry with slope_n2=recompute held in every "
+                       "reachable child; do not claim the missing interaction")
+    elif len(owners) == 1:
         disposition = "LOCALIZED_TO_" + owners[0].upper()
-        next_action = f"split {owners[0]} with the same complement-paired design"
+        next_action = f"split {owners[0]} with dependency-coherent children"
     elif len(owners) > 1:
-        disposition = "COMPOSITION_MULTIPLE_GROUPS"
-        next_action = "run pair/complement interaction arms among owner groups"
+        disposition = "COMPOSITION_MULTIPLE_REACHABLE_CONTRASTS"
+        next_action = "run complement interactions among the named contrasts"
     else:
         disposition = "OPEN_DISTRIBUTED_OR_INTERACTION"
         next_action = "run the all-16-legacy universe gate, then complement pairs"
@@ -300,11 +370,21 @@ def main() -> int:
         "historical": HISTORICAL,
         "historical_band": HISTORICAL_BAND,
         "groups": GROUPS,
+        "structurally_unreachable_corner": {
+            "tke_n2_evaluation_stage": "implicit_solve_state",
+            "gm_redi_slope_n2_evaluation": "carried_step_entry",
+            "reason": "faithful slope N2 requires the pre-zdf_phy carried N2 bundle",
+            "interaction_status": "UNIDENTIFIABLE_FROM_REACHABLE_CORNERS",
+        },
         "group_artifact_sha256": {
             name: sha256(path) for name, path in group_paths.items()},
         "scores": scores,
-        "closure_fraction": closures,
-        "classification": classes,
+        "arm_closure_fraction": arm_closures,
+        "arm_classification": arm_classes,
+        "conditional_closure_fraction": conditional,
+        "conditional_classification": conditional_classes,
+        "primitive_closure_fraction": primitive,
+        "primitive_classification": primitive_classes,
         "disposition": disposition,
         "next_action": next_action,
         "classifier_plants": plants,
