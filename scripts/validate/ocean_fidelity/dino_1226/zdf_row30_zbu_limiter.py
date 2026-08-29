@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
@@ -145,8 +146,11 @@ def main() -> int:
     def qco_r3u(ssh: np.ndarray) -> np.ndarray:
         weighted = e1e2t * np.asarray(ssh, dtype=np.float64)
         pair = weighted + np.roll(weighted, -1, axis=1)
-        r1_hu0 = np.where(hu0 > 0.0, np.float64(1.0) / hu0, 0.0)
-        r1_e1e2u = np.where(e1e2u > 0.0, np.float64(1.0) / e1e2u, 0.0)
+        r1_hu0 = np.zeros_like(hu0)
+        r1_e1e2u = np.zeros_like(e1e2u)
+        np.divide(np.float64(1.0), hu0, out=r1_hu0, where=hu0 > 0.0)
+        np.divide(
+            np.float64(1.0), e1e2u, out=r1_e1e2u, where=e1e2u > 0.0)
         return ((np.float64(0.5) * pair) * r1_hu0) * r1_e1e2u
 
     r3u_now = qco_r3u(np.asarray(now.ssh))
@@ -154,9 +158,16 @@ def main() -> int:
     live_e3u = e3u0 * (np.float64(1.0) + r3u_now[..., None] * umask)
     before_e3u = e3u0 * (np.float64(1.0) + r3u_before[..., None] * umask)
 
-    production_pre = np.asarray(loc["zb_u"])
-    production_zau = np.asarray(loc["zau"])
-    production_static_e3u = np.asarray(loc["e3u_k"])
+    uv_code = next(
+        item for item in ldf.compute_nemo_native_slopes.__code__.co_consts
+        if isinstance(item, types.CodeType) and item.co_name == "_uv_slp")
+    _, uv_calls = ldf.capture_return_locals(state["recall"], uv_code)
+    if len(uv_calls) != 2:
+        raise SystemExit(f"expected two _uv_slp calls, captured {len(uv_calls)}")
+    u_loc, _ = uv_calls[0]
+    production_pre = np.asarray(u_loc["zb_pair"])
+    production_zau = np.asarray(u_loc["zau"])
+    production_static_e3u = np.asarray(u_loc["e3_face"])
     nk = min(
         production_pre.shape[-1], nemo_pre.shape[-1], live_e3u.shape[-1])
     production_pre = production_pre[..., :nk]
@@ -174,7 +185,9 @@ def main() -> int:
         ..., ldf.KLO:min(ldf.KHI, nk)]
     focus = sweep.focus_from_maps(args.mld_maps)
 
-    z1 = np.asarray(loc["z1_slpmax"], dtype=np.float64)
+    z1 = np.asarray(
+        np.float64(1.0) / np.float64(state["gm_cfg"].S_max),
+        dtype=np.float64)
     abs_zau = np.abs(production_zau)
     slope_cap = -z1 * abs_zau
     live_metric_cap = (-np.float64(7.0e3) / live_e3u) * abs_zau
