@@ -158,7 +158,8 @@ def main() -> int:
     j, i, k = idx
     r0 = np_nem_r[j, i]
     r1 = np.nextafter(r0, np.inf)
-    controls["reciprocal_one_ulp_changes_product"] = (zg[idx] * r0 != zg[idx] * r1)
+    controls["reciprocal_one_ulp_changes_product"] = bool(
+        zg[idx] * r0 != zg[idx] * r1)
     controls["reciprocal_control_ji_k"] = [int(j), int(i), int(k)]
     if not all(v for v in controls.values() if isinstance(v, bool)):
         raise SystemExit("a planted row30 zau control did not fire")
