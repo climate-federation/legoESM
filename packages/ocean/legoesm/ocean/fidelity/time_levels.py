@@ -227,6 +227,12 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     "tke_dump_etau_htau.bin": ("now", "write-only row-18 direct operand "
                                         "htau(ji,jj) captured at the same read "
                                         "site and repeated over jk."),
+    "dump_avt.bin": ("now", "composed tracer diffusivity after closure copy "
+                              "and active EVD overwrite, zdfphy.F90:311-323; "
+                              "rn2/rn2b are this step's now/before pair."),
+    "dump_avm.bin": ("now", "composed momentum viscosity after closure copy, "
+                              "active EVD overwrite, and the interior side of "
+                              "lbc_lnk, zdfphy.F90:311-344."),
     "wzv_dump_ww_call1.bin": ("now", "wzv_MLF diagnoses NOW w: pww integrated "
                                       "from hdiv with e3t(:,:,:,Kmm) (sshwzv."
                                       "F90:211), Kmm=Nnn. WRITE at MY_SRC "

@@ -74,6 +74,12 @@ def test_row18_direct_operand_dumps_are_registered_at_now_level():
         assert _DUMP_TIME_LEVEL[name][1].strip(), name
 
 
+def test_composed_zdf_coefficients_are_registered_at_now_level():
+    for name in ("dump_avt.bin", "dump_avm.bin"):
+        assert time_level_for_dump(name) == "now", name
+        assert "zdfphy.F90:" in _DUMP_TIME_LEVEL[name][1]
+
+
 def test_select_ts_picks_before_for_an_eos_rab_dump():
     now, bef = ("T_now", "S_now"), ("T_bef", "S_bef")
     assert select_ts("dump_alpha_b.bin", now=now, before=bef) == bef
