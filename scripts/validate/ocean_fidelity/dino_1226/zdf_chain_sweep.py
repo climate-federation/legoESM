@@ -2646,6 +2646,41 @@ def main() -> int:
                                         literal_dump_exp_metric = metrics(
                                             literal_dump_exp, exp_n, wet_etau,
                                             focus, POINTWISE_BAR)
+                                        argument_bits = np.asarray(
+                                            argument_n).view(np.uint64)
+                                        ordinary_exp = wet_etau & (
+                                            ((argument_bits
+                                              & np.uint64(
+                                                  0x7FFF_FFFF_FFFF_FFFF))
+                                             >> np.uint64(32))
+                                            <= np.uint64(0x4086_232A))
+                                        literal_bits = np.asarray(
+                                            literal_dump_exp).view(np.uint64)
+                                        nemo_exp_bits = np.asarray(
+                                            exp_n).view(np.uint64)
+                                        literal_exp_exact = {
+                                            "ordinary_wet_elements": int(
+                                                ordinary_exp.sum()),
+                                            "ordinary_bit_mismatches": int(
+                                                np.sum(ordinary_exp & (
+                                                    literal_bits
+                                                    != nemo_exp_bits))),
+                                            "exceptional_wet_elements": int(
+                                                np.sum(wet_etau
+                                                       & ~ordinary_exp)),
+                                            "exceptional_bit_mismatches": int(
+                                                np.sum(wet_etau
+                                                       & ~ordinary_exp
+                                                       & (literal_bits
+                                                          != nemo_exp_bits))),
+                                            "exceptional_max_abs": float(
+                                                np.max(np.where(
+                                                    wet_etau & ~ordinary_exp,
+                                                    np.abs(literal_dump_exp
+                                                           - exp_n), 0.0))),
+                                            "range_guard_high_word": (
+                                                "0x4086232a"),
+                                        }
                                         literal_production_exp_metric = metrics(
                                             literal_production_exp, exp_n,
                                             wet_etau, focus, POINTWISE_BAR)
@@ -2785,6 +2820,8 @@ def main() -> int:
                                             "direct_nemo_exp": exp_metric,
                                             "literal_exp_on_dumped_argument":
                                                 literal_dump_exp_metric,
+                                            "literal_exp_bitwise_census":
+                                                literal_exp_exact,
                                             "literal_exp_on_production_argument":
                                                 literal_production_exp_metric,
                                             "production_argument_plus_exp":
@@ -2851,35 +2888,13 @@ def main() -> int:
                                                     "output": row18m,
                                                     "first_failing_operand": {
                                                         "name": (
-                                                            "-gdepw/htau"
-                                                            if not
-                                                            argument_metric[
-                                                                "pass"] else
-                                                            "EXP(-gdepw/htau)"
-                                                            if not exp_metric[
-                                                                "pass"] else
-                                                            "htau latitude "
-                                                            "operand via a "
-                                                            "degree round trip"
-                                                            if raw_rad_metric[
-                                                                "pass"] else
-                                                            "etau additive "
-                                                            "increment after "
-                                                            "raw-radian "
-                                                            "substitution"),
+                                                            "production "
+                                                            "-gdepw/htau input; "
+                                                            "gdepw versus htau "
+                                                            "not yet separated"),
                                                         "nemo_line": (
                                                             "cfgs/DINO/MY_SRC/"
-                                                            "zdftke.F90:590"
-                                                            if (not
-                                                                argument_metric[
-                                                                    "pass"] or
-                                                                not exp_metric[
-                                                                    "pass"])
-                                                            else
-                                                            "zdftke.F90:1005"
-                                                            if raw_rad_metric[
-                                                                "pass"] else
-                                                            "zdftke.F90:590-591"),
+                                                            "zdftke.F90:590"),
                                                     },
                                                     "operand_localization":
                                                         row18m[
@@ -2889,13 +2904,11 @@ def main() -> int:
                                                     "next_round_fix_design": {
                                                         "status": "DESIGNED",
                                                         "option": (
-                                                            "tke_etau_argument_"
-                                                            "evaluation" if
-                                                            not argument_metric[
-                                                                "pass"] else
-                                                            "tke_etau_"
-                                                            "exponential_"
-                                                            "evaluation"),
+                                                            "instrument direct "
+                                                            "gdepw and htau "
+                                                            "operands before "
+                                                            "choosing the next "
+                                                            "production option"),
                                                         "faithful_default_on_"
                                                         "complete_dino_nemo_"
                                                         "cards": (
@@ -2904,16 +2917,14 @@ def main() -> int:
                                                         "everywhere_else": (
                                                             "jax_expression"),
                                                         "rule": (
-                                                            "Reproduce the "
-                                                            "active NEMO "
-                                                            "source-ordered "
-                                                            "argument and EXP "
-                                                            "lowering in pure "
-                                                            "JAX, retaining JIT "
-                                                            "and reverse-mode "
-                                                            "autodiff; pin every "
-                                                            "unchanged card to "
-                                                            "the current path."),
+                                                            "Add write-only htau "
+                                                            "and live-gdepw dumps, "
+                                                            "prove restart bit "
+                                                            "identity, substitute "
+                                                            "one operand at a time, "
+                                                            "then implement only "
+                                                            "the first failing "
+                                                            "construction."),
                                                     },
                                                 }
                                             ordered_tail = {
@@ -3276,6 +3287,7 @@ def main() -> int:
         Path("packages/ocean/legoesm/ocean/physics/vertical_mixing/_shared.py"),
         Path("packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py"),
         Path("packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py"),
+        Path("/usr/lib64/libmvec.so.1"),
         Path("packages/ocean/legoesm/ocean/vertical.py"),
         Path("packages/ocean/legoesm/ocean/state.py"),
         HERE / "dump_lane.py",
