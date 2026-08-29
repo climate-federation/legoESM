@@ -213,6 +213,7 @@ def main() -> int:
     ni, nj = jpi - 2 * hls, jpj - 2 * hls
     with netCDF4.Dataset(run / "mesh_mask.nc") as ds:
         active = np.moveaxis(np.asarray(ds["tmask"][0]), 0, -1)
+        nemo_lat_deg = np.asarray(ds["gphit"][0], dtype=np.float64)
     # This canonical mesh_mask is already the halo-free (199,52,36) field;
     # binary streams alone carry the 2-cell halo described by _read_dims.
     if active.shape[:2] != (nj, ni):
@@ -266,18 +267,36 @@ def main() -> int:
         np.float64(np.pi) / np.float64(180.0)
         * np.asarray(etau_kwargs["lat_deg"], dtype=np.float64)
     )
+    if nemo_lat_deg.shape != source_phase.shape:
+        raise AssertionError(
+            f"NEMO gphit shape {nemo_lat_deg.shape} != {source_phase.shape}")
     legacy_phase = np.asarray(
         jnp.deg2rad(etau_kwargs["lat_deg"]), dtype=np.float64)
     vector_sine = glibc_vector_sin(source_phase, args.vector_sin_library)
-    vector_htau_2d = np.maximum(
-        tke_mod._NEMO_TKE_HTAU_MIN_M,
-        np.minimum(
-            tke_mod._NEMO_TKE_HTAU_MAX_M,
-            tke_mod._NEMO_TKE_HTAU_SLOPE_M * np.abs(vector_sine),
-        ),
-    )
+
+    def assemble_htau(sine_value: np.ndarray) -> np.ndarray:
+        return np.maximum(
+            tke_mod._NEMO_TKE_HTAU_MIN_M,
+            np.minimum(
+                tke_mod._NEMO_TKE_HTAU_MAX_M,
+                tke_mod._NEMO_TKE_HTAU_SLOPE_M * np.abs(sine_value),
+            ),
+        )
+
+    vector_htau_2d = assemble_htau(vector_sine)
+    direct_phase = (
+        np.float64(np.pi) / np.float64(180.0) * nemo_lat_deg)
+    direct_jax_sine = np.asarray(jnp.sin(jnp.asarray(direct_phase)))
+    direct_vector_sine = glibc_vector_sin(
+        direct_phase, args.vector_sin_library)
+    direct_jax_htau_2d = assemble_htau(direct_jax_sine)
+    direct_vector_htau_2d = assemble_htau(direct_vector_sine)
     vector_htau = np.broadcast_to(
         vector_htau_2d[..., None], gdepw_l.shape)[..., :netau]
+    direct_jax_htau = np.broadcast_to(
+        direct_jax_htau_2d[..., None], gdepw_l.shape)[..., :netau]
+    direct_vector_htau = np.broadcast_to(
+        direct_vector_htau_2d[..., None], gdepw_l.shape)[..., :netau]
     wet_columns = np.any(wet, axis=-1)
 
     operands = {
@@ -296,6 +315,9 @@ def main() -> int:
         "substitute_htau": negative_ratio(gdepw_l, htau_n),
         "substitute_both": negative_ratio(gdepw_n, htau_n),
         "vector_sin_htau": negative_ratio(gdepw_l, vector_htau),
+        "direct_gphit_jax_htau": negative_ratio(gdepw_l, direct_jax_htau),
+        "direct_gphit_vector_htau": negative_ratio(
+            gdepw_l, direct_vector_htau),
     }
 
     rounded = tke_mod._nemo_binary64_round
@@ -335,10 +357,22 @@ def main() -> int:
     vector_htau_metric = sweep.metrics(
         vector_htau, htau_n, wet, focus, POINTWISE)
     vector_htau_exact = exact_census(vector_htau, htau_n, wet)
-    vector_confirmed = (
-        vector_htau_exact["n_unequal_wet_elements"] == 0
-        and arms["vector_sin_htau"]["full_row"]["pass"]
-    )
+    direct_jax_exact = exact_census(direct_jax_htau, htau_n, wet)
+    direct_vector_exact = exact_census(direct_vector_htau, htau_n, wet)
+    vector_exact = vector_htau_exact["n_unequal_wet_elements"] == 0
+    direct_jax_is_exact = direct_jax_exact["n_unequal_wet_elements"] == 0
+    direct_vector_is_exact = (
+        direct_vector_exact["n_unequal_wet_elements"] == 0)
+    if direct_jax_is_exact and not vector_exact:
+        htau_owner = "LATITUDE"
+    elif vector_exact and not direct_jax_is_exact:
+        htau_owner = "VECTOR-SIN"
+    elif direct_vector_is_exact and not direct_jax_is_exact and not vector_exact:
+        htau_owner = "INTERACTION"
+    elif direct_vector_is_exact:
+        htau_owner = "AMBIGUOUS"
+    else:
+        htau_owner = "NEXT-ASSEMBLY-OPERAND"
 
     singles = [
         name for name in ("substitute_gdepw", "substitute_htau")
@@ -422,9 +456,13 @@ def main() -> int:
         "owner": owner,
         "vector_sin_discriminator": {
             "disposition": (
-                "CONFIRM-VECTOR-SIN" if vector_confirmed
-                else "REFUTE-VECTOR-SIN"),
+                "CONFIRM-HTAU-OPERANDS" if direct_vector_is_exact
+                else "REFUTE-HTAU-OPERANDS"),
+            "owner": htau_owner,
             "glibc_version": glibc_version(),
+            "captured_latitude_vs_nemo_gphit_exact": exact_census(
+                np.asarray(etau_kwargs["lat_deg"])[..., None],
+                nemo_lat_deg[..., None], wet_columns[..., None]),
             "source_phase_vs_legacy_exact": exact_census(
                 source_phase[..., None], legacy_phase[..., None],
                 wet_columns[..., None]),
@@ -435,6 +473,18 @@ def main() -> int:
             "htau": vector_htau_metric,
             "htau_exact": vector_htau_exact,
             "full_row": arms["vector_sin_htau"]["full_row"],
+            "direct_gphit_jax": {
+                "htau_exact": direct_jax_exact,
+                "htau": sweep.metrics(
+                    direct_jax_htau, htau_n, wet, focus, POINTWISE),
+                "full_row": arms["direct_gphit_jax_htau"]["full_row"],
+            },
+            "direct_gphit_vector": {
+                "htau_exact": direct_vector_exact,
+                "htau": sweep.metrics(
+                    direct_vector_htau, htau_n, wet, focus, POINTWISE),
+                "full_row": arms["direct_gphit_vector_htau"]["full_row"],
+            },
         },
         "operands": operands,
         "arms": arms,
