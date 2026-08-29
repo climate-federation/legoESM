@@ -68,6 +68,11 @@ def main() -> int:
     literal_g, literal_rows_abs = T._reduce(literal)
     generic_gap, literal_gap = generic_g - nemo_g, literal_g - nemo_g
     delta = literal_gap - generic_gap
+    if abs(generic_gap - T.BASELINE[360]) > 2.0 * T.FLOOR[360]:
+        raise SystemExit(
+            "STOP generic control does not reproduce the frozen day-360 "
+            f"basin epoch: got {generic_gap:.17g}, expected "
+            f"{T.BASELINE[360]:.17g} within {2.0*T.FLOOR[360]:.17g} Sv")
 
     wet = A.tmask
     nm, gm, lm = G.metrics(nemo, wet), G.metrics(generic, wet), G.metrics(literal, wet)
@@ -105,6 +110,7 @@ def main() -> int:
         "literal_minus_generic_sv": delta,
         "response_fraction": delta / abs(generic_gap),
         "floor_sv": T.FLOOR[360],
+        "frozen_baseline_sv": T.BASELINE[360],
         "verdict": verdict,
         "generic_rows_sv": (generic_rows_abs - nemo_rows).tolist(),
         "literal_rows_sv": (literal_rows_abs - nemo_rows).tolist(),
