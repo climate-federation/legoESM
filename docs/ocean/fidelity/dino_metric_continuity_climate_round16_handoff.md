@@ -214,7 +214,7 @@ export CODEX_SESSION_ID=01a04e34-d1fb-73e0-b25a-177641f0a246
 run_root=/tmp/dino-metric-continuity-factorial-01a04e34
 scorer_checkout="$run_root/scorer-checkout"
 nemo=/tmp/dino_eta_waves/nemo_5d_eta.npz
-test -d "$scorer_checkout/.git" || {
+test -e "$scorer_checkout/.git" || {
   echo "STOP: run corrected Block 3 to create the scorer checkout" >&2
   exit 1
 }
