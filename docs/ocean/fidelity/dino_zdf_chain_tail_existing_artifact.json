@@ -108,7 +108,7 @@
     "tke_dump_zmxld.bin": "df9a09e7fcb9e11b7549fb523cb241a2a22a1e073182bcbcc00d56e0d5cfcde2",
     "tke_dump_zmxlm.bin": "60ed331574d813885fb29399b2dbf041a6913ea965d45c09e2890eef8b3ef830"
   },
-  "repo_sha": "19addd99b0ff79e4bf42d8c5735c0e37a4b0b1e1",
+  "repo_sha": "f31f09ccd26efcc04c2b9739484f26d2fadcd8a9",
   "rows": {
     "19": {
       "disposition": "UNMEASURED-NEEDS-DUMP",
@@ -581,13 +581,16 @@
           "ln_zdfswm": false
         },
         "separated_salinity_K_control": {
+          "K_unequal_elements": 1,
           "fired": true,
           "perturbation": "+1 ULP",
           "perturbed_index": [
             1,
             1,
             0
-          ]
+          ],
+          "production_pair_calls": 0,
+          "production_scalar_calls": 4
         },
         "shared_K_object_asserted": true
       },
