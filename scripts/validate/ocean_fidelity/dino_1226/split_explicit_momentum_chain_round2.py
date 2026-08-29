@@ -832,11 +832,7 @@ def main() -> int:
             "campaign_classifier_and_alignment": classifier_controls,
         },
         "ordered_continuation": {
-            "row_1_1": (
-                "CLOSED_BRIDGE_WIND_SOURCE"
-                if counterfactual["u"]["verdict"] == "CONFIRMS_BRIDGE_WIND_SOURCE"
-                else "OPEN"
-            ),
+            "row_1_1": "OPEN_SOURCE_LOCALIZED_FAITHFUL_TOTAL_DEBT",
             "row_1_2": "ORDERED_BLOCKED_UNLESS_FAITHFUL_TOTAL_AT_BAR",
             "row_1_3": "ORDERED_BLOCKED_UNLESS_FAITHFUL_TOTAL_AT_BAR",
             "rows_2_to_6": "ORDERED_BLOCKED",
