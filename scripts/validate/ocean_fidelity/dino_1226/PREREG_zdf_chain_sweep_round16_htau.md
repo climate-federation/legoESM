@@ -50,3 +50,22 @@ found 8,046 wet phases whose +1 ULP plant changes the vector result; the
 control now deterministically selects the first of those, then perturbs only
 that one argument.  This preserves the registered one-argument/one-ULP test
 without pretending an insensitive plant is red-capable.
+
+Pre-measurement extension, 2026-08-28, after `REFUTE-VECTOR-SIN`: the vector
+candidate reduced the direct `htau` exact miss from 74,005 to 3,364 wet
+elements and cleared the complete row at its bar, but it failed the exact
+operand requirement.  No production code was changed.  Disassembly shows the
+oracle loads native degree-valued `gphit`, evaluates runtime `rpi/180`, then
+executes `mulpd -> _ZGVbN2v_sin -> andpd(abs) -> mulpd(45) -> minpd(30) ->
+maxpd(0.5)`.  legoESM's captured latitude has passed through its radian grid
+representation before returning to degrees.  The existing `mesh_mask.nc`
+already carries NEMO's direct `gphit`, so no new oracle dump is required.
+
+Add the registered 2x2 substitution now: legacy captured latitude versus
+direct dumped `gphit`, each with JAX/XLA sine and host `_ZGVbN2v_sin`.  Score
+the direct latitude in degrees and the multiplied phase bitwise, then score
+each constructed `htau` bitwise and through the complete row.  `LATITUDE`
+owns only if direct-`gphit`+JAX is exact and legacy+vector is not; `VECTOR-SIN`
+owns only for the converse; `INTERACTION` owns if only direct-`gphit`+vector
+is exact.  If even the combined arm is not exact, stop and localize the next
+assembly operation.  The same focus bars and red controls apply.
