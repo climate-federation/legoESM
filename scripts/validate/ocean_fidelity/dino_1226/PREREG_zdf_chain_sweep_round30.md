@@ -83,3 +83,7 @@ fixes is promoted from this incomplete interval.
 
 Rows 31 and 32 may run their already-registered no-new-dump volume-form
 discriminators as targeting only. They cannot be promoted across row 30.
+
+The frozen held instrumentation, SHA gates, exact operand order, and human
+execution blocks for this interval are in
+`docs/ocean/fidelity/PREREG_zdf_chain_sweep_round30_uv_operands.md`.

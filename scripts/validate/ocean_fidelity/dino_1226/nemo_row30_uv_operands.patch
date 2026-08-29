@@ -1,0 +1,85 @@
+--- a/cfgs/DINO/MY_SRC/ldfslp.F90
++++ b/cfgs/DINO/MY_SRC/ldfslp.F90
+@@ -83,0 +84,7 @@
++   ! #1226 row 30: full-halo-zeroed write-only U/V operand ladder.
++   REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   zgru_iik_dump, zgru_iikm1_dump
++   REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   zau_dump, zav_dump
++   REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   zbu_pre_dump, zbv_pre_dump
++   REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   zbu_post_dump, zbv_post_dump
++   REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   uslp_raw_dump, vslp_raw_dump
++   REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   uslp_postshapiro_dump, vslp_postshapiro_dump
+@@ -183,0 +191,6 @@
++            ALLOCATE( zgru_iik_dump(jpi,jpj,jpk), zgru_iikm1_dump(jpi,jpj,jpk) )
++            ALLOCATE( zau_dump(jpi,jpj,jpk), zav_dump(jpi,jpj,jpk) )
++            ALLOCATE( zbu_pre_dump(jpi,jpj,jpk), zbv_pre_dump(jpi,jpj,jpk) )
++            ALLOCATE( zbu_post_dump(jpi,jpj,jpk), zbv_post_dump(jpi,jpj,jpk) )
++            ALLOCATE( uslp_raw_dump(jpi,jpj,jpk), vslp_raw_dump(jpi,jpj,jpk) )
++            ALLOCATE( uslp_postshapiro_dump(jpi,jpj,jpk), vslp_postshapiro_dump(jpi,jpj,jpk) )
+@@ -193,0 +207,12 @@
++         zgru_iik_dump(:,:,:) = 0._wp
++         zgru_iikm1_dump(:,:,:) = 0._wp
++         zau_dump(:,:,:) = 0._wp
++         zav_dump(:,:,:) = 0._wp
++         zbu_pre_dump(:,:,:) = 0._wp
++         zbv_pre_dump(:,:,:) = 0._wp
++         zbu_post_dump(:,:,:) = 0._wp
++         zbv_post_dump(:,:,:) = 0._wp
++         uslp_raw_dump(:,:,:) = 0._wp
++         vslp_raw_dump(:,:,:) = 0._wp
++         uslp_postshapiro_dump(:,:,:) = 0._wp
++         vslp_postshapiro_dump(:,:,:) = 0._wp
+@@ -245,0 +271,8 @@
++            IF( .NOT. l_1226_raw_dump_done ) THEN
++               zgru_iik_dump(ji,jj,jk) = zgru(ji,jj,iik)
++               zgru_iikm1_dump(ji,jj,jk) = zgru(ji,jj,iikm1)
++               zau_dump(ji,jj,jk) = zau
++               zav_dump(ji,jj,jk) = zav
++               zbu_pre_dump(ji,jj,jk) = zbu
++               zbv_pre_dump(ji,jj,jk) = zbv
++            ENDIF
+@@ -249,0 +283,4 @@
++            IF( .NOT. l_1226_raw_dump_done ) THEN
++               zbu_post_dump(ji,jj,jk) = zbu
++               zbv_post_dump(ji,jj,jk) = zbv
++            ENDIF
+@@ -270,0 +308,4 @@
++            IF( .NOT. l_1226_raw_dump_done ) THEN
++               uslp_raw_dump(ji,jj,jk) = zwz(ji,jj)
++               vslp_raw_dump(ji,jj,jk) = zww(ji,jj)
++            ENDIF
+@@ -292,0 +334,4 @@
++            IF( .NOT. l_1226_raw_dump_done ) THEN
++               uslp_postshapiro_dump(ji,jj,jk) = uslp(ji,jj,jk)
++               vslp_postshapiro_dump(ji,jj,jk) = vslp(ji,jj,jk)
++            ENDIF
+@@ -378,0 +424,12 @@
++         OPEN( UNIT=8900, FILE='eiv_dump_zgru_iik.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=8901, FILE='eiv_dump_zgru_iikm1.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=8902, FILE='eiv_dump_zau.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=8903, FILE='eiv_dump_zav.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=8904, FILE='eiv_dump_zbu_pre.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=8905, FILE='eiv_dump_zbv_pre.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=8906, FILE='eiv_dump_zbu_post.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=8907, FILE='eiv_dump_zbv_post.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=8908, FILE='eiv_dump_uslp_raw.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=8909, FILE='eiv_dump_vslp_raw.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=8910, FILE='eiv_dump_uslp_postshapiro.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=8911, FILE='eiv_dump_vslp_postshapiro.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
+@@ -405,0 +463,14 @@
++         DO jk = 1, jpk
++            CALL dino_dump_2d( 8900, zgru_iik_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8901, zgru_iikm1_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8902, zau_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8903, zav_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8904, zbu_pre_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8905, zbv_pre_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8906, zbu_post_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8907, zbv_post_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8908, uslp_raw_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8909, vslp_raw_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8910, uslp_postshapiro_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8911, vslp_postshapiro_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++         END DO
+@@ -407,0 +479,2 @@
++         CLOSE(8900) ; CLOSE(8901) ; CLOSE(8902) ; CLOSE(8903) ; CLOSE(8904) ; CLOSE(8905)
++         CLOSE(8906) ; CLOSE(8907) ; CLOSE(8908) ; CLOSE(8909) ; CLOSE(8910) ; CLOSE(8911)

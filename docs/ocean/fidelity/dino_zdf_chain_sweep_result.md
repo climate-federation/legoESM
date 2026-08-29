@@ -3,6 +3,35 @@
 Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 (`RUN_SEQDUMP_D180_1R`, `kt=5761`).
 
+## Round-23 preregistration: row-30 U/V ownership ladder held for execution
+
+Row 30 remains **DIVERGED** and unscored beyond the Round-22 interval. The
+next measurement is frozen before execution in
+`PREREG_zdf_chain_sweep_round30_uv_operands.md`: twelve deterministic,
+full-buffer-zeroed write-only streams walk `zgru/zgrv`, `zau/zav`, pre/post
+limiter `zbu/zbv`, raw U/V slopes, and post-Shapiro U/V in
+`ldfslp.F90:203-292` order. The pointwise bar remains `1.0e-15`, with U and V
+censuses 9,758 and 9,868 and all four southern focus columns scored at every
+stage. The first nonzero count owns the localization interval; raw and
+post-Shapiro stages have a frozen finer peel and are not mislabeled as atomic
+operands.
+
+The patch SHA256 is
+`de6b46dc3fc1c347e79f9b44f49eda44f40e2edb938c7b7d0a82dfc0bbb7d110`.
+It dry-runs against deterministic-writer `ldfslp.F90` SHA256
+`a4e65b80484423df67247e4b93ace08fd50fa929e325b2f2af113d4bb31ffd30`;
+the expected patched source SHA256 is
+`8b4d8cffe35d66241eb77bdc508ef15d6dd90d8ff192fd60201ff83a7d523a29`.
+The committed preregistration contains the SHA-gated build, no-retry ON/OFF,
+197-shared-stream exact bracket, measured-dump-SHA substitution, and scorer
+blocks. No NEMO build or run was performed in this round.
+
+Rows 31--32 still need no new NEMO dump, but row-30 closure alone does not
+promote them. Row 31 requires the literal momentum matrix/ordered Thomas path
+in production and U `0/9758`, V `0/9868`; only after that may row 32 seek
+production T and S `0/9920` on the registered tracer volume form. Climate
+arms remain unauthorized.
+
 ## Round-22 result: row 28 closes; complete row 30 remains the ordered stop
 
 The held row-28 run is bound at

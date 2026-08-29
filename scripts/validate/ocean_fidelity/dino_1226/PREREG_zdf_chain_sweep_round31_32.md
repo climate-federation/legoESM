@@ -29,3 +29,12 @@ native-slope K33 term, and feed the production paired implicit solve. Score T
 and S independently at `1.0e-12`, including every focus column. A wrong-e3t
 slot and a one-cell roll must fail. No disposition is promotable while an
 earlier row is red.
+
+## Promotion clarification (2026-08-29, before row-30 execution)
+
+Row-30 closure only removes the ordering block. Row 31 next requires the
+literal matrix and ordered Thomas path in production and U `0/9758`, V
+`0/9868` at `1.0e-12`. Row 32 follows only after that pass and requires the
+volume-form production T and S results both at `0/9920`. The unchanged-card
+scope and complete gates are frozen in
+`docs/ocean/fidelity/PREREG_zdf_chain_sweep_round30_uv_operands.md`.

@@ -20,6 +20,15 @@ FINAL BOARD, 2026-07-27, corr-to-1.0 bar) · **VERIFIED-EARLIER** (older doc/com
 re-certified at the 1.0 bar) · **WAIVED** (reason given) · **UNVERIFIED** (nobody has
 measured a number against this specific NEMO array).
 
+**Full-step import note (2026-08-29):** the newer matched-day-180 ZDF ledger is
+`dino_zdf_chain_sweep_result.md`, not the older aggregate labels in rows
+11/12/30/50 below. Its rows 1--29 are harvestable receipts; ZDF row 30
+(`ldf_slp` U/V) is still the ordered stop and now has a frozen operand-ladder
+handoff. The ZDF momentum/tracer implicit applications (ZDF rows 31--32,
+corresponding to full-step rows 30 and 50) remain targeting-only until that
+stop closes and their production volume-form gates pass. Do not promote the
+older `VERIFIED-EARLIER` structural claims over those numeric receipts.
+
 | order | stpmlf line | routine (concrete, DINO dispatch) | what it computes | status | evidence/reason |
 |---|---|---|---|---|---|
 | 1 | 160 | `day` | calendar advance | WAIVED:diagnostic | pure calendar bookkeeping, no physics |

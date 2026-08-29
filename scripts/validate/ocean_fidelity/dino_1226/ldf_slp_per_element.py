@@ -160,6 +160,34 @@ def capture_locals(fn, target_code):
     return out, holder
 
 
+def capture_return_locals(fn, target_code):
+    """Run ``fn`` and retain locals plus return value for every target call.
+
+    ``compute_nemo_native_slopes`` calls its nested ``_uv_slp`` twice, first
+    for U and then for V. Row 30 needs both call frames without copying that
+    production algebra into the scorer. The tracer observes only; callers
+    must prove the returned model result is bit-identical to an untraced call.
+    """
+    calls = []
+
+    def tracer(frame, event, arg):
+        if event == "call" and frame.f_code is target_code:
+            def local_tracer(f, ev, value):
+                if ev == "return":
+                    calls.append((f.f_locals.copy(), value))
+                return local_tracer
+            return local_tracer
+        return None
+
+    old = sys.gettrace()
+    sys.settrace(tracer)
+    try:
+        out = fn()
+    finally:
+        sys.settrace(old)
+    return out, calls
+
+
 class _JnpCapture:
     """Proxy for the ``jnp`` module attribute of ``gm_redi_latlon_cgrid``, used
     to READ OFF the PRE-SMOOTHER slope field from the REAL production call.

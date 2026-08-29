@@ -43,6 +43,20 @@ def test_ldfslp_intermediate_chain_is_registered():
         assert time_level_for_dump(name) == "before", name
 
 
+def test_row30_uv_operand_ladder_is_registered():
+    """Every new U/V write-only slot consumes the BEFORE slope state."""
+    for name in (
+        "eiv_dump_zgru_iik.bin", "eiv_dump_zgru_iikm1.bin",
+        "eiv_dump_zau.bin", "eiv_dump_zav.bin",
+        "eiv_dump_zbu_pre.bin", "eiv_dump_zbv_pre.bin",
+        "eiv_dump_zbu_post.bin", "eiv_dump_zbv_post.bin",
+        "eiv_dump_uslp_raw.bin", "eiv_dump_vslp_raw.bin",
+        "eiv_dump_uslp_postshapiro.bin", "eiv_dump_vslp_postshapiro.bin",
+    ):
+        assert time_level_for_dump(name) == "before", name
+        assert "ldfslp.F90:" in _DUMP_TIME_LEVEL[name][1], name
+
+
 def test_atf_after_dumps_are_after_level():
     assert time_level_for_dump("atf_dump_tem_after.bin") == "after"
     assert time_level_for_dump("atf_dump_tem_before.bin") == "before"

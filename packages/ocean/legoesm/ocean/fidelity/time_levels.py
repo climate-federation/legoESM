@@ -99,6 +99,30 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     "eiv_dump_zgrv_iik.bin": ("before", "ldfslp.F90 zgrv rolling buffer, current level (unit 8846)"),
     "eiv_dump_zgrv_iikm1.bin": ("before", "ldfslp.F90 zgrv rolling buffer, level above (unit 8847)"),
     "eiv_dump_prd_arg.bin": ("before", "ldfslp.F90 prd argument as received (unit 8848)"),
+    # Row-30 U/V source-order write-only ladder (units 8900--8911). These
+    # preserve the same BEFORE density/rn2b state as the existing slope dumps.
+    "eiv_dump_zgru_iik.bin": (
+        "before", "ldfslp.F90:203/217 U gradient, current rolling slot"),
+    "eiv_dump_zgru_iikm1.bin": (
+        "before", "ldfslp.F90:203/217 U gradient, preceding rolling slot"),
+    "eiv_dump_zau.bin": ("before", "ldfslp.F90:242 metric-scaled U gradient"),
+    "eiv_dump_zav.bin": ("before", "ldfslp.F90:243 metric-scaled V gradient"),
+    "eiv_dump_zbu_pre.bin": (
+        "before", "ldfslp.F90:244 U denominator before bounds"),
+    "eiv_dump_zbv_pre.bin": (
+        "before", "ldfslp.F90:245 V denominator before bounds"),
+    "eiv_dump_zbu_post.bin": (
+        "before", "ldfslp.F90:248 U denominator after bounds"),
+    "eiv_dump_zbv_post.bin": (
+        "before", "ldfslp.F90:249 V denominator after bounds"),
+    "eiv_dump_uslp_raw.bin": (
+        "before", "ldfslp.F90:269 raw U slope before Shapiro"),
+    "eiv_dump_vslp_raw.bin": (
+        "before", "ldfslp.F90:270 raw V slope before Shapiro"),
+    "eiv_dump_uslp_postshapiro.bin": (
+        "before", "ldfslp.F90:279-285 U after Shapiro, before LBC"),
+    "eiv_dump_vslp_postshapiro.bin": (
+        "before", "ldfslp.F90:286-292 V after Shapiro, before LBC"),
     # Asselin filter dumps are explicit about their own level.
     "atf_dump_tem_before.bin": ("before", "traatf_qco.F90, pre-filter state"),
     "atf_dump_sal_before.bin": ("before", "traatf_qco.F90, pre-filter state"),
