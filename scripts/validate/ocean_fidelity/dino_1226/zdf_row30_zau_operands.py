@@ -121,7 +121,9 @@ def main() -> int:
     e1_lego = np.asarray(state["grid"].dx_u[:, 1:], dtype=np.float64)
     with Dataset(run / "mesh_mask.nc") as ds:
         e1_halo = np.asarray(ds.variables["e1u"][0], dtype=np.float64)
-    e1_nemo = e1_halo[hls:jpj-hls, hls:jpi-hls]
+    # mesh_mask is the global domain product and already omits the local
+    # decomposition halos carried by the write-only stream buffers.
+    e1_nemo = e1_halo
     if e1_nemo.shape != e1_lego.shape:
         raise SystemExit(f"metric shapes differ: {e1_nemo.shape} {e1_lego.shape}")
 
