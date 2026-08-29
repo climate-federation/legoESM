@@ -93,7 +93,9 @@ def test_full_literal_slope_with_carried_w_bundle_has_finite_jit_gradient():
     mask = jnp.ones((nlat, nlon), dtype=jnp.float64)
     umask = jnp.ones((nlat, nlon + 1), dtype=jnp.float64)
     vmask = jnp.ones((nlat + 1, nlon), dtype=jnp.float64)
-    cfg = GMRediConfig(slope_prd_evaluation="nemo_literal")
+    cfg = GMRediConfig(
+        slope_prd_evaluation="nemo_literal",
+        slope_metric_evaluation="nemo_reciprocal")
     eos_fn = make_eos_fn("nemo_seos", None, rho0=1026.0)
     carried_n2 = jnp.full((nlat, nlon, nlev - 1), 1.0e-5)
     carried_e3w = jnp.broadcast_to(

@@ -143,7 +143,7 @@ def main() -> int:
         "lego_metric_reciprocal_multiply": zg * np_leg_r[:, :, None],
         "nemo_metric_division": zg / e1_nemo[:, :, None],
         "nemo_metric_numpy_reciprocal_multiply": zg * np_nem_r[:, :, None],
-        "nemo_metric_jax_eager_reciprocal_multiply": np.asarray(
+        "nemo_metric_jax_explicit_compile_reciprocal_multiply": np.asarray(
             jax_literal.lower(jnp.asarray(zg), jnp.asarray(e1_nemo)).compile()(jnp.asarray(zg), jnp.asarray(e1_nemo))),
         "nemo_metric_jax_jit_reciprocal_multiply": np.asarray(
             jax_literal(jnp.asarray(zg), jnp.asarray(e1_nemo))),

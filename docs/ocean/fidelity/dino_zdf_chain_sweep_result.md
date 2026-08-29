@@ -3,6 +3,83 @@
 Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 (`RUN_SEQDUMP_D180_1R`, `kt=5761`).
 
+## Round-24 result: line-242 owner fixed; row 30 advances to `zbu_pre`
+
+The held row-30 operand campaign is bound to binary SHA256
+`a77fbaa9e302e699acb76b89a4c4d8e04d4ec0a77e6b0bbee8b8a45180a6d20f`
+and run directory `/tmp/RUN_ZDF30_UV_ON.fYlRzG`. Its certified output restart
+is byte-identical, all 197 shared streams are exact, and the complete twelve-
+dump SHA inventory is in the committed parent machine receipt
+`dino_zdf_row30_uv_operands_artifact.json` (SHA256
+`37c5565786d614597f8cd4b1d5f8e2b5d9656b5cf04ef5601d12aefe34a3203d`).
+The ordered first score was `zau`: **190/9,758** columns failed the `1e-15`
+bar, while all four southern focus columns passed. The preceding `zgru` slots
+were exact (U **0/9,758**, V **0/9,868**), so the BEFORE-level `rhd` EOS field,
+`umask`, and horizontal difference were exonerated before the metric stage.
+
+The preregistered offline peel owns the discrepancy completely. NEMO's dumped
+`e1u` and legoESM's selected U metric are bit-exact (zero unequal values, max
+ULP zero). Division reproduces **190/9,758**; NEMO's `domhgr.F90:140` stored
+reciprocal followed by the literal `ldfslp.F90:242`
+`zau = zgru(ji,jj,iik) * r1_e1u(ji,jj)` gives **0/9,758** in NumPy, an
+explicit JAX lower/compile path, and JIT, with every focus column passing. The committed receipt is
+`dino_zdf_row30_zau_operands_artifact.json`, SHA256
+`cc3bf736862bd898264e088a361c5d1095c1c282bc1ae51b698c8577db86d997`.
+Qualification from adversarial review: that immutable receipt calls its
+explicit `.lower().compile()` arm `jax_eager`; the name is wrong, although the
+number is valid. The committed probe now calls that arm `jax_explicit_compile`
+so it cannot repeat the claim. Ownership does not rely on the duplicate arm:
+the NumPy literal, JIT literal, and post-fix production composite are each
+independent zero-failure receipts.
+
+Production now has `GMRediConfig.slope_metric_evaluation`. `division` remains
+the global and explicit legacy default; only `nemo_dino_kamm` and its MLF card
+select `nemo_reciprocal`. That path freezes the reciprocal and product with
+JAX optimization barriers, preserving JIT and AD. Every other DINO card keeps
+the old value and path. The disabled `physics.lateral_mixing` GM/Redi shadow is
+documented as inert (`scheme="none"`) in the two-surface ratchet. Hand-computed
+binary64 red coverage uses `0.1/7`, which differs by one ULP from
+`0.1*(1/7)`; selector, typo, card-scope, JIT, and finite-gradient gates pass.
+
+The post-fix ordered composite advances both metric rows exactly:
+
+- `zau`: **0/9,758**, `focus_fail=0`;
+- `zav`: **0/9,868**, `focus_fail=0`.
+
+It then stops, correctly, at the next numeric divergence:
+`zbu_pre` is **9,758/9,758** red and all four focus columns are red. The bound
+post-fix receipt is `dino_zdf_row30_uv_operands_postfix_artifact.json`, SHA256
+`b2935557eb1ce6be74da08c7707e5323086091c1a4806fab6c454d1e6954c181`.
+The new localization interval is NEMO `ldfslp.F90:226-244`: the passed
+`zau` does not enter pre-bound `zbu`; line 244 is
+`zbu = 0.5_wp * ( zdzr(ji,jj) + zdzr(ji+1,jj) )`, where lines 226-230 build
+`zdzr` in source order from `zm1_g`, exact BEFORE-level `prd+1`, the two
+adjacent `pn2` slots (the `rn2b` actual argument made by
+`stpmlf.F90:207,234`), and `1-0.5*tmask(k+1)`. Alpha/beta are therefore not
+an operand of line 242, but they are upstream of this newly reached `rn2b`
+interval.
+
+The next registered design is an existing-dump, no-NEMO-rerun peel unless an
+input SHA gate proves a slot absent: `pn2(jk)` -> `pn2(jk+1)` -> ordered sum ->
+`prd+1` product -> mask-factor product -> `zm1_g` product -> east-face pair
+sum -> literal `0.5_wp` multiply. Every stage retains the `1e-15` U census and
+four focus scores; the first red operand owns the fix. A faithful fix, if
+implied, will be selectable and default only on the two NEMO DINO cards, with
+all other cards pinned byte-identical.
+
+Rows 31--32 remain **TARGETING-BLOCKED-BY-ROW30**. Their exact promotion
+requirements are unchanged: row 31 must dispatch the literal
+`dynzdf.F90:199-214,340-380` production path and score U **0/9,758**, V
+**0/9,868** at `1e-12`; only then may row 32 dispatch the paired tracer
+volume form and score T and S each **0/9,920** at `1e-12`. Offline helper-only
+zeros are not promotable, and no new NEMO dumps are presently required.
+
+The four focus passes at the original `zau` stage prove that specific 190-
+column deviation lies outside the MLD focus support. They do not create a
+waiver: the frozen Round-23 text explicitly requires rows 30--32 VERIFIED or
+waived and defines no focus-only/`OPEN-BOUNDED` exception. The newly exposed
+`zbu_pre` stage also fails the focus set. **CLIMATE ARMS NOT AUTHORIZED.**
+
 ## Round-23 preregistration: row-30 U/V ownership ladder held for execution
 
 Row 30 remains **DIVERGED** and unscored beyond the Round-22 interval. The
