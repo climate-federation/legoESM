@@ -3,6 +3,79 @@
 Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 (`RUN_SEQDUMP_D180_1R`, `kt=5761`).
 
+## Round-14 result: scalar-LIBM waiver refuted; literal EXP lands; ordered stop remains at row 18
+
+The preregistered Rule-1b discriminator used the 59 columns where JAX/XLA
+`exp` missed the dumped oracle operand.  On this host the linked runtime is
+glibc 2.34.  Scalar `exp` loaded from `libm.so.6` by `ctypes` did **not** own
+the difference: the ownership residual failed **59/59** columns at the
+`1e-16` bar (maximum `1.421263e-15`), and the planted +1-ULP argument control
+fired.  Row 18 is therefore not `WAIVED-LIBM`.
+
+The oracle's active loop imports glibc's two-lane
+`_ZGVbN2v_exp@GLIBC_2.22`.  The implemented
+`tke_etau_exponential_evaluation="nemo_literal"` reproduces that ordinary-
+range glibc-2.34 arithmetic in pure JAX: exact 1024-entry table bits,
+source-ordered range reduction and polynomial, and explicit binary64 rounding
+points with identity JVPs.  It defaults only on `nemo_dino_kamm` and
+`nemo_dino_kamm_mlf`; `jax_expression` remains byte-identical everywhere else
+and is the legacy opt-in on those two cards.  The literal helper is bit-exact
+on all 328,072 ordinary-range wet dumped arguments; its exceptional fallback
+differs only for 430 subnormal results, maximum absolute `9.855e-314`.
+
+The ordered rerun is:
+
+| Row | Operation | Disposition | Whole-domain per-column result | Southern focus |
+|---:|---|---|---|---|
+| 1--15 | `eos_rab` through all TKE RHS terms | `VERIFIED` | unchanged; rows 2, 4, 8, 10, 12--15 remain 0/9,920 | 4/4 pass |
+| 16 | wave surface boundary | `WAIVED` | resolved DINO has `ln_wave=F` | inactive |
+| 17 | literal TKE solve | `VERIFIED` | 0/9,920; max 0 | 4/4 exact |
+| 18 | `nn_etau=1` penetrating TKE addition | **`DIVERGED`** | **21/9,920; max `2.277967e-15`** | **4/4 exact** |
+| 19--32 | mixing length through EVD, assembly, `ldf_slp`, and both implicit applications | `UNMEASURED` | ordered stop at row 18 | ordered stop |
+
+### Remaining row-18 operand
+
+The EXP fix itself is verified: evaluating the literal helper on NEMO's
+dumped exponent argument scores **0/9,920** (maximum `6.660194e-313`).  The
+same helper on legoESM's production argument fails **217/9,920**, maximum
+`1.500624e-15`.  Most decisively, substituting NEMO's dumped EXP into the
+literal left-associated factor chain at `zdftke.F90:590-591` makes both the
+increment and final `en` output **0/9,920** (final maximum exactly zero).
+
+Thus the remaining first operand is the input to EXP, specifically the
+latitude-dependent `htau` constructed at:
+
+```fortran
+htau(:,:) = MAX( 0.5_wp, MIN( 30._wp, 45._wp * &
+   ABS( SIN( rpi/180._wp * gphit(A2D(0)) ) ) ) ) ! zdftke.F90:1005
+```
+
+The carried live `gdepw(Kmm)` is already verified by preceding rows.  Both a
+literal `(rpi/180)*gphit` association and the raw grid radians stay within the
+coarser argument bar but do not become bit-identical.  The oracle binary
+imports `_ZGVbN2v_sin@GLIBC_2.22`, so the registered next design is a
+`tke_htau_evaluation="nemo_literal"` pure-JAX transcription of that linked
+vector-sine range reduction/polynomial, followed by NEMO's source-ordered
+`45*ABS`, `MIN`, and `MAX`.  It defaults only on the two DINO oracle cards;
+the existing JAX sine construction remains byte-identical elsewhere and is
+their legacy opt-in.  Required red receipts are direct `htau`/argument dumps,
+a one-ULP latitude control, JIT and forward/reverse AD, unchanged-card pins,
+and final row 18 at 0/9,920.  This second vector transcendental port is too
+large for this round, so ordered discipline does not promote row 19.
+
+**CLIMATE ARMS NOT AUTHORIZED.**  Rows 19--32 remain unmeasured.  Frozen bands
+remain baseline `22.479491 m`, CONFIRM `<=11.2397455 m`, REFUTE
+`>=20.2775 m`, with all previously registered acceptance gates unchanged.
+
+Receipts:
+
+- scalar-LIBM discriminator:
+  `docs/ocean/fidelity/dino_zdf_etau_libm_ownership_artifact.json`, SHA256
+  `d0e62557c3d3e09b43ffb30494a219a9e47fc0b40a1730e5a33c2cbeb63f0854`;
+- literal-EXP and remaining-operand sweep:
+  `docs/ocean/fidelity/dino_zdf_chain_sweep_round17_artifact.json`, SHA256
+  `2e3d07208936b6343b8b4e4f4244e22af176569b1140c75ee2ecebdf3a0df1a4`.
+
 ## Round-11 result: literal TKE solve closed; ordered stop at row 18
 
 `tke_solver_evaluation="nemo_literal"` is implemented and defaults only on
