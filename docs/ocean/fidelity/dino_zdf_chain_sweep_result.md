@@ -3,6 +3,117 @@
 Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 (`RUN_SEQDUMP_D180_1R`, `kt=5761`).
 
+## Round-11 result: literal TKE solve closed; ordered stop at row 18
+
+`tke_solver_evaluation="nemo_literal"` is implemented and defaults only on
+`nemo_dino_kamm` and `nemo_dino_kamm_mlf`.  It transcribes
+`zdftke.F90:547-565` as separate ordered forward-diagonal and forward-RHS JAX
+scans, seeds the direct `jpkm1` solution, reverse-substitutes toward the
+surface, and applies the floor and W mask after the solve.  It preserves the
+division-before-multiply association in the RHS recurrence and does not solve
+the held `jpk` row as an ordinary Thomas row.
+
+`shared_thomas` remains the exact historical default for every other DINO
+recipe, generic `TKEConfig`, the ORCA-oriented `_nemo_tke_config`, and both ACC
+TKE cards; it is the explicit legacy opt-in on the two DINO oracle cards.  The
+literal solver requires the already-literal NEMO matrix, z=0 surface row,
+floor positivity, and W mask and fails closed otherwise.  The red-capable hand
+case pins the first-column solution to `22/23, 19/23, 0`, distinguishes an
+unequal-depth column, and proves that the shared solver, a changed RHS, and a
+multiply-before-divide recurrence do not pass.  Eager/JIT equality and finite
+reverse gradients are also pinned.  The focused solver/TKE suites pass 87/87;
+the time-level registry suite passes 16/16.
+
+The ordered CPU/fp64 disposition is:
+
+| Row | Operation | Disposition | Whole-domain per-column result | Southern focus |
+|---:|---|---|---|---|
+| 1--15 | `eos_rab` through all TKE RHS terms | `VERIFIED` | unchanged | 4/4 pass |
+| 16 | wave surface boundary | `WAIVED` | resolved DINO has `ln_wave=F` | inactive |
+| 17 | literal TKE tridiagonal solve application | **`VERIFIED`** | **0/9,920; max `0`** | **4/4 exact** |
+| 18 | `nn_etau=1` penetrating TKE addition | **`DIVERGED`** | **173/9,920; max `2.277967e-15`** | **4/4 pass** |
+| 19--32 | mixing length through EVD, assembly, `ldf_slp`, and both implicit applications | `UNMEASURED` | ordered stop at row 18 | ordered stop |
+
+### Row-18 first operand
+
+The active NEMO expression is:
+
+```fortran
+en(ji,jj,jk) = en(ji,jj,jk) + rn_efr * en(ji,jj,1) * &
+   EXP( -gdepw(ji,jj,jk,Kmm) / htau(ji,jj) ) &
+   * MAX( 0._wp, 1._wp - zice_fra(ji) ) * wmask(ji,jj,jk) * tmask(ji,jj,1)
+```
+
+Source: NEMO 5.0.2 `cfgs/DINO/MY_SRC/zdftke.F90:590-591` under the active
+`nn_etau == 1` branch at line 588.
+
+The pre-penetration `en` is exact (0/9,920).  A new write-only stream separates
+the exponent argument from its result.  The raw `-gdepw/htau` argument is
+`VERIFIED`, 0/9,920 failures with maximum `4.496170e-16`; the immediately
+following NEMO `EXP(argument)` is the first numeric divergence after
+substituting NEMO's dumped argument, 59/9,920 failures with maximum
+`1.500624e-15`.  The unsubstituted production argument-plus-EXP composite
+fails 355/9,920 with maximum `1.875780e-15`.  The complete additive increment fails
+1,480/9,920 in production and the final row fails 173/9,920.  NumPy/libm and a
+raw-radian latitude substitution also fail, so neither is promoted as a fix.
+All four southern focus columns pass the final row (`0` through
+`2.847459e-16`); the whole-domain census, not a focus-only score, finds this
+roundoff-tier mismatch.
+
+The argument/EXP/increment instrument is write-only: its output restart is
+bit-identical to the dump-off control for all 131 shared numeric variables.
+The active binary imports `exp@GLIBC_2.29`; source, binary, all three operand
+streams, restarts, time levels, and the MLD focus map are SHA-stamped in the
+artifact.  Planted perturbation, horizontal-roll, and nonfinite controls all
+fire.
+
+### Deferred large-fix design
+
+The next option is `tke_etau_exponential_evaluation`.  `nemo_literal` will be
+the correct-by-default choice only on `nemo_dino_kamm` and
+`nemo_dino_kamm_mlf`; `jax_expression` remains byte-identical everywhere else
+and becomes the explicit legacy opt-in on those two cards.  The faithful path
+must reproduce the active NEMO/glibc fp64 exponential lowering from the
+already-verified argument using pure JAX source-ordered range reduction and
+polynomial/table evaluation; a NumPy callback is forbidden because it breaks
+JIT and reverse-mode AD.  Required red tests include the direct argument and
+EXP dumps, the worst day-180 columns, ULP/`nextafter` discriminators, eager/JIT
+identity, finite reverse gradients, final row 18 at 0/9,920, and exact pins for
+all unchanged cards.  This is a new differentiable elementary-function path
+and is too large for this round, so rows 19--32 are not measured.
+
+### Climate status
+
+**CLIMATE ARMS NOT AUTHORIZED.**  The chain is not verified end-to-end.  The
+frozen prediction is unchanged: baseline southern day-90 MLD RMS
+`22.479491 m`, CONFIRM `<=11.2397455 m`, REFUTE `>=20.2775 m`, with the
+legacy-baseline (`0.001 m`), acceptance-floor, 5x pass-tally, and
+southern-density gates unchanged.  The eventual faithful command remains
+option-free.  The eventual legacy command must add
+`--tke-solver-evaluation shared_thomas` and, once the row-18 option exists, its
+`jax_expression` selector to the previously frozen control command.  These
+are not runnable authorization commands while row 18 remains divergent.
+
+Machine-readable receipt:
+`docs/ocean/fidelity/dino_zdf_chain_sweep_round14_artifact.json`, SHA256
+`56bd965f2625ef5196729650fc326662005f0f2263320df4cb44b21ec63d5b1d`.
+The stamped committed probe/tree SHA is
+`ca287822841fb04138fe6cd8d25aedffd5dcc252`.
+
+### Round-11 adversarial review
+
+Two independent read-only reviews raised four holds, all resolved before this
+receipt was committed.  The solver review required an association
+discriminator exercised through the literal solver, full production-dispatch
+coverage, and behavioral shared-solver pins for every unchanged reaching
+card.  The receipt review required substituting the dumped NEMO exponent
+argument rather than inferring attribution from an at-bar argument composite;
+that stricter measurement is the 59/9,920 result above.  The final rerun uses
+the committed fixes and exits cleanly.  Residual scope: the write-only bracket
+proves restart neutrality for this matched one-step state, and the literal
+solver is intentionally selectable only on DINO cards whose terminal W mask
+is the NEMO zero row.
+
 ## Round-10 result: literal Langmuir closed; ordered stop at row 17
 
 `tke_langmuir_evaluation="nemo_literal"` is implemented and defaults only on
