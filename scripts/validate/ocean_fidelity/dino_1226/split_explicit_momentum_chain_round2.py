@@ -623,6 +623,8 @@ def main() -> int:
     F_faithful_v = _v_to_nemo(faithful_arm["F_slow_v"])
     residual_u = F_legacy_u - nemo["u"]["final"]
     residual_v = F_legacy_v - nemo["v"]["final"]
+    faithful_residual_u = F_faithful_u - nemo["u"]["final"]
+    faithful_residual_v = F_faithful_v - nemo["v"]["final"]
 
     total_metrics = {
         "legacy_u": round1._metric(F_legacy_u, nemo["u"]["final"], umask2, EXPECTED_U),
@@ -651,6 +653,16 @@ def main() -> int:
     term_metrics["v"]["wind_faithful"] = _term_metric(
         faithful_terms_v["wind"], nemo_terms_v["wind"], vmask2, EXPECTED_V, residual_v
     )
+    faithful_term_metrics: dict[str, dict[str, Any]] = {"u": {}, "v": {}}
+    for name in ordered:
+        faithful_term_metrics["u"][name] = _term_metric(
+            faithful_terms_u[name], nemo_terms_u[name], umask2, EXPECTED_U,
+            faithful_residual_u,
+        )
+        faithful_term_metrics["v"][name] = _term_metric(
+            faithful_terms_v[name], nemo_terms_v[name], vmask2, EXPECTED_V,
+            faithful_residual_v,
+        )
 
     counterfactual = {
         "u": _counterfactual_score(
@@ -807,6 +819,7 @@ def main() -> int:
         },
         "total_metrics": total_metrics,
         "term_metrics": term_metrics,
+        "faithful_term_metrics": faithful_term_metrics,
         "counterfactual": counterfactual,
         "term_error_sum_closure": {
             "u_normalized_to_total_residual": _rms((term_sum_error_u - residual_u)[umask2]) / _rms(residual_u[umask2]),
@@ -855,6 +868,17 @@ def main() -> int:
                 f"removal={attribution['residual_removal']:.6f} "
                 f"{attribution['verdict']}"
             )
+        if component == "u":
+            print("    post-faithful U tail:")
+            for name in ordered:
+                attribution = faithful_term_metrics["u"][name]["attribution"]
+                print(
+                    f"      {name}: "
+                    f"corrR={attribution['correlation_with_total_residual']:+.6f} "
+                    f"gain={attribution['rms_gain']:.6f} "
+                    f"removal={attribution['residual_removal']:.6f} "
+                    f"{attribution['verdict']}"
+                )
     print(f"artifact={args.output}")
     return 0
 
