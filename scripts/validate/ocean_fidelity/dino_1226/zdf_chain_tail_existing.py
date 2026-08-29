@@ -32,11 +32,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 import bn2_alpha_compare as loaders  # noqa: E402
 import dump_lane  # noqa: E402
 import ldf_slp_per_element as ldf_probe  # noqa: E402
+import legoesm.ocean.physics.vertical_mixing as vmix_mod  # noqa: E402
 import zdf_chain_sweep as sweep  # noqa: E402
 from kamm_twin_90d import _build_twin_state  # noqa: E402
 from legoesm.core.precision import PrecisionPolicy, set_policy  # noqa: E402
 from legoesm.ocean.fidelity.time_levels import time_level_for_dump  # noqa: E402
-import legoesm.ocean.physics.vertical_mixing as vmix_mod  # noqa: E402
 from legoesm.ocean.physics.vertical_mixing.tke import (  # noqa: E402
     compute_K_from_tke,
     compute_mixing_lengths,
@@ -143,9 +143,9 @@ def main() -> int:
     pair_calls = []
     real_pair = vmix_mod.implicit_vertical_diffusion_ocean_pair
 
-    def spy_pair(T, S, K, *pair_args, **pair_kwargs):
-        pair_calls.append((T, S, K))
-        return real_pair(T, S, K, *pair_args, **pair_kwargs)
+    def spy_pair(t_field, s_field, k_field, *pair_args, **pair_kwargs):
+        pair_calls.append((t_field, s_field, k_field))
+        return real_pair(t_field, s_field, k_field, *pair_args, **pair_kwargs)
 
     vmix_mod.implicit_vertical_diffusion_ocean_pair = spy_pair
     try:
