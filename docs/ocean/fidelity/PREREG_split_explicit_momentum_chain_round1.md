@@ -67,10 +67,11 @@ barotropic-integrator defect.
 The wrapper requires a clean Git worktree, CPU, fp64,
 `LEGOESM_NEMO_E3T=both`, lane `d180`, exact registered populations, finite wet
 values, and the probe's own registered time levels. It records and enforces a
-zero-shift alignment scan on `zu_frc`. Its scorer controls must all fire before
-an artifact is admitted: identical arrays score zero, a planted `1e-6`
-RMS-scale wet-field offset breaches the relevant bar, and zero shift is the
-best alignment. Any missing field, failed control, shape/population mismatch,
+zero-shift alignment scan on the actual legoESM/NEMO `zu_frc` pair. Its scorer
+controls must all fire before an artifact is admitted: identical arrays score
+zero, a planted `1e-6` RMS-scale offset turns an identical pair red, the same
+perturbation changes the actual binding's score, and zero shift is the best
+alignment. Any missing field, failed control, shape/population mismatch,
 non-finite wet value, wrong lane, dirty tree, or nonzero inherited-probe exit
 is `INVALID`, not evidence. The receipt hashes the Git commit, all 18 dumps
 read by the inherited probe, restart, mesh, output/namelists, production

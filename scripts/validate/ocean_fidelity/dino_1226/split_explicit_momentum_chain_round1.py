@@ -92,9 +92,17 @@ def _controls(
     lego, nemo, mask = sample
     identical = _metric(nemo, nemo, mask, expected_n)["normalized_rms_error"]
     scale = float(np.sqrt(np.mean(np.asarray(nemo)[np.asarray(mask, dtype=bool)] ** 2)))
-    planted = np.asarray(lego).copy()
-    planted[np.asarray(mask, dtype=bool)] += 1.0e-6 * scale
-    planted_error = _metric(planted, nemo, mask, expected_n)["normalized_rms_error"]
+    planted_identity = np.asarray(nemo).copy()
+    planted_identity[np.asarray(mask, dtype=bool)] += 1.0e-6 * scale
+    planted_identity_error = _metric(
+        planted_identity, nemo, mask, expected_n
+    )["normalized_rms_error"]
+    actual_error = _metric(lego, nemo, mask, expected_n)["normalized_rms_error"]
+    planted_actual = np.asarray(lego).copy()
+    planted_actual[np.asarray(mask, dtype=bool)] += 1.0e-6 * scale
+    planted_actual_error = _metric(
+        planted_actual, nemo, mask, expected_n
+    )["normalized_rms_error"]
     alignment: list[dict[str, Any]] = []
     for dj in (-1, 0, 1):
         for di in (-1, 0, 1):
@@ -104,10 +112,13 @@ def _controls(
     best = min(alignment, key=lambda item: item["normalized_rms_error"])
     return {
         "identical_array_zero": identical == 0.0,
-        "planted_offset_breaches_bar": planted_error > bar,
+        "planted_identity_breaches_bar": planted_identity_error > bar,
+        "actual_binding_perturbation_changes_score": planted_actual_error != actual_error,
         "zero_shift_is_best": (best["dj"], best["di"]) == (0, 0),
         "identical_error": identical,
-        "planted_error": planted_error,
+        "actual_binding_error": actual_error,
+        "planted_identity_error": planted_identity_error,
+        "planted_actual_binding_error": planted_actual_error,
         "alignment_scan": alignment,
         "alignment_best": best,
     }
@@ -133,7 +144,9 @@ def main() -> int:
         ["git", "status", "--porcelain"], cwd=repo_root, text=True
     )
     if dirty_before:
-        raise SystemExit("clean tracked and untracked worktree required")
+        raise SystemExit(
+            "clean tracked and untracked worktree required; found:\n" + dirty_before
+        )
 
     captured: dict[str, list[tuple[np.ndarray, np.ndarray, np.ndarray]]] = {}
     original_report = inherited._report
@@ -212,7 +225,8 @@ def main() -> int:
         controls[key]
         for key in (
             "identical_array_zero",
-            "planted_offset_breaches_bar",
+            "planted_identity_breaches_bar",
+            "actual_binding_perturbation_changes_score",
             "zero_shift_is_best",
         )
     ):
