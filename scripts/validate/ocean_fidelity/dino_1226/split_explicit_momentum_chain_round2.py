@@ -232,7 +232,6 @@ def _run_arm(state, sf, geometry, z_coord, config) -> dict[str, Any]:
     )
     if any(field is None for field in before_fields):
         raise SystemExit("NEMO leapfrog BEFORE fields required for term peel")
-    ldf_state = tuple(field.data for field in before_fields)
     centred_sf = sf._replace(
         tau_x=0.5 * (state.tau_x_prev + sf.tau_x),
         tau_y=0.5 * (state.tau_y_prev + sf.tau_y),
@@ -253,7 +252,7 @@ def _run_arm(state, sf, geometry, z_coord, config) -> dict[str, Any]:
     pe_module._bc_ke_and_pressure_gradients = spy_gradients
     try:
         _, diagnostics = model.tendencies_with_diagnostics(
-            state, surface_forcing=centred_sf, dt=DT, ldf_state=ldf_state,
+            state, surface_forcing=centred_sf, dt=DT,
         )
     finally:
         pe_module._bc_ke_and_pressure_gradients = real_gradients
@@ -930,6 +929,13 @@ def main() -> int:
         "run_dir": str(run_dir),
         "restart_clock": clock,
         "oracle_runtime_flags": oracle_flags,
+        "lateral_friction_levels": {
+            "lego_live_barotropic_first_pass": "NOW",
+            "lego_later_3d_dissipative_pass": "BEFORE_BAROTROPIC_RESULT_DISCARDED",
+            "nemo_dynldf_operand": "BEFORE",
+            "lego_source": "ocean_model_latlon_cgrid.py:8950-9030",
+            "nemo_source": "stpmlf.F90:319-322; dynldf.F90:69-119",
+        },
         "runtime": {
             "backend": jax.default_backend(),
             "jax_enable_x64": bool(jax.config.jax_enable_x64),
