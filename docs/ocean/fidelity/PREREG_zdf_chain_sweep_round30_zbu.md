@@ -101,3 +101,28 @@ identity perturbation, wet NaN, and bar-scale perturbation. The raw-mesh,
 restart, dump, source, binary, parent-artifact, focus-map, clean-HEAD, CPU, and
 fp64 gates are fatal. Rows 31--32 and climate remain blocked until the row is
 closed under the original no-focus-exception registration.
+
+## Frozen continuation: first raw U slope
+
+Date: 2026-08-29. Frozen after the live-face fix made both post-bound rows
+exact and before inspecting any raw-slope substitution. The complete scorer's
+new first red stage is `uslp_raw` at original `ldfslp.F90:269`: `8387/9758`,
+with all four focus columns red. Existing `dump_nmln.bin`,
+`eiv_dump_gdept.bin`, `zau`, `zbu_post`, and `uslp_raw` receipts are sufficient;
+no rebuild is authorized first.
+
+The registered peel follows `ldfslp.F90:251-271`: `iku` from the two NEMO
+`nmln` columns -> integer `zfi` -> live `gdept(Kmm)` face average -> surface
+`e3u(miku,Kmm)` subtraction -> `zdepu` -> carried anchor at `jk=iku` ->
+interior `zau/(zbu-zeps)` -> ML blend -> U mask. The whole-domain bar remains
+`1.0e-15`, with the four focus columns on every numeric stage.
+
+The first discrimination is the surface-thickness operand. The current code
+subtracts a T-column `_e3_top`; NEMO subtracts one half of the live U-face
+`e3u(ji,jj,miku,Kmm)` inside its outer half multiply. If replacing only that
+operand by the already-verified live `e3u_k[...,0]` yields `0/9758`, it owns
+the row at `ldfslp.F90:261-264`. If not, the peel stops at the first earlier
+red stage. Controls replace NEMO `nmln` by a one-level shift, use the old
+T-column surface thickness, roll the face thickness, inject wet NaN, and add a
+bar-scale perturbation; each must fail. All parent/dump/source/restart/mesh,
+clean-HEAD, CPU, fp64, and focus-map gates remain fatal.
