@@ -2,7 +2,7 @@
 
 Date: 2026-08-29. Session
 `01a04e34-d1fb-73e0-b25a-177641f0a246`. Measured package commit
-`720158832b6`.
+`3e76b2166e0`.
 
 ## Association rows 9.4--9.6
 
@@ -18,6 +18,15 @@ For row 9.6, divide-after-sum differs at 2,655/9,920 points. These are the
 executed source expressions at `dynspg_ts.F90:698-704,722-724`. The production
 path now preserves these associations under
 `barotropic_continuity_evaluation="nemo_literal"`.
+
+Adversarial review caught and closed a selector-routing defect before any
+climate arm: the first implementation let the selector alter face-depth/drag
+physics while both values still took literal divergence. Production now keys
+H_u/H_v only on `barotropic_face_depth` and keys generic versus literal
+divergence only on `barotropic_continuity_evaluation`. A one-substep test with
+nonzero drag and `g=0` requires both arms to return bit-identical transports
+and velocities while SSH is bit-distinct; the combined continuity/drag/
+partial-cell set passes 40/40 on CPU/fp64.
 
 At the final package commit, the hardened production acceptance again reports
 rows 9.1--9.7 all `AT BAR` with normalized error and maximum error both exactly
@@ -91,11 +100,11 @@ reported. No GPU arm was run in this round.
 ## Bound artifacts
 
 - acceptance: SHA-256
-  `e58b78bf31bf792acf3a58dab4f624a06925399f326cabd7148e7cf1e1a507ea`
+  `a8da092619b04760071ddba66bd7a3f7a522824e9caa314025cc5f3a21cffb08`
 - recurrence: SHA-256
-  `48d5ef6829578a036f8655e89447cdbfaa6ae0c789d4ad63dcd2f4394d52324e`
+  `315e7f93362b2d9694bfea4ab6636e6763c3b4e1dfa362fa0d01ba1d02d31121`
 - combined adjudication: SHA-256
-  `61495f82d812d7f1d1f3219b9415f87b82c78840d260f8567a83646409d5f70e`
+  `21925ad16b32f6e7240243d6b08eb882bf835c772daccb7839382c558b6def2a`
 
 The earlier round-13/14 artifacts are unbound diagnostics superseded by these
 hardened receipts. No NEMO process, GPU, `mpirun`, push, or new instrumentation

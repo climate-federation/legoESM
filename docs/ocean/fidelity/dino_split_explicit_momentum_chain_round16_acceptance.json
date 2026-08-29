@@ -14,8 +14,8 @@
       "mesh_mask.nc": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622"
     },
     "production_sha256": {
-      "barotropic": "d8ea030ae2e61f3961035ae2930b348e8f0c8deebfecd93233a317d41f8ef392",
-      "dino_card": "6b7a24d000e6a809191e1ce9228eef95c8d16f40e4c3ed94460ababd5e871616",
+      "barotropic": "583776857172334a1347d5b7425355f598d22076a9abe56888cb317ee022f812",
+      "dino_card": "a72a7682488cab0ec46a5a57877c6ca33b5cdd047d1047d07fc128bfbcdca9a6",
       "inherited_probe": "698831d6e79c7cc225fa65cff2f8170fe64d2c1b3fd602cbe0e7aeee9157a247",
       "nemo_io": "cfa18c2991a4d6175a6e2f231031799aa00cebdb2ffe30b35b4ca6d076d804a2",
       "round9_scorer": "dfd071b5cb9a3f5f9ccca2d745785f3b8a9a9dfd2a03afceab3425617741a1c4",
@@ -32,7 +32,7 @@
   },
   "disposition": "ROW_1.3_ALL_OPERANDS_AT_BAR_RELEASE_1.4",
   "first_diverged_subrow": null,
-  "git_commit": "720158832b62f53a48b46b78fd395a95423da4fa",
+  "git_commit": "3e76b2166e021263d2a0816c284d156bcd5f7565",
   "jax_enable_x64": true,
   "later_rows": {
     "1.4": "RELEASED",

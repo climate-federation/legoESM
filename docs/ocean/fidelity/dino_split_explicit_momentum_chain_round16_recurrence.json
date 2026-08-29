@@ -155,7 +155,7 @@
   "git": {
     "clean_after": true,
     "clean_before": true,
-    "commit": "720158832b62f53a48b46b78fd395a95423da4fa"
+    "commit": "3e76b2166e021263d2a0816c284d156bcd5f7565"
   },
   "held_forcing_metrics": {
     "u": {
@@ -708,9 +708,9 @@
     "inherited_probe": "698831d6e79c7cc225fa65cff2f8170fe64d2c1b3fd602cbe0e7aeee9157a247",
     "nemo_dynspg_ts": "a64b32e7c9ce1c1be6c121597235b08f05c853961e83d52be6082ea7242f6275",
     "nemo_stpmlf": "26849c4fa34305317881959dd5a1e41af9b13aa4f96a290a998add955a73a283",
-    "production_barotropic": "d8ea030ae2e61f3961035ae2930b348e8f0c8deebfecd93233a317d41f8ef392",
+    "production_barotropic": "583776857172334a1347d5b7425355f598d22076a9abe56888cb317ee022f812",
     "production_bridge": "b23fcd68febf011776f1e8194c05377777dcfc0fe083b4b62e1639fd661ef8ba",
-    "production_dino_card": "6b7a24d000e6a809191e1ce9228eef95c8d16f40e4c3ed94460ababd5e871616",
+    "production_dino_card": "a72a7682488cab0ec46a5a57877c6ca33b5cdd047d1047d07fc128bfbcdca9a6",
     "production_ocean_model": "48605f5dacd2944fb6cb25ba6a98e0b873cc577b72370e0c73ee54eb799e124f",
     "round1_scorer": "19f1de44300c1e1119af03405af887a4bdf63d51af9c6dfb5998a74529c4cac9",
     "wrapper": "ff5aa01351bf5b95cc8f4dbad72b0268173e1ceb8163c28241d0b2dd44759ad6"
