@@ -2629,6 +2629,12 @@ def main() -> int:
                                         exp_n = exp_n_full[..., 1:1 + netau]
                                         isolated_exp_l = np.asarray(jnp.exp(
                                             jnp.asarray(argument_n)))
+                                        literal_dump_exp = np.asarray(
+                                            tke_mod._nemo_glibc234_vector_exp(
+                                                jnp.asarray(argument_n)))
+                                        literal_production_exp = np.asarray(
+                                            tke_mod._nemo_glibc234_vector_exp(
+                                                jnp.asarray(argument_l)))
                                         inc_direct_n = inc_direct_n_full[
                                             ..., 1:1 + netau]
                                         argument_metric = metrics(
@@ -2637,9 +2643,72 @@ def main() -> int:
                                         exp_metric = metrics(
                                             isolated_exp_l, exp_n, wet_etau,
                                             focus, POINTWISE_BAR)
+                                        literal_dump_exp_metric = metrics(
+                                            literal_dump_exp, exp_n, wet_etau,
+                                            focus, POINTWISE_BAR)
+                                        literal_production_exp_metric = metrics(
+                                            literal_production_exp, exp_n,
+                                            wet_etau, focus, POINTWISE_BAR)
                                         argument_plus_exp_metric = metrics(
                                             argument_plus_exp_l, exp_n,
                                             wet_etau, focus, POINTWISE_BAR)
+                                        nemo_radian = (
+                                            jnp.asarray(
+                                                float.fromhex(
+                                                    "0x1.1df46a2529d39p-6"),
+                                                dtype=etau_args[0].dtype)
+                                            * etau_kwargs["lat_deg"])
+                                        literal_degree_htau = jnp.maximum(
+                                            tke_mod._NEMO_TKE_HTAU_MIN_M,
+                                            jnp.minimum(
+                                                tke_mod._NEMO_TKE_HTAU_MAX_M,
+                                                tke_mod._NEMO_TKE_HTAU_SLOPE_M
+                                                * jnp.abs(jnp.sin(
+                                                    nemo_radian))))
+                                        literal_degree_argument = np.asarray(
+                                            -etau_args[2]
+                                            / literal_degree_htau[..., None])[
+                                                ..., :netau]
+                                        literal_degree_argument_metric = metrics(
+                                            literal_degree_argument,
+                                            argument_n, wet_etau, focus,
+                                            POINTWISE_BAR)
+                                        raw_radian_argument = np.asarray(
+                                            -etau_args[2]
+                                            / raw_htau[..., None])[..., :netau]
+                                        raw_radian_argument_metric = metrics(
+                                            raw_radian_argument, argument_n,
+                                            wet_etau, focus, POINTWISE_BAR)
+                                        rounded = tke_mod._nemo_binary64_round
+                                        literal_line_increment = rounded(
+                                            etau_args[3].etau_frac
+                                            * surface_for_etau[..., None])
+                                        literal_line_increment = rounded(
+                                            literal_line_increment
+                                            * jnp.asarray(exp_n))
+                                        if etau_ice is not None:
+                                            literal_line_increment = rounded(
+                                                literal_line_increment
+                                                * jnp.maximum(
+                                                    0.0, 1.0
+                                                    - etau_ice[..., None]))
+                                        literal_line_increment = np.asarray(
+                                            literal_line_increment)[
+                                                ..., :netau]
+                                        literal_line_candidate = np.asarray(
+                                            rounded(
+                                                jnp.asarray(pre_etau_l[
+                                                    ..., :netau])
+                                                + jnp.asarray(
+                                                    literal_line_increment)))
+                                        literal_line_increment_metric = metrics(
+                                            literal_line_increment,
+                                            inc_direct_n, wet_etau, focus,
+                                            POINTWISE_BAR)
+                                        literal_line_candidate_metric = metrics(
+                                            literal_line_candidate,
+                                            post_etau_n, wet_etau, focus,
+                                            POINTWISE_BAR)
                                         numpy_exp_degree = np.exp(
                                             -np.asarray(etau_args[2])
                                             / np.asarray(degree_htau)[
@@ -2714,8 +2783,20 @@ def main() -> int:
                                             "direct_nemo_exponent_argument":
                                                 argument_metric,
                                             "direct_nemo_exp": exp_metric,
+                                            "literal_exp_on_dumped_argument":
+                                                literal_dump_exp_metric,
+                                            "literal_exp_on_production_argument":
+                                                literal_production_exp_metric,
                                             "production_argument_plus_exp":
                                                 argument_plus_exp_metric,
+                                            "literal_rpi_argument":
+                                                literal_degree_argument_metric,
+                                            "raw_radian_argument":
+                                                raw_radian_argument_metric,
+                                            "literal_line_dumped_exp_increment":
+                                                literal_line_increment_metric,
+                                            "literal_line_dumped_exp_output":
+                                                literal_line_candidate_metric,
                                             "diagnostic_numpy_libm_exp_degree":
                                                 numpy_exp_degree_metric,
                                             "diagnostic_numpy_libm_exp_raw_rad":
