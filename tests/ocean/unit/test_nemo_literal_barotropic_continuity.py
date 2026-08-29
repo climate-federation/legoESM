@@ -59,3 +59,13 @@ def test_gradient_is_finite():
 
     grad = jax.grad(loss)(u)
     assert bool(jnp.all(jnp.isfinite(grad)))
+
+
+def test_rich_geometry_uses_full_u_face_metric():
+    h_u, h_v, u, v, um, vm, grid = _case()
+    grid.dy_u = jnp.array([[39711.3, 39712.3, 39713.3, 39714.3],
+                           [51227.9, 51228.9, 51229.9, 51230.9]],
+                          dtype=jnp.float64)
+    got_u, _ = nemo_literal_metric_transports(h_u, h_v, u, v, um, vm, grid)
+    expected = ((grid.dy_u * u) * h_u) * um
+    np.testing.assert_array_equal(np.asarray(got_u), np.asarray(expected))

@@ -1145,6 +1145,7 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                        vmix_scheme: str | None = None,
                        use_gm_redi: bool | None = None,
                        surface_tendency_placement: str | None = None,
+                       barotropic_continuity_evaluation: str | None = None,
                        tke_preclosure_coeff_source: str | None = None,
                        tke_matrix_evaluation: str | None = None,
                        tke_solver_evaluation: str | None = None,
@@ -1231,6 +1232,12 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
         cfg = dataclasses.replace(cfg, use_gm_redi=use_gm_redi)
     if surface_tendency_placement is not None:
         cfg = dataclasses.replace(cfg, surface_tendency_placement=surface_tendency_placement)
+    if barotropic_continuity_evaluation is not None:
+        if barotropic_continuity_evaluation not in ("generic", "nemo_literal"):
+            raise ValueError("barotropic_continuity_evaluation must be "
+                             "'generic' or 'nemo_literal'")
+        cfg = dataclasses.replace(
+            cfg, barotropic_continuity_evaluation=barotropic_continuity_evaluation)
     if tke_preclosure_coeff_source is not None:
         if tke_preclosure_coeff_source not in (
                 "carried_previous_step", "current_subiteration"):
@@ -1513,6 +1520,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
              vmix_scheme: str | None = None,
              use_gm_redi: bool | None = None,
              surface_tendency_placement: str | None = None,
+             barotropic_continuity_evaluation: str | None = None,
              tke_preclosure_coeff_source: str | None = None,
              tke_matrix_evaluation: str | None = None,
              tke_solver_evaluation: str | None = None,
@@ -1597,6 +1605,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         bridge_before_stress_tpoint=bridge_before_stress_tpoint,
         use_gm_redi=use_gm_redi, restart_file=restart_file,
         surface_tendency_placement=surface_tendency_placement,
+        barotropic_continuity_evaluation=barotropic_continuity_evaluation,
         tke_preclosure_coeff_source=tke_preclosure_coeff_source,
         tke_matrix_evaluation=tke_matrix_evaluation,
         tke_solver_evaluation=tke_solver_evaluation,
@@ -1724,6 +1733,8 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         "bridge_before_stress_tpoint": bool(bridge_before_stress_tpoint),
         "vmix_scheme": vmix_scheme, "use_gm_redi": use_gm_redi,
         "surface_tendency_placement": surface_tendency_placement,
+        "barotropic_continuity_evaluation":
+            cfg.barotropic_continuity_evaluation,
         # Resolved production selectors, not merely the optional CLI
         # overrides.  These receipts make the faithful and legacy climate
         # arms distinguishable even when both are launched from defaults.
@@ -2189,6 +2200,11 @@ def _parse_args(argv=None):
                          "'leapfrog_rhs' NEMO-faithful fix); default None "
                          "leaves the recipe's own value")
     p.add_argument(
+        "--barotropic-continuity-evaluation", default=None,
+        choices=("generic", "nemo_literal"),
+        help="one-variable QCO continuity association selector; default None "
+             "uses the recipe (NEMO cards use nemo_literal)")
+    p.add_argument(
         "--tke-preclosure-coeff-source", default=None,
         choices=("carried_previous_step", "current_subiteration"),
         help="override the TKE pre-solve avm_k/avt_k lifetime; default None "
@@ -2493,6 +2509,8 @@ def main(argv=None):
               bridge_before_stress_tpoint=args.bridge_before_stress_tpoint,
               vmix_scheme=args.vmix_scheme, use_gm_redi=args.use_gm_redi,
               surface_tendency_placement=args.surface_tendency_placement,
+              barotropic_continuity_evaluation=(
+                  args.barotropic_continuity_evaluation),
               tke_preclosure_coeff_source=args.tke_preclosure_coeff_source,
               tke_matrix_evaluation=args.tke_matrix_evaluation,
               tke_solver_evaluation=args.tke_solver_evaluation,

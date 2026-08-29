@@ -332,7 +332,10 @@ def nemo_literal_metric_transports(
     H_u, H_v, U, V, u_mask, v_mask, grid,
 ):
     """Assemble NEMO DINO's literal ``zhU``/``zhV`` metric transports."""
-    e2u = (grid.dy * 0.5)[:, jnp.newaxis]
+    # Rich/fold-aware geometry carries the full 2-D u-face meridional metric.
+    # Lean LatLonGrid callers retain the canonical regular-grid construction.
+    e2u = (grid.dy_u if hasattr(grid, "dy_u")
+           else (grid.dy * 0.5)[:, jnp.newaxis])
     # Rich NEMO-faithful geometry carries e1v directly. Lean LatLonGrid tests
     # and callers reconstruct the same canonical v-face width used by the
     # generic divergence path.
@@ -780,6 +783,12 @@ def _run_substep_loop(
         raise ValueError(
             "unknown barotropic_face_depth scheme "
             f"{_face_depth_mode!r}: must be one of ('min_rule', 'nemo_ssh_avg').")
+    _continuity_evaluation = config.barotropic.barotropic_continuity_evaluation
+    if _continuity_evaluation not in ("generic", "nemo_literal"):
+        raise ValueError(
+            "unknown barotropic_continuity_evaluation "
+            f"{_continuity_evaluation!r}: must be one of "
+            "('generic', 'nemo_literal').")
 
     def _face_depths(H_total):
         """Min-rule C-grid face depths (module-level ``_min_rule_face_depths``,
@@ -860,7 +869,8 @@ def _run_substep_loop(
         # zsshu_a/hu_e rule (dynspg_ts.F90:658-666,771-778) — fixed reference
         # depth + e1e2-area-weighted average of the CARRY-level ssh (eta_c,
         # the level-jn dynamic ssh — same time level NEMO's hu_e sees here).
-        if _face_depth_mode == "nemo_ssh_avg":
+        if (_face_depth_mode == "nemo_ssh_avg"
+                and _continuity_evaluation == "nemo_literal"):
             H_u, H_v = _ssh_avg_face_depths(eta_c)
         else:
             H_u, H_v = _face_depths(H_total_c)

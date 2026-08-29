@@ -1121,6 +1121,10 @@ class BarotropicConfig(NamedTuple):
     # selecting "nemo_ssh_avg" is conservation-inert (machine-gated by
     # test_partial_cells_phase7.py::TestNemoSshAvgFaceDepthGate).
     barotropic_face_depth: str = "min_rule"
+    # Arithmetic used to assemble the continuity flux/divergence. ``generic``
+    # retains the shared FV operator. ``nemo_literal`` preserves NEMO's
+    # e2u*U*H / e1v*V*H operand order and multiply-by-reciprocal divergence.
+    barotropic_continuity_evaluation: str = "generic"
     # Which OUTER time level seeds the FROZEN in-window EEN barotropic-Coriolis
     # coefficients (#1226 zero-deviation item 4; only read when
     # barotropic_coriolis is "een"/"een_metric").  NEMO freezes the dyn_cor_2D

@@ -846,6 +846,9 @@ class DINOConfig:
     # face depths).  The kamm cards override to "nemo_ssh_avg" (zero-deviation
     # track item 2 — see the card comment in DINO_RECIPES).
     barotropic_face_depth: str = "min_rule"
+    # ``generic`` (legacy shared FV association) | ``nemo_literal`` (active
+    # dynspg_ts source association). NEMO-fidelity cards select the latter.
+    barotropic_continuity_evaluation: str = "generic"
     # LatLonCGridOceanConfig.barotropic.barotropic_seed_face_depth (#1226
     # round 2 item 1), threaded 1:1 via from_flat/BarotropicConfig.
     # "min_rule" (default, bit-identical legacy) | "nemo_ssh_avg" (the
@@ -1448,6 +1451,7 @@ DINO_RECIPES: dict[str, dict] = {
         # TestNemoSshAvgFaceDepthGate (volume + tracer conserved; mode
         # measured conservation-inert vs min_rule at machine precision).
         "barotropic_face_depth": "nemo_ssh_avg",
+        "barotropic_continuity_evaluation": "nemo_literal",
         # #1226 round 2 item 1: the barotropic substep loop's ENTRY seed
         # (U_bar/V_bar, lego's re-derived stand-in for NEMO's persistent
         # un_e/vn_e = puu_b/pvv_b(Kbb or Kmm)) uses the SAME NEMO ssh-average
@@ -3543,6 +3547,7 @@ def dino_lat_lon_model_config(
         # Routed by from_flat into config.barotropic.
         barotropic_diffusion_alpha=cfg.barotropic_diffusion_alpha,
         barotropic_face_depth=cfg.barotropic_face_depth,
+        barotropic_continuity_evaluation=cfg.barotropic_continuity_evaluation,
         barotropic_seed_face_depth=cfg.barotropic_seed_face_depth,
         **_scheme,
         tracer_advection=cfg.tracer_advection,

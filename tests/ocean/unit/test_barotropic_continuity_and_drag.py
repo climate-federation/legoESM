@@ -267,7 +267,8 @@ class TestBarotropicFaceDepthNemoSshAvg:
         state = state._replace(u=state.u.replace(data=u1))
 
         cfg = _cfg(barotropic_time_filter="box",
-                   barotropic_face_depth="nemo_ssh_avg")
+                   barotropic_face_depth="nemo_ssh_avg",
+                   barotropic_continuity_evaluation="nemo_literal")
         sn, (Hu, Hv) = barotropic_substeps_latlon_cgrid(
             state, 1.0, 1, grid, z, cfg, add_barotropic_coriolis=False)
         Hu = np.asarray(Hu)
