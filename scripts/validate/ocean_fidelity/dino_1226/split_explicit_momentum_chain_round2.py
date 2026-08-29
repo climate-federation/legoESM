@@ -211,12 +211,18 @@ def _drag_contribution(state, h_k, h_u, h_v, z_coord, config, grid):
 
 def _run_arm(state, sf, geometry, z_coord, config) -> dict[str, Any]:
     model = LatLonCGridOceanModel(geometry, z_coord, config)
+    before_fields = (
+        state.T_before, state.S_before, state.u_before, state.v_before,
+    )
+    if any(field is None for field in before_fields):
+        raise SystemExit("NEMO leapfrog BEFORE fields required for term peel")
+    ldf_state = tuple(field.data for field in before_fields)
     centred_sf = sf._replace(
         tau_x=0.5 * (state.tau_x_prev + sf.tau_x),
         tau_y=0.5 * (state.tau_y_prev + sf.tau_y),
     )
     _, diagnostics = model.tendencies_with_diagnostics(
-        state, surface_forcing=centred_sf, dt=DT
+        state, surface_forcing=centred_sf, dt=DT, ldf_state=ldf_state,
     )
     captured: dict[str, Any] = {}
     real_baro = ocean_model_module.barotropic_substeps_latlon_cgrid
