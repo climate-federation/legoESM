@@ -1747,6 +1747,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     # from the same restart.  Stamping it next to the clock the twin USED lets
     # a scorer reject ANY offset that is not NEMO's, not merely t0=0.
     t0_reference_sec = restart_elapsed_seconds(f"{run_stepdump}/{restart_file}")
+    resolved_snap_days = resolve_snap_days(snap_days, n_days, save_3d)
     # Everything about this run a comparison must hold fixed.  A two-arm A/B
     # that changes the clock and something else is a confound, and nothing in
     # the artifact could see it before this stamp existed.
@@ -1762,6 +1763,8 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
             cfg.barotropic_continuity_evaluation,
         "vface_zonal_metric_evaluation":
             cfg.vface_zonal_metric_evaluation,
+        "save_3d": bool(save_3d),
+        "snap_days": list(resolved_snap_days),
         "save_step_eta": bool(save_step_eta),
         # Resolved production selectors, not merely the optional CLI
         # overrides.  These receipts make the faithful and legacy climate
@@ -1928,7 +1931,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         eta_step = np.full((nsteps, n_lat, n_lon), np.nan, dtype=np.float64)
         print(f"per-step eta enabled: {nsteps} samples at float64", flush=True)
 
-    snaps = resolve_snap_days(snap_days, n_days, save_3d)
+    snaps = resolved_snap_days
     snap_np = snapshot_dtype(fp64_3d)
     snap_name = np.dtype(snap_np).name
     t3d, s3d, eta3d, u3d, v3d = {}, {}, {}, {}, {}

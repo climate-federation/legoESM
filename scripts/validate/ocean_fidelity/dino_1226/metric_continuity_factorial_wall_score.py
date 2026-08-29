@@ -40,7 +40,8 @@ def _validate(path, producer, metric_selector, association_selector):
         cfg = json.loads(str(_scalar(z, "run_config")))
         if cfg.get("vface_zonal_metric_evaluation") != metric_selector \
                 or cfg.get("barotropic_continuity_evaluation") != association_selector \
-                or cfg.get("n_days") != 5 or not cfg.get("save_step_eta"):
+                or cfg.get("n_days") != 5 or not cfg.get("save_step_eta") \
+                or cfg.get("save_3d") or cfg.get("snap_days") != []:
             raise SystemExit(f"STOP {path} selector/day config")
         if int(_scalar(z, "capture_every_steps")) != 1 \
                 or float(_scalar(z, "dt_seconds")) != 2700.0 \
