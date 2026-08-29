@@ -38,3 +38,13 @@ Admission retains round 6's clean CPU/fp64/lane/e3t gates, exact populations,
 interception receipt, planted controls, and complete hashes.  The held signed
 SSH field must compare exactly to `-ssh_frc` on all 9,920 wet T cells.  This is
 an existing-dump offline arm; no NEMO writer or SLOT block is involved.
+
+## Instrument amendment after invalid attempt 1
+
+The first execution completed all three arms but the receipt rejected the
+signed-SSH control because the registered NEMO dump is identically zero and
+the generic normalized metric correctly refuses a zero reference RMS.  No
+artifact was admitted.  The control is replaced with an exact-zero receipt:
+9,920 wet cells, zero nonzero reference values, and zero maximum held-minus-
+oracle difference.  The arm outputs, bars, and ownership rule are unchanged;
+the zero dump itself preregisters a direct refutation of SSH-source ownership.

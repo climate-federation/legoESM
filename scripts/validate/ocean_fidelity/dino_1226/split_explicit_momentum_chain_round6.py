@@ -213,8 +213,19 @@ def main() -> int:
     held_ssh_metric = None
     if args.with_ssh_forcing:
         eta_mask = arm_captures["forcing_seed_and_ssh"]["sshn_e_init"][0][2]
-        held_ssh_metric = base._metric(held["feta"], -nemo["feta"], eta_mask, 9920)
-        if held_ssh_metric["normalized_rms_error"] != 0.0:
+        eta_n = int(np.asarray(eta_mask, dtype=bool).sum())
+        eta_diff = np.asarray(held["feta"] + nemo["feta"])[eta_mask]
+        held_ssh_metric = {
+            "n": eta_n,
+            "nemo_rms": float(np.sqrt(np.mean(nemo["feta"][eta_mask] ** 2))),
+            "max_abs_difference": float(np.max(np.abs(eta_diff))),
+            "exact_zero_field_receipt": bool(
+                eta_n == 9920
+                and np.count_nonzero(nemo["feta"][eta_mask]) == 0
+                and np.count_nonzero(eta_diff) == 0
+            ),
+        }
+        if not held_ssh_metric["exact_zero_field_receipt"]:
             raise SystemExit("held signed SSH forcing reconstruction is not exact")
 
     controls = base._controls(arm_captures["forcing_only"]["zu_frc"][0], 9758)
