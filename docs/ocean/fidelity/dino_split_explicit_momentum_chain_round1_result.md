@@ -23,11 +23,11 @@ claim. The next operand peel is the full forcing assembly: vertically averaged
 explicit momentum RHS (`:316-353`), Coriolis removal (`:358-370`), bottom drag
 (`:372-383`), and centered wind (`:423-445`).
 
-The inherited probe's non-gating diagnostic is consistent with this transfer:
-the U forcing difference propagated through one `rDt_e` predicts
+The inherited probe also reports a non-gating, magnitude-only diagnostic:
+the U forcing-difference norm scaled through one `rDt_e` is
 `1.1018e-5`, versus first-substep U `E=1.1009e-5` (ratio `1.001`); V gives
-`1.633`. These ratios do not decide the row and do not prove recurrence
-fidelity.
+`1.633`. These scalar norms discard vector direction and cancellation, so they
+assign no causal ownership and do not prove recurrence fidelity.
 
 The lateral admission fact remains intact: production tracer-entry `uu(Kmm)`
 diverged 9,758/9,758 (correlation `0.9845023189`, RMS ratio
@@ -73,7 +73,7 @@ no legoESM `F_slow_eta` while freshwater closure is inactive.
 - `fidelity_bar_gate.classify` supplied all verdicts. The receipt records its
   correlation, mean-absolute-ratio, and arithmetic-class per-element axes.
 - Clean Git commit before/after:
-  `ee37274564696528d02e674ce4fca0002425214f`.
+  `94d09060672c071ad06add7fe9ff9652ad068500`.
 - Identical arrays classified `AT BAR`; the planted `1e-6` RMS-scale offset
   traversed the same `fidelity_bar_gate.classify` path and classified `DEBT`;
   perturbing the actual legoESM binding also changed its score.
@@ -90,7 +90,9 @@ no legoESM `F_slow_eta` while freshwater closure is inactive.
   after two adversarial HOLD reviews. The first attempt at the hardened commit
   was rejected by its clean-tree gate before calculation. The first re-review
   retained HOLD on classifier-control and effective-config provenance; the
-  final run after those corrections exited zero.
+  mechanism re-review then retained HOLD on a stale scalar-norm ownership
+  claim in the inherited probe. The final run after retracting that claim
+  exited zero and printed term attribution UNMEASURED.
 
 Machine receipt:
 `docs/ocean/fidelity/dino_split_explicit_momentum_chain_round1_artifact.json`.
