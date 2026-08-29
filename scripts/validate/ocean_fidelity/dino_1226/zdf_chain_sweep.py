@@ -2912,6 +2912,7 @@ def main() -> int:
         HERE / "PREREG_zdf_chain_sweep_round10.md",
         HERE / "PREREG_zdf_chain_sweep_round10_update.md",
         HERE / "PREREG_zdf_chain_sweep_round11.md",
+        HERE / "PREREG_zdf_chain_sweep_round12.md",
         HERE / "kamm_twin_90d.py",
         Path("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py"),
         Path("packages/ocean/legoesm/ocean/eos.py"),
