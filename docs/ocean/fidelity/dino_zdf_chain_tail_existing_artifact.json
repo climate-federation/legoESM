@@ -1,0 +1,909 @@
+{
+  "bars": {
+    "accumulating": 1e-12,
+    "pointwise": 1e-15
+  },
+  "controls": {
+    "row20_lk": {
+      "baseline_pass": true,
+      "nonfinite_fired": true,
+      "one_i_roll_fired": true,
+      "perturbation_fired": true,
+      "perturbed_ji_k": [
+        1,
+        1,
+        0
+      ]
+    },
+    "row22_avt": {
+      "baseline_pass": true,
+      "nonfinite_fired": true,
+      "one_i_roll_fired": true,
+      "perturbation_fired": true,
+      "perturbed_ji_k": [
+        1,
+        1,
+        0
+      ]
+    },
+    "row25_avt": {
+      "baseline_pass": true,
+      "nonfinite_fired": true,
+      "one_i_roll_fired": true,
+      "perturbation_fired": true,
+      "perturbed_ji_k": [
+        1,
+        1,
+        1
+      ]
+    },
+    "row30_prd": {
+      "baseline_pass": true,
+      "nonfinite_fired": true,
+      "one_i_roll_fired": true,
+      "perturbation_fired": true,
+      "perturbed_ji_k": [
+        1,
+        1,
+        1
+      ]
+    }
+  },
+  "focus_columns_ji": [
+    [
+      11,
+      1
+    ],
+    [
+      12,
+      1
+    ],
+    [
+      13,
+      1
+    ],
+    [
+      13,
+      23
+    ]
+  ],
+  "lane": "DUMP LANE: d180  run_dir=/tmp/zdf-tail-oracle/RUN_SEQDUMP_D180_1R  restart=DINO_00005760_restart.nc  kt(nit000)=5761  t_seconds=15554700s (= day 180.03)",
+  "provenance_sha256": {
+    "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
+    "dump_avm.bin": "ad8104d352838ff36c1c09cb3b21231eacabeb00ce7bd2b5477cc40ead4faed0",
+    "dump_avt.bin": "a6cc3fca6348c10c73ab0bf3bf4081c38be8d20a6f2cbdd00de521e21252eeca",
+    "eiv_dump_prd_arg.bin": "7dcb079fafa6126943cad48d2c0e844c2a84d1a4e20f053552a4ccf8fc052c25",
+    "eiv_dump_uslp.bin": "0c51e341b6eeee97d14de18aa8b8f40caa9e2607b0dd799f560b229c49d122ec",
+    "eiv_dump_vslp.bin": "cbb588a037da590743386c5f4565e651e185a47f80baf905e0d851258a1dfc4f",
+    "eiv_dump_wslpi.bin": "fb466cc9047d7fb43b373d78c071a902e21b8484ef6a59c131ad162dfcf37ac0",
+    "eiv_dump_wslpj.bin": "9c5e32fa88395db86f1d4337b928261ff63a6d0efd7902a1bbb9dc0f590e793e",
+    "mesh_mask.nc": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
+    "ocean.output": "f3370030a3751a3698ccdde7b41b5cf5c95e5eed26ebd47048922cc348c07dc6",
+    "tke_dump_avm_final.bin": "1240ccb86e674edd1309831e2292a244aaabc3bca2f245b530fd3b88b59c275f",
+    "tke_dump_avm_in.bin": "f05299d26b198ffad1449bf29bebfa8f2035de0b339be030bbf1c4eba0bce5bd",
+    "tke_dump_avt_final.bin": "6f34238727e142e4036a629ed20fde47220e290d2f11f20618aef34e72d91c34",
+    "tke_dump_en.bin": "b7a28c78a10dc3ed15b424197f7139d53c42cdfea6fe4191d96796b635722565",
+    "tke_dump_pdlr.bin": "538af8f8f1a229e60bb23513fc87826554670a30ed05a45dbfe9e7cc38acd614",
+    "tke_dump_rn2.bin": "df573f8c07abab1cc0a2fc7fd2093dd8276dccf0319d3375220340d91b5a6004",
+    "tke_dump_rn2b.bin": "fcd7ddee9e94b6158085f2ff5d174b2cb01e1b22a8524faa1b5be31a2b798961",
+    "tke_dump_sh2.bin": "2c18e0926b2b81c07ba3c5c371067d051ffea2d2fad0cc75c444af1654746f53",
+    "tke_dump_zmxld.bin": "df9a09e7fcb9e11b7549fb523cb241a2a22a1e073182bcbcc00d56e0d5cfcde2",
+    "tke_dump_zmxlm.bin": "60ed331574d813885fb29399b2dbf041a6913ea965d45c09e2890eef8b3ef830"
+  },
+  "repo_sha": "cbaeaf3494fbddd0a3a42878be73a4b21f47ae84",
+  "rows": {
+    "19": {
+      "disposition": "UNMEASURED-NEEDS-DUMP",
+      "operation": "raw buoyancy mixing length before scans",
+      "reason": "existing zmxlm/zmxld slots are post-scan; no raw pre-limit slot"
+    },
+    "20": {
+      "disposition": "DIVERGED",
+      "operation": "nn_mxl=3 limiting scans (row19+20 composite)",
+      "qualification": "composite isolation using exact NEMO en/rn2; row19 cannot be separated without a raw slot",
+      "zmxld": {
+        "aggregate_bar_pass": false,
+        "bar": 1e-12,
+        "column_bar_pass": false,
+        "correlation": 0.9988490176737563,
+        "focus": [
+          {
+            "column_error": 0.4325683339893572,
+            "i": 1,
+            "j": 11,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.43326189044200075,
+            "i": 1,
+            "j": 12,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.46671462306776373,
+            "i": 1,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.5014758893104383,
+            "i": 23,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          }
+        ],
+        "max_column_error": 2.0732537323244022,
+        "n_diverged_columns": 9920,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 0,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 342134,
+        "pass": false,
+        "reference_rms": 229.99883913809467,
+        "rms_ratio": 1.1370887323230963,
+        "worst_column_ji": [
+          8,
+          16
+        ]
+      },
+      "zmxlm": {
+        "aggregate_bar_pass": false,
+        "bar": 1e-12,
+        "column_bar_pass": false,
+        "correlation": 0.9988158706307637,
+        "focus": [
+          {
+            "column_error": 0.43617221715903914,
+            "i": 1,
+            "j": 11,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.4361726965596315,
+            "i": 1,
+            "j": 12,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.48166502496993835,
+            "i": 1,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.509857970821509,
+            "i": 23,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          }
+        ],
+        "max_column_error": 2.0420059179170407,
+        "n_diverged_columns": 9920,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 0,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 342134,
+        "pass": false,
+        "reference_rms": 142.2645842961593,
+        "rms_ratio": 1.1342874829932375,
+        "worst_column_ji": [
+          8,
+          45
+        ]
+      }
+    },
+    "21": {
+      "avm_preview": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": 1.0,
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.0,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 342134,
+        "pass": true,
+        "reference_rms": 0.11786484632024644,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          1,
+          1
+        ]
+      },
+      "disposition": "UNMEASURED-NEEDS-DUMP",
+      "operation": "base avm/avt/dissl assembly",
+      "reason": "base avm is directly checkable and passes; base pre-Prandtl avt and post-tke_avn dissl are not dumped (the existing dissl slot is the carried pre-overwrite row-15 operand)"
+    },
+    "22": {
+      "avt": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": 1.0,
+        "focus": [
+          {
+            "column_error": 1.1561708289454122e-19,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 1.1561708289454122e-19,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 2.8904270723635305e-20,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 4.624683315781649e-19,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 2.367837857680204e-16,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 342134,
+        "pass": true,
+        "reference_rms": 0.11721907192928044,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          22,
+          15
+        ]
+      },
+      "disposition": "VERIFIED",
+      "operation": "inverse-Prandtl avt correction",
+      "pdlr_input_identity": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": 0.9999999999999998,
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.0,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 342134,
+        "pass": true,
+        "reference_rms": 0.3801552735542426,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          1,
+          1
+        ]
+      }
+    },
+    "23": {
+      "avm": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": 1.0,
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.0,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9557,
+        "n_wet_columns": 9557,
+        "n_wet_elements": 292921,
+        "pass": true,
+        "reference_rms": 0.019147968318501993,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          5,
+          1
+        ]
+      },
+      "avt": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": 0.9999999999999999,
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.0,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9557,
+        "n_wet_columns": 9557,
+        "n_wet_elements": 292921,
+        "pass": true,
+        "reference_rms": 0.013782838683084615,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          5,
+          1
+        ]
+      },
+      "disposition": "VERIFIED",
+      "operation": "closure coefficient copy on EVD-stable points"
+    },
+    "24": {
+      "disposition": "WAIVED",
+      "operation": "river-mouth enhancement",
+      "reason": "ln_rnf=F and reference ln_rnf_mouth=.false.; branch zdfphy.F90:317-321 is inactive"
+    },
+    "25": {
+      "avt": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": null,
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.0,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 5020,
+        "n_wet_columns": 5020,
+        "n_wet_elements": 39293,
+        "pass": true,
+        "reference_rms": 100.0,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          1,
+          1
+        ]
+      },
+      "disposition": "VERIFIED",
+      "fired_wet_elements": 39293,
+      "operation": "EVD tracer overwrite"
+    },
+    "26": {
+      "avm": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": null,
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.0,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 5020,
+        "n_wet_columns": 5020,
+        "n_wet_elements": 39293,
+        "pass": true,
+        "reference_rms": 100.0,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          1,
+          1
+        ]
+      },
+      "disposition": "VERIFIED",
+      "fired_wet_elements": 39293,
+      "operation": "EVD momentum overwrite"
+    },
+    "27": {
+      "disposition": "UNMEASURED-NEEDS-DUMP",
+      "operation": "avs copy and optional enhancements",
+      "reason": "live avs=avt copy lacks an avs slot; DDM, surface-wave, and internal-wave branches are WAIVED by resolved false flags"
+    },
+    "28": {
+      "disposition": "UNMEASURED-NEEDS-DUMP",
+      "operation": "composed-avt turbocline scan",
+      "reason": "no same-step imld/hmld (mldkz5) slot exists"
+    },
+    "29": {
+      "avm_interior": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": 0.9999999999999998,
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.0,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": true,
+        "reference_rms": 34.39130758075968,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          1,
+          1
+        ]
+      },
+      "disposition": "VERIFIED",
+      "operation": "avm lateral boundary update, interior census",
+      "qualification": "halo exchange is outside the registered interior column census"
+    },
+    "30": {
+      "disposition": "DIVERGED",
+      "fields": {
+        "uslp": {
+          "aggregate_bar_pass": false,
+          "bar": 1e-15,
+          "column_bar_pass": false,
+          "correlation": 0.9999999970933962,
+          "focus": [
+            {
+              "column_error": 7.097513153481557e-05,
+              "i": 1,
+              "j": 11,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 8.217965832784772e-05,
+              "i": 1,
+              "j": 12,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 8.15385628623353e-05,
+              "i": 1,
+              "j": 13,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 4.792731682551672e-06,
+              "i": 23,
+              "j": 13,
+              "pass": false,
+              "wet": true
+            }
+          ],
+          "max_column_error": 0.0056076665529788735,
+          "n_diverged_columns": 9306,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 452,
+          "n_wet_columns": 9758,
+          "n_wet_elements": 336338,
+          "pass": false,
+          "reference_rms": 0.0006980116051114225,
+          "rms_ratio": 1.000016117775148,
+          "worst_column_ji": [
+            99,
+            1
+          ]
+        },
+        "vslp": {
+          "aggregate_bar_pass": false,
+          "bar": 1e-15,
+          "column_bar_pass": false,
+          "correlation": 0.9999999873985062,
+          "focus": [
+            {
+              "column_error": 3.540140438243519e-06,
+              "i": 1,
+              "j": 11,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 4.818681210104864e-06,
+              "i": 1,
+              "j": 12,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 1.296822892149376e-05,
+              "i": 1,
+              "j": 13,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 2.204031139388229e-05,
+              "i": 23,
+              "j": 13,
+              "pass": false,
+              "wet": true
+            }
+          ],
+          "max_column_error": 0.007863679543055986,
+          "n_diverged_columns": 9412,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 456,
+          "n_wet_columns": 9868,
+          "n_wet_elements": 340271,
+          "pass": false,
+          "reference_rms": 0.0010729290935060534,
+          "rms_ratio": 1.0000139572167668,
+          "worst_column_ji": [
+            96,
+            17
+          ]
+        },
+        "wslpi": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-15,
+          "column_bar_pass": false,
+          "correlation": 0.9999999999887257,
+          "focus": [
+            {
+              "column_error": 5.057536465055034e-07,
+              "i": 1,
+              "j": 11,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 7.413534880942628e-07,
+              "i": 1,
+              "j": 12,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 9.062796179862453e-07,
+              "i": 1,
+              "j": 13,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 2.1090416601467285e-06,
+              "i": 23,
+              "j": 13,
+              "pass": false,
+              "wet": true
+            }
+          ],
+          "max_column_error": 0.0007938849266420253,
+          "n_diverged_columns": 9462,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 458,
+          "n_wet_columns": 9920,
+          "n_wet_elements": 342134,
+          "pass": false,
+          "reference_rms": 0.0007355792067598877,
+          "rms_ratio": 1.0000001780412238,
+          "worst_column_ji": [
+            187,
+            2
+          ]
+        },
+        "wslpj": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-15,
+          "column_bar_pass": false,
+          "correlation": 0.9999999999868688,
+          "focus": [
+            {
+              "column_error": 1.267016736496796e-07,
+              "i": 1,
+              "j": 11,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 1.0925076614520069e-07,
+              "i": 1,
+              "j": 12,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 1.6928981210032577e-07,
+              "i": 1,
+              "j": 13,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 6.852219838063683e-05,
+              "i": 23,
+              "j": 13,
+              "pass": false,
+              "wet": true
+            }
+          ],
+          "max_column_error": 0.0006489893559666216,
+          "n_diverged_columns": 9462,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 458,
+          "n_wet_columns": 9920,
+          "n_wet_elements": 342134,
+          "pass": false,
+          "reference_rms": 0.0011217088699229632,
+          "rms_ratio": 0.9999998577026715,
+          "worst_column_ji": [
+            195,
+            3
+          ]
+        }
+      },
+      "first_failing_operand": {
+        "design": "separate the EOS-produced prd arithmetic from downstream zgrv with the existing prd slot; literal SEOS association is the next targeted production option only after row18 closes",
+        "metric": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-15,
+          "column_bar_pass": false,
+          "correlation": 1.0,
+          "focus": [
+            {
+              "column_error": 1.5502745024712352e-09,
+              "i": 1,
+              "j": 11,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 1.8246651425923079e-09,
+              "i": 1,
+              "j": 12,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 1.8652119968837226e-09,
+              "i": 1,
+              "j": 13,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 1.5109065648820862e-09,
+              "i": 23,
+              "j": 13,
+              "pass": false,
+              "wet": true
+            }
+          ],
+          "max_column_error": 2.521742227478876e-08,
+          "n_diverged_columns": 9920,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 0,
+          "n_wet_columns": 9920,
+          "n_wet_elements": 332214,
+          "pass": false,
+          "reference_rms": 0.00090255402271627,
+          "rms_ratio": 1.0000000000159903,
+          "worst_column_ji": [
+            186,
+            1
+          ]
+        },
+        "name": "prd argument entering ldf_slp",
+        "nemo_line": "cfgs/DINO/MY_SRC/ldfslp.F90:202-213 (prd input; first consumed operand)"
+      },
+      "operation": "ldf_slp"
+    },
+    "31": {
+      "disposition": "UNMEASURED-NEEDS-DUMP",
+      "operation": "momentum implicit solve application",
+      "reason": "stage-7 Naa aliases Krhs and is a tendency, not the true pre-solve velocity; no existing dump brackets Krhs after dyn_spg and before dyn_zdf"
+    },
+    "32": {
+      "disposition": "UNMEASURED-NEEDS-DUMP",
+      "operation": "tracer implicit solve application",
+      "reason": "post-tra_zdf Naa exists, but no same-step pre-tra_zdf Naa state isolates the implicit tracer application"
+    }
+  },
+  "run_dir": "/tmp/RUN_ZDF18_ETAUARG.g6lJkJ",
+  "schema": "dino-zdf-chain-tail-existing-v1",
+  "status": "PROVISIONAL-DOWNSTREAM; ordered frontier remains row 17 while row 18 is open",
+  "wet_columns": 9920
+}

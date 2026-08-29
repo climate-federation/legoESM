@@ -3,6 +3,145 @@
 Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 (`RUN_SEQDUMP_D180_1R`, `kt=5761`).
 
+## Round-15 hold: row-18 operands instrumented on paper; existing tail scored
+
+Home storage was quota-blocked, so this round made **no NEMO build or run**.
+The ordered frontier remains row 17 and climate arms remain unauthorized.
+The committed write-only patch
+`scripts/validate/ocean_fidelity/dino_1226/nemo_row18_gdepw_htau.patch`
+(SHA256 `e797e5d9ba9cbc50401a7542c53182f41d7cd2ab3b148b914ccb01c15cb28fb7`)
+applies cleanly to the active instrument source SHA256
+`5eec1700605ff54dff13b76913b46f67c8cbdc7b526d9901c33c61a1196d67a5`.
+It captures `gdepw(ji,jj,jk,Kmm)` and `htau(ji,jj)` separately at the live
+read site and never reads the observation arrays back into the calculation.
+The unchanged oracle expression is:
+
+```fortran
+etau_arg_dump(ji,jj,jk) = -gdepw(ji,jj,jk,Kmm) / htau(ji,jj)
+```
+
+Source: active DINO instrument `MY_SRC/zdftke.F90:648`; after applying the
+patch the two new copies are at `:658-659` and the unchanged expression moves
+to `:660`. The preregistered one-at-a-time substitution, ULP controls,
+provenance stamps, and dump-disabled/enabled bracket are in
+`PREREG_zdf_chain_sweep_round18_operands.md`. Rebuild and measurement are on
+explicit hold until home writes recover.
+
+The existing-dump tail was scored meanwhile. These are deliberately labeled
+`PROVISIONAL-DOWNSTREAM`: they target later work but do not promote any row
+past the unresolved row 18.
+
+| Row | Operation | Qualified disposition | Whole-domain column result | Southern focus |
+|---:|---|---|---|---|
+| 19 | raw buoyancy length | `UNMEASURED-NEEDS-DUMP` | existing length slots are post-scan | needs raw slot |
+| 20 | `nn_mxl=3` scans, row-19+20 composite | `DIVERGED` | `zmxlm` and `zmxld`: 9,920/9,920 fail; maxima `2.042006` and `2.073254` | 4/4 fail both |
+| 21 | base `avm/avt/dissl` | `UNMEASURED-NEEDS-DUMP` | isolated base `avm` is exact, 0/9,920; pre-Prandtl `avt` and post-overwrite `dissl` lack slots | `avm` 4/4 exact |
+| 22 | inverse-Prandtl `avt` | `VERIFIED` | 0/9,920; max `2.367838e-16` | 4/4 pass |
+| 23 | closure coefficient copy | `VERIFIED` | stable subset exact for `avt` and `avm` | 4/4 pass |
+| 24 | river-mouth enhancement | `WAIVED` | `ln_rnf=F`, `ln_rnf_mouth=F` | inactive |
+| 25 | EVD tracer overwrite | `VERIFIED` | 0 failures over 39,293 fired wet elements | 4/4 pass |
+| 26 | EVD momentum overwrite | `VERIFIED` | 0 failures over 39,293 fired wet elements | 4/4 pass |
+| 27 | `avs=avt`; optional enhancements | `UNMEASURED-NEEDS-DUMP` | live `avs` copy lacks a slot; DDM/SWM/IWM arms waived by false flags | needs slot |
+| 28 | composed-`avt` turbocline | `UNMEASURED-NEEDS-DUMP` | no same-step `imld/hmld` slot | needs slot |
+| 29 | `avm` lateral boundary update | `VERIFIED` | interior census exact, 0/9,920 | 4/4 exact |
+| 30 | `ldf_slp` | `DIVERGED` | `uslp/vslp/wslpi/wslpj` fail 9,306/9,412/9,462/9,462 columns | 4/4 fail each |
+| 31 | momentum implicit application | `UNMEASURED-NEEDS-DUMP` | stage-7 `Naa` aliases tendency `Krhs`; no true pre-solve bracket | needs slot |
+| 32 | tracer implicit application | `UNMEASURED-NEEDS-DUMP` | post field exists; no same-step pre-`tra_zdf` state | needs slot |
+
+Row 20 was isolated by feeding the real production mixing-length routine
+NEMO's dumped post-row-18 `en`, current `rn2`, and the captured production
+geometry/configuration. Because the only NEMO length dumps are after both the
+raw buoyancy calculation and the `nn_mxl=3` scans, the divergence cannot yet
+be assigned between rows 19 and 20; a raw pre-limit length slot is required.
+The maximum absolute misses are 290.505 m (`zmxlm`) and 476.846 m (`zmxld`),
+so this is not a roundoff-only preview.
+
+Rows 23 and 25--26 close exactly when NEMO's source-order EVD mask
+`MIN(rn2,rn2b) <= -1e-12` is used. On Fortran `jk=2..jpkm1`, copying the
+closure coefficients at stable points and setting both coefficients to
+`100*wmask` at fired points reproduces `dump_avt.bin` and `dump_avm.bin`
+bit-for-bit. Row 29's registered interior side remains bit-exact after the
+halo update.
+
+Row 30's earliest available failing operand is the dumped `prd` argument:
+9,920/9,920 columns fail the `1e-15` bar, maximum column error
+`2.521742e-08`, even though correlation prints 1.0. NEMO first consumes it in
+the bottom horizontal gradients:
+
+```fortran
+zgru(ji,jj,iikm1) = umask(ji,jj,jpkm1) * ( prd(ji+1,jj,jpkm1) - prd(ji,jj,jpkm1) )
+zgrv(ji,jj,iikm1) = vmask(ji,jj,jpkm1) * ( prd(ji,jj+1,jpkm1) - prd(ji,jj,jpkm1) )
+```
+
+Source: DINO `MY_SRC/ldfslp.F90:202-203`. This is a provisional later-row
+target, not permission to jump over rows 18--20. Its next discriminator is a
+literal SEOS/`prd` association check using the existing direct slot.
+
+Machine receipt:
+`docs/ocean/fidelity/dino_zdf_chain_tail_existing_artifact.json`, SHA256
+`0c6e0cfc9d11f6dba93697e08767f3778be01aeae1494588550e83f825f36630`,
+stamped probe SHA `cbaeaf3494fbddd0a3a42878be73a4b21f47ae84`. All four
+planted perturbation, nonfinite, and one-cell-roll control families fired.
+
+### Held rebuild/run commands
+
+Run these only after home writes recover. They keep the build, run outputs,
+and caches under `/tmp`; the donor restart is read through its restored
+symlink and is not modified.
+
+```bash
+source /home/dbalwada/miniconda3/etc/profile.d/conda.sh
+conda activate nemo-build
+export TMPDIR=/tmp
+export XDG_CACHE_HOME=/tmp/nemo-row18-xdg
+
+nemo_src=$(mktemp -d /tmp/nemo-row18-operands.XXXXXX)
+cp -a /tmp/nemo-tau-slot-eaef2a1e1/. "$nemo_src/"
+cd "$nemo_src"
+test "$(sha256sum cfgs/DINO/MY_SRC/zdftke.F90 | awk '{print $1}')" = \
+  5eec1700605ff54dff13b76913b46f67c8cbdc7b526d9901c33c61a1196d67a5
+patch --dry-run -p1 < \
+  /tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/nemo_row18_gdepw_htau.patch
+patch -p1 < \
+  /tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/nemo_row18_gdepw_htau.patch
+./makenemo -m conda -r DINO -j 8
+sha256sum cfgs/DINO/MY_SRC/zdftke.F90 cfgs/DINO/BLD/bin/nemo.exe
+
+run_off=$(mktemp -d /tmp/RUN_ZDF18_OPERANDS_OFF.XXXXXX)
+run_on=$(mktemp -d /tmp/RUN_ZDF18_OPERANDS_ON.XXXXXX)
+cp -a /tmp/RUN_ZDF18_ETAUARG.g6lJkJ/. "$run_off/"
+cp -a /tmp/RUN_ZDF18_ETAUARG.g6lJkJ/. "$run_on/"
+ln -sfn /tmp/nemo-tau-slot-eaef2a1e1/cfgs/DINO/BLD/bin/nemo.exe "$run_off/nemo"
+ln -sfn "$nemo_src/cfgs/DINO/BLD/bin/nemo.exe" "$run_on/nemo"
+( cd "$run_off" && mpirun -np 1 ./nemo > run.log 2>&1 )
+( cd "$run_on" && mpirun -np 1 ./nemo > run.log 2>&1 )
+test "$(stat -c %s "$run_on/tke_dump_etau_gdepw.bin")" -eq 2980224
+test "$(stat -c %s "$run_on/tke_dump_etau_htau.bin")" -eq 2980224
+sha256sum "$run_off/DINO_00005761_restart.nc" \
+  "$run_on/DINO_00005761_restart.nc" \
+  "$run_on/tke_dump_etau_gdepw.bin" \
+  "$run_on/tke_dump_etau_htau.bin"
+
+cd /tmp/codex-zdf-sweep
+DINO_1226_LANE=d180 CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS=cpu \
+  JAX_ENABLE_X64=1 PYTHONPATH=packages/core:packages/ocean python - \
+  "$run_on/DINO_00005761_restart.nc" \
+  "$run_off/DINO_00005761_restart.nc" <<'PY'
+from pathlib import Path
+import sys
+from scripts.validate.ocean_fidelity.dino_1226.zdf_chain_sweep import (
+    restart_numeric_identity,
+)
+receipt = restart_numeric_identity(Path(sys.argv[1]), Path(sys.argv[2]))
+print(receipt)
+assert receipt["pass"]
+PY
+```
+
+The on-run must then be fed to the row-18 operand scorer registered above;
+the operand ULP/roll controls and the one-at-a-time substitutions are not
+replaced by the restart bracket.
+
 ## Round-14 result: scalar-LIBM waiver refuted; literal EXP lands; ordered stop remains at row 18
 
 The preregistered Rule-1b discriminator used the 59 columns where JAX/XLA
