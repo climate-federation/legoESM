@@ -98,7 +98,16 @@ def _find_total_call(calls, target):
     target_without_gate = {
         key: value for key, value in target.items() if key != "campaign_gate"
     }
-    matches = [call for call in calls if call["metric"] == target_without_gate]
+    matches = [
+        call
+        for call in calls
+        if {
+            key: value
+            for key, value in call["metric"].items()
+            if key != "campaign_gate"
+        }
+        == target_without_gate
+    ]
     if len(matches) != 1:
         raise SystemExit(
             f"total-field interception changed: found {len(matches)} matches"
@@ -387,7 +396,7 @@ def main() -> int:
                 "nemo": np.asarray(nemo).copy(),
                 "mask": np.asarray(mask, dtype=bool).copy(),
                 "expected_n": int(expected_n),
-                "metric": metric,
+                "metric": dict(metric),
             })
         return metric
 
