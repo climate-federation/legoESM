@@ -273,9 +273,10 @@ def main() -> int:
     }
     args.output.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n")
     for name, score in scores.items():
+        focus_fail = sum(not item["pass"] for item in score["focus"])
         print(
             f"{name}: {score['n_diverged_columns']}/{score['n_wet_columns']} "
-            f"fail bar {BAR:.1e}; focus_fail={score['focus_fail_count']}")
+            f"fail bar {BAR:.1e}; focus_fail={focus_fail}")
     print(
         "static e3u substitution: "
         f"{discrimination['static_metric_cap_vs_nemo_post']['n_diverged_columns']}"
