@@ -3,6 +3,88 @@
 Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 (`RUN_SEQDUMP_D180_1R`, `kt=5761`).
 
+## Round-16 result: row 18 localized to a two-operand `htau` interaction
+
+Row 18 remains the ordered stop, now with its owner fully localized. The
+direct one-at-a-time substitution first assigns the remaining 21 failing
+columns to `htau`, not `gdepw`: substituting `gdepw` alone leaves 21/9,920,
+whereas substituting `htau` alone gives 0/9,920. `gdepw` is bit-exact over all
+332,214 wet elements. The legacy `htau` differs in 74,005 wet elements, maximum
+absolute `1.065814e-14`, despite passing its standalone per-column bar. All
+four southern focus columns pass every arm.
+
+The first registered fix design—changing `deg2rad` to the literal
+`(rpi/180)*gphit` association—was loudly retracted before implementation after
+both independent reviewers showed it is the same binary64 multiply and cannot
+change the result. The next preregistered host probe calls the exact glibc 2.34
+two-lane symbol imported by the oracle, `_ZGVbN2v_sin@GLIBC_2.22`. Vector sine
+alone reduces the `htau` exact miss to 3,364 wet elements and makes the complete
+row pass its bar, but it fails the preregistered exact-operand condition.
+
+The remaining 2x2 substitution closes exactly:
+
+| Latitude operand | Sine lowering | `htau` unequal wet elements | Full-row failures | Focus |
+|---|---|---:|---:|---:|
+| captured legoESM degrees | JAX/XLA | 74,005 | 21/9,920 | 0/4 fail |
+| captured legoESM degrees | glibc vector | 3,364 | 0/9,920 | 0/4 fail |
+| native NEMO `gphit` degrees | JAX/XLA | 74,005 | 21/9,920 | 0/4 fail |
+| native NEMO `gphit` degrees | glibc vector | **0** | **0/9,920, max 0** | **0/4 fail** |
+
+Thus the exact owner is an **interaction**: (1) 406/9,920 wet captured
+latitudes differ from native `gphit` after the degrees→radians→degrees
+round-trip (maximum `1.421085e-14` degrees), and (2) glibc vector sine differs
+from JAX/XLA sine at 6,252/9,920 wet columns. NEMO's active assembly is:
+
+```fortran
+htau(:,:) = MAX( 0.5_wp, MIN( 30._wp, 45._wp * &
+   ABS( SIN( rpi/180._wp * gphit(A2D(0)) ) ) ) )
+```
+
+Source: upstream `src/OCE/ZDF/zdftke.F90:870` (the patched live copy is
+`cfgs/DINO/MY_SRC/zdftke.F90:1079`); row 18 consumes it at the live copy's
+`:664`. Disassembly confirms `divsd(rpi,180)` followed by `mulpd`,
+`_ZGVbN2v_sin`, `andpd`, `mulpd(45)`, `minpd(30)`, and `maxpd(0.5)`.
+
+### Registered production design; deferred large fix
+
+This fix is too large for a safe partial implementation in this round. It
+requires both a geometry contract change and a second pure-JAX glibc
+transcendental transcription. The next implementation is:
+
+1. retain an optional native degree-valued T-point latitude on bridged NEMO
+   geometry, populated directly from `NemoGrid.gphit`; generic geometry keeps
+   `None` and the existing `degrees(lat_T)` path byte-identical;
+2. add `tke_htau_evaluation="nemo_literal"`, combining that native latitude
+   with a pure-JAX transcription of glibc-2.34 `_ZGVbN2v_sin`, explicit
+   binary64 rounding barriers whose JVPs are identity, then the source-ordered
+   abs/multiply/min/max chain above. The sine itself retains its mathematical
+   `cos(x)` derivative (or the derivative of the exact polynomial);
+3. select `nemo_literal` only for `nemo_dino_kamm` and
+   `nemo_dino_kamm_mlf`; their legacy opt-in is `jax_expression`. Every other
+   card retains `jax_expression` as its byte-identical default. A selected
+   literal card without native bridged degrees raises explicitly; it must not
+   silently reconstruct degrees and label that inexact path faithful;
+4. require red-capable exact tests against `tke_dump_etau_htau.bin`, fixed
+   hand-computed vector-sine cases, JIT/eager and forward/reverse-AD checks,
+   scope pins for every unchanged card, and a final row-18 target of 0/9,920.
+
+Receipt:
+`docs/ocean/fidelity/dino_zdf_chain_sweep_round18_htau_artifact.json`, backed
+by committed probe `45fd95c244ac8f41e5c4be10b94f8a841ea8db71`; full machine artifact SHA256
+`184853856783dfc159d19155c9ca6ddd956a769534c6892843413fb37289d3b7`.
+The +1-ULP sensitive-phase control, j-row roll, nonfinite plant, value plant,
+and operand-roll controls all fired.
+
+The bracket proof carries the explicit `cor2d_dump_zu_trd_substep1.bin`
+exclusion described below: identical-unpatched-binary determinism runs differ
+from byte 3 while both restart containers remain byte-identical. The 22 shared
+TKE streams and both restart containers are byte-identical. This is recorded
+as an oracle-instrumentation defect, likely an uninitialized write-only buffer,
+and cannot conceal a ZDF state change.
+
+Rows 19--32 are not promoted past this unresolved production fix. **CLIMATE
+ARMS NOT AUTHORIZED.** Frozen bands and commands remain unchanged.
+
 ## Round-16 execution receipt: row-18 operands available
 
 The held block was executed by the human after home writes recovered. Two
