@@ -68,3 +68,16 @@ registered row-31 miss, wrong `rDt` and a one-cell roll must fail, and for row
 tests must include hand-computed unequal-thickness columns, JIT, finite AD,
 selector typo rejection, exact default-versus-explicit legacy identity, and
 resolved-card scope assertions.  No new NEMO dump is authorised or needed.
+
+### Row-32 residual peel amendment (2026-08-29, before measurement)
+
+If the first production literal run leaves a tracer residual, peel without new
+oracle dumps in this order: undivided content RHS (T then S), `avt+akz`, lower
+and upper coefficients, `e3t(Kaa)-(zwi+zws)`, diagonal recurrence, RHS
+recurrence, reverse substitution.  The cheap discriminator is the same full
+literal system evaluated by an unfused NumPy host loop versus the pure-JAX
+ordered scans.  If the host loop is `0/9920` and JAX is red, the remaining
+owner is compiled arithmetic lowering inside the first stage where an
+optimization barrier closes the census.  Every candidate keeps the `1e-12`
+column bar, all focus scores, and wrong-e3t/roll controls; a barrier is retained
+only if its production JIT result is `0/9920` for both tracers.
