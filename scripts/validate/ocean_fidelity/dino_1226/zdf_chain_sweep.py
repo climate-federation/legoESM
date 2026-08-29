@@ -3388,8 +3388,9 @@ def main() -> int:
         preview = row4.get("continuation_preview")
         if preview is not None:
             for name, cm in preview["rows"].items():
-                disposition = cm.get(
-                    "disposition", "VERIFIED" if cm["pass"] else "DIVERGED")
+                disposition = cm.get("disposition")
+                if disposition is None:
+                    disposition = "VERIFIED" if cm["pass"] else "DIVERGED"
                 if "max_column_error" in cm:
                     print(f"row {name}: {disposition} "
                           f"max={cm['max_column_error']:.6e} "
