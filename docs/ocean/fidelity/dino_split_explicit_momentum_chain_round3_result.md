@@ -2,7 +2,7 @@
 
 Date: 2026-08-29. Session:
 `01a04e34-d1fb-73e0-b25a-177641f0a246`. Clean measurement commit:
-`eee7f2941750d4689b19360b943a6551bcd730b1`.
+`1c5c8414fceacb156983ebf6e3fc0881668d4ece`.
 
 ## Verdict
 
@@ -40,12 +40,25 @@ The fetched source branch was
 | 1 | `73ad090d411` | `8327ffb10bc` | T-point reconstruction, content/time/stagger receipts, selector, gate, tests |
 | 2 | `f862e155491` | `7061c59af51` | faithful carry becomes default; legacy U-as-T becomes explicit opt-in |
 
-Both local commits are ancestors of the clean measurement commit.  The
-default receipt is `build=True`, `run=True`, `CLI=True`; the legacy flag
-selects `False`.  The focused fp64 CPU tests pass (`5 passed`).  Contextual
-resolution retained this branch's newer harness arguments.  For the default-
-on follow-up, only its harness/test changes were imported: five basin-only
-receipt files that do not exist on this branch were not transplanted.
+Independent review found two import-integration gaps after the first accepted
+execution.  Local follow-up `b698eac4d8d` imports the exact latest committed
+`PREREG_endwall_wind_placement.md` required by the reused gate (SHA-256
+`6dd29cd67621f13c9d0c6229d38ea4fdeaef8f45f9a6800f0214cd1f2a65dfb5`)
+and makes the faithful default conditional on a bridged start.  Thus the
+ordinary bridged CLI still selects corrected T-point carry, while
+`--legacy-euler-start` selects neither a before-level bridge nor prior-stress
+carry; an explicitly incompatible request still fails closed.  This is an
+integration follow-up, not a second carry implementation.
+
+Both patch-equivalent local commits and the integration follow-up are
+ancestors of the clean measurement commit.  The default receipt is
+`build=True`, `run=True`, `CLI=True`; the legacy U-as-T flag selects `False`;
+the legacy-Euler receipt is `bridge_before=False`, `stress=False`.  The
+focused fp64 CPU tests pass (`5 passed`).  Contextual resolution retained this
+branch's newer harness arguments.  For the default-on follow-up, its
+harness/test changes were imported; basin-only result files were not
+transplanted, while the gate's named preregistration dependency was imported
+by the reviewed integration follow-up.
 
 This creates an explicit merge-order dependency.  If PR #1695 lands first,
 the two patch-equivalent local cherry-picks must be dropped before this branch
@@ -131,14 +144,16 @@ open.
   CONFIRM and REFUTE, respectively.
 - The receipt hashes the round-2/round-3 probes and preregistrations, imported
   harness, existing ZAD tests, all 18 dumps, and seven run inputs.
-- Preliminary test attempts without the repository fp64/PYTHONPATH environment
-  were invalid and produced no science artifact.  The accepted clean run used
-  CPU, JAX fp64, `LEGOESM_NEMO_E3T=both`, and exited zero.
+- Independent review held the first accepted artifact for the two import-
+  integration gaps above.  The preregistration was amended before extending
+  the selector receipt; that superseded artifact is not packaged.
+- The accepted rerun used CPU, JAX fp64, `LEGOESM_NEMO_E3T=both`, and exited
+  zero.  A second clean invocation produced a byte-identical artifact.
 
 No new NEMO writer, integration, GPU, MPI process, or SLOT block was used.
 
 Machine receipt:
 `docs/ocean/fidelity/dino_split_explicit_momentum_chain_round3_artifact.json`,
-SHA-256 `bd583c7d3ef50386ea34deca5a86f2feade242cfd1c6dd7f40d13c48141afea7`.
+SHA-256 `f102167ea9784644e5c86a2f761caad2eccba85f03b26ef8580f1e5c689334f9`.
 Accepted run log SHA-256:
-`580812bfa80b5fb13082fb7deb4e27bd6e6e439ee3800cc6f334972d65ea6e6d`.
+`13ed76f5dcf09ef34176a96dc2e775869173e86108fb10a202aa1d3b482cd6e5`.

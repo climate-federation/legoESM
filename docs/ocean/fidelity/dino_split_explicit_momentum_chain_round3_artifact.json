@@ -1,5 +1,5 @@
 {
-  "base_round2_artifact_sha256": "e4ebd2400b9e35dca567f557b4a03c01401c6788b4414ee81176536889e5657d",
+  "base_round2_artifact_sha256": "488b05050cfe9dd3418512ad4c053749e71cc2365b80046ad788ec4dc195f373",
   "base_round2_term_error_closure": {
     "u_normalized_to_total_residual": 1.0764362196730072e-12,
     "v_normalized_to_total_residual": 9.973535071390227e-12
@@ -423,7 +423,7 @@
   "git": {
     "clean_after": true,
     "clean_before": true,
-    "commit": "eee7f2941750d4689b19360b943a6551bcd730b1"
+    "commit": "1c5c8414fceacb156983ebf6e3fc0881668d4ece"
   },
   "imported_pr1695": {
     "local_build": "8327ffb10bc",
@@ -516,11 +516,11 @@
   ],
   "provenance_sha256": {
     "ldf_state_test": "6fd15277845c8723716b89b596396f535328f37261fe64d26ebb622ddfa77b11",
-    "preregistration": "010306d0cceabef328a22bd7980f12dc4a8f61f757eeaca86736fb5a169d0e08",
-    "probe": "b02d8cdcb6cadc12ef00a9101bc2dcf6a76292966156113851883b02514e9710",
+    "preregistration": "8f1710bb328745a07fd32f7160e2649e63e831626bd52dd879d3787190217285",
+    "probe": "b11041452508114c6c62c2ffebc34251379f432b91767ae03759f03311a85dc9",
     "round2_preregistration": "d6f12bb4538eb5b500f403387eebbea57013003a32b463a2d8bea6806373d69f",
     "round2_probe": "dab1dae2107cd61e7b1f2b98f5dd2f87d7586a0d0907d5814b4a61ec3d11320c",
-    "twin_harness": "c294990c61ff4264176aefb8a3a0797eece3bbb4c72585e0c9fdb52fea970f1a",
+    "twin_harness": "1e74f8e2b536adf521813d563caa5a76a7c09a69ad4a2c2428c229c3ba0f466e",
     "zad_flux_fix_test": "cf6a9a5f1323f11131867986ce3edcc614464ad06a5f2d1013af704014cff35f",
     "zad_mask_fix_test": "9066feeb454cefee3ed02e08bdef401e07ef1914ce1a209613309d8b9b5aef7f"
   },
@@ -548,6 +548,8 @@
   "selector_receipt": {
     "build_default": true,
     "cli_default": true,
+    "legacy_euler_bridge_before": false,
+    "legacy_euler_stress": false,
     "legacy_opt_in": false,
     "run_default": true
   },
