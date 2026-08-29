@@ -9,6 +9,7 @@ import numpy as np
 
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     nemo_literal_continuity_divergence,
+    nemo_literal_metric_transports,
 )
 
 
@@ -32,11 +33,14 @@ def _case():
 
 def test_matches_nemo_literal_source_order_bitwise():
     h_u, h_v, u, v, um, vm, grid = _case()
+    got_u, got_v = nemo_literal_metric_transports(h_u, h_v, u, v, um, vm, grid)
     got = nemo_literal_continuity_divergence(h_u, h_v, u, v, um, vm, grid)
     zh_u = ((grid.dy[:, None] * 0.5 * u) * h_u) * um
     zh_v = ((grid.dx_v * v) * h_v) * vm
     expected = ((zh_u[:, 1:] - zh_u[:, :-1])
                 + (zh_v[1:] - zh_v[:-1])) * (1.0 / grid.area)
+    np.testing.assert_array_equal(np.asarray(got_u), np.asarray(zh_u))
+    np.testing.assert_array_equal(np.asarray(got_v), np.asarray(zh_v))
     np.testing.assert_array_equal(np.asarray(got), np.asarray(expected))
 
 

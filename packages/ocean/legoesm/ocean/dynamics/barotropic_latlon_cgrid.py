@@ -328,6 +328,21 @@ def nemo_ssh_avg_face_depth(eta_dyn, H_bathy, mask, u_mask, v_mask, grid,
     return _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep)
 
 
+def nemo_literal_metric_transports(
+    H_u, H_v, U, V, u_mask, v_mask, grid,
+):
+    """Assemble NEMO DINO's literal ``zhU``/``zhV`` metric transports."""
+    e2u = (grid.dy * 0.5)[:, jnp.newaxis]
+    # Rich NEMO-faithful geometry carries e1v directly. Lean LatLonGrid tests
+    # and callers reconstruct the same canonical v-face width used by the
+    # generic divergence path.
+    e1v = (grid.dx_v if hasattr(grid, "dx_v")
+           else (grid.radius * grid.dlon * vface_zonal_cos_lat(grid))[:, jnp.newaxis])
+    zh_u = ((e2u * U) * H_u) * u_mask
+    zh_v = ((e1v * V) * H_v) * v_mask
+    return zh_u, zh_v
+
+
 def nemo_literal_continuity_divergence(
     H_u, H_v, U, V, u_mask, v_mask, grid,
 ):
@@ -354,14 +369,8 @@ def nemo_literal_continuity_divergence(
     NEMO's periodic U east-minus-west difference and
     ``[1:]-[:-1]`` supplies its closed-wall V north-minus-south difference.
     """
-    e2u = (grid.dy * 0.5)[:, jnp.newaxis]
-    # Rich NEMO-faithful geometry carries e1v directly. Lean LatLonGrid tests
-    # and callers reconstruct the same canonical v-face width used by the
-    # generic divergence path.
-    e1v = (grid.dx_v if hasattr(grid, "dx_v")
-           else (grid.radius * grid.dlon * vface_zonal_cos_lat(grid))[:, jnp.newaxis])
-    zh_u = ((e2u * U) * H_u) * u_mask
-    zh_v = ((e1v * V) * H_v) * v_mask
+    zh_u, zh_v = nemo_literal_metric_transports(
+        H_u, H_v, U, V, u_mask, v_mask, grid)
     du = zh_u[:, 1:] - zh_u[:, :-1]
     dv = zh_v[1:] - zh_v[:-1]
     return (du + dv) * (1.0 / grid.area)
