@@ -186,3 +186,28 @@ prediction and changes no operand, matrix arm, locked corner, ownership or
 interaction threshold, group classifier, term bound, or continuation rule.
 Only an artifact satisfying both executable receipt requirements may be
 accepted and cited.
+
+## Retraction after invalid attempt 3
+
+Attempt 3 falsified the operation-count premise before writing an artifact:
+the faithful assembled forcing and the independently reconstructed eight
+term fields do not share one fp64 association tree, so their pointwise
+closure cannot honestly be certified as addition/subtraction roundoff.  The
+operation-count envelope above is withdrawn and the scorer must stop using
+or printing it.
+
+Before the next attempt, promote
+`assembly_remainder = r0 - sum(e_i, i in the eight-term ledger)` to an
+explicit ninth residual component.  Score its
+`RMS(assembly_remainder)/RMS(r0)` through the already-frozen noncandidate
+bound `<=0.10`; label it `BOUNDED_MAGNITUDE` or `UNBOUNDED_REMAINDER` exactly
+like a named term, include it in `fully_disposed`, and retain its signed
+field in the all-term endpoint.  The inherited round-2 legacy term-closure
+control and planted failure remain mandatory and unchanged.  The existing
+`0.11*RMS(r0)` bound plant exercises this new component too.
+
+This is a retraction and explicit accounting entry, not a relaxed closure
+bar: an unclosed remainder now consumes the same ownership budget as any
+other term and can block the row.  No matrix arm, measured value, ownership
+threshold, interaction threshold, group classifier, named-term bound, or
+continuation rule changes.
