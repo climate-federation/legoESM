@@ -126,3 +126,16 @@ red stage. Controls replace NEMO `nmln` by a one-level shift, use the old
 T-column surface thickness, roll the face thickness, inject wet NaN, and add a
 bar-scale perturbation; each must fail. All parent/dump/source/restart/mesh,
 clean-HEAD, CPU, fp64, and focus-map gates remain fatal.
+
+### Live-`gdept` sub-peel amendment (frozen before measurement)
+
+The first raw-slope probe found `gdept(Kmm)` first red (`706/9758`; focus
+`0/4`) before a live-face `zdepu` substitution reduced `uslp_raw` from
+`8387/9758` to `14/9758`. The next registered discrimination therefore uses
+the existing canonical `nemo_r3t_stretch(..., evaluation="nemo_reciprocal")`
+with raw-mesh `gdept_0`, NOW SSH, and the bridged `ht_0`. CONFIRM is both
+`gdept 0/9758` and the downstream live-face `uslp_raw 0/9758`; REFUTE is any
+failure at either bar. A quotient-evaluation control and a one-ULP SSH control
+must fail. If confirmed, the owner is the live T-depth evaluation boundary
+(`domain.F90:158` stored reciprocal -> `domqco.F90:160` multiply ->
+`domzgr_substitute.h90:139` live `gdept`) feeding `ldfslp.F90:261-264`.
