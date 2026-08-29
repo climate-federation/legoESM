@@ -165,8 +165,11 @@ def main() -> int:
     prod_masked = prod_prd1 * prod_sum * mask_factor
     nemo_masked = nemo_prd1 * nemo_sum * mask_factor
     zm1_g = -np.float64(1.0) / np.float64(st["g"])
-    prod_zdzr = zm1_g * prod_masked
-    nemo_zdzr = zm1_g * nemo_masked
+    # Preserve Fortran's left-associated source expression exactly:
+    # (((zm1_g * (prd+1)) * (pn2+pn2_kp1)) * mask_factor).
+    # Factoring zm1_g outside the completed product changes binary64 bits.
+    prod_zdzr = ((zm1_g * prod_prd1) * prod_sum) * mask_factor
+    nemo_zdzr = ((zm1_g * nemo_prd1) * nemo_sum) * mask_factor
     prod_pair = prod_zdzr + np.roll(prod_zdzr, -1, axis=1)
     nemo_pair = nemo_zdzr + np.roll(nemo_zdzr, -1, axis=1)
     prod_face = np.float64(0.5) * prod_pair
