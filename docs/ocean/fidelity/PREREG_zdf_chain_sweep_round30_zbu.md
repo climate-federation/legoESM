@@ -60,3 +60,44 @@ focus map, or dirty tracked tree is fatal.
 
 Rows 31--32 and climate remain ordered-blocked until row 30 is fully VERIFIED
 or admissibly waived; there is no focus-only exception.
+
+## Frozen continuation: post-bound `zbu` limiter
+
+Date: 2026-08-29. Frozen before the post-bound substitution measurement. The
+eight-stage peel above has repaired the historical scorer and the complete
+row-30 scorer now verifies the raw `zbu` at `ldfslp.F90:244` (`0/9758`) but
+first diverges after the stability bounds at `ldfslp.F90:248`
+(`5496/9758`, all four focus columns). This continuation uses only the existing
+`zau`, `zbu_pre`, and `zbu_post` dumps plus the SHA-bound NOW restart and raw
+mesh; no oracle rebuild is authorized before this ladder is exhausted.
+
+The running source is evaluated literally, in this order:
+
+```fortran
+! ldfslp.F90:247-248
+zbu = MIN( zbu, -z1_slpmax * ABS( zau ),   &
+     &          -7.e+3_wp / e3u(ji,jj,jk,Kmm) * ABS( zau ) )
+```
+
+The registered stages are: captured `zbu_pre`; captured `zau`; stored
+`z1_slpmax`; raw-mesh `e3u_0`; `r3u(Kmm)` reconstructed from the NOW SSH using
+`domqco.F90:166-169`; live `e3u(Kmm)=e3u_0*(1+r3u*umask)` from
+`domzgr_substitute.h90:129`; slope cap; live-metric cap; inner ordered `MIN`;
+outer ordered `MIN`; captured `zbu_post`. Each stage uses the whole wet-U
+column bar `1.0e-15` and reports the four southern focus columns.
+
+The discrimination is frozen as follows. If substituting the literal live
+`e3u(Kmm)` makes the final `MIN` `0/9758`, while the production static partial-
+cell face thickness reproduces the measured `5496/9758`, the owner is the
+`e3u(Kmm)` operand at `ldfslp.F90:248`. The production repair is a selectable
+live-QCO face-thickness construction, faithful by default only on the two DINO
+NEMO cards; the historical static face metric remains the global default and
+must be byte-identical on every other card. If the live substitution is still
+red, the first red literal stage owns the row and no later stage is scored.
+
+Controls must fail: replacing live `e3u` by static partial-cell thickness,
+using BEFORE rather than NOW SSH in `r3u`, a zonal face roll, a one-ULP exact-
+identity perturbation, wet NaN, and bar-scale perturbation. The raw-mesh,
+restart, dump, source, binary, parent-artifact, focus-map, clean-HEAD, CPU, and
+fp64 gates are fatal. Rows 31--32 and climate remain blocked until the row is
+closed under the original no-focus-exception registration.
