@@ -286,9 +286,25 @@ def _identity_except_stress(legacy, faithful) -> dict[str, Any]:
     return {"all_nonstress_exact": bool(exact), "fields": checked}
 
 
+def _zero_reference_gate(model_values, oracle_values) -> str:
+    if np.count_nonzero(oracle_values) != 0:
+        return "NOT_ZERO_REFERENCE"
+    return (
+        "UNMEASURED_ZERO_REFERENCE"
+        if np.count_nonzero(model_values) == 0
+        else "DEBT_NONZERO_AGAINST_ZERO_REFERENCE"
+    )
+
+
 def _term_metric(lego, nemo, mask, expected_n, total_residual):
-    lego_values = np.asarray(lego)[mask]
-    nemo_values = np.asarray(nemo)[mask]
+    lego_array = np.asarray(lego)
+    nemo_array = np.asarray(nemo)
+    if lego_array.shape != nemo_array.shape or lego_array.shape != mask.shape:
+        raise RuntimeError("term metric shape changed")
+    if not np.all(np.isfinite(lego_array)) or not np.all(np.isfinite(nemo_array)):
+        raise RuntimeError("non-finite term metric operand")
+    lego_values = lego_array[mask]
+    nemo_values = nemo_array[mask]
     if lego_values.size != expected_n or nemo_values.size != expected_n:
         raise RuntimeError("term metric population changed")
     nemo_rms = _rms(nemo_values)
@@ -297,8 +313,21 @@ def _term_metric(lego, nemo, mask, expected_n, total_residual):
         # an explicit structural-zero row and still test whether the legoESM
         # term error can carry the assembled residual.
         lego_rms = _rms(lego_values)
-        planted = lego_values.copy()
-        planted[0] += max(1.0e-30, 1.0e-12 * _rms(np.asarray(total_residual)[mask]))
+        zero_control = np.zeros_like(lego_values)
+        planted = zero_control.copy()
+        planted[0] = max(
+            1.0e-30, 1.0e-12 * _rms(np.asarray(total_residual)[mask])
+        )
+        zero_gate = _zero_reference_gate(lego_values, nemo_values)
+        control_gate = _zero_reference_gate(zero_control, nemo_values)
+        planted_gate = _zero_reference_gate(planted, nemo_values)
+        planted_fires = bool(
+            control_gate == "UNMEASURED_ZERO_REFERENCE"
+            and planted_gate == "DEBT_NONZERO_AGAINST_ZERO_REFERENCE"
+            and not np.array_equal(zero_control, planted)
+        )
+        if not planted_fires:
+            raise RuntimeError("zero-reference planted classifier control failed")
         metric = {
             "sample_count": int(lego_values.size),
             "reference_rms": 0.0,
@@ -306,12 +335,14 @@ def _term_metric(lego, nemo, mask, expected_n, total_residual):
             "max_abs_model": float(np.max(np.abs(lego_values))),
             "normalized_rms_error": None,
             "correlation": None,
-            "campaign_gate": "UNMEASURED_ZERO_REFERENCE",
+            "campaign_gate": zero_gate,
             "structural_zero_reference": True,
             "zero_control": {
                 "oracle_exact_zero": bool(np.count_nonzero(nemo_values) == 0),
                 "model_exact_zero": bool(np.count_nonzero(lego_values) == 0),
-                "planted_nonzero_fires": bool(np.count_nonzero(planted) > 0),
+                "identical_zero_gate": control_gate,
+                "planted_nonzero_gate": planted_gate,
+                "planted_nonzero_fires": planted_fires,
             },
         }
     else:
