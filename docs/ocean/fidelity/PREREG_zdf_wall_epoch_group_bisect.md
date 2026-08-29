@@ -15,6 +15,13 @@ parallel `tke_core` arm completed stably for 160 samples at clean producer
 `1be9010230834eca71f349aa672c20c5704c2f6b0887ed19d0b4eff01e38ee3a`;
 no flicker statistic was opened. That valid independent arm is retained.
 
+Operational amendment: the coordinator deleted that unscored run root during
+cleanup. The retained-artifact optimization is therefore withdrawn without
+changing any arm, contrast, or bar. The handoff reruns all five reachable arms
+from one fresh root and one pinned producer; `tke_core` is admitted by the same
+producer/config/state/runtime gates as the other four, not by the deleted NPZ's
+archive hash.
+
 The repaired design pins every model arm to producer `9ac2550d...`. It replaces
 the unreachable entry arm with `entry_dep`, which also reverts the required
 slope-N2 selector, and adds `slope_n2_only` to measure that dependency. The

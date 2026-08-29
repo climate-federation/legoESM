@@ -19,8 +19,6 @@ NEMO_SHA256 = "52bc6c70697126f7522114dbe2fc5cda5b56ce566db28f488d6809b79997b47a"
 CURRENT_PRODUCER = "e013e95ca54957a4454878ed7118e623da0a19ba"
 CURRENT_ARTIFACT_SHA256 = (
     "c8c7135a12a75332cb1662052dc7c346b6bae7523dabe75e0f2223c515ac616a")
-RETAINED_TKE_CORE_SHA256 = (
-    "1be9010230834eca71f349aa672c20c5704c2f6b0887ed19d0b4eff01e38ee3a")
 HISTORICAL_RECEIPT_SHA256 = (
     "5fd033345548dd5b80390293b0ee786d3c23f2a68055ae86afe2b616ad4e5dd0")
 CURRENT = {"ratio_first8": 1.6511846170859847,
@@ -292,8 +290,6 @@ def main() -> int:
     current_config, initial_hash, land_mask, current_stress = _load_current(
         args.current)
     group_paths = {name: getattr(args, name) for name in GROUPS}
-    if sha256(group_paths["tke_core"]) != RETAINED_TKE_CORE_SHA256:
-        raise SystemExit("STOP retained tke_core artifact SHA mismatch")
     group_stress = {
         name: _load_group(path, args.producer_commit, name, current_config,
                           initial_hash, land_mask)
