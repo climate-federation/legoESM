@@ -814,32 +814,12 @@ def main() -> int:
           "same weights, :2890). No mismatch found -- THE RULE: exact match, "
           "no invented correction.")
 
-    # --- STAGE 7 item (3): is 8.03e-3 quantitatively consistent with the
-    # depth-mean of the known 3-D trend-error rows (dyn_ldf 3.9e-3, dyn_vor EEN
-    # 1.2e-3, dyn_adv ZAD 4.9e-3, dyn_cor_2d 1.2e-3)? Only meaningful if STAGE
-    # 7's static-weight test does NOT collapse the error (i.e. RHS-side, not
-    # weight-side) -- reported unconditionally as a magnitude sanity check,
-    # NOT asserted as a match (no NEMO per-term 3-D dump was read here to
-    # verify the individual level-by-level RHS agreement; this is a
-    # plausibility check on ROOT-SUM-SQUARE magnitude only).
-    _known_rows_rss = float(np.sqrt(3.9e-3**2 + 1.2e-3**2 + 4.9e-3**2 + 1.2e-3**2))
-    print(f"\nSTAGE 7 item 3 (magnitude plausibility ONLY, not a per-level "
-          f"verification): RSS of known 3-D trend-error rows "
-          f"(dyn_ldf 3.9e-3, dyn_vor EEN 1.2e-3, dyn_adv ZAD 4.9e-3, "
-          f"dyn_cor_2d 1.2e-3) = {_known_rows_rss:.4e} vs zu_frc's established "
-          f"8.03e-3 -- {'CONSISTENT-MAGNITUDE' if abs(_known_rows_rss-8.03e-3) < 3e-3 else 'NOT closely matched'} "
-          "(this is NOT proof of a shared root cause -- would need per-level "
-          "correlation of the actual du_dt error field against each term's own "
-          "error field, not run here).")
+    print("\nSTAGE 7 item 3: WITHDRAWN -- the former hard-coded RSS comparison "
+          "mixed historical row values with this run's live forcing score and "
+          "did not localize an operand.")
 
-    print("\nSTAGE 4 VERDICT: if e_u3d_before/e_v3d_before (the raw 3-D before-level "
-          "velocity, direct restart comparison, no depth-averaging involved at all) "
-          "is already at the ~2-3e-2 err_norm level seen at the STAGE-1 seed, the "
-          "error is INHERITED at the bridge/restart-read step -- attribution (A), "
-          "the depth-averaging operator is exonerated. If e_u3d_before/"
-          "e_v3d_before is CLEAN (near roundoff) while the STAGE-1 seed still shows "
-          "~2-3e-2, the averaging/weighting itself introduces the error -- "
-          "attribution (B).")
+    print("\nSTAGE 4 INPUT/SEED CHECK: compare the live 3-D before-level receipt "
+          "and live depth-mean seed without importing historical magnitudes.")
     print(f"  e_u3d_before={e_u3d_before:.4e}  e_v3d_before={e_v3d_before:.4e}  "
           f"(cf. STAGE-1 seed: e_uninit={e_uninit:.4e}  e_vninit={e_vninit:.4e})")
 
@@ -866,30 +846,16 @@ def main() -> int:
           f"final(pvv_b)={e_pvv:.4e}")
     print(f"  ssh    : loop-entry seed={0.0:.4e}  substep-1={e_ssh_s1:.4e}  "
           f"final(pssh)={e_pssh:.4e}")
-    print("The u/v error is ALREADY 2.3-3.0e-2 at the LOOP-ENTRY SEED, i.e. "
-          "BEFORE the substep loop runs even once, and stays essentially FLAT "
-          "(2.3e-2 -> 2.3e-2 -> 3.1e-2) from seed -> substep-1 -> final. This "
-          "is NOT accumulation (an accumulation signature would need a clean "
-          "seed/substep-1 and a large final gap) -- the defect is already "
-          "present in the loop-ENTRY SEED itself (the depth-mean of the "
-          "before-level 3-D velocity, i.e. barotropic_seed_face_depth/the "
-          "before-level bridge), before dyn_spg_ts's substep recurrence ever "
-          "runs. ssh has NO such defect (0 at seed, 7.6e-4 at substep-1, "
-          "4.3e-3 final) -- the residual is velocity-specific, not a shared "
-          "ssh/eta problem, which points at the U/V depth-mean construction "
-          "specifically (the before-level 3-D-to-2-D reduction), not the "
-          "eta continuity/PGF chain.")
-    print(f"\nSTAGE 4 RESULT (this iteration): e_u3d_before={e_u3d_before:.4e}  "
-          f"e_v3d_before={e_v3d_before:.4e} -- the 3-D before-level velocity "
-          "(state.u_before/v_before) is BIT-IDENTICAL to NEMO's restart ub/vb "
-          "at EVERY level (0.0000e+00 err_norm, 35/35 levels, both components) "
-          "-- see the per-level table above. The bridge does nothing but a "
-          "Neumann-fill + C-grid face relabel to this array, so the INPUT to "
-          "the depth-average is proven correct. Yet the depth-MEAN of that "
-          "same exact input (STAGE-1 seed, e_uninit/e_vninit) is already "
-          f"{e_uninit:.4e}/{e_vninit:.4e}. This is a CLEAN, unambiguous "
-          "attribution to (B): the averaging/weighting -- NOT (A) the 3-D "
-          "velocity -- introduces the seed error. (A) is EXONERATED.")
+    if max(e_uninit, e_vninit) <= 1.0e-12:
+        print("The loop-entry U/V seed is MATCHED at the accumulation bar; "
+              "no seed defect is present to attribute. Divergence begins in a "
+              "later operand/output.")
+    elif max(e_u3d_before, e_v3d_before) <= 1.0e-12:
+        print("The 3-D before-level receipt is clean but the depth-mean seed is "
+              "not; this localizes the seed divergence to the averaging path.")
+    else:
+        print("The 3-D before-level receipt is already divergent; the seed "
+              "cannot localize the defect to averaging.")
 
     # =========================================================================
     # STAGE 5 (this iteration): the (B) denominator -- WET LEVEL COUNT at the
@@ -1071,7 +1037,10 @@ def main() -> int:
         print(f"\n  PAYOFF RESULT: seed err_norm with legoESM weights = "
               f"{e_uninit:.4e}/{e_vninit:.4e} (u/v)  ->  with NEMO's own "
               f"e3u_0*umask/e3v_0*vmask weights = {e_u_payoff:.4e}/{e_v_payoff:.4e} (u/v).")
-        if e_u_payoff < 1e-6 and e_v_payoff < 1e-6:
+        if max(e_uninit, e_vninit) <= 1.0e-12:
+            print("  SEED ALREADY MATCHED -- the NEMO-weighted payoff is a "
+                  "redundant roundoff check and makes no ownership claim.")
+        elif e_u_payoff < 1e-6 and e_v_payoff < 1e-6:
             print("  COLLAPSED TO ROUNDOFF -- the weighting/wet-level-count DOES "
                   "own the seed error; STAGE 5's (1a)/(1c) count-diff localisation "
                   "IS the exact defect.")
@@ -1198,11 +1167,10 @@ def main() -> int:
               f"zu_frc's own measured error through exactly ONE substep's rDt_e "
               f"predicts err_norm={predicted_u_s1_from_forcing:.4e} (u), matching the "
               f"independently measured substep-1 err_norm={e_ub_s1:.4e} to "
-              f"{ratio_u:.2f}x. Since zu_frc/zv_frc are frozen constants added "
-              "UNCHANGED every one of the 68 substeps (dynspg_ts.F90:802-808), this "
-              "SAME constant increment repeats every iteration -- exactly the "
-              "linear-accumulation signature (ratio 67.2 over 68 substeps) already "
-              "measured for the final error. The v-component check is reported "
+              f"{ratio_u:.2f}x. This localizes the first-substep divergence; it "
+              "does not by itself claim that unweighted multiplication by the "
+              "substep count predicts the filtered final state. The v-component "
+              "check is reported "
               f"alongside (ratio={ratio_v:.2f}) for completeness, though it is "
               "noisier because vn_e_init's own RMS is small.")
     else:

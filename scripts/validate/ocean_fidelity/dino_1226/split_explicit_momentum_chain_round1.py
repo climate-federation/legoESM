@@ -109,7 +109,6 @@ def main() -> int:
     specifications = [
         ("1.1", "zu_frc", DIRECT_BAR),
         ("1.1", "zv_frc", DIRECT_BAR),
-        ("1.1", "ssh_frc", DIRECT_BAR),
         ("1.2", "sshn_e_init", DIRECT_BAR),
         ("1.2", "un_e_init", DIRECT_BAR),
         ("1.2", "vn_e_init", DIRECT_BAR),
@@ -197,6 +196,12 @@ def main() -> int:
         "row_1_status": row_status,
         "first_diverged_subrow": first_diverged,
         "ordered_subrows": subrows,
+        "unmeasured": {
+            "ssh_frc": (
+                "NEMO dump exists, but the production recipe has no "
+                "F_slow_eta because freshwater_closure is inactive"
+            )
+        },
         "measurements": measurements,
         "controls": controls,
         "provenance_sha256": {

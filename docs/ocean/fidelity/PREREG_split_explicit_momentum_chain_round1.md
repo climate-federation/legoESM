@@ -48,7 +48,7 @@ subrow to satisfy its frozen bar; otherwise the subrow is `DIVERGED`.
 
 | Subrow | Operand/output | Bar | CONFIRM / REFUTE |
 |---:|---|---:|---|
-| 1.1 | slow forcing `zu_frc`, `zv_frc`, `ssh_frc` | `E <= 1e-15` | CONFIRM exact operand receipt / REFUTE |
+| 1.1 | slow momentum forcing `zu_frc`, `zv_frc` | `E <= 1e-15` | CONFIRM exact operand receipt / REFUTE |
 | 1.2 | loop seed `sshn_e`, `un_e`, `vn_e` | `E <= 1e-15` | CONFIRM exact entry state / REFUTE |
 | 1.3 | first substep `ssh`, `ub`, `vb` | `E <= 1e-12` | CONFIRM accumulated prefix / REFUTE |
 | 1.4 | final `puu_b`, `pvv_b`, `pssh`, `un_adv`, `vn_adv` | `E <= 1e-12` | CONFIRM split-explicit output / REFUTE |
@@ -77,3 +77,15 @@ attempt 2, `spg_substep_chain.py` is amended to resolve the card before the
 bridge and pass the same `omega` and `carry_native_lat_deg` condition used by
 `kamm_twin_90d.py:889-905`. This is a harness-input repair only; the ordered
 rows, arrays, bars, controls, and stop rule above are unchanged.
+
+## Instrument amendment after invalid attempt 2
+
+Attempt 2 completed the inherited calculation but the receipt correctly
+refused admission because it required `ssh_frc`. The NEMO dump exists, but
+this production recipe has no legoESM `F_slow_eta` while freshwater closure
+is inactive, so no paired score exists. Before attempt 3, `ssh_frc` is marked
+`UNMEASURED` and removed from momentum subrow 1.1; the U/V fields and their
+bars are unchanged. The inherited log also exposed superseded hard-coded
+seed and accumulation prose inconsistent with its live values. That prose is
+made conditional or withdrawn in the probe before attempt 3, as required by
+the campaign retraction rule; no numeric calculation changes.
