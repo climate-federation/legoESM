@@ -408,3 +408,22 @@ frozen `1.0e-15` per-column oracle bar with `focus_fail=0`; that is the numeric
 gate and no tolerance was changed. The unit receipt therefore bounds the
 synthetic eager/JIT difference at two ULP and retains the red old-association
 control. The scorer's compiled oracle bar remains mandatory.
+
+## Frozen continuation: row-30 raw/post-Shapiro composite close
+
+Date: 2026-08-29. Frozen after the repaired held ladder printed eight
+consecutive zero-failure stages through `blend_u`; parent artifact SHA256
+`8be5ec24beed64967b1a31646df516a40a1b6647f4e5c334d00852cb3e4f435e`.
+No new NEMO dump is required. The existing run already carries the source-
+ordered composites from `ldfslp.F90:306-307,320-333`.
+
+The registered order is `uslp_raw` -> `vslp_raw` -> `uslp_postshapiro` ->
+`vslp_postshapiro`. U stages must be **0/9,758** and V stages **0/9,868** at
+the unchanged `1.0e-15` per-column bar; every stage reports the four southern
+focus columns and requires `focus_fail=0`. The scorer SHA-binds the parent,
+197/197 bracket receipt, mesh, input/output restarts, source, focus map, and
+all four composite dumps, and requires clean HEAD/CPU/fp64. Frame capture must
+be numerically inert. Each direction has expected-vs-expected exact baseline,
+bar-scale, zonal-roll, and wet-NaN controls. The first nonzero stage is
+`DIVERGED` and later stages are not dispositioned. If all four pass, row 30 is
+VERIFIED and the ordered sweep advances to row 31.
