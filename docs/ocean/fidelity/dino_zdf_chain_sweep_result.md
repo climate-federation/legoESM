@@ -3,6 +3,35 @@
 Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 (`RUN_SEQDUMP_D180_1R`, `kt=5761`).
 
+## Round-16 execution receipt: row-18 operands available
+
+The held block was executed by the human after home writes recovered. Two
+command corrections are now permanent:
+
+- an existing NEMO configuration is rebuilt with `makenemo -n DINO`, not
+  `makenemo -r DINO`;
+- the build shell must explicitly run `conda activate nemo-build` after
+  sourcing Conda's shell hook. The earlier handoff omitted that activation.
+
+The patched build and both one-step CPU runs completed. Dump-on and dump-off
+restart containers are byte-identical, SHA256
+`33c0c1a2e998161afdc9d4b71c5606f5cc5d869e54d53058fc0f64eeac7a115c`.
+The two registered 2,980,224-byte operands are:
+
+- `tke_dump_etau_gdepw.bin`:
+  `fc601f5a4c0a9715245189fa10e9f354f0ad204f87bb5e5c31b5859107a01c3d`;
+- `tke_dump_etau_htau.bin`:
+  `3b1e2574a9ea37deb500f9f1a94a56d71b428f9be5b5558dfdf842df1eedfa0d`.
+
+The bracket has one explicit oracle-instrument exclusion:
+`cor2d_dump_zu_trd_substep1.bin` differs beginning at byte 3. Two runs of the
+identical unpatched executable reproduce that run-to-run difference while
+their restart containers remain byte-identical. It is therefore classified
+as a nondeterministic write-only diagnostic—likely an uninitialized dump
+buffer—not a patch effect. It is not consumed by the ZDF scorer. The bracket
+receipt asserts the shared TKE streams byte-for-byte and the restart state
+independently; this exclusion cannot hide a row-18 result.
+
 ## Round-15 hold: row-18 operands instrumented on paper; existing tail scored
 
 Home storage was quota-blocked, so this round made **no NEMO build or run**.
@@ -120,7 +149,7 @@ patch --dry-run -p1 < \
   /tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/nemo_row18_gdepw_htau.patch
 patch -p1 < \
   /tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/nemo_row18_gdepw_htau.patch
-./makenemo -m conda -r DINO -j 8
+./makenemo -m conda -n DINO -j 8
 sha256sum cfgs/DINO/MY_SRC/zdftke.F90 cfgs/DINO/BLD/bin/nemo.exe
 
 run_off=$(mktemp -d /tmp/RUN_ZDF18_OPERANDS_OFF.XXXXXX)
