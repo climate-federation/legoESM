@@ -335,6 +335,23 @@ def test_literal_etau_exp_jit_and_ad_are_finite():
     assert np.all(np.isfinite(np.asarray(reverse)))
 
 
+@pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
+def test_literal_etau_exp_exceptional_range_guard_and_float32_fallback():
+    exceptional = jnp.asarray([-800.0, jnp.inf, -jnp.inf], dtype=jnp.float64)
+    guarded = jax.jit(tke_mod._nemo_glibc234_vector_exp)(exceptional)
+    fallback = jax.jit(jnp.exp)(exceptional)
+    np.testing.assert_array_equal(
+        np.asarray(guarded).view(np.uint64),
+        np.asarray(fallback).view(np.uint64))
+
+    # The dtype guard is independently red-capable: removing it would make
+    # the uint64 bit assembly invalid for this float32 input.
+    fp32 = jnp.asarray([-0.3, -80.0], dtype=jnp.float32)
+    np.testing.assert_array_equal(
+        np.asarray(tke_mod._nemo_glibc234_vector_exp(fp32)),
+        np.asarray(jnp.exp(fp32)))
+
+
 def test_etau_jax_expression_is_the_legacy_expression_byte_for_byte():
     e = jnp.asarray([[1.0e-6, 2.0e-6]])
     taum = jnp.asarray([0.08])
