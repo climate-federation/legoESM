@@ -274,15 +274,15 @@ def main() -> int:
     args.output.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n")
     for name, score in scores.items():
         print(
-            f"{name}: {score['n_diverged_columns']}/{score['n_columns']} "
+            f"{name}: {score['n_diverged_columns']}/{score['n_wet_columns']} "
             f"fail bar {BAR:.1e}; focus_fail={score['focus_fail_count']}")
     print(
         "static e3u substitution: "
         f"{discrimination['static_metric_cap_vs_nemo_post']['n_diverged_columns']}"
-        f"/{discrimination['static_metric_cap_vs_nemo_post']['n_columns']}; "
+        f"/{discrimination['static_metric_cap_vs_nemo_post']['n_wet_columns']}; "
         "live e3u substitution: "
         f"{discrimination['live_metric_cap_vs_nemo_post']['n_diverged_columns']}"
-        f"/{discrimination['live_metric_cap_vs_nemo_post']['n_columns']}")
+        f"/{discrimination['live_metric_cap_vs_nemo_post']['n_wet_columns']}")
     print(f"DISPOSITION: {disposition}; owner={artifact['owner']}")
     return 30 if owner or first is not None else 0
 
