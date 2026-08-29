@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import hashlib
 import json
 import os
@@ -118,8 +119,8 @@ def main() -> int:
     # --bridge-before path does. Seed those exact arrays before invoking the
     # production bundle, matching the real model-step precondition.
     bridge_state = st["bridge_state"]._replace(
-        T_before=st["bridge_state"].T._replace(data=st["T"]),
-        S_before=st["bridge_state"].S._replace(data=st["S"]))
+        T_before=dataclasses.replace(st["bridge_state"].T, data=st["T"]),
+        S_before=dataclasses.replace(st["bridge_state"].S, data=st["S"]))
     bundle = LatLonCGridOceanModel._tke_step_entry_n2_bundle(
         model, bridge_state)
     if bundle is None:
