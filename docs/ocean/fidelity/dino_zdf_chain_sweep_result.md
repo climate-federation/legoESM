@@ -43,8 +43,11 @@ Scope is fail-closed:
 Selecting the literal arm without bridge-carried native degrees raises rather
 than silently reconstructing them.  The focused CPU/fp64 suite reports 57/57
 tests passing, including hard-coded ULP cases, eager/JIT identity, forward and
-reverse AD, legacy-expression identity, selector scope, and bridge/slicer
-coverage.  No GPU was used.
+reverse AD, legacy-expression identity, selector scope, and native-degree
+bridge coverage.  No GPU was used.  The two-reviewer adversarial sign-off required
+before climate citation is still outstanding; this execution environment did
+not authorize spawning reviewers, so the numerical receipt is not a substitute
+for that process gate.
 
 ### Ordered row-19 hold and provisional downstream census
 
@@ -132,6 +135,14 @@ python scripts/validate/ocean_fidelity/dino_1226/zdf_row19_raw_mxl.py \
 The ordered frontier is row 19, so the climate arms remain unauthorized.
 The frozen prediction and arm commands are unchanged; running them now would
 violate the preregistered chain-clean condition.
+
+Post-commit machine receipts (both stamp commit
+`ea4c6eb118f87b7652e462619c3ec9f25424c52f`) are:
+
+- `/tmp/dino_zdf_row18_postfix_final_artifact.json`, SHA256
+  `751c81503843164e73d6fccdbfd3b4092ad692dfbbbc1ace2a55f67a93931613`;
+- `/tmp/dino_zdf_chain_tail_postfix_final_artifact.json`, SHA256
+  `65b94ff73c7eefac853321cc712a3c6334134a291230875c46f7dfc3f1f304b0`.
 
 ## Round-16 result: row 18 localized to a two-operand `htau` interaction
 
