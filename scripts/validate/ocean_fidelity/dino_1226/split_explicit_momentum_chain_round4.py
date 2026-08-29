@@ -282,7 +282,27 @@ def _component_matrix(
         term_dispositions[name] = noncandidate[name]["disposition"]
 
     all_error = sum((errors[name] for name in ORDERED), np.zeros_like(r0))
-    closure = _rms(all_error - r0) / r0_rms
+    closure_values = all_error - r0
+    eps = np.finfo(np.float64).eps
+    closure_bound = 32.0 * eps * (
+        np.abs(r0)
+        + sum((np.abs(errors[name]) for name in ORDERED), np.zeros_like(r0))
+    )
+    closure_roundoff_pass = bool(
+        np.all(np.abs(closure_values) <= closure_bound)
+    )
+    planted_closure = closure_values.copy()
+    planted_closure[0] += 1.0e-12 * r0_rms
+    planted_closure_fails = bool(
+        np.any(np.abs(planted_closure) > closure_bound)
+    )
+    if not (closure_roundoff_pass and planted_closure_fails):
+        raise SystemExit(
+            f"{component} signed closure receipt failed: "
+            f"roundoff_pass={closure_roundoff_pass} "
+            f"plant_fails={planted_closure_fails}"
+        )
+    closure = _rms(closure_values) / r0_rms
     all_model = np.asarray(total_call["lego"]).copy()
     for name in ORDERED:
         all_model -= full_errors[name]
@@ -309,7 +329,14 @@ def _component_matrix(
                 "label": _interaction_label(triple),
             },
             "shapley": {
-                name: {"value": value, "label": _ownership_label(value)}
+                name: {
+                    "value": value,
+                    "label": (
+                        _ownership_label(value)
+                        if group_confirms
+                        else "DESCRIPTIVE_UNADMITTED_GROUP_UNRESOLVED"
+                    ),
+                }
                 for name, value in shapley.items()
             },
             "identities": energy_checks,
@@ -319,6 +346,14 @@ def _component_matrix(
         "noncandidate_bounds": noncandidate,
         "term_dispositions": term_dispositions,
         "all_eight_term_closure_normalized_rms": closure,
+        "all_eight_term_closure_control": {
+            "operation_count_factor": 32.0,
+            "machine_epsilon": eps,
+            "all_points_within_roundoff_bound": closure_roundoff_pass,
+            "max_abs_closure": float(np.max(np.abs(closure_values))),
+            "max_roundoff_bound": float(np.max(closure_bound)),
+            "planted_1e_minus_12_rms_fails": planted_closure_fails,
+        },
         "all_eight_oracle_endpoint": all_metric,
         "fully_disposed": fully_disposed,
     }
