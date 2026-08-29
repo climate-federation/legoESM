@@ -2622,6 +2622,36 @@ def main() -> int:
                                         exp_metric = metrics(
                                             exp_l, exp_n, wet_etau, focus,
                                             POINTWISE_BAR)
+                                        numpy_exp_degree = np.exp(
+                                            -np.asarray(etau_args[2])
+                                            / np.asarray(degree_htau)[
+                                                ..., None])[..., :netau]
+                                        numpy_exp_raw_rad = np.exp(
+                                            -np.asarray(etau_args[2])
+                                            / np.asarray(raw_htau)[
+                                                ..., None])[..., :netau]
+                                        numpy_exp_degree_metric = metrics(
+                                            numpy_exp_degree, exp_n,
+                                            wet_etau, focus, POINTWISE_BAR)
+                                        numpy_exp_raw_rad_metric = metrics(
+                                            numpy_exp_raw_rad, exp_n,
+                                            wet_etau, focus, POINTWISE_BAR)
+                                        numpy_candidate_increment = (
+                                            np.asarray(
+                                                etau_args[3].etau_frac
+                                                * surface_for_etau)[..., None]
+                                            * numpy_exp_degree)
+                                        if etau_ice is not None:
+                                            numpy_candidate_increment *= (
+                                                np.maximum(
+                                                    0.0, 1.0 - np.asarray(
+                                                        etau_ice)[..., None]))
+                                        numpy_candidate = (
+                                            pre_etau_l[..., :netau]
+                                            + numpy_candidate_increment)
+                                        numpy_candidate_metric = metrics(
+                                            numpy_candidate, post_etau_n,
+                                            wet_etau, focus, POINTWISE_BAR)
                                         inc_direct_metric = metrics(
                                             increment_l, inc_direct_n,
                                             wet_etau, focus, POINTWISE_BAR)
@@ -2664,6 +2694,12 @@ def main() -> int:
                                                 wet_etau, focus,
                                                 POINTWISE_BAR),
                                             "direct_nemo_exp": exp_metric,
+                                            "diagnostic_numpy_libm_exp_degree":
+                                                numpy_exp_degree_metric,
+                                            "diagnostic_numpy_libm_exp_raw_rad":
+                                                numpy_exp_raw_rad_metric,
+                                            "substitute_numpy_libm_exp":
+                                                numpy_candidate_metric,
                                             "direct_nemo_increment":
                                                 inc_direct_metric,
                                             "gphit_after_degree_roundtrip":
