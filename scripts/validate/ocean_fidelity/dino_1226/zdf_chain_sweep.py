@@ -472,12 +472,14 @@ def capture_face_sh2_call(model, state, forcing):
     real_mxl = tke_mod.compute_mixing_lengths
     real_solve = tke_mod._solve_tke_backward_euler
     real_tri = tke_mod._tridiag_thomas
+    real_literal_tri = tke_mod._nemo_literal_tke_solve
     real_lc = tke_mod.nemo_langmuir_tke_source
     real_prandtl = tke_mod._prandtl_number
     calls = []
     mxl_calls = []
     solve_calls = []
     tri_calls = []
+    literal_tri_calls = []
     lc_calls = []
     prandtl_calls = []
 
@@ -501,6 +503,11 @@ def capture_face_sh2_call(model, state, forcing):
         tri_calls.append(((a, b, c, d), out))
         return out
 
+    def spy_literal_tri(*args, **kwargs):
+        out = real_literal_tri(*args, **kwargs)
+        literal_tri_calls.append((args, kwargs, out))
+        return out
+
     def spy_lc(*args, **kwargs):
         out = real_lc(*args, **kwargs)
         lc_calls.append((args, kwargs, out))
@@ -515,6 +522,7 @@ def capture_face_sh2_call(model, state, forcing):
     tke_mod.compute_mixing_lengths = spy_mxl
     tke_mod._solve_tke_backward_euler = spy_solve
     tke_mod._tridiag_thomas = spy_tri
+    tke_mod._nemo_literal_tke_solve = spy_literal_tri
     tke_mod.nemo_langmuir_tke_source = spy_lc
     tke_mod._prandtl_number = spy_prandtl
     try:
@@ -525,6 +533,7 @@ def capture_face_sh2_call(model, state, forcing):
         tke_mod.compute_mixing_lengths = real_mxl
         tke_mod._solve_tke_backward_euler = real_solve
         tke_mod._tridiag_thomas = real_tri
+        tke_mod._nemo_literal_tke_solve = real_literal_tri
         tke_mod.nemo_langmuir_tke_source = real_lc
         tke_mod._prandtl_number = real_prandtl
     if not calls:
@@ -534,6 +543,7 @@ def capture_face_sh2_call(model, state, forcing):
     return real, calls[0], {
         "mxl_calls": mxl_calls, "lc_calls": lc_calls,
         "solve_calls": solve_calls, "tri_calls": tri_calls,
+        "literal_tri_calls": literal_tri_calls,
         "prandtl_calls": prandtl_calls,
     }
 
@@ -1629,10 +1639,17 @@ def main() -> int:
                             # handed to Thomas against zdftke.F90:499-510,
                             # reconstructed from independent dumped operands.
                             tri_calls = tke_capture["tri_calls"]
-                            if not tri_calls:
+                            literal_tri_calls = tke_capture[
+                                "literal_tri_calls"]
+                            if tri_calls:
+                                tri_args, _tri_out = tri_calls[0]
+                            elif literal_tri_calls:
+                                literal_args, _literal_kwargs, _tri_out = (
+                                    literal_tri_calls[0])
+                                tri_args = literal_args[:4]
+                            else:
                                 raise AssertionError(
                                     "TKE tridiagonal solve was not captured")
-                            tri_args, _tri_out = tri_calls[0]
                             a_tri, b_tri, c_tri, _rhs_tri = map(
                                 np.asarray, tri_args)
                             nmat = npr - 1

@@ -197,6 +197,24 @@ def test_only_complete_dino_nemo_cards_select_literal_tke_matrix():
     assert all(c.tke_matrix_evaluation == "factored" for c in unchanged)
 
 
+def test_only_complete_dino_nemo_cards_select_literal_tke_solver():
+    faithful = {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}
+    for name, values in DINO_RECIPES.items():
+        resolved = values.get("tke_solver_evaluation", "shared_thomas")
+        assert resolved == (
+            "nemo_literal" if name in faithful else "shared_thomas"), name
+        if values.get("vmix_scheme") == "tke":
+            built = dino_mod._dino_vertical_mixing_config(
+                dino_config_for_recipe(name)).tke
+            assert built.tke_solver_evaluation == resolved, name
+
+    # These are the non-DINO consumers that reach the same production solve.
+    # Their selector and therefore their numerical path remain unchanged.
+    unchanged = (TKEConfig(), _nemo_tke_config(), ACC_TKE_CONFIG,
+                 ACC_BASIC_TKE_CONFIG)
+    assert all(c.tke_solver_evaluation == "shared_thomas" for c in unchanged)
+
+
 def test_only_complete_dino_nemo_cards_select_literal_langmuir():
     faithful = {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}
     for name, values in DINO_RECIPES.items():
@@ -578,11 +596,78 @@ def test_explicit_legacy_selector_is_bit_identical_to_old_default():
         kappa_convention="veros_sqrte", enable_kappaH_profile=False)
     explicit_legacy = implicit_legacy._replace(
         tke_preclosure_coeff_source="current_subiteration",
-        tke_matrix_evaluation="factored")
+        tke_matrix_evaluation="factored",
+        tke_solver_evaluation="shared_thomas")
     old = tke_mod.tke_vertical_mixing(**_column_kwargs(implicit_legacy))
     selected = tke_mod.tke_vertical_mixing(**_column_kwargs(explicit_legacy))
     for field in ("K_M", "K_H", "tke_new", "l_eps"):
         np.testing.assert_array_equal(getattr(selected, field), getattr(old, field))
+
+
+def test_nemo_literal_solver_hand_case_red_controls_jit_and_grad():
+    """Pin zdftke:547-565, including jpkm1 and post-solve mask order."""
+    # Surface + two solved W rows + held jpk. The first column is exactly
+    # hand-computable: diag=(1/2, 2, 23/8), work=(1, 3/2, 19/8), hence the
+    # reverse solution is (22/23, 19/23); the held negative jpk RHS floors
+    # first and is then zeroed by wmask.
+    a = jnp.asarray([[0.0, -0.25, -0.5, 0.0],
+                     [0.0, -0.25, 0.0, 0.0]], dtype=jnp.float64)
+    b = jnp.asarray([[1.0, 2.0, 3.0, 1.0],
+                     [1.0, 2.0, 1.0, 1.0]], dtype=jnp.float64)
+    c = jnp.asarray([[0.0, -0.5, 0.0, 0.0],
+                     [0.0, -0.5, 0.0, 0.0]], dtype=jnp.float64)
+    rhs = jnp.asarray([[2.0, 1.0, 2.0, -1.0],
+                       [4.0, 1.0, 0.4, 7.0]], dtype=jnp.float64)
+    surface = jnp.asarray([2.0, 4.0], dtype=jnp.float64)
+    wet = jnp.asarray([[1.0, 1.0, 0.0],
+                       [1.0, 0.0, 0.0]], dtype=jnp.float64)
+
+    eager = tke_mod._nemo_literal_tke_solve(
+        a, b, c, rhs, surface, wet, 0.1)
+    np.testing.assert_allclose(
+        np.asarray(eager[0]), [22.0 / 23.0, 19.0 / 23.0, 0.0],
+        rtol=0.0, atol=2.0e-15)
+    # Unequal-depth column: its identity bottom row is masked after the
+    # source-ordered solve, while its one wet row remains independently live.
+    np.testing.assert_allclose(
+        np.asarray(eager[1]), [1.1, 0.0, 0.0], rtol=0.0, atol=2.0e-15)
+
+    compiled = jax.jit(tke_mod._nemo_literal_tke_solve,
+                       static_argnums=(6,))(a, b, c, rhs, surface, wet, 0.1)
+    np.testing.assert_array_equal(compiled, eager)
+    grad = jax.grad(lambda r: jnp.sum(tke_mod._nemo_literal_tke_solve(
+        a, b, c, r, surface, wet, 0.1)))(rhs)
+    assert np.all(np.isfinite(np.asarray(grad)))
+
+    # Red controls: generic Thomas consumes the held jpk row and a recurrence
+    # seeded at that row; it must not accidentally satisfy the literal case.
+    shared = tke_mod._tridiag_thomas(a, b, c, rhs)[..., 1:]
+    assert not np.allclose(np.asarray(shared), np.asarray(eager),
+                           rtol=0.0, atol=1.0e-15)
+    source = np.float64(-3.076523269561039e-169)
+    lower = np.float64(-9.741726840261526e-158)
+    previous_diagonal = np.float64(-3.745647236661062e150)
+    previous_rhs = np.float64(-1.1401603475665343e167)
+    divide_then_multiply = (
+        source - lower / previous_diagonal * previous_rhs)
+    multiply_then_divide = (
+        source - (lower * previous_rhs) / previous_diagonal)
+    assert divide_then_multiply != multiply_then_divide
+    planted = rhs.at[0, 2].set(rhs[0, 2] + 0.25)
+    poisoned = tke_mod._nemo_literal_tke_solve(
+        a, b, c, planted, surface, wet, 0.1)
+    assert not np.array_equal(np.asarray(poisoned), np.asarray(eager))
+
+
+def test_nemo_literal_solver_requires_literal_matrix():
+    cfg = TKEConfig(tke_solver_evaluation="nemo_literal")
+    with pytest.raises(ValueError, match="requires.*matrix"):
+        tke_mod._solve_tke_backward_euler(
+            e_old=jnp.ones((1, 2)), K_M_old=jnp.ones((1, 2)),
+            K_H_old=jnp.ones((1, 2)), P_s=jnp.zeros((1, 2)),
+            N2=jnp.zeros((1, 2)), l_eps=jnp.ones((1, 2)),
+            dz_half=jnp.ones((1, 2)), surface_flux=jnp.zeros((1,)),
+            dt=1.0, cfg=cfg)
 
 
 def test_nemo_literal_matrix_matches_hand_computed_source_order(monkeypatch):

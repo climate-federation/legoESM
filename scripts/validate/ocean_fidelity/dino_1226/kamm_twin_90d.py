@@ -1087,6 +1087,7 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                        surface_tendency_placement: str | None = None,
                        tke_preclosure_coeff_source: str | None = None,
                        tke_matrix_evaluation: str | None = None,
+                       tke_solver_evaluation: str | None = None,
                        tke_langmuir_evaluation: str | None = None,
                        tke_shear_evaluation_stage: str | None = None,
                        tke_shear_metric_source: str | None = None,
@@ -1163,6 +1164,13 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                 "tke_matrix_evaluation must be 'nemo_literal' or 'factored'")
         cfg = dataclasses.replace(
             cfg, tke_matrix_evaluation=tke_matrix_evaluation)
+    if tke_solver_evaluation is not None:
+        if tke_solver_evaluation not in ("nemo_literal", "shared_thomas"):
+            raise ValueError(
+                "tke_solver_evaluation must be 'nemo_literal' or "
+                "'shared_thomas'")
+        cfg = dataclasses.replace(
+            cfg, tke_solver_evaluation=tke_solver_evaluation)
     if tke_langmuir_evaluation is not None:
         if tke_langmuir_evaluation not in ("nemo_literal", "vectorized"):
             raise ValueError(
@@ -1388,6 +1396,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
              surface_tendency_placement: str | None = None,
              tke_preclosure_coeff_source: str | None = None,
              tke_matrix_evaluation: str | None = None,
+             tke_solver_evaluation: str | None = None,
              tke_langmuir_evaluation: str | None = None,
              tke_shear_evaluation_stage: str | None = None,
              tke_shear_metric_source: str | None = None,
@@ -1457,6 +1466,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         surface_tendency_placement=surface_tendency_placement,
         tke_preclosure_coeff_source=tke_preclosure_coeff_source,
         tke_matrix_evaluation=tke_matrix_evaluation,
+        tke_solver_evaluation=tke_solver_evaluation,
         tke_langmuir_evaluation=tke_langmuir_evaluation,
         tke_shear_evaluation_stage=tke_shear_evaluation_stage,
         tke_shear_metric_source=tke_shear_metric_source,
@@ -1546,6 +1556,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         # arms distinguishable even when both are launched from defaults.
         "tke_preclosure_coeff_source": cfg.tke_preclosure_coeff_source,
         "tke_matrix_evaluation": cfg.tke_matrix_evaluation,
+        "tke_solver_evaluation": cfg.tke_solver_evaluation,
         "tke_langmuir_evaluation": cfg.tke_langmuir_evaluation,
         "tke_shear_evaluation_stage": cfg.tke_shear_evaluation_stage,
         "tke_shear_metric_source": cfg.tke_shear_metric_source,
@@ -1978,6 +1989,12 @@ def _parse_args(argv=None):
              "recipe (DINO NEMO cards use literal zdftke source order; "
              "factored is historical reproduction)")
     p.add_argument(
+        "--tke-solver-evaluation", default=None,
+        choices=("nemo_literal", "shared_thomas"),
+        help="override the TKE tridiagonal recurrence; default None uses "
+             "the recipe (DINO NEMO cards use the literal zdftke scans; "
+             "shared_thomas is historical reproduction)")
+    p.add_argument(
         "--tke-langmuir-evaluation", default=None,
         choices=("nemo_literal", "vectorized"),
         help="override the Langmuir source construction; default None uses "
@@ -2238,6 +2255,7 @@ def main(argv=None):
               surface_tendency_placement=args.surface_tendency_placement,
               tke_preclosure_coeff_source=args.tke_preclosure_coeff_source,
               tke_matrix_evaluation=args.tke_matrix_evaluation,
+              tke_solver_evaluation=args.tke_solver_evaluation,
               tke_langmuir_evaluation=args.tke_langmuir_evaluation,
               tke_shear_evaluation_stage=args.tke_shear_evaluation_stage,
               tke_shear_metric_source=args.tke_shear_metric_source,

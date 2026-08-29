@@ -890,6 +890,98 @@ from legoesm.ocean.physics.vertical_mixing._shared import (  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
+def _nemo_literal_tke_solve(
+    a: jnp.ndarray,
+    b: jnp.ndarray,
+    c: jnp.ndarray,
+    rhs: jnp.ndarray,
+    surface_en: jnp.ndarray,
+    w_active: jnp.ndarray,
+    floor: float,
+) -> jnp.ndarray:
+    """Solve the NEMO ``zdftke`` system in literal source order.
+
+    ``a/b/c/rhs`` include the virtual z=0 row followed by NEMO's W rows.
+    Unlike the shared Thomas solver, ``zdftke.F90:547-565`` first eliminates
+    all diagonal coefficients, then eliminates the RHS in a separate loop,
+    seeds the solution at ``jpkm1`` (leaving the held ``jpk`` row out of the
+    recurrence), and only then reverse-substitutes. The final floor and W
+    mask are part of the same source-ordered operation.
+    """
+    if not (a.shape == b.shape == c.shape == rhs.shape):
+        raise ValueError("literal TKE tridiagonal operands must share a shape")
+    if a.ndim < 1 or a.shape[-1] < 2:
+        raise ValueError("literal TKE solve requires a surface and W row")
+    expected_mask_shape = a.shape[:-1] + (a.shape[-1] - 1,)
+    if w_active.shape != expected_mask_shape:
+        raise ValueError(
+            "w_active must match the non-surface TKE rows; got "
+            f"{w_active.shape} vs {expected_mask_shape}")
+
+    # For an extended length jpk, Python index jpk-2 is Fortran jpkm1.
+    # The final (Fortran jpk) row is deliberately excluded from both scans.
+    jpkm1 = a.shape[-1] - 2
+    diag_seed = 1.0 / jnp.asarray(surface_en, dtype=b.dtype)
+    work_seed = jnp.ones_like(diag_seed)
+
+    if jpkm1:
+        diag_inputs = tuple(jnp.moveaxis(x, -1, 0) for x in (
+            a[..., 1:jpkm1 + 1], b[..., 1:jpkm1 + 1], c[..., :jpkm1]))
+
+        def diagonal_step(previous, operands):
+            lower, diagonal, previous_upper = operands
+            current = diagonal - lower * previous_upper / previous
+            return current, current
+
+        _, diagonal_rows = jax.lax.scan(
+            diagonal_step, diag_seed, diag_inputs)
+        diagonal = jnp.concatenate(
+            [diag_seed[..., None], jnp.moveaxis(diagonal_rows, 0, -1)],
+            axis=-1)
+
+        rhs_inputs = tuple(jnp.moveaxis(x, -1, 0) for x in (
+            rhs[..., 1:jpkm1 + 1], a[..., 1:jpkm1 + 1],
+            diagonal[..., :jpkm1]))
+
+        def rhs_step(previous, operands):
+            source, lower, previous_diagonal = operands
+            # Preserve NEMO's division-before-multiply association (:556).
+            current = source - lower / previous_diagonal * previous
+            return current, current
+
+        _, work_rows = jax.lax.scan(rhs_step, work_seed, rhs_inputs)
+        work = jnp.concatenate(
+            [work_seed[..., None], jnp.moveaxis(work_rows, 0, -1)], axis=-1)
+
+        terminal = work[..., jpkm1] / diagonal[..., jpkm1]
+        if jpkm1 > 1:
+            reverse_inputs = tuple(
+                jnp.moveaxis(x[..., 1:jpkm1][..., ::-1], -1, 0)
+                for x in (work, c, diagonal))
+
+            def reverse_step(next_value, operands):
+                source, upper, current_diagonal = operands
+                current = (source - upper * next_value) / current_diagonal
+                return current, current
+
+            _, reverse_rows = jax.lax.scan(
+                reverse_step, terminal, reverse_inputs)
+            solved_prefix = jnp.concatenate(
+                [jnp.moveaxis(reverse_rows, 0, -1)[..., ::-1],
+                 terminal[..., None]], axis=-1)
+        else:
+            solved_prefix = terminal[..., None]
+    else:
+        solved_prefix = jnp.zeros(a.shape[:-1] + (0,), dtype=rhs.dtype)
+
+    # The uneliminated jpk row retains its RHS until the source's final
+    # MAX(..., rn_emin) * wmask statement.
+    solved = jnp.concatenate(
+        [solved_prefix, rhs[..., jpkm1 + 1:]], axis=-1)
+    return (jnp.maximum(solved, jnp.asarray(floor, dtype=solved.dtype))
+            * jnp.asarray(w_active, dtype=solved.dtype))
+
+
 def _solve_tke_backward_euler(
     e_old: jnp.ndarray,
     K_M_old: jnp.ndarray,
@@ -1055,6 +1147,16 @@ def _solve_tke_backward_euler(
             "Unknown TKEConfig.tke_matrix_evaluation: expected 'factored' "
             f"or 'nemo_literal', got {matrix_evaluation!r}.")
     literal_matrix = matrix_evaluation == "nemo_literal"
+    solver_evaluation = getattr(cfg, "tke_solver_evaluation", "shared_thomas")
+    if solver_evaluation not in ("shared_thomas", "nemo_literal"):
+        raise ValueError(
+            "Unknown TKEConfig.tke_solver_evaluation: expected "
+            f"'shared_thomas' or 'nemo_literal', got {solver_evaluation!r}.")
+    literal_solver = solver_evaluation == "nemo_literal"
+    if literal_solver and not literal_matrix:
+        raise ValueError(
+            "tke_solver_evaluation='nemo_literal' requires "
+            "tke_matrix_evaluation='nemo_literal'.")
     if literal_matrix:
         if nemo_e3t is None or dissl_old is None or w_active is None:
             raise ValueError(
@@ -1108,6 +1210,15 @@ def _solve_tke_backward_euler(
             "(MY_SRC/zdftke.F90:565) and requires TKEConfig.positivity="
             "'floor'; got positivity='veros_surface_correction' (the Veros "
             "branch has no such floor, so the mask would silently no-op).")
+    if literal_solver:
+        if surface_bc_level != "nemo_z0" or w_active is None:
+            raise ValueError(
+                "tke_solver_evaluation='nemo_literal' requires the NEMO "
+                "z=0 row and w_active.")
+        if veros_positivity:
+            raise ValueError(
+                "tke_solver_evaluation='nemo_literal' requires "
+                "positivity='floor'.")
     if veros_positivity:
         # Veros linearisation point: sqrttke = sqrt(max(0, e)) (tke.py:30)
         # — zero where the carried TKE is negative (energy debt), so the
@@ -1477,8 +1588,13 @@ def _solve_tke_backward_euler(
             [jnp.zeros_like(c_diff[..., :1]), c_diff], axis=-1)
         rhs_ext = jnp.concatenate([e_sfc[..., None], rhs], axis=-1)
 
-        e_new_ext = _tridiag_thomas(a_ext, b_ext, c_ext, rhs_ext)
-        e_new = e_new_ext[..., 1:]
+        if literal_solver:
+            e_new = _nemo_literal_tke_solve(
+                a_ext, b_ext, c_ext, rhs_ext, e_sfc, w_active,
+                cfg.tke_background)
+        else:
+            e_new_ext = _tridiag_thomas(a_ext, b_ext, c_ext, rhs_ext)
+            e_new = e_new_ext[..., 1:]
     elif surface_dirichlet is not None:
         # NEMO nn_bc_surf=1 Dirichlet surface TKE (zdftke.F90:264-269): hold
         # e_new[...,0] = e_sfc exactly by making row 0 an identity row (the
@@ -1493,6 +1609,9 @@ def _solve_tke_backward_euler(
     else:
         rhs = rhs.at[..., 0].add(dt * surface_flux / inj_vol)
         e_new = _tridiag_thomas(a_diff, diag, c_diff, rhs)
+
+    if literal_solver:
+        return e_new
 
     if veros_positivity:
         # Veros tke.py:238-245: interior TKE MAY GO NEGATIVE (the debt is
