@@ -23,6 +23,7 @@ import jaxlib
 import numpy as np
 
 from legoesm.core.precision import PrecisionPolicy, set_policy
+import legoesm.grids.latlon as grid_module
 import legoesm.ocean.dynamics.barotropic_latlon_cgrid as barotropic_module
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     nemo_literal_continuity_divergence,
@@ -78,6 +79,7 @@ def main() -> int:
             ["git", "status", "--porcelain"], cwd=root, text=True):
         raise SystemExit("clean package commit required")
     production_paths = {
+        "core_grid": Path(grid_module.__file__).resolve(),
         "barotropic": Path(barotropic_module.__file__).resolve(),
         "dino_card": Path(dino_module.__file__).resolve(),
         "nemo_io": Path(nemo_io_module.__file__).resolve(),

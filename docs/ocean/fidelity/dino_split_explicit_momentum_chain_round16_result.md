@@ -28,7 +28,7 @@ nonzero drag and `g=0` requires both arms to return bit-identical transports
 and velocities while SSH is bit-distinct; the combined continuity/drag/
 partial-cell set passes 40/40 on CPU/fp64.
 
-At the final package commit, the hardened production acceptance again reports
+At the measured production commit, the hardened production acceptance reports
 rows 9.1--9.7 all `AT BAR` with normalized error and maximum error both exactly
 zero. It binds checkout-local production modules, the exact mesh/restart and
 dump hashes, CPU/fp64, session, and controls. The production acceptance calls

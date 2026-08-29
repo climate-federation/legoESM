@@ -58,7 +58,7 @@ def main() -> int:
         raise SystemExit(
             "acceptance mesh/restart hashes do not match recurrence inputs")
     if set(bindings.get("production_sha256", {})) != {
-            "barotropic", "dino_card", "nemo_io", "state_bridge",
+            "core_grid", "barotropic", "dino_card", "nemo_io", "state_bridge",
             "inherited_probe", "round9_scorer"}:
         raise SystemExit("hardened production binding missing")
     if acceptance.get("disposition") \
