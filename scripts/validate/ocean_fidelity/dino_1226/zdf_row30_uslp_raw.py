@@ -177,7 +177,11 @@ def main() -> int:
     controls["one_ulp_ssh_exact_fired"] = not np.array_equal(
         np.asarray(ulp_gdept), np.asarray(reciprocal_gdept))
     if not all(value for value in controls.values() if isinstance(value, bool)):
-        raise SystemExit("row30 raw-slope planted control did not fire")
+        failed = sorted(
+            name for name, value in controls.items()
+            if isinstance(value, bool) and not value)
+        raise SystemExit(
+            f"row30 raw-slope planted control did not fire: {failed}")
 
     owner = (reciprocal_gdept_score["pass"] and correct_score["pass"]
              and not production_score["pass"])
