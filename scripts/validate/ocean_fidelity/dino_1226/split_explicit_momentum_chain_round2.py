@@ -270,9 +270,38 @@ def _identity_except_stress(legacy, faithful) -> dict[str, Any]:
 
 
 def _term_metric(lego, nemo, mask, expected_n, total_residual):
-    metric = round1._metric(lego, nemo, mask, expected_n)
-    metric["campaign_gate"] = round1._classify_metric(metric, None)
-    term_error = (np.asarray(lego) - np.asarray(nemo))[mask]
+    lego_values = np.asarray(lego)[mask]
+    nemo_values = np.asarray(nemo)[mask]
+    if lego_values.size != expected_n or nemo_values.size != expected_n:
+        raise RuntimeError("term metric population changed")
+    nemo_rms = _rms(nemo_values)
+    if nemo_rms == 0.0:
+        # A zero oracle term has no normalized-error statistic.  Preserve it as
+        # an explicit structural-zero row and still test whether the legoESM
+        # term error can carry the assembled residual.
+        lego_rms = _rms(lego_values)
+        planted = lego_values.copy()
+        planted[0] += max(1.0e-30, 1.0e-12 * _rms(np.asarray(total_residual)[mask]))
+        metric = {
+            "sample_count": int(lego_values.size),
+            "reference_rms": 0.0,
+            "model_rms": lego_rms,
+            "max_abs_model": float(np.max(np.abs(lego_values))),
+            "normalized_rms_error": None,
+            "correlation": None,
+            "campaign_gate": "UNMEASURED_ZERO_REFERENCE",
+            "structural_zero_reference": True,
+            "zero_control": {
+                "oracle_exact_zero": bool(np.count_nonzero(nemo_values) == 0),
+                "model_exact_zero": bool(np.count_nonzero(lego_values) == 0),
+                "planted_nonzero_fires": bool(np.count_nonzero(planted) > 0),
+            },
+        }
+    else:
+        metric = round1._metric(lego, nemo, mask, expected_n)
+        metric["campaign_gate"] = round1._classify_metric(metric, None)
+        metric["structural_zero_reference"] = False
+    term_error = lego_values - nemo_values
     residual = np.asarray(total_residual)[mask]
     residual_rms = _rms(residual)
     term_rms = _rms(term_error)
@@ -303,7 +332,13 @@ def _counterfactual_score(legacy, faithful, nemo, mask):
     corrected = (np.asarray(faithful) - np.asarray(nemo))[mask]
     rms_residual = _rms(residual)
     prediction_error = _rms(prediction + residual) / rms_residual
-    corr = float(np.corrcoef(prediction, -residual)[0, 1])
+    corr = (
+        float(np.corrcoef(prediction, -residual)[0, 1])
+        if prediction.size > 1
+        and np.std(prediction) > 0.0
+        and np.std(residual) > 0.0
+        else math.nan
+    )
     reduction = 1.0 - _rms(corrected) / rms_residual
     if prediction_error <= 0.10 and corr >= 0.99 and reduction >= 0.90:
         verdict = "CONFIRMS_BRIDGE_WIND_SOURCE"
