@@ -61,12 +61,24 @@ multiplies it back.  Dry rows are identity-diagonal/masked, and the literal
 helpers pass hand arithmetic, JIT, finite AD, selector-typo, dry-row, resolved-
 card scope, and default-versus-explicit legacy identity tests.
 
+The final production-path review caught and red-tested one routing defect
+before authorization: a 2-D surface wet mask had been broadcast through the
+full-step staircase, so dry bottom rows could enter the literal matrices as
+wet and produce `0/0`.  The literal route now uses `z_coord.is_active` for
+tracers and its derived 3-D U/V face masks for momentum, while the final
+application preserves the model's below-bottom sentinels.  The real-model
+regression changed from hundreds of NaNs to four finite fields with every dry
+sentinel bit-identical; the one-level momentum edge now also applies its
+implicit diagonal and dry mask.  Shared-Thomas cards retain their prior mask
+route.
+
 The final machine receipt is
 `dino_zdf_chain_end_verified_artifact.json`, SHA256
-`5c518b4666468855c520c248a58313c3645681dcf0f86d6b6971ff634373d647`.
+`ce6fff6690ff6fbfa1023b4cf3eafbd36d0b86938ef47c5f7524accc410d4975`.
 It binds both row-30 closure receipts, the full existing day-180 dump family,
 both resolved-card selectors, production-dispatch call counts, oracle source
-SHAs, bars, focus registry, and planted controls.  Rows 1--32 are now
+SHAs, production source SHAs, a clean checked-out HEAD, bars, focus registry,
+and planted controls.  Rows 1--32 are now
 `VERIFIED` or `WAIVED` under the ordered ledger: there is no remaining red or
 unmeasured ZDF row.
 

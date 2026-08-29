@@ -40,7 +40,25 @@
   },
   "probe": {
     "path": "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/zdf_chain_end.py",
-    "sha256": "68c45e1fbfc2f81e876a68fa6f81d6ed03f197307b35858fd9a153234dff0a23"
+    "sha256": "23c02c9f81bba22e74fac5d01b2dc052f01cf39f04510a69210992cc4e001fe8"
+  },
+  "production_source_sha256": {
+    "dino.py": {
+      "path": "/tmp/codex-zdf-sweep/packages/ocean/legoesm/ocean/experiments/dino.py",
+      "sha256": "faec0ce345f151573b36a2805ae1226cfd2e3381e442ee05934ef14e5ad5fcf4"
+    },
+    "implicit_solver.py": {
+      "path": "/tmp/codex-zdf-sweep/packages/ocean/legoesm/ocean/physics/vertical_mixing/implicit_solver.py",
+      "sha256": "e94c17da3f1e8d085d7af9d58aee02c5e95cd7c00d23b79e2a72f56121f93f30"
+    },
+    "ocean_model_latlon_cgrid.py": {
+      "path": "/tmp/codex-zdf-sweep/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py",
+      "sha256": "2a063281b528ca0740700b35204d4cedd9cd5dc298f1e98d96c79de77b267d7b"
+    },
+    "state.py": {
+      "path": "/tmp/codex-zdf-sweep/packages/ocean/legoesm/ocean/state.py",
+      "sha256": "6cbf1909d5b4a084d2a17e8c5a5260d81a12d12c113b505a1b4c483ec2c66002"
+    }
   },
   "provenance_sha256": {
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/BLD/bin/nemo.exe.seqdump_ea0c113c": "545b383996e644591492e0fc7c82663a2d47272e2c7172ad8bbc58e5cd7d5239",
@@ -93,7 +111,7 @@
     "/tmp/dino_zdf_row30_uslp_postdepthfix_artifact.json": "8be5ec24beed64967b1a31646df516a40a1b6647f4e5c334d00852cb3e4f435e",
     "/tmp/row30_seos_oracle.so": "fd831e156b2efed818bc3e96dc8ffaab37b6f46a66fcff9f88b2e40de3a8f68e"
   },
-  "repo_sha": "a32dfea1d369009379bb4a545fe633af4b0c3d76",
+  "repo_sha": "bc9dac9e6c760ed3025e1c6c576488e69e252de8",
   "rows": {
     "28": {
       "disposition": "VERIFIED",
@@ -1537,7 +1555,7 @@
           ]
         }
       },
-      "literal_dispatch_call_count": 2,
+      "literal_dispatch_call_count": 1,
       "nemo_lines": [
         "dynzdf.F90:199-214",
         "dynzdf.F90:340-380"

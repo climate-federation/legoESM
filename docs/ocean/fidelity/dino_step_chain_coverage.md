@@ -28,7 +28,7 @@ and V `0/9,868`; row 31's production literal momentum application is U
 `0/9,758`, V `0/9,868`; row 32's production literal content-form tracer
 application is T/S `0/9,920`, all with every southern focus column passing.
 The binding end receipt is `dino_zdf_chain_end_verified_artifact.json` SHA256
-`5c518b4666468855c520c248a58313c3645681dcf0f86d6b6971ff634373d647`.
+`ce6fff6690ff6fbfa1023b4cf3eafbd36d0b86938ef47c5f7524accc410d4975`.
 The older `VERIFIED-EARLIER` labels below are superseded by these numeric
 receipts when the full-step lane imports ZDF coverage.
 
