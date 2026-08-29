@@ -139,5 +139,53 @@ gap by `-0.02496024897123128 Sv`; the interaction is
 `+0.03865013957391383 Sv`, leaving every registered component bounded at the
 same floor. The score artifact SHA-256 is
 `d1974563f01cfec03e317dbeba6de1210935b184d8bc8a1dd5fa34984a6d30a6`.
-The independently preregistered five-day wall factorial remains to be run in
-Blocks 4--5.
+The independently preregistered five-day wall factorial is now complete. Its
+artifact SHA-256 is
+`c9be1e08aac6b501dca2d8634ee889df7e7f90e930c70d0c345af8cdc2819343`.
+All four arms lie in the narrow ranges ratio `1.63496--1.65118` and wall share
+`0.17020--0.17308`; continuity alone changes either statistic by less than
+`1e-9`, while the V-face metric changes ratio by about `-0.0162` and wall share
+by `+0.00288`.
+
+The formal wall verdict is **`INVALID_CONTROL`**. The registered control band
+was the earlier uncorrected-bridge epoch (`[2.60,3.18]`, `[0.38,0.59]`), while
+the corrected-T basin lane had already moved to ratio `1.1607251697830108`,
+wall share `0.11941867158491266`. The current M0A0 control instead measures
+`1.6511846170859847`, `0.17020235431211447`. Therefore no registered wall
+ownership verdict exists: all four metric/association effects are descriptive,
+and any earlier wording that the current-epoch wall question was confirmed or
+refuted by this factorial is withdrawn.
+
+The basin result is a real registered null measurement, not an invalid
+control. It rejects the working prediction that this structural pair would
+produce a visible, material movement of the `-0.95 Sv` deficit: the observed
+response is only 1.376%. Its formal label nevertheless remains
+**`UNRESOLVED/FLOOR`**, because the decision tree checks `|delta|<=2F` before
+the <=2% refutation branch. It must not be relabeled formal `REFUTED`; the
+correct claim is that material ownership was not confirmed and the measured
+pair does not explain the deficit at the registered resolution.
+
+The wall control's rise from the corrected-T epoch (`1.1607/0.1194`) to the
+current epoch (`1.6512/0.1702`) opens a separate attribution lane. Sixteen
+ZDF-sweep changes have explicit legacy selectors. They are preregistered into
+four non-overlapping group reversions (entry lifetime, TKE core algebra,
+penetration/mixing-length/final ZDF, and GM/Redi slopes), with the current
+artifact and historical receipt hash-bound. A group owns the movement only if
+both observables clear the frozen closure rule; mixed responses escalate to an
+all-legacy universe gate and complement-paired interactions.
+
+## COMPLETE-PR boundary
+
+The momentum lane's finished PR unit is ready: the NEMO V-face metric and
+literal QCO continuity production fixes; exact day-180 row-9.1--9.7 acceptance
+and recurrence receipts; selector isolation/non-confound tests; corrected-T
+merge-order dependency; and both completed climate outcomes with the formal
+qualifications above. The PR must say COMPLETE and must not claim either basin
+or wall climate ownership.
+
+The following remain open and are not merge conditions for that finished
+unit: the ordered chain stop at row 1.2; rows 1.3--6; the unknown owner of the
+`-0.95 Sv` basin deficit; and the new wall-epoch ZDF selector attribution. The
+last item has a frozen four-arm measurement package but no result, so execution
+and any individual-selector peel belong on a new follow-up branch/PR rather
+than as a tail appended after this PR opens.
