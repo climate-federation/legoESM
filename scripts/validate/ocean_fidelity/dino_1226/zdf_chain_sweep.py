@@ -2616,7 +2616,7 @@ def main() -> int:
                                                 * jnp.abs(jnp.sin(jnp.deg2rad(
                                                     etau_kwargs[
                                                         "lat_deg"])))))
-                                        exp_l = np.asarray(jnp.exp(
+                                        argument_plus_exp_l = np.asarray(jnp.exp(
                                             -etau_args[2]
                                             / degree_htau[..., None]))[
                                                 ..., :netau]
@@ -2627,14 +2627,19 @@ def main() -> int:
                                         argument_n = arg_n_full[
                                             ..., 1:1 + netau]
                                         exp_n = exp_n_full[..., 1:1 + netau]
+                                        isolated_exp_l = np.asarray(jnp.exp(
+                                            jnp.asarray(argument_n)))
                                         inc_direct_n = inc_direct_n_full[
                                             ..., 1:1 + netau]
                                         argument_metric = metrics(
                                             argument_l, argument_n, wet_etau,
                                             focus, POINTWISE_BAR)
                                         exp_metric = metrics(
-                                            exp_l, exp_n, wet_etau, focus,
+                                            isolated_exp_l, exp_n, wet_etau,
                                             POINTWISE_BAR)
+                                        argument_plus_exp_metric = metrics(
+                                            argument_plus_exp_l, exp_n,
+                                            wet_etau, focus, POINTWISE_BAR)
                                         numpy_exp_degree = np.exp(
                                             -np.asarray(etau_args[2])
                                             / np.asarray(degree_htau)[
@@ -2709,6 +2714,8 @@ def main() -> int:
                                             "direct_nemo_exponent_argument":
                                                 argument_metric,
                                             "direct_nemo_exp": exp_metric,
+                                            "production_argument_plus_exp":
+                                                argument_plus_exp_metric,
                                             "diagnostic_numpy_libm_exp_degree":
                                                 numpy_exp_degree_metric,
                                             "diagnostic_numpy_libm_exp_raw_rad":

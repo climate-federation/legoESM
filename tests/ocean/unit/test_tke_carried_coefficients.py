@@ -215,6 +215,50 @@ def test_only_complete_dino_nemo_cards_select_literal_tke_solver():
     assert all(c.tke_solver_evaluation == "shared_thomas" for c in unchanged)
 
 
+@pytest.mark.parametrize("card_name", [
+    "nemo_paper", "veros", "generic_nemo", "acc", "acc_basic",
+])
+def test_every_unchanged_tke_card_keeps_shared_solver_bits(card_name,
+                                                           monkeypatch):
+    dino_cards = {
+        name: dino_mod._dino_vertical_mixing_config(
+            dino_config_for_recipe(name)).tke
+        for name in ("nemo_paper", "veros")
+    }
+    cards = {
+        **dino_cards,
+        "generic_nemo": _nemo_tke_config(),
+        "acc": ACC_TKE_CONFIG,
+        "acc_basic": ACC_BASIC_TKE_CONFIG,
+    }
+    cfg = cards[card_name]
+    assert cfg.tke_solver_evaluation == "shared_thomas"
+
+    def literal_must_not_run(*args, **kwargs):
+        raise AssertionError(f"literal solver reached by unchanged {card_name}")
+
+    monkeypatch.setattr(tke_mod, "_nemo_literal_tke_solve",
+                        literal_must_not_run)
+    common = dict(
+        e_old=jnp.asarray([[1.0, 0.7]]),
+        K_M_old=jnp.asarray([[0.2, 0.3]]),
+        K_H_old=jnp.asarray([[0.1, 0.15]]),
+        P_s=jnp.asarray([[0.01, 0.02]]),
+        N2=jnp.asarray([[1.0e-5, -1.0e-5]]),
+        l_eps=jnp.asarray([[1.0, 1.2]]),
+        dz_half=jnp.asarray([[2.0, 3.0]]),
+        surface_flux=jnp.asarray([0.001]), dt=2.0,
+        surface_dirichlet=(
+            jnp.asarray([0.8]) if cfg.surface_bc == "nemo_dirichlet"
+            else None),
+        surface_bc_level=cfg.tke_surface_bc_level,
+    )
+    implicit = tke_mod._solve_tke_backward_euler(cfg=cfg, **common)
+    explicit = tke_mod._solve_tke_backward_euler(
+        cfg=cfg._replace(tke_solver_evaluation="shared_thomas"), **common)
+    np.testing.assert_array_equal(explicit, implicit)
+
+
 def test_only_complete_dino_nemo_cards_select_literal_langmuir():
     faithful = {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}
     for name, values in DINO_RECIPES.items():
@@ -653,6 +697,19 @@ def test_nemo_literal_solver_hand_case_red_controls_jit_and_grad():
     multiply_then_divide = (
         source - (lower * previous_rhs) / previous_diagonal)
     assert divide_then_multiply != multiply_then_divide
+    association_result = tke_mod._nemo_literal_tke_solve(
+        jnp.asarray([[0.0, 0.0, lower, 0.0]], dtype=jnp.float64),
+        jnp.asarray([[1.0, previous_diagonal, 1.0, 1.0]],
+                    dtype=jnp.float64),
+        jnp.zeros((1, 4), dtype=jnp.float64),
+        jnp.asarray([[1.0, previous_rhs, source, 0.0]],
+                    dtype=jnp.float64),
+        jnp.asarray([1.0], dtype=jnp.float64),
+        jnp.asarray([[1.0, 1.0, 0.0]], dtype=jnp.float64),
+        -jnp.inf,
+    )
+    assert np.asarray(association_result)[0, 1] == divide_then_multiply
+    assert np.asarray(association_result)[0, 1] != multiply_then_divide
     planted = rhs.at[0, 2].set(rhs[0, 2] + 0.25)
     poisoned = tke_mod._nemo_literal_tke_solve(
         a, b, c, planted, surface, wet, 0.1)
@@ -668,6 +725,45 @@ def test_nemo_literal_solver_requires_literal_matrix():
             N2=jnp.zeros((1, 2)), l_eps=jnp.ones((1, 2)),
             dz_half=jnp.ones((1, 2)), surface_flux=jnp.zeros((1,)),
             dt=1.0, cfg=cfg)
+
+
+def test_nemo_literal_solver_dispatches_through_production_solve(monkeypatch):
+    cfg = TKEConfig(
+        tke_matrix_evaluation="nemo_literal",
+        tke_solver_evaluation="nemo_literal",
+        dissipation_discretization="nemo_1p5_split",
+        surface_bc="nemo_dirichlet", tke_surface_bc_level="nemo_z0",
+        tke_background=0.0, tke_surface_min=0.0,
+    )
+    real = tke_mod._nemo_literal_tke_solve
+    calls = []
+
+    def capture(*args, **kwargs):
+        result = real(*args, **kwargs)
+        calls.append(result)
+        return result
+
+    monkeypatch.setattr(tke_mod, "_nemo_literal_tke_solve", capture)
+    result = tke_mod._solve_tke_backward_euler(
+        e_old=jnp.asarray([[1.0, 0.7]]),
+        K_M_old=jnp.asarray([[0.2, 0.3]]),
+        K_H_old=jnp.asarray([[0.1, 0.15]]),
+        P_s=jnp.asarray([[0.01, 0.02]]),
+        N2=jnp.asarray([[1.0e-5, -1.0e-5]]),
+        l_eps=jnp.asarray([[1.0, 1.2]]),
+        dz_half=jnp.asarray([[2.0, 3.0]]),
+        surface_flux=jnp.asarray([0.0]), dt=2.0, cfg=cfg,
+        dz_surface=jnp.asarray([1.0]),
+        surface_dirichlet=jnp.asarray([0.8]),
+        surface_bc_level="nemo_z0",
+        bottom_dirichlet=jnp.asarray([0.2]),
+        K_M_surface=jnp.asarray([0.25]),
+        w_active=jnp.asarray([[1.0, 0.0]]),
+        nemo_e3t=jnp.asarray([[1.0, 2.0, 3.0]]),
+        dissl_old=jnp.asarray([[0.1, 0.2]]),
+    )
+    assert len(calls) == 1
+    np.testing.assert_array_equal(result, calls[0])
 
 
 def test_nemo_literal_matrix_matches_hand_computed_source_order(monkeypatch):
