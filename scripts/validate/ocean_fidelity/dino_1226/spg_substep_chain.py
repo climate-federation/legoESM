@@ -1129,18 +1129,18 @@ def main() -> int:
           f"{rDt_e * float(captured['n_substeps']):.3f} should be 2*DT={2 * DT:.1f})")
     diff_zufrc_rms = e_zufrc * float(np.sqrt(np.mean(nemo_zu_frc[umask2] ** 2)))
     diff_zvfrc_rms = e_zvfrc * float(np.sqrt(np.mean(nemo_zv_frc[vmask2] ** 2)))
-    predicted_u_s1_from_forcing = rDt_e * diff_zufrc_rms / float(np.sqrt(np.mean(nemo_un_init[umask2] ** 2)))
-    predicted_v_s1_from_forcing = rDt_e * diff_zvfrc_rms / float(np.sqrt(np.mean(nemo_vn_init[vmask2] ** 2)))
+    scaled_forcing_u_norm = rDt_e * diff_zufrc_rms / float(np.sqrt(np.mean(nemo_un_init[umask2] ** 2)))
+    scaled_forcing_v_norm = rDt_e * diff_zvfrc_rms / float(np.sqrt(np.mean(nemo_vn_init[vmask2] ** 2)))
     print("\n" + "=" * 78)
     print("=== STAGE 6b: MAGNITUDE-ONLY arithmetic (unit-consistent: rDt_e * "
           "forcing-error norm, same [m/s] normalisation as ub_substep1/vb_substep1) ===")
     print(f"  forcing-difference norm scaled by rDt_e (rDt_e*|zu_frc diff|/RMS(un_e)):"
-          f"  u={predicted_u_s1_from_forcing:.4e}  v={predicted_v_s1_from_forcing:.4e}")
+          f"  u={scaled_forcing_u_norm:.4e}  v={scaled_forcing_v_norm:.4e}")
     print(f"  MEASURED substep-1 err_norm (STAGE 2, same run)                              :"
           f"  u={e_ub_s1:.4e}  v={e_vb_s1:.4e}")
-    ratio_u = predicted_u_s1_from_forcing / e_ub_s1 if e_ub_s1 else float("nan")
-    ratio_v = predicted_v_s1_from_forcing / e_vb_s1 if e_vb_s1 else float("nan")
-    print(f"  ratio predicted/measured: u={ratio_u:.3f}  v={ratio_v:.3f}  "
+    ratio_u = scaled_forcing_u_norm / e_ub_s1 if e_ub_s1 else float("nan")
+    ratio_v = scaled_forcing_v_norm / e_vb_s1 if e_vb_s1 else float("nan")
+    print(f"  scalar norm ratio (scaled forcing/substep-1): u={ratio_u:.3f}  v={ratio_v:.3f}  "
           "(diagnostic only: scalar norm agreement discards vector direction and "
           "cannot detect cancellation with pressure-gradient/Coriolis/drag errors)")
     print("\n  NO CAUSAL VERDICT: the assembled forcing is independently DIVERGED, "
@@ -1170,7 +1170,7 @@ def main() -> int:
     # substep's scalar error norm by the substep count is not a propagation
     # model: it discards vector direction, filtering, and state feedback.
     print("\n" + "=" * 78)
-    print("=== STAGE 6d: consistency check (linear-accumulation arithmetic) ===")
+    print("=== STAGE 6d: noncausal scalar norm-growth shape check ===")
     n_substeps_final = icycle
     scaled_first_u = e_ub_s1 * n_substeps_final
     scaled_to_final_u = scaled_first_u / e_puu if e_puu else float("nan")
