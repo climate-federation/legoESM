@@ -81,3 +81,14 @@ step because the clean commit's bridge predates the optional
 the installed bridge signature exposes it.  On this clean commit neither
 literal selector exists, so omission is the exact legacy behavior.  Attempt 2
 is also `INVALID`; all arms, scores, and gates remain frozen.
+
+## Provenance retraction after adversarial review
+
+The first nominally accepted round-6 receipt is **WITHDRAWN**.  Its detached
+measurement checkout was clean, but the editable Python install resolved
+production modules from another worktree; the stamped production hash did not
+match the claimed commit.  The instrument now fails unless every imported
+production module resolves beneath the measured checkout, stamps those paths,
+and asserts restoration of every monkeypatch.  The rerun must put the measured
+checkout's package roots first on `PYTHONPATH`.  No prior round-6 score is
+admissible.

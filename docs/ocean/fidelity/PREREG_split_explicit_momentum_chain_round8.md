@@ -44,3 +44,19 @@ up, not a guessed fix.
 Rows 1.4 and 2--6 remain ordered-blocked behind the literal row-1.2 and held
 row-1.3 stops.  Their existing probes may be inventoried or run as targeting-
 only evidence, but cannot be promoted.  No new writer is used in this round.
+
+## Provenance and admission retraction after adversarial review
+
+The first nominally accepted round-8 receipt is **WITHDRAWN** because its clean
+harness imported production modules from another editable-install worktree.
+The unchanged calculations and bars must be rerun with the shared under-
+checkout import guard and resolved-path stamps.
+
+Review also found that the first instrument compared the reconstructed held
+seed rather than the runtime-captured seed and treated the inverted-divergence
+forward replay as a control even though that replay is an algebraic identity.
+The rerun must compare the runtime-captured seed to `ua_e/va_e`, require all
+three runtime seed fields `AT BAR`, and label the replay
+`ALGEBRAIC_CLOSURE_ONLY_NOT_CONTROL`.  Confirmation depends only on the
+independent runtime seed/half-step receipts plus the divergence gate.  No prior
+round-8 score or ownership claim is admissible.

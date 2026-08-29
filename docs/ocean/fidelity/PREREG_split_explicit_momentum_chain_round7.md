@@ -48,3 +48,10 @@ artifact was admitted.  The control is replaced with an exact-zero receipt:
 9,920 wet cells, zero nonzero reference values, and zero maximum held-minus-
 oracle difference.  The arm outputs, bars, and ownership rule are unchanged;
 the zero dump itself preregisters a direct refutation of SSH-source ownership.
+
+## Provenance retraction after adversarial review
+
+The first nominally accepted round-7 receipt is **WITHDRAWN** with round 6:
+its clean harness imported production modules from a different editable-install
+worktree.  It must be rerun after the shared under-checkout import guard and
+restoration assertions are committed.  No prior round-7 score is admissible.

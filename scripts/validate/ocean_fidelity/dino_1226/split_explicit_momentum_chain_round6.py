@@ -32,6 +32,8 @@ import split_explicit_momentum_chain_round1 as base
 import spg_substep_chain as inherited
 import legoesm.ocean.dynamics.barotropic_latlon_cgrid as barotropic_module
 import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as ocean_model_module
+import legoesm.ocean.experiments.dino as dino_module
+import legoesm.ocean.fidelity.nemo_state_bridge as bridge_module
 
 
 EXPECTED_LANE = "d180"
@@ -104,6 +106,22 @@ def main() -> int:
         raise SystemExit("CPU + JAX x64 are required")
 
     root = Path(__file__).resolve().parents[4]
+    production_imports = {
+        "production_barotropic": Path(barotropic_module.__file__).resolve(),
+        "production_ocean_model": Path(ocean_model_module.__file__).resolve(),
+        "production_dino_card": Path(dino_module.__file__).resolve(),
+        "production_bridge": Path(bridge_module.__file__).resolve(),
+    }
+    escaped = {
+        name: str(path)
+        for name, path in production_imports.items()
+        if not path.is_relative_to(root)
+    }
+    if escaped:
+        raise SystemExit(
+            "production imports escaped measured checkout; put this checkout's "
+            f"package roots first on PYTHONPATH: {escaped}"
+        )
     git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
     dirty_before = subprocess.check_output(["git", "status", "--porcelain"], cwd=root, text=True)
     if dirty_before:
@@ -134,6 +152,7 @@ def main() -> int:
     entry_counts: dict[str, int] = {}
     step_dt: dict[str, float] = {}
     forcing_receipts: dict[str, Any] = {}
+    restoration_receipts: dict[str, Any] = {}
 
     arms = [("forcing_only", False, False), ("forcing_and_seed", True, False)]
     if args.with_ssh_forcing:
@@ -185,6 +204,21 @@ def main() -> int:
             barotropic_module._depth_average_to_faces = real_davg
             inherited._report = real_report
             inherited.dino_lat_lon_model_config = real_builder
+        restoration_receipts[arm] = {
+            "ocean_solver_restored": (
+                ocean_model_module.barotropic_substeps_latlon_cgrid is real_solver
+            ),
+            "inherited_solver_restored": (
+                inherited.barotropic_substeps_latlon_cgrid is real_inherited_solver
+            ),
+            "depth_average_restored": (
+                barotropic_module._depth_average_to_faces is real_davg
+            ),
+            "report_restored": inherited._report is real_report,
+            "config_builder_restored": inherited.dino_lat_lon_model_config is real_builder,
+        }
+        if not all(restoration_receipts[arm].values()):
+            raise SystemExit(f"{arm}: monkeypatch restoration failed")
         if code != 0 or calls < 3:
             raise SystemExit(f"{arm}: inherited exit={code}, seeded held entries={calls}")
         arm_captures[arm] = reports
@@ -253,10 +287,15 @@ def main() -> int:
             str(run / "cor2d_dump_ua_e_in_substep1.bin"), jpi, jpj, hls)
         va_n = inherited._load_full(
             str(run / "cor2d_dump_va_e_in_substep1.bin"), jpi, jpj, hls)
-        u_mask = reports["ub_substep1"][0][2]
-        v_mask = reports["vb_substep1"][0][2]
-        ua_metric = base._metric(held["u"][:, 1:], ua_n, u_mask, 9758)
-        va_metric = base._metric(held["v"][1:], va_n, v_mask, 9868)
+        u_seed_l, _u_seed_n, u_mask = reports["un_e_init"][0]
+        v_seed_l, _v_seed_n, v_mask = reports["vn_e_init"][0]
+        ua_metric = base._metric(u_seed_l, ua_n, u_mask, 9758)
+        va_metric = base._metric(v_seed_l, va_n, v_mask, 9868)
+        exact_seed_statuses = {
+            item["field"]: item["gate_status"]
+            for item in measurements
+            if item["arm"] == "forcing_and_seed" and item["subrow"] == "1.2"
+        }
         continuity_localization = {
             "dt_s": dt_e,
             "midstep_u": {**ua_metric,
@@ -265,12 +304,14 @@ def main() -> int:
                           "gate_status": base._classify_metric(va_metric, None)},
             "implied_flux_divergence": {**div_metric, "gate_status": div_gate},
             "forward_replay_max_abs_residual": replay_max,
+            "forward_replay_role": "ALGEBRAIC_CLOSURE_ONLY_NOT_CONTROL",
+            "runtime_exact_seed_gate_statuses": exact_seed_statuses,
             "status": (
                 "CONFIRMED_CONTINUITY_FLUX_COMPOSITION"
-                if (base._classify_metric(ua_metric, None) == "AT BAR"
+                if (set(exact_seed_statuses.values()) == {"AT BAR"}
+                    and base._classify_metric(ua_metric, None) == "AT BAR"
                     and base._classify_metric(va_metric, None) == "AT BAR"
-                    and div_gate != "AT BAR"
-                    and replay_max <= np.finfo(np.float64).eps)
+                    and div_gate != "AT BAR")
                 else "REFUTED_OR_UNRESOLVED"
             ),
         }
@@ -294,8 +335,7 @@ def main() -> int:
         "inherited_probe": Path(inherited.__file__).resolve(),
         "round1_scorer": Path(base.__file__).resolve(),
         "bar_gate": Path(bar_gate.__file__).resolve(),
-        "production_barotropic": Path(barotropic_module.__file__).resolve(),
-        "production_ocean_model": Path(ocean_model_module.__file__).resolve(),
+        **production_imports,
         "nemo_dynspg_ts": oracle / "cfgs/DINO/MY_SRC/dynspg_ts.F90",
         "nemo_stpmlf": oracle / "cfgs/DINO/MY_SRC/stpmlf.F90",
     }
@@ -328,6 +368,10 @@ def main() -> int:
                     "jax": jax.__version__, "jaxlib": jaxlib.__version__,
                     "numpy": np.__version__, "device": str(jax.devices("cpu")[0])},
         "entry_counts": entry_counts,
+        "restoration_receipts": restoration_receipts,
+        "imported_production_paths": {
+            name: str(path) for name, path in production_imports.items()
+        },
         "forcing_receipts": forcing_receipts,
         "held_forcing_metrics": held_forcing_metrics,
         "held_signed_ssh_forcing_metric": held_ssh_metric,
