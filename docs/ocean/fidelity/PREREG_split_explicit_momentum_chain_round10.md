@@ -24,6 +24,14 @@ reviewed V-face metric fix carried from commits `c1cbef72ae4` and
 `6917c20714c` on `fidelity/dino-register-items` (cherry-picked here as
 `4ff604100fe` and `9445d8228c8`).
 
+Post-measurement citation corrigendum (no bar, operand, or statistic changed):
+the active uninstrumented oracle source is `zhU` at
+`dynspg_ts.F90:699-701`, `zhV` at `:702-704`, and `zhdiv/ssha_e` at
+`:722-724`. The `:703-708` references below were taken from the instrumented
+writer source, whose inserted declarations/comments shift these statements;
+they are retained here only as the frozen preregistration text. Result claims
+use the uninstrumented active-source line numbers.
+
 ## Source hypothesis
 
 NEMO's active DINO path is:
@@ -39,7 +47,7 @@ and consumes the stored V-face zonal width in divergence at
 `packages/core/legoesm/grids/operators_latlon_cgrid.py:959-965`. Before the
 carried fix, `packages/core/legoesm/grids/latlon.py` built that width at the
 arithmetic mean of adjacent T latitudes. The carried implementation instead
-uses the true V-face latitude at `latlon.py:1739-1789` for the
+uses the true V-face latitude and assembles `dx_v` at `latlon.py:1739-1806` for the
 `nemo_isotropic`, variable-meridional-spacing contract.
 
 ## Registered outputs and bars
@@ -58,7 +66,7 @@ unchanged round-9 scorer at the fixed production commit. It produces:
    frozen decisions.
 
 The V-face width is **CONFIRMED as the dominant pre-fix flux-composition
-owner** iff all four independent reductions are at least 0.99: subrow 9.5,
+owner** iff all four registered, correlated reductions are at least 0.99: subrow 9.5,
 subrow 9.6, wall `j=1`, and wall `j=197`.
 
 It is **REFUTED** iff all four reductions are at most 0.10. Every mixed result
@@ -78,8 +86,10 @@ particular, this counterfactual does not assume that the already-measured
 The adjudicator refuses a changed round-9 SHA, changed six-dump binding,
 changed NEMO binary/source/bracket binding, dirty or failed scorer controls,
 or a post artifact whose package commit is not supplied explicitly. It also
-plants a zero-reduction counterfactual and requires that it cannot satisfy the
-confirmation gate. Both artifacts, the adjudicated artifact, package commit,
-backend, fp64 state, and session ID are SHA-bound.
+requires equal nonempty session IDs; applies the shared classifier to a
+data-derived pre-as-post plant that must REFUTE; and applies it to a one-axis
+unfixed plant that must remain OPEN, proving the four-axis conjunction. Both
+artifacts, the adjudicated artifact, package commit, backend, fp64 state, and
+session ID are SHA-bound.
 
 No GPU, `mpirun`, push, or external write is authorized.

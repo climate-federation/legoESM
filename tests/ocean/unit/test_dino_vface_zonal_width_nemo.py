@@ -5,13 +5,13 @@ WHAT THIS PINS.  NEMO builds DINO's horizontal metrics in
 
     pphiv(ji,jj) = 1./rad * ASIN( TANH( rn_e1_deg *rad* zvj ) )     ! :108
     pe1v (ji,jj) = ra * rad * COS( rad * pphiv(ji,jj) ) * rn_e1_deg ! :113
-    pe2v (ji,jj) = ra * rad * COS( rad * pphiv(ji,jj) ) * rn_e1_deg ! :117
+    pe2v (ji,jj) = ra * rad * COS( rad * pphiv(ji,jj) ) * rn_e1_deg ! :118
 
 with ``zvj = REAL( mjg(jj,0) - nn_jeq_s ) + 0.5`` (:98) -- the Mercator
 transform evaluated at the HALF-INTEGER row index, i.e. at the V-point's own
 latitude.  ``ra = 6371229 m`` and ``rad = pi/180`` come from ``phycst.F90``
 (:26, :37); ``rn_e1_deg = 1`` from ``usrdef_nam.F90:30`` and DINO's
-``namelist_cfg``.  Lines :113 and :117 are the SAME expression, so NEMO's mesh
+``namelist_cfg``.  Lines :113 and :118 are the SAME expression, so NEMO's mesh
 is isotropic and ``e1v == e2v`` to the last bit.
 
 THE DEFECT THIS TEST WOULD HAVE CAUGHT.  legoESM's ``"exact"`` convention
@@ -207,7 +207,7 @@ class TestConstructionMatchesNemo:
             "non-vacuity control is dead")
 
     def test_isotropy_e1v_equals_e2v(self, dino_iso):
-        """NEMO's :113 and :117 are one expression, so its mesh has
+        """NEMO's :113 and :118 are one expression, so its mesh has
         ``e1v == e2v`` bit-for-bit.  Reproduce that exactly, not to a ulp."""
         _, geom = dino_iso
         dx_v = np.asarray(geom.dx_v, np.float64)
@@ -215,7 +215,7 @@ class TestConstructionMatchesNemo:
         np.testing.assert_array_equal(
             dx_v[1:-1], dy_v[1:-1],
             err_msg="under nemo_isotropic the two v-face scale factors must "
-                    "be the SAME quantity (usrdef_hgr.F90:113 == :117)")
+                    "be the SAME quantity (usrdef_hgr.F90:113 == :118)")
 
     def test_wall_faces_stay_hard_zeroed(self, dino_iso):
         """The #516 TRANSPORT-metric contract is unchanged by the fix: the

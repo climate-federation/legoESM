@@ -1385,7 +1385,7 @@ DINO_RECIPES: dict[str, dict] = {
         # legoesm.grids.latlon.create_mercator_grid's docstring for the
         # NEMO citation. Since #1455 it ALSO puts the two v-face scale
         # factors on NEMO's own V-point Mercator latitude gphiv
-        # (usrdef_hgr.F90:113/:117) instead of the mean of the two adjacent
+        # (usrdef_hgr.F90:113/:118) instead of the mean of the two adjacent
         # tracer latitudes -- worth 3.3e-05 relative at the walls, and it
         # makes the F-point lateral-viscosity coefficient exact. The #516
         # transport contract is unchanged: the two end v-faces stay zero.

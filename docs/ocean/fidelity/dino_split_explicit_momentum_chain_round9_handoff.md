@@ -233,9 +233,10 @@ done
 ```bash
 set -euo pipefail
 cd /tmp/codex-zdf-sweep
+repo=/tmp/codex-zdf-sweep
 ON=$(cat /tmp/spg-qco-row13-on-dir.txt)
 OFF=$(cat /tmp/spg-qco-row13-off-dir.txt)
-PYTHONPATH=scripts/validate/ocean_fidelity/dino_1226 /home/dbalwada/legoESM/.venv/bin/python - "$ON" "$OFF" <<'PY'
+PYTHONPATH=$repo/scripts/validate/ocean_fidelity/dino_1226 /home/dbalwada/legoESM/.venv/bin/python - "$ON" "$OFF" <<'PY'
 from pathlib import Path
 import json, sys
 from zdf_stream_bracket import files_byte_identical, manifest_sha256, one_bit_file_control, sha256, stream_manifest
@@ -304,7 +305,7 @@ export PYTHONPATH="$MEASURED/src:$MEASURED/packages/core:$MEASURED/packages/ocea
 export CODEX_SESSION_ID
 cd "$MEASURED"
 DINO_1226_LANE=d180 JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES='' JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both \
-/home/dbalwada/legoESM/.venv/bin/python scripts/validate/ocean_fidelity/dino_1226/split_explicit_momentum_chain_round9.py \
+/home/dbalwada/legoESM/.venv/bin/python "$MEASURED/scripts/validate/ocean_fidelity/dino_1226/split_explicit_momentum_chain_round9.py" \
   --run "$ON" --off-run "$OFF" \
   --binary-sha256 "$BIN_SHA" --off-binary-sha256 "$OFF_BIN_SHA" \
   --dynspg-source-sha256 "$SRC_SHA" \
@@ -316,7 +317,7 @@ DINO_1226_LANE=d180 JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES='' JAX_ENABLE_X64=1 L
   --dump-sha "qco_dump_zhdiv_substep1.bin=$ZHDIV_SHA" \
   --bracket-receipt /tmp/dino_spg_qco_row13_bracket_receipt.json \
   --bracket-sha256 "$BRACKET_SHA" \
-  --round8-artifact docs/ocean/fidelity/dino_split_explicit_momentum_chain_round8_artifact.json \
+  --round8-artifact "$MEASURED/docs/ocean/fidelity/dino_split_explicit_momentum_chain_round8_artifact.json" \
   --round8-sha256 16883e8e140f3e25de24866d9deedf9dd6b18189ca4f280c1448144620b48a92 \
   --package-commit "$PACKAGE_COMMIT" \
   --output /tmp/dino_split_explicit_momentum_chain_round9_artifact.json

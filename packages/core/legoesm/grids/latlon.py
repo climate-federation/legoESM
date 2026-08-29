@@ -558,7 +558,7 @@ def create_mercator_grid(
       It DOES, since #1455, select the latitude at which the two
       v-face scale factors are evaluated: NEMO builds both from its
       own V-point Mercator latitude ``gphiv``
-      (``usrdef_hgr.F90:113``/``:117``), i.e. at the half-integer row
+      (``usrdef_hgr.F90:113``/``:118``), i.e. at the half-integer row
       index, whereas ``"exact"`` averages the two adjacent tracer
       latitudes.  ``asin(tanh(.))`` is nonlinear, so those are
       different latitudes -- on DINO by up to 0.0011 degrees, making
@@ -1495,7 +1495,7 @@ def create_latlon_geometry(
         (NEMO's ``e1v``) and ``dy_v`` (NEMO's ``e2v``) are evaluated —
         NEMO's own V-point Mercator latitude ``gphiv`` rather than the
         mean of the two adjacent tracer latitudes (#1455,
-        ``usrdef_hgr.F90:113``/``:117``); under this convention the two
+        ``usrdef_hgr.F90:113``/``:118``); under this convention the two
         are ONE quantity, bit-for-bit on the interior.  ``cos_lat_v``
         (the raw face-latitude cosine) is not touched by this flag.
         The flag ALSO selects the vertex
@@ -1807,7 +1807,7 @@ def create_latlon_geometry(
         # ``cos_lat_v_1d`` is the cosine of the TRUE v-face latitude that the
         # variable-dlat branch above already carries (``lat_face``), and is the
         # same array the ``nemo_isotropic`` ``dy_v`` below consumes -- NEMO's
-        # mesh is isotropic (``pe2v = pe1v``, usrdef_hgr.F90:117), so under
+        # mesh is isotropic (``pe2v = pe1v``, usrdef_hgr.F90:118), so under
         # this convention the two v-face scale factors are ONE quantity.
         #
         # One semantic difference between the branches, stated because it is
@@ -1838,7 +1838,7 @@ def create_latlon_geometry(
         # ``nemo_isotropic`` ``dy_v`` below uses, so the two v-face scale
         # factors come out BIT-IDENTICAL on the interior rather than differing
         # by a floating-point ulp.  NEMO's DINO mesh has ``e1v == e2v`` to the
-        # last bit (one formula, usrdef_hgr.F90:113 and :117), and reproducing
+        # last bit (one formula, usrdef_hgr.F90:113 and :118), and reproducing
         # that isotropy exactly is free here.
         dx_v = (radius * dlon) * cos_lat_v[:, jnp.newaxis] \
             * jnp.ones((1, n_lon))
@@ -1864,7 +1864,7 @@ def create_latlon_geometry(
     else:
         dy_v = jnp.full((n_lat + 1, n_lon), float(radius * dlat), dtype=dtype)
     if metric_convention == "nemo_isotropic":
-        # NEMO usrdef_hgr.F90:117 -- pe2v = ra*rad*COS(rad*gphiv)*rn_e1_deg,
+        # NEMO usrdef_hgr.F90:118 -- pe2v = ra*rad*COS(rad*gphiv)*rn_e1_deg,
         # the SAME expression as pe1v.  Under the isotropic convention the
         # meridional v-point scale factor IS the zonal one, evaluated at the
         # TRUE v-face latitude (cos_lat_v, NOT the pole-zeroed #516 transport

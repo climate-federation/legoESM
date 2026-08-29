@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,16 @@ def _wall_rms(artifact: dict[str, Any], row: str) -> float:
     return math.sqrt(sum(float(x) ** 2 for x in values) / len(values))
 
 
+def _classify(reductions: tuple[float, ...]) -> str:
+    if not reductions or not all(math.isfinite(value) for value in reductions):
+        raise SystemExit(f"invalid ownership reductions: {reductions}")
+    if all(value >= CONFIRM_REDUCTION for value in reductions):
+        return "VFACE_WIDTH_DOMINANT_FLUX_OWNER_CONFIRMED"
+    if all(value <= REFUTE_REDUCTION for value in reductions):
+        return "VFACE_WIDTH_DOMINANT_FLUX_OWNER_REFUTED"
+    return "VFACE_WIDTH_DOMINANT_FLUX_OWNER_OPEN_UNRESOLVED"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pre-artifact", type=Path, required=True)
@@ -69,6 +80,20 @@ def main() -> int:
         raise SystemExit("fixed-tree package commit mismatch")
     if post.get("source_bindings", {}).get("package_commit") != args.expected_post_commit:
         raise SystemExit("fixed-tree source binding commit mismatch")
+    pre_session = pre.get("session_id")
+    post_session = post.get("session_id")
+    if not pre_session or pre_session != post_session:
+        raise SystemExit(
+            f"same nonempty session required: pre={pre_session!r}, post={post_session!r}")
+    active_session = os.environ.get("CODEX_SESSION_ID")
+    if not active_session or active_session != post_session:
+        raise SystemExit(
+            f"active CODEX_SESSION_ID must match artifacts: active={active_session!r}, "
+            f"artifact={post_session!r}")
+    if pre.get("dt_e_s") != post.get("dt_e_s"):
+        raise SystemExit("fixed-tree rescore changed dt_e_s")
+    if pre.get("runtime") != post.get("runtime"):
+        raise SystemExit("fixed-tree rescore changed runtime versions/platform")
     if not (pre.get("git", {}).get("clean_before") and pre.get("git", {}).get("clean_after")):
         raise SystemExit("round-9 scorer was not clean")
     if not (post.get("git", {}).get("clean_before") and post.get("git", {}).get("clean_after")):
@@ -97,19 +122,36 @@ def main() -> int:
         "wall_j=197_residual_rms": _reduction(_wall_rms(pre, "j=197"), _wall_rms(post, "j=197")),
     }
     values = tuple(reductions.values())
-    if all(value >= CONFIRM_REDUCTION for value in values):
-        disposition = "VFACE_WIDTH_DOMINANT_FLUX_OWNER_CONFIRMED"
-    elif all(value <= REFUTE_REDUCTION for value in values):
-        disposition = "VFACE_WIDTH_DOMINANT_FLUX_OWNER_REFUTED"
-    else:
-        disposition = "VFACE_WIDTH_DOMINANT_FLUX_OWNER_OPEN_UNRESOLVED"
+    disposition = _classify(values)
 
-    # Non-vacuity: a no-change plant has zero reduction on all four registered
-    # axes and must not reach the confirmation disposition.
-    planted = (0.0, 0.0, 0.0, 0.0)
-    control = not all(value >= CONFIRM_REDUCTION for value in planted)
-    if not control:
-        raise SystemExit("zero-change planted control unexpectedly confirms")
+    # Data-derived non-vacuity controls exercise the same classifier as the
+    # measured result. Treating the pre artifact as its own post artifact gives
+    # zero reduction on every extracted axis and must REFUTE. Replacing one
+    # measured post axis with its pre value gives one zero plus the other three
+    # measured reductions and must be OPEN, proving the all-four conjunction.
+    same_artifact_plant = tuple(
+        _reduction(value, value)
+        for value in (
+            before["9.5"]["normalized_rms_error"],
+            before["9.6"]["normalized_rms_error"],
+            _wall_rms(pre, "j=1"),
+            _wall_rms(pre, "j=197"),
+        )
+    )
+    mixed_axis_plant = (same_artifact_plant[0], *values[1:])
+    controls = {
+        "both_scorers_passed_all_controls": True,
+        "pre_as_post_classifies_refuted": _classify(same_artifact_plant)
+            == "VFACE_WIDTH_DOMINANT_FLUX_OWNER_REFUTED",
+        "one_axis_unfixed_classifies_open": _classify(mixed_axis_plant)
+            == "VFACE_WIDTH_DOMINANT_FLUX_OWNER_OPEN_UNRESOLVED",
+        "same_nonempty_session": bool(pre_session and pre_session == post_session),
+        "active_session_matches": active_session == post_session,
+        "same_timestep": pre.get("dt_e_s") == post.get("dt_e_s"),
+        "same_runtime": pre.get("runtime") == post.get("runtime"),
+    }
+    if not all(controls.values()):
+        raise SystemExit(f"adjudicator planted control failed: {controls}")
 
     ordered = [after[f"9.{i}"] for i in range(1, 8)]
     first_debt = next((row["subrow"] for row in ordered if row["gate_status"] != "AT BAR"), None)
@@ -139,8 +181,7 @@ def main() -> int:
             "B_nemo_divergence": pre["substitution_arms"]["B_nemo_divergence"],
         },
         "post_substitution_arms": post["substitution_arms"],
-        "controls": {"both_scorers_passed_all_controls": True,
-                     "zero_reduction_does_not_confirm": control},
+        "controls": controls,
         "disposition": disposition,
         "later_chain": post["later_rows"],
     }
