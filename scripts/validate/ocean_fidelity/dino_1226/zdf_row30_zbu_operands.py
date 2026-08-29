@@ -213,8 +213,10 @@ def main() -> int:
         rn2, npn, wet_w, focus, BAR)["pass"]
     seq_now = loaders._load_haloed(
         str(run / "seq_dump_rhd_nnn_kt00005761.bin"), jpi, jpj, hls)[..., :nk]
+    nk_now = min(seq_now.shape[-1], nemo_prd.shape[-1], wet_t.shape[-1])
     controls["current_prd_for_before_fails"] = not sweep.metrics(
-        seq_now, nemo_prd, wet_t, focus, BAR)["pass"]
+        seq_now[..., :nk_now], nemo_prd[..., :nk_now],
+        wet_t[..., :nk_now], focus, BAR)["pass"]
     exact_before = int(np.count_nonzero(
         wet_u & (control_actual != nemo_zgru[..., :nk])))
     ulp = control_actual.copy()
