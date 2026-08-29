@@ -3,6 +3,62 @@
 Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 (`RUN_SEQDUMP_D180_1R`, `kt=5761`).
 
+## Round-21 result: coefficient/EVD chain closes through row 27; row 28 held
+
+The row-21 outside-sandbox arm is bound at binary SHA256
+`c7b0de8a33040921bd1cd477f8ca81ff8654fbdfbc671d4a259f8b715f7a9f68`
+and run directory `/tmp/RUN_ZDF21_COEFF_ON.cVaC2Q`. Its restart is the
+certified byte-identical state, and all 197 shared ON/OFF streams are exact
+with no exclusions. The bracket's one-bit and missing-stream controls fired.
+The five registered dump SHAs are recorded in the machine receipt.
+
+Row 21 is **VERIFIED**. In literal NEMO order, `zsqen_base`, `zav_base`,
+`avm_base`, `avt_base`, and `dissl_postavn` each fail **0/9,920** columns at
+the absolute `1e-15` bar, have maximum error 0 and exact-unequal count 0, and
+pass all four southern focus columns. The committed receipt is
+`docs/ocean/fidelity/dino_zdf_row21_coeff_assembly_artifact.json`, SHA256
+`84885e45ecc149082606c0b44b411271f40942a99497996b0d4b35e051b6a97a`.
+
+The ordered no-new-dump walk then gives:
+
+- row 22 **VERIFIED**, inverse-Prandtl `avt`: 0/9,920, maximum
+  normalized error `2.3334937858491784e-16`, all focus columns pass;
+- row 23 **VERIFIED**, production closure-copy `avm/avt`: 0/9,920 for both,
+  maximum normalized errors 0 and `2.3334937858491784e-16`, all focus columns
+  pass;
+- row 24 **WAIVED**, because fail-closed parsing proves both resolved
+  `ln_rnf=F` and `ln_rnf_mouth=.false.` at the live
+  `zdfphy.F90:317-321` branch;
+- rows 25 and 26 **VERIFIED**, tracer and momentum EVD: the production and
+  NEMO unstable masks are exact over 39,293 fired wet elements with zero XOR
+  levels in every column; composed `avt/avm` fail 0/9,920 with maxima
+  normalized errors `8.070521127552721e-19` and 0; all focus columns pass;
+- row 27 **VERIFIED**, because DINO disables DDM, surface-wave, and
+  internal-wave enhancement and the production tracer pair receives the
+  same coefficient object. The +1-ULP separated-salinity control forces the
+  non-shared path and fires.
+
+The updated tail receipt is
+`docs/ocean/fidelity/dino_zdf_chain_tail_existing_artifact.json`, SHA256
+`fdcc8f739788d9dba13fb86392047e0dc6fddfdf45daf00f7522f84bdd30bf21`.
+Every numeric row above is scored over the whole-domain column census and the
+four registered southern columns.
+
+Row 28 is the ordered stop. The live oracle initializes and scans `imld`, then
+indexes the live `gdepw(Kmm)` ladder at `cfgs/DINO/WORK/zdfmxl.F90:145-152`.
+No existing stream contains this same-step turbocline index/depth result. The
+new one-slot patch persists `hmld` after `zdf_mxl_turb`; the scorer recovers
+`imld` uniquely from the strictly monotone ladder and freezes exact-index plus
+`1e-15 m` depth bars. The patch applies with zero fuzz and compile-checks, but
+NEMO was deliberately not run. The SHA-gated build/run/bracket block is in
+`PREREG_zdf_chain_sweep_round28_turbocline.md`.
+
+Rows 29--32 remain ordered-blocked. Existing-state targeting says row 29
+passes and the volume-form substitutions for rows 31--32 need no further NEMO
+dumps, but neither is promoted across row 28. Row 30's old `prd`/slope miss is
+likewise only a targeting preview until the walk reaches it. **CLIMATE ARMS
+NOT AUTHORIZED.**
+
 ## Round-19 result: deterministic bracket closes rows 19--20; row 21 instrumented
 
 The repaired writer campaign completed end-to-end. Both patched arms and the

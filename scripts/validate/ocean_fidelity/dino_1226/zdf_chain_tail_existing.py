@@ -72,6 +72,27 @@ def disposition(metric: dict) -> str:
     return "VERIFIED" if metric["pass"] else "DIVERGED"
 
 
+def _enforce_ordered_stop(rows: dict[str, dict]) -> str | None:
+    """Block every later row after the first promoted divergence."""
+    promoted_order = tuple(str(row) for row in range(20, 28))
+    first_diverged = next(
+        (row for row in promoted_order if rows[row]["disposition"] == "DIVERGED"),
+        None,
+    )
+    if first_diverged is None:
+        return None
+    stop_index = int(first_diverged)
+    for row in range(stop_index + 1, 33):
+        key = str(row)
+        previous = rows[key]["disposition"]
+        rows[key]["targeting_preview_disposition"] = previous
+        rows[key]["disposition"] = f"UNMEASURED-BLOCKED-BY-ROW{first_diverged}"
+        rows[key]["ordered_block_reason"] = (
+            f"ordered promotion stopped at first divergence row {first_diverged}"
+        )
+    return first_diverged
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-dir", type=Path, required=True)
@@ -546,6 +567,8 @@ def main() -> int:
 
     numeric_controls = {
         "row20_lk": sweep.planted_controls(zmxlm, zmxlm, wet_interior, ACCUMULATING),
+        "row21_actual_card_avm": sweep.planted_controls(
+            avm_closure, avm_closure, wet_interior, POINTWISE),
         "row22_avt": sweep.planted_controls(avt_closure, avt_closure, wet_interior, POINTWISE),
         "row23_avm": sweep.planted_controls(
             avm_closure, avm_closure, wet_interior, POINTWISE),
@@ -590,7 +613,7 @@ def main() -> int:
         },
         "21": {
             "operation": "base avm/avt/dissl assembly",
-            "disposition": "VERIFIED",
+            "disposition": "VERIFIED" if row21_avm["pass"] else "DIVERGED",
             "receipt": str(row21_path),
             "receipt_sha256": sha256(row21_path),
             "operands": row21_rows,
@@ -757,6 +780,11 @@ def main() -> int:
         },
     }
 
+    # Enforce the campaign's ordered stop in the receipt itself. Later
+    # calculations are useful targeting previews, but a failed promoted row
+    # must never leave downstream VERIFIED/WAIVED labels or a successful exit.
+    first_diverged = _enforce_ordered_stop(rows)
+
     consumed = [
         "mesh_mask.nc",
         "DINO_00005760_restart.nc",
@@ -789,7 +817,11 @@ def main() -> int:
         "schema": "dino-zdf-chain-tail-existing-v1",
         "status": (
             "ROWS-19-23,25-27-VERIFIED; ROW-24-WAIVED; "
-            "ordered frontier is row 28 turbocline diagnostic"),
+            "ordered frontier is row 28 turbocline diagnostic"
+            if first_diverged is None
+            else f"DIVERGED at row {first_diverged}; later rows ordered-blocked"
+        ),
+        "first_divergence": first_diverged,
         "repo_sha": git_sha(),
         "probe": {
             "path": str(Path(__file__).resolve()),
@@ -839,7 +871,7 @@ def main() -> int:
             sort_keys=True,
         )
     )
-    return 0
+    return 0 if first_diverged is None else 1
 
 
 if __name__ == "__main__":

@@ -6,9 +6,8 @@ in one day — comparing a before-level dump against now-level T/S.
 from __future__ import annotations
 
 import pytest
-
 from legoesm.ocean.fidelity.time_levels import (
-    _DUMP_TIME_LEVEL,   # white-box: the citation string is part of the contract
+    _DUMP_TIME_LEVEL,  # white-box: the citation string is part of the contract
     register_dump,
     select_ts,
     time_level_for_dump,
@@ -85,6 +84,13 @@ def test_row21_base_coefficient_operands_are_registered_at_now_level():
     ):
         assert time_level_for_dump(name) == "now", name
         assert "zdftke.F90:" in _DUMP_TIME_LEVEL[name][1], name
+
+
+def test_row28_turbocline_result_is_registered_at_now_level():
+    """The direct result uses current composed avt and the live Kmm ladder."""
+    name = "zdf_dump_hmld_turb.bin"
+    assert time_level_for_dump(name) == "now"
+    assert "zdfmxl.F90:145-152" in _DUMP_TIME_LEVEL[name][1]
 
 
 def test_composed_zdf_coefficients_are_registered_at_now_level():

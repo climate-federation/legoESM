@@ -201,6 +201,17 @@ print("row21 write-only bracket VERIFIED: 197/197 shared streams exact; controls
 PY
 ```
 
-Row 21 remains `UNMEASURED-NEEDS-DUMP` until this bracket and the registered
-five-term scorer pass. Rows 22--32 remain provisional targeting receipts, and
-the climate arms are not yet authorized.
+## Outcome (2026-08-29)
+
+The held block completed cleanly. Binary SHA256 is
+`c7b0de8a33040921bd1cd477f8ca81ff8654fbdfbc671d4a259f8b715f7a9f68`;
+the ON run is `/tmp/RUN_ZDF21_COEFF_ON.cVaC2Q`. The strict bracket reports
+197/197 shared streams exact with no exclusions and both controls firing.
+The five-term scorer reports 0/9,920 failures, maximum error 0, exact unequal
+0, and zero focus failures for every term. Row 21 is therefore VERIFIED.
+
+The machine receipt is
+`docs/ocean/fidelity/dino_zdf_row21_coeff_assembly_artifact.json`, SHA256
+`84885e45ecc149082606c0b44b411271f40942a99497996b0d4b35e051b6a97a`.
+The permanent held-block correction was needed again: use the repository venv
+path rather than bare `python`.

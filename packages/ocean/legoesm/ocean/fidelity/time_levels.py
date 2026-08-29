@@ -167,6 +167,10 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
                                             "captured at patched MY_SRC/zdftke.F90:"
                                             "934 from :928 SQRT(en)/zmxld, after the "
                                             "current tke_avn update."),
+    "zdf_dump_hmld_turb.bin": ("now", "write-only row-28 turbocline depth "
+                                         "persisted after zdf_mxl_turb from "
+                                         "zdfmxl.F90:145-152; hmld uses the live "
+                                         "Kmm gdepw ladder and current composed avt."),
     "tke_dump_avt_final.bin": ("now", "base closure avt=MAX(zav,avtb) (tke_avn, "
                                         "zsqen=SQRT(en)/zmxlm branch) is now-derived "
                                         "(en, zmxlm both now per above); the nn_pdl==1 "
