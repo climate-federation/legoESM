@@ -731,15 +731,14 @@ def main() -> int:
     donor_control = {
         "receiver": list(receiver),
         "east_donor": list(donor),
-        "legacy_prediction_error": counterfactual["u"]["prediction_normalized_error"],
-        "equalized_prediction_error": equalized_score["prediction_normalized_error"],
-        "changes_score": (
-            equalized_score["prediction_normalized_error"]
-            != counterfactual["u"]["prediction_normalized_error"]
+        "faithful_score": counterfactual["u"],
+        "equalized_score": equalized_score,
+        "changes_verdict_path": (
+            equalized_score["verdict"] != counterfactual["u"]["verdict"]
         ),
     }
-    if not donor_control["changes_score"]:
-        raise SystemExit("east-donor equalization control did not change owner score")
+    if not donor_control["changes_verdict_path"]:
+        raise SystemExit("east-donor equalization control did not change owner verdict")
 
     classifier_controls = round1._controls(
         (F_legacy_u, nemo["u"]["final"], umask2), EXPECTED_U
