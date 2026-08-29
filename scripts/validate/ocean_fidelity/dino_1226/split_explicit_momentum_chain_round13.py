@@ -44,6 +44,11 @@ from zdf_stream_bracket import sha256
 R10_RAW_SHA = "d2f2b8da84dffb6948f51a08f03327831ae3d5db9e5e812631c9f48e89b8822a"
 R11_SHA = "fffe3bfb1daa97ef6d9d85c1bb4eaa7541e6a71eb9f3376b835187a322b07e09"
 R12_SHA = "cc6dd626cdc37950164c9bdbe2cbf3678b3c3b31b5c2f4f53d12d9b030f54a0b"
+EXPECTED_INPUT_SHA256 = {
+    "mesh_mask.nc": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
+    "DINO_00005760_restart.nc":
+        "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
+}
 
 
 def _load_json(path: Path, expected: str, label: str):
@@ -102,6 +107,9 @@ def main() -> int:
         "mesh_mask.nc": sha256(run / "mesh_mask.nc"),
         inherited.RESTART_FILE: sha256(run / inherited.RESTART_FILE),
     }
+    if input_sha256 != EXPECTED_INPUT_SHA256:
+        raise SystemExit(
+            f"mesh/restart differ from frozen day-180 inputs: {input_sha256}")
     for name, expected in raw["dump_sha256"].items():
         if sha256(run / name) != expected:
             raise SystemExit(f"{name}: SHA changed")

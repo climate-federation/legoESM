@@ -226,6 +226,52 @@ class TestBarotropicFaceDepthNemoSshAvg:
             barotropic_substeps_latlon_cgrid(
                 state, 60.0, 4, grid, z, cfg, add_barotropic_coriolis=False)
 
+    def test_association_selector_holds_face_depth_and_drag_fixed(self):
+        """The climate A axis changes arithmetic, not face-depth physics.
+
+        With g=0 and Coriolis off, the velocity update contains only explicit
+        bottom drag. Identical U/V outputs therefore prove both arms used the
+        same carry-level H_u/H_v drag denominators. Identical returned Hu/Hv
+        prove the same flux-depth operands; bit-distinct eta proves the
+        registered generic versus NEMO-literal divergence association fired.
+        """
+        grid, z, state = _flat_basin(n_lat=8, n_lon=16)
+        key_u, key_v = jax.random.split(jax.random.PRNGKey(1226))
+        u0 = (0.017 + 0.013 * jax.random.normal(key_u, state.u.data.shape)) \
+            * state.u_mask.data[..., None]
+        v0 = (-0.019 + 0.011 * jax.random.normal(key_v, state.v.data.shape)) \
+            * state.v_mask.data[..., None]
+        jj = jnp.arange(grid.n_lat, dtype=jnp.float64)[:, None]
+        ii = jnp.arange(grid.n_lon, dtype=jnp.float64)[None, :]
+        eta0 = (0.031 + 0.00017 * ii + 0.00023 * jj) * state.land_mask.data
+        state = state._replace(
+            u=state.u.replace(data=u0), v=state.v.replace(data=v0),
+            eta=state.eta.replace(data=eta0))
+        base = _cfg(
+            barotropic_time_filter="box", barotropic_face_depth="nemo_ssh_avg",
+            bottom_drag_r=1.7e-3)
+        base = base._replace(constants=base.constants._replace(g=0.0))
+        generic = base._replace(barotropic=base.barotropic._replace(
+            barotropic_continuity_evaluation="generic"))
+        literal = base._replace(barotropic=base.barotropic._replace(
+            barotropic_continuity_evaluation="nemo_literal"))
+        sn_g, (hu_g, hv_g) = barotropic_substeps_latlon_cgrid(
+            state, 117.391304, 1, grid, z, generic,
+            add_barotropic_coriolis=False)
+        sn_l, (hu_l, hv_l) = barotropic_substeps_latlon_cgrid(
+            state, 117.391304, 1, grid, z, literal,
+            add_barotropic_coriolis=False)
+        np.testing.assert_array_equal(np.asarray(hu_g), np.asarray(hu_l))
+        np.testing.assert_array_equal(np.asarray(hv_g), np.asarray(hv_l))
+        np.testing.assert_array_equal(np.asarray(sn_g.u.data),
+                                      np.asarray(sn_l.u.data))
+        np.testing.assert_array_equal(np.asarray(sn_g.v.data),
+                                      np.asarray(sn_l.v.data))
+        assert not np.array_equal(np.asarray(sn_g.eta.data),
+                                  np.asarray(sn_l.eta.data)), (
+            "generic and nemo_literal produced bit-identical eta; the "
+            "association selector did not exercise distinct arithmetic")
+
     def test_default_min_rule_byte_identical_to_pre_change(self):
         """Default is "min_rule" — must reproduce the pre-#1226-field
         min-rule face depth exactly (the field is purely additive)."""

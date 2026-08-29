@@ -52,6 +52,11 @@ def main() -> int:
     if set(bindings.get("input_sha256", {})) != {
             "mesh_mask.nc", "DINO_00005760_restart.nc"}:
         raise SystemExit("hardened mesh/restart binding missing")
+    recurrence_inputs = recurrence.get("input_sha256", {})
+    if any(recurrence_inputs.get(name) != value
+           for name, value in bindings["input_sha256"].items()):
+        raise SystemExit(
+            "acceptance mesh/restart hashes do not match recurrence inputs")
     if set(bindings.get("production_sha256", {})) != {
             "barotropic", "dino_card", "nemo_io", "state_bridge",
             "inherited_probe", "round9_scorer"}:

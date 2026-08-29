@@ -10,10 +10,10 @@ QCO continuity association, materially reduce the frozen southern-basin
 transport deficit (`Gbasin90`, baseline -0.9519122331848315 Sv at day 360)
 and the independently frozen five-day wall flicker?
 
-This is an intervention test on a production fix already in the twin path. It
-is released independently of the ordered source-equivalence registry: the
-registry remains stopped at row 1.2 and this experiment cannot promote that
-row or rows 1.3--6.
+This is an intervention test on a production fix already in the twin path. The
+pre-measurement `AMENDMENT_round15_climate_release_round16.md` explicitly
+supersedes round 15's former coupled release condition. The registry remains
+stopped at row 1.2 and this experiment cannot promote that row or rows 1.3--6.
 
 ## Design
 

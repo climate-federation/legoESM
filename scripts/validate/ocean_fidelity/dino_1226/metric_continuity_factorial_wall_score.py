@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 
@@ -37,6 +38,9 @@ def _validate(path, producer, metric_selector, association_selector):
                 or _scalar(z, "twin_start_mode") != "BRIDGED_BEFORE" \
                 or _scalar(z, "bridge_before_stress_stagger") != "T":
             raise SystemExit(f"STOP {path} provenance/runtime receipt")
+        session = os.environ.get("CODEX_SESSION_ID")
+        if not session or _scalar(z, "codex_session_id") != session:
+            raise SystemExit(f"STOP {path} session receipt")
         cfg = json.loads(str(_scalar(z, "run_config")))
         if cfg.get("vface_zonal_metric_evaluation") != metric_selector \
                 or cfg.get("barotropic_continuity_evaluation") != association_selector \
@@ -48,7 +52,13 @@ def _validate(path, producer, metric_selector, association_selector):
                 or np.asarray(z["eta"]).shape[0] != 160 \
                 or np.asarray(z["eta"]).dtype != np.float64:
             raise SystemExit(f"STOP {path} per-step eta contract")
-        return cfg
+        return cfg, str(_scalar(z, "initial_state_sha256"))
+
+
+def _bit_identical(a, b):
+    a, b = np.asarray(a), np.asarray(b)
+    return a.dtype == b.dtype and a.shape == b.shape \
+        and np.ascontiguousarray(a).tobytes() == np.ascontiguousarray(b).tobytes()
 
 
 def _verdict(control, candidate):
@@ -81,8 +91,12 @@ def main() -> int:
         raise SystemExit("STOP certified NEMO comparator SHA mismatch")
 
     paths = {arm: getattr(args, arm) for arm in ARMS}
-    configs = {arm: _validate(paths[arm], args.producer_commit, *selectors)
-               for arm, selectors in ARMS.items()}
+    validated = {arm: _validate(paths[arm], args.producer_commit, *selectors)
+                 for arm, selectors in ARMS.items()}
+    configs = {arm: item[0] for arm, item in validated.items()}
+    initial_hashes = {arm: item[1] for arm, item in validated.items()}
+    if len(set(initial_hashes.values())) != 1:
+        raise SystemExit(f"STOP factorial initial-state hashes differ: {initial_hashes}")
     stripped = []
     for cfg in configs.values():
         cfg = dict(cfg)
@@ -91,6 +105,12 @@ def main() -> int:
         stripped.append(cfg)
     if any(cfg != stripped[0] for cfg in stripped[1:]):
         raise SystemExit("STOP factorial configs differ beyond two selectors")
+    with np.load(paths["legacy_generic"]) as control_npz:
+        for arm in list(ARMS)[1:]:
+            with np.load(paths[arm]) as candidate_npz:
+                if not _bit_identical(
+                        control_npz["land_mask"], candidate_npz["land_mask"]):
+                    raise SystemExit(f"STOP {arm} land mask differs")
 
     out = Path(args.out)
     scores = {}
@@ -124,6 +144,8 @@ def main() -> int:
     result = {
         "schema": "metric-continuity-wall-score-v2-factorial",
         "producer_commit": args.producer_commit,
+        "session_id": os.environ["CODEX_SESSION_ID"],
+        "initial_state_sha256": next(iter(initial_hashes.values())),
         "arm_sha256": {arm: sha256(Path(path)) for arm, path in paths.items()},
         "nemo_sha256": NEMO_SHA256,
         "scores": scores,

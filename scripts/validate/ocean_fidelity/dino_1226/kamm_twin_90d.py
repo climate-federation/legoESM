@@ -217,6 +217,28 @@ def _stress_content_sha256(tau_x, tau_y) -> str:
     return digest.hexdigest()
 
 
+def _initial_state_sha256(state) -> str:
+    """Compact bit identity of the actual prognostic/before state at t=0."""
+    digest = hashlib.sha256()
+    names = (
+        "T", "S", "u", "v", "eta",
+        "T_before", "S_before", "u_before", "v_before", "eta_before",
+        "tau_x_prev", "tau_y_prev", "land_mask", "u_mask", "v_mask",
+    )
+    for name in names:
+        value = getattr(state, name, None)
+        if value is None:
+            digest.update(f"{name}:None|".encode("ascii"))
+            continue
+        value = getattr(value, "data", value)
+        array = np.ascontiguousarray(np.asarray(value))
+        digest.update(name.encode("ascii"))
+        digest.update(array.dtype.str.encode("ascii"))
+        digest.update(json.dumps(array.shape).encode("ascii"))
+        digest.update(array.tobytes(order="C"))
+    return digest.hexdigest()
+
+
 def _analytic_dino_tpoint_stress(grid, cfg, *, t_seconds: float):
     """Load analytic DINO T-point stress and bind it to one seasonal time."""
     if not np.isfinite(t_seconds) or t_seconds < 0.0:
@@ -1726,6 +1748,8 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
               f"max|dT|={d_t:.3e}  max_rel|dT/T|={rel:.3e}", flush=True)
         st = st._replace(T=st.T.replace(data=t_pert))
 
+    initial_state_sha256 = _initial_state_sha256(st)
+
     nsteps = STEPS_PER_DAY * n_days
 
     # #1492: "leapfrog_rhs" placement REQUIRES return_rate=True + threading
@@ -2136,6 +2160,8 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         run_config=np.str_(run_config),
         producer_git_sha=np.str_(_producer_sha_entry),
         producer_dirty_tracked_files=np.int32(_producer_dirty_entry),
+        codex_session_id=np.str_(os.environ.get("CODEX_SESSION_ID", "")),
+        initial_state_sha256=np.str_(initial_state_sha256),
     )
     if daily_acc:
         # #1455 Phase-2: stamp the perturbation next to the response it caused,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 
@@ -39,6 +40,9 @@ def _validate(path, producer, metric_selector, association_selector):
                 or _scalar(z, "twin_start_mode") != "BRIDGED_BEFORE" \
                 or _scalar(z, "bridge_before_stress_stagger") != "T":
             raise SystemExit(f"STOP {path} runtime/stagger receipt")
+        session = os.environ.get("CODEX_SESSION_ID")
+        if not session or _scalar(z, "codex_session_id") != session:
+            raise SystemExit(f"STOP {path} session receipt")
         cfg = json.loads(str(_scalar(z, "run_config")))
         if cfg.get("vface_zonal_metric_evaluation") != metric_selector \
                 or cfg.get("barotropic_continuity_evaluation") != association_selector \
@@ -47,7 +51,7 @@ def _validate(path, producer, metric_selector, association_selector):
                 or cfg.get("snap_days") != [0, 360] \
                 or cfg.get("save_step_eta"):
             raise SystemExit(f"STOP {path} selector/day stamps")
-        return cfg
+        return cfg, str(_scalar(z, "initial_state_sha256"))
 
 
 def _metric_safety(nemo, control, candidate):
@@ -101,10 +105,14 @@ def main() -> int:
         raise SystemExit("STOP dirty scorer checkout")
 
     paths = {arm: getattr(args, arm) for arm in ARMS}
-    configs = {
+    validated = {
         arm: _validate(paths[arm], args.producer_commit, *selectors)
         for arm, selectors in ARMS.items()
     }
+    configs = {arm: item[0] for arm, item in validated.items()}
+    initial_hashes = {arm: item[1] for arm, item in validated.items()}
+    if len(set(initial_hashes.values())) != 1:
+        raise SystemExit(f"STOP factorial initial-state hashes differ: {initial_hashes}")
     stripped = []
     for cfg in configs.values():
         cfg = dict(cfg)
@@ -177,6 +185,8 @@ def main() -> int:
     result = {
         "schema": "metric-continuity-climate-score-v2-factorial",
         "producer_commit": args.producer_commit,
+        "session_id": os.environ["CODEX_SESSION_ID"],
+        "initial_state_sha256": next(iter(initial_hashes.values())),
         "arm_sha256": {arm: T.sha256(path) for arm, path in paths.items()},
         "nemo_absolute_sv": nemo_g,
         "basin_gap_sv": basin,

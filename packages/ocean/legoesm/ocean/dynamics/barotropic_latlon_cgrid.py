@@ -869,8 +869,7 @@ def _run_substep_loop(
         # zsshu_a/hu_e rule (dynspg_ts.F90:658-666,771-778) — fixed reference
         # depth + e1e2-area-weighted average of the CARRY-level ssh (eta_c,
         # the level-jn dynamic ssh — same time level NEMO's hu_e sees here).
-        if (_face_depth_mode == "nemo_ssh_avg"
-                and _continuity_evaluation == "nemo_literal"):
+        if _face_depth_mode == "nemo_ssh_avg":
             H_u, H_v = _ssh_avg_face_depths(eta_c)
         else:
             H_u, H_v = _face_depths(H_total_c)
@@ -914,11 +913,12 @@ def _run_substep_loop(
         Hu_sum_new = Hu_sum_c + w_tr_i * flux_u.astype(dtype)
         Hv_sum_new = Hv_sum_c + w_tr_i * flux_v.astype(dtype)
 
-        if _face_depth_mode == "nemo_ssh_avg":
+        if _continuity_evaluation == "nemo_literal":
             # DINO key_qco source order, confirmed from the directly dumped
             # zhU/zhV/zhdiv operands (#1226 split-explicit rounds 11--12).
-            # The generic path is intentionally retained for every other face
-            # depth convention.
+            # Face-depth physics is selected independently above; this switch
+            # changes association only, so generic/nemo_literal are valid
+            # factorial arms with identical flux operands and drag depths.
             div_flux = nemo_literal_continuity_divergence(
                 H_u_flux, H_v_flux, U_mid, V_mid, u_mask, v_mask, grid,
             ).astype(dtype)
