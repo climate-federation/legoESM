@@ -45,7 +45,7 @@ past the unresolved row 18.
 | 28 | composed-`avt` turbocline | `UNMEASURED-NEEDS-DUMP` | no same-step `imld/hmld` slot | needs slot |
 | 29 | `avm` lateral boundary update | `UNMEASURED-ORACLE-SELFCHECK` | NEMO interior reconstruction exact; legoESM LBC path was not invoked | preview only |
 | 30 | `ldf_slp` | `DIVERGED` | `uslp/vslp/wslpi/wslpj` fail 9,306/9,412/9,462/9,462 columns | 4/4 fail each |
-| 31 | momentum implicit application | `UNMEASURED-EXISTING-BRACKET` | existing Kbb/stage-7/stage-8 fields suffice; exact reconstruction is blocked by upstream coefficient divergences | no new dump |
+| 31 | momentum implicit application | `UNMEASURED-EXISTING-BRACKET` | existing Kbb + stage-6 Krhs + stage-7 barotropic + stage-8 fields suffice; exact reconstruction is blocked by composed-`avm` uncertainty | no new dump |
 | 32 | tracer implicit application | `UNMEASURED-EXISTING-BRACKET` | existing Kbb/stage-23/stage-21 fields suffice; exact reconstruction is blocked by row-30 K33 divergence | no new dump |
 
 Row 20 was isolated by feeding the real production mixing-length routine
@@ -126,31 +126,36 @@ sha256sum "$run_off/DINO_00005761_restart.nc" \
   "$run_on/tke_dump_etau_gdepw.bin" \
   "$run_on/tke_dump_etau_htau.bin"
 
-# Bracket-stream proof: the only enabled-only files may be the two new dumps;
-# every shared normal output, log, and restart must be byte-identical.
-find "$run_off" -type f -printf '%P\n' | sort > /tmp/row18-off.files
-find "$run_on" -type f \
+# Bracket-stream proof: every shared raw physics stream is byte-identical.
+# Logs/timing/static donor files are deliberately outside the physics receipt.
+find "$run_off" -maxdepth 1 -type f -name '*.bin' -printf '%P\n' \
+  | sort > /tmp/row18-off-bin.files
+find "$run_on" -maxdepth 1 -type f -name '*.bin' \
   ! -name tke_dump_etau_gdepw.bin ! -name tke_dump_etau_htau.bin \
-  -printf '%P\n' | sort > /tmp/row18-on-shared.files
-cmp /tmp/row18-off.files /tmp/row18-on-shared.files
+  -printf '%P\n' | sort > /tmp/row18-on-shared-bin.files
+cmp /tmp/row18-off-bin.files /tmp/row18-on-shared-bin.files
 while IFS= read -r rel; do
   cmp "$run_off/$rel" "$run_on/$rel"
-done < /tmp/row18-off.files
-sha256sum /tmp/row18-off.files /tmp/row18-on-shared.files
+done < /tmp/row18-off-bin.files
+sha256sum /tmp/row18-off-bin.files /tmp/row18-on-shared-bin.files
 
 cd /tmp/codex-zdf-sweep
 DINO_1226_LANE=d180 CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS=cpu \
   JAX_ENABLE_X64=1 PYTHONPATH=packages/core:packages/ocean python - \
-  "$run_on/DINO_00005761_restart.nc" \
-  "$run_off/DINO_00005761_restart.nc" <<'PY'
+  "$run_on" "$run_off" <<'PY'
 from pathlib import Path
 import sys
 from scripts.validate.ocean_fidelity.dino_1226.zdf_chain_sweep import (
     restart_numeric_identity,
 )
-receipt = restart_numeric_identity(Path(sys.argv[1]), Path(sys.argv[2]))
-print(receipt)
-assert receipt["pass"]
+on, off = map(Path, sys.argv[1:])
+on_files = {p.name for p in on.glob("DINO_*.nc")}
+off_files = {p.name for p in off.glob("DINO_*.nc")}
+assert on_files == off_files, (sorted(on_files), sorted(off_files))
+for name in sorted(on_files):
+    receipt = restart_numeric_identity(on / name, off / name)
+    print(name, receipt)
+    assert receipt["pass"]
 PY
 ```
 

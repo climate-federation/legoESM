@@ -328,10 +328,11 @@ def main() -> int:
             "operation": "momentum implicit solve application",
             "disposition": "UNMEASURED-EXISTING-BRACKET",
             "reason": (
-                "no new NEMO dump is required: restart Kbb + stage-7 post-dyn_spg "
-                "Krhs/barotropic state + stage-8 output bracket dyn_zdf. Exact "
-                "isolation remains blocked by upstream row-20/row-30 coefficient "
-                "divergences and requires the registered NEMO volume-form input reconstruction"
+                "no new NEMO dump is required: restart Kbb + stage-6 Krhs + "
+                "stage-7 post-dyn_spg barotropic state + stage-8 output bracket "
+                "dyn_zdf. Exact isolation remains blocked by upstream row-20/"
+                "23/25/26 composed-avm uncertainty and requires the registered "
+                "NEMO volume-form input reconstruction"
             ),
         },
         "32": {
