@@ -14,7 +14,9 @@ import json
 import math
 import os
 from pathlib import Path
+import platform
 import subprocess
+import sys
 from typing import Any
 
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
@@ -23,6 +25,7 @@ os.environ.setdefault("LEGOESM_NEMO_E3T", "both")
 os.environ.setdefault("DINO_1226_LANE", "d180")
 
 import jax
+import jaxlib
 import numpy as np
 
 import fidelity_bar_gate as bar_gate
@@ -33,8 +36,6 @@ import legoesm.ocean.experiments.dino as dino_module
 import legoesm.ocean.fidelity.nemo_state_bridge as bridge_module
 
 
-DIRECT_BAR = 1.0e-15
-ACCUMULATION_BAR = 1.0e-12
 EXPECTED_LANE = "d180"
 
 
@@ -44,6 +45,12 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _json_setting(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return repr(value)
 
 
 def _metric(
@@ -84,25 +91,37 @@ def _metric(
     }
 
 
+def _classify_metric(metric: dict[str, Any], gate_name: str | None) -> str:
+    return bar_gate.classify(
+        metric["correlation"],
+        metric["mean_abs_ratio"],
+        metric["per_element_max_error_over_nemo_rms"],
+        name=gate_name,
+    )
+
+
 def _controls(
     sample: tuple[np.ndarray, np.ndarray, np.ndarray],
-    bar: float,
     expected_n: int,
 ) -> dict[str, Any]:
     lego, nemo, mask = sample
-    identical = _metric(nemo, nemo, mask, expected_n)["normalized_rms_error"]
+    identical_metric = _metric(nemo, nemo, mask, expected_n)
+    identical = identical_metric["normalized_rms_error"]
     scale = float(np.sqrt(np.mean(np.asarray(nemo)[np.asarray(mask, dtype=bool)] ** 2)))
     planted_identity = np.asarray(nemo).copy()
     planted_identity[np.asarray(mask, dtype=bool)] += 1.0e-6 * scale
-    planted_identity_error = _metric(
-        planted_identity, nemo, mask, expected_n
-    )["normalized_rms_error"]
-    actual_error = _metric(lego, nemo, mask, expected_n)["normalized_rms_error"]
+    planted_identity_metric = _metric(planted_identity, nemo, mask, expected_n)
+    planted_identity_error = planted_identity_metric["normalized_rms_error"]
+    actual_metric = _metric(lego, nemo, mask, expected_n)
+    actual_error = actual_metric["normalized_rms_error"]
     planted_actual = np.asarray(lego).copy()
     planted_actual[np.asarray(mask, dtype=bool)] += 1.0e-6 * scale
-    planted_actual_error = _metric(
-        planted_actual, nemo, mask, expected_n
-    )["normalized_rms_error"]
+    planted_actual_metric = _metric(planted_actual, nemo, mask, expected_n)
+    planted_actual_error = planted_actual_metric["normalized_rms_error"]
+    identical_gate = _classify_metric(identical_metric, None)
+    planted_identity_gate = _classify_metric(planted_identity_metric, None)
+    actual_gate = _classify_metric(actual_metric, None)
+    planted_actual_gate = _classify_metric(planted_actual_metric, None)
     alignment: list[dict[str, Any]] = []
     for dj in (-1, 0, 1):
         for di in (-1, 0, 1):
@@ -112,13 +131,19 @@ def _controls(
     best = min(alignment, key=lambda item: item["normalized_rms_error"])
     return {
         "identical_array_zero": identical == 0.0,
-        "planted_identity_breaches_bar": planted_identity_error > bar,
+        "planted_identity_flips_campaign_gate": (
+            identical_gate == "AT BAR" and planted_identity_gate != "AT BAR"
+        ),
         "actual_binding_perturbation_changes_score": planted_actual_error != actual_error,
         "zero_shift_is_best": (best["dj"], best["di"]) == (0, 0),
         "identical_error": identical,
+        "identical_campaign_gate": identical_gate,
         "actual_binding_error": actual_error,
+        "actual_binding_campaign_gate": actual_gate,
         "planted_identity_error": planted_identity_error,
+        "planted_identity_campaign_gate": planted_identity_gate,
         "planted_actual_binding_error": planted_actual_error,
+        "planted_actual_binding_campaign_gate": planted_actual_gate,
         "alignment_scan": alignment,
         "alignment_best": best,
     }
@@ -149,7 +174,9 @@ def main() -> int:
         )
 
     captured: dict[str, list[tuple[np.ndarray, np.ndarray, np.ndarray]]] = {}
+    runtime_capture: dict[str, Any] = {}
     original_report = inherited._report
+    original_config_builder = inherited.dino_lat_lon_model_config
 
     def collecting_report(
         name: str, lego: np.ndarray, nemo: np.ndarray, mask: np.ndarray
@@ -159,13 +186,23 @@ def main() -> int:
         )
         return original_report(name, lego, nemo, mask)
 
+    def collecting_config_builder(*builder_args: Any, **builder_kwargs: Any) -> Any:
+        result = original_config_builder(*builder_args, **builder_kwargs)
+        runtime_capture["effective_dino_config"] = builder_args[1]
+        runtime_capture["model_config"] = result[0]
+        return result
+
     inherited._report = collecting_report
+    inherited.dino_lat_lon_model_config = collecting_config_builder
     try:
         inherited_exit = inherited.main()
     finally:
         inherited._report = original_report
+        inherited.dino_lat_lon_model_config = original_config_builder
     if inherited_exit != 0:
         raise SystemExit(f"inherited probe exited {inherited_exit}")
+    if set(runtime_capture) != {"effective_dino_config", "model_config"}:
+        raise SystemExit(f"effective runtime config was not captured: {runtime_capture}")
     dirty_after = subprocess.check_output(
         ["git", "status", "--porcelain"], cwd=repo_root, text=True
     )
@@ -192,12 +229,7 @@ def main() -> int:
         if name not in captured:
             raise SystemExit(f"required inherited report missing: {name}")
         metric = _metric(*captured[name][0], expected_n)
-        gate_status = bar_gate.classify(
-            metric["correlation"],
-            metric["mean_abs_ratio"],
-            metric["per_element_max_error_over_nemo_rms"],
-            name=gate_name,
-        )
+        gate_status = _classify_metric(metric, gate_name)
         bar = bar_gate.class_bar_for(gate_name)
         metric.update(
             {
@@ -220,12 +252,12 @@ def main() -> int:
         if first_diverged is None and status == "DIVERGED":
             first_diverged = subrow
 
-    controls = _controls(captured["zu_frc"][0], DIRECT_BAR, 9758)
+    controls = _controls(captured["zu_frc"][0], 9758)
     if not all(
         controls[key]
         for key in (
             "identical_array_zero",
-            "planted_identity_breaches_bar",
+            "planted_identity_flips_campaign_gate",
             "actual_binding_perturbation_changes_score",
             "zero_shift_is_best",
         )
@@ -265,6 +297,8 @@ def main() -> int:
         "ocean.output",
         "namelist_cfg",
         "namelist_ref",
+        "output.namelist.dyn",
+        "nemo",
     ]
     provenance_paths = {
         "wrapper": Path(__file__).resolve(),
@@ -277,7 +311,21 @@ def main() -> int:
         "nemo_stpmlf": oracle / "cfgs/DINO/MY_SRC/stpmlf.F90",
         "nemo_dynspg_ts": oracle / "cfgs/DINO/MY_SRC/dynspg_ts.F90",
     }
-    recipe_repr = repr(dino_module.dino_config_for_recipe("nemo_dino_kamm_mlf"))
+    effective_config = runtime_capture["effective_dino_config"]
+    model_config = runtime_capture["model_config"]
+    barotropic_config = model_config.barotropic
+    effective_config_repr = repr(effective_config)
+    model_config_repr = repr(model_config)
+    barotropic_settings = {
+        name: _json_setting(getattr(barotropic_config, name))
+        for name in (
+            "n_barotropic_substeps",
+            "barotropic_time_filter",
+            "barotropic_coriolis",
+            "barotropic_face_depth",
+            "barotropic_seed_face_depth",
+        )
+    }
     receipt = {
         "schema": "dino-split-explicit-momentum-chain-round1-v2",
         "session_id": os.environ.get("CODEX_SESSION_ID", "unset"),
@@ -292,7 +340,26 @@ def main() -> int:
         "jax_enable_x64": bool(jax.config.jax_enable_x64),
         "e3t_mode": os.environ.get("LEGOESM_NEMO_E3T"),
         "recipe": "nemo_dino_kamm_mlf",
-        "recipe_repr_sha256": hashlib.sha256(recipe_repr.encode()).hexdigest(),
+        "effective_recipe_overrides": {
+            "lon_west_deg": _json_setting(effective_config.lon_west_deg),
+            "lon_east_deg": _json_setting(effective_config.lon_east_deg),
+            "sill_lon_m_deg": _json_setting(effective_config.sill_lon_m_deg),
+        },
+        "effective_config_repr_sha256": hashlib.sha256(
+            effective_config_repr.encode()
+        ).hexdigest(),
+        "derived_model_config_repr_sha256": hashlib.sha256(
+            model_config_repr.encode()
+        ).hexdigest(),
+        "derived_barotropic_settings": barotropic_settings,
+        "runtime": {
+            "python": sys.version,
+            "platform": platform.platform(),
+            "jax": jax.__version__,
+            "jaxlib": jaxlib.__version__,
+            "numpy": np.__version__,
+            "cpu_device": str(jax.devices("cpu")[0]),
+        },
         "bar_policy": {
             "classifier": "fidelity_bar_gate.classify",
             "correlation_min": bar_gate.BAR_CORR,

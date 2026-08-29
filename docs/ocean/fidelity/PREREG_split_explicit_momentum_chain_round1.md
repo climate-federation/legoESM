@@ -111,3 +111,17 @@ active MLF source citations are corrected, and the result may only say an
 earlier operand diverges: recurrence and rewrite correctness remain
 independently unmeasured without held-forcing counterfactuals. Numeric model
 code and the row ordering are unchanged.
+
+## Instrument amendment after first re-review
+
+Both re-reviewers retained HOLD because the planted arrays had not traversed
+`fidelity_bar_gate.classify` itself and because runtime provenance still
+fingerprinted the base recipe rather than the probe's effective replaced card.
+Before the next run, identical and planted metrics are classified through the
+same decision function used for row verdicts and must flip `AT BAR` to a
+non-bar state. The actual replaced DINO config and derived model/barotropic
+settings are captured at their production builder call; their fingerprints
+and selected settings are recorded. Runtime Python/JAX/jaxlib/NumPy/platform/
+CPU-device fields, the NEMO executable, and resolved `output.namelist.dyn` are
+also stamped. Rows, bars, populations, numeric model code, and stop rule remain
+unchanged.
