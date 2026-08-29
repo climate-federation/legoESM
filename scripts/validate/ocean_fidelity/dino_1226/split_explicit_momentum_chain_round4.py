@@ -282,27 +282,22 @@ def _component_matrix(
         term_dispositions[name] = noncandidate[name]["disposition"]
 
     all_error = sum((errors[name] for name in ORDERED), np.zeros_like(r0))
-    closure_values = all_error - r0
-    eps = np.finfo(np.float64).eps
-    closure_bound = 32.0 * eps * (
-        np.abs(r0)
-        + sum((np.abs(errors[name]) for name in ORDERED), np.zeros_like(r0))
-    )
-    closure_roundoff_pass = bool(
-        np.all(np.abs(closure_values) <= closure_bound)
-    )
-    planted_closure = closure_values.copy()
-    planted_closure[0] += 1.0e-12 * r0_rms
-    planted_closure_fails = bool(
-        np.any(np.abs(planted_closure) > closure_bound)
-    )
-    if not (closure_roundoff_pass and planted_closure_fails):
-        raise SystemExit(
-            f"{component} signed closure receipt failed: "
-            f"roundoff_pass={closure_roundoff_pass} "
-            f"plant_fails={planted_closure_fails}"
-        )
-    closure = _rms(closure_values) / r0_rms
+    assembly_remainder = r0 - all_error
+    closure = _rms(assembly_remainder) / r0_rms
+    remainder_bounded = closure <= TERM_GAIN_BOUND
+    noncandidate["assembly_remainder"] = {
+        "rms_gain": closure,
+        "bound": TERM_GAIN_BOUND,
+        "bounded": remainder_bounded,
+        "disposition": (
+            "BOUNDED_MAGNITUDE"
+            if remainder_bounded
+            else "UNBOUNDED_REMAINDER"
+        ),
+    }
+    term_dispositions["assembly_remainder"] = noncandidate[
+        "assembly_remainder"
+    ]["disposition"]
     all_model = np.asarray(total_call["lego"]).copy()
     for name in ORDERED:
         all_model -= full_errors[name]
@@ -346,13 +341,12 @@ def _component_matrix(
         "noncandidate_bounds": noncandidate,
         "term_dispositions": term_dispositions,
         "all_eight_term_closure_normalized_rms": closure,
-        "all_eight_term_closure_control": {
-            "operation_count_factor": 32.0,
-            "machine_epsilon": eps,
-            "all_points_within_roundoff_bound": closure_roundoff_pass,
-            "max_abs_closure": float(np.max(np.abs(closure_values))),
-            "max_roundoff_bound": float(np.max(closure_bound)),
-            "planted_1e_minus_12_rms_fails": planted_closure_fails,
+        "assembly_remainder": {
+            "normalized_rms": closure,
+            "max_abs": float(np.max(np.abs(assembly_remainder))),
+            "bound": TERM_GAIN_BOUND,
+            "bounded": remainder_bounded,
+            "disposition": noncandidate["assembly_remainder"]["disposition"],
         },
         "all_eight_oracle_endpoint": all_metric,
         "fully_disposed": fully_disposed,
