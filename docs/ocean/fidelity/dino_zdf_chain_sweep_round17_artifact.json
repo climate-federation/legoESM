@@ -4,7 +4,7 @@
     "pointwise_column": 1e-15,
     "rms_ratio_epsilon": 1e-06
   },
-  "checked_out_parent_sha": "926a2e568db63d18d3b003327c0547a8dc5495d1",
+  "checked_out_parent_sha": "7a017757fc79495acd641b8887b52df2f8beb4d7",
   "controls": {
     "baseline_pass": true,
     "nonfinite_fired": true,
@@ -50,15 +50,15 @@
       ]
     },
     "first_failing_operand": {
-      "name": "EXP(-gdepw/htau)",
+      "name": "production -gdepw/htau input; gdepw versus htau not yet separated",
       "nemo_line": "cfgs/DINO/MY_SRC/zdftke.F90:590"
     },
     "nemo_line": "cfgs/DINO/MY_SRC/zdftke.F90:588-592",
     "next_round_fix_design": {
       "faithful_default_on_complete_dino_nemo_cards": "nemo_literal",
       "legacy_default_everywhere_else": "jax_expression",
-      "option": "tke_etau_exponential_evaluation",
-      "rule": "Reproduce the active NEMO source-ordered argument and EXP lowering in pure JAX, retaining JIT and reverse-mode autodiff; pin every unchanged card to the current path.",
+      "option": "instrument direct gdepw and htau operands before choosing the next production option",
+      "rule": "Add write-only htau and live-gdepw dumps, prove restart bit identity, substitute one operand at a time, then implement only the first failing construction.",
       "status": "DESIGNED"
     },
     "operand_localization": {
@@ -404,6 +404,14 @@
           14,
           0
         ]
+      },
+      "literal_exp_bitwise_census": {
+        "exceptional_bit_mismatches": 430,
+        "exceptional_max_abs": 9.8549685886e-314,
+        "exceptional_wet_elements": 4142,
+        "ordinary_bit_mismatches": 0,
+        "ordinary_wet_elements": 328072,
+        "range_guard_high_word": "0x4086232a"
       },
       "literal_exp_on_dumped_argument": {
         "aggregate_bar_pass": true,
@@ -1358,6 +1366,14 @@
             0
           ]
         },
+        "literal_exp_bitwise_census": {
+          "exceptional_bit_mismatches": 430,
+          "exceptional_max_abs": 9.8549685886e-314,
+          "exceptional_wet_elements": 4142,
+          "ordinary_bit_mismatches": 0,
+          "ordinary_wet_elements": 328072,
+          "range_guard_high_word": "0x4086232a"
+        },
         "literal_exp_on_dumped_argument": {
           "aggregate_bar_pass": true,
           "bar": 1e-15,
@@ -1904,7 +1920,7 @@
       "matrix": "0/9920 at 1e-15; max 0"
     }
   },
-  "probe_commit_sha": "926a2e568db63d18d3b003327c0547a8dc5495d1",
+  "probe_commit_sha": "7a017757fc79495acd641b8887b52df2f8beb4d7",
   "python": "3.13.0",
   "row4_localization": null,
   "rows": {
@@ -7559,6 +7575,14 @@
               0
             ]
           },
+          "literal_exp_bitwise_census": {
+            "exceptional_bit_mismatches": 430,
+            "exceptional_max_abs": 9.8549685886e-314,
+            "exceptional_wet_elements": 4142,
+            "ordinary_bit_mismatches": 0,
+            "ordinary_wet_elements": 328072,
+            "range_guard_high_word": "0x4086232a"
+          },
           "literal_exp_on_dumped_argument": {
             "aggregate_bar_pass": true,
             "bar": 1e-15,
@@ -8432,15 +8456,15 @@
             ]
           },
           "first_failing_operand": {
-            "name": "EXP(-gdepw/htau)",
+            "name": "production -gdepw/htau input; gdepw versus htau not yet separated",
             "nemo_line": "cfgs/DINO/MY_SRC/zdftke.F90:590"
           },
           "nemo_line": "cfgs/DINO/MY_SRC/zdftke.F90:588-592",
           "next_round_fix_design": {
             "faithful_default_on_complete_dino_nemo_cards": "nemo_literal",
             "legacy_default_everywhere_else": "jax_expression",
-            "option": "tke_etau_exponential_evaluation",
-            "rule": "Reproduce the active NEMO source-ordered argument and EXP lowering in pure JAX, retaining JIT and reverse-mode autodiff; pin every unchanged card to the current path.",
+            "option": "instrument direct gdepw and htau operands before choosing the next production option",
+            "rule": "Add write-only htau and live-gdepw dumps, prove restart bit identity, substitute one operand at a time, then implement only the first failing construction.",
             "status": "DESIGNED"
           },
           "operand_localization": {
@@ -8786,6 +8810,14 @@
                 14,
                 0
               ]
+            },
+            "literal_exp_bitwise_census": {
+              "exceptional_bit_mismatches": 430,
+              "exceptional_max_abs": 9.8549685886e-314,
+              "exceptional_wet_elements": 4142,
+              "ordinary_bit_mismatches": 0,
+              "ordinary_wet_elements": 328072,
+              "range_guard_high_word": "0x4086232a"
             },
             "literal_exp_on_dumped_argument": {
               "aggregate_bar_pass": true,
@@ -9739,6 +9771,14 @@
                   14,
                   0
                 ]
+              },
+              "literal_exp_bitwise_census": {
+                "exceptional_bit_mismatches": 430,
+                "exceptional_max_abs": 9.8549685886e-314,
+                "exceptional_wet_elements": 4142,
+                "ordinary_bit_mismatches": 0,
+                "ordinary_wet_elements": 328072,
+                "range_guard_high_word": "0x4086232a"
               },
               "literal_exp_on_dumped_argument": {
                 "aggregate_bar_pass": true,
@@ -15922,6 +15962,14 @@
                   0
                 ]
               },
+              "literal_exp_bitwise_census": {
+                "exceptional_bit_mismatches": 430,
+                "exceptional_max_abs": 9.8549685886e-314,
+                "exceptional_wet_elements": 4142,
+                "ordinary_bit_mismatches": 0,
+                "ordinary_wet_elements": 328072,
+                "range_guard_high_word": "0x4086232a"
+              },
               "literal_exp_on_dumped_argument": {
                 "aggregate_bar_pass": true,
                 "bar": 1e-15,
@@ -17380,11 +17428,12 @@
     "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/dump_lane.py": "41252d898b0d09b350c086aa678ddb890c7e6232fa2b46e88093a3b108a9bf62",
     "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/eos_rab_bn2_per_element.py": "3a82b0ef216fccf1b9112bfbac0005096eee491f15693d80f82320d3d80febda",
     "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py": "5e3c3455823d3f279af916246f293d4fc386c4b138db2d211280ca11186564a9",
-    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/zdf_chain_sweep.py": "46fa5b6897cf4be011185724613320fee768da51c88b5cae70508ec080df908c",
+    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/zdf_chain_sweep.py": "073828e80ca28a43b85d5d7263cd708f2c266d45cd26f3559e1b04c153ec3ca3",
     "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/zdf_etau_libm_ownership.py": "1d34c20fa6fabff3fec8c722f95ae81ca96b8c04b1e17ca010625ec9058680c9",
     "/tmp/dino_mld_audit_codex/mld_maps.npz": "9fb7344d1e6f92232d211f6a52ff8636022f0d9b0b05acea2b0bae6e6afd9bf0",
     "/tmp/nemo-tau-slot-eaef2a1e1/cfgs/DINO/BLD/bin/nemo.exe": "0c548ed74b4b36d160ff308505e8fe2716dcbef01840632936c6c040e49b3412",
     "/tmp/nemo-tau-slot-eaef2a1e1/cfgs/DINO/MY_SRC/zdftke.F90": "5eec1700605ff54dff13b76913b46f67c8cbdc7b526d9901c33c61a1196d67a5",
+    "/usr/lib64/libmvec.so.1": "f8af7aaf7ad6483c8e7898a8bf272cb47b30feb59f894b76d9c9d1c29e44564c",
     "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py": "56d3ee4e539988fa8dfaa9ec3c09a3fa5df5e9a734a9453945ff4135c1f4a657",
     "packages/ocean/legoesm/ocean/eos.py": "a1e175d2807eef81a0ecb731412165a21d569f17e28ccfa90ffe013d93f20828",
     "packages/ocean/legoesm/ocean/experiments/dino.py": "afa1ed8fc37ac8769025054dbabe3ab1810b9e8d9d6ec4db0066d824b79378ea",

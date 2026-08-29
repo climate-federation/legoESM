@@ -42,26 +42,29 @@ same helper on legoESM's production argument fails **217/9,920**, maximum
 literal left-associated factor chain at `zdftke.F90:590-591` makes both the
 increment and final `en` output **0/9,920** (final maximum exactly zero).
 
-Thus the remaining first operand is the input to EXP, specifically the
-latitude-dependent `htau` constructed at:
+Thus the remaining first operand is the production input to EXP,
+`-gdepw(Kmm)/htau`.  The current dump does not separate its numerator from
+its denominator, so ownership is **not yet assigned** to either one.  The
+candidate denominator is constructed at:
 
 ```fortran
 htau(:,:) = MAX( 0.5_wp, MIN( 30._wp, 45._wp * &
    ABS( SIN( rpi/180._wp * gphit(A2D(0)) ) ) ) ) ! zdftke.F90:1005
 ```
 
-The carried live `gdepw(Kmm)` is already verified by preceding rows.  Both a
-literal `(rpi/180)*gphit` association and the raw grid radians stay within the
-coarser argument bar but do not become bit-identical.  The oracle binary
-imports `_ZGVbN2v_sin@GLIBC_2.22`, so the registered next design is a
-`tke_htau_evaluation="nemo_literal"` pure-JAX transcription of that linked
-vector-sine range reduction/polynomial, followed by NEMO's source-ordered
-`45*ABS`, `MIN`, and `MAX`.  It defaults only on the two DINO oracle cards;
-the existing JAX sine construction remains byte-identical elsewhere and is
-their legacy opt-in.  Required red receipts are direct `htau`/argument dumps,
-a one-ULP latitude control, JIT and forward/reverse AD, unchanged-card pins,
-and final row 18 at 0/9,920.  This second vector transcendental port is too
-large for this round, so ordered discipline does not promote row 19.
+The live `gdepw(Kmm)` construction passed preceding row-level bars, but that
+does not prove bit identity at this more sensitive use.  Both a literal
+`(rpi/180)*gphit` association and raw grid radians stay within the coarse
+argument bar but do not close the downstream literal EXP.  Although the
+oracle imports `_ZGVbN2v_sin@GLIBC_2.22`, assigning the residual to vector
+sine now would be premature.  The registered next design is write-only direct
+`gdepw(Kmm)` and `htau` streams immediately before line 590, with the usual
+restart bit-identity bracket, then one-operand-at-a-time substitutions into
+the dumped division.  Only the first failing construction gets a production
+option; if it is `htau`, that option will reproduce source-ordered line 1005
+and the linked sine lowering in pure JAX.  This instrumentation plus a second
+vector transcendental port if indicated is too large for this round, so
+ordered discipline does not promote row 19.
 
 **CLIMATE ARMS NOT AUTHORIZED.**  Rows 19--32 remain unmeasured.  Frozen bands
 remain baseline `22.479491 m`, CONFIRM `<=11.2397455 m`, REFUTE
@@ -74,7 +77,7 @@ Receipts:
   `d0e62557c3d3e09b43ffb30494a219a9e47fc0b40a1730e5a33c2cbeb63f0854`;
 - literal-EXP and remaining-operand sweep:
   `docs/ocean/fidelity/dino_zdf_chain_sweep_round17_artifact.json`, SHA256
-  `2e3d07208936b6343b8b4e4f4244e22af176569b1140c75ee2ecebdf3a0df1a4`.
+  `14aa2bd2ecf52bd86ccea65c43389619fadbae9e9152e2a58c36264e803f2266`.
 
 ## Round-11 result: literal TKE solve closed; ordered stop at row 18
 
