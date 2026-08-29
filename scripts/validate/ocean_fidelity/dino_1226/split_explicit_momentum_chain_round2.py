@@ -402,8 +402,11 @@ def main() -> int:
         faithful, sf, bridge.geometry, bridge.z_coord, model_config
     )
 
-    umask3 = np.asarray(grid.umask, dtype=bool)
-    vmask3 = np.asarray(grid.vmask, dtype=bool)
+    # NEMO momentum dumps stop at jpkm1; mesh_mask retains the terminal jpk
+    # zero-thickness level.  Slice explicitly so the shape gate compares the
+    # active momentum population rather than relying on that level being dry.
+    umask3 = np.asarray(grid.umask[..., :jpk - 1], dtype=bool)
+    vmask3 = np.asarray(grid.vmask[..., :jpk - 1], dtype=bool)
     umask2 = umask3[..., 0]
     vmask2 = vmask3[..., 0]
     if int(umask2.sum()) != EXPECTED_U or int(vmask2.sum()) != EXPECTED_V:
