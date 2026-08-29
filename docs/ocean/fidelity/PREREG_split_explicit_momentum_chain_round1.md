@@ -67,3 +67,13 @@ admitted: an identical-array control must score zero and a planted `1e-6`
 RMS-scale wet-field offset must breach the relevant bar. Any missing field,
 failed control, non-finite metric, wrong lane, or nonzero inherited-probe exit
 is `INVALID`, not evidence.
+
+## Instrument amendment after invalid attempt 1
+
+Attempt 1 exited before producing an artifact because the inherited probe's
+bridge did not carry native T-point latitude, now required by the production
+card's `tke_htau_evaluation="nemo_literal"`. No row score was admitted. Before
+attempt 2, `spg_substep_chain.py` is amended to resolve the card before the
+bridge and pass the same `omega` and `carry_native_lat_deg` condition used by
+`kamm_twin_90d.py:889-905`. This is a harness-input repair only; the ordered
+rows, arrays, bars, controls, and stop rule above are unchanged.

@@ -355,15 +355,27 @@ def main() -> int:
         f"icycle={icycle} != 3*nn_e-1={3*nn_e-1} -- nn_bt_flt=2 boxcar window-edge "
         "assumption violated, re-derive the substep count before trusting anything below")
 
-    # --- Build the legoESM twin state from the SAME restart NEMO's dumps came from
+    # --- Build the legoESM twin state from the SAME restart NEMO's dumps came from.
+    # Resolve the production card before bridging because the current
+    # nemo_literal TKE closure consumes NEMO's native T-point latitude.
+    cfg = dataclasses.replace(dino_config_for_recipe("nemo_dino_kamm_mlf"),
+                               lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)
     g = read_nemo_mesh_mask(os.path.join(RUN_DIR, "mesh_mask.nc"), nn_hls=0)
     s = read_nemo_restart(os.path.join(RUN_DIR, RESTART_FILE), nn_hls=0)
-    br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True)
+    br = bridge_nemo_to_legoesm_topo(
+        g,
+        s,
+        periodic_i=True,
+        full_step=True,
+        omega=cfg.omega,
+        carry_native_lat_deg=(
+            cfg.tke_htau_evaluation == "nemo_literal"
+            or cfg.gm_treguier_final_evaluation == "nemo_literal"
+        ),
+    )
     before = read_nemo_restart_before(os.path.join(RUN_DIR, RESTART_FILE), nn_hls=0)
     st = bridge_before_state_topo(br._replace(state=br.state), g, before, periodic_i=True)
 
-    cfg = dataclasses.replace(dino_config_for_recipe("nemo_dino_kamm_mlf"),
-                               lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)
     mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
     require_fp64(br.geometry, br.z_coord, st, context="spg_substep_chain twin state")
 
