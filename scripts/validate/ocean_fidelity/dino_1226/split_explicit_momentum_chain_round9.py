@@ -158,7 +158,9 @@ def _bound_hash(path: Path, expected: str, label: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run", type=Path, required=True)
+    parser.add_argument("--off-run", type=Path, required=True)
     parser.add_argument("--binary-sha256", required=True)
+    parser.add_argument("--off-binary-sha256", required=True)
     parser.add_argument("--dynspg-source-sha256", required=True)
     parser.add_argument("--dump-sha", action="append", default=[])
     parser.add_argument("--bracket-receipt", type=Path, required=True)
@@ -199,9 +201,13 @@ def main() -> int:
         raise SystemExit("clean worktree required\n" + dirty_before)
 
     run = args.run.resolve()
+    frozen_off = args.off_run.resolve()
     _bound_hash(run / "nemo", args.binary_sha256, "NEMO executable")
+    _bound_hash(frozen_off / "nemo", args.off_binary_sha256, "OFF NEMO executable")
     if (run / ".nemo_binary_sha256").read_text().split()[0] != args.binary_sha256:
         raise SystemExit("run-stamped executable SHA mismatch")
+    if (frozen_off / ".nemo_binary_sha256").read_text().split()[0] != args.off_binary_sha256:
+        raise SystemExit("OFF run-stamped executable SHA mismatch")
     if (run / ".dynspg_source_sha256").read_text().split()[0] != args.dynspg_source_sha256:
         raise SystemExit("run-stamped dynspg source SHA mismatch")
     _bound_hash(args.bracket_receipt, args.bracket_sha256, "bracket receipt")
@@ -219,14 +225,11 @@ def main() -> int:
         _bound_hash(run / name, value, name)
 
     bracket = json.loads(args.bracket_receipt.read_text())
-    frozen_off = Path(
-        "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/"
-        "cfgs/DINO/RUN_SEQDUMP_D180_1R"
-    ).resolve()
     if not (
         bracket.get("schema") == "dino-spg-qco-row13-bracket-v1"
         and Path(bracket.get("on_dir", "")).resolve() == run
         and Path(bracket.get("off_dir", "")).resolve() == frozen_off
+        and bracket.get("shared_count") == 197
         and bracket.get("shared_exact") is True
         and set(bracket.get("new_streams", [])) == EXPECTED_NEW
         and all(bracket.get("controls", {}).values())
@@ -235,12 +238,12 @@ def main() -> int:
     on_manifest = stream_manifest(run)
     off_manifest = stream_manifest(frozen_off)
     if not (
-        len(on_manifest) == 325
-        and len(off_manifest) == 319
+        len(on_manifest) == 203
+        and len(off_manifest) == 197
         and set(on_manifest) - set(off_manifest) == EXPECTED_NEW
         and all(files_byte_identical(run / name, frozen_off / name) for name in off_manifest)
     ):
-        raise SystemExit("scored ON directory no longer satisfies exact 319/319 bracket")
+        raise SystemExit("scored ON directory no longer satisfies exact 197/197 bracket")
     shared_hash = manifest_sha256({name: on_manifest[name] for name in sorted(off_manifest)})
     if shared_hash != bracket.get("shared_manifest_sha256"):
         raise SystemExit("scored shared-stream manifest changed after bracketing")
@@ -272,6 +275,10 @@ def main() -> int:
     n_zhV = load("qco_dump_zhV_substep1.bin")
     n_div = load("qco_dump_zhdiv_substep1.bin")
 
+    legacy_round8 = Path(
+        "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/"
+        "cfgs/DINO/RUN_SEQDUMP_D180_1R"
+    ).resolve()
     frozen_dump_names = {
         "spg_dump_sshn_e_init.bin",
         "cor2d_dump_ua_e_in_substep1.bin",
@@ -280,8 +287,11 @@ def main() -> int:
         "spg_dump_ssh_frc.bin",
     }
     for name in frozen_dump_names:
-        if sha256(run / name) != round8["dump_sha256"][name]:
-            raise SystemExit(f"{name}: differs from frozen round-8 input")
+        _bound_hash(
+            legacy_round8 / name,
+            round8["dump_sha256"][name],
+            f"legacy round-8 {name}",
+        )
     for name in ("mesh_mask.nc", inherited.RESTART_FILE):
         if sha256(run / name) != round8["input_sha256"][name]:
             raise SystemExit(f"{name}: differs from frozen round-8 input")
@@ -308,6 +318,59 @@ def main() -> int:
     land = np.asarray(g.tmask)[..., 0] > 0.5
     umask = np.asarray(g.umask)[..., 0] > 0.5
     vmask = np.asarray(g.vmask)[..., 0] > 0.5
+
+    # The deterministic writer deliberately normalizes halo bytes, so its
+    # full-file hashes cannot equal the legacy round-8 files. Bind those old
+    # files to their frozen receipt, then require bit identity on each field's
+    # registered wet physical population. A one-ULP wet-cell plant proves this
+    # translation gate can fail.
+    fresh_frozen = {
+        "spg_dump_sshn_e_init.bin": eta_seed,
+        "cor2d_dump_ua_e_in_substep1.bin": ua,
+        "cor2d_dump_va_e_in_substep1.bin": va,
+        "spg_dump_ssh_substep1.bin": ssh_out,
+        "spg_dump_ssh_frc.bin": ssh_frc,
+    }
+    frozen_populations = {
+        "spg_dump_sshn_e_init.bin": (land, 9920, "wet_T"),
+        "cor2d_dump_ua_e_in_substep1.bin": (umask, 9758, "wet_U"),
+        "cor2d_dump_va_e_in_substep1.bin": (vmask, 9868, "wet_V"),
+        "spg_dump_ssh_substep1.bin": (land, 9920, "wet_T"),
+        "spg_dump_ssh_frc.bin": (land, 9920, "wet_T"),
+    }
+
+    def physical_bits_equal(a: np.ndarray, b: np.ndarray, mask: np.ndarray) -> bool:
+        aa = np.ascontiguousarray(np.asarray(a)[mask], dtype=np.float64).view(np.uint64)
+        bb = np.ascontiguousarray(np.asarray(b)[mask], dtype=np.float64).view(np.uint64)
+        return bool(np.array_equal(aa, bb))
+
+    legacy_load = lambda name: inherited._load_full(
+        str(legacy_round8 / name), jpi, jpj, hls)
+    deterministic_translation: dict[str, Any] = {}
+    translation_plants: list[bool] = []
+    for name, fresh in fresh_frozen.items():
+        mask, expected_n, population = frozen_populations[name]
+        if int(mask.sum()) != expected_n:
+            raise SystemExit(f"{name}: {population} population changed")
+        legacy = legacy_load(name)
+        exact = physical_bits_equal(fresh, legacy, mask)
+        if not exact:
+            raise SystemExit(f"{name}: deterministic/legacy {population} bits differ")
+        planted = np.array(fresh, copy=True)
+        first = tuple(np.argwhere(mask)[0])
+        if not np.isfinite(planted[first]):
+            raise SystemExit(f"{name}: first planted {population} cell is non-finite")
+        planted[first] = np.nextafter(planted[first], np.inf)
+        plant_fails = not physical_bits_equal(planted, legacy, mask)
+        translation_plants.append(plant_fails)
+        deterministic_translation[name] = {
+            "population": population,
+            "n": expected_n,
+            "legacy_full_file_sha256": round8["dump_sha256"][name],
+            "deterministic_full_file_sha256": sha256(run / name),
+            "physical_bits_exact": exact,
+            "one_ulp_physical_plant_fails": plant_fails,
+        }
     if np.count_nonzero(ssh_frc[land]) != 0:
         raise SystemExit("frozen substep-1 ssh_frc is not exact zero")
     uface_mask = _u_face(umask.astype(np.float64))
@@ -412,6 +475,9 @@ def main() -> int:
         "zero_prediction_does_not_confirm": _prediction(
             np.zeros_like(residual), residual, land)["verdict"] != "CONFIRMS",
         "bracket_one_bit_and_missing_stream": all(bracket["controls"].values()),
+        "deterministic_translation_exact": all(
+            row["physical_bits_exact"] for row in deterministic_translation.values()),
+        "deterministic_translation_one_ulp_plants_fail": all(translation_plants),
     }
     if not all(controls.values()):
         raise SystemExit(f"planted control failed: {controls}")
@@ -449,6 +515,7 @@ def main() -> int:
                     "numpy": np.__version__},
         "source_bindings": {
             "binary_sha256": args.binary_sha256,
+            "off_binary_sha256": args.off_binary_sha256,
             "dynspg_source_sha256": args.dynspg_source_sha256,
             "package_commit": args.package_commit,
             "round8_artifact_sha256": args.round8_sha256,
@@ -456,6 +523,7 @@ def main() -> int:
             "production_sha256": {k: sha256(v) for k, v in production_paths.items()},
         },
         "dump_sha256": supplied,
+        "deterministic_writer_translation": deterministic_translation,
         "dt_e_s": dt_e,
         "measurements": measurements,
         "first_diverged_subrow": first_debt,
