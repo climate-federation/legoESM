@@ -34,6 +34,7 @@ os.environ["LEGOESM_NEMO_E3T"] = "both"
 
 import importlib.util
 import sys
+from types import MethodType, SimpleNamespace
 
 import numpy as np
 import jax.numpy as jnp
@@ -334,22 +335,27 @@ def build_state():
     slope_pn2 = None
     slope_e3w = None
     if slope_n2_evaluation == "carried_step_entry":
-        raw_gd = getattr(z_coord, "nemo_gdept_0", None)
-        raw_gw = getattr(z_coord, "nemo_gdepw_0", None)
-        if raw_gd is None or raw_gw is None:
-            raise ValueError("carried slope rn2b requires raw NEMO depth ladders")
-        gd_live, gw_live, e3w_live = nemo_bn2_live_geometry(
-            z_coord, eta, H_bathy, r3t_evaluation="nemo_reciprocal")
-        n2_stretch = nemo_r3t_stretch(
-            z_coord, eta, H_bathy, evaluation="nemo_reciprocal")
-        slope_pn2_int = compute_buoyancy_frequency_nemo_bn2(
-            T, S, gd_live, gw_live, NemoSEOSConfig(), g=mc.constants.g,
-            e3w_int=e3w_live, e3w_source="mesh_reference",
-            zrw_evaluation="nemo_literal", zrw_gdept_0=raw_gd,
-            zrw_gdepw_0=raw_gw[..., 1:], zrw_stretch=n2_stretch)
-        slope_pn2 = jnp.concatenate(
-            [jnp.zeros_like(slope_pn2_int[..., :1]), slope_pn2_int], axis=-1)
-        slope_e3w = e3w_live
+        # Reuse the real step-entry producer. The prior duplicate omitted its
+        # below-seafloor extrapolation and made this measurement helper report
+        # every zbu column red even though the dispatched model bundle is
+        # exact. The standalone bridge keeps tb/sb separately, whereas the
+        # production twin installs them through --bridge-before; seed those
+        # same fields before invoking the production helper.
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        _model = SimpleNamespace(z_coord=z_coord, config=mc)
+        _model._n2_nemo_before_tracers = MethodType(
+            LatLonCGridOceanModel._n2_nemo_before_tracers, _model)
+        _bundle_state = state._replace(
+            T_before=state.T.replace(data=T),
+            S_before=state.S.replace(data=S))
+        _bundle = LatLonCGridOceanModel._tke_step_entry_n2_bundle(
+            _model, _bundle_state)
+        if _bundle is None:
+            raise ValueError("carried slope rn2b production bundle is disabled")
+        slope_pn2 = _bundle.rn2b
+        slope_e3w = _bundle.e3w_Kmm
     elif slope_n2_evaluation != "recompute":
         raise ValueError(f"unknown slope_n2_evaluation {slope_n2_evaluation!r}")
 
