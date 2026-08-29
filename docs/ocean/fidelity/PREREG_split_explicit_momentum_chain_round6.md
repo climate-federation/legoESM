@@ -74,3 +74,10 @@ attributes absent from the clean branch commit.  The probe now uses fail-safe
 `getattr(..., None)` checks for those optional literal-evaluation selectors.
 This changes neither a model setting nor any registered arm, array, population,
 bar, or stop rule; attempt 1 is `INVALID` and supplies no evidence.
+
+Attempt 2 then reached the same state-construction call and exited before a
+step because the clean commit's bridge predates the optional
+`carry_native_lat_deg` keyword.  The probe now passes that keyword only when
+the installed bridge signature exposes it.  On this clean commit neither
+literal selector exists, so omission is the exact legacy behavior.  Attempt 2
+is also `INVALID`; all arms, scores, and gates remain frozen.

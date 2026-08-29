@@ -136,6 +136,7 @@ Run::
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import os
 import re
 
@@ -362,17 +363,17 @@ def main() -> int:
                                lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)
     g = read_nemo_mesh_mask(os.path.join(RUN_DIR, "mesh_mask.nc"), nn_hls=0)
     s = read_nemo_restart(os.path.join(RUN_DIR, RESTART_FILE), nn_hls=0)
-    br = bridge_nemo_to_legoesm_topo(
-        g,
-        s,
-        periodic_i=True,
-        full_step=True,
-        omega=cfg.omega,
-        carry_native_lat_deg=(
+    _bridge_kwargs = {
+        "periodic_i": True,
+        "full_step": True,
+        "omega": cfg.omega,
+    }
+    if "carry_native_lat_deg" in inspect.signature(bridge_nemo_to_legoesm_topo).parameters:
+        _bridge_kwargs["carry_native_lat_deg"] = (
             getattr(cfg, "tke_htau_evaluation", None) == "nemo_literal"
             or getattr(cfg, "gm_treguier_final_evaluation", None) == "nemo_literal"
-        ),
-    )
+        )
+    br = bridge_nemo_to_legoesm_topo(g, s, **_bridge_kwargs)
     before = read_nemo_restart_before(os.path.join(RUN_DIR, RESTART_FILE), nn_hls=0)
     st = bridge_before_state_topo(br._replace(state=br.state), g, before, periodic_i=True)
 
