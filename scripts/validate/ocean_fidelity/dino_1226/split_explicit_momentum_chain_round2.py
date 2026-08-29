@@ -44,6 +44,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 import legoesm.ocean.dynamics.barotropic_latlon_cgrid as barotropic_module
 import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as ocean_model_module
+import legoesm.ocean.dynamics.ocean_pe_latlon_cgrid as pe_module
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     nemo_bottom_drag_rate_faces,
 )
@@ -220,6 +221,7 @@ def _run_arm(state, sf, geometry, z_coord, config) -> dict[str, Any]:
     captured: dict[str, Any] = {}
     real_baro = ocean_model_module.barotropic_substeps_latlon_cgrid
     real_cor = barotropic_module.barotropic_coriolis_een_pre_step
+    real_stress = pe_module.surface_stress_faces
 
     def spy_baro(state_mid, dt_s, n_substeps, grid, zc, cfg, **kwargs):
         result = real_baro(state_mid, dt_s, n_substeps, grid, zc, cfg, **kwargs)
@@ -235,15 +237,30 @@ def _run_arm(state, sf, geometry, z_coord, config) -> dict[str, Any]:
             captured["cor_v"] = np.asarray(cor_v)
         return cor_u, cor_v
 
+    def spy_stress(surface_forcing, u_dtype, z_coord_arg, J, grid):
+        result = real_stress(surface_forcing, u_dtype, z_coord_arg, J, grid)
+        if result is not None and "tau_i_u" not in captured:
+            tau_i_u, tau_j_v, dz_0_u, dz_0_v = result
+            captured["tau_i_u"] = np.asarray(tau_i_u)
+            captured["tau_j_v"] = np.asarray(tau_j_v)
+            captured["dz_0_u"] = np.asarray(dz_0_u)
+            captured["dz_0_v"] = np.asarray(dz_0_v)
+        return result
+
     ocean_model_module.barotropic_substeps_latlon_cgrid = spy_baro
     barotropic_module.barotropic_coriolis_een_pre_step = spy_cor
+    pe_module.surface_stress_faces = spy_stress
     try:
         with jax.disable_jit():
             model.step(state, DT, surface_forcing=sf)
     finally:
         ocean_model_module.barotropic_substeps_latlon_cgrid = real_baro
         barotropic_module.barotropic_coriolis_een_pre_step = real_cor
-    required = {"F_slow_u", "F_slow_v", "cor_u", "cor_v"}
+        pe_module.surface_stress_faces = real_stress
+    required = {
+        "F_slow_u", "F_slow_v", "cor_u", "cor_v",
+        "tau_i_u", "tau_j_v", "dz_0_u", "dz_0_v",
+    }
     if not required <= captured.keys():
         raise SystemExit(f"arm missed production hooks: {required - captured.keys()}")
     captured["diagnostics"] = diagnostics
@@ -408,6 +425,8 @@ def main() -> int:
         bridge._replace(state=bridge.state), grid, before, periodic_i=True
     )
     model_config, _ = dino_lat_lon_model_config(bridge.geometry, cfg)
+    if model_config.surface_stress_implicit:
+        raise SystemExit("registered explicit surface-stress path changed")
     require_fp64(
         bridge.geometry, bridge.z_coord, legacy, context="split chain round2"
     )
@@ -528,9 +547,9 @@ def main() -> int:
                     + diagnostics.Cs_smag_u.data + diagnostics.Cl_leith_u.data
                 ),
                 "vertical_friction": diagnostics.Av_vert_u.data,
-                "wind": diagnostics.phys_u.data,
             }
             direct_drag, cor = drag_u, arm["cor_u"]
+            tau, dz0 = arm["tau_i_u"], arm["dz_0_u"]
         else:
             mapper, thickness, mask = _v_to_nemo, h_v, np.asarray(legacy.v_mask.data)
             fields = {
@@ -542,15 +561,25 @@ def main() -> int:
                     + diagnostics.Cs_smag_v.data + diagnostics.Cl_leith_v.data
                 ),
                 "vertical_friction": diagnostics.Av_vert_v.data,
-                "wind": diagnostics.phys_v.data,
             }
             direct_drag, cor = drag_v, arm["cor_v"]
+            tau, dz0 = arm["tau_j_v"], arm["dz_0_v"]
         out = {
             name: mapper(_live_depth_mean(np.asarray(field), thickness, mask))
             for name, field in fields.items()
         }
         out["cor_removal"] = -mapper(np.asarray(cor))
         out["drag"] = mapper(direct_drag)
+        # Reuse zu_frc_write_ledger.py's production-spy reconstruction:
+        # external stress is a top-cell kick tau/(rho0*dz0), then the exact
+        # F_slow thickness reduction weights it by h[...,0]/sum(h).
+        wind0 = tau / (
+            float(model_config.constants.rho_0) * np.maximum(dz0, 1.0e-10)
+        )
+        out["wind"] = mapper(
+            wind0 * thickness[..., 0]
+            / np.maximum(np.sum(thickness, axis=-1), 1.0e-10) * mask
+        )
         return out
 
     legacy_terms_u = lego_terms(legacy_arm, "u")
@@ -714,6 +743,7 @@ def main() -> int:
         "fidelity_bar_gate": Path(bar_gate.__file__).resolve(),
         "production_ocean_model": Path(ocean_model_module.__file__).resolve(),
         "production_barotropic": Path(barotropic_module.__file__).resolve(),
+        "production_pe": Path(pe_module.__file__).resolve(),
         "production_bridge": Path(bridge_module.__file__).resolve(),
         "production_dino_card": Path(dino_module.__file__).resolve(),
         "nemo_stpmlf": oracle / "cfgs/DINO/MY_SRC/stpmlf.F90",
