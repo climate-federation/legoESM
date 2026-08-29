@@ -149,3 +149,16 @@ hashes, strict JSON, and unchanged round-2 controls.  Additional plants must:
 No NEMO execution, writer, or new dump is required.  Therefore no SLOT block
 is allocated.  Any later need for a NEMO writer must first use the held-SLOT
 protocol in the host conventions.
+
+## Instrument amendment after invalid attempt 1
+
+Attempt 1 reran the inherited round-2 operand loader but exited at the
+total-field interception lookup before `_component_matrix` was called; no
+matrix arm, `111` corner, energy coefficient, Shapley allocation, or row
+verdict was computed or written.  The interceptor retained the metric dict
+by reference.  The inherited probe subsequently appended `campaign_gate` to
+that same object, so lookup against the pre-gate metric found zero matches.
+Before attempt 2, store a shallow copy of the metric at interception and make
+the lookup ignore `campaign_gate` on both sides.  Add a uniqueness check and
+retain the existing exact residual-array identity check.  No operand, arm,
+bar, locked corner, ownership rule, control, or continuation rule changes.
