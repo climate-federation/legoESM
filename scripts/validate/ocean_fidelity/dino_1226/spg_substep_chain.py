@@ -369,8 +369,8 @@ def main() -> int:
         full_step=True,
         omega=cfg.omega,
         carry_native_lat_deg=(
-            cfg.tke_htau_evaluation == "nemo_literal"
-            or cfg.gm_treguier_final_evaluation == "nemo_literal"
+            getattr(cfg, "tke_htau_evaluation", None) == "nemo_literal"
+            or getattr(cfg, "gm_treguier_final_evaluation", None) == "nemo_literal"
         ),
     )
     before = read_nemo_restart_before(os.path.join(RUN_DIR, RESTART_FILE), nn_hls=0)

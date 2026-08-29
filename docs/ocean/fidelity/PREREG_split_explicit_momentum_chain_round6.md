@@ -65,3 +65,12 @@ wrapper, inherited probe, production modules, oracle sources, dumps, restart,
 mesh, namelists, and executable.  A dirty tree, missing call, wrong shape/time
 level, failed control, or nonzero inherited exit is `INVALID`.  This uses no
 new NEMO writer, so no SLOT block is created.
+
+## Instrument amendment after invalid attempt 1
+
+Attempt 1 exited during state construction, before a production step or any
+score, because the inherited probe directly accessed two optional DINO-card
+attributes absent from the clean branch commit.  The probe now uses fail-safe
+`getattr(..., None)` checks for those optional literal-evaluation selectors.
+This changes neither a model setting nor any registered arm, array, population,
+bar, or stop rule; attempt 1 is `INVALID` and supplies no evidence.
