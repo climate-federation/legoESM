@@ -3,6 +3,86 @@
 Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 (`RUN_SEQDUMP_D180_1R`, `kt=5761`).
 
+## Round-25 result: `zbu` closed; raw-U composite held at nine columns
+
+The existing-dump post-bound peel owns row 30's `zbu` divergence at NEMO
+`ldfslp.F90:248`. `zbu_pre` and `zau` each score **0/9,758**. Reusing the
+historical static partial-cell face thickness reproduces **5,496/9,758**;
+substituting NEMO's literal NOW-SSH QCO
+`e3u(Kmm)=e3u_0*(1+r3u*umask)` gives **0/9,758**, with all four focus columns
+passing. The bound receipt is
+`dino_zdf_row30_zbu_limiter_artifact.json`, SHA256
+`f954ab58328e176a9da4f5ae464066eaa8118fa8e2b23492c894d7676c374b4f`.
+
+Production now exposes `slope_face_thickness_evaluation`. `static_face` is the
+global legacy default; only `nemo_dino_kamm` and `nemo_dino_kamm_mlf` select
+`nemo_qco_live`. The latter preserves NEMO's stored horizontal reciprocals and
+NOW-SSH face dilation through explicit JAX barriers. Every non-oracle card
+resolves to the old selector and follows the unchanged branch. Hand-computed
+binary64, selector scope, JIT, finite AD, and neighboring slope tests pass.
+The post-fix complete scorer verifies both limiter rows exactly:
+
+- `zbu_post`: **0/9,758**, `focus_fail=0`;
+- `zbv_post`: **0/9,868**, `focus_fail=0`.
+
+It advances to the next ordered stage, `uslp_raw` at `ldfslp.F90:269`, which
+is **8,387/9,758** red and fails all four focus columns. The complete receipt
+is `dino_zdf_row30_uv_operands_postfacefix_artifact.json`, SHA256
+`365942724667605ebc1de470ffb8b6dd11f07f9ae75272ac43e3b70c559a614b`.
+
+The existing-dump raw-U peel then establishes:
+
+- production `iku` is exactly NEMO's 1-based face index minus one in all
+  **9,758** columns;
+- the current live `gdept(Kmm)` construction is first red at **706/9,758**
+  (all focus columns pass), while raw `gdept_0` times the canonical stored-
+  reciprocal NOW stretch is **0/9,758**;
+- changing the live-depth construction and replacing the T-column surface
+  subtraction by NEMO's live face `e3u(miku,Kmm)` reduces `uslp_raw` from
+  **8,387** to **9/9,758**, with all focus columns passing.
+
+The remaining nine columns are one-ULP-scale (maximum normalized column error
+`1.0782601e-15`). Existing dumps cannot distinguish `e3u(miku)`, literal
+`zdepu` association, the carried ML anchor, interior quotient, and final
+blend. The receipt is `dino_zdf_row30_uslp_raw_artifact.json`, SHA256
+`7450069747711242f63a3b5bbead1765ace01af104ad0d9a5367158882262edd`.
+The initially registered quotient-vs-reciprocal and one-ULP-SSH controls were
+not red-capable and are loudly retracted in the preregistration and tool; the
+replacement production-Jacobian and one-ULP-live-depth controls fire.
+
+The held deterministic instrumentation writes the eight remaining operands.
+Patch SHA256 is
+`9e5877d03d6ae8b6274adc6f4ae2b06af05fe44eafe83008f1624aa72656c596`;
+it dry-runs against row-30 deterministic source SHA256
+`8b4d8cffe35d66241eb77bdc508ef15d6dd90d8ff192fd60201ff83a7d523a29`
+and produces expected source SHA256
+`2d59df4697b3d16f0ee9dc2b38ce929cca707d59ef43442dee3600c8d8b1f7ca`.
+The preregistration contains SHA-gated build, one-step run, 197-stream exact
+bracket, measured-SHA, and source-order score blocks using host `grep` and the
+repository venv. Codex did not build or run NEMO.
+
+Fix design, pending that exact first-red receipt: add a DINO-only faithful
+live-depth selector that constructs `gdept_0*(1+eta*r1_ht_0)` with NEMO's
+stored-reciprocal boundary, and assemble U/V depth literally as
+`0.5*((gdept_face_pair)-e3{u,v}(mikuva,Kmm))`. The two NEMO DINO cards select
+the faithful path by default; every other card keeps the byte-identical
+Jacobian/T-column legacy path. Red tests must pin unequal-depth faces, source
+association, JIT/AD, selector typos, and every unchanged recipe. No raw-slope
+production fix is landed before the held dump names the remaining operand.
+
+Rows 31--32 remain **TARGETING-BLOCKED-BY-ROW30**. Their promotion needs are
+unchanged: row 31 must dispatch the literal volume-form momentum matrix and
+ordered Thomas solve at U **0/9,758**, V **0/9,868**; row 32 then must dispatch
+the paired tracer volume form at T/S **0/9,920**, all at their registered
+`1e-12` bars with every focus column passing. Offline helper zeros cannot be
+promoted across the open raw-slope row.
+
+Chain verdict: rows 1--29 are VERIFIED/WAIVED; row 30 is DIVERGED at the raw-U
+composite with nine columns not yet operand-owned; rows 31--32 are ordered-
+blocked. **CLIMATE ARMS NOT AUTHORIZED.** The frozen baseline and bands remain
+`22.479491 m`, CONFIRM `<=11.2397455 m`, REFUTE `>=20.2775 m`; GPU commands
+remain deliberately withheld until all three remaining rows are promotable.
+
 ## Round-24 result: line-242 owner fixed; row 30 advances to `zbu_pre`
 
 The held row-30 operand campaign is bound to binary SHA256

@@ -1041,9 +1041,11 @@ def compute_nemo_native_slopes(
       * horizontal Shapiro 1/16 + coastal decrease, native mask factors
         (:242-257 u/v; :301-315 w).
 
-    Scope (v1, matches the operator's documented assumptions): reference
-    geometry (dz_ref ladder; z-star eta/J stretching ignored — linssh/flat
-    oracle configs), no ice shelves (risfdep=0, mikt=1), no partial cells.
+    Scope: the current horizontally uniform DINO full-step grid represented by
+    ``OceanPartialCellCoordinate``, with live z-star depths and selectable
+    live-QCO face thicknesses on the two literal oracle cards.  Generic cards
+    retain the historical static-face construction.  Partial-step and
+    ice-shelf geometry remain out of scope (risfdep=0, mikt=1).
     """
     zeps = 1.0e-20
     dtype = rho.dtype

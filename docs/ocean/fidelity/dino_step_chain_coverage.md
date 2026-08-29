@@ -22,10 +22,12 @@ measured a number against this specific NEMO array).
 
 **Full-step import note (2026-08-29):** the newer matched-day-180 ZDF ledger is
 `dino_zdf_chain_sweep_result.md`, not the older aggregate labels in rows
-11/12/30/50 below. Its rows 1--29 are harvestable receipts. ZDF row 30's
-`zgru` and post-fix `zau/zav` stages are now exact; the ordered stop has moved
-to pre-bound `zbu` (`ldfslp.F90:226-244`), 9,758/9,758 red with all four
-southern focus columns red. The ZDF momentum/tracer implicit applications (ZDF rows 31--32,
+11/12/30/50 below. Its rows 1--29 are harvestable receipts. ZDF row 30 now
+verifies `zgru/zgrv`, `zau/zav`, and both post-bound `zbu/zbv` rows exactly.
+The ordered stop is `uslp_raw`: the existing-dump live-depth/face substitution
+reduces it from 8,387/9,758 to 9/9,758 failures and clears all focus columns,
+but exact operand ownership awaits the held eight-slot deterministic dump.
+The ZDF momentum/tracer implicit applications (ZDF rows 31--32,
 corresponding to full-step rows 30 and 50) remain targeting-only until that
 stop closes and their production volume-form gates pass. Do not promote the
 older `VERIFIED-EARLIER` structural claims over those numeric receipts.

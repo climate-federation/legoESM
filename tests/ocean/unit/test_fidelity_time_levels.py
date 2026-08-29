@@ -57,6 +57,18 @@ def test_row30_uv_operand_ladder_is_registered():
         assert "ldfslp.F90:" in _DUMP_TIME_LEVEL[name][1], name
 
 
+def test_row30_raw_u_continuation_is_registered():
+    before = (
+        "eiv_dump_iku.bin", "eiv_dump_zfi.bin",
+        "eiv_dump_zuslp_hml_pre.bin", "eiv_dump_sint_u.bin",
+        "eiv_dump_mlterm_u.bin", "eiv_dump_blend_u.bin",
+    )
+    for name in before:
+        assert time_level_for_dump(name) == "before", name
+    for name in ("eiv_dump_e3u_miku.bin", "eiv_dump_zdepu.bin"):
+        assert time_level_for_dump(name) == "now", name
+
+
 def test_atf_after_dumps_are_after_level():
     assert time_level_for_dump("atf_dump_tem_after.bin") == "after"
     assert time_level_for_dump("atf_dump_tem_before.bin") == "before"

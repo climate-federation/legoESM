@@ -57,13 +57,15 @@ def test_literal_prd_is_jittable_and_differentiable():
     assert np.isfinite(np.asarray(jax.grad(fn)(x)))
 
 
-def test_full_literal_slope_with_carried_w_bundle_has_finite_jit_gradient():
+def test_full_literal_slope_with_carried_w_bundle_has_finite_jit_gradient(
+        monkeypatch):
     """The unused restored surface W slot must not inject 0*inf into AD."""
     from legoesm.grids.latlon import create_latlon_grid, ensure_geometry
     from legoesm.ocean.eos import make_eos_fn
     from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
         compute_nemo_native_slopes,
     )
+    from legoesm.ocean.physics.lateral_mixing import gm_redi_latlon_cgrid as gm
     from legoesm.ocean.vertical import (
         create_partial_cell_coordinate,
         create_z_star_from_thicknesses,
@@ -116,6 +118,46 @@ def test_full_literal_slope_with_carried_w_bundle_has_finite_jit_gradient():
     assert np.all(np.isfinite(np.asarray(compiled)))
     np.testing.assert_allclose(np.asarray(compiled), np.asarray(eager),
                                rtol=1.0e-12, atol=1.0e-14)
+
+    # Scope receipt: the historical implicit default and its explicit selector
+    # must remain numerically byte-identical through the active slope path.
+    rho = 1026.0 + 0.2 * (10.0 - T)
+    explicit_static = cfg._replace(
+        slope_face_thickness_evaluation="static_face")
+    default_out = compute_nemo_native_slopes(
+        rho, T, S, mask, umask, vmask, z_coord, grid, cfg, eos_fn,
+        active_3d=z_coord.is_active, pn2_override=carried_n2,
+        e3w_override=carried_e3w)
+    explicit_out = compute_nemo_native_slopes(
+        rho, T, S, mask, umask, vmask, z_coord, grid, explicit_static,
+        eos_fn, active_3d=z_coord.is_active, pn2_override=carried_n2,
+        e3w_override=carried_e3w)
+    for got, want in zip(explicit_out, default_out):
+        np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+
+    # Every card outside the two DINO oracle cards must stay on the static
+    # path.  Make accidental live-helper reachability a hard red failure and
+    # exercise the complete numerical entry point for each unchanged card.
+    def forbidden_live_helper(*_args, **_kwargs):
+        raise AssertionError("unchanged card reached nemo_qco_live helper")
+
+    monkeypatch.setattr(
+        gm, "_nemo_qco_live_slope_face_thicknesses", forbidden_live_helper)
+    faithful = {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}
+    for name in DINO_RECIPES:
+        if name in faithful:
+            continue
+        card = dino_config_for_recipe(name)
+        card_cfg = cfg._replace(
+            slope_face_thickness_evaluation=
+            card.gm_redi_slope_face_thickness_evaluation)
+        card_out = compute_nemo_native_slopes(
+            rho, T, S, mask, umask, vmask, z_coord, grid, card_cfg,
+            eos_fn, active_3d=z_coord.is_active, pn2_override=carried_n2,
+            e3w_override=carried_e3w)
+        for got, want in zip(card_out, default_out):
+            np.testing.assert_array_equal(np.asarray(got), np.asarray(want),
+                                          err_msg=name)
 
 
 def test_row30_selectors_are_scoped_to_the_two_dino_nemo_cards():

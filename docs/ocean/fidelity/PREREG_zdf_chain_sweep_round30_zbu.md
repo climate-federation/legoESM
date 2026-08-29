@@ -146,3 +146,194 @@ rounded away before the live-depth product. They are not red-capable and are
 withdrawn. The replacements are the measured-red production-Jacobian depth
 construction and a direct one-ULP perturbation of one wet live-`gdept` value.
 This changes no scored stage, bar, focus set, or ownership criterion.
+
+## HELD: exact raw-U operand dumps (human executes; Codex does not run NEMO)
+
+Existing dumps are exhausted with nine non-focus columns still red. The next
+receipt writes `iku -> zfi -> e3u(miku) -> zdepu -> carried anchor -> interior
+quotient -> ML term -> pre-mask blend`. The patch is write-only, initializes
+every full halo buffer, and guards the irrelevant pre-anchor carry slots so
+uninitialized values cannot enter a stream.
+
+Build block (the preserved row-30 deterministic-writer source is the baseline):
+
+```bash
+set -euo pipefail
+source /home/dbalwada/miniconda3/etc/profile.d/conda.sh
+conda activate nemo-build
+export TMPDIR=/tmp XDG_CACHE_HOME=/tmp/nemo-row30-uslp-build-xdg
+cd /tmp/codex-zdf-sweep
+base=/tmp/nemo-row30-manifest.OMUakO
+test "$(sha256sum "$base/cfgs/DINO/MY_SRC/ldfslp.F90" | awk '{print $1}')" = \
+  8b4d8cffe35d66241eb77bdc508ef15d6dd90d8ff192fd60201ff83a7d523a29
+test "$(sha256sum scripts/validate/ocean_fidelity/dino_1226/nemo_row30_uslp_raw_operands.patch | awk '{print $1}')" = \
+  9e5877d03d6ae8b6274adc6f4ae2b06af05fe44eafe83008f1624aa72656c596
+nemo_src=$(mktemp -d /tmp/nemo-row30-uslp.XXXXXX)
+cp -a "$base"/. "$nemo_src"/
+patch -p1 -d "$nemo_src" < \
+  scripts/validate/ocean_fidelity/dino_1226/nemo_row30_uslp_raw_operands.patch
+test "$(sha256sum "$nemo_src/cfgs/DINO/MY_SRC/ldfslp.F90" | awk '{print $1}')" = \
+  2d59df4697b3d16f0ee9dc2b38ce929cca707d59ef43442dee3600c8d8b1f7ca
+test "$(grep -c 'dino_dump_2d' "$nemo_src/cfgs/DINO/MY_SRC/ldfslp.F90")" -eq 30
+for unit in $(seq 8912 8919); do
+  test "$(grep -rE --include='*.F90' "UNIT[[:space:]]*=[[:space:]]*$unit" \
+    "$nemo_src/cfgs/DINO/MY_SRC" | wc -l)" -eq 1
+done
+cd "$nemo_src"
+./makenemo -m conda -n DINO -j 8 2>&1 | tee /tmp/nemo-row30-uslp-build.log
+cp -p cfgs/DINO/MY_SRC/ldfslp.F90 /tmp/ldfslp-row30-uslp-on.F90
+cp -p cfgs/DINO/BLD/bin/nemo.exe /tmp/nemo-row30-uslp-on.exe
+test /tmp/nemo-row30-uslp-on.exe -nt /tmp/ldfslp-row30-uslp-on.F90
+sha256sum /tmp/nemo-row30-uslp-on.exe > /tmp/nemo-row30-uslp-build.sha256
+sha256sum /tmp/ldfslp-row30-uslp-on.F90 /tmp/nemo-row30-uslp-on.exe \
+  /tmp/nemo-row30-uslp-build.log
+printf 'SUBSTITUTE __MEASURED_ROW30_USLP_BINARY_SHA256__=%s\n' \
+  "$(awk '{print $1}' /tmp/nemo-row30-uslp-build.sha256)"
+```
+
+One-step run block (replace the measured binary slot; no automatic retry):
+
+```bash
+set -euo pipefail
+source /home/dbalwada/miniconda3/etc/profile.d/conda.sh
+conda activate nemo-build
+export TMPDIR=/tmp XDG_CACHE_HOME=/tmp/nemo-row30-uslp-run-xdg
+BIN_SHA=__MEASURED_ROW30_USLP_BINARY_SHA256__
+case "$BIN_SHA" in __MEASURED_*) echo 'replace binary SHA slot' >&2; exit 2;; esac
+bin=/tmp/nemo-row30-uslp-on.exe
+test "$(sha256sum "$bin" | awk '{print $1}')" = "$BIN_SHA"
+ON=$(mktemp -d /tmp/RUN_ZDF30_USLP_ON.XXXXXX)
+cp -a /tmp/RUN_ZDF19_DETWRITER_OFF.q2tSGL/. "$ON"/
+find "$ON" -maxdepth 1 \( -type f -o -type l \) \( \
+  -name '*.bin' -o -name 'DINO_00005761_restart.nc' -o \
+  -name 'DINO_*_grid_*.nc' -o -name 'domain_cfg_out.nc' -o \
+  -name 'ocean.output' -o -name 'run*.log' -o -name '.nemo_binary_sha256' \) -delete
+ln -sfn "$bin" "$ON/nemo"
+sha256sum "$bin" > "$ON/.nemo_binary_sha256"
+( cd "$ON" && mpirun -np 1 ./nemo > run.attempt1.log 2>&1 )
+grep -q '^STOP 0$' "$ON/run.attempt1.log"
+test "$(sha256sum "$ON/DINO_00005761_restart.nc" | awk '{print $1}')" = \
+  33c0c1a2e998161afdc9d4b71c5606f5cc5d869e54d53058fc0f64eeac7a115c
+test "$(find "$ON" -maxdepth 1 -type f -name '*.bin' | wc -l)" -eq 217
+for name in iku zfi e3u_miku zdepu zuslp_hml_pre sint_u mlterm_u blend_u; do
+  test "$(stat -c %s "$ON/eiv_dump_${name}.bin")" -eq 3273984
+done
+printf '%s\n' "$ON" > /tmp/row30-uslp-on-dir.txt
+sha256sum "$ON"/eiv_dump_{iku,zfi,e3u_miku,zdepu,zuslp_hml_pre,sint_u,mlterm_u,blend_u}.bin
+```
+
+Strict bracket (uses the already-certified deterministic OFF arm).  This gate
+persists a SHA-bindable JSON receipt; the scorer refuses to run without that
+receipt and independently reconstructs its 197-stream manifest:
+
+```bash
+set -euo pipefail
+cd /tmp/codex-zdf-sweep
+ON=$(cat /tmp/row30-uslp-on-dir.txt)
+OFF=/tmp/RUN_ZDF30_UV_OFF.75aJsW
+PYTHONPATH=scripts/validate/ocean_fidelity/dino_1226 \
+/home/dbalwada/legoESM/.venv/bin/python - "$ON" "$OFF" <<'PY'
+from pathlib import Path
+import sys
+import json
+from zdf_stream_bracket import (files_byte_identical, manifest_sha256,
+                                one_bit_file_control, sha256, stream_manifest)
+on, off = map(Path, sys.argv[1:])
+old = {f"eiv_dump_{n}.bin" for n in ("zgru_iik","zgru_iikm1","zau","zav",
+ "zbu_pre","zbv_pre","zbu_post","zbv_post","uslp_raw","vslp_raw",
+ "uslp_postshapiro","vslp_postshapiro")}
+new = {f"eiv_dump_{n}.bin" for n in ("iku","zfi","e3u_miku","zdepu",
+ "zuslp_hml_pre","sint_u","mlterm_u","blend_u")}
+om, fm = stream_manifest(on), stream_manifest(off)
+assert len(om) == 217 and len(fm) == 197
+assert set(om)-set(fm) == old | new and not set(fm)-set(om)
+for name in sorted(fm): assert files_byte_identical(on/name, off/name), name
+one_bit = one_bit_file_control(on/sorted(fm)[0])
+missing = not (set(om)-{next(iter(new))}-set(fm) == old | new)
+assert one_bit and missing
+names = ("nemo", "mesh_mask.nc", "DINO_00005760_restart.nc",
+         "DINO_00005761_restart.nc", "namelist_cfg", "run.attempt1.log")
+receipt = {
+ "schema": "dino-zdf-row30-uslp-bracket-v1",
+ "on_dir": str(on.resolve()), "off_dir": str(off.resolve()),
+ "shared_count": len(fm), "shared_exact": True,
+ "shared_manifest_sha256": manifest_sha256({n: om[n] for n in sorted(fm)}),
+ "controls": {"one_bit_file": one_bit, "missing_stream": missing},
+ "on_sha256": {n: sha256(on/n) for n in names},
+ "off_sha256": {n: sha256(off/n) for n in names},
+}
+path = Path("/tmp/dino_zdf_row30_uslp_bracket_receipt.json")
+path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+print("row30 raw-U write-only bracket VERIFIED: 197/197 shared streams exact; controls fired")
+print(path, sha256(path))
+PY
+```
+
+Measured-SHA score block (replace all ten marked slots, including the bracket
+receipt SHA printed by the preceding block):
+
+```bash
+set -euo pipefail
+cd /tmp/codex-zdf-sweep
+ON=$(cat /tmp/row30-uslp-on-dir.txt)
+BIN_SHA=__MEASURED_ROW30_USLP_BINARY_SHA256__
+IKU_SHA=__MEASURED_SHA256_EIV_DUMP_IKU_BIN__
+ZFI_SHA=__MEASURED_SHA256_EIV_DUMP_ZFI_BIN__
+E3U_SHA=__MEASURED_SHA256_EIV_DUMP_E3U_MIKU_BIN__
+ZDEPU_SHA=__MEASURED_SHA256_EIV_DUMP_ZDEPU_BIN__
+ANCHOR_SHA=__MEASURED_SHA256_EIV_DUMP_ZUSLP_HML_PRE_BIN__
+SINT_SHA=__MEASURED_SHA256_EIV_DUMP_SINT_U_BIN__
+MLTERM_SHA=__MEASURED_SHA256_EIV_DUMP_MLTERM_U_BIN__
+BLEND_SHA=__MEASURED_SHA256_EIV_DUMP_BLEND_U_BIN__
+BRACKET_SHA=__MEASURED_SHA256_BRACKET_RECEIPT_JSON__
+for value in "$BIN_SHA" "$IKU_SHA" "$ZFI_SHA" "$E3U_SHA" "$ZDEPU_SHA" \
+ "$ANCHOR_SHA" "$SINT_SHA" "$MLTERM_SHA" "$BLEND_SHA" "$BRACKET_SHA"; do
+  case "$value" in __MEASURED_*) echo 'replace every SHA slot' >&2; exit 2;; esac
+done
+manifest=/tmp/row30-uslp-measured-dump-sha256.json
+/home/dbalwada/legoESM/.venv/bin/python - "$manifest" \
+ "$IKU_SHA" "$ZFI_SHA" "$E3U_SHA" "$ZDEPU_SHA" "$ANCHOR_SHA" \
+ "$SINT_SHA" "$MLTERM_SHA" "$BLEND_SHA" <<'PY'
+import json,sys
+names=("iku","zfi","e3u_miku","zdepu","zuslp_hml_pre","sint_u","mlterm_u","blend_u")
+json.dump({f"eiv_dump_{n}.bin":s for n,s in zip(names,sys.argv[2:])},open(sys.argv[1],"w"))
+PY
+lane_root=$(mktemp -d /tmp/row30-uslp-lane.XXXXXX)
+ln -s "$ON" "$lane_root/RUN_SEQDUMP_D180_1R"
+repo_sha=$(git --git-dir=/tmp/zdf-sweep-git.cJQ6wi/repo.git \
+ --work-tree=/tmp/codex-zdf-sweep rev-parse HEAD)
+set +e
+DINO_ORACLE_ROOT="$lane_root" DINO_1226_LANE=d180 \
+CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both \
+GIT_DIR=/tmp/zdf-sweep-git.cJQ6wi/repo.git GIT_WORK_TREE=/tmp/codex-zdf-sweep \
+PYTHONPATH=packages/atmosphere:packages/core:packages/coupler:packages/ice:\
+packages/land:packages/ml:packages/ocean:packages/tools:scripts/validate/ocean_fidelity/dino_1226 \
+/home/dbalwada/legoESM/.venv/bin/python \
+ scripts/validate/ocean_fidelity/dino_1226/zdf_row30_uslp_dump_score.py \
+ --run-dir "$ON" --mld-maps /tmp/dino_mld_audit_codex/mld_maps.npz \
+ --dump-sha-manifest "$manifest" --nemo-source /tmp/ldfslp-row30-uslp-on.F90 \
+ --bracket-receipt /tmp/dino_zdf_row30_uslp_bracket_receipt.json \
+ --expected-bracket-sha "$BRACKET_SHA" \
+ --nemo-binary /tmp/nemo-row30-uslp-on.exe \
+ --expected-source-sha 2d59df4697b3d16f0ee9dc2b38ce929cca707d59ef43442dee3600c8d8b1f7ca \
+ --expected-binary-sha "$BIN_SHA" --expected-repo-sha "$repo_sha" \
+ --output /tmp/dino_zdf_row30_uslp_held_artifact.json
+rc=$?; set -e
+test "$rc" -eq 0 -o "$rc" -eq 30
+sha256sum /tmp/dino_zdf_row30_uslp_held_artifact.json
+exit "$rc"
+```
+
+The held scorer also hard-gates the production-state inputs used by
+`ldf_slp_per_element.build_state()`: `mesh_mask.nc` SHA
+`3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622`,
+input restart SHA
+`0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e`,
+and `namelist_cfg` SHA
+`55f17d2344e5aaa58f7c6ef23e7d5dfebd9c351888c6499d5d312131b8515355`.
+The bracket receipt additionally binds both binaries, both input/output
+restarts, both meshes and namelists, and both run logs.  Red controls now live
+on the new ladder itself: wrong `iku`, vertically shifted `zfi`, zonally
+rolled and wrong-level `e3u(miku)`, zonally rolled `zdepu`, and a wet NaN.
+The blend reconstruction uses the literal Fortran multiply/divide/add
+association rather than a post-hoc `where` selection.

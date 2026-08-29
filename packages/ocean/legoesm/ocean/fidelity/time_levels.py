@@ -123,6 +123,21 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
         "before", "ldfslp.F90:279-285 U after Shapiro, before LBC"),
     "eiv_dump_vslp_postshapiro.bin": (
         "before", "ldfslp.F90:286-292 V after Shapiro, before LBC"),
+    # Row-30 raw-U composite continuation (units 8912--8919).
+    "eiv_dump_iku.bin": ("before", "ldfslp.F90:251 U mixed-layer index"),
+    "eiv_dump_zfi.bin": ("before", "ldfslp.F90:254 U integer ML switch"),
+    "eiv_dump_e3u_miku.bin": (
+        "now", "ldfslp.F90:261-264 live e3u(miku,Kmm) depth operand"),
+    "eiv_dump_zdepu.bin": (
+        "now", "ldfslp.F90:261-264 U live water-column depth"),
+    "eiv_dump_zuslp_hml_pre.bin": (
+        "before", "ldfslp.F90:269 carried U mixed-layer anchor before update"),
+    "eiv_dump_sint_u.bin": (
+        "before", "ldfslp.F90:269 U interior zau/(zbu-zeps)"),
+    "eiv_dump_mlterm_u.bin": (
+        "before", "ldfslp.F90:269 U mixed-layer depth-anchor product"),
+    "eiv_dump_blend_u.bin": (
+        "before", "ldfslp.F90:269 U raw blend before umask"),
     # Asselin filter dumps are explicit about their own level.
     "atf_dump_tem_before.bin": ("before", "traatf_qco.F90, pre-filter state"),
     "atf_dump_sal_before.bin": ("before", "traatf_qco.F90, pre-filter state"),
