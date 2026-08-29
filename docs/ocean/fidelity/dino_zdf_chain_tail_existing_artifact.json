@@ -108,7 +108,7 @@
     "tke_dump_zmxld.bin": "df9a09e7fcb9e11b7549fb523cb241a2a22a1e073182bcbcc00d56e0d5cfcde2",
     "tke_dump_zmxlm.bin": "60ed331574d813885fb29399b2dbf041a6913ea965d45c09e2890eef8b3ef830"
   },
-  "repo_sha": "11710df679204e76eb76519e260815f40d7f3c59",
+  "repo_sha": "b7ac05c3c610cfa5d42f9c71a008f87b37a40a6a",
   "rows": {
     "19": {
       "disposition": "UNMEASURED-NEEDS-DUMP",
@@ -544,9 +544,42 @@
       "reason": "NEMO source-order EVD reconstruction only; legoESM EVD path not invoked"
     },
     "27": {
-      "disposition": "WAIVED",
+      "disposition": "VERIFIED",
       "operation": "avs copy and optional enhancements",
-      "reason": "source-identity waiver: DDM is disabled, so NEMO executes avs=avt (zdfphy.F90:326-331), while legoESM passes the same K_v_cell object to T and S (ocean_model_latlon_cgrid.py:7308-7336); surface-wave and internal-wave enhancement arms are inactive"
+      "source_identity": {
+        "bar": "exact source/object identity",
+        "focus": [
+          {
+            "i": 1,
+            "j": 11,
+            "pass": true
+          },
+          {
+            "i": 1,
+            "j": 12,
+            "pass": true
+          },
+          {
+            "i": 1,
+            "j": 13,
+            "pass": true
+          },
+          {
+            "i": 23,
+            "j": 13,
+            "pass": true
+          }
+        ],
+        "legoesm": "ocean_model_latlon_cgrid.py:7308-7336 passes the same K_v_cell object to the T/S pair solve with DDM off",
+        "n_diverged_columns": 0,
+        "n_verified_columns": 9920,
+        "nemo": "zdfphy.F90:326-331 executes avs=avt with DDM off"
+      },
+      "waived_inactive_enhancements": [
+        "DDM coefficient delta",
+        "surface-wave enhancement",
+        "internal-wave enhancement"
+      ]
     },
     "28": {
       "disposition": "UNMEASURED-NEEDS-DUMP",
@@ -864,11 +897,13 @@
       "operation": "ldf_slp"
     },
     "31": {
+      "deferred_large_design": "reconstruct Naa_A=(Kbb+rDt*stage6_Krhs)*mask, subtract the stage7 barotropic Naa field, add the dumped level-1 stress deposit, substitute dump_avm into the production momentum matrix/drag call, and compare its u/v result per column with stage8; planted wrong-rDt and one-cell-roll controls must fail",
       "disposition": "UNMEASURED-EXISTING-BRACKET",
       "operation": "momentum implicit solve application",
-      "reason": "no new NEMO dump is required: restart Kbb + stage-7 post-dyn_spg Krhs/barotropic state + stage-8 output bracket dyn_zdf. Exact isolation remains blocked by upstream row-20/row-30 coefficient divergences and requires the registered NEMO volume-form input reconstruction"
+      "reason": "no new NEMO dump is required: restart Kbb + stage-6 Krhs + stage-7 post-dyn_spg barotropic state + stage-8 output bracket dyn_zdf. Exact isolation remains blocked by upstream row-20/23/25/26 composed-avm uncertainty and requires the registered NEMO volume-form input reconstruction"
     },
     "32": {
+      "deferred_large_design": "reconstruct Naa=(e3t_Kbb*T_Kbb+rDt*e3t_Kmm*stage23_Krhs)/e3t_Kaa for T/S, assemble exact K33 from dump_avt plus the existing NEMO slope/coefficient dumps, substitute both into the production pair solve, and compare per column with stage21; planted wrong-e3t-slot and one-cell-roll controls must fail",
       "disposition": "UNMEASURED-EXISTING-BRACKET",
       "operation": "tracer implicit solve application",
       "reason": "no new NEMO dump is required: restart Kbb + stage-23 post-tra_ldf Krhs and stage-21 post-tra_zdf bracket the application. Exact isolation remains blocked by row-30 K33/slope divergence and requires the registered z-star volume-form input reconstruction"
