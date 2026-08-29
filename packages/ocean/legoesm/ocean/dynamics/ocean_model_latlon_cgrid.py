@@ -7033,6 +7033,16 @@ class LatLonCGridOceanModel:
 
         mask_3d = state.land_mask.data[..., jnp.newaxis]
 
+        # The surface land mask cannot describe a partial/full-step column's
+        # staircase bottom.  Keep the legacy 2-D broadcast for every existing
+        # shared-Thomas card, but give the NEMO-literal application its actual
+        # three-dimensional T mask.  Face masks are constructed below from the
+        # same active ladder once the momentum geometry is available.
+        _literal_t_wet = jnp.broadcast_to(mask_3d > 0.5, state.T.data.shape)
+        if isinstance(_zc, OceanPartialCellCoordinate):
+            _literal_t_wet = jnp.logical_and(
+                _literal_t_wet, _zc.is_active)
+
         # Partial-cell dry-interface guard: no implicit flux through the
         # seafloor.  K/A at interface k couple cells k and k+1; where cell k+1
         # is below the seafloor the diffusivity must be EXACTLY zero (Veros
@@ -7441,8 +7451,7 @@ class LatLonCGridOceanModel:
                         _content_s = S_solve_in * dz_cell
                     else:
                         _content_t, _content_s = nemo_tracer_content_rhs
-                    _tracer_wet = jnp.broadcast_to(
-                        mask_3d > 0.5, T_solve_in.shape)
+                    _tracer_wet = _literal_t_wet
                     T_new, S_new = (
                         implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
                             T_solve_in, S_solve_in, _content_t, _content_s,
@@ -7478,8 +7487,20 @@ class LatLonCGridOceanModel:
                     from legoesm.ocean.physics.vertical_mixing import (
                         implicit_vertical_diffusion_ocean_momentum_dispatch,
                     )
-                    _uwet = jnp.broadcast_to(u_mask_3d > 0.5, u_solve_in.shape)
-                    _vwet = jnp.broadcast_to(v_mask_3d > 0.5, v_solve_in.shape)
+                    if isinstance(_zc, OceanPartialCellCoordinate):
+                        _uwet = jnp.logical_and(
+                            jnp.broadcast_to(u_mask_3d > 0.5,
+                                             u_solve_in.shape),
+                            _act_u3)
+                        _vwet = jnp.logical_and(
+                            jnp.broadcast_to(v_mask_3d > 0.5,
+                                             v_solve_in.shape),
+                            _act_v3)
+                    else:
+                        _uwet = jnp.broadcast_to(
+                            u_mask_3d > 0.5, u_solve_in.shape)
+                        _vwet = jnp.broadcast_to(
+                            v_mask_3d > 0.5, v_solve_in.shape)
                     u_new = implicit_vertical_diffusion_ocean_momentum_dispatch(
                         u_solve_in, A_v_u, dz_u, dz_half_u, dt_mom, _uwet,
                         evaluation="nemo_literal",
@@ -7498,8 +7519,10 @@ class LatLonCGridOceanModel:
                         extra_diag=extra_diag_v,
                     )
         if do_tracers:
-            T_new = jnp.where(mask_3d > 0.5, T_new, state.T.data)
-            S_new = jnp.where(mask_3d > 0.5, S_new, state.S.data)
+            _tracer_apply_mask = (_literal_t_wet if _zdf_literal
+                                  else mask_3d > 0.5)
+            T_new = jnp.where(_tracer_apply_mask, T_new, state.T.data)
+            S_new = jnp.where(_tracer_apply_mask, S_new, state.S.data)
         if do_momentum:
             if _zdf_baroclinic_only:
                 # Re-add the SAME depth mean that was subtracted before the
@@ -7508,8 +7531,10 @@ class LatLonCGridOceanModel:
                 # A_v=0 (test 3: strip + re-add round-trips to the input).
                 u_new = u_new + _u_bt_mean
                 v_new = v_new + _v_bt_mean
-            u_new = jnp.where(u_mask_3d > 0.5, u_new, state.u.data)
-            v_new = jnp.where(v_mask_3d > 0.5, v_new, state.v.data)
+            _u_apply_mask = _uwet if _zdf_literal else u_mask_3d > 0.5
+            _v_apply_mask = _vwet if _zdf_literal else v_mask_3d > 0.5
+            u_new = jnp.where(_u_apply_mask, u_new, state.u.data)
+            v_new = jnp.where(_v_apply_mask, v_new, state.v.data)
             if self._tke_realized_kdiss_active() and (
                     return_K_diss_v or (K_diss_v_w is None and do_tracers)):
                 # Realized implicit-friction dissipation K_diss_v (Veros

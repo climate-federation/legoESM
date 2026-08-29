@@ -86,14 +86,18 @@ From this branch worktree, the exact two GPU commands are:
 
 ```bash
 cd /tmp/codex-zdf-sweep
-CUDA_VISIBLE_DEVICES=<gpu> JAX_ENABLE_X64=1 /home/dbalwada/legoESM/.venv/bin/python \
-  scripts/validate/ocean_fidelity/run_fp64.py \
+CUDA_VISIBLE_DEVICES=<gpu> JAX_ENABLE_X64=1 \
+PYTHONPATH="$PWD/src:$PWD/packages/core:$PWD/packages/ocean" \
+/home/dbalwada/legoESM/.venv/bin/python \
+  scripts/validate/ocean_fidelity/dino_1226/run_fp64.py \
   scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py \
   nemo_dino_kamm_mlf /tmp/zdf_faithful_d90.npz --days 90 --save-3d --bridge-tke
 
 cd /tmp/codex-zdf-sweep
-CUDA_VISIBLE_DEVICES=<gpu> JAX_ENABLE_X64=1 /home/dbalwada/legoESM/.venv/bin/python \
-  scripts/validate/ocean_fidelity/run_fp64.py \
+CUDA_VISIBLE_DEVICES=<gpu> JAX_ENABLE_X64=1 \
+PYTHONPATH="$PWD/src:$PWD/packages/core:$PWD/packages/ocean" \
+/home/dbalwada/legoESM/.venv/bin/python \
+  scripts/validate/ocean_fidelity/dino_1226/run_fp64.py \
   scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py \
   nemo_dino_kamm_mlf /tmp/zdf_legacy_d90.npz --days 90 --save-3d --bridge-tke \
   --tke-preclosure-coeff-source current_subiteration \

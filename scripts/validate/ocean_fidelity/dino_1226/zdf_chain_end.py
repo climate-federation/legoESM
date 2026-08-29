@@ -14,6 +14,7 @@ import ctypes
 import hashlib
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -139,6 +140,20 @@ def main() -> int:
     ap.add_argument("--seos-oracle-so", type=Path, required=True)
     ap.add_argument("--output", type=Path, required=True)
     args = ap.parse_args()
+
+    repo_root = Path(__file__).resolve().parents[4]
+    actual_repo_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repo_root, text=True).strip()
+    if args.repo_sha != actual_repo_sha:
+        raise SystemExit(
+            f"--repo-sha {args.repo_sha} != checked-out HEAD {actual_repo_sha}")
+    tracked_status = subprocess.check_output(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        cwd=repo_root, text=True)
+    if tracked_status:
+        raise SystemExit(
+            "chain-end receipt requires a clean tracked worktree; got:\n"
+            + tracked_status)
 
     set_policy(PrecisionPolicy.fp64())
     if jax.default_backend() != "cpu" or not jax.config.x64_enabled:
@@ -379,18 +394,26 @@ def main() -> int:
 
     implicit_mod.implicit_vertical_diffusion_nemo_momentum = capture_literal_momentum
     try:
-        production_u = implicit_vertical_diffusion_ocean_momentum_dispatch(
+        @jax.jit
+        def production_momentum(rhs, avm_face, dz, dzh, wet, diagonal):
+            return implicit_vertical_diffusion_ocean_momentum_dispatch(
+                rhs, avm_face, dz, dzh, rdt, wet,
+                evaluation="nemo_literal", extra_diag=diagonal)
+
+        production_u = production_momentum(
             jnp.asarray(rhs_u), jnp.asarray(Ku), jnp.asarray(e3uaa[..., :35]),
-            jnp.asarray(e3uwmm[..., 1:35]), rdt, jnp.asarray(wu),
-            evaluation="nemo_literal", extra_diag=jnp.asarray(diag_u))
-        production_v = implicit_vertical_diffusion_ocean_momentum_dispatch(
+            jnp.asarray(e3uwmm[..., 1:35]), jnp.asarray(wu),
+            jnp.asarray(diag_u))
+        production_v = production_momentum(
             jnp.asarray(rhs_v), jnp.asarray(Kv), jnp.asarray(e3vaa[..., :35]),
-            jnp.asarray(e3vwmm[..., 1:35]), rdt, jnp.asarray(wv),
-            evaluation="nemo_literal", extra_diag=jnp.asarray(diag_v))
+            jnp.asarray(e3vwmm[..., 1:35]), jnp.asarray(wv),
+            jnp.asarray(diag_v))
     finally:
         implicit_mod.implicit_vertical_diffusion_nemo_momentum = real_literal_momentum
-    if literal_calls != 2:
-        raise SystemExit("row31 production dispatch did not call literal solver twice")
+    # U/V have the same static shape, so one JIT trace captures the literal
+    # callable and the compiled executable is reused for the sibling.
+    if literal_calls != 1:
+        raise SystemExit("row31 production JIT did not capture literal solver")
     literal_u = _literal_nemo_momentum_solve(
         rhs_u, avm, e3uaa[..., :35], e3uwmm[..., 1:35], wu, bot_u,
         drag_u, rdt, 1)
@@ -458,13 +481,19 @@ def main() -> int:
 
     implicit_mod.implicit_vertical_diffusion_nemo_tracer_pair = capture_literal_tracer
     try:
-        production_t, production_s = (
+        @jax.jit
+        def production_tracers(tin_arg, sin_arg, tc_arg, sc_arg, k_arg,
+                               e3t_arg, e3w_arg, wet_arg):
+            return (
             implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
-                jnp.asarray(tin), jnp.asarray(sin),
-                jnp.asarray(t_content), jnp.asarray(s_content),
-                jnp.asarray(ktr), jnp.asarray(e3aa[..., :35]),
-                jnp.asarray(e3wmm[..., 1:35]), rdt,
-                jnp.asarray(tmask[..., :35]), evaluation="nemo_literal"))
+                tin_arg, sin_arg, tc_arg, sc_arg, k_arg, e3t_arg, e3w_arg,
+                rdt, wet_arg, evaluation="nemo_literal"))
+
+        production_t, production_s = production_tracers(
+            jnp.asarray(tin), jnp.asarray(sin),
+            jnp.asarray(t_content), jnp.asarray(s_content),
+            jnp.asarray(ktr), jnp.asarray(e3aa[..., :35]),
+            jnp.asarray(e3wmm[..., 1:35]), jnp.asarray(tmask[..., :35]))
     finally:
         implicit_mod.implicit_vertical_diffusion_nemo_tracer_pair = real_literal_tracer
     if tracer_literal_calls != 1:
@@ -581,6 +610,16 @@ def main() -> int:
         "dynzdf.F90": source_root / "cfgs/DINO/MY_SRC/dynzdf.F90",
         "trazdf.F90": source_root / "cfgs/DINO/WORK/trazdf.F90",
     }
+    production_sources = {
+        "implicit_solver.py": repo_root / (
+            "packages/ocean/legoesm/ocean/physics/vertical_mixing/"
+            "implicit_solver.py"),
+        "ocean_model_latlon_cgrid.py": repo_root / (
+            "packages/ocean/legoesm/ocean/dynamics/"
+            "ocean_model_latlon_cgrid.py"),
+        "dino.py": repo_root / "packages/ocean/legoesm/ocean/experiments/dino.py",
+        "state.py": repo_root / "packages/ocean/legoesm/ocean/state.py",
+    }
     artifact = {
         "schema": "dino-zdf-chain-end-v2",
         "disposition": ("DIVERGED-ROW30" if not row30_pass else
@@ -595,6 +634,9 @@ def main() -> int:
         "provenance_sha256": {str(p): sha256(p) for p in sorted(set(paths))},
         "oracle_source_sha256": {
             k: {"path": str(v), "sha256": sha256(v)} for k, v in sources.items()},
+        "production_source_sha256": {
+            k: {"path": str(v), "sha256": sha256(v)}
+            for k, v in production_sources.items()},
         "probe": {"path": str(Path(__file__).resolve()),
                   "sha256": sha256(Path(__file__).resolve())},
     }

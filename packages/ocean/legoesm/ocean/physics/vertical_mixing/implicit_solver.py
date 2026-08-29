@@ -361,14 +361,18 @@ def implicit_vertical_diffusion_nemo_momentum(
         raise ValueError("avm_face must contain one value per interior face")
     if e3w_now.shape != avm_face.shape:
         raise ValueError("e3w_now must match avm_face")
-    if field.shape[-1] < 2:
-        return field
-
     dtype = field.dtype
+    wet_f = jnp.asarray(wet, dtype=dtype)
+    if field.shape[-1] < 2:
+        diagonal = (jnp.asarray(1.0, dtype=dtype)
+                    + jnp.asarray(extra_diag, dtype=dtype))
+        diagonal = jnp.where(wet_f > 0.0, diagonal,
+                             jnp.asarray(1.0, dtype=dtype))
+        return field / diagonal * wet_f
+
     zero = jnp.zeros_like(field[..., :1])
     zdt2 = jnp.asarray(0.5, dtype=dtype) * jnp.asarray(dt, dtype=dtype)
     avm_sum = jnp.asarray(2.0, dtype=dtype) * avm_face
-    wet_f = jnp.asarray(wet, dtype=dtype)
     interface_wet = wet_f[..., 1:] * wet_f[..., :-1]
     avm_product = jax.lax.optimization_barrier(-zdt2 * avm_sum)
     dz_safe = jnp.where(wet_f > 0.0, dz_after,

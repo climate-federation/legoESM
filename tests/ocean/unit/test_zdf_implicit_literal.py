@@ -7,7 +7,13 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from legoesm.grids.latlon import create_latlon_grid
+from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks_3d
+from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+    LatLonCGridOceanModel,
+)
 from legoesm.ocean.experiments.dino import DINOConfig, DINO_RECIPES
+from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.physics.vertical_mixing.implicit_solver import (
     implicit_vertical_diffusion_nemo_momentum,
     implicit_vertical_diffusion_nemo_tracer_pair,
@@ -15,6 +21,11 @@ from legoesm.ocean.physics.vertical_mixing.implicit_solver import (
     implicit_vertical_diffusion_ocean_momentum_dispatch,
     implicit_vertical_diffusion_ocean_pair,
     implicit_vertical_diffusion_ocean_tracer_pair_dispatch,
+)
+from legoesm.ocean.state import LatLonCGridOceanConfig
+from legoesm.ocean.vertical import (
+    create_full_step_coordinate,
+    create_ocean_z_star,
 )
 
 
@@ -178,3 +189,60 @@ def test_literal_dry_rows_are_finite_and_masked():
     assert np.isfinite(np.asarray(tracer)).all()
     assert float(momentum[0, -1]) == 0.0
     assert float(tracer[0, -1]) == 0.0
+
+
+def test_literal_single_level_applies_diagonal_and_dry_mask():
+    field = jnp.array([[6.0], [9.0]], dtype=jnp.float64)
+    wet = jnp.array([[True], [False]])
+    empty = jnp.empty((2, 0), dtype=jnp.float64)
+    extra = jnp.array([[2.0], [7.0]], dtype=jnp.float64)
+    actual = implicit_vertical_diffusion_nemo_momentum(
+        field, empty, jnp.array([[3.0], [0.0]]), empty, 4.0, wet,
+        extra_diag=extra)
+    np.testing.assert_array_equal(np.asarray(actual), np.array([[2.0], [0.0]]))
+
+
+def test_production_literal_route_uses_full_step_active_masks():
+    """The model route must not broadcast a surface mask into dry rock."""
+    grid = create_latlon_grid(6, 8)
+    zref = create_ocean_z_star(n_levels=5, H_max=3000.0)
+    z_coord = create_full_step_coordinate(
+        zref, jnp.full((6, 8), 3, dtype=jnp.int32))
+    H_bathy = jnp.sum(z_coord.h_partial, axis=-1)
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z_coord, T_water_init_C=10.0, T_deep=10.0, S_uniform=35.0,
+        H_bathy_override=H_bathy)
+    active_t = z_coord.is_active
+    active_u, active_v = compute_face_masks_3d(active_t, grid)
+    # Poison the dry slots: a correct production mask both avoids 0/0 in the
+    # matrix and preserves these model-level below-bottom sentinels.
+    state = state._replace(
+        T=state.T.replace(data=jnp.where(active_t, state.T.data, 77.0)),
+        S=state.S.replace(data=jnp.where(active_t, state.S.data, 88.0)),
+        u=state.u.replace(data=jnp.where(active_u, state.u.data, 99.0)),
+        v=state.v.replace(data=jnp.where(active_v, state.v.data, 111.0)),
+    )
+    cfg = LatLonCGridOceanConfig.from_flat(
+        bottom_drag_scheme="legacy", bottom_drag_r=0.0,
+        A_v=1.0e-3, K_v=1.0e-4, A_h=0.0, K_h=0.0,
+        implicit_vertical_mixing=True,
+        zdf_implicit_solver_evaluation="nemo_literal",
+        implicit_vmix_e3t_now_divisor=True,
+    )
+    out = LatLonCGridOceanModel(grid, z_coord, cfg)._apply_implicit_vertical_mixing(
+        state, 1800.0, surface_forcing=None)
+
+    for field in (out.T.data, out.S.data, out.u.data, out.v.data):
+        assert np.isfinite(np.asarray(field)).all()
+    np.testing.assert_array_equal(
+        np.asarray(out.T.data)[~np.asarray(active_t)],
+        np.asarray(state.T.data)[~np.asarray(active_t)])
+    np.testing.assert_array_equal(
+        np.asarray(out.S.data)[~np.asarray(active_t)],
+        np.asarray(state.S.data)[~np.asarray(active_t)])
+    np.testing.assert_array_equal(
+        np.asarray(out.u.data)[~np.asarray(active_u, dtype=bool)],
+        np.asarray(state.u.data)[~np.asarray(active_u, dtype=bool)])
+    np.testing.assert_array_equal(
+        np.asarray(out.v.data)[~np.asarray(active_v, dtype=bool)],
+        np.asarray(state.v.data)[~np.asarray(active_v, dtype=bool)])
