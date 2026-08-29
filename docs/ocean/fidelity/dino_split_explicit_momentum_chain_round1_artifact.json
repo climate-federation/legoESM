@@ -1,10 +1,73 @@
 {
   "backend": "cpu",
+  "bar_policy": {
+    "accumulating_per_element": 1e-12,
+    "classifier": "fidelity_bar_gate.classify",
+    "correlation_min": 0.999999999,
+    "mean_abs_ratio_epsilon": 1e-06,
+    "pointwise_per_element": 1e-15
+  },
   "controls": {
+    "actual_binding_error": 0.0002740311743349557,
+    "actual_binding_perturbation_changes_score": true,
+    "alignment_best": {
+      "di": 0,
+      "dj": 0,
+      "normalized_rms_error": 0.0002740311743349557
+    },
+    "alignment_scan": [
+      {
+        "di": -1,
+        "dj": -1,
+        "normalized_rms_error": 0.8516081801088069
+      },
+      {
+        "di": 0,
+        "dj": -1,
+        "normalized_rms_error": 0.1519087309177422
+      },
+      {
+        "di": 1,
+        "dj": -1,
+        "normalized_rms_error": 0.6195845689627931
+      },
+      {
+        "di": -1,
+        "dj": 0,
+        "normalized_rms_error": 0.8443944756561844
+      },
+      {
+        "di": 0,
+        "dj": 0,
+        "normalized_rms_error": 0.0002740311743349557
+      },
+      {
+        "di": 1,
+        "dj": 0,
+        "normalized_rms_error": 0.6070870738151861
+      },
+      {
+        "di": -1,
+        "dj": 1,
+        "normalized_rms_error": 0.8458064471463069
+      },
+      {
+        "di": 0,
+        "dj": 1,
+        "normalized_rms_error": 0.12872651182641404
+      },
+      {
+        "di": 1,
+        "dj": 1,
+        "normalized_rms_error": 0.6071317831961214
+      }
+    ],
     "identical_array_zero": true,
     "identical_error": 0.0,
-    "planted_error": 1.0000000000008017e-06,
-    "planted_offset_breaches_bar": true
+    "planted_actual_binding_error": 0.0002740603312831709,
+    "planted_identity_breaches_bar": true,
+    "planted_identity_error": 1.0000000000008017e-06,
+    "zero_shift_is_best": true
   },
   "dump_sha256": {
     "spg_dump_pssh_final.bin": "7db66cadeb8d04522885a766fd1dd77e010a9adcaa5e8c07ce832a5339928c70",
@@ -20,10 +83,19 @@
     "spg_dump_vn_adv_final.bin": "9abb35a32437797aecc60c2e6fea28f2abc1b609662b26b8a669c124f661dab0",
     "spg_dump_vn_e_init.bin": "df8203ca3654edc64c2803929146343d1e905f00f3fcd7f5dd703a41a4743a42",
     "spg_dump_zu_frc.bin": "13138faa46149968c009f0d6c20956b8d2457a904667686a1f6cb1a93d7bcca6",
-    "spg_dump_zv_frc.bin": "81d01381ad5164b1a0cc3fb5f22590f471b0e24bb9b68084290e0cb9e2ef4c0e"
+    "spg_dump_zv_frc.bin": "81d01381ad5164b1a0cc3fb5f22590f471b0e24bb9b68084290e0cb9e2ef4c0e",
+    "stp_dump_07_dynspg_u.bin": "2e050572fa3c8474264b89b5ee1e76e6da8a6b6c65fd3aa47fbbf95d624684f4",
+    "stp_dump_07_dynspg_ub.bin": "14d2085b34d027f13c6a489c1f1c39a09d1fd3cd56d1e3e1edb718fed458f50a",
+    "stp_dump_07_dynspg_v.bin": "059a62add5b5a9a261f0eea83cee77dd71cb879f435fa46f3ca800040a5ecba9",
+    "stp_dump_07_dynspg_vb.bin": "d3d2fca6d60cc9015ca120bf4a7e523f8bca18049198a44fb8fe8ac395b41ac3"
   },
   "e3t_mode": "both",
   "first_diverged_subrow": "1.1",
+  "git": {
+    "clean_after": true,
+    "clean_before": true,
+    "commit": "7a11b6aaa9363985ed85ea71774abef8222e5fa4"
+  },
   "jax_enable_x64": true,
   "lane": "d180",
   "later_rows": {
@@ -35,131 +107,183 @@
   },
   "measurements": [
     {
-      "bar": 1e-15,
+      "arithmetic_class_bar": 1e-15,
       "correlation": 0.9999999661960921,
+      "fidelity_bar_row": null,
       "field": "zu_frc",
+      "gate_status": "DEBT",
+      "mean_abs_ratio": 1.0000909532419107,
       "n": 9758,
       "normalized_rms_error": 0.0002740311743349557,
+      "per_element_max_error_over_nemo_rms": 0.005491879143984337,
       "rms_ratio": 1.0000976381607058,
       "status": "DIVERGED",
       "subrow": "1.1"
     },
     {
-      "bar": 1e-15,
+      "arithmetic_class_bar": 1e-15,
       "correlation": 0.9999999997944569,
+      "fidelity_bar_row": null,
       "field": "zv_frc",
+      "gate_status": "DEBT",
+      "mean_abs_ratio": 0.9999986895970492,
       "n": 9868,
       "normalized_rms_error": 2.939336660178107e-05,
+      "per_element_max_error_over_nemo_rms": 0.0008011401797623365,
       "rms_ratio": 0.9999785828768776,
       "status": "DIVERGED",
       "subrow": "1.1"
     },
     {
-      "bar": 1e-15,
+      "arithmetic_class_bar": 1e-15,
       "correlation": 1.0,
+      "fidelity_bar_row": null,
       "field": "sshn_e_init",
+      "gate_status": "AT BAR",
+      "mean_abs_ratio": 1.0,
       "n": 9920,
       "normalized_rms_error": 0.0,
+      "per_element_max_error_over_nemo_rms": 0.0,
       "rms_ratio": 1.0,
       "status": "MATCHED",
       "subrow": "1.2"
     },
     {
-      "bar": 1e-15,
+      "arithmetic_class_bar": 1e-15,
       "correlation": 1.0,
+      "fidelity_bar_row": null,
       "field": "un_e_init",
+      "gate_status": "NEAR-CLASS",
+      "mean_abs_ratio": 1.0,
       "n": 9758,
       "normalized_rms_error": 2.29625968916112e-16,
+      "per_element_max_error_over_nemo_rms": 5.5743163337299506e-15,
       "rms_ratio": 0.9999999999999998,
-      "status": "MATCHED",
+      "status": "DIVERGED",
       "subrow": "1.2"
     },
     {
-      "bar": 1e-15,
+      "arithmetic_class_bar": 1e-15,
       "correlation": 1.0,
+      "fidelity_bar_row": null,
       "field": "vn_e_init",
+      "gate_status": "NEAR-CLASS",
+      "mean_abs_ratio": 1.0,
       "n": 9868,
       "normalized_rms_error": 2.2888243353878416e-16,
+      "per_element_max_error_over_nemo_rms": 5.330284387009278e-15,
       "rms_ratio": 1.0,
-      "status": "MATCHED",
+      "status": "DIVERGED",
       "subrow": "1.2"
     },
     {
-      "bar": 1e-12,
+      "arithmetic_class_bar": 1e-12,
       "correlation": 0.9999999999997532,
+      "fidelity_bar_row": "dyn_spg_ts pssh",
       "field": "ssh_substep1",
+      "gate_status": "DEBT",
+      "mean_abs_ratio": 0.9999999942925106,
       "n": 9920,
       "normalized_rms_error": 6.204876300487743e-07,
+      "per_element_max_error_over_nemo_rms": 2.197097512566286e-05,
       "rms_ratio": 1.0000000041149284,
       "status": "DIVERGED",
       "subrow": "1.3"
     },
     {
-      "bar": 1e-12,
+      "arithmetic_class_bar": 1e-12,
       "correlation": 0.9999999999392883,
+      "fidelity_bar_row": "dyn_spg_ts puu_b",
       "field": "ub_substep1",
+      "gate_status": "DEBT",
+      "mean_abs_ratio": 1.0000021380675392,
       "n": 9758,
       "normalized_rms_error": 1.100939578119499e-05,
+      "per_element_max_error_over_nemo_rms": 0.00022080020902929789,
       "rms_ratio": 1.0000002876062122,
       "status": "DIVERGED",
       "subrow": "1.3"
     },
     {
-      "bar": 1e-12,
+      "arithmetic_class_bar": 1e-12,
       "correlation": 0.9999999999998381,
+      "fidelity_bar_row": "dyn_spg_ts puu_b",
       "field": "vb_substep1",
+      "gate_status": "DEBT",
+      "mean_abs_ratio": 0.9999999147723985,
       "n": 9868,
       "normalized_rms_error": 5.706172276570908e-07,
+      "per_element_max_error_over_nemo_rms": 2.568936725553647e-05,
       "rms_ratio": 0.9999999576075874,
       "status": "DIVERGED",
       "subrow": "1.3"
     },
     {
-      "bar": 1e-12,
+      "arithmetic_class_bar": 1e-12,
       "correlation": 0.9999999990986951,
+      "fidelity_bar_row": "dyn_spg_ts puu_b",
       "field": "puu_b_final",
+      "gate_status": "DEBT",
+      "mean_abs_ratio": 1.000019369361832,
       "n": 9758,
       "normalized_rms_error": 4.3721192189279916e-05,
+      "per_element_max_error_over_nemo_rms": 0.0025585947104073987,
       "rms_ratio": 1.0000106599989813,
       "status": "DIVERGED",
       "subrow": "1.4"
     },
     {
-      "bar": 1e-12,
+      "arithmetic_class_bar": 1e-12,
       "correlation": 0.9999999987667224,
+      "fidelity_bar_row": "dyn_spg_ts puu_b",
       "field": "pvv_b_final",
+      "gate_status": "DEBT",
+      "mean_abs_ratio": 0.9999928594752391,
       "n": 9868,
       "normalized_rms_error": 4.966985717979302e-05,
+      "per_element_max_error_over_nemo_rms": 0.0031618158647041448,
       "rms_ratio": 1.0000005478386977,
       "status": "DIVERGED",
       "subrow": "1.4"
     },
     {
-      "bar": 1e-12,
+      "arithmetic_class_bar": 1e-12,
       "correlation": 0.9999999997790596,
+      "fidelity_bar_row": "dyn_spg_ts pssh",
       "field": "pssh_final",
+      "gate_status": "DEBT",
+      "mean_abs_ratio": 1.0000013600734816,
       "n": 9920,
       "normalized_rms_error": 1.8597737330135592e-05,
+      "per_element_max_error_over_nemo_rms": 0.00029841224040219974,
       "rms_ratio": 1.00000062665077,
       "status": "DIVERGED",
       "subrow": "1.4"
     },
     {
-      "bar": 1e-12,
+      "arithmetic_class_bar": 1e-12,
       "correlation": 0.9999999996476373,
+      "fidelity_bar_row": "dyn_spg_ts un_adv",
       "field": "un_adv_final (Hu_avg)",
+      "gate_status": "DEBT",
+      "mean_abs_ratio": 1.000014265259992,
       "n": 9758,
       "normalized_rms_error": 2.732316729735999e-05,
+      "per_element_max_error_over_nemo_rms": 0.0012426290613859945,
       "rms_ratio": 1.000006964837423,
       "status": "DIVERGED",
       "subrow": "1.4"
     },
     {
-      "bar": 1e-12,
+      "arithmetic_class_bar": 1e-12,
       "correlation": 0.9999999996264044,
+      "fidelity_bar_row": "dyn_spg_ts un_adv",
       "field": "vn_adv_final (Hv_avg)",
+      "gate_status": "DEBT",
+      "mean_abs_ratio": 0.999994088005205,
       "n": 9868,
       "normalized_rms_error": 2.7375159925904965e-05,
+      "per_element_max_error_over_nemo_rms": 0.001611003372005796,
       "rms_ratio": 0.9999985634484645,
       "status": "DIVERGED",
       "subrow": "1.4"
@@ -171,7 +295,7 @@
       "subrow": "1.1"
     },
     {
-      "status": "MATCHED",
+      "status": "DIVERGED",
       "subrow": "1.2"
     },
     {
@@ -184,14 +308,28 @@
     }
   ],
   "provenance_sha256": {
+    "fidelity_bar_gate": "a3cb0db9533155ee828a3ec87035f553be1f040509823dd94c85a4f9eba7a76d",
     "inherited_probe": "087eb9858c376491dfc2d75265a797080ac930b6b04f9762f0f3e7f7d9e40a12",
     "nemo_dynspg_ts": "a64b32e7c9ce1c1be6c121597235b08f05c853961e83d52be6082ea7242f6275",
     "nemo_stpmlf": "26849c4fa34305317881959dd5a1e41af9b13aa4f96a290a998add955a73a283",
-    "wrapper": "b899709ecf95cff0e75cad21e43f8c8db18bfb71b97fde221303ac23098eb18f"
+    "production_barotropic": "b837dea5562d5230401ee60c2f020b8146a20bcc266dbc5bf68738917a531598",
+    "production_bridge": "7b91414ff5c6de79366d7c6efe3c8966d3d889034d3341fe56ba4796b53367a7",
+    "production_dino_card": "faec0ce345f151573b36a2805ae1226cfd2e3381e442ee05934ef14e5ad5fcf4",
+    "production_ocean_model": "2a063281b528ca0740700b35204d4cedd9cd5dc298f1e98d96c79de77b267d7b",
+    "wrapper": "5da376ceb44086f37ab64c68675373fb58c153d6a80f617c69a010346a1229ae"
   },
+  "recipe": "nemo_dino_kamm_mlf",
+  "recipe_repr_sha256": "9dd4eae4e59d1135aea084f2c3903758d179b2134f5c55cf0312221f83238a42",
   "row_1_status": "DIVERGED",
   "run_dir": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R",
-  "schema": "dino-split-explicit-momentum-chain-round1-v1",
+  "run_input_sha256": {
+    "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
+    "mesh_mask.nc": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
+    "namelist_cfg": "0e75f4cb32dad3ed3fc17b721651ec12e0366c2978df8c65a6e95ae80b48d68b",
+    "namelist_ref": "b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd",
+    "ocean.output": "66162e1d54cc0c8648b0c220fe902b6a75f7b19a0e8c2349f5d11928809c0557"
+  },
+  "schema": "dino-split-explicit-momentum-chain-round1-v2",
   "session_id": "01a04e34-d1fb-73e0-b25a-177641f0a246",
   "unmeasured": {
     "ssh_frc": "NEMO dump exists, but the production recipe has no F_slow_eta because freshwater_closure is inactive"
