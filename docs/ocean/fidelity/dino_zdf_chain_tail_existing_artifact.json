@@ -68,6 +68,24 @@
     ]
   ],
   "lane": "DUMP LANE: d180  run_dir=/tmp/zdf-tail-oracle/RUN_SEQDUMP_D180_1R  restart=DINO_00005760_restart.nc  kt(nit000)=5761  t_seconds=15554700s (= day 180.03)",
+  "oracle_source_sha256": {
+    "ldfslp.F90": {
+      "path": "/tmp/nemo-tau-slot-eaef2a1e1/cfgs/DINO/MY_SRC/ldfslp.F90",
+      "sha256": "3f6fcb769c3adcfd06b2745fee17b362af26f36bd326936cfdb77bf5e6fa80d9"
+    },
+    "zdfevd.F90": {
+      "path": "/tmp/nemo-tau-slot-eaef2a1e1/src/OCE/ZDF/zdfevd.F90",
+      "sha256": "a4939b36876cca686e50880456fe5c27929ee4d0b3e694dcc693df592866f776"
+    },
+    "zdfphy.F90": {
+      "path": "/tmp/nemo-tau-slot-eaef2a1e1/src/OCE/ZDF/zdfphy.F90",
+      "sha256": "76eeec2a280d56c55bec9e59b579e5290623c408c03962d04652e406334b45fd"
+    },
+    "zdftke.F90": {
+      "path": "/tmp/nemo-tau-slot-eaef2a1e1/cfgs/DINO/MY_SRC/zdftke.F90",
+      "sha256": "5eec1700605ff54dff13b76913b46f67c8cbdc7b526d9901c33c61a1196d67a5"
+    }
+  },
   "provenance_sha256": {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
     "dump_avm.bin": "ad8104d352838ff36c1c09cb3b21231eacabeb00ce7bd2b5477cc40ead4faed0",
@@ -90,7 +108,7 @@
     "tke_dump_zmxld.bin": "df9a09e7fcb9e11b7549fb523cb241a2a22a1e073182bcbcc00d56e0d5cfcde2",
     "tke_dump_zmxlm.bin": "60ed331574d813885fb29399b2dbf041a6913ea965d45c09e2890eef8b3ef830"
   },
-  "repo_sha": "cbaeaf3494fbddd0a3a42878be73a4b21f47ae84",
+  "repo_sha": "e4758a2fea84b1d3846a66e369e15f61c301f799",
   "rows": {
     "19": {
       "disposition": "UNMEASURED-NEEDS-DUMP",
@@ -305,59 +323,12 @@
         ]
       },
       "disposition": "VERIFIED",
-      "operation": "inverse-Prandtl avt correction",
-      "pdlr_input_identity": {
-        "aggregate_bar_pass": true,
-        "bar": 1e-15,
-        "column_bar_pass": true,
-        "correlation": 0.9999999999999998,
-        "focus": [
-          {
-            "column_error": 0.0,
-            "i": 1,
-            "j": 11,
-            "pass": true,
-            "wet": true
-          },
-          {
-            "column_error": 0.0,
-            "i": 1,
-            "j": 12,
-            "pass": true,
-            "wet": true
-          },
-          {
-            "column_error": 0.0,
-            "i": 1,
-            "j": 13,
-            "pass": true,
-            "wet": true
-          },
-          {
-            "column_error": 0.0,
-            "i": 23,
-            "j": 13,
-            "pass": true,
-            "wet": true
-          }
-        ],
-        "max_column_error": 0.0,
-        "n_diverged_columns": 0,
-        "n_nonfinite_wet_elements": 0,
-        "n_verified_columns": 9920,
-        "n_wet_columns": 9920,
-        "n_wet_elements": 342134,
-        "pass": true,
-        "reference_rms": 0.3801552735542426,
-        "rms_ratio": 1.0,
-        "worst_column_ji": [
-          1,
-          1
-        ]
-      }
+      "operation": "inverse-Prandtl avt correction"
     },
     "23": {
-      "avm": {
+      "disposition": "UNMEASURED-ORACLE-SELFCHECK",
+      "operation": "closure coefficient copy on EVD-stable points",
+      "oracle_selfcheck_avm": {
         "aggregate_bar_pass": true,
         "bar": 1e-15,
         "column_bar_pass": true,
@@ -406,7 +377,7 @@
           1
         ]
       },
-      "avt": {
+      "oracle_selfcheck_avt": {
         "aggregate_bar_pass": true,
         "bar": 1e-15,
         "column_bar_pass": true,
@@ -455,8 +426,7 @@
           1
         ]
       },
-      "disposition": "VERIFIED",
-      "operation": "closure coefficient copy on EVD-stable points"
+      "reason": "NEMO closure and composed dumps self-consistent on stable subset; legoESM composition path not invoked"
     },
     "24": {
       "disposition": "WAIVED",
@@ -464,7 +434,10 @@
       "reason": "ln_rnf=F and reference ln_rnf_mouth=.false.; branch zdfphy.F90:317-321 is inactive"
     },
     "25": {
-      "avt": {
+      "disposition": "UNMEASURED-ORACLE-SELFCHECK",
+      "fired_wet_elements": 39293,
+      "operation": "EVD tracer overwrite",
+      "oracle_selfcheck_avt": {
         "aggregate_bar_pass": true,
         "bar": 1e-15,
         "column_bar_pass": true,
@@ -513,12 +486,13 @@
           1
         ]
       },
-      "disposition": "VERIFIED",
-      "fired_wet_elements": 39293,
-      "operation": "EVD tracer overwrite"
+      "reason": "NEMO source-order EVD reconstruction only; legoESM EVD path not invoked"
     },
     "26": {
-      "avm": {
+      "disposition": "UNMEASURED-ORACLE-SELFCHECK",
+      "fired_wet_elements": 39293,
+      "operation": "EVD momentum overwrite",
+      "oracle_selfcheck_avm": {
         "aggregate_bar_pass": true,
         "bar": 1e-15,
         "column_bar_pass": true,
@@ -567,14 +541,12 @@
           1
         ]
       },
-      "disposition": "VERIFIED",
-      "fired_wet_elements": 39293,
-      "operation": "EVD momentum overwrite"
+      "reason": "NEMO source-order EVD reconstruction only; legoESM EVD path not invoked"
     },
     "27": {
-      "disposition": "UNMEASURED-NEEDS-DUMP",
+      "disposition": "WAIVED",
       "operation": "avs copy and optional enhancements",
-      "reason": "live avs=avt copy lacks an avs slot; DDM, surface-wave, and internal-wave branches are WAIVED by resolved false flags"
+      "reason": "source-identity waiver: DDM is disabled, so NEMO executes avs=avt (zdfphy.F90:326-331), while legoESM passes the same K_v_cell object to T and S (ocean_model_latlon_cgrid.py:7308-7336); surface-wave and internal-wave enhancement arms are inactive"
     },
     "28": {
       "disposition": "UNMEASURED-NEEDS-DUMP",
@@ -582,7 +554,9 @@
       "reason": "no same-step imld/hmld (mldkz5) slot exists"
     },
     "29": {
-      "avm_interior": {
+      "disposition": "UNMEASURED-ORACLE-SELFCHECK",
+      "operation": "avm lateral boundary update, interior census",
+      "oracle_selfcheck_avm_interior": {
         "aggregate_bar_pass": true,
         "bar": 1e-15,
         "column_bar_pass": true,
@@ -631,9 +605,7 @@
           1
         ]
       },
-      "disposition": "VERIFIED",
-      "operation": "avm lateral boundary update, interior census",
-      "qualification": "halo exchange is outside the registered interior column census"
+      "reason": "NEMO reconstructed interior compared to NEMO composed dump; legoESM LBC path not invoked"
     },
     "30": {
       "disposition": "DIVERGED",
@@ -892,14 +864,14 @@
       "operation": "ldf_slp"
     },
     "31": {
-      "disposition": "UNMEASURED-NEEDS-DUMP",
+      "disposition": "UNMEASURED-EXISTING-BRACKET",
       "operation": "momentum implicit solve application",
-      "reason": "stage-7 Naa aliases Krhs and is a tendency, not the true pre-solve velocity; no existing dump brackets Krhs after dyn_spg and before dyn_zdf"
+      "reason": "no new NEMO dump is required: restart Kbb + stage-7 post-dyn_spg Krhs/barotropic state + stage-8 output bracket dyn_zdf. Exact isolation remains blocked by upstream row-20/row-30 coefficient divergences and requires the registered NEMO volume-form input reconstruction"
     },
     "32": {
-      "disposition": "UNMEASURED-NEEDS-DUMP",
+      "disposition": "UNMEASURED-EXISTING-BRACKET",
       "operation": "tracer implicit solve application",
-      "reason": "post-tra_zdf Naa exists, but no same-step pre-tra_zdf Naa state isolates the implicit tracer application"
+      "reason": "no new NEMO dump is required: restart Kbb + stage-23 post-tra_ldf Krhs and stage-21 post-tra_zdf bracket the application. Exact isolation remains blocked by row-30 K33/slope divergence and requires the registered z-star volume-form input reconstruction"
     }
   },
   "run_dir": "/tmp/RUN_ZDF18_ETAUARG.g6lJkJ",
