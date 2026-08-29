@@ -1,5 +1,11 @@
 # Split-explicit / momentum-commit chain: rounds 11--14
 
+> **Superseded admission notice.** The original round-13/14 receipts described
+> below did not mechanically bind checkout-local production imports plus the
+> exact mesh/restart. They are `UNBOUND_DIAGNOSTIC`, not citable verdicts. The
+> hardened round-16 result reproduces the measurements and supersedes this
+> document.
+
 Date: 2026-08-29.  Session
 `01a04e34-d1fb-73e0-b25a-177641f0a246`.
 
@@ -15,8 +21,9 @@ points.  These are the executed NEMO expressions at
 `cfgs/DINO/MY_SRC/dynspg_ts.F90:698-704,722-724`.
 
 Production now uses those literal associations in the `nemo_ssh_avg` QCO
-continuity path.  Round 13 called the production face-depth, metric-transport,
-divergence, and SSH-update helpers on the bound day-180 inputs.  Every row
+continuity path. Round 13 called the production face-depth, metric-transport,
+and divergence helpers on the bound day-180 inputs, then applied the registered
+SSH formula to those production operands. Every row
 9.1--9.7 was bit-exact (`E=0`, maximum absolute difference `0`), including
 both walls and the prognostic `ssha_e` update.  The relevant production tests
 pass: 3/3 literal-continuity tests and 38/38 tests in the combined continuity,
@@ -36,14 +43,16 @@ entry.  The authoritative `forcing_only` arm stops at row 1.2:
 
 The frozen POINTWISE per-element bar is `1e-15`; therefore the U/V seed
 cannot be promoted as AT BAR.  The 3-D BEFORE velocity is bit-exact and prior
-receipts show identical wet-level counts and total face thickness.  The
-remaining row-1.2 difference is consequently bounded to the vertical
-reduction/multiplication association used to construct NEMO's
+receipts show identical wet-level counts and total face thickness. The
+remaining row-1.2 difference makes the vertical reduction/multiplication
+association used to construct NEMO's
 `puu_b/pvv_b(Kbb)`: NEMO initializes and left-accumulates the vertical
 transport at `dynatf_qco.F90:254-267`, then copies it into `un_e/vn_e` at
 `dynspg_ts.F90:571-579`; legoESM uses the fused vertical reduction in
 `ocean_tendency_common.py:540-590` through
-`barotropic_latlon_cgrid.py:232-235`.  This is a roundoff-class operand stop,
+`barotropic_latlon_cgrid.py:232-235` the prime candidate. It is not owned or
+bounded until the per-level face weights are compared bitwise; equality of the
+total face thickness is insufficient. This is a roundoff-class operand stop,
 not evidence of a physical seed defect, but the preregistered bar forbids
 skipping it.
 
@@ -81,11 +90,10 @@ The headline climate question is:
 > (`Gbasin90`, approximately -0.95 Sv at day 360) and the independently frozen
 > wall-flicker statistic, relative to the corrected-carry baseline?
 
-That experiment is **not released in this round**.  The chain has a literal
-row-1.2 stop and a larger row-1.3 velocity-update stop before row 1.4, so
-handing off GPU arms now would violate the registered execution order.  The
-basin and wall instruments remain frozen and reusable; no GPU, NEMO MPI run,
-or climate arm was launched.
+This non-release was superseded after hardened production acceptance showed
+the structural fix is in the twin path. Round 16 releases an independent 2x2
+climate intervention without promoting any ordered registry row. No GPU,
+NEMO MPI run, or climate arm was launched in rounds 11--14.
 
 ## Artifacts
 

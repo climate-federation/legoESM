@@ -69,6 +69,20 @@ def _metric_safety(nemo, control, candidate):
     return rows, safe
 
 
+def _effect_class(value, baseline, floor):
+    """Registered symmetric attribution bar for factorial components."""
+    if abs(value) <= 2.0 * floor:
+        return "BOUNDED_AT_FLOOR"
+    fraction = value / abs(baseline)
+    if fraction >= 0.10:
+        return "MATERIAL_IMPROVEMENT"
+    if fraction <= -0.10:
+        return "MATERIAL_REGRESSION"
+    if abs(fraction) <= 0.02:
+        return "BOUNDED_SMALL"
+    return "UNRESOLVED"
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     for arm in ARMS:
@@ -146,6 +160,17 @@ def main() -> int:
     if plants != {"confirm": "CONFIRMED", "refute": "REFUTED",
                   "floor": "UNRESOLVED/FLOOR"}:
         raise SystemExit(f"STOP classifier plants failed: {plants}")
+    effect_plants = {
+        "improve": _effect_class(0.11 * abs(baseline), baseline, 0.0),
+        "regress": _effect_class(-0.11 * abs(baseline), baseline, 0.0),
+        "small": _effect_class(0.01 * abs(baseline), baseline, 0.0),
+        "floor": _effect_class(0.5 * T.FLOOR[360], baseline, T.FLOOR[360]),
+    }
+    if effect_plants != {
+            "improve": "MATERIAL_IMPROVEMENT",
+            "regress": "MATERIAL_REGRESSION",
+            "small": "BOUNDED_SMALL", "floor": "BOUNDED_AT_FLOOR"}:
+        raise SystemExit(f"STOP effect-class plants failed: {effect_plants}")
     result = {
         "schema": "metric-continuity-climate-score-v2-factorial",
         "producer_commit": args.producer_commit,
@@ -155,6 +180,9 @@ def main() -> int:
         "effects": effects,
         "effect_response_fraction": {
             key: value / abs(baseline) for key, value in effects.items()},
+        "effect_class": {
+            key: _effect_class(value, baseline, T.FLOOR[360])
+            for key, value in effects.items()},
         "floor_sv": T.FLOOR[360],
         "frozen_baseline_sv": T.BASELINE[360],
         "headline_contrast": "nemo_literal minus legacy_generic",
@@ -162,6 +190,7 @@ def main() -> int:
         "rows_sv": row_gaps,
         "combined_compensation_metrics": metric_rows,
         "classifier_plants": plants,
+        "effect_classifier_plants": effect_plants,
     }
     Path(args.out).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(json.dumps(result, indent=2, sort_keys=True))
