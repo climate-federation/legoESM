@@ -74,6 +74,19 @@ def test_row18_direct_operand_dumps_are_registered_at_now_level():
         assert _DUMP_TIME_LEVEL[name][1].strip(), name
 
 
+def test_row21_base_coefficient_operands_are_registered_at_now_level():
+    """The five write-only captures all consume the current tke_avn state."""
+    for name in (
+        "tke_dump_zsqen_base.bin",
+        "tke_dump_zav_base.bin",
+        "tke_dump_avm_base.bin",
+        "tke_dump_avt_base.bin",
+        "tke_dump_dissl_postavn.bin",
+    ):
+        assert time_level_for_dump(name) == "now", name
+        assert "zdftke.F90:" in _DUMP_TIME_LEVEL[name][1], name
+
+
 def test_composed_zdf_coefficients_are_registered_at_now_level():
     for name in ("dump_avt.bin", "dump_avm.bin"):
         assert time_level_for_dump(name) == "now", name

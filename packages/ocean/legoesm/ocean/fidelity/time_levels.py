@@ -145,6 +145,28 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     "tke_dump_zmxld.bin": ("now", "same rn2(now) dependency as tke_dump_zmxlm.bin "
                                    "(zdftke.F90:740); captured after ALL nn_mxl "
                                    "constraint sweeps, same insertion point."),
+    "tke_dump_zsqen_base.bin": ("now", "write-only row-21 operand captured at "
+                                         "patched MY_SRC/zdftke.F90:930 from "
+                                         "the SQRT(en) evaluated at :924, "
+                                         "after the TKE solve and "
+                                         "row-20 mixing-length scans."),
+    "tke_dump_zav_base.bin": ("now", "write-only row-21 operand captured at "
+                                       "patched MY_SRC/zdftke.F90:931 from "
+                                       "the :925 expression "
+                                       "rn_ediff*zmxlm*SQRT(en), before either "
+                                       "coefficient floor."),
+    "tke_dump_avm_base.bin": ("now", "write-only row-21 base viscosity captured "
+                                       "at patched MY_SRC/zdftke.F90:932 from "
+                                       "the :926 assignment, before "
+                                       "the later zdfphy EVD/LBC assembly."),
+    "tke_dump_avt_base.bin": ("now", "write-only row-21 base diffusivity captured "
+                                       "at patched MY_SRC/zdftke.F90:933 from "
+                                       "the :927 assignment, before the nn_pdl "
+                                       "Prandtl overwrite at :944."),
+    "tke_dump_dissl_postavn.bin": ("now", "write-only row-21 dissipation carry "
+                                            "captured at patched MY_SRC/zdftke.F90:"
+                                            "934 from :928 SQRT(en)/zmxld, after the "
+                                            "current tke_avn update."),
     "tke_dump_avt_final.bin": ("now", "base closure avt=MAX(zav,avtb) (tke_avn, "
                                         "zsqen=SQRT(en)/zmxlm branch) is now-derived "
                                         "(en, zmxlm both now per above); the nn_pdl==1 "

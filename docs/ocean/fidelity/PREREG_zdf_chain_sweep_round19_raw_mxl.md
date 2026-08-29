@@ -1,5 +1,13 @@
 # Preregistration: ZDF row 19 raw buoyancy length
 
+Outcome, 2026-08-29: the repaired deterministic bracket passed without stream
+exceptions and row 19 is VERIFIED at 0/9,920 failing columns, exact unequal
+wet elements 0, and 0 focus failures. The frozen receipt is
+`dino_zdf_row19_raw_mxl_artifact.json`, SHA256
+`f5e42f1d15cd9e823e81fa3f5b56a2b9eebd504c8ef823718c50dd9b9f3fc29b`.
+The conditional hold language below is preserved as the preregistered rule
+that the successful run satisfied.
+
 Date: 2026-08-28. Ordered predecessor: row 18 VERIFIED at the registered
 `1e-15` per-column bar (0/9,920 failing columns, including all four southern
 focus columns). This receipt must not be used if row 18 ceases to clear.

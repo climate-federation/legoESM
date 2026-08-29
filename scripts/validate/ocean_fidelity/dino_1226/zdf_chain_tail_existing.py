@@ -1,10 +1,10 @@
 #!/usr/bin/env python
-"""Qualified ZDF rows 19--32 using only existing day-180 dumps.
+"""Qualified ZDF rows 19--32 using existing day-180 dumps.
 
-Row 18 is verified.  Row 19 still requires its clean write-only raw-length
-bracket, so results after it remain ``PROVISIONAL-DOWNSTREAM`` receipts: they
-identify work that can be cleared or targeted without another NEMO rebuild,
-but cannot advance the ordered verified frontier past row 18.
+Row 19 is accepted only through its strict deterministic-writer receipt.  Row
+20 can then be promoted from the already-registered row-19+20 composite.  The
+ordered frontier stops at row 21, whose pre-Prandtl coefficients still require
+their registered direct dump slots; later results remain targeting previews.
 """
 
 from __future__ import annotations
@@ -45,6 +45,7 @@ from legoesm.ocean.physics.vertical_mixing.tke import (  # noqa: E402
 
 POINTWISE = 1.0e-15
 ACCUMULATING = 1.0e-12
+ROW19_RECEIPT_SHA256 = "f5e42f1d15cd9e823e81fa3f5b56a2b9eebd504c8ef823718c50dd9b9f3fc29b"
 
 
 def sha256(path: Path) -> str:
@@ -59,6 +60,12 @@ def git_sha() -> str:
     return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
 
 
+def tracked_tree_clean() -> bool:
+    return not subprocess.check_output(
+        ["git", "status", "--porcelain", "--untracked-files=no"], text=True
+    ).strip()
+
+
 def disposition(metric: dict) -> str:
     return "VERIFIED" if metric["pass"] else "DIVERGED"
 
@@ -66,6 +73,7 @@ def disposition(metric: dict) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-dir", type=Path, required=True)
+    ap.add_argument("--row19-artifact", type=Path, required=True)
     ap.add_argument("--mld-maps", type=Path, required=True)
     ap.add_argument("--nemo-source-root", type=Path, required=True)
     ap.add_argument("--output", type=Path, required=True)
@@ -74,7 +82,10 @@ def main() -> int:
     set_policy(PrecisionPolicy.fp64())
     if jax.default_backend() != "cpu" or not jax.config.x64_enabled:
         raise SystemExit("row-tail receipt requires CPU and JAX fp64")
+    if not tracked_tree_clean():
+        raise SystemExit("row-tail receipt requires a clean tracked tree")
     run = args.run_dir.resolve()
+    row19_path = args.row19_artifact.resolve()
     source_root = args.nemo_source_root.resolve()
     if Path(dump_lane.RUN_DIR).resolve() != run:
         raise SystemExit(
@@ -82,6 +93,33 @@ def main() -> int:
         )
     if dump_lane.LANE != "d180" or dump_lane.KT_DUMP != 5761:
         raise SystemExit("only the registered d180/kt=5761 lane is accepted")
+
+    row19_receipt = json.loads(row19_path.read_text())
+    row19_metric = row19_receipt.get("production_metric", {})
+    row19_bracket = row19_receipt.get("bracket", {})
+    row19_controls = row19_receipt.get("controls", {})
+    row19_provenance = row19_receipt.get("provenance_sha256", {})
+    row19_run = str(run / "tke_dump_zmxlm_raw.bin")
+    if (
+        sha256(row19_path) != ROW19_RECEIPT_SHA256
+        or row19_receipt.get("schema") != "dino-zdf-row19-raw-mxl-v1"
+        or row19_receipt.get("disposition") != "VERIFIED"
+        or row19_metric.get("pass") is not True
+        or row19_metric.get("n_diverged_columns") != 0
+        or row19_metric.get("n_wet_columns") != 9920
+        or row19_receipt.get("exact_unequal_wet_elements") != 0
+        or row19_receipt.get("source_formula_unequal_wet_elements") != 0
+        or row19_bracket.get("determinism_stream_count") != 198
+        or row19_bracket.get("shared_stream_count") != 197
+        or row19_bracket.get("strict_byte_identical_stream_count") != 197
+        or row19_bracket.get("uninitialized_memory_exclusions") != []
+        or row19_provenance.get(row19_run) != sha256(run / "tke_dump_zmxlm_raw.bin")
+        or not row19_controls
+        or not all(row19_controls.values())
+        or len(row19_metric.get("focus", [])) != 4
+        or not all(item.get("pass") is True for item in row19_metric["focus"])
+    ):
+        raise SystemExit("row19 deterministic-writer receipt is not promotable")
 
     focus = sweep.focus_from_maps(args.mld_maps)
     jpi, jpj, jpk, hls = loaders._read_dims(str(run))
@@ -385,26 +423,31 @@ def main() -> int:
     rows = {
         "19": {
             "operation": "raw buoyancy mixing length before scans",
-            "disposition": "UNMEASURED-NEEDS-DETERMINISTIC-WRITER-BRACKET",
-            "reason": (
-                "raw run exists and production arithmetic is diagnostic-exact, "
-                "but the fixed four-slot model was retracted; promotion waits "
-                "for strict ON/OFF and repeated-ON identity after deterministic "
-                "initialization of instrumentation capture buffers"
-            ),
+            "disposition": "VERIFIED",
+            "metric": row19_metric,
+            "exact_unequal_wet_elements": 0,
+            "deterministic_bracket": {
+                "on_streams": row19_bracket["determinism_stream_count"],
+                "shared_streams": row19_bracket["shared_stream_count"],
+                "strict_byte_identical_shared_streams": row19_bracket[
+                    "strict_byte_identical_stream_count"
+                ],
+                "uninitialized_memory_exclusions": [],
+            },
+            "receipt": str(row19_path),
+            "receipt_sha256": sha256(row19_path),
         },
         "20": {
             "operation": "nn_mxl=3 limiting scans (row19+20 composite)",
             "disposition": (
-                "PROVISIONAL-VERIFIED-BLOCKED-BY-ROW19"
+                "VERIFIED"
                 if row20_lk["pass"] and row20_leps["pass"] else "DIVERGED"
             ),
             "zmxlm": row20_lk,
             "zmxld": row20_leps,
             "qualification": (
-                "production composite using exact NEMO en/rn2; numerical bar "
-                "is exact, but ordered promotion waits for row19's repaired "
-                "deterministic-writer bracket"
+                "production composite using exact NEMO en/rn2; row19's raw "
+                "operand and deterministic writer bracket are independently VERIFIED"
             ),
         },
         "21": {
@@ -420,7 +463,7 @@ def main() -> int:
         "22": {
             "operation": "inverse-Prandtl avt correction",
             "disposition": (
-                "PROVISIONAL-VERIFIED-BLOCKED-BY-ROW19"
+                "PROVISIONAL-VERIFIED-BLOCKED-BY-ROW21"
                 if row22_avt["pass"] else "DIVERGED"),
             "avt": row22_avt,
         },
@@ -436,7 +479,7 @@ def main() -> int:
         },
         "24": {
             "operation": "river-mouth enhancement",
-            "disposition": "PROVISIONAL-WAIVED-BLOCKED-BY-ROW19",
+            "disposition": "PROVISIONAL-WAIVED-BLOCKED-BY-ROW21",
             "reason": (
                 "fail-closed parse confirms resolved ln_rnf=F, namelist_ref "
                 "ln_rnf_mouth=.false., and live zdfphy.F90:317-321 branch"
@@ -458,7 +501,7 @@ def main() -> int:
         },
         "27": {
             "operation": "avs copy and optional enhancements",
-            "disposition": "PROVISIONAL-VERIFIED-BLOCKED-BY-ROW19",
+            "disposition": "PROVISIONAL-VERIFIED-BLOCKED-BY-ROW21",
             "source_identity": {
                 "bar": "exact source/object identity",
                 "n_verified_columns": 9920,
@@ -510,9 +553,9 @@ def main() -> int:
         "30": {
             "operation": "ldf_slp",
             "disposition": (
-                "PROVISIONAL-VERIFIED-BLOCKED-BY-ROW19"
+                "PROVISIONAL-VERIFIED-BLOCKED-BY-ROW21"
                 if all(x["pass"] for x in row30_fields.values())
-                else "PROVISIONAL-DIVERGED-BLOCKED-BY-ROW19"
+                else "PROVISIONAL-DIVERGED-BLOCKED-BY-ROW21"
             ),
             "fields": row30_fields,
             "first_failing_operand": {
@@ -524,7 +567,7 @@ def main() -> int:
                 "design": (
                     "separate the EOS-produced prd arithmetic from downstream "
                     "zgrv with the existing prd slot; literal SEOS association "
-                    "is the next targeted production option only after row19 closes"
+                    "is the next targeted production option only after rows 21--29 close"
                 ),
             },
         },
@@ -596,14 +639,22 @@ def main() -> int:
     artifact = {
         "schema": "dino-zdf-chain-tail-existing-v1",
         "status": (
-            "PROVISIONAL-DOWNSTREAM; row 18 is VERIFIED and the ordered "
-            "frontier is row 19's deterministic-writer bracket"),
+            "ROWS-19-20-VERIFIED; ordered frontier is row 21 coefficient assembly"),
         "repo_sha": git_sha(),
+        "probe": {
+            "path": str(Path(__file__).resolve()),
+            "sha256": sha256(Path(__file__).resolve()),
+        },
         "lane": dump_lane.banner(),
         "run_dir": str(run),
         "focus_columns_ji": [list(x) for x in focus],
         "wet_columns": 9920,
         "bars": {"pointwise": POINTWISE, "accumulating": ACCUMULATING},
+        "row19_receipt": {
+            "path": str(row19_path),
+            "sha256": sha256(row19_path),
+            "repo_sha": row19_receipt["repo_sha"],
+        },
         "rows": rows,
         "controls": numeric_controls,
         "provenance_sha256": {name: sha256(run / name) for name in sorted(set(consumed))},
