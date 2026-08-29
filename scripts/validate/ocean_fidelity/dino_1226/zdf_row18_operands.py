@@ -87,6 +87,26 @@ def exact_control(reference: np.ndarray, wet: np.ndarray) -> dict:
     }
 
 
+def exact_census(actual: np.ndarray, expected: np.ndarray,
+                 wet: np.ndarray) -> dict:
+    """Report an elementwise binary64 census over the registered wet mask."""
+    actual_wet = np.asarray(actual, dtype=np.float64)[wet]
+    expected_wet = np.asarray(expected, dtype=np.float64)[wet]
+    unequal = actual_wet.view(np.uint64) != expected_wet.view(np.uint64)
+    return {
+        "n_wet_elements": int(actual_wet.size),
+        "n_unequal_wet_elements": int(unequal.sum()),
+        "max_abs_error": float(np.max(np.abs(actual_wet - expected_wet))),
+    }
+
+
+def negative_ratio(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
+    """Evaluate ``-numerator/denominator`` without touching dry zero slots."""
+    result = np.zeros_like(numerator)
+    np.divide(-numerator, denominator, out=result, where=denominator != 0.0)
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-dir", type=Path, required=True)
@@ -220,11 +240,15 @@ def main() -> int:
         "htau_production_vs_nemo": sweep.metrics(
             htau_l, htau_n, wet, focus, POINTWISE),
     }
+    operands["gdepw_production_vs_nemo"]["exact_census"] = exact_census(
+        gdepw_l, gdepw_n, wet)
+    operands["htau_production_vs_nemo"]["exact_census"] = exact_census(
+        htau_l, htau_n, wet)
     arguments = {
-        "production": -gdepw_l / htau_l,
-        "substitute_gdepw": -gdepw_n / htau_l,
-        "substitute_htau": -gdepw_l / htau_n,
-        "substitute_both": -gdepw_n / htau_n,
+        "production": negative_ratio(gdepw_l, htau_l),
+        "substitute_gdepw": negative_ratio(gdepw_n, htau_l),
+        "substitute_htau": negative_ratio(gdepw_l, htau_n),
+        "substitute_both": negative_ratio(gdepw_n, htau_n),
     }
 
     rounded = tke_mod._nemo_binary64_round
@@ -265,7 +289,9 @@ def main() -> int:
         name for name in ("substitute_gdepw", "substitute_htau")
         if arms[name]["full_row"]["pass"]
     ]
-    if singles == ["substitute_gdepw"]:
+    if arms["production"]["full_row"]["pass"]:
+        disposition, owner = "VERIFIED", "none (production clears row)"
+    elif singles == ["substitute_gdepw"]:
         disposition, owner = "VERIFIED-WITH-SUBSTITUTION", "gdepw(Kmm)"
     elif singles == ["substitute_htau"]:
         disposition, owner = "VERIFIED-WITH-SUBSTITUTION", "htau"
