@@ -14,6 +14,10 @@ from legoesm.ocean.physics.vertical_mixing.implicit_solver import (
     implicit_vertical_diffusion_ocean,
     implicit_vertical_diffusion_ocean_batched,
     implicit_vertical_diffusion_ocean_pair,
+    implicit_vertical_diffusion_nemo_momentum,
+    implicit_vertical_diffusion_nemo_tracer_pair,
+    implicit_vertical_diffusion_ocean_momentum_dispatch,
+    implicit_vertical_diffusion_ocean_tracer_pair_dispatch,
     build_dz_half,
 )
 from legoesm.ocean.physics.vertical_mixing.k_profiles import (
@@ -40,6 +44,10 @@ __all__ = [
     "implicit_vertical_diffusion_ocean",
     "implicit_vertical_diffusion_ocean_batched",
     "implicit_vertical_diffusion_ocean_pair",
+    "implicit_vertical_diffusion_nemo_momentum",
+    "implicit_vertical_diffusion_nemo_tracer_pair",
+    "implicit_vertical_diffusion_ocean_momentum_dispatch",
+    "implicit_vertical_diffusion_ocean_tracer_pair_dispatch",
     "build_dz_half",
     "compute_vertical_K_profiles",
 ]

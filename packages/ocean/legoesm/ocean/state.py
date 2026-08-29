@@ -2763,6 +2763,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # flux the model applied", so those configs RAISE instead of storing a
     # lie.
     store_salt_flux: bool = False
+    # Evaluation order of the final ZDF implicit applications.  The generic
+    # historical path normalises each matrix row and calls the shared Thomas
+    # solver.  ``nemo_literal`` preserves dynzdf/trazdf's unnormalised written
+    # matrices and their three separate ordered recurrences.  Appended to keep
+    # every positional constructor byte-compatible.
+    zdf_implicit_solver_evaluation: str = "shared_thomas"
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

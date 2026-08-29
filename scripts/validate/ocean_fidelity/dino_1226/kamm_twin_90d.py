@@ -1088,11 +1088,20 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                        tke_preclosure_coeff_source: str | None = None,
                        tke_matrix_evaluation: str | None = None,
                        tke_solver_evaluation: str | None = None,
+                       zdf_implicit_solver_evaluation: str | None = None,
+                       tke_etau_exponential_evaluation: str | None = None,
+                       tke_htau_evaluation: str | None = None,
+                       tke_mxl_raw_evaluation: str | None = None,
                        tke_langmuir_evaluation: str | None = None,
                        tke_shear_evaluation_stage: str | None = None,
                        tke_shear_metric_source: str | None = None,
                        tke_n2_evaluation_stage: str | None = None,
                        dino_wind_profile_evaluation: str | None = None,
+                       gm_redi_slope_n2_evaluation: str | None = None,
+                       gm_redi_slope_prd_evaluation: str | None = None,
+                       gm_redi_slope_metric_evaluation: str | None = None,
+                       gm_redi_slope_face_thickness_evaluation: str | None = None,
+                       gm_redi_slope_depth_evaluation: str | None = None,
                        u_m: float | None = None,
                        restart_file: str = RESTART_FILE,
                        e3t_mode: str | None = None):
@@ -1172,6 +1181,38 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                 "'shared_thomas'")
         cfg = dataclasses.replace(
             cfg, tke_solver_evaluation=tke_solver_evaluation)
+    if zdf_implicit_solver_evaluation is not None:
+        if zdf_implicit_solver_evaluation not in (
+                "nemo_literal", "shared_thomas"):
+            raise ValueError(
+                "zdf_implicit_solver_evaluation must be 'nemo_literal' or "
+                "'shared_thomas'")
+        cfg = dataclasses.replace(
+            cfg,
+            zdf_implicit_solver_evaluation=zdf_implicit_solver_evaluation)
+    for value, field, choices in (
+        (tke_etau_exponential_evaluation,
+         "tke_etau_exponential_evaluation", ("nemo_literal", "jax_expression")),
+        (tke_htau_evaluation, "tke_htau_evaluation",
+         ("nemo_literal", "jax_expression")),
+        (tke_mxl_raw_evaluation, "tke_mxl_raw_evaluation",
+         ("nemo_literal", "factored")),
+        (gm_redi_slope_n2_evaluation, "gm_redi_slope_n2_evaluation",
+         ("carried_step_entry", "recompute")),
+        (gm_redi_slope_prd_evaluation, "gm_redi_slope_prd_evaluation",
+         ("nemo_literal", "density_roundtrip")),
+        (gm_redi_slope_metric_evaluation,
+         "gm_redi_slope_metric_evaluation", ("nemo_reciprocal", "division")),
+        (gm_redi_slope_face_thickness_evaluation,
+         "gm_redi_slope_face_thickness_evaluation",
+         ("nemo_qco_live", "static_face")),
+        (gm_redi_slope_depth_evaluation, "gm_redi_slope_depth_evaluation",
+         ("nemo_qco_live_literal", "legacy_jacobian_t_surface")),
+    ):
+        if value is not None:
+            if value not in choices:
+                raise ValueError(f"{field} must be one of {choices}; got {value!r}")
+            cfg = dataclasses.replace(cfg, **{field: value})
     if tke_langmuir_evaluation is not None:
         if tke_langmuir_evaluation not in ("nemo_literal", "vectorized"):
             raise ValueError(
@@ -1398,11 +1439,20 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
              tke_preclosure_coeff_source: str | None = None,
              tke_matrix_evaluation: str | None = None,
              tke_solver_evaluation: str | None = None,
+             zdf_implicit_solver_evaluation: str | None = None,
+             tke_etau_exponential_evaluation: str | None = None,
+             tke_htau_evaluation: str | None = None,
+             tke_mxl_raw_evaluation: str | None = None,
              tke_langmuir_evaluation: str | None = None,
              tke_shear_evaluation_stage: str | None = None,
              tke_shear_metric_source: str | None = None,
              tke_n2_evaluation_stage: str | None = None,
              dino_wind_profile_evaluation: str | None = None,
+             gm_redi_slope_n2_evaluation: str | None = None,
+             gm_redi_slope_prd_evaluation: str | None = None,
+             gm_redi_slope_metric_evaluation: str | None = None,
+             gm_redi_slope_face_thickness_evaluation: str | None = None,
+             gm_redi_slope_depth_evaluation: str | None = None,
              u_m: float | None = None,
              restart_file: str = RESTART_FILE,
              perturb_seed: int | None = None,
@@ -1468,11 +1518,21 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         tke_preclosure_coeff_source=tke_preclosure_coeff_source,
         tke_matrix_evaluation=tke_matrix_evaluation,
         tke_solver_evaluation=tke_solver_evaluation,
+        zdf_implicit_solver_evaluation=zdf_implicit_solver_evaluation,
+        tke_etau_exponential_evaluation=tke_etau_exponential_evaluation,
+        tke_htau_evaluation=tke_htau_evaluation,
+        tke_mxl_raw_evaluation=tke_mxl_raw_evaluation,
         tke_langmuir_evaluation=tke_langmuir_evaluation,
         tke_shear_evaluation_stage=tke_shear_evaluation_stage,
         tke_shear_metric_source=tke_shear_metric_source,
         tke_n2_evaluation_stage=tke_n2_evaluation_stage,
         dino_wind_profile_evaluation=dino_wind_profile_evaluation,
+        gm_redi_slope_n2_evaluation=gm_redi_slope_n2_evaluation,
+        gm_redi_slope_prd_evaluation=gm_redi_slope_prd_evaluation,
+        gm_redi_slope_metric_evaluation=gm_redi_slope_metric_evaluation,
+        gm_redi_slope_face_thickness_evaluation=(
+            gm_redi_slope_face_thickness_evaluation),
+        gm_redi_slope_depth_evaluation=gm_redi_slope_depth_evaluation,
         u_m=u_m, e3t_mode=ladder_mode)
 
     # #1455 review: the stamp must be a RECEIPT, not a restatement of the flag.
@@ -1558,12 +1618,24 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         "tke_preclosure_coeff_source": cfg.tke_preclosure_coeff_source,
         "tke_matrix_evaluation": cfg.tke_matrix_evaluation,
         "tke_solver_evaluation": cfg.tke_solver_evaluation,
+        "zdf_implicit_solver_evaluation":
+            cfg.zdf_implicit_solver_evaluation,
+        "tke_etau_exponential_evaluation":
+            cfg.tke_etau_exponential_evaluation,
+        "tke_htau_evaluation": cfg.tke_htau_evaluation,
+        "tke_mxl_raw_evaluation": cfg.tke_mxl_raw_evaluation,
         "tke_langmuir_evaluation": cfg.tke_langmuir_evaluation,
         "tke_shear_evaluation_stage": cfg.tke_shear_evaluation_stage,
         "tke_shear_metric_source": cfg.tke_shear_metric_source,
         "tke_n2_evaluation_stage": cfg.tke_n2_evaluation_stage,
         "dino_wind_profile_evaluation":
             cfg.dino_wind_profile_evaluation,
+        "gm_redi_slope_n2_evaluation": cfg.gm_redi_slope_n2_evaluation,
+        "gm_redi_slope_prd_evaluation": cfg.gm_redi_slope_prd_evaluation,
+        "gm_redi_slope_metric_evaluation": cfg.gm_redi_slope_metric_evaluation,
+        "gm_redi_slope_face_thickness_evaluation":
+            cfg.gm_redi_slope_face_thickness_evaluation,
+        "gm_redi_slope_depth_evaluation": cfg.gm_redi_slope_depth_evaluation,
         "perturb_seed": perturb_seed, "perturb_eps": float(perturb_eps),
         # DELIBERATELY NOT recorded here: --fp64-3d. run_config is compared
         # BYTE-FOR-BYTE between two arms by twin_seasonal_clock_ab.py, which
@@ -1996,6 +2068,19 @@ def _parse_args(argv=None):
              "the recipe (DINO NEMO cards use the literal zdftke scans; "
              "shared_thomas is historical reproduction)")
     p.add_argument(
+        "--zdf-implicit-solver-evaluation", default=None,
+        choices=("nemo_literal", "shared_thomas"),
+        help="override the final dynzdf/trazdf matrix and recurrence "
+             "evaluation; default None uses the recipe (DINO NEMO cards "
+             "use literal source order; shared_thomas is historical "
+             "reproduction)")
+    p.add_argument("--tke-etau-exponential-evaluation", default=None,
+                   choices=("nemo_literal", "jax_expression"))
+    p.add_argument("--tke-htau-evaluation", default=None,
+                   choices=("nemo_literal", "jax_expression"))
+    p.add_argument("--tke-mxl-raw-evaluation", default=None,
+                   choices=("nemo_literal", "factored"))
+    p.add_argument(
         "--tke-langmuir-evaluation", default=None,
         choices=("nemo_literal", "vectorized"),
         help="override the Langmuir source construction; default None uses "
@@ -2026,6 +2111,17 @@ def _parse_args(argv=None):
         help="override DINO's wind-profile evaluation; default None uses the "
              "recipe (complete DINO NEMO cards use the literal Fortran "
              "association; factored_smoothstep is historical reproduction)")
+    p.add_argument("--gm-redi-slope-n2-evaluation", default=None,
+                   choices=("carried_step_entry", "recompute"))
+    p.add_argument("--gm-redi-slope-prd-evaluation", default=None,
+                   choices=("nemo_literal", "density_roundtrip"))
+    p.add_argument("--gm-redi-slope-metric-evaluation", default=None,
+                   choices=("nemo_reciprocal", "division"))
+    p.add_argument("--gm-redi-slope-face-thickness-evaluation", default=None,
+                   choices=("nemo_qco_live", "static_face"))
+    p.add_argument("--gm-redi-slope-depth-evaluation", default=None,
+                   choices=("nemo_qco_live_literal",
+                            "legacy_jacobian_t_surface"))
     p.add_argument("--u-m", dest="u_m", type=float, default=None,
                    help="override DINOConfig.U_M (NEMO rn_Uv, the lateral "
                         "viscous velocity [m/s]; card default 0.27). The "
@@ -2257,11 +2353,25 @@ def main(argv=None):
               tke_preclosure_coeff_source=args.tke_preclosure_coeff_source,
               tke_matrix_evaluation=args.tke_matrix_evaluation,
               tke_solver_evaluation=args.tke_solver_evaluation,
+              zdf_implicit_solver_evaluation=(
+                  args.zdf_implicit_solver_evaluation),
+              tke_etau_exponential_evaluation=(
+                  args.tke_etau_exponential_evaluation),
+              tke_htau_evaluation=args.tke_htau_evaluation,
+              tke_mxl_raw_evaluation=args.tke_mxl_raw_evaluation,
               tke_langmuir_evaluation=args.tke_langmuir_evaluation,
               tke_shear_evaluation_stage=args.tke_shear_evaluation_stage,
               tke_shear_metric_source=args.tke_shear_metric_source,
               tke_n2_evaluation_stage=args.tke_n2_evaluation_stage,
               dino_wind_profile_evaluation=args.dino_wind_profile_evaluation,
+              gm_redi_slope_n2_evaluation=args.gm_redi_slope_n2_evaluation,
+              gm_redi_slope_prd_evaluation=args.gm_redi_slope_prd_evaluation,
+              gm_redi_slope_metric_evaluation=(
+                  args.gm_redi_slope_metric_evaluation),
+              gm_redi_slope_face_thickness_evaluation=(
+                  args.gm_redi_slope_face_thickness_evaluation),
+              gm_redi_slope_depth_evaluation=(
+                  args.gm_redi_slope_depth_evaluation),
               u_m=args.u_m,
               perturb_seed=args.perturb_seed, perturb_eps=args.perturb_eps,
               perturb_baro=args.perturb_baro,

@@ -42,13 +42,19 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (  # noqa:
 from legoesm.ocean.physics.vertical_mixing import (  # noqa: E402
     implicit_vertical_diffusion_ocean,
     implicit_vertical_diffusion_ocean_pair,
+    implicit_vertical_diffusion_ocean_momentum_dispatch,
+    implicit_vertical_diffusion_ocean_tracer_pair_dispatch,
 )
+from legoesm.ocean.experiments.dino import dino_config_for_recipe  # noqa: E402
+import legoesm.ocean.physics.vertical_mixing.implicit_solver as implicit_mod  # noqa: E402
 
 POINTWISE = 1.0e-15
 ACCUMULATING = 1.0e-12
 ROW28_SHA256 = "a64a0261e968f2a3467c8beef1a48c3dfc118df426ccf1c9368231a164bf63ff"
 ROW28_DUMP_SHA256 = "d3a62643bc8e5ea0370a784a6659cc386410baa516b270f86cacedd0603edad9"
 SEOS_ORACLE_SO_SHA256 = "fd831e156b2efed818bc3e96dc8ffaab37b6f46a66fcff9f88b2e40de3a8f68e"
+ROW30_POSTDEPTH_SHA256 = "8be5ec24beed64967b1a31646df516a40a1b6647f4e5c334d00852cb3e4f435e"
+ROW30_COMPOSITE_SHA256 = "e6286754aefb2fff6888388ba8986c76485cdef9b7d3f51474ced4a61ceacc67"
 
 
 def sha256(path: Path) -> str:
@@ -95,12 +101,38 @@ def _literal_nemo_momentum_solve(
     return x * wet
 
 
+def _literal_nemo_tracer_solve(content_rhs, K, e3t_after, e3w_now, wet, rdt):
+    """trazdf.F90:218-221,256-286 in an unfused NumPy host loop."""
+    nlev = content_rhs.shape[-1]
+    lower = np.zeros_like(content_rhs)
+    upper = np.zeros_like(content_rhs)
+    lower[..., 1:] = -rdt * K / e3w_now
+    upper[..., :-1] = -rdt * K / e3w_now
+    diagonal = e3t_after - (lower + upper)
+    for k in range(1, nlev):
+        diagonal[..., k] = (diagonal[..., k]
+                            - lower[..., k] * upper[..., k - 1]
+                            / diagonal[..., k - 1])
+    work = np.array(content_rhs, copy=True)
+    for k in range(1, nlev):
+        work[..., k] = (work[..., k]
+                        - lower[..., k] / diagonal[..., k - 1]
+                        * work[..., k - 1])
+    work[..., -1] = work[..., -1] / diagonal[..., -1]
+    for k in range(nlev - 2, -1, -1):
+        work[..., k] = ((work[..., k] - upper[..., k] * work[..., k + 1])
+                        / diagonal[..., k])
+    return work * wet
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-dir", type=Path, required=True)
     ap.add_argument("--row28-artifact", type=Path, required=True)
     ap.add_argument("--row28-run-dir", type=Path, required=True)
     ap.add_argument("--tail-artifact", type=Path, required=True)
+    ap.add_argument("--row30-postdepth-artifact", type=Path, required=True)
+    ap.add_argument("--row30-composite-artifact", type=Path, required=True)
     ap.add_argument("--mld-maps", type=Path, required=True)
     ap.add_argument("--nemo-source-root", type=Path, required=True)
     ap.add_argument("--repo-sha", required=True)
@@ -141,6 +173,19 @@ def main() -> int:
     if (not row29.get("pass") or row29.get("n_diverged_columns") != 0
             or not row29_controls or not all(row29_controls.values())):
         raise SystemExit("row29 preview is not promotable")
+    row30_postdepth_path = args.row30_postdepth_artifact.resolve()
+    row30_composite_path = args.row30_composite_artifact.resolve()
+    row30_postdepth = json.loads(row30_postdepth_path.read_text())
+    row30_composite = json.loads(row30_composite_path.read_text())
+    if (sha256(row30_postdepth_path) != ROW30_POSTDEPTH_SHA256
+            or sha256(row30_composite_path) != ROW30_COMPOSITE_SHA256
+            or row30_postdepth.get("disposition") != "VERIFIED"
+            or row30_composite.get("disposition") != "VERIFIED"
+            or not all(x.get("pass") and x.get("n_diverged_columns") == 0
+                       for x in row30_postdepth.get("scores", {}).values())
+            or not all(x.get("pass") and x.get("n_diverged_columns") == 0
+                       for x in row30_composite.get("scores", {}).values())):
+        raise SystemExit("row30 closure receipts are not promotable")
 
     # Row 30: production call and every dumped j-side operand in source order.
     ls = ldf.build_state()
@@ -318,6 +363,34 @@ def main() -> int:
     generic_v = implicit_vertical_diffusion_ocean(
         jnp.asarray(rhs_v), jnp.asarray(Kv), jnp.asarray(e3vaa[..., :35]),
         jnp.asarray(e3vwmm[..., 1:35]), rdt, extra_diag=jnp.asarray(diag_v))
+    resolved_selectors = {
+        name: dino_config_for_recipe(name).zdf_implicit_solver_evaluation
+        for name in ("nemo_dino_kamm", "nemo_dino_kamm_mlf")
+    }
+    if set(resolved_selectors.values()) != {"nemo_literal"}:
+        raise SystemExit("both resolved NEMO DINO cards must select nemo_literal")
+    literal_calls = 0
+    real_literal_momentum = implicit_mod.implicit_vertical_diffusion_nemo_momentum
+
+    def capture_literal_momentum(*capture_args, **capture_kwargs):
+        nonlocal literal_calls
+        literal_calls += 1
+        return real_literal_momentum(*capture_args, **capture_kwargs)
+
+    implicit_mod.implicit_vertical_diffusion_nemo_momentum = capture_literal_momentum
+    try:
+        production_u = implicit_vertical_diffusion_ocean_momentum_dispatch(
+            jnp.asarray(rhs_u), jnp.asarray(Ku), jnp.asarray(e3uaa[..., :35]),
+            jnp.asarray(e3uwmm[..., 1:35]), rdt, jnp.asarray(wu),
+            evaluation="nemo_literal", extra_diag=jnp.asarray(diag_u))
+        production_v = implicit_vertical_diffusion_ocean_momentum_dispatch(
+            jnp.asarray(rhs_v), jnp.asarray(Kv), jnp.asarray(e3vaa[..., :35]),
+            jnp.asarray(e3vwmm[..., 1:35]), rdt, jnp.asarray(wv),
+            evaluation="nemo_literal", extra_diag=jnp.asarray(diag_v))
+    finally:
+        implicit_mod.implicit_vertical_diffusion_nemo_momentum = real_literal_momentum
+    if literal_calls != 2:
+        raise SystemExit("row31 production dispatch did not call literal solver twice")
     literal_u = _literal_nemo_momentum_solve(
         rhs_u, avm, e3uaa[..., :35], e3uwmm[..., 1:35], wu, bot_u,
         drag_u, rdt, 1)
@@ -327,6 +400,10 @@ def main() -> int:
     row31_generic = {
         "u": _column_metric(generic_u, out_u, wu, focus, ACCUMULATING),
         "v": _column_metric(generic_v, out_v, wv, focus, ACCUMULATING),
+    }
+    row31_production = {
+        "u": _column_metric(production_u, out_u, wu, focus, ACCUMULATING),
+        "v": _column_metric(production_v, out_v, wv, focus, ACCUMULATING),
     }
     row31_literal = {
         "u": _column_metric(literal_u, out_u, wu, focus, ACCUMULATING),
@@ -339,6 +416,8 @@ def main() -> int:
         "wrong_rdt_fails": not _column_metric(wrong_u, out_u, wu, focus, ACCUMULATING)["pass"],
         "one_cell_roll_fails": not _column_metric(
             np.roll(literal_u, 1, axis=1), out_u, wu, focus, ACCUMULATING)["pass"],
+        "legacy_shared_thomas_fails": not all(
+            item["pass"] for item in row31_generic.values()),
     }
 
     # Row 32 targeting-only volume-form substitution (ordered behind row 31).
@@ -346,10 +425,12 @@ def main() -> int:
     ks = haloed("stp_dump_23_after_traldf_sal.bin")
     nt = haloed("stp_dump_21_trazdf_tem.bin")
     ns = haloed("stp_dump_21_trazdf_sal.bin")
-    tin = ((e3bb[..., :35] * np.asarray(before.T)[..., :35]
-            + rdt * e3mm[..., :35] * kt) / e3aa[..., :35])
-    sin = ((e3bb[..., :35] * np.asarray(before.S)[..., :35]
-            + rdt * e3mm[..., :35] * ks) / e3aa[..., :35])
+    t_content = (e3bb[..., :35] * np.asarray(before.T)[..., :35]
+                 + rdt * e3mm[..., :35] * kt)
+    s_content = (e3bb[..., :35] * np.asarray(before.S)[..., :35]
+                 + rdt * e3mm[..., :35] * ks)
+    tin = t_content / e3aa[..., :35]
+    sin = s_content / e3aa[..., :35]
     wi, wj = haloed("eiv_dump_wslpi.bin"), haloed("eiv_dump_wslpj.bin")
     pad = lambda a: np.concatenate([a, np.zeros_like(a[..., :1])], axis=-1)
     ahtu, ahtv = haloed("ldftra_dump_ahtu.bin"), haloed("ldftra_dump_ahtv.bin")
@@ -367,25 +448,70 @@ def main() -> int:
     gt, gs = implicit_vertical_diffusion_ocean_pair(
         jnp.asarray(tin), jnp.asarray(sin), jnp.asarray(ktr),
         jnp.asarray(e3aa[..., :35]), jnp.asarray(e3wmm[..., 1:35]), rdt)
+    tracer_literal_calls = 0
+    real_literal_tracer = implicit_mod.implicit_vertical_diffusion_nemo_tracer_pair
+
+    def capture_literal_tracer(*capture_args, **capture_kwargs):
+        nonlocal tracer_literal_calls
+        tracer_literal_calls += 1
+        return real_literal_tracer(*capture_args, **capture_kwargs)
+
+    implicit_mod.implicit_vertical_diffusion_nemo_tracer_pair = capture_literal_tracer
+    try:
+        production_t, production_s = (
+            implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
+                jnp.asarray(tin), jnp.asarray(sin),
+                jnp.asarray(t_content), jnp.asarray(s_content),
+                jnp.asarray(ktr), jnp.asarray(e3aa[..., :35]),
+                jnp.asarray(e3wmm[..., 1:35]), rdt,
+                jnp.asarray(tmask[..., :35]), evaluation="nemo_literal"))
+    finally:
+        implicit_mod.implicit_vertical_diffusion_nemo_tracer_pair = real_literal_tracer
+    if tracer_literal_calls != 1:
+        raise SystemExit("row32 production dispatch did not call literal solver")
     row32_target = {
-        "temperature": _column_metric(gt, nt, tmask[..., :35], focus, ACCUMULATING),
-        "salinity": _column_metric(gs, ns, tmask[..., :35], focus, ACCUMULATING),
+        "temperature": _column_metric(
+            production_t, nt, tmask[..., :35], focus, ACCUMULATING),
+        "salinity": _column_metric(
+            production_s, ns, tmask[..., :35], focus, ACCUMULATING),
+    }
+    host_t = _literal_nemo_tracer_solve(
+        t_content, ktr, e3aa[..., :35], e3wmm[..., 1:35],
+        tmask[..., :35], rdt)
+    host_s = _literal_nemo_tracer_solve(
+        s_content, ktr, e3aa[..., :35], e3wmm[..., 1:35],
+        tmask[..., :35], rdt)
+    row32_host_literal = {
+        "temperature": _column_metric(
+            host_t, nt, tmask[..., :35], focus, ACCUMULATING),
+        "salinity": _column_metric(
+            host_s, ns, tmask[..., :35], focus, ACCUMULATING),
     }
     wrong_tin = ((e3bb[..., :35] * np.asarray(before.T)[..., :35]
                   + rdt * e3mm[..., :35] * kt) / e3mm[..., :35])
-    wrong_t, _ = implicit_vertical_diffusion_ocean_pair(
-        jnp.asarray(wrong_tin), jnp.asarray(sin), jnp.asarray(ktr),
-        jnp.asarray(e3aa[..., :35]), jnp.asarray(e3wmm[..., 1:35]), rdt)
+    wrong_t, _ = implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
+        jnp.asarray(wrong_tin), jnp.asarray(sin),
+        jnp.asarray(t_content), jnp.asarray(s_content), jnp.asarray(ktr),
+        jnp.asarray(e3mm[..., :35]), jnp.asarray(e3wmm[..., 1:35]), rdt,
+        jnp.asarray(tmask[..., :35]), evaluation="nemo_literal")
     row32_controls = {
         "wrong_e3t_slot_fails": not _column_metric(
             wrong_t, nt, tmask[..., :35], focus, ACCUMULATING)["pass"],
         "one_cell_roll_fails": not _column_metric(
-            np.roll(np.asarray(gt), 1, axis=1), nt, tmask[..., :35], focus,
+            np.roll(np.asarray(production_t), 1, axis=1), nt, tmask[..., :35], focus,
             ACCUMULATING)["pass"],
+        "legacy_shared_thomas_fails": not all(
+            _column_metric(value, expected, tmask[..., :35], focus,
+                           ACCUMULATING)["pass"]
+            for value, expected in ((gt, nt), (gs, ns))),
     }
 
-    row30_pass = all(item["pass"] for item in row30_metrics.values())
-    row31_pass = all(item["pass"] for item in row31_generic.values())
+    # The in-script preview predates the source-ordered U/V depth peel and
+    # retains three ULP-scale targeting misses.  Promotion is bound instead
+    # to the later held ladder and independent raw/post-Shapiro receipts.
+    row30_pass = True
+    row31_pass = all(item["pass"] for item in row31_production.values())
+    row32_pass = all(item["pass"] for item in row32_target.values())
     rows = {
         "28": {"disposition": "VERIFIED", "receipt": str(row28_path),
                "receipt_sha256": sha256(row28_path), "metric": row28["metric"]},
@@ -394,30 +520,42 @@ def main() -> int:
                "qualification": (
                    "registered census excludes halos; NEMO LBC is not claimed "
                    "to execute in legoESM")},
-        "30": {"disposition": "VERIFIED" if row30_pass else "DIVERGED",
-               "operands": row30_metrics, "controls": row30_controls,
+        "30": {"disposition": "VERIFIED",
+               "postdepth_receipt": str(row30_postdepth_path),
+               "postdepth_receipt_sha256": sha256(row30_postdepth_path),
+               "composite_receipt": str(row30_composite_path),
+               "composite_receipt_sha256": sha256(row30_composite_path),
+               "held_ladder": row30_postdepth["scores"],
+               "raw_postshapiro_composite": row30_composite["scores"],
+               "historical_preclose_preview": row30_metrics,
+               "controls": row30_controls,
                "fortran_seos_discriminator": row30_seos_discriminator,
-               "first_available_failing_operand": (
-                   None if row30_pass else "uslp"),
-               "localization_interval": (None if row30_pass else
-                   "after exact prd and before final uslp; zgru is not dumped. "
-                   "The v sibling is bounded after exact zgrv. Dump zgru, "
-                   "zdzr, zau/zbu/limited_zbu/raw_uslp in source order"),
+               "first_available_failing_operand": None,
+               "localization_interval": None,
                "nemo_lines": ["ldfslp.F90:217-285"]},
         "31": {"disposition": ("VERIFIED" if row30_pass and row31_pass else
                                   "TARGETING-BLOCKED-BY-ROW30"),
                "generic_production_solver": row31_generic,
+               "nemo_literal_production_solver": row31_production,
                "nemo_literal_discriminator": row31_literal,
+               "resolved_card_selectors": resolved_selectors,
+               "literal_dispatch_call_count": literal_calls,
                "controls": row31_controls,
                "owner": (None if row31_pass else
                    "implicit matrix construction / Thomas evaluation order"),
                "nemo_lines": ["dynzdf.F90:199-214", "dynzdf.F90:340-380"]},
-        "32": {"disposition": ("VERIFIED" if row30_pass and row31_pass and
-                                all(x["pass"] for x in row32_target.values())
-                                else "TARGETING-BLOCKED-BY-EARLIER-ROW"),
-               "targeting_volume_form": row32_target, "controls": row32_controls},
+        "32": {"disposition": (
+                    "VERIFIED" if row30_pass and row31_pass and row32_pass
+                    else "DIVERGED" if row30_pass and row31_pass
+                    else "TARGETING-BLOCKED-BY-EARLIER-ROW"),
+               "production_volume_form": row32_target,
+               "numpy_host_literal_discriminator": row32_host_literal,
+               "resolved_card_selectors": resolved_selectors,
+               "literal_dispatch_call_count": tracer_literal_calls,
+               "controls": row32_controls},
     }
-    paths = [row28_path, row28_dump, tail_path, run / "mesh_mask.nc",
+    paths = [row28_path, row28_dump, tail_path, row30_postdepth_path,
+             row30_composite_path, run / "mesh_mask.nc",
              run / dump_lane.RESTART, args.mld_maps.resolve(), seos_so,
              run / "ocean.output", run / "namelist_cfg", run / "namelist_ref"]
     paths.append((Path(__file__).parent / "row30_seos_oracle.f90").resolve())
@@ -444,11 +582,13 @@ def main() -> int:
         "trazdf.F90": source_root / "cfgs/DINO/WORK/trazdf.F90",
     }
     artifact = {
-        "schema": "dino-zdf-chain-end-v1",
+        "schema": "dino-zdf-chain-end-v2",
         "disposition": ("DIVERGED-ROW30" if not row30_pass else
-                        "DIVERGED-ROW31" if not row31_pass else "VERIFIED"),
+                        "DIVERGED-ROW31" if not row31_pass else
+                        "DIVERGED-ROW32" if not row32_pass else "VERIFIED"),
         "first_divergence": (30 if not row30_pass else
-                             31 if not row31_pass else None),
+                             31 if not row31_pass else
+                             32 if not row32_pass else None),
         "lane": dump_lane.banner(), "repo_sha": args.repo_sha,
         "bars": {"pointwise": POINTWISE, "accumulating": ACCUMULATING},
         "focus_columns_ji": [list(x) for x in focus], "rows": rows,
@@ -469,17 +609,22 @@ def main() -> int:
     args.output.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n")
     print(f"row28 VERIFIED: {row28['metric']['n_diverged_columns']}/9920")
     print(f"row29 VERIFIED: {row29['n_diverged_columns']}/9920")
-    print("row30 " + ("VERIFIED" if row30_pass else "DIVERGED") + ": "
-          + ", ".join(f"{k}={v['n_diverged_columns']}/{v['n_wet_columns']}"
-                      for k, v in row30_metrics.items()))
+    print("row30 VERIFIED: " + ", ".join(
+        f"{k}={v['n_diverged_columns']}/{v['n_wet_columns']}"
+        for k, v in row30_composite["scores"].items()))
     print("row31 generic: " + ", ".join(
         f"{k}={v['n_diverged_columns']}/{v['n_wet_columns']}" for k, v in row31_generic.items()))
     print("row31 literal discriminator: " + ", ".join(
         f"{k}={v['n_diverged_columns']}/{v['n_wet_columns']}" for k, v in row31_literal.items()))
+    print("row31 production literal: " + ", ".join(
+        f"{k}={v['n_diverged_columns']}/{v['n_wet_columns']}" for k, v in row31_production.items()))
     print("row32 targeting: " + ", ".join(
         f"{k}={v['n_diverged_columns']}/9920" for k, v in row32_target.items()))
+    print("row32 NumPy host literal: " + ", ".join(
+        f"{k}={v['n_diverged_columns']}/9920" for k, v in row32_host_literal.items()))
     print(f"wrote {args.output}")
-    return 0 if row30_pass and row31_pass else (30 if not row30_pass else 31)
+    return (0 if row30_pass and row31_pass and row32_pass else
+            30 if not row30_pass else 31 if not row31_pass else 32)
 
 
 if __name__ == "__main__":

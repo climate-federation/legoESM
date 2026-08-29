@@ -302,6 +302,10 @@ class DINOConfig:
     # bit-identical.
     zdf_drag_in_matrix: bool = False
     zdf_baroclinic_only: bool = False
+    # Final dynzdf/trazdf matrix and recurrence evaluation.  Historical cards
+    # retain the normalised shared Thomas path; the NEMO cards select the
+    # literal source order in their recipe.
+    zdf_implicit_solver_evaluation: str = "shared_thomas"
     # NEMO dyn_drg in-subcycle barotropic drag (#1226): see
     # LatLonCGridOceanConfig.barotropic_drag_substep. Threaded 1:1.
     # Requires zdf_drag_in_matrix=True + zdf_baroclinic_only=True (NEMO's
@@ -1278,6 +1282,7 @@ DINO_RECIPES: dict[str, dict] = {
         #    #1226. --
         "zdf_drag_in_matrix": True,
         "zdf_baroclinic_only": True,
+        "zdf_implicit_solver_evaluation": "nemo_literal",
         "barotropic_drag_substep": True,
         # -- Tracer advection (namtra_adv: ln_traadv_fct=T, nn_fct_h=nn_fct_v=2) --
         "tracer_advection": "fct2",
@@ -3493,6 +3498,7 @@ def dino_lat_lon_model_config(
         # NEMO dynzdf composition (#1226; see DINOConfig field docstrings).
         zdf_drag_in_matrix=cfg.zdf_drag_in_matrix,
         zdf_baroclinic_only=cfg.zdf_baroclinic_only,
+        zdf_implicit_solver_evaluation=cfg.zdf_implicit_solver_evaluation,
         barotropic_drag_substep=cfg.barotropic_drag_substep,
         # NEMO ln_bt_fw=.FALSE. centred barotropic forcing (#1226 item 3;
         # see DINOConfig.barotropic_forcing_centred docstring).

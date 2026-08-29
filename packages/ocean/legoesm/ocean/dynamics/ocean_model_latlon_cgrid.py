@@ -1221,10 +1221,24 @@ def thickness_weighted_tracer_combine(t_before, t_now, t_expl, d_diss,
     -------
     array : tracer at Naa.
     """
-    content = (h_before * t_before
-               + (h_after * t_expl - h_now * t_now)
-               + h_now * d_diss)
+    content = thickness_weighted_tracer_content(
+        t_before, t_now, t_expl, d_diss,
+        h_before, h_now, h_after)
     return jnp.where(mask > 0, content / jnp.maximum(h_after, h_floor), t_now)
+
+
+def thickness_weighted_tracer_content(t_before, t_now, t_expl, d_diss,
+                                      h_before, h_now, h_after):
+    """Undivided NEMO ``tra_zdf`` RHS content for one tracer.
+
+    Kept separate from :func:`thickness_weighted_tracer_combine` so the
+    literal ``trazdf`` matrix can consume the source's content RHS directly;
+    dividing by ``e3t(Kaa)`` and multiplying back would lose the source's
+    floating-point evaluation order.
+    """
+    return (h_before * t_before
+            + (h_after * t_expl - h_now * t_now)
+            + h_now * d_diss)
 
 
 def _thickness_weighted_asselin(now, before, after,
@@ -2394,6 +2408,13 @@ class LatLonCGridOceanModel:
                     "Enable barotropic_drag_substep=True (NEMO's DINO "
                     "composition), use a different barotropic_solver, or "
                     "leave zdf_drag_in_matrix=False.")
+        _zdf_solver_evaluation = getattr(
+            config, "zdf_implicit_solver_evaluation", "shared_thomas")
+        if _zdf_solver_evaluation not in ("shared_thomas", "nemo_literal"):
+            raise ValueError(
+                "unknown zdf_implicit_solver_evaluation "
+                f"{_zdf_solver_evaluation!r}; expected 'shared_thomas' or "
+                "'nemo_literal'")
         # barotropic_drag_substep (#1226, NEMO dyn_drg): the in-subcycle
         # explicit barotropic drag + pu_RHSi slow-forcing correction.
         if getattr(config, "barotropic_drag_substep", False):
@@ -6631,6 +6652,7 @@ class LatLonCGridOceanModel:
         eta_now=None,
         u_now=None,
         v_now=None,
+        nemo_tracer_content_rhs=None,
         z_coord=None, config=None, iwm_fields=None,
     ) -> LatLonCGridOceanState:
         """Backward-Euler vertical diffusion for ``u, v, T, S``.
@@ -7383,6 +7405,13 @@ class LatLonCGridOceanModel:
             and do_tracers and do_momentum
             and not getattr(_cfg_b, "zdf_drag_in_matrix", False)
         )
+        _zdf_literal = (getattr(
+            _cfg_b, "zdf_implicit_solver_evaluation", "shared_thomas")
+            == "nemo_literal")
+        # The source-ordered path is intentionally not routed through the
+        # performance-only batched solver: doing so would replace its three
+        # separate recurrences with the shared generic lowering.
+        _vmix_batched = _vmix_batched and not _zdf_literal
         # Double-diffusion salinity diffusivity: K_v (heat) + (avs - avt).
         # ``dK_ddm_salt is None`` (ddm off) ⇒ K_s_cell IS K_v_cell (same
         # object) ⇒ the shared-K pair fast path stays BYTE-IDENTICAL.
@@ -7398,6 +7427,27 @@ class LatLonCGridOceanModel:
             )
         else:
             if do_tracers:
+                if _zdf_literal:
+                    if dK_ddm_salt is not None:
+                        raise ValueError(
+                            "zdf_implicit_solver_evaluation='nemo_literal' "
+                            "does not yet support distinct DDM heat/salt "
+                            "matrices")
+                    from legoesm.ocean.physics.vertical_mixing import (
+                        implicit_vertical_diffusion_ocean_tracer_pair_dispatch,
+                    )
+                    if nemo_tracer_content_rhs is None:
+                        _content_t = T_solve_in * dz_cell
+                        _content_s = S_solve_in * dz_cell
+                    else:
+                        _content_t, _content_s = nemo_tracer_content_rhs
+                    _tracer_wet = jnp.broadcast_to(
+                        mask_3d > 0.5, T_solve_in.shape)
+                    T_new, S_new = (
+                        implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
+                            T_solve_in, S_solve_in, _content_t, _content_s,
+                            K_v_cell, dz_cell, dz_half_cell, dt, _tracer_wet,
+                            evaluation="nemo_literal"))
                 # T and S share the IDENTICAL tridiagonal matrix (same
                 # K_v_cell incl. any K33_iso fold + partial-cell wet
                 # mask, same dz/dz_half/dt), so the pair solve factors
@@ -7407,7 +7457,7 @@ class LatLonCGridOceanModel:
                 # field-batching ADDED it).  LEGOESM_VMIX_TSPAIR=0
                 # restores the two separate solves (trace-time switch,
                 # same caveat as above).
-                if (dK_ddm_salt is None
+                elif (dK_ddm_salt is None
                         and os.environ.get("LEGOESM_VMIX_TSPAIR", "1") != "0"):
                     T_new, S_new = implicit_vertical_diffusion_ocean_pair(
                         T_solve_in, S_solve_in,
@@ -7424,14 +7474,29 @@ class LatLonCGridOceanModel:
                         S_solve_in, K_s_cell, dz_cell, dz_half_cell, dt,
                     )
             if do_momentum:
-                u_new = implicit_vertical_diffusion_ocean(
-                    u_solve_in, A_v_u, dz_u, dz_half_u, dt_mom,
-                    extra_diag=extra_diag_u,
-                )
-                v_new = implicit_vertical_diffusion_ocean(
-                    v_solve_in, A_v_v, dz_v, dz_half_v, dt_mom,
-                    extra_diag=extra_diag_v,
-                )
+                if _zdf_literal:
+                    from legoesm.ocean.physics.vertical_mixing import (
+                        implicit_vertical_diffusion_ocean_momentum_dispatch,
+                    )
+                    _uwet = jnp.broadcast_to(u_mask_3d > 0.5, u_solve_in.shape)
+                    _vwet = jnp.broadcast_to(v_mask_3d > 0.5, v_solve_in.shape)
+                    u_new = implicit_vertical_diffusion_ocean_momentum_dispatch(
+                        u_solve_in, A_v_u, dz_u, dz_half_u, dt_mom, _uwet,
+                        evaluation="nemo_literal",
+                        extra_diag=extra_diag_u)
+                    v_new = implicit_vertical_diffusion_ocean_momentum_dispatch(
+                        v_solve_in, A_v_v, dz_v, dz_half_v, dt_mom, _vwet,
+                        evaluation="nemo_literal",
+                        extra_diag=extra_diag_v)
+                else:
+                    u_new = implicit_vertical_diffusion_ocean(
+                        u_solve_in, A_v_u, dz_u, dz_half_u, dt_mom,
+                        extra_diag=extra_diag_u,
+                    )
+                    v_new = implicit_vertical_diffusion_ocean(
+                        v_solve_in, A_v_v, dz_v, dz_half_v, dt_mom,
+                        extra_diag=extra_diag_v,
+                    )
         if do_tracers:
             T_new = jnp.where(mask_3d > 0.5, T_new, state.T.data)
             S_new = jnp.where(mask_3d > 0.5, S_new, state.S.data)
@@ -8992,6 +9057,7 @@ class LatLonCGridOceanModel:
             mask3 > 0,
             state.S_before.data + (state_expl.S.data - state.S.data) + dS_diss_bb,
             state.S.data)
+        _nemo_tracer_content_rhs = None
         _combine = getattr(_cfg_b, "tracer_combine", "concentration")
         if _combine not in ("concentration", "thickness_weighted"):
             raise ValueError(
@@ -9024,12 +9090,19 @@ class LatLonCGridOceanModel:
             h_naa = compute_layer_thickness(
                 state_expl.eta.data, state.H_bathy.data, _zc,
                 min_water_column_m=_cfg_b.min_water_column_m)
+            _content_t = thickness_weighted_tracer_content(
+                state.T_before.data, state.T.data, state_expl.T.data,
+                dT_diss_bb, h_bef, h_k, h_naa)
+            _content_s = thickness_weighted_tracer_content(
+                state.S_before.data, state.S.data, state_expl.S.data,
+                dS_diss_bb, h_bef, h_k, h_naa)
             T_naa = thickness_weighted_tracer_combine(
                 state.T_before.data, state.T.data, state_expl.T.data,
                 dT_diss_bb, h_bef, h_k, h_naa, mask3)
             S_naa = thickness_weighted_tracer_combine(
                 state.S_before.data, state.S.data, state_expl.S.data,
                 dS_diss_bb, h_bef, h_k, h_naa, mask3)
+            _nemo_tracer_content_rhs = (_content_t, _content_s)
         eta_naa = state_expl.eta.data * cmask   # from the barotropic solve
         naa_expl = state_expl._replace(
             u=state_expl.u.replace(data=u_naa),
@@ -9073,6 +9146,7 @@ class LatLonCGridOceanModel:
                 # off.
                 eta_now=state.eta.data,
                 u_now=state.u.data, v_now=state.v.data,
+                nemo_tracer_content_rhs=_nemo_tracer_content_rhs,
             z_coord=z_coord, config=config, iwm_fields=iwm_fields)
             if _tke_prog:
                 naa, tke_new = _res

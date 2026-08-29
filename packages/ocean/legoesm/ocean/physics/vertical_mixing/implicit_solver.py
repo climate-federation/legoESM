@@ -263,6 +263,235 @@ def implicit_vertical_diffusion_ocean_pair(
     return x1, x2
 
 
+def _nemo_ordered_solve(
+    lower: jax.Array,
+    diagonal: jax.Array,
+    upper: jax.Array,
+    rhs: jax.Array,
+) -> jax.Array:
+    """NEMO's three source-ordered Thomas recurrences.
+
+    Unlike :func:`thomas_solve`, NEMO first eliminates the complete diagonal,
+    then walks the RHS, then seeds the last wet-array row and substitutes in
+    reverse.  Keeping these as separate ordered scans is numerically visible
+    at the matched-day-180 bar (``dynzdf.F90:322-345`` and
+    ``trazdf.F90:256-286``).
+    """
+    if not (lower.shape == diagonal.shape == upper.shape == rhs.shape):
+        raise ValueError("NEMO literal tridiagonal operands must share shape")
+    if rhs.ndim < 1 or rhs.shape[-1] < 1:
+        raise ValueError("NEMO literal tridiagonal solve needs at least one row")
+    nlev = rhs.shape[-1]
+    if nlev == 1:
+        return rhs / diagonal
+
+    diag_inputs = tuple(jnp.moveaxis(x, -1, 0) for x in (
+        lower[..., 1:], diagonal[..., 1:], upper[..., :-1]))
+
+    def diagonal_step(previous, operands):
+        current_lower, current_diagonal, previous_upper = operands
+        product = jax.lax.optimization_barrier(
+            current_lower * previous_upper)
+        quotient = jax.lax.optimization_barrier(product / previous)
+        current = jax.lax.optimization_barrier(
+            current_diagonal - quotient)
+        return current, current
+
+    _, diag_rows = jax.lax.scan(
+        diagonal_step, diagonal[..., 0], diag_inputs)
+    eliminated = jnp.concatenate(
+        [diagonal[..., :1], jnp.moveaxis(diag_rows, 0, -1)], axis=-1)
+
+    rhs_inputs = tuple(jnp.moveaxis(x, -1, 0) for x in (
+        rhs[..., 1:], lower[..., 1:], eliminated[..., :-1]))
+
+    def rhs_step(previous, operands):
+        source, current_lower, previous_diagonal = operands
+        # NEMO writes division before multiplication in both routines.
+        quotient = jax.lax.optimization_barrier(
+            current_lower / previous_diagonal)
+        product = jax.lax.optimization_barrier(quotient * previous)
+        current = jax.lax.optimization_barrier(source - product)
+        return current, current
+
+    _, work_rows = jax.lax.scan(rhs_step, rhs[..., 0], rhs_inputs)
+    work = jnp.concatenate(
+        [rhs[..., :1], jnp.moveaxis(work_rows, 0, -1)], axis=-1)
+
+    terminal = work[..., -1] / eliminated[..., -1]
+    reverse_inputs = tuple(
+        jnp.moveaxis(x[..., :-1][..., ::-1], -1, 0)
+        for x in (work, upper, eliminated))
+
+    def reverse_step(next_value, operands):
+        source, current_upper, current_diagonal = operands
+        product = jax.lax.optimization_barrier(current_upper * next_value)
+        numerator = jax.lax.optimization_barrier(source - product)
+        current = jax.lax.optimization_barrier(
+            numerator / current_diagonal)
+        return current, current
+
+    _, reverse_rows = jax.lax.scan(
+        reverse_step, terminal, reverse_inputs)
+    return jnp.concatenate(
+        [jnp.moveaxis(reverse_rows, 0, -1)[..., ::-1],
+         terminal[..., None]], axis=-1)
+
+
+def implicit_vertical_diffusion_nemo_momentum(
+    field: jax.Array,
+    avm_face: jax.Array,
+    dz_after: jax.Array,
+    e3w_now: jax.Array,
+    dt: float,
+    wet: jax.Array,
+    *,
+    extra_diag: jax.Array | float = 0.0,
+) -> jax.Array:
+    """Literal NEMO ``dynzdf`` momentum matrix and ordered solve.
+
+    ``avm_face`` is the already-interpolated arithmetic face average.  The
+    exact multiply by two reconstructs the rounded two-T-point sum so the
+    coefficient retains NEMO's written ``0.5*dt * (avm_1+avm_2)``
+    association instead of the generic normalised operator's ``dt*K/dz``.
+    """
+    if field.shape != dz_after.shape or field.shape != wet.shape:
+        raise ValueError("field, dz_after, and wet must share shape")
+    if avm_face.shape != field.shape[:-1] + (field.shape[-1] - 1,):
+        raise ValueError("avm_face must contain one value per interior face")
+    if e3w_now.shape != avm_face.shape:
+        raise ValueError("e3w_now must match avm_face")
+    if field.shape[-1] < 2:
+        return field
+
+    dtype = field.dtype
+    zero = jnp.zeros_like(field[..., :1])
+    zdt2 = jnp.asarray(0.5, dtype=dtype) * jnp.asarray(dt, dtype=dtype)
+    avm_sum = jnp.asarray(2.0, dtype=dtype) * avm_face
+    wet_f = jnp.asarray(wet, dtype=dtype)
+    interface_wet = wet_f[..., 1:] * wet_f[..., :-1]
+    avm_product = jax.lax.optimization_barrier(-zdt2 * avm_sum)
+    dz_safe = jnp.where(wet_f > 0.0, dz_after,
+                        jnp.asarray(1.0, dtype=dtype))
+    e3w_safe = jnp.where(interface_wet > 0.0, e3w_now,
+                         jnp.asarray(1.0, dtype=dtype))
+    lower_denominator = jax.lax.optimization_barrier(
+        dz_safe[..., 1:] * e3w_safe)
+    upper_denominator = jax.lax.optimization_barrier(
+        dz_safe[..., :-1] * e3w_safe)
+    lower_coeff = jax.lax.optimization_barrier(
+        avm_product / lower_denominator) * interface_wet
+    upper_coeff = jax.lax.optimization_barrier(
+        avm_product / upper_denominator) * interface_wet
+    lower = jnp.concatenate([zero, lower_coeff], axis=-1)
+    upper = jnp.concatenate([upper_coeff, zero], axis=-1)
+    diagonal = jax.lax.optimization_barrier(
+        jnp.asarray(1.0, dtype=dtype) - lower)
+    diagonal = jax.lax.optimization_barrier(diagonal - upper)
+    diagonal = jax.lax.optimization_barrier(
+        diagonal + jnp.asarray(extra_diag, dtype=dtype))
+    diagonal = jnp.where(wet_f > 0.0, diagonal,
+                         jnp.asarray(1.0, dtype=dtype))
+    return _nemo_ordered_solve(lower, diagonal, upper, field) * wet_f
+
+
+def implicit_vertical_diffusion_nemo_tracer_pair(
+    content_rhs_1: jax.Array,
+    content_rhs_2: jax.Array,
+    K: jax.Array,
+    e3t_after: jax.Array,
+    e3w_now: jax.Array,
+    dt: float,
+    wet: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """Literal NEMO ``trazdf`` content matrix and paired ordered solves."""
+    if content_rhs_1.shape != content_rhs_2.shape:
+        raise ValueError("tracer content RHS arrays must share shape")
+    if content_rhs_1.shape != e3t_after.shape or wet.shape != e3t_after.shape:
+        raise ValueError("content RHS, e3t_after, and wet must share shape")
+    if K.shape != content_rhs_1.shape[:-1] + (content_rhs_1.shape[-1] - 1,):
+        raise ValueError("K must contain one value per interior face")
+    if e3w_now.shape != K.shape:
+        raise ValueError("e3w_now must match K")
+    if content_rhs_1.shape[-1] < 2:
+        divisor = jnp.maximum(e3t_after, _EPS)
+        wet_f = jnp.asarray(wet, dtype=content_rhs_1.dtype)
+        return (content_rhs_1 / divisor * wet_f,
+                content_rhs_2 / divisor * wet_f)
+
+    dtype = content_rhs_1.dtype
+    zero = jnp.zeros_like(content_rhs_1[..., :1])
+    wet_f = jnp.asarray(wet, dtype=dtype)
+    interface_wet = wet_f[..., 1:] * wet_f[..., :-1]
+    product = jax.lax.optimization_barrier(
+        -jnp.asarray(dt, dtype=dtype) * K)
+    e3w_safe = jnp.where(interface_wet > 0.0, e3w_now,
+                         jnp.asarray(1.0, dtype=dtype))
+    coeff = (jax.lax.optimization_barrier(product / e3w_safe)
+             * interface_wet)
+    lower = jnp.concatenate([zero, coeff], axis=-1)
+    upper = jnp.concatenate([coeff, zero], axis=-1)
+    coefficient_sum = jax.lax.optimization_barrier(lower + upper)
+    diagonal = jax.lax.optimization_barrier(e3t_after - coefficient_sum)
+    diagonal = jnp.where(wet_f > 0.0, diagonal,
+                         jnp.asarray(1.0, dtype=dtype))
+    out_1 = _nemo_ordered_solve(
+        lower, diagonal, upper, content_rhs_1) * wet_f
+    out_2 = _nemo_ordered_solve(
+        lower, diagonal, upper, content_rhs_2) * wet_f
+    return out_1, out_2
+
+
+def implicit_vertical_diffusion_ocean_momentum_dispatch(
+    field: jax.Array,
+    avm_face: jax.Array,
+    dz_after: jax.Array,
+    e3w_now: jax.Array,
+    dt: float,
+    wet: jax.Array,
+    *,
+    evaluation: str = "shared_thomas",
+    extra_diag: jax.Array | float = 0.0,
+) -> jax.Array:
+    """Static production dispatch for the final momentum ZDF application."""
+    if evaluation == "shared_thomas":
+        return implicit_vertical_diffusion_ocean(
+            field, avm_face, dz_after, e3w_now, dt,
+            extra_diag=extra_diag)
+    if evaluation == "nemo_literal":
+        return implicit_vertical_diffusion_nemo_momentum(
+            field, avm_face, dz_after, e3w_now, dt, wet,
+            extra_diag=extra_diag)
+    raise ValueError(
+        "unknown ZDF momentum solver evaluation "
+        f"{evaluation!r}; expected 'shared_thomas' or 'nemo_literal'")
+
+
+def implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
+    field_1: jax.Array,
+    field_2: jax.Array,
+    content_rhs_1: jax.Array,
+    content_rhs_2: jax.Array,
+    K: jax.Array,
+    dz_after: jax.Array,
+    e3w_now: jax.Array,
+    dt: float,
+    wet: jax.Array,
+    *,
+    evaluation: str = "shared_thomas",
+) -> tuple[jax.Array, jax.Array]:
+    """Static production dispatch for the paired tracer ZDF application."""
+    if evaluation == "shared_thomas":
+        return implicit_vertical_diffusion_ocean_pair(
+            field_1, field_2, K, dz_after, e3w_now, dt)
+    if evaluation == "nemo_literal":
+        return implicit_vertical_diffusion_nemo_tracer_pair(
+            content_rhs_1, content_rhs_2, K, dz_after, e3w_now, dt, wet)
+    raise ValueError(
+        "unknown ZDF tracer solver evaluation "
+        f"{evaluation!r}; expected 'shared_thomas' or 'nemo_literal'")
+
+
 def _build_implicit_tridiag(
     field: jax.Array,
     K: jax.Array | float,
