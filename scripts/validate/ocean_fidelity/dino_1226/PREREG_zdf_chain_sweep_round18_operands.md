@@ -53,7 +53,7 @@ Before citing either new file:
   donor restart; every shared normal output and restart variable must be
   bit-identical;
 - record SHA256 for source, patch, executable, donor restart, every consumed
-  dump, and the two run directories;
+  dump, and sorted per-run file manifests;
 - perturb one wet dumped gdepw value by one representable ULP and require its
   operand check to fail;
 - perturb one wet htau value by one representable ULP and require its check to

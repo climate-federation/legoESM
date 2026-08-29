@@ -37,16 +37,16 @@ past the unresolved row 18.
 | 20 | `nn_mxl=3` scans, row-19+20 composite | `DIVERGED` | `zmxlm` and `zmxld`: 9,920/9,920 fail; maxima `2.042006` and `2.073254` | 4/4 fail both |
 | 21 | base `avm/avt/dissl` | `UNMEASURED-NEEDS-DUMP` | isolated base `avm` is exact, 0/9,920; pre-Prandtl `avt` and post-overwrite `dissl` lack slots | `avm` 4/4 exact |
 | 22 | inverse-Prandtl `avt` | `VERIFIED` | 0/9,920; max `2.367838e-16` | 4/4 pass |
-| 23 | closure coefficient copy | `VERIFIED` | stable subset exact for `avt` and `avm` | 4/4 pass |
+| 23 | closure coefficient copy | `UNMEASURED-ORACLE-SELFCHECK` | NEMO stable-subset reconstruction is exact, but legoESM composition was not invoked | preview only |
 | 24 | river-mouth enhancement | `WAIVED` | `ln_rnf=F`, `ln_rnf_mouth=F` | inactive |
-| 25 | EVD tracer overwrite | `VERIFIED` | 0 failures over 39,293 fired wet elements | 4/4 pass |
-| 26 | EVD momentum overwrite | `VERIFIED` | 0 failures over 39,293 fired wet elements | 4/4 pass |
-| 27 | `avs=avt`; optional enhancements | `UNMEASURED-NEEDS-DUMP` | live `avs` copy lacks a slot; DDM/SWM/IWM arms waived by false flags | needs slot |
+| 25 | EVD tracer overwrite | `UNMEASURED-ORACLE-SELFCHECK` | NEMO reconstruction is exact over 39,293 fired wet elements; legoESM EVD was not invoked | preview only |
+| 26 | EVD momentum overwrite | `UNMEASURED-ORACLE-SELFCHECK` | NEMO reconstruction is exact over 39,293 fired wet elements; legoESM EVD was not invoked | preview only |
+| 27 | `avs=avt`; optional enhancements | `WAIVED` | DDM off: exact source identity on both sides; SWM/IWM arms inactive | source receipt |
 | 28 | composed-`avt` turbocline | `UNMEASURED-NEEDS-DUMP` | no same-step `imld/hmld` slot | needs slot |
-| 29 | `avm` lateral boundary update | `VERIFIED` | interior census exact, 0/9,920 | 4/4 exact |
+| 29 | `avm` lateral boundary update | `UNMEASURED-ORACLE-SELFCHECK` | NEMO interior reconstruction exact; legoESM LBC path was not invoked | preview only |
 | 30 | `ldf_slp` | `DIVERGED` | `uslp/vslp/wslpi/wslpj` fail 9,306/9,412/9,462/9,462 columns | 4/4 fail each |
-| 31 | momentum implicit application | `UNMEASURED-NEEDS-DUMP` | stage-7 `Naa` aliases tendency `Krhs`; no true pre-solve bracket | needs slot |
-| 32 | tracer implicit application | `UNMEASURED-NEEDS-DUMP` | post field exists; no same-step pre-`tra_zdf` state | needs slot |
+| 31 | momentum implicit application | `UNMEASURED-EXISTING-BRACKET` | existing Kbb/stage-7/stage-8 fields suffice; exact reconstruction is blocked by upstream coefficient divergences | no new dump |
+| 32 | tracer implicit application | `UNMEASURED-EXISTING-BRACKET` | existing Kbb/stage-23/stage-21 fields suffice; exact reconstruction is blocked by row-30 K33 divergence | no new dump |
 
 Row 20 was isolated by feeding the real production mixing-length routine
 NEMO's dumped post-row-18 `en`, current `rn2`, and the captured production
@@ -56,12 +56,13 @@ be assigned between rows 19 and 20; a raw pre-limit length slot is required.
 The maximum absolute misses are 290.505 m (`zmxlm`) and 476.846 m (`zmxld`),
 so this is not a roundoff-only preview.
 
-Rows 23 and 25--26 close exactly when NEMO's source-order EVD mask
+The NEMO-only previews for rows 23 and 25--26 close exactly when NEMO's source-order EVD mask
 `MIN(rn2,rn2b) <= -1e-12` is used. On Fortran `jk=2..jpkm1`, copying the
 closure coefficients at stable points and setting both coefficients to
 `100*wmask` at fired points reproduces `dump_avt.bin` and `dump_avm.bin`
-bit-for-bit. Row 29's registered interior side remains bit-exact after the
-halo update.
+bit-for-bit. These are oracle self-consistency checks, not legoESM-vs-NEMO
+measurements; the earlier `VERIFIED` labels are loudly retracted. Row 29 is
+qualified the same way.
 
 Row 30's earliest available failing operand is the dumped `prd` argument:
 9,920/9,920 columns fail the `1e-15` bar, maximum column error
@@ -121,6 +122,18 @@ sha256sum "$run_off/DINO_00005761_restart.nc" \
   "$run_on/DINO_00005761_restart.nc" \
   "$run_on/tke_dump_etau_gdepw.bin" \
   "$run_on/tke_dump_etau_htau.bin"
+
+# Bracket-stream proof: the only enabled-only files may be the two new dumps;
+# every shared normal output, log, and restart must be byte-identical.
+find "$run_off" -type f -printf '%P\n' | sort > /tmp/row18-off.files
+find "$run_on" -type f -printf '%P\n' \
+  ! -name tke_dump_etau_gdepw.bin ! -name tke_dump_etau_htau.bin \
+  | sort > /tmp/row18-on-shared.files
+cmp /tmp/row18-off.files /tmp/row18-on-shared.files
+while IFS= read -r rel; do
+  cmp "$run_off/$rel" "$run_on/$rel"
+done < /tmp/row18-off.files
+sha256sum /tmp/row18-off.files /tmp/row18-on-shared.files
 
 cd /tmp/codex-zdf-sweep
 DINO_1226_LANE=d180 CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS=cpu \

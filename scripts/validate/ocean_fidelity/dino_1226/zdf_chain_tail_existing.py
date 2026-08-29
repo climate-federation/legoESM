@@ -64,6 +64,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-dir", type=Path, required=True)
     ap.add_argument("--mld-maps", type=Path, required=True)
+    ap.add_argument("--nemo-source-root", type=Path, required=True)
     ap.add_argument("--output", type=Path, required=True)
     args = ap.parse_args()
 
@@ -169,10 +170,10 @@ def main() -> int:
     )
     row21_avm = sweep.metrics(np.asarray(km), avm_closure, wet_interior, focus, POINTWISE)
     row22_avt = sweep.metrics(np.asarray(kh), avt_closure, wet_interior, focus, POINTWISE)
-    row22_pdlr = sweep.metrics(np.asarray(km) * 0.0 + pdlr, pdlr, wet_interior, focus, POINTWISE)
-
-    # zdfphy rows 23/25/26/29 are completely reconstructible from existing
-    # closure, rn2/rn2b, mask, and composed-coefficient dumps.
+    # zdfphy rows 23/25/26/29 are reconstructible from existing NEMO closure,
+    # rn2/rn2b, mask, and composed-coefficient dumps.  These are deliberately
+    # retained as ORACLE-SELFCHECK previews, not legoESM measurements: no
+    # legoESM coefficient-composition/EVD/LBC production routine is called.
     avt_composed = haloed("dump_avt.bin")
     avm_composed = haloed("dump_avm.bin")
     closure_avt_z = avt_closure_full[..., : jpk - 1]
@@ -250,13 +251,13 @@ def main() -> int:
             "operation": "inverse-Prandtl avt correction",
             "disposition": disposition(row22_avt),
             "avt": row22_avt,
-            "pdlr_input_identity": row22_pdlr,
         },
         "23": {
             "operation": "closure coefficient copy on EVD-stable points",
-            "disposition": ("VERIFIED" if row23_avt["pass"] and row23_avm["pass"] else "DIVERGED"),
-            "avt": row23_avt,
-            "avm": row23_avm,
+            "disposition": "UNMEASURED-ORACLE-SELFCHECK",
+            "oracle_selfcheck_avt": row23_avt,
+            "oracle_selfcheck_avm": row23_avm,
+            "reason": "NEMO closure and composed dumps self-consistent on stable subset; legoESM composition path not invoked",
         },
         "24": {
             "operation": "river-mouth enhancement",
@@ -267,22 +268,26 @@ def main() -> int:
         },
         "25": {
             "operation": "EVD tracer overwrite",
-            "disposition": disposition(row25),
-            "avt": row25,
+            "disposition": "UNMEASURED-ORACLE-SELFCHECK",
+            "oracle_selfcheck_avt": row25,
+            "reason": "NEMO source-order EVD reconstruction only; legoESM EVD path not invoked",
             "fired_wet_elements": int(fired.sum()),
         },
         "26": {
             "operation": "EVD momentum overwrite",
-            "disposition": disposition(row26),
-            "avm": row26,
+            "disposition": "UNMEASURED-ORACLE-SELFCHECK",
+            "oracle_selfcheck_avm": row26,
+            "reason": "NEMO source-order EVD reconstruction only; legoESM EVD path not invoked",
             "fired_wet_elements": int(fired.sum()),
         },
         "27": {
             "operation": "avs copy and optional enhancements",
-            "disposition": "UNMEASURED-NEEDS-DUMP",
+            "disposition": "WAIVED",
             "reason": (
-                "live avs=avt copy lacks an avs slot; DDM, surface-wave, and "
-                "internal-wave branches are WAIVED by resolved false flags"
+                "source-identity waiver: DDM is disabled, so NEMO executes "
+                "avs=avt (zdfphy.F90:326-331), while legoESM passes the same "
+                "K_v_cell object to T and S (ocean_model_latlon_cgrid.py:7308-7336); "
+                "surface-wave and internal-wave enhancement arms are inactive"
             ),
         },
         "28": {
@@ -292,9 +297,9 @@ def main() -> int:
         },
         "29": {
             "operation": "avm lateral boundary update, interior census",
-            "disposition": disposition(row29),
-            "avm_interior": row29,
-            "qualification": "halo exchange is outside the registered interior column census",
+            "disposition": "UNMEASURED-ORACLE-SELFCHECK",
+            "oracle_selfcheck_avm_interior": row29,
+            "reason": "NEMO reconstructed interior compared to NEMO composed dump; legoESM LBC path not invoked",
         },
         "30": {
             "operation": "ldf_slp",
@@ -317,19 +322,22 @@ def main() -> int:
         },
         "31": {
             "operation": "momentum implicit solve application",
-            "disposition": "UNMEASURED-NEEDS-DUMP",
+            "disposition": "UNMEASURED-EXISTING-BRACKET",
             "reason": (
-                "stage-7 Naa aliases Krhs and is a tendency, not the true "
-                "pre-solve velocity; no existing dump brackets Krhs after "
-                "dyn_spg and before dyn_zdf"
+                "no new NEMO dump is required: restart Kbb + stage-7 post-dyn_spg "
+                "Krhs/barotropic state + stage-8 output bracket dyn_zdf. Exact "
+                "isolation remains blocked by upstream row-20/row-30 coefficient "
+                "divergences and requires the registered NEMO volume-form input reconstruction"
             ),
         },
         "32": {
             "operation": "tracer implicit solve application",
-            "disposition": "UNMEASURED-NEEDS-DUMP",
+            "disposition": "UNMEASURED-EXISTING-BRACKET",
             "reason": (
-                "post-tra_zdf Naa exists, but no same-step pre-tra_zdf Naa "
-                "state isolates the implicit tracer application"
+                "no new NEMO dump is required: restart Kbb + stage-23 post-tra_ldf "
+                "Krhs and stage-21 post-tra_zdf bracket the application. Exact "
+                "isolation remains blocked by row-30 K33/slope divergence and "
+                "requires the registered z-star volume-form input reconstruction"
             ),
         },
     }
@@ -353,6 +361,16 @@ def main() -> int:
         *ldf_probe.DUMP_META.values(),
         ldf_probe.CHAIN_DUMPS["prd"],
     ]
+    source_root = args.nemo_source_root.resolve()
+    source_names = {
+        "zdftke.F90": source_root / "MY_SRC" / "zdftke.F90",
+        "zdfphy.F90": source_root / "MY_SRC" / "zdfphy.F90",
+        "zdfevd.F90": source_root / "MY_SRC" / "zdfevd.F90",
+        "ldfslp.F90": source_root / "MY_SRC" / "ldfslp.F90",
+    }
+    missing_sources = [str(path) for path in source_names.values() if not path.is_file()]
+    if missing_sources:
+        raise SystemExit(f"quoted NEMO source missing: {missing_sources}")
     artifact = {
         "schema": "dino-zdf-chain-tail-existing-v1",
         "status": "PROVISIONAL-DOWNSTREAM; ordered frontier remains row 17 while row 18 is open",
@@ -365,6 +383,10 @@ def main() -> int:
         "rows": rows,
         "controls": numeric_controls,
         "provenance_sha256": {name: sha256(run / name) for name in sorted(set(consumed))},
+        "oracle_source_sha256": {
+            name: {"path": str(path), "sha256": sha256(path)}
+            for name, path in source_names.items()
+        },
     }
     args.output.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n")
     print(
