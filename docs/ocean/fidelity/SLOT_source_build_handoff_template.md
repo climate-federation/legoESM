@@ -17,9 +17,10 @@ Canonical preamble:
 ```bash
 set -euo pipefail
 cd /tmp/codex-zdf-sweep
+repo=/tmp/codex-zdf-sweep
 base=/tmp/nemo-__LEAN_DONOR__
 oracle_root=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
-copy_guard=scripts/validate/ocean_fidelity/dino_1226/safe_copy_nemo_source.sh
+copy_guard=$repo/scripts/validate/ocean_fidelity/dino_1226/safe_copy_nemo_source.sh
 test "$(sha256sum "$copy_guard" | awk '{print $1}')" = __COPY_GUARD_SHA256__
 
 # Freeze the donor itself, not only files that a later overlay replaces.

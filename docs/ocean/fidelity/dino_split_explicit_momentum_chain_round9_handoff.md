@@ -3,6 +3,13 @@
 Date: 2026-08-29. This package is **DESIGNED, NOT RUN**. It adds no measured
 row and authorizes no physics change.
 
+Host execution receipt, 2026-08-29: the cascade completed through scoring,
+but required three shell-only corrections now folded into every block below:
+`grep` replaces the unavailable `rg`; each block enters its own repository
+directory and all cross-directory inputs use absolute paths (the former
+relative patch redirect failed after the OFF build changed directory); and
+`CODEX_SESSION_ID` is explicitly exported before the scorer child process.
+
 Correction, 2026-08-29: the original build block in commit `5328e23f489`
 is retired. It named the 55 GiB oracle root as a `cp -a` donor and did not
 explicitly bind the cumulative writer source stack. Do not run that block.
@@ -68,15 +75,16 @@ source /home/dbalwada/miniconda3/etc/profile.d/conda.sh
 conda activate nemo-build
 export TMPDIR=/tmp XDG_CACHE_HOME=/tmp/nemo-spg-qco-build-xdg
 cd /tmp/codex-zdf-sweep
+repo=/tmp/codex-zdf-sweep
 base=/tmp/nemo-row19-detwriter.kTFp14
 oracle_root=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
-stack_manifest=scripts/validate/ocean_fidelity/dino_1226/nemo_spg_qco_base_source_manifest.sha256
-copy_guard=scripts/validate/ocean_fidelity/dino_1226/safe_copy_nemo_source.sh
-patch_file=scripts/validate/ocean_fidelity/dino_1226/nemo_spg_qco_continuity_operands.patch
-row18_patch=scripts/validate/ocean_fidelity/dino_1226/nemo_row18_gdepw_htau.patch
-writer_patch=scripts/validate/ocean_fidelity/dino_1226/nemo_deterministic_dump_buffers.patch
-row19_patch=scripts/validate/ocean_fidelity/dino_1226/nemo_row19_raw_mxl.patch
-row19_remove_patch=scripts/validate/ocean_fidelity/dino_1226/nemo_row19_raw_mxl_remove.patch
+stack_manifest=$repo/scripts/validate/ocean_fidelity/dino_1226/nemo_spg_qco_base_source_manifest.sha256
+copy_guard=$repo/scripts/validate/ocean_fidelity/dino_1226/safe_copy_nemo_source.sh
+patch_file=$repo/scripts/validate/ocean_fidelity/dino_1226/nemo_spg_qco_continuity_operands.patch
+row18_patch=$repo/scripts/validate/ocean_fidelity/dino_1226/nemo_row18_gdepw_htau.patch
+writer_patch=$repo/scripts/validate/ocean_fidelity/dino_1226/nemo_deterministic_dump_buffers.patch
+row19_patch=$repo/scripts/validate/ocean_fidelity/dino_1226/nemo_row19_raw_mxl.patch
+row19_remove_patch=$repo/scripts/validate/ocean_fidelity/dino_1226/nemo_row19_raw_mxl_remove.patch
 test "$(sha256sum "$stack_manifest" | awk '{print $1}')" = 22fdaa20eeb3ff1c04ea22fa0dc293d3db9b9e6bf8cf9638075fdfb819b97e57
 test "$(sha256sum "$copy_guard" | awk '{print $1}')" = f1bfbc7e5428c2f532a26aa8197b368847c40421dae6704b33fb91afeb98e071
 test "$(sha256sum "$patch_file" | awk '{print $1}')" = aa3a1c99b8a32d431f027137f10fe4a02cd458929a9c8be5ef55e6636f5bed83
@@ -93,11 +101,11 @@ test "$(sha256sum "$base/cfgs/DINO/MY_SRC/dynspg_ts.F90" | awk '{print $1}')" = 
 test "$(sha256sum "$base/cfgs/DINO/MY_SRC/dino_dump_zero.F90" | awk '{print $1}')" = ddb1abfaf4ebb3b95791f262460ce7652aee868a40b9cbd05d01c874b3128780
 test "$(sha256sum "$base/cfgs/DINO/MY_SRC/zdftke.F90" | awk '{print $1}')" = 6a33079678505c105cae1edb8a52b9d70d02012d0eb3395673f4b62fe657a9fd
 test "$(find "$base/cfgs/DINO/MY_SRC" -maxdepth 1 -type f | wc -l)" -eq 28
-( cd "$base" && sha256sum -c "/tmp/codex-zdf-sweep/$stack_manifest" )
+( cd "$base" && sha256sum -c "$stack_manifest" )
 test "$(grep -c 'key_qco' "$base/cfgs/DINO/cpp_DINO.fcm")" -ge 1
 test "$(grep -c 'key_qcoTest_FluxForm' "$base/cfgs/DINO/cpp_DINO.fcm")" -eq 0
-test "$(rg -n 'CALL dino_dump_2d' "$base/cfgs/DINO/MY_SRC" -g '*.F90' | wc -l)" -eq 150
-test "$(rg -n 'CALL dino_dump_3d' "$base/cfgs/DINO/MY_SRC" -g '*.F90' | wc -l)" -eq 5
+test "$(grep -rE --include='*.F90' 'CALL dino_dump_2d' "$base/cfgs/DINO/MY_SRC" | wc -l)" -eq 150
+test "$(grep -rE --include='*.F90' 'CALL dino_dump_3d' "$base/cfgs/DINO/MY_SRC" | wc -l)" -eq 5
 for unit in 8980 8981 8982 8983 8984 8985; do
   test "$(grep -rE --include='*.F90' "OPEN\( UNIT=${unit}" "$base/cfgs/DINO/MY_SRC" | wc -l)" -eq 0
 done
@@ -133,7 +141,7 @@ rmdir "$reject_free"
 nemo_src=$(mktemp -d /tmp/nemo-spg-qco-src.XXXXXX)
 NEMO_SOURCE_BASE_MAX_MIB=3072 NEMO_SOURCE_COPY_MAX_MIB=512 \
   NEMO_SOURCE_MIN_FREE_MIB=4096 "$copy_guard" "$base" "$nemo_src"
-( cd "$nemo_src" && sha256sum -c "/tmp/codex-zdf-sweep/$stack_manifest" )
+( cd "$nemo_src" && sha256sum -c "$stack_manifest" )
 test "$(find "$nemo_src/cfgs/DINO/MY_SRC" -maxdepth 1 -type f | wc -l)" -eq 28
 
 # Build the manifest-exact deterministic OFF arm before adding the new writer.
@@ -265,6 +273,7 @@ cell plant must fail for every translated field.
 
 ```bash
 set -euo pipefail
+cd /tmp/codex-zdf-sweep
 ON=$(cat /tmp/spg-qco-row13-on-dir.txt)
 OFF=$(cat /tmp/spg-qco-row13-off-dir.txt)
 BIN_SHA=__MEASURED_SPG_QCO_BINARY_SHA256__
@@ -292,6 +301,7 @@ test "$(sha256sum "$MEASURED/scripts/validate/ocean_fidelity/dino_1226/split_exp
 test "$(sha256sum "$MEASURED/docs/ocean/fidelity/dino_split_explicit_momentum_chain_round8_artifact.json" | awk '{print $1}')" = 16883e8e140f3e25de24866d9deedf9dd6b18189ca4f280c1448144620b48a92
 export PYTHONPATH="$MEASURED/src:$MEASURED/packages/core:$MEASURED/packages/ocean:$MEASURED/scripts/validate/ocean_fidelity/dino_1226"
 : "${CODEX_SESSION_ID:?set CODEX_SESSION_ID to the active session id}"
+export CODEX_SESSION_ID
 cd "$MEASURED"
 DINO_1226_LANE=d180 JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES='' JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both \
 /home/dbalwada/legoESM/.venv/bin/python scripts/validate/ocean_fidelity/dino_1226/split_explicit_momentum_chain_round9.py \
