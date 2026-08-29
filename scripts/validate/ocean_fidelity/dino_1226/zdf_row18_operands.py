@@ -165,7 +165,13 @@ def main() -> int:
     ni, nj = jpi - 2 * hls, jpj - 2 * hls
     with netCDF4.Dataset(run / "mesh_mask.nc") as ds:
         active = np.moveaxis(np.asarray(ds["tmask"][0]), 0, -1)
-    active = active[hls:jpj - hls, hls:jpi - hls] > 0.5
+    # This canonical mesh_mask is already the halo-free (199,52,36) field;
+    # binary streams alone carry the 2-cell halo described by _read_dims.
+    if active.shape[:2] != (nj, ni):
+        raise AssertionError(
+            f"mesh mask interior shape changed: {active.shape[:2]} != {(nj, ni)}"
+        )
+    active = active > 0.5
     wet = (active[..., :-1] & active[..., 1:])
     if int(np.any(wet, axis=-1).sum()) != 9920:
         raise AssertionError("row18 wet-column census changed")
