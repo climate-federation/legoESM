@@ -7,11 +7,14 @@
       "drag+wind": {
         "residual_removal": 0.9928766949022818
       },
+      "kinetic_energy_gradient+wind": {
+        "residual_removal": 0.9928767442771345
+      },
       "lateral_friction+wind": {
         "residual_removal": 0.997604359368721
       },
-      "pressure_ke+wind": {
-        "residual_removal": 0.9928767443744916
+      "pressure_gradient+wind": {
+        "residual_removal": 0.9928767443744969
       },
       "vertical_advection+wind": {
         "residual_removal": 0.9928779320718727
@@ -30,11 +33,14 @@
       "drag+wind": {
         "residual_removal": -1.1375916373346229e-06
       },
+      "kinetic_energy_gradient+wind": {
+        "residual_removal": -0.0019262996905651253
+      },
       "lateral_friction+wind": {
         "residual_removal": 0.0687687868307687
       },
-      "pressure_ke+wind": {
-        "residual_removal": 0.6322386063606517
+      "pressure_gradient+wind": {
+        "residual_removal": 0.6323591523535514
       },
       "vertical_advection+wind": {
         "residual_removal": -8.344263019499643e-05
@@ -48,6 +54,29 @@
     }
   },
   "controls": {
+    "attribution_classifier": {
+      "confirming_score": {
+        "correlation_with_total_residual": 1.0,
+        "residual_removal": 1.0,
+        "rms_gain": 1.0,
+        "verdict": "CONFIRMS_CARRY"
+      },
+      "identity_confirms": true,
+      "orthogonal_refutes": true,
+      "refuting_score": {
+        "correlation_with_total_residual": -5.551115123125784e-17,
+        "residual_removal": -0.4142135623730949,
+        "rms_gain": 0.9999999999999999,
+        "verdict": "REFUTES_CARRY"
+      }
+    },
+    "base_reconstruction": {
+      "bar": 1e-12,
+      "planted_u_fires": true,
+      "planted_u_normalized_error": 1.0000000000050667e-06,
+      "u_pass": true,
+      "v_pass": true
+    },
     "campaign_classifier_and_alignment": {
       "actual_binding_campaign_gate": "DEBT",
       "actual_binding_error": 0.0002740311743349557,
@@ -115,13 +144,23 @@
       "zero_shift_is_best": true
     },
     "donor_equalization": {
-      "changes_score": true,
+      "changes_verdict_path": true,
       "east_donor": [
         49,
         50
       ],
-      "equalized_prediction_error": 0.9792034895211493,
-      "legacy_prediction_error": 0.007130447331820113,
+      "equalized_score": {
+        "corrected_residual_reduction": 0.02079651047885067,
+        "prediction_correlation": 0.2026900415810054,
+        "prediction_normalized_error": 0.9792034895211493,
+        "verdict": "UNRESOLVED_BRIDGE_WIND_SOURCE"
+      },
+      "faithful_score": {
+        "corrected_residual_reduction": 0.9928695526681799,
+        "prediction_correlation": 0.999974655141223,
+        "prediction_normalized_error": 0.007130447331820113,
+        "verdict": "CONFIRMS_BRIDGE_WIND_SOURCE"
+      },
       "receiver": [
         49,
         49
@@ -311,6 +350,13 @@
           "field": "salt_flux_v_int"
         }
       ]
+    },
+    "term_error_closure": {
+      "bar": 1e-10,
+      "planted_u_fires": true,
+      "planted_u_normalized_closure": 9.999999947495682e-07,
+      "u_pass": true,
+      "v_pass": true
     }
   },
   "counterfactual": {
@@ -383,6 +429,22 @@
         "rms_ratio": 1.0000083828300064,
         "structural_zero_reference": false
       },
+      "kinetic_energy_gradient": {
+        "attribution": {
+          "correlation_with_total_residual": -0.06987885937523067,
+          "residual_removal": -2.731148640577885e-14,
+          "rms_gain": 3.8582650119099966e-13,
+          "verdict": "REFUTES_CARRY"
+        },
+        "campaign_gate": "NEAR-CLASS",
+        "correlation": 1.0,
+        "mean_abs_ratio": 1.0,
+        "n": 9758,
+        "normalized_rms_error": 2.2234356722727573e-16,
+        "per_element_max_error_over_nemo_rms": 6.8662038656038e-15,
+        "rms_ratio": 1.0,
+        "structural_zero_reference": false
+      },
       "lateral_friction": {
         "attribution": {
           "correlation_with_total_residual": 0.9426393223555646,
@@ -399,20 +461,20 @@
         "rms_ratio": 0.9998658624617099,
         "structural_zero_reference": false
       },
-      "pressure_ke": {
+      "pressure_gradient": {
         "attribution": {
-          "correlation_with_total_residual": 0.017158481033315496,
-          "residual_removal": 1.355641010558628e-08,
-          "rms_gain": 7.944296440702971e-07,
+          "correlation_with_total_residual": 0.01715948637943879,
+          "residual_removal": 1.3557164946220723e-08,
+          "rms_gain": 7.944289237647815e-07,
           "verdict": "REFUTES_CARRY"
         },
         "campaign_gate": "NEAR-CLASS",
         "correlation": 1.0,
-        "mean_abs_ratio": 0.9999999999999275,
+        "mean_abs_ratio": 0.9999999999999267,
         "n": 9758,
-        "normalized_rms_error": 1.5711988514546603e-12,
-        "per_element_max_error_over_nemo_rms": 9.118559090548265e-12,
-        "rms_ratio": 0.9999999999999969,
+        "normalized_rms_error": 1.5699933824477664e-12,
+        "per_element_max_error_over_nemo_rms": 9.111571453469666e-12,
+        "rms_ratio": 0.9999999999999968,
         "structural_zero_reference": false
       },
       "vertical_advection": {
@@ -497,6 +559,22 @@
         "rms_ratio": 1.0000018274336318,
         "structural_zero_reference": false
       },
+      "kinetic_energy_gradient": {
+        "attribution": {
+          "correlation_with_total_residual": -0.8208435738586591,
+          "residual_removal": -0.0019262996905651253,
+          "rms_gain": 0.002339918783242175,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.9999999999338174,
+        "mean_abs_ratio": 0.9999850030258296,
+        "n": 9868,
+        "normalized_rms_error": 2.723148589093772e-05,
+        "per_element_max_error_over_nemo_rms": 0.00041701699857617594,
+        "rms_ratio": 0.9999752899892176,
+        "structural_zero_reference": false
+      },
       "lateral_friction": {
         "attribution": {
           "correlation_with_total_residual": 0.3666841571421037,
@@ -513,20 +591,20 @@
         "rms_ratio": 0.9998769273642392,
         "structural_zero_reference": false
       },
-      "pressure_ke": {
+      "pressure_gradient": {
         "attribution": {
-          "correlation_with_total_residual": 0.9293190067460716,
-          "residual_removal": 0.6322386063606504,
-          "rms_gain": 0.9085035163916679,
+          "correlation_with_total_residual": 0.9293208299298419,
+          "residual_removal": 0.6323591523535501,
+          "rms_gain": 0.9105717018954679,
           "verdict": "UNRESOLVED"
         },
         "campaign_gate": "DEBT",
-        "correlation": 0.9999999998534946,
-        "mean_abs_ratio": 0.9999988827224139,
+        "correlation": 0.99999999985399,
+        "mean_abs_ratio": 0.9999988679855453,
         "n": 9868,
-        "normalized_rms_error": 2.6938696431475313e-05,
-        "per_element_max_error_over_nemo_rms": 0.0003538944541577475,
-        "rms_ratio": 0.9999791015359356,
+        "normalized_rms_error": 2.6942279645783727e-05,
+        "per_element_max_error_over_nemo_rms": 0.0003541831482071407,
+        "rms_ratio": 0.9999790735244436,
         "structural_zero_reference": false
       },
       "vertical_advection": {
@@ -563,7 +641,7 @@
       },
       "wind": {
         "attribution": {
-          "correlation_with_total_residual": NaN,
+          "correlation_with_total_residual": null,
           "residual_removal": 0.0,
           "rms_gain": 0.0,
           "verdict": "UNRESOLVED"
@@ -577,9 +655,11 @@
         "sample_count": 9868,
         "structural_zero_reference": true,
         "zero_control": {
+          "identical_zero_gate": "UNMEASURED_ZERO_REFERENCE",
           "model_exact_zero": true,
           "oracle_exact_zero": true,
-          "planted_nonzero_fires": true
+          "planted_nonzero_fires": true,
+          "planted_nonzero_gate": "DEBT_NONZERO_AGAINST_ZERO_REFERENCE"
         }
       }
     }
@@ -587,7 +667,7 @@
   "git": {
     "clean_after": true,
     "clean_before": true,
-    "commit": "1c736e5f5123d9894d4c6603847b8fac9ae7a337"
+    "commit": "fdce09795a11370337fb0e93c4cccc72a40cc6d3"
   },
   "inferred_coriolis_ledger": {
     "fp64_roundoff_envelope_pass_u": true,
@@ -616,6 +696,13 @@
   },
   "kt": 5761,
   "lane": "d180",
+  "lateral_friction_levels": {
+    "lego_later_3d_dissipative_pass": "BEFORE_BAROTROPIC_RESULT_DISCARDED",
+    "lego_live_barotropic_first_pass": "NOW",
+    "lego_source": "ocean_model_latlon_cgrid.py:8950-9030",
+    "nemo_dynldf_operand": "BEFORE",
+    "nemo_source": "stpmlf.F90:319-322; dynldf.F90:69-119"
+  },
   "nemo_base_reconstruction": {
     "u": {
       "correlation": 0.9999999999999998,
@@ -634,8 +721,14 @@
       "rms_ratio": 1.0
     }
   },
+  "oracle_runtime_flags": {
+    "ln_apr_dyn": "F",
+    "ln_bt_fw": "F",
+    "ln_drgice_imp": "F",
+    "ln_isfcav": "F"
+  },
   "ordered_continuation": {
-    "row_1_1": "CLOSED_BRIDGE_WIND_SOURCE",
+    "row_1_1": "OPEN_SOURCE_LOCALIZED_FAITHFUL_TOTAL_DEBT",
     "row_1_2": "ORDERED_BLOCKED_UNLESS_FAITHFUL_TOTAL_AT_BAR",
     "row_1_3": "ORDERED_BLOCKED_UNLESS_FAITHFUL_TOTAL_AT_BAR",
     "rows_2_to_6": "ORDERED_BLOCKED"
@@ -650,8 +743,8 @@
     "nemo_dynvor": "f227e8b629bd491ac06ca1816fdffc2206a3ce1012c531f865de6120b0a7b5d7",
     "nemo_dynzdf": "cb5b27ac93148deffc0bdf9c6927053dfd1678e095fedc6127b54c0f2aab08aa",
     "nemo_stpmlf": "26849c4fa34305317881959dd5a1e41af9b13aa4f96a290a998add955a73a283",
-    "preregistration": "9a4906e7908f04a5646f730dce72f633feb7e5c4efa5fa9bef2c9d54e33744c9",
-    "probe": "cb5f98c43b5e97e176a8d3ef395c97de2c5d68828f7e39b44778a261ae4137ee",
+    "preregistration": "d6f12bb4538eb5b500f403387eebbea57013003a32b463a2d8bea6806373d69f",
+    "probe": "dab1dae2107cd61e7b1f2b98f5dd2f87d7586a0d0907d5814b4a61ec3d11320c",
     "production_barotropic": "b837dea5562d5230401ee60c2f020b8146a20bcc266dbc5bf68738917a531598",
     "production_bridge": "7b91414ff5c6de79366d7c6efe3c8966d3d889034d3341fe56ba4796b53367a7",
     "production_dino_card": "faec0ce345f151573b36a2805ae1226cfd2e3381e442ee05934ef14e5ad5fcf4",
@@ -688,8 +781,8 @@
   "schema": "dino-split-explicit-momentum-chain-round2-v1",
   "session_id": "01a04e34-d1fb-73e0-b25a-177641f0a246",
   "term_error_sum_closure": {
-    "u_normalized_to_total_residual": 1.073873038300649e-12,
-    "v_normalized_to_total_residual": 1.0718441865678136e-11
+    "u_normalized_to_total_residual": 1.0764362196730072e-12,
+    "v_normalized_to_total_residual": 9.973535071390227e-12
   },
   "term_metrics": {
     "u": {
@@ -725,6 +818,22 @@
         "rms_ratio": 1.0000083828300064,
         "structural_zero_reference": false
       },
+      "kinetic_energy_gradient": {
+        "attribution": {
+          "correlation_with_total_residual": -0.025414490022975612,
+          "residual_removal": -2.220446049250313e-16,
+          "rms_gain": 2.7511155459628533e-15,
+          "verdict": "REFUTES_CARRY"
+        },
+        "campaign_gate": "NEAR-CLASS",
+        "correlation": 1.0,
+        "mean_abs_ratio": 1.0,
+        "n": 9758,
+        "normalized_rms_error": 2.2234356722727573e-16,
+        "per_element_max_error_over_nemo_rms": 6.8662038656038e-15,
+        "rms_ratio": 1.0,
+        "structural_zero_reference": false
+      },
       "lateral_friction": {
         "attribution": {
           "correlation_with_total_residual": 0.00611416623003355,
@@ -741,20 +850,20 @@
         "rms_ratio": 0.9998658624617099,
         "structural_zero_reference": false
       },
-      "pressure_ke": {
+      "pressure_gradient": {
         "attribution": {
-          "correlation_with_total_residual": -0.004241828586100606,
-          "residual_removal": -2.37654340651261e-11,
-          "rms_gain": 5.664638735879853e-09,
+          "correlation_with_total_residual": -0.00423279930571962,
+          "residual_removal": -2.371414176138842e-11,
+          "rms_gain": 5.66463359977931e-09,
           "verdict": "REFUTES_CARRY"
         },
         "campaign_gate": "NEAR-CLASS",
         "correlation": 1.0,
-        "mean_abs_ratio": 0.9999999999999275,
+        "mean_abs_ratio": 0.9999999999999267,
         "n": 9758,
-        "normalized_rms_error": 1.5711988514546603e-12,
-        "per_element_max_error_over_nemo_rms": 9.118559090548265e-12,
-        "rms_ratio": 0.9999999999999969,
+        "normalized_rms_error": 1.5699933824477664e-12,
+        "per_element_max_error_over_nemo_rms": 9.111571453469666e-12,
+        "rms_ratio": 0.9999999999999968,
         "structural_zero_reference": false
       },
       "vertical_advection": {
@@ -855,6 +964,22 @@
         "rms_ratio": 1.0000018274336318,
         "structural_zero_reference": false
       },
+      "kinetic_energy_gradient": {
+        "attribution": {
+          "correlation_with_total_residual": -0.8208435738586549,
+          "residual_removal": -0.0019262996905651253,
+          "rms_gain": 0.0023399187832421654,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.9999999999338174,
+        "mean_abs_ratio": 0.9999850030258296,
+        "n": 9868,
+        "normalized_rms_error": 2.723148589093772e-05,
+        "per_element_max_error_over_nemo_rms": 0.00041701699857617594,
+        "rms_ratio": 0.9999752899892176,
+        "structural_zero_reference": false
+      },
       "lateral_friction": {
         "attribution": {
           "correlation_with_total_residual": 0.3666841571421021,
@@ -871,20 +996,20 @@
         "rms_ratio": 0.9998769273642392,
         "structural_zero_reference": false
       },
-      "pressure_ke": {
+      "pressure_gradient": {
         "attribution": {
-          "correlation_with_total_residual": 0.9293190067460717,
-          "residual_removal": 0.6322386063606517,
-          "rms_gain": 0.9085035163916643,
+          "correlation_with_total_residual": 0.9293208299298424,
+          "residual_removal": 0.6323591523535514,
+          "rms_gain": 0.9105717018954642,
           "verdict": "UNRESOLVED"
         },
         "campaign_gate": "DEBT",
-        "correlation": 0.9999999998534946,
-        "mean_abs_ratio": 0.9999988827224139,
+        "correlation": 0.99999999985399,
+        "mean_abs_ratio": 0.9999988679855453,
         "n": 9868,
-        "normalized_rms_error": 2.6938696431475313e-05,
-        "per_element_max_error_over_nemo_rms": 0.0003538944541577475,
-        "rms_ratio": 0.9999791015359356,
+        "normalized_rms_error": 2.6942279645783727e-05,
+        "per_element_max_error_over_nemo_rms": 0.0003541831482071407,
+        "rms_ratio": 0.9999790735244436,
         "structural_zero_reference": false
       },
       "vertical_advection": {
@@ -921,7 +1046,7 @@
       },
       "wind": {
         "attribution": {
-          "correlation_with_total_residual": NaN,
+          "correlation_with_total_residual": null,
           "residual_removal": 0.0,
           "rms_gain": 0.0,
           "verdict": "UNRESOLVED"
@@ -935,14 +1060,16 @@
         "sample_count": 9868,
         "structural_zero_reference": true,
         "zero_control": {
+          "identical_zero_gate": "UNMEASURED_ZERO_REFERENCE",
           "model_exact_zero": true,
           "oracle_exact_zero": true,
-          "planted_nonzero_fires": true
+          "planted_nonzero_fires": true,
+          "planted_nonzero_gate": "DEBT_NONZERO_AGAINST_ZERO_REFERENCE"
         }
       },
       "wind_faithful": {
         "attribution": {
-          "correlation_with_total_residual": NaN,
+          "correlation_with_total_residual": null,
           "residual_removal": 0.0,
           "rms_gain": 0.0,
           "verdict": "UNRESOLVED"
@@ -956,9 +1083,11 @@
         "sample_count": 9868,
         "structural_zero_reference": true,
         "zero_control": {
+          "identical_zero_gate": "UNMEASURED_ZERO_REFERENCE",
           "model_exact_zero": true,
           "oracle_exact_zero": true,
-          "planted_nonzero_fires": true
+          "planted_nonzero_fires": true,
+          "planted_nonzero_gate": "DEBT_NONZERO_AGAINST_ZERO_REFERENCE"
         }
       }
     }

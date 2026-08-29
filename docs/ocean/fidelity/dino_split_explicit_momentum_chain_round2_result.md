@@ -2,7 +2,7 @@
 
 Date: 2026-08-29. Session:
 `01a04e34-d1fb-73e0-b25a-177641f0a246`. Clean measurement commit:
-`1c736e5f5123d9894d4c6603847b8fac9ae7a337`.
+`fdce09795a11370337fb0e93c4cccc72a40cc6d3`.
 
 ## Verdict
 
@@ -11,8 +11,8 @@ the original 9,758-face residual, its error has correlation
 `0.9999746989`, RMS gain `1.0002839648`, and removal `0.9928767443`; it
 therefore **CONFIRMS_CARRY** under the frozen three-axis bar.  Every other U
 term refutes carrying the original residual.  The signed term-error ledger
-reconstructs the assembled residual to `1.0738730e-12` of its RMS (U) and
-`1.0718442e-11` (V).
+reconstructs the assembled residual to `1.0764362e-12` of its RMS (U) and
+`9.9735351e-12` (V).
 
 The independently preregistered basin correction changes only the initial
 previous-stress carry from the historical NEMO-U-as-lego-T representation to
@@ -45,10 +45,11 @@ the original assembled residual.
 
 | Order | Constituent and active NEMO source | U `E` / gate | U `corrR`, gain, removal | Original-residual verdict | V `E` / gate |
 |---:|---|---|---|---|---|
-| 1 | pressure + KE gradient: `dynadv.F90:89-95`, `dynhpg.F90:348-413`; called at `stpmlf.F90:309-314,324-328` | `1.5712e-12` / NEAR-CLASS | `-0.004242`, `5.66e-9`, `-2.38e-11` | REFUTES_CARRY | `2.69387e-5` / DEBT |
-| 2 | vertical advection: `dynadv.F90:97-103`; `stpmlf.F90:309-314` | `6.42855e-5` / DEBT | `+0.009092`, `7.16e-5`, `6.15e-7` | REFUTES_CARRY | `1.01641e-4` / DEBT |
-| 3 | total EEN vorticity/Coriolis: `dynvor.F90:147-155`; `stpmlf.F90:315-318` | `2.97729e-5` / DEBT | `-0.112407`, `0.034481`, `-0.004485` | REFUTES_CARRY | `2.04328e-5` / DEBT |
-| 4 | lateral friction: `dynldf.F90:69-85,118-119`; `stpmlf.F90:319-322` | `7.62755e-4` / DEBT | `+0.006114`, `0.006513`, `0.000020` | REFUTES_CARRY | `3.26464e-3` / DEBT |
+| 1a | kinetic-energy gradient: `dynadv.F90:89-95`; `stpmlf.F90:309-314` | `2.22344e-16` / NEAR-CLASS | `-0.025414`, `2.75e-15`, `-2.22e-16` | REFUTES_CARRY | `2.72315e-5` / DEBT |
+| 1b | vertical advection: `dynadv.F90:97-103`; `stpmlf.F90:309-314` | `6.42855e-5` / DEBT | `+0.009092`, `7.16e-5`, `6.15e-7` | REFUTES_CARRY | `1.01641e-4` / DEBT |
+| 2 | total EEN vorticity/Coriolis: `dynvor.F90:147-193`; `stpmlf.F90:315-318` | `2.97729e-5` / DEBT | `-0.112407`, `0.034481`, `-0.004485` | REFUTES_CARRY | `2.04328e-5` / DEBT |
+| 3 | lateral friction: `dynldf.F90:69-119`; `stpmlf.F90:319-322` | `7.62755e-4` / DEBT | `+0.006114`, `0.006513`, `0.000020` | REFUTES_CARRY | `3.26464e-3` / DEBT |
+| 4 | hydrostatic pressure gradient: `dynhpg.F90:348-413`; `stpmlf.F90:324-328` | `1.56999e-12` / NEAR-CLASS | `-0.004233`, `5.66e-9`, `-2.37e-11` | REFUTES_CARRY | `2.69423e-5` / DEBT |
 | 5 | REST depth mean: `dynspg_ts.F90:316-339` | base reconstruction control | — | exact-ledger prerequisite | base reconstruction control |
 | 6 | pre-loop 2-D Coriolis removal: `dynspg_ts.F90:358-370` | `3.01037e-5` / DEBT | `+0.104576`, `0.034268`, `0.003018` | REFUTES_CARRY | `1.98758e-5` / DEBT |
 | 7 | baroclinic-residual drag: `dynspg_ts.F90:372-400` | `1.41810e-5` / DEBT | `+0.061012`, `2.95e-6`, `1.81e-7` | REFUTES_CARRY | `2.82178e-6` / DEBT |
@@ -67,34 +68,58 @@ zero RMS.
 ## Post-correction tail and ordered continuation
 
 Rescoring every term against the faithful U residual leaves no confirming
-single-term owner.  Pressure/KE, vertical advection, vorticity, Coriolis
-removal, drag, and faithful wind all REFUTE_CARRY.  Lateral friction is the
-largest remaining single term but is **UNRESOLVED**: correlation `0.9426393`,
-gain `0.9133374`, removal `0.6612415`.  V is also composite: pressure/KE is
-the strongest single candidate (`corrR=0.9293190`, gain `0.9085035`, removal
-`0.6322386`) but remains UNRESOLVED; lateral friction, vorticity, and the 2-D
-Coriolis removal are also unresolved.
+single-term owner.  Kinetic-energy gradient, pressure gradient, vertical
+advection, vorticity, Coriolis removal, drag, and faithful wind all
+REFUTE_CARRY.  Lateral friction is the largest remaining single term but is
+**UNRESOLVED**: correlation `0.9426393`, gain `0.9133374`, removal
+`0.6612415`.
 
-The next row-1.1 design is therefore a preregistered cancellation peel of the
-faithful tail, beginning in source order and treating the EEN-vorticity /
-pre-loop-Coriolis pair together before any physics edit.  Their separate U
-errors are each about `4.8x` the faithful residual and neither carries it,
-which is the campaign's cancelling-pair signature.  Lateral friction is then
-rescored with that pair held.  For V, pressure/KE is the first unresolved
-source-ordered candidate and must be tested against the same pair.  Existing
-dumps remain sufficient for that design; no later execution-chain row is
-opened and no coefficient or production physics is changed here.
+The formal next row-1.1 peel is vertical advection: kinetic-energy gradient is
+NEAR-CLASS, and vertical advection is the first remaining DEBT term in the
+registered NEMO source order.  Its standalone error refutes carrying the
+faithful residual (`corrR=0.0211173`, gain `0.0100371`, removal `0.0001691`),
+but the ordered protocol does not permit skipping it.  Once that disposition
+is closed, EEN vorticity and the pre-loop Coriolis removal form the next
+cancelling-pair design: their separate U errors are about `4.8x` the faithful
+residual and neither carries it.  Lateral friction follows in source order;
+its strong unresolved score is additionally mechanism-backed by a production
+level mismatch.  legoESM's live first barotropic pass evaluates lateral
+friction at NOW (`ocean_model_latlon_cgrid.py:8950-9030`), while NEMO
+`dyn_ldf` evaluates BEFORE (`stpmlf.F90:319-322`; `dynldf.F90:69-119`).  The
+later legoESM BEFORE pass retains only the three-dimensional dissipative
+increment and discards its barotropic result.
+
+V is also composite.  Hydrostatic pressure gradient is its strongest
+descriptive unresolved term (`corrR=0.9293208`, gain `0.9105717`, removal
+`0.6323592`), while kinetic-energy gradient, lateral friction, vorticity, and
+the 2-D Coriolis removal are also unresolved.  This does not open a separate V
+owner or any later execution-chain row while U row 1.1 remains open.  No
+coefficient or production physics is changed here.
 
 ## Controls, provenance, and attempt audit
 
 - The NEMO `keg + zad + vor + ldf + hpg` reconstruction matches the existing
-  stage-06 accumulated RHS within the registered `1e-12` normalized bar.
+  stage-06 accumulated RHS within the registered `1e-12` normalized bar; a
+  planted `1.0000000e-6` U offset fires the control.
+- The signed term-error sum closes the assembled residual at
+  `1.0764362e-12` U and `9.9735351e-12` V under its registered `1e-10` bar; a
+  planted `9.9999999e-7` U closure error fires it.
 - The inferred 2-D Coriolis ledger reconstructs final forcing inside an
   explicit fp64 operation-count envelope: maximum differences are
   `6.7763e-21` U and `3.3881e-21` V; a material planted offset breaches it.
+- The attribution classifier's identity plant produces correlation/gain/
+  removal `1/1/1` and CONFIRMS_CARRY.  Its orthogonal plant produces
+  correlation `-5.55e-17`, gain `1`, removal `-0.4142` and REFUTES_CARRY.
 - Actual alignment selects zero shift; identity and planted campaign-gate
   controls pass.  Every non-stress entry leaf is bit-identical between the
   legacy and faithful arms.
+- The east-donor plant changes the full ownership verdict from
+  CONFIRMS_BRIDGE_WIND_SOURCE (receiver `[49,49]`, east donor `[49,50]`) to
+  UNRESOLVED_BRIDGE_WIND_SOURCE, not merely its numeric score.  Exact-zero V
+  wind uses a planted nonzero control and serializes unavailable normalized
+  metrics as JSON `null` under strict `allow_nan=False` output.
+- The receipt asserts the active oracle flags `ln_apr_dyn=F`, `ln_bt_fw=F`,
+  `ln_drgice_imp=F`, and `ln_isfcav=F` before interpreting dead operands.
 - The accepted receipt hashes 18 existing dumps, seven run inputs, the active
   NEMO sources, all production/scorer modules, the probe, and preregistration.
 - Invalid attempts were rejected before admission for terminal-level mask
@@ -102,13 +127,18 @@ opened and no coefficient or production physics is changed here.
   normalization.  A later clean run exposed and retracted use of `phys_u` as
   the standalone wind term; the accepted probe reuses the prior campaign's
   production `surface_stress_faces` spy and exact F-slow thickness reduction.
-  A clean interim receipt was superseded by the final post-faithful rescore.
+  A reviewer-proposed lateral-friction BEFORE diagnostic was also rejected:
+  it failed the signed closure gate because it does not represent the live
+  barotropic pass.  Source tracing established the production NOW pass and
+  the discarded later BEFORE barotropic result, so the accepted measurement
+  restores NOW and stamps both levels.  No rejected attempt produced the
+  admitted artifact.
 
 No new NEMO writer was needed, so no SLOT block was allocated.  This lane ran
 no GPU, MPI process, or NEMO integration.
 
 Machine receipt:
 `docs/ocean/fidelity/dino_split_explicit_momentum_chain_round2_artifact.json`,
-SHA-256 `cf76649114f9dc646ee125ca0c1b146b6ea1dad81f2b6615f5d330e1e75a8476`.
+SHA-256 `8dcd1bedfa1e47d7cc27a5cef722063da76510c2a87d13c2168602d4c2e0cd0a`.
 Accepted run log SHA-256:
-`56ba98fbe884b47e0c25815a5f40958b491d57a0cb9c98eca7d1cad2287fd34c`.
+`70d33d847c4a87681889589c4366da5268b6e7345d2d7f8506e61f1a24b35261`.
