@@ -118,8 +118,8 @@ class DINOConfig:
 
     # T/u-face horizontal metric convention (#1226) fed to
     # LatLonCGridOceanConfig.metric_convention (see that field's docstring in
-    # state.py for the NEMO usr_def_hgr.F90 citation + the #516 v-face
-    # exemption). Default "exact" is BIT-IDENTICAL to every prior DINO run;
+    # state.py for the NEMO usr_def_hgr.F90 citation + the #516 shared-metric
+    # contract). Default "exact" is BIT-IDENTICAL to every prior DINO run;
     # only the nemo_dino_kamm/_mlf DINO_RECIPES cards set "nemo_isotropic".
     metric_convention: str = "exact"
 

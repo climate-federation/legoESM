@@ -1788,9 +1788,10 @@ class LatLonCGridOceanConfig(NamedTuple):
     # usr_def_hgr.F90 closed form ``pe1t = pe2t`` (see
     # create_mercator_grid's docstring for the full citation) -- ONLY the
     # nemo_dino_kamm*/nemo_faithful_grid oracle cards set this; every other
-    # recipe stays on "exact". Does NOT touch the v-face metric (#516
-    # vface_zonal_cos_lat invariant) -- see ensure_geometry/
-    # create_latlon_geometry docstrings. Dispatch raises in
+    # recipe stays on "exact". The separate selector below chooses the
+    # corrected versus legacy dx_v latitude only when this convention is
+    # nemo_isotropic on a variable-dlat grid; the #516 shared-metric
+    # invariants hold under either value. Dispatch raises in
     # LatLonCGridOceanModel._validate_config on an unknown value.
     metric_convention: str = "exact"
 
