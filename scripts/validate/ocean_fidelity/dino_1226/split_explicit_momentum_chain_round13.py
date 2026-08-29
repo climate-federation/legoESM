@@ -23,13 +23,17 @@ import jaxlib
 import numpy as np
 
 from legoesm.core.precision import PrecisionPolicy, set_policy
+import legoesm.ocean.dynamics.barotropic_latlon_cgrid as barotropic_module
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     nemo_literal_continuity_divergence,
     nemo_literal_metric_transports,
     nemo_ssh_avg_face_depth,
 )
+import legoesm.ocean.experiments.dino as dino_module
 from legoesm.ocean.experiments.dino import dino_config_for_recipe
+import legoesm.ocean.fidelity.nemo_io as nemo_io_module
 from legoesm.ocean.fidelity.nemo_io import read_nemo_mesh_mask, read_nemo_restart
+import legoesm.ocean.fidelity.nemo_state_bridge as bridge_module
 from legoesm.ocean.fidelity.nemo_state_bridge import bridge_nemo_to_legoesm_topo
 
 import spg_substep_chain as inherited
@@ -68,6 +72,21 @@ def main() -> int:
     if commit != args.package_commit or subprocess.check_output(
             ["git", "status", "--porcelain"], cwd=root, text=True):
         raise SystemExit("clean package commit required")
+    production_paths = {
+        "barotropic": Path(barotropic_module.__file__).resolve(),
+        "dino_card": Path(dino_module.__file__).resolve(),
+        "nemo_io": Path(nemo_io_module.__file__).resolve(),
+        "state_bridge": Path(bridge_module.__file__).resolve(),
+        "inherited_probe": Path(inherited.__file__).resolve(),
+        "round9_scorer": Path(r9.__file__).resolve(),
+    }
+    escaped = {name: str(path) for name, path in production_paths.items()
+               if not path.is_relative_to(root)}
+    if escaped:
+        raise SystemExit(f"production imports escaped measured checkout: {escaped}")
+    if os.environ.get("DINO_1226_LANE") != "d180" \
+            or os.environ.get("LEGOESM_NEMO_E3T") != "both":
+        raise SystemExit("DINO_1226_LANE=d180 and LEGOESM_NEMO_E3T=both required")
     raw = _load_json(args.round10_raw, R10_RAW_SHA, "round10 raw")
     r11 = _load_json(args.round11_artifact, R11_SHA, "round11")
     r12 = _load_json(args.round12_artifact, R12_SHA, "round12")
@@ -79,6 +98,10 @@ def main() -> int:
         raise SystemExit("association fix is not authorized")
 
     run = args.run.resolve()
+    input_sha256 = {
+        "mesh_mask.nc": sha256(run / "mesh_mask.nc"),
+        inherited.RESTART_FILE: sha256(run / inherited.RESTART_FILE),
+    }
     for name, expected in raw["dump_sha256"].items():
         if sha256(run / name) != expected:
             raise SystemExit(f"{name}: SHA changed")
@@ -153,7 +176,14 @@ def main() -> int:
                            "jax": jax.__version__, "jaxlib": jaxlib.__version__,
                            "numpy": np.__version__},
                "bindings": {"round10_raw_sha256": R10_RAW_SHA, "round11_sha256": R11_SHA,
-                            "round12_sha256": R12_SHA, "dump_sha256": raw["dump_sha256"]},
+                            "round12_sha256": R12_SHA, "dump_sha256": raw["dump_sha256"],
+                            "input_sha256": input_sha256,
+                            "production_sha256": {
+                                name: sha256(path) for name, path in production_paths.items()
+                            }},
+               "production_paths": {
+                   name: str(path) for name, path in production_paths.items()
+               },
                "measurements": rows, "first_diverged_subrow": first,
                "controls": controls, "disposition": disposition,
                "later_rows": {"1.4": "RELEASED" if first is None else "ORDERED_BLOCKED",
