@@ -396,6 +396,11 @@ class GMRediConfig(NamedTuple):
     # ``"nemo_literal"`` evaluates eosbn2.F90's zn*r1_rho0 directly and is
     # selected only by the DINO NEMO cards.
     slope_prd_evaluation: str = "density_roundtrip"
+    # Arithmetic form of ldfslp's horizontal metric application. ``division``
+    # is the historical path. ``nemo_reciprocal`` evaluates and carries the
+    # reciprocal as a separate fp64 value before multiplying, matching
+    # domhgr.F90:140 + ldfslp.F90:242-243. The DINO NEMO cards opt in.
+    slope_metric_evaluation: str = "division"
     # NEMO ldfslp horizontal (1-2-1)⊗(1-2-1)/16 Shapiro smoother on the final
     # interface slopes (ldfslp.F90:304-315).  legoESM omitted it, leaving the
     # interior slope amplitude ~1.27x too large; wet-renormalized so land drops

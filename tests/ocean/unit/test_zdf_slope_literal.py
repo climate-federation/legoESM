@@ -123,18 +123,22 @@ def test_row30_selectors_are_scoped_to_the_two_dino_nemo_cards():
             assert cfg.gm_redi_slope_n2_evaluation == "carried_step_entry"
             assert cfg.gm_redi_slope_prd_geometry_stage == "before_step"
             assert cfg.gm_redi_slope_prd_evaluation == "nemo_literal"
+            assert cfg.gm_redi_slope_metric_evaluation == "nemo_reciprocal"
         else:
             assert cfg.gm_redi_slope_n2_evaluation == "recompute", name
             assert cfg.gm_redi_slope_prd_geometry_stage == "current_step", name
             assert cfg.gm_redi_slope_prd_evaluation == "density_roundtrip", name
+            assert cfg.gm_redi_slope_metric_evaluation == "division", name
 
     assert GMRediConfig().slope_n2_evaluation == "recompute"
     assert GMRediConfig().slope_prd_geometry_stage == "current_step"
     assert GMRediConfig().slope_prd_evaluation == "density_roundtrip"
+    assert GMRediConfig().slope_metric_evaluation == "division"
     explicit_legacy = dataclasses.replace(
         DINOConfig(), gm_redi_slope_n2_evaluation="recompute",
         gm_redi_slope_prd_geometry_stage="current_step",
-        gm_redi_slope_prd_evaluation="density_roundtrip")
+        gm_redi_slope_prd_evaluation="density_roundtrip",
+        gm_redi_slope_metric_evaluation="division")
     assert explicit_legacy == DINOConfig()
 
     fe = dino_config_for_recipe("nemo_dino_kamm")
@@ -145,3 +149,21 @@ def test_row30_selectors_are_scoped_to_the_two_dino_nemo_cards():
     assert dino_lat_lon_model_config(
         dino_lat_lon_grid(mlf, n_lon=8), mlf, physics=True)[0].outer_integrator \
         == "leapfrog"
+
+
+def test_nemo_reciprocal_metric_matches_hand_computed_rounding_and_is_red():
+    """0.1/7 differs by one ULP from 0.1*(1/7) in binary64."""
+    zg = jnp.asarray([[[0.1]]], dtype=jnp.float64)
+    metric = jnp.asarray([[7.0]], dtype=jnp.float64)
+
+    def literal(z, e):
+        reciprocal = jax.lax.optimization_barrier(jnp.float64(1.0) / e)
+        return jax.lax.optimization_barrier(z * reciprocal[:, :, None])
+
+    want = np.float64(0.1) * (np.float64(1.0) / np.float64(7.0))
+    got = np.asarray(jax.jit(literal)(zg, metric))[0, 0, 0]
+    divided = np.float64(0.1) / np.float64(7.0)
+    assert got == want
+    assert got.view(np.uint64) != divided.view(np.uint64)
+    assert np.isfinite(np.asarray(jax.grad(
+        lambda x: jnp.sum(literal(x, metric)))(zg))).all()

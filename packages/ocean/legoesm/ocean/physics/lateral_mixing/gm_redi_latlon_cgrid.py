@@ -1139,9 +1139,22 @@ def compute_nemo_native_slopes(
 
     kidx = jnp.arange(nlev)[None, None, :]
 
+    _metric_mode = getattr(cfg, "slope_metric_evaluation", "division")
+    if _metric_mode not in ("division", "nemo_reciprocal"):
+        raise ValueError(
+            "unknown GMRediConfig.slope_metric_evaluation "
+            f"{_metric_mode!r}; expected 'division' or 'nemo_reciprocal'")
+
     def _uv_slp(zg, zb_pair, e1_face, e3_face, iku, r1_hml, zdep_face, msk3):
         """Shared u/v-slope assembly (:206-238 without the Shapiro)."""
-        zau = zg / e1_face[:, :, None]
+        if _metric_mode == "nemo_reciprocal":
+            # domhgr.F90:140 stores r1_e1u/r1_e2v; ldfslp.F90:242-243 then
+            # multiplies. Keep both rounding boundaries visible to XLA.
+            r1_face = jax.lax.optimization_barrier(
+                jnp.asarray(1.0, dtype=dtype) / e1_face)
+            zau = jax.lax.optimization_barrier(zg * r1_face[:, :, None])
+        else:
+            zau = zg / e1_face[:, :, None]
         zbu = jnp.minimum(
             zb_pair,
             jnp.minimum(-z1_slpmax * jnp.abs(zau),
