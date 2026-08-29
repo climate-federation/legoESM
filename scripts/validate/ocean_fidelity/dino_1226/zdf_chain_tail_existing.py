@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -35,6 +36,7 @@ import zdf_chain_sweep as sweep  # noqa: E402
 from kamm_twin_90d import _build_twin_state  # noqa: E402
 from legoesm.core.precision import PrecisionPolicy, set_policy  # noqa: E402
 from legoesm.ocean.fidelity.time_levels import time_level_for_dump  # noqa: E402
+import legoesm.ocean.physics.vertical_mixing as vmix_mod  # noqa: E402
 from legoesm.ocean.physics.vertical_mixing.tke import (  # noqa: E402
     compute_K_from_tke,
     compute_mixing_lengths,
@@ -72,6 +74,7 @@ def main() -> int:
     if jax.default_backend() != "cpu" or not jax.config.x64_enabled:
         raise SystemExit("row-tail receipt requires CPU and JAX fp64")
     run = args.run_dir.resolve()
+    source_root = args.nemo_source_root.resolve()
     if Path(dump_lane.RUN_DIR).resolve() != run:
         raise SystemExit(
             f"dump_lane resolves to {Path(dump_lane.RUN_DIR).resolve()}, not requested run {run}"
@@ -137,7 +140,22 @@ def main() -> int:
         restart_file="DINO_00005760_restart.nc",
         e3t_mode="both",
     )
-    _, _, captured = sweep.capture_face_sh2_call(model, state, sf)
+    pair_calls = []
+    real_pair = vmix_mod.implicit_vertical_diffusion_ocean_pair
+
+    def spy_pair(T, S, K, *pair_args, **pair_kwargs):
+        pair_calls.append((T, S, K))
+        return real_pair(T, S, K, *pair_args, **pair_kwargs)
+
+    vmix_mod.implicit_vertical_diffusion_ocean_pair = spy_pair
+    try:
+        _, _, captured = sweep.capture_face_sh2_call(model, state, sf)
+    finally:
+        vmix_mod.implicit_vertical_diffusion_ocean_pair = real_pair
+    if len(pair_calls) != 1:
+        raise AssertionError(
+            f"DINO production T/S pair solve fired {len(pair_calls)} times, expected 1"
+        )
     mxl_args, mxl_kwargs, _ = captured["mxl_calls"][-1]
     if len(mxl_args) != 4 or en.shape != np.asarray(mxl_args[0]).shape:
         raise AssertionError("production mixing-length call contract changed")
@@ -168,6 +186,48 @@ def main() -> int:
     )
     row21_avm = sweep.metrics(np.asarray(km), avm_closure, wet_interior, focus, POINTWISE)
     row22_avt = sweep.metrics(np.asarray(kh), avt_closure, wet_interior, focus, POINTWISE)
+
+    # Row 27 fail-closed source/object identity.  NEMO's resolved runtime
+    # flags and active assignment must remain exactly the DINO no-DDM path,
+    # while production must dispatch T/S through the one-coefficient pair
+    # solve.  The planted separated-salinity-K arm proves the identity gate
+    # can fail even if a future refactor leaves the prose below unchanged.
+    vmcfg = mc.physics.vertical_mixing
+    if vmcfg.ddm.enabled or vmcfg.iwm.enabled:
+        raise AssertionError("DINO row27 source identity requires DDM=IWM=false")
+    ocean_output = (run / "ocean.output").read_text(errors="replace")
+    for flag in ("ln_zdfddm", "ln_zdfswm", "ln_zdfiwm"):
+        if re.search(rf"{flag}\s*=\s*F(?:\s|$)", ocean_output) is None:
+            raise AssertionError(f"resolved NEMO flag is not false: {flag}")
+    zdfphy_path = source_root / "src" / "OCE" / "ZDF" / "zdfphy.F90"
+    zdfphy_text = zdfphy_path.read_text(errors="strict")
+    avs_copy = re.search(
+        r"IF\s*\(\s*ln_zdfddm\s*\).*?ELSE.*?"
+        r"avs\s*\(\s*ji\s*,\s*jj\s*,\s*jk\s*\)\s*=\s*"
+        r"avt\s*\(\s*ji\s*,\s*jj\s*,\s*jk\s*\).*?ENDIF",
+        zdfphy_text,
+        flags=re.DOTALL,
+    )
+    if avs_copy is None:
+        raise AssertionError("active NEMO no-DDM avs=avt assignment changed")
+    shared_k = np.asarray(pair_calls[0][2])
+
+    def shared_k_gate(k_heat, k_salt) -> bool:
+        return k_heat is k_salt and np.array_equal(k_heat, k_salt, equal_nan=True)
+
+    if not shared_k_gate(shared_k, shared_k):
+        raise AssertionError("production T/S call did not receive one shared K object")
+    separated_k = shared_k.copy()
+    wet_k = np.argwhere(np.isfinite(separated_k) & (separated_k != 0.0))
+    if wet_k.size == 0:
+        raise AssertionError("row27 separated-salinity-K control found no finite nonzero K")
+    control_index = tuple(int(x) for x in wet_k[0])
+    separated_k[control_index] = np.nextafter(
+        separated_k[control_index], np.inf
+    )
+    row27_control_fired = not shared_k_gate(shared_k, separated_k)
+    if not row27_control_fired:
+        raise AssertionError("row27 separated-salinity-K control did not fire")
     # zdfphy rows 23/25/26/29 are reconstructible from existing NEMO closure,
     # rn2/rn2b, mask, and composed-coefficient dumps.  These are deliberately
     # retained as ORACLE-SELFCHECK previews, not legoESM measurements: no
@@ -296,6 +356,18 @@ def main() -> int:
                     "ocean_model_latlon_cgrid.py:7308-7336 passes the same "
                     "K_v_cell object to the T/S pair solve with DDM off"
                 ),
+                "resolved_nemo_flags": {
+                    "ln_zdfddm": False,
+                    "ln_zdfswm": False,
+                    "ln_zdfiwm": False,
+                },
+                "production_pair_calls": len(pair_calls),
+                "shared_K_object_asserted": True,
+                "separated_salinity_K_control": {
+                    "fired": row27_control_fired,
+                    "perturbed_index": list(control_index),
+                    "perturbation": "+1 ULP",
+                },
             },
             "waived_inactive_enhancements": [
                 "DDM coefficient delta",
@@ -392,7 +464,6 @@ def main() -> int:
         *ldf_probe.DUMP_META.values(),
         ldf_probe.CHAIN_DUMPS["prd"],
     ]
-    source_root = args.nemo_source_root.resolve()
     source_names = {
         "zdftke.F90": source_root / "cfgs" / "DINO" / "MY_SRC" / "zdftke.F90",
         "zdfphy.F90": source_root / "src" / "OCE" / "ZDF" / "zdfphy.F90",
