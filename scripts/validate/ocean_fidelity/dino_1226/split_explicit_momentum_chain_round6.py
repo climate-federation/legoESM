@@ -93,6 +93,7 @@ def _metric_record(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--with-ssh-forcing", action="store_true")
     args = parser.parse_args()
     if os.environ.get("DINO_1226_LANE") != EXPECTED_LANE:
         raise SystemExit("DINO_1226_LANE=d180 is required")
@@ -115,9 +116,12 @@ def main() -> int:
         "eta": inherited._load_full(str(run / "spg_dump_sshn_e_init.bin"), jpi, jpj, hls),
         "u": inherited._load_full(str(run / "spg_dump_un_e_init.bin"), jpi, jpj, hls),
         "v": inherited._load_full(str(run / "spg_dump_vn_e_init.bin"), jpi, jpj, hls),
+        "feta": inherited._load_full(str(run / "spg_dump_ssh_frc.bin"), jpi, jpj, hls),
     }
     held = {"fu": _u_face(nemo["fu"]), "fv": _v_face(nemo["fv"]),
-            "u": _u_face(nemo["u"]), "v": _v_face(nemo["v"])}
+            "u": _u_face(nemo["u"]), "v": _v_face(nemo["v"]),
+            # NEMO subtracts ssh_frc; legoESM adds F_slow_eta.
+            "feta": -nemo["feta"]}
 
     real_solver = ocean_model_module.barotropic_substeps_latlon_cgrid
     real_inherited_solver = inherited.barotropic_substeps_latlon_cgrid
@@ -129,7 +133,10 @@ def main() -> int:
     entry_counts: dict[str, int] = {}
     forcing_receipts: dict[str, Any] = {}
 
-    for arm, hold_seed in (("forcing_only", False), ("forcing_and_seed", True)):
+    arms = [("forcing_only", False, False), ("forcing_and_seed", True, False)]
+    if args.with_ssh_forcing:
+        arms.append(("forcing_seed_and_ssh", True, True))
+    for arm, hold_seed, hold_eta in arms:
         reports: dict[str, list[tuple[np.ndarray, np.ndarray, np.ndarray]]] = {}
         calls = 0
         originals: list[tuple[np.ndarray, np.ndarray]] = []
@@ -142,6 +149,8 @@ def main() -> int:
                 originals.append((np.asarray(kw["F_slow_u"]), np.asarray(kw["F_slow_v"])))
                 kw["F_slow_u"] = jnp.asarray(held["fu"], dtype=kw["F_slow_u"].dtype)
                 kw["F_slow_v"] = jnp.asarray(held["fv"], dtype=kw["F_slow_v"].dtype)
+                if hold_eta:
+                    kw["F_slow_eta"] = jnp.asarray(held["feta"], dtype=kw["eta_init"].dtype)
             return real_solver(state, dt_s, n_substeps, grid, z_coord, config, **kw)
 
         def held_davg(*dargs, **dkw):
@@ -201,6 +210,12 @@ def main() -> int:
     }
     if any(m["normalized_rms_error"] != 0.0 for m in held_forcing_metrics.values()):
         raise SystemExit("held forcing reconstruction is not exact")
+    held_ssh_metric = None
+    if args.with_ssh_forcing:
+        eta_mask = arm_captures["forcing_seed_and_ssh"]["sshn_e_init"][0][2]
+        held_ssh_metric = base._metric(held["feta"], -nemo["feta"], eta_mask, 9920)
+        if held_ssh_metric["normalized_rms_error"] != 0.0:
+            raise SystemExit("held signed SSH forcing reconstruction is not exact")
 
     controls = base._controls(arm_captures["forcing_only"]["zu_frc"][0], 9758)
     required_controls = ("identical_array_zero", "planted_identity_flips_campaign_gate",
@@ -239,7 +254,9 @@ def main() -> int:
     if dirty_after:
         raise SystemExit("worktree changed during measurement")
     receipt = {
-        "schema": "dino-split-explicit-momentum-chain-round6-v1",
+        "schema": ("dino-split-explicit-momentum-chain-round7-v1"
+                   if args.with_ssh_forcing
+                   else "dino-split-explicit-momentum-chain-round6-v1"),
         "session_id": os.environ.get("CODEX_SESSION_ID", "unset"),
         "git": {"commit": git_sha, "clean_before": True, "clean_after": True},
         "lane": EXPECTED_LANE,
@@ -252,6 +269,7 @@ def main() -> int:
         "entry_counts": entry_counts,
         "forcing_receipts": forcing_receipts,
         "held_forcing_metrics": held_forcing_metrics,
+        "held_signed_ssh_forcing_metric": held_ssh_metric,
         "measurements": measurements,
         "literal_ordered_stop": first_stop,
         "later_rows": {str(i): "ORDERED-BLOCKED" if first_stop else "ELIGIBLE" for i in range(2, 7)},
