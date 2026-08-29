@@ -577,6 +577,11 @@ def main() -> int:
     ap.add_argument("--row17-bracket-instrument-restart", type=Path)
     ap.add_argument("--row17-instrument-source", type=Path)
     ap.add_argument("--row17-instrument-binary", type=Path)
+    ap.add_argument("--row18-exp-dump", type=Path)
+    ap.add_argument("--row18-increment-dump", type=Path)
+    ap.add_argument("--row18-bracket-instrument-restart", type=Path)
+    ap.add_argument("--row18-instrument-source", type=Path)
+    ap.add_argument("--row18-instrument-binary", type=Path)
     args = ap.parse_args()
     bracket_args = (
         args.bn2_bracket_off_restart,
@@ -2577,6 +2582,56 @@ def main() -> int:
                                             raw_rad_candidate[..., :netau],
                                             post_etau_n, wet_etau, focus,
                                             POINTWISE_BAR)
+                                        row18_dump_args = (
+                                            args.row18_exp_dump,
+                                            args.row18_increment_dump,
+                                            args.row18_bracket_instrument_restart,
+                                            args.row18_instrument_source,
+                                            args.row18_instrument_binary,
+                                        )
+                                        if any(x is None for x in
+                                               row18_dump_args):
+                                            raise AssertionError(
+                                                "row 18 requires the direct "
+                                                "exp/increment dumps and "
+                                                "instrument provenance")
+                                        for path in row18_dump_args:
+                                            if not path.is_file():
+                                                raise FileNotFoundError(path)
+                                        exp_n_full = base._load_interior(
+                                            str(args.row18_exp_dump), ni, nj)
+                                        inc_direct_n_full = (
+                                            base._load_interior(
+                                                str(args.row18_increment_dump),
+                                                ni, nj))
+                                        degree_htau = jnp.maximum(
+                                            tke_mod._NEMO_TKE_HTAU_MIN_M,
+                                            jnp.minimum(
+                                                tke_mod._NEMO_TKE_HTAU_MAX_M,
+                                                tke_mod._NEMO_TKE_HTAU_SLOPE_M
+                                                * jnp.abs(jnp.sin(jnp.deg2rad(
+                                                    etau_kwargs[
+                                                        "lat_deg"])))))
+                                        exp_l = np.asarray(jnp.exp(
+                                            -etau_args[2]
+                                            / degree_htau[..., None]))[
+                                                ..., :netau]
+                                        exp_n = exp_n_full[..., 1:1 + netau]
+                                        inc_direct_n = inc_direct_n_full[
+                                            ..., 1:1 + netau]
+                                        exp_metric = metrics(
+                                            exp_l, exp_n, wet_etau, focus,
+                                            POINTWISE_BAR)
+                                        inc_direct_metric = metrics(
+                                            increment_l, inc_direct_n,
+                                            wet_etau, focus, POINTWISE_BAR)
+                                        bracket18 = restart_numeric_identity(
+                                            args.row18_bracket_instrument_restart,
+                                            args.row17_bracket_off_restart)
+                                        if not bracket18["pass"]:
+                                            raise AssertionError(
+                                                "row-18 dump-on/dump-off "
+                                                "numeric restart bracket failed")
                                         with xr.open_dataset(
                                                 RUN / "mesh_mask.nc",
                                                 decode_cf=False) as mesh_ds:
@@ -2608,6 +2663,9 @@ def main() -> int:
                                                 increment_l, increment_n,
                                                 wet_etau, focus,
                                                 POINTWISE_BAR),
+                                            "direct_nemo_exp": exp_metric,
+                                            "direct_nemo_increment":
+                                                inc_direct_metric,
                                             "gphit_after_degree_roundtrip":
                                                 lat_operand_metric,
                                             "substitute_raw_tgrid_radians":
@@ -2621,6 +2679,21 @@ def main() -> int:
                                                 "nemo_line": (
                                                     "cfgs/DINO/MY_SRC/"
                                                     "zdftke.F90:588-592"),
+                                            },
+                                        }
+                                        row18m["instrumentation_bracket"] = (
+                                            bracket18)
+                                        row18m["instrumentation"] = {
+                                            "slots": [
+                                                "tke_dump_etau_exp.bin",
+                                                "tke_dump_etau_increment.bin",
+                                            ],
+                                            "location": (
+                                                "active nn_etau=1 expression "
+                                                "at zdftke.F90:590-591"),
+                                            "sha256": {
+                                                str(path): sha256(path)
+                                                for path in row18_dump_args
                                             },
                                         }
                                         row4["continuation_preview"]["rows"][
@@ -2638,6 +2711,9 @@ def main() -> int:
                                                     "output": row18m,
                                                     "first_failing_operand": {
                                                         "name": (
+                                                            "EXP(-gdepw/htau)"
+                                                            if not exp_metric[
+                                                                "pass"] else
                                                             "htau latitude "
                                                             "operand via a "
                                                             "degree round trip"
@@ -2649,6 +2725,9 @@ def main() -> int:
                                                             "substitution"),
                                                         "nemo_line": (
                                                             "cfgs/DINO/MY_SRC/"
+                                                            "zdftke.F90:590"
+                                                            if not exp_metric[
+                                                                "pass"] else
                                                             "zdftke.F90:1005"
                                                             if raw_rad_metric[
                                                                 "pass"] else
@@ -3061,6 +3140,11 @@ def main() -> int:
         args.row17_bracket_instrument_restart,
         args.row17_instrument_source,
         args.row17_instrument_binary,
+        args.row18_exp_dump,
+        args.row18_increment_dump,
+        args.row18_bracket_instrument_restart,
+        args.row18_instrument_source,
+        args.row18_instrument_binary,
     ) if path is not None)
     input_paths.extend(round9_instrument_paths)
     continuation = row4.get("continuation_preview")
@@ -3133,6 +3217,8 @@ def main() -> int:
                          "tke_dump_zdiag_forward.bin",
                          "tke_dump_zrhs_forward.bin",
                          "tke_dump_en_postsolve.bin",
+                         "tke_dump_etau_exp.bin",
+                         "tke_dump_etau_increment.bin",
                          "dump_nmln.bin", "dump_hmlp.bin",
                          "drg_dump_rCdU_bot.bin", "sbc_dump_utau.bin",
                          "eiv_dump_gdept.bin", "eiv_dump_e3w.bin",
