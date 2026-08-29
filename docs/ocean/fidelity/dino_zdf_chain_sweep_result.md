@@ -92,8 +92,8 @@ literal SEOS/`prd` association check using the existing direct slot.
 
 Machine receipt:
 `docs/ocean/fidelity/dino_zdf_chain_tail_existing_artifact.json`, SHA256
-`c17ce6c931cf18bab05871efba30a1fb5f889fd8f18dcaa2b9091b90ad730c1c`,
-stamped probe commit `b7ac05c3c610cfa5d42f9c71a008f87b37a40a6a`. All four
+`f70c5d30bda5b712d3a81f71dc9f68763e8a006a3251ef345de92e38c5a310f2`,
+stamped probe commit `19addd99b0ff79e4bf42d8c5735c0e37a4b0b1e1`. All four
 planted perturbation, nonfinite, and one-cell-roll control families fired.
 The receipt also stamps every quoted active NEMO source. Review correction:
 the former row-22 `pdlr` identity field compared a dump with itself and has

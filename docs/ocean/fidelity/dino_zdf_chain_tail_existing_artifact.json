@@ -108,7 +108,7 @@
     "tke_dump_zmxld.bin": "df9a09e7fcb9e11b7549fb523cb241a2a22a1e073182bcbcc00d56e0d5cfcde2",
     "tke_dump_zmxlm.bin": "60ed331574d813885fb29399b2dbf041a6913ea965d45c09e2890eef8b3ef830"
   },
-  "repo_sha": "b7ac05c3c610cfa5d42f9c71a008f87b37a40a6a",
+  "repo_sha": "19addd99b0ff79e4bf42d8c5735c0e37a4b0b1e1",
   "rows": {
     "19": {
       "disposition": "UNMEASURED-NEEDS-DUMP",
@@ -573,7 +573,23 @@
         "legoesm": "ocean_model_latlon_cgrid.py:7308-7336 passes the same K_v_cell object to the T/S pair solve with DDM off",
         "n_diverged_columns": 0,
         "n_verified_columns": 9920,
-        "nemo": "zdfphy.F90:326-331 executes avs=avt with DDM off"
+        "nemo": "zdfphy.F90:326-331 executes avs=avt with DDM off",
+        "production_pair_calls": 1,
+        "resolved_nemo_flags": {
+          "ln_zdfddm": false,
+          "ln_zdfiwm": false,
+          "ln_zdfswm": false
+        },
+        "separated_salinity_K_control": {
+          "fired": true,
+          "perturbation": "+1 ULP",
+          "perturbed_index": [
+            1,
+            1,
+            0
+          ]
+        },
+        "shared_K_object_asserted": true
       },
       "waived_inactive_enhancements": [
         "DDM coefficient delta",
