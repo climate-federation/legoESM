@@ -129,9 +129,9 @@ sha256sum "$run_off/DINO_00005761_restart.nc" \
 # Bracket-stream proof: the only enabled-only files may be the two new dumps;
 # every shared normal output, log, and restart must be byte-identical.
 find "$run_off" -type f -printf '%P\n' | sort > /tmp/row18-off.files
-find "$run_on" -type f -printf '%P\n' \
+find "$run_on" -type f \
   ! -name tke_dump_etau_gdepw.bin ! -name tke_dump_etau_htau.bin \
-  | sort > /tmp/row18-on-shared.files
+  -printf '%P\n' | sort > /tmp/row18-on-shared.files
 cmp /tmp/row18-off.files /tmp/row18-on-shared.files
 while IFS= read -r rel; do
   cmp "$run_off/$rel" "$run_on/$rel"
