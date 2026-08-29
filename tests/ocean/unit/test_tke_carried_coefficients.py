@@ -275,6 +275,86 @@ def test_only_complete_dino_nemo_cards_select_literal_langmuir():
     assert all(c.tke_langmuir_evaluation == "vectorized" for c in unchanged)
 
 
+def test_only_complete_dino_nemo_cards_select_literal_etau_exp():
+    faithful = {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}
+    for name, values in DINO_RECIPES.items():
+        resolved = values.get(
+            "tke_etau_exponential_evaluation", "jax_expression")
+        assert resolved == (
+            "nemo_literal" if name in faithful else "jax_expression"), name
+        if values.get("vmix_scheme") == "tke":
+            built = dino_mod._dino_vertical_mixing_config(
+                dino_config_for_recipe(name)).tke
+            assert built.tke_etau_exponential_evaluation == resolved, name
+
+    unchanged = (TKEConfig(), _nemo_tke_config(), ACC_TKE_CONFIG,
+                 ACC_BASIC_TKE_CONFIG)
+    assert all(c.tke_etau_exponential_evaluation == "jax_expression"
+               for c in unchanged)
+
+
+@pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
+def test_literal_etau_exp_matches_oracle_bits_and_one_ulp_control_fires():
+    # First selected row-18 ownership-control operand, plus ordinary-range
+    # values spanning the DINO ladder.  Expected bits are from the committed
+    # NEMO EXP dump / linked _ZGVbN2v_exp receipt.
+    argument = np.asarray([
+        float.fromhex("-0x1.5fc93e9bbda71p-2"),
+        float.fromhex("-0x1.063a29f68dac2p+3"),
+        -10.0,
+        -0.0001,
+    ], dtype=np.float64)
+    expected = np.asarray([
+        float.fromhex("0x1.6b23619ba571ap-1"),
+        float.fromhex("0x1.218df37ee5074p-12"),
+        float.fromhex("0x1.7cd79b5647c9ap-15"),
+        float.fromhex("0x1.fff2e4b97d31dp-1"),
+    ], dtype=np.float64)
+    actual = np.asarray(jax.jit(tke_mod._nemo_glibc234_vector_exp)(
+        jnp.asarray(argument)))
+    np.testing.assert_array_equal(actual.view(np.uint64),
+                                  expected.view(np.uint64))
+
+    planted = argument.copy()
+    planted[0] = np.nextafter(planted[0], np.inf)
+    planted_actual = np.asarray(tke_mod._nemo_glibc234_vector_exp(
+        jnp.asarray(planted)))
+    # Red-capable control: the same exactness assertion would fail after the
+    # registered one-ULP argument plant.
+    assert planted_actual[0].view(np.uint64) != expected[0].view(np.uint64)
+
+
+@pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
+def test_literal_etau_exp_jit_and_ad_are_finite():
+    argument = jnp.asarray([-0.3, -1.0], dtype=jnp.float64)
+    value = jax.jit(tke_mod._nemo_glibc234_vector_exp)(argument)
+    forward = jax.jacfwd(tke_mod._nemo_glibc234_vector_exp)(argument)
+    reverse = jax.jacrev(tke_mod._nemo_glibc234_vector_exp)(argument)
+    assert np.all(np.isfinite(np.asarray(value)))
+    assert np.all(np.isfinite(np.asarray(forward)))
+    assert np.all(np.isfinite(np.asarray(reverse)))
+
+
+def test_etau_jax_expression_is_the_legacy_expression_byte_for_byte():
+    e = jnp.asarray([[1.0e-6, 2.0e-6]])
+    taum = jnp.asarray([0.08])
+    depth = jnp.asarray([[4.0, 20.0]])
+    cfg = TKEConfig(etau_mode="below_ml", etau_htau_mode="constant10m",
+                    tke_etau_exponential_evaluation="jax_expression")
+    actual = tke_mod.nemo_etau_injection(e, taum, depth, cfg)
+    e_sfc = jnp.maximum(
+        tke_mod._NEMO_TKE_EMIN0,
+        tke_mod._NEMO_TKE_EBB / constants.rho_ocean * taum)
+    expected = e + (cfg.etau_frac * e_sfc[..., None]
+                    * jnp.exp(-depth / 10.0))
+    np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+
+    with pytest.raises(ValueError, match="tke_etau_exponential_evaluation"):
+        tke_mod.nemo_etau_injection(
+            e, taum, depth,
+            cfg._replace(tke_etau_exponential_evaluation="unknown"))
+
+
 def test_only_complete_dino_nemo_cards_freeze_step_entry_shear():
     faithful = {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}
     for name, values in DINO_RECIPES.items():

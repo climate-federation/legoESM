@@ -593,6 +593,11 @@ class TKEConfig(NamedTuple):
     # Solver recurrence. ``shared_thomas`` preserves the generic historical
     # path; complete DINO NEMO cards select the literal zdftke scan order.
     tke_solver_evaluation: str = "shared_thomas"
+    # Arithmetic used by the nn_etau penetration profile. ``jax_expression``
+    # is the historical single jnp.exp call. ``nemo_literal`` reproduces the
+    # ordinary-range glibc-2.34 vector EXP linked into the DINO oracle; only
+    # the two complete DINO oracle cards select it.
+    tke_etau_exponential_evaluation: str = "jax_expression"
     # Langmuir source evaluation. ``vectorized`` is the historical shared
     # construction. ``nemo_literal`` preserves zdftke.F90:422-463 operation
     # order, including the per-column mbkt+1 no-crossing fallback. Only the

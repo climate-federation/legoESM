@@ -109,6 +109,9 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.ocean.physics.vertical_mixing._glibc234_exp_table import (
+    GLIBC234_EXP_TABLE_BITS,
+)
 from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
 
 __physics_contract__ = {
@@ -2132,6 +2135,76 @@ def nemo_literal_langmuir_tke_update(
     return jnp.where(apply, e_old + increment, e_old)
 
 
+@jax.custom_jvp
+def _nemo_binary64_round(value: jnp.ndarray) -> jnp.ndarray:
+    """Materialise one binary64 rounding point while retaining identity AD.
+
+    XLA is otherwise free to contract adjacent multiply/add expressions.  The
+    glibc vector routine used separate SSE2 instructions, so its source-order
+    rounding points are observable at the last bit.  ``nextafter(x, x)`` is
+    value-identical but remains an operation boundary; the custom JVP records
+    the mathematical identity derivative instead of differentiating the
+    representational barrier.
+    """
+    return jnp.nextafter(value, value)
+
+
+@_nemo_binary64_round.defjvp
+def _nemo_binary64_round_jvp(primals, tangents):
+    (value,), (tangent,) = primals, tangents
+    return _nemo_binary64_round(value), tangent
+
+
+def _nemo_glibc234_vector_exp(argument: jnp.ndarray) -> jnp.ndarray:
+    """DINO oracle's ordinary-range glibc-2.34 two-lane EXP arithmetic.
+
+    This is a pure-JAX transcription of ``_ZGVbN2v_exp`` as linked into the
+    instrumented NEMO executable: 1024-bin reduction, split ln(2)/1024,
+    cubic residual polynomial, and integer exponent assembly.  The exact
+    lookup bits live in :mod:`_glibc234_exp_table`; no host libm is called.
+    glibc's exceptional-input arm is deliberately left to ``jnp.exp``.
+    """
+    if argument.dtype != jnp.float64:
+        return jnp.exp(argument)
+
+    bits = jax.lax.bitcast_convert_type(argument, jnp.uint64)
+    high_word = ((bits & jnp.uint64(0x7FFF_FFFF_FFFF_FFFF))
+                 >> jnp.uint64(32))
+    # Exact pcmpgtd cutoff in the linked routine.  Supplying zero to the
+    # unselected literal arm prevents invalid exponent-bit assembly.
+    ordinary = high_word <= jnp.uint64(0x4086_232A)
+    x = jnp.where(ordinary, argument, jnp.asarray(0.0, argument.dtype))
+    rounded = _nemo_binary64_round
+
+    product = rounded(x * float.fromhex("0x1.71547652b82fep+10"))
+    n = rounded(jnp.rint(product))
+    encoded_n = rounded(product + float.fromhex("0x1.8p+52"))
+    n_hi = rounded(n * float.fromhex("0x1.62e42fec00000p-11"))
+    residual_hi = rounded(x - n_hi)
+    n_lo = rounded(n * float.fromhex("0x1.d1cf79abc9e3bp-42"))
+    residual = rounded(residual_hi - n_lo)
+
+    poly = rounded(
+        float.fromhex("0x1.5555555555556p-3") * residual)
+    poly = rounded(poly + float.fromhex("0x1.0000001ebfbe0p-1"))
+    poly = rounded(poly * residual)
+    poly = rounded(poly + 1.0)
+    poly = rounded(poly * residual)
+    poly = rounded(poly + 1.0)
+
+    encoded_bits = jax.lax.bitcast_convert_type(encoded_n, jnp.uint64)
+    table_index = encoded_bits & jnp.uint64(0x3FF)
+    exponent_bits = (
+        (encoded_bits & jnp.uint64(0xFFFF_FFFF_FFFF_FC00))
+        << jnp.uint64(42))
+    table_bits = jnp.asarray(
+        GLIBC234_EXP_TABLE_BITS, dtype=jnp.uint64)[table_index]
+    scale = jax.lax.bitcast_convert_type(
+        table_bits + exponent_bits, jnp.float64)
+    literal = rounded(scale * poly)
+    return jnp.where(ordinary, literal, jnp.exp(argument))
+
+
 def nemo_etau_injection(
     e: jnp.ndarray,
     taum: jnp.ndarray,
@@ -2185,7 +2258,17 @@ def nemo_etau_injection(
             f"'constant10m' or 'latitude' (NEMO nn_htau 0/1).")
     e_sfc = jnp.maximum(_NEMO_TKE_EMIN0, _NEMO_TKE_EBB / rho_0
                         * jnp.maximum(taum, 0.0))
-    inj = cfg.etau_frac * e_sfc[..., None] * jnp.exp(-depth_w / htau)
+    exp_evaluation = getattr(
+        cfg, "tke_etau_exponential_evaluation", "jax_expression")
+    if exp_evaluation == "jax_expression":
+        profile = jnp.exp(-depth_w / htau)
+    elif exp_evaluation == "nemo_literal":
+        profile = _nemo_glibc234_vector_exp(-depth_w / htau)
+    else:
+        raise ValueError(
+            "Unknown TKEConfig.tke_etau_exponential_evaluation: expected "
+            f"'jax_expression' or 'nemo_literal', got {exp_evaluation!r}.")
+    inj = cfg.etau_frac * e_sfc[..., None] * profile
     if ice_frac is not None:
         inj = inj * jnp.maximum(0.0, 1.0 - ice_frac[..., None])
     return e + inj

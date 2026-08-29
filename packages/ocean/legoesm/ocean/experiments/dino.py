@@ -590,6 +590,7 @@ class DINOConfig:
     tke_preclosure_coeff_source: str = "current_subiteration"
     tke_matrix_evaluation: str = "factored"
     tke_solver_evaluation: str = "shared_thomas"
+    tke_etau_exponential_evaluation: str = "jax_expression"
     tke_langmuir_evaluation: str = "vectorized"
     tke_shear_evaluation_stage: str = "implicit_solve_state"
     tke_shear_metric_source: str = "tpoint_jacobian"
@@ -1173,6 +1174,7 @@ DINO_RECIPES: dict[str, dict] = {
         "tke_preclosure_coeff_source": "carried_previous_step",
         "tke_matrix_evaluation": "nemo_literal",
         "tke_solver_evaluation": "nemo_literal",
+        "tke_etau_exponential_evaluation": "nemo_literal",
         "tke_langmuir_evaluation": "nemo_literal",
         "tke_shear_evaluation_stage": "step_entry",
         "tke_shear_metric_source": "nemo_qco_live_face",
@@ -3007,6 +3009,8 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
             tke_preclosure_coeff_source=cfg.tke_preclosure_coeff_source,
             tke_matrix_evaluation=cfg.tke_matrix_evaluation,
             tke_solver_evaluation=cfg.tke_solver_evaluation,
+            tke_etau_exponential_evaluation=(
+                cfg.tke_etau_exponential_evaluation),
             tke_langmuir_evaluation=cfg.tke_langmuir_evaluation,
             tke_shear_evaluation_stage=cfg.tke_shear_evaluation_stage,
             tke_shear_metric_source=cfg.tke_shear_metric_source,
