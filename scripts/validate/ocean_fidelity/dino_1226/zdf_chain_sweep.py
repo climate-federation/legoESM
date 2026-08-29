@@ -2636,7 +2636,7 @@ def main() -> int:
                                             focus, POINTWISE_BAR)
                                         exp_metric = metrics(
                                             isolated_exp_l, exp_n, wet_etau,
-                                            POINTWISE_BAR)
+                                            focus, POINTWISE_BAR)
                                         argument_plus_exp_metric = metrics(
                                             argument_plus_exp_l, exp_n,
                                             wet_etau, focus, POINTWISE_BAR)
