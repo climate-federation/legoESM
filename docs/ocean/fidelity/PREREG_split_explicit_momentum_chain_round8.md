@@ -11,9 +11,11 @@ BEFORE seed held exactly, the first divergent output remains first-substep SSH
 at `E=6.2048763005e-7`.  This round localizes the corresponding continuity
 operand using only existing outputs.
 
-At active NEMO `dynspg_ts.F90:698-725`, `zhU/zhV` are assembled from the
-half-step velocity, fixed DINO `key_linssh` face depth, and face metric; their
-divergence is then applied with the zero `ssh_frc`.  At substep 1 the
+At active NEMO `dynspg_ts.F90:651-725`, DINO's `key_qco` variable-volume arm
+first constructs eta-dependent `zhup2_e/zhvp2_e` (`:651-688`), then assembles
+`zhU/zhV` from those face depths, the half-step velocity, and face metric
+(`:698-704`) before applying their divergence with zero `ssh_frc` (`:718-725`).
+At substep 1 the
 AB3/AM4 extrapolation coefficients reduce to the current loop seed.  Existing
 `cor2d_dump_{ua,va}_e_in_substep1.bin` independently record those same
 half-step velocity operands at `dynspg_ts.F90:784-805` before the velocity

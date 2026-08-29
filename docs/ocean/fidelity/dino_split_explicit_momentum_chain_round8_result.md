@@ -21,12 +21,16 @@ seed fields bit-exact for targeting, but cannot promote the literal row.
 With row 1.1 forcing and row 1.2 seed held exactly, row 1.3 still diverges at
 the first substep: SSH/U/V `E=6.2048763005e-7` / `6.2120556997e-7` /
 `1.1172636476e-6`.  The existing `ssh_frc` candidate is identically zero and
-is refuted.  The half-step U/V operands are bit-exact, whereas the algebraically
-recovered continuity flux divergence is DEBT (`E=0.4530771405`, correlation
-`0.9141355600`, mean-absolute ratio `1.0523503033`).  Reapplying that divergence
-difference reproduces the SSH residual to `5.8233515124e-22`.  Thus the first
-held-chain divergence is localized to the `zhU/zhV -> zhdiv` composition at
-active NEMO `cfgs/DINO/MY_SRC/dynspg_ts.F90:698-724`.
+is refuted.  All three runtime-captured held seed fields and the independently
+dumped half-step U/V operands are bit-exact, whereas the algebraically recovered
+continuity flux divergence is DEBT (`E=0.4530771405`, correlation
+`0.9141355600`, mean-absolute ratio `1.0523503033`).  Inverting and reapplying
+the same continuity equation closes to `5.8233515124e-22`, but that replay is
+explicitly an algebraic identity, not a control or independent ownership fact.
+The independent exact runtime inputs followed by the first divergent executed
+output localize the held-chain difference to DINO's active `key_qco`
+variable-volume face-depth/transport/divergence composition at
+`cfgs/DINO/MY_SRC/dynspg_ts.F90:651-725`.
 
 ## Row 1.1 complete term disposition
 
@@ -90,7 +94,7 @@ bridge over this result.
 |---:|---|---|
 | 1.1 | forcing assembly `dynspg_ts.F90:316-459` | **OWNERSHIP COMPLETE; PRODUCTION DEBT IS COMPOSITE** |
 | 1.2 | centred BEFORE seed `dynspg_ts.F90:561-580` | **DIVERGED, NEAR-CLASS U/V operation-order residue** |
-| 1.3 | first recurrence `dynspg_ts.F90:614-850` | **TARGETING DIVERGED at continuity flux composition `:698-724`** |
+| 1.3 | first recurrence `dynspg_ts.F90:614-850` | **TARGETING DIVERGED at key_qco continuity composition `:651-725`** |
 | 1.4 | final `puu_b/pvv_b/pssh/un_adv/vn_adv`; rewrite `:1170-1174` | ORDERED-BLOCKED; targeting DEBT under held forcing/seed |
 | 2 | second `div_hor`, `stpmlf.F90:349-376` | ORDERED-BLOCKED; existing dumps inventoried |
 | 3 | second `dom_qco_r3c`, `stpmlf.F90:378-394` | ORDERED-BLOCKED; existing dumps inventoried |
@@ -110,10 +114,15 @@ All accepted calculations used CPU/JAX fp64, `DINO_1226_LANE=d180`,
 `RUN_SEQDUMP_D180_1R` dumps.  No GPU, `mpirun`, NEMO build/run, or writer was
 used.  Consequently no SLOT block was acquired.  The two round-6 pre-score
 compatibility exits and the round-7 zero-RMS scorer exit are recorded as
-`INVALID`; none supplied evidence.  Exact forcing reconstruction, exact held
-seed, exact-zero SSH forcing, planted gate traversal, zero-shift alignment,
-interception/restoration counts, populations, runtime settings, sources,
-dumps, restart, mesh, namelists, and executable are hashed in the receipts.
+`INVALID`; none supplied evidence.  The first nominal receipts are also
+withdrawn because adversarial review proved their editable install imported
+production modules from another worktree.  The replacement receipts fail
+closed unless all production imports resolve beneath the clean measured
+checkout, stamp those paths, and assert every monkeypatch restoration.  Exact
+forcing reconstruction, runtime exact held seed, exact-zero SSH forcing,
+planted gate traversal, zero-shift alignment, interception/restoration
+receipts, populations, runtime settings, sources, dumps, restart, mesh,
+namelists, and executable are hashed.
 
 Machine receipts:
 
@@ -121,7 +130,8 @@ Machine receipts:
 - `dino_split_explicit_momentum_chain_round7_artifact.json`
 - `dino_split_explicit_momentum_chain_round8_artifact.json`
 
-The next admissible discriminator needs direct `zhU/zhV` operands around
-`dynspg_ts.F90:698-704`.  Because those arrays are not in the existing stack,
-that work is designed-not-run and must use a preregistered SLOT-protocol held
-writer block before any measurement.
+The next admissible discriminator needs direct eta-dependent
+`zhup2_e/zhvp2_e` and `zhU/zhV` operands around `dynspg_ts.F90:651-704`.
+Because those arrays are not in the existing stack, that work is
+designed-not-run and must use a preregistered SLOT-protocol held writer block
+before any measurement.

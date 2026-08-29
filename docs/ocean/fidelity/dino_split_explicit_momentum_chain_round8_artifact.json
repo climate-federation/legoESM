@@ -3,6 +3,7 @@
   "continuity_localization": {
     "dt_s": 117.3913043478261,
     "forward_replay_max_abs_residual": 5.823351512373315e-22,
+    "forward_replay_role": "ALGEBRAIC_CLOSURE_ONLY_NOT_CONTROL",
     "implied_flux_divergence": {
       "correlation": 0.9141355599848835,
       "gate_status": "DEBT",
@@ -29,6 +30,11 @@
       "normalized_rms_error": 0.0,
       "per_element_max_error_over_nemo_rms": 0.0,
       "rms_ratio": 1.0
+    },
+    "runtime_exact_seed_gate_statuses": {
+      "sshn_e_init": "AT BAR",
+      "un_e_init": "AT BAR",
+      "vn_e_init": "AT BAR"
     },
     "status": "CONFIRMED_CONTINUITY_FLUX_COMPOSITION"
   },
@@ -127,14 +133,14 @@
   },
   "forcing_receipts": {
     "forcing_and_seed": {
-      "first_original_u_sha256": "5bf33df74be3f5adb620764157b6aadf3053426c5175aa6d30ff10d59c9ecae8",
-      "first_original_v_sha256": "ac9fa5f65969d98fab2d3aec3a6ebd442c1a4721fbdbe7f45fdee822aab8c04c",
+      "first_original_u_sha256": "1c86ea7e4baec5c45dc31f16c9de55f94ce0a28ff46c1ca0de5d2cb4b20fd093",
+      "first_original_v_sha256": "927f9d1e7f791fb0eb03f5e96ad719acb770956ddf22452a7fe1bf3b42571a56",
       "held_u_sha256": "0b9d39168b69fee850839eedd32d6629ed544f1f25472cb42b4774091f63e669",
       "held_v_sha256": "efe48421934dcfb3e65d2c0af8f0c8507c207afd3feec6aa2a102b91e68d2d61"
     },
     "forcing_only": {
-      "first_original_u_sha256": "5bf33df74be3f5adb620764157b6aadf3053426c5175aa6d30ff10d59c9ecae8",
-      "first_original_v_sha256": "ac9fa5f65969d98fab2d3aec3a6ebd442c1a4721fbdbe7f45fdee822aab8c04c",
+      "first_original_u_sha256": "1c86ea7e4baec5c45dc31f16c9de55f94ce0a28ff46c1ca0de5d2cb4b20fd093",
+      "first_original_v_sha256": "927f9d1e7f791fb0eb03f5e96ad719acb770956ddf22452a7fe1bf3b42571a56",
       "held_u_sha256": "0b9d39168b69fee850839eedd32d6629ed544f1f25472cb42b4774091f63e669",
       "held_v_sha256": "efe48421934dcfb3e65d2c0af8f0c8507c207afd3feec6aa2a102b91e68d2d61"
     }
@@ -142,7 +148,7 @@
   "git": {
     "clean_after": true,
     "clean_before": true,
-    "commit": "8bd7fd5648bcc8a74aa2f66169967c6ca6edef65"
+    "commit": "f469b2564a79e0f5fadc3b524c89a73a458d76d1"
   },
   "held_forcing_metrics": {
     "u": {
@@ -163,6 +169,12 @@
     }
   },
   "held_signed_ssh_forcing_metric": null,
+  "imported_production_paths": {
+    "production_barotropic": "/tmp/codex-zdf-round6-measure/packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py",
+    "production_bridge": "/tmp/codex-zdf-round6-measure/packages/ocean/legoesm/ocean/fidelity/nemo_state_bridge.py",
+    "production_dino_card": "/tmp/codex-zdf-round6-measure/packages/ocean/legoesm/ocean/experiments/dino.py",
+    "production_ocean_model": "/tmp/codex-zdf-round6-measure/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py"
+  },
   "input_sha256": {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
     "mesh_mask.nc": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
@@ -252,7 +264,7 @@
       "gate_status": "DEBT",
       "mean_abs_ratio": 1.0000000340647395,
       "n": 9758,
-      "normalized_rms_error": 6.212055699772222e-07,
+      "normalized_rms_error": 6.212055699772024e-07,
       "per_element_max_error_over_nemo_rms": 2.0540983332116403e-05,
       "rms_ratio": 1.0000000907999922,
       "status": "DIVERGED",
@@ -282,7 +294,7 @@
       "gate_status": "DEBT",
       "mean_abs_ratio": 1.000009378217715,
       "n": 9758,
-      "normalized_rms_error": 1.1889091711330603e-05,
+      "normalized_rms_error": 1.1889091711331259e-05,
       "per_element_max_error_over_nemo_rms": 0.00018594647835556651,
       "rms_ratio": 1.0000077111539885,
       "status": "DIVERGED",
@@ -417,7 +429,7 @@
       "gate_status": "DEBT",
       "mean_abs_ratio": 1.0000000340647397,
       "n": 9758,
-      "normalized_rms_error": 6.212055699738333e-07,
+      "normalized_rms_error": 6.212055699739243e-07,
       "per_element_max_error_over_nemo_rms": 2.0540983332116403e-05,
       "rms_ratio": 1.0000000907999922,
       "status": "DIVERGED",
@@ -447,7 +459,7 @@
       "gate_status": "DEBT",
       "mean_abs_ratio": 1.000009378217715,
       "n": 9758,
-      "normalized_rms_error": 1.1889091711373316e-05,
+      "normalized_rms_error": 1.188909171137338e-05,
       "per_element_max_error_over_nemo_rms": 0.00018594647835626336,
       "rms_ratio": 1.0000077111539885,
       "status": "DIVERGED",
@@ -520,9 +532,27 @@
     "nemo_dynspg_ts": "a64b32e7c9ce1c1be6c121597235b08f05c853961e83d52be6082ea7242f6275",
     "nemo_stpmlf": "26849c4fa34305317881959dd5a1e41af9b13aa4f96a290a998add955a73a283",
     "production_barotropic": "b837dea5562d5230401ee60c2f020b8146a20bcc266dbc5bf68738917a531598",
-    "production_ocean_model": "4b8735a7cdd39bdd8c7a376e4769d5dbfea878dbe733bd1434f14b09505545b5",
+    "production_bridge": "7b91414ff5c6de79366d7c6efe3c8966d3d889034d3341fe56ba4796b53367a7",
+    "production_dino_card": "faec0ce345f151573b36a2805ae1226cfd2e3381e442ee05934ef14e5ad5fcf4",
+    "production_ocean_model": "2a063281b528ca0740700b35204d4cedd9cd5dc298f1e98d96c79de77b267d7b",
     "round1_scorer": "19f1de44300c1e1119af03405af887a4bdf63d51af9c6dfb5998a74529c4cac9",
-    "wrapper": "501ce53bbcf0072813e92c291073f720514a7ef0d6582ffb4a0001684a670ecb"
+    "wrapper": "ff5aa01351bf5b95cc8f4dbad72b0268173e1ceb8163c28241d0b2dd44759ad6"
+  },
+  "restoration_receipts": {
+    "forcing_and_seed": {
+      "config_builder_restored": true,
+      "depth_average_restored": true,
+      "inherited_solver_restored": true,
+      "ocean_solver_restored": true,
+      "report_restored": true
+    },
+    "forcing_only": {
+      "config_builder_restored": true,
+      "depth_average_restored": true,
+      "inherited_solver_restored": true,
+      "ocean_solver_restored": true,
+      "report_restored": true
+    }
   },
   "runtime": {
     "device": "cpu:0",
@@ -534,12 +564,12 @@
   },
   "runtime_config_sha256": {
     "forcing_and_seed": {
-      "effective": "da91107ff930e3df7d93d802fa8fff87e7f491674469e38210520cbbaa154e8a",
-      "model": "817783ade1da39be4abdea34161a52fc4307aceb6fa6477ca86aa203a2d86e72"
+      "effective": "fc3aaa6596728aaa2c26640bea40af9fde363629d94f9d6e716b4616649eeabd",
+      "model": "d5e8a11e67d2d8ed408a3c554b74719df3710e807749f71e72e8cbdb6749e0aa"
     },
     "forcing_only": {
-      "effective": "da91107ff930e3df7d93d802fa8fff87e7f491674469e38210520cbbaa154e8a",
-      "model": "817783ade1da39be4abdea34161a52fc4307aceb6fa6477ca86aa203a2d86e72"
+      "effective": "fc3aaa6596728aaa2c26640bea40af9fde363629d94f9d6e716b4616649eeabd",
+      "model": "d5e8a11e67d2d8ed408a3c554b74719df3710e807749f71e72e8cbdb6749e0aa"
     }
   },
   "schema": "dino-split-explicit-momentum-chain-round8-v1",
