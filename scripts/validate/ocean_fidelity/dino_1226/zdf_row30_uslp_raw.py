@@ -95,6 +95,8 @@ def main() -> int:
         str(run / "eiv_dump_gdept.bin"), jpi, jpj, hls)
     nemo_raw = loaders._load_haloed(
         str(run / "eiv_dump_uslp_raw.bin"), jpi, jpj, hls)
+    nemo_zau = loaders._load_haloed(
+        str(run / "eiv_dump_zau.bin"), jpi, jpj, hls)
     nk = min(production_raw.shape[-1], nemo_raw.shape[-1], nemo_gdept.shape[-1])
     wet = np.zeros_like(state["active"][..., :nk], dtype=bool)
     wet_full = ldf.wet_u_mask(
@@ -135,8 +137,10 @@ def main() -> int:
     current_zdep = np.asarray(u_loc["zdep_face"])[..., :nk]
     correct_zdep_np = np.asarray(correct_zdepu)[..., :nk]
     zdep_delta = sweep.metrics(current_zdep, correct_zdep_np, wet, focus, BAR)
+    # Controls attach to the independently verified upstream zau row; the
+    # candidate stage is allowed to stay red without disabling its receipt.
     controls = sweep.planted_controls(
-        np.asarray(literal_raw)[..., :nk], nemo_raw[..., :nk], wet, BAR)
+        np.asarray(u_loc["zau"])[..., :nk], nemo_zau[..., :nk], wet, BAR)
     controls["old_tpoint_surface_e3_fails"] = not production_score["pass"]
     rolled = jax.lax.optimization_barrier(
         jnp.asarray(0.5, dtype=gdept.dtype)
