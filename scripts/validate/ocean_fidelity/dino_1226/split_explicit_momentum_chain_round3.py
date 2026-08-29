@@ -138,17 +138,26 @@ def main() -> int:
         "nemo_dino_kamm_mlf", "unused.npz",
         "--bridge-before-stress-legacy-u-as-t",
     ])
+    parsed_legacy_euler = twin._parse_args([
+        "nemo_dino_kamm_mlf", "unused.npz", "--legacy-euler-start",
+    ])
     selector_receipt = {
         "build_default": bool(build_default),
         "run_default": bool(run_default),
         "cli_default": bool(parsed_default.bridge_before_stress_tpoint),
         "legacy_opt_in": bool(parsed_legacy.bridge_before_stress_tpoint),
+        "legacy_euler_bridge_before": bool(parsed_legacy_euler.bridge_before),
+        "legacy_euler_stress": bool(
+            parsed_legacy_euler.bridge_before_stress_tpoint
+        ),
     }
     if selector_receipt != {
         "build_default": True,
         "run_default": True,
         "cli_default": True,
         "legacy_opt_in": False,
+        "legacy_euler_bridge_before": False,
+        "legacy_euler_stress": False,
     }:
         raise SystemExit(f"#1695 selector/default receipt failed: {selector_receipt}")
 
