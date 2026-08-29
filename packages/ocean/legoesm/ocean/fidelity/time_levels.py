@@ -221,6 +221,12 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     "tke_dump_etau_increment.bin": ("now", "write-only row-18 full additive "
                                             "increment at zdftke.F90:590-591, "
                                             "including ice/W/T masks."),
+    "tke_dump_etau_gdepw.bin": ("now", "write-only row-18 direct operand "
+                                         "gdepw(ji,jj,jk,Kmm) captured immediately "
+                                         "before the active nn_etau=1 division."),
+    "tke_dump_etau_htau.bin": ("now", "write-only row-18 direct operand "
+                                        "htau(ji,jj) captured at the same read "
+                                        "site and repeated over jk."),
     "wzv_dump_ww_call1.bin": ("now", "wzv_MLF diagnoses NOW w: pww integrated "
                                       "from hdiv with e3t(:,:,:,Kmm) (sshwzv."
                                       "F90:211), Kmm=Nnn. WRITE at MY_SRC "

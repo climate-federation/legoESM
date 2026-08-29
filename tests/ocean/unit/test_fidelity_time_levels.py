@@ -67,6 +67,13 @@ def test_unregistered_dump_raises_and_never_defaults():
         time_level_for_dump("dump_something_new.bin")
 
 
+def test_row18_direct_operand_dumps_are_registered_at_now_level():
+    """The write-only operands are read in zdftke's live-Kmm etau block."""
+    for name in ("tke_dump_etau_gdepw.bin", "tke_dump_etau_htau.bin"):
+        assert time_level_for_dump(name) == "now", name
+        assert _DUMP_TIME_LEVEL[name][1].strip(), name
+
+
 def test_select_ts_picks_before_for_an_eos_rab_dump():
     now, bef = ("T_now", "S_now"), ("T_bef", "S_bef")
     assert select_ts("dump_alpha_b.bin", now=now, before=bef) == bef
