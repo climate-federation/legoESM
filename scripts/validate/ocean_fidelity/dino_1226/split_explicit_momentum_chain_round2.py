@@ -13,10 +13,10 @@ import argparse
 import dataclasses
 import hashlib
 import json
-import math
 import os
 from pathlib import Path
 import platform
+import re
 import subprocess
 import sys
 from typing import Any
@@ -74,6 +74,8 @@ EXPECTED_LANE = "d180"
 EXPECTED_U = 9758
 EXPECTED_V = 9868
 DT = 2700.0
+BASE_RECONSTRUCTION_BAR = 1.0e-12
+TERM_CLOSURE_BAR = 1.0e-10
 
 
 def _sha256(path: Path) -> str:
@@ -109,15 +111,28 @@ def _restart_clock(path: Path) -> dict[str, float]:
     return {"adatrj_days": adatrj, "kt": kt, "seconds": from_days}
 
 
+def _oracle_echo_flags(path: Path, names: tuple[str, ...]) -> dict[str, str]:
+    text = path.read_text(errors="replace")
+    out: dict[str, str] = {}
+    for name in names:
+        hits = re.findall(rf"\b{re.escape(name)}\b\s*=\s*([TF])\b", text)
+        if not hits or len(set(hits)) != 1:
+            raise SystemExit(
+                f"oracle echo for {name} missing or inconsistent in {path}: {hits}"
+            )
+        out[name] = hits[0]
+    return out
+
+
 def _register_dumps(kt: int) -> list[str]:
     names_and_sources = {
         "keg_dump_du.bin": "cfgs/DINO/MY_SRC/dynadv.F90:89-95 KEG Krhs contribution",
         "keg_dump_dv.bin": "same as keg_dump_du",
         "zad_dump_du.bin": "cfgs/DINO/MY_SRC/dynadv.F90:97-103 ZAD increment",
         "zad_dump_dv.bin": "same as zad_dump_du",
-        "vor_dump_du.bin": "cfgs/DINO/MY_SRC/dynvor.F90:147-155 EEN increment",
+        "vor_dump_du.bin": "cfgs/DINO/MY_SRC/dynvor.F90:147-193 total EEN increment and dump",
         "vor_dump_dv.bin": "same as vor_dump_du",
-        "ldf_dump_du.bin": "cfgs/DINO/MY_SRC/dynldf.F90:69-85,118-119 increment",
+        "ldf_dump_du.bin": "cfgs/DINO/MY_SRC/dynldf.F90:69-119 increment and dump",
         "ldf_dump_dv.bin": "same as ldf_dump_du",
         "hpg_dump_du.bin": "cfgs/DINO/MY_SRC/dynhpg.F90:348-413 SCO increment",
         "hpg_dump_dv.bin": "same as hpg_dump_du",
@@ -211,6 +226,7 @@ def _drag_contribution(state, h_k, h_u, h_v, z_coord, config, grid):
 
 def _run_arm(state, sf, geometry, z_coord, config) -> dict[str, Any]:
     model = LatLonCGridOceanModel(geometry, z_coord, config)
+    captured: dict[str, Any] = {}
     before_fields = (
         state.T_before, state.S_before, state.u_before, state.v_before,
     )
@@ -221,10 +237,26 @@ def _run_arm(state, sf, geometry, z_coord, config) -> dict[str, Any]:
         tau_x=0.5 * (state.tau_x_prev + sf.tau_x),
         tau_y=0.5 * (state.tau_y_prev + sf.tau_y),
     )
-    _, diagnostics = model.tendencies_with_diagnostics(
-        state, surface_forcing=centred_sf, dt=DT, ldf_state=ldf_state,
-    )
-    captured: dict[str, Any] = {}
+    real_gradients = pe_module._bc_ke_and_pressure_gradients
+
+    def spy_gradients(*args, **kwargs):
+        result = real_gradients(*args, **kwargs)
+        if "keg_u" not in captured:
+            dke_dx, dp_dx, dke_dy, dp_dy = result
+            rho_0 = float(config.constants.rho_0)
+            captured["keg_u"] = np.asarray(-dke_dx)
+            captured["keg_v"] = np.asarray(-dke_dy)
+            captured["hpg_u"] = np.asarray(-dp_dx / rho_0)
+            captured["hpg_v"] = np.asarray(-dp_dy / rho_0)
+        return result
+
+    pe_module._bc_ke_and_pressure_gradients = spy_gradients
+    try:
+        _, diagnostics = model.tendencies_with_diagnostics(
+            state, surface_forcing=centred_sf, dt=DT, ldf_state=ldf_state,
+        )
+    finally:
+        pe_module._bc_ke_and_pressure_gradients = real_gradients
     real_baro = ocean_model_module.barotropic_substeps_latlon_cgrid
     real_cor = barotropic_module.barotropic_coriolis_een_pre_step
     real_stress = pe_module.surface_stress_faces
@@ -266,6 +298,7 @@ def _run_arm(state, sf, geometry, z_coord, config) -> dict[str, Any]:
     required = {
         "F_slow_u", "F_slow_v", "cor_u", "cor_v",
         "tau_i_u", "tau_j_v", "dz_0_u", "dz_0_v",
+        "keg_u", "keg_v", "hpg_u", "hpg_v",
     }
     if not required <= captured.keys():
         raise SystemExit(f"arm missed production hooks: {required - captured.keys()}")
@@ -300,6 +333,49 @@ def _zero_reference_gate(model_values, oracle_values) -> str:
         if np.count_nonzero(model_values) == 0
         else "DEBT_NONZERO_AGAINST_ZERO_REFERENCE"
     )
+
+
+def _attribute_error(term_error, residual) -> dict[str, Any]:
+    term_error = np.asarray(term_error)
+    residual = np.asarray(residual)
+    residual_rms = _rms(residual)
+    if residual_rms <= 0.0:
+        raise RuntimeError("zero assembled residual has no attribution score")
+    term_rms = _rms(term_error)
+    corr = (
+        float(np.corrcoef(term_error, residual)[0, 1])
+        if term_error.size > 1 and np.std(term_error) > 0.0 else None
+    )
+    gain = term_rms / residual_rms
+    removal = 1.0 - _rms(residual - term_error) / residual_rms
+    if corr is not None and corr >= 0.99 and 0.90 <= gain <= 1.10 and removal >= 0.90:
+        verdict = "CONFIRMS_CARRY"
+    elif corr is not None and abs(corr) <= 0.20 and removal <= 0.10:
+        verdict = "REFUTES_CARRY"
+    else:
+        verdict = "UNRESOLVED"
+    return {
+        "correlation_with_total_residual": corr,
+        "rms_gain": gain,
+        "residual_removal": removal,
+        "verdict": verdict,
+    }
+
+
+def _attribution_controls() -> dict[str, Any]:
+    phase = 2.0 * np.pi * np.arange(1024, dtype=np.float64) / 1024.0
+    residual = np.sin(phase)
+    confirming = _attribute_error(residual.copy(), residual)
+    refuting = _attribute_error(np.cos(phase), residual)
+    controls = {
+        "identity_confirms": confirming["verdict"] == "CONFIRMS_CARRY",
+        "orthogonal_refutes": refuting["verdict"] == "REFUTES_CARRY",
+        "confirming_score": confirming,
+        "refuting_score": refuting,
+    }
+    if not (controls["identity_confirms"] and controls["orthogonal_refutes"]):
+        raise RuntimeError("attribution classifier controls failed")
+    return controls
 
 
 def _term_metric(lego, nemo, mask, expected_n, total_residual):
@@ -357,26 +433,7 @@ def _term_metric(lego, nemo, mask, expected_n, total_residual):
         metric["structural_zero_reference"] = False
     term_error = lego_values - nemo_values
     residual = np.asarray(total_residual)[mask]
-    residual_rms = _rms(residual)
-    term_rms = _rms(term_error)
-    corr = (
-        float(np.corrcoef(term_error, residual)[0, 1])
-        if term_error.size > 1 and np.std(term_error) > 0.0 else math.nan
-    )
-    gain = term_rms / residual_rms if residual_rms > 0.0 else math.nan
-    removal = 1.0 - _rms(residual - term_error) / residual_rms
-    if corr >= 0.99 and 0.90 <= gain <= 1.10 and removal >= 0.90:
-        verdict = "CONFIRMS_CARRY"
-    elif abs(corr) <= 0.20 and removal <= 0.10:
-        verdict = "REFUTES_CARRY"
-    else:
-        verdict = "UNRESOLVED"
-    metric["attribution"] = {
-        "correlation_with_total_residual": corr,
-        "rms_gain": gain,
-        "residual_removal": removal,
-        "verdict": verdict,
-    }
+    metric["attribution"] = _attribute_error(term_error, residual)
     return metric
 
 
@@ -391,12 +448,12 @@ def _counterfactual_score(legacy, faithful, nemo, mask):
         if prediction.size > 1
         and np.std(prediction) > 0.0
         and np.std(residual) > 0.0
-        else math.nan
+        else None
     )
     reduction = 1.0 - _rms(corrected) / rms_residual
-    if prediction_error <= 0.10 and corr >= 0.99 and reduction >= 0.90:
+    if corr is not None and prediction_error <= 0.10 and corr >= 0.99 and reduction >= 0.90:
         verdict = "CONFIRMS_BRIDGE_WIND_SOURCE"
-    elif prediction_error >= 0.90 and corr <= 0.20 and reduction <= 0.10:
+    elif corr is not None and prediction_error >= 0.90 and corr <= 0.20 and reduction <= 0.10:
         verdict = "REFUTES_BRIDGE_WIND_SOURCE"
     else:
         verdict = "UNRESOLVED_BRIDGE_WIND_SOURCE"
@@ -433,6 +490,12 @@ def main() -> int:
 
     run_dir = Path(inherited.RUN_DIR).resolve()
     restart_path = run_dir / inherited.RESTART_FILE
+    oracle_flags = _oracle_echo_flags(
+        run_dir / "ocean.output",
+        ("ln_apr_dyn", "ln_bt_fw", "ln_isfcav", "ln_drgice_imp"),
+    )
+    if any(value != "F" for value in oracle_flags.values()):
+        raise SystemExit(f"registered dynspg_ts arm changed: {oracle_flags}")
     jpi, jpj, jpk, hls, _, _ = inherited._read_dims(str(run_dir))
     kt = int(inherited.dump_lane.KT_DUMP)
     dump_names = _register_dumps(kt)
@@ -522,10 +585,26 @@ def main() -> int:
         base_parts_v, nemo["v"]["stage06"], vmask3, int(vmask3.sum())
     )
     if (
-        base_control_u["normalized_rms_error"] > 1.0e-12
-        or base_control_v["normalized_rms_error"] > 1.0e-12
+        base_control_u["normalized_rms_error"] > BASE_RECONSTRUCTION_BAR
+        or base_control_v["normalized_rms_error"] > BASE_RECONSTRUCTION_BAR
     ):
         raise SystemExit(f"NEMO base reconstruction failed: {base_control_u} {base_control_v}")
+    planted_base_u = base_parts_u.copy()
+    planted_base_u[umask3] += 1.0e-6 * _rms(nemo["u"]["stage06"][umask3])
+    planted_base_metric = round1._metric(
+        planted_base_u, nemo["u"]["stage06"], umask3, int(umask3.sum())
+    )
+    base_reconstruction_control = {
+        "bar": BASE_RECONSTRUCTION_BAR,
+        "u_pass": base_control_u["normalized_rms_error"] <= BASE_RECONSTRUCTION_BAR,
+        "v_pass": base_control_v["normalized_rms_error"] <= BASE_RECONSTRUCTION_BAR,
+        "planted_u_normalized_error": planted_base_metric["normalized_rms_error"],
+        "planted_u_fires": (
+            planted_base_metric["normalized_rms_error"] > BASE_RECONSTRUCTION_BAR
+        ),
+    }
+    if not base_reconstruction_control["planted_u_fires"]:
+        raise SystemExit("NEMO base reconstruction plant did not breach bar")
 
     base_u = _nemo_depth_mean(base_parts_u, e3u, umask3, hu)
     base_v = _nemo_depth_mean(base_parts_v, e3v, vmask3, hv)
@@ -576,13 +655,14 @@ def main() -> int:
         if component == "u":
             mapper, thickness, mask = _u_to_nemo, h_u, np.asarray(legacy.u_mask.data)
             fields = {
-                "pressure_ke": diagnostics.KE_PGF_u.data,
+                "kinetic_energy_gradient": arm["keg_u"],
                 "vertical_advection": diagnostics.vertadv_u.data,
                 "vorticity": diagnostics.vortcor_u.data,
                 "lateral_friction": (
                     diagnostics.Ah_lap_u.data + diagnostics.Bh_bilap_u.data
                     + diagnostics.Cs_smag_u.data + diagnostics.Cl_leith_u.data
                 ),
+                "pressure_gradient": arm["hpg_u"],
                 "vertical_friction": diagnostics.Av_vert_u.data,
             }
             direct_drag, cor = drag_u, arm["cor_u"]
@@ -590,13 +670,14 @@ def main() -> int:
         else:
             mapper, thickness, mask = _v_to_nemo, h_v, np.asarray(legacy.v_mask.data)
             fields = {
-                "pressure_ke": diagnostics.KE_PGF_v.data,
+                "kinetic_energy_gradient": arm["keg_v"],
                 "vertical_advection": diagnostics.vertadv_v.data,
                 "vorticity": diagnostics.vortcor_v.data,
                 "lateral_friction": (
                     diagnostics.Ah_lap_v.data + diagnostics.Bh_bilap_v.data
                     + diagnostics.Cs_smag_v.data + diagnostics.Cl_leith_v.data
                 ),
+                "pressure_gradient": arm["hpg_v"],
                 "vertical_friction": diagnostics.Av_vert_v.data,
             }
             direct_drag, cor = drag_v, arm["cor_v"]
@@ -624,8 +705,8 @@ def main() -> int:
     faithful_terms_u = lego_terms(faithful_arm, "u")
     faithful_terms_v = lego_terms(faithful_arm, "v")
     nemo_terms_u = {
-        "pressure_ke": _nemo_depth_mean(
-            nemo["u"]["keg"] + nemo["u"]["hpg"], e3u, umask3, hu
+        "kinetic_energy_gradient": _nemo_depth_mean(
+            nemo["u"]["keg"], e3u, umask3, hu
         ),
         "vertical_advection": _nemo_depth_mean(
             nemo["u"]["vertical_advection"], e3u, umask3, hu
@@ -634,13 +715,16 @@ def main() -> int:
         "lateral_friction": _nemo_depth_mean(
             nemo["u"]["lateral_friction"], e3u, umask3, hu
         ),
+        "pressure_gradient": _nemo_depth_mean(
+            nemo["u"]["hpg"], e3u, umask3, hu
+        ),
         "cor_removal": -nemo_cor_u,
         "drag": nemo["u"]["drag"],
         "wind": nemo["u"]["wind"],
     }
     nemo_terms_v = {
-        "pressure_ke": _nemo_depth_mean(
-            nemo["v"]["keg"] + nemo["v"]["hpg"], e3v, vmask3, hv
+        "kinetic_energy_gradient": _nemo_depth_mean(
+            nemo["v"]["keg"], e3v, vmask3, hv
         ),
         "vertical_advection": _nemo_depth_mean(
             nemo["v"]["vertical_advection"], e3v, vmask3, hv
@@ -648,6 +732,9 @@ def main() -> int:
         "vorticity": _nemo_depth_mean(nemo["v"]["vorticity"], e3v, vmask3, hv),
         "lateral_friction": _nemo_depth_mean(
             nemo["v"]["lateral_friction"], e3v, vmask3, hv
+        ),
+        "pressure_gradient": _nemo_depth_mean(
+            nemo["v"]["hpg"], e3v, vmask3, hv
         ),
         "cor_removal": -nemo_cor_v,
         "drag": nemo["v"]["drag"],
@@ -674,8 +761,9 @@ def main() -> int:
 
     term_metrics: dict[str, dict[str, Any]] = {"u": {}, "v": {}}
     ordered = (
-        "pressure_ke", "vertical_advection", "vorticity",
-        "lateral_friction", "cor_removal", "drag", "wind",
+        "kinetic_energy_gradient", "vertical_advection", "vorticity",
+        "lateral_friction", "pressure_gradient", "cor_removal", "drag",
+        "wind",
     )
     for name in ordered:
         term_metrics["u"][name] = _term_metric(
@@ -760,6 +848,27 @@ def main() -> int:
     term_sum_error_v = sum(
         legacy_terms_v[name] - nemo_terms_v[name] for name in ordered
     )
+    closure_u = _rms((term_sum_error_u - residual_u)[umask2]) / _rms(residual_u[umask2])
+    closure_v = _rms((term_sum_error_v - residual_v)[vmask2]) / _rms(residual_v[vmask2])
+    planted_term_sum_u = term_sum_error_u.copy()
+    planted_term_sum_u[umask2] += 1.0e-6 * _rms(residual_u[umask2])
+    planted_closure_u = _rms(
+        (planted_term_sum_u - residual_u)[umask2]
+    ) / _rms(residual_u[umask2])
+    closure_controls = {
+        "bar": TERM_CLOSURE_BAR,
+        "u_pass": closure_u <= TERM_CLOSURE_BAR,
+        "v_pass": closure_v <= TERM_CLOSURE_BAR,
+        "planted_u_normalized_closure": planted_closure_u,
+        "planted_u_fires": planted_closure_u > TERM_CLOSURE_BAR,
+    }
+    if not (
+        closure_controls["u_pass"]
+        and closure_controls["v_pass"]
+        and closure_controls["planted_u_fires"]
+    ):
+        raise SystemExit(f"signed term-error closure failed: {closure_controls}")
+    attribution_controls = _attribution_controls()
     cancellation = {"u": {}, "v": {}}
     for name in ordered:
         for component, residual, leading, mask in (
@@ -820,6 +929,7 @@ def main() -> int:
         "kt": kt,
         "run_dir": str(run_dir),
         "restart_clock": clock,
+        "oracle_runtime_flags": oracle_flags,
         "runtime": {
             "backend": jax.default_backend(),
             "jax_enable_x64": bool(jax.config.jax_enable_x64),
@@ -858,14 +968,17 @@ def main() -> int:
         "faithful_term_metrics": faithful_term_metrics,
         "counterfactual": counterfactual,
         "term_error_sum_closure": {
-            "u_normalized_to_total_residual": _rms((term_sum_error_u - residual_u)[umask2]) / _rms(residual_u[umask2]),
-            "v_normalized_to_total_residual": _rms((term_sum_error_v - residual_v)[vmask2]) / _rms(residual_v[vmask2]),
+            "u_normalized_to_total_residual": closure_u,
+            "v_normalized_to_total_residual": closure_v,
         },
         "cancellation_pairs": cancellation,
         "controls": {
             "entry_identity": identity,
             "donor_equalization": donor_control,
             "campaign_classifier_and_alignment": classifier_controls,
+            "base_reconstruction": base_reconstruction_control,
+            "term_error_closure": closure_controls,
+            "attribution_classifier": attribution_controls,
         },
         "ordered_continuation": {
             "row_1_1": "OPEN_SOURCE_LOCALIZED_FAITHFUL_TOTAL_DEBT",
@@ -879,7 +992,9 @@ def main() -> int:
         "dump_sha256": {name: _sha256(run_dir / name) for name in dump_names},
         "run_input_sha256": {name: _sha256(run_dir / name) for name in inputs},
     }
-    args.output.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+    args.output.write_text(
+        json.dumps(receipt, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    )
 
     print("ROW 1.1 TERM PEEL")
     for component in ("u", "v"):
@@ -894,8 +1009,10 @@ def main() -> int:
         )
         for name in ordered:
             attribution = term_metrics[component][name]["attribution"]
+            corr_value = attribution["correlation_with_total_residual"]
+            corr_text = "null" if corr_value is None else f"{corr_value:+.6f}"
             print(
-                f"    {name}: corrR={attribution['correlation_with_total_residual']:+.6f} "
+                f"    {name}: corrR={corr_text} "
                 f"gain={attribution['rms_gain']:.6f} "
                 f"removal={attribution['residual_removal']:.6f} "
                 f"{attribution['verdict']}"
@@ -904,9 +1021,11 @@ def main() -> int:
             print("    post-faithful U tail:")
             for name in ordered:
                 attribution = faithful_term_metrics["u"][name]["attribution"]
+                corr_value = attribution["correlation_with_total_residual"]
+                corr_text = "null" if corr_value is None else f"{corr_value:+.6f}"
                 print(
                     f"      {name}: "
-                    f"corrR={attribution['correlation_with_total_residual']:+.6f} "
+                    f"corrR={corr_text} "
                     f"gain={attribution['rms_gain']:.6f} "
                     f"removal={attribution['residual_removal']:.6f} "
                     f"{attribution['verdict']}"

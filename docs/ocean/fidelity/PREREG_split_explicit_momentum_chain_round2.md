@@ -14,8 +14,8 @@ sources rather than re-derived from a new decomposition.
 | Order | Constituent | Active NEMO statement and existing dump |
 |---:|---|---|
 | 1 | kinetic-energy gradient plus vertical advection | `cfgs/DINO/MY_SRC/stpmlf.F90:269-270,309-314`; split dumps at `dynadv.F90:89-103` (`keg_dump_*`, `zad_dump_*`) |
-| 2 | total EEN vorticity/Coriolis | `stpmlf.F90:315-318`; active EEN dispatch and increment bracket at `dynvor.F90:147-155` (`vor_dump_*`) |
-| 3 | lateral friction | `stpmlf.F90:319-322`; active level-Laplacian dispatch and increment bracket at `dynldf.F90:69-85,118-119` (`ldf_dump_*`) |
+| 2 | total EEN vorticity/Coriolis | `stpmlf.F90:315-318`; active planetary and relative EEN dispatch, accumulation, and dump at `dynvor.F90:147-193` (`vor_dump_*`) |
+| 3 | lateral friction | `stpmlf.F90:319-322`; active level-Laplacian snapshot, dispatch, dump, and trend bracket at `dynldf.F90:69-119` (`ldf_dump_*`) |
 | 4 | hydrostatic pressure gradient | `stpmlf.F90:324-328`; active SCO increment bracket at `dynhpg.F90:348-413` (`hpg_dump_*`) |
 | 5 | REST-weighted depth mean of rows 1-4 | `cfgs/DINO/MY_SRC/dynspg_ts.F90:316-339` |
 | 6 | remove pre-loop 2-D Coriolis | `dynspg_ts.F90:358-370`; inferred exactly as `base + drag + wind - final` because `ln_apr_dyn=F` |
@@ -90,7 +90,19 @@ ownership verdict while row 1.1 remains open.
 ## Controls, provenance, and instrumentation
 
 - The actual U/V alignment scan must select `(dj,di)=(0,0)`.
-- The exact base reconstruction and inferred-Coriolis ledger must close.
+- The exact base reconstruction must have normalized error `<=1e-12` for U
+  and V; adding `1e-6*RMS(stage06)` to the U reconstruction must fail.  The
+  inferred-Coriolis ledger must close within its explicit fp64 roundoff
+  envelope.
+- The run's own `ocean.output` must echo `ln_apr_dyn=F`, `ln_bt_fw=F`,
+  `ln_isfcav=F`, and `ln_drgice_imp=F` before the inferred-Coriolis identity
+  is evaluated; missing or inconsistent echoes stop the probe.
+- The signed constituent-error sum must reconstruct each assembled residual
+  with normalized closure `<=1e-10`.  Adding `1e-6*RMS(residual)` to the U
+  sum must fail that same bar.
+- Synthetic identity and orthogonal error fields must traverse the same
+  attribution classifier and return `CONFIRMS_CARRY` and `REFUTES_CARRY`,
+  respectively.
 - Identical arrays must classify AT BAR; a planted `1e-6` RMS-scale offset
   must traverse the same campaign classifier and classify DEBT.
 - A planted east-donor equalization must alter the wind prediction/owner
@@ -104,3 +116,17 @@ already exist in `RUN_SEQDUMP_D180_1R`.  Therefore no SLOT block is allocated.
 If an exact pre-loop term cannot be recovered from the registered ledger, the
 probe stops `UNMEASURED`; any later held writer must be preregistered and use
 the campaign SLOT protocol before it is built.
+
+Source-citation amendment before the accepted run: independent review found
+that the original `dynvor.F90:147-155` and
+`dynldf.F90:69-85,118-119` shorthand omitted the second EEN pass/dump and the
+LDF dump write, respectively.  The table now gives the complete active
+ranges.  No operand, statistic, population, threshold, or interpretation bar
+changed.
+
+Instrument-control amendment before the accepted run: independent review
+required the oracle-arm, signed-closure, attribution-path, zero-reference,
+donor-verdict, and strict-JSON checks above to fail closed.  These controls
+were committed before the accepted receipt was produced.  No science bar or
+ownership operand changed; the `1e-10` closure threshold is an arithmetic
+ledger-validity bar, not a fidelity classification.
