@@ -2,9 +2,10 @@
 """Qualified ZDF rows 19--32 using existing day-180 dumps.
 
 Row 19 is accepted only through its strict deterministic-writer receipt.  Row
-20 can then be promoted from the already-registered row-19+20 composite.  The
-ordered frontier stops at row 21, whose pre-Prandtl coefficients still require
-their registered direct dump slots; later results remain targeting previews.
+20 is the registered row-19+20 composite.  Row 21 is accepted only through its
+strict five-slot receipt.  Rows 22--27 then use the production TKE/profile
+composer captures; the ordered frontier stops at row 28's missing direct
+turbocline index/depth slot.
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ from legoesm.ocean.physics.vertical_mixing.tke import (  # noqa: E402
 POINTWISE = 1.0e-15
 ACCUMULATING = 1.0e-12
 ROW19_RECEIPT_SHA256 = "f5e42f1d15cd9e823e81fa3f5b56a2b9eebd504c8ef823718c50dd9b9f3fc29b"
+ROW21_RECEIPT_SHA256 = "84885e45ecc149082606c0b44b411271f40942a99497996b0d4b35e051b6a97a"
 
 
 def sha256(path: Path) -> str:
@@ -73,7 +75,9 @@ def disposition(metric: dict) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-dir", type=Path, required=True)
+    ap.add_argument("--row19-run-dir", type=Path, required=True)
     ap.add_argument("--row19-artifact", type=Path, required=True)
+    ap.add_argument("--row21-artifact", type=Path, required=True)
     ap.add_argument("--mld-maps", type=Path, required=True)
     ap.add_argument("--nemo-source-root", type=Path, required=True)
     ap.add_argument("--output", type=Path, required=True)
@@ -85,7 +89,9 @@ def main() -> int:
     if not tracked_tree_clean():
         raise SystemExit("row-tail receipt requires a clean tracked tree")
     run = args.run_dir.resolve()
+    row19_run_dir = args.row19_run_dir.resolve()
     row19_path = args.row19_artifact.resolve()
+    row21_path = args.row21_artifact.resolve()
     source_root = args.nemo_source_root.resolve()
     if Path(dump_lane.RUN_DIR).resolve() != run:
         raise SystemExit(
@@ -99,7 +105,7 @@ def main() -> int:
     row19_bracket = row19_receipt.get("bracket", {})
     row19_controls = row19_receipt.get("controls", {})
     row19_provenance = row19_receipt.get("provenance_sha256", {})
-    row19_run = str(run / "tke_dump_zmxlm_raw.bin")
+    row19_run = str(row19_run_dir / "tke_dump_zmxlm_raw.bin")
     if (
         sha256(row19_path) != ROW19_RECEIPT_SHA256
         or row19_receipt.get("schema") != "dino-zdf-row19-raw-mxl-v1"
@@ -113,13 +119,54 @@ def main() -> int:
         or row19_bracket.get("shared_stream_count") != 197
         or row19_bracket.get("strict_byte_identical_stream_count") != 197
         or row19_bracket.get("uninitialized_memory_exclusions") != []
-        or row19_provenance.get(row19_run) != sha256(run / "tke_dump_zmxlm_raw.bin")
+        or row19_provenance.get(row19_run)
+        != sha256(row19_run_dir / "tke_dump_zmxlm_raw.bin")
         or not row19_controls
         or not all(row19_controls.values())
         or len(row19_metric.get("focus", [])) != 4
         or not all(item.get("pass") is True for item in row19_metric["focus"])
     ):
         raise SystemExit("row19 deterministic-writer receipt is not promotable")
+
+    row21_receipt = json.loads(row21_path.read_text())
+    row21_rows = row21_receipt.get("rows", {})
+    row21_bracket = row21_receipt.get("bracket", {})
+    row21_controls = row21_receipt.get("controls", {})
+    row21_bracket_controls = row21_receipt.get("bracket_controls", {})
+    row21_provenance = row21_receipt.get("provenance_sha256", {})
+    row21_paths = row21_receipt.get("provenance_paths", {})
+    expected_row21_dumps = {
+        "zsqen_base", "zav_base", "avm_base", "avt_base", "dissl_postavn"
+    }
+    if (
+        sha256(row21_path) != ROW21_RECEIPT_SHA256
+        or row21_receipt.get("schema") != "dino-zdf-row21-coeff-assembly-v1"
+        or row21_receipt.get("disposition") != "VERIFIED"
+        or row21_receipt.get("first_divergence") is not None
+        or set(row21_rows) != expected_row21_dumps
+        or not all(item.get("metric", {}).get("pass") is True for item in row21_rows.values())
+        or not all(item["metric"].get("n_diverged_columns") == 0 for item in row21_rows.values())
+        or not all(
+            item["metric"].get("exact_unequal_wet_elements") == 0
+            for item in row21_rows.values()
+        )
+        or row21_bracket.get("on_stream_count") != 202
+        or row21_bracket.get("off_stream_count") != 197
+        or row21_bracket.get("strict_byte_identical_shared_stream_count") != 197
+        or row21_bracket.get("exclusions") != []
+        or not row21_controls
+        or not all(all(control.values()) for control in row21_controls.values())
+        or not all(row21_bracket_controls.values())
+    ):
+        raise SystemExit("row21 five-slot receipt is not promotable")
+    for name in expected_row21_dumps:
+        key = f"dump_{name}"
+        expected_path = str(run / f"tke_dump_{name}.bin")
+        if (
+            row21_paths.get(key) != expected_path
+            or row21_provenance.get(key) != sha256(Path(expected_path))
+        ):
+            raise SystemExit(f"row21 receipt does not bind current run dump: {name}")
 
     focus = sweep.focus_from_maps(args.mld_maps)
     jpi, jpj, jpk, hls = loaders._read_dims(str(run))
@@ -185,7 +232,13 @@ def main() -> int:
     )
     pair_calls = []
     apply_calls = []
+    profile_calls = []
+    closure_calls = []
+    evd_calls = []
     real_pair = vmix_mod.implicit_vertical_diffusion_ocean_pair
+    real_profiles = vmix_mod.compute_vertical_K_profiles
+    real_closure = kprofiles_mod._vmix_K_profiles
+    real_evd = kprofiles_mod._enhanced_diffusion_K
     model_cls = type(model)
     real_apply = model_cls._apply_implicit_vertical_mixing
 
@@ -197,12 +250,33 @@ def main() -> int:
         apply_calls.append((apply_args, apply_kwargs))
         return real_apply(self, *apply_args, **apply_kwargs)
 
+    def spy_profiles(*profile_args, **profile_kwargs):
+        result = real_profiles(*profile_args, **profile_kwargs)
+        profile_calls.append((profile_args, profile_kwargs, result))
+        return result
+
+    def spy_closure(*closure_args, **closure_kwargs):
+        result = real_closure(*closure_args, **closure_kwargs)
+        closure_calls.append((closure_args, closure_kwargs, result))
+        return result
+
+    def spy_evd(*evd_args, **evd_kwargs):
+        result = real_evd(*evd_args, **evd_kwargs)
+        evd_calls.append((evd_args, evd_kwargs, result))
+        return result
+
     vmix_mod.implicit_vertical_diffusion_ocean_pair = spy_pair
+    vmix_mod.compute_vertical_K_profiles = spy_profiles
+    kprofiles_mod._vmix_K_profiles = spy_closure
+    kprofiles_mod._enhanced_diffusion_K = spy_evd
     model_cls._apply_implicit_vertical_mixing = spy_apply
     try:
         _, _, captured = sweep.capture_face_sh2_call(model, state, sf)
     finally:
         vmix_mod.implicit_vertical_diffusion_ocean_pair = real_pair
+        vmix_mod.compute_vertical_K_profiles = real_profiles
+        kprofiles_mod._vmix_K_profiles = real_closure
+        kprofiles_mod._enhanced_diffusion_K = real_evd
         model_cls._apply_implicit_vertical_mixing = real_apply
     if len(pair_calls) != 1:
         raise AssertionError(
@@ -211,6 +285,12 @@ def main() -> int:
     if len(apply_calls) != 1:
         raise AssertionError(
             f"DINO production implicit call fired {len(apply_calls)} times, expected 1"
+        )
+    if len(profile_calls) != 1 or len(closure_calls) != 1 or len(evd_calls) != 1:
+        raise AssertionError(
+            "DINO production profile composer did not fire exactly once: "
+            f"profiles={len(profile_calls)} closure={len(closure_calls)} "
+            f"evd={len(evd_calls)}"
         )
     mxl_args, mxl_kwargs, _ = captured["mxl_calls"][-1]
     if len(mxl_args) != 4 or en.shape != np.asarray(mxl_args[0]).shape:
@@ -242,6 +322,70 @@ def main() -> int:
     )
     row21_avm = sweep.metrics(np.asarray(km), avm_closure, wet_interior, focus, POINTWISE)
     row22_avt = sweep.metrics(np.asarray(kh), avt_closure, wet_interior, focus, POINTWISE)
+
+    profile_k = np.asarray(profile_calls[0][2][0])
+    profile_a = np.asarray(profile_calls[0][2][1])
+    closure_k = np.asarray(closure_calls[0][2][0])
+    closure_a = np.asarray(closure_calls[0][2][1])
+    evd_k = np.asarray(evd_calls[0][2][0])
+    evd_a = np.asarray(evd_calls[0][2][1])
+    expected_shape = wet_interior.shape
+    for name, field in (
+        ("profile avt", profile_k), ("profile avm", profile_a),
+        ("closure avt", closure_k), ("closure avm", closure_a),
+        ("EVD avt", evd_k), ("EVD avm", evd_a),
+    ):
+        if field.shape != expected_shape:
+            raise AssertionError(
+                f"production {name} shape changed: {field.shape} vs {expected_shape}"
+            )
+
+    row23_avt = sweep.metrics(
+        closure_k, avt_closure, wet_interior, focus, POINTWISE)
+    row23_avm = sweep.metrics(
+        closure_a, avm_closure, wet_interior, focus, POINTWISE)
+
+    # NEMO's composed coefficient streams contain jk=1..jpkm1.  legoESM's
+    # interior W state maps to jk=2..jpk, so drop the prescribed surface row
+    # and append the dry jpk terminal.  The terminal is outside the wet census.
+    def composed_to_legoesm(name: str) -> np.ndarray:
+        nemo = haloed(name)
+        if nemo.shape != (nj, ni, jpk - 1):
+            raise AssertionError(f"composed coefficient shape changed: {nemo.shape}")
+        return np.concatenate(
+            [nemo[..., 1:], np.zeros_like(nemo[..., :1])], axis=-1)
+
+    avt_composed_lego = composed_to_legoesm("dump_avt.bin")
+    avm_composed_lego = composed_to_legoesm("dump_avm.bin")
+    row25 = sweep.metrics(
+        profile_k, avt_composed_lego, wet_interior, focus, POINTWISE)
+    row26 = sweep.metrics(
+        profile_a, avm_composed_lego, wet_interior, focus, POINTWISE)
+    nemo_evd_mask = wet_interior & (np.minimum(rn2, rn2b) <= -1.0e-12)
+    lego_evd_mask = wet_interior & (evd_k == 100.0) & (evd_a == 100.0)
+    evd_xor = wet_interior & (nemo_evd_mask != lego_evd_mask)
+    evd_bad_columns = np.any(evd_xor, axis=-1)
+    evd_wet_columns = np.any(wet_interior, axis=-1)
+    evd_focus = [
+        {
+            "j": j,
+            "i": i,
+            "wet": bool(evd_wet_columns[j, i]),
+            "xor_levels": int(evd_xor[j, i].sum()),
+            "pass": bool(evd_wet_columns[j, i] and not evd_bad_columns[j, i]),
+        }
+        for j, i in focus
+    ]
+    row25_26_mask = {
+        "bar": "exact branch-mask equality",
+        "n_wet_columns": int(evd_wet_columns.sum()),
+        "n_diverged_columns": int(evd_bad_columns.sum()),
+        "n_verified_columns": int(evd_wet_columns.sum() - evd_bad_columns.sum()),
+        "n_xor_wet_elements": int(evd_xor.sum()),
+        "n_fired_wet_elements": int(nemo_evd_mask.sum()),
+        "focus": evd_focus,
+        "pass": bool(not evd_bad_columns.any()),
+    }
 
     # Row 27 fail-closed source/object identity.  NEMO's resolved runtime
     # flags and active assignment must remain exactly the DINO no-DDM path,
@@ -368,25 +512,9 @@ def main() -> int:
         raise AssertionError(
             "row27 production DDM control did not isolate one salt-K coefficient"
         )
-    # zdfphy rows 23/25/26/29 are reconstructible from existing NEMO closure,
-    # rn2/rn2b, mask, and composed-coefficient dumps.  These are deliberately
-    # retained as ORACLE-SELFCHECK previews, not legoESM measurements: no
-    # legoESM coefficient-composition/EVD/LBC production routine is called.
-    avt_composed = haloed("dump_avt.bin")
-    avm_composed = haloed("dump_avm.bin")
-    closure_avt_z = avt_closure_full[..., : jpk - 1]
-    closure_avm_z = avm_closure_full[..., : jpk - 1]
-    rn2_z = rn2_full[..., : jpk - 1]
-    rn2b_z = rn2b_full[..., : jpk - 1]
-    fired = wet_zdfphy & (np.minimum(rn2_z, rn2b_z) <= -1.0e-12)
-    stable = wet_zdfphy & ~fired
-    predicted_avt = np.where(fired, 100.0 * wet_interior, closure_avt_z)
-    predicted_avm = np.where(fired, 100.0 * wet_interior, closure_avm_z)
-    row23_avt = sweep.metrics(closure_avt_z, avt_composed, stable, focus, POINTWISE)
-    row23_avm = sweep.metrics(closure_avm_z, avm_composed, stable, focus, POINTWISE)
-    row25 = sweep.metrics(predicted_avt, avt_composed, fired, focus, POINTWISE)
-    row26 = sweep.metrics(predicted_avm, avm_composed, fired, focus, POINTWISE)
-    row29 = sweep.metrics(predicted_avm, avm_composed, wet_zdfphy, focus, POINTWISE)
+    # Row 29's interior LBC no-op preview is numerically the same production
+    # composed-avm comparison as row 26.  It cannot be promoted across row 28.
+    row29 = row26
 
     # Row 30: call the existing production-native slope probe once, capture
     # its own first intermediate (prd), and score all four returned slopes.
@@ -410,11 +538,21 @@ def main() -> int:
         wet_prd[..., ldf_probe.KHI :] = False
     row30_prd = sweep.metrics(prd_l[..., :nk_prd], prd_n[..., :nk_prd], wet_prd, focus, POINTWISE)
 
+    evd_mask_plant = lego_evd_mask.copy()
+    evd_control_index = tuple(int(x) for x in np.argwhere(wet_interior)[0])
+    evd_mask_plant[evd_control_index] = ~evd_mask_plant[evd_control_index]
+    evd_mask_control_fired = bool(
+        np.any(wet_interior & (evd_mask_plant != nemo_evd_mask)))
+
     numeric_controls = {
         "row20_lk": sweep.planted_controls(zmxlm, zmxlm, wet_interior, ACCUMULATING),
         "row22_avt": sweep.planted_controls(avt_closure, avt_closure, wet_interior, POINTWISE),
+        "row23_avm": sweep.planted_controls(
+            avm_closure, avm_closure, wet_interior, POINTWISE),
         "row24_enabled_runoff_waiver_fired": row24_control_fired,
-        "row25_avt": sweep.planted_controls(avt_composed, avt_composed, fired, POINTWISE),
+        "row25_avt": sweep.planted_controls(
+            avt_composed_lego, avt_composed_lego, wet_interior, POINTWISE),
+        "row25_26_mask_flip_fired": evd_mask_control_fired,
         "row30_prd": sweep.planted_controls(
             prd_n[..., :nk_prd], prd_n[..., :nk_prd], wet_prd, POINTWISE
         ),
@@ -452,34 +590,41 @@ def main() -> int:
         },
         "21": {
             "operation": "base avm/avt/dissl assembly",
-            "disposition": "UNMEASURED-NEEDS-DUMP",
-            "avm_preview": row21_avm,
-            "reason": (
-                "base avm is directly checkable and passes; base pre-Prandtl "
-                "avt and post-tke_avn dissl are not dumped (the existing "
-                "dissl slot is the carried pre-overwrite row-15 operand)"
-            ),
+            "disposition": "VERIFIED",
+            "receipt": str(row21_path),
+            "receipt_sha256": sha256(row21_path),
+            "operands": row21_rows,
+            "production_actual_card_avm": row21_avm,
+            "write_only_bracket": {
+                "on_streams": row21_bracket["on_stream_count"],
+                "off_streams": row21_bracket["off_stream_count"],
+                "strict_byte_identical_shared_streams": row21_bracket[
+                    "strict_byte_identical_shared_stream_count"
+                ],
+                "exclusions": [],
+            },
         },
         "22": {
             "operation": "inverse-Prandtl avt correction",
-            "disposition": (
-                "PROVISIONAL-VERIFIED-BLOCKED-BY-ROW21"
-                if row22_avt["pass"] else "DIVERGED"),
+            "disposition": "VERIFIED" if row22_avt["pass"] else "DIVERGED",
             "avt": row22_avt,
         },
         "23": {
             "operation": "closure coefficient copy on EVD-stable points",
-            "disposition": "UNMEASURED-ORACLE-SELFCHECK",
-            "oracle_selfcheck_avt": row23_avt,
-            "oracle_selfcheck_avm": row23_avm,
+            "disposition": (
+                "VERIFIED" if row23_avt["pass"] and row23_avm["pass"]
+                else "DIVERGED"
+            ),
+            "production_closure_avt": row23_avt,
+            "production_closure_avm": row23_avm,
             "reason": (
-                "NEMO closure and composed dumps self-consistent on stable "
-                "subset; legoESM composition path not invoked"
+                "the production _vmix_K_profiles result is captured before "
+                "the production EVD composer and compared to NEMO closure dumps"
             ),
         },
         "24": {
             "operation": "river-mouth enhancement",
-            "disposition": "PROVISIONAL-WAIVED-BLOCKED-BY-ROW21",
+            "disposition": "WAIVED",
             "reason": (
                 "fail-closed parse confirms resolved ln_rnf=F, namelist_ref "
                 "ln_rnf_mouth=.false., and live zdfphy.F90:317-321 branch"
@@ -487,21 +632,27 @@ def main() -> int:
         },
         "25": {
             "operation": "EVD tracer overwrite",
-            "disposition": "UNMEASURED-ORACLE-SELFCHECK",
-            "oracle_selfcheck_avt": row25,
-            "reason": "NEMO source-order EVD reconstruction only; legoESM EVD path not invoked",
-            "fired_wet_elements": int(fired.sum()),
+            "disposition": (
+                "VERIFIED" if row25["pass"] and row25_26_mask["pass"]
+                else "DIVERGED"
+            ),
+            "production_composed_avt": row25,
+            "branch_mask": row25_26_mask,
+            "fired_wet_elements": row25_26_mask["n_fired_wet_elements"],
         },
         "26": {
             "operation": "EVD momentum overwrite",
-            "disposition": "UNMEASURED-ORACLE-SELFCHECK",
-            "oracle_selfcheck_avm": row26,
-            "reason": "NEMO source-order EVD reconstruction only; legoESM EVD path not invoked",
-            "fired_wet_elements": int(fired.sum()),
+            "disposition": (
+                "VERIFIED" if row26["pass"] and row25_26_mask["pass"]
+                else "DIVERGED"
+            ),
+            "production_composed_avm": row26,
+            "branch_mask": row25_26_mask,
+            "fired_wet_elements": row25_26_mask["n_fired_wet_elements"],
         },
         "27": {
             "operation": "avs copy and optional enhancements",
-            "disposition": "PROVISIONAL-VERIFIED-BLOCKED-BY-ROW21",
+            "disposition": "VERIFIED",
             "source_identity": {
                 "bar": "exact source/object identity",
                 "n_verified_columns": 9920,
@@ -543,20 +694,19 @@ def main() -> int:
         },
         "29": {
             "operation": "avm lateral boundary update, interior census",
-            "disposition": "UNMEASURED-ORACLE-SELFCHECK",
-            "oracle_selfcheck_avm_interior": row29,
+            "disposition": "UNMEASURED-BLOCKED-BY-ROW28",
+            "targeting_preview_avm_interior": row29,
             "reason": (
-                "NEMO reconstructed interior compared to NEMO composed "
-                "dump; legoESM LBC path not invoked"
+                "production composed avm already matches the NEMO interior; "
+                "ordered promotion waits for row 28"
             ),
         },
         "30": {
             "operation": "ldf_slp",
-            "disposition": (
-                "PROVISIONAL-VERIFIED-BLOCKED-BY-ROW21"
-                if all(x["pass"] for x in row30_fields.values())
-                else "PROVISIONAL-DIVERGED-BLOCKED-BY-ROW21"
-            ),
+            "disposition": "UNMEASURED-BLOCKED-BY-ROW28",
+            "targeting_preview_disposition": (
+                "VERIFIED" if all(x["pass"] for x in row30_fields.values())
+                else "DIVERGED"),
             "fields": row30_fields,
             "first_failing_operand": {
                 "name": "prd argument entering ldf_slp",
@@ -573,13 +723,12 @@ def main() -> int:
         },
         "31": {
             "operation": "momentum implicit solve application",
-            "disposition": "UNMEASURED-EXISTING-BRACKET",
+            "disposition": "UNMEASURED-BLOCKED-BY-ROW28",
             "reason": (
                 "no new NEMO dump is required: restart Kbb + stage-6 Krhs + "
                 "stage-7 post-dyn_spg barotropic state + stage-8 output bracket "
-                "dyn_zdf. Exact isolation remains blocked by upstream row-20/"
-                "23/25/26 composed-avm uncertainty and requires the registered "
-                "NEMO volume-form input reconstruction"
+                "dyn_zdf. The registered volume-form substitution is ready, "
+                "but ordered promotion cannot cross row 28"
             ),
             "deferred_large_design": (
                 "reconstruct Naa_A=(Kbb+rDt*stage6_Krhs)*mask, subtract the "
@@ -591,12 +740,12 @@ def main() -> int:
         },
         "32": {
             "operation": "tracer implicit solve application",
-            "disposition": "UNMEASURED-EXISTING-BRACKET",
+            "disposition": "UNMEASURED-BLOCKED-BY-ROW28",
             "reason": (
                 "no new NEMO dump is required: restart Kbb + stage-23 post-tra_ldf "
-                "Krhs and stage-21 post-tra_zdf bracket the application. Exact "
-                "isolation remains blocked by row-30 K33/slope divergence and "
-                "requires the registered z-star volume-form input reconstruction"
+                "Krhs and stage-21 post-tra_zdf bracket the application. The "
+                "registered z-star volume-form substitution is ready, but ordered "
+                "promotion cannot cross row 28"
             ),
             "deferred_large_design": (
                 "reconstruct Naa=(e3t_Kbb*T_Kbb+rDt*e3t_Kmm*stage23_Krhs)/"
@@ -639,7 +788,8 @@ def main() -> int:
     artifact = {
         "schema": "dino-zdf-chain-tail-existing-v1",
         "status": (
-            "ROWS-19-20-VERIFIED; ordered frontier is row 21 coefficient assembly"),
+            "ROWS-19-23,25-27-VERIFIED; ROW-24-WAIVED; "
+            "ordered frontier is row 28 turbocline diagnostic"),
         "repo_sha": git_sha(),
         "probe": {
             "path": str(Path(__file__).resolve()),
@@ -654,6 +804,11 @@ def main() -> int:
             "path": str(row19_path),
             "sha256": sha256(row19_path),
             "repo_sha": row19_receipt["repo_sha"],
+        },
+        "row21_receipt": {
+            "path": str(row21_path),
+            "sha256": sha256(row21_path),
+            "repo_sha": row21_receipt["repo_sha"],
         },
         "rows": rows,
         "controls": numeric_controls,
