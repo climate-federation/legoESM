@@ -25,6 +25,7 @@ import dump_lane  # noqa: E402
 import ldf_slp_per_element as ldf  # noqa: E402
 import zdf_chain_sweep as sweep  # noqa: E402
 from legoesm.core.precision import PrecisionPolicy, set_policy  # noqa: E402
+from legoesm.ocean.eos import nemo_r3t_stretch  # noqa: E402
 
 BAR = 1.0e-15
 SHAS = {
@@ -117,9 +118,18 @@ def main() -> int:
     # those against production, then use that verified production array's
     # finite 36th sentinel so _uv_slp retains its registered full shape.
     gdept_full = jnp.asarray(outer["_gd_col"], dtype=state["T"].dtype)
-    gdept = gdept_full
     gdept_score = sweep.metrics(
         np.asarray(gdept_full)[..., :nk], nemo_gdept[..., :nk], wet, focus, BAR)
+    raw_gdept = jnp.asarray(
+        state["z_coord"].nemo_gdept_0, dtype=state["T"].dtype)
+    reciprocal_stretch = nemo_r3t_stretch(
+        state["z_coord"], state["eta"], state["H_bathy"],
+        evaluation="nemo_reciprocal")
+    reciprocal_gdept = raw_gdept * reciprocal_stretch[..., None]
+    reciprocal_gdept_score = sweep.metrics(
+        np.asarray(reciprocal_gdept)[..., :nk], nemo_gdept[..., :nk],
+        wet, focus, BAR)
+    gdept = reciprocal_gdept
     face_sum = jax.lax.optimization_barrier(
         gdept + jnp.roll(gdept, -1, axis=1))
     live_surface_e3u = jnp.asarray(outer["e3u_k"])[..., :1]
@@ -152,14 +162,30 @@ def main() -> int:
     controls["rolled_face_e3_fails"] = not sweep.metrics(
         np.asarray(rolled_raw)[..., :nk], nemo_raw[..., :nk], wet, focus, BAR)["pass"]
     controls["shifted_nmln_fails"] = offsets["0"] != offsets["-1"]
+    quotient_gdept = raw_gdept * nemo_r3t_stretch(
+        state["z_coord"], state["eta"], state["H_bathy"],
+        evaluation="quotient")[..., None]
+    controls["quotient_gdept_fails"] = not sweep.metrics(
+        np.asarray(quotient_gdept)[..., :nk], nemo_gdept[..., :nk],
+        wet, focus, BAR)["pass"]
+    eta_ulp = np.asarray(state["eta"]).copy()
+    first_wet = tuple(np.argwhere(wet2)[0])
+    eta_ulp[first_wet] = np.nextafter(eta_ulp[first_wet], np.inf)
+    ulp_gdept = raw_gdept * nemo_r3t_stretch(
+        state["z_coord"], jnp.asarray(eta_ulp), state["H_bathy"],
+        evaluation="nemo_reciprocal")[..., None]
+    controls["one_ulp_ssh_exact_fired"] = not np.array_equal(
+        np.asarray(ulp_gdept), np.asarray(reciprocal_gdept))
     if not all(value for value in controls.values() if isinstance(value, bool)):
         raise SystemExit("row30 raw-slope planted control did not fire")
 
-    owner = correct_score["pass"] and not production_score["pass"]
+    owner = (reciprocal_gdept_score["pass"] and correct_score["pass"]
+             and not production_score["pass"])
     artifact = {
         "schema": "dino-zdf-row30-uslp-raw-v1",
-        "disposition": "DIVERGED-ZDEPU-SURFACE-E3U" if owner else "DIVERGED",
-        "owner": "e3u(miku,Kmm) in zdepu at ldfslp.F90:261-264" if owner else None,
+        "disposition": "DIVERGED-LIVE-GDEPT-AND-ZDEPU" if owner else "DIVERGED",
+        "owner": ("stored-reciprocal live gdept plus e3u(miku,Kmm) in zdepu "
+                  "at ldfslp.F90:261-264" if owner else None),
         "bar": BAR,
         "focus_columns_ji": [list(x) for x in focus],
         "iku_offset_failures": offsets,
@@ -167,6 +193,7 @@ def main() -> int:
         "live_face_zdepu_raw": correct_score,
         "current_vs_live_face_zdepu": zdep_delta,
         "gdept_existing_dump": gdept_score,
+        "reciprocal_gdept_existing_dump": reciprocal_gdept_score,
         "controls": controls,
         "repo_sha": args.expected_repo_sha,
         "source_quote": quote,
