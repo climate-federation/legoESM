@@ -8,6 +8,7 @@
     "pointwise_per_element": 1e-15
   },
   "controls": {
+    "actual_binding_campaign_gate": "DEBT",
     "actual_binding_error": 0.0002740311743349557,
     "actual_binding_perturbation_changes_score": true,
     "alignment_best": {
@@ -63,12 +64,23 @@
       }
     ],
     "identical_array_zero": true,
+    "identical_campaign_gate": "AT BAR",
     "identical_error": 0.0,
+    "planted_actual_binding_campaign_gate": "DEBT",
     "planted_actual_binding_error": 0.0002740603312831709,
-    "planted_identity_breaches_bar": true,
+    "planted_identity_campaign_gate": "DEBT",
     "planted_identity_error": 1.0000000000008017e-06,
+    "planted_identity_flips_campaign_gate": true,
     "zero_shift_is_best": true
   },
+  "derived_barotropic_settings": {
+    "barotropic_coriolis": "een_metric",
+    "barotropic_face_depth": "nemo_ssh_avg",
+    "barotropic_seed_face_depth": "nemo_ssh_avg",
+    "barotropic_time_filter": "nemo_boxcar_ab3",
+    "n_barotropic_substeps": 23
+  },
+  "derived_model_config_repr_sha256": "d5e8a11e67d2d8ed408a3c554b74719df3710e807749f71e72e8cbdb6749e0aa",
   "dump_sha256": {
     "spg_dump_pssh_final.bin": "7db66cadeb8d04522885a766fd1dd77e010a9adcaa5e8c07ce832a5339928c70",
     "spg_dump_puu_b_final.bin": "14d2085b34d027f13c6a489c1f1c39a09d1fd3cd56d1e3e1edb718fed458f50a",
@@ -90,11 +102,17 @@
     "stp_dump_07_dynspg_vb.bin": "d3d2fca6d60cc9015ca120bf4a7e523f8bca18049198a44fb8fe8ac395b41ac3"
   },
   "e3t_mode": "both",
+  "effective_config_repr_sha256": "fc3aaa6596728aaa2c26640bea40af9fde363629d94f9d6e716b4616649eeabd",
+  "effective_recipe_overrides": {
+    "lon_east_deg": 49.0,
+    "lon_west_deg": 1.0,
+    "sill_lon_m_deg": 1.0
+  },
   "first_diverged_subrow": "1.1",
   "git": {
     "clean_after": true,
     "clean_before": true,
-    "commit": "7a11b6aaa9363985ed85ea71774abef8222e5fa4"
+    "commit": "ee37274564696528d02e674ce4fca0002425214f"
   },
   "jax_enable_x64": true,
   "lane": "d180",
@@ -316,10 +334,9 @@
     "production_bridge": "7b91414ff5c6de79366d7c6efe3c8966d3d889034d3341fe56ba4796b53367a7",
     "production_dino_card": "faec0ce345f151573b36a2805ae1226cfd2e3381e442ee05934ef14e5ad5fcf4",
     "production_ocean_model": "2a063281b528ca0740700b35204d4cedd9cd5dc298f1e98d96c79de77b267d7b",
-    "wrapper": "5da376ceb44086f37ab64c68675373fb58c153d6a80f617c69a010346a1229ae"
+    "wrapper": "19f1de44300c1e1119af03405af887a4bdf63d51af9c6dfb5998a74529c4cac9"
   },
   "recipe": "nemo_dino_kamm_mlf",
-  "recipe_repr_sha256": "9dd4eae4e59d1135aea084f2c3903758d179b2134f5c55cf0312221f83238a42",
   "row_1_status": "DIVERGED",
   "run_dir": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R",
   "run_input_sha256": {
@@ -327,7 +344,17 @@
     "mesh_mask.nc": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
     "namelist_cfg": "0e75f4cb32dad3ed3fc17b721651ec12e0366c2978df8c65a6e95ae80b48d68b",
     "namelist_ref": "b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd",
-    "ocean.output": "66162e1d54cc0c8648b0c220fe902b6a75f7b19a0e8c2349f5d11928809c0557"
+    "nemo": "545b383996e644591492e0fc7c82663a2d47272e2c7172ad8bbc58e5cd7d5239",
+    "ocean.output": "66162e1d54cc0c8648b0c220fe902b6a75f7b19a0e8c2349f5d11928809c0557",
+    "output.namelist.dyn": "1ebcbcc9bd3f91dede8153a297c1f9df906a262460476760a78a45be14b1176e"
+  },
+  "runtime": {
+    "cpu_device": "cpu:0",
+    "jax": "0.10.0",
+    "jaxlib": "0.10.0",
+    "numpy": "2.4.4",
+    "platform": "Linux-5.14.0-611.36.1.el9_7.x86_64-x86_64-with-glibc2.34",
+    "python": "3.13.0 | packaged by conda-forge | (main, Nov 27 2024, 19:18:50) [GCC 13.3.0]"
   },
   "schema": "dino-split-explicit-momentum-chain-round1-v2",
   "session_id": "01a04e34-d1fb-73e0-b25a-177641f0a246",

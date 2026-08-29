@@ -73,19 +73,24 @@ no legoESM `F_slow_eta` while freshwater closure is inactive.
 - `fidelity_bar_gate.classify` supplied all verdicts. The receipt records its
   correlation, mean-absolute-ratio, and arithmetic-class per-element axes.
 - Clean Git commit before/after:
-  `7a11b6aaa9363985ed85ea71774abef8222e5fa4`.
-- Identical-array score was zero; a planted `1e-6` RMS-scale offset turned the
-  identical binding red; perturbing the actual binding changed its score.
+  `ee37274564696528d02e674ce4fca0002425214f`.
+- Identical arrays classified `AT BAR`; the planted `1e-6` RMS-scale offset
+  traversed the same `fidelity_bar_gate.classify` path and classified `DEBT`;
+  perturbing the actual legoESM binding also changed its score.
 - Actual `zu_frc` alignment scan selected `(dj,di)=(0,0)` with
   `E=2.740311743e-4`; the next-best shift was `(1,0)` with `E=0.1287265`.
 - Receipt hashes all 18 dumps read by the inherited probe, restart, mesh,
-  `ocean.output`, both namelists, recipe fingerprint, five production/scorer
-  modules, wrapper/probe, and active NEMO `stpmlf`/`dynspg_ts` sources.
+  NEMO executable, `ocean.output`, resolved `output.namelist.dyn`, both
+  namelists, five production/scorer modules, wrapper/probe, and active NEMO
+  `stpmlf`/`dynspg_ts` sources. It also stamps the effective replaced DINO
+  config, derived model/barotropic settings, Python/JAX/jaxlib/NumPy versions,
+  platform, and CPU device.
 - Attempts 1 and 2 were INVALID before artifact admission (native-latitude
   bridge precondition; unpaired `ssh_frc`). Attempt 3's receipt was withdrawn
   after two adversarial HOLD reviews. The first attempt at the hardened commit
-  was rejected by its clean-tree gate before calculation; the stable clean
-  rerun and the final strengthened-control run exited zero.
+  was rejected by its clean-tree gate before calculation. The first re-review
+  retained HOLD on classifier-control and effective-config provenance; the
+  final run after those corrections exited zero.
 
 Machine receipt:
 `docs/ocean/fidelity/dino_split_explicit_momentum_chain_round1_artifact.json`.
