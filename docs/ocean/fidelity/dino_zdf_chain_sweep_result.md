@@ -3,7 +3,57 @@
 Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 (`RUN_SEQDUMP_D180_1R`, `kt=5761`).
 
-## Round-18 hold: instrument writers nondeterministic; row 19 remains unscored
+## Round-19 result: deterministic bracket closes rows 19--20; row 21 instrumented
+
+The repaired writer campaign completed end-to-end. Both patched arms and the
+unpatched control stopped normally, reproduced restart SHA256
+`33c0c1a2e998161afdc9d4b71c5606f5cc5d869e54d53058fc0f64eeac7a115c`,
+and passed the strict no-exclusion bracket: 198/198 repeated-ON streams and all
+197 shared ON/OFF streams are byte-identical. The five planted value, roll,
+ULP, one-bit, and missing-stream controls fired.
+
+Row 19 is **VERIFIED**: 0/9,920 columns fail the absolute `1.0e-15 m` bar,
+maximum error 0, exact unequal wet elements 0, and all four southern focus
+columns pass. Its committed receipt is
+`docs/ocean/fidelity/dino_zdf_row19_raw_mxl_artifact.json`, SHA256
+`f5e42f1d15cd9e823e81fa3f5b56a2b9eebd504c8ef823718c50dd9b9f3fc29b`.
+It binds the three run directories and their binary, log, restart, dump, and
+complete stream-manifest receipts:
+
+- ON A: `/tmp/RUN_ZDF19_DETWRITER_ON_A.zwuAvC`;
+- ON B: `/tmp/RUN_ZDF19_DETWRITER_ON_B.wiYoAZ`;
+- OFF: `/tmp/RUN_ZDF19_DETWRITER_OFF.q2tSGL`.
+
+With row 19 closed, the retraction-corrected row-19+20 production composite is
+promoted. Row 20 is **VERIFIED**: both `zmxlm` and `zmxld` fail 0/9,920
+columns, have maximum error 0, and pass all four southern focus columns. The
+machine receipt is
+`docs/ocean/fidelity/dino_zdf_chain_tail_existing_artifact.json`, SHA256
+`fe83d18ea088643f8e3a3acd14773bdbf28330820b0674d41ccd64cda1489bab`.
+The tool no longer prints the retracted row-19 hold or provisional row-20
+label. The ordered frontier is now row 21.
+
+Row 21 needs direct pre-Prandtl coefficient operands. The registered write-only
+patch captures `SQRT(en)`, `zav`, base `avm`, base `avt`, and post-`tke_avn`
+`dissl` in literal NEMO order at baseline `zdftke.F90:913-925` (patched
+expressions `:924-928`, captures `:930-934`). Every new buffer
+is fully initialized before interior fill. The patch applies cleanly to the
+provided deterministic-writer source baseline and compile-checks successfully;
+the compile log SHA256 is
+`a2bdbf8b18beffe48d8cc9e9ff43bb338cd8aa20100eb3192f9496c5ceed6b12`.
+No NEMO execution was performed. The preregistration and exact SHA-gated
+build/run/bracket handoff are in
+`PREREG_zdf_chain_sweep_round21_coeff_assembly.md`.
+
+Two held-block corrections are recorded for future commands: `rg` is absent on
+the execution host, so recursive source gates use `grep -rE --include`; bare
+`python` is also invalid there, so every Python command uses
+`/home/dbalwada/legoESM/.venv/bin/python`.
+
+Rows 22--32 remain targeting-only previews behind row 21. **CLIMATE ARMS NOT
+AUTHORIZED.**
+
+## Historical Round-18 hold (superseded): nondeterministic writers
 
 The native-degree carry and the pure-JAX transcription of the host's glibc
 2.34 `_ZGVbN2v_sin` are implemented.  The active IFUNC resolves to the SSE4
@@ -49,7 +99,8 @@ reviews completed on 2026-08-29. They found no defect in the literal EXP or SIN
 arithmetic, but requested evidence/tooling changes. The full-table EXP SHA,
 inactive-selector dispatch, native-degree bridge scope, row-18 fail-closed gate,
 row-24 waiver, row-19 production/bar/provenance, and stale tail labels are now
-fixed. Row 19 remains held on the deterministic-writer bracket below.
+fixed. At that round, row 19 remained held on the deterministic-writer bracket
+below; Round 19 above supersedes that hold.
 
 ### Ordered row-19 hold and provisional downstream census
 
@@ -131,7 +182,8 @@ mapping.  With that mapping, the literal raw association, carried step-entry
 `e3t(Kmm)`, QCO's wet-only `Tmsk` stretch, and NEMO's untouched `jpk` seed,
 the production row-19+20 composite is exact: `zmxlm` **0/9,920** and `zmxld`
 **0/9,920**, maximum 0 for both, with all focus columns passing.  Its formal
-label is `PROVISIONAL-VERIFIED-BLOCKED-BY-ROW19`, not VERIFIED.
+label at that round was `PROVISIONAL-VERIFIED-BLOCKED-BY-ROW19`; Round 19 above
+now promotes it to VERIFIED.
 
 The corrected no-new-dump tail also gives row 22 at 0/9,920 (maximum
 normalized error `2.333494e-16`) and row 27's source/object identity exact.
@@ -139,8 +191,9 @@ Rows 21, 23, 25-26, 28-29 remain unmeasured because they lack a production
 operand slot or invoke only an oracle self-check.  Row 30 remains the first
 provisional later divergence: its `prd` operand fails 9,920/9,920, including
 all focus columns, before any slope recurrence.  Rows 31-32 remain deferred;
-their volume-form substitution probes cannot be promoted across the ordered
-row-19 stop (and row 32 additionally depends on row 30's K33/slopes).
+their volume-form substitution probes could not be promoted across that
+round's row-19 stop. The current ordered stop is row 21 (and row 32 also
+depends on row 30's K33/slopes).
 
 The remaining outside-sandbox deterministic-writer rebuild is:
 
@@ -310,7 +363,9 @@ packages/land:packages/ml:packages/ocean:packages/tools \
   --output /tmp/dino_zdf_row19_raw_mxl_artifact.json
 ```
 
-The ordered frontier is row 19, so the climate arms remain unauthorized.
+This was the pre-execution row-19 frontier; the Round-19 result above
+supersedes it. The current frontier is row 21, so the climate arms remain
+unauthorized.
 The frozen prediction and arm commands are unchanged; running them now would
 violate the preregistered chain-clean condition.
 

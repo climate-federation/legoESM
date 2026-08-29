@@ -26,6 +26,7 @@
         0
       ]
     },
+    "row24_enabled_runoff_waiver_fired": true,
     "row25_avt": {
       "baseline_pass": true,
       "nonfinite_fired": true,
@@ -67,34 +68,38 @@
       23
     ]
   ],
-  "lane": "DUMP LANE: d180  run_dir=/tmp/zdf-tail-oracle/RUN_SEQDUMP_D180_1R  restart=DINO_00005760_restart.nc  kt(nit000)=5761  t_seconds=15554700s (= day 180.03)",
+  "lane": "DUMP LANE: d180  run_dir=/tmp/row20-tail-lane-root/RUN_SEQDUMP_D180_1R  restart=DINO_00005760_restart.nc  kt(nit000)=5761  t_seconds=15554700s (= day 180.03)",
   "oracle_source_sha256": {
     "ldfslp.F90": {
-      "path": "/tmp/nemo-tau-slot-eaef2a1e1/cfgs/DINO/MY_SRC/ldfslp.F90",
-      "sha256": "3f6fcb769c3adcfd06b2745fee17b362af26f36bd326936cfdb77bf5e6fa80d9"
+      "path": "/tmp/nemo-row19-detwriter.kTFp14/cfgs/DINO/MY_SRC/ldfslp.F90",
+      "sha256": "a4e65b80484423df67247e4b93ace08fd50fa929e325b2f2af113d4bb31ffd30"
     },
     "zdfevd.F90": {
-      "path": "/tmp/nemo-tau-slot-eaef2a1e1/src/OCE/ZDF/zdfevd.F90",
+      "path": "/tmp/nemo-row19-detwriter.kTFp14/src/OCE/ZDF/zdfevd.F90",
       "sha256": "a4939b36876cca686e50880456fe5c27929ee4d0b3e694dcc693df592866f776"
     },
     "zdfphy.F90": {
-      "path": "/tmp/nemo-tau-slot-eaef2a1e1/src/OCE/ZDF/zdfphy.F90",
+      "path": "/tmp/nemo-row19-detwriter.kTFp14/src/OCE/ZDF/zdfphy.F90",
       "sha256": "76eeec2a280d56c55bec9e59b579e5290623c408c03962d04652e406334b45fd"
     },
     "zdftke.F90": {
-      "path": "/tmp/nemo-tau-slot-eaef2a1e1/cfgs/DINO/MY_SRC/zdftke.F90",
-      "sha256": "5eec1700605ff54dff13b76913b46f67c8cbdc7b526d9901c33c61a1196d67a5"
+      "path": "/tmp/nemo-row19-detwriter.kTFp14/cfgs/DINO/MY_SRC/zdftke.F90",
+      "sha256": "6a33079678505c105cae1edb8a52b9d70d02012d0eb3395673f4b62fe657a9fd"
     }
+  },
+  "probe": {
+    "path": "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/zdf_chain_tail_existing.py",
+    "sha256": "68917c3102d3b9f5c527193a78bb6b67a187ed8a25c8de9231a9ea7e85ee4a4a"
   },
   "provenance_sha256": {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
-    "dump_avm.bin": "ad8104d352838ff36c1c09cb3b21231eacabeb00ce7bd2b5477cc40ead4faed0",
-    "dump_avt.bin": "a6cc3fca6348c10c73ab0bf3bf4081c38be8d20a6f2cbdd00de521e21252eeca",
-    "eiv_dump_prd_arg.bin": "7dcb079fafa6126943cad48d2c0e844c2a84d1a4e20f053552a4ccf8fc052c25",
-    "eiv_dump_uslp.bin": "0c51e341b6eeee97d14de18aa8b8f40caa9e2607b0dd799f560b229c49d122ec",
-    "eiv_dump_vslp.bin": "cbb588a037da590743386c5f4565e651e185a47f80baf905e0d851258a1dfc4f",
-    "eiv_dump_wslpi.bin": "fb466cc9047d7fb43b373d78c071a902e21b8484ef6a59c131ad162dfcf37ac0",
-    "eiv_dump_wslpj.bin": "9c5e32fa88395db86f1d4337b928261ff63a6d0efd7902a1bbb9dc0f590e793e",
+    "dump_avm.bin": "abe4c1e928c4c2bb3fd1a7921d68a7fc656a19a91c345379a6edb24170134d7b",
+    "dump_avt.bin": "a0906fc4442eec4c01c36ea63069df6a412ebbe0d38259aa65ca69b1d5db93b3",
+    "eiv_dump_prd_arg.bin": "12e67ec2d5cb951cc5efe02e41d56e4aa6395d3d1def7f653d2b88c91957ab1b",
+    "eiv_dump_uslp.bin": "ecb3ca3c50c97ef67ad45e96f828a5264c18f94b767a0f9d619f010535d9d0f9",
+    "eiv_dump_vslp.bin": "96bfd0eacd958a9c809becf9dbc3852bc0e345aacb2fc511c4880f89f284edfa",
+    "eiv_dump_wslpi.bin": "e3073a8501e8046732e301d58781dcaf35a6a84d9071309353b3de0bad08fb64",
+    "eiv_dump_wslpj.bin": "2d24bcace748f7d550b34ae51dc1736a3e6943967a2ffd068618b0e92a723acc",
     "mesh_mask.nc": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
     "ocean.output": "f3370030a3751a3698ccdde7b41b5cf5c95e5eed26ebd47048922cc348c07dc6",
     "tke_dump_avm_final.bin": "1240ccb86e674edd1309831e2292a244aaabc3bca2f245b530fd3b88b59c275f",
@@ -108,113 +113,171 @@
     "tke_dump_zmxld.bin": "df9a09e7fcb9e11b7549fb523cb241a2a22a1e073182bcbcc00d56e0d5cfcde2",
     "tke_dump_zmxlm.bin": "60ed331574d813885fb29399b2dbf041a6913ea965d45c09e2890eef8b3ef830"
   },
-  "repo_sha": "f31f09ccd26efcc04c2b9739484f26d2fadcd8a9",
+  "repo_sha": "35d1f39420dcd106e38fcb5a9bf1bb5c27994be1",
+  "row19_receipt": {
+    "path": "/tmp/codex-zdf-sweep/docs/ocean/fidelity/dino_zdf_row19_raw_mxl_artifact.json",
+    "repo_sha": "040a3437ea68cf1139f20774793cc3b9dd988695",
+    "sha256": "f5e42f1d15cd9e823e81fa3f5b56a2b9eebd504c8ef823718c50dd9b9f3fc29b"
+  },
   "rows": {
     "19": {
-      "disposition": "UNMEASURED-NEEDS-DUMP",
-      "operation": "raw buoyancy mixing length before scans",
-      "reason": "existing zmxlm/zmxld slots are post-scan; no raw pre-limit slot"
-    },
-    "20": {
-      "disposition": "DIVERGED",
-      "operation": "nn_mxl=3 limiting scans (row19+20 composite)",
-      "qualification": "composite isolation using exact NEMO en/rn2; row19 cannot be separated without a raw slot",
-      "zmxld": {
-        "aggregate_bar_pass": false,
-        "bar": 1e-12,
-        "column_bar_pass": false,
-        "correlation": 0.9988490176737563,
+      "deterministic_bracket": {
+        "on_streams": 198,
+        "shared_streams": 197,
+        "strict_byte_identical_shared_streams": 197,
+        "uninitialized_memory_exclusions": []
+      },
+      "disposition": "VERIFIED",
+      "exact_unequal_wet_elements": 0,
+      "metric": {
+        "absolute_column_bar_m": 1e-15,
         "focus": [
           {
-            "column_error": 0.4325683339893572,
+            "column_error_m": 0.0,
             "i": 1,
             "j": 11,
-            "pass": false,
+            "pass": true,
             "wet": true
           },
           {
-            "column_error": 0.43326189044200075,
+            "column_error_m": 0.0,
             "i": 1,
             "j": 12,
-            "pass": false,
+            "pass": true,
             "wet": true
           },
           {
-            "column_error": 0.46671462306776373,
+            "column_error_m": 0.0,
             "i": 1,
             "j": 13,
-            "pass": false,
+            "pass": true,
             "wet": true
           },
           {
-            "column_error": 0.5014758893104383,
+            "column_error_m": 0.0,
             "i": 23,
             "j": 13,
-            "pass": false,
+            "pass": true,
             "wet": true
           }
         ],
-        "max_column_error": 2.0732537323244022,
-        "n_diverged_columns": 9920,
+        "max_column_error_m": 0.0,
+        "n_diverged_columns": 0,
         "n_nonfinite_wet_elements": 0,
-        "n_verified_columns": 0,
+        "n_verified_columns": 9920,
         "n_wet_columns": 9920,
-        "n_wet_elements": 342134,
-        "pass": false,
-        "reference_rms": 229.99883913809467,
-        "rms_ratio": 1.1370887323230963,
+        "n_wet_elements": 332214,
+        "pass": true,
+        "units": "m",
         "worst_column_ji": [
-          8,
-          16
+          1,
+          1
+        ]
+      },
+      "operation": "raw buoyancy mixing length before scans",
+      "receipt": "/tmp/codex-zdf-sweep/docs/ocean/fidelity/dino_zdf_row19_raw_mxl_artifact.json",
+      "receipt_sha256": "f5e42f1d15cd9e823e81fa3f5b56a2b9eebd504c8ef823718c50dd9b9f3fc29b"
+    },
+    "20": {
+      "disposition": "VERIFIED",
+      "operation": "nn_mxl=3 limiting scans (row19+20 composite)",
+      "qualification": "production composite using exact NEMO en/rn2; row19's raw operand and deterministic writer bracket are independently VERIFIED",
+      "zmxld": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-12,
+        "column_bar_pass": true,
+        "correlation": 1.0,
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.0,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": true,
+        "reference_rms": 233.4074434701507,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          1,
+          1
         ]
       },
       "zmxlm": {
-        "aggregate_bar_pass": false,
+        "aggregate_bar_pass": true,
         "bar": 1e-12,
-        "column_bar_pass": false,
-        "correlation": 0.9988158706307637,
+        "column_bar_pass": true,
+        "correlation": 1.0,
         "focus": [
           {
-            "column_error": 0.43617221715903914,
+            "column_error": 0.0,
             "i": 1,
             "j": 11,
-            "pass": false,
+            "pass": true,
             "wet": true
           },
           {
-            "column_error": 0.4361726965596315,
+            "column_error": 0.0,
             "i": 1,
             "j": 12,
-            "pass": false,
+            "pass": true,
             "wet": true
           },
           {
-            "column_error": 0.48166502496993835,
+            "column_error": 0.0,
             "i": 1,
             "j": 13,
-            "pass": false,
+            "pass": true,
             "wet": true
           },
           {
-            "column_error": 0.509857970821509,
+            "column_error": 0.0,
             "i": 23,
             "j": 13,
-            "pass": false,
+            "pass": true,
             "wet": true
           }
         ],
-        "max_column_error": 2.0420059179170407,
-        "n_diverged_columns": 9920,
+        "max_column_error": 0.0,
+        "n_diverged_columns": 0,
         "n_nonfinite_wet_elements": 0,
-        "n_verified_columns": 0,
+        "n_verified_columns": 9920,
         "n_wet_columns": 9920,
-        "n_wet_elements": 342134,
-        "pass": false,
-        "reference_rms": 142.2645842961593,
-        "rms_ratio": 1.1342874829932375,
+        "n_wet_elements": 332214,
+        "pass": true,
+        "reference_rms": 144.37290804400527,
+        "rms_ratio": 1.0,
         "worst_column_ji": [
-          8,
-          45
+          1,
+          1
         ]
       }
     },
@@ -259,9 +322,9 @@
         "n_nonfinite_wet_elements": 0,
         "n_verified_columns": 9920,
         "n_wet_columns": 9920,
-        "n_wet_elements": 342134,
+        "n_wet_elements": 332214,
         "pass": true,
-        "reference_rms": 0.11786484632024644,
+        "reference_rms": 0.11959969832089476,
         "rms_ratio": 1.0,
         "worst_column_ji": [
           1,
@@ -280,49 +343,49 @@
         "correlation": 1.0,
         "focus": [
           {
-            "column_error": 1.1561708289454122e-19,
+            "column_error": 1.1394012626216691e-19,
             "i": 1,
             "j": 11,
             "pass": true,
             "wet": true
           },
           {
-            "column_error": 1.1561708289454122e-19,
+            "column_error": 1.1394012626216691e-19,
             "i": 1,
             "j": 12,
             "pass": true,
             "wet": true
           },
           {
-            "column_error": 2.8904270723635305e-20,
+            "column_error": 2.848503156554173e-20,
             "i": 1,
             "j": 13,
             "pass": true,
             "wet": true
           },
           {
-            "column_error": 4.624683315781649e-19,
+            "column_error": 4.557605050486677e-19,
             "i": 23,
             "j": 13,
             "pass": true,
             "wet": true
           }
         ],
-        "max_column_error": 2.367837857680204e-16,
+        "max_column_error": 2.3334937858491784e-16,
         "n_diverged_columns": 0,
         "n_nonfinite_wet_elements": 0,
         "n_verified_columns": 9920,
         "n_wet_columns": 9920,
-        "n_wet_elements": 342134,
+        "n_wet_elements": 332214,
         "pass": true,
-        "reference_rms": 0.11721907192928044,
+        "reference_rms": 0.118944287676894,
         "rms_ratio": 1.0,
         "worst_column_ji": [
           22,
           15
         ]
       },
-      "disposition": "VERIFIED",
+      "disposition": "PROVISIONAL-VERIFIED-BLOCKED-BY-ROW21",
       "operation": "inverse-Prandtl avt correction"
     },
     "23": {
@@ -332,7 +395,7 @@
         "aggregate_bar_pass": true,
         "bar": 1e-15,
         "column_bar_pass": true,
-        "correlation": 1.0,
+        "correlation": 0.9999999999999998,
         "focus": [
           {
             "column_error": 0.0,
@@ -366,14 +429,14 @@
         "max_column_error": 0.0,
         "n_diverged_columns": 0,
         "n_nonfinite_wet_elements": 0,
-        "n_verified_columns": 9557,
-        "n_wet_columns": 9557,
-        "n_wet_elements": 292921,
+        "n_verified_columns": 9551,
+        "n_wet_columns": 9551,
+        "n_wet_elements": 283379,
         "pass": true,
-        "reference_rms": 0.019147968318501993,
+        "reference_rms": 0.019208690722100713,
         "rms_ratio": 1.0,
         "worst_column_ji": [
-          5,
+          6,
           1
         ]
       },
@@ -415,27 +478,27 @@
         "max_column_error": 0.0,
         "n_diverged_columns": 0,
         "n_nonfinite_wet_elements": 0,
-        "n_verified_columns": 9557,
-        "n_wet_columns": 9557,
-        "n_wet_elements": 292921,
+        "n_verified_columns": 9551,
+        "n_wet_columns": 9551,
+        "n_wet_elements": 283379,
         "pass": true,
-        "reference_rms": 0.013782838683084615,
+        "reference_rms": 0.013659114911621657,
         "rms_ratio": 1.0,
         "worst_column_ji": [
-          5,
+          6,
           1
         ]
       },
       "reason": "NEMO closure and composed dumps self-consistent on stable subset; legoESM composition path not invoked"
     },
     "24": {
-      "disposition": "WAIVED",
+      "disposition": "PROVISIONAL-WAIVED-BLOCKED-BY-ROW21",
       "operation": "river-mouth enhancement",
-      "reason": "ln_rnf=F and reference ln_rnf_mouth=.false.; branch zdfphy.F90:317-321 is inactive"
+      "reason": "fail-closed parse confirms resolved ln_rnf=F, namelist_ref ln_rnf_mouth=.false., and live zdfphy.F90:317-321 branch"
     },
     "25": {
       "disposition": "UNMEASURED-ORACLE-SELFCHECK",
-      "fired_wet_elements": 39293,
+      "fired_wet_elements": 38915,
       "operation": "EVD tracer overwrite",
       "oracle_selfcheck_avt": {
         "aggregate_bar_pass": true,
@@ -475,9 +538,9 @@
         "max_column_error": 0.0,
         "n_diverged_columns": 0,
         "n_nonfinite_wet_elements": 0,
-        "n_verified_columns": 5020,
-        "n_wet_columns": 5020,
-        "n_wet_elements": 39293,
+        "n_verified_columns": 5014,
+        "n_wet_columns": 5014,
+        "n_wet_elements": 38915,
         "pass": true,
         "reference_rms": 100.0,
         "rms_ratio": 1.0,
@@ -490,7 +553,7 @@
     },
     "26": {
       "disposition": "UNMEASURED-ORACLE-SELFCHECK",
-      "fired_wet_elements": 39293,
+      "fired_wet_elements": 38915,
       "operation": "EVD momentum overwrite",
       "oracle_selfcheck_avm": {
         "aggregate_bar_pass": true,
@@ -530,9 +593,9 @@
         "max_column_error": 0.0,
         "n_diverged_columns": 0,
         "n_nonfinite_wet_elements": 0,
-        "n_verified_columns": 5020,
-        "n_wet_columns": 5020,
-        "n_wet_elements": 39293,
+        "n_verified_columns": 5014,
+        "n_wet_columns": 5014,
+        "n_wet_elements": 38915,
         "pass": true,
         "reference_rms": 100.0,
         "rms_ratio": 1.0,
@@ -544,7 +607,7 @@
       "reason": "NEMO source-order EVD reconstruction only; legoESM EVD path not invoked"
     },
     "27": {
-      "disposition": "VERIFIED",
+      "disposition": "PROVISIONAL-VERIFIED-BLOCKED-BY-ROW21",
       "operation": "avs copy and optional enhancements",
       "source_identity": {
         "bar": "exact source/object identity",
@@ -648,9 +711,9 @@
         "n_nonfinite_wet_elements": 0,
         "n_verified_columns": 9920,
         "n_wet_columns": 9920,
-        "n_wet_elements": 332214,
+        "n_wet_elements": 322294,
         "pass": true,
-        "reference_rms": 34.39130758075968,
+        "reference_rms": 34.74821223842341,
         "rms_ratio": 1.0,
         "worst_column_ji": [
           1,
@@ -660,7 +723,7 @@
       "reason": "NEMO reconstructed interior compared to NEMO composed dump; legoESM LBC path not invoked"
     },
     "30": {
-      "disposition": "DIVERGED",
+      "disposition": "PROVISIONAL-DIVERGED-BLOCKED-BY-ROW21",
       "fields": {
         "uslp": {
           "aggregate_bar_pass": false,
@@ -860,7 +923,7 @@
         }
       },
       "first_failing_operand": {
-        "design": "separate the EOS-produced prd arithmetic from downstream zgrv with the existing prd slot; literal SEOS association is the next targeted production option only after row18 closes",
+        "design": "separate the EOS-produced prd arithmetic from downstream zgrv with the existing prd slot; literal SEOS association is the next targeted production option only after rows 21--29 close",
         "metric": {
           "aggregate_bar_pass": true,
           "bar": 1e-15,
@@ -928,8 +991,8 @@
       "reason": "no new NEMO dump is required: restart Kbb + stage-23 post-tra_ldf Krhs and stage-21 post-tra_zdf bracket the application. Exact isolation remains blocked by row-30 K33/slope divergence and requires the registered z-star volume-form input reconstruction"
     }
   },
-  "run_dir": "/tmp/RUN_ZDF18_ETAUARG.g6lJkJ",
+  "run_dir": "/tmp/RUN_ZDF19_DETWRITER_ON_A.zwuAvC",
   "schema": "dino-zdf-chain-tail-existing-v1",
-  "status": "PROVISIONAL-DOWNSTREAM; ordered frontier remains row 17 while row 18 is open",
+  "status": "ROWS-19-20-VERIFIED; ordered frontier is row 21 coefficient assembly",
   "wet_columns": 9920
 }
