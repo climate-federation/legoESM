@@ -359,7 +359,10 @@ class TestDINORecipes:
             "ke_gradient_scheme": "hollingsworth",        # nn_dynkeg=1
             "A_h_eq_boost": 1.0, "A_h_floor": 0.0,        # no legoESM stabilizers
             "barotropic_solver": "explicit_substep",      # ln_dynspg_ts
-            "barotropic_time_filter": "nemo_boxcar_centred",  # nn_bt_flt=2
+            # Perpetual FE has no NEMO trajectory analogue, but NEMO's one
+            # Euler bootstrap executes nn_bt_flt=2 AB3/AM4; repeating that
+            # composition is the registered stable FE approximation.
+            "barotropic_time_filter": "nemo_boxcar_ab3",
             "forcing_annual_cycle": True, "wind_through_step": True,  # ln_ann_cyc
             "use_gm_redi": True,                          # ln_ldfeiv
             # namdyn_hpg ln_hpg_sco (dynhpg.F90 hpg_sco: qco stretch + zuap

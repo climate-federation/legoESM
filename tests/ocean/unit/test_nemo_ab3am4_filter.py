@@ -196,6 +196,20 @@ def test_boxcar_ab3_accepts_nemo_first_euler_frame():
     assert model.config.barotropic.barotropic_time_filter == "nemo_boxcar_ab3"
 
 
+def test_fe_kamm_card_pins_the_admitted_first_euler_filter():
+    """The registered stabilizer must be a shipped-card default, not an arm
+    override that disappears when the GPU handoff resolves the recipe."""
+    from legoesm.ocean.experiments.dino import (
+        DINO_RECIPES,
+        dino_config_for_recipe,
+    )
+
+    card = DINO_RECIPES["nemo_dino_kamm"]
+    assert card.get("barotropic_time_filter") == "nemo_boxcar_ab3"
+    assert (dino_config_for_recipe("nemo_dino_kamm").barotropic_time_filter
+            == "nemo_boxcar_ab3")
+
+
 def test_boxcar_ab3_rejects_ab2_outer_frame():
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,

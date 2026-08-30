@@ -1478,16 +1478,19 @@ DINO_RECIPES: dict[str, dict] = {
         "A_h_eq_boost": 1.0,
         "A_h_floor": 0.0,
         # -- Barotropic / free surface (namdyn_spg: ln_dynspg_ts=T; nn_bt_flt=2; nn_e=30) --
-        # FE-FRAME FIDELITY CEILING (verified 2026-07-18, step-dump twin vs NEMO
-        # RUN_STEPDUMP kt=5760->5761): this card runs the barotropic mode on the
-        # forward_euler outer frame, but NEMO-DINO's dyn_spg_ts is intrinsically
-        # the MLF/centred barotropic (ln_bt_fw=F, a 2*nn_e window over 2dt seeded
-        # from the before-level). Two MLF-only composition pieces are therefore
-        # FAITHFULLY guarded OUT of this frame (do NOT re-wire them here):
-        #   * barotropic_time_filter="nemo_boxcar_ab3" (AB3 vel + AM4 ssh temporal
-        #     dissipation) requires outer_integrator="leapfrog" — the 2dt window +
-        #     before-seed are what make the AM4 boxcar faithful; on the dt/nn_e
-        #     forward window the dissipation window is halved (unfaithful).
+        # FE-FRAME FIDELITY CEILING: NEMO-DINO uses exactly one Euler bootstrap,
+        # then switches to MLF (stpmlf.F90:134-137,685-688).  This card repeats
+        # the Euler frame forever, so it has no oracle trajectory analogue and
+        # must not be called oracle-faithful.  The bootstrap nevertheless runs
+        # nn_bt_flt=2's AB3 velocity predictor and AM4 ssh interpolation on its
+        # forward rn_Dt window (dynspg_ts.F90:241-251,546-553,766-780).  Repeating
+        # that executed first-Euler composition is the minimal NEMO-sourced FE
+        # stabilization: the registered step-25--35 operand trace localised the
+        # former plain-boxcar blow-up to the continuity/surface-PGF fast pair,
+        # while this one-field filter arm stayed finite through the admission
+        # window.  A different perpetual-Euler stabilizer would require its own
+        # design and preregistration.
+        # One MLF-only composition piece remains guarded OUT of this frame:
         #   * barotropic_coriolis_split="live" (in-substep dyn_cor_2D) requires
         #     coriolis_scheme="explicit_ab2" so F_slow CONTAINS the planetary
         #     Coriolis for the pre-step subtraction to cancel; this card uses
@@ -1503,11 +1506,10 @@ DINO_RECIPES: dict[str, dict] = {
         # masked by the default 0.01 eta-diffusion damping — it corrupts
         # oracle tendency comparisons). dynspg_ts.F90 has no eta-diffusion
         # term at all; set to 0 for the NEMO-true composition.
-        # The permanent-FE sibling cannot carry this zero-damping choice: the
-        # developed-state control grows |eta|max 0.83 -> 2.87 -> 95.6 m and
-        # becomes non-finite, while its historical 0.01 default remains finite.
-        # NEMO defines no permanent-FE equivalent.  The faithful zero therefore
-        # lands on the MLF card below; this FE approximation keeps 0.01.
+        # The permanent-FE sibling still cannot carry the MLF card's zero spatial
+        # damping choice.  NEMO defines no permanent-FE equivalent; the admitted
+        # AB3/AM4 temporal filter stabilizes the historical 0.01 FE approximation,
+        # while zero spatial damping remains an MLF-only claim.
         # Zero-deviation track item 2 (#1226): NEMO's e1e2-weighted ssh-average
         # face depth for the substep flux AND drag/update depth (zhup2_e,
         # dynspg_ts.F90:568-592,658-666).  Pair-consistent with the tracer
@@ -1549,7 +1551,7 @@ DINO_RECIPES: dict[str, dict] = {
         # test_shelf_column_floor_breaks_inertness_at_production_default``.
         "barotropic_seed_face_depth": "nemo_ssh_avg",
         "barotropic_solver": "explicit_substep",
-        "barotropic_time_filter": "nemo_boxcar_centred",
+        "barotropic_time_filter": "nemo_boxcar_ab3",
         # namdyn_vor: ln_dynvor_een — enstrophy-conserving EEN barotropic
         # Coriolis (node 16; cures the deep-equatorial jet velocity null mode).
         # "een_metric" = METRIC-COMPLETE: folds NEMO's e1v/r1_e1u + e2u/r1_e2v

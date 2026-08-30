@@ -2410,25 +2410,23 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"barotropic_time_filter must be one of {_valid_time_filters}, "
                 f"got {config.barotropic.barotropic_time_filter!r}")
-        # T2 transfer audit: the DINO FE approximation's centred boxcar has a
-        # live 2-dx free-surface mode and requires its historical 0.01 spatial
-        # damping.  With the otherwise faithful Kamm geometry and alpha=0, a
-        # developed NEMO state grows |eta|max 0.83 -> 2.87 -> 95.6 m before
-        # becoming non-finite.  NEMO has no permanent-FE branch from which a
-        # zero-damping equivalent can be defined.  Reject that exact card-class
-        # combination at construction instead of deferring to a JAX e3w check.
+        # T2 transfer audit: the DINO FE approximation requires its historical
+        # 0.01 spatial damping independently of the temporal-filter choice.
+        # With the otherwise faithful Kamm geometry and alpha=0, a developed
+        # NEMO state grows |eta|max 0.83 -> 2.87 -> 95.6 m before becoming
+        # non-finite.  NEMO has no permanent-FE branch from which a zero-damping
+        # equivalent can be defined.  Reject that exact card-class combination
+        # at construction instead of deferring to a JAX e3w check.
         if (getattr(config, "outer_integrator", "forward_euler")
                 == "forward_euler"
-                and config.barotropic.barotropic_time_filter
-                == "nemo_boxcar_centred"
                 and config.barotropic.barotropic_diffusion_alpha == 0.0
                 and getattr(config, "metric_convention", "exact")
                 == "nemo_isotropic"
                 and getattr(config.barotropic, "barotropic_face_depth", "min_rule")
                 == "nemo_ssh_avg"):
             raise ValueError(
-                "DINO Kamm forward-Euler + nemo_boxcar_centred requires "
-                "barotropic_diffusion_alpha > 0: alpha=0 is the MLF-only "
+                "DINO Kamm forward-Euler requires barotropic_diffusion_alpha "
+                "> 0: alpha=0 is the MLF-only "
                 "NEMO-faithful choice and excites the FE free-surface mode")
         # nemo_boxcar_ab3 is NEMO nn_bt_flt=2's AB3 velocity predictor plus
         # ts_bck_interp SSH dissipation.  It runs in BOTH executed stp_MLF
@@ -2584,12 +2582,11 @@ class LatLonCGridOceanModel:
         # The two outer steps that have NEMO's stpmlf.F90 stage layout. Defined
         # here because the first consumer is the guard immediately below.
         _leapfrog_family = ("leapfrog", "nemo_mlf")
-        # barotropic_after_reconcile (NEMO mlf_baro_corr) has a site in the two
-        # leap-frog-family outer steps AND in NEMO's l_1st_euler step
-        # (stpmlf.F90:578; l_1st_euler is cleared only at :685-688).  A
-        # perpetual-forward-Euler approximation may repeat that executed Euler
-        # composition each step.  AB2 has no such NEMO stage layout and remains
-        # rejected rather than silently ignoring the selector.
+        # barotropic_after_reconcile (NEMO mlf_baro_corr) is retained only for
+        # the two leap-frog-family cards.  NEMO does execute it on its single
+        # l_1st_euler bootstrap, but no oracle path repeats that Euler frame for
+        # a whole integration.  Do not turn that one-step fact into a perpetual-
+        # FE policy without a separately admitted design.
         _after_recon = getattr(
             config.barotropic, "barotropic_after_reconcile", "off")
         # The regular-step and cold-start sites are one NEMO policy.  Keeping
@@ -2607,14 +2604,13 @@ class LatLonCGridOceanModel:
                 "barotropic_after_reconcile; NEMO stp_MLF applies the same "
                 "mlf_baro_corr policy on l_1st_euler and regular steps, got "
                 f"cold={_cold_recon!r}, regular={_after_recon!r}")
-        _after_reconcile_family = _leapfrog_family + ("forward_euler",)
         if (_after_recon != "off"
-                and _outer_int not in _after_reconcile_family):
+                and _outer_int not in _leapfrog_family):
             raise ValueError(
                 f"barotropic_after_reconcile={_after_recon!r} requires "
-                f"outer_integrator in {sorted(_after_reconcile_family)}: NEMO's "
+                f"outer_integrator in {sorted(_leapfrog_family)}: NEMO's "
                 "mlf_baro_corr (stpmlf.F90:754-765) runs after dyn_zdf and "
-                "runs on l_1st_euler as well as regular MLF steps. Got "
+                "has no perpetual-forward-Euler oracle analogue. Got "
                 f"outer_integrator={_outer_int!r}, which would silently ignore "
                 "the setting.")
         # "leapfrog" (_leapfrog_step, two-pass) and "nemo_mlf" (_nemo_mlf_step,
@@ -8139,11 +8135,7 @@ class LatLonCGridOceanModel:
                                         surface_forcing=surface_forcing,
                                         sponge=sponge,
                                         grid=grid, vertex_mask=vertex_mask,
-                                        t_seconds=t_seconds,
-                                        _apply_cold_start_after_reconcile=(
-                                            self.config.barotropic
-                                            .barotropic_after_reconcile
-                                            == "nemo_mlf_baro_corr"))
+                                        t_seconds=t_seconds)
         # Feature-gated on a STATIC config bool (CLAUDE.md feature-gating
         # exception): a Python ``if`` selects the branch at trace time, so
         # the freeze-floor clamp is only traced when enabled — no jnp.where

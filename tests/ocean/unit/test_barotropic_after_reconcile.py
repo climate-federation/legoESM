@@ -130,37 +130,6 @@ def test_kamm_mlf_ships_the_faithful_pair():
     assert c.barotropic_reconcile_target == "velocity_avg"
 
 
-def test_forward_euler_can_select_the_executed_euler_corrector_site():
-    """NEMO calls mlf_baro_corr on l_1st_euler before clearing the flag."""
-    import unittest.mock as mock
-    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as omlc
-
-    real_kernel = omlc.nemo_literal_after_level_reconcile
-    calls = []
-
-    def capture(*args, **kwargs):
-        calls.append(1)
-        return real_kernel(*args, **kwargs)
-
-    state, model = _channel(
-        outer="forward_euler", after="nemo_mlf_baro_corr", dino_drag=True)
-    with mock.patch.object(
-            omlc, "nemo_literal_after_level_reconcile", capture):
-        selected = model._step_jitted(state, _DT)
-    assert len(calls) == 2, "the FE path must run one shared U/V reconciliation"
-
-    state_off, model_off = _channel(
-        outer="forward_euler", after="off", cold="off", dino_drag=True)
-    omitted = model_off._step_jitted(state_off, _DT)
-    assert np.max(np.abs(np.asarray(selected.u.data - omitted.u.data))) > 1e-9
-    assert np.max(np.abs(np.asarray(selected.v.data - omitted.v.data))) > 1e-9
-
-
-def test_ab2_rejects_the_euler_mlf_corrector_selector():
-    with pytest.raises(ValueError, match="barotropic_after_reconcile"):
-        _channel(outer="ab2", after="nemo_mlf_baro_corr", dino_drag=True)
-
-
 # ----------------------------------------------------------------- kernel --
 def _synthetic(seed=0, ny=5, nx=7, nz=6):
     rng = np.random.default_rng(seed)

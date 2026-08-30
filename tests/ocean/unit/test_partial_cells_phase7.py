@@ -383,7 +383,7 @@ class TestTracerMassConservation:
 
 class TestNemoSshAvgFaceDepthGate:
     """#1226 zero-deviation item 2 machine gate: the DINO kamm barotropic
-    composition (explicit_substep + nemo_boxcar_centred + een_metric +
+    composition (explicit_substep + a NEMO boxcar filter + een_metric +
     alpha=0, dynspg_ts.F90 zhU construction) must conserve volume and
     tracer mass to machine precision under BOTH face-depth modes.
 
@@ -421,8 +421,9 @@ class TestNemoSshAvgFaceDepthGate:
     MODE-INERTNESS at machine precision (the zero-deviation claim: flipping
     the face rule adds nothing to the conservation residual)."""
 
-    # Conservation-relevant barotropic composition of the nemo_dino_kamm
-    # (FE-frame) card — see DINO_RECIPES["nemo_dino_kamm"] in dino.py.
+    # Conservation-relevant plain-boxcar control.  The shipped FE card now uses
+    # nemo_boxcar_ab3; this gate deliberately isolates face-depth conservation
+    # and separately parametrizes both filters below.
     _KAMM_BARO = dict(
         barotropic_solver="explicit_substep",
         barotropic_time_filter="nemo_boxcar_centred",
@@ -517,10 +518,8 @@ class TestNemoSshAvgFaceDepthGate:
             f"(per-mode drifts: {drifts})")
 
     @pytest.mark.parametrize("time_filter", [
-        "nemo_boxcar_centred",   # kamm FE card
-        "nemo_boxcar_ab3",       # kamm MLF card (AB3 eta_mid flux-depth branch;
-                                 # direct solver call — the MLF-frame guard
-                                 # lives in the model wrapper, not the solver)
+        "nemo_boxcar_centred",   # planted plain-boxcar control
+        "nemo_boxcar_ab3",       # shipped Kamm FE and MLF cards
     ])
     @pytest.mark.parametrize("face_depth", ["min_rule", "nemo_ssh_avg"])
     def test_column_sum_identity_and_seafloor_w(
