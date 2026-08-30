@@ -43,6 +43,7 @@ import kamm_twin_90d as twin
 from recipe_transfer_identity import flatten_resolved
 
 SCHEMA = "dino_standalone_20y_v1"
+REDUCER_CONVENTION_SCHEMA = "dino_standalone_reducer_frame_v1"
 RECIPE = "nemo_dino_kamm_mlf"
 DT_SECONDS = 2700.0
 STEPS_PER_DAY = 32
@@ -101,6 +102,169 @@ def state_hashes(state) -> dict[str, str | None]:
         else:
             out[name] = sha256_array(value.data)
     return out
+
+
+def _expected_reducer_input_shapes(
+        native_t_shape: tuple[int, int, int]) -> dict[str, tuple[int, ...]]:
+    """Standalone field shapes corresponding to a native NEMO T frame.
+
+    NEMO's reducer frame contains two horizontal halo rings and its terminal
+    ``jpk`` level. The public analytic DINO grid contains only the physical
+    core and ``jpkm1`` active levels; C-grid U/V retain one extra face.
+    """
+    ny, nx, nz = native_t_shape
+    if ny <= 4 or nx <= 4 or nz <= 1:
+        raise ValueError(
+            f"native reducer frame is too small: {native_t_shape}")
+    core = (ny - 4, nx - 4, nz - 1)
+    return {
+        "T": core,
+        "S": core,
+        "eta": core[:2],
+        "u": (core[0], core[1] + 1, core[2]),
+        "v": (core[0] + 1, core[1], core[2]),
+        "land_mask": core[:2],
+    }
+
+
+def expand_standalone_reducer_inputs(
+        fields: dict[str, Any], land_mask: Any,
+        native_t_shape: tuple[int, int, int],
+) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    """Map analytic-core fields onto the recorded NEMO reducer frame.
+
+    The recorded reducer remains unchanged. This adapter owns only geometry
+    convention: two horizontal NEMO halo rings, the dry terminal ``jpk``
+    level, and the C-grid U face mapping. Every supplied capture field is
+    asserted before any allocation so a bad arm fails at day 0.
+    """
+    expected = _expected_reducer_input_shapes(native_t_shape)
+    supplied: dict[str, Any] = dict(fields)
+    supplied["land_mask"] = land_mask
+    missing = sorted(set(expected) - set(supplied))
+    if missing:
+        raise ValueError(
+            "standalone reducer input is missing fields: " + ", ".join(missing))
+    actual = {name: tuple(np.shape(supplied[name])) for name in expected}
+    bad = {name: {"actual": actual[name], "expected": expected[name]}
+           for name in expected if actual[name] != expected[name]}
+    if bad:
+        rows = "; ".join(
+            f"{name} actual={row['actual']} expected={row['expected']}"
+            for name, row in sorted(bad.items()))
+        raise ValueError("standalone reducer shape contract failed: " + rows)
+
+    ny, nx, nz = native_t_shape
+
+    def scalar3(name: str) -> np.ndarray:
+        core = np.asarray(supplied[name], dtype=np.float64)
+        native = np.zeros(native_t_shape, dtype=np.float64)
+        native[2:-2, 2:-2, :-1] = core
+        # NEMO's zonal halo columns are periodic copies of the physical core.
+        # Meridional halos remain reducer-dry through ``land_mask``.
+        native[2:-2, :2, :-1] = core[:, -2:, :]
+        native[2:-2, -2:, :-1] = core[:, :2, :]
+        return native
+
+    core_land = np.asarray(supplied["land_mask"], dtype=np.float64)
+    native_land = np.zeros((ny, nx), dtype=np.float64)
+    native_land[2:-2, 2:-2] = core_land
+    native_land[2:-2, :2] = core_land[:, -2:]
+    native_land[2:-2, -2:] = core_land[:, :2]
+
+    # The recorded reducer first selects lU[:, 1:nx+1]. Embed the analytic
+    # grid's east/native faces u[:, 1:] so that this selection's [2:-2] core is
+    # exactly the model core; face column 0 is intentionally unused.
+    core_u = np.asarray(supplied["u"], dtype=np.float64)[:, 1:, :]
+    native_u_faces = np.zeros((ny, nx + 1, nz), dtype=np.float64)
+    native_u_faces[2:-2, 3:nx - 1, :-1] = core_u
+    native_u_faces[2:-2, 1:3, :-1] = core_u[:, -2:, :]
+    native_u_faces[2:-2, nx - 1:nx + 1, :-1] = core_u[:, :2, :]
+
+    expanded = {
+        "T": scalar3("T"),
+        "S": scalar3("S"),
+        "u": native_u_faces,
+        "land_mask": native_land,
+    }
+    receipt = {
+        "schema": REDUCER_CONVENTION_SCHEMA,
+        "native_t_shape": list(native_t_shape),
+        "standalone_input_shapes": {
+            name: list(actual[name]) for name in sorted(actual)},
+        "asserted_input_names": sorted(expected),
+        "horizontal_convention": (
+            "standalone physical core -> NEMO [2:-2,2:-2]; two periodic "
+            "zonal halo rings restored; meridional halos reducer-dry"),
+        "vertical_convention": (
+            "standalone jpkm1 -> NEMO [:-1]; terminal jpk level padded dry"),
+        "u_convention": (
+            "standalone u[:,1:] east/native faces -> reducer-selected "
+            "lU[:,1:nx+1][:,2:-2]"),
+        "expanded_reducer_shapes": {
+            name: list(value.shape) for name, value in sorted(expanded.items())},
+    }
+    return expanded, receipt
+
+
+def build_standalone_reducer_adapter(reducer, fields, land_mask):
+    """Return the native-frame adapter plus its fail-fast convention receipt."""
+    import acc_thermal_wind as A
+
+    native_t_shape = tuple(A.tmask.shape)
+    weight_shapes = {
+        "tmask": tuple(A.tmask.shape),
+        "umask": tuple(A.umask.shape),
+        "e3t0": tuple(A.e3t0.shape),
+        "gdept0": tuple(A.gdept0.shape),
+        "e3t1d": tuple(A.e3t1d.shape),
+        "gdept1d": tuple(A.gdept1d.shape),
+        "e2u_col": tuple(A.e2u_col.shape),
+    }
+    expected_weights = {
+        "tmask": native_t_shape,
+        "umask": native_t_shape,
+        "e3t0": native_t_shape,
+        "gdept0": native_t_shape,
+        "e3t1d": (native_t_shape[2],),
+        "gdept1d": (native_t_shape[2],),
+        "e2u_col": (native_t_shape[0],),
+    }
+    bad_weights = {
+        name: {"actual": weight_shapes[name], "expected": expected_weights[name]}
+        for name in expected_weights
+        if weight_shapes[name] != expected_weights[name]
+    }
+    if bad_weights:
+        raise ValueError(
+            f"standalone reducer mesh-weight contract failed: {bad_weights}")
+
+    _, receipt = expand_standalone_reducer_inputs(
+        fields, land_mask, native_t_shape)
+
+    # Runtime plant: the exact shape gate that was formerly deferred to day
+    # 360 must demonstrably fire before the integration starts.
+    try:
+        expand_standalone_reducer_inputs(
+            fields, np.asarray(land_mask)[:, :-1], native_t_shape)
+    except ValueError as exc:
+        if "land_mask" not in str(exc):
+            raise RuntimeError(
+                "standalone reducer shape plant fired on the wrong row") from exc
+        receipt["shape_mismatch_plant"] = "FIRED"
+    else:  # pragma: no cover - the unit test plants this mismatch
+        raise RuntimeError("standalone reducer shape mismatch plant did not fire")
+
+    receipt["mesh_weight_shapes"] = {
+        name: list(shape) for name, shape in sorted(weight_shapes.items())}
+
+    def adapted(live):
+        adapted_fields, _ = expand_standalone_reducer_inputs(
+            {name: live[name] for name in ("T", "S", "eta", "u", "v")},
+            live["land_mask"], native_t_shape)
+        return reducer(adapted_fields)
+
+    return adapted, receipt
 
 
 def perturb_temperature(state, member: int):
@@ -332,6 +496,7 @@ def run(args: argparse.Namespace) -> int:
     reducer = None
     reducer_status = "disabled for debug run"
     reducer_mesh = None
+    reducer_convention_receipt = None
     if args.reducer_mesh is not None:
         reducer_mesh = args.reducer_mesh.resolve()
         if reducer_mesh.name != "mesh_mask.nc" or not reducer_mesh.is_file():
@@ -340,6 +505,39 @@ def run(args: argparse.Namespace) -> int:
             str(reducer_mesh.parent))
         if reducer is None:
             raise SystemExit(f"live reducer unavailable: {reducer_status}")
+        day0_fields = {name: getattr(state, name).data
+                       for name in ("T", "S", "eta", "u", "v")}
+        reducer, reducer_convention_receipt = build_standalone_reducer_adapter(
+            reducer, day0_fields, state.land_mask.data)
+        _, day0_reduced, day0_status = twin.capture_snapshot(
+            day0_fields, snap_dtype=np.float64, reducer=reducer,
+            land_mask=state.land_mask.data)
+        if day0_reduced is None or day0_status != "ok":
+            raise SystemExit(
+                f"live reducer day-0 admission failed: {day0_status}")
+        missing = sorted(
+            set(twin.REDUCED_KEYS + (twin.REDUCED_ROW_KEY,))
+            - set(day0_reduced))
+        if missing:
+            raise SystemExit(
+                "live reducer day-0 admission omitted keys: " + ", ".join(missing))
+        day0_serialized = {
+            key: np.asarray(value, dtype=np.float64).tolist()
+            for key, value in sorted(day0_reduced.items())}
+        reducer_convention_receipt.update(
+            day0_reduction_status="PASS",
+            day0_reduction_keys=sorted(day0_reduced),
+            day0_reduction_sha256=hashlib.sha256(json.dumps(
+                day0_serialized, sort_keys=True,
+                separators=(",", ":")).encode()).hexdigest(),
+        )
+        reducer_status = (
+            f"{reducer_status}; convention={REDUCER_CONVENTION_SCHEMA}; "
+            "day0=PASS")
+        print(
+            f"REDUCER_DAY0=PASS convention={REDUCER_CONVENTION_SCHEMA} "
+            f"plant={reducer_convention_receipt['shape_mismatch_plant']}",
+            flush=True)
     elif args.steps == YEARS * DAYS_PER_YEAR * STEPS_PER_DAY:
         raise SystemExit("a claim-length run requires --reducer-mesh")
 
@@ -347,6 +545,14 @@ def run(args: argparse.Namespace) -> int:
     cfg_hash = hashlib.sha256(json.dumps(
         cfg_rows, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     initial_hashes = state_hashes(state)
+    reducer_receipt_path = args.output_dir / "reducer_convention_receipt.json"
+    if reducer_convention_receipt is not None:
+        reducer_convention_receipt.update(
+            producer_commit=producer,
+            reducer_mesh=str(reducer_mesh),
+            reducer_mesh_sha256=_file_sha256(reducer_mesh),
+        )
+        _write_json(reducer_receipt_path, reducer_convention_receipt)
     initial_receipt = {
         "schema": SCHEMA,
         "producer_commit": producer,
@@ -367,6 +573,12 @@ def run(args: argparse.Namespace) -> int:
         "perturbation": perturbation,
         "reducer_mesh_diagnostic_only": (
             str(reducer_mesh) if reducer_mesh is not None else None),
+        "reducer_convention_schema": (
+            REDUCER_CONVENTION_SCHEMA
+            if reducer_convention_receipt is not None else None),
+        "reducer_convention_receipt_sha256": (
+            _file_sha256(reducer_receipt_path)
+            if reducer_convention_receipt is not None else None),
     }
     _write_json(args.output_dir / "initial_receipt.json", initial_receipt)
 
@@ -448,6 +660,12 @@ def run(args: argparse.Namespace) -> int:
         "initial_receipt_sha256": _file_sha256(
             args.output_dir / "initial_receipt.json"),
         "reducer_status": reducer_status,
+        "reducer_convention_schema": (
+            REDUCER_CONVENTION_SCHEMA
+            if reducer_convention_receipt is not None else None),
+        "reducer_convention_receipt_sha256": (
+            _file_sha256(reducer_receipt_path)
+            if reducer_convention_receipt is not None else None),
         "captures": written,
         "wall_seconds": time.time() - started,
     }

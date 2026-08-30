@@ -90,6 +90,49 @@ def test_claim_length_is_admitted_after_first_step_corrector():
     assert RUNNER.claim_admission_reasons() == ()
 
 
+def _synthetic_reducer_inputs(native=(9, 10, 6)):
+    expected = RUNNER._expected_reducer_input_shapes(native)
+    fields = {
+        name: np.arange(np.prod(expected[name]), dtype=np.float64).reshape(
+            expected[name])
+        for name in ("T", "S", "eta", "u", "v")
+    }
+    land = np.ones(expected["land_mask"], dtype=np.float64)
+    return fields, land
+
+
+def test_standalone_reducer_convention_expands_to_recorded_native_frame():
+    native = (9, 10, 6)
+    fields, land = _synthetic_reducer_inputs(native)
+    expanded, receipt = RUNNER.expand_standalone_reducer_inputs(
+        fields, land, native)
+    assert expanded["T"].shape == native
+    assert expanded["S"].shape == native
+    assert expanded["land_mask"].shape == native[:2]
+    assert expanded["u"].shape == (native[0], native[1] + 1, native[2])
+    np.testing.assert_array_equal(expanded["T"][2:-2, 2:-2, :-1], fields["T"])
+    np.testing.assert_array_equal(
+        expanded["u"][:, 1:native[1] + 1, :][2:-2, 2:-2, :-1],
+        fields["u"][:, 1:, :])
+    np.testing.assert_array_equal(expanded["T"][2:-2, :2, :-1],
+                                  fields["T"][:, -2:, :])
+    assert not expanded["T"][:, :, -1].any()
+    assert receipt["asserted_input_names"] == [
+        "S", "T", "eta", "land_mask", "u", "v"]
+
+
+@pytest.mark.parametrize("name", ["T", "S", "eta", "u", "v", "land_mask"])
+def test_standalone_reducer_day0_shape_gate_catches_every_input(name):
+    native = (9, 10, 6)
+    fields, land = _synthetic_reducer_inputs(native)
+    if name == "land_mask":
+        land = land[:, :-1]
+    else:
+        fields[name] = fields[name][..., :-1]
+    with pytest.raises(ValueError, match=rf"\b{name}\b.*actual=.*expected="):
+        RUNNER.expand_standalone_reducer_inputs(fields, land, native)
+
+
 def test_classifier_plants_cover_all_frozen_branches():
     assert SCORER.classifier_self_test() == {
         "confirm": "CONFIRM",
