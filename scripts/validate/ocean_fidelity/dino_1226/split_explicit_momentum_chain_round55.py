@@ -21,6 +21,7 @@ import numpy as np
 
 import kamm_twin_90d as twin
 import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as model_module
+import legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid as gm_module
 import zdf_chain_sweep as sweep
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ocean.dynamics.latlon_cgrid_operators import min_cell_to_uface
@@ -37,6 +38,7 @@ ROUND60_SHA = "b3ef5c0534ff1348dbdb581686aa602cc1d9eca9ef61336ca0b4130217e54e2d"
 ROUND61_SHA = "b8f7a376a0a13fd384cb4195cf27db8ff6f82c71e576bb8d449451903d3bd07c"
 ROUND62_SHA = "290caa5bb3c3187d5ea13fe62276f299bd47953b556615dfab3f4443d1597a86"
 ROUND63_SHA = "3a1a25ca328761b1bcbeb87953751a3a15b1ac00852b2ff62fd4223d107d24e0"
+ROUND64_SHA = "8858d60a51b07181e290fead087e4bab69c0d15e271bbdecb7d458ba12d4e4c7"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -53,6 +55,12 @@ HELD_SHA = {
     "spg_dump_zv_frc.bin": "81d01381ad5164b1a0cc3fb5f22590f471b0e24bb9b68084290e0cb9e2ef4c0e",
     "spg_dump_un_adv_final.bin": "4d8e7a6445ba465c8229954b443c467862381409805163f2045f5854017917ab",
     "spg_dump_vn_adv_final.bin": "ed1e28aa27e1c49d237e07a07707220251b3a1845a599d21b06df18b8425d088",
+}
+BOLUS_HELD_SHA = {
+    "eiv_dump_u.bin": "a0e7b0f0a84cb87bd5e059c7161d261016f2528ba127df666a37966395c0fc00",
+    "eiv_dump_psi_uw.bin": "feb5ba7a1e4882cb43c71db049fb78ecd2e2301c9573777bf5a0e1738518101b",
+    "eiv_dump_wslpi.bin": "e3073a8501e8046732e301d58781dcaf35a6a84d9071309353b3de0bad08fb64",
+    "eiv_dump_aeiu.bin": "8146cf02d33e8013bf240623948b42bd8b2cda8ee15c11847393ad298a5a60e8",
 }
 FOCUS = [(11, 1), (12, 1), (13, 1), (13, 23)]
 POINTWISE_BAR = 1.0e-15
@@ -107,11 +115,13 @@ def main() -> int:
     parser.add_argument("--round61", type=Path)
     parser.add_argument("--round62", type=Path)
     parser.add_argument("--round63", type=Path)
+    parser.add_argument("--round64", type=Path)
     parser.add_argument("--hold-slow-forcing", action="store_true")
     parser.add_argument("--oracle-transport", action="store_true")
     parser.add_argument("--capture-cycle", action="store_true")
     parser.add_argument("--direct-cycle-entry", action="store_true")
     parser.add_argument("--live-thickness-entry", action="store_true")
+    parser.add_argument("--capture-bolus-operands", action="store_true")
     parser.add_argument("--raw-artifact", type=Path, required=True)
     parser.add_argument("--nemo-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -204,12 +214,33 @@ def main() -> int:
             raise SystemExit("round 63 does not release the live-thickness score")
     elif args.round63 is not None:
         raise SystemExit("--round63 requires --live-thickness-entry")
+    prior64 = None
+    if args.capture_bolus_operands:
+        if not args.live_thickness_entry:
+            raise SystemExit(
+                "--capture-bolus-operands requires --live-thickness-entry")
+        if (args.round64 is None
+                or _sha(args.round64.resolve()) != ROUND64_SHA):
+            raise SystemExit("official round-64 row-8.8 receipt required")
+        prior64 = json.loads(args.round64.read_text())
+        if (prior64.get("disposition") != "TRACER_ENTRY_DIVERGED_8.8"
+                or any(prior64["rows"][i]["status"] != "AT_BAR"
+                       for i in range(5))
+                or prior64["rows"][5]["metrics"]["n_diverged_columns"]
+                != 8938):
+            raise SystemExit("round 64 does not release the bolus operand peel")
+    elif args.round64 is not None:
+        raise SystemExit("--round64 requires --capture-bolus-operands")
     if _sha(args.raw_artifact.resolve()) != RAW_ARTIFACT_SHA:
         raise SystemExit("admitted held row-8 artifact changed")
     held = args.held_dir.resolve()
     for name, expected in HELD_SHA.items():
         if not (held / name).is_file() or _sha(held / name) != expected:
             raise SystemExit(f"held row-8 input changed: {name}")
+    if args.capture_bolus_operands:
+        for name, expected in BOLUS_HELD_SHA.items():
+            if not (held / name).is_file() or _sha(held / name) != expected:
+                raise SystemExit(f"held GM operand changed: {name}")
 
     set_policy(PrecisionPolicy.fp64())
     if jax.default_backend() != "cpu" or not jax.config.jax_enable_x64:
@@ -228,6 +259,7 @@ def main() -> int:
     solver_transport_captures = []
     cycle_captures = []
     thickness_captures = []
+    bolus_captures = []
     held_u_native = np.fromfile(held / "spg_dump_zu_frc.bin", dtype="<f8")
     held_v_native = np.fromfile(held / "spg_dump_zv_frc.bin", dtype="<f8")
     if held_u_native.size != 199 * 52 or held_v_native.size != 199 * 52:
@@ -293,6 +325,18 @@ def main() -> int:
         thickness_captures.append(tuple(np.asarray(value) for value in result))
         return result
 
+    original_bolus = gm_module.nemo_eiv_bolus_transport
+
+    def observed_bolus(*bolus_args, **bolus_kwargs):
+        result = original_bolus(*bolus_args, **bolus_kwargs)
+        bolus_captures.append((
+            tuple(np.asarray(value) if hasattr(value, "shape") else value
+                  for value in bolus_args),
+            dict(bolus_kwargs),
+            tuple(np.asarray(value) for value in result),
+        ))
+        return result
+
     model_module.add_bolus_to_advecting_flux = observe
     if args.hold_slow_forcing:
         model_module.barotropic_substeps_latlon_cgrid = held_solver
@@ -300,6 +344,8 @@ def main() -> int:
         model_module.nemo_qco_kmm_velocity_cycle = observed_cycle
     if args.live_thickness_entry:
         model_module.nemo_qco_live_face_thicknesses = observed_thickness
+    if args.capture_bolus_operands:
+        gm_module.nemo_eiv_bolus_transport = observed_bolus
     try:
         with jax.disable_jit():
             model._nemo_mlf_step(state, twin.DT, surface_forcing=sf)
@@ -308,11 +354,13 @@ def main() -> int:
         model_module.barotropic_substeps_latlon_cgrid = original_solver
         model_module.nemo_qco_kmm_velocity_cycle = original_cycle
         model_module.nemo_qco_live_face_thicknesses = original_thickness
+        gm_module.nemo_eiv_bolus_transport = original_bolus
     restored = (model_module.add_bolus_to_advecting_flux is original
                 and model_module.barotropic_substeps_latlon_cgrid is original_solver
                 and model_module.nemo_qco_kmm_velocity_cycle is original_cycle
                 and model_module.nemo_qco_live_face_thicknesses
-                is original_thickness)
+                is original_thickness
+                and gm_module.nemo_eiv_bolus_transport is original_bolus)
     if len(captured) != 1:
         raise SystemExit(f"expected one single-pass tracer handoff, got {len(captured)}")
 
@@ -384,6 +432,71 @@ def main() -> int:
         live_u_raw = thickness_captures[0][0][..., :35]
         values["e3u"] = live_u_raw
         values["e2e3u"] = e2u[:, 1:, :] * live_u_raw
+    bolus_operand_metrics = {}
+    if args.capture_bolus_operands:
+        if not bolus_captures:
+            raise SystemExit("expected at least one GM bolus producer capture")
+        bargs, bkwargs, bresult = bolus_captures[0]
+        if not all(np.array_equal(capture[2][0], bresult[0])
+                   for capture in bolus_captures[1:]):
+            raise SystemExit("multiple GM bolus calls produced different U transports")
+        kappa, slope_kp1, _, e2u_native, _, u_mask_native, _, act, act_below = bargs[:9]
+        out_shape = tuple(bargs[9])
+        kappa = np.asarray(kappa)
+        if kappa.ndim == 2:
+            kappa = np.broadcast_to(kappa[..., None], out_shape)
+        elif kappa.ndim != 3:
+            kappa = np.broadcast_to(kappa, out_shape)
+        if not bkwargs.get("kappa_face_average", False):
+            raise SystemExit("round 65 requires production face-averaged kappa")
+        aeiu = 0.5 * (kappa + np.roll(kappa, -1, axis=1))
+        slope_sum = slope_kp1 + np.roll(slope_kp1, -1, axis=1)
+        aeiu_sum = aeiu + np.roll(aeiu, -1, axis=2)
+        wumask = (u_mask_native[:, 1:, None] * act
+                  * np.roll(act, -1, axis=1) * act_below
+                  * np.roll(act_below, -1, axis=1))
+        current_psi = -(e2u_native[..., None] * (0.5 * slope_sum)
+                        * (0.5 * aeiu_sum) * wumask)
+        literal_psi = (((-0.25 * e2u_native[..., None]) * slope_sum)
+                       * aeiu_sum) * wumask
+        oracle_psi = _load(held / "eiv_dump_psi_uw.bin")
+        oracle_u_eiv = -_load(held / "eiv_dump_u.bin")
+        oracle_wslpi = _load(held / "eiv_dump_wslpi.bin")
+        oracle_aeiu = _load(held / "eiv_dump_aeiu.bin")
+        zero_level = np.zeros_like(oracle_wslpi[..., :1])
+        oracle_slope_kp1 = np.concatenate(
+            [oracle_wslpi[..., 1:], zero_level], axis=2)
+        oracle_aeiu_kp1 = np.concatenate(
+            [oracle_aeiu[..., 1:], np.zeros_like(oracle_aeiu[..., :1])], axis=2)
+        oracle_slope_sum = oracle_slope_kp1 + np.roll(
+            oracle_slope_kp1, -1, axis=1)
+        oracle_aeiu_sum = oracle_aeiu + oracle_aeiu_kp1
+        own_oracle_slope = (((-0.25 * e2u_native[..., None])
+                             * oracle_slope_sum) * aeiu_sum) * wumask
+        own_oracle_aeiu = (((-0.25 * e2u_native[..., None])
+                            * slope_sum) * oracle_aeiu_sum) * wumask
+        oracle_both = (((-0.25 * e2u_native[..., None])
+                        * oracle_slope_sum) * oracle_aeiu_sum) * wumask
+        wet_psi = np.asarray(wumask[..., :35], dtype=bool)
+        if int(np.any(wet_psi, axis=-1).sum()) != 9758:
+            raise SystemExit("GM psi registered U-column population changed")
+        def bm(value, oracle_value=oracle_psi):
+            return sweep.metrics(
+                np.asarray(value)[..., :35], oracle_value, wet_psi,
+                FOCUS, ACCUMULATION_BAR)
+        bolus_operand_metrics = {
+            "captured_u_increment": sweep.metrics(
+                bresult[0][..., :35], oracle_u_eiv, wet_psi,
+                FOCUS, ACCUMULATION_BAR),
+            "aeiu_face": bm(aeiu, oracle_aeiu),
+            "wslpi_kp1_face_sum": bm(slope_sum, oracle_slope_sum),
+            "psi_current_normalized": bm(current_psi),
+            "psi_literal_same_operands": bm(literal_psi),
+            "factorial_own_slope_own_aeiu": bm(literal_psi),
+            "factorial_oracle_slope_own_aeiu": bm(own_oracle_slope),
+            "factorial_own_slope_oracle_aeiu": bm(own_oracle_aeiu),
+            "factorial_oracle_slope_oracle_aeiu": bm(oracle_both),
+        }
     specs = (
         ("8.3", "uu(Kmm) / zptu", "traadv.F90:301-304", "un", POINTWISE_BAR),
         ("8.4", "e2u", "traadv.F90:329", "e2u", POINTWISE_BAR),
@@ -441,6 +554,12 @@ def main() -> int:
             sweep.metrics(h_u[:, 1:, :35], oracle["e3u"], wet, FOCUS,
                           POINTWISE_BAR)["n_diverged_columns"] == 9758
             if args.live_thickness_entry else True),
+        "round64_row8_8_debt_admitted": (
+            prior64 is None
+            or prior64["rows"][5]["metrics"]["n_diverged_columns"] == 8938),
+        "bolus_capture_count": (
+            len(bolus_captures) >= 1 if args.capture_bolus_operands
+            else len(bolus_captures) == 0),
         "round56_unheld_red": (
             prior56 is None
             or prior56["rows"][0]["status"] == "DIVERGED"),
@@ -462,6 +581,17 @@ def main() -> int:
     controls["gm_sign_plant"] = not sweep.metrics(
         -values["pu_bolus"], oracle["pu_bolus"], wet, FOCUS,
         ACCUMULATION_BAR)["pass"]
+    if args.capture_bolus_operands:
+        controls.update({
+            "bolus_current_normalized_red":
+                not bolus_operand_metrics["psi_current_normalized"]["pass"],
+            "bolus_sign_plant": not sweep.metrics(
+                -literal_psi[..., :35], oracle_psi, wet_psi, FOCUS,
+                ACCUMULATION_BAR)["pass"],
+            "bolus_meridional_roll_plant": not sweep.metrics(
+                np.roll(literal_psi[..., :35], 1, axis=0), oracle_psi,
+                wet_psi, FOCUS, ACCUMULATION_BAR)["pass"],
+        })
     controls["all_scored_finite"] = all(
         row.get("status") == "ORDERED_BLOCKED"
         or row["metrics"]["n_nonfinite_wet_elements"] == 0 for row in rows)
@@ -490,6 +620,19 @@ def main() -> int:
             disposition = "INVALID_TRANSPORT_SUBSTITUTION_PLUMBING"
         else:
             disposition = "ROW8_3_CYCLE_CAPTURE_UNRESOLVED"
+    if args.capture_bolus_operands and valid:
+        aeiu_at_bar = bolus_operand_metrics["aeiu_face"]["pass"]
+        slope_at_bar = bolus_operand_metrics["wslpi_kp1_face_sum"]["pass"]
+        literal_at_bar = bolus_operand_metrics["psi_literal_same_operands"]["pass"]
+        current_red = not bolus_operand_metrics["psi_current_normalized"]["pass"]
+        if aeiu_at_bar and slope_at_bar and literal_at_bar and current_red:
+            disposition = "ROW8_8_LOCALIZED_TO_PSI_ASSOCIATION"
+        elif not slope_at_bar:
+            disposition = "ROW8_8_LOCALIZED_TO_WSPLPI_OPERAND"
+        elif not aeiu_at_bar:
+            disposition = "ROW8_8_LOCALIZED_TO_AEIU_OPERAND"
+        else:
+            disposition = "ROW8_8_PSI_COMPOSITION_OPEN"
     nemo = args.nemo_root.resolve()
     receipt = {
         "schema": ("dino-split-explicit-momentum-chain-round64-v1"
@@ -510,6 +653,8 @@ def main() -> int:
         "controls": controls,
         **({"cycle_capture_metrics": capture_metrics}
            if args.capture_cycle else {}),
+        **({"bolus_operand_metrics": bolus_operand_metrics}
+           if args.capture_bolus_operands else {}),
         "focus_ji": [list(x) for x in FOCUS],
         "bindings": {
             "round54": _sha(args.round54.resolve()),
@@ -524,12 +669,17 @@ def main() -> int:
                if args.direct_cycle_entry else {}),
             **({"round63": _sha(args.round63.resolve())}
                if args.live_thickness_entry else {}),
+            **({"round64": _sha(args.round64.resolve()),
+                **{name: _sha(held / name) for name in BOLUS_HELD_SHA}}
+               if args.capture_bolus_operands else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(
                 root / "docs/ocean/fidelity" /
-                ("PREREG_split_explicit_momentum_chain_round64.md"
+                ("PREREG_split_explicit_momentum_chain_round65.md"
+                 if args.capture_bolus_operands else
+                 "PREREG_split_explicit_momentum_chain_round64.md"
                  if args.live_thickness_entry else
                  "PREREG_split_explicit_momentum_chain_round63.md"
                  if args.direct_cycle_entry else
@@ -545,7 +695,8 @@ def main() -> int:
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
             "nemo_ldftra": _sha(nemo / "cfgs/DINO/MY_SRC/ldftra.F90"),
         },
-        "arm": ("live_thickness_entry" if args.live_thickness_entry else
+        "arm": ("bolus_operand_capture" if args.capture_bolus_operands else
+                "live_thickness_entry" if args.live_thickness_entry else
                 "direct_cycle_entry" if args.direct_cycle_entry else
                 "cycle_capture" if args.capture_cycle else
                 "oracle_transport" if args.oracle_transport else
