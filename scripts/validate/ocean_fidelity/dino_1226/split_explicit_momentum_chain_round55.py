@@ -44,6 +44,7 @@ ROUND66_SHA = "673d9dc978ac4c05a0c8a6995f7c9e1870d9502afedff9b765045df23014785f"
 ROUND67_SHA = "2c1c1819f08cc07d9aa90fd43624285fe276558bbb5bba84aa97b3b83b345d95"
 ROUND68_SHA = "8e9a2ee7ee1969da86ee2ef24198047d6ea83ee14842753b528271453efaf9a0"
 ROUND69_SHA = "bd109e2869333a31b8b6a8410d3ec10f24acae94353ed1f35d60900ae5b62eb2"
+ROUND70_SHA = "d831bbcb89e06c8795a085103041293becedb8ac79c438f1302b44296b3314bc"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -144,6 +145,7 @@ def main() -> int:
     parser.add_argument("--round67", type=Path)
     parser.add_argument("--round68", type=Path)
     parser.add_argument("--round69", type=Path)
+    parser.add_argument("--round70", type=Path)
     parser.add_argument("--hold-slow-forcing", action="store_true")
     parser.add_argument("--oracle-transport", action="store_true")
     parser.add_argument("--capture-cycle", action="store_true")
@@ -155,6 +157,7 @@ def main() -> int:
     parser.add_argument("--capture-kappa-geometry", action="store_true")
     parser.add_argument("--coupled-kappa-carry", action="store_true")
     parser.add_argument("--surface-kmm-carry", action="store_true")
+    parser.add_argument("--exact-surface-kmm-carry", action="store_true")
     parser.add_argument("--raw-artifact", type=Path, required=True)
     parser.add_argument("--nemo-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -337,6 +340,25 @@ def main() -> int:
             raise SystemExit("round 69 does not release the surface carry")
     elif args.round69 is not None:
         raise SystemExit("--round69 requires --surface-kmm-carry")
+    prior70 = None
+    if args.exact_surface_kmm_carry:
+        if not args.surface_kmm_carry:
+            raise SystemExit(
+                "--exact-surface-kmm-carry requires --surface-kmm-carry")
+        if (args.round70 is None
+                or _sha(args.round70.resolve()) != ROUND70_SHA):
+            raise SystemExit("official round-70 planted violation required")
+        prior70 = json.loads(args.round70.read_text())
+        if (prior70.get("disposition") != "ROW8_8_LOCALIZED_TO_KMM_E3W"
+                or prior70["kappa_geometry_metrics"]["e3w_Kmm"]["pass"]
+                or prior70["rows"][5]["metrics"]["n_diverged_columns"]
+                != 9257
+                or prior70["rows"][5]["metrics"]["max_column_error"]
+                < 8.0e-4):
+            raise SystemExit(
+                "round 70 does not admit the exact-surface Kmm carry")
+    elif args.round70 is not None:
+        raise SystemExit("--round70 requires --exact-surface-kmm-carry")
     if _sha(args.raw_artifact.resolve()) != RAW_ARTIFACT_SHA:
         raise SystemExit("admitted held row-8 artifact changed")
     held = args.held_dir.resolve()
@@ -795,6 +817,11 @@ def main() -> int:
             prior69 is None
             or (not prior69["kappa_geometry_metrics"]["e3w_Kmm"]["pass"]
                 and prior69["kappa_geometry_metrics"]["rn2b"]["pass"])),
+        "round70_e3t_surface_proxy_plant_red": (
+            prior70 is None
+            or (not prior70["kappa_geometry_metrics"]["e3w_Kmm"]["pass"]
+                and prior70["rows"][5]["metrics"]["max_column_error"]
+                >= 8.0e-4)),
         "round56_unheld_red": (
             prior56 is None
             or prior56["rows"][0]["status"] == "DIVERGED"),
@@ -910,7 +937,11 @@ def main() -> int:
     if args.capture_kappa_geometry and valid:
         e3w_pass = kappa_geometry_metrics["e3w_Kmm"]["pass"]
         rn2_pass = kappa_geometry_metrics["rn2b"]["pass"]
-        disposition = (("TRACER_ENTRY_ROW8_AT_BAR_CARRIED_KMM"
+        disposition = (("TRACER_ENTRY_ROW8_AT_BAR_EXACT_SURFACE_KMM"
+                        if args.exact_surface_kmm_carry and first is None
+                        and all(metric["pass"] for metric in
+                                kappa_operand_metrics.values()) else
+                        "TRACER_ENTRY_ROW8_AT_BAR_CARRIED_KMM"
                         if args.surface_kmm_carry and first is None
                         and all(metric["pass"] for metric in
                                 kappa_operand_metrics.values()) else
@@ -922,7 +953,9 @@ def main() -> int:
                        if not rn2_pass else "ROW8_8_KAPPA_GEOMETRY_AT_BAR")
     nemo = args.nemo_root.resolve()
     receipt = {
-        "schema": ("dino-split-explicit-momentum-chain-round64-v1"
+        "schema": ("dino-split-explicit-momentum-chain-round71-v1"
+                   if args.exact_surface_kmm_carry else
+                   "dino-split-explicit-momentum-chain-round64-v1"
                    if args.live_thickness_entry else
                    "dino-split-explicit-momentum-chain-round63-v1"
                    if args.direct_cycle_entry else
@@ -975,12 +1008,16 @@ def main() -> int:
                if args.coupled_kappa_carry else {}),
             **({"round69": _sha(args.round69.resolve())}
                if args.surface_kmm_carry else {}),
+            **({"round70": _sha(args.round70.resolve())}
+               if args.exact_surface_kmm_carry else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(
                 root / "docs/ocean/fidelity" /
-                ("PREREG_split_explicit_momentum_chain_round70.md"
+                ("PREREG_split_explicit_momentum_chain_round71.md"
+                 if args.exact_surface_kmm_carry else
+                 "PREREG_split_explicit_momentum_chain_round70.md"
                  if args.surface_kmm_carry else
                  "PREREG_split_explicit_momentum_chain_round69.md"
                  if args.coupled_kappa_carry else
@@ -1008,7 +1045,9 @@ def main() -> int:
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
             "nemo_ldftra": _sha(nemo / "cfgs/DINO/MY_SRC/ldftra.F90"),
         },
-        "arm": ("surface_kmm_carry" if args.surface_kmm_carry else
+        "arm": ("exact_surface_kmm_carry"
+                if args.exact_surface_kmm_carry else
+                "surface_kmm_carry" if args.surface_kmm_carry else
                 "coupled_kappa_carry" if args.coupled_kappa_carry else
                 "kappa_geometry_capture" if args.capture_kappa_geometry else
                 "literal_kappa_reduction" if args.literal_kappa_reduction else
@@ -1027,7 +1066,8 @@ def main() -> int:
             "TRACER_ENTRY_ROW8_AT_BAR_DIRECT_KMM",
             "TRACER_ENTRY_ROW8_AT_BAR_LIVE_QCO",
             "TRACER_ENTRY_ROW8_AT_BAR_LITERAL_GM",
-            "TRACER_ENTRY_ROW8_AT_BAR_CARRIED_KMM"} else first),
+            "TRACER_ENTRY_ROW8_AT_BAR_CARRIED_KMM",
+            "TRACER_ENTRY_ROW8_AT_BAR_EXACT_SURFACE_KMM"} else first),
     }
     args.output.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     print(f"disposition={disposition} first_diverged_subrow={first}")
