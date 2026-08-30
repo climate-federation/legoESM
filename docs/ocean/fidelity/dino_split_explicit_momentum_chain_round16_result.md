@@ -38,7 +38,7 @@ recurrence closes the first-substep SSH output.
 
 ## Ordered chain state
 
-The hardened recurrence remains stopped at row 1.2 under the frozen
+The hardened recurrence at this commit remains stopped at row 1.2 under the frozen
 pointwise `1e-15` bar:
 
 | Row | Operand | Status | E | max error / NEMO RMS |
@@ -47,14 +47,14 @@ pointwise `1e-15` bar:
 | 1.2 | `un_e` | NEAR-CLASS | 2.29625968916112e-16 | 5.57431633372995e-15 |
 | 1.2 | `vn_e` | NEAR-CLASS | 2.223767115037694e-16 | 4.26422750960742e-15 |
 
-The 3-D BEFORE velocities, wet-level counts, and total face thicknesses are
-exact. That makes NEMO's left-accumulated per-level thickness x velocity
-reduction the prime candidate (`dynatf_qco.F90:254-267`, copied into the
-split-explicit seed at `dynspg_ts.F90:571-579`), but it is **not owned or
-bounded yet**: total thickness equality does not prove that every per-level
-face thickness and multiplication operand is bit-identical. The next legal
-peel is a bit comparison of the per-level U/V face weights followed by the
-left-accumulation association.
+The round-18 existing-dump peel now owns this roundoff residue exactly. At an
+MLF restart, `istate.F90:149-155` reconstructs the barotropic Kbb seed with
+BEFORE (`sshb`) live face thickness and source-ordered vertical accumulation;
+that expression is bit-exact on every registered U/V face. The former
+`dynatf_qco` attribution is corrected for this restart boundary. Production
+still uses a fused reduction, so row 1.2 remains an ordered implementation stop
+until the designed `barotropic_seed_evaluation="nemo_literal"` selector lands
+and the recurrence is replayed. See the round-18 result.
 
 Rows after the stop retain targeting evidence only:
 

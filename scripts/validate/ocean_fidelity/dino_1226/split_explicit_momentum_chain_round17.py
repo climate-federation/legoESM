@@ -149,6 +149,9 @@ def main() -> int:
         disposition = "OWNED_BY_LEFT_ACCUMULATION"
     else:
         disposition = "ASSOCIATION_NOT_DISCRIMINATING"
+    if (disposition == "OWNED_BY_LEFT_ACCUMULATION"
+            and args.ssh_variable == "sshb" and args.prior is not None):
+        disposition = "OWNED_BY_BEFORE_THICKNESS_TIME_LEVEL_AND_LEFT_ACCUMULATION"
     planted = {q: arrays[q]["literal_live_left"].copy() for q in ("u", "v")}
     for q in ("u", "v"):
         idx = np.unravel_index(np.argmax(np.abs(oracle[q]) * wet2[q]), oracle[q].shape)
