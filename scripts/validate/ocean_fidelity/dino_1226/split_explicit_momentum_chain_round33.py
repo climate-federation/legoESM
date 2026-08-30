@@ -164,17 +164,17 @@ def main() -> int:
             candidate, oracle, mask,
             "dyn_zdf (momentum implicit vertical solve)")
         controls[component] = r29._strict_controls(candidate, oracle, mask)
-        five_ulp = np.array(oracle, copy=True)
+        bar_plant = np.array(oracle, copy=True)
         wet_points = np.argwhere(mask)
         wet_values = np.abs(oracle[mask])
         point = tuple(wet_points[int(np.argmax(wet_values))])
-        for _ in range(5):
-            five_ulp[point] = np.nextafter(five_ulp[point], np.inf)
-        controls[component]["five_nextafter"] = r29._score(
-            five_ulp, oracle, mask,
+        reference_rms = float(np.sqrt(np.mean(oracle[mask] ** 2)))
+        bar_plant[point] += 2.0e-12 * reference_rms
+        controls[component]["two_bar_point_plant"] = r29._score(
+            bar_plant, oracle, mask,
             "dyn_zdf (momentum implicit vertical solve)")
-        controls[component]["five_nextafter_fires"] = (
-            controls[component]["five_nextafter"]["gate_status"] != "AT BAR")
+        controls[component]["two_bar_point_plant_fires"] = (
+            controls[component]["two_bar_point_plant"]["gate_status"] != "AT BAR")
 
     # S17's null arm is call 2 and self is call 1.
     null_exact = all(np.array_equal(calls[0][name], calls[1][name])
@@ -184,7 +184,7 @@ def main() -> int:
                 and s17.bridge_nemo_to_legoesm_topo is real_bridge)
     strict_controls = all(
         item["identity_at_bar"] and item["zero_shift_best"]
-        and item["five_nextafter_fires"]
+        and item["two_bar_point_plant_fires"]
         for item in controls.values())
     valid = null_exact and restored and strict_controls
     if not valid:

@@ -104,3 +104,12 @@ not a receipt. The display now uses the classifier's actual
 preregistered five-`nextafter` plant explicitly and requires it, rather than
 relying on the older helper's four-ULP plant. Arms, comparands, bars, and
 disposition logic are unchanged; attempt 3 is not cited.
+
+Attempt 4 exited zero but classified the artifact `INVALID`, as required:
+five ULPs at the largest-magnitude wet element give only `1.69e-14` maximum
+error over reference RMS, below this row's `1e-12` ACCUMULATING class bar.
+That plant is structurally incapable of turning this 336k-element row red.
+It is retracted and replaced by adding `2e-12*RMS(reference)` at that same
+wet element, through the same row classifier. The identity and actual
+zero-shift controls remain. No measured arm, class bar, or verdict rule is
+changed; attempt 4 supplies no science receipt.
