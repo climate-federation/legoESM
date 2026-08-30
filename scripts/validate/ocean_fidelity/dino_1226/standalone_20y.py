@@ -50,6 +50,16 @@ DAYS_PER_YEAR = 360
 YEARS = 20
 MEMBERS = tuple(range(6))
 PERTURB_EPS = 1.0e-14
+FIRST_STEP_EQUIVALENT = False
+
+
+def claim_admission_reasons() -> tuple[str, ...]:
+    """Known build blockers that make a 20-year science arm inadmissible."""
+    reasons = []
+    if not FIRST_STEP_EQUIVALENT:
+        reasons.append(
+            "cold-start leapfrog skips nemo_mlf_baro_corr on l_1st_euler")
+    return tuple(reasons)
 
 
 def sample_days() -> tuple[int, ...]:
@@ -300,6 +310,12 @@ def run(args: argparse.Namespace) -> int:
         raise SystemExit("REFUSING dirty tracked producer")
     if args.output_dir.exists():
         raise SystemExit(f"REFUSING existing output directory {args.output_dir}")
+    claim_steps = YEARS * DAYS_PER_YEAR * STEPS_PER_DAY
+    blockers = claim_admission_reasons()
+    if args.steps == claim_steps and blockers:
+        raise SystemExit(
+            "REFUSING claim-length T1 arm while standalone admission is "
+            "blocked: " + "; ".join(blockers))
     args.output_dir.mkdir(parents=True)
     snapshots = args.output_dir / "snapshots"
     reductions = args.output_dir / "reductions"
@@ -354,7 +370,6 @@ def run(args: argparse.Namespace) -> int:
 
     frozen_days = set(sample_days())
     target_steps = args.steps
-    claim_steps = YEARS * DAYS_PER_YEAR * STEPS_PER_DAY
     capture_steps = {
         day * STEPS_PER_DAY: day for day in frozen_days
         if day * STEPS_PER_DAY <= target_steps
@@ -407,7 +422,8 @@ def run(args: argparse.Namespace) -> int:
                            if day * STEPS_PER_DAY <= target_steps)
     if [row["day"] for row in written] != expected_days:
         raise SystemExit("snapshot schedule mismatch")
-    complete = target_steps == claim_steps and expected_days == list(sample_days())
+    complete = (target_steps == claim_steps
+                and expected_days == list(sample_days()) and not blockers)
     manifest = {
         "schema": SCHEMA,
         "producer_commit": producer,
@@ -417,6 +433,7 @@ def run(args: argparse.Namespace) -> int:
         "steps_completed": target_steps,
         "claim_steps": claim_steps,
         "claim_admissible": complete,
+        "claim_admission_blockers": list(blockers),
         "twin_start_mode": "standalone",
         "bridge_paths": [],
         "restart_paths": [],

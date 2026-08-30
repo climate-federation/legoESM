@@ -1,4 +1,4 @@
-# DINO transfer question — T3 certified, T2 FE stabilization block
+# DINO transfer question — T3 certified, T2 block, T1 build admission
 
 Date: 2026-08-30. Session:
 `01a053d4-8e9f-7212-bbdb-19ba2d64e140`.
@@ -127,3 +127,56 @@ The isolated test passes and still executes both original plants:
 `0.6`. The complete Block-0 admission suite passes `178/178` after this
 fixture repair. That admission result never licensed a long-horizon FE
 stability claim.
+
+## #1696 selector bisection — regression premise refuted
+
+The committed `PREREG_dino_fe_default_scope_bisect.md` froze a paired causal
+gate before the new CPU arms. Restoring all sweep-promoted barotropic,
+TKE/ZDF, Redi, wind and V-metric selectors to their pre-sweep evaluation paths
+did not rescue the current FE card. It reached `|eta|max=3999.5 m`,
+`|v|max=9.54e127 m s-1` at step 36 and raised the same raw-`e3w_int` error at
+step 37. Receipt SHA-256 is
+`6392216940040b02184f1c2d4a3da99adab1dfda55a7f833f7bc3a0318cbe4d1`;
+log SHA-256 is
+`a70c489bae288b657113401ee974928d66a6fd78e7bfaf0c320b07e5c9fa6fed`.
+
+The clean pre-#1696 target `b794c0618e287ebf1d364a8713c3c504ac2eb01c`
+was then run through its original committed twin harness with the same
+developed state, before bridge, TKE bridge, fp64 and CPU/no-JIT policy. It was
+already fully nonfinite at the first day checkpoint, step 32. Its artifact and
+log SHA-256 values are
+`9f97a8ba82800672116a7f60c1cb1043dfc1aab7b51ab230311bced1284f2839`
+and
+`4f5f128c7ea83ebfe3d81a41da4b29146b4d744e0862a573b3c9f04605218464`.
+
+Thus no promoted selector passes the preregistered activation/restoration
+causality gate, and no new FE default was withdrawn. The proposed #1696
+regression mechanism is refuted; the actual finding is pre-existing permanent-
+FE developed-state instability. The already-bound MLF-only fences for alpha
+and the Nbb/Kaa QCO pair remain valid. No green post-step-32 FE regression test
+exists to add until FE stabilization itself is implemented.
+
+## T1 build round — runner built, claim-length admission blocked
+
+`standalone_20y.py` now constructs the public `nemo_dino_kamm_mlf` card from
+legoESM's own analytic NEMO-grid DINO grid, vertical coordinate and from-rest
+state. It has no restart or bridge selector, owns the six-member temperature-
+only perturbation contract, streams the exact 75 fp64 dates, imports the live
+campaign reducer, and hashes configs, initialization, snapshots and reductions.
+`standalone_20y_score.py` implements the six-family, six-member, 20,000-draw,
+seed-1455 horizon-matched floor/classifier with quantization and simultaneous-
+maximum plants.
+
+The first CPU smoke initially exposed missing raw literal-kernel operands. The
+runner now constructs those vertical, face, metric and EEN operands from the
+public analytic DINO grid rather than a NEMO file. A real one-step CPU/no-JIT
+smoke completes with every prognostic field finite and stamps
+`claim_admissible=false` as required for a truncated run.
+
+One model-level start-path debt remains and is fail-closed: the card resolves
+the T3-certified `outer_integrator=leapfrog`; with no history, legoESM's first
+Euler bootstrap skips `nemo_mlf_baro_corr`, while NEMO applies that after-level
+reconciliation on `l_1st_euler`. The core model already emits this exact
+warning. The runner refuses a 230,400-step claim arm until that row is
+implemented; a bridge would evade rather than solve T1. T1 is therefore
+**BUILD-BLOCKED-FIRST-STEP-RECONCILIATION**, not run and not science-scored.
