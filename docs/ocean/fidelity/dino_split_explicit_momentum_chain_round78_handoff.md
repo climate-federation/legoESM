@@ -233,6 +233,16 @@ PY
 
 ## Block 4 — CPU/fp64 registered score
 
+Scorer-only amendment after the first block-4 receipt: the six new Redi flux
+operands were measured, but the legacy `8.4` zonal-roll plant is structurally
+inert because Mercator `e2u` is zonally uniform.  That sole false control hid
+the registered first Redi failure and the Redi rows were absent from the terse
+table.  The corrected scorer records the structural invariance while retaining
+the red wet-point, meridional-roll, and sign plants; emits ordered `78.T.*` and
+`78.S.*` rows; uses the preregistered `T`/`S` disposition names; and advances
+an all-pass ladder to tracer ZDF.  The invalid artifact is SHA-bound below and
+preserved.  Re-run this block only; blocks 1--3 and their bracket remain valid.
+
 ```bash
 set -euo pipefail
 export CODEX_SESSION_ID=01a04e34-d1fb-73e0-b25a-177641f0a246
@@ -244,7 +254,7 @@ for value in "$PRODUCER" "$BRACKET_SHA"; do case "$value" in __*) exit 2;; esac;
 test "$PRODUCER" = 7723918c2b2ff42071d937988574dfccc5fcf197
 test -z "$(git status --porcelain --untracked-files=no)"
 test -z "$(git diff --name-only "$PRODUCER" HEAD -- packages/core packages/ocean src)"
-test "$(sha256sum "$repo/scripts/validate/ocean_fidelity/dino_1226/split_explicit_momentum_chain_round55.py" | awk '{print $1}')" = 4498395b95d34efab12a1ed1bac62936d92442b70ca1f062058ac578ce06ae27
+test "$(sha256sum "$repo/scripts/validate/ocean_fidelity/dino_1226/split_explicit_momentum_chain_round55.py" | awk '{print $1}')" = f60c86ea1e5b9dd5a3885eced735c23d5ccb5d8b2de41c65dc6afb70463daabf
 test "$(sha256sum "$repo/docs/ocean/fidelity/PREREG_split_explicit_momentum_chain_round78.md" | awk '{print $1}')" = c0fe235ef86abf4a639bc8ae5e1906675b6d4feae7432b55628cf50a154ebcc0
 run_root=$(cat /tmp/dino-redi-flux-round78-run-root.txt)
 bracket="$run_root/redi_flux_bracket.json"
@@ -253,7 +263,9 @@ held=/tmp/RUN_LATERAL_ROW8_PU_ON.Qln5u8
 redi=/tmp/RUN_BN2_CERT_1R
 traj=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ
 nemo=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
-output=/tmp/dino_split_explicit_momentum_chain_round78.json
+invalid_output=/tmp/dino_split_explicit_momentum_chain_round78.json
+test "$(sha256sum "$invalid_output" | awk '{print $1}')" = 251503e05bd2db0badb5db53081f552ce0dee87e5aa37aa4e892ed25c58df00e
+output=/tmp/dino_split_explicit_momentum_chain_round78_rescore.json
 test ! -e "$output"
 export PYTHONPATH="$repo/packages/core:$repo/packages/ocean:$repo:$repo/scripts/validate/ocean_fidelity/dino_1226"
 export PYTHONPYCACHEPREFIX="$run_root/pycache"

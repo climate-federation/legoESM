@@ -919,6 +919,9 @@ def main() -> int:
     redi_metrics = {}
     redi_e3w_metrics = {}
     redi_flux_metrics = {}
+    redi_flux_rows = []
+    first_flux = None
+    first_flux_subrow = None
     if args.capture_kappa_operands:
         if len(kappa_captures) != 1:
             raise SystemExit(
@@ -1333,8 +1336,16 @@ def main() -> int:
             metric = sweep.metrics(values[key], oracle[key], wet, FOCUS, bar)
             row.update(status="AT_BAR" if metric["pass"] else "DIVERGED",
                        metrics=metric)
-            controls.update({f"{subrow}_{k}": v for k, v in
-                             _controls(oracle[key], wet, bar).items()})
+            row_controls = _controls(oracle[key], wet, bar)
+            if subrow == "8.4":
+                # Mercator e2u is exactly zonally uniform on the registered
+                # wet population, so a zonal roll cannot be a red-capable
+                # plant.  Preserve that geometry fact as a positive receipt;
+                # wet-point, meridional-roll, and sign plants remain red.
+                controls["8.4_zonal_roll_structurally_inert"] = not (
+                    row_controls.pop("zonal_roll"))
+            controls.update({f"{subrow}_{k}": v
+                             for k, v in row_controls.items()})
             if not metric["pass"]:
                 first = subrow
                 blocked = True
@@ -1586,18 +1597,49 @@ def main() -> int:
         disposition = ("REDI_MSC_E3W_OWNED" if owned else
                        "REDI_MSC_E3W_MAJORITY" if improved else
                        "REDI_MSC_E3W_REFUTED")
-    if args.redi_flux_ladder and valid:
+    if args.redi_flux_ladder:
         flux_order = (
-            "zfu_tem", "zfv_tem", "zfw_tem",
-            "zfu_sal", "zfv_sal", "zfw_sal")
-        first_flux = next(
-            (name for name in flux_order
-             if not redi_flux_metrics[name]["pass"]), None)
-        disposition = (
-            f"REDI_DIVERGED_{first_flux.upper()}" if first_flux is not None
-            else "REDI_DIVERGED_DIVERGENCE_VOLUME_T"
-            if not redi_e3w_metrics["temperature"]["live_kmm_e3w"]["pass"]
-            else "TRACER_TAIL_REDI_AT_BAR_LIVE_E3W")
+            ("zfu_tem", "78.T.1", "temperature zfu",
+             "traldf_iso_scheme.h90:55-70"),
+            ("zfv_tem", "78.T.2", "temperature zfv",
+             "traldf_iso_scheme.h90:72-90"),
+            ("zfw_tem", "78.T.3", "temperature zfw_kp1",
+             "traldf_iso_scheme.h90:104-129"),
+            ("zfu_sal", "78.S.1", "salinity zfu",
+             "traldf_iso_scheme.h90:55-70"),
+            ("zfv_sal", "78.S.2", "salinity zfv",
+             "traldf_iso_scheme.h90:72-90"),
+            ("zfw_sal", "78.S.3", "salinity zfw_kp1",
+             "traldf_iso_scheme.h90:104-129"),
+        )
+        flux_blocked = False
+        for operand, subrow, name, source in flux_order:
+            row = {"subrow": subrow, "name": name,
+                   "nemo_source": source, "bar": POINTWISE_BAR}
+            if flux_blocked:
+                row["status"] = "ORDERED_BLOCKED"
+            else:
+                metric = redi_flux_metrics[operand]
+                row.update(status="AT_BAR" if metric["pass"] else "DIVERGED",
+                           metrics=metric)
+                if not metric["pass"]:
+                    first_flux = operand
+                    first_flux_subrow = subrow
+                    flux_blocked = True
+            redi_flux_rows.append(row)
+        if valid:
+            if first_flux is not None:
+                flux, tracer = first_flux.split("_")
+                disposition = (
+                    f"REDI_DIVERGED_{flux.upper()}_"
+                    f"{'T' if tracer == 'tem' else 'S'}")
+            elif not redi_e3w_metrics["temperature"]["live_kmm_e3w"]["pass"]:
+                disposition = "REDI_DIVERGED_DIVERGENCE_VOLUME_T"
+            else:
+                disposition = "TRACER_TAIL_REDI_AT_BAR_LIVE_E3W"
+    receipt_first = (first_flux_subrow
+                     if args.redi_flux_ladder and first_flux_subrow is not None
+                     else first)
     nemo = args.nemo_root.resolve()
     receipt = {
         "schema": ("dino-split-explicit-momentum-chain-round78-v1"
@@ -1629,7 +1671,7 @@ def main() -> int:
         "git_commit": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
         "disposition": disposition,
-        "first_diverged_subrow": first,
+        "first_diverged_subrow": receipt_first,
         "rows": rows,
         "controls": controls,
         **({"cycle_capture_metrics": capture_metrics}
@@ -1651,6 +1693,9 @@ def main() -> int:
         **({"redi_e3w_metrics": redi_e3w_metrics}
            if args.redi_e3w_factorial else {}),
         **({"redi_flux_metrics": redi_flux_metrics}
+           if args.redi_flux_ladder else {}),
+        **({"redi_flux_rows": redi_flux_rows,
+            "first_diverged_flux_operand": first_flux}
            if args.redi_flux_ladder else {}),
         "focus_ji": [list(x) for x in FOCUS],
         "bindings": {
@@ -1787,8 +1832,9 @@ def main() -> int:
                           "redi_flux_ladder" if disposition in {
                               "REDI_MSC_E3W_MAJORITY",
                               "REDI_MSC_E3W_REFUTED"} else
-                          "tracer_zdf" if disposition ==
-                          "TRACER_TAIL_REDI_AT_BAR" else
+                          "tracer_zdf" if disposition in {
+                              "TRACER_TAIL_REDI_AT_BAR",
+                              "TRACER_TAIL_REDI_AT_BAR_LIVE_E3W"} else
                           "redi_t" if disposition in {
             "TRACER_ENTRY_ROW8_AT_BAR",
             "TRACER_ENTRY_ROW8_AT_BAR_UPSTREAM_FORCING_EXACT",
@@ -1801,8 +1847,9 @@ def main() -> int:
             "TRACER_ENTRY_ROW8_AT_BAR_EXACT_GM_SQRT"} else first),
     }
     args.output.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
-    print(f"disposition={disposition} first_diverged_subrow={first}")
-    for row in rows:
+    print(f"disposition={disposition} "
+          f"first_diverged_subrow={receipt_first}")
+    for row in rows + redi_flux_rows:
         if "metrics" in row:
             print(row["subrow"], row["status"],
                   row["metrics"]["n_diverged_columns"],
