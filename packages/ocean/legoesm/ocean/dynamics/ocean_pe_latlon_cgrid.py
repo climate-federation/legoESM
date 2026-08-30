@@ -2698,11 +2698,14 @@ def _bc_vertical_momentum_advection(
                         "u_full and v_full to be passed to "
                         "_bc_vertical_momentum_advection.",
                     )
-                area_w = grid.area_T[..., jnp.newaxis] * w
-                w_area_u = interp_cell_to_uface(area_w)
-                w_area_v = interp_cell_to_vface(area_w, grid=grid)
-                face_area_u = grid.dx_u * grid.dy_u
-                face_area_v = grid.dx_v * grid.dy_v
+                area_w = jax.lax.optimization_barrier(
+                    grid.area_T[..., jnp.newaxis] * w)
+                w_area_u = jax.lax.optimization_barrier(
+                    interp_cell_to_uface(area_w))
+                w_area_v = jax.lax.optimization_barrier(
+                    interp_cell_to_vface(area_w, grid=grid))
+                face_area_u = jax.lax.optimization_barrier(grid.dx_u * grid.dy_u)
+                face_area_v = jax.lax.optimization_barrier(grid.dx_v * grid.dy_v)
                 u_face_active = jnp.broadcast_to(u_mask_3d, u_full.shape)
                 v_face_active = jnp.broadcast_to(v_mask_3d, v_full.shape)
                 # #1226 level-29-onset fix: which bottom/straddling-face mask
@@ -2719,6 +2722,9 @@ def _bc_vertical_momentum_advection(
                     v_full, w_area_v, h_v_old, face_area_v[..., jnp.newaxis],
                     face_active=v_face_active,
                     bottom_face_mask_mode=_zad_mask_mode)
+                if getattr(config, "zad_qco_evaluation", "generic") == "nemo_literal":
+                    diag_vertadv_u = jax.lax.optimization_barrier(diag_vertadv_u)
+                    diag_vertadv_v = jax.lax.optimization_barrier(diag_vertadv_v)
             else:
                 # Default: 1st-order upwind of the PERTURBATION velocity.
                 # The implicit viscosity (~|w|*dz/2) damps baroclinic shear
