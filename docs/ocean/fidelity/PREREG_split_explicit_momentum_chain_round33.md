@@ -95,3 +95,12 @@ tried to create a duplicate name. No numerical operation or score ran. The
 view builder now admits an existing link only after its content hash equals
 the explicit entry-restart binding; otherwise it stops. The science design is
 unchanged.
+
+Attempt 3 completed all four numerical arms and wrote a provisional JSON, but
+the process then exited nonzero while printing a nonexistent display-only
+metric key. Under the lane's exit-zero admission rule the provisional file is
+not a receipt. The display now uses the classifier's actual
+`per_element_max_error_over_nemo_rms` key. The scorer also records the
+preregistered five-`nextafter` plant explicitly and requires it, rather than
+relying on the older helper's four-ULP plant. Arms, comparands, bars, and
+disposition logic are unchanged; attempt 3 is not cited.

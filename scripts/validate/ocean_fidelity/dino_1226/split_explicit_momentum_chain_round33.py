@@ -164,6 +164,17 @@ def main() -> int:
             candidate, oracle, mask,
             "dyn_zdf (momentum implicit vertical solve)")
         controls[component] = r29._strict_controls(candidate, oracle, mask)
+        five_ulp = np.array(oracle, copy=True)
+        wet_points = np.argwhere(mask)
+        wet_values = np.abs(oracle[mask])
+        point = tuple(wet_points[int(np.argmax(wet_values))])
+        for _ in range(5):
+            five_ulp[point] = np.nextafter(five_ulp[point], np.inf)
+        controls[component]["five_nextafter"] = r29._score(
+            five_ulp, oracle, mask,
+            "dyn_zdf (momentum implicit vertical solve)")
+        controls[component]["five_nextafter_fires"] = (
+            controls[component]["five_nextafter"]["gate_status"] != "AT BAR")
 
     # S17's null arm is call 2 and self is call 1.
     null_exact = all(np.array_equal(calls[0][name], calls[1][name])
@@ -173,7 +184,7 @@ def main() -> int:
                 and s17.bridge_nemo_to_legoesm_topo is real_bridge)
     strict_controls = all(
         item["identity_at_bar"] and item["zero_shift_best"]
-        and item["four_nextafter_fires"]
+        and item["five_nextafter_fires"]
         for item in controls.values())
     valid = null_exact and restored and strict_controls
     if not valid:
@@ -227,7 +238,8 @@ def main() -> int:
     print(f"disposition={disposition}")
     for component, row in rows.items():
         print(component, row["gate_status"],
-              row["normalized_rms_error"], row["max_abs_over_rms_reference"])
+              row["normalized_rms_error"],
+              row["per_element_max_error_over_nemo_rms"])
     return 0 if valid else 2
 
 
