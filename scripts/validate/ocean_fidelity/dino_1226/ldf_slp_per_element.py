@@ -1863,7 +1863,7 @@ def main() -> int:
                     raw[name], oracle_raw[name], wmask,
                     FOCUS, POINTWISE_BAR),
                 "oracle_identity": sweep.metrics(
-                    oracle_raw[name], oracle_raw[name], wmask[..., :35],
+                    oracle_raw[name], oracle_raw[name], wmask,
                     FOCUS, POINTWISE_BAR),
             }
         for use_raw in (0, 1):
