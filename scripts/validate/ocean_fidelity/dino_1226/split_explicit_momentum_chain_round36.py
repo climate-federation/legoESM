@@ -271,6 +271,7 @@ def main() -> int:
     nan_plant = np.array(rhs_u, copy=True)
     nan_plant[point] = np.nan
     controls["wet_nan_detected"] = not np.isfinite(nan_plant[wet_u]).all()
+    controls = {name: bool(value) for name, value in controls.items()}
     valid = all(controls.values())
     delayed_at_bar = rows["delayed_actual_wind"]["u"]["gate_status"] == "AT BAR"
     oracle_at_bar = rows["delayed_oracle_wind"]["u"]["gate_status"] == "AT BAR"
@@ -307,7 +308,7 @@ def main() -> int:
         "backend": jax.default_backend(),
         "jax_enable_x64": bool(jax.config.jax_enable_x64),
         "rows": rows,
-        "u_baseline_error_removal_fraction": removal,
+        "u_baseline_error_removal_fraction": float(removal),
         "controls": controls,
         "bindings": {name: r35._sha(path.resolve())
                      for name, path in paths.items()},
