@@ -201,6 +201,7 @@ def bridge_nemo_to_legoesm(
                       np.asarray(grid.e1u) * np.asarray(grid.e2u)),
         nemo_e1e2v_m=(None if grid.e1v is None else
                       np.asarray(grid.e1v) * np.asarray(grid.e2v)),
+        nemo_e2u_m=grid.e2u, nemo_e1v_m=grid.e1v,
         nemo_een_barotropic_m=_nemo_een_barotropic_operands(grid),
         nemo_e3w_source="mesh_reference",
     )
@@ -752,6 +753,7 @@ def bridge_nemo_to_legoesm_topo(
                       np.asarray(grid.e1u) * np.asarray(grid.e2u)),
         nemo_e1e2v_m=(None if grid.e1v is None else
                       np.asarray(grid.e1v) * np.asarray(grid.e2v)),
+        nemo_e2u_m=grid.e2u, nemo_e1v_m=grid.e1v,
         nemo_een_barotropic_m=_nemo_een_barotropic_operands(grid),
         nemo_e3w_source=nemo_e3w_source,
     )

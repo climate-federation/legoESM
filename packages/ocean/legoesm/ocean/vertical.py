@@ -182,6 +182,8 @@ class OceanZStarCoordinate(NamedTuple):
     nemo_e1e2t: jnp.ndarray | None = None
     nemo_e1e2u: jnp.ndarray | None = None
     nemo_e1e2v: jnp.ndarray | None = None
+    nemo_e2u: jnp.ndarray | None = None
+    nemo_e1v: jnp.ndarray | None = None
     nemo_een_barotropic: NemoEENBarotropicOperands | None = None
 
 
@@ -286,6 +288,7 @@ def create_z_star_from_thicknesses(
     nemo_e3w_source="mesh_reference",
     nemo_hu_0_m=None, nemo_hv_0_m=None, nemo_e1e2t_m=None,
     nemo_e1e2u_m=None, nemo_e1e2v_m=None,
+    nemo_e2u_m=None, nemo_e1v_m=None,
     nemo_een_barotropic_m=None,
 ) -> OceanZStarCoordinate:
     """Build a z* coordinate from EXPLICIT reference layer thicknesses.
@@ -397,6 +400,8 @@ def create_z_star_from_thicknesses(
     nemo_e1e2t = _raw_horizontal(nemo_e1e2t_m, "nemo_e1e2t_m")
     nemo_e1e2u = _raw_horizontal(nemo_e1e2u_m, "nemo_e1e2u_m")
     nemo_e1e2v = _raw_horizontal(nemo_e1e2v_m, "nemo_e1e2v_m")
+    nemo_e2u = _raw_horizontal(nemo_e2u_m, "nemo_e2u_m")
+    nemo_e1v = _raw_horizontal(nemo_e1v_m, "nemo_e1v_m")
     nemo_een_barotropic = None
     if nemo_een_barotropic_m is not None:
         if not isinstance(nemo_een_barotropic_m, NemoEENBarotropicOperands):
@@ -448,6 +453,7 @@ def create_z_star_from_thicknesses(
         nemo_hu_0=nemo_hu_0, nemo_hv_0=nemo_hv_0,
         nemo_e1e2t=nemo_e1e2t, nemo_e1e2u=nemo_e1e2u,
         nemo_e1e2v=nemo_e1e2v,
+        nemo_e2u=nemo_e2u, nemo_e1v=nemo_e1v,
         nemo_een_barotropic=nemo_een_barotropic,
     )
 
@@ -658,6 +664,8 @@ class OceanPartialCellCoordinate(NamedTuple):
     nemo_e1e2t: jnp.ndarray | None = None
     nemo_e1e2u: jnp.ndarray | None = None
     nemo_e1e2v: jnp.ndarray | None = None
+    nemo_e2u: jnp.ndarray | None = None
+    nemo_e1v: jnp.ndarray | None = None
     nemo_een_barotropic: NemoEENBarotropicOperands | None = None
 
 
@@ -778,6 +786,8 @@ def create_partial_cell_coordinate(
         nemo_e1e2t=getattr(z_coord, "nemo_e1e2t", None),
         nemo_e1e2u=getattr(z_coord, "nemo_e1e2u", None),
         nemo_e1e2v=getattr(z_coord, "nemo_e1e2v", None),
+        nemo_e2u=getattr(z_coord, "nemo_e2u", None),
+        nemo_e1v=getattr(z_coord, "nemo_e1v", None),
         nemo_een_barotropic=getattr(
             z_coord, "nemo_een_barotropic", None),
     )
@@ -856,6 +866,8 @@ def create_full_step_coordinate(
         nemo_e1e2t=getattr(z_coord, "nemo_e1e2t", None),
         nemo_e1e2u=getattr(z_coord, "nemo_e1e2u", None),
         nemo_e1e2v=getattr(z_coord, "nemo_e1e2v", None),
+        nemo_e2u=getattr(z_coord, "nemo_e2u", None),
+        nemo_e1v=getattr(z_coord, "nemo_e1v", None),
         nemo_een_barotropic=getattr(
             z_coord, "nemo_een_barotropic", None),
     )

@@ -1435,8 +1435,13 @@ def _nemo_qco_zad_operands(
     h0_safe = jnp.where(h0 > 0.0, h0, 1.0)
     r3_now = eta_now / h0_safe
     live_t = e3t0 * (1.0 + r3_now[..., None] * tmask) * tmask
-    e2u = jnp.asarray(grid.dy_u[:, 1:], dtype=eta_now.dtype)
-    e1v = jnp.asarray(grid.dx_v[1:, :], dtype=eta_now.dtype)
+    raw_e2u = getattr(z_coord, "nemo_e2u", None)
+    raw_e1v = getattr(z_coord, "nemo_e1v", None)
+    if raw_e2u is None or raw_e1v is None:
+        raise ValueError(
+            "zad_qco_evaluation='nemo_literal' requires raw NEMO e2u/e1v")
+    e2u = jnp.asarray(raw_e2u, dtype=eta_now.dtype)
+    e1v = jnp.asarray(raw_e1v, dtype=eta_now.dtype)
     r1_area_t = jax.lax.optimization_barrier(1.0 / area_t)
     flux_levels = []
     barotropic_div = jnp.zeros_like(eta_now)

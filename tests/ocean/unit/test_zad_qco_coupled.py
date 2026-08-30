@@ -25,6 +25,8 @@ def test_qco_zad_pair_matches_source_ordered_oracle():
             nemo_e1e2t=jnp.asarray(2.0 + np.arange(nlat * nlon).reshape(nlat, nlon) / 7),
             nemo_e1e2u=jnp.asarray(3.0 + np.arange(nlat * nlon).reshape(nlat, nlon) / 11),
             nemo_e1e2v=jnp.asarray(4.0 + np.arange(nlat * nlon).reshape(nlat, nlon) / 13),
+            nemo_e2u=jnp.asarray(1.5 + np.arange(nlat * nlon).reshape(nlat, nlon) / 17),
+            nemo_e1v=jnp.asarray(1.7 + np.arange(nlat * nlon).reshape(nlat, nlon) / 19),
         )
     rng = np.random.default_rng(1455)
     eta_now = rng.normal(scale=0.1, size=(nlat, nlon))
@@ -39,8 +41,8 @@ def test_qco_zad_pair_matches_source_ordered_oracle():
     vm[-1] = 0.0
     tm = np.ones((nlat, nlon, nlev))
     dt = 5400.0
-    e2u = 1.5 + np.arange(nlat * nlon).reshape(nlat, nlon) / 17
-    e1v = 1.7 + np.arange(nlat * nlon).reshape(nlat, nlon) / 19
+    e2u = np.asarray(coord.nemo_e2u)
+    e1v = np.asarray(coord.nemo_e1v)
     grid = SimpleNamespace(
         dy_u=jnp.asarray(np.concatenate([e2u[:, -1:], e2u], axis=1)),
         dx_v=jnp.asarray(np.concatenate([np.zeros_like(e1v[:1]), e1v], axis=0)),
