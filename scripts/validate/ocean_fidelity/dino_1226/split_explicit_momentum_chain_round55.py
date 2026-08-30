@@ -905,15 +905,6 @@ def main() -> int:
             "corrected_u": np.asarray(result[0]),
             "corrected_v": np.asarray(result[1]),
         })
-    if args.redi_zfw_wslp_stage_factorial:
-        controls.update({
-            "round90_wslp_pair_admitted": (
-                prior90["disposition"] ==
-                "REDI_ZFW_T_SKEW_OWNED_WSLPI_WSLPJ"),
-            **{f"redi_zfw_wslp_stage_{name}": value
-               for name, value in
-               redi_zfw_wslp_stage_factorial["controls"].items()},
-        })
         return result
 
     def observed_thickness(*thickness_args, **thickness_kwargs):
@@ -2576,6 +2567,15 @@ def main() -> int:
             **{f"redi_zfw_skew_operand_{name}": value
                for name, value in
                redi_zfw_skew_operand_factorial["controls"].items()},
+        })
+    if args.redi_zfw_wslp_stage_factorial:
+        controls.update({
+            "round90_wslp_pair_admitted": (
+                prior90["disposition"] ==
+                "REDI_ZFW_T_SKEW_OWNED_WSLPI_WSLPJ"),
+            **{f"redi_zfw_wslp_stage_{name}": value
+               for name, value in
+               redi_zfw_wslp_stage_factorial["controls"].items()},
         })
     controls["all_scored_finite"] = all(
         row.get("status") == "ORDERED_BLOCKED"
