@@ -15,6 +15,14 @@ enters its own directory, and the physics producer is pinned to
 `a6a5908db19ffaef99fa2e837fa4064b166d2bae`; later packaging-only commits are
 admitted only when their model diff from that SHA is empty.
 
+The coefficient writer owns the documented contiguous unit range
+`9400--9407`. A full post-QCO `MY_SRC` inventory found no explicit `OPEN`,
+`WRITE`, `CLOSE`, or other numeric reference to any unit in that range. The
+build block now proves all eight units have zero `OPEN` owners before applying
+the coefficient patch and exactly one owner afterward. This replaces the
+retired `8990--8997` proposal, which collided with the existing salinity-FCT
+writers in `traadv_fct.F90`.
+
 The guarded lean-copy convention below is mandatory for this and every future
 held handoff. It rejects non-`/tmp/nemo-*` donors, caps the donor and copied
 source sizes, verifies free space, and excludes `RUN_*`, `BLD`, `WORK`, and
@@ -60,6 +68,11 @@ NEMO_SOURCE_BASE_MAX_MIB=3072 NEMO_SOURCE_COPY_MAX_MIB=512 NEMO_SOURCE_MIN_FREE_
   "$guard" "$base" "$src"
 ( cd "$src" && sha256sum -c "$manifest" )
 patch --fuzz=0 -p1 -d "$src" < "$qco_patch"
+claimed_units='9400 9401 9402 9403 9404 9405 9406 9407'
+for unit in $claimed_units; do
+  test "$(grep -rE --include='*.F90' "OPEN[[:space:]]*\\([[:space:]]*UNIT[[:space:]]*=[[:space:]]*${unit}([^0-9]|$)" "$src/cfgs/DINO/MY_SRC" | wc -l)" -eq 0
+  test "$(grep -rE --include='*.F90' "\\b${unit}\\b" "$src/cfgs/DINO/MY_SRC" | wc -l)" -eq 0
+done
 source /home/dbalwada/miniconda3/etc/profile.d/conda.sh
 conda activate nemo-build
 export TMPDIR=/tmp XDG_CACHE_HOME=/tmp/nemo-spg-corcoef-xdg
@@ -67,8 +80,9 @@ cd "$src"
 ./makenemo -m conda -n DINO -j 8 2>&1 | tee /tmp/nemo-spg-corcoef-off-build.log
 cp -p cfgs/DINO/BLD/bin/nemo.exe /tmp/nemo-spg-corcoef-off.exe
 patch --fuzz=0 -p1 -d "$src" < "$cor_patch"
-for unit in 8990 8991 8992 8993 8994 8995 8996 8997; do
-  test "$(grep -rE --include='*.F90' "OPEN\( UNIT=${unit}" "$src/cfgs/DINO/MY_SRC" | wc -l)" -eq 1
+for unit in $claimed_units; do
+  test "$(grep -rE --include='*.F90' "OPEN[[:space:]]*\\([[:space:]]*UNIT[[:space:]]*=[[:space:]]*${unit}([^0-9]|$)" "$src/cfgs/DINO/MY_SRC" | wc -l)" -eq 1
+  test "$(grep -rlE --include='*.F90' "\\b${unit}\\b" "$src/cfgs/DINO/MY_SRC" | wc -l)" -eq 1
 done
 ./makenemo -m conda -n DINO -j 8 2>&1 | tee /tmp/nemo-spg-corcoef-on-build.log
 cp -p cfgs/DINO/BLD/bin/nemo.exe /tmp/nemo-spg-corcoef-on.exe
