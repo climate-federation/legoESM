@@ -508,3 +508,18 @@ The local row-5 owner is therefore the coupled raw Kaa plus source-literal
 Kmm rewrite at `dynspg_ts.F90:1170-1174`. The unheld W residual
 `3.43293e-6` remains an upstream row-1.1 qualification and is not relabelled
 as local exactness. Row 5 is promoted conditionally and releases row 6.
+
+## Round 47: row 6 stops on the pointwise maximum axis
+
+Artifact `/tmp/dino_split_explicit_momentum_chain_round47.json`, SHA-256
+`60a4b7d8f45b8cc9a611deb4d4e641e5952c67960f6edff2ddade51771a3e4aa`,
+passes the retained-stream, forcing-hold, hook, null, identity, roll, planted-
+point, nonzero-correction, shape, and restoration gates. The local arm feeds
+NEMO's pre-correction Kaa U/V into production `_apply_after_level_reconcile`
+with the model's upstream-exact primary barotropic target.
+
+U/V normalized RMS are only `1.13036e-16/1.53239e-16`, but their maximum
+errors over NEMO RMS are `2.98986e-15/5.63618e-15`, above the registered
+POINTWISE `1e-15` bar. The ordered disposition is therefore
+`ROW6_MLF_BARO_CORR_U_DIVERGED`; row 6 is not promoted. Round 48 separates
+the few-ULP residual into primary-target and source-association operands.
