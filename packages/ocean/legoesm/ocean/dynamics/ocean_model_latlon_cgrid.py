@@ -46,6 +46,7 @@ from legoesm.ocean.vertical import (
     flux_form_vertical_tracer_advection,
     flux_form_vertical_tracer_advection_tvd,
     flux_form_vertical_tracer_advection_centered,
+    nemo_qco_live_face_geometry_from_operands,
 )
 from legoesm.ocean.state import (
     LatLonCGridOceanState,
@@ -74,7 +75,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     min_cell_to_vface,
 )
 from legoesm.ocean.dynamics.barotropic_common import (
-    after_level_column_mean_reconcile,
+    nemo_literal_after_level_reconcile,
     validate_after_reconcile,
 )
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
@@ -3435,6 +3436,7 @@ class LatLonCGridOceanModel:
                    _fct_tracer_before=None,
                    _external_tracer_rate=None,
                    _ldf_state=None, _tke_n2_bundle_override=None,
+                   _return_raw_kaa_qco: bool = False,
                    z_coord=None, config=None, iwm_fields=None):
         """Core step logic — no JIT wrapper.
 
@@ -5576,9 +5578,15 @@ class LatLonCGridOceanModel:
             # NB: ``tracer_source`` (EXT-N2) is APPENDED so the positional
             # contract of the first six slots is unchanged (consumed by
             # _ab2_step and tests/ocean/unit/test_ab2_scope.py).
-            return state_new, (tend.K_v, tend.A_v, k33_implicit,
-                               tend.surface_tracer_forcing, _tke_src,
-                               _diss_incr, tend.tracer_source)
+            _aux = (tend.K_v, tend.A_v, k33_implicit,
+                    tend.surface_tracer_forcing, _tke_src,
+                    _diss_incr, tend.tracer_source)
+            if _return_raw_kaa_qco:
+                # Transient within-step operand, deliberately outside the
+                # prognostic/restart state tree: NEMO's Kaa SSH immediately
+                # after dyn_spg_ts and before legoESM's global eta projection.
+                _aux = _aux + (_eta_after_spg_literal,)
+            return state_new, _aux
         return state_new
 
     def _fixed_depth_means(self, st, z_coord=None, config=None, grid=None):
@@ -8696,7 +8704,8 @@ class LatLonCGridOceanModel:
             RuntimeWarning, stacklevel=3)
 
     def _apply_after_level_reconcile(self, naa, state, btu_exp, btv_exp,
-                                     u_mask3, v_mask3, grid, z_coord=None, config=None):
+                                     u_mask3, v_mask3, grid, kaa_eta_raw=None,
+                                     z_coord=None, config=None):
         """NEMO ``mlf_baro_corr``, the SECOND depth-mean reconciliation.
 
         Transcribes ``cfgs/DINO/MY_SRC/stpmlf.F90:578 -> :754-765``.  The
@@ -8719,13 +8728,11 @@ class LatLonCGridOceanModel:
            NEMO throws that deposit away every step (measured at +17.9 m3/s2
            per southern u-row on the 90-day DINO twin, 12x the realized
            spin-up rate), and legoESM otherwise keeps a residue of it.
-        2. It re-pins the column mean using the REFERENCE ladder.  NEMO's own
-           weighting is time-level INDEPENDENT -- under ``key_qco`` the
-           ``(1+r3u)`` free-surface factor cancels between ``e3u(Kaa)`` and
-           ``r1_hu(Kaa)`` exactly (see the kernel docstring) -- whereas the
-           caller's ``_split`` weights with the LIVE now-level thickness.
-           Under pure z-star that rescale is column-uniform and the two
-           coincide to roundoff; the difference is a partial-cell effect only.
+        2. It re-pins the column mean by executing the LIVE Kaa face-thickness
+           reduction and independently materialized reciprocal.  Their QCO
+           factor cancels algebraically but not at the final ULP; round 49
+           measured the executed form as bit-exact and the cancelled form as
+           pointwise debt.
 
         THE TARGET is ``btu_exp``/``btv_exp``, the depth mean the barotropic
         solve produced -- i.e. whichever substep average
@@ -8738,11 +8745,13 @@ class LatLonCGridOceanModel:
         ``nemo_mlf_baro_corr`` is NOT the faithful combination.  Matching NEMO
         on this row needs BOTH ``velocity_avg`` and ``nemo_mlf_baro_corr``.
 
-        Even under ``velocity_avg`` the identity is to ROUNDOFF WHERE THE
-        WET-COLUMN FLOOR DOES NOT BIND, not exact: the barotropic solve builds
-        its own split on a FLOORED eta while the caller's ``_split`` uses the
-        unfloored ``state.eta``.  It is not NEMO's line verbatim and is not
-        claimed to be.
+        Round 49 retracted the earlier claim that the QCO factor can be
+        cancelled in production.  It cancels algebraically, but NEMO executes
+        the live thickness reduction and the independently built reciprocal
+        before that cancellation.  The final few ULPs depend on that order.
+        ``kaa_eta_raw`` therefore carries the pre-projection Kaa SSH as a
+        transient auxiliary from ``_step_impl``; it never enters the model
+        state or restart schema.
         """
         _zc = self.z_coord if z_coord is None else z_coord  # SPMD band override
         _cfg_b = self.config if config is None else config  # SPMD band override
@@ -8750,6 +8759,10 @@ class LatLonCGridOceanModel:
             _cfg_b.barotropic.barotropic_after_reconcile)
         if scheme == "off":
             return naa
+        if kaa_eta_raw is None:
+            raise ValueError(
+                "nemo_mlf_baro_corr requires the raw pre-projection Kaa SSH "
+                "from the split-explicit solve")
         # REFERENCE ladder (NEMO e3u_0/e3v_0): the free-surface scaling cancels
         # inside NEMO's own reconciliation, so the faithful weight carries no
         # eta at all. Built from eta = 0 so partial-cell thicknesses survive
@@ -8804,15 +8817,53 @@ class LatLonCGridOceanModel:
         # weighting and the target would disagree end-to-end.  On every card
         # that ships this option they are the same number.
         #
-        # floor matches the caller's own ``_split`` (depth_mean(..., 1.0e-10)),
-        # so the two means this composes are taken with the same land guard.
-        u_rec = after_level_column_mean_reconcile(
-            naa.u.data, interp_cell_to_uface(h_k_ref), btu_exp, u_mask3,
-            1.0e-10)
-        u_rec = u_rec.at[:, -1].set(u_rec[:, 0])          # periodic-lon wrap
-        v_rec = after_level_column_mean_reconcile(
-            naa.v.data, interp_cell_to_vface(h_k_ref, grid), btv_exp,
-            v_mask3, 1.0e-10)
+        # Work on NEMO's native east/north faces, then map once to legoESM's
+        # redundant west/south boundary layout.  A NEMO bridge supplies the
+        # raw mesh operands.  Generated grids use the same arithmetic from
+        # their reference face ladder and native C-grid metrics; the active
+        # DINO certification takes the raw branch.
+        dtype = naa.u.data.dtype
+        nlev = naa.u.data.shape[-1]
+        raw_names = (
+            "nemo_e3t_0", "nemo_hu_0", "nemo_hv_0", "nemo_e1e2t",
+            "nemo_e1e2u", "nemo_e1e2v",
+        )
+        raw_refs = tuple(getattr(_zc, name, None) for name in raw_names)
+        raw_umask = jnp.asarray(u_mask3[:, 1:, :], dtype=dtype)
+        raw_vmask = jnp.asarray(v_mask3[1:, :, :], dtype=dtype)
+        if all(value is not None for value in raw_refs):
+            e3t0, hu0, hv0, area_t, area_u, area_v = (
+                jnp.asarray(value, dtype=dtype) for value in raw_refs)
+            e3u0 = e3t0[..., :nlev]
+            e3v0 = e3t0[..., :nlev]
+        else:
+            e3u0 = interp_cell_to_uface(h_k_ref)[:, 1:, :]
+            e3v0 = interp_cell_to_vface(h_k_ref, grid)[1:, :, :]
+            b = jax.lax.optimization_barrier
+            hu0 = jnp.zeros_like(kaa_eta_raw, dtype=dtype)
+            hv0 = jnp.zeros_like(kaa_eta_raw, dtype=dtype)
+            for jk in range(nlev):
+                hu0 = b(hu0 + b(e3u0[..., jk] * raw_umask[..., jk]))
+                hv0 = b(hv0 + b(e3v0[..., jk] * raw_vmask[..., jk]))
+            geom_grid = ensure_geometry(grid)
+            area_t = geom_grid.area_T
+            area_u_raw = (geom_grid.dx_u * geom_grid.dy_u)[:, 1:]
+            area_v_raw = (geom_grid.dx_v * geom_grid.dy_v)[1:, :]
+            area_u = jnp.where(raw_umask[..., 0] > 0.0, area_u_raw, 1.0)
+            area_v = jnp.where(raw_vmask[..., 0] > 0.0, area_v_raw, 1.0)
+
+        live = nemo_qco_live_face_geometry_from_operands(
+            kaa_eta_raw, e3u0, e3v0, raw_umask, raw_vmask,
+            hu0, hv0, area_t, area_u, area_v)
+        u_native = nemo_literal_after_level_reconcile(
+            naa.u.data[:, 1:, :], live.e3u, live.r1_hu,
+            btu_exp[:, 1:, :], raw_umask)
+        v_native = nemo_literal_after_level_reconcile(
+            naa.v.data[1:, :, :], live.e3v, live.r1_hv,
+            btv_exp[1:, :, :], raw_vmask)
+        u_rec = jnp.concatenate([u_native[:, -1:, :], u_native], axis=1)
+        v_rec = jnp.concatenate(
+            [jnp.zeros_like(v_native[:1]), v_native], axis=0)
         return naa._replace(u=naa.u.replace(data=u_rec),
                             v=naa.v.replace(data=v_rec))
 
@@ -9046,7 +9097,8 @@ class LatLonCGridOceanModel:
         # (residual #1). Only the advective (Nnn) pass drives the live barotropic
         # solve; the Nbb diss pass discards its barotropic result.
         state_expl, (K_v_phys, A_v_phys, k33_implicit, surface_tracer_forcing,
-                     tke_source, _diss_incr_nn, tracer_source) = self._step_impl(
+                     tke_source, _diss_incr_nn, tracer_source,
+                     kaa_eta_raw) = self._step_impl(
             state, rdt, freshwater=freshwater, surface_forcing=surface_forcing,
             sponge=sponge, _apply_implicit_vmix=False, grid=_grid,
             vertex_mask=vertex_mask, t_seconds=t_seconds,
@@ -9076,6 +9128,7 @@ class LatLonCGridOceanModel:
             # docstring and the ``step()`` param doc.
             _external_tracer_rate=external_tracer_rate,
             _tke_n2_bundle_override=_tke_n2_bundle,
+            _return_raw_kaa_qco=True,
             z_coord=z_coord, config=config, iwm_fields=iwm_fields)
         # 1b. DISSIPATIVE Nbb pass — evaluate dyn_ldf(Kbb)/tra_ldf(Kbb) + the GM/eiv
         #     trend on the BEFORE state and keep ONLY its dissipative increment
@@ -9273,7 +9326,8 @@ class LatLonCGridOceanModel:
         #     before the Asselin filter below. ONE implementation, called from
         #     both outer-step paths. "off" (the default) is bit-identical.
         naa = self._apply_after_level_reconcile(
-            naa, state, btu_exp, btv_exp, u_mask3, v_mask3, _grid, z_coord=z_coord, config=config)
+            naa, state, btu_exp, btv_exp, u_mask3, v_mask3, _grid,
+            kaa_eta_raw=kaa_eta_raw, z_coord=z_coord, config=config)
 
         # 4. Conservation fixer on the final after-state.
         if _cfg_b.use_conservation_fixer:
@@ -9475,7 +9529,8 @@ class LatLonCGridOceanModel:
         #    not a second whole-state pass (stpmlf.F90:275/437).
         _baro_scale = 2
         state_expl, (K_v_phys, A_v_phys, k33_implicit, surface_tracer_forcing,
-                     tke_source, diss_incr, tracer_source) = self._step_impl(
+                     tke_source, diss_incr, tracer_source,
+                     kaa_eta_raw) = self._step_impl(
             state, rdt, freshwater=freshwater, surface_forcing=surface_forcing,
             sponge=sponge, _apply_implicit_vmix=False, grid=_grid,
             vertex_mask=vertex_mask, t_seconds=t_seconds,
@@ -9494,6 +9549,7 @@ class LatLonCGridOceanModel:
                 state.T_before.data, state.S_before.data,
                 state.u_before.data, state.v_before.data),
             _tke_n2_bundle_override=_tke_n2_bundle,
+            _return_raw_kaa_qco=True,
         z_coord=z_coord, config=config, iwm_fields=iwm_fields)
 
         # 2. Explicit combine -- IDENTICAL algebra to ``_leapfrog_step`` (same
@@ -9605,7 +9661,8 @@ class LatLonCGridOceanModel:
         #     before the Asselin filter below. ONE implementation, called from
         #     both outer-step paths. "off" (the default) is bit-identical.
         naa = self._apply_after_level_reconcile(
-            naa, state, btu_exp, btv_exp, u_mask3, v_mask3, _grid, z_coord=z_coord, config=config)
+            naa, state, btu_exp, btv_exp, u_mask3, v_mask3, _grid,
+            kaa_eta_raw=kaa_eta_raw, z_coord=z_coord, config=config)
 
         # 4. Conservation fixer on the final after-state.
         if _cfg_b.use_conservation_fixer:

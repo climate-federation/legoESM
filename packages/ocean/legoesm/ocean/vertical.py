@@ -39,6 +39,74 @@ _AIMP_CU_MAX = 0.30
 _H_FLOOR = 1.0e-10
 
 
+class NemoQCOLiveFaceGeometry(NamedTuple):
+    """Executed DINO-QCO face thickness and reciprocal operands."""
+
+    e3u: jnp.ndarray
+    e3v: jnp.ndarray
+    r1_hu: jnp.ndarray
+    r1_hv: jnp.ndarray
+    r3u: jnp.ndarray
+    r3v: jnp.ndarray
+
+
+def nemo_qco_live_face_geometry_from_operands(
+    eta,
+    e3u_0,
+    e3v_0,
+    umask3,
+    vmask3,
+    hu_0,
+    hv_0,
+    area_t,
+    area_u,
+    area_v,
+):
+    """Build live native-face QCO geometry in NEMO source association.
+
+    All horizontal inputs use NEMO's native A2D layout: U/V store the east/
+    north face of each T cell.  The returned thicknesses and reciprocals are
+    the coupled operands materialized by ``dom_qco_r3c.F90:160-181`` and the
+    ``key_qco`` substitutions.  Keeping the reciprocal separate is necessary
+    even though its free-surface factor cancels algebraically against the
+    thickness: round 49 measured that executing both sides changes the final
+    few ULPs in ``mlf_baro_corr``.
+    """
+    dtype = jnp.asarray(e3u_0).dtype
+    b = lax.optimization_barrier
+    one = jnp.asarray(1.0, dtype=dtype)
+    half = jnp.asarray(0.5, dtype=dtype)
+    eta = jnp.asarray(eta, dtype=dtype)
+    e3u_0 = jnp.asarray(e3u_0, dtype=dtype)
+    e3v_0 = jnp.asarray(e3v_0, dtype=dtype)
+    umask3 = jnp.asarray(umask3, dtype=dtype)
+    vmask3 = jnp.asarray(vmask3, dtype=dtype)
+    hu_0 = jnp.asarray(hu_0, dtype=dtype)
+    hv_0 = jnp.asarray(hv_0, dtype=dtype)
+    area_t = jnp.asarray(area_t, dtype=dtype)
+    area_u = jnp.asarray(area_u, dtype=dtype)
+    area_v = jnp.asarray(area_v, dtype=dtype)
+
+    weighted_eta = b(area_t * eta)
+    num_u = b(half * b(weighted_eta + jnp.roll(weighted_eta, -1, axis=1)))
+    num_v = b(half * b(weighted_eta + jnp.roll(weighted_eta, -1, axis=0)))
+    wet_u = (hu_0 > 0.0).astype(dtype)
+    wet_v = (hv_0 > 0.0).astype(dtype)
+    r1_hu0 = b(wet_u / (hu_0 + one - wet_u))
+    r1_hv0 = b(wet_v / (hv_0 + one - wet_v))
+    r1_area_u = b(one / area_u)
+    r1_area_v = b(one / area_v)
+    r3u = b(b(num_u * r1_hu0) * r1_area_u)
+    r3v = b(b(num_v * r1_hv0) * r1_area_v)
+    one_plus_r3u = b(one + r3u)
+    one_plus_r3v = b(one + r3v)
+    e3u = b(e3u_0 * b(one + r3u[..., None] * umask3))
+    e3v = b(e3v_0 * b(one + r3v[..., None] * vmask3))
+    r1_hu = b(r1_hu0 / one_plus_r3u)
+    r1_hv = b(r1_hv0 / one_plus_r3v)
+    return NemoQCOLiveFaceGeometry(e3u, e3v, r1_hu, r1_hv, r3u, r3v)
+
+
 def nemo_qco_live_face_thicknesses(
     eta,
     z_coord,
@@ -55,7 +123,6 @@ def nemo_qco_live_face_thicknesses(
     face layout when required.  The explicit barriers preserve the executed
     source association measured by the DINO fidelity instruments.
     """
-    dtype = jnp.asarray(e3u_0).dtype
     refs = tuple(getattr(z_coord, name, None) for name in (
         "nemo_hu_0", "nemo_hv_0", "nemo_e1e2t", "nemo_e1e2u",
         "nemo_e1e2v",
@@ -64,31 +131,12 @@ def nemo_qco_live_face_thicknesses(
         raise ValueError(
             "nemo_qco_live_face_thicknesses requires raw NEMO hu_0/hv_0 "
             "and e1e2t/e1e2u/e1e2v fields")
-    hu0, hv0, area_t, area_u, area_v = (
-        jnp.asarray(value, dtype=dtype) for value in refs)
-    eta_now = jnp.asarray(eta, dtype=dtype)
-    weighted_eta = lax.optimization_barrier(area_t * eta_now)
-    half = jnp.asarray(0.5, dtype=dtype)
-    num_u = lax.optimization_barrier(
-        half * lax.optimization_barrier(
-            weighted_eta + jnp.roll(weighted_eta, -1, axis=1)))
-    num_v = lax.optimization_barrier(
-        half * lax.optimization_barrier(
-            weighted_eta + jnp.roll(weighted_eta, -1, axis=0)))
-    wet_u = (hu0 > 0.0).astype(dtype)
-    wet_v = (hv0 > 0.0).astype(dtype)
-    r1_hu0 = lax.optimization_barrier(wet_u / (hu0 + 1.0 - wet_u))
-    r1_hv0 = lax.optimization_barrier(wet_v / (hv0 + 1.0 - wet_v))
-    r1_area_u = lax.optimization_barrier(jnp.asarray(1.0, dtype=dtype) / area_u)
-    r1_area_v = lax.optimization_barrier(jnp.asarray(1.0, dtype=dtype) / area_v)
-    r3u = lax.optimization_barrier(
-        lax.optimization_barrier(num_u * r1_hu0) * r1_area_u)
-    r3v = lax.optimization_barrier(
-        lax.optimization_barrier(num_v * r1_hv0) * r1_area_v)
-    return (
-        jnp.asarray(e3u_0) * (1.0 + r3u[..., None] * umask3),
-        jnp.asarray(e3v_0) * (1.0 + r3v[..., None] * vmask3),
+    dtype = jnp.asarray(e3u_0).dtype
+    geom = nemo_qco_live_face_geometry_from_operands(
+        eta, e3u_0, e3v_0, umask3, vmask3,
+        *(jnp.asarray(value, dtype=dtype) for value in refs),
     )
+    return geom.e3u, geom.e3v
 
 
 class NemoEENBarotropicOperands(NamedTuple):

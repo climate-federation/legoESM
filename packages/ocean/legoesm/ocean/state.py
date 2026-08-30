@@ -1337,21 +1337,14 @@ class BarotropicConfig(NamedTuple):
     # faithful pair is velocity_avg + nemo_mlf_baro_corr; transport_avg +
     # nemo_mlf_baro_corr commits, in NEMO's slot, the average NEMO throws away.
     #
-    # RETRACTED 2026-08-21: this field was first documented as switching to
-    # "the AFTER-level thickness NEMO divides by".  NEMO's weighting is
-    # TIME-LEVEL INDEPENDENT -- under key_qco the (1+r3u) free-surface factor
-    # cancels exactly between e3u(Kaa) and r1_hu(Kaa) -- so the faithful weight
-    # is the REFERENCE ladder e3u_0/hu_0, which is what the kernel now uses.
-    # Any statement sized against "the after-thickness half" must be re-read.
+    # ROUND-49 RETRACTION: treating the key_qco factor as cancelled is
+    # algebraically valid but not execution-equivalent at the last bit.  The
+    # faithful path carries raw pre-projection Kaa SSH, executes live e3u/e3v
+    # reduction, then applies the independently built r1_hu/r1_hv post-factor.
     #
-    # AND ON THE DINO CARD THAT HALF IS INERT OUTRIGHT, not merely small: DINO
-    # runs a pure z-coordinate with NO partial steps (namelist_cfg:70-72,
-    # ln_zco_nam=.true. / ln_zps_nam=.false.) and legoESM's restart bridge
-    # builds a matching full-step coordinate, so the reference ladder is the
-    # uniform dz on every wet face and this kernel reproduces NEMO's
-    # SUM_k e3u_0*u*umask / hu_0 exactly. A second retraction, 2026-08-21: an
-    # earlier note said the thickness half "bites only through partial cells --
-    # which the DINO card does have". It does not.
+    # DINO still has no partial steps (namelist_cfg:70-72), but the live QCO
+    # execution is not inert: its mathematically cancelling scale changes the
+    # final few ULPs through multiplication/reduction/division association.
     #
     # SCOPE, named rather than left to be discovered: the site is in the
     # leap-frog branch of each outer step, so it is NOT applied on the

@@ -351,7 +351,9 @@ class DINOConfig:
     # only; "nemo_mlf_baro_corr" adds NEMO's after-dyn_zdf site, which discards
     # the implicit vertical solve's column-mean deposit. (NOT an "after
     # thickness" change: NEMO's weighting is time-level independent -- the
-    # key_qco free-surface factor cancels. Corrected 2026-08-21.) Matching NEMO
+    # key_qco free-surface factor cancels only algebraically; round 49 requires
+    # its executed live reduction and reciprocal for last-bit equality.)
+    # Matching NEMO
     # needs it TOGETHER with barotropic_reconcile_target="velocity_avg"; the
     # nemo_dino_kamm_mlf card ships that pair (#1455 R6 arm D). It is one of
     # the two arms that take the 90-day acceptance gate from 4/5 to 5/5 -- and
