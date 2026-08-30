@@ -139,3 +139,44 @@ still forbidden to print `FE_FAITHFUL`, `FE_STABLE_CLIMATE`, or a T2 science
 verdict.  T2 climate arms remain withdrawn pending this admission and a later
 GPU rerun.  T1 GPU work is outside this round and must not be inspected or
 modified.
+
+### Corrector arm result and frozen filter discrimination
+
+The corrector arm is refuted before any default change.  The baseline fails at
+step 36; repeating `mlf_baro_corr` suppresses the measured vertical-solve
+deposit but still reaches hundreds of metres of SSH and fails at step 37 with
+the same raw-`e3w_int` check.  It therefore misses conditions 2--3 above and
+must not be promoted as the FE stabilization.
+
+The remaining source difference inside NEMO's *executed first Euler step* is
+now frozen as the next one-variable arm.  `dynspg_ts.F90:202-208` sets
+`ll_init=ll_bt_av=.true.` for DINO's boxcar filter; `:241-251` gives the
+first-Euler window its forward centre; `:546-553` resets the AB3/AM4 histories;
+`:766-780` executes `ts_bck_interp` before every surface-pressure-gradient
+evaluation.  Thus NEMO's Euler step is not legoESM's current plain
+forward-backward `nemo_boxcar_centred` loop.  It includes the AB3 velocity
+predictor and the four-level SSH interpolation, with the startup ramp reset for
+that window.  legoESM already implements exactly that reset/window combination
+as `nemo_boxcar_ab3`; the current construction guard that calls its
+forward-Euler use a non-NEMO hybrid is contradicted by the executed source.
+
+Before the arm, add diagnostic-only callbacks to the existing probe (no copied
+numerics) and record, over outer steps 25--35, the per-window maxima and
+locations of the live continuity divergence, interpolated SSH pressure
+gradient, EEN Coriolis tendency, and frozen slow forcing.  The callbacks must
+have a planted nonzero control.  The causal arm changes exactly one resolved
+field:
+
+| field | baseline | Euler-filter arm |
+|---|---|---|
+| `barotropic_time_filter` | `nemo_boxcar_centred` | `nemo_boxcar_ab3` |
+
+The after-level corrector stays `off`, alpha stays `0.01`, and every other
+resolved field, bridge, forcing, ladder, timestep, and substep count is held.
+The arm confirms the missing-AB3/AM4 mechanism only if baseline growth is
+owned by the live continuity/PGF fast pair while slow forcing and Coriolis are
+subleading through onset, and the arm completes 40 steps finite.  On
+confirmation, promote only this filter on `nemo_dino_kamm`, retain the explicit
+scope statement that perpetual Euler has no NEMO trajectory analogue, show the
+plain-filter plant fail by step 37, and require 64 finite steps on the promoted
+card.  Otherwise stop without another stabilization edit.
