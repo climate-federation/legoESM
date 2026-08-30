@@ -232,10 +232,18 @@ def main() -> int:
     import legoesm.ocean.physics.vertical_mixing as vm
     real_dispatch = vm.implicit_vertical_diffusion_ocean_momentum_dispatch
     captured = []
+    identity_checks = []
 
     def capture(field, K, dz, dzh, dt, wet, *call_args, **call_kwargs):
         output = real_dispatch(field, K, dz, dzh, dt, wet,
                                *call_args, **call_kwargs)
+        # Replay before converting anything to NumPy: NumPy inputs take a
+        # different eager coercion route and are not a byte-identity control
+        # for the production JAX call.
+        identity_output = real_dispatch(field, K, dz, dzh, dt, wet,
+                                        *call_args, **call_kwargs)
+        identity_checks.append(np.array_equal(np.asarray(identity_output),
+                                              np.asarray(output)))
         captured.append({
             "field": np.array(field), "K": np.array(K),
             "dz": np.array(dz), "dzh": np.array(dzh),
@@ -315,12 +323,8 @@ def main() -> int:
                                   for key in ("field", "K", "dz", "dzh",
                                               "extra_diag", "output")),
     }
-    identity_u = np.asarray(real_dispatch(
-        actual_u["field"], actual_u["K"], actual_u["dz"], actual_u["dzh"],
-        actual_u["dt"], actual_u["wet"], evaluation=actual_u["evaluation"],
-        extra_diag=actual_u["extra_diag"]))
-    controls["identity_dispatch_exact"] = np.array_equal(identity_u,
-                                                          actual_u["output"])
+    controls["identity_dispatch_exact"] = (
+        len(identity_checks) == 2 and all(identity_checks))
     rhs_u, _, wet_u, _, rhs_gate = reference["rhs"]
     rhs_plant = np.array(rhs_u, copy=True)
     point = tuple(np.argwhere(wet_u)[0])
