@@ -216,8 +216,14 @@ def attach_analytic_nemo_operands(grid, z_coord, state, cfg):
     e2t = np.asarray(geom.dy_T, dtype=dtype)
     e1u = np.asarray(geom.dx_u[:, 1:], dtype=dtype)
     e2u = np.asarray(geom.dy_u[:, 1:], dtype=dtype)
-    e1v = np.asarray(geom.dx_v[1:, :], dtype=dtype)
-    e2v = np.asarray(geom.dy_v[1:, :], dtype=dtype)
+    # ``geom.dx_v`` deliberately zeroes the two closed transport boundaries.
+    # NEMO's raw metric arrays stay geometrically positive there and apply the
+    # wall through vmask.  QCO reciprocals therefore require the unzeroed
+    # native V/F metric evaluated at the true Mercator face latitude.
+    v_width = (float(grid.radius) * float(grid.dlon)
+               * np.asarray(grid.cos_lat_v[1:], dtype=dtype))
+    e1v = np.broadcast_to(v_width[:, None], (n_lat, n_lon)).copy()
+    e2v = e1v.copy()
     e1f = e1v.copy()
     e2f = e2v.copy()
     hu = np.sum(e3u * umask, axis=-1)
