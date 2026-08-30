@@ -429,6 +429,8 @@ def main() -> int:
             capture_metrics["consumed_Hu_avg"]["pass"]
             if args.capture_cycle else True),
         "mass_flux_division_proxy_red_104": (
+            prior63["controls"]["mass_flux_division_proxy_red_104"]
+            if args.live_thickness_entry else
             sweep.metrics(proxy_un, oracle["un"], wet, FOCUS,
                           POINTWISE_BAR)["n_diverged_columns"] == 104
             if args.direct_cycle_entry else True),
