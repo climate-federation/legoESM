@@ -47,7 +47,7 @@ def test_member_seed_contract_fails_closed():
 
 
 def test_standalone_builder_has_no_bridge_level_and_resolves_card_default():
-    _, grid, _, state, model_cfg, _, _, _, receipt = (
+    _, grid, z_coord, state, model_cfg, _, _, _, receipt = (
         RUNNER.build_standalone(0))
     assert (grid.n_lat, grid.n_lon) == (195, 48)
     assert model_cfg.outer_integrator == "leapfrog"
@@ -55,6 +55,12 @@ def test_standalone_builder_has_no_bridge_level_and_resolves_card_default():
         "T_before", "S_before", "eta_before", "u_before", "v_before"))
     assert receipt["changed_channels"] == []
     assert np.asarray(state.T.data).dtype == np.float64
+    for name in (
+        "nemo_gdept_0", "nemo_gdepw_0", "nemo_e3t_0", "nemo_e3w_0",
+        "nemo_hu_0", "nemo_hv_0", "nemo_e1e2t", "nemo_e1e2u",
+        "nemo_e1e2v", "nemo_e2u", "nemo_e1v", "nemo_een_barotropic",
+    ):
+        assert getattr(z_coord, name) is not None, name
 
 
 def test_temperature_plant_changes_only_now_level_temperature():
