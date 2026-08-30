@@ -269,9 +269,7 @@ def main() -> int:
                    else "INVALID" if not valid else f"TRACER_ENTRY_DIVERGED_{first}")
     nemo = args.nemo_root.resolve()
     receipt = {
-        "schema": ("dino-split-explicit-momentum-chain-round57-v1"
-                   if args.hold_slow_forcing
-                   else "dino-split-explicit-momentum-chain-round55-v1"),
+        "schema": "dino-split-explicit-momentum-chain-round59-v1",
         "session_id": session,
         "git_commit": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
@@ -289,10 +287,9 @@ def main() -> int:
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(
                 root / "docs/ocean/fidelity" /
-                ("PREREG_split_explicit_momentum_chain_round57.md"
-                 if args.hold_slow_forcing
-                 else "PREREG_split_explicit_momentum_chain_round55.md")),
+                "PREREG_split_explicit_momentum_chain_round59.md"),
             "production_model": _sha(root / "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py"),
+            "production_barotropic": _sha(root / "packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py"),
             "nemo_stpmlf": _sha(nemo / "cfgs/DINO/MY_SRC/stpmlf.F90"),
             "nemo_traadv": _sha(nemo / "src/OCE/TRA/traadv.F90"),
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
