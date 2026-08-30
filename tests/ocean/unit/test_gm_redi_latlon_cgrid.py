@@ -1560,6 +1560,37 @@ class TestNemoIsoLapOperator:
                 T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
                 cfg.kappa_Redi, act, return_operand_diagnostics=True)
 
+    def test_vertical_skew_literal_is_opt_in_and_default_is_byte_pinned(self):
+        """Round-88's source association is explicit and generic-safe."""
+        setup = _stratified_with_meridional_tilt()
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian,
+         rho, T, S, cfg) = setup
+        S_x, S_y = self._slopes(setup)
+        act = jnp.broadcast_to(mask[:, :, None], T.shape)
+        # Positive but deliberately nonuniform face coefficients make the
+        # source pair-pair topology observably distinct from normalized sums.
+        jj, ii, kk = jnp.indices(T.shape, dtype=T.dtype)
+        kappa_u = (cfg.kappa_Redi + 0.13 * ii + 0.07 * jj + 0.03 * kk)
+        kappa_v = (cfg.kappa_Redi + 0.11 * ii + 0.05 * jj + 0.02 * kk)
+        legacy = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            kappa_u, act, kappa_Redi_v=kappa_v)
+        pinned = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            kappa_u, act, kappa_Redi_v=kappa_v,
+            vertical_skew_evaluation="normalized_sums")
+        literal = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            kappa_u, act, kappa_Redi_v=kappa_v,
+            vertical_skew_evaluation="nemo_literal")
+        assert jnp.array_equal(legacy, pinned)
+        # Planted violation: reverting the literal arm must be observable.
+        assert not jnp.array_equal(literal, pinned)
+        with pytest.raises(ValueError, match="vertical_skew_evaluation"):
+            nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+                kappa_u, act, vertical_skew_evaluation="unknown")
+
     def test_nemo_iso_lap_bolus_slopes_are_independent_of_redi_slopes(self):
         """The Kmm Redi slope carry must not move the earlier through-FCT
         bolus transport.  A distinct bolus slope tuple changes only the

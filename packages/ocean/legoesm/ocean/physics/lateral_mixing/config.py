@@ -444,6 +444,12 @@ class GMRediConfig(NamedTuple):
     # ldfc1d_c2d.F90:141-145. Only the two DINO NEMO cards opt in.
     kappa_redi_horizontal_evaluation: str = "cosine_scaled"
     kappa_redi_diffusive_velocity: float | None = None
+    # Arithmetic topology of traldf_iso's vertical A31/A32 skew flux.
+    # ``normalized_sums`` preserves the historical shared-sum construction.
+    # ``nemo_literal`` follows scheme.h90:109-125 pair-for-pair, including
+    # coefficient and four-gradient association. Only the DINO NEMO cards
+    # opt in.
+    redi_vertical_skew_evaluation: str = "normalized_sums"
     # --- Veros-faithful isoneutral options (oracle-matching; default off) ---
     implicit_K33: bool = False
     # ^ When True, the vertical isoneutral diagonal K_33 = kappa_Redi·S² (the

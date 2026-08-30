@@ -2084,10 +2084,14 @@ class TestIsoneutralRediOnly:
                 grid, cfg, physics=True)
             assert (model_cfg.gm_redi.kappa_redi_horizontal_evaluation
                     == "nemo_metric_literal")
+            assert (model_cfg.gm_redi.redi_vertical_skew_evaluation
+                    == "nemo_literal")
             assert (model_cfg.gm_redi.kappa_redi_diffusive_velocity
                     == cfg.U_T)
         generic = dino_config_for_recipe("nemo_paper")
         assert generic.gm_redi_horizontal_evaluation == "cosine_scaled"
+        assert (generic.gm_redi_vertical_skew_evaluation
+                == "normalized_sums")
 
     def test_static_kappa_override_on_cgrid_geometry(self):
         """cos_lat_v on LatLonCGridGeometry -- the from-rest path.

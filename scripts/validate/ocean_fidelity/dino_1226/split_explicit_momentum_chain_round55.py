@@ -63,6 +63,7 @@ ROUND84_SHA = "6483fc67d59bea3b5bb81e546a31af47eec85aeea48573f42e11c2e575740451"
 ROUND85_SHA = "10a5695a804c0e96ec36455ed160169b18897c43b57614c6a979349fcf53ec6c"
 ROUND86_SHA = "93e39c3ee0fbf973464aa4ea583a404668e4be13dfe044153a28c0e3022c260e"
 ROUND87_SHA = "df56a496d6e7ebc14d9e8214cdc6742010d3b8b4286c0d9b2704526593ed6caf"
+ROUND88_SHA = "9107fa743aa3deb6b4f7e2180711f956599f099b908e8eb87cf36bd1bd76bd66"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -206,6 +207,7 @@ def main() -> int:
     parser.add_argument("--round85", type=Path)
     parser.add_argument("--round86", type=Path)
     parser.add_argument("--round87", type=Path)
+    parser.add_argument("--round88", type=Path)
     parser.add_argument("--hold-slow-forcing", action="store_true")
     parser.add_argument("--oracle-transport", action="store_true")
     parser.add_argument("--capture-cycle", action="store_true")
@@ -235,6 +237,7 @@ def main() -> int:
     parser.add_argument("--redi-zfw-association-factorial", action="store_true")
     parser.add_argument("--redi-zfw-component-score", action="store_true")
     parser.add_argument("--redi-zfw-skew-factorial", action="store_true")
+    parser.add_argument("--redi-zfw-skew-postfix", action="store_true")
     parser.add_argument("--redi-run-dir", type=Path)
     parser.add_argument("--redi-flux-run-dir", type=Path)
     parser.add_argument("--redi-flux-bracket", type=Path)
@@ -740,6 +743,19 @@ def main() -> int:
                 raise SystemExit(f"held Redi skew input changed: {name}")
     elif args.round87 is not None:
         raise SystemExit("--round87 requires --redi-zfw-skew-factorial")
+    if args.redi_zfw_skew_postfix:
+        if not args.redi_zfw_component_score:
+            raise SystemExit("skew postfix requires component score")
+        if args.round88 is None or _sha(args.round88.resolve()) != ROUND88_SHA:
+            raise SystemExit("bound official round-88 receipt required")
+        prior88 = json.loads(args.round88.read_text())
+        if (prior88.get("disposition") !=
+                "REDI_ZFW_T_SKEW_LOCALIZED_TO_COEFFICIENT_ASSEMBLY"
+                or not prior88["redi_zfw_skew_factorial"]["arms"][
+                    "C1G1T0"]["pass"]):
+            raise SystemExit("round 88 does not admit the production postfix")
+    elif args.round88 is not None:
+        raise SystemExit("--round88 requires --redi-zfw-skew-postfix")
     if _sha(args.raw_artifact.resolve()) != RAW_ARTIFACT_SHA:
         raise SystemExit("admitted held row-8 artifact changed")
     held = args.held_dir.resolve()
@@ -2193,6 +2209,10 @@ def main() -> int:
             **{f"redi_zfw_skew_{name}": value for name, value in
                redi_zfw_skew_factorial["controls"].items()},
         })
+    if args.redi_zfw_skew_postfix:
+        controls["round88_literal_skew_admitted"] = (
+            prior88["disposition"] ==
+            "REDI_ZFW_T_SKEW_LOCALIZED_TO_COEFFICIENT_ASSEMBLY")
     controls["all_scored_finite"] = all(
         row.get("status") == "ORDERED_BLOCKED"
         or row["metrics"]["n_nonfinite_wet_elements"] == 0 for row in rows)
@@ -2500,12 +2520,27 @@ def main() -> int:
         else:
             disposition = "REDI_ZFW_T_SKEW_A31_A32_HELD_SPLIT_REQUIRED"
         first_flux_subrow = "88.T.3a"
+    if args.redi_zfw_skew_postfix and valid:
+        skew_pass = redi_zfw_component_metrics["skew"]["pass"]
+        a33_pass = redi_zfw_component_metrics["a33"]["pass"]
+        total_pass = redi_flux_metrics["zfw_tem"]["pass"]
+        if not skew_pass:
+            disposition = "REDI_ZFW_T_SKEW_POSTFIX_REGRESSION"
+        elif not a33_pass:
+            disposition = "REDI_ZFW_T_SKEW_FIXED_A33_NEXT"
+        elif total_pass:
+            disposition = "REDI_ZFW_T_AT_BAR"
+        else:
+            disposition = "REDI_ZFW_T_COMPONENT_SUM_ASSOCIATION_OPEN"
+        first_flux_subrow = "89.T.3a"
     receipt_first = (first_flux_subrow
                      if args.redi_flux_ladder and first_flux_subrow is not None
                      else first)
     nemo = args.nemo_root.resolve()
     receipt = {
-        "schema": ("dino-split-explicit-momentum-chain-round88-v1"
+        "schema": ("dino-split-explicit-momentum-chain-round89-v1"
+                   if args.redi_zfw_skew_postfix else
+                   "dino-split-explicit-momentum-chain-round88-v1"
                    if args.redi_zfw_skew_factorial else
                    "dino-split-explicit-momentum-chain-round87-v1"
                    if args.redi_zfw_component_score else
@@ -2668,12 +2703,16 @@ def main() -> int:
                 **{f"skew_input_{name}": _sha(flux_dir / name)
                    for name in sorted(REDI_SKEW_INPUT_SHA)}}
                if args.redi_zfw_skew_factorial else {}),
+            **({"round88": _sha(args.round88.resolve())}
+               if args.redi_zfw_skew_postfix else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(
                 root / "docs/ocean/fidelity" /
-                ("PREREG_split_explicit_momentum_chain_round88.md"
+                ("PREREG_split_explicit_momentum_chain_round89.md"
+                 if args.redi_zfw_skew_postfix else
+                 "PREREG_split_explicit_momentum_chain_round88.md"
                  if args.redi_zfw_skew_factorial else
                  "PREREG_split_explicit_momentum_chain_round87.md"
                  if args.redi_zfw_component_score else
@@ -2737,7 +2776,9 @@ def main() -> int:
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
             "nemo_ldftra": _sha(nemo / "cfgs/DINO/MY_SRC/ldftra.F90"),
         },
-        "arm": ("redi_zfw_skew_factorial"
+        "arm": ("redi_zfw_skew_postfix"
+                if args.redi_zfw_skew_postfix else
+                "redi_zfw_skew_factorial"
                 if args.redi_zfw_skew_factorial else
                 "redi_zfw_component_score"
                 if args.redi_zfw_component_score else
@@ -2785,7 +2826,15 @@ def main() -> int:
                 "oracle_transport" if args.oracle_transport else
                 "held_slow_forcing" if args.hold_slow_forcing else
                 "production"),
-        "ordered_next": ("stop_invalid_kbb_registration" if disposition ==
+        "ordered_next": ("stop_skew_postfix_regression" if disposition ==
+                          "REDI_ZFW_T_SKEW_POSTFIX_REGRESSION" else
+                          "redi_zfw_a33_operand_peel" if disposition ==
+                          "REDI_ZFW_T_SKEW_FIXED_A33_NEXT" else
+                          "redi_zfw_component_sum_association" if disposition ==
+                          "REDI_ZFW_T_COMPONENT_SUM_ASSOCIATION_OPEN" else
+                          "redi_salinity_flux_ladder" if disposition ==
+                          "REDI_ZFW_T_AT_BAR" else
+                          "stop_invalid_kbb_registration" if disposition ==
                           "INVALID_REDI_ZFW_SKEW_MATCHES_KMM_NOT_KBB" else
                           "redi_zfw_skew_source_fix" if disposition in (
                           "REDI_ZFW_T_SKEW_LOCALIZED_TO_COEFFICIENT_ASSEMBLY",

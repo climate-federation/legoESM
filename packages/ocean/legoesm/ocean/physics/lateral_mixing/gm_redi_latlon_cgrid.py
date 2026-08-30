@@ -2247,6 +2247,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     face_thickness_u: jnp.ndarray | None = None,
     face_thickness_v: jnp.ndarray | None = None,
     bolus_native_slopes: tuple | None = None,
+    vertical_skew_evaluation: str = "normalized_sums",
     return_diagnostics: bool = False,
     return_operand_diagnostics: bool = False,
 ) -> jnp.ndarray:
@@ -2335,6 +2336,10 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     if return_operand_diagnostics and not return_diagnostics:
         raise ValueError(
             "return_operand_diagnostics=True requires return_diagnostics=True")
+    if vertical_skew_evaluation not in ("normalized_sums", "nemo_literal"):
+        raise ValueError(
+            "vertical_skew_evaluation must be 'normalized_sums' or "
+            f"'nemo_literal', got {vertical_skew_evaluation!r}")
     ones_z = jnp.ones((1, 1, nlev), dtype=dtype)
     if (face_thickness_u is None) != (face_thickness_v is None):
         raise ValueError(
@@ -2459,12 +2464,44 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     # wet-count IS scheme.h90's (masked 4-sum)·zmsku — the previous
     # inline version summed UNMASKED kappa (4k/N at an N-wet-face wall
     # vs the K33's k: the residual split mismatch).
-    _ksum_u, _cnt_u, _ksum_v, _cnt_v = nemo_iso_w_kappa_sums(
-        aht, umask, vmask, aht_v=aht_v)
-    zmsku_w = wmask / jnp.maximum(jnp.roll(_cnt_u, -1, ax_z), 1.0)
-    zmskv_w = wmask / jnp.maximum(jnp.roll(_cnt_v, -1, ax_z), 1.0)
-    zahu_w = jnp.roll(_ksum_u, -1, ax_z) * zmsku_w
-    zahv_w = jnp.roll(_ksum_v, -1, ax_z) * zmskv_w
+    if vertical_skew_evaluation == "nemo_literal":
+        # traldf_iso_scheme.h90:109-120, in source association.  This cannot
+        # reuse the normalized shared K33 sums: NEMO forms the four Kmm face
+        # values as two explicit pairs, applies zmsk, then applies zmsk again
+        # in zA31/zA32.  The distinction is one-ULP class but is amplified by
+        # the O(1e4) metric and gradient factors in the vertical skew flux.
+        def _pair4(a, b, c, d):
+            return (a + b) + (c + d)
+
+        um_w = jnp.roll(umask, +1, ax_x)
+        um_kp1 = jnp.roll(umask, -1, ax_z)
+        um_w_kp1 = jnp.roll(um_kp1, +1, ax_x)
+        vm_s = jnp.roll(vmask, +1, ax_y)
+        vm_kp1 = jnp.roll(vmask, -1, ax_z)
+        vm_s_kp1 = jnp.roll(vm_kp1, +1, ax_y)
+        zmsku_w = wmask / jnp.maximum(
+            _pair4(umask, um_w_kp1, um_w, um_kp1), 1.0)
+        zmskv_w = wmask / jnp.maximum(
+            _pair4(vmask, vm_s_kp1, vm_s, vm_kp1), 1.0)
+        aht_masked = aht * umask
+        ahtv_masked = aht_v * vmask
+        aht_w = jnp.roll(aht_masked, +1, ax_x)
+        aht_kp1 = jnp.roll(aht_masked, -1, ax_z)
+        aht_w_kp1 = jnp.roll(aht_kp1, +1, ax_x)
+        ahtv_s = jnp.roll(ahtv_masked, +1, ax_y)
+        ahtv_kp1 = jnp.roll(ahtv_masked, -1, ax_z)
+        ahtv_s_kp1 = jnp.roll(ahtv_kp1, +1, ax_y)
+        zahu_w = _pair4(
+            aht_masked, aht_w_kp1, aht_w, aht_kp1) * zmsku_w
+        zahv_w = _pair4(
+            ahtv_masked, ahtv_s_kp1, ahtv_s, ahtv_kp1) * zmskv_w
+    else:
+        _ksum_u, _cnt_u, _ksum_v, _cnt_v = nemo_iso_w_kappa_sums(
+            aht, umask, vmask, aht_v=aht_v)
+        zmsku_w = wmask / jnp.maximum(jnp.roll(_cnt_u, -1, ax_z), 1.0)
+        zmskv_w = wmask / jnp.maximum(jnp.roll(_cnt_v, -1, ax_z), 1.0)
+        zahu_w = jnp.roll(_ksum_u, -1, ax_z) * zmsku_w
+        zahv_w = jnp.roll(_ksum_v, -1, ax_z) * zmskv_w
 
     wslpi_kp1 = jnp.roll(wslpi, -1, ax_z)            # wslpi(jk+1)
     wslpj_kp1 = jnp.roll(wslpj, -1, ax_z)
@@ -2476,10 +2513,16 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     # 4-pt horizontal-gradient average around the w-point (i, jk+1)
     zdit_kp1 = jnp.roll(zdit, -1, ax_z)
     zdjt_kp1 = jnp.roll(zdjt, -1, ax_z)
-    avg4_wi = (zdit + jnp.roll(zdit_kp1, +1, ax_x)
-               + jnp.roll(zdit, +1, ax_x) + zdit_kp1)
-    avg4_wj = (zdjt + jnp.roll(zdjt_kp1, +1, ax_y)
-               + jnp.roll(zdjt, +1, ax_y) + zdjt_kp1)
+    if vertical_skew_evaluation == "nemo_literal":
+        avg4_wi = ((zdit + jnp.roll(zdit_kp1, +1, ax_x))
+                   + (jnp.roll(zdit, +1, ax_x) + zdit_kp1))
+        avg4_wj = ((zdjt + jnp.roll(zdjt_kp1, +1, ax_y))
+                   + (jnp.roll(zdjt, +1, ax_y) + zdjt_kp1))
+    else:
+        avg4_wi = (zdit + jnp.roll(zdit_kp1, +1, ax_x)
+                   + jnp.roll(zdit, +1, ax_x) + zdit_kp1)
+        avg4_wj = (zdjt + jnp.roll(zdjt_kp1, +1, ax_y)
+                   + jnp.roll(zdjt, +1, ax_y) + zdjt_kp1)
     zfw_kp1 = zA31 * avg4_wi + zA32 * avg4_wj        # flux at interface BELOW cell k
     zfw_skew_current = zfw_kp1
     zfw_a33_current = jnp.zeros_like(zfw_kp1)
@@ -4199,6 +4242,7 @@ def gm_redi_tracer_tendency_latlon(
                     pn2_override=native_slope_pn2,
                     e3w_override=native_slope_e3w)
             _msc = getattr(cfg, "msc_stabilize", False)
+            _skew_eval = cfg.redi_vertical_skew_evaluation
             _bolus = None
             _dT = nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 T, S_x, S_y, mask, u_mask, v_mask,
@@ -4210,7 +4254,8 @@ def gm_redi_tracer_tendency_latlon(
                 return_bolus=return_bolus_transport,
                 kappa_Redi_v=kappa_Redi_v_eff,
                 face_thickness_u=_flux_e3u,
-                face_thickness_v=_flux_e3v)
+                face_thickness_v=_flux_e3v,
+                vertical_skew_evaluation=_skew_eval)
             if return_bolus_transport:
                 dT_dt, _bolus = _dT
             else:
@@ -4224,7 +4269,8 @@ def gm_redi_tracer_tendency_latlon(
                 gm_bolus_kappa_face_average=_gm_kfa,
                 kappa_Redi_v=kappa_Redi_v_eff,
                 face_thickness_u=_flux_e3u,
-                face_thickness_v=_flux_e3v)
+                face_thickness_v=_flux_e3v,
+                vertical_skew_evaluation=_skew_eval)
             if return_bolus_transport:
                 return dT_dt, dS_dt, _bolus
             return dT_dt, dS_dt
