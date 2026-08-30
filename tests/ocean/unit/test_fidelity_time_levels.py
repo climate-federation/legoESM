@@ -5,7 +5,10 @@ in one day — comparing a before-level dump against now-level T/S.
 """
 from __future__ import annotations
 
+import inspect
+
 import pytest
+import legoesm.ocean.fidelity.time_levels as time_levels
 from legoesm.ocean.fidelity.time_levels import (
     _DUMP_TIME_LEVEL,  # white-box: the citation string is part of the contract
     register_dump,
@@ -84,7 +87,16 @@ def test_realized_vmix_dumps_are_current_zdf_phy_outputs():
         assert time_level_for_dump(name) == "now"
         src = _DUMP_TIME_LEVEL[name][1]
         assert "zdfphy.F90:311" in src, src
-        assert "closure copy" in src and "EVD overwrite" in src, src
+        assert "applies EVD" in src, src
+        assert "MY_SRC stpmlf.F90:210" in src, src
+        assert "MY_SRC ldftra.F90:95" in src, src
+
+
+def test_realized_vmix_registry_keys_are_source_unique():
+    """REBASE-RED: duplicate dict literals silently kept only the later value."""
+    src = inspect.getsource(time_levels)
+    assert src.count('"dump_avt.bin":') == 1
+    assert src.count('"dump_avm.bin":') == 1
 
 
 def test_unregistered_dump_raises_and_never_defaults():
