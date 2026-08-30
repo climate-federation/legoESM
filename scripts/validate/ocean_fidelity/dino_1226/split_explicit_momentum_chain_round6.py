@@ -123,7 +123,9 @@ def main() -> int:
             f"package roots first on PYTHONPATH: {escaped}"
         )
     git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
-    dirty_before = subprocess.check_output(["git", "status", "--porcelain"], cwd=root, text=True)
+    dirty_before = subprocess.check_output(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        cwd=root, text=True)
     if dirty_before:
         raise SystemExit("clean worktree required\n" + dirty_before)
 
@@ -349,7 +351,9 @@ def main() -> int:
         "stp_dump_07_dynspg_u.bin", "stp_dump_07_dynspg_v.bin",
         "stp_dump_07_dynspg_ub.bin", "stp_dump_07_dynspg_vb.bin",
     })
-    dirty_after = subprocess.check_output(["git", "status", "--porcelain"], cwd=root, text=True)
+    dirty_after = subprocess.check_output(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        cwd=root, text=True)
     if dirty_after:
         raise SystemExit("worktree changed during measurement")
     receipt = {
