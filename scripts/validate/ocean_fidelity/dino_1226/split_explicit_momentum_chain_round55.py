@@ -34,6 +34,7 @@ ROUND54_SHA = "a1b76177330b83d7bb21c7f35c9e606d10d36a4b98d46b3b570f53588188eaa3"
 ROUND56_SHA = "c114565363360439e155deec96882828e553887ba49b1bfbfd940c50c6998e29"
 ROUND59_SHA = "85ea27cce4804d98f281940fe472e798d9fa64c741c23bb55e3fca40ee9ca677"
 ROUND60_SHA = "b3ef5c0534ff1348dbdb581686aa602cc1d9eca9ef61336ca0b4130217e54e2d"
+ROUND61_SHA = "b8f7a376a0a13fd384cb4195cf27db8ff6f82c71e576bb8d449451903d3bd07c"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -101,8 +102,10 @@ def main() -> int:
     parser.add_argument("--round56", type=Path)
     parser.add_argument("--round59", type=Path)
     parser.add_argument("--round60", type=Path)
+    parser.add_argument("--round61", type=Path)
     parser.add_argument("--hold-slow-forcing", action="store_true")
     parser.add_argument("--oracle-transport", action="store_true")
+    parser.add_argument("--capture-cycle", action="store_true")
     parser.add_argument("--raw-artifact", type=Path, required=True)
     parser.add_argument("--nemo-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -149,6 +152,19 @@ def main() -> int:
             raise SystemExit("round 60 does not release the oracle transport arm")
     elif args.round59 is not None or args.round60 is not None:
         raise SystemExit("--round59/--round60 require --oracle-transport")
+    prior61 = None
+    if args.capture_cycle:
+        if not args.oracle_transport:
+            raise SystemExit("--capture-cycle requires --oracle-transport")
+        if (args.round61 is None
+                or _sha(args.round61.resolve()) != ROUND61_SHA):
+            raise SystemExit("official round-61 null receipt required")
+        prior61 = json.loads(args.round61.read_text())
+        if (prior61.get("disposition") != "TRACER_ENTRY_DIVERGED_8.3"
+                or prior61["rows"][0]["metrics"]["n_diverged_columns"] != 104):
+            raise SystemExit("round 61 does not admit the Kmm-cycle capture")
+    elif args.round61 is not None:
+        raise SystemExit("--round61 requires --capture-cycle")
     if _sha(args.raw_artifact.resolve()) != RAW_ARTIFACT_SHA:
         raise SystemExit("admitted held row-8 artifact changed")
     held = args.held_dir.resolve()
@@ -166,8 +182,11 @@ def main() -> int:
     captured = []
     original = model_module.add_bolus_to_advecting_flux
     original_solver = model_module.barotropic_substeps_latlon_cgrid
+    original_cycle = model_module.nemo_qco_kmm_velocity_cycle
     solver_calls = 0
     transport_substitutions = 0
+    solver_transport_captures = []
+    cycle_captures = []
     held_u_native = np.fromfile(held / "spg_dump_zu_frc.bin", dtype="<f8")
     held_v_native = np.fromfile(held / "spg_dump_zv_frc.bin", dtype="<f8")
     if held_u_native.size != 199 * 52 or held_v_native.size != 199 * 52:
@@ -207,6 +226,9 @@ def main() -> int:
                 held_v, dtype=kwargs["F_slow_v"].dtype)
         result = original_solver(
             state_arg, dt_s, n_substeps, grid, z_coord, config, **kwargs)
+        if is_target and args.capture_cycle:
+            solver_transport_captures.append(tuple(
+                np.asarray(value) for value in result[1]))
         if is_target and args.oracle_transport:
             transport_substitutions += 1
             solved_state, _ = result
@@ -215,17 +237,31 @@ def main() -> int:
                 jnp.asarray(oracle_v, dtype=state_arg.eta.data.dtype)))
         return result
 
+    def observed_cycle(*cycle_args, **cycle_kwargs):
+        result = original_cycle(*cycle_args, **cycle_kwargs)
+        cycle_captures.append({
+            "un_adv": np.asarray(cycle_args[3]),
+            "vn_adv": np.asarray(cycle_args[4]),
+            "corrected_u": np.asarray(result[0]),
+            "corrected_v": np.asarray(result[1]),
+        })
+        return result
+
     model_module.add_bolus_to_advecting_flux = observe
     if args.hold_slow_forcing:
         model_module.barotropic_substeps_latlon_cgrid = held_solver
+    if args.capture_cycle:
+        model_module.nemo_qco_kmm_velocity_cycle = observed_cycle
     try:
         with jax.disable_jit():
             model._nemo_mlf_step(state, twin.DT, surface_forcing=sf)
     finally:
         model_module.add_bolus_to_advecting_flux = original
         model_module.barotropic_substeps_latlon_cgrid = original_solver
+        model_module.nemo_qco_kmm_velocity_cycle = original_cycle
     restored = (model_module.add_bolus_to_advecting_flux is original
-                and model_module.barotropic_substeps_latlon_cgrid is original_solver)
+                and model_module.barotropic_substeps_latlon_cgrid is original_solver
+                and model_module.nemo_qco_kmm_velocity_cycle is original_cycle)
     if len(captured) != 1:
         raise SystemExit(f"expected one single-pass tracer handoff, got {len(captured)}")
 
@@ -266,6 +302,27 @@ def main() -> int:
     wet = np.asarray(u_mask, dtype=bool)[:, 1:, :35]
     if int(np.any(wet, axis=-1).sum()) != 9758 or int(wet.sum()) != 336338:
         raise SystemExit("registered U population changed from 9758/336338")
+    capture_metrics = {}
+    if args.capture_cycle:
+        if len(solver_transport_captures) != 1 or not cycle_captures:
+            raise SystemExit(
+                "expected one solver transport and at least one Kmm-cycle capture")
+        wet2 = np.any(wet, axis=-1)
+        wet2_3d = wet2[..., None]
+        oracle_transport_3d = oracle_u_native[..., None]
+        production_hu = solver_transport_captures[0][0][:, 1:]
+        consumed_hu = cycle_captures[0]["un_adv"][:, 1:]
+        capture_metrics = {
+            "production_Hu_avg": sweep.metrics(
+                production_hu[..., None], oracle_transport_3d,
+                wet2_3d, FOCUS, POINTWISE_BAR),
+            "consumed_Hu_avg": sweep.metrics(
+                consumed_hu[..., None], oracle_transport_3d,
+                wet2_3d, FOCUS, POINTWISE_BAR),
+            "cycle_corrected_u": sweep.metrics(
+                cycle_captures[0]["corrected_u"][:, 1:, :35],
+                oracle["un"], wet, FOCUS, POINTWISE_BAR),
+        }
     specs = (
         ("8.3", "uu(Kmm) / zptu", "traadv.F90:301-304", "un", POINTWISE_BAR),
         ("8.4", "e2u", "traadv.F90:329", "e2u", POINTWISE_BAR),
@@ -292,6 +349,18 @@ def main() -> int:
         "round60_literal_local_exact": (
             prior60 is None
             or prior60["metrics"]["raw_metric"]["pass"]),
+        "round61_null_admitted": (
+            prior61 is None
+            or prior61["rows"][0]["metrics"]["n_diverged_columns"] == 104),
+        "cycle_capture_count": (
+            len(cycle_captures) >= 1 if args.capture_cycle
+            else len(cycle_captures) == 0),
+        "solver_transport_capture_count": (
+            len(solver_transport_captures) == 1 if args.capture_cycle
+            else len(solver_transport_captures) == 0),
+        "consumed_transport_at_bar": (
+            capture_metrics["consumed_Hu_avg"]["pass"]
+            if args.capture_cycle else True),
         "round56_unheld_red": (
             prior56 is None
             or prior56["rows"][0]["status"] == "DIVERGED"),
@@ -325,9 +394,23 @@ def main() -> int:
                     if args.hold_slow_forcing else "TRACER_ENTRY_ROW8_AT_BAR")
                    if valid and first is None
                    else "INVALID" if not valid else f"TRACER_ENTRY_DIVERGED_{first}")
+    if args.capture_cycle and valid:
+        production_at_bar = capture_metrics["production_Hu_avg"]["pass"]
+        consumed_at_bar = capture_metrics["consumed_Hu_avg"]["pass"]
+        cycle_at_bar = capture_metrics["cycle_corrected_u"]["pass"]
+        if production_at_bar and consumed_at_bar and not cycle_at_bar:
+            disposition = "ROW8_3_ACCUMULATOR_EXONERATED_KMM_COMPOSITION_OPEN"
+        elif not consumed_at_bar:
+            disposition = "INVALID_ORACLE_TRANSPORT_LAYOUT"
+        elif not production_at_bar and not cycle_at_bar:
+            disposition = "INVALID_TRANSPORT_SUBSTITUTION_PLUMBING"
+        else:
+            disposition = "ROW8_3_CYCLE_CAPTURE_UNRESOLVED"
     nemo = args.nemo_root.resolve()
     receipt = {
-        "schema": ("dino-split-explicit-momentum-chain-round61-v1"
+        "schema": ("dino-split-explicit-momentum-chain-round62-v1"
+                   if args.capture_cycle else
+                   "dino-split-explicit-momentum-chain-round61-v1"
                    if args.oracle_transport else
                    "dino-split-explicit-momentum-chain-round59-v1"),
         "session_id": session,
@@ -337,6 +420,8 @@ def main() -> int:
         "first_diverged_subrow": first,
         "rows": rows,
         "controls": controls,
+        **({"cycle_capture_metrics": capture_metrics}
+           if args.capture_cycle else {}),
         "focus_ji": [list(x) for x in FOCUS],
         "bindings": {
             "round54": _sha(args.round54.resolve()),
@@ -345,12 +430,16 @@ def main() -> int:
             **({"round59": _sha(args.round59.resolve()),
                 "round60": _sha(args.round60.resolve())}
                if args.oracle_transport else {}),
+            **({"round61": _sha(args.round61.resolve())}
+               if args.capture_cycle else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(
                 root / "docs/ocean/fidelity" /
-                ("PREREG_split_explicit_momentum_chain_round61.md"
+                ("PREREG_split_explicit_momentum_chain_round62.md"
+                 if args.capture_cycle else
+                 "PREREG_split_explicit_momentum_chain_round61.md"
                  if args.oracle_transport else
                  "PREREG_split_explicit_momentum_chain_round59.md")),
             "production_model": _sha(root / "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py"),
@@ -360,7 +449,8 @@ def main() -> int:
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
             "nemo_ldftra": _sha(nemo / "cfgs/DINO/MY_SRC/ldftra.F90"),
         },
-        "arm": ("oracle_transport" if args.oracle_transport else
+        "arm": ("cycle_capture" if args.capture_cycle else
+                "oracle_transport" if args.oracle_transport else
                 "held_slow_forcing" if args.hold_slow_forcing else
                 "production"),
         "ordered_next": ("redi_t" if disposition in {
