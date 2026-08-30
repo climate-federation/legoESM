@@ -124,7 +124,12 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="dino-row33-view.") as tmp:
         view = Path(tmp)
         _link_view(run, view)
-        (view / "DINO_00005760_restart.nc").symlink_to(entry_restart)
+        restart_view = view / "DINO_00005760_restart.nc"
+        if restart_view.exists():
+            if _sha(restart_view) != _sha(entry_restart):
+                raise SystemExit("retained entry-restart link disagrees with explicit binding")
+        else:
+            restart_view.symlink_to(entry_restart)
         s17.RUN_DIR = str(view)
         s17.RESTART = "DINO_00005760_restart.nc"
         s17._report = capture_report

@@ -88,3 +88,10 @@ the entry state. The required entry restart is the original sequential lane's
 `DINO_00005760_restart.nc` (`kt=5760`, `adatrj=180.0`). The scorer now takes
 that path explicitly, hashes it, and refuses a missing file. No operand,
 statistic, bar, or disposition rule changes; the failed C1 receipt is invalid.
+
+Attempt 2 stopped before model construction because the retained run already
+contains a symlink to the same `5760` entry restart and the temporary view
+tried to create a duplicate name. No numerical operation or score ran. The
+view builder now admits an existing link only after its content hash equals
+the explicit entry-restart binding; otherwise it stops. The science design is
+unchanged.
