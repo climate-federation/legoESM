@@ -669,3 +669,36 @@ including 590 dry U faces; the registered NEMO `umask` population is
 plants for the structural Kmm fix, but their column counts and maxima are
 retracted for ownership. Round 58 reruns the unheld and held arms on the exact
 captured 3-D U mask before any transport-accumulator change.
+
+## Round 58: corrected population localizes the final tracer-entry ULPs
+
+The corrected unheld artifact
+`/tmp/dino_split_explicit_momentum_chain_round58_unheld.json`, SHA-256
+`c114565363360439e155deec96882828e553887ba49b1bfbfd940c50c6998e29`,
+retains the production stop on the exact `9,758`-column / `336,338`-element
+umask: all 9,758 columns diverge and the maximum normalized column error is
+`1.8702849959e-5` (correlation `0.9999999999997494`, RMS ratio
+`0.9999999850425257`).
+
+The registered slow-forcing arm
+`/tmp/dino_split_explicit_momentum_chain_round58_held.json`, SHA-256
+`c542be24a4a646ada9a2d2bddfa380dce1c05f75ca05d3c17214bed75c897f9c`,
+removes nearly all of that error but does not clear the bar: `170/9,758`
+columns remain red, maximum normalized column error `5.9792156327e-15`,
+correlation and RMS ratio both `1.0`. All population, identity, wet-point,
+roll, sign, substitution-count, finiteness, and hook-restoration controls pass.
+
+Together with round 54's bit-exact oracle-`un_adv` substitution, this owns the
+remaining local residual to the barotropic transport accumulator. NEMO forms
+`un_adv += za2 * zhU * r1_e2u` / V analog at
+`dynspg_ts.F90:734-737`, preserving the metric multiply and reciprocal, and
+divides the completed sum once by `r1_wgt2s` at `:999-1000`. legoESM instead
+accumulates normalized secondary weights against the algebraically cancelled
+`H*U` transport (`barotropic_latlon_cgrid.py:1259-1260,2041-2047`). This is a
+few-ULP association difference after the slow-forcing hold.
+
+Row 8 remains OPEN at subrow 8.3; 8.4--8.10, Redi T/S, complete tracer ZDF,
+and tracer Asselin remain ordered-blocked. The literal accumulator is the
+genuine too-large boundary for this round because the same carry contract must
+remain correct in differentiable scan, fori-loop, and wide-halo chunked paths.
+No new held run is required; all operands already exist.
