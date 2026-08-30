@@ -43,3 +43,20 @@ The replay must bind checkout-local imports, SHA-pinned mesh/restart/dumps,
 CPU/fp64, and a tracked-clean tree. Untracked campaign outputs are ignored by
 cleanliness checks. Identity, actual-binding perturbation, zero-shift, and
 planted gate controls must pass.
+
+## Stopped implementation replay and authorized correction
+
+The first current-production replay (artifact SHA-256
+`2b6685f986492f3b22b4b2c813dd2da2a2c5cc2b990ce0afe6e7f34daed3125f`)
+stopped at the already-admitted row 1.3: the branch still selected
+`cell_average` Coriolis on the two fidelity cards. That is the temporary
+round-24 retraction, made while the corner-coefficient owner was only partial;
+round 25 subsequently closed all three registered association axes exactly.
+It is therefore an implementation lag, not a new science arm.
+
+Before repeating row 1.4, restore the already-tested `face_latitude` selector
+on exactly `nemo_dino_kamm` and its `nemo_dino_kamm_mlf` child. Keep
+`DINOConfig` and every other recipe byte-pinned to `cell_average`, with a
+red-capable routing test that enumerates the selected recipes. The corrected
+replay uses the same inputs, populations, controls, and unchanged bars above.
+The stopped artifact is diagnostic only and cannot release row 1.4.
