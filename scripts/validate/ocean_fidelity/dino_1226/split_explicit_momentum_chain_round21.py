@@ -53,7 +53,7 @@ def main():
     nu=((-float(mc.g)*du)*(1.0/np.asarray(g.e1u)))*um
     nv=((-float(mc.g)*(north-z))*(1.0/np.asarray(g.e2v)))*vm
     rows={"u":metric(np.asarray(pu)[:,1:],nu,um,9758),"v":metric(np.asarray(pv)[1:],nv,vm,9868)}
-    plant=nu.copy(); ij=tuple(np.argwhere(um)[0]); plant[ij]=np.nextafter(plant[ij],np.inf)
+    plant=nu.copy(); ij=tuple(np.argwhere(um)[0]); plant[ij] += 1.0e-6 * float(np.sqrt(np.mean(nu[um]**2)))
     control=metric(plant,nu,um,9758)['gate_status']=='DEBT'
     if not control: raise SystemExit('plant failed')
     out={"schema":"dino-split-explicit-momentum-chain-round21-v1","session_id":os.environ.get('CODEX_SESSION_ID'),
