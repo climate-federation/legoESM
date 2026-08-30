@@ -4884,6 +4884,20 @@ class LatLonCGridOceanModel:
                         "requires the pre-zdf_phy TKE N2 bundle")
                 _gm_native_pn2 = _tke_n2_bundle.rn2b
                 _gm_native_e3w = _tke_n2_bundle.e3w_Kmm
+                # ldf_eiv integrates jk=1:jpk, while the eosbn2/TKE bundle's
+                # e3w carry stores only levels 2:jpk. NEMO depth_e3.F90:64
+                # sets e3w(1)=2*(gdept(1)-gdepw(1)); on DINO's uniform top
+                # cell this is the already-carried e3t(1,Kmm). Do not restore
+                # it from the later GM geometry: that mixes time levels in
+                # zhw/zn after the exact interior carry.
+                _nlev_gm = state.T.data.shape[-1]
+                if _gm_native_e3w.shape[-1] == _nlev_gm - 1:
+                    _gm_native_e3w = jnp.concatenate([
+                        _tke_n2_bundle.e3t_Kmm[..., :1], _gm_native_e3w,
+                    ], axis=-1)
+                elif _gm_native_e3w.shape[-1] != _nlev_gm:
+                    raise ValueError(
+                        "carried GM e3w must contain nlev or nlev-1 W levels")
             elif _slope_n2_eval != "recompute":
                 raise ValueError(
                     "GMRediConfig.slope_n2_evaluation must be 'recompute' or "
