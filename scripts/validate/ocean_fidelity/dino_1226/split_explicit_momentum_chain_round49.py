@@ -86,12 +86,14 @@ def main() -> int:
     with netCDF4.Dataset(run / "mesh_mask.nc") as ds:
         data = {}
         for c in ("u", "v"):
-            data[c] = {
-                "e3": np.moveaxis(
-                    np.asarray(ds[f"e3{c}_0"][0], dtype=np.float64), 0, -1)[..., :35],
-                "h0": np.asarray(ds[f"h{c}_0"][0], dtype=np.float64),
-                "mask": np.moveaxis(np.asarray(ds[f"{c}mask"][0]), 0, -1)[..., :35],
-            }
+            e3 = np.moveaxis(
+                np.asarray(ds[f"e3{c}_0"][0], dtype=np.float64), 0, -1)[..., :35]
+            mask = np.moveaxis(
+                np.asarray(ds[f"{c}mask"][0]), 0, -1)[..., :35]
+            h0 = e3[..., 0] * mask[..., 0]
+            for k in range(1, 35):
+                h0 = h0 + e3[..., k] * mask[..., k]
+            data[c] = {"e3": e3, "h0": h0, "mask": mask}
     arms = {}
     arrays = {}
     for live, name in ((False, "C0_cancelled"), (True, "C1_executed_live")):
