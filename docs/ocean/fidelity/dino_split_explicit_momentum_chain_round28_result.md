@@ -635,3 +635,20 @@ round-53 production-transport rows remain DEBT and are retained as an upstream
 qualification; this result closes the cycle and filter arithmetic, not the
 production `Hu_avg/Hv_avg` operand. The tracer tail is released for a fresh
 production-entry replay against its previously admitted held streams.
+
+## Round 55: tracer entry exposes a missing Kmm write
+
+Artifact `/tmp/dino_split_explicit_momentum_chain_round55.json`, SHA-256
+`46aaf5f1644304151a9377ace037f4a4e03a91f1f0255885296af433e67e0f9d`,
+stops at subrow 8.3: all `9758/9758` wet U columns diverge, correlation is
+`0.9846254752`, RMS ratio is `1.0294306361`, and maximum normalized column
+error is `2.6794216264`. This reproduces the old lateral-lane signature at the
+current production epoch and is many orders above round 53's transport ULPs.
+
+The missing operation is structural. NEMO installs the transport-corrected
+Kmm velocity at `dynspg_ts.F90:1170-1174` before `traadv.F90:301-304` points
+`zptu/zptv` at Kmm. legoESM used the same literal cycle for WZV call 2 and the
+later Asselin filter but left tracer horizontal mass flux on its generic
+`state_new` correction. Round 56 wires the execute half into tracer entry
+under the already-scoped literal QCO selector; GM/FCT remain ordered-blocked
+until that production replay passes.

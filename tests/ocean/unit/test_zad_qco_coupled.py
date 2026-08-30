@@ -151,6 +151,10 @@ def test_qco_zad_pair_matches_source_ordered_oracle():
     np.testing.assert_allclose(
         np.asarray(restored_v)[1:], restored_v_expected,
         rtol=0, atol=2e-16)
+    # Tracer entry consumes the execute half, before stpmlf undoes it for the
+    # Asselin filter.  A stale/generic Kmm handoff is a red-capable violation.
+    assert np.any(np.asarray(corrected_u)[:, 1:] != u_native)
+    assert np.any(np.asarray(corrected_v)[1:] != v_native)
     # Planted violation: skipping the execute+undo cycle is algebraically
     # tempting and measurably wrong in floating-point arithmetic.
     assert np.any(np.asarray(restored_u)[:, 1:] != u_native)

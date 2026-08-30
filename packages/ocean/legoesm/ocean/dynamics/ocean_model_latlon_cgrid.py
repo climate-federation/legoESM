@@ -4471,9 +4471,11 @@ class LatLonCGridOceanModel:
             active_3d = mask_3d
 
         # Full 3D velocity (barotropic + baroclinic) from state after
-        # barotropic correction.  The barotropic solver preserves the
-        # baroclinic perturbation u' = u - U_bar and replaces the
-        # barotropic component with the time-averaged U_bar_avg.
+        # barotropic correction.  The generic path below preserves the
+        # baroclinic perturbation u' = u - U_bar and replaces the barotropic
+        # component with the time-averaged U_bar_avg.  DINO's literal QCO
+        # path instead executes dynspg_ts.F90:1170-1174 on Kmm itself before
+        # tra_adv points zptu/zptv at that state (traadv.F90:301-304).
         u_3d = state_new.u.data   # (n_lat, n_lon+1, nlev)
         v_3d = state_new.v.data   # (n_lat+1, n_lon, nlev)
 
@@ -4481,18 +4483,7 @@ class LatLonCGridOceanModel:
         # transport matches Hu_avg exactly.  The correction is the
         # difference between <H*U> (time-averaged transport) and
         # <U>*H (time-averaged velocity times pre-barotropic H).
-        # H + Hu reductions per face share the h_u_old/h_v_old weight
-        # on the level axis — fuse into one stack each.
-        _u_pair = jnp.sum(jnp.stack([h_u_old, u_3d * h_u_old], axis=-1), axis=-2)
-        H_u_old, Hu_3d = _u_pair[..., 0], _u_pair[..., 1]  # (n_lat, n_lon+1)
-        _v_pair = jnp.sum(jnp.stack([h_v_old, v_3d * h_v_old], axis=-1), axis=-2)
-        H_v_old, Hv_3d = _v_pair[..., 0], _v_pair[..., 1]  # (n_lat+1, n_lon)
-        if _pflow is None:
-            delta_U = (Hu_avg - Hu_3d) / jnp.maximum(H_u_old, 1e-10)
-            delta_V = (Hv_avg - Hv_3d) / jnp.maximum(H_v_old, 1e-10)
-            u_corrected = u_3d + delta_U[..., jnp.newaxis]
-            v_corrected = v_3d + delta_V[..., jnp.newaxis]
-        else:
+        if _pflow is not None:
             # Prescribed flow: NO barotropic transport correction.  u_3d/v_3d
             # already carry the pinned flow (splice above); Hu_avg/Hv_avg from
             # the DISCARDED barotropic solve must not leak into the tracer
@@ -4500,6 +4491,29 @@ class LatLonCGridOceanModel:
             # fluxes vanish and the diagnosed w below is identically zero.
             u_corrected = u_3d
             v_corrected = v_3d
+        elif getattr(_cfg_b, "wzv_call2_evaluation", "generic") == "nemo_literal":
+            # One coupled Kmm operation feeds both tracer horizontal fluxes
+            # and WZV call 2.  Reusing the literal execute/undo primitive here
+            # prevents the historical half-state where W saw the corrected
+            # velocity but tra_adv still saw the generic state_new velocity.
+            u_corrected, v_corrected, _, _ = nemo_qco_kmm_velocity_cycle(
+                state.eta.data, state.u.data, state.v.data,
+                Hu_avg, Hv_avg, _zc, u_mask_3d_tracer, v_mask_3d_tracer)
+        else:
+            # H + Hu reductions per face share the h_u_old/h_v_old weight
+            # on the level axis — fuse into one stack each.  Keep this entire
+            # legacy arm textually isolated so non-fidelity cards retain their
+            # prior arithmetic topology byte-for-byte.
+            _u_pair = jnp.sum(
+                jnp.stack([h_u_old, u_3d * h_u_old], axis=-1), axis=-2)
+            H_u_old, Hu_3d = _u_pair[..., 0], _u_pair[..., 1]
+            _v_pair = jnp.sum(
+                jnp.stack([h_v_old, v_3d * h_v_old], axis=-1), axis=-2)
+            H_v_old, Hv_3d = _v_pair[..., 0], _v_pair[..., 1]
+            delta_U = (Hu_avg - Hu_3d) / jnp.maximum(H_u_old, 1e-10)
+            delta_V = (Hv_avg - Hv_3d) / jnp.maximum(H_v_old, 1e-10)
+            u_corrected = u_3d + delta_U[..., jnp.newaxis]
+            v_corrected = v_3d + delta_V[..., jnp.newaxis]
 
         # Per-layer mass fluxes with full 3D velocity structure.
         # Unlike the previous barotropic-only distribution (which gave
