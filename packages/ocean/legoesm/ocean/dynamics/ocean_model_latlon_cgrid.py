@@ -2588,13 +2588,12 @@ class LatLonCGridOceanModel:
         # The two outer steps that have NEMO's stpmlf.F90 stage layout. Defined
         # here because the first consumer is the guard immediately below.
         _leapfrog_family = ("leapfrog", "nemo_mlf")
-        # barotropic_after_reconcile (NEMO mlf_baro_corr) has a site ONLY in
-        # the two leap-frog-family outer steps. Selecting it on forward_euler
-        # or ab2 would silently do NOTHING -- a card asking for a
-        # reconciliation and not getting one, which is exactly the failure the
-        # fn-entry dispatch guard exists to prevent and which no typo is needed
-        # to reach (forward_euler is the DEFAULT outer_integrator). Reject at
-        # construction instead.
+        # barotropic_after_reconcile (NEMO mlf_baro_corr) has a site in the two
+        # leap-frog-family outer steps AND in NEMO's l_1st_euler step
+        # (stpmlf.F90:578; l_1st_euler is cleared only at :685-688).  A
+        # perpetual-forward-Euler approximation may repeat that executed Euler
+        # composition each step.  AB2 has no such NEMO stage layout and remains
+        # rejected rather than silently ignoring the selector.
         _after_recon = getattr(
             config.barotropic, "barotropic_after_reconcile", "off")
         # The regular-step and cold-start sites are one NEMO policy.  Keeping
@@ -2612,13 +2611,14 @@ class LatLonCGridOceanModel:
                 "barotropic_after_reconcile; NEMO stp_MLF applies the same "
                 "mlf_baro_corr policy on l_1st_euler and regular steps, got "
                 f"cold={_cold_recon!r}, regular={_after_recon!r}")
-        if _after_recon != "off" and _outer_int not in _leapfrog_family:
+        _after_reconcile_family = _leapfrog_family + ("forward_euler",)
+        if (_after_recon != "off"
+                and _outer_int not in _after_reconcile_family):
             raise ValueError(
                 f"barotropic_after_reconcile={_after_recon!r} requires "
-                f"outer_integrator in {sorted(_leapfrog_family)}: NEMO's "
+                f"outer_integrator in {sorted(_after_reconcile_family)}: NEMO's "
                 "mlf_baro_corr (stpmlf.F90:754-765) runs after dyn_zdf and "
-                "before the Asselin filter, and only the leap-frog-family "
-                "outer steps have that position. Got "
+                "runs on l_1st_euler as well as regular MLF steps. Got "
                 f"outer_integrator={_outer_int!r}, which would silently ignore "
                 "the setting.")
         # "leapfrog" (_leapfrog_step, two-pass) and "nemo_mlf" (_nemo_mlf_step,
@@ -8143,7 +8143,11 @@ class LatLonCGridOceanModel:
                                         surface_forcing=surface_forcing,
                                         sponge=sponge,
                                         grid=grid, vertex_mask=vertex_mask,
-                                        t_seconds=t_seconds)
+                                        t_seconds=t_seconds,
+                                        _apply_cold_start_after_reconcile=(
+                                            self.config.barotropic
+                                            .barotropic_after_reconcile
+                                            == "nemo_mlf_baro_corr"))
         # Feature-gated on a STATIC config bool (CLAUDE.md feature-gating
         # exception): a Python ``if`` selects the branch at trace time, so
         # the freeze-floor clamp is only traced when enabled — no jnp.where
