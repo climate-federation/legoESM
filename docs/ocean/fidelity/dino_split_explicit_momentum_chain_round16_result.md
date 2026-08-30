@@ -203,8 +203,8 @@ the epoch drift belongs to the pre-existing ZDF TKE-core selector group, not to
 
 The following remain open and are not merge conditions for that finished
 unit: the ordered chain stop at row 1.2; rows 1.3--6; the unknown owner of the
-`-0.95 Sv` basin deficit; the TKE-core matrix/recurrence/Langmuir sub-peel; and
-the still-unidentified error that the legacy core compensated at the walls.
-The wall-epoch group attribution itself is no longer open. Its individual-
-selector peel belongs on a new follow-up branch/PR rather than as a tail
-appended after #1696 opens.
+`-0.95 Sv` basin deficit; and the still-unidentified feeder that the legacy
+TKE matrix compensated at the walls. The follow-up sub-peel has now localized
+the wall-epoch rise to the matrix conditional on legacy solver and Langmuir;
+its WALL-TKE-MATRIX-FEEDER operand ladder belongs on a new follow-up branch/PR,
+not as a tail appended after #1696 opens.
