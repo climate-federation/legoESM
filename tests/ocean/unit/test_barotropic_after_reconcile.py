@@ -86,11 +86,15 @@ def test_default_is_off_on_both_config_surfaces():
     from legoesm.ocean.state import BarotropicConfig
     from legoesm.ocean.experiments.dino import DINOConfig, dino_config_for_recipe
     assert BarotropicConfig().barotropic_after_reconcile == "off"
+    assert BarotropicConfig().barotropic_cold_start_after_reconcile == "off"
     assert DINOConfig().barotropic_after_reconcile == "off"
+    assert DINOConfig().barotropic_cold_start_after_reconcile == "off"
     # and no OTHER shipped DINO recipe silently turns it on
     for recipe in ("nemo_dino_kamm", "nemo_paper", "legoesm_default",
                    "veros", "mitgcm", "oceananigans"):
         assert dino_config_for_recipe(recipe).barotropic_after_reconcile == "off"
+        assert (dino_config_for_recipe(recipe)
+                .barotropic_cold_start_after_reconcile == "off")
 
 
 def test_kamm_mlf_ships_the_faithful_pair():
@@ -114,12 +118,15 @@ def test_kamm_mlf_ships_the_faithful_pair():
     card = DINO_RECIPES["nemo_dino_kamm_mlf"]
     # membership first -- this is the half that cannot pass by default
     assert card.get("barotropic_after_reconcile") == "nemo_mlf_baro_corr"
+    assert (card.get("barotropic_cold_start_after_reconcile")
+            == "nemo_mlf_baro_corr")
     assert card.get("barotropic_reconcile_target") == "velocity_avg", (
         "the card must PIN the reconcile target explicitly; it equals the "
         "config default, so dropping the line would otherwise be invisible "
         "here and would take the after_reconcile line with it")
     c = dino_config_for_recipe("nemo_dino_kamm_mlf")
     assert c.barotropic_after_reconcile == "nemo_mlf_baro_corr"
+    assert c.barotropic_cold_start_after_reconcile == "nemo_mlf_baro_corr"
     assert c.barotropic_reconcile_target == "velocity_avg"
 
 
@@ -225,7 +232,8 @@ def test_kernel_difference_is_depth_uniform_on_wet_columns():
 
 
 # ------------------------------------------------------------ step paths --
-def _channel(outer="leapfrog", after="off", partial=True, dino_drag=False,
+def _channel(outer="leapfrog", after="off", cold=None, partial=True,
+             dino_drag=False,
              ny=8, nx=16, nz=5, H=3000.0):
     """Channel matching the shape of the card this option was built for.
 
@@ -264,7 +272,9 @@ def _channel(outer="leapfrog", after="off", partial=True, dino_drag=False,
         A_h=2.0e4, A_v=1.0e-3, K_v=1.0e-4, n_barotropic_substeps=8,
         enable_runtime_checks=False,
         barotropic_time_filter="nemo_boxcar_centred",
-        barotropic_after_reconcile=after)
+        barotropic_after_reconcile=after,
+        barotropic_cold_start_after_reconcile=(
+            after if cold is None else cold))
     if outer == "nemo_mlf":
         kw["implicit_vmix_e3t_now_divisor"] = True   # construction requirement
     if dino_drag:
@@ -282,14 +292,23 @@ def _second_step(method, **kw):
     return getattr(model, method)(s1, _DT)
 
 
+def _paired_second_steps(method, outer):
+    """Same admitted post-bootstrap state; regular-step selector is sole axis."""
+    state, on_model = _channel(
+        outer=outer, after="nemo_mlf_baro_corr", dino_drag=True)
+    s1 = on_model._leapfrog_step(state, _DT)
+    _, off_model = _channel(
+        outer=outer, after="off", cold="off", dino_drag=True)
+    return (getattr(off_model, method)(s1, _DT),
+            getattr(on_model, method)(s1, _DT))
+
+
 _PATHS = [("_leapfrog_step", "leapfrog"), ("_nemo_mlf_step", "nemo_mlf")]
 
 
 @pytest.mark.parametrize("method,outer", _PATHS)
 def test_option_changes_the_after_state_on_both_step_paths(method, outer):
-    off = _second_step(method, outer=outer, after="off", dino_drag=True)
-    on = _second_step(method, outer=outer, after="nemo_mlf_baro_corr",
-                      dino_drag=True)
+    off, on = _paired_second_steps(method, outer)
     du = np.asarray(on.u.data - off.u.data)
     dv = np.asarray(on.v.data - off.v.data)
     assert np.max(np.abs(du)) > 1e-6, "the option is inert -- its site never ran"
@@ -300,9 +319,7 @@ def test_option_changes_the_after_state_on_both_step_paths(method, outer):
 def test_the_change_is_a_column_mean_replacement_and_nothing_else(method, outer):
     """On every wet column the option shifts EVERY level by the SAME number.
     Anything that touched the vertical structure would fail here."""
-    off = _second_step(method, outer=outer, after="off", dino_drag=True)
-    on = _second_step(method, outer=outer, after="nemo_mlf_baro_corr",
-                      dino_drag=True)
+    off, on = _paired_second_steps(method, outer)
     du = np.asarray(on.u.data - off.u.data)
     # WITHOUT this line the test passes on du == 0 -- i.e. it would survive the
     # option being removed entirely, proving nothing. ``checked > 10`` below
@@ -336,13 +353,18 @@ def test_off_matches_the_unset_default_bit_for_bit(method, outer):
 
 @pytest.mark.parametrize("method,outer", _PATHS)
 def test_unknown_scheme_raises_from_inside_each_step_path(method, outer):
-    """The raise fires from the option's OWN site, so this doubles as the
-    reachability proof for both call sites: a path that never reached the
-    dispatch would return a state instead."""
-    state, model = _channel(outer=outer, after="not_a_scheme", dino_drag=True)
-    s1 = model._leapfrog_step(state, _DT)   # Euler start: site not reached yet
+    """Unknown regular/cold policies fail before a model can compile."""
     with pytest.raises(ValueError, match="barotropic_after_reconcile"):
-        getattr(model, method)(s1, _DT)
+        _channel(outer=outer, after="not_a_scheme", dino_drag=True)
+
+
+@pytest.mark.parametrize("method,outer", _PATHS)
+def test_mismatched_cold_and_regular_selectors_raise(method, outer):
+    del method
+    with pytest.raises(
+            ValueError, match="barotropic_cold_start_after_reconcile must equal"):
+        _channel(outer=outer, after="nemo_mlf_baro_corr", cold="off",
+                 dino_drag=True)
 
 def test_zstar_makes_the_after_thickness_half_a_no_op():
     """A MEASURED BOUND on what this option can own -- asserted DIRECTLY.
@@ -583,102 +605,69 @@ def test_call_site_carries_raw_kaa_and_executes_literal_kernel(method, outer):
     assert np.all(np.isfinite(np.asarray(naa.v.data)))
 
 
-# ---------------------------------- the Euler-start gap is no longer SILENT --
+# -------------------------------- faithful Euler-start reconciliation --
 @pytest.mark.parametrize("method,outer", _PATHS)
-def test_euler_start_warns_that_it_skips_the_reconciliation(method, outer):
-    """#1640 finding 3.  The forward-Euler start returns before the
-    reconciliation site, so on that one step legoESM COMMITS a depth-mean
-    deposit NEMO removes (NEMO runs mlf_baro_corr on l_1st_euler too).  That
-    was silent while the card claimed the reference's second-site behaviour on
-    every step.
+def test_euler_start_runs_shared_corrector_and_off_plant_moves(method, outer):
+    """NEMO's l_1st_euler call is live on both production step paths.
 
-    PARAMETRIZED OVER BOTH OUTER STEPS deliberately.  There are two separate
-    early-return branches, and an earlier version keyed the once-only flag on a
-    single process-wide bool -- so whichever path ran first consumed the
-    warning and the OTHER site was never observed to warn at all.  Review
-    caught it; this is the gate that keeps it caught.
-
-    Not a raise: a genuine FROM-REST run of a card that ships this option has
-    no before level to bridge, and the DINO twin's ``--legacy-euler-start``
-    exists to reproduce artifacts recorded before 2026-08-24.  (An earlier
-    version of this docstring justified that by the twin's default being
-    ``bridge_before=False`` -- RETRACTED, the default is the bridged start
-    since #1455; see the companion test below.)"""
-    import warnings
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        LatLonCGridOceanModel)
-
-    LatLonCGridOceanModel._WARNED_EULER_SKIP = set()
-    state, model = _channel(outer=outer, after="nemo_mlf_baro_corr",
-                            dino_drag=True)
-    assert state.u_before is None, "fixture must start on the Euler path"
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        getattr(model, method)(state, _DT)
-    msgs = [str(x.message) for x in w if issubclass(x.category, RuntimeWarning)]
-    assert any("forward-Euler start" in m and method in m for m in msgs), (
-        f"the Euler-start skip must announce itself from {method}, got {msgs}")
-
-    # once per site, not once per step
-    with warnings.catch_warnings(record=True) as w2:
-        warnings.simplefilter("always")
-        getattr(model, method)(state, _DT)
-    assert not [x for x in w2 if "forward-Euler start" in str(x.message)], (
-        "the warning must be emitted once per site, not on every Euler step")
-
-
-def test_no_euler_warning_once_the_before_level_is_populated():
-    """#1455 (2026-08-24): under the twin's NEW default the warning must NOT
-    fire -- and that is a property of the model, not of the harness.
-
-    The bridged start hands ``model.step`` a populated ``u_before``, so the
-    early-return branch the warning lives on is never taken.  The fixture gets
-    there the same way the model does: step 1 is the Euler start (and warns),
-    step 2 runs with the before level populated and must be silent.  Without
-    this, "the default no longer warns" would be an assertion about a flag
-    default rather than about the code path it selects.
+    The off arm is a planted omission: it must skip the literal kernel and
+    leave a different committed column mean.  Counting the literal u/v kernel
+    calls also proves the selected path executes one shared reconciliation,
+    not a locally duplicated implementation.
     """
-    import warnings
+    import unittest.mock as mock
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as omlc
+
+    real_kernel = omlc.nemo_literal_after_level_reconcile
+    calls = []
+
+    def capture(*args, **kwargs):
+        calls.append(1)
+        return real_kernel(*args, **kwargs)
+
+    state_on, model_on = _channel(
+        outer=outer, after="nemo_mlf_baro_corr", dino_drag=True)
+    assert state_on.u_before is None
+    with mock.patch.object(
+            omlc, "nemo_literal_after_level_reconcile", capture):
+        on = getattr(model_on, method)(state_on, _DT)
+    assert len(calls) == 2, "one reconciliation must execute U and V kernels"
+
+    state_off, model_off = _channel(
+        outer=outer, after="off", cold="off", dino_drag=True)
+    off = getattr(model_off, method)(state_off, _DT)
+    assert np.max(np.abs(np.asarray(on.u.data - off.u.data))) > 1e-9
+    assert np.max(np.abs(np.asarray(on.v.data - off.v.data))) > 1e-9
+
+
+@pytest.mark.parametrize("method,outer", _PATHS)
+def test_euler_corrector_is_after_implicit_mixing(method, outer):
+    """Lock the source ordering, not merely reachability of both calls."""
+    import unittest.mock as mock
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel)
 
-    LatLonCGridOceanModel._WARNED_EULER_SKIP = set()
-    state, model = _channel(after="nemo_mlf_baro_corr", dino_drag=True)
-    s1 = model._leapfrog_step(state, _DT)          # the Euler start itself
-    assert s1.u_before is not None, (
-        "fixture must reach a populated before level, or this test passes "
-        "vacuously by staying on the Euler path")
-    # non-vacuity: the warning DID fire on the step that took the Euler branch
-    assert "_leapfrog_step" in LatLonCGridOceanModel._WARNED_EULER_SKIP
+    events = []
+    real_implicit = LatLonCGridOceanModel._apply_implicit_vertical_mixing
+    real_reconcile = LatLonCGridOceanModel._apply_after_level_reconcile
 
-    # ...and must not fire again now that the before level exists. Cleared, so
-    # a silent result cannot be the once-per-site latch instead of the branch.
-    LatLonCGridOceanModel._WARNED_EULER_SKIP = set()
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        model._leapfrog_step(s1, _DT)
-    assert not [x for x in w if "forward-Euler start" in str(x.message)], (
-        "a leap-frog step with a populated before level must never claim to "
-        "be the Euler start")
+    def capture_implicit(self, *args, **kwargs):
+        events.append("implicit")
+        return real_implicit(self, *args, **kwargs)
 
+    def capture_reconcile(self, *args, **kwargs):
+        events.append("reconcile")
+        return real_reconcile(self, *args, **kwargs)
 
-def test_no_euler_warning_when_the_option_is_off():
-    """Non-vacuity for the test above: a warning that fires unconditionally
-    would pass it while telling the operator nothing."""
-    import warnings
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        LatLonCGridOceanModel)
-
-    LatLonCGridOceanModel._WARNED_EULER_SKIP = set()
-    state, model = _channel(after="off", dino_drag=True)
-    assert state.u_before is None, (
-        "fixture must start on the Euler path, or this test passes vacuously "
-        "by never reaching the branch it is about")
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        model._leapfrog_step(state, _DT)
-    assert not [x for x in w if "forward-Euler start" in str(x.message)], (
-        "the default (option off) must stay silent")
+    state, model = _channel(
+        outer=outer, after="nemo_mlf_baro_corr", dino_drag=True)
+    with mock.patch.object(
+            LatLonCGridOceanModel, "_apply_implicit_vertical_mixing",
+            capture_implicit), mock.patch.object(
+                LatLonCGridOceanModel, "_apply_after_level_reconcile",
+                capture_reconcile):
+        getattr(model, method)(state, _DT)
+    assert events == ["implicit", "reconcile"]
 
 
 def test_the_weighting_fix_is_bit_identical_on_the_SHIPPED_DINO_geometry():

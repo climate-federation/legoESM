@@ -51,6 +51,8 @@ def test_standalone_builder_has_no_bridge_level_and_resolves_card_default():
         RUNNER.build_standalone(0))
     assert (grid.n_lat, grid.n_lon) == (195, 48)
     assert model_cfg.outer_integrator == "leapfrog"
+    assert (model_cfg.barotropic.barotropic_cold_start_after_reconcile
+            == "nemo_mlf_baro_corr")
     assert all(getattr(state, name) is None for name in (
         "T_before", "S_before", "eta_before", "u_before", "v_before"))
     assert receipt["changed_channels"] == []

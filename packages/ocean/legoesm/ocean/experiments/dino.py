@@ -365,6 +365,10 @@ class DINOConfig:
     # "5/5" here means "the gate is no longer failing", not "the twin is
     # finished". Every other card leaves it "off".
     barotropic_after_reconcile: str = "off"
+    # NEMO applies the same mlf_baro_corr on the first l_1st_euler step.  This
+    # is a separate fail-closed selector because a from-rest run has no bridge
+    # to bypass that stage; see BarotropicConfig for the collision rule.
+    barotropic_cold_start_after_reconcile: str = "off"
     S_star_eq: float = 37.25       # equatorial target S [g/kg]
     S_star_n: float = 35.1         # northern boundary target S [g/kg]
     S_star_s: float = 35.0         # southern boundary target S [g/kg]
@@ -1901,6 +1905,7 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     # barotropic_after_reconcile="off" if a non-leapfrog arm is what you want.
     "barotropic_reconcile_target": "velocity_avg",
     "barotropic_after_reconcile": "nemo_mlf_baro_corr",
+    "barotropic_cold_start_after_reconcile": "nemo_mlf_baro_corr",
     # Phase-2 #1317 T4/T8/T13: TKE closure axes that read the leap-frog
     # BEFORE (Nbb) state (state.u_before/v_before, state.T_before/S_before)
     # — meaningful ONLY under the MLF integrator (construction raises
@@ -3674,6 +3679,9 @@ def dino_lat_lon_model_config(
         # NEMO mlf_baro_corr, the after-level reconciliation (stpmlf.F90:
         # 754-765; see DINOConfig.barotropic_after_reconcile docstring).
         barotropic_after_reconcile=cfg.barotropic_after_reconcile,
+        # NEMO stp_MLF runs the same after-level corrector on l_1st_euler.
+        barotropic_cold_start_after_reconcile=(
+            cfg.barotropic_cold_start_after_reconcile),
         A_h=A_h_base,
         A_h_lat_scaling=True,         # cos(lat) per-row scaling — Phase 1B
         # Node 14: "nemo_div_curl" embeds ahmt/ahmf=½·rn_Uv·MAX(e1,e2) inside the

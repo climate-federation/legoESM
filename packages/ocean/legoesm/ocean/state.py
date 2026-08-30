@@ -1325,10 +1325,10 @@ class BarotropicConfig(NamedTuple):
     #     90-day DINO twin, 12x the realized spin-up rate, thrown away
     #     every step.
     #
-    # legoESM has no site-2 analogue.  Its single reconciliation happens inside
-    # the barotropic solve (``_reconcile_targets``) and the leap-frog combine
-    # then pins the after-level column mean; nothing runs after the implicit
-    # vertical solve, so legoESM keeps a residue of that deposit.
+    # legoESM historically had no site-2 analogue.  The regular leapfrog path
+    # now calls the shared after-level kernel after implicit mixing, and the
+    # cold Euler bootstrap does so when the paired cold-start selector below is
+    # selected.
     #
     #   "off" (default)      -> unchanged, BIT-IDENTICAL.
     #   "nemo_mlf_baro_corr" -> run NEMO's site 2, after the implicit vertical
@@ -1351,43 +1351,32 @@ class BarotropicConfig(NamedTuple):
     # execution is not inert: its mathematically cancelling scale changes the
     # final few ULPs through multiplication/reduction/division association.
     #
-    # SCOPE, named rather than left to be discovered: the site is in the
-    # leap-frog branch of each outer step, so it is NOT applied on the
-    # forward-Euler first step (``state.u_before is None``), which returns
-    # straight out of ``_step_impl`` with no barotropic-mean slot to reconcile
-    # onto. NEMO DOES run mlf_baro_corr on its l_1st_euler step, so that is a
-    # real one-step gap. Whether a bridged/restart twin takes it is a
-    # property of the RUNNER'S DEFAULT, not of being a twin -- the correction
-    # #1640 forced. ``u_before`` arrives populated only when the before level
-    # is bridged; ``kamm_twin_90d.py`` defaulted that OFF until 2026-08-24, so
-    # a twin COULD enter step 1 with ``u_before is None`` and take this branch.
-    # RETRACTED (#1455, 2026-08-24): the note here previously said the
-    # campaign's own 90-day twin DID. Audited against the recorded run logs, it
-    # did not -- 18 of 18 recorded twin builds passed the bridge explicitly,
-    # and the acceptance gate has defaulted it ON since 2026-08-09. Since #1455
-    # the twin runner defaults to the bridged start too, so the shipped twin
-    # cannot take it; ``--legacy-euler-start`` still can. (The
-    # original wording here, "It is empty for a bridged/restart twin (u_before
-    # arrives populated, so that branch is never taken)", stays RETRACTED: it
-    # was asserted of every run when it was only ever true of a bridged one.)
-    # The same applies to a genuine FROM-REST run of a card that ships this
-    # option,
-    # which since #1455 R6 includes nemo_dino_kamm_mlf and therefore its
-    # from-rest drivers
-    # (scripts/validate/ocean_fidelity/dino_1226/box_budget_run.py and
-    # acc_momentum_budget.py). All of those miss NEMO's reconciliation on step
-    # 1 only. The step is no longer SILENT: the model emits a one-time
-    # RuntimeWarning (``_warn_euler_start_skips_after_reconcile``) whenever the
-    # Euler start is taken with the option on. Not a raise, deliberately --
-    # refusing it would break the shipped twin's default invocation; closing
-    # the gap needs ``_step_impl`` to surface the barotropic depth mean on its
-    # implicit-vmix path (named and costed at that helper, not done).
-    # Selecting this on an outer_integrator that has no such site
-    # (forward_euler, ab2) is rejected at model construction, not ignored.
+    # COLD-START SCOPE (#1455 T1): NEMO also executes this site while
+    # l_1st_euler is true (DINO MY_SRC/stpmlf.F90:578; the flag is cleared only
+    # at :685-688). ``barotropic_cold_start_after_reconcile`` makes that policy
+    # explicit. The DINO MLF oracle and catalog cards select both sites. The
+    # constructor rejects a mismatch, so the historical regular-on/cold-off
+    # configuration cannot silently return. A bridged state bypasses the Euler
+    # bootstrap but uses the same regular-step site; a genuine from-rest state
+    # captures its pre-mixing barotropic target and raw Kaa SSH inside
+    # ``_step_impl`` and invokes this same kernel after implicit mixing.
+    # Selecting either site on an outer integrator without the NEMO MLF stage
+    # layout (forward_euler, ab2) is rejected at model construction.
     #
-    # Unknown value raises at outer-step entry (barotropic_common.
-    # validate_after_reconcile), on both the leapfrog and the nemo_mlf path.
+    # Unknown values and regular/cold collisions raise at construction.
     barotropic_after_reconcile: str = "off"
+    # Policy for the no-history Euler bootstrap of a leapfrog-family run.
+    # NEMO's stp_MLF calls mlf_baro_corr on l_1st_euler as well as on regular
+    # leapfrog steps (DINO MY_SRC/stpmlf.F90:578; l_1st_euler is cleared only
+    # at :685-688).  Keep this independently explicit so a card cannot acquire
+    # a faithful regular-step corrector while silently retaining legoESM's old
+    # cold-start skip.  Construction requires a non-off value to equal
+    # barotropic_after_reconcile and to use a leapfrog-family outer integrator.
+    #
+    #   "off"                  -> legacy/bootstrap behavior, no correction.
+    #   "nemo_mlf_baro_corr"   -> use the shared after-level kernel after the
+    #                              bootstrap's implicit vertical solve.
+    barotropic_cold_start_after_reconcile: str = "off"
     # AB2 time-centering of the barotropic slow forcing F_slow (matches the
     # Oceananigans split-explicit Gᵁ = AB2-extrapolated depth-integral of the 3D
     # tendency, vs legoESM's default current-time depth-mean).  Investigated for

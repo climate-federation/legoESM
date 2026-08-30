@@ -158,6 +158,7 @@ LATLON_RECIPES = {
         "adaptive_implicit_vertadv": False,
         "asselin_gamma": 0.1,
         "barotropic_after_reconcile": "nemo_mlf_baro_corr",
+        "barotropic_cold_start_after_reconcile": "nemo_mlf_baro_corr",
         "barotropic_continuity_evaluation": "nemo_literal",
         "barotropic_coriolis": "een_metric",
         "barotropic_coriolis_split": "live",

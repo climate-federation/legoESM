@@ -50,15 +50,14 @@ DAYS_PER_YEAR = 360
 YEARS = 20
 MEMBERS = tuple(range(6))
 PERTURB_EPS = 1.0e-14
-FIRST_STEP_EQUIVALENT = False
+FIRST_STEP_EQUIVALENT = True
 
 
 def claim_admission_reasons() -> tuple[str, ...]:
     """Known build blockers that make a 20-year science arm inadmissible."""
     reasons = []
     if not FIRST_STEP_EQUIVALENT:
-        reasons.append(
-            "cold-start leapfrog skips nemo_mlf_baro_corr on l_1st_euler")
+        reasons.append("cold-start corrector is not source-equivalent")
     return tuple(reasons)
 
 
@@ -435,6 +434,8 @@ def run(args: argparse.Namespace) -> int:
         "claim_admissible": complete,
         "claim_admission_blockers": list(blockers),
         "twin_start_mode": "standalone",
+        "barotropic_cold_start_after_reconcile": (
+            model_cfg.barotropic.barotropic_cold_start_after_reconcile),
         "bridge_paths": [],
         "restart_paths": [],
         "storage_dtype": "float64",

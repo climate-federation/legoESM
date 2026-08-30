@@ -987,6 +987,7 @@ class TestBarotropicReconcileTargetCard:
     _FAITHFUL_PAIR = {
         "barotropic_reconcile_target": "velocity_avg",
         "barotropic_after_reconcile": "nemo_mlf_baro_corr",
+        "barotropic_cold_start_after_reconcile": "nemo_mlf_baro_corr",
     }
 
     def test_kamm_mlf_card_pins_the_faithful_pair_explicitly(self):
@@ -1006,6 +1007,8 @@ class TestBarotropicReconcileTargetCard:
         c = dino_config_for_recipe("nemo_dino_kamm_mlf")
         assert c.barotropic_reconcile_target == "velocity_avg"
         assert c.barotropic_after_reconcile == "nemo_mlf_baro_corr"
+        assert (c.barotropic_cold_start_after_reconcile
+                == "nemo_mlf_baro_corr")
         # No OTHER shipped card runs either half of the pair -- all six,
         # not a sample, so a new card cannot pick it up unnoticed.
         for recipe in ("legoesm_default", "nemo_dino_kamm", "nemo_paper",
@@ -1015,3 +1018,5 @@ class TestBarotropicReconcileTargetCard:
                 f"{recipe}: got {o.barotropic_reconcile_target}")
             assert o.barotropic_after_reconcile == "off", (
                 f"{recipe}: got {o.barotropic_after_reconcile}")
+            assert o.barotropic_cold_start_after_reconcile == "off", (
+                f"{recipe}: got {o.barotropic_cold_start_after_reconcile}")

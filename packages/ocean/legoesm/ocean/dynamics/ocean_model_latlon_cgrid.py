@@ -2597,6 +2597,21 @@ class LatLonCGridOceanModel:
         # construction instead.
         _after_recon = getattr(
             config.barotropic, "barotropic_after_reconcile", "off")
+        # The regular-step and cold-start sites are one NEMO policy.  Keeping
+        # two explicit selectors makes the historical cold-start omission
+        # observable, while this collision guard prevents a mixed card from
+        # silently returning.  Validate here so a typo fails at construction,
+        # before either branch has compiled.
+        _after_recon = validate_after_reconcile(_after_recon)
+        _cold_recon = validate_after_reconcile(getattr(
+            config.barotropic,
+            "barotropic_cold_start_after_reconcile", "off"))
+        if _cold_recon != _after_recon:
+            raise ValueError(
+                "barotropic_cold_start_after_reconcile must equal "
+                "barotropic_after_reconcile; NEMO stp_MLF applies the same "
+                "mlf_baro_corr policy on l_1st_euler and regular steps, got "
+                f"cold={_cold_recon!r}, regular={_after_recon!r}")
         if _after_recon != "off" and _outer_int not in _leapfrog_family:
             raise ValueError(
                 f"barotropic_after_reconcile={_after_recon!r} requires "
@@ -3495,6 +3510,7 @@ class LatLonCGridOceanModel:
                    _external_tracer_rate=None,
                    _ldf_state=None, _tke_n2_bundle_override=None,
                    _return_raw_kaa_qco: bool = False,
+                   _apply_cold_start_after_reconcile: bool = False,
                    z_coord=None, config=None, iwm_fields=None):
         """Core step logic — no JIT wrapper.
 
@@ -5534,6 +5550,19 @@ class LatLonCGridOceanModel:
                     data=(state_new.v.data + _dv_bc) * v_mask_3d),
             )
 
+        # Cold-start target: NEMO's uu_b/vv_b(Kaa) is the barotropic mean
+        # produced before dyn_zdf.  Capture the identical model operand here,
+        # immediately before the implicit solve that may deposit a new column
+        # mean.  The flag is private and true only on the no-history Euler
+        # bootstrap; every established caller keeps the exact old path.
+        if _apply_cold_start_after_reconcile:
+            _cold_btu = depth_mean(
+                state_new.u.data, h_u_pre, 1.0e-10,
+                keepdims=True, fused=False)
+            _cold_btv = depth_mean(
+                state_new.v.data, h_v_pre, 1.0e-10,
+                keepdims=True, fused=False)
+
         # 8b. Implicit (backward-Euler) vertical mixing for u, v, T, S.
         #
         # When this branch is active, the PE tendency function has
@@ -5626,6 +5655,18 @@ class LatLonCGridOceanModel:
                 tke=Field(data=tke_new, name="tke",
                           dims=("lat", "lon", "level"), units="m^2/s^2"),
             )
+
+        # DINO/NEMO cold start: stpmlf.F90:578 calls mlf_baro_corr after
+        # dyn_zdf/tra_zdf even while l_1st_euler is true (the flag is cleared
+        # only at :685-688).  Reuse the regular-step implementation and its
+        # raw pre-projection Kaa SSH; this is a call-site addition, not a
+        # second reconciliation kernel.
+        if _apply_cold_start_after_reconcile:
+            state_new = self._apply_after_level_reconcile(
+                state_new, state, _cold_btu, _cold_btv,
+                u_mask_3d_tracer, v_mask_3d_tracer, _grid,
+                kaa_eta_raw=_eta_after_spg_literal,
+                z_coord=z_coord, config=config)
 
         if _impose_mean:
             # NEMO stprk3_stg.F90:440: uu += (uu_b(Kaa) − Σ e3u_0·uu·r1_hu_0)
@@ -8749,78 +8790,6 @@ class LatLonCGridOceanModel:
                               dims=state.v.dims, units=state.v.units),
         )
 
-    _WARNED_EULER_SKIP: set = set()
-
-    def _warn_euler_start_skips_after_reconcile(self):
-        """Say out loud that NEMO's SECOND reconciliation is skipped here.
-
-        #1640 finding 3.  The forward-Euler start (``state.u_before is None``)
-        returns from ``_step_impl`` before ``_apply_after_level_reconcile``
-        ever runs, so on THAT step the implicit vertical solve's depth-mean
-        deposit is COMMITTED, where NEMO removes it: NEMO runs
-        ``mlf_baro_corr`` on its ``l_1st_euler`` step too.  One step in the
-        run, but the card claims the reference's second-site behaviour on
-        every step, and it was silent.
-
-        WHY A WARNING AND NOT A RAISE, stated so the next reader does not
-        "harden" it into one.  Two live callers legitimately take this branch:
-        a genuine FROM-REST run of a card that ships the option (there is no
-        before level to bridge — the run has to start somewhere), and the DINO
-        twin's ``--legacy-euler-start``, which exists precisely to reproduce
-        artifacts recorded before 2026-08-24.  A raise would refuse both.
-        Closing the gap for real means surfacing the barotropic depth mean
-        (``btu_exp``/``btv_exp``) from the ``_apply_implicit_vmix=True`` path,
-        which changes ``_step_impl``'s return contract at ~8 call sites —
-        named, costed, NOT done here.
-
-        WHAT CHANGED ON 2026-08-24 (#1455), and a RETRACTION with it.  This
-        docstring used to justify "warning, not raise" by asserting that the
-        campaign's own 90-day production twin took this branch, because
-        ``kamm_twin_90d.py`` defaulted ``bridge_before=False``.  The DEFAULT
-        was as described; the CONCLUSION was wrong.  Audited against the
-        recorded run logs: every twin build on record (18 of 18, all four
-        acceptance-gate arms included) passed the before-level bridge
-        explicitly, and the acceptance gate has defaulted it ON since
-        2026-08-09.  No recorded 90-day twin ever took this branch.  The twin
-        default is now the bridged start as well, so the shipped invocation
-        cannot; ``--legacy-euler-start`` still can.  The "warning, not raise"
-        justification above stands on the two callers, not on any default.
-
-        RETRACTED, still (``state.py`` barotropic_after_reconcile note, which
-        said the gap "is empty for a bridged/restart twin (u_before arrives
-        populated, so that branch is never taken)"): that was asserted of every
-        run when it was only true of a bridged one.  It is true of the twin's
-        default again — but as a consequence of the flipped default, not as a
-        property of being a twin.
-
-        Emitted once per process: this fires on step 1, and a per-step warning
-        inside a scan-driven run would be noise, not signal.
-        """
-        if self.config.barotropic.barotropic_after_reconcile == "off":
-            return
-        # keyed by CALL SITE, not a single process-wide bool: the two outer
-        # steps have separate early-return branches, and a single flag let
-        # whichever ran first consume the warning forever -- the second site
-        # was then unobservable, which is the silent degradation this exists
-        # to remove (review finding).
-        import sys
-        site = sys._getframe(1).f_code.co_name
-        if site in type(self)._WARNED_EULER_SKIP:
-            return
-        type(self)._WARNED_EULER_SKIP.add(site)
-        import warnings
-        warnings.warn(
-            f"[{site}] barotropic_after_reconcile="
-            f"{self.config.barotropic.barotropic_after_reconcile!r} is ON, but "
-            "this step is the forward-Euler start (no before-level), which "
-            "returns before the reconciliation site. NEMO DOES run "
-            "mlf_baro_corr on its l_1st_euler step, so this step alone commits "
-            "a depth-mean deposit NEMO removes. Bridge the before-level "
-            "(the DINO twin's default; --legacy-euler-start turns it off) "
-            "to avoid the Euler start entirely, or treat step 1 as "
-            "off-reference.",
-            RuntimeWarning, stacklevel=3)
-
     def _apply_after_level_reconcile(self, naa, state, btu_exp, btv_exp,
                                      u_mask3, v_mask3, grid, kaa_eta_raw=None,
                                      z_coord=None, config=None):
@@ -9129,7 +9098,6 @@ class LatLonCGridOceanModel:
         # --- FIRST step: forward-Euler start (NEMO l_1st_euler), no RA filter.
         #     Populate Nbb with the pre-step now-fields for the next step.
         if state.u_before is None:
-            self._warn_euler_start_skips_after_reconcile()
             # NEMO's cold-start Euler step does NOT run with an undefined
             # before-level: istate.F90:97-99/135-137 sets Kmm := Kbb (ts/uu/vv
             # copied onto BOTH time-level array slots) before stp_MLF is ever
@@ -9153,7 +9121,11 @@ class LatLonCGridOceanModel:
             naa = self._step_impl(
                 _entry, dt, freshwater=freshwater,
                 surface_forcing=surface_forcing, sponge=sponge, grid=_grid,
-                vertex_mask=vertex_mask, t_seconds=t_seconds, z_coord=z_coord, config=config, iwm_fields=iwm_fields)
+                vertex_mask=vertex_mask, t_seconds=t_seconds,
+                _apply_cold_start_after_reconcile=(
+                    _cfg_b.barotropic.barotropic_cold_start_after_reconcile
+                    == "nemo_mlf_baro_corr"),
+                z_coord=z_coord, config=config, iwm_fields=iwm_fields)
             naa = naa._replace(
                 u_before=state.u, v_before=state.v, T_before=state.T,
                 S_before=state.S, eta_before=state.eta,
@@ -9613,7 +9585,6 @@ class LatLonCGridOceanModel:
         #     combine degenerate to forward-Euler regardless of which method
         #     performs it, so there is nothing MLF-specific to transcribe here.
         if state.u_before is None:
-            self._warn_euler_start_skips_after_reconcile()
             _entry = state._replace(
                 u_before=state.u, v_before=state.v, T_before=state.T,
                 S_before=state.S, eta_before=state.eta,
@@ -9621,7 +9592,11 @@ class LatLonCGridOceanModel:
             naa = self._step_impl(
                 _entry, dt, freshwater=freshwater,
                 surface_forcing=surface_forcing, sponge=sponge, grid=_grid,
-                vertex_mask=vertex_mask, t_seconds=t_seconds, z_coord=z_coord, config=config, iwm_fields=iwm_fields)
+                vertex_mask=vertex_mask, t_seconds=t_seconds,
+                _apply_cold_start_after_reconcile=(
+                    _cfg_b.barotropic.barotropic_cold_start_after_reconcile
+                    == "nemo_mlf_baro_corr"),
+                z_coord=z_coord, config=config, iwm_fields=iwm_fields)
             naa = naa._replace(
                 u_before=state.u, v_before=state.v, T_before=state.T,
                 S_before=state.S, eta_before=state.eta,
