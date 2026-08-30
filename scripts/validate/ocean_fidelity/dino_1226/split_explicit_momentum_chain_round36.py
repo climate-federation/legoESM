@@ -213,11 +213,26 @@ def main() -> int:
         "delayed_oracle_wind": (delayed_oracle_u, delayed_oracle_v,
                                 rhs_u, rhs_v),
     }
-    rows = {
-        name: {"u": r35._metric(au, eu, wet_u, gate),
-               "v": r35._metric(av, ev, wet_v, gate)}
-        for name, (au, av, eu, ev) in arms.items()
-    }
+    rows = {}
+    for name, (au, av, eu, ev) in arms.items():
+        u_row = r35._metric(au, eu, wet_u, gate)
+        if name == "wind":
+            # The meridional DINO wind oracle is the structural zero used as
+            # the falsifier, so an RMS-normalized score is undefined. Gate it
+            # by exact equality instead of inventing a denominator.
+            v_exact = np.array_equal(av[wet_v], ev[wet_v])
+            v_row = {
+                "class_bar": 0.0,
+                "gate_name": "exact structural-zero wind",
+                "gate_status": "AT BAR" if v_exact else "DEBT",
+                "n": int(wet_v.sum()),
+                "normalized_rms_error": 0.0 if v_exact else float("inf"),
+                "per_element_max_error_over_nemo_rms": (
+                    0.0 if v_exact else float("inf")),
+            }
+        else:
+            v_row = r35._metric(av, ev, wet_v, gate)
+        rows[name] = {"u": u_row, "v": v_row}
     baseline_error = rows["baseline"]["u"]["normalized_rms_error"]
     delayed_error = rows["delayed_actual_wind"]["u"]["normalized_rms_error"]
     removal = 1.0 - delayed_error / baseline_error
