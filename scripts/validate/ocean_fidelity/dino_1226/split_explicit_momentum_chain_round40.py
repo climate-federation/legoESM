@@ -21,6 +21,7 @@ import numpy as np
 
 import kamm_twin_90d as twin
 import split_explicit_momentum_chain_round38 as r38
+import legoesm.ocean.dynamics.ocean_pe_latlon_cgrid as pe
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks_3d
 from zu_frc_term_walk import _load_full_3d
@@ -66,13 +67,51 @@ def main() -> int:
     with jax.disable_jit():
         _, diag = model.tendencies_with_diagnostics(
             state, surface_forcing=sf, dt=twin.DT, ldf_state=ldf)
+        um3, vm3 = compute_face_masks_3d(model.z_coord.is_active, model.grid)
+        qww, qhu, qhv = pe._nemo_qco_zad_operands(
+            state.eta.data, state.eta_before.data, state.u.data, state.v.data,
+            model.grid, model.z_coord, um3, vm3, model.z_coord.is_active,
+            2.0 * twin.DT)
 
     run = args.run_stepdump.resolve()
     with netCDF4.Dataset(run / "mesh_mask.nc") as ds:
+        area_t = np.asarray(ds["e1t"][0]) * np.asarray(ds["e2t"][0])
+        area_u = np.asarray(ds["e1u"][0]) * np.asarray(ds["e2u"][0])
+        area_v = np.asarray(ds["e1v"][0]) * np.asarray(ds["e2v"][0])
+        e3u0 = np.moveaxis(np.asarray(ds["e3u_0"][0]), 0, -1)
+        e3v0 = np.moveaxis(np.asarray(ds["e3v_0"][0]), 0, -1)
+        umask_full = np.moveaxis(np.asarray(ds["umask"][0]), 0, -1)
+        vmask_full = np.moveaxis(np.asarray(ds["vmask"][0]), 0, -1)
         masks = {
-            "u": np.moveaxis(np.asarray(ds["umask"][0]), 0, -1)[..., :35] > 0.5,
-            "v": np.moveaxis(np.asarray(ds["vmask"][0]), 0, -1)[..., :35] > 0.5,
+            "u": umask_full[..., :35] > 0.5,
+            "v": vmask_full[..., :35] > 0.5,
         }
+    weighted = area_t * np.asarray(state.eta.data)
+    hu0 = np.sum(e3u0 * umask_full, axis=-1)
+    hv0 = np.sum(e3v0 * vmask_full, axis=-1)
+    r3u = (0.5 * (weighted + np.roll(weighted, -1, axis=1))
+           / np.where(hu0 > 0.0, hu0, 1.0) / area_u)
+    north = np.empty_like(weighted)
+    north[:-1] = weighted[1:]
+    north[-1] = weighted[-1]
+    r3v = 0.5 * (weighted + north) / np.where(hv0 > 0.0, hv0, 1.0) / area_v
+    expected_hu = e3u0 * (1.0 + r3u[..., None] * umask_full)
+    expected_hv = e3v0 * (1.0 + r3v[..., None] * vmask_full)
+    ww_oracle = r38._load_ww(run / "wzv_dump_ww_call1.bin")
+    tmask = np.asarray(model.z_coord.is_active)
+    ww_diff = np.asarray(qww)[..., :36] - ww_oracle
+    operand_replay = {
+        "ww_normalized_rms_error": float(
+            np.sqrt(np.mean(ww_diff[tmask] ** 2))
+            / np.sqrt(np.mean(ww_oracle[tmask] ** 2))),
+        "ww_max_abs_error": float(np.max(np.abs(ww_diff[tmask]))),
+        "live_u_wet_max_abs_error": float(np.max(np.abs(
+            np.asarray(qhu)[:, 1:][umask_full > 0.5]
+            - expected_hu[umask_full > 0.5]))),
+        "live_v_wet_max_abs_error": float(np.max(np.abs(
+            np.asarray(qhv)[1:][vmask_full > 0.5]
+            - expected_hv[vmask_full > 0.5]))),
+    }
     rows = {}
     controls = {}
     for component in ("u", "v"):
@@ -112,6 +151,7 @@ def main() -> int:
         "backend": jax.default_backend(),
         "jax_enable_x64": bool(jax.config.jax_enable_x64),
         "rows": rows,
+        "operand_replay": operand_replay,
         "controls": controls,
         "round39_joint_arm": prior["arms"]["W1H1A1"],
         "bindings": {
