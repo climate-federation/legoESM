@@ -1110,8 +1110,10 @@ def main() -> int:
         ACCUMULATION_BAR)["pass"]
     if args.capture_bolus_operands:
         controls.update({
-            "bolus_current_normalized_red":
-                not bolus_operand_metrics["psi_current_normalized"]["pass"],
+            "bolus_current_normalized_or_guarded_plant_red": (
+                not zn_sqrt_metrics["guarded_floor"]["row8_8"]["pass"]
+                if args.exact_sqrt_production else
+                not bolus_operand_metrics["psi_current_normalized"]["pass"]),
             "bolus_sign_plant": not sweep.metrics(
                 -literal_psi[..., :35], oracle_psi, wet_psi, FOCUS,
                 ACCUMULATION_BAR)["pass"],
@@ -1150,17 +1152,23 @@ def main() -> int:
         })
     if args.post_chain_factorial:
         controls.update({
-            "post_chain_production_zaeiw_red":
-                not post_chain_metrics["production"]["zaeiw"]["pass"],
-            "post_chain_production_row8_8_red":
-                not post_chain_metrics["production"]["row8_8"]["pass"],
+            "post_chain_production_or_guarded_zaeiw_red": (
+                not zn_sqrt_metrics["guarded_floor"]["zaeiw"]["pass"]
+                if args.exact_sqrt_production else
+                not post_chain_metrics["production"]["zaeiw"]["pass"]),
+            "post_chain_production_or_guarded_row8_8_red": (
+                not zn_sqrt_metrics["guarded_floor"]["row8_8"]["pass"]
+                if args.exact_sqrt_production else
+                not post_chain_metrics["production"]["row8_8"]["pass"]),
         })
     if args.rossby_factorial:
         controls.update({
             "rossby_latitude_is_radians":
                 float(np.max(np.abs(raw_kappa["lat_t"]))) <= np.pi / 2.0,
-            "rossby_production_downstream_red":
-                not rossby_metrics["production"]["row8_8"]["pass"],
+            "rossby_production_or_guarded_downstream_red": (
+                not zn_sqrt_metrics["guarded_floor"]["row8_8"]["pass"]
+                if args.exact_sqrt_production else
+                not rossby_metrics["production"]["row8_8"]["pass"]),
             "rossby_direct_oracle_downstream_pass":
                 rossby_metrics["direct_oracle_zRo"]["row8_8"]["pass"],
         })
