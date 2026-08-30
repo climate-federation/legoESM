@@ -45,6 +45,7 @@ ROUND67_SHA = "2c1c1819f08cc07d9aa90fd43624285fe276558bbb5bba84aa97b3b83b345d95"
 ROUND68_SHA = "8e9a2ee7ee1969da86ee2ef24198047d6ea83ee14842753b528271453efaf9a0"
 ROUND69_SHA = "bd109e2869333a31b8b6a8410d3ec10f24acae94353ed1f35d60900ae5b62eb2"
 ROUND70_SHA = "d831bbcb89e06c8795a085103041293becedb8ac79c438f1302b44296b3314bc"
+ROUND71_SHA = "6500acfa930c0342430fd1e57cfb1da023b0978e8fda3561e6133ffe12368821"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -146,6 +147,7 @@ def main() -> int:
     parser.add_argument("--round68", type=Path)
     parser.add_argument("--round69", type=Path)
     parser.add_argument("--round70", type=Path)
+    parser.add_argument("--round71", type=Path)
     parser.add_argument("--hold-slow-forcing", action="store_true")
     parser.add_argument("--oracle-transport", action="store_true")
     parser.add_argument("--capture-cycle", action="store_true")
@@ -158,6 +160,7 @@ def main() -> int:
     parser.add_argument("--coupled-kappa-carry", action="store_true")
     parser.add_argument("--surface-kmm-carry", action="store_true")
     parser.add_argument("--exact-surface-kmm-carry", action="store_true")
+    parser.add_argument("--post-chain-factorial", action="store_true")
     parser.add_argument("--raw-artifact", type=Path, required=True)
     parser.add_argument("--nemo-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -359,6 +362,24 @@ def main() -> int:
                 "round 70 does not admit the exact-surface Kmm carry")
     elif args.round70 is not None:
         raise SystemExit("--round70 requires --exact-surface-kmm-carry")
+    prior71 = None
+    if args.post_chain_factorial:
+        if not args.exact_surface_kmm_carry:
+            raise SystemExit(
+                "--post-chain-factorial requires --exact-surface-kmm-carry")
+        if (args.round71 is None
+                or _sha(args.round71.resolve()) != ROUND71_SHA):
+            raise SystemExit("official round-71 exact-geometry receipt required")
+        prior71 = json.loads(args.round71.read_text())
+        if (prior71.get("disposition") != "ROW8_8_KAPPA_GEOMETRY_AT_BAR"
+                or not all(prior71["kappa_geometry_metrics"][name]["pass"]
+                           for name in ("e3w_Kmm", "rn2b"))
+                or prior71["kappa_operand_metrics"]["zaeiw"]["pass"]
+                or prior71["rows"][5]["metrics"]["n_diverged_columns"]
+                != 1071):
+            raise SystemExit("round 71 does not release the post-chain peel")
+    elif args.round71 is not None:
+        raise SystemExit("--round71 requires --post-chain-factorial")
     if _sha(args.raw_artifact.resolve()) != RAW_ARTIFACT_SHA:
         raise SystemExit("admitted held row-8 artifact changed")
     held = args.held_dir.resolve()
@@ -515,6 +536,13 @@ def main() -> int:
                 "wmask": np.asarray(raw_wmask),
                 "pn2": np.asarray(raw_pn2),
             }
+        if args.post_chain_factorial:
+            raw_operands.update({
+                "f_coriolis": np.asarray(kappa_args[8]),
+                "surface_mask": np.asarray(kappa_args[5]),
+                "omega": float(kappa_kwargs["omega"]),
+                "aei0": float(kappa_args[9].aei0),
+            })
         kappa_captures.append((
             np.asarray(result), np.asarray(replay),
             {name: np.asarray(value) for name, value in diagnostics.items()},
@@ -692,6 +720,7 @@ def main() -> int:
         }
     kappa_operand_metrics = {}
     kappa_geometry_metrics = {}
+    post_chain_metrics = {}
     if args.capture_kappa_operands:
         if len(kappa_captures) != 1:
             raise SystemExit(
@@ -732,6 +761,59 @@ def main() -> int:
             kappa_geometry_metrics = {
                 "e3w_Kmm": gm(raw_e3w, oracle_e3w),
                 "rn2b": gm(raw_kappa["pn2"], oracle_pn2),
+            }
+        if args.post_chain_factorial:
+            dtype = diagnostics["zRo"].dtype
+            ff_t = jnp.asarray(raw_kappa["f_coriolis"], dtype=dtype)
+            ssmask = jnp.asarray(raw_kappa["surface_mask"], dtype=dtype)
+            omega = jnp.asarray(raw_kappa["omega"], dtype=dtype)
+            aei0 = jnp.asarray(raw_kappa["aei0"], dtype=dtype)
+            rad = jnp.asarray(np.pi / 180.0, dtype=dtype)
+            z1_f20 = (jnp.asarray(1.0, dtype=dtype)
+                      / (jnp.asarray(2.0, dtype=dtype) * omega
+                         * jnp.sin(rad * jnp.asarray(20.0, dtype=dtype))))
+
+            def literal_post(ro_value, zah_value, zhw_value):
+                zaeiw_pre = ((ro_value * ro_value)
+                              * jnp.sqrt(zah_value / zhw_value)) * ssmask
+                zzaei = jnp.minimum(
+                    jnp.asarray(1.0, dtype=dtype),
+                    jnp.abs(ff_t * z1_f20)) * zaeiw_pre
+                return jnp.minimum(zzaei, aei0)
+
+            own = {name: jnp.asarray(diagnostics[name], dtype=dtype)
+                   for name in ("zRo", "zah", "zhw")}
+            ora = {name: jnp.asarray(oracle2[name], dtype=dtype)
+                   for name in ("zRo", "zah", "zhw")}
+            arms = {
+                "literal_own": literal_post(
+                    own["zRo"], own["zah"], own["zhw"]),
+                "literal_oracle_zRo": literal_post(
+                    ora["zRo"], own["zah"], own["zhw"]),
+                "literal_oracle_zah_zhw": literal_post(
+                    own["zRo"], ora["zah"], ora["zhw"]),
+                "literal_all_oracle": literal_post(
+                    ora["zRo"], ora["zah"], ora["zhw"]),
+            }
+            u_surf_mask = jnp.asarray(bargs[5][:, 1:], dtype=dtype)
+            for arm_name, arm_kappa in arms.items():
+                arm_args = list(bargs)
+                arm_args[0] = arm_kappa
+                arm_u = np.asarray(original_bolus(*arm_args, **bkwargs)[0])
+                arm_aeiu = (0.5 * (arm_kappa
+                                    + jnp.roll(arm_kappa, -1, axis=1))
+                            * u_surf_mask)
+                post_chain_metrics[arm_name] = {
+                    "zaeiw": km(arm_kappa, oracle2["zaeiw"]),
+                    "aeiu": km(arm_aeiu, oracle_aeiu[..., 0]),
+                    "row8_8": sweep.metrics(
+                        arm_u[..., :35], oracle_u_eiv, wet_psi,
+                        FOCUS, ACCUMULATION_BAR),
+                }
+            post_chain_metrics["production"] = {
+                "zaeiw": kappa_operand_metrics["zaeiw"],
+                "aeiu": kappa_operand_metrics["aeiu_face"],
+                "row8_8": bolus_operand_metrics["captured_u_increment"],
             }
     specs = (
         ("8.3", "uu(Kmm) / zptu", "traadv.F90:301-304", "un", POINTWISE_BAR),
@@ -822,6 +904,11 @@ def main() -> int:
             or (not prior70["kappa_geometry_metrics"]["e3w_Kmm"]["pass"]
                 and prior70["rows"][5]["metrics"]["max_column_error"]
                 >= 8.0e-4)),
+        "round71_exact_geometry_debt_admitted": (
+            prior71 is None
+            or (all(prior71["kappa_geometry_metrics"][name]["pass"]
+                    for name in ("e3w_Kmm", "rn2b"))
+                and not prior71["kappa_operand_metrics"]["zaeiw"]["pass"])),
         "round56_unheld_red": (
             prior56 is None
             or prior56["rows"][0]["status"] == "DIVERGED"),
@@ -882,6 +969,13 @@ def main() -> int:
             "rn2b_level_roll_plant": not sweep.metrics(
                 np.roll(raw_kappa["pn2"][..., :35], 1, axis=2), oracle_pn2,
                 wet_w, FOCUS, ACCUMULATION_BAR)["pass"],
+        })
+    if args.post_chain_factorial:
+        controls.update({
+            "post_chain_production_zaeiw_red":
+                not post_chain_metrics["production"]["zaeiw"]["pass"],
+            "post_chain_production_row8_8_red":
+                not post_chain_metrics["production"]["row8_8"]["pass"],
         })
     controls["all_scored_finite"] = all(
         row.get("status") == "ORDERED_BLOCKED"
@@ -951,9 +1045,26 @@ def main() -> int:
                        if not e3w_pass and rn2_pass else
                        "ROW8_8_LOCALIZED_TO_RN2B"
                        if not rn2_pass else "ROW8_8_KAPPA_GEOMETRY_AT_BAR")
+    if args.post_chain_factorial and valid:
+        def arm_pass(name):
+            return all(metric["pass"]
+                       for metric in post_chain_metrics[name].values())
+
+        if not arm_pass("literal_all_oracle"):
+            disposition = "INVALID_LITERAL_REPLAY"
+        elif arm_pass("literal_own"):
+            disposition = "ROW8_8_LOCALIZED_TO_POST_CHAIN_ASSOCIATION"
+        elif arm_pass("literal_oracle_zRo"):
+            disposition = "ROW8_8_LOCALIZED_TO_ZRO_PRECURSOR"
+        elif arm_pass("literal_oracle_zah_zhw"):
+            disposition = "ROW8_8_LOCALIZED_TO_ZAH_ZHW_PRECURSOR"
+        else:
+            disposition = "ROW8_8_POST_CHAIN_COMPOSITION_OPEN"
     nemo = args.nemo_root.resolve()
     receipt = {
-        "schema": ("dino-split-explicit-momentum-chain-round71-v1"
+        "schema": ("dino-split-explicit-momentum-chain-round72-v1"
+                   if args.post_chain_factorial else
+                   "dino-split-explicit-momentum-chain-round71-v1"
                    if args.exact_surface_kmm_carry else
                    "dino-split-explicit-momentum-chain-round64-v1"
                    if args.live_thickness_entry else
@@ -979,6 +1090,8 @@ def main() -> int:
            if args.capture_kappa_operands else {}),
         **({"kappa_geometry_metrics": kappa_geometry_metrics}
            if args.capture_kappa_geometry else {}),
+        **({"post_chain_metrics": post_chain_metrics}
+           if args.post_chain_factorial else {}),
         "focus_ji": [list(x) for x in FOCUS],
         "bindings": {
             "round54": _sha(args.round54.resolve()),
@@ -1010,12 +1123,16 @@ def main() -> int:
                if args.surface_kmm_carry else {}),
             **({"round70": _sha(args.round70.resolve())}
                if args.exact_surface_kmm_carry else {}),
+            **({"round71": _sha(args.round71.resolve())}
+               if args.post_chain_factorial else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(
                 root / "docs/ocean/fidelity" /
-                ("PREREG_split_explicit_momentum_chain_round71.md"
+                ("PREREG_split_explicit_momentum_chain_round72.md"
+                 if args.post_chain_factorial else
+                 "PREREG_split_explicit_momentum_chain_round71.md"
                  if args.exact_surface_kmm_carry else
                  "PREREG_split_explicit_momentum_chain_round70.md"
                  if args.surface_kmm_carry else
@@ -1045,7 +1162,9 @@ def main() -> int:
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
             "nemo_ldftra": _sha(nemo / "cfgs/DINO/MY_SRC/ldftra.F90"),
         },
-        "arm": ("exact_surface_kmm_carry"
+        "arm": ("post_chain_factorial"
+                if args.post_chain_factorial else
+                "exact_surface_kmm_carry"
                 if args.exact_surface_kmm_carry else
                 "surface_kmm_carry" if args.surface_kmm_carry else
                 "coupled_kappa_carry" if args.coupled_kappa_carry else
