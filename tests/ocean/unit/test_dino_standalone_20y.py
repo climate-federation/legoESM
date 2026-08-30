@@ -87,7 +87,6 @@ def test_runner_surface_has_no_restart_or_bridge_selector():
 
 def test_claim_length_is_admitted_after_first_step_corrector():
     """Red-before-green gate for the T1 cold-start physics row."""
-    assert RUNNER.FIRST_STEP_EQUIVALENT is True
     assert RUNNER.claim_admission_reasons() == ()
 
 

@@ -50,13 +50,16 @@ DAYS_PER_YEAR = 360
 YEARS = 20
 MEMBERS = tuple(range(6))
 PERTURB_EPS = 1.0e-14
-FIRST_STEP_EQUIVALENT = True
 
 
 def claim_admission_reasons() -> tuple[str, ...]:
     """Known build blockers that make a 20-year science arm inadmissible."""
     reasons = []
-    if not FIRST_STEP_EQUIVALENT:
+    cfg = dino_config_for_recipe(RECIPE)
+    if not (
+            cfg.barotropic_after_reconcile == "nemo_mlf_baro_corr"
+            and cfg.barotropic_cold_start_after_reconcile
+            == "nemo_mlf_baro_corr"):
         reasons.append("cold-start corrector is not source-equivalent")
     return tuple(reasons)
 
