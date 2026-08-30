@@ -225,3 +225,24 @@ controls without importing the unrelated failed ZDF control. This extension
 is the too-large instrumentation stop for this round. Rows 5 (`wzv`), 6
 (`mlf_baro_corr`), free-surface filter, remaining momentum RHS, and tracer tail
 remain ordered-blocked at row 4.
+
+## Round-37 held scoped U/V term ladder
+
+Round 37 is **DESIGNED, NOT RUN**. Enumeration of the admitted day-180
+deterministic-writer inventory found full-halo D03--D06 cumulative U/V
+streams and dedicated KEG, ZAD, VOR, LDF, and HPG increments already present.
+No new NEMO writer, Fortran patch, build-tree copy, GPU run, or MPI run is
+therefore justified. The committed producer instead captures production
+public momentum diagnostics twice on CPU/fp64 and the bracket requires all
+15 files to be byte-identical before scoring.
+
+The exact, source-ordered ownership ladder is vertical advection/ZAD,
+vorticity/Coriolis, lateral friction, the KE-gradient+HPG group, then the D06
+total. Individual KEG and HPG partitions are diagnostic partials and cannot
+own the interval alone. Every comparable 3-D term uses the unchanged
+accumulating `1e-12` class bar. Full-halo NEMO streams are admitted by the
+retained manifest; native twin staggering and the cited U/V interior crop are
+checked explicitly. Roll, sign, wet-NaN, and `2x` plants must fire for both
+components. The four-block producer/capture/bracket/score handoff is in
+`dino_split_explicit_momentum_chain_round37_handoff.md`. Row 4 and all later
+registry rows remain ordered-blocked until its held receipt is returned.
