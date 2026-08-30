@@ -63,6 +63,7 @@ def _link_view(run: Path, view: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run", type=Path, required=True)
+    parser.add_argument("--entry-restart", type=Path, required=True)
     parser.add_argument("--round32", type=Path, required=True)
     parser.add_argument("--manifest-artifact", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -86,6 +87,9 @@ def main() -> int:
         raise SystemExit("CPU/fp64 required")
 
     run = args.run.resolve()
+    entry_restart = args.entry_restart.resolve()
+    if not entry_restart.is_file():
+        raise SystemExit(f"missing day-180 entry restart {entry_restart}")
     manifest_artifact = json.loads(args.manifest_artifact.read_text())
     manifest = manifest_artifact["bracket"]["off_stream_manifest"]
     for source_name in (*ALIASES.values(), "zdf_dump_u1_prestress.bin",
@@ -120,8 +124,9 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="dino-row33-view.") as tmp:
         view = Path(tmp)
         _link_view(run, view)
+        (view / "DINO_00005760_restart.nc").symlink_to(entry_restart)
         s17.RUN_DIR = str(view)
-        s17.RESTART = "DINO_00005761_restart.nc"
+        s17.RESTART = "DINO_00005760_restart.nc"
         s17._report = capture_report
         s17._run_with_hook = capture_run
         s17.bridge_nemo_to_legoesm_topo = current_bridge
@@ -179,12 +184,13 @@ def main() -> int:
         "scorer": _sha(Path(__file__).resolve()),
         "preregistration": _sha(
             root / "docs/ocean/fidelity/PREREG_split_explicit_momentum_chain_round33.md"),
+        "entry_restart": _sha(entry_restart),
     }
     for source_name in (*ALIASES.values(), "zdf_dump_u1_prestress.bin",
                         "zdf_dump_u1_poststress.bin",
                         "zdf_dump_v1_prestress.bin",
                         "zdf_dump_v1_poststress.bin", "dump_avm.bin",
-                        "mesh_mask.nc", "DINO_00005761_restart.nc"):
+                        "mesh_mask.nc"):
         bindings[source_name] = _sha(run / source_name)
     receipt = {
         "schema": "dino-split-explicit-momentum-chain-round33-row4-v1",

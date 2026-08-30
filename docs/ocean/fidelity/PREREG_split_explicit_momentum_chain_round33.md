@@ -78,3 +78,13 @@ restoration are mandatory; all captured arrays must be finite. Any failed
 receipt, shape, reconstruction, control, or restoration makes the artifact
 `INVALID`, not evidence. No SLOT block is allocated because all oracle
 operands already exist.
+
+## Instrument amendment after invalid attempt 1
+
+Attempt 1 stopped at reconstruction control C1 and produced no artifact. The
+scorer had used the retained run's `DINO_00005761_restart.nc`, which is the
+output of the measured step (`kt=5761`, `adatrj=180.03125`), as though it were
+the entry state. The required entry restart is the original sequential lane's
+`DINO_00005760_restart.nc` (`kt=5760`, `adatrj=180.0`). The scorer now takes
+that path explicitly, hashes it, and refuses a missing file. No operand,
+statistic, bar, or disposition rule changes; the failed C1 receipt is invalid.
