@@ -577,3 +577,20 @@ cross-interface implementation above; row 6 cannot be promoted before its
 production replay reaches the unchanged pointwise bar. The free-surface
 filter, momentum-RHS tail, and tracer-tail chains remain ordered-blocked behind
 that production certification.
+
+## Round 50: row 6 certified on the production carry
+
+Artifact `/tmp/dino_split_explicit_momentum_chain_round50.json`, SHA-256
+`9d17606b1dfe4190456df58cb1a0e4aaac6e6456c86849fb93dbfc39f3b7dc80`,
+classifies `ROW6_MLF_BARO_CORR_AT_BAR_UPSTREAM_TARGET_EXACT`. The actual
+`_nemo_mlf_step` carries raw pre-projection Kaa SSH, rebuilds live native-face
+QCO thicknesses and reciprocals, and executes `stpmlf.F90:752-765` in source
+order. With the retained oracle primary target, U is bit-exact and V has
+normalized RMS `1.88713e-20` and pointwise maximum/RMS `1.10082e-17`, both
+inside the unchanged `1e-15` bar. The stale-Kaa and point/roll plants fire.
+
+The production-target arm remains explicitly qualified: U/V normalized RMS
+are `1.02615e-16/1.42064e-16`, but pointwise maximum/RMS are
+`2.98986e-15/5.63618e-15`. This is the registered upstream primary-target
+debt, not a local row-6 failure. Row 6 is promoted conditionally in the same
+upstream-exact frame as rows 4--5 and releases the free-surface-filter chain.
