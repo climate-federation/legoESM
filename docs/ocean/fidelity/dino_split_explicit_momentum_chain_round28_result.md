@@ -594,3 +594,14 @@ are `1.02615e-16/1.42064e-16`, but pointwise maximum/RMS are
 `2.98986e-15/5.63618e-15`. This is the registered upstream primary-target
 debt, not a local row-6 failure. Row 6 is promoted conditionally in the same
 upstream-exact frame as rows 4--5 and releases the free-surface-filter chain.
+
+## Round 51: free-surface filter chain is bit-exact
+
+Artifact `/tmp/dino_split_explicit_momentum_chain_round51.json`, SHA-256
+`aaa492d7107ba00096d1d93c9240127856365dae71f56fbe65f41f611e1146c1`,
+classifies `FREE_SURFACE_FILTER_AT_BAR`. `ssh_atf` and the filtered
+`r3t_f/r3u_f/r3v_f` are all bit-exact under the unchanged pointwise bar. The
+correct Kaa operand is final `spg_dump_pssh_final`, not the pre-split
+`ssh_nxt` state: substituting the latter gives SSH normalized RMS
+`7.60141e-6` and maximum/RMS `8.33751e-5`, so the wrong-time-level control
+fires strongly. The momentum tail is released.
