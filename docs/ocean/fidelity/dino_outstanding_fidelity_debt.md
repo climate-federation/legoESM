@@ -141,7 +141,7 @@ arm, three arms. No new instrument.
 | 4 | **Re-calibrate bottom drag against the corrected drag** (~2× weaker in open water, ~4× over stepped bathymetry after two independent fixes). | D2.1 | one coefficient sweep + a gate re-run |
 | 5 | **Close the step-1 reconciliation gap for real** — a return-contract change so `_step_impl` surfaces the barotropic depth mean on its `_apply_implicit_vmix=True` path. | D2.4 | ~8 call sites + their tests |
 | 6 | **fp64 snapshots on two ensemble members (days 30/90).** fp32 storage is a live confound twice over: it bounds the measured ensemble spread from above, and it manufactured the "NEMO convects more often" finding (casting NEMO to fp32 reproduces 98.7–99.9% of the apparent gap). Days 10–70 are currently unmeasurable at fp32. | new | rerun two existing members; no model change |
-| 7 | **The multi-year horizon.** Everything certified is one year from a common state; the deep ocean has not adjusted, and two verdict metrics are recorded as **upper bounds only** because their spread is still growing. | new | the largest compute item on the board |
+| 7 | **The multi-year horizon.** Everything certified is one year from a common state; the deep ocean has not adjusted, and two verdict metrics are recorded as **upper bounds only** because their spread is still growing. **REGISTERED, NOT RUN (2026-08-30):** `PREREG_multi_year_climate_equivalence.md` freezes a six-member-per-side, horizon-matched 20-year climate-statistics ensemble; `dino_multi_year_climate_equivalence_handoff.md` carries the exact held arms. | registered / held | the largest compute item on the board |
 | 8 | **The from-rest raise decision.** Needs an owner's call, not a lane's. | carried | decision |
 
 ### On the board, no work assigned
