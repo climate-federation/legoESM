@@ -661,3 +661,11 @@ under a held NEMO slow forcing and held after-level target, so it was not an
 unheld transport replay. Round 57 therefore substitutes only the already-
 registered `zu_frc/zv_frc` streams before reopening any downstream tracer
 operand.
+
+**Population correction before adjudication.** The first round-55--57 scorer
+revision used nonzero `e3u` as its wet mask. That admitted `10,348` columns,
+including 590 dry U faces; the registered NEMO `umask` population is
+`9,758` columns / `336,338` elements. Those receipts remain useful as red
+plants for the structural Kmm fix, but their column counts and maxima are
+retracted for ownership. Round 58 reruns the unheld and held arms on the exact
+captured 3-D U mask before any transport-accumulator change.

@@ -210,7 +210,13 @@ def main() -> int:
         "pu_total": _load(held / "fct_entry_dump_pu_total.bin"),
         "upstream": _load(held / "fct_dump_zwx_up.bin"),
     }
-    wet = _load(held / "fct_entry_dump_e3u.bin") != 0.0
+    # Registry population is NEMO's real 3-D umask, not nonzero geometric
+    # thickness.  The latter admits 590 dry surface faces because e3u remains
+    # defined under land and produced the invalid 10,348-column round-55--57
+    # population.  The captured production mask is the bridge of that umask.
+    wet = np.asarray(u_mask, dtype=bool)[:, 1:, :35]
+    if int(np.any(wet, axis=-1).sum()) != 9758 or int(wet.sum()) != 336338:
+        raise SystemExit("registered U population changed from 9758/336338")
     specs = (
         ("8.3", "uu(Kmm) / zptu", "traadv.F90:301-304", "un", POINTWISE_BAR),
         ("8.4", "e2u", "traadv.F90:329", "e2u", POINTWISE_BAR),
@@ -252,7 +258,8 @@ def main() -> int:
     controls["all_scored_finite"] = all(
         row.get("status") == "ORDERED_BLOCKED"
         or row["metrics"]["n_nonfinite_wet_elements"] == 0 for row in rows)
-    controls["population_nonempty"] = int(wet.sum()) > 0
+    controls["registered_population_exact"] = (
+        int(np.any(wet, axis=-1).sum()) == 9758 and int(wet.sum()) == 336338)
     valid = all(controls.values())
     disposition = (("TRACER_ENTRY_ROW8_AT_BAR_UPSTREAM_FORCING_EXACT"
                     if args.hold_slow_forcing else "TRACER_ENTRY_ROW8_AT_BAR")
