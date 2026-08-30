@@ -1125,6 +1125,14 @@ class BarotropicConfig(NamedTuple):
     # retains the shared FV operator. ``nemo_literal`` preserves NEMO's
     # e2u*U*H / e1v*V*H operand order and multiply-by-reciprocal divergence.
     barotropic_continuity_evaluation: str = "generic"
+    # Arithmetic used only for the 3-D -> 2-D velocity reduction that seeds
+    # the split-explicit window. ``generic`` retains the shared fused stacked
+    # reduction byte-for-byte. ``nemo_literal`` preserves the active DINO MLF
+    # restart construction: live Kbb QCO face thickness, surface-to-bottom
+    # accumulation, then r1_hu_0/(1+r3u) (V analog), istate.F90:149-155.
+    # Requires barotropic_seed_face_depth="nemo_ssh_avg" so the live face
+    # thickness and its separately associated reciprocal describe one state.
+    barotropic_seed_evaluation: str = "generic"
     # Which OUTER time level seeds the FROZEN in-window EEN barotropic-Coriolis
     # coefficients (#1226 zero-deviation item 4; only read when
     # barotropic_coriolis is "een"/"een_metric").  NEMO freezes the dyn_cor_2D

@@ -127,6 +127,20 @@ def nemo_ab3am4_coeff_arrays(n_loop: int, alpha: float = _NEMO_BT_ALPHA,
     return jnp.asarray(za), jnp.asarray(zb)
 
 
+def _nemo_literal_seed_depth_mean(field, h_face, face_mask, r1_live):
+    """NEMO ``istate.F90:149-155`` source-ordered barotropic seed mean.
+
+    Keep the vertical recurrence explicit: a stacked ``jnp.sum`` is permitted
+    to use a tree reduction, whereas the active NEMO source left-accumulates
+    one level at a time before multiplying by the separately constructed live
+    reciprocal depth.  The Python loop is static under JIT and differentiable.
+    """
+    acc = jnp.zeros_like(field[..., 0])
+    for jk in range(field.shape[-1]):
+        acc = acc + h_face[..., jk] * field[..., jk]
+    return (acc * r1_live) * face_mask
+
+
 def _depth_average_to_faces(
     u_3d: jnp.ndarray,
     v_3d: jnp.ndarray,
@@ -138,6 +152,7 @@ def _depth_average_to_faces(
     grid=None,
     *,
     seed_face_depth: str = "min_rule",
+    seed_evaluation: str = "generic",
     eta_dyn: jnp.ndarray | None = None,
     H_bathy: jnp.ndarray | None = None,
     area: jnp.ndarray | None = None,
@@ -179,6 +194,11 @@ def _depth_average_to_faces(
         It selects the face-depth bookkeeping convention, not the
         velocity, EXCEPT at the floor. Requires ``eta_dyn``/``H_bathy``/
         ``area`` when selected. Unknown value raises (dispatch hardening).
+    seed_evaluation : ``BarotropicConfig.barotropic_seed_evaluation`` value.
+        ``"generic"`` preserves the legacy shared stacked reduction.
+        ``"nemo_literal"`` requires ``seed_face_depth="nemo_ssh_avg"`` and
+        evaluates NEMO's live-thickness, source-ordered recurrence followed by
+        its separately associated reciprocal depth (``istate.F90:149-155``).
     eta_dyn, H_bathy, area : required only when ``seed_face_depth ==
         "nemo_ssh_avg"``.
 
@@ -191,6 +211,14 @@ def _depth_average_to_faces(
         raise ValueError(
             "unknown barotropic_seed_face_depth scheme "
             f"{seed_face_depth!r}: must be one of ('min_rule', 'nemo_ssh_avg').")
+    if seed_evaluation not in ("generic", "nemo_literal"):
+        raise ValueError(
+            "unknown barotropic_seed_evaluation scheme "
+            f"{seed_evaluation!r}: must be one of ('generic', 'nemo_literal').")
+    if seed_evaluation == "nemo_literal" and seed_face_depth != "nemo_ssh_avg":
+        raise ValueError(
+            "barotropic_seed_evaluation='nemo_literal' requires "
+            "barotropic_seed_face_depth='nemo_ssh_avg'.")
 
     # h at u/v-faces — min-rule (MOM6/MITgcm hFacW convention).
     # Must match the PE tendency and slow-forcing depth-average which
@@ -200,6 +228,7 @@ def _depth_average_to_faces(
     h_u = min_cell_to_uface(h_k)
     h_v = min_cell_to_vface(h_k, grid)
 
+    _literal_r1_u = _literal_r1_v = None
     if seed_face_depth == "nemo_ssh_avg":
         # Rescale the min-rule 3-D face thickness by the NEMO/min-rule TOTAL
         # column face-depth ratio (see docstring above) — the loop-entry
@@ -210,8 +239,10 @@ def _depth_average_to_faces(
         H_total_2d = jnp.sum(h_k, axis=-1)
         H_u_minrule = min_cell_to_uface(H_total_2d)
         H_v_minrule = min_cell_to_vface(H_total_2d, grid)
-        H_u_nemo, H_v_nemo = nemo_ssh_avg_face_depth(
-            eta_dyn, H_bathy, mask, u_mask, v_mask, grid, area, dtype)
+        _prep = _nemo_ssh_avg_prep(H_bathy, mask, grid, dtype)
+        H_u_nemo, H_v_nemo, _literal_r1_u, _literal_r1_v = _nemo_ssh_avg_apply(
+            eta_dyn, u_mask, v_mask, grid, area, _prep,
+            return_literal_inverse=True)
         # `_eps` is a bare numerical divide-by-zero guard for THIS ratio's
         # own denominator (`H_u_minrule`) — deliberately NOT
         # `min_water_col`/`config.min_water_column_m` (the caller's
@@ -227,6 +258,18 @@ def _depth_average_to_faces(
         ratio_v = jnp.where(v_mask > 0.5, H_v_nemo / jnp.maximum(H_v_minrule, _eps), 1.0)
         h_u = h_u * ratio_u[..., jnp.newaxis]
         h_v = h_v * ratio_v[..., jnp.newaxis]
+
+    if seed_evaluation == "nemo_literal":
+        # NEMO DINO MLF restart initialization, istate.F90:149-155:
+        # start from zero, add one live-thickness transport per level in source
+        # order, then apply the separately associated live reciprocal depth.
+        # A Python loop is static at trace time, JIT/autodiff-safe, and prevents
+        # XLA from replacing this source-ordered recurrence by the generic
+        # stacked tree reduction that measured 7,302/7,035 bit mismatches.
+        return (_nemo_literal_seed_depth_mean(
+                    u_3d, h_u, u_mask, _literal_r1_u),
+                _nemo_literal_seed_depth_mean(
+                    v_3d, h_v, v_mask, _literal_r1_v))
 
     # Barotropic-mean face velocities: thickness-weighted depth average
     # masked by the face mask (#517 item 1: shared depth_average_to_faces;
@@ -256,7 +299,8 @@ def _nemo_ssh_avg_prep(H_bathy, mask, grid, dtype, _nfold_mask=None):
     return H_u_ref, H_v_ref, _r1_e1e2u, _r1_e1e2v, _nfold_mask
 
 
-def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep):
+def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
+                        return_literal_inverse=False):
     """Apply the NEMO ssh-average face-depth formula at one ``eta`` snapshot,
     given the loop-invariant ``prep = _nemo_ssh_avg_prep(...)`` tuple.  See
     :func:`nemo_ssh_avg_face_depth` for the full formula docstring."""
@@ -267,6 +311,13 @@ def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep):
     ssh_avg_u = 0.5 * _r1_e1e2u[:, :-1] * (area_w * eta_w + area * eta_dyn)
     ssh_avg_u = jnp.concatenate([ssh_avg_u, ssh_avg_u[:, 0:1]], axis=1)
     H_u = (H_u_ref + ssh_avg_u) * u_mask
+    # ``where(mask, 1/H, 0)`` still evaluates 1/H on masked zero-depth faces
+    # under JAX and can poison reverse-mode derivatives with inf/NaN.  Replace
+    # the dry denominator before division, then zero the result.
+    H_u_ref_safe = jnp.where(u_mask > 0.5, H_u_ref, 1.0)
+    r1_u_ref = jnp.where(u_mask > 0.5, 1.0 / H_u_ref_safe, 0.0)
+    r3_u = ssh_avg_u * r1_u_ref
+    r1_u = (r1_u_ref / (1.0 + r3_u)) * u_mask
 
     area_pad = pad_ns_zero(area)
     eta_pad = pad_ns_zero(eta_dyn)
@@ -282,6 +333,12 @@ def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep):
         ssh_avg_v = apply_north_fold(
             ssh_avg_v, ssh_avg_north, grid, north_mask=_nfold_mask)
     H_v = (H_v_ref + ssh_avg_v) * v_mask
+    H_v_ref_safe = jnp.where(v_mask > 0.5, H_v_ref, 1.0)
+    r1_v_ref = jnp.where(v_mask > 0.5, 1.0 / H_v_ref_safe, 0.0)
+    r3_v = ssh_avg_v * r1_v_ref
+    r1_v = (r1_v_ref / (1.0 + r3_v)) * v_mask
+    if return_literal_inverse:
+        return H_u, H_v, r1_u, r1_v
     return H_u, H_v
 
 
@@ -1449,9 +1506,11 @@ def barotropic_substeps_latlon_cgrid(
     # BarotropicConfig.barotropic_seed_face_depth docstring).  Validated at
     # fn entry via _depth_average_to_faces's own dispatch-hardening raise.
     _seed_fd = config.barotropic.barotropic_seed_face_depth
+    _seed_eval = config.barotropic.barotropic_seed_evaluation
     U_bar, V_bar = _depth_average_to_faces(
         u, v, h_k, min_water_col, mask, u_mask, v_mask, grid,
-        seed_face_depth=_seed_fd, eta_dyn=eta, H_bathy=H_bathy, area=_area,
+        seed_face_depth=_seed_fd, seed_evaluation=_seed_eval,
+        eta_dyn=eta, H_bathy=H_bathy, area=_area,
     )
     # 3-D depth-mean REPLACEMENT reference (u' = u − ū_corr): the NOW-level
     # barotropic mean over the NOW eta.  With the MLF before-level seed the
@@ -1907,10 +1966,12 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
     # BarotropicConfig.barotropic_seed_face_depth docstring) — same option,
     # same dispatch, as the standard-halo entry point above.
     _seed_fd = config.barotropic.barotropic_seed_face_depth
+    _seed_eval = config.barotropic.barotropic_seed_evaluation
     _area_seed = grid.area.astype(_dt)
     U_bar, V_bar = _depth_average_to_faces(
         u, v, h_k, min_water_col, mask, u_mask, v_mask, grid,
-        seed_face_depth=_seed_fd, eta_dyn=eta, H_bathy=H_bathy,
+        seed_face_depth=_seed_fd, seed_evaluation=_seed_eval,
+        eta_dyn=eta, H_bathy=H_bathy,
         area=_area_seed,
     )
 

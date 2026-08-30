@@ -41,6 +41,7 @@ from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     barotropic_substeps_latlon_cgrid,
     _depth_average_to_faces,
+    _nemo_literal_seed_depth_mean,
 )
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     divergence_cgrid, min_cell_to_uface, min_cell_to_vface,
@@ -390,6 +391,105 @@ class TestBarotropicSeedFaceDepth:
             barotropic_substeps_latlon_cgrid(
                 state, 60.0, 4, grid, z, cfg, add_barotropic_coriolis=False)
 
+    def test_unknown_seed_evaluation_raises_at_leaf_and_substep(self):
+        args = (
+            jnp.zeros((4, 5, 2)), jnp.zeros((5, 4, 2)),
+            jnp.ones((4, 4, 2)), jnp.asarray(1.0), jnp.ones((4, 4)),
+            jnp.ones((4, 5)), jnp.ones((5, 4)),
+        )
+        with pytest.raises(ValueError, match="barotropic_seed_evaluation"):
+            _depth_average_to_faces(*args, seed_evaluation="bogus_scheme")
+
+        grid, z, state = _flat_basin()
+        cfg = _cfg(barotropic_seed_evaluation="bogus_scheme")
+        with pytest.raises(ValueError, match="barotropic_seed_evaluation"):
+            barotropic_substeps_latlon_cgrid(
+                state, 60.0, 4, grid, z, cfg, add_barotropic_coriolis=False)
+
+    def test_nemo_literal_requires_nemo_ssh_avg_face_depth(self):
+        with pytest.raises(ValueError, match="requires.*nemo_ssh_avg"):
+            _depth_average_to_faces(
+                jnp.zeros((4, 5, 2)), jnp.zeros((5, 4, 2)),
+                jnp.ones((4, 4, 2)), jnp.asarray(1.0), jnp.ones((4, 4)),
+                jnp.ones((4, 5)), jnp.ones((5, 4)),
+                seed_face_depth="min_rule", seed_evaluation="nemo_literal")
+
+    def test_nemo_literal_source_order_jit_grad_and_planted_reversal(self):
+        """Pin ``istate.F90:149-155`` association independently of geometry.
+
+        The cancellation-heavy terms make source order observable.  Reversing
+        the level recurrence is the planted red control: it must not reproduce
+        the registered surface-to-bottom result.
+        """
+        field_np = np.asarray([[[1.0e16, 1.0, -1.0e16, 1.0]]], dtype=np.float64)
+        h_np = np.ones_like(field_np)
+        mask_np = np.ones((1, 1), dtype=np.float64)
+        r1_np = np.asarray([[0.25]], dtype=np.float64)
+
+        expected = np.zeros((1, 1), dtype=np.float64)
+        for jk in range(field_np.shape[-1]):
+            expected = expected + h_np[..., jk] * field_np[..., jk]
+        expected = (expected * r1_np) * mask_np
+
+        field = jnp.asarray(field_np)
+        h_face = jnp.asarray(h_np)
+        face_mask = jnp.asarray(mask_np)
+        r1_live = jnp.asarray(r1_np)
+        got = _nemo_literal_seed_depth_mean(field, h_face, face_mask, r1_live)
+        got_jit = jax.jit(_nemo_literal_seed_depth_mean)(
+            field, h_face, face_mask, r1_live)
+        np.testing.assert_array_equal(np.asarray(got), expected)
+        np.testing.assert_array_equal(np.asarray(got_jit), expected)
+
+        reversed_acc = np.zeros((1, 1), dtype=np.float64)
+        for jk in reversed(range(field_np.shape[-1])):
+            reversed_acc = reversed_acc + h_np[..., jk] * field_np[..., jk]
+        reversed_value = (reversed_acc * r1_np) * mask_np
+        assert not np.array_equal(reversed_value, expected), (
+            "planted reversed vertical recurrence did not separate from the "
+            "NEMO source order")
+
+        grad = jax.grad(lambda f: jnp.sum(
+            _nemo_literal_seed_depth_mean(f, h_face, face_mask, r1_live)))(field)
+        assert np.all(np.isfinite(np.asarray(grad)))
+        assert np.any(np.asarray(grad) != 0.0)
+
+    def test_nemo_literal_before_ssh_is_observable_against_now_control(self):
+        """A nonuniform BEFORE/NOW SSH pair must not collapse to one seed.
+
+        This is the unit-scale red control for the time-level owner measured in
+        round 18: the MLF caller supplies ``eta_init`` (BEFORE), and the seed
+        thickness/reciprocal must be constructed from that same value.
+        """
+        grid, z, state = _flat_basin(
+            n_lat=8, n_lon=16, H=1000.0, lat_cap_deg=90.0)
+        key_u, key_v = jax.random.split(jax.random.PRNGKey(149155))
+        u3 = jax.random.normal(key_u, state.u.data.shape) * state.u_mask.data[..., None]
+        v3 = jax.random.normal(key_v, state.v.data.shape) * state.v_mask.data[..., None]
+        eta_before = (0.31 * jnp.sin(grid.lon2d)
+                      + 0.09 * jnp.cos(2.0 * grid.lat2d)) * state.land_mask.data
+        eta_now = (-0.27 * jnp.cos(2.0 * grid.lon2d)
+                   + 0.07 * jnp.sin(grid.lat2d)) * state.land_mask.data
+        area = grid.area.astype(jnp.float64)
+        common = (jnp.asarray(0.0), state.land_mask.data,
+                  state.u_mask.data, state.v_mask.data, grid)
+
+        h_before = compute_layer_thickness(
+            eta_before, state.H_bathy.data, z, min_water_column_m=0.0)
+        seed_before = _depth_average_to_faces(
+            u3, v3, h_before, *common,
+            seed_face_depth="nemo_ssh_avg", seed_evaluation="nemo_literal",
+            eta_dyn=eta_before, H_bathy=state.H_bathy.data, area=area)
+        h_now = compute_layer_thickness(
+            eta_now, state.H_bathy.data, z, min_water_column_m=0.0)
+        seed_now = _depth_average_to_faces(
+            u3, v3, h_now, *common,
+            seed_face_depth="nemo_ssh_avg", seed_evaluation="nemo_literal",
+            eta_dyn=eta_now, H_bathy=state.H_bathy.data, area=area)
+
+        assert np.any(np.asarray(seed_before[0]) != np.asarray(seed_now[0]))
+        assert np.any(np.asarray(seed_before[1]) != np.asarray(seed_now[1]))
+
     def test_default_min_rule_byte_identical_to_pre_change(self):
         """Default is "min_rule" — the new kwarg is purely additive; a run
         with the option left at default must reproduce a run from BEFORE the
@@ -417,15 +517,17 @@ class TestBarotropicSeedFaceDepth:
         U_post, V_post = _depth_average_to_faces(
             state.u.data, state.v.data, h_k, min_wc, state.land_mask.data,
             state.u_mask.data, state.v_mask.data, grid,
-            seed_face_depth="min_rule")
+            seed_face_depth="min_rule", seed_evaluation="generic")
         np.testing.assert_array_equal(np.asarray(U_pre), np.asarray(U_post))
         np.testing.assert_array_equal(np.asarray(V_pre), np.asarray(V_post))
 
         # Full substep loop: default config vs explicit "min_rule".
         cfg_default = _cfg(barotropic_time_filter="cosine")
         cfg_explicit = _cfg(barotropic_time_filter="cosine",
-                            barotropic_seed_face_depth="min_rule")
+                            barotropic_seed_face_depth="min_rule",
+                            barotropic_seed_evaluation="generic")
         assert cfg_default.barotropic.barotropic_seed_face_depth == "min_rule"
+        assert cfg_default.barotropic.barotropic_seed_evaluation == "generic"
         sn_a, (Hu_a, Hv_a) = barotropic_substeps_latlon_cgrid(
             state, 60.0, 30, grid, z, cfg_default, add_barotropic_coriolis=True)
         sn_b, (Hu_b, Hv_b) = barotropic_substeps_latlon_cgrid(
@@ -675,9 +777,11 @@ class TestBarotropicSeedFaceDepth:
         for name in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
             c = dino_config_for_recipe(name)
             assert c.barotropic_seed_face_depth == "nemo_ssh_avg", name
+            assert c.barotropic_seed_evaluation == "nemo_literal", name
             grid = create_latlon_grid(n_lat=8, n_lon=16)
             mc, _ = dino_lat_lon_model_config(grid, c)
             assert mc.barotropic.barotropic_seed_face_depth == "nemo_ssh_avg", name
+            assert mc.barotropic.barotropic_seed_evaluation == "nemo_literal", name
 
         for name, spec in DINO_RECIPES.items():
             if name in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
@@ -686,3 +790,4 @@ class TestBarotropicSeedFaceDepth:
             # #1226: nemo_ssh_avg seed is a kamm-only override; every other
             # recipe must stay at the bit-identical legacy default.
             assert c.barotropic_seed_face_depth == "min_rule", name
+            assert c.barotropic_seed_evaluation == "generic", name
