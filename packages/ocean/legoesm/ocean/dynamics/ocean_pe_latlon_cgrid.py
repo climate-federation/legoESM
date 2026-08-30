@@ -1387,7 +1387,7 @@ def _bc_vertical_and_depthmean_velocity(
 
 def _nemo_qco_zad_operands(
     eta_now, eta_before, u, v, grid, z_coord, u_mask_3d, v_mask_3d,
-    mask_3d, dt, freshwater_eta_tendency=None,
+    mask_3d, dt, freshwater_eta_tendency=None, return_debug=False,
 ):
     """Coupled Kaa-continuity ``ww`` + live Kmm face thickness for ZAD.
 
@@ -1431,9 +1431,11 @@ def _nemo_qco_zad_operands(
     tmask = jnp.asarray(mask_3d, dtype=eta_now.dtype)
     h0 = jnp.zeros_like(eta_now)
     for jk in range(nlev):
-        h0 = h0 + e3t0[..., jk] * tmask[..., jk]
+        h0 = jax.lax.optimization_barrier(
+            h0 + e3t0[..., jk] * tmask[..., jk])
     h0_safe = jnp.where(h0 > 0.0, h0, 1.0)
-    r3_now = eta_now / h0_safe
+    r1_h0 = jax.lax.optimization_barrier(1.0 / h0_safe)
+    r3_now = jax.lax.optimization_barrier(eta_now * r1_h0)
     live_t = e3t0 * (1.0 + r3_now[..., None] * tmask) * tmask
     raw_e2u = getattr(z_coord, "nemo_e2u", None)
     raw_e1v = getattr(z_coord, "nemo_e1v", None)
@@ -1478,7 +1480,6 @@ def _nemo_qco_zad_operands(
         eta_before - jax.lax.optimization_barrier(dt * barotropic_div))
     eta_after = jax.lax.optimization_barrier(
         eta_after + jax.lax.optimization_barrier(dt * fw)) * tmask[..., 0]
-    r1_h0 = jax.lax.optimization_barrier(1.0 / h0_safe)
     r3_after = jax.lax.optimization_barrier(eta_after * r1_h0)
     r3_before = jax.lax.optimization_barrier(eta_before * r1_h0)
     r3_delta = jax.lax.optimization_barrier(r3_after - r3_before)
