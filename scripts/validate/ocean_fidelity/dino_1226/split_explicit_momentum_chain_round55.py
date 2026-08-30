@@ -472,11 +472,14 @@ def main() -> int:
             oracle_slope_kp1, -1, axis=1)
         oracle_aeiu_sum = oracle_aeiu + oracle_aeiu_kp1
         own_oracle_slope = (((-0.25 * e2u_native[..., None])
-                             * oracle_slope_sum) * aeiu_sum) * wumask
+                             * oracle_slope_sum) * aeiu_sum[..., :35]) \
+            * wumask[..., :35]
         own_oracle_aeiu = (((-0.25 * e2u_native[..., None])
-                            * slope_sum) * oracle_aeiu_sum) * wumask
+                            * slope_sum[..., :35]) * oracle_aeiu_sum) \
+            * wumask[..., :35]
         oracle_both = (((-0.25 * e2u_native[..., None])
-                        * oracle_slope_sum) * oracle_aeiu_sum) * wumask
+                        * oracle_slope_sum) * oracle_aeiu_sum) \
+            * wumask[..., :35]
         wet_psi = np.asarray(wumask[..., :35], dtype=bool)
         if int(np.any(wet_psi, axis=-1).sum()) != 9758:
             raise SystemExit("GM psi registered U-column population changed")
