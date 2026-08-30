@@ -1386,12 +1386,17 @@ def compute_nemo_native_slopes(
         # where() is mathematically equivalent but elides the zero arm and
         # changes the last bit at the strict row-30/Redi bar.
         zfk = (~in_ml_w).astype(dtype)
+        _outside_i = lax.optimization_barrier(zfk * swi_int)
+        _outside_j = lax.optimization_barrier(zfk * swj_int)
+        _inside_depth = lax.optimization_barrier((1.0 - zfk) * zck)
+        _inside_i = lax.optimization_barrier(
+            _inside_depth * anc_i[:, :, None])
+        _inside_j = lax.optimization_barrier(
+            _inside_depth * anc_j[:, :, None])
         wslpi = lax.optimization_barrier(
-            (zfk * swi_int
-             + (1.0 - zfk) * zck * anc_i[:, :, None]) * wmask3)
+            lax.optimization_barrier(_outside_i + _inside_i) * wmask3)
         wslpj = lax.optimization_barrier(
-            (zfk * swj_int
-             + (1.0 - zfk) * zck * anc_j[:, :, None]) * wmask3)
+            lax.optimization_barrier(_outside_j + _inside_j) * wmask3)
     else:
         wslpi = jnp.where(in_ml_w, zck * anc_i[:, :, None], swi_int) * wmask3
         wslpj = jnp.where(in_ml_w, zck * anc_j[:, :, None], swj_int) * wmask3
