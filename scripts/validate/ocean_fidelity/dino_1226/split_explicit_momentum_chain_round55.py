@@ -35,6 +35,7 @@ ROUND56_SHA = "c114565363360439e155deec96882828e553887ba49b1bfbfd940c50c6998e29"
 ROUND59_SHA = "85ea27cce4804d98f281940fe472e798d9fa64c741c23bb55e3fca40ee9ca677"
 ROUND60_SHA = "b3ef5c0534ff1348dbdb581686aa602cc1d9eca9ef61336ca0b4130217e54e2d"
 ROUND61_SHA = "b8f7a376a0a13fd384cb4195cf27db8ff6f82c71e576bb8d449451903d3bd07c"
+ROUND62_SHA = "290caa5bb3c3187d5ea13fe62276f299bd47953b556615dfab3f4443d1597a86"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -103,9 +104,11 @@ def main() -> int:
     parser.add_argument("--round59", type=Path)
     parser.add_argument("--round60", type=Path)
     parser.add_argument("--round61", type=Path)
+    parser.add_argument("--round62", type=Path)
     parser.add_argument("--hold-slow-forcing", action="store_true")
     parser.add_argument("--oracle-transport", action="store_true")
     parser.add_argument("--capture-cycle", action="store_true")
+    parser.add_argument("--direct-cycle-entry", action="store_true")
     parser.add_argument("--raw-artifact", type=Path, required=True)
     parser.add_argument("--nemo-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -165,6 +168,22 @@ def main() -> int:
             raise SystemExit("round 61 does not admit the Kmm-cycle capture")
     elif args.round61 is not None:
         raise SystemExit("--round61 requires --capture-cycle")
+    prior62 = None
+    if args.direct_cycle_entry:
+        if not args.capture_cycle:
+            raise SystemExit("--direct-cycle-entry requires --capture-cycle")
+        if (args.round62 is None
+                or _sha(args.round62.resolve()) != ROUND62_SHA):
+            raise SystemExit("official round-62 capture receipt required")
+        prior62 = json.loads(args.round62.read_text())
+        capture62 = prior62.get("cycle_capture_metrics", {})
+        if (prior62.get("disposition") != "ROW8_3_CYCLE_CAPTURE_UNRESOLVED"
+                or not capture62.get("production_Hu_avg", {}).get("pass")
+                or not capture62.get("consumed_Hu_avg", {}).get("pass")
+                or not capture62.get("cycle_corrected_u", {}).get("pass")):
+            raise SystemExit("round 62 does not release the direct-cycle score")
+    elif args.round62 is not None:
+        raise SystemExit("--round62 requires --direct-cycle-entry")
     if _sha(args.raw_artifact.resolve()) != RAW_ARTIFACT_SHA:
         raise SystemExit("admitted held row-8 artifact changed")
     held = args.held_dir.resolve()
@@ -274,8 +293,9 @@ def main() -> int:
         base_u, h_u, out=np.zeros_like(base_u),
         where=(np.asarray(u_mask, dtype=bool) & (h_u != 0.0)))
     e2u = np.asarray(model.grid.dy_u)[:, :, None]
+    proxy_un = u_corrected[:, 1:, :35]
     values = {
-        "un": u_corrected[:, 1:, :35],
+        "un": proxy_un,
         "e2u": np.broadcast_to(e2u[:, 1:, :], u_corrected[:, 1:, :35].shape),
         "e3u": h_u[:, 1:, :35],
         "e2e3u": (e2u * h_u)[:, 1:, :35],
@@ -323,6 +343,8 @@ def main() -> int:
                 cycle_captures[0]["corrected_u"][:, 1:, :35],
                 oracle["un"], wet, FOCUS, POINTWISE_BAR),
         }
+        if args.direct_cycle_entry:
+            values["un"] = cycle_captures[0]["corrected_u"][:, 1:, :35]
     specs = (
         ("8.3", "uu(Kmm) / zptu", "traadv.F90:301-304", "un", POINTWISE_BAR),
         ("8.4", "e2u", "traadv.F90:329", "e2u", POINTWISE_BAR),
@@ -352,6 +374,9 @@ def main() -> int:
         "round61_null_admitted": (
             prior61 is None
             or prior61["rows"][0]["metrics"]["n_diverged_columns"] == 104),
+        "round62_direct_cycle_exact": (
+            prior62 is None
+            or prior62["cycle_capture_metrics"]["cycle_corrected_u"]["pass"]),
         "cycle_capture_count": (
             len(cycle_captures) >= 1 if args.capture_cycle
             else len(cycle_captures) == 0),
@@ -361,6 +386,10 @@ def main() -> int:
         "consumed_transport_at_bar": (
             capture_metrics["consumed_Hu_avg"]["pass"]
             if args.capture_cycle else True),
+        "mass_flux_division_proxy_red_104": (
+            sweep.metrics(proxy_un, oracle["un"], wet, FOCUS,
+                          POINTWISE_BAR)["n_diverged_columns"] == 104
+            if args.direct_cycle_entry else True),
         "round56_unheld_red": (
             prior56 is None
             or prior56["rows"][0]["status"] == "DIVERGED"),
@@ -388,13 +417,15 @@ def main() -> int:
     controls["registered_population_exact"] = (
         int(np.any(wet, axis=-1).sum()) == 9758 and int(wet.sum()) == 336338)
     valid = all(controls.values())
-    disposition = (("TRACER_ENTRY_ROW8_AT_BAR_ORACLE_TRANSPORT"
+    disposition = (("TRACER_ENTRY_ROW8_AT_BAR_DIRECT_KMM"
+                    if args.direct_cycle_entry else
+                    "TRACER_ENTRY_ROW8_AT_BAR_ORACLE_TRANSPORT"
                     if args.oracle_transport else
                     "TRACER_ENTRY_ROW8_AT_BAR_UPSTREAM_FORCING_EXACT"
                     if args.hold_slow_forcing else "TRACER_ENTRY_ROW8_AT_BAR")
                    if valid and first is None
                    else "INVALID" if not valid else f"TRACER_ENTRY_DIVERGED_{first}")
-    if args.capture_cycle and valid:
+    if args.capture_cycle and valid and not args.direct_cycle_entry:
         production_at_bar = capture_metrics["production_Hu_avg"]["pass"]
         consumed_at_bar = capture_metrics["consumed_Hu_avg"]["pass"]
         cycle_at_bar = capture_metrics["cycle_corrected_u"]["pass"]
@@ -408,7 +439,9 @@ def main() -> int:
             disposition = "ROW8_3_CYCLE_CAPTURE_UNRESOLVED"
     nemo = args.nemo_root.resolve()
     receipt = {
-        "schema": ("dino-split-explicit-momentum-chain-round62-v1"
+        "schema": ("dino-split-explicit-momentum-chain-round63-v1"
+                   if args.direct_cycle_entry else
+                   "dino-split-explicit-momentum-chain-round62-v1"
                    if args.capture_cycle else
                    "dino-split-explicit-momentum-chain-round61-v1"
                    if args.oracle_transport else
@@ -432,12 +465,16 @@ def main() -> int:
                if args.oracle_transport else {}),
             **({"round61": _sha(args.round61.resolve())}
                if args.capture_cycle else {}),
+            **({"round62": _sha(args.round62.resolve())}
+               if args.direct_cycle_entry else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(
                 root / "docs/ocean/fidelity" /
-                ("PREREG_split_explicit_momentum_chain_round62.md"
+                ("PREREG_split_explicit_momentum_chain_round63.md"
+                 if args.direct_cycle_entry else
+                 "PREREG_split_explicit_momentum_chain_round62.md"
                  if args.capture_cycle else
                  "PREREG_split_explicit_momentum_chain_round61.md"
                  if args.oracle_transport else
@@ -449,14 +486,16 @@ def main() -> int:
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
             "nemo_ldftra": _sha(nemo / "cfgs/DINO/MY_SRC/ldftra.F90"),
         },
-        "arm": ("cycle_capture" if args.capture_cycle else
+        "arm": ("direct_cycle_entry" if args.direct_cycle_entry else
+                "cycle_capture" if args.capture_cycle else
                 "oracle_transport" if args.oracle_transport else
                 "held_slow_forcing" if args.hold_slow_forcing else
                 "production"),
         "ordered_next": ("redi_t" if disposition in {
             "TRACER_ENTRY_ROW8_AT_BAR",
             "TRACER_ENTRY_ROW8_AT_BAR_UPSTREAM_FORCING_EXACT",
-            "TRACER_ENTRY_ROW8_AT_BAR_ORACLE_TRANSPORT"} else first),
+            "TRACER_ENTRY_ROW8_AT_BAR_ORACLE_TRANSPORT",
+            "TRACER_ENTRY_ROW8_AT_BAR_DIRECT_KMM"} else first),
     }
     args.output.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     print(f"disposition={disposition} first_diverged_subrow={first}")
