@@ -4264,6 +4264,13 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             mask_3d, qco_dt,
             freshwater_eta_tendency=zad_freshwater_eta_tendency,
         )
+        # The W/H pair is a materialized NEMO stage boundary.  Without these
+        # barriers XLA fuses the full tendency graph back through continuity;
+        # the standalone dynzad kernel then differs at every active point even
+        # though its captured operands are bit-exact (round 40).
+        zad_w = jax.lax.optimization_barrier(zad_w)
+        zad_h_u = jax.lax.optimization_barrier(zad_h_u)
+        zad_h_v = jax.lax.optimization_barrier(zad_h_v)
 
     # --- 5. Coriolis ---
     # Coriolis is NOT included in the returned momentum tendencies.
