@@ -114,3 +114,30 @@ scorer tees the 68-row `fori_loop`, compares carry-in to NEMO substep-start,
 and binds trace rows 1/2 to the existing entry/post-substep-1 dumps. Only the
 scorer block in `dino_split_explicit_momentum_chain_round32_resumed_handoff.md`
 must rerun; the NEMO artifacts remain admitted.
+
+## Official round-32 closure and ordered promotion
+
+The official corrected scorer artifact is
+`/tmp/dino_split_explicit_momentum_chain_round32_substep_trace.json`, SHA-256
+`0b284d7c8880646850daee86b2b85fb13fb65540402e2e9a02760b0ed60ba86f`.
+It binds commit `588cbae24e8605008cf3ccac5dff55fb9c5460a9`, the admitted NEMO source,
+binary, patch, bracket, and three trace streams, and classifies
+`NO_STRICT_SSH_FAILURE`. There is no first strict SSH, U, or V failure in any
+of the 68 split-explicit substeps. The final U/V point errors are
+`4.83e-16`/`4.44e-16`, below the registered `1.4e-14` linear-accumulation
+bound by a scalar factor of about 30: the remaining last-bit errors cancel
+rather than accumulate. The actual substep-1, full 68-row capture, entry and
+post-substep-1 alignment, `fori_loop` restoration, identity, and five-
+`nextafter` planted controls all fire. The retained four-`nextafter` plant is
+documented as structurally insufficient and is superseded by the firing
+five-`nextafter` plant.
+
+This receipt certifies the split-explicit recurrence end to end. Rows
+1.1--1.4 and row 2 are promoted from the ordered gate. Row 3 is also promoted
+as `INHERITED-BOUNDED`: its local QCO depth and composition operands remain
+exonerated by the round-30 factorial, and the certified recurrence proves that
+the inherited at-bar SSH last bits never create a strict downstream failure.
+This is an ordered-gate release, not a relabeling of the row-3 NEAR-CLASS
+pointwise statistic or a relaxation of its bar. The next executable registry
+row is row 4 (`dyn_zdf`), followed by row 5 (`wzv`), row 6
+(`mlf_baro_corr`), the free-surface filter, momentum RHS, and tracer tail.
