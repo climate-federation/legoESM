@@ -105,3 +105,12 @@ formally blocked by inherited row-1.4 last bits. Rows 4 (`dyn_zdf`), 5 (`wzv`),
 6 (`mlf_baro_corr`), then the free-surface filter, momentum RHS, tracer tail,
 and remaining registry chains are ORDERED-BLOCKED pending the round-32 held
 trajectory.
+
+Round-32 execution addendum: the host completed the build, both sequential
+arms, and the exact 223/223+3 bracket. The first scorer attempt is invalid and
+makes no science claim: it intercepted `scan` while the faithful card executes
+`fori_loop`, and it treated the pre-update trace as post-update. The corrected
+scorer tees the 68-row `fori_loop`, compares carry-in to NEMO substep-start,
+and binds trace rows 1/2 to the existing entry/post-substep-1 dumps. Only the
+scorer block in `dino_split_explicit_momentum_chain_round32_resumed_handoff.md`
+must rerun; the NEMO artifacts remain admitted.

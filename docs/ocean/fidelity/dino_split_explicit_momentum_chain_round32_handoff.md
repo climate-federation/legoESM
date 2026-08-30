@@ -6,6 +6,11 @@ base is the cumulative round-26 source (deterministic writer + continuity
 operands + EEN coefficients + bottom/update operands); the OFF binary is its
 retained SHA-pinned executable. The new patch claims units 9440--9442.
 
+**Scorer correction:** blocks 1--3 completed and remain admitted. The block-4
+scorer below incorrectly intercepts `scan`; the faithful card executes
+`fori_loop`. Do not rerun this file's block 4. Use only the corrected block in
+`dino_split_explicit_momentum_chain_round32_resumed_handoff.md`.
+
 ## Block 1 — guarded cumulative source copy and ON build
 
 ```bash
