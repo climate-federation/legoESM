@@ -1387,7 +1387,7 @@ def _bc_vertical_and_depthmean_velocity(
 
 def _nemo_qco_zad_operands(
     eta_now, eta_before, u, v, grid, z_coord, u_mask_3d, v_mask_3d,
-    mask_3d, dt, freshwater_eta_tendency=None, return_debug=False,
+    mask_3d, dt, freshwater_eta_tendency=None,
 ):
     """Coupled Kaa-continuity ``ww`` + live Kmm face thickness for ZAD.
 
