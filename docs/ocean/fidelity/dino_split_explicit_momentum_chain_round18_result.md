@@ -22,9 +22,13 @@ Round 17's use of NOW SSH is reclassified as the registered time-level control,
 not an input defect requiring a new writer.
 
 The authoritative artifact is
-`dino_split_explicit_momentum_chain_round18_seed_artifact.json`; its external
-run copy was initially SHA-256
-`4a95fccfa966a006b4573788f2337a3ba25b5ab052d52ea79063af5245226e29`.
+`dino_split_explicit_momentum_chain_round18_seed_artifact.json`, SHA-256
+`001ac4ab57c89b8d762d25e7c171e3ef5a231411e692e5bb38ed648c7c6f808a`.
+The pre-adjudication external run copy was SHA-256
+`4a95fccfa966a006b4573788f2337a3ba25b5ab052d52ea79063af5245226e29`;
+the numerical arrays and scores are identical, while the committed copy emits
+the preregistered combined disposition and binds adjudication commit
+`ed4c9f7ba1cb735e7aee91bec502b2dd4964ad5c`.
 It binds the round-17 control artifact, round-16 recurrence, restart, mesh, seed
 dumps, CPU/fp64, populations, script, and planted controls.
 
