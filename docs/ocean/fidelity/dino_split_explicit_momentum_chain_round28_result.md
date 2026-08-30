@@ -190,3 +190,38 @@ the barotropic removal. Production currently lets the explicit wind enter the
 state before its baroclinic strip (`ocean_model_latlon_cgrid.py:7160-7180,
 7275-7296`). Round 36 preregisters the additive placement decomposition before
 changing that ordering.
+
+## Official round-36 RHS peel and next stop
+
+The registered additive artifact is
+`/tmp/dino_split_explicit_momentum_chain_round36.json`, SHA-256
+`f680200f2a3733558d1de7be7f97f5a80e575c003cbebf554fc1aa80e4428270`.
+It binds commit `30c7cc2c746`, reconstructs its captured baseline from the
+no-wind and stripped-wind terms at the accumulating bar, and passes every
+identity, restoration, V-zero, roll, NaN, and planted-bar control. The result
+is `WIND_PLACEMENT_REFUTED`:
+
+| arm | U normalized RMS | V normalized RMS |
+|---|---:|---:|
+| production baseline | `7.44406e-3` | `1.25751e-5` |
+| no-wind RHS | `6.74635e-3` | `1.25751e-5` |
+| wind deposit | `3.80291e-6` | exact structural zero |
+| delayed actual wind | `6.47452e-3` | bit-identical to baseline |
+| delayed NEMO wind | `6.47446e-3` | bit-identical to baseline |
+
+Delaying wind removes only `0.130243289` of the baseline U error, far below
+the preregistered `0.90` majority bar. The already-carried centered-wind fix
+is confirmed independently by the `3.8e-6` deposit residual; neither its
+arithmetic nor its position owns row 4. The remaining first operand is the
+no-wind pre-`dyn_zdf` momentum RHS.
+
+The existing `acc_momentum_budget.py` was tried first, as required, but its
+run is INVALID and prints no term verdict. Before reaching D03--D06 it applies
+an old whole-ZDF uniformity control requiring the un-restored top/bottom RMS
+ratio `<3.0`; the current faithful epoch measures `3.26` and the probe stops.
+That bar is not relaxed post hoc. Round 37 preregisters a scoped U/V
+D03--D06 accumulator scorer that retains the relevant time-level and closure
+controls without importing the unrelated failed ZDF control. This extension
+is the too-large instrumentation stop for this round. Rows 5 (`wzv`), 6
+(`mlf_baro_corr`), free-surface filter, remaining momentum RHS, and tracer tail
+remain ordered-blocked at row 4.
