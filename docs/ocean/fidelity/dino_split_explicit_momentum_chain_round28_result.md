@@ -273,3 +273,92 @@ dimensionless normalized RMS error. The former explains the stopped closure
 gate; it does not reassign the row-4 residual, and round 36 already refuted
 wind ownership at 13% removal. Rows 4 onward remain held pending the corrected
 round-37 capture/bracket/score cascade.
+
+## Official round-37 RHS ladder
+
+The corrected scoped ladder completed with artifact
+`/tmp/dino_split_explicit_momentum_chain_round37.json`, SHA-256
+`053bafb547e66aa09a2f0a357c8bce3da5ba808689e3654b726e77d7f0ee0f23`,
+and exact duplicate bracket
+`bce8c5a037690487d7149010ab99826c7c498df202bc90da3b5a44a6c668b062`.
+All closure, dedicated-increment, identity, roll, sign, wet-NaN, and two-bar
+controls fire. The first failing exact D03--D06 term is vertical advection
+(ZAD): U normalized RMS `1.4248796516210466e-5`, V
+`5.7019720173785526e-5`. The later vorticity, lateral-friction, KE-gradient +
+HPG, and D06 rows remain ordered behind it. This localizes the earlier row-4
+assembled-RHS error; it does not equate the ZAD metric with the larger
+`7.444e-3` raw-RHS boundary metric.
+
+NEMO's active stock operator is `dynzad.F90:83-119`: zero surface carry,
+surface-to-bottom `jk=1..jpk-2`, `e1e2t*ww(jk+1)` neighbour sums, Kmm velocity
+shear, live `e3u/e3v(Kmm)` division, carried interface term, and a carried-only
+bottom cell. `stpmlf.F90:275` computes the `ww` consumed by `dyn_adv` at
+`:309`; the post-split call is not this operand.
+
+## Rounds 38--39: ZAD is a QCO `ww` x face-thickness composition
+
+Round 38 replayed the previously known `ww` inheritance at the exact day-180
+round-37 state. Artifact
+`/tmp/dino_split_explicit_momentum_chain_round38.json`, SHA-256
+`51737434a48a2c625d0ac5472ab4a5914eca32a4a5d615034abb57ec993fb79b`,
+reproduces the retained production diagnostic and a direct production-kernel
+call bit exactly. Kbb/before velocity is decisively worse (`3.34e-3/3.44e-2`),
+and NEMO call 2 is worse than the structurally correct call 1. Call-1 `ww`
+reduces U error from `1.42488e-5` to `4.17258e-6` (70.716%) and V from
+`5.70197e-5` to `6.08806e-6` (89.323%). It is causal, but neither component
+meets the preregistered 90% majority rule, so the historical one-operand
+`wzv` ownership claim is retracted for this matched state.
+
+Round 39 then ran the registered 2^3 retained-input factorial over call-1
+`ww` (W), source-literal live `e3u/e3v(Kmm)` (H), and explicit
+`dynzad.F90:83-119` association (A). Artifact
+`/tmp/dino_split_explicit_momentum_chain_round39.json`, SHA-256
+`7104c30ad692241f13c828ecd75eadaee284762e64b619d45243471c35b18748`,
+binds exact Kmm U/V and exact wet T/U/V metrics and passes every registered
+control. Results are decisive:
+
+| arm | U normalized RMS | V normalized RMS |
+|---|---:|---:|
+| production W0H0A0 | `1.42488e-5` | `5.70197e-5` |
+| H only W0H1A0 | `1.51413e-5` | `6.07680e-5` |
+| W only W1H0A0 | `4.17258e-6` | `6.08806e-6` |
+| W + H W1H1A0 | `2.55945e-16` | `6.08581e-16` |
+| W + H + A W1H1A1 | `2.33481e-16` | `5.98622e-16` |
+
+H conditional on W removes `0.99999999994/0.99999999990` of the remaining
+U/V error. A is inert at roughly `1e-17` effect. H alone makes the production
+result worse, while W + H closes both components at the accumulating `1e-12`
+bar. The owner is therefore the **interaction of NEMO QCO call-1 `ww` and live
+Kmm face thickness**, not velocity timing, call timing, recurrence, source
+association, or partial-cell bottom handling. The older divisor-only
+refutation remains correct in its one-factor context; it concealed this
+cancelling pair.
+
+### Coupled fix design and ordered stop
+
+A thickness-only patch is forbidden by the measured cancellation: it is
+faithful locally but worsens both production rows. The required production
+change is one coupled selector, provisionally `zad_qco_evaluation`, with no
+independently selectable W/H half-arms:
+
+1. at the DINO MLF step entry, predict Kaa SSH from the same current-volume
+   continuity used by NEMO `ssh_nxt` (`stpmlf.F90:248`);
+2. use Kbb/Kmm/Kaa SSH to evaluate the literal QCO `wzv` recurrence
+   (`sshwzv.F90:218-227`);
+3. build live Kmm U/V face thickness through the already-established raw-mesh
+   `dom_qco_r3c` operands;
+4. pass both operands together into ZAD before assembling the slow momentum
+   RHS, preserving the current public diagnostic and autodiff contracts.
+
+The selector must be faithful by default on only `nemo_dino_kamm` and
+`nemo_dino_kamm_mlf`; all other cards must be byte-pinned. Validation requires
+unknown/dependency-red config tests, synthetic source-literal W/H tests, JIT
+and gradient coverage, diagnostic closure, the round-39 full-arm day-180
+target, then round-37 and raw row-4 replays. This is an integrator/state-
+contract restructure rather than a safe local fix for this round.
+
+Ordered disposition: row 4's first failing term is fully owned by the W x H
+composition but remains unfixed; row 5 (`wzv`) is the same architectural
+operand and is open. Row 6 (`mlf_baro_corr`), free-surface filter, later
+momentum-RHS rows, and tracer tail remain ordered-blocked. No held run is
+needed: the next action is the coupled production implementation above.
