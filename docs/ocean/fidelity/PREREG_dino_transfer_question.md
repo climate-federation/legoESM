@@ -67,13 +67,20 @@ The faithful `nemo_dino_kamm_mlf` configuration can be requested through
 `legoesm.ocean.recipes.assemble_ocean_config`, and resolves identically to the
 oracle DINO factory path.
 
-At preregistration time this hypothesis is **not already true by inspection**.
-`packages/ocean/legoesm/ocean/recipes.py` contains `nemo_dino_v1`, documented as
-the cruder Wright/KPP, forward-Euler approximation. It does not contain the
-faithful MLF card. `nemo_dino_v1` is therefore a negative control, never an
-alias or admissible substitute. T3 requires a distinct catalog entry whose
-name and version are recorded in the artifact. Adding such an entry is a
-separate implementation change; this lane does not silently make it.
+At the preregistration parent this hypothesis was **false by source
+inspection**. `packages/ocean/legoesm/ocean/recipes.py` contained only
+`nemo_dino_v1`, documented as the cruder Wright/KPP, forward-Euler
+approximation; the faithful card was not catalog-reachable. That is the frozen
+pre-change T3 finding. `nemo_dino_v1` remains the negative control, never an
+alias or admissible substitute.
+
+**ASKED catalog choice (2026-08-30):** add the distinct public name
+`nemo_dino_kamm_mlf_v1`. The entry and committed
+`recipe_transfer_identity.py` probe implement the already-registered positive
+arm. The name denotes the Kamm DINO setup's campaign-certified MLF structural
+identity; dimensionful setup objects retain their explicit setup ownership.
+The source-level reachability finding does not pre-judge the post-change
+identity gate: only its zero-row artifact may do that.
 
 ### Arms
 

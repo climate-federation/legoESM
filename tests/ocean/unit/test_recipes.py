@@ -38,6 +38,7 @@ class TestRegistry:
         assert "legoesm_linear_v1" in all_recipes
         assert "veros_faithful_v1" in all_recipes
         assert "nemo_dino_v1" in all_recipes
+        assert "nemo_dino_kamm_mlf_v1" in all_recipes
         assert "legoesm_linear_mpas_v1" in all_recipes
         # The proven OMIP NEMO-match recipes (#500) appear in the menu.
         assert "omip_nemo_match_mpas_v1" in all_recipes
@@ -112,6 +113,21 @@ class TestCatalogMatchesFactories:
         mc, _ = dino_lat_lon_model_config(grid, DINOConfig())
         for k, v in get_recipe("nemo_dino_v1").items():
             assert mc.flat_get(k) == v, k
+
+    def test_nemo_dino_kamm_mlf_v1_is_faithful_dino_dycore(self):
+        """Every catalog-owned field matches the resolved faithful card."""
+        from legoesm.grids.latlon import create_mercator_grid
+        from legoesm.ocean.experiments.dino import (
+            dino_config_for_recipe,
+            dino_lat_lon_model_config,
+        )
+        grid = create_mercator_grid(n_lon=16, lat_max_deg=70.0,
+                                    lon_west_deg=0.0, lon_east_deg=50.0)
+        mc, _ = dino_lat_lon_model_config(
+            grid, dino_config_for_recipe("nemo_dino_kamm_mlf"))
+        for key, expected in get_recipe(
+                "nemo_dino_kamm_mlf_v1", "latlon").items():
+            assert mc.flat_get(key) == expected, key
 
     def test_omip_nemo_match_mpas_v1_is_factory_dycore(self):
         """Drift guard: catalog == nemo_match_mpas_model_config scheme fields."""

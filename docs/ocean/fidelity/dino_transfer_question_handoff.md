@@ -15,8 +15,8 @@ not come from inline or throwaway probes.
 
 ```text
 SLOT __SLOT_TRANSFER_PRODUCER_COMMIT__ VALUE=
-SLOT __SLOT_T3_CATALOG_RECIPE__ VALUE=
-SLOT __SLOT_T3_IDENTITY_PROBE_RELATIVE_PATH__ VALUE=
+SLOT __SLOT_T3_CATALOG_RECIPE__ VALUE=nemo_dino_kamm_mlf_v1
+SLOT __SLOT_T3_IDENTITY_PROBE_RELATIVE_PATH__ VALUE=scripts/validate/ocean_fidelity/dino_1226/recipe_transfer_identity.py
 SLOT __SLOT_T3_TWIN_RELATIVE_PATH__ VALUE=
 SLOT __SLOT_T3_IDENTITY_ARTIFACT_SHA256__ VALUE=
 SLOT __SLOT_T3_ORACLE_ARTIFACT_SHA256__ VALUE=
@@ -72,6 +72,8 @@ test "$(sha256sum "$checkout/scripts/validate/ocean_fidelity/dino_1226/climate_r
   cf85b65302ed65d2a5d8b7ea7a77fb6fa35abd55b5fde8d6e541db9f266996db
 test "$(sha256sum "$checkout/scripts/validate/ocean_fidelity/dino_1226/mld_climate_audit.py" | awk '{print $1}')" = \
   cf1bcffb4ee7994bd4eb433f6b3fa3ba5ac0f2610463b9bb3133ea0c1762dc14
+test "$(sha256sum "$checkout/scripts/validate/ocean_fidelity/dino_1226/recipe_transfer_identity.py" | awk '{print $1}')" = \
+  5d952fbee44f4ed9297be2b94750b52ef846afec259bc01259d2a00e99ec181c
 pythonpath="$checkout/packages/core:$checkout/packages/ocean:$checkout/packages/atmosphere:$checkout/packages/coupler:$checkout/packages/ice:$checkout/packages/land:$checkout/packages/ml:$checkout/packages/tools:$checkout:$checkout/scripts/validate/ocean_fidelity/dino_1226"
 cd "$checkout"
 PYTHONPATH="$pythonpath" JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES='' \
@@ -79,30 +81,34 @@ PYTHONPATH="$pythonpath" JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES='' \
   /home/dbalwada/legoESM/.venv/bin/python -m pytest -q \
   tests/ocean/unit/test_recipes.py \
   tests/ocean/unit/test_recipe_snapshots.py \
+  tests/ocean/unit/test_dino_recipe_transfer_identity.py \
   tests/ocean/unit/test_climate_rebattery_score.py
 printf '%s\n' "$producer" > "$run_root/receipts/producer_commit.txt"
 printf 'producer=%s session=%s free_tmp_kb=%s\n' \
   "$producer" "$CODEX_SESSION_ID" "$free_kb"
 ```
 
-## T3 checkpoint — required committed catalog work
+## T3.1 finding and resolved implementation choice
 
-The faithful versioned recipe and committed identity probe do not exist at this
-preregistration commit. Do not use `nemo_dino_v1`; it is the registered negative
-control. The implementation unit must:
+The preregistration-parent catalog had no faithful-versioned MLF entry. That is
+a T3 finding: the faithful configuration was not catalog-reachable. Per the
+user's requested completion, this commit makes the following **ASKED**
+user-visible catalog choice:
 
-1. add a distinct faithful MLF catalog entry and tests;
-2. assemble it through `get_recipe` plus `assemble_ocean_config` with an
-   independently built DINO setup;
-3. add the committed recursive config-identity probe with collision, negative,
-   and one-ulp plant controls; and
-4. add a catalog-aware twin wrapper that reuses the hash-pinned round-94 twin
-   without changing that instrument's source, time stepping, bridge, or output
-   schema.
+- public recipe name: `nemo_dino_kamm_mlf_v1`;
+- identity probe:
+  `scripts/validate/ocean_fidelity/dino_1226/recipe_transfer_identity.py`;
+- probe SHA-256:
+  `5d952fbee44f4ed9297be2b94750b52ef846afec259bc01259d2a00e99ec181c`.
 
-Record those paths in the SLOTs and start again from Block 0 with the new clean
-producer. This is an explicit prerequisite, not permission to implement it
-post-result.
+The entry owns the frozen structural fields. The probe's disjoint setup
+allowlist owns coefficients, constants, grid-dependent values, and nested
+physics/setup objects. It fails on an ownership collision, missing/extra
+ownership row, or any recursive resolved-config leaf difference. Its
+one-ULP `asselin_gamma` plant and `nemo_dino_v1` negative control run in the
+same invocation. **UNASKED changes: none.** The catalog-aware behavioral twin
+wrapper remains the separately declared T3.2 prerequisite and is not invented
+by this T3.1 repair.
 
 ## Block T3.1 — CPU field-by-field identity gate
 
@@ -112,8 +118,8 @@ export CODEX_SESSION_ID=01a053d4-8e9f-7212-bbdb-19ba2d64e140
 run_root=/tmp/dino-transfer-01a053d4
 checkout="$run_root/producer-checkout"
 producer=__SLOT_TRANSFER_PRODUCER_COMMIT__
-catalog_recipe=__SLOT_T3_CATALOG_RECIPE__
-probe_rel=__SLOT_T3_IDENTITY_PROBE_RELATIVE_PATH__
+catalog_recipe=nemo_dino_kamm_mlf_v1
+probe_rel=scripts/validate/ocean_fidelity/dino_1226/recipe_transfer_identity.py
 
 for value in "$producer" "$catalog_recipe" "$probe_rel"; do
   case "$value" in __SLOT_*__|'') echo 'STOP: fill every T3.1 slot' >&2; exit 1;; esac
@@ -130,10 +136,13 @@ PYTHONPATH="$pythonpath" JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES='' \
   --oracle-card nemo_dino_kamm_mlf \
   --catalog-recipe "$catalog_recipe" \
   --negative-recipe nemo_dino_v1 \
+  --producer-commit "$producer" \
+  --session-id "$CODEX_SESSION_ID" \
   --output "$run_root/t3/config_identity.json" \
   | tee "$run_root/logs/t3_config_identity.log"
 grep -F 'CONFIG_IDENTITY=PASS' "$run_root/logs/t3_config_identity.log"
 grep -F 'PLANT=FIRED' "$run_root/logs/t3_config_identity.log"
+grep -F 'OWNERSHIP_COLLISION=FIRED' "$run_root/logs/t3_config_identity.log"
 grep -F 'NEGATIVE_CONTROL=DIFF' "$run_root/logs/t3_config_identity.log"
 printf 'SLOT __SLOT_T3_IDENTITY_ARTIFACT_SHA256__ VALUE=%s\n' \
   "$(sha256sum "$run_root/t3/config_identity.json" | awk '{print $1}')"
@@ -155,10 +164,10 @@ export FP64=1 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both
 run_root=/tmp/dino-transfer-01a053d4
 checkout="$run_root/producer-checkout"
 producer=__SLOT_TRANSFER_PRODUCER_COMMIT__
-catalog_recipe=__SLOT_T3_CATALOG_RECIPE__
+catalog_recipe=nemo_dino_kamm_mlf_v1
 nemo=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO
 twin_rel=__SLOT_T3_TWIN_RELATIVE_PATH__
-probe_rel=__SLOT_T3_IDENTITY_PROBE_RELATIVE_PATH__
+probe_rel=scripts/validate/ocean_fidelity/dino_1226/recipe_transfer_identity.py
 
 for value in "$producer" "$catalog_recipe" "$twin_rel" "$probe_rel"; do
   case "$value" in __SLOT_*__|'') echo 'STOP: fill every T3.2 slot' >&2; exit 1;; esac
