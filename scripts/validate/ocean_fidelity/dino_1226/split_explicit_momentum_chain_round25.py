@@ -242,8 +242,14 @@ def main() -> int:
     arms = {}
     for bits in itertools.product((0, 1), repeat=3):
         key = f"T{bits[0]}V{bits[1]}P{bits[2]}"
-        coefficient = _checkerboard_rematerialize(_materialize(
-            mx, np.asarray(mesh.ff_f), e3f, e3u, e3v, live_r3, bits))
+        raw_coefficient = _materialize(
+            mx, np.asarray(mesh.ff_f), e3f, e3u, e3v, live_r3, bits)
+        # P0 represents production, whose coefficients are not stored and are
+        # therefore inferred by the registered checkerboards. P1 literally
+        # materializes NEMO's stored ffu/ffv at dyn_cor_2D_init; applying the
+        # inversion again would add an instrument absent from that arm.
+        coefficient = (raw_coefficient if bits[2]
+                       else _checkerboard_rematerialize(raw_coefficient))
         rows = {name: r22._metric(value, oracle[name],
                                   umask if name.startswith("ffu") else vmask)
                 for name, value in sorted(coefficient.items())}
@@ -320,6 +326,11 @@ def main() -> int:
     values = {key: arm["aggregate_rms"] for key, arm in arms.items()}
     receipt = {
         "schema": "dino-split-explicit-momentum-chain-round25-v1",
+        "retraction": {
+            "superseded_artifact_sha256":
+                "49df3aeeb5d27ff32ca2532f2649b09e0738795dc5aa4891f4773e57e83b4d62",
+            "reason": "P1 incorrectly passed a materialized NEMO coefficient through the P0 checkerboard inference",
+        },
         "session_id": session,
         "git_commit": head,
         "backend": "cpu",
