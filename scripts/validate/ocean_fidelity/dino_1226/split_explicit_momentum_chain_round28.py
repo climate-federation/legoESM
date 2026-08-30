@@ -282,7 +282,7 @@ def main() -> int:
         "controls": controls,
         "control_receipts": {
             "four_nextafter_metric": planted,
-            "four_nextafter_location": plant_at,
+            "four_nextafter_location": [int(index) for index in plant_at],
             "coefficient_gradient": gradient,
         },
         "disposition": disposition,
