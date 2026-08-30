@@ -42,3 +42,13 @@ Round-38 receipt/hash, retained streams, state recipe, selector defaults,
 full-halo/interior shapes, source files, and tracked-clean status are fail-
 closed. Identity, longitude-roll, sign, wet-NaN, and two-bar controls must fire
 for U and V. No held run, NEMO build, GPU, or MPI process is authorized.
+
+### Stopped admission clarification (before any factorial score)
+
+The first scorer attempt stopped before building or printing any arm because
+the metric-alignment admission included the structurally dry outer V row.
+The south-dropped mapping is exact on every wet V face (0 differing values),
+while its sole difference is the final dry boundary row; the alternative
+north-dropped mapping differs at 9,818 wet faces. The admission is therefore
+clarified to the same active T/U/V populations on which every registered arm
+is scored. This changes no factor, bar, input, or ownership rule.

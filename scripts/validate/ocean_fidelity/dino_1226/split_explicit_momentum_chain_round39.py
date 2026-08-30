@@ -68,11 +68,13 @@ def _metric_equal(left: dict, right: dict) -> bool:
     return all(left[key] == right[key] for key in keys)
 
 
-def _normalized_max(left, right) -> float:
+def _normalized_max(left, right, mask=None) -> float:
     left = np.asarray(left, dtype=np.float64)
     right = np.asarray(right, dtype=np.float64)
-    scale = max(float(np.sqrt(np.mean(right ** 2))), np.finfo(np.float64).tiny)
-    return float(np.max(np.abs(left - right)) / scale)
+    active = np.ones(right.shape, dtype=bool) if mask is None else np.asarray(mask, dtype=bool)
+    scale = max(float(np.sqrt(np.mean(right[active] ** 2))),
+                np.finfo(np.float64).tiny)
+    return float(np.max(np.abs(left[active] - right[active])) / scale)
 
 
 def _contrasts(errors: dict[str, float]) -> dict[str, float]:
@@ -229,11 +231,14 @@ def main() -> int:
         "v_velocity_vs_restart_max_abs": float(np.max(
             np.abs(raw["v"]["velocity"] - np.asarray(restart.v)))),
         "t_area_normalized_max": _normalized_max(
-            np.asarray(captured["grid"].area_T), area_t),
+            np.asarray(captured["grid"].area_T), area_t,
+            tmask36[..., 0] > 0.5),
         "u_area_normalized_max": _normalized_max(
-            np.asarray(captured["grid"].dx_u * captured["grid"].dy_u)[:, 1:], area_u),
+            np.asarray(captured["grid"].dx_u * captured["grid"].dy_u)[:, 1:],
+            area_u, umask36[..., 0] > 0.5),
         "v_area_normalized_max": _normalized_max(
-            np.asarray(captured["grid"].dx_v * captured["grid"].dy_v)[1:, :], area_v),
+            np.asarray(captured["grid"].dx_v * captured["grid"].dy_v)[1:, :],
+            area_v, vmask36[..., 0] > 0.5),
     }
     if any(value > 1e-15 for value in alignment.values()):
         raise SystemExit(f"velocity/metric alignment changed: {alignment}")
