@@ -3731,6 +3731,7 @@ def gm_redi_tracer_tendency_latlon(
     native_slope_pn2: jnp.ndarray | None = None,
     native_slope_e3w: jnp.ndarray | None = None,
     native_slope_eta: jnp.ndarray | None = None,
+    native_kappa_slope_eta: jnp.ndarray | None = None,
     redi_flux_eta: jnp.ndarray | None = None,
     dt: float | None = None,
     return_bolus_transport: bool = False,
@@ -3808,6 +3809,8 @@ def gm_redi_tracer_tendency_latlon(
     # see gm_redi_density_and_jacobian's docstring).
     _eos_mk_kw = {"rho0": rho_0} if eos_depth == "geometric" else {}
     _native_eta = eta if native_slope_eta is None else native_slope_eta
+    _kappa_native_eta = (
+        eta if native_kappa_slope_eta is None else native_kappa_slope_eta)
     eos_fn = make_eos_fn(eos, eos_linear, **_eos_mk_kw)
     if density_jacobian is None:
         rho, jacobian = gm_redi_density_and_jacobian(
@@ -3880,7 +3883,7 @@ def gm_redi_tracer_tendency_latlon(
             _act_kgm = _nemo_native_active_3d(mask, z_coord, H_bathy, T.dtype)
             _uslp_kgm, _vslp_kgm, _wslpi_kgm, _wslpj_kgm = compute_nemo_native_slopes(
                 rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg, eos_fn,
-                jacobian=jacobian, eta=_native_eta, H_bathy=H_bathy,
+                jacobian=jacobian, eta=_kappa_native_eta, H_bathy=H_bathy,
                 prd_jacobian=_native_prd_J,
                 prd_TS_override=native_prd_TS,
                 pn2_override=native_slope_pn2,
