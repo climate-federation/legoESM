@@ -141,6 +141,83 @@ def _nemo_literal_seed_depth_mean(field, h_face, face_mask, r1_live):
     return (acc * r1_live) * face_mask
 
 
+def _nemo_literal_seed_from_reference_mesh(
+    u_3d, v_3d, h_k, eta_dyn, u_mask, v_mask, z_coord,
+):
+    """Evaluate the DINO QCO seed from the carried NEMO reference mesh.
+
+    Returns ``None`` when the coordinate was not constructed by the NEMO
+    bridge.  The generated-grid fallback in :func:`_depth_average_to_faces`
+    then retains the same source-ordered recurrence using its model-native
+    face thicknesses.
+
+    DINO's executed ``ln_zco`` branch has ``e3u_0 == e3v_0 == e3t_0`` at the
+    corresponding NEMO point.  The bridge carries that exact, unaveraged
+    ``e3t_0`` plus ``hu_0/hv_0`` and the three native areas.  Use them without
+    reconstructing either the reference ladder or QCO ``r3`` through the
+    generic z-star/min-face path; that reconstruction is mathematically
+    equivalent but changed the last bits measured in round 19.
+    """
+    if z_coord is None:
+        return None
+    names = ("nemo_e3t_0", "nemo_hu_0", "nemo_hv_0", "nemo_e1e2t",
+             "nemo_e1e2u", "nemo_e1e2v")
+    refs = tuple(getattr(z_coord, name, None) for name in names)
+    if any(value is None for value in refs):
+        return None
+    e3t_ref, hu0, hv0, area_t, area_u, area_v = (
+        jnp.asarray(value, dtype=eta_dyn.dtype) for value in refs)
+    nlev = u_3d.shape[-1]
+    e3t_ref = e3t_ref[..., :nlev]
+    expected_t_shape = eta_dyn.shape
+    if (e3t_ref.shape[:2] != expected_t_shape
+            or hu0.shape != expected_t_shape
+            or hv0.shape != expected_t_shape
+            or area_t.shape != expected_t_shape
+            or area_u.shape != expected_t_shape
+            or area_v.shape != expected_t_shape):
+        raise ValueError(
+            "NEMO reference seed operands must share eta's T-grid shape; got "
+            f"eta={expected_t_shape}, e3t={e3t_ref.shape}, hu0={hu0.shape}, "
+            f"hv0={hv0.shape}, area_t={area_t.shape}, area_u={area_u.shape}, "
+            f"area_v={area_v.shape}.")
+
+    # Work first in NEMO's native east-/north-face arrays (same 2-D extent as
+    # T points), then map once to legoESM's redundant west/south face layout.
+    # This preserves domqco.F90:166-169 operand order exactly.
+    wet_t = h_k[..., :nlev] > 0.0
+    wet_u = (wet_t & jnp.roll(wet_t, -1, axis=1)
+             & (u_mask[:, 1:, None] > 0.5))
+    wet_t_north = jnp.concatenate(
+        [wet_t[1:], jnp.zeros_like(wet_t[:1])], axis=0)
+    wet_v = (wet_t & wet_t_north & (v_mask[1:, :, None] > 0.5))
+    wet2_u = wet_u[..., 0]
+    wet2_v = wet_v[..., 0]
+    hu_safe = jnp.where(wet2_u, hu0, 1.0)
+    hv_safe = jnp.where(wet2_v, hv0, 1.0)
+    area_u_safe = jnp.where(wet2_u, area_u, 1.0)
+    area_v_safe = jnp.where(wet2_v, area_v, 1.0)
+    area_eta = area_t * eta_dyn
+    area_eta_east = jnp.roll(area_eta, -1, axis=1)
+    area_eta_north = jnp.concatenate(
+        [area_eta[1:], jnp.zeros_like(area_eta[:1])], axis=0)
+    r3u = (0.5 * (area_eta + area_eta_east) / hu_safe / area_u_safe)
+    r3v = (0.5 * (area_eta + area_eta_north) / hv_safe / area_v_safe)
+    mask_u3 = wet_u.astype(eta_dyn.dtype)
+    mask_v3 = wet_v.astype(eta_dyn.dtype)
+    live_u = (e3t_ref * (1.0 + r3u[..., None] * mask_u3)) * mask_u3
+    live_v = (e3t_ref * (1.0 + r3v[..., None] * mask_v3)) * mask_v3
+    r1u = ((1.0 / hu_safe) / (1.0 + r3u)) * wet2_u
+    r1v = ((1.0 / hv_safe) / (1.0 + r3v)) * wet2_v
+    un_native = _nemo_literal_seed_depth_mean(
+        u_3d[:, 1:, :], live_u, wet2_u, r1u)
+    vn_native = _nemo_literal_seed_depth_mean(
+        v_3d[1:, :, :], live_v, wet2_v, r1v)
+    un = jnp.concatenate([un_native[:, -1:], un_native], axis=1)
+    vn = jnp.concatenate([jnp.zeros_like(vn_native[:1]), vn_native], axis=0)
+    return un, vn
+
+
 def _depth_average_to_faces(
     u_3d: jnp.ndarray,
     v_3d: jnp.ndarray,
@@ -156,6 +233,7 @@ def _depth_average_to_faces(
     eta_dyn: jnp.ndarray | None = None,
     H_bathy: jnp.ndarray | None = None,
     area: jnp.ndarray | None = None,
+    z_coord=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute depth-averaged velocities at C-grid face points.
 
@@ -201,6 +279,10 @@ def _depth_average_to_faces(
         its separately associated reciprocal depth (``istate.F90:149-155``).
     eta_dyn, H_bathy, area : required only when ``seed_face_depth ==
         "nemo_ssh_avg"``.
+    z_coord : optional vertical coordinate.  A NEMO-bridged coordinate carries
+        the exact reference ``e3t_0``, face depths, and native areas needed by
+        the literal DINO QCO expression. Generated coordinates fall back to
+        the model-native face-thickness construction.
 
     Returns
     -------
@@ -219,6 +301,12 @@ def _depth_average_to_faces(
         raise ValueError(
             "barotropic_seed_evaluation='nemo_literal' requires "
             "barotropic_seed_face_depth='nemo_ssh_avg'.")
+
+    if seed_evaluation == "nemo_literal":
+        mesh_seed = _nemo_literal_seed_from_reference_mesh(
+            u_3d, v_3d, h_k, eta_dyn, u_mask, v_mask, z_coord)
+        if mesh_seed is not None:
+            return mesh_seed
 
     # h at u/v-faces — min-rule (MOM6/MITgcm hFacW convention).
     # Must match the PE tendency and slow-forcing depth-average which
@@ -1510,7 +1598,7 @@ def barotropic_substeps_latlon_cgrid(
     U_bar, V_bar = _depth_average_to_faces(
         u, v, h_k, min_water_col, mask, u_mask, v_mask, grid,
         seed_face_depth=_seed_fd, seed_evaluation=_seed_eval,
-        eta_dyn=eta, H_bathy=H_bathy, area=_area,
+        eta_dyn=eta, H_bathy=H_bathy, area=_area, z_coord=z_coord,
     )
     # 3-D depth-mean REPLACEMENT reference (u' = u − ū_corr): the NOW-level
     # barotropic mean over the NOW eta.  With the MLF before-level seed the
@@ -1972,7 +2060,7 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
         u, v, h_k, min_water_col, mask, u_mask, v_mask, grid,
         seed_face_depth=_seed_fd, seed_evaluation=_seed_eval,
         eta_dyn=eta, H_bathy=H_bathy,
-        area=_area_seed,
+        area=_area_seed, z_coord=z_coord,
     )
 
     w_filter, w_total, w_transport, n_loop = _compute_weights(

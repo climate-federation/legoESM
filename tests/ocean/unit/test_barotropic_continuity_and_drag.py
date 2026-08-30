@@ -31,6 +31,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from types import SimpleNamespace
 
 jax.config.update("jax_enable_x64", True)
 
@@ -489,6 +490,88 @@ class TestBarotropicSeedFaceDepth:
 
         assert np.any(np.asarray(seed_before[0]) != np.asarray(seed_now[0]))
         assert np.any(np.asarray(seed_before[1]) != np.asarray(seed_now[1]))
+
+    def test_nemo_literal_prefers_carried_reference_mesh_operands(self):
+        """The bridge's exact e3/hu/hv/area operands own the literal path.
+
+        A deliberately different model-native ``h_k`` makes the fallback a
+        red control: if dispatch silently stops consuming the carried NEMO
+        reference mesh, the bit-exact expected seed below changes.
+        """
+        n_lat, n_lon, nlev = 3, 4, 3
+        rng = np.random.default_rng(149155)
+        u_native = rng.normal(size=(n_lat, n_lon, nlev))
+        v_native = rng.normal(size=(n_lat, n_lon, nlev))
+        u3 = np.concatenate([u_native[:, -1:], u_native], axis=1)
+        v3 = np.concatenate([np.zeros_like(v_native[:1]), v_native], axis=0)
+        h_k = np.ones((n_lat, n_lon, nlev), dtype=np.float64)
+        eta = np.asarray([
+            [0.11, -0.07, 0.03, 0.19],
+            [-0.13, 0.05, 0.17, -0.02],
+            [0.09, 0.01, -0.15, 0.08],
+        ])
+        e3 = np.broadcast_to(
+            np.asarray([1.25, 2.5, 5.0]), (n_lat, n_lon, nlev)).copy()
+        hu0 = e3.sum(axis=-1)
+        hv0 = hu0.copy()
+        area_t = 2.0 + np.arange(n_lat * n_lon).reshape(n_lat, n_lon) / 13.0
+        area_u = 3.0 + np.arange(n_lat * n_lon).reshape(n_lat, n_lon) / 17.0
+        area_v = 4.0 + np.arange(n_lat * n_lon).reshape(n_lat, n_lon) / 19.0
+        z_coord = SimpleNamespace(
+            nemo_e3t_0=jnp.asarray(e3), nemo_hu_0=jnp.asarray(hu0),
+            nemo_hv_0=jnp.asarray(hv0), nemo_e1e2t=jnp.asarray(area_t),
+            nemo_e1e2u=jnp.asarray(area_u), nemo_e1e2v=jnp.asarray(area_v))
+        u_mask = np.ones((n_lat, n_lon + 1), dtype=np.float64)
+        v_mask = np.ones((n_lat + 1, n_lon), dtype=np.float64)
+        v_mask[0] = 0.0
+        v_mask[-1] = 0.0
+        mask = np.ones((n_lat, n_lon), dtype=np.float64)
+        grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
+
+        area_eta = area_t * eta
+        r3u = (0.5 * (area_eta + np.roll(area_eta, -1, axis=1))
+               / hu0 / area_u)
+        north = np.concatenate([area_eta[1:], np.zeros_like(area_eta[:1])], axis=0)
+        r3v = 0.5 * (area_eta + north) / hv0 / area_v
+        wet_v = np.ones((n_lat, n_lon, nlev), dtype=np.float64)
+        wet_v[-1] = 0.0
+
+        def source_mean(field, live_h, live_r1, wet):
+            acc = np.zeros(field.shape[:2], dtype=np.float64)
+            for jk in range(nlev):
+                acc = acc + ((live_h[..., jk] * field[..., jk])
+                             * wet[..., jk])
+            return acc * live_r1
+
+        expected_u_native = source_mean(
+            u_native, e3 * (1.0 + r3u[..., None]),
+            (1.0 / hu0) / (1.0 + r3u), np.ones_like(e3))
+        expected_v_native = source_mean(
+            v_native, (e3 * (1.0 + r3v[..., None])) * wet_v,
+            ((1.0 / hv0) / (1.0 + r3v)) * wet_v[..., 0], wet_v)
+        expected_u = np.concatenate(
+            [expected_u_native[:, -1:], expected_u_native], axis=1)
+        expected_v = np.concatenate(
+            [np.zeros_like(expected_v_native[:1]), expected_v_native], axis=0)
+
+        args = (jnp.asarray(u3), jnp.asarray(v3), jnp.asarray(h_k),
+                jnp.asarray(0.0), jnp.asarray(mask), jnp.asarray(u_mask),
+                jnp.asarray(v_mask), grid)
+        got_u, got_v = _depth_average_to_faces(
+            *args, seed_face_depth="nemo_ssh_avg",
+            seed_evaluation="nemo_literal", eta_dyn=jnp.asarray(eta),
+            H_bathy=jnp.full_like(jnp.asarray(eta), 8.75),
+            area=jnp.asarray(area_t), z_coord=z_coord)
+        np.testing.assert_array_equal(np.asarray(got_u), expected_u)
+        np.testing.assert_array_equal(np.asarray(got_v), expected_v)
+
+        fallback_u, fallback_v = _depth_average_to_faces(
+            *args, seed_face_depth="nemo_ssh_avg",
+            seed_evaluation="nemo_literal", eta_dyn=jnp.asarray(eta),
+            H_bathy=jnp.full_like(jnp.asarray(eta), 8.75),
+            area=jnp.asarray(area_t), z_coord=None)
+        assert np.any(np.asarray(fallback_u) != expected_u)
+        assert np.any(np.asarray(fallback_v) != expected_v)
 
     def test_default_min_rule_byte_identical_to_pre_change(self):
         """Default is "min_rule" — the new kwarg is purely additive; a run
