@@ -2262,14 +2262,28 @@ def main() -> int:
                                                         np.isfinite(stage_values[
                                                             "I1J1"][masks[
                                                                 "zfw"]]).all()),
-                                                    "both_stage_substitutions_noninert":
-                                                        all(not np.array_equal(
-                                                            stage_values[name],
-                                                            stage_values[
-                                                                "I0J0"])
-                                                            for name in (
-                                                                "I1J0",
-                                                                "I0J1")),
+                                                    **({
+                                                        "both_stage_substitutions_inert_after_fix":
+                                                            all(np.array_equal(
+                                                                stage_values[
+                                                                    name],
+                                                                stage_values[
+                                                                    "I0J0"])
+                                                                for name in (
+                                                                    "I1J0",
+                                                                    "I0J1")),
+                                                    } if args.redi_zfw_a33_floor_factorial
+                                                       else {
+                                                        "both_stage_substitutions_noninert":
+                                                            all(not np.array_equal(
+                                                                stage_values[
+                                                                    name],
+                                                                stage_values[
+                                                                    "I0J0"])
+                                                                for name in (
+                                                                    "I1J0",
+                                                                    "I0J1")),
+                                                    }),
                                                     **{f"oracle_{name}": value
                                                        for name, value in
                                                        _controls(
@@ -3183,6 +3197,8 @@ def main() -> int:
             # rerunning NEMO. Temperature T.3 retains the faithful-arm metric
             # that supports either the strict or Rule-1b clearance.
             redi_flux_rows = []
+            first_flux = None
+            first_flux_subrow = None
             release_order = (
                 ("zfu_tem", "78.T.1", "temperature zfu",
                  "traldf_iso_scheme.h90:55-70"),
