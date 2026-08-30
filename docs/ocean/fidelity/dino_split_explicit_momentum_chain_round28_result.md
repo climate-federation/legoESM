@@ -451,3 +451,29 @@ Therefore the generic tracer-boundary velocity passed into the literal
 recurrence is not NEMO's corrected Kmm velocity. Row 5 remains open. The next
 ordered measurement separately scores actual Kaa `r3t` and the reconstructed
 second `hdiv`; no further production algebra changes before that result.
+
+## Round 44: production call-2 operand capture
+
+Artifact `/tmp/dino_split_explicit_momentum_chain_round44.json`, SHA-256
+`b2b38638bbd4e1e0aaf3f30e67ccec3998addb9af6057f9e2e12b53e76c2b515`,
+passes the unique-capture, restoration, identity, roll, shape, and retained-
+stream gates. Its ordered disposition is `CALL2_KAA_R3T_DIVERGED`: the Kaa
+`r3t` passed by production has normalized RMS `4.37655e-6` and maximum error
+`2.69191e-5` of NEMO RMS. The following Kmm `hdiv` is independently DEBT at
+normalized RMS `0.226396` (correlation `0.977900`), but stays second in source
+order.
+
+The Kaa owner is the model's post-solver global eta-drift projection, not the
+split-explicit filter. NEMO accumulates and normalizes `pssh(Kaa)` at
+`dynspg_ts.F90:991,1003`; round 29 already measured the corresponding raw
+production `pssh_final` at `3.2628e-16`. legoESM subsequently modifies that
+field in `_step_impl`'s `fix_eta_drift` block before the call-2 helper. The
+global correction remains part of the model state and tracer thickness, but
+it is not an operand of NEMO's already-completed call 2.
+
+The H operand also has a named time-level mismatch. NEMO call 2 reads the Kmm
+velocity rewritten at `dynspg_ts.F90:1170-1174`: entry Kmm plus
+`un_adv*r1_hu(Kmm)-puu_b(Kmm)`. The current call passes the later tracer
+transport velocity derived from `state_new`, which includes after-level
+momentum composition. Round 45 tests the literal Kmm rewrite together with
+the raw Kaa SSH; neither half is eligible to ship independently.
