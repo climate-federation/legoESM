@@ -1,8 +1,11 @@
 # Blocks: legal-lattice ZDF wall-epoch attribution
 
-The retained `slope_n2_only` artifact is admitted by hash. The five new arms
+The retained `slope_n2_only` artifact is admitted by content hash plus a
+model/harness-diff-zero receipt against the pinned producer. The five new arms
 run at pinned producer `9ac2550d...`; every Python invocation resolves imports
-from its pinned checkout.
+from its pinned checkout. Twin SSH artifacts contain the full haloed
+`(time,199,52)` field; reduction probes, not the harness, strip it to
+`(197,50)`.
 
 ## Block 1 — admit retained arm and create pinned scorer checkout
 
@@ -54,23 +57,29 @@ git diff --quiet e013e95ca54957a4454878ed7118e623da0a19ba.."$producer" -- \
   packages/core packages/ocean \
   scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py
 producer_pythonpath="$producer_checkout/packages/core:$producer_checkout/packages/ocean:$producer_checkout/packages/atmosphere:$producer_checkout/packages/coupler:$producer_checkout/packages/ice:$producer_checkout/packages/land:$producer_checkout/packages/ml:$producer_checkout/packages/tools:$producer_checkout/scripts/validate/ocean_fidelity/dino_1226"
-PYTHONPATH="$producer_pythonpath" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
-  python - "$retained" "$producer" "$CODEX_SESSION_ID" <<'PY'
+retained_producer=$( \
+  PYTHONPATH="$producer_pythonpath" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
+  python - "$retained" "$CODEX_SESSION_ID" <<'PY'
 import json
 import sys
 import numpy as np
 
-path, producer, session = sys.argv[1:]
+path, session = sys.argv[1:]
 with np.load(path) as z:
     cfg = json.loads(str(np.asarray(z["run_config"]).item()))
-    assert str(np.asarray(z["producer_git_sha"]).item()) == producer
     assert int(np.asarray(z["producer_dirty_tracked_files"]).item()) == 0
     assert str(np.asarray(z["codex_session_id"]).item()) == session
     assert bool(np.asarray(z["stable"]).item())
-    assert np.asarray(z["eta"]).shape == (160, 197, 50)
+    assert np.asarray(z["eta"]).shape == (160, 199, 52)
     assert np.asarray(z["eta"]).dtype == np.float64
     assert cfg["gm_redi_slope_n2_evaluation"] == "recompute"
+    print(str(np.asarray(z["producer_git_sha"]).item()))
 PY
+)
+git cat-file -e "$retained_producer^{commit}"
+git diff --quiet "$retained_producer".."$producer" -- \
+  packages/core packages/ocean \
+  scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py
 scorer_pythonpath="$scorer_checkout/packages/core:$scorer_checkout/packages/ocean:$scorer_checkout/packages/atmosphere:$scorer_checkout/packages/coupler:$scorer_checkout/packages/ice:$scorer_checkout/packages/land:$scorer_checkout/packages/ml:$scorer_checkout/packages/tools:$scorer_checkout/scripts/validate/ocean_fidelity/dino_1226"
 cd "$scorer_checkout"
 grep -n "Complete executable dependency graph" \
@@ -79,9 +88,9 @@ PYTHONPATH="$scorer_pythonpath" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
   python "$scorer_checkout/scripts/validate/ocean_fidelity/dino_1226/zdf_wall_epoch_group_score.py" \
   --self-test
 printf '%s\n' "$scorer_commit" > "$run_root/lattice_scorer_commit.txt"
-printf 'producer=%s scorer=%s producer_kb=%s scorer_kb=%s free_tmp_kb=%s session=%s\n' \
-  "$producer" "$scorer_commit" "$producer_kb" "$scorer_kb" \
-  "$available_kb" "$CODEX_SESSION_ID"
+printf 'producer=%s retained_producer=%s scorer=%s producer_kb=%s scorer_kb=%s free_tmp_kb=%s session=%s\n' \
+  "$producer" "$retained_producer" "$scorer_commit" "$producer_kb" \
+  "$scorer_kb" "$available_kb" "$CODEX_SESSION_ID"
 ```
 
 ## Block 2 — five new legal arms, two GPUs in three waves

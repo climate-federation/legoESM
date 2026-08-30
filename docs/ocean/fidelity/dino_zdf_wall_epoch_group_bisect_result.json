@@ -1,0 +1,104 @@
+{
+  "schema": "dino-zdf-wall-epoch-group-bisect-result-v1",
+  "date": "2026-08-29",
+  "session_id": "01a04e34-d1fb-73e0-b25a-177641f0a246",
+  "disposition": "LOCALIZED_TO_TKE_CORE_AT_FAITHFUL_SLOPE_N2",
+  "source_score": {
+    "path": "/tmp/dino-zdf-wall-epoch-bisect-fresh-01a04e34/zdf_wall_epoch_lattice_score.json",
+    "sha256": "05dc4c7edefc8b6e705026812b3a4d6ae90098715b60a940094a3de421c45a16",
+    "scorer_commit": "96b3858f29334f983f33a3a22961387c416ba667",
+    "producer_commit": "9ac2550d4f559b1c73c2b65174fc2e436025176a",
+    "scorer_log_sha256": "43183e20c7e793ff48e496145970d94359f8f1136b276357ac7f6e282e7c8b38"
+  },
+  "endpoints": {
+    "current": {
+      "ratio_first8": 1.6511846170859847,
+      "wall_share_first8": 0.17020235431211447
+    },
+    "historical": {
+      "ratio_first8": 1.1607251697830108,
+      "wall_share_first8": 0.11941867158491266
+    }
+  },
+  "arms": {
+    "slope_n2_only": {
+      "artifact_sha256": "1395b84ec8e9f482c17bde34ebb59d273f794b7e5901ac6c3ea02c0e67d43083",
+      "ratio_first8": 1.6504618975919532,
+      "wall_share_first8": 0.16916100356988872,
+      "classification": "BOUNDED_SMALL"
+    },
+    "tke_core": {
+      "artifact_sha256": "1be9010230834eca71f349aa672c20c5704c2f6b0887ed19d0b4eff01e38ee3a",
+      "ratio_first8": 1.163579045567568,
+      "wall_share_first8": 0.11693494406953533,
+      "classification": "EPOCH_RESTORED"
+    },
+    "core_slope_n2": {
+      "artifact_sha256": "a7a597cfd814760781635b63c252d49b575a43eabe9134eb29bb1f2dd19a05f3",
+      "ratio_first8": 1.1633713911846726,
+      "wall_share_first8": 0.1166817281028976,
+      "classification": "EPOCH_RESTORED"
+    },
+    "entry_closed": {
+      "artifact_sha256": "5a9dcd0d6010d1bf5d408e3862597a03f354ae9552e5a8fbd45ef1cba1b43e22",
+      "ratio_first8": 1.1606948289201353,
+      "wall_share_first8": 0.11942049396588678,
+      "classification": "EPOCH_RESTORED"
+    },
+    "mxl_zdf": {
+      "artifact_sha256": "396a76babef1ec42773abd8b7decbc50cb5d536ca85bcc1898d6094edaf94619",
+      "ratio_first8": 1.6511846284967464,
+      "wall_share_first8": 0.17020235932513172,
+      "classification": "BOUNDED_SMALL"
+    },
+    "slope_rest": {
+      "artifact_sha256": "9d577117893b214b13cd7f3086289205ca91b782c7541685f5c626ffd0a78a75",
+      "ratio_first8": 1.6509855080164337,
+      "wall_share_first8": 0.17031547097596436,
+      "classification": "BOUNDED_SMALL"
+    }
+  },
+  "ownership_receipt": {
+    "tke_core_closure_fraction": {
+      "ratio_first8": 0.9941812196701466,
+      "wall_share_first8": 1.0489079834701893
+    },
+    "tke_core_x_slope_n2_interaction_fraction": {
+      "ratio_first8": -0.0010501686000104872,
+      "wall_share_first8": -0.015519449028966605
+    },
+    "entry_given_legacy_core_and_slope_n2": "BOUNDED_SMALL",
+    "mxl_zdf": "BOUNDED_SMALL",
+    "slope_n2_at_faithful_entry": "BOUNDED_SMALL",
+    "slope_rest_at_faithful_slope_n2": "BOUNDED_SMALL"
+  },
+  "controls": {
+    "classifier_plants": [
+      "EPOCH_RESTORED",
+      "MAJORITY_OWNER",
+      "BOUNDED_SMALL",
+      "OPEN_MIXED_OR_PARTIAL",
+      "CONDITIONAL_MAJORITY_OWNER"
+    ],
+    "legal_selector_subsets": 14336,
+    "structurally_unreachable_contrasts": 3,
+    "common_stress_sha256": "cad9b34958cba58812f1dce2c6c441c8fd6b5f2733c20b91065f4d60507592b7",
+    "eta_shape": [160, 199, 52],
+    "eta_dtype": "float64",
+    "all_arms_clean_and_stable": true
+  },
+  "interpretation": {
+    "faithful_but_worse": true,
+    "claim": "The legacy TKE-core implementation supplied a compensating wall-flicker error that the NEMO-literal core removed; the result does not identify the remaining error being compensated.",
+    "not_yet_identified": "matrix versus solver recurrence versus Langmuir association"
+  },
+  "next_measurement": {
+    "design": "At faithful slope N2, run solver-only legacy, Langmuir-only legacy, and solver-plus-Langmuir legacy; combine with current and the existing full-core-legacy arm.",
+    "reachable_contrasts": [
+      "solver main effect at faithful matrix and Langmuir",
+      "Langmuir main effect at faithful matrix and solver",
+      "solver x Langmuir interaction at faithful matrix",
+      "matrix conditional effect with solver and Langmuir held legacy"
+    ]
+  }
+}

@@ -166,32 +166,45 @@ correct claim is that material ownership was not confirmed and the measured
 pair does not explain the deficit at the registered resolution.
 
 The wall control's rise from the corrected-T epoch (`1.1607/0.1194`) to the
-current epoch (`1.6512/0.1702`) opens a separate attribution lane. Sixteen
-ZDF-sweep changes have explicit legacy selectors. The first proposed four-way
-partition was not executable: reverting entry N2 removed the carried bundle
-required by faithful slope N2, and the `entry` arm stopped before producing an
-artifact. That independence claim is retracted. The stable `tke_core` arm is
-retained by hash. Four replacement arms form a dependency-conditioned design:
-`entry_dep` also reverts slope N2, while `slope_n2_only` supplies the reachable
-conditioning contrast; the other two arms retain the mixing/final-ZDF and
-remaining slope groups. The missing legacy-entry/faithful-slope corner is
-structurally unreachable, so its interaction is recorded as unidentifiable.
-Every model arm is pinned to producer `9ac2550d...`; mixed responses still
-escalate to an all-legacy universe gate and complement-paired interactions.
+current epoch (`1.6512/0.1702`) opened a separate attribution lane. Two stopped
+partitions proved that its 16 selectors do not form an unconstrained cube: the
+matrix, recurrence, Langmuir, entry-N2, and carried-slope dependencies leave
+14,336 legal subsets. Those independence claims are retracted in the committed
+preregistration; neither stopped arm produced an admitted NPZ.
+
+The replacement legal-lattice bisect is complete. Its score artifact SHA-256
+is `05dc4c7edefc8b6e705026812b3a4d6ae90098715b60a940094a3de421c45a16`.
+The registered disposition is
+**`LOCALIZED_TO_TKE_CORE_AT_FAITHFUL_SLOPE_N2`**: reverting the TKE matrix,
+solver recurrence, and Langmuir association together restores ratio
+`1.163579045567568` and wall share `0.11693494406953533`, closing `99.42%` and
+`104.89%` of the epoch shifts and entering both historical bands. Every
+primitive non-core contrast is `BOUNDED_SMALL`; the core x slope-N2 interaction
+is only `-0.11%/-1.55%` of the two shifts. This is faithful-but-worse: the
+legacy core supplied a compensating error that masked a remaining wall error.
+The group arm does not yet distinguish matrix from recurrence from Langmuir or
+name the compensated counterpart. The registered next discriminator is the
+legal solver-only / Langmuir-only / both-legacy peel at faithful matrix, with
+the existing full-core arm furnishing the conditional matrix contrast. Full
+receipts and interpretation are in
+`dino_zdf_wall_epoch_group_bisect_result.md`.
 
 ## COMPLETE-PR boundary
 
-The momentum lane's finished PR unit is ready: the NEMO V-face metric and
+The momentum lane's finished PR unit, #1696, remains ready: the NEMO V-face metric and
 literal QCO continuity production fixes; exact day-180 row-9.1--9.7 acceptance
 and recurrence receipts; selector isolation/non-confound tests; corrected-T
 merge-order dependency; and both completed climate outcomes with the formal
 qualifications above. The PR must say COMPLETE and must not claim either basin
-or wall climate ownership.
+or metric/continuity wall-climate ownership. Its former `INVALID_CONTROL`
+qualification may cross-reference the separately registered lattice result:
+the epoch drift belongs to the pre-existing ZDF TKE-core selector group, not to
+#1696's intervention. No TKE-core code or follow-up peel belongs in #1696.
 
 The following remain open and are not merge conditions for that finished
 unit: the ordered chain stop at row 1.2; rows 1.3--6; the unknown owner of the
-`-0.95 Sv` basin deficit; and the new wall-epoch ZDF selector attribution. The
-last item has a corrected four-replacement-arm measurement package plus one
-retained arm, but no result, so execution and any individual-selector peel
-belong on a new follow-up branch/PR rather than as a tail appended after this
-PR opens.
+`-0.95 Sv` basin deficit; the TKE-core matrix/recurrence/Langmuir sub-peel; and
+the still-unidentified error that the legacy core compensated at the walls.
+The wall-epoch group attribution itself is no longer open. Its individual-
+selector peel belongs on a new follow-up branch/PR rather than as a tail
+appended after #1696 opens.
