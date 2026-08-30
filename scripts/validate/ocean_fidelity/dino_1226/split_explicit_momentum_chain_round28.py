@@ -66,6 +66,25 @@ def _array_equal_tree(left: dict[str, Any], right: dict[str, Any]) -> bool:
     return True
 
 
+def _boundary_metric(candidate: np.ndarray, oracle: np.ndarray) -> dict[str, Any]:
+    """Use the registered relative bar, with an exact gate for zero walls."""
+    wet = np.ones_like(oracle, dtype=bool)
+    oracle_rms = float(np.sqrt(np.mean(np.asarray(oracle)[wet] ** 2)))
+    if oracle_rms > 0.0:
+        return r22._metric(candidate, oracle, wet)
+    error = np.asarray(candidate)[wet] - np.asarray(oracle)[wet]
+    mismatch = int(np.count_nonzero(
+        np.asarray(candidate)[wet] != np.asarray(oracle)[wet]))
+    return {
+        "n": int(error.size),
+        "oracle_rms": 0.0,
+        "max_abs_error": float(np.max(np.abs(error), initial=0.0)),
+        "bit_mismatch_count": mismatch,
+        "gate_status": "AT BAR" if mismatch == 0 else "DEBT",
+        "zero_oracle_rule": "bit_exact",
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run", type=Path, required=True)
@@ -202,15 +221,11 @@ def main() -> int:
 
     seam_candidate = np.asarray(compiled_values[-2])[:, [0, -1]]
     wall_candidate = np.asarray(compiled_values[-1])[[0, -1]]
-    seam_mask = np.ones_like(seam_candidate, dtype=bool)
-    wall_mask = np.ones_like(wall_candidate, dtype=bool)
     pointwise = {
-        "u_periodic_seam": r22._metric(
-            seam_candidate,
-            nemo_u[:, [0, -1]], seam_mask),
-        "v_south_north_walls": r22._metric(
-            wall_candidate,
-            nemo_v[[0, -1]], wall_mask),
+        "u_periodic_seam": _boundary_metric(
+            seam_candidate, nemo_u[:, [0, -1]]),
+        "v_south_north_walls": _boundary_metric(
+            wall_candidate, nemo_v[[0, -1]]),
     }
 
     direction = jnp.sin(jnp.arange(eta.size, dtype=jnp.float64)).reshape(eta.shape)
