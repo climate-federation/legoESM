@@ -598,6 +598,11 @@ def restart_elapsed_seconds(path: str) -> float:
     return t_from_days
 
 
+# Compatibility for frozen branch probes written before main made the helper
+# public.  Live harness paths below use the public spelling.
+_restart_elapsed_seconds = restart_elapsed_seconds
+
+
 def seasonal_t0_seconds(restart_path: str) -> float:
     """Absolute seasonal-clock offset [s] for a twin bridged from ``restart_path``.
 
@@ -1314,7 +1319,7 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
         st = bridge_before_state_topo(br._replace(state=st), g, before, periodic_i=True)
         _print_before_bridge_verify(st, before, g)
         if bridge_before_stress_tpoint:
-            prior_time = _restart_elapsed_seconds(restart_path)
+            prior_time = restart_elapsed_seconds(restart_path)
             st, _ = reconstruct_dino_before_stress_tpoint(
                 st, br.geometry, cfg, t_seconds=prior_time)
 
@@ -1528,7 +1533,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     # actually present on the built state before stamping "T".
     restart_path = f"{run_stepdump}/{restart_file}"
     if bridge_before_stress_tpoint:
-        reconstruction_time = _restart_elapsed_seconds(restart_path)
+        reconstruction_time = restart_elapsed_seconds(restart_path)
         expected_x, expected_y, expected_hash = _analytic_dino_tpoint_stress(
             br.geometry, cfg, t_seconds=reconstruction_time)
         if (not np.array_equal(np.asarray(st.tau_x_prev), np.asarray(expected_x))

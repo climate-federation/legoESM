@@ -1583,6 +1583,17 @@ def test_run_twin_stamps_the_reference_clock_and_the_run_configuration(
     assert "restart_elapsed_seconds(" in src
 
 
+def test_corrected_stress_live_paths_use_public_clock_helper(instruments):
+    """REBASE-RED: main removed the private helper spelling, while two
+    corrected-stress call sites on this branch still used it."""
+    import inspect
+    k = instruments.kamm_twin_90d
+    src = inspect.getsource(k.run_twin)
+    assert "_restart_elapsed_seconds(" not in src
+    assert src.count("restart_elapsed_seconds(") == 2
+    assert k._restart_elapsed_seconds is k.restart_elapsed_seconds
+
+
 # ---------------------------------------------------------------------------
 # kamm_twin_90d -- fp64 snapshot storage and the always-on fp64 reduced series
 #
