@@ -237,10 +237,17 @@ def main() -> int:
     baseline = arms["T0V0P0"]
     bound = prior["arms"]["F1Q1"]
     baseline_reproduces = True
+    baseline_diagnostics = {}
     for name, row in baseline["coefficients"].items():
         ref = bound["coefficients"][name]["normalized_rms_error"]
         denom = max(abs(ref), np.finfo(np.float64).tiny)
-        baseline_reproduces &= abs(row["normalized_rms_error"] - ref) / denom <= BAR
+        relative = abs(row["normalized_rms_error"] - ref) / denom
+        baseline_reproduces &= relative <= BAR
+        baseline_diagnostics[name] = {
+            "direct": row["normalized_rms_error"],
+            "bound": ref,
+            "relative_delta": relative,
+        }
     identity = r22._metric(oracle["ffu_nw"], oracle["ffu_nw"], umask)
     plant = np.array(oracle["ffu_nw"], copy=True)
     ij = tuple(np.argwhere(umask)[0]); steps = 0
@@ -259,7 +266,8 @@ def main() -> int:
     }
     if not all(value for name, value in controls.items()
                if name != "nextafter_steps"):
-        raise SystemExit(f"control failed: {controls}")
+        raise SystemExit(
+            f"control failed: {controls}; baseline={baseline_diagnostics}")
 
     full = arms["T1V1P1"]
     exact = all(row["gate_status"] == "AT BAR" for row in
@@ -283,6 +291,7 @@ def main() -> int:
         "effects": _effects(values),
         "full_literal_reduction": reduction,
         "controls": controls,
+        "baseline_diagnostics": baseline_diagnostics,
         "plant_metric": plant_row,
         "disposition": disposition,
         "ordered_rows": {
