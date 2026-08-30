@@ -623,3 +623,15 @@ the literal cycle gives U/V pointwise maximum/RMS
 `2.98961e-15/5.63615e-15`; the filter inherits the same values. The next
 source-ordered operand is therefore the transport average itself, for which
 unchanged retained `spg_dump_{un,vn}_adv_final.bin` streams already exist.
+
+## Round 54: momentum tail conditionally closed
+
+Artifact `/tmp/dino_split_explicit_momentum_chain_round54.json`, SHA-256
+`a1b76177330b83d7bb21c7f35c9e606d10d36a4b98d46b3b570f53588188eaa3`,
+classifies `MOMENTUM_TAIL_AT_BAR_UPSTREAM_TRANSPORT_EXACT`. Substituting only
+NEMO's retained `un_adv/vn_adv` into the production Kmm execute/undo cycle
+makes restored Kmm U/V and consequent Asselin-filtered U/V bit-exact. The
+round-53 production-transport rows remain DEBT and are retained as an upstream
+qualification; this result closes the cycle and filter arithmetic, not the
+production `Hu_avg/Hv_avg` operand. The tracer tail is released for a fresh
+production-entry replay against its previously admitted held streams.
