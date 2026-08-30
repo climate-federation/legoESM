@@ -21,9 +21,36 @@ import jax
 import numpy as np
 
 from legoesm.core.precision import PrecisionPolicy, set_policy
-from legoesm.ocean.experiments.dino import apply_dino_lat_lon_surface_forcing
+from legoesm.ocean.experiments.dino import (
+    DINOConfig,
+    DINO_RECIPES,
+    apply_dino_lat_lon_surface_forcing,
+)
 
 import kamm_twin_90d as twin
+
+
+def parse_recipe_overrides(raw_values: list[str]) -> dict[str, object]:
+    """Parse repeatable ``FIELD=JSON`` overrides for controlled CPU arms."""
+    legal = set(DINOConfig.__dataclass_fields__)
+    parsed: dict[str, object] = {}
+    for raw in raw_values:
+        if "=" not in raw:
+            raise ValueError(
+                f"invalid --recipe-override {raw!r}; expected FIELD=JSON")
+        field, encoded = raw.split("=", 1)
+        if field not in legal:
+            raise ValueError(
+                f"unknown DINOConfig override {field!r}; refusing an inert arm")
+        if field in parsed:
+            raise ValueError(f"duplicate DINOConfig override {field!r}")
+        try:
+            parsed[field] = json.loads(encoded)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"invalid JSON for DINOConfig override {field!r}: {encoded!r}"
+            ) from exc
+    return parsed
 
 
 def _finite_max(value) -> tuple[bool, float]:
@@ -81,6 +108,7 @@ def run(args: argparse.Namespace) -> int:
         "outer_integrator": mc.outer_integrator,
         "producer_commit": producer_commit,
         "recipe": args.recipe,
+        "recipe_overrides": args.recipe_overrides,
         "status": "RUNNING",
         "steps": [],
         "surface_tendency_placement": placement,
@@ -91,7 +119,8 @@ def run(args: argparse.Namespace) -> int:
         "FE_REPRO_CONFIG "
         f"recipe={args.recipe} integrator={mc.outer_integrator} "
         f"alpha={mc.barotropic.barotropic_diffusion_alpha} "
-        f"ladder={ladder} placement={placement}",
+        f"ladder={ladder} placement={placement} "
+        f"overrides={json.dumps(args.recipe_overrides, sort_keys=True)}",
         flush=True,
     )
     for index in range(args.max_steps):
@@ -169,11 +198,29 @@ def main() -> int:
     parser.add_argument("--run-traj", default=twin.RUN_TRAJ)
     parser.add_argument("--run-stepdump", default=twin.RUN_STEPDUMP)
     parser.add_argument("--max-steps", type=int, default=64)
+    parser.add_argument(
+        "--recipe-override",
+        action="append",
+        default=[],
+        metavar="FIELD=JSON",
+        help="repeatable controlled DINOConfig recipe override",
+    )
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     if args.max_steps < 1:
         parser.error("--max-steps must be >= 1")
-    return run(args)
+    try:
+        args.recipe_overrides = parse_recipe_overrides(args.recipe_override)
+    except ValueError as exc:
+        parser.error(str(exc))
+    original = DINO_RECIPES.get(args.recipe)
+    if original is None:
+        parser.error(f"unknown DINO recipe {args.recipe!r}")
+    DINO_RECIPES[args.recipe] = {**original, **args.recipe_overrides}
+    try:
+        return run(args)
+    finally:
+        DINO_RECIPES[args.recipe] = original
 
 
 if __name__ == "__main__":
