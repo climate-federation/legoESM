@@ -60,6 +60,7 @@ ROUND82_SHA = "4177c99481bdbc6996477dad848d1e645ada3a26a08fb9aa1e9dd9e4b20f9e7a"
 ROUND83_SHA = "f759087db5680d8ee13f8053000812e7b0a89471f8efc28196f2ead0006f8bb3"
 ROUND84_SHA = "6483fc67d59bea3b5bb81e546a31af47eec85aeea48573f42e11c2e575740451"
 ROUND85_SHA = "10a5695a804c0e96ec36455ed160169b18897c43b57614c6a979349fcf53ec6c"
+ROUND86_SHA = "93e39c3ee0fbf973464aa4ea583a404668e4be13dfe044153a28c0e3022c260e"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -195,6 +196,7 @@ def main() -> int:
     parser.add_argument("--round83", type=Path)
     parser.add_argument("--round84", type=Path)
     parser.add_argument("--round85", type=Path)
+    parser.add_argument("--round86", type=Path)
     parser.add_argument("--hold-slow-forcing", action="store_true")
     parser.add_argument("--oracle-transport", action="store_true")
     parser.add_argument("--capture-cycle", action="store_true")
@@ -222,10 +224,14 @@ def main() -> int:
     parser.add_argument("--redi-zfu-bolus-stage-split-postfix", action="store_true")
     parser.add_argument("--redi-zfu-ahtu-postfix", action="store_true")
     parser.add_argument("--redi-zfw-association-factorial", action="store_true")
+    parser.add_argument("--redi-zfw-component-score", action="store_true")
     parser.add_argument("--redi-run-dir", type=Path)
     parser.add_argument("--redi-flux-run-dir", type=Path)
     parser.add_argument("--redi-flux-bracket", type=Path)
     parser.add_argument("--redi-flux-bracket-sha")
+    parser.add_argument("--redi-zfw-component-dir", type=Path)
+    parser.add_argument("--redi-zfw-component-bracket", type=Path)
+    parser.add_argument("--redi-zfw-component-bracket-sha")
     parser.add_argument("--raw-artifact", type=Path, required=True)
     parser.add_argument("--nemo-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -678,6 +684,37 @@ def main() -> int:
             raise SystemExit("round 85 does not admit the zfw factorial")
     elif args.round85 is not None:
         raise SystemExit("--round85 requires --redi-zfw-association-factorial")
+    component_dir = None
+    if args.redi_zfw_component_score:
+        if not args.redi_zfw_association_factorial:
+            raise SystemExit("component score requires zfw factorial")
+        if args.round86 is None or _sha(args.round86.resolve()) != ROUND86_SHA:
+            raise SystemExit("bound official round-86 receipt required")
+        if (args.redi_zfw_component_dir is None
+                or args.redi_zfw_component_bracket is None
+                or not args.redi_zfw_component_bracket_sha):
+            raise SystemExit("component score requires dir, bracket, and SHA")
+        if (_sha(args.redi_zfw_component_bracket.resolve())
+                != args.redi_zfw_component_bracket_sha):
+            raise SystemExit("zfw component bracket changed")
+        component_dir = args.redi_zfw_component_dir.resolve()
+        expected_components = {
+            f"redi_dump_zfw_{term}_{tracer}.bin"
+            for term in ("skew", "a33") for tracer in ("tem", "sal")}
+        bracket = json.loads(args.redi_zfw_component_bracket.read_text())
+        if (bracket.get("schema") != "dino-redi-zfw-component-bracket-v1"
+                or set(bracket.get("new_streams", ())) != expected_components
+                or not all(bracket.get("controls", {}).values())):
+            raise SystemExit("zfw component bracket does not admit scoring")
+        for name in expected_components:
+            path = component_dir / name
+            if (not path.is_file() or path.stat().st_size != 35 * 203 * 56 * 8
+                    or _sha(path) != bracket["new_stream_manifest"][name]["sha256"]):
+                raise SystemExit(f"held zfw component changed: {name}")
+    elif (args.round86 is not None or args.redi_zfw_component_dir is not None
+          or args.redi_zfw_component_bracket is not None
+          or args.redi_zfw_component_bracket_sha is not None):
+        raise SystemExit("round-87 component inputs require component score")
     if _sha(args.raw_artifact.resolve()) != RAW_ARTIFACT_SHA:
         raise SystemExit("admitted held row-8 artifact changed")
     held = args.held_dir.resolve()
@@ -1066,6 +1103,7 @@ def main() -> int:
     redi_flux_metrics = {}
     redi_zfu_operand_ladder = {}
     redi_zfw_association_factorial = {}
+    redi_zfw_component_metrics = {}
     redi_flux_rows = []
     first_flux = None
     first_flux_subrow = None
@@ -1594,6 +1632,31 @@ def main() -> int:
                                         [masks["zfw"]]).all()),
                                 },
                             }
+                            if args.redi_zfw_component_score:
+                                own_components = {
+                                    "skew": np.asarray(
+                                        zfw["skew_current"]
+                                        * zfw["act_below"])[..., :35],
+                                    "a33": np.asarray(
+                                        zfw["a33_current"]
+                                        * zfw["act_below"])[..., :35],
+                                }
+                                oracle_components = {
+                                    term: _load(component_dir /
+                                        f"redi_dump_zfw_{term}_tem.bin")
+                                    for term in ("skew", "a33")}
+                                redi_zfw_component_metrics = {
+                                    term: sweep.metrics(
+                                        own_components[term],
+                                        oracle_components[term], masks["zfw"],
+                                        FOCUS, POINTWISE_BAR)
+                                    for term in ("skew", "a33")}
+                                redi_zfw_component_metrics["oracle_closure"] = (
+                                    sweep.metrics(
+                                        oracle_components["skew"]
+                                        + oracle_components["a33"],
+                                        oracle_zfw, masks["zfw"], FOCUS,
+                                        POINTWISE_BAR))
     specs = (
         ("8.3", "uu(Kmm) / zptu", "traadv.F90:301-304", "un", POINTWISE_BAR),
         ("8.4", "e2u", "traadv.F90:329", "e2u", POINTWISE_BAR),
@@ -1868,6 +1931,14 @@ def main() -> int:
                 prior85["redi_flux_metrics"]["zfw_tem"]["pass"] is False),
             **{f"redi_zfw_{name}": value for name, value in
                redi_zfw_association_factorial["controls"].items()},
+        })
+    if args.redi_zfw_component_score:
+        controls.update({
+            "round86_components_released": (
+                json.loads(args.round86.read_text()).get("disposition")
+                == "REDI_ZFW_T_COMPONENTS_HELD_OPEN"),
+            "zfw_oracle_component_closure":
+                redi_zfw_component_metrics["oracle_closure"]["pass"],
         })
     controls["all_scored_finite"] = all(
         row.get("status") == "ORDERED_BLOCKED"
@@ -2148,12 +2219,24 @@ def main() -> int:
         else:
             disposition = "REDI_ZFW_T_COMPONENTS_HELD_OPEN"
         first_flux_subrow = "86.T.3"
+    if args.redi_zfw_component_score and valid:
+        if not redi_zfw_component_metrics["skew"]["pass"]:
+            disposition = "REDI_ZFW_T_DIVERGED_A31_A32"
+            first_flux_subrow = "87.T.3a"
+        elif not redi_zfw_component_metrics["a33"]["pass"]:
+            disposition = "REDI_ZFW_T_DIVERGED_A33"
+            first_flux_subrow = "87.T.3b"
+        else:
+            disposition = "REDI_ZFW_T_COMPONENTS_AT_BAR"
+            first_flux_subrow = "87.T.3c"
     receipt_first = (first_flux_subrow
                      if args.redi_flux_ladder and first_flux_subrow is not None
                      else first)
     nemo = args.nemo_root.resolve()
     receipt = {
-        "schema": ("dino-split-explicit-momentum-chain-round86-v1"
+        "schema": ("dino-split-explicit-momentum-chain-round87-v1"
+                   if args.redi_zfw_component_score else
+                   "dino-split-explicit-momentum-chain-round86-v1"
                    if args.redi_zfw_association_factorial else
                    "dino-split-explicit-momentum-chain-round85-v1"
                    if args.redi_zfu_ahtu_postfix else
@@ -2229,6 +2312,8 @@ def main() -> int:
         **({"redi_zfw_association_factorial":
             redi_zfw_association_factorial}
            if args.redi_zfw_association_factorial else {}),
+        **({"redi_zfw_component_metrics": redi_zfw_component_metrics}
+           if args.redi_zfw_component_score else {}),
         "focus_ji": [list(x) for x in FOCUS],
         "bindings": {
             "round54": _sha(args.round54.resolve()),
@@ -2298,12 +2383,20 @@ def main() -> int:
                if args.redi_zfu_ahtu_postfix else {}),
             **({"round85": _sha(args.round85.resolve())}
                if args.redi_zfw_association_factorial else {}),
+            **({"round86": _sha(args.round86.resolve()),
+                "redi_zfw_component_bracket": _sha(
+                    args.redi_zfw_component_bracket.resolve()),
+                **{name: _sha(component_dir / name)
+                   for name in sorted(expected_components)}}
+               if args.redi_zfw_component_score else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(
                 root / "docs/ocean/fidelity" /
-                ("PREREG_split_explicit_momentum_chain_round86.md"
+                ("PREREG_split_explicit_momentum_chain_round87.md"
+                 if args.redi_zfw_component_score else
+                 "PREREG_split_explicit_momentum_chain_round86.md"
                  if args.redi_zfw_association_factorial else
                  "PREREG_split_explicit_momentum_chain_round85.md"
                  if args.redi_zfu_ahtu_postfix else
@@ -2363,7 +2456,9 @@ def main() -> int:
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
             "nemo_ldftra": _sha(nemo / "cfgs/DINO/MY_SRC/ldftra.F90"),
         },
-        "arm": ("redi_zfw_association_factorial"
+        "arm": ("redi_zfw_component_score"
+                if args.redi_zfw_component_score else
+                "redi_zfw_association_factorial"
                 if args.redi_zfw_association_factorial else
                 "redi_zfu_ahtu_postfix"
                 if args.redi_zfu_ahtu_postfix else
@@ -2407,7 +2502,13 @@ def main() -> int:
                 "oracle_transport" if args.oracle_transport else
                 "held_slow_forcing" if args.hold_slow_forcing else
                 "production"),
-        "ordered_next": ("redi_zfw_source_association_fix" if disposition in (
+        "ordered_next": ("redi_zfw_a31_a32_operand_peel" if disposition ==
+                          "REDI_ZFW_T_DIVERGED_A31_A32" else
+                          "redi_zfw_a33_operand_peel" if disposition ==
+                          "REDI_ZFW_T_DIVERGED_A33" else
+                          "redi_zfw_component_sum_association" if disposition ==
+                          "REDI_ZFW_T_COMPONENTS_AT_BAR" else
+                          "redi_zfw_source_association_fix" if disposition in (
                           "REDI_ZFW_T_GRADIENT_ASSOCIATION_OWNED",
                           "REDI_ZFW_T_A33_ASSOCIATION_OWNED",
                           "REDI_ZFW_T_ASSOCIATION_COMPOSITION_OWNED") else
