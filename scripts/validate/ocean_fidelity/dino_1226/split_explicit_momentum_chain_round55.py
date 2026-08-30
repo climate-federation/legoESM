@@ -16,6 +16,7 @@ os.environ.setdefault("LEGOESM_NEMO_E3T", "both")
 os.environ.setdefault("DINO_1226_LANE", "d180")
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 import kamm_twin_90d as twin
@@ -28,6 +29,7 @@ from legoesm.ocean.vertical import compute_layer_thickness
 
 
 ROUND54_SHA = "a1b76177330b83d7bb21c7f35c9e606d10d36a4b98d46b3b570f53588188eaa3"
+ROUND56_SHA = "d8c71c02792250ee85973a8c713260e61f7c6b240c9231d666fcdd62772fc86b"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -40,6 +42,8 @@ HELD_SHA = {
     "fct_entry_dump_pu_bolus.bin": "69dfe222dbbf460f9ae86f657b2b9ca114e4203ac8beb34d00d76f0e8f3f58d5",
     "fct_entry_dump_pu_total.bin": "4006ee7f7c8c140f1e4b3dfcdec5a4a3573b322cd86edfff245a206e05c5d270",
     "fct_dump_zwx_up.bin": "ecb7caf9cb610c274cc206877fc484ffe6a278cf558db73d6cf10aac184b715d",
+    "spg_dump_zu_frc.bin": "13138faa46149968c009f0d6c20956b8d2457a904667686a1f6cb1a93d7bcca6",
+    "spg_dump_zv_frc.bin": "81d01381ad5164b1a0cc3fb5f22590f471b0e24bb9b68084290e0cb9e2ef4c0e",
 }
 FOCUS = [(11, 1), (12, 1), (13, 1), (13, 23)]
 POINTWISE_BAR = 1.0e-15
@@ -88,6 +92,8 @@ def main() -> int:
     parser.add_argument("--held-dir", type=Path, required=True)
     parser.add_argument("--run-traj", type=Path, required=True)
     parser.add_argument("--round54", type=Path, required=True)
+    parser.add_argument("--round56", type=Path)
+    parser.add_argument("--hold-slow-forcing", action="store_true")
     parser.add_argument("--raw-artifact", type=Path, required=True)
     parser.add_argument("--nemo-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -104,6 +110,16 @@ def main() -> int:
     if (prior.get("session_id") != session or prior.get("disposition")
             != "MOMENTUM_TAIL_AT_BAR_UPSTREAM_TRANSPORT_EXACT"):
         raise SystemExit("round 54 does not release the tracer tail")
+    prior56 = None
+    if args.hold_slow_forcing:
+        if args.round56 is None or _sha(args.round56.resolve()) != ROUND56_SHA:
+            raise SystemExit("official round-56 red receipt required")
+        prior56 = json.loads(args.round56.read_text())
+        if (prior56.get("session_id") != session or prior56.get("disposition")
+                != "TRACER_ENTRY_DIVERGED_8.3"):
+            raise SystemExit("round 56 does not admit the forcing substitution")
+    elif args.round56 is not None:
+        raise SystemExit("--round56 is only valid with --hold-slow-forcing")
     if _sha(args.raw_artifact.resolve()) != RAW_ARTIFACT_SHA:
         raise SystemExit("admitted held row-8 artifact changed")
     held = args.held_dir.resolve()
@@ -120,6 +136,17 @@ def main() -> int:
     state = model._seed_tke_preclosure_carry(state)
     captured = []
     original = model_module.add_bolus_to_advecting_flux
+    original_solver = model_module.barotropic_substeps_latlon_cgrid
+    solver_calls = 0
+    held_u_native = np.fromfile(held / "spg_dump_zu_frc.bin", dtype="<f8")
+    held_v_native = np.fromfile(held / "spg_dump_zv_frc.bin", dtype="<f8")
+    if held_u_native.size != 199 * 52 or held_v_native.size != 199 * 52:
+        raise SystemExit("held slow forcing must be cited-interior (199,52)")
+    held_u = np.concatenate(
+        [held_u_native.reshape(199, 52)[:, -1:], held_u_native.reshape(199, 52)],
+        axis=1)
+    held_v = np.concatenate(
+        [np.zeros((1, 52)), held_v_native.reshape(199, 52)], axis=0)
 
     def observe(bolus, mass_flux_u, mass_flux_v, u_mask, v_mask, grid, z_coord):
         result = original(
@@ -127,13 +154,29 @@ def main() -> int:
         captured.append((mass_flux_u, result[0], u_mask))
         return result
 
+    def held_solver(state_arg, dt_s, n_substeps, grid, z_coord, config, **kwargs):
+        nonlocal solver_calls
+        kwargs = dict(kwargs)
+        if kwargs.get("eta_init") is not None:
+            solver_calls += 1
+            kwargs["F_slow_u"] = jnp.asarray(
+                held_u, dtype=kwargs["F_slow_u"].dtype)
+            kwargs["F_slow_v"] = jnp.asarray(
+                held_v, dtype=kwargs["F_slow_v"].dtype)
+        return original_solver(
+            state_arg, dt_s, n_substeps, grid, z_coord, config, **kwargs)
+
     model_module.add_bolus_to_advecting_flux = observe
+    if args.hold_slow_forcing:
+        model_module.barotropic_substeps_latlon_cgrid = held_solver
     try:
         with jax.disable_jit():
             model._nemo_mlf_step(state, twin.DT, surface_forcing=sf)
     finally:
         model_module.add_bolus_to_advecting_flux = original
-    restored = model_module.add_bolus_to_advecting_flux is original
+        model_module.barotropic_substeps_latlon_cgrid = original_solver
+    restored = (model_module.add_bolus_to_advecting_flux is original
+                and model_module.barotropic_substeps_latlon_cgrid is original_solver)
     if len(captured) != 1:
         raise SystemExit(f"expected one single-pass tracer handoff, got {len(captured)}")
 
@@ -181,7 +224,14 @@ def main() -> int:
     rows = []
     blocked = False
     first = None
-    controls = {"hook_restored": restored}
+    controls = {
+        "hook_restored": restored,
+        "solver_substitution_count": (
+            solver_calls == 1 if args.hold_slow_forcing else solver_calls == 0),
+        "round56_unheld_red": (
+            prior56 is None
+            or prior56["rows"][0]["status"] == "DIVERGED"),
+    }
     for subrow, name, source, key, bar in specs:
         row = {"subrow": subrow, "name": name, "nemo_source": source, "bar": bar}
         if blocked:
@@ -204,11 +254,15 @@ def main() -> int:
         or row["metrics"]["n_nonfinite_wet_elements"] == 0 for row in rows)
     controls["population_nonempty"] = int(wet.sum()) > 0
     valid = all(controls.values())
-    disposition = ("TRACER_ENTRY_ROW8_AT_BAR" if valid and first is None
+    disposition = (("TRACER_ENTRY_ROW8_AT_BAR_UPSTREAM_FORCING_EXACT"
+                    if args.hold_slow_forcing else "TRACER_ENTRY_ROW8_AT_BAR")
+                   if valid and first is None
                    else "INVALID" if not valid else f"TRACER_ENTRY_DIVERGED_{first}")
     nemo = args.nemo_root.resolve()
     receipt = {
-        "schema": "dino-split-explicit-momentum-chain-round55-v1",
+        "schema": ("dino-split-explicit-momentum-chain-round57-v1"
+                   if args.hold_slow_forcing
+                   else "dino-split-explicit-momentum-chain-round55-v1"),
         "session_id": session,
         "git_commit": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
@@ -219,17 +273,26 @@ def main() -> int:
         "focus_ji": [list(x) for x in FOCUS],
         "bindings": {
             "round54": _sha(args.round54.resolve()),
+            **({"round56": _sha(args.round56.resolve())}
+               if args.hold_slow_forcing else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
             "scorer": _sha(Path(__file__).resolve()),
-            "preregistration": _sha(root / "docs/ocean/fidelity/PREREG_split_explicit_momentum_chain_round55.md"),
+            "preregistration": _sha(
+                root / "docs/ocean/fidelity" /
+                ("PREREG_split_explicit_momentum_chain_round57.md"
+                 if args.hold_slow_forcing
+                 else "PREREG_split_explicit_momentum_chain_round55.md")),
             "production_model": _sha(root / "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py"),
             "nemo_stpmlf": _sha(nemo / "cfgs/DINO/MY_SRC/stpmlf.F90"),
             "nemo_traadv": _sha(nemo / "src/OCE/TRA/traadv.F90"),
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
             "nemo_ldftra": _sha(nemo / "cfgs/DINO/MY_SRC/ldftra.F90"),
         },
-        "ordered_next": "redi_t" if disposition == "TRACER_ENTRY_ROW8_AT_BAR" else first,
+        "arm": ("held_slow_forcing" if args.hold_slow_forcing else "production"),
+        "ordered_next": ("redi_t" if disposition in {
+            "TRACER_ENTRY_ROW8_AT_BAR",
+            "TRACER_ENTRY_ROW8_AT_BAR_UPSTREAM_FORCING_EXACT"} else first),
     }
     args.output.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     print(f"disposition={disposition} first_diverged_subrow={first}")

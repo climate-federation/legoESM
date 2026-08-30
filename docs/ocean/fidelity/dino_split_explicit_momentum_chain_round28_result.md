@@ -652,3 +652,12 @@ later Asselin filter but left tracer horizontal mass flux on its generic
 `state_new` correction. Round 56 wires the execute half into tracer entry
 under the already-scoped literal QCO selector; GM/FCT remain ordered-blocked
 until that production replay passes.
+
+Round 56 executes the production fix and reduces the maximum normalized
+column error from `2.6794216264` to `1.9408056746e-5` (about `1.38e5`-fold),
+with correlation `0.9999999999997489` and RMS ratio `0.9999999850`; the strict
+pointwise bar still rejects `9758/9758`. Round 53's smaller tail was measured
+under a held NEMO slow forcing and held after-level target, so it was not an
+unheld transport replay. Round 57 therefore substitutes only the already-
+registered `zu_frc/zv_frc` streams before reopening any downstream tracer
+operand.
