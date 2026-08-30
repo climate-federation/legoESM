@@ -1133,6 +1133,9 @@ class BarotropicConfig(NamedTuple):
     # Requires barotropic_seed_face_depth="nemo_ssh_avg" so the live face
     # thickness and its separately associated reciprocal describe one state.
     barotropic_seed_evaluation: str = "generic"
+    # Split-explicit surface-PGF arithmetic. ``nemo_literal`` consumes the
+    # carried U/V face metrics and preserves dynspg_ts.F90:776-780 ordering.
+    barotropic_pgf_evaluation: str = "generic"
     # Which OUTER time level seeds the FROZEN in-window EEN barotropic-Coriolis
     # coefficients (#1226 zero-deviation item 4; only read when
     # barotropic_coriolis is "een"/"een_metric").  NEMO freezes the dyn_cor_2D

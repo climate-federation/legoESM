@@ -42,10 +42,11 @@ from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     barotropic_substeps_latlon_cgrid,
     _depth_average_to_faces,
+    _nemo_literal_barotropic_pressure_gradient,
     _nemo_literal_seed_depth_mean,
 )
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-    divergence_cgrid, min_cell_to_uface, min_cell_to_vface,
+    divergence_cgrid, gradient_y_cgrid, min_cell_to_uface, min_cell_to_vface,
 )
 
 
@@ -608,7 +609,8 @@ class TestBarotropicSeedFaceDepth:
         cfg_default = _cfg(barotropic_time_filter="cosine")
         cfg_explicit = _cfg(barotropic_time_filter="cosine",
                             barotropic_seed_face_depth="min_rule",
-                            barotropic_seed_evaluation="generic")
+                            barotropic_seed_evaluation="generic",
+                            barotropic_pgf_evaluation="generic")
         assert cfg_default.barotropic.barotropic_seed_face_depth == "min_rule"
         assert cfg_default.barotropic.barotropic_seed_evaluation == "generic"
         sn_a, (Hu_a, Hv_a) = barotropic_substeps_latlon_cgrid(
@@ -620,6 +622,37 @@ class TestBarotropicSeedFaceDepth:
         np.testing.assert_array_equal(np.asarray(sn_a.v.data), np.asarray(sn_b.v.data))
         np.testing.assert_array_equal(np.asarray(Hu_a), np.asarray(Hu_b))
         np.testing.assert_array_equal(np.asarray(Hv_a), np.asarray(Hv_b))
+
+    def test_nemo_literal_pgf_uses_face_metrics_and_source_order(self):
+        grid = ensure_geometry(create_latlon_grid(n_lat=5, n_lon=8))
+        # Make the V metric observably non-reconstructible from the legacy
+        # cell-height average, as on the NEMO Mercator bridge.
+        scale = 1.0 + 2.0e-4 * jnp.arange(6, dtype=jnp.float64)[:, None]
+        grid = grid._replace(dy_v=grid.dy_v * scale)
+        jj = jnp.arange(5, dtype=jnp.float64)[:, None]
+        ii = jnp.arange(8, dtype=jnp.float64)[None, :]
+        eta = 0.17 * jnp.sin(0.3 * ii) + 0.11 * jnp.cos(0.4 * jj)
+        um = jnp.ones((5, 9), dtype=jnp.float64)
+        vm = jnp.ones((6, 8), dtype=jnp.float64).at[0].set(0.0).at[-1].set(0.0)
+        g = jnp.asarray(9.80665)
+        pu, pv = _nemo_literal_barotropic_pressure_gradient(eta, grid, g, um, vm)
+
+        e = np.asarray(eta)
+        du = np.roll(e, -1, axis=1) - e
+        expected_u_native = ((-float(g) * du)
+                             * (1.0 / np.asarray(grid.dx_u)[:, 1:]))
+        expected_u = np.concatenate(
+            [expected_u_native[:, -1:], expected_u_native], axis=1)
+        dv = e[1:] - e[:-1]
+        expected_v = np.concatenate([
+            np.zeros_like(e[:1]),
+            ((-float(g) * dv) * (1.0 / np.asarray(grid.dy_v)[1:-1])),
+            np.zeros_like(e[:1]),
+        ], axis=0)
+        np.testing.assert_array_equal(np.asarray(pu), expected_u)
+        np.testing.assert_array_equal(np.asarray(pv), expected_v)
+        generic_v = -g * gradient_y_cgrid(eta, grid)
+        assert np.any(np.asarray(generic_v)[1:-1] != expected_v[1:-1])
 
     def test_ground_truth_column_reimplementation(self):
         """Independent, from-scratch NumPy re-derivation of the
@@ -861,10 +894,12 @@ class TestBarotropicSeedFaceDepth:
             c = dino_config_for_recipe(name)
             assert c.barotropic_seed_face_depth == "nemo_ssh_avg", name
             assert c.barotropic_seed_evaluation == "nemo_literal", name
+            assert c.barotropic_pgf_evaluation == "nemo_literal", name
             grid = create_latlon_grid(n_lat=8, n_lon=16)
             mc, _ = dino_lat_lon_model_config(grid, c)
             assert mc.barotropic.barotropic_seed_face_depth == "nemo_ssh_avg", name
             assert mc.barotropic.barotropic_seed_evaluation == "nemo_literal", name
+            assert mc.barotropic.barotropic_pgf_evaluation == "nemo_literal", name
 
         for name, spec in DINO_RECIPES.items():
             if name in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
@@ -874,3 +909,4 @@ class TestBarotropicSeedFaceDepth:
             # recipe must stay at the bit-identical legacy default.
             assert c.barotropic_seed_face_depth == "min_rule", name
             assert c.barotropic_seed_evaluation == "generic", name
+            assert c.barotropic_pgf_evaluation == "generic", name

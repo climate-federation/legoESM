@@ -32,7 +32,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from legoesm.grids.latlon import LatLonGrid
+from legoesm.grids.latlon import LatLonGrid, ensure_geometry
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness
 from legoesm.ocean.state import LatLonCGridOceanState, LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
@@ -216,6 +216,21 @@ def _nemo_literal_seed_from_reference_mesh(
     un = jnp.concatenate([un_native[:, -1:], un_native], axis=1)
     vn = jnp.concatenate([jnp.zeros_like(vn_native[:1]), vn_native], axis=0)
     return un, vn
+
+
+def _nemo_literal_barotropic_pressure_gradient(eta_pgf, grid, g, u_mask, v_mask):
+    """NEMO ``dynspg_ts.F90:776-780`` surface PGF and native face metrics."""
+    geom = ensure_geometry(grid)
+    east_delta = jnp.roll(eta_pgf, -1, axis=1) - eta_pgf
+    pgf_u_native = ((-g * east_delta) * (1.0 / geom.dx_u[:, 1:]))
+    pgf_u = jnp.concatenate([pgf_u_native[:, -1:], pgf_u_native], axis=1)
+    north_delta = eta_pgf[1:] - eta_pgf[:-1]
+    pgf_v = jnp.concatenate([
+        jnp.zeros_like(eta_pgf[:1]),
+        ((-g * north_delta) * (1.0 / geom.dy_v[1:-1])),
+        jnp.zeros_like(eta_pgf[:1]),
+    ], axis=0)
+    return pgf_u * u_mask, pgf_v * v_mask
 
 
 def _depth_average_to_faces(
@@ -1092,8 +1107,18 @@ def _run_substep_loop(
                        + zb_i[2] * etab_c + zb_i[3] * etabb_c)
         else:
             eta_pgf = bebt_blend(eta_new, eta_c, bebt)
-        deta_dx = gradient_x_cgrid(eta_pgf, grid).astype(dtype)
-        deta_dy = gradient_y_cgrid(eta_pgf, grid).astype(dtype)
+        _pgf_eval = config.barotropic.barotropic_pgf_evaluation
+        if _pgf_eval == "nemo_literal":
+            _pgf_u, _pgf_v = _nemo_literal_barotropic_pressure_gradient(
+                eta_pgf, grid, g, u_mask, v_mask)
+            _pgf_u, _pgf_v = _pgf_u.astype(dtype), _pgf_v.astype(dtype)
+        elif _pgf_eval == "generic":
+            _pgf_u = -g * gradient_x_cgrid(eta_pgf, grid).astype(dtype)
+            _pgf_v = -g * gradient_y_cgrid(eta_pgf, grid).astype(dtype)
+        else:
+            raise ValueError(
+                "unknown barotropic_pgf_evaluation scheme "
+                f"{_pgf_eval!r}: must be one of ('generic', 'nemo_literal').")
 
         # Average V to u-points for Coriolis.  In ab3am4 mode NEMO applies
         # the 2D Coriolis to the EXTRAPOLATED mid-step velocities (both
@@ -1143,7 +1168,7 @@ def _run_substep_loop(
         else:
             _drag_u = 0.0
         U_bar_new = (U_bar_c + dt_s * (
-            _cor_u + _drag_u - g * deta_dx + F_slow_u_i
+            _cor_u + _drag_u + _pgf_u + F_slow_u_i
         )) * u_mask
 
         # U averaged to v-points for the backward Coriolis half-step,
@@ -1170,7 +1195,7 @@ def _run_substep_loop(
         else:
             _drag_v = 0.0
         V_bar_new = (V_bar_c + dt_s * (
-            _cor_v + _drag_v - g * deta_dy + F_slow_v_i
+            _cor_v + _drag_v + _pgf_v + F_slow_v_i
         )) * v_mask
 
         # Divergence damping: grad(div(u_bar)) (#205)
