@@ -18,6 +18,7 @@ os.environ.setdefault("LEGOESM_NEMO_E3T", "both")
 os.environ.setdefault("DINO_1226_LANE", "d180")
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 import split_explicit_momentum_chain_round29 as r29
@@ -53,33 +54,37 @@ def _load_trace(path: Path, icycle: int, jpj: int, jpi: int, hls: int) -> np.nda
 
 
 def _capture_production_trace(output: Path, n_loop: int) -> tuple[np.ndarray, ...]:
-    real_scan = jax.lax.scan
+    real_fori = jax.lax.fori_loop
     captures: list[tuple[Any, Any, Any]] = []
 
-    def tracing_scan(f, init, xs=None, length=None, **kwargs):
-        if length == n_loop and isinstance(init, tuple) and len(init) == 14:
-            def body(carry, x):
-                new_carry, _ = f(carry, x)
-                return new_carry, (new_carry[0], new_carry[1], new_carry[2])
+    def tracing_fori(lower, upper, body, init, *args, **kwargs):
+        if (lower == 0 and upper == n_loop
+                and isinstance(init, tuple) and len(init) == 14):
+            def scan_body(carry, index):
+                new_carry = body(index, carry)
+                # The NEMO writer is before the current substep update: row jn
+                # is sshn_e/un_e/vn_e at substep START. Return the carry-in,
+                # while advancing the production recurrence with new_carry.
+                return new_carry, (carry[0], carry[1], carry[2])
 
-            final, trace = real_scan(
-                body, init, xs=xs, length=length, **kwargs)
+            final, trace = jax.lax.scan(
+                scan_body, init, jnp.arange(lower, upper))
             captures.append(trace)
-            return final, None
-        return real_scan(f, init, xs=xs, length=length, **kwargs)
+            return final
+        return real_fori(lower, upper, body, init, *args, **kwargs)
 
-    jax.lax.scan = tracing_scan
+    jax.lax.fori_loop = tracing_fori
     try:
         r29._capture_production_pssh(output)
     finally:
-        jax.lax.scan = real_scan
-    if jax.lax.scan is not real_scan:
-        raise SystemExit("jax.lax.scan restoration failed")
+        jax.lax.fori_loop = real_fori
+    if jax.lax.fori_loop is not real_fori:
+        raise SystemExit("jax.lax.fori_loop restoration failed")
     if len(captures) != 2:
         raise SystemExit(
             f"expected forcing-only and forcing+seed outer traces, got {len(captures)}")
-    # Round 6 executes forcing_only first. Convert before the compiled buffers
-    # leave scope; the second capture is a non-primary restoration/control arm.
+    # Round 6 executes forcing_only first. The second capture is its
+    # forcing+seed restoration/control arm.
     return tuple(np.asarray(jax.device_get(value)) for value in captures[0])
 
 
@@ -169,27 +174,28 @@ def main() -> int:
             if row["gate_status"] != "AT BAR"), None)
 
     bound = json.loads(args.round31.read_text())
-    bound_substep = {
+    bound_entry = {
         row["field"]: row for row in bound["measurements"]
-        if row["arm"] == "forcing_only" and row["subrow"] == "1.3"
+        if row["arm"] == "forcing_only" and row["subrow"] == "1.2"
     }
-    mappings = {"ssh": "ssh_substep1", "u": "ub_substep1", "v": "vb_substep1"}
+    mappings = {"ssh": "sshn_e_init", "u": "un_e_init", "v": "vn_e_init"}
     bound_ok = all(np.isclose(
         rows[name][0]["normalized_rms_error"],
-        bound_substep[field]["normalized_rms_error"], rtol=1e-12, atol=1e-30)
+        bound_entry[field]["normalized_rms_error"], rtol=0.0, atol=0.0)
         for name, field in mappings.items())
     controls = r29._strict_controls(
         production["ssh"][0], nemo["ssh"][0], masks["ssh"])
     controls.update({
         "bracket_exact": bracket_ok,
-        "scan_restored": True,
-        "substep1_bound": bound_ok,
-        "final_finite": all(np.isfinite(value[-1]).all()
-                            for value in production.values()),
+        "fori_loop_restored": True,
+        "substep1_entry_bound": bound_ok,
+        "last_start_finite": all(np.isfinite(value[-1]).all()
+                                 for value in production.values()),
     })
     if not all(controls[name] for name in (
             "identity_at_bar", "four_nextafter_fires", "zero_shift_best",
-            "bracket_exact", "scan_restored", "substep1_bound", "final_finite")):
+            "bracket_exact", "fori_loop_restored", "substep1_entry_bound",
+            "last_start_finite")):
         disposition = "INVALID"
     elif first_strict["ssh"] is None:
         disposition = "NO_STRICT_SSH_FAILURE"
@@ -220,7 +226,7 @@ def main() -> int:
             ["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
         "backend": jax.default_backend(),
         "jax_enable_x64": bool(jax.config.jax_enable_x64),
-        "source": "dynspg_ts.F90:948-971 post-swap; loop end :1135",
+        "source": "dynspg_ts.F90 pre-update carry at each jn; prior swap commits next row",
         "shapes": expected_shapes,
         "populations": populations,
         "first_strict_failure_substep": first_strict,
