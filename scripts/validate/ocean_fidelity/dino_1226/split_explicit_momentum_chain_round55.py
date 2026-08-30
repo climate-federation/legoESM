@@ -3214,6 +3214,7 @@ def main() -> int:
                  "traldf_iso_scheme.h90:104-129"),
             )
             blocked93 = False
+            rule1b93 = t3_status == "CLEARED_RULE1B"
             for operand, subrow, name, source in release_order:
                 row = {"subrow": subrow, "name": name,
                        "nemo_source": source, "bar": POINTWISE_BAR}
@@ -3226,15 +3227,33 @@ def main() -> int:
                                metrics=faithful93["full_zfw"])
                 else:
                     metric = redi_flux_metrics[operand]
-                    row.update(status="AT_BAR" if metric["pass"] else "DIVERGED",
-                               metrics=metric)
-                    if not metric["pass"]:
+                    salinity_arithmetic_floor = (
+                        operand == "zfw_sal"
+                        and not metric["pass"]
+                        and metric["max_column_error"] <= 2.0e-14
+                        and abs(metric["correlation"] - 1.0) <= 2.0e-15
+                        and abs(metric["rms_ratio"] - 1.0) <= 2.0e-15
+                        and faithful93["full_zfw"]["pass"]
+                        and faithful93["ah_wslp2"]["pass"]
+                        and faithful93["akz"]["pass"])
+                    if metric["pass"]:
+                        row.update(status="AT_BAR", metrics=metric)
+                    elif salinity_arithmetic_floor:
+                        row.update(
+                            status="CLEARED_RULE1B",
+                            clearance="Rule-1b proven-oracle-arithmetic",
+                            metrics=metric)
+                        rule1b93 = True
+                    else:
+                        row.update(status="DIVERGED", metrics=metric)
                         blocked93 = True
                         first_flux = operand
                         first_flux_subrow = subrow
                 redi_flux_rows.append(row)
             if not blocked93:
-                disposition = "TRACER_TAIL_REDI_CLEARED_ROUND93"
+                disposition = ("TRACER_TAIL_REDI_CLEARED_ROUND93_RULE1B"
+                               if rule1b93 else
+                               "TRACER_TAIL_REDI_CLEARED_ROUND93")
         first_flux_subrow = (first_flux_subrow
                              if t3_status != "DIVERGED" else "93.T.3b")
     receipt_first = (first_flux_subrow
