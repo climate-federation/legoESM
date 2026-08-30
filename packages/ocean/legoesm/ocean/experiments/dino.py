@@ -709,6 +709,9 @@ class DINOConfig:
     # traldf_iso A31/A32 vertical-skew arithmetic. Generic cards retain the
     # historical normalized-sum topology; the two NEMO cards use source order.
     gm_redi_vertical_skew_evaluation: str = "normalized_sums"
+    # traldf_iso A33 slope-square association. Generic cards retain the
+    # exponent form; the two NEMO cards use the written left-associated form.
+    gm_redi_a33_evaluation: str = "normalized_square"
     # W-position slope stage used by the Redi vertical flux. Generic cards
     # retain the original Redi tuple; the two NEMO cards carry the post-stage
     # pair already computed for the bolus path.
@@ -1379,6 +1382,7 @@ DINO_RECIPES: dict[str, dict] = {
         "gm_redi_flux_face_thickness_evaluation": "nemo_qco_live",
         "gm_redi_horizontal_evaluation": "nemo_metric_literal",
         "gm_redi_vertical_skew_evaluation": "nemo_literal",
+        "gm_redi_a33_evaluation": "nemo_literal",
         "gm_redi_w_slope_stage_evaluation": "nemo_post_slope_pair",
         "gm_redi_slope_depth_evaluation": "nemo_qco_live_literal",
         "gm_treguier_vertical_reduction_evaluation": "nemo_left",
@@ -3309,6 +3313,12 @@ def dino_lat_lon_model_config(
             "unknown DINOConfig.gm_redi_vertical_skew_evaluation "
             f"{cfg.gm_redi_vertical_skew_evaluation!r}; expected "
             "'normalized_sums' or 'nemo_literal'")
+    if cfg.gm_redi_a33_evaluation not in (
+            "normalized_square", "nemo_literal"):
+        raise ValueError(
+            "unknown DINOConfig.gm_redi_a33_evaluation "
+            f"{cfg.gm_redi_a33_evaluation!r}; expected "
+            "'normalized_square' or 'nemo_literal'")
     if cfg.gm_redi_w_slope_stage_evaluation not in (
             "redi_tuple", "nemo_post_slope_pair"):
         raise ValueError(
@@ -3414,6 +3424,7 @@ def dino_lat_lon_model_config(
                 cfg.gm_redi_horizontal_evaluation),
             redi_vertical_skew_evaluation=(
                 cfg.gm_redi_vertical_skew_evaluation),
+            redi_a33_evaluation=cfg.gm_redi_a33_evaluation,
             redi_w_slope_stage_evaluation=(
                 cfg.gm_redi_w_slope_stage_evaluation),
             kappa_redi_diffusive_velocity=cfg.U_T,
@@ -3461,6 +3472,7 @@ def dino_lat_lon_model_config(
                 cfg.gm_redi_flux_face_thickness_evaluation),
             redi_vertical_skew_evaluation=(
                 cfg.gm_redi_vertical_skew_evaluation),
+            redi_a33_evaluation=cfg.gm_redi_a33_evaluation,
             redi_w_slope_stage_evaluation=(
                 cfg.gm_redi_w_slope_stage_evaluation),
             slope_depth_evaluation=cfg.gm_redi_slope_depth_evaluation,
@@ -3519,6 +3531,7 @@ def dino_lat_lon_model_config(
                         cfg.gm_redi_horizontal_evaluation),
                     redi_vertical_skew_evaluation=(
                         cfg.gm_redi_vertical_skew_evaluation),
+                    redi_a33_evaluation=cfg.gm_redi_a33_evaluation,
                     redi_w_slope_stage_evaluation=(
                         cfg.gm_redi_w_slope_stage_evaluation),
                     kappa_redi_diffusive_velocity=cfg.U_T,

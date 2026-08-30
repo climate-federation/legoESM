@@ -450,6 +450,11 @@ class GMRediConfig(NamedTuple):
     # coefficient and four-gradient association. Only the DINO NEMO cards
     # opt in.
     redi_vertical_skew_evaluation: str = "normalized_sums"
+    # Arithmetic topology of traldf_iso's A33 slope-square coefficient.
+    # ``normalized_square`` preserves the historical exponent form;
+    # ``nemo_literal`` follows scheme.h90's left-associated zahu*wslpi*wslpi
+    # expression. Only the two DINO NEMO cards opt in.
+    redi_a33_evaluation: str = "normalized_square"
     # Stage of the W-position native slopes consumed by the Redi vertical
     # flux. ``redi_tuple`` preserves the historical all-Kmm tuple.
     # ``nemo_post_slope_pair`` carries the separately computed post-stage

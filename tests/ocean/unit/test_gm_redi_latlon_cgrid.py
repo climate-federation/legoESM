@@ -2173,6 +2173,20 @@ class TestK33NemoNativeA33:
             aht, um3, vm3, wm3, wi, wj, e1u_c, e2v_c, e3w ** 2,
             dt=2700.0, msc=True)
         np.testing.assert_array_equal(np.asarray(ahw), np.asarray(ahw_f))
+        # Planted association violation: the historical exponent topology
+        # differs from NEMO's written left-associated multiply in fp64.
+        probe_aht = jnp.full_like(aht, 0.0005940911383846305)
+        probe_wi = jnp.full_like(wi, 0.05066177848148756)
+        probe_wj = jnp.zeros_like(wj)
+        ahw_square, _ = nemo_iso_a33(
+            probe_aht, um3, vm3, wm3, probe_wi, probe_wj,
+            e1u_c, e2v_c, e3w ** 2, msc=False,
+            evaluation="normalized_square")
+        ahw_literal, _ = nemo_iso_a33(
+            probe_aht, um3, vm3, wm3, probe_wi, probe_wj,
+            e1u_c, e2v_c, e3w ** 2, msc=False,
+            evaluation="nemo_literal")
+        assert bool(jnp.any(ahw_square != ahw_literal))
         assert float(jnp.min(akz)) >= 0.0
         # akz <= zcoef0*e3w2/dt with the -1/2 cap => akz < ah_wslp2 + akz_h*e3w2
         # (weak identity); the STRONG stability property: explicit remainder

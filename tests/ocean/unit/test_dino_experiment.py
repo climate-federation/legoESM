@@ -2086,6 +2086,7 @@ class TestIsoneutralRediOnly:
                     == "nemo_metric_literal")
             assert (model_cfg.gm_redi.redi_vertical_skew_evaluation
                     == "nemo_literal")
+            assert model_cfg.gm_redi.redi_a33_evaluation == "nemo_literal"
             assert (model_cfg.gm_redi.redi_w_slope_stage_evaluation
                     == "nemo_post_slope_pair")
             assert (model_cfg.gm_redi.kappa_redi_diffusive_velocity
@@ -2094,6 +2095,7 @@ class TestIsoneutralRediOnly:
         assert generic.gm_redi_horizontal_evaluation == "cosine_scaled"
         assert (generic.gm_redi_vertical_skew_evaluation
                 == "normalized_sums")
+        assert generic.gm_redi_a33_evaluation == "normalized_square"
         assert (generic.gm_redi_w_slope_stage_evaluation
                 == "redi_tuple")
 

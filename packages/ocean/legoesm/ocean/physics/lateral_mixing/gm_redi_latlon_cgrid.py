@@ -2181,7 +2181,8 @@ def nemo_iso_w_kappa_sums(aht, umask, vmask, aht_v=None):
 
 
 def nemo_iso_a33(aht, umask, vmask, wmask, wslpi, wslpj,
-                 e1u_c, e2v_c, e3w2, dt=None, msc: bool = False, aht_v=None):
+                 e1u_c, e2v_c, e3w2, dt=None, msc: bool = False, aht_v=None,
+                 evaluation: str = "normalized_square"):
     """``traldf_iso_a33`` in the "above" (k-1,k) convention: the a33 element
     of the rotated tensor and its explicit/implicit split.
 
@@ -2208,13 +2209,21 @@ def nemo_iso_a33(aht, umask, vmask, wmask, wslpi, wslpj,
     diverge (#1226).  ``aht_v`` (default ``None`` -> reuse ``aht``): see
     ``nemo_iso_w_kappa_sums``.
     """
+    if evaluation not in ("normalized_square", "nemo_literal"):
+        raise ValueError(
+            "nemo_iso_a33 evaluation must be 'normalized_square' or "
+            f"'nemo_literal', got {evaluation!r}")
     ax_y, ax_x, ax_z = 0, 1, 2
     up = lambda a: jnp.roll(a, +1, ax_z)
     aht_v_ = aht if aht_v is None else aht_v
     ksum_u, cnt_u, ksum_v, cnt_v = nemo_iso_w_kappa_sums(aht, umask, vmask, aht_v=aht_v)
     zahu_w = ksum_u * (wmask / jnp.maximum(cnt_u, 1.0))
     zahv_w = ksum_v * (wmask / jnp.maximum(cnt_v, 1.0))
-    ah_wslp2 = zahu_w * wslpi ** 2 + zahv_w * wslpj ** 2
+    if evaluation == "nemo_literal":
+        # traldf_iso.F90:302-303: preserve Fortran's left association.
+        ah_wslp2 = (zahu_w * wslpi) * wslpi + (zahv_w * wslpj) * wslpj
+    else:
+        ah_wslp2 = zahu_w * wslpi ** 2 + zahv_w * wslpj ** 2
     if not msc:
         return ah_wslp2, ah_wslp2
     if dt is None:
@@ -2266,6 +2275,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     face_thickness_v: jnp.ndarray | None = None,
     bolus_native_slopes: tuple | None = None,
     vertical_skew_evaluation: str = "normalized_sums",
+    a33_evaluation: str = "normalized_square",
     return_diagnostics: bool = False,
     return_operand_diagnostics: bool = False,
 ) -> jnp.ndarray:
@@ -2358,6 +2368,10 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         raise ValueError(
             "vertical_skew_evaluation must be 'normalized_sums' or "
             f"'nemo_literal', got {vertical_skew_evaluation!r}")
+    if a33_evaluation not in ("normalized_square", "nemo_literal"):
+        raise ValueError(
+            "a33_evaluation must be 'normalized_square' or 'nemo_literal', "
+            f"got {a33_evaluation!r}")
     ones_z = jnp.ones((1, 1, nlev), dtype=dtype)
     if (face_thickness_u is None) != (face_thickness_v is None):
         raise ValueError(
@@ -2587,7 +2601,8 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
                     f"{q.shape}, got {e3w_ab.shape}")
         _ahw_ab, _akz_ab = nemo_iso_a33(
             aht, umask, vmask, wmask, wslpi, wslpj,
-            e1u, e2v, e3w_ab ** 2, dt=dt, msc=True, aht_v=aht_v)
+            e1u, e2v, e3w_ab ** 2, dt=dt, msc=True, aht_v=aht_v,
+            evaluation=a33_evaluation)
         ah_wslp2 = jnp.roll(_ahw_ab, -1, ax_z)
         akz = jnp.roll(_akz_ab, -1, ax_z)
         e3w_kp1 = jnp.roll(e3w_ab, -1, ax_z)
@@ -4285,6 +4300,7 @@ def gm_redi_tracer_tendency_latlon(
                     f"{_w_stage!r}")
             _msc = getattr(cfg, "msc_stabilize", False)
             _skew_eval = cfg.redi_vertical_skew_evaluation
+            _a33_eval = cfg.redi_a33_evaluation
             _bolus = None
             _dT = nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 T, S_x, S_y, mask, u_mask, v_mask,
@@ -4297,7 +4313,8 @@ def gm_redi_tracer_tendency_latlon(
                 kappa_Redi_v=kappa_Redi_v_eff,
                 face_thickness_u=_flux_e3u,
                 face_thickness_v=_flux_e3v,
-                vertical_skew_evaluation=_skew_eval)
+                vertical_skew_evaluation=_skew_eval,
+                a33_evaluation=_a33_eval)
             if return_bolus_transport:
                 dT_dt, _bolus = _dT
             else:
@@ -4312,7 +4329,8 @@ def gm_redi_tracer_tendency_latlon(
                 kappa_Redi_v=kappa_Redi_v_eff,
                 face_thickness_u=_flux_e3u,
                 face_thickness_v=_flux_e3v,
-                vertical_skew_evaluation=_skew_eval)
+                vertical_skew_evaluation=_skew_eval,
+                a33_evaluation=_a33_eval)
             if return_bolus_transport:
                 return dT_dt, dS_dt, _bolus
             return dT_dt, dS_dt
@@ -4528,7 +4546,8 @@ def compute_isoneutral_K33_latlon(
         _msc = bool(getattr(cfg, "msc_stabilize", False))
         _, _akz = nemo_iso_a33(
             _aht, _um3, _vm3, _wm3, _wi, _wj,
-            _e1u_c, _e2v_c, _e3w ** 2, dt=dt, msc=_msc, aht_v=_aht_v)
+            _e1u_c, _e2v_c, _e3w ** 2, dt=dt, msc=_msc, aht_v=_aht_v,
+            evaluation=cfg.redi_a33_evaluation)
         return _akz[:, :, 1:]                              # interfaces 0..nlev-2
     kappa_Redi = cfg.kappa_Redi if kappa_redi_override is None else kappa_redi_override
     nlev = T.shape[-1]
