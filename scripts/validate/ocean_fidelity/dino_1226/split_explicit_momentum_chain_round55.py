@@ -891,15 +891,6 @@ def main() -> int:
             "corrected_u": np.asarray(result[0]),
             "corrected_v": np.asarray(result[1]),
         })
-    if args.redi_zfw_skew_operand_factorial:
-        controls.update({
-            "round89_postfix_regression_admitted": (
-                prior89["disposition"] ==
-                "REDI_ZFW_T_SKEW_POSTFIX_REGRESSION"),
-            **{f"redi_zfw_skew_operand_{name}": value
-               for name, value in
-               redi_zfw_skew_operand_factorial["controls"].items()},
-        })
         return result
 
     def observed_thickness(*thickness_args, **thickness_kwargs):
@@ -2437,6 +2428,15 @@ def main() -> int:
             "production_literal_skew_selector_reached": (
                 matched_calls["temperature"]["kwargs"].get(
                     "vertical_skew_evaluation") == "nemo_literal"),
+        })
+    if args.redi_zfw_skew_operand_factorial:
+        controls.update({
+            "round89_postfix_regression_admitted": (
+                prior89["disposition"] ==
+                "REDI_ZFW_T_SKEW_POSTFIX_REGRESSION"),
+            **{f"redi_zfw_skew_operand_{name}": value
+               for name, value in
+               redi_zfw_skew_operand_factorial["controls"].items()},
         })
     controls["all_scored_finite"] = all(
         row.get("status") == "ORDERED_BLOCKED"
