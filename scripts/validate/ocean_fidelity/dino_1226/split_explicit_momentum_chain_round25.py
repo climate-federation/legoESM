@@ -270,9 +270,9 @@ def main() -> int:
             "bound": ref,
             "relative_delta": relative,
         }
-    direct_at_bar = all(row["gate_status"] == "AT BAR" for row in
-                        [*direct_baseline["coefficients"].values(),
-                         *direct_baseline["output"].values()])
+    direct_debt_topology = all(row["gate_status"] == "DEBT" for row in
+                               [*direct_baseline["coefficients"].values(),
+                                *direct_baseline["output"].values()])
     # Exact hash admission of the production JAX/checkerboard control. A
     # separate source stencil cannot reproduce a nonzero 1e-16 inversion
     # residue to 1e-15 relative; the amendment documents both failed gates.
@@ -295,7 +295,7 @@ def main() -> int:
             raise SystemExit("nextafter plant did not fire")
     controls = {
         "T0V0P0_admitted_from_round24": admitted_exactly,
-        "direct_T0V0P0_at_pointwise_bar": bool(direct_at_bar),
+        "direct_T0V0P0_matches_DEBT_topology": bool(direct_debt_topology),
         "identity_at_bar": identity["gate_status"] == "AT BAR",
         "nextafter_plant_debt": plant_row["gate_status"] == "DEBT",
         "nextafter_steps": steps,

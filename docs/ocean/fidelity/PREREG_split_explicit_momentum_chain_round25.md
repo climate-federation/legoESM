@@ -64,3 +64,15 @@ coefficients and both literal-applied outputs at the unchanged POINTWISE bar;
 otherwise the factorial stops. Other arms use that one committed materializer.
 No physics bar, arm, or ownership rule changes. This amendment is frozen before
 the first factorial invocation permitted to emit a disposition.
+
+### Direct-baseline control correction
+
+The first hash-admitted invocation stopped because the amendment above
+mistakenly required the independently materialized *off/off/off* arm to be at
+bar. That contradicts the experiment: off/off/off is precisely the association
+DEBT control. Its eight coefficient maxima (`1.11e-15`--`1.40e-15`) and two
+output maxima (`3.98e-15/4.93e-15`) correctly remain DEBT. Before any valid
+disposition, the independent control is corrected to require the same ten-row
+DEBT topology as the SHA-admitted round-24 baseline. The admitted values remain
+the quantitative control. The full-literal arm still must pass the unchanged
+POINTWISE bars; no ownership condition changes.
