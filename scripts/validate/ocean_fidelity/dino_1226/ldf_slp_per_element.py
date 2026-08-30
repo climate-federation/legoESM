@@ -1644,7 +1644,10 @@ def main() -> int:
                                                    dtype=st["T"].dtype),
             st["u_mask"], st["v_mask"], st["z_coord"], st["grid"],
             st["gm_cfg"], st["eos_fn"], rho_0=st["rho_0"], g=st["g"],
-            active_3d=st["active_3d"], jacobian=st["jacobian"])
+            active_3d=st["active_3d"], jacobian=st["jacobian"],
+            eta=st["eta"], H_bathy=st["H_bathy"],
+            prd_jacobian=st["prd_jacobian"],
+            pn2_override=st["slope_pn2"], e3w_override=st["slope_e3w"])
         sub_fields = {"wslpi": wi_s, "wslpj": wj_s, "uslp": u_s, "vslp": v_s}
 
         # ---- THE NULL CONTROL (both 2026-08-21 reviewers asked for it, and
@@ -1661,7 +1664,10 @@ def main() -> int:
             jnp.asarray(st["mask"].astype(float), dtype=st["T"].dtype),
             st["u_mask"], st["v_mask"], st["z_coord"], st["grid"],
             st["gm_cfg"], st["eos_fn"], rho_0=st["rho_0"], g=st["g"],
-            active_3d=st["active_3d"], jacobian=st["jacobian"])
+            active_3d=st["active_3d"], jacobian=st["jacobian"],
+            eta=st["eta"], H_bathy=st["H_bathy"],
+            prd_jacobian=st["prd_jacobian"],
+            pn2_override=st["slope_pn2"], e3w_override=st["slope_e3w"])
         ctrl_fields = {"wslpi": wi_c, "wslpj": wj_c, "uslp": u_c, "vslp": v_c}
         ctrl_max = max(
             float(np.abs(np.asarray(ctrl_fields[c]) - st["lego"][c]).max())
