@@ -162,6 +162,48 @@ def compute_nemo_boxcar_centred_weights(
     )
 
 
+def compute_nemo_boxcar_raw_transport_weights(
+    n_substeps: int,
+    dtype: jnp.dtype,
+    substep_scale: int = 1,
+):
+    """Return NEMO's unnormalised ``wgtbtp2`` and ``r1_wgt2s`` divisor.
+
+    ``dynspg_ts.F90:1227-1294`` builds a raw 0/1 primary boxcar, forms each
+    secondary weight by summing the remaining primary weights, accumulates
+    ``za2 * zhU * r1_e2u`` with that raw integer-like ``za2``, and divides the
+    completed transport once at :999-1000.  The shared filter helper above
+    deliberately returns pre-normalised SM2005 weights; these arrays preserve
+    the distinct source association needed by DINO's literal accumulator.
+
+    Returns ``(wgtbtp2, r1_wgt2s, n_loop)``.  Shape/window validation mirrors
+    :func:`compute_nemo_boxcar_centred_weights` without changing its generic
+    arithmetic or byte contract.
+    """
+    import numpy as _np
+    if n_substeps < 2:
+        raise ValueError(
+            f"nemo_boxcar_centred needs n_substeps >= 2, got {n_substeps!r}")
+    if substep_scale < 1 or n_substeps % substep_scale != 0:
+        raise ValueError(
+            f"substep_scale={substep_scale!r} must be >=1 and divide "
+            f"n_substeps={n_substeps!r} (n_substeps = nn_e * substep_scale).")
+    half_width = n_substeps // substep_scale
+    jn = _np.arange(1, 3 * n_substeps + 1, dtype=_np.float64)
+    primary = (
+        _np.abs(jn - n_substeps) / half_width < 1.0
+    ).astype(_np.float64)
+    n_loop = int(_np.max(_np.where(primary > 0.0)[0]) + 1)
+    primary = primary[:n_loop]
+    secondary = _np.cumsum(primary[::-1], dtype=_np.float64)[::-1]
+    divisor = secondary.sum(dtype=_np.float64)
+    return (
+        jnp.asarray(secondary, dtype=dtype),
+        jnp.asarray(divisor, dtype=dtype),
+        n_loop,
+    )
+
+
 def nemo_auto_substeps(
     dt: float,
     H_max_wet: float,

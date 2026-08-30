@@ -1128,6 +1128,11 @@ class BarotropicConfig(NamedTuple):
     # retains the shared FV operator. ``nemo_literal`` preserves NEMO's
     # e2u*U*H / e1v*V*H operand order and multiply-by-reciprocal divergence.
     barotropic_continuity_evaluation: str = "generic"
+    # Time-mean advective-transport accumulation. ``generic`` retains the
+    # pre-normalised SM2005 weight times cancelled H*U form. ``nemo_literal``
+    # carries raw wgtbtp2, accumulates za2*zhU*r1_e2u (V analog), and divides
+    # the completed sum once by r1_wgt2s (dynspg_ts.F90:734-737,999-1000).
+    barotropic_transport_accumulation_evaluation: str = "generic"
     # Frozen EEN coefficient construction. ``generic`` retains the shared
     # AL81 association. ``nemo_literal`` materializes NEMO dyn_cor_2D_init's
     # eight coefficients with its triad, vertical recurrence, and post-factor

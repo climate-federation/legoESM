@@ -857,6 +857,11 @@ class DINOConfig:
     # ``generic`` (legacy shared FV association) | ``nemo_literal`` (active
     # dynspg_ts source association). NEMO-fidelity cards select the latter.
     barotropic_continuity_evaluation: str = "generic"
+    # ``generic`` keeps pre-normalised SM2005 weights on the cancelled H*U
+    # transport. ``nemo_literal`` preserves raw wgtbtp2, metric transport,
+    # reciprocal metric, and one final r1_wgt2s division (dynspg_ts.F90:
+    # 734-737,999-1000). NEMO-fidelity cards select the latter.
+    barotropic_transport_accumulation_evaluation: str = "generic"
     # ``generic`` preserves the shared fused vertical reduction. The two
     # NEMO-fidelity cards select ``nemo_literal``: BEFORE/Kbb live face
     # thickness with source-ordered vertical accumulation (istate.F90:149-155).
@@ -1479,6 +1484,7 @@ DINO_RECIPES: dict[str, dict] = {
         # measured conservation-inert vs min_rule at machine precision).
         "barotropic_face_depth": "nemo_ssh_avg",
         "barotropic_continuity_evaluation": "nemo_literal",
+        "barotropic_transport_accumulation_evaluation": "nemo_literal",
         "barotropic_een_coefficient_evaluation": "nemo_literal",
         "barotropic_seed_evaluation": "nemo_literal",
         "barotropic_pgf_evaluation": "nemo_literal",
@@ -3582,6 +3588,8 @@ def dino_lat_lon_model_config(
         barotropic_diffusion_alpha=cfg.barotropic_diffusion_alpha,
         barotropic_face_depth=cfg.barotropic_face_depth,
         barotropic_continuity_evaluation=cfg.barotropic_continuity_evaluation,
+        barotropic_transport_accumulation_evaluation=(
+            cfg.barotropic_transport_accumulation_evaluation),
         barotropic_een_coefficient_evaluation=(
             cfg.barotropic_een_coefficient_evaluation),
         barotropic_seed_evaluation=cfg.barotropic_seed_evaluation,

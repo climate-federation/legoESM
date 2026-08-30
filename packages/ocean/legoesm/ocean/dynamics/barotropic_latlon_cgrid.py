@@ -58,6 +58,7 @@ from legoesm.ocean.dynamics.barotropic_common import (
     bebt_blend,
     compute_filter_weights,
     compute_nemo_boxcar_centred_weights,
+    compute_nemo_boxcar_raw_transport_weights,
     compute_power_law_filter_weights,
     coriolis_at_faces,
     maxvel_clip,
@@ -504,6 +505,42 @@ def nemo_literal_metric_transports(
     zh_u = ((e2u * U) * H_u) * u_mask
     zh_v = ((e1v * V) * H_v) * v_mask
     return zh_u, zh_v
+
+
+def nemo_literal_accumulate_transport(
+    Hu_sum, Hv_sum, raw_weight, H_u, H_v, U, V, u_mask, v_mask, grid,
+):
+    """One source-ordered DINO ``un_adv/vn_adv`` accumulation row.
+
+    Preserves ``dynspg_ts.F90:699-704,734-737``: materialise metric
+    transports, multiply by raw ``za2``, multiply by the reciprocal face
+    metric, then add to the running accumulator.  The metric factors cancel
+    algebraically but round 58 measured the cancelled form outside the
+    pointwise bar.  Optimization barriers pin the stated association against
+    XLA fusion while retaining JIT/autodiff compatibility.
+    """
+    zh_u, zh_v = nemo_literal_metric_transports(
+        H_u, H_v, U, V, u_mask, v_mask, grid)
+    dtype = Hu_sum.dtype
+    zh_u = zh_u.astype(dtype)
+    zh_v = zh_v.astype(dtype)
+    raw_weight = jnp.asarray(raw_weight, dtype=dtype)
+    e2u = jnp.asarray(
+        grid.dy_u if hasattr(grid, "dy_u")
+        else (grid.dy * 0.5)[:, jnp.newaxis], dtype=dtype)
+    e1v = jnp.asarray(
+        grid.dx_v if hasattr(grid, "dx_v")
+        else (grid.radius * grid.dlon
+              * vface_zonal_cos_lat(grid))[:, jnp.newaxis], dtype=dtype)
+    # NEMO's reciprocal metric arrays are zero on masked/polar faces.  A raw
+    # divide by the geometric zero would turn the already-masked transport
+    # into 0*Inf=NaN on lean-grid tests and at wall halos.
+    r1_e2u = jnp.where(u_mask != 0, 1.0 / e2u, 0.0)
+    r1_e1v = jnp.where(v_mask != 0, 1.0 / e1v, 0.0)
+    b = jax.lax.optimization_barrier
+    inc_u = b(b(raw_weight * b(zh_u)) * b(r1_e2u))
+    inc_v = b(b(raw_weight * b(zh_v)) * b(r1_e1v))
+    return b(Hu_sum + inc_u), b(Hv_sum + inc_v)
 
 
 def nemo_literal_continuity_divergence(
@@ -1077,6 +1114,7 @@ def _run_substep_loop(
     een_pre=None,
     drag_r_u=None, drag_r_v=None,
     tide_basis=None, tide_cos=None, tide_sin=None,
+    transport_sum_init=None,
 ):
     """The forward-backward substep loop (verbatim extraction).
 
@@ -1116,8 +1154,12 @@ def _run_substep_loop(
     # equation can use transport consistent with the barotropic continuity.
     n_lat = eta.shape[0]
     n_lon = eta.shape[1]
-    Hu_sum = jnp.zeros((n_lat, n_lon + 1), dtype=dtype)
-    Hv_sum = jnp.zeros((n_lat + 1, n_lon), dtype=dtype)
+    if transport_sum_init is None:
+        Hu_sum = jnp.zeros((n_lat, n_lon + 1), dtype=dtype)
+        Hv_sum = jnp.zeros((n_lat + 1, n_lon), dtype=dtype)
+    else:
+        Hu_sum = jnp.asarray(transport_sum_init[0], dtype=dtype)
+        Hv_sum = jnp.asarray(transport_sum_init[1], dtype=dtype)
     eta_sum = jnp.zeros((n_lat, n_lon), dtype=dtype)
     U_sum = jnp.zeros((n_lat, n_lon + 1), dtype=dtype)
     V_sum = jnp.zeros((n_lat + 1, n_lon), dtype=dtype)
@@ -1134,6 +1176,14 @@ def _run_substep_loop(
         raise ValueError(
             "unknown barotropic_continuity_evaluation "
             f"{_continuity_evaluation!r}: must be one of "
+            "('generic', 'nemo_literal').")
+    _transport_evaluation = getattr(
+        config.barotropic,
+        "barotropic_transport_accumulation_evaluation", "generic")
+    if _transport_evaluation not in ("generic", "nemo_literal"):
+        raise ValueError(
+            "unknown barotropic_transport_accumulation_evaluation "
+            f"{_transport_evaluation!r}: must be one of "
             "('generic', 'nemo_literal').")
 
     def _face_depths(H_total):
@@ -1255,9 +1305,17 @@ def _run_substep_loop(
         flux_u = H_u_flux * U_mid * u_mask
         flux_v = H_v_flux * V_mid * v_mask
 
-        # Accumulate transport (always box-filtered for volume conservation)
-        Hu_sum_new = Hu_sum_c + w_tr_i * flux_u.astype(dtype)
-        Hv_sum_new = Hv_sum_c + w_tr_i * flux_v.astype(dtype)
+        # Accumulate transport (always box-filtered for volume conservation).
+        # Keep the generic statements unchanged: non-fidelity cards retain
+        # the pre-round-59 arithmetic topology byte-for-byte.
+        if _transport_evaluation == "nemo_literal":
+            Hu_sum_new, Hv_sum_new = nemo_literal_accumulate_transport(
+                Hu_sum_c, Hv_sum_c, w_tr_i,
+                H_u_flux, H_v_flux, U_mid, V_mid,
+                u_mask, v_mask, grid)
+        else:
+            Hu_sum_new = Hu_sum_c + w_tr_i * flux_u.astype(dtype)
+            Hv_sum_new = Hv_sum_c + w_tr_i * flux_v.astype(dtype)
 
         if _continuity_evaluation == "nemo_literal":
             # DINO key_qco source order, confirmed from the directly dumped
@@ -1575,6 +1633,42 @@ def _compute_weights(config, n_substeps: int, dtype, substep_scale: int = 1):
             n_substeps, dtype, use_cosine=use_cosine_filter,
         )
     return w_filter, w_total, w_transport, n_loop
+
+
+def _transport_accumulator_weights(
+    config, n_substeps: int, dtype, normalized_weights, n_loop: int,
+    *, substep_scale: int = 1,
+):
+    """Select generic normalised or NEMO raw secondary transport weights.
+
+    This dispatch is deliberately outside the traced substep body.  Generic
+    cards receive the exact array returned by :func:`_compute_weights`; the
+    DINO literal path instead carries NEMO's raw ``wgtbtp2`` through every
+    accumulation and returns its one post-loop divisor separately.
+    """
+    evaluation = getattr(
+        config.barotropic,
+        "barotropic_transport_accumulation_evaluation", "generic")
+    if evaluation == "generic":
+        return normalized_weights, None
+    if evaluation != "nemo_literal":
+        raise ValueError(
+            "unknown barotropic_transport_accumulation_evaluation "
+            f"{evaluation!r}: must be one of ('generic', 'nemo_literal').")
+    if config.barotropic.barotropic_time_filter not in (
+            "nemo_boxcar_centred", "nemo_boxcar_ab3"):
+        raise ValueError(
+            "barotropic_transport_accumulation_evaluation='nemo_literal' "
+            "requires barotropic_time_filter in "
+            "('nemo_boxcar_centred', 'nemo_boxcar_ab3').")
+    raw_weights, divisor, raw_n_loop = (
+        compute_nemo_boxcar_raw_transport_weights(
+            n_substeps, dtype, substep_scale=substep_scale))
+    if raw_n_loop != n_loop:
+        raise AssertionError(
+            "NEMO raw and normalized transport windows disagree: "
+            f"{raw_n_loop} != {n_loop}.")
+    return raw_weights, divisor
 
 
 def _reconcile_targets(config, *, U_bar_avg, V_bar_avg, Hu_avg, Hv_avg,
@@ -1938,6 +2032,9 @@ def barotropic_substeps_latlon_cgrid(
 
     w_filter, w_total, w_transport, n_loop = _compute_weights(
         config, n_substeps, eta.dtype, substep_scale=substep_scale)
+    w_transport, _transport_divisor = _transport_accumulator_weights(
+        config, n_substeps, eta.dtype, w_transport, n_loop,
+        substep_scale=substep_scale)
 
     # --- Equilibrium-tide barotropic body force (OPT-IN; #tidal_forcing) -------
     # a = +g*grad(eta_eq_eff) is added to the SLOW forcing inside the substep,
@@ -2038,13 +2135,18 @@ def barotropic_substeps_latlon_cgrid(
     (eta_f, U_bar_f, V_bar_f,
      Hu_sum_f, Hv_sum_f, eta_sum_f, U_sum_f, V_sum_f) = _finals[:8]
 
-    # Time-averaged barotropic transport: w_transport already carries the full
-    # continuity-consistent normalisation — the SM2005 tail-sum
-    # ``tail_j/(n·w_total)`` (box/cosine) or the SM2005 secondary weights
-    # (power_law) — so the accumulator IS the time-averaged transport ``Hu_avg``
-    # that closes ``div(Hu_avg) == (eta_old - eta_avg)/dt``.
-    Hu_avg = Hu_sum_f
-    Hv_avg = Hv_sum_f
+    # Generic transport weights already carry their full normalization.  The
+    # DINO literal path mirrors dynspg_ts.F90:734-737,999-1000 instead: raw
+    # wgtbtp2 in every addition and exactly one division after the loop.
+    if _transport_divisor is None:
+        Hu_avg = Hu_sum_f
+        Hv_avg = Hv_sum_f
+    else:
+        _barrier = jax.lax.optimization_barrier
+        Hu_avg = _barrier(
+            _barrier(Hu_sum_f) / _barrier(_transport_divisor))
+        Hv_avg = _barrier(
+            _barrier(Hv_sum_f) / _barrier(_transport_divisor))
 
     if _ab3 and not _boxcar_ab3:
         # NEMO nn_bt_flt=3: the new state is the FINAL substep value (no time
@@ -2295,6 +2397,8 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
 
     w_filter, w_total, w_transport, n_loop = _compute_weights(
         config, n_substeps, eta.dtype)
+    w_transport, _transport_divisor = _transport_accumulator_weights(
+        config, n_substeps, eta.dtype, w_transport, n_loop)
 
     # --- Static chunk / width budget --------------------------------------
     # The v-face widening exchanges ``halo = W + 1`` cell rows (the stagger
@@ -2400,13 +2504,30 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
 
     # --- Chunked substep loop ----------------------------------------------
     eta_c, U_c, V_c = eta, U_bar, V_bar
+    _literal_transport = _transport_divisor is not None
+    if _literal_transport:
+        # The source-order accumulator is one recurrence over the complete
+        # substep window.  Carry it across chunk boundaries; summing completed
+        # chunk totals afterwards would introduce an association NEMO has no
+        # analogue for.
+        Hu_c = jnp.zeros_like(U_bar)
+        Hv_c = jnp.zeros_like(V_bar)
     sums = None
     done = 0
     for _ in range(n_chunks):
         k = min(chunk, int(n_loop) - done)
         # Wide exchange of the carry (2 fused messages) with the REAL backend.
-        (eta_x, U_x) = widen_band_cell_fields((eta_c, U_c), W)
-        (V_x,) = widen_band_vface_fields((V_c,), W)
+        # Literal Hu/Hv rides in those SAME messages; a second exchange pair
+        # would silently erase the wide-halo communication budget.
+        if _literal_transport:
+            eta_x, U_x, Hu_x = widen_band_cell_fields(
+                (eta_c, U_c, Hu_c), W)
+            V_x, Hv_x = widen_band_vface_fields((V_c, Hv_c), W)
+            _transport_sum_init = (Hu_x, Hv_x)
+        else:
+            (eta_x, U_x) = widen_band_cell_fields((eta_c, U_c), W)
+            (V_x,) = widen_band_vface_fields((V_c,), W)
+            _transport_sum_init = None
         wf = jax.lax.slice_in_dim(w_filter, done, done + k)
         wt = jax.lax.slice_in_dim(w_transport, done, done + k)
         # Slice the tide phases with the SAME [done, done+k) window as the
@@ -2436,6 +2557,7 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
                 linear_free_surface=getattr(
                     z_coord, "linear_free_surface", False),
                 tide_basis=_tide_basis, tide_cos=tcos, tide_sin=tsin,
+                transport_sum_init=_transport_sum_init,
             )
         (eta_ext_f, U_ext_f, V_ext_f,
          Hu_k, Hv_k, eta_sum_k, U_sum_k, V_sum_k) = finals
@@ -2443,15 +2565,30 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
         eta_c = eta_ext_f[W:W + nl]
         U_c = U_ext_f[W:W + nl]
         V_c = V_ext_f[W:W + nl + 1]
-        # Accumulate the (pointwise) sums on OWNED rows across chunks.
-        k_sums = (Hu_k[W:W + nl], Hv_k[W:W + nl + 1],
-                  eta_sum_k[W:W + nl], U_sum_k[W:W + nl],
-                  V_sum_k[W:W + nl + 1])
+        # The literal Hu/Hv recurrence was seeded with the previous chunk's
+        # owned result, so crop it as the next carry and do NOT add chunk
+        # totals. Generic mode retains the pre-round-59 tuple/add statements
+        # byte-for-byte.
+        if _literal_transport:
+            Hu_c = Hu_k[W:W + nl]
+            Hv_c = Hv_k[W:W + nl + 1]
+            k_sums = (eta_sum_k[W:W + nl], U_sum_k[W:W + nl],
+                      V_sum_k[W:W + nl + 1])
+        else:
+            k_sums = (Hu_k[W:W + nl], Hv_k[W:W + nl + 1],
+                      eta_sum_k[W:W + nl], U_sum_k[W:W + nl],
+                      V_sum_k[W:W + nl + 1])
         sums = k_sums if sums is None else tuple(
             a + b for a, b in zip(sums, k_sums))
         done += k
 
-    Hu_avg, Hv_avg, eta_sum_f, U_sum_f, V_sum_f = sums
+    if _literal_transport:
+        eta_sum_f, U_sum_f, V_sum_f = sums
+        _barrier = jax.lax.optimization_barrier
+        Hu_avg = _barrier(_barrier(Hu_c) / _barrier(_transport_divisor))
+        Hv_avg = _barrier(_barrier(Hv_c) / _barrier(_transport_divisor))
+    else:
+        Hu_avg, Hv_avg, eta_sum_f, U_sum_f, V_sum_f = sums
 
     eta_avg = eta_sum_f / w_total
     U_bar_avg = U_sum_f / w_total
