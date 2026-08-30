@@ -48,6 +48,7 @@ ROUND70_SHA = "d831bbcb89e06c8795a085103041293becedb8ac79c438f1302b44296b3314bc"
 ROUND71_SHA = "6500acfa930c0342430fd1e57cfb1da023b0978e8fda3561e6133ffe12368821"
 ROUND72_SHA = "1abf7718e8dc1fc4f75d23295ebaaf46c368ffa07d8e56467577f1abb7201230"
 ROUND73_SHA = "c7445a0e26e4b74999bbe89f79c043ad4e9d9754f357d0e94ae136471cc9961d"
+ROUND74_SHA = "56db4716cba582654fbd7bb55178a699b55678a1afdea9d8d8fe3cc670eea6fb"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -152,6 +153,7 @@ def main() -> int:
     parser.add_argument("--round71", type=Path)
     parser.add_argument("--round72", type=Path)
     parser.add_argument("--round73", type=Path)
+    parser.add_argument("--round74", type=Path)
     parser.add_argument("--hold-slow-forcing", action="store_true")
     parser.add_argument("--oracle-transport", action="store_true")
     parser.add_argument("--capture-cycle", action="store_true")
@@ -167,6 +169,7 @@ def main() -> int:
     parser.add_argument("--post-chain-factorial", action="store_true")
     parser.add_argument("--rossby-factorial", action="store_true")
     parser.add_argument("--zn-sqrt-factorial", action="store_true")
+    parser.add_argument("--exact-sqrt-production", action="store_true")
     parser.add_argument("--raw-artifact", type=Path, required=True)
     parser.add_argument("--nemo-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -421,6 +424,25 @@ def main() -> int:
             raise SystemExit("round 73 does not release the sqrt peel")
     elif args.round73 is not None:
         raise SystemExit("--round73 requires --zn-sqrt-factorial")
+    prior74 = None
+    if args.exact_sqrt_production:
+        if not args.zn_sqrt_factorial:
+            raise SystemExit(
+                "--exact-sqrt-production requires --zn-sqrt-factorial")
+        if (args.round74 is None
+                or _sha(args.round74.resolve()) != ROUND74_SHA):
+            raise SystemExit("official round-74 sqrt owner receipt required")
+        prior74 = json.loads(args.round74.read_text())
+        if (prior74.get("disposition")
+                != "ROW8_8_LOCALIZED_TO_ZN_SQRT_FORWARD_FLOOR"
+                or not all(prior74["zn_sqrt_metrics"]["exact_forward"]
+                           [name]["pass"] for name in
+                           ("zn", "zRo", "zaeiw", "aeiu", "row8_8"))
+                or prior74["zn_sqrt_metrics"]["guarded_floor"]
+                          ["row8_8"]["pass"]):
+            raise SystemExit("round 74 does not release production certification")
+    elif args.round74 is not None:
+        raise SystemExit("--round74 requires --exact-sqrt-production")
     if _sha(args.raw_artifact.resolve()) != RAW_ARTIFACT_SHA:
         raise SystemExit("admitted held row-8 artifact changed")
     held = args.held_dir.resolve()
@@ -912,12 +934,17 @@ def main() -> int:
                         raw_e3w = jnp.broadcast_to(raw_e3w, raw_pn2.shape)
                     zn_term_exact = jnp.sqrt(jnp.maximum(
                         raw_pn2, jnp.asarray(0.0, dtype=dtype))) * raw_e3w
+                    zn_term_guarded = jnp.sqrt(jnp.maximum(
+                        raw_pn2, jnp.asarray(1.0e-30, dtype=dtype))) * raw_e3w
                     zeros = jnp.zeros_like(zn_term_exact)
                     zn_exact, _, _ = gm_module._nemo_treguier_left_reductions(
                         zn_term_exact, zeros, zeros,
                         jnp.asarray(0.0, dtype=dtype))
+                    zn_guarded, _, _ = gm_module._nemo_treguier_left_reductions(
+                        zn_term_guarded, zeros, zeros,
+                        jnp.asarray(0.0, dtype=dtype))
                     for arm_name, arm_zn in {
-                            "guarded_floor": own_zn,
+                            "guarded_floor": zn_guarded,
                             "exact_forward": zn_exact}.items():
                         arm_ro = literal_ro(arm_zn, zfw_stored)
                         arm_kappa = literal_post(
@@ -927,12 +954,20 @@ def main() -> int:
                             "zRo": km(arm_ro, oracle2["zRo"]),
                             **score_kappa_arm(arm_kappa),
                         }
+                    zn_sqrt_metrics["production"] = {
+                        "zn": kappa_operand_metrics["zn"],
+                        "zRo": kappa_operand_metrics["zRo"],
+                        "zaeiw": kappa_operand_metrics["zaeiw"],
+                        "aeiu": kappa_operand_metrics["aeiu_face"],
+                        "row8_8": bolus_operand_metrics["captured_u_increment"],
+                    }
                     pn2_np = np.asarray(raw_kappa["pn2"])
                     zn_sqrt_metrics["operand_receipts"] = {
                         "n_zero_n2_slots": int(np.count_nonzero(pn2_np == 0.0)),
                         "n_negative_n2_slots": int(np.count_nonzero(pn2_np < 0.0)),
                         "exact_differs_from_guarded": bool(
-                            np.any(np.asarray(zn_exact) != diagnostics["zn"])),
+                            np.any(np.asarray(zn_exact)
+                                   != np.asarray(zn_guarded))),
                         "negative_forward_clipped_zero": bool(np.all(
                             np.asarray(jnp.sqrt(jnp.maximum(
                                 raw_pn2, jnp.asarray(0.0, dtype=dtype))))
@@ -1044,6 +1079,13 @@ def main() -> int:
             or (prior73["rossby_metrics"]["literal_oracle_zn"]
                       ["row8_8"]["pass"]
                 and not prior73["rossby_metrics"]["literal_stored_f"]
+                               ["row8_8"]["pass"])),
+        "round74_sqrt_owner_admitted": (
+            prior74 is None
+            or (all(prior74["zn_sqrt_metrics"]["exact_forward"]
+                           [name]["pass"] for name in
+                           ("zn", "zRo", "zaeiw", "aeiu", "row8_8"))
+                and not prior74["zn_sqrt_metrics"]["guarded_floor"]
                                ["row8_8"]["pass"])),
         "round56_unheld_red": (
             prior56 is None
@@ -1239,9 +1281,20 @@ def main() -> int:
         disposition = ("ROW8_8_LOCALIZED_TO_ZN_SQRT_FORWARD_FLOOR"
                        if exact_pass else
                        "ROW8_8_ZN_SQRT_FORWARD_OPEN")
+    if args.exact_sqrt_production and valid:
+        production_operands_pass = all(
+            metric["pass"] for metric in
+            zn_sqrt_metrics["production"].values())
+        disposition = ("TRACER_ENTRY_ROW8_AT_BAR_EXACT_GM_SQRT"
+                       if production_operands_pass and first is None else
+                       f"TRACER_ENTRY_DIVERGED_{first}"
+                       if first is not None else
+                       "ROW8_8_EXACT_SQRT_PRODUCTION_OPEN")
     nemo = args.nemo_root.resolve()
     receipt = {
-        "schema": ("dino-split-explicit-momentum-chain-round74-v1"
+        "schema": ("dino-split-explicit-momentum-chain-round75-v1"
+                   if args.exact_sqrt_production else
+                   "dino-split-explicit-momentum-chain-round74-v1"
                    if args.zn_sqrt_factorial else
                    "dino-split-explicit-momentum-chain-round73-v1"
                    if args.rossby_factorial else
@@ -1316,12 +1369,16 @@ def main() -> int:
                if args.rossby_factorial else {}),
             **({"round73": _sha(args.round73.resolve())}
                if args.zn_sqrt_factorial else {}),
+            **({"round74": _sha(args.round74.resolve())}
+               if args.exact_sqrt_production else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(
                 root / "docs/ocean/fidelity" /
-                ("PREREG_split_explicit_momentum_chain_round74.md"
+                ("PREREG_split_explicit_momentum_chain_round75.md"
+                 if args.exact_sqrt_production else
+                 "PREREG_split_explicit_momentum_chain_round74.md"
                  if args.zn_sqrt_factorial else
                  "PREREG_split_explicit_momentum_chain_round73.md"
                  if args.rossby_factorial else
@@ -1357,7 +1414,9 @@ def main() -> int:
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
             "nemo_ldftra": _sha(nemo / "cfgs/DINO/MY_SRC/ldftra.F90"),
         },
-        "arm": ("zn_sqrt_factorial"
+        "arm": ("exact_sqrt_production"
+                if args.exact_sqrt_production else
+                "zn_sqrt_factorial"
                 if args.zn_sqrt_factorial else
                 "rossby_factorial"
                 if args.rossby_factorial else
@@ -1385,7 +1444,8 @@ def main() -> int:
             "TRACER_ENTRY_ROW8_AT_BAR_LIVE_QCO",
             "TRACER_ENTRY_ROW8_AT_BAR_LITERAL_GM",
             "TRACER_ENTRY_ROW8_AT_BAR_CARRIED_KMM",
-            "TRACER_ENTRY_ROW8_AT_BAR_EXACT_SURFACE_KMM"} else first),
+            "TRACER_ENTRY_ROW8_AT_BAR_EXACT_SURFACE_KMM",
+            "TRACER_ENTRY_ROW8_AT_BAR_EXACT_GM_SQRT"} else first),
     }
     args.output.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     print(f"disposition={disposition} first_diverged_subrow={first}")
