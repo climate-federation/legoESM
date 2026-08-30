@@ -4280,6 +4280,12 @@ class LatLonCGridOceanModel:
                 **_baro_seed,
             )
 
+        # NEMO's WZV call 2 consumes the raw boxcar pssh(Kaa) produced by
+        # dyn_spg_ts (:991,1003). Keep that exact within-step operand before
+        # legoESM's separate global eta-drift projection below modifies the
+        # model state used by tracers and the committed next step.
+        _eta_after_spg_literal = state_new.eta.data
+
         # 6b. Issue #271: project out global mean-eta drift right after
         # the barotropic solve, BEFORE the flux-form tracer step
         # recomputes ``h_k_new`` and consumes ``Hu_avg``.  Applying the
@@ -4542,9 +4548,10 @@ class LatLonCGridOceanModel:
             _eta_before_wzv = (state.eta.data if _eta_before_field is None
                                else _eta_before_field.data)
             w_baro, _, _ = nemo_qco_wzv_operands(
-                state.eta.data, _eta_before_wzv, u_corrected, v_corrected,
+                state.eta.data, _eta_before_wzv, state.u.data, state.v.data,
                 _grid, _zc, u_mask_3d_tracer, v_mask_3d_tracer, active_3d,
-                dt, eta_after_override=state_new.eta.data)
+                dt, eta_after_override=_eta_after_spg_literal,
+                transport_after_override=(Hu_avg, Hv_avg))
             w_baro = jax.lax.optimization_barrier(w_baro)
         else:
             w_baro = diagnose_w_from_flux_div(

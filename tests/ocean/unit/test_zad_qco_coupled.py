@@ -107,11 +107,53 @@ def test_qco_zad_pair_matches_source_ordered_oracle():
     np.testing.assert_array_equal(hv2, hv)
     assert not np.array_equal(np.asarray(ww2), np.asarray(ww))
 
+    # Call 2 first rewrites the entry Kmm velocity with NEMO's secondary
+    # transport mean (dynspg_ts.F90:1170-1174), then recomputes div_hor.
+    un_adv_native = rng.normal(scale=0.4, size=(nlat, nlon))
+    vn_adv_native = rng.normal(scale=0.4, size=(nlat, nlon))
+    un_adv = np.concatenate(
+        [un_adv_native[:, -1:], un_adv_native], axis=1)
+    vn_adv = np.concatenate(
+        [np.zeros_like(vn_adv_native[:1]), vn_adv_native], axis=0)
+    ww3, _, _ = nemo_qco_wzv_operands(
+        jnp.asarray(eta_now), jnp.asarray(eta_before), jnp.asarray(u),
+        jnp.asarray(v), grid, coord, jnp.asarray(um), jnp.asarray(vm),
+        jnp.asarray(tm), dt, eta_after_override=jnp.asarray(eta_override),
+        transport_after_override=(jnp.asarray(un_adv), jnp.asarray(vn_adv)))
+    r1u = 1.0 / (30.0 * (1.0 + r3u))
+    r1v = 1.0 / (30.0 * (1.0 + r3v))
+    puu_b = np.sum(hu_raw * u_native, axis=-1) * r1u
+    pvv_b = np.sum(hv_raw * v_native, axis=-1) * r1v
+    u_call2 = u_native + un_adv_native[..., None] * r1u[..., None] \
+        - puu_b[..., None]
+    v_call2 = v_native + vn_adv_native[..., None] * r1v[..., None] \
+        - pvv_b[..., None]
+    zu3 = e2u[..., None] * hu_raw * u_call2
+    zv3 = e1v[..., None] * hv_raw * v_call2
+    zv3[-1] = 0.0
+    south3 = np.concatenate([np.zeros_like(zv3[:1]), zv3[:-1]], axis=0)
+    div3 = (zu3 - np.roll(zu3, 1, axis=1) + zv3 - south3) / at[..., None]
+    expected_w3 = np.zeros((nlat, nlon, nlev + 1))
+    for k in range(nlev - 1, -1, -1):
+        expected_w3[..., k] = (
+            expected_w3[..., k + 1] - div3[..., k] - stretch2[..., k])
+    np.testing.assert_allclose(np.asarray(ww3), expected_w3, rtol=0, atol=3e-16)
+    assert not np.array_equal(np.asarray(ww3), np.asarray(ww2))
+
+    with pytest.raises(ValueError, match="requires eta_after_override"):
+        nemo_qco_wzv_operands(
+            jnp.asarray(eta_now), jnp.asarray(eta_before), jnp.asarray(u),
+            jnp.asarray(v), grid, coord, jnp.asarray(um), jnp.asarray(vm),
+            jnp.asarray(tm), dt,
+            transport_after_override=(jnp.asarray(un_adv), jnp.asarray(vn_adv)))
+
     def objective(eta_a):
         value, _, _ = nemo_qco_wzv_operands(
             jnp.asarray(eta_now), jnp.asarray(eta_before), jnp.asarray(u),
             jnp.asarray(v), grid, coord, jnp.asarray(um), jnp.asarray(vm),
-            jnp.asarray(tm), dt, eta_after_override=eta_a)
+            jnp.asarray(tm), dt, eta_after_override=eta_a,
+            transport_after_override=(
+                jnp.asarray(un_adv), jnp.asarray(vn_adv)))
         return jnp.sum(value * value)
 
     compiled = jax.jit(objective)(jnp.asarray(eta_override))

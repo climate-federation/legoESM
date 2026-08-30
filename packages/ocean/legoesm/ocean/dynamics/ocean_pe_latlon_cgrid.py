@@ -1388,6 +1388,7 @@ def _bc_vertical_and_depthmean_velocity(
 def nemo_qco_wzv_operands(
     eta_now, eta_before, u, v, grid, z_coord, u_mask_3d, v_mask_3d,
     mask_3d, dt, freshwater_eta_tendency=None, eta_after_override=None,
+    transport_after_override=None,
 ):
     """Coupled QCO ``ww`` + live Kmm face thickness for either WZV call.
 
@@ -1395,9 +1396,12 @@ def nemo_qco_wzv_operands(
     ``:218-227``.  Without ``eta_after_override``, the horizontal transports
     and Kaa SSH prediction use the same live Kmm ``e3u/e3v`` returned to
     dynzad (call 1).  With an override, the same source-ordered second hdiv is
-    paired inseparably with the actual barotropic Kaa SSH (call 2).  Splitting
-    either pair is deliberately unsupported: rounds 39 and 42 measured both
-    corresponding half-states as worsening planted violations.
+    paired inseparably with the actual barotropic Kaa SSH (call 2).  For call
+    2, ``transport_after_override=(un_adv, vn_adv)`` also performs NEMO's
+    in-place Kmm velocity rewrite at ``dynspg_ts.F90:1170-1174`` before the
+    second divergence. Splitting either pair is deliberately unsupported:
+    rounds 39 and 42 measured both corresponding half-states as worsening
+    planted violations.
     """
     if not isinstance(z_coord, OceanPartialCellCoordinate):
         raise ValueError(
@@ -1419,6 +1423,73 @@ def nemo_qco_wzv_operands(
     raw_vmask = jnp.asarray(v_mask_3d[1:, :, :], dtype=eta_now.dtype)
     live_u_raw, live_v_raw = nemo_qco_live_face_thicknesses(
         eta_now, z_coord, e3t0, e3t0, raw_umask, raw_vmask)
+
+    if transport_after_override is not None:
+        if eta_after_override is None:
+            raise ValueError(
+                "transport_after_override is a WZV call-2 operand and "
+                "requires eta_after_override")
+        un_adv, vn_adv = (
+            jnp.asarray(value, dtype=eta_now.dtype)
+            for value in transport_after_override)
+        if un_adv.shape != u.shape[:2] or vn_adv.shape != v.shape[:2]:
+            raise ValueError(
+                "call-2 transport shapes must match the redundant U/V "
+                f"layouts; got {un_adv.shape}/{vn_adv.shape} versus "
+                f"{u.shape[:2]}/{v.shape[:2]}")
+
+        # dynspg_ts.F90:1170-1174, on the native east/north face arrays:
+        #   u(Kmm) += un_adv*r1_hu(Kmm) - puu_b(Kmm)
+        # r1_hu/r1_hv are the independently associated dom_qco reciprocals;
+        # puu_b/pvv_b use istate.F90's source-left vertical accumulation.
+        one = jnp.asarray(1.0, dtype=eta_now.dtype)
+        half = jnp.asarray(0.5, dtype=eta_now.dtype)
+        weighted_eta = jax.lax.optimization_barrier(area_t * eta_now)
+        num_u = jax.lax.optimization_barrier(
+            half * jax.lax.optimization_barrier(
+                weighted_eta + jnp.roll(weighted_eta, -1, axis=1)))
+        num_v = jax.lax.optimization_barrier(
+            half * jax.lax.optimization_barrier(
+                weighted_eta + jnp.roll(weighted_eta, -1, axis=0)))
+        wet_u = (_hu0 > 0.0).astype(eta_now.dtype)
+        wet_v = (_hv0 > 0.0).astype(eta_now.dtype)
+        r1_hu0 = jax.lax.optimization_barrier(
+            wet_u / (_hu0 + one - wet_u))
+        r1_hv0 = jax.lax.optimization_barrier(
+            wet_v / (_hv0 + one - wet_v))
+        r1_area_u = jax.lax.optimization_barrier(one / area_u)
+        r1_area_v = jax.lax.optimization_barrier(one / area_v)
+        r3u = jax.lax.optimization_barrier(
+            jax.lax.optimization_barrier(num_u * r1_hu0) * r1_area_u)
+        r3v = jax.lax.optimization_barrier(
+            jax.lax.optimization_barrier(num_v * r1_hv0) * r1_area_v)
+        r1_hu = jax.lax.optimization_barrier(
+            r1_hu0 / jax.lax.optimization_barrier(one + r3u))
+        r1_hv = jax.lax.optimization_barrier(
+            r1_hv0 / jax.lax.optimization_barrier(one + r3v))
+
+        u_native = u[:, 1:, :]
+        v_native = v[1:, :, :]
+        puu_b = jnp.zeros_like(eta_now)
+        pvv_b = jnp.zeros_like(eta_now)
+        for jk in range(nlev):
+            puu_b = jax.lax.optimization_barrier(
+                puu_b + live_u_raw[..., jk] * u_native[..., jk]
+                * raw_umask[..., jk])
+            pvv_b = jax.lax.optimization_barrier(
+                pvv_b + live_v_raw[..., jk] * v_native[..., jk]
+                * raw_vmask[..., jk])
+        puu_b = jax.lax.optimization_barrier(puu_b * r1_hu) * wet_u
+        pvv_b = jax.lax.optimization_barrier(pvv_b * r1_hv) * wet_v
+        target_u = jax.lax.optimization_barrier(un_adv[:, 1:] * r1_hu)
+        target_v = jax.lax.optimization_barrier(vn_adv[1:, :] * r1_hv)
+        u_native = jax.lax.optimization_barrier(
+            u_native + target_u[..., None] - puu_b[..., None]) * raw_umask
+        v_native = jax.lax.optimization_barrier(
+            v_native + target_v[..., None] - pvv_b[..., None]) * raw_vmask
+        u = jnp.concatenate([u_native[:, -1:, :], u_native], axis=1)
+        v = jnp.concatenate(
+            [jnp.zeros_like(v_native[:1]), v_native], axis=0)
 
     # NEMO native U/V arrays store the east/north face of each T cell.  Map
     # once to legoESM's redundant west/south face layout for dynzad.
