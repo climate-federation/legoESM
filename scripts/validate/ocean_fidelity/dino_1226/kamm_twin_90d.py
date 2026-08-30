@@ -157,6 +157,52 @@ from legoesm.ocean.fidelity.nemo_state_bridge import (
     bridge_before_state_topo,
     bridge_nemo_to_legoesm_topo,
 )
+from legoesm.ocean.recipes import get_recipe
+
+try:
+    from validate.ocean_fidelity.dino_1226.recipe_transfer_identity import (
+        SETUP_OWNED_FIELDS as _CATALOG_SETUP_OWNED_FIELDS,
+        assemble_owned as _assemble_catalog_owned,
+        diff_rows as _catalog_diff_rows,
+    )
+except ModuleNotFoundError:  # Direct execution: this file's directory is sys.path[0].
+    from recipe_transfer_identity import (  # type: ignore[no-redef]
+        SETUP_OWNED_FIELDS as _CATALOG_SETUP_OWNED_FIELDS,
+        assemble_owned as _assemble_catalog_owned,
+        diff_rows as _catalog_diff_rows,
+    )
+
+ORACLE_CONFIG_SOURCE = "oracle"
+CATALOG_CONFIG_SOURCE = "catalog"
+FAITHFUL_CATALOG_RECIPE = "nemo_dino_kamm_mlf_v1"
+FAITHFUL_ORACLE_CARD = "nemo_dino_kamm_mlf"
+
+
+def validate_config_source_pair(recipe: str, config_source: str,
+                                catalog_recipe: str | None) -> None:
+    """Fail closed on ambiguous or unsupported construction-source pairs."""
+    if config_source not in (ORACLE_CONFIG_SOURCE, CATALOG_CONFIG_SOURCE):
+        raise ValueError(
+            f"unknown config source {config_source!r}; expected 'oracle' or 'catalog'")
+    if config_source == ORACLE_CONFIG_SOURCE:
+        if catalog_recipe is not None:
+            raise ValueError(
+                "--catalog-recipe is incompatible with --config-source oracle")
+        return
+    if catalog_recipe is None:
+        raise ValueError(
+            "--config-source catalog requires --catalog-recipe "
+            f"{FAITHFUL_CATALOG_RECIPE}")
+    # Resolve through the public catalog now, before bridge/NEMO I/O.  This is
+    # deliberately not just a string allowlist: a removed/renamed entry is a
+    # hard error at admission time.
+    get_recipe(catalog_recipe, "latlon")
+    if (recipe, catalog_recipe) != (
+            FAITHFUL_ORACLE_CARD, FAITHFUL_CATALOG_RECIPE):
+        raise ValueError(
+            "unsupported oracle/catalog pair: "
+            f"card={recipe!r}, catalog_recipe={catalog_recipe!r}; expected "
+            f"({FAITHFUL_ORACLE_CARD!r}, {FAITHFUL_CATALOG_RECIPE!r})")
 
 # NEMO oracle-build artifact roots (mesh/restart donors). Override via env var
 # or --run-traj/--run-stepdump for a different machine/build layout.
@@ -233,6 +279,19 @@ def _initial_state_sha256(state) -> str:
         value = getattr(value, "data", value)
         array = np.ascontiguousarray(np.asarray(value))
         digest.update(name.encode("ascii"))
+        digest.update(array.dtype.str.encode("ascii"))
+        digest.update(json.dumps(array.shape).encode("ascii"))
+        digest.update(array.tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def _prognostic_state_sha256(state) -> str:
+    """Bit identity over every pytree leaf, including closure memory."""
+    digest = hashlib.sha256()
+    leaves, _ = jax.tree_util.tree_flatten_with_path(state)
+    for path, value in leaves:
+        array = np.ascontiguousarray(np.asarray(value))
+        digest.update(repr(path).encode("utf-8"))
         digest.update(array.dtype.str.encode("ascii"))
         digest.update(json.dumps(array.shape).encode("ascii"))
         digest.update(array.tobytes(order="C"))
@@ -1167,6 +1226,8 @@ def start_mode_of(stamped) -> str | None:
 
 
 def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
+                       config_source: str = ORACLE_CONFIG_SOURCE,
+                       catalog_recipe: str | None = None,
                        bridge_tke: bool = False, bridge_before: bool = True,
                        bridge_before_stress_tpoint: bool = True,
                        vmix_scheme: str | None = None,
@@ -1247,6 +1308,7 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
         raise SystemExit(
             "--bridge-before-stress-tpoint requires --bridge-before; a "
             "T-point prior-stress carry cannot be attached to an Euler start")
+    validate_config_source_pair(recipe, config_source, catalog_recipe)
     cfg = dataclasses.replace(dino_config_for_recipe(recipe),
         lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)
     g = read_nemo_mesh_mask(f"{run_traj}/mesh_mask.nc", nn_hls=0)
@@ -1500,7 +1562,31 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                   f"max|d_avt|={d_avt:.3e} max|d_dissl|={d_dissl:.3e}",
                   flush=True)
 
-    mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
+    oracle_mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
+    if config_source == CATALOG_CONFIG_SOURCE:
+        bundle = get_recipe(catalog_recipe, "latlon")
+        resolved_fields = set(type(oracle_mc).flat_fields())
+        recipe_fields = set(bundle)
+        setup_fields = set(_CATALOG_SETUP_OWNED_FIELDS)
+        collisions = sorted(recipe_fields & setup_fields)
+        missing = sorted(resolved_fields - recipe_fields - setup_fields)
+        extra = sorted((recipe_fields | setup_fields) - resolved_fields)
+        if collisions or missing or extra:
+            raise RuntimeError(
+                "invalid catalog ownership partition: "
+                f"collisions={collisions}, missing={missing}, extra={extra}")
+        setup_params = {
+            name: oracle_mc.flat_get(name) for name in sorted(setup_fields)}
+        mc = _assemble_catalog_owned(bundle, type(oracle_mc), setup_params)
+        differences, _, _ = _catalog_diff_rows(oracle_mc, mc)
+        if differences:
+            rows = "\n".join(json.dumps(row, sort_keys=True)
+                             for row in differences)
+            raise RuntimeError(
+                "catalog resolved config differs from oracle; refusing model "
+                f"construction ({len(differences)} rows):\n{rows}")
+    else:
+        mc = oracle_mc
     if os.environ.get("DINO_NEMO_KMM_DIVISOR") is not None:
         # #1226 W1: NEMO-faithful implicit-solve gradient divisor (trazdf.F90:
         # 219-220 e3w(...,Kmm), NOW/pre-solve thickness) vs legoESM's default
@@ -1556,6 +1642,8 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
 
 def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = False,
              run_traj: str = RUN_TRAJ, run_stepdump: str = RUN_STEPDUMP,
+             config_source: str = ORACLE_CONFIG_SOURCE,
+             catalog_recipe: str | None = None,
              bridge_tke: bool = False, bridge_before: bool = True,
              bridge_before_stress_tpoint: bool = True,
              vmix_scheme: str | None = None,
@@ -1641,6 +1729,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     U-as-T bridge defect. Later-step carry behavior remains the model's
     ordinary ``_seed_centred_forcing_carry`` path.
     """
+    validate_config_source_pair(recipe, config_source, catalog_recipe)
     _producer_sha_entry, _producer_dirty_entry = _git_provenance()
     if (_producer_dirty_entry
             and os.environ.get("LEGOESM_ALLOW_DIRTY") != "1"):
@@ -1652,7 +1741,8 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     ladder_mode = resolve_ladder_mode(legacy_1d_ladder)
     requested_start = resolve_start_mode(bridge_before)
     br, cfg, mc, model, forcing, sf, st = _build_twin_state(
-        recipe, run_traj, run_stepdump, bridge_tke=bridge_tke,
+        recipe, run_traj, run_stepdump, config_source=config_source,
+        catalog_recipe=catalog_recipe, bridge_tke=bridge_tke,
         bridge_before=bridge_before, vmix_scheme=vmix_scheme,
         bridge_before_stress_tpoint=bridge_before_stress_tpoint,
         use_gm_redi=use_gm_redi, restart_file=restart_file,
@@ -1755,6 +1845,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         st = st._replace(T=st.T.replace(data=t_pert))
 
     initial_state_sha256 = _initial_state_sha256(st)
+    prognostic_initial_state_sha256 = _prognostic_state_sha256(st)
 
     nsteps = STEPS_PER_DAY * n_days
 
@@ -1783,6 +1874,8 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     # the artifact could see it before this stamp existed.
     run_config = json.dumps({
         "recipe": recipe, "n_days": int(n_days),
+        "config_source": config_source,
+        "catalog_recipe": catalog_recipe or "",
         "run_traj": run_traj, "run_stepdump": run_stepdump,
         "restart_file": restart_file,
         "bridge_tke": bool(bridge_tke), "bridge_before": bool(bridge_before),
@@ -2094,6 +2187,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
                 break
 
     stable = blew_up_at is None
+    prognostic_final_state_sha256 = _prognostic_state_sha256(st)
     print(f"DONE {'blew up at step ' + str(blew_up_at) if blew_up_at else 'nsteps=' + str(nsteps)} "
           f"STABLE={stable}  wall={time.time()-t0:.0f}s", flush=True)
 
@@ -2189,6 +2283,12 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         producer_dirty_tracked_files=np.int32(_producer_dirty_entry),
         codex_session_id=np.str_(os.environ.get("CODEX_SESSION_ID", "")),
         initial_state_sha256=np.str_(initial_state_sha256),
+        config_source=np.str_(config_source),
+        catalog_recipe=np.str_(catalog_recipe or ""),
+        prognostic_initial_state_sha256=np.str_(
+            prognostic_initial_state_sha256),
+        prognostic_final_state_sha256=np.str_(
+            prognostic_final_state_sha256),
     )
     if daily_acc:
         # #1455 Phase-2: stamp the perturbation next to the response it caused,
@@ -2245,6 +2345,16 @@ def _parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("recipe", help="dino recipe name, e.g. nemo_dino_kamm_mlf")
     p.add_argument("out", help="output .npz path")
+    p.add_argument(
+        "--config-source", choices=(ORACLE_CONFIG_SOURCE, CATALOG_CONFIG_SOURCE),
+        default=ORACLE_CONFIG_SOURCE,
+        help="resolved-config construction path: oracle uses the shipped DINO "
+             "card factory (default); catalog uses the public recipe catalog "
+             "and strict ownership/identity gate")
+    p.add_argument(
+        "--catalog-recipe", default=None,
+        help="required only with --config-source catalog; the supported faithful "
+             f"recipe is {FAITHFUL_CATALOG_RECIPE}")
     p.add_argument("--days", type=int, default=90, help="twin length in days (default 90)")
     p.add_argument("--save-3d", action="store_true",
                     help="also save full 3-D T/S/eta/u/v at days 0/30/60/90")
@@ -2463,6 +2573,8 @@ def _parse_args(argv=None):
                         "eta/t_seconds contract; preserve daily eta as "
                         "eta_daily. Required for 2dt/Nyquist scoring")
     args = p.parse_args(argv)
+    validate_config_source_pair(
+        args.recipe, args.config_source, args.catalog_recipe)
     if args.bridge_before_stress_tpoint is None:
         args.bridge_before_stress_tpoint = bool(args.bridge_before)
     return args
@@ -2643,6 +2755,8 @@ def main(argv=None):
         return
     run_twin(args.recipe, args.out, n_days=args.days, save_3d=args.save_3d,
               run_traj=args.run_traj, run_stepdump=args.run_stepdump,
+              config_source=args.config_source,
+              catalog_recipe=args.catalog_recipe,
               bridge_tke=args.bridge_tke, bridge_before=args.bridge_before,
               bridge_before_stress_tpoint=args.bridge_before_stress_tpoint,
               vmix_scheme=args.vmix_scheme, use_gm_redi=args.use_gm_redi,

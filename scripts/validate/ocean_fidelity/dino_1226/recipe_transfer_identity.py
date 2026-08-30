@@ -307,15 +307,107 @@ def run_identity(oracle_card: str = ORACLE_CARD,
     }
 
 
+def compare_behavior_artifacts(oracle_path: Path,
+                               catalog_path: Path) -> dict[str, Any]:
+    """Require bit identity except for the two declared construction stamps."""
+    ignored = {"config_source", "catalog_recipe", "run_config"}
+    with np.load(oracle_path, allow_pickle=False) as oracle, np.load(
+            catalog_path, allow_pickle=False) as catalog:
+        oracle_source = str(oracle["config_source"])
+        catalog_source = str(catalog["config_source"])
+        catalog_name = str(catalog["catalog_recipe"])
+        if (oracle_source, str(oracle["catalog_recipe"])) != ("oracle", ""):
+            raise RuntimeError("oracle artifact has invalid construction stamps")
+        if (catalog_source, catalog_name) != ("catalog", CATALOG_RECIPE):
+            raise RuntimeError("catalog artifact has invalid construction stamps")
+
+        oracle_config = json.loads(str(oracle["run_config"]))
+        catalog_config = json.loads(str(catalog["run_config"]))
+        for key in ("config_source", "catalog_recipe"):
+            oracle_config.pop(key, None)
+            catalog_config.pop(key, None)
+        config_equal = oracle_config == catalog_config
+
+        oracle_keys = set(oracle.files) - ignored
+        catalog_keys = set(catalog.files) - ignored
+        missing = sorted(oracle_keys - catalog_keys)
+        extra = sorted(catalog_keys - oracle_keys)
+        differences = []
+        for key in sorted(oracle_keys & catalog_keys):
+            left = np.asarray(oracle[key])
+            right = np.asarray(catalog[key])
+            values_equal = (
+                np.array_equal(left, right, equal_nan=True)
+                if left.dtype.kind in "fc" and right.dtype.kind in "fc"
+                else np.array_equal(left, right))
+            if (left.dtype != right.dtype or left.shape != right.shape
+                    or not values_equal):
+                differences.append({
+                    "key": key,
+                    "oracle_dtype": str(left.dtype),
+                    "catalog_dtype": str(right.dtype),
+                    "oracle_shape": list(left.shape),
+                    "catalog_shape": list(right.shape),
+                })
+
+        required_receipts = {
+            "prognostic_initial_state_sha256",
+            "prognostic_final_state_sha256",
+        }
+        missing_receipts = sorted(
+            key for key in required_receipts
+            if key not in oracle_keys or key not in catalog_keys)
+        passed = (config_equal and not missing and not extra
+                  and not differences and not missing_receipts)
+        return {
+            "schema": "dino_recipe_transfer_behavior_identity_v1",
+            "oracle_artifact": str(oracle_path),
+            "catalog_artifact": str(catalog_path),
+            "oracle_sha256": hashlib.sha256(oracle_path.read_bytes()).hexdigest(),
+            "catalog_sha256": hashlib.sha256(catalog_path.read_bytes()).hexdigest(),
+            "construction_stamps": {
+                "oracle": oracle_source,
+                "catalog": catalog_source,
+                "catalog_recipe": catalog_name,
+            },
+            "normalized_run_config_equal": config_equal,
+            "missing_keys": missing,
+            "extra_keys": extra,
+            "missing_required_receipts": missing_receipts,
+            "bit_differences": differences,
+            "compared_key_count": len(oracle_keys & catalog_keys),
+            "verdict": "PASS" if passed else "FAIL",
+        }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--oracle-card", default=ORACLE_CARD)
     parser.add_argument("--catalog-recipe", default=CATALOG_RECIPE)
     parser.add_argument("--negative-recipe", default=NEGATIVE_RECIPE)
-    parser.add_argument("--producer-commit", required=True)
-    parser.add_argument("--session-id", required=True)
+    parser.add_argument("--producer-commit")
+    parser.add_argument("--session-id")
+    parser.add_argument("--compare-oracle", type=Path)
+    parser.add_argument("--compare-catalog", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+
+    compare_mode = args.compare_oracle is not None or args.compare_catalog is not None
+    if compare_mode:
+        if args.compare_oracle is None or args.compare_catalog is None:
+            parser.error("--compare-oracle and --compare-catalog are required together")
+        if args.producer_commit is not None or args.session_id is not None:
+            parser.error("producer/session identity comes from compared artifacts")
+        result = compare_behavior_artifacts(
+            args.compare_oracle, args.compare_catalog)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+        print(f"BEHAVIOR_IDENTITY={result['verdict']} "
+              f"bit_differences={len(result['bit_differences'])}")
+        return 0 if result["verdict"] == "PASS" else 1
+
+    if args.producer_commit is None or args.session_id is None:
+        parser.error("--producer-commit and --session-id are required in identity mode")
 
     actual_commit = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()

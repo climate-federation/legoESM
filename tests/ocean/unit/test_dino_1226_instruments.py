@@ -296,6 +296,61 @@ def test_parse_args_bridge_tke_flag(instruments):
     assert args.bridge_tke is True
 
 
+def test_config_source_selector_is_fail_closed(instruments):
+    k = instruments.kamm_twin_90d
+    base = ["nemo_dino_kamm_mlf", "out.npz"]
+    oracle = k._parse_args(base)
+    assert oracle.config_source == "oracle"
+    assert oracle.catalog_recipe is None
+
+    catalog = k._parse_args(base + [
+        "--config-source", "catalog", "--catalog-recipe",
+        "nemo_dino_kamm_mlf_v1"])
+    assert catalog.config_source == "catalog"
+    assert catalog.catalog_recipe == "nemo_dino_kamm_mlf_v1"
+
+    with pytest.raises(ValueError, match="incompatible"):
+        k._parse_args(base + [
+            "--config-source", "oracle", "--catalog-recipe",
+            "nemo_dino_kamm_mlf_v1"])
+    with pytest.raises(ValueError, match="requires --catalog-recipe"):
+        k._parse_args(base + ["--config-source", "catalog"])
+    with pytest.raises(ValueError, match="unknown latlon recipe"):
+        k._parse_args(base + [
+            "--config-source", "catalog", "--catalog-recipe", "not_a_recipe"])
+    with pytest.raises(ValueError, match="unsupported oracle/catalog pair"):
+        k._parse_args([
+            "nemo_dino_kamm", "out.npz", "--config-source", "catalog",
+            "--catalog-recipe", "nemo_dino_kamm_mlf_v1"])
+
+
+def test_config_source_selector_threads_and_artifact_stamps(
+        instruments, monkeypatch):
+    import inspect
+
+    k = instruments.kamm_twin_90d
+    seen = {}
+    source = inspect.getsource(k.run_twin)
+
+    def _spy(*args, **kwargs):
+        seen.update(kwargs)
+        return True
+
+    monkeypatch.setattr(k, "run_twin", _spy)
+    monkeypatch.setattr(k, "provenance_gate", lambda: None)
+    monkeypatch.setattr(k, "_precision_gate", lambda: None)
+    k.main([
+        "nemo_dino_kamm_mlf", "out.npz", "--config-source", "catalog",
+        "--catalog-recipe", "nemo_dino_kamm_mlf_v1"])
+    assert seen["config_source"] == "catalog"
+    assert seen["catalog_recipe"] == "nemo_dino_kamm_mlf_v1"
+
+    assert "config_source=np.str_(config_source)" in source
+    assert "catalog_recipe=np.str_(catalog_recipe or \"\")" in source
+    assert '"config_source": config_source' in source
+    assert '"catalog_recipe": catalog_recipe or ""' in source
+
+
 # ---------------------------------------------------------------------------
 # kamm_twin_90d: --bridge-before (#1317 leap-frog before-level bridge)
 # ---------------------------------------------------------------------------

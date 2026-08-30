@@ -6,34 +6,35 @@ handoff implements `PREREG_dino_transfer_question.md` in T3, T2, T1 order.
 GPU arms and any NEMO regeneration belong to the user. The author ran no GPU,
 `mpirun`, or NEMO command.
 
-Replace every `__SLOT_*__` token before executing a block. A block containing
-an unresolved token must stop. Producer code, new instruments, and catalog
-wiring must be committed before a science arm is launched; citable results may
-not come from inline or throwaway probes.
+Executable blocks below contain no unresolved path or flag placeholders.
+Producer identity is resolved from the bundle's branch ref and then pinned in
+the detached checkout. Producer code, instruments, and catalog wiring must be
+committed before a science arm is launched; citable results may not come from
+inline or throwaway probes.
 
 ## Receipt slots
 
 ```text
-SLOT __SLOT_TRANSFER_PRODUCER_COMMIT__ VALUE=
-SLOT __SLOT_T3_CATALOG_RECIPE__ VALUE=nemo_dino_kamm_mlf_v1
-SLOT __SLOT_T3_IDENTITY_PROBE_RELATIVE_PATH__ VALUE=scripts/validate/ocean_fidelity/dino_1226/recipe_transfer_identity.py
-SLOT __SLOT_T3_TWIN_RELATIVE_PATH__ VALUE=
-SLOT __SLOT_T3_IDENTITY_ARTIFACT_SHA256__ VALUE=
-SLOT __SLOT_T3_ORACLE_ARTIFACT_SHA256__ VALUE=
-SLOT __SLOT_T3_CATALOG_ARTIFACT_SHA256__ VALUE=
-SLOT __SLOT_T2_FE_CLIMATE_A_SHA256__ VALUE=
-SLOT __SLOT_T2_FE_CLIMATE_B_SHA256__ VALUE=
-SLOT __SLOT_T2_FE_WALL_A_SHA256__ VALUE=
-SLOT __SLOT_T2_FE_WALL_B_SHA256__ VALUE=
-SLOT __SLOT_T2_SCORE_SHA256__ VALUE=
-SLOT __SLOT_T1_STANDALONE_RUNNER_RELATIVE_PATH__ VALUE=
-SLOT __SLOT_T1_SCORE_RELATIVE_PATH__ VALUE=
-SLOT __SLOT_T1_NEMO_STANDALONE_ROOT__ VALUE=
-SLOT __SLOT_T1_NEMO_ENSEMBLE_MANIFEST_SHA256__ VALUE=
-SLOT __SLOT_T1_LEGO_ENSEMBLE_MANIFEST_SHA256__ VALUE=
-SLOT __SLOT_T1_SCORE_SHA256__ VALUE=
-SLOT __SLOT_T1_MEASURED_GPU_HOURS__ VALUE=
-SLOT __SLOT_T1_MEASURED_NEMO_HOURS__ VALUE=
+SLOT TRANSFER_PRODUCER_COMMIT VALUE=RESOLVE_FROM_BUNDLE_BRANCH_REF
+SLOT T3_CATALOG_RECIPE VALUE=nemo_dino_kamm_mlf_v1
+SLOT T3_IDENTITY_PROBE_RELATIVE_PATH VALUE=scripts/validate/ocean_fidelity/dino_1226/recipe_transfer_identity.py
+SLOT T3_TWIN_RELATIVE_PATH VALUE=scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py
+SLOT T3_IDENTITY_ARTIFACT_SHA256 VALUE=MEASURED_AT_RUN
+SLOT T3_ORACLE_ARTIFACT_SHA256 VALUE=MEASURED_AT_RUN
+SLOT T3_CATALOG_ARTIFACT_SHA256 VALUE=MEASURED_AT_RUN
+SLOT T2_FE_CLIMATE_A_SHA256 VALUE=MEASURED_AT_RUN
+SLOT T2_FE_CLIMATE_B_SHA256 VALUE=MEASURED_AT_RUN
+SLOT T2_FE_WALL_A_SHA256 VALUE=MEASURED_AT_RUN
+SLOT T2_FE_WALL_B_SHA256 VALUE=MEASURED_AT_RUN
+SLOT T2_SCORE_SHA256 VALUE=MEASURED_AT_RUN
+SLOT T1_STANDALONE_RUNNER_RELATIVE_PATH VALUE=BUILD_IN_T1_ROUND
+SLOT T1_SCORE_RELATIVE_PATH VALUE=BUILD_IN_T1_ROUND
+SLOT T1_NEMO_STANDALONE_ROOT VALUE=PROVIDE_IN_T1_ROUND
+SLOT T1_NEMO_ENSEMBLE_MANIFEST_SHA256 VALUE=MEASURED_IN_T1_ROUND
+SLOT T1_LEGO_ENSEMBLE_MANIFEST_SHA256 VALUE=MEASURED_IN_T1_ROUND
+SLOT T1_SCORE_SHA256 VALUE=MEASURED_IN_T1_ROUND
+SLOT T1_MEASURED_GPU_HOURS VALUE=MEASURED_IN_T1_ROUND
+SLOT T1_MEASURED_NEMO_HOURS VALUE=MEASURED_IN_T1_ROUND
 ```
 
 ## Block 0 — fresh root, producer pin, and CPU admission
@@ -44,11 +45,10 @@ export CODEX_SESSION_ID=01a053d4-8e9f-7212-bbdb-19ba2d64e140
 repo=/tmp/codex-transfer
 run_root=/tmp/dino-transfer-01a053d4
 checkout="$run_root/producer-checkout"
-producer=__SLOT_TRANSFER_PRODUCER_COMMIT__
+producer=$(git -C "$repo" rev-parse refs/heads/fidelity/dino-transfer-codex)
 nemo=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO
 nemo_wall=/tmp/dino_eta_waves/nemo_5d_eta.npz
 
-case "$producer" in __SLOT_*__|'') echo 'STOP: fill producer slot' >&2; exit 1;; esac
 cd "$repo"
 test ! -e "$run_root"
 test -z "$(git status --porcelain --untracked-files=no)"
@@ -67,13 +67,13 @@ test -d "$nemo/RUN_STEPDUMP"
 test "$(sha256sum "$nemo_wall" | awk '{print $1}')" = \
   52bc6c70697126f7522114dbe2fc5cda5b56ce566db28f488d6809b79997b47a
 test "$(sha256sum "$checkout/scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py" | awk '{print $1}')" = \
-  4be31374f2858a477f13f90c688c278feb28861bb12e175fab7e68f2e56b1448
+  7eb37dec1ebee1179b1dc7fe79f68325196f15ee84b538b489cfd2c348fb079f
 test "$(sha256sum "$checkout/scripts/validate/ocean_fidelity/dino_1226/climate_rebattery_score.py" | awk '{print $1}')" = \
   cf85b65302ed65d2a5d8b7ea7a77fb6fa35abd55b5fde8d6e541db9f266996db
 test "$(sha256sum "$checkout/scripts/validate/ocean_fidelity/dino_1226/mld_climate_audit.py" | awk '{print $1}')" = \
   cf1bcffb4ee7994bd4eb433f6b3fa3ba5ac0f2610463b9bb3133ea0c1762dc14
 test "$(sha256sum "$checkout/scripts/validate/ocean_fidelity/dino_1226/recipe_transfer_identity.py" | awk '{print $1}')" = \
-  5d952fbee44f4ed9297be2b94750b52ef846afec259bc01259d2a00e99ec181c
+  2efe2e9360bb57b2e41cac16b57da548f0a6dda01a469faa9b6ab9b2be31cf67
 pythonpath="$checkout/packages/core:$checkout/packages/ocean:$checkout/packages/atmosphere:$checkout/packages/coupler:$checkout/packages/ice:$checkout/packages/land:$checkout/packages/ml:$checkout/packages/tools:$checkout:$checkout/scripts/validate/ocean_fidelity/dino_1226"
 cd "$checkout"
 PYTHONPATH="$pythonpath" JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES='' \
@@ -99,16 +99,15 @@ user-visible catalog choice:
 - identity probe:
   `scripts/validate/ocean_fidelity/dino_1226/recipe_transfer_identity.py`;
 - probe SHA-256:
-  `5d952fbee44f4ed9297be2b94750b52ef846afec259bc01259d2a00e99ec181c`.
+  `2efe2e9360bb57b2e41cac16b57da548f0a6dda01a469faa9b6ab9b2be31cf67`.
 
 The entry owns the frozen structural fields. The probe's disjoint setup
 allowlist owns coefficients, constants, grid-dependent values, and nested
 physics/setup objects. It fails on an ownership collision, missing/extra
 ownership row, or any recursive resolved-config leaf difference. Its
 one-ULP `asselin_gamma` plant and `nemo_dino_v1` negative control run in the
-same invocation. **UNASKED changes: none.** The catalog-aware behavioral twin
-wrapper remains the separately declared T3.2 prerequisite and is not invented
-by this T3.1 repair.
+same invocation. The T3.2 selector and behavioral comparator are now committed
+in the named harness/probe; there is no wrapper prerequisite.
 
 ## Block T3.1 — CPU field-by-field identity gate
 
@@ -117,13 +116,10 @@ set -euo pipefail
 export CODEX_SESSION_ID=01a053d4-8e9f-7212-bbdb-19ba2d64e140
 run_root=/tmp/dino-transfer-01a053d4
 checkout="$run_root/producer-checkout"
-producer=__SLOT_TRANSFER_PRODUCER_COMMIT__
+producer=$(git -C /tmp/codex-transfer rev-parse refs/heads/fidelity/dino-transfer-codex)
 catalog_recipe=nemo_dino_kamm_mlf_v1
 probe_rel=scripts/validate/ocean_fidelity/dino_1226/recipe_transfer_identity.py
 
-for value in "$producer" "$catalog_recipe" "$probe_rel"; do
-  case "$value" in __SLOT_*__|'') echo 'STOP: fill every T3.1 slot' >&2; exit 1;; esac
-done
 cd "$checkout"
 test "$(git rev-parse HEAD)" = "$producer"
 test "$(cat "$run_root/receipts/producer_commit.txt")" = "$producer"
@@ -144,7 +140,7 @@ grep -F 'CONFIG_IDENTITY=PASS' "$run_root/logs/t3_config_identity.log"
 grep -F 'PLANT=FIRED' "$run_root/logs/t3_config_identity.log"
 grep -F 'OWNERSHIP_COLLISION=FIRED' "$run_root/logs/t3_config_identity.log"
 grep -F 'NEGATIVE_CONTROL=DIFF' "$run_root/logs/t3_config_identity.log"
-printf 'SLOT __SLOT_T3_IDENTITY_ARTIFACT_SHA256__ VALUE=%s\n' \
+printf 'SLOT T3_IDENTITY_ARTIFACT_SHA256 VALUE=%s\n' \
   "$(sha256sum "$run_root/t3/config_identity.json" | awk '{print $1}')"
 ```
 
@@ -152,10 +148,10 @@ If this block does not pass, T3 stops without GPU use.
 
 ## Block T3.2 — user GPU behavioral identity pair
 
-The committed twin adapter must expose the catalog construction path without a
-physics override. Replace only the adapter's documented construction-path
-argument below if its reviewed CLI spelling differs; the two commands must be
-identical except `--config-source` and output/log path.
+The committed twin harness exposes the catalog construction path without a
+physics override. The oracle arm must not receive `--catalog-recipe`; the
+catalog arm must receive the exact faithful name. All scientific arguments
+are identical.
 
 ```bash
 set -euo pipefail
@@ -163,15 +159,12 @@ export CODEX_SESSION_ID=01a053d4-8e9f-7212-bbdb-19ba2d64e140
 export FP64=1 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both
 run_root=/tmp/dino-transfer-01a053d4
 checkout="$run_root/producer-checkout"
-producer=__SLOT_TRANSFER_PRODUCER_COMMIT__
+producer=$(git -C /tmp/codex-transfer rev-parse refs/heads/fidelity/dino-transfer-codex)
 catalog_recipe=nemo_dino_kamm_mlf_v1
 nemo=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO
-twin_rel=__SLOT_T3_TWIN_RELATIVE_PATH__
+twin_rel=scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py
 probe_rel=scripts/validate/ocean_fidelity/dino_1226/recipe_transfer_identity.py
 
-for value in "$producer" "$catalog_recipe" "$twin_rel" "$probe_rel"; do
-  case "$value" in __SLOT_*__|'') echo 'STOP: fill every T3.2 slot' >&2; exit 1;; esac
-done
 cd "$checkout"
 test "$(git rev-parse HEAD)" = "$producer"
 grep -F 'CONFIG_IDENTITY=PASS' "$run_root/logs/t3_config_identity.log"
@@ -185,13 +178,17 @@ run_t3() {
   gpu=$1
   source=$2
   arm=$3
+  source_args=(--config-source "$source")
+  if test "$source" = catalog; then
+    source_args+=(--catalog-recipe "$catalog_recipe")
+  fi
   PYTHONPATH="$pythonpath" CUDA_VISIBLE_DEVICES="$gpu" \
     /home/dbalwada/legoESM/.venv/bin/python "$run_fp64" "$twin" \
     nemo_dino_kamm_mlf "$run_root/t3/$arm.npz" \
     --days 5 --save-3d --snap-days 0,5 --fp64-3d \
     --run-traj "$nemo/RUN_TRAJ" --run-stepdump "$nemo/RUN_STEPDUMP" \
     --bridge-tke --bridge-before --bridge-before-stress-tpoint \
-    --config-source "$source" --catalog-recipe "$catalog_recipe" \
+    "${source_args[@]}" \
     > "$run_root/logs/$arm.log" 2>&1
 }
 run_t3 0 oracle t3_oracle & p0=$!
@@ -223,7 +220,7 @@ export CODEX_SESSION_ID=01a053d4-8e9f-7212-bbdb-19ba2d64e140
 export FP64=1 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both
 run_root=/tmp/dino-transfer-01a053d4
 checkout="$run_root/producer-checkout"
-producer=__SLOT_TRANSFER_PRODUCER_COMMIT__
+producer=$(git -C /tmp/codex-transfer rev-parse refs/heads/fidelity/dino-transfer-codex)
 nemo=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO
 cd "$checkout"
 test "$(git rev-parse HEAD)" = "$producer"
@@ -258,7 +255,7 @@ export CODEX_SESSION_ID=01a053d4-8e9f-7212-bbdb-19ba2d64e140
 export FP64=1 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both
 run_root=/tmp/dino-transfer-01a053d4
 checkout="$run_root/producer-checkout"
-producer=__SLOT_TRANSFER_PRODUCER_COMMIT__
+producer=$(git -C /tmp/codex-transfer rev-parse refs/heads/fidelity/dino-transfer-codex)
 nemo=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO
 cd "$checkout"
 test "$(git rev-parse HEAD)" = "$producer"
@@ -291,7 +288,7 @@ set -euo pipefail
 export CODEX_SESSION_ID=01a053d4-8e9f-7212-bbdb-19ba2d64e140
 run_root=/tmp/dino-transfer-01a053d4
 checkout="$run_root/producer-checkout"
-producer=__SLOT_TRANSFER_PRODUCER_COMMIT__
+producer=$(git -C /tmp/codex-transfer rev-parse refs/heads/fidelity/dino-transfer-codex)
 nemo_wall=/tmp/dino_eta_waves/nemo_5d_eta.npz
 score="$run_root/t2/fe_climate_rebattery_score.json"
 cd "$checkout"
@@ -337,116 +334,13 @@ Record their paths in the SLOTs and restart from Block 0. Do not adapt
 `kamm_twin_90d.py` by merely omitting filenames: its bridge semantics are the
 experimental variable.
 
-## Block T1.1 — CPU instrument and fresh-NEMO manifest admission
+## T1 executable status — BUILD IN T1 ROUND
 
-```bash
-set -euo pipefail
-export CODEX_SESSION_ID=01a053d4-8e9f-7212-bbdb-19ba2d64e140
-run_root=/tmp/dino-transfer-01a053d4
-checkout="$run_root/producer-checkout"
-producer=__SLOT_TRANSFER_PRODUCER_COMMIT__
-runner_rel=__SLOT_T1_STANDALONE_RUNNER_RELATIVE_PATH__
-score_rel=__SLOT_T1_SCORE_RELATIVE_PATH__
-nemo_root=__SLOT_T1_NEMO_STANDALONE_ROOT__
-manifest="$run_root/t1/nemo_standalone_manifest.sha256"
-for value in "$producer" "$runner_rel" "$score_rel" "$nemo_root"; do
-  case "$value" in __SLOT_*__|'') echo 'STOP: fill every T1.1 slot' >&2; exit 1;; esac
-done
-test -f "$checkout/$runner_rel"
-test -f "$checkout/$score_rel"
-for member in 0 1 2 3 4 5; do
-  test -d "$nemo_root/m$member"
-  grep -Fx 'STOP 0' "$nemo_root/m$member/run.log"
-done
-find "$nemo_root" -type f -print0 | sort -z | xargs -0 sha256sum > "$manifest"
-sha256sum "$manifest"
-cd "$checkout"
-test "$(git rev-parse HEAD)" = "$producer"
-test -z "$(git status --porcelain --untracked-files=no)"
-```
-
-## Block T1.2 — user GPU six standalone 20-year members
-
-The committed runner owns exact CLI spelling. Its reviewed interface must
-implement these semantics, use the model's own initializer, and reject every
-bridge/resume option. Member 0 is unperturbed; members 1–5 use the same-numbered
-`1e-14` temperature-kick seed at initialized time zero.
-
-```bash
-set -euo pipefail
-export CODEX_SESSION_ID=01a053d4-8e9f-7212-bbdb-19ba2d64e140
-export FP64=1 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both
-run_root=/tmp/dino-transfer-01a053d4
-checkout="$run_root/producer-checkout"
-producer=__SLOT_TRANSFER_PRODUCER_COMMIT__
-runner_rel=__SLOT_T1_STANDALONE_RUNNER_RELATIVE_PATH__
-cd "$checkout"
-test "$(git rev-parse HEAD)" = "$producer"
-test -z "$(git status --porcelain --untracked-files=no)"
-pythonpath="$checkout/packages/core:$checkout/packages/ocean:$checkout/packages/atmosphere:$checkout/packages/coupler:$checkout/packages/ice:$checkout/packages/land:$checkout/packages/ml:$checkout/packages/tools:$checkout"
-run_member() {
-  gpu=$1; member=$2
-  args=''
-  if test "$member" -ne 0; then args="--temperature-kick-seed $member --temperature-kick-relative 1e-14"; fi
-  # shellcheck disable=SC2086 -- args is the frozen optional two-flag member arm.
-  PYTHONPATH="$pythonpath" CUDA_VISIBLE_DEVICES="$gpu" \
-    /home/dbalwada/legoESM/.venv/bin/python "$checkout/$runner_rel" \
-    --recipe nemo_dino_kamm_mlf --start standalone --years 20 \
-    --annual-years 1:15 --monthly-years 16:20 --fp64-snapshots \
-    --member "$member" $args \
-    --output "$run_root/t1/lego_m${member}_20y.npz" \
-    > "$run_root/logs/t1_lego_m${member}.log" 2>&1
-}
-for wave in 0 2 4; do
-  run_member 0 "$wave" & p0=$!
-  run_member 1 "$((wave + 1))" & p1=$!
-  rc=0; wait "$p0" || rc=1; wait "$p1" || rc=1; test "$rc" -eq 0
-done
-for member in 0 1 2 3 4 5; do
-  grep -F 'STANDALONE_20Y_STABLE' "$run_root/logs/t1_lego_m${member}.log"
-done
-sha256sum "$run_root/t1/lego_m"*_20y.npz > "$run_root/t1/lego_manifest.sha256"
-sha256sum "$run_root/t1/lego_manifest.sha256"
-```
-
-## Block T1.3 — CPU 20-year distribution score
-
-```bash
-set -euo pipefail
-export CODEX_SESSION_ID=01a053d4-8e9f-7212-bbdb-19ba2d64e140
-run_root=/tmp/dino-transfer-01a053d4
-checkout="$run_root/producer-checkout"
-producer=__SLOT_TRANSFER_PRODUCER_COMMIT__
-score_rel=__SLOT_T1_SCORE_RELATIVE_PATH__
-nemo_root=__SLOT_T1_NEMO_STANDALONE_ROOT__
-nemo=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO
-pythonpath="$checkout/packages/core:$checkout/packages/ocean:$checkout/packages/atmosphere:$checkout/packages/coupler:$checkout/packages/ice:$checkout/packages/land:$checkout/packages/ml:$checkout/packages/tools:$checkout"
-cd "$checkout"
-test "$(git rev-parse HEAD)" = "$producer"
-test -z "$(git status --porcelain --untracked-files=no)"
-PYTHONPATH="$pythonpath" JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES='' \
-  JAX_ENABLE_X64=1 /home/dbalwada/legoESM/.venv/bin/python \
-  "$checkout/$score_rel" \
-  --lego-members "$run_root/t1/lego_m0_20y.npz" \
-                 "$run_root/t1/lego_m1_20y.npz" \
-                 "$run_root/t1/lego_m2_20y.npz" \
-                 "$run_root/t1/lego_m3_20y.npz" \
-                 "$run_root/t1/lego_m4_20y.npz" \
-                 "$run_root/t1/lego_m5_20y.npz" \
-  --nemo-members "$nemo_root/m0" "$nemo_root/m1" "$nemo_root/m2" \
-                 "$nemo_root/m3" "$nemo_root/m4" "$nemo_root/m5" \
-  --nemo-manifest "$run_root/t1/nemo_standalone_manifest.sha256" \
-  --lego-manifest "$run_root/t1/lego_manifest.sha256" \
-  --from-rest-control-y1-y20 "$nemo/RUN_20Y_REBUILD/DINO_1y_00060101_00201230_grid_U.nc" \
-  --from-rest-control-y21-y40 "$nemo/RUN_40Y_REBUILD/DINO_1y_00210101_00401230_grid_U.nc" \
-  --bootstrap-draws 20000 --bootstrap-seed 1455 \
-  --output "$run_root/t1/standalone_transfer_score.json" \
-  | tee "$run_root/logs/t1_score.log"
-grep -E 'STANDALONE_|CONFIRM|REFUTE|UNRESOLVED|ONE_SIDED' \
-  "$run_root/logs/t1_score.log"
-sha256sum "$run_root/t1/"*.npz "$run_root/t1/"*.sha256 \
-  "$run_root/t1/standalone_transfer_score.json"
-```
+There is intentionally no T1 shell block in this handoff. The standalone
+runner, scorer, fresh NEMO ensemble root, and their exact CLIs do not exist in
+the committed tree. They are explicitly `BUILD_IN_T1_ROUND`, not executable
+placeholders. Adding a command before those paths and parsers are committed
+would recreate the missing-selector failure class this audit is closing.
 
 ## Completion receipt
 
