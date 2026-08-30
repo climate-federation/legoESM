@@ -20,6 +20,18 @@ cleanup.  The fresh OFF run is reduced to its cryptographic manifest before
 the ON run to limit scratch use; that temporary OFF directory is then removed
 and is reproducible from its pinned binary and template.
 
+Amendment after the deleted row-30 source tree STOP: block 1 now starts from
+the surviving deterministic-writer baseline and reconstructs the deleted
+source state with the committed row-30 UV and raw-USLP patches.  The gates
+require the 28-file baseline manifest, the registered intermediate UV source
+and manifest SHAs, the registered deleted-tree `ldfslp.F90` SHA, and exact
+baseline hashes for every other source file.  The raw-USLP patch historically
+requires GNU patch fuzz 1--2 against that byte-pinned UV source; its final
+registered source SHA is therefore the authority, and
+`--no-backup-if-mismatch` prevents an unregistered `.orig` file.  Current
+load-bearing scratch trees are recorded in the machine-checkable
+`KEEP_TMP_TREES.txt` cleanup denylist.
+
 ## Block 1 — guarded OFF/ON build
 
 ```bash
@@ -32,18 +44,55 @@ git cat-file -e "${producer}^{commit}"
 test -z "$(git status --porcelain --untracked-files=no)"
 test -z "$(git diff --name-only "$producer" HEAD -- packages/core packages/ocean src)"
 
-base=/tmp/nemo-row30-uslp.NPhyli
+base=/tmp/nemo-row19-detwriter.kTFp14
 guard="$repo/scripts/validate/ocean_fidelity/dino_1226/safe_copy_nemo_source.sh"
-patch_file="$repo/scripts/validate/ocean_fidelity/dino_1226/nemo_redi_flux_ladder.patch"
+base_manifest="$repo/scripts/validate/ocean_fidelity/dino_1226/nemo_spg_qco_base_source_manifest.sha256"
+uv_patch="$repo/scripts/validate/ocean_fidelity/dino_1226/nemo_row30_uv_operands.patch"
+uslp_patch="$repo/scripts/validate/ocean_fidelity/dino_1226/nemo_row30_uslp_raw_operands.patch"
+redi_patch="$repo/scripts/validate/ocean_fidelity/dino_1226/nemo_redi_flux_ladder.patch"
+keep_manifest="$repo/scripts/validate/ocean_fidelity/dino_1226/KEEP_TMP_TREES.txt"
+test "$(sha256sum "$keep_manifest" | awk '{print $1}')" = 24caf885c4d839c5ac346f8748869dbada4152e4d9e176f6371f8bdfec7747d2
+grep -Fxq -- "$base" "$keep_manifest"
 test "$(du -sm "$base" | awk '{print $1}')" -le 3072
 test "$(df -Pm /tmp | awk 'NR==2 {print $4}')" -ge 8192
 test "$(sha256sum "$guard" | awk '{print $1}')" = f1bfbc7e5428c2f532a26aa8197b368847c40421dae6704b33fb91afeb98e071
-test "$(sha256sum "$patch_file" | awk '{print $1}')" = bf5756a4fcf262d64f28267c227355085defddf8365f8a2ffcbe94d493dc8fed
+test "$(sha256sum "$base_manifest" | awk '{print $1}')" = 22fdaa20eeb3ff1c04ea22fa0dc293d3db9b9e6bf8cf9638075fdfb819b97e57
+test "$(sha256sum "$uv_patch" | awk '{print $1}')" = de6b46dc3fc1c347e79f9b44f49eda44f40e2edb938c7b7d0a82dfc0bbb7d110
+test "$(sha256sum "$uslp_patch" | awk '{print $1}')" = b3435410f3ce2dcd7a77d197f233682691cc8609276c2ffcae07782d0507cca9
+test "$(sha256sum "$redi_patch" | awk '{print $1}')" = bf5756a4fcf262d64f28267c227355085defddf8365f8a2ffcbe94d493dc8fed
 
 src=$(mktemp -d /tmp/nemo-redi-flux-round78-src.XXXXXX)
 NEMO_SOURCE_BASE_MAX_MIB=3072 NEMO_SOURCE_COPY_MAX_MIB=512 NEMO_SOURCE_MIN_FREE_MIB=8192 \
   "$guard" "$base" "$src"
 test "$(du -sm "$src" | awk '{print $1}')" -le 512
+( cd "$src" && sha256sum -c "$base_manifest" )
+test "$(find "$src/cfgs/DINO/MY_SRC" -maxdepth 1 -type f | wc -l)" -eq 28
+
+patch --dry-run --fuzz=0 -p1 -d "$src" < "$uv_patch"
+patch --fuzz=0 -p1 -d "$src" < "$uv_patch"
+test "$(sha256sum "$src/cfgs/DINO/MY_SRC/ldfslp.F90" | awk '{print $1}')" = \
+  8b4d8cffe35d66241eb77bdc508ef15d6dd90d8ff192fd60201ff83a7d523a29
+( cd "$src" && sha256sum cfgs/DINO/MY_SRC/*.F90 | sort ) > \
+  /tmp/nemo-redi-flux-round78-uv-source-manifest.sha256
+test "$(sha256sum /tmp/nemo-redi-flux-round78-uv-source-manifest.sha256 | awk '{print $1}')" = \
+  433067fd909cafe37b31d094e0f7326177c8628c4ee6d3d9ff31b528b2ec40c3
+
+# This committed historical patch fuzzes against the exact registered UV file;
+# its final SHA and unchanged-other-file loop make the reconstruction strict.
+patch --dry-run --no-backup-if-mismatch -p1 -d "$src" < "$uslp_patch"
+patch --no-backup-if-mismatch -p1 -d "$src" < "$uslp_patch"
+test "$(sha256sum "$src/cfgs/DINO/MY_SRC/ldfslp.F90" | awk '{print $1}')" = \
+  2d59df4697b3d16f0ee9dc2b38ce929cca707d59ef43442dee3600c8d8b1f7ca
+test "$(find "$src/cfgs/DINO/MY_SRC" -maxdepth 1 -type f | wc -l)" -eq 28
+while read -r expected path; do
+  test "$path" = cfgs/DINO/MY_SRC/ldfslp.F90 && continue
+  test "$(sha256sum "$src/$path" | awk '{print $1}')" = "$expected"
+done < "$base_manifest"
+( cd "$src" && sha256sum cfgs/DINO/MY_SRC/*.F90 | sort ) > \
+  /tmp/nemo-redi-flux-round78-reconstructed-source-manifest.sha256
+test "$(sha256sum /tmp/nemo-redi-flux-round78-reconstructed-source-manifest.sha256 | awk '{print $1}')" = \
+  1abd4ebbfc1a26fdad0963aa2d8537b4819a05de2c92e080569a5978a47fe4b2
+
 cp -p "$src/src/OCE/TRA/traldf_iso.F90" "$src/cfgs/DINO/MY_SRC/traldf_iso.F90"
 
 for unit in 9450 9451 9452 9453 9454 9455; do
@@ -56,7 +105,7 @@ cd "$src"
 ./makenemo -m conda -n DINO -j 8 2>&1 | tee /tmp/nemo-redi-flux-round78-off-build.log
 cp -p cfgs/DINO/BLD/bin/nemo.exe /tmp/nemo-redi-flux-round78-off.exe
 
-patch --fuzz=0 -p1 -d "$src" < "$patch_file"
+patch --fuzz=0 -p1 -d "$src" < "$redi_patch"
 for unit in 9450 9451 9452 9453 9454 9455; do
   test "$(grep -rE --include='*.F90' "OPEN[[:space:]]*\\([[:space:]]*UNIT[[:space:]]*=[[:space:]]*${unit}([^0-9]|$)" \
     "$src/cfgs/DINO/MY_SRC" | wc -l)" -eq 1
