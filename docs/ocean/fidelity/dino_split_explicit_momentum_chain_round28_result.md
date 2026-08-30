@@ -617,3 +617,9 @@ algebraically cancelling pair leaves U/V maximum-error-over-NEMO-RMS
 `2.98961e-15/2.81807e-15`; `dyn_atf_qco` inherits the same pointwise maxima.
 The oracle-Kmm filter arm is at bar, so the filter formula is exonerated and
 the cycle arithmetic is the sole local owner.
+
+Round 53 production replay retains the stop. With production `Hu_avg/Hv_avg`,
+the literal cycle gives U/V pointwise maximum/RMS
+`2.98961e-15/5.63615e-15`; the filter inherits the same values. The next
+source-ordered operand is therefore the transport average itself, for which
+unchanged retained `spg_dump_{un,vn}_adv_final.bin` streams already exist.
