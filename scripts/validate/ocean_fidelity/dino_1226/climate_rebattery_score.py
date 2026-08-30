@@ -36,6 +36,7 @@ MLD_REFUTE_MIN = 20.2775
 
 CURRENT_DEFAULTS = {
     "bridge_tke": True,
+    "barotropic_diffusion_alpha": 0.0,
     "barotropic_continuity_evaluation": "nemo_literal",
     "vface_zonal_metric_evaluation": "nemo_vpoint",
     "barotropic_transport_accumulation_evaluation": "nemo_literal",
@@ -70,6 +71,22 @@ CURRENT_DEFAULTS = {
     "gm_treguier_vertical_reduction_evaluation": "nemo_left",
     "gm_treguier_sqrt_evaluation": "nemo_forward_exact",
 }
+
+SUPPORTED_RECIPES = {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}
+
+
+def current_defaults_for_recipe(recipe: str) -> dict[str, object]:
+    """Return frozen admission defaults, including card-scoped time levels."""
+    require(recipe in SUPPORTED_RECIPES,
+            f"unsupported re-battery recipe {recipe!r}")
+    expected = dict(CURRENT_DEFAULTS)
+    if recipe == "nemo_dino_kamm":
+        # These two operands are NEMO stp_MLF Nbb/Kaa associations.  The FE
+        # sibling has no equivalent time levels and is fail-closed if literal.
+        expected["zad_qco_evaluation"] = "generic"
+        expected["wzv_call2_evaluation"] = "generic"
+        expected["barotropic_diffusion_alpha"] = 0.01
+    return expected
 
 
 def require(condition: bool, message: str) -> None:
@@ -150,8 +167,9 @@ def load_module(path: Path, name: str):
     return module
 
 
-def validate_arm(path: Path, producer: str, session: str, days: int,
-                 snap_days: list[int], save_step_eta: bool) -> dict[str, object]:
+def validate_arm(path: Path, producer: str, session: str, recipe: str,
+                 days: int, snap_days: list[int],
+                 save_step_eta: bool) -> dict[str, object]:
     require(path.is_file(), f"missing arm {path}")
     with np.load(path, allow_pickle=False) as data:
         require(str(scalar(data, "producer_git_sha")) == producer,
@@ -173,11 +191,13 @@ def validate_arm(path: Path, producer: str, session: str, days: int,
                 float(scalar(data, "seasonal_t0_reference_seconds")),
                 f"wrong seasonal clock: {path}")
         config = json.loads(str(scalar(data, "run_config")))
+        require(config.get("recipe") == recipe,
+                f"wrong recipe {config.get('recipe')!r}, expected {recipe!r}: {path}")
         require(config.get("n_days") == days, f"wrong duration: {path}")
         require(config.get("snap_days") == snap_days, f"wrong snapshots: {path}")
         require(config.get("save_step_eta") is save_step_eta,
                 f"wrong step-eta selection: {path}")
-        for key, expected in CURRENT_DEFAULTS.items():
+        for key, expected in current_defaults_for_recipe(recipe).items():
             require(key in config, f"missing current-default stamp {key}: {path}")
             require(config[key] == expected,
                     f"off-default {key}={config[key]!r}, expected {expected!r}")
@@ -273,6 +293,10 @@ def main() -> int:
     parser.add_argument("--nemo-wall", type=Path, required=True)
     parser.add_argument("--producer-commit", required=True)
     parser.add_argument("--session-id", required=True)
+    parser.add_argument(
+        "--recipe", choices=sorted(SUPPORTED_RECIPES),
+        default="nemo_dino_kamm_mlf",
+        help="artifact card; defaults preserve the round-94 MLF invocation")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
@@ -287,13 +311,15 @@ def main() -> int:
             "NEMO wall comparator SHA mismatch")
 
     climate_a = validate_arm(args.climate_a, args.producer_commit,
-                             args.session_id, 360, [0, 90, 360], False)
+                             args.session_id, args.recipe,
+                             360, [0, 90, 360], False)
     climate_b = validate_arm(args.climate_b, args.producer_commit,
-                             args.session_id, 360, [0, 90, 360], False)
+                             args.session_id, args.recipe,
+                             360, [0, 90, 360], False)
     wall_a = validate_arm(args.wall_a, args.producer_commit,
-                          args.session_id, 5, [], True)
+                          args.session_id, args.recipe, 5, [], True)
     wall_b = validate_arm(args.wall_b, args.producer_commit,
-                          args.session_id, 5, [], True)
+                          args.session_id, args.recipe, 5, [], True)
     require(climate_a["config"] == climate_b["config"], "climate configs differ")
     require(wall_a["config"] == wall_b["config"], "wall configs differ")
     require(climate_a["initial_state_sha256"] == climate_b["initial_state_sha256"]
@@ -338,6 +364,7 @@ def main() -> int:
         "schema": "dino-current-default-climate-rebattery-v1",
         "producer_commit": args.producer_commit,
         "session_id": args.session_id,
+        "recipe": args.recipe,
         "epoch_duplicate_identity": True,
         "arms": {"climate_a": climate_a, "climate_b": climate_b,
                  "wall_a": wall_a, "wall_b": wall_b},

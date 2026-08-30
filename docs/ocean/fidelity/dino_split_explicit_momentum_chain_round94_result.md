@@ -78,10 +78,13 @@ from NEMO's developed day-180 restart and bridges before-level state, carried
 T-point stress and TKE. They are not yet a claim that a standalone legoESM
 DINO recipe starting from its own initial condition reaches the same climate,
 and they do not transfer automatically to another recipe. All four battery
-arms use the `nemo_dino_kamm_mlf` faithful-default card. The same selectors
-default on both DINO NEMO cards, but this battery did not climate-test
-`nemo_dino_kamm`; neither standalone initialization nor cross-recipe transfer
-is claimed. The registered next campaign step is therefore a standalone-
+arms use the `nemo_dino_kamm_mlf` faithful-default card. The subsequent T2
+admission audit found that zero barotropic damping and the literal QCO ZAD/WZV
+pair are MLF-frame-specific. The FE approximation retains alpha `0.01` and the
+generic QCO association; no transfer of those MLF choices is claimed. This
+battery did not climate-test `nemo_dino_kamm`; neither standalone
+initialization nor cross-recipe transfer is claimed. The registered next
+campaign step is therefore a standalone-
 recipe transfer test, with the three remaining call measurements kept visible
 rather than folded into the climate headline.
 

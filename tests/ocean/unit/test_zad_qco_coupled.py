@@ -199,10 +199,10 @@ def test_qco_zad_pair_matches_source_ordered_oracle():
     assert np.any(np.asarray(gradient) != 0.0)
 
 
-def test_qco_selector_defaults_are_scoped_to_two_dino_cards():
+def test_qco_selector_defaults_are_scoped_to_mlf_dino_card():
     assert DINOConfig().zad_qco_evaluation == "generic"
     assert DINOConfig().wzv_call2_evaluation == "generic"
-    faithful = {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}
+    faithful = {"nemo_dino_kamm_mlf"}
     for recipe in (
         "legoesm_default", "nemo_paper", "nemo_dino_kamm",
         "nemo_dino_kamm_mlf", "veros", "mitgcm", "oceananigans",
@@ -221,3 +221,22 @@ def test_qco_call2_selector_is_red_for_unknown_and_half_configurations():
             LatLonCGridOceanConfig.from_flat(
                 wzv_call2_evaluation="nemo_literal",
                 zad_qco_evaluation="generic"))
+
+
+@pytest.mark.parametrize("selector", [
+    "zad_qco_evaluation", "wzv_call2_evaluation",
+])
+def test_qco_literal_time_level_selectors_fail_closed_on_forward_euler(selector):
+    """Planted MLF association on FE must fail before a traced runtime."""
+    kwargs = {
+        "outer_integrator": "forward_euler",
+        "vertical_momentum_scheme": "nemo_advective",
+        "zad_qco_evaluation": "nemo_literal",
+        "wzv_call2_evaluation": "generic",
+    }
+    if selector == "wzv_call2_evaluation":
+        kwargs["wzv_call2_evaluation"] = "nemo_literal"
+    with pytest.raises(ValueError, match=(
+            "zad_qco_evaluation='nemo_literal' requires outer_integrator")):
+        LatLonCGridOceanModel._validate_config(
+            LatLonCGridOceanConfig.from_flat(**kwargs))

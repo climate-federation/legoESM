@@ -2229,6 +2229,13 @@ class LatLonCGridOceanModel:
                 "zad_qco_evaluation='nemo_literal' requires "
                 "vertical_momentum_scheme='nemo_advective'; the QCO ww and "
                 "live Kmm thickness operands are a coupled dynzad path")
+        _outer = getattr(config, "outer_integrator", "forward_euler")
+        _leapfrog_family = {"leapfrog", "nemo_mlf"}
+        if _zad_qco == "nemo_literal" and _outer not in _leapfrog_family:
+            raise ValueError(
+                "zad_qco_evaluation='nemo_literal' requires outer_integrator "
+                "in ['leapfrog', 'nemo_mlf']; its call-1 Kaa/Kmm thickness "
+                "association has no permanent forward-Euler equivalent")
         _wzv_call2 = getattr(config, "wzv_call2_evaluation", "generic")
         if _wzv_call2 not in {"generic", "nemo_literal"}:
             raise ValueError(
@@ -2239,6 +2246,11 @@ class LatLonCGridOceanModel:
                 "wzv_call2_evaluation='nemo_literal' requires "
                 "zad_qco_evaluation='nemo_literal'; second hdiv and "
                 "barotropic Kaa r3t are an inseparable QCO operand pair")
+        if _wzv_call2 == "nemo_literal" and _outer not in _leapfrog_family:
+            raise ValueError(
+                "wzv_call2_evaluation='nemo_literal' requires outer_integrator "
+                "in ['leapfrog', 'nemo_mlf']; call 2 consumes the carried Nbb "
+                "and actual Kaa barotropic result")
         # Reject centered_full / nemo_advective + adaptive-implicit vertadv:
         # the adaptive-implicit path (ln_zad_Aimp) replaces the explicit
         # in-tendency vertical momentum advection ENTIRELY with an upwind
@@ -2398,6 +2410,26 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"barotropic_time_filter must be one of {_valid_time_filters}, "
                 f"got {config.barotropic.barotropic_time_filter!r}")
+        # T2 transfer audit: the DINO FE approximation's centred boxcar has a
+        # live 2-dx free-surface mode and requires its historical 0.01 spatial
+        # damping.  With the otherwise faithful Kamm geometry and alpha=0, a
+        # developed NEMO state grows |eta|max 0.83 -> 2.87 -> 95.6 m before
+        # becoming non-finite.  NEMO has no permanent-FE branch from which a
+        # zero-damping equivalent can be defined.  Reject that exact card-class
+        # combination at construction instead of deferring to a JAX e3w check.
+        if (getattr(config, "outer_integrator", "forward_euler")
+                == "forward_euler"
+                and config.barotropic.barotropic_time_filter
+                == "nemo_boxcar_centred"
+                and config.barotropic.barotropic_diffusion_alpha == 0.0
+                and getattr(config, "metric_convention", "exact")
+                == "nemo_isotropic"
+                and getattr(config.barotropic, "barotropic_face_depth", "min_rule")
+                == "nemo_ssh_avg"):
+            raise ValueError(
+                "DINO Kamm forward-Euler + nemo_boxcar_centred requires "
+                "barotropic_diffusion_alpha > 0: alpha=0 is the MLF-only "
+                "NEMO-faithful choice and excites the FE free-surface mode")
         # nemo_boxcar_ab3 (NEMO nn_bt_flt=2) is only flt=2-faithful under the
         # MLF leap-frog family (_leapfrog_step OR nemo_mlf's _nemo_mlf_step --
         # both supply the SAME ×2 substep scale + Nbb before-level seed, per

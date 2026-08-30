@@ -869,7 +869,7 @@ class DINOConfig:
     # threaded 1:1 via from_flat/BarotropicConfig. NEMO has no eta-diffusion
     # term in dynspg_ts; the legoESM default 0.01 is a forward-frame 2Δx
     # stability crutch. Default here (0.01) keeps every non-kamm recipe
-    # bit-identical; the kamm cards override to 0.0 (see DINO_RECIPES).
+    # bit-identical; the Kamm MLF card overrides to 0.0 (see DINO_RECIPES).
     barotropic_diffusion_alpha: float = 0.01
     # LatLonCGridOceanConfig.barotropic.barotropic_face_depth (#1226), threaded
     # 1:1 via from_flat/BarotropicConfig.  "min_rule" (default, bit-identical
@@ -1412,11 +1412,11 @@ DINO_RECIPES: dict[str, dict] = {
         # population. See fidelity_bar_gate.py PER_ELEMENT["dyn_adv ZAD"]
         # for the corrected localisation and current DEBT status.
         "zad_bottom_face_mask": "nemo_faithful",
-        # Round 39: neither operand is independently faithful.  The call-1
-        # Kaa-continuity ww + live e3u/e3v(Kmm) pair closes ZAD jointly while
-        # thickness alone worsens it, so expose only the coupled selector.
-        "zad_qco_evaluation": "nemo_literal",
-        "wzv_call2_evaluation": "nemo_literal",
+        # Round 39's literal QCO pair is MLF-time-level-specific: call 1 reads
+        # Kaa/Kmm and call 2 reads the carried Nbb plus actual Kaa barotropic
+        # result.  A permanent forward-Euler frame has no Nbb/Kaa analogue.
+        # Keep the FE card on the generic association; the MLF card below owns
+        # the coupled literal selectors and model construction guards them.
         # NEMO's STANDARD gravity (phycst.F90:38) -- see NEMO_CONSTANTS_CONFIG.
         # 5.0e-5 from legoESM's canonical g; it was the whole remaining bn2
         # residual (N^2 median rel err 4.95e-05 -> 6.96e-06).
@@ -1494,12 +1494,16 @@ DINO_RECIPES: dict[str, dict] = {
         # pattern = the forward_euler-vs-MLF integrator-frame difference, which no
         # barotropic sub-step composition can remove. The bit-faithful NEMO-DINO
         # dynspg_ts match is the MLF card (nemo_dino_kamm_mlf), not this FE card.
-        # alpha=0: no NEMO counterpart; the 0.01 crutch masks pump signal
+        # NEMO has no eta-diffusion counterpart; the 0.01 crutch masks pump signal
         # (2026-07-23 sweep B measured ~1/3 of the barotropic pump signal
         # masked by the default 0.01 eta-diffusion damping — it corrupts
         # oracle tendency comparisons). dynspg_ts.F90 has no eta-diffusion
         # term at all; set to 0 for the NEMO-true composition.
-        "barotropic_diffusion_alpha": 0.0,
+        # The permanent-FE sibling cannot carry this zero-damping choice: the
+        # developed-state control grows |eta|max 0.83 -> 2.87 -> 95.6 m and
+        # becomes non-finite, while its historical 0.01 default remains finite.
+        # NEMO defines no permanent-FE equivalent.  The faithful zero therefore
+        # lands on the MLF card below; this FE approximation keeps 0.01.
         # Zero-deviation track item 2 (#1226): NEMO's e1e2-weighted ssh-average
         # face depth for the substep flux AND drag/update depth (zhup2_e,
         # dynspg_ts.F90:568-592,658-666).  Pair-consistent with the tracer
@@ -1632,6 +1636,15 @@ DINO_RECIPES: dict[str, dict] = {
 DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     **DINO_RECIPES["nemo_dino_kamm"],
     "outer_integrator": "leapfrog",       # NEMO stp_MLF (key_qco, no key_RK3)
+    # NEMO dynspg_ts has no eta-diffusion term.  Zero damping is faithful and
+    # stable in the MLF frame; the FE sibling retains its required 0.01 crutch.
+    "barotropic_diffusion_alpha": 0.0,
+    # Round 39: neither operand is independently faithful.  The call-1
+    # Kaa-continuity ww + live e3u/e3v(Kmm) pair closes ZAD jointly while
+    # thickness alone worsens it, so expose only the coupled selector.  These
+    # are MLF-only time-level associations (Nbb/Kaa), not portable numerics.
+    "zad_qco_evaluation": "nemo_literal",
+    "wzv_call2_evaluation": "nemo_literal",
     "vorticity_scheme": "een_total",      # ln_dynvor_een: (f+zeta) in the EEN triad
     "een_q_boundary": "nemo_live",        # vor_een keeps coast shear-zeta LIVE
                                           # (ln_dynvor_msk=F; no Neumann fill)

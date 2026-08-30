@@ -1,8 +1,9 @@
 # DINO transfer question: exact SLOT handoff
 
 Date: 2026-08-30. Session:
-`01a053d4-8e9f-7212-bbdb-19ba2d64e140`. **PREREGISTERED, NOT RUN.** This
-handoff implements `PREREG_dino_transfer_question.md` in T3, T2, T1 order.
+`01a053d4-8e9f-7212-bbdb-19ba2d64e140`. **T3 CERTIFIED; T2 CORRECTED ARMS
+NOT RUN.** This handoff implements `PREREG_dino_transfer_question.md` in T3,
+T2, T1 order.
 GPU arms and any NEMO regeneration belong to the user. The author ran no GPU,
 `mpirun`, or NEMO command.
 
@@ -19,9 +20,10 @@ SLOT TRANSFER_PRODUCER_COMMIT VALUE=RESOLVE_FROM_BUNDLE_BRANCH_REF
 SLOT T3_CATALOG_RECIPE VALUE=nemo_dino_kamm_mlf_v1
 SLOT T3_IDENTITY_PROBE_RELATIVE_PATH VALUE=scripts/validate/ocean_fidelity/dino_1226/recipe_transfer_identity.py
 SLOT T3_TWIN_RELATIVE_PATH VALUE=scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py
-SLOT T3_IDENTITY_ARTIFACT_SHA256 VALUE=MEASURED_AT_RUN
-SLOT T3_ORACLE_ARTIFACT_SHA256 VALUE=MEASURED_AT_RUN
-SLOT T3_CATALOG_ARTIFACT_SHA256 VALUE=MEASURED_AT_RUN
+SLOT T3_IDENTITY_ARTIFACT_SHA256 VALUE=cae74e17dd2e3c60f592c203b398a9d1d15790532be1387090ad9dc35fdd27fe
+SLOT T3_BEHAVIOR_IDENTITY_ARTIFACT_SHA256 VALUE=f52990b76afe44cc5a045fd3d2d8e7c10c311a79838bc83296fd6b873cf28169
+SLOT T3_ORACLE_ARTIFACT_SHA256 VALUE=d94fd2370413c151723a9986df046d9a5d1051202802b34de2f21b7f9e725f52
+SLOT T3_CATALOG_ARTIFACT_SHA256 VALUE=fa778f3ed225955cf0f2ae9ac523d48b07b5763840d05fb7d7387726b65c8983
 SLOT T2_FE_CLIMATE_A_SHA256 VALUE=MEASURED_AT_RUN
 SLOT T2_FE_CLIMATE_B_SHA256 VALUE=MEASURED_AT_RUN
 SLOT T2_FE_WALL_A_SHA256 VALUE=MEASURED_AT_RUN
@@ -43,7 +45,7 @@ SLOT T1_MEASURED_NEMO_HOURS VALUE=MEASURED_IN_T1_ROUND
 set -euo pipefail
 export CODEX_SESSION_ID=01a053d4-8e9f-7212-bbdb-19ba2d64e140
 repo=/tmp/codex-transfer
-run_root=/tmp/dino-transfer-01a053d4
+run_root=/tmp/dino-transfer-01a053d4-t2r
 checkout="$run_root/producer-checkout"
 producer=$(git -C "$repo" rev-parse refs/heads/fidelity/dino-transfer-codex)
 nemo=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO
@@ -69,7 +71,7 @@ test "$(sha256sum "$nemo_wall" | awk '{print $1}')" = \
 test "$(sha256sum "$checkout/scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py" | awk '{print $1}')" = \
   7eb37dec1ebee1179b1dc7fe79f68325196f15ee84b538b489cfd2c348fb079f
 test "$(sha256sum "$checkout/scripts/validate/ocean_fidelity/dino_1226/climate_rebattery_score.py" | awk '{print $1}')" = \
-  cf85b65302ed65d2a5d8b7ea7a77fb6fa35abd55b5fde8d6e541db9f266996db
+  b253cf40bcf27c526c18c6d3c9b08d50674b29af4cb10d68e6b9a88f3e23f424
 test "$(sha256sum "$checkout/scripts/validate/ocean_fidelity/dino_1226/mld_climate_audit.py" | awk '{print $1}')" = \
   cf1bcffb4ee7994bd4eb433f6b3fa3ba5ac0f2610463b9bb3133ea0c1762dc14
 test "$(sha256sum "$checkout/scripts/validate/ocean_fidelity/dino_1226/recipe_transfer_identity.py" | awk '{print $1}')" = \
@@ -82,6 +84,8 @@ PYTHONPATH="$pythonpath" JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES='' \
   tests/ocean/unit/test_recipes.py \
   tests/ocean/unit/test_recipe_snapshots.py \
   tests/ocean/unit/test_dino_recipe_transfer_identity.py \
+  tests/ocean/unit/test_zad_qco_coupled.py \
+  tests/ocean/unit/test_dino_experiment.py \
   tests/ocean/unit/test_climate_rebattery_score.py
 printf '%s\n' "$producer" > "$run_root/receipts/producer_commit.txt"
 printf 'producer=%s session=%s free_tmp_kb=%s\n' \
@@ -114,7 +118,7 @@ in the named harness/probe; there is no wrapper prerequisite.
 ```bash
 set -euo pipefail
 export CODEX_SESSION_ID=01a053d4-8e9f-7212-bbdb-19ba2d64e140
-run_root=/tmp/dino-transfer-01a053d4
+run_root=/tmp/dino-transfer-01a053d4-t2r
 checkout="$run_root/producer-checkout"
 producer=$(git -C /tmp/codex-transfer rev-parse refs/heads/fidelity/dino-transfer-codex)
 catalog_recipe=nemo_dino_kamm_mlf_v1
@@ -157,7 +161,7 @@ are identical.
 set -euo pipefail
 export CODEX_SESSION_ID=01a053d4-8e9f-7212-bbdb-19ba2d64e140
 export FP64=1 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both
-run_root=/tmp/dino-transfer-01a053d4
+run_root=/tmp/dino-transfer-01a053d4-t2r
 checkout="$run_root/producer-checkout"
 producer=$(git -C /tmp/codex-transfer rev-parse refs/heads/fidelity/dino-transfer-codex)
 catalog_recipe=nemo_dino_kamm_mlf_v1
@@ -214,11 +218,19 @@ sha256sum "$run_root/t3/"*.npz "$run_root/t3/"*.json
 This is round-94 Block 2 with exactly one scientific edit:
 `nemo_dino_kamm_mlf` becomes `nemo_dino_kamm`.
 
+The stopped arms diagnosed in `dino_transfer_question_result.md` used an
+invalid transferred MLF bundle: alpha `0.0` makes the permanent-FE
+free-surface mode non-finite. The corrected named FE card is explicitly a
+stable approximation: alpha `0.01`, with the Nbb/Kaa QCO pair `generic`.
+These are the only three card-aware admission differences. A T2 pass would
+characterize this sibling bundle; it cannot certify transfer of MLF zero
+damping or MLF Nbb/Kaa associations.
+
 ```bash
 set -euo pipefail
 export CODEX_SESSION_ID=01a053d4-8e9f-7212-bbdb-19ba2d64e140
 export FP64=1 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both
-run_root=/tmp/dino-transfer-01a053d4
+run_root=/tmp/dino-transfer-01a053d4-t2r
 checkout="$run_root/producer-checkout"
 producer=$(git -C /tmp/codex-transfer rev-parse refs/heads/fidelity/dino-transfer-codex)
 nemo=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO
@@ -238,10 +250,10 @@ run_fe_climate() {
     --bridge-tke --bridge-before --bridge-before-stress-tpoint \
     > "$run_root/logs/$arm.log" 2>&1
 }
-run_fe_climate 0 fe_climate_a & p0=$!
-run_fe_climate 1 fe_climate_b & p1=$!
+run_fe_climate 0 fe_climate_r2_a & p0=$!
+run_fe_climate 1 fe_climate_r2_b & p1=$!
 rc=0; wait "$p0" || rc=1; wait "$p1" || rc=1; test "$rc" -eq 0
-for arm in fe_climate_a fe_climate_b; do
+for arm in fe_climate_r2_a fe_climate_r2_b; do
   grep -F "SAVED $run_root/t2/$arm.npz  stable=True" "$run_root/logs/$arm.log"
   sha256sum "$run_root/t2/$arm.npz"
 done
@@ -253,7 +265,7 @@ done
 set -euo pipefail
 export CODEX_SESSION_ID=01a053d4-8e9f-7212-bbdb-19ba2d64e140
 export FP64=1 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both
-run_root=/tmp/dino-transfer-01a053d4
+run_root=/tmp/dino-transfer-01a053d4-t2r
 checkout="$run_root/producer-checkout"
 producer=$(git -C /tmp/codex-transfer rev-parse refs/heads/fidelity/dino-transfer-codex)
 nemo=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO
@@ -272,10 +284,10 @@ run_fe_wall() {
     --bridge-tke --bridge-before --bridge-before-stress-tpoint \
     > "$run_root/logs/$arm.log" 2>&1
 }
-run_fe_wall 0 fe_wall_a & p0=$!
-run_fe_wall 1 fe_wall_b & p1=$!
+run_fe_wall 0 fe_wall_r2_a & p0=$!
+run_fe_wall 1 fe_wall_r2_b & p1=$!
 rc=0; wait "$p0" || rc=1; wait "$p1" || rc=1; test "$rc" -eq 0
-for arm in fe_wall_a fe_wall_b; do
+for arm in fe_wall_r2_a fe_wall_r2_b; do
   grep -F "SAVED $run_root/t2/$arm.npz  stable=True" "$run_root/logs/$arm.log"
   sha256sum "$run_root/t2/$arm.npz"
 done
@@ -286,7 +298,7 @@ done
 ```bash
 set -euo pipefail
 export CODEX_SESSION_ID=01a053d4-8e9f-7212-bbdb-19ba2d64e140
-run_root=/tmp/dino-transfer-01a053d4
+run_root=/tmp/dino-transfer-01a053d4-t2r
 checkout="$run_root/producer-checkout"
 producer=$(git -C /tmp/codex-transfer rev-parse refs/heads/fidelity/dino-transfer-codex)
 nemo_wall=/tmp/dino_eta_waves/nemo_5d_eta.npz
@@ -299,13 +311,14 @@ PYTHONPATH="$pythonpath" JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES='' \
   JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both \
   /home/dbalwada/legoESM/.venv/bin/python \
   "$checkout/scripts/validate/ocean_fidelity/dino_1226/climate_rebattery_score.py" \
-  --climate-a "$run_root/t2/fe_climate_a.npz" \
-  --climate-b "$run_root/t2/fe_climate_b.npz" \
-  --wall-a "$run_root/t2/fe_wall_a.npz" \
-  --wall-b "$run_root/t2/fe_wall_b.npz" \
+  --climate-a "$run_root/t2/fe_climate_r2_a.npz" \
+  --climate-b "$run_root/t2/fe_climate_r2_b.npz" \
+  --wall-a "$run_root/t2/fe_wall_r2_a.npz" \
+  --wall-b "$run_root/t2/fe_wall_r2_b.npz" \
   --nemo-wall "$nemo_wall" \
   --producer-commit "$producer" \
   --session-id "$CODEX_SESSION_ID" \
+  --recipe nemo_dino_kamm \
   --output "$score" | tee "$run_root/logs/t2_score.log"
 sha256sum "$run_root/t2/"*.npz "$score" \
   "$run_root/t2/fe_climate_rebattery_score_wall_detail.json"

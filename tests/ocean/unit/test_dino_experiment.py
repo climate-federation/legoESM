@@ -378,9 +378,9 @@ class TestDINORecipes:
             "zdf_drag_in_matrix": True,
             "zdf_baroclinic_only": True,
             "barotropic_drag_substep": True,
-            # NEMO dynspg_ts has no eta-diffusion term; alpha=0 is the
-            # NEMO-true composition (see dino.py card comment).
-            "barotropic_diffusion_alpha": 0.0,
+            # The FE approximation requires its historical 2-dx damping;
+            # alpha=0 is faithful and stable only on the MLF card.
+            "barotropic_diffusion_alpha": 0.01,
             # Zero-deviation item 2 (#1226): NEMO zhup2_e/zhvp2_e ssh-average
             # face depths (dynspg_ts.F90:568-592), pair-consistent with the
             # tracer continuity; conservation gate
@@ -399,26 +399,41 @@ class TestDINORecipes:
         # #1226: the full NEMO-faithful drag composition (zdf_drag_in_matrix +
         # zdf_baroclinic_only + barotropic_drag_substep) is ON for BOTH kamm
         # cards (MLF inherits from the base nemo_dino_kamm dict — see
-        # DINO_RECIPES["nemo_dino_kamm_mlf"]), together with alpha=0 (no NEMO
-        # eta-diffusion counterpart) and face_depth="nemo_ssh_avg" (zero-
+        # DINO_RECIPES["nemo_dino_kamm_mlf"]), together with the card-scoped
+        # alpha (FE stability crutch 0.01; MLF/NEMO 0.0) and
+        # face_depth="nemo_ssh_avg" (zero-
         # deviation item 2, pair-consistent with the tracer continuity;
         # conservation gate test_partial_cells_phase7.py::
         # TestNemoSshAvgFaceDepthGate — see the dino.py card comment).
         # Assert these propagate through to the model config unchanged on both.
-        for recipe in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
+        for recipe, alpha in (
+                ("nemo_dino_kamm", 0.01),
+                ("nemo_dino_kamm_mlf", 0.0)):
             c = dino_config_for_recipe(recipe)
             assert c.zdf_drag_in_matrix is True, recipe
             assert c.zdf_baroclinic_only is True, recipe
             assert c.barotropic_drag_substep is True, recipe
-            assert c.barotropic_diffusion_alpha == 0.0, recipe
+            assert c.barotropic_diffusion_alpha == alpha, recipe
             assert c.barotropic_face_depth == "nemo_ssh_avg", recipe
             grid = dino_lat_lon_grid(c, n_lon=10)
             mc, _ = dino_lat_lon_model_config(grid, c, physics=True)
             assert mc.zdf_drag_in_matrix is True, recipe
             assert mc.zdf_baroclinic_only is True, recipe
             assert mc.barotropic_drag_substep is True, recipe
-            assert mc.barotropic.barotropic_diffusion_alpha == 0.0, recipe
+            assert mc.barotropic.barotropic_diffusion_alpha == alpha, recipe
             assert mc.barotropic.barotropic_face_depth == "nemo_ssh_avg", recipe
+
+    def test_kamm_fe_zero_damping_plant_fails_closed(self):
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        c = dataclasses.replace(
+            dino_config_for_recipe("nemo_dino_kamm"),
+            barotropic_diffusion_alpha=0.0)
+        grid = dino_lat_lon_grid(c, n_lon=10)
+        with pytest.raises(ValueError, match="alpha=0 is the MLF-only"):
+            mc, _ = dino_lat_lon_model_config(grid, c, physics=True)
+            LatLonCGridOceanModel._validate_config(mc)
 
     def test_zdf_flags_default_false_on_other_recipes(self):
         # Every non-kamm recipe (veros/mitgcm/oceananigans/legoesm_default/
@@ -430,8 +445,8 @@ class TestDINORecipes:
             assert c.zdf_drag_in_matrix is False, recipe
             assert c.zdf_baroclinic_only is False, recipe
             assert c.barotropic_drag_substep is False, recipe
-            # #1226: alpha=0 is a kamm-only override; every other recipe
-            # keeps the legoESM 2Δx stability-crutch default (0.01).
+            # #1226: every non-MLF recipe keeps the legoESM 2Δx
+            # stability-crutch default (0.01).
             assert c.barotropic_diffusion_alpha == 0.01, recipe
             # #1226: nemo_ssh_avg face depths are a kamm-only override; every
             # other recipe keeps the bit-identical min-rule default.

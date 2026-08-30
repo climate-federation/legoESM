@@ -135,6 +135,37 @@ GPU check and is also `TRANSFER_REFUTED` once an assemblable candidate exists.
 
 ## T2 — THE SIBLING CARD
 
+### Registered admission amendment after the stopped arms (2026-08-30)
+
+Both first FE climate arms stopped before producing a scoreable artifact. The
+unjitted CPU reproduction and one-field controls identified two false
+preregistration assumptions. First, zero `barotropic_diffusion_alpha` is
+NEMO-faithful and stable on MLF but excites the permanent-FE free-surface mode;
+the FE approximation requires its historical `0.01` stability crutch. Second,
+`zad_qco_evaluation=nemo_literal` and
+`wzv_call2_evaluation=nemo_literal` encode NEMO MLF Nbb/Kaa associations and
+have no permanent-forward-Euler equivalent. The zero-damping combination and
+literal pair are now fail-closed to the appropriate frame. The MLF card keeps
+alpha `0.0` plus both literals; the FE sibling resolves alpha `0.01` plus both
+selectors `generic`.
+
+This amends config admission, not the science hypotheses or bars. The scorer
+must hard-check `run_config.recipe`; its expected FE table differs from the
+round-94 MLF table at exactly those three named rows. All reducers, comparator
+archives, floors, classifier branches, and frozen thresholds below remain
+unchanged. Consequently T2 asks whether the *legal named FE card bundle*
+passes the same statistical battery. Even a pass cannot transfer or certify
+the two MLF-only time-level associations themselves. The stopped artifacts,
+unjitted trace, source diagnosis, and hashes are bound in
+`dino_transfer_question_result.md`.
+
+The corrected instrument receipts supersede the pre-finding hashes for T2:
+`kamm_twin_90d.py` SHA-256
+`7eb37dec1ebee1179b1dc7fe79f68325196f15ee84b538b489cfd2c348fb079f` and
+the admission-amended `climate_rebattery_score.py` SHA-256
+`b253cf40bcf27c526c18c6d3c9b08d50674b29af4cb10d68e6b9a88f3e23f424`.
+The MLD audit and NEMO wall hashes remain frozen below.
+
 ### Controlled comparison
 
 Run the round-94 re-battery verbatim with `nemo_dino_kamm` in place of
@@ -158,10 +189,10 @@ The pinned instruments are:
   SHA-256
   `52bc6c70697126f7522114dbe2fc5cda5b56ce566db28f488d6809b79997b47a`.
 
-No scoring code may be edited for the sibling result. The existing scorer does
-not require an MLF recipe stamp; its faithful selector table is shared by these
-cards. If the unmodified scorer rejects an FE artifact, T2 is `INVALID` and the
-rejection is the result—do not create an FE exception after seeing outputs.
+The statistical scoring code and bars may not change. The admission-only
+amendment above is the sole allowed scorer edit: require the stamped card and
+expect `generic` for the two proven MLF-only selectors on FE. Any other scorer
+change invalidates T2.
 
 ### Arms and frozen bars
 
