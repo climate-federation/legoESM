@@ -43,7 +43,9 @@ def main():
     if any(x['normalized_rms_error']!=0 for x in seeds): raise SystemExit('row 1.2 not exact')
     g=read_nemo_mesh_mask(str(a.run/'mesh_mask.nc'),nn_hls=0); s=read_nemo_restart(str(a.run/inherited.RESTART_FILE),nn_hls=0)
     cfg=dataclasses.replace(dino_config_for_recipe('nemo_dino_kamm_mlf'),lon_west_deg=1.,lon_east_deg=49.,sill_lon_m_deg=1.)
-    br=bridge_nemo_to_legoesm_topo(g,s,periodic_i=True,full_step=True,omega=cfg.omega,carry_native_lat_deg=True)
+    br=bridge_nemo_to_legoesm_topo(
+        g,s,periodic_i=True,full_step=True,omega=cfg.omega,
+        coriolis_placement=cfg.coriolis_placement,carry_native_lat_deg=True)
     mc,_=dino_lat_lon_model_config(br.geometry,cfg)
     z=inherited._load_full(str(a.qco_run/'qco_dump_zsshp2_substep1.bin'),56,203,2)
     um=np.asarray(g.umask)[...,0]>0; vm=np.asarray(g.vmask)[...,0]>0

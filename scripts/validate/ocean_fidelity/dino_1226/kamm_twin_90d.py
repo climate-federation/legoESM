@@ -1252,6 +1252,7 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
             vface_zonal_metric_evaluation
             if vface_zonal_metric_evaluation is not None
             else cfg.vface_zonal_metric_evaluation),
+        coriolis_placement=cfg.coriolis_placement,
         carry_native_lat_deg=(cfg.tke_htau_evaluation == "nemo_literal"))
     if vmix_scheme is not None:
         cfg = dataclasses.replace(cfg, vmix_scheme=vmix_scheme)

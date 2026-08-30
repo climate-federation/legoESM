@@ -220,6 +220,7 @@ def main() -> int:
         lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)
     bridge = bridge_nemo_to_legoesm_topo(
         mesh, restart, periodic_i=True, full_step=True, omega=cfg.omega,
+        coriolis_placement=cfg.coriolis_placement,
         carry_native_lat_deg=True)
     model_cfg, _ = dino_lat_lon_model_config(bridge.geometry, cfg)
     h_k = compute_layer_thickness(

@@ -18,6 +18,30 @@ from legoesm.grids.latlon import create_latlon_geometry
 from legoesm.ocean.dynamics.latlon_cgrid_operators import vertex_coriolis
 
 
+def test_only_the_two_NEMO_exactness_cards_select_face_latitude():
+    """The faithful fix is card-scoped; generic experiments stay byte-pinned."""
+    from legoesm.ocean.experiments.dino import (
+        DINOConfig, DINO_RECIPES, dino_config_for_recipe)
+
+    assert DINOConfig().coriolis_placement == "cell_average"
+    assert dino_config_for_recipe(
+        "nemo_dino_kamm").coriolis_placement == "face_latitude"
+    assert dino_config_for_recipe(
+        "nemo_dino_kamm_mlf").coriolis_placement == "face_latitude"
+    selected = {
+        name for name in DINO_RECIPES
+        if dino_config_for_recipe(name).coriolis_placement == "face_latitude"
+    }
+    assert selected == {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}
+
+
+def test_nonfaithful_recipe_keeps_the_cell_average_byte_pin():
+    from legoesm.ocean.experiments.dino import dino_config_for_recipe
+
+    assert dino_config_for_recipe(
+        "legoesm_default").coriolis_placement == "cell_average"
+
+
 def _pair(**kw):
     base = dict(n_lat=12, n_lon=4, omega=1.0e-4, dtype=jnp.float64)
     base.update(kw)

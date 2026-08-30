@@ -367,6 +367,7 @@ def main() -> int:
         "periodic_i": True,
         "full_step": True,
         "omega": cfg.omega,
+        "coriolis_placement": cfg.coriolis_placement,
     }
     if "carry_native_lat_deg" in inspect.signature(bridge_nemo_to_legoesm_topo).parameters:
         _bridge_kwargs["carry_native_lat_deg"] = (

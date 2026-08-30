@@ -59,3 +59,14 @@ while EEN energy/enstrophy identities must remain at roundoff.
 
 Rows 1.4, 2--6, free-surface filter, momentum RHS, and tracer tail remain
 ordered-blocked until this coefficient row reaches a registered disposition.
+
+### Pre-measurement control amendment
+
+The phrase "one-ULP wet-point coefficient plant" above is not a decisive
+control for a `1e-15` normalized bar: one binary64 ULP of an order-`1e-4`
+coefficient, divided by the field RMS, is itself below that bar.  Before any
+arm was evaluated, the control was therefore made red-capable by advancing one
+wet coefficient by the smallest repeated `nextafter` count whose independently
+computed normalized maximum exceeds `1e-15`.  The scorer records that count,
+requires the unmodified oracle identity to pass, and requires the planted copy
+to fail.  This amendment changes no scientific arm, population, or bar.
