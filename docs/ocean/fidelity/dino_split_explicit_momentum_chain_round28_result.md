@@ -362,3 +362,31 @@ composition but remains unfixed; row 5 (`wzv`) is the same architectural
 operand and is open. Row 6 (`mlf_baro_corr`), free-surface filter, later
 momentum-RHS rows, and tracer tail remain ordered-blocked. No held run is
 needed: the next action is the coupled production implementation above.
+
+## Round 40: production coupled QCO ZAD path
+
+The production implementation is complete at commit `ef0cfed87ecf`; the
+official replay artifact is
+`/tmp/dino_split_explicit_momentum_chain_round40.json` (SHA-256
+`723fe0e74724febab71537ef31cde16e32388c9da01c9058ef2c37629067258b`).
+It classifies `ROW4_ZAD_AT_BAR`: U/V normalized RMS are
+`2.55945e-16/6.08581e-16` under the unchanged `1e-12` accumulating bar. The
+reconstructed call-1 `ww` and live Kmm U/V face thicknesses each have exactly
+zero error against their retained NEMO operands. Identity, sign, roll,
+two-bar, and thickness-only-worsens controls all fire.
+
+`zad_qco_evaluation="nemo_literal"` is one inseparable path on the two DINO
+fidelity cards and stays `generic` elsewhere. It left-accumulates Kmm
+`divhor`, predicts Kaa SSH over the leapfrog span, applies the QCO WZV
+recurrence, and supplies the same live Kmm face thicknesses to dynzad. The
+final wiring defect was a 2-D land mask broadcast over depth at the production
+call site; passing `OceanPartialCellCoordinate.is_active` restored NEMO's
+dummy/below-bottom mask and closed the row. The bridge now also carries raw
+`e2u/e1v`, so the literal continuity path does not reconstruct those operands.
+
+Ordered disposition: row 4 is promoted. Row 5 is **not** promoted by this
+receipt: round 40 certifies the call-1 WZV consumed by dynzad, while the
+registered row-5 check is the post-dyn_zdf call-2 recurrence. Capturing the
+corresponding production post-ZDF W state is the next held instrumentation
+boundary. Row 6 and the free-surface-filter, momentum-RHS, and tracer-tail
+chains remain ordered-blocked; no call-1 result is relabelled as call 2.
