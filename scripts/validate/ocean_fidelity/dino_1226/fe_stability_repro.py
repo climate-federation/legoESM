@@ -3,9 +3,11 @@
 
 This probe deliberately mirrors the forcing and stepping loop in
 ``kamm_twin_90d.py`` while materialising every outer step.  Run it with JIT
-disabled and NaN debugging enabled; otherwise it refuses to start.  The JSON
-receipt is written even when the model raises, so the first failing step and
-the unwrapped exception remain citable.
+disabled; otherwise it refuses to start.  NaN debugging is stamped rather
+than required because it catches a masked dry-face intermediate at step 1,
+before the trajectory-level checked error seen by the production arm.  The
+JSON receipt is written even when the model raises, so the first failing step
+and the unwrapped exception remain citable.
 """
 
 from __future__ import annotations
@@ -39,8 +41,6 @@ def _write(path: str, receipt: dict) -> None:
 def run(args: argparse.Namespace) -> int:
     if not bool(jax.config.jax_disable_jit):
         raise SystemExit("REFUSING: set JAX_DISABLE_JIT=1")
-    if not bool(jax.config.jax_debug_nans):
-        raise SystemExit("REFUSING: set JAX_DEBUG_NANS=1")
     if jax.default_backend() != "cpu":
         raise SystemExit(
             f"REFUSING: CPU backend required, got {jax.default_backend()!r}")
@@ -48,6 +48,9 @@ def run(args: argparse.Namespace) -> int:
         raise SystemExit("REFUSING: this reproducer is frozen to nemo_dino_kamm")
 
     set_policy(PrecisionPolicy.fp64())
+    producer_commit, producer_dirty = twin._git_provenance()
+    if producer_dirty:
+        raise SystemExit("REFUSING: producer checkout has dirty tracked files")
     ladder = twin.resolve_ladder_mode(False)
     br, cfg, mc, model, forcing, sf, state = twin._build_twin_state(
         args.recipe,
@@ -71,11 +74,12 @@ def run(args: argparse.Namespace) -> int:
         "exception_message": None,
         "exception_type": None,
         "first_failing_step": None,
-        "jax_debug_nans": True,
+        "jax_debug_nans": bool(jax.config.jax_debug_nans),
         "jax_disable_jit": True,
         "ladder": ladder,
         "max_steps": args.max_steps,
         "outer_integrator": mc.outer_integrator,
+        "producer_commit": producer_commit,
         "recipe": args.recipe,
         "status": "RUNNING",
         "steps": [],
