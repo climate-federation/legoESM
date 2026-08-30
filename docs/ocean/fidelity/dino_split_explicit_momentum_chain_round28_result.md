@@ -161,3 +161,32 @@ dispatch kernel is exact for the oracle pack. The corrected round-35
 measurement observes the unmodified production step's raw literal-dispatch
 input and return, before mean readdition, and compares like representation
 with like. Rows 4 onward remain open pending that preregistered result.
+
+## Official round-35 row-4 boundary
+
+The corrected artifact is
+`/tmp/dino_split_explicit_momentum_chain_round35.json`, SHA-256
+`4b6edffaafb7e3f079f8620fd899698c7b5f324ba00bedf1603ad4e2e1c94dbe`.
+It runs one unmodified production day-180 step at commit
+`cb9c3342848`, captures exactly the U then V raw dispatch calls, restores the
+hook, and passes the same-JAX-path identity, finite-capture, wrong-`rDt`, wet
+NaN, roll, RHS plant, and output plant controls. Its disposition is
+`ROW4_LOCALIZED_TO_RHS`:
+
+| ordered operand | U normalized RMS | V normalized RMS | disposition |
+|---|---:|---:|---|
+| selector / `rDt` / wet mask | 0 | 0 | exact |
+| assembled RHS | `7.44406e-3` | `1.25751e-5` | first DEBT |
+| face `avm` | `1.95309e-4` | `1.99454e-4` | ordered-blocked |
+| cell thickness | `2.98257e-6` | `2.54150e-6` | ordered-blocked |
+| interface thickness | `3.95588e-3` | `3.95535e-3` | ordered-blocked |
+| drag diagonal | `6.58318e-6` | `4.78768e-6` | ordered-blocked |
+| raw dispatch output | `4.25523e-2` | `1.33955e-2` | ordered-blocked |
+
+The coefficient rows are not owners merely because they are red: the ordered
+walk stops at the RHS. NEMO forms the baroclinic RHS and bottom correction at
+`dynzdf.F90:137-178`, then deposits the surface stress at `:353-363` after
+the barotropic removal. Production currently lets the explicit wind enter the
+state before its baroclinic strip (`ocean_model_latlon_cgrid.py:7160-7180,
+7275-7296`). Round 36 preregisters the additive placement decomposition before
+changing that ordering.
