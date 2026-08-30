@@ -269,7 +269,14 @@ def build_standalone(member: int):
         raise RuntimeError("from-rest factory unexpectedly populated a bridge level")
     z_coord = attach_analytic_nemo_operands(grid, z_coord, state, cfg)
     state, perturbation = perturb_temperature(state, member)
-    model_cfg, _ = dino_lat_lon_model_config(grid, cfg)
+    geometry = ensure_geometry(
+        grid,
+        omega=cfg.omega,
+        metric_convention=cfg.metric_convention,
+        vface_zonal_metric_evaluation=cfg.vface_zonal_metric_evaluation,
+        coriolis_placement=cfg.coriolis_placement,
+    )._replace(native_lat_T_deg=jnp.degrees(grid.lat2d))
+    model_cfg, _ = dino_lat_lon_model_config(geometry, cfg)
     # Despite the card name, the shipped and T3-certified resolved selector is
     # ``leapfrog``.  Its own no-history entry performs the model's Euler-start
     # bootstrap.  The twin harness's historical DINO_OUTER_INTEGRATOR=nemo_mlf
@@ -278,10 +285,12 @@ def build_standalone(member: int):
         raise RuntimeError(
             f"T1 card resolved {model_cfg.outer_integrator!r}, expected the "
             "T3-certified leapfrog default")
-    model = LatLonCGridOceanModel(grid, z_coord, model_cfg)
-    forcing = dino_lat_lon_surface_forcing_arrays(grid, cfg)
+    model = LatLonCGridOceanModel(geometry, z_coord, model_cfg)
+    forcing = dino_lat_lon_surface_forcing_arrays(
+        geometry, cfg, wind_lat_deg=geometry.native_lat_T_deg[:, 0])
     step_forcing = dino_step_surface_forcing(forcing)
-    return cfg, grid, z_coord, state, model_cfg, model, forcing, step_forcing, perturbation
+    return (cfg, geometry, z_coord, state, model_cfg, model, forcing,
+            step_forcing, perturbation)
 
 
 def run(args: argparse.Namespace) -> int:
