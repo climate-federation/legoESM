@@ -438,3 +438,16 @@ installed earlier by `dynspg_ts.F90:1170-1174`; the second `div_hor` and Kaa
 Disposition is `CALL2_HDIV_X_KAA_COMPOSITION`. Production must build the
 literal second W using both operands together. Row 6 and later chains remain
 ordered-blocked until the coupled production replay reaches the row-5 bar.
+
+## Round 43: literal recurrence alone does not close production
+
+Artifact `/tmp/dino_split_explicit_momentum_chain_round43.json`, SHA-256
+`7109a7c0eae5684b778452cc5b07e4e1397a4b88849f37d448c515c451494eec`,
+is valid and classifies `ROW5_WZV_CALL2_LITERAL_DIVERGED`. The coupled
+call-2 selector, actual Kaa override, duplicate capture, post-`dyn_zdf` carry,
+and red controls all passed, but normalized RMS remains `0.1712884891`.
+
+Therefore the generic tracer-boundary velocity passed into the literal
+recurrence is not NEMO's corrected Kmm velocity. Row 5 remains open. The next
+ordered measurement separately scores actual Kaa `r3t` and the reconstructed
+second `hdiv`; no further production algebra changes before that result.
