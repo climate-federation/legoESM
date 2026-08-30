@@ -1,15 +1,18 @@
-# DINO transfer question — T3 certified, T2 re-admitted, T1 running
+# DINO transfer question — T3 certified, T2 scoped, T1 reducer repaired
 
 Date: 2026-08-30. Session:
 `01a053d4-8e9f-7212-bbdb-19ba2d64e140`.
 
-T3 is **TRANSFER_CONFIRMED**. T2 is **READY-FOR-R3-TWIN-BATTERY** after a
-registered CPU-only stabilization; it still has no science verdict. The
+T3 is **TRANSFER_CONFIRMED**. T2 is
+**PERPETUAL-FE-OUT-OF-MODEL-CLAIM-BY-USER** and has no science verdict. The
 forward-Euler crash is localized to the live continuity/surface-pressure fast
 pair under a plain temporal boxcar. Repeating NEMO's first-Euler nn_bt_flt=2
 AB3/AM4 temporal composition passes the frozen 40-step discriminator and the
-64-step clean-card gate. T1's human-owned GPU arms remain outside this work.
-No GPU, NEMO, MPI process, push, or remote action was launched in this round.
+64-step clean-card gate, and remains the correct default for NEMO's actual one
+Euler bootstrap. No further perpetual-Euler stabilization is in scope. T1's
+first wave reached 360 cold-start days cleanly before a reducer-shape bug
+aborted its first capture; that reducer path is now repaired and admitted at
+day 0. No GPU, NEMO, MPI process, push, or remote action was launched here.
 
 ## T3 — catalog construction is certified
 
@@ -220,11 +223,19 @@ Evidence SHA-256 values:
   `1d2da9994bc18246a05de5ac20ad5d333ee1e42b83447e2cbac18afdb735ef38` /
   `1d5649ffe67344ace9125be863e5baf2f8447b21bb866d8c562a9fe2cbd5e724`.
 
-The strongest result is
-`PERPETUAL_FE_EULER_COMPOSITION_RUNS_64_STEP_DEVELOPED_STATE_WINDOW`.
-It authorizes re-emitting the frozen T2 twin battery. It does not establish
-`FE_FAITHFUL`, `FE_STABLE_CLIMATE`, or a T2 statistical verdict; those remain
-conditional on the new GPU artifacts and unchanged scorer.
+The 64-step result remains an engineering receipt, not the target claim. The
+user's final scope decision is that only NEMO-covered integration matters:
+one Euler bootstrap followed by leapfrog. Perpetual-Euler longevity is
+explicitly out of scope. The AB3/AM4 fix stands because it matches NEMO's
+actual Euler treatment; no further FE stabilization or perpetual-Euler
+fidelity verdict will be pursued.
+
+T2 is disposed as `PERPETUAL_FE_OUT_OF_MODEL_CLAIM_BY_USER`. One five-day FE
+probe may be run as the cheap admission check. A 360-day duplicate may run only
+after that probe writes `stable=True`, and would be descriptive diagnostics
+only. The offline T2 fidelity scorer is withdrawn because NEMO has no
+perpetual-Euler trajectory against which it could issue an oracle-backed model
+claim.
 
 ## T1 build round — cold-start row closed; legoESM arms ready
 
@@ -242,6 +253,37 @@ runner now constructs those vertical, face, metric and EEN operands from the
 public analytic DINO grid rather than a NEMO file. A real one-step CPU/no-JIT
 smoke completes with every prognostic field finite and stamps
 `claim_admissible=false` as required for a truncated run.
+
+The first human GPU attempt then completed its initial 360 from-rest days with
+a clean, finite model trajectory, but aborted at the first scheduled capture:
+`live reduction failed at day 360: shapes (199,52,36) vs (195,48,1)`. This is
+a user-reported run receipt; the abort occurred before the runner wrote a
+day-360 snapshot or manifest, so there is no citable artifact hash. It proves
+only 360-day cold-start runnability, not a T1 statistic or verdict.
+
+The failure was diagnostic geometry, not model state. The recorded reducer
+owns NEMO's `(199,52,36)` native T frame; the standalone model owns the
+physical `(195,48,35)` core, with U `(195,49,35)` and V `(196,48,35)`.
+`standalone_20y.py` now preserves the recorded reducer verbatim and supplies a
+stamped `dino_standalone_reducer_frame_v1` adapter: model scalars map to
+`[2:-2,2:-2,:-1]`, two periodic zonal halo rings are restored, NEMO's dry
+terminal `jpk` level is padded, and U's `[:,1:]` east/native faces map to the
+reducer's selected U core.
+
+Before step 1, the runner now asserts the exact shapes of T, S, eta, U, V, and
+land mask, asserts every imported mesh-weight shape, fires a planted land-mask
+mismatch, and executes the real live reducer. The clean CPU receipt from
+producer `8209506a38c91aff9e293192eb6c18ff37118ff4` reports
+`REDUCER_DAY0=PASS`, all 12 reduction keys, and a finite one-step state.
+The final focused CPU suite passes `196/196`.
+SHA-256 values are:
+
+- reducer convention receipt:
+  `afcbaf82948e50747f2cf66911d758bfdcfba23cf60062e4380356542d4adcfc`;
+- one-step manifest:
+  `917a9020e8b008244dea8b371da941fded9ceff8a18ec6b638a9bbec4cfd7ecf`;
+- one-step log:
+  `7839ef464a7b96d734efb9fdd8c9f73e2c2788b64aa2ebf2a9a678f7eedb9992`.
 
 The remaining start-path row is now closed against the executed oracle source.
 For a non-restart start, `src/OCE/DOM/istate.F90:107-110` enters the from-rest
@@ -281,9 +323,8 @@ Its manifest SHA-256 is
 `claim_admissible=false` means only that this receipt intentionally ran one
 step rather than all 230,400.
 
-The six legoESM 20-year arms were admitted and handed off; the user reports
-that they are now running on human-owned GPUs. This CPU-only round did not
-inspect or modify them. T1 remains **UNMEASURED** until those arms, the fresh
+The six legoESM 20-year arms must be rerun from fresh output directories with
+the repaired runner. T1 remains **UNMEASURED** until those arms, the fresh
 from-rest NEMO ensemble, normalized six-family statistics, and the science
 score all exist. The scorer cannot be invoked until both roots contain the
 registered `dino_standalone_20y_statistics_v1` products.

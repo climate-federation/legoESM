@@ -204,3 +204,22 @@ The result authorizes re-running T2; it does not authorize `FE_FAITHFUL`,
 `FE_STABLE_CLIMATE`, or any T2 statistical verdict.  Because NEMO executes
 Euler only once and then switches to MLF, the permanent-FE card remains a
 NEMO-sourced stabilized approximation with no oracle trajectory analogue.
+
+### User scope decision (final disposition)
+
+The user explicitly limits the model claim to NEMO-covered use: **one Euler
+bootstrap step followed by leapfrog**. Perpetual-Euler longevity is out of
+scope by user choice. This decision supersedes the earlier authorization for
+additional FE stabilization or a perpetual-FE transfer verdict.
+
+The `nemo_boxcar_ab3` default remains because it corrects the actual
+NEMO-covered Euler step: DINO's first Euler call executes the nn_bt_flt=2 AB3
+velocity predictor and SSH interpolation. The 40/64-step receipts remain valid
+engineering evidence that this correction removed the observed immediate
+runaway, but no stronger perpetual-Euler claim is sought or needed.
+
+T2 is therefore disposed as `PERPETUAL_FE_OUT_OF_MODEL_CLAIM_BY_USER`. At most,
+run one cheap five-day FE probe first. Only if it writes a stable artifact may
+the 360-day duplicate arms be considered, and then only as optional diagnostic
+statistics—not as an oracle-fidelity transfer claim. No further FE bisection,
+stabilization, or perpetual-Euler scientific verdict is authorized.
