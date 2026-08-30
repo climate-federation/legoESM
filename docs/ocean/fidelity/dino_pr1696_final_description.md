@@ -36,18 +36,32 @@ momentum, and Redi tracer tail**
 > `ldf_dyn`, `tra_sbc`, and `tra_qsr`. Those three are follow-up measurement
 > debt, not hidden omissions from this physics chain.
 >
-> **Climate qualification:** this PR makes no present-day MLD, basin-transport,
-> or wall-flicker improvement claim. The earlier MLD refutation, day-360 basin
-> floor, and wall-epoch attribution all predate later tracer-velocity,
-> momentum-couple, Redi and A33 fixes. A fresh duplicate-controlled re-battery
-> against the current faithful defaults is committed and preregistered; its
-> MLD-band, day-360 basin and five-day wall verdicts must replace those stale
-> epochs only after the GPU arms pass their identity and provenance gates.
+> **Current-default climate re-battery: all three registered bars pass.**
+> Bit-identical duplicate arms pass every provenance and planted
+> control. Southern-basin day-90 MLD RMS is `0.000103797 m` (`0.103797 mm`,
+> **CONFIRM**); the day-360 basin gap is `-0.0231838 Sv` against the historical
+> `-0.9519122 Sv` (`+0.9287285 Sv`, `15.043F`, NEMO frame `10.0160712 Sv`,
+> **CONFIRMED**); and the five-day wall ratio/share is
+> `1.1997321/0.1091188` (**CONFIRMED**). These replace the stale pre-tail
+> climate epochs for the combined `nemo_dino_kamm_mlf` faithful default; they
+> do not attribute the closure among individual fixes. The same selectors
+> default on `nemo_dino_kamm`, but this battery did not climate-test that card.
+> Scope remains the state-initialized twin with NEMO before/T-stress/TKE
+> bridging, not yet a standalone-initialization or cross-recipe transfer
+> claim.
 >
 > Validation includes the focused selector/physics suites, red-capable scorer
 > controls, deterministic NEMO stream brackets, all ordered round result
 > receipts, the full-step synthetic-unaccounted-call plant, and the current
-> climate-rebattery classifier/default-card tests. No bar constant was relaxed.
+> climate-rebattery classifier/default-card tests, and the completed battery
+> artifact SHA-256
+> `db966e97b214151789e203cc6058d0c0a3564071cc92e301b5ac63aa8b7f693e`.
+> No bar constant was relaxed. The only residual measurement debt is
+> `ldf_dyn`/`tra_sbc`/`tra_qsr`; separately, salinity `zfw` retains its
+> explicit Rule-1b arithmetic-floor qualification. Two independent closing
+> reviews are **PASS/PASS** after their recipe-scope, scored-storage,
+> plant/gate-vocabulary, residual-debt and exact-verdict-label findings were
+> corrected.
 
 This final description supersedes the earlier round-16 and wall-bisect
 boundary snapshots only because the same branch was subsequently extended by

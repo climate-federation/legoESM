@@ -104,6 +104,7 @@ LANE_RESULT_DOC_SHA256 = {
     "dino_split_explicit_momentum_chain_round91_result.md": "117ddd5947ae26d58f2a517f8d6425eb3dc757c9b9c421da233159156347f0bc",
     "dino_split_explicit_momentum_chain_round92_result.md": "b6867a2396309020c47e89d5431036482a9cfcf6f8fcd33b178bb19b2bf6e267",
     "dino_split_explicit_momentum_chain_round93_result.md": "608f7408573434e07cba1ccccf1029a75abf45fd29cdf2af0374de2c4078d45b",
+    "dino_split_explicit_momentum_chain_round94_result.md": "38ab6fb2a799308520d704d0373cbe4d881c900bae9440f6777c28b326ac7e84",
 }
 
 ZDF_CHAIN_RECEIPT = (

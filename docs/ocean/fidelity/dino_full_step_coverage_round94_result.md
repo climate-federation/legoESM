@@ -7,7 +7,7 @@ Date: 2026-08-30. Session
 
 The master full-step gate from `fidelity/dino-full-step-coverage-codex` was
 fetched at `97d3d7188eb5`. That commit is already an ancestor of this branch,
-so no duplicate cherry-pick was needed. The gate now SHA-admits all 33
+so no duplicate cherry-pick was needed. The gate now SHA-admits all 34
 committed split-explicit/momentum-chain result documents plus the committed
 ZDF chain-end receipt before applying any promotion.
 

@@ -99,6 +99,7 @@ def test_lane_receipts_and_final_fraction():
     mod = _load_module()
     assert mod._validate_lane_receipts() == []
     summary = mod.coverage_summary(mod.resolved_calls())
+    assert summary["lane_result_receipt_count"] == 34
     assert summary["measured_active_calls"] == 34
     assert summary["active_nonwaived_calls"] == 37
     assert summary["measured_active_fraction"] == 34 / 37
