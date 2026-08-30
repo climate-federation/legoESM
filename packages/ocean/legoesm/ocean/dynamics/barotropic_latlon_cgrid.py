@@ -233,6 +233,16 @@ def _nemo_literal_barotropic_pressure_gradient(eta_pgf, grid, g, u_mask, v_mask)
     return pgf_u * u_mask, pgf_v * v_mask
 
 
+def _nemo_literal_barotropic_momentum_update(
+    velocity, pgf, coriolis, drag, forcing, dt_s, mask,
+):
+    """Preserve dynspg_ts.F90:700-705,719-732's explicit commit order."""
+    b = jax.lax.optimization_barrier
+    trend = b(coriolis + drag)
+    rhs = b(b(pgf + trend) + forcing)
+    return b(b(velocity + b(dt_s * rhs)) * mask)
+
+
 def _depth_average_to_faces(
     u_3d: jnp.ndarray,
     v_3d: jnp.ndarray,
@@ -1353,9 +1363,26 @@ def _run_substep_loop(
             _drag_u = -drag_r_u * U_bar_c / jnp.maximum(H_u, min_water_col)
         else:
             _drag_u = 0.0
-        U_bar_new = (U_bar_c + dt_s * (
-            _cor_u + _drag_u + _pgf_u + F_slow_u_i
-        )) * u_mask
+        _momentum_eval = getattr(
+            config.barotropic,
+            "barotropic_momentum_update_evaluation", "generic")
+        if _momentum_eval == "nemo_literal":
+            # dynspg_ts.F90:700-705,719-725. NEMO first updates zu_trd
+            # in-place with bottom stress, then evaluates
+            # un_e + rDt_e * ((zu_spg + zu_trd) + zu_frc). Barriers plus
+            # single-operation helpers prevent XLA from reassociating this
+            # last-bit-visible recurrence.
+            U_bar_new = _nemo_literal_barotropic_momentum_update(
+                U_bar_c, _pgf_u, _cor_u, _drag_u, F_slow_u_i, dt_s,
+                u_mask)
+        elif _momentum_eval == "generic":
+            U_bar_new = (U_bar_c + dt_s * (
+                _cor_u + _drag_u + _pgf_u + F_slow_u_i
+            )) * u_mask
+        else:
+            raise ValueError(
+                "unknown barotropic_momentum_update_evaluation scheme "
+                f"{_momentum_eval!r}: expected 'generic' or 'nemo_literal'")
 
         # U averaged to v-points for the backward Coriolis half-step,
         # cell-pad-first (shared interp_u_to_vface_4pt): the partition-
@@ -1380,9 +1407,14 @@ def _run_substep_loop(
             _drag_v = -drag_r_v * V_bar_c / jnp.maximum(H_v, min_water_col)
         else:
             _drag_v = 0.0
-        V_bar_new = (V_bar_c + dt_s * (
-            _cor_v + _drag_v + _pgf_v + F_slow_v_i
-        )) * v_mask
+        if _momentum_eval == "nemo_literal":
+            V_bar_new = _nemo_literal_barotropic_momentum_update(
+                V_bar_c, _pgf_v, _cor_v, _drag_v, F_slow_v_i, dt_s,
+                v_mask)
+        else:
+            V_bar_new = (V_bar_c + dt_s * (
+                _cor_v + _drag_v + _pgf_v + F_slow_v_i
+            )) * v_mask
 
         # Divergence damping: grad(div(u_bar)) (#205)
         if use_div_damp:

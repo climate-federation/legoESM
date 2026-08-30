@@ -1141,6 +1141,10 @@ class BarotropicConfig(NamedTuple):
     # Split-explicit surface-PGF arithmetic. ``nemo_literal`` consumes the
     # carried U/V face metrics and preserves dynspg_ts.F90:776-780 ordering.
     barotropic_pgf_evaluation: str = "generic"
+    # Split-explicit momentum commit arithmetic. ``nemo_literal`` preserves
+    # dynspg_ts.F90:700-705,719-732: materialized Coriolis+bottom trend, then
+    # (PGF+trend)+forcing before the dt product and carry update.
+    barotropic_momentum_update_evaluation: str = "generic"
     # Which OUTER time level seeds the FROZEN in-window EEN barotropic-Coriolis
     # coefficients (#1226 zero-deviation item 4; only read when
     # barotropic_coriolis is "een"/"een_metric").  NEMO freezes the dyn_cor_2D
