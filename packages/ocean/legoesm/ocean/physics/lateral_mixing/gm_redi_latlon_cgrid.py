@@ -2244,6 +2244,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     return_bolus: bool = False,
     kappa_Redi_v=None,
     msc_e3w_override: jnp.ndarray | None = None,
+    return_diagnostics: bool = False,
 ) -> jnp.ndarray:
     """NEMO ``traldf_iso`` (``#define iso_lap``) iso-neutral Laplacian Redi
     tracer tendency on the lat-lon C-grid.
@@ -2580,9 +2581,19 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     # Mask by the 3-D cell wet mask (NEMO tmask), not just the 2-D surface mask,
     # so sub-seafloor dry levels of a wet column are zeroed too (byte-identical
     # on flat bottom, where those levels already carry zero divergence).
+    tend = tend * act
+    if return_diagnostics:
+        diagnostics = {
+            "zfu": zfu,
+            "zfv": zfv,
+            "zfw_kp1": zfw_kp1,
+        }
+        if return_bolus:
+            return tend, bolus_transport, diagnostics
+        return tend, diagnostics
     if return_bolus:
-        return tend * act, bolus_transport
-    return tend * act
+        return tend, bolus_transport
+    return tend
 
 
 # =====================================================================

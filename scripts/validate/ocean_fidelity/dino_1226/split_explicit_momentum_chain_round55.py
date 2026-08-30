@@ -51,6 +51,7 @@ ROUND73_SHA = "c7445a0e26e4b74999bbe89f79c043ad4e9d9754f357d0e94ae136471cc9961d"
 ROUND74_SHA = "56db4716cba582654fbd7bb55178a699b55678a1afdea9d8d8fe3cc670eea6fb"
 ROUND75_SHA = "750c40875300ddda48287d84089c8931eaaecc71e8aab6ce7f4e18a0c806edf4"
 ROUND76_SHA = "45e4f8afda737b41e457668fe1ab7cc28ded09d3f7be06fabdd15e9804936a76"
+ROUND77_SHA = "dcc0cff4c63b30024794ad25b023b65223fe87137e5052b6d7dc478066973d14"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -137,6 +138,10 @@ def _controls(oracle: np.ndarray, wet: np.ndarray, bar: float) -> dict:
         "wet_point": not sweep.metrics(point, oracle, wet, FOCUS, bar)["pass"],
         "meridional_roll": not sweep.metrics(
             np.roll(oracle, 1, axis=0), oracle, wet, FOCUS, bar)["pass"],
+        "zonal_roll": not sweep.metrics(
+            np.roll(oracle, 1, axis=1), oracle, wet, FOCUS, bar)["pass"],
+        "sign": not sweep.metrics(
+            -oracle, oracle, wet, FOCUS, bar)["pass"],
     }
 
 
@@ -164,6 +169,7 @@ def main() -> int:
     parser.add_argument("--round74", type=Path)
     parser.add_argument("--round75", type=Path)
     parser.add_argument("--round76", type=Path)
+    parser.add_argument("--round77", type=Path)
     parser.add_argument("--hold-slow-forcing", action="store_true")
     parser.add_argument("--oracle-transport", action="store_true")
     parser.add_argument("--capture-cycle", action="store_true")
@@ -182,7 +188,11 @@ def main() -> int:
     parser.add_argument("--exact-sqrt-production", action="store_true")
     parser.add_argument("--capture-redi-tail", action="store_true")
     parser.add_argument("--redi-e3w-factorial", action="store_true")
+    parser.add_argument("--redi-flux-ladder", action="store_true")
     parser.add_argument("--redi-run-dir", type=Path)
+    parser.add_argument("--redi-flux-run-dir", type=Path)
+    parser.add_argument("--redi-flux-bracket", type=Path)
+    parser.add_argument("--redi-flux-bracket-sha")
     parser.add_argument("--raw-artifact", type=Path, required=True)
     parser.add_argument("--nemo-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -491,6 +501,48 @@ def main() -> int:
             raise SystemExit("round 76 does not admit the MSC thickness peel")
     elif args.round76 is not None:
         raise SystemExit("--round76 requires --redi-e3w-factorial")
+    prior77 = None
+    if args.redi_flux_ladder:
+        if not args.redi_e3w_factorial:
+            raise SystemExit(
+                "--redi-flux-ladder requires --redi-e3w-factorial")
+        if (args.round77 is None
+                or _sha(args.round77.resolve()) != ROUND77_SHA):
+            raise SystemExit("official round-77 MSC majority receipt required")
+        prior77 = json.loads(args.round77.read_text())
+        if (prior77.get("session_id") != session
+                or prior77.get("disposition") != "REDI_MSC_E3W_MAJORITY"):
+            raise SystemExit("round 77 does not admit the Redi flux ladder")
+        if (args.redi_flux_run_dir is None
+                or args.redi_flux_bracket is None
+                or not args.redi_flux_bracket_sha):
+            raise SystemExit(
+                "--redi-flux-ladder requires run dir, bracket, and bracket SHA")
+        if _sha(args.redi_flux_bracket.resolve()) != args.redi_flux_bracket_sha:
+            raise SystemExit("Redi flux bracket SHA changed")
+        flux_bracket = json.loads(args.redi_flux_bracket.read_text())
+        expected_flux = {
+            f"redi_dump_{flux}_{tracer}.bin"
+            for flux in ("zfu", "zfv", "zfw")
+            for tracer in ("tem", "sal")
+        }
+        if (flux_bracket.get("schema") != "dino-redi-flux-bracket-v1"
+                or not flux_bracket.get("shared_exact")
+                or set(flux_bracket.get("new_streams", ())) != expected_flux
+                or not all(flux_bracket.get("controls", {}).values())):
+            raise SystemExit("Redi flux bracket does not admit measurement")
+        flux_dir = args.redi_flux_run_dir.resolve()
+        for name in expected_flux:
+            path = flux_dir / name
+            item = flux_bracket["new_stream_manifest"][name]
+            if (not path.is_file() or path.stat().st_size != 35 * 203 * 56 * 8
+                    or _sha(path) != item["sha256"]):
+                raise SystemExit(f"held Redi flux stream changed: {name}")
+    else:
+        if (args.round77 is not None or args.redi_flux_run_dir is not None
+                or args.redi_flux_bracket is not None
+                or args.redi_flux_bracket_sha is not None):
+            raise SystemExit("round-78 flux inputs require --redi-flux-ladder")
     if _sha(args.raw_artifact.resolve()) != RAW_ARTIFACT_SHA:
         raise SystemExit("admitted held row-8 artifact changed")
     held = args.held_dir.resolve()
@@ -866,6 +918,7 @@ def main() -> int:
     zn_sqrt_metrics = {}
     redi_metrics = {}
     redi_e3w_metrics = {}
+    redi_flux_metrics = {}
     if args.capture_kappa_operands:
         if len(kappa_captures) != 1:
             raise SystemExit(
@@ -1098,8 +1151,16 @@ def main() -> int:
                 replay_kwargs = dict(capture["kwargs"])
                 replay_kwargs["msc_e3w_override"] = jnp.asarray(
                     exact_e3w, dtype=capture["args"][0].dtype)
+                if args.redi_flux_ladder:
+                    replay_kwargs["return_diagnostics"] = True
                 replay = original_redi(*capture["args"], **replay_kwargs)
-                if isinstance(replay, tuple) and replay_kwargs.get("return_bolus"):
+                diagnostics_replay = None
+                if args.redi_flux_ladder:
+                    if replay_kwargs.get("return_bolus"):
+                        replay, _, diagnostics_replay = replay
+                    else:
+                        replay, diagnostics_replay = replay
+                elif isinstance(replay, tuple) and replay_kwargs.get("return_bolus"):
                     replay = replay[0]
                 exact_metric = sweep.metrics(
                     np.asarray(replay)[..., :35], redi_oracle[name], wet_t,
@@ -1113,6 +1174,34 @@ def main() -> int:
                     "max_error_removal_fraction": float(
                         (legacy_error - exact_error) / legacy_error),
                 }
+                if args.redi_flux_ladder:
+                    short = "tem" if name == "temperature" else "sal"
+                    active = jnp.asarray(capture["args"][10], dtype=bool)
+                    umask, vmask, _ = gm_module.nemo_iso_face_masks(
+                        capture["args"][4], capture["args"][5], active)
+                    below = jnp.concatenate(
+                        [active[..., 1:], jnp.zeros_like(active[..., :1])],
+                        axis=-1)
+                    masks = {
+                        "zfu": np.asarray(umask[..., :35], dtype=bool),
+                        "zfv": np.asarray(vmask[..., :35], dtype=bool),
+                        "zfw": np.asarray(
+                            (active * below)[..., :35], dtype=bool),
+                    }
+                    for flux, key in (("zfu", "zfu"), ("zfv", "zfv"),
+                                      ("zfw", "zfw_kp1")):
+                        oracle_flux = _load(
+                            flux_dir / f"redi_dump_{flux}_{short}.bin")
+                        metric = sweep.metrics(
+                            np.asarray(diagnostics_replay[key])[..., :35],
+                            oracle_flux, masks[flux], FOCUS, POINTWISE_BAR)
+                        redi_flux_metrics[f"{flux}_{short}"] = metric
+                        for control_name, control_value in _controls(
+                                oracle_flux, masks[flux], POINTWISE_BAR).items():
+                            controls_key = (
+                                f"redi_flux_{flux}_{short}_{control_name}")
+                            # Applied below after the base control dictionary is built.
+                            redi_flux_metrics[f"_{controls_key}"] = control_value
     specs = (
         ("8.3", "uu(Kmm) / zptu", "traadv.F90:301-304", "un", POINTWISE_BAR),
         ("8.4", "e2u", "traadv.F90:329", "e2u", POINTWISE_BAR),
@@ -1352,6 +1441,20 @@ def main() -> int:
                 arm["max_error_removal_fraction"] != 0.0
                 for arm in redi_e3w_metrics.values()),
         })
+    if args.redi_flux_ladder:
+        flux_control_keys = [
+            key for key in redi_flux_metrics if key.startswith("_redi_flux_")]
+        for key in flux_control_keys:
+            controls[key[1:]] = bool(redi_flux_metrics.pop(key))
+        controls.update({
+            "round77_majority_admitted": (
+                prior77["disposition"] == "REDI_MSC_E3W_MAJORITY"),
+            "redi_flux_six_operands_scored": (
+                set(redi_flux_metrics) == {
+                    f"{flux}_{tracer}"
+                    for flux in ("zfu", "zfv", "zfw")
+                    for tracer in ("tem", "sal")}),
+        })
     controls["all_scored_finite"] = all(
         row.get("status") == "ORDERED_BLOCKED"
         or row["metrics"]["n_nonfinite_wet_elements"] == 0 for row in rows)
@@ -1483,9 +1586,23 @@ def main() -> int:
         disposition = ("REDI_MSC_E3W_OWNED" if owned else
                        "REDI_MSC_E3W_MAJORITY" if improved else
                        "REDI_MSC_E3W_REFUTED")
+    if args.redi_flux_ladder and valid:
+        flux_order = (
+            "zfu_tem", "zfv_tem", "zfw_tem",
+            "zfu_sal", "zfv_sal", "zfw_sal")
+        first_flux = next(
+            (name for name in flux_order
+             if not redi_flux_metrics[name]["pass"]), None)
+        disposition = (
+            f"REDI_DIVERGED_{first_flux.upper()}" if first_flux is not None
+            else "REDI_DIVERGED_DIVERGENCE_VOLUME_T"
+            if not redi_e3w_metrics["temperature"]["live_kmm_e3w"]["pass"]
+            else "TRACER_TAIL_REDI_AT_BAR_LIVE_E3W")
     nemo = args.nemo_root.resolve()
     receipt = {
-        "schema": ("dino-split-explicit-momentum-chain-round77-v1"
+        "schema": ("dino-split-explicit-momentum-chain-round78-v1"
+                   if args.redi_flux_ladder else
+                   "dino-split-explicit-momentum-chain-round77-v1"
                    if args.redi_e3w_factorial else
                    "dino-split-explicit-momentum-chain-round76-v1"
                    if args.capture_redi_tail else
@@ -1533,6 +1650,8 @@ def main() -> int:
            if args.capture_redi_tail else {}),
         **({"redi_e3w_metrics": redi_e3w_metrics}
            if args.redi_e3w_factorial else {}),
+        **({"redi_flux_metrics": redi_flux_metrics}
+           if args.redi_flux_ladder else {}),
         "focus_ji": [list(x) for x in FOCUS],
         "bindings": {
             "round54": _sha(args.round54.resolve()),
@@ -1577,12 +1696,19 @@ def main() -> int:
                if args.capture_redi_tail else {}),
             **({"round76": _sha(args.round76.resolve())}
                if args.redi_e3w_factorial else {}),
+            **({"round77": _sha(args.round77.resolve()),
+                "redi_flux_bracket": _sha(args.redi_flux_bracket.resolve()),
+                **{name: _sha(flux_dir / name)
+                   for name in sorted(expected_flux)}}
+               if args.redi_flux_ladder else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(
                 root / "docs/ocean/fidelity" /
-                ("PREREG_split_explicit_momentum_chain_round77.md"
+                ("PREREG_split_explicit_momentum_chain_round78.md"
+                 if args.redi_flux_ladder else
+                 "PREREG_split_explicit_momentum_chain_round77.md"
                  if args.redi_e3w_factorial else
                  "PREREG_split_explicit_momentum_chain_round76.md"
                  if args.capture_redi_tail else
@@ -1624,7 +1750,9 @@ def main() -> int:
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
             "nemo_ldftra": _sha(nemo / "cfgs/DINO/MY_SRC/ldftra.F90"),
         },
-        "arm": ("redi_e3w_factorial"
+        "arm": ("redi_flux_ladder"
+                if args.redi_flux_ladder else
+                "redi_e3w_factorial"
                 if args.redi_e3w_factorial else
                 "capture_redi_tail"
                 if args.capture_redi_tail else
@@ -1650,7 +1778,11 @@ def main() -> int:
                 "oracle_transport" if args.oracle_transport else
                 "held_slow_forcing" if args.hold_slow_forcing else
                 "production"),
-        "ordered_next": ("redi_msc_e3w_production" if disposition ==
+        "ordered_next": ("redi_flux_subpeel" if disposition.startswith(
+                          "REDI_DIVERGED_ZF") else
+                          "redi_divergence_volume_peel" if disposition ==
+                          "REDI_DIVERGED_DIVERGENCE_VOLUME_T" else
+                          "redi_msc_e3w_production" if disposition ==
                           "REDI_MSC_E3W_OWNED" else
                           "redi_flux_ladder" if disposition in {
                               "REDI_MSC_E3W_MAJORITY",
