@@ -1517,6 +1517,39 @@ class TestNemoIsoLapOperator:
         assert bool(jnp.any(diagnostics["zfv"] != 0.0))
         assert bool(jnp.any(diagnostics["zfw_kp1"] != 0.0))
 
+    def test_nemo_iso_lap_zfu_operand_diagnostics_are_observational(self):
+        """Round-79 exposes real zfu operands only behind the explicit nested
+        diagnostic flag; the flag cannot silently change the public return
+        shape or the production tendency."""
+        setup = _stratified_with_meridional_tilt()
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian,
+         rho, T, S, cfg) = setup
+        S_x, S_y = self._slopes(setup)
+        z_top = jnp.cumsum(z_coord.dz_ref) - z_coord.dz_ref
+        act = ((mask[:, :, jnp.newaxis] > 0.5)
+               & (z_top[jnp.newaxis, jnp.newaxis, :]
+                  < H_bathy[:, :, jnp.newaxis])).astype(T.dtype)
+        plain = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act)
+        observed, diagnostics = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, return_diagnostics=True,
+            return_operand_diagnostics=True)
+        assert jnp.array_equal(observed, plain)
+        operands = diagnostics["zfu_operands"]
+        assert set(operands) == {
+            "ahtu", "e1u", "e2u", "e3t", "uslp", "wmask", "zmsku",
+            "zdit", "zdkt", "avg4_u",
+        }
+        assert operands["ahtu"].shape == T.shape
+        assert operands["uslp"].shape == T.shape
+        assert bool(jnp.any(operands["ahtu"] != 0.0))
+        with pytest.raises(ValueError, match="requires return_diagnostics"):
+            nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+                cfg.kappa_Redi, act, return_operand_diagnostics=True)
+
     def test_nemo_iso_lap_gm_conserves(self):
         """The GM bolus (kappa_GM>0, NEMO ln_ldfeiv) is a curl-of-streamfunction
         transport, so its discrete divergence telescopes to zero and it conserves

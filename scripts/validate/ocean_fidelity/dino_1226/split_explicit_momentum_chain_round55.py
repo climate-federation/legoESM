@@ -52,6 +52,7 @@ ROUND74_SHA = "56db4716cba582654fbd7bb55178a699b55678a1afdea9d8d8fe3cc670eea6fb"
 ROUND75_SHA = "750c40875300ddda48287d84089c8931eaaecc71e8aab6ce7f4e18a0c806edf4"
 ROUND76_SHA = "45e4f8afda737b41e457668fe1ab7cc28ded09d3f7be06fabdd15e9804936a76"
 ROUND77_SHA = "dcc0cff4c63b30024794ad25b023b65223fe87137e5052b6d7dc478066973d14"
+ROUND78_SHA = "30f63d47e11d632e214490c2d6fc8756170a03f12f86635ba6a8b0a8b8d6e7f3"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -127,6 +128,15 @@ def _load2(path: Path) -> np.ndarray:
     return raw.reshape(203, 56)[2:-2, 2:-2]
 
 
+def _load_levels(path: Path, nlev: int) -> np.ndarray:
+    """Load a full-halo NEMO level-major stream and strip its two-cell halo."""
+    raw = np.fromfile(path, dtype="<f8")
+    if raw.size != nlev * 203 * 56:
+        raise SystemExit(
+            f"{path}: expected ({nlev},203,56), got {raw.size} values")
+    return np.moveaxis(raw.reshape(nlev, 203, 56)[:, 2:-2, 2:-2], 0, -1)
+
+
 def _controls(oracle: np.ndarray, wet: np.ndarray, bar: float) -> dict:
     identity = sweep.metrics(oracle, oracle, wet, FOCUS, bar)
     point = np.array(oracle, copy=True)
@@ -170,6 +180,7 @@ def main() -> int:
     parser.add_argument("--round75", type=Path)
     parser.add_argument("--round76", type=Path)
     parser.add_argument("--round77", type=Path)
+    parser.add_argument("--round78", type=Path)
     parser.add_argument("--hold-slow-forcing", action="store_true")
     parser.add_argument("--oracle-transport", action="store_true")
     parser.add_argument("--capture-cycle", action="store_true")
@@ -189,6 +200,7 @@ def main() -> int:
     parser.add_argument("--capture-redi-tail", action="store_true")
     parser.add_argument("--redi-e3w-factorial", action="store_true")
     parser.add_argument("--redi-flux-ladder", action="store_true")
+    parser.add_argument("--redi-zfu-operand-ladder", action="store_true")
     parser.add_argument("--redi-run-dir", type=Path)
     parser.add_argument("--redi-flux-run-dir", type=Path)
     parser.add_argument("--redi-flux-bracket", type=Path)
@@ -543,12 +555,40 @@ def main() -> int:
                 or args.redi_flux_bracket is not None
                 or args.redi_flux_bracket_sha is not None):
             raise SystemExit("round-78 flux inputs require --redi-flux-ladder")
+    prior78 = None
+    if args.redi_zfu_operand_ladder:
+        if not args.redi_flux_ladder:
+            raise SystemExit(
+                "--redi-zfu-operand-ladder requires --redi-flux-ladder")
+        if args.round78 is None or _sha(args.round78.resolve()) != ROUND78_SHA:
+            raise SystemExit("official corrected round-78 receipt required")
+        prior78 = json.loads(args.round78.read_text())
+        if (prior78.get("session_id") != session
+                or prior78.get("disposition") != "REDI_DIVERGED_ZFU_T"
+                or prior78.get("first_diverged_subrow") != "78.T.1"
+                or prior78.get("first_diverged_flux_operand") != "zfu_tem"
+                or prior78["redi_flux_metrics"]["zfu_tem"]
+                          ["n_diverged_columns"] != 9758):
+            raise SystemExit("round 78 does not admit the zfu operand peel")
+    elif args.round78 is not None:
+        raise SystemExit(
+            "--round78 requires --redi-zfu-operand-ladder")
     if _sha(args.raw_artifact.resolve()) != RAW_ARTIFACT_SHA:
         raise SystemExit("admitted held row-8 artifact changed")
     held = args.held_dir.resolve()
     for name, expected in HELD_SHA.items():
         if not (held / name).is_file() or _sha(held / name) != expected:
             raise SystemExit(f"held row-8 input changed: {name}")
+    if args.redi_zfu_operand_ladder:
+        for name, expected in {
+                "ldftra_dump_ahtu.bin":
+                    "098b95a3548ee8d3c66694ca43c3b720840e2c193895b0df222e8e186b2580da",
+                "eiv_dump_uslp.bin":
+                    "ecb3ca3c50c97ef67ad45e96f828a5264c18f94b767a0f9d619f010535d9d0f9",
+        }.items():
+            path = flux_dir / name
+            if not path.is_file() or _sha(path) != expected:
+                raise SystemExit(f"held Redi zfu operand changed: {name}")
     if args.capture_bolus_operands:
         for name, expected in BOLUS_HELD_SHA.items():
             if not (held / name).is_file() or _sha(held / name) != expected:
@@ -919,6 +959,7 @@ def main() -> int:
     redi_metrics = {}
     redi_e3w_metrics = {}
     redi_flux_metrics = {}
+    redi_zfu_operand_ladder = {}
     redi_flux_rows = []
     first_flux = None
     first_flux_subrow = None
@@ -1156,6 +1197,9 @@ def main() -> int:
                     exact_e3w, dtype=capture["args"][0].dtype)
                 if args.redi_flux_ladder:
                     replay_kwargs["return_diagnostics"] = True
+                    replay_kwargs["return_operand_diagnostics"] = bool(
+                        args.redi_zfu_operand_ladder
+                        and name == "temperature")
                 replay = original_redi(*capture["args"], **replay_kwargs)
                 diagnostics_replay = None
                 if args.redi_flux_ladder:
@@ -1205,6 +1249,153 @@ def main() -> int:
                                 f"redi_flux_{flux}_{short}_{control_name}")
                             # Applied below after the base control dictionary is built.
                             redi_flux_metrics[f"_{controls_key}"] = control_value
+                    if args.redi_zfu_operand_ladder and name == "temperature":
+                        own = diagnostics_replay["zfu_operands"]
+                        own = {key: jnp.asarray(value)
+                               for key, value in own.items()}
+                        nlev = own["e3t"].shape[-1]
+                        oracle_ahtu = _load_levels(
+                            flux_dir / "ldftra_dump_ahtu.bin", 36)
+                        oracle_uslp = _load(
+                            flux_dir / "eiv_dump_uslp.bin")
+                        oracle_e3u = _load(
+                            held / "fct_entry_dump_e3u.bin")
+
+                        def pad_operand(value, current):
+                            value = jnp.asarray(value, dtype=current.dtype)
+                            if value.shape[-1] == nlev:
+                                return value
+                            if value.shape[-1] != nlev - 1:
+                                raise SystemExit(
+                                    "Redi zfu held operand level count changed")
+                            return jnp.concatenate(
+                                [value, current[..., -1:]], axis=-1)
+
+                        oracle_ahtu = pad_operand(oracle_ahtu, own["ahtu"])
+                        oracle_uslp = pad_operand(oracle_uslp, own["uslp"])
+                        oracle_e3u = pad_operand(oracle_e3u, own["e3t"])
+
+                        def compose(slope_oracle, thickness_oracle,
+                                    ahtu_oracle, literal_association=False):
+                            slope = oracle_uslp if slope_oracle else own["uslp"]
+                            e3u = oracle_e3u if thickness_oracle else own["e3t"]
+                            ahtu = oracle_ahtu if ahtu_oracle else own["ahtu"]
+                            if literal_association:
+                                ratio = own["e2u"] * (1.0 / own["e1u"])
+                                wm_ip1 = jnp.roll(own["wmask"], -1, axis=1)
+                                wm_kp1 = jnp.roll(own["wmask"], -1, axis=2)
+                                wm_ip1_kp1 = jnp.roll(wm_ip1, -1, axis=2)
+                                zmsku = 1.0 / jnp.maximum(
+                                    (wm_ip1 + wm_kp1)
+                                    + (wm_ip1_kp1 + own["wmask"]), 1.0)
+                                zdkt_kp1 = jnp.roll(own["zdkt"], -1, axis=2)
+                                avg4 = (
+                                    (jnp.roll(own["zdkt"], -1, axis=1)
+                                     + zdkt_kp1)
+                                    + (jnp.roll(zdkt_kp1, -1, axis=1)
+                                       + own["zdkt"]))
+                            else:
+                                ratio = own["e2u"] / own["e1u"]
+                                zmsku = own["zmsku"]
+                                avg4 = own["avg4_u"]
+                            za11 = ratio[:, :, None] * e3u
+                            za13 = (-own["e2u"][:, :, None]
+                                    * slope * zmsku)
+                            return ahtu * (
+                                za11 * own["zdit"] + za13 * avg4)
+
+                        oracle_zfu = _load(
+                            flux_dir / "redi_dump_zfu_tem.bin")
+                        wet_u = masks["zfu"]
+                        arms = {}
+                        arm_values = {}
+                        for use_slope in (0, 1):
+                            for use_thickness in (0, 1):
+                                for use_ahtu in (0, 1):
+                                    arm = (f"S{use_slope}H{use_thickness}"
+                                           f"K{use_ahtu}")
+                                    value = compose(
+                                        use_slope, use_thickness, use_ahtu)
+                                    arm_values[arm] = np.asarray(value)[..., :35]
+                                    arms[arm] = sweep.metrics(
+                                        arm_values[arm], oracle_zfu, wet_u,
+                                        FOCUS, POINTWISE_BAR)
+                        literal_value = np.asarray(
+                            compose(1, 1, 1, literal_association=True))[..., :35]
+                        literal_metric = sweep.metrics(
+                            literal_value, oracle_zfu, wet_u,
+                            FOCUS, POINTWISE_BAR)
+                        baseline_error = arms["S0H0K0"]["max_column_error"]
+                        for metric in arms.values():
+                            metric["max_error_removal_fraction"] = float(
+                                (baseline_error - metric["max_column_error"])
+                                / baseline_error)
+                        literal_metric["max_error_removal_fraction"] = float(
+                            (baseline_error
+                             - literal_metric["max_column_error"])
+                            / baseline_error)
+                        errors = {key: value["max_column_error"]
+                                  for key, value in arms.items()}
+                        interactions = {
+                            "SxH": float((errors["S1H0K0"]
+                                          + errors["S0H1K0"]
+                                          - errors["S1H1K0"]
+                                          - errors["S0H0K0"])
+                                         / baseline_error),
+                            "SxK": float((errors["S1H0K0"]
+                                          + errors["S0H0K1"]
+                                          - errors["S1H0K1"]
+                                          - errors["S0H0K0"])
+                                         / baseline_error),
+                            "HxK": float((errors["S0H1K0"]
+                                          + errors["S0H0K1"]
+                                          - errors["S0H1K1"]
+                                          - errors["S0H0K0"])
+                                         / baseline_error),
+                        }
+                        perturb = np.array(arm_values["S0H0K0"], copy=True)
+                        first_wet = tuple(
+                            int(index) for index in np.argwhere(wet_u)[0])
+                        perturb[first_wet] += max(
+                            4.0 * POINTWISE_BAR
+                            * arms["S0H0K0"]["reference_rms"],
+                            4.0 * abs(float(np.spacing(perturb[first_wet]))))
+                        ladder_controls = {
+                            "production_recompose_identity": bool(
+                                np.array_equal(
+                                    arm_values["S0H0K0"],
+                                    np.asarray(diagnostics_replay["zfu"])[..., :35])),
+                            "eight_factorial_arms_present": len(arms) == 8,
+                            "wet_point_plant_red": not sweep.metrics(
+                                perturb, oracle_zfu, wet_u, FOCUS,
+                                POINTWISE_BAR)["pass"],
+                            "live_thickness_substitution_noninert": not bool(
+                                np.array_equal(
+                                    arm_values["S0H1K0"],
+                                    arm_values["S0H0K0"])),
+                            "literal_recompose_finite": bool(
+                                np.isfinite(literal_value[wet_u]).all()),
+                        }
+                        redi_zfu_operand_ladder = {
+                            "arms": arms,
+                            "literal_all_oracle": literal_metric,
+                            "interactions": interactions,
+                            "operand_metrics": {
+                                "final_uslp": sweep.metrics(
+                                    np.asarray(own["uslp"])[..., :35],
+                                    np.asarray(oracle_uslp)[..., :35], wet_u,
+                                    FOCUS, POINTWISE_BAR),
+                                "live_e3u": sweep.metrics(
+                                    np.asarray(own["e3t"])[..., :35],
+                                    np.asarray(oracle_e3u)[..., :35], wet_u,
+                                    FOCUS, POINTWISE_BAR),
+                                "ahtu": sweep.metrics(
+                                    np.asarray(own["ahtu"])[..., :35],
+                                    np.asarray(oracle_ahtu)[..., :35], wet_u,
+                                    FOCUS, POINTWISE_BAR),
+                            },
+                            "controls": ladder_controls,
+                        }
     specs = (
         ("8.3", "uu(Kmm) / zptu", "traadv.F90:301-304", "un", POINTWISE_BAR),
         ("8.4", "e2u", "traadv.F90:329", "e2u", POINTWISE_BAR),
@@ -1466,6 +1657,13 @@ def main() -> int:
                     for flux in ("zfu", "zfv", "zfw")
                     for tracer in ("tem", "sal")}),
         })
+    if args.redi_zfu_operand_ladder:
+        controls.update({
+            "round78_zfu_temperature_admitted": (
+                prior78["disposition"] == "REDI_DIVERGED_ZFU_T"),
+            **{f"redi_zfu_{name}": value for name, value in
+               redi_zfu_operand_ladder["controls"].items()},
+        })
     controls["all_scored_finite"] = all(
         row.get("status") == "ORDERED_BLOCKED"
         or row["metrics"]["n_nonfinite_wet_elements"] == 0 for row in rows)
@@ -1637,12 +1835,44 @@ def main() -> int:
                 disposition = "REDI_DIVERGED_DIVERGENCE_VOLUME_T"
             else:
                 disposition = "TRACER_TAIL_REDI_AT_BAR_LIVE_E3W"
+    if args.redi_zfu_operand_ladder and valid:
+        arms = redi_zfu_operand_ladder["arms"]
+        literal = redi_zfu_operand_ladder["literal_all_oracle"]
+        slope_removal = arms["S1H0K0"]["max_error_removal_fraction"]
+        thickness_removal = arms["S0H1K0"]["max_error_removal_fraction"]
+        ahtu_removal = arms["S0H0K1"]["max_error_removal_fraction"]
+        full_current = arms["S1H1K1"]
+        if (thickness_removal >= 0.90 and slope_removal < 0.50
+                and ahtu_removal < 0.50 and literal["pass"]):
+            disposition = "REDI_ZFU_T_LOCALIZED_TO_LIVE_E3U"
+        elif (slope_removal >= 0.90 and thickness_removal < 0.50
+              and ahtu_removal < 0.50 and literal["pass"]):
+            disposition = "REDI_ZFU_T_LOCALIZED_TO_FINAL_USLP"
+        elif (ahtu_removal >= 0.90 and slope_removal < 0.50
+              and thickness_removal < 0.50 and literal["pass"]):
+            disposition = "REDI_ZFU_T_LOCALIZED_TO_AHTU"
+        elif (not full_current["pass"] and literal["pass"]
+              and (full_current["max_column_error"]
+                   - literal["max_column_error"])
+              / full_current["max_column_error"] >= 0.90):
+            disposition = "REDI_ZFU_T_LOCALIZED_TO_ASSOCIATION"
+        elif (max(slope_removal, thickness_removal, ahtu_removal) < 0.90
+              and literal["pass"]):
+            disposition = "REDI_ZFU_T_OPERAND_COMPOSITION"
+        elif (full_current["max_error_removal_fraction"] >= 0.90
+              and not literal["pass"]):
+            disposition = "REDI_ZFU_T_OPERANDS_BOUNDED_ASSOCIATION_OPEN"
+        else:
+            disposition = "REDI_ZFU_T_OPERAND_LADDER_OPEN"
+        first_flux_subrow = "79.T.1"
     receipt_first = (first_flux_subrow
                      if args.redi_flux_ladder and first_flux_subrow is not None
                      else first)
     nemo = args.nemo_root.resolve()
     receipt = {
-        "schema": ("dino-split-explicit-momentum-chain-round78-v1"
+        "schema": ("dino-split-explicit-momentum-chain-round79-v1"
+                   if args.redi_zfu_operand_ladder else
+                   "dino-split-explicit-momentum-chain-round78-v1"
                    if args.redi_flux_ladder else
                    "dino-split-explicit-momentum-chain-round77-v1"
                    if args.redi_e3w_factorial else
@@ -1697,6 +1927,8 @@ def main() -> int:
         **({"redi_flux_rows": redi_flux_rows,
             "first_diverged_flux_operand": first_flux}
            if args.redi_flux_ladder else {}),
+        **({"redi_zfu_operand_ladder": redi_zfu_operand_ladder}
+           if args.redi_zfu_operand_ladder else {}),
         "focus_ji": [list(x) for x in FOCUS],
         "bindings": {
             "round54": _sha(args.round54.resolve()),
@@ -1746,12 +1978,20 @@ def main() -> int:
                 **{name: _sha(flux_dir / name)
                    for name in sorted(expected_flux)}}
                if args.redi_flux_ladder else {}),
+            **({"round78": _sha(args.round78.resolve()),
+                "ldftra_dump_ahtu.bin": _sha(
+                    flux_dir / "ldftra_dump_ahtu.bin"),
+                "eiv_dump_uslp.bin": _sha(
+                    flux_dir / "eiv_dump_uslp.bin")}
+               if args.redi_zfu_operand_ladder else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(
                 root / "docs/ocean/fidelity" /
-                ("PREREG_split_explicit_momentum_chain_round78.md"
+                ("PREREG_split_explicit_momentum_chain_round79.md"
+                 if args.redi_zfu_operand_ladder else
+                 "PREREG_split_explicit_momentum_chain_round78.md"
                  if args.redi_flux_ladder else
                  "PREREG_split_explicit_momentum_chain_round77.md"
                  if args.redi_e3w_factorial else
@@ -1795,7 +2035,9 @@ def main() -> int:
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
             "nemo_ldftra": _sha(nemo / "cfgs/DINO/MY_SRC/ldftra.F90"),
         },
-        "arm": ("redi_flux_ladder"
+        "arm": ("redi_zfu_operand_ladder"
+                if args.redi_zfu_operand_ladder else
+                "redi_flux_ladder"
                 if args.redi_flux_ladder else
                 "redi_e3w_factorial"
                 if args.redi_e3w_factorial else
@@ -1823,7 +2065,11 @@ def main() -> int:
                 "oracle_transport" if args.oracle_transport else
                 "held_slow_forcing" if args.hold_slow_forcing else
                 "production"),
-        "ordered_next": ("redi_flux_subpeel" if disposition.startswith(
+        "ordered_next": ("redi_zfu_live_e3u_production" if disposition ==
+                          "REDI_ZFU_T_LOCALIZED_TO_LIVE_E3U" else
+                          "redi_zfu_operand_followup" if disposition.startswith(
+                          "REDI_ZFU_T_") else
+                          "redi_flux_subpeel" if disposition.startswith(
                           "REDI_DIVERGED_ZF") else
                           "redi_divergence_volume_peel" if disposition ==
                           "REDI_DIVERGED_DIVERGENCE_VOLUME_T" else
@@ -1856,6 +2102,16 @@ def main() -> int:
                   row["metrics"]["max_column_error"])
         else:
             print(row["subrow"], row["status"])
+    if args.redi_zfu_operand_ladder:
+        for name, metric in sorted(
+                redi_zfu_operand_ladder["arms"].items()):
+            print(name, "AT_BAR" if metric["pass"] else "DIVERGED",
+                  metric["n_diverged_columns"], metric["max_column_error"],
+                  metric["max_error_removal_fraction"])
+        literal = redi_zfu_operand_ladder["literal_all_oracle"]
+        print("S1H1K1L1", "AT_BAR" if literal["pass"] else "DIVERGED",
+              literal["n_diverged_columns"], literal["max_column_error"],
+              literal["max_error_removal_fraction"])
     return 0 if valid else 2
 
 

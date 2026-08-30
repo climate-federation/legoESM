@@ -2245,6 +2245,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     kappa_Redi_v=None,
     msc_e3w_override: jnp.ndarray | None = None,
     return_diagnostics: bool = False,
+    return_operand_diagnostics: bool = False,
 ) -> jnp.ndarray:
     """NEMO ``traldf_iso`` (``#define iso_lap``) iso-neutral Laplacian Redi
     tracer tendency on the lat-lon C-grid.
@@ -2328,6 +2329,9 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     # wslpi/wslpj@w) are the documented follow-up to push amplitude toward 1.0.
     nlev = q.shape[-1]
     dtype = q.dtype
+    if return_operand_diagnostics and not return_diagnostics:
+        raise ValueError(
+            "return_operand_diagnostics=True requires return_diagnostics=True")
     ones_z = jnp.ones((1, 1, nlev), dtype=dtype)
 
     # --- Metrics (n_lat, n_lon).  NEMO e1u/e2u/e1v/e2v are co-located at the
@@ -2588,6 +2592,19 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
             "zfv": zfv,
             "zfw_kp1": zfw_kp1,
         }
+        if return_operand_diagnostics:
+            diagnostics["zfu_operands"] = {
+                "ahtu": aht,
+                "e1u": e1u,
+                "e2u": e2u,
+                "e3t": e3t,
+                "uslp": uslp,
+                "wmask": wmask,
+                "zmsku": zmsku_h,
+                "zdit": zdit,
+                "zdkt": zdkt,
+                "avg4_u": avg4_u,
+            }
         if return_bolus:
             return tend, bolus_transport, diagnostics
         return tend, diagnostics
