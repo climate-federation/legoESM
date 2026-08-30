@@ -254,8 +254,8 @@ def main() -> int:
                 root / "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py"),
             "operand_builder": _sha(
                 root / "packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py"),
-            "nemo_divhor": _sha(nemo / "cfgs/DINO/MY_SRC/divhor.F90"),
-            "nemo_domqco": _sha(nemo / "cfgs/DINO/MY_SRC/domqco.F90"),
+            "nemo_divhor": _sha(nemo / "src/OCE/DYN/divhor.F90"),
+            "nemo_domqco": _sha(nemo / "src/OCE/DOM/domqco.F90"),
             "nemo_stpmlf": _sha(nemo / "cfgs/DINO/MY_SRC/stpmlf.F90"),
         },
         "disposition": disposition,
