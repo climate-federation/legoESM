@@ -200,14 +200,16 @@ def main() -> int:
         plant[plant_at] = np.nextafter(plant[plant_at], np.inf)
     planted = r22._metric(plant, oracle_coeff["ffu_nw"], umask)
 
-    seam_mask = np.ones((jpi, 2), dtype=bool)
-    wall_mask = np.ones((2, jpj), dtype=bool)
+    seam_candidate = np.asarray(compiled_values[-2])[:, [0, -1]]
+    wall_candidate = np.asarray(compiled_values[-1])[[0, -1]]
+    seam_mask = np.ones_like(seam_candidate, dtype=bool)
+    wall_mask = np.ones_like(wall_candidate, dtype=bool)
     pointwise = {
         "u_periodic_seam": r22._metric(
-            np.asarray(compiled_values[-2])[:, [0, -1]],
+            seam_candidate,
             nemo_u[:, [0, -1]], seam_mask),
         "v_south_north_walls": r22._metric(
-            np.asarray(compiled_values[-1])[[0, -1]],
+            wall_candidate,
             nemo_v[[0, -1]], wall_mask),
     }
 
