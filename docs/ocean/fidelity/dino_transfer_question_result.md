@@ -156,7 +156,7 @@ FE developed-state instability. The already-bound MLF-only fences for alpha
 and the Nbb/Kaa QCO pair remain valid. No green post-step-32 FE regression test
 exists to add until FE stabilization itself is implemented.
 
-## T1 build round — runner built, claim-length admission blocked
+## T1 build round — cold-start row closed; legoESM arms ready
 
 `standalone_20y.py` now constructs the public `nemo_dino_kamm_mlf` card from
 legoESM's own analytic NEMO-grid DINO grid, vertical coordinate and from-rest
@@ -173,10 +173,47 @@ public analytic DINO grid rather than a NEMO file. A real one-step CPU/no-JIT
 smoke completes with every prognostic field finite and stamps
 `claim_admissible=false` as required for a truncated run.
 
-One model-level start-path debt remains and is fail-closed: the card resolves
-the T3-certified `outer_integrator=leapfrog`; with no history, legoESM's first
-Euler bootstrap skips `nemo_mlf_baro_corr`, while NEMO applies that after-level
-reconciliation on `l_1st_euler`. The core model already emits this exact
-warning. The runner refuses a 230,400-step claim arm until that row is
-implemented; a bridge would evade rather than solve T1. T1 is therefore
-**BUILD-BLOCKED-FIRST-STEP-RECONCILIATION**, not run and not science-scored.
+The remaining start-path row is now closed against the executed oracle source.
+For a non-restart start, `src/OCE/DOM/istate.F90:107-110` enters the from-rest
+branch and sets `l_1st_euler=.true.`; lines 121--123 initialize velocity at
+rest, and lines 135--137 copy `Kbb` to `Kmm`. In the built DINO override,
+`cfgs/DINO/MY_SRC/stpmlf.F90:134-137` consequently selects the one-`rn_Dt`
+Euler step. The corrector call at line 578 is guarded only by
+`ln_dynspg_ts`, not by `.NOT.l_1st_euler`:
+
+```fortran
+IF( ln_dynspg_ts ) CALL mlf_baro_corr ( kstp, Nnn, Naa, uu, vv )
+```
+
+`l_1st_euler` is cleared later, at `stpmlf.F90:685-688`. Thus the call is live
+on `nn_it000`; the reduction/replacement itself is at lines 752--765.
+
+legoESM now exposes
+`barotropic_cold_start_after_reconcile={off,nemo_mlf_baro_corr}`. The DINO MLF
+oracle card and `nemo_dino_kamm_mlf_v1` catalog card both select the faithful
+value. Unknown values, non-MLF use, and a regular/cold selector mismatch fail
+at model construction. On the no-history bootstrap, `_step_impl` captures the
+pre-mixing barotropic target and raw pre-projection Kaa SSH, applies implicit
+mixing, then invokes the existing shared `_apply_after_level_reconcile` kernel
+before the conservation fixer. The retired skip warning no longer exists.
+
+The pre-change claim-admission test failed on the registered refusal. It now
+passes by resolving both selectors from the shipped card; the off plant moves
+the committed U and V means on both leapfrog-family paths, and ordering tests
+observe exactly `implicit -> reconcile`. Clean-producer config identity remains
+`PASS` with zero diff rows (artifact SHA-256
+`c8f885a669734ed03f9bfd769eca5e367488bb34dcc21a1b52f07f676de73fe1`).
+A CPU/fp64/no-JIT standalone step from producer
+`28be310c6ab487c3fa685063af6554abea5938f2` is finite and stamps the faithful
+cold-start selector, empty bridge/restart paths, and zero admission blockers.
+Its manifest SHA-256 is
+`41c044ad8e13e1ce9745a94b2d0724451b32d113f4ed1c74f74434d28217ebc1`;
+`claim_admissible=false` means only that this receipt intentionally ran one
+step rather than all 230,400.
+
+The six legoESM 20-year arms are therefore **READY-TO-RUN** and are emitted in
+the handoff. T1 itself remains **UNMEASURED**: no GPU arm, fresh from-rest NEMO
+ensemble, normalized six-family statistics, or science score was produced in
+this round. The scorer cannot be invoked until both roots contain the
+registered `dino_standalone_20y_statistics_v1` products. The FE stability
+bisect remains registered future work and was not reopened.

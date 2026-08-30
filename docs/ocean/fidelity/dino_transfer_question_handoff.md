@@ -1,12 +1,13 @@
-# DINO transfer question: certified/blocked handoff
+# DINO transfer question: T1 standalone-arm handoff
 
 Date: 2026-08-30. Session:
 `01a053d4-8e9f-7212-bbdb-19ba2d64e140`.
 
 Status: **T3 TRANSFER_CONFIRMED; T2 BLOCKED-NEEDS-FE-STABILIZATION;
-T1 BUILD-BLOCKED-FIRST-STEP-RECONCILIATION.** No GPU, NEMO, `mpirun`, or push
-was performed. The previous T2 GPU blocks remain withdrawn, and the T1 runner
-refuses a claim-length arm until its recorded first-step debt is fixed.
+T1 LEGOESM ARMS READY / SCIENCE UNMEASURED.** No GPU, NEMO, `mpirun`, push, or
+FE bisect was performed in this build round. The previous T2 GPU blocks remain
+withdrawn. The executable blocks below are the six registered T1 legoESM GPU
+arms for the human to run.
 
 ## Receipt slots
 
@@ -39,17 +40,23 @@ SLOT T2_PRE1696_COMMIT VALUE=b794c0618e287ebf1d364a8713c3c504ac2eb01c
 SLOT T2_PRE1696_ARTIFACT_SHA256 VALUE=9f97a8ba82800672116a7f60c1cb1043dfc1aab7b51ab230311bced1284f2839
 SLOT T2_PRE1696_LOG_SHA256 VALUE=4f5f128c7ea83ebfe3d81a41da4b29146b4d744e0862a573b3c9f04605218464
 SLOT T2_PR1696_ADDENDUM_RELATIVE_PATH VALUE=docs/ocean/fidelity/dino_pr1696_t2_addendum.md
-SLOT T1_STATUS VALUE=BUILD-BLOCKED-FIRST-STEP-RECONCILIATION
+SLOT T1_STATUS VALUE=LEGO_ARMS_READY_SCIENCE_UNMEASURED
+SLOT T1_COLD_START_PREREG_RELATIVE_PATH VALUE=docs/ocean/fidelity/PREREG_dino_standalone_cold_start_corrector.md
+SLOT T1_VALIDATED_BUILD_PRODUCER_SHA VALUE=28be310c6ab487c3fa685063af6554abea5938f2
+SLOT T1_COLD_START_CORE_SHA256 VALUE=ddb0c414a3d9f44073fed646516b9dbe463a4a9cac42b721b54aff94d26ef8cf
 SLOT T1_STANDALONE_RUNNER_RELATIVE_PATH VALUE=scripts/validate/ocean_fidelity/dino_1226/standalone_20y.py
-SLOT T1_STANDALONE_RUNNER_SHA256 VALUE=45c161f11b7055badb786dbd5974f6f8b4ea06ff56c72e12db008bd91c0a414b
+SLOT T1_STANDALONE_RUNNER_SHA256 VALUE=de0d17b3651da380356ca8f89ad0b7e8166a24d8f15a23049c4557fe1d2bf763
 SLOT T1_SCORE_RELATIVE_PATH VALUE=scripts/validate/ocean_fidelity/dino_1226/standalone_20y_score.py
 SLOT T1_SCORE_SCRIPT_SHA256 VALUE=de121565dc4ecdd9b2543886f2f240ed53f994e1c0f1622e5b62aaffe71d32f9
-SLOT T1_CPU_SMOKE_MANIFEST_SHA256 VALUE=3fba61701e206019a95234fbc587ab3d72d126c257394b35d89dfb4c74004bcc
-SLOT T1_CPU_SMOKE_INITIAL_RECEIPT_SHA256 VALUE=3ebe7648f14250e4587338a8027fe16278ffa6908e4f979edc5a72c22bfdb3ea
-SLOT T1_NEMO_STANDALONE_ROOT VALUE=BLOCKED_NOT_CREATED
-SLOT T1_NEMO_ENSEMBLE_MANIFEST_SHA256 VALUE=BLOCKED_NOT_RUN
-SLOT T1_LEGO_ENSEMBLE_MANIFEST_SHA256 VALUE=BLOCKED_NOT_RUN
-SLOT T1_SCORE_SHA256 VALUE=BLOCKED_NOT_RUN
+SLOT T1_CONFIG_IDENTITY_R2_SHA256 VALUE=c8f885a669734ed03f9bfd769eca5e367488bb34dcc21a1b52f07f676de73fe1
+SLOT T1_CPU_SMOKE_MANIFEST_SHA256 VALUE=41c044ad8e13e1ce9745a94b2d0724451b32d113f4ed1c74f74434d28217ebc1
+SLOT T1_CPU_SMOKE_INITIAL_RECEIPT_SHA256 VALUE=a2d69016458af5b11258b5975841246bbaa9d2404624050c06f19db55fef7951
+SLOT T1_LEGO_STANDALONE_ROOT VALUE=HANDOFF_TO_CREATE
+SLOT T1_NEMO_STANDALONE_ROOT VALUE=HUMAN_TO_CREATE_FROM_REST
+SLOT T1_NORMALIZED_STATISTICS_PRODUCER VALUE=BUILD_IN_NEMO_AND_NORMALIZER_ROUND
+SLOT T1_NEMO_ENSEMBLE_MANIFEST_SHA256 VALUE=NOT_RUN
+SLOT T1_LEGO_ENSEMBLE_MANIFEST_SHA256 VALUE=NOT_RUN
+SLOT T1_SCORE_SHA256 VALUE=NOT_RUN
 SLOT T1_MEASURED_GPU_HOURS VALUE=0
 SLOT T1_MEASURED_NEMO_HOURS VALUE=0
 ```
@@ -121,52 +128,201 @@ T2 therefore has no statistical `CONFIRMED`/`REFUTED` verdict. Its result is a
 model-scope block: the MLF bridge certification has not transferred to the FE
 sibling card.
 
-## T1 build receipt and stop
+## T1 cold-start closure receipt
 
-The runner and scorer now exist at the paths in the SLOT block. The runner has
-no restart, bridge, `--run-traj`, or `--run-stepdump` selector. It constructs
-the exact-card analytic grid, vertical coordinate and from-rest state; builds
-literal raw vertical/QCO/EEN operands from those public constructions; applies
-only the registered member-temperature perturbation; streams the 75 fp64
-snapshots and live reductions; and emits hashes/manifests. The score program
-owns the frozen six-member floor, 20,000 independent resamples at seed 1455,
-quantization rules, scalar/family/capstone labels and planted controls. It
-expects each model's recorded family instruments to emit the normalized
-`dino_standalone_20y_statistics_v1` contract; it does not retype reducers.
+The executed NEMO ownership is now bound, not inferred. A from-rest start sets
+`l_1st_euler=.true.` and copies `Kbb` to `Kmm`
+(`src/OCE/DOM/istate.F90:107-137`). The built DINO source selects
+`rDt=rn_Dt` at `MY_SRC/stpmlf.F90:134-137`, calls `mlf_baro_corr` at line 578,
+and clears `l_1st_euler` only at lines 685--688. legoESM now captures the
+bootstrap's pre-mixing barotropic target and raw Kaa SSH, runs implicit mixing,
+then calls the existing shared corrector before the conservation fixer.
 
-A CPU/no-JIT one-step run now completes with finite prognostic fields and no
-NEMO state input. It is intentionally `claim_admissible=false`. The model's
-own warning proves why the 20-year arms are not emitted: on the no-history
-Euler bootstrap, legoESM skips `nemo_mlf_baro_corr`; NEMO runs that row on
-`l_1st_euler`. The runner's `--steps 230400` path refuses before integration
-while this blocker is registered. Fixing it requires surfacing the barotropic
-target and raw Kaa SSH from `_step_impl`'s implicit-vmix path into the cold-
-start reconciliation site, then a red first-step comparison. A bridge is not
-an admissible workaround.
+`barotropic_cold_start_after_reconcile="nemo_mlf_baro_corr"` is pinned on the
+oracle and catalog DINO MLF cards. It must equal the regular-step selector;
+unknown, mismatched, or non-leapfrog-family configurations raise during model
+construction. The former warning implementation is removed.
 
-No recorded NEMO ensemble is legal as T1 science data or an ensemble floor.
-`RUN_20Y_REBUILD` and `RUN_40Y_REBUILD` remain reducer/control context only;
-the bridge-started ensembles remain ineligible because their start and horizon
-do not match T1.
+The clean one-step receipt has zero admission blockers, is finite, and stamps
+standalone start plus empty bridge/restart paths. It says
+`claim_admissible=false` only because `steps_completed=1`, not because T1 still
+has a physics blocker. Config identity remains zero-diff. Focused validation is
+`213/213` plus `47/47` config/partial-cell tests.
+
+## Frozen T1 bars
+
+Do not substitute the historical 0.091 Sv or other round-94 floors. For every
+registered scalar `s`, the only legal T1 floor is computed from the fresh six
+standalone members on each side:
+
+```text
+gap_s   = mean(lego_s) - mean(nemo_s)
+floor_s = sqrt(sample_sd(lego_s)^2 + sample_sd(nemo_s)^2)
+R_s     = abs(gap_s) / floor_s
+```
+
+With 20,000 independent six-member bootstrap resamples at seed 1455:
+
+- `CONFIRM` iff `R_hi <= 2.0`;
+- `REFUTE` iff `R_lo > 2.0`;
+- otherwise `UNRESOLVED`;
+- any quantization admission failure is `UNRESOLVED_QUANTIZED`.
+
+Each family scores its bootstrap maximum R. All six families must confirm for
+`STANDALONE_STATISTICALLY_INDISTINGUISHABLE_AT_20Y`. This is a years-16--20
+from-rest horizon claim, not equilibrium.
+
+## T1 setup block — run once
+
+This creates a clean detached worktree from the delivered branch ref and runs
+only CPU admission. The bundle is the transfer artifact; the auxiliary git dir
+is the current workspace's branch store.
+
+```bash
+set -euo pipefail
+T1_GIT_DIR=/tmp/codex-transfer-aux.git
+T1_REF=refs/heads/fidelity/dino-transfer-codex
+T1_WORKTREE=/tmp/dino-transfer-t1-01a053d4-producer
+T1_ROOT=/tmp/dino-transfer-01a053d4-t1
+T1_MESH=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/mesh_mask.nc
+T1_PYTHON=/home/dbalwada/miniconda3/bin/python
+T1_SHA=$(git --git-dir="$T1_GIT_DIR" rev-parse "$T1_REF")
+test ! -e "$T1_WORKTREE"
+test -f "$T1_MESH"
+git --git-dir="$T1_GIT_DIR" worktree add --detach "$T1_WORKTREE" "$T1_SHA"
+test -z "$(git -C "$T1_WORKTREE" status --porcelain --untracked-files=no)"
+mkdir -p "$T1_ROOT/logs" "$T1_ROOT/lego"
+T1_PYTHONPATH="$T1_WORKTREE/packages/atmosphere:$T1_WORKTREE/packages/core:$T1_WORKTREE/packages/coupler:$T1_WORKTREE/packages/ice:$T1_WORKTREE/packages/land:$T1_WORKTREE/packages/ml:$T1_WORKTREE/packages/ocean:$T1_WORKTREE/packages/tools"
+PYTHONPATH="$T1_PYTHONPATH" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
+  "$T1_PYTHON" -m pytest \
+  "$T1_WORKTREE/tests/ocean/unit/test_barotropic_after_reconcile.py" \
+  "$T1_WORKTREE/tests/ocean/unit/test_dino_standalone_20y.py" -q
+PYTHONPATH="$T1_PYTHONPATH:$T1_WORKTREE/scripts/validate/ocean_fidelity/dino_1226" \
+  JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
+  "$T1_PYTHON" "$T1_WORKTREE/scripts/validate/ocean_fidelity/dino_1226/standalone_20y_score.py" \
+  --lego-root /tmp/T1_SELF_TEST_UNUSED_LEGO \
+  --nemo-root /tmp/T1_SELF_TEST_UNUSED_NEMO \
+  --output "$T1_ROOT/classifier_self_test.json" --self-test
+```
+
+## T1 legoESM GPU arms — three two-GPU waves
+
+The function uses only implemented flags: `--member`, `--output-dir`,
+`--reducer-mesh`, and `--steps`. `RUN_TRAJ/mesh_mask.nc` is diagnostic-only;
+the runner refuses restart/bridge inputs and stamps that it did not use them.
+
+```bash
+set -euo pipefail
+T1_RUNNER="$T1_WORKTREE/scripts/validate/ocean_fidelity/dino_1226/standalone_20y.py"
+t1_run_member () {
+  local T1_MEMBER="$1"
+  local T1_GPU="$2"
+  CUDA_VISIBLE_DEVICES="$T1_GPU" \
+  PYTHONPATH="$T1_PYTHONPATH:$T1_WORKTREE/scripts/validate/ocean_fidelity/dino_1226" \
+  JAX_ENABLE_X64=1 XLA_PYTHON_CLIENT_PREALLOCATE=false \
+    "$T1_PYTHON" "$T1_RUNNER" \
+    --member "$T1_MEMBER" \
+    --output-dir "$T1_ROOT/lego/m$T1_MEMBER" \
+    --reducer-mesh "$T1_MESH" --steps 230400 \
+    >"$T1_ROOT/logs/lego_m$T1_MEMBER.log" 2>&1
+}
+```
+
+Wave 1:
+
+```bash
+t1_run_member 0 0 & T1_PID_A=$!
+t1_run_member 1 1 & T1_PID_B=$!
+wait "$T1_PID_A"
+wait "$T1_PID_B"
+```
+
+Wave 2:
+
+```bash
+t1_run_member 2 0 & T1_PID_A=$!
+t1_run_member 3 1 & T1_PID_B=$!
+wait "$T1_PID_A"
+wait "$T1_PID_B"
+```
+
+Wave 3:
+
+```bash
+t1_run_member 4 0 & T1_PID_A=$!
+t1_run_member 5 1 & T1_PID_B=$!
+wait "$T1_PID_A"
+wait "$T1_PID_B"
+```
+
+Admission audit after all six finish:
+
+```bash
+PYTHONPATH="$T1_PYTHONPATH" "$T1_PYTHON" - "$T1_ROOT/lego" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+for member in range(6):
+    manifest = json.loads((root / f"m{member}" / "manifest.json").read_text())
+    assert manifest["member"] == member
+    assert manifest["steps_completed"] == 230400
+    assert manifest["claim_admissible"] is True
+    assert manifest["claim_admission_blockers"] == []
+    assert manifest["twin_start_mode"] == "standalone"
+    assert manifest["bridge_paths"] == [] and manifest["restart_paths"] == []
+    assert manifest["storage_dtype"] == manifest["compute_dtype"] == "float64"
+    assert manifest["barotropic_cold_start_after_reconcile"] == "nemo_mlf_baro_corr"
+    assert len(manifest["sample_days"]) == 75
+print("T1_LEGO_ADMISSION=PASS members=6 dates=75")
+PY
+find "$T1_ROOT/lego" -type f -print0 | sort -z | xargs -0 sha256sum \
+  > "$T1_ROOT/lego_files.sha256"
+sha256sum "$T1_ROOT/lego_files.sha256"
+```
+
+## NEMO-side need and scoring stop
+
+T1 still needs six **fresh NEMO-owned from-rest** 20-year members: control plus
+`1e-14` relative now-temperature perturbations at seeds 1--5, with every other
+restart byte identical, the same 75 dates, fp64 scored storage, and the six
+registered family instruments. No NEMO command is emitted here: its safe
+parallel launch/initial-checkpoint machinery and the cross-model normalized
+statistics producer are explicitly `BUILD_IN_NEMO_AND_NORMALIZER_ROUND`.
+
+Recorded `RUN_20Y_REBUILD`/`RUN_40Y_REBUILD` U archives are legal only for
+deterministic ACC/reducer context. Their T/S history requires a committed
+validity audit. `RUN_ENS_M*`, `RUN_VERDICT360_M*`, day-180 bridge products, the
+held bridge battery, and every historical floor are illegal as T1 arms or
+denominators.
+
+The committed scorer flags all exist, but do not run it until every
+`lego/m0..m5` and `nemo/m0..m5` directory has a validated
+`statistics.json` with schema `dino_standalone_20y_statistics_v1`. At that
+point the command is:
+
+```bash
+for T1_SIDE in lego nemo; do
+  for T1_MEMBER in 0 1 2 3 4 5; do
+    test -f "$T1_ROOT/$T1_SIDE/m$T1_MEMBER/statistics.json"
+  done
+done
+PYTHONPATH="$T1_PYTHONPATH:$T1_WORKTREE/scripts/validate/ocean_fidelity/dino_1226" \
+  JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
+  "$T1_PYTHON" "$T1_WORKTREE/scripts/validate/ocean_fidelity/dino_1226/standalone_20y_score.py" \
+  --lego-root "$T1_ROOT/lego" --nemo-root "$T1_ROOT/nemo" \
+  --output "$T1_ROOT/standalone_20y_score.json"
+```
 
 ## Self-audit
 
-- No GPU, NEMO, `mpirun`, or push command appears in this handoff.
-- No T2 or claim-length T1 arm command is emitted.
-- All completed T3/T2 paths named above exist in the committed tree.
-- The T2 reproducer's parser implements `--recipe`, `--run-traj`,
-  `--run-stepdump`, `--max-steps`, and `--output`; no other probe flag is
-  claimed here.
-- The T1 runner implements `--member`, `--output-dir`, `--reducer-mesh`, and
-  `--steps`; the score implements `--lego-root`, `--nemo-root`, `--output`, and
-  `--self-test`. Every named flag and committed path exists.
-- The final one-step smoke manifest stamps producer `c981468d05`, fp64,
-  standalone start, empty bridge/restart paths, the exact first-step blocker,
-  and `claim_admissible=false`.
-- Focused CPU validation passes `137/137`: the new standalone runner/scorer
-  tests, FE reproducer tests, and complete `test_dino_experiment.py`. The one
-  warning is the expected first-step reconciliation warning bound above.
+- The six GPU commands above were emitted for the human and were not executed
+  in this round. No NEMO, `mpirun`, push, or FE-bisect command was run.
+- Every emitted runner/scorer flag is implemented by the committed parser.
+  There are no empty SLOT values. Missing future artifacts say `NOT_RUN`, and
+  the absent normalizer is explicitly `BUILD_IN_NEMO_AND_NORMALIZER_ROUND`.
+- The T1 runner exposes no restart, bridge, `--run-traj`, or `--run-stepdump`
+  flag. All six member output paths are distinct and fail closed if preexisting.
+- T3 remains certified. T2 remains blocked and its withdrawn arms are not
+  re-emitted. The FE registered bisect is future work, as requested.
 
-Post the T2 block and any future T1/T2 result to GitHub issue #1455 when the
-human-owned evidence trail is updated. No remote action was taken in this
-round.
+Post future T1/T2 results to GitHub issue #1455 when the human-owned evidence
+trail is updated. No remote action was taken in this round.
