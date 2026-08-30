@@ -44,6 +44,7 @@ def test_qco_zad_pair_matches_source_ordered_oracle():
     grid = SimpleNamespace(
         dy_u=jnp.asarray(np.concatenate([e2u[:, -1:], e2u], axis=1)),
         dx_v=jnp.asarray(np.concatenate([np.zeros_like(e1v[:1]), e1v], axis=0)),
+        area=jnp.asarray(coord.nemo_e1e2t),
     )
 
     ww, hu, hv = _nemo_qco_zad_operands(

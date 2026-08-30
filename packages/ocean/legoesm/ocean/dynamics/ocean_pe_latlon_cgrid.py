@@ -1424,22 +1424,28 @@ def _nemo_qco_zad_operands(
     live_v = jnp.concatenate(
         [jnp.zeros_like(live_v_raw[:1]), live_v_raw], axis=0)
 
-    # div_hor(Kbb,Kmm): source-oriented transport differences on the native
-    # mesh.  This same flux divergence predicts Kaa SSH and feeds wzv.
-    # div_hor.F90 uses the edge length, not the face area used by r3u/r3v:
-    # e2u*e3u*u in x and e1v*e3v*v in y.
-    e2u = jnp.asarray(grid.dy_u[:, 1:], dtype=eta_now.dtype)
-    e1v = jnp.asarray(grid.dx_v[1:, :], dtype=eta_now.dtype)
-    zu = e2u[..., None] * live_u_raw * u[:, 1:, :] * raw_umask
-    zv = e1v[..., None] * live_v_raw * v[1:, :, :] * raw_vmask
-    west = jnp.roll(zu, 1, axis=1)
-    south = jnp.concatenate([jnp.zeros_like(zv[:1]), zv[:-1]], axis=0)
+    # Reuse the already-certified row-1.3 source-associated continuity
+    # builder.  Its API is 2-D, so retain the NEMO vertical left order while
+    # evaluating each Kmm layer.  A local import avoids the barotropic module's
+    # optional EEN -> ocean_pe import cycle during module initialization.
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        nemo_literal_continuity_divergence,
+    )
     tmask = jnp.asarray(mask_3d, dtype=eta_now.dtype)
-    flux_div = ((zu - west + zv - south) / area_t[..., None]) * tmask
+    flux_levels = []
+    barotropic_div = jnp.zeros_like(eta_now)
+    for jk in range(nlev):
+        level = nemo_literal_continuity_divergence(
+            live_u[..., jk], live_v[..., jk], u[..., jk], v[..., jk],
+            u_mask_3d[..., jk], v_mask_3d[..., jk], grid,
+        ) * tmask[..., jk]
+        flux_levels.append(level)
+        barotropic_div = barotropic_div + level
+    flux_div = jnp.stack(flux_levels, axis=-1)
 
     fw = (jnp.zeros_like(eta_now) if freshwater_eta_tendency is None
           else jnp.asarray(freshwater_eta_tendency, dtype=eta_now.dtype))
-    eta_after = (eta_before - dt * jnp.sum(flux_div, axis=-1) + dt * fw
+    eta_after = (eta_before - dt * barotropic_div + dt * fw
                  ) * tmask[..., 0]
     h0 = jnp.sum(e3t0 * tmask, axis=-1)
     h0_safe = jnp.where(h0 > 0.0, h0, 1.0)
