@@ -71,3 +71,26 @@ Only an AT-BAR bottom stress and final update release row 1.4. Only an AT-BAR
 row 1.4 releases rows 2--6, then the free-surface-filter, momentum-RHS, and
 tracer-tail chains in NEMO execution order. The identity, missing-stream, and
 four-step-`nextafter` controls must be red-capable.
+
+## Loader correction after the first score stopped
+
+Blocks 1--3 completed with the registered 211/223 bracket, and all twelve new
+streams are the required 90,944-byte full-halo products. The first scorer
+stopped before emitting an artifact while loading the pre-existing
+`spg_dump_zu_frc.bin`: 10,348 doubles cannot be reshaped to `(203,56)`.
+
+This is a loader defect, not a writer defect. NEMO declares `zu_frc,zv_frc`
+as `REAL(wp), DIMENSION(A2D(0))` at `dynspg_ts.F90:168`; `A2D(0)` is the
+halo-free `(199,52)` domain. The new `zu_trd/zu_spg`, depths, coefficients, and
+outputs are declared `DIMENSION(jpi,jpj)` at `:166-174` and remain full-halo.
+The amended scorer uses the deterministic writer's interior loader for the two
+frozen forcing streams only, asserts their exact 82,784-byte size, and records
+both layouts in its receipt. No arm, bar, population, arithmetic, or
+disposition rule changes.
+
+The exact bracket SHA-256
+`f9ff8f957c3228a882339b7ce5e5e423ad22f4e0d0e7f9839dc761f242841854`
+is retained; rebuilding or rerunning NEMO would add no information. The
+cleanliness gate is narrowed to tracked paths: staged or unstaged tracked edits
+still stop scoring, while unrelated untracked campaign outputs do not. The
+SHA-pinned producer/model-diff gate remains unchanged.

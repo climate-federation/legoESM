@@ -93,9 +93,13 @@ def main() -> int:
     root = Path(__file__).resolve().parents[4]
     head = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    # Shared campaign worktrees intentionally carry unrelated untracked run
+    # artifacts. Ignore those, but still stop on staged or unstaged tracked
+    # edits to any committed scorer/model input.
     if subprocess.check_output(
-            ["git", "status", "--porcelain"], cwd=root, text=True).strip():
-        raise SystemExit("clean scorer checkout required")
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=root, text=True).strip():
+        raise SystemExit("tracked-clean scorer checkout required")
     subprocess.run(
         ["git", "cat-file", "-e", f"{args.producer}^{{commit}}"],
         cwd=root, check=True)
@@ -153,6 +157,17 @@ def main() -> int:
     def load(name: str) -> np.ndarray:
         return inherited._load_full(str(on / name), jpi, jpj, hls)
 
+    def load_interior(name: str) -> np.ndarray:
+        """Load a NEMO A2D(0) stream, whose declaration excludes halos."""
+        ni, nj = jpi - 2 * hls, jpj - 2 * hls
+        path = on / name
+        expected_bytes = ni * nj * np.dtype("<f8").itemsize
+        if path.stat().st_size != expected_bytes:
+            raise SystemExit(
+                f"interior A2D(0) stream {name} has {path.stat().st_size} "
+                f"bytes, expected {expected_bytes}")
+        return inherited._load_interior(str(path), ni, nj)
+
     # The mesh's first level is the exact active 2-D U/V population.  The
     # deterministic streams are already halo-cropped by inherited._load_full.
     import xarray as xr
@@ -170,7 +185,11 @@ def main() -> int:
 
     un, vn = load("cor2d_dump_ua_e_in_substep1.bin"), load("cor2d_dump_va_e_in_substep1.bin")
     cor_u, cor_v = load("cor2d_dump_zu_trd_substep1.bin"), load("cor2d_dump_zv_trd_substep1.bin")
-    frc_u, frc_v = load("spg_dump_zu_frc.bin"), load("spg_dump_zv_frc.bin")
+    # dynspg_ts.F90:168 declares these DIMENSION(A2D(0)); their writers emit
+    # the genuine 199x52 interior grid. The new jpi,jpj operands remain full
+    # halo 203x56 products and continue through load() above.
+    frc_u = load_interior("spg_dump_zu_frc.bin")
+    frc_v = load_interior("spg_dump_zv_frc.bin")
     zcdu, zcdv = load(NEW_STREAMS[0]), load(NEW_STREAMS[1])
     hu, hv = load(NEW_STREAMS[2]), load(NEW_STREAMS[3])
     hur, hvr = load(NEW_STREAMS[4]), load(NEW_STREAMS[5])
@@ -223,6 +242,14 @@ def main() -> int:
         "producer_model_diff_zero": True,
         "bars": {"pointwise": POINTWISE},
         "runtime": {"rDt_e_seconds": rdt, "icycle": icycle, "nn_e": nn_e},
+        "stream_layout": {
+            "new_row26_operands": "full_halo_jpi_jpj_203x56",
+            "spg_dump_zu_frc": "interior_A2D(0)_199x52",
+            "spg_dump_zv_frc": "interior_A2D(0)_199x52",
+            "nemo_declaration": (
+                "dynspg_ts.F90:168 REAL(wp), DIMENSION(A2D(0)) :: "
+                "zu_frc, zv_frc"),
+        },
         "nemo_source_identities": {
             "reciprocal_depth": reciprocal,
             "bottom_stress_commit": bottom,
