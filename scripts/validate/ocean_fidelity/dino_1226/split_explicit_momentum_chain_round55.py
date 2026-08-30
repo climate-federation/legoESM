@@ -41,6 +41,7 @@ ROUND63_SHA = "3a1a25ca328761b1bcbeb87953751a3a15b1ac00852b2ff62fd4223d107d24e0"
 ROUND64_SHA = "8858d60a51b07181e290fead087e4bab69c0d15e271bbdecb7d458ba12d4e4c7"
 ROUND65_SHA = "6b4a80ddaf020916770dd0eb0005a6ce9dd69ffe79a6604a0e2125cfbadf4c60"
 ROUND66_SHA = "673d9dc978ac4c05a0c8a6995f7c9e1870d9502afedff9b765045df23014785f"
+ROUND67_SHA = "2c1c1819f08cc07d9aa90fd43624285fe276558bbb5bba84aa97b3b83b345d95"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -70,6 +71,10 @@ KAPPA_HELD_SHA = {
     "eiv_dump_zhw.bin": "60b23de68ef7eff2219725a3b1f0abf732b2dc78879c7097cf58cca0e6a8260f",
     "eiv_dump_zRo.bin": "b2465f3e63f1ea4332a8fda2bb4785b45577f8cc939cf5957d6497600a9e0b24",
     "eiv_dump_zaeiw.bin": "adc570d4d7e385ebe54f7cef0e249e391c6b5eb193acbd4315feb50cf035db44",
+}
+KAPPA_GEOMETRY_SHA = {
+    "eiv_dump_e3w.bin": "fa204dd2ea7f02af0c5fddda5c61255e0db916b429729311444d21a737c12a3b",
+    "eiv_dump_rn2b.bin": "b419cf3ef5a6bba9100e37ead3e481b7e1d0da4a11709c5dcd55d43fec1770c5",
 }
 FOCUS = [(11, 1), (12, 1), (13, 1), (13, 23)]
 POINTWISE_BAR = 1.0e-15
@@ -134,6 +139,7 @@ def main() -> int:
     parser.add_argument("--round64", type=Path)
     parser.add_argument("--round65", type=Path)
     parser.add_argument("--round66", type=Path)
+    parser.add_argument("--round67", type=Path)
     parser.add_argument("--hold-slow-forcing", action="store_true")
     parser.add_argument("--oracle-transport", action="store_true")
     parser.add_argument("--capture-cycle", action="store_true")
@@ -142,6 +148,7 @@ def main() -> int:
     parser.add_argument("--capture-bolus-operands", action="store_true")
     parser.add_argument("--capture-kappa-operands", action="store_true")
     parser.add_argument("--literal-kappa-reduction", action="store_true")
+    parser.add_argument("--capture-kappa-geometry", action="store_true")
     parser.add_argument("--raw-artifact", type=Path, required=True)
     parser.add_argument("--nemo-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -282,6 +289,19 @@ def main() -> int:
             raise SystemExit("round 66 does not release the literal reduction")
     elif args.round66 is not None:
         raise SystemExit("--round66 requires --literal-kappa-reduction")
+    prior67 = None
+    if args.capture_kappa_geometry:
+        if not args.literal_kappa_reduction:
+            raise SystemExit(
+                "--capture-kappa-geometry requires --literal-kappa-reduction")
+        if (args.round67 is None
+                or _sha(args.round67.resolve()) != ROUND67_SHA):
+            raise SystemExit("official round-67 null receipt required")
+        prior67 = json.loads(args.round67.read_text())
+        if prior67.get("disposition") != "ROW8_8_GM_COEFFICIENT_DIVERGED_ZN":
+            raise SystemExit("round 67 does not release the geometry peel")
+    elif args.round67 is not None:
+        raise SystemExit("--round67 requires --capture-kappa-geometry")
     if _sha(args.raw_artifact.resolve()) != RAW_ARTIFACT_SHA:
         raise SystemExit("admitted held row-8 artifact changed")
     held = args.held_dir.resolve()
@@ -296,6 +316,10 @@ def main() -> int:
         for name, expected in KAPPA_HELD_SHA.items():
             if not (held / name).is_file() or _sha(held / name) != expected:
                 raise SystemExit(f"held GM coefficient operand changed: {name}")
+    if args.capture_kappa_geometry:
+        for name, expected in KAPPA_GEOMETRY_SHA.items():
+            if not (held / name).is_file() or _sha(held / name) != expected:
+                raise SystemExit(f"held GM geometry operand changed: {name}")
 
     set_policy(PrecisionPolicy.fp64())
     if jax.default_backend() != "cpu" or not jax.config.jax_enable_x64:
@@ -400,9 +424,26 @@ def main() -> int:
         diagnostic_kwargs["return_diagnostics"] = True
         replay, diagnostics = original_kappa(
             *kappa_args, **diagnostic_kwargs)
+        raw_operands = {}
+        if args.capture_kappa_geometry:
+            if not all(name in kappa_kwargs for name in
+                       ("rho_0", "g", "active_3d", "jacobian", "slope_n2")):
+                raise SystemExit("production kappa call omitted registered operands")
+            raw_e3w, raw_wmask, raw_pn2 = gm_module._nemo_wpoint_e3w_wmask_n2(
+                kappa_args[0], kappa_args[1], kappa_args[2], kappa_args[6],
+                kappa_args[10], kappa_kwargs["rho_0"], kappa_kwargs["g"],
+                kappa_kwargs["active_3d"],
+                slope_n2=kappa_kwargs["slope_n2"],
+                jacobian=kappa_kwargs["jacobian"])
+            raw_operands = {
+                "e3w": np.asarray(raw_e3w),
+                "wmask": np.asarray(raw_wmask),
+                "pn2": np.asarray(raw_pn2),
+            }
         kappa_captures.append((
             np.asarray(result), np.asarray(replay),
-            {name: np.asarray(value) for name, value in diagnostics.items()}))
+            {name: np.asarray(value) for name, value in diagnostics.items()},
+            raw_operands))
         return result
 
     model_module.add_bolus_to_advecting_flux = observe
@@ -575,11 +616,12 @@ def main() -> int:
             "factorial_oracle_slope_oracle_aeiu": bm(oracle_both),
         }
     kappa_operand_metrics = {}
+    kappa_geometry_metrics = {}
     if args.capture_kappa_operands:
         if len(kappa_captures) != 1:
             raise SystemExit(
                 f"expected one Treguier coefficient call, got {len(kappa_captures)}")
-        kappa_result, kappa_replay, diagnostics = kappa_captures[0]
+        kappa_result, kappa_replay, diagnostics, raw_kappa = kappa_captures[0]
         if not np.array_equal(kappa_result, kappa_replay):
             raise SystemExit("diagnostic replay changed the production kappa")
         oracle2 = {
@@ -600,6 +642,22 @@ def main() -> int:
         kappa_operand_metrics["aeiu_face"] = km(aeiu[..., 0], oracle_aeiu[..., 0])
         kappa_operand_metrics["oracle_zaeiw_to_aeiu"] = km(
             oracle_face, oracle_aeiu[..., 0])
+        if args.capture_kappa_geometry:
+            oracle_e3w = _load(held / "eiv_dump_e3w.bin")
+            oracle_pn2 = _load(held / "eiv_dump_rn2b.bin")
+            raw_e3w = raw_kappa["e3w"]
+            if raw_e3w.ndim == 1:
+                raw_e3w = np.broadcast_to(
+                    raw_e3w[None, None, :], raw_kappa["pn2"].shape)
+            wet_w = np.asarray(raw_kappa["wmask"][..., :35], dtype=bool)
+            def gm(value, oracle_value):
+                return sweep.metrics(
+                    np.asarray(value)[..., :35], oracle_value, wet_w,
+                    FOCUS, ACCUMULATION_BAR)
+            kappa_geometry_metrics = {
+                "e3w_Kmm": gm(raw_e3w, oracle_e3w),
+                "rn2b": gm(raw_kappa["pn2"], oracle_pn2),
+            }
     specs = (
         ("8.3", "uu(Kmm) / zptu", "traadv.F90:301-304", "un", POINTWISE_BAR),
         ("8.4", "e2u", "traadv.F90:329", "e2u", POINTWISE_BAR),
@@ -672,6 +730,10 @@ def main() -> int:
         "round66_reduction_debt_admitted": (
             prior66 is None
             or not prior66["kappa_operand_metrics"]["zn"]["pass"]),
+        "round67_reduction_null_admitted": (
+            prior67 is None
+            or prior67["kappa_operand_metrics"]["zhw"]["max_column_error"]
+            == prior66["kappa_operand_metrics"]["zhw"]["max_column_error"]),
         "round56_unheld_red": (
             prior56 is None
             or prior56["rows"][0]["status"] == "DIVERGED"),
@@ -722,6 +784,16 @@ def main() -> int:
                 perturbed_zaeiw, oracle_zaeiw)["pass"],
             "zaeiw_zonal_roll_plant": not km(
                 np.roll(oracle_zaeiw, 1, axis=1), oracle_zaeiw)["pass"],
+        })
+    if args.capture_kappa_geometry:
+        controls.update({
+            "kappa_geometry_capture_present": bool(raw_kappa),
+            "e3w_level_roll_plant": not sweep.metrics(
+                np.roll(raw_e3w[..., :35], 1, axis=2), oracle_e3w,
+                wet_w, FOCUS, ACCUMULATION_BAR)["pass"],
+            "rn2b_level_roll_plant": not sweep.metrics(
+                np.roll(raw_kappa["pn2"][..., :35], 1, axis=2), oracle_pn2,
+                wet_w, FOCUS, ACCUMULATION_BAR)["pass"],
         })
     controls["all_scored_finite"] = all(
         row.get("status") == "ORDERED_BLOCKED"
@@ -774,6 +846,14 @@ def main() -> int:
                         f"ROW8_8_GM_COEFFICIENT_AT_BAR_DOWNSTREAM_{first}")
                        if first_kappa is None else
                        f"ROW8_8_GM_COEFFICIENT_DIVERGED_{first_kappa.upper()}")
+    if args.capture_kappa_geometry and valid:
+        e3w_pass = kappa_geometry_metrics["e3w_Kmm"]["pass"]
+        rn2_pass = kappa_geometry_metrics["rn2b"]["pass"]
+        disposition = ("ROW8_8_LOCALIZED_TO_KMM_E3W"
+                       if not e3w_pass and rn2_pass else
+                       "ROW8_8_LOCALIZED_TO_RN2B"
+                       if not rn2_pass else
+                       "ROW8_8_KAPPA_GEOMETRY_AT_BAR")
     nemo = args.nemo_root.resolve()
     receipt = {
         "schema": ("dino-split-explicit-momentum-chain-round64-v1"
@@ -798,6 +878,8 @@ def main() -> int:
            if args.capture_bolus_operands else {}),
         **({"kappa_operand_metrics": kappa_operand_metrics}
            if args.capture_kappa_operands else {}),
+        **({"kappa_geometry_metrics": kappa_geometry_metrics}
+           if args.capture_kappa_geometry else {}),
         "focus_ji": [list(x) for x in FOCUS],
         "bindings": {
             "round54": _sha(args.round54.resolve()),
@@ -820,12 +902,17 @@ def main() -> int:
                if args.capture_kappa_operands else {}),
             **({"round66": _sha(args.round66.resolve())}
                if args.literal_kappa_reduction else {}),
+            **({"round67": _sha(args.round67.resolve()),
+                **{name: _sha(held / name) for name in KAPPA_GEOMETRY_SHA}}
+               if args.capture_kappa_geometry else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(
                 root / "docs/ocean/fidelity" /
-                ("PREREG_split_explicit_momentum_chain_round67.md"
+                ("PREREG_split_explicit_momentum_chain_round68.md"
+                 if args.capture_kappa_geometry else
+                 "PREREG_split_explicit_momentum_chain_round67.md"
                  if args.literal_kappa_reduction else
                  "PREREG_split_explicit_momentum_chain_round66.md"
                  if args.capture_kappa_operands else
@@ -847,7 +934,8 @@ def main() -> int:
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
             "nemo_ldftra": _sha(nemo / "cfgs/DINO/MY_SRC/ldftra.F90"),
         },
-        "arm": ("literal_kappa_reduction" if args.literal_kappa_reduction else
+        "arm": ("kappa_geometry_capture" if args.capture_kappa_geometry else
+                "literal_kappa_reduction" if args.literal_kappa_reduction else
                 "kappa_operand_capture" if args.capture_kappa_operands else
                 "bolus_operand_capture" if args.capture_bolus_operands else
                 "live_thickness_entry" if args.live_thickness_entry else
