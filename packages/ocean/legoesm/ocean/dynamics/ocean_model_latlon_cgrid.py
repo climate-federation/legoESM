@@ -4944,6 +4944,10 @@ class LatLonCGridOceanModel:
                 native_prd_TS=_gm_native_prd_TS,
                 native_slope_pn2=_gm_native_pn2,
                 native_slope_e3w=_gm_native_e3w,
+                # tra_ldf runs after dynamics but e3u/e3v are indexed Kmm:
+                # carry the step-entry Nnn SSH rather than recomputing from
+                # state_new.eta (Naa). stpmlf.F90:528,548 + scheme.h90:73-74.
+                redi_flux_eta=state.eta.data,
                 return_bolus_transport=_want_bolus,
                 dt=dt,
                 eos_depth=getattr(_cfg_b, "eos_depth", "insitu"),
@@ -9874,7 +9878,9 @@ class LatLonCGridOceanModel:
                 omega=_cfg_b.omega,  # see the sibling call's comment above
                 kappa_redi_override=_kri_static,
                 kappa_redi_v_override=_kri_v_static,
-                density_jacobian=_gm_dj, dt=dt, eos_depth=_eos_depth)
+                density_jacobian=_gm_dj,
+                redi_flux_eta=state.eta.data,
+                dt=dt, eos_depth=_eos_depth)
             dT_n = dT_n + dt * dT_gm    # noqa: N806
             dS_n = dS_n + dt * dS_gm    # noqa: N806
             if gm_cfg.implicit_K33:

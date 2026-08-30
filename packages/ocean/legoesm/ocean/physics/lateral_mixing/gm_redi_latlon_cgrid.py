@@ -3730,6 +3730,7 @@ def gm_redi_tracer_tendency_latlon(
     native_prd_TS: tuple[jnp.ndarray, jnp.ndarray] | None = None,
     native_slope_pn2: jnp.ndarray | None = None,
     native_slope_e3w: jnp.ndarray | None = None,
+    redi_flux_eta: jnp.ndarray | None = None,
     dt: float | None = None,
     return_bolus_transport: bool = False,
     eos_depth: str = "insitu",
@@ -3747,6 +3748,12 @@ def gm_redi_tracer_tendency_latlon(
     T, S : (n_lat, n_lon, nlev)
     eta : (n_lat, n_lon)
         Sea-surface height.
+    redi_flux_eta : (n_lat, n_lon) or None
+        Optional carried Kmm sea-surface height used only to build
+        traldf_iso's live-QCO e3u/e3v flux faces. NEMO builds the lateral
+        tracer flux after the dynamics update but indexes these faces at Kmm,
+        so the MLF model step supplies its step-entry eta here. ``None`` keeps
+        same-level callers byte-identical.
     H_bathy : (n_lat, n_lon)
         Bottom depth (positive).
     grid : LatLonGrid
@@ -4127,8 +4134,9 @@ def gm_redi_tracer_tendency_latlon(
             _umask3, _vmask3, _ = nemo_iso_face_masks(
                 u_mask, v_mask, _active_3d)
             _e3t0 = jnp.asarray(_e3t0, dtype=T.dtype)[..., :T.shape[-1]]
+            _flux_eta = eta if redi_flux_eta is None else redi_flux_eta
             _flux_e3u, _flux_e3v = nemo_qco_live_face_thicknesses(
-                eta, z_coord, _e3t0, _e3t0, _umask3, _vmask3)
+                _flux_eta, z_coord, _e3t0, _e3t0, _umask3, _vmask3)
         _positions = getattr(cfg, "slope_positions", "mode_b")
         if _positions not in ("mode_b", "nemo_native"):
             raise ValueError(
