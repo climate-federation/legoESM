@@ -1125,6 +1125,11 @@ class BarotropicConfig(NamedTuple):
     # retains the shared FV operator. ``nemo_literal`` preserves NEMO's
     # e2u*U*H / e1v*V*H operand order and multiply-by-reciprocal divergence.
     barotropic_continuity_evaluation: str = "generic"
+    # Frozen EEN coefficient construction. ``generic`` retains the shared
+    # AL81 association. ``nemo_literal`` materializes NEMO dyn_cor_2D_init's
+    # eight coefficients with its triad, vertical recurrence, and post-factor
+    # association from bridge-carried raw QCO operands.
+    barotropic_een_coefficient_evaluation: str = "generic"
     # Arithmetic used only for the 3-D -> 2-D velocity reduction that seeds
     # the split-explicit window. ``generic`` retains the shared fused stacked
     # reduction byte-for-byte. ``nemo_literal`` preserves the active DINO MLF

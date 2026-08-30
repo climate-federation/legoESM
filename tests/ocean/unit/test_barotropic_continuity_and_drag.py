@@ -894,11 +894,15 @@ class TestBarotropicSeedFaceDepth:
             c = dino_config_for_recipe(name)
             assert c.barotropic_seed_face_depth == "nemo_ssh_avg", name
             assert c.barotropic_seed_evaluation == "nemo_literal", name
+            assert (c.barotropic_een_coefficient_evaluation
+                    == "nemo_literal"), name
             assert c.barotropic_pgf_evaluation == "nemo_literal", name
             grid = create_latlon_grid(n_lat=8, n_lon=16)
             mc, _ = dino_lat_lon_model_config(grid, c)
             assert mc.barotropic.barotropic_seed_face_depth == "nemo_ssh_avg", name
             assert mc.barotropic.barotropic_seed_evaluation == "nemo_literal", name
+            assert (mc.barotropic.barotropic_een_coefficient_evaluation
+                    == "nemo_literal"), name
             assert mc.barotropic.barotropic_pgf_evaluation == "nemo_literal", name
 
         for name, spec in DINO_RECIPES.items():
@@ -909,4 +913,5 @@ class TestBarotropicSeedFaceDepth:
             # recipe must stay at the bit-identical legacy default.
             assert c.barotropic_seed_face_depth == "min_rule", name
             assert c.barotropic_seed_evaluation == "generic", name
+            assert c.barotropic_een_coefficient_evaluation == "generic", name
             assert c.barotropic_pgf_evaluation == "generic", name

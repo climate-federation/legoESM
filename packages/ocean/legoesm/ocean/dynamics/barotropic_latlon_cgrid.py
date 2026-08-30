@@ -689,11 +689,123 @@ def _dissipation_coeffs(config, grid, area, dt_s, dtype, mask):
             div_damp_coeff, div_damp_area_u, div_damp_area_v)
 
 
+def _nemo_literal_een_coefficients(eta, z_coord, dtype):
+    """Materialize dynspg_ts.F90:1517-1565's eight frozen coefficients."""
+    raw = getattr(z_coord, "nemo_een_barotropic", None)
+    if raw is None:
+        raise ValueError(
+            "barotropic_een_coefficient_evaluation='nemo_literal' requires "
+            "bridge-carried raw NEMO EEN/QCO operands")
+    if eta is None or eta.shape != raw.ff_f.shape:
+        raise ValueError(
+            "literal NEMO EEN coefficients require eta at the native A2D "
+            f"shape {raw.ff_f.shape}; got {None if eta is None else eta.shape}")
+    b = jax.lax.optimization_barrier
+    one = jnp.asarray(1.0, dtype=dtype)
+    half = jnp.asarray(0.5, dtype=dtype)
+    quarter = jnp.asarray(0.25, dtype=dtype)
+    r1_12 = jnp.asarray(1.0 / 12.0, dtype=dtype)
+    eta = jnp.asarray(eta, dtype=dtype)
+    ff = jnp.asarray(raw.ff_f, dtype=dtype)
+    e3u0 = jnp.asarray(raw.e3u_0, dtype=dtype)
+    e3v0 = jnp.asarray(raw.e3v_0, dtype=dtype)
+    e3f0 = jnp.asarray(raw.e3f_0, dtype=dtype)
+    umask = jnp.asarray(raw.umask, dtype=dtype)
+    vmask = jnp.asarray(raw.vmask, dtype=dtype)
+    fmask = jnp.asarray(raw.fmask, dtype=dtype)
+
+    def recip(depth, wet):
+        return b(wet / b(depth + one - wet))
+
+    wet_u = (jnp.asarray(raw.hu_0, dtype=dtype) > 0.0).astype(dtype)
+    wet_v = (jnp.asarray(raw.hv_0, dtype=dtype) > 0.0).astype(dtype)
+    wet_f = (jnp.asarray(raw.hf_0, dtype=dtype) > 0.0).astype(dtype)
+    r1_hu0 = recip(jnp.asarray(raw.hu_0, dtype=dtype), wet_u)
+    r1_hv0 = recip(jnp.asarray(raw.hv_0, dtype=dtype), wet_v)
+    r1_hf0 = recip(jnp.asarray(raw.hf_0, dtype=dtype), wet_f)
+    e1t = jnp.asarray(raw.e1t, dtype=dtype)
+    e2t = jnp.asarray(raw.e2t, dtype=dtype)
+    e1u = jnp.asarray(raw.e1u, dtype=dtype)
+    e2u = jnp.asarray(raw.e2u, dtype=dtype)
+    e1v = jnp.asarray(raw.e1v, dtype=dtype)
+    e2v = jnp.asarray(raw.e2v, dtype=dtype)
+    e1f = jnp.asarray(raw.e1f, dtype=dtype)
+    e2f = jnp.asarray(raw.e2f, dtype=dtype)
+    area_eta = b(b(e1t * e2t) * eta)
+    east = jnp.roll(area_eta, -1, axis=1)
+    north = jnp.roll(area_eta, -1, axis=0)
+    northeast = jnp.roll(north, -1, axis=1)
+    r3u = b(b(half * b(area_eta + east)) * r1_hu0 / b(e1u * e2u))
+    r3v = b(b(half * b(area_eta + north)) * r1_hv0 / b(e1v * e2v))
+    quad = b(b(area_eta + east) + b(north + northeast))
+    r3f = b(b(quarter * quad) * r1_hf0 / b(e1f * e2f))
+    e3u = b(e3u0 * b(one + r3u[..., None] * umask) * umask)
+    e3v = b(e3v0 * b(one + r3v[..., None] * vmask) * vmask)
+    e3f = b(e3f0 * b(one + r3f[..., None] * fmask))
+    q = b(ff[..., None] / e3f)
+
+    def shift(value, di=0, dj=0):
+        out = jnp.roll(value, di, axis=1) if di else value
+        return jnp.roll(out, dj, axis=0) if dj else out
+
+    def triad(a, c, d):
+        return b(b(a + c) + d)
+
+    def coefficient(face, neighbor, neighbor_mask, q_args,
+                    neighbor_metric, local_metric, r1_h):
+        qsum = triad(*q_args)
+        term = b(b(b(face * neighbor) * neighbor_mask) * qsum)
+        acc = jnp.zeros_like(r1_h)
+        for jk in range(term.shape[-1]):
+            acc = b(acc + term[..., jk])
+        return b(b(b(b(r1_12 * b(one / local_metric)) * r1_h)
+                     * neighbor_metric) * acc)
+
+    uq = {
+        "nw": (shift(q, 1, 0), q, shift(q, 0, 1)),
+        "ne": (shift(q, 0, 1), q, shift(q, -1, 0)),
+        "sw": (q, shift(q, 0, 1), shift(q, 1, 1)),
+        "se": (shift(q, -1, 1), shift(q, 0, 1), q),
+    }
+    un = {
+        "nw": (e3v, vmask, e1v),
+        "ne": (shift(e3v, -1, 0), shift(vmask, -1, 0), shift(e1v, -1, 0)),
+        "sw": (shift(e3v, 0, 1), shift(vmask, 0, 1), shift(e1v, 0, 1)),
+        "se": (shift(e3v, -1, 1), shift(vmask, -1, 1), shift(e1v, -1, 1)),
+    }
+    vq = {
+        "se": (shift(q, 1, 0), q, shift(q, 0, 1)),
+        "sw": (shift(q, 1, 1), shift(q, 1, 0), q),
+        "ne": (shift(q, 0, -1), q, shift(q, 1, 0)),
+        "nw": (q, shift(q, 1, 0), shift(q, 1, -1)),
+    }
+    vn = {
+        "nw": (shift(e3u, 1, -1), shift(umask, 1, -1), shift(e2u, 1, -1)),
+        "ne": (shift(e3u, 0, -1), shift(umask, 0, -1), shift(e2u, 0, -1)),
+        "sw": (shift(e3u, 1, 0), shift(umask, 1, 0), shift(e2u, 1, 0)),
+        "se": (e3u, umask, e2u),
+    }
+    r1_hu = b(r1_hu0 / b(one + r3u))
+    r1_hv = b(r1_hv0 / b(one + r3v))
+    out = {}
+    for corner in ("nw", "ne", "sw", "se"):
+        neighbor, neighbor_mask, metric = un[corner]
+        out[f"ffu_{corner}"] = coefficient(
+            e3u, neighbor, neighbor_mask, uq[corner], metric, e1u, r1_hu)
+        neighbor, neighbor_mask, metric = vn[corner]
+        out[f"ffv_{corner}"] = coefficient(
+            e3v, neighbor, neighbor_mask, vq[corner], metric, e2v, r1_hv)
+    return out
+
+
 def _build_een_barotropic_inputs(h_k, grid, mask, u_mask, v_mask, dtype,
                                  metric_complete=False,
                                  een_q_boundary="neumann_fill",
                                  een_e3f_scheme="min",
-                                 dz_ref=None):
+                                 dz_ref=None,
+                                 coefficient_evaluation="generic",
+                                 eta=None,
+                                 z_coord=None):
     """Precompute the geometry inputs for the EEN barotropic Coriolis (node 16).
 
     NEMO ``dyn_spg_ts::dyn_cor_2D`` applies an ENSTROPHY-conserving EEN
@@ -734,6 +846,14 @@ def _build_een_barotropic_inputs(h_k, grid, mask, u_mask, v_mask, dtype,
     3-D face masks, the column depths ``hu``/``hv``, and the ``q_boundary``
     string the operator is to be called with — all static geometry/config.
     """
+    if coefficient_evaluation not in ("generic", "nemo_literal"):
+        raise ValueError(
+            "unknown barotropic_een_coefficient_evaluation "
+            f"{coefficient_evaluation!r}; expected 'generic' or 'nemo_literal'")
+    if coefficient_evaluation == "nemo_literal" and not metric_complete:
+        raise ValueError(
+            "barotropic_een_coefficient_evaluation='nemo_literal' requires "
+            "barotropic_coriolis='een_metric'")
     e3u = min_cell_to_uface(h_k).astype(dtype)      # (nlat, nlon+1, nlev)
     e3v = min_cell_to_vface(h_k, grid).astype(dtype)  # (nlat+1, nlon, nlev)
     hu = jnp.sum(e3u, axis=-1)                       # (nlat, nlon+1)
@@ -775,6 +895,10 @@ def _build_een_barotropic_inputs(h_k, grid, mask, u_mask, v_mask, dtype,
         geom = ensure_geometry(grid)   # idempotent: pass-through if already geom
         out.update(e1u=geom.dx_u.astype(dtype), e1v=geom.dx_v.astype(dtype),
                    e2u=geom.dy_u.astype(dtype), e2v=geom.dy_v.astype(dtype))
+    if coefficient_evaluation == "nemo_literal":
+        out["literal_coefficients"] = _nemo_literal_een_coefficients(
+            eta, z_coord, dtype)
+    out["coefficient_evaluation"] = coefficient_evaluation
     return out
 
 
@@ -818,6 +942,55 @@ def een_barotropic_coriolis(U_bar, V_bar, pre, eps=1.0e-10):
       runaway (a free-surface mode via the barotropic PGF/continuity coupling) —
       it is a fidelity refinement over the metric-less "een".
     """
+    if pre.get("coefficient_evaluation", "generic") == "nemo_literal":
+        b = jax.lax.optimization_barrier
+        coeff = pre["literal_coefficients"]
+
+        def source_pair(first, second):
+            """Add two products without letting XLA reassociate the pair.
+
+            NEMO materializes each product and then executes the two binary
+            additions in source order.  ``optimization_barrier`` alone does
+            not stop XLA from reassociating the pair on CPU; the two-element
+            scan is the smallest JAX transform that preserves that association
+            while retaining JIT and reverse-mode autodiff support.
+            """
+            terms = jnp.stack((b(first), b(second)), axis=0)
+
+            def add_one(acc, term):
+                return b(acc + term), None
+
+            return jax.lax.scan(
+                add_one, jnp.zeros_like(first), terms)[0]
+
+        # Native NEMO arrays name the east/north face of T(i,j); legoESM
+        # stores redundant west/south faces. Apply first, map only afterward.
+        ua = U_bar[:, 1:]
+        va = V_bar[1:, :]
+        east_v = jnp.roll(va, -1, axis=1)
+        south_v = jnp.concatenate([jnp.zeros_like(va[:1]), va[:-1]], axis=0)
+        southeast_v = jnp.roll(south_v, -1, axis=1)
+        north_u = jnp.concatenate([ua[1:], jnp.zeros_like(ua[:1])], axis=0)
+        west_u = jnp.roll(ua, 1, axis=1)
+        northwest_u = jnp.roll(north_u, 1, axis=1)
+        u_nw = b(coeff["ffu_nw"] * va)
+        u_ne = b(coeff["ffu_ne"] * east_v)
+        u_sw = b(coeff["ffu_sw"] * south_v)
+        u_se = b(coeff["ffu_se"] * southeast_v)
+        cor_u_native = source_pair(
+            source_pair(u_nw, u_ne), source_pair(u_sw, u_se))
+        v_sw = b(coeff["ffv_sw"] * west_u)
+        v_se = b(coeff["ffv_se"] * ua)
+        v_nw = b(coeff["ffv_nw"] * northwest_u)
+        v_ne = b(coeff["ffv_ne"] * north_u)
+        cor_v_native = -source_pair(
+            source_pair(v_sw, v_se), source_pair(v_nw, v_ne))
+        cor_u = jnp.concatenate(
+            [cor_u_native[:, -1:], cor_u_native], axis=1)
+        cor_v = jnp.concatenate(
+            [jnp.zeros_like(cor_v_native[:1]), cor_v_native], axis=0)
+        return cor_u, cor_v
+
     nlev = pre["e3u"].shape[-1]
     U_src, V_src = U_bar, V_bar
     if pre.get("metric_complete", False):
@@ -848,7 +1021,12 @@ def barotropic_coriolis_een_pre_step(u_3d, v_3d, h_k, grid, mask, u_mask,
                                      metric_complete=False,
                                      een_q_boundary="neumann_fill",
                                      een_e3f_scheme="min",
-                                     dz_ref=None):
+                                     dz_ref=None,
+                                     coefficient_evaluation="generic",
+                                     eta=None,
+                                     z_coord=None,
+                                     pre=None,
+                                     return_pre=False):
     """Pre-step EEN barotropic Coriolis ``(cor_u, cor_v)`` for the live split.
 
     NEMO ``dynspg_ts.F90:296-300`` subtracts ``dyn_cor_2D(puu_b, pvv_b)`` — the
@@ -867,14 +1045,22 @@ def barotropic_coriolis_een_pre_step(u_3d, v_3d, h_k, grid, mask, u_mask,
     substep loop and the 3-D EEN caller pass, or this subtraction uses a
     different ``e3f`` at fully-dry vertices than the live term it cancels.
     """
-    pre = _build_een_barotropic_inputs(h_k, grid, mask, u_mask, v_mask, dtype,
-                                       metric_complete=metric_complete,
-                                       een_q_boundary=een_q_boundary,
-                                       een_e3f_scheme=een_e3f_scheme,
-                                       dz_ref=dz_ref)
+    if pre is None:
+        pre = _build_een_barotropic_inputs(
+            h_k, grid, mask, u_mask, v_mask, dtype,
+            metric_complete=metric_complete,
+            een_q_boundary=een_q_boundary,
+            een_e3f_scheme=een_e3f_scheme,
+            dz_ref=dz_ref,
+            coefficient_evaluation=coefficient_evaluation,
+            eta=eta,
+            z_coord=z_coord)
     U_bar, V_bar = _depth_average_to_faces(
         u_3d, v_3d, h_k, min_water_col, mask, u_mask, v_mask, grid)
-    return een_barotropic_coriolis(U_bar, V_bar, pre)
+    cor_u, cor_v = een_barotropic_coriolis(U_bar, V_bar, pre)
+    if return_pre:
+        return cor_u, cor_v, pre
+    return cor_u, cor_v
 
 
 def _run_substep_loop(
@@ -1463,6 +1649,7 @@ def barotropic_substeps_latlon_cgrid(
     u_now=None,
     v_now=None,
     substep_scale: int = 1,
+    een_pre_override=None,
 ) -> LatLonCGridOceanState:
     """Run barotropic substeps on a C-grid lat-lon grid.
 
@@ -1674,6 +1861,15 @@ def barotropic_substeps_latlon_cgrid(
         raise ValueError(
             "unknown barotropic_een_seed "
             f"{_een_seed!r}: must be one of ('window_start', 'nemo_kmm').")
+    _een_eval = getattr(
+        config.barotropic, "barotropic_een_coefficient_evaluation", "generic")
+    if _een_eval not in ("generic", "nemo_literal"):
+        raise ValueError(
+            "unknown barotropic_een_coefficient_evaluation "
+            f"{_een_eval!r}; expected 'generic' or 'nemo_literal'")
+    if een_pre_override is not None and _een_eval != "nemo_literal":
+        raise ValueError(
+            "een_pre_override is reserved for the nemo_literal coefficient path")
     _een_pre = None
     if _bt_cor in ("een", "een_metric") and add_barotropic_coriolis:
         # "een_metric" (node-16 finale) folds NEMO's e1v/r1_e1u (u) and e2u/
@@ -1687,14 +1883,23 @@ def barotropic_substeps_latlon_cgrid(
         # the SAME raw (unfilled, unmasked) ff_f/e3f as vor_een, so a card
         # that selects the NEMO-faithful options for the 3-D path must get
         # them here too (dynspg_ts.F90:1517-1531 vs dynvor.F90::vor_een).
-        _een_pre = _build_een_barotropic_inputs(
-            _h_k_een, grid, mask, u_mask, v_mask, eta.dtype,
-            metric_complete=(_bt_cor == "een_metric"),
-            een_q_boundary=getattr(config, "een_q_boundary", "neumann_fill"),
-            een_e3f_scheme=getattr(config, "een_e3f_scheme", "min"),
-            # SAME dz_ref the 3-D EEN caller forwards (ocean_pe_latlon_cgrid
-            # _bc_pv_flux(dz_ref=z_coord.dz_ref)) — see the helper docstring.
-            dz_ref=getattr(z_coord, "dz_ref", None))
+        if een_pre_override is not None:
+            _een_pre = een_pre_override
+        else:
+            _eta_een = (_eta_corr if (
+                _een_seed == "nemo_kmm" and _seed_override) else eta)
+            _een_pre = _build_een_barotropic_inputs(
+                _h_k_een, grid, mask, u_mask, v_mask, eta.dtype,
+                metric_complete=(_bt_cor == "een_metric"),
+                een_q_boundary=getattr(
+                    config, "een_q_boundary", "neumann_fill"),
+                een_e3f_scheme=getattr(config, "een_e3f_scheme", "min"),
+                # SAME dz_ref the 3-D EEN caller forwards
+                # (ocean_pe_latlon_cgrid _bc_pv_flux).
+                dz_ref=getattr(z_coord, "dz_ref", None),
+                coefficient_evaluation=_een_eval,
+                eta=_eta_een,
+                z_coord=z_coord)
 
     coeffs = _dissipation_coeffs(config, grid, _area, dt_s, eta.dtype, mask)
 

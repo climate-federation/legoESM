@@ -92,6 +92,13 @@ class NemoGrid(NamedTuple):
     e3w_0: np.ndarray | None = None      # (n_lat, n_lon, nlev) [m]
     e2u: np.ndarray | None = None        # u-face meridional extent [m]
     e1v: np.ndarray | None = None        # v-face zonal extent [m]
+    # Raw F-point/QCO operands used by dyn_spg_ts::dyn_cor_2D_init.  Keep
+    # these separate from reconstructed geometry: their last-bit arithmetic
+    # and wall rows are observable at the pointwise fidelity bar.
+    e3f_0: np.ndarray | None = None      # (n_lat, n_lon, nlev) [m]
+    fmask: np.ndarray | None = None      # (n_lat, n_lon, nlev)
+    e1f: np.ndarray | None = None        # F-point zonal extent [m]
+    e2f: np.ndarray | None = None        # F-point meridional extent [m]
 
 
 class NemoState(NamedTuple):
@@ -208,6 +215,10 @@ def read_nemo_mesh_mask(path: str, *, nn_hls: int = 1) -> NemoGrid:
         e3w_0=(m3("e3w_0") if "e3w_0" in m else None),
         e2u=(h2("e2u") if "e2u" in m else None),
         e1v=(h2("e1v") if "e1v" in m else None),
+        e3f_0=(m3("e3f_0") if "e3f_0" in m else None),
+        fmask=(m3("fmask") if "fmask" in m else None),
+        e1f=(h2("e1f") if "e1f" in m else None),
+        e2f=(h2("e2f") if "e2f" in m else None),
     )
 
 

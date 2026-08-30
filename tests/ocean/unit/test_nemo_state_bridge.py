@@ -196,6 +196,40 @@ def test_topo_bridge_metric_convention_default_is_bit_identical():
             getattr(out_default.geometry, f), getattr(out_exact.geometry, f))
 
 
+def test_topo_bridge_carries_raw_een_coefficient_operands_without_rebuilding():
+    """The literal dyn_cor_2D builder receives native mesh arrays bytewise.
+
+    Missing any member keeps the optional bundle absent; a partial bundle must
+    never be completed from lego geometry because last-bit metric association
+    and the wall rows are observable at the fidelity bar.
+    """
+    grid, state, _ = _synthetic_topo()
+    e3 = np.broadcast_to(
+        grid.e3t_1d[None, None, :], (TNY, TNX, TNZ)).copy()
+    fmask = np.array(grid.tmask, copy=True)
+    carried = grid._replace(
+        e3u_0=e3, e3v_0=e3 + 0.25, e3f_0=e3 + 0.5,
+        hu_0=np.sum(e3 * grid.umask, axis=-1),
+        hv_0=np.sum((e3 + 0.25) * grid.vmask, axis=-1),
+        fmask=fmask, e2u=grid.e2t + 1.0, e1v=grid.e1t + 2.0,
+        e1f=grid.e1t + 3.0, e2f=grid.e2t + 4.0)
+    out = bridge_nemo_to_legoesm_topo(
+        carried, state, periodic_i=True, full_step=True)
+    raw = out.z_coord.nemo_een_barotropic
+    assert raw is not None
+    for name in raw._fields:
+        if name == "hf_0":
+            expected = np.sum(carried.e3f_0 * carried.fmask, axis=-1)
+        else:
+            expected = getattr(carried, name)
+        np.testing.assert_array_equal(np.asarray(getattr(raw, name)), expected)
+
+    missing = carried._replace(e2f=None)
+    out_missing = bridge_nemo_to_legoesm_topo(
+        missing, state, periodic_i=True, full_step=True)
+    assert out_missing.z_coord.nemo_een_barotropic is None
+
+
 def test_topo_bridge_metric_convention_isotropic_forwards_and_raises():
     """metric_convention="nemo_isotropic" is forwarded to create_latlon_geometry:
     dy_T becomes dx_T (NEMO's pe1t=pe2t isotropic identity). The synthetic

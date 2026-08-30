@@ -4078,6 +4078,7 @@ class LatLonCGridOceanModel:
             _add_bt_cor = (
                 getattr(_cfg_b, "coriolis_scheme", "matsuno_split")
                 != "explicit_ab2")
+            _een_pre_shared = None
             if (not _add_bt_cor) and getattr(
                     _cfg_b, "barotropic_coriolis_split",
                     "frozen") == "live":
@@ -4129,7 +4130,11 @@ class LatLonCGridOceanModel:
                     )
                     _min_wc = jnp.asarray(
                         _cfg_b.min_water_column_m, dtype=F_slow_u.dtype)
-                    _cor_u_sub, _cor_v_sub = barotropic_coriolis_een_pre_step(
+                    _een_eval = getattr(
+                        _cfg_b.barotropic,
+                        "barotropic_een_coefficient_evaluation", "generic")
+                    (_cor_u_sub, _cor_v_sub,
+                     _een_pre_built) = barotropic_coriolis_een_pre_step(
                         state_mid.u.data, state_mid.v.data, h_k_pre, _grid,
                         state.land_mask.data, state.u_mask.data,
                         state.v_mask.data, _min_wc, F_slow_u.dtype,
@@ -4144,7 +4149,13 @@ class LatLonCGridOceanModel:
                             _cfg_b, "een_e3f_scheme", "min"),
                         # ...and the SAME dz_ref, or the fully-dry-vertex e3f
                         # differs from the live substep term this cancels.
-                        dz_ref=getattr(_zc, "dz_ref", None))
+                        dz_ref=getattr(_zc, "dz_ref", None),
+                        coefficient_evaluation=_een_eval,
+                        eta=state.eta.data,
+                        z_coord=_zc,
+                        return_pre=True)
+                    if _een_eval == "nemo_literal":
+                        _een_pre_shared = _een_pre_built
                     F_slow_u = (F_slow_u - _cor_u_sub) * state.u_mask.data
                     F_slow_v = (F_slow_v - _cor_v_sub) * state.v_mask.data
                     _add_bt_cor = True
@@ -4220,6 +4231,9 @@ class LatLonCGridOceanModel:
                 _baro_seed = dict(
                     _baro_seed, substep_scale=_barotropic_substep_scale,
                     u_now=state.u.data, v_now=state.v.data)
+                if _een_pre_shared is not None:
+                    _baro_seed = dict(
+                        _baro_seed, een_pre_override=_een_pre_shared)
             state_new, (Hu_avg, Hv_avg) = _baro_fn(
                 state_mid, dt_s, _nbaro,
                 _grid, _zc, _cfg_b,

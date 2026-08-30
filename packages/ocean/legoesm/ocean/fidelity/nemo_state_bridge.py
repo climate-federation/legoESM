@@ -49,6 +49,7 @@ from legoesm.ocean.fidelity.nemo_io import NemoBeforeState, NemoGrid, NemoState
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import LatLonCGridOceanState
 from legoesm.ocean.vertical import (
+    NemoEENBarotropicOperands,
     create_full_step_coordinate,
     create_z_star_from_thicknesses,
 )
@@ -60,6 +61,23 @@ class NemoBridgeOutput(NamedTuple):
     state: LatLonCGridOceanState
     land_mask: np.ndarray          # (n_lat, n_lon) surface wet mask
     f_match_max_abs: float         # max|geom.f_T - NEMO ff_t| — build self-check
+
+
+def _nemo_een_barotropic_operands(grid: NemoGrid):
+    """Return the raw dyn_cor_2D_init inputs when the mesh carries all of them."""
+    required = (grid.ff_f, grid.e3u_0, grid.e3v_0, grid.e3f_0,
+                grid.umask, grid.vmask, grid.fmask, grid.hu_0, grid.hv_0,
+                grid.e1t, grid.e2t, grid.e1u, grid.e2u,
+                grid.e1v, grid.e2v, grid.e1f, grid.e2f)
+    if any(value is None for value in required):
+        return None
+    hf_0 = (np.asarray(grid.e3f_0) * np.asarray(grid.fmask)).sum(axis=-1)
+    values = (grid.ff_f, grid.e3u_0, grid.e3v_0, grid.e3f_0,
+              grid.umask, grid.vmask, grid.fmask,
+              grid.hu_0, grid.hv_0, hf_0,
+              grid.e1t, grid.e2t, grid.e1u, grid.e2u,
+              grid.e1v, grid.e2v, grid.e1f, grid.e2f)
+    return NemoEENBarotropicOperands(*values)
 
 
 def _beta_plane_params(grid: NemoGrid):
@@ -183,6 +201,7 @@ def bridge_nemo_to_legoesm(
                       np.asarray(grid.e1u) * np.asarray(grid.e2u)),
         nemo_e1e2v_m=(None if grid.e1v is None else
                       np.asarray(grid.e1v) * np.asarray(grid.e2v)),
+        nemo_een_barotropic_m=_nemo_een_barotropic_operands(grid),
         nemo_e3w_source="mesh_reference",
     )
     H_max = float(np.sum(np.asarray(grid.e3t_1d)[:n_wet]))   # depth of the n_wet wet cells
@@ -733,6 +752,7 @@ def bridge_nemo_to_legoesm_topo(
                       np.asarray(grid.e1u) * np.asarray(grid.e2u)),
         nemo_e1e2v_m=(None if grid.e1v is None else
                       np.asarray(grid.e1v) * np.asarray(grid.e2v)),
+        nemo_een_barotropic_m=_nemo_een_barotropic_operands(grid),
         nemo_e3w_source=nemo_e3w_source,
     )
 

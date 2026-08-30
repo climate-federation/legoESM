@@ -1691,7 +1691,11 @@ class TestSurfaceTendencyPlacement:
             gm_redi_slope_prd_geometry_stage="current_step",
             gm_redi_slope_prd_evaluation="density_roundtrip",
             gm_redi_slope_face_thickness_evaluation="static_face",
-            gm_redi_slope_depth_evaluation="legacy_jacobian_t_surface")
+            gm_redi_slope_depth_evaluation="legacy_jacobian_t_surface",
+            # This fixture deliberately does not bridge the raw NEMO EEN
+            # coefficient operands.  Keep its unrelated surface-placement
+            # contrast on the byte-pinned generic coefficient builder.
+            barotropic_een_coefficient_evaluation="generic")
         g = dino_lat_lon_grid(cfg, n_lon=10)
         z = dino_lat_lon_vertical(g, cfg)  # MLF card needs its matching
                                            # partial-cell/masked-zco coord,

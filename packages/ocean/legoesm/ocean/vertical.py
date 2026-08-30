@@ -38,6 +38,28 @@ _AIMP_CU_MAX = 0.30
 _H_FLOOR = 1.0e-10
 
 
+class NemoEENBarotropicOperands(NamedTuple):
+    """Raw native-A2D operands for NEMO's frozen barotropic EEN builder."""
+    ff_f: jnp.ndarray
+    e3u_0: jnp.ndarray
+    e3v_0: jnp.ndarray
+    e3f_0: jnp.ndarray
+    umask: jnp.ndarray
+    vmask: jnp.ndarray
+    fmask: jnp.ndarray
+    hu_0: jnp.ndarray
+    hv_0: jnp.ndarray
+    hf_0: jnp.ndarray
+    e1t: jnp.ndarray
+    e2t: jnp.ndarray
+    e1u: jnp.ndarray
+    e2u: jnp.ndarray
+    e1v: jnp.ndarray
+    e2v: jnp.ndarray
+    e1f: jnp.ndarray
+    e2f: jnp.ndarray
+
+
 class OceanZStarCoordinate(NamedTuple):
     """Static vertical grid definition (independent of eta).
 
@@ -107,6 +129,7 @@ class OceanZStarCoordinate(NamedTuple):
     nemo_e1e2t: jnp.ndarray | None = None
     nemo_e1e2u: jnp.ndarray | None = None
     nemo_e1e2v: jnp.ndarray | None = None
+    nemo_een_barotropic: NemoEENBarotropicOperands | None = None
 
 
 def create_ocean_z_star(
@@ -210,6 +233,7 @@ def create_z_star_from_thicknesses(
     nemo_e3w_source="mesh_reference",
     nemo_hu_0_m=None, nemo_hv_0_m=None, nemo_e1e2t_m=None,
     nemo_e1e2u_m=None, nemo_e1e2v_m=None,
+    nemo_een_barotropic_m=None,
 ) -> OceanZStarCoordinate:
     """Build a z* coordinate from EXPLICIT reference layer thicknesses.
 
@@ -320,6 +344,29 @@ def create_z_star_from_thicknesses(
     nemo_e1e2t = _raw_horizontal(nemo_e1e2t_m, "nemo_e1e2t_m")
     nemo_e1e2u = _raw_horizontal(nemo_e1e2u_m, "nemo_e1e2u_m")
     nemo_e1e2v = _raw_horizontal(nemo_e1e2v_m, "nemo_e1e2v_m")
+    nemo_een_barotropic = None
+    if nemo_een_barotropic_m is not None:
+        if not isinstance(nemo_een_barotropic_m, NemoEENBarotropicOperands):
+            raise TypeError(
+                "nemo_een_barotropic_m must be NemoEENBarotropicOperands")
+        raw = nemo_een_barotropic_m
+        two_d = (raw.ff_f, raw.hu_0, raw.hv_0, raw.hf_0,
+                 raw.e1t, raw.e2t, raw.e1u, raw.e2u,
+                 raw.e1v, raw.e2v, raw.e1f, raw.e2f)
+        shape2 = np.asarray(raw.ff_f).shape
+        if len(shape2) != 2 or any(np.asarray(x).shape != shape2 for x in two_d):
+            raise ValueError(
+                "NEMO EEN 2-D operands must have one common native A2D shape")
+        three_d = (raw.e3u_0, raw.e3v_0, raw.e3f_0,
+                   raw.umask, raw.vmask, raw.fmask)
+        if any(np.asarray(x).shape != shape2 + (n_levels,) for x in three_d):
+            raise ValueError(
+                "NEMO EEN 3-D operands must have native A2D+n_levels shape")
+        if any(not np.all(np.isfinite(np.asarray(x)))
+               for x in (*two_d, *three_d)):
+            raise ValueError("NEMO EEN operands must be finite")
+        nemo_een_barotropic = NemoEENBarotropicOperands(*(
+            jnp.asarray(x, dtype=get_policy().control) for x in raw))
     if nemo_gdept_0 is not None and nemo_e3w_0 is not None:
         gdept_np = np.asarray(nemo_gdept_0)
         e3w_np = np.asarray(nemo_e3w_0)
@@ -348,6 +395,7 @@ def create_z_star_from_thicknesses(
         nemo_hu_0=nemo_hu_0, nemo_hv_0=nemo_hv_0,
         nemo_e1e2t=nemo_e1e2t, nemo_e1e2u=nemo_e1e2u,
         nemo_e1e2v=nemo_e1e2v,
+        nemo_een_barotropic=nemo_een_barotropic,
     )
 
 
@@ -557,6 +605,7 @@ class OceanPartialCellCoordinate(NamedTuple):
     nemo_e1e2t: jnp.ndarray | None = None
     nemo_e1e2u: jnp.ndarray | None = None
     nemo_e1e2v: jnp.ndarray | None = None
+    nemo_een_barotropic: NemoEENBarotropicOperands | None = None
 
 
 def create_partial_cell_coordinate(
@@ -676,6 +725,8 @@ def create_partial_cell_coordinate(
         nemo_e1e2t=getattr(z_coord, "nemo_e1e2t", None),
         nemo_e1e2u=getattr(z_coord, "nemo_e1e2u", None),
         nemo_e1e2v=getattr(z_coord, "nemo_e1e2v", None),
+        nemo_een_barotropic=getattr(
+            z_coord, "nemo_een_barotropic", None),
     )
 
 
@@ -752,6 +803,8 @@ def create_full_step_coordinate(
         nemo_e1e2t=getattr(z_coord, "nemo_e1e2t", None),
         nemo_e1e2u=getattr(z_coord, "nemo_e1e2u", None),
         nemo_e1e2v=getattr(z_coord, "nemo_e1e2v", None),
+        nemo_een_barotropic=getattr(
+            z_coord, "nemo_een_barotropic", None),
     )
 
 
