@@ -1815,11 +1815,32 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         "dino_wind_profile_evaluation":
             cfg.dino_wind_profile_evaluation,
         "gm_redi_slope_n2_evaluation": cfg.gm_redi_slope_n2_evaluation,
+        "gm_redi_slope_prd_geometry_stage":
+            cfg.gm_redi_slope_prd_geometry_stage,
         "gm_redi_slope_prd_evaluation": cfg.gm_redi_slope_prd_evaluation,
         "gm_redi_slope_metric_evaluation": cfg.gm_redi_slope_metric_evaluation,
         "gm_redi_slope_face_thickness_evaluation":
             cfg.gm_redi_slope_face_thickness_evaluation,
+        "gm_redi_flux_face_thickness_evaluation":
+            cfg.gm_redi_flux_face_thickness_evaluation,
+        "gm_redi_horizontal_evaluation": cfg.gm_redi_horizontal_evaluation,
+        "gm_redi_vertical_skew_evaluation":
+            cfg.gm_redi_vertical_skew_evaluation,
+        "gm_redi_a33_evaluation": cfg.gm_redi_a33_evaluation,
+        "gm_redi_w_slope_stage_evaluation":
+            cfg.gm_redi_w_slope_stage_evaluation,
         "gm_redi_slope_depth_evaluation": cfg.gm_redi_slope_depth_evaluation,
+        "gm_treguier_vertical_reduction_evaluation":
+            cfg.gm_treguier_vertical_reduction_evaluation,
+        "gm_treguier_sqrt_evaluation": cfg.gm_treguier_sqrt_evaluation,
+        "barotropic_transport_accumulation_evaluation":
+            cfg.barotropic_transport_accumulation_evaluation,
+        "barotropic_seed_evaluation": cfg.barotropic_seed_evaluation,
+        "barotropic_een_coefficient_evaluation":
+            cfg.barotropic_een_coefficient_evaluation,
+        "barotropic_pgf_evaluation": cfg.barotropic_pgf_evaluation,
+        "zad_qco_evaluation": cfg.zad_qco_evaluation,
+        "wzv_call2_evaluation": cfg.wzv_call2_evaluation,
         "perturb_seed": perturb_seed, "perturb_eps": float(perturb_eps),
         # DELIBERATELY NOT recorded here: --fp64-3d. run_config is compared
         # BYTE-FOR-BYTE between two arms by twin_seasonal_clock_ab.py, which
