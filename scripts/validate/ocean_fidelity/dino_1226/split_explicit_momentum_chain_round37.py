@@ -31,6 +31,29 @@ ORDERED_EXACT = (
     "ke_gradient_plus_hpg",
     "d06_total",
 )
+SOURCE_LINES = {
+    "vertical_advection": [
+        "stpmlf.F90:309-314",
+        "dynadv.F90:97-103",
+    ],
+    "vorticity_coriolis": [
+        "stpmlf.F90:315-318",
+        "dynvor.F90:143-179",
+    ],
+    "lateral_friction": [
+        "stpmlf.F90:319-322",
+        "dynldf.F90:79-115",
+    ],
+    "ke_gradient_plus_hpg": [
+        "dynadv.F90:89-96",
+        "dynhpg.F90:117-133",
+        "stpmlf.F90:309-328",
+    ],
+    "d06_total": [
+        "stpmlf.F90:269-270",
+        "stpmlf.F90:309-328",
+    ],
+}
 KT = 5761
 STREAMS = tuple(
     f"stp_dump_0{stage}_{name}_kt{KT:08d}_{component}.bin"
@@ -301,6 +324,7 @@ def main() -> int:
         "backend": jax.default_backend(),
         "jax_enable_x64": bool(jax.config.jax_enable_x64),
         "ordered_exact_rows": list(ORDERED_EXACT),
+        "nemo_source_lines_by_row": SOURCE_LINES,
         "first_failing_exact_term": first_failure,
         "rows": rows,
         "partial_rows_nonowning": partial_rows,

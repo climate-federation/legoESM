@@ -40,8 +40,9 @@ diagnostic closure, declared U/V staggering, and exact D06 reconstruction.
 One-cell roll, sign reversal, wet NaN, and `2x` bar plants must fire for both
 components. The failed legacy whole-ZDF top/bottom control is explicitly
 unreachable from this scoped measurement and is not weakened or copied. No
-SLOT is allocated: all NEMO streams already exist; only a CPU scorer is
-required.
+new NEMO-writer SLOT is allocated because all required NEMO streams already
+exist. The held twin-capture SLOT cascade is specified by the pre-run
+amendment below.
 
 ## Pre-run implementation amendment: held twin capture and exact order
 
@@ -58,3 +59,13 @@ comparable part of `dyn_adv`; (2) vorticity/Coriolis; (3) lateral friction;
 (4) the KE-gradient+HPG group at the `dyn_hpg` closure point; (5) D06 total.
 The individual KEG and HPG partitions remain diagnostic partials. This is a
 clarification of the registered bundle constraint, not a changed bar.
+
+The active instrumented-source citations carried into every receipt are:
+
+| exact row | NEMO source |
+|---|---|
+| vertical advection / ZAD | `stpmlf.F90:309-314`; `dynadv.F90:97-103` |
+| vorticity / Coriolis | `stpmlf.F90:315-318`; `dynvor.F90:143-179` |
+| lateral friction | `stpmlf.F90:319-322`; `dynldf.F90:79-115` |
+| KE-gradient + HPG | `dynadv.F90:89-96`; `dynhpg.F90:117-133`; `stpmlf.F90:309-328` |
+| D06 total | `stpmlf.F90:269-270,309-328` |
