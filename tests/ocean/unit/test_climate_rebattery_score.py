@@ -24,3 +24,14 @@ def test_wall_classifier_branches():
 
 def test_all_plants_fire():
     assert all(R.classifier_controls().values())
+
+
+def test_registered_current_defaults_are_the_two_dino_cards():
+    from legoesm.ocean.experiments.dino import dino_config_for_recipe
+
+    for recipe in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
+        config = dino_config_for_recipe(recipe)
+        for name, expected in R.CURRENT_DEFAULTS.items():
+            if name == "bridge_tke":
+                continue  # harness launch choice, not a DINOConfig field
+            assert getattr(config, name) == expected, (recipe, name)

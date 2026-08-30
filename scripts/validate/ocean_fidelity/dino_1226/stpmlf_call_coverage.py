@@ -42,6 +42,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import subprocess
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -63,6 +65,7 @@ COVERED, WAIVED, UNCOVERED, COVERED_UNMEASURED = (
     "COVERED", "WAIVED", "UNCOVERED", "COVERED (row UNMEASURED)")
 
 ROOT = Path(__file__).resolve().parents[4]
+MASTER_COVERAGE_GATE_TIP = "97d3d7188eb5"
 
 # The momentum-chain result documents are transitive receipts: each one binds
 # its machine artifacts and predecessor admissions. Hash every result document
@@ -741,6 +744,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     summary = coverage_summary(calls)
     if args.json_output is not None:
+        summary["producer_commit"] = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        summary["session_id"] = os.environ.get("CODEX_SESSION_ID", "")
+        summary["master_coverage_gate_tip"] = MASTER_COVERAGE_GATE_TIP
         args.json_output.write_text(
             json.dumps(summary, indent=2, sort_keys=True) + "\n")
         print(f"coverage_json={args.json_output} "
