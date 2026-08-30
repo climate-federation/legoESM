@@ -44,8 +44,8 @@ SLOT T1_STANDALONE_RUNNER_RELATIVE_PATH VALUE=scripts/validate/ocean_fidelity/di
 SLOT T1_STANDALONE_RUNNER_SHA256 VALUE=45c161f11b7055badb786dbd5974f6f8b4ea06ff56c72e12db008bd91c0a414b
 SLOT T1_SCORE_RELATIVE_PATH VALUE=scripts/validate/ocean_fidelity/dino_1226/standalone_20y_score.py
 SLOT T1_SCORE_SCRIPT_SHA256 VALUE=de121565dc4ecdd9b2543886f2f240ed53f994e1c0f1622e5b62aaffe71d32f9
-SLOT T1_CPU_SMOKE_MANIFEST_SHA256 VALUE=MEASURED_AFTER_FINAL_COMMIT
-SLOT T1_CPU_SMOKE_INITIAL_RECEIPT_SHA256 VALUE=MEASURED_AFTER_FINAL_COMMIT
+SLOT T1_CPU_SMOKE_MANIFEST_SHA256 VALUE=3fba61701e206019a95234fbc587ab3d72d126c257394b35d89dfb4c74004bcc
+SLOT T1_CPU_SMOKE_INITIAL_RECEIPT_SHA256 VALUE=3ebe7648f14250e4587338a8027fe16278ffa6908e4f979edc5a72c22bfdb3ea
 SLOT T1_NEMO_STANDALONE_ROOT VALUE=BLOCKED_NOT_CREATED
 SLOT T1_NEMO_ENSEMBLE_MANIFEST_SHA256 VALUE=BLOCKED_NOT_RUN
 SLOT T1_LEGO_ENSEMBLE_MANIFEST_SHA256 VALUE=BLOCKED_NOT_RUN
@@ -160,8 +160,9 @@ do not match T1.
 - The T1 runner implements `--member`, `--output-dir`, `--reducer-mesh`, and
   `--steps`; the score implements `--lego-root`, `--nemo-root`, `--output`, and
   `--self-test`. Every named flag and committed path exists.
-- The two `MEASURED_AFTER_FINAL_COMMIT` smoke hashes are packaging-time slots;
-  they must be replaced with concrete values before the bundle is handed off.
+- The final one-step smoke manifest stamps producer `c981468d05`, fp64,
+  standalone start, empty bridge/restart paths, the exact first-step blocker,
+  and `claim_admissible=false`.
 
 Post the T2 block and any future T1/T2 result to GitHub issue #1455 when the
 human-owned evidence trail is updated. No remote action was taken in this
