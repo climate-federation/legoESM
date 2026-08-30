@@ -159,8 +159,8 @@ def main() -> int:
         nemo_input = naa._replace(**inputs)
         targets0 = {"u": btu, "v": btv}
         for ti, targets in ((0, targets0), (1, {
-                "u": jnp.asarray(_target_model(target1["u"], "u")),
-                "v": jnp.asarray(_target_model(target1["v"], "v"))})):
+                "u": jnp.asarray(_target_model(target1["u"], "u"))[..., None],
+                "v": jnp.asarray(_target_model(target1["v"], "v"))[..., None]})):
             out = real_reconcile(
                 self, nemo_input, state_arg, targets["u"], targets["v"],
                 um3, vm3, grid, z_coord=z_coord, config=config)
