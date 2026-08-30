@@ -199,7 +199,7 @@ def main() -> int:
             "normalized_cancelled"]["pass"],
         "finite_reconstruction": all(
             row["n_nonfinite"] == 0 for row in metrics.values()),
-        "raw_weight_sum_2070": divisor == 2070.0,
+        "raw_weight_sum_2070": bool(divisor == 2070.0),
     }
     valid = all(controls.values())
     literal_at_bar = metrics["raw_metric"]["pass"]
