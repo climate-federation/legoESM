@@ -1418,14 +1418,21 @@ def main() -> int:
                             literal_value, oracle_zfu, wet_u,
                             FOCUS, POINTWISE_BAR)
                         baseline_error = arms["S0H0K0"]["max_column_error"]
+                        # Once production is exact, the historical relative-
+                        # removal denominator is zero. Keep the diagnostic
+                        # finite by normalizing counterfactual deltas to the
+                        # oracle RMS; this cannot affect the later all-pass
+                        # classifier and is stamped in the ladder receipt.
+                        normalizer = (baseline_error if baseline_error != 0.0
+                                      else arms["S0H0K0"]["reference_rms"])
                         for metric in arms.values():
                             metric["max_error_removal_fraction"] = float(
                                 (baseline_error - metric["max_column_error"])
-                                / baseline_error)
+                                / normalizer)
                         literal_metric["max_error_removal_fraction"] = float(
                             (baseline_error
                              - literal_metric["max_column_error"])
-                            / baseline_error)
+                            / normalizer)
                         errors = {key: value["max_column_error"]
                                   for key, value in arms.items()}
                         interactions = {
@@ -1433,17 +1440,17 @@ def main() -> int:
                                           + errors["S0H1K0"]
                                           - errors["S1H1K0"]
                                           - errors["S0H0K0"])
-                                         / baseline_error),
+                                         / normalizer),
                             "SxK": float((errors["S1H0K0"]
                                           + errors["S0H0K1"]
                                           - errors["S1H0K1"]
                                           - errors["S0H0K0"])
-                                         / baseline_error),
+                                         / normalizer),
                             "HxK": float((errors["S0H1K0"]
                                           + errors["S0H0K1"]
                                           - errors["S0H1K1"]
                                           - errors["S0H0K0"])
-                                         / baseline_error),
+                                         / normalizer),
                         }
                         perturb = np.array(arm_values["S0H0K0"], copy=True)
                         first_wet = tuple(
@@ -1474,6 +1481,10 @@ def main() -> int:
                                 np.isfinite(literal_value[wet_u]).all()),
                         }
                         redi_zfu_operand_ladder = {
+                            "normalization": (
+                                "baseline_max_column_error"
+                                if baseline_error != 0.0 else
+                                "oracle_reference_rms_zero_baseline"),
                             "arms": arms,
                             "literal_all_oracle": literal_metric,
                             "interactions": interactions,
