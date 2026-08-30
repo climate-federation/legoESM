@@ -412,6 +412,36 @@ class TestTreguierKappaNemoNative:
     and the fix raises the ADVECTION-bucket (bolus-inclusive) tracer-tendency
     corr vs the NEMO oracle from 0.9347 to 0.9889 (full3D)."""
 
+    def test_literal_column_reduction_is_left_fold_jittable_and_red(self):
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            _nemo_treguier_left_reductions,
+        )
+        # All-positive, physically admissible terms. Each tiny contribution
+        # is lost when added individually to 1, while a tree first combines
+        # the tiny values and crosses multiple ulps: the red plant proves the
+        # association selector is not inert without relying on cancellation.
+        tiny = np.float64(2.0 ** -53)
+        raw = np.full((1, 1, 64), tiny, dtype=np.float64)
+        raw[..., 0] = 1.0
+        term = jnp.asarray(raw)
+        got = jax.jit(_nemo_treguier_left_reductions)(
+            term, 2.0 * term, 3.0 * term, 5.0)
+
+        def left(values, start):
+            acc = np.float64(start)
+            for value in values.ravel():
+                acc = np.float64(acc + value)
+            return acc
+
+        assert float(got[0][0, 0]) == left(raw, 0.0)
+        assert float(got[1][0, 0]) == left(2.0 * raw, 0.0)
+        assert float(got[2][0, 0]) == left(3.0 * raw, 5.0)
+        assert float(jnp.sum(term)) != float(got[0][0, 0])
+
+        grad = jax.grad(lambda x: sum(jnp.sum(v) for v in
+            _nemo_treguier_left_reductions(x, 2.0 * x, 3.0 * x, 5.0)))(term)
+        assert bool(jnp.isfinite(grad).all())
+
     def _dino_fixture(self, n_lon=50):
         from legoesm.ocean.experiments.dino import (
             DINOConfig, create_dino_z_star, dino_lat_lon_grid,

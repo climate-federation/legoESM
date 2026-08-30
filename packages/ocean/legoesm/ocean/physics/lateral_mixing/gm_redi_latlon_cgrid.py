@@ -1462,6 +1462,21 @@ def compute_nemo_native_slopes(
     return uslp, vslp, wslpi, wslpj
 
 
+def _nemo_treguier_left_reductions(zn_term, zah_term, ze3w, zhw_offset):
+    """Source-ordered ``ldf_eiv`` column accumulators (jk=1..jpk)."""
+    def _left_body(jk, carry):
+        _zn, _zah, _zhw = carry
+        return (_zn + zn_term[..., jk],
+                _zah + zah_term[..., jk],
+                _zhw + ze3w[..., jk])
+
+    _zero = jnp.zeros_like(zn_term[..., 0])
+    return jax.lax.fori_loop(
+        0, zn_term.shape[-1], _left_body,
+        (_zero, _zero, _zero + jnp.asarray(
+            zhw_offset, dtype=zn_term.dtype)))
+
+
 def compute_treguier_kappa_gm_nemo_native(
     rho: jnp.ndarray,
     T: jnp.ndarray,
@@ -1481,6 +1496,7 @@ def compute_treguier_kappa_gm_nemo_native(
     return_diagnostics: bool = False,
     slope_n2: str = "adiabatic",
     omega: float = constants.Omega,
+    vertical_reduction_evaluation: str = "tree",
 ) -> jnp.ndarray:
     r"""Treguier et al. (1997) adaptive κ_GM (NEMO ``ldftra.F90::ldf_eiv``,
     ``nn_aei_ijk_t=21``, the non-triad ``ln_traldf_triad=.FALSE.`` ELSE
@@ -1566,10 +1582,28 @@ def compute_treguier_kappa_gm_nemo_native(
     # ~ 1e-15, negligible -- exactly the guard compute_treguier_kappa_gm
     # (_gm_redi_common.py) already uses for the same reason.
     zn2 = jnp.maximum(pn2, 0.0)
-    zn = jnp.sum(jnp.sqrt(jnp.maximum(zn2, 1e-30)) * e3w_3d, axis=-1)  # :689, unmasked term
-    ze3w = e3w_3d * wmask3
-    zah = jnp.sum(zn2 * (wslpi ** 2 + wslpj ** 2) * ze3w, axis=-1)  # :694-695
-    zhw = TREGUIER_ZHW_OFFSET_M + jnp.sum(ze3w, axis=-1)           # :665,696
+    _reduction = vertical_reduction_evaluation
+    if _reduction == "nemo_left":
+        # ldftra.F90:665,687-696: the three 2-D work arrays are initialized
+        # once, then each jk contributes exactly once in surface-to-bottom
+        # source order. A tree reduction changes the last bits of all three
+        # operands and those bits survive the Rossby-radius/timescale chain.
+        _zn_term = jnp.sqrt(jnp.maximum(zn2, 1e-30)) * e3w_3d
+        _ze3w = e3w_3d * wmask3
+        _zah_term = zn2 * (wslpi ** 2 + wslpj ** 2) * _ze3w
+
+        zn, zah, zhw = _nemo_treguier_left_reductions(
+            _zn_term, _zah_term, _ze3w, TREGUIER_ZHW_OFFSET_M)
+    elif _reduction == "tree":
+        # Preserve the generic/off statements byte-for-byte.
+        zn = jnp.sum(jnp.sqrt(jnp.maximum(zn2, 1e-30)) * e3w_3d, axis=-1)  # :689, unmasked term
+        ze3w = e3w_3d * wmask3
+        zah = jnp.sum(zn2 * (wslpi ** 2 + wslpj ** 2) * ze3w, axis=-1)  # :694-695
+        zhw = TREGUIER_ZHW_OFFSET_M + jnp.sum(ze3w, axis=-1)           # :665,696
+    else:
+        raise ValueError(
+            "GMRediConfig.treguier_vertical_reduction_evaluation must be "
+            f"'tree' or 'nemo_left', got {_reduction!r}")
 
     f_abs = jnp.maximum(jnp.abs(f_coriolis), TREGUIER_F_MIN)
     ro = jnp.clip(TREGUIER_RO_FACTOR * zn / f_abs,
@@ -3751,6 +3785,8 @@ def gm_redi_tracer_tendency_latlon(
                 slope_n2=getattr(cfg, "slope_n2", "adiabatic"),
                 jacobian=jacobian,
                 omega=omega,
+                vertical_reduction_evaluation=getattr(
+                    cfg, "treguier_vertical_reduction_evaluation", "tree"),
             )
         else:
             kappa_GM = compute_treguier_kappa_gm(

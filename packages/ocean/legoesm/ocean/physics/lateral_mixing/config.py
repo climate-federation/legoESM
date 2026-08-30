@@ -411,6 +411,11 @@ class GMRediConfig(NamedTuple):
     # Jacobian and T-column subtraction. ``nemo_qco_live_literal`` uses raw
     # gdept/gdepw times NOW ssh*r1_ht_0 and NEMO's literal face expression.
     slope_depth_evaluation: str = "legacy_jacobian_t_surface"
+    # Arithmetic topology of the three Treguier ldf_eiv column integrals.
+    # ``tree`` preserves the historical jnp.sum reductions byte-for-byte.
+    # ``nemo_left`` follows ldftra.F90's jk loop, carrying zn/zah/zhw from
+    # surface to bottom. Only the DINO NEMO cards opt in.
+    treguier_vertical_reduction_evaluation: str = "tree"
     # NEMO ldfslp horizontal (1-2-1)⊗(1-2-1)/16 Shapiro smoother on the final
     # interface slopes (ldfslp.F90:304-315).  legoESM omitted it, leaving the
     # interior slope amplitude ~1.27x too large; wet-renormalized so land drops
