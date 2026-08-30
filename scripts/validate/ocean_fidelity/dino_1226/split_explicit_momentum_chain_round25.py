@@ -303,7 +303,9 @@ def main() -> int:
     if not all(value for name, value in controls.items()
                if name != "nextafter_steps"):
         raise SystemExit(
-            f"control failed: {controls}; baseline={baseline_diagnostics}")
+            f"control failed: {controls}; baseline={baseline_diagnostics}; "
+            f"direct_coefficients={direct_baseline['coefficients']}; "
+            f"direct_output={direct_baseline['output']}")
 
     full = arms["T1V1P1"]
     exact = all(row["gate_status"] == "AT BAR" for row in
