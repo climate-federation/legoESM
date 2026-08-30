@@ -1560,6 +1560,36 @@ class TestNemoIsoLapOperator:
                 T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
                 cfg.kappa_Redi, act, return_operand_diagnostics=True)
 
+    def test_nemo_iso_lap_bolus_slopes_are_independent_of_redi_slopes(self):
+        """The Kmm Redi slope carry must not move the earlier through-FCT
+        bolus transport.  A distinct bolus slope tuple changes only the
+        exported transport; the Redi tendency remains byte-identical."""
+        setup = _stratified_with_meridional_tilt()
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian,
+         rho, T, S, cfg) = setup
+        u_mask, v_mask = self._closed_box(setup)
+        S_x, S_y = self._slopes(setup)
+        act = jnp.broadcast_to(mask[:, :, jnp.newaxis], T.shape)
+        zero = jnp.zeros_like(T)
+        native = (zero, zero, zero, zero)
+        ramp_i = jnp.broadcast_to(
+            1.0e-3 * jnp.arange(T.shape[1])[None, :, None], T.shape)
+        ramp_j = jnp.broadcast_to(
+            1.0e-3 * jnp.arange(T.shape[0])[:, None, None], T.shape)
+        bolus_native = (zero, zero, ramp_i, ramp_j)
+        base, base_bolus = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, native_slopes=native, kappa_GM=2000.0,
+            gm_bolus_advection="through_fct", return_bolus=True)
+        split, split_bolus = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, native_slopes=native,
+            bolus_native_slopes=bolus_native, kappa_GM=2000.0,
+            gm_bolus_advection="through_fct", return_bolus=True)
+        assert jnp.array_equal(split, base)
+        assert any(bool(jnp.any(a != b))
+                   for a, b in zip(split_bolus, base_bolus))
+
     def test_nemo_iso_lap_gm_conserves(self):
         """The GM bolus (kappa_GM>0, NEMO ln_ldfeiv) is a curl-of-streamfunction
         transport, so its discrete divergence telescopes to zero and it conserves

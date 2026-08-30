@@ -4945,6 +4945,11 @@ class LatLonCGridOceanModel:
                 native_slope_pn2=_gm_native_pn2,
                 native_slope_e3w=_gm_native_e3w,
                 native_slope_eta=state.eta.data,
+                # ldf_eiv_trp precedes dynamics and consumes the same-stage
+                # ldf_slp slopes, while the later tra_ldf tensor consumes Kmm
+                # geometry. Keep the through-FCT bolus on the historical Naa
+                # slope geometry as the Redi tensor alone receives Kmm eta.
+                native_bolus_slope_eta=state_new.eta.data,
                 # tra_ldf runs after dynamics but e3u/e3v are indexed Kmm:
                 # carry the step-entry Nnn SSH rather than recomputing from
                 # state_new.eta (Naa). stpmlf.F90:528,548 + scheme.h90:73-74.

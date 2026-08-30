@@ -2246,6 +2246,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     msc_e3w_override: jnp.ndarray | None = None,
     face_thickness_u: jnp.ndarray | None = None,
     face_thickness_v: jnp.ndarray | None = None,
+    bolus_native_slopes: tuple | None = None,
     return_diagnostics: bool = False,
     return_operand_diagnostics: bool = False,
 ) -> jnp.ndarray:
@@ -2401,6 +2402,10 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         uslp = jnp.concatenate([S_x, zpad], axis=2)  # (n_lat, n_lon, nlev)
         vslp = jnp.concatenate([S_y, zpad], axis=2)
         wslpi, wslpj = uslp, vslp
+    if bolus_native_slopes is None:
+        bolus_wslpi, bolus_wslpj = wslpi, wslpj
+    else:
+        _, _, bolus_wslpi, bolus_wslpj = bolus_native_slopes
 
     ax_y, ax_x, ax_z = 0, 1, 2
 
@@ -2463,6 +2468,8 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
 
     wslpi_kp1 = jnp.roll(wslpi, -1, ax_z)            # wslpi(jk+1)
     wslpj_kp1 = jnp.roll(wslpj, -1, ax_z)
+    bolus_wslpi_kp1 = jnp.roll(bolus_wslpi, -1, ax_z)
+    bolus_wslpj_kp1 = jnp.roll(bolus_wslpj, -1, ax_z)
     zA31 = -zahu_w * e2t[:, :, jnp.newaxis] * zmsku_w * wslpi_kp1
     zA32 = -zahv_w * e1t[:, :, jnp.newaxis] * zmskv_w * wslpj_kp1
 
@@ -2560,7 +2567,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         # -1,z) so a full-depth column does not wrap a surface slope onto the sea
         # floor (NEMO forces wslpi(jpk)=0, wumask(...,jpk)=0 at the deepest iface).
         u_eiv, v_eiv, w_eiv_kp1 = nemo_eiv_bolus_transport(
-            kappa_GM, wslpi_kp1, wslpj_kp1, e2u, e1v,
+            kappa_GM, bolus_wslpi_kp1, bolus_wslpj_kp1, e2u, e1v,
             u_mask, v_mask, act, act_below, q.shape, dtype,
             kappa_face_average=gm_bolus_kappa_face_average,
         )
@@ -3732,6 +3739,7 @@ def gm_redi_tracer_tendency_latlon(
     native_slope_e3w: jnp.ndarray | None = None,
     native_slope_eta: jnp.ndarray | None = None,
     native_kappa_slope_eta: jnp.ndarray | None = None,
+    native_bolus_slope_eta: jnp.ndarray | None = None,
     redi_flux_eta: jnp.ndarray | None = None,
     dt: float | None = None,
     return_bolus_transport: bool = False,
@@ -4159,12 +4167,23 @@ def gm_redi_tracer_tendency_latlon(
                 prd_TS_override=native_prd_TS,
                 pn2_override=native_slope_pn2,
                 e3w_override=native_slope_e3w)
+            _bolus_nat = None
+            if native_bolus_slope_eta is not None:
+                _bolus_nat = compute_nemo_native_slopes(
+                    rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg,
+                    eos_fn, rho_0=rho_0, g=g, active_3d=_active_3d,
+                    jacobian=jacobian, eta=native_bolus_slope_eta,
+                    H_bathy=H_bathy, prd_jacobian=_native_prd_J,
+                    prd_TS_override=native_prd_TS,
+                    pn2_override=native_slope_pn2,
+                    e3w_override=native_slope_e3w)
             _msc = getattr(cfg, "msc_stabilize", False)
             _bolus = None
             _dT = nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 T, S_x, S_y, mask, u_mask, v_mask,
                 z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
                 native_slopes=_nat, msc_stabilize=_msc, dt=dt,
+                bolus_native_slopes=_bolus_nat,
                 kappa_GM=kappa_GM, gm_bolus_advection=_gm_bolus,
                 gm_bolus_kappa_face_average=_gm_kfa,
                 return_bolus=return_bolus_transport,
@@ -4179,6 +4198,7 @@ def gm_redi_tracer_tendency_latlon(
                 S, S_x, S_y, mask, u_mask, v_mask,
                 z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
                 native_slopes=_nat, msc_stabilize=_msc, dt=dt,
+                bolus_native_slopes=_bolus_nat,
                 kappa_GM=kappa_GM, gm_bolus_advection=_gm_bolus,
                 gm_bolus_kappa_face_average=_gm_kfa,
                 kappa_Redi_v=kappa_Redi_v_eff,
