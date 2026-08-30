@@ -163,6 +163,9 @@ do not match T1.
 - The final one-step smoke manifest stamps producer `c981468d05`, fp64,
   standalone start, empty bridge/restart paths, the exact first-step blocker,
   and `claim_admissible=false`.
+- Focused CPU validation passes `137/137`: the new standalone runner/scorer
+  tests, FE reproducer tests, and complete `test_dino_experiment.py`. The one
+  warning is the expected first-step reconciliation warning bound above.
 
 Post the T2 block and any future T1/T2 result to GitHub issue #1455 when the
 human-owned evidence trail is updated. No remote action was taken in this
