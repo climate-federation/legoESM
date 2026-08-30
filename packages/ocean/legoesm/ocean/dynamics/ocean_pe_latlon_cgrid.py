@@ -1445,30 +1445,43 @@ def _nemo_qco_zad_operands(
             live_u[..., jk], live_v[..., jk], u[..., jk], v[..., jk],
             u_mask_3d[..., jk], v_mask_3d[..., jk], grid,
         ) * tmask[..., jk]
+        transport_div = jax.lax.optimization_barrier(transport_div)
         # divhor.F90:180-184 divides the transport divergence by live e3t;
         # ssh_nxt/wzv then multiply by that same e3t.  Preserve the executed
         # divide/multiply instead of algebraically cancelling it -- row 4 is
         # sensitive to those last bits through the vertical recurrence.
         safe_e3t = jnp.where(tmask[..., jk] > 0.5, live_t[..., jk], 1.0)
-        hdiv = transport_div / safe_e3t
-        level = (live_t[..., jk] * hdiv) * tmask[..., jk]
+        hdiv = jax.lax.optimization_barrier(transport_div / safe_e3t)
+        level = jax.lax.optimization_barrier(
+            live_t[..., jk] * hdiv) * tmask[..., jk]
         flux_levels.append(level)
-        barotropic_div = barotropic_div + level
+        barotropic_div = jax.lax.optimization_barrier(barotropic_div + level)
     flux_div = jnp.stack(flux_levels, axis=-1)
 
     fw = (jnp.zeros_like(eta_now) if freshwater_eta_tendency is None
           else jnp.asarray(freshwater_eta_tendency, dtype=eta_now.dtype))
-    eta_after = (eta_before - dt * barotropic_div + dt * fw
-                 ) * tmask[..., 0]
-    r3_delta = eta_after / h0_safe - eta_before / h0_safe
-    stretch_rate = e3t0 * (r3_delta / dt)[..., None]
+    eta_after = jax.lax.optimization_barrier(
+        eta_before - jax.lax.optimization_barrier(dt * barotropic_div))
+    eta_after = jax.lax.optimization_barrier(
+        eta_after + jax.lax.optimization_barrier(dt * fw)) * tmask[..., 0]
+    r1_h0 = jax.lax.optimization_barrier(1.0 / h0_safe)
+    r3_after = jax.lax.optimization_barrier(eta_after * r1_h0)
+    r3_before = jax.lax.optimization_barrier(eta_before * r1_h0)
+    r3_delta = jax.lax.optimization_barrier(r3_after - r3_before)
+    r1_dt = jax.lax.optimization_barrier(
+        jnp.asarray(1.0, dtype=eta_now.dtype) / dt)
+    stretch_rate = jax.lax.optimization_barrier(
+        (r1_dt * e3t0) * r3_delta[..., None])
 
     # sshwzv.F90 bottom-up left recurrence.  A static Python loop preserves
     # source ordering under JIT and remains differentiable.
     carry = jnp.zeros_like(eta_now)
     levels = [None] * nlev
     for jk in range(nlev - 1, -1, -1):
-        carry = carry - (flux_div[..., jk] + stretch_rate[..., jk]) * tmask[..., jk]
+        bracket = jax.lax.optimization_barrier(
+            flux_div[..., jk] + stretch_rate[..., jk])
+        carry = jax.lax.optimization_barrier(
+            carry - bracket * tmask[..., jk])
         levels[jk] = carry
     ww = jnp.stack(levels + [jnp.zeros_like(carry)], axis=-1)
     return ww, live_u, live_v
