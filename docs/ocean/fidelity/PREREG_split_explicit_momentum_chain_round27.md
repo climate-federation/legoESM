@@ -60,3 +60,16 @@ on exactly `nemo_dino_kamm` and its `nemo_dino_kamm_mlf` child. Keep
 red-capable routing test that enumerates the selected recipes. The corrected
 replay uses the same inputs, populations, controls, and unchanged bars above.
 The stopped artifact is diagnostic only and cannot release row 1.4.
+
+## Post-replay adjudication (not part of the frozen bars)
+
+The selector-only replay did not meet row 1.3. Its artifact SHA-256 is
+`74f4bb05827190a9d5bffad0a885374f175d270413a967937e98e95e80bd2b07`;
+it retained U/V substep-1 DEBT at normalized RMS
+`1.9256402731006323e-7` and `1.0000704249865956e-7`. The registered exact
+round-25 arm also changed source association (triad, vertical recurrence, and
+post factors) and consumed NEMO's live QCO F-point operands. Restoring only
+the vertex-latitude selector was therefore an invalid partial implementation
+of that design. The card change is retracted before packaging, while both
+diagnostic artifacts remain bound. Row 1.4 was printed only as downstream
+diagnostic output and is not admitted.

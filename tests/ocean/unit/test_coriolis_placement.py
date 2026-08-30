@@ -18,21 +18,17 @@ from legoesm.grids.latlon import create_latlon_geometry
 from legoesm.ocean.dynamics.latlon_cgrid_operators import vertex_coriolis
 
 
-def test_only_the_two_NEMO_exactness_cards_select_face_latitude():
-    """The faithful fix is card-scoped; generic experiments stay byte-pinned."""
+def test_no_recipe_selects_face_latitude_before_its_owner_is_exact():
+    """A selector-only arm is partial until the literal builder lands."""
     from legoesm.ocean.experiments.dino import (
         DINOConfig, DINO_RECIPES, dino_config_for_recipe)
 
     assert DINOConfig().coriolis_placement == "cell_average"
-    assert dino_config_for_recipe(
-        "nemo_dino_kamm").coriolis_placement == "face_latitude"
-    assert dino_config_for_recipe(
-        "nemo_dino_kamm_mlf").coriolis_placement == "face_latitude"
     selected = {
         name for name in DINO_RECIPES
         if dino_config_for_recipe(name).coriolis_placement == "face_latitude"
     }
-    assert selected == {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}
+    assert selected == set()
 
 
 def test_nonfaithful_recipe_keeps_the_cell_average_byte_pin():

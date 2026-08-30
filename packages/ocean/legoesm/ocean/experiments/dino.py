@@ -1405,12 +1405,6 @@ DINO_RECIPES: dict[str, dict] = {
         # transport contract is unchanged: the two end v-faces stay zero.
         "metric_convention": "nemo_isotropic",
         "vface_zonal_metric_evaluation": "nemo_vpoint",
-        # dynspg_ts.F90:1517-1563 forms the eight barotropic EEN corner
-        # coefficients from NEMO's ff_f, evaluated at gphif.  The generic
-        # cell-average convention is intentionally retained everywhere else:
-        # it is the exact discrete curl of solid-body rotation, while this
-        # oracle-only setting reproduces NEMO's source arithmetic.
-        "coriolis_placement": "face_latitude",
         "redi_S_max": 0.01,                      # rn_slpmax (namtra_ldf ref default)
         # -- Momentum (namdyn_adv: ln_dynadv_vec + nn_dynkeg=1; namdyn_vor: ln_dynvor_een) --
         "ke_gradient_scheme": "hollingsworth",
