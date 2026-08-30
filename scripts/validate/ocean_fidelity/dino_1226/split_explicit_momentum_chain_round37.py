@@ -34,7 +34,7 @@ ORDERED_EXACT = (
 SOURCE_LINES = {
     "surface_stress_outside_d03_d06": [
         "dynzdf.F90:353-363",
-        "ocean_pe_latlon_cgrid.py:3646-3710",
+        "ocean_pe_latlon_cgrid.py:3646-3711",
     ],
     "vertical_advection": [
         "stpmlf.F90:309-314",
