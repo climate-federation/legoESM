@@ -66,6 +66,7 @@ ROUND87_SHA = "df56a496d6e7ebc14d9e8214cdc6742010d3b8b4286c0d9b2704526593ed6caf"
 ROUND88_SHA = "9107fa743aa3deb6b4f7e2180711f956599f099b908e8eb87cf36bd1bd76bd66"
 ROUND89_SHA = "555520203984430e988c075646e7feb674cc522de33f5cadfc4052ccdc560a76"
 ROUND90_SHA = "32a79283ab3ed45fbf909ffc03ed8a8afc5ccb9b82e99a5f5de6f22f9ae1dc05"
+ROUND93_WSLP_SHA = "3ff570e4359ffd30b4314fd49a8af678d3091191d095a5347e359ee5951ce75a"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -212,6 +213,7 @@ def main() -> int:
     parser.add_argument("--round88", type=Path)
     parser.add_argument("--round89", type=Path)
     parser.add_argument("--round90", type=Path)
+    parser.add_argument("--round93-wslp", type=Path)
     parser.add_argument("--hold-slow-forcing", action="store_true")
     parser.add_argument("--oracle-transport", action="store_true")
     parser.add_argument("--capture-cycle", action="store_true")
@@ -244,6 +246,7 @@ def main() -> int:
     parser.add_argument("--redi-zfw-skew-postfix", action="store_true")
     parser.add_argument("--redi-zfw-skew-operand-factorial", action="store_true")
     parser.add_argument("--redi-zfw-wslp-stage-factorial", action="store_true")
+    parser.add_argument("--redi-zfw-a33-floor-factorial", action="store_true")
     parser.add_argument("--redi-run-dir", type=Path)
     parser.add_argument("--redi-flux-run-dir", type=Path)
     parser.add_argument("--redi-flux-bracket", type=Path)
@@ -789,6 +792,22 @@ def main() -> int:
     elif args.round90 is not None:
         raise SystemExit(
             "--round90 requires --redi-zfw-wslp-stage-factorial")
+    prior93_wslp = None
+    if args.redi_zfw_a33_floor_factorial:
+        if not args.redi_zfw_wslp_stage_factorial:
+            raise SystemExit("A33 floor factorial requires W-slope factorial")
+        if (args.round93_wslp is None
+                or _sha(args.round93_wslp.resolve()) != ROUND93_WSLP_SHA):
+            raise SystemExit("bound round-93 W-slope receipt required")
+        prior93_wslp = json.loads(args.round93_wslp.read_text())
+        if (prior93_wslp.get("disposition")
+                != "WSLOPE_ASSOCIATION_AT_BAR_R1S0"
+                or not all(prior93_wslp["arms"]["R1S0"][name]["pass"]
+                           for name in ("wslpi", "wslpj"))):
+            raise SystemExit("round-93 W-slope receipt does not release A33")
+    elif args.round93_wslp is not None:
+        raise SystemExit(
+            "--round93-wslp requires --redi-zfw-a33-floor-factorial")
     if _sha(args.raw_artifact.resolve()) != RAW_ARTIFACT_SHA:
         raise SystemExit("admitted held row-8 artifact changed")
     held = args.held_dir.resolve()
@@ -1181,6 +1200,7 @@ def main() -> int:
     redi_zfw_skew_factorial = {}
     redi_zfw_skew_operand_factorial = {}
     redi_zfw_wslp_stage_factorial = {}
+    redi_zfw_a33_floor_factorial = {}
     redi_flux_rows = []
     first_flux = None
     first_flux_subrow = None
@@ -2259,6 +2279,215 @@ def main() -> int:
                                                            POINTWISE_BAR).items()},
                                                 },
                                             }
+                                        if args.redi_zfw_a33_floor_factorial:
+                                            # Round 93 holds the winning exact
+                                            # NEMO raw-W -> production-Shapiro
+                                            # pair and splits the remaining
+                                            # traldf_iso.F90:285-332 A33
+                                            # arithmetic into H and K groups.
+                                            au = np.asarray(oracle_ahtu)
+                                            av = np.asarray(oracle_ahtv)
+                                            um = np.asarray(full_umask)
+                                            vm = np.asarray(full_vmask)
+                                            wm = np.asarray(full_wmask)
+                                            wi_exact = np.asarray(oracle_wslpi)
+                                            wj_exact = np.asarray(oracle_wslpj)
+                                            up = lambda value: np.roll(
+                                                value, +1, axis=2)
+                                            au_m = au * um
+                                            av_m = av * vm
+                                            au_w = np.roll(au_m, +1, axis=1)
+                                            av_s = np.roll(av_m, +1, axis=0)
+                                            um_w = np.roll(um, +1, axis=1)
+                                            vm_s = np.roll(vm, +1, axis=0)
+                                            cnt_u = ((up(um) + um_w)
+                                                     + (up(um_w) + um))
+                                            cnt_v = ((up(vm) + vm_s)
+                                                     + (up(vm_s) + vm))
+                                            zmsku_ab = wm / np.maximum(cnt_u, 1.0)
+                                            zmskv_ab = wm / np.maximum(cnt_v, 1.0)
+                                            sum_u = ((up(au_m) + au_w)
+                                                     + (up(au_w) + au_m))
+                                            sum_v = ((up(av_m) + av_s)
+                                                     + (up(av_s) + av_m))
+                                            zahu_ab = sum_u * zmsku_ab
+                                            zahv_ab = sum_v * zmskv_ab
+                                            ah_current = (zahu_ab * wi_exact ** 2
+                                                          + zahv_ab * wj_exact ** 2)
+                                            ah_source = ((zahu_ab * wi_exact)
+                                                         * wi_exact
+                                                         + (zahv_ab * wj_exact)
+                                                         * wj_exact)
+                                            geom93 = ensure_geometry(
+                                                capture["args"][8])
+                                            e1u93 = np.asarray(
+                                                geom93.dx_u[:, 1:])[:, :, None]
+                                            e2v93 = np.asarray(
+                                                geom93.dy_v[1:, :])[:, :, None]
+                                            e1u_w = np.roll(e1u93, +1, axis=1)
+                                            e2v_s = np.roll(e2v93, +1, axis=0)
+                                            e3w_ab = np.roll(np.asarray(
+                                                zfw["e3w_kp1"]), +1, axis=2)
+                                            dt93 = float(capture["kwargs"]["dt"])
+
+                                            def k_current(ah_value):
+                                                inv_e1 = 1.0 / (e1u93 ** 2)
+                                                inv_e2 = 1.0 / (e2v93 ** 2)
+                                                akh = 0.25 * (
+                                                    (au_m + up(au_m)) * inv_e1
+                                                    + (au_w + up(au_w))
+                                                    * np.roll(inv_e1, +1, axis=1)
+                                                    + (av_m + up(av_m)) * inv_e2
+                                                    + (av_s + up(av_s))
+                                                    * np.roll(inv_e2, +1, axis=0))
+                                                e3sq = e3w_ab ** 2
+                                                coef = dt93 * (
+                                                    akh + ah_value / e3sq)
+                                                return (np.maximum(coef - 0.5, 0.0)
+                                                        * e3sq / dt93)
+
+                                            def k_source(ah_value):
+                                                u0 = ((au_m + up(au_m))
+                                                      / (e1u93 * e1u93))
+                                                u1 = ((au_w + up(au_w))
+                                                      / (e1u_w * e1u_w))
+                                                v0 = ((av_m + up(av_m))
+                                                      / (e2v93 * e2v93))
+                                                v1 = ((av_s + up(av_s))
+                                                      / (e2v_s * e2v_s))
+                                                akh = ((u0 + u1) + (v0 + v1)) * 0.25
+                                                e3sq = e3w_ab * e3w_ab
+                                                coef = dt93 * (
+                                                    akh + ah_value / e3sq)
+                                                return (np.maximum(coef - 0.5, 0.0)
+                                                        * e3sq * (1.0 / dt93))
+
+                                            za31, za32 = source_zA(
+                                                oracle_ahtu, oracle_ahtv,
+                                                oracle_wslpi, oracle_wslpj)
+                                            zdi = zfw["zdit"]
+                                            zdj = zfw["zdjt"]
+                                            zdi_kp1 = jnp.roll(zdi, -1, axis=2)
+                                            zdj_kp1 = jnp.roll(zdj, -1, axis=2)
+                                            skew93 = np.asarray((
+                                                za31 * pair4(
+                                                    zdi,
+                                                    jnp.roll(zdi_kp1, +1, axis=1),
+                                                    jnp.roll(zdi, +1, axis=1),
+                                                    zdi_kp1)
+                                                + za32 * pair4(
+                                                    zdj,
+                                                    jnp.roll(zdj_kp1, +1, axis=0),
+                                                    jnp.roll(zdj, +1, axis=0),
+                                                    zdj_kp1))
+                                                * zfw["act_below"])[..., :35]
+                                            a33_values = {}
+                                            full_values = {}
+                                            ah_values = {}
+                                            akz_values = {}
+                                            for use_h in (0, 1):
+                                                for use_k in (0, 1):
+                                                    arm = f"H{use_h}K{use_k}"
+                                                    ah_ab = (ah_source if use_h
+                                                             else ah_current)
+                                                    akz_ab = (k_source(ah_ab)
+                                                              if use_k else
+                                                              k_current(ah_ab))
+                                                    ah_flux = np.roll(
+                                                        ah_ab, -1, axis=2)
+                                                    akz_flux = np.roll(
+                                                        akz_ab, -1, axis=2)
+                                                    if use_k:
+                                                        a33 = (((np.asarray(
+                                                            zfw["e1e2t"])[..., None]
+                                                            / np.asarray(zfw[
+                                                                "e3w_kp1"]))
+                                                            * np.roll(wm, -1, axis=2))
+                                                            * (ah_flux - akz_flux))
+                                                        a33 = a33 * np.asarray(
+                                                            zfw["qdiff_kp1"])
+                                                    else:
+                                                        a33 = ((np.asarray(
+                                                            zfw["e1e2t"])[..., None]
+                                                            / np.asarray(zfw[
+                                                                "e3w_kp1"]))
+                                                            * (ah_flux - akz_flux)
+                                                            * np.asarray(zfw[
+                                                                "qdiff_kp1"]))
+                                                    a33 = (a33 * np.asarray(
+                                                        zfw["act_below"]))[..., :35]
+                                                    ah_values[arm] = ah_flux[..., :35]
+                                                    akz_values[arm] = akz_flux[..., :35]
+                                                    a33_values[arm] = a33
+                                                    full_values[arm] = skew93 + a33
+                                            oracle_ah = ah_values["H1K1"]
+                                            oracle_akz = akz_values["H1K1"]
+                                            a33_arms = {}
+                                            for arm in a33_values:
+                                                a33_arms[arm] = {
+                                                    "ah_wslp2": sweep.metrics(
+                                                        ah_values[arm], oracle_ah,
+                                                        masks["zfw"], FOCUS,
+                                                        POINTWISE_BAR),
+                                                    "akz": sweep.metrics(
+                                                        akz_values[arm], oracle_akz,
+                                                        masks["zfw"], FOCUS,
+                                                        POINTWISE_BAR),
+                                                    "a33": sweep.metrics(
+                                                        a33_values[arm],
+                                                        oracle_components["a33"],
+                                                        masks["zfw"], FOCUS,
+                                                        POINTWISE_BAR),
+                                                    "skew": sweep.metrics(
+                                                        skew93,
+                                                        oracle_components["skew"],
+                                                        masks["zfw"], FOCUS,
+                                                        POINTWISE_BAR),
+                                                    "full_zfw": sweep.metrics(
+                                                        full_values[arm], oracle_zfw,
+                                                        masks["zfw"], FOCUS,
+                                                        POINTWISE_BAR),
+                                                }
+                                            base93 = a33_arms["H0K0"]["full_zfw"][
+                                                "max_column_error"]
+                                            errors93 = {arm: value["full_zfw"][
+                                                "max_column_error"]
+                                                for arm, value in a33_arms.items()}
+                                            plant93 = np.roll(
+                                                oracle_components["a33"], 1, axis=1)
+                                            redi_zfw_a33_floor_factorial = {
+                                                "arms": a33_arms,
+                                                "max_error_removal_fraction": {
+                                                    arm: float((base93 - error)
+                                                               / base93)
+                                                    for arm, error in
+                                                    errors93.items()},
+                                                "interaction_HxK": float((
+                                                    errors93["H1K0"]
+                                                    + errors93["H0K1"]
+                                                    - errors93["H1K1"]
+                                                    - base93) / base93),
+                                                "controls": {
+                                                    "wslp_winner_admitted": True,
+                                                    "four_arms_present":
+                                                        len(a33_arms) == 4,
+                                                    "derived_oracle_ah_identity":
+                                                        a33_arms["H1K1"][
+                                                            "ah_wslp2"]["pass"],
+                                                    "derived_oracle_akz_identity":
+                                                        a33_arms["H1K1"]["akz"][
+                                                            "pass"],
+                                                    "oracle_component_closure":
+                                                        redi_zfw_component_metrics[
+                                                            "oracle_closure"]["pass"],
+                                                    "zonal_roll_plant_red": not
+                                                        sweep.metrics(
+                                                            plant93,
+                                                            oracle_components["a33"],
+                                                            masks["zfw"], FOCUS,
+                                                            POINTWISE_BAR)["pass"],
+                                                },
+                                            }
     specs = (
         ("8.3", "uu(Kmm) / zptu", "traadv.F90:301-304", "un", POINTWISE_BAR),
         ("8.4", "e2u", "traadv.F90:329", "e2u", POINTWISE_BAR),
@@ -2576,6 +2805,15 @@ def main() -> int:
             **{f"redi_zfw_wslp_stage_{name}": value
                for name, value in
                redi_zfw_wslp_stage_factorial["controls"].items()},
+        })
+    if args.redi_zfw_a33_floor_factorial:
+        controls.update({
+            "round93_wslp_at_bar_admitted": (
+                prior93_wslp["disposition"] ==
+                "WSLOPE_ASSOCIATION_AT_BAR_R1S0"),
+            **{f"redi_zfw_a33_floor_{name}": value
+               for name, value in
+               redi_zfw_a33_floor_factorial["controls"].items()},
         })
     controls["all_scored_finite"] = all(
         row.get("status") == "ORDERED_BLOCKED"
@@ -2925,12 +3163,72 @@ def main() -> int:
         else:
             disposition = "REDI_ZFW_T_SKEW_NEEDS_EXISTING_ROW30_LADDER"
         first_flux_subrow = "91.T.3a"
+    if args.redi_zfw_a33_floor_factorial and valid:
+        faithful93 = redi_zfw_a33_floor_factorial["arms"]["H1K1"]
+        if faithful93["full_zfw"]["pass"]:
+            disposition = "REDI_ZFW_T_AT_BAR_ROUND93"
+            t3_status = "AT_BAR"
+        elif (faithful93["ah_wslp2"]["pass"]
+              and faithful93["akz"]["pass"]
+              and redi_zfw_a33_floor_factorial["controls"][
+                  "oracle_component_closure"]
+              and faithful93["full_zfw"]["max_column_error"] <= 2.0e-14):
+            disposition = "REDI_ZFW_T_CLEARED_RULE1B_ORACLE_ARITHMETIC"
+            t3_status = "CLEARED_RULE1B"
+        else:
+            disposition = "REDI_ZFW_T_ASSOCIATION_UNRESOLVED"
+            t3_status = "DIVERGED"
+        if t3_status != "DIVERGED":
+            # Release the already measured salinity siblings without
+            # rerunning NEMO. Temperature T.3 retains the faithful-arm metric
+            # that supports either the strict or Rule-1b clearance.
+            redi_flux_rows = []
+            release_order = (
+                ("zfu_tem", "78.T.1", "temperature zfu",
+                 "traldf_iso_scheme.h90:55-70"),
+                ("zfv_tem", "78.T.2", "temperature zfv",
+                 "traldf_iso_scheme.h90:72-90"),
+                ("zfw_tem", "78.T.3", "temperature zfw_kp1",
+                 "traldf_iso_scheme.h90:104-129"),
+                ("zfu_sal", "78.S.1", "salinity zfu",
+                 "traldf_iso_scheme.h90:55-70"),
+                ("zfv_sal", "78.S.2", "salinity zfv",
+                 "traldf_iso_scheme.h90:72-90"),
+                ("zfw_sal", "78.S.3", "salinity zfw_kp1",
+                 "traldf_iso_scheme.h90:104-129"),
+            )
+            blocked93 = False
+            for operand, subrow, name, source in release_order:
+                row = {"subrow": subrow, "name": name,
+                       "nemo_source": source, "bar": POINTWISE_BAR}
+                if blocked93:
+                    row["status"] = "ORDERED_BLOCKED"
+                elif subrow == "78.T.3":
+                    row.update(status=t3_status,
+                               clearance=("bar" if t3_status == "AT_BAR"
+                                          else "Rule-1b proven-oracle-arithmetic"),
+                               metrics=faithful93["full_zfw"])
+                else:
+                    metric = redi_flux_metrics[operand]
+                    row.update(status="AT_BAR" if metric["pass"] else "DIVERGED",
+                               metrics=metric)
+                    if not metric["pass"]:
+                        blocked93 = True
+                        first_flux = operand
+                        first_flux_subrow = subrow
+                redi_flux_rows.append(row)
+            if not blocked93:
+                disposition = "TRACER_TAIL_REDI_CLEARED_ROUND93"
+        first_flux_subrow = (first_flux_subrow
+                             if t3_status != "DIVERGED" else "93.T.3b")
     receipt_first = (first_flux_subrow
                      if args.redi_flux_ladder and first_flux_subrow is not None
                      else first)
     nemo = args.nemo_root.resolve()
     receipt = {
-        "schema": ("dino-split-explicit-momentum-chain-round91-v1"
+        "schema": ("dino-split-explicit-momentum-chain-round93-v1"
+                   if args.redi_zfw_a33_floor_factorial else
+                   "dino-split-explicit-momentum-chain-round91-v1"
                    if args.redi_zfw_wslp_stage_factorial else
                    "dino-split-explicit-momentum-chain-round90-v1"
                    if args.redi_zfw_skew_operand_factorial else
@@ -3026,6 +3324,9 @@ def main() -> int:
         **({"redi_zfw_wslp_stage_factorial":
             redi_zfw_wslp_stage_factorial}
            if args.redi_zfw_wslp_stage_factorial else {}),
+        **({"redi_zfw_a33_floor_factorial":
+            redi_zfw_a33_floor_factorial}
+           if args.redi_zfw_a33_floor_factorial else {}),
         "focus_ji": [list(x) for x in FOCUS],
         "bindings": {
             "round54": _sha(args.round54.resolve()),
@@ -3113,12 +3414,16 @@ def main() -> int:
                if args.redi_zfw_skew_operand_factorial else {}),
             **({"round90": _sha(args.round90.resolve())}
                if args.redi_zfw_wslp_stage_factorial else {}),
+            **({"round93_wslp": _sha(args.round93_wslp.resolve())}
+               if args.redi_zfw_a33_floor_factorial else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(
                 root / "docs/ocean/fidelity" /
-                ("PREREG_split_explicit_momentum_chain_round91.md"
+                ("PREREG_split_explicit_momentum_chain_round93.md"
+                 if args.redi_zfw_a33_floor_factorial else
+                 "PREREG_split_explicit_momentum_chain_round91.md"
                  if args.redi_zfw_wslp_stage_factorial else
                  "PREREG_split_explicit_momentum_chain_round90.md"
                  if args.redi_zfw_skew_operand_factorial else
@@ -3192,7 +3497,9 @@ def main() -> int:
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
             "nemo_ldftra": _sha(nemo / "cfgs/DINO/MY_SRC/ldftra.F90"),
         },
-        "arm": ("redi_zfw_wslp_stage_factorial"
+        "arm": ("redi_zfw_a33_floor_factorial"
+                if args.redi_zfw_a33_floor_factorial else
+                "redi_zfw_wslp_stage_factorial"
                 if args.redi_zfw_wslp_stage_factorial else
                 "redi_zfw_skew_operand_factorial"
                 if args.redi_zfw_skew_operand_factorial else

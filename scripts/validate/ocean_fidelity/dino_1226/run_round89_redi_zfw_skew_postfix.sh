@@ -3,7 +3,7 @@ set -euo pipefail
 producer=$1
 output=${2:-/tmp/dino_split_explicit_momentum_chain_round89.json}
 mode=${3:-postfix}
-test "$mode" = postfix -o "$mode" = operand_factorial -o "$mode" = wslp_stage
+test "$mode" = postfix -o "$mode" = operand_factorial -o "$mode" = wslp_stage -o "$mode" = a33_floor
 repo=$(cd "$(dirname "$0")/../../../.." && pwd)
 cd "$repo"
 git cat-file -e "$producer^{commit}"
@@ -52,16 +52,22 @@ args+=(
   --nemo-root /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
   --output "$output"
 )
-if test "$mode" = operand_factorial -o "$mode" = wslp_stage; then
+if test "$mode" = operand_factorial -o "$mode" = wslp_stage -o "$mode" = a33_floor; then
   args+=(
     --round89 /tmp/dino_split_explicit_momentum_chain_round89.json
     --redi-zfw-skew-operand-factorial
   )
 fi
-if test "$mode" = wslp_stage; then
+if test "$mode" = wslp_stage -o "$mode" = a33_floor; then
   args+=(
     --round90 /tmp/dino_split_explicit_momentum_chain_round90.json
     --redi-zfw-wslp-stage-factorial
+  )
+fi
+if test "$mode" = a33_floor; then
+  args+=(
+    --round93-wslp /tmp/dino_split_explicit_momentum_chain_round93_wslp.json
+    --redi-zfw-a33-floor-factorial
   )
 fi
 python3 "$scorer" "${args[@]}"
