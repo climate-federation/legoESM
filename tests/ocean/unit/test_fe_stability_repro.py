@@ -33,6 +33,13 @@ def test_recipe_override_parser_accepts_typed_values():
     }
 
 
+def test_column_mean_deposit_plant_fires_at_planted_cell():
+    result = MODULE.column_mean_deposit_plant()
+    assert result["fired"] is True
+    assert result["metrics"]["u"]["max_abs"] > 0.0
+    assert result["metrics"]["u"]["index"] == [1, 2]
+
+
 @pytest.mark.parametrize(
     "raw, message",
     [

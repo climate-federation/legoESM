@@ -21,6 +21,7 @@ import jax
 import numpy as np
 
 from legoesm.core.precision import PrecisionPolicy, set_policy
+import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as ocean_model_module
 from legoesm.ocean.experiments.dino import (
     DINOConfig,
     DINO_RECIPES,
@@ -57,6 +58,103 @@ def _finite_max(value) -> tuple[bool, float]:
     array = np.asarray(value, dtype=np.float64)
     finite = bool(np.isfinite(array).all())
     return finite, float(np.max(np.abs(array))) if finite else float("nan")
+
+
+def _operand_max(value) -> dict[str, object]:
+    """Return a citable maximum and location without changing model numerics."""
+    array = np.asarray(value, dtype=np.float64)
+    finite = bool(np.isfinite(array).all())
+    if not finite:
+        return {"finite": False, "max_abs": float("nan"), "index": None}
+    flat_index = int(np.argmax(np.abs(array)))
+    return {
+        "finite": True,
+        "max_abs": float(np.abs(array).reshape(-1)[flat_index]),
+        "index": [int(i) for i in np.unravel_index(flat_index, array.shape)],
+    }
+
+
+def column_mean_deposit(before_u, before_v, after_u, after_v) -> dict[str, object]:
+    """Measure the vertical solve's change to barotropic column means."""
+    return {
+        "u": _operand_max(np.asarray(after_u) - np.asarray(before_u)),
+        "v": _operand_max(np.asarray(after_v) - np.asarray(before_v)),
+    }
+
+
+def column_mean_deposit_plant() -> dict[str, object]:
+    """Non-vacuity control: a planted target mismatch must be detected."""
+    before_u = np.zeros((2, 3), dtype=np.float64)
+    before_v = np.zeros((3, 2), dtype=np.float64)
+    after_u = before_u.copy()
+    after_v = before_v.copy()
+    after_u[1, 2] = np.nextafter(0.0, 1.0)
+    metrics = column_mean_deposit(before_u, before_v, after_u, after_v)
+    fired = metrics["u"]["max_abs"] > 0.0 and metrics["u"]["index"] == [1, 2]
+    return {"fired": bool(fired), "metrics": metrics}
+
+
+def _install_operand_trace(model, trace_rows, trace_context, start_step, end_step):
+    """Spy on existing production seams; return a restoration callback."""
+    original_baro = ocean_model_module.barotropic_substeps_latlon_cgrid
+    model_type = type(model)
+    original_vmix = model_type._apply_implicit_vertical_mixing
+
+    def active_row():
+        step = trace_context["step"]
+        if start_step <= step <= end_step:
+            return trace_rows.setdefault(str(step), {"step": step})
+        return None
+
+    def baro_spy(state, *positional, **keywords):
+        row = active_row()
+        if row is not None:
+            row["barotropic_input"] = {
+                name: _operand_max(getattr(state, name).data)
+                for name in ("eta", "u", "v")
+            }
+            row["frozen_slow_forcing"] = {
+                name: _operand_max(keywords.get(f"F_slow_{name}"))
+                for name in ("eta", "u", "v")
+            }
+        answer = original_baro(state, *positional, **keywords)
+        if row is not None:
+            after = answer[0]
+            row["barotropic_output"] = {
+                name: _operand_max(getattr(after, name).data)
+                for name in ("eta", "u", "v")
+            }
+        return answer
+
+    def vmix_spy(self, state, *positional, **keywords):
+        row = active_row()
+        z_coord = keywords.get("z_coord")
+        config = keywords.get("config")
+        grid = keywords.get("grid")
+        if row is not None:
+            before_u, before_v = self._fixed_depth_means(
+                state, z_coord=z_coord, config=config, grid=grid)
+        answer = original_vmix(self, state, *positional, **keywords)
+        after_state = answer[0] if isinstance(answer, tuple) else answer
+        if row is not None:
+            after_u, after_v = self._fixed_depth_means(
+                after_state, z_coord=z_coord, config=config, grid=grid)
+            row["vertical_solve_column_mean_before"] = {
+                "u": _operand_max(before_u), "v": _operand_max(before_v)}
+            row["vertical_solve_column_mean_after"] = {
+                "u": _operand_max(after_u), "v": _operand_max(after_v)}
+            row["vertical_solve_column_mean_deposit"] = column_mean_deposit(
+                before_u, before_v, after_u, after_v)
+        return answer
+
+    ocean_model_module.barotropic_substeps_latlon_cgrid = baro_spy
+    model_type._apply_implicit_vertical_mixing = vmix_spy
+
+    def restore():
+        ocean_model_module.barotropic_substeps_latlon_cgrid = original_baro
+        model_type._apply_implicit_vertical_mixing = original_vmix
+
+    return restore
 
 
 def _write(path: str, receipt: dict) -> None:
@@ -112,8 +210,19 @@ def run(args: argparse.Namespace) -> int:
         "status": "RUNNING",
         "steps": [],
         "surface_tendency_placement": placement,
+        "trace_end_step": args.trace_end_step,
+        "trace_rows": {},
+        "trace_start_step": args.trace_start_step,
         "traceback": None,
     }
+    plant = column_mean_deposit_plant()
+    if not plant["fired"]:
+        raise AssertionError("column-mean deposit planted control did not fire")
+    receipt["column_mean_deposit_plant"] = plant
+    trace_context = {"step": 0}
+    restore_trace = _install_operand_trace(
+        model, receipt["trace_rows"], trace_context,
+        args.trace_start_step, args.trace_end_step)
 
     print(
         "FE_REPRO_CONFIG "
@@ -125,6 +234,7 @@ def run(args: argparse.Namespace) -> int:
     )
     for index in range(args.max_steps):
         step = index + 1
+        trace_context["step"] = step
         print(f"STEP_START={step}", flush=True)
         try:
             if placement == "leapfrog_rhs":
@@ -183,10 +293,12 @@ def run(args: argparse.Namespace) -> int:
             )
             traceback.print_exc()
             print(f"RECEIPT={args.output}", flush=True)
+            restore_trace()
             return 2
 
     receipt["status"] = "NO_FAILURE_IN_REQUESTED_WINDOW"
     _write(args.output, receipt)
+    restore_trace()
     print(f"NO_FAILURE_THROUGH_STEP={args.max_steps}", flush=True)
     print(f"RECEIPT={args.output}", flush=True)
     return 0
@@ -198,6 +310,8 @@ def main() -> int:
     parser.add_argument("--run-traj", default=twin.RUN_TRAJ)
     parser.add_argument("--run-stepdump", default=twin.RUN_STEPDUMP)
     parser.add_argument("--max-steps", type=int, default=64)
+    parser.add_argument("--trace-start-step", type=int, default=25)
+    parser.add_argument("--trace-end-step", type=int, default=35)
     parser.add_argument(
         "--recipe-override",
         action="append",
@@ -209,6 +323,9 @@ def main() -> int:
     args = parser.parse_args()
     if args.max_steps < 1:
         parser.error("--max-steps must be >= 1")
+    if not (1 <= args.trace_start_step <= args.trace_end_step <= args.max_steps):
+        parser.error(
+            "trace window must satisfy 1 <= start <= end <= max-steps")
     try:
         args.recipe_overrides = parse_recipe_overrides(args.recipe_override)
     except ValueError as exc:
