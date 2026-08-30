@@ -586,7 +586,7 @@ def per_element_report(name, lego, nemo, wet, quiet=False):
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--round93-output", type=Path)
-    args = parser.parse_args()
+    cli = parser.parse_args()
     print(dump_lane.banner())
     print(f"restart used  = {os.path.join(RUN_DIR, RESTART)}")
     print(f"dump dir used = {RUN_DIR}")
@@ -1795,7 +1795,7 @@ def main() -> int:
               f"both read 0.0)")
     except NameError:
         pass
-    if args.round93_output is not None:
+    if cli.round93_output is not None:
         if not raw_ok or "_shap" not in loc:
             raise SystemExit("round93 requires the verified raw-W capture")
         root = Path(__file__).resolve().parents[4]
@@ -1939,7 +1939,7 @@ def main() -> int:
                    for name in RAW_DUMPS},
             },
         }
-        args.round93_output.write_text(
+        cli.round93_output.write_text(
             json.dumps(receipt, indent=2, sort_keys=True) + "\n")
         print(f"round93_wslp_disposition={disposition}")
         if not valid:
