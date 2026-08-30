@@ -492,3 +492,19 @@ assembled slow forcing before scoring downstream operations. Round 46 applies
 the same committed hold and no other substitution. Row 5 remains open until
 that registered conditional replay either reaches its unchanged bars or
 exposes another local operand.
+
+## Round 46: row 5 promoted in the upstream-exact frame
+
+Artifact `/tmp/dino_split_explicit_momentum_chain_round46.json`, SHA-256
+`a5c68a419877b61605e7cfa1e3e67caf0b5b8d0e77c32c2718e5e2fd71a252f2`,
+classifies `ROW5_WZV_CALL2_AT_BAR_UPSTREAM_EXACT`. Only the registered
+`zu_frc/zv_frc` boundary was held; seed, `Hu_avg/Hv_avg`, QCO geometry, Kmm
+rewrite, hdiv, Kaa SSH, recurrence, and post-`dyn_zdf` carry were production.
+Q/H/W normalized RMS are respectively `3.25755e-16`, `2.90617e-15`, and
+`2.37700e-14`; their maximum errors over NEMO RMS are `2.50682e-15`,
+`1.09795e-13`, and `5.26687e-13`, all within the unchanged `1e-12` bars.
+
+The local row-5 owner is therefore the coupled raw Kaa plus source-literal
+Kmm rewrite at `dynspg_ts.F90:1170-1174`. The unheld W residual
+`3.43293e-6` remains an upstream row-1.1 qualification and is not relabelled
+as local exactness. Row 5 is promoted conditionally and releases row 6.
