@@ -1380,8 +1380,21 @@ def compute_nemo_native_slopes(
         if _stretch2d is not None:
             zck = zck * _stretch2d[:, :, None]
     in_ml_w = kidx < kanc[:, :, None]
-    wslpi = jnp.where(in_ml_w, zck * anc_i[:, :, None], swi_int) * wmask3
-    wslpj = jnp.where(in_ml_w, zck * anc_j[:, :, None], swj_int) * wmask3
+    if _prd_mode == "nemo_literal":
+        # ldfslp.F90:320-328 writes the integer zfk selector as two
+        # multiplied arms followed by one addition and the final wmask.  A
+        # where() is mathematically equivalent but elides the zero arm and
+        # changes the last bit at the strict row-30/Redi bar.
+        zfk = (~in_ml_w).astype(dtype)
+        wslpi = lax.optimization_barrier(
+            (zfk * swi_int
+             + (1.0 - zfk) * zck * anc_i[:, :, None]) * wmask3)
+        wslpj = lax.optimization_barrier(
+            (zfk * swj_int
+             + (1.0 - zfk) * zck * anc_j[:, :, None]) * wmask3)
+    else:
+        wslpi = jnp.where(in_ml_w, zck * anc_i[:, :, None], swi_int) * wmask3
+        wslpj = jnp.where(in_ml_w, zck * anc_j[:, :, None], swj_int) * wmask3
     wslpi = wslpi.at[:, :, 0].set(0.0)
     wslpj = wslpj.at[:, :, 0].set(0.0)
 
