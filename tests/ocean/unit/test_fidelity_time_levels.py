@@ -83,7 +83,8 @@ def test_realized_vmix_dumps_are_current_zdf_phy_outputs():
     for name in ("dump_avm.bin", "dump_avt.bin"):
         assert time_level_for_dump(name) == "now"
         src = _DUMP_TIME_LEVEL[name][1]
-        assert "stpmlf.F90:210" in src and "ldftra.F90:95" in src, src
+        assert "zdfphy.F90:311" in src, src
+        assert "closure copy" in src and "EVD overwrite" in src, src
 
 
 def test_unregistered_dump_raises_and_never_defaults():

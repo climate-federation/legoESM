@@ -8,6 +8,7 @@ placement.
 import numpy as np
 import pytest
 
+from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean.fidelity.nemo_io import NemoBeforeState, NemoGrid, NemoState
 from legoesm.ocean.fidelity.nemo_state_bridge import (
     bridge_before_state_topo,
@@ -213,8 +214,13 @@ def test_topo_bridge_carries_raw_een_coefficient_operands_without_rebuilding():
         hv_0=np.sum((e3 + 0.25) * grid.vmask, axis=-1),
         fmask=fmask, e2u=grid.e2t + 1.0, e1v=grid.e1t + 2.0,
         e1f=grid.e1t + 3.0, e2f=grid.e2t + 4.0)
-    out = bridge_nemo_to_legoesm_topo(
-        carried, state, periodic_i=True, full_step=True)
+    old_policy = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        out = bridge_nemo_to_legoesm_topo(
+            carried, state, periodic_i=True, full_step=True)
+    finally:
+        set_policy(old_policy)
     raw = out.z_coord.nemo_een_barotropic
     assert raw is not None
     for name in raw._fields:

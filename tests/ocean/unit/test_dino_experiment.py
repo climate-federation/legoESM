@@ -1697,6 +1697,11 @@ class TestSurfaceTendencyPlacement:
             # contrast on the byte-pinned generic coefficient builder.
             barotropic_een_coefficient_evaluation="generic")
         g = dino_lat_lon_grid(cfg, n_lon=10)
+        # This is a surface-placement control on a synthetic state, not a
+        # restart-bridge fidelity run.  Pin the two coupled QCO paths whose
+        # literal arms require raw NEMO restart operands.
+        cfg = dataclasses.replace(
+            cfg, zad_qco_evaluation="generic", wzv_call2_evaluation="generic")
         z = dino_lat_lon_vertical(g, cfg)  # MLF card needs its matching
                                            # partial-cell/masked-zco coord,
                                            # not the bare z* helper.
