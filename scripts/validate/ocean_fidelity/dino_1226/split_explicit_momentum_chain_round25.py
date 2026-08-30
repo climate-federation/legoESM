@@ -143,6 +143,29 @@ def _materialize(
     return out
 
 
+def _checkerboard_rematerialize(
+    coefficient: dict[str, np.ndarray],
+) -> dict[str, np.ndarray]:
+    """Apply round 22's four-pattern measurement operator to every arm."""
+    ny, nx = coefficient["ffu_nw"].shape
+    u_patterns = r22._checkerboards((ny, nx + 1), periodic_u=True)
+    v_patterns = r22._checkerboards((ny + 1, nx))
+    zero_u = np.zeros((ny, nx), dtype=np.float64)
+    zero_v = np.zeros((ny, nx), dtype=np.float64)
+    u_outputs = [
+        r22._literal_application(zero_u, pattern[1:, :], coefficient)[0]
+        for pattern in v_patterns
+    ]
+    v_outputs = [
+        r22._literal_application(pattern[:, 1:], zero_v, coefficient)[1]
+        for pattern in u_patterns
+    ]
+    eu = r22._solve_coefficients(u_outputs, v_patterns, "u")
+    ev = r22._solve_coefficients(v_outputs, u_patterns, "v")
+    return {**{f"ffu_{name}": value for name, value in eu.items()},
+            **{f"ffv_{name}": value for name, value in ev.items()}}
+
+
 def _effects(values: dict[str, float]) -> dict[str, float]:
     result = {}
     axes = {"T": 0, "V": 1, "P": 2}
@@ -218,8 +241,8 @@ def main() -> int:
     arms = {}
     for bits in itertools.product((0, 1), repeat=3):
         key = f"T{bits[0]}V{bits[1]}P{bits[2]}"
-        coefficient = _materialize(mx, np.asarray(mesh.ff_f), e3f, e3u, e3v,
-                                   live_r3, bits)
+        coefficient = _checkerboard_rematerialize(_materialize(
+            mx, np.asarray(mesh.ff_f), e3f, e3u, e3v, live_r3, bits))
         rows = {name: r22._metric(value, oracle[name],
                                   umask if name.startswith("ffu") else vmask)
                 for name, value in sorted(coefficient.items())}
