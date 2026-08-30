@@ -5,3 +5,23 @@
 # point in a flat basin, not a calibrated value. Opt in with --params; this
 # file never mutates a production *Config default.
 
+atm.conv.TiedtkeConfig.M_b_max: 0.126188  # default 0.05, seed-spread 33% of range, kg/m^2/s
+atm.conv.TiedtkeConfig.autoconv_pe_max: 0.720218  # default 0.9, seed-spread 16% of range
+atm.conv.TiedtkeConfig.autoconv_q_c_crit: 0.00082842  # default 0.0005, seed-spread 49% of range, kg/kg
+atm.conv.TiedtkeConfig.cape_threshold: 76.421  # default 70, seed-spread 18% of range, J/kg
+atm.conv.TiedtkeConfig.cloud_depth_deep: 4046.19  # default 3000, seed-spread 15% of range, m
+atm.conv.TiedtkeConfig.cloud_depth_shallow_max: 1310.32  # default 1500, seed-spread 2% of range, m
+atm.conv.TiedtkeConfig.cmt_c_d: 0.471376  # default 0.7, seed-spread 18% of range
+atm.conv.TiedtkeConfig.cmt_c_u: 1.6915  # default 0.7, seed-spread 28% of range
+atm.conv.TiedtkeConfig.delta_deep: 0.000152352  # default 0.0001, seed-spread 17% of range, 1/m
+atm.conv.TiedtkeConfig.delta_midlevel: 0.000234139  # default 0.0002, seed-spread 7% of range, 1/m
+atm.conv.TiedtkeConfig.delta_shallow: 0.00035257  # default 0.0003, seed-spread 11% of range, 1/m
+atm.conv.TiedtkeConfig.downdraft_alpha: 0.0612729  # default 0.3, seed-spread 10% of range
+atm.conv.TiedtkeConfig.downdraft_evap_efficiency: 0.205671  # default 0.05, seed-spread 41% of range
+atm.conv.TiedtkeConfig.mc_proxy_RH_crit: 0.821407  # default 0.6, seed-spread 51% of range
+atm.conv.TiedtkeConfig.midlevel_M_b_fraction: 0.579884  # default 0.5, seed-spread 36% of range
+atm.conv.TiedtkeConfig.moisture_convergence_threshold: 1.51359e-08  # default 1e-08, seed-spread 46% of range, kg/kg/s
+atm.conv.TiedtkeConfig.parcel_dq: 0.00146003  # default 0.001, seed-spread 56% of range, kg/kg
+atm.conv.TiedtkeConfig.tau_MC_proxy: 4188.82  # default 3600, seed-spread 19% of range, s
+atm.conv.TiedtkeConfig.tau_M_u_relax: 3872.02  # default 1800, seed-spread 13% of range, s
+atm.conv.TiedtkeConfig.tau_shallow_M_b: 5005.28  # default 3600, seed-spread 15% of range, s
