@@ -6394,10 +6394,12 @@ def main() -> int:
                 "--nemo-monthly-init with --woa-smoothing-passes would "
                 "silently smooth away the exact NEMO IC — drop one "
                 "(codex r11 MED#2).")
-        if app_grid_type == "mpas":
-            raise SystemExit(
-                "--nemo-monthly-init is wired for the structured grids "
-                "(tripole/latlon); MPAS keeps its own IC path.")
+        # Grid-agnostic: load_nemo_monthly_init_ts -> _to_model_grid_2d uses
+        # NearestWetRegridder(structured=False) for MPAS 1-D cell centres
+        # (lat2d/lon2d = rad2deg(latCell/lonCell)), output (nCells, nlev). The
+        # loader is exact-ladder-only, so it raises if MPAS is not the 75-level
+        # NEMO ladder (the card must carry --nemo-vertical). IC harmonization:
+        # all grids take the same NEMO monthly WOA start (2026-08-30).
         from legoesm.ocean.forcing.nemo_native_fields import (
             load_nemo_monthly_init_ts,
         )

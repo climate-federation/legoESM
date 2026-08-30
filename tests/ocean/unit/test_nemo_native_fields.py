@@ -129,3 +129,38 @@ def test_monthly_init_native(tmp_path):
     with pytest.raises(ValueError, match="month"):
         load_nemo_monthly_init_ts(str(tp), str(sp), lat, lon,
                                   n_levels=nlev, month=0)
+
+
+def test_monthly_init_unstructured_target(tmp_path):
+    """MPAS Voronoi target: 1-D paired cell centres -> (nCells, nlev).
+
+    Exercises the exact path the run_omip_core2 MPAS gate removal exposes
+    (2026-08-30): the loader must accept 1-D cell coords (NearestWetRegridder
+    structured=False) so all grids can take the same NEMO monthly WOA IC.
+    """
+    nlev = 5
+    tp, sp = tmp_path / "t.nc", tmp_path / "s.nc"
+    lat_i = np.linspace(-70, 89, 6)[:, None] * np.ones((1, 8))
+    lon_i = np.ones((6, 1)) * np.linspace(0, 350, 8)[None, :]
+    for path, var, base in ((tp, "contemp", 10.0), (sp, "presalt", 34.0)):
+        with netCDF4.Dataset(path, "w") as ds:
+            ds.createDimension("time_counter", 12)
+            ds.createDimension("deptht", nlev)
+            ds.createDimension("y", 6)
+            ds.createDimension("x", 8)
+            v = ds.createVariable("nav_lat", "f8", ("y", "x")); v[:] = lat_i
+            v = ds.createVariable("nav_lon", "f8", ("y", "x")); v[:] = lon_i
+            v = ds.createVariable(var, "f8",
+                                  ("time_counter", "deptht", "y", "x"))
+            fld = (base + np.arange(12)[:, None, None, None]
+                   + np.arange(nlev)[None, :, None, None] * 0.01)
+            v[:] = np.broadcast_to(fld, (12, nlev, 6, 8)).copy()
+    # 1-D paired MPAS cell centres (nCells=5) inside the source hull
+    latc = np.array([-40.0, -10.0, 10.0, 40.0, 70.0])
+    lonc = np.array([30.0, 100.0, 180.0, 250.0, 320.0])
+    T, S = load_nemo_monthly_init_ts(str(tp), str(sp), latc, lonc,
+                                     n_levels=nlev, month=2)
+    assert T.shape == (5, nlev) and S.shape == (5, nlev)   # (nCells, nlev)
+    assert np.isfinite(T).all() and np.isfinite(S).all()
+    # month indexing survives: contemp = 10 + m at month 2 (index 1)
+    np.testing.assert_allclose(T[:, 0], 10.0 + 1, atol=1e-6)
