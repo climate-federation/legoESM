@@ -21,6 +21,7 @@ import jax
 import numpy as np
 
 from legoesm.core.precision import PrecisionPolicy, set_policy
+import legoesm.ocean.dynamics.barotropic_latlon_cgrid as barotropic_module
 import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as ocean_model_module
 from legoesm.ocean.experiments.dino import (
     DINOConfig,
@@ -94,9 +95,41 @@ def column_mean_deposit_plant() -> dict[str, object]:
     return {"fired": bool(fired), "metrics": metrics}
 
 
+def _record_term(row: dict, term: str, **components) -> None:
+    """Accumulate a per-window maximum from a production-kernel callback."""
+    terms = row.setdefault("fast_terms", {})
+    entry = terms.setdefault(term, {"calls": 0})
+    entry["calls"] += 1
+    for name, value in components.items():
+        measured = _operand_max(value)
+        previous = entry.get(name)
+        if previous is None or measured["max_abs"] > previous["max_abs"]:
+            entry[name] = measured
+
+
+def fast_term_trace_plant() -> dict[str, object]:
+    """Non-vacuity control for the callback maximum/location accumulator."""
+    row: dict[str, object] = {}
+    _record_term(row, "plant", u=np.zeros((2, 2)), v=np.zeros((2, 2)))
+    planted = np.zeros((2, 2), dtype=np.float64)
+    planted[1, 0] = 3.0
+    _record_term(row, "plant", u=planted, v=np.zeros((2, 2)))
+    result = row["fast_terms"]["plant"]
+    return {
+        "fired": bool(
+            result["calls"] == 2
+            and result["u"]["max_abs"] == 3.0
+            and result["u"]["index"] == [1, 0]),
+        "metrics": result,
+    }
+
+
 def _install_operand_trace(model, trace_rows, trace_context, start_step, end_step):
     """Spy on existing production seams; return a restoration callback."""
     original_baro = ocean_model_module.barotropic_substeps_latlon_cgrid
+    original_continuity = barotropic_module.nemo_literal_continuity_divergence
+    original_coriolis = barotropic_module.een_barotropic_coriolis
+    original_pgf = barotropic_module._nemo_literal_barotropic_pressure_gradient
     model_type = type(model)
     original_vmix = model_type._apply_implicit_vertical_mixing
 
@@ -126,6 +159,36 @@ def _install_operand_trace(model, trace_rows, trace_context, start_step, end_ste
             }
         return answer
 
+    def continuity_spy(*positional, **keywords):
+        answer = original_continuity(*positional, **keywords)
+        jax.debug.callback(
+            lambda value: (
+                _record_term(active_row(), "continuity_divergence", eta=value)
+                if active_row() is not None else None),
+            answer,
+        )
+        return answer
+
+    def coriolis_spy(*positional, **keywords):
+        answer = original_coriolis(*positional, **keywords)
+        jax.debug.callback(
+            lambda u, v: (
+                _record_term(active_row(), "een_coriolis", u=u, v=v)
+                if active_row() is not None else None),
+            answer[0], answer[1],
+        )
+        return answer
+
+    def pgf_spy(*positional, **keywords):
+        answer = original_pgf(*positional, **keywords)
+        jax.debug.callback(
+            lambda u, v: (
+                _record_term(active_row(), "surface_pressure_gradient", u=u, v=v)
+                if active_row() is not None else None),
+            answer[0], answer[1],
+        )
+        return answer
+
     def vmix_spy(self, state, *positional, **keywords):
         row = active_row()
         z_coord = keywords.get("z_coord")
@@ -148,10 +211,16 @@ def _install_operand_trace(model, trace_rows, trace_context, start_step, end_ste
         return answer
 
     ocean_model_module.barotropic_substeps_latlon_cgrid = baro_spy
+    barotropic_module.nemo_literal_continuity_divergence = continuity_spy
+    barotropic_module.een_barotropic_coriolis = coriolis_spy
+    barotropic_module._nemo_literal_barotropic_pressure_gradient = pgf_spy
     model_type._apply_implicit_vertical_mixing = vmix_spy
 
     def restore():
         ocean_model_module.barotropic_substeps_latlon_cgrid = original_baro
+        barotropic_module.nemo_literal_continuity_divergence = original_continuity
+        barotropic_module.een_barotropic_coriolis = original_coriolis
+        barotropic_module._nemo_literal_barotropic_pressure_gradient = original_pgf
         model_type._apply_implicit_vertical_mixing = original_vmix
 
     return restore
@@ -219,6 +288,10 @@ def run(args: argparse.Namespace) -> int:
     if not plant["fired"]:
         raise AssertionError("column-mean deposit planted control did not fire")
     receipt["column_mean_deposit_plant"] = plant
+    term_plant = fast_term_trace_plant()
+    if not term_plant["fired"]:
+        raise AssertionError("fast-term callback planted control did not fire")
+    receipt["fast_term_trace_plant"] = term_plant
     trace_context = {"step": 0}
     restore_trace = _install_operand_trace(
         model, receipt["trace_rows"], trace_context,

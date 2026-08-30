@@ -179,10 +179,8 @@ def test_before_level_seed_none_vs_now_is_byte_identical():
         np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
 
 
-def test_boxcar_ab3_requires_leapfrog():
-    """nemo_boxcar_ab3 (nn_bt_flt=2) is flt=2-faithful only under the MLF
-    leap-frog (×2 substep scale + Nbb seed); pairing it with forward_euler is a
-    non-NEMO hybrid and must raise."""
+def test_boxcar_ab3_accepts_nemo_first_euler_frame():
+    """NEMO's l_1st_euler step still executes nn_bt_flt=2 AB3/AM4."""
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
     )
@@ -191,6 +189,22 @@ def test_boxcar_ab3_requires_leapfrog():
     r = build_nemo_gyre_recipe()
     mc = r.model_config._replace(
         outer_integrator="forward_euler",
+        barotropic=r.model_config.barotropic._replace(
+            barotropic_time_filter="nemo_boxcar_ab3"))
+    model = LatLonCGridOceanModel(r.grid, r.z_coord, mc)
+    assert model.config.outer_integrator == "forward_euler"
+    assert model.config.barotropic.barotropic_time_filter == "nemo_boxcar_ab3"
+
+
+def test_boxcar_ab3_rejects_ab2_outer_frame():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.fidelity.nemo_recipe import build_nemo_gyre_recipe
+
+    r = build_nemo_gyre_recipe()
+    mc = r.model_config._replace(
+        outer_integrator="ab2",
         barotropic=r.model_config.barotropic._replace(
             barotropic_time_filter="nemo_boxcar_ab3"))
     with pytest.raises(ValueError, match="nemo_boxcar_ab3"):

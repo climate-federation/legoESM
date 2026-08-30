@@ -40,6 +40,14 @@ def test_column_mean_deposit_plant_fires_at_planted_cell():
     assert result["metrics"]["u"]["index"] == [1, 2]
 
 
+def test_fast_term_trace_plant_fires_and_keeps_largest_call():
+    result = MODULE.fast_term_trace_plant()
+    assert result["fired"] is True
+    assert result["metrics"]["calls"] == 2
+    assert result["metrics"]["u"]["max_abs"] == 3.0
+    assert result["metrics"]["u"]["index"] == [1, 0]
+
+
 @pytest.mark.parametrize(
     "raw, message",
     [

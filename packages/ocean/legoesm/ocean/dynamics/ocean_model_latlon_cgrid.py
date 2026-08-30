@@ -2430,26 +2430,22 @@ class LatLonCGridOceanModel:
                 "DINO Kamm forward-Euler + nemo_boxcar_centred requires "
                 "barotropic_diffusion_alpha > 0: alpha=0 is the MLF-only "
                 "NEMO-faithful choice and excites the FE free-surface mode")
-        # nemo_boxcar_ab3 (NEMO nn_bt_flt=2) is only flt=2-faithful under the
-        # MLF leap-frog family (_leapfrog_step OR nemo_mlf's _nemo_mlf_step --
-        # both supply the SAME ×2 substep scale + Nbb before-level seed, per
-        # _nemo_mlf_step's docstring "barotropic-before seeding ... IDENTICAL
-        # to _leapfrog_step"), which make the boxcar 2*nn_e-wide and centred at
-        # Naa (dynspg_ts.F90:1061, 494-503). Pairing it with forward_euler
-        # would give a flt=1-width window + AB3 + ts_bck_interp — a non-NEMO
-        # hybrid — so reject it (only the leapfrog-family cards select it).
+        # nemo_boxcar_ab3 is NEMO nn_bt_flt=2's AB3 velocity predictor plus
+        # ts_bck_interp SSH dissipation.  It runs in BOTH executed stp_MLF
+        # frames: the regular 2*rn_Dt leap-frog window and l_1st_euler's rn_Dt
+        # window (stpmlf.F90:134-137; dynspg_ts.F90:241-251,546-553,766-780).
+        # ``substep_scale`` selects the matching window geometry below.  AB2
+        # has no NEMO analogue for this filter and remains fail-closed.
         if (config.barotropic.barotropic_time_filter == "nemo_boxcar_ab3"
                 and getattr(config, "outer_integrator", "forward_euler")
-                not in ("leapfrog", "nemo_mlf")):
+                not in ("forward_euler", "leapfrog", "nemo_mlf")):
             raise ValueError(
                 'barotropic_time_filter="nemo_boxcar_ab3" (NEMO nn_bt_flt=2 AB3 '
                 "+ ts_bck_interp dissipation) requires outer_integrator in "
-                '("leapfrog", "nemo_mlf") (the MLF family supplies the ×2 '
-                "substep scale + before-level seed that make the boxcar the "
-                "faithful 2*nn_e window centred at Naa); got outer_integrator="
+                '("forward_euler", "leapfrog", "nemo_mlf"); got outer_integrator='
                 f"{getattr(config, 'outer_integrator', 'forward_euler')!r}. Use "
-                'barotropic_time_filter="nemo_boxcar_centred" for the '
-                "forward-frame boxcar.")
+                'barotropic_time_filter="nemo_boxcar_centred" for a plain '
+                "forward-backward boxcar without NEMO's temporal filter.")
         # zdf_drag_in_matrix (#1226 dynzdf.F90:293-305): the diagonal term is
         # NEMO's rCdU_bot (zdfdrg zdf_drg_nonlin/loglayer), so it requires a
         # NEMO bottom-drag scheme (the legacy linear / MOM6 DRAG_BG_VEL rate
