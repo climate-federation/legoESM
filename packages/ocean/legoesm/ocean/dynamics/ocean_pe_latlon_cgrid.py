@@ -4265,9 +4265,13 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         eta_before = (eta if eta_before_field is None
                       else eta_before_field.data)
         qco_dt = dt if zad_continuity_dt is None else zad_continuity_dt
+        qco_tmask_3d = (
+            z_coord.is_active.astype(eta.dtype)
+            if isinstance(z_coord, OceanPartialCellCoordinate)
+            else mask_3d)
         zad_w, zad_h_u, zad_h_v = _nemo_qco_zad_operands(
             eta, eta_before, u, v, grid, z_coord, u_mask_3d, v_mask_3d,
-            mask_3d, qco_dt,
+            qco_tmask_3d, qco_dt,
             freshwater_eta_tendency=zad_freshwater_eta_tendency,
         )
         # The W/H pair is a materialized NEMO stage boundary.  Without these
