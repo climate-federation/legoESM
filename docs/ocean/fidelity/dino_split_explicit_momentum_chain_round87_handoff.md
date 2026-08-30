@@ -15,7 +15,7 @@ set -euo pipefail
 export CODEX_SESSION_ID=01a04e34-d1fb-73e0-b25a-177641f0a246
 repo=/tmp/codex-zdf-sweep
 cd "$repo"
-producer=__MEASURED_ROW87_PRODUCER__
+producer=f9032e65ec7b0854bbb2b01af6df2ef34b2429fd
 git cat-file -e "$producer^{commit}"
 test -z "$(git status --porcelain --untracked-files=no)"
 test -z "$(git diff --name-only "$producer" HEAD -- packages/core packages/ocean scripts/validate/ocean_fidelity/dino_1226)"
@@ -31,6 +31,8 @@ NEMO_SOURCE_BASE_MAX_MIB=3072 NEMO_SOURCE_COPY_MAX_MIB=512 NEMO_SOURCE_MIN_FREE_
 for unit in 9460 9461 9462 9463; do test "$(grep -rE --include='*.F90' "\b${unit}\b" "$src" | wc -l)" -eq 0; done
 patch --dry-run --fuzz=2 -p1 -d "$src" < "$patchfile"
 patch --fuzz=2 -p1 -d "$src" < "$patchfile"
+test "$(sha256sum "$src/cfgs/DINO/MY_SRC/traldf_iso.F90" | awk '{print $1}')" = 3cc1548fbe98b833ff0871e91cb05eeae476ef940b21b44528e924277653bf2b
+test "$(sha256sum "$src/src/OCE/TRA/traldf_iso_scheme.h90" | awk '{print $1}')" = 3e55740bfdaabc0516af966ac4a05a2f728dd00564ae881536d69b30226cfe68
 for unit in 9460 9461 9462 9463; do test "$(grep -rE --include='*.F90' "OPEN.*UNIT.*=${unit}([^0-9]|$)" "$src/cfgs/DINO/MY_SRC" | wc -l)" -eq 1; done
 source /home/dbalwada/miniconda3/etc/profile.d/conda.sh
 conda activate nemo-build
@@ -48,7 +50,7 @@ printf 'SLOT __MEASURED_ROW87_SCHEME_SOURCE_SHA256__ VALUE=%s\n' "$(sha256sum sr
 ```bash
 set -euo pipefail
 repo=/tmp/codex-zdf-sweep; cd "$repo"
-producer=__MEASURED_ROW87_PRODUCER__; binary_sha=__MEASURED_ROW87_BINARY_SHA256__
+producer=f9032e65ec7b0854bbb2b01af6df2ef34b2429fd; binary_sha=__MEASURED_ROW87_BINARY_SHA256__
 git cat-file -e "$producer^{commit}"
 test -z "$(git status --porcelain --untracked-files=no)"
 test -z "$(git diff --name-only "$producer" HEAD -- packages/core packages/ocean scripts/validate/ocean_fidelity/dino_1226)"
@@ -92,7 +94,7 @@ printf 'SLOT __MEASURED_ROW87_BRACKET_SHA256__ VALUE=%s\n' "$(sha256sum "$out" |
 ```bash
 set -euo pipefail
 repo=/tmp/codex-zdf-sweep; cd "$repo"
-producer=__MEASURED_ROW87_PRODUCER__; run=__MEASURED_ROW87_RUN_DIR__; bracket_sha=__MEASURED_ROW87_BRACKET_SHA256__
+producer=f9032e65ec7b0854bbb2b01af6df2ef34b2429fd; run=__MEASURED_ROW87_RUN_DIR__; bracket_sha=__MEASURED_ROW87_BRACKET_SHA256__
 bash "$repo/scripts/validate/ocean_fidelity/dino_1226/run_round87_redi_zfw_score.sh" "$producer" "$run" /tmp/dino_redi_zfw_round87_bracket.json "$bracket_sha" /tmp/dino_split_explicit_momentum_chain_round87.json
 sha256sum /tmp/dino_split_explicit_momentum_chain_round87.json
 ```
