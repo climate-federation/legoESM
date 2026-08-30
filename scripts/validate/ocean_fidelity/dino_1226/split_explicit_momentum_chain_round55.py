@@ -177,13 +177,16 @@ def main() -> int:
         axis=1)
     held_v = np.concatenate(
         [np.zeros((1, 52)), held_v_native.reshape(199, 52)], axis=0)
-    oracle_u = np.concatenate([
-        np.fromfile(held / "spg_dump_un_adv_final.bin", dtype="<f8")
-        .reshape(199, 52)[:, -1:],
-        np.fromfile(held / "spg_dump_un_adv_final.bin", dtype="<f8")
-        .reshape(199, 52)], axis=1)
+    oracle_u_native = np.fromfile(
+        held / "spg_dump_un_adv_final.bin", dtype="<f8")
     oracle_v_native = np.fromfile(
-        held / "spg_dump_vn_adv_final.bin", dtype="<f8").reshape(199, 52)
+        held / "spg_dump_vn_adv_final.bin", dtype="<f8")
+    if oracle_u_native.size != 203 * 56 or oracle_v_native.size != 203 * 56:
+        raise SystemExit("final transport writers must be full-halo (203,56)")
+    oracle_u_native = oracle_u_native.reshape(203, 56)[2:-2, 2:-2]
+    oracle_v_native = oracle_v_native.reshape(203, 56)[2:-2, 2:-2]
+    oracle_u = np.concatenate([
+        oracle_u_native[:, -1:], oracle_u_native], axis=1)
     oracle_v = np.concatenate([np.zeros((1, 52)), oracle_v_native], axis=0)
 
     def observe(bolus, mass_flux_u, mass_flux_v, u_mask, v_mask, grid, z_coord):
