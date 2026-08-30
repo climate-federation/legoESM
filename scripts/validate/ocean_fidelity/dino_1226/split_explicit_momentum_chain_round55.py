@@ -1665,7 +1665,10 @@ def main() -> int:
                                 "controls": {
                                     "production_recompose_identity": bool(
                                         np.array_equal(
-                                            zfw_values["G0A0"],
+                                            zfw_values[
+                                                "G1A0" if
+                                                args.redi_zfw_skew_postfix
+                                                else "G0A0"],
                                             np.asarray(diagnostics_replay[
                                                 "zfw_kp1"])[..., :35])),
                                     "four_arms_present": len(zfw_arms) == 4,
@@ -2210,9 +2213,14 @@ def main() -> int:
                redi_zfw_skew_factorial["controls"].items()},
         })
     if args.redi_zfw_skew_postfix:
-        controls["round88_literal_skew_admitted"] = (
-            prior88["disposition"] ==
-            "REDI_ZFW_T_SKEW_LOCALIZED_TO_COEFFICIENT_ASSEMBLY")
+        controls.update({
+            "round88_literal_skew_admitted": (
+                prior88["disposition"] ==
+                "REDI_ZFW_T_SKEW_LOCALIZED_TO_COEFFICIENT_ASSEMBLY"),
+            "production_literal_skew_selector_reached": (
+                matched_calls["temperature"]["kwargs"].get(
+                    "vertical_skew_evaluation") == "nemo_literal"),
+        })
     controls["all_scored_finite"] = all(
         row.get("status") == "ORDERED_BLOCKED"
         or row["metrics"]["n_nonfinite_wet_elements"] == 0 for row in rows)
