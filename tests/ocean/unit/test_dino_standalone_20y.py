@@ -83,10 +83,10 @@ def test_runner_surface_has_no_restart_or_bridge_selector():
     assert "restart_paths\": []" in source
 
 
-def test_claim_length_is_fail_closed_on_first_step_debt():
-    assert RUNNER.FIRST_STEP_EQUIVALENT is False
-    assert RUNNER.claim_admission_reasons() == (
-        "cold-start leapfrog skips nemo_mlf_baro_corr on l_1st_euler",)
+def test_claim_length_is_admitted_after_first_step_corrector():
+    """Red-before-green gate for the T1 cold-start physics row."""
+    assert RUNNER.FIRST_STEP_EQUIVALENT is True
+    assert RUNNER.claim_admission_reasons() == ()
 
 
 def test_classifier_plants_cover_all_frozen_branches():
