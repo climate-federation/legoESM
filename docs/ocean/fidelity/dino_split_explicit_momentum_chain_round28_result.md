@@ -523,3 +523,17 @@ errors over NEMO RMS are `2.98986e-15/5.63618e-15`, above the registered
 POINTWISE `1e-15` bar. The ordered disposition is therefore
 `ROW6_MLF_BARO_CORR_U_DIVERGED`; row 6 is not promoted. Round 48 separates
 the few-ULP residual into primary-target and source-association operands.
+
+Round 48 artifact `/tmp/dino_split_explicit_momentum_chain_round48.json`,
+SHA-256 `8055e1138c7784942167ae06212e2801d78f6690d3646351b6040d557a70c06b`,
+classifies `OPEN_UNRESOLVED`. Substituting NEMO's primary target removes
+`82.206%` of joint squared error, while replacing the shared tree reduction
+with the algebraically cancelled reference-ladder left reduction removes
+`-0.504%`. The joint arm still has maximum/RMS `2.98986e-15/2.81809e-15`
+for U/V. Thus the target is material but not sufficient, and the simplified
+reference cancellation is not the remaining arithmetic owner.
+
+The source shows why: `stpmlf.F90:744-755` actually materializes live
+`e3u/e3v(Kaa)`, left-accumulates transport, then multiplies by live
+`r1_hu/r1_hv(Kaa)`. The QCO factors cancel algebraically but not before
+rounding. Round 49 tests that executed association from existing Kaa r3 dumps.
