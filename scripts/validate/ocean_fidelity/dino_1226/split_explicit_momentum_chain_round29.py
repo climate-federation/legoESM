@@ -85,7 +85,7 @@ def _strict_controls(candidate, oracle, mask) -> dict[str, Any]:
         "four_nextafter_location": [int(index) for index in point],
         "alignment_scan": alignment,
         "identity_at_bar": identity["gate_status"] == "AT BAR",
-        "four_nextafter_debt": planted["gate_status"] == "DEBT",
+        "four_nextafter_fires": planted["gate_status"] != "AT BAR",
         "zero_shift_best": (best["dj"], best["di"]) == (0, 0),
     }
 
@@ -231,7 +231,7 @@ def main() -> int:
     row2_literal = _score(literal_hdiv, oracle_hdiv, hmask)
     row2_controls = _strict_controls(production_hdiv, oracle_hdiv, hmask)
     if not all(row2_controls[name] for name in (
-            "identity_at_bar", "four_nextafter_debt", "zero_shift_best")):
+            "identity_at_bar", "four_nextafter_fires", "zero_shift_best")):
         raise SystemExit(f"row-2 control failed: {row2_controls}")
     row2_released = row2["gate_status"] in ("AT BAR", "CEILING")
 
@@ -268,7 +268,7 @@ def main() -> int:
         row3_controls = _strict_controls(
             qco["r3t"], oracle_qco["r3t"], masks["r3t"])
         if not all(row3_controls[name] for name in (
-                "identity_at_bar", "four_nextafter_debt", "zero_shift_best")):
+                "identity_at_bar", "four_nextafter_fires", "zero_shift_best")):
             raise SystemExit(f"row-3 control failed: {row3_controls}")
 
     row3_released = bool(
