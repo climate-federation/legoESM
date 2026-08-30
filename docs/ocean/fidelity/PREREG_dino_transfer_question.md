@@ -141,7 +141,8 @@ Both first FE climate arms stopped before producing a scoreable artifact. The
 unjitted CPU reproduction and one-field controls identified two false
 preregistration assumptions. First, zero `barotropic_diffusion_alpha` is
 NEMO-faithful and stable on MLF but excites the permanent-FE free-surface mode;
-the FE approximation requires its historical `0.01` stability crutch. Second,
+the then-available five-step control suggested restoring the FE approximation's
+historical `0.01` damping. Second,
 `zad_qco_evaluation=nemo_literal` and
 `wzv_call2_evaluation=nemo_literal` encode NEMO MLF Nbb/Kaa associations and
 have no permanent-forward-Euler equivalent. The zero-damping combination and
@@ -165,6 +166,23 @@ The corrected instrument receipts supersede the pre-finding hashes for T2:
 the admission-amended `climate_rebattery_score.py` SHA-256
 `b253cf40bcf27c526c18c6d3c9b08d50674b29af4cb10d68e6b9a88f3e23f424`.
 The MLD audit and NEMO wall hashes remain frozen below.
+
+### Post-run binding after the corrected r2 stop
+
+This paragraph records an outcome; it does not alter the frozen experiment or
+bars below. Both corrected FE climate arms still crash. The committed unjitted
+CPU replay completes the previously tested five-step window, matches the GPU
+day-1 SSH maximum at step 32, and raises the exact `e3w_int` positivity error
+at step 36 after the FE trajectory has already become grossly unphysical.
+
+The admission amendment's statement that alpha `0.01` is a stability crutch is
+therefore narrowed: it delays the failure beyond five steps but does not make
+this bundle stable. Any implication that it licensed the 360-day battery is
+retracted. T2 is **BLOCKED-NEEDS-FE-STABILIZATION**; its climate, wall, and
+scorer arms are withdrawn until a separate preregistered FE-stabilization
+round identifies and controls the remaining free-surface/barotropic owner.
+The Nbb/Kaa scope guards and FE alpha admission remain, but are not represented
+as a complete stability fix.
 
 ### Controlled comparison
 
