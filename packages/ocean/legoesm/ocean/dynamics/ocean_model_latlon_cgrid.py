@@ -2191,6 +2191,16 @@ class LatLonCGridOceanModel:
                 f"{sorted(VALID_ZAD_BOTTOM_FACE_MASK)}, "
                 f"got {_zad_mask_mode!r}",
             )
+        _zad_qco = getattr(config, "zad_qco_evaluation", "generic")
+        if _zad_qco not in {"generic", "nemo_literal"}:
+            raise ValueError(
+                "zad_qco_evaluation must be one of ['generic', "
+                f"'nemo_literal'], got {_zad_qco!r}")
+        if _zad_qco == "nemo_literal" and _vert_mom_scheme != "nemo_advective":
+            raise ValueError(
+                "zad_qco_evaluation='nemo_literal' requires "
+                "vertical_momentum_scheme='nemo_advective'; the QCO ww and "
+                "live Kmm thickness operands are a coupled dynzad path")
         # Reject centered_full / nemo_advective + adaptive-implicit vertadv:
         # the adaptive-implicit path (ln_zad_Aimp) replaces the explicit
         # in-tendency vertical momentum advection ENTIRELY with an upwind
@@ -3280,7 +3290,9 @@ class LatLonCGridOceanModel:
                    precomputed_geom_density=None, *, grid=None,
                    vertex_mask=None, skip_lateral_viscosity=False,
                    ab2_scope_override: str | None = None,
-                   ldf_state=None, z_coord=None, config=None):
+                   ldf_state=None, z_coord=None, config=None,
+                   zad_continuity_dt=None,
+                   zad_freshwater_eta_tendency=None):
         """Compute baroclinic tendencies.
 
         ``momentum_only=True`` skips the (T/S-frozen) tracer-diffusion
@@ -3327,6 +3339,8 @@ class LatLonCGridOceanModel:
             skip_lateral_viscosity=skip_lateral_viscosity,
             precomputed_geom_density=precomputed_geom_density,
             ldf_state=ldf_state,
+            zad_continuity_dt=zad_continuity_dt,
+            zad_freshwater_eta_tendency=zad_freshwater_eta_tendency,
         )
 
     def tendencies_with_diagnostics(
@@ -3379,6 +3393,14 @@ class LatLonCGridOceanModel:
         _cfg_b = self.config if config is None else config  # SPMD band override
         _grid = grid if grid is not None else self.grid
         _vmask = vertex_mask if vertex_mask is not None else self._vertex_mask
+        _qco_dt = dt
+        if (getattr(_cfg_b, "zad_qco_evaluation", "generic") == "nemo_literal"
+                and getattr(_cfg_b, "outer_integrator", "forward_euler")
+                == "leapfrog"
+                and getattr(state, "eta_before", None) is not None):
+            # Public diagnostics receive the clock dt, while production MLF
+            # calls _step_impl with rDt=2*dt.  Match that active source span.
+            _qco_dt = 2.0 * dt
         return latlon_cgrid_ocean_baroclinic_tendencies(
             state, _grid, _zc, _cfg_b,
             physics_fn=self._physics_fn,
@@ -3389,6 +3411,7 @@ class LatLonCGridOceanModel:
             surface_tracer_forcing_fn=self._surface_tracer_forcing_fn,
             vertex_mask=_vmask,
             ldf_state=ldf_state,
+            zad_continuity_dt=_qco_dt,
         )
 
     def _step_impl(self, state: LatLonCGridOceanState, dt: float,
@@ -3560,7 +3583,8 @@ class LatLonCGridOceanModel:
                                precomputed_geom_density=_geom_density,
                                grid=_grid, vertex_mask=_vmask,
                                ab2_scope_override=_ab2_scope_override,
-                               ldf_state=_ldf_state, z_coord=z_coord, config=config)
+                               ldf_state=_ldf_state, z_coord=z_coord, config=config,
+                               zad_continuity_dt=dt)
         # #1492 DINO surface_tendency_placement="leapfrog_rhs": fold the
         # externally-supplied surface tracer RATE into the SAME explicit RHS
         # every other tendency uses -- BEFORE the diss-withholding split and

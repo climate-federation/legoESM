@@ -50,6 +50,7 @@ from legoesm.ocean.eos import (
     nemo_seos_prd_literal,
     rho_0 as _RHO_0,
 )
+from legoesm.ocean.vertical import nemo_qco_live_face_thicknesses
 from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
     EPS,
     EPS_DIV as _EPS_DIV,
@@ -949,47 +950,9 @@ def _nemo_qco_live_slope_face_thicknesses(
     umask3: jnp.ndarray,
     vmask3: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """NEMO dom_qco_r3c NOW-face dilation for ldfslp's live e3u/e3v."""
-    dtype = e3u_0.dtype
-    hu0 = getattr(z_coord, "nemo_hu_0", None)
-    hv0 = getattr(z_coord, "nemo_hv_0", None)
-    area_t = getattr(z_coord, "nemo_e1e2t", None)
-    area_u = getattr(z_coord, "nemo_e1e2u", None)
-    area_v = getattr(z_coord, "nemo_e1e2v", None)
-    if any(value is None for value in (hu0, hv0, area_t, area_u, area_v)):
-        raise ValueError(
-            "slope_face_thickness_evaluation='nemo_qco_live' requires "
-            "raw NEMO hu_0/hv_0 and e1e2t/e1e2u/e1e2v fields")
-    hu0 = jnp.asarray(hu0, dtype=dtype)
-    hv0 = jnp.asarray(hv0, dtype=dtype)
-    area_t = jnp.asarray(area_t, dtype=dtype)
-    area_u = jnp.asarray(area_u, dtype=dtype)
-    area_v = jnp.asarray(area_v, dtype=dtype)
-    eta_now = jnp.asarray(eta, dtype=dtype)
-    weighted_eta = lax.optimization_barrier(area_t * eta_now)
-    num_u = lax.optimization_barrier(
-        jnp.asarray(0.5, dtype=dtype)
-        * lax.optimization_barrier(
-            weighted_eta + jnp.roll(weighted_eta, -1, axis=1)))
-    num_v = lax.optimization_barrier(
-        jnp.asarray(0.5, dtype=dtype)
-        * lax.optimization_barrier(
-            weighted_eta + jnp.roll(weighted_eta, -1, axis=0)))
-    wet_u = (hu0 > 0.0).astype(dtype)
-    wet_v = (hv0 > 0.0).astype(dtype)
-    r1_hu0 = lax.optimization_barrier(wet_u / (hu0 + 1.0 - wet_u))
-    r1_hv0 = lax.optimization_barrier(wet_v / (hv0 + 1.0 - wet_v))
-    r1_area_u = lax.optimization_barrier(
-        jnp.asarray(1.0, dtype=dtype) / area_u)
-    r1_area_v = lax.optimization_barrier(
-        jnp.asarray(1.0, dtype=dtype) / area_v)
-    r3u = lax.optimization_barrier(
-        lax.optimization_barrier(num_u * r1_hu0) * r1_area_u)
-    r3v = lax.optimization_barrier(
-        lax.optimization_barrier(num_v * r1_hv0) * r1_area_v)
-    return (
-        e3u_0 * (1.0 + r3u[:, :, None] * umask3),
-        e3v_0 * (1.0 + r3v[:, :, None] * vmask3),
+    """Compatibility wrapper around the shared QCO operand builder."""
+    return nemo_qco_live_face_thicknesses(
+        eta, z_coord, e3u_0, e3v_0, umask3, vmask3,
     )
 
 

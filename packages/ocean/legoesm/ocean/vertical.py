@@ -18,6 +18,7 @@ from __future__ import annotations
 import math
 from typing import NamedTuple
 
+from jax import lax
 import jax.numpy as jnp
 import numpy as np
 
@@ -36,6 +37,58 @@ _AIMP_CU_MAX = 0.30
 # Layer-thickness floor [m] for advective-tendency / Courant denominators
 # (matches ``flux_form_vertical_momentum_advection``).
 _H_FLOOR = 1.0e-10
+
+
+def nemo_qco_live_face_thicknesses(
+    eta,
+    z_coord,
+    e3u_0,
+    e3v_0,
+    umask3,
+    vmask3,
+):
+    """Build NEMO QCO live ``e3u/e3v`` on its native east/north faces.
+
+    This is the common ``dom_qco_r3c.F90:160-181`` operand builder used by
+    both ldfslp and dynzad.  Inputs and outputs retain NEMO's native A2D
+    horizontal extent; callers map once to legoESM's redundant west/south
+    face layout when required.  The explicit barriers preserve the executed
+    source association measured by the DINO fidelity instruments.
+    """
+    dtype = jnp.asarray(e3u_0).dtype
+    refs = tuple(getattr(z_coord, name, None) for name in (
+        "nemo_hu_0", "nemo_hv_0", "nemo_e1e2t", "nemo_e1e2u",
+        "nemo_e1e2v",
+    ))
+    if any(value is None for value in refs):
+        raise ValueError(
+            "nemo_qco_live_face_thicknesses requires raw NEMO hu_0/hv_0 "
+            "and e1e2t/e1e2u/e1e2v fields")
+    hu0, hv0, area_t, area_u, area_v = (
+        jnp.asarray(value, dtype=dtype) for value in refs)
+    eta_now = jnp.asarray(eta, dtype=dtype)
+    weighted_eta = lax.optimization_barrier(area_t * eta_now)
+    half = jnp.asarray(0.5, dtype=dtype)
+    num_u = lax.optimization_barrier(
+        half * lax.optimization_barrier(
+            weighted_eta + jnp.roll(weighted_eta, -1, axis=1)))
+    num_v = lax.optimization_barrier(
+        half * lax.optimization_barrier(
+            weighted_eta + jnp.roll(weighted_eta, -1, axis=0)))
+    wet_u = (hu0 > 0.0).astype(dtype)
+    wet_v = (hv0 > 0.0).astype(dtype)
+    r1_hu0 = lax.optimization_barrier(wet_u / (hu0 + 1.0 - wet_u))
+    r1_hv0 = lax.optimization_barrier(wet_v / (hv0 + 1.0 - wet_v))
+    r1_area_u = lax.optimization_barrier(jnp.asarray(1.0, dtype=dtype) / area_u)
+    r1_area_v = lax.optimization_barrier(jnp.asarray(1.0, dtype=dtype) / area_v)
+    r3u = lax.optimization_barrier(
+        lax.optimization_barrier(num_u * r1_hu0) * r1_area_u)
+    r3v = lax.optimization_barrier(
+        lax.optimization_barrier(num_v * r1_hv0) * r1_area_v)
+    return (
+        jnp.asarray(e3u_0) * (1.0 + r3u[..., None] * umask3),
+        jnp.asarray(e3v_0) * (1.0 + r3v[..., None] * vmask3),
+    )
 
 
 class NemoEENBarotropicOperands(NamedTuple):

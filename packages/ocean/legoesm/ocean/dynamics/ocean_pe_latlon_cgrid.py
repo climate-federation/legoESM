@@ -55,6 +55,7 @@ from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
     compute_layer_thickness,
     compute_ocean_jacobian,
+    nemo_qco_live_face_thicknesses,
 )
 from legoesm.ocean.state import (
     LatLonCGridOceanState,
@@ -1382,6 +1383,74 @@ def _bc_vertical_and_depthmean_velocity(
     u_prime = u - U_bar[..., jnp.newaxis]
     v_prime = v - V_bar[..., jnp.newaxis]
     return h_u, h_v, flux_div_k, w, u_prime, v_prime
+
+
+def _nemo_qco_zad_operands(
+    eta_now, eta_before, u, v, z_coord, u_mask_3d, v_mask_3d,
+    mask_3d, dt, freshwater_eta_tendency=None,
+):
+    """Coupled Kaa-continuity ``ww`` + live Kmm face thickness for ZAD.
+
+    Transcribes the active DINO QCO path at ``sshwzv.F90:111-128`` and
+    ``:218-227``.  The horizontal transports and Kaa SSH prediction use the
+    same live Kmm ``e3u/e3v`` returned to dynzad; splitting those operands is
+    deliberately unsupported because round 39 measured thickness-only as a
+    worsening planted state.
+    """
+    if not isinstance(z_coord, OceanPartialCellCoordinate):
+        raise ValueError(
+            "zad_qco_evaluation='nemo_literal' requires an "
+            "OceanPartialCellCoordinate carrying the raw NEMO QCO mesh")
+    refs = tuple(getattr(z_coord, name, None) for name in (
+        "nemo_e3t_0", "nemo_hu_0", "nemo_hv_0", "nemo_e1e2t",
+        "nemo_e1e2u", "nemo_e1e2v",
+    ))
+    if any(value is None for value in refs):
+        raise ValueError(
+            "zad_qco_evaluation='nemo_literal' requires raw NEMO e3t_0, "
+            "hu_0/hv_0, and e1e2t/e1e2u/e1e2v operands")
+    e3t0, _hu0, _hv0, area_t, area_u, area_v = (
+        jnp.asarray(value, dtype=eta_now.dtype) for value in refs)
+    nlev = u.shape[-1]
+    e3t0 = e3t0[..., :nlev]
+    raw_umask = jnp.asarray(u_mask_3d[:, 1:, :], dtype=eta_now.dtype)
+    raw_vmask = jnp.asarray(v_mask_3d[1:, :, :], dtype=eta_now.dtype)
+    live_u_raw, live_v_raw = nemo_qco_live_face_thicknesses(
+        eta_now, z_coord, e3t0, e3t0, raw_umask, raw_vmask)
+
+    # NEMO native U/V arrays store the east/north face of each T cell.  Map
+    # once to legoESM's redundant west/south face layout for dynzad.
+    live_u = jnp.concatenate([live_u_raw[:, -1:, :], live_u_raw], axis=1)
+    live_v = jnp.concatenate(
+        [jnp.zeros_like(live_v_raw[:1]), live_v_raw], axis=0)
+
+    # div_hor(Kbb,Kmm): source-oriented transport differences on the native
+    # mesh.  This same flux divergence predicts Kaa SSH and feeds wzv.
+    zu = area_u[..., None] * live_u_raw * u[:, 1:, :] * raw_umask
+    zv = area_v[..., None] * live_v_raw * v[1:, :, :] * raw_vmask
+    west = jnp.roll(zu, 1, axis=1)
+    south = jnp.concatenate([jnp.zeros_like(zv[:1]), zv[:-1]], axis=0)
+    tmask = jnp.asarray(mask_3d, dtype=eta_now.dtype)
+    flux_div = ((zu - west + zv - south) / area_t[..., None]) * tmask
+
+    fw = (jnp.zeros_like(eta_now) if freshwater_eta_tendency is None
+          else jnp.asarray(freshwater_eta_tendency, dtype=eta_now.dtype))
+    eta_after = (eta_before - dt * jnp.sum(flux_div, axis=-1) + dt * fw
+                 ) * tmask[..., 0]
+    h0 = jnp.sum(e3t0 * tmask, axis=-1)
+    h0_safe = jnp.where(h0 > 0.0, h0, 1.0)
+    r3_delta = eta_after / h0_safe - eta_before / h0_safe
+    stretch_rate = e3t0 * (r3_delta / dt)[..., None]
+
+    # sshwzv.F90 bottom-up left recurrence.  A static Python loop preserves
+    # source ordering under JIT and remains differentiable.
+    carry = jnp.zeros_like(eta_now)
+    levels = [None] * nlev
+    for jk in range(nlev - 1, -1, -1):
+        carry = carry - (flux_div[..., jk] + stretch_rate[..., jk]) * tmask[..., jk]
+        levels[jk] = carry
+    ww = jnp.stack(levels + [jnp.zeros_like(carry)], axis=-1)
+    return ww, live_u, live_v
 
 
 def _bc_ke_and_pressure_gradients(
@@ -4031,6 +4100,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     precomputed_geom_density=None,
     skip_lateral_viscosity: bool = False,
     ldf_state=None,
+    zad_continuity_dt=None,
+    zad_freshwater_eta_tendency=None,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -4133,6 +4204,17 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             h_k, u, v, u_mask_3d, v_mask_3d, grid, z_coord, u_mask, v_mask,
         )
     )
+    zad_w, zad_h_u, zad_h_v = w, h_u, h_v
+    if getattr(config, "zad_qco_evaluation", "generic") == "nemo_literal":
+        eta_before_field = getattr(state, "eta_before", None)
+        eta_before = (eta if eta_before_field is None
+                      else eta_before_field.data)
+        qco_dt = dt if zad_continuity_dt is None else zad_continuity_dt
+        zad_w, zad_h_u, zad_h_v = _nemo_qco_zad_operands(
+            eta, eta_before, u, v, z_coord, u_mask_3d, v_mask_3d,
+            mask_3d, qco_dt,
+            freshwater_eta_tendency=zad_freshwater_eta_tendency,
+        )
 
     # --- 5. Coriolis ---
     # Coriolis is NOT included in the returned momentum tendencies.
@@ -4268,7 +4350,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # Veros-faithful ``centered_full`` scheme; the default
     # ``upwind_perturbation`` scheme ignores them and advects ``u_prime``.
     du_dt, dv_dt, diag_vertadv_u, diag_vertadv_v = _bc_vertical_momentum_advection(
-        du_dt, dv_dt, u_prime, v_prime, w, h_u, h_v, u_mask_3d, v_mask_3d,
+        du_dt, dv_dt, u_prime, v_prime, zad_w, zad_h_u, zad_h_v,
+        u_mask_3d, v_mask_3d,
         grid, _mom_adv, _weno_order, config, diagnose_momentum,
         u_full=u, v_full=v,
     )

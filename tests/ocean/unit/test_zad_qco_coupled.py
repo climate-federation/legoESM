@@ -1,0 +1,84 @@
+"""Regression gates for the coupled QCO ww + Kmm-thickness ZAD path."""
+from __future__ import annotations
+
+import numpy as np
+import jax.numpy as jnp
+
+from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _nemo_qco_zad_operands
+from legoesm.ocean.experiments.dino import DINOConfig, dino_config_for_recipe
+from legoesm.ocean.vertical import (
+    create_levy_stretched_z_star,
+    create_partial_cell_coordinate,
+)
+
+
+def test_qco_zad_pair_matches_source_ordered_oracle():
+    nlat, nlon, nlev = 3, 4, 3
+    base = create_levy_stretched_z_star(nlev, 30.0, 5.0, 2.0, 1.0)
+    h0 = np.broadcast_to(np.asarray(base.dz_ref), (nlat, nlon, nlev)).copy()
+    coord = create_partial_cell_coordinate(
+        base, jnp.full((nlat, nlon), 30.0))._replace(
+            nemo_e3t_0=jnp.asarray(h0),
+            nemo_hu_0=jnp.asarray(h0.sum(axis=-1)),
+            nemo_hv_0=jnp.asarray(h0.sum(axis=-1)),
+            nemo_e1e2t=jnp.asarray(2.0 + np.arange(nlat * nlon).reshape(nlat, nlon) / 7),
+            nemo_e1e2u=jnp.asarray(3.0 + np.arange(nlat * nlon).reshape(nlat, nlon) / 11),
+            nemo_e1e2v=jnp.asarray(4.0 + np.arange(nlat * nlon).reshape(nlat, nlon) / 13),
+        )
+    rng = np.random.default_rng(1455)
+    eta_now = rng.normal(scale=0.1, size=(nlat, nlon))
+    eta_before = rng.normal(scale=0.1, size=(nlat, nlon))
+    u_native = rng.normal(scale=1e-2, size=(nlat, nlon, nlev))
+    v_native = rng.normal(scale=1e-2, size=(nlat, nlon, nlev))
+    u = np.concatenate([u_native[:, -1:], u_native], axis=1)
+    v = np.concatenate([np.zeros_like(v_native[:1]), v_native], axis=0)
+    um = np.ones_like(u)
+    vm = np.ones_like(v)
+    vm[0] = 0.0
+    vm[-1] = 0.0
+    tm = np.ones((nlat, nlon, nlev))
+    dt = 5400.0
+
+    ww, hu, hv = _nemo_qco_zad_operands(
+        jnp.asarray(eta_now), jnp.asarray(eta_before), jnp.asarray(u),
+        jnp.asarray(v), coord, jnp.asarray(um), jnp.asarray(vm),
+        jnp.asarray(tm), dt)
+
+    at = np.asarray(coord.nemo_e1e2t)
+    au = np.asarray(coord.nemo_e1e2u)
+    av = np.asarray(coord.nemo_e1e2v)
+    weighted = at * eta_now
+    r3u = 0.5 * (weighted + np.roll(weighted, -1, axis=1)) / 30.0 / au
+    r3v = 0.5 * (weighted + np.roll(weighted, -1, axis=0)) / 30.0 / av
+    hu_raw = h0 * (1.0 + r3u[..., None])
+    hv_raw = h0 * (1.0 + r3v[..., None])
+    # NEMO carries reference e3 on the closed outer V row; the transport mask
+    # zeros that row separately (same operand separation as dom_qco_r3c).
+    hv_raw[-1] = h0[-1]
+    zu = au[..., None] * hu_raw * u_native
+    zv = av[..., None] * hv_raw * v_native
+    zv[-1] = 0.0
+    south = np.concatenate([np.zeros_like(zv[:1]), zv[:-1]], axis=0)
+    div = (zu - np.roll(zu, 1, axis=1) + zv - south) / at[..., None]
+    eta_after = eta_before - dt * np.sum(div, axis=-1)
+    stretch = h0 * ((eta_after - eta_before) / 30.0 / dt)[..., None]
+    expected_w = np.zeros((nlat, nlon, nlev + 1))
+    for k in range(nlev - 1, -1, -1):
+        expected_w[..., k] = expected_w[..., k + 1] - div[..., k] - stretch[..., k]
+
+    np.testing.assert_array_equal(np.asarray(hu)[:, 1:], hu_raw)
+    np.testing.assert_array_equal(np.asarray(hv)[1:], hv_raw)
+    np.testing.assert_allclose(np.asarray(ww), expected_w, rtol=0, atol=2e-16)
+    np.testing.assert_array_equal(np.asarray(ww)[..., -1], 0.0)
+    assert np.any(np.asarray(ww)[..., 1:-1] != 0.0)
+
+
+def test_qco_selector_defaults_are_scoped_to_two_dino_cards():
+    assert DINOConfig().zad_qco_evaluation == "generic"
+    faithful = {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}
+    for recipe in (
+        "legoesm_default", "nemo_paper", "nemo_dino_kamm",
+        "nemo_dino_kamm_mlf", "veros", "mitgcm", "oceananigans",
+    ):
+        expected = "nemo_literal" if recipe in faithful else "generic"
+        assert dino_config_for_recipe(recipe).zad_qco_evaluation == expected

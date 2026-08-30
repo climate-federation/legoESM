@@ -940,6 +940,9 @@ class DINOConfig:
     # 1.000, zero free parameters). The kamm card selects "nemo_faithful"
     # (see VALID_ZAD_BOTTOM_FACE_MASK, legoesm.ocean.vertical).
     zad_bottom_face_mask: str = "min_rule"
+    # Coupled NEMO QCO ww + live Kmm face-thickness path for dynzad.
+    # Literal default keeps every non-DINO-fidelity recipe byte-identical.
+    zad_qco_evaluation: str = "generic"
     coriolis_scheme: str = "matsuno_split"        # "explicit_ab2" (MITgcm/Oceananigans/Veros)
     outer_integrator: str = "forward_euler"       # "ab2" | "leapfrog" (NEMO stp_MLF)
     # Vector-invariant vorticity flux scheme (relative + optionally planetary).
@@ -1370,6 +1373,10 @@ DINO_RECIPES: dict[str, dict] = {
         # population. See fidelity_bar_gate.py PER_ELEMENT["dyn_adv ZAD"]
         # for the corrected localisation and current DEBT status.
         "zad_bottom_face_mask": "nemo_faithful",
+        # Round 39: neither operand is independently faithful.  The call-1
+        # Kaa-continuity ww + live e3u/e3v(Kmm) pair closes ZAD jointly while
+        # thickness alone worsens it, so expose only the coupled selector.
+        "zad_qco_evaluation": "nemo_literal",
         # NEMO's STANDARD gravity (phycst.F90:38) -- see NEMO_CONSTANTS_CONFIG.
         # 5.0e-5 from legoESM's canonical g; it was the whole remaining bn2
         # residual (N^2 median rel err 4.95e-05 -> 6.96e-06).
@@ -3469,6 +3476,7 @@ def dino_lat_lon_model_config(
         momentum_flux_scheme=cfg.momentum_flux_scheme,
         vertical_momentum_scheme=cfg.vertical_momentum_scheme,
         zad_bottom_face_mask=cfg.zad_bottom_face_mask,
+        zad_qco_evaluation=cfg.zad_qco_evaluation,
         coriolis_scheme=cfg.coriolis_scheme,
         outer_integrator=cfg.outer_integrator,
         vorticity_scheme=cfg.vorticity_scheme,

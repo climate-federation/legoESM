@@ -2204,6 +2204,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # "nemo_faithful": dynzad.F90:86-119 has NO interior mask at all; masking
     # is deferred to dynzdf.F90:121's post-hoc *umask(jk) on the tendency.
     zad_bottom_face_mask: str = "min_rule"
+    # Coupled QCO operand evaluation for NEMO dynzad.  "generic" preserves
+    # the historical z-star w + min-face thickness path byte-for-byte;
+    # "nemo_literal" supplies Kaa-continuity ww and live Kmm e3u/e3v as one
+    # inseparable operand pair.  Only meaningful with nemo_advective.
+    zad_qco_evaluation: str = "generic"
     # Lateral (harmonic) momentum-viscosity OPERATOR form. Selects how the A_h
     # Laplacian viscosity acts on the vector velocity field:
     #   "vector_laplacian" (default) — legoESM's VECTOR Laplacian
