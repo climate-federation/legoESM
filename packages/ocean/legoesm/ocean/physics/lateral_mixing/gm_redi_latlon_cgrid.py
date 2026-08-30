@@ -2220,7 +2220,7 @@ def nemo_iso_a33(aht, umask, vmask, wmask, wslpi, wslpj,
     zahu_w = ksum_u * (wmask / jnp.maximum(cnt_u, 1.0))
     zahv_w = ksum_v * (wmask / jnp.maximum(cnt_v, 1.0))
     if evaluation == "nemo_literal":
-        # traldf_iso.F90:302-303: preserve Fortran's left association.
+        # traldf_iso.F90:296-297: preserve Fortran's left association.
         ah_wslp2 = (zahu_w * wslpi) * wslpi + (zahv_w * wslpj) * wslpj
     else:
         ah_wslp2 = zahu_w * wslpi ** 2 + zahv_w * wslpj ** 2

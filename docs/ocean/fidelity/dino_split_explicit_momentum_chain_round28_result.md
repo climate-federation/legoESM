@@ -785,3 +785,20 @@ and the complete build/run/score cascade are frozen in
 releases the A31/A32-versus-A33 split; six passing fluxes with a red total
 release the divergence/volume-factor association peel.  This is the first
 measurement requiring a held NEMO run, so the ordered walk stops here.
+
+## Rounds 79--93: Redi T/S closure and registry completion
+
+Rounds 79--92 successively closed the Redi horizontal fluxes, vertical skew,
+and post-stage W-slope ownership. Round 93's existing-dump factorial owns the
+remaining A33 debt to NEMO's written `zahu_w*wslpi*wslpi` / V association and
+lands the shared explicit/implicit literal builder. Temperature T.1--T.3 and
+salinity S.1--S.2 are strict AT-BAR. Salinity S.3's sole remaining
+`6.690652e-15` association residue is cleared as
+`PROVEN-ORACLE-ARITHMETIC` under Rule 1b after every registered association
+arm is exhausted; it is not relabeled AT-BAR.
+
+The released tracer ZDF application reuses the bit-exact registered rows
+30--32, and the final tracer Asselin endpoint retains its prior
+verified-formula/structural-target qualification. The chain is complete. Full
+receipts and the Rule-1b conditions are in
+`dino_split_explicit_momentum_chain_round93_result.md`.
