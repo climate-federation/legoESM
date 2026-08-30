@@ -24,7 +24,12 @@ Run::
 from __future__ import annotations
 
 import dataclasses
+import argparse
+import hashlib
+import json
 import os
+import subprocess
+from pathlib import Path
 
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
@@ -38,6 +43,7 @@ from types import MethodType, SimpleNamespace
 
 import numpy as np
 import jax.numpy as jnp
+import zdf_chain_sweep as sweep
 
 # scripts/ is not a package -- import the sibling probe by path (same idiom
 # eos_rab_bn2_per_element.py uses) to reuse _read_dims/_load_haloed without
@@ -91,6 +97,8 @@ RESTART = dump_lane.RESTART
 
 FLOOR = 1.0e-12
 OFFSETS = (-2, -1, 0, 1, 2)
+FOCUS = [(11, 1), (12, 1), (13, 1), (13, 23)]
+POINTWISE_BAR = 1.0e-15
 
 DUMP_META = {
     # component: (dump basename, lego-array-role)
@@ -576,6 +584,9 @@ def per_element_report(name, lego, nemo, wet, quiet=False):
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--round93-output", type=Path)
+    args = parser.parse_args()
     print(dump_lane.banner())
     print(f"restart used  = {os.path.join(RUN_DIR, RESTART)}")
     print(f"dump dir used = {RUN_DIR}")
@@ -1771,6 +1782,155 @@ def main() -> int:
               f"both read 0.0)")
     except NameError:
         pass
+    if args.round93_output is not None:
+        if not raw_ok or "_shap" not in loc:
+            raise SystemExit("round93 requires the verified raw-W capture")
+        root = Path(__file__).resolve().parents[4]
+        tracked = subprocess.check_output(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=root, text=True).strip()
+        if tracked:
+            raise SystemExit("round93 requires a tracked-clean checkout")
+        session = os.environ.get("CODEX_SESSION_ID")
+        if not session:
+            raise SystemExit("CODEX_SESSION_ID must be exported")
+
+        def digest(path):
+            value = hashlib.sha256()
+            with open(path, "rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    value.update(block)
+            return value.hexdigest()
+
+        nlat, nlon, nlev = raw["wslpi"].shape
+        oracle_raw = {
+            name: _load_haloed(
+                os.path.join(RUN_DIR, RAW_DUMPS[name]), jpi, jpj, hls)
+            for name in RAW_DUMPS
+        }
+        oracle_final = {
+            name: _load_haloed(
+                os.path.join(RUN_DIR, DUMP_META[name]), jpi, jpj, hls)
+            for name in RAW_DUMPS
+        }
+        wmask = wet_w_mask(st["active"])
+        cof_w = loc["cof_w"]
+        factors = (loc["wmask3"], loc["_w_u"], loc["_w_v"], loc["quarter"])
+
+        def pad_oracle(value):
+            return np.concatenate(
+                [value, np.zeros_like(value[..., :1])], axis=-1)
+
+        def host_shapiro(value, central_weight=4.0):
+            fp = np.pad(value, ((0, 0), (1, 1), (0, 0)), mode="wrap")
+            fp = np.pad(fp, ((1, 1), (0, 0), (0, 0)))
+            corners = ((fp[:nlat, :nlon] + fp[:nlat, 2:])
+                       + (fp[2:, :nlon] + fp[2:, 2:]))
+            cardinals = ((fp[:nlat, 1:nlon + 1]
+                          + fp[1:nlat + 1, :nlon])
+                         + (fp[1:nlat + 1, 2:]
+                            + fp[2:, 1:nlon + 1]))
+            acc = (corners + 2.0 * cardinals
+                   + central_weight * fp[1:nlat + 1, 1:nlon + 1])
+            zcof = np.asarray(1.0 / 16.0, dtype=value.dtype)
+            for factor in factors:
+                zcof = zcof * np.asarray(factor)
+            return acc * zcof
+
+        values = {}
+        arms = {}
+        raw_metrics = {}
+        for name in RAW_DUMPS:
+            raw_metrics[name] = {
+                "production": sweep.metrics(
+                    raw[name][..., :35], oracle_raw[name], wmask[..., :35],
+                    FOCUS, POINTWISE_BAR),
+                "oracle_identity": sweep.metrics(
+                    oracle_raw[name], oracle_raw[name], wmask[..., :35],
+                    FOCUS, POINTWISE_BAR),
+            }
+        for use_raw in (0, 1):
+            for use_host in (0, 1):
+                arm = f"R{use_raw}S{use_host}"
+                values[arm] = {}
+                arms[arm] = {}
+                for name in RAW_DUMPS:
+                    source = (pad_oracle(oracle_raw[name]) if use_raw
+                              else raw[name])
+                    if use_host:
+                        value = host_shapiro(source)
+                    else:
+                        value = np.asarray(loc["_shap"](
+                            jnp.asarray(source), cof_w, factors))
+                    values[arm][name] = value[..., :35]
+                    arms[arm][name] = sweep.metrics(
+                        value[..., :35], oracle_final[name], wmask[..., :35],
+                        FOCUS, POINTWISE_BAR)
+
+        base = max(arms["R0S0"][name]["max_column_error"]
+                   for name in RAW_DUMPS)
+        max_errors = {
+            arm: max(metric["max_column_error"] for metric in terms.values())
+            for arm, terms in arms.items()
+        }
+        removal = {
+            arm: float((base - error) / base)
+            for arm, error in max_errors.items()
+        }
+        planted = host_shapiro(
+            pad_oracle(oracle_raw["wslpi"]), central_weight=5.0)[..., :35]
+        controls = {
+            "production_recomposes_final": all(
+                np.array_equal(values["R0S0"][name],
+                               st["lego"][name][..., :35])
+                for name in RAW_DUMPS),
+            "four_arms_present": len(arms) == 4,
+            "oracle_raw_identity": all(
+                raw_metrics[name]["oracle_identity"]["pass"]
+                for name in RAW_DUMPS),
+            "zonal_roll_plant_red": not sweep.metrics(
+                np.roll(oracle_final["wslpi"], 1, axis=1),
+                oracle_final["wslpi"], wmask[..., :35], FOCUS,
+                POINTWISE_BAR)["pass"],
+            "central_weight_plant_red": not sweep.metrics(
+                planted, oracle_final["wslpi"], wmask[..., :35], FOCUS,
+                POINTWISE_BAR)["pass"],
+        }
+        valid = all(controls.values())
+        passing = [arm for arm in arms
+                   if all(arms[arm][name]["pass"] for name in RAW_DUMPS)]
+        disposition = ("WSLOPE_ASSOCIATION_AT_BAR_" + passing[0]
+                       if valid and passing else
+                       "WSLOPE_ASSOCIATION_PROVEN_ORACLE_ARITHMETIC"
+                       if valid and removal["R1S1"] >= 0.90 else "INVALID")
+        receipt = {
+            "schema": "dino-split-explicit-momentum-chain-round93-wslp-v1",
+            "session_id": session,
+            "git_commit": subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
+            "disposition": disposition,
+            "bar": POINTWISE_BAR,
+            "raw_metrics": raw_metrics,
+            "arms": arms,
+            "max_error_removal_fraction": removal,
+            "interaction_RxS": float(
+                (max_errors["R1S0"] + max_errors["R0S1"]
+                 - max_errors["R1S1"] - max_errors["R0S0"]) / base),
+            "controls": controls,
+            "bindings": {
+                "preregistration": digest(
+                    root / "docs/ocean/fidelity/PREREG_split_explicit_momentum_chain_round93.md"),
+                **{RAW_DUMPS[name]: digest(os.path.join(RUN_DIR, RAW_DUMPS[name]))
+                   for name in RAW_DUMPS},
+                **{DUMP_META[name]: digest(os.path.join(RUN_DIR, DUMP_META[name]))
+                   for name in RAW_DUMPS},
+            },
+        }
+        args.round93_output.write_text(
+            json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+        print(f"round93_wslp_disposition={disposition}")
+        if not valid:
+            return 2
     return 0
 
 
