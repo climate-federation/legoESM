@@ -63,6 +63,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", type=Path, required=True)
     ap.add_argument("--recurrence", type=Path, required=True)
+    ap.add_argument("--prior", type=Path)
+    ap.add_argument("--ssh-variable", choices=("sshb", "sshn"), default="sshb")
     ap.add_argument("--output", type=Path, required=True)
     args = ap.parse_args()
     root = Path(__file__).resolve().parents[4]
@@ -80,7 +82,7 @@ def main() -> int:
     restart = args.run / "DINO_00005760_restart.nc"
     mesh = args.run / "mesh_mask.nc"
     with Dataset(restart) as d:
-        ssh = np.asarray(d["sshn"][0], dtype=np.float64)
+        ssh = np.asarray(d[args.ssh_variable][0], dtype=np.float64)
         vel = {"u": np.asarray(d["ub"][0, :35], dtype=np.float64),
                "v": np.asarray(d["vb"][0, :35], dtype=np.float64)}
     with Dataset(mesh) as d:
@@ -163,14 +165,16 @@ def main() -> int:
     if not all(controls.values()):
         raise SystemExit("red control failed")
     receipt = {
-        "schema": "dino-split-explicit-momentum-chain-round17-v1",
+        "schema": "dino-split-explicit-momentum-chain-round18-v1",
         "session_id": session, "git_commit": commit,
+        "ssh_variable": args.ssh_variable,
         "backend": jax.default_backend(), "jax_enable_x64": bool(jax.config.jax_enable_x64),
         "bar": bar, "disposition": disposition, "scores": scores,
         "controls": controls,
         "input_sha256": {p.name: sha256(p) for p in (
             restart, mesh, args.run / "spg_dump_un_e_init.bin",
-            args.run / "spg_dump_vn_e_init.bin", args.recurrence)},
+            args.run / "spg_dump_vn_e_init.bin", args.recurrence,
+            *(() if args.prior is None else (args.prior,)))},
         "script_sha256": sha256(Path(__file__)),
     }
     args.output.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
