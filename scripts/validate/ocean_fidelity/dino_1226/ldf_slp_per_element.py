@@ -1350,7 +1350,9 @@ def main() -> int:
         print(f"      near-zero fractions are {ru['frac_near0']*100:.1f}% (u) vs "
               f"{rv['frac_near0']*100:.1f}% (v) -- v is the LESS ill-conditioned "
               f"of the two, so its larger error is NOT a conditioning artifact.")
-        print(f"      median ratio v/u = {rv['med_en'] / ru['med_en']:.1f}x   "
+        _uv_ratio = (rv["med_en"] / ru["med_en"]
+                     if ru["med_en"] > 0.0 else float("nan"))
+        print(f"      median ratio v/u = {_uv_ratio:.1f}x   "
               f"p99 ratio v/u = {rv['p99_en'] / ru['p99_en']:.2f}x   "
               f"max ratio v/u = {rv['max_en'] / ru['max_en']:.2f}x")
         print("      -> the excess is concentrated in the MEDIAN (bulk), not the "
