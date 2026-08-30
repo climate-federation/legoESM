@@ -1352,9 +1352,13 @@ def main() -> int:
               f"of the two, so its larger error is NOT a conditioning artifact.")
         _uv_ratio = (rv["med_en"] / ru["med_en"]
                      if ru["med_en"] > 0.0 else float("nan"))
+        _uv_p99_ratio = (rv["p99_en"] / ru["p99_en"]
+                         if ru["p99_en"] > 0.0 else float("nan"))
+        _uv_max_ratio = (rv["max_en"] / ru["max_en"]
+                         if ru["max_en"] > 0.0 else float("nan"))
         print(f"      median ratio v/u = {_uv_ratio:.1f}x   "
-              f"p99 ratio v/u = {rv['p99_en'] / ru['p99_en']:.2f}x   "
-              f"max ratio v/u = {rv['max_en'] / ru['max_en']:.2f}x")
+              f"p99 ratio v/u = {_uv_p99_ratio:.2f}x   "
+              f"max ratio v/u = {_uv_max_ratio:.2f}x")
         print("      -> the excess is concentrated in the MEDIAN (bulk), not the "
               "tail: a SYSTEMATIC term, not amplification of a few cells.")
         for c in ("uslp", "vslp"):
