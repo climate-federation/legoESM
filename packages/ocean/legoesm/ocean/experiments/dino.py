@@ -863,7 +863,6 @@ class DINOConfig:
     # ``nemo_literal`` preserves dynspg_ts.F90:1517-1565 source ordering.
     barotropic_een_coefficient_evaluation: str = "generic"
     barotropic_pgf_evaluation: str = "generic"
-    barotropic_momentum_update_evaluation: str = "generic"
     # LatLonCGridOceanConfig.barotropic.barotropic_seed_face_depth (#1226
     # round 2 item 1), threaded 1:1 via from_flat/BarotropicConfig.
     # "min_rule" (default, bit-identical legacy) | "nemo_ssh_avg" (the
@@ -1471,7 +1470,6 @@ DINO_RECIPES: dict[str, dict] = {
         "barotropic_een_coefficient_evaluation": "nemo_literal",
         "barotropic_seed_evaluation": "nemo_literal",
         "barotropic_pgf_evaluation": "nemo_literal",
-        "barotropic_momentum_update_evaluation": "nemo_literal",
         # #1226 round 2 item 1: the barotropic substep loop's ENTRY seed
         # (U_bar/V_bar, lego's re-derived stand-in for NEMO's persistent
         # un_e/vn_e = puu_b/pvv_b(Kbb or Kmm)) uses the SAME NEMO ssh-average
@@ -3574,8 +3572,6 @@ def dino_lat_lon_model_config(
             cfg.barotropic_een_coefficient_evaluation),
         barotropic_seed_evaluation=cfg.barotropic_seed_evaluation,
         barotropic_pgf_evaluation=cfg.barotropic_pgf_evaluation,
-        barotropic_momentum_update_evaluation=(
-            cfg.barotropic_momentum_update_evaluation),
         barotropic_seed_face_depth=cfg.barotropic_seed_face_depth,
         **_scheme,
         tracer_advection=cfg.tracer_advection,

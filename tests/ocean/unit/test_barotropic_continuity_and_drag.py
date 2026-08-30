@@ -42,51 +42,12 @@ from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     barotropic_substeps_latlon_cgrid,
     _depth_average_to_faces,
-    _nemo_literal_barotropic_momentum_update,
     _nemo_literal_barotropic_pressure_gradient,
     _nemo_literal_seed_depth_mean,
 )
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     divergence_cgrid, gradient_y_cgrid, min_cell_to_uface, min_cell_to_vface,
 )
-
-
-class TestNemoLiteralBarotropicMomentumUpdate:
-    def test_source_order_is_exact_under_jit_and_red_plant_differs(self):
-        shape = (2, 3)
-        velocity = np.full(shape, 0.25, dtype=np.float64)
-        pgf = np.full(shape, 1.0e16, dtype=np.float64)
-        coriolis = np.full(shape, -1.0e16, dtype=np.float64)
-        drag = np.ones(shape, dtype=np.float64)
-        forcing = np.ones(shape, dtype=np.float64)
-        mask = np.ones(shape, dtype=np.float64)
-        dt = np.float64(2.0)
-        trend = np.add(coriolis, drag)
-        rhs = np.add(np.add(pgf, trend), forcing)
-        expected = np.multiply(np.add(velocity, np.multiply(dt, rhs)), mask)
-        fn = jax.jit(_nemo_literal_barotropic_momentum_update)
-        actual = np.asarray(fn(
-            velocity, pgf, coriolis, drag, forcing, dt, mask))
-        np.testing.assert_array_equal(actual, expected)
-
-        # Planted regrouping: (pgf+coriolis)+(drag+forcing) recovers a unit
-        # the source grouping loses. This proves the test can fail.
-        planted_rhs = (pgf + coriolis) + (drag + forcing)
-        planted = (velocity + dt * planted_rhs) * mask
-        assert not np.array_equal(planted, expected)
-
-    def test_reverse_mode_gradient_executes(self):
-        x = jnp.array([[0.2, -0.3]], dtype=jnp.float64)
-        ones = jnp.ones_like(x)
-
-        def loss(v):
-            out = _nemo_literal_barotropic_momentum_update(
-                v, 0.3 * ones, -0.2 * ones, 0.05 * ones,
-                0.1 * ones, jnp.asarray(2.0), ones)
-            return jnp.sum(out * out)
-
-        grad = jax.jit(jax.grad(loss))(x)
-        assert np.all(np.isfinite(np.asarray(grad)))
 
 
 def _flat_basin(n_lat=24, n_lon=48, H=4000.0, lat_cap_deg=80.0):
@@ -936,8 +897,6 @@ class TestBarotropicSeedFaceDepth:
             assert (c.barotropic_een_coefficient_evaluation
                     == "nemo_literal"), name
             assert c.barotropic_pgf_evaluation == "nemo_literal", name
-            assert (c.barotropic_momentum_update_evaluation
-                    == "nemo_literal"), name
             grid = create_latlon_grid(n_lat=8, n_lon=16)
             mc, _ = dino_lat_lon_model_config(grid, c)
             assert mc.barotropic.barotropic_seed_face_depth == "nemo_ssh_avg", name
@@ -945,8 +904,6 @@ class TestBarotropicSeedFaceDepth:
             assert (mc.barotropic.barotropic_een_coefficient_evaluation
                     == "nemo_literal"), name
             assert mc.barotropic.barotropic_pgf_evaluation == "nemo_literal", name
-            assert (mc.barotropic.barotropic_momentum_update_evaluation
-                    == "nemo_literal"), name
 
         for name, spec in DINO_RECIPES.items():
             if name in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
@@ -958,4 +915,3 @@ class TestBarotropicSeedFaceDepth:
             assert c.barotropic_seed_evaluation == "generic", name
             assert c.barotropic_een_coefficient_evaluation == "generic", name
             assert c.barotropic_pgf_evaluation == "generic", name
-            assert c.barotropic_momentum_update_evaluation == "generic", name
