@@ -103,9 +103,12 @@ def main() -> int:
     mesh = read_nemo_mesh_mask(str(run / "mesh_mask.nc"), nn_hls=0)
     restart = read_nemo_restart(str(run / r22.inherited.RESTART_FILE), nn_hls=0)
     mx = r24._mesh(run / "mesh_mask.nc")
-    r3 = r24._r3(np.asarray(restart.ssh), mx)
+    ht_0 = (mx["e3t_0"] * mx["tmask"]).sum(axis=-1)
+    tsurf = mx["tmask"].max(axis=-1)
+    r3t = (np.asarray(restart.ssh)
+           * tsurf / (ht_0 + 1.0 - tsurf))
     h_k = jnp.asarray(mx["e3t_0"] * (
-        1.0 + r3["t"][..., None] * mx["tmask"]) * mx["tmask"])
+        1.0 + r3t[..., None] * mx["tmask"]) * mx["tmask"])
     cfg = dino_config_for_recipe("nemo_dino_kamm_mlf")
     bridge = bridge_nemo_to_legoesm_topo(
         mesh, restart, periodic_i=True, full_step=True, omega=cfg.omega,
