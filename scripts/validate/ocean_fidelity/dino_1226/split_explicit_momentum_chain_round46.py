@@ -125,16 +125,35 @@ def main() -> int:
         model_module.barotropic_substeps_latlon_cgrid = real_solver
         sys.argv = old_argv
     restored = model_module.barotropic_substeps_latlon_cgrid is real_solver
-    if code != 0 or calls != 1 or not restored or not inherited_output.is_file():
+    if calls != 1 or not restored or not inherited_output.is_file():
         raise SystemExit(
             f"inherited held replay failed: exit={code} calls={calls} "
             f"restored={restored}")
     inherited = json.loads(inherited_output.read_text())
+    # Round 45 required the post-projection Q arm to remain a red plant while
+    # diagnosing the unheld Kaa owner. Under the newly registered upstream-
+    # exact forcing hold that correction is itself below bar, so the inherited
+    # plant is expected to stop firing. Round 46 preregisters the *unheld*
+    # round-45 Q/H/W rows as its red controls instead. Admit exit 2 only when
+    # this is the sole inherited false control; every scientific bar and every
+    # still-applicable structural control must pass.
+    inherited_false = {
+        name for name, value in inherited["controls"].items() if not value}
+    expected_nonrequired = inherited_false == {"old_post_projection_q_fails"}
+    if code not in (0, 2) or (code == 2 and not expected_nonrequired):
+        raise SystemExit(
+            f"unexpected inherited disposition: exit={code} "
+            f"false_controls={sorted(inherited_false)}")
     held_exact = (
         np.array_equal(_u_face(held_u_native), held_u)
         and np.array_equal(_v_face(held_v_native), held_v))
-    controls = dict(inherited["controls"])
+    controls = {
+        name: value for name, value in inherited["controls"].items()
+        if name != "old_post_projection_q_fails"
+    }
     controls.update({
+        "inherited_expected_nonrequired_control_only": (
+            code == 0 or expected_nonrequired),
         "held_forcing_u_byte_exact": held_exact,
         "held_forcing_v_byte_exact": held_exact,
         "held_solver_entry_count_one": calls == 1,
@@ -145,7 +164,10 @@ def main() -> int:
         "unheld_w_plant_fires": prior["row5"]["gate_status"] != "AT BAR",
     })
     valid = all(controls.values())
-    local_at_bar = inherited["disposition"] == "ROW5_WZV_CALL2_AT_BAR"
+    local_at_bar = all(
+        row["gate_status"] == "AT BAR" for row in (
+            inherited["operands"]["Q_kaa_r3t"],
+            inherited["operands"]["H_kmm_hdiv"], inherited["row5"]))
     disposition = (
         "ROW5_WZV_CALL2_AT_BAR_UPSTREAM_EXACT"
         if valid and local_at_bar else
@@ -177,6 +199,10 @@ def main() -> int:
             "Q_kaa_r3t": prior["operands"]["Q_kaa_r3t"],
             "H_kmm_hdiv": prior["operands"]["H_kmm_hdiv"],
             "row5": prior["row5"],
+        },
+        "held_post_projection_q_diagnostic": {
+            "gate_status": inherited["old_post_projection_q"]["gate_status"],
+            "role": "post-hoc diagnostic; not a round-46 red control",
         },
         "disposition": disposition,
         "ordered_next": 6 if disposition.endswith("UPSTREAM_EXACT") else 5,
