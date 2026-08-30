@@ -17,6 +17,20 @@ carry **before** applying that row's body. No metric, bar, population, input,
 NEMO byte, or disposition changes; this corrects only temporal alignment and
 the capture mechanism before the first score.
 
+Control amendment, frozen after a dry scorer returned `INVALID` and before an
+admissible score: round 6's printed “substep 1” is a separate one-row replay
+with `barotropic_time_filter="nemo_ab3am4"`; it is not the first update of the
+full 68-row `nemo_boxcar_ab3` recurrence. It remains a valid registered proxy
+but cannot control this trajectory. Instead, NEMO trace row 1 must be
+bit-identical to all three existing loop-entry dumps, trace row 2 must be
+bit-identical to all three existing post-substep-1 dumps, and production trace
+row 2 must pass the unchanged strict bar. The dry score also proved that four
+nextafter steps at the maximum-magnitude entry SSH produce only
+`0.971e-15` maximum/NEMO-RMS and therefore cannot cross the `1e-15` bar. Five
+steps is the minimal deterministic firing plant. The failed four-step receipt
+is retained; the required control is the five-step plant. No science row or
+disposition from the invalid dry score is admitted.
+
 ## Instrument and source
 
 Patch the cumulative 223-stream round-26 writer source with
@@ -42,8 +56,9 @@ full-halo on disk and are cropped by the cited A2D loader.
 At every substep-start report the canonical tuple on the unchanged 9,920/9,758/9,868
 wet populations. Apply the strict unconditioned 1e-15 pointwise class bar as a
 diagnostic in addition to the registered field gate. Identity must be zero, a
-four-nextafter plant must fail the strict bar, trace row 1 must reproduce the
-bound round-31 loop-entry metrics exactly, trace row 68 must be finite, tracked state must stay
+five-nextafter plant must fail the strict bar, NEMO trace rows 1/2 must bind
+the existing entry/post-substep-1 dumps exactly, the actual full-loop
+production row 2 must be AT BAR, trace row 68 must be finite, tracked state must stay
 clean, and all binaries, sources, streams, bracket, and prior artifacts are
 SHA-bound.
 
