@@ -537,3 +537,43 @@ The source shows why: `stpmlf.F90:744-755` actually materializes live
 `e3u/e3v(Kaa)`, left-accumulates transport, then multiplies by live
 `r1_hu/r1_hv(Kaa)`. The QCO factors cancel algebraically but not before
 rounding. Round 49 tests that executed association from existing Kaa r3 dumps.
+
+## Round 49: row-6 local arithmetic owned; production change held
+
+Artifact `/tmp/dino_split_explicit_momentum_chain_round49.json`, SHA-256
+`501f15eb8b2893b2f04fd73e8256ab9d2099cec865b7673198e3f359718b7018`,
+classifies `ROW6_LOCALIZED_TO_LIVE_QCO_ASSOCIATION_GIVEN_ORACLE_TARGET`.
+With the oracle primary target fixed in both arms, the algebraically cancelled
+C0 reconstruction retains U/V maximum-error-over-NEMO-RMS
+`2.98986e-15/2.81809e-15`. Executing the live QCO composition in C1 makes
+both components bit-exact: normalized RMS and pointwise maximum are `0` for U
+and V. Identity, roll, wet-point, nonzero-live-factor, and round-48 C0
+reproduction controls all fire.
+
+The owner is the executed association at `stpmlf.F90:752-765`: initialize the
+transport with live `e3u/e3v(Kaa)`, source-left accumulate levels 2 through
+`jpkm1`, then evaluate the correction with independently materialized live
+`r1_hu/r1_hv(Kaa)`. Although the thickness and reciprocal cancel
+mathematically, replacing that execution with a cancelled depth mean changes
+the final few ULPs. Round 48 remains an upstream qualification: substituting
+the oracle primary target accounts for `82.206%` of joint squared error, so
+the live-association result does not claim that production's target is exact.
+
+Row 6 is therefore **owned but not fixed**. A faithful production change is
+larger than this round because the raw Kaa QCO state is currently lost across
+the model-only post-solver eta projection. The registered implementation must:
+
+1. carry raw Kaa `r3u/r3v` (or equivalently the raw pre-projection Kaa SSH)
+   from the split-explicit solver to `_apply_after_level_reconcile`;
+2. materialize live Kaa face thicknesses and reciprocals and execute the NEMO
+   left-reduction and post-factor order literally;
+3. keep the primary-target residual separately visible as upstream debt; and
+4. default faithful only on the two DINO cards, preserve generic/off cards
+   byte-for-byte, and include red controls for cancelled association and stale
+   Kaa state.
+
+No held run is needed to establish this ownership. The next work item is the
+cross-interface implementation above; row 6 cannot be promoted before its
+production replay reaches the unchanged pointwise bar. The free-surface
+filter, momentum-RHS tail, and tracer-tail chains remain ordered-blocked behind
+that production certification.
