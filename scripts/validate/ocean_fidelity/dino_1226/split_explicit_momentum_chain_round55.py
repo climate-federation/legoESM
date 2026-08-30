@@ -46,6 +46,7 @@ ROUND68_SHA = "8e9a2ee7ee1969da86ee2ef24198047d6ea83ee14842753b528271453efaf9a0"
 ROUND69_SHA = "bd109e2869333a31b8b6a8410d3ec10f24acae94353ed1f35d60900ae5b62eb2"
 ROUND70_SHA = "d831bbcb89e06c8795a085103041293becedb8ac79c438f1302b44296b3314bc"
 ROUND71_SHA = "6500acfa930c0342430fd1e57cfb1da023b0978e8fda3561e6133ffe12368821"
+ROUND72_SHA = "1abf7718e8dc1fc4f75d23295ebaaf46c368ffa07d8e56467577f1abb7201230"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -148,6 +149,7 @@ def main() -> int:
     parser.add_argument("--round69", type=Path)
     parser.add_argument("--round70", type=Path)
     parser.add_argument("--round71", type=Path)
+    parser.add_argument("--round72", type=Path)
     parser.add_argument("--hold-slow-forcing", action="store_true")
     parser.add_argument("--oracle-transport", action="store_true")
     parser.add_argument("--capture-cycle", action="store_true")
@@ -161,6 +163,7 @@ def main() -> int:
     parser.add_argument("--surface-kmm-carry", action="store_true")
     parser.add_argument("--exact-surface-kmm-carry", action="store_true")
     parser.add_argument("--post-chain-factorial", action="store_true")
+    parser.add_argument("--rossby-factorial", action="store_true")
     parser.add_argument("--raw-artifact", type=Path, required=True)
     parser.add_argument("--nemo-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -380,6 +383,24 @@ def main() -> int:
             raise SystemExit("round 71 does not release the post-chain peel")
     elif args.round71 is not None:
         raise SystemExit("--round71 requires --post-chain-factorial")
+    prior72 = None
+    if args.rossby_factorial:
+        if not args.post_chain_factorial:
+            raise SystemExit("--rossby-factorial requires --post-chain-factorial")
+        if (args.round72 is None
+                or _sha(args.round72.resolve()) != ROUND72_SHA):
+            raise SystemExit("official round-72 zRo receipt required")
+        prior72 = json.loads(args.round72.read_text())
+        if (prior72.get("disposition")
+                != "ROW8_8_LOCALIZED_TO_ZRO_PRECURSOR"
+                or not all(prior72["post_chain_metrics"]
+                           ["literal_oracle_zRo"][name]["pass"]
+                           for name in ("zaeiw", "aeiu", "row8_8"))
+                or prior72["post_chain_metrics"]["literal_own"]
+                           ["row8_8"]["pass"]):
+            raise SystemExit("round 72 does not release the Rossby peel")
+    elif args.round72 is not None:
+        raise SystemExit("--round72 requires --rossby-factorial")
     if _sha(args.raw_artifact.resolve()) != RAW_ARTIFACT_SHA:
         raise SystemExit("admitted held row-8 artifact changed")
     held = args.held_dir.resolve()
@@ -542,6 +563,7 @@ def main() -> int:
                 "surface_mask": np.asarray(kappa_args[5]),
                 "omega": float(kappa_kwargs["omega"]),
                 "aei0": float(kappa_args[9].aei0),
+                "lat_t": np.asarray(kappa_args[7].lat2d),
             })
         kappa_captures.append((
             np.asarray(result), np.asarray(replay),
@@ -721,6 +743,7 @@ def main() -> int:
     kappa_operand_metrics = {}
     kappa_geometry_metrics = {}
     post_chain_metrics = {}
+    rossby_metrics = {}
     if args.capture_kappa_operands:
         if len(kappa_captures) != 1:
             raise SystemExit(
@@ -796,25 +819,69 @@ def main() -> int:
                     ora["zRo"], ora["zah"], ora["zhw"]),
             }
             u_surf_mask = jnp.asarray(bargs[5][:, 1:], dtype=dtype)
-            for arm_name, arm_kappa in arms.items():
+            def score_kappa_arm(arm_kappa):
                 arm_args = list(bargs)
                 arm_args[0] = arm_kappa
                 arm_u = np.asarray(original_bolus(*arm_args, **bkwargs)[0])
                 arm_aeiu = (0.5 * (arm_kappa
                                     + jnp.roll(arm_kappa, -1, axis=1))
                             * u_surf_mask)
-                post_chain_metrics[arm_name] = {
+                return {
                     "zaeiw": km(arm_kappa, oracle2["zaeiw"]),
                     "aeiu": km(arm_aeiu, oracle_aeiu[..., 0]),
                     "row8_8": sweep.metrics(
                         arm_u[..., :35], oracle_u_eiv, wet_psi,
                         FOCUS, ACCUMULATION_BAR),
                 }
+            for arm_name, arm_kappa in arms.items():
+                post_chain_metrics[arm_name] = score_kappa_arm(arm_kappa)
             post_chain_metrics["production"] = {
                 "zaeiw": kappa_operand_metrics["zaeiw"],
                 "aeiu": kappa_operand_metrics["aeiu_face"],
                 "row8_8": bolus_operand_metrics["captured_u_increment"],
             }
+            if args.rossby_factorial:
+                lat_t = jnp.asarray(raw_kappa["lat_t"], dtype=dtype)
+                f_floor = jnp.asarray(1.0e-10, dtype=dtype)
+                zfw_stored = jnp.maximum(jnp.abs(ff_t), f_floor)
+                zfw_recomputed = jnp.maximum(
+                    jnp.abs((jnp.asarray(2.0, dtype=dtype) * omega)
+                            * jnp.sin(rad * lat_t)), f_floor)
+                ro_min = jnp.asarray(2.0e3, dtype=dtype)
+                ro_max = jnp.asarray(40.0e3, dtype=dtype)
+
+                def literal_ro(zn_value, zfw_value):
+                    return jnp.maximum(
+                        ro_min,
+                        jnp.minimum(
+                            (jnp.asarray(0.4, dtype=dtype) * zn_value)
+                            / zfw_value,
+                            ro_max))
+
+                own_zn = jnp.asarray(diagnostics["zn"], dtype=dtype)
+                oracle_zn = jnp.asarray(oracle2["zn"], dtype=dtype)
+                ro_arms = {
+                    "literal_stored_f": literal_ro(own_zn, zfw_stored),
+                    "literal_recomputed_f": literal_ro(
+                        own_zn, zfw_recomputed),
+                    "literal_oracle_zn": literal_ro(
+                        oracle_zn, zfw_stored),
+                    "literal_oracle_zn_recomputed_f": literal_ro(
+                        oracle_zn, zfw_recomputed),
+                    "direct_oracle_zRo": jnp.asarray(
+                        oracle2["zRo"], dtype=dtype),
+                }
+                for arm_name, arm_ro in ro_arms.items():
+                    arm_kappa = literal_post(
+                        arm_ro, own["zah"], own["zhw"])
+                    rossby_metrics[arm_name] = {
+                        "zRo": km(arm_ro, oracle2["zRo"]),
+                        **score_kappa_arm(arm_kappa),
+                    }
+                rossby_metrics["production"] = {
+                    "zRo": kappa_operand_metrics["zRo"],
+                    **post_chain_metrics["production"],
+                }
     specs = (
         ("8.3", "uu(Kmm) / zptu", "traadv.F90:301-304", "un", POINTWISE_BAR),
         ("8.4", "e2u", "traadv.F90:329", "e2u", POINTWISE_BAR),
@@ -909,6 +976,13 @@ def main() -> int:
             or (all(prior71["kappa_geometry_metrics"][name]["pass"]
                     for name in ("e3w_Kmm", "rn2b"))
                 and not prior71["kappa_operand_metrics"]["zaeiw"]["pass"])),
+        "round72_zro_debt_admitted": (
+            prior72 is None
+            or (all(prior72["post_chain_metrics"]["literal_oracle_zRo"]
+                           [name]["pass"]
+                    for name in ("zaeiw", "aeiu", "row8_8"))
+                and not prior72["post_chain_metrics"]["literal_own"]
+                               ["row8_8"]["pass"])),
         "round56_unheld_red": (
             prior56 is None
             or prior56["rows"][0]["status"] == "DIVERGED"),
@@ -976,6 +1050,13 @@ def main() -> int:
                 not post_chain_metrics["production"]["zaeiw"]["pass"],
             "post_chain_production_row8_8_red":
                 not post_chain_metrics["production"]["row8_8"]["pass"],
+        })
+    if args.rossby_factorial:
+        controls.update({
+            "rossby_production_downstream_red":
+                not rossby_metrics["production"]["row8_8"]["pass"],
+            "rossby_direct_oracle_downstream_pass":
+                rossby_metrics["direct_oracle_zRo"]["row8_8"]["pass"],
         })
     controls["all_scored_finite"] = all(
         row.get("status") == "ORDERED_BLOCKED"
@@ -1060,9 +1141,24 @@ def main() -> int:
             disposition = "ROW8_8_LOCALIZED_TO_ZAH_ZHW_PRECURSOR"
         else:
             disposition = "ROW8_8_POST_CHAIN_COMPOSITION_OPEN"
+    if args.rossby_factorial and valid:
+        def rossby_arm_pass(name):
+            return all(metric["pass"]
+                       for metric in rossby_metrics[name].values())
+
+        if not rossby_arm_pass("literal_oracle_zn_recomputed_f"):
+            disposition = "INVALID_ROSSBY_LITERAL_REPLAY"
+        elif rossby_arm_pass("literal_recomputed_f"):
+            disposition = "ROW8_8_LOCALIZED_TO_ZFW_COMPOSITION"
+        elif rossby_arm_pass("literal_oracle_zn"):
+            disposition = "ROW8_8_LOCALIZED_TO_ZN_PRECURSOR"
+        else:
+            disposition = "ROW8_8_LOCALIZED_TO_ZN_X_ZFW_COMPOSITION"
     nemo = args.nemo_root.resolve()
     receipt = {
-        "schema": ("dino-split-explicit-momentum-chain-round72-v1"
+        "schema": ("dino-split-explicit-momentum-chain-round73-v1"
+                   if args.rossby_factorial else
+                   "dino-split-explicit-momentum-chain-round72-v1"
                    if args.post_chain_factorial else
                    "dino-split-explicit-momentum-chain-round71-v1"
                    if args.exact_surface_kmm_carry else
@@ -1092,6 +1188,8 @@ def main() -> int:
            if args.capture_kappa_geometry else {}),
         **({"post_chain_metrics": post_chain_metrics}
            if args.post_chain_factorial else {}),
+        **({"rossby_metrics": rossby_metrics}
+           if args.rossby_factorial else {}),
         "focus_ji": [list(x) for x in FOCUS],
         "bindings": {
             "round54": _sha(args.round54.resolve()),
@@ -1125,12 +1223,16 @@ def main() -> int:
                if args.exact_surface_kmm_carry else {}),
             **({"round71": _sha(args.round71.resolve())}
                if args.post_chain_factorial else {}),
+            **({"round72": _sha(args.round72.resolve())}
+               if args.rossby_factorial else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(
                 root / "docs/ocean/fidelity" /
-                ("PREREG_split_explicit_momentum_chain_round72.md"
+                ("PREREG_split_explicit_momentum_chain_round73.md"
+                 if args.rossby_factorial else
+                 "PREREG_split_explicit_momentum_chain_round72.md"
                  if args.post_chain_factorial else
                  "PREREG_split_explicit_momentum_chain_round71.md"
                  if args.exact_surface_kmm_carry else
@@ -1162,7 +1264,9 @@ def main() -> int:
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
             "nemo_ldftra": _sha(nemo / "cfgs/DINO/MY_SRC/ldftra.F90"),
         },
-        "arm": ("post_chain_factorial"
+        "arm": ("rossby_factorial"
+                if args.rossby_factorial else
+                "post_chain_factorial"
                 if args.post_chain_factorial else
                 "exact_surface_kmm_carry"
                 if args.exact_surface_kmm_carry else
