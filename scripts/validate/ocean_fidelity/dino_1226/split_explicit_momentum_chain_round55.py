@@ -36,6 +36,7 @@ ROUND59_SHA = "85ea27cce4804d98f281940fe472e798d9fa64c741c23bb55e3fca40ee9ca677"
 ROUND60_SHA = "b3ef5c0534ff1348dbdb581686aa602cc1d9eca9ef61336ca0b4130217e54e2d"
 ROUND61_SHA = "b8f7a376a0a13fd384cb4195cf27db8ff6f82c71e576bb8d449451903d3bd07c"
 ROUND62_SHA = "290caa5bb3c3187d5ea13fe62276f299bd47953b556615dfab3f4443d1597a86"
+ROUND63_SHA = "3a1a25ca328761b1bcbeb87953751a3a15b1ac00852b2ff62fd4223d107d24e0"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -105,10 +106,12 @@ def main() -> int:
     parser.add_argument("--round60", type=Path)
     parser.add_argument("--round61", type=Path)
     parser.add_argument("--round62", type=Path)
+    parser.add_argument("--round63", type=Path)
     parser.add_argument("--hold-slow-forcing", action="store_true")
     parser.add_argument("--oracle-transport", action="store_true")
     parser.add_argument("--capture-cycle", action="store_true")
     parser.add_argument("--direct-cycle-entry", action="store_true")
+    parser.add_argument("--live-thickness-entry", action="store_true")
     parser.add_argument("--raw-artifact", type=Path, required=True)
     parser.add_argument("--nemo-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -184,6 +187,23 @@ def main() -> int:
             raise SystemExit("round 62 does not release the direct-cycle score")
     elif args.round62 is not None:
         raise SystemExit("--round62 requires --direct-cycle-entry")
+    prior63 = None
+    if args.live_thickness_entry:
+        if not args.direct_cycle_entry:
+            raise SystemExit(
+                "--live-thickness-entry requires --direct-cycle-entry")
+        if (args.round63 is None
+                or _sha(args.round63.resolve()) != ROUND63_SHA):
+            raise SystemExit("official round-63 thickness receipt required")
+        prior63 = json.loads(args.round63.read_text())
+        if (prior63.get("disposition") != "TRACER_ENTRY_DIVERGED_8.5"
+                or prior63["rows"][0]["status"] != "AT_BAR"
+                or prior63["rows"][1]["status"] != "AT_BAR"
+                or prior63["rows"][2]["metrics"]["n_diverged_columns"]
+                != 9758):
+            raise SystemExit("round 63 does not release the live-thickness score")
+    elif args.round63 is not None:
+        raise SystemExit("--round63 requires --live-thickness-entry")
     if _sha(args.raw_artifact.resolve()) != RAW_ARTIFACT_SHA:
         raise SystemExit("admitted held row-8 artifact changed")
     held = args.held_dir.resolve()
@@ -202,10 +222,12 @@ def main() -> int:
     original = model_module.add_bolus_to_advecting_flux
     original_solver = model_module.barotropic_substeps_latlon_cgrid
     original_cycle = model_module.nemo_qco_kmm_velocity_cycle
+    original_thickness = model_module.nemo_qco_live_face_thicknesses
     solver_calls = 0
     transport_substitutions = 0
     solver_transport_captures = []
     cycle_captures = []
+    thickness_captures = []
     held_u_native = np.fromfile(held / "spg_dump_zu_frc.bin", dtype="<f8")
     held_v_native = np.fromfile(held / "spg_dump_zv_frc.bin", dtype="<f8")
     if held_u_native.size != 199 * 52 or held_v_native.size != 199 * 52:
@@ -266,11 +288,18 @@ def main() -> int:
         })
         return result
 
+    def observed_thickness(*thickness_args, **thickness_kwargs):
+        result = original_thickness(*thickness_args, **thickness_kwargs)
+        thickness_captures.append(tuple(np.asarray(value) for value in result))
+        return result
+
     model_module.add_bolus_to_advecting_flux = observe
     if args.hold_slow_forcing:
         model_module.barotropic_substeps_latlon_cgrid = held_solver
     if args.capture_cycle:
         model_module.nemo_qco_kmm_velocity_cycle = observed_cycle
+    if args.live_thickness_entry:
+        model_module.nemo_qco_live_face_thicknesses = observed_thickness
     try:
         with jax.disable_jit():
             model._nemo_mlf_step(state, twin.DT, surface_forcing=sf)
@@ -278,9 +307,12 @@ def main() -> int:
         model_module.add_bolus_to_advecting_flux = original
         model_module.barotropic_substeps_latlon_cgrid = original_solver
         model_module.nemo_qco_kmm_velocity_cycle = original_cycle
+        model_module.nemo_qco_live_face_thicknesses = original_thickness
     restored = (model_module.add_bolus_to_advecting_flux is original
                 and model_module.barotropic_substeps_latlon_cgrid is original_solver
-                and model_module.nemo_qco_kmm_velocity_cycle is original_cycle)
+                and model_module.nemo_qco_kmm_velocity_cycle is original_cycle
+                and model_module.nemo_qco_live_face_thicknesses
+                is original_thickness)
     if len(captured) != 1:
         raise SystemExit(f"expected one single-pass tracer handoff, got {len(captured)}")
 
@@ -345,6 +377,13 @@ def main() -> int:
         }
         if args.direct_cycle_entry:
             values["un"] = cycle_captures[0]["corrected_u"][:, 1:, :35]
+    if args.live_thickness_entry:
+        if len(thickness_captures) != 1:
+            raise SystemExit(
+                "expected exactly one tracer live-thickness capture")
+        live_u_raw = thickness_captures[0][0][..., :35]
+        values["e3u"] = live_u_raw
+        values["e2e3u"] = e2u[:, 1:, :] * live_u_raw
     specs = (
         ("8.3", "uu(Kmm) / zptu", "traadv.F90:301-304", "un", POINTWISE_BAR),
         ("8.4", "e2u", "traadv.F90:329", "e2u", POINTWISE_BAR),
@@ -377,6 +416,9 @@ def main() -> int:
         "round62_direct_cycle_exact": (
             prior62 is None
             or prior62["cycle_capture_metrics"]["cycle_corrected_u"]["pass"]),
+        "round63_thickness_debt_admitted": (
+            prior63 is None
+            or prior63["rows"][2]["metrics"]["n_diverged_columns"] == 9758),
         "cycle_capture_count": (
             len(cycle_captures) >= 1 if args.capture_cycle
             else len(cycle_captures) == 0),
@@ -390,6 +432,13 @@ def main() -> int:
             sweep.metrics(proxy_un, oracle["un"], wet, FOCUS,
                           POINTWISE_BAR)["n_diverged_columns"] == 104
             if args.direct_cycle_entry else True),
+        "live_thickness_capture_count": (
+            len(thickness_captures) == 1 if args.live_thickness_entry
+            else len(thickness_captures) == 0),
+        "generic_min_thickness_plant_red_9758": (
+            sweep.metrics(h_u[:, 1:, :35], oracle["e3u"], wet, FOCUS,
+                          POINTWISE_BAR)["n_diverged_columns"] == 9758
+            if args.live_thickness_entry else True),
         "round56_unheld_red": (
             prior56 is None
             or prior56["rows"][0]["status"] == "DIVERGED"),
@@ -417,7 +466,9 @@ def main() -> int:
     controls["registered_population_exact"] = (
         int(np.any(wet, axis=-1).sum()) == 9758 and int(wet.sum()) == 336338)
     valid = all(controls.values())
-    disposition = (("TRACER_ENTRY_ROW8_AT_BAR_DIRECT_KMM"
+    disposition = (("TRACER_ENTRY_ROW8_AT_BAR_LIVE_QCO"
+                    if args.live_thickness_entry else
+                    "TRACER_ENTRY_ROW8_AT_BAR_DIRECT_KMM"
                     if args.direct_cycle_entry else
                     "TRACER_ENTRY_ROW8_AT_BAR_ORACLE_TRANSPORT"
                     if args.oracle_transport else
@@ -439,7 +490,9 @@ def main() -> int:
             disposition = "ROW8_3_CYCLE_CAPTURE_UNRESOLVED"
     nemo = args.nemo_root.resolve()
     receipt = {
-        "schema": ("dino-split-explicit-momentum-chain-round63-v1"
+        "schema": ("dino-split-explicit-momentum-chain-round64-v1"
+                   if args.live_thickness_entry else
+                   "dino-split-explicit-momentum-chain-round63-v1"
                    if args.direct_cycle_entry else
                    "dino-split-explicit-momentum-chain-round62-v1"
                    if args.capture_cycle else
@@ -467,12 +520,16 @@ def main() -> int:
                if args.capture_cycle else {}),
             **({"round62": _sha(args.round62.resolve())}
                if args.direct_cycle_entry else {}),
+            **({"round63": _sha(args.round63.resolve())}
+               if args.live_thickness_entry else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(
                 root / "docs/ocean/fidelity" /
-                ("PREREG_split_explicit_momentum_chain_round63.md"
+                ("PREREG_split_explicit_momentum_chain_round64.md"
+                 if args.live_thickness_entry else
+                 "PREREG_split_explicit_momentum_chain_round63.md"
                  if args.direct_cycle_entry else
                  "PREREG_split_explicit_momentum_chain_round62.md"
                  if args.capture_cycle else
@@ -486,7 +543,8 @@ def main() -> int:
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
             "nemo_ldftra": _sha(nemo / "cfgs/DINO/MY_SRC/ldftra.F90"),
         },
-        "arm": ("direct_cycle_entry" if args.direct_cycle_entry else
+        "arm": ("live_thickness_entry" if args.live_thickness_entry else
+                "direct_cycle_entry" if args.direct_cycle_entry else
                 "cycle_capture" if args.capture_cycle else
                 "oracle_transport" if args.oracle_transport else
                 "held_slow_forcing" if args.hold_slow_forcing else
@@ -495,7 +553,8 @@ def main() -> int:
             "TRACER_ENTRY_ROW8_AT_BAR",
             "TRACER_ENTRY_ROW8_AT_BAR_UPSTREAM_FORCING_EXACT",
             "TRACER_ENTRY_ROW8_AT_BAR_ORACLE_TRANSPORT",
-            "TRACER_ENTRY_ROW8_AT_BAR_DIRECT_KMM"} else first),
+            "TRACER_ENTRY_ROW8_AT_BAR_DIRECT_KMM",
+            "TRACER_ENTRY_ROW8_AT_BAR_LIVE_QCO"} else first),
     }
     args.output.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     print(f"disposition={disposition} first_diverged_subrow={first}")

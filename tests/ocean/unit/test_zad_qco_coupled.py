@@ -86,6 +86,11 @@ def test_qco_zad_pair_matches_source_ordered_oracle():
 
     np.testing.assert_array_equal(np.asarray(hu)[:, 1:], hu_raw)
     np.testing.assert_array_equal(np.asarray(hv)[1:], hv_raw)
+    # Red-capable row-8.5 plant: replacing the live Kmm QCO thickness with
+    # the reference/generic face thickness must be detectably different on
+    # this nonzero-SSH state.
+    assert np.any(np.asarray(hu)[:, 1:] != h0)
+    assert np.any(np.asarray(hv)[1:] != h0)
     np.testing.assert_allclose(np.asarray(ww), expected_w, rtol=0, atol=2e-16)
     np.testing.assert_array_equal(np.asarray(ww)[..., -1], 0.0)
     assert np.any(np.asarray(ww)[..., 1:-1] != 0.0)

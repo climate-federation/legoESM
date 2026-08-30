@@ -47,6 +47,7 @@ from legoesm.ocean.vertical import (
     flux_form_vertical_tracer_advection_tvd,
     flux_form_vertical_tracer_advection_centered,
     nemo_qco_live_face_geometry_from_operands,
+    nemo_qco_live_face_thicknesses,
 )
 from legoesm.ocean.state import (
     LatLonCGridOceanState,
@@ -4499,6 +4500,25 @@ class LatLonCGridOceanModel:
             u_corrected, v_corrected, _, _ = nemo_qco_kmm_velocity_cycle(
                 state.eta.data, state.u.data, state.v.data,
                 Hu_avg, Hv_avg, _zc, u_mask_3d_tracer, v_mask_3d_tracer)
+            # traadv.F90:328-331 consumes the SAME live Kmm QCO face
+            # thickness as the literal velocity cycle, not lego's generic
+            # min-of-neighbour thickness. Build the native east/north faces
+            # from the raw bridge operands, then map once to the redundant
+            # west/south layout used by the tracer core.
+            _e3t0 = jnp.asarray(
+                _zc.nemo_e3t_0, dtype=state.eta.data.dtype)[
+                    ..., :u_corrected.shape[-1]]
+            _raw_umask = jnp.asarray(
+                u_mask_3d_tracer[:, 1:, :], dtype=state.eta.data.dtype)
+            _raw_vmask = jnp.asarray(
+                v_mask_3d_tracer[1:, :, :], dtype=state.eta.data.dtype)
+            _live_u_raw, _live_v_raw = nemo_qco_live_face_thicknesses(
+                state.eta.data, _zc, _e3t0, _e3t0,
+                _raw_umask, _raw_vmask)
+            _h_u_tracer = jnp.concatenate(
+                [_live_u_raw[:, -1:, :], _live_u_raw], axis=1)
+            _h_v_tracer = jnp.concatenate(
+                [jnp.zeros_like(_live_v_raw[:1]), _live_v_raw], axis=0)
         else:
             # H + Hu reductions per face share the h_u_old/h_v_old weight
             # on the level axis — fuse into one stack each.  Keep this entire
@@ -4520,8 +4540,13 @@ class LatLonCGridOceanModel:
         # uniform velocity at all depths and identically zero w),
         # this preserves baroclinic shear and produces non-zero vertical
         # velocity from Ekman pumping/suction.
-        mass_flux_u = h_u_old * u_corrected * u_mask_3d_tracer
-        mass_flux_v = h_v_old * v_corrected * v_mask_3d_tracer
+        if getattr(_cfg_b, "wzv_call2_evaluation", "generic") == "nemo_literal":
+            mass_flux_u = _h_u_tracer * u_corrected * u_mask_3d_tracer
+            mass_flux_v = _h_v_tracer * v_corrected * v_mask_3d_tracer
+        else:
+            # Preserve the generic/off statements byte-for-byte.
+            mass_flux_u = h_u_old * u_corrected * u_mask_3d_tracer
+            mass_flux_v = h_v_old * v_corrected * v_mask_3d_tracer
 
         # Flux-form tracer update (horizontal + vertical)
         #
