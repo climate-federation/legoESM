@@ -68,6 +68,12 @@ def main() -> int:
     parser.add_argument("--manifest-artifact", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    raise SystemExit(
+        "RETRACTED: round 33 injected NEMO's already barotropic-free naa_B at "
+        "the public mixing-method entry, so production stripped the mean a "
+        "second time and the scorer compared a post-splice field to NEMO's "
+        "pre-splice stage-8 field. Use the round-35 raw-dispatch scorer."
+    )
     set_policy(PrecisionPolicy.fp64())
 
     root = Path(__file__).resolve().parents[4]

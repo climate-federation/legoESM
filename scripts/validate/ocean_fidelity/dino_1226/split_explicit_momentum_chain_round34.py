@@ -72,6 +72,11 @@ def main() -> int:
     parser.add_argument("--manifest-artifact", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    raise SystemExit(
+        "RETRACTED: round 34 captured the invalid round-33 fed arm after its "
+        "double barotropic-mean subtraction. Its operand table does not score "
+        "the production row-4 boundary. Use round 35."
+    )
     set_policy(PrecisionPolicy.fp64())
 
     root = Path(__file__).resolve().parents[4]

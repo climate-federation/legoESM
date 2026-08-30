@@ -58,3 +58,13 @@ round-33 null and hook-restoration controls must still pass. A changed/missing
 hash, nonfinite capture, failed control, or ambiguous U/V call ordering is
 `INVALID`. No SLOT block is allocated because every oracle operand already
 exists.
+
+## Post-run retraction
+
+This registration targeted an invalid fed-arm representation boundary.
+Round 33 supplied already barotropic-free NEMO `naa_B` to a public method that
+strips its mean again, and round 34 captured the resulting double-stripped
+arguments. The round-34 scorer is retired and refuses execution. Its nominal
+`LOCALIZED_TO_RHS` print is withdrawn; it is not an ownership receipt. Round
+35 replaces it with an unmodified production-step capture at the raw dispatch
+boundary before mean readdition.
