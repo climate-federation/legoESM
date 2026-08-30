@@ -53,6 +53,17 @@ def _target_model(native, component):
             np.concatenate([np.zeros_like(native[:1]), native], axis=0))
 
 
+def _native_target(value, component):
+    array = np.asarray(value)
+    if array.ndim == 3 and array.shape[-1] == 1:
+        array = array[..., 0]
+    expected = (199, 53) if component == "u" else (200, 52)
+    if array.shape != expected:
+        raise SystemExit(
+            f"production {component}-target shape changed: {array.shape}")
+    return array[:, 1:] if component == "u" else array[1:, :]
+
+
 def _literal(before, target_native, component, z_coord, mask):
     e3 = jnp.asarray(z_coord.nemo_e3t_0, dtype=jnp.float64)[..., :35]
     h0 = jnp.asarray(
@@ -156,8 +167,7 @@ def main() -> int:
             captured[f"T{ti}A0"] = {
                 c: r47._from_model(getattr(out, c).data, c) for c in ("u", "v")}
             target_native = {
-                "u": np.asarray(targets["u"])[:, 1:],
-                "v": np.asarray(targets["v"])[1:, :],
+                c: _native_target(targets[c], c) for c in ("u", "v")
             }
             captured[f"T{ti}A1"] = {
                 c: np.asarray(_literal(
@@ -165,7 +175,8 @@ def main() -> int:
                     self.z_coord if z_coord is None else z_coord, masks[c]))
                 for c in ("u", "v")}
         captured["target0"] = {
-            "u": np.asarray(btu)[:, 1:], "v": np.asarray(btv)[1:, :]}
+            c: _native_target(value, c)
+            for c, value in (("u", btu), ("v", btv))}
         return real_reconcile(
             self, naa, state_arg, btu, btv, um3, vm3, grid,
             z_coord=z_coord, config=config)
