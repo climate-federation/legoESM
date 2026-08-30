@@ -1,15 +1,15 @@
-# DINO transfer question — T3 certified, T2 block, T1 build admission
+# DINO transfer question — T3 certified, T2 re-admitted, T1 running
 
 Date: 2026-08-30. Session:
 `01a053d4-8e9f-7212-bbdb-19ba2d64e140`.
 
-T3 is **TRANSFER_CONFIRMED**. T2 is
-**BLOCKED-NEEDS-FE-STABILIZATION** and has no science verdict. The corrected
-forward-Euler arms still become numerically unstable during their second model
-day, before writing an admitted artifact. This result binds the T3 artifacts,
-both T2 rerun failures, the unmasked CPU diagnosis, and the stop disposition.
-No GPU, NEMO, or MPI process was launched while diagnosing or binding these
-results.
+T3 is **TRANSFER_CONFIRMED**. T2 is **READY-FOR-R3-TWIN-BATTERY** after a
+registered CPU-only stabilization; it still has no science verdict. The
+forward-Euler crash is localized to the live continuity/surface-pressure fast
+pair under a plain temporal boxcar. Repeating NEMO's first-Euler nn_bt_flt=2
+AB3/AM4 temporal composition passes the frozen 40-step discriminator and the
+64-step clean-card gate. T1's human-owned GPU arms remain outside this work.
+No GPU, NEMO, MPI process, push, or remote action was launched in this round.
 
 ## T3 — catalog construction is certified
 
@@ -41,7 +41,7 @@ under the registered bridge and five-day behavioral check. This transfers
 construction-path identity for the certified MLF card. It does not extend the
 round-94 bridge claim to a standalone start or another card.
 
-## T2 r2 — exact crash and owner
+## T2 r2 — historical exact crash and owner
 
 Both corrected `nemo_dino_kamm` climate arms stopped before writing an
 artifact. Their logs are
@@ -92,9 +92,10 @@ It only keeps five steps bounded and delays the same failure. The MLF-only
 Nbb/Kaa guards and the FE alpha restoration remain valid admission/scope
 fences, but they are not an FE stability fix.
 
-## T2 disposition
+## T2 historical stop disposition (superseded by the authorized continuation)
 
-T2 is **BLOCKED-NEEDS-FE-STABILIZATION**. It is not `CONFIRMED`, `REFUTED` by
+At that checkpoint T2 was **BLOCKED-NEEDS-FE-STABILIZATION**. It was not
+`CONFIRMED` or `REFUTED` by
 the registered climate statistics, or science-scored: no climate, wall, or
 score artifact exists. The 360-day and five-day GPU blocks are withdrawn from
 the handoff and must not be relaunched from this producer. A future FE-specific
@@ -156,6 +157,75 @@ FE developed-state instability. The already-bound MLF-only fences for alpha
 and the Nbb/Kaa QCO pair remain valid. No green post-step-32 FE regression test
 exists to add until FE stabilization itself is implemented.
 
+## T2 authorized continuation — causal owner and admitted stabilization
+
+The executed DINO source establishes the scope boundary. `RUN_TRAJ/namelist_cfg`
+sets `nn_it000=1` at line 94 and `ln_rstart=.false.` at line 101. The from-rest
+branch sets `l_1st_euler=.true.` (`src/OCE/DOM/istate.F90:107-110`), initializes
+velocity at rest (`:121-123`), and copies Kbb into Kmm (`:135-137`). The built
+`MY_SRC/stpmlf.F90` selects `rDt=rn_Dt` at lines 134-137, still calls
+`mlf_baro_corr` at line 578, and only at lines 685-688 restores `2*rn_Dt` and
+clears the Euler flag. NEMO therefore takes exactly one Euler outer step and
+then MLF; it has no perpetual-Euler oracle trajectory.
+
+That one Euler step is not a plain forward/backward barotropic loop.
+`MY_SRC/dynspg_ts.F90:202-208` initializes the boxcar/temporal histories;
+lines 241-251 choose the first-Euler forward window; lines 546-553 reset the
+history; and lines 766-780 run `ts_bck_interp` before each surface pressure
+gradient. Lines 718-725 are the live continuity update, while lines 1123-1127
+return the barotropic increment to the 3-D momentum RHS. Repeating this
+first-Euler composition is a source-grounded stabilization, not an
+oracle-faithful trajectory.
+
+The committed CPU probe wrapped the production kernels with diagnostic-only
+callbacks over outer steps 25-35. The plain `nemo_boxcar_centred` control
+reproduced the step-36 failure. At step 25 it recorded:
+
+- `|eta|max=29.4297 m`;
+- live surface-PGF tendency `0.90269 m s-2`;
+- continuity divergence `22.1698 m s-1`;
+- frozen slow tendency `3.3084e-5 m s-2`;
+- EEN Coriolis tendency `2.308e-4 m s-2`.
+
+By step 29, SSH is `684.48 m` and surface PGF is `3.478 m s-2`. Thus the
+continuity/surface-PGF gravity-wave pair injects the growth; the slow tendency
+and Coriolis are subleading through onset. Both the column-mean-deposit plant
+and the fast-term callback plant fire.
+
+The preregistered corrector hypothesis is refuted. Repeating
+`mlf_baro_corr` reduces the after-solve column-mean deposit but still raises the
+same raw-`e3w_int` check at step 37. Its experimental FE wiring was removed.
+
+The next frozen arm changes exactly one resolved field:
+`barotropic_time_filter=nemo_boxcar_centred` to `nemo_boxcar_ab3`. It completes
+40 steps finite. The shipped `nemo_dino_kamm` card now pins that value and,
+without any probe override, completes the registered 64-step gate. At step 64,
+`|eta|max=0.852169 m`, `|u|max=0.898959 m s-1`, and
+`|v|max=1.092863 m s-1`. The old plain-boxcar receipt is the non-vacuous red
+control; a five-step synthetic test would not reach the registered failure and
+is intentionally not substituted for it.
+
+Evidence SHA-256 values:
+
+- plain-filter fast-term JSON/log:
+  `c2623575caf21283f0abe820873f94611f5d401cd3f32e611fd2cad967dcf26c` /
+  `15936968c8cb9197b6ec8568d369c64bbb8bf4d004c425c05096292274790a38`;
+- refuted corrector JSON/log:
+  `5ec1765659fc68d3f56f3cd0255b027b162734cc9e66eeedde82f90b8f84a91f` /
+  `e6a8394dbcc69547e27f78c001b19b38ed156cf29610a86bc1aec3d371be7223`;
+- one-field AB3/AM4 40-step JSON/log:
+  `eb7a378a8eb5c85294e0591db17927bfc1f52fb12c6e7fbf3700aebef794c92e` /
+  `7c91c5c77732b0f979a05de477f3ff744aaecab03226187c9a8e0902c90c7a2d`;
+- promoted-default 64-step JSON/log:
+  `1d2da9994bc18246a05de5ac20ad5d333ee1e42b83447e2cbac18afdb735ef38` /
+  `1d5649ffe67344ace9125be863e5baf2f8447b21bb866d8c562a9fe2cbd5e724`.
+
+The strongest result is
+`PERPETUAL_FE_EULER_COMPOSITION_RUNS_64_STEP_DEVELOPED_STATE_WINDOW`.
+It authorizes re-emitting the frozen T2 twin battery. It does not establish
+`FE_FAITHFUL`, `FE_STABLE_CLIMATE`, or a T2 statistical verdict; those remain
+conditional on the new GPU artifacts and unchanged scorer.
+
 ## T1 build round — cold-start row closed; legoESM arms ready
 
 `standalone_20y.py` now constructs the public `nemo_dino_kamm_mlf` card from
@@ -211,9 +281,9 @@ Its manifest SHA-256 is
 `claim_admissible=false` means only that this receipt intentionally ran one
 step rather than all 230,400.
 
-The six legoESM 20-year arms are therefore **READY-TO-RUN** and are emitted in
-the handoff. T1 itself remains **UNMEASURED**: no GPU arm, fresh from-rest NEMO
-ensemble, normalized six-family statistics, or science score was produced in
-this round. The scorer cannot be invoked until both roots contain the
-registered `dino_standalone_20y_statistics_v1` products. The FE stability
-bisect remains registered future work and was not reopened.
+The six legoESM 20-year arms were admitted and handed off; the user reports
+that they are now running on human-owned GPUs. This CPU-only round did not
+inspect or modify them. T1 remains **UNMEASURED** until those arms, the fresh
+from-rest NEMO ensemble, normalized six-family statistics, and the science
+score all exist. The scorer cannot be invoked until both roots contain the
+registered `dino_standalone_20y_statistics_v1` products.

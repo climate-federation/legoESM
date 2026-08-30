@@ -25,18 +25,20 @@ Ready-to-paste addendum, 2026-08-30. Session
 > The already-established frame fences remain: FE keeps
 > `barotropic_diffusion_alpha=0.01` and generic `zad_qco_evaluation` /
 > `wzv_call2_evaluation`; the zero-alpha and coupled Nbb/Kaa literal forms are
-> MLF-only. No additional default is scoped in this addendum. Faithful FE
-> equivalents and a stable permanent-FE composition remain registered future
-> work. The honest PR claim is unchanged but narrower in emphasis: #1696 ships
-> and climate-certifies the MLF card, exposes faithful selectors on the sibling
-> where guarded, and does **not** establish FE developed-state runnability or
-> climate fidelity.
+> MLF-only. The authorized continuation has now admitted one additional FE
+> default: `barotropic_time_filter=nemo_boxcar_ab3`. NEMO's first and only
+> Euler bootstrap still runs the nn_bt_flt=2 AB3 velocity predictor and
+> `ts_bck_interp` SSH interpolation; repeating that first-step composition is
+> the minimal source-grounded stabilization for legoESM's perpetual-Euler card.
+> It passes the registered 40-step discriminator and 64-step clean-card gate.
+> This does not make perpetual Euler oracle-faithful—NEMO switches to MLF after
+> one step—and does not establish FE climate fidelity.
 >
-> The requested long-window green FE regression test cannot be added honestly:
-> both sides of the alleged before/after boundary fail. A five-step test would
-> be vacuous—the registered failure is at step 32 or later. The committed
-> reproducer and preregistration instead fail closed and preserve the exact FE
-> stabilization block for a distinct round.
+> The committed developed-state reproducer is the non-vacuous regression gate:
+> its planted old `nemo_boxcar_centred` arm fails at step 36, the one-field
+> AB3/AM4 arm completes 40 steps, and the shipped default completes 64. A
+> short synthetic five-step CI test would remain vacuous, so the full clean
+> CPU receipt—not a fabricated short green test—carries the runnability claim.
 
 Evidence hashes:
 
@@ -47,4 +49,13 @@ Evidence hashes:
 - clean pre-#1696 two-day artifact:
   `9f97a8ba82800672116a7f60c1cb1043dfc1aab7b51ab230311bced1284f2839`;
 - clean pre-#1696 log:
-  `4f5f128c7ea83ebfe3d81a41da4b29146b4d744e0862a573b3c9f04605218464`.
+  `4f5f128c7ea83ebfe3d81a41da4b29146b4d744e0862a573b3c9f04605218464`;
+- live fast-term plain-filter control JSON/log:
+  `c2623575caf21283f0abe820873f94611f5d401cd3f32e611fd2cad967dcf26c` /
+  `15936968c8cb9197b6ec8568d369c64bbb8bf4d004c425c05096292274790a38`;
+- one-field AB3/AM4 40-step JSON/log:
+  `eb7a378a8eb5c85294e0591db17927bfc1f52fb12c6e7fbf3700aebef794c92e` /
+  `7c91c5c77732b0f979a05de477f3ff744aaecab03226187c9a8e0902c90c7a2d`;
+- promoted-default 64-step JSON/log:
+  `1d2da9994bc18246a05de5ac20ad5d333ee1e42b83447e2cbac18afdb735ef38` /
+  `1d5649ffe67344ace9125be863e5baf2f8447b21bb866d8c562a9fe2cbd5e724`.

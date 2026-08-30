@@ -1,13 +1,13 @@
-# DINO transfer question: T1 standalone-arm handoff
+# DINO transfer question: T2 r3 and T1 standalone-arm handoff
 
 Date: 2026-08-30. Session:
 `01a053d4-8e9f-7212-bbdb-19ba2d64e140`.
 
-Status: **T3 TRANSFER_CONFIRMED; T2 BLOCKED-NEEDS-FE-STABILIZATION;
-T1 LEGOESM ARMS READY / SCIENCE UNMEASURED.** No GPU, NEMO, `mpirun`, push, or
-FE bisect was performed in this build round. The previous T2 GPU blocks remain
-withdrawn. The executable blocks below are the six registered T1 legoESM GPU
-arms for the human to run.
+Status: **T3 TRANSFER_CONFIRMED; T2 R3 ARMS READY / SCIENCE UNMEASURED;
+T1 LEGOESM ARMS RUNNING / SCIENCE UNMEASURED.** The registered FE CPU
+diagnosis and stabilization were completed without GPU, NEMO, `mpirun`, push,
+or remote action. The executable T2 r3 blocks below reuse the frozen round-94
+battery; the already-emitted T1 blocks are retained unchanged for provenance.
 
 ## Receipt slots
 
@@ -22,15 +22,15 @@ SLOT T3_IDENTITY_ARTIFACT_SHA256 VALUE=cae74e17dd2e3c60f592c203b398a9d1d15790532
 SLOT T3_BEHAVIOR_IDENTITY_ARTIFACT_SHA256 VALUE=f52990b76afe44cc5a045fd3d2d8e7c10c311a79838bc83296fd6b873cf28169
 SLOT T3_ORACLE_ARTIFACT_SHA256 VALUE=d94fd2370413c151723a9986df046d9a5d1051202802b34de2f21b7f9e725f52
 SLOT T3_CATALOG_ARTIFACT_SHA256 VALUE=fa778f3ed225955cf0f2ae9ac523d48b07b5763840d05fb7d7387726b65c8983
-SLOT T2_STATUS VALUE=BLOCKED-NEEDS-FE-STABILIZATION
+SLOT T2_STATUS VALUE=READY_FOR_T2_R3_GPU_RERUN
 SLOT T2_FE_CLIMATE_R2_A_ARTIFACT VALUE=BLOCKED_NO_ARTIFACT
 SLOT T2_FE_CLIMATE_R2_A_LOG_SHA256 VALUE=e07de38ab808ce86d46ba813b488b3c4661c9bed9b5627eeb5479685971db664
 SLOT T2_FE_CLIMATE_R2_B_ARTIFACT VALUE=BLOCKED_NO_ARTIFACT
 SLOT T2_FE_CLIMATE_R2_B_LOG_SHA256 VALUE=637b769cba5c81dd6f3080d22ad3322e64d29bb65be6bc986258a23a80ce4452
-SLOT T2_FE_WALL_ARTIFACTS VALUE=BLOCKED_NOT_RUN
-SLOT T2_SCORE_ARTIFACT VALUE=BLOCKED_NOT_RUN
+SLOT T2_R2_FE_WALL_ARTIFACTS VALUE=HISTORICAL_BLOCKED_NOT_RUN
+SLOT T2_R2_SCORE_ARTIFACT VALUE=HISTORICAL_BLOCKED_NOT_RUN
 SLOT T2_CPU_REPRO_RELATIVE_PATH VALUE=scripts/validate/ocean_fidelity/dino_1226/fe_stability_repro.py
-SLOT T2_CPU_REPRO_SCRIPT_SHA256 VALUE=d8d8be9e0d2b057260dcebdd9a3c77c370d16005a26cf3b0f26864ee68289fae
+SLOT T2_CPU_REPRO_SCRIPT_SHA256 VALUE=0ea386a3248706a8f40dfd74226a0f3eb1ce905a6a7bf72751ef16bd339718d8
 SLOT T2_CPU_REPRO_RECEIPT_SHA256 VALUE=3adc8ba20f26dec0631b7118c5f881abd3f630391c808067ccf7725435a5281e
 SLOT T2_CPU_REPRO_LOG_SHA256 VALUE=24d0c63f2208a476d70e011587a341de00e6964a57b638a84d332042b0d0489b
 SLOT T2_SCOPE_BISECT_PREREG_RELATIVE_PATH VALUE=docs/ocean/fidelity/PREREG_dino_fe_default_scope_bisect.md
@@ -40,7 +40,22 @@ SLOT T2_PRE1696_COMMIT VALUE=b794c0618e287ebf1d364a8713c3c504ac2eb01c
 SLOT T2_PRE1696_ARTIFACT_SHA256 VALUE=9f97a8ba82800672116a7f60c1cb1043dfc1aab7b51ab230311bced1284f2839
 SLOT T2_PRE1696_LOG_SHA256 VALUE=4f5f128c7ea83ebfe3d81a41da4b29146b4d744e0862a573b3c9f04605218464
 SLOT T2_PR1696_ADDENDUM_RELATIVE_PATH VALUE=docs/ocean/fidelity/dino_pr1696_t2_addendum.md
-SLOT T1_STATUS VALUE=LEGO_ARMS_READY_SCIENCE_UNMEASURED
+SLOT T2_PLAIN_FILTER_FASTTERM_RECEIPT_SHA256 VALUE=c2623575caf21283f0abe820873f94611f5d401cd3f32e611fd2cad967dcf26c
+SLOT T2_PLAIN_FILTER_FASTTERM_LOG_SHA256 VALUE=15936968c8cb9197b6ec8568d369c64bbb8bf4d004c425c05096292274790a38
+SLOT T2_REFUTED_CORRECTOR_RECEIPT_SHA256 VALUE=5ec1765659fc68d3f56f3cd0255b027b162734cc9e66eeedde82f90b8f84a91f
+SLOT T2_REFUTED_CORRECTOR_LOG_SHA256 VALUE=e6a8394dbcc69547e27f78c001b19b38ed156cf29610a86bc1aec3d371be7223
+SLOT T2_AB3AM4_ARM40_RECEIPT_SHA256 VALUE=eb7a378a8eb5c85294e0591db17927bfc1f52fb12c6e7fbf3700aebef794c92e
+SLOT T2_AB3AM4_ARM40_LOG_SHA256 VALUE=7c91c5c77732b0f979a05de477f3ff744aaecab03226187c9a8e0902c90c7a2d
+SLOT T2_DEFAULT64_RECEIPT_SHA256 VALUE=1d2da9994bc18246a05de5ac20ad5d333ee1e42b83447e2cbac18afdb735ef38
+SLOT T2_DEFAULT64_LOG_SHA256 VALUE=1d5649ffe67344ace9125be863e5baf2f8447b21bb866d8c562a9fe2cbd5e724
+SLOT T2_R3_RUN_ROOT VALUE=/tmp/dino-transfer-01a053d4-t2r3
+SLOT T2_R3_CLIMATE_A_SHA256 VALUE=MEASURED_AT_RUN
+SLOT T2_R3_CLIMATE_B_SHA256 VALUE=MEASURED_AT_RUN
+SLOT T2_R3_WALL_A_SHA256 VALUE=MEASURED_AT_RUN
+SLOT T2_R3_WALL_B_SHA256 VALUE=MEASURED_AT_RUN
+SLOT T2_R3_SCORE_SHA256 VALUE=MEASURED_AT_RUN
+SLOT T2_MEASURED_GPU_HOURS_THIS_ROUND VALUE=0
+SLOT T1_STATUS VALUE=LEGO_ARMS_RUNNING_USER_OWNED_SCIENCE_UNMEASURED
 SLOT T1_COLD_START_PREREG_RELATIVE_PATH VALUE=docs/ocean/fidelity/PREREG_dino_standalone_cold_start_corrector.md
 SLOT T1_VALIDATED_BUILD_PRODUCER_SHA VALUE=28be310c6ab487c3fa685063af6554abea5938f2
 SLOT T1_COLD_START_CORE_SHA256 VALUE=ddb0c414a3d9f44073fed646516b9dbe463a4a9cac42b721b54aff94d26ef8cf
@@ -62,8 +77,8 @@ SLOT T1_MEASURED_NEMO_HOURS VALUE=0
 ```
 
 There are no empty slots. Every T3/T2 path above is committed, every completed
-artifact or log has a concrete hash, and every unavailable science artifact is
-explicitly marked blocked rather than represented by an empty value.
+artifact or log has a concrete hash, and each pending r3 artifact is explicitly
+`MEASURED_AT_RUN` rather than represented by an empty value.
 
 ## T3 bound verdict
 
@@ -83,50 +98,167 @@ No T3 rerun is required. The prior executable T3 blocks and their implemented
 history and in the certified producer; this handoff binds their completed
 artifacts instead of asking the user to spend more GPU time.
 
-## T2 stop receipt
+## T2 CPU admission receipt and scope
 
-Both corrected FE climate arms used `nemo_dino_kamm`, alpha `0.01`, generic
-Nbb/Kaa selectors, the NEMO day-180 restart, ladder `both`, fp64, TKE bridge,
-BEFORE bridge, T-point-stress bridge, and the NEMO seasonal epoch. Both become
-unphysical by the day-1 checkpoint (`|eta|max=525.7945 m`) and then surface the
-same checked error:
+The r2 arms used `nemo_dino_kamm`, alpha `0.01`, generic Nbb/Kaa selectors, the
+NEMO day-180 restart, ladder `both`, fp64, TKE bridge, BEFORE bridge,
+T-point-stress bridge, and the NEMO seasonal epoch. Both became unphysical by
+the day-1 checkpoint (`|eta|max=525.7945 m`) and surfaced:
 
 ```text
 raw-mesh e3w_int must contain only finite values > 0
 ```
 
-The committed CPU-only reproducer uses the same state construction and forcing
-loop with `JAX_DISABLE_JIT=1`. It completes steps 1--35, records the accelerating
-SSH and velocity mode, and raises the unwrapped `EquinoxTracetimeError` at step
-36 from `compute_buoyancy_frequency_nemo_bn2`, called by the GM/Redi native
-slope path. The geometry check is the immediate raise site but not the
-upstream instability: by step 35 `|u|max=214.312787 m s-1`, after SSH has
-already reached hundreds of metres.
+The extended CPU probe localizes the upstream injection to the live
+continuity/surface-PGF fast pair. At step 25, surface PGF is
+`0.90269 m s-2`, versus slow forcing `3.3084e-5 m s-2` and EEN Coriolis
+`2.308e-4 m s-2`; continuity divergence is `22.1698 m s-1`. Repeating the
+after-level corrector is refuted by the same step-37 failure and is not shipped.
 
-The five-step alpha control was too short. Alpha `0.01` delays the failure but
-does not stabilize this admitted FE bundle. The exact remaining composition
-owner within the FE/split-explicit barotropic path is unresolved. No additional
-selector change is authorized by this evidence.
+NEMO's one Euler bootstrap still executes nn_bt_flt=2's AB3 velocity predictor
+and `ts_bck_interp` SSH interpolation. Changing only the FE card's temporal
+filter from the plain boxcar to `nemo_boxcar_ab3` completes 40 steps, and the
+promoted clean card completes 64. The old selector is the red step-36 control.
+NEMO switches from Euler to MLF after that first step, so this admits a
+perpetual-Euler stabilization but not an oracle-faithful trajectory.
 
-The selector bisection does not change that disposition. Restoring every
-sweep-promoted evaluation selector still fails at step 37. The clean pre-#1696
-target itself is fully nonfinite at its step-32/day-1 checkpoint. Thus the
-premise that #1696 introduced this FE explosion is refuted, no additional
-selector passed the frozen causal gate, and no new default was scoped. The
-ready-to-paste addendum records that correction without weakening #1696's MLF
-climate result.
+T2 is now ready for r3. It still has no statistical `CONFIRMED`/`REFUTED`
+verdict; only the unchanged GPU battery and offline scorer may issue one.
 
-Consequences:
+## T2 r3 setup and CPU admission — run once
 
-- do not run the withdrawn 360-day FE climate pair;
-- do not run the five-day FE wall pair, because its trajectory is already
-  unstable;
-- do not invoke the offline scorer without admitted artifacts;
-- open a distinct, preregistered FE-stabilization round before reissuing T2.
+Every flag below was checked against the committed parser. The setup resolves
+the delivered branch from its actual auxiliary Git directory, creates a clean
+detached producer, and pins the unchanged round-94 instruments by hash.
 
-T2 therefore has no statistical `CONFIRMED`/`REFUTED` verdict. Its result is a
-model-scope block: the MLF bridge certification has not transferred to the FE
-sibling card.
+```bash
+set -euo pipefail
+export CODEX_SESSION_ID=01a053d4-8e9f-7212-bbdb-19ba2d64e140
+T2_GIT_DIR=/tmp/codex-transfer-aux.git
+T2_REF=refs/heads/fidelity/dino-transfer-codex
+T2_ROOT=/tmp/dino-transfer-01a053d4-t2r3
+T2_WORKTREE=/tmp/dino-transfer-t2r3-01a053d4-producer
+T2_NEMO=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO
+T2_NEMO_WALL=/tmp/dino_eta_waves/nemo_5d_eta.npz
+T2_PYTHON=/home/dbalwada/legoESM/.venv/bin/python
+T2_SHA=$(git --git-dir="$T2_GIT_DIR" rev-parse "$T2_REF")
+test ! -e "$T2_ROOT"
+test ! -e "$T2_WORKTREE"
+test -d "$T2_NEMO/RUN_TRAJ"
+test -d "$T2_NEMO/RUN_STEPDUMP"
+test -f "$T2_NEMO_WALL"
+test "$(sha256sum "$T2_NEMO_WALL" | awk '{print $1}')" = \
+  52bc6c70697126f7522114dbe2fc5cda5b56ce566db28f488d6809b79997b47a
+git --git-dir="$T2_GIT_DIR" worktree add --detach "$T2_WORKTREE" "$T2_SHA"
+test "$(git -C "$T2_WORKTREE" rev-parse HEAD)" = "$T2_SHA"
+test -z "$(git -C "$T2_WORKTREE" status --porcelain --untracked-files=no)"
+mkdir -p "$T2_ROOT/arms" "$T2_ROOT/logs" "$T2_ROOT/receipts"
+printf '%s\n' "$T2_SHA" > "$T2_ROOT/receipts/producer_commit.txt"
+T2_PYTHONPATH="$T2_WORKTREE/packages/atmosphere:$T2_WORKTREE/packages/core:$T2_WORKTREE/packages/coupler:$T2_WORKTREE/packages/ice:$T2_WORKTREE/packages/land:$T2_WORKTREE/packages/ml:$T2_WORKTREE/packages/ocean:$T2_WORKTREE/packages/tools:$T2_WORKTREE/scripts/validate/ocean_fidelity/dino_1226"
+test "$(sha256sum "$T2_WORKTREE/scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py" | awk '{print $1}')" = \
+  7eb37dec1ebee1179b1dc7fe79f68325196f15ee84b538b489cfd2c348fb079f
+test "$(sha256sum "$T2_WORKTREE/scripts/validate/ocean_fidelity/dino_1226/climate_rebattery_score.py" | awk '{print $1}')" = \
+  b253cf40bcf27c526c18c6d3c9b08d50674b29af4cb10d68e6b9a88f3e23f424
+test "$(sha256sum "$T2_WORKTREE/scripts/validate/ocean_fidelity/dino_1226/fe_stability_repro.py" | awk '{print $1}')" = \
+  0ea386a3248706a8f40dfd74226a0f3eb1ce905a6a7bf72751ef16bd339718d8
+PYTHONPATH="$T2_PYTHONPATH" JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES='' \
+  JAX_ENABLE_X64=1 "$T2_PYTHON" -m pytest -q \
+  "$T2_WORKTREE/tests/ocean/unit/test_fe_stability_repro.py" \
+  "$T2_WORKTREE/tests/ocean/unit/test_nemo_ab3am4_filter.py" \
+  "$T2_WORKTREE/tests/ocean/unit/test_dino_experiment.py" \
+  "$T2_WORKTREE/tests/ocean/unit/test_climate_rebattery_score.py"
+```
+
+## T2.1 r3 — user GPU FE climate duplicate
+
+This is the certified MLF round-94 climate instrument with one card variable:
+`nemo_dino_kamm`. Both duplicates resolve the newly admitted AB3/AM4 FE
+temporal filter from the shipped card; there is no runtime physics override.
+
+```bash
+set -euo pipefail
+export FP64=1 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both
+T2_TWIN="$T2_WORKTREE/scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py"
+T2_RUN_FP64="$T2_WORKTREE/scripts/validate/ocean_fidelity/dino_1226/run_fp64.py"
+t2_run_climate () {
+  local T2_GPU="$1"
+  local T2_ARM="$2"
+  CUDA_VISIBLE_DEVICES="$T2_GPU" PYTHONPATH="$T2_PYTHONPATH" \
+    "$T2_PYTHON" "$T2_RUN_FP64" "$T2_TWIN" \
+    nemo_dino_kamm "$T2_ROOT/arms/$T2_ARM.npz" \
+    --days 360 --save-3d --snap-days 0,90,360 --fp64-3d \
+    --run-traj "$T2_NEMO/RUN_TRAJ" \
+    --run-stepdump "$T2_NEMO/RUN_STEPDUMP" \
+    --bridge-tke --bridge-before --bridge-before-stress-tpoint \
+    >"$T2_ROOT/logs/$T2_ARM.log" 2>&1
+}
+t2_run_climate 0 fe_climate_r3_a & T2_PID_A=$!
+t2_run_climate 1 fe_climate_r3_b & T2_PID_B=$!
+T2_RC=0
+wait "$T2_PID_A" || T2_RC=1
+wait "$T2_PID_B" || T2_RC=1
+test "$T2_RC" -eq 0
+for T2_ARM in fe_climate_r3_a fe_climate_r3_b; do
+  grep -F "SAVED $T2_ROOT/arms/$T2_ARM.npz  stable=True" \
+    "$T2_ROOT/logs/$T2_ARM.log"
+  sha256sum "$T2_ROOT/arms/$T2_ARM.npz" "$T2_ROOT/logs/$T2_ARM.log"
+done
+```
+
+## T2.2 r3 — user GPU FE wall duplicate
+
+```bash
+set -euo pipefail
+export FP64=1 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both
+t2_run_wall () {
+  local T2_GPU="$1"
+  local T2_ARM="$2"
+  CUDA_VISIBLE_DEVICES="$T2_GPU" PYTHONPATH="$T2_PYTHONPATH" \
+    "$T2_PYTHON" "$T2_RUN_FP64" "$T2_TWIN" \
+    nemo_dino_kamm "$T2_ROOT/arms/$T2_ARM.npz" \
+    --days 5 --save-step-eta \
+    --run-traj "$T2_NEMO/RUN_TRAJ" \
+    --run-stepdump "$T2_NEMO/RUN_STEPDUMP" \
+    --bridge-tke --bridge-before --bridge-before-stress-tpoint \
+    >"$T2_ROOT/logs/$T2_ARM.log" 2>&1
+}
+t2_run_wall 0 fe_wall_r3_a & T2_PID_A=$!
+t2_run_wall 1 fe_wall_r3_b & T2_PID_B=$!
+T2_RC=0
+wait "$T2_PID_A" || T2_RC=1
+wait "$T2_PID_B" || T2_RC=1
+test "$T2_RC" -eq 0
+for T2_ARM in fe_wall_r3_a fe_wall_r3_b; do
+  grep -F "SAVED $T2_ROOT/arms/$T2_ARM.npz  stable=True" \
+    "$T2_ROOT/logs/$T2_ARM.log"
+  sha256sum "$T2_ROOT/arms/$T2_ARM.npz" "$T2_ROOT/logs/$T2_ARM.log"
+done
+```
+
+## T2.3 r3 — unchanged offline scorer
+
+Run only after all four artifacts pass their `stable=True` checks.
+
+```bash
+set -euo pipefail
+T2_SCORE="$T2_ROOT/arms/fe_climate_rebattery_score.json"
+PYTHONPATH="$T2_PYTHONPATH" JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES='' \
+  JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both \
+  "$T2_PYTHON" \
+  "$T2_WORKTREE/scripts/validate/ocean_fidelity/dino_1226/climate_rebattery_score.py" \
+  --climate-a "$T2_ROOT/arms/fe_climate_r3_a.npz" \
+  --climate-b "$T2_ROOT/arms/fe_climate_r3_b.npz" \
+  --wall-a "$T2_ROOT/arms/fe_wall_r3_a.npz" \
+  --wall-b "$T2_ROOT/arms/fe_wall_r3_b.npz" \
+  --nemo-wall "$T2_NEMO_WALL" \
+  --producer-commit "$T2_SHA" \
+  --session-id "$CODEX_SESSION_ID" \
+  --recipe nemo_dino_kamm \
+  --output "$T2_SCORE" | tee "$T2_ROOT/logs/t2_r3_score.log"
+sha256sum "$T2_ROOT/arms/"*.npz "$T2_SCORE" \
+  "$T2_ROOT/arms/fe_climate_rebattery_score_wall_detail.json" \
+  "$T2_ROOT/logs/t2_r3_score.log"
+```
 
 ## T1 cold-start closure receipt
 
@@ -314,15 +446,22 @@ PYTHONPATH="$T1_PYTHONPATH:$T1_WORKTREE/scripts/validate/ocean_fidelity/dino_122
 
 ## Self-audit
 
-- The six GPU commands above were emitted for the human and were not executed
-  in this round. No NEMO, `mpirun`, push, or FE-bisect command was run.
-- Every emitted runner/scorer flag is implemented by the committed parser.
-  There are no empty SLOT values. Missing future artifacts say `NOT_RUN`, and
-  the absent normalizer is explicitly `BUILD_IN_NEMO_AND_NORMALIZER_ROUND`.
+- The T2 r3 GPU commands were emitted for the human and were not executed in
+  this round. The six T1 commands were already running on human-owned GPUs and
+  were not inspected or modified. No GPU, NEMO, `mpirun`, push, or remote
+  command was run by this round.
+- Every emitted T2 and T1 runner/scorer flag is implemented by the committed
+  parser. There are no empty SLOT values. Pending T2 products say
+  `MEASURED_AT_RUN`; the absent T1 normalizer remains explicitly
+  `BUILD_IN_NEMO_AND_NORMALIZER_ROUND`.
 - The T1 runner exposes no restart, bridge, `--run-traj`, or `--run-stepdump`
   flag. All six member output paths are distinct and fail closed if preexisting.
-- T3 remains certified. T2 remains blocked and its withdrawn arms are not
-  re-emitted. The FE registered bisect is future work, as requested.
+- The T2 setup uses the actual auxiliary Git directory and a fresh detached
+  producer. The two climate and two wall paths are distinct; the scorer is
+  gated on their successful completion.
+- T3 remains certified. T2 is re-admitted for r3 but has no science verdict.
+  The strongest CPU claim is only the registered 64-step developed-state
+  runnability statement.
 
 Post future T1/T2 results to GitHub issue #1455 when the human-owned evidence
 trail is updated. No remote action was taken in this round.

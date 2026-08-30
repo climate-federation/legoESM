@@ -136,9 +136,9 @@ card then runs 64 steps under the existing admission gate.
 The strongest allowed statement is
 `PERPETUAL_FE_EULER_COMPOSITION_RUNS_64_STEP_DEVELOPED_STATE_WINDOW`.  It is
 still forbidden to print `FE_FAITHFUL`, `FE_STABLE_CLIMATE`, or a T2 science
-verdict.  T2 climate arms remain withdrawn pending this admission and a later
-GPU rerun.  T1 GPU work is outside this round and must not be inspected or
-modified.
+verdict.  At this preregistration point, T2 climate arms remain withdrawn
+pending this admission and a later GPU rerun.  T1 GPU work is outside this
+round and must not be inspected or modified.
 
 ### Corrector arm result and frozen filter discrimination
 
@@ -180,3 +180,27 @@ confirmation, promote only this filter on `nemo_dino_kamm`, retain the explicit
 scope statement that perpetual Euler has no NEMO trajectory analogue, show the
 plain-filter plant fail by step 37, and require 64 finite steps on the promoted
 card.  Otherwise stop without another stabilization edit.
+
+### Registered result (post-measurement binding)
+
+The one-variable arm **CONFIRMED the admission mechanism**.  This is an
+engineering admission result, not an oracle-fidelity or climate result.
+
+- The plain-filter control fails at outer step 36.  At step 25 its live
+  pressure-gradient tendency is `0.90269 m s-2`, versus frozen slow forcing
+  `3.3084e-5 m s-2` and EEN Coriolis `2.308e-4 m s-2`; its continuity
+  divergence is `22.1698 m s-1`.  By step 29 the live pressure-gradient
+  tendency is `3.478 m s-2` and SSH is `684.48 m`.  The continuity/surface-PGF
+  fast pair therefore owns the onset; slow forcing and Coriolis are subleading.
+- Repeating `mlf_baro_corr` is refuted: that arm still fails at step 37.  Its
+  experimental FE wiring was removed.
+- Changing only `barotropic_time_filter` to `nemo_boxcar_ab3` completes 40
+  steps finite.  The shipped `nemo_dino_kamm` card then completes the frozen
+  64-step gate with no override; at step 64, `|eta|max=0.852169 m`,
+  `|u|max=0.898959 m s-1`, and `|v|max=1.092863 m s-1`.
+
+The admitted default is therefore `nemo_boxcar_ab3` on the perpetual-FE card.
+The result authorizes re-running T2; it does not authorize `FE_FAITHFUL`,
+`FE_STABLE_CLIMATE`, or any T2 statistical verdict.  Because NEMO executes
+Euler only once and then switches to MLF, the permanent-FE card remains a
+NEMO-sourced stabilized approximation with no oracle trajectory analogue.
