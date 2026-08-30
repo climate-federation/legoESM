@@ -1831,6 +1831,10 @@ def main() -> int:
         factors = (loc["wmask3"], loc["_w_u"], loc["_w_v"], loc["quarter"])
 
         def pad_oracle(value):
+            if value.shape[-1] == nlev:
+                return value
+            if value.shape[-1] != nlev - 1:
+                raise SystemExit("round93 W-slope level count changed")
             return np.concatenate(
                 [value, np.zeros_like(value[..., :1])], axis=-1)
 
@@ -1856,7 +1860,7 @@ def main() -> int:
         for name in RAW_DUMPS:
             raw_metrics[name] = {
                 "production": sweep.metrics(
-                    raw[name][..., :35], oracle_raw[name], wmask[..., :35],
+                    raw[name], oracle_raw[name], wmask,
                     FOCUS, POINTWISE_BAR),
                 "oracle_identity": sweep.metrics(
                     oracle_raw[name], oracle_raw[name], wmask[..., :35],
