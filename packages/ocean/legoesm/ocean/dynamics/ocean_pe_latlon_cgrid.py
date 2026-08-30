@@ -1386,7 +1386,7 @@ def _bc_vertical_and_depthmean_velocity(
 
 
 def _nemo_qco_zad_operands(
-    eta_now, eta_before, u, v, z_coord, u_mask_3d, v_mask_3d,
+    eta_now, eta_before, u, v, grid, z_coord, u_mask_3d, v_mask_3d,
     mask_3d, dt, freshwater_eta_tendency=None,
 ):
     """Coupled Kaa-continuity ``ww`` + live Kmm face thickness for ZAD.
@@ -1426,8 +1426,12 @@ def _nemo_qco_zad_operands(
 
     # div_hor(Kbb,Kmm): source-oriented transport differences on the native
     # mesh.  This same flux divergence predicts Kaa SSH and feeds wzv.
-    zu = area_u[..., None] * live_u_raw * u[:, 1:, :] * raw_umask
-    zv = area_v[..., None] * live_v_raw * v[1:, :, :] * raw_vmask
+    # div_hor.F90 uses the edge length, not the face area used by r3u/r3v:
+    # e2u*e3u*u in x and e1v*e3v*v in y.
+    e2u = jnp.asarray(grid.dy_u[:, 1:], dtype=eta_now.dtype)
+    e1v = jnp.asarray(grid.dx_v[1:, :], dtype=eta_now.dtype)
+    zu = e2u[..., None] * live_u_raw * u[:, 1:, :] * raw_umask
+    zv = e1v[..., None] * live_v_raw * v[1:, :, :] * raw_vmask
     west = jnp.roll(zu, 1, axis=1)
     south = jnp.concatenate([jnp.zeros_like(zv[:1]), zv[:-1]], axis=0)
     tmask = jnp.asarray(mask_3d, dtype=eta_now.dtype)
@@ -4211,7 +4215,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                       else eta_before_field.data)
         qco_dt = dt if zad_continuity_dt is None else zad_continuity_dt
         zad_w, zad_h_u, zad_h_v = _nemo_qco_zad_operands(
-            eta, eta_before, u, v, z_coord, u_mask_3d, v_mask_3d,
+            eta, eta_before, u, v, grid, z_coord, u_mask_3d, v_mask_3d,
             mask_3d, qco_dt,
             freshwater_eta_tendency=zad_freshwater_eta_tendency,
         )

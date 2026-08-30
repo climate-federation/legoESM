@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 import jax.numpy as jnp
+from types import SimpleNamespace
 
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _nemo_qco_zad_operands
 from legoesm.ocean.experiments.dino import DINOConfig, dino_config_for_recipe
@@ -38,10 +39,16 @@ def test_qco_zad_pair_matches_source_ordered_oracle():
     vm[-1] = 0.0
     tm = np.ones((nlat, nlon, nlev))
     dt = 5400.0
+    e2u = 1.5 + np.arange(nlat * nlon).reshape(nlat, nlon) / 17
+    e1v = 1.7 + np.arange(nlat * nlon).reshape(nlat, nlon) / 19
+    grid = SimpleNamespace(
+        dy_u=jnp.asarray(np.concatenate([e2u[:, -1:], e2u], axis=1)),
+        dx_v=jnp.asarray(np.concatenate([np.zeros_like(e1v[:1]), e1v], axis=0)),
+    )
 
     ww, hu, hv = _nemo_qco_zad_operands(
         jnp.asarray(eta_now), jnp.asarray(eta_before), jnp.asarray(u),
-        jnp.asarray(v), coord, jnp.asarray(um), jnp.asarray(vm),
+        jnp.asarray(v), grid, coord, jnp.asarray(um), jnp.asarray(vm),
         jnp.asarray(tm), dt)
 
     at = np.asarray(coord.nemo_e1e2t)
@@ -55,8 +62,8 @@ def test_qco_zad_pair_matches_source_ordered_oracle():
     # NEMO carries reference e3 on the closed outer V row; the transport mask
     # zeros that row separately (same operand separation as dom_qco_r3c).
     hv_raw[-1] = h0[-1]
-    zu = au[..., None] * hu_raw * u_native
-    zv = av[..., None] * hv_raw * v_native
+    zu = e2u[..., None] * hu_raw * u_native
+    zv = e1v[..., None] * hv_raw * v_native
     zv[-1] = 0.0
     south = np.concatenate([np.zeros_like(zv[:1]), zv[:-1]], axis=0)
     div = (zu - np.roll(zu, 1, axis=1) + zv - south) / at[..., None]
