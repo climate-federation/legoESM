@@ -846,7 +846,9 @@ def main() -> int:
                 zfw_stored = jnp.maximum(jnp.abs(ff_t), f_floor)
                 zfw_recomputed = jnp.maximum(
                     jnp.abs((jnp.asarray(2.0, dtype=dtype) * omega)
-                            * jnp.sin(rad * lat_t)), f_floor)
+                            # NEMO gphit is degrees and uses rad*gphit;
+                            # LatLonGrid.lat2d is already radians.
+                            * jnp.sin(lat_t)), f_floor)
                 ro_min = jnp.asarray(2.0e3, dtype=dtype)
                 ro_max = jnp.asarray(40.0e3, dtype=dtype)
 
@@ -1053,6 +1055,8 @@ def main() -> int:
         })
     if args.rossby_factorial:
         controls.update({
+            "rossby_latitude_is_radians":
+                float(np.max(np.abs(raw_kappa["lat_t"]))) <= np.pi / 2.0,
             "rossby_production_downstream_red":
                 not rossby_metrics["production"]["row8_8"]["pass"],
             "rossby_direct_oracle_downstream_pass":
