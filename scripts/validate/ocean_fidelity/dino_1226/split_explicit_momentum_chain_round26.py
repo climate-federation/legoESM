@@ -196,7 +196,9 @@ def main() -> int:
 
     identity = _metric(out_u, out_u, umask)["gate_status"] == "AT BAR"
     plant = np.array(out_u, copy=True)
-    point = tuple(np.argwhere(umask)[0])
+    wet_points = np.argwhere(umask)
+    wet_values = np.abs(out_u[umask])
+    point = tuple(wet_points[int(np.argmax(wet_values))])
     for _ in range(4):
         plant[point] = np.nextafter(plant[point], np.inf)
     plant_red = _metric(plant, out_u, umask)["gate_status"] == "DEBT"
