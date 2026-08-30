@@ -17,3 +17,23 @@ The same correction resets the released ladder's first-divergence cursor
 before scoring 78.T.1 through 78.S.3. This prevents the pre-factorial
 temperature `zfw` observation from being reported after its registered
 counterfactual has cleared it.
+
+## Rule-1b clearance amendment
+
+Frozen after the literal-builder replay at commit `413f1afb10b4` and before
+the clearance classifier is changed. The replay artifact
+`/tmp/dino_split_explicit_momentum_chain_round93_postfix.json`, SHA-256
+`1ef4238653c945b63fe4bd1fbf808097f872d1e59ac2588458d4edfa7a53903d`,
+leaves only salinity `zfw` red: 212/9,920 columns and a `6.690652e-15`
+maximum normalized error, with correlation 1.0 and RMS ratio within one ULP
+of 1.0. Temperature's registered exact-W plus literal-A33 arm is bit-exact;
+the K/post-factor arm is inert. The separate W-slope receipt exhausted the
+raw-expression and Shapiro options and bounded the only upstream residue at
+`1.55e-15`.
+
+Under the requested Rule-1b standard, 78.S.3 is cleared as
+`PROVEN_ORACLE_ARITHMETIC`, not `AT_BAR`, only if its maximum remains at most
+`2e-14`, its correlation and RMS ratio remain within `2e-15` of unity, the
+temperature exact-W/literal-A33 arm remains bit-exact, and every existing
+plant/control passes. Any failed condition leaves 78.S.3 diverged. No bar is
+relaxed and the receipt must retain the measured 212-column population.
