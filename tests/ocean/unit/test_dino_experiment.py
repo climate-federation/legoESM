@@ -1706,6 +1706,10 @@ class TestSurfaceTendencyPlacement:
             gm_redi_slope_prd_geometry_stage="current_step",
             gm_redi_slope_prd_evaluation="density_roundtrip",
             gm_redi_slope_face_thickness_evaluation="static_face",
+            # d1cf21b425 made the faithful Redi flux consume raw bridged
+            # NEMO e3t_0.  This generated-grid surface-placement plant has no
+            # such operand, so pin the paired generic flux geometry too.
+            gm_redi_flux_face_thickness_evaluation="tpoint_jacobian",
             gm_redi_slope_depth_evaluation="legacy_jacobian_t_surface",
             # This fixture deliberately does not bridge the raw NEMO EEN
             # coefficient operands.  Keep its unrelated surface-placement

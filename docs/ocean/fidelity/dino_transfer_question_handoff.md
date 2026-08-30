@@ -76,6 +76,8 @@ test "$(sha256sum "$checkout/scripts/validate/ocean_fidelity/dino_1226/mld_clima
   cf1bcffb4ee7994bd4eb433f6b3fa3ba5ac0f2610463b9bb3133ea0c1762dc14
 test "$(sha256sum "$checkout/scripts/validate/ocean_fidelity/dino_1226/recipe_transfer_identity.py" | awk '{print $1}')" = \
   2efe2e9360bb57b2e41cac16b57da548f0a6dda01a469faa9b6ab9b2be31cf67
+test "$(sha256sum "$checkout/tests/ocean/unit/test_dino_experiment.py" | awk '{print $1}')" = \
+  47184f1b8bebcedf78faff9d371d4843c6264e8e751127b9b2e8d7977515dede
 pythonpath="$checkout/packages/core:$checkout/packages/ocean:$checkout/packages/atmosphere:$checkout/packages/coupler:$checkout/packages/ice:$checkout/packages/land:$checkout/packages/ml:$checkout/packages/tools:$checkout:$checkout/scripts/validate/ocean_fidelity/dino_1226"
 cd "$checkout"
 PYTHONPATH="$pythonpath" JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES='' \
@@ -91,6 +93,12 @@ printf '%s\n' "$producer" > "$run_root/receipts/producer_commit.txt"
 printf 'producer=%s session=%s free_tmp_kb=%s\n' \
   "$producer" "$CODEX_SESSION_ID" "$free_kb"
 ```
+
+The prior Block-0 stop was a stale synthetic fixture, not a production
+surface-tendency failure: the generated grid lacked raw NEMO `e3t_0` while
+inheriting the later faithful Redi live-flux selector. The fixture now pins the
+paired generic `tpoint_jacobian` flux geometry. No model code changed; the
+two-sided retention plant and its original thresholds remain intact.
 
 ## T3.1 finding and resolved implementation choice
 

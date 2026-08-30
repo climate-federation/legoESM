@@ -80,9 +80,8 @@ SSH-diffusion term, but the FE approximation requires its historical `0.01`
 MLF-only. The audit also hardens the independently true Nbb/Kaa scope of the
 literal `zad_qco_evaluation` and `wzv_call2_evaluation` pair:
 
-- `nemo_dino_kamm_mlf` retains both `nemo_literal` selectors, so the certified
-  selectors and alpha `0.0`, so the certified MLF and catalog configurations
-  are unchanged;
+- `nemo_dino_kamm_mlf` retains both `nemo_literal` selectors and alpha `0.0`,
+  so the certified MLF and catalog configurations are unchanged;
 - `nemo_dino_kamm` resolves both selectors to `generic` and restores alpha
   `0.01`;
 - model construction rejects a planted literal pair unless
@@ -98,3 +97,23 @@ as previously shipped is not legal on the FE sibling. A corrected FE battery
 can characterize the named sibling card as a bundle, but it cannot claim that
 the MLF-only time-level selectors transferred. T2 remains **NOT RUN / NOT
 SCIENCE-SCORED** until the corrected duplicate arms in the handoff complete.
+
+## Block-0 admission correction
+
+The first rerun stopped in
+`TestSurfaceTendencyPlacement::test_retention_synthetic_violation_both_directions`
+before either registered retention assertion. The production surface-placement
+path had not regressed, and none of the T2 card fences caused the exception.
+The synthetic ten-column fixture inherits the faithful MLF card but has no raw
+bridged NEMO `e3t_0`; commit `d1cf21b425` later promoted
+`gm_redi_flux_face_thickness_evaluation="nemo_qco_live"` without adding the
+matching generic fixture override. The resulting exception was
+`redi_flux_face_thickness_evaluation='nemo_qco_live' requires raw NEMO e3t_0`.
+
+The test setup now pins
+`gm_redi_flux_face_thickness_evaluation="tpoint_jacobian"`, paired with its
+existing synthetic-grid slope and QCO overrides. Production code is unchanged.
+The isolated test passes and still executes both original plants:
+`applied_now` must retain below `0.6`, while `leapfrog_rhs` must retain above
+`0.6`. The complete Block-0 admission suite passes `178/178` after this
+fixture repair.
