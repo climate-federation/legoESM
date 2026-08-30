@@ -1274,7 +1274,8 @@ def main() -> int:
         # the closed path's N^2, via the SAME production function
         n2_closed = np.asarray(compute_buoyancy_frequency_nemo_bn2(
             st["T"], st["S"], jnp.asarray(gd_live, dtype=st["T"].dtype),
-            jnp.asarray(gdw_live, dtype=st["T"].dtype), _NSC(), g=g_slope))
+            jnp.asarray(gdw_live, dtype=st["T"].dtype), _NSC(), g=g_slope,
+            e3w_source="depth_difference"))
         nk2 = min(n2_closed.shape[-1] + 1, nkL)
         same = np.array_equal(pn2_our[:, :, 1:nk2], n2_closed[:, :, :nk2 - 1])
         print(f"      are the two N^2 arrays BIT-IDENTICAL? {same}")
