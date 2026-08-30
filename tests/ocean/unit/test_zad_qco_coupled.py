@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     _nemo_qco_zad_operands,
+    nemo_qco_kmm_velocity_cycle,
     nemo_qco_wzv_operands,
 )
 from legoesm.ocean.experiments.dino import DINOConfig, dino_config_for_recipe
@@ -128,6 +129,32 @@ def test_qco_zad_pair_matches_source_ordered_oracle():
         - puu_b[..., None]
     v_call2 = v_native + vn_adv_native[..., None] * r1v[..., None] \
         - pvv_b[..., None]
+    v_call2 = v_call2 * vm[1:]
+    corrected_u, corrected_v, restored_u, restored_v = (
+        nemo_qco_kmm_velocity_cycle(
+            jnp.asarray(eta_now), jnp.asarray(u), jnp.asarray(v),
+            jnp.asarray(un_adv), jnp.asarray(vn_adv), coord,
+            jnp.asarray(um), jnp.asarray(vm)))
+    np.testing.assert_allclose(
+        np.asarray(corrected_u)[:, 1:], u_call2, rtol=0, atol=2e-16)
+    np.testing.assert_allclose(
+        np.asarray(corrected_v)[1:], v_call2, rtol=0, atol=2e-16)
+    restored_u_expected = (
+        u_call2 - un_adv_native[..., None] * r1u[..., None]
+        + puu_b[..., None])
+    restored_v_expected = (
+        v_call2 - vn_adv_native[..., None] * r1v[..., None]
+        + pvv_b[..., None]) * vm[1:]
+    np.testing.assert_allclose(
+        np.asarray(restored_u)[:, 1:], restored_u_expected,
+        rtol=0, atol=2e-16)
+    np.testing.assert_allclose(
+        np.asarray(restored_v)[1:], restored_v_expected,
+        rtol=0, atol=2e-16)
+    # Planted violation: skipping the execute+undo cycle is algebraically
+    # tempting and measurably wrong in floating-point arithmetic.
+    assert np.any(np.asarray(restored_u)[:, 1:] != u_native)
+    assert np.any(np.asarray(restored_v)[1:] != v_native)
     zu3 = e2u[..., None] * hu_raw * u_call2
     zv3 = e1v[..., None] * hv_raw * v_call2
     zv3[-1] = 0.0

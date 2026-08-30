@@ -605,3 +605,15 @@ correct Kaa operand is final `spg_dump_pssh_final`, not the pre-split
 `ssh_nxt` state: substituting the latter gives SSH normalized RMS
 `7.60141e-6` and maximum/RMS `8.33751e-5`, so the wrong-time-level control
 fires strongly. The momentum tail is released.
+
+## Round 52: momentum tail stops on the cancelling Kmm cycle
+
+Artifact `/tmp/dino_split_explicit_momentum_chain_round52.json` classifies
+`MOMENTUM_TAIL_DIVERGED_KMM_REWRITE_U`. `finalize_lbc` is bit-exact for U/V.
+The first debt is NEMO's centered Kmm execute-and-undo cycle:
+`dynspg_ts.F90:1172-1173` installs the transport mean for tracer advection and
+`stpmlf.F90:787-790` removes it before `dyn_atf_qco`. Skipping the
+algebraically cancelling pair leaves U/V maximum-error-over-NEMO-RMS
+`2.98961e-15/2.81807e-15`; `dyn_atf_qco` inherits the same pointwise maxima.
+The oracle-Kmm filter arm is at bar, so the filter formula is exonerated and
+the cycle arithmetic is the sole local owner.

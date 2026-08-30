@@ -56,6 +56,7 @@ from legoesm.ocean.state import (
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     latlon_cgrid_ocean_baroclinic_tendencies,
     compute_frozen_geom_density,
+    nemo_qco_kmm_velocity_cycle,
     nemo_qco_wzv_operands,
     interp_to_v_points,
     interp_to_v_points_multi,
@@ -5585,7 +5586,8 @@ class LatLonCGridOceanModel:
                 # Transient within-step operand, deliberately outside the
                 # prognostic/restart state tree: NEMO's Kaa SSH immediately
                 # after dyn_spg_ts and before legoESM's global eta projection.
-                _aux = _aux + (_eta_after_spg_literal,)
+                _aux = _aux + (
+                    _eta_after_spg_literal, Hu_avg, Hv_avg)
             return state_new, _aux
         return state_new
 
@@ -9098,7 +9100,7 @@ class LatLonCGridOceanModel:
         # solve; the Nbb diss pass discards its barotropic result.
         state_expl, (K_v_phys, A_v_phys, k33_implicit, surface_tracer_forcing,
                      tke_source, _diss_incr_nn, tracer_source,
-                     kaa_eta_raw) = self._step_impl(
+                     kaa_eta_raw, kaa_hu_avg, kaa_hv_avg) = self._step_impl(
             state, rdt, freshwater=freshwater, surface_forcing=surface_forcing,
             sponge=sponge, _apply_implicit_vmix=False, grid=_grid,
             vertex_mask=vertex_mask, t_seconds=t_seconds,
@@ -9347,9 +9349,21 @@ class LatLonCGridOceanModel:
         #    (residual #2 close).
         def _asselin(now, before, after, m):
             return (now + gamma * (before - 2.0 * now + after)) * m
-        u_f = _asselin(state.u.data, state.u_before.data, naa.u.data, u_mask3)
+        kmm_u, kmm_v = state.u.data, state.v.data
+        _raw_cycle_refs = (
+            "nemo_e3t_0", "nemo_hu_0", "nemo_hv_0", "nemo_e1e2t",
+            "nemo_e1e2u", "nemo_e1e2v",
+        )
+        if (_cfg_b.barotropic.barotropic_after_reconcile
+                == "nemo_mlf_baro_corr"
+                and all(getattr(_zc, name, None) is not None
+                        for name in _raw_cycle_refs)):
+            _, _, kmm_u, kmm_v = nemo_qco_kmm_velocity_cycle(
+                state.eta.data, state.u.data, state.v.data,
+                kaa_hu_avg, kaa_hv_avg, _zc, u_mask3, v_mask3)
+        u_f = _asselin(kmm_u, state.u_before.data, naa.u.data, u_mask3)
         u_f = u_f.at[:, -1].set(u_f[:, 0])
-        v_f = _asselin(state.v.data, state.v_before.data, naa.v.data, v_mask3)
+        v_f = _asselin(kmm_v, state.v_before.data, naa.v.data, v_mask3)
         eta_f = _asselin(state.eta.data, state.eta_before.data,
                          naa.eta.data, cmask)
         # Thickness at the three tracer time levels + the Asselin-filtered ssh.
@@ -9530,7 +9544,7 @@ class LatLonCGridOceanModel:
         _baro_scale = 2
         state_expl, (K_v_phys, A_v_phys, k33_implicit, surface_tracer_forcing,
                      tke_source, diss_incr, tracer_source,
-                     kaa_eta_raw) = self._step_impl(
+                     kaa_eta_raw, kaa_hu_avg, kaa_hv_avg) = self._step_impl(
             state, rdt, freshwater=freshwater, surface_forcing=surface_forcing,
             sponge=sponge, _apply_implicit_vmix=False, grid=_grid,
             vertex_mask=vertex_mask, t_seconds=t_seconds,
@@ -9675,9 +9689,21 @@ class LatLonCGridOceanModel:
         #    extra step is inserted here (see the finalize_lbc docstring note).
         def _asselin(now, before, after, m):
             return (now + gamma * (before - 2.0 * now + after)) * m
-        u_f = _asselin(state.u.data, state.u_before.data, naa.u.data, u_mask3)
+        kmm_u, kmm_v = state.u.data, state.v.data
+        _raw_cycle_refs = (
+            "nemo_e3t_0", "nemo_hu_0", "nemo_hv_0", "nemo_e1e2t",
+            "nemo_e1e2u", "nemo_e1e2v",
+        )
+        if (_cfg_b.barotropic.barotropic_after_reconcile
+                == "nemo_mlf_baro_corr"
+                and all(getattr(_zc, name, None) is not None
+                        for name in _raw_cycle_refs)):
+            _, _, kmm_u, kmm_v = nemo_qco_kmm_velocity_cycle(
+                state.eta.data, state.u.data, state.v.data,
+                kaa_hu_avg, kaa_hv_avg, _zc, u_mask3, v_mask3)
+        u_f = _asselin(kmm_u, state.u_before.data, naa.u.data, u_mask3)
         u_f = u_f.at[:, -1].set(u_f[:, 0])
-        v_f = _asselin(state.v.data, state.v_before.data, naa.v.data, v_mask3)
+        v_f = _asselin(kmm_v, state.v_before.data, naa.v.data, v_mask3)
         eta_f = _asselin(state.eta.data, state.eta_before.data,
                          naa.eta.data, cmask)
         _mwc = _cfg_b.min_water_column_m

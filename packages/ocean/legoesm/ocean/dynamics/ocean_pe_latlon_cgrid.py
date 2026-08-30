@@ -55,6 +55,7 @@ from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
     compute_layer_thickness,
     compute_ocean_jacobian,
+    nemo_qco_live_face_geometry_from_operands,
     nemo_qco_live_face_thicknesses,
 )
 from legoesm.ocean.state import (
@@ -1385,6 +1386,86 @@ def _bc_vertical_and_depthmean_velocity(
     return h_u, h_v, flux_div_k, w, u_prime, v_prime
 
 
+def nemo_qco_kmm_velocity_cycle(
+    eta_now, u, v, un_adv, vn_adv, z_coord, u_mask_3d, v_mask_3d,
+):
+    """Execute and undo DINO's transient Kmm barotropic rewrite.
+
+    ``dynspg_ts.F90:1170-1174`` installs the transport-weighted barotropic
+    velocity before tracer advection.  Centered MLF then removes that exact
+    increment at ``stpmlf.F90:781-789`` before ``dyn_atf_qco``.  The two
+    operations cancel algebraically but not bitwise; round 52 measured the
+    skipped cycle at the pointwise bar.  Return both the tracer-entry
+    ``corrected`` values and the post-removal ``restored`` values.
+    """
+    if not isinstance(z_coord, OceanPartialCellCoordinate):
+        raise ValueError(
+            "literal Kmm velocity cycle requires an "
+            "OceanPartialCellCoordinate carrying the raw NEMO QCO mesh")
+    refs = tuple(getattr(z_coord, name, None) for name in (
+        "nemo_e3t_0", "nemo_hu_0", "nemo_hv_0", "nemo_e1e2t",
+        "nemo_e1e2u", "nemo_e1e2v",
+    ))
+    if any(value is None for value in refs):
+        raise ValueError(
+            "literal Kmm velocity cycle requires raw NEMO e3t_0, "
+            "hu_0/hv_0, and e1e2t/e1e2u/e1e2v operands")
+    e3t0, hu0, hv0, area_t, area_u, area_v = (
+        jnp.asarray(value, dtype=eta_now.dtype) for value in refs)
+    nlev = u.shape[-1]
+    e3t0 = e3t0[..., :nlev]
+    raw_umask = jnp.asarray(u_mask_3d[:, 1:, :], dtype=eta_now.dtype)
+    raw_vmask = jnp.asarray(v_mask_3d[1:, :, :], dtype=eta_now.dtype)
+    geom = nemo_qco_live_face_geometry_from_operands(
+        eta_now, e3t0, e3t0, raw_umask, raw_vmask,
+        hu0, hv0, area_t, area_u, area_v)
+    un_adv = jnp.asarray(un_adv, dtype=eta_now.dtype)
+    vn_adv = jnp.asarray(vn_adv, dtype=eta_now.dtype)
+    if un_adv.shape != u.shape[:2] or vn_adv.shape != v.shape[:2]:
+        raise ValueError(
+            "Kmm transport shapes must match the redundant U/V layouts; "
+            f"got {un_adv.shape}/{vn_adv.shape} versus "
+            f"{u.shape[:2]}/{v.shape[:2]}")
+
+    b = jax.lax.optimization_barrier
+    u_native = u[:, 1:, :]
+    v_native = v[1:, :, :]
+    puu_b = jnp.zeros_like(eta_now)
+    pvv_b = jnp.zeros_like(eta_now)
+    for jk in range(nlev):
+        puu_b = b(
+            puu_b + geom.e3u[..., jk] * u_native[..., jk]
+            * raw_umask[..., jk])
+        pvv_b = b(
+            pvv_b + geom.e3v[..., jk] * v_native[..., jk]
+            * raw_vmask[..., jk])
+    wet_u = (hu0 > 0.0).astype(eta_now.dtype)
+    wet_v = (hv0 > 0.0).astype(eta_now.dtype)
+    puu_b = b(puu_b * geom.r1_hu) * wet_u
+    pvv_b = b(pvv_b * geom.r1_hv) * wet_v
+    target_u = b(un_adv[:, 1:] * geom.r1_hu)
+    target_v = b(vn_adv[1:, :] * geom.r1_hv)
+    corrected_u_native = b(
+        b(u_native + target_u[..., None]) - puu_b[..., None]) * raw_umask
+    corrected_v_native = b(
+        b(v_native + target_v[..., None]) - pvv_b[..., None]) * raw_vmask
+    restored_u_native = b(
+        b(corrected_u_native - target_u[..., None])
+        + puu_b[..., None]) * raw_umask
+    restored_v_native = b(
+        b(corrected_v_native - target_v[..., None])
+        + pvv_b[..., None]) * raw_vmask
+
+    def u_layout(native):
+        return jnp.concatenate([native[:, -1:, :], native], axis=1)
+
+    def v_layout(native):
+        return jnp.concatenate([jnp.zeros_like(native[:1]), native], axis=0)
+
+    return (u_layout(corrected_u_native), v_layout(corrected_v_native),
+            u_layout(restored_u_native), v_layout(restored_v_native))
+
+
 def nemo_qco_wzv_operands(
     eta_now, eta_before, u, v, grid, z_coord, u_mask_3d, v_mask_3d,
     mask_3d, dt, freshwater_eta_tendency=None, eta_after_override=None,
@@ -1429,67 +1510,9 @@ def nemo_qco_wzv_operands(
             raise ValueError(
                 "transport_after_override is a WZV call-2 operand and "
                 "requires eta_after_override")
-        un_adv, vn_adv = (
-            jnp.asarray(value, dtype=eta_now.dtype)
-            for value in transport_after_override)
-        if un_adv.shape != u.shape[:2] or vn_adv.shape != v.shape[:2]:
-            raise ValueError(
-                "call-2 transport shapes must match the redundant U/V "
-                f"layouts; got {un_adv.shape}/{vn_adv.shape} versus "
-                f"{u.shape[:2]}/{v.shape[:2]}")
-
-        # dynspg_ts.F90:1170-1174, on the native east/north face arrays:
-        #   u(Kmm) += un_adv*r1_hu(Kmm) - puu_b(Kmm)
-        # r1_hu/r1_hv are the independently associated dom_qco reciprocals;
-        # puu_b/pvv_b use istate.F90's source-left vertical accumulation.
-        one = jnp.asarray(1.0, dtype=eta_now.dtype)
-        half = jnp.asarray(0.5, dtype=eta_now.dtype)
-        weighted_eta = jax.lax.optimization_barrier(area_t * eta_now)
-        num_u = jax.lax.optimization_barrier(
-            half * jax.lax.optimization_barrier(
-                weighted_eta + jnp.roll(weighted_eta, -1, axis=1)))
-        num_v = jax.lax.optimization_barrier(
-            half * jax.lax.optimization_barrier(
-                weighted_eta + jnp.roll(weighted_eta, -1, axis=0)))
-        wet_u = (_hu0 > 0.0).astype(eta_now.dtype)
-        wet_v = (_hv0 > 0.0).astype(eta_now.dtype)
-        r1_hu0 = jax.lax.optimization_barrier(
-            wet_u / (_hu0 + one - wet_u))
-        r1_hv0 = jax.lax.optimization_barrier(
-            wet_v / (_hv0 + one - wet_v))
-        r1_area_u = jax.lax.optimization_barrier(one / area_u)
-        r1_area_v = jax.lax.optimization_barrier(one / area_v)
-        r3u = jax.lax.optimization_barrier(
-            jax.lax.optimization_barrier(num_u * r1_hu0) * r1_area_u)
-        r3v = jax.lax.optimization_barrier(
-            jax.lax.optimization_barrier(num_v * r1_hv0) * r1_area_v)
-        r1_hu = jax.lax.optimization_barrier(
-            r1_hu0 / jax.lax.optimization_barrier(one + r3u))
-        r1_hv = jax.lax.optimization_barrier(
-            r1_hv0 / jax.lax.optimization_barrier(one + r3v))
-
-        u_native = u[:, 1:, :]
-        v_native = v[1:, :, :]
-        puu_b = jnp.zeros_like(eta_now)
-        pvv_b = jnp.zeros_like(eta_now)
-        for jk in range(nlev):
-            puu_b = jax.lax.optimization_barrier(
-                puu_b + live_u_raw[..., jk] * u_native[..., jk]
-                * raw_umask[..., jk])
-            pvv_b = jax.lax.optimization_barrier(
-                pvv_b + live_v_raw[..., jk] * v_native[..., jk]
-                * raw_vmask[..., jk])
-        puu_b = jax.lax.optimization_barrier(puu_b * r1_hu) * wet_u
-        pvv_b = jax.lax.optimization_barrier(pvv_b * r1_hv) * wet_v
-        target_u = jax.lax.optimization_barrier(un_adv[:, 1:] * r1_hu)
-        target_v = jax.lax.optimization_barrier(vn_adv[1:, :] * r1_hv)
-        u_native = jax.lax.optimization_barrier(
-            u_native + target_u[..., None] - puu_b[..., None]) * raw_umask
-        v_native = jax.lax.optimization_barrier(
-            v_native + target_v[..., None] - pvv_b[..., None]) * raw_vmask
-        u = jnp.concatenate([u_native[:, -1:, :], u_native], axis=1)
-        v = jnp.concatenate(
-            [jnp.zeros_like(v_native[:1]), v_native], axis=0)
+        u, v, _, _ = nemo_qco_kmm_velocity_cycle(
+            eta_now, u, v, *transport_after_override, z_coord,
+            u_mask_3d, v_mask_3d)
 
     # NEMO native U/V arrays store the east/north face of each T cell.  Map
     # once to legoESM's redundant west/south face layout for dynzad.
