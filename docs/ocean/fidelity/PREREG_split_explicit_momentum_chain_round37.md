@@ -42,3 +42,19 @@ components. The failed legacy whole-ZDF top/bottom control is explicitly
 unreachable from this scoped measurement and is not weakened or copied. No
 SLOT is allocated: all NEMO streams already exist; only a CPU scorer is
 required.
+
+## Pre-run implementation amendment: held twin capture and exact order
+
+Frozen before any round-37 capture. Enumeration found that the retained
+deterministic-writer stack already contains D03--D06 for both U and V, plus
+the dedicated `keg`, `zad`, `vor`, `ldf`, and `hpg` increment streams. No new
+NEMO writer is justified. The held cascade therefore builds and runs a
+deterministic CPU twin-diagnostic producer twice, brackets its byte-identical
+captures, then scores against those existing full-halo streams.
+
+The earlier shorthand placing the `adv+hpg` group first is superseded by this
+source-ordered exact ladder: (1) vertical-advection/ZAD, the separately
+comparable part of `dyn_adv`; (2) vorticity/Coriolis; (3) lateral friction;
+(4) the KE-gradient+HPG group at the `dyn_hpg` closure point; (5) D06 total.
+The individual KEG and HPG partitions remain diagnostic partials. This is a
+clarification of the registered bundle constraint, not a changed bar.
