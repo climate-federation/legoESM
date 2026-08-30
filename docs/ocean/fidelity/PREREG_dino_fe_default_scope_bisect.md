@@ -62,3 +62,80 @@ The strongest allowed result is:
 
 It is forbidden to print `FE_FAITHFUL`, `FE_STABLE_CLIMATE`, or a T2 fidelity
 verdict from this lane.
+
+## User-authorized continuation: perpetual-Euler split coupling
+
+Frozen 2026-08-30 before adding operand dumps or changing the FE step.  The
+original selector bisection stopped correctly: `ALL_RESTORED` and the clean
+pre-#1696 control both fail, so #1696 did not cause the instability.  The user
+has now explicitly opened the pre-existing FE defect as a work item.  This
+continuation does not reuse the refuted selector premise.
+
+### Executed oracle branch
+
+The reference is the built DINO override, not generic NEMO prose:
+
+- `RUN_TRAJ/namelist_cfg:94,101` selects `nn_it000=1` and a from-rest start;
+  `:351-353` selects split-explicit, `ln_bt_fw=.false.`, with the in-file
+  warning that the forward barotropic branch crashes.
+- `src/OCE/DOM/istate.F90:107-110,121-137` sets `l_1st_euler=.true.`, starts
+  velocity from rest, and makes `Kbb == Kmm`.
+- `cfgs/DINO/MY_SRC/stpmlf.F90:134-137` uses `rDt=rn_Dt` on that first step;
+  `:332` calls `dyn_spg`; `:578` calls `mlf_baro_corr` without excluding the
+  Euler step; only `:685-688` clears `l_1st_euler` and restores `2*rn_Dt`.
+- `cfgs/DINO/MY_SRC/dynspg_ts.F90:241-268` gives the first step forward
+  averaging weights and resets them to centred weights on step two;
+  `:561-579` still takes the `ln_bt_fw=.false.` seed branch (the initial
+  `Kbb==Kmm` makes the first seed degenerate); `:1123-1127` couples the
+  barotropic increment back into the 3-D RHS.
+
+Therefore NEMO provides exactly one Euler outer step, and that step still runs
+the after-vertical-solve barotropic corrector.  It provides no perpetual-Euler
+oracle trajectory.  A perpetual-Euler legoESM card can at most repeat the
+executed Euler-step composition as a stabilized approximation; it cannot be
+called NEMO-faithful.
+
+### Frozen diagnosis
+
+Extend the committed CPU reproducer, without duplicating model numerics, to
+wrap the production barotropic call and record outer steps 25--35.  For each
+step record maxima and locations for the step-entry and barotropic-output
+`eta/u/v`, the frozen `F_slow_eta/u/v`, and the column-mean velocity immediately
+before and after the implicit vertical solve.  Record the after-solve
+column-mean deposit and its work proxy `max_abs(after_mean-target_mean)`.  A
+planted one-cell perturbation of the captured target must make the deposit
+detector fire.
+
+The baseline is the current `nemo_dino_kamm` card and must reproduce failure in
+steps 32--37.  The sole causal arm repeats NEMO's executed first-Euler-step
+composition on every perpetual-FE step: apply the existing shared
+`mlf_baro_corr` kernel after the implicit vertical solve, targeting the
+barotropic solver's primary velocity average.  No coefficient, substep count,
+forcing, bridge, ladder, or other selector changes.  This arm confirms the
+missing-corrector mechanism only if:
+
+1. baseline growth is already present in the after-solve column-mean deposit;
+2. the arm removes that deposit at the same recorded steps;
+3. the arm completes 40 steps finite while baseline fails; and
+4. reverting only the call site makes the new N-step regression test fail.
+
+If any condition fails, do not ship the corrector as an FE stabilization.
+Instead record the observed leading operand and open a new one-variable arm
+before another physics edit.
+
+### Frozen disposition and bars
+
+On confirmation, the `nemo_dino_kamm` recipe selects the same existing
+`nemo_mlf_baro_corr` policy and the forward-Euler dispatch executes it every
+step at NEMO's source position.  The MLF card remains unchanged.  The committed
+regression gate runs 40 developed-state CPU steps in fp64/no-JIT and requires
+all prognostic arrays finite; its non-vacuity control disables only the FE
+corrector and must reproduce the registered failure by step 37.  The final
+card then runs 64 steps under the existing admission gate.
+
+The strongest allowed statement is
+`PERPETUAL_FE_EULER_COMPOSITION_RUNS_64_STEP_DEVELOPED_STATE_WINDOW`.  It is
+still forbidden to print `FE_FAITHFUL`, `FE_STABLE_CLIMATE`, or a T2 science
+verdict.  T2 climate arms remain withdrawn pending this admission and a later
+GPU rerun.  T1 GPU work is outside this round and must not be inspected or
+modified.
