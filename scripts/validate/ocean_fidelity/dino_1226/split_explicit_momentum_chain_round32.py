@@ -53,7 +53,9 @@ def _load_trace(path: Path, icycle: int, jpj: int, jpi: int, hls: int) -> np.nda
     return full[:, hls:-hls, hls:-hls]
 
 
-def _capture_production_trace(output: Path, n_loop: int) -> tuple[np.ndarray, ...]:
+def _capture_production_trace(
+    output: Path, n_loop: int,
+) -> tuple[tuple[np.ndarray, ...], bool]:
     real_fori = jax.lax.fori_loop
     captures: list[tuple[Any, Any, Any]] = []
 
@@ -80,12 +82,28 @@ def _capture_production_trace(output: Path, n_loop: int) -> tuple[np.ndarray, ..
         jax.lax.fori_loop = real_fori
     if jax.lax.fori_loop is not real_fori:
         raise SystemExit("jax.lax.fori_loop restoration failed")
-    if len(captures) != 2:
+    capture_receipt = json.loads(output.read_text())
+    if capture_receipt.get("entry_counts") != {
+            "forcing_only": 3, "forcing_and_seed": 3}:
         raise SystemExit(
-            f"expected forcing-only and forcing+seed outer traces, got {len(captures)}")
-    # Round 6 executes forcing_only first. The second capture is its
-    # forcing+seed restoration/control arm.
-    return tuple(np.asarray(jax.device_get(value)) for value in captures[0])
+            "round-6 barotropic entry count changed: "
+            f"{capture_receipt.get('entry_counts')}")
+    if len(captures) != 6:
+        raise SystemExit(
+            "expected three forcing-only and three forcing+seed outer traces, "
+            f"got {len(captures)}")
+    converted = [
+        tuple(np.asarray(jax.device_get(value)) for value in trace)
+        for trace in captures
+    ]
+    # Per arm, spg_substep_chain executes: the seeded production pass, the
+    # discarded dissipative pass, then a direct seeded replay for STAGE 3.
+    # The first and third forcing-only trajectories must be byte-identical;
+    # this both selects the correct pass and controls the interception.
+    seeded_repeat_exact = all(
+        np.array_equal(converted[0][index], converted[2][index])
+        for index in range(3))
+    return converted[0], seeded_repeat_exact
 
 
 def main() -> int:
@@ -136,7 +154,7 @@ def main() -> int:
         "u": _load_trace(on / TRACE_NAMES[1], icycle, jpj, jpi, hls),
         "v": _load_trace(on / TRACE_NAMES[2], icycle, jpj, jpi, hls),
     }
-    eta_trace, u_trace, v_trace = _capture_production_trace(
+    (eta_trace, u_trace, v_trace), seeded_repeat_exact = _capture_production_trace(
         Path("/tmp/dino_split_explicit_momentum_chain_round32_capture.json"),
         icycle)
     production = {
@@ -188,6 +206,7 @@ def main() -> int:
     controls.update({
         "bracket_exact": bracket_ok,
         "fori_loop_restored": True,
+        "seeded_repeat_exact": seeded_repeat_exact,
         "substep1_entry_bound": bound_ok,
         "last_start_finite": all(np.isfinite(value[-1]).all()
                                  for value in production.values()),
@@ -195,7 +214,7 @@ def main() -> int:
     if not all(controls[name] for name in (
             "identity_at_bar", "four_nextafter_fires", "zero_shift_best",
             "bracket_exact", "fori_loop_restored", "substep1_entry_bound",
-            "last_start_finite")):
+            "seeded_repeat_exact", "last_start_finite")):
         disposition = "INVALID"
     elif first_strict["ssh"] is None:
         disposition = "NO_STRICT_SSH_FAILURE"
