@@ -29,7 +29,9 @@ from legoesm.ocean.vertical import compute_layer_thickness
 
 
 ROUND54_SHA = "a1b76177330b83d7bb21c7f35c9e606d10d36a4b98d46b3b570f53588188eaa3"
-ROUND56_SHA = "d8c71c02792250ee85973a8c713260e61f7c6b240c9231d666fcdd62772fc86b"
+# 2026-08-30 round-58 population correction: supersedes the invalid
+# e3u!=0 round-56 admission hash; same production arm on exact NEMO umask.
+ROUND56_SHA = "c114565363360439e155deec96882828e553887ba49b1bfbfd940c50c6998e29"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
