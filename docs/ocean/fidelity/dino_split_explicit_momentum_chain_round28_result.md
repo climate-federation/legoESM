@@ -141,3 +141,33 @@ This is an ordered-gate release, not a relabeling of the row-3 NEAR-CLASS
 pointwise statistic or a relaxation of its bar. The next executable registry
 row is row 4 (`dyn_zdf`), followed by row 5 (`wzv`), row 6
 (`mlf_baro_corr`), the free-surface filter, momentum RHS, and tracer tail.
+
+## Round-33 row-4 stop
+
+The existing-dump oracle-input bracket is
+`/tmp/dino_split_explicit_momentum_chain_round33_row4.json`, SHA-256
+`20ebb1d9921b7ec6f7eb9b90c1da73278a89e7a16f38b94ab52860a046724b01`.
+It runs at commit `0248c9e2eea1e1da635be3827b83bfa6cb061c68`, admits the
+retained 197-stream producer by hash, and passes null-substitution,
+restoration, identity, zero-shift, and `2x` accumulating-bar planted controls.
+
+The corrected S17 reconstruction selects `rDt=5400 s` and reproduces both
+NEMO level-1 pre-stress operands bit-exactly; `2700 s` and zero are loudly
+red. With NEMO's own complete reconstructed pre-solve velocity and its own
+level-1 stress deposit fed into production, row 4 remains DEBT:
+
+| component | correlation | RMS ratio | normalized RMS | maximum/NEMO RMS |
+|---|---:|---:|---:|---:|
+| U | 0.999096543 | 0.998653233 | 4.23660e-2 | 1.70751 |
+| V | 0.999909746 | 1.000511732 | 1.33967e-2 | 0.569806 |
+
+The residual is primarily baroclinic and non-bottom: U/V non-bottom
+normalized RMS is `4.2417e-2`/`1.3438e-2`, versus
+`1.0664e-3`/`1.2100e-3` at the bottom wet cells. This rules out a sole
+bottom-drag owner. Conversely, the previously bound ZDF chain-end row-31
+receipt proves the production `nemo_literal` matrix and ordered Thomas kernel
+are `0/9758` U and `0/9868` V when fed the oracle operand pack. The remaining
+owned interval is therefore the full-step assembly/routing of one or more
+dispatch operands (`rhs`, `avm` face coefficient, `e3{u,v}(Kaa)`,
+`e3{uw,vw}(Kmm)`, wet mask, or drag diagonal), not the literal solver kernel.
+Rows 5 onward remain `ORDERED-BLOCKED` at row 4.
