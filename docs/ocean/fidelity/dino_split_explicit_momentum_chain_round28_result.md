@@ -390,3 +390,24 @@ registered row-5 check is the post-dyn_zdf call-2 recurrence. Capturing the
 corresponding production post-ZDF W state is the next held instrumentation
 boundary. Row 6 and the free-surface-filter, momentum-RHS, and tracer-tail
 chains remain ordered-blocked; no call-1 result is relabelled as call 2.
+
+## Round 41 held: post-`dyn_zdf` WZV call 2
+
+Round 41 preregisters the distinct row-5 boundary at NEMO
+`stpmlf.F90:396,411-412,578` and the QCO bottom-up recurrence at
+`sshwzv.F90:198-228`. The existing full-halo
+`wzv_dump_ww_call2.bin` is reused; call 1 is retained only as the wrong-order
+control. No new NEMO writer is needed. The canonical call-pair writer's unit
+9103 is admitted by a whole-tree collision scan, including the mirrored
+DINO/DINO_DBG MY_SRC/WORK copies.
+
+The legoESM instrument executes the committed single-pass `_nemo_mlf_step`
+verification path, captures each native `(199,52,37)` interface-W assembly,
+and selects the unique array whose adjacent-interface average is byte-exact
+with the `(199,52,36)` W state observed at the post-implicit-solve,
+pre-`mlf_baro_corr` boundary. This closes the time-boundary receipt without
+padding an interior array. Two fresh CPU captures, a byte-exact bracket, and
+the registered accumulating `1e-12` score are held in the round-41 SLOT
+handoff. Until that official receipt runs, row 5 stays open and row 6 plus
+the later free-surface, momentum-RHS, and tracer-tail chains stay
+ordered-blocked.
