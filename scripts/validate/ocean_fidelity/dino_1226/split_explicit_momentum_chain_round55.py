@@ -39,6 +39,7 @@ ROUND61_SHA = "b8f7a376a0a13fd384cb4195cf27db8ff6f82c71e576bb8d449451903d3bd07c"
 ROUND62_SHA = "290caa5bb3c3187d5ea13fe62276f299bd47953b556615dfab3f4443d1597a86"
 ROUND63_SHA = "3a1a25ca328761b1bcbeb87953751a3a15b1ac00852b2ff62fd4223d107d24e0"
 ROUND64_SHA = "8858d60a51b07181e290fead087e4bab69c0d15e271bbdecb7d458ba12d4e4c7"
+ROUND65_SHA = "6b4a80ddaf020916770dd0eb0005a6ce9dd69ffe79a6604a0e2125cfbadf4c60"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -61,6 +62,13 @@ BOLUS_HELD_SHA = {
     "eiv_dump_psi_uw.bin": "feb5ba7a1e4882cb43c71db049fb78ecd2e2301c9573777bf5a0e1738518101b",
     "eiv_dump_wslpi.bin": "e3073a8501e8046732e301d58781dcaf35a6a84d9071309353b3de0bad08fb64",
     "eiv_dump_aeiu.bin": "8146cf02d33e8013bf240623948b42bd8b2cda8ee15c11847393ad298a5a60e8",
+}
+KAPPA_HELD_SHA = {
+    "eiv_dump_zn.bin": "8d4f9557f62803af99f5ff03eb2d980bbe161b03ff37093f05a03d89e64e985b",
+    "eiv_dump_zah.bin": "f40b23c4ab54544b8663699c2011e7709239afebd235e930824225bd3167810c",
+    "eiv_dump_zhw.bin": "60b23de68ef7eff2219725a3b1f0abf732b2dc78879c7097cf58cca0e6a8260f",
+    "eiv_dump_zRo.bin": "b2465f3e63f1ea4332a8fda2bb4785b45577f8cc939cf5957d6497600a9e0b24",
+    "eiv_dump_zaeiw.bin": "adc570d4d7e385ebe54f7cef0e249e391c6b5eb193acbd4315feb50cf035db44",
 }
 FOCUS = [(11, 1), (12, 1), (13, 1), (13, 23)]
 POINTWISE_BAR = 1.0e-15
@@ -90,6 +98,13 @@ def _load(path: Path) -> np.ndarray:
     return np.moveaxis(raw.reshape(35, 203, 56)[:, 2:-2, 2:-2], 0, -1)
 
 
+def _load2(path: Path) -> np.ndarray:
+    raw = np.fromfile(path, dtype="<f8")
+    if raw.size != 203 * 56:
+        raise SystemExit(f"{path}: full-halo 2-D writer contract changed")
+    return raw.reshape(203, 56)[2:-2, 2:-2]
+
+
 def _controls(oracle: np.ndarray, wet: np.ndarray, bar: float) -> dict:
     identity = sweep.metrics(oracle, oracle, wet, FOCUS, bar)
     point = np.array(oracle, copy=True)
@@ -116,12 +131,14 @@ def main() -> int:
     parser.add_argument("--round62", type=Path)
     parser.add_argument("--round63", type=Path)
     parser.add_argument("--round64", type=Path)
+    parser.add_argument("--round65", type=Path)
     parser.add_argument("--hold-slow-forcing", action="store_true")
     parser.add_argument("--oracle-transport", action="store_true")
     parser.add_argument("--capture-cycle", action="store_true")
     parser.add_argument("--direct-cycle-entry", action="store_true")
     parser.add_argument("--live-thickness-entry", action="store_true")
     parser.add_argument("--capture-bolus-operands", action="store_true")
+    parser.add_argument("--capture-kappa-operands", action="store_true")
     parser.add_argument("--raw-artifact", type=Path, required=True)
     parser.add_argument("--nemo-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -231,6 +248,22 @@ def main() -> int:
             raise SystemExit("round 64 does not release the bolus operand peel")
     elif args.round64 is not None:
         raise SystemExit("--round64 requires --capture-bolus-operands")
+    prior65 = None
+    if args.capture_kappa_operands:
+        if not args.capture_bolus_operands:
+            raise SystemExit(
+                "--capture-kappa-operands requires --capture-bolus-operands")
+        if (args.round65 is None
+                or _sha(args.round65.resolve()) != ROUND65_SHA):
+            raise SystemExit("official round-65 aeiu receipt required")
+        prior65 = json.loads(args.round65.read_text())
+        if (prior65.get("disposition") != "ROW8_8_LOCALIZED_TO_AEIU_OPERAND"
+                or prior65["bolus_operand_metrics"]["aeiu_face"]["pass"]
+                or not prior65["bolus_operand_metrics"]
+                    ["wslpi_kp1_face_sum"]["pass"]):
+            raise SystemExit("round 65 does not release the kappa ladder")
+    elif args.round65 is not None:
+        raise SystemExit("--round65 requires --capture-kappa-operands")
     if _sha(args.raw_artifact.resolve()) != RAW_ARTIFACT_SHA:
         raise SystemExit("admitted held row-8 artifact changed")
     held = args.held_dir.resolve()
@@ -241,6 +274,10 @@ def main() -> int:
         for name, expected in BOLUS_HELD_SHA.items():
             if not (held / name).is_file() or _sha(held / name) != expected:
                 raise SystemExit(f"held GM operand changed: {name}")
+    if args.capture_kappa_operands:
+        for name, expected in KAPPA_HELD_SHA.items():
+            if not (held / name).is_file() or _sha(held / name) != expected:
+                raise SystemExit(f"held GM coefficient operand changed: {name}")
 
     set_policy(PrecisionPolicy.fp64())
     if jax.default_backend() != "cpu" or not jax.config.jax_enable_x64:
@@ -260,6 +297,7 @@ def main() -> int:
     cycle_captures = []
     thickness_captures = []
     bolus_captures = []
+    kappa_captures = []
     held_u_native = np.fromfile(held / "spg_dump_zu_frc.bin", dtype="<f8")
     held_v_native = np.fromfile(held / "spg_dump_zv_frc.bin", dtype="<f8")
     if held_u_native.size != 199 * 52 or held_v_native.size != 199 * 52:
@@ -326,6 +364,7 @@ def main() -> int:
         return result
 
     original_bolus = gm_module.nemo_eiv_bolus_transport
+    original_kappa = gm_module.compute_treguier_kappa_gm_nemo_native
 
     def observed_bolus(*bolus_args, **bolus_kwargs):
         result = original_bolus(*bolus_args, **bolus_kwargs)
@@ -337,6 +376,17 @@ def main() -> int:
         ))
         return result
 
+    def observed_kappa(*kappa_args, **kappa_kwargs):
+        result = original_kappa(*kappa_args, **kappa_kwargs)
+        diagnostic_kwargs = dict(kappa_kwargs)
+        diagnostic_kwargs["return_diagnostics"] = True
+        replay, diagnostics = original_kappa(
+            *kappa_args, **diagnostic_kwargs)
+        kappa_captures.append((
+            np.asarray(result), np.asarray(replay),
+            {name: np.asarray(value) for name, value in diagnostics.items()}))
+        return result
+
     model_module.add_bolus_to_advecting_flux = observe
     if args.hold_slow_forcing:
         model_module.barotropic_substeps_latlon_cgrid = held_solver
@@ -346,6 +396,8 @@ def main() -> int:
         model_module.nemo_qco_live_face_thicknesses = observed_thickness
     if args.capture_bolus_operands:
         gm_module.nemo_eiv_bolus_transport = observed_bolus
+    if args.capture_kappa_operands:
+        gm_module.compute_treguier_kappa_gm_nemo_native = observed_kappa
     try:
         with jax.disable_jit():
             model._nemo_mlf_step(state, twin.DT, surface_forcing=sf)
@@ -355,12 +407,16 @@ def main() -> int:
         model_module.nemo_qco_kmm_velocity_cycle = original_cycle
         model_module.nemo_qco_live_face_thicknesses = original_thickness
         gm_module.nemo_eiv_bolus_transport = original_bolus
+        gm_module.compute_treguier_kappa_gm_nemo_native = original_kappa
     restored = (model_module.add_bolus_to_advecting_flux is original
                 and model_module.barotropic_substeps_latlon_cgrid is original_solver
                 and model_module.nemo_qco_kmm_velocity_cycle is original_cycle
                 and model_module.nemo_qco_live_face_thicknesses
                 is original_thickness
                 and gm_module.nemo_eiv_bolus_transport is original_bolus)
+    restored = (restored
+                and gm_module.compute_treguier_kappa_gm_nemo_native
+                is original_kappa)
     if len(captured) != 1:
         raise SystemExit(f"expected one single-pass tracer handoff, got {len(captured)}")
 
@@ -500,6 +556,32 @@ def main() -> int:
             "factorial_own_slope_oracle_aeiu": bm(own_oracle_aeiu),
             "factorial_oracle_slope_oracle_aeiu": bm(oracle_both),
         }
+    kappa_operand_metrics = {}
+    if args.capture_kappa_operands:
+        if len(kappa_captures) != 1:
+            raise SystemExit(
+                f"expected one Treguier coefficient call, got {len(kappa_captures)}")
+        kappa_result, kappa_replay, diagnostics = kappa_captures[0]
+        if not np.array_equal(kappa_result, kappa_replay):
+            raise SystemExit("diagnostic replay changed the production kappa")
+        oracle2 = {
+            name: _load2(held / f"eiv_dump_{name}.bin")
+            for name in ("zn", "zah", "zhw", "zRo", "zaeiw")
+        }
+        wet2 = np.any(wet, axis=-1)
+        wet2_3d = wet2[..., None]
+        def km(value, oracle_value):
+            return sweep.metrics(
+                np.asarray(value)[..., None], oracle_value[..., None],
+                wet2_3d, FOCUS, ACCUMULATION_BAR)
+        for name in ("zn", "zah", "zhw", "zRo", "zaeiw"):
+            kappa_operand_metrics[name] = km(diagnostics[name], oracle2[name])
+        oracle_face = (0.5 * (oracle2["zaeiw"]
+                              + np.roll(oracle2["zaeiw"], -1, axis=1))
+                       * np.asarray(u_mask_native[:, 1:], dtype=bool))
+        kappa_operand_metrics["aeiu_face"] = km(aeiu[..., 0], oracle_aeiu[..., 0])
+        kappa_operand_metrics["oracle_zaeiw_to_aeiu"] = km(
+            oracle_face, oracle_aeiu[..., 0])
     specs = (
         ("8.3", "uu(Kmm) / zptu", "traadv.F90:301-304", "un", POINTWISE_BAR),
         ("8.4", "e2u", "traadv.F90:329", "e2u", POINTWISE_BAR),
@@ -563,6 +645,12 @@ def main() -> int:
         "bolus_capture_count": (
             len(bolus_captures) >= 1 if args.capture_bolus_operands
             else len(bolus_captures) == 0),
+        "kappa_capture_count": (
+            len(kappa_captures) == 1 if args.capture_kappa_operands
+            else len(kappa_captures) == 0),
+        "round65_aeiu_debt_admitted": (
+            prior65 is None
+            or not prior65["bolus_operand_metrics"]["aeiu_face"]["pass"]),
         "round56_unheld_red": (
             prior56 is None
             or prior56["rows"][0]["status"] == "DIVERGED"),
@@ -594,6 +682,25 @@ def main() -> int:
             "bolus_meridional_roll_plant": not sweep.metrics(
                 np.roll(literal_psi[..., :35], 1, axis=0), oracle_psi,
                 wet_psi, FOCUS, ACCUMULATION_BAR)["pass"],
+        })
+    if args.capture_kappa_operands:
+        oracle_zaeiw = _load2(held / "eiv_dump_zaeiw.bin")
+        perturbed_zaeiw = np.array(oracle_zaeiw, copy=True)
+        first_wet = tuple(int(x) for x in np.argwhere(wet2)[0])
+        perturb = max(
+            4.0 * ACCUMULATION_BAR
+            * kappa_operand_metrics["zaeiw"]["reference_rms"],
+            4.0 * abs(float(np.spacing(perturbed_zaeiw[first_wet]))))
+        perturbed_zaeiw[first_wet] += perturb
+        controls.update({
+            "kappa_diagnostic_replay_identity":
+                np.array_equal(kappa_result, kappa_replay),
+            "oracle_zaeiw_face_closure":
+                kappa_operand_metrics["oracle_zaeiw_to_aeiu"]["pass"],
+            "zaeiw_wet_point_plant": not km(
+                perturbed_zaeiw, oracle_zaeiw)["pass"],
+            "zaeiw_zonal_roll_plant": not km(
+                np.roll(oracle_zaeiw, 1, axis=1), oracle_zaeiw)["pass"],
         })
     controls["all_scored_finite"] = all(
         row.get("status") == "ORDERED_BLOCKED"
@@ -636,6 +743,14 @@ def main() -> int:
             disposition = "ROW8_8_LOCALIZED_TO_AEIU_OPERAND"
         else:
             disposition = "ROW8_8_PSI_COMPOSITION_OPEN"
+    if args.capture_kappa_operands and valid:
+        ladder = ("zn", "zah", "zhw", "zRo", "zaeiw", "aeiu_face")
+        first_kappa = next(
+            (name for name in ladder
+             if not kappa_operand_metrics[name]["pass"]), None)
+        disposition = ("ROW8_8_GM_COEFFICIENT_AT_BAR"
+                       if first_kappa is None else
+                       f"ROW8_8_GM_COEFFICIENT_DIVERGED_{first_kappa.upper()}")
     nemo = args.nemo_root.resolve()
     receipt = {
         "schema": ("dino-split-explicit-momentum-chain-round64-v1"
@@ -658,6 +773,8 @@ def main() -> int:
            if args.capture_cycle else {}),
         **({"bolus_operand_metrics": bolus_operand_metrics}
            if args.capture_bolus_operands else {}),
+        **({"kappa_operand_metrics": kappa_operand_metrics}
+           if args.capture_kappa_operands else {}),
         "focus_ji": [list(x) for x in FOCUS],
         "bindings": {
             "round54": _sha(args.round54.resolve()),
@@ -675,12 +792,17 @@ def main() -> int:
             **({"round64": _sha(args.round64.resolve()),
                 **{name: _sha(held / name) for name in BOLUS_HELD_SHA}}
                if args.capture_bolus_operands else {}),
+            **({"round65": _sha(args.round65.resolve()),
+                **{name: _sha(held / name) for name in KAPPA_HELD_SHA}}
+               if args.capture_kappa_operands else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(
                 root / "docs/ocean/fidelity" /
-                ("PREREG_split_explicit_momentum_chain_round65.md"
+                ("PREREG_split_explicit_momentum_chain_round66.md"
+                 if args.capture_kappa_operands else
+                 "PREREG_split_explicit_momentum_chain_round65.md"
                  if args.capture_bolus_operands else
                  "PREREG_split_explicit_momentum_chain_round64.md"
                  if args.live_thickness_entry else
@@ -698,7 +820,8 @@ def main() -> int:
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
             "nemo_ldftra": _sha(nemo / "cfgs/DINO/MY_SRC/ldftra.F90"),
         },
-        "arm": ("bolus_operand_capture" if args.capture_bolus_operands else
+        "arm": ("kappa_operand_capture" if args.capture_kappa_operands else
+                "bolus_operand_capture" if args.capture_bolus_operands else
                 "live_thickness_entry" if args.live_thickness_entry else
                 "direct_cycle_entry" if args.direct_cycle_entry else
                 "cycle_capture" if args.capture_cycle else
