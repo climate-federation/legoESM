@@ -83,7 +83,7 @@ from legoesm.core.fv3_native_state_3d import (
     require_no_remap_needed,
 )
 from legoesm.core.fv3_phase3d_common import (
-    require_f64_jax,  # f64 entry gate, reads only static dtypes
+    require_f64_jax,  # dtype-uniformity entry gate, reads only static dtypes
     require_km,
     validate_stacked,
 )

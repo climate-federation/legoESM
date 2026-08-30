@@ -362,9 +362,11 @@ def state_3d_to_numpy(states: dict) -> list:
     test), so a JAX result can be fed to a NumPy-lane consumer without
     anyone re-deriving the unstacking at a call site.
 
-    Does NOT cast either: an f32 leaf RAISES rather than being widened
-    on the way out, because a silent widen here would make a
-    precision-losing run look f64 to every downstream comparison.
+    Does NOT cast either: it never silently widens on the way out, so a
+    precision-losing run cannot be made to look f64 to a downstream
+    comparison. (The dtype gates now enforce UNIFORMITY, so an f32 leaf
+    MIXED among f64 raises here; a genuine fp64-vs-fp32 run intent is
+    caught at the model boundary, not by widening.)
     """
     if not isinstance(states, dict):
         raise TypeError(
