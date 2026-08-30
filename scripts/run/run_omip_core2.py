@@ -7813,6 +7813,11 @@ def main() -> int:
                         model.config._replace(lateral_viscosity=model.config.lateral_viscosity._replace(A_h=_ah, C_smag_lap=_cs)),
                         # keep the zdfiwm maps through the mid-run rebuild
                         iwm_forcing=getattr(model, "_iwm_forcing", None))
+                    # Free the previous segment's compiled step before the new
+                    # one compiles: without this the old executable stays in
+                    # JAX's compilation cache and the rebuild OOMs the GPU
+                    # (CUDA_ERROR_OUT_OF_MEMORY at the day-8 segment, 2026-08-29).
+                    jax.clear_caches()
                 print(f"[visc-schedule] day {(step-1)*dt/86400.0:.1f}: "
                       f"A_h={_ah:g} C_smag_lap={_cs:g} "
                       f"(segment {visc_seg_idx + 1}/{len(visc_schedule)})",
