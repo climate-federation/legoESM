@@ -4245,13 +4245,33 @@ def gm_redi_tracer_tendency_latlon(
                     prd_TS_override=native_prd_TS,
                     pn2_override=native_slope_pn2,
                     e3w_override=native_slope_e3w)
+            _w_stage = getattr(
+                cfg, "redi_w_slope_stage_evaluation", "redi_tuple")
+            if _w_stage == "redi_tuple":
+                _redi_nat = _nat
+            elif _w_stage == "nemo_post_slope_pair":
+                if _bolus_nat is None:
+                    raise ValueError(
+                        "redi_w_slope_stage_evaluation="
+                        "'nemo_post_slope_pair' requires "
+                        "native_bolus_slope_eta")
+                # NEMO ldf_slp completes before ldf_tra consumes its native
+                # four-position fields. Carry the post-stage W pair into the
+                # vertical Redi tensor while retaining the certified Kmm U/V
+                # pair used by the horizontal fluxes.
+                _redi_nat = (
+                    _nat[0], _nat[1], _bolus_nat[2], _bolus_nat[3])
+            else:
+                raise ValueError(
+                    "Unknown GMRediConfig.redi_w_slope_stage_evaluation: "
+                    f"{_w_stage!r}")
             _msc = getattr(cfg, "msc_stabilize", False)
             _skew_eval = cfg.redi_vertical_skew_evaluation
             _bolus = None
             _dT = nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 T, S_x, S_y, mask, u_mask, v_mask,
                 z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
-                native_slopes=_nat, msc_stabilize=_msc, dt=dt,
+                native_slopes=_redi_nat, msc_stabilize=_msc, dt=dt,
                 bolus_native_slopes=_bolus_nat,
                 kappa_GM=kappa_GM, gm_bolus_advection=_gm_bolus,
                 gm_bolus_kappa_face_average=_gm_kfa,
@@ -4267,7 +4287,7 @@ def gm_redi_tracer_tendency_latlon(
             dS_dt = nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 S, S_x, S_y, mask, u_mask, v_mask,
                 z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
-                native_slopes=_nat, msc_stabilize=_msc, dt=dt,
+                native_slopes=_redi_nat, msc_stabilize=_msc, dt=dt,
                 bolus_native_slopes=_bolus_nat,
                 kappa_GM=kappa_GM, gm_bolus_advection=_gm_bolus,
                 gm_bolus_kappa_face_average=_gm_kfa,

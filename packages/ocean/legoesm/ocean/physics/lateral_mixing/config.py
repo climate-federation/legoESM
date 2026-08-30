@@ -450,6 +450,11 @@ class GMRediConfig(NamedTuple):
     # coefficient and four-gradient association. Only the DINO NEMO cards
     # opt in.
     redi_vertical_skew_evaluation: str = "normalized_sums"
+    # Stage of the W-position native slopes consumed by the Redi vertical
+    # flux. ``redi_tuple`` preserves the historical all-Kmm tuple.
+    # ``nemo_post_slope_pair`` carries the separately computed post-stage
+    # wslpi/wslpj while retaining the certified Kmm uslp/vslp.
+    redi_w_slope_stage_evaluation: str = "redi_tuple"
     # --- Veros-faithful isoneutral options (oracle-matching; default off) ---
     implicit_K33: bool = False
     # ^ When True, the vertical isoneutral diagonal K_33 = kappa_Redi·S² (the
