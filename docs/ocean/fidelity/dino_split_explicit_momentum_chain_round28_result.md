@@ -246,3 +246,30 @@ checked explicitly. Roll, sign, wet-NaN, and `2x` plants must fire for both
 components. The four-block producer/capture/bracket/score handoff is in
 `dino_split_explicit_momentum_chain_round37_handoff.md`. Row 4 and all later
 registry rows remain ordered-blocked until its held receipt is returned.
+
+## Round-37 stopped-capture coverage adjudication
+
+The first round-37 capture is INVALID for term ownership and emitted no
+metadata. Its closure stop is a real Rule-1 coverage finding in the public
+diagnostics: the explicit external surface-stress tendency had no diagnostic
+slot. The remainder is confined exactly to the U surface level (9,793
+nonzeros, maximum `1.9218384941372795e-5 m s-2`); deeper U levels and the
+entire V field are bit zero. DINO's analytic stress is zonal-only, matching
+round 36's independent exact-zero V wind receipt.
+
+The active NEMO audit confirms this is not an omitted D03--D06 tendency.
+`dyn_adv`, `dyn_vor`, `dyn_ldf`, and `dyn_hpg` are the active writers at
+`stpmlf.F90:309-328`; optional damping, assimilation, boundary, AGRIF, and
+OSMOSIS writers are inactive. Surface stress is applied only later at
+`dynzdf.F90:353-363`. The twin diagnostic contract now carries the exact
+surface-stress arrays used in the tendency update, with a two-component wind
+closure test that is red without them. Round 37 records stress as a
+coverage-only nonowner and leaves its source-ordered D03--D06 ladder and bars
+unchanged.
+
+The two headline magnitudes must not be divided: `1.9218e-5 m s-2` is a
+pointwise absolute tendency maximum, whereas row 4's `7.444e-3` is a
+dimensionless normalized RMS error. The former explains the stopped closure
+gate; it does not reassign the row-4 residual, and round 36 already refuted
+wind ownership at 13% removal. Rows 4 onward remain held pending the corrected
+round-37 capture/bracket/score cascade.

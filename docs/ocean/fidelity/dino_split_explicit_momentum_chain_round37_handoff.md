@@ -1,8 +1,15 @@
 # Round-37 scoped U/V momentum-RHS SLOT handoff
 
 Date: 2026-08-30. Session
-`01a04e34-d1fb-73e0-b25a-177641f0a246`. **DESIGNED, NOT RUN.** Producer
-`fb69916d162ba547f92682927afd2f8e566f86c5`.
+`01a04e34-d1fb-73e0-b25a-177641f0a246`. **CORRECTED AFTER THE CLOSURE
+STOP; NOT RERUN.** Producer
+`9f1e3dfec4e59891ce40b7cc6089e31b4451a138`.
+
+The stopped capture is not retained: it emitted no metadata. The corrected
+producer adds the missing explicit surface-stress diagnostic, admits it as a
+coverage-only row outside D03--D06, and requires two new full-stagger files.
+All four blocks must rerun because both production diagnostics and script
+hashes changed. Each fresh capture now contains 17 files.
 
 Enumeration found that the retained deterministic-writer stack already has
 all D03--D06 U/V cumulative streams and the dedicated KEG/ZAD/VOR/LDF/HPG
@@ -25,7 +32,9 @@ The scorer emits the file:line citations registered for each exact row:
 ZAD (`dynadv.F90:97-103`), vorticity/Coriolis
 (`dynvor.F90:143-179`), lateral friction (`dynldf.F90:79-115`), the
 KE-gradient+HPG group (`dynadv.F90:89-96`; `dynhpg.F90:117-133`), and the
-D06 accumulator (`stpmlf.F90:269-270,309-328`).
+D06 accumulator (`stpmlf.F90:269-270,309-328`). The new coverage row binds
+the twin deposit (`ocean_pe_latlon_cgrid.py:3646-3711`) to NEMO's later
+surface-stress deposit (`dynzdf.F90:353-363`) and cannot own D03--D06.
 
 Every block changes to its own absolute checkout, uses checkout-first
 `PYTHONPATH`, exports the session ID, pins the producer SHA, and uses a
@@ -39,7 +48,7 @@ set -euo pipefail
 export CODEX_SESSION_ID=01a04e34-d1fb-73e0-b25a-177641f0a246
 repo=/tmp/codex-zdf-sweep
 cd "$repo"
-producer=fb69916d162ba547f92682927afd2f8e566f86c5
+producer=9f1e3dfec4e59891ce40b7cc6089e31b4451a138
 git cat-file -e "${producer}^{commit}"
 test -z "$(git diff --name-only)"
 test -z "$(git diff --cached --name-only)"
@@ -54,10 +63,10 @@ bracket="$repo/scripts/validate/ocean_fidelity/dino_1226/split_explicit_momentum
 scorer="$repo/scripts/validate/ocean_fidelity/dino_1226/split_explicit_momentum_chain_round37.py"
 prereg="$repo/docs/ocean/fidelity/PREREG_split_explicit_momentum_chain_round37.md"
 manifest="$repo/docs/ocean/fidelity/dino_zdf_row21_coeff_assembly_artifact.json"
-test "$(sha256sum "$capture" | awk '{print $1}')" = 140b47c376379954ef4179fc99933b67fdbbf77ba970d09bedbcbc0dcc901dc4
-test "$(sha256sum "$bracket" | awk '{print $1}')" = fbbba9cc9c1ba95962d736f7a2b12bf202b2a64f14865d99fe56d07638838af8
-test "$(sha256sum "$scorer" | awk '{print $1}')" = 20643afb404fefba676c08a9d9579041f8940a390ede6006c1007931675f87be
-test "$(sha256sum "$prereg" | awk '{print $1}')" = 15cf47f7af423c0f02ee4ab67d9d58d3d1a9de9a8c547e41506942cd7f70a7ef
+test "$(sha256sum "$capture" | awk '{print $1}')" = fed0b64c3b98910bfe2f8f426c4417a197d1025461b55322e9eac4a7cf69d2ab
+test "$(sha256sum "$bracket" | awk '{print $1}')" = 6fc13399285911b68295d20f32a7c1d93e8f1d9aa2225c5f37ff119c22fddfb2
+test "$(sha256sum "$scorer" | awk '{print $1}')" = ef6fea962cf4932688b5c075b57b21a5328193231ae87a430244d04893be30f4
+test "$(sha256sum "$prereg" | awk '{print $1}')" = 479485589b9dc8852ecc01aad1640f9707b1111bd2610d1838d77cd9d8890564
 test "$(sha256sum "$manifest" | awk '{print $1}')" = 84885e45ecc149082606c0b44b411271f40942a99497996b0d4b35e051b6a97a
 test "$(sha256sum /tmp/dino_split_explicit_momentum_chain_round36.json | awk '{print $1}')" = f680200f2a3733558d1de7be7f97f5a80e575c003cbebf554fc1aa80e4428270
 
@@ -84,7 +93,7 @@ cd "$repo"
 PRODUCER=__MEASURED_ROW37_PRODUCER__
 CAPTURE_SHA=__MEASURED_ROW37_CAPTURE_SCRIPT_SHA256__
 for value in "$PRODUCER" "$CAPTURE_SHA"; do case "$value" in __*) exit 2;; esac; done
-test "$PRODUCER" = fb69916d162ba547f92682927afd2f8e566f86c5
+test "$PRODUCER" = 9f1e3dfec4e59891ce40b7cc6089e31b4451a138
 capture="$repo/scripts/validate/ocean_fidelity/dino_1226/split_explicit_momentum_chain_round37_capture.py"
 test "$(sha256sum "$capture" | awk '{print $1}')" = "$CAPTURE_SHA"
 test -z "$(git diff --name-only)"
@@ -105,7 +114,7 @@ for out in "$A" "$B"; do
     --restart-file DINO_00005760_restart.nc \
     --round36 /tmp/dino_split_explicit_momentum_chain_round36.json \
     --output-dir "$out"
-  test "$(find "$out" -maxdepth 1 -type f | wc -l)" -eq 15
+  test "$(find "$out" -maxdepth 1 -type f | wc -l)" -eq 17
 done
 printf '%s\n' "$A" > /tmp/row37-capture-a.txt
 printf '%s\n' "$B" > /tmp/row37-capture-b.txt
@@ -113,7 +122,7 @@ printf 'SLOT __MEASURED_ROW37_CAPTURE_A_SHA256__ VALUE=%s\n' "$(sha256sum "$A/ca
 printf 'SLOT __MEASURED_ROW37_CAPTURE_B_SHA256__ VALUE=%s\n' "$(sha256sum "$B/capture.json" | awk '{print $1}')"
 ```
 
-## Block 3 — exact 15/15 duplicate-capture bracket
+## Block 3 — exact 17/17 duplicate-capture bracket
 
 ```bash
 set -euo pipefail
@@ -148,7 +157,7 @@ PRODUCER=__MEASURED_ROW37_PRODUCER__
 SCORER_SHA=__MEASURED_ROW37_SCORER_SHA256__
 BRACKET_SHA=__MEASURED_ROW37_BRACKET_SHA256__
 for value in "$PRODUCER" "$SCORER_SHA" "$BRACKET_SHA"; do case "$value" in __*) exit 2;; esac; done
-test "$PRODUCER" = fb69916d162ba547f92682927afd2f8e566f86c5
+test "$PRODUCER" = 9f1e3dfec4e59891ce40b7cc6089e31b4451a138
 test -z "$(git diff --name-only "$PRODUCER" HEAD -- packages/core packages/ocean \
   scripts/validate/ocean_fidelity/dino_1226/split_explicit_momentum_chain_round37.py \
   scripts/validate/ocean_fidelity/dino_1226/split_explicit_momentum_chain_round37_capture.py \
