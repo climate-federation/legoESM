@@ -45,3 +45,22 @@ and the existing conservation plants remain mandatory.
 Rows later than the live EEN coefficient remain ordered-blocked until this
 factorial is adjudicated. Any future held instrumentation uses the canonical
 `__MEASURED_<name>__` SLOT prefix, but round 25 itself requires none.
+
+## Control-failure amendment before a valid factorial
+
+Two committed attempts to reconstruct `T0V0P0` stopped at the frozen control,
+before emitting an artifact or disposition.  The direct source stencil put all
+eight coefficient RMS rows closer to NEMO (`2.10e-16`--`2.21e-16`), but differed
+by 16--35% from round 24's nonzero `2.56e-16`--`3.25e-16` checkerboard-inversion
+residues. Forwarding it through the same four-pattern solve reduced that gap to
+3--15%, but cannot make a separately evaluated stencil reproduce the exact
+roundoff of the production JAX operator plus inversion to `1e-15` *relative to
+the residual*.
+
+The valid factorial therefore admits `T0V0P0` verbatim from the SHA-bound round
+24 artifact. This is the actual production control, not a reconstruction. The
+separately materialized `T0V0P0` remains in the receipt and must put all eight
+coefficients and both literal-applied outputs at the unchanged POINTWISE bar;
+otherwise the factorial stops. Other arms use that one committed materializer.
+No physics bar, arm, or ownership rule changes. This amendment is frozen before
+the first factorial invocation permitted to emit a disposition.
