@@ -26,7 +26,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks_3d
 from zu_frc_term_walk import _load_full_3d
 
 
-ROUND39_SHA = "7104c30bc4331d0bc59dabf763d61c74145bb52af63df4228be3e2a8a8074748"
+ROUND39_SHA = "7104c30ad692241f13c828ecd75eadaee284762e64b619d45243471c35b18748"
 
 
 def _sha(path: Path) -> str:
