@@ -23,7 +23,7 @@ counterfactual has cleared it.
 Frozen after the literal-builder replay at commit `413f1afb10b4` and before
 the clearance classifier is changed. The replay artifact
 `/tmp/dino_split_explicit_momentum_chain_round93_postfix.json`, SHA-256
-`1ef4238653c945b63fe4bd1fbf808097f872d1e59ac2588458d4edfa7a53903d`,
+`f075a3b7ecd63d226cbd1cb66d39c98a018118764632f50c2ad5c6bff109e06a`,
 leaves only salinity `zfw` red: 212/9,920 columns and a `6.690652e-15`
 maximum normalized error, with correlation 1.0 and RMS ratio within one ULP
 of 1.0. Temperature's registered exact-W plus literal-A33 arm is bit-exact;
