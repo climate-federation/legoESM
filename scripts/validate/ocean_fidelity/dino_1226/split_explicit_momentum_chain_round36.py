@@ -180,9 +180,9 @@ def main() -> int:
         raise SystemExit("DINO forcing unexpectedly carries no stress")
     tau_u, tau_v = np.asarray(stress[0]), np.asarray(stress[1])
     wind_u = _deposit(crop_u(tau_u[..., None], 1)[..., 0], dz_u, wet_u,
-                      2.0 * r35.DT, cfg.constants.rho_0)
+                      2.0 * r35.DT, model_cfg.constants.rho_0)
     wind_v = _deposit(crop_v(tau_v[..., None], 1)[..., 0], dz_v, wet_v,
-                      2.0 * r35.DT, cfg.constants.rho_0)
+                      2.0 * r35.DT, model_cfg.constants.rho_0)
     oracle_wind_u = np.zeros_like(rhs_u)
     oracle_wind_v = np.zeros_like(rhs_v)
     oracle_wind_u[..., 0] = (
