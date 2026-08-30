@@ -42,6 +42,7 @@ ROUND64_SHA = "8858d60a51b07181e290fead087e4bab69c0d15e271bbdecb7d458ba12d4e4c7"
 ROUND65_SHA = "6b4a80ddaf020916770dd0eb0005a6ce9dd69ffe79a6604a0e2125cfbadf4c60"
 ROUND66_SHA = "673d9dc978ac4c05a0c8a6995f7c9e1870d9502afedff9b765045df23014785f"
 ROUND67_SHA = "2c1c1819f08cc07d9aa90fd43624285fe276558bbb5bba84aa97b3b83b345d95"
+ROUND68_SHA = "8e9a2ee7ee1969da86ee2ef24198047d6ea83ee14842753b528271453efaf9a0"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -140,6 +141,7 @@ def main() -> int:
     parser.add_argument("--round65", type=Path)
     parser.add_argument("--round66", type=Path)
     parser.add_argument("--round67", type=Path)
+    parser.add_argument("--round68", type=Path)
     parser.add_argument("--hold-slow-forcing", action="store_true")
     parser.add_argument("--oracle-transport", action="store_true")
     parser.add_argument("--capture-cycle", action="store_true")
@@ -149,6 +151,7 @@ def main() -> int:
     parser.add_argument("--capture-kappa-operands", action="store_true")
     parser.add_argument("--literal-kappa-reduction", action="store_true")
     parser.add_argument("--capture-kappa-geometry", action="store_true")
+    parser.add_argument("--coupled-kappa-carry", action="store_true")
     parser.add_argument("--raw-artifact", type=Path, required=True)
     parser.add_argument("--nemo-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -302,6 +305,21 @@ def main() -> int:
             raise SystemExit("round 67 does not release the geometry peel")
     elif args.round67 is not None:
         raise SystemExit("--round67 requires --capture-kappa-geometry")
+    prior68 = None
+    if args.coupled_kappa_carry:
+        if not args.capture_kappa_geometry:
+            raise SystemExit(
+                "--coupled-kappa-carry requires --capture-kappa-geometry")
+        if (args.round68 is None
+                or _sha(args.round68.resolve()) != ROUND68_SHA):
+            raise SystemExit("official round-68 coupled-operand receipt required")
+        prior68 = json.loads(args.round68.read_text())
+        if (prior68.get("disposition") != "ROW8_8_LOCALIZED_TO_RN2B"
+                or prior68["kappa_geometry_metrics"]["e3w_Kmm"]["pass"]
+                or prior68["kappa_geometry_metrics"]["rn2b"]["pass"]):
+            raise SystemExit("round 68 does not release the coupled carry")
+    elif args.round68 is not None:
+        raise SystemExit("--round68 requires --coupled-kappa-carry")
     if _sha(args.raw_artifact.resolve()) != RAW_ARTIFACT_SHA:
         raise SystemExit("admitted held row-8 artifact changed")
     held = args.held_dir.resolve()
@@ -435,6 +453,24 @@ def main() -> int:
                 kappa_kwargs["active_3d"],
                 slope_n2=kappa_kwargs["slope_n2"],
                 jacobian=kappa_kwargs["jacobian"])
+            if args.coupled_kappa_carry:
+                if (kappa_kwargs.get("pn2_override") is None
+                        or kappa_kwargs.get("e3w_override") is None):
+                    raise SystemExit("production Treguier call dropped Kmm carry")
+                nlev = kappa_args[0].shape[-1]
+                raw_pn2 = np.asarray(kappa_kwargs["pn2_override"])
+                if raw_pn2.shape[-1] == nlev - 1:
+                    raw_pn2 = np.concatenate(
+                        [np.zeros_like(raw_pn2[..., :1]), raw_pn2], axis=-1)
+                raw_e3w_override = np.asarray(kappa_kwargs["e3w_override"])
+                if raw_e3w_override.shape[-1] == nlev - 1:
+                    surface = np.broadcast_to(
+                        np.asarray(raw_e3w)[..., :1],
+                        raw_e3w_override.shape[:-1] + (1,))
+                    raw_e3w = np.concatenate(
+                        [surface, raw_e3w_override], axis=-1)
+                else:
+                    raw_e3w = raw_e3w_override
             raw_operands = {
                 "e3w": np.asarray(raw_e3w),
                 "wmask": np.asarray(raw_wmask),
@@ -734,6 +770,10 @@ def main() -> int:
             prior67 is None
             or prior67["kappa_operand_metrics"]["zhw"]["max_column_error"]
             == prior66["kappa_operand_metrics"]["zhw"]["max_column_error"]),
+        "round68_coupled_debt_admitted": (
+            prior68 is None
+            or (not prior68["kappa_geometry_metrics"]["e3w_Kmm"]["pass"]
+                and not prior68["kappa_geometry_metrics"]["rn2b"]["pass"])),
         "round56_unheld_red": (
             prior56 is None
             or prior56["rows"][0]["status"] == "DIVERGED"),
@@ -849,11 +889,16 @@ def main() -> int:
     if args.capture_kappa_geometry and valid:
         e3w_pass = kappa_geometry_metrics["e3w_Kmm"]["pass"]
         rn2_pass = kappa_geometry_metrics["rn2b"]["pass"]
-        disposition = ("ROW8_8_LOCALIZED_TO_KMM_E3W"
+        disposition = (("TRACER_ENTRY_ROW8_AT_BAR_CARRIED_KMM"
+                        if args.coupled_kappa_carry and first is None
+                        and all(metric["pass"] for metric in
+                                kappa_operand_metrics.values()) else
+                        "ROW8_8_KAPPA_GEOMETRY_AT_BAR")
+                       if e3w_pass and rn2_pass else
+                       "ROW8_8_LOCALIZED_TO_KMM_E3W"
                        if not e3w_pass and rn2_pass else
                        "ROW8_8_LOCALIZED_TO_RN2B"
-                       if not rn2_pass else
-                       "ROW8_8_KAPPA_GEOMETRY_AT_BAR")
+                       if not rn2_pass else "ROW8_8_KAPPA_GEOMETRY_AT_BAR")
     nemo = args.nemo_root.resolve()
     receipt = {
         "schema": ("dino-split-explicit-momentum-chain-round64-v1"
@@ -905,12 +950,16 @@ def main() -> int:
             **({"round67": _sha(args.round67.resolve()),
                 **{name: _sha(held / name) for name in KAPPA_GEOMETRY_SHA}}
                if args.capture_kappa_geometry else {}),
+            **({"round68": _sha(args.round68.resolve())}
+               if args.coupled_kappa_carry else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(
                 root / "docs/ocean/fidelity" /
-                ("PREREG_split_explicit_momentum_chain_round68.md"
+                ("PREREG_split_explicit_momentum_chain_round69.md"
+                 if args.coupled_kappa_carry else
+                 "PREREG_split_explicit_momentum_chain_round68.md"
                  if args.capture_kappa_geometry else
                  "PREREG_split_explicit_momentum_chain_round67.md"
                  if args.literal_kappa_reduction else
@@ -934,7 +983,8 @@ def main() -> int:
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
             "nemo_ldftra": _sha(nemo / "cfgs/DINO/MY_SRC/ldftra.F90"),
         },
-        "arm": ("kappa_geometry_capture" if args.capture_kappa_geometry else
+        "arm": ("coupled_kappa_carry" if args.coupled_kappa_carry else
+                "kappa_geometry_capture" if args.capture_kappa_geometry else
                 "literal_kappa_reduction" if args.literal_kappa_reduction else
                 "kappa_operand_capture" if args.capture_kappa_operands else
                 "bolus_operand_capture" if args.capture_bolus_operands else
@@ -950,7 +1000,8 @@ def main() -> int:
             "TRACER_ENTRY_ROW8_AT_BAR_ORACLE_TRANSPORT",
             "TRACER_ENTRY_ROW8_AT_BAR_DIRECT_KMM",
             "TRACER_ENTRY_ROW8_AT_BAR_LIVE_QCO",
-            "TRACER_ENTRY_ROW8_AT_BAR_LITERAL_GM"} else first),
+            "TRACER_ENTRY_ROW8_AT_BAR_LITERAL_GM",
+            "TRACER_ENTRY_ROW8_AT_BAR_CARRIED_KMM"} else first),
     }
     args.output.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     print(f"disposition={disposition} first_diverged_subrow={first}")
