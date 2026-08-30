@@ -4884,20 +4884,13 @@ class LatLonCGridOceanModel:
                         "requires the pre-zdf_phy TKE N2 bundle")
                 _gm_native_pn2 = _tke_n2_bundle.rn2b
                 _gm_native_e3w = _tke_n2_bundle.e3w_Kmm
-                # ldf_eiv integrates jk=1:jpk, while the eosbn2/TKE bundle's
-                # e3w carry stores only levels 2:jpk. NEMO depth_e3.F90:64
-                # sets e3w(1)=2*(gdept(1)-gdepw(1)); on DINO's uniform top
-                # cell this is the already-carried e3t(1,Kmm). Do not restore
-                # it from the later GM geometry: that mixes time levels in
-                # zhw/zn after the exact interior carry.
-                _nlev_gm = state.T.data.shape[-1]
-                if _gm_native_e3w.shape[-1] == _nlev_gm - 1:
-                    _gm_native_e3w = jnp.concatenate([
-                        _tke_n2_bundle.e3t_Kmm[..., :1], _gm_native_e3w,
-                    ], axis=-1)
-                elif _gm_native_e3w.shape[-1] != _nlev_gm:
-                    raise ValueError(
-                        "carried GM e3w must contain nlev or nlev-1 W levels")
+                _gm_surface_e3w = getattr(
+                    _tke_n2_bundle, "e3w_surface_Kmm", None)
+                if (_gm_surface_e3w is not None
+                        and _gm_native_e3w.shape[-1]
+                        == state.T.data.shape[-1] - 1):
+                    _gm_native_e3w = jnp.concatenate(
+                        [_gm_surface_e3w, _gm_native_e3w], axis=-1)
             elif _slope_n2_eval != "recompute":
                 raise ValueError(
                     "GMRediConfig.slope_n2_evaluation must be 'recompute' or "
@@ -6050,6 +6043,7 @@ class LatLonCGridOceanModel:
             compute_buoyancy_frequency_nemo_bn2,
             nemo_bn2_depth_ladders,
             nemo_bn2_live_geometry,
+            nemo_e3w_from_live_gdept,
             nemo_r3t_stretch,
         )
         from legoesm.ocean.physics.vertical_mixing.tke import TKEEntryN2Bundle
@@ -6078,6 +6072,8 @@ class LatLonCGridOceanModel:
         zrw_stretch = nemo_r3t_stretch(
             _zc, state.eta.data, state.H_bathy.data,
             evaluation="nemo_reciprocal")
+        e3w_surface = nemo_e3w_from_live_gdept(
+            _zc, gdept, stretch=zrw_stretch, interior=False)[..., :1]
         _n2_kwargs = dict(
             g=_cfg_b.constants.g,
             eos_form=getattr(tke_cfg, "n2_eos_form", "seos"),
@@ -6117,7 +6113,7 @@ class LatLonCGridOceanModel:
                 e3t_0_array)
         return TKEEntryN2Bundle(
             rn2=rn2, rn2b=rn2b, gdepw_Kmm=gdepw, e3w_Kmm=e3w,
-            e3t_Kmm=e3t)
+            e3t_Kmm=e3t, e3w_surface_Kmm=e3w_surface)
 
     def _tke_step_entry_p_sh2(
         self, state, *, eta_now=None, u_now=None, v_now=None,

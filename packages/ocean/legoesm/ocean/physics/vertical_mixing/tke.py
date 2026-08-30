@@ -348,6 +348,9 @@ class TKEEntryN2Bundle(NamedTuple):
     gdepw_Kmm: jnp.ndarray
     e3w_Kmm: jnp.ndarray
     e3t_Kmm: jnp.ndarray
+    # Full-grid surface W thickness from raw nemo_e3w_0*(1+r3t). The interior
+    # e3w_Kmm field above intentionally has nlev-1 eosbn2 interfaces.
+    e3w_surface_Kmm: jnp.ndarray | None = None
 
 
 class TKECarryOutput(NamedTuple):
