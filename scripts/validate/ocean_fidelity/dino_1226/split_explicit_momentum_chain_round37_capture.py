@@ -25,7 +25,8 @@ from legoesm.core.precision import PrecisionPolicy, set_policy
 ROUND36_SHA = "f680200f2a3733558d1de7be7f97f5a80e575c003cbebf554fc1aa80e4428270"
 COMPONENTS = (
     "KE_PGF", "vortcor", "Dterm", "vertadv", "Ah_lap", "Bh_bilap",
-    "Cs_smag", "Cl_leith", "botdrag", "Av_vert", "phys", "sponge",
+    "Cs_smag", "Cl_leith", "botdrag", "Av_vert", "phys",
+    "surface_stress", "sponge",
 )
 
 
@@ -105,23 +106,31 @@ def main() -> int:
     files: dict[str, dict[str, object]] = {}
     closure = {}
     for component in ("u", "v"):
-        total = np.asarray(getattr(tendencies, f"d{component}_dt").data,
-                           dtype=np.float64)
+        total = _data(diag, "total", component,
+                      np.asarray(getattr(tendencies, f"d{component}_dt").data,
+                                 dtype=np.float64))
         ke_hpg = _data(diag, "KE_PGF", component, total)
         vertical = _data(diag, "vertadv", component, total)
         vorticity = _data(diag, "vortcor", component, total)
+        surface_stress = _data(diag, "surface_stress", component, total)
         lateral = sum((_data(diag, name, component, total)
                        for name in ("Ah_lap", "Bh_bilap", "Cs_smag", "Cl_leith")),
                       np.zeros_like(total))
         mapped = ke_hpg + vertical + vorticity + lateral
         diagnostic_sum = sum((_data(diag, name, component, total)
                               for name in COMPONENTS), np.zeros_like(total))
+        without_surface_stress = diagnostic_sum - surface_stress
         closure[component] = {
             "max_abs_diagnostic_sum_minus_total": float(
                 np.max(np.abs(diagnostic_sum - total))),
+            "max_abs_without_surface_stress_minus_total": float(
+                np.max(np.abs(without_surface_stress - total))),
+            "max_abs_surface_stress": float(np.max(np.abs(surface_stress))),
+            "surface_stress_nonzero_count": int(np.count_nonzero(surface_stress)),
             "all_finite": bool(all(np.isfinite(value).all() for value in
                                     (total, ke_hpg, vertical, vorticity,
-                                     lateral, mapped, diagnostic_sum))),
+                                     lateral, surface_stress, mapped,
+                                     diagnostic_sum))),
         }
         arrays = {
             "vertical_advection": vertical,
@@ -129,6 +138,7 @@ def main() -> int:
             "lateral_friction": lateral,
             "ke_gradient_plus_hpg": ke_hpg,
             "mapped_d06": mapped,
+            "surface_stress_outside_d03_d06": surface_stress,
             "diagnostic_total": total,
             "diagnostic_sum": diagnostic_sum,
         }
@@ -150,6 +160,10 @@ def main() -> int:
     if any(item["max_abs_diagnostic_sum_minus_total"] > 1e-15
            for item in closure.values()):
         raise SystemExit(f"public diagnostic closure failed: {closure}")
+    if (closure["u"]["surface_stress_nonzero_count"] == 0
+            or closure["v"]["surface_stress_nonzero_count"] != 0):
+        raise SystemExit(
+            f"DINO zonal-only surface-stress coverage changed: {closure}")
 
     bindings = {
         "round36": _sha(args.round36.resolve()),
@@ -165,7 +179,7 @@ def main() -> int:
             root / "packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py"),
     }
     metadata = {
-        "schema": "dino-split-explicit-momentum-chain-round37-capture-v1",
+        "schema": "dino-split-explicit-momentum-chain-round37-capture-v2",
         "session_id": session,
         "git_commit": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),

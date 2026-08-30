@@ -3658,10 +3658,14 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
     add it (× dt_tracer) inside the backward-Euler vertical-mixing solve at
     weight 1.0 (Veros's implicit surface-forcing placement).
 
-    Returns ``(du_dt, dv_dt, dT_dt, dS_dt, dT_surf)`` where ``dT_surf`` is a
+    Returns ``(du_dt, dv_dt, dT_dt, dS_dt, dT_surf,
+    diag_surface_stress_u, diag_surface_stress_v)`` where ``dT_surf`` is a
     full-column zero array unless ``route_heat_to_implicit`` AND a q_net forcing
-    were both present."""
+    were both present.  The two stress diagnostics are the exact arrays added
+    to the momentum tendencies, not a reconstructed copy."""
     dT_surf = jnp.zeros_like(dT_dt)
+    diag_surface_stress_u = jnp.zeros_like(du_dt)
+    diag_surface_stress_v = jnp.zeros_like(dv_dt)
     # --- 10b'. External surface forcing (e.g. from JRA55 bulk fluxes) ---
     # When the caller passes an OceanSurfaceForcing carrying tau_x /
     # tau_y / q_net / sw_down, apply them here.  Mirrors
@@ -3697,8 +3701,14 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
             inv_rho_dz_u = 1.0 / (rho_0_dt * jnp.maximum(dz_0_u, 1e-10))
             inv_rho_dz_v = 1.0 / (rho_0_dt * jnp.maximum(dz_0_v, 1e-10))
 
-            du_dt = du_dt.at[..., 0].add(tau_i_u * inv_rho_dz_u)
-            dv_dt = dv_dt.at[..., 0].add(tau_j_v * inv_rho_dz_v)
+            stress_u = tau_i_u * inv_rho_dz_u
+            stress_v = tau_j_v * inv_rho_dz_v
+            diag_surface_stress_u = diag_surface_stress_u.at[..., 0].set(stress_u)
+            diag_surface_stress_v = diag_surface_stress_v.at[..., 0].set(stress_v)
+            # Preserve the production update expression byte-for-byte; the
+            # diagnostic is a second consumer of the already-built value.
+            du_dt = du_dt.at[..., 0].add(stress_u)
+            dv_dt = dv_dt.at[..., 0].add(stress_v)
 
         if _sf_q_net is not None:
             from legoesm.ocean.eos import c_sw as _c_sw
@@ -3784,7 +3794,8 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
             dS_salt = salt_flux_salinity_tendency(
                 jnp.asarray(_sf_salt, dtype=S.dtype), dz_0_T_s, float(rho_0))
             dS_dt = dS_dt.at[..., 0].add(dS_salt * mask)
-    return du_dt, dv_dt, dT_dt, dS_dt, dT_surf
+    return (du_dt, dv_dt, dT_dt, dS_dt, dT_surf,
+            diag_surface_stress_u, diag_surface_stress_v)
 
 
 def _bc_sponge_relaxation(du_dt, dv_dt, dT_dt, dS_dt, T, S, u, v, sponge, grid,
@@ -4494,10 +4505,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             )
     _sf_implicit = bool(getattr(config, "surface_forcing_implicit", False))
     _stress_implicit = bool(getattr(config, "surface_stress_implicit", False))
-    du_dt, dv_dt, dT_dt, dS_dt, dT_surf_heat = _bc_external_surface_forcing(
-        du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S, h_k, z_coord, J, grid,
-        rho_0, mask, mask_3d, route_heat_to_implicit=_sf_implicit,
-        withhold_stress=_stress_implicit,
+    (du_dt, dv_dt, dT_dt, dS_dt, dT_surf_heat,
+     diag_surface_stress_u, diag_surface_stress_v) = (
+        _bc_external_surface_forcing(
+            du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S,
+            h_k, z_coord, J, grid, rho_0, mask, mask_3d,
+            route_heat_to_implicit=_sf_implicit,
+            withhold_stress=_stress_implicit,
+        )
     )
 
     # --- Stage 10b'': surface TRACER restoring (T*/S*) routed for IMPLICIT
@@ -4711,6 +4726,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         botdrag_u=_mu(diag_botdrag_u),  botdrag_v=_mv(diag_botdrag_v),
         Av_vert_u=_mu(diag_Av_vert_u),  Av_vert_v=_mv(diag_Av_vert_v),
         phys_u=_mu(diag_phys_u),        phys_v=_mv(diag_phys_v),
+        surface_stress_u=_mu(diag_surface_stress_u),
+        surface_stress_v=_mv(diag_surface_stress_v),
         sponge_u=_mu(diag_sponge_u),    sponge_v=_mv(diag_sponge_v),
         # total_u/v are the actually-applied masked tendencies — must
         # equal Σ of the components above to machine precision.
@@ -4718,5 +4735,3 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         total_v=Field(data=diag_dv_total, name="total_v", dims=dims_v, units="m/s^2"),
     )
     return tendencies, diagnostics
-
-

@@ -977,9 +977,10 @@ class MomentumTendencyDiagnostics(NamedTuple):
     Av_vert_u, Av_vert_v : Field
         A_v · ∂²u/∂z² (vertical viscosity on the perturbation)
     phys_u, phys_v : Field
-        ``phys.du_dt`` / ``phys.dv_dt`` from the surface-forcing physics
-        module (wind stress at the surface; possibly other physics
-        contributions if active)
+        ``phys.du_dt`` / ``phys.dv_dt`` from the configured physics module.
+    surface_stress_u, surface_stress_v : Field
+        Explicit external wind-stress tendency deposited in the surface cell.
+        Zero when no stress is supplied or ``surface_stress_implicit=True``.
     sponge_u, sponge_v : Field
         Sponge restoring (0 when no sponge)
     total_u, total_v : Field
@@ -1013,6 +1014,8 @@ class MomentumTendencyDiagnostics(NamedTuple):
     Av_vert_v: Field
     phys_u: Field
     phys_v: Field
+    surface_stress_u: Field
+    surface_stress_v: Field
     sponge_u: Field
     sponge_v: Field
     total_u: Field

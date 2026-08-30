@@ -69,3 +69,34 @@ The active instrumented-source citations carried into every receipt are:
 | lateral friction | `stpmlf.F90:319-322`; `dynldf.F90:79-115` |
 | KE-gradient + HPG | `dynadv.F90:89-96`; `dynhpg.F90:117-133`; `stpmlf.F90:309-328` |
 | D06 total | `stpmlf.F90:269-270,309-328` |
+
+## Coverage amendment after the stopped first capture
+
+The first held capture stopped before emitting metadata, exactly as its
+closure gate required. Its retained binary arrays are diagnostic evidence,
+not an admitted round-37 score: `total - diagnostic_sum` is nonzero only in
+the U surface level (9,793 values, maximum `1.9218384941372795e-5 m s-2`),
+while every deeper U level and all V values are exactly zero. This is the
+signature of DINO's zonal-only explicit surface stress, already independently
+established by round 36's exact-zero V wind control.
+
+The active NEMO D03--D06 writer audit finds no omitted call:
+
+| interval | call that can write momentum RHS | active DINO disposition |
+|---|---|---|
+| zero to D03 | `dyn_dmp` (`stpmlf.F90:292`), `dyn_asm_inc` (`:294-295`), `bdy_dyn3d_dmp` (`:297`), AGRIF sponge (`:302-303`) | inactive (`ln_dyndmp=F`, `ln_dyninc=F`, `ln_bdy=F`, no AGRIF) |
+| D03 | `dyn_adv` (`stpmlf.F90:309-314`) -> KEG then ZAD (`dynadv.F90:86-103`) | active; dedicated KEG+ZAD identity |
+| D03 to D04 | `dyn_vor` (`stpmlf.F90:315-318`; `dynvor.F90:143-179`) | active; planetary+relative EEN contribution |
+| D04 to D05 | `dyn_ldf` (`stpmlf.F90:319-322`; `dynldf.F90:79-120`) | active |
+| D05 to D06 | `dyn_osm` (`stpmlf.F90:323`), then `dyn_hpg` (`:324-328`; `dynhpg.F90:117-133`) | OSM inactive (`ln_zdfosm=F`); HPG active |
+| after D06 | `dyn_spg` (`stpmlf.F90:332`), then surface stress inside `dyn_zdf` (`dynzdf.F90:353-363`) | outside the D03--D06 accumulator |
+
+Thus neither a separate Coriolis metric term, an SSH-gradient split, nor
+trend bookkeeping is missing from D03--D06. The missing public diagnostic is
+`surface_stress_u/v`, applied by the twin after the enumerated slow terms and
+by NEMO later inside `dyn_zdf`. Round 37 adds it as a coverage-only,
+non-owning row; it is excluded from `mapped_d06` and remains disposed by
+round 36 (`WIND_PLACEMENT_REFUTED`). The corrected closure bar is unchanged:
+all named public components, now including surface stress, must reconstruct
+`diagnostics.total_u/v` to `1e-15`, and the DINO V stress must remain exactly
+zero. The exact D03--D06 ownership ladder and its `1e-12` bars do not change.

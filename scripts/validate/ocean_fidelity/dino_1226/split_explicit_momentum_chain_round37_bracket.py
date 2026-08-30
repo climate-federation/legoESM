@@ -14,7 +14,7 @@ EXPECTED_BIN = {
     for name in (
         "vertical_advection", "vorticity", "lateral_friction",
         "ke_gradient_plus_hpg", "mapped_d06", "diagnostic_total",
-        "diagnostic_sum",
+        "diagnostic_sum", "surface_stress_outside_d03_d06",
     )
 }
 
@@ -48,7 +48,7 @@ def main() -> int:
     metadata_valid = (
         metadata_a == metadata_b
         and metadata_a.get("schema")
-        == "dino-split-explicit-momentum-chain-round37-capture-v1"
+        == "dino-split-explicit-momentum-chain-round37-capture-v2"
         and set(metadata_a.get("files", {})) == EXPECTED_BIN
     )
     first = a / sorted(EXPECTED_BIN)[0]

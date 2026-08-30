@@ -32,6 +32,10 @@ ORDERED_EXACT = (
     "d06_total",
 )
 SOURCE_LINES = {
+    "surface_stress_outside_d03_d06": [
+        "dynzdf.F90:353-363",
+        "ocean_pe_latlon_cgrid.py:3646-3710",
+    ],
     "vertical_advection": [
         "stpmlf.F90:309-314",
         "dynadv.F90:97-103",
@@ -132,7 +136,7 @@ def main() -> int:
     metadata_path = capture / "capture.json"
     metadata = json.loads(metadata_path.read_text())
     if (metadata.get("schema")
-            != "dino-split-explicit-momentum-chain-round37-capture-v1"
+            != "dino-split-explicit-momentum-chain-round37-capture-v2"
             or metadata.get("session_id") != session):
         raise SystemExit("capture metadata/session mismatch")
     if str(capture) not in (bracket["capture_a"], bracket["capture_b"]):
@@ -250,6 +254,7 @@ def main() -> int:
         for row in cumulative_controls.values() for item in row.values())
 
     closure_controls = {}
+    coverage_rows = {}
     for component, mask in (("u", umask), ("v", vmask)):
         diagnostic_total = crop(component, _load_capture(
             capture, metadata, component, "diagnostic_total"))
@@ -263,6 +268,20 @@ def main() -> int:
         closure_controls[f"mapped_sum_{component}"] = (
             _score(mapped_sum, twin[component]["d06_total"], mask)["gate_status"]
             == "AT BAR")
+        stress = crop(component, _load_capture(
+            capture, metadata, component,
+            "surface_stress_outside_d03_d06"))
+        coverage_rows[component] = {
+            "max_abs_tendency": float(np.max(np.abs(stress[mask]))),
+            "nonzero_count": int(np.count_nonzero(stress[mask])),
+            "nemo_application": "dynzdf.F90:353-363 (after D06/dyn_spg)",
+            "d03_d06_owner": False,
+            "round36_disposition": round36["disposition"],
+        }
+    closure_controls["surface_stress_u_present"] = (
+        coverage_rows["u"]["nonzero_count"] > 0)
+    closure_controls["surface_stress_v_structural_zero"] = (
+        coverage_rows["v"]["nonzero_count"] == 0)
 
     plant_controls = {}
     for component, mask in (("u", umask), ("v", vmask)):
@@ -301,6 +320,7 @@ def main() -> int:
         "dynvor": args.nemo_root / "cfgs/DINO/MY_SRC/dynvor.F90",
         "dynldf": args.nemo_root / "cfgs/DINO/MY_SRC/dynldf.F90",
         "dynhpg": args.nemo_root / "cfgs/DINO/MY_SRC/dynhpg.F90",
+        "dynzdf": args.nemo_root / "cfgs/DINO/MY_SRC/dynzdf.F90",
     }
     paths = {
         "round36": args.round36,
@@ -325,6 +345,7 @@ def main() -> int:
         "jax_enable_x64": bool(jax.config.jax_enable_x64),
         "ordered_exact_rows": list(ORDERED_EXACT),
         "nemo_source_lines_by_row": SOURCE_LINES,
+        "coverage_row_surface_stress_outside_d03_d06": coverage_rows,
         "first_failing_exact_term": first_failure,
         "rows": rows,
         "partial_rows_nonowning": partial_rows,
