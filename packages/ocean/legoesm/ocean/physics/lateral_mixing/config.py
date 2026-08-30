@@ -416,6 +416,11 @@ class GMRediConfig(NamedTuple):
     # ``nemo_left`` follows ldftra.F90's jk loop, carrying zn/zah/zhw from
     # surface to bottom. Only the DINO NEMO cards opt in.
     treguier_vertical_reduction_evaluation: str = "tree"
+    # Forward value used by ldf_eiv's sqrt(MAX(rn2b,0)) term. The guarded
+    # floor is the historical AD-safe path. ``nemo_forward_exact`` preserves
+    # NEMO's exact zero forward value and supplies a finite zero derivative.
+    # Only the two DINO NEMO cards opt in.
+    treguier_sqrt_evaluation: str = "guarded_floor"
     # NEMO ldfslp horizontal (1-2-1)⊗(1-2-1)/16 Shapiro smoother on the final
     # interface slopes (ldfslp.F90:304-315).  legoESM omitted it, leaving the
     # interior slope amplitude ~1.27x too large; wet-renormalized so land drops

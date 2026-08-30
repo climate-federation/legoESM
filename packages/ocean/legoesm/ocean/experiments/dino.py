@@ -707,6 +707,9 @@ class DINOConfig:
     # historical tree reduction; the two NEMO cards use source-ordered left
     # accumulation.
     gm_treguier_vertical_reduction_evaluation: str = "tree"
+    # Treguier zn sqrt forward rule. Global default preserves the historical
+    # 1e-30 floor; the two DINO NEMO cards use exact SQRT(MAX(rn2b,0)).
+    gm_treguier_sqrt_evaluation: str = "guarded_floor"
     # GM eddy-induced (bolus) advection FORM for gm_redi_slope_scheme=
     # "nemo_iso_lap" (GMRediConfig.gm_bolus_advection): "centred" (default, byte-
     # identical — 2nd-order centred bolus flux inside the iso operator) or
@@ -1362,6 +1365,7 @@ DINO_RECIPES: dict[str, dict] = {
         "gm_redi_slope_face_thickness_evaluation": "nemo_qco_live",
         "gm_redi_slope_depth_evaluation": "nemo_qco_live_literal",
         "gm_treguier_vertical_reduction_evaluation": "nemo_left",
+        "gm_treguier_sqrt_evaluation": "nemo_forward_exact",
         "gm_bolus_kappa_face_average": True,
         # #1226 root cause: NEMO dynzad.F90 is the ADVECTIVE form w*du/dz,
         # not the FLUX form d(w*u)/dz that "centered_full" (and the default
@@ -3282,6 +3286,12 @@ def dino_lat_lon_model_config(
             "unknown DINOConfig.gm_treguier_vertical_reduction_evaluation "
             f"{cfg.gm_treguier_vertical_reduction_evaluation!r}; expected "
             "'tree' or 'nemo_left'")
+    if cfg.gm_treguier_sqrt_evaluation not in (
+            "guarded_floor", "nemo_forward_exact"):
+        raise ValueError(
+            "unknown DINOConfig.gm_treguier_sqrt_evaluation "
+            f"{cfg.gm_treguier_sqrt_evaluation!r}; expected "
+            "'guarded_floor' or 'nemo_forward_exact'")
     if cfg.gm_redi_mld_criterion not in ("rho_c", "n2_integral"):
         raise ValueError(
             "unknown DINOConfig.gm_redi_mld_criterion "
@@ -3360,6 +3370,7 @@ def dino_lat_lon_model_config(
             slope_depth_evaluation=cfg.gm_redi_slope_depth_evaluation,
             treguier_vertical_reduction_evaluation=(
                 cfg.gm_treguier_vertical_reduction_evaluation),
+            treguier_sqrt_evaluation=cfg.gm_treguier_sqrt_evaluation,
             visbeck=VisbeckConfig(
                 enabled=(cfg.use_gm_redi
                          and cfg.gm_kappa_scheme == "visbeck"),
@@ -3399,6 +3410,7 @@ def dino_lat_lon_model_config(
             slope_depth_evaluation=cfg.gm_redi_slope_depth_evaluation,
             treguier_vertical_reduction_evaluation=(
                 cfg.gm_treguier_vertical_reduction_evaluation),
+            treguier_sqrt_evaluation=cfg.gm_treguier_sqrt_evaluation,
             # Exactly ONE adaptive-κ diagnostic on (the GM/Redi dispatch
             # raises if both are enabled): "visbeck" (historical) or
             # "treguier" (the NEMO nn_aei_ijk_t=21 oracle scaling, cap

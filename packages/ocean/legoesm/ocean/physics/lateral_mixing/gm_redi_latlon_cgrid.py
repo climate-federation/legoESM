@@ -1477,6 +1477,23 @@ def _nemo_treguier_left_reductions(zn_term, zah_term, ze3w, zhw_offset):
             zhw_offset, dtype=zn_term.dtype)))
 
 
+@jax.custom_jvp
+def _nemo_sqrt_nonnegative_forward_exact(value):
+    """NEMO ``SQRT(MAX(value,0))`` forward with a finite zero tangent."""
+    return jnp.sqrt(jnp.maximum(value, jnp.zeros_like(value)))
+
+
+@_nemo_sqrt_nonnegative_forward_exact.defjvp
+def _nemo_sqrt_nonnegative_forward_exact_jvp(primals, tangents):
+    (value,), (value_dot,) = primals, tangents
+    result = _nemo_sqrt_nonnegative_forward_exact(value)
+    safe_result = jnp.where(result > 0.0, result, jnp.ones_like(result))
+    result_dot = jnp.where(
+        value > 0.0, 0.5 * value_dot / safe_result,
+        jnp.zeros_like(value_dot))
+    return result, result_dot
+
+
 def compute_treguier_kappa_gm_nemo_native(
     rho: jnp.ndarray,
     T: jnp.ndarray,
@@ -1497,6 +1514,7 @@ def compute_treguier_kappa_gm_nemo_native(
     slope_n2: str = "adiabatic",
     omega: float = constants.Omega,
     vertical_reduction_evaluation: str = "tree",
+    sqrt_evaluation: str = "guarded_floor",
     pn2_override: jnp.ndarray | None = None,
     e3w_override: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
@@ -1604,13 +1622,21 @@ def compute_treguier_kappa_gm_nemo_native(
     # ~ 1e-15, negligible -- exactly the guard compute_treguier_kappa_gm
     # (_gm_redi_common.py) already uses for the same reason.
     zn2 = jnp.maximum(pn2, 0.0)
+    if sqrt_evaluation == "nemo_forward_exact":
+        sqrt_zn2 = _nemo_sqrt_nonnegative_forward_exact(pn2)
+    elif sqrt_evaluation == "guarded_floor":
+        sqrt_zn2 = jnp.sqrt(jnp.maximum(zn2, 1e-30))
+    else:
+        raise ValueError(
+            "GMRediConfig.treguier_sqrt_evaluation must be "
+            f"'guarded_floor' or 'nemo_forward_exact', got {sqrt_evaluation!r}")
     _reduction = vertical_reduction_evaluation
     if _reduction == "nemo_left":
         # ldftra.F90:665,687-696: the three 2-D work arrays are initialized
         # once, then each jk contributes exactly once in surface-to-bottom
         # source order. A tree reduction changes the last bits of all three
         # operands and those bits survive the Rossby-radius/timescale chain.
-        _zn_term = jnp.sqrt(jnp.maximum(zn2, 1e-30)) * e3w_3d
+        _zn_term = sqrt_zn2 * e3w_3d
         _ze3w = e3w_3d * wmask3
         _zah_term = zn2 * (wslpi ** 2 + wslpj ** 2) * _ze3w
 
@@ -1618,7 +1644,7 @@ def compute_treguier_kappa_gm_nemo_native(
             _zn_term, _zah_term, _ze3w, TREGUIER_ZHW_OFFSET_M)
     elif _reduction == "tree":
         # Preserve the generic/off statements byte-for-byte.
-        zn = jnp.sum(jnp.sqrt(jnp.maximum(zn2, 1e-30)) * e3w_3d, axis=-1)  # :689, unmasked term
+        zn = jnp.sum(sqrt_zn2 * e3w_3d, axis=-1)  # :689, unmasked term
         ze3w = e3w_3d * wmask3
         zah = jnp.sum(zn2 * (wslpi ** 2 + wslpj ** 2) * ze3w, axis=-1)  # :694-695
         zhw = TREGUIER_ZHW_OFFSET_M + jnp.sum(ze3w, axis=-1)           # :665,696
@@ -3809,6 +3835,8 @@ def gm_redi_tracer_tendency_latlon(
                 omega=omega,
                 vertical_reduction_evaluation=getattr(
                     cfg, "treguier_vertical_reduction_evaluation", "tree"),
+                sqrt_evaluation=getattr(
+                    cfg, "treguier_sqrt_evaluation", "guarded_floor"),
                 pn2_override=native_slope_pn2,
                 e3w_override=native_slope_e3w,
             )

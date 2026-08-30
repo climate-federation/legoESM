@@ -177,6 +177,7 @@ def test_row30_selectors_are_scoped_to_the_two_dino_nemo_cards():
             assert cfg.gm_redi_slope_face_thickness_evaluation == "nemo_qco_live"
             assert cfg.gm_redi_slope_depth_evaluation == "nemo_qco_live_literal"
             assert cfg.gm_treguier_vertical_reduction_evaluation == "nemo_left"
+            assert cfg.gm_treguier_sqrt_evaluation == "nemo_forward_exact"
         else:
             assert cfg.gm_redi_slope_n2_evaluation == "recompute", name
             assert cfg.gm_redi_slope_prd_geometry_stage == "current_step", name
@@ -186,6 +187,7 @@ def test_row30_selectors_are_scoped_to_the_two_dino_nemo_cards():
             assert cfg.gm_redi_slope_depth_evaluation == \
                 "legacy_jacobian_t_surface", name
             assert cfg.gm_treguier_vertical_reduction_evaluation == "tree", name
+            assert cfg.gm_treguier_sqrt_evaluation == "guarded_floor", name
 
     assert GMRediConfig().slope_n2_evaluation == "recompute"
     assert GMRediConfig().slope_prd_geometry_stage == "current_step"
@@ -195,6 +197,7 @@ def test_row30_selectors_are_scoped_to_the_two_dino_nemo_cards():
     assert GMRediConfig().slope_depth_evaluation == \
         "legacy_jacobian_t_surface"
     assert GMRediConfig().treguier_vertical_reduction_evaluation == "tree"
+    assert GMRediConfig().treguier_sqrt_evaluation == "guarded_floor"
     explicit_legacy = dataclasses.replace(
         DINOConfig(), gm_redi_slope_n2_evaluation="recompute",
         gm_redi_slope_prd_geometry_stage="current_step",
@@ -202,7 +205,8 @@ def test_row30_selectors_are_scoped_to_the_two_dino_nemo_cards():
         gm_redi_slope_metric_evaluation="division",
         gm_redi_slope_face_thickness_evaluation="static_face",
         gm_redi_slope_depth_evaluation="legacy_jacobian_t_surface",
-        gm_treguier_vertical_reduction_evaluation="tree")
+        gm_treguier_vertical_reduction_evaluation="tree",
+        gm_treguier_sqrt_evaluation="guarded_floor")
     assert explicit_legacy == DINOConfig()
 
     fe = dino_config_for_recipe("nemo_dino_kamm")
@@ -222,6 +226,11 @@ def test_row30_selectors_are_scoped_to_the_two_dino_nemo_cards():
     with pytest.raises(ValueError, match="gm_treguier_vertical_reduction"):
         dino_lat_lon_model_config(
             dino_lat_lon_grid(bad_reduction, n_lon=8), bad_reduction)
+    bad_sqrt = dataclasses.replace(
+        DINOConfig(), gm_treguier_sqrt_evaluation="silent_typo")
+    with pytest.raises(ValueError, match="gm_treguier_sqrt_evaluation"):
+        dino_lat_lon_model_config(
+            dino_lat_lon_grid(bad_sqrt, n_lon=8), bad_sqrt)
 
 
 def test_nemo_qco_live_face_thickness_matches_hand_source_order_and_is_red():
