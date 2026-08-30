@@ -169,7 +169,7 @@ def main() -> int:
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(root / "docs/ocean/fidelity/PREREG_split_explicit_momentum_chain_round54.md"),
             "nemo_stpmlf": _sha(nemo / "cfgs/DINO/MY_SRC/stpmlf.F90"),
-            "production_model": _sha(root / "packages/ocean/legoesm/ocean/model.py"),
+            "production_model": _sha(root / "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py"),
             "production_momentum": _sha(root / "packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py"),
         },
         "disposition": disposition,
