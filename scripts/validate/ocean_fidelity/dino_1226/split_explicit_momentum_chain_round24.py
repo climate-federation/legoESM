@@ -137,8 +137,10 @@ def main() -> int:
         hk = compute_layer_thickness(br.state.eta.data,br.state.H_bathy.data,br.z_coord,min_water_column_m=mc.min_water_column_m)
         base = _build_een_barotropic_inputs(hk,br.geometry,br.state.land_mask.data,br.state.u_mask.data,br.state.v_mask.data,jnp.float64,metric_complete=True,een_q_boundary=mc.een_q_boundary,een_e3f_scheme=mc.een_e3f_scheme,dz_ref=br.z_coord.dz_ref)
         if metric_rows is None:
-            ones=np.ones_like(mx["e1u"],dtype=bool)
-            metric_rows={"e1u":r22._metric(np.asarray(br.geometry.dx_u)[:,1:],mx["e1u"],ones),"e2u":r22._metric(np.asarray(br.geometry.dy_u)[:,1:],mx["e2u"],ones),"e1v":r22._metric(np.asarray(br.geometry.dx_v)[1:],mx["e1v"],ones),"e2v":r22._metric(np.asarray(br.geometry.dy_v)[1:],mx["e2v"],ones)}
+            # Metrics are coefficient operands only where their corresponding
+            # face is wet. The synthetic polar boundary face is deliberately
+            # zero in legoESM and is never read by a scored NEMO coefficient.
+            metric_rows={"e1u":r22._metric(np.asarray(br.geometry.dx_u)[:,1:],mx["e1u"],umask),"e2u":r22._metric(np.asarray(br.geometry.dy_u)[:,1:],mx["e2u"],umask),"e1v":r22._metric(np.asarray(br.geometry.dx_v)[1:],mx["e1v"],vmask),"e2v":r22._metric(np.asarray(br.geometry.dy_v)[1:],mx["e2v"],vmask)}
         for q in (0,1):
             pre=dict(base)
             if q:
