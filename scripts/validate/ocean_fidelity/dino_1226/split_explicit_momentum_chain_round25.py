@@ -79,7 +79,8 @@ def _coefficient(
     # 1/12 in the triad, neighbour metric in the transported velocity,
     # JAX reduction, then depth/local-metric divisions.
     t = np.asarray(jnp.asarray(1.0 / 12.0) * jnp.asarray(qsum))
-    vsrc = np.asarray(jnp.asarray(neighbor_metric) * jnp.asarray(1.0))
+    vsrc = np.asarray(
+        jnp.asarray(neighbor_metric)[..., jnp.newaxis] * jnp.asarray(1.0))
     flux = np.asarray(
         (jnp.asarray(neighbor) * jnp.asarray(vsrc))
         * jnp.asarray(neighbor_mask))
