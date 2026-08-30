@@ -2680,6 +2680,8 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
                     "ahtv": aht_v,
                     "wslpi": wslpi,
                     "wslpj": wslpj,
+                    "bolus_wslpi": bolus_wslpi,
+                    "bolus_wslpj": bolus_wslpj,
                     "zA31": zA31,
                     "zA32": zA32,
                     "zdit": zdit,
