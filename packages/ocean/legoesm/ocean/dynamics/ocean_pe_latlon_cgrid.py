@@ -1432,13 +1432,26 @@ def _nemo_qco_zad_operands(
         nemo_literal_continuity_divergence,
     )
     tmask = jnp.asarray(mask_3d, dtype=eta_now.dtype)
+    h0 = jnp.zeros_like(eta_now)
+    for jk in range(nlev):
+        h0 = h0 + e3t0[..., jk] * tmask[..., jk]
+    h0_safe = jnp.where(h0 > 0.0, h0, 1.0)
+    r3_now = eta_now / h0_safe
+    live_t = e3t0 * (1.0 + r3_now[..., None] * tmask) * tmask
     flux_levels = []
     barotropic_div = jnp.zeros_like(eta_now)
     for jk in range(nlev):
-        level = nemo_literal_continuity_divergence(
+        transport_div = nemo_literal_continuity_divergence(
             live_u[..., jk], live_v[..., jk], u[..., jk], v[..., jk],
             u_mask_3d[..., jk], v_mask_3d[..., jk], grid,
         ) * tmask[..., jk]
+        # divhor.F90:180-184 divides the transport divergence by live e3t;
+        # ssh_nxt/wzv then multiply by that same e3t.  Preserve the executed
+        # divide/multiply instead of algebraically cancelling it -- row 4 is
+        # sensitive to those last bits through the vertical recurrence.
+        safe_e3t = jnp.where(tmask[..., jk] > 0.5, live_t[..., jk], 1.0)
+        hdiv = transport_div / safe_e3t
+        level = (live_t[..., jk] * hdiv) * tmask[..., jk]
         flux_levels.append(level)
         barotropic_div = barotropic_div + level
     flux_div = jnp.stack(flux_levels, axis=-1)
@@ -1447,8 +1460,6 @@ def _nemo_qco_zad_operands(
           else jnp.asarray(freshwater_eta_tendency, dtype=eta_now.dtype))
     eta_after = (eta_before - dt * barotropic_div + dt * fw
                  ) * tmask[..., 0]
-    h0 = jnp.sum(e3t0 * tmask, axis=-1)
-    h0_safe = jnp.where(h0 > 0.0, h0, 1.0)
     r3_delta = eta_after / h0_safe - eta_before / h0_safe
     stretch_rate = e3t0 * (r3_delta / dt)[..., None]
 
