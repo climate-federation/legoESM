@@ -702,3 +702,86 @@ and tracer Asselin remain ordered-blocked. The literal accumulator is the
 genuine too-large boundary for this round because the same carry contract must
 remain correct in differentiable scan, fori-loop, and wide-halo chunked paths.
 No new held run is required; all operands already exist.
+
+## Rounds 59--64: literal transport carry and live Kmm face thickness
+
+Round 59's held production replay (SHA-256
+`85ea27cce4804d98f281940fe472e798d9fa64c741c23bb55e3fca40ee9ca677`)
+reduced row 8.3 to a 104-column, `1.4948039082e-15` association residual.
+Round 60 (SHA-256
+`b3ef5c0534ff1348dbdb581686aa602cc1d9eca9ef61336ca0b4130217e54e2d`)
+proved that NEMO's raw `za2*zhU*r1_e2u` / V analogue, followed by one final
+division, is exact on the retained operands.  The production implementation
+therefore preserves that accumulation topology consistently in the scan,
+fori-loop, and wide-halo chunk paths; generic paths retain the normalized
+historical form.  The direct cycle then made 8.3--8.4 bit-exact and exposed
+8.5, the live Kmm face thickness, at `7.4551634675e-5` in all 9,758 columns
+(round 63 SHA-256
+`3a1a25ca328761b1bcbeb87953751a3a15b1ac00852b2ff62fd4223d107d24e0`).
+
+Round 64 (SHA-256
+`8858d60a51b07181e290fead087e4bab69c0d15e271bbdecb7d458ba12d4e4c7`)
+certifies rows 8.3--8.7 after threading the live Kmm QCO face thickness: rows
+8.3--8.6 are bit-exact and 8.7 has maximum normalized error
+`7.1212637199e-15`, inside its accumulating bar.  The first failure moves to
+the GM increment, row 8.8 (`8938/9758`, maximum `3.8631299623e-7`).
+
+## Rounds 65--75: GM coefficient ladder closes tracer entry
+
+The ordered GM peel first localized row 8.8 to `aeiu`, then to the Treguier
+`zn` precursor.  The initial carried-N2 result exposed two coupled geometry
+requirements: raw `rn2b` and the complete live Kmm W thickness including its
+surface value.  A partial surface carry worsened the registered arm and is
+retained as a red control, not an ownership result.  Round 71 (SHA-256
+`6500acfa930c0342430fd1e57cfb1da023b0978e8fda3561e6133ffe12368821`)
+makes `e3w(Kmm)` and `rn2b` exact and reduces row 8.8 to
+`2.4207639254e-11`; its first residual coefficient is `zaeiw`.
+
+The post-chain and Rossby-radius factorials exonerate the `zRo^2*sqrt(zah/zhw)`
+association, Coriolis reconstruction, and bounds, localizing successively to
+`zRo`, `zn`, and finally the forward value of
+`sqrt(MAX(rn2b,0))`.  Round 74 (SHA-256
+`56db4716cba582654fbd7bb55178a699b55678a1afdea9d8d8fe3cc670eea6fb`)
+shows that exact-zero forward sqrt closes `zn`, `zRo`, `zaeiw`, `aeiu`, and
+row 8.8, while the historical `1e-30` floor remains red in 982 columns.  The
+production selector preserves NEMO's exact forward zero with a custom finite
+zero derivative for nonpositive inputs; only the two NEMO DINO cards opt in.
+
+Round 75 (SHA-256
+`750c40875300ddda48287d84089c8931eaaecc71e8aab6ce7f4e18a0c806edf4`)
+classifies `TRACER_ENTRY_ROW8_AT_BAR_EXACT_GM_SQRT`.  Rows 8.3--8.6 are
+bit-exact; maxima for 8.7--8.10 are respectively
+`7.1213e-15`, `1.3503e-13`, `7.1287e-15`, and `3.6437e-15`, all inside the
+unchanged accumulating bar.  The full tracer-entry chain is therefore closed.
+
+## Rounds 76--78: Redi entry and live-W-thickness majority owner
+
+Round 76 (SHA-256
+`45e4f8afda737b41e457668fe1ab7cc28ded09d3f7be06fabdd15e9804936a76`)
+is the first ordered tracer-tail measurement.  It stops at Redi temperature:
+all 9,920 wet columns are red, maximum normalized error
+`0.1165888037`, correlation `0.9999949375`, and RMS ratio `1.0000806132`.
+Salinity is co-located red with maximum `0.1119039414`.  Tracer ZDF and
+Asselin remain ordered-blocked.
+
+Round 77 (artifact
+`/tmp/dino_split_explicit_momentum_chain_round77.json`, SHA-256
+`dcc0cff4c63b30024794ad25b023b65223fe87137e5052b6d7dc478066973d14`)
+substitutes only NEMO's live `e3w(:,:,Kmm)` into both MSC uses:
+`traldf_iso.F90:314-332`'s `akz` construction and
+`traldf_iso_scheme.h90:126-129`'s explicit-A33 reciprocal.  Temperature's
+maximum falls to `7.2152808253e-4` (99.381% removed; correlation
+`0.9999999994435`) and salinity's to `5.9841977660e-4` (99.465% removed;
+correlation `0.9999999995771`).  Both remain red in every column, so the
+registered disposition is `REDI_MSC_E3W_MAJORITY`, not full ownership, and
+the production selector is deliberately not promoted yet.
+
+No retained stream contains the remaining Redi flux operands.  Round 78 is
+therefore the current held frontier: six deterministic full-halo streams for
+T/S `zfu`, `zfv`, and total `zfw_kp1`, scored in that NEMO order at the
+pointwise bar.  Units `9450--9455`, zeroed halos, exact shared-stream bracket,
+and the complete build/run/score cascade are frozen in
+`dino_split_explicit_momentum_chain_round78_handoff.md`.  A `zfw` failure
+releases the A31/A32-versus-A33 split; six passing fluxes with a red total
+release the divergence/volume-factor association peel.  This is the first
+measurement requiring a held NEMO run, so the ordered walk stops here.

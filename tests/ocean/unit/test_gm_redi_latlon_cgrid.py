@@ -1491,6 +1491,32 @@ class TestNemoIsoLapOperator:
             cfg_n.kappa_Redi, act)
         assert jnp.allclose(dT, dT_direct, rtol=1e-12, atol=1e-30)
 
+    def test_nemo_iso_lap_diagnostic_fluxes_preserve_default(self):
+        """Round-78 flux capture is observational: requesting zfu/zfv/zfw
+        must preserve the tendency exactly, while each returned flux is a
+        real, shape-matched production operand (not a zero/self control)."""
+        setup = _stratified_with_meridional_tilt()
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian,
+         rho, T, S, cfg) = setup
+        S_x, S_y = self._slopes(setup)
+        z_top = jnp.cumsum(z_coord.dz_ref) - z_coord.dz_ref
+        act = ((mask[:, :, jnp.newaxis] > 0.5)
+               & (z_top[jnp.newaxis, jnp.newaxis, :]
+                  < H_bathy[:, :, jnp.newaxis])).astype(T.dtype)
+        plain = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act)
+        observed, diagnostics = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, return_diagnostics=True)
+        assert jnp.array_equal(observed, plain)
+        assert set(diagnostics) == {"zfu", "zfv", "zfw_kp1"}
+        assert all(value.shape == T.shape for value in diagnostics.values())
+        # The fixture varies meridionally only, so zfu is the intentional
+        # structural zero; zfv and the rotated vertical flux must both fire.
+        assert bool(jnp.any(diagnostics["zfv"] != 0.0))
+        assert bool(jnp.any(diagnostics["zfw_kp1"] != 0.0))
+
     def test_nemo_iso_lap_gm_conserves(self):
         """The GM bolus (kappa_GM>0, NEMO ln_ldfeiv) is a curl-of-streamfunction
         transport, so its discrete divergence telescopes to zero and it conserves
