@@ -55,6 +55,7 @@ ROUND77_SHA = "dcc0cff4c63b30024794ad25b023b65223fe87137e5052b6d7dc478066973d14"
 ROUND78_SHA = "30f63d47e11d632e214490c2d6fc8756170a03f12f86635ba6a8b0a8b8d6e7f3"
 ROUND79_SHA = "dca39985e54bd95f20ee9b1bfb4ab3bc39013953c95aa8fb74965eb6618f6f61"
 ROUND80_SHA = "e0803ac9f844ec77c843885247b6ad0809b33f02894b88376690ec870f9b8493"
+ROUND81_SHA = "247acae491d6568febb16d81a7a96e5b2c22a4246cf6b2e613ce640d38eaee71"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -185,6 +186,7 @@ def main() -> int:
     parser.add_argument("--round78", type=Path)
     parser.add_argument("--round79", type=Path)
     parser.add_argument("--round80", type=Path)
+    parser.add_argument("--round81", type=Path)
     parser.add_argument("--hold-slow-forcing", action="store_true")
     parser.add_argument("--oracle-transport", action="store_true")
     parser.add_argument("--capture-cycle", action="store_true")
@@ -207,6 +209,7 @@ def main() -> int:
     parser.add_argument("--redi-zfu-operand-ladder", action="store_true")
     parser.add_argument("--redi-zfu-postfix", action="store_true")
     parser.add_argument("--redi-zfu-kmm-postfix", action="store_true")
+    parser.add_argument("--redi-zfu-slope-kmm-postfix", action="store_true")
     parser.add_argument("--redi-run-dir", type=Path)
     parser.add_argument("--redi-flux-run-dir", type=Path)
     parser.add_argument("--redi-flux-bracket", type=Path)
@@ -607,6 +610,19 @@ def main() -> int:
             raise SystemExit("round 80 does not admit the Kmm correction")
     elif args.round80 is not None:
         raise SystemExit("--round80 requires --redi-zfu-kmm-postfix")
+    prior81 = None
+    if args.redi_zfu_slope_kmm_postfix:
+        if not args.redi_zfu_kmm_postfix:
+            raise SystemExit(
+                "--redi-zfu-slope-kmm-postfix requires the Kmm face arm")
+        if args.round81 is None or _sha(args.round81.resolve()) != ROUND81_SHA:
+            raise SystemExit("official corrected round-81 receipt required")
+        prior81 = json.loads(args.round81.read_text())
+        if prior81.get("disposition") != (
+                "REDI_ZFU_T_KMM_FACE_FIXED_RESIDUAL_FINAL_USLP"):
+            raise SystemExit("round 81 does not admit the slope Kmm carry")
+    elif args.round81 is not None:
+        raise SystemExit("--round81 requires --redi-zfu-slope-kmm-postfix")
     if _sha(args.raw_artifact.resolve()) != RAW_ARTIFACT_SHA:
         raise SystemExit("admitted held row-8 artifact changed")
     held = args.held_dir.resolve()
@@ -1931,12 +1947,23 @@ def main() -> int:
         else:
             disposition = "REDI_ZFU_T_KMM_FACE_FIXED_REGRESSION"
         first_flux_subrow = "81.T.1"
+    if args.redi_zfu_slope_kmm_postfix and valid:
+        current = redi_zfu_operand_ladder["arms"]["S0H0K0"]
+        e3u = redi_zfu_operand_ladder["operand_metrics"]["live_e3u"]
+        uslp = redi_zfu_operand_ladder["operand_metrics"]["final_uslp"]
+        if current["pass"] and e3u["pass"] and uslp["pass"]:
+            disposition = "REDI_ZFU_T_KMM_SLOPE_AT_BAR"
+        else:
+            disposition = "REDI_ZFU_T_KMM_SLOPE_REGRESSION"
+        first_flux_subrow = "82.T.1"
     receipt_first = (first_flux_subrow
                      if args.redi_flux_ladder and first_flux_subrow is not None
                      else first)
     nemo = args.nemo_root.resolve()
     receipt = {
-        "schema": ("dino-split-explicit-momentum-chain-round81-v1"
+        "schema": ("dino-split-explicit-momentum-chain-round82-v1"
+                   if args.redi_zfu_slope_kmm_postfix else
+                   "dino-split-explicit-momentum-chain-round81-v1"
                    if args.redi_zfu_kmm_postfix else
                    "dino-split-explicit-momentum-chain-round80-v1"
                    if args.redi_zfu_postfix else
@@ -2058,12 +2085,16 @@ def main() -> int:
                if args.redi_zfu_postfix else {}),
             **({"round80": _sha(args.round80.resolve())}
                if args.redi_zfu_kmm_postfix else {}),
+            **({"round81": _sha(args.round81.resolve())}
+               if args.redi_zfu_slope_kmm_postfix else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(
                 root / "docs/ocean/fidelity" /
-                ("PREREG_split_explicit_momentum_chain_round81.md"
+                ("PREREG_split_explicit_momentum_chain_round82.md"
+                 if args.redi_zfu_slope_kmm_postfix else
+                 "PREREG_split_explicit_momentum_chain_round81.md"
                  if args.redi_zfu_kmm_postfix else
                  "PREREG_split_explicit_momentum_chain_round80.md"
                  if args.redi_zfu_postfix else
@@ -2113,7 +2144,9 @@ def main() -> int:
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
             "nemo_ldftra": _sha(nemo / "cfgs/DINO/MY_SRC/ldftra.F90"),
         },
-        "arm": ("redi_zfu_kmm_postfix"
+        "arm": ("redi_zfu_slope_kmm_postfix"
+                if args.redi_zfu_slope_kmm_postfix else
+                "redi_zfu_kmm_postfix"
                 if args.redi_zfu_kmm_postfix else
                 "redi_zfu_postfix"
                 if args.redi_zfu_postfix else
@@ -2147,7 +2180,11 @@ def main() -> int:
                 "oracle_transport" if args.oracle_transport else
                 "held_slow_forcing" if args.hold_slow_forcing else
                 "production"),
-        "ordered_next": ("redi_zfu_final_uslp_residual" if disposition in (
+        "ordered_next": ("redi_zfu_temperature_vflux" if disposition ==
+                          "REDI_ZFU_T_KMM_SLOPE_AT_BAR" else
+                          "stop_postfix_regression" if disposition ==
+                          "REDI_ZFU_T_KMM_SLOPE_REGRESSION" else
+                          "redi_zfu_final_uslp_residual" if disposition in (
                           "REDI_ZFU_T_POSTFIX_RESIDUAL_FINAL_USLP",
                           "REDI_ZFU_T_KMM_FACE_FIXED_RESIDUAL_FINAL_USLP") else
                           "redi_zfu_temperature_vflux" if disposition in (

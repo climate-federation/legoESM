@@ -4944,6 +4944,7 @@ class LatLonCGridOceanModel:
                 native_prd_TS=_gm_native_prd_TS,
                 native_slope_pn2=_gm_native_pn2,
                 native_slope_e3w=_gm_native_e3w,
+                native_slope_eta=state.eta.data,
                 # tra_ldf runs after dynamics but e3u/e3v are indexed Kmm:
                 # carry the step-entry Nnn SSH rather than recomputing from
                 # state_new.eta (Naa). stpmlf.F90:528,548 + scheme.h90:73-74.
@@ -4992,6 +4993,7 @@ class LatLonCGridOceanModel:
                     native_prd_TS=_gm_native_prd_TS,
                     native_slope_pn2=_gm_native_pn2,
                     native_slope_e3w=_gm_native_e3w,
+                    native_slope_eta=state.eta.data,
                     # #1226: the SAME wall masks the tendency dispatcher uses,
                     # so the nemo_native K33 slopes/masks are bit-identical to
                     # the explicit operator's (staircase-aware; the K33-side
@@ -9879,6 +9881,7 @@ class LatLonCGridOceanModel:
                 kappa_redi_override=_kri_static,
                 kappa_redi_v_override=_kri_v_static,
                 density_jacobian=_gm_dj,
+                native_slope_eta=state.eta.data,
                 redi_flux_eta=state.eta.data,
                 dt=dt, eos_depth=_eos_depth)
             dT_n = dT_n + dt * dT_gm    # noqa: N806
@@ -9892,6 +9895,7 @@ class LatLonCGridOceanModel:
                     kappa_redi_override=_kri_static,
                     kappa_redi_v_override=_kri_v_static,
                     density_jacobian=_gm_dj,
+                    native_slope_eta=state.eta.data,
                     # #1226: same wall masks as the tendency call above.
                     u_mask=u_mask, v_mask=v_mask, dt=dt, eos_depth=_eos_depth)
         du_p = (state.u_incr_prev.data if state.u_incr_prev is not None

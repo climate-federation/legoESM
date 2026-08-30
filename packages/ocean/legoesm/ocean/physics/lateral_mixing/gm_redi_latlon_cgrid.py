@@ -3730,6 +3730,7 @@ def gm_redi_tracer_tendency_latlon(
     native_prd_TS: tuple[jnp.ndarray, jnp.ndarray] | None = None,
     native_slope_pn2: jnp.ndarray | None = None,
     native_slope_e3w: jnp.ndarray | None = None,
+    native_slope_eta: jnp.ndarray | None = None,
     redi_flux_eta: jnp.ndarray | None = None,
     dt: float | None = None,
     return_bolus_transport: bool = False,
@@ -3806,6 +3807,7 @@ def gm_redi_tracer_tendency_latlon(
     # tiny near-seafloor density gradient and sign-flips the eiv transport;
     # see gm_redi_density_and_jacobian's docstring).
     _eos_mk_kw = {"rho0": rho_0} if eos_depth == "geometric" else {}
+    _native_eta = eta if native_slope_eta is None else native_slope_eta
     eos_fn = make_eos_fn(eos, eos_linear, **_eos_mk_kw)
     if density_jacobian is None:
         rho, jacobian = gm_redi_density_and_jacobian(
@@ -3878,7 +3880,7 @@ def gm_redi_tracer_tendency_latlon(
             _act_kgm = _nemo_native_active_3d(mask, z_coord, H_bathy, T.dtype)
             _uslp_kgm, _vslp_kgm, _wslpi_kgm, _wslpj_kgm = compute_nemo_native_slopes(
                 rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg, eos_fn,
-                jacobian=jacobian, eta=eta, H_bathy=H_bathy,
+                jacobian=jacobian, eta=_native_eta, H_bathy=H_bathy,
                 prd_jacobian=_native_prd_J,
                 prd_TS_override=native_prd_TS,
                 pn2_override=native_slope_pn2,
@@ -4149,7 +4151,7 @@ def gm_redi_tracer_tendency_latlon(
             _nat = compute_nemo_native_slopes(
                 rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg,
                 eos_fn, rho_0=rho_0, g=g, active_3d=_active_3d,
-                jacobian=jacobian, eta=eta, H_bathy=H_bathy,
+                jacobian=jacobian, eta=_native_eta, H_bathy=H_bathy,
                 prd_jacobian=_native_prd_J,
                 prd_TS_override=native_prd_TS,
                 pn2_override=native_slope_pn2,
@@ -4251,6 +4253,7 @@ def compute_isoneutral_K33_latlon(
     native_prd_TS: tuple[jnp.ndarray, jnp.ndarray] | None = None,
     native_slope_pn2: jnp.ndarray | None = None,
     native_slope_e3w: jnp.ndarray | None = None,
+    native_slope_eta: jnp.ndarray | None = None,
     u_mask: jnp.ndarray | None = None,
     v_mask: jnp.ndarray | None = None,
     dt: float | None = None,
@@ -4341,9 +4344,10 @@ def compute_isoneutral_K33_latlon(
         else:
             _vm = v_mask
         _native_prd_J = _J if native_prd_jacobian is None else native_prd_jacobian
+        _native_eta = eta if native_slope_eta is None else native_slope_eta
         _, _, _wi, _wj = compute_nemo_native_slopes(
             _rho, T, S, _m, _um, _vm, z_coord, grid, cfg, _eosfn,
-            jacobian=_J, eta=eta, H_bathy=H_bathy,
+            jacobian=_J, eta=_native_eta, H_bathy=H_bathy,
             prd_jacobian=_native_prd_J,
             prd_TS_override=native_prd_TS,
             pn2_override=native_slope_pn2,
