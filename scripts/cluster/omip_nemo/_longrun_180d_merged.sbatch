@@ -51,6 +51,7 @@ rc=$?; [ $rc -eq 0 ] || { echo "FATAL: gate rc=$rc"; exit 1; }
 JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --mesh data/grids/eORCA1.2_mesh_mask.nc --dt 150 --min-levels 2 \
   --C-smag-lap 3.0 --smag-cfl-safety 0.125 \
+  --visc-schedule '0:1e4:3.0,8:1e4:1.5,16:1e4:0.5' \
   --ew-cyclic-overlap --nemo-vertical --partial-cell --pgf-scheme smc03 \
   --adaptive-implicit-vertadv --momentum-rk3 --geothermal --runoff \
   --sss-restore --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 \
