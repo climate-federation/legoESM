@@ -2209,6 +2209,10 @@ class LatLonCGridOceanConfig(NamedTuple):
     # "nemo_literal" supplies Kaa-continuity ww and live Kmm e3u/e3v as one
     # inseparable operand pair.  Only meaningful with nemo_advective.
     zad_qco_evaluation: str = "generic"
+    # Post-barotropic WZV call-2 composition. ``nemo_literal`` pairs the
+    # second Kmm hdiv with actual barotropic Kaa r3t; depends on the coupled
+    # call-1 QCO operands above. Generic default is byte-compatible.
+    wzv_call2_evaluation: str = "generic"
     # Lateral (harmonic) momentum-viscosity OPERATOR form. Selects how the A_h
     # Laplacian viscosity acts on the vector velocity field:
     #   "vector_laplacian" (default) — legoESM's VECTOR Laplacian

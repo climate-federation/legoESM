@@ -55,6 +55,7 @@ from legoesm.ocean.state import (
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     latlon_cgrid_ocean_baroclinic_tendencies,
     compute_frozen_geom_density,
+    nemo_qco_wzv_operands,
     interp_to_v_points,
     interp_to_v_points_multi,
     centered_cell_to_uface,
@@ -2201,6 +2202,16 @@ class LatLonCGridOceanModel:
                 "zad_qco_evaluation='nemo_literal' requires "
                 "vertical_momentum_scheme='nemo_advective'; the QCO ww and "
                 "live Kmm thickness operands are a coupled dynzad path")
+        _wzv_call2 = getattr(config, "wzv_call2_evaluation", "generic")
+        if _wzv_call2 not in {"generic", "nemo_literal"}:
+            raise ValueError(
+                "wzv_call2_evaluation must be one of ['generic', "
+                f"'nemo_literal'], got {_wzv_call2!r}")
+        if _wzv_call2 == "nemo_literal" and _zad_qco != "nemo_literal":
+            raise ValueError(
+                "wzv_call2_evaluation='nemo_literal' requires "
+                "zad_qco_evaluation='nemo_literal'; second hdiv and "
+                "barotropic Kaa r3t are an inseparable QCO operand pair")
         # Reject centered_full / nemo_advective + adaptive-implicit vertadv:
         # the adaptive-implicit path (ln_zad_Aimp) replaces the explicit
         # in-tendency vertical momentum advection ENTIRELY with an upwind
@@ -4521,9 +4532,24 @@ class LatLonCGridOceanModel:
         # column-integrated div(h*u), so the inferred deta_dt = w_euler[...,0]
         # equals the actual increment.  A `dh_dt=` path was implemented, tested,
         # found inert, and removed rather than carried as dead weight.
-        w_baro = diagnose_w_from_flux_div(
-            flux_div_k, _zc, thickness_weighted=True,
-        )
+        if getattr(_cfg_b, "wzv_call2_evaluation", "generic") == "nemo_literal":
+            # NEMO call 2 (stpmlf.F90:350-412; sshwzv.F90:218-227): the
+            # dyn_spg-corrected Kmm velocity feeds a SECOND div_hor and that
+            # divergence is paired with the ACTUAL barotropic Kaa r3t.  Round
+            # 42 measured either operand alone as ~48-50x worse in squared
+            # call-delta energy, so this is one coupled operation.
+            _eta_before_field = getattr(state, "eta_before", None)
+            _eta_before_wzv = (state.eta.data if _eta_before_field is None
+                               else _eta_before_field.data)
+            w_baro, _, _ = nemo_qco_wzv_operands(
+                state.eta.data, _eta_before_wzv, u_corrected, v_corrected,
+                _grid, _zc, u_mask_3d_tracer, v_mask_3d_tracer, active_3d,
+                dt, eta_after_override=state_new.eta.data)
+            w_baro = jax.lax.optimization_barrier(w_baro)
+        else:
+            w_baro = diagnose_w_from_flux_div(
+                flux_div_k, _zc, thickness_weighted=True,
+            )
 
         # Advecting mass fluxes for the TRACER scheme.  Default = the base
         # (momentum/continuity) mass flux; when GM runs with

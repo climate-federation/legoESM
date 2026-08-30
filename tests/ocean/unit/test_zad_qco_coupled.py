@@ -2,11 +2,18 @@
 from __future__ import annotations
 
 import numpy as np
+import jax
 import jax.numpy as jnp
+import pytest
 from types import SimpleNamespace
 
-from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _nemo_qco_zad_operands
+from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+    _nemo_qco_zad_operands,
+    nemo_qco_wzv_operands,
+)
 from legoesm.ocean.experiments.dino import DINOConfig, dino_config_for_recipe
+from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.vertical import (
     create_levy_stretched_z_star,
     create_partial_cell_coordinate,
@@ -82,9 +89,41 @@ def test_qco_zad_pair_matches_source_ordered_oracle():
     np.testing.assert_array_equal(np.asarray(ww)[..., -1], 0.0)
     assert np.any(np.asarray(ww)[..., 1:-1] != 0.0)
 
+    # WZV call 2 uses the SAME second-hdiv composition but the actual
+    # barotropic Kaa SSH/r3t.  A Kaa override must change W, follow the
+    # literal bottom-up recurrence, and remain JIT/grad capable.
+    eta_override = eta_after + np.linspace(
+        -2e-3, 3e-3, nlat * nlon).reshape(nlat, nlon)
+    ww2, hu2, hv2 = nemo_qco_wzv_operands(
+        jnp.asarray(eta_now), jnp.asarray(eta_before), jnp.asarray(u),
+        jnp.asarray(v), grid, coord, jnp.asarray(um), jnp.asarray(vm),
+        jnp.asarray(tm), dt, eta_after_override=jnp.asarray(eta_override))
+    stretch2 = h0 * ((eta_override - eta_before) / 30.0 / dt)[..., None]
+    expected_w2 = np.zeros((nlat, nlon, nlev + 1))
+    for k in range(nlev - 1, -1, -1):
+        expected_w2[..., k] = expected_w2[..., k + 1] - div[..., k] - stretch2[..., k]
+    np.testing.assert_allclose(np.asarray(ww2), expected_w2, rtol=0, atol=2e-16)
+    np.testing.assert_array_equal(hu2, hu)
+    np.testing.assert_array_equal(hv2, hv)
+    assert not np.array_equal(np.asarray(ww2), np.asarray(ww))
+
+    def objective(eta_a):
+        value, _, _ = nemo_qco_wzv_operands(
+            jnp.asarray(eta_now), jnp.asarray(eta_before), jnp.asarray(u),
+            jnp.asarray(v), grid, coord, jnp.asarray(um), jnp.asarray(vm),
+            jnp.asarray(tm), dt, eta_after_override=eta_a)
+        return jnp.sum(value * value)
+
+    compiled = jax.jit(objective)(jnp.asarray(eta_override))
+    gradient = jax.jit(jax.grad(objective))(jnp.asarray(eta_override))
+    assert np.isfinite(np.asarray(compiled))
+    assert np.isfinite(np.asarray(gradient)).all()
+    assert np.any(np.asarray(gradient) != 0.0)
+
 
 def test_qco_selector_defaults_are_scoped_to_two_dino_cards():
     assert DINOConfig().zad_qco_evaluation == "generic"
+    assert DINOConfig().wzv_call2_evaluation == "generic"
     faithful = {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}
     for recipe in (
         "legoesm_default", "nemo_paper", "nemo_dino_kamm",
@@ -92,3 +131,15 @@ def test_qco_selector_defaults_are_scoped_to_two_dino_cards():
     ):
         expected = "nemo_literal" if recipe in faithful else "generic"
         assert dino_config_for_recipe(recipe).zad_qco_evaluation == expected
+        assert dino_config_for_recipe(recipe).wzv_call2_evaluation == expected
+
+
+def test_qco_call2_selector_is_red_for_unknown_and_half_configurations():
+    with pytest.raises(ValueError, match="wzv_call2_evaluation must be"):
+        LatLonCGridOceanModel._validate_config(
+            LatLonCGridOceanConfig.from_flat(wzv_call2_evaluation="typo"))
+    with pytest.raises(ValueError, match="requires zad_qco_evaluation"):
+        LatLonCGridOceanModel._validate_config(
+            LatLonCGridOceanConfig.from_flat(
+                wzv_call2_evaluation="nemo_literal",
+                zad_qco_evaluation="generic"))

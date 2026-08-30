@@ -1385,17 +1385,19 @@ def _bc_vertical_and_depthmean_velocity(
     return h_u, h_v, flux_div_k, w, u_prime, v_prime
 
 
-def _nemo_qco_zad_operands(
+def nemo_qco_wzv_operands(
     eta_now, eta_before, u, v, grid, z_coord, u_mask_3d, v_mask_3d,
-    mask_3d, dt, freshwater_eta_tendency=None,
+    mask_3d, dt, freshwater_eta_tendency=None, eta_after_override=None,
 ):
-    """Coupled Kaa-continuity ``ww`` + live Kmm face thickness for ZAD.
+    """Coupled QCO ``ww`` + live Kmm face thickness for either WZV call.
 
     Transcribes the active DINO QCO path at ``sshwzv.F90:111-128`` and
-    ``:218-227``.  The horizontal transports and Kaa SSH prediction use the
-    same live Kmm ``e3u/e3v`` returned to dynzad; splitting those operands is
-    deliberately unsupported because round 39 measured thickness-only as a
-    worsening planted state.
+    ``:218-227``.  Without ``eta_after_override``, the horizontal transports
+    and Kaa SSH prediction use the same live Kmm ``e3u/e3v`` returned to
+    dynzad (call 1).  With an override, the same source-ordered second hdiv is
+    paired inseparably with the actual barotropic Kaa SSH (call 2).  Splitting
+    either pair is deliberately unsupported: rounds 39 and 42 measured both
+    corresponding half-states as worsening planted violations.
     """
     if not isinstance(z_coord, OceanPartialCellCoordinate):
         raise ValueError(
@@ -1476,10 +1478,14 @@ def _nemo_qco_zad_operands(
 
     fw = (jnp.zeros_like(eta_now) if freshwater_eta_tendency is None
           else jnp.asarray(freshwater_eta_tendency, dtype=eta_now.dtype))
-    eta_after = jax.lax.optimization_barrier(
-        eta_before - jax.lax.optimization_barrier(dt * barotropic_div))
-    eta_after = jax.lax.optimization_barrier(
-        eta_after + jax.lax.optimization_barrier(dt * fw)) * tmask[..., 0]
+    if eta_after_override is None:
+        eta_after = jax.lax.optimization_barrier(
+            eta_before - jax.lax.optimization_barrier(dt * barotropic_div))
+        eta_after = jax.lax.optimization_barrier(
+            eta_after + jax.lax.optimization_barrier(dt * fw)) * tmask[..., 0]
+    else:
+        eta_after = jax.lax.optimization_barrier(
+            jnp.asarray(eta_after_override, dtype=eta_now.dtype)) * tmask[..., 0]
     r3_after = jax.lax.optimization_barrier(eta_after * r1_h0)
     r3_before = jax.lax.optimization_barrier(eta_before * r1_h0)
     r3_delta = jax.lax.optimization_barrier(r3_after - r3_before)
@@ -1500,6 +1506,11 @@ def _nemo_qco_zad_operands(
         levels[jk] = carry
     ww = jnp.stack(levels + [jnp.zeros_like(carry)], axis=-1)
     return ww, live_u, live_v
+
+
+# Compatibility name for the already-certified call-1/ZAD consumer and its
+# committed probes.  New callers should use the operation's call-neutral name.
+_nemo_qco_zad_operands = nemo_qco_wzv_operands
 
 
 def _bc_ke_and_pressure_gradients(

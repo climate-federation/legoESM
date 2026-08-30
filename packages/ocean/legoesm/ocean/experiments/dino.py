@@ -943,6 +943,8 @@ class DINOConfig:
     # Coupled NEMO QCO ww + live Kmm face-thickness path for dynzad.
     # Literal default keeps every non-DINO-fidelity recipe byte-identical.
     zad_qco_evaluation: str = "generic"
+    # Coupled post-barotropic WZV call-2 hdiv x Kaa-r3t evaluation.
+    wzv_call2_evaluation: str = "generic"
     coriolis_scheme: str = "matsuno_split"        # "explicit_ab2" (MITgcm/Oceananigans/Veros)
     outer_integrator: str = "forward_euler"       # "ab2" | "leapfrog" (NEMO stp_MLF)
     # Vector-invariant vorticity flux scheme (relative + optionally planetary).
@@ -1377,6 +1379,7 @@ DINO_RECIPES: dict[str, dict] = {
         # Kaa-continuity ww + live e3u/e3v(Kmm) pair closes ZAD jointly while
         # thickness alone worsens it, so expose only the coupled selector.
         "zad_qco_evaluation": "nemo_literal",
+        "wzv_call2_evaluation": "nemo_literal",
         # NEMO's STANDARD gravity (phycst.F90:38) -- see NEMO_CONSTANTS_CONFIG.
         # 5.0e-5 from legoESM's canonical g; it was the whole remaining bn2
         # residual (N^2 median rel err 4.95e-05 -> 6.96e-06).
@@ -3477,6 +3480,7 @@ def dino_lat_lon_model_config(
         vertical_momentum_scheme=cfg.vertical_momentum_scheme,
         zad_bottom_face_mask=cfg.zad_bottom_face_mask,
         zad_qco_evaluation=cfg.zad_qco_evaluation,
+        wzv_call2_evaluation=cfg.wzv_call2_evaluation,
         coriolis_scheme=cfg.coriolis_scheme,
         outer_integrator=cfg.outer_integrator,
         vorticity_scheme=cfg.vorticity_scheme,
