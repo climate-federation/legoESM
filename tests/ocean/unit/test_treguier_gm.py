@@ -442,6 +442,47 @@ class TestTreguierKappaNemoNative:
             _nemo_treguier_left_reductions(x, 2.0 * x, 3.0 * x, 5.0)))(term)
         assert bool(jnp.isfinite(grad).all())
 
+    def test_kmm_bundle_overrides_are_coupled_red_and_validated(self, monkeypatch):
+        import legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid as gm
+
+        shape = (1, 1, 4)
+        rho = jnp.ones(shape, dtype=jnp.float64) * constants.rho_ocean
+        slopes = jnp.ones(shape, dtype=jnp.float64) * 1.0e-3
+        mask = jnp.ones((1, 1), dtype=jnp.float64)
+        act = jnp.ones(shape, dtype=jnp.float64)
+        base_e3w = jnp.asarray([1.0, 2.0, 3.0, 4.0], dtype=jnp.float64)
+        base_pn2 = jnp.asarray([[[0.0, 1.0e-5, 2.0e-5, 3.0e-5]]])
+        monkeypatch.setattr(
+            gm, "_nemo_wpoint_e3w_wmask_n2",
+            lambda *_args, **_kwargs: (base_e3w, act, base_pn2))
+        cfg = TreguierConfig(enabled=True, aei0=1.0e12)
+
+        def run(pn2=None, e3w=None):
+            return gm.compute_treguier_kappa_gm_nemo_native(
+                rho, rho, rho, slopes, slopes, mask, None, None,
+                jnp.asarray([[1.0e-4]]), cfg, None, active_3d=act,
+                vertical_reduction_evaluation="nemo_left",
+                pn2_override=pn2, e3w_override=e3w,
+                return_diagnostics=True)
+
+        generic = run()
+        explicit_none = run(None, None)
+        np.testing.assert_array_equal(generic[0], explicit_none[0])
+        pn2_live = base_pn2 * 1.25
+        e3w_live = jnp.asarray([1.0, 2.25, 3.5, 4.75])
+        p_only = run(pn2_live, None)
+        e_only = run(None, e3w_live)
+        coupled = run(pn2_live, e3w_live)
+        assert not np.array_equal(np.asarray(p_only[0]), np.asarray(generic[0]))
+        assert not np.array_equal(np.asarray(e_only[0]), np.asarray(generic[0]))
+        assert not np.array_equal(np.asarray(coupled[0]), np.asarray(p_only[0]))
+        assert not np.array_equal(np.asarray(coupled[0]), np.asarray(e_only[0]))
+        np.testing.assert_array_equal(coupled[1]["zhw"], 5.0 + np.sum(e3w_live))
+        with pytest.raises(ValueError, match="pn2_override"):
+            run(jnp.ones((1, 1, 2)), e3w_live)
+        with pytest.raises(ValueError, match="e3w_override"):
+            run(pn2_live, jnp.ones((2,)))
+
     def _dino_fixture(self, n_lon=50):
         from legoesm.ocean.experiments.dino import (
             DINOConfig, create_dino_z_star, dino_lat_lon_grid,

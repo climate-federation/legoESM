@@ -1497,6 +1497,8 @@ def compute_treguier_kappa_gm_nemo_native(
     slope_n2: str = "adiabatic",
     omega: float = constants.Omega,
     vertical_reduction_evaluation: str = "tree",
+    pn2_override: jnp.ndarray | None = None,
+    e3w_override: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     r"""Treguier et al. (1997) adaptive κ_GM (NEMO ``ldftra.F90::ldf_eiv``,
     ``nn_aei_ijk_t=21``, the non-triad ``ln_traldf_triad=.FALSE.`` ELSE
@@ -1571,6 +1573,26 @@ def compute_treguier_kappa_gm_nemo_native(
     e3w, wmask3, pn2 = _nemo_wpoint_e3w_wmask_n2(
         rho, T, S, z_coord, eos_fn, rho_0, g, act,
         slope_n2=slope_n2, jacobian=jacobian)
+    _e3w_surface = e3w[..., :1]
+    nlev = rho.shape[-1]
+    if pn2_override is not None:
+        pn2 = jnp.asarray(pn2_override, dtype=dtype)
+        if pn2.shape[-1] == nlev - 1:
+            pn2 = jnp.concatenate([jnp.zeros_like(pn2[..., :1]), pn2], axis=-1)
+        elif pn2.shape[-1] != nlev:
+            raise ValueError(
+                "pn2_override must contain nlev or nlev-1 W levels, got "
+                f"{pn2.shape[-1]} for nlev={nlev}")
+    if e3w_override is not None:
+        e3w = jnp.asarray(e3w_override, dtype=dtype)
+        if e3w.shape[-1] == nlev - 1:
+            surface_shape = e3w.shape[:-1] + (1,)
+            surface_e3w = jnp.broadcast_to(_e3w_surface, surface_shape)
+            e3w = jnp.concatenate([surface_e3w, e3w], axis=-1)
+        elif e3w.shape[-1] != nlev:
+            raise ValueError(
+                "e3w_override must contain nlev or nlev-1 W levels, got "
+                f"{e3w.shape[-1]} for nlev={nlev}")
     e3w_3d = jnp.broadcast_to(e3w, rho.shape)
 
     # Floor at 1e-30 (not a hard 0) before sqrt: sqrt(0) has an infinite
@@ -3787,6 +3809,8 @@ def gm_redi_tracer_tendency_latlon(
                 omega=omega,
                 vertical_reduction_evaluation=getattr(
                     cfg, "treguier_vertical_reduction_evaluation", "tree"),
+                pn2_override=native_slope_pn2,
+                e3w_override=native_slope_e3w,
             )
         else:
             kappa_GM = compute_treguier_kappa_gm(
