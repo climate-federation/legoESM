@@ -40,6 +40,7 @@ ROUND62_SHA = "290caa5bb3c3187d5ea13fe62276f299bd47953b556615dfab3f4443d1597a86"
 ROUND63_SHA = "3a1a25ca328761b1bcbeb87953751a3a15b1ac00852b2ff62fd4223d107d24e0"
 ROUND64_SHA = "8858d60a51b07181e290fead087e4bab69c0d15e271bbdecb7d458ba12d4e4c7"
 ROUND65_SHA = "6b4a80ddaf020916770dd0eb0005a6ce9dd69ffe79a6604a0e2125cfbadf4c60"
+ROUND66_SHA = "673d9dc978ac4c05a0c8a6995f7c9e1870d9502afedff9b765045df23014785f"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -132,6 +133,7 @@ def main() -> int:
     parser.add_argument("--round63", type=Path)
     parser.add_argument("--round64", type=Path)
     parser.add_argument("--round65", type=Path)
+    parser.add_argument("--round66", type=Path)
     parser.add_argument("--hold-slow-forcing", action="store_true")
     parser.add_argument("--oracle-transport", action="store_true")
     parser.add_argument("--capture-cycle", action="store_true")
@@ -139,6 +141,7 @@ def main() -> int:
     parser.add_argument("--live-thickness-entry", action="store_true")
     parser.add_argument("--capture-bolus-operands", action="store_true")
     parser.add_argument("--capture-kappa-operands", action="store_true")
+    parser.add_argument("--literal-kappa-reduction", action="store_true")
     parser.add_argument("--raw-artifact", type=Path, required=True)
     parser.add_argument("--nemo-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -264,6 +267,21 @@ def main() -> int:
             raise SystemExit("round 65 does not release the kappa ladder")
     elif args.round65 is not None:
         raise SystemExit("--round65 requires --capture-kappa-operands")
+    prior66 = None
+    if args.literal_kappa_reduction:
+        if not args.capture_kappa_operands:
+            raise SystemExit(
+                "--literal-kappa-reduction requires --capture-kappa-operands")
+        if (args.round66 is None
+                or _sha(args.round66.resolve()) != ROUND66_SHA):
+            raise SystemExit("official round-66 reduction debt receipt required")
+        prior66 = json.loads(args.round66.read_text())
+        if (prior66.get("disposition")
+                != "ROW8_8_GM_COEFFICIENT_DIVERGED_ZN"
+                or prior66["kappa_operand_metrics"]["zn"]["pass"]):
+            raise SystemExit("round 66 does not release the literal reduction")
+    elif args.round66 is not None:
+        raise SystemExit("--round66 requires --literal-kappa-reduction")
     if _sha(args.raw_artifact.resolve()) != RAW_ARTIFACT_SHA:
         raise SystemExit("admitted held row-8 artifact changed")
     held = args.held_dir.resolve()
@@ -651,6 +669,9 @@ def main() -> int:
         "round65_aeiu_debt_admitted": (
             prior65 is None
             or not prior65["bolus_operand_metrics"]["aeiu_face"]["pass"]),
+        "round66_reduction_debt_admitted": (
+            prior66 is None
+            or not prior66["kappa_operand_metrics"]["zn"]["pass"]),
         "round56_unheld_red": (
             prior56 is None
             or prior56["rows"][0]["status"] == "DIVERGED"),
@@ -748,7 +769,9 @@ def main() -> int:
         first_kappa = next(
             (name for name in ladder
              if not kappa_operand_metrics[name]["pass"]), None)
-        disposition = ("ROW8_8_GM_COEFFICIENT_AT_BAR"
+        disposition = (("TRACER_ENTRY_ROW8_AT_BAR_LITERAL_GM"
+                        if first is None else
+                        f"ROW8_8_GM_COEFFICIENT_AT_BAR_DOWNSTREAM_{first}")
                        if first_kappa is None else
                        f"ROW8_8_GM_COEFFICIENT_DIVERGED_{first_kappa.upper()}")
     nemo = args.nemo_root.resolve()
@@ -795,12 +818,16 @@ def main() -> int:
             **({"round65": _sha(args.round65.resolve()),
                 **{name: _sha(held / name) for name in KAPPA_HELD_SHA}}
                if args.capture_kappa_operands else {}),
+            **({"round66": _sha(args.round66.resolve())}
+               if args.literal_kappa_reduction else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(
                 root / "docs/ocean/fidelity" /
-                ("PREREG_split_explicit_momentum_chain_round66.md"
+                ("PREREG_split_explicit_momentum_chain_round67.md"
+                 if args.literal_kappa_reduction else
+                 "PREREG_split_explicit_momentum_chain_round66.md"
                  if args.capture_kappa_operands else
                  "PREREG_split_explicit_momentum_chain_round65.md"
                  if args.capture_bolus_operands else
@@ -820,7 +847,8 @@ def main() -> int:
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
             "nemo_ldftra": _sha(nemo / "cfgs/DINO/MY_SRC/ldftra.F90"),
         },
-        "arm": ("kappa_operand_capture" if args.capture_kappa_operands else
+        "arm": ("literal_kappa_reduction" if args.literal_kappa_reduction else
+                "kappa_operand_capture" if args.capture_kappa_operands else
                 "bolus_operand_capture" if args.capture_bolus_operands else
                 "live_thickness_entry" if args.live_thickness_entry else
                 "direct_cycle_entry" if args.direct_cycle_entry else
@@ -833,7 +861,8 @@ def main() -> int:
             "TRACER_ENTRY_ROW8_AT_BAR_UPSTREAM_FORCING_EXACT",
             "TRACER_ENTRY_ROW8_AT_BAR_ORACLE_TRANSPORT",
             "TRACER_ENTRY_ROW8_AT_BAR_DIRECT_KMM",
-            "TRACER_ENTRY_ROW8_AT_BAR_LIVE_QCO"} else first),
+            "TRACER_ENTRY_ROW8_AT_BAR_LIVE_QCO",
+            "TRACER_ENTRY_ROW8_AT_BAR_LITERAL_GM"} else first),
     }
     args.output.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     print(f"disposition={disposition} first_diverged_subrow={first}")
