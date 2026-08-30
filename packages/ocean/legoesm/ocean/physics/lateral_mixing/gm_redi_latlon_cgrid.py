@@ -2678,6 +2678,8 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 diagnostics["zfw_operands"] = {
                     "ahtu": aht,
                     "ahtv": aht_v,
+                    "wslpi": wslpi,
+                    "wslpj": wslpj,
                     "zA31": zA31,
                     "zA32": zA32,
                     "zdit": zdit,

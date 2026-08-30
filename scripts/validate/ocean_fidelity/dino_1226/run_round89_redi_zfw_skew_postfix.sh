@@ -2,6 +2,8 @@
 set -euo pipefail
 producer=$1
 output=${2:-/tmp/dino_split_explicit_momentum_chain_round89.json}
+mode=${3:-postfix}
+test "$mode" = postfix -o "$mode" = operand_factorial
 repo=$(cd "$(dirname "$0")/../../../.." && pwd)
 cd "$repo"
 git cat-file -e "$producer^{commit}"
@@ -50,4 +52,10 @@ args+=(
   --nemo-root /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
   --output "$output"
 )
+if test "$mode" = operand_factorial; then
+  args+=(
+    --round89 /tmp/dino_split_explicit_momentum_chain_round89.json
+    --redi-zfw-skew-operand-factorial
+  )
+fi
 python3 "$scorer" "${args[@]}"
