@@ -2,7 +2,7 @@
 
 Date: 2026-08-30. Session
 `01a04e34-d1fb-73e0-b25a-177641f0a246`. Physics/instrument producer
-`5de6f7a6370ebf1856deee2b3915664059660dd3`.
+`7723918c2b2ff42071d937988574dfccc5fcf197`.
 
 Round 77 is `REDI_MSC_E3W_MAJORITY`, so the exact live W thickness is replayed
 but not yet made the production default.  This held cascade records the first
@@ -27,7 +27,7 @@ set -euo pipefail
 export CODEX_SESSION_ID=01a04e34-d1fb-73e0-b25a-177641f0a246
 repo=/tmp/codex-zdf-sweep
 cd "$repo"
-producer=5de6f7a6370ebf1856deee2b3915664059660dd3
+producer=7723918c2b2ff42071d937988574dfccc5fcf197
 git cat-file -e "${producer}^{commit}"
 test -z "$(git status --porcelain --untracked-files=no)"
 test -z "$(git diff --name-only "$producer" HEAD -- packages/core packages/ocean src)"
@@ -84,7 +84,7 @@ OFF_SHA=__MEASURED_ROW78_OFF_BINARY_SHA256__
 ON_SHA=__MEASURED_ROW78_ON_BINARY_SHA256__
 SRC_SHA=__MEASURED_ROW78_SOURCE_SHA256__
 for value in "$PRODUCER" "$OFF_SHA" "$ON_SHA" "$SRC_SHA"; do case "$value" in __*) exit 2;; esac; done
-test "$PRODUCER" = 5de6f7a6370ebf1856deee2b3915664059660dd3
+test "$PRODUCER" = 7723918c2b2ff42071d937988574dfccc5fcf197
 test -z "$(git status --porcelain --untracked-files=no)"
 test -z "$(git diff --name-only "$PRODUCER" HEAD -- packages/core packages/ocean src)"
 test "$(sha256sum /tmp/nemo-redi-flux-round78-off.exe | awk '{print $1}')" = "$OFF_SHA"
@@ -192,7 +192,7 @@ cd "$repo"
 PRODUCER=__MEASURED_ROW78_PRODUCER__
 BRACKET_SHA=__MEASURED_ROW78_BRACKET_SHA256__
 for value in "$PRODUCER" "$BRACKET_SHA"; do case "$value" in __*) exit 2;; esac; done
-test "$PRODUCER" = 5de6f7a6370ebf1856deee2b3915664059660dd3
+test "$PRODUCER" = 7723918c2b2ff42071d937988574dfccc5fcf197
 test -z "$(git status --porcelain --untracked-files=no)"
 test -z "$(git diff --name-only "$PRODUCER" HEAD -- packages/core packages/ocean src)"
 test "$(sha256sum "$repo/scripts/validate/ocean_fidelity/dino_1226/split_explicit_momentum_chain_round55.py" | awk '{print $1}')" = 4498395b95d34efab12a1ed1bac62936d92442b70ca1f062058ac578ce06ae27
