@@ -220,10 +220,14 @@ def main() -> int:
     production_hdiv = np.asarray(divergence_cgrid(
         bridge.state.u.data, bridge.state.v.data, bridge.geometry,
         u_mask=bridge.state.u_mask.data, v_mask=bridge.state.v_mask.data))
-    hmask = np.asarray(mesh.tmask) > 0.5
+    # NEMO's div_hor loops jpkm1 active levels; the bridged lego state keeps
+    # the jpk dummy bottom level as an exactly dry padded plane.
+    nlev_hdiv = oracle_hdiv.shape[-1]
+    production_hdiv = production_hdiv[..., :nlev_hdiv]
+    hmask = np.asarray(mesh.tmask)[..., :nlev_hdiv] > 0.5
     row2 = _score(
         production_hdiv, oracle_hdiv, hmask, "ssh_nxt / div_hor")
-    literal_hdiv = _literal_hdiv(now, mesh)
+    literal_hdiv = _literal_hdiv(now, mesh)[..., :nlev_hdiv]
     row2_literal = _score(literal_hdiv, oracle_hdiv, hmask)
     row2_controls = _strict_controls(production_hdiv, oracle_hdiv, hmask)
     if not all(row2_controls[name] for name in (
