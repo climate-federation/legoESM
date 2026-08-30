@@ -27,3 +27,15 @@ The expected scientific outcome is the already measured conditional
 `1.9511075e-7` final-uslp residual, which resumes the committed row-30 ladder.
 That expectation is not a relaxed bar and cannot advance row `78.T.1`.
 
+## Scorer-control correction after the first invalid execution
+
+The first execution produced invalid receipt SHA-256
+`7d850caecaedcb91cc52afeb1b8cd238a9c052e387556f7809d398ac5997ae42`.
+Its sole failed control was the inherited round-79 requirement that replacing
+production thickness by oracle thickness be non-inert. That is a valid red
+plant before the fix but is logically incompatible with this round's required
+bit-exact production thickness. For postfix arms only, the control is renamed
+and inverted to require that substitution to be inert. The wet-point plant,
+factorial completeness, production recomposition identity, finite literal
+arm, scientific bars, and dispositions are unchanged. This correction was
+committed before the official rerun.

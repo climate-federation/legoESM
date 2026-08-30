@@ -1396,6 +1396,10 @@ def main() -> int:
                             4.0 * POINTWISE_BAR
                             * arms["S0H0K0"]["reference_rms"],
                             4.0 * abs(float(np.spacing(perturb[first_wet]))))
+                        thickness_substitution_noninert = not bool(
+                            np.array_equal(
+                                arm_values["S0H1K0"],
+                                arm_values["S0H0K0"]))
                         ladder_controls = {
                             "production_recompose_identity": bool(
                                 np.array_equal(
@@ -1405,10 +1409,11 @@ def main() -> int:
                             "wet_point_plant_red": not sweep.metrics(
                                 perturb, oracle_zfu, wet_u, FOCUS,
                                 POINTWISE_BAR)["pass"],
-                            "live_thickness_substitution_noninert": not bool(
-                                np.array_equal(
-                                    arm_values["S0H1K0"],
-                                    arm_values["S0H0K0"])),
+                            **({"live_thickness_substitution_inert_after_fix":
+                                not thickness_substitution_noninert}
+                               if args.redi_zfu_postfix else
+                               {"live_thickness_substitution_noninert":
+                                thickness_substitution_noninert}),
                             "literal_recompose_finite": bool(
                                 np.isfinite(literal_value[wet_u]).all()),
                         }
