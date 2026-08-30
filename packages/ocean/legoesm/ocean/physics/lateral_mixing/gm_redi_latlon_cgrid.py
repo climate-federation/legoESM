@@ -2481,6 +2481,8 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     avg4_wj = (zdjt + jnp.roll(zdjt_kp1, +1, ax_y)
                + jnp.roll(zdjt, +1, ax_y) + zdjt_kp1)
     zfw_kp1 = zA31 * avg4_wi + zA32 * avg4_wj        # flux at interface BELOW cell k
+    zfw_skew_current = zfw_kp1
+    zfw_a33_current = jnp.zeros_like(zfw_kp1)
     # A33 explicit vertical-diagonal part.  With ln_traldf_msc=F the FULL K33
     # (ah_wslp2) goes to the implicit vertical solve → explicit coeff (ah_wslp2 −
     # akz) = 0 (akz≡ah_wslp2), so this block is skipped and the operator is
@@ -2536,8 +2538,9 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         # below.  The near-surface ML k1/k2 over-diffusion is a pre-existing ML-ramp
         # SLOPE mismatch (native wslp match NEMO corr 0.99 below the ML, ~0.3 in it),
         # not this A33 term — masking it here would drop a legitimate NEMO flux.
-        zfw_kp1 = zfw_kp1 + (e1t * e2t)[:, :, jnp.newaxis] / e3w_kp1 * (
+        zfw_a33_current = (e1t * e2t)[:, :, jnp.newaxis] / e3w_kp1 * (
             ah_wslp2 - akz) * zdkt_kp1
+        zfw_kp1 = zfw_kp1 + zfw_a33_current
     # Sea-floor / bottom no-flux BC: the interface below cell k carries flux
     # only if cell k+1 is water.  This zeros the flux crossing into the floor
     # (already ~0 there via the padded bottom slope) AND, critically, kills the
@@ -2628,6 +2631,24 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 "zdkt": zdkt,
                 "avg4_u": avg4_u,
             }
+            if msc_stabilize:
+                diagnostics["zfw_operands"] = {
+                    "ahtu": aht,
+                    "ahtv": aht_v,
+                    "zA31": zA31,
+                    "zA32": zA32,
+                    "zdit": zdit,
+                    "zdjt": zdjt,
+                    "wmask": wmask,
+                    "ah_wslp2": ah_wslp2,
+                    "akz": akz,
+                    "e1e2t": e1t * e2t,
+                    "e3w_kp1": e3w_kp1,
+                    "qdiff_kp1": q - jnp.roll(q, -1, axis=2),
+                    "act_below": act_below,
+                    "skew_current": zfw_skew_current,
+                    "a33_current": zfw_a33_current,
+                }
         if return_bolus:
             return tend, bolus_transport, diagnostics
         return tend, diagnostics

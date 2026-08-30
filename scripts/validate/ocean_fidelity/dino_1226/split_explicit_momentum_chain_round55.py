@@ -59,6 +59,7 @@ ROUND81_SHA = "247acae491d6568febb16d81a7a96e5b2c22a4246cf6b2e613ce640d38eaee71"
 ROUND82_SHA = "4177c99481bdbc6996477dad848d1e645ada3a26a08fb9aa1e9dd9e4b20f9e7a"
 ROUND83_SHA = "f759087db5680d8ee13f8053000812e7b0a89471f8efc28196f2ead0006f8bb3"
 ROUND84_SHA = "6483fc67d59bea3b5bb81e546a31af47eec85aeea48573f42e11c2e575740451"
+ROUND85_SHA = "10a5695a804c0e96ec36455ed160169b18897c43b57614c6a979349fcf53ec6c"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -193,6 +194,7 @@ def main() -> int:
     parser.add_argument("--round82", type=Path)
     parser.add_argument("--round83", type=Path)
     parser.add_argument("--round84", type=Path)
+    parser.add_argument("--round85", type=Path)
     parser.add_argument("--hold-slow-forcing", action="store_true")
     parser.add_argument("--oracle-transport", action="store_true")
     parser.add_argument("--capture-cycle", action="store_true")
@@ -219,6 +221,7 @@ def main() -> int:
     parser.add_argument("--redi-zfu-kmm-operator-postfix", action="store_true")
     parser.add_argument("--redi-zfu-bolus-stage-split-postfix", action="store_true")
     parser.add_argument("--redi-zfu-ahtu-postfix", action="store_true")
+    parser.add_argument("--redi-zfw-association-factorial", action="store_true")
     parser.add_argument("--redi-run-dir", type=Path)
     parser.add_argument("--redi-flux-run-dir", type=Path)
     parser.add_argument("--redi-flux-bracket", type=Path)
@@ -663,6 +666,18 @@ def main() -> int:
             raise SystemExit("round 84 does not admit the ahtu postfix")
     elif args.round84 is not None:
         raise SystemExit("--round84 requires --redi-zfu-ahtu-postfix")
+    if args.redi_zfw_association_factorial:
+        if not args.redi_zfu_ahtu_postfix:
+            raise SystemExit("zfw factorial requires the ahtu postfix")
+        if args.round85 is None or _sha(args.round85.resolve()) != ROUND85_SHA:
+            raise SystemExit("bound official round-85 receipt required")
+        prior85 = json.loads(args.round85.read_text())
+        if (prior85.get("disposition") != "REDI_ZFU_T_AHTU_AT_BAR"
+                or prior85["redi_flux_metrics"]["zfv_tem"]["pass"] is not True
+                or prior85["redi_flux_metrics"]["zfw_tem"]["pass"] is not False):
+            raise SystemExit("round 85 does not admit the zfw factorial")
+    elif args.round85 is not None:
+        raise SystemExit("--round85 requires --redi-zfw-association-factorial")
     if _sha(args.raw_artifact.resolve()) != RAW_ARTIFACT_SHA:
         raise SystemExit("admitted held row-8 artifact changed")
     held = args.held_dir.resolve()
@@ -1050,6 +1065,7 @@ def main() -> int:
     redi_e3w_metrics = {}
     redi_flux_metrics = {}
     redi_zfu_operand_ladder = {}
+    redi_zfw_association_factorial = {}
     redi_flux_rows = []
     first_flux = None
     first_flux_subrow = None
@@ -1504,6 +1520,80 @@ def main() -> int:
                             },
                             "controls": ladder_controls,
                         }
+                        if args.redi_zfw_association_factorial:
+                            zfw = {
+                                key: jnp.asarray(value)
+                                for key, value in
+                                diagnostics_replay["zfw_operands"].items()
+                            }
+                            zdit_kp1 = jnp.roll(zfw["zdit"], -1, axis=2)
+                            zdjt_kp1 = jnp.roll(zfw["zdjt"], -1, axis=2)
+                            wi = (
+                                zfw["zdit"],
+                                jnp.roll(zdit_kp1, +1, axis=1),
+                                jnp.roll(zfw["zdit"], +1, axis=1),
+                                zdit_kp1,
+                            )
+                            wj = (
+                                zfw["zdjt"],
+                                jnp.roll(zdjt_kp1, +1, axis=0),
+                                jnp.roll(zfw["zdjt"], +1, axis=0),
+                                zdjt_kp1,
+                            )
+
+                            def zfw_compose(source_gradient, source_a33):
+                                def four(values):
+                                    a, b, c, d = values
+                                    return ((a + b) + (c + d)
+                                            if source_gradient else
+                                            ((a + b) + c) + d)
+                                term31 = zfw["zA31"] * four(wi)
+                                term32 = zfw["zA32"] * four(wj)
+                                if source_a33:
+                                    a33 = (((zfw["e1e2t"][..., None]
+                                             / zfw["e3w_kp1"])
+                                            * jnp.roll(
+                                                zfw["wmask"], -1, axis=2))
+                                           * (zfw["ah_wslp2"] - zfw["akz"]))
+                                    a33 = a33 * zfw["qdiff_kp1"]
+                                else:
+                                    a33 = zfw["a33_current"]
+                                return ((term31 + term32) + a33) * zfw["act_below"]
+
+                            oracle_zfw = _load(
+                                flux_dir / "redi_dump_zfw_tem.bin")
+                            zfw_arms = {}
+                            zfw_values = {}
+                            for use_g in (0, 1):
+                                for use_a in (0, 1):
+                                    arm = f"G{use_g}A{use_a}"
+                                    value = np.asarray(zfw_compose(
+                                        use_g, use_a))[..., :35]
+                                    zfw_values[arm] = value
+                                    zfw_arms[arm] = sweep.metrics(
+                                        value, oracle_zfw, masks["zfw"],
+                                        FOCUS, POINTWISE_BAR)
+                            base = zfw_arms["G0A0"]["max_column_error"]
+                            interaction = float(
+                                (zfw_arms["G1A0"]["max_column_error"]
+                                 + zfw_arms["G0A1"]["max_column_error"]
+                                 - zfw_arms["G1A1"]["max_column_error"]
+                                 - base) / base)
+                            redi_zfw_association_factorial = {
+                                "arms": zfw_arms,
+                                "interaction_GxA": interaction,
+                                "controls": {
+                                    "production_recompose_identity": bool(
+                                        np.array_equal(
+                                            zfw_values["G0A0"],
+                                            np.asarray(diagnostics_replay[
+                                                "zfw_kp1"])[..., :35])),
+                                    "four_arms_present": len(zfw_arms) == 4,
+                                    "source_arm_finite": bool(np.isfinite(
+                                        zfw_values["G1A1"]
+                                        [masks["zfw"]]).all()),
+                                },
+                            }
     specs = (
         ("8.3", "uu(Kmm) / zptu", "traadv.F90:301-304", "un", POINTWISE_BAR),
         ("8.4", "e2u", "traadv.F90:329", "e2u", POINTWISE_BAR),
@@ -1771,6 +1861,13 @@ def main() -> int:
                 prior78["disposition"] == "REDI_DIVERGED_ZFU_T"),
             **{f"redi_zfu_{name}": value for name, value in
                redi_zfu_operand_ladder["controls"].items()},
+        })
+    if args.redi_zfw_association_factorial:
+        controls.update({
+            "round85_zfw_temperature_admitted": (
+                prior85["redi_flux_metrics"]["zfw_tem"]["pass"] is False),
+            **{f"redi_zfw_{name}": value for name, value in
+               redi_zfw_association_factorial["controls"].items()},
         })
     controls["all_scored_finite"] = all(
         row.get("status") == "ORDERED_BLOCKED"
@@ -2040,12 +2137,25 @@ def main() -> int:
         else:
             disposition = "REDI_ZFU_T_AHTU_REGRESSION"
         first_flux_subrow = "85.T.1"
+    if args.redi_zfw_association_factorial and valid:
+        arms = redi_zfw_association_factorial["arms"]
+        if arms["G1A0"]["pass"] and not arms["G0A1"]["pass"]:
+            disposition = "REDI_ZFW_T_GRADIENT_ASSOCIATION_OWNED"
+        elif arms["G0A1"]["pass"] and not arms["G1A0"]["pass"]:
+            disposition = "REDI_ZFW_T_A33_ASSOCIATION_OWNED"
+        elif arms["G1A1"]["pass"]:
+            disposition = "REDI_ZFW_T_ASSOCIATION_COMPOSITION_OWNED"
+        else:
+            disposition = "REDI_ZFW_T_COMPONENTS_HELD_OPEN"
+        first_flux_subrow = "86.T.3"
     receipt_first = (first_flux_subrow
                      if args.redi_flux_ladder and first_flux_subrow is not None
                      else first)
     nemo = args.nemo_root.resolve()
     receipt = {
-        "schema": ("dino-split-explicit-momentum-chain-round85-v1"
+        "schema": ("dino-split-explicit-momentum-chain-round86-v1"
+                   if args.redi_zfw_association_factorial else
+                   "dino-split-explicit-momentum-chain-round85-v1"
                    if args.redi_zfu_ahtu_postfix else
                    "dino-split-explicit-momentum-chain-round84-v1"
                    if args.redi_zfu_bolus_stage_split_postfix else
@@ -2116,6 +2226,9 @@ def main() -> int:
            if args.redi_flux_ladder else {}),
         **({"redi_zfu_operand_ladder": redi_zfu_operand_ladder}
            if args.redi_zfu_operand_ladder else {}),
+        **({"redi_zfw_association_factorial":
+            redi_zfw_association_factorial}
+           if args.redi_zfw_association_factorial else {}),
         "focus_ji": [list(x) for x in FOCUS],
         "bindings": {
             "round54": _sha(args.round54.resolve()),
@@ -2183,12 +2296,16 @@ def main() -> int:
                if args.redi_zfu_bolus_stage_split_postfix else {}),
             **({"round84": _sha(args.round84.resolve())}
                if args.redi_zfu_ahtu_postfix else {}),
+            **({"round85": _sha(args.round85.resolve())}
+               if args.redi_zfw_association_factorial else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(
                 root / "docs/ocean/fidelity" /
-                ("PREREG_split_explicit_momentum_chain_round85.md"
+                ("PREREG_split_explicit_momentum_chain_round86.md"
+                 if args.redi_zfw_association_factorial else
+                 "PREREG_split_explicit_momentum_chain_round85.md"
                  if args.redi_zfu_ahtu_postfix else
                  "PREREG_split_explicit_momentum_chain_round84.md"
                  if args.redi_zfu_bolus_stage_split_postfix else
@@ -2246,7 +2363,9 @@ def main() -> int:
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
             "nemo_ldftra": _sha(nemo / "cfgs/DINO/MY_SRC/ldftra.F90"),
         },
-        "arm": ("redi_zfu_ahtu_postfix"
+        "arm": ("redi_zfw_association_factorial"
+                if args.redi_zfw_association_factorial else
+                "redi_zfu_ahtu_postfix"
                 if args.redi_zfu_ahtu_postfix else
                 "redi_zfu_bolus_stage_split_postfix"
                 if args.redi_zfu_bolus_stage_split_postfix else
@@ -2288,7 +2407,13 @@ def main() -> int:
                 "oracle_transport" if args.oracle_transport else
                 "held_slow_forcing" if args.hold_slow_forcing else
                 "production"),
-        "ordered_next": ("redi_zfu_ahtu_last_bits" if disposition in (
+        "ordered_next": ("redi_zfw_source_association_fix" if disposition in (
+                          "REDI_ZFW_T_GRADIENT_ASSOCIATION_OWNED",
+                          "REDI_ZFW_T_A33_ASSOCIATION_OWNED",
+                          "REDI_ZFW_T_ASSOCIATION_COMPOSITION_OWNED") else
+                          "redi_zfw_component_held_instrumentation" if disposition ==
+                          "REDI_ZFW_T_COMPONENTS_HELD_OPEN" else
+                          "redi_zfu_ahtu_last_bits" if disposition in (
                           "REDI_ZFU_T_KMM_OPERATOR_FIXED_AHTU_RESIDUAL",
                           "REDI_ZFU_T_BOLUS_STAGE_SPLIT_FIXED_AHTU_RESIDUAL") else
                           "redi_zfu_temperature_vflux" if disposition in (

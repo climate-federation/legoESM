@@ -1590,6 +1590,26 @@ class TestNemoIsoLapOperator:
         assert any(bool(jnp.any(a != b))
                    for a, b in zip(split_bolus, base_bolus))
 
+    def test_nemo_iso_lap_zfw_operands_are_observational(self):
+        setup = _stratified_with_meridional_tilt()
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian,
+         rho, T, S, cfg) = setup
+        S_x, S_y = self._slopes(setup)
+        act = jnp.broadcast_to(mask[:, :, jnp.newaxis], T.shape)
+        plain = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, msc_stabilize=True, dt=2700.0)
+        observed, diagnostics = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, msc_stabilize=True, dt=2700.0,
+            return_diagnostics=True, return_operand_diagnostics=True)
+        assert jnp.array_equal(observed, plain)
+        operands = diagnostics["zfw_operands"]
+        rebuilt = ((operands["skew_current"] + operands["a33_current"])
+                   * operands["act_below"])
+        assert jnp.array_equal(rebuilt, diagnostics["zfw_kp1"])
+        assert bool(jnp.any(operands["a33_current"] != 0.0))
+
     def test_nemo_iso_lap_gm_conserves(self):
         """The GM bolus (kappa_GM>0, NEMO ln_ldfeiv) is a curl-of-streamfunction
         transport, so its discrete divergence telescopes to zero and it conserves
