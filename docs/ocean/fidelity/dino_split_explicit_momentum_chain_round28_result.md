@@ -411,3 +411,30 @@ the registered accumulating `1e-12` score are held in the round-41 SLOT
 handoff. Until that official receipt runs, row 5 stays open and row 6 plus
 the later free-surface, momentum-RHS, and tracer-tail chains stay
 ordered-blocked.
+
+## Round 42: row-5 call1-to-call2 composition
+
+The official existing-dump artifact is
+`/tmp/dino_split_explicit_momentum_chain_round42.json`, SHA-256
+`d9dec7def95b9dbe4389452f988ea2ea05087b4830b4af7dd1b90d3a8a441d29`.
+Both endpoint reconstructions are bit-exact: H0Q0 reproduces call 1 and H1Q1
+reproduces call 2 with normalized RMS `0`. The two single substitutions expose
+a severe cancellation:
+
+| arm | call-2 normalized RMS | call-delta squared-energy removal |
+|---|---:|---:|
+| H0Q0 (call 1) | `4.7717e-5` | `0` |
+| H1Q0 (second `hdiv` only) | `3.33605e-4` | `-47.9514` |
+| H0Q1 (barotropic Kaa `r3t` only) | `3.38725e-4` | `-49.4655` |
+| H1Q1 (joint call 2) | `0` | `1` |
+
+Thus neither half is a permissible fix: the `dyn_spg_ts`-corrected Kmm
+transport divergence and barotropic Kaa thickness tendency are a coupled WZV
+operand. The source audit also rejects the apparent `dyn_zdf` velocity owner:
+`dyn_zdf` writes Naa, while call 2 reads Kmm. The corrected Kmm velocity was
+installed earlier by `dynspg_ts.F90:1170-1174`; the second `div_hor` and Kaa
+`r3t` were both materialized before `dyn_zdf`.
+
+Disposition is `CALL2_HDIV_X_KAA_COMPOSITION`. Production must build the
+literal second W using both operands together. Row 6 and later chains remain
+ordered-blocked until the coupled production replay reaches the row-5 bar.
