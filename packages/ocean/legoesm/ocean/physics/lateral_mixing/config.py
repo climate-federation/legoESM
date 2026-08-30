@@ -406,6 +406,12 @@ class GMRediConfig(NamedTuple):
     # ``nemo_qco_live`` applies NEMO's NOW-SSH r3u/r3v dilation to that raw
     # full-step face thickness before the limiter. The DINO NEMO cards opt in.
     slope_face_thickness_evaluation: str = "static_face"
+    # Horizontal face thickness used by traldf_iso's diagonal zA11/zA22
+    # flux coefficients. ``tpoint_jacobian`` preserves the historical e3t
+    # substitution. ``nemo_qco_live`` consumes the raw-mesh e3u_0/e3v_0
+    # dilated by NOW SSH, matching traldf_iso_scheme.h90:73/90. Only the two
+    # DINO NEMO cards opt in.
+    redi_flux_face_thickness_evaluation: str = "tpoint_jacobian"
     # Live depths and U/V-point depth accumulation used by ldfslp's mixed-
     # layer ramp. ``legacy_jacobian_t_surface`` preserves the historical
     # Jacobian and T-column subtraction. ``nemo_qco_live_literal`` uses raw

@@ -1539,12 +1539,22 @@ class TestNemoIsoLapOperator:
         assert jnp.array_equal(observed, plain)
         operands = diagnostics["zfu_operands"]
         assert set(operands) == {
-            "ahtu", "e1u", "e2u", "e3t", "uslp", "wmask", "zmsku",
-            "zdit", "zdkt", "avg4_u",
+            "ahtu", "e1u", "e2u", "e3t", "e3u_flux", "uslp", "wmask",
+            "zmsku", "zdit", "zdkt", "avg4_u",
         }
         assert operands["ahtu"].shape == T.shape
         assert operands["uslp"].shape == T.shape
         assert bool(jnp.any(operands["ahtu"] != 0.0))
+        pinned = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act,
+            face_thickness_u=operands["e3t"],
+            face_thickness_v=operands["e3t"])
+        assert jnp.array_equal(pinned, plain)
+        with pytest.raises(ValueError, match="must be supplied together"):
+            nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+                cfg.kappa_Redi, act, face_thickness_u=operands["e3t"])
         with pytest.raises(ValueError, match="requires return_diagnostics"):
             nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,

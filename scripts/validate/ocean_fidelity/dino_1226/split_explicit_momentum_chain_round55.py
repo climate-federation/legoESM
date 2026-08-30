@@ -53,6 +53,7 @@ ROUND75_SHA = "750c40875300ddda48287d84089c8931eaaecc71e8aab6ce7f4e18a0c806edf4"
 ROUND76_SHA = "45e4f8afda737b41e457668fe1ab7cc28ded09d3f7be06fabdd15e9804936a76"
 ROUND77_SHA = "dcc0cff4c63b30024794ad25b023b65223fe87137e5052b6d7dc478066973d14"
 ROUND78_SHA = "30f63d47e11d632e214490c2d6fc8756170a03f12f86635ba6a8b0a8b8d6e7f3"
+ROUND79_SHA = "dca39985e54bd95f20ee9b1bfb4ab3bc39013953c95aa8fb74965eb6618f6f61"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -181,6 +182,7 @@ def main() -> int:
     parser.add_argument("--round76", type=Path)
     parser.add_argument("--round77", type=Path)
     parser.add_argument("--round78", type=Path)
+    parser.add_argument("--round79", type=Path)
     parser.add_argument("--hold-slow-forcing", action="store_true")
     parser.add_argument("--oracle-transport", action="store_true")
     parser.add_argument("--capture-cycle", action="store_true")
@@ -201,6 +203,7 @@ def main() -> int:
     parser.add_argument("--redi-e3w-factorial", action="store_true")
     parser.add_argument("--redi-flux-ladder", action="store_true")
     parser.add_argument("--redi-zfu-operand-ladder", action="store_true")
+    parser.add_argument("--redi-zfu-postfix", action="store_true")
     parser.add_argument("--redi-run-dir", type=Path)
     parser.add_argument("--redi-flux-run-dir", type=Path)
     parser.add_argument("--redi-flux-bracket", type=Path)
@@ -573,6 +576,20 @@ def main() -> int:
     elif args.round78 is not None:
         raise SystemExit(
             "--round78 requires --redi-zfu-operand-ladder")
+    prior79 = None
+    if args.redi_zfu_postfix:
+        if not args.redi_zfu_operand_ladder:
+            raise SystemExit(
+                "--redi-zfu-postfix requires --redi-zfu-operand-ladder")
+        if args.round79 is None or _sha(args.round79.resolve()) != ROUND79_SHA:
+            raise SystemExit("official round-79 operand receipt required")
+        prior79 = json.loads(args.round79.read_text())
+        if (prior79.get("session_id") != session
+                or prior79.get("disposition") !=
+                "REDI_ZFU_T_OPERANDS_BOUNDED_ASSOCIATION_OPEN"):
+            raise SystemExit("round 79 does not admit the production replay")
+    elif args.round79 is not None:
+        raise SystemExit("--round79 requires --redi-zfu-postfix")
     if _sha(args.raw_artifact.resolve()) != RAW_ARTIFACT_SHA:
         raise SystemExit("admitted held row-8 artifact changed")
     held = args.held_dir.resolve()
@@ -1273,12 +1290,14 @@ def main() -> int:
 
                         oracle_ahtu = pad_operand(oracle_ahtu, own["ahtu"])
                         oracle_uslp = pad_operand(oracle_uslp, own["uslp"])
-                        oracle_e3u = pad_operand(oracle_e3u, own["e3t"])
+                        oracle_e3u = pad_operand(
+                            oracle_e3u, own["e3u_flux"])
 
                         def compose(slope_oracle, thickness_oracle,
                                     ahtu_oracle, literal_association=False):
                             slope = oracle_uslp if slope_oracle else own["uslp"]
-                            e3u = oracle_e3u if thickness_oracle else own["e3t"]
+                            e3u = (oracle_e3u if thickness_oracle
+                                   else own["e3u_flux"])
                             ahtu = oracle_ahtu if ahtu_oracle else own["ahtu"]
                             if literal_association:
                                 ratio = own["e2u"] * (1.0 / own["e1u"])
@@ -1386,7 +1405,7 @@ def main() -> int:
                                     np.asarray(oracle_uslp)[..., :35], wet_u,
                                     FOCUS, POINTWISE_BAR),
                                 "live_e3u": sweep.metrics(
-                                    np.asarray(own["e3t"])[..., :35],
+                                    np.asarray(own["e3u_flux"])[..., :35],
                                     np.asarray(oracle_e3u)[..., :35], wet_u,
                                     FOCUS, POINTWISE_BAR),
                                 "ahtu": sweep.metrics(
@@ -1865,12 +1884,26 @@ def main() -> int:
         else:
             disposition = "REDI_ZFU_T_OPERAND_LADDER_OPEN"
         first_flux_subrow = "79.T.1"
+    if args.redi_zfu_postfix and valid:
+        current = redi_zfu_operand_ladder["arms"]["S0H0K0"]
+        e3u = redi_zfu_operand_ladder["operand_metrics"]["live_e3u"]
+        full = redi_zfu_operand_ladder["arms"]["S1H1K1"]
+        if current["pass"]:
+            disposition = "REDI_ZFU_T_POSTFIX_AT_BAR"
+        elif (e3u["pass"] and full["pass"]
+              and current["max_column_error"] < 1.0e-5):
+            disposition = "REDI_ZFU_T_POSTFIX_RESIDUAL_FINAL_USLP"
+        else:
+            disposition = "REDI_ZFU_T_POSTFIX_REGRESSION"
+        first_flux_subrow = "80.T.1"
     receipt_first = (first_flux_subrow
                      if args.redi_flux_ladder and first_flux_subrow is not None
                      else first)
     nemo = args.nemo_root.resolve()
     receipt = {
-        "schema": ("dino-split-explicit-momentum-chain-round79-v1"
+        "schema": ("dino-split-explicit-momentum-chain-round80-v1"
+                   if args.redi_zfu_postfix else
+                   "dino-split-explicit-momentum-chain-round79-v1"
                    if args.redi_zfu_operand_ladder else
                    "dino-split-explicit-momentum-chain-round78-v1"
                    if args.redi_flux_ladder else
@@ -1984,12 +2017,16 @@ def main() -> int:
                 "eiv_dump_uslp.bin": _sha(
                     flux_dir / "eiv_dump_uslp.bin")}
                if args.redi_zfu_operand_ladder else {}),
+            **({"round79": _sha(args.round79.resolve())}
+               if args.redi_zfu_postfix else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(
                 root / "docs/ocean/fidelity" /
-                ("PREREG_split_explicit_momentum_chain_round79.md"
+                ("PREREG_split_explicit_momentum_chain_round80.md"
+                 if args.redi_zfu_postfix else
+                 "PREREG_split_explicit_momentum_chain_round79.md"
                  if args.redi_zfu_operand_ladder else
                  "PREREG_split_explicit_momentum_chain_round78.md"
                  if args.redi_flux_ladder else
@@ -2035,7 +2072,9 @@ def main() -> int:
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
             "nemo_ldftra": _sha(nemo / "cfgs/DINO/MY_SRC/ldftra.F90"),
         },
-        "arm": ("redi_zfu_operand_ladder"
+        "arm": ("redi_zfu_postfix"
+                if args.redi_zfu_postfix else
+                "redi_zfu_operand_ladder"
                 if args.redi_zfu_operand_ladder else
                 "redi_flux_ladder"
                 if args.redi_flux_ladder else
@@ -2065,7 +2104,13 @@ def main() -> int:
                 "oracle_transport" if args.oracle_transport else
                 "held_slow_forcing" if args.hold_slow_forcing else
                 "production"),
-        "ordered_next": ("redi_zfu_live_e3u_production" if disposition ==
+        "ordered_next": ("redi_zfu_final_uslp_residual" if disposition ==
+                          "REDI_ZFU_T_POSTFIX_RESIDUAL_FINAL_USLP" else
+                          "redi_zfu_temperature_vflux" if disposition ==
+                          "REDI_ZFU_T_POSTFIX_AT_BAR" else
+                          "stop_postfix_regression" if disposition ==
+                          "REDI_ZFU_T_POSTFIX_REGRESSION" else
+                          "redi_zfu_live_e3u_production" if disposition ==
                           "REDI_ZFU_T_LOCALIZED_TO_LIVE_E3U" else
                           "redi_zfu_operand_followup" if disposition.startswith(
                           "REDI_ZFU_T_") else

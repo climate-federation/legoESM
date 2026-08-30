@@ -700,6 +700,9 @@ class DINOConfig:
     # ldfslp 7 km limiter face thickness: static legacy construction or the
     # NEMO QCO live e3u/e3v built from NOW SSH. Only the NEMO cards select live.
     gm_redi_slope_face_thickness_evaluation: str = "static_face"
+    # traldf_iso zA11/zA22 face thickness. The generic default retains the
+    # historical T-point Jacobian; the two NEMO cards consume live QCO faces.
+    gm_redi_flux_face_thickness_evaluation: str = "tpoint_jacobian"
     # ldfslp mixed-layer-ramp depth construction. Only the two DINO NEMO
     # cards select raw-mesh NOW-QCO depths and literal face accumulation.
     gm_redi_slope_depth_evaluation: str = "legacy_jacobian_t_surface"
@@ -1363,6 +1366,7 @@ DINO_RECIPES: dict[str, dict] = {
         "gm_redi_slope_prd_evaluation": "nemo_literal",
         "gm_redi_slope_metric_evaluation": "nemo_reciprocal",
         "gm_redi_slope_face_thickness_evaluation": "nemo_qco_live",
+        "gm_redi_flux_face_thickness_evaluation": "nemo_qco_live",
         "gm_redi_slope_depth_evaluation": "nemo_qco_live_literal",
         "gm_treguier_vertical_reduction_evaluation": "nemo_left",
         "gm_treguier_sqrt_evaluation": "nemo_forward_exact",
@@ -3274,6 +3278,12 @@ def dino_lat_lon_model_config(
             "unknown DINOConfig.gm_redi_slope_face_thickness_evaluation "
             f"{cfg.gm_redi_slope_face_thickness_evaluation!r}; expected "
             "'static_face' or 'nemo_qco_live'")
+    if cfg.gm_redi_flux_face_thickness_evaluation not in (
+            "tpoint_jacobian", "nemo_qco_live"):
+        raise ValueError(
+            "unknown DINOConfig.gm_redi_flux_face_thickness_evaluation "
+            f"{cfg.gm_redi_flux_face_thickness_evaluation!r}; expected "
+            "'tpoint_jacobian' or 'nemo_qco_live'")
     if cfg.gm_redi_slope_depth_evaluation not in (
             "legacy_jacobian_t_surface", "nemo_qco_live_literal"):
         raise ValueError(
@@ -3367,6 +3377,8 @@ def dino_lat_lon_model_config(
             slope_metric_evaluation=cfg.gm_redi_slope_metric_evaluation,
             slope_face_thickness_evaluation=(
                 cfg.gm_redi_slope_face_thickness_evaluation),
+            redi_flux_face_thickness_evaluation=(
+                cfg.gm_redi_flux_face_thickness_evaluation),
             slope_depth_evaluation=cfg.gm_redi_slope_depth_evaluation,
             treguier_vertical_reduction_evaluation=(
                 cfg.gm_treguier_vertical_reduction_evaluation),
@@ -3407,6 +3419,8 @@ def dino_lat_lon_model_config(
             slope_metric_evaluation=cfg.gm_redi_slope_metric_evaluation,
             slope_face_thickness_evaluation=(
                 cfg.gm_redi_slope_face_thickness_evaluation),
+            redi_flux_face_thickness_evaluation=(
+                cfg.gm_redi_flux_face_thickness_evaluation),
             slope_depth_evaluation=cfg.gm_redi_slope_depth_evaluation,
             treguier_vertical_reduction_evaluation=(
                 cfg.gm_treguier_vertical_reduction_evaluation),
@@ -3457,6 +3471,8 @@ def dino_lat_lon_model_config(
                 gm_redi=GMRediConfig(
                     slope_face_thickness_evaluation=(
                         cfg.gm_redi_slope_face_thickness_evaluation),
+                    redi_flux_face_thickness_evaluation=(
+                        cfg.gm_redi_flux_face_thickness_evaluation),
                     slope_depth_evaluation=(
                         cfg.gm_redi_slope_depth_evaluation))),
             convection=OceanConvectionConfig(

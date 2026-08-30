@@ -175,6 +175,7 @@ def test_row30_selectors_are_scoped_to_the_two_dino_nemo_cards():
             assert cfg.gm_redi_slope_prd_evaluation == "nemo_literal"
             assert cfg.gm_redi_slope_metric_evaluation == "nemo_reciprocal"
             assert cfg.gm_redi_slope_face_thickness_evaluation == "nemo_qco_live"
+            assert cfg.gm_redi_flux_face_thickness_evaluation == "nemo_qco_live"
             assert cfg.gm_redi_slope_depth_evaluation == "nemo_qco_live_literal"
             assert cfg.gm_treguier_vertical_reduction_evaluation == "nemo_left"
             assert cfg.gm_treguier_sqrt_evaluation == "nemo_forward_exact"
@@ -184,6 +185,8 @@ def test_row30_selectors_are_scoped_to_the_two_dino_nemo_cards():
             assert cfg.gm_redi_slope_prd_evaluation == "density_roundtrip", name
             assert cfg.gm_redi_slope_metric_evaluation == "division", name
             assert cfg.gm_redi_slope_face_thickness_evaluation == "static_face", name
+            assert cfg.gm_redi_flux_face_thickness_evaluation == \
+                "tpoint_jacobian", name
             assert cfg.gm_redi_slope_depth_evaluation == \
                 "legacy_jacobian_t_surface", name
             assert cfg.gm_treguier_vertical_reduction_evaluation == "tree", name
@@ -194,6 +197,8 @@ def test_row30_selectors_are_scoped_to_the_two_dino_nemo_cards():
     assert GMRediConfig().slope_prd_evaluation == "density_roundtrip"
     assert GMRediConfig().slope_metric_evaluation == "division"
     assert GMRediConfig().slope_face_thickness_evaluation == "static_face"
+    assert GMRediConfig().redi_flux_face_thickness_evaluation == \
+        "tpoint_jacobian"
     assert GMRediConfig().slope_depth_evaluation == \
         "legacy_jacobian_t_surface"
     assert GMRediConfig().treguier_vertical_reduction_evaluation == "tree"
@@ -204,6 +209,7 @@ def test_row30_selectors_are_scoped_to_the_two_dino_nemo_cards():
         gm_redi_slope_prd_evaluation="density_roundtrip",
         gm_redi_slope_metric_evaluation="division",
         gm_redi_slope_face_thickness_evaluation="static_face",
+        gm_redi_flux_face_thickness_evaluation="tpoint_jacobian",
         gm_redi_slope_depth_evaluation="legacy_jacobian_t_surface",
         gm_treguier_vertical_reduction_evaluation="tree",
         gm_treguier_sqrt_evaluation="guarded_floor")
@@ -221,6 +227,11 @@ def test_row30_selectors_are_scoped_to_the_two_dino_nemo_cards():
         DINOConfig(), gm_redi_slope_depth_evaluation="silent_typo")
     with pytest.raises(ValueError, match="gm_redi_slope_depth_evaluation"):
         dino_lat_lon_model_config(dino_lat_lon_grid(bad, n_lon=8), bad)
+    bad_flux_face = dataclasses.replace(
+        DINOConfig(), gm_redi_flux_face_thickness_evaluation="silent_typo")
+    with pytest.raises(ValueError, match="gm_redi_flux_face_thickness"):
+        dino_lat_lon_model_config(
+            dino_lat_lon_grid(bad_flux_face, n_lon=8), bad_flux_face)
     bad_reduction = dataclasses.replace(
         DINOConfig(), gm_treguier_vertical_reduction_evaluation="silent_typo")
     with pytest.raises(ValueError, match="gm_treguier_vertical_reduction"):

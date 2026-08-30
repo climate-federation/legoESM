@@ -2244,6 +2244,8 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     return_bolus: bool = False,
     kappa_Redi_v=None,
     msc_e3w_override: jnp.ndarray | None = None,
+    face_thickness_u: jnp.ndarray | None = None,
+    face_thickness_v: jnp.ndarray | None = None,
     return_diagnostics: bool = False,
     return_operand_diagnostics: bool = False,
 ) -> jnp.ndarray:
@@ -2333,6 +2335,9 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         raise ValueError(
             "return_operand_diagnostics=True requires return_diagnostics=True")
     ones_z = jnp.ones((1, 1, nlev), dtype=dtype)
+    if (face_thickness_u is None) != (face_thickness_v is None):
+        raise ValueError(
+            "face_thickness_u and face_thickness_v must be supplied together")
 
     # --- Metrics (n_lat, n_lon).  NEMO e1u/e2u/e1v/e2v are co-located at the
     # u/v-point of cell i/j; map legoESM's (n_lon+1)/(n_lat+1) face metrics to
@@ -2406,8 +2411,18 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     zdkt = zdkt.at[:, :, 0].set(0.0)                 # surface w-level = 0
 
     # ================= HORIZONTAL fluxes (A11 + A13, A22 + A23) =============
-    zA11 = (e2u / e1u)[:, :, jnp.newaxis] * e3t
-    zA22 = (e1v / e2v)[:, :, jnp.newaxis] * e3t
+    if face_thickness_u is None:
+        e3u_flux = e3t
+        e3v_flux = e3t
+    else:
+        e3u_flux = jnp.asarray(face_thickness_u, dtype=dtype)
+        e3v_flux = jnp.asarray(face_thickness_v, dtype=dtype)
+        if e3u_flux.shape != q.shape or e3v_flux.shape != q.shape:
+            raise ValueError(
+                "face thickness overrides must have tracer shape "
+                f"{q.shape}; got {e3u_flux.shape} and {e3v_flux.shape}")
+    zA11 = (e2u / e1u)[:, :, jnp.newaxis] * e3u_flux
+    zA22 = (e1v / e2v)[:, :, jnp.newaxis] * e3v_flux
     # zmsku = 1/max(Σ4 wmask around the u-face vertical pair, 1)
     wm_ip1 = jnp.roll(wmask, -1, ax_x)
     wm_kp1 = jnp.roll(wmask, -1, ax_z)
@@ -2598,6 +2613,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 "e1u": e1u,
                 "e2u": e2u,
                 "e3t": e3t,
+                "e3u_flux": e3u_flux,
                 "uslp": uslp,
                 "wmask": wmask,
                 "zmsku": zmsku_h,
@@ -4090,6 +4106,29 @@ def gm_redi_tracer_tendency_latlon(
         # prefers z_coord.is_active's exact per-column integer bottom-level
         # compare over a float top-depth-vs-H_bathy tie, #1226).
         _active_3d = _nemo_native_active_3d(mask, z_coord, H_bathy, T.dtype)
+        _flux_face_mode = cfg.redi_flux_face_thickness_evaluation
+        if _flux_face_mode not in ("tpoint_jacobian", "nemo_qco_live"):
+            raise ValueError(
+                "unknown GMRediConfig.redi_flux_face_thickness_evaluation "
+                f"{_flux_face_mode!r}; expected 'tpoint_jacobian' or "
+                "'nemo_qco_live'")
+        _flux_e3u = None
+        _flux_e3v = None
+        if _flux_face_mode == "nemo_qco_live":
+            if eta is None:
+                raise ValueError(
+                    "redi_flux_face_thickness_evaluation='nemo_qco_live' "
+                    "requires NOW sea-surface height")
+            _e3t0 = getattr(z_coord, "nemo_e3t_0", None)
+            if _e3t0 is None:
+                raise ValueError(
+                    "redi_flux_face_thickness_evaluation='nemo_qco_live' "
+                    "requires raw NEMO e3t_0")
+            _umask3, _vmask3, _ = nemo_iso_face_masks(
+                u_mask, v_mask, _active_3d)
+            _e3t0 = jnp.asarray(_e3t0, dtype=T.dtype)[..., :T.shape[-1]]
+            _flux_e3u, _flux_e3v = nemo_qco_live_face_thicknesses(
+                eta, z_coord, _e3t0, _e3t0, _umask3, _vmask3)
         _positions = getattr(cfg, "slope_positions", "mode_b")
         if _positions not in ("mode_b", "nemo_native"):
             raise ValueError(
@@ -4116,7 +4155,9 @@ def gm_redi_tracer_tendency_latlon(
                 kappa_GM=kappa_GM, gm_bolus_advection=_gm_bolus,
                 gm_bolus_kappa_face_average=_gm_kfa,
                 return_bolus=return_bolus_transport,
-                kappa_Redi_v=kappa_Redi_v_eff)
+                kappa_Redi_v=kappa_Redi_v_eff,
+                face_thickness_u=_flux_e3u,
+                face_thickness_v=_flux_e3v)
             if return_bolus_transport:
                 dT_dt, _bolus = _dT
             else:
@@ -4127,7 +4168,9 @@ def gm_redi_tracer_tendency_latlon(
                 native_slopes=_nat, msc_stabilize=_msc, dt=dt,
                 kappa_GM=kappa_GM, gm_bolus_advection=_gm_bolus,
                 gm_bolus_kappa_face_average=_gm_kfa,
-                kappa_Redi_v=kappa_Redi_v_eff)
+                kappa_Redi_v=kappa_Redi_v_eff,
+                face_thickness_u=_flux_e3u,
+                face_thickness_v=_flux_e3v)
             if return_bolus_transport:
                 return dT_dt, dS_dt, _bolus
             return dT_dt, dS_dt
@@ -4152,6 +4195,8 @@ def gm_redi_tracer_tendency_latlon(
                 gm_bolus_kappa_face_average=_gm_kfa,
             return_bolus=return_bolus_transport,
             kappa_Redi_v=kappa_Redi_v_eff,
+            face_thickness_u=_flux_e3u,
+            face_thickness_v=_flux_e3v,
         )
         if return_bolus_transport:
             dT_dt, _bolus = _dT
@@ -4161,8 +4206,10 @@ def gm_redi_tracer_tendency_latlon(
             S, -S_x, -S_y, mask, u_mask, v_mask,
             z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
             kappa_GM=kappa_GM, gm_bolus_advection=_gm_bolus,
-                gm_bolus_kappa_face_average=_gm_kfa,
+            gm_bolus_kappa_face_average=_gm_kfa,
             kappa_Redi_v=kappa_Redi_v_eff,
+            face_thickness_u=_flux_e3u,
+            face_thickness_v=_flux_e3v,
         )
         if return_bolus_transport:
             return dT_dt, dS_dt, _bolus
