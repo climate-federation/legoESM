@@ -24,6 +24,7 @@ import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as model_module
 import legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid as gm_module
 import zdf_chain_sweep as sweep
 from legoesm.core.precision import PrecisionPolicy, set_policy
+from legoesm.grids.latlon import ensure_geometry
 from legoesm.ocean.dynamics.latlon_cgrid_operators import min_cell_to_uface
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import upwind_to_u_points
 from legoesm.ocean.vertical import compute_layer_thickness
@@ -61,6 +62,7 @@ ROUND83_SHA = "f759087db5680d8ee13f8053000812e7b0a89471f8efc28196f2ead0006f8bb3"
 ROUND84_SHA = "6483fc67d59bea3b5bb81e546a31af47eec85aeea48573f42e11c2e575740451"
 ROUND85_SHA = "10a5695a804c0e96ec36455ed160169b18897c43b57614c6a979349fcf53ec6c"
 ROUND86_SHA = "93e39c3ee0fbf973464aa4ea583a404668e4be13dfe044153a28c0e3022c260e"
+ROUND87_SHA = "df56a496d6e7ebc14d9e8214cdc6742010d3b8b4286c0d9b2704526593ed6caf"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -100,6 +102,12 @@ REDI_HELD_SHA = {
     "stp_dump_22_before_traldf_sal.bin": "d8985e7056391862c64d3f4c3da92cd3d437f606ea0d66c58ca7d5ea4edb9a50",
     "stp_dump_23_after_traldf_tem.bin": "ff109b54b8f04c9dfcb09643b940b29f603fceff48d1896a510ba9af74a96f2f",
     "stp_dump_23_after_traldf_sal.bin": "7e751ab80519d2097e9332e120b7c0423d744ec98c3a9260c82c47a4064811fb",
+}
+REDI_SKEW_INPUT_SHA = {
+    "ldftra_dump_ahtu.bin": "098b95a3548ee8d3c66694ca43c3b720840e2c193895b0df222e8e186b2580da",
+    "ldftra_dump_ahtv.bin": "769cb4b4e87bbc4bee9567cd933216b8931086c9b236b9ec2acf35e38fb7006b",
+    "eiv_dump_wslpi.bin": "e3073a8501e8046732e301d58781dcaf35a6a84d9071309353b3de0bad08fb64",
+    "eiv_dump_wslpj.bin": "2d24bcace748f7d550b34ae51dc1736a3e6943967a2ffd068618b0e92a723acc",
 }
 FOCUS = [(11, 1), (12, 1), (13, 1), (13, 23)]
 POINTWISE_BAR = 1.0e-15
@@ -197,6 +205,7 @@ def main() -> int:
     parser.add_argument("--round84", type=Path)
     parser.add_argument("--round85", type=Path)
     parser.add_argument("--round86", type=Path)
+    parser.add_argument("--round87", type=Path)
     parser.add_argument("--hold-slow-forcing", action="store_true")
     parser.add_argument("--oracle-transport", action="store_true")
     parser.add_argument("--capture-cycle", action="store_true")
@@ -225,6 +234,7 @@ def main() -> int:
     parser.add_argument("--redi-zfu-ahtu-postfix", action="store_true")
     parser.add_argument("--redi-zfw-association-factorial", action="store_true")
     parser.add_argument("--redi-zfw-component-score", action="store_true")
+    parser.add_argument("--redi-zfw-skew-factorial", action="store_true")
     parser.add_argument("--redi-run-dir", type=Path)
     parser.add_argument("--redi-flux-run-dir", type=Path)
     parser.add_argument("--redi-flux-bracket", type=Path)
@@ -715,6 +725,21 @@ def main() -> int:
           or args.redi_zfw_component_bracket is not None
           or args.redi_zfw_component_bracket_sha is not None):
         raise SystemExit("round-87 component inputs require component score")
+    if args.redi_zfw_skew_factorial:
+        if not args.redi_zfw_component_score:
+            raise SystemExit("skew factorial requires component score")
+        if args.round87 is None or _sha(args.round87.resolve()) != ROUND87_SHA:
+            raise SystemExit("bound official round-87 receipt required")
+        prior87 = json.loads(args.round87.read_text())
+        if (prior87.get("disposition") != "REDI_ZFW_T_DIVERGED_A31_A32"
+                or prior87["redi_zfw_component_metrics"]["skew"]["pass"]
+                or prior87["redi_zfw_component_metrics"]["a33"]["pass"]):
+            raise SystemExit("round 87 does not admit the ordered skew peel")
+        for name, expected in REDI_SKEW_INPUT_SHA.items():
+            if _sha(args.redi_flux_run_dir.resolve() / name) != expected:
+                raise SystemExit(f"held Redi skew input changed: {name}")
+    elif args.round87 is not None:
+        raise SystemExit("--round87 requires --redi-zfw-skew-factorial")
     if _sha(args.raw_artifact.resolve()) != RAW_ARTIFACT_SHA:
         raise SystemExit("admitted held row-8 artifact changed")
     held = args.held_dir.resolve()
@@ -1104,6 +1129,7 @@ def main() -> int:
     redi_zfu_operand_ladder = {}
     redi_zfw_association_factorial = {}
     redi_zfw_component_metrics = {}
+    redi_zfw_skew_factorial = {}
     redi_flux_rows = []
     first_flux = None
     first_flux_subrow = None
@@ -1657,6 +1683,225 @@ def main() -> int:
                                         + oracle_components["a33"],
                                         oracle_zfw, masks["zfw"], FOCUS,
                                         POINTWISE_BAR))
+                                if args.redi_zfw_skew_factorial:
+                                    nlev = zfw["ahtu"].shape[-1]
+
+                                    def pad_w_slope(value):
+                                        value = jnp.asarray(value, dtype=dtype)
+                                        if value.shape[-1] != nlev - 1:
+                                            raise SystemExit(
+                                                "held W-slope level count changed")
+                                        return jnp.concatenate([
+                                            value,
+                                            jnp.zeros_like(value[..., :1])],
+                                            axis=-1)
+
+                                    oracle_ahtu = jnp.asarray(_load_levels(
+                                        flux_dir / "ldftra_dump_ahtu.bin", nlev),
+                                        dtype=dtype)
+                                    oracle_ahtv = jnp.asarray(_load_levels(
+                                        flux_dir / "ldftra_dump_ahtv.bin", nlev),
+                                        dtype=dtype)
+                                    oracle_wslpi = pad_w_slope(_load(
+                                        flux_dir / "eiv_dump_wslpi.bin"))
+                                    oracle_wslpj = pad_w_slope(_load(
+                                        flux_dir / "eiv_dump_wslpj.bin"))
+                                    full_umask = jnp.asarray(umask, dtype=dtype)
+                                    full_vmask = jnp.asarray(vmask, dtype=dtype)
+                                    full_wmask = zfw["wmask"]
+
+                                    def pair4(a, b, c, d):
+                                        return (a + b) + (c + d)
+
+                                    ahtu_w = jnp.roll(
+                                        oracle_ahtu, +1, axis=1)
+                                    ahtu_kp1 = jnp.roll(
+                                        oracle_ahtu, -1, axis=2)
+                                    ahtu_w_kp1 = jnp.roll(
+                                        ahtu_kp1, +1, axis=1)
+                                    ahtv_s = jnp.roll(
+                                        oracle_ahtv, +1, axis=0)
+                                    ahtv_kp1 = jnp.roll(
+                                        oracle_ahtv, -1, axis=2)
+                                    ahtv_s_kp1 = jnp.roll(
+                                        ahtv_kp1, +1, axis=0)
+                                    umask_w = jnp.roll(
+                                        full_umask, +1, axis=1)
+                                    umask_kp1 = jnp.roll(
+                                        full_umask, -1, axis=2)
+                                    umask_w_kp1 = jnp.roll(
+                                        umask_kp1, +1, axis=1)
+                                    vmask_s = jnp.roll(
+                                        full_vmask, +1, axis=0)
+                                    vmask_kp1 = jnp.roll(
+                                        full_vmask, -1, axis=2)
+                                    vmask_s_kp1 = jnp.roll(
+                                        vmask_kp1, +1, axis=0)
+                                    zmsku_literal = full_wmask / jnp.maximum(
+                                        pair4(full_umask, umask_w_kp1,
+                                              umask_w, umask_kp1), 1.0)
+                                    zmskv_literal = full_wmask / jnp.maximum(
+                                        pair4(full_vmask, vmask_s_kp1,
+                                              vmask_s, vmask_kp1), 1.0)
+                                    zahu_literal = pair4(
+                                        oracle_ahtu, ahtu_w_kp1,
+                                        ahtu_w, ahtu_kp1) * zmsku_literal
+                                    zahv_literal = pair4(
+                                        oracle_ahtv, ahtv_s_kp1,
+                                        ahtv_s, ahtv_kp1) * zmskv_literal
+                                    skew_geom = ensure_geometry(
+                                        capture["args"][8])
+                                    zA_literal = (
+                                        (-zahu_literal
+                                         * skew_geom.dy_T[:, :, None]
+                                         * zmsku_literal
+                                         * jnp.roll(oracle_wslpi, -1, axis=2)),
+                                        (-zahv_literal
+                                         * skew_geom.dx_T[:, :, None]
+                                         * zmskv_literal
+                                         * jnp.roll(oracle_wslpj, -1, axis=2)),
+                                    )
+
+                                    def gradients(q_value):
+                                        q_value = jnp.asarray(q_value, dtype=dtype)
+                                        return (
+                                            (jnp.roll(q_value, -1, axis=1)
+                                             - q_value) * full_umask,
+                                            (jnp.roll(q_value, -1, axis=0)
+                                             - q_value) * full_vmask,
+                                        )
+
+                                    gradient_levels = {
+                                        0: gradients(capture["q"]),
+                                        1: gradients(state.T.data),
+                                    }
+
+                                    def four(values, source_grouping):
+                                        a, b, c, d = values
+                                        if source_grouping:
+                                            return (a + b) + (c + d)
+                                        return ((a + b) + c) + d
+
+                                    def skew_arm(use_literal_coefficient,
+                                                 source_grouping,
+                                                 use_now_gradient):
+                                        za31, za32 = (zA_literal
+                                            if use_literal_coefficient else
+                                            (zfw["zA31"], zfw["zA32"]))
+                                        zdit_arm, zdjt_arm = gradient_levels[
+                                            use_now_gradient]
+                                        zdit_kp1_arm = jnp.roll(
+                                            zdit_arm, -1, axis=2)
+                                        zdjt_kp1_arm = jnp.roll(
+                                            zdjt_arm, -1, axis=2)
+                                        wi_arm = (
+                                            zdit_arm,
+                                            jnp.roll(zdit_kp1_arm, +1, axis=1),
+                                            jnp.roll(zdit_arm, +1, axis=1),
+                                            zdit_kp1_arm,
+                                        )
+                                        wj_arm = (
+                                            zdjt_arm,
+                                            jnp.roll(zdjt_kp1_arm, +1, axis=0),
+                                            jnp.roll(zdjt_arm, +1, axis=0),
+                                            zdjt_kp1_arm,
+                                        )
+                                        return ((za31 * four(
+                                            wi_arm, source_grouping)
+                                            + za32 * four(
+                                                wj_arm, source_grouping))
+                                            * zfw["act_below"])
+
+                                    skew_arms = {}
+                                    skew_values = {}
+                                    for use_c in (0, 1):
+                                        for use_g in (0, 1):
+                                            for use_t in (0, 1):
+                                                arm = f"C{use_c}G{use_g}T{use_t}"
+                                                value = np.asarray(skew_arm(
+                                                    use_c, use_g, use_t))[..., :35]
+                                                skew_values[arm] = value
+                                                skew_arms[arm] = sweep.metrics(
+                                                    value,
+                                                    oracle_components["skew"],
+                                                    masks["zfw"], FOCUS,
+                                                    POINTWISE_BAR)
+                                    baseline = skew_arms["C0G0T0"][
+                                        "max_column_error"]
+                                    errors = {name: metric[
+                                        "max_column_error"]
+                                        for name, metric in skew_arms.items()}
+                                    removals = {name: float(
+                                        (baseline - error) / baseline)
+                                        for name, error in errors.items()}
+                                    interactions = {
+                                        "CxG_at_T0": float((
+                                            errors["C1G0T0"]
+                                            + errors["C0G1T0"]
+                                            - errors["C1G1T0"]
+                                            - baseline) / baseline),
+                                        "CxT_at_G0": float((
+                                            errors["C1G0T0"]
+                                            + errors["C0G0T1"]
+                                            - errors["C1G0T1"]
+                                            - baseline) / baseline),
+                                        "GxT_at_C0": float((
+                                            errors["C0G1T0"]
+                                            + errors["C0G0T1"]
+                                            - errors["C0G1T1"]
+                                            - baseline) / baseline),
+                                        "CxGxT": float((
+                                            errors["C1G1T1"]
+                                            - errors["C1G1T0"]
+                                            - errors["C1G0T1"]
+                                            - errors["C0G1T1"]
+                                            + errors["C1G0T0"]
+                                            + errors["C0G1T0"]
+                                            + errors["C0G0T1"]
+                                            - baseline) / baseline),
+                                    }
+                                    perturb = np.array(
+                                        skew_values["C0G0T0"], copy=True)
+                                    wet_index = tuple(int(x) for x in
+                                        np.argwhere(masks["zfw"])[0])
+                                    perturb[wet_index] += max(
+                                        4.0 * POINTWISE_BAR
+                                        * skew_arms["C0G0T0"]["reference_rms"],
+                                        4.0 * abs(float(np.spacing(
+                                            perturb[wet_index]))))
+                                    redi_zfw_skew_factorial = {
+                                        "arms": skew_arms,
+                                        "max_error_removal_fraction": removals,
+                                        "interactions": interactions,
+                                        "controls": {
+                                            "eight_arms_present":
+                                                len(skew_arms) == 8,
+                                            "source_inputs_hash_bound": True,
+                                            "baseline_recomposes_production":
+                                                bool(np.array_equal(
+                                                    skew_values["C0G0T0"],
+                                                    own_components["skew"])),
+                                            "faithful_arm_finite": bool(
+                                                np.isfinite(skew_values[
+                                                    "C1G1T0"][masks[
+                                                        "zfw"]]).all()),
+                                            "wet_point_plant_red": not
+                                                sweep.metrics(
+                                                    perturb,
+                                                    oracle_components["skew"],
+                                                    masks["zfw"], FOCUS,
+                                                    POINTWISE_BAR)["pass"],
+                                            "now_gradient_distinct": not bool(
+                                                np.array_equal(
+                                                    skew_values["C1G1T0"],
+                                                    skew_values["C1G1T1"])),
+                                            **{f"oracle_{name}": value
+                                               for name, value in _controls(
+                                                   oracle_components["skew"],
+                                                   masks["zfw"],
+                                                   POINTWISE_BAR).items()},
+                                        },
+                                    }
     specs = (
         ("8.3", "uu(Kmm) / zptu", "traadv.F90:301-304", "un", POINTWISE_BAR),
         ("8.4", "e2u", "traadv.F90:329", "e2u", POINTWISE_BAR),
@@ -1939,6 +2184,14 @@ def main() -> int:
                 == "REDI_ZFW_T_COMPONENTS_HELD_OPEN"),
             "zfw_oracle_component_closure":
                 redi_zfw_component_metrics["oracle_closure"]["pass"],
+        })
+    if args.redi_zfw_skew_factorial:
+        controls.update({
+            "round87_ordered_skew_admitted": (
+                prior87["disposition"] ==
+                "REDI_ZFW_T_DIVERGED_A31_A32"),
+            **{f"redi_zfw_skew_{name}": value for name, value in
+               redi_zfw_skew_factorial["controls"].items()},
         })
     controls["all_scored_finite"] = all(
         row.get("status") == "ORDERED_BLOCKED"
@@ -2229,12 +2482,32 @@ def main() -> int:
         else:
             disposition = "REDI_ZFW_T_COMPONENTS_AT_BAR"
             first_flux_subrow = "87.T.3c"
+    if args.redi_zfw_skew_factorial and valid:
+        arms = redi_zfw_skew_factorial["arms"]
+        removal = redi_zfw_skew_factorial[
+            "max_error_removal_fraction"]
+        if arms["C0G0T1"]["pass"]:
+            disposition = "INVALID_REDI_ZFW_SKEW_MATCHES_KMM_NOT_KBB"
+        elif arms["C1G1T0"]["pass"]:
+            if (removal["C1G0T0"] >= 0.90
+                    and removal["C0G1T0"] < 0.90):
+                disposition = "REDI_ZFW_T_SKEW_LOCALIZED_TO_COEFFICIENT_ASSEMBLY"
+            elif (removal["C0G1T0"] >= 0.90
+                  and removal["C1G0T0"] < 0.90):
+                disposition = "REDI_ZFW_T_SKEW_LOCALIZED_TO_GRADIENT_ASSOCIATION"
+            else:
+                disposition = "REDI_ZFW_T_SKEW_COEFFICIENT_GRADIENT_COMPOSITION"
+        else:
+            disposition = "REDI_ZFW_T_SKEW_A31_A32_HELD_SPLIT_REQUIRED"
+        first_flux_subrow = "88.T.3a"
     receipt_first = (first_flux_subrow
                      if args.redi_flux_ladder and first_flux_subrow is not None
                      else first)
     nemo = args.nemo_root.resolve()
     receipt = {
-        "schema": ("dino-split-explicit-momentum-chain-round87-v1"
+        "schema": ("dino-split-explicit-momentum-chain-round88-v1"
+                   if args.redi_zfw_skew_factorial else
+                   "dino-split-explicit-momentum-chain-round87-v1"
                    if args.redi_zfw_component_score else
                    "dino-split-explicit-momentum-chain-round86-v1"
                    if args.redi_zfw_association_factorial else
@@ -2314,6 +2587,8 @@ def main() -> int:
            if args.redi_zfw_association_factorial else {}),
         **({"redi_zfw_component_metrics": redi_zfw_component_metrics}
            if args.redi_zfw_component_score else {}),
+        **({"redi_zfw_skew_factorial": redi_zfw_skew_factorial}
+           if args.redi_zfw_skew_factorial else {}),
         "focus_ji": [list(x) for x in FOCUS],
         "bindings": {
             "round54": _sha(args.round54.resolve()),
@@ -2389,12 +2664,18 @@ def main() -> int:
                 **{name: _sha(component_dir / name)
                    for name in sorted(expected_components)}}
                if args.redi_zfw_component_score else {}),
+            **({"round87": _sha(args.round87.resolve()),
+                **{f"skew_input_{name}": _sha(flux_dir / name)
+                   for name in sorted(REDI_SKEW_INPUT_SHA)}}
+               if args.redi_zfw_skew_factorial else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(
                 root / "docs/ocean/fidelity" /
-                ("PREREG_split_explicit_momentum_chain_round87.md"
+                ("PREREG_split_explicit_momentum_chain_round88.md"
+                 if args.redi_zfw_skew_factorial else
+                 "PREREG_split_explicit_momentum_chain_round87.md"
                  if args.redi_zfw_component_score else
                  "PREREG_split_explicit_momentum_chain_round86.md"
                  if args.redi_zfw_association_factorial else
@@ -2456,7 +2737,9 @@ def main() -> int:
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
             "nemo_ldftra": _sha(nemo / "cfgs/DINO/MY_SRC/ldftra.F90"),
         },
-        "arm": ("redi_zfw_component_score"
+        "arm": ("redi_zfw_skew_factorial"
+                if args.redi_zfw_skew_factorial else
+                "redi_zfw_component_score"
                 if args.redi_zfw_component_score else
                 "redi_zfw_association_factorial"
                 if args.redi_zfw_association_factorial else
@@ -2502,7 +2785,15 @@ def main() -> int:
                 "oracle_transport" if args.oracle_transport else
                 "held_slow_forcing" if args.hold_slow_forcing else
                 "production"),
-        "ordered_next": ("redi_zfw_a31_a32_operand_peel" if disposition ==
+        "ordered_next": ("stop_invalid_kbb_registration" if disposition ==
+                          "INVALID_REDI_ZFW_SKEW_MATCHES_KMM_NOT_KBB" else
+                          "redi_zfw_skew_source_fix" if disposition in (
+                          "REDI_ZFW_T_SKEW_LOCALIZED_TO_COEFFICIENT_ASSEMBLY",
+                          "REDI_ZFW_T_SKEW_LOCALIZED_TO_GRADIENT_ASSOCIATION",
+                          "REDI_ZFW_T_SKEW_COEFFICIENT_GRADIENT_COMPOSITION") else
+                          "redi_zfw_a31_vs_a32_held_split" if disposition ==
+                          "REDI_ZFW_T_SKEW_A31_A32_HELD_SPLIT_REQUIRED" else
+                          "redi_zfw_a31_a32_operand_peel" if disposition ==
                           "REDI_ZFW_T_DIVERGED_A31_A32" else
                           "redi_zfw_a33_operand_peel" if disposition ==
                           "REDI_ZFW_T_DIVERGED_A33" else
