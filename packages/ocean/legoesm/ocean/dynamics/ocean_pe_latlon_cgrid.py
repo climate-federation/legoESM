@@ -1424,13 +1424,10 @@ def _nemo_qco_zad_operands(
     live_v = jnp.concatenate(
         [jnp.zeros_like(live_v_raw[:1]), live_v_raw], axis=0)
 
-    # Reuse the already-certified row-1.3 source-associated continuity
-    # builder.  Its API is 2-D, so retain the NEMO vertical left order while
-    # evaluating each Kmm layer.  A local import avoids the barotropic module's
-    # optional EEN -> ocean_pe import cycle during module initialization.
-    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
-        nemo_literal_continuity_divergence,
-    )
+    # divhor.F90:180-184 materializes the two native face fluxes before their
+    # differences, then divides by live e3t.  Do not route this through the
+    # barotropic column-continuity helper: that helper intentionally collapses
+    # e3t*hdiv and loses the divide/multiply boundary required by wzv.
     tmask = jnp.asarray(mask_3d, dtype=eta_now.dtype)
     h0 = jnp.zeros_like(eta_now)
     for jk in range(nlev):
@@ -1438,14 +1435,26 @@ def _nemo_qco_zad_operands(
     h0_safe = jnp.where(h0 > 0.0, h0, 1.0)
     r3_now = eta_now / h0_safe
     live_t = e3t0 * (1.0 + r3_now[..., None] * tmask) * tmask
+    e2u = jnp.asarray(grid.dy_u[:, 1:], dtype=eta_now.dtype)
+    e1v = jnp.asarray(grid.dx_v[1:, :], dtype=eta_now.dtype)
+    r1_area_t = jax.lax.optimization_barrier(1.0 / area_t)
     flux_levels = []
     barotropic_div = jnp.zeros_like(eta_now)
     for jk in range(nlev):
-        transport_div = nemo_literal_continuity_divergence(
-            live_u[..., jk], live_v[..., jk], u[..., jk], v[..., jk],
-            u_mask_3d[..., jk], v_mask_3d[..., jk], grid,
-        ) * tmask[..., jk]
-        transport_div = jax.lax.optimization_barrier(transport_div)
+        flux_u = jax.lax.optimization_barrier(
+            jax.lax.optimization_barrier(e2u * live_u_raw[..., jk])
+            * u[:, 1:, jk]) * raw_umask[..., jk]
+        flux_v = jax.lax.optimization_barrier(
+            jax.lax.optimization_barrier(e1v * live_v_raw[..., jk])
+            * v[1:, :, jk]) * raw_vmask[..., jk]
+        west = jnp.roll(flux_u, 1, axis=1)
+        south = jnp.concatenate(
+            [jnp.zeros_like(flux_v[:1]), flux_v[:-1]], axis=0)
+        zonal = jax.lax.optimization_barrier(flux_u - west)
+        meridional = jax.lax.optimization_barrier(flux_v - south)
+        numerator = jax.lax.optimization_barrier(zonal + meridional)
+        transport_div = jax.lax.optimization_barrier(
+            numerator * r1_area_t) * tmask[..., jk]
         # divhor.F90:180-184 divides the transport divergence by live e3t;
         # ssh_nxt/wzv then multiply by that same e3t.  Preserve the executed
         # divide/multiply instead of algebraically cancelling it -- row 4 is
