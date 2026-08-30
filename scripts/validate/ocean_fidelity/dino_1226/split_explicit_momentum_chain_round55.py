@@ -179,6 +179,7 @@ def main() -> int:
     parser.add_argument("--zn-sqrt-factorial", action="store_true")
     parser.add_argument("--exact-sqrt-production", action="store_true")
     parser.add_argument("--capture-redi-tail", action="store_true")
+    parser.add_argument("--redi-run-dir", type=Path)
     parser.add_argument("--raw-artifact", type=Path, required=True)
     parser.add_argument("--nemo-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -488,9 +489,14 @@ def main() -> int:
             if not (held / name).is_file() or _sha(held / name) != expected:
                 raise SystemExit(f"held GM geometry operand changed: {name}")
     if args.capture_redi_tail:
+        if args.redi_run_dir is None:
+            raise SystemExit("--capture-redi-tail requires --redi-run-dir")
+        redi_dir = args.redi_run_dir.resolve()
         for name, expected in REDI_HELD_SHA.items():
-            if not (held / name).is_file() or _sha(held / name) != expected:
+            if not (redi_dir / name).is_file() or _sha(redi_dir / name) != expected:
                 raise SystemExit(f"held Redi bracket changed: {name}")
+    elif args.redi_run_dir is not None:
+        raise SystemExit("--redi-run-dir requires --capture-redi-tail")
 
     set_policy(PrecisionPolicy.fp64())
     if jax.default_backend() != "cpu" or not jax.config.jax_enable_x64:
@@ -1046,8 +1052,8 @@ def main() -> int:
         redi_oracle = {}
         for name, suffix in (("temperature", "tem"), ("salinity", "sal")):
             redi_oracle[name] = (
-                _load(held / f"stp_dump_23_after_traldf_{suffix}.bin")
-                - _load(held / f"stp_dump_22_before_traldf_{suffix}.bin"))
+                _load(redi_dir / f"stp_dump_23_after_traldf_{suffix}.bin")
+                - _load(redi_dir / f"stp_dump_22_before_traldf_{suffix}.bin"))
             redi_metrics[name] = sweep.metrics(
                 matched[name], redi_oracle[name], wet_t,
                 FOCUS, ACCUMULATION_BAR)
@@ -1483,7 +1489,7 @@ def main() -> int:
             **({"round74": _sha(args.round74.resolve())}
                if args.exact_sqrt_production else {}),
             **({"round75": _sha(args.round75.resolve()),
-                **{name: _sha(held / name) for name in REDI_HELD_SHA}}
+                **{name: _sha(redi_dir / name) for name in REDI_HELD_SHA}}
                if args.capture_redi_tail else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
