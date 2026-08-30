@@ -2113,13 +2113,24 @@ def main() -> int:
                                                     np.isfinite(operand_values[
                                                         "U1V1I1J1"][masks[
                                                             "zfw"]]).all()),
-                                                "each_substitution_noninert":
+                                                "certified_coefficients_inert":
+                                                    all(np.array_equal(
+                                                        operand_values[
+                                                            operand_key({name})],
+                                                        operand_values[
+                                                            "U0V0I0J0"])
+                                                        for name in "UV")
+                                                    and raw_operand_metrics[
+                                                        "ahtu"]["pass"]
+                                                    and raw_operand_metrics[
+                                                        "ahtv"]["pass"],
+                                                "slope_substitutions_noninert":
                                                     all(not np.array_equal(
                                                         operand_values[
                                                             operand_key({name})],
                                                         operand_values[
                                                             "U0V0I0J0"])
-                                                        for name in "UVIJ"),
+                                                        for name in "IJ"),
                                                 "source_inputs_hash_bound": True,
                                                 **{f"oracle_{name}": value
                                                    for name, value in _controls(
@@ -3024,6 +3035,10 @@ def main() -> int:
                  "PREREG_split_explicit_momentum_chain_round61.md"
                  if args.oracle_transport else
                  "PREREG_split_explicit_momentum_chain_round59.md")),
+            **({"preregistration_amendment": _sha(
+                root / "docs/ocean/fidelity" /
+                "PREREG_split_explicit_momentum_chain_round90_amendment.md")}
+               if args.redi_zfw_skew_operand_factorial else {}),
             "production_model": _sha(root / "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py"),
             "production_barotropic": _sha(root / "packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py"),
             "nemo_stpmlf": _sha(nemo / "cfgs/DINO/MY_SRC/stpmlf.F90"),
