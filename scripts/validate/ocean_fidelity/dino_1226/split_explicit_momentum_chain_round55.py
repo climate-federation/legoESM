@@ -58,6 +58,7 @@ ROUND80_SHA = "e0803ac9f844ec77c843885247b6ad0809b33f02894b88376690ec870f9b8493"
 ROUND81_SHA = "247acae491d6568febb16d81a7a96e5b2c22a4246cf6b2e613ce640d38eaee71"
 ROUND82_SHA = "4177c99481bdbc6996477dad848d1e645ada3a26a08fb9aa1e9dd9e4b20f9e7a"
 ROUND83_SHA = "f759087db5680d8ee13f8053000812e7b0a89471f8efc28196f2ead0006f8bb3"
+ROUND84_SHA = "6483fc67d59bea3b5bb81e546a31af47eec85aeea48573f42e11c2e575740451"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -191,6 +192,7 @@ def main() -> int:
     parser.add_argument("--round81", type=Path)
     parser.add_argument("--round82", type=Path)
     parser.add_argument("--round83", type=Path)
+    parser.add_argument("--round84", type=Path)
     parser.add_argument("--hold-slow-forcing", action="store_true")
     parser.add_argument("--oracle-transport", action="store_true")
     parser.add_argument("--capture-cycle", action="store_true")
@@ -216,6 +218,7 @@ def main() -> int:
     parser.add_argument("--redi-zfu-slope-kmm-postfix", action="store_true")
     parser.add_argument("--redi-zfu-kmm-operator-postfix", action="store_true")
     parser.add_argument("--redi-zfu-bolus-stage-split-postfix", action="store_true")
+    parser.add_argument("--redi-zfu-ahtu-postfix", action="store_true")
     parser.add_argument("--redi-run-dir", type=Path)
     parser.add_argument("--redi-flux-run-dir", type=Path)
     parser.add_argument("--redi-flux-bracket", type=Path)
@@ -649,6 +652,17 @@ def main() -> int:
     elif args.round83 is not None:
         raise SystemExit(
             "--round83 requires --redi-zfu-bolus-stage-split-postfix")
+    if args.redi_zfu_ahtu_postfix:
+        if not args.redi_zfu_bolus_stage_split_postfix:
+            raise SystemExit("ahtu postfix requires bolus stage split arm")
+        if args.round84 is None or _sha(args.round84.resolve()) != ROUND84_SHA:
+            raise SystemExit("bound official round-84 receipt required")
+        prior84 = json.loads(args.round84.read_text())
+        if prior84.get("disposition") != (
+                "REDI_ZFU_T_BOLUS_STAGE_SPLIT_FIXED_AHTU_RESIDUAL"):
+            raise SystemExit("round 84 does not admit the ahtu postfix")
+    elif args.round84 is not None:
+        raise SystemExit("--round84 requires --redi-zfu-ahtu-postfix")
     if _sha(args.raw_artifact.resolve()) != RAW_ARTIFACT_SHA:
         raise SystemExit("admitted held row-8 artifact changed")
     held = args.held_dir.resolve()
@@ -2007,12 +2021,22 @@ def main() -> int:
         else:
             disposition = "REDI_ZFU_T_BOLUS_STAGE_SPLIT_REGRESSION"
         first_flux_subrow = "84.T.1"
+    if args.redi_zfu_ahtu_postfix and valid:
+        current = redi_zfu_operand_ladder["arms"]["S0H0K0"]
+        ahtu = redi_zfu_operand_ladder["operand_metrics"]["ahtu"]
+        if current["pass"] and ahtu["pass"]:
+            disposition = "REDI_ZFU_T_AHTU_AT_BAR"
+        else:
+            disposition = "REDI_ZFU_T_AHTU_REGRESSION"
+        first_flux_subrow = "85.T.1"
     receipt_first = (first_flux_subrow
                      if args.redi_flux_ladder and first_flux_subrow is not None
                      else first)
     nemo = args.nemo_root.resolve()
     receipt = {
-        "schema": ("dino-split-explicit-momentum-chain-round84-v1"
+        "schema": ("dino-split-explicit-momentum-chain-round85-v1"
+                   if args.redi_zfu_ahtu_postfix else
+                   "dino-split-explicit-momentum-chain-round84-v1"
                    if args.redi_zfu_bolus_stage_split_postfix else
                    "dino-split-explicit-momentum-chain-round83-v1"
                    if args.redi_zfu_kmm_operator_postfix else
@@ -2146,12 +2170,16 @@ def main() -> int:
                if args.redi_zfu_kmm_operator_postfix else {}),
             **({"round83": _sha(args.round83.resolve())}
                if args.redi_zfu_bolus_stage_split_postfix else {}),
+            **({"round84": _sha(args.round84.resolve())}
+               if args.redi_zfu_ahtu_postfix else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(
                 root / "docs/ocean/fidelity" /
-                ("PREREG_split_explicit_momentum_chain_round84.md"
+                ("PREREG_split_explicit_momentum_chain_round85.md"
+                 if args.redi_zfu_ahtu_postfix else
+                 "PREREG_split_explicit_momentum_chain_round84.md"
                  if args.redi_zfu_bolus_stage_split_postfix else
                  "PREREG_split_explicit_momentum_chain_round83.md"
                  if args.redi_zfu_kmm_operator_postfix else
@@ -2207,7 +2235,9 @@ def main() -> int:
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
             "nemo_ldftra": _sha(nemo / "cfgs/DINO/MY_SRC/ldftra.F90"),
         },
-        "arm": ("redi_zfu_bolus_stage_split_postfix"
+        "arm": ("redi_zfu_ahtu_postfix"
+                if args.redi_zfu_ahtu_postfix else
+                "redi_zfu_bolus_stage_split_postfix"
                 if args.redi_zfu_bolus_stage_split_postfix else
                 "redi_zfu_kmm_operator_postfix"
                 if args.redi_zfu_kmm_operator_postfix else
@@ -2251,13 +2281,15 @@ def main() -> int:
                           "REDI_ZFU_T_KMM_OPERATOR_FIXED_AHTU_RESIDUAL",
                           "REDI_ZFU_T_BOLUS_STAGE_SPLIT_FIXED_AHTU_RESIDUAL") else
                           "redi_zfu_temperature_vflux" if disposition in (
+                          "REDI_ZFU_T_AHTU_AT_BAR",
                           "REDI_ZFU_T_KMM_OPERATOR_AT_BAR",
                           "REDI_ZFU_T_BOLUS_STAGE_SPLIT_AT_BAR",
                           "REDI_ZFU_T_KMM_SLOPE_AT_BAR") else
                           "stop_postfix_regression" if disposition in (
                           "REDI_ZFU_T_KMM_SLOPE_REGRESSION",
                           "REDI_ZFU_T_KMM_OPERATOR_REGRESSION",
-                          "REDI_ZFU_T_BOLUS_STAGE_SPLIT_REGRESSION") else
+                          "REDI_ZFU_T_BOLUS_STAGE_SPLIT_REGRESSION",
+                          "REDI_ZFU_T_AHTU_REGRESSION") else
                           "redi_zfu_final_uslp_residual" if disposition in (
                           "REDI_ZFU_T_POSTFIX_RESIDUAL_FINAL_USLP",
                           "REDI_ZFU_T_KMM_FACE_FIXED_RESIDUAL_FINAL_USLP") else

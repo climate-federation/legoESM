@@ -1149,6 +1149,30 @@ def static_kappa_redi_override(gm_cfg, grid):
     """
     if not bool(getattr(gm_cfg, "kappa_redi_lat_scaling", False)):
         return None, None
+    evaluation = getattr(
+        gm_cfg, "kappa_redi_horizontal_evaluation", "cosine_scaled")
+    if evaluation not in ("cosine_scaled", "nemo_metric_literal"):
+        raise ValueError(
+            "unknown GMRediConfig.kappa_redi_horizontal_evaluation "
+            f"{evaluation!r}; expected 'cosine_scaled' or "
+            "'nemo_metric_literal'")
+    if evaluation == "nemo_metric_literal":
+        velocity = getattr(gm_cfg, "kappa_redi_diffusive_velocity", None)
+        if velocity is None:
+            raise ValueError(
+                "kappa_redi_horizontal_evaluation='nemo_metric_literal' "
+                "requires kappa_redi_diffusive_velocity")
+        geom = ensure_geometry(grid)
+        # NEMO ldf_c2d('TRA'): pUfac is formed first, then multiplied by
+        # MAX(e1,e2) independently at the U and V points
+        # (ldfc1d_c2d.F90:141-145).  The east/north slices use the operator's
+        # cell-indexed face convention.
+        pUfac = 0.5 * velocity
+        kappa_u = pUfac * jnp.maximum(
+            geom.dx_u[:, 1:], geom.dy_u[:, 1:])
+        kappa_v = pUfac * jnp.maximum(
+            geom.dx_v[1:, :], geom.dy_v[1:, :])
+        return kappa_u, kappa_v
     lat = jnp.asarray(grid.lat)
     if lat.ndim != 1:
         raise ValueError(

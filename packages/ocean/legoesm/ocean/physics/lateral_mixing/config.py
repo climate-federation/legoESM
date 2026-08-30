@@ -438,6 +438,12 @@ class GMRediConfig(NamedTuple):
     # ½·U_d·R·dλ).  Applied by the lat-lon model as a per-column
     # kappa_redi_override; scalar-kappa paths (MPAS/cube) reject it.
     kappa_redi_lat_scaling: bool = False
+    # Arithmetic/source topology for nn_aht_ijk_t=20. ``cosine_scaled`` is
+    # the historical equatorial-kappa*cos(lat) path. ``nemo_metric_literal``
+    # evaluates 0.5*U_d*MAX(e1u,e2u) independently at U/V points, matching
+    # ldfc1d_c2d.F90:141-145. Only the two DINO NEMO cards opt in.
+    kappa_redi_horizontal_evaluation: str = "cosine_scaled"
+    kappa_redi_diffusive_velocity: float | None = None
     # --- Veros-faithful isoneutral options (oracle-matching; default off) ---
     implicit_K33: bool = False
     # ^ When True, the vertical isoneutral diagonal K_33 = kappa_Redi·S² (the

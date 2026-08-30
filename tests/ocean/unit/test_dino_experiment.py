@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 
 from legoesm import constants
-from legoesm.grids.latlon import create_mercator_grid
+from legoesm.grids.latlon import create_mercator_grid, ensure_geometry
 from legoesm.ocean.experiments import dino
 from legoesm.ocean.experiments import AVAILABLE_EXPERIMENTS
 from legoesm.ocean.experiments.dino import (
@@ -2050,6 +2050,44 @@ class TestIsoneutralRediOnly:
         assert not np.allclose(np.asarray(arr)[:, 0], np.asarray(arr_v)[:, 0])
         gm_off = GMRediConfig(kappa_Redi=100.0)
         assert static_kappa_redi_override(gm_off, g) == (None, None)
+
+        # Literal ldf_c2d source topology: form pUfac first and multiply the
+        # stored U/V metrics. This is deliberately distinct from regrouping
+        # the equatorial coefficient with cos(latitude).
+        gm_literal = GMRediConfig(
+            kappa_Redi=100.0, kappa_redi_lat_scaling=True,
+            kappa_redi_horizontal_evaluation="nemo_metric_literal",
+            kappa_redi_diffusive_velocity=0.027)
+        literal_u, literal_v = static_kappa_redi_override(gm_literal, g)
+        geom = ensure_geometry(g)
+        np.testing.assert_array_equal(
+            np.asarray(literal_u),
+            np.asarray((0.5 * 0.027) * jnp.maximum(
+                geom.dx_u[:, 1:], geom.dy_u[:, 1:])))
+        np.testing.assert_array_equal(
+            np.asarray(literal_v),
+            np.asarray((0.5 * 0.027) * jnp.maximum(
+                geom.dx_v[1:, :], geom.dy_v[1:, :])))
+        with pytest.raises(ValueError, match="diffusive_velocity"):
+            static_kappa_redi_override(
+                gm_literal._replace(kappa_redi_diffusive_velocity=None), g)
+
+    def test_nemo_cards_select_literal_static_kappa(self):
+        from legoesm.ocean.experiments.dino import (
+            dino_config_for_recipe, dino_lat_lon_grid,
+            dino_lat_lon_model_config,
+        )
+        for recipe in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
+            cfg = dino_config_for_recipe(recipe)
+            grid = dino_lat_lon_grid(cfg, n_lon=12)
+            model_cfg, _ = dino_lat_lon_model_config(
+                grid, cfg, physics=True)
+            assert (model_cfg.gm_redi.kappa_redi_horizontal_evaluation
+                    == "nemo_metric_literal")
+            assert (model_cfg.gm_redi.kappa_redi_diffusive_velocity
+                    == cfg.U_T)
+        generic = dino_config_for_recipe("nemo_paper")
+        assert generic.gm_redi_horizontal_evaluation == "cosine_scaled"
 
     def test_static_kappa_override_on_cgrid_geometry(self):
         """cos_lat_v on LatLonCGridGeometry -- the from-rest path.
