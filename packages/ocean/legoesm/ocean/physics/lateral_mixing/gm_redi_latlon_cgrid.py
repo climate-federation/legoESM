@@ -2243,6 +2243,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     gm_bolus_kappa_face_average: bool = False,
     return_bolus: bool = False,
     kappa_Redi_v=None,
+    msc_e3w_override: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """NEMO ``traldf_iso`` (``#define iso_lap``) iso-neutral Laplacian Redi
     tracer tendency on the lat-lon C-grid.
@@ -2477,12 +2478,23 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         # roll IS the faithful indexing.  akz_h now uses face-MASKED aht
         # (NEMO's ahtu is masked at build; the previous inline version
         # summed raw aht — same wall deviation class as the zahu_w fix).
-        # z*-scaled w-thickness.  APPROX: the T-thickness average, not NEMO's
-        # analytic e3w_0·(1+r3t) (from gdepw) — a few-% difference on the stretched
-        # grid that feeds the flux magnitude + the akz threshold (accepted; exact
-        # fidelity would use the coordinate's e3w_0).
-        e3w_ab = 0.5 * (jnp.roll(e3t, +1, ax_z) + e3t)
-        e3w_ab = e3w_ab.at[:, :, 0].set(e3t[:, :, 0])   # surface w (unused: wslp(0)=0)
+        # z*-scaled w-thickness.  The optional operand is diagnostic-only at
+        # this layer: None preserves the historical T-thickness average
+        # byte-for-byte, while a caller that already carries NEMO's live Kmm
+        # e3w can replay both of the exact source uses below (akz's e3w**2 and
+        # the explicit-A33 1/e3w post-factor) without changing any other Redi
+        # operand.  Production dispatch remains None until its registered
+        # stage-22/23 bracket owns the substitution.
+        if msc_e3w_override is None:
+            e3w_ab = 0.5 * (jnp.roll(e3t, +1, ax_z) + e3t)
+            e3w_ab = e3w_ab.at[:, :, 0].set(
+                e3t[:, :, 0])   # surface w (unused: wslp(0)=0)
+        else:
+            e3w_ab = jnp.asarray(msc_e3w_override, dtype=dtype)
+            if e3w_ab.shape != q.shape:
+                raise ValueError(
+                    "msc_e3w_override must have the full tracer shape "
+                    f"{q.shape}, got {e3w_ab.shape}")
         _ahw_ab, _akz_ab = nemo_iso_a33(
             aht, umask, vmask, wmask, wslpi, wslpj,
             e1u, e2v, e3w_ab ** 2, dt=dt, msc=True, aht_v=aht_v)

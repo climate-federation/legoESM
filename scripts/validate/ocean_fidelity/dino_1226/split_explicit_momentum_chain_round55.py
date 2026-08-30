@@ -50,6 +50,7 @@ ROUND72_SHA = "1abf7718e8dc1fc4f75d23295ebaaf46c368ffa07d8e56467577f1abb7201230"
 ROUND73_SHA = "c7445a0e26e4b74999bbe89f79c043ad4e9d9754f357d0e94ae136471cc9961d"
 ROUND74_SHA = "56db4716cba582654fbd7bb55178a699b55678a1afdea9d8d8fe3cc670eea6fb"
 ROUND75_SHA = "750c40875300ddda48287d84089c8931eaaecc71e8aab6ce7f4e18a0c806edf4"
+ROUND76_SHA = "45e4f8afda737b41e457668fe1ab7cc28ded09d3f7be06fabdd15e9804936a76"
 RAW_ARTIFACT_SHA = "ec4885a1e7c059872f1b575c5f93f00c0e6538b65613eede71f082fac24885ea"
 HELD_SHA = {
     "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
@@ -162,6 +163,7 @@ def main() -> int:
     parser.add_argument("--round73", type=Path)
     parser.add_argument("--round74", type=Path)
     parser.add_argument("--round75", type=Path)
+    parser.add_argument("--round76", type=Path)
     parser.add_argument("--hold-slow-forcing", action="store_true")
     parser.add_argument("--oracle-transport", action="store_true")
     parser.add_argument("--capture-cycle", action="store_true")
@@ -179,6 +181,7 @@ def main() -> int:
     parser.add_argument("--zn-sqrt-factorial", action="store_true")
     parser.add_argument("--exact-sqrt-production", action="store_true")
     parser.add_argument("--capture-redi-tail", action="store_true")
+    parser.add_argument("--redi-e3w-factorial", action="store_true")
     parser.add_argument("--redi-run-dir", type=Path)
     parser.add_argument("--raw-artifact", type=Path, required=True)
     parser.add_argument("--nemo-root", type=Path, required=True)
@@ -470,6 +473,24 @@ def main() -> int:
             raise SystemExit("round 75 does not release the Redi tail")
     elif args.round75 is not None:
         raise SystemExit("--round75 requires --capture-redi-tail")
+    prior76 = None
+    if args.redi_e3w_factorial:
+        if (not args.capture_redi_tail or not args.capture_kappa_geometry
+                or not args.exact_surface_kmm_carry):
+            raise SystemExit(
+                "--redi-e3w-factorial requires the Redi capture and exact "
+                "surface-Kmm geometry stack")
+        if (args.round76 is None
+                or _sha(args.round76.resolve()) != ROUND76_SHA):
+            raise SystemExit("official round-76 Redi receipt required")
+        prior76 = json.loads(args.round76.read_text())
+        if (prior76.get("session_id") != session
+                or prior76.get("disposition")
+                != "TRACER_TAIL_DIVERGED_REDI_T"
+                or prior76["redi_metrics"]["temperature"]["pass"]):
+            raise SystemExit("round 76 does not admit the MSC thickness peel")
+    elif args.round76 is not None:
+        raise SystemExit("--round76 requires --redi-e3w-factorial")
     if _sha(args.raw_artifact.resolve()) != RAW_ARTIFACT_SHA:
         raise SystemExit("admitted held row-8 artifact changed")
     held = args.held_dir.resolve()
@@ -655,7 +676,12 @@ def main() -> int:
         result = original_redi(*redi_args, **redi_kwargs)
         output = (result[0] if isinstance(result, tuple)
                   and redi_kwargs.get("return_bolus") else result)
-        redi_captures.append((np.asarray(redi_args[0]), np.asarray(output)))
+        redi_captures.append({
+            "args": redi_args,
+            "kwargs": dict(redi_kwargs),
+            "q": np.asarray(redi_args[0]),
+            "output": np.asarray(output),
+        })
         return result
 
     model_module.add_bolus_to_advecting_flux = observe
@@ -839,6 +865,7 @@ def main() -> int:
     rossby_metrics = {}
     zn_sqrt_metrics = {}
     redi_metrics = {}
+    redi_e3w_metrics = {}
     if args.capture_kappa_operands:
         if len(kappa_captures) != 1:
             raise SystemExit(
@@ -1039,11 +1066,14 @@ def main() -> int:
             "temperature": np.asarray(state.T_before.data),
             "salinity": np.asarray(state.S_before.data),
         }
-        for q_in, tendency in redi_captures:
+        matched_calls = {}
+        for capture in redi_captures:
+            q_in = capture["q"]
             for name, target in targets.items():
                 if name not in matched and np.array_equal(
                         q_in[..., :35][wet_t], target[..., :35][wet_t]):
-                    matched[name] = tendency[..., :35]
+                    matched[name] = capture["output"][..., :35]
+                    matched_calls[name] = capture
                     break
         if set(matched) != set(targets) or len(redi_captures) != 2:
             raise SystemExit(
@@ -1057,6 +1087,32 @@ def main() -> int:
             redi_metrics[name] = sweep.metrics(
                 matched[name], redi_oracle[name], wet_t,
                 FOCUS, ACCUMULATION_BAR)
+        if args.redi_e3w_factorial:
+            exact_e3w = np.asarray(raw_kappa["e3w"])
+            if exact_e3w.shape != np.asarray(state.T_before.data).shape:
+                raise SystemExit(
+                    "registered live Kmm e3w must have full tracer shape; "
+                    f"got {exact_e3w.shape}")
+            for name in ("temperature", "salinity"):
+                capture = matched_calls[name]
+                replay_kwargs = dict(capture["kwargs"])
+                replay_kwargs["msc_e3w_override"] = jnp.asarray(
+                    exact_e3w, dtype=capture["args"][0].dtype)
+                replay = original_redi(*capture["args"], **replay_kwargs)
+                if isinstance(replay, tuple) and replay_kwargs.get("return_bolus"):
+                    replay = replay[0]
+                exact_metric = sweep.metrics(
+                    np.asarray(replay)[..., :35], redi_oracle[name], wet_t,
+                    FOCUS, ACCUMULATION_BAR)
+                legacy_metric = redi_metrics[name]
+                legacy_error = legacy_metric["max_column_error"]
+                exact_error = exact_metric["max_column_error"]
+                redi_e3w_metrics[name] = {
+                    "legacy_t_average": legacy_metric,
+                    "live_kmm_e3w": exact_metric,
+                    "max_error_removal_fraction": float(
+                        (legacy_error - exact_error) / legacy_error),
+                }
     specs = (
         ("8.3", "uu(Kmm) / zptu", "traadv.F90:301-304", "un", POINTWISE_BAR),
         ("8.4", "e2u", "traadv.F90:329", "e2u", POINTWISE_BAR),
@@ -1285,6 +1341,17 @@ def main() -> int:
             controls[f"redi_{name}_sign_plant"] = not sweep.metrics(
                 -redi_oracle[name], redi_oracle[name], wet_t,
                 FOCUS, ACCUMULATION_BAR)["pass"]
+    if args.redi_e3w_factorial:
+        controls.update({
+            "round76_temperature_debt_admitted": (
+                prior76["redi_metrics"]["temperature"]
+                       ["n_diverged_columns"] == 9920),
+            "redi_e3w_two_tracer_arms_complete": (
+                set(redi_e3w_metrics) == {"temperature", "salinity"}),
+            "redi_e3w_substitution_noninert": any(
+                arm["max_error_removal_fraction"] != 0.0
+                for arm in redi_e3w_metrics.values()),
+        })
     controls["all_scored_finite"] = all(
         row.get("status") == "ORDERED_BLOCKED"
         or row["metrics"]["n_nonfinite_wet_elements"] == 0 for row in rows)
@@ -1403,9 +1470,24 @@ def main() -> int:
             disposition = "TRACER_TAIL_DIVERGED_REDI_S"
         else:
             disposition = "TRACER_TAIL_REDI_AT_BAR"
+    if args.redi_e3w_factorial and valid:
+        temp = redi_e3w_metrics["temperature"]
+        salt = redi_e3w_metrics["salinity"]
+        exact_pass = (temp["live_kmm_e3w"]["pass"]
+                      and salt["live_kmm_e3w"]["pass"])
+        owned = (exact_pass
+                 and temp["max_error_removal_fraction"] >= 0.99
+                 and salt["max_error_removal_fraction"] >= 0.99)
+        improved = (temp["max_error_removal_fraction"] >= 0.50
+                    and salt["max_error_removal_fraction"] >= 0.0)
+        disposition = ("REDI_MSC_E3W_OWNED" if owned else
+                       "REDI_MSC_E3W_MAJORITY" if improved else
+                       "REDI_MSC_E3W_REFUTED")
     nemo = args.nemo_root.resolve()
     receipt = {
-        "schema": ("dino-split-explicit-momentum-chain-round76-v1"
+        "schema": ("dino-split-explicit-momentum-chain-round77-v1"
+                   if args.redi_e3w_factorial else
+                   "dino-split-explicit-momentum-chain-round76-v1"
                    if args.capture_redi_tail else
                    "dino-split-explicit-momentum-chain-round75-v1"
                    if args.exact_sqrt_production else
@@ -1449,6 +1531,8 @@ def main() -> int:
            if args.zn_sqrt_factorial else {}),
         **({"redi_metrics": redi_metrics}
            if args.capture_redi_tail else {}),
+        **({"redi_e3w_metrics": redi_e3w_metrics}
+           if args.redi_e3w_factorial else {}),
         "focus_ji": [list(x) for x in FOCUS],
         "bindings": {
             "round54": _sha(args.round54.resolve()),
@@ -1491,12 +1575,16 @@ def main() -> int:
             **({"round75": _sha(args.round75.resolve()),
                 **{name: _sha(redi_dir / name) for name in REDI_HELD_SHA}}
                if args.capture_redi_tail else {}),
+            **({"round76": _sha(args.round76.resolve())}
+               if args.redi_e3w_factorial else {}),
             "held_raw_artifact": _sha(args.raw_artifact.resolve()),
             **{name: _sha(held / name) for name in HELD_SHA},
             "scorer": _sha(Path(__file__).resolve()),
             "preregistration": _sha(
                 root / "docs/ocean/fidelity" /
-                ("PREREG_split_explicit_momentum_chain_round76.md"
+                ("PREREG_split_explicit_momentum_chain_round77.md"
+                 if args.redi_e3w_factorial else
+                 "PREREG_split_explicit_momentum_chain_round76.md"
                  if args.capture_redi_tail else
                  "PREREG_split_explicit_momentum_chain_round75.md"
                  if args.exact_sqrt_production else
@@ -1536,7 +1624,9 @@ def main() -> int:
             "nemo_traadv_fct": _sha(nemo / "src/OCE/TRA/traadv_fct.F90"),
             "nemo_ldftra": _sha(nemo / "cfgs/DINO/MY_SRC/ldftra.F90"),
         },
-        "arm": ("capture_redi_tail"
+        "arm": ("redi_e3w_factorial"
+                if args.redi_e3w_factorial else
+                "capture_redi_tail"
                 if args.capture_redi_tail else
                 "exact_sqrt_production"
                 if args.exact_sqrt_production else
@@ -1560,7 +1650,12 @@ def main() -> int:
                 "oracle_transport" if args.oracle_transport else
                 "held_slow_forcing" if args.hold_slow_forcing else
                 "production"),
-        "ordered_next": ("tracer_zdf" if disposition ==
+        "ordered_next": ("redi_msc_e3w_production" if disposition ==
+                          "REDI_MSC_E3W_OWNED" else
+                          "redi_flux_ladder" if disposition in {
+                              "REDI_MSC_E3W_MAJORITY",
+                              "REDI_MSC_E3W_REFUTED"} else
+                          "tracer_zdf" if disposition ==
                           "TRACER_TAIL_REDI_AT_BAR" else
                           "redi_t" if disposition in {
             "TRACER_ENTRY_ROW8_AT_BAR",
