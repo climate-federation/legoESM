@@ -168,9 +168,12 @@ def run(args: argparse.Namespace) -> int:
     # rings excluded by standalone: 203x56 -> 195x48.
     edge = 4
     core = lambda value: np.asarray(value)[edge:-edge, edge:-edge]
-    tmask = core(np.asarray(grid.tmask)[..., 0]) > 0.5
-    umask = core(np.asarray(grid.umask)[..., 0]) > 0.5
-    vmask = core(np.asarray(grid.vmask)[..., 0]) > 0.5
+    # ``read_nemo_mesh_mask(nn_hls=0)`` has already removed the runtime MPI
+    # halo, leaving only the two construction rings; do not strip four twice.
+    mesh_core = lambda value: np.asarray(value)[2:-2, 2:-2]
+    tmask = mesh_core(np.asarray(grid.tmask)[..., 0]) > 0.5
+    umask = mesh_core(np.asarray(grid.umask)[..., 0]) > 0.5
+    vmask = mesh_core(np.asarray(grid.vmask)[..., 0]) > 0.5
     rows = []
     for index in range(icycle):
         jn = index + 1
