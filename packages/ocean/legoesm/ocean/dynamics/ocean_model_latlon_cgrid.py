@@ -9114,6 +9114,11 @@ class LatLonCGridOceanModel:
                 _entry, dt, freshwater=freshwater,
                 surface_forcing=surface_forcing, sponge=sponge, grid=_grid,
                 vertex_mask=vertex_mask, t_seconds=t_seconds,
+                # NEMO still executes tra_sbc on its l_1st_euler step
+                # (stpmlf.F90:190, then tra_sbc at :498). The cold-start
+                # branch used to drop this registered RHS entirely, even
+                # though every later leap-frog step threads it below.
+                _external_tracer_rate=external_tracer_rate,
                 _apply_cold_start_after_reconcile=(
                     _cfg_b.barotropic.barotropic_cold_start_after_reconcile
                     == "nemo_mlf_baro_corr"),

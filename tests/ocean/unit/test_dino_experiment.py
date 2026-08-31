@@ -1812,6 +1812,19 @@ class TestSurfaceTendencyPlacement:
         mean_mask = np.asarray(st0.land_mask.data) > 0.5
         n_steps = 6
 
+        # Cold-start red test: the no-history Euler bootstrap must consume
+        # tra_sbc's external RHS just like every later MLF step. Before the
+        # cold-branch threading fix these two first-step states were identical.
+        cfg_rhs0 = dataclasses.replace(
+            cfg, surface_tendency_placement="leapfrog_rhs")
+        _, rate0 = dino.apply_dino_lat_lon_surface_forcing(
+            st0, frc, z, cfg_rhs0, dt, t_seconds=dt, return_rate=True)
+        first_without = model.step(st0, dt=dt)
+        first_with = model.step(
+            st0, dt=dt, external_tracer_rate=rate0)
+        assert float(jnp.max(jnp.abs(
+            first_with.T.data - first_without.T.data))) > 0.0
+
         def run(placement):
             # #1492 C2: the config field is now LOAD-BEARING -- the applier
             # raises if cfg.surface_tendency_placement disagrees with the
