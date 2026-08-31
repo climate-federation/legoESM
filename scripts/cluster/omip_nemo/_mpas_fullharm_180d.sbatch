@@ -90,7 +90,9 @@ for d in range(15, 181, 15):
     lat = z["lat_T"]; lon = z["lon_T"] % 360
     T0 = z["T"][..., 0]; wet = z["land_mask"] > 0.5
     box = (np.abs(lat) <= 5) & (lon >= 210) & (lon <= 270) & wet
-    area = z["cell_area"] if "cell_area" in z else np.cos(np.deg2rad(lat))
+    # codex 9562869: MPAS SCVT cells are quasi-uniform area; uniform weights,
+    # not cos(lat), when the snapshot carries no cell_area.
+    area = z["cell_area"] if "cell_area" in z else np.ones_like(lat)
     w = area[box]; v = T0[box]
     ok = np.isfinite(v) & np.isfinite(w) & (w > 0)
     sst = float((v[ok] * w[ok]).sum() / w[ok].sum())
