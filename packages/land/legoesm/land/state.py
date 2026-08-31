@@ -27,6 +27,12 @@ class LandState(NamedTuple):
     # step.  Independent of any externally prescribed
     # ``CanopyLandParams.TgC`` (which takes precedence when both are set).
     TgC: jax.Array | None = None
+    # P-model acclimation state (``land/p_model.py``), a ``PModelAcclimState``
+    # pytree of five arrays in the SLAB state's native shape ((ncol,) or
+    # (6, n, n)); flattened alongside the other fields for the canopy vmap.
+    # Present iff a P-model switch is active; ``None`` otherwise.  Appended
+    # last (positional-ABI rule).
+    pmodel_acclim: Any | None = None
 
 
 class MultiLayerLandState(NamedTuple):
