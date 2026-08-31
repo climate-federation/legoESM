@@ -22,6 +22,7 @@ import standalone_20y as standalone
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ocean.experiments.dino import (
     apply_dino_lat_lon_surface_forcing,
+    dino_Q_sr_seasonal,
     dino_S_profile_1d,
     dino_T_profile_1d,
     dino_lat_lon_grid,
@@ -418,6 +419,7 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
                 common.eta.data, common.u.data, common.v.data),
             _external_tracer_rate=ext_rate,
             _tke_n2_bundle_override=n2_bundle,
+            _return_cold_euler_tracer_rhs=True,
             _apply_cold_start_after_reconcile=False,
             z_coord=z_coord, config=model.config)
 
@@ -442,30 +444,44 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
     common_u = mask_u & lego_u
     common_v = mask_v & lego_v
     # Frozen rows 1--5 are the shared tracer RHS accumulator, not endpoint
-    # states.  Reconstruct the production accumulator from the exact content
-    # update.  Under the cold collapse h(Kbb)==h(Kmm), while section 7 returns
-    # h(Kaa)*T(Kaa); hence RHS=(h_aa*T_aa-h_mm*T_mm)/(dt*h_mm).
-    tend = model.tendencies(
-        entry, step_forcing, dt=standalone.DT_SECONDS,
-        ab2_scope_override="advective", z_coord=z_coord,
-        config=model.config)
-    rate_t, rate_s = rate
-    rhs14_t = np.asarray(rate_t)
-    rhs14_s = np.asarray(rate_s)
-    rhs17_t = np.asarray(tend.dT_dt.data + rate_t)
-    rhs17_s = np.asarray(tend.dS_dt.data + rate_s)
-    h_mm = np.asarray(compute_layer_thickness(
-        entry.eta.data, entry.H_bathy.data, z_coord,
-        min_water_column_m=model.config.min_water_column_m))
-    h_aa = np.asarray(compute_layer_thickness(
-        pre_zdf.eta.data, pre_zdf.H_bathy.data, z_coord,
-        min_water_column_m=model.config.min_water_column_m))
-    rhs20_t = ((h_aa * np.asarray(pre_zdf.T.data)
-                - h_mm * np.asarray(entry.T.data))
-               / (standalone.DT_SECONDS * np.maximum(h_mm, 1.0e-30)))
-    rhs20_s = ((h_aa * np.asarray(pre_zdf.S.data)
-                - h_mm * np.asarray(entry.S.data))
-               / (standalone.DT_SECONDS * np.maximum(h_mm, 1.0e-30)))
+    # states.  Consume the direct pre-content-update rates exposed by the
+    # private peel receipt; endpoint subtraction is too ill-conditioned for
+    # this lane's 1e-15 bar.
+    rhs17_t = np.asarray(_pre_zdf_bundle[-4])
+    rhs17_s = np.asarray(_pre_zdf_bundle[-3])
+    adv_t = np.asarray(_pre_zdf_bundle[-2])
+    adv_s = np.asarray(_pre_zdf_bundle[-1])
+    rhs20_t = rhs17_t + adv_t
+    rhs20_s = rhs17_s + adv_s
+
+    # The public forcing applicator intentionally returns tra_sbc+tra_qsr as
+    # one driver rate.  Split its shortwave component with the same shared
+    # production primitive (not an oracle-dump subtraction) to score stage 14.
+    from legoesm.ocean.physics.shortwave_penetration import (
+        ShortwavePenetrationConfig, shortwave_penetration_tendency,
+    )
+    q_sr = forcing["Q_sr_2d"]
+    if cfg.forcing_annual_cycle:
+        q_sr = np.broadcast_to(np.asarray(dino_Q_sr_seasonal(
+            forcing["lat_deg_1d"], standalone.DT_SECONDS, cfg))[:, None],
+            q_sr.shape)
+    ladder = cfg.shortwave_penetration_ladder
+    if ladder == "static":
+        stretch = None
+    elif ladder == "nemo_live":
+        from legoesm.ocean.eos import nemo_r3t_stretch
+        stretch = nemo_r3t_stretch(
+            z_coord, entry.eta.data, entry.H_bathy.data)
+    else:
+        raise ValueError(f"unknown shortwave ladder {ladder!r}")
+    sw_t = np.asarray(shortwave_penetration_tendency(
+        sw_down=q_sr, z_coord_dz_ref=z_coord.dz_ref,
+        z_coord_z_half_ref=z_coord.z_half_ref,
+        jacobian=np.ones_like(np.asarray(entry.eta.data)),
+        config=ShortwavePenetrationConfig(water_type=cfg.jerlov_water_type),
+        rho_0=cfg.rho_0, c_sw=cfg.c_p, z_half_stretch=stretch))
+    rhs14_t = rhs17_t - sw_t
+    rhs14_s = rhs17_s
     diss = _pre_zdf_bundle[5]
     if diss is None:
         raise ValueError("faithful cold Euler stage probe requires diss_incr")

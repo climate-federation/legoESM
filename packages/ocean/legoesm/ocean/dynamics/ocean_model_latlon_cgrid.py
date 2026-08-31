@@ -3538,6 +3538,7 @@ class LatLonCGridOceanModel:
                    _external_tracer_rate=None,
                    _ldf_state=None, _tke_n2_bundle_override=None,
                    _return_raw_kaa_qco: bool = False,
+                   _return_cold_euler_tracer_rhs: bool = False,
                    _apply_cold_start_after_reconcile: bool = False,
                    z_coord=None, config=None, iwm_fields=None):
         """Core step logic — no JIT wrapper.
@@ -5215,6 +5216,8 @@ class LatLonCGridOceanModel:
             _tti = _cfg_b.tracer_time_integrator
             _T_flux_div_cur = None
             _S_flux_div_cur = None
+            _T_adv_rate_direct = None
+            _S_adv_rate_direct = None
 
             # AB2: ensure pytree structure is stable for jax.lax.scan.
             # When the input state has None carry fields, pre-create
@@ -5331,6 +5334,17 @@ class LatLonCGridOceanModel:
                         _pair_divs[0] if tr_name == 'T' else _pair_divs[1]
                     )
                     total_flux_div = div_hut + vert_flux_div
+                    # Direct tracer-rate receipt for the committed cold-Euler
+                    # peel.  Capture before the content update so a 1e-15 row
+                    # does not subtract nearly equal endpoint states.  The
+                    # private gate is false for every production call.
+                    if _return_cold_euler_tracer_rhs:
+                        _direct_rate = -total_flux_div / jnp.maximum(
+                            h_k_old, 1.0e-30)
+                        if tr_name == 'T':
+                            _T_adv_rate_direct = _direct_rate
+                        else:
+                            _S_adv_rate_direct = _direct_rate
 
                     if _tti == "ab2":
                         # Adams-Bashforth 2: extrapolate flux divergence
@@ -5808,6 +5822,15 @@ class LatLonCGridOceanModel:
                 # after dyn_spg_ts and before legoESM's global eta projection.
                 _aux = _aux + (
                     _eta_after_spg_literal, Hu_avg, Hv_avg)
+            if _return_cold_euler_tracer_rhs:
+                if (_T_adv_rate_direct is None
+                        or _S_adv_rate_direct is None):
+                    raise ValueError(
+                        "cold Euler tracer RHS receipt requires the direct "
+                        "non-RK3 flux-divergence path")
+                _aux = _aux + (
+                    tend.dT_dt.data, tend.dS_dt.data,
+                    _T_adv_rate_direct, _S_adv_rate_direct)
             return state_new, _aux
         return state_new
 
