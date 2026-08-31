@@ -337,3 +337,45 @@ def test_pmodel_flags_refused_off_two_leaf():
         build_config_from_args(_parse_args(
             ["--lat", "45.0", "--land-surface-scheme", "simple_seb",
              "--canopy-capacity-scheme", "p_model"]))
+
+
+def test_stomatal_model_selectable_on_every_scheme():
+    """PR1 guarantee: every stomatal model of every LMIP-reachable scheme has a
+    CLI selector, and each flag round-trips to its config field."""
+    import pytest
+    from scripts.run.run_lmip import _parse_args, build_config_from_args
+
+    # Two-leaf: both canopy stomatal models.
+    for m in ("ball_berry", "medlyn"):
+        ss = build_config_from_args(_parse_args(
+            ["--lat", "45.0", "--land-surface-scheme", "two_leaf",
+             "--canopy-stomatal-model", m])).land.surface_scheme
+        assert ss.stomatal_model == m
+    # CLM-ML: all three backend models.
+    for m in ("medlyn", "ball_berry", "wue"):
+        ss = build_config_from_args(_parse_args(
+            ["--lat", "45.0", "--land-surface-scheme", "clm_ml",
+             "--clm-ml-stomatal-model", m])).land.surface_scheme
+        assert ss.stomatal_model == m
+    # Big-leaf: enable + both models (Jarvis is structural: enabled + carbon none).
+    for m in ("ball_berry", "medlyn"):
+        land = build_config_from_args(_parse_args(
+            ["--lat", "45.0", "--land-surface-scheme", "simple_seb",
+             "--stomata-enabled", "--stomata-model", m])).land
+        assert land.stomata.enabled is True
+        assert land.stomata.stomata_model == m
+    # Unset keeps defaults everywhere.
+    land = build_config_from_args(_parse_args(
+        ["--lat", "45.0", "--land-surface-scheme", "simple_seb"])).land
+    assert land.stomata.enabled is False
+    ss = build_config_from_args(_parse_args(
+        ["--lat", "45.0", "--land-surface-scheme", "clm_ml"])).land.surface_scheme
+    assert ss.stomatal_model == "wue"
+    # Big-leaf flags refused under canopy schemes (double-throttle trap).
+    with pytest.raises(ValueError, match="simple_seb"):
+        build_config_from_args(_parse_args(
+            ["--lat", "45.0", "--land-surface-scheme", "two_leaf",
+             "--stomata-enabled"]))
+    # Bogus choice rejected by argparse.
+    with pytest.raises(SystemExit):
+        _parse_args(["--lat", "45.0", "--clm-ml-stomatal-model", "jarvis"])

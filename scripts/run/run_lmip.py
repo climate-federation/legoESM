@@ -195,6 +195,8 @@ def _build_surface_scheme(args: argparse.Namespace):
             overrides["pft_clm"] = int(args.clm_ml_pft)
         if getattr(args, "clm_ml_turbulence_scheme", None) is not None:
             overrides["turbulence_scheme"] = args.clm_ml_turbulence_scheme
+        if getattr(args, "clm_ml_stomatal_model", None) is not None:
+            overrides["stomatal_model"] = args.clm_ml_stomatal_model
         if getattr(args, "clm_ml_dtime_target", None) is not None:
             overrides["dtime_ml_target_s"] = float(args.clm_ml_dtime_target)
         return cfg._replace(**overrides) if overrides else cfg
@@ -276,6 +278,27 @@ def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
             freeze_dormancy_threshold_K=args.freeze_dormancy_threshold_k,
         ),
     )
+    # Big-leaf stomatal throttle (simple_seb only): the two-leaf / CLM-ML
+    # canopies carry their OWN stomata, so enabling the separate StomataConfig
+    # beta under them would down-regulate the same conductance twice (see the
+    # biophysics_lmip_two_leaf_setup rationale) — refuse rather than trap.
+    _stomata_on = getattr(args, "stomata_enabled", False)
+    _stomata_model = getattr(args, "stomata_model", None)
+    if (_stomata_on or _stomata_model is not None) and \
+            args.land_surface_scheme != "simple_seb":
+        raise ValueError(
+            "--stomata-enabled / --stomata-model configure the big-leaf "
+            "StomataConfig and are only meaningful with --land-surface-scheme "
+            f"simple_seb (got {args.land_surface_scheme!r}); the two_leaf and "
+            "clm_ml canopies carry their own stomatal models "
+            "(--canopy-stomatal-model / --clm-ml-stomatal-model).")
+    if _stomata_on or _stomata_model is not None:
+        _sto = land.stomata
+        if _stomata_on:
+            _sto = _sto._replace(enabled=True)
+        if _stomata_model is not None:
+            _sto = _sto._replace(stomata_model=_stomata_model)
+        land = land._replace(stomata=_sto)
     # Sub-grid elevation-band snow (opt-in): for an offline column, the sub-grid
     # relief std [m] is supplied directly (--elev-std-m); a coarse gridded run gets
     # it per cell from the CLM STD_ELEV map instead (coupled driver).
@@ -753,6 +776,27 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "upstream design value). num_ml_steps is derived from it, "
                         "so the canopy air budget stays at its design sub-step "
                         "whatever host --dt is used.")
+    p.add_argument("--clm-ml-stomatal-model", default=None,
+                   choices=["medlyn", "ball_berry", "wue"],
+                   dest="clm_ml_stomatal_model",
+                   help="CLM-ML leaf stomatal-conductance model for "
+                        "--land-surface-scheme clm_ml. Unset keeps the "
+                        "CLMMLCanopyConfig default (wue).")
+    p.add_argument("--stomata-enabled", action="store_true",
+                   dest="stomata_enabled",
+                   help="simple_seb only: enable the big-leaf coupled "
+                        "Farquhar stomatal beta (StomataConfig.enabled). "
+                        "Refused with two_leaf/clm_ml, whose canopies carry "
+                        "their own stomata (enabling both would down-regulate "
+                        "the same conductance twice).")
+    p.add_argument("--stomata-model", default=None,
+                   choices=["ball_berry", "medlyn"],
+                   dest="stomata_model",
+                   help="Big-leaf (simple_seb) stomatal conductance model "
+                        "(StomataConfig.stomata_model). Unset keeps the "
+                        "config default (ball_berry). The Jarvis fallback is "
+                        "selected structurally (stomata enabled + carbon "
+                        "scheme none), not by name.")
     p.add_argument("--canopy-stomatal-model", default=None,
                    choices=["ball_berry", "medlyn"],
                    dest="canopy_stomatal_model",
