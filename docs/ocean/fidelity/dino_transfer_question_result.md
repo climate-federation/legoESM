@@ -606,6 +606,16 @@ measured cancellation rather than patching one face family. The frozen maxima
 are now `7.757167435624285e-19 K/s` for T and
 `6.204261567009084e-18 PSU/s` for S, both below the `1e-15` rate bar.
 
+The component gate also passes independently: horizontal/vertical maxima are
+`6.217685053989594e-19` / `7.792158387225629e-19 K/s` for T and
+`2.4385549155859273e-18` / `6.220025613231601e-18 PSU/s` for S. This is the
+claimable coupled face-path result. It is not a claim that the stored faces are
+bit-identical: NEMO forms and dumps metric-complete `pU/pV/pW` products
+(`traadv_fct.F90:169-187`), while legoESM applies its face metrics in the
+divergence. The probe retains individual normalized and native-frame face
+comparisons as non-gating diagnostics; division cannot reverse NEMO's prior
+floating-point product association.
+
 The next owner was QCO T-cell geometry. Executed NEMO evaluates
 `r3t=ssh*r1_ht_0` (`src/OCE/DOM/domqco.F90:160`) and substitutes
 `E3t_0*(1+r3t*tmask)` (`cfgs/DINO/WORK/domzgr_substitute.h90:46,126`).

@@ -21,13 +21,15 @@ SLOT T1_EULER_STATUS VALUE=EULER_AT_BAR
 SLOT T1_RULE_1B_STATUS VALUE=NOT_USED
 SLOT T1_IC_EULER_PREREG_RELATIVE_PATH VALUE=docs/ocean/fidelity/PREREG_dino_cold_euler_operator_peel.md
 SLOT T1_IC_EULER_PROBE_RELATIVE_PATH VALUE=scripts/validate/ocean_fidelity/dino_1226/ic_euler_peel.py
-SLOT T1_IC_EULER_PROBE_SHA256 VALUE=27bbbdef45e0090aa09d568fdf89133b843f76f9fd61ce2084744eb5b9e064c6
+SLOT T1_IC_EULER_PROBE_SHA256 VALUE=cc46a5715aa2657e024a7675717e95b0312e68a75c563164094a90860dbfd1f1
 SLOT T1_IC_EULER_ARTIFACT_RELATIVE_PATH VALUE=docs/ocean/fidelity/dino_ic_euler_peel_artifact.json
-SLOT T1_IC_EULER_ARTIFACT_SHA256 VALUE=595ca607c53a85276f96a031ef3825c52049f078d9d734b02389cca9ad85310d
-SLOT T1_IC_EULER_PRODUCER VALUE=019bc38beaa08c7da8750ab2b9f7f9147f2ee3ca
+SLOT T1_IC_EULER_ARTIFACT_SHA256 VALUE=98738a8ea067e2c97f3adc8fa83462e4e8d621a297e422ca9558164c6b241980
+SLOT T1_IC_EULER_PRODUCER VALUE=c5b1c5a9e363a951aa422f811d7f6dfe7bc88c94
 SLOT T1_IC_EULER_FIRST_OVER_BAR VALUE=NONE
 SLOT T1_MAX_TRAADV_T_DIFF_KPS VALUE=7.757167435624285e-19
 SLOT T1_MAX_TRAADV_S_DIFF_PSUPS VALUE=6.204261567009084e-18
+SLOT T1_FCT_COUPLED_PATH_DIVERGENCE_AT_BAR VALUE=TRUE
+SLOT T1_FCT_INDIVIDUAL_FACE_BIT_IDENTITY_CLAIMED VALUE=FALSE
 SLOT T1_MAX_LITERAL_TRAZDF_T_DIFF_DEGC VALUE=0
 SLOT T1_MAX_LITERAL_TRAZDF_S_DIFF_PSU VALUE=0
 SLOT T1_FSLOW_U_MAX_DIFF_MPS2 VALUE=1.1712877473750872e-21
@@ -89,5 +91,9 @@ toward the step-2 bridge class near `0.01 degC`.
 - `standalone_20y.py --help` implements every flag in the arm.
 - The output directory was absent and reducer mesh present at handoff time.
 - The committed artifact reports `EULER_AT_BAR`, `FIRST_OVER_BAR=None`, and
-  all frozen rows passing; public endpoint residuals remain separately stamped.
+  all frozen rows passing. Both horizontal/vertical FCT divergence paths pass
+  independently. Individual stored-face bit identity is explicitly not claimed:
+  NEMO dumps metric-complete products whereas legoESM applies the metrics in its
+  divergence; both the normalized and rejected native-frame comparisons remain
+  stamped. Public endpoint residuals remain separately stamped.
 - No GPU, NEMO execution, `mpirun`, push, or remote action ran in this round.

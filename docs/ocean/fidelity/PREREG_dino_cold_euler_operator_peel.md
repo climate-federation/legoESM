@@ -123,6 +123,18 @@ stage-23 accumulator, then runs the independent unfused transcription of
 `trazdf.F90:218-221,256-286`. T and S are bit-exact. No Rule-1b waiver is
 used.
 
+The face receipt distinguishes operator closure from an illegal storage-frame
+claim. NEMO forms metric-complete `pU/pV/pW` and dumps `ztFu/ztFv/ztFw` in
+`m3/s * tracer` (`traadv_fct.F90:169-187`), while legoESM stores the same faces
+per unit width/area and applies metrics in `divergence_cgrid`. Both independently
+reconstructed horizontal and vertical divergence rates pass (T:
+`6.217685053989594e-19` / `7.792158387225629e-19 K/s`; S:
+`2.4385549155859273e-18` / `6.220025613231601e-18 PSU/s`). Individual stored
+face bit identity is not claimed because dividing an already formed NEMO
+metric-complete product cannot undo its floating-point association. The probe
+retains those face-density and raw-native comparisons as non-gating diagnostics
+and gates admission on the two physical divergence paths.
+
 The source-geometry repair reuses the already selected
 `zad_qco_evaluation="nemo_literal"` path. NEMO computes `r3t=ssh*r1_ht_0` at
 `dom_qco_r3c.F90:160`, and `domzgr_substitute.h90:46,126` evaluates
