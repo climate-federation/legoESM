@@ -837,6 +837,7 @@ def fct_tracer_advection(
     tracer_before: jnp.ndarray | None = None,
     active_mask: jnp.ndarray | None = None,
     fixed_thickness: bool = False,
+    return_face_fluxes: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """FCT tracer advection: high-order accuracy with guaranteed monotonicity.
 
@@ -903,6 +904,10 @@ def fct_tracer_advection(
         ``h_k`` itself.  False (z-star default): the AFTER thickness
         ``h_new = h_k - dt*div(mf)`` is derived in the body and the
         Zalesak box is certified against it -- see the h_new block.
+    return_face_fluxes : bool
+        Private validation receipt. When true, append the exact production
+        upstream and limited-antidiffusive U/V/W face fluxes. False preserves
+        the public two-array return.
 
     Returns
     -------
@@ -1106,6 +1111,16 @@ def fct_tracer_advection(
     F_vert_fct = jnp.pad(F_vert_fct_int, (*pad_axes_v, (1, 1)))
     vert_div_fct = F_vert_fct[..., :-1] - F_vert_fct[..., 1:]
 
+    if return_face_fluxes:
+        ad_w_limited = jnp.pad(
+            alpha_vert_face * ad_vert_int, (*pad_axes_v, (1, 1)))
+        return (
+            div_h_fct, vert_div_fct,
+            (flux_u_low, flux_v_low, F_vert_low,
+             alpha_u_full * ad_flux_u,
+             alpha_v * ad_flux_v,
+             ad_w_limited),
+        )
     return div_h_fct, vert_div_fct
 
 

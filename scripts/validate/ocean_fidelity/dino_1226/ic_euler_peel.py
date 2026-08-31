@@ -168,7 +168,8 @@ def _runtime_ssh(path: Path) -> np.ndarray:
     return array[edge:-edge, edge:-edge]
 
 
-def _nemo_fct_rate_components(run_kt2: Path, grid, *, sal: bool):
+def _nemo_fct_rate_components(run_kt2: Path, grid, *, sal: bool,
+                              return_faces: bool = False):
     """Pure horizontal/vertical tra_adv rates from NEMO's dumped fluxes."""
     suffix = "_sal" if sal else ""
 
@@ -205,6 +206,15 @@ def _nemo_fct_rate_components(run_kt2: Path, grid, *, sal: bool):
 
     horizontal = rate(divergence(fu, fv, zero))
     vertical = rate(divergence(np.zeros_like(fu), np.zeros_like(fv), fw))
+    if return_faces:
+        return horizontal, vertical, {
+            "u_up": load("x", "up"),
+            "v_up": load("y", "up"),
+            "w_up": load("z", "up"),
+            "u_anti": load("x", "anti"),
+            "v_anti": load("y", "anti"),
+            "w_anti": load("z", "anti"),
+        }
     return horizontal, vertical
 
 
@@ -460,6 +470,7 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
             _external_tracer_rate=ext_rate,
             _tke_n2_bundle_override=n2_bundle,
             _return_cold_euler_tracer_rhs=True,
+            _return_cold_euler_fct_faces=True,
             _apply_cold_start_after_reconcile=False,
             z_coord=z_coord, config=model.config)
 
@@ -487,14 +498,16 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
     # states.  Consume the direct pre-content-update rates exposed by the
     # private peel receipt; endpoint subtraction is too ill-conditioned for
     # this lane's 1e-15 bar.
-    rhs17_t = np.asarray(_pre_zdf_bundle[-8])
-    rhs17_s = np.asarray(_pre_zdf_bundle[-7])
-    adv_t = np.asarray(_pre_zdf_bundle[-6])
-    adv_s = np.asarray(_pre_zdf_bundle[-5])
-    adv_h_t = np.asarray(_pre_zdf_bundle[-4])
-    adv_h_s = np.asarray(_pre_zdf_bundle[-3])
-    adv_v_t = np.asarray(_pre_zdf_bundle[-2])
-    adv_v_s = np.asarray(_pre_zdf_bundle[-1])
+    rhs17_t = np.asarray(_pre_zdf_bundle[7])
+    rhs17_s = np.asarray(_pre_zdf_bundle[8])
+    adv_t = np.asarray(_pre_zdf_bundle[9])
+    adv_s = np.asarray(_pre_zdf_bundle[10])
+    adv_h_t = np.asarray(_pre_zdf_bundle[11])
+    adv_h_s = np.asarray(_pre_zdf_bundle[12])
+    adv_v_t = np.asarray(_pre_zdf_bundle[13])
+    adv_v_s = np.asarray(_pre_zdf_bundle[14])
+    fct_faces_t = tuple(map(np.asarray, _pre_zdf_bundle[15]))
+    fct_faces_s = tuple(map(np.asarray, _pre_zdf_bundle[16]))
     rhs20_t = rhs17_t + adv_t
     rhs20_s = rhs17_s + adv_s
 
@@ -597,10 +610,10 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
                      _runtime_dump(run_kt2 / "stp_dump_08_dynzdf_v.bin"), common_v),
         ],
     }
-    nemo_h_t, nemo_v_t = _nemo_fct_rate_components(
-        run_kt2, grid, sal=False)
-    nemo_h_s, nemo_v_s = _nemo_fct_rate_components(
-        run_kt2, grid, sal=True)
+    nemo_h_t, nemo_v_t, nemo_faces_t = _nemo_fct_rate_components(
+        run_kt2, grid, sal=False, return_faces=True)
+    nemo_h_s, nemo_v_s, nemo_faces_s = _nemo_fct_rate_components(
+        run_kt2, grid, sal=True, return_faces=True)
     localization["first_failed_traadv_components"] = {
         "qualification": "FROZEN_FIRST_FAILED_ROW_COMPONENT_LOCALIZATION",
         "source": ("traadv.F90:301-304 Kmm velocity; traadv_fct.F90 dumped "
@@ -615,6 +628,40 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
             diff_row("S_traadv_vertical", _model_core(adv_v_s),
                      _model_core(nemo_v_s), common_t),
         ],
+    }
+    area = np.asarray(model.grid.dx_v[:-1, :]) * np.asarray(
+        model.grid.dy_u[:, :-1])
+    dy_u = np.asarray(model.grid.dy_u)
+    dx_v = np.asarray(model.grid.dx_v)
+
+    def face_rows(prefix, lego_faces, nemo_faces):
+        u_up, v_up, w_up, u_anti, v_anti, w_anti = lego_faces
+        rows = []
+        for part, lu, lv, lw in (
+                ("up", u_up, v_up, w_up),
+                ("anti", u_anti, v_anti, w_anti)):
+            rows.extend([
+                diff_row(
+                    f"{prefix}_fct_u_{part}",
+                    _model_core(lu[:, 1:, :] * dy_u[:, 1:, None]),
+                    _model_core(nemo_faces[f"u_{part}"]), common_u),
+                diff_row(
+                    f"{prefix}_fct_v_{part}",
+                    _model_core(lv[1:, :, :] * dx_v[1:, :, None]),
+                    _model_core(nemo_faces[f"v_{part}"]), common_v),
+                diff_row(
+                    f"{prefix}_fct_w_{part}",
+                    _model_core(lw[..., :-1] * area[..., None]),
+                    _model_core(nemo_faces[f"w_{part}"]), common_t),
+            ])
+        return rows
+
+    localization["fct_face_flux_identity"] = {
+        "qualification": "FROZEN_COUPLED_FACE_FLUX_LOCALIZATION",
+        "units": "NEMO_NATIVE_TRACER_VOLUME_FLUX",
+        "rows": (
+            face_rows("T", fct_faces_t, nemo_faces_t)
+            + face_rows("S", fct_faces_s, nemo_faces_s)),
     }
     step1, rate = apply_dino_lat_lon_surface_forcing(
         step1, forcing, z_coord, cfg, standalone.DT_SECONDS,

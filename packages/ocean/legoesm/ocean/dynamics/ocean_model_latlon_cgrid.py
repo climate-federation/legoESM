@@ -469,6 +469,7 @@ def _compute_advection_flux_div(
     linssh_top_flux: bool = False,
     tr_before: jnp.ndarray | None = None,
     return_h_fluxes: bool = False,
+    return_fct_face_fluxes: bool = False,
 ):
     """Compute advection flux divergence for a single tracer field.
 
@@ -541,7 +542,7 @@ def _compute_advection_flux_div(
             "centered/ppm/dst3/weno5/weno7).")
     if tracer_advection in ("ppm_fct", "fct2"):
         from legoesm.ocean.advection import fct_tracer_advection
-        div_hut, vert_flux_div = fct_tracer_advection(
+        _fct_out = fct_tracer_advection(
             tr, mass_flux_u, mass_flux_v, w_baro, h_k_old, grid, dt,
             high_order="ppm" if tracer_advection == "ppm_fct" else "centred2",
             tracer_before=tr_before,
@@ -555,7 +556,12 @@ def _compute_advection_flux_div(
             # limiting), so the limiter's after-thickness must not move
             # (codex 2026-08-10 on the h_new certification fix).
             fixed_thickness=linssh_top_flux,
+            return_face_fluxes=return_fct_face_fluxes,
         )
+        if return_fct_face_fluxes:
+            div_hut, vert_flux_div, _fct_face_fluxes = _fct_out
+        else:
+            div_hut, vert_flux_div = _fct_out
     elif tracer_advection == "ppm":
         from legoesm.ocean.advection import (
             ppm_to_u_points, ppm_to_v_points,
@@ -660,6 +666,11 @@ def _compute_advection_flux_div(
             f"ppm_fct, dst3, dst3_multidim, weno5, weno7."
         )
 
+    if return_fct_face_fluxes:
+        if tracer_advection not in ("ppm_fct", "fct2"):
+            raise ValueError(
+                "return_fct_face_fluxes requires an FCT tracer scheme")
+        return div_hut, vert_flux_div, _fct_face_fluxes
     if return_h_fluxes:
         try:
             _h_flux_pair = (tracer_flux_u, tracer_flux_v)
@@ -713,6 +724,7 @@ def compute_advection_flux_div_pair(
     tr_a_before: jnp.ndarray | None = None,
     tr_b_before: jnp.ndarray | None = None,
     return_b_h_fluxes: bool = False,
+    return_fct_face_fluxes: bool = False,
 ):
     """Advection flux divergence for TWO tracers (T, S) in one pass.
 
@@ -758,6 +770,7 @@ def compute_advection_flux_div_pair(
     # test_tracer_pair_advection.py) and the trade may flip on GPU.
     if (
         return_b_h_fluxes
+        or return_fct_face_fluxes
         or tracer_advection not in _LEVEL_SEPARABLE_H_SCHEMES
         or os.environ.get("LEGOESM_TRACER_PAIR", "0") != "1"
     ):
@@ -767,6 +780,7 @@ def compute_advection_flux_div_pair(
             recon_fill_mask=recon_fill_mask,
             linssh_top_flux=linssh_top_flux,
             tr_before=tr_a_before,
+            return_fct_face_fluxes=return_fct_face_fluxes,
         )
         out_b = _compute_advection_flux_div(
             tr_b, tracer_advection, mass_flux_u, mass_flux_v,
@@ -775,7 +789,12 @@ def compute_advection_flux_div_pair(
             linssh_top_flux=linssh_top_flux,
             tr_before=tr_b_before,
             return_h_fluxes=return_b_h_fluxes,
+            return_fct_face_fluxes=return_fct_face_fluxes,
         )
+        if return_fct_face_fluxes:
+            div_a, vert_a, faces_a = pair_a
+            div_b, vert_b, faces_b = out_b
+            return (div_a, vert_a), (div_b, vert_b), (faces_a, faces_b)
         if return_b_h_fluxes:
             div_b, vert_b, sf_u, sf_v = out_b
             return pair_a, (div_b, vert_b), (sf_u, sf_v)
@@ -3539,6 +3558,7 @@ class LatLonCGridOceanModel:
                    _ldf_state=None, _tke_n2_bundle_override=None,
                    _return_raw_kaa_qco: bool = False,
                    _return_cold_euler_tracer_rhs: bool = False,
+                   _return_cold_euler_fct_faces: bool = False,
                    _apply_cold_start_after_reconcile: bool = False,
                    z_coord=None, config=None, iwm_fields=None):
         """Core step logic — no JIT wrapper.
@@ -5318,14 +5338,21 @@ class LatLonCGridOceanModel:
                     _salt_flux_u2 = _sf_u3.sum(axis=-1)
                     _salt_flux_v2 = _sf_v3.sum(axis=-1)
                 else:
-                    _pair_divs = compute_advection_flux_div_pair(
+                    _pair_out = compute_advection_flux_div_pair(
                         T_mid, S_mid, _adv,
                         mass_flux_u_tr, mass_flux_v_tr, w_baro_tr,
                         h_k_old, h_u_old, h_v_old, _grid, dt,
                         recon_fill_mask=_wall_fill_mask,
                         linssh_top_flux=_linssh,
                         tr_a_before=_T_adv_before, tr_b_before=_S_adv_before,
+                        return_fct_face_fluxes=(
+                            _return_cold_euler_fct_faces),
                     )
+                    if _return_cold_euler_fct_faces:
+                        _pair_a, _pair_b, _cold_fct_faces = _pair_out
+                        _pair_divs = (_pair_a, _pair_b)
+                    else:
+                        _pair_divs = _pair_out
 
             for tr_name in ['T', 'S']:
                 tr = T_mid if tr_name == 'T' else S_mid
@@ -5845,6 +5872,11 @@ class LatLonCGridOceanModel:
                     _T_adv_rate_direct, _S_adv_rate_direct,
                     _T_adv_h_rate_direct, _S_adv_h_rate_direct,
                     _T_adv_v_rate_direct, _S_adv_v_rate_direct)
+            if _return_cold_euler_fct_faces:
+                if not _return_cold_euler_tracer_rhs:
+                    raise ValueError(
+                        "cold Euler FCT faces require the tracer RHS receipt")
+                _aux = _aux + _cold_fct_faces
             return state_new, _aux
         return state_new
 
