@@ -33,3 +33,15 @@ def test_planted_wet_state_violation_turns_row_red():
     assert row["exact"] is False
     assert row["status"] == "DEBT"
     assert row["normalized_max_abs"] > gate.BAR
+
+
+def test_empty_structural_face_is_loud_unmeasured_but_nonzero_still_red():
+    zeros = np.zeros(2, dtype=np.float64)
+    empty = np.zeros(2, dtype=bool)
+    row = gate.score(
+        "v", zeros, zeros, empty, allow_empty_no_active_face=True)
+    assert row["status"] == "UNMEASURED"
+    nonzero = gate.score(
+        "v", zeros, np.array([1.0, 0.0]), empty,
+        allow_empty_no_active_face=True)
+    assert nonzero["status"] == "DEBT"

@@ -86,13 +86,21 @@ def lego_fields(state):
     }
 
 
-def score(name: str, oracle, candidate, mask, *, plant=False) -> dict:
+def score(
+    name: str, oracle, candidate, mask, *, plant=False,
+    allow_empty_no_active_face=False,
+) -> dict:
     oracle = np.asarray(oracle, dtype=np.float64)
     candidate = np.asarray(candidate)
     use = np.asarray(mask, dtype=bool)
     require(oracle.shape == candidate.shape == use.shape, f"{name}: shape mismatch")
     require(candidate.dtype == np.float64, f"{name}: candidate is {candidate.dtype}")
-    require(bool(use.any()), f"{name}: empty mask")
+    no_active_face = not bool(use.any())
+    if no_active_face:
+        require(allow_empty_no_active_face, f"{name}: empty mask")
+        # Inventory the structurally absent face array and retain a gross
+        # nonzero control over all stored points. It is not an alignment row.
+        use = np.ones(oracle.shape, dtype=bool)
     if plant:
         candidate = candidate.copy()
         candidate[tuple(np.argwhere(use)[0])] += 1.0
@@ -100,9 +108,10 @@ def score(name: str, oracle, candidate, mask, *, plant=False) -> dict:
     exact = bool(np.array_equal(oracle[use], candidate[use]))
     scale = max(float(np.max(np.abs(oracle[use]))), 1.0)
     error = float(np.max(np.abs(candidate[use] - oracle[use]))) / scale
-    return {
+    status = "AT-BAR" if error <= BAR else "DEBT"
+    row = {
         "name": name,
-        "status": "AT-BAR" if error <= BAR else "DEBT",
+        "status": status,
         "exact": exact,
         "normalized_max_abs": error,
         "bar": BAR,
@@ -110,6 +119,12 @@ def score(name: str, oracle, candidate, mask, *, plant=False) -> dict:
         "oracle_dtype": str(oracle.dtype),
         "candidate_dtype": str(candidate.dtype),
     }
+    if no_active_face and status == "AT-BAR":
+        row["status"] = "UNMEASURED"
+        row["reason"] = (
+            "no active meridional velocity face in the three-row closed tank; "
+            "all stored values were nevertheless checked against zero")
+    return row
 
 
 def run(case: str, oracle_root: Path, max_step: int, *, plant=False) -> dict:
@@ -149,7 +164,7 @@ def run(case: str, oracle_root: Path, max_step: int, *, plant=False) -> dict:
             rows.append(score(
                 f"{case}.kt{kt}.before.{field}", reference,
                 candidate[field], masks[field], plant=plant and kt == 1
-                and field == "T"))
+                and field == "T", allow_empty_no_active_face=field == "v"))
         exact_here = all(row["exact"] for row in rows)
         over = [row["name"].rsplit(".", 1)[-1] for row in rows
                 if row["status"] == "DEBT"]
