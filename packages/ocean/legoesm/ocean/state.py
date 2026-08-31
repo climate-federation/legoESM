@@ -2802,6 +2802,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # r1_hu_0/r1_hv_0 with a source-ordered level recurrence
     # (dynspg_ts.F90:316-338). Appended for positional compatibility.
     slow_forcing_depth_mean_evaluation: str = "live_tree"
+    # Evaluation of NEMO hpg_sco's meridional pressure accumulator. The
+    # default factored pressure-gradient path is retained globally.
+    # ``"nemo_v_literal"`` preserves dynhpg.F90's zhpj recurrence for V while
+    # deliberately leaving U on the already bit-exact factored path.
+    # Appended for positional compatibility.
+    nemo_sco_hpg_accumulation_evaluation: str = "factored"
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

@@ -1049,6 +1049,10 @@ class DINOConfig:
     # (dynspg_ts.F90:316-338). The latter requires analytic/bridged NEMO raw
     # operands and is selected only by the two faithful DINO cards.
     slow_forcing_depth_mean_evaluation: str = "live_tree"
+    # hpg_sco accumulation: generic factored pressure gradient, or the
+    # source-ordered V recurrence. U remains factored because it already
+    # matches the oracle exactly on the registered common-face population.
+    nemo_sco_hpg_accumulation_evaluation: str = "factored"
 
     # ------------------------------------------------------------------
     # Derived / effective properties
@@ -1618,6 +1622,7 @@ DINO_RECIPES: dict[str, dict] = {
         # present in the oracle.
         "surface_restoring_time_integration": "nemo_explicit_rhs",
         "slow_forcing_depth_mean_evaluation": "nemo_static_literal",
+        "nemo_sco_hpg_accumulation_evaluation": "nemo_v_literal",
         # traqsr.F90:665-712 qsr_2BD live gdepw ladder (#1226) -- see
         # DINOConfig.shortwave_penetration_ladder docstring.
         "shortwave_penetration_ladder": "nemo_live",
@@ -3888,6 +3893,8 @@ def dino_lat_lon_model_config(
         barotropic_forcing_centred=cfg.barotropic_forcing_centred,
         slow_forcing_depth_mean_evaluation=(
             cfg.slow_forcing_depth_mean_evaluation),
+        nemo_sco_hpg_accumulation_evaluation=(
+            cfg.nemo_sco_hpg_accumulation_evaluation),
         # NEMO dyn_cor_2D_init(Kmm) EEN coefficient seed (#1226 item 4; see
         # DINOConfig.barotropic_een_seed docstring).
         barotropic_een_seed=cfg.barotropic_een_seed,

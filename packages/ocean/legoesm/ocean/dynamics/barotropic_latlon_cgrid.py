@@ -131,7 +131,8 @@ def nemo_ab3am4_coeff_arrays(n_loop: int, alpha: float = _NEMO_BT_ALPHA,
 def nemo_literal_depth_mean(field, h_face, face_mask, r1_live):
     """NEMO source-ordered vertical mean on a native face array.
 
-    Keep the vertical recurrence explicit: a stacked ``jnp.sum`` is permitted
+    ``h_face`` is the already level-masked thickness operand. Keep the
+    vertical recurrence explicit: a stacked ``jnp.sum`` is permitted
     to use a tree reduction, whereas the active NEMO source left-accumulates
     one level at a time before multiplying by the separately constructed live
     reciprocal depth.  This is shared by the ``istate.F90:149-155``

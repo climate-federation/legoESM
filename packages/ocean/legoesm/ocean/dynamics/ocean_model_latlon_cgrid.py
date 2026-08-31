@@ -2521,6 +2521,19 @@ class LatLonCGridOceanModel:
                 "unknown slow_forcing_depth_mean_evaluation "
                 f"{_slow_mean_evaluation!r}; expected 'live_tree' or "
                 "'nemo_static_literal'")
+        _hpg_accumulation_evaluation = getattr(
+            config, "nemo_sco_hpg_accumulation_evaluation", "factored")
+        if _hpg_accumulation_evaluation not in (
+                "factored", "nemo_v_literal"):
+            raise ValueError(
+                "unknown nemo_sco_hpg_accumulation_evaluation "
+                f"{_hpg_accumulation_evaluation!r}; expected 'factored' or "
+                "'nemo_v_literal'")
+        if (_hpg_accumulation_evaluation == "nemo_v_literal"
+                and getattr(config, "pgf_scheme", "adcroft") != "nemo_sco"):
+            raise ValueError(
+                "nemo_sco_hpg_accumulation_evaluation='nemo_v_literal' "
+                "requires pgf_scheme='nemo_sco'")
         # barotropic_drag_substep (#1226, NEMO dyn_drg): the in-subcycle
         # explicit barotropic drag + pu_RHSi slow-forcing correction.
         if getattr(config, "barotropic_drag_substep", False):
@@ -3791,9 +3804,11 @@ class LatLonCGridOceanModel:
             _r1_hu = jnp.where(_u_wet > 0.5, 1.0 / _raw.hu_0, 0.0)
             _r1_hv = jnp.where(_v_wet > 0.5, 1.0 / _raw.hv_0, 0.0)
             _F_u_native = nemo_literal_depth_mean(
-                du_dt[:, 1:, :], _raw.e3u_0, _u_wet, _r1_hu)
+                du_dt[:, 1:, :], _raw.e3u_0 * _raw.umask,
+                _u_wet, _r1_hu)
             _F_v_native = nemo_literal_depth_mean(
-                dv_dt[1:, :, :], _raw.e3v_0, _v_wet, _r1_hv)
+                dv_dt[1:, :, :], _raw.e3v_0 * _raw.vmask,
+                _v_wet, _r1_hv)
             F_slow_u = jnp.concatenate(
                 [_F_u_native[:, -1:], _F_u_native], axis=1)
             F_slow_v = jnp.concatenate(

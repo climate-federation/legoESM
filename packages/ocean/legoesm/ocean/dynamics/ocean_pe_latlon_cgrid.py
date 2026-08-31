@@ -1905,6 +1905,66 @@ def _bc_ke_and_pressure_gradients(
                 - g_val * interp_cell_to_vface(rho_m, grid)
                 * gradient_y_cgrid(gdept_z0, grid)
             )
+            _hpg_eval = getattr(
+                config, "nemo_sco_hpg_accumulation_evaluation", "factored")
+            if _hpg_eval == "nemo_v_literal":
+                # DINO's executed hpg_sco V recurrence, kept source-ordered.
+                # The algebraically equivalent p_hat gradient above differed
+                # by 8.41e-11 m/s2 after the vertical slow-forcing mean. NEMO
+                # accumulates zhpj one level at a time (dynhpg.F90:348-350,
+                # 367-387); preserve that association. The U factored path is
+                # deliberately retained: it is already bit-exact against the
+                # oracle dump, while a literal U needs an unavailable outer
+                # construction-ring tracer operand at seven seam faces.
+                _raw = getattr(z_coord, "nemo_een_barotropic", None)
+                _e3w0 = getattr(z_coord, "nemo_e3w_0", None)
+                _gdept0 = getattr(z_coord, "nemo_gdept_0", None)
+                if _raw is None or _e3w0 is None or _gdept0 is None:
+                    raise ValueError(
+                        "nemo_sco_hpg_accumulation_evaluation="
+                        "'nemo_v_literal' requires nemo_een_barotropic, "
+                        "nemo_e3w_0, and nemo_gdept_0 operands")
+                _rho0 = jnp.asarray(config.rho_0, dtype=rho_m.dtype)
+                _rhd = rho_m / _rho0
+                _e3w = (jnp.asarray(_e3w0, dtype=rho_m.dtype)
+                        * stretch)
+                _gdept = gdept_z0
+                _rhd_n = jnp.concatenate(
+                    [_rhd[1:], jnp.zeros_like(_rhd[:1])], axis=0)
+                _e3w_n = jnp.concatenate(
+                    [_e3w[1:], jnp.zeros_like(_e3w[:1])], axis=0)
+                _gdept_n = jnp.concatenate(
+                    [_gdept[1:], jnp.zeros_like(_gdept[:1])], axis=0)
+                _r1e2v = 1.0 / jnp.asarray(_raw.e2v, dtype=rho_m.dtype)
+                _zcoef0 = -jnp.asarray(g_val, dtype=rho_m.dtype) * 0.5
+                _zhpj = _zcoef0 * _r1e2v * (
+                    _e3w_n[..., 0] * _rhd_n[..., 0]
+                    - _e3w[..., 0] * _rhd[..., 0])
+                _zvap = (-_zcoef0) * (
+                    _rhd_n[..., 0] + _rhd[..., 0]) * (
+                    _gdept_n[..., 0] - _gdept[..., 0]) * _r1e2v
+                _v_trends = [_zhpj + _zvap]
+                for _jk in range(1, rho_m.shape[-1]):
+                    _zhpj = _zhpj + _zcoef0 * _r1e2v * (
+                        _e3w_n[..., _jk] * (
+                            _rhd_n[..., _jk] + _rhd_n[..., _jk - 1])
+                        - _e3w[..., _jk] * (
+                            _rhd[..., _jk] + _rhd[..., _jk - 1]))
+                    _zvap = (-_zcoef0) * (
+                        _rhd_n[..., _jk] + _rhd[..., _jk]) * (
+                        _gdept_n[..., _jk] - _gdept[..., _jk]) * _r1e2v
+                    _v_trends.append(_zhpj + _zvap)
+                _v_trend_native = jnp.stack(_v_trends, axis=-1)
+                # The redundant last V face has no northern cell in the
+                # stripped model grid and is masked. Keep it explicitly zero.
+                _v_trend_native = _v_trend_native.at[-1].set(0.0)
+                _dp_v_native = -_rho0 * _v_trend_native
+                dp_dy_sco = jnp.concatenate(
+                    [jnp.zeros_like(_dp_v_native[:1]), _dp_v_native], axis=0)
+            elif _hpg_eval != "factored":
+                raise ValueError(
+                    "unknown nemo_sco_hpg_accumulation_evaluation "
+                    f"{_hpg_eval!r}")
             dp_dx = dp_dx_sco.astype(dp_dx.dtype)
             dp_dy = dp_dy_sco.astype(dp_dy.dtype)
         else:

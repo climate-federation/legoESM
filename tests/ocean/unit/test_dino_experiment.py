@@ -2811,15 +2811,21 @@ class TestDinoSlowForcingDepthMean:
     def test_defaults_and_oracle_cards(self):
         assert (DINOConfig().slow_forcing_depth_mean_evaluation
                 == "live_tree")
+        assert (DINOConfig().nemo_sco_hpg_accumulation_evaluation
+                == "factored")
         for recipe in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
             cfg = dino.dino_config_for_recipe(recipe)
             assert (cfg.slow_forcing_depth_mean_evaluation
                     == "nemo_static_literal")
+            assert (cfg.nemo_sco_hpg_accumulation_evaluation
+                    == "nemo_v_literal")
             grid = dino.dino_lat_lon_grid(cfg)
             model_cfg, _ = dino.dino_lat_lon_model_config(
                 grid, cfg, physics=False)
             assert (model_cfg.slow_forcing_depth_mean_evaluation
                     == "nemo_static_literal")
+            assert (model_cfg.nemo_sco_hpg_accumulation_evaluation
+                    == "nemo_v_literal")
 
     def test_literal_association_and_reordered_plant(self):
         from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (

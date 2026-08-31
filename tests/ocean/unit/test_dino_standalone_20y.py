@@ -53,6 +53,8 @@ def test_standalone_builder_has_no_bridge_level_and_resolves_card_default():
     assert model_cfg.outer_integrator == "leapfrog"
     assert (model_cfg.slow_forcing_depth_mean_evaluation
             == "nemo_static_literal")
+    assert (model_cfg.nemo_sco_hpg_accumulation_evaluation
+            == "nemo_v_literal")
     assert (model_cfg.barotropic.barotropic_cold_start_after_reconcile
             == "nemo_mlf_baro_corr")
     assert all(getattr(state, name) is None for name in (
@@ -65,6 +67,23 @@ def test_standalone_builder_has_no_bridge_level_and_resolves_card_default():
         "nemo_e1e2v", "nemo_e2u", "nemo_e1v", "nemo_een_barotropic",
     ):
         assert getattr(z_coord, name) is not None, name
+
+
+def test_slow_forcing_and_hpg_selectors_fail_closed():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    _, grid, z_coord, _, model_cfg, *_ = RUNNER.build_standalone(0)
+    with pytest.raises(ValueError, match="slow_forcing_depth_mean_evaluation"):
+        LatLonCGridOceanModel(
+            grid, z_coord,
+            model_cfg._replace(slow_forcing_depth_mean_evaluation="bogus"))
+    with pytest.raises(
+            ValueError, match="nemo_sco_hpg_accumulation_evaluation"):
+        LatLonCGridOceanModel(
+            grid, z_coord,
+            model_cfg._replace(
+                nemo_sco_hpg_accumulation_evaluation="bogus"))
 
 
 def test_construction_frame_faces_close_and_stripped_roll_is_red_control():
