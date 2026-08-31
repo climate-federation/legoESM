@@ -2295,6 +2295,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     return_bolus: bool = False,
     kappa_Redi_v=None,
     msc_e3w_override: jnp.ndarray | None = None,
+    divisor_e3t_override: jnp.ndarray | None = None,
     face_thickness_u: jnp.ndarray | None = None,
     face_thickness_v: jnp.ndarray | None = None,
     bolus_native_slopes: tuple | None = None,
@@ -2411,7 +2412,16 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     e1u, e2u = geom.dx_u[:, 1:], geom.dy_u[:, 1:]    # east face of cell i
     e1v, e2v = geom.dx_v[1:, :], geom.dy_v[1:, :]    # north face of cell j
     # e3 at tracer level (flat zco: e3u=e3v=e3t=dz_ref·jacobian).
-    e3t = z_coord.dz_ref[None, None, :] * jacobian[:, :, jnp.newaxis]  # (n_lat,n_lon,nlev)
+    e3t = (z_coord.dz_ref[None, None, :]
+           * jacobian[:, :, jnp.newaxis])
+    if divisor_e3t_override is None:
+        e3t_divisor = e3t
+    else:
+        e3t_divisor = jnp.asarray(divisor_e3t_override, dtype=dtype)
+        if e3t_divisor.shape != q.shape:
+            raise ValueError(
+                "divisor_e3t_override must have the tracer shape "
+                f"{q.shape}, got {e3t_divisor.shape}")
 
     # --- Cell wet mask (NEMO tmask): full-depth flat bottom if not supplied.
     if active_3d is None:
@@ -2706,7 +2716,8 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     vdiv = zfw_top - zfw_kp1
 
     r1_e1e2t = 1.0 / (e1t * e2t)
-    tend = (hdiv + vdiv) * r1_e1e2t[:, :, jnp.newaxis] / e3t
+    tend = ((hdiv + vdiv) * r1_e1e2t[:, :, jnp.newaxis]
+            / e3t_divisor)
     # Mask by the 3-D cell wet mask (NEMO tmask), not just the 2-D surface mask,
     # so sub-seafloor dry levels of a wet column are zeroed too (byte-identical
     # on flat bottom, where those levels already carry zero divergence).
@@ -4259,6 +4270,7 @@ def gm_redi_tracer_tendency_latlon(
                 "'nemo_qco_live'")
         _flux_e3u = None
         _flux_e3v = None
+        _flux_e3t = None
         if _flux_face_mode == "nemo_qco_live":
             if eta is None:
                 raise ValueError(
@@ -4275,6 +4287,16 @@ def gm_redi_tracer_tendency_latlon(
             _flux_eta = eta if redi_flux_eta is None else redi_flux_eta
             _flux_e3u, _flux_e3v = nemo_qco_live_face_thicknesses(
                 _flux_eta, z_coord, _e3t0, _e3t0, _umask3, _vmask3)
+            # The same Kmm geometry owns the cell-volume divisor in
+            # traldf_iso_scheme.h90:149,168.  Preserve NEMO's wet-only QCO
+            # macro: dry mesh slots retain their reference thickness.
+            from legoesm.ocean.eos import nemo_r3t_stretch
+            _flux_stretch = nemo_r3t_stretch(
+                z_coord, _flux_eta, H_bathy,
+                evaluation="nemo_reciprocal")
+            _stretched_e3t = _e3t0 * _flux_stretch[..., jnp.newaxis]
+            _flux_e3t = jnp.where(
+                _active_3d > 0.5, _stretched_e3t, _e3t0)
         _positions = getattr(cfg, "slope_positions", "mode_b")
         if _positions not in ("mode_b", "nemo_native"):
             raise ValueError(
@@ -4349,6 +4371,7 @@ def gm_redi_tracer_tendency_latlon(
                 # traldf_iso_scheme.h90:126).  Rebuilding it from adjacent
                 # T thicknesses mixes a different geometry into the operator.
                 msc_e3w_override=native_slope_e3w,
+                divisor_e3t_override=_flux_e3t,
                 face_thickness_u=_flux_e3u,
                 face_thickness_v=_flux_e3v,
                 vertical_skew_evaluation=_skew_eval,
@@ -4366,6 +4389,7 @@ def gm_redi_tracer_tendency_latlon(
                 gm_bolus_kappa_face_average=_gm_kfa,
                 kappa_Redi_v=kappa_Redi_v_eff,
                 msc_e3w_override=native_slope_e3w,
+                divisor_e3t_override=_flux_e3t,
                 face_thickness_u=_flux_e3u,
                 face_thickness_v=_flux_e3v,
                 vertical_skew_evaluation=_skew_eval,

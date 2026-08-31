@@ -1517,6 +1517,33 @@ class TestNemoIsoLapOperator:
         assert bool(jnp.any(diagnostics["zfv"] != 0.0))
         assert bool(jnp.any(diagnostics["zfw_kp1"] != 0.0))
 
+    def test_nemo_iso_lap_cell_divisor_uses_carried_e3t(self):
+        """A carried Kmm e3t replaces only the final cell-volume divisor."""
+        setup = _stratified_with_meridional_tilt()
+        (grid, z_coord, mask, u_mask, v_mask, _eta, _H_bathy, jacobian,
+         _rho, T, _S, cfg) = setup
+        S_x, S_y = self._slopes(setup)
+        act = jnp.broadcast_to(mask[..., None], T.shape)
+        e3t = jnp.broadcast_to(
+            z_coord.dz_ref[None, None, :] * jacobian[..., None], T.shape)
+        legacy = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act)
+        identical = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, divisor_e3t_override=e3t)
+        doubled = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, divisor_e3t_override=2.0 * e3t)
+        assert jnp.array_equal(identical, legacy)
+        assert bool(jnp.any(doubled != legacy))
+        np.testing.assert_allclose(np.asarray(doubled),
+                                   0.5 * np.asarray(legacy), rtol=0, atol=0)
+        with pytest.raises(ValueError, match="tracer shape"):
+            nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+                cfg.kappa_Redi, act, divisor_e3t_override=e3t[..., :-1])
+
     def test_nemo_iso_lap_zfu_operand_diagnostics_are_observational(self):
         """Round-79 exposes real zfu operands only behind the explicit nested
         diagnostic flag; the flag cannot silently change the public return
