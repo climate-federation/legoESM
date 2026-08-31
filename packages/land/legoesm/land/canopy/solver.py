@@ -200,6 +200,9 @@ class CanopyForcingBundle(NamedTuple):
     # keeps the kernel's Kattge & Knorr acclimated ratio bit-for-bit.  Appended
     # last so positional bundle constructions stay valid.
     rjv25: jax.Array | None = None
+    # Leuning D0 [kPa] (CanopyConfig.d0_leuning_kpa) — consumed only when
+    # stomatal_model == "leuning"; None otherwise.  Appended last.
+    d0_leuning_kpa: jax.Array | float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -281,23 +284,27 @@ def _canopy_residual(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, q_f_Sun, q_c, RH_c, VPD_c,
             b.lam, b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
-            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
+            d0_leuning_kpa=b.d0_leuning_kpa)
         _, LE_Sh, H_Sh, Tf_Sh_new, gs_Sh, Ci_Sh_new = leaf_energy_balance_bt(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, q_f_Sh, q_c, RH_c, VPD_c,
             b.lam, b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
-            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
+            d0_leuning_kpa=b.d0_leuning_kpa)
     else:  # PM
         _, LE_Sun, H_Sun, Tf_Sun_new, gs_Sun, Ci_Sun_new = leaf_energy_balance_pm(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
-            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
+            d0_leuning_kpa=b.d0_leuning_kpa)
         _, LE_Sh, H_Sh, Tf_Sh_new, gs_Sh, Ci_Sh_new = leaf_energy_balance_pm(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
-            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
+            d0_leuning_kpa=b.d0_leuning_kpa)
 
     # ---- Soil energy balance (prescribed Ts; G diagnosed as residual) ----
     q_s = saturation_specific_humidity(Ts, b.Ps)
@@ -436,23 +443,27 @@ def canopy_forward(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, q_f_Sun, q_c, RH_c, VPD_c,
             b.lam, b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
-            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
+            d0_leuning_kpa=b.d0_leuning_kpa)
         Rn_Sh,  LE_Sh,  H_Sh,  _, gs_Sh, _  = leaf_energy_balance_bt(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, q_f_Sh, q_c, RH_c, VPD_c,
             b.lam, b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
-            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
+            d0_leuning_kpa=b.d0_leuning_kpa)
     else:
         Rn_Sun, LE_Sun, H_Sun, _, gs_Sun, _ = leaf_energy_balance_pm(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
-            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
+            d0_leuning_kpa=b.d0_leuning_kpa)
         Rn_Sh,  LE_Sh,  H_Sh,  _, gs_Sh,  _ = leaf_energy_balance_pm(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
-            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
+            d0_leuning_kpa=b.d0_leuning_kpa)
 
     # Wet-leaf evaporation (interception loss): the fwet share of each leaf's
     # latent flux, which is sourced from the canopy-water store rather than

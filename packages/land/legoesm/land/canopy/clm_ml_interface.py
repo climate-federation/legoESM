@@ -205,7 +205,7 @@ _PSIHAT_RSL: dict[str, Any] | None = None
 _DIFF_TURBULENCE_SCHEME: str | None = None
 # Backend gs_type in force from the last ``_apply_stomatal_model``; used to clear
 # the leaf-kernel lru_caches only on an actual stomatal-model switch.
-_APPLIED_GS_TYPE: int | None = None
+_APPLIED_GS_TYPE: tuple | None = None
 
 # Last turbulence scheme concretely APPLIED + VERIFIED to the process-global ψ̂
 # tables by an eager (non-traced) _apply_turbulence_scheme call.  A traced step
@@ -304,13 +304,19 @@ def _apply_stomatal_model(canopy_config: CLMMLCanopyConfig) -> None:
     # case pays nothing).  This is a serial-process guard; concurrent mixed-model
     # calls remain unsupported (the state is process-global) — one stomatal model
     # per process is the contract.  Upstream fix: key the caches on gs_type.
+    # Leuning parameters ride the same by-value module-global pattern; a
+    # changed value must also invalidate the cached kernel factories (the
+    # kernels close over the module globals as static Python floats).
+    _leun = (float(canopy_config.a1_leuning), float(canopy_config.d0_leuning_kpa) * 1000.0)
+    _photo.leuning_a1 = _leun[0]
+    _photo.leuning_d0_pa = _leun[1]
     global _APPLIED_GS_TYPE
-    if _APPLIED_GS_TYPE is not None and _APPLIED_GS_TYPE != gs:
+    if _APPLIED_GS_TYPE is not None and _APPLIED_GS_TYPE != (gs,) + _leun:
         for _name in dir(_photo):
             _fn = getattr(_photo, _name, None)
             if hasattr(_fn, "cache_clear"):
                 _fn.cache_clear()
-    _APPLIED_GS_TYPE = gs
+    _APPLIED_GS_TYPE = (gs,) + _leun
 
 
 def _apply_turbulence_scheme(scheme: str, *, differentiable: bool = False) -> None:

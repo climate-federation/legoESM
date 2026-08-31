@@ -29,7 +29,8 @@ from legoesm.thermo import (
     vapor_pressure_from_specific_humidity,
 )
 from legoesm.land.leaf_biophysics import DIFFUSIVITY_RATIO_H2O_CO2
-from legoesm.land.stomata import ball_berry_gs, medlyn_gs
+from legoesm.land.canopy.photosynthesis import co2_compensation_point
+from legoesm.land.stomata import ball_berry_gs, leuning_gs, medlyn_gs
 
 # Module-local constants.
 # NOTE: Stefan-Boltzmann, freezing point, latent heat of vaporisation, etc.
@@ -200,6 +201,7 @@ def _compute_gs_and_ci(
     m: jax.Array,
     b0: jax.Array,
     stomatal_model: str,
+    d0_leuning_kpa: jax.Array | float | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Stomatal conductance and intercellular CO2 closure for a leaf.
 
@@ -234,12 +236,23 @@ def _compute_gs_and_ci(
     if stomatal_model == "medlyn":
         VPD_kPa = jnp.maximum(VPD_c, 50.0) / 1000.0  # coeff-ok: 50 Pa (0.05 kPa) VPD floor; Pa→kPa
         gs_mol = medlyn_gs(An, VPD_kPa, Ca, m, b0)
+    elif stomatal_model == "leuning":
+        # ``m`` carries the Leuning slope a1 (same per-leaf slot overload as
+        # the other models); D0 comes from CanopyConfig via the bundle.
+        if d0_leuning_kpa is None:
+            raise ValueError(
+                "stomatal_model='leuning' needs d0_leuning_kpa (threaded from "
+                "CanopyConfig via the forcing bundle); got None")
+        VPD_kPa = jnp.maximum(VPD_c, 0.0) / 1000.0
+        gs_mol = leuning_gs(
+            An, VPD_kPa, Ca, co2_compensation_point(Tf), m, d0_leuning_kpa, b0)
     elif stomatal_model == "ball_berry":
         gs_mol = ball_berry_gs(An, RH_c, Ca, m, b0)
     else:
         raise ValueError(
             f"unknown stomatal_model {stomatal_model!r}; the stomatal "
-            "conductance scheme must be one of {'ball_berry', 'medlyn'}")
+            "conductance scheme must be one of "
+            "{'ball_berry', 'medlyn', 'leuning'}")
 
     # Minimum cuticular conductance: keep gs > 0 even at full water stress with
     # the legacy ``stress_b0=True`` (m = b0 = 0), otherwise the leaf gs/Ci/An
@@ -290,6 +303,7 @@ def leaf_energy_balance_bt(
     fwet: jax.Array = 0.0,
     stomatal_model: str = "ball_berry",
     le_cap_mode: str = "soft",
+    d0_leuning_kpa: jax.Array | float | None = None,
 ) -> tuple[jax.Array, ...]:
     """Leaf energy balance via direct bulk transfer (BT).
 
@@ -332,7 +346,8 @@ def leaf_energy_balance_bt(
     Rn, LE, H, Tf_new, gs, Ci
     """
     _rs, gs, Ci = _compute_gs_and_ci(
-        An, RH_c, VPD_c, Ca, Tf, Ps, m, b0, stomatal_model)
+        An, RH_c, VPD_c, Ca, Tf, Ps, m, b0, stomatal_model,
+        d0_leuning_kpa=d0_leuning_kpa)
 
     Rn = ASW + ALW
     # Series leaf latent-heat conductance written directly in gs (= 1/rs):
@@ -396,6 +411,7 @@ def leaf_energy_balance_pm(
     fwet: jax.Array = 0.0,
     stomatal_model: str = "ball_berry",
     le_cap_mode: str = "soft",
+    d0_leuning_kpa: jax.Array | float | None = None,
 ) -> tuple[jax.Array, ...]:
     """Leaf energy balance via second-order Penman-Monteith (Paw & Gao 1988).
 
@@ -411,7 +427,8 @@ def leaf_energy_balance_pm(
     Rn, LE, H, Tf_new, gs, Ci
     """
     rs, gs, Ci = _compute_gs_and_ci(
-        An, RH_c, VPD_c, Ca, Tf, Ps, m, b0, stomatal_model)
+        An, RH_c, VPD_c, Ca, Tf, Ps, m, b0, stomatal_model,
+        d0_leuning_kpa=d0_leuning_kpa)
 
     Rn = ASW + ALW
     # Wet/dry vapour-conductance blend -> effective canopy resistance.  The

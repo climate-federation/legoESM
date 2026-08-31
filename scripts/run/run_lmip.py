@@ -777,7 +777,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "so the canopy air budget stays at its design sub-step "
                         "whatever host --dt is used.")
     p.add_argument("--clm-ml-stomatal-model", default=None,
-                   choices=["medlyn", "ball_berry", "wue"],
+                   choices=["medlyn", "ball_berry", "wue", "leuning"],
                    dest="clm_ml_stomatal_model",
                    help="CLM-ML leaf stomatal-conductance model for "
                         "--land-surface-scheme clm_ml. Unset keeps the "
@@ -790,7 +790,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "their own stomata (enabling both would down-regulate "
                         "the same conductance twice).")
     p.add_argument("--stomata-model", default=None,
-                   choices=["ball_berry", "medlyn"],
+                   choices=["ball_berry", "medlyn", "leuning"],
                    dest="stomata_model",
                    help="Big-leaf (simple_seb) stomatal conductance model "
                         "(StomataConfig.stomata_model). Unset keeps the "
@@ -798,7 +798,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "selected structurally (stomata enabled + carbon "
                         "scheme none), not by name.")
     p.add_argument("--canopy-stomatal-model", default=None,
-                   choices=["ball_berry", "medlyn"],
+                   choices=["ball_berry", "medlyn", "leuning"],
                    dest="canopy_stomatal_model",
                    help="Two-leaf stomatal conductance model. Unset keeps the "
                         "CanopyConfig default (ball_berry). Required as "

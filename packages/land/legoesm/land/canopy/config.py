@@ -144,7 +144,7 @@ PFT_CANOPY_HEIGHT: dict[str, float] = {
 # ---------------------------------------------------------------------------
 # Valid values for the static leaf-gas-exchange dispatch field.  Kept next to
 # the config so the fail-early validator and the config default cannot drift.
-_VALID_STOMATAL_MODELS = ("ball_berry", "medlyn")
+_VALID_STOMATAL_MODELS = ("ball_berry", "medlyn", "leuning")
 VALID_LE_MODULES = ("BT", "PM")
 
 # Valid values for the CLM-ML canopy-airspace turbulence dispatch field
@@ -157,7 +157,7 @@ VALID_CLM_ML_TURBULENCE_SCHEMES = ("rsl_bonan", "most")
 # "medlyn" wires the traced per-site ``vcmaxpft_jax`` injection path (used for
 # gradient-based Vcmax25 training).  Public so the interface applier and the
 # validator share one source of truth.
-CLM_ML_STOMATAL_GS_TYPE = {"medlyn": 0, "ball_berry": 1, "wue": 2}
+CLM_ML_STOMATAL_GS_TYPE = {"medlyn": 0, "ball_berry": 1, "wue": 2, "leuning": 3}
 VALID_CLM_ML_STOMATAL_MODELS = tuple(CLM_ML_STOMATAL_GS_TYPE)
 
 
@@ -184,7 +184,11 @@ class CanopyConfig(NamedTuple):
     # and intercept; "medlyn" interprets ``m`` as the Medlyn g1 slope
     # [kPa^0.5] and ``b0`` as g0 [mol/m2/s].  Captured as a static
     # Python string via functools.partial — never traced.
-    stomatal_model: str = "ball_berry"      # "ball_berry" | "medlyn"
+    stomatal_model: str = "ball_berry"      # "ball_berry" | "medlyn" | "leuning"
+    # Leuning (1995) VPD sensitivity scale D0 [kPa]; the slope a1 rides the
+    # per-column m_C3/m_C4 slot (the same semantic overload ball_berry/medlyn
+    # use for their slopes — see _compute_gs_and_ci).  CABLE C3 default.
+    d0_leuning_kpa: float = 1.5
     use_ta_for_photosynthesis: bool = False  # use Ta (True) or Tf (False) for photosynthesis
     # Energy-balance latent-heat cap that keeps the leaf-temperature Newton
     # solve from diverging (NaN leaf T -> NaN fluxes) under hot/dry/high-VPD
@@ -308,6 +312,7 @@ __param_spec__ = {
             "tol": "numerics: Newton-Raphson convergence tolerance",
         },
         "params": {
+            "d0_leuning_kpa": {"units": "kPa", "bounds": (0.5, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stomata", "reference": "Leuning 1995 PCE eq. 8; CABLE D0=1.5 kPa", "shape": None},
             "epsf": {
                 "units": "1", "bounds": (0.90, 1.0), "tunable_tier": 2,
                 "transform": "sigmoid", "category": "radiation",
@@ -354,6 +359,8 @@ __param_spec__ = {
             ),
         },
         "params": {
+            "a1_leuning": {"units": "1", "bounds": (2.0, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stomata", "reference": "Leuning 1995 PCE eq. 8; CABLE C3 a1=9 (De Kauwe et al. 2015 GMD)", "shape": None},
+            "d0_leuning_kpa": {"units": "kPa", "bounds": (0.5, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stomata", "reference": "Leuning 1995 PCE eq. 8; CABLE D0=1.5 kPa", "shape": None},
             "o2ref": {
                 "units": "mmol/mol",
                 "bounds": (180.0, 230.0),
@@ -650,6 +657,12 @@ class CLMMLCanopyConfig(NamedTuple):
     # (``vcmax25_override``) can flow gradients — under "wue" that injection is
     # inert and Vcmax25 is applied through the module-global lookup instead.
     stomatal_model: str = "wue"
+    # Leuning (1995) stomatal parameters (stomatal_model="leuning"): slope a1
+    # and VPD scale D0.  Installed process-globally into the backend by
+    # _apply_stomatal_model (same by-value pattern as gs_type); g0 reuses the
+    # backend per-PFT Ball-Berry residual-conductance table.
+    a1_leuning: float = 9.0
+    d0_leuning_kpa: float = 1.5
 
     # Per-site Vcmax25 override [µmol m-2 s-1].  ``None`` (default) keeps the
     # MLpftcon per-PFT lookup value.  A float replaces the global lookup for THIS

@@ -567,6 +567,21 @@ def _CiFunc(
                 gs_val = max(r1, r2)
             else:
                 gs_val = g0_p
+        elif gs_type == 3:  # Leuning (1995)
+            if anet_val > 0.0:
+                # gs = g0 + a1*An/((cs - cp)*(1 + Ds/D0)) with the surface VPD
+                # Ds = gbv*Da/(gbv+gs) closed analytically: gs^2 +
+                # gs*(gbv*fD - g0 - A') - gbv*(g0*fD + A') = 0, fD = 1+Da/D0,
+                # A' = a1*An/(cs - cp).  a1 rides g1_p (slot overload).
+                fD = 1.0 + max(lesat_ic - ceair_ic, 0.0) / leuning_d0_pa
+                aprime = g1_p * anet_val / max(cs_val - cp_ic, 1.0)
+                aq = 1.0
+                bq = gbv_ic * fD - g0_p - aprime
+                cq = -gbv_ic * (g0_p * fD + aprime)
+                r1, r2 = quadratic(aq, bq, cq)
+                gs_val = max(r1, r2)
+            else:
+                gs_val = g0_p
         else:
             gs_val = g0_p  # Fallback (should not reach)
 
@@ -684,6 +699,21 @@ def _CiFuncPure(
             gs_val = max(r1, r2)
         else:
             gs_val = g0_p
+    elif gs_type == 3:  # Leuning (1995)
+        if anet_val > 0.0:
+            # gs = g0 + a1*An/((cs - cp)*(1 + Ds/D0)) with the surface VPD
+            # Ds = gbv*Da/(gbv+gs) closed analytically: gs^2 +
+            # gs*(gbv*fD - g0 - A') - gbv*(g0*fD + A') = 0, fD = 1+Da/D0,
+            # A' = a1*An/(cs - cp).  a1 rides g1_p (slot overload).
+            fD = 1.0 + max(lesat_ic - ceair_ic, 0.0) / leuning_d0_pa
+            aprime = g1_p * anet_val / max(cs_val - cp_ic, 1.0)
+            aq = 1.0
+            bq = gbv_ic * fD - g0_p - aprime
+            cq = -gbv_ic * (g0_p * fD + aprime)
+            r1, r2 = quadratic_py(aq, bq, cq)
+            gs_val = max(r1, r2)
+        else:
+            gs_val = g0_p
     else:
         gs_val = g0_p
 
@@ -699,6 +729,16 @@ def _CiFuncPure(
 # ---------------------------------------------------------------------------
 # Task D helpers: JAX-traceable Ci residual, scan-based solver, layer kernel
 # ---------------------------------------------------------------------------
+
+
+# --- Leuning (1995) stomatal model (gs_type == 3) ---
+# Patched process-globally by legoesm.land.canopy.clm_ml_interface.
+# _apply_stomatal_model from CLMMLCanopyConfig (same by-value module-global
+# pattern as gs_type itself).  g0 reuses the per-PFT Ball-Berry residual
+# conductance table (unit-consistent mol m-2 s-1); the slope a1 rides the
+# g1 slot selected below.
+leuning_a1 = 9.0        # [-] Leuning slope (CABLE C3 default)
+leuning_d0_pa = 1500.0  # [Pa] VPD sensitivity scale D0
 
 
 def _CiFuncPure_jax(
@@ -780,6 +820,19 @@ def _CiFuncPure_jax(
         gbv_safe = jnp.maximum(gbv_ic, _eps)
         bq_gs = -(2.0 * (g0_p + term) + (g1_p * term) ** 2 / (gbv_safe * vpd_term))
         cq_gs = g0_p * g0_p + (2.0 * g0_p + term * (1.0 - g1_p * g1_p / vpd_term)) * term
+        r1, r2 = quadratic(1.0, bq_gs, cq_gs)
+        gs_pos = jnp.maximum(r1, r2)
+        gs_val = jnp.where(anet_val > 0.0, gs_pos, jnp.asarray(g0_p))
+
+    elif gs_type == 3:  # Leuning (1995) — static Python branch
+        # Same closed surface-VPD quadratic as the eager sites (see comment
+        # there): gs^2 + gs*(gbv*fD - g0 - A') - gbv*(g0*fD + A') = 0.
+        _da = jnp.maximum(lesat_ic - ceair_ic, 0.0)
+        _fD = 1.0 + _da / leuning_d0_pa
+        _cs_cp = jnp.maximum(cs_val - cp_ic, 1.0)
+        _aprime = g1_p * anet_val / _cs_cp
+        bq_gs = gbv_ic * _fD - g0_p - _aprime
+        cq_gs = -gbv_ic * (g0_p * _fD + _aprime)
         r1, r2 = quadratic(1.0, bq_gs, cq_gs)
         gs_pos = jnp.maximum(r1, r2)
         gs_val = jnp.where(anet_val > 0.0, gs_pos, jnp.asarray(g0_p))
@@ -1058,6 +1111,15 @@ def _make_leaf_photo_kernel(
             _r1, _r2 = quadratic(1.0, _bq2, _cq2)
             _gs_pos = jnp.maximum(_r1, _r2)
             _gs = jnp.where(_anet > 0.0, _gs_pos, g0_rt)
+        elif gs_type == 3:  # Leuning (1995) — static Python branch
+            _da2 = jnp.maximum(lesat_val - ceair_val, 0.0)
+            _fD2 = 1.0 + _da2 / leuning_d0_pa
+            _aprime2 = g1_rt * _anet / jnp.maximum(_cs - cp_val, 1.0)
+            _bq2 = gbv_ic * _fD2 - g0_rt - _aprime2
+            _cq2 = -gbv_ic * (g0_rt * _fD2 + _aprime2)
+            _r1, _r2 = quadratic(1.0, _bq2, _cq2)
+            _gs_pos = jnp.maximum(_r1, _r2)
+            _gs = jnp.where(_anet > 0.0, _gs_pos, g0_rt)
         else:  # Medlyn (gs_type == 0) — static Python branch
             _vpdt = jnp.maximum(lesat_val - ceair_val, vpd_min_MED) * 0.001
             _term = dh2o_to_dco2 * _anet / _cs
@@ -1282,6 +1344,15 @@ def _make_leaf_photo_kernel_acclim(
             _bq2 = gbv_ic - g0_rt - g1_rt * _term
             _lesat_safe = jnp.maximum(lesat_val, _eps_k)
             _cq2 = -gbv_ic * (g0_rt + g1_rt * _term * ceair_val / _lesat_safe)
+            _r1, _r2 = quadratic(1.0, _bq2, _cq2)
+            _gs_pos = jnp.maximum(_r1, _r2)
+            _gs = jnp.where(_anet > 0.0, _gs_pos, g0_rt)
+        elif gs_type == 3:  # Leuning (1995) — static Python branch
+            _da3 = jnp.maximum(lesat_val - ceair_val, 0.0)
+            _fD3 = 1.0 + _da3 / leuning_d0_pa
+            _aprime3 = g1_rt * _anet / jnp.maximum(_cs - cp_val, 1.0)
+            _bq2 = gbv_ic * _fD3 - g0_rt - _aprime3
+            _cq2 = -gbv_ic * (g0_rt * _fD3 + _aprime3)
             _r1, _r2 = quadratic(1.0, _bq2, _cq2)
             _gs_pos = jnp.maximum(_r1, _r2)
             _gs = jnp.where(_anet > 0.0, _gs_pos, g0_rt)
@@ -2383,6 +2454,9 @@ def LeafPhotosynthesis(
         elif gs_type == 1:
             g0_val = _g0_BB_jnp[pft]  # JAX scalar — differentiable
             g1_val = _g1_BB_jnp[pft]  # JAX scalar — differentiable
+        elif gs_type == 3:  # Leuning: g0 from the BB residual table; a1 rides g1
+            g0_val = _g0_BB_jnp[pft]
+            g1_val = jnp.asarray(leuning_a1)
         else:
             g0_val = jnp.asarray(-999.0)
             g1_val = jnp.asarray(-999.0)
@@ -2416,7 +2490,7 @@ def LeafPhotosynthesis(
         else:
             _o2ref_cache_key = float(_o2ref_p)  # OK in eager / non-checkpoint mode
 
-        if gs_type in (0, 1):
+        if gs_type in (0, 1, 3):
             # ---- Differentiable vmap path: no numpy accumulators ---
             # For acclim_type == 0: vcmaxse/jmaxse/vcmaxc/jmaxc are Python
             # floats, so use the standard lru_cache'd kernel factory.
