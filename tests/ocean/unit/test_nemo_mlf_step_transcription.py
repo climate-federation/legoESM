@@ -87,6 +87,70 @@ def _second_step_pair(model, state, dt=_DT):
     return s1
 
 
+def test_cold_euler_threads_mlf_tracer_content_into_literal_zdf(monkeypatch):
+    """The no-history Euler bootstrap must not let the literal tracer solve
+    reconstruct its RHS as ``e3t(Kaa) * C_after_explicit``.  NEMO keeps the
+    MLF content equation on this step (collapsed Kbb/Kmm, one-step rDt), so
+    the dissipative increment is weighted by Kmm.  The planted legacy
+    reconstruction must differ on this live moving-surface step."""
+    import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as ocean_model
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import compute_layer_thickness
+
+    state, model = _channel(
+        K_h=2.0e4, A_h=2.0e4,
+        tracer_combine="thickness_weighted",
+    )
+    # A live moving-surface operand is required: with eta identically zero,
+    # Kmm and Kaa thickness can coincide and make the legacy reconstruction
+    # algebraically indistinguishable even when the wiring is absent.
+    lon_phase = jnp.linspace(0.0, 2.0 * jnp.pi,
+                             state.eta.data.shape[1], endpoint=False)
+    eta = 0.1 * jnp.sin(lon_phase)[None, :]
+    eta = jnp.broadcast_to(eta, state.eta.data.shape) * state.land_mask.data
+    state = state._replace(eta=state.eta.replace(data=eta))
+    original_content = ocean_model.thickness_weighted_tracer_content
+    content_calls = []
+
+    def planted_content(*args, **kwargs):
+        value = original_content(*args, **kwargs)
+        # Plant one live value.  This makes the wiring check capable of
+        # distinguishing the committed content operand from the solver's old
+        # local reconstruction even on a synthetic step whose Kaa/Kmm surface
+        # displacement happens to cancel at machine precision.
+        value = value.at[2, 2, 0].add(jnp.asarray(0.125, value.dtype))
+        content_calls.append(value)
+        return value
+
+    monkeypatch.setattr(
+        ocean_model, "thickness_weighted_tracer_content", planted_content)
+    calls = []
+
+    def capture(_self, solve_state, _dt, _forcing=None, *,
+                nemo_tracer_content_rhs=None, **_kwargs):
+        calls.append((solve_state, nemo_tracer_content_rhs))
+        return solve_state
+
+    model._apply_implicit_vertical_mixing = MethodType(capture, model)
+    out = model._leapfrog_step(state, _DT)
+    assert np.all(np.isfinite(np.asarray(out.T.data)))
+    assert len(calls) == 1
+    assert len(content_calls) == 2
+    solve_state, content = calls[0]
+    assert content is not None
+    assert len(content) == 2
+    h_after = compute_layer_thickness(
+        solve_state.eta.data, solve_state.H_bathy.data, model.z_coord,
+        min_water_column_m=model.config.min_water_column_m)
+    for field_name, actual in zip(("T", "S"), content):
+        actual = np.asarray(actual)
+        legacy = np.asarray(
+            h_after * getattr(solve_state, field_name).data)
+        assert np.all(np.isfinite(actual))
+        # A control that can fail: the planted live content value reaches the
+        # solve, while the old local reconstruction does not contain it.
+        assert float(np.max(np.abs(actual - legacy))) >= 0.125
+
+
 # ---------------------------------------------------------------------------
 # (a) bit-comparison vs _leapfrog_step
 # ---------------------------------------------------------------------------

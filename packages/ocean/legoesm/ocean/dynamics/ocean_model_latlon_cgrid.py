@@ -5653,6 +5653,41 @@ class LatLonCGridOceanModel:
                 S=state_new.S.replace(data=S_fw),
             )
 
+        # NEMO's collapsed-level Euler bootstrap still enters ``tra_zdf``
+        # through the MLF content equation (t trazdf.F90:271-278):
+        #
+        #   e3t(Kaa) C(Kaa) = e3t(Kbb) C(Kbb)
+        #                       + rDt e3t(Kmm) RHS(Nrhs)
+        #
+        # On the cold step Kbb==Kmm and rDt==rn_Dt, but e3t(Kaa) need not
+        # equal e3t(Kmm).  Preserve that content operand before adding the
+        # withheld Redi/lateral-diffusion concentration increment below.
+        # The later literal implicit solve must consume this operand rather
+        # than reconstructing content as e3t(Kaa) * post-explicit C, which
+        # gives the dissipative increment the wrong (Kaa) thickness.
+        _cold_nemo_tracer_content_rhs = None
+        if (_cold_nemo_euler and _apply_implicit_vmix
+                and getattr(_cfg_b, "tracer_combine", "concentration")
+                == "thickness_weighted"):
+            if state.T_before is None or state.S_before is None:
+                raise ValueError(
+                    "cold NEMO Euler tracer content requires collapsed "
+                    "before levels")
+            if _diss_dT_incr is None or _diss_dS_incr is None:
+                _cold_dT_diss = jnp.zeros_like(state.T.data)
+                _cold_dS_diss = jnp.zeros_like(state.S.data)
+            else:
+                _cold_dT_diss = _diss_dT_incr
+                _cold_dS_diss = _diss_dS_incr
+            _cold_content_t = thickness_weighted_tracer_content(
+                state.T_before.data, state.T.data, state_new.T.data,
+                _cold_dT_diss, h_k_old, h_k_old, h_k_new)
+            _cold_content_s = thickness_weighted_tracer_content(
+                state.S_before.data, state.S.data, state_new.S.data,
+                _cold_dS_diss, h_k_old, h_k_old, h_k_new)
+            _cold_nemo_tracer_content_rhs = (
+                _cold_content_t, _cold_content_s)
+
         # 8a'. AB2 "advective" scope: apply the weight-1.0 DISSIPATIVE increment.
         # On the FORWARD-EULER ``step()`` path (``_apply_implicit_vmix=True``)
         # the dissipative increment (momentum lateral friction + bottom drag;
@@ -5764,6 +5799,8 @@ class LatLonCGridOceanModel:
                     # implicit_vmix_e3t_now_divisor is off.
                     eta_now=state.eta.data,
                     u_now=state.u.data, v_now=state.v.data,
+                    nemo_tracer_content_rhs=(
+                        _cold_nemo_tracer_content_rhs),
                 z_coord=z_coord, config=config, iwm_fields=iwm_fields)
             else:
                 _n2_tracers = self._n2_before_advection_tracers(state, z_coord=z_coord, config=config)
@@ -5780,6 +5817,8 @@ class LatLonCGridOceanModel:
                     # NEMO e3w(Kmm) divisor (#1226 W1): see the sibling call.
                     eta_now=state.eta.data,
                     u_now=state.u.data, v_now=state.v.data,
+                    nemo_tracer_content_rhs=(
+                        _cold_nemo_tracer_content_rhs),
                 z_coord=z_coord, config=config, iwm_fields=iwm_fields)
         if tke_new is not None:
             # Veros order (integrate_tke): the implicit solve writes
