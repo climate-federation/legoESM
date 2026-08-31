@@ -2795,6 +2795,13 @@ class LatLonCGridOceanConfig(NamedTuple):
     # matrices and their three separate ordered recurrences.  Appended to keep
     # every positional constructor byte-compatible.
     zdf_implicit_solver_evaluation: str = "shared_thomas"
+    # Vertical averaging used to form the split-explicit slow momentum
+    # forcing. ``"live_tree"`` is the historical live min-face thickness +
+    # JAX tree-reduction path. ``"nemo_static_literal"`` transcribes DINO's
+    # active key_qco/key_GPU_reproducibility branch: static e3u_0/e3v_0 and
+    # r1_hu_0/r1_hv_0 with a source-ordered level recurrence
+    # (dynspg_ts.F90:316-338). Appended for positional compatibility.
+    slow_forcing_depth_mean_evaluation: str = "live_tree"
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

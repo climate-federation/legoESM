@@ -128,13 +128,15 @@ def nemo_ab3am4_coeff_arrays(n_loop: int, alpha: float = _NEMO_BT_ALPHA,
     return jnp.asarray(za), jnp.asarray(zb)
 
 
-def _nemo_literal_seed_depth_mean(field, h_face, face_mask, r1_live):
-    """NEMO ``istate.F90:149-155`` source-ordered barotropic seed mean.
+def nemo_literal_depth_mean(field, h_face, face_mask, r1_live):
+    """NEMO source-ordered vertical mean on a native face array.
 
     Keep the vertical recurrence explicit: a stacked ``jnp.sum`` is permitted
     to use a tree reduction, whereas the active NEMO source left-accumulates
     one level at a time before multiplying by the separately constructed live
-    reciprocal depth.  The Python loop is static under JIT and differentiable.
+    reciprocal depth.  This is shared by the ``istate.F90:149-155``
+    barotropic seed and ``dynspg_ts.F90:316-338`` slow-forcing mean.  The
+    Python loop is static under JIT and differentiable.
     """
     acc = jnp.zeros_like(field[..., 0])
     for jk in range(field.shape[-1]):
@@ -210,9 +212,9 @@ def _nemo_literal_seed_from_reference_mesh(
     live_v = (e3t_ref * (1.0 + r3v[..., None] * mask_v3)) * mask_v3
     r1u = ((1.0 / hu_safe) / (1.0 + r3u)) * wet2_u
     r1v = ((1.0 / hv_safe) / (1.0 + r3v)) * wet2_v
-    un_native = _nemo_literal_seed_depth_mean(
+    un_native = nemo_literal_depth_mean(
         u_3d[:, 1:, :], live_u, wet2_u, r1u)
-    vn_native = _nemo_literal_seed_depth_mean(
+    vn_native = nemo_literal_depth_mean(
         v_3d[1:, :, :], live_v, wet2_v, r1v)
     un = jnp.concatenate([un_native[:, -1:], un_native], axis=1)
     vn = jnp.concatenate([jnp.zeros_like(vn_native[:1]), vn_native], axis=0)
@@ -370,9 +372,9 @@ def _depth_average_to_faces(
         # A Python loop is static at trace time, JIT/autodiff-safe, and prevents
         # XLA from replacing this source-ordered recurrence by the generic
         # stacked tree reduction that measured 7,302/7,035 bit mismatches.
-        return (_nemo_literal_seed_depth_mean(
+        return (nemo_literal_depth_mean(
                     u_3d, h_u, u_mask, _literal_r1_u),
-                _nemo_literal_seed_depth_mean(
+                nemo_literal_depth_mean(
                     v_3d, h_v, v_mask, _literal_r1_v))
 
     # Barotropic-mean face velocities: thickness-weighted depth average

@@ -1044,6 +1044,11 @@ class DINOConfig:
     # quadrupole, |eta| 6 m by day 15, growth rate ∝ dt).  The validated-stable
     # Silvestri §5 jet runs the same Coriolis routing WITH this flag on.
     barotropic_slow_forcing_ab2: bool = False     # True (Oceananigans card)
+    # Slow-forcing vertical mean: historical live min-face/tree reduction or
+    # DINO key_qco's static e3u_0/e3v_0 source-ordered recurrence
+    # (dynspg_ts.F90:316-338). The latter requires analytic/bridged NEMO raw
+    # operands and is selected only by the two faithful DINO cards.
+    slow_forcing_depth_mean_evaluation: str = "live_tree"
 
     # ------------------------------------------------------------------
     # Derived / effective properties
@@ -1612,6 +1617,7 @@ DINO_RECIPES: dict[str, dict] = {
         # explicit RHS term. The historical implicit-Euler weakening is not
         # present in the oracle.
         "surface_restoring_time_integration": "nemo_explicit_rhs",
+        "slow_forcing_depth_mean_evaluation": "nemo_static_literal",
         # traqsr.F90:665-712 qsr_2BD live gdepw ladder (#1226) -- see
         # DINOConfig.shortwave_penetration_ladder docstring.
         "shortwave_penetration_ladder": "nemo_live",
@@ -3880,6 +3886,8 @@ def dino_lat_lon_model_config(
         # NEMO ln_bt_fw=.FALSE. centred barotropic forcing (#1226 item 3;
         # see DINOConfig.barotropic_forcing_centred docstring).
         barotropic_forcing_centred=cfg.barotropic_forcing_centred,
+        slow_forcing_depth_mean_evaluation=(
+            cfg.slow_forcing_depth_mean_evaluation),
         # NEMO dyn_cor_2D_init(Kmm) EEN coefficient seed (#1226 item 4; see
         # DINOConfig.barotropic_een_seed docstring).
         barotropic_een_seed=cfg.barotropic_een_seed,

@@ -51,6 +51,8 @@ def test_standalone_builder_has_no_bridge_level_and_resolves_card_default():
         RUNNER.build_standalone(0))
     assert (grid.n_lat, grid.n_lon) == (195, 48)
     assert model_cfg.outer_integrator == "leapfrog"
+    assert (model_cfg.slow_forcing_depth_mean_evaluation
+            == "nemo_static_literal")
     assert (model_cfg.barotropic.barotropic_cold_start_after_reconcile
             == "nemo_mlf_baro_corr")
     assert all(getattr(state, name) is None for name in (
@@ -63,6 +65,22 @@ def test_standalone_builder_has_no_bridge_level_and_resolves_card_default():
         "nemo_e1e2v", "nemo_e2u", "nemo_e1v", "nemo_een_barotropic",
     ):
         assert getattr(z_coord, name) is not None, name
+
+
+def test_construction_frame_faces_close_and_stripped_roll_is_red_control():
+    """The outer construction ring must affect real core U faces."""
+    cfg, grid, z_coord, state, *_ = RUNNER.build_standalone(0)
+    tmask, umask, vmask, fmask = RUNNER.nemo_construction_frame_masks(
+        grid, z_coord, state, cfg)
+    stripped_roll_u = tmask & np.roll(tmask, -1, axis=1)
+    mismatch = stripped_roll_u != umask
+    assert np.count_nonzero(mismatch) == 7
+    assert np.all(np.argwhere(mismatch)[:, 1] == grid.n_lon - 1)
+    assert vmask.shape == tmask.shape == fmask.shape
+    raw = z_coord.nemo_een_barotropic
+    np.testing.assert_array_equal(np.asarray(raw.umask), umask)
+    np.testing.assert_array_equal(np.asarray(raw.vmask), vmask)
+    np.testing.assert_array_equal(np.asarray(raw.fmask), fmask)
 
 
 def test_temperature_plant_changes_only_now_level_temperature():

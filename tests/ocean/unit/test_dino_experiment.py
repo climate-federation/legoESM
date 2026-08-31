@@ -2805,6 +2805,42 @@ class TestDinoSurfaceRestoringTimeIntegration:
         assert np.count_nonzero(got_delta_S[wet]) > 0
 
 
+class TestDinoSlowForcingDepthMean:
+    """DINO key_qco uses static, source-ordered slow-forcing weights."""
+
+    def test_defaults_and_oracle_cards(self):
+        assert (DINOConfig().slow_forcing_depth_mean_evaluation
+                == "live_tree")
+        for recipe in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
+            cfg = dino.dino_config_for_recipe(recipe)
+            assert (cfg.slow_forcing_depth_mean_evaluation
+                    == "nemo_static_literal")
+            grid = dino.dino_lat_lon_grid(cfg)
+            model_cfg, _ = dino.dino_lat_lon_model_config(
+                grid, cfg, physics=False)
+            assert (model_cfg.slow_forcing_depth_mean_evaluation
+                    == "nemo_static_literal")
+
+    def test_literal_association_and_reordered_plant(self):
+        from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+            nemo_literal_depth_mean,
+        )
+        field = jnp.asarray([[[1.0e16, -1.0e16, 1.0]]], dtype=jnp.float64)
+        weight = jnp.ones_like(field)
+        mask = jnp.ones((1, 1), dtype=jnp.float64)
+        literal = nemo_literal_depth_mean(field, weight, mask, mask)
+        expected = 0.0
+        for value in np.asarray(field)[0, 0]:
+            expected = expected + float(value)
+        assert float(literal[0, 0]) == expected == 1.0
+        # Planted association violation: reversing the same operands changes
+        # the result and proves this source-order control can fire.
+        planted = nemo_literal_depth_mean(
+            field[..., ::-1], weight, mask, mask)
+        assert float(planted[0, 0]) == 0.0
+        assert float(planted[0, 0]) != float(literal[0, 0])
+
+
 # ---------------------------------------------------------------------
 # #1226 c_p truncation (eosbn2.F90:1899 rcp)
 # ---------------------------------------------------------------------

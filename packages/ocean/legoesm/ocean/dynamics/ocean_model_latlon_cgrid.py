@@ -82,6 +82,7 @@ from legoesm.ocean.dynamics.barotropic_common import (
 )
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     barotropic_substeps_latlon_cgrid,
+    nemo_literal_depth_mean,
 )
 from legoesm.ocean.dynamics.barotropic_implicit_latlon_cgrid import (
     barotropic_implicit_latlon_cgrid,
@@ -1385,6 +1386,21 @@ class LatLonCGridOceanModel:
         self.z_coord = z_coord
         self.config = config or LatLonCGridOceanConfig.from_flat()
         self._validate_config(self.config)
+        if (getattr(self.config, "slow_forcing_depth_mean_evaluation",
+                    "live_tree") == "nemo_static_literal"):
+            _raw = getattr(self.z_coord, "nemo_een_barotropic", None)
+            _required = (
+                getattr(self.z_coord, "nemo_e3t_0", None),
+                getattr(self.z_coord, "nemo_hu_0", None),
+                getattr(self.z_coord, "nemo_hv_0", None),
+                _raw,
+            )
+            if any(value is None for value in _required):
+                raise ValueError(
+                    "slow_forcing_depth_mean_evaluation="
+                    "'nemo_static_literal' requires z_coord to carry "
+                    "nemo_e3t_0, nemo_hu_0, nemo_hv_0, and "
+                    "nemo_een_barotropic raw masks")
         # Convert LatLonGrid -> LatLonCGridGeometry once at construction.
         # All downstream operators see the enriched geometry with per-cell
         # metric arrays.  For a plain LatLonGrid this is a no-op on field
@@ -2498,6 +2514,13 @@ class LatLonCGridOceanModel:
                 "unknown zdf_implicit_solver_evaluation "
                 f"{_zdf_solver_evaluation!r}; expected 'shared_thomas' or "
                 "'nemo_literal'")
+        _slow_mean_evaluation = getattr(
+            config, "slow_forcing_depth_mean_evaluation", "live_tree")
+        if _slow_mean_evaluation not in ("live_tree", "nemo_static_literal"):
+            raise ValueError(
+                "unknown slow_forcing_depth_mean_evaluation "
+                f"{_slow_mean_evaluation!r}; expected 'live_tree' or "
+                "'nemo_static_literal'")
         # barotropic_drag_substep (#1226, NEMO dyn_drg): the in-subcycle
         # explicit barotropic drag + pu_RHSi slow-forcing correction.
         if getattr(config, "barotropic_drag_substep", False):
@@ -3743,14 +3766,48 @@ class LatLonCGridOceanModel:
         # h at v-faces — same min-rule for meridional direction.
         h_v_pre = min_cell_to_vface(h_k_pre, _grid)
 
-        # H + F_slow share the per-face h weight on the level axis —
-        # fuse the two reductions per face into one stacked sum.
-        _u_pair = jnp.sum(jnp.stack([h_u_pre, du_dt * h_u_pre], axis=-1), axis=-2)
-        H_u_pre = jnp.maximum(_u_pair[..., 0], 1e-10)
-        F_slow_u = _u_pair[..., 1] / H_u_pre * state.u_mask.data
-        _v_pair = jnp.sum(jnp.stack([h_v_pre, dv_dt * h_v_pre], axis=-1), axis=-2)
-        H_v_pre = jnp.maximum(_v_pair[..., 0], 1e-10)
-        F_slow_v = _v_pair[..., 1] / H_v_pre * state.v_mask.data
+        # H + F_slow share the per-face h weight on the level axis. The
+        # historical path fuses them into a tree reduction. DINO's executed
+        # key_qco/key_GPU_reproducibility branch instead left-accumulates the
+        # STATIC e3u_0/e3v_0 ladder and only then multiplies r1_hu_0/r1_hv_0
+        # (dynspg_ts.F90:316-338). Keep the two evaluation contracts explicit:
+        # association and the construction-frame face mask both affect the
+        # cold Euler last bits.
+        _slow_mean_eval = getattr(
+            _cfg_b, "slow_forcing_depth_mean_evaluation", "live_tree")
+        if _slow_mean_eval == "live_tree":
+            _u_pair = jnp.sum(
+                jnp.stack([h_u_pre, du_dt * h_u_pre], axis=-1), axis=-2)
+            H_u_pre = jnp.maximum(_u_pair[..., 0], 1e-10)
+            F_slow_u = _u_pair[..., 1] / H_u_pre * state.u_mask.data
+            _v_pair = jnp.sum(
+                jnp.stack([h_v_pre, dv_dt * h_v_pre], axis=-1), axis=-2)
+            H_v_pre = jnp.maximum(_v_pair[..., 0], 1e-10)
+            F_slow_v = _v_pair[..., 1] / H_v_pre * state.v_mask.data
+        elif _slow_mean_eval == "nemo_static_literal":
+            _raw = _zc.nemo_een_barotropic
+            _u_wet = _raw.umask[..., 0]
+            _v_wet = _raw.vmask[..., 0]
+            _r1_hu = jnp.where(_u_wet > 0.5, 1.0 / _raw.hu_0, 0.0)
+            _r1_hv = jnp.where(_v_wet > 0.5, 1.0 / _raw.hv_0, 0.0)
+            _F_u_native = nemo_literal_depth_mean(
+                du_dt[:, 1:, :], _raw.e3u_0, _u_wet, _r1_hu)
+            _F_v_native = nemo_literal_depth_mean(
+                dv_dt[1:, :, :], _raw.e3v_0, _v_wet, _r1_hv)
+            F_slow_u = jnp.concatenate(
+                [_F_u_native[:, -1:], _F_u_native], axis=1)
+            F_slow_v = jnp.concatenate(
+                [jnp.zeros_like(_F_v_native[:1]), _F_v_native], axis=0)
+            H_u_pre = jnp.concatenate(
+                [_raw.hu_0[:, -1:], _raw.hu_0], axis=1)
+            H_v_pre = jnp.concatenate(
+                [jnp.zeros_like(_raw.hv_0[:1]), _raw.hv_0], axis=0)
+            H_u_pre = jnp.maximum(H_u_pre, 1e-10)
+            H_v_pre = jnp.maximum(H_v_pre, 1e-10)
+        else:  # construction validates; retain a fail-closed local invariant.
+            raise ValueError(
+                "unknown slow_forcing_depth_mean_evaluation "
+                f"{_slow_mean_eval!r}")
 
         if getattr(_cfg_b, "surface_stress_implicit", False):
             # NEMO stp2d explicit barotropic wind term: with the stress
