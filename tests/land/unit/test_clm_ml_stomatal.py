@@ -40,9 +40,12 @@ def test_default_is_wue():
     assert CLMMLCanopyConfig().stomatal_model == "wue"
 
 
-def test_gs_type_map_is_the_three_backend_codes():
-    assert CLM_ML_STOMATAL_GS_TYPE == {"medlyn": 0, "ball_berry": 1, "wue": 2}
-    assert VALID_CLM_ML_STOMATAL_MODELS == ("medlyn", "ball_berry", "wue")
+def test_gs_type_map_is_the_four_backend_codes():
+    # leuning=3 added 2026-08-31 (Leuning 1995 backend branch).
+    assert CLM_ML_STOMATAL_GS_TYPE == {
+        "medlyn": 0, "ball_berry": 1, "wue": 2, "leuning": 3}
+    assert VALID_CLM_ML_STOMATAL_MODELS == ("medlyn", "ball_berry", "wue",
+                                            "leuning")
 
 
 @pytest.mark.parametrize("scheme,gs", list(CLM_ML_STOMATAL_GS_TYPE.items()))

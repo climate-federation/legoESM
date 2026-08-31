@@ -2302,6 +2302,7 @@ def LeafPhotosynthesis(
     grid=None,
     _o2ref_py: float = None,
     g1_MED_jax=None,
+    g1_med_col=None,
 ) -> mlcanopy_type:
     """
     Calculate leaf photosynthesis and stomatal conductance for sunlit
@@ -2450,7 +2451,10 @@ def LeafPhotosynthesis(
         # JAX scalar that stays on the autodiff tape.
         if gs_type == 0:
             g0_val = _g0_MED_jnp[pft]  # JAX scalar — differentiable
-            g1_val = _g1_MED_jnp[pft]  # JAX scalar — differentiable
+            # Generic per-PATCH Medlyn-slope override (provider-agnostic; the
+            # P model's predicted g1 today).  Per-PFT table is the default.
+            g1_val = (_g1_MED_jnp[pft] if g1_med_col is None
+                      else g1_med_col[p])
         elif gs_type == 1:
             g0_val = _g0_BB_jnp[pft]  # JAX scalar — differentiable
             g1_val = _g1_BB_jnp[pft]  # JAX scalar — differentiable

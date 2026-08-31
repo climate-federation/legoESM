@@ -854,6 +854,19 @@ class CLMMLCanopyConfig(NamedTuple):
     # dominant-PFT map changes bare/other-PFT columns off pft_clm, so a faithful run
     # wants the full CLM PFT parameterisation validated first.
     use_surfdata_pft: bool = False
+    # --- P-model optimality switches (land/p_model.py; appended last) ---
+    # capacity_scheme="p_model" injects the acclimated per-column leaf-top
+    # Vcmax25 into the canopy nitrogen profile (generic per-column provider;
+    # the per-PFT table stays the default) AND unifies the growth-temperature
+    # clock (the P-model acclimation temperature replaces the backend's
+    # 10-day t_a10 for the Kattge & Knorr entropies).  g1_source="p_model"
+    # injects the predicted per-column Medlyn slope (requires
+    # stomatal_model="medlyn").  pmodel_rjv25 additionally replaces the
+    # backend's Jmax25:Vcmax25 acclimation ratio with the coordination
+    # optimum (option; off keeps the backend closure).
+    capacity_scheme: str = "prescribed"   # "prescribed" | "p_model"
+    g1_source: str = "table"              # "table" | "p_model"
+    pmodel_rjv25: bool = False
 
     def validate(self) -> "CLMMLCanopyConfig":
         """Fail-early check of the static string-dispatch fields.
@@ -891,5 +904,28 @@ class CLMMLCanopyConfig(NamedTuple):
                 f"unknown CLM-ML stomatal_model {self.stomatal_model!r}; must be "
                 f"one of {VALID_CLM_ML_STOMATAL_MODELS} "
                 "('wue'=water-use-efficiency optimization (default), "
-                "'medlyn'=Medlyn 2011, 'ball_berry'=Ball-Berry)")
+                "'medlyn'=Medlyn 2011, 'ball_berry'=Ball-Berry, "
+                "'leuning'=Leuning 1995)")
+        if self.capacity_scheme not in VALID_CAPACITY_SCHEMES:
+            raise ValueError(
+                f"unknown capacity_scheme {self.capacity_scheme!r}; the "
+                f"photosynthetic-capacity source must be one of "
+                f"{VALID_CAPACITY_SCHEMES}")
+        if self.g1_source not in VALID_G1_SOURCES:
+            raise ValueError(
+                f"unknown g1_source {self.g1_source!r}; the Medlyn-slope "
+                f"scheme must be one of {VALID_G1_SOURCES}")
+        if self.g1_source == "p_model" and self.stomatal_model != "medlyn":
+            raise ValueError(
+                "g1_source='p_model' predicts a MEDLYN slope and requires "
+                f"stomatal_model='medlyn'; got {self.stomatal_model!r}.")
+        if self.capacity_scheme == "p_model" and self.vcmax25_override is not None:
+            raise ValueError(
+                "capacity_scheme='p_model' and vcmax25_override are two "
+                "providers for one canopy-top Vcmax25; select one.")
+        if self.pmodel_rjv25 and self.capacity_scheme != "p_model":
+            raise ValueError(
+                "pmodel_rjv25=True (coordination Jmax25:Vcmax25 ratio) "
+                "requires capacity_scheme='p_model'; the ratio has no meaning "
+                "without the optimality capacity source.")
         return self

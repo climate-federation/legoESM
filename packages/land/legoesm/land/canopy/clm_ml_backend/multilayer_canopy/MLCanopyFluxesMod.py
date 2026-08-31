@@ -203,6 +203,9 @@ def MLCanopyFluxes(
     grid: "GridInfo | None" = None,
     _o2ref_py: "float | None" = None,
     vcmaxpft_jax=None,
+    vcmax25top_col=None,
+    jv_ratio_col=None,
+    g1_med_col=None,
     g1_MED_jax=None,
     cos_zenith_device=None,
 ) -> mlcanopy_type:
@@ -657,7 +660,9 @@ def MLCanopyFluxes(
         # Solar radiation — Fortran line 290
         inst = SolarRadiation(bounds, num_mlcan, filter_mlcan, inst, grid=grid)
         # Nitrogen profile — Fortran line 293
-        inst = CanopyNitrogenProfile(num_mlcan, filter_mlcan, inst, vcmaxpft_jax, grid=grid)
+        inst = CanopyNitrogenProfile(
+            num_mlcan, filter_mlcan, inst, vcmaxpft_jax, grid=grid,
+            vcmax25top_col=vcmax25top_col, jv_ratio_col=jv_ratio_col)
         # Runge-Kutta inner loop — Fortran lines 310-328
         for _irk in range(1, nrk_steps + 2):
             inst = CanopyWettedFraction(num_mlcan, filter_mlcan, inst, grid=grid)
@@ -681,6 +686,7 @@ def MLCanopyFluxes(
                 grid=grid,
                 _o2ref_py=_o2ref_py_val,
                 g1_MED_jax=g1_MED_jax,
+                g1_med_col=g1_med_col,
             )
             inst = LeafPhotosynthesis(
                 num_mlcan,
@@ -690,6 +696,7 @@ def MLCanopyFluxes(
                 grid=grid,
                 _o2ref_py=_o2ref_py_val,
                 g1_MED_jax=g1_MED_jax,
+                g1_med_col=g1_med_col,
             )
             inst = FluxProfileSolution(num_mlcan, filter_mlcan, inst, grid=grid)
             inst = LeafWaterPotential(num_mlcan, filter_mlcan, isun, inst, grid=grid)

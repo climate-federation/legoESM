@@ -329,14 +329,32 @@ def test_pmodel_g1_requires_medlyn():
              "--canopy-g1-source", "p_model"]))
 
 
-def test_pmodel_flags_refused_off_two_leaf():
+def test_pmodel_flags_route_per_scheme():
     import pytest
     from scripts.run.run_lmip import _parse_args, build_config_from_args
 
-    with pytest.raises(ValueError, match="two_leaf"):
+    # simple_seb: switches land on StomataConfig; without --stomata-enabled
+    # they would be inert, so the validate refuses loudly.
+    with pytest.raises(ValueError, match="inert"):
         build_config_from_args(_parse_args(
             ["--lat", "45.0", "--land-surface-scheme", "simple_seb",
              "--canopy-capacity-scheme", "p_model"]))
+    land = build_config_from_args(_parse_args(
+        ["--lat", "45.0", "--land-surface-scheme", "simple_seb",
+         "--stomata-enabled", "--stomata-model", "medlyn",
+         "--carbon-scheme", "differland",
+         "--canopy-capacity-scheme", "p_model",
+         "--canopy-g1-source", "p_model"])).land
+    assert land.stomata.capacity_scheme == "p_model"
+    assert land.stomata.g1_source == "p_model"
+    # clm_ml: switches land on CLMMLCanopyConfig (medlyn required for g1).
+    ss = build_config_from_args(_parse_args(
+        ["--lat", "45.0", "--land-surface-scheme", "clm_ml",
+         "--clm-ml-stomatal-model", "medlyn",
+         "--canopy-capacity-scheme", "p_model",
+         "--canopy-g1-source", "p_model"])).land.surface_scheme
+    assert ss.capacity_scheme == "p_model"
+    assert ss.g1_source == "p_model"
 
 
 def test_stomatal_model_selectable_on_every_scheme():

@@ -49,6 +49,8 @@ def CanopyNitrogenProfile(
     mlcanopy_inst: mlcanopy_type,
     vcmaxpft_jax=None,
     grid: "GridInfo | None" = None,
+    vcmax25top_col=None,
+    jv_ratio_col=None,
 ) -> mlcanopy_type:
     """
     Calculate the canopy profile of nitrogen and photosynthetic capacity.
@@ -156,9 +158,19 @@ def CanopyNitrogenProfile(
         is_c3 = jnp.round(c3psn[pft]) == 1  # Fortran implicit round of 0/1 flag
 
         # Canopy-top photosynthetic parameters — Fortran lines 80-96
-        vcmax25top = _vcmaxpft[pft]  # JAX scalar via dynamic gather
+        # Generic per-PATCH canopy-top capacity override (provider-agnostic:
+        # the P model today; any Vcmax(lat, lon, climate, ...) predictor
+        # later).  The per-PFT table stays the default provider.
+        if vcmax25top_col is None:
+            vcmax25top = _vcmaxpft[pft]  # JAX scalar via dynamic gather
+        else:
+            vcmax25top = vcmax25top_col[p]  # per-patch, traced-p safe
 
-        if acclim_type == 0:  # static branch — evaluated at trace time
+        if jv_ratio_col is not None:
+            # Per-patch Jmax25:Vcmax25 ratio override (e.g. the P-model
+            # coordination optimum) — replaces the acclim_type closure.
+            j2v = jv_ratio_col[p]
+        elif acclim_type == 0:  # static branch — evaluated at trace time
             j2v = jmax25_to_vcmax25_noacclim
         elif acclim_type == 1:
             ta_c = jnp.clip(mlcanopy_inst.tacclim_forcing[p] - tfrz, 11.0, 35.0)

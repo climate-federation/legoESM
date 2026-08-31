@@ -690,6 +690,39 @@ def _step_multilayer_land_impl(
         clmml_forcing = forcing._replace(
             u_lowest=jnp.where(_calm, forcing.u_lowest * _sc, U_min),
             v_lowest=jnp.where(_calm, forcing.v_lowest * _sc, 0.0))
+        # --- P-model optimality parameter source (CLM-ML lane) ---
+        _cc_ml = config.surface_scheme
+        _v_col = _g1_col = _jv_col = _tacc_col = None
+        if pmodel_switches_active(_cc_ml):
+            from legoesm.land.p_model import acclimated_capacities
+            # INTERIM REFUSAL: the P-model optimum is C3 (FvCB); a C4 PFT
+            # column under the injection would silently run C4 physiology on
+            # a C3 optimum.  PFTs are static host ints, so check loudly here.
+            from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import (
+                MLpftconMod as _pftmod)
+            _pfts = ([int(x) for x in clm_ml_pft_per_col]
+                     if clm_ml_pft_per_col is not None
+                     else [int(_cc_ml.pft_clm)])
+            _c4 = [pf for pf in _pfts
+                   if int(round(float(_pftmod.MLpftcon.c3psn[pf]))) != 1]
+            if _c4:
+                raise ValueError(
+                    f"CLM-ML P-model capacity/g1 source does not support C4 "
+                    f"PFTs yet (columns with PFT {_c4}); the C4 optimality "
+                    "extension is a separate change. Use prescribed "
+                    "capacities for these columns.")
+            _caps_ml = acclimated_capacities(state.pmodel_acclim, config.p_model)
+            if _cc_ml.capacity_scheme == "p_model":
+                _v_col = _caps_ml.vcmax25_leaf
+                # Unified growth-temperature clock (user decision): the
+                # P-model acclimation temperature replaces the backend's own
+                # 10-day t_a10 mean for the K&K entropies / j2v closure.
+                _tacc_col = state.pmodel_acclim.t_mean_K
+                if _cc_ml.pmodel_rjv25:
+                    _jv_col = _caps_ml.rjv25
+            if _cc_ml.g1_source == "p_model":
+                _g1_col = _caps_ml.g1_kpa
+
         surface_out, canopy_state_new = compute_clm_ml_canopy_fluxes(
             T_soil_top=T_surface,
             forcing=clmml_forcing,
@@ -708,6 +741,10 @@ def _step_multilayer_land_impl(
             pft_per_col=clm_ml_pft_per_col,
             vcmaxpft_jax=clm_ml_vcmaxpft_jax,
             g1_medlyn_jax=clm_ml_g1_medlyn_jax,
+            vcmax25_col_jax=_v_col,
+            g1_med_col_jax=_g1_col,
+            jv_ratio_col_jax=_jv_col,
+            tacclim_col_jax=_tacc_col,
         )
     elif isinstance(config.surface_scheme, SimpleSEBConfig):
         # SimpleSEB: bulk fluxes with skin T = T_soil[:, 0].

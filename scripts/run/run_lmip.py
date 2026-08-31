@@ -168,12 +168,9 @@ def _build_surface_scheme(args: argparse.Namespace):
     name = getattr(args, "land_surface_scheme", "simple_seb")
     _cap = getattr(args, "canopy_capacity_scheme", "prescribed")
     _g1s = getattr(args, "canopy_g1_source", "table")
-    if name != "two_leaf" and (_cap, _g1s) != ("prescribed", "table"):
-        raise ValueError(
-            "--canopy-capacity-scheme / --canopy-g1-source select the P-model "
-            "parameter source, which is only wired into the two_leaf scheme; "
-            f"got --land-surface-scheme {name!r}.")
     if name == "simple_seb":
+        # simple_seb routes the P-model switches onto StomataConfig in
+        # build_config_from_args (they live with the big-leaf stomata there).
         return SimpleSEBConfig()
     if name == "two_leaf":
         overrides = {}
@@ -197,9 +194,14 @@ def _build_surface_scheme(args: argparse.Namespace):
             overrides["turbulence_scheme"] = args.clm_ml_turbulence_scheme
         if getattr(args, "clm_ml_stomatal_model", None) is not None:
             overrides["stomatal_model"] = args.clm_ml_stomatal_model
+        if _cap != "prescribed":
+            overrides["capacity_scheme"] = _cap
+        if _g1s != "table":
+            overrides["g1_source"] = _g1s
         if getattr(args, "clm_ml_dtime_target", None) is not None:
             overrides["dtime_ml_target_s"] = float(args.clm_ml_dtime_target)
-        return cfg._replace(**overrides) if overrides else cfg
+        cfg = cfg._replace(**overrides) if overrides else cfg
+        return cfg.validate()
     raise ValueError(
         f"Unknown --land-surface-scheme {name!r}; "
         "expected one of 'simple_seb', 'two_leaf', 'clm_ml'.")
@@ -292,13 +294,19 @@ def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
             f"simple_seb (got {args.land_surface_scheme!r}); the two_leaf and "
             "clm_ml canopies carry their own stomatal models "
             "(--canopy-stomatal-model / --clm-ml-stomatal-model).")
-    if _stomata_on or _stomata_model is not None:
+    _cap = getattr(args, "canopy_capacity_scheme", "prescribed")
+    _g1s = getattr(args, "canopy_g1_source", "table")
+    _seb_pm = (args.land_surface_scheme == "simple_seb"
+               and (_cap, _g1s) != ("prescribed", "table"))
+    if _stomata_on or _stomata_model is not None or _seb_pm:
         _sto = land.stomata
         if _stomata_on:
             _sto = _sto._replace(enabled=True)
         if _stomata_model is not None:
             _sto = _sto._replace(stomata_model=_stomata_model)
-        land = land._replace(stomata=_sto)
+        if _seb_pm:
+            _sto = _sto._replace(capacity_scheme=_cap, g1_source=_g1s)
+        land = land._replace(stomata=_sto.validate())
     # Sub-grid elevation-band snow (opt-in): for an offline column, the sub-grid
     # relief std [m] is supplied directly (--elev-std-m); a coarse gridded run gets
     # it per cell from the CLM STD_ELEV map instead (coupled driver).
