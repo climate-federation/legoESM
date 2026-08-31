@@ -44,7 +44,7 @@ from legoesm.ocean.fidelity.nemo_io import (
 )
 
 
-SCHEMA = "dino_ic_euler_peel_v5"
+SCHEMA = "dino_ic_euler_peel_v6"
 BAR = 1.0e-15
 RUNTIME_SHAPE = (203, 56)
 RUNTIME_HALO = 2
@@ -394,6 +394,31 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
         t_seconds=standalone.DT_SECONDS, return_rate=True)
     localization = _forcing_localization(
         run_kt2, grid, z_coord, common, model, step_forcing)
+    # NEMO's cold Euler step runs dyn_zdf after dyn_spg and before tra_adv
+    # (stpmlf.F90:262-267,363).  The public step endpoint cannot distinguish
+    # those two momentum stages, so record both operands explicitly.  The
+    # explicit-only call is the state immediately before lego's implicit ZDF;
+    # the second call includes ZDF but deliberately withholds mlf_baro_corr.
+    # Both use the exact private operands that the no-history branch passes at
+    # ocean_model_latlon_cgrid.py:9183-9210.
+    entry = common._replace(
+        u_before=common.u, v_before=common.v, T_before=common.T,
+        S_before=common.S, eta_before=common.eta)
+
+    def _cold_impl(st, ext_rate, apply_vmix):
+        return model._step_impl(
+            st, standalone.DT_SECONDS, surface_forcing=step_forcing,
+            _apply_implicit_vmix=apply_vmix,
+            _barotropic_before_state=(
+                common.eta.data, common.u.data, common.v.data),
+            _external_tracer_rate=ext_rate,
+            _apply_cold_start_after_reconcile=False,
+            z_coord=z_coord, config=model.config)
+
+    pre_zdf, _pre_zdf_bundle = jax.jit(
+        lambda st, ext_rate: _cold_impl(st, ext_rate, False))(entry, rate)
+    post_zdf = jax.jit(
+        lambda st, ext_rate: _cold_impl(st, ext_rate, True))(entry, rate)
     step1 = dyn(common, rate)
     mask_t = _mesh_core(grid.tmask).astype(bool)
     mask_u = _mesh_core(grid.umask).astype(bool)
@@ -411,6 +436,18 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
     common_u = mask_u & lego_u
     common_v = mask_v & lego_v
     rows = [
+        diff_row("conditional_euler_U_after_dynspg",
+                 _model_core(np.asarray(pre_zdf.u.data)[:, 1:, :]),
+                 _runtime_dump(run_kt2 / "stp_dump_07_dynspg_u.bin"), common_u),
+        diff_row("conditional_euler_V_after_dynspg",
+                 _model_core(np.asarray(pre_zdf.v.data)[1:, :, :]),
+                 _runtime_dump(run_kt2 / "stp_dump_07_dynspg_v.bin"), common_v),
+        diff_row("conditional_euler_U_after_dynzdf_before_corrector",
+                 _model_core(np.asarray(post_zdf.u.data)[:, 1:, :]),
+                 _runtime_dump(run_kt2 / "stp_dump_08_dynzdf_u.bin"), common_u),
+        diff_row("conditional_euler_V_after_dynzdf_before_corrector",
+                 _model_core(np.asarray(post_zdf.v.data)[1:, :, :]),
+                 _runtime_dump(run_kt2 / "stp_dump_08_dynzdf_v.bin"), common_v),
         diff_row("conditional_euler_T_after_trazdf", _model_core(step1.T.data),
                  _runtime_dump(run_kt2 / "stp_dump_21_trazdf_tem.bin"), common_t),
         diff_row("conditional_euler_S_after_trazdf", _model_core(step1.S.data),
@@ -573,6 +610,8 @@ def run(args: argparse.Namespace) -> int:
         run_y1 / "DINO_00011520_restart.nc",
         run_y1 / "DINO_1y_00010701_00011230_grid_T_0000.nc",
     ] + [run_kt2 / name for name in (
+        "stp_dump_07_dynspg_u.bin", "stp_dump_07_dynspg_v.bin",
+        "stp_dump_08_dynzdf_u.bin", "stp_dump_08_dynzdf_v.bin",
         "stp_dump_21_trazdf_tem.bin", "stp_dump_21_trazdf_sal.bin",
         "baro_dump_u_after.bin", "baro_dump_v_after.bin",
         "spg_dump_pssh_final.bin", "spg_dump_zu_frc.bin",
