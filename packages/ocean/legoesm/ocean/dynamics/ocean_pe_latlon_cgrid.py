@@ -1616,7 +1616,11 @@ def _bc_ke_and_pressure_gradients(
     Adcroft-Campin / SMC03 partial-cell PGF face correction.
 
     Pure verbatim extraction (Q8). Returns ``(dKE_dx, dp_dx, dKE_dy,
-    dp_dy)``."""
+    dp_dy, direct_hpg_v)``. ``direct_hpg_v`` is normally ``None``; the
+    NEMO-literal V selector returns its source-native acceleration so the
+    downstream generic ``rho0 * trend / rho0`` round trip cannot alter the
+    last bits NEMO never rounded through."""
+    direct_hpg_v = None
     # --- 6. Kinetic energy gradient (from TOTAL velocity, #160) ---
     # MOM6-style: KE from total u, not perturbation u'. The depth-mean
     # contribution enters F_slow for the barotropic solver; the
@@ -1958,6 +1962,9 @@ def _bc_ke_and_pressure_gradients(
                 # The redundant last V face has no northern cell in the
                 # stripped model grid and is masked. Keep it explicitly zero.
                 _v_trend_native = _v_trend_native.at[-1].set(0.0)
+                direct_hpg_v = jnp.concatenate(
+                    [jnp.zeros_like(_v_trend_native[:1]),
+                     _v_trend_native], axis=0)
                 _dp_v_native = -_rho0 * _v_trend_native
                 dp_dy_sco = jnp.concatenate(
                     [jnp.zeros_like(_dp_v_native[:1]), _dp_v_native], axis=0)
@@ -2039,7 +2046,7 @@ def _bc_ke_and_pressure_gradients(
                 bottom_slope_2nd_order=True,
             ).astype(dp_dy.dtype)
 
-    return dKE_dx, dp_dx, dKE_dy, dp_dy
+    return dKE_dx, dp_dx, dKE_dy, dp_dy, direct_hpg_v
 
 
 def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord):
@@ -4462,10 +4469,11 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # stage (None otherwise -> never dereferenced). The PV-flux stage computes
     # its own copy internally.
     _weno_order = {"weno5": 5, "weno7": 7, "weno9": 9}.get(_mom_adv)
-    dKE_dx, dp_dx, dKE_dy, dp_dy = _bc_ke_and_pressure_gradients(
+    dKE_dx, dp_dx, dKE_dy, dp_dy, direct_hpg_v = (
+        _bc_ke_and_pressure_gradients(
         u, v, p_prime_filled, rho_prime, grid, config, z_coord,
         eta_safe, H_bathy, g_val, mask,
-    )
+    ))
     # Flux-form momentum advection (stage 7b below) provides the FULL horizontal
     # advection -div(transport(x)u), which already includes the kinetic-energy
     # gradient. The vector-invariant form instead splits advection into the KE
@@ -4480,7 +4488,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # Capture each term as a named local so the same expression feeds
     # both the integration and the optional diagnostics path.
     KE_PGF_u = -dKE_dx - dp_dx / rho_0
-    KE_PGF_v = -dKE_dy - dp_dy / rho_0
+    KE_PGF_v = (-dKE_dy - dp_dy / rho_0
+                if direct_hpg_v is None else -dKE_dy + direct_hpg_v)
     du_dt = KE_PGF_u
     dv_dt = KE_PGF_v
     # Diagnostics scaffolding: zero arrays for terms that may be
