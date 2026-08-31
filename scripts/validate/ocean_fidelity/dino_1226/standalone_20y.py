@@ -51,14 +51,15 @@ DAYS_PER_YEAR = 360
 YEARS = 20
 MEMBERS = tuple(range(6))
 PERTURB_EPS = 1.0e-14
-IC_GEOMETRY_BLOCKER = (
-    "standalone IC geometry is not NEMO-identical: "
-    "dino_ic_euler_peel_v2 first diverges at the wet mask")
+IC_EULER_BLOCKER = (
+    "initialization is exact, but the frozen Euler gate is debt: "
+    "dino_ic_euler_peel_v5 first diverges at "
+    "conditional_euler_T_after_trazdf")
 
 
 def claim_admission_reasons() -> tuple[str, ...]:
     """Known build blockers that make a 20-year science arm inadmissible."""
-    reasons = [IC_GEOMETRY_BLOCKER]
+    reasons = [IC_EULER_BLOCKER]
     cfg = dino_config_for_recipe(RECIPE)
     if not (
             cfg.barotropic_after_reconcile == "nemo_mlf_baro_corr"
@@ -585,8 +586,15 @@ def run(args: argparse.Namespace) -> int:
     }
     _write_json(args.output_dir / "initial_receipt.json", initial_receipt)
 
-    frozen_days = set(sample_days())
     target_steps = args.steps
+    if args.snap_final and target_steps % STEPS_PER_DAY:
+        raise SystemExit(
+            "--snap-final requires --steps to end on a whole DINO day "
+            f"({STEPS_PER_DAY} steps/day)")
+    frozen_days = set(sample_days())
+    final_day = target_steps // STEPS_PER_DAY
+    if args.snap_final:
+        frozen_days.add(final_day)
     capture_steps = {
         day * STEPS_PER_DAY: day for day in frozen_days
         if day * STEPS_PER_DAY <= target_steps
@@ -659,6 +667,11 @@ def run(args: argparse.Namespace) -> int:
         "storage_dtype": "float64",
         "compute_dtype": "float64",
         "sample_days": expected_days,
+        "snap_final_requested": bool(args.snap_final),
+        "final_snapshot_day": final_day if args.snap_final else None,
+        "final_snapshot_present": bool(
+            args.snap_final and written and written[-1]["step"] == target_steps),
+        "final_snapshot_dtype": "float64" if args.snap_final else None,
         "resolved_config_sha256": cfg_hash,
         "initial_receipt_sha256": _file_sha256(
             args.output_dir / "initial_receipt.json"),
@@ -691,6 +704,10 @@ def main() -> int:
         default=YEARS * DAYS_PER_YEAR * STEPS_PER_DAY,
         help="debug truncation only; any value other than 230400 is stamped "
              "claim_admissible=false")
+    parser.add_argument(
+        "--snap-final", action="store_true",
+        help="include the exact final whole-day state as an fp64 3-D snapshot "
+             "even when it is not on the frozen 30/360-day schedule")
     args = parser.parse_args()
     if args.steps < 1 or args.steps > YEARS * DAYS_PER_YEAR * STEPS_PER_DAY:
         parser.error("--steps must be in [1, 230400]")

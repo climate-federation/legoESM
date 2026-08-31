@@ -29,7 +29,14 @@ from legoesm.ocean.experiments.dino import (
 )
 from legoesm.grids.latlon import create_mercator_grid
 from legoesm.ocean.init_latlon_cgrid import partial_periodic_seam_wall_latlon
-from legoesm.ocean.vertical import create_levy_stretched_z_star
+from legoesm.ocean.vertical import (
+    compute_layer_thickness,
+    create_levy_stretched_z_star,
+)
+from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+    min_cell_to_uface,
+    min_cell_to_vface,
+)
 from legoesm.ocean.fidelity.nemo_io import (
     read_nemo_mesh_mask,
     read_nemo_restart,
@@ -37,7 +44,7 @@ from legoesm.ocean.fidelity.nemo_io import (
 )
 
 
-SCHEMA = "dino_ic_euler_peel_v4"
+SCHEMA = "dino_ic_euler_peel_v5"
 BAR = 1.0e-15
 RUNTIME_SHAPE = (203, 56)
 RUNTIME_HALO = 2
@@ -152,7 +159,8 @@ def _runtime_ssh(path: Path) -> np.ndarray:
 
 
 def _initial_rows(grid, geometry, z_coord, state, cfg) -> tuple[
-        list[dict[str, Any]], np.ndarray, np.ndarray, dict[str, int]]:
+        list[dict[str, Any]], list[dict[str, Any]], np.ndarray, np.ndarray,
+        dict[str, int]]:
     if grid.gdept_0 is None:
         raise ValueError("mesh_mask.nc lacks gdept_0")
     nemo_t, nemo_s = hpg.nemo_istate_case4(
@@ -209,7 +217,7 @@ def _initial_rows(grid, geometry, z_coord, state, cfg) -> tuple[
         phi_max_deg=float(cfg.lat_max_deg),
         t_bot=float(legacy_t_prof[..., -1].min()),
         s_bot=float(legacy_s_prof[..., -1].min()))
-    rows.extend([
+    localization = [
         diff_row("substitute_nemo_depth_T_common_wet", source_lego_depth,
                  nemo_t, common_mask),
         diff_row("substitute_nemo_depth_S_common_wet", source_lego_depth_s,
@@ -222,8 +230,8 @@ def _initial_rows(grid, geometry, z_coord, state, cfg) -> tuple[
                  np.asarray(state.T.data), common_mask),
         diff_row("source_order_legacy_S", source_legacy_s,
                  np.asarray(state.S.data), common_mask),
-    ])
-    return rows, nemo_t, nemo_s, mask_receipt
+    ]
+    return rows, localization, nemo_t, nemo_s, mask_receipt
 
 
 def initialization_admitted(rows: list[dict[str, Any]]) -> bool:
@@ -237,9 +245,113 @@ def initialization_admitted(rows: list[dict[str, Any]]) -> bool:
                for name in INIT_ADMISSION_ROWS)
 
 
+def _forcing_localization(run_kt2: Path, grid, z_coord, state, model,
+                          step_forcing) -> dict[str, Any]:
+    """Post-hoc split of the first cold-start slow momentum forcing.
+
+    This is localization only: it does not alter the frozen Euler rows or
+    their 1e-15 bar.  At rest the momentum diagnostic closes from HPG plus
+    wind stress; all velocity-dependent components are exact zeros.  The
+    registered common-face population excludes the artificial boundary face
+    introduced by stripping NEMO's two-ring construction frame.
+    """
+    tendencies, diag = model.tendencies_with_diagnostics(
+        state, step_forcing, dt=standalone.DT_SECONDS)
+    h_k = compute_layer_thickness(
+        state.eta.data, state.H_bathy.data, z_coord,
+        min_water_column_m=model.config.min_water_column_m)
+    h_u = np.asarray(min_cell_to_uface(h_k))
+    h_v = np.asarray(min_cell_to_vface(h_k, model.grid))
+    H_u = np.maximum(np.sum(h_u, axis=-1), 1.0e-10)
+    H_v = np.maximum(np.sum(h_v, axis=-1), 1.0e-10)
+    u_mask_2d = np.asarray(state.u_mask.data)
+    v_mask_2d = np.asarray(state.v_mask.data)
+
+    def depth_mean(value, weight, total, mask):
+        return (np.sum(np.asarray(value) * weight, axis=-1) / total) * mask
+
+    hpg_u = depth_mean(diag.KE_PGF_u.data, h_u, H_u, u_mask_2d)
+    hpg_v = depth_mean(diag.KE_PGF_v.data, h_v, H_v, v_mask_2d)
+    wind_u = depth_mean(diag.surface_stress_u.data, h_u, H_u, u_mask_2d)
+    wind_v = depth_mean(diag.surface_stress_v.data, h_v, H_v, v_mask_2d)
+    total_u = depth_mean(tendencies.du_dt.data, h_u, H_u, u_mask_2d)
+    total_v = depth_mean(tendencies.dv_dt.data, h_v, H_v, v_mask_2d)
+
+    mask_t = _mesh_core(grid.tmask).astype(bool)
+    mask_u = _mesh_core(grid.umask).astype(bool)
+    mask_v = _mesh_core(grid.vmask).astype(bool)
+    lego_t = (np.asarray(z_coord.is_active, dtype=bool)
+              & _broadcast_mask(
+                  np.asarray(state.land_mask.data) > 0.5, mask_t.shape))
+    lego_u = lego_t & np.roll(lego_t, -1, axis=1)
+    lego_v = np.zeros_like(lego_t)
+    lego_v[:-1] = lego_t[:-1] & lego_t[1:]
+    common_u = (mask_u & lego_u)[..., 0]
+    common_v = (mask_v & lego_v)[..., 0]
+
+    def interior_2d(name: str) -> np.ndarray:
+        value = np.fromfile(run_kt2 / name, dtype="<f8")
+        expected = 199 * 52
+        if value.size != expected:
+            raise ValueError(f"{name}: {value.size} values != {expected}")
+        return value.reshape(199, 52)[2:-2, 2:-2]
+
+    nemo_total_u = interior_2d("spg_dump_zu_frc.bin")
+    nemo_total_v = interior_2d("spg_dump_zv_frc.bin")
+    nemo_wind_u = interior_2d("wnd_dump_zu_frc_inc.bin")
+    nemo_wind_v = interior_2d("wnd_dump_zv_frc_inc.bin")
+    nemo_hpg_u = np.sum(
+        _runtime_dump(run_kt2 / "hpg_dump_du.bin") * h_u[:, 1:, :],
+        axis=-1) / H_u[:, 1:]
+    nemo_hpg_v = np.sum(
+        _runtime_dump(run_kt2 / "hpg_dump_dv.bin") * h_v[1:, :, :],
+        axis=-1) / H_v[1:, :]
+
+    rows = [
+        diff_row("POST_HOC_fslow_u_total", total_u[:, 1:], nemo_total_u,
+                 common_u),
+        diff_row("POST_HOC_fslow_v_total", total_v[1:], nemo_total_v,
+                 common_v),
+        diff_row("POST_HOC_fslow_u_wind", wind_u[:, 1:], nemo_wind_u,
+                 common_u),
+        diff_row("POST_HOC_fslow_v_wind", wind_v[1:], nemo_wind_v,
+                 common_v),
+        diff_row("POST_HOC_fslow_u_hpg", hpg_u[:, 1:], nemo_hpg_u,
+                 common_u),
+        diff_row("POST_HOC_fslow_v_hpg", hpg_v[1:], nemo_hpg_v,
+                 common_v),
+    ]
+    u_total_residual = total_u[:, 1:] - nemo_total_u
+    u_wind_residual = wind_u[:, 1:] - nemo_wind_u
+    v_total_residual = total_v[1:] - nemo_total_v
+    v_hpg_residual = hpg_v[1:] - nemo_hpg_v
+    return {
+        "qualification": "POST_HOC_LOCALIZATION_NOT_A_FROZEN_VERDICT",
+        "source": {
+            "nemo_slow_forcing": "dynspg_ts.F90:337,368,443",
+            "nemo_hpg": "dynhpg.F90:345-380",
+            "lego_depth_mean": "ocean_model_latlon_cgrid.py:3740-3786",
+            "lego_wind": "ocean_pe_latlon_cgrid.py:3836-3940",
+        },
+        "registered_population": "NEMO_AND_STANDALONE_COMMON_WET_FACES",
+        "rows": rows,
+        "ownership": {
+            "u": "WIND_STRESS_PROJECTION",
+            "v": "HPG_ACCUMULATION",
+            "u_total_minus_wind_residual_max_abs": float(np.max(
+                np.abs((u_total_residual - u_wind_residual)[common_u]),
+                initial=0.0)),
+            "v_total_minus_hpg_residual_max_abs": float(np.max(
+                np.abs((v_total_residual - v_hpg_residual)[common_v]),
+                initial=0.0)),
+            "rule_1b_eligibility": "NO_PHYSICAL_OPERATOR_RESIDUAL",
+        },
+    }
+
+
 def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
                forcing, step_forcing, nemo_t: np.ndarray,
-               nemo_s: np.ndarray) -> list[dict[str, Any]]:
+               nemo_s: np.ndarray) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     common = state._replace(
         T=state.T.replace(data=nemo_t),
         S=state.S.replace(data=nemo_s))
@@ -255,6 +367,8 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
     common, rate = apply_dino_lat_lon_surface_forcing(
         common, forcing, z_coord, cfg, standalone.DT_SECONDS,
         t_seconds=standalone.DT_SECONDS, return_rate=True)
+    localization = _forcing_localization(
+        run_kt2, grid, z_coord, common, model, step_forcing)
     step1 = dyn(common, rate)
     mask_t = _mesh_core(grid.tmask).astype(bool)
     mask_u = _mesh_core(grid.umask).astype(bool)
@@ -306,7 +420,7 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
                  np.asarray(step2.eta_before.data),
                  _mesh_core(before.ssh), common_t[..., 0]),
     ])
-    return rows
+    return rows, localization
 
 
 def self_test() -> dict[str, str]:
@@ -432,7 +546,9 @@ def run(args: argparse.Namespace) -> int:
     ] + [run_kt2 / name for name in (
         "stp_dump_21_trazdf_tem.bin", "stp_dump_21_trazdf_sal.bin",
         "baro_dump_u_after.bin", "baro_dump_v_after.bin",
-        "spg_dump_pssh_final.bin")]
+        "spg_dump_pssh_final.bin", "spg_dump_zu_frc.bin",
+        "spg_dump_zv_frc.bin", "wnd_dump_zu_frc_inc.bin",
+        "wnd_dump_zv_frc_inc.bin", "hpg_dump_du.bin", "hpg_dump_dv.bin")]
     missing = [str(path) for path in inputs if not path.is_file()]
     if missing:
         raise SystemExit("missing peel inputs: " + ", ".join(missing))
@@ -452,19 +568,25 @@ def run(args: argparse.Namespace) -> int:
 
     (cfg, geometry, z_coord, state, _model_cfg, model, forcing,
      step_forcing, _perturbation) = standalone.build_standalone(0)
-    ic_rows, nemo_t, nemo_s, mask_receipt = _initial_rows(
+    ic_rows, init_localization, nemo_t, nemo_s, mask_receipt = _initial_rows(
         grid, geometry, z_coord, state, cfg)
     controls["legacy_geometry"] = _legacy_geometry_controls(
         grid, cfg, z_coord, state)
     admitted = initialization_admitted(ic_rows)
     step_rows = []
+    forcing_localization = None
     if admitted:
-        step_rows = _step_rows(
+        step_rows, forcing_localization = _step_rows(
             run_kt2, grid, cfg, z_coord, state, model, forcing, step_forcing,
             nemo_t, nemo_s)
     ordered = ic_rows + step_rows
     first_over_bar = next(
         (row["name"] for row in ordered if row["status"] == "OVER_BAR"), None)
+    euler_passed = bool(step_rows) and all(
+        row["status"] == "PASS" for row in step_rows)
+    first_euler_debt = next(
+        (row["name"] for row in step_rows if row["status"] == "OVER_BAR"),
+        None)
     artifact = {
         "schema": SCHEMA,
         "session_id": SESSION_ID,
@@ -474,11 +596,17 @@ def run(args: argparse.Namespace) -> int:
         "bars": {"evaluated_fp64_abs": BAR, "discrete": 0.0},
         "first_over_bar": first_over_bar,
         "initialization_outcome": (
-            "INIT_GEOMETRY_CONFIRMED" if admitted else
-            f"INIT_GEOMETRY_PARTIAL_{first_over_bar}"),
-        "euler_outcome": "EULER_SCORED" if admitted else "EULER_WITHHELD",
+            "INIT_CONFIRMED" if admitted else
+            f"INIT_PARTIAL_{first_over_bar}"),
+        "euler_outcome": (
+            "EULER_AT_BAR" if euler_passed else
+            (f"EULER_DEBT_{first_euler_debt}" if admitted else
+             "EULER_WITHHELD")),
         "euler_admission": admitted,
+        "euler_at_bar": euler_passed,
         "wet_mask_receipt": mask_receipt,
+        "initialization_localization_and_controls": init_localization,
+        "euler_forcing_localization": forcing_localization,
         "rows": ordered,
         "inputs": {str(path): {"bytes": path.stat().st_size,
                                "sha256": file_sha256(path)}

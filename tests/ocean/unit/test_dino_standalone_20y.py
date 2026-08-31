@@ -85,11 +85,18 @@ def test_runner_surface_has_no_restart_or_bridge_selector():
     assert "restart_paths\": []" in source
 
 
-def test_claim_length_refuses_the_measured_ic_geometry_mismatch():
-    """The kt=2 peel makes the old claim-length admission a hard stop."""
+def test_claim_length_refuses_the_measured_euler_debt():
+    """Exact initialization does not bypass the still-red Euler gate."""
     assert RUNNER.claim_admission_reasons() == (
-        RUNNER.IC_GEOMETRY_BLOCKER,)
-    assert "wet mask" in RUNNER.IC_GEOMETRY_BLOCKER
+        RUNNER.IC_EULER_BLOCKER,)
+    assert "conditional_euler_T_after_trazdf" in RUNNER.IC_EULER_BLOCKER
+
+
+def test_runner_exposes_fail_closed_final_snapshot_flag():
+    source = (TOOLS / "standalone_20y.py").read_text()
+    assert '"--snap-final", action="store_true"' in source
+    assert '"final_snapshot_present"' in source
+    assert "--snap-final requires --steps to end on a whole DINO day" in source
 
 
 def _synthetic_reducer_inputs(native=(9, 10, 6)):
