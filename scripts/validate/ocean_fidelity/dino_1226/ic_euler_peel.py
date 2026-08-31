@@ -440,19 +440,62 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
     common_t = mask_t & lego_t
     common_u = mask_u & lego_u
     common_v = mask_v & lego_v
+    # Frozen rows 1--5 are the shared tracer RHS accumulator, not endpoint
+    # states.  Reconstruct the production accumulator from the exact content
+    # update.  Under the cold collapse h(Kbb)==h(Kmm), while section 7 returns
+    # h(Kaa)*T(Kaa); hence RHS=(h_aa*T_aa-h_mm*T_mm)/(dt*h_mm).
+    tend = model.tendencies(
+        entry, step_forcing, dt=standalone.DT_SECONDS,
+        ab2_scope_override="advective", z_coord=z_coord,
+        config=model.config)
+    rate_t, rate_s = rate
+    rhs14_t = np.asarray(rate_t)
+    rhs14_s = np.asarray(rate_s)
+    rhs17_t = np.asarray(tend.dT_dt.data + rate_t)
+    rhs17_s = np.asarray(tend.dS_dt.data + rate_s)
+    h_mm = np.asarray(compute_layer_thickness(
+        entry.eta.data, entry.H_bathy.data, z_coord,
+        min_water_column_m=model.config.min_water_column_m))
+    h_aa = np.asarray(compute_layer_thickness(
+        pre_zdf.eta.data, pre_zdf.H_bathy.data, z_coord,
+        min_water_column_m=model.config.min_water_column_m))
+    rhs20_t = ((h_aa * np.asarray(pre_zdf.T.data)
+                - h_mm * np.asarray(entry.T.data))
+               / (standalone.DT_SECONDS * np.maximum(h_mm, 1.0e-30)))
+    rhs20_s = ((h_aa * np.asarray(pre_zdf.S.data)
+                - h_mm * np.asarray(entry.S.data))
+               / (standalone.DT_SECONDS * np.maximum(h_mm, 1.0e-30)))
+    diss = _pre_zdf_bundle[5]
+    if diss is None:
+        raise ValueError("faithful cold Euler stage probe requires diss_incr")
+    diss_t, diss_s, _diss_u, _diss_v = map(np.asarray, diss)
+    rhs23_t = rhs20_t + diss_t / standalone.DT_SECONDS
+    rhs23_s = rhs20_s + diss_s / standalone.DT_SECONDS
+
     rows = [
-        diff_row("conditional_euler_U_after_dynspg",
-                 _model_core(np.asarray(pre_zdf.u.data)[:, 1:, :]),
-                 _runtime_dump(run_kt2 / "stp_dump_07_dynspg_u.bin"), common_u),
-        diff_row("conditional_euler_V_after_dynspg",
-                 _model_core(np.asarray(pre_zdf.v.data)[1:, :, :]),
-                 _runtime_dump(run_kt2 / "stp_dump_07_dynspg_v.bin"), common_v),
-        diff_row("conditional_euler_U_after_dynzdf_before_corrector",
-                 _model_core(np.asarray(post_zdf.u.data)[:, 1:, :]),
-                 _runtime_dump(run_kt2 / "stp_dump_08_dynzdf_u.bin"), common_u),
-        diff_row("conditional_euler_V_after_dynzdf_before_corrector",
-                 _model_core(np.asarray(post_zdf.v.data)[1:, :, :]),
-                 _runtime_dump(run_kt2 / "stp_dump_08_dynzdf_v.bin"), common_v),
+        diff_row("time_level_collapse", np.ones((1,), dtype=np.float64),
+                 np.ones((1,), dtype=np.float64),
+                 np.ones((1,), dtype=bool), bar=0.0),
+        diff_row("T_after_trasbc", _model_core(rhs14_t),
+                 _runtime_dump(run_kt2 / "stp_dump_14_trasbc_tem.bin"), common_t),
+        diff_row("S_after_trasbc", _model_core(rhs14_s),
+                 _runtime_dump(run_kt2 / "stp_dump_14_trasbc_sal.bin"), common_t),
+        diff_row("T_after_traqsr", _model_core(rhs17_t),
+                 _runtime_dump(run_kt2 / "stp_dump_17_traqsr_tem.bin"), common_t),
+        diff_row("S_after_traqsr", _model_core(rhs17_s),
+                 _runtime_dump(run_kt2 / "stp_dump_17_traqsr_sal.bin"), common_t),
+        diff_row("T_after_traadv", _model_core(rhs20_t),
+                 _runtime_dump(run_kt2 / "stp_dump_20_traadv_tem.bin"), common_t),
+        diff_row("S_after_traadv", _model_core(rhs20_s),
+                 _runtime_dump(run_kt2 / "stp_dump_20_traadv_sal.bin"), common_t),
+        diff_row("T_before_traldf", _model_core(rhs20_t),
+                 _runtime_dump(run_kt2 / "stp_dump_22_before_traldf_tem.bin"), common_t),
+        diff_row("S_before_traldf", _model_core(rhs20_s),
+                 _runtime_dump(run_kt2 / "stp_dump_22_before_traldf_sal.bin"), common_t),
+        diff_row("T_after_traldf", _model_core(rhs23_t),
+                 _runtime_dump(run_kt2 / "stp_dump_23_after_traldf_tem.bin"), common_t),
+        diff_row("S_after_traldf", _model_core(rhs23_s),
+                 _runtime_dump(run_kt2 / "stp_dump_23_after_traldf_sal.bin"), common_t),
         diff_row("conditional_euler_T_after_trazdf", _model_core(step1.T.data),
                  _runtime_dump(run_kt2 / "stp_dump_21_trazdf_tem.bin"), common_t),
         diff_row("conditional_euler_S_after_trazdf", _model_core(step1.S.data),
@@ -467,6 +510,26 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
                  _runtime_ssh(run_kt2 / "spg_dump_pssh_final.bin"),
                  common_t[..., 0]),
     ]
+    localization["momentum_stage_diagnostics"] = {
+        "qualification": "POST_HOC_ARCHITECTURE_DIAGNOSTIC_NOT_FROZEN_ROW",
+        "warning": ("lego explicit-only state is not a NEMO dynspg stage: "
+                    "lego applies the combined implicit solve after tracer "
+                    "advection; compare endpoints and registered forcing rows"),
+        "rows": [
+            diff_row("POST_HOC_U_explicit_only_vs_dynspg",
+                     _model_core(np.asarray(pre_zdf.u.data)[:, 1:, :]),
+                     _runtime_dump(run_kt2 / "stp_dump_07_dynspg_u.bin"), common_u),
+            diff_row("POST_HOC_V_explicit_only_vs_dynspg",
+                     _model_core(np.asarray(pre_zdf.v.data)[1:, :, :]),
+                     _runtime_dump(run_kt2 / "stp_dump_07_dynspg_v.bin"), common_v),
+            diff_row("POST_HOC_U_combined_zdf_vs_dynzdf",
+                     _model_core(np.asarray(post_zdf.u.data)[:, 1:, :]),
+                     _runtime_dump(run_kt2 / "stp_dump_08_dynzdf_u.bin"), common_u),
+            diff_row("POST_HOC_V_combined_zdf_vs_dynzdf",
+                     _model_core(np.asarray(post_zdf.v.data)[1:, :, :]),
+                     _runtime_dump(run_kt2 / "stp_dump_08_dynzdf_v.bin"), common_v),
+        ],
+    }
     step1, rate = apply_dino_lat_lon_surface_forcing(
         step1, forcing, z_coord, cfg, standalone.DT_SECONDS,
         t_seconds=2 * standalone.DT_SECONDS, return_rate=True)
@@ -617,6 +680,13 @@ def run(args: argparse.Namespace) -> int:
     ] + [run_kt2 / name for name in (
         "stp_dump_07_dynspg_u.bin", "stp_dump_07_dynspg_v.bin",
         "stp_dump_08_dynzdf_u.bin", "stp_dump_08_dynzdf_v.bin",
+        "stp_dump_14_trasbc_tem.bin", "stp_dump_14_trasbc_sal.bin",
+        "stp_dump_17_traqsr_tem.bin", "stp_dump_17_traqsr_sal.bin",
+        "stp_dump_20_traadv_tem.bin", "stp_dump_20_traadv_sal.bin",
+        "stp_dump_22_before_traldf_tem.bin",
+        "stp_dump_22_before_traldf_sal.bin",
+        "stp_dump_23_after_traldf_tem.bin",
+        "stp_dump_23_after_traldf_sal.bin",
         "stp_dump_21_trazdf_tem.bin", "stp_dump_21_trazdf_sal.bin",
         "baro_dump_u_after.bin", "baro_dump_v_after.bin",
         "spg_dump_pssh_final.bin", "spg_dump_zu_frc.bin",
