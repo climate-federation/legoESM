@@ -106,18 +106,6 @@ def compute_effective_beta(
     _rjv25 = None
     _tgc_c = None
     if _pm_on:
-        # INTERIM REFUSAL (until the C4 P-model extension lands): a
-        # mixed-vegetation configuration (per-cell fC4 supplied) under the
-        # big-leaf P model would silently run C4 columns on a C3 optimum.
-        # ``land_params.fC4 is not None`` is a static structure check, so
-        # this refuses configured C4 data loudly at trace time (a zero-C4
-        # array is also refused — conservative by design, revisit with C4).
-        if land_params is not None and land_params.fC4 is not None:
-            raise ValueError(
-                "the big-leaf P-model capacity/g1 source does not support "
-                "mixed C3/C4 vegetation yet (land_params.fC4 is set); the "
-                "C4 optimality extension is a separate change. Drop the fC4 "
-                "field or use capacity_scheme='prescribed'.")
         if not (config.carbon.scheme == "differland"
                 and carbon_state is not None and config.stomata.enabled):
             raise ValueError(
@@ -125,14 +113,26 @@ def compute_effective_beta(
                 "path (stomata.enabled with carbon.scheme='differland' and "
                 "a carbon state); the Jarvis fallback has no Vcmax/g1 for "
                 "the P model to supply.")
-        from legoesm.land.p_model import acclimated_capacities
+        from legoesm.land.p_model import (
+            acclimated_capacities, acclimated_capacities_c4)
         _caps = acclimated_capacities(pmodel_acclim, config.p_model)
+        _caps4 = acclimated_capacities_c4(pmodel_acclim, config.p_model)
+        # The big-leaf kernel shares ONE Vcmax25 (and one Medlyn slope)
+        # across its C3/C4 branches and area-blends the RATES by fC4; in
+        # production fC4 is the dominant-PFT 0/1 flag, so the linear
+        # capacity blend below is EXACT at both endpoints and inherits the
+        # kernel's own single-capacity approximation for intermediate fC4
+        # (codex design review).
         if config.stomata.capacity_scheme == "p_model":
-            _stomata = _stomata._replace(Vc_max25=_caps.vcmax25_leaf)
-            _rjv25 = _caps.rjv25
+            _stomata = _stomata._replace(
+                Vc_max25=((1.0 - _fC4) * _caps.vcmax25_leaf
+                          + _fC4 * _caps4.vcmax25_c4_leaf))
+            _rjv25 = _caps.rjv25  # consumed by the C3 branch only
             _tgc_c = pmodel_acclim.t_mean_K - constants.T_freeze
         if config.stomata.g1_source == "p_model":
-            _stomata = _stomata._replace(g1_med=_caps.g1_kpa)
+            _stomata = _stomata._replace(
+                g1_med=((1.0 - _fC4) * _caps.g1_kpa
+                        + _fC4 * _caps4.g1_c4_kpa))
 
     if config.stomata.enabled:
         if config.carbon.scheme == "differland" and carbon_state is not None:

@@ -248,3 +248,68 @@ def test_grid_capacities_finite_and_positive():
             assert np.all(np.isfinite(np.asarray(leaf)))
         assert float(caps.vcmax25_leaf[0]) > 0.0
         assert 0.0 < float(caps.chi[0]) < 1.0
+
+
+# --- C4 (rpmodel c4 method; Cai & Prentice 2020 quadratic) -----------------
+_O_BETA_C4 = 146.0 / 9.0
+_O_QUAD_C4 = (-0.064, 0.03, -0.000464)
+# Collatz C4 kernel constants (CLM5): independent oracle literals.
+_O_Q10_C4, _O_S1, _O_S2, _O_S3, _O_S4 = 2.0, 0.3, 313.15, 0.2, 288.15
+
+
+def _o_phi0_c4(T, kphio_c4):
+    tc = T - _O_TFREEZE
+    a0, a1, a2 = _O_QUAD_C4
+    quad = a0 + a1 * tc + a2 * tc * tc
+    quad = 0.01 * math.log1p(math.exp(quad / 0.01))
+    return kphio_c4 * quad
+
+
+def _o_c4_response(T):
+    tref = _O_TFREEZE + 25.0
+    q10 = _O_Q10_C4 ** ((T - tref) / 10.0)
+    fH = 1.0 + math.exp(_O_S1 * (T - _O_S2))
+    fL = 1.0 + math.exp(_O_S3 * (_O_S4 - T))
+    return q10 / (fH * fL)
+
+
+def test_c4_capacities_match_oracle():
+    from legoesm.land.p_model import acclimated_capacities_c4
+    cfg = pm.PModelConfig()
+    iabs = 400.0
+    for T, D, ca, P in _GRID:
+        caps4 = acclimated_capacities_c4(_mk_state(T, D, ca, P, iabs), cfg)
+        o_chi, o_xi, _, _ = _o_chi_pack(
+            T, D, ca, P, _O_BETA_C4, cfg.vpd_min_pa, cfg.mj_floor_eps,
+            cfg.mj_floor_width)
+        mprime = math.sqrt(1.0 - 0.41 ** (2.0 / 3.0))
+        o_v4 = (_o_phi0_c4(T, cfg.kphio_c4) * iabs * mprime
+                / _o_c4_response(T))
+        assert float(caps4.chi_c4[0]) == pytest.approx(o_chi, rel=1e-9)
+        assert float(caps4.g1_c4_kpa[0]) == pytest.approx(
+            o_xi / math.sqrt(1000.0), rel=1e-9)
+        assert float(caps4.vcmax25_c4_leaf[0]) == pytest.approx(o_v4, rel=1e-9)
+
+
+def test_c4_constant_canaries():
+    cfg = pm.PModelConfig()
+    assert cfg.beta_cost_c4 == pytest.approx(146.0 / 9.0, rel=0)
+    assert cfg.kphio_c4 == 1.0
+    assert pm._KPHIO_QUAD_C4 == (-0.064, 0.03, -0.000464)
+    # The host Collatz response is deliberately UN-normalised at 25 C
+    # (fH*fL active there): pin the reference value the inversion divides by.
+    from legoesm.land.canopy.photosynthesis import c4_vcmax_temperature_response
+    r25 = float(c4_vcmax_temperature_response(jnp.float64(_O_TFREEZE + 25.0)))
+    assert r25 == pytest.approx(_o_c4_response(_O_TFREEZE + 25.0), rel=1e-12)
+    assert 0.85 < r25 < 0.90  # ~0.87, NOT 1
+
+
+def test_c4_non_vacuity():
+    from legoesm.land.p_model import acclimated_capacities_c4
+    cfg = pm.PModelConfig()
+    T, D, ca, P = _GRID[0]
+    caps4 = acclimated_capacities_c4(_mk_state(T, D, ca, P), cfg)
+    o_chi_bad, *_ = _o_chi_pack(
+        T, D, ca, P, _O_BETA_C4 * 1.001, cfg.vpd_min_pa, cfg.mj_floor_eps,
+        cfg.mj_floor_width)
+    assert float(caps4.chi_c4[0]) != pytest.approx(o_chi_bad, rel=1e-9)

@@ -38,6 +38,7 @@ from legoesm.land.p_model import (
     VALID_CAPACITY_SCHEMES,
     VALID_G1_SOURCES,
     acclimated_capacities,
+    acclimated_capacities_c4,
 )
 from legoesm.land.canopy.radiative_transfer import (
     split_sw_components, canopy_shortwave_rt,
@@ -364,17 +365,20 @@ def compute_two_leaf_canopy_fluxes(
         # acclimation state (slab-land / patch-mosaic until wired): no silent
         # fall-back to prescribed parameters.
         _caps = acclimated_capacities(pmodel_acclim, land_config.p_model)
+        _caps4 = acclimated_capacities_c4(pmodel_acclim, land_config.p_model)
         if cc.capacity_scheme == "p_model":
-            # C3 leaf-top capacity + Jmax25/Vcmax25 ratio from the optimum.
-            # INTERIM: C4 capacity (Vc4_leaf) stays prescribed until the C4
-            # P-model extension lands (see CanopyConfig.capacity_scheme docs).
+            # C3 leaf-top capacity + Jmax25/Vcmax25 ratio, and the C4 leaf-top
+            # capacity (rpmodel c4 method: full-kinetics chi with beta/9,
+            # mj = mc = 1; no Jmax — the Collatz branch has none).
             Vc3_leaf = _caps.vcmax25_leaf
             rjv25 = _caps.rjv25
+            Vc4_leaf = _caps4.vcmax25_c4_leaf
         if cc.g1_source == "p_model":
-            # Predicted Medlyn slope replaces the tabulated C3 slope; the
-            # soil-moisture stress below multiplies it exactly as it does the
-            # tabulated one (deliberate: one consistent stress path).
+            # Predicted Medlyn slopes replace the tabulated C3 AND C4 slopes;
+            # the soil-moisture stress below multiplies them exactly as it
+            # does the tabulated ones (deliberate: one consistent stress path).
             m_C3 = _caps.g1_kpa
+            m_C4 = _caps4.g1_c4_kpa
 
     # ---- Soil moisture stress ----
     # Photosynthesis/transpiration down-regulation uses the ROOT-ZONE beta.

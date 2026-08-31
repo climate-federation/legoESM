@@ -255,6 +255,23 @@ def vcmax_temperature_response(Tf: jax.Array, TgC: jax.Array) -> jax.Array:
     return _arrhenius_peaked(Tf, _HA_VCMAX, _HD_VCMAX, _delta_s_vcmax(TgC_a))
 
 
+def c4_vcmax_temperature_response(Tf: jax.Array) -> jax.Array:
+    """RAW Collatz C4 Vcmax temperature factor the kernel applies.
+
+    ``Vcmax(T) = Vcmax25 * Q10^((T-Tref)/10) / (fH(T) * fL(T))`` — deliberately
+    NOT normalised to 1 at 25 degC: the high/low-T deactivations fH/fL are
+    mildly active at the reference (factor ~0.87), and that is the kernel's
+    (Collatz/CLM5) convention.  Public so the P model can divide its growth-T
+    optimal Vcmax by THIS exact factor — the kernel then reproduces the
+    optimum at the growth temperature (codex design review: a re-normalised
+    helper here would leave a constant fH*fL(25) bias).
+    """
+    q10_pow = jnp.power(_Q10_C4, (Tf - _T_REF) / 10.0)
+    fH = 1.0 + jnp.exp(_S1_C4 * (Tf - _S2_C4))
+    fL = 1.0 + jnp.exp(_S3_C4 * (_S4_C4 - Tf))
+    return q10_pow / (fH * fL)
+
+
 def jmax_temperature_response(Tf: jax.Array, TgC: jax.Array) -> jax.Array:
     """Normalised Jmax temperature response (Kattge & Knorr 2007 peaked Arrhenius).
 
@@ -403,10 +420,8 @@ def c4_assimilation(
     item = (Tf - _T_REF) / 10.0
     q10_pow = jnp.power(_Q10_C4, item)
 
-    Vcmax_o = Vcmax25 * q10_pow
-    fH = 1.0 + jnp.exp(_S1_C4 * (Tf - _S2_C4))
-    fL = 1.0 + jnp.exp(_S3_C4 * (_S4_C4 - Tf))
-    Vcmax = Vcmax_o / (fH * fL)
+    # Single-source T response (shared with the P model's 25C inversion).
+    Vcmax = Vcmax25 * c4_vcmax_temperature_response(Tf)
 
     Rd25 = _RD25_FRAC_C4 * Vcmax25
     Rd = Rd25 * q10_pow / (1.0 + jnp.exp(_S5_C4 * (Tf - _S6_C4)))

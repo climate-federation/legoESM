@@ -216,3 +216,42 @@ def test_init_multilayer_state_carries_acclim_iff_switch_active():
     assert s.pmodel_acclim is not None
     assert s.pmodel_acclim.iabs_mean.shape == (4,)
     assert float(s.pmodel_acclim.co2_mean_ppm[0]) == 390.0
+
+
+def test_c4_capacities_regime_and_g1_ratio():
+    from legoesm.land.p_model import acclimated_capacities_c4
+    cfg = pm.PModelConfig()
+    s = _state(t_c=30.0, vpd=1500.0)
+    caps4 = acclimated_capacities_c4(s, cfg)
+    v4 = float(caps4.vcmax25_c4_leaf[0])
+    assert 5.0 < v4 < 200.0
+    assert 0.0 < float(caps4.chi_c4[0]) < 1.0
+    # Same kinetics, beta_c4 = beta/9 exactly -> xi (hence g1) ratio = 1/3.
+    caps3 = pm.acclimated_capacities(s, cfg)
+    ratio = float(caps4.g1_c4_kpa[0]) / float(caps3.g1_kpa[0])
+    assert ratio == pytest.approx(1.0 / 3.0, rel=1e-10)
+    # C4 chi < C3 chi (lower cost ratio closes stomata harder).
+    assert float(caps4.chi_c4[0]) < float(caps3.chi[0])
+
+
+def test_c4_kphio_temp_off_freezes_quadratic_at_15C():
+    from legoesm.land.p_model import acclimated_capacities_c4
+    cfg_off = pm.PModelConfig(kphio_temp=False)
+    v_cold = acclimated_capacities_c4(_state(t_c=10.0), cfg_off)
+    v_warm = acclimated_capacities_c4(_state(t_c=30.0), cfg_off)
+    # phi0_c4 frozen at 15 C: remaining T-dependence is ONLY the Collatz
+    # normalisation and the chi kinetics, so the phi0 ratio drops out --
+    # verify by scaling out the normalisation.
+    from legoesm.land.canopy.photosynthesis import c4_vcmax_temperature_response
+    import jax.numpy as _j
+    r_cold = float(c4_vcmax_temperature_response(_j.asarray(283.15)))
+    r_warm = float(c4_vcmax_temperature_response(_j.asarray(303.15)))
+    lhs = float(v_cold.vcmax25_c4_leaf[0]) * r_cold
+    rhs = float(v_warm.vcmax25_c4_leaf[0]) * r_warm
+    assert lhs == pytest.approx(rhs, rel=1e-6)  # growth Vcmax identical
+
+
+def test_c4_capacities_raise_without_state():
+    from legoesm.land.p_model import acclimated_capacities_c4
+    with pytest.raises(ValueError, match="acclimation state"):
+        acclimated_capacities_c4(None, pm.PModelConfig())

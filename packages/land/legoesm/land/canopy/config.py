@@ -252,10 +252,9 @@ class CanopyConfig(NamedTuple):
     # Source of the leaf photosynthetic capacities: "prescribed" (default —
     # PFT tables / CanopyLandParams, bit-identical legacy behaviour) or
     # "p_model" (acclimated leaf-top Vcmax25 + Jmax25/Vcmax25 ratio from the
-    # least-cost/coordination optimum at the running daytime-mean drivers).
-    # INTERIM (until the C4 P-model extension lands): with "p_model", C3
-    # capacities are optimality-supplied while C4 columns keep their
-    # prescribed Vcmax25_C4 — a documented mixed configuration.
+    # least-cost/coordination optimum at the running daytime-mean drivers;
+    # C4 capacities and slopes come from the rpmodel c4 method with the
+    # beta/9 cost ratio — both pathways optimality-supplied).
     capacity_scheme: str = "prescribed"   # "prescribed" | "p_model"
     # Source of the Medlyn slope: "table" (default — per-PFT m_C3/m_C4) or
     # "p_model" (predicted g1 = xi; requires stomatal_model="medlyn").

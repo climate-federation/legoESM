@@ -694,10 +694,12 @@ def _step_multilayer_land_impl(
         _cc_ml = config.surface_scheme
         _v_col = _g1_col = _jv_col = _tacc_col = None
         if pmodel_switches_active(_cc_ml):
-            from legoesm.land.p_model import acclimated_capacities
-            # INTERIM REFUSAL: the P-model optimum is C3 (FvCB); a C4 PFT
-            # column under the injection would silently run C4 physiology on
-            # a C3 optimum.  PFTs are static host ints, so check loudly here.
+            from legoesm.land.p_model import (
+                acclimated_capacities, acclimated_capacities_c4)
+            # Per-column PATHWAY selection: PFTs are static host ints, so the
+            # C3/C4 mask is concrete (c3psn from the host pftcon table); C4
+            # columns get the rpmodel-c4 optimum (beta/9, mj=mc=1), C3
+            # columns the coordination optimum.
             from legoesm.land.canopy.clm_ml_backend.clm_src_main import (
                 pftconMod as _pftmod)
             try:
@@ -706,28 +708,32 @@ def _step_multilayer_land_impl(
                          else [int(_cc_ml.pft_clm)])
             except (TypeError, jax.errors.TracerIntegerConversionError) as e:
                 raise ValueError(
-                    "the CLM-ML P-model C4 check needs CONCRETE host PFT "
-                    "indices; clm_ml_pft_per_col arrived traced. Pass the "
-                    "static per-column PFT list.") from e
-            _c4 = [pf for pf in _pfts
-                   if int(round(float(_pftmod.pftcon.c3psn[pf]))) != 1]
-            if _c4:
-                raise ValueError(
-                    f"CLM-ML P-model capacity/g1 source does not support C4 "
-                    f"PFTs yet (columns with PFT {_c4}); the C4 optimality "
-                    "extension is a separate change. Use prescribed "
-                    "capacities for these columns.")
+                    "the CLM-ML P-model pathway selection needs CONCRETE "
+                    "host PFT indices; clm_ml_pft_per_col arrived traced. "
+                    "Pass the static per-column PFT list.") from e
+            _is_c3 = [int(round(float(_pftmod.pftcon.c3psn[pf]))) == 1
+                      for pf in _pfts]
+            _ncol_ml = int(T_surface.shape[0])
+            if len(_is_c3) == 1:
+                _is_c3 = _is_c3 * _ncol_ml
+            _c3_mask = jnp.asarray(_is_c3, dtype=bool)
             _caps_ml = acclimated_capacities(state.pmodel_acclim, config.p_model)
+            _caps4_ml = acclimated_capacities_c4(
+                state.pmodel_acclim, config.p_model)
             if _cc_ml.capacity_scheme == "p_model":
-                _v_col = _caps_ml.vcmax25_leaf
+                _v_col = jnp.where(_c3_mask, _caps_ml.vcmax25_leaf,
+                                   _caps4_ml.vcmax25_c4_leaf)
                 # Unified growth-temperature clock (user decision): the
                 # P-model acclimation temperature replaces the backend's own
                 # 10-day t_a10 mean for the K&K entropies / j2v closure.
                 _tacc_col = state.pmodel_acclim.t_mean_K
                 if _cc_ml.pmodel_rjv25:
+                    # C3-only by construction: the backend zeroes jmax25top
+                    # for C4 columns regardless of the injected ratio.
                     _jv_col = _caps_ml.rjv25
             if _cc_ml.g1_source == "p_model":
-                _g1_col = _caps_ml.g1_kpa
+                _g1_col = jnp.where(_c3_mask, _caps_ml.g1_kpa,
+                                    _caps4_ml.g1_c4_kpa)
 
         surface_out, canopy_state_new = compute_clm_ml_canopy_fluxes(
             T_soil_top=T_surface,

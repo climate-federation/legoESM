@@ -61,9 +61,11 @@ def test_interface_guards():
     assert "shape (ncol,)" in src
 
 
-def test_multilayer_arm_refuses_c4_pft():
-    """The C4-PFT refusal is a static host check in the CLM-ML arm."""
+def test_multilayer_arm_selects_pathway_per_column():
+    """C3/C4 pathway selection is a static host mask (c3psn) feeding a
+    per-column where() between the coordination and rpmodel-c4 optima."""
     src = open(
         "packages/land/legoesm/land/multilayer_land.py").read()
-    assert "does not support C4" in src
+    assert "acclimated_capacities_c4" in src
     assert "c3psn" in src
+    assert "_c3_mask" in src

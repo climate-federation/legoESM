@@ -157,6 +157,21 @@ __param_spec__ = {
                 ),
                 "shape": None,
             },
+            "beta_cost_c4": {
+                "units": "1", "bounds": (3.0, 60.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "photosynthesis",
+                "reference": "rpmodel c4 beta = 146/9 (Cai & Prentice 2020)",
+                "shape": None,
+            },
+            "kphio_c4": {
+                "units": "mol/mol", "bounds": (0.2, 2.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "photosynthesis",
+                "reference": (
+                    "rpmodel c4 base kphio = 1.0 (the Cai & Prentice 2020 "
+                    "temperature quadratic carries the magnitude)"
+                ),
+                "shape": None,
+            },
             "tau_acclim_s": {
                 "units": "s", "bounds": (86400.0, 10368000.0),
                 "tunable_tier": 2, "transform": "sigmoid",
@@ -175,6 +190,15 @@ C_STAR = 0.41  # [-] unit cost of Jmax maintenance; k = (c*/mj)^(2/3)
 # phi0(T)/kphio = a + b*Tc + c*Tc^2, ascending powers of leaf T [degC].
 _KPHIO_QUAD_C3 = (0.352, 0.022, -3.4e-4)
 
+# --- C4 quantum-yield temperature fit (rpmodel ftemp_kphio, c4 branch) ---
+# "Cai & Prentice (2020), corrected by David Orme" (rpmodel source comment);
+# the C4 base kphio is 1.0 in rpmodel — this quadratic carries the magnitude
+# (peaks ~0.42 near 32 degC), floored at 0 like the C3 fit.
+_KPHIO_QUAD_C4 = (-0.064, 0.03, -0.000464)
+# rpmodel evaluates the C4 quadratic at a FIXED 15 degC when the temperature
+# dependence is switched off (do_ftemp_kphio = FALSE branch).
+_KPHIO_C4_REF_TC = 15.0
+
 # --- numerics (smooth guards) ---
 _PHI0_FLOOR_WIDTH = 0.01  # coeff-ok: softplus width keeping phi0 >= 0 smooth
 
@@ -191,6 +215,9 @@ class PModelConfig(NamedTuple):
     beta_cost: float = 146.0     # [-] carboxylation:transpiration cost ratio
     kphio: float = 0.081785      # [mol/mol] apparent quantum yield (absorptance folded in)
     kphio_temp: bool = True      # Bernacchi 2003 phi0(T) quadratic on (compile-time)
+    # --- C4 optimality (rpmodel c4; Cai & Prentice 2020) ---
+    beta_cost_c4: float = 146.0 / 9.0  # [-] C4 cost ratio (rpmodel: beta/9)
+    kphio_c4: float = 1.0        # [mol/mol] C4 base quantum yield (rpmodel 1.0)
     # --- acclimation (Mengoli et al. 2022) ---
     tau_acclim_s: float = 1296000.0  # [s] = 15 days
     # --- numerics (smooth guards; excluded from calibration) ---
@@ -274,6 +301,7 @@ def optimal_chi(
     co2_ppm: jax.Array,
     ps_pa: jax.Array,
     cfg: PModelConfig,
+    beta: jax.Array | float | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Least-cost optimal chi (Stocker 2020 eq. 8-9), all pressures in Pa.
 
@@ -290,8 +318,9 @@ def optimal_chi(
     big_k = kc * (1.0 + p_o2 / ko)  # Michaelis coefficient K [Pa]
 
     eta_star = water_viscosity_ratio(T_K, ps_pa)
+    _beta = cfg.beta_cost if beta is None else beta
     xi = jnp.sqrt(
-        cfg.beta_cost * (big_k + gamma_star) / (DIFFUSIVITY_RATIO_H2O_CO2 * eta_star)
+        _beta * (big_k + gamma_star) / (DIFFUSIVITY_RATIO_H2O_CO2 * eta_star)
     )  # [Pa^0.5]
 
     vpd = _smooth_floor(vpd_pa, cfg.vpd_min_pa, cfg.vpd_min_pa)
@@ -402,6 +431,71 @@ def init_pmodel_acclim(
         co2_mean_ppm=full(0.0) + jnp.asarray(co2, dtype=dtype),
         ps_ema=full(0.0) + jnp.asarray(ps_init_pa, dtype=dtype),
     )
+
+
+class PModelCapacitiesC4(NamedTuple):
+    """C4 acclimated parameter predictions (leaf-top; rpmodel c4 method)."""
+
+    vcmax25_c4_leaf: jax.Array  # [umol/m^2/s] leaf-top C4 Vcmax25
+    g1_c4_kpa: jax.Array        # [kPa^0.5] predicted C4 Medlyn slope (= xi_c4)
+    chi_c4: jax.Array           # [-] C4 ci/ca at the optimum (diagnostic)
+    xi_c4_sqrt_pa: jax.Array    # [Pa^0.5] C4 least-cost xi (diagnostic)
+
+
+def _phi0_c4(T_K: jax.Array, cfg: PModelConfig) -> jax.Array:
+    """C4 apparent quantum yield [mol/mol] (rpmodel ftemp_kphio, c4 branch).
+
+    ``kphio_c4 * max(quad_c4(Tc), 0)`` with the smooth softplus floor; when
+    the temperature dependence is off, rpmodel freezes the quadratic at
+    15 degC rather than dropping it (the magnitude lives in the quadratic).
+    """
+    a0, a1, a2 = _KPHIO_QUAD_C4
+    if not cfg.kphio_temp:
+        tc = jnp.full_like(T_K, _KPHIO_C4_REF_TC)
+    else:
+        tc = T_K - constants.T_freeze
+    quad = a0 + a1 * tc + a2 * tc * tc
+    quad = _PHI0_FLOOR_WIDTH * jax.nn.softplus(quad / _PHI0_FLOOR_WIDTH)
+    return cfg.kphio_c4 * quad
+
+
+def acclimated_capacities_c4(
+    acclim: PModelAcclimState | None, cfg: PModelConfig
+) -> PModelCapacitiesC4:
+    """C4 acclimated leaf-top Vcmax25 and predicted Medlyn g1 (rpmodel c4).
+
+    rpmodel's c4 method verbatim: chi/xi use the FULL kinetics (real Gamma*
+    and K) with the C4 cost ratio ``beta_cost_c4`` (= 146/9); the CO2-
+    saturated bundle sheath sets mj = mc = 1, so the Wang-2017 limitation
+    factor is the constant ``sqrt(1 - c*^(2/3))`` and
+    ``Vcmax_growth = phi0_c4(Tg) * Iabs * sqrt(1 - c*^(2/3))``.  The 25 degC
+    inversion divides by the HOST Collatz kernel's RAW temperature factor
+    (``c4_vcmax_temperature_response``, which is ~0.87 at 25 degC by the
+    kernel's own convention), so the kernel reproduces the optimum at the
+    growth temperature.  No Jmax ratio: the Collatz kernel has none.
+    """
+    if acclim is None:
+        raise ValueError(
+            "P-model C4 capacities requested but no acclimation state was "
+            "supplied (pmodel_acclim=None): this land lane does not carry "
+            "PModelAcclimState. Initialise it (init_pmodel_acclim) or select "
+            "capacity_scheme='prescribed' / g1_source='table'."
+        )
+    from legoesm.land.canopy.photosynthesis import (
+        c4_vcmax_temperature_response,
+    )
+
+    tg_k = acclim.t_mean_K
+    chi, xi, _ci, _gs, _K = optimal_chi(
+        tg_k, acclim.vpd_mean_pa, acclim.co2_mean_ppm, acclim.ps_ema, cfg,
+        beta=cfg.beta_cost_c4)
+    mprime_c4 = jnp.sqrt(1.0 - C_STAR ** (2.0 / 3.0))  # mj = 1 (CO2-saturated)
+    v_growth = _phi0_c4(tg_k, cfg) * acclim.iabs_mean * mprime_c4
+    vcmax25_c4 = v_growth / c4_vcmax_temperature_response(tg_k)
+    g1_c4 = xi / jnp.sqrt(1000.0)
+    return PModelCapacitiesC4(
+        vcmax25_c4_leaf=vcmax25_c4, g1_c4_kpa=g1_c4, chi_c4=chi,
+        xi_c4_sqrt_pa=xi)
 
 
 def acclim_trajectory(
