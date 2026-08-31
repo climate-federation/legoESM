@@ -5218,6 +5218,10 @@ class LatLonCGridOceanModel:
             _S_flux_div_cur = None
             _T_adv_rate_direct = None
             _S_adv_rate_direct = None
+            _T_adv_h_rate_direct = None
+            _S_adv_h_rate_direct = None
+            _T_adv_v_rate_direct = None
+            _S_adv_v_rate_direct = None
 
             # AB2: ensure pytree structure is stable for jax.lax.scan.
             # When the input state has None carry fields, pre-create
@@ -5343,8 +5347,16 @@ class LatLonCGridOceanModel:
                             h_k_old, 1.0e-30)
                         if tr_name == 'T':
                             _T_adv_rate_direct = _direct_rate
+                            _T_adv_h_rate_direct = (
+                                -div_hut / jnp.maximum(h_k_old, 1.0e-30))
+                            _T_adv_v_rate_direct = (
+                                -vert_flux_div / jnp.maximum(h_k_old, 1.0e-30))
                         else:
                             _S_adv_rate_direct = _direct_rate
+                            _S_adv_h_rate_direct = (
+                                -div_hut / jnp.maximum(h_k_old, 1.0e-30))
+                            _S_adv_v_rate_direct = (
+                                -vert_flux_div / jnp.maximum(h_k_old, 1.0e-30))
 
                     if _tti == "ab2":
                         # Adams-Bashforth 2: extrapolate flux divergence
@@ -5830,7 +5842,9 @@ class LatLonCGridOceanModel:
                         "non-RK3 flux-divergence path")
                 _aux = _aux + (
                     tend.dT_dt.data, tend.dS_dt.data,
-                    _T_adv_rate_direct, _S_adv_rate_direct)
+                    _T_adv_rate_direct, _S_adv_rate_direct,
+                    _T_adv_h_rate_direct, _S_adv_h_rate_direct,
+                    _T_adv_v_rate_direct, _S_adv_v_rate_direct)
             return state_new, _aux
         return state_new
 

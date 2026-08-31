@@ -168,6 +168,46 @@ def _runtime_ssh(path: Path) -> np.ndarray:
     return array[edge:-edge, edge:-edge]
 
 
+def _nemo_fct_rate_components(run_kt2: Path, grid, *, sal: bool):
+    """Pure horizontal/vertical tra_adv rates from NEMO's dumped fluxes."""
+    suffix = "_sal" if sal else ""
+
+    def load(axis: str, part: str) -> np.ndarray:
+        full = hpg.read_dump(
+            str(run_kt2 / f"fct_dump_zw{axis}_{part}{suffix}.bin"),
+            35, RUNTIME_SHAPE[0], RUNTIME_SHAPE[1])
+        return full[RUNTIME_HALO:-RUNTIME_HALO,
+                    RUNTIME_HALO:-RUNTIME_HALO, :]
+
+    fu = load("x", "up") + load("x", "anti")
+    fv = load("y", "up") + load("y", "anti")
+    fw = load("z", "up") + load("z", "anti")
+    zero = np.zeros_like(fw)
+
+    def divergence(x_flux, y_flux, z_flux):
+        dx = np.empty_like(x_flux)
+        dx[:, 1:, :] = x_flux[:, 1:, :] - x_flux[:, :-1, :]
+        dx[:, 0, :] = np.nan
+        dy = np.empty_like(y_flux)
+        dy[1:, :, :] = y_flux[1:, :, :] - y_flux[:-1, :, :]
+        dy[0, :, :] = np.nan
+        dz = np.empty_like(z_flux)
+        dz[..., :-1] = z_flux[..., :-1] - z_flux[..., 1:]
+        dz[..., -1] = z_flux[..., -1]
+        return -(dx + dy + dz)
+
+    area = np.asarray(grid.e1t) * np.asarray(grid.e2t)
+    e3t = np.asarray(grid.e3t_0)[..., :-1]
+    tmask = np.asarray(grid.tmask)[..., :-1]
+
+    def rate(div):
+        return div / (area[..., None] * e3t) * tmask
+
+    horizontal = rate(divergence(fu, fv, zero))
+    vertical = rate(divergence(np.zeros_like(fu), np.zeros_like(fv), fw))
+    return horizontal, vertical
+
+
 def _initial_rows(grid, geometry, z_coord, state, cfg) -> tuple[
         list[dict[str, Any]], list[dict[str, Any]], np.ndarray, np.ndarray,
         dict[str, int]]:
@@ -447,10 +487,14 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
     # states.  Consume the direct pre-content-update rates exposed by the
     # private peel receipt; endpoint subtraction is too ill-conditioned for
     # this lane's 1e-15 bar.
-    rhs17_t = np.asarray(_pre_zdf_bundle[-4])
-    rhs17_s = np.asarray(_pre_zdf_bundle[-3])
-    adv_t = np.asarray(_pre_zdf_bundle[-2])
-    adv_s = np.asarray(_pre_zdf_bundle[-1])
+    rhs17_t = np.asarray(_pre_zdf_bundle[-8])
+    rhs17_s = np.asarray(_pre_zdf_bundle[-7])
+    adv_t = np.asarray(_pre_zdf_bundle[-6])
+    adv_s = np.asarray(_pre_zdf_bundle[-5])
+    adv_h_t = np.asarray(_pre_zdf_bundle[-4])
+    adv_h_s = np.asarray(_pre_zdf_bundle[-3])
+    adv_v_t = np.asarray(_pre_zdf_bundle[-2])
+    adv_v_s = np.asarray(_pre_zdf_bundle[-1])
     rhs20_t = rhs17_t + adv_t
     rhs20_s = rhs17_s + adv_s
 
@@ -545,6 +589,25 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
             diff_row("POST_HOC_V_combined_zdf_vs_dynzdf",
                      _model_core(np.asarray(post_zdf.v.data)[1:, :, :]),
                      _runtime_dump(run_kt2 / "stp_dump_08_dynzdf_v.bin"), common_v),
+        ],
+    }
+    nemo_h_t, nemo_v_t = _nemo_fct_rate_components(
+        run_kt2, grid, sal=False)
+    nemo_h_s, nemo_v_s = _nemo_fct_rate_components(
+        run_kt2, grid, sal=True)
+    localization["first_failed_traadv_components"] = {
+        "qualification": "FROZEN_FIRST_FAILED_ROW_COMPONENT_LOCALIZATION",
+        "source": ("traadv.F90:301-304 Kmm velocity; traadv_fct.F90 dumped "
+                   "upstream+antidiffusive face fluxes"),
+        "rows": [
+            diff_row("T_traadv_horizontal", _model_core(adv_h_t),
+                     _model_core(nemo_h_t), common_t),
+            diff_row("T_traadv_vertical", _model_core(adv_v_t),
+                     _model_core(nemo_v_t), common_t),
+            diff_row("S_traadv_horizontal", _model_core(adv_h_s),
+                     _model_core(nemo_h_s), common_t),
+            diff_row("S_traadv_vertical", _model_core(adv_v_s),
+                     _model_core(nemo_v_s), common_t),
         ],
     }
     step1, rate = apply_dino_lat_lon_surface_forcing(
@@ -704,6 +767,12 @@ def run(args: argparse.Namespace) -> int:
         "stp_dump_22_before_traldf_sal.bin",
         "stp_dump_23_after_traldf_tem.bin",
         "stp_dump_23_after_traldf_sal.bin",
+        "fct_dump_zwx_up.bin", "fct_dump_zwy_up.bin",
+        "fct_dump_zwz_up.bin", "fct_dump_zwx_anti.bin",
+        "fct_dump_zwy_anti.bin", "fct_dump_zwz_anti.bin",
+        "fct_dump_zwx_up_sal.bin", "fct_dump_zwy_up_sal.bin",
+        "fct_dump_zwz_up_sal.bin", "fct_dump_zwx_anti_sal.bin",
+        "fct_dump_zwy_anti_sal.bin", "fct_dump_zwz_anti_sal.bin",
         "stp_dump_21_trazdf_tem.bin", "stp_dump_21_trazdf_sal.bin",
         "baro_dump_u_after.bin", "baro_dump_v_after.bin",
         "spg_dump_pssh_final.bin", "spg_dump_zu_frc.bin",
