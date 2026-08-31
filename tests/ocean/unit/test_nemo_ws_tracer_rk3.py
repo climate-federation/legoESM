@@ -1,11 +1,56 @@
 """Stage-program tests for NEMO's key_RK3 active tracers."""
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
 import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as model_module
 from legoesm.core.precision import PrecisionPolicy, set_policy
+from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.fidelity.nemo_testcase_recipe import build_lock_exchange_zco_card
+from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+from legoesm.ocean.state import LatLonCGridOceanConfig
+from legoesm.ocean.vertical import create_ocean_z_star
+
+
+def test_nemo_ws_transport_default_is_conditional_and_legacy_is_explicit():
+    """Resolve WS to Kmm without changing any non-WS result."""
+    set_policy(PrecisionPolicy.fp64())
+    grid = create_latlon_grid(4, 8, dtype=jnp.float64)
+    z_coord = create_ocean_z_star(n_levels=2, H_max=20.0)
+
+    ws = LatLonCGridOceanConfig(
+        tracer_time_integrator="rk3_ws",
+        momentum_time_integrator="rk3_ws",
+    )
+    ws_model = model_module.LatLonCGridOceanModel(grid, z_coord, ws)
+    assert ws.tracer_rk3_transport_time_levels is None
+    assert ws_model.config.tracer_rk3_transport_time_levels == "nemo_kmm"
+
+    ws_legacy = ws._replace(
+        tracer_rk3_transport_time_levels="frozen_final")
+    ws_legacy_model = model_module.LatLonCGridOceanModel(
+        grid, z_coord, ws_legacy)
+    assert ws_legacy_model.config.tracer_rk3_transport_time_levels == "frozen_final"
+
+    non_ws = LatLonCGridOceanConfig()
+    explicit_old = non_ws._replace(
+        tracer_rk3_transport_time_levels="frozen_final")
+    non_ws_model = model_module.LatLonCGridOceanModel(
+        grid, z_coord, non_ws)
+    explicit_old_model = model_module.LatLonCGridOceanModel(
+        grid, z_coord, explicit_old)
+    assert non_ws_model.config == explicit_old_model.config
+
+    initial = rest_state_latlon_cgrid_ocean(
+        grid, z_coord, H_max=20.0, T_water_init_C=10.0, T_deep=10.0)
+    default_result = non_ws_model.step(initial, dt=0.01)
+    explicit_result = explicit_old_model.step(initial, dt=0.01)
+    default_leaves = jax.tree_util.tree_leaves(default_result)
+    explicit_leaves = jax.tree_util.tree_leaves(explicit_result)
+    assert len(default_leaves) == len(explicit_leaves)
+    for default, explicit in zip(default_leaves, explicit_leaves, strict=True):
+        np.testing.assert_array_equal(np.asarray(default), np.asarray(explicit))
 
 
 def test_nemo_ws_tracer_stage_polynomial(monkeypatch):

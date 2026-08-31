@@ -409,7 +409,7 @@ def run(
                 "classification": "CONFIRMED_EXONERATED",
                 "retraction": (
                     "the prior owner label compared NEMO with zeros and ignored "
-                    "the nine-order scale contradiction"),
+                    "the six-order scale contradiction"),
                 "poststage_only_u_error": baseline_u_error,
                 "per_stage_u_error": stage_baro_u_error,
                 "movement": stage_baro_u_error - baseline_u_error,

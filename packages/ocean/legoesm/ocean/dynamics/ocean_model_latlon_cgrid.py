@@ -1449,8 +1449,8 @@ class LatLonCGridOceanModel:
         iwm_forcing=None,
     ):
         self.z_coord = z_coord
-        self.config = config or LatLonCGridOceanConfig.from_flat()
-        self._validate_config(self.config)
+        self.config = self._validate_config(
+            config or LatLonCGridOceanConfig.from_flat())
         # Convert LatLonGrid -> LatLonCGridGeometry once at construction.
         # All downstream operators see the enriched geometry with per-cell
         # metric arrays.  For a plain LatLonGrid this is a no-op on field
@@ -1834,8 +1834,18 @@ class LatLonCGridOceanModel:
         return self.rigid_lid_data
 
     @staticmethod
-    def _validate_config(config: LatLonCGridOceanConfig) -> None:
-        """Validate configuration ranges."""
+    def _validate_config(
+        config: LatLonCGridOceanConfig,
+    ) -> LatLonCGridOceanConfig:
+        """Resolve conditional defaults, then validate configuration ranges."""
+        if config.tracer_rk3_transport_time_levels is None:
+            config = config._replace(
+                tracer_rk3_transport_time_levels=(
+                    "nemo_kmm"
+                    if config.tracer_time_integrator == "rk3_ws"
+                    else "frozen_final"
+                )
+            )
         nonnegative = {
             "A_h": config.lateral_viscosity.A_h,
             "B_h": config.lateral_viscosity.B_h,
@@ -3299,6 +3309,8 @@ class LatLonCGridOceanModel:
                         "pin — parameterized ADVECTION the lever does not "
                         "isolate. Disable MLE (mle=None) for the isolation "
                         "run.")
+
+        return config
 
     def check_barotropic_cfl(self, dt: float) -> float:
         """Check barotropic CFL and warn if marginal or unstable.

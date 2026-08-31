@@ -2070,11 +2070,14 @@ class LatLonCGridOceanConfig(NamedTuple):
     #   nonlinear limiters (TVD, WENO, FCT).
     tracer_time_integrator: str = "euler"  # also "ab2", "rk3" (SSP), "rk3_ws" (NEMO dt/3,dt/2,dt)
     # Velocity/geometry time levels supplied to the NEMO WS tracer stages.
-    # "frozen_final" preserves the historical split step: one post-barotropic
-    # transport is reused by all stages.  "nemo_kmm" supplies Kbb, stage-1 Kaa,
-    # and stage-2 Kaa transports to stages 1, 2, and 3 respectively, matching
-    # stprk3.F90:194-207 and stprk3_stg.F90:250-303,456-519.
-    tracer_rk3_transport_time_levels: str = "frozen_final"
+    # None resolves during model validation: "nemo_kmm" for rk3_ws, otherwise
+    # "frozen_final" so every non-WS user's resolved config and behaviour remain
+    # unchanged.  Explicit "frozen_final" is the selectable legacy split step:
+    # one post-barotropic transport is reused by all stages.  "nemo_kmm"
+    # supplies Kbb, stage-1 Kaa, and stage-2 Kaa transports to stages 1, 2, and
+    # 3 respectively, matching stprk3.F90:194-207 and
+    # stprk3_stg.F90:250-303,456-519.
+    tracer_rk3_transport_time_levels: str | None = None
     # Causal fidelity experiment for NEMO's per-stage Kaa external-mode
     # replacement (stprk3_stg.F90:433-446).  Default false preserves every
     # existing user's single post-stage barotropic correction.

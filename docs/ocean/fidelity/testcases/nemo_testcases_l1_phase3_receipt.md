@@ -84,6 +84,14 @@ The cards now resolve the oracle programs per case:
 | outer/tracer stages | `rk3_ws` | `rk3_ws` | `stprk3.F90:184-207`; `stprk3_stg.F90:535-570` |
 | tracer transport levels | `nemo_kmm` | `nemo_kmm` | `stprk3.F90:194-207`; `stprk3_stg.F90:160-168,195-213,225-303,456-519` |
 
+**Resolved default decision (standing Rule 3):** the stored selector sentinel
+resolves at model validation to `nemo_kmm` only when
+`tracer_time_integrator="rk3_ws"`; every other integrator resolves to the
+previous `frozen_final`, preserving its prior validation and numerical path.
+An explicit `frozen_final` remains the documented legacy WS arm.  The two
+testcase cards continue to pin `nemo_kmm` explicitly in their resolved run
+configuration.
+
 The phase-3 preregistration's statement that the cases "resolve nn_e=30" is
 retracted: 30 is the input value, but both namelists enable `ln_bt_auto`.
 NEMO recomputes the executed count from depth, metric, gravity, timestep, and
