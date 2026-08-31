@@ -344,15 +344,41 @@ def reconstruct_dino_before_stress_tpoint(state, grid, cfg, *, t_seconds: float)
     return rebuilt, receipt
 
 
-def verify_day0_matches_restart(st, restart_state, land_mask, *, tol: float = 1e-8) -> None:
+def resolve_restart_min_speed() -> tuple[float, str]:
+    """Resolve the audited rest-state discriminator.
+
+    Exact bridge equality and restart nonzero are independent invariants.  The
+    environment override changes only how far above zero the restart must be;
+    it can never relax the equality gate.
+    """
+    raw = os.environ.get("DINO_TWIN_MIN_SPEED")
+    if raw is None:
+        return 0.0, "default_nonzero"
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise SystemExit(
+            f"DINO_TWIN_MIN_SPEED must be a finite nonnegative number, got {raw!r}"
+        ) from exc
+    if not np.isfinite(value) or value < 0.0:
+        raise SystemExit(
+            f"DINO_TWIN_MIN_SPEED must be a finite nonnegative number, got {raw!r}"
+        )
+    return value, "environment"
+
+
+def verify_day0_matches_restart(
+        st, restart_state, land_mask, *, tol: float = 1e-8,
+        min_restart_speed: float = 0.0) -> None:
     """Day-0 gate: raise SystemExit unless ``st`` == the NEMO restart on wet cells.
 
     Guards against the 2026-07-24 defect where a "twin" silently started from
     the analytic rest-state IC instead of the bridged restart. Checks:
       (1) max|dT| = max|d_eta| = max|du| = max|dv| = 0 (to `tol`) vs the raw
           NEMO restart, restricted to wet cells;
-      (2) max|u0| > 0.1 -- a rest-state start has u == 0 identically, so any
-          twin claiming a developed IC must show real velocity.
+      (2) max(max|u_restart|, max|v_restart|) > ``min_restart_speed``.  The
+          default is exact nonzero: an early-spinup restart may be very slow,
+          but an analytic rest-state restart is identically zero.
 
     Parameters
     ----------
@@ -374,8 +400,9 @@ def verify_day0_matches_restart(st, restart_state, land_mask, *, tol: float = 1e
     d_eta = float(np.max(np.abs(eta0_lego[wet] - eta0_nemo[wet])))
     d_u = float(np.max(np.abs(u0_lego[wet] - u0_nemo[wet])))
     d_v = float(np.max(np.abs(v0_lego[wet] - v0_nemo[wet])))
-    max_u0 = float(np.max(np.abs(u0_lego[wet])))
-    max_v0 = float(np.max(np.abs(v0_lego[wet])))
+    max_u0 = float(np.max(np.abs(u0_nemo[wet])))
+    max_v0 = float(np.max(np.abs(v0_nemo[wet])))
+    max_restart_speed = max(max_u0, max_v0)
 
     print(f"DAY-0 VERIFY vs NEMO restart (wet cells): "
           f"max|dT|={d_t:.3e}  max|d_eta|={d_eta:.3e}  max|du|={d_u:.3e}  max|dv|={d_v:.3e}  "
@@ -390,15 +417,10 @@ def verify_day0_matches_restart(st, restart_state, land_mask, *, tol: float = 1e
         failures.append(f"u mismatch vs NEMO restart: {d_u:.3e} >= {tol:.1e}")
     if not d_v < tol:
         failures.append(f"v mismatch vs NEMO restart: {d_v:.3e} >= {tol:.1e}")
-    if not max_u0 > 0.1:
+    if not max_restart_speed > min_restart_speed:
         failures.append(
-            f"max|u0|={max_u0:.4f} <= 0.1 -- looks like a REST-STATE start, not a "
-            "developed-restart twin (2026-07-24 defect: verify the caller passed "
-            "br.state, not dino_lat_lon_state(...))"
-        )
-    if not max_v0 > 0.1:
-        failures.append(
-            f"max|v0|={max_v0:.4f} <= 0.1 -- looks like a REST-STATE start, not a "
+            f"restart max velocity={max_restart_speed:.6e} <= "
+            f"{min_restart_speed:.6e} -- looks like a REST-STATE start, not a "
             "developed-restart twin (2026-07-24 defect: verify the caller passed "
             "br.state, not dino_lat_lon_state(...))"
         )
@@ -766,7 +788,9 @@ NEMO_LADDER_TWIN_DEFAULT = "both"
 _LADDER_ANNOUNCED: set[str] = set()      # modes whose loud banner already fired
 
 
-def resolve_snap_days(snap_days, n_days: int, save_3d: bool) -> tuple[int, ...]:
+def resolve_snap_days(
+        snap_days, n_days: int, save_3d: bool, *,
+        snap_final: bool = False) -> tuple[int, ...]:
     """Which days get a full 3-D snapshot.
 
     ``snap_days=None`` keeps the recorded :data:`SNAP_DAYS` grid, so every
@@ -776,10 +800,15 @@ def resolve_snap_days(snap_days, n_days: int, save_3d: bool) -> tuple[int, ...]:
     filter did before this was a function.  Without ``save_3d`` there are no
     snapshots at all and the answer is empty regardless of what was asked for.
     """
+    if snap_final and not save_3d:
+        raise SystemExit("--snap-final requires --save-3d")
     if not save_3d:
         return ()
     grid = SNAP_DAYS if snap_days is None else tuple(int(d) for d in snap_days)
-    return tuple(d for d in grid if d <= n_days)
+    selected = [d for d in grid if d <= n_days]
+    if snap_final and n_days not in selected:
+        selected.append(n_days)
+    return tuple(sorted(set(selected)))
 
 
 def snapshot_dtype(fp64_3d: bool):
@@ -1254,7 +1283,8 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                        gm_redi_slope_depth_evaluation: str | None = None,
                        u_m: float | None = None,
                        restart_file: str = RESTART_FILE,
-                       e3t_mode: str | None = None):
+                       e3t_mode: str | None = None,
+                       min_restart_speed: float = 0.0):
     """Bridge the NEMO restart into a legoESM state and run the day-0 gate.
 
     ``restart_file``: basename of the (rebuilt, single-file) NEMO restart
@@ -1495,7 +1525,8 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
     # the 2026-07-24 defect note in the module docstring.
     st = br.state
     print("twin from developed NEMO state (br.state, NOT dino_lat_lon_state)")
-    verify_day0_matches_restart(st, s, br.land_mask)
+    verify_day0_matches_restart(
+        st, s, br.land_mask, min_restart_speed=min_restart_speed)
 
     # DEFAULT ON (#1455, 2026-08-24): bridge NEMO's leap-frog BEFORE-level
     # state (tb/sb/ub/vb, the MLF integrator's THIRD time level) onto
@@ -1678,6 +1709,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
              daily_acc: bool = False,
              save_step_eta: bool = False,
              snap_days: tuple[int, ...] | None = None,
+             snap_final: bool = False,
              fp64_3d: bool = False,
              legacy_1d_ladder: bool = False) -> bool:
     """Run the state-initialized twin for ``n_days`` and save an npz. Returns stable.
@@ -1740,6 +1772,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     # inheriting the other's setting.
     ladder_mode = resolve_ladder_mode(legacy_1d_ladder)
     requested_start = resolve_start_mode(bridge_before)
+    min_restart_speed, min_restart_speed_source = resolve_restart_min_speed()
     br, cfg, mc, model, forcing, sf, st = _build_twin_state(
         recipe, run_traj, run_stepdump, config_source=config_source,
         catalog_recipe=catalog_recipe, bridge_tke=bridge_tke,
@@ -1767,7 +1800,8 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         gm_redi_slope_face_thickness_evaluation=(
             gm_redi_slope_face_thickness_evaluation),
         gm_redi_slope_depth_evaluation=gm_redi_slope_depth_evaluation,
-        u_m=u_m, e3t_mode=ladder_mode)
+        u_m=u_m, e3t_mode=ladder_mode,
+        min_restart_speed=min_restart_speed)
 
     # #1455 review: the stamp must be a RECEIPT, not a restatement of the flag.
     # ``resolve_start_mode`` reads the CLI; what actually seeds the before level
@@ -1868,7 +1902,8 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     # from the same restart.  Stamping it next to the clock the twin USED lets
     # a scorer reject ANY offset that is not NEMO's, not merely t0=0.
     t0_reference_sec = restart_elapsed_seconds(f"{run_stepdump}/{restart_file}")
-    resolved_snap_days = resolve_snap_days(snap_days, n_days, save_3d)
+    resolved_snap_days = resolve_snap_days(
+        snap_days, n_days, save_3d, snap_final=snap_final)
     # Everything about this run a comparison must hold fixed.  A two-arm A/B
     # that changes the clock and something else is a confound, and nothing in
     # the artifact could see it before this stamp existed.
@@ -2241,6 +2276,8 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         # content hash exists to prevent, and this dimension gets the same
         # treatment.
         twin_start_mode=np.str_(start_mode),
+        restart_min_speed=np.float64(min_restart_speed),
+        restart_min_speed_source=np.str_(min_restart_speed_source),
         # Round-3 bridge-only stagger receipt. "T" is stamped only after the
         # built carry was compared byte-for-byte with the existing analytic
         # DINO forcing loader at the restart's own time.
@@ -2551,6 +2588,10 @@ def _parse_args(argv=None):
                    help="comma-separated days for the --save-3d 3-D snapshots "
                         "(default: the recorded 0,30,60,90 grid). Days past "
                         "--days are dropped.")
+    p.add_argument(
+        "--snap-final", action="store_true",
+        help="with --save-3d, also capture the exact --days endpoint even "
+             "when it is absent from --snap-days (for example day 359)")
     p.add_argument("--fp64-3d", dest="fp64_3d", action="store_true",
                    help="store the 3-D T/S/eta/u/v snapshot block at float64 "
                         "instead of float32. Roughly DOUBLES the artifact, so "
@@ -2796,6 +2837,7 @@ def main(argv=None):
               save_step_eta=args.save_step_eta,
               snap_days=(None if args.snap_days is None else
                          tuple(int(x) for x in args.snap_days.split(","))),
+              snap_final=args.snap_final,
               fp64_3d=args.fp64_3d,
               legacy_1d_ladder=args.legacy_1d_ladder)
 

@@ -199,6 +199,53 @@ def test_day0_verify_passes_for_matched_developed_state(instruments):
     kamm_twin_90d.verify_day0_matches_restart(st, restart, land_mask)
 
 
+def test_day0_verify_accepts_matched_slow_restart(instruments):
+    """Early-spinup velocity may be tiny; exact nonzero is the invariant."""
+    k = instruments.kamm_twin_90d
+    n_lat, n_lon, n_lev = 2, 3, 2
+    land_mask = np.ones((n_lat, n_lon))
+    t_field = np.ones((n_lat, n_lon, n_lev))
+    ssh = np.zeros((n_lat, n_lon))
+    u_nemo = np.full((n_lat, n_lon, n_lev), 1.0e-12)
+    v_nemo = np.zeros((n_lat, n_lon, n_lev))
+    restart = _fake_restart(t_field, ssh, u_nemo, v_nemo)
+    u_face = np.zeros((n_lat, n_lon + 1, n_lev))
+    v_face = np.zeros((n_lat + 1, n_lon, n_lev))
+    u_face[:, 1:, :] = u_nemo
+    st = _fake_state(t_field.copy(), ssh.copy(), u_face, v_face)
+
+    k.verify_day0_matches_restart(st, restart, land_mask)
+
+
+def test_day0_verify_rejects_matched_zero_restart(instruments):
+    """Planted zero proves equality alone cannot admit an analytic rest state."""
+    k = instruments.kamm_twin_90d
+    n_lat, n_lon, n_lev = 2, 3, 2
+    land_mask = np.ones((n_lat, n_lon))
+    t_field = np.ones((n_lat, n_lon, n_lev))
+    ssh = np.zeros((n_lat, n_lon))
+    zeros = np.zeros((n_lat, n_lon, n_lev))
+    restart = _fake_restart(t_field, ssh, zeros, zeros)
+    st = _fake_state(
+        t_field.copy(), ssh.copy(),
+        np.zeros((n_lat, n_lon + 1, n_lev)),
+        np.zeros((n_lat + 1, n_lon, n_lev)))
+
+    with pytest.raises(SystemExit, match="REST-STATE"):
+        k.verify_day0_matches_restart(st, restart, land_mask)
+
+
+def test_restart_min_speed_environment_is_validated(instruments, monkeypatch):
+    k = instruments.kamm_twin_90d
+    monkeypatch.delenv("DINO_TWIN_MIN_SPEED", raising=False)
+    assert k.resolve_restart_min_speed() == (0.0, "default_nonzero")
+    monkeypatch.setenv("DINO_TWIN_MIN_SPEED", "1e-14")
+    assert k.resolve_restart_min_speed() == (1.0e-14, "environment")
+    monkeypatch.setenv("DINO_TWIN_MIN_SPEED", "nan")
+    with pytest.raises(SystemExit, match="finite nonnegative"):
+        k.resolve_restart_min_speed()
+
+
 def test_kamm_twin_90d_import_is_side_effect_free(instruments):
     """Import must not read any NEMO artifact (module docstring guarantee)."""
     kamm_twin_90d = instruments.kamm_twin_90d
@@ -1581,6 +1628,20 @@ def test_snap_days_is_empty_without_save_3d(instruments):
     assert k.resolve_snap_days(None, 360, False) == ()
 
 
+def test_snap_final_adds_exact_nonmonthly_endpoint(instruments):
+    k = instruments.kamm_twin_90d
+    assert k.resolve_snap_days(
+        None, 359, True, snap_final=True) == (0, 30, 60, 90, 359)
+    assert k.resolve_snap_days(
+        (0, 180, 359), 359, True, snap_final=True) == (0, 180, 359)
+
+
+def test_snap_final_requires_3d_capture(instruments):
+    k = instruments.kamm_twin_90d
+    with pytest.raises(SystemExit, match="requires --save-3d"):
+        k.resolve_snap_days(None, 359, False, snap_final=True)
+
+
 def test_snap_days_cli_parses_a_comma_list(instruments):
     k = instruments.kamm_twin_90d
     args = k._parse_args(["nemo_dino_kamm_mlf", "/tmp/x.npz", "--days", "360",
@@ -1591,6 +1652,9 @@ def test_snap_days_cli_parses_a_comma_list(instruments):
         args.save_3d) == (0, 90, 180, 270, 360)
     # and the flag is genuinely optional
     assert k._parse_args(["r", "/tmp/x.npz"]).snap_days is None
+    args = k._parse_args([
+        "r", "/tmp/x.npz", "--days", "359", "--save-3d", "--snap-final"])
+    assert args.snap_final is True
 # the seasonal-clock guard every scorer shares
 # ---------------------------------------------------------------------------
 def test_clock_guard_accepts_the_restarts_own_day_of_year(instruments):

@@ -70,6 +70,14 @@ The receipt must record that both bridge artifacts were produced from commit
 mid-run-edit refusal if a citable log is available; absent log means
 `USER_REPORTED_NO_HASH`, never an invented artifact.
 
+The restart-admission deviation is frozen as the user-added
+`DINO_TWIN_MIN_SPEED` environment override. Its permanent replacement must
+keep two independent conditions: every bridged field equals the selected
+restart on wet cells within the existing tolerance, and the selected restart's
+wet velocity vector is nonzero. Lowering the nonzero threshold must never
+weaken or replace the equality condition. The effective threshold and its
+source are artifact stamps.
+
 ## Rung 1 — analytic initialization, first divergence
 
 All comparisons use fp64 and the standalone physical core convention:

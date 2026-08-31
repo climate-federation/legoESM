@@ -112,7 +112,8 @@ _DUMP_HALO = 2
 # NEMO usr_def_istate CASE(4) -- transcription of
 # cfgs/DINO/MY_SRC/usrdef_istate.F90:129-175
 # ----------------------------------------------------------------------
-def _istate_profiles_1d(gdept: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def nemo_istate_profiles_1d(
+        gdept: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """The depth-only T and S profiles (usrdef_istate.F90:134-149).
 
     ``gdept`` is positive-down depth [m].  Returns ``(T_1d, S_1d)`` in
@@ -137,7 +138,10 @@ def _istate_profiles_1d(gdept: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def nemo_istate_case4(gdept: np.ndarray, gphit: np.ndarray,
-                      tmask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+                      tmask: np.ndarray, *,
+                      phi_max_deg: float | None = None,
+                      t_bot: float | None = None,
+                      s_bot: float | None = None) -> tuple[np.ndarray, np.ndarray]:
     """NEMO ``usr_def_istate`` CASE(4) T and S on a full-step (ln_zco) mesh.
 
     ``gdept`` is the depth NEMO ACTUALLY passes as ``pdept`` -- the 3-D
@@ -161,10 +165,12 @@ def nemo_istate_case4(gdept: np.ndarray, gphit: np.ndarray,
 
     Returns ``(T, S)`` shaped like ``tmask`` (n_lat, n_lon, nlev).
     """
-    t_prof, s_prof = _istate_profiles_1d(np.asarray(gdept, dtype=np.float64))
+    t_prof, s_prof = nemo_istate_profiles_1d(
+        np.asarray(gdept, dtype=np.float64))
     t = np.broadcast_to(t_prof, tmask.shape) * tmask
     s = np.broadcast_to(s_prof, tmask.shape) * tmask
-    phi_max = float(np.max(gphit))
+    phi_max = (float(np.max(gphit)) if phi_max_deg is None
+               else float(phi_max_deg))
     if not phi_max > 0.0:
         # NEMO's zphiMAX is MAXVAL(gphit) (69.85 deg on DINO R1); a
         # non-positive max would divide the blend by zero and hand back a
@@ -173,8 +179,10 @@ def nemo_istate_case4(gdept: np.ndarray, gphit: np.ndarray,
             f"MAXVAL(gphit) must be > 0 for the CASE(4) meridional blend; "
             f"got {phi_max!r}")
     # MINVAL over wet cells: the +100*(1-tmask) trick keeps dry cells out.
-    t_bot = float(np.min(t + 100.0 * (1.0 - tmask)))
-    s_bot = float(np.min(s + 100.0 * (1.0 - tmask)))
+    t_bot = (float(np.min(t + 100.0 * (1.0 - tmask)))
+             if t_bot is None else float(t_bot))
+    s_bot = (float(np.min(s + 100.0 * (1.0 - tmask)))
+             if s_bot is None else float(s_bot))
     blend = ((phi_max - np.abs(gphit)) / phi_max)[..., None]
     t_out = ((t - t_bot) * blend + t_bot) * tmask
     s_out = ((s - s_bot) * blend + s_bot) * tmask

@@ -36,7 +36,7 @@ def test_istate_case4_equator_is_the_unblended_profile():
     gphit = np.array([[0.0, 60.0]])          # col 0 = equator, col 1 sets phiMAX
     tmask = np.ones((1, 2, 4))
     t, s = hpg.nemo_istate_case4(gdept, gphit, tmask)
-    t1d, s1d = hpg._istate_profiles_1d(gdept)
+    t1d, s1d = hpg.nemo_istate_profiles_1d(gdept)
     np.testing.assert_allclose(t[0, 0], t1d, rtol=1e-14)
     np.testing.assert_allclose(s[0, 0], s1d, rtol=1e-14)
 
@@ -59,7 +59,7 @@ def test_istate_case4_pole_collapses_to_the_abyssal_anchor():
     assert np.allclose(t[0, 1], t[0, 1][0])
     assert np.allclose(s[0, 1], s[0, 1][0])
     # and the anchor is the MINIMUM of the profile (NEMO's MINVAL)
-    t1d, s1d = hpg._istate_profiles_1d(gdept)
+    t1d, s1d = hpg.nemo_istate_profiles_1d(gdept)
     np.testing.assert_allclose(t[0, 1][0], t1d.min(), rtol=1e-14)
     np.testing.assert_allclose(s[0, 1][0], s1d.min(), rtol=1e-14)
 
@@ -73,7 +73,7 @@ def test_istate_case4_anchor_ignores_dry_cells():
     wet = np.ones((1, 1, 4))
     wet[0, 0, 3] = 0.0                      # deepest level DRY
     t_wet, _ = hpg.nemo_istate_case4(gdept, gphit, wet)
-    t1d, _ = hpg._istate_profiles_1d(gdept)
+    t1d, _ = hpg.nemo_istate_profiles_1d(gdept)
     # anchor is the min over the WET levels (0..2), not t1d[3]
     np.testing.assert_allclose(t_wet[0, 0, 0], t1d[:3].min(), rtol=1e-14)
     assert not np.isclose(t_wet[0, 0, 0], t1d.min())
