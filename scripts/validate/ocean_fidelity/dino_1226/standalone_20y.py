@@ -51,11 +51,14 @@ DAYS_PER_YEAR = 360
 YEARS = 20
 MEMBERS = tuple(range(6))
 PERTURB_EPS = 1.0e-14
+IC_GEOMETRY_BLOCKER = (
+    "standalone IC geometry is not NEMO-identical: "
+    "dino_ic_euler_peel_v2 first diverges at the wet mask")
 
 
 def claim_admission_reasons() -> tuple[str, ...]:
     """Known build blockers that make a 20-year science arm inadmissible."""
-    reasons = []
+    reasons = [IC_GEOMETRY_BLOCKER]
     cfg = dino_config_for_recipe(RECIPE)
     if not (
             cfg.barotropic_after_reconcile == "nemo_mlf_baro_corr"

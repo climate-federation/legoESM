@@ -85,9 +85,11 @@ def test_runner_surface_has_no_restart_or_bridge_selector():
     assert "restart_paths\": []" in source
 
 
-def test_claim_length_is_admitted_after_first_step_corrector():
-    """Red-before-green gate for the T1 cold-start physics row."""
-    assert RUNNER.claim_admission_reasons() == ()
+def test_claim_length_refuses_the_measured_ic_geometry_mismatch():
+    """The kt=2 peel makes the old claim-length admission a hard stop."""
+    assert RUNNER.claim_admission_reasons() == (
+        RUNNER.IC_GEOMETRY_BLOCKER,)
+    assert "wet mask" in RUNNER.IC_GEOMETRY_BLOCKER
 
 
 def _synthetic_reducer_inputs(native=(9, 10, 6)):

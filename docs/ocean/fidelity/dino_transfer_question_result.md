@@ -1,4 +1,4 @@
-# DINO transfer question — T3 certified, T2 scoped, T1 reducer repaired
+# DINO transfer question — T3 certified; T1 first divergence bound
 
 Date: 2026-08-30. Session:
 `01a053d4-8e9f-7212-bbdb-19ba2d64e140`.
@@ -11,8 +11,10 @@ AB3/AM4 temporal composition passes the frozen 40-step discriminator and the
 64-step clean-card gate, and remains the correct default for NEMO's actual one
 Euler bootstrap. No further perpetual-Euler stabilization is in scope. T1's
 first wave reached 360 cold-start days cleanly before a reducer-shape bug
-aborted its first capture; that reducer path is now repaired and admitted at
-day 0. No GPU, NEMO, MPI process, push, or remote action was launched here.
+aborted its first capture. That reducer is repaired, but the new step-2 ladder
+peel blocks the science claim earlier: standalone wet mask, latitude
+evaluation, and T-depths are not NEMO-identical. No GPU, NEMO, MPI process,
+push, or remote action was launched here.
 
 ## T3 — catalog construction is certified
 
@@ -323,8 +325,84 @@ Its manifest SHA-256 is
 `claim_admissible=false` means only that this receipt intentionally ran one
 step rather than all 230,400.
 
-The six legoESM 20-year arms must be rerun from fresh output directories with
-the repaired runner. T1 remains **UNMEASURED** until those arms, the fresh
-from-rest NEMO ensemble, normalized six-family statistics, and the science
-score all exist. The scorer cannot be invoked until both roots contain the
-registered `dino_standalone_20y_statistics_v1` products.
+The six legoESM 20-year science arms are superseded by the discriminator below.
+Any already-running arm from an older producer is diagnostic-only. T1 remains
+**BLOCKED_AT_IC_GEOMETRY_FIRST_DIVERGENCE** until that row closes and the CPU
+peel is rerun from a clean producer.
+
+## T1 step-2 ladder receipt and IC/Euler peel
+
+The user-reported common-target ladder is bound without recomputation:
+
+| start | free run | day-360 readout | SST RMS | SSH RMS |
+|---|---:|---|---:|---:|
+| day-180 bit-exact bridge | 180 d | scheduled twin snapshot | 0.005 degC | prior twin battery |
+| NEMO step-2 bit-exact bridge | 359 d | daily-series endpoint | 0.0104 degC | 0.29 mm |
+| independent analytic start | 360 d | independent endpoint | 0.39 degC | not supplied |
+
+The step-2 row is offset from the target by 0.94 day and did not schedule a
+final 3-D snapshot. Its frozen scope is
+`TWIN_CLASS_DAILY_ENDPOINT_WITH_OFFSET`; it is not a horizon-exact or bit-exact
+final-state claim. The bridge artifacts are:
+
+- `/data/abyssal/dbalwada/lego_bridged_kt2.npz`, SHA-256
+  `3b9bec883ad79ad5e7dc43e95118c0f7ca903b2f39d8374eee0a74b2131661d9`;
+- `/data/abyssal/dbalwada/lego_bridged_d10.npz`, SHA-256
+  `759abcc2e86346abf1e25ee49d1c83535e54789cc73ecab1a7686a604e8d7062`.
+
+Both stamp producer `7c0f121baed6bc57243e849127040865dda2d597` with one
+dirty tracked file and were admitted with `LEGOESM_ALLOW_DIRTY=1`. The user
+temporarily lowered the rest-state guard with `DINO_TWIN_MIN_SPEED`; the first
+ten-day attempt was refused after a mid-run edit but has no citable log, so its
+receipt is `USER_REPORTED_NO_HASH`.
+
+The guard is now a committed, artifact-stamped feature. Bridge equality remains
+an independent check on T, SSH, U, and V. The restart itself must also have
+`max(max|U|,max|V|)>threshold`; the default threshold is exact nonzero, and a
+finite nonnegative `DINO_TWIN_MIN_SPEED` may tighten it. The actual step-2
+restart passes with zero bridge differences and restart maxima 0.0470 and
+0.0115 m/s. A planted equal-but-zero restart fails.
+
+The committed peel artifact is
+`docs/ocean/fidelity/dino_ic_euler_peel_artifact.json`, SHA-256
+`d7e10ed32d39182167dd3ebbcb1944965b6a6d8b8847c23fab7fc6e6b889e21f`.
+Its producer is `6a6af74d4e4b82357fd186a3e14d2775114ad6d6`, clean,
+CPU/fp64. Both planted controls fire. The first over-bar row is
+`input_wet_mask`:
+
+- NEMO has 324,128 wet T cells; standalone has 317,516; their intersection is
+  317,298. NEMO-wet/standalone-dry is 6,830 cells and the reverse is 218.
+- Latitude differs at 5,472 of 9,360 T points, maximum
+  `5.684341886080802e-14` degree.
+- Positive-down T-depth differs at 80,768 wet cells, maximum
+  `104.96931566119792` m.
+- On identical NEMO depths, public legoESM and source-ordered profile
+  evaluations differ by at most `4.440892098500626e-15` degC and
+  `1.4210854715202004e-14` PSU. These fail the frozen `1e-15` pointwise bar but
+  are not the leading state difference.
+- On the common wet subset, resolved standalone IC differs by up to
+  `0.0763656229991243` degC and `0.003602246810750387` PSU. Re-evaluating the
+  legacy inputs in NumPy source order leaves only profile-scale last-bit
+  residuals.
+
+This ordering matches the executed source. `istate.F90:107-137` passes the
+three-dimensional `gdept` into `usr_def_istate`; DINO CASE(4) evaluates the
+profiles at that operand (`usrdef_istate.F90:129-148`) and derives latitude and
+bottom anchors from the live grid/mask (`:150-175`). The selected DINO namelist
+has `ln_zco_nam=.true.` and `ln_sco_nam=.false.`. Its vertical source still
+builds the 3-D T-depth through `zgr_sco_mi96` on `zflat=Hmax`
+(`usrdef_zgr.F90:102-120`), whereas the standalone path supplies its own masked
+reference ladder.
+
+The one-step and filtered-carry rows were executed only as registered
+conditional diagnostics. They are not Euler attribution because wet topology,
+latitude, and depth already failed. Therefore the user ladder supports the
+strong result that year-long legoESM dynamics started from NEMO's post-step-1
+state remain twin-class. It does **not** yet separate the independent 0.39 degC
+gap between Euler bootstrap and the earlier initialization-geometry mismatch.
+The first repair target is initialization geometry; Euler is re-scored only
+after that row passes.
+
+`kamm_twin_90d.py --snap-final` now adds the exact `--days` endpoint to the 3-D
+snapshot schedule and fails if `--save-3d` is absent. Thus a future 359-day
+repeat can capture day 359 even though it is not a multiple of 30.
