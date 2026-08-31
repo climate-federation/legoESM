@@ -401,9 +401,11 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
     # the second call includes ZDF but deliberately withholds mlf_baro_corr.
     # Both use the exact private operands that the no-history branch passes at
     # ocean_model_latlon_cgrid.py:9183-9210.
-    entry = common._replace(
-        u_before=common.u, v_before=common.v, T_before=common.T,
-        S_before=common.S, eta_before=common.eta)
+    common_seeded = model._seed_tke_preclosure_carry(common)
+    entry = common_seeded._replace(
+        u_before=common_seeded.u, v_before=common_seeded.v,
+        T_before=common_seeded.T, S_before=common_seeded.S,
+        eta_before=common_seeded.eta)
 
     def _cold_impl(st, ext_rate, apply_vmix):
         n2_bundle = model._tke_step_entry_n2_bundle(
