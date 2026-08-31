@@ -244,6 +244,14 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # kernel _compute_gs_and_ci as a trace-time backstop.
         ("packages/land/legoesm/land/canopy/config.py", "validate"),
         ("packages/land/legoesm/land/canopy/energy_balance.py", "_compute_gs_and_ci"),
+        # P-model switches (capacity_scheme: prescribed|p_model, g1_source:
+        # table|p_model): hardened at introduction (2026-08-31). Guarded at
+        # BOTH ends: CanopyConfig.validate() (the ``validate`` pair above) and
+        # a trace-time backstop at the two-leaf flux entry, so a hand-built
+        # config that skipped validate() cannot silently run prescribed
+        # parameters while claiming optimality (or vice versa).
+        ("packages/land/legoesm/land/surface_scheme/two_leaf_canopy.py",
+         "compute_two_leaf_canopy_fluxes"),
         # LE_module leaf-energy dispatch (BT|PM): the internal residual uses a
         # bare ``else: # PM``, so a typo silently runs Penman-Monteith. Guarded
         # at the config validator AND at the solver entry (direct-call path).

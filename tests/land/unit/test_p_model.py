@@ -177,5 +177,35 @@ def test_init_state_uses_config_constants_and_override():
 
 
 def test_valid_selector_tuples():
-    assert pm._VALID_CAPACITY_SCHEMES == ("prescribed", "p_model")
-    assert pm._VALID_G1_SOURCES == ("table", "p_model")
+    assert pm.VALID_CAPACITY_SCHEMES == ("prescribed", "p_model")
+    assert pm.VALID_G1_SOURCES == ("table", "p_model")
+
+
+def test_canopy_config_validates_switches():
+    from legoesm.land.canopy.config import CanopyConfig
+    with pytest.raises(ValueError, match="capacity_scheme"):
+        CanopyConfig(capacity_scheme="pmodel").validate()
+    with pytest.raises(ValueError, match="g1_source"):
+        CanopyConfig(g1_source="xi").validate()
+    with pytest.raises(ValueError, match="medlyn"):
+        CanopyConfig(g1_source="p_model", stomatal_model="ball_berry").validate()
+    # Composability: predicted g1 with medlyn OK; capacities-only with the
+    # default ball_berry stomata OK (g1 substitution simply skipped).
+    CanopyConfig(g1_source="p_model", stomatal_model="medlyn").validate()
+    CanopyConfig(capacity_scheme="p_model").validate()
+
+
+def test_init_multilayer_state_carries_acclim_iff_switch_active():
+    from legoesm.land.canopy.config import CanopyConfig
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.multilayer_land import init_multilayer_land_state
+
+    cfg_off = MultiLayerLandConfig(surface_scheme=CanopyConfig())
+    assert init_multilayer_land_state(4, cfg_off).pmodel_acclim is None
+    cfg_on = MultiLayerLandConfig(surface_scheme=CanopyConfig(
+        capacity_scheme="p_model", g1_source="p_model",
+        stomatal_model="medlyn"))
+    s = init_multilayer_land_state(4, cfg_on, pmodel_co2_init_ppm=390.0)
+    assert s.pmodel_acclim is not None
+    assert s.pmodel_acclim.ppfd_ema.shape == (4,)
+    assert float(s.pmodel_acclim.co2_mean_ppm[0]) == 390.0

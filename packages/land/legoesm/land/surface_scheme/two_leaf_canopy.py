@@ -34,6 +34,11 @@ from legoesm.land.canopy.config import (
     VCMAX25_C4_DEFAULT,
 )
 from legoesm.land.canopy.photosynthesis import co2_compensation_point
+from legoesm.land.p_model import (
+    VALID_CAPACITY_SCHEMES,
+    VALID_G1_SOURCES,
+    acclimated_capacities,
+)
 from legoesm.land.canopy.radiative_transfer import (
     split_sw_components, canopy_shortwave_rt,
 )
@@ -204,6 +209,7 @@ def compute_two_leaf_canopy_fluxes(
     w_frac_soil_evap: jnp.ndarray | None = None,
     soil_surface_relsat: jnp.ndarray | None = None,
     fwet: jnp.ndarray | None = None,
+    pmodel_acclim=None,  # PModelAcclimState | None (land/p_model.py)
 ) -> SurfaceFluxOutput:
     """Compute surface fluxes via the two-leaf canopy Newton + Picard closure.
 
@@ -339,6 +345,37 @@ def compute_two_leaf_canopy_fluxes(
     else:
         TgC = _get(lp, "TgC", forcing.T_lowest - constants.T_freeze)
 
+    # ---- P-model optimality parameter source (static dispatch) ----
+    # Trace-time backstop for the two switches (CanopyConfig.validate() is the
+    # fail-early guard at line ~249 above; a typo can still arrive through a
+    # hand-built config that skipped validate()).
+    if cc.capacity_scheme not in VALID_CAPACITY_SCHEMES:
+        raise ValueError(
+            f"unknown capacity_scheme {cc.capacity_scheme!r}; the "
+            f"photosynthetic-capacity source must be one of "
+            f"{VALID_CAPACITY_SCHEMES}")
+    if cc.g1_source not in VALID_G1_SOURCES:
+        raise ValueError(
+            f"unknown g1_source {cc.g1_source!r}; the Medlyn-slope scheme "
+            f"must be one of {VALID_G1_SOURCES}")
+    rjv25 = None
+    if cc.capacity_scheme == "p_model" or cc.g1_source == "p_model":
+        # Raises with a clear message when this caller does not carry the
+        # acclimation state (slab-land / patch-mosaic until wired): no silent
+        # fall-back to prescribed parameters.
+        _caps = acclimated_capacities(pmodel_acclim, cc.p_model)
+        if cc.capacity_scheme == "p_model":
+            # C3 leaf-top capacity + Jmax25/Vcmax25 ratio from the optimum.
+            # INTERIM: C4 capacity (Vc4_leaf) stays prescribed until the C4
+            # P-model extension lands (see CanopyConfig.capacity_scheme docs).
+            Vc3_leaf = _caps.vcmax25_leaf
+            rjv25 = _caps.rjv25
+        if cc.g1_source == "p_model":
+            # Predicted Medlyn slope replaces the tabulated C3 slope; the
+            # soil-moisture stress below multiplies it exactly as it does the
+            # tabulated one (deliberate: one consistent stress path).
+            m_C3 = _caps.g1_kpa
+
     # ---- Soil moisture stress ----
     # Photosynthesis/transpiration down-regulation uses the ROOT-ZONE beta.
     # Bare-soil evaporation is governed by the fast-drying SURFACE layer, not the
@@ -430,6 +467,7 @@ def compute_two_leaf_canopy_fluxes(
             r_soil_surface=r_soil_surface,
             fwet=(jnp.zeros_like(w_frac_rz) if fwet is None
                   else jnp.broadcast_to(fwet, w_frac_rz.shape)),
+            rjv25=rjv25,
         )
 
     def _solve_one_col(x0, bun):

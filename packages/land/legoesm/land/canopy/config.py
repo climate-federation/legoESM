@@ -17,6 +17,11 @@ from typing import NamedTuple
 import jax
 
 from legoesm.land.canopy.sif import SIFConfig
+from legoesm.land.p_model import (
+    VALID_CAPACITY_SCHEMES,
+    VALID_G1_SOURCES,
+    PModelConfig,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +245,23 @@ class CanopyConfig(NamedTuple):
     # and defaults this to the legacy True.
     stress_b0: bool = True
 
+    # --- P-model optimality switches (land/p_model.py; appended last) ---
+    # Source of the leaf photosynthetic capacities: "prescribed" (default —
+    # PFT tables / CanopyLandParams, bit-identical legacy behaviour) or
+    # "p_model" (acclimated leaf-top Vcmax25 + Jmax25/Vcmax25 ratio from the
+    # least-cost/coordination optimum at the running daytime-mean drivers).
+    # INTERIM (until the C4 P-model extension lands): with "p_model", C3
+    # capacities are optimality-supplied while C4 columns keep their
+    # prescribed Vcmax25_C4 — a documented mixed configuration.
+    capacity_scheme: str = "prescribed"   # "prescribed" | "p_model"
+    # Source of the Medlyn slope: "table" (default — per-PFT m_C3/m_C4) or
+    # "p_model" (predicted g1 = xi; requires stomatal_model="medlyn").
+    g1_source: str = "table"              # "table" | "p_model"
+    # P-model tunables + acclimation constants (used iff a switch above is
+    # "p_model"; always present so the params-reachability audit can route
+    # land.p_model.* overrides).
+    p_model: PModelConfig = PModelConfig()
+
     def validate(self) -> "CanopyConfig":
         """Fail-early check of the static string-dispatch fields.
 
@@ -259,6 +281,20 @@ class CanopyConfig(NamedTuple):
                 f"must be one of {VALID_LE_MODULES} ('BT'=bulk transfer, "
                 f"'PM'=Penman-Monteith). The internal dispatch is a bare "
                 f"'else: # PM', so a typo would silently run PM.")
+        if self.capacity_scheme not in VALID_CAPACITY_SCHEMES:
+            raise ValueError(
+                f"unknown capacity_scheme {self.capacity_scheme!r}; the "
+                f"photosynthetic-capacity source must be one of "
+                f"{VALID_CAPACITY_SCHEMES}")
+        if self.g1_source not in VALID_G1_SOURCES:
+            raise ValueError(
+                f"unknown g1_source {self.g1_source!r}; the Medlyn-slope scheme "
+                f"must be one of {VALID_G1_SOURCES}")
+        if self.g1_source == "p_model" and self.stomatal_model != "medlyn":
+            raise ValueError(
+                "g1_source='p_model' predicts a MEDLYN slope and requires "
+                f"stomatal_model='medlyn'; got {self.stomatal_model!r}. "
+                "Select stomatal_model='medlyn' or g1_source='table'.")
         return self
 
 

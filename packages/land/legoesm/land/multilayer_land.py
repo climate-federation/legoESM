@@ -60,6 +60,12 @@ from legoesm.land.surface_scheme.two_leaf_canopy import (
     advance_TgC_ema,
     compute_prognostic_lai,
 )
+from legoesm.land.canopy.energy_balance import canopy_met_variables
+from legoesm.land.canopy.radiative_transfer import (
+    PAR_W_TO_UMOL,
+    split_sw_components,
+)
+from legoesm.land.p_model import advance_pmodel_acclim, init_pmodel_acclim
 from legoesm.surface_albedo import land_albedo as compute_land_albedo
 from legoesm.surface_albedo import (
     dry_soil_brightening,
@@ -608,6 +614,7 @@ def _step_multilayer_land_impl(
             TgC_override=TgC_override,
             LAI_override=LAI_override,
             fwet=_fwet_pre,
+            pmodel_acclim=state.pmodel_acclim,
             # Bare-soil evaporation efficiency = TWO complementary top-layer
             # limiters, applied as a beta conductance efficiency in the canopy
             # soil energy balance (both tie evaporation to the fast-drying
@@ -1066,6 +1073,30 @@ def _step_multilayer_land_impl(
     else:
         TgC_new = None
 
+    # --- Advance the P-model acclimation state (only when state carries it) ---
+    if state.pmodel_acclim is not None:
+        # Drivers from the same forcing the canopy saw this step: top-of-canopy
+        # PPFD from the shared SW split, VPD [Pa] from the shared met helper.
+        _par_dir, _par_diff, _, _, _ = split_sw_components(
+            forcing.sw_down, forcing.cos_zenith)
+        _ppfd_toc = (_par_dir + _par_diff) * PAR_W_TO_UMOL
+        _, _, _vpd_pa, _, _, _, _ = canopy_met_variables(
+            forcing.p_surface, forcing.T_lowest, forcing.q_lowest)
+        pmodel_acclim_new = advance_pmodel_acclim(
+            state.pmodel_acclim,
+            T_K=forcing.T_lowest,
+            ppfd=_ppfd_toc,
+            vpd_pa=jnp.maximum(_vpd_pa, 0.0),
+            co2_ppm=jnp.broadcast_to(
+                jnp.asarray(forcing.co2_ppmv), _ppfd_toc.shape),
+            ps_pa=jnp.broadcast_to(
+                jnp.asarray(forcing.p_surface), _ppfd_toc.shape),
+            cfg=config.surface_scheme.p_model,
+            dt=dt,
+        )
+    else:
+        pmodel_acclim_new = None
+
     # --- Build new state ---
     # Preserve the INPUT state's precision.  The Richards + soil-thermal solves run
     # in an internal working precision that is float64 whenever the hydraulics config
@@ -1109,6 +1140,11 @@ def _step_multilayer_land_impl(
         # store (no ``None`` -> array carry-structure change under a scan).
         W_canopy=(_match(W_canopy_new, state.W_canopy)
                   if state.W_canopy is not None else None),
+        # P-model acclimation carry: a NamedTuple pytree of (ncol,) leaves —
+        # per-leaf dtype cast via tree-map (same reason as the scalar _match).
+        pmodel_acclim=(jax.tree.map(_match, pmodel_acclim_new,
+                                    state.pmodel_acclim)
+                       if state.pmodel_acclim is not None else None),
     )
 
     # --- Post-step surface state for coupler ---
@@ -1469,6 +1505,8 @@ def init_multilayer_land_state(
     T_init: float = 280.0,  # coeff-ok: initial condition (default land skin/soil temperature)
     theta_init: float | None = None,
     TgC_init: float | None = None,
+    pmodel_co2_init_ppm: float | None = None,
+    pmodel_ps_init_pa: float | None = None,
 ) -> MultiLayerLandState:
     """Create initial multi-layer land state.
 
@@ -1543,6 +1581,25 @@ def init_multilayer_land_state(
     else:
         canopy_state = None
 
+    # P-model acclimation state: created iff the two-leaf scheme has a P-model
+    # switch active.  T/pressure come from the initial condition; PPFD/VPD
+    # (and CO2 unless the driver overrides with the run value) come from the
+    # PModelConfig init fields — every cold-start value is in the resolved
+    # config, no hidden choice.
+    pmodel_acclim = None
+    _ss = config.surface_scheme
+    if isinstance(_ss, TwoLeafCanopyConfig) and (
+            _ss.capacity_scheme == "p_model" or _ss.g1_source == "p_model"):
+        pmodel_acclim = init_pmodel_acclim(
+            ncol,
+            t_init_K=jnp.asarray(T_init),  # scalar or per-column, broadcasts
+            ps_init_pa=(constants.p_atm_std if pmodel_ps_init_pa is None
+                        else pmodel_ps_init_pa),
+            cfg=_ss.p_model,
+            co2_init_ppm=pmodel_co2_init_ppm,
+            dtype=T_soil.dtype,
+        )
+
     return MultiLayerLandState(
         T_soil=T_soil,
         psi_soil=psi_soil,
@@ -1559,6 +1616,7 @@ def init_multilayer_land_state(
         canopy_state=canopy_state,
         # Dry canopy at start; carried only when interception is configured.
         W_canopy=(jnp.zeros(ncol) if config.interception is not None else None),
+        pmodel_acclim=pmodel_acclim,
     )
 
 

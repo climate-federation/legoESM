@@ -415,3 +415,46 @@ def test_any_non_default_column_requires_a_stamp(tmp_path):
         load_land_restart(path, expected_land_mode="multilayer",
                           expected_ncol=_NCOL, expected_n_layers=_NLAY,
                           expected_soil_grid=_grid(total_depth=3.0))
+
+
+def _fake_pmodel_acclim(ncol=_NCOL):
+    from legoesm.land.p_model import PModelAcclimState
+    import jax.numpy as _jnp
+    one = _jnp.ones((ncol,))
+    return PModelAcclimState(
+        ppfd_ema=400.0 * one, iabs_mean=380.0 * one, t_mean_K=293.0 * one,
+        vpd_mean_pa=900.0 * one, co2_mean_ppm=410.0 * one,
+        ps_ema=101000.0 * one)
+
+
+def test_pmodel_acclim_round_trips(tmp_path):
+    state = _fake_state()._replace(pmodel_acclim=_fake_pmodel_acclim())
+    save_land_restart(tmp_path / "r.npz", state,
+                      land_mode="multilayer", t_end_s=0.0, n_steps_completed=0)
+    loaded, _ = load_land_restart(tmp_path / "r.npz",
+                                  expected_land_mode="multilayer",
+                                  expected_ncol=_NCOL, expected_n_layers=_NLAY)
+    assert loaded.pmodel_acclim is not None
+    for got, want in zip(loaded.pmodel_acclim, state.pmodel_acclim):
+        np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+
+
+def test_pmodel_restart_never_silently_cold_starts(tmp_path):
+    """Codex-review guard: loading a pre-P-model archive into a run with a
+    P-model switch active is a scientific state reset, so it must be refused
+    unless the caller explicitly allowed it."""
+    from legoesm.land.restart import merge_land_restart_into_template
+
+    loaded = _fake_state(seed=1)                       # no pmodel_acclim
+    template = _fake_state(seed=2)._replace(pmodel_acclim=_fake_pmodel_acclim())
+    with pytest.raises(ValueError, match="cold-start"):
+        merge_land_restart_into_template(loaded, template)
+    merged = merge_land_restart_into_template(
+        loaded, template, allow_pmodel_cold_start=True)
+    assert merged.pmodel_acclim is not None            # template's fresh state
+    # And when BOTH carry it, the restart's values win.
+    loaded2 = _fake_state(seed=3)._replace(pmodel_acclim=_fake_pmodel_acclim())
+    merged2 = merge_land_restart_into_template(loaded2, template)
+    np.testing.assert_array_equal(
+        np.asarray(merged2.pmodel_acclim.vpd_mean_pa),
+        np.asarray(loaded2.pmodel_acclim.vpd_mean_pa))

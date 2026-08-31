@@ -205,8 +205,8 @@ class PModelConfig(NamedTuple):
 
 # Valid selector values for the CanopyConfig switches wired in
 # surface_scheme/two_leaf_canopy.py; imported by canopy/config.py.
-_VALID_CAPACITY_SCHEMES = ("prescribed", "p_model")
-_VALID_G1_SOURCES = ("table", "p_model")
+VALID_CAPACITY_SCHEMES = ("prescribed", "p_model")
+VALID_G1_SOURCES = ("table", "p_model")
 
 
 class PModelAcclimState(NamedTuple):
