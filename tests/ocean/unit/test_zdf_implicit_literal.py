@@ -236,7 +236,9 @@ def test_production_literal_route_uses_full_step_active_masks():
     bundle = TKEEntryN2Bundle(
         rn2=jnp.zeros(w_shape), rn2b=jnp.zeros(w_shape),
         gdepw_Kmm=jnp.zeros(w_shape), e3w_Kmm=raw_e3w,
-        e3t_Kmm=z_coord.h_partial)
+        e3t_Kmm=z_coord.h_partial,
+        e3uw_Kmm=build_dz_half(jnp.ones_like(state.u.data)),
+        e3vw_Kmm=build_dz_half(jnp.ones_like(state.v.data)))
     out = LatLonCGridOceanModel(grid, z_coord, cfg)._apply_implicit_vertical_mixing(
         state, 1800.0, surface_forcing=None, tke_n2_bundle=bundle)
 

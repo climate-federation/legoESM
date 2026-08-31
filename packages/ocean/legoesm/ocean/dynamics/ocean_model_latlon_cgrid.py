@@ -6419,10 +6419,41 @@ class LatLonCGridOceanModel:
             terminal_e3t = jnp.broadcast_to(
                 jnp.asarray(terminal_e3t, dtype=e3t.dtype),
                 state.eta.data.shape)
+        e3uw = None
+        e3vw = None
+        raw_e3w = getattr(_zc, "nemo_e3w_0", None)
+        raw_een = getattr(_zc, "nemo_een_barotropic", None)
+        if raw_e3w is not None and raw_een is not None:
+            # DINO zgr_lib.F90:230-234 constructs E3uw_0/E3vw_0 by the
+            # arithmetic face average of E3w_0. key_qco then applies the
+            # independently evaluated face stretch Time(r3u/r3v)
+            # (domzgr_substitute.h90:131-133). Do not reconstruct these
+            # dynzdf operands from live e3t midpoints.
+            raw_e3w_int = jnp.asarray(raw_e3w, dtype=e3t.dtype)[..., 1:]
+            raw_e3uw = interp_cell_to_uface(raw_e3w_int)[:, 1:, :]
+            raw_e3vw = interp_to_v_points(raw_e3w_int, self.grid)[1:, :, :]
+            live = nemo_qco_live_face_geometry_from_operands(
+                state.eta.data,
+                raw_een.e3u_0, raw_een.e3v_0,
+                raw_een.umask, raw_een.vmask,
+                raw_een.hu_0, raw_een.hv_0,
+                raw_een.e1t * raw_een.e2t,
+                raw_een.e1u * raw_een.e2u,
+                raw_een.e1v * raw_een.e2v,
+            )
+            one = jnp.asarray(1.0, dtype=e3t.dtype)
+            b = jax.lax.optimization_barrier
+            e3uw_native = b(raw_e3uw * b(one + live.r3u[..., None]))
+            e3vw_native = b(raw_e3vw * b(one + live.r3v[..., None]))
+            e3uw = jnp.concatenate(
+                [e3uw_native[:, -1:, :], e3uw_native], axis=1)
+            e3vw = jnp.concatenate(
+                [jnp.zeros_like(e3vw_native[:1]), e3vw_native], axis=0)
         return TKEEntryN2Bundle(
             rn2=rn2, rn2b=rn2b, gdepw_Kmm=gdepw, e3w_Kmm=e3w,
             e3t_Kmm=e3t, e3w_surface_Kmm=e3w_surface,
-            e3t_bottom_Kmm=terminal_e3t)
+            e3t_bottom_Kmm=terminal_e3t,
+            e3uw_Kmm=e3uw, e3vw_Kmm=e3vw)
 
     def _tke_step_entry_p_sh2(
         self, state, *, eta_now=None, u_now=None, v_now=None,
@@ -7684,10 +7715,33 @@ class LatLonCGridOceanModel:
                 # face-consistency pattern.  NEMO closes this interface with
                 # ``wumask`` (dynzdf.F90:183-185), not with a zeroed e3uw, so
                 # the mask does not belong on the gradient slot either.
-                e3t_now_u = interp_cell_to_uface(e3t_now)
-                e3t_now_v = interp_to_v_points(e3t_now, _grid)
-                dz_half_u = build_dz_half(e3t_now_u).astype(dz_u.dtype)
-                dz_half_v = build_dz_half(e3t_now_v).astype(dz_v.dtype)
+                if (getattr(_cfg_b, "zdf_implicit_solver_evaluation",
+                            "shared_thomas") == "nemo_literal"):
+                    raw_e3uw = (
+                        None if tke_n2_bundle is None else
+                        getattr(tke_n2_bundle, "e3uw_Kmm", None))
+                    raw_e3vw = (
+                        None if tke_n2_bundle is None else
+                        getattr(tke_n2_bundle, "e3vw_Kmm", None))
+                    if raw_e3uw is None or raw_e3vw is None:
+                        raise ValueError(
+                            "literal NEMO momentum ZDF requires carried raw "
+                            "e3uw_Kmm/e3vw_Kmm step-entry operands")
+                    dz_half_u = jnp.asarray(raw_e3uw, dtype=dz_u.dtype)
+                    dz_half_v = jnp.asarray(raw_e3vw, dtype=dz_v.dtype)
+                    if dz_half_u.shape != A_v_u.shape:
+                        raise ValueError(
+                            f"carried e3uw_Kmm shape {dz_half_u.shape} != "
+                            f"U-interface shape {A_v_u.shape}")
+                    if dz_half_v.shape != A_v_v.shape:
+                        raise ValueError(
+                            f"carried e3vw_Kmm shape {dz_half_v.shape} != "
+                            f"V-interface shape {A_v_v.shape}")
+                else:
+                    e3t_now_u = interp_cell_to_uface(e3t_now)
+                    e3t_now_v = interp_to_v_points(e3t_now, _grid)
+                    dz_half_u = build_dz_half(e3t_now_u).astype(dz_u.dtype)
+                    dz_half_v = build_dz_half(e3t_now_v).astype(dz_v.dtype)
             else:
                 dz_half_u = build_dz_half(dz_u_open)
                 dz_half_v = build_dz_half(dz_v_open)

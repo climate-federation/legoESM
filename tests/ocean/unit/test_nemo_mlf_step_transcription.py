@@ -270,6 +270,12 @@ def test_shipped_leapfrog_threads_raw_entry_e3w_to_literal_zdf(monkeypatch):
              - model.z_coord.dz_ref)[1:], w_shape),
         e3w_Kmm=jnp.broadcast_to(model.z_coord.dz_ref[1:], w_shape),
         e3t_Kmm=jnp.broadcast_to(model.z_coord.dz_ref, shape),
+        e3uw_Kmm=jnp.broadcast_to(
+            model.z_coord.dz_ref[1:],
+            state.u.data.shape[:-1] + (w_shape[-1],)),
+        e3vw_Kmm=jnp.broadcast_to(
+            model.z_coord.dz_ref[1:],
+            state.v.data.shape[:-1] + (w_shape[-1],)),
     )
     calls = []
 
@@ -278,27 +284,47 @@ def test_shipped_leapfrog_threads_raw_entry_e3w_to_literal_zdf(monkeypatch):
         return bundle
 
     seen_e3w = []
+    seen_face_e3w = []
     real_dispatch = vmix.implicit_vertical_diffusion_ocean_tracer_pair_dispatch
+    real_momentum = vmix.implicit_vertical_diffusion_ocean_momentum_dispatch
 
     def capture_dispatch(*args, **kwargs):
         seen_e3w.append(args[6])
         return real_dispatch(*args, **kwargs)
 
+    def capture_momentum(*args, **kwargs):
+        seen_face_e3w.append(args[3])
+        return real_momentum(*args, **kwargs)
+
     model._tke_step_entry_n2_bundle = MethodType(entry_bundle, model)
     monkeypatch.setattr(
         vmix, "implicit_vertical_diffusion_ocean_tracer_pair_dispatch",
         capture_dispatch)
+    monkeypatch.setattr(
+        vmix, "implicit_vertical_diffusion_ocean_momentum_dispatch",
+        capture_momentum)
     s1 = model._leapfrog_step(state, _DT)
     assert len(seen_e3w) == 1
     np.testing.assert_array_equal(
         np.asarray(seen_e3w[0]), np.asarray(bundle.e3w_Kmm))
+    assert len(seen_face_e3w) == 2
+    np.testing.assert_array_equal(
+        np.asarray(seen_face_e3w[0]), np.asarray(bundle.e3uw_Kmm))
+    np.testing.assert_array_equal(
+        np.asarray(seen_face_e3w[1]), np.asarray(bundle.e3vw_Kmm))
     calls.clear()
     seen_e3w.clear()
+    seen_face_e3w.clear()
     s2 = model._leapfrog_step(s1, _DT)
     assert len(calls) == 1
     assert len(seen_e3w) == 1
     np.testing.assert_array_equal(
         np.asarray(seen_e3w[0]), np.asarray(bundle.e3w_Kmm))
+    assert len(seen_face_e3w) == 2
+    np.testing.assert_array_equal(
+        np.asarray(seen_face_e3w[0]), np.asarray(bundle.e3uw_Kmm))
+    np.testing.assert_array_equal(
+        np.asarray(seen_face_e3w[1]), np.asarray(bundle.e3vw_Kmm))
     assert np.all(np.isfinite(np.asarray(s2.T.data)))
 
 
@@ -313,6 +339,27 @@ def test_literal_zdf_rejects_missing_raw_entry_e3w():
         model._apply_implicit_vertical_mixing(
             state, _DT, None, eta_now=state.eta.data,
             tke_n2_bundle=None)
+
+
+def test_literal_momentum_zdf_rejects_missing_raw_face_e3w():
+    """A T-point divisor cannot stand in for NEMO's UW/VW operands."""
+    from legoesm.ocean.physics.vertical_mixing.tke import TKEEntryN2Bundle
+
+    state, model = _channel(
+        K_h=0.0, A_h=0.0,
+        implicit_vmix_e3t_now_divisor=True,
+        zdf_implicit_solver_evaluation="nemo_literal",
+    )
+    shape = state.T.data.shape
+    w_shape = shape[:-1] + (shape[-1] - 1,)
+    bundle = TKEEntryN2Bundle(
+        rn2=jnp.zeros(w_shape), rn2b=jnp.zeros(w_shape),
+        gdepw_Kmm=jnp.zeros(w_shape), e3w_Kmm=jnp.ones(w_shape),
+        e3t_Kmm=jnp.ones(shape))
+    with pytest.raises(ValueError, match="e3uw_Kmm/e3vw_Kmm"):
+        model._apply_implicit_vertical_mixing(
+            state, _DT, None, eta_now=state.eta.data,
+            tke_n2_bundle=bundle)
 
 
 def test_prd_before_source_tracks_integrator_time_levels(monkeypatch):

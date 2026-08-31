@@ -354,6 +354,11 @@ class TKEEntryN2Bundle(NamedTuple):
     # Optional geometry for NEMO's dry jpk-th T row. Compact DINO states omit
     # the row, but nn_mxl=3 reads its e3t once at the deepest wet W row.
     e3t_bottom_Kmm: jnp.ndarray | None = None
+    # Native live UW/VW scale factors from E3uw_0*Time(r3u) and
+    # E3vw_0*Time(r3v). dynzdf reads these directly; they are not vertical
+    # midpoint reconstructions of the live U/V T-cell thicknesses.
+    e3uw_Kmm: jnp.ndarray | None = None
+    e3vw_Kmm: jnp.ndarray | None = None
 
 
 class TKECarryOutput(NamedTuple):
