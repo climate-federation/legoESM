@@ -471,6 +471,7 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
             _tke_n2_bundle_override=n2_bundle,
             _return_cold_euler_tracer_rhs=True,
             _return_cold_euler_fct_faces=True,
+            _cold_nemo_euler=True,
             _apply_cold_start_after_reconcile=False,
             z_coord=z_coord, config=model.config)
 

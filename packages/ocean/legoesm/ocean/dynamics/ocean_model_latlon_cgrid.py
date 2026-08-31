@@ -3559,6 +3559,7 @@ class LatLonCGridOceanModel:
                    _return_raw_kaa_qco: bool = False,
                    _return_cold_euler_tracer_rhs: bool = False,
                    _return_cold_euler_fct_faces: bool = False,
+                   _cold_nemo_euler: bool = False,
                    _apply_cold_start_after_reconcile: bool = False,
                    z_coord=None, config=None, iwm_fields=None):
         """Core step logic — no JIT wrapper.
@@ -4835,8 +4836,11 @@ class LatLonCGridOceanModel:
         # conformant, ``_step_impl`` never widens what reads Nbb here beyond
         # this one tendency's tracer argument -- Rule 1d guard).  ``None``
         # (every other caller) ⇒ bit-identical.
-        _T_gm_in = T_mid if _ldf_state is None else _ldf_state[0]
-        _S_gm_in = S_mid if _ldf_state is None else _ldf_state[1]
+        if _cold_nemo_euler:
+            _T_gm_in, _S_gm_in = state.T.data, state.S.data
+        else:
+            _T_gm_in = T_mid if _ldf_state is None else _ldf_state[0]
+            _S_gm_in = S_mid if _ldf_state is None else _ldf_state[1]
 
         # GM/Redi isopycnal mixing (if configured)
         k33_implicit = None  # vertical isoneutral diffusivity K_33 for the
@@ -5108,7 +5112,9 @@ class LatLonCGridOceanModel:
                 # ldf_slp slopes, while the later tra_ldf tensor consumes Kmm
                 # geometry. Keep the through-FCT bolus on the historical Naa
                 # slope geometry as the Redi tensor alone receives Kmm eta.
-                native_bolus_slope_eta=state_new.eta.data,
+                native_bolus_slope_eta=(
+                    state.eta.data if _cold_nemo_euler
+                    else state_new.eta.data),
                 # tra_ldf runs after dynamics but e3u/e3v are indexed Kmm:
                 # carry the step-entry Nnn SSH rather than recomputing from
                 # state_new.eta (Naa). stpmlf.F90:528,548 + scheme.h90:73-74.
@@ -5299,8 +5305,16 @@ class LatLonCGridOceanModel:
             if _fct_tracer_before is not None:
                 _T_adv_before = _fct_tracer_before[0] + (T_mid - state.T.data)
                 _S_adv_before = _fct_tracer_before[1] + (S_mid - state.S.data)
+            elif _cold_nemo_euler and _adv in ("ppm_fct", "fct2"):
+                _T_adv_before, _S_adv_before = state.T.data, state.S.data
             else:
                 _T_adv_before = _S_adv_before = None
+            _T_adv_now = (
+                state.T.data if _cold_nemo_euler and _adv in ("ppm_fct", "fct2")
+                else T_mid)
+            _S_adv_now = (
+                state.S.data if _cold_nemo_euler and _adv in ("ppm_fct", "fct2")
+                else S_mid)
             if _tti == "rk3":
                 T_corrected, S_corrected = _ssp_rk3_tracer_pair_step(
                     T_mid, S_mid, _adv,
@@ -5322,7 +5336,7 @@ class LatLonCGridOceanModel:
                 if _cap_salt:
                     _pair_a, _pair_b, (_sf_u3, _sf_v3) = (
                         compute_advection_flux_div_pair(
-                            T_mid, S_mid, _adv,
+                            _T_adv_now, _S_adv_now, _adv,
                             mass_flux_u_tr, mass_flux_v_tr, w_baro_tr,
                             h_k_old, h_u_old, h_v_old, _grid, dt,
                             recon_fill_mask=_wall_fill_mask,
@@ -5339,7 +5353,7 @@ class LatLonCGridOceanModel:
                     _salt_flux_v2 = _sf_v3.sum(axis=-1)
                 else:
                     _pair_out = compute_advection_flux_div_pair(
-                        T_mid, S_mid, _adv,
+                        _T_adv_now, _S_adv_now, _adv,
                         mass_flux_u_tr, mass_flux_v_tr, w_baro_tr,
                         h_k_old, h_u_old, h_v_old, _grid, dt,
                         recon_fill_mask=_wall_fill_mask,
@@ -9273,6 +9287,7 @@ class LatLonCGridOceanModel:
                 # branch used to drop this registered RHS entirely, even
                 # though every later leap-frog step threads it below.
                 _external_tracer_rate=external_tracer_rate,
+                _cold_nemo_euler=True,
                 _apply_cold_start_after_reconcile=(
                     _cfg_b.barotropic.barotropic_cold_start_after_reconcile
                     == "nemo_mlf_baro_corr"),

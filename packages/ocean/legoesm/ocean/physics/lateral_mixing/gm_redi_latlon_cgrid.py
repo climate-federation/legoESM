@@ -4270,10 +4270,19 @@ def gm_redi_tracer_tendency_latlon(
                 e3w_override=native_slope_e3w)
             _bolus_nat = None
             if native_bolus_slope_eta is not None:
+                # ``ldf_slp`` is evaluated before dynamics (stpmlf.F90:
+                # 203-237), so a caller that carries an earlier eta for the
+                # bolus must carry the matching QCO stretch into the MLD ramp
+                # too.  Reusing ``jacobian`` here mixed entry depths with the
+                # post-dynamics hml normalizer on the cold Euler step.
+                from legoesm.ocean.eos import nemo_r3t_stretch
+                _bolus_jacobian = nemo_r3t_stretch(
+                    z_coord, native_bolus_slope_eta, H_bathy,
+                    evaluation="nemo_reciprocal")
                 _bolus_nat = compute_nemo_native_slopes(
                     rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg,
                     eos_fn, rho_0=rho_0, g=g, active_3d=_active_3d,
-                    jacobian=jacobian, eta=native_bolus_slope_eta,
+                    jacobian=_bolus_jacobian, eta=native_bolus_slope_eta,
                     H_bathy=H_bathy, prd_jacobian=_native_prd_J,
                     prd_TS_override=native_prd_TS,
                     pn2_override=native_slope_pn2,
