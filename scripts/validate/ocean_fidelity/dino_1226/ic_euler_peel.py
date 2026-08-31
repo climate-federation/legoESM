@@ -139,6 +139,15 @@ def _mesh_core(value: np.ndarray) -> np.ndarray:
     raise ValueError(f"unsupported mesh rank {array.ndim}")
 
 
+def _model_core(value: np.ndarray) -> np.ndarray:
+    """195x48 physical score from a live 199x52 construction field."""
+    array = np.asarray(value)
+    if array.ndim not in (2, 3):
+        raise ValueError(f"unsupported live-model rank {array.ndim}")
+    return array[STANDALONE_CORE:-STANDALONE_CORE,
+                 STANDALONE_CORE:-STANDALONE_CORE, ...]
+
+
 def _runtime_dump(path: Path) -> np.ndarray:
     array = hpg.read_dump(
         str(path), 35, RUNTIME_SHAPE[0], RUNTIME_SHAPE[1])
@@ -163,14 +172,17 @@ def _initial_rows(grid, geometry, z_coord, state, cfg) -> tuple[
         dict[str, int]]:
     if grid.gdept_0 is None:
         raise ValueError("mesh_mask.nc lacks gdept_0")
-    nemo_t, nemo_s = hpg.nemo_istate_case4(
+    nemo_t_full, nemo_s_full = hpg.nemo_istate_case4(
         grid.gdept_0, grid.gphit, grid.tmask)
-    nemo_t = _mesh_core(nemo_t)
-    nemo_s = _mesh_core(nemo_s)
+    nemo_t_full = np.asarray(nemo_t_full)[..., :-1]
+    nemo_s_full = np.asarray(nemo_s_full)[..., :-1]
+    nemo_t = _model_core(nemo_t_full)
+    nemo_s = _model_core(nemo_s_full)
     mask = _mesh_core(grid.tmask).astype(bool)
-    lego_mask = (np.asarray(z_coord.is_active, dtype=bool)
-                 & _broadcast_mask(
-                     np.asarray(state.land_mask.data) > 0.5, mask.shape))
+    lego_mask_full = (
+        np.asarray(z_coord.is_active, dtype=bool)
+        & (np.asarray(state.land_mask.data) > 0.5)[..., None])
+    lego_mask = _model_core(lego_mask_full)
     common_mask = mask & lego_mask
     mask_receipt = {
         "nemo_wet": int(np.count_nonzero(mask)),
@@ -179,8 +191,8 @@ def _initial_rows(grid, geometry, z_coord, state, cfg) -> tuple[
         "nemo_wet_lego_dry": int(np.count_nonzero(mask & ~lego_mask)),
         "nemo_dry_lego_wet": int(np.count_nonzero(~mask & lego_mask)),
     }
-    lego_depth = np.asarray(z_coord.nemo_gdept_0)
-    lego_lat = np.asarray(geometry.native_lat_T_deg)
+    lego_depth = _model_core(np.asarray(z_coord.nemo_gdept_0))
+    lego_lat = _model_core(np.asarray(geometry.native_lat_T_deg))
     rows = [
         diff_row("input_wet_mask", lego_mask.astype(np.float64),
                  mask.astype(np.float64), np.ones(mask.shape, dtype=bool), bar=0.0),
@@ -196,9 +208,9 @@ def _initial_rows(grid, geometry, z_coord, state, cfg) -> tuple[
     rows.extend([
         diff_row("common_depth_T_profile", lego_t_profile, source_t_profile, mask),
         diff_row("common_depth_S_profile", lego_s_profile, source_s_profile, mask),
-        diff_row("resolved_T_nemo_wet", np.asarray(state.T.data), nemo_t,
+        diff_row("resolved_T_nemo_wet", _model_core(state.T.data), nemo_t,
                  mask),
-        diff_row("resolved_S_nemo_wet", np.asarray(state.S.data), nemo_s,
+        diff_row("resolved_S_nemo_wet", _model_core(state.S.data), nemo_s,
                  mask),
     ])
 
@@ -223,15 +235,15 @@ def _initial_rows(grid, geometry, z_coord, state, cfg) -> tuple[
         diff_row("substitute_nemo_depth_S_common_wet", source_lego_depth_s,
                  nemo_s, common_mask),
         diff_row("substitute_nemo_anchors_T", source_lego_anchors,
-                 np.asarray(state.T.data), common_mask),
+                 _model_core(state.T.data), common_mask),
         diff_row("substitute_nemo_anchors_S", source_lego_anchors_s,
-                 np.asarray(state.S.data), common_mask),
+                 _model_core(state.S.data), common_mask),
         diff_row("source_order_legacy_T", source_legacy,
-                 np.asarray(state.T.data), common_mask),
+                 _model_core(state.T.data), common_mask),
         diff_row("source_order_legacy_S", source_legacy_s,
-                 np.asarray(state.S.data), common_mask),
+                 _model_core(state.S.data), common_mask),
     ]
-    return rows, localization, nemo_t, nemo_s, mask_receipt
+    return rows, localization, nemo_t_full, nemo_s_full, mask_receipt
 
 
 def initialization_admitted(rows: list[dict[str, Any]]) -> bool:
@@ -280,12 +292,14 @@ def _forcing_localization(run_kt2: Path, grid, z_coord, state, model,
     mask_t = _mesh_core(grid.tmask).astype(bool)
     mask_u = _mesh_core(grid.umask).astype(bool)
     mask_v = _mesh_core(grid.vmask).astype(bool)
-    lego_t = (np.asarray(z_coord.is_active, dtype=bool)
-              & _broadcast_mask(
-                  np.asarray(state.land_mask.data) > 0.5, mask_t.shape))
-    lego_u = lego_t & np.roll(lego_t, -1, axis=1)
-    lego_v = np.zeros_like(lego_t)
-    lego_v[:-1] = lego_t[:-1] & lego_t[1:]
+    lego_t_full = (
+        np.asarray(z_coord.is_active, dtype=bool)
+        & (np.asarray(state.land_mask.data) > 0.5)[..., None])
+    lego_u_full = lego_t_full & np.roll(lego_t_full, -1, axis=1)
+    lego_v_full = np.zeros_like(lego_t_full)
+    lego_v_full[:-1] = lego_t_full[:-1] & lego_t_full[1:]
+    lego_u = _model_core(lego_u_full)
+    lego_v = _model_core(lego_v_full)
     common_u = (mask_u & lego_u)[..., 0]
     common_v = (mask_v & lego_v)[..., 0]
 
@@ -300,31 +314,42 @@ def _forcing_localization(run_kt2: Path, grid, z_coord, state, model,
     nemo_total_v = interior_2d("spg_dump_zv_frc.bin")
     nemo_wind_u = interior_2d("wnd_dump_zu_frc_inc.bin")
     nemo_wind_v = interior_2d("wnd_dump_zv_frc_inc.bin")
+    h_u_core = _model_core(h_u[:, 1:, :])
+    h_v_core = _model_core(h_v[1:, :, :])
+    H_u_core = _model_core(H_u[:, 1:])
+    H_v_core = _model_core(H_v[1:, :])
     nemo_hpg_u = np.sum(
-        _runtime_dump(run_kt2 / "hpg_dump_du.bin") * h_u[:, 1:, :],
-        axis=-1) / H_u[:, 1:]
+        _runtime_dump(run_kt2 / "hpg_dump_du.bin") * h_u_core,
+        axis=-1) / H_u_core
     nemo_hpg_v = np.sum(
-        _runtime_dump(run_kt2 / "hpg_dump_dv.bin") * h_v[1:, :, :],
-        axis=-1) / H_v[1:, :]
+        _runtime_dump(run_kt2 / "hpg_dump_dv.bin") * h_v_core,
+        axis=-1) / H_v_core
+
+    total_u_core = _model_core(total_u[:, 1:])
+    total_v_core = _model_core(total_v[1:])
+    wind_u_core = _model_core(wind_u[:, 1:])
+    wind_v_core = _model_core(wind_v[1:])
+    hpg_u_core = _model_core(hpg_u[:, 1:])
+    hpg_v_core = _model_core(hpg_v[1:])
 
     rows = [
-        diff_row("POST_HOC_fslow_u_total", total_u[:, 1:], nemo_total_u,
+        diff_row("POST_HOC_fslow_u_total", total_u_core, nemo_total_u,
                  common_u),
-        diff_row("POST_HOC_fslow_v_total", total_v[1:], nemo_total_v,
+        diff_row("POST_HOC_fslow_v_total", total_v_core, nemo_total_v,
                  common_v),
-        diff_row("POST_HOC_fslow_u_wind", wind_u[:, 1:], nemo_wind_u,
+        diff_row("POST_HOC_fslow_u_wind", wind_u_core, nemo_wind_u,
                  common_u),
-        diff_row("POST_HOC_fslow_v_wind", wind_v[1:], nemo_wind_v,
+        diff_row("POST_HOC_fslow_v_wind", wind_v_core, nemo_wind_v,
                  common_v),
-        diff_row("POST_HOC_fslow_u_hpg", hpg_u[:, 1:], nemo_hpg_u,
+        diff_row("POST_HOC_fslow_u_hpg", hpg_u_core, nemo_hpg_u,
                  common_u),
-        diff_row("POST_HOC_fslow_v_hpg", hpg_v[1:], nemo_hpg_v,
+        diff_row("POST_HOC_fslow_v_hpg", hpg_v_core, nemo_hpg_v,
                  common_v),
     ]
-    u_total_residual = total_u[:, 1:] - nemo_total_u
-    u_wind_residual = wind_u[:, 1:] - nemo_wind_u
-    v_total_residual = total_v[1:] - nemo_total_v
-    v_hpg_residual = hpg_v[1:] - nemo_hpg_v
+    u_total_residual = total_u_core - nemo_total_u
+    u_wind_residual = wind_u_core - nemo_wind_u
+    v_total_residual = total_v_core - nemo_total_v
+    v_hpg_residual = hpg_v_core - nemo_hpg_v
     return {
         "qualification": "POST_HOC_LOCALIZATION_NOT_A_FROZEN_VERDICT",
         "source": {
@@ -373,27 +398,30 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
     mask_t = _mesh_core(grid.tmask).astype(bool)
     mask_u = _mesh_core(grid.umask).astype(bool)
     mask_v = _mesh_core(grid.vmask).astype(bool)
-    lego_t = (np.asarray(z_coord.is_active, dtype=bool)
-              & _broadcast_mask(
-                  np.asarray(state.land_mask.data) > 0.5, mask_t.shape))
-    lego_u = lego_t & np.roll(lego_t, -1, axis=1)
-    lego_v = np.zeros_like(lego_t)
-    lego_v[:-1] = lego_t[:-1] & lego_t[1:]
+    lego_t_full = (
+        np.asarray(z_coord.is_active, dtype=bool)
+        & (np.asarray(state.land_mask.data) > 0.5)[..., None])
+    lego_u_full = lego_t_full & np.roll(lego_t_full, -1, axis=1)
+    lego_v_full = np.zeros_like(lego_t_full)
+    lego_v_full[:-1] = lego_t_full[:-1] & lego_t_full[1:]
+    lego_t = _model_core(lego_t_full)
+    lego_u = _model_core(lego_u_full)
+    lego_v = _model_core(lego_v_full)
     common_t = mask_t & lego_t
     common_u = mask_u & lego_u
     common_v = mask_v & lego_v
     rows = [
-        diff_row("conditional_euler_T_after_trazdf", np.asarray(step1.T.data),
+        diff_row("conditional_euler_T_after_trazdf", _model_core(step1.T.data),
                  _runtime_dump(run_kt2 / "stp_dump_21_trazdf_tem.bin"), common_t),
-        diff_row("conditional_euler_S_after_trazdf", np.asarray(step1.S.data),
+        diff_row("conditional_euler_S_after_trazdf", _model_core(step1.S.data),
                  _runtime_dump(run_kt2 / "stp_dump_21_trazdf_sal.bin"), common_t),
         diff_row("conditional_euler_U_after_corrector",
-                 np.asarray(step1.u.data)[:, 1:, :],
+                 _model_core(np.asarray(step1.u.data)[:, 1:, :]),
                  _runtime_dump(run_kt2 / "baro_dump_u_after.bin"), common_u),
         diff_row("conditional_euler_V_after_corrector",
-                 np.asarray(step1.v.data)[1:, :, :],
+                 _model_core(np.asarray(step1.v.data)[1:, :, :]),
                  _runtime_dump(run_kt2 / "baro_dump_v_after.bin"), common_v),
-        diff_row("conditional_euler_SSH_after_split", np.asarray(step1.eta.data),
+        diff_row("conditional_euler_SSH_after_split", _model_core(step1.eta.data),
                  _runtime_ssh(run_kt2 / "spg_dump_pssh_final.bin"),
                  common_t[..., 0]),
     ]
@@ -405,19 +433,19 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
         str(run_kt2 / "DINO_00000002_restart.nc"), nn_hls=0)
     rows.extend([
         diff_row("conditional_filtered_step1_T_carry",
-                 np.asarray(step2.T_before.data),
+                 _model_core(step2.T_before.data),
                  _mesh_core(before.T), common_t),
         diff_row("conditional_filtered_step1_S_carry",
-                 np.asarray(step2.S_before.data),
+                 _model_core(step2.S_before.data),
                  _mesh_core(before.S), common_t),
         diff_row("conditional_filtered_step1_U_carry",
-                 np.asarray(step2.u_before.data)[:, 1:, :],
+                 _model_core(np.asarray(step2.u_before.data)[:, 1:, :]),
                  _mesh_core(before.u), common_u),
         diff_row("conditional_filtered_step1_V_carry",
-                 np.asarray(step2.v_before.data)[1:, :, :],
+                 _model_core(np.asarray(step2.v_before.data)[1:, :, :]),
                  _mesh_core(before.v), common_v),
         diff_row("conditional_filtered_step1_SSH_carry",
-                 np.asarray(step2.eta_before.data),
+                 _model_core(step2.eta_before.data),
                  _mesh_core(before.ssh), common_t[..., 0]),
     ])
     return rows, localization
@@ -461,7 +489,8 @@ def _legacy_geometry_controls(nemo_grid, cfg, z_coord, state) -> dict[str, Any]:
         open_lat_south_deg=cfg.channel_lat_south_deg,
         open_lat_north_deg=cfg.channel_lat_north_deg,
         seam_column_index=0)) > 0.5
-    seam3d = np.asarray(z_coord.is_active, dtype=bool) & seam2d[..., None]
+    seam3d = _model_core(
+        np.asarray(z_coord.is_active, dtype=bool)) & seam2d[..., None]
     seam_row = diff_row(
         "control_old_seam_wall", seam3d.astype(np.float64),
         mask.astype(np.float64), np.ones(mask.shape, dtype=bool), bar=0.0)
