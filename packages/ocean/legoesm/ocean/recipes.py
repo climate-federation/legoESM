@@ -204,7 +204,7 @@ LATLON_RECIPES = {
         "freshwater_salinity": "s_ref",
         "implicit_vertical_mixing": True,
         "implicit_vmix_dzw_slot": False,
-        "implicit_vmix_e3t_now_divisor": False,
+        "implicit_vmix_e3t_now_divisor": True,
         "ke_gradient_scheme": "hollingsworth",
         "lateral_friction_scheme": "none",
         "lateral_side_bc": "free_slip",
