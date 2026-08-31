@@ -15,6 +15,7 @@ import numpy as np
 
 from legoesm.grids.latlon import create_beta_plane_cgrid_geometry
 from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
+from legoesm.ocean.dynamics.barotropic_common import nemo_auto_substeps
 from legoesm.ocean.fidelity.nemo_recipe import NEMORecipe
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import LatLonCGridOceanConfig
@@ -39,7 +40,9 @@ class NEMOTestcaseCard(NamedTuple):
     bbl_gamma_s: float
 
 
-def _model_config(*, barotropic_time_filter: str) -> LatLonCGridOceanConfig:
+def _model_config(
+    *, barotropic_time_filter: str, n_barotropic_substeps: int
+) -> LatLonCGridOceanConfig:
     """The selectors shared by both certified ``key_qco + key_RK3`` runs."""
 
     return LatLonCGridOceanConfig.from_flat(
@@ -64,6 +67,7 @@ def _model_config(*, barotropic_time_filter: str) -> LatLonCGridOceanConfig:
         pgf_quadrature="nemo_trapezoid",
         barotropic_solver="explicit_substep",
         barotropic_time_filter=barotropic_time_filter,
+        n_barotropic_substeps=n_barotropic_substeps,
         adaptive_implicit_vertadv=True,
         implicit_vertical_mixing=True,
         A_h=0.0,
@@ -82,6 +86,31 @@ def _model_config(*, barotropic_time_filter: str) -> LatLonCGridOceanConfig:
         use_conservation_fixer=False,
         fix_eta_drift=False,
         freeze_floor=False,
+    )
+
+
+def _resolved_auto_substeps(grid, bathymetry, dt_s: float) -> int:
+    """Resolve NEMO ``ln_bt_auto`` on the actual T-cell depth and metric.
+
+    NEMO computes ``zcu`` pointwise and takes its maximum before the ceiling
+    (``dynspg_ts.F90:1223-1240``).  Keeping depth and metric paired avoids the
+    global-max upper bound used by callers that lack collocated arrays.
+    """
+
+    wet = np.asarray(bathymetry) > 0.0
+    inverse_metric = (
+        np.asarray(grid.dx_T, dtype=np.float64) ** -2
+        + np.asarray(grid.dy_T, dtype=np.float64) ** -2
+    )
+    if inverse_metric.shape != wet.shape:
+        inverse_metric = np.broadcast_to(inverse_metric, wet.shape)
+    courant_factor = np.asarray(bathymetry, dtype=np.float64) * inverse_metric
+    return nemo_auto_substeps(
+        dt_s,
+        1.0,
+        float(np.max(courant_factor[wet], initial=0.0)),
+        float(NEMO_CONSTANTS_CONFIG.g),
+        cmax=0.8,
     )
 
 
@@ -152,7 +181,10 @@ def build_lock_exchange_zco_card() -> NEMOTestcaseCard:
     )
     # ln_bt_fw=T, nn_bt_flt=3, rn_bt_alpha=.07: dynspg_ts.F90:199-226,
     # 536-553,1676-1711. The canonical option carries substep history.
-    model_config = _model_config(barotropic_time_filter="nemo_ab3am4")
+    model_config = _model_config(
+        barotropic_time_filter="nemo_ab3am4",
+        n_barotropic_substeps=_resolved_auto_substeps(grid, bathymetry, 1.0),
+    )
     recipe = NEMORecipe(
         model_config=model_config,
         physics_config=model_config.physics,
@@ -199,7 +231,12 @@ def build_overflow_zps_card() -> NEMOTestcaseCard:
     )
     # ln_bt_fw=T, nn_bt_flt=1, rn_bt_alpha=0: dynspg_ts.F90:1058-1080,
     # 1676-1711. The canonical option re-runs the cold-start ramp each step.
-    model_config = _model_config(barotropic_time_filter="nemo_boxcar1_ab3")
+    model_config = _model_config(
+        barotropic_time_filter="nemo_boxcar1_ab3",
+        n_barotropic_substeps=_resolved_auto_substeps(
+            grid, effective_bathymetry, 10.0
+        ),
+    )
     recipe = NEMORecipe(
         model_config=model_config,
         physics_config=model_config.physics,

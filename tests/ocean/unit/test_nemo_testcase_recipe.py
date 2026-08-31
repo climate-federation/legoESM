@@ -75,10 +75,14 @@ def test_nemo_testcase_cards_are_fp64_source_pinned(
 
 
 def test_testcase_cards_select_their_resolved_barotropic_filters():
-    assert (
-        build_lock_exchange_zco_card().recipe.model_config.barotropic.barotropic_time_filter
-        == "nemo_ab3am4"
-    )
+    lock_baro = build_lock_exchange_zco_card().recipe.model_config.barotropic
+    overflow_baro = build_overflow_zps_card().recipe.model_config.barotropic
+    assert lock_baro.barotropic_time_filter == "nemo_ab3am4"
+    assert overflow_baro.barotropic_time_filter == "nemo_boxcar1_ab3"
+    # Resolved ln_bt_auto counts, independently printed by the pinned NEMO
+    # runs: LOCK ocean.output:763 and OVERFLOW ocean.output:879.
+    assert lock_baro.n_barotropic_substeps == 1
+    assert overflow_baro.n_barotropic_substeps == 3
 
 
 def test_testcase_cards_construct_the_shared_canonical_model():

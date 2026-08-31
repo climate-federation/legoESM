@@ -257,10 +257,21 @@ def nemo_auto_substeps(
     can only increase the substep count).
     """
     import math as _math
-    zcmax = _math.sqrt(g * max(H_max_wet, 0.0)
-                       * inv_e1_sq_plus_inv_e2_sq_max)
+    if not all(_math.isfinite(value) for value in (
+        dt, H_max_wet, inv_e1_sq_plus_inv_e2_sq_max, g, cmax
+    )):
+        raise ValueError("nemo_auto_substeps inputs must all be finite.")
+    if dt <= 0.0 or g <= 0.0 or cmax <= 0.0:
+        raise ValueError(
+            "nemo_auto_substeps requires dt, g, and cmax to be positive."
+        )
+    if H_max_wet < 0.0 or inv_e1_sq_plus_inv_e2_sq_max < 0.0:
+        raise ValueError(
+            "nemo_auto_substeps requires non-negative depth and metric inputs."
+        )
+    zcmax = _math.sqrt(g * H_max_wet * inv_e1_sq_plus_inv_e2_sq_max)
     n = int(_math.ceil(dt / cmax * zcmax))
-    if n < 2:
+    if n < 1:
         raise ValueError(
             f"nemo_auto_substeps computed n={n!r} (dt={dt}, cmax={cmax}) — "
             "check the metric/H inputs.")
