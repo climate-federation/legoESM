@@ -139,6 +139,34 @@ def nemo_qco_live_face_thicknesses(
     return geom.e3u, geom.e3v
 
 
+def nemo_qco_live_t_thicknesses(eta, H_bathy, z_coord, wet3):
+    """Build key-QCO live T-cell ``e3t`` in NEMO source association.
+
+    ``dom_qco_r3c.F90:160`` evaluates ``r3t = ssh * r1_ht_0`` and
+    ``domzgr_substitute.h90:46,126`` then substitutes
+    ``E3t_0 * (1 + r3t * tmask)``.  This is algebraically equivalent to the
+    generic z-star ``h_partial * (H + ssh) / H`` but not last-bit equivalent.
+    """
+    raw = getattr(z_coord, "nemo_e3t_0", None)
+    if raw is None:
+        raise ValueError(
+            "NEMO literal QCO T thickness requires raw nemo_e3t_0")
+    dtype = jnp.asarray(raw).dtype
+    b = lax.optimization_barrier
+    one = jnp.asarray(1.0, dtype=dtype)
+    eta = jnp.asarray(eta, dtype=dtype)
+    H = jnp.asarray(H_bathy, dtype=dtype)
+    wet = jnp.asarray(wet3, dtype=dtype)
+    raw = jnp.asarray(raw, dtype=dtype)
+    if raw.shape != wet.shape:
+        raise ValueError(
+            f"raw nemo_e3t_0 shape {raw.shape} != wet T shape {wet.shape}")
+    wet2 = (jnp.sum(wet, axis=-1) > 0.0).astype(dtype)
+    r1_h0 = b(wet2 / b(H + one - wet2))
+    r3t = b(eta * r1_h0)
+    return b(raw * b(one + b(r3t[..., None] * wet)))
+
+
 class NemoEENBarotropicOperands(NamedTuple):
     """Raw native-A2D operands for NEMO's frozen barotropic EEN builder."""
     ff_f: jnp.ndarray

@@ -24,8 +24,10 @@ from legoesm.ocean.physics.vertical_mixing.implicit_solver import (
 )
 from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.vertical import (
+    compute_layer_thickness,
     create_full_step_coordinate,
     create_ocean_z_star,
+    nemo_qco_live_t_thicknesses,
 )
 
 
@@ -101,6 +103,32 @@ def test_literal_tracer_pair_matches_hand_content_system():
         jnp.asarray(e3t + np.array([[0.0, 0.25, 0.0]])),
         jnp.asarray(e3w), dt, jnp.asarray(wet))
     assert np.any(np.asarray(wrong_t) != expected_t)
+
+
+def test_qco_t_thickness_preserves_nemo_source_association():
+    """The faithful QCO path must not reassociate ``E3t_0*(1+ssh/H)``."""
+    zref = create_ocean_z_star(n_levels=3, H_max=37.0)
+    z_coord = create_full_step_coordinate(
+        zref, jnp.full((2, 2), 2, dtype=jnp.int32))
+    raw = np.asarray(z_coord.h_partial, dtype=np.float64)
+    raw = np.nextafter(raw, np.inf)
+    z_coord = z_coord._replace(nemo_e3t_0=jnp.asarray(raw))
+    wet = np.asarray(z_coord.is_active, dtype=np.float64)
+    H = np.sum(raw * wet, axis=-1)
+    eta = np.array([[0.037, -0.019], [0.011, -0.023]], dtype=np.float64)
+    expected = raw * (1.0 + (eta * (1.0 / H))[..., None] * wet)
+    actual = np.asarray(nemo_qco_live_t_thicknesses(
+        eta, H, z_coord, wet))
+    np.testing.assert_array_equal(actual, expected)
+
+    # Planted discriminator: the generic algebraic form rounds differently.
+    generic = np.asarray(compute_layer_thickness(eta, H, z_coord))
+    active = wet.astype(bool)
+    assert np.any(actual[active] != generic[active])
+
+    with pytest.raises(ValueError, match="nemo_e3t_0"):
+        nemo_qco_live_t_thicknesses(
+            eta, H, z_coord._replace(nemo_e3t_0=None), wet)
 
 
 def test_literal_solvers_jit_and_ad():

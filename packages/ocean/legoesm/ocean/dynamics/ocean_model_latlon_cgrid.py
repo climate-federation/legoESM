@@ -48,6 +48,7 @@ from legoesm.ocean.vertical import (
     flux_form_vertical_tracer_advection_centered,
     nemo_qco_live_face_geometry_from_operands,
     nemo_qco_live_face_thicknesses,
+    nemo_qco_live_t_thicknesses,
 )
 from legoesm.ocean.state import (
     LatLonCGridOceanState,
@@ -4145,10 +4146,17 @@ class LatLonCGridOceanModel:
         )
 
         # 5. Save pre-barotropic layer thickness
-        h_k_old = compute_layer_thickness(
-            state_mid.eta.data, state_mid.H_bathy.data, _zc,
-            min_water_column_m=_cfg_b.min_water_column_m,
-        )
+        if getattr(_cfg_b, "zad_qco_evaluation", "generic") == "nemo_literal":
+            _wet_t_qco = (
+                _zc.is_active.astype(state_mid.T.data.dtype)
+                * state_mid.land_mask.data[..., None])
+            h_k_old = nemo_qco_live_t_thicknesses(
+                state_mid.eta.data, state_mid.H_bathy.data, _zc, _wet_t_qco)
+        else:
+            h_k_old = compute_layer_thickness(
+                state_mid.eta.data, state_mid.H_bathy.data, _zc,
+                min_water_column_m=_cfg_b.min_water_column_m,
+            )
 
         # 6. Barotropic step.  Two paths:
         #    - explicit_substep: split-explicit forward-backward substepping
@@ -4741,10 +4749,14 @@ class LatLonCGridOceanModel:
         # Total conservation is exact.
 
 
-        h_k_new = compute_layer_thickness(
-            state_new.eta.data, state_new.H_bathy.data, _zc,
-            min_water_column_m=_cfg_b.min_water_column_m,
-        )
+        if getattr(_cfg_b, "zad_qco_evaluation", "generic") == "nemo_literal":
+            h_k_new = nemo_qco_live_t_thicknesses(
+                state_new.eta.data, state_new.H_bathy.data, _zc, _wet_t_qco)
+        else:
+            h_k_new = compute_layer_thickness(
+                state_new.eta.data, state_new.H_bathy.data, _zc,
+                min_water_column_m=_cfg_b.min_water_column_m,
+            )
 
         # Diagnose w from barotropic-averaged per-layer divergence
         # (consistent with the horizontal transport used for tracers).
@@ -7492,7 +7504,13 @@ class LatLonCGridOceanModel:
         # maximum(dz,_EPS)) and the _wet_if_vmix / face-activity guards zero every
         # flux that would couple them, so they stay inert.  Pure z-star keeps
         # dz_ref·J → BIT-IDENTICAL (else branch == the original line).
-        if isinstance(_zc, OceanPartialCellCoordinate):
+        if getattr(_cfg_b, "zad_qco_evaluation", "generic") == "nemo_literal":
+            _wet_t_qco = (
+                _zc.is_active.astype(state.T.data.dtype)
+                * state.land_mask.data[..., None])
+            dz_cell = nemo_qco_live_t_thicknesses(
+                state.eta.data, state.H_bathy.data, _zc, _wet_t_qco)
+        elif isinstance(_zc, OceanPartialCellCoordinate):
             dz_cell = _zc.h_partial * J_cell[..., jnp.newaxis]
         else:
             dz_cell = _zc.dz_ref * J_cell[..., jnp.newaxis]
