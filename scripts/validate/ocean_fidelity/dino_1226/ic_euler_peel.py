@@ -45,7 +45,7 @@ from legoesm.ocean.fidelity.nemo_io import (
 )
 
 
-SCHEMA = "dino_ic_euler_peel_v8"
+SCHEMA = "dino_ic_euler_peel_v9"
 BAR = 1.0e-15
 RUNTIME_SHAPE = (203, 56)
 RUNTIME_HALO = 2
@@ -174,6 +174,53 @@ def _runtime_ssh(path: Path) -> np.ndarray:
     array = array.reshape(RUNTIME_SHAPE)
     edge = RUNTIME_HALO + STANDALONE_CORE
     return array[edge:-edge, edge:-edge]
+
+
+def _runtime_model_dump(path: Path) -> np.ndarray:
+    """Strip NEMO's two MPI-halo rings, retaining lego's live model frame."""
+    array = hpg.read_dump(
+        str(path), 35, RUNTIME_SHAPE[0], RUNTIME_SHAPE[1])
+    return array[RUNTIME_HALO:-RUNTIME_HALO,
+                 RUNTIME_HALO:-RUNTIME_HALO, :]
+
+
+def _runtime_model_ssh(path: Path) -> np.ndarray:
+    """Two-ring-stripped NEMO SSH on lego's live model frame."""
+    array = np.fromfile(path, dtype=np.float64)
+    expected = RUNTIME_SHAPE[0] * RUNTIME_SHAPE[1]
+    if array.size != expected:
+        raise ValueError(f"{path}: {array.size} values != {expected}")
+    array = array.reshape(RUNTIME_SHAPE)
+    return array[RUNTIME_HALO:-RUNTIME_HALO,
+                 RUNTIME_HALO:-RUNTIME_HALO]
+
+
+def _host_literal_nemo_tracer_solve(
+        content_rhs: np.ndarray, K: np.ndarray, e3t_after: np.ndarray,
+        e3w_now: np.ndarray, wet: np.ndarray, dt: float) -> np.ndarray:
+    """Independent unfused host transcription of trazdf.F90:218-286."""
+    nlev = content_rhs.shape[-1]
+    lower = np.zeros_like(content_rhs)
+    upper = np.zeros_like(content_rhs)
+    lower[..., 1:] = -dt * K / e3w_now
+    upper[..., :-1] = -dt * K / e3w_now
+    diagonal = e3t_after - (lower + upper)
+    diagonal = np.where(wet, diagonal, 1.0)
+    for k in range(1, nlev):
+        diagonal[..., k] = (diagonal[..., k]
+                            - lower[..., k] * upper[..., k - 1]
+                            / diagonal[..., k - 1])
+    work = np.array(content_rhs, copy=True)
+    for k in range(1, nlev):
+        work[..., k] = (work[..., k]
+                        - lower[..., k] / diagonal[..., k - 1]
+                        * work[..., k - 1])
+    work[..., -1] = work[..., -1] / diagonal[..., -1]
+    for k in range(nlev - 2, -1, -1):
+        work[..., k] = ((work[..., k]
+                         - upper[..., k] * work[..., k + 1])
+                        / diagonal[..., k])
+    return work * wet
 
 
 def _nemo_fct_rate_components(run_kt2: Path, grid, *, sal: bool,
@@ -558,6 +605,83 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
     rhs23_t = rhs20_t + diss_t / standalone.DT_SECONDS
     rhs23_s = rhs20_s + diss_s / standalone.DT_SECONDS
 
+    # Frozen row 6 is an operator admission, not another subtraction of two
+    # already-updated states.  Rebuild the exact NEMO content RHS from the
+    # recorded stage-23 accumulator, then feed it through the production
+    # literal tracer matrix.  This separates upstream last-bit rate residuals
+    # from tra_zdf itself, as preregistered.  Geometry and coefficients are the
+    # same live operands the cold call above uses; only the RHS accumulator is
+    # replaced by its recorded oracle value.
+    from legoesm.ocean.physics.vertical_mixing import (
+        implicit_vertical_diffusion_ocean_tracer_pair_dispatch,
+    )
+    # DINO's TKE closure intentionally does not surface K_v on the tendency.
+    # Re-enter the same profile builder with the cold call's carried N2 bundle
+    # and stop at its existing ``return_K_profiles`` receipt.
+    n2_bundle = model._tke_step_entry_n2_bundle(
+        entry, z_coord=z_coord, config=model.config)
+    tke_old = (None if entry.tke is None else entry.tke.data)
+    K_v_live, _A_v_live = model._apply_implicit_vertical_mixing(
+        pre_zdf, standalone.DT_SECONDS, step_forcing,
+        K_v_phys=_pre_zdf_bundle[0], A_v_phys=_pre_zdf_bundle[1],
+        tke_old=tke_old, tke_source=_pre_zdf_bundle[4],
+        n2_tracers=model._n2_before_advection_tracers(
+            entry, z_coord=z_coord, config=model.config),
+        n2_tracers_before=model._n2_nemo_before_tracers(
+            entry, z_coord=z_coord, config=model.config),
+        tke_n2_bundle=n2_bundle, eta_now=entry.eta.data,
+        u_now=entry.u.data, v_now=entry.v.data,
+        return_K_profiles=True, z_coord=z_coord, config=model.config)
+    nemo_avt = _runtime_model_dump(run_kt2 / "dump_avt.bin")[..., 1:]
+    ktr = nemo_avt
+    if _pre_zdf_bundle[2] is not None:
+        ktr = ktr + np.asarray(_pre_zdf_bundle[2])
+    ktr = ktr * lego_t_full[..., 1:]
+    h_before_live = np.asarray(compute_layer_thickness(
+        entry.eta.data, entry.H_bathy.data, z_coord,
+        min_water_column_m=model.config.min_water_column_m))
+    e3t_0 = np.asarray(grid.e3t_0)[..., :-1]
+    tmask_full = np.asarray(grid.tmask, dtype=np.float64)[..., :-1]
+    h_before = e3t_0
+    eta_after_nemo = _runtime_model_ssh(
+        run_kt2 / "spg_dump_pssh_final.bin")
+    h_after_live = np.asarray(compute_layer_thickness(
+        eta_after_nemo, entry.H_bathy.data, z_coord,
+        min_water_column_m=model.config.min_water_column_m))
+    # DINO key_qco source association: dom_qco_r3c.F90:160 forms
+    # r3t=ssh*r1_ht_0, then domzgr_substitute.h90:46/126 evaluates
+    # E3t_0*(1+r3t*tmask).  The algebraically equivalent (H+ssh)/H form
+    # rounds differently and is not an oracle operand at this last-bit bar.
+    r1_ht_0 = 1.0 / np.asarray(entry.H_bathy.data)
+    r3t_after = eta_after_nemo * r1_ht_0
+    h_after_nemo = e3t_0 * (
+        1.0 + r3t_after[..., None] * tmask_full)
+    e3w_live = np.asarray(n2_bundle.e3w_Kmm)
+    e3w_now = np.asarray(grid.e3w_0)[..., 1:35]
+    nemo_rhs23_t = _runtime_model_dump(
+        run_kt2 / "stp_dump_23_after_traldf_tem.bin")
+    nemo_rhs23_s = _runtime_model_dump(
+        run_kt2 / "stp_dump_23_after_traldf_sal.bin")
+    b = jax.lax.optimization_barrier
+    dt64 = np.float64(standalone.DT_SECONDS)
+    content_t = b(b(h_before * np.asarray(entry.T_before.data))
+                  + b(dt64 * h_before * nemo_rhs23_t))
+    content_s = b(b(h_before * np.asarray(entry.S_before.data))
+                  + b(dt64 * h_before * nemo_rhs23_s))
+    literal_t, literal_s = jax.jit(
+        lambda ct, cs, kk, e3a, e3w, wet:
+        implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
+            ct / e3a, cs / e3a, ct, cs, kk, e3a, e3w,
+            standalone.DT_SECONDS, wet, evaluation="nemo_literal"))(
+                content_t, content_s, ktr, h_after_nemo, e3w_now,
+                lego_t_full)
+    host_literal_t = _host_literal_nemo_tracer_solve(
+        np.asarray(content_t), ktr, h_after_nemo, e3w_now,
+        lego_t_full, standalone.DT_SECONDS)
+    host_literal_s = _host_literal_nemo_tracer_solve(
+        np.asarray(content_s), ktr, h_after_nemo, e3w_now,
+        lego_t_full, standalone.DT_SECONDS)
+
     rows = [
         diff_row("time_level_collapse", np.ones((1,), dtype=np.float64),
                  np.ones((1,), dtype=np.float64),
@@ -582,9 +706,9 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
                  _runtime_dump(run_kt2 / "stp_dump_23_after_traldf_tem.bin"), common_t),
         diff_row("S_after_traldf", _model_core(rhs23_s),
                  _runtime_dump(run_kt2 / "stp_dump_23_after_traldf_sal.bin"), common_t),
-        diff_row("conditional_euler_T_after_trazdf", _model_core(step1.T.data),
+        diff_row("T_after_trazdf", _model_core(literal_t),
                  _runtime_dump(run_kt2 / "stp_dump_21_trazdf_tem.bin"), common_t),
-        diff_row("conditional_euler_S_after_trazdf", _model_core(step1.S.data),
+        diff_row("S_after_trazdf", _model_core(literal_s),
                  _runtime_dump(run_kt2 / "stp_dump_21_trazdf_sal.bin"), common_t),
         dict(next(row for row in localization["rows"]
                   if row["name"] == "POST_HOC_fslow_u_wind"),
@@ -626,6 +750,36 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
             diff_row("POST_HOC_V_before_mlf_baro_corr",
                      _model_core(np.asarray(post_zdf.v.data)[1:, :, :]),
                      _runtime_dump(run_kt2 / "baro_dump_v_before.bin"), common_v),
+        ],
+    }
+    localization["tracer_zdf_matrix_diagnostics"] = {
+        "qualification": "POST_HOC_OPERATOR_LOCALIZATION_NOT_FROZEN_ROW",
+        "source": "trazdf.F90:218-221,256-286",
+        "rows": [
+            diff_row(
+                "POST_HOC_live_avt_vs_recorded_avt",
+                _model_core(np.asarray(K_v_live)), _model_core(nemo_avt),
+                common_t[..., 1:]),
+            diff_row(
+                "POST_HOC_live_e3t_Kmm_vs_source_order",
+                _model_core(h_before_live), _model_core(h_before), common_t),
+            diff_row(
+                "POST_HOC_live_e3t_Kaa_vs_source_order",
+                _model_core(h_after_live), _model_core(h_after_nemo), common_t),
+            diff_row(
+                "POST_HOC_live_e3w_Kmm_vs_recorded_e3w0",
+                _model_core(e3w_live), _model_core(e3w_now),
+                common_t[..., 1:]),
+            diff_row(
+                "POST_HOC_host_literal_T_after_trazdf",
+                _model_core(host_literal_t),
+                _runtime_dump(run_kt2 / "stp_dump_21_trazdf_tem.bin"),
+                common_t),
+            diff_row(
+                "POST_HOC_host_literal_S_after_trazdf",
+                _model_core(host_literal_s),
+                _runtime_dump(run_kt2 / "stp_dump_21_trazdf_sal.bin"),
+                common_t),
         ],
     }
     nemo_h_t, nemo_v_t, nemo_faces_t = _nemo_fct_rate_components(
@@ -845,6 +999,7 @@ def run(args: argparse.Namespace) -> int:
         "fct_dump_zwz_up_sal.bin", "fct_dump_zwx_anti_sal.bin",
         "fct_dump_zwy_anti_sal.bin", "fct_dump_zwz_anti_sal.bin",
         "stp_dump_21_trazdf_tem.bin", "stp_dump_21_trazdf_sal.bin",
+        "dump_avt.bin",
         "baro_dump_u_before.bin", "baro_dump_v_before.bin",
         "baro_dump_u_after.bin", "baro_dump_v_after.bin",
         "spg_dump_pssh_final.bin", "spg_dump_zu_frc.bin",
