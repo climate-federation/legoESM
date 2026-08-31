@@ -108,7 +108,7 @@ def test_cold_euler_threads_mlf_tracer_content_into_literal_zdf(monkeypatch):
     eta = 0.1 * jnp.sin(lon_phase)[None, :]
     eta = jnp.broadcast_to(eta, state.eta.data.shape) * state.land_mask.data
     state = state._replace(eta=state.eta.replace(data=eta))
-    original_content = ocean_model.nemo_euler_tracer_content_rhs
+    original_content = ocean_model.thickness_weighted_tracer_content
     content_calls = []
 
     def planted_content(*args, **kwargs):
@@ -122,7 +122,7 @@ def test_cold_euler_threads_mlf_tracer_content_into_literal_zdf(monkeypatch):
         return value
 
     monkeypatch.setattr(
-        ocean_model, "nemo_euler_tracer_content_rhs", planted_content)
+        ocean_model, "thickness_weighted_tracer_content", planted_content)
     calls = []
 
     def capture(_self, solve_state, _dt, _forcing=None, *,
@@ -149,45 +149,6 @@ def test_cold_euler_threads_mlf_tracer_content_into_literal_zdf(monkeypatch):
         # A control that can fail: the planted live content value reaches the
         # solve, while the old local reconstruction does not contain it.
         assert float(np.max(np.abs(actual - legacy))) >= 0.125
-
-
-def test_nemo_euler_tracer_content_rhs_matches_source_order_and_refutes_endpoint():
-    """Independent trazdf content algebra; endpoint subtraction is the plant."""
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        nemo_euler_tracer_content_rhs,
-        thickness_weighted_tracer_content,
-    )
-
-    t_before = jnp.asarray([[[
-        float.fromhex("0x1.016162f75ad48p+4"),
-        float.fromhex("0x1.26f76488a2ad3p+5")]]], dtype=jnp.float64)
-    rhs = jnp.asarray([[[
-        float.fromhex("0x1.920153ee08782p-24"),
-        float.fromhex("-0x1.9c2d5985ab5f4p-26")]]], dtype=jnp.float64)
-    h_before = jnp.asarray([[[
-        float.fromhex("0x1.8b15a2c19d23ep+8"),
-        float.fromhex("0x1.49f8c795c6206p+8")]]], dtype=jnp.float64)
-    h_after = jnp.asarray([[[
-        float.fromhex("0x1.8b15a2c19d23fp+8"),
-        float.fromhex("0x1.49f8c795c6207p+8")]]], dtype=jnp.float64)
-    dt = 2700.0
-    expected = ((np.asarray(h_before) * np.asarray(t_before))
-                + (dt * np.asarray(h_before)) * np.asarray(rhs))
-    actual = np.asarray(nemo_euler_tracer_content_rhs(
-        t_before, rhs, h_before, h_before, dt))
-    np.testing.assert_array_equal(actual, expected)
-
-    # Plant the old endpoint subtraction.  It is algebraically equivalent,
-    # but loses last bits after the concentration endpoint was rounded on a
-    # moving layer.
-    t_expl = (
-        np.asarray(h_before) * np.asarray(t_before)
-        + (dt * np.asarray(h_before)) * np.asarray(rhs)
-    ) / np.asarray(h_after)
-    legacy = np.asarray(thickness_weighted_tracer_content(
-        t_before, t_before, jnp.asarray(t_expl), jnp.zeros_like(t_before),
-        h_before, h_before, h_after))
-    assert not np.array_equal(legacy, expected)
 
 
 # ---------------------------------------------------------------------------

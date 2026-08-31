@@ -1289,27 +1289,6 @@ def thickness_weighted_tracer_content(t_before, t_now, t_expl, d_diss,
             + h_now * d_diss)
 
 
-def nemo_euler_tracer_content_rhs(t_before, rhs, h_before, h_now, dt):
-    """Literal collapsed-level Euler RHS content for NEMO ``tra_zdf``.
-
-    NEMO 5.0.2 ``trazdf.F90:271-278`` evaluates
-    ``e3t(Kbb)*C(Kbb) + p2dt*e3t(Kmm)*C(Krhs)``.  Keep the three
-    multiplications and final addition separated so XLA cannot replace the
-    source evaluation with an endpoint-difference reconstruction.  On the
-    cold Euler step ``Kbb == Kmm`` and ``p2dt == rn_Dt``; the two thickness
-    arguments remain explicit because they are distinct source operands.
-
-    Positive ``rhs`` increases positive-down layer tracer content; there is no
-    boundary-flux sign conversion in this assembly (surface and lateral flux
-    signs were already resolved into ``Krhs`` by their owning operators).
-    """
-    b = jax.lax.optimization_barrier
-    before_content = b(h_before * t_before)
-    timed_thickness = b(jnp.asarray(dt, dtype=h_now.dtype) * h_now)
-    tendency_content = b(timed_thickness * rhs)
-    return b(before_content + tendency_content)
-
-
 def _thickness_weighted_asselin(now, before, after,
                                 e3_now, e3_before, e3_after, e3_f,
                                 gamma, mask):
@@ -5411,7 +5390,7 @@ class LatLonCGridOceanModel:
                     # peel.  Capture before the content update so a 1e-15 row
                     # does not subtract nearly equal endpoint states.  The
                     # private gate is false for every production call.
-                    if _return_cold_euler_tracer_rhs or _cold_nemo_euler:
+                    if _return_cold_euler_tracer_rhs:
                         _direct_rate = -total_flux_div / jnp.maximum(
                             h_k_old, 1.0e-30)
                         if tr_name == 'T':
@@ -5700,26 +5679,12 @@ class LatLonCGridOceanModel:
             else:
                 _cold_dT_diss = _diss_dT_incr
                 _cold_dS_diss = _diss_dS_incr
-            if _T_adv_rate_direct is None or _S_adv_rate_direct is None:
-                raise ValueError(
-                    "cold NEMO Euler tracer content requires the direct "
-                    "non-RK3 advection rates")
-            # Executed source order is tra_sbc+tra_qsr, then tra_adv, then
-            # tra_ldf (stpmlf.F90:498-551).  Accumulate that Krhs before
-            # forming trazdf's content equation.  The committed stage-23
-            # receipt independently checks this sum against NEMO.
-            _cold_rhs_t = jax.lax.optimization_barrier(
-                tend.dT_dt.data + _T_adv_rate_direct)
-            _cold_rhs_s = jax.lax.optimization_barrier(
-                tend.dS_dt.data + _S_adv_rate_direct)
-            _cold_rhs_t = jax.lax.optimization_barrier(
-                _cold_rhs_t + _cold_dT_diss / dt)
-            _cold_rhs_s = jax.lax.optimization_barrier(
-                _cold_rhs_s + _cold_dS_diss / dt)
-            _cold_content_t = nemo_euler_tracer_content_rhs(
-                state.T_before.data, _cold_rhs_t, h_k_old, h_k_old, dt)
-            _cold_content_s = nemo_euler_tracer_content_rhs(
-                state.S_before.data, _cold_rhs_s, h_k_old, h_k_old, dt)
+            _cold_content_t = thickness_weighted_tracer_content(
+                state.T_before.data, state.T.data, state_new.T.data,
+                _cold_dT_diss, h_k_old, h_k_old, h_k_new)
+            _cold_content_s = thickness_weighted_tracer_content(
+                state.S_before.data, state.S.data, state_new.S.data,
+                _cold_dS_diss, h_k_old, h_k_old, h_k_new)
             _cold_nemo_tracer_content_rhs = (
                 _cold_content_t, _cold_content_s)
 
