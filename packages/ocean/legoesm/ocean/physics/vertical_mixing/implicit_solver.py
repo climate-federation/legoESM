@@ -338,6 +338,50 @@ def _nemo_ordered_solve(
          terminal[..., None]], axis=-1)
 
 
+def _nemo_ordered_tracer_solve(
+    lower: jax.Array,
+    diagonal: jax.Array,
+    upper: jax.Array,
+    rhs: jax.Array,
+) -> jax.Array:
+    """Statically unrolled trazdf recurrences in executed source order.
+
+    XLA's ``lax.scan`` lowering is numerically visible for the cold Euler
+    tracer row even with barriers (T 4.44e-15, S 2.84e-14 versus an unfused
+    host transcription that is bit-exact).  The vertical level count is a
+    static model dimension, so unroll only this oracle-selected tracer path;
+    momentum retains the compact scan implementation above.
+    """
+    if not (lower.shape == diagonal.shape == upper.shape == rhs.shape):
+        raise ValueError("NEMO literal tracer operands must share shape")
+    nlev = rhs.shape[-1]
+    if nlev < 1:
+        raise ValueError("NEMO literal tracer solve needs at least one row")
+    b = jax.lax.optimization_barrier
+    if nlev == 1:
+        return b(rhs / diagonal)
+
+    eliminated = [diagonal[..., 0]]
+    for k in range(1, nlev):
+        product = b(lower[..., k] * upper[..., k - 1])
+        quotient = b(product / eliminated[k - 1])
+        eliminated.append(b(diagonal[..., k] - quotient))
+
+    work = [rhs[..., 0]]
+    for k in range(1, nlev):
+        quotient = b(lower[..., k] / eliminated[k - 1])
+        product = b(quotient * work[k - 1])
+        work.append(b(rhs[..., k] - product))
+
+    result = [None] * nlev
+    result[-1] = b(work[-1] / eliminated[-1])
+    for k in range(nlev - 2, -1, -1):
+        product = b(upper[..., k] * result[k + 1])
+        numerator = b(work[k] - product)
+        result[k] = b(numerator / eliminated[k])
+    return b(jnp.stack(result, axis=-1))
+
+
 def implicit_vertical_diffusion_nemo_momentum(
     field: jax.Array,
     avm_face: jax.Array,
@@ -439,9 +483,9 @@ def implicit_vertical_diffusion_nemo_tracer_pair(
     diagonal = jax.lax.optimization_barrier(e3t_after - coefficient_sum)
     diagonal = jnp.where(wet_f > 0.0, diagonal,
                          jnp.asarray(1.0, dtype=dtype))
-    out_1 = _nemo_ordered_solve(
+    out_1 = _nemo_ordered_tracer_solve(
         lower, diagonal, upper, content_rhs_1) * wet_f
-    out_2 = _nemo_ordered_solve(
+    out_2 = _nemo_ordered_tracer_solve(
         lower, diagonal, upper, content_rhs_2) * wet_f
     return out_1, out_2
 
