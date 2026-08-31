@@ -247,13 +247,15 @@ def test_nemo_mlf_diverges_from_leapfrog_only_via_gm_redi_tracer_source():
         rtol=1e-8, atol=3e-5)
 
 
-def test_shipped_leapfrog_second_step_threads_one_entry_n2_bundle_to_gm_redi():
-    """Both explicit-only passes retain the one bundle built at step entry."""
+def test_shipped_leapfrog_threads_raw_entry_e3w_to_literal_zdf(monkeypatch):
+    """One entry bundle feeds both Redi and the literal ZDF matrix."""
     from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
     from legoesm.ocean.physics.vertical_mixing.tke import TKEEntryN2Bundle
+    import legoesm.ocean.physics.vertical_mixing as vmix
 
     state, model = _channel(
         K_h=2.0e4, A_h=2.0e4, implicit_vmix_e3t_now_divisor=True,
+        zdf_implicit_solver_evaluation="nemo_literal",
         gm_redi=GMRediConfig(
             kappa_GM=0.0, kappa_Redi=1.0e3,
             slope_scheme="nemo_iso_lap", slope_positions="nemo_native",
@@ -275,12 +277,42 @@ def test_shipped_leapfrog_second_step_threads_one_entry_n2_bundle_to_gm_redi():
         calls.append(step_state)
         return bundle
 
+    seen_e3w = []
+    real_dispatch = vmix.implicit_vertical_diffusion_ocean_tracer_pair_dispatch
+
+    def capture_dispatch(*args, **kwargs):
+        seen_e3w.append(args[6])
+        return real_dispatch(*args, **kwargs)
+
     model._tke_step_entry_n2_bundle = MethodType(entry_bundle, model)
+    monkeypatch.setattr(
+        vmix, "implicit_vertical_diffusion_ocean_tracer_pair_dispatch",
+        capture_dispatch)
     s1 = model._leapfrog_step(state, _DT)
+    assert len(seen_e3w) == 1
+    np.testing.assert_array_equal(
+        np.asarray(seen_e3w[0]), np.asarray(bundle.e3w_Kmm))
     calls.clear()
+    seen_e3w.clear()
     s2 = model._leapfrog_step(s1, _DT)
     assert len(calls) == 1
+    assert len(seen_e3w) == 1
+    np.testing.assert_array_equal(
+        np.asarray(seen_e3w[0]), np.asarray(bundle.e3w_Kmm))
     assert np.all(np.isfinite(np.asarray(s2.T.data)))
+
+
+def test_literal_zdf_rejects_missing_raw_entry_e3w():
+    """The faithful selector cannot silently rebuild raw NEMO geometry."""
+    state, model = _channel(
+        K_h=0.0, A_h=0.0,
+        implicit_vmix_e3t_now_divisor=True,
+        zdf_implicit_solver_evaluation="nemo_literal",
+    )
+    with pytest.raises(ValueError, match="raw e3w_Kmm"):
+        model._apply_implicit_vertical_mixing(
+            state, _DT, None, eta_now=state.eta.data,
+            tke_n2_bundle=None)
 
 
 def test_prd_before_source_tracks_integrator_time_levels(monkeypatch):

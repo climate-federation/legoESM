@@ -7469,7 +7469,36 @@ class LatLonCGridOceanModel:
             e3t_now = compute_layer_thickness(
                 _eta_now, state.H_bathy.data, _zc,
                 min_water_column_m=_cfg_b.min_water_column_m)
-            dz_half_cell = build_dz_half(e3t_now).astype(dz_cell.dtype)
+            if (getattr(_cfg_b, "zdf_implicit_solver_evaluation",
+                        "shared_thomas") == "nemo_literal"):
+                # NEMO ``trazdf.F90:218-221`` reads the independently stored
+                # e3w(...,Kmm), not a midpoint reconstructed from e3t(Kmm).
+                # The faithful DINO TKE entry bundle already carries that raw
+                # live operand for eosbn2/zdftke.  Reuse the same array so the
+                # tracer and closure matrices cannot acquire two subtly
+                # different W geometries.  A literal solve without the raw
+                # operand is not a NEMO transcription and must fail closed.
+                _raw_e3w_now = (
+                    None if tke_n2_bundle is None
+                    else getattr(tke_n2_bundle, "e3w_Kmm", None))
+                if _raw_e3w_now is None:
+                    raise ValueError(
+                        "zdf_implicit_solver_evaluation='nemo_literal' with "
+                        "implicit_vmix_e3t_now_divisor=True requires the "
+                        "carried raw e3w_Kmm step-entry operand")
+                _raw_e3w_now = jnp.asarray(
+                    _raw_e3w_now, dtype=dz_cell.dtype)
+                if _raw_e3w_now.shape != dz_cell.shape[:-1] + (
+                        dz_cell.shape[-1] - 1,):
+                    raise ValueError(
+                        "carried raw e3w_Kmm shape "
+                        f"{_raw_e3w_now.shape} != implicit interface shape "
+                        f"{dz_cell.shape[:-1] + (dz_cell.shape[-1] - 1,)}")
+                dz_half_cell = _raw_e3w_now
+            else:
+                # Historical NOW-thickness reconstruction for non-literal
+                # solvers.  Keeping it here preserves every non-oracle card.
+                dz_half_cell = build_dz_half(e3t_now).astype(dz_cell.dtype)
         else:
             dz_half_cell = build_dz_half(dz_cell)
 

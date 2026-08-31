@@ -229,8 +229,16 @@ def test_production_literal_route_uses_full_step_active_masks():
         zdf_implicit_solver_evaluation="nemo_literal",
         implicit_vmix_e3t_now_divisor=True,
     )
+    from legoesm.ocean.physics.vertical_mixing import build_dz_half
+    from legoesm.ocean.physics.vertical_mixing.tke import TKEEntryN2Bundle
+    w_shape = state.T.data.shape[:-1] + (state.T.data.shape[-1] - 1,)
+    raw_e3w = build_dz_half(z_coord.h_partial)
+    bundle = TKEEntryN2Bundle(
+        rn2=jnp.zeros(w_shape), rn2b=jnp.zeros(w_shape),
+        gdepw_Kmm=jnp.zeros(w_shape), e3w_Kmm=raw_e3w,
+        e3t_Kmm=z_coord.h_partial)
     out = LatLonCGridOceanModel(grid, z_coord, cfg)._apply_implicit_vertical_mixing(
-        state, 1800.0, surface_forcing=None)
+        state, 1800.0, surface_forcing=None, tke_n2_bundle=bundle)
 
     for field in (out.T.data, out.S.data, out.u.data, out.v.data):
         assert np.isfinite(np.asarray(field)).all()
