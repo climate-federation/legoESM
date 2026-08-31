@@ -3,11 +3,10 @@
 Date: 2026-08-31. Session:
 `01a053d4-8e9f-7212-bbdb-19ba2d64e140`.
 
-Status: **EXECUTED; FROZEN OUTCOME `EULER_DEBT_T_after_traadv`.** The v5
-initialization artifact admitted every geometry, profile, anchor, and resolved
-state row with zero differences. The next legal target is therefore the first
-failed Euler row, `conditional_euler_T_after_trazdf`, whose max error is
-`1.1374146413256625e-4 degC`.
+Status: **EXECUTED; FROZEN OUTCOME `EULER_AT_BAR`.** Initialization is exact
+and every registered Euler row 0--8 passes. The earlier v7 coupled-`tra_adv`
+debt below is retained as the ordered intermediate finding and superseded by
+the closure receipt at the end of this document.
 
 This peel is CPU-only and consumes the already recorded raw first-step dumps in
 `RUN_KT2`; it does not execute NEMO, MPI, or a GPU.
@@ -112,3 +111,30 @@ Rows 7--8 were reported after that honest disposition. U wind is at bar
 (`4.129285617864714e-20 m/s2`); neither is the Euler owner. The launch outcome
 is therefore debt rather than missing-oracle blocked, but the launch gate is
 false in both cases.
+
+## Closure outcome
+
+The v9 committed probe closes the coupled horizontal/vertical FCT rate paths
+together. `T_after_traadv` is `7.757167435624285e-19 K/s` and
+`S_after_traadv` is `6.204261567009084e-18 PSU/s`; the subsequent `tra_ldf`
+rows remain at the same bar. Row 6 follows the frozen protocol literally: it
+rebuilds NEMO's content RHS from the admitted collapsed state and recorded
+stage-23 accumulator, then runs the independent unfused transcription of
+`trazdf.F90:218-221,256-286`. T and S are bit-exact. No Rule-1b waiver is
+used.
+
+The source-geometry repair reuses the already selected
+`zad_qco_evaluation="nemo_literal"` path. NEMO computes `r3t=ssh*r1_ht_0` at
+`dom_qco_r3c.F90:160`, and `domzgr_substitute.h90:46,126` evaluates
+`E3t_0*(1+r3t*tmask)`. DINO's raw 35-row `e3t_0` column left-sums to
+`3999.9999999999045 m`, not the nominal `4000 m`; the generic reassociation
+was therefore wrong by `9.55e-11 m`. The repaired path derives `ht_0` from the
+carried raw rows in source order and leaves every non-literal card unchanged.
+
+Rows 7--8 pass at `1.1712877473750872e-21 m/s2` and
+`4.129285617864714e-20 m/s2`. The artifact reports `FIRST_OVER_BAR=None` and
+`EULER_AT_BAR`, so the preregistered 11,520-step member-0 arm with
+`--snap-final` is released. Post-hoc compiled/public endpoint differences are
+retained outside the frozen verdict rather than called bit-exact: public T,
+S, and U maxima are `6.750155989720952e-14 degC`,
+`4.192202140984591e-13 PSU`, and `1.3363623935745694e-8 m/s`.

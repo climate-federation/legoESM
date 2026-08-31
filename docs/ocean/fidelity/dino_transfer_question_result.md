@@ -597,3 +597,40 @@ implemented and audited, but no standalone-year arm is emitted. The frozen
 prediction remains unchanged for the first admitted run: independent-year SST
 RMS `0.39 degC` should collapse toward the `~0.01 degC` step-2 bridge class;
 `<=0.02 degC` confirms and `>=0.10 degC` refutes.
+
+## T1 closure: source-ordered QCO geometry and admitted Euler ladder
+
+This section supersedes the launch disposition immediately above. The paired
+FCT repair was evaluated as a coupled horizontal/vertical rate, preserving the
+measured cancellation rather than patching one face family. The frozen maxima
+are now `7.757167435624285e-19 K/s` for T and
+`6.204261567009084e-18 PSU/s` for S, both below the `1e-15` rate bar.
+
+The next owner was QCO T-cell geometry. Executed NEMO evaluates
+`r3t=ssh*r1_ht_0` (`src/OCE/DOM/domqco.F90:160`) and substitutes
+`E3t_0*(1+r3t*tmask)` (`cfgs/DINO/WORK/domzgr_substitute.h90:46,126`).
+legoESM used the equivalent-looking `(H+ssh)/H` form with nominal
+`H=4000 m`; NEMO's rounded 35-row `e3t_0` left-sum is instead
+`3999.9999999999045 m`. The resulting `9.55e-11 m` thickness difference is
+now removed by the existing DINO `zad_qco_evaluation="nemo_literal"`
+selector, using carried raw T rows and a source-ordered column sum. Generic
+cards retain the old path, and a planted nominal-depth reassociation fails.
+
+Row 6 then reconstructs the exact NEMO content RHS from the admitted collapsed
+state and stage-23 dump and executes an independent host transcription of
+`cfgs/DINO/WORK/trazdf.F90:218-221,256-286`; T and S are bit-exact. The U-wind
+and V-HPG rows pass at `1.1712877473750872e-21` and
+`4.129285617864714e-20 m/s2`. The final artifact therefore reports
+`INIT_CONFIRMED`, `EULER_AT_BAR`, and `FIRST_OVER_BAR=None`, without Rule-1b.
+
+The scope remains precise. The public compiled endpoint is not called
+bit-exact: post-hoc maximum differences are `6.750155989720952e-14 degC` T,
+`4.192202140984591e-13 PSU` S, `1.3363623935745694e-8 m/s` U, and
+`1.7069679003611782e-15 m` SSH. Those diagnostics are outside the frozen
+operator rows and remain stamped in the artifact.
+
+The preregistered standalone-year arm is released: public
+`nemo_dino_kamm_mlf`, member 0, 11,520 fp64 steps, and `--snap-final`. The
+frozen prediction remains day-360 SST RMS `0.39 degC` collapsing toward the
+step-2 bridge class near `0.01 degC`; `<=0.02 degC` confirms,
+`>=0.10 degC` refutes, and the interval is inconclusive.
