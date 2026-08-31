@@ -562,7 +562,7 @@ def _load_restart(restart_path: Path, config: MultiLayerLandConfig,
             int(state.snow_depth.shape[0]),
             t_init_K=state.T_soil[:, 0],
             ps_init_pa=constants.p_atm_std,
-            cfg=_ss.p_model))
+            cfg=config.p_model))
     start_step = int(data["step"])
     start_day = float(data["day"])
     carbon_state = None

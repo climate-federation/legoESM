@@ -20,7 +20,6 @@ from legoesm.land.canopy.sif import SIFConfig
 from legoesm.land.p_model import (
     VALID_CAPACITY_SCHEMES,
     VALID_G1_SOURCES,
-    PModelConfig,
 )
 
 
@@ -257,10 +256,11 @@ class CanopyConfig(NamedTuple):
     # Source of the Medlyn slope: "table" (default — per-PFT m_C3/m_C4) or
     # "p_model" (predicted g1 = xi; requires stomatal_model="medlyn").
     g1_source: str = "table"              # "table" | "p_model"
-    # P-model tunables + acclimation constants (used iff a switch above is
-    # "p_model"; always present so the params-reachability audit can route
-    # land.p_model.* overrides).
-    p_model: PModelConfig = PModelConfig()
+    # NB: the P-model tunables (PModelConfig) live ONCE per land config at
+    # the root (MultiLayerLandConfig.p_model / LandConfig.p_model), not here —
+    # a second instance in one built tree would make land.p_model.* overrides
+    # unroutable (params-reachability AMBIGUOUS).  This config carries only
+    # the string switches.
 
     def validate(self) -> "CanopyConfig":
         """Fail-early check of the static string-dispatch fields.

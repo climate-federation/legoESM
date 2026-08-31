@@ -6,6 +6,7 @@ from typing import Any, NamedTuple
 
 from legoesm import constants
 from legoesm.land.carbon.config import CarbonConfig
+from legoesm.land.p_model import PModelConfig
 from legoesm.land.stomata import StomataConfig
 from legoesm.land.snow_bands import ElevationSnowBandConfig
 from legoesm.land.soil_grid import SoilGridConfig
@@ -116,6 +117,10 @@ class LandConfig(NamedTuple):
     # Niu 2005 / CLM4.5).  Unknown -> ValueError at dispatch.
     runoff_scheme: str = "bucket"
     topmodel: TopmodelConfig = TopmodelConfig()
+    # P-model optimality tunables (land/p_model.py) — exactly ONE instance per
+    # land config (routable as land.p_model.*); the scheme/stomata configs
+    # carry only the string switches that activate it.  Appended last.
+    p_model: PModelConfig = PModelConfig()
 
 
 class MultiLayerLandConfig(NamedTuple):
@@ -218,6 +223,10 @@ class MultiLayerLandConfig(NamedTuple):
     # leaf — reducing soil infiltration and re-partitioning the canopy latent
     # flux.  The CLM-ML canopy has its OWN internal interception and ignores this.
     interception: Any | None = None
+    # P-model optimality tunables (land/p_model.py) — exactly ONE instance per
+    # land config (routable as land.p_model.*); the scheme/stomata configs
+    # carry only the string switches that activate it.  Appended last.
+    p_model: PModelConfig = PModelConfig()
 
 
 def resolve_land_config(land_mode: str, land_config=None):

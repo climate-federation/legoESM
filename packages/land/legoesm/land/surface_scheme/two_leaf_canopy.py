@@ -363,7 +363,7 @@ def compute_two_leaf_canopy_fluxes(
         # Raises with a clear message when this caller does not carry the
         # acclimation state (slab-land / patch-mosaic until wired): no silent
         # fall-back to prescribed parameters.
-        _caps = acclimated_capacities(pmodel_acclim, cc.p_model)
+        _caps = acclimated_capacities(pmodel_acclim, land_config.p_model)
         if cc.capacity_scheme == "p_model":
             # C3 leaf-top capacity + Jmax25/Vcmax25 ratio from the optimum.
             # INTERIM: C4 capacity (Vc4_leaf) stays prescribed until the C4

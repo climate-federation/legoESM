@@ -65,7 +65,11 @@ from legoesm.land.canopy.radiative_transfer import (
     PAR_W_TO_UMOL,
     split_sw_components,
 )
-from legoesm.land.p_model import advance_pmodel_acclim, init_pmodel_acclim
+from legoesm.land.p_model import (
+    advance_pmodel_acclim,
+    init_pmodel_acclim,
+    pmodel_switches_active,
+)
 from legoesm.surface_albedo import land_albedo as compute_land_albedo
 from legoesm.surface_albedo import (
     dry_soil_brightening,
@@ -1094,7 +1098,7 @@ def _step_multilayer_land_impl(
                 jnp.asarray(forcing.co2_ppmv), _ppfd_toc.shape),
             ps_pa=jnp.broadcast_to(
                 jnp.asarray(forcing.p_surface), _ppfd_toc.shape),
-            cfg=config.surface_scheme.p_model,
+            cfg=config.p_model,
             dt=dt,
         )
     else:
@@ -1590,15 +1594,13 @@ def init_multilayer_land_state(
     # PModelConfig init fields — every cold-start value is in the resolved
     # config, no hidden choice.
     pmodel_acclim = None
-    _ss = config.surface_scheme
-    if isinstance(_ss, TwoLeafCanopyConfig) and (
-            _ss.capacity_scheme == "p_model" or _ss.g1_source == "p_model"):
+    if pmodel_switches_active(config.surface_scheme, config.stomata):
         pmodel_acclim = init_pmodel_acclim(
             ncol,
             t_init_K=jnp.asarray(T_init),  # scalar or per-column, broadcasts
             ps_init_pa=(constants.p_atm_std if pmodel_ps_init_pa is None
                         else pmodel_ps_init_pa),
-            cfg=_ss.p_model,
+            cfg=config.p_model,
             co2_init_ppm=pmodel_co2_init_ppm,
             dtype=T_soil.dtype,
         )

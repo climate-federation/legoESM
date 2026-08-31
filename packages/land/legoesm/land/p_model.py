@@ -240,6 +240,24 @@ class PModelCapacities(NamedTuple):
     xi_sqrt_pa: jax.Array    # [Pa^0.5] least-cost xi (diagnostic)
 
 
+def pmodel_switches_active(surface_scheme=None, stomata=None) -> bool:
+    """True iff any P-model switch is selected on the given config objects.
+
+    Reads ``capacity_scheme``/``g1_source`` where present (canopy configs) and
+    the same fields on a big-leaf ``StomataConfig``.  Shared by every lane's
+    state-initialisation gate and driver guard so "is the P model on?" has one
+    definition.
+    """
+    for obj in (surface_scheme, stomata):
+        if obj is None:
+            continue
+        if getattr(obj, "capacity_scheme", "prescribed") == "p_model":
+            return True
+        if getattr(obj, "g1_source", "table") == "p_model":
+            return True
+    return False
+
+
 def _smooth_floor(x: jax.Array, floor: jax.Array, width: jax.Array) -> jax.Array:
     """Smooth (softplus) lower bound: ~x for x >> floor, -> floor from above.
 
