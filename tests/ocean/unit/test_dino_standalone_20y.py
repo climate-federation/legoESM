@@ -103,6 +103,23 @@ def test_construction_frame_faces_close_and_stripped_roll_is_red_control():
     np.testing.assert_array_equal(np.asarray(raw.fmask), fmask)
 
 
+def test_construction_frame_source_metric_roundtrip_is_live():
+    cfg = RUNNER.build_standalone(0)[0]
+    raw_grid = RUNNER.dino_lat_lon_grid(cfg, construction_frame=True)
+    source = RUNNER.nemo_construction_frame_geometry(raw_grid, cfg)
+    generic = RUNNER.ensure_geometry(
+        raw_grid, omega=cfg.omega,
+        metric_convention=cfg.metric_convention,
+        vface_zonal_metric_evaluation=cfg.vface_zonal_metric_evaluation,
+        coriolis_placement=cfg.coriolis_placement)
+    # The planted radian shortcut differs on live rows, proving that the
+    # degree-valued source evaluation is not a self-comparison.
+    assert np.count_nonzero(
+        np.asarray(source.dx_T) != np.asarray(generic.dx_T)) > 0
+    np.testing.assert_array_equal(source.dx_T, source.dy_T)
+    np.testing.assert_array_equal(source.area_T, source.dx_T * source.dy_T)
+
+
 def test_temperature_plant_changes_only_now_level_temperature():
     control = RUNNER.build_standalone(0)[3]
     perturbed, receipt = RUNNER.perturb_temperature(control, 3)
