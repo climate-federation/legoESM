@@ -835,14 +835,22 @@ def dm2dc_sw_factor(grid, dm2dc_window):
     every consumer of the CORE-II daily-mean SW (the ocean surface forcing AND
     the prognostic sea-ice AtmToSurface) sees the SAME diurnal modulation —
     codex r1 #2: the ice tile previously received the raw daily-mean SW while
-    the ocean saw the modulated one.  Lat-lon / tripole C-grid families only
-    (matches the run drivers, which reject --dm2dc elsewhere)."""
+    the ocean saw the modulated one.  Lat-lon / tripole C-grid families and the
+    MPAS Voronoi mesh (matches the run drivers' --dm2dc gate)."""
     from legoesm.ocean.forcing.diurnal_cycle import diurnal_sw_factor
     _day_of_year, _year_len, _t_lo, _t_up = dm2dc_window
     _lat_T = getattr(grid, "lat_T", None)
+    _lat_cell = getattr(grid, "latCell", None)
     if _lat_T is not None:            # tripole family (2-D, radians)
         _lat_deg = np.degrees(np.asarray(_lat_T))
         _lon_deg = np.degrees(np.asarray(grid.lon_T))
+    elif _lat_cell is not None:       # MPAS Voronoi mesh: 1-D PAIRED cell
+        # centres (radians) -- each cell carries its OWN (lat, lon), so pass the
+        # 1-D arrays directly, NOT a meshgrid.  diurnal_sw_factor is elementwise,
+        # so this returns the (nCells,) per-cell factor, matching the sw_down /
+        # q_net fields the MPAS lane modulates.
+        _lat_deg = np.degrees(np.asarray(_lat_cell))
+        _lon_deg = np.degrees(np.asarray(grid.lonCell))
     else:                             # regular lat-lon (1-D, radians)
         _lat_deg = np.degrees(np.asarray(grid.lat))[:, None]
         _lon_deg = np.degrees(np.asarray(grid.lon))[None, :]

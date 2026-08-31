@@ -6282,10 +6282,10 @@ def main() -> int:
 
     # (--prescribed-flow gates ran PRE-BUILD via validate_prescribed_flow_args;
     # the lever itself was threaded into the model config at build.)
-    if args.dm2dc and app_grid_type not in ("tripole", "latlon"):
+    if args.dm2dc and app_grid_type not in ("tripole", "latlon", "mpas"):
         raise SystemExit(
-            "--dm2dc is wired for tripole/latlon (the applicator needs the "
-            f"2-D tracer lon/lat); got {args.grid!r}")
+            "--dm2dc is wired for tripole/latlon/mpas (the applicator needs the "
+            f"tracer lon/lat); got {args.grid!r}")
     isf_forcing = None
     if args.isf:
         # NEMO ISF 'spe' prescribed melt: load the monthly Depoorter fields
@@ -6694,9 +6694,9 @@ def main() -> int:
     # forcing as ``chl`` (the PE C-grid step switches to rgb_chl when chl is set).
     chl_clim = None
     if args.sw_rgb_chl:
-        if app_grid_type not in ("latlon", "tripole"):
+        if app_grid_type not in ("latlon", "tripole", "mpas"):
             raise ValueError(
-                f"--sw-rgb-chl is wired for latlon/tripole only, not {app_grid_type!r}")
+                f"--sw-rgb-chl is wired for latlon/tripole/mpas only, not {app_grid_type!r}")
         chl_clim = load_nemo_chl_monthly(
             grid, app_grid_type, lat2d, lon2d, chl_file=args.chl_file)
     # allow_synthetic=False: this NEMO-faithful pipeline MUST use the real

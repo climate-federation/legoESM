@@ -16,7 +16,9 @@ from legoesm.core.field import Field
 from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.ocean.eos import rho_0 as rho_0_ref
-from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
+from legoesm.ocean.vertical import (
+    OceanZStarCoordinate, compute_ocean_jacobian, compute_layer_thickness,
+)
 from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
 from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 
@@ -321,6 +323,7 @@ def make_mpas_ocean_physics(
             _sf_tau_x = getattr(surface_forcing, "tau_x", None)
             _sf_tau_y = getattr(surface_forcing, "tau_y", None)
             _sf_q_net = getattr(surface_forcing, "q_net", None)
+            _sf_chl = getattr(surface_forcing, "chl", None)
 
             if _sf_tau_x is not None and _sf_tau_y is not None:
                 dz_0_cell = z_coord.dz_ref[0] * jacobian  # (nCells,)
@@ -343,7 +346,45 @@ def make_mpas_ocean_physics(
                 from legoesm.ocean.eos import c_sw
                 _sf_sw = getattr(surface_forcing, "sw_down", None)
 
-                if _sf_sw is not None:
+                if _sf_sw is not None and _sf_chl is not None:
+                    # NEMO RGB chlorophyll penetration (ln_qsr_rgb), the SAME
+                    # shared kernel the lat-lon C-grid PE step selects when chl
+                    # is attached (ocean_pe_latlon_cgrid).  NEMO partitions 100%
+                    # of net SW across IR + R/G/B bands, so there is NO 0.94
+                    # "skin" pre-split here: the FULL sw is the penetrating qsr
+                    # and the non-solar surface flux is q_net - sw.
+                    dz_0_cell_q = z_coord.dz_ref[0] * jacobian
+                    inv_rho_csw_dz = 1.0 / (
+                        rho_0_ref * c_sw * jnp.maximum(dz_0_cell_q, 1e-10))
+                    q_nonsolar = _sf_q_net - _sf_sw
+                    dT_dt = dT_dt.at[:, 0].add(
+                        q_nonsolar * inv_rho_csw_dz * mask)
+                    from legoesm.ocean.physics.shortwave_penetration import (
+                        apply_shortwave_penetration,
+                        ShortwavePenetrationConfig,
+                    )
+                    # Live (z*/partial-cell) layer thickness, (nCells, nlev):
+                    # dispatches on the coordinate type, so on --partial-cell it
+                    # returns the per-column partial thicknesses with ZERO below
+                    # each seabed (codex: dz_ref*jacobian would invent wet layers
+                    # below the bottom, leaking RGB light past the seabed and
+                    # breaking the q_net closure).  For a plain z* coordinate it
+                    # reduces exactly to dz_ref*jacobian, so non-partial runs are
+                    # unchanged.  wet_cell = h_k>0 excludes below-seabed cells and
+                    # is the RGB kernel's safe-denominator guard; a dry column has
+                    # thickness 0 -> wet_cell 0 (masked anyway).
+                    dz_live = compute_layer_thickness(eta, H_bathy, z_coord)
+                    wet_cell = jnp.asarray(dz_live > 0.0, dtype=T_3d.dtype)
+                    sw_tend = apply_shortwave_penetration(
+                        ShortwavePenetrationConfig(scheme="rgb_chl"),
+                        _sf_sw,
+                        chl=jnp.asarray(_sf_chl, dtype=T_3d.dtype),
+                        dz_live=dz_live,
+                        wet_cell=wet_cell,
+                        rho_0=rho_0_ref, c_sw=c_sw,
+                    )
+                    dT_dt = dT_dt + sw_tend * mask[:, None]
+                elif _sf_sw is not None:
                     # VERTICAL split of the surface heat flux (NOT an albedo):
                     # ``q_net`` carries 100% of the incident sw_down; here 94% is
                     # routed through the Jerlov penetration profile and the
