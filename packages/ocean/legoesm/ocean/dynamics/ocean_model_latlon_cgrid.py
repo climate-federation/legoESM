@@ -5712,6 +5712,20 @@ class LatLonCGridOceanModel:
             _cold_nemo_tracer_content_rhs = (
                 _cold_content_t, _cold_content_s)
 
+        # Cold-start target: NEMO's uu_b/vv_b(Kaa) is produced by dyn_spg_ts
+        # before the 3-D Krhs residual continues through dyn_zdf and before
+        # mlf_baro_corr consumes that target (stpmlf.F90:528-578).  Capture it
+        # before lego's withheld weight-1 lateral-dissipation residual below;
+        # that residual is baroclinic only under lego's generic face weights,
+        # but not under mlf_baro_corr's native live QCO weights.
+        if _apply_cold_start_after_reconcile:
+            _cold_btu = depth_mean(
+                state_new.u.data, h_u_pre, 1.0e-10,
+                keepdims=True, fused=False)
+            _cold_btv = depth_mean(
+                state_new.v.data, h_v_pre, 1.0e-10,
+                keepdims=True, fused=False)
+
         # 8a'. AB2 "advective" scope: apply the weight-1.0 DISSIPATIVE increment.
         # On the FORWARD-EULER ``step()`` path (``_apply_implicit_vmix=True``)
         # the dissipative increment (momentum lateral friction + bottom drag;
@@ -5748,19 +5762,6 @@ class LatLonCGridOceanModel:
                 v=state_new.v.replace(
                     data=(state_new.v.data + _dv_bc) * v_mask_3d),
             )
-
-        # Cold-start target: NEMO's uu_b/vv_b(Kaa) is the barotropic mean
-        # produced before dyn_zdf.  Capture the identical model operand here,
-        # immediately before the implicit solve that may deposit a new column
-        # mean.  The flag is private and true only on the no-history Euler
-        # bootstrap; every established caller keeps the exact old path.
-        if _apply_cold_start_after_reconcile:
-            _cold_btu = depth_mean(
-                state_new.u.data, h_u_pre, 1.0e-10,
-                keepdims=True, fused=False)
-            _cold_btv = depth_mean(
-                state_new.v.data, h_v_pre, 1.0e-10,
-                keepdims=True, fused=False)
 
         # 8b. Implicit (backward-Euler) vertical mixing for u, v, T, S.
         #
