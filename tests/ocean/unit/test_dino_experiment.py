@@ -664,10 +664,15 @@ class TestNemoFaithfulGrid:
         lat = np.degrees(np.asarray(grid.lat))
         lon = np.degrees(np.asarray(grid.lon))
         assert (grid.n_lat, grid.n_lon) == (199, 52)
-        np.testing.assert_array_equal(lon[[0, -1]], [-0.5, 50.5])
+        # LatLonGrid coordinate storage follows the active precision policy
+        # (float32 in this unit lane); the exact source-order metric receipt is
+        # separately pinned on native degree operands.  This row checks frame
+        # extent/spacing, not a float64 bit pattern after radian storage.
+        np.testing.assert_allclose(
+            lon[[0, -1]], [-0.5, 50.5], rtol=0.0, atol=5.0e-6)
         assert lat[99] == 0.0
         assert lat[[0, -1]] == pytest.approx(
-            [-69.85173502222084, 69.85173502222084], abs=1e-13)
+            [-69.85173502222084, 69.85173502222084], abs=1e-5)
 
     def test_literal_sill_association_moves_planted_bottom_threshold(self):
         cfg = nemo_faithful_dino_config(
@@ -1756,7 +1761,10 @@ class TestSurfaceTendencyPlacement:
         )
         cfg = dataclasses.replace(
             dino_config_for_recipe("nemo_dino_kamm"),  # forward-Euler card
-            initial_condition_evaluation="jax_factored")
+            initial_condition_evaluation="jax_factored",
+            # Synthetic generated grid: this dispatch-only fixture has no
+            # raw NEMO e3t/hu/hv/mask operands.
+            slow_forcing_depth_mean_evaluation="live_tree")
         z = create_dino_z_star(cfg)
         g = dino_lat_lon_grid(cfg, n_lon=8)
         mc, _ = dino_lat_lon_model_config(g, cfg, physics=True)
@@ -1824,6 +1832,7 @@ class TestSurfaceTendencyPlacement:
             # such operand, so pin the paired generic flux geometry too.
             gm_redi_flux_face_thickness_evaluation="tpoint_jacobian",
             gm_redi_slope_depth_evaluation="legacy_jacobian_t_surface",
+            nemo_sco_hpg_accumulation_evaluation="factored",
             # This fixture deliberately does not bridge the raw NEMO EEN
             # coefficient operands.  Keep its unrelated surface-placement
             # contrast on the byte-pinned generic coefficient builder.
@@ -1833,7 +1842,10 @@ class TestSurfaceTendencyPlacement:
         # restart-bridge fidelity run.  Pin the two coupled QCO paths whose
         # literal arms require raw NEMO restart operands.
         cfg = dataclasses.replace(
-            cfg, zad_qco_evaluation="generic", wzv_call2_evaluation="generic")
+            cfg, zad_qco_evaluation="generic", wzv_call2_evaluation="generic",
+            # Same synthetic-grid scope: do not weaken the production guard;
+            # explicitly select the generic depth-mean tree this fixture owns.
+            slow_forcing_depth_mean_evaluation="live_tree")
         z = dino_lat_lon_vertical(g, cfg)  # MLF card needs its matching
                                            # partial-cell/masked-zco coord,
                                            # not the bare z* helper.
