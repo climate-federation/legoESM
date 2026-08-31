@@ -136,3 +136,21 @@ def test_c3_electron_transport_jmax_bounded():
     # Saturating: a 2x light increase yields < 5% more assimilation.
     assert An_4000 >= An_2000
     assert (An_4000 - An_2000) / An_2000 < 0.05
+
+
+def test_jmax_temperature_response_public():
+    """Public Jmax normalisation: unity at 25 degC, K&K composition, peaked."""
+    import jax.numpy as _jnp
+    TgC = _jnp.array(20.0)
+    assert float(photo.jmax_temperature_response(photo._T_REF, TgC)) == pytest.approx(
+        1.0, abs=1e-12)
+    # Composition matches the private pieces c3_assimilation itself uses.
+    T = _jnp.array(303.15)
+    expected = photo._arrhenius_peaked(
+        T, photo._HA_JMAX, photo._HD_JMAX, photo._delta_s_jmax(TgC))
+    assert float(photo.jmax_temperature_response(T, TgC)) == pytest.approx(
+        float(expected), rel=1e-12)
+    # Peaked: declines well above the optimum.
+    hi = float(photo.jmax_temperature_response(photo._T_REF + 20.0, TgC))
+    lo = float(photo.jmax_temperature_response(photo._T_REF + 3.0, TgC))
+    assert hi < lo

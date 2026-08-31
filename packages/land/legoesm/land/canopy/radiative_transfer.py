@@ -65,7 +65,7 @@ import jax.numpy as jnp
 from legoesm import constants
 
 # Module-local conversion factor (not a physical constant per se).
-_APAR_CONVERSION = 4.56           # [W m-2] → [μmol m-2 s-1] for PAR
+PAR_W_TO_UMOL = 4.56           # [W m-2] → [μmol m-2 s-1] for PAR (public: P model reuses it)
 
 # --- Weiss & Norman (1985) broadband → spectral fractions [-] ---
 _PAR_FRACTION = 0.48
@@ -387,8 +387,8 @@ def canopy_shortwave_rt(
     ASW_Soil = APAR_Soil + ANIR_Soil + AUV_Soil
 
     # ---- Convert APAR W m-2 → μmol m-2 s-1 ----
-    APAR_Sun = APAR_Sun * _APAR_CONVERSION
-    APAR_Sh  = APAR_Sh  * _APAR_CONVERSION
+    APAR_Sun = APAR_Sun * PAR_W_TO_UMOL
+    APAR_Sh  = APAR_Sh  * PAR_W_TO_UMOL
 
     # ---- Vcmax25 canopy integration via nitrogen extinction profile ----
     # (Sellers 1985 / DifferBESS: exponential N profile with extinction kn)

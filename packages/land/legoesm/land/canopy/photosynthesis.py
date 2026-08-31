@@ -255,6 +255,24 @@ def vcmax_temperature_response(Tf: jax.Array, TgC: jax.Array) -> jax.Array:
     return _arrhenius_peaked(Tf, _HA_VCMAX, _HD_VCMAX, _delta_s_vcmax(TgC_a))
 
 
+def jmax_temperature_response(Tf: jax.Array, TgC: jax.Array) -> jax.Array:
+    """Normalised Jmax temperature response (Kattge & Knorr 2007 peaked Arrhenius).
+
+    Returns f(T) such that ``Jmax(T) = f(T) * Jmax25``; f == 1 at 25 degC.
+    Public sibling of :func:`vcmax_temperature_response` — the P model
+    (``land/p_model.py``) needs BOTH normalisations to convert its
+    growth-temperature optimal capacities to 25 degC values with the exact
+    constants this kernel applies on the way back up.
+
+    Parameters
+    ----------
+    Tf  : leaf temperature [K]
+    TgC : growth temperature [degC] (clipped to the K&K calibration range)
+    """
+    TgC_a = jnp.clip(TgC, _TGC_LO, _TGC_HI)
+    return _arrhenius_peaked(Tf, _HA_JMAX, _HD_JMAX, _delta_s_jmax(TgC_a))
+
+
 # ---------------------------------------------------------------------------
 # C3 photosynthesis (canonical FvCB; Bonan ch. 11 / CLM5 §2.9)
 # ---------------------------------------------------------------------------
