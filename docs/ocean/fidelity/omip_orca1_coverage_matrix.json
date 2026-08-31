@@ -1,0 +1,2172 @@
+{
+  "schema_version": "1.0.0",
+  "audit": {
+    "title": "ORCA1-OMIP configuration coverage audit",
+    "date": "2026-08-31",
+    "scope": "Read-only configuration and implementation audit; no physics changes and no model run.",
+    "status_enum": {
+      "CERTIFIED": "The selected requirement exists in legoESM and the DINO campaign has an applicable oracle receipt. Certification is limited by each row's scope note.",
+      "PRESENT-UNCERTIFIED": "An implementation or production wiring exists, but no applicable DINO oracle receipt certifies this selected ORCA1 path.",
+      "ABSENT": "The selected ORCA1 recipe is not implemented as an executable legoESM path. Analogous pieces do not count.",
+      "N/A-INFRA": "I/O, diagnostics, timing, restart, XIOS, or MPP plumbing rather than physical-model coverage."
+    },
+    "source": {
+      "repository": "https://github.com/alexis-barge/ORCA1",
+      "local_checkout": "/data/abyssal/dbalwada/ORCA1-omip",
+      "commit": "5babc1e0de584f34e35a686182d0270b50f5643b",
+      "nemo_version": "5.0.1",
+      "path_namespace": "resolved_configuration source paths are relative to the pinned target checkout; coverage evidence paths are relative to the legoESM audit commit unless prefixed target:",
+      "files": {
+        "cpp_ORCA1.fcm": "sha256:1f475adc3868d77277c20b460dec83ed558ce55c1fe5baca321739629389d108",
+        "EXPREF/namelist_cfg": "sha256:7cfe2d47d78a00553cb28fe72c7e2be8655f96f0ea22920f0b8f17f5b2a47a0b",
+        "EXPREF/namelist_ref": "sha256:54fcb01a1fa275a1acbd11490fbf8e1c897785db7ba56cc7209aa1c8718f23b1",
+        "EXPREF/namelist_ice_cfg": "sha256:9be4731d1835ebd042e590421fb43cec6d984f114f049728acf1a150edc90470",
+        "EXPREF/namelist_ice_ref": "sha256:d18c3f3c147f65c60da65baae6f84084113c63afb86a8f70166e359b0afb5245"
+      }
+    },
+    "legoesm_commit": "de1426ea315d8ecb9f43115eaa05a5c6b7bc6e55",
+    "resolution_rule": "For each namelist pair, values in *_cfg overlay the same block and variable in *_ref. Only selectors whose containing feature is enabled are called active; dependent values are retained with their effective value.",
+    "fld_n_freqh_semantics": {
+      "positive": "hours",
+      "zero": "static field",
+      "negative": "number of months per record",
+      "-1": "one record per month",
+      "-12": "one record per 12 months; record contents are not inferred"
+    },
+    "important_non_claim": "Source comments describing a faithful port or unit tests are presence evidence, not DINO certification. GYRE evidence is readiness evidence, not a DINO receipt.",
+    "source_limitations": [
+      "The clone does not contain INPUTS/domain_cfg.nc or the forcing NetCDF files; deploy.sh downloads/links them. This audit resolves the selectors and declared filenames exactly, but does not claim byte identity for absent payloads.",
+      "The absent domain_cfg.nc also prevents resolving its ln_isfcav cavity-geometry flag; key_isf and the namisf overlay are resolved, but cavity activation from the domain payload is explicitly UNRESOLVED.",
+      "EXPREF/namelist_cfg:456 is a bare 71-hyphen line without a Fortran comment marker between namzdf_tke and namzdf_iwm. This is recorded as a source anomaly, not declared runnable or broken because no executable was run."
+    ]
+  },
+  "resolved_configuration": {
+    "cpp_keys": [
+      {
+        "key": "key_si3",
+        "defined": true,
+        "source": "cpp_ORCA1.fcm:1"
+      },
+      {
+        "key": "key_xios",
+        "defined": true,
+        "source": "cpp_ORCA1.fcm:1"
+      },
+      {
+        "key": "key_qco",
+        "defined": true,
+        "source": "cpp_ORCA1.fcm:1"
+      },
+      {
+        "key": "key_vco_1d3d",
+        "defined": true,
+        "source": "cpp_ORCA1.fcm:1"
+      },
+      {
+        "key": "key_RK3",
+        "defined": true,
+        "source": "cpp_ORCA1.fcm:1"
+      },
+      {
+        "key": "key_isf",
+        "defined": true,
+        "source": "cpp_ORCA1.fcm:1"
+      }
+    ],
+    "ocean_overlay": [
+      {
+        "block": "namrun",
+        "active": true,
+        "effective": {
+          "cn_exp": "ORCA1",
+          "nn_no": 0,
+          "nn_it000": 1,
+          "nn_itend": 350400,
+          "nn_date0": 20000101,
+          "ln_rstart": false,
+          "nn_rstctl": 0,
+          "cn_ocerst_in": "restart_init_oce",
+          "cn_ocerst_out": "restart_oce",
+          "nn_istate": 0,
+          "nn_stock": 0,
+          "nn_write": 720,
+          "ln_mskland": true,
+          "ln_clobber": true
+        },
+        "source": "EXPREF/namelist_cfg:34-54"
+      },
+      {
+        "block": "namdom",
+        "active": true,
+        "effective": {
+          "rn_Dt": 3600,
+          "ln_meshmask": false,
+          "ln_shuman": true
+        },
+        "source": "EXPREF/namelist_cfg:56-61"
+      },
+      {
+        "block": "namcfg",
+        "active": true,
+        "effective": {
+          "ln_read_cfg": true,
+          "cn_domcfg": "domain_cfg"
+        },
+        "source": "EXPREF/namelist_cfg:63-69"
+      },
+      {
+        "block": "namtsd",
+        "active": true,
+        "effective": {
+          "ln_tsd_init": true,
+          "ln_tsd_dmp": false,
+          "cn_dir": "./",
+          "sn_tem": {
+            "file": "woce_temp_monthly_init_4p2",
+            "freqh": -1,
+            "variable": "contemp",
+            "time_interpolation": true,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "sn_sal": {
+            "file": "woce_salt_monthly_init_4p2",
+            "freqh": -1,
+            "variable": "presalt",
+            "time_interpolation": true,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          }
+        },
+        "source": "EXPREF/namelist_cfg:71-83"
+      },
+      {
+        "block": "namsbc",
+        "active": true,
+        "effective": {
+          "nn_fsbc": 4,
+          "ln_usr": false,
+          "ln_flx": false,
+          "ln_blk": true,
+          "ln_abl": false,
+          "ln_cpl": false,
+          "ln_mixcpl": false,
+          "nn_components": 0,
+          "nn_ice": 2,
+          "ln_ice_embd": false,
+          "ln_traqsr": true,
+          "ln_dm2dc": true,
+          "ln_ssr": true,
+          "nn_fwb": 1,
+          "ln_rnf": true,
+          "ln_apr_dyn": false,
+          "ln_wave": false,
+          "nn_lsm": 0
+        },
+        "source": "EXPREF/namelist_cfg:104-127 + EXPREF/namelist_ref:179-215"
+      },
+      {
+        "block": "namsbc_blk",
+        "active": true,
+        "effective": {
+          "ln_NCAR": true,
+          "ln_COARE_3p0": false,
+          "ln_COARE_3p6": false,
+          "ln_ECMWF": false,
+          "ln_MFS": false,
+          "ln_ANDREAS": false,
+          "rn_zqt": 10.0,
+          "rn_zu": 10.0,
+          "nn_iter_algo": 5,
+          "ln_skin_cs": false,
+          "ln_skin_wl": false,
+          "rn_pfac": 1.0,
+          "rn_efac": 1.0,
+          "ln_crt_fbk": false,
+          "rn_stau_a": -0.0029,
+          "rn_stau_b": 0.008,
+          "ln_humi_sph": true,
+          "ln_humi_dpt": false,
+          "ln_humi_rlh": false,
+          "ln_tair_pot": false,
+          "ln_prec_met": false,
+          "ln_Cx_ice_cst": true,
+          "rn_Cd_ia": 0.001,
+          "rn_Ce_ia": 0.001,
+          "rn_Ch_ia": 0.001,
+          "ln_Cx_ice_frm": false,
+          "ln_Cx_ice_AN05": false,
+          "ln_Cx_ice_LU12": false,
+          "ln_Cx_ice_LG15": false,
+          "cn_dir": "./",
+          "sn_wndi": {
+            "file": "u_10.15JUNE2009",
+            "freqh": 6.0,
+            "variable": "U_10_MOD",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "weights_coreII_2_eORCA1.4.2_bicubic.nc",
+            "rotation_pair": "Uwnd",
+            "land_sea_mask": ""
+          },
+          "sn_wndj": {
+            "file": "v_10.15JUNE2009",
+            "freqh": 6.0,
+            "variable": "V_10_MOD",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "weights_coreII_2_eORCA1.4.2_bicubic.nc",
+            "rotation_pair": "Vwnd",
+            "land_sea_mask": ""
+          },
+          "sn_qsr": {
+            "file": "ncar_rad.15JUNE2009",
+            "freqh": 24.0,
+            "variable": "SWDN_MOD",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "weights_coreII_2_eORCA1.4.2_bilinear.nc",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "sn_qlw": {
+            "file": "ncar_rad.15JUNE2009",
+            "freqh": 24.0,
+            "variable": "LWDN_MOD",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "weights_coreII_2_eORCA1.4.2_bilinear.nc",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "sn_tair": {
+            "file": "t_10.15JUNE2009",
+            "freqh": 6.0,
+            "variable": "T_10_MOD",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "weights_coreII_2_eORCA1.4.2_bilinear.nc",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "sn_humi": {
+            "file": "q_10.15JUNE2009",
+            "freqh": 6.0,
+            "variable": "Q_10_MOD",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "weights_coreII_2_eORCA1.4.2_bilinear.nc",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "sn_prec": {
+            "file": "ncar_precip.15JUNE2009",
+            "freqh": -1.0,
+            "variable": "PRC_MOD",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "weights_coreII_2_eORCA1.4.2_bilinear.nc",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "sn_snow": {
+            "file": "ncar_precip.15JUNE2009",
+            "freqh": -1.0,
+            "variable": "SNOW",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "weights_coreII_2_eORCA1.4.2_bilinear.nc",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "sn_slp": {
+            "file": "slp.15JUNE2009",
+            "freqh": 6.0,
+            "variable": "SLP",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "weights_coreII_2_eORCA1.4.2_bilinear.nc",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "inactive_when_ln_crt_fbk_false": [
+            "rn_stau_a",
+            "rn_stau_b"
+          ]
+        },
+        "source": "EXPREF/namelist_cfg:129-158 + EXPREF/namelist_ref:230-290"
+      },
+      {
+        "block": "namtra_qsr",
+        "active": true,
+        "effective": {
+          "ln_qsr_rgb": true,
+          "nn_chldta": 1,
+          "cn_dir": "./",
+          "sn_chl": {
+            "file": "merged_ESACCI_BIOMER4V1R1_CHL_REG05",
+            "freqh": -1,
+            "variable": "CHLA",
+            "time_interpolation": true,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "weights_reg05_bilinear.nc",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          }
+        },
+        "source": "EXPREF/namelist_cfg:160-171"
+      },
+      {
+        "block": "namsbc_ssr",
+        "active": true,
+        "effective": {
+          "nn_sssr": 2,
+          "rn_deds": -220.0,
+          "ln_sssr_bnd": true,
+          "rn_sssr_bnd": 4.0,
+          "nn_sssr_ice": 0,
+          "cn_dir": "./",
+          "sn_sss": {
+            "file": "sss_climatology_for_restoring",
+            "freqh": -1.0,
+            "variable": "presalt",
+            "time_interpolation": true,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          }
+        },
+        "source": "EXPREF/namelist_cfg:173-186"
+      },
+      {
+        "block": "namsbc_rnf",
+        "active": true,
+        "effective": {
+          "ln_rnf_mouth": false,
+          "rn_rfact": 1.0,
+          "ln_rnf_depth": false,
+          "ln_rnf_tem": false,
+          "ln_rnf_sal": false,
+          "ln_rnf_icb": false,
+          "ln_rnf_depth_ini": true,
+          "rn_rnf_max": 0.05,
+          "rn_dep_max": 150.0,
+          "nn_rnf_depth_file": 0,
+          "cn_dir": "./",
+          "sn_rnf": {
+            "file": "runoff-icb_DaiTrenberth_Depoorter",
+            "freqh": -1,
+            "variable": "sorunoff",
+            "time_interpolation": true,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "sn_i_rnf": {
+            "file": "runoff-icb_DaiTrenberth_Depoorter",
+            "freqh": -1,
+            "variable": "Icb_flux",
+            "time_interpolation": true,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "sn_cnf": {
+            "file": "runoff-icb_DaiTrenberth_Depoorter",
+            "freqh": 0,
+            "variable": "socoefr",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "inactive_records": [
+            "sn_i_rnf because ln_rnf_icb=false"
+          ]
+        },
+        "source": "EXPREF/namelist_cfg:188-202 + EXPREF/namelist_ref:468-490"
+      },
+      {
+        "block": "namisf",
+        "active": true,
+        "effective": {
+          "domain_cfg_ln_isfcav": "UNRESOLVED: domain_cfg.nc payload absent",
+          "cn_isfload": "uniform",
+          "rn_isfload_T": -1.9,
+          "rn_isfload_S": 34.4,
+          "ln_isf": true,
+          "ln_isfdebug": false,
+          "cn_isfdir": "./",
+          "ln_isfcav_mlt": false,
+          "ln_isfpar_mlt": true,
+          "cn_isfpar_mlt": "spe",
+          "ln_isfcpl": false,
+          "sn_isfpar_zmax": {
+            "file": "runoff-icb_DaiTrenberth_Depoorter",
+            "freqh": -12,
+            "variable": "sodepmax_isf",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "sn_isfpar_zmin": {
+            "file": "runoff-icb_DaiTrenberth_Depoorter",
+            "freqh": -12,
+            "variable": "sodepmin_isf",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "sn_isfpar_fwf": {
+            "file": "runoff-icb_DaiTrenberth_Depoorter",
+            "freqh": -12,
+            "variable": "sornfisf",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          }
+        },
+        "source": "EXPREF/namelist_cfg:204-227 + EXPREF/namelist_ref:509-581"
+      },
+      {
+        "block": "namlbc",
+        "active": true,
+        "effective": {
+          "rn_shlat": 2.0,
+          "meaning": "no-slip"
+        },
+        "source": "EXPREF/namelist_cfg:240-244"
+      },
+      {
+        "block": "namdrg",
+        "active": true,
+        "effective": {
+          "ln_drg_OFF": false,
+          "ln_lin": false,
+          "ln_non_lin": true,
+          "ln_loglayer": false,
+          "ln_drgimp": true,
+          "ln_drgice_imp": true
+        },
+        "source": "EXPREF/namelist_cfg:256-262 + EXPREF/namelist_ref:810-819"
+      },
+      {
+        "block": "namdrg_bot",
+        "active": true,
+        "effective": {
+          "rn_Cd0": 0.001,
+          "rn_Cdmax": 0.1,
+          "rn_ke0": 0.0025,
+          "rn_z0": 0.003,
+          "ln_boost": false
+        },
+        "source": "EXPREF/namelist_cfg:264-270 + EXPREF/namelist_ref:832-841"
+      },
+      {
+        "block": "nambbc",
+        "active": true,
+        "effective": {
+          "ln_trabbc": true,
+          "nn_geoflx": 2,
+          "cn_dir": "./",
+          "sn_qgh": {
+            "file": "geothermal_heat_flux.nc",
+            "freqh": -12.0,
+            "variable": "gh_flux",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "weights_ghflux_bilinear.nc",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          }
+        },
+        "source": "EXPREF/namelist_cfg:272-282"
+      },
+      {
+        "block": "nambbl",
+        "active": true,
+        "effective": {
+          "ln_trabbl": true,
+          "nn_bbl_ldf": 0,
+          "nn_bbl_adv": 2,
+          "rn_ahtbbl": 1000.0,
+          "rn_gambbl": 20.0
+        },
+        "source": "EXPREF/namelist_cfg:284-291"
+      },
+      {
+        "block": "nameos",
+        "active": true,
+        "effective": {
+          "ln_teos10": true,
+          "ln_eos80": false,
+          "ln_seos": false
+        },
+        "source": "EXPREF/namelist_cfg:305-309 + EXPREF/namelist_ref:878-882"
+      },
+      {
+        "block": "namtra_adv",
+        "active": true,
+        "effective": {
+          "ln_traadv_OFF": false,
+          "ln_traadv_cen": false,
+          "ln_traadv_fct": true,
+          "nn_fct_h": 2,
+          "nn_fct_v": 2,
+          "nn_fct_imp": 1,
+          "ln_traadv_mus": false,
+          "ln_mus_ups": false,
+          "ln_traadv_ubs": false,
+          "ln_traadv_qck": false
+        },
+        "source": "EXPREF/namelist_cfg:311-316 + EXPREF/namelist_ref:898-913"
+      },
+      {
+        "block": "namtra_ldf",
+        "active": true,
+        "effective": {
+          "ln_traldf_OFF": false,
+          "ln_traldf_lap": true,
+          "ln_traldf_blp": false,
+          "ln_traldf_lev": false,
+          "ln_traldf_hor": false,
+          "ln_traldf_iso": true,
+          "ln_traldf_triad": false,
+          "ln_traldf_msc": true,
+          "rn_slpmax": 0.01,
+          "nn_aht_ijk_t": 21,
+          "rn_Ud": 0.018,
+          "rn_Ld": 100000.0
+        },
+        "source": "EXPREF/namelist_cfg:318-328 + EXPREF/namelist_ref:915-946"
+      },
+      {
+        "block": "namtra_mle",
+        "active": true,
+        "effective": {
+          "ln_mle": true,
+          "rn_ce": 0.06,
+          "nn_mle": 1,
+          "rn_lat": 20.0,
+          "nn_mld_uv": 0,
+          "nn_conv": 0,
+          "rn_rho_c_mle": 0.01
+        },
+        "source": "EXPREF/namelist_cfg:330-333 + EXPREF/namelist_ref:950-961"
+      },
+      {
+        "block": "namtra_eiv",
+        "active": true,
+        "effective": {
+          "ln_ldfeiv": true,
+          "nn_aei_ijk_t": 21,
+          "rn_Ue": 0.018,
+          "rn_Le": 100000.0,
+          "ln_eke_equ": false
+        },
+        "source": "EXPREF/namelist_cfg:335-344 + EXPREF/namelist_ref:963-982"
+      },
+      {
+        "block": "namtra_dmp",
+        "active": false,
+        "effective": {
+          "ln_tradmp": false,
+          "nn_zdmp": 0,
+          "inactive_when_ln_tradmp_false": [
+            "nn_zdmp"
+          ]
+        },
+        "source": "EXPREF/namelist_cfg:347-351"
+      },
+      {
+        "block": "nam_vvl",
+        "active": true,
+        "effective": {
+          "ln_vvl_zstar": true,
+          "ln_vvl_ztilde": false,
+          "ln_vvl_layer": false,
+          "nn_vvl_interp": 2
+        },
+        "source": "EXPREF/namelist_cfg:366-369 + EXPREF/namelist_ref:1034-1046"
+      },
+      {
+        "block": "namdyn_adv",
+        "active": true,
+        "effective": {
+          "ln_dynadv_vec": true,
+          "nn_dynkeg": 1
+        },
+        "source": "EXPREF/namelist_cfg:371-375"
+      },
+      {
+        "block": "namdyn_vor",
+        "active": true,
+        "effective": {
+          "ln_dynvor_een": true,
+          "nn_e3f_typ": 0,
+          "ln_dynvor_msk": false
+        },
+        "source": "EXPREF/namelist_cfg:377-381 + EXPREF/namelist_ref:1061-1073"
+      },
+      {
+        "block": "namdyn_hpg",
+        "active": true,
+        "effective": {
+          "ln_hpg_sco": true,
+          "ln_hpg_isf": false
+        },
+        "source": "EXPREF/namelist_cfg:383-386 + EXPREF/namelist_ref:1076-1084"
+      },
+      {
+        "block": "namdyn_spg",
+        "active": true,
+        "effective": {
+          "ln_dynspg_ts": true,
+          "ln_bt_fw": true,
+          "nn_bt_flt": 1,
+          "rn_bt_alpha": 0.0,
+          "ln_bt_auto": true,
+          "rn_bt_cmax": 0.8
+        },
+        "source": "EXPREF/namelist_cfg:388-399 + EXPREF/namelist_ref:1087-1102"
+      },
+      {
+        "block": "namdyn_ldf",
+        "active": true,
+        "effective": {
+          "ln_dynldf_lap": true,
+          "ln_dynldf_lev": true,
+          "nn_dynldf_typ": 0,
+          "nn_ahm_ijk_t": -30,
+          "coefficient_file": "eddy_viscosity_3D.nc"
+        },
+        "source": "EXPREF/namelist_cfg:402-419 + EXPREF/namelist_ref:1105-1134"
+      },
+      {
+        "block": "namzdf",
+        "active": true,
+        "effective": {
+          "ln_zad_Aimp": true,
+          "ln_zdftke": true,
+          "ln_zdfevd": true,
+          "nn_evdm": 0,
+          "rn_evd": 100.0,
+          "ln_zdfddm": false,
+          "rn_avts": 0.0001,
+          "rn_hsbfr": 1.6,
+          "ln_zdfiwm": true,
+          "rn_avm0": 0.00012,
+          "rn_avt0": 0.000012,
+          "nn_avb": 0,
+          "nn_havtb": 0,
+          "inactive_when_ln_zdfddm_false": [
+            "rn_avts",
+            "rn_hsbfr"
+          ]
+        },
+        "source": "EXPREF/namelist_cfg:422-440"
+      },
+      {
+        "block": "namzdf_tke",
+        "active": true,
+        "effective": {
+          "nn_mxl": 2,
+          "ln_mxl0": true,
+          "rn_mxl0": 0.04,
+          "nn_mxlice": 2,
+          "nn_etau": 1,
+          "rn_efr": 0.08,
+          "nn_htau": 1,
+          "ln_lc": true,
+          "rn_lc": 0.25,
+          "nn_eice": 3,
+          "rn_ediff": 0.1,
+          "rn_ediss": 0.7,
+          "rn_ebb": 67.83,
+          "rn_emin": 0.000001,
+          "rn_emin0": 0.0001,
+          "rn_bshear": 1e-20,
+          "nn_pdl": 1,
+          "ln_mxhsw": false,
+          "nn_bc_surf": 1,
+          "nn_bc_bot": 1,
+          "inactive_without_wave_coupling": [
+            "nn_bc_surf",
+            "nn_bc_bot"
+          ]
+        },
+        "source": "EXPREF/namelist_cfg:442-454 + EXPREF/namelist_ref:1223-1262"
+      },
+      {
+        "block": "namzdf_iwm",
+        "active": true,
+        "effective": {
+          "ln_mevar": false,
+          "ln_tsdiff": false,
+          "cn_dir": "./",
+          "sn_mpb": {
+            "file": "zdfiwm_forcing_TRA.nc",
+            "freqh": -12,
+            "variable": "power_bot",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "sn_mpc": {
+            "file": "zdfiwm_forcing_TRA.nc",
+            "freqh": -12,
+            "variable": "power_cri",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "sn_mpn": {
+            "file": "zdfiwm_forcing_TRA.nc",
+            "freqh": -12,
+            "variable": "power_nsq",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "sn_mps": {
+            "file": "zdfiwm_forcing_TRA.nc",
+            "freqh": -12,
+            "variable": "power_sho",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "sn_dsb": {
+            "file": "zdfiwm_forcing_TRA.nc",
+            "freqh": -12,
+            "variable": "scale_bot",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "sn_dsc": {
+            "file": "zdfiwm_forcing_TRA.nc",
+            "freqh": -12,
+            "variable": "scale_cri",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          }
+        },
+        "source": "EXPREF/namelist_cfg:457-472"
+      },
+      {
+        "block": "namhsb",
+        "active": true,
+        "effective": {
+          "ln_diahsb": true
+        },
+        "source": "EXPREF/namelist_cfg:489-492"
+      },
+      {
+        "block": "namnc4",
+        "active": true,
+        "effective": {
+          "nn_nchunks_i": 1,
+          "nn_nchunks_j": 1,
+          "nn_nchunks_k": 75,
+          "ln_nc4zip": true
+        },
+        "source": "EXPREF/namelist_cfg:494-503"
+      },
+      {
+        "block": "nammpp",
+        "active": true,
+        "effective": {
+          "ln_listonly": false,
+          "ln_nnogather": true,
+          "ln_mppdelay": true,
+          "jpni": 0,
+          "jpnj": 0,
+          "nn_hls": 2,
+          "nn_comm": 1,
+          "decomposition": "automatic because jpni and jpnj are less than 1"
+        },
+        "source": "EXPREF/namelist_cfg:514-520 + EXPREF/namelist_ref:1510-1520"
+      },
+      {
+        "block": "namctl",
+        "active": true,
+        "effective": {
+          "ln_timing": true,
+          "ln_diacfl": false,
+          "sn_cfctl.l_runstat": false,
+          "sn_cfctl.l_trcstat": false,
+          "sn_cfctl.l_oceout": false,
+          "sn_cfctl.l_layout": false,
+          "sn_cfctl.l_prtctl": false,
+          "sn_cfctl.l_prttrc": false,
+          "sn_cfctl.l_oasout": false,
+          "sn_cfctl.l_obsstat": false,
+          "sn_cfctl.procmin": 0,
+          "sn_cfctl.procmax": 1000000,
+          "sn_cfctl.procincr": 1,
+          "sn_cfctl.ptimincr": 1
+        },
+        "source": "EXPREF/namelist_cfg:522-527 + EXPREF/namelist_ref:1522-1534"
+      }
+    ],
+    "ice_overlay": [
+      {
+        "block": "nampar",
+        "active": true,
+        "effective": {
+          "jpl": 1,
+          "nlay_i": 3,
+          "nlay_s": 3,
+          "ln_virtual_itd": false,
+          "ln_icedyn": true,
+          "ln_icethd": true,
+          "rn_amax_n": 0.99999,
+          "rn_amax_s": 0.99999,
+          "cn_icerst_in": "restart_ice_r4.2",
+          "cn_icerst_out": "restart_ice"
+        },
+        "source": "EXPREF/namelist_ice_cfg:22-33 + EXPREF/namelist_ice_ref:22-37"
+      },
+      {
+        "block": "namitd",
+        "active": true,
+        "effective": {
+          "ln_cat_hfn": true,
+          "ln_cat_usr": false,
+          "rn_himean": 2.0,
+          "rn_himin": 0.05,
+          "rn_himax": 99.0
+        },
+        "source": "EXPREF/namelist_ice_cfg:35-40 + EXPREF/namelist_ice_ref:39-47"
+      },
+      {
+        "block": "namdyn",
+        "active": true,
+        "effective": {
+          "ln_dynALL": true,
+          "ln_dynRHGADV": false,
+          "ln_dynADV1D": false,
+          "ln_dynADV2D": false,
+          "rn_ishlat": 2.0,
+          "ln_landfast_L16": true,
+          "rn_lf_depfra": 0.125,
+          "rn_lf_bfr": 15.0,
+          "rn_lf_relax": 0.00001,
+          "rn_lf_tensile": 0.05,
+          "cn_dir": "./",
+          "sn_icbmsk": {
+            "file": "NOT USED",
+            "freqh": -12.0,
+            "variable": "icb_mask",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "sn_fastmsk": {
+            "file": "NOT USED",
+            "freqh": -12.0,
+            "variable": "fast_mask",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          }
+        },
+        "source": "EXPREF/namelist_ice_cfg:42-47 + EXPREF/namelist_ice_ref:49-71"
+      },
+      {
+        "block": "namdyn_rdgrft",
+        "active": true,
+        "effective": {
+          "ln_str_H79": true,
+          "ln_str_R75": false,
+          "ln_str_CST": false,
+          "rn_pstar": 20000.0,
+          "rn_crhg": 20.0,
+          "ln_str_smooth": false,
+          "ln_distf_lin": false,
+          "ln_distf_exp": true,
+          "rn_murdg": 3.0,
+          "rn_csrdg": 0.5,
+          "ln_partf_lin": false,
+          "ln_partf_exp": true,
+          "rn_astar": 0.03,
+          "ln_ridging": true,
+          "ln_rafting": true,
+          "rn_hstar": 25.0,
+          "rn_fsnwrdg": 0.5,
+          "rn_fpndrdg": 0.5,
+          "rn_porordg": 0.0,
+          "rn_hraft": 0.75,
+          "rn_craft": 5.0,
+          "rn_fsnwrft": 0.5,
+          "rn_fpndrft": 0.5
+        },
+        "source": "EXPREF/namelist_ice_cfg:49-66 + EXPREF/namelist_ice_ref:73-104"
+      },
+      {
+        "block": "namdyn_rhg",
+        "active": true,
+        "effective": {
+          "ln_rhg_EVP": true,
+          "ln_rhg_EAP": false,
+          "ln_rhg_VP": false,
+          "rn_creepl": 2E-9,
+          "rn_ecc": 2.0,
+          "nn_nevp": 100,
+          "rn_relast": 0.333,
+          "nn_rhg_chkcvg": 0
+        },
+        "source": "EXPREF/namelist_ice_cfg:68-71 + EXPREF/namelist_ice_ref:106-125"
+      },
+      {
+        "block": "namdyn_adv",
+        "active": true,
+        "effective": {
+          "ln_adv_Pra": true,
+          "ln_adv_UMx": false
+        },
+        "source": "EXPREF/namelist_ice_cfg:73-77 + EXPREF/namelist_ice_ref:127-132"
+      },
+      {
+        "block": "namsbc",
+        "active": true,
+        "effective": {
+          "rn_Cd_io": 0.005,
+          "nn_snwfra": 2,
+          "rn_snwblow": 0.66,
+          "nn_flxdist": -1,
+          "ln_cndflx": false,
+          "ln_cndemulate": false,
+          "nn_qtrice": 0
+        },
+        "source": "EXPREF/namelist_ice_cfg:79-83 + EXPREF/namelist_ice_ref:134-153"
+      },
+      {
+        "block": "namthd",
+        "active": true,
+        "effective": {
+          "ln_icedH": true,
+          "ln_icedA": false,
+          "ln_icedO": true,
+          "ln_leadhfx": true
+        },
+        "source": "EXPREF/namelist_ice_cfg:85-88 + EXPREF/namelist_ice_ref:155-161"
+      },
+      {
+        "block": "namthd_zdf",
+        "active": true,
+        "effective": {
+          "ln_zdf_BL99": true,
+          "ln_cndi_U64": false,
+          "ln_cndi_P07": true,
+          "rn_cnd_s": 0.5,
+          "ln_zdf_chkcvg": false
+        },
+        "source": "EXPREF/namelist_ice_cfg:90-95 + EXPREF/namelist_ice_ref:163-175"
+      },
+      {
+        "block": "namthd_da",
+        "active": false,
+        "effective": {
+          "reason": "ln_icedA=false",
+          "rn_beta": 1.0,
+          "rn_dmin": 8.0
+        },
+        "source": "EXPREF/namelist_ice_cfg:97-99 + EXPREF/namelist_ice_ref:177-185"
+      },
+      {
+        "block": "namthd_do",
+        "active": true,
+        "effective": {
+          "rn_hinew": 0.05,
+          "ln_frazil": false
+        },
+        "source": "EXPREF/namelist_ice_cfg:101-104 + EXPREF/namelist_ice_ref:188-195"
+      },
+      {
+        "block": "namthd_sal",
+        "active": true,
+        "effective": {
+          "nn_icesal": 2,
+          "ln_flushing": true,
+          "ln_drainage": true,
+          "rn_simin": 0.1,
+          "rn_sinew": 0.75,
+          "rn_icesal": 4.0,
+          "rn_sal_gd": 5.0,
+          "rn_time_gd": 1730000.0,
+          "rn_sal_fl": 2.0,
+          "rn_time_fl": 864000.0,
+          "rn_sal_himin": 0.1,
+          "nn_liquidus": 2,
+          "nn_drainage": 50,
+          "nn_flushing": 5,
+          "rn_flushrate": 0.3,
+          "rn_vbrc": 0.05,
+          "nn_sal_scheme": 1,
+          "rn_alpha_RJW": 0.03,
+          "rn_Rc_RJW": 9.0,
+          "rn_alpha_GN": 0.00054,
+          "rn_Rc_GN": 6.4,
+          "rn_alpha_CW": 9E-7,
+          "ln_sal_chk": false,
+          "inactive_parameter_groups": {
+            "nn_icesal_1": [
+              "rn_icesal"
+            ],
+            "nn_icesal_4": [
+              "nn_liquidus",
+              "nn_drainage",
+              "nn_flushing",
+              "rn_flushrate",
+              "rn_vbrc",
+              "nn_sal_scheme",
+              "rn_alpha_RJW",
+              "rn_Rc_RJW",
+              "rn_alpha_GN",
+              "rn_Rc_GN",
+              "rn_alpha_CW",
+              "ln_sal_chk"
+            ]
+          },
+          "note": "nn_icesal=2 selects varying salinity; flushing, drainage and rn_sal_himin execute for this branch"
+        },
+        "source": "EXPREF/namelist_ice_cfg:106-147"
+      },
+      {
+        "block": "namthd_pnd",
+        "active": false,
+        "effective": {
+          "ln_pnd": false,
+          "ln_pnd_LEV": false
+        },
+        "source": "EXPREF/namelist_ice_cfg:149-154"
+      },
+      {
+        "block": "namini",
+        "active": true,
+        "effective": {
+          "ln_iceini": true,
+          "nn_iceini_file": 1,
+          "rn_thres_sst": 2.0,
+          "rn_hti_ini_n": 2.5,
+          "rn_hti_ini_s": 1.0,
+          "rn_hts_ini_n": 0.2,
+          "rn_hts_ini_s": 0.1,
+          "rn_ati_ini_n": 0.997,
+          "rn_ati_ini_s": 0.8,
+          "rn_smi_ini_n": 9.0,
+          "rn_smi_ini_s": 4.0,
+          "rn_tmi_ini_n": 260.0,
+          "rn_tmi_ini_s": 272.0,
+          "rn_tsu_ini_n": 250.0,
+          "rn_tsu_ini_s": 270.0,
+          "rn_tms_ini_n": 255.0,
+          "rn_tms_ini_s": 271.0,
+          "rn_apd_ini_n": 0.0,
+          "rn_apd_ini_s": 0.2,
+          "rn_hpd_ini_n": 0.0,
+          "rn_hpd_ini_s": 0.05,
+          "rn_hld_ini_n": 0.0,
+          "rn_hld_ini_s": 0.0,
+          "cn_dir": "./",
+          "sn_hti": {
+            "file": "Ice_initialization",
+            "freqh": -12,
+            "variable": "ht_i",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "sn_hts": {
+            "file": "Ice_initialization",
+            "freqh": -12,
+            "variable": "ht_s",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "sn_ati": {
+            "file": "Ice_initialization",
+            "freqh": -12,
+            "variable": "at_i",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "sn_smi": {
+            "file": "Ice_initialization",
+            "freqh": -12,
+            "variable": "sm_i",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "sn_tmi": {
+            "file": "NOT USED",
+            "freqh": -12,
+            "variable": "tm_i",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "sn_tsu": {
+            "file": "Ice_initialization",
+            "freqh": -12,
+            "variable": "tmsu",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "sn_tms": {
+            "file": "NOT USED",
+            "freqh": -12,
+            "variable": "tm_s",
+            "time_interpolation": false,
+            "climatology": true,
+            "period": "yearly",
+            "weights": "",
+            "rotation_pair": "",
+            "land_sea_mask": ""
+          },
+          "inactive_when_nn_iceini_file_is_1": [
+            "rn_thres_sst",
+            "rn_hti_ini_n",
+            "rn_hti_ini_s",
+            "rn_hts_ini_n",
+            "rn_hts_ini_s",
+            "rn_ati_ini_n",
+            "rn_ati_ini_s",
+            "rn_smi_ini_n",
+            "rn_smi_ini_s",
+            "rn_tmi_ini_n",
+            "rn_tmi_ini_s",
+            "rn_tsu_ini_n",
+            "rn_tsu_ini_s",
+            "rn_tms_ini_n",
+            "rn_tms_ini_s",
+            "rn_apd_ini_n",
+            "rn_apd_ini_s",
+            "rn_hpd_ini_n",
+            "rn_hpd_ini_s",
+            "rn_hld_ini_n",
+            "rn_hld_ini_s"
+          ]
+        },
+        "source": "EXPREF/namelist_ice_cfg:156-190"
+      },
+      {
+        "block": "namalb",
+        "active": true,
+        "effective": {
+          "rn_alb_sdry": 0.85,
+          "rn_alb_smlt": 0.75,
+          "rn_alb_idry": 0.64,
+          "rn_alb_imlt": 0.53,
+          "rn_alb_dpnd": 0.18,
+          "rn_alb_lpnd": 0.3,
+          "rn_alb_hpiv": 1.0
+        },
+        "source": "EXPREF/namelist_ice_cfg:192-194 + EXPREF/namelist_ice_ref:303-313"
+      },
+      {
+        "block": "namdia",
+        "active": false,
+        "effective": {
+          "ln_icediachk": false,
+          "ln_icectl": false
+        },
+        "source": "EXPREF/namelist_ice_cfg:196-199 + EXPREF/namelist_ice_ref:315-324"
+      }
+    ]
+  },
+  "coverage_rows": [
+    {
+      "id": "CPP-SI3",
+      "requirement": "key_si3 plus SI3 top-level ocean/ice orchestration",
+      "status": "ABSENT",
+      "legoesm": "A prognostic sea-ice subsystem exists, but it is not an SI3 driver or exact SI3 state/ordering recipe.",
+      "evidence": [
+        "packages/ice/legoesm/ice/sea_ice.py:1-16",
+        "scripts/run/run_omip_core2.py:3158-3205"
+      ],
+      "dino_receipt": [
+        "docs/ocean/fidelity/dino_full_step_coverage_round94_result.md:42-47"
+      ],
+      "scope": "DINO compiled and ran without sea ice; no DINO certificate can apply.",
+      "structural_gap": true,
+      "effort": "XXL"
+    },
+    {
+      "id": "CPP-XIOS",
+      "requirement": "key_xios",
+      "status": "N/A-INFRA",
+      "legoesm": "Different output stack.",
+      "evidence": [
+        "target:EXPREF/field_def_nemo-oce.xml",
+        "target:EXPREF/file_def_nemo-oce.xml"
+      ],
+      "dino_receipt": [],
+      "scope": "I/O only.",
+      "structural_gap": false,
+      "effort": "N/A"
+    },
+    {
+      "id": "CPP-QCO",
+      "requirement": "key_qco z-star/VVL geometry core",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "NEMO QCO thickness factors and z-star state are implemented.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/vertical.py:55-145",
+        "packages/ocean/legoesm/ocean/state.py:1201-1225"
+      ],
+      "dino_receipt": [
+        "scripts/validate/ocean_fidelity/dino_1226/fidelity_bar_gate.py:2342-2462",
+        "docs/ocean/fidelity/dino_full_step_coverage_round94_result.md:54-60"
+      ],
+      "scope": "A narrow formula harness matched, but the production DINO QCO r3t/r3u/r3v row remains DEBT; ORCA additionally composes partial cells, RK3 and ISF.",
+      "structural_gap": false,
+      "effort": "M"
+    },
+    {
+      "id": "CPP-VCO-1D3D",
+      "requirement": "key_vco_1d3d vertical-coordinate dispatch",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "Carries 1-D reference ladders and 3-D mesh/thickness fields, but DINO used key_vco_3d rather than this dispatch.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/vertical.py:145-220",
+        "packages/ocean/legoesm/ocean/fidelity/nemo_io.py:33-77"
+      ],
+      "dino_receipt": [],
+      "scope": "Exact compile-key composition is untested.",
+      "structural_gap": true,
+      "effort": "M"
+    },
+    {
+      "id": "CPP-RK3",
+      "requirement": "key_RK3 whole-step orchestration",
+      "status": "ABSENT",
+      "legoesm": "Momentum rk3_ws and a generic tracer RK3 exist, but there is no single NEMO stprk3 stage program coordinating tracers, QCO, barotropic updates, LDF/ZDF, SBC, SI3, and ISF.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/state.py:2064-2072",
+        "packages/ocean/legoesm/ocean/state.py:2309-2320",
+        "docs/ocean/fidelity/nemo_gyre_wiring_comparison.md:32-40"
+      ],
+      "dino_receipt": [
+        "docs/ocean/fidelity/dino_step_chain_coverage.md:8-16"
+      ],
+      "scope": "DINO's certificate is MLF-only. GYRE certifies momentum rk3_ws but explicitly leaves tracer stepping unmatched; it is not a DINO receipt.",
+      "structural_gap": true,
+      "effort": "XL"
+    },
+    {
+      "id": "CPP-ISF",
+      "requirement": "key_isf geometry and step integration",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "The selected parametrised spe melt forcing and depth deposition exist; general overhanging cavity geometry and rigid cavity-lid integration remain deferred.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/forcing/isf_spe.py:1-55",
+        "packages/ocean/legoesm/ocean/coupler/ice_shelf_apply.py:337-381",
+        "packages/ocean/legoesm/ocean/dynamics/_future/immersed_boundary.py:48-94"
+      ],
+      "dino_receipt": [
+        "docs/ocean/fidelity/dino_full_step_coverage_round94_result.md:42-47"
+      ],
+      "scope": "DINO had ISF compiled/routed off; ORCA's spe recipe has no oracle match.",
+      "structural_gap": true,
+      "effort": "L"
+    },
+    {
+      "id": "DOM-DOMAINCFG",
+      "requirement": "read real DOMAINcfg/eORCA mesh",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "Reads NEMO mesh_mask geometry and builds eORCA tripole runs.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/init_tripole.py:1-40",
+        "packages/ocean/legoesm/ocean/fidelity/nemo_io.py:152-200"
+      ],
+      "dino_receipt": [],
+      "scope": "DINO geometry identity was on its idealized grid, not eORCA DOMAINcfg.",
+      "structural_gap": true,
+      "effort": "L"
+    },
+    {
+      "id": "DOM-PARTIAL",
+      "requirement": "real-bathymetry partial cells and NEMO face-thickness rules",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "Partial-cell coordinates exist, but the DINO reconciliation hardcodes an averaging choice where DOMAINcfg uses the shallower-neighbour minimum.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/vertical.py:656-823",
+        "docs/ocean/fidelity/dino_outstanding_fidelity_debt.md:D2.5"
+      ],
+      "dino_receipt": [],
+      "scope": "Explicit min-rule debt; DINO had no partial cells.",
+      "structural_gap": true,
+      "effort": "L"
+    },
+    {
+      "id": "DOM-TRIPOLE",
+      "requirement": "multi-basin eORCA lateral boundaries and north fold",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "Fold-aware tripolar grid/operators and real eORCA runs exist.",
+      "evidence": [
+        "docs/ocean/experiments/tripole_grid_implementation_status.md",
+        "packages/ocean/legoesm/ocean/dynamics/latlon_cgrid_operators.py:128-132"
+      ],
+      "dino_receipt": [],
+      "scope": "DINO was zonally re-entrant with closed meridional walls; it did not certify a north fold or multi-basin masks.",
+      "structural_gap": true,
+      "effort": "L"
+    },
+    {
+      "id": "DOM-LBC",
+      "requirement": "rn_shlat=2 no-slip lateral momentum boundary",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "A lateral-side boundary selector exists, but DINO certified rn_shlat=0 free-slip.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/state.py:2241-2248",
+        "docs/ocean/fidelity/dino_campaign_synthesis.md:310"
+      ],
+      "dino_receipt": [],
+      "scope": "Different active boundary scheme.",
+      "structural_gap": false,
+      "effort": "M"
+    },
+    {
+      "id": "DOM-TS-INIT",
+      "requirement": "monthly WOCE T/S initialization",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "WOA/NEMO-grid initialization and native-field loaders exist; the named WOCE fields have no DINO oracle receipt.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/init_woa.py",
+        "packages/ocean/legoesm/ocean/forcing/nemo_native_fields.py:1-20"
+      ],
+      "dino_receipt": [],
+      "scope": "Different initial-condition source and global geometry.",
+      "structural_gap": false,
+      "effort": "M"
+    },
+    {
+      "id": "SBC-FLDREAD",
+      "requirement": "fldread climatological file sampling, time interpolation, regridding, and vector rotation",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "OMIP applicator and native-field loaders implement the production data path, but not as a general NEMO fldread engine.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/coupler/omip2_applicator.py:384-457",
+        "packages/ocean/legoesm/ocean/forcing/nemo_native_fields.py:83-125"
+      ],
+      "dino_receipt": [],
+      "scope": "DINO forcing is analytic; file/calendar/weight semantics are un-certified.",
+      "structural_gap": true,
+      "effort": "L"
+    },
+    {
+      "id": "SBC-NCAR",
+      "requirement": "NCAR/Large-Yeager bulk forcing",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "A NEMO-5.0.1-oriented NCAR implementation and oracle unit tests exist.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/bulk_flux_omip.py:1-86",
+        "tests/ocean/unit/test_ncar_bulk.py:1-20"
+      ],
+      "dino_receipt": [],
+      "scope": "DINO certified its analytic forcing, not NCAR bulk fluxes.",
+      "structural_gap": true,
+      "effort": "M"
+    },
+    {
+      "id": "SBC-ICE",
+      "requirement": "nn_ice=2 levitating SI3 coupling and constant ice-air coefficients",
+      "status": "ABSENT",
+      "legoesm": "Generic tile coupling exists, but exact SI3 exchange ordering, categories, stresses, mass/salt/heat fluxes, and levitating-ice semantics do not.",
+      "evidence": [
+        "packages/ice/legoesm/ice/sea_ice.py",
+        "scripts/run/run_omip_core2.py:7932-8035"
+      ],
+      "dino_receipt": [],
+      "scope": "Whole recipe, not the existence of an ice coupler.",
+      "structural_gap": true,
+      "effort": "XXL"
+    },
+    {
+      "id": "SBC-QSR-RGB",
+      "requirement": "RGB shortwave penetration with monthly CHLA",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "NEMO RGB/CHLA port and production loading exist.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/physics/shortwave_penetration.py:1-18",
+        "scripts/run/run_omip_core2.py:2619-2655"
+      ],
+      "dino_receipt": [
+        "docs/ocean/fidelity/dino_full_step_coverage_round94_result.md:31-37"
+      ],
+      "scope": "DINO's two-band tra_qsr redistribution remains unmeasured; RGB is a different branch.",
+      "structural_gap": false,
+      "effort": "M"
+    },
+    {
+      "id": "SBC-DM2DC",
+      "requirement": "daily-mean shortwave to diurnal cycle",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "Tripole/lat-lon command path exists.",
+      "evidence": [
+        "scripts/run/run_omip_core2.py:4640-4644",
+        "scripts/run/run_omip_core2.py:6285-6289"
+      ],
+      "dino_receipt": [],
+      "scope": "DINO's diurnal path was off.",
+      "structural_gap": false,
+      "effort": "S"
+    },
+    {
+      "id": "SBC-SSS",
+      "requirement": "bounded nn_sssr=2 monthly SSS restoring, gated under ice",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "SSS restoring and river-mouth/ice gates exist.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/coupler/sss_apply.py",
+        "scripts/run/run_omip_core2.py:4913-4951"
+      ],
+      "dino_receipt": [],
+      "scope": "Not active in DINO.",
+      "structural_gap": false,
+      "effort": "M"
+    },
+    {
+      "id": "SBC-FWB",
+      "requirement": "nn_fwb=1 per-step global mean E-P-R correction",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "Freshwater correction/conservation controls exist in the OMIP driver and core freshwater operator.",
+      "evidence": [
+        "scripts/run/run_omip_core2.py:6634-6641",
+        "packages/ocean/legoesm/ocean/freshwater.py:177-221"
+      ],
+      "dino_receipt": [],
+      "scope": "Not DINO-certified on a global tripole with ice/runoff/isf.",
+      "structural_gap": false,
+      "effort": "M"
+    },
+    {
+      "id": "SBC-RUNOFF",
+      "requirement": "monthly river runoff, coastal mask, and ln_rnf_depth_ini depth spreading",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "Monthly river-runoff loaders, NEMO depth-map rule, and 3-D spread closure exist.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/forcing/runoff_depth.py:1-85",
+        "scripts/run/run_omip_core2.py:6515-6611"
+      ],
+      "dino_receipt": [],
+      "scope": "Off in DINO. The declared sn_i_rnf iceberg record is inactive because ln_rnf_icb=false.",
+      "structural_gap": false,
+      "effort": "M"
+    },
+    {
+      "id": "SBC-ISF-SPE",
+      "requirement": "prescribed spe ice-shelf freshwater/heat deposition over zmin-zmax",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "Selected ORCA spe path exists and is wired host-side.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/physics/ice_shelf.py:187-224",
+        "scripts/run/run_omip_core2.py:6289-6331"
+      ],
+      "dino_receipt": [],
+      "scope": "No DINO or ORCA oracle match; full key_isf geometry remains a gap.",
+      "structural_gap": true,
+      "effort": "L"
+    },
+    {
+      "id": "BOT-DRAG",
+      "requirement": "implicit nonlinear bottom drag, Cd0=1e-3, ke0=2.5e-3",
+      "status": "CERTIFIED",
+      "legoesm": "NEMO quadratic bottom drag is implemented with the selected constants.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/state.py:1054-1075",
+        "packages/ocean/legoesm/ocean/dynamics/ocean_tendency_common.py:917-1055"
+      ],
+      "dino_receipt": [
+        "docs/ocean/fidelity/dino_campaign_synthesis.md:309"
+      ],
+      "scope": "Kernel/coefficient certificate; ice drag and RK3/partial-cell composition are not included.",
+      "structural_gap": false,
+      "effort": "S"
+    },
+    {
+      "id": "BOT-GEOTHERMAL",
+      "requirement": "spatially varying geothermal bottom heat flux",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "Bottom-heating tendency and driver wiring exist.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/physics/geothermal.py:1-25",
+        "packages/ocean/legoesm/ocean/coupler/geothermal_apply.py:1-15"
+      ],
+      "dino_receipt": [
+        "docs/ocean/fidelity/dino_step_chain_coverage.md:90"
+      ],
+      "scope": "DINO branch was off.",
+      "structural_gap": false,
+      "effort": "S"
+    },
+    {
+      "id": "BOT-BBL",
+      "requirement": "advective BBL option 2, gamma=20 s",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "Campin-Goosse BBL transport and tripole driver wiring exist.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/physics/bbl_adv.py:1-40",
+        "scripts/run/run_omip_core2.py:6332-6374"
+      ],
+      "dino_receipt": [
+        "docs/ocean/fidelity/dino_step_chain_coverage.md:63"
+      ],
+      "scope": "DINO branch was off; no ORCA/OVERFLOW oracle receipt.",
+      "structural_gap": true,
+      "effort": "M"
+    },
+    {
+      "id": "EOS-TEOS10",
+      "requirement": "TEOS-10/Roquet polynomial EOS",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "TEOS-10-oriented EOS paths exist.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:315-325",
+        "scripts/validate/ocean_fidelity/nemo_zero_step_closure.py:188-195"
+      ],
+      "dino_receipt": [
+        "docs/ocean/fidelity/dino_step_chain_coverage.md:68"
+      ],
+      "scope": "DINO selected S-EOS, so its EOS receipt cannot certify ORCA's TEOS-10 selector.",
+      "structural_gap": true,
+      "effort": "M"
+    },
+    {
+      "id": "TRA-FCT2",
+      "requirement": "FCT2 tracer advection",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "FCT2 exists and DINO exercised it, but the DINO result remains below the exact bar and ORCA requires RK3 staging.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/advection.py:850-900",
+        "docs/ocean/fidelity/dino_step_chain_coverage.md:94"
+      ],
+      "dino_receipt": [
+        "docs/ocean/fidelity/dino_step_chain_coverage.md:94"
+      ],
+      "scope": "Not promoted: DINO full 3-D tendency corr was 0.9945 and vertical mass-flux clipping remained.",
+      "structural_gap": true,
+      "effort": "L"
+    },
+    {
+      "id": "TRA-REDI-MSC",
+      "requirement": "laplacian isoneutral Redi with MSC",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "NEMO literal Redi/MSC path is implemented.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py",
+        "packages/ocean/legoesm/ocean/physics/lateral_mixing/_gm_redi_common.py"
+      ],
+      "dino_receipt": [
+        "docs/ocean/fidelity/dino_split_explicit_momentum_chain_round93_result.md:1-72",
+        "docs/ocean/fidelity/dino_full_step_coverage_round94_result.md:24-27"
+      ],
+      "scope": "DINO's operator/operand ladder retained a Rule-1b salinity zfw qualification; ORCA also selects coefficient option 21 and RK3 composition.",
+      "structural_gap": false,
+      "effort": "M"
+    },
+    {
+      "id": "TRA-AHT21",
+      "requirement": "nn_aht_ijk_t=21 time-varying tracer diffusivity",
+      "status": "ABSENT",
+      "legoesm": "The Treguier option-21 machinery found controls GM/EIV, not the selected Redi tracer diffusivity; the exact nn_aht_ijk_t=21 path is not wired.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/physics/lateral_mixing/config.py:160-205"
+      ],
+      "dino_receipt": [
+        "docs/ocean/fidelity/dino_step_chain_coverage.md:10-14"
+      ],
+      "scope": "Analogous option-21 EIV support does not satisfy the Redi coefficient requirement.",
+      "structural_gap": true,
+      "effort": "M"
+    },
+    {
+      "id": "TRA-MLE",
+      "requirement": "MLE nn_mle=1",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "NEMO 5.0.1 MLE ports exist for lat-lon/tripole and MPAS.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/physics/lateral_mixing/mle_latlon_cgrid.py:1-15",
+        "packages/ocean/legoesm/ocean/physics/lateral_mixing/mle.py:1-30"
+      ],
+      "dino_receipt": [],
+      "scope": "No applicable DINO oracle receipt located for the active MLE path.",
+      "structural_gap": false,
+      "effort": "M"
+    },
+    {
+      "id": "TRA-EIV",
+      "requirement": "GM/EIV nn_aei_ijk_t=21 Treguier",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "Time-varying EIV coefficient and bolus path exist.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/physics/lateral_mixing/config.py:160-205"
+      ],
+      "dino_receipt": [
+        "scripts/validate/ocean_fidelity/dino_1226/fidelity_bar_gate.py:660-747"
+      ],
+      "scope": "DINO's meridional EIV transport remains DEBT/unresolved; ORCA additionally changes coefficient selection, RK3 staging and global-fold composition.",
+      "structural_gap": false,
+      "effort": "M"
+    },
+    {
+      "id": "DYN-ADV",
+      "requirement": "Hollingsworth kinetic-energy-gradient kernel in vector-invariant momentum advection",
+      "status": "CERTIFIED",
+      "legoesm": "The selected Hollingsworth KE-gradient stencil exists.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py"
+      ],
+      "dino_receipt": [
+        "scripts/validate/ocean_fidelity/dino_1226/fidelity_bar_gate.py:246,538,1505,3428"
+      ],
+      "scope": "The current gate records corr=1, ratio=1, byte-exact and per-element error 3.578e-19 for the selected KE-gradient kernel; ORCA RK3 staging, other momentum-advection terms and north-fold execution are excluded.",
+      "structural_gap": false,
+      "effort": "M"
+    },
+    {
+      "id": "DYN-EEN-E3F0",
+      "requirement": "EEN vorticity with nn_e3f_typ=0",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "EEN exists, but DINO's active selector was nn_e3f_typ=1 and its fresh score remained just outside the exact bar.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py:2100-2190"
+      ],
+      "dino_receipt": [
+        "docs/ocean/fidelity/dino_step_chain_coverage.md:72"
+      ],
+      "scope": "Different e3f selector and global fold.",
+      "structural_gap": false,
+      "effort": "M"
+    },
+    {
+      "id": "DYN-HPG-SCO",
+      "requirement": "s-coordinate standard-Jacobian pressure gradient",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "hpg_sco/qco path exists.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py:1840-1865"
+      ],
+      "dino_receipt": [
+        "scripts/validate/ocean_fidelity/dino_1226/fidelity_bar_gate.py:1411-1831"
+      ],
+      "scope": "The current DINO meridional HPG score remains DEBT; ORCA further adds partial cells, key_isf and RK3 composition.",
+      "structural_gap": false,
+      "effort": "L"
+    },
+    {
+      "id": "DYN-SPG",
+      "requirement": "split-explicit free surface, auto substeps, forward barotropic integration, boxcar filter 1",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "Split-explicit solvers and filters exist, but the exact ORCA filter/stage composition is not certified.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py",
+        "packages/ocean/legoesm/ocean/state.py:380-410"
+      ],
+      "dino_receipt": [
+        "docs/ocean/fidelity/dino_step_chain_coverage.md:76"
+      ],
+      "scope": "DINO used nn_bt_flt=2 and its barotropic substep loop was explicitly unverified in that inventory.",
+      "structural_gap": true,
+      "effort": "L"
+    },
+    {
+      "id": "DYN-LDF",
+      "requirement": "level laplacian momentum viscosity with file-based nn_ahm_ijk_t=-30",
+      "status": "ABSENT",
+      "legoesm": "The current loader reduces ahmf_3d to a surface zonal-median profile; it does not preserve the selected three-dimensional coefficient field.",
+      "evidence": [
+        "scripts/run/run_omip_core2.py:940-968",
+        "packages/ocean/legoesm/ocean/dynamics/latlon_cgrid_operators.py:1930-1990"
+      ],
+      "dino_receipt": [
+        "docs/ocean/fidelity/dino_full_step_coverage_round94_result.md:31-37"
+      ],
+      "scope": "The exact -30 3-D coefficient recipe is absent; DINO used option 20 and coefficient-isolated ldf_dyn remains unmeasured.",
+      "structural_gap": true,
+      "effort": "M"
+    },
+    {
+      "id": "ZDF-AIMP",
+      "requirement": "adaptive-implicit vertical momentum advection",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "A Shchepetkin-style adaptive implicit selector exists and is used by real OMIP runs.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/state.py:2290-2308"
+      ],
+      "dino_receipt": [
+        "docs/ocean/fidelity/dino_step_chain_coverage.md:67"
+      ],
+      "scope": "DINO branch was off; RK3 stage semantics are un-certified.",
+      "structural_gap": false,
+      "effort": "M"
+    },
+    {
+      "id": "ZDF-TKE",
+      "requirement": "prognostic TKE, nn_mxl=2, surface anchor, Langmuir, NIW penetration, under-ice scaling",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "A detailed ORCA1 TKE card is implemented, and DINO certifies many shared kernel pieces.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:159-180",
+        "scripts/validate/ocean_fidelity/audit_orca1_tke_card.py"
+      ],
+      "dino_receipt": [
+        "docs/ocean/fidelity/dino_euc_mechanism_result.md:245-268",
+        "docs/ocean/fidelity/dino_full_step_coverage_round94_result.md:54-60"
+      ],
+      "scope": "Not promoted because ORCA changes nn_mxl/ice terms/TEOS-10/IWM and RK3 placement; current DINO work still localizes a TKE feeder debt.",
+      "structural_gap": false,
+      "effort": "L"
+    },
+    {
+      "id": "ZDF-EVD",
+      "requirement": "EVD tracer-only nn_evdm=0",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "EVD exists, but DINO used nn_evdm=1 and S-EOS.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/physics/convection/enhanced_diffusion.py"
+      ],
+      "dino_receipt": [
+        "scripts/validate/ocean_fidelity/dino_1226/PREREG_zdf_chain_sweep.md:21-23"
+      ],
+      "scope": "Different active selector and EOS trigger.",
+      "structural_gap": false,
+      "effort": "M"
+    },
+    {
+      "id": "ZDF-IWM",
+      "requirement": "zdfiwm with six climatological fields, constant efficiency, no differential T/S",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "NEMO-5.0.1-oriented IWM kernel, forcing object, loader, and tripole wiring exist.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/physics/vertical_mixing/internal_wave_mixing.py:1-20",
+        "packages/ocean/legoesm/ocean/iwm_forcing.py:1-25"
+      ],
+      "dino_receipt": [
+        "docs/ocean/fidelity/dino_step_chain_coverage.md:15-16"
+      ],
+      "scope": "DINO branch was off.",
+      "structural_gap": false,
+      "effort": "M"
+    },
+    {
+      "id": "ICE-ITD",
+      "requirement": "SI3 single-category HFN ITD and remapping",
+      "status": "ABSENT",
+      "legoesm": "The available ITD machinery is explicitly simplified and does not implement the selected SI3 HFN/remapping recipe.",
+      "evidence": [
+        "packages/ice/legoesm/ice/sea_ice.py:14-16",
+        "packages/ice/legoesm/ice/itd.py"
+      ],
+      "dino_receipt": [],
+      "scope": "An analogous ITD is not the exact selected implementation.",
+      "structural_gap": true,
+      "effort": "L"
+    },
+    {
+      "id": "ICE-LANDFAST",
+      "requirement": "Lemieux-2016 landfast ice",
+      "status": "ABSENT",
+      "legoesm": "No landfast implementation located.",
+      "evidence": [
+        "packages/ice/legoesm/ice"
+      ],
+      "dino_receipt": [],
+      "scope": "Selected SI3 dynamics option.",
+      "structural_gap": true,
+      "effort": "L"
+    },
+    {
+      "id": "ICE-RIDGING",
+      "requirement": "H79 strength, exponential redistribution/participation, ridging and rafting",
+      "status": "ABSENT",
+      "legoesm": "A ridging analogue exists, but no rafting implementation or exact SI3 one-category redistribution/participation recipe was found.",
+      "evidence": [
+        "packages/ice/legoesm/ice/ridging.py:1-54"
+      ],
+      "dino_receipt": [],
+      "scope": "The combined selected recipe is absent.",
+      "structural_gap": true,
+      "effort": "L"
+    },
+    {
+      "id": "ICE-EVP",
+      "requirement": "SI3 EVP rheology with 100 subcycles on eORCA tripole",
+      "status": "ABSENT",
+      "legoesm": "Generic EVP/mEVP solvers exist, but the target tripole driver cannot execute dynamics and falls back to free drift.",
+      "evidence": [
+        "packages/ice/legoesm/ice/dynamics.py:1-22",
+        "packages/ice/legoesm/ice/dynamics.py:374-460",
+        "scripts/run/run_omip_core2.py:6736-6755"
+      ],
+      "dino_receipt": [],
+      "scope": "The exact production-grid EVP path is absent.",
+      "structural_gap": true,
+      "effort": "L"
+    },
+    {
+      "id": "ICE-PRATHER",
+      "requirement": "SI3 Prather ice advection",
+      "status": "ABSENT",
+      "legoesm": "The active ice transport is donor-cell/FV; no Prather scheme was found.",
+      "evidence": [
+        "packages/ice/legoesm/ice/transport.py",
+        "packages/ice/legoesm/ice/sea_ice.py:93-99"
+      ],
+      "dino_receipt": [],
+      "scope": "Exact scheme requirement.",
+      "structural_gap": true,
+      "effort": "XL"
+    },
+    {
+      "id": "ICE-THERMO",
+      "requirement": "three-layer ice/three-layer snow SI3 BL99 thermodynamics with P07 conductivity",
+      "status": "ABSENT",
+      "legoesm": "The BL99 module is explicitly parked under _future and not integrated; current thermodynamics are not this SI3 multilayer recipe.",
+      "evidence": [
+        "packages/ice/legoesm/ice/_future/bitz_lipscomb.py:1-40",
+        "packages/ice/legoesm/ice/_future/bitz_lipscomb.py:230-245"
+      ],
+      "dino_receipt": [],
+      "scope": "Whole selected thermodynamic scheme.",
+      "structural_gap": true,
+      "effort": "XL"
+    },
+    {
+      "id": "ICE-SALINITY",
+      "requirement": "SI3 nn_icesal=2 varying vertical/time salinity",
+      "status": "ABSENT",
+      "legoesm": "A bulk-mean salinity/brine budget exists, not SI3's three-layer varying salinity parameterization.",
+      "evidence": [
+        "packages/ice/legoesm/ice/brine.py:1-32"
+      ],
+      "dino_receipt": [],
+      "scope": "Exact selected scheme.",
+      "structural_gap": true,
+      "effort": "L"
+    },
+    {
+      "id": "ICE-INIT",
+      "requirement": "SI3 file initialization for at_i/ht_i/ht_s/sm_i/tmsu",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "The ORCA SI3 aggregate initial fields can initialize legoESM's prognostic ice state.",
+      "evidence": [
+        "scripts/run/run_omip_core2.py:3253-3278",
+        "scripts/run/run_omip_core2.py:6789-6815"
+      ],
+      "dino_receipt": [],
+      "scope": "Loader presence only; state semantics and subsequent SI3 evolution differ.",
+      "structural_gap": false,
+      "effort": "M"
+    },
+    {
+      "id": "ICE-ALBEDO-SBC",
+      "requirement": "SI3 albedo, snow fraction, leads, and air/ocean exchange",
+      "status": "PRESENT-UNCERTIFIED",
+      "legoesm": "Generic snow/albedo and coupled flux partitioning exist, but the SI3 formulas/order are not matched.",
+      "evidence": [
+        "packages/ice/legoesm/ice/snow.py",
+        "packages/ice/legoesm/ice/sea_ice.py:1510-1540"
+      ],
+      "dino_receipt": [],
+      "scope": "No SI3 oracle.",
+      "structural_gap": true,
+      "effort": "L"
+    },
+    {
+      "id": "INFRA-HSB-NC4-MPP",
+      "requirement": "heat/salt diagnostics, NetCDF4 chunks, timing, MPP, restart, and XIOS definitions",
+      "status": "N/A-INFRA",
+      "legoesm": "Different diagnostics/restart/output stack.",
+      "evidence": [
+        "packages/ocean/legoesm/ocean/restart.py",
+        "target:EXPREF/file_def_nemo-oce.xml"
+      ],
+      "dino_receipt": [
+        "docs/ocean/fidelity/dino_full_step_coverage_round94_result.md:42-48"
+      ],
+      "scope": "No physical coverage claim.",
+      "structural_gap": false,
+      "effort": "N/A"
+    }
+  ],
+  "structural_gaps": [
+    {
+      "rank": 1,
+      "id": "CPP-RK3",
+      "effort": "XL",
+      "omip_criticality": "BLOCKING",
+      "why": "The production config is key_RK3. Existing momentum rk3_ws plus generic tracer RK3 do not reproduce NEMO's whole-stage ordering.",
+      "first_discriminator": "GYRE: full tracer+momentum+barotropic RK3 tendency/step twin."
+    },
+    {
+      "rank": 2,
+      "id": "CPP-SI3",
+      "effort": "XXL",
+      "omip_criticality": "BLOCKING",
+      "why": "The target runs SI3 every fourth ocean step; generic ice cannot establish SI3 parity.",
+      "first_discriminator": "SI3 testcase ladder: thermodynamics, advection, rheology, ridging, then coupled budgets."
+    },
+    {
+      "rank": 3,
+      "id": "DOM-PARTIAL",
+      "effort": "L",
+      "omip_criticality": "BLOCKING",
+      "why": "Real ORCA bathymetry activates partial-cell face rules that DINO did not test; the known average-versus-min rule is wrong for DOMAINcfg.",
+      "first_discriminator": "OVERFLOW and LOCK_EXCHANGE geometry/transport receipts before global runs."
+    },
+    {
+      "rank": 4,
+      "id": "DOM-TRIPOLE",
+      "effort": "L",
+      "omip_criticality": "BLOCKING",
+      "why": "Implementation exists, but north-fold, no-slip, multi-basin and partial-cell composition lack an oracle certificate.",
+      "first_discriminator": "ORCA2 dry integration and fold-local operator twins."
+    },
+    {
+      "rank": 5,
+      "id": "SBC-FLDREAD",
+      "effort": "L",
+      "omip_criticality": "BLOCKING",
+      "why": "The target is climatological CORE forcing; DINO's analytic forcing certificate cannot transfer.",
+      "first_discriminator": "Field/time/vector-rotation parity before flux parity."
+    },
+    {
+      "rank": 6,
+      "id": "SBC-ICE",
+      "effort": "XXL",
+      "omip_criticality": "BLOCKING",
+      "why": "SI3 exchange order and budgets are part of the production trajectory.",
+      "first_discriminator": "Coupled SI3-ocean heat/freshwater/salt conservation testcase."
+    },
+    {
+      "rank": 7,
+      "id": "CPP-ISF",
+      "effort": "L",
+      "omip_criticality": "HIGH",
+      "why": "The selected spe forcing exists, but key_isf geometry and RK3 deposition have not been matched.",
+      "first_discriminator": "ISOMIP+ plus single-column spe deposition twin."
+    },
+    {
+      "rank": 8,
+      "id": "TRA-FCT2",
+      "effort": "L",
+      "omip_criticality": "HIGH",
+      "why": "FCT is active and DINO's vertical flux path remained below bar; RK3 changes its stage use.",
+      "first_discriminator": "GYRE tracer-stage dump and LOCK_EXCHANGE monotonicity/RPE."
+    },
+    {
+      "rank": 9,
+      "id": "EOS-TEOS10",
+      "effort": "M",
+      "omip_criticality": "HIGH",
+      "why": "ORCA selects TEOS-10 whereas DINO certified S-EOS.",
+      "first_discriminator": "EOS/rab/bn2 unit oracle followed by OVERFLOW density-current response."
+    },
+    {
+      "rank": 10,
+      "id": "SBC-QSR-RGB",
+      "effort": "M",
+      "omip_criticality": "MEDIUM",
+      "why": "RGB/CHLA is active and neither DINO's two-band redistribution nor ORCA RGB was certified.",
+      "first_discriminator": "Column tra_qsr RGB oracle over monthly CHLA extremes."
+    },
+    {
+      "rank": 11,
+      "id": "SBC-RUNOFF",
+      "effort": "M",
+      "omip_criticality": "MEDIUM",
+      "why": "Global freshwater distribution and depth spreading materially affect OMIP circulation.",
+      "first_discriminator": "Global conservation plus exact depth-map/deposition twin."
+    },
+    {
+      "rank": 12,
+      "id": "ZDF-TKE",
+      "effort": "L",
+      "omip_criticality": "HIGH",
+      "why": "Shared kernels exist, but the ORCA card combines TEOS-10, nn_mxl=2, IWM and ice scaling under RK3.",
+      "first_discriminator": "Column twins, then GYRE/ORCA2 composed closure."
+    }
+  ],
+  "roadmap": [
+    {
+      "order": 1,
+      "gate": "OVERFLOW and LOCK_EXCHANGE",
+      "purpose": "Close partial-cell min-rule, TEOS-10 density/BN2, FCT monotonicity/RPE, adaptive vertical advection and BBL prerequisites.",
+      "gaps": [
+        "DOM-PARTIAL",
+        "EOS-TEOS10",
+        "TRA-FCT2",
+        "ZDF-AIMP",
+        "BOT-BBL"
+      ],
+      "effort": "L"
+    },
+    {
+      "order": 2,
+      "gate": "GYRE",
+      "purpose": "Build and oracle-match the complete key_RK3 step, not just momentum rk3_ws.",
+      "gaps": [
+        "CPP-RK3",
+        "DYN-SPG",
+        "TRA-FCT2",
+        "ZDF-TKE"
+      ],
+      "effort": "XL"
+    },
+    {
+      "order": 3,
+      "gate": "SI3 testcase suite",
+      "purpose": "Replace analogous ice physics with an SI3-equivalent recipe in ascending coupling complexity.",
+      "gaps": [
+        "ICE-THERMO",
+        "ICE-SALINITY",
+        "ICE-PRATHER",
+        "ICE-ITD",
+        "ICE-EVP",
+        "ICE-RIDGING",
+        "ICE-LANDFAST",
+        "ICE-INIT",
+        "ICE-ALBEDO-SBC",
+        "SBC-ICE",
+        "CPP-SI3"
+      ],
+      "effort": "XXL"
+    },
+    {
+      "order": 4,
+      "gate": "ORCA2",
+      "purpose": "Integrate global fold/multi-basin geometry and all selected global input/physics paths at lower cost.",
+      "gaps": [
+        "CPP-VCO-1D3D",
+        "CPP-ISF",
+        "DOM-DOMAINCFG",
+        "DOM-TRIPOLE",
+        "DOM-LBC",
+        "DOM-TS-INIT",
+        "SBC-FLDREAD",
+        "SBC-NCAR",
+        "SBC-DM2DC",
+        "SBC-SSS",
+        "SBC-FWB",
+        "SBC-RUNOFF",
+        "SBC-ISF-SPE",
+        "SBC-QSR-RGB",
+        "BOT-GEOTHERMAL",
+        "BOT-BBL",
+        "TRA-REDI-MSC",
+        "TRA-AHT21",
+        "TRA-MLE",
+        "TRA-EIV",
+        "DYN-ADV",
+        "DYN-EEN-E3F0",
+        "DYN-HPG-SCO",
+        "DYN-LDF",
+        "ZDF-TKE",
+        "ZDF-EVD",
+        "ZDF-IWM"
+      ],
+      "effort": "XL"
+    },
+    {
+      "order": 5,
+      "gate": "ORCA1",
+      "purpose": "Only after all preceding gates: execute the exact pinned configuration and issue term, conservation, and climate receipts.",
+      "gaps": [
+        "all remaining PRESENT-UNCERTIFIED rows"
+      ],
+      "effort": "XXL"
+    }
+  ],
+  "counts": {
+    "CERTIFIED": 2,
+    "PRESENT-UNCERTIFIED": 32,
+    "ABSENT": 12,
+    "N/A-INFRA": 2,
+    "TOTAL": 48
+  }
+}
