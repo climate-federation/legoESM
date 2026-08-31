@@ -31,6 +31,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -85,6 +86,13 @@ class DINOConfig:
     # association, full nn_hls=2 latitude MAXVAL, and live wet-cell MINVAL
     # anchors. It is legal only with the faithful grid + masked-zco geometry.
     initial_condition_evaluation: str = "jax_factored"
+    # Static Drake-sill ring evaluation. ``factored`` keeps the historical
+    # ``-(sqrt(x2+y2)-r)**2`` algebra. ``nemo_literal`` transcribes
+    # usrdef_zgr.F90:762-770's expanded exponent and its no-deepening guard;
+    # the forms are algebraically equivalent away from the guard but can pick
+    # different full-step bottom levels at a threshold. Oracle cards select
+    # the literal form; all other recipes retain the historical default.
+    bathymetry_gauss_ring_evaluation: str = "factored"
     channel_lat_south_deg: float = -65.0  # southern edge of re-entrant channel
     channel_lat_north_deg: float = -45.0  # northern edge of re-entrant channel
     channel_width_deg: float = 20.0       # Δφ_c in eq A4 (= |lat_n - lat_s|)
@@ -1236,6 +1244,7 @@ DINO_RECIPES: dict[str, dict] = {
         # full construction-frame MAXVAL(gphit), and wet-field MINVAL anchors.
         # The MLF card inherits this; non-oracle recipes keep jax_factored.
         "initial_condition_evaluation": "nemo_scalar_source",
+        "bathymetry_gauss_ring_evaluation": "nemo_literal",
         # -- Hydrostatic PGF (namdyn_hpg: ln_hpg_sco=T — forced by qco/nonlinear
         #    free surface even on z-levels; dynhpg.F90:181 rejects hpg_zco).
         #    "nemo_sco" = the hpg_sco transcription: qco (1+r3t) thickness
@@ -2204,15 +2213,37 @@ def dino_bathymetry(lon_deg, lat_deg, cfg: DINOConfig | None = None, *,
         cfg.sill_lon_m_deg + cfg.sill_gaussian_width_s,
     )
     ring_radius = cha_width / 2.0  # zrad in Zenodo code
-    sill = _gauss_ring(
-        lon_deg, lat_deg,
-        lon0=cfg.sill_lon_m_deg,
-        lat0=cfg.sill_lat_m_deg,
-        ring_radius=ring_radius,
-        dist_lam=cfg.sill_gaussian_width_s,
-        depth_top=cfg.H_sill,
-        depth_bot=bathy,
-    )
+    if cfg.bathymetry_gauss_ring_evaluation == "factored":
+        sill = _gauss_ring(
+            lon_deg, lat_deg,
+            lon0=cfg.sill_lon_m_deg,
+            lat0=cfg.sill_lat_m_deg,
+            ring_radius=ring_radius,
+            dist_lam=cfg.sill_gaussian_width_s,
+            depth_top=cfg.H_sill,
+            depth_bot=bathy,
+        )
+    elif cfg.bathymetry_gauss_ring_evaluation == "nemo_literal":
+        # usrdef_zgr.F90:762-770, including the expanded exponent and the
+        # branch that forbids a nominal sill from deepening shallow bathy.
+        b = jax.lax.optimization_barrier
+        zx = b(lon_deg - cfg.sill_lon_m_deg)
+        zy = b(lat_deg - cfg.sill_lat_m_deg)
+        zx2 = b(zx ** 2)
+        zy2 = b(zy ** 2)
+        radius2 = b(ring_radius ** 2)
+        distance = b(jnp.sqrt(b(zx2 + zy2)))
+        numerator = b(b(b(-zx2 - zy2)
+                        + b(2.0 * ring_radius * distance)) - radius2)
+        exponent = b(numerator / b(cfg.sill_gaussian_width_s ** 2))
+        candidate = b(b((cfg.H_sill - bathy) * b(jnp.exp(exponent)))
+                      + bathy)
+        sill = jnp.where(bathy >= cfg.H_sill, candidate, bathy)
+    else:
+        raise ValueError(
+            "bathymetry_gauss_ring_evaluation must be 'factored' or "
+            f"'nemo_literal', got "
+            f"{cfg.bathymetry_gauss_ring_evaluation!r}")
     bathy = sill_taper * sill + (1.0 - sill_taper) * bathy
 
     return bathy
@@ -2782,9 +2813,22 @@ def dino_lat_lon_bowl(grid, cfg: DINOConfig | None = None):
         # zlam0 + rn_e1_deg * REAL(mig-1).  Do not round-trip these analytic
         # half-index operands through radians: that changes 3,315 physical
         # values by one ULP before zgr_bat applies its wet-level thresholds.
-        ddeg = (cfg.lon_east_deg - cfg.lon_west_deg) / grid.n_lon
+        legal_shapes = {
+            (_NEMO_DINO_NLAT, _NEMO_DINO_NLON): 0,
+            (_NEMO_DINO_NLAT + 4, _NEMO_DINO_NLON + 4): -2,
+        }
+        try:
+            source_i0 = legal_shapes[(grid.n_lat, grid.n_lon)]
+        except KeyError as exc:
+            raise ValueError(
+                "faithful DINO bowl requires the 195x48 physical or "
+                f"199x52 construction grid; got {grid.n_lat}x{grid.n_lon}"
+            ) from exc
+        ddeg = ((cfg.lon_east_deg - cfg.lon_west_deg)
+                / _NEMO_DINO_NLON)
         lon_deg_1d = jnp.asarray(
-            cfg.lon_west_deg + ddeg * (np.arange(grid.n_lon) + 0.5),
+            cfg.lon_west_deg
+            + ddeg * (np.arange(grid.n_lon) + source_i0 + 0.5),
             dtype=grid.lon.dtype,
         )
     else:
@@ -2799,8 +2843,9 @@ def dino_lat_lon_bowl(grid, cfg: DINOConfig | None = None):
         # lon 0..51; Mercator indices -98.5..99.5). Derive rather than fit the
         # printed degrees so the receipt remains analytic.
         halo = 2
-        ddeg = (cfg.lon_east_deg - cfg.lon_west_deg) / grid.n_lon
-        K = (grid.n_lat - 1) // 2
+        ddeg = ((cfg.lon_east_deg - cfg.lon_west_deg)
+                / _NEMO_DINO_NLON)
+        K = (_NEMO_DINO_NLAT - 1) // 2
         rad = 3.141592653589793 / 180.0
         inv_rad = 1.0 / rad
 
@@ -3015,7 +3060,12 @@ def nemo_faithful_dino_config(base: DINOConfig | None = None) -> DINOConfig:
     )
 
 
-def dino_lat_lon_grid(cfg: DINOConfig | None = None, n_lon: int = 50):
+def dino_lat_lon_grid(
+    cfg: DINOConfig | None = None,
+    n_lon: int = 50,
+    *,
+    construction_frame: bool = False,
+):
     """Build a Mercator lat-lon grid covering the DINO basin.
 
     Wraps ``legoesm.grids.latlon.create_mercator_grid`` with the
@@ -3023,10 +3073,12 @@ def dino_lat_lon_grid(cfg: DINOConfig | None = None, n_lon: int = 50):
     Default ``n_lon = 50`` gives 1° equatorial cells — paper R1.
 
     ``cfg.nemo_faithful_grid`` (opt-in) instead builds NEMO's EXACT DINO R1
-    mesh — 48×195 with the equator on a T-point and faces [1°, 49°] — so a
-    standalone run matches NEMO cell-for-cell (the ``n_lon`` argument is then
-    ignored). The bathymetry lon frame must be NEMO's; build the config via
-    :func:`nemo_faithful_dino_config` (this raises otherwise).
+    physical mesh — 48×195 with the equator on a T-point and faces
+    [1°, 49°] — so a standalone run matches NEMO cell-for-cell (the
+    ``n_lon`` argument is then ignored). ``construction_frame=True`` retains
+    the two ``nn_hls=2`` construction rings and returns the 52×199 operator
+    domain with faces [-1°, 51°]. This is the domain NEMO actually advances;
+    it is not a change to the 48×195 physical scoring domain.
     """
     from legoesm.grids.latlon import create_mercator_grid
 
@@ -3047,13 +3099,14 @@ def dino_lat_lon_grid(cfg: DINOConfig | None = None, n_lon: int = 50):
                 "nemo_faithful_dino_config() so the bathymetry frame + sill "
                 "anchor are co-set."
             )
+        frame = 2 if construction_frame else 0
         return create_mercator_grid(
-            n_lon=_NEMO_DINO_NLON,
+            n_lon=_NEMO_DINO_NLON + 2 * frame,
             lat_max_deg=cfg.lat_max_deg,
-            lon_west_deg=cfg.lon_west_deg,
-            lon_east_deg=cfg.lon_east_deg,
+            lon_west_deg=cfg.lon_west_deg - frame,
+            lon_east_deg=cfg.lon_east_deg + frame,
             equator_on_tpoint=True,
-            n_lat=_NEMO_DINO_NLAT,
+            n_lat=_NEMO_DINO_NLAT + 2 * frame,
             omega=cfg.omega,
             # #1226: keep the raw LatLonGrid's own dy/area consistent with
             # the LatLonCGridGeometry the model actually steps on (built
@@ -3082,12 +3135,18 @@ def _dino_nemo_full_t_lat_max_deg(grid, cfg: DINOConfig) -> float:
     array, whose northern T index is 99. This is the T-point companion to the
     already source-owned U-boundary indices in :func:`dino_lat_lon_bowl`.
     """
-    if grid.n_lat != _NEMO_DINO_NLAT or grid.n_lon != _NEMO_DINO_NLON:
+    legal_shapes = {
+        (_NEMO_DINO_NLAT, _NEMO_DINO_NLON),
+        (_NEMO_DINO_NLAT + 4, _NEMO_DINO_NLON + 4),
+    }
+    if (grid.n_lat, grid.n_lon) not in legal_shapes:
         raise ValueError(
-            "nemo_scalar_source requires the 195x48 NEMO DINO grid; got "
+            "nemo_scalar_source requires the 195x48 physical or 199x52 "
+            "construction NEMO DINO grid; got "
             f"{grid.n_lat}x{grid.n_lon}")
-    ddeg = (cfg.lon_east_deg - cfg.lon_west_deg) / grid.n_lon
-    core_half = (grid.n_lat - 1) // 2
+    ddeg = ((cfg.lon_east_deg - cfg.lon_west_deg)
+            / _NEMO_DINO_NLON)
+    core_half = (_NEMO_DINO_NLAT - 1) // 2
     halo = 2
     rad = math.pi / 180.0
     return math.asin(math.tanh((ddeg * rad) * (core_half + halo))) / rad

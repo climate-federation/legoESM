@@ -146,14 +146,29 @@ def expand_standalone_reducer_inputs(
     level, and the C-grid U face mapping. Every supplied capture field is
     asserted before any allocation so a bad arm fails at day 0.
     """
-    expected = _expected_reducer_input_shapes(native_t_shape)
+    expected_core = _expected_reducer_input_shapes(native_t_shape)
+    ny, nx, nz = native_t_shape
+    expected_frame = {
+        "T": (ny, nx, nz - 1),
+        "S": (ny, nx, nz - 1),
+        "eta": (ny, nx),
+        "u": (ny, nx + 1, nz - 1),
+        "v": (ny + 1, nx, nz - 1),
+        "land_mask": (ny, nx),
+    }
     supplied: dict[str, Any] = dict(fields)
     supplied["land_mask"] = land_mask
-    missing = sorted(set(expected) - set(supplied))
+    missing = sorted(set(expected_core) - set(supplied))
     if missing:
         raise ValueError(
             "standalone reducer input is missing fields: " + ", ".join(missing))
-    actual = {name: tuple(np.shape(supplied[name])) for name in expected}
+    actual = {name: tuple(np.shape(supplied[name])) for name in expected_core}
+    if actual == expected_frame:
+        expected = expected_frame
+        horizontal_mode = "nemo_construction_frame"
+    else:
+        expected = expected_core
+        horizontal_mode = "physical_core_adapter"
     bad = {name: {"actual": actual[name], "expected": expected[name]}
            for name in expected if actual[name] != expected[name]}
     if bad:
@@ -162,32 +177,40 @@ def expand_standalone_reducer_inputs(
             for name, row in sorted(bad.items()))
         raise ValueError("standalone reducer shape contract failed: " + rows)
 
-    ny, nx, nz = native_t_shape
-
     def scalar3(name: str) -> np.ndarray:
-        core = np.asarray(supplied[name], dtype=np.float64)
+        source = np.asarray(supplied[name], dtype=np.float64)
         native = np.zeros(native_t_shape, dtype=np.float64)
-        native[2:-2, 2:-2, :-1] = core
-        # NEMO's zonal halo columns are periodic copies of the physical core.
-        # Meridional halos remain reducer-dry through ``land_mask``.
-        native[2:-2, :2, :-1] = core[:, -2:, :]
-        native[2:-2, -2:, :-1] = core[:, :2, :]
+        if horizontal_mode == "nemo_construction_frame":
+            native[..., :-1] = source
+        else:
+            native[2:-2, 2:-2, :-1] = source
+            # NEMO's zonal halo columns are periodic copies of the physical
+            # core. Meridional halos remain reducer-dry through land_mask.
+            native[2:-2, :2, :-1] = source[:, -2:, :]
+            native[2:-2, -2:, :-1] = source[:, :2, :]
         return native
 
-    core_land = np.asarray(supplied["land_mask"], dtype=np.float64)
+    source_land = np.asarray(supplied["land_mask"], dtype=np.float64)
     native_land = np.zeros((ny, nx), dtype=np.float64)
-    native_land[2:-2, 2:-2] = core_land
-    native_land[2:-2, :2] = core_land[:, -2:]
-    native_land[2:-2, -2:] = core_land[:, :2]
+    if horizontal_mode == "nemo_construction_frame":
+        native_land[...] = source_land
+    else:
+        native_land[2:-2, 2:-2] = source_land
+        native_land[2:-2, :2] = source_land[:, -2:]
+        native_land[2:-2, -2:] = source_land[:, :2]
 
     # The recorded reducer first selects lU[:, 1:nx+1]. Embed the analytic
     # grid's east/native faces u[:, 1:] so that this selection's [2:-2] core is
     # exactly the model core; face column 0 is intentionally unused.
-    core_u = np.asarray(supplied["u"], dtype=np.float64)[:, 1:, :]
+    source_u = np.asarray(supplied["u"], dtype=np.float64)
     native_u_faces = np.zeros((ny, nx + 1, nz), dtype=np.float64)
-    native_u_faces[2:-2, 3:nx - 1, :-1] = core_u
-    native_u_faces[2:-2, 1:3, :-1] = core_u[:, -2:, :]
-    native_u_faces[2:-2, nx - 1:nx + 1, :-1] = core_u[:, :2, :]
+    if horizontal_mode == "nemo_construction_frame":
+        native_u_faces[..., :-1] = source_u
+    else:
+        core_u = source_u[:, 1:, :]
+        native_u_faces[2:-2, 3:nx - 1, :-1] = core_u
+        native_u_faces[2:-2, 1:3, :-1] = core_u[:, -2:, :]
+        native_u_faces[2:-2, nx - 1:nx + 1, :-1] = core_u[:, :2, :]
 
     expanded = {
         "T": scalar3("T"),
@@ -197,11 +220,14 @@ def expand_standalone_reducer_inputs(
     }
     receipt = {
         "schema": REDUCER_CONVENTION_SCHEMA,
+        "horizontal_mode": horizontal_mode,
         "native_t_shape": list(native_t_shape),
         "standalone_input_shapes": {
             name: list(actual[name]) for name in sorted(actual)},
         "asserted_input_names": sorted(expected),
         "horizontal_convention": (
+            "standalone already advances NEMO 199x52 construction frame"
+            if horizontal_mode == "nemo_construction_frame" else
             "standalone physical core -> NEMO [2:-2,2:-2]; two periodic "
             "zonal halo rings restored; meridional halos reducer-dry"),
         "vertical_convention": (
@@ -354,9 +380,25 @@ def nemo_construction_frame_masks(grid, z_coord, state, cfg):
     T mask loses the east/north operands of the last core faces. Reconstruct
     the analytic frame, form faces there, and crop exactly once.
     """
-    if not (cfg.nemo_faithful_grid and grid.n_lat == 195 and grid.n_lon == 48):
+    if not cfg.nemo_faithful_grid:
+        raise ValueError("NEMO construction-frame masks require the faithful grid")
+    if (grid.n_lat, grid.n_lon) == (199, 52):
+        tmask = (
+            np.asarray(z_coord.is_active, dtype=bool)
+            & (np.asarray(state.land_mask.data) > 0.5)[..., None])
+        umask = tmask & np.roll(tmask, -1, axis=1)
+        vmask = np.zeros_like(tmask)
+        vmask[:-1] = tmask[:-1] & tmask[1:]
+        fmask = np.zeros_like(tmask)
+        fmask[:-1, :-1] = (
+            tmask[:-1, :-1] & tmask[:-1, 1:]
+            & tmask[1:, :-1] & tmask[1:, 1:])
+        return tmask, umask, vmask, fmask
+    if not (grid.n_lat == 195 and grid.n_lon == 48):
         raise ValueError(
-            "NEMO construction-frame masks require the faithful 195x48 grid")
+            "NEMO construction-frame masks require the faithful 195x48 "
+            f"physical or 199x52 construction grid; got "
+            f"{grid.n_lat}x{grid.n_lon}")
     halo = 2
     ddeg = (cfg.lon_east_deg - cfg.lon_west_deg) / grid.n_lon
     core_half = (grid.n_lat - 1) // 2
@@ -408,6 +450,32 @@ def nemo_construction_frame_masks(grid, z_coord, state, cfg):
             f"core at {mismatch} cells")
     return tuple(mask[crop] for mask in (
         tmask_frame, umask_frame, vmask_frame, fmask_frame))
+
+
+def nemo_construction_frame_land_mask(grid, cfg):
+    """Analytic ``lbc_lnk`` surface mask on DINO's 199x52 A2D frame.
+
+    NEMO's ``zgr_msk_top_bot`` applies ``lbc_lnk`` to the bathymetric wet
+    levels (``usrdef_zgr.F90:470-479``).  The outer meridional rows are land;
+    the outer zonal columns are open only for T cells wholly inside the
+    channel.  Testing the south and north V faces reproduces the source's
+    half-index boundary convention (T row 13 straddles -65 degrees and is
+    closed; rows 14..48 are open in RUN_KT2).
+    """
+    if not (cfg.nemo_faithful_grid
+            and (grid.n_lat, grid.n_lon) == (199, 52)):
+        raise ValueError(
+            "construction-frame land mask requires faithful 199x52 DINO grid")
+    lat_faces = np.degrees(np.asarray(grid.lat_v, dtype=np.float64))
+    open_channel = (
+        (lat_faces[:-1] >= cfg.channel_lat_south_deg)
+        & (lat_faces[1:] <= cfg.channel_lat_north_deg))
+    land = np.ones((grid.n_lat, grid.n_lon), dtype=np.float64)
+    land[0, :] = 0.0
+    land[-1, :] = 0.0
+    land[~open_channel, 0] = 0.0
+    land[~open_channel, -1] = 0.0
+    return jnp.asarray(land, dtype=grid.lat.dtype)
 
 
 def attach_analytic_nemo_operands(grid, z_coord, state, cfg):
@@ -502,9 +570,15 @@ def build_standalone(member: int):
     set_policy(PrecisionPolicy.fp64())
     cfg = nemo_faithful_dino_config(
         base=dino_config_for_recipe(RECIPE))
-    grid = dino_lat_lon_grid(cfg)
+    # NEMO advances the 199x52 nn_hls=2 construction frame.  The certified
+    # restart twin retains that frame; stripping to the 195x48 scoring core
+    # before dynamics creates an artificial boundary that first contaminates
+    # continuity on split-explicit substep 2.
+    grid = dino_lat_lon_grid(cfg, construction_frame=True)
     z_coord = dino_lat_lon_vertical(grid, cfg)
-    state = dino_lat_lon_state(grid, z_coord, cfg)
+    state = dino_lat_lon_state(
+        grid, z_coord, cfg,
+        land_mask_override=nemo_construction_frame_land_mask(grid, cfg))
     if any(getattr(state, name, None) is not None for name in
            ("T_before", "S_before", "eta_before", "u_before", "v_before")):
         raise RuntimeError("from-rest factory unexpectedly populated a bridge level")

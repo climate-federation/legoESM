@@ -150,9 +150,10 @@ def run(args: argparse.Namespace) -> int:
     grid = read_nemo_mesh_mask(str(mesh_path), nn_hls=0)
     nemo_t, nemo_s = hpg.nemo_istate_case4(
         grid.gdept_0, grid.gphit, grid.tmask)
-    # NEMO construction frame -> standalone physical core.
-    nemo_t = np.asarray(nemo_t)[2:-2, 2:-2, :-1]
-    nemo_s = np.asarray(nemo_s)[2:-2, 2:-2, :-1]
+    # Standalone advances NEMO's full 199x52 construction frame; the two-ring
+    # crop below is a scoring population only, never an operator boundary.
+    nemo_t = np.asarray(nemo_t)[..., :-1]
+    nemo_s = np.asarray(nemo_s)[..., :-1]
 
     (cfg, _geometry, z_coord, state, _model_cfg, model, forcing,
      step_forcing, _perturbation) = standalone.build_standalone(0)
@@ -168,25 +169,24 @@ def run(args: argparse.Namespace) -> int:
     if (jpj, jpi) != (203, 56):
         raise ValueError(f"unexpected NEMO runtime shape {(jpj, jpi)}")
 
-    # Full runtime frame has the two MPI halos plus the two construction
-    # rings excluded by standalone: 203x56 -> 195x48.
-    edge = 4
+    # Full runtime frame has two MPI halos around the 199x52 construction
+    # frame advanced by both models: 203x56 -> 199x52.
+    edge = 2
     core = lambda value: np.asarray(value)[edge:-edge, edge:-edge]
-    # ``read_nemo_mesh_mask(nn_hls=0)`` has already removed the runtime MPI
-    # halo, leaving only the two construction rings; do not strip four twice.
-    mesh_core = lambda value: np.asarray(value)[2:-2, 2:-2]
-    tmask = (mesh_core(np.asarray(grid.tmask)[..., 0]) > 0.5) & (
+    physical = np.zeros((199, 52), dtype=bool)
+    physical[2:-2, 2:-2] = True
+    tmask = (np.asarray(grid.tmask)[..., 0] > 0.5) & physical & (
         np.asarray(state.land_mask.data) > 0.5)
-    umask = (mesh_core(np.asarray(grid.umask)[..., 0]) > 0.5) & (
+    umask = (np.asarray(grid.umask)[..., 0] > 0.5) & physical & (
         np.asarray(state.u_mask.data)[:, 1:] > 0.5)
-    vmask = (mesh_core(np.asarray(grid.vmask)[..., 0]) > 0.5) & (
+    vmask = (np.asarray(grid.vmask)[..., 0] > 0.5) & physical & (
         np.asarray(state.v_mask.data)[1:, :] > 0.5)
 
     def slow_forcing(name: str) -> np.ndarray:
         value = np.fromfile(run_dir / name, dtype="<f8")
         if value.size != 199 * 52:
             raise ValueError(f"{name}: unexpected value count {value.size}")
-        return value.reshape(199, 52)[2:-2, 2:-2]
+        return value.reshape(199, 52)
 
     rows = [
         diff("slow_forcing_U", np.asarray(loop["F_slow_u"])[:, 1:],
@@ -264,6 +264,8 @@ def run(args: argparse.Namespace) -> int:
         "first_over_bar": None if first is None else first["name"],
         "rows": rows,
         "loop_receipt": {
+            "operator_domain": "NEMO_199x52_CONSTRUCTION_FRAME",
+            "scoring_domain": "PHYSICAL_195x48_CORE",
             "dt_s": float(np.asarray(loop["dt_s"])),
             "n_loop": int(loop["n_loop"]),
             "seed_eta_max_abs": float(np.max(np.abs(np.asarray(loop["eta"])))),

@@ -49,7 +49,7 @@ def test_member_seed_contract_fails_closed():
 def test_standalone_builder_has_no_bridge_level_and_resolves_card_default():
     _, grid, z_coord, state, model_cfg, _, _, _, receipt = (
         RUNNER.build_standalone(0))
-    assert (grid.n_lat, grid.n_lon) == (195, 48)
+    assert (grid.n_lat, grid.n_lon) == (199, 52)
     assert model_cfg.outer_integrator == "leapfrog"
     assert (model_cfg.slow_forcing_depth_mean_evaluation
             == "nemo_static_literal")
@@ -91,10 +91,11 @@ def test_construction_frame_faces_close_and_stripped_roll_is_red_control():
     cfg, grid, z_coord, state, *_ = RUNNER.build_standalone(0)
     tmask, umask, vmask, fmask = RUNNER.nemo_construction_frame_masks(
         grid, z_coord, state, cfg)
-    stripped_roll_u = tmask & np.roll(tmask, -1, axis=1)
-    mismatch = stripped_roll_u != umask
+    core_tmask = tmask[2:-2, 2:-2]
+    stripped_roll_u = core_tmask & np.roll(core_tmask, -1, axis=1)
+    mismatch = stripped_roll_u != umask[2:-2, 2:-2]
     assert np.count_nonzero(mismatch) == 7
-    assert np.all(np.argwhere(mismatch)[:, 1] == grid.n_lon - 1)
+    assert np.all(np.argwhere(mismatch)[:, 1] == core_tmask.shape[1] - 1)
     assert vmask.shape == tmask.shape == fmask.shape
     raw = z_coord.nemo_een_barotropic
     np.testing.assert_array_equal(np.asarray(raw.umask), umask)
@@ -165,6 +166,25 @@ def test_standalone_reducer_convention_expands_to_recorded_native_frame():
     assert not expanded["T"][:, :, -1].any()
     assert receipt["asserted_input_names"] == [
         "S", "T", "eta", "land_mask", "u", "v"]
+
+
+def test_standalone_reducer_accepts_live_construction_frame_without_crop():
+    native = (9, 10, 6)
+    ny, nx, nz = native
+    fields = {
+        "T": np.ones((ny, nx, nz - 1)),
+        "S": np.ones((ny, nx, nz - 1)),
+        "eta": np.ones((ny, nx)),
+        "u": np.ones((ny, nx + 1, nz - 1)),
+        "v": np.ones((ny + 1, nx, nz - 1)),
+    }
+    land = np.ones((ny, nx))
+    expanded, receipt = RUNNER.expand_standalone_reducer_inputs(
+        fields, land, native)
+    assert receipt["horizontal_mode"] == "nemo_construction_frame"
+    np.testing.assert_array_equal(expanded["T"][..., :-1], fields["T"])
+    np.testing.assert_array_equal(expanded["u"][..., :-1], fields["u"])
+    assert not expanded["T"][..., -1].any()
 
 
 @pytest.mark.parametrize("name", ["T", "S", "eta", "u", "v", "land_mask"])

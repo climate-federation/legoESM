@@ -657,6 +657,39 @@ class TestNemoFaithfulGrid:
         assert lat[97] == pytest.approx(0.0, abs=1e-5)     # equator on T-point
         assert abs(lat[0]) == pytest.approx(69.1514, abs=1e-3)
 
+    def test_nemo_construction_frame_preserves_source_spacing(self):
+        cfg = nemo_faithful_dino_config(
+            base=dino_config_for_recipe("nemo_dino_kamm_mlf"))
+        grid = dino_lat_lon_grid(cfg, construction_frame=True)
+        lat = np.degrees(np.asarray(grid.lat))
+        lon = np.degrees(np.asarray(grid.lon))
+        assert (grid.n_lat, grid.n_lon) == (199, 52)
+        np.testing.assert_array_equal(lon[[0, -1]], [-0.5, 50.5])
+        assert lat[99] == 0.0
+        assert lat[[0, -1]] == pytest.approx(
+            [-69.85173502222084, 69.85173502222084], abs=1e-13)
+
+    def test_literal_sill_association_moves_planted_bottom_threshold(self):
+        cfg = nemo_faithful_dino_config(
+            base=dino_config_for_recipe("nemo_dino_kamm_mlf"))
+        assert cfg.bathymetry_gauss_ring_evaluation == "nemo_literal"
+        grid = dino_lat_lon_grid(cfg, construction_frame=True)
+        literal = dino.dino_lat_lon_vertical(grid, cfg)
+        factored = dino.dino_lat_lon_vertical(
+            grid, dataclasses.replace(
+                cfg, bathymetry_gauss_ring_evaluation="factored"))
+        moved = np.argwhere(
+            np.asarray(literal.is_active) != np.asarray(factored.is_active))
+        # Live threshold plant: reduced-square algebra wets one extra bottom
+        # cell in the retained construction ring.
+        np.testing.assert_array_equal(moved, [[1, 3, 30]])
+
+        with pytest.raises(
+                ValueError, match="bathymetry_gauss_ring_evaluation"):
+            dino.dino_lat_lon_vertical(
+                grid, dataclasses.replace(
+                    cfg, bathymetry_gauss_ring_evaluation="unknown"))
+
     def test_nemo_faithful_bathymetry_domain_is_wet(self):
         # The co-set lon frame keeps the bathymetry valid (not an all-land
         # domain) — the sill anchor tracks NEMO's western U face at 0.0.
