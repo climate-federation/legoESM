@@ -171,10 +171,25 @@ def run(args: argparse.Namespace) -> int:
     # ``read_nemo_mesh_mask(nn_hls=0)`` has already removed the runtime MPI
     # halo, leaving only the two construction rings; do not strip four twice.
     mesh_core = lambda value: np.asarray(value)[2:-2, 2:-2]
-    tmask = mesh_core(np.asarray(grid.tmask)[..., 0]) > 0.5
-    umask = mesh_core(np.asarray(grid.umask)[..., 0]) > 0.5
-    vmask = mesh_core(np.asarray(grid.vmask)[..., 0]) > 0.5
-    rows = []
+    tmask = (mesh_core(np.asarray(grid.tmask)[..., 0]) > 0.5) & (
+        np.asarray(state.land_mask.data) > 0.5)
+    umask = (mesh_core(np.asarray(grid.umask)[..., 0]) > 0.5) & (
+        np.asarray(state.u_mask.data)[:, 1:] > 0.5)
+    vmask = (mesh_core(np.asarray(grid.vmask)[..., 0]) > 0.5) & (
+        np.asarray(state.v_mask.data)[1:, :] > 0.5)
+
+    def slow_forcing(name: str) -> np.ndarray:
+        value = np.fromfile(run_dir / name, dtype="<f8")
+        if value.size != 199 * 52:
+            raise ValueError(f"{name}: unexpected value count {value.size}")
+        return value.reshape(199, 52)[2:-2, 2:-2]
+
+    rows = [
+        diff("slow_forcing_U", np.asarray(loop["F_slow_u"])[:, 1:],
+             slow_forcing("spg_dump_zu_frc.bin"), umask),
+        diff("slow_forcing_V", np.asarray(loop["F_slow_v"])[1:, :],
+             slow_forcing("spg_dump_zv_frc.bin"), vmask),
+    ]
     for index in range(icycle):
         jn = index + 1
         rows.extend([
