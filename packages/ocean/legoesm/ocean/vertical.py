@@ -720,6 +720,8 @@ class OceanPartialCellCoordinate(NamedTuple):
 def create_partial_cell_coordinate(
     z_coord: OceanZStarCoordinate,
     H_bathy: jnp.ndarray,
+    *,
+    bottom_index_rule: str = "interface",
 ) -> OceanPartialCellCoordinate:
     """Build an ``OceanPartialCellCoordinate`` from a z* coord + bathymetry.
 
@@ -732,6 +734,14 @@ def create_partial_cell_coordinate(
         Per-column bathymetry depth [m], positive downward.  Land
         cells should have H_bathy <= 0; they're flagged as
         ``bottom_level = -1`` and ``is_active = False`` everywhere.
+    bottom_index_rule : {"interface", "nemo_tpoint"}
+        ``"interface"`` is the legacy Adcroft rule: the deepest active cell
+        is the one whose top interface is shallower than the supplied depth.
+        ``"nemo_tpoint"`` reproduces NEMO ``zgr_zps`` user domains that set
+        ``k_bot`` from ``pdept_1d(k) < H <= pdept_1d(k+1)`` and then clip the
+        bottom thickness at the reference bottom interface.  The latter also
+        retains near-full last-bit thicknesses instead of applying legoESM's
+        legacy near-full snap.
 
     Returns
     -------
@@ -750,12 +760,29 @@ def create_partial_cell_coordinate(
     nlev = z_coord.n_levels
     abs_z_half = jnp.abs(z_coord.z_half_ref)        # (nlev+1,) positive depths
 
-    # Number of half-interfaces strictly shallower than H_bathy.
-    # E.g. abs_z_half = [0, 10, 300, 1500, 4000], H=2350 → count=4 → bottom_level=3.
+    if bottom_index_rule not in {"interface", "nemo_tpoint"}:
+        raise ValueError(
+            "bottom_index_rule must be 'interface' or 'nemo_tpoint', got "
+            f"{bottom_index_rule!r}"
+        )
+
+    # Number of reference points strictly shallower than H_bathy.  The legacy
+    # rule counts W interfaces.  NEMO's zps user-domain rule counts T points;
+    # on a uniform grid this guarantees a half-cell minimum before k_bot moves
+    # down, exactly as usrdef_zgr.F90:140-143/157-160 executes.
     n_lead = H.ndim
     H_exp = H[..., jnp.newaxis]                     # (..., 1)
+    index_depths = (
+        jnp.abs(
+            z_coord.t_depth_ref
+            if z_coord.t_depth_ref is not None
+            else z_coord.z_full_ref
+        )
+        if bottom_index_rule == "nemo_tpoint"
+        else abs_z_half
+    )
     interfaces_above = jnp.sum(
-        abs_z_half[(jnp.newaxis,) * n_lead + (slice(None),)] < H_exp,
+        index_depths[(jnp.newaxis,) * n_lead + (slice(None),)] < H_exp,
         axis=-1,
     )                                                # (...) integer
     bottom_level = interfaces_above.astype(jnp.int32) - 1
@@ -798,8 +825,11 @@ def create_partial_cell_coordinate(
     dz_at_bottom = z_coord.dz_ref[safe_bottom]      # (...)
     raw_partial = H - abs_z_at_bottom
     capped = jnp.minimum(raw_partial, dz_at_bottom)
-    near_full = jnp.abs(capped - dz_at_bottom) < dz_at_bottom * 1e-5
-    partial_thickness = jnp.where(near_full, dz_at_bottom, capped)
+    if bottom_index_rule == "nemo_tpoint":
+        partial_thickness = capped
+    else:
+        near_full = jnp.abs(capped - dz_at_bottom) < dz_at_bottom * 1e-5
+        partial_thickness = jnp.where(near_full, dz_at_bottom, capped)
 
     is_bottom = (k_view == bottom_view) & (bottom_view >= 0)
     h_partial = jnp.where(is_bottom, partial_thickness[..., jnp.newaxis], h_full)
