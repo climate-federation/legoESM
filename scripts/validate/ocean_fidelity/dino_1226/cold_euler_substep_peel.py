@@ -213,6 +213,9 @@ def run(args: argparse.Namespace) -> int:
         axis=-1) * r1_hv
     nemo_wind_v = slow_forcing("wnd_dump_zv_frc_inc.bin")
     rows[2:2] = [
+        diff("slow_forcing_V_PE_total_closure",
+             literal_v(diagnostics.total_v.data),
+             np.asarray(loop["F_slow_v"])[1:, :], vmask),
         diff("slow_forcing_V_HPG_component",
              literal_v(diagnostics.KE_PGF_v.data), nemo_hpg_v, vmask),
         diff("slow_forcing_V_wind_component",
@@ -266,6 +269,10 @@ def run(args: argparse.Namespace) -> int:
             "seed_eta_max_abs": float(np.max(np.abs(np.asarray(loop["eta"])))),
             "seed_u_max_abs": float(np.max(np.abs(np.asarray(loop["U_bar"])))),
             "seed_v_max_abs": float(np.max(np.abs(np.asarray(loop["V_bar"])))),
+            "v_component_depth_mean_max_abs": {
+                name: float(np.max(np.abs(literal_v(getattr(diagnostics, name).data))))
+                for name in diagnostics._fields if name.endswith("_v")
+            },
         },
         "inputs": {
             str(trajectory_path): {"bytes": trajectory_path.stat().st_size,
