@@ -43,12 +43,16 @@ def test_land_ml_survives_carry_aux_npz_roundtrip(tmp_path):
     loaded = dict(np.load(tmp_path / "c.npz"))
 
     # Restart lands on the cold-start state; restore must overwrite it.
-    dst = SimpleNamespace(_carry_aux=loaded, _land_ml_state=_state(99.0))
+    dst = SimpleNamespace(_check_land_soil_dz=lambda dz: None,
+                          _carry_aux=loaded, _land_ml_state=_state(99.0))
     ModelDriver._restore_land_ml_from_carry_aux(dst)
 
     for f in MultiLayerLandState._fields:
-        np.testing.assert_allclose(
-            getattr(dst._land_ml_state, f), getattr(saved, f))
+        want = getattr(saved, f)
+        if want is None:  # optional fields (TgC-style) unset here
+            assert getattr(dst._land_ml_state, f) is None
+            continue
+        np.testing.assert_allclose(getattr(dst._land_ml_state, f), want)
     # land_ml_* popped, not left to re-save as junk.
     assert not any(k.startswith("land_ml_") for k in dst._carry_aux)
 
@@ -69,7 +73,8 @@ def test_none_optional_fields_survive_roundtrip(tmp_path):
     np.savez(tmp_path / "c.npz", **aux)      # must not need allow_pickle
     loaded = dict(np.load(tmp_path / "c.npz"))
 
-    dst = SimpleNamespace(_carry_aux=loaded,
+    dst = SimpleNamespace(_check_land_soil_dz=lambda dz: None,
+                          _carry_aux=loaded,
                           _land_ml_state=_state(99.0)._replace(TgC=None))
     ModelDriver._restore_land_ml_from_carry_aux(dst)
     assert dst._land_ml_state.TgC is None    # stays None, not resurrected
@@ -80,6 +85,7 @@ def test_restore_is_noop_for_slab_land():
     # Slab run (_land_ml_state None) must ignore any stray land_ml_* keys AND
     # strip them, so they never leak forward into the next slab checkpoint.
     dst = SimpleNamespace(
+        _check_land_soil_dz=lambda dz: None,
         _carry_aux={"land_ml_T_soil": np.ones(3)}, _land_ml_state=None)
     ModelDriver._restore_land_ml_from_carry_aux(dst)
     assert dst._land_ml_state is None
@@ -98,13 +104,15 @@ def test_partial_checkpoint_raises(tmp_path):
     )
     aux = ModelDriver._checkpoint_carry_aux(src)
     del aux["land_ml_snow_depth"]                    # simulate a dropped column
-    dst = SimpleNamespace(_carry_aux=dict(aux), _land_ml_state=_state(99.0))
+    dst = SimpleNamespace(_check_land_soil_dz=lambda dz: None,
+                          _carry_aux=dict(aux), _land_ml_state=_state(99.0))
     with pytest.raises(ValueError, match="does not match"):
         ModelDriver._restore_land_ml_from_carry_aux(dst)
 
 
 def test_unknown_field_raises():
     dst = SimpleNamespace(
+        _check_land_soil_dz=lambda dz: None,
         _carry_aux={f"land_ml_{f}": np.ones((4, 6) if i < 3 else (4,),
                                             dtype=np.float32)
                     for i, f in enumerate(MultiLayerLandState._fields[:7])}
@@ -121,6 +129,7 @@ def test_shape_mismatch_raises():
             for i, f in enumerate(MultiLayerLandState._fields[:7])}
     good["land_ml_T_soil"] = np.ones((4, 8), dtype=np.float32)   # 8 != 6 layers
     dst = SimpleNamespace(
+        _check_land_soil_dz=lambda dz: None,
         _carry_aux=good,
         _land_ml_state=_state(99.0)._replace(TgC=None, surface_water=None))
     with pytest.raises(ValueError, match="shape"):
