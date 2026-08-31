@@ -927,10 +927,15 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
         return rows
 
     localization["fct_face_flux_identity"] = {
-        "qualification": "FROZEN_COUPLED_FACE_FLUX_LOCALIZATION",
+        "qualification": "POST_HOC_FACE_DENSITY_DIAGNOSTIC_NOT_A_GATE",
         "convention": (
             "COMMON_FLUX_DENSITY: NEMO ztFu/e2u, ztFv/e1v, "
             "ztFw/(e1t*e2t) versus legoESM native U/V/W faces"),
+        "scope": (
+            "NEMO forms metric-complete pU/pV/pW before tracer "
+            "multiplication; division of the recorded products cannot undo "
+            "that association bit-for-bit. Operator admission is the "
+            "independent horizontal/vertical divergence-rate gate below."),
         "source": "traadv_fct.F90:169-187,341-344,417-424",
         "units": "tracer*m2/s on U/V; tracer*m/s on W",
         "rows": (
@@ -946,6 +951,12 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
         "rows": (
             native_volume_rows("T", fct_faces_t, nemo_faces_t)
             + native_volume_rows("S", fct_faces_s, nemo_faces_s)),
+    }
+    localization["fct_coupled_path_gate"] = {
+        "qualification": "REGISTERED_HORIZONTAL_AND_VERTICAL_RATE_GATE",
+        "source": "traadv_fct.F90:341-344,417-424",
+        "bar": BAR,
+        "rows": localization["first_failed_traadv_components"]["rows"],
     }
     step1, rate = apply_dino_lat_lon_surface_forcing(
         step1, forcing, z_coord, cfg, standalone.DT_SECONDS,
@@ -1163,19 +1174,19 @@ def run(args: argparse.Namespace) -> int:
     ordered = ic_rows + step_rows
     first_over_bar = next(
         (row["name"] for row in ordered if row["status"] == "OVER_BAR"), None)
-    face_identity_rows = (
+    fct_path_rows = (
         [] if forcing_localization is None else
-        forcing_localization["fct_face_flux_identity"]["rows"])
-    face_identity_passed = bool(face_identity_rows) and all(
-        row["status"] == "PASS" for row in face_identity_rows)
+        forcing_localization["fct_coupled_path_gate"]["rows"])
+    fct_paths_passed = bool(fct_path_rows) and all(
+        row["status"] == "PASS" for row in fct_path_rows)
     euler_passed = (bool(step_rows)
                     and all(row["status"] == "PASS" for row in step_rows)
-                    and face_identity_passed)
+                    and fct_paths_passed)
     first_euler_debt = next(
         (row["name"] for row in step_rows if row["status"] == "OVER_BAR"),
         None)
-    if first_euler_debt is None and step_rows and not face_identity_passed:
-        first_euler_debt = "FCT_FACE_FLUX_IDENTITY"
+    if first_euler_debt is None and step_rows and not fct_paths_passed:
+        first_euler_debt = "FCT_FACE_FLUX_PATH_DIVERGENCE"
     artifact = {
         "schema": SCHEMA,
         "session_id": SESSION_ID,
@@ -1193,7 +1204,8 @@ def run(args: argparse.Namespace) -> int:
              "EULER_WITHHELD")),
         "euler_admission": admitted,
         "euler_at_bar": euler_passed,
-        "fct_face_flux_identity_at_bar": face_identity_passed,
+        "fct_face_flux_path_divergence_at_bar": fct_paths_passed,
+        "fct_individual_face_bit_identity_claimed": False,
         "euler_disposition": {
             "status": ("ADMITTED" if euler_passed else
                        "BLOCKED_COUPLED_TRAADV_PAIR"),
