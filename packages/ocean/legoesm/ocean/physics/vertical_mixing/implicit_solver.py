@@ -471,19 +471,18 @@ def implicit_vertical_diffusion_nemo_tracer_pair(
     zero = jnp.zeros_like(content_rhs_1[..., :1])
     wet_f = jnp.asarray(wet, dtype=dtype)
     interface_wet = wet_f[..., 1:] * wet_f[..., :-1]
-    b = jax.lax.optimization_barrier
-    dt_value = b(jnp.asarray(dt, dtype=dtype))
-    neg_dt = b(-dt_value)
-    product = b(neg_dt * b(K))
+    product = jax.lax.optimization_barrier(
+        -jnp.asarray(dt, dtype=dtype) * K)
     e3w_safe = jnp.where(interface_wet > 0.0, e3w_now,
                          jnp.asarray(1.0, dtype=dtype))
-    coeff = b(b(product / b(e3w_safe)) * b(interface_wet))
-    lower = b(jnp.concatenate([zero, coeff], axis=-1))
-    upper = b(jnp.concatenate([coeff, zero], axis=-1))
-    coefficient_sum = b(b(lower) + b(upper))
-    diagonal = b(b(e3t_after) - coefficient_sum)
-    diagonal = b(jnp.where(wet_f > 0.0, diagonal,
-                           jnp.asarray(1.0, dtype=dtype)))
+    coeff = (jax.lax.optimization_barrier(product / e3w_safe)
+             * interface_wet)
+    lower = jnp.concatenate([zero, coeff], axis=-1)
+    upper = jnp.concatenate([coeff, zero], axis=-1)
+    coefficient_sum = jax.lax.optimization_barrier(lower + upper)
+    diagonal = jax.lax.optimization_barrier(e3t_after - coefficient_sum)
+    diagonal = jnp.where(wet_f > 0.0, diagonal,
+                         jnp.asarray(1.0, dtype=dtype))
     out_1 = _nemo_ordered_tracer_solve(
         lower, diagonal, upper, content_rhs_1) * wet_f
     out_2 = _nemo_ordered_tracer_solve(
