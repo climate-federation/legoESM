@@ -344,6 +344,27 @@ def biophysics_lmip_two_leaf_setup() -> dict:
     )
 
 
+def biophysics_lmip_p_model_setup() -> dict:
+    """Two-leaf biophysics mode with the P-model optimality source active.
+
+    Identical to :func:`biophysics_lmip_two_leaf_setup` except the canopy
+    runs Medlyn stomata with BOTH P-model switches on: acclimated Vcmax25 +
+    Jmax25/Vcmax25 from the coordination optimum and the predicted least-cost
+    Medlyn slope g1 = xi (Stocker et al. 2020; see ``land/p_model.py``).
+    NOTE: the calibrated per-PFT Vc_max25/g1 tables of the two-leaf setup are
+    bypassed by construction here — scores are not comparable to the
+    calibrated two-leaf run until the P model is itself calibrated
+    (``--params land.p_model.*``).
+    """
+    setup = biophysics_lmip_two_leaf_setup()
+    setup["surface_scheme"] = TwoLeafCanopyConfig(
+        stomatal_model="medlyn",
+        capacity_scheme="p_model",
+        g1_source="p_model",
+    ).validate()
+    return setup
+
+
 def apply_biophysics_lmip_two_leaf(config: MultiLayerLandConfig) -> MultiLayerLandConfig:
     """Apply the biophysics LMIP calibration, including its albedo scalars."""
     from legoesm.land.clm_surface_map import biophysics_lmip_albedo_scalars

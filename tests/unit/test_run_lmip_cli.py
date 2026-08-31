@@ -285,3 +285,55 @@ def test_carbon_ic_config_yaml_round_trips_to_args():
     assert args.carbon_ic.endswith("global_carbon_ic.npz")
     # A seeded config must still build a usable land config.
     assert build_config_from_args(args).land is not None
+
+
+def test_pmodel_switches_flow_to_config():
+    from scripts.run.run_lmip import _parse_args, build_config_from_args
+
+    cfg = build_config_from_args(_parse_args(
+        ["--lat", "45.0", "--land-surface-scheme", "two_leaf",
+         "--canopy-stomatal-model", "medlyn",
+         "--canopy-capacity-scheme", "p_model",
+         "--canopy-g1-source", "p_model"])).land
+    ss = cfg.surface_scheme
+    assert ss.capacity_scheme == "p_model"
+    assert ss.g1_source == "p_model"
+    assert ss.stomatal_model == "medlyn"
+
+
+def test_pmodel_switches_default_off():
+    from scripts.run.run_lmip import _parse_args, build_config_from_args
+
+    ss = build_config_from_args(_parse_args(
+        ["--lat", "45.0", "--land-surface-scheme", "two_leaf"])).land.surface_scheme
+    assert ss.capacity_scheme == "prescribed"
+    assert ss.g1_source == "table"
+    assert ss.stomatal_model == "ball_berry"  # unset keeps the config default
+
+
+def test_pmodel_bogus_choice_rejected():
+    import pytest
+    from scripts.run.run_lmip import _parse_args
+
+    with pytest.raises(SystemExit):
+        _parse_args(["--lat", "45.0", "--canopy-capacity-scheme", "pmodel"])
+
+
+def test_pmodel_g1_requires_medlyn():
+    import pytest
+    from scripts.run.run_lmip import _parse_args, build_config_from_args
+
+    with pytest.raises(ValueError, match="medlyn"):
+        build_config_from_args(_parse_args(
+            ["--lat", "45.0", "--land-surface-scheme", "two_leaf",
+             "--canopy-g1-source", "p_model"]))
+
+
+def test_pmodel_flags_refused_off_two_leaf():
+    import pytest
+    from scripts.run.run_lmip import _parse_args, build_config_from_args
+
+    with pytest.raises(ValueError, match="two_leaf"):
+        build_config_from_args(_parse_args(
+            ["--lat", "45.0", "--land-surface-scheme", "simple_seb",
+             "--canopy-capacity-scheme", "p_model"]))

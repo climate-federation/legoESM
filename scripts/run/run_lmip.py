@@ -72,6 +72,8 @@ from legoesm.land.richards import RichardsConfig
 from legoesm.land.carbon.config import CarbonConfig, som_total
 from legoesm.land.carbon.carbon_cycle import init_carbon_state
 from legoesm.land.lmip_forcing import make_synthetic_lmip_forcing
+from legoesm import constants
+from legoesm.land.p_model import PModelAcclimState, init_pmodel_acclim
 from legoesm.land.multilayer_land import (
     step_multilayer_land,
     init_multilayer_land_state,
@@ -164,10 +166,27 @@ def _build_surface_scheme(args: argparse.Namespace):
     """
     from legoesm.land.surface_scheme import SimpleSEBConfig, TwoLeafCanopyConfig
     name = getattr(args, "land_surface_scheme", "simple_seb")
+    _cap = getattr(args, "canopy_capacity_scheme", "prescribed")
+    _g1s = getattr(args, "canopy_g1_source", "table")
+    if name != "two_leaf" and (_cap, _g1s) != ("prescribed", "table"):
+        raise ValueError(
+            "--canopy-capacity-scheme / --canopy-g1-source select the P-model "
+            "parameter source, which is only wired into the two_leaf scheme; "
+            f"got --land-surface-scheme {name!r}.")
     if name == "simple_seb":
         return SimpleSEBConfig()
     if name == "two_leaf":
-        return TwoLeafCanopyConfig()
+        overrides = {}
+        if getattr(args, "canopy_stomatal_model", None) is not None:
+            overrides["stomatal_model"] = args.canopy_stomatal_model
+        if _cap != "prescribed":
+            overrides["capacity_scheme"] = _cap
+        if _g1s != "table":
+            overrides["g1_source"] = _g1s
+        cfg = TwoLeafCanopyConfig()._replace(**overrides) if overrides \
+            else TwoLeafCanopyConfig()
+        # Fail-early on invalid combos (e.g. g1_source=p_model without medlyn).
+        return cfg.validate()
     if name == "clm_ml":
         from legoesm.land.canopy.config import CLMMLCanopyConfig
         cfg = CLMMLCanopyConfig()
@@ -454,10 +473,14 @@ def _save_restart(
             )
     if soil_frozen_fraction is not None:
         payload["soil_frozen_fraction"] = np.asarray(soil_frozen_fraction)
+    if getattr(state, "pmodel_acclim", None) is not None:
+        for _fname, _val in zip(PModelAcclimState._fields, state.pmodel_acclim):
+            payload[f"pmodel_{_fname}"] = np.asarray(_val)
     np.savez_compressed(str(restart_path), **payload)
 
 
-def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
+def _load_restart(restart_path: Path, config: MultiLayerLandConfig,
+                  allow_pmodel_cold_start: bool = False):
     """Load a restart checkpoint and reconstruct MultiLayerLandState."""
     from legoesm.land.state import MultiLayerLandState
     data = np.load(str(restart_path))
@@ -494,6 +517,29 @@ def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
         state = state._replace(
             ice_bands=jnp.asarray(data["ice_bands"]) if "ice_bands" in data
             else jnp.zeros((ncol, nb)))
+    # P-model acclimation state: restore when present; a P-model-active config
+    # resuming an archive WITHOUT it is a scientific reset of the acclimated
+    # capacities and is refused unless --pmodel-cold-restart made it explicit.
+    from legoesm.land.surface_scheme import TwoLeafCanopyConfig as _TLC
+    _ss = config.surface_scheme
+    _pm_active = isinstance(_ss, _TLC) and (
+        _ss.capacity_scheme == "p_model" or _ss.g1_source == "p_model")
+    _pm_keys = [f"pmodel_{f}" for f in PModelAcclimState._fields]
+    if all(k in data for k in _pm_keys):
+        state = state._replace(pmodel_acclim=PModelAcclimState(
+            *[jnp.asarray(data[k]) for k in _pm_keys]))
+    elif _pm_active:
+        if not allow_pmodel_cold_start:
+            raise ValueError(
+                f"restart {restart_path} has no P-model acclimation state but "
+                "a P-model switch is active; resuming would silently "
+                "cold-start the acclimated capacities. Pass "
+                "--pmodel-cold-restart to accept the reset explicitly.")
+        state = state._replace(pmodel_acclim=init_pmodel_acclim(
+            int(state.snow_depth.shape[0]),
+            t_init_K=state.T_soil[:, 0],
+            ps_init_pa=constants.p_atm_std,
+            cfg=_ss.p_model))
     start_step = int(data["step"])
     start_day = float(data["day"])
     carbon_state = None
@@ -707,6 +753,34 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "upstream design value). num_ml_steps is derived from it, "
                         "so the canopy air budget stays at its design sub-step "
                         "whatever host --dt is used.")
+    p.add_argument("--canopy-stomatal-model", default=None,
+                   choices=["ball_berry", "medlyn"],
+                   dest="canopy_stomatal_model",
+                   help="Two-leaf stomatal conductance model. Unset keeps the "
+                        "CanopyConfig default (ball_berry). Required as "
+                        "'medlyn' when --canopy-g1-source p_model.")
+    p.add_argument("--canopy-capacity-scheme", default="prescribed",
+                   choices=["prescribed", "p_model"],
+                   dest="canopy_capacity_scheme",
+                   help="Source of the two-leaf C3 leaf capacities: "
+                        "'prescribed' (default, PFT tables) or 'p_model' "
+                        "(acclimated optimality Vcmax25 + Jmax25/Vcmax25; "
+                        "C4 capacity stays prescribed until the C4 extension "
+                        "lands). Two-leaf scheme only.")
+    p.add_argument("--canopy-g1-source", default="table",
+                   choices=["table", "p_model"],
+                   dest="canopy_g1_source",
+                   help="Source of the Medlyn slope g1: 'table' (default, "
+                        "per-PFT) or 'p_model' (least-cost xi; requires "
+                        "--canopy-stomatal-model medlyn). Two-leaf only.")
+    p.add_argument("--pmodel-cold-restart", action="store_true",
+                   dest="pmodel_cold_restart",
+                   help="Allow resuming a P-model run from a restart that has "
+                        "no P-model acclimation state (an archive written "
+                        "before the switches were on). The acclimation "
+                        "restarts from the configured cold-start values - an "
+                        "explicit, recorded reset. Without this flag such a "
+                        "resume is refused.")
     p.add_argument("--output", default="lmip_output",
                    help="Output directory")
     p.add_argument("--checkpoint-days", type=int, default=100,
@@ -892,7 +966,8 @@ def main() -> None:
     if args.restart_from is not None:
         print(f"Loading restart from {args.restart_from}")
         state, carbon_state, start_step, start_day_abs, carbon_phi = _load_restart(
-            Path(args.restart_from), config
+            Path(args.restart_from), config,
+            allow_pmodel_cold_start=getattr(args, "pmodel_cold_restart", False),
         )
         print(f"  Resumed at step {start_step}, day {start_day_abs:.2f}")
         # The LMIP restart format persists only soil/snow/carbon, not the CLM-ML
