@@ -74,7 +74,7 @@ def test_capacities_decay_smoothly_to_zero_at_low_light():
         caps = pm.acclimated_capacities(_state(ppfd=ppfd), cfg)
         v.append(float(caps.vcmax25_leaf[0]))
         assert np.isfinite(float(caps.rjv25[0]))  # analytic ratio: no 0/0
-    assert all(a > b for a, b in zip(v, v[1:])) or v[-1] == 0.0
+    assert all(a > b for a, b in zip(v, v[1:]))  # strictly decreasing in light
     assert v[-1] == pytest.approx(0.0, abs=1e-12)
 
 

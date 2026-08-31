@@ -1086,7 +1086,10 @@ def _step_multilayer_land_impl(
             state.pmodel_acclim,
             T_K=forcing.T_lowest,
             ppfd=_ppfd_toc,
-            vpd_pa=jnp.maximum(_vpd_pa, 0.0),
+            # Raw VPD (can be slightly negative in supersaturated air): the
+            # consumer (optimal_chi) applies the SMOOTH floor; a hard maximum
+            # here would add a gradient kink at saturation.
+            vpd_pa=_vpd_pa,
             co2_ppm=jnp.broadcast_to(
                 jnp.asarray(forcing.co2_ppmv), _ppfd_toc.shape),
             ps_pa=jnp.broadcast_to(

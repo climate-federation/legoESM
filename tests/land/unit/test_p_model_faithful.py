@@ -210,6 +210,14 @@ def test_non_vacuity_perturbed_oracle_fails():
         T, D, ca, P, _O_BETA * 1.001, cfg.vpd_min_pa, cfg.mj_floor_eps,
         cfg.mj_floor_width)
     assert float(chi) != pytest.approx(o_chi_bad, rel=1e-9)
+    # And the SUT side: a perturbed module config must break the pin too.
+    o_chi, *_ = _o_chi_pack(
+        T, D, ca, P, _O_BETA, cfg.vpd_min_pa, cfg.mj_floor_eps,
+        cfg.mj_floor_width)
+    chi_bad, *_ = pm.optimal_chi(
+        jnp.float64(T), jnp.float64(D), jnp.float64(ca), jnp.float64(P),
+        pm.PModelConfig(beta_cost=146.0 * 1.001))
+    assert float(chi_bad) != pytest.approx(o_chi, rel=1e-9)
 
 
 def test_ema_recurrence_exact():
