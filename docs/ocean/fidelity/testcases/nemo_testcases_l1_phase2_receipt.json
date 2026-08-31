@@ -1,0 +1,51 @@
+{
+  "format": "nemo-testcase-l1-phase2-receipt-v1",
+  "session_id": "01a0591f-a335-7060-9257-6c47bf2149ee",
+  "preregistration_commit": "bb718ae7ca60912962187d2c39c5cac358f96e48",
+  "implementation_commit": "b5fb6b34e6d802b035267da41f2906908e8c3608",
+  "precision": {
+    "policy": "PrecisionPolicy.fp64()",
+    "pointwise_bar": 1e-15,
+    "accumulating_bar": 1e-12,
+    "backend": "CPU"
+  },
+  "cases": {
+    "LOCK_EXCHANGE-zco": {
+      "status": "VERIFIED",
+      "mesh_disposition": {"provided": 35, "verified": 30, "waived": 5, "unmeasured": 0},
+      "geometry_rows": 30,
+      "geometry_max_normalized_abs": 2.2118061813543975e-16,
+      "step1_before_rows": 5,
+      "step1_before_max_normalized_abs": 0.0,
+      "mesh_sha256": "ec3200f559cb44ee76d00498aac168dd6452cc29bd0abdf955dfc4ab061ed935",
+      "step1_dump_sha256": "c9f23d441865c566e3edf0301aca4f6e440259ade1722b725a0aa0fd4c2839e1",
+      "gate_report_sha256": "780452b1b914b74a238e82fc1f28eed8cbcc6309ea506b424d22ff6b4274ca84"
+    },
+    "OVERFLOW-zps": {
+      "status": "VERIFIED",
+      "mesh_disposition": {"provided": 45, "verified": 39, "waived": 6, "unmeasured": 0},
+      "geometry_rows": 39,
+      "geometry_max_normalized_abs": 1.417541617476509e-16,
+      "step1_before_rows": 5,
+      "step1_before_max_normalized_abs": 0.0,
+      "mesh_sha256": "4692b893eddee3eea5cee2e6f04e1d7fc55e6685100e349369051a6914cbd280",
+      "step1_dump_sha256": "cf0183e563aba8b8848bc5dea470c9e50aab2d987ff5da86241e8f82494d5c66",
+      "gate_report_sha256": "c417995ae4c5325467513185fbf5b280e4c5e7a7187ace2413a4df75565a7d0e"
+    }
+  },
+  "planted_controls": {
+    "file_side_unaccounted": "RED: missing=['PLANTED_UNACCOUNTED_FILE_ARRAY']",
+    "geometry_e1t_plus_1m": "RED: normalized error 1e-3 > 1e-15",
+    "ic_temperature_plus_1c": "RED: normalized error 5e-2 > 1e-15"
+  },
+  "unmeasured": [
+    "kt_gt_1_trajectory",
+    "rk3_stage_tendencies",
+    "teos10_density",
+    "rab",
+    "bn2",
+    "fct_tendency",
+    "adaptive_vertical_advection_partition",
+    "bbl_transport"
+  ]
+}
