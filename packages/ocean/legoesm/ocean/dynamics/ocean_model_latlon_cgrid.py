@@ -9963,34 +9963,19 @@ class LatLonCGridOceanModel:
         #     combine degenerate to forward-Euler regardless of which method
         #     performs it, so there is nothing MLF-specific to transcribe here.
         if state.u_before is None:
-            _entry = state._replace(
-                u_before=state.u, v_before=state.v, T_before=state.T,
-                S_before=state.S, eta_before=state.eta,
-            )
-            naa = self._step_impl(
-                _entry, dt, freshwater=freshwater,
+            # There is one cold-Euler operator, not two implementations.  In
+            # particular, the shared branch owns the collapsed-MLF tracer
+            # order, tra_sbc RHS threading, cold wind placement and first-step
+            # mlf_baro_corr.  Delegating here prevents the private single-pass
+            # transcription from drifting whenever that oracle branch gains a
+            # source-order repair.  Once Nbb exists, execution resumes below
+            # on this method's genuinely distinct one-pass MLF machinery.
+            return self._leapfrog_step(
+                state, dt, freshwater=freshwater,
                 surface_forcing=surface_forcing, sponge=sponge, grid=_grid,
                 vertex_mask=vertex_mask, t_seconds=t_seconds,
-                # DINO's centred split-explicit loop reads Kbb even while
-                # stp_MLF is in its one-step Euler mode.  At cold start
-                # istate has collapsed Kbb==Kmm, so seed from the original
-                # pre-tendency fields, identically to _leapfrog_step above.
-                _barotropic_before_state=(
-                    state.eta.data, state.u.data, state.v.data),
-                _apply_cold_start_after_reconcile=(
-                    _cfg_b.barotropic.barotropic_cold_start_after_reconcile
-                    == "nemo_mlf_baro_corr"),
+                external_tracer_rate=external_tracer_rate,
                 z_coord=z_coord, config=config, iwm_fields=iwm_fields)
-            naa = naa._replace(
-                u_before=state.u, v_before=state.v, T_before=state.T,
-                S_before=state.S, eta_before=state.eta,
-            )
-            if getattr(_cfg_b, "barotropic_forcing_centred", False):
-                naa = naa._replace(
-                    **_seed_centred_forcing_carry(
-                        surface_forcing, freshwater, _cfg_b.rho_0,
-                        state.land_mask.data))
-            return naa
 
         # --- LEAP-FROG + Asselin.
         rdt = 2.0 * dt

@@ -1843,6 +1843,15 @@ class TestSurfaceTendencyPlacement:
         # literal arms require raw NEMO restart operands.
         cfg = dataclasses.replace(
             cfg, zad_qco_evaluation="generic", wzv_call2_evaluation="generic",
+            # The literal trazdf matrix is a restart/oracle transcription: it
+            # requires the raw step-entry e3w_Kmm carried by a bridged state.
+            # This generated-grid control owns no such operand, so keep the
+            # unrelated surface-placement plant on the generic solver and its
+            # matching reconstructed interface divisor.  The production
+            # fail-closed guard remains exercised by the dedicated literal-
+            # solver tests.
+            zdf_implicit_solver_evaluation="shared_thomas",
+            implicit_vmix_e3t_now_divisor=False,
             # Same synthetic-grid scope: do not weaken the production guard;
             # explicitly select the generic depth-mean tree this fixture owns.
             slow_forcing_depth_mean_evaluation="live_tree")

@@ -273,6 +273,28 @@ def _nemo_fct_rate_components(run_kt2: Path, grid, *, sal: bool,
     return horizontal, vertical
 
 
+def _nemo_fct_flux_density(native_flux: np.ndarray,
+                            metric: np.ndarray, *, name: str) -> np.ndarray:
+    """Remove NEMO's face metric from a dumped native volume flux.
+
+    ``traadv_fct`` carries its ``ztF*`` work arrays as metric-complete volume
+    fluxes (the dump comment at ``traadv_fct.F90:169-187`` states
+    ``m3/s * tracer``). legoESM carries U/V/W faces per unit face width/area
+    and applies those metrics inside ``divergence_cgrid``. Face identity must
+    therefore compare flux density, not two independently rounded metric
+    frames.
+    """
+    native = np.asarray(native_flux, dtype=np.float64)
+    width = np.asarray(metric, dtype=np.float64)
+    if native.shape[:2] != width.shape:
+        raise ValueError(
+            f"{name}: native face shape {native.shape[:2]} != metric shape "
+            f"{width.shape}")
+    if np.any(~np.isfinite(width)) or np.any(width <= 0.0):
+        raise ValueError(f"{name}: face metric must be finite and positive")
+    return native / width[..., None]
+
+
 def _initial_rows(grid, geometry, z_coord, state, cfg) -> tuple[
         list[dict[str, Any]], list[dict[str, Any]], np.ndarray, np.ndarray,
         dict[str, int]]:
@@ -850,7 +872,7 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
     dy_u = np.asarray(model.grid.dy_u)
     dx_v = np.asarray(model.grid.dx_v)
 
-    def face_rows(prefix, lego_faces, nemo_faces):
+    def native_volume_rows(prefix, lego_faces, nemo_faces):
         u_up, v_up, w_up, u_anti, v_anti, w_anti = lego_faces
         rows = []
         for part, lu, lv, lw in (
@@ -872,12 +894,58 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
             ])
         return rows
 
+    def face_density_rows(prefix, lego_faces, nemo_faces):
+        """Compare all six FCT faces in their common physical convention."""
+        u_up, v_up, w_up, u_anti, v_anti, w_anti = lego_faces
+        rows = []
+        nemo_area = np.asarray(grid.e1t) * np.asarray(grid.e2t)
+        if grid.e2u is None or grid.e1v is None:
+            raise ValueError("FCT face identity requires NEMO e2u/e1v")
+        for part, lu, lv, lw in (
+                ("up", u_up, v_up, w_up),
+                ("anti", u_anti, v_anti, w_anti)):
+            rows.extend([
+                diff_row(
+                    f"{prefix}_fct_u_{part}",
+                    _model_core(lu[:, 1:, :]),
+                    _model_core(_nemo_fct_flux_density(
+                        nemo_faces[f"u_{part}"], grid.e2u,
+                        name=f"{prefix}_u_{part}")), common_u),
+                diff_row(
+                    f"{prefix}_fct_v_{part}",
+                    _model_core(lv[1:, :, :]),
+                    _model_core(_nemo_fct_flux_density(
+                        nemo_faces[f"v_{part}"], grid.e1v,
+                        name=f"{prefix}_v_{part}")), common_v),
+                diff_row(
+                    f"{prefix}_fct_w_{part}",
+                    _model_core(lw[..., :-1]),
+                    _model_core(_nemo_fct_flux_density(
+                        nemo_faces[f"w_{part}"], nemo_area,
+                        name=f"{prefix}_w_{part}")), common_t),
+            ])
+        return rows
+
     localization["fct_face_flux_identity"] = {
         "qualification": "FROZEN_COUPLED_FACE_FLUX_LOCALIZATION",
-        "units": "NEMO_NATIVE_TRACER_VOLUME_FLUX",
+        "convention": (
+            "COMMON_FLUX_DENSITY: NEMO ztFu/e2u, ztFv/e1v, "
+            "ztFw/(e1t*e2t) versus legoESM native U/V/W faces"),
+        "source": "traadv_fct.F90:169-187,341-344,417-424",
+        "units": "tracer*m2/s on U/V; tracer*m/s on W",
         "rows": (
-            face_rows("T", fct_faces_t, nemo_faces_t)
-            + face_rows("S", fct_faces_s, nemo_faces_s)),
+            face_density_rows("T", fct_faces_t, nemo_faces_t)
+            + face_density_rows("S", fct_faces_s, nemo_faces_s)),
+    }
+    localization["fct_native_volume_convention_receipt"] = {
+        "qualification": "EXPECTED_METRIC_FRAME_DIFFERENCE_NOT_A_GATE",
+        "explanation": (
+            "Multiplying legoESM faces by its geometry and comparing against "
+            "NEMO's independently rounded native volume-flux frame is not an "
+            "operator identity; these rows retain that rejected convention."),
+        "rows": (
+            native_volume_rows("T", fct_faces_t, nemo_faces_t)
+            + native_volume_rows("S", fct_faces_s, nemo_faces_s)),
     }
     step1, rate = apply_dino_lat_lon_surface_forcing(
         step1, forcing, z_coord, cfg, standalone.DT_SECONDS,
@@ -929,10 +997,20 @@ def self_test() -> dict[str, str]:
     gate_rows[-1]["status"] = "OVER_BAR"
     if initialization_admitted(gate_rows):
         raise RuntimeError("planted initialization failure did not withhold")
+    face = np.arange(1.0, 9.0, dtype=np.float64).reshape(2, 2, 2)
+    metric = np.array([[2.0, 4.0], [8.0, 16.0]], dtype=np.float64)
+    native = face * metric[..., None]
+    np.testing.assert_array_equal(
+        _nemo_fct_flux_density(native, metric, name="control"), face)
+    wrong = _nemo_fct_flux_density(
+        native, np.nextafter(metric, np.inf), name="control_wrong")
+    if not np.any(wrong != face):
+        raise RuntimeError("planted FCT metric convention did not fire")
     return {
         "field_mismatch_plant": "FIRED",
         "wrong_core_plant": shape,
         "initialization_gate_plant": "FIRED",
+        "fct_metric_convention_plant": "FIRED",
     }
 
 
@@ -1085,11 +1163,19 @@ def run(args: argparse.Namespace) -> int:
     ordered = ic_rows + step_rows
     first_over_bar = next(
         (row["name"] for row in ordered if row["status"] == "OVER_BAR"), None)
-    euler_passed = bool(step_rows) and all(
-        row["status"] == "PASS" for row in step_rows)
+    face_identity_rows = (
+        [] if forcing_localization is None else
+        forcing_localization["fct_face_flux_identity"]["rows"])
+    face_identity_passed = bool(face_identity_rows) and all(
+        row["status"] == "PASS" for row in face_identity_rows)
+    euler_passed = (bool(step_rows)
+                    and all(row["status"] == "PASS" for row in step_rows)
+                    and face_identity_passed)
     first_euler_debt = next(
         (row["name"] for row in step_rows if row["status"] == "OVER_BAR"),
         None)
+    if first_euler_debt is None and step_rows and not face_identity_passed:
+        first_euler_debt = "FCT_FACE_FLUX_IDENTITY"
     artifact = {
         "schema": SCHEMA,
         "session_id": SESSION_ID,
@@ -1107,6 +1193,7 @@ def run(args: argparse.Namespace) -> int:
              "EULER_WITHHELD")),
         "euler_admission": admitted,
         "euler_at_bar": euler_passed,
+        "fct_face_flux_identity_at_bar": face_identity_passed,
         "euler_disposition": {
             "status": ("ADMITTED" if euler_passed else
                        "BLOCKED_COUPLED_TRAADV_PAIR"),

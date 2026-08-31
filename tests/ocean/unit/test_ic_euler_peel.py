@@ -24,6 +24,7 @@ def test_planted_controls_fire(peel):
         "field_mismatch_plant": "FIRED",
         "wrong_core_plant": "FIRED",
         "initialization_gate_plant": "FIRED",
+        "fct_metric_convention_plant": "FIRED",
     }
 
 
