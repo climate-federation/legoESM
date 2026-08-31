@@ -413,6 +413,7 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
         return model._step_impl(
             st, standalone.DT_SECONDS, surface_forcing=step_forcing,
             _apply_implicit_vmix=apply_vmix,
+            _ab2_scope_override="advective",
             _barotropic_before_state=(
                 common.eta.data, common.u.data, common.v.data),
             _external_tracer_rate=ext_rate,
