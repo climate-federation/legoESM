@@ -36,15 +36,13 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 import numpy as np
-
-from legoesm import constants
 from legoesm.grids.latlon import (
     LatLonCGridGeometry,
     create_beta_plane_cgrid_geometry,
     create_latlon_geometry,
 )
-from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import neumann_fill_cgrid
 from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
+from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import neumann_fill_cgrid
 from legoesm.ocean.fidelity.nemo_io import NemoBeforeState, NemoGrid, NemoState
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import LatLonCGridOceanState
@@ -54,13 +52,18 @@ from legoesm.ocean.vertical import (
     create_z_star_from_thicknesses,
 )
 
+from legoesm import constants
+
 
 class NemoBridgeOutput(NamedTuple):
     geometry: LatLonCGridGeometry
     z_coord: object
     state: LatLonCGridOceanState
     land_mask: np.ndarray          # (n_lat, n_lon) surface wet mask
-    f_match_max_abs: float         # max|geom.f_T - NEMO ff_t| — build self-check
+    # max|geom.f_T - selected reference ff_t|. The selected reference is NEMO
+    # by default; the registered bridge-Omega counterfactual scales NEMO ff_t
+    # by selected_omega/NEMO_OMEGA without relaxing the guard.
+    f_match_max_abs: float
 
 
 def _nemo_een_barotropic_operands(grid: NemoGrid):
@@ -416,8 +419,8 @@ def _warn_if_not_fp64() -> None:
     global _FP32_BRIDGE_WARNED
     if _FP32_BRIDGE_WARNED:
         return
-    from legoesm.core.precision import get_policy
     import jax.numpy as _jnp
+    from legoesm.core.precision import get_policy
     if _jnp.dtype(get_policy().control) == _jnp.float64:
         return
     _FP32_BRIDGE_WARNED = True
@@ -486,6 +489,11 @@ def bridge_nemo_to_legoesm_topo(
     # four orders of headroom for a different NEMO mesh's own roundoff while
     # still failing on any real constant or latitude error.
     f_rtol: float = 1e-9,
+    # Counterfactual-only validation axis. ``nemo`` is the historical default
+    # and remains bit-identical. ``selected_omega`` validates against NEMO's
+    # own ff_t scaled by the explicitly supplied omega, so a registered old-
+    # Earth reproduction remains fail-closed instead of loosening f_rtol.
+    f_reference_mode: str = "nemo",
     full_step: bool = False,
     metric_convention: str = "auto",
     vface_zonal_metric_evaluation: str = "nemo_vpoint",
@@ -542,6 +550,13 @@ def bridge_nemo_to_legoesm_topo(
         geometry retains its historical pytree structure.
     f_rtol : float
         Max relative error tolerance between the built ``f_T`` and NEMO ``ff_t``.
+    f_reference_mode : {"nemo", "selected_omega"}, optional
+        Reference used by the ``f_T`` guard. ``"nemo"`` (default) compares
+        directly with NEMO ``ff_t`` and is bit-identical to the prior bridge.
+        ``"selected_omega"`` compares with ``ff_t`` scaled by
+        ``omega / NEMO_CONSTANTS_CONFIG.Omega``. It exists only for explicit,
+        hash-stamped counterfactual reproduction and does not relax
+        ``f_rtol``.
     metric_convention : {"exact", "nemo_isotropic"}, optional (#1226)
         Forwarded to :func:`create_latlon_geometry`. Default ``"exact"``
         (the true finite-difference T/u-face metric legoESM has always
@@ -595,6 +610,10 @@ def bridge_nemo_to_legoesm_topo(
         raise ValueError(
             f"unknown e3t_mode {e3t_mode!r}; expected None or one of "
             + ", ".join(repr(m) for m in NEMO_E3T_MODES))
+    if f_reference_mode not in ("nemo", "selected_omega"):
+        raise ValueError(
+            "f_reference_mode must be 'nemo' or 'selected_omega', got "
+            f"{f_reference_mode!r}")
     # metric_convention="auto" (DEFAULT): ASK THE ORACLE instead of assuming.
     # NEMO's mesh_mask carries e1t and e2t, so the convention is observable:
     # DINO's usr_def_hgr sets pe2t = pe1t (Mercator conformality imposed
@@ -667,8 +686,12 @@ def bridge_nemo_to_legoesm_topo(
     # O(100%)), loose enough to pass the reconstruction residual.
     f_built = np.asarray(geom.f_T)
     f_nemo = np.asarray(grid.ff_t)
-    f_scale = float(np.max(np.abs(f_nemo)))
-    f_err = float(np.max(np.abs(f_built - f_nemo)))
+    if f_reference_mode == "nemo":
+        f_reference = f_nemo
+    else:
+        f_reference = f_nemo * (float(omega) / NEMO_CONSTANTS_CONFIG.Omega)
+    f_scale = float(np.max(np.abs(f_reference)))
+    f_err = float(np.max(np.abs(f_built - f_reference)))
     # PRECISION-AWARE BOUND.  ``f_rtol`` is tight enough (1e-9) to catch a
     # rotation-rate or latitude error in fp64, which is the precision every
     # oracle comparison runs at.  The geometry is stored at the PRECISION
@@ -682,12 +705,24 @@ def bridge_nemo_to_legoesm_topo(
     _bound = max(f_rtol, 8.0 * _eps)
     if f_err > _bound * f_scale:
         raise ValueError(
-            f"Mercator Coriolis mismatch vs NEMO ff_t: max|Δ|={f_err:.3e} > "
+            f"Mercator Coriolis mismatch vs {f_reference_mode} ff_t reference: "
+            f"max|Δ|={f_err:.3e} > "
             f"{_bound:.1e}·{f_scale:.3e} (relative {f_err / f_scale:.3e}; "
             f"f_rtol={f_rtol:.1e}, dtype={f_built.dtype}, 8*eps="
             f"{8.0 * _eps:.1e}). Check gphit/omega -- a relative gap near "
             "1.58e-05 is legoESM's rounded constants.Omega against NEMO's own "
             "2*pi/rsiday, which is what this bound was tightened to catch."
+        )
+    if f_reference_mode == "selected_omega":
+        f_nemo_scale = float(np.max(np.abs(f_nemo)))
+        unscaled_err = float(np.max(np.abs(f_built - f_nemo)))
+        print(
+            "BRIDGE OMEGA COUNTERFACTUAL: selected_omega validation PASS; "
+            f"omega={float(omega):.17g} reference_scale="
+            f"{float(omega) / NEMO_CONSTANTS_CONFIG.Omega:.17g} "
+            f"max|f_T-NEMO ff_t|={unscaled_err:.17g} "
+            f"relative={unscaled_err / f_nemo_scale:.17g}",
+            flush=True,
         )
     # SEPARATE BOUND, deliberately.  ``f_rtol`` was tightened from 1e-3 to 1e-9
     # to catch a rotation-rate error in the CORIOLIS check above, and it was
