@@ -5,13 +5,13 @@ WHAT THIS PINS.  NEMO builds DINO's horizontal metrics in
 
     pphiv(ji,jj) = 1./rad * ASIN( TANH( rn_e1_deg *rad* zvj ) )     ! :108
     pe1v (ji,jj) = ra * rad * COS( rad * pphiv(ji,jj) ) * rn_e1_deg ! :113
-    pe2v (ji,jj) = ra * rad * COS( rad * pphiv(ji,jj) ) * rn_e1_deg ! :117
+    pe2v (ji,jj) = ra * rad * COS( rad * pphiv(ji,jj) ) * rn_e1_deg ! :118
 
 with ``zvj = REAL( mjg(jj,0) - nn_jeq_s ) + 0.5`` (:98) -- the Mercator
 transform evaluated at the HALF-INTEGER row index, i.e. at the V-point's own
 latitude.  ``ra = 6371229 m`` and ``rad = pi/180`` come from ``phycst.F90``
 (:26, :37); ``rn_e1_deg = 1`` from ``usrdef_nam.F90:30`` and DINO's
-``namelist_cfg``.  Lines :113 and :117 are the SAME expression, so NEMO's mesh
+``namelist_cfg``.  Lines :113 and :118 are the SAME expression, so NEMO's mesh
 is isotropic and ``e1v == e2v`` to the last bit.
 
 THE DEFECT THIS TEST WOULD HAVE CAUGHT.  legoESM's ``"exact"`` convention
@@ -92,7 +92,7 @@ def _fp64_storage():
     set_policy(prev)
 
 
-def _dino_geometry(convention: str):
+def _dino_geometry(convention: str, vface_evaluation: str = "nemo_vpoint"):
     """The NEMO-faithful DINO R1 grid + its C-grid geometry."""
     cfg = dataclasses.replace(
         nemo_faithful_dino_config(), metric_convention=convention)
@@ -101,6 +101,7 @@ def _dino_geometry(convention: str):
         n_lat=g.n_lat, n_lon=g.n_lon, lat_1d=g.lat, lon_1d=g.lon,
         lat_face_1d=g.lat_v, radius=g.radius,
         metric_convention=convention,
+        vface_zonal_metric_evaluation=vface_evaluation,
     )
     return g, geom
 
@@ -118,7 +119,34 @@ def dino_exact(_fp64_storage):
     return _dino_geometry("exact")
 
 
+@pytest.fixture(scope="module")
+def dino_legacy_vface(_fp64_storage):
+    return _dino_geometry("nemo_isotropic", "legacy_tracer_midpoint")
+
+
 class TestConstructionMatchesNemo:
+    def test_attribution_selector_moves_only_dx_v(
+            self, dino_iso, dino_legacy_vface):
+        """The climate counterfactual changes only the diagnosed owner.
+
+        The true faces and every metric other than e1v/dx_v must remain
+        bit-identical, while dx_v must reproduce the historical midpoint gap.
+        """
+        g_new, new = dino_iso
+        g_old, old = dino_legacy_vface
+        np.testing.assert_array_equal(np.asarray(g_new.lat_v),
+                                      np.asarray(g_old.lat_v))
+        for name in ("dx_T", "dy_T", "area_T", "dx_u", "dy_u", "dy_v",
+                     "area_q", "f_T", "f_u", "f_v"):
+            np.testing.assert_array_equal(
+                np.asarray(getattr(new, name)), np.asarray(getattr(old, name)),
+                err_msg=f"V-face attribution selector unexpectedly moved {name}")
+        assert not np.array_equal(np.asarray(new.dx_v), np.asarray(old.dx_v))
+        j = 1
+        nemo_width = NEMO_E1V_AT_VFACE[j][1]
+        legacy_gap = abs(float(old.dx_v[j, 26]) - nemo_width) / nemo_width
+        assert legacy_gap > 1e-6
+
     def test_vface_latitudes_are_nemos_gphiv(self, dino_iso):
         """The correspondence is by LATITUDE, so the width comparison below
         is not resting on an assumed halo offset."""
@@ -207,7 +235,7 @@ class TestConstructionMatchesNemo:
             "non-vacuity control is dead")
 
     def test_isotropy_e1v_equals_e2v(self, dino_iso):
-        """NEMO's :113 and :117 are one expression, so its mesh has
+        """NEMO's :113 and :118 are one expression, so its mesh has
         ``e1v == e2v`` bit-for-bit.  Reproduce that exactly, not to a ulp."""
         _, geom = dino_iso
         dx_v = np.asarray(geom.dx_v, np.float64)
@@ -215,7 +243,7 @@ class TestConstructionMatchesNemo:
         np.testing.assert_array_equal(
             dx_v[1:-1], dy_v[1:-1],
             err_msg="under nemo_isotropic the two v-face scale factors must "
-                    "be the SAME quantity (usrdef_hgr.F90:113 == :117)")
+                    "be the SAME quantity (usrdef_hgr.F90:113 == :118)")
 
     def test_wall_faces_stay_hard_zeroed(self, dino_iso):
         """The #516 TRANSPORT-metric contract is unchanged by the fix: the

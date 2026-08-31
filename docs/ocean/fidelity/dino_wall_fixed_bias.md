@@ -608,7 +608,7 @@ NEMO, `cfgs/DINO/MY_SRC/usrdef_hgr.F90`:
 zvj = REAL( mjg(jj,0) - nn_jeq_s, wp ) + 0.5                     ! :98
 pphiv(ji,jj) = 1./rad * ASIN( TANH( rn_e1_deg *rad* zvj ) )      ! :108
 pe1v (ji,jj) = ra * rad * COS( rad * pphiv(ji,jj) ) * rn_e1_deg  ! :113
-pe2v (ji,jj) = ra * rad * COS( rad * pphiv(ji,jj) ) * rn_e1_deg  ! :117
+pe2v (ji,jj) = ra * rad * COS( rad * pphiv(ji,jj) ) * rn_e1_deg  ! :118
 ```
 
 The Mercator transform is taken at the **half-integer row index** — the
@@ -629,7 +629,7 @@ two latitudes differ by up to **0.0011°**, which is exactly the 3.3e-05.
 The sharpest form of the diagnosis: legoESM **already had the correct face
 latitudes** and was already using them for the *meridional* v-face scale factor
 (NEMO's `e2v`) under the same convention. Only the *zonal* one was left on the
-tracer midpoint. The two are one quantity in NEMO — `:113` and `:117` are the
+tracer midpoint. The two are one quantity in NEMO — `:113` and `:118` are the
 same expression — and now they are one quantity here too, bit-for-bit on the
 interior.
 

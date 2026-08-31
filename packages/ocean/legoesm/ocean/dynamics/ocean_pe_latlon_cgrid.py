@@ -55,6 +55,8 @@ from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
     compute_layer_thickness,
     compute_ocean_jacobian,
+    nemo_qco_live_face_geometry_from_operands,
+    nemo_qco_live_face_thicknesses,
 )
 from legoesm.ocean.state import (
     LatLonCGridOceanState,
@@ -1391,6 +1393,227 @@ def _bc_vertical_and_depthmean_velocity(
     return h_u, h_v, flux_div_k, w, u_prime, v_prime
 
 
+def nemo_qco_kmm_velocity_cycle(
+    eta_now, u, v, un_adv, vn_adv, z_coord, u_mask_3d, v_mask_3d,
+):
+    """Execute and undo DINO's transient Kmm barotropic rewrite.
+
+    ``dynspg_ts.F90:1170-1174`` installs the transport-weighted barotropic
+    velocity before tracer advection.  Centered MLF then removes that exact
+    increment at ``stpmlf.F90:781-789`` before ``dyn_atf_qco``.  The two
+    operations cancel algebraically but not bitwise; round 52 measured the
+    skipped cycle at the pointwise bar.  Return both the tracer-entry
+    ``corrected`` values and the post-removal ``restored`` values.
+    """
+    if not isinstance(z_coord, OceanPartialCellCoordinate):
+        raise ValueError(
+            "literal Kmm velocity cycle requires an "
+            "OceanPartialCellCoordinate carrying the raw NEMO QCO mesh")
+    refs = tuple(getattr(z_coord, name, None) for name in (
+        "nemo_e3t_0", "nemo_hu_0", "nemo_hv_0", "nemo_e1e2t",
+        "nemo_e1e2u", "nemo_e1e2v",
+    ))
+    if any(value is None for value in refs):
+        raise ValueError(
+            "literal Kmm velocity cycle requires raw NEMO e3t_0, "
+            "hu_0/hv_0, and e1e2t/e1e2u/e1e2v operands")
+    e3t0, hu0, hv0, area_t, area_u, area_v = (
+        jnp.asarray(value, dtype=eta_now.dtype) for value in refs)
+    nlev = u.shape[-1]
+    e3t0 = e3t0[..., :nlev]
+    raw_umask = jnp.asarray(u_mask_3d[:, 1:, :], dtype=eta_now.dtype)
+    raw_vmask = jnp.asarray(v_mask_3d[1:, :, :], dtype=eta_now.dtype)
+    geom = nemo_qco_live_face_geometry_from_operands(
+        eta_now, e3t0, e3t0, raw_umask, raw_vmask,
+        hu0, hv0, area_t, area_u, area_v)
+    un_adv = jnp.asarray(un_adv, dtype=eta_now.dtype)
+    vn_adv = jnp.asarray(vn_adv, dtype=eta_now.dtype)
+    if un_adv.shape != u.shape[:2] or vn_adv.shape != v.shape[:2]:
+        raise ValueError(
+            "Kmm transport shapes must match the redundant U/V layouts; "
+            f"got {un_adv.shape}/{vn_adv.shape} versus "
+            f"{u.shape[:2]}/{v.shape[:2]}")
+
+    b = jax.lax.optimization_barrier
+    u_native = u[:, 1:, :]
+    v_native = v[1:, :, :]
+    puu_b = jnp.zeros_like(eta_now)
+    pvv_b = jnp.zeros_like(eta_now)
+    for jk in range(nlev):
+        puu_b = b(
+            puu_b + geom.e3u[..., jk] * u_native[..., jk]
+            * raw_umask[..., jk])
+        pvv_b = b(
+            pvv_b + geom.e3v[..., jk] * v_native[..., jk]
+            * raw_vmask[..., jk])
+    wet_u = (hu0 > 0.0).astype(eta_now.dtype)
+    wet_v = (hv0 > 0.0).astype(eta_now.dtype)
+    puu_b = b(puu_b * geom.r1_hu) * wet_u
+    pvv_b = b(pvv_b * geom.r1_hv) * wet_v
+    target_u = b(un_adv[:, 1:] * geom.r1_hu)
+    target_v = b(vn_adv[1:, :] * geom.r1_hv)
+    corrected_u_native = b(
+        b(u_native + target_u[..., None]) - puu_b[..., None]) * raw_umask
+    corrected_v_native = b(
+        b(v_native + target_v[..., None]) - pvv_b[..., None]) * raw_vmask
+    restored_u_native = b(
+        b(corrected_u_native - target_u[..., None])
+        + puu_b[..., None]) * raw_umask
+    restored_v_native = b(
+        b(corrected_v_native - target_v[..., None])
+        + pvv_b[..., None]) * raw_vmask
+
+    def u_layout(native):
+        return jnp.concatenate([native[:, -1:, :], native], axis=1)
+
+    def v_layout(native):
+        return jnp.concatenate([jnp.zeros_like(native[:1]), native], axis=0)
+
+    return (u_layout(corrected_u_native), v_layout(corrected_v_native),
+            u_layout(restored_u_native), v_layout(restored_v_native))
+
+
+def nemo_qco_wzv_operands(
+    eta_now, eta_before, u, v, grid, z_coord, u_mask_3d, v_mask_3d,
+    mask_3d, dt, freshwater_eta_tendency=None, eta_after_override=None,
+    transport_after_override=None,
+):
+    """Coupled QCO ``ww`` + live Kmm face thickness for either WZV call.
+
+    Transcribes the active DINO QCO path at ``sshwzv.F90:111-128`` and
+    ``:218-227``.  Without ``eta_after_override``, the horizontal transports
+    and Kaa SSH prediction use the same live Kmm ``e3u/e3v`` returned to
+    dynzad (call 1).  With an override, the same source-ordered second hdiv is
+    paired inseparably with the actual barotropic Kaa SSH (call 2).  For call
+    2, ``transport_after_override=(un_adv, vn_adv)`` also performs NEMO's
+    in-place Kmm velocity rewrite at ``dynspg_ts.F90:1170-1174`` before the
+    second divergence. Splitting either pair is deliberately unsupported:
+    rounds 39 and 42 measured both corresponding half-states as worsening
+    planted violations.
+    """
+    if not isinstance(z_coord, OceanPartialCellCoordinate):
+        raise ValueError(
+            "zad_qco_evaluation='nemo_literal' requires an "
+            "OceanPartialCellCoordinate carrying the raw NEMO QCO mesh")
+    refs = tuple(getattr(z_coord, name, None) for name in (
+        "nemo_e3t_0", "nemo_hu_0", "nemo_hv_0", "nemo_e1e2t",
+        "nemo_e1e2u", "nemo_e1e2v",
+    ))
+    if any(value is None for value in refs):
+        raise ValueError(
+            "zad_qco_evaluation='nemo_literal' requires raw NEMO e3t_0, "
+            "hu_0/hv_0, and e1e2t/e1e2u/e1e2v operands")
+    e3t0, _hu0, _hv0, area_t, area_u, area_v = (
+        jnp.asarray(value, dtype=eta_now.dtype) for value in refs)
+    nlev = u.shape[-1]
+    e3t0 = e3t0[..., :nlev]
+    raw_umask = jnp.asarray(u_mask_3d[:, 1:, :], dtype=eta_now.dtype)
+    raw_vmask = jnp.asarray(v_mask_3d[1:, :, :], dtype=eta_now.dtype)
+    live_u_raw, live_v_raw = nemo_qco_live_face_thicknesses(
+        eta_now, z_coord, e3t0, e3t0, raw_umask, raw_vmask)
+
+    if transport_after_override is not None:
+        if eta_after_override is None:
+            raise ValueError(
+                "transport_after_override is a WZV call-2 operand and "
+                "requires eta_after_override")
+        u, v, _, _ = nemo_qco_kmm_velocity_cycle(
+            eta_now, u, v, *transport_after_override, z_coord,
+            u_mask_3d, v_mask_3d)
+
+    # NEMO native U/V arrays store the east/north face of each T cell.  Map
+    # once to legoESM's redundant west/south face layout for dynzad.
+    live_u = jnp.concatenate([live_u_raw[:, -1:, :], live_u_raw], axis=1)
+    live_v = jnp.concatenate(
+        [jnp.zeros_like(live_v_raw[:1]), live_v_raw], axis=0)
+
+    # divhor.F90:180-184 materializes the two native face fluxes before their
+    # differences, then divides by live e3t.  Do not route this through the
+    # barotropic column-continuity helper: that helper intentionally collapses
+    # e3t*hdiv and loses the divide/multiply boundary required by wzv.
+    tmask = jnp.asarray(mask_3d, dtype=eta_now.dtype)
+    h0 = jnp.zeros_like(eta_now)
+    for jk in range(nlev):
+        h0 = jax.lax.optimization_barrier(
+            h0 + e3t0[..., jk] * tmask[..., jk])
+    h0_safe = jnp.where(h0 > 0.0, h0, 1.0)
+    r1_h0 = jax.lax.optimization_barrier(1.0 / h0_safe)
+    r3_now = jax.lax.optimization_barrier(eta_now * r1_h0)
+    live_t = e3t0 * (1.0 + r3_now[..., None] * tmask) * tmask
+    raw_e2u = getattr(z_coord, "nemo_e2u", None)
+    raw_e1v = getattr(z_coord, "nemo_e1v", None)
+    if raw_e2u is None or raw_e1v is None:
+        raise ValueError(
+            "zad_qco_evaluation='nemo_literal' requires raw NEMO e2u/e1v")
+    e2u = jnp.asarray(raw_e2u, dtype=eta_now.dtype)
+    e1v = jnp.asarray(raw_e1v, dtype=eta_now.dtype)
+    r1_area_t = jax.lax.optimization_barrier(1.0 / area_t)
+    flux_levels = []
+    barotropic_div = jnp.zeros_like(eta_now)
+    for jk in range(nlev):
+        flux_u = jax.lax.optimization_barrier(
+            jax.lax.optimization_barrier(e2u * live_u_raw[..., jk])
+            * u[:, 1:, jk]) * raw_umask[..., jk]
+        flux_v = jax.lax.optimization_barrier(
+            jax.lax.optimization_barrier(e1v * live_v_raw[..., jk])
+            * v[1:, :, jk]) * raw_vmask[..., jk]
+        west = jnp.roll(flux_u, 1, axis=1)
+        south = jnp.concatenate(
+            [jnp.zeros_like(flux_v[:1]), flux_v[:-1]], axis=0)
+        zonal = jax.lax.optimization_barrier(flux_u - west)
+        meridional = jax.lax.optimization_barrier(flux_v - south)
+        numerator = jax.lax.optimization_barrier(zonal + meridional)
+        transport_div = jax.lax.optimization_barrier(
+            numerator * r1_area_t) * tmask[..., jk]
+        # divhor.F90:180-184 divides the transport divergence by live e3t;
+        # ssh_nxt/wzv then multiply by that same e3t.  Preserve the executed
+        # divide/multiply instead of algebraically cancelling it -- row 4 is
+        # sensitive to those last bits through the vertical recurrence.
+        safe_e3t = jnp.where(tmask[..., jk] > 0.5, live_t[..., jk], 1.0)
+        hdiv = jax.lax.optimization_barrier(transport_div / safe_e3t)
+        level = jax.lax.optimization_barrier(
+            live_t[..., jk] * hdiv) * tmask[..., jk]
+        flux_levels.append(level)
+        barotropic_div = jax.lax.optimization_barrier(barotropic_div + level)
+    flux_div = jnp.stack(flux_levels, axis=-1)
+
+    fw = (jnp.zeros_like(eta_now) if freshwater_eta_tendency is None
+          else jnp.asarray(freshwater_eta_tendency, dtype=eta_now.dtype))
+    if eta_after_override is None:
+        eta_after = jax.lax.optimization_barrier(
+            eta_before - jax.lax.optimization_barrier(dt * barotropic_div))
+        eta_after = jax.lax.optimization_barrier(
+            eta_after + jax.lax.optimization_barrier(dt * fw)) * tmask[..., 0]
+    else:
+        eta_after = jax.lax.optimization_barrier(
+            jnp.asarray(eta_after_override, dtype=eta_now.dtype)) * tmask[..., 0]
+    r3_after = jax.lax.optimization_barrier(eta_after * r1_h0)
+    r3_before = jax.lax.optimization_barrier(eta_before * r1_h0)
+    r3_delta = jax.lax.optimization_barrier(r3_after - r3_before)
+    r1_dt = jax.lax.optimization_barrier(
+        jnp.asarray(1.0, dtype=eta_now.dtype) / dt)
+    stretch_rate = jax.lax.optimization_barrier(
+        (r1_dt * e3t0) * r3_delta[..., None])
+
+    # sshwzv.F90 bottom-up left recurrence.  A static Python loop preserves
+    # source ordering under JIT and remains differentiable.
+    carry = jnp.zeros_like(eta_now)
+    levels = [None] * nlev
+    for jk in range(nlev - 1, -1, -1):
+        bracket = jax.lax.optimization_barrier(
+            flux_div[..., jk] + stretch_rate[..., jk])
+        carry = jax.lax.optimization_barrier(
+            carry - bracket * tmask[..., jk])
+        levels[jk] = carry
+    ww = jnp.stack(levels + [jnp.zeros_like(carry)], axis=-1)
+    return ww, live_u, live_v
+
+
+# Compatibility name for the already-certified call-1/ZAD consumer and its
+# committed probes.  New callers should use the operation's call-neutral name.
+_nemo_qco_zad_operands = nemo_qco_wzv_operands
+
+
 def _bc_ke_and_pressure_gradients(
     u, v, p_prime_filled, rho_prime, grid, config, z_coord,
     eta_safe, H_bathy, g_val, mask,
@@ -2606,11 +2829,14 @@ def _bc_vertical_momentum_advection(
                         "u_full and v_full to be passed to "
                         "_bc_vertical_momentum_advection.",
                     )
-                area_w = grid.area_T[..., jnp.newaxis] * w
-                w_area_u = interp_cell_to_uface(area_w)
-                w_area_v = interp_cell_to_vface(area_w, grid=grid)
-                face_area_u = grid.dx_u * grid.dy_u
-                face_area_v = grid.dx_v * grid.dy_v
+                area_w = jax.lax.optimization_barrier(
+                    grid.area_T[..., jnp.newaxis] * w)
+                w_area_u = jax.lax.optimization_barrier(
+                    interp_cell_to_uface(area_w))
+                w_area_v = jax.lax.optimization_barrier(
+                    interp_cell_to_vface(area_w, grid=grid))
+                face_area_u = jax.lax.optimization_barrier(grid.dx_u * grid.dy_u)
+                face_area_v = jax.lax.optimization_barrier(grid.dx_v * grid.dy_v)
                 u_face_active = jnp.broadcast_to(u_mask_3d, u_full.shape)
                 v_face_active = jnp.broadcast_to(v_mask_3d, v_full.shape)
                 # #1226 level-29-onset fix: which bottom/straddling-face mask
@@ -2627,6 +2853,9 @@ def _bc_vertical_momentum_advection(
                     v_full, w_area_v, h_v_old, face_area_v[..., jnp.newaxis],
                     face_active=v_face_active,
                     bottom_face_mask_mode=_zad_mask_mode)
+                if getattr(config, "zad_qco_evaluation", "generic") == "nemo_literal":
+                    diag_vertadv_u = jax.lax.optimization_barrier(diag_vertadv_u)
+                    diag_vertadv_v = jax.lax.optimization_barrier(diag_vertadv_v)
             else:
                 # Default: 1st-order upwind of the PERTURBATION velocity.
                 # The implicit viscosity (~|w|*dz/2) damps baroclinic shear
@@ -3684,10 +3913,14 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
     add it (× dt_tracer) inside the backward-Euler vertical-mixing solve at
     weight 1.0 (Veros's implicit surface-forcing placement).
 
-    Returns ``(du_dt, dv_dt, dT_dt, dS_dt, dT_surf)`` where ``dT_surf`` is a
+    Returns ``(du_dt, dv_dt, dT_dt, dS_dt, dT_surf,
+    diag_surface_stress_u, diag_surface_stress_v)`` where ``dT_surf`` is a
     full-column zero array unless ``route_heat_to_implicit`` AND a q_net forcing
-    were both present."""
+    were both present.  The two stress diagnostics are the exact arrays added
+    to the momentum tendencies, not a reconstructed copy."""
     dT_surf = jnp.zeros_like(dT_dt)
+    diag_surface_stress_u = jnp.zeros_like(du_dt)
+    diag_surface_stress_v = jnp.zeros_like(dv_dt)
     # --- 10b'. External surface forcing (e.g. from JRA55 bulk fluxes) ---
     # When the caller passes an OceanSurfaceForcing carrying tau_x /
     # tau_y / q_net / sw_down, apply them here.  Mirrors
@@ -3723,8 +3956,14 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
             inv_rho_dz_u = 1.0 / (rho_0_dt * jnp.maximum(dz_0_u, 1e-10))
             inv_rho_dz_v = 1.0 / (rho_0_dt * jnp.maximum(dz_0_v, 1e-10))
 
-            du_dt = du_dt.at[..., 0].add(tau_i_u * inv_rho_dz_u)
-            dv_dt = dv_dt.at[..., 0].add(tau_j_v * inv_rho_dz_v)
+            stress_u = tau_i_u * inv_rho_dz_u
+            stress_v = tau_j_v * inv_rho_dz_v
+            diag_surface_stress_u = diag_surface_stress_u.at[..., 0].set(stress_u)
+            diag_surface_stress_v = diag_surface_stress_v.at[..., 0].set(stress_v)
+            # Preserve the production update expression byte-for-byte; the
+            # diagnostic is a second consumer of the already-built value.
+            du_dt = du_dt.at[..., 0].add(stress_u)
+            dv_dt = dv_dt.at[..., 0].add(stress_v)
 
         if _sf_q_net is not None:
             from legoesm.ocean.eos import c_sw as _c_sw
@@ -3810,7 +4049,8 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
             dS_salt = salt_flux_salinity_tendency(
                 jnp.asarray(_sf_salt, dtype=S.dtype), dz_0_T_s, float(rho_0))
             dS_dt = dS_dt.at[..., 0].add(dS_salt * mask)
-    return du_dt, dv_dt, dT_dt, dS_dt, dT_surf
+    return (du_dt, dv_dt, dT_dt, dS_dt, dT_surf,
+            diag_surface_stress_u, diag_surface_stress_v)
 
 
 def _bc_sponge_relaxation(du_dt, dv_dt, dT_dt, dS_dt, T, S, u, v, sponge, grid,
@@ -4046,6 +4286,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     precomputed_geom_density=None,
     skip_lateral_viscosity: bool = False,
     ldf_state=None,
+    zad_continuity_dt=None,
+    zad_freshwater_eta_tendency=None,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -4148,6 +4390,28 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             h_k, u, v, u_mask_3d, v_mask_3d, grid, z_coord, u_mask, v_mask,
         )
     )
+    zad_w, zad_h_u, zad_h_v = w, h_u, h_v
+    if getattr(config, "zad_qco_evaluation", "generic") == "nemo_literal":
+        eta_before_field = getattr(state, "eta_before", None)
+        eta_before = (eta if eta_before_field is None
+                      else eta_before_field.data)
+        qco_dt = dt if zad_continuity_dt is None else zad_continuity_dt
+        qco_tmask_3d = (
+            z_coord.is_active.astype(eta.dtype)
+            if isinstance(z_coord, OceanPartialCellCoordinate)
+            else mask_3d)
+        zad_w, zad_h_u, zad_h_v = _nemo_qco_zad_operands(
+            eta, eta_before, u, v, grid, z_coord, u_mask_3d, v_mask_3d,
+            qco_tmask_3d, qco_dt,
+            freshwater_eta_tendency=zad_freshwater_eta_tendency,
+        )
+        # The W/H pair is a materialized NEMO stage boundary.  Without these
+        # barriers XLA fuses the full tendency graph back through continuity;
+        # the standalone dynzad kernel then differs at every active point even
+        # though its captured operands are bit-exact (round 40).
+        zad_w = jax.lax.optimization_barrier(zad_w)
+        zad_h_u = jax.lax.optimization_barrier(zad_h_u)
+        zad_h_v = jax.lax.optimization_barrier(zad_h_v)
 
     # --- 5. Coriolis ---
     # Coriolis is NOT included in the returned momentum tendencies.
@@ -4283,7 +4547,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # Veros-faithful ``centered_full`` scheme; the default
     # ``upwind_perturbation`` scheme ignores them and advects ``u_prime``.
     du_dt, dv_dt, diag_vertadv_u, diag_vertadv_v = _bc_vertical_momentum_advection(
-        du_dt, dv_dt, u_prime, v_prime, w, h_u, h_v, u_mask_3d, v_mask_3d,
+        du_dt, dv_dt, u_prime, v_prime, zad_w, zad_h_u, zad_h_v,
+        u_mask_3d, v_mask_3d,
         grid, _mom_adv, _weno_order, config, diagnose_momentum,
         u_full=u, v_full=v,
     )
@@ -4520,10 +4785,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             )
     _sf_implicit = bool(getattr(config, "surface_forcing_implicit", False))
     _stress_implicit = bool(getattr(config, "surface_stress_implicit", False))
-    du_dt, dv_dt, dT_dt, dS_dt, dT_surf_heat = _bc_external_surface_forcing(
-        du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S, h_k, z_coord, J, grid,
-        rho_0, mask, mask_3d, route_heat_to_implicit=_sf_implicit,
-        withhold_stress=_stress_implicit,
+    (du_dt, dv_dt, dT_dt, dS_dt, dT_surf_heat,
+     diag_surface_stress_u, diag_surface_stress_v) = (
+        _bc_external_surface_forcing(
+            du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S,
+            h_k, z_coord, J, grid, rho_0, mask, mask_3d,
+            route_heat_to_implicit=_sf_implicit,
+            withhold_stress=_stress_implicit,
+        )
     )
 
     # --- Stage 10b'': surface TRACER restoring (T*/S*) routed for IMPLICIT
@@ -4737,6 +5006,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         botdrag_u=_mu(diag_botdrag_u),  botdrag_v=_mv(diag_botdrag_v),
         Av_vert_u=_mu(diag_Av_vert_u),  Av_vert_v=_mv(diag_Av_vert_v),
         phys_u=_mu(diag_phys_u),        phys_v=_mv(diag_phys_v),
+        surface_stress_u=_mu(diag_surface_stress_u),
+        surface_stress_v=_mv(diag_surface_stress_v),
         sponge_u=_mu(diag_sponge_u),    sponge_v=_mv(diag_sponge_v),
         # total_u/v are the actually-applied masked tendencies — must
         # equal Σ of the components above to machine precision.
@@ -4744,5 +5015,3 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         total_v=Field(data=diag_dv_total, name="total_v", dims=dims_v, units="m/s^2"),
     )
     return tendencies, diagnostics
-
-

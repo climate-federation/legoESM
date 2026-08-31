@@ -1,0 +1,34 @@
+{
+  "schema": "dino-zdf-row18-postfix-compact-v1",
+  "date": "2026-08-29",
+  "lane": "d180 kt=5761 CPU fp64",
+  "probe": "scripts/validate/ocean_fidelity/dino_1226/zdf_row18_operands.py",
+  "probe_run_commit": "ea4c6eb118f87b7652e462619c3ec9f25424c52f",
+  "full_artifact": {
+    "path": "/tmp/dino_zdf_row18_postfix_final_artifact.json",
+    "sha256": "751c81503843164e73d6fccdbfd3b4092ad692dfbbbc1ace2a55f67a93931613"
+  },
+  "disposition": "VERIFIED",
+  "bar": 1e-15,
+  "wet_columns": 9920,
+  "production_full_row": {
+    "n_diverged_columns": 0,
+    "max_column_error": 0.0,
+    "focus_failures": 0
+  },
+  "production_operands": {
+    "gdepw_diverged_columns": 0,
+    "htau_diverged_columns": 0,
+    "argument_diverged_columns": 0,
+    "literal_exp_diverged_columns": 0
+  },
+  "red_arm": {
+    "native_gphit_jax_sin_diverged_columns": 21
+  },
+  "oracle": {
+    "restart_sha256": "33c0c1a2e998161afdc9d4b71c5606f5cc5d869e54d53058fc0f64eeac7a115c",
+    "gdepw_dump_sha256": "fc601f5a4c0a9715245189fa10e9f354f0ad204f87bb5e5c31b5859107a01c3d",
+    "htau_dump_sha256": "3b1e2574a9ea37deb500f9f1a94a56d71b428f9be5b5558dfdf842df1eedfa0d"
+  },
+  "qualification": "The row-18 receipt brackets 22 shared TKE streams and both restart containers exactly. A later global audit found 13 unrelated debug streams with four uninitialized halo slots; no physical-interior or row-18-consumed bit differs."
+}

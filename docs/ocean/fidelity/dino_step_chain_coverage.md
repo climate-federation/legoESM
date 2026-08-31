@@ -20,6 +20,30 @@ FINAL BOARD, 2026-07-27, corr-to-1.0 bar) · **VERIFIED-EARLIER** (older doc/com
 re-certified at the 1.0 bar) · **WAIVED** (reason given) · **UNVERIFIED** (nobody has
 measured a number against this specific NEMO array).
 
+**Full-step import note (2026-08-29):** the matched-day-180 ZDF ledger is
+`dino_zdf_chain_sweep_result.md`, not the older aggregate labels in rows
+11/12/30/50 below. All 32 ZDF rows are now harvestable VERIFIED/WAIVED
+receipts. Row 30's complete raw/post-Shapiro slope composite is U `0/9,758`
+and V `0/9,868`; row 31's production literal momentum application is U
+`0/9,758`, V `0/9,868`; row 32's production literal content-form tracer
+application is T/S `0/9,920`, all with every southern focus column passing.
+The binding end receipt is `dino_zdf_chain_end_verified_artifact.json` SHA256
+`ce6fff6690ff6fbfa1023b4cf3eafbd36d0b86938ef47c5f7524accc410d4975`.
+The older `VERIFIED-EARLIER` labels below are superseded by these numeric
+receipts when the full-step lane imports ZDF coverage.
+
+**Climate import note (2026-08-29):** the complete matched-step closure did
+not transfer into the registered southern-basin MLD improvement.  The faithful
+90-day arm scores `22.479521394 m` RMS against NEMO (REFUTE boundary
+`20.2775 m`), while the bundled legacy control scores `18.686435517 m` and
+fails its required baseline-reproduction band by `3.793055483 m`.  Both
+five-metric acceptance gates pass 5/5 and the do-no-harm and southern-density
+conditions pass.  Per the frozen decision tree the ZDF ownership claim is
+**REFUTED**; because the legacy control itself failed, its displacement is
+OPEN mechanism work rather than a selector attribution.  Import receipt:
+`dino_zdf_climate_score_artifact.json` SHA256
+`19e7466d3efa47466c4208d52a0a8ded4db09f3cad705538ac6edf11f35a15de`.
+
 | order | stpmlf line | routine (concrete, DINO dispatch) | what it computes | status | evidence/reason |
 |---|---|---|---|---|---|
 | 1 | 160 | `day` | calendar advance | WAIVED:diagnostic | pure calendar bookkeeping, no physics |
@@ -70,12 +94,12 @@ measured a number against this specific NEMO array).
 | 46 | 363 | `tra_adv` → `tra_adv_fct` (`ln_traadv_fct=T`, `nn_fct_h=nn_fct_v=2`) | FCT tracer advection: centred hi-flux + upwind lo-flux + Zalesak limiter; eiv bolus added to advecting velocity pre-FCT | **VERIFIED-THIS-SWEEP** | board item 8 REOPENED + FIXED: the 0.9923 "FAITHFUL" verdict was a real limiter bug, not cancellation noise — legoESM's `nonosc` stencil bound (`q_min`/`q_max`) was built from `tracer_before` alone, dropping NEMO's `zta_up1` (upstream provisional guess `q_td`) contribution to the per-point bound (`traadv_fct.F90:876-880,912-920`: `bnd_up=max(pbef,paft)`, `paft=zta_up1`). Instrumented NEMO's `nonosc` internals directly (units 8950-8958) and confirmed a faithful `q_td`-inclusive bound reconstruction matches NEMO's own dumped bounds/beta-ratios to <1e-7 rel err. Fixed in `advection.py::fct_tracer_advection` (`bnd_up/bnd_do = max/min(base,q_td)` before the 7-pt neighbourhood). Horizontal-only tendency now corr 0.99995 (was folded into the 0.9923 mix); full 3-D pure tendency corr 0.9923→0.9945. Residual gap is NOT the limiter: it's a pre-existing, separate vertical-mass-flux deviation (upstream `w` construction corr ~0.91, unrelated to `nonosc`) that over-clips w-faces ~1.7-1.9x vs NEMO (662 NEMO vs 1126-1256 lego, both pre- and post-fix) — tracked as a follow-up, NOT closed by this fix. |
 | 47 | 364 | `tra_mfc` | mass-flux convection tracer transport | WAIVED | `ln_zdfmfc=F` (namelist_ref default; TKE+EVD handles convection for DINO) |
 | 48 | 365-367 | `tra_osm` | OSMOSIS non-local tracer flux | WAIVED | `ln_zdfosm=F` for DINO |
-| 49 | 368 | `tra_ldf` → `traldf_iso_lap` (`ln_traldf_iso=T`, NOT `traldf_triad_lap`) + `ln_traldf_msc=T` (Method of Stabilizing Correction) | isoneutral Redi diffusion, MSC-stabilized, implicit K33 | VERIFIED-EARLIER | wiring-diagram node 23 ⚠️ "operator added this session; ML-slope gap (node 6)", 2026-07-20 — no term-board 1.0-corr entry; note this is a DIFFERENT concrete routine (`traldf_iso_lap`) than the `ldf_slp`-slope term the board verified (order 12) — the diffusion OPERATOR consuming those slopes is not itself corr-tested |
-| 50 | 370 | `tra_zdf` → `tra_zdf_imp` (implicit, unconditional single-branch) | vertical tracer mixing (avt), implicit backward-Euler + Redi K33/MSC fold-in | VERIFIED-EARLIER | wiring-diagram Round-2 note "✅ VERIFIED... `implicit_solver.py:122-185` ≡ `trazdf.F90:118-293`", 2026-07-18 — code-structure equivalence claim, not a corr-vs-NEMO-dump number; no term-board entry |
+| 49 | 368 | `tra_ldf` → `traldf_iso_lap` (`ln_traldf_iso=T`, NOT `traldf_triad_lap`) + `ln_traldf_msc=T` (Method of Stabilizing Correction) | isoneutral Redi diffusion, MSC-stabilized, implicit K33 | **VERIFIED-ROUND93 / RULE-1B-S3** | T zfu/zfv/zfw and S zfu/zfv are strict AT-BAR. S zfw retains only a `6.690652e-15` association residue and is explicitly cleared as proven-oracle-arithmetic after the registered W/Shapiro × A33 split is exhausted; see `dino_split_explicit_momentum_chain_round93_result.md`. |
+| 50 | 370 | `tra_zdf` → `tra_zdf_imp` (implicit, unconditional single-branch) | vertical tracer mixing (avt), implicit backward-Euler + Redi K33/MSC fold-in | **VERIFIED-EXACT** | committed `dino_zdf_chain_end_verified_artifact.json`: rows 30–32 verified; row-32 NumPy literal T/S are bit-exact and production is inside the accumulating bar, with wrong-thickness/roll/legacy controls red. |
 | 51 | 371 | `tra_npc` | non-penetrative convection | WAIVED | `ln_zdfnpc=F` for DINO (uses `zdfevd` instead, per stpmlf.F90 comment "n/a") |
 | 52 | 392 | `mlf_baro_corr` (stpmlf.F90:491-537, `ln_dynspg_ts=T`) | finalize after-velocity: subtract 3D-diagnosed transport, replace with time-split barotropic estimate | UNVERIFIED | no board or wiring-diagram entry at all — genuinely never examined against a NEMO dump; couples directly to the barotropic solver (order 28) |
 | 53 | 393 | `finalize_lbc` (stpmlf.F90:540-589) | lateral BC on after-velocity/tracers (`lbc_lnk`), bdy_tra/bdy_dyn | WAIVED (`ln_bdy=F` bdy branches) / UNVERIFIED (`lbc_lnk` halo-sign convention) | the `bdy_*` calls inside are WAIVED (`ln_bdy=F`); the unconditional `lbc_lnk` sign-convention calls (U:-1, V:-1, T:+1) are UNVERIFIED as a distinct check — halo-exchange sign correctness is asserted by construction elsewhere in the codebase but not corr-tested against this specific NEMO call |
-| 54 | 394 | `tra_atf_qco` | time filtering ("now") of tracer arrays, qco-aware | UNVERIFIED (known scheme MISMATCH) | same class as order 36 (`ssh_atf`) — legoESM's forward-Euler+Matsuno has no Asselin-equivalent filter step; documented as a structural difference (wiring-diagram node 19 discussion), not a corr gap on a shared routine |
+| 54 | 394 | `tra_atf_qco` | time filtering ("now") of tracer arrays, qco-aware | **VERIFIED-FORMULA / STRUCTURAL-TARGET-QUALIFIED** | active thickness-weighted formula and `rn_atfp` are verified by the committed ATF probes; the old tracer Naa target bracket is reconstructed from the filtered target, so no independent strict-array claim is made. This is a named integration-structure qualification, not an unowned arithmetic operand. |
 | 55 | 395 | `dyn_atf_qco` | time filtering ("now") of velocities, qco-aware | UNVERIFIED (known scheme MISMATCH) | same as order 54 |
 | 56 | 409 | `dia_hsb` | global conservation diagnostics (heat/salt/volume) | WAIVED:diagnostic | pure diagnostic, no state feedback |
 | 57 | 416-417 | `rst_write`/`sto_rst_write` | restart-file writes | WAIVED:diagnostic | I/O only |

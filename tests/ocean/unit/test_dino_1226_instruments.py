@@ -50,18 +50,6 @@ def instruments():
             tcarry_omega=tcarry_omega,
             tcarry_een=tcarry_een,
         )
-    except (SystemExit, FileNotFoundError) as _e:
-        # The dino instrument chain loads the DINO oracle build (mesh_mask,
-        # trajectories) at import.  Where that build is absent (any account
-        # other than the producer's, or CI without the data) the data-path
-        # tests cannot run -- skip them rather than erroring the whole module.
-        # But if DINO_DIR was set EXPLICITLY, a missing/broken file is a config
-        # error, not an absence: fail loudly so it is never silently skipped.
-        # Only FileNotFoundError (absence) is caught -- a corrupt/unreadable
-        # file raises another OSError and propagates as a real failure.
-        if os.environ.get("DINO_DIR"):
-            raise
-        pytest.skip(f"DINO oracle data absent (set DINO_DIR): {_e}")
     finally:
         try:
             sys.path.remove(str(SCRIPTS_DIR))
@@ -270,6 +258,27 @@ def test_bridge_tke_from_restart_mapping_round_trip(instruments):
         assert np.allclose(wet_vals, expected)
     # land cell masked to zero, not the raw en=999 value
     assert tke[0, 0, :].max() == 0.0
+
+
+def test_bridge_tke_coefficients_preserves_surface_and_interior(instruments):
+    kamm = instruments.kamm_twin_90d
+    n_lat, n_lon, jpk = 2, 3, 4
+    wet = np.ones((n_lat, n_lon))
+    en = np.arange(n_lat * n_lon * jpk, dtype=float).reshape(n_lat, n_lon, jpk)
+    avm = en + 100.0
+    avt = en + 200.0
+    dissl = en + 300.0
+    st = _fake_state(np.zeros((n_lat, n_lon, jpk)),
+                     np.zeros((n_lat, n_lon)),
+                     np.zeros((n_lat, n_lon + 1, jpk)),
+                     np.zeros((n_lat + 1, n_lon, jpk)))
+    out = kamm.bridge_tke_from_restart(
+        st, en, wet, restart_avm=avm, restart_avt=avt,
+        restart_dissl=dissl)
+    np.testing.assert_array_equal(out.tke_avm.data, avm[..., 1:])
+    np.testing.assert_array_equal(out.tke_avt.data, avt[..., 1:])
+    np.testing.assert_array_equal(out.tke_avm_surface.data, avm[..., 0])
+    np.testing.assert_array_equal(out.tke_dissl.data, dissl[..., 1:])
 
 
 def test_build_twin_state_default_bridge_tke_off(instruments, monkeypatch):
@@ -485,9 +494,13 @@ def test_tpoint_stress_selector_defaults_corrected_and_legacy_is_opt_in(instrume
     legacy = k._parse_args([
         "nemo_dino_kamm_mlf", "out.npz",
         "--bridge-before-stress-legacy-u-as-t"])
+    legacy_euler = k._parse_args([
+        "nemo_dino_kamm_mlf", "out.npz", "--legacy-euler-start"])
     assert base.bridge_before_stress_tpoint is True
     assert explicit_corrected.bridge_before_stress_tpoint is True
     assert legacy.bridge_before_stress_tpoint is False
+    assert legacy_euler.bridge_before is False
+    assert legacy_euler.bridge_before_stress_tpoint is False
     with pytest.raises(SystemExit):
         k._parse_args([
             "nemo_dino_kamm_mlf", "out.npz",
@@ -564,6 +577,10 @@ def test_tpoint_stress_selector_refuses_euler_start_before_io(
         k._build_twin_state(
             "nemo_dino_kamm_mlf", "/unused", "/unused",
             bridge_before=False, bridge_before_stress_tpoint=True)
+    with pytest.raises(AssertionError, match="selector must refuse"):
+        k._build_twin_state(
+            "nemo_dino_kamm_mlf", "/unused", "/unused",
+            bridge_before=False, bridge_before_stress_tpoint=False)
 
 
 def test_tpoint_stress_selector_threads_and_stamps_receipts(
@@ -588,6 +605,11 @@ def test_tpoint_stress_selector_threads_and_stamps_receipts(
     k.main([
         "nemo_dino_kamm_mlf", "out.npz",
         "--bridge-before-stress-legacy-u-as-t"])
+    assert seen["bridge_before_stress_tpoint"] is False
+    seen.clear()
+    k.main([
+        "nemo_dino_kamm_mlf", "out.npz", "--legacy-euler-start"])
+    assert seen["bridge_before"] is False
     assert seen["bridge_before_stress_tpoint"] is False
 
     assert 'bridge_before_stress_stagger = "T"' in src
@@ -1588,11 +1610,31 @@ def test_run_twin_stamps_the_reference_clock_and_the_run_configuration(
     src = inspect.getsource(kamm_twin_90d.run_twin)
     assert "seasonal_t0_reference_seconds=" in src
     assert "run_config=" in src
+    for selector in (
+        "tke_preclosure_coeff_source",
+        "tke_shear_evaluation_stage",
+        "tke_shear_metric_source",
+        "tke_n2_evaluation_stage",
+        "tke_langmuir_evaluation",
+        "dino_wind_profile_evaluation",
+    ):
+        assert f'"{selector}"' in src
     assert "producer_git_sha=" in src
     assert "producer_dirty_tracked_files=" in src
     # the reference must come from the restart, not from the same override the
     # twin itself used -- otherwise the pair-check compares a value to itself
     assert "restart_elapsed_seconds(" in src
+
+
+def test_corrected_stress_live_paths_use_public_clock_helper(instruments):
+    """REBASE-RED: main removed the private helper spelling, while two
+    corrected-stress call sites on this branch still used it."""
+    import inspect
+    k = instruments.kamm_twin_90d
+    src = inspect.getsource(k.run_twin)
+    assert "_restart_elapsed_seconds(" not in src
+    assert src.count("restart_elapsed_seconds(") == 2
+    assert k._restart_elapsed_seconds is k.restart_elapsed_seconds
 
 
 # ---------------------------------------------------------------------------
@@ -1837,12 +1879,7 @@ def contract_check():
     try:
         import fp64_snapshot_contract_check as C
         return C
-    except (SystemExit, FileNotFoundError) as exc:  # no NEMO mesh on this box
-        # DINO_DIR set explicitly => a missing/broken file is a config error, not
-        # absence: fail loudly rather than silently skip (corrupt files raise a
-        # non-FileNotFoundError OSError and already propagate).
-        if os.environ.get("DINO_DIR"):
-            raise
+    except SystemExit as exc:                       # no NEMO mesh on this box
         pytest.skip(f"NEMO mesh unavailable: {exc}")
     finally:
         try:
@@ -1959,6 +1996,18 @@ def test_a_storage_only_flag_stays_out_of_the_run_config_string(instruments):
     assert "perturb_seed" in cfg, "wrong block located -- this test is vacuous"
 
 
+def test_twin_cli_exposes_literal_and_legacy_langmuir_arms(instruments):
+    k = instruments.kamm_twin_90d
+    default = k._parse_args(["nemo_dino_kamm_mlf", "out.npz"])
+    legacy = k._parse_args([
+        "nemo_dino_kamm_mlf", "out.npz",
+        "--tke-langmuir-evaluation", "vectorized",
+    ])
+    assert default.tke_langmuir_evaluation is None
+    assert legacy.tke_langmuir_evaluation == "vectorized"
+
+
+# ---------------------------------------------------------------------------
 # paired corrected-T-carry basin verdict
 # ---------------------------------------------------------------------------
 def test_tcarry_basin_floor_has_priority_over_refute(instruments):

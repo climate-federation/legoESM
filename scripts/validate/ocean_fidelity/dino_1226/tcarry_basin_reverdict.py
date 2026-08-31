@@ -37,7 +37,15 @@ import kamm_twin_90d as K  # noqa: E402, N812
 # replacement.
 BASELINE = {90: -0.43908550999203477, 360: -0.9519122331848315}
 FLOOR = {90: 0.00015266693430725714, 360: 0.06173656216045926}
-EXPECTED_T_HASH = "b6a08b8395017c8e3f8df0b8b13eefa75fdfe7be3770d788beaaf1ca514127ae"
+# The reconstructed T-point carry is a content receipt for the resolved wind
+# arithmetic, not a timeless constant. The complete DINO cards changed their
+# default on 2026-08-29 after the literal NEMO wind walk. Keep the historical
+# hash admissible only for an explicitly legacy (or pre-selector) artifact.
+EXPECTED_T_HASH_FACTORED_SMOOTHSTEP = (
+    "b6a08b8395017c8e3f8df0b8b13eefa75fdfe7be3770d788beaaf1ca514127ae")
+EXPECTED_T_HASH_NEMO_LITERAL = (
+    "cad9b34958cba58812f1dce2c6c441c8fd6b5f2733c20b91065f4d60507592b7")
+EXPECTED_T_HASH = EXPECTED_T_HASH_NEMO_LITERAL
 FLOOR_RECEIPT = {
     90: "/tmp/tcarry_basin_floor90.json",
     360: "/tmp/dino_basin_seasonal_decomp.json",
@@ -64,6 +72,63 @@ IDENTICAL_STAMPS = (
     "producer_dirty_tracked_files",
 )
 DAY0_KEYS = ("T3d_day0", "S3d_day0", "eta3d_day0", "u3d_day0", "v3d_day0")
+
+
+def expected_tpoint_stress_hash(wind_evaluation: str | None) -> str:
+    """Hash admitted for one resolved DINO wind-profile implementation.
+
+    ``None`` is limited to artifacts made before the selector was stamped;
+    those necessarily used the historical factored expression.
+    """
+    if wind_evaluation in (None, "factored_smoothstep"):
+        return EXPECTED_T_HASH_FACTORED_SMOOTHSTEP
+    if wind_evaluation == "nemo_literal":
+        return EXPECTED_T_HASH_NEMO_LITERAL
+    raise ValueError(f"unknown DINO wind-profile receipt {wind_evaluation!r}")
+
+
+def tpoint_stress_receipt_errors(receipt: Mapping[str, object],
+                                 config: Mapping[str, object]) -> list[str]:
+    """Validate the corrected carry against its producing wind selector."""
+    errors = []
+    expected = {
+        "twin_start_mode": "bridged",
+        "bridge_before_stress_stagger": "T",
+        "bridge_before_stress_reconstruction_seconds": 15552000.0,
+    }
+    for key, want in expected.items():
+        got = receipt.get(key)
+        if got != want:
+            errors.append(f"{key}: got {got!r}, expected {want!r}")
+    selector = config.get("dino_wind_profile_evaluation")
+    try:
+        want_hash = expected_tpoint_stress_hash(selector)
+    except ValueError as exc:
+        errors.append(str(exc))
+    else:
+        got_hash = receipt.get("bridge_before_stress_sha256")
+        if got_hash != want_hash:
+            errors.append(
+                "bridge_before_stress_sha256: got "
+                f"{got_hash!r}, expected {want_hash!r} for "
+                f"dino_wind_profile_evaluation={selector!r}")
+    return errors
+
+
+def check_tpoint_stress_receipt_plants(receipt: Mapping[str, object],
+                                       config: Mapping[str, object]) -> None:
+    """Prove the start-mode and selector-bound hash controls can fail."""
+    if tpoint_stress_receipt_errors(receipt, config):
+        raise SystemExit("STOP receipt plants require an admitted real receipt")
+    bad_start = dict(receipt, twin_start_mode="BRIDGED_BEFORE")
+    if not any("twin_start_mode" in error for error in
+               tpoint_stress_receipt_errors(bad_start, config)):
+        raise SystemExit("STOP planted start-mode mismatch did not fire")
+    bad_hash = dict(receipt, bridge_before_stress_sha256="0" * 64)
+    if not any("bridge_before_stress_sha256" in error for error in
+               tpoint_stress_receipt_errors(bad_hash, config)):
+        raise SystemExit("STOP planted wind/hash mismatch did not fire")
+    print("[CONTROL PASS] planted start-mode and wind/hash receipt swaps rejected")
 
 
 def sha256(path: str | Path) -> str:
@@ -177,6 +242,14 @@ def _receipt_errors(legacy: np.lib.npyio.NpzFile,
                     corrected: np.lib.npyio.NpzFile,
                     day: int, expected_sha: str | None = None) -> list[str]:
     errors = []
+    try:
+        corrected_config_for_hash = json.loads(
+            str(_scalar(corrected, "run_config")))
+        expected_stress_hash = expected_tpoint_stress_hash(
+            corrected_config_for_hash.get("dino_wind_profile_evaluation"))
+    except (TypeError, ValueError, SystemExit) as exc:
+        errors.append(f"corrected wind/hash receipt unreadable: {exc}")
+        expected_stress_hash = None
     for key in IDENTICAL_STAMPS:
         try:
             left, right = _scalar(legacy, key), _scalar(corrected, key)
@@ -193,8 +266,6 @@ def _receipt_errors(legacy: np.lib.npyio.NpzFile,
         "corrected.bridge_before_stress_reconstruction_seconds": (
             float(_scalar(corrected, "bridge_before_stress_reconstruction_seconds")),
             15552000.0),
-        "corrected.bridge_before_stress_sha256": (
-            _scalar(corrected, "bridge_before_stress_sha256"), EXPECTED_T_HASH),
         "legacy.surface_stress_implicit": (
             bool(_scalar(legacy, "surface_stress_implicit")), False),
         "corrected.surface_stress_implicit": (
@@ -218,6 +289,12 @@ def _receipt_errors(legacy: np.lib.npyio.NpzFile,
     }
     errors.extend(f"{name}: got {got!r}, expected {want!r}"
                   for name, (got, want) in expected.items() if got != want)
+    if expected_stress_hash is not None:
+        got_stress_hash = _scalar(corrected, "bridge_before_stress_sha256")
+        if got_stress_hash != expected_stress_hash:
+            errors.append(
+                "corrected.bridge_before_stress_sha256: got "
+                f"{got_stress_hash!r}, expected {expected_stress_hash!r}")
     for tag, artifact in (("legacy", legacy), ("corrected", corrected)):
         producer_sha = str(_scalar(artifact, "producer_git_sha"))
         if len(producer_sha) != 40 or any(c not in "0123456789abcdef" for c in producer_sha):
@@ -463,7 +540,7 @@ def _self_test() -> int:
             corrected_path, **common_stamps,
             bridge_before_stress_stagger="T",
             bridge_before_stress_reconstruction_seconds=15552000.0,
-            bridge_before_stress_sha256=EXPECTED_T_HASH,
+            bridge_before_stress_sha256=EXPECTED_T_HASH_FACTORED_SMOOTHSTEP,
             run_config=json.dumps(corrected_config, sort_keys=True))
         with np.load(legacy_path) as legacy, np.load(corrected_path) as corrected:
             overlay = _Swap(corrected, {"control_dtype": "float32"})

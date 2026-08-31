@@ -744,6 +744,12 @@ def pad_tripole_grid_south(grid: LatLonCGridGeometry,
             [jnp.ones((n_pad,), dtype=jnp.asarray(seam_pad).dtype),
              jnp.asarray(seam_pad)])
 
+    native_lat_pad = grid.native_lat_T_deg
+    if native_lat_pad is not None:
+        native_lat_pad = jnp.concatenate(
+            [jnp.degrees(lat_new).astype(jnp.asarray(native_lat_pad).dtype),
+             jnp.asarray(native_lat_pad)], axis=0)
+
     return grid._replace(
         n_lat=n_lat + n_pad,
         lat_T=lat_T_pad,
@@ -771,6 +777,7 @@ def pad_tripole_grid_south(grid: LatLonCGridGeometry,
         cos_lat_v=cos_lat_v_pad,
         lat=lat_1d_pad,
         seam_wall_rows=seam_pad,
+        native_lat_T_deg=native_lat_pad,
         # lon (n_lon,) unchanged; dlon/dlat sentinels unchanged.
     )
 

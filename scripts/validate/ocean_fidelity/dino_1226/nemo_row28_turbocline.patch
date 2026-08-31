@@ -1,0 +1,14 @@
+diff --git a/cfgs/DINO/MY_SRC/ldftra.F90 b/cfgs/DINO/MY_SRC/ldftra.F90
+--- a/cfgs/DINO/MY_SRC/ldftra.F90
++++ b/cfgs/DINO/MY_SRC/ldftra.F90
+@@ -36,1 +36,1 @@
+-   USE zdfmxl  , ONLY : nmln, hmlp ! #1226 debug dump (MLD)
++   USE zdfmxl  , ONLY : nmln, hmlp, hmld ! #1226 debug dump (MLD/turbocline)
+@@ -974,0 +975,1 @@
++               OPEN( UNIT=8980, FILE='zdf_dump_hmld_turb.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
+@@ -977,1 +979,4 @@
+-               CLOSE(8816) ; CLOSE(8817)
++               ! Direct row-28 result after zdf_mxl_turb; imld is recovered
++               ! exactly from this depth and the strictly monotone gdepw ladder.
++               CALL dino_dump_2d( 8980, hmld(Nis0:Nie0,Njs0:Nje0) )
++               CLOSE(8816) ; CLOSE(8817) ; CLOSE(8980)

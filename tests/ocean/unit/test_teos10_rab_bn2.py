@@ -143,9 +143,11 @@ def test_bn2_teos10_differs_from_seos_and_is_signed():
     _t[5] = _t[6] - 0.5                          # cell 5 colder than 6 -> unstable
     T = jnp.asarray(_t)
     S = jnp.full((nlev,), 35.0)
-    n2_seos = e.compute_buoyancy_frequency_nemo_bn2(T, S, gdept, gdepw)
+    n2_seos = e.compute_buoyancy_frequency_nemo_bn2(
+        T, S, gdept, gdepw, e3w_source="depth_difference")
     n2_teos = e.compute_buoyancy_frequency_nemo_bn2(
-        T, S, gdept, gdepw, eos_form="teos10")
+        T, S, gdept, gdepw, eos_form="teos10",
+        e3w_source="depth_difference")
     a, b = np.asarray(n2_seos), np.asarray(n2_teos)
     assert a.shape == b.shape == (nlev - 1,)
     assert not np.allclose(a, b), "teos10 produced the S-EOS answer"
@@ -170,7 +172,9 @@ def test_unknown_eos_form_raises():
     gd = jnp.asarray([5.0, 15.0, 30.0, 50.0])
     gw = jnp.asarray([10.0, 22.0, 40.0])
     with pytest.raises(ValueError, match="eos_form"):
-        e.compute_buoyancy_frequency_nemo_bn2(T, S, gd, gw, eos_form="teos-10")
+        e.compute_buoyancy_frequency_nemo_bn2(
+            T, S, gd, gw, eos_form="teos-10",
+            e3w_source="depth_difference")
 
 
 def test_default_stays_seos_bit_identical():
@@ -181,9 +185,11 @@ def test_default_stays_seos_bit_identical():
     S = jnp.asarray(np.linspace(34.5, 34.9, 8))
     gd = jnp.asarray(np.linspace(5.0, 300.0, 8))
     gw = 0.5 * (gd[:-1] + gd[1:])
-    a = np.asarray(e.compute_buoyancy_frequency_nemo_bn2(T, S, gd, gw))
+    a = np.asarray(e.compute_buoyancy_frequency_nemo_bn2(
+        T, S, gd, gw, e3w_source="depth_difference"))
     b = np.asarray(e.compute_buoyancy_frequency_nemo_bn2(
-        T, S, gd, gw, eos_form="seos"))
+        T, S, gd, gw, eos_form="seos",
+        e3w_source="depth_difference"))
     assert np.array_equal(a, b)
 
 
@@ -385,8 +391,9 @@ class TestProductionWiring:
         S = jnp.asarray(np.linspace(34.4, 34.9, nlev))
         gd = jnp.asarray(np.linspace(5.0, 400.0, nlev))
         gw = 0.5 * (gd[:-1] + gd[1:])
-        common = dict(T_cell=T, S_cell=S, t_depth=gd, w_depth=gw,
-                      n2_mode="nemo_bn2")
+        common = dict(
+            T_cell=T, S_cell=S, t_depth=gd, w_depth=gw,
+            e3w_int=jnp.diff(gd), n2_mode="nemo_bn2")
         a = np.asarray(compute_N2(None, None, 1026.0, **common,
                                   n2_eos_form="seos"))
         b = np.asarray(compute_N2(None, None, 1026.0, **common,
@@ -547,7 +554,7 @@ class TestCrossGridAndEndToEnd:
                 jnp.full((1, nlev - 1), 1e-4),
                 None, None, 3600.0, cfg,
                 t_depth=t_depth, w_depth=w_depth,
-                dz_ref=z.dz_ref,
+                e3w_int=jnp.diff(t_depth, axis=-1), dz_ref=z.dz_ref,
             )
 
         cfg = TKEConfig(prognostic=True, n2_mode="nemo_bn2",
@@ -569,7 +576,8 @@ class TestCrossGridAndEndToEnd:
             u, v, T_flat, S_flat, rho, dz_half,
             jnp.full((1, nlev - 1), 1e-4),
             None, None, 3600.0, cfg,
-            t_depth=t_depth, w_depth=w_depth, dz_ref=z.dz_ref,
+            t_depth=t_depth, w_depth=w_depth,
+            e3w_int=jnp.diff(t_depth, axis=-1), dz_ref=z.dz_ref,
         )
 
         n2 = _bn2_signed(T, S, t_depth, w_depth)
@@ -593,4 +601,5 @@ class TestCrossGridAndEndToEnd:
 def _bn2_signed(T, S, t_depth, w_depth):
     from legoesm.ocean.eos import compute_buoyancy_frequency_nemo_bn2
     return compute_buoyancy_frequency_nemo_bn2(
-        T, S, t_depth, w_depth, eos_form="teos10")
+        T, S, t_depth, w_depth, eos_form="teos10",
+        e3w_source="depth_difference")
