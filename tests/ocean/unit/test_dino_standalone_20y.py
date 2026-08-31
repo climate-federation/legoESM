@@ -69,6 +69,69 @@ def test_standalone_builder_has_no_bridge_level_and_resolves_card_default():
         assert getattr(z_coord, name) is not None, name
 
 
+def test_literal_momentum_zdf_uses_native_live_kaa_face_geometry(monkeypatch):
+    """The DINO literal path reads e3u/e3v(Kaa), not T-cell midpoints."""
+    import jax.numpy as jnp
+    import legoesm.ocean.physics.vertical_mixing as vmix
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        compute_face_masks_3d,
+        interp_cell_to_uface,
+    )
+    from legoesm.ocean.vertical import (
+        compute_layer_thickness,
+        nemo_qco_live_face_geometry_from_operands,
+    )
+
+    _, grid, z_coord, state, _, model, *_ = RUNNER.build_standalone(0)
+    state = model._seed_tke_preclosure_carry(state)
+    state = state._replace(
+        T_before=state.T, S_before=state.S,
+        u_before=state.u, v_before=state.v, eta_before=state.eta)
+    bundle = model._tke_step_entry_n2_bundle(state)
+    eta_after = jnp.asarray(
+        0.2 * np.sin(np.linspace(-1.0, 1.0, grid.n_lat))[:, None]
+        * np.cos(np.linspace(0.0, 2.0, grid.n_lon))[None, :])
+    kaa = state._replace(eta=state.eta.replace(data=eta_after))
+
+    captured = []
+
+    def capture(field, avm_face, dz_after, e3w_now, dt, wet, **kwargs):
+        captured.append((np.asarray(dz_after), np.asarray(e3w_now)))
+        return field
+
+    monkeypatch.setattr(
+        vmix, "implicit_vertical_diffusion_ocean_momentum_dispatch", capture)
+    model._apply_implicit_vertical_mixing(
+        kaa, RUNNER.DT_SECONDS, None, do_tracers=False,
+        tke_n2_bundle=bundle, eta_now=state.eta.data,
+        u_now=state.u.data, v_now=state.v.data,
+        n2_tracers=(state.T.data, state.S.data),
+        n2_tracers_before=(state.T.data, state.S.data))
+    assert len(captured) == 2
+
+    raw = z_coord.nemo_een_barotropic
+    live = nemo_qco_live_face_geometry_from_operands(
+        eta_after, raw.e3u_0, raw.e3v_0, raw.umask, raw.vmask,
+        raw.hu_0, raw.hv_0, raw.e1t * raw.e2t,
+        raw.e1u * raw.e2u, raw.e1v * raw.e2v)
+    expected_u = np.concatenate(
+        [np.asarray(live.e3u)[:, -1:, :], np.asarray(live.e3u)], axis=1)
+    expected_v = np.concatenate(
+        [np.zeros_like(np.asarray(live.e3v)[:1]), np.asarray(live.e3v)],
+        axis=0)
+    active_u, active_v = compute_face_masks_3d(z_coord.is_active, grid)
+    expected_u = expected_u * np.asarray(active_u)
+    expected_v = expected_v * np.asarray(active_v)
+    np.testing.assert_array_equal(captured[0][0], expected_u)
+    np.testing.assert_array_equal(captured[1][0], expected_v)
+
+    old_u = np.asarray(interp_cell_to_uface(compute_layer_thickness(
+        eta_after, state.H_bathy.data, z_coord,
+        min_water_column_m=model.config.min_water_column_m)))
+    assert np.count_nonzero(
+        (old_u != expected_u) & np.asarray(active_u, dtype=bool)) > 0
+
+
 def test_slow_forcing_and_hpg_selectors_fail_closed():
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,

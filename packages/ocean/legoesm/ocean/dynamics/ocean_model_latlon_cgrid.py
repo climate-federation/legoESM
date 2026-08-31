@@ -7669,10 +7669,35 @@ class LatLonCGridOceanModel:
             if _wet_if_vmix is not None:
                 A_v_cell = A_v_cell * _wet_if_vmix
             A_v_u = interp_cell_to_uface(A_v_cell)        # (n_lat, n_lon+1, nlev-1)
-            dz_u = interp_cell_to_uface(dz_cell)
-            # Fused v-interps: one sendrecv pair per cut for A_v + dz
-            # (audit lever O4; both are independent cell fields here).
-            A_v_v, dz_v = interp_to_v_points_multi((A_v_cell, dz_cell))
+            A_v_v = interp_to_v_points(A_v_cell, _grid)
+            literal_face_geometry = (
+                getattr(_cfg_b, "zdf_implicit_solver_evaluation",
+                        "shared_thomas") == "nemo_literal"
+                and getattr(_zc, "nemo_een_barotropic", None) is not None)
+            if literal_face_geometry:
+                # dynzdf.F90:199-213/391-403 divides by e3u/e3v(Kaa).
+                # Under key_qco those are E3u_0/E3v_0 times the native
+                # face stretch (domzgr_substitute.h90:127-128), not a
+                # cell-average of live e3t. Reuse the established QCO face
+                # constructor already used by mlf_baro_corr.
+                raw = _zc.nemo_een_barotropic
+                live_after = nemo_qco_live_face_geometry_from_operands(
+                    state.eta.data,
+                    raw.e3u_0, raw.e3v_0,
+                    raw.umask, raw.vmask,
+                    raw.hu_0, raw.hv_0,
+                    raw.e1t * raw.e2t,
+                    raw.e1u * raw.e2u,
+                    raw.e1v * raw.e2v,
+                )
+                dz_u = jnp.concatenate(
+                    [live_after.e3u[:, -1:, :], live_after.e3u], axis=1)
+                dz_v = jnp.concatenate(
+                    [jnp.zeros_like(live_after.e3v[:1]), live_after.e3v],
+                    axis=0)
+            else:
+                dz_u = interp_cell_to_uface(dz_cell)
+                dz_v = interp_to_v_points(dz_cell, _grid)
             # UNMASKED face thickness, kept under its own name because two
             # consumers need a POSITIVE thickness rather than the masked
             # control volume built below: the centre-to-centre gradient slot
