@@ -384,7 +384,7 @@ def _legacy_geometry_controls(nemo_grid, cfg, z_coord, state) -> dict[str, Any]:
         np.abs(np.asarray(first.z_full_ref)), mask.shape)
     depth_row = diff_row(
         "control_old_first_pass_depth", first_depth,
-        _mesh_core(nemo_grid.gdept_0)[..., :-1], mask, bar=0.0)
+        _mesh_core(nemo_grid.gdept_0), mask, bar=0.0)
     if not (depth_row["status"] == "OVER_BAR"
             and depth_row["max_abs"] > 100.0):
         raise RuntimeError("old first-pass depth control did not fire >100 m")
