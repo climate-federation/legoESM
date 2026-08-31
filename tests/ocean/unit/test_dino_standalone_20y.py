@@ -216,6 +216,19 @@ def test_runner_exposes_fail_closed_final_snapshot_flag():
     assert "--snap-final requires --steps to end on a whole DINO day" in source
 
 
+def test_reducer_mesh_requires_canonical_scorer_path(tmp_path, monkeypatch):
+    canonical = tmp_path / "canonical" / "mesh_mask.nc"
+    canonical.parent.mkdir()
+    canonical.write_bytes(b"same mesh bytes")
+    alias = tmp_path / "alias" / "mesh_mask.nc"
+    alias.parent.mkdir()
+    alias.write_bytes(canonical.read_bytes())
+    monkeypatch.setattr(RUNNER, "CANONICAL_REDUCER_MESH", canonical)
+    assert RUNNER.validate_reducer_mesh_path(canonical) == canonical.resolve()
+    with pytest.raises(ValueError, match="byte-identical aliases"):
+        RUNNER.validate_reducer_mesh_path(alias)
+
+
 def _synthetic_reducer_inputs(native=(9, 10, 6)):
     expected = RUNNER._expected_reducer_input_shapes(native)
     fields = {

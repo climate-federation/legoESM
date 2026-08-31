@@ -57,6 +57,29 @@ YEARS = 20
 MEMBERS = tuple(range(6))
 PERTURB_EPS = 1.0e-14
 IC_EULER_ADMISSION = "dino_ic_euler_peel_v9:EULER_AT_BAR"
+CANONICAL_REDUCER_MESH = Path(
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/"
+    "RUN_TRAJ/mesh_mask.nc")
+
+
+def validate_reducer_mesh_path(path: Path) -> Path:
+    """Require the pathname owned by the imported campaign reducers.
+
+    ``acc_thermal_wind`` opens the oracle ``RUN_TRAJ`` mesh at import time and
+    ``build_snapshot_reducer`` deliberately compares pathnames, not hashes.
+    Byte-identical copies (including ``RUN_KT2/mesh_mask.nc``) are therefore
+    not legal inputs. Fail here at day 0 with the actionable canonical path.
+    """
+    resolved = path.resolve()
+    if resolved.name != "mesh_mask.nc" or not resolved.is_file():
+        raise ValueError("--reducer-mesh must name an existing mesh_mask.nc")
+    canonical = CANONICAL_REDUCER_MESH.resolve()
+    if resolved != canonical:
+        raise ValueError(
+            "--reducer-mesh must be the canonical scorer mesh "
+            f"{canonical}; byte-identical aliases are rejected because the "
+            "recorded reducer imports that pathname")
+    return resolved
 
 
 def claim_admission_reasons() -> tuple[str, ...]:
@@ -692,9 +715,10 @@ def run(args: argparse.Namespace) -> int:
     reducer_mesh = None
     reducer_convention_receipt = None
     if args.reducer_mesh is not None:
-        reducer_mesh = args.reducer_mesh.resolve()
-        if reducer_mesh.name != "mesh_mask.nc" or not reducer_mesh.is_file():
-            raise SystemExit("--reducer-mesh must name an existing mesh_mask.nc")
+        try:
+            reducer_mesh = validate_reducer_mesh_path(args.reducer_mesh)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
         reducer, reducer_status = twin.build_snapshot_reducer(
             str(reducer_mesh.parent))
         if reducer is None:
