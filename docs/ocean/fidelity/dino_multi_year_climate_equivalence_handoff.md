@@ -387,6 +387,7 @@ PYTHONPATH="$pythonpath" JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES='' \
 from pathlib import Path
 import hashlib
 import json
+import re
 import sys
 import numpy as np
 
@@ -396,12 +397,28 @@ days = np.array(list(range(360, 5401, 360)) + list(range(5430, 7201, 30)))
 assert days.size == 75
 members = []
 config0 = None
+snapshot0 = None
+snapshot_pattern = re.compile(r"^(T3d|S3d|eta3d|u3d|v3d)_day([0-9]+)$")
 for m in range(6):
     path = run_root / "arms" / f"m{m}.npz"
     if not path.is_file():
         raise SystemExit(f"missing {path}")
     with np.load(path, allow_pickle=False) as z:
-        got_days = np.asarray(z["snap_days"], dtype=np.int64)
+        by_field = {field: [] for field in ("T3d", "S3d", "eta3d", "u3d", "v3d")}
+        for key in z.files:
+            match = snapshot_pattern.fullmatch(key)
+            if match:
+                by_field[match.group(1)].append(int(match.group(2)))
+        for field in by_field:
+            by_field[field] = sorted(by_field[field])
+        field_sets = {field: tuple(values) for field, values in by_field.items()}
+        if len(set(field_sets.values())) != 1:
+            raise SystemExit(f"m{m}: per-field snapshot days disagree: {field_sets}")
+        got_days = np.asarray(field_sets["T3d"], dtype=np.int64)
+        if snapshot0 is None:
+            snapshot0 = field_sets
+        elif field_sets != snapshot0:
+            raise SystemExit(f"m{m}: snapshot key schema differs from member 0")
         red_days = np.asarray(z["reduced_days"], dtype=np.int64)
         if not np.array_equal(got_days, days) or not np.array_equal(red_days, days):
             raise SystemExit(f"m{m}: snapshot/reduced dates differ from prereg")
