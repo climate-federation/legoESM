@@ -1466,6 +1466,60 @@ def flux_form_vertical_momentum_advection_centered(
     return -vert_flux_div / h_u_safe
 
 
+def nemo_up3_vertical_momentum_advection(
+    velocity: jnp.ndarray,
+    w_half_at_face: jnp.ndarray,
+    h_face: jnp.ndarray,
+    face_active: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """NEMO ``dynadv_up3`` vertical momentum-flux transcription.
+
+    This is the vertical part of the live flux-form ``ln_dynadv_up3`` arm,
+    not ``dynzad`` (which ``dynadv.F90:79-91`` calls only for vector form).
+    It transcribes NEMO 5.0.2 ``dynadv_up3.F90:239-365`` with
+    ``gamma1=1/3``: second differences come from the before/stage-base
+    velocity, their upwind choice uses the sign of the vertical transport,
+    and the transported value is the centered pair minus the UP3 correction.
+
+    ``w_half_at_face`` is the arithmetic T-to-u/v-face average.  NEMO writes
+    ``0.25*(zFw_left+zFw_right)*(u_below+u_above-gamma1*lap)``; because the
+    supplied average is half that sum, the coefficient below is ``0.5``.
+    Surface and bottom fluxes are exactly zero.  Final tendencies are masked
+    at their own wet velocity cell, matching NEMO's subsequent time update.
+    """
+    nlev = velocity.shape[-1]
+    if nlev < 2:
+        return jnp.zeros_like(velocity)
+    gamma1 = 1.0 / 3.0
+    if face_active is None:
+        active = jnp.ones_like(velocity)
+    else:
+        active = jnp.broadcast_to(face_active, velocity.shape)
+    interface_active = active[..., :-1] * active[..., 1:]
+    first_difference = (
+        (velocity[..., :-1] - velocity[..., 1:]) * interface_active
+    )
+    pad_axes = ((0, 0),) * (velocity.ndim - 1)
+    next_difference = jnp.pad(
+        first_difference[..., 1:], (*pad_axes, (0, 1))
+    )
+    second_difference = first_difference - next_difference
+    previous_second = jnp.pad(
+        second_difference[..., :-1], (*pad_axes, (1, 0))
+    )
+    w_interior = w_half_at_face[..., 1:nlev]
+    up3_correction = jnp.where(
+        w_interior > 0.0, second_difference, previous_second
+    )
+    interior_flux = 0.5 * w_interior * (
+        velocity[..., :-1] + velocity[..., 1:]
+        - gamma1 * up3_correction
+    )
+    flux = jnp.pad(interior_flux, (*pad_axes, (1, 1)))
+    divergence = flux[..., :-1] - flux[..., 1:]
+    return -divergence / jnp.maximum(h_face, _H_FLOOR) * active
+
+
 #: ``bottom_face_mask_mode`` literals for
 #: :func:`nemo_advective_vertical_momentum_advection` (#1226 level-29-onset
 #: finding, ``zad_level29_onset_walk.py``, commit ``b6d0d9877``):
@@ -1780,6 +1834,7 @@ def adaptive_implicit_vertical_momentum_advection(
     cu_min: float = _AIMP_CU_MIN,
     cu_max: float = _AIMP_CU_MAX,
     face_active: jnp.ndarray | None = None,
+    explicit_scheme: str = "upwind",
 ) -> jnp.ndarray:
     """Adaptive-implicit vertical momentum advection (Shchepetkin 2015).
 
@@ -1838,10 +1893,20 @@ def adaptive_implicit_vertical_momentum_advection(
     w_imp = zcff * w_half
     w_exp = (1.0 - zcff) * w_half
 
-    # Explicit (Courant-capped) part through the existing flux-form scheme.
-    tend_exp = flux_form_vertical_momentum_advection(
-        u, w_exp, h, face_active=face_active,
-    )
+    # Explicit (Courant-capped) part.  ``nemo_up3`` selects the live
+    # ln_dynadv_up3 vertical flux; the default is unchanged.
+    if explicit_scheme == "upwind":
+        tend_exp = flux_form_vertical_momentum_advection(
+            u, w_exp, h, face_active=face_active,
+        )
+    elif explicit_scheme == "nemo_up3":
+        tend_exp = nemo_up3_vertical_momentum_advection(
+            u, w_exp, h, face_active=face_active,
+        )
+    else:
+        raise ValueError(
+            "explicit_scheme must be 'upwind' or 'nemo_up3', got "
+            f"{explicit_scheme!r}")
     u_exp = u + dt * tend_exp
 
     # Implicit part: unconditionally-stable backward-Euler upwind solve.

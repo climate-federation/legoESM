@@ -162,6 +162,41 @@ def compute_nemo_boxcar_centred_weights(
     )
 
 
+def compute_nemo_boxcar_forward_weights(
+    n_substeps: int,
+    dtype: jnp.dtype,
+):
+    """NEMO forward ``nn_bt_flt=1`` primary/secondary weights.
+
+    This is the live OVERFLOW testcase arm: ``ln_bt_fw=T`` makes
+    ``jic=nn_e`` and ``ts_wgt`` CASE(1) selects exactly those one-based
+    substeps satisfying ``abs(jn-jic)/nn_e < 1/2``
+    (NEMO 5.0.2 ``dynspg_ts.F90:1058-1080``).  The final in-window index is
+    also NEMO's loop bound.  Tail-sum transport weights implement
+    ``ts_wgt:1097-1102`` and are normalized by their sum.
+    """
+    import numpy as _np
+    if n_substeps < 2:
+        raise ValueError(
+            f"nemo_boxcar_forward needs n_substeps >= 2, got {n_substeps!r}")
+    jn = _np.arange(1, 3 * n_substeps + 1, dtype=_np.float64)
+    primary = (
+        _np.abs(jn - n_substeps) / n_substeps < 0.5
+    ).astype(_np.float64)
+    n_loop = int(_np.max(_np.where(primary > 0.0)[0]) + 1)
+    primary = primary[:n_loop]
+    total = primary.sum(dtype=_np.float64)
+    averaged = primary / total
+    secondary = _np.cumsum(primary[::-1], dtype=_np.float64)[::-1]
+    secondary = secondary / secondary.sum(dtype=_np.float64)
+    return (
+        jnp.asarray(averaged, dtype=dtype),
+        jnp.asarray(1.0, dtype=dtype),
+        jnp.asarray(secondary, dtype=dtype),
+        n_loop,
+    )
+
+
 def compute_nemo_boxcar_raw_transport_weights(
     n_substeps: int,
     dtype: jnp.dtype,

@@ -58,6 +58,7 @@ from legoesm.ocean.dynamics.barotropic_common import (
     bebt_blend,
     compute_filter_weights,
     compute_nemo_boxcar_centred_weights,
+    compute_nemo_boxcar_forward_weights,
     compute_nemo_boxcar_raw_transport_weights,
     compute_power_law_filter_weights,
     coriolis_at_faces,
@@ -1620,6 +1621,12 @@ def _compute_weights(config, n_substeps: int, dtype, substep_scale: int = 1):
         w_filter, w_total, w_transport, n_loop = (
             compute_nemo_boxcar_centred_weights(
                 n_substeps, dtype, substep_scale=substep_scale))
+    elif config.barotropic.barotropic_time_filter == "nemo_boxcar1_ab3":
+        # NEMO ln_bt_fw=T + nn_bt_flt=1 (OVERFLOW): width-n boxcar centred
+        # on jic=n, with the same cold-start AB3/AM4 substep program as the
+        # other averaging filters (dynspg_ts.F90:199-202,1060-1080).
+        w_filter, w_total, w_transport, n_loop = (
+            compute_nemo_boxcar_forward_weights(n_substeps, dtype))
     else:
         use_cosine_filter = config.barotropic.barotropic_time_filter == "cosine"
         # FOUR values, and the fourth is the loop count. The cosine window runs
@@ -2086,14 +2093,16 @@ def barotropic_substeps_latlon_cgrid(
 
 
     _filter = config.barotropic.barotropic_time_filter
-    _boxcar_ab3 = _filter == "nemo_boxcar_ab3"   # NEMO nn_bt_flt=2 (DINO)
-    _ab3 = _filter in ("nemo_ab3am4", "nemo_boxcar_ab3")
+    _boxcar_ab3 = _filter in (
+        "nemo_boxcar_ab3", "nemo_boxcar1_ab3")
+    _ab3 = _filter in (
+        "nemo_ab3am4", "nemo_boxcar_ab3", "nemo_boxcar1_ab3")
     if _boxcar_ab3:
-        # NEMO nn_bt_flt=2: the barotropic sub-state is re-initialised EVERY
+        # NEMO nn_bt_flt=1/2: the barotropic sub-state is re-initialised EVERY
         # baroclinic step (ll_init=ll_bt_av=T, dynspg_ts.F90:202/469-476) ⇒ the
         # ll_init ramp fires every step and there is NO cross-window bt_hist
         # carry.  The ssh half-step-back interpolation uses the rn_bt_alpha=0
-        # literals (flt2=True); the boxcar averaging (w_filter above) is applied
+        # alpha-zero literals (flt2=True); boxcar averaging is applied
         # to the raw per-substep ssh, matching NEMO's pssh(Kaa) accumulation.
         _ab3_hist = None
         _ab3_za, _ab3_zb = nemo_ab3am4_coeff_arrays(
@@ -2157,7 +2166,8 @@ def barotropic_substeps_latlon_cgrid(
         V_bar_avg = V_bar_f
     else:
         # Time-averaged eta and velocity (cosine / box / nemo_boxcar_centred /
-        # nemo_boxcar_ab3 = nn_bt_flt=2 boxcar averaging of the raw substep ssh).
+        # nemo_boxcar_ab3 / nemo_boxcar1_ab3 = NEMO boxcar averaging of the
+        # raw substep ssh).
         eta_avg = eta_sum_f / w_total
         U_bar_avg = U_sum_f / w_total
         V_bar_avg = V_sum_f / w_total

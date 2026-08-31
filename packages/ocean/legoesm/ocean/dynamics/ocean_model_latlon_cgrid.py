@@ -978,6 +978,62 @@ def _ssp_rk3_tracer_pair_step(
     return a_new, b_new
 
 
+def _nemo_ws_rk3_tracer_pair_step(
+    tr_a: jnp.ndarray,
+    tr_b: jnp.ndarray,
+    tracer_advection: str,
+    mass_flux_u: jnp.ndarray,
+    mass_flux_v: jnp.ndarray,
+    w_baro: jnp.ndarray,
+    h_k_old: jnp.ndarray,
+    h_k_new: jnp.ndarray,
+    h_u_old: jnp.ndarray,
+    h_v_old: jnp.ndarray,
+    grid,
+    dt: float,
+    active_3d: jnp.ndarray,
+    recon_fill_mask: jnp.ndarray | None = None,
+    linssh_top_flux: bool = False,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """NEMO key_RK3 tracer stage program (Wicker--Skamarock form).
+
+    ``stprk3_stg.F90:112-249,519-559`` restarts every stage from Kbb and
+    applies the previous stage RHS with ``dt/3``, ``dt/2``, then ``dt``.
+    Under key_qco the stage result is thickness weighted; the one-third and
+    one-half thicknesses below are the corresponding linear r3t stages.
+    The flux reconstruction receives the live stage interval so FCT uses the
+    same stage Courant factor.  This selector changes no existing ``rk3``
+    (SSP) user.
+    """
+    def _flux_pair(a_val, b_val, stage_dt):
+        (dh_a, dv_a), (dh_b, dv_b) = compute_advection_flux_div_pair(
+            a_val, b_val, tracer_advection, mass_flux_u, mass_flux_v,
+            w_baro, h_k_old, h_u_old, h_v_old, grid, stage_dt,
+            recon_fill_mask=recon_fill_mask,
+            linssh_top_flux=linssh_top_flux,
+        )
+        return dh_a + dv_a, dh_b + dv_b
+
+    def _stage(base, flux_div, stage_dt, h_stage):
+        out = (h_k_old * base - stage_dt * flux_div) / jnp.maximum(
+            h_stage, 1.0e-10)
+        return jnp.where(active_3d > 0.5, out, base)
+
+    h_one_third = h_k_old + (h_k_new - h_k_old) / 3.0
+    h_one_half = 0.5 * (h_k_old + h_k_new)
+    fd0_a, fd0_b = _flux_pair(tr_a, tr_b, dt / 3.0)
+    a1 = _stage(tr_a, fd0_a, dt / 3.0, h_one_third)
+    b1 = _stage(tr_b, fd0_b, dt / 3.0, h_one_third)
+    fd1_a, fd1_b = _flux_pair(a1, b1, dt / 2.0)
+    a2 = _stage(tr_a, fd1_a, dt / 2.0, h_one_half)
+    b2 = _stage(tr_b, fd1_b, dt / 2.0, h_one_half)
+    fd2_a, fd2_b = _flux_pair(a2, b2, dt)
+    return (
+        _stage(tr_a, fd2_a, dt, h_k_new),
+        _stage(tr_b, fd2_b, dt, h_k_new),
+    )
+
+
 def _forward_backward_coriolis_3d(
     u: jnp.ndarray,
     v: jnp.ndarray,
@@ -2356,7 +2412,7 @@ class LatLonCGridOceanModel:
                     'barotropic_solver="implicit_cn", or extend _unsplit_ab2_step.')
         _valid_time_filters = {"box", "cosine", "power_law",
                                "nemo_boxcar_centred", "nemo_ab3am4",
-                               "nemo_boxcar_ab3"}
+                               "nemo_boxcar_ab3", "nemo_boxcar1_ab3"}
         if (getattr(config, "surface_stress_implicit", False)
                 and not getattr(config.barotropic,
                                 "nemo_stage_mean_imposition", False)
@@ -2386,7 +2442,7 @@ class LatLonCGridOceanModel:
                 "otherwise the wind's depth-mean is double-counted "
                 "(F_slow + the solve).")
         if (config.barotropic.barotropic_time_filter
-                in ("nemo_ab3am4", "nemo_boxcar_ab3")
+                in ("nemo_ab3am4", "nemo_boxcar_ab3", "nemo_boxcar1_ab3")
                 and config.barotropic.barotropic_wide_halo):
             raise ValueError(
                 f"barotropic_time_filter="
@@ -2879,7 +2935,7 @@ class LatLonCGridOceanModel:
                     "plain pre-step U_bar, so substep-0 would not cancel "
                     "bit-exactly. Use the boxcar filter (nn_bt_flt=2, NEMO's "
                     "DINO selection) with the live split.")
-        _valid_time_int = {"euler", "ab2", "rk3"}
+        _valid_time_int = {"euler", "ab2", "rk3", "rk3_ws"}
         if config.tracer_time_integrator not in _valid_time_int:
             raise ValueError(
                 f"tracer_time_integrator must be one of {_valid_time_int}, "
@@ -4668,14 +4724,28 @@ class LatLonCGridOceanModel:
             V_bar = (Hv_3d / jnp.maximum(H_v_old, 1e-10))[..., jnp.newaxis]
             u_face_active = jnp.broadcast_to(u_mask_3d_tracer, u_3d.shape)
             v_face_active = jnp.broadcast_to(v_mask_3d_tracer, v_3d.shape)
-            u_adv = adaptive_implicit_vertical_momentum_advection(
-                u_3d - U_bar, w_u_half, h_u_old, dt,
-                face_active=u_face_active,
-            ) + U_bar
-            v_adv = adaptive_implicit_vertical_momentum_advection(
-                v_3d - V_bar, w_v_half, h_v_old, dt,
-                face_active=v_face_active,
-            ) + V_bar
+            _vertical_scheme = getattr(
+                _cfg_b, "vertical_momentum_scheme", "upwind_perturbation")
+            if _vertical_scheme == "nemo_up3":
+                # NEMO dynadv_up3 advects full uu/vv.  Its adaptive split
+                # partitions only the vertical transport (stprk3_stg.F90:
+                # 284-300), so use the same UP3 explicit flux on w_exp and
+                # the canonical implicit upwind solve on w_imp.
+                u_adv = adaptive_implicit_vertical_momentum_advection(
+                    u_3d, w_u_half, h_u_old, dt,
+                    face_active=u_face_active, explicit_scheme="nemo_up3")
+                v_adv = adaptive_implicit_vertical_momentum_advection(
+                    v_3d, w_v_half, h_v_old, dt,
+                    face_active=v_face_active, explicit_scheme="nemo_up3")
+            else:
+                u_adv = adaptive_implicit_vertical_momentum_advection(
+                    u_3d - U_bar, w_u_half, h_u_old, dt,
+                    face_active=u_face_active,
+                ) + U_bar
+                v_adv = adaptive_implicit_vertical_momentum_advection(
+                    v_3d - V_bar, w_v_half, h_v_old, dt,
+                    face_active=v_face_active,
+                ) + V_bar
             # Re-apply the 2D wet mask + periodic wrap column (matches the
             # tendency path's post-update masking at u[:, -1] = u[:, 0]).
             u_adv = u_adv * u_mask_3d
@@ -5162,6 +5232,15 @@ class LatLonCGridOceanModel:
                 _T_adv_before = _S_adv_before = None
             if _tti == "rk3":
                 T_corrected, S_corrected = _ssp_rk3_tracer_pair_step(
+                    T_mid, S_mid, _adv,
+                    mass_flux_u_tr, mass_flux_v_tr, w_baro_tr,
+                    h_k_old, h_k_new, h_u_old, h_v_old,
+                    _grid, dt, active_3d, recon_fill_mask=_wall_fill_mask,
+                    linssh_top_flux=_linssh,
+                )
+                _pair_divs = (None, None)
+            elif _tti == "rk3_ws":
+                T_corrected, S_corrected = _nemo_ws_rk3_tracer_pair_step(
                     T_mid, S_mid, _adv,
                     mass_flux_u_tr, mass_flux_v_tr, w_baro_tr,
                     h_k_old, h_k_new, h_u_old, h_v_old,

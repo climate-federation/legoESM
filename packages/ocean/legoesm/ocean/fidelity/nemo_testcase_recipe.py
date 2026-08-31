@@ -39,7 +39,7 @@ class NEMOTestcaseCard(NamedTuple):
     bbl_gamma_s: float
 
 
-def _model_config() -> LatLonCGridOceanConfig:
+def _model_config(*, barotropic_time_filter: str) -> LatLonCGridOceanConfig:
     """The selectors shared by both certified ``key_qco + key_RK3`` runs."""
 
     return LatLonCGridOceanConfig.from_flat(
@@ -48,18 +48,22 @@ def _model_config() -> LatLonCGridOceanConfig:
         # selects the Roquet TEOS-10 coefficient table and :260-288 evaluates it.
         eos="nemo_teos10",
         tracer_advection="fct2",
-        tracer_time_integrator="euler",
+        # NEMO key_RK3: stprk3_stg.F90:112-249,519-559 restarts tracer
+        # stages from Kbb with dt/3, dt/2, and dt.
+        tracer_time_integrator="rk3_ws",
         momentum_advection="flux_form",
         momentum_flux_scheme="upwind3",
         momentum_time_integrator="rk3_ws",
-        vertical_momentum_scheme="nemo_advective",
+        # ln_dynadv_up3 dispatches to dynadv_up3 (dynadv.F90:87-89); its
+        # vertical UP3 flux is dynadv_up3.F90:239-365. dynzad is dead here.
+        vertical_momentum_scheme="nemo_up3",
         # NEMO 5.0.2 dynhpg.F90:117-123 dispatches ln_hpg_sco (the resolved
         # value on both cards) to hpg_sco, not hpg_djc.  The canonical
         # nemo_sco option transcribes its recurrence at :340-390.
         pgf_scheme="nemo_sco",
         pgf_quadrature="nemo_trapezoid",
         barotropic_solver="explicit_substep",
-        barotropic_time_filter="cosine",
+        barotropic_time_filter=barotropic_time_filter,
         adaptive_implicit_vertadv=True,
         implicit_vertical_mixing=True,
         A_h=0.0,
@@ -146,7 +150,9 @@ def build_lock_exchange_zco_card() -> NEMOTestcaseCard:
     state = _native_initial_state(
         grid, z_coord, bathymetry, x_km, 5.0, 30.0, 32.0
     )
-    model_config = _model_config()
+    # ln_bt_fw=T, nn_bt_flt=3, rn_bt_alpha=.07: dynspg_ts.F90:199-226,
+    # 536-553,1676-1711. The canonical option carries substep history.
+    model_config = _model_config(barotropic_time_filter="nemo_ab3am4")
     recipe = NEMORecipe(
         model_config=model_config,
         physics_config=model_config.physics,
@@ -191,7 +197,9 @@ def build_overflow_zps_card() -> NEMOTestcaseCard:
     state = _native_initial_state(
         grid, z_coord, effective_bathymetry, x_km, 10.0, 20.0, 20.0
     )
-    model_config = _model_config()
+    # ln_bt_fw=T, nn_bt_flt=1, rn_bt_alpha=0: dynspg_ts.F90:1058-1080,
+    # 1676-1711. The canonical option re-runs the cold-start ramp each step.
+    model_config = _model_config(barotropic_time_filter="nemo_boxcar1_ab3")
     recipe = NEMORecipe(
         model_config=model_config,
         physics_config=model_config.physics,

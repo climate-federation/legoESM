@@ -67,9 +67,34 @@ def test_nemo_testcase_cards_are_fp64_source_pinned(
     assert cfg.momentum_advection == "flux_form"
     assert cfg.momentum_flux_scheme == "upwind3"
     assert cfg.momentum_time_integrator == "rk3_ws"
+    assert cfg.tracer_time_integrator == "rk3_ws"
+    assert cfg.vertical_momentum_scheme == "nemo_up3"
     assert cfg.pgf_scheme == "nemo_sco"
     assert cfg.pgf_quadrature == "nemo_trapezoid"
     assert cfg.adaptive_implicit_vertadv
+
+
+def test_testcase_cards_select_their_resolved_barotropic_filters():
+    assert (
+        build_lock_exchange_zco_card().recipe.model_config.barotropic.barotropic_time_filter
+        == "nemo_ab3am4"
+    )
+
+
+def test_testcase_cards_construct_the_shared_canonical_model():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    for builder in (build_lock_exchange_zco_card, build_overflow_zps_card):
+        card = builder()
+        LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config
+        )
+    assert (
+        build_overflow_zps_card().recipe.model_config.barotropic.barotropic_time_filter
+        == "nemo_boxcar1_ab3"
+    )
 
 
 def test_card_builder_does_not_mutate_precision_policy():

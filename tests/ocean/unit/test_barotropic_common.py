@@ -22,10 +22,23 @@ from legoesm.ocean.dynamics.barotropic_common import (
     bebt_blend,
     compute_filter_weights,
     compute_nemo_boxcar_centred_weights,
+    compute_nemo_boxcar_forward_weights,
     compute_nemo_boxcar_raw_transport_weights,
     maxvel_clip,
     precision_aware_rel_tol,
 )
+
+
+def test_nemo_forward_boxcar1_matches_ts_wgt_strict_window():
+    w, total, transport, n_loop = compute_nemo_boxcar_forward_weights(
+        30, jnp.float64)
+    # dynspg_ts ts_wgt CASE(1): one-based jn=16..44 for nn_e=jic=30.
+    assert n_loop == 44
+    expected = np.zeros(44, dtype=np.float64)
+    expected[15:44] = 1.0 / 29.0
+    np.testing.assert_array_equal(np.asarray(w), expected)
+    assert float(total) == 1.0
+    assert np.isclose(float(np.asarray(transport).sum()), 1.0)
 
 
 # ---------------------------------------------------------------------------

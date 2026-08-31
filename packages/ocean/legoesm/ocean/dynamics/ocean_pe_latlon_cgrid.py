@@ -131,6 +131,7 @@ from legoesm.ocean.vertical import (
     flux_form_vertical_momentum_advection as _flux_form_vertical_momentum_advection,
     flux_form_vertical_momentum_advection_centered as _flux_form_vertical_momentum_advection_centered,
     nemo_advective_vertical_momentum_advection as _nemo_advective_vertical_momentum_advection,
+    nemo_up3_vertical_momentum_advection as _nemo_up3_vertical_momentum_advection,
     compute_centroid_depth,
 )
 
@@ -179,10 +180,12 @@ VALID_MOMENTUM_FLUX_SCHEME = frozenset({"upwind", "centered", "upwind3"})
 #     every interior level — the #1226 stage-chain audit measured this as
 #     the WHOLE dyn_zad mismatch (predicted-vs-observed residual corr
 #     -0.9992, ratio 0.998).  See nemo_advective_vertical_momentum_advection.
+#   "nemo_up3" — the live flux-form ln_dynadv_up3 vertical flux from
+#     dynadv_up3.F90:239-365; UP3 correction on full velocity.
 # The WENO momentum paths (momentum_advection in {weno5,weno7}) own their own
 # vertical reconstruction and ignore this field.
 VALID_VERTICAL_MOMENTUM_SCHEME = frozenset(
-    {"upwind_perturbation", "centered_full", "nemo_advective"}
+    {"upwind_perturbation", "centered_full", "nemo_advective", "nemo_up3"}
 )
 # Lateral (harmonic) momentum-viscosity operator form (config.lateral_viscosity_operator):
 # the default VECTOR Laplacian grad(div)−k×grad(curl), or Veros's component-wise
@@ -2792,6 +2795,20 @@ def _bc_vertical_momentum_advection(
                 diag_vertadv_u = _flux_form_vertical_momentum_advection_centered(
                     u_full, w_u, h_u_old, face_active=u_face_active)
                 diag_vertadv_v = _flux_form_vertical_momentum_advection_centered(
+                    v_full, w_v, h_v_old, face_active=v_face_active)
+            elif _vert_mom_scheme == "nemo_up3":
+                # Live NEMO flux-form arm: dynadv.F90:87-89 dispatches
+                # ln_dynadv_up3 to dynadv_up3; its vertical UP3 flux is
+                # dynadv_up3.F90:239-365. It advects FULL velocity.
+                if u_full is None or v_full is None:
+                    raise ValueError(
+                        "vertical_momentum_scheme='nemo_up3' requires "
+                        "u_full and v_full")
+                u_face_active = jnp.broadcast_to(u_mask_3d, u_full.shape)
+                v_face_active = jnp.broadcast_to(v_mask_3d, v_full.shape)
+                diag_vertadv_u = _nemo_up3_vertical_momentum_advection(
+                    u_full, w_u, h_u_old, face_active=u_face_active)
+                diag_vertadv_v = _nemo_up3_vertical_momentum_advection(
                     v_full, w_v, h_v_old, face_active=v_face_active)
             elif _vert_mom_scheme == "nemo_advective":
                 # NEMO-faithful (#1226): dynzad.F90's ADVECTIVE form w*du/dz
