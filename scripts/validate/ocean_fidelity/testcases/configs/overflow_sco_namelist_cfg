@@ -133,6 +133,8 @@
 !-----------------------------------------------------------------------
 &nambbl        !   OMIP-style advective bottom boundary layer
 !-----------------------------------------------------------------------
+   ! Exact ORCA1-OMIP target: /data/abyssal/dbalwada/ORCA1-omip/EXPREF/namelist_cfg:284-291
+   ! Source SHA256: 7cfe2d47d78a00553cb28fe72c7e2be8655f96f0ea22920f0b8f17f5b2a47a0b
    ln_trabbl  = .true.
    nn_bbl_ldf = 0
    nn_bbl_adv = 2

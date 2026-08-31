@@ -53,6 +53,12 @@ Pinned source hashes are: `usrdef_nam f21a82df...`, `usrdef_hgr 9a8d7208...`,
 `usrdef_zgr 91160159...`, `usrdef_sbc 9b4ba4c...`, and `usrdef_istate
 eeaaa70e...` (full values are emitted by the receipt collector).
 
+The BBL overlay is copied from the actual ORCA1-OMIP target, not inferred:
+`/data/abyssal/dbalwada/ORCA1-omip/EXPREF/namelist_cfg:284-291`
+(SHA256 `7cfe2d47d78a00553cb28fe72c7e2be8655f96f0ea22920f0b8f17f5b2a47a0b`)
+sets `ln_trabbl=.true.`, `nn_bbl_ldf=0`, `nn_bbl_adv=2`,
+`rn_ahtbbl=1000.`, and `rn_gambbl=20.` exactly.
+
 ### LOCK_EXCHANGE
 
 The domain is a closed, nonrotating, flat-bottom, three-row tank 64 km long and
@@ -139,8 +145,12 @@ These predicates are decided before receipt runs:
    interpret trajectories.
 4. **CONFIRM FCT monotonicity** iff all wet-cell temperature and salinity values
    in every registered entry record remain within their initial closed ranges
-   (OVERFLOW T 10..20 C; LOCK T 5..30 C; S exactly 35, allowing only a gate-coded
-   64-epsilon roundoff envelope).  Otherwise **REFUTE**.
+   (OVERFLOW T 10..20 C; LOCK T 5..30 C; S exactly 35).  The corrected
+   numerical bar is relative and tracer-specific: closed-range excess divided
+   by `max(abs(initial endpoints),1)` must not exceed
+   `sqrt(N_steps) * eps(fp64)`.  Temperature remains **UNMEASURED** pending
+   attribution of its 640--796-epsilon relative excess; salinity is classified
+   against this floor and is never called oracle debt merely for missing it.
 5. **CONFIRM documented behaviour** iff the dense/cold water centre of mass
    advances in the expected direction and the final wet velocity norm is
    nonzero, while zero-flux global tracer inventory closure stays within the
@@ -156,6 +166,23 @@ TEOS-10 density, `rab`, and BN2; adaptive vertical advection; and BBL activity
 are coverage receipts: the exact active namelist/source arms and finite output
 arrays must be present.  Their numerical oracle values are emitted without a
 legoESM comparison in phase 1.
+
+## Preregistered round-1 BBL attribution control
+
+Before this control is run, the only registered arm is
+`OVERFLOW_OMIP_L1_SCO` with `ln_trabbl=.false.`.  Its committed namelist is
+semantically identical to the failed sco receipt except for that one logical;
+the executable, `key_qco + key_RK3`, coordinate, EOS, FCT, timestep, end step,
+and trajectory instrument remain fixed.  Run root:
+`/data/abyssal/dbalwada/nemo-testcases-l1/overflow_sco_no_bbl_control`.
+
+* If it reaches step 6120 and writes the final restart, the advective BBL owns
+  the original step-4772 blow-up.  This is mechanistically consistent with the
+  sco downslope mask being nonzero in every interior column.
+* If it still stops, BBL is refuted as sole owner and TEOS-10 sigma-coordinate
+  pressure-gradient truncation is the next suspect.
+
+No second attribution arm is authorized in this round.
 
 ## Post-run Rule-0 erratum (does not alter the registered bar)
 

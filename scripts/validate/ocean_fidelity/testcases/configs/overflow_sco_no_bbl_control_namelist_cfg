@@ -1,7 +1,7 @@
 !!>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 !! NEMO/OCE  Configuration namelist : overwrite default values defined in SHARED/namelist_ref
 !!>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-!!        OVERFLOW configuration - variant zps_FCT2_flux_ubs          !!
+!!        OVERFLOW configuration - variant sco_FCT2_flux_ubs          !!
 !!======================================================================
 !
 !-----------------------------------------------------------------------
@@ -9,13 +9,13 @@
 !-----------------------------------------------------------------------
    rn_dx       =   1000.   !  horizontal resolution   [meters]
    rn_dz       =     20.   !  vertical   resolution   [meters]
-   nn_COORD    =      1    !  zps vertical coordinate 
+   nn_COORD    =      2    !  sco vertical coordinate 
 /
 !
 !-----------------------------------------------------------------------
 &namrun        !   parameters of the run
 !-----------------------------------------------------------------------
-   cn_exp      =  "OVERFLOW_OMIP_L1_ZPS"     !  certified oracle receipt
+   cn_exp      =  "OVERFLOW_OMIP_L1_SCO"     !  certified oracle receipt
    nn_itend    =    6120                    !  17h of simulation (6120 time steps) 
    nn_stock    =    6120                    !  final-step restart receipt
 /
@@ -135,9 +135,10 @@
 !-----------------------------------------------------------------------
    ! Exact ORCA1-OMIP target: /data/abyssal/dbalwada/ORCA1-omip/EXPREF/namelist_cfg:284-291
    ! Source SHA256: 7cfe2d47d78a00553cb28fe72c7e2be8655f96f0ea22920f0b8f17f5b2a47a0b
-   ln_trabbl  = .true.
+   ln_trabbl  = .false.
    nn_bbl_ldf = 0
    nn_bbl_adv = 2
    rn_ahtbbl  = 1000.
    rn_gambbl  = 20.
 /
+
