@@ -87,6 +87,44 @@ def _nemo_nmln_reference(n2_by_level, mbkt, thresh, nlb10=2):
     return nmln
 
 
+def test_carried_step_entry_rn2b_and_e3w_control_the_mld_threshold():
+    """zdfmxl must consume the carried eosbn2 pair, not recompute it.
+
+    The planted T/S column is vertically uniform, so the legacy recomputation
+    stays below threshold to the bottom.  A carried rn2b/e3w pair crosses at
+    the first eligible W level.  This is the cold-DINO failure mode in a small
+    red-capable fixture: dropping either override returns the deep legacy MLD.
+    """
+    dz = np.asarray([8.0, 12.0, 20.0, 35.0, 55.0, 80.0])
+    nlev = dz.size
+    z = _z_coord(dz, 1, 1, np.full((1, 1), nlev - 1))
+    T = jnp.full((1, 1, nlev), 10.0, dtype=jnp.float64)
+    S = jnp.full((1, 1, nlev), 35.0, dtype=jnp.float64)
+    mask = jnp.ones((1, 1), dtype=jnp.float64)
+    e3w = jnp.ones((1, 1, nlev - 1), dtype=jnp.float64)
+    rn2b = jnp.zeros_like(e3w).at[..., 1].set(1.0)
+
+    _, legacy_base = _nemo_mld_from_n2_integral(
+        T, S, mask, z, None, 0.01, 9.80665, 1026.0,
+        active_3d=z.is_active)
+    _, carried_base = _nemo_mld_from_n2_integral(
+        T, S, mask, z, None, 0.01, 9.80665, 1026.0,
+        active_3d=z.is_active, n2_override=rn2b,
+        e3w_override=e3w)
+    assert int(carried_base[0, 0]) < int(legacy_base[0, 0])
+    assert int(carried_base[0, 0]) == 1
+
+    with pytest.raises(ValueError, match="supplied together"):
+        _nemo_mld_from_n2_integral(
+            T, S, mask, z, None, 0.01, 9.80665, 1026.0,
+            active_3d=z.is_active, n2_override=rn2b)
+    with pytest.raises(ValueError, match="must both have shape"):
+        _nemo_mld_from_n2_integral(
+            T, S, mask, z, None, 0.01, 9.80665, 1026.0,
+            active_3d=z.is_active, n2_override=rn2b[..., :-1],
+            e3w_override=e3w[..., :-1])
+
+
 def test_native_bn2_divide_and_mld_multiply_share_one_e3w():
     """Native e3w is consumed, and only the shared multiply cancels it."""
     from legoesm.ocean.eos import compute_buoyancy_frequency_nemo_bn2

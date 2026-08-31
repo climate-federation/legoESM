@@ -431,7 +431,8 @@ def _nemo_mld_from_potential_density(T, S, mask, z_coord, eos_fn, rho_c,
 
 
 def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
-                               active_3d=None, jacobian=None):
+                               active_3d=None, jacobian=None,
+                               n2_override=None, e3w_override=None):
     """Mixed-layer depth [m] via NEMO's EXACT zdfmxl N^2-integral criterion.
 
     NEMO (``zdfmxl.F90:91-105``, 5.0.2) integrates the POSITIVE buoyancy
@@ -489,7 +490,24 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
     # S-EOS; fall back to the adiabatic N^2 for any other EOS (nemo_bn2 is
     # S-EOS-specific, being written in terms of the alpha/beta polynomial).
     _use_nemo_bn2 = getattr(z_coord, "t_depth_ref", None) is not None
-    if _use_nemo_bn2:
+    if (n2_override is None) != (e3w_override is None):
+        raise ValueError(
+            "n2_override and e3w_override must be supplied together")
+    if n2_override is not None:
+        # zdfmxl.F90:96-99 consumes the already-built step-entry rn2b and
+        # matching live e3w; it does not recompute either operand.  The DINO
+        # literal path carries those exact arrays from eosbn2 into ldf_slp.
+        # Keep that producer/consumer identity here too: recomputing N2 from
+        # T/S changed the threshold side in 100 cold-start columns even though
+        # the carried rn2b itself was bit-identical to NEMO.
+        n2_int = jnp.asarray(n2_override, dtype=dtype)
+        e3w = jnp.asarray(e3w_override, dtype=dtype)
+        expected = T_filled.shape[:-1] + (nlev - 1,)
+        if n2_int.shape != expected or e3w.shape != expected:
+            raise ValueError(
+                "MLD carried rn2b/e3w must both have shape "
+                f"{expected}, got {n2_int.shape} and {e3w.shape}")
+    elif _use_nemo_bn2:
         from legoesm.ocean.eos import (
             compute_buoyancy_frequency_nemo_bn2, nemo_e3w_from_live_gdept,
             NemoSEOSConfig,
@@ -541,7 +559,7 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
     # selected above.  Rebuilding the multiplier from the arithmetic-midpoint
     # ladder cumsum(dz)-dz/2 left a residual and produced 14 mismatched DINO
     # MLD columns whose below-threshold decisions otherwise matched NEMO.
-    if not _use_nemo_bn2:
+    if n2_override is None and not _use_nemo_bn2:
         e3w = z_centers[1:] - z_centers[:-1]         # (nlev-1,)
     # The MLD CRITERION is thickness-free, and that is not an approximation --
     # it is an identity in NEMO.  eosbn2 divides by the live e3w and zdfmxl
@@ -643,7 +661,8 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
 
 
 def _nemo_mld(criterion, T, S, mask, z_coord, eos_fn, rho_c, *,
-              g=constants.g, rho_0=_RHO_0, active_3d=None, jacobian=None):
+              g=constants.g, rho_0=_RHO_0, active_3d=None, jacobian=None,
+              n2_override=None, e3w_override=None):
     """Dispatch the NEMO zdfmxl mixed-layer depth by criterion (raise on typo).
 
     ``"rho_c"`` (default, byte-identical) = potential-density difference;
@@ -657,7 +676,8 @@ def _nemo_mld(criterion, T, S, mask, z_coord, eos_fn, rho_c, *,
     if criterion == "n2_integral":
         return _nemo_mld_from_n2_integral(
             T, S, mask, z_coord, eos_fn, rho_c, g, rho_0, active_3d=active_3d,
-            jacobian=jacobian)
+            jacobian=jacobian, n2_override=n2_override,
+            e3w_override=e3w_override)
     raise ValueError(
         f"unknown GMRediConfig.mld_criterion {criterion!r}; "
         "expected 'rho_c' or 'n2_integral'.")
@@ -1202,9 +1222,13 @@ def compute_nemo_native_slopes(
 
     # ML indices per column (NEMO nmln, via the shared zdfmxl-criterion
     # helper: ``first`` = first stratified cell = 0-based nmln).
+    _mld_uses_carried_n2 = (
+        pn2_override is not None and e3w_override is not None)
     hml, m_base = _nemo_mld(
         cfg.mld_criterion, T, S, mask, z_coord, eos_fn, cfg.mld_rho_c,
-        g=g, rho_0=rho_0, active_3d=active_3d, jacobian=jacobian)
+        g=g, rho_0=rho_0, active_3d=active_3d, jacobian=jacobian,
+        n2_override=(pn2[..., 1:] if _mld_uses_carried_n2 else None),
+        e3w_override=(e3w[..., 1:] if _mld_uses_carried_n2 else None))
     first = jnp.clip(m_base + 1, 1, nlev - 1)                    # (nlat,nlon) int
     # zhmlpt = gdept(nmln-1,Kmm) = depth of the last T-point inside the ML
     # (ldfslp.F90:143) -- live gdept, so the static per-level gather is

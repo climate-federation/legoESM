@@ -105,6 +105,33 @@ def test_full_literal_slope_with_carried_w_bundle_has_finite_jit_gradient(
     carried_e3w = jnp.broadcast_to(
         jnp.asarray([1.5, 2.5, 3.5]), carried_n2.shape)
 
+    # Wiring receipt: NEMO zdfmxl consumes the SAME carried rn2b/e3w pair as
+    # ldf_slp.  Before the cold-Euler repair compute_nemo_native_slopes used
+    # the carried arrays for its slope denominator but silently recomputed a
+    # second N2 for the mixed-layer selector, so a knife-edge threshold could
+    # choose a different level.  The wrapper is observational and delegates
+    # every operation to the real production helper.
+    original_mld = gm._nemo_mld_from_n2_integral
+    seen_mld_pair = {"calls": 0}
+
+    def observe_mld_pair(*args, **kwargs):
+        assert kwargs["n2_override"] is not None
+        assert kwargs["e3w_override"] is not None
+        assert kwargs["n2_override"].shape == carried_n2.shape
+        assert kwargs["e3w_override"].shape == carried_e3w.shape
+        seen_mld_pair["calls"] += 1
+        return original_mld(*args, **kwargs)
+
+    monkeypatch.setattr(gm, "_nemo_mld_from_n2_integral", observe_mld_pair)
+    rho_receipt = 1026.0 + 0.2 * (10.0 - T)
+    compute_nemo_native_slopes(
+        rho_receipt, T, S, mask, umask, vmask, z_coord, grid,
+        cfg._replace(mld_criterion="n2_integral"), eos_fn,
+        active_3d=z_coord.is_active, pn2_override=carried_n2,
+        e3w_override=carried_e3w)
+    assert seen_mld_pair["calls"] == 1
+    monkeypatch.setattr(gm, "_nemo_mld_from_n2_integral", original_mld)
+
     def objective(temperature):
         rho = 1026.0 + 0.2 * (10.0 - temperature)
         slopes = compute_nemo_native_slopes(
