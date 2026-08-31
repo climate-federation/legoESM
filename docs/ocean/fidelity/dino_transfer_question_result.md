@@ -532,3 +532,68 @@ repair would collapse independent-year SST RMS from `0.39 degC` toward the
 whole-day fp64 3-D capture, and hard-fails if `--steps` does not end on a whole
 DINO day. Its claim-length admission now names this Euler debt rather than the
 closed geometry row.
+
+## T1 cold-Euler frozen peel: forcing closed, coupled `tra_adv` blocks launch
+
+The preceding endpoint-only ownership is superseded by the v7 first-divergence
+probe. It retains NEMO's complete 199 x 52 construction frame during the first
+step and scores only the central 195 x 48 physical domain. Initialization stays
+exact on all seven admission rows.
+
+The executed oracle path is
+`cfgs/DINO/MY_SRC/stpmlf.F90:134-137` (`l_1st_euler` selects one `rn_Dt`),
+momentum through `dyn_spg` and `dyn_zdf` at `:332-403`, then the tracer RHS
+chain `tra_sbc`, `tra_qsr`, `tra_adv`, `tra_ldf`, and `tra_zdf` at
+`:498-556`. The MLF corrector still runs at `:578`; only `:685-688` restores
+the two-step coefficient and clears the Euler flag. Crucially, the apparent
+source ordering does not mean `tra_adv` reads the newly solved `Naa`
+velocity: executed `traadv.F90:301-304` points its MLF advecting velocity at
+`uu/vv(Kmm)`. legoESM's existing `nemo_literal` QCO cycle at
+`ocean_model_latlon_cgrid.py:4616-4647` is the corresponding within-step Kmm
+transport correction. Therefore moving tracer advection behind legoESM's
+combined implicit solve would be an unfaithful patch and was not done.
+
+The frozen tracer rows are:
+
+| row | maximum absolute difference | verdict |
+|---|---:|---|
+| `T_after_trasbc` | `1.7152417181899582e-20 K/s` | AT-BAR |
+| `S_after_trasbc` | `5.293955920339377e-23 PSU/s` | AT-BAR |
+| `T_after_traqsr` | `2.3895536046880523e-19 K/s` | AT-BAR |
+| `S_after_traqsr` | `5.293955920339377e-23 PSU/s` | AT-BAR |
+| `T_after_traadv` | `1.935793899665525e-9 K/s` | DEBT, first failure |
+| `S_after_traadv` | `1.6939489048408599e-10 PSU/s` | DEBT |
+| `T_after_traldf` | `1.531349295244393e-8 K/s` | downstream, not assigned |
+| `S_after_traldf` | `1.9498173068735505e-9 PSU/s` | downstream, not assigned |
+| T/S after `tra_zdf` | `4.132883526075659e-5 K` / `4.855222066169063e-6 PSU` | downstream |
+
+The direct pre-content-update receipt prevents endpoint-cancellation roundoff
+from manufacturing the `tra_adv` result. NEMO's recorded upstream and
+antidiffusive face fluxes then split the first failed row into a cancelling
+pair. Temperature horizontal/vertical maximum errors are respectively
+`4.7693280353502145e-8` and `4.604503436800065e-8 K/s`; salinity's are
+`1.6674772814986368e-7` and `1.6661196066977857e-7 PSU/s`. Their much smaller
+sum is cancellation, so repairing either component alone is prohibited by the
+campaign's paired-term rule. The honest disposition is
+`EULER_DEBT_T_after_traadv / BLOCKED_COUPLED_TRAADV_PAIR`: first close the
+horizontal-plus-vertical face-flux identity together against the already
+recorded `fct_dump_zw{x,y,z}_{up,anti}` operands, preserving the measured
+cancellation, then resume rows 4--8. No new NEMO run is required for that
+design; it is more than a cold-bootstrap call-site patch.
+
+The requested momentum ownership is separately closed, not deferred. On the
+registered common faces, U total and U wind both differ by only
+`1.1712877473750872e-21 m/s2`; V total differs by
+`4.5422141796511856e-20 m/s2`, and its HPG component by
+`4.129285617864714e-20 m/s2`. The residual identities close exactly for U and
+to `6.776263578034403e-21 m/s2` for V. Thus the former U wind-projection and V
+HPG-accumulation debts were source-association/geometry defects repaired by
+the literal NEMO wind latitude and V accumulation paths; they are now at the
+frozen bar and are not Euler owners.
+
+Because row 3 is a real coupled operator residual and no pre-existing Rule-1b
+clearance applies, the one-year launch gate remains false. `--snap-final` is
+implemented and audited, but no standalone-year arm is emitted. The frozen
+prediction remains unchanged for the first admitted run: independent-year SST
+RMS `0.39 degC` should collapse toward the `~0.01 degC` step-2 bridge class;
+`<=0.02 degC` confirms and `>=0.10 degC` refutes.

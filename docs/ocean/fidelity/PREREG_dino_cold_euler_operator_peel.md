@@ -3,7 +3,7 @@
 Date: 2026-08-31. Session:
 `01a053d4-8e9f-7212-bbdb-19ba2d64e140`.
 
-Status: **FROZEN BEFORE NEW STAGE SCORES OR PHYSICS CHANGES.** The v5
+Status: **EXECUTED; FROZEN OUTCOME `EULER_DEBT_T_after_traadv`.** The v5
 initialization artifact admitted every geometry, profile, anchor, and resolved
 state row with zero differences. The next legal target is therefore the first
 failed Euler row, `conditional_euler_T_after_trazdf`, whose max error is
@@ -89,3 +89,26 @@ pre-existing signed Rule-1b clearance), and must be 11,520 fp64 steps,
 standalone member 0, public `nemo_dino_kamm_mlf`, with `--snap-final`.
 `<=0.02 degC` confirms, `>=0.10 degC` refutes, and the interval is reported as
 inconclusive.
+
+## Registered outcome
+
+The v7 committed probe executed the frozen order. Rows 0--2 pass: the maximum
+T/S differences are `1.7152417181899582e-20` / `5.293955920339377e-23` after
+`tra_sbc`, and `2.3895536046880523e-19` / `5.293955920339377e-23` after
+`tra_qsr`. The first failed row is order 3, `T_after_traadv`, at
+`1.935793899665525e-9 K/s` (S: `1.6939489048408599e-10 PSU/s`).
+
+The recorded NEMO face fluxes localize that failure to a cancelling
+horizontal/vertical pair: T component maxima `4.7693280353502145e-8` and
+`4.604503436800065e-8 K/s`; S component maxima
+`1.6674772814986368e-7` and `1.6661196066977857e-7 PSU/s`. The standing
+cancelling-pair rule forbids a one-component patch. Disposition: retain the
+current trajectory, register a paired face-flux identity repair using the
+already recorded `fct_dump_zw{x,y,z}_{up,anti}` operands, and withhold the
+year arm. No Rule-1b clearance was added.
+
+Rows 7--8 were reported after that honest disposition. U wind is at bar
+(`1.1712877473750872e-21 m/s2`) and V HPG is at bar
+(`4.129285617864714e-20 m/s2`); neither is the Euler owner. The launch outcome
+is therefore debt rather than missing-oracle blocked, but the launch gate is
+false in both cases.

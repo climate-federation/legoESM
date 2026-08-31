@@ -45,7 +45,7 @@ from legoesm.ocean.fidelity.nemo_io import (
 )
 
 
-SCHEMA = "dino_ic_euler_peel_v6"
+SCHEMA = "dino_ic_euler_peel_v7"
 BAR = 1.0e-15
 RUNTIME_SHAPE = (203, 56)
 RUNTIME_HALO = 2
@@ -561,6 +561,12 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
                  _runtime_dump(run_kt2 / "stp_dump_21_trazdf_tem.bin"), common_t),
         diff_row("conditional_euler_S_after_trazdf", _model_core(step1.S.data),
                  _runtime_dump(run_kt2 / "stp_dump_21_trazdf_sal.bin"), common_t),
+        dict(next(row for row in localization["rows"]
+                  if row["name"] == "POST_HOC_fslow_u_wind"),
+             name="U_wind_slow_forcing"),
+        dict(next(row for row in localization["rows"]
+                  if row["name"] == "POST_HOC_fslow_v_hpg"),
+             name="V_hpg_slow_forcing"),
         diff_row("conditional_euler_U_after_corrector",
                  _model_core(np.asarray(step1.u.data)[:, 1:, :]),
                  _runtime_dump(run_kt2 / "baro_dump_u_after.bin"), common_u),
@@ -833,6 +839,18 @@ def run(args: argparse.Namespace) -> int:
              "EULER_WITHHELD")),
         "euler_admission": admitted,
         "euler_at_bar": euler_passed,
+        "euler_disposition": {
+            "status": ("ADMITTED" if euler_passed else
+                       "BLOCKED_COUPLED_TRAADV_PAIR"),
+            "first_failed_frozen_row": first_euler_debt,
+            "owner": ("NONE" if euler_passed else
+                      "tra_adv horizontal/vertical cancelling pair"),
+            "repair_rule": ("No one-component patch: preserve the measured "
+                            "horizontal/vertical cancellation and first close "
+                            "the paired NEMO face-flux identity."),
+            "year_arm": ("RELEASED" if euler_passed else
+                         "WITHHELD_BY_FROZEN_EULER_GATE"),
+        },
         "wet_mask_receipt": mask_receipt,
         "initialization_localization_and_controls": init_localization,
         "euler_forcing_localization": forcing_localization,
