@@ -95,6 +95,11 @@ def diff_row(name: str, actual: np.ndarray, expected: np.ndarray,
     mismatch = selected > bar
     exact_mismatch = selected != 0.0
     indices = np.argwhere(active & (delta > bar))
+    index_receipt_limit = 32
+    over_bar_indices = [
+        [int(i) for i in index]
+        for index in indices[:index_receipt_limit]
+    ]
     first = None
     if indices.size:
         index = tuple(int(i) for i in indices[0])
@@ -115,6 +120,9 @@ def diff_row(name: str, actual: np.ndarray, expected: np.ndarray,
         "max_abs": float(selected.max(initial=0.0)),
         "rms": float(np.sqrt(np.mean(selected * selected))) if selected.size else 0.0,
         "mismatch_count": int(np.count_nonzero(mismatch)),
+        "over_bar_indices_first_32": over_bar_indices,
+        "over_bar_indices_truncated": bool(
+            indices.shape[0] > index_receipt_limit),
         "exact_mismatch_count": int(np.count_nonzero(exact_mismatch)),
         "max_ulp": int(ulps.max(initial=0)),
         "first_over_bar": first,
