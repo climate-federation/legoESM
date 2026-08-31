@@ -6,6 +6,9 @@ independent NumPy transcription of NEMO's ``eos_insitu`` Horner form, the
 independent UNESCO surface anchor, T/S monotonicity, an at-depth regression
 pin, and finite AD gradients.
 """
+import hashlib
+import struct
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -140,3 +143,24 @@ def test_nemo_teos10_dispatch_is_the_canonical_roquet_polynomial():
         T, S, pressure, coeffs=_ROQUET_TEOS10, rho0=rho_ref
     )
     np.testing.assert_array_equal(np.asarray(got), np.asarray(expected))
+
+
+def test_nemo_teos10_density_coefficient_table_has_ci_pin():
+    """Pin all 52 EOS### values without requiring a local NEMO checkout."""
+    density = {k: float(v) for k, v in _ROQUET_TEOS10.items()
+               if k.startswith("EOS")}
+    assert len(density) == 52
+
+    def digest(values):
+        hashed = hashlib.sha256()
+        for name, value in sorted(values.items()):
+            hashed.update(name.encode("ascii"))
+            hashed.update(b"\0")
+            hashed.update(struct.pack(">d", value))
+        return hashed.hexdigest()
+
+    expected = "dfb7fe0df632023d5f7dec65221cd2f0733cf4d80312494120384ae94e756239"
+    assert digest(density) == expected
+    planted = dict(density)
+    planted["EOS000"] += 1.0e-11
+    assert digest(planted) != expected
