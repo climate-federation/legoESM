@@ -123,3 +123,27 @@ and the existing diagnostic-only reducer mesh. It must request `--snap-final`
 and the manifest must stamp day 360 as an fp64 3-D capture. The launch block is
 withheld unless the clean CPU artifact says `INIT_CONFIRMED` and either
 `EULER_AT_BAR` or a separately identified, pre-existing Rule-1b clearance.
+
+## Frozen-protocol outcome (2026-08-31)
+
+The clean v5 artifact, produced at
+`9e7f786f60a73a28d66ad52c3ccfd1e3efb89d40`, admits initialization:
+all seven geometry/profile/resolved-state rows are exact zero-difference.
+This closes P0--A1. The faithful path uses the executed binary's scalar glibc
+`tanh` and literal CASE(4) source association; no `EXP`/`SIN` lowering was
+introduced.
+
+E0 executes and returns
+`EULER_DEBT_conditional_euler_T_after_trazdf`. The first row differs by
+`1.1374146413256625e-4 degC`; every later Euler/carry row is also over the
+frozen `1e-15` bar. Post-hoc forcing localization is recorded separately from
+the frozen rows: on the registered common-face population, the zonal slow-
+forcing residual is exactly the wind-projection residual, while the
+meridional residual is the HPG accumulation residual to
+`6.78e-21 m s-2`. Their own maxima are `9.880195637883915e-9` and
+`8.413501212734391e-11 m s-2`. These are physical operator residuals, not an
+exhausted last-bit association class, so the existing proven-oracle-arithmetic
+Rule-1b precedent does not clear them.
+
+Accordingly the launch condition is false. The prediction and discriminator
+remain frozen, but no standalone-year GPU arm is emitted from this outcome.

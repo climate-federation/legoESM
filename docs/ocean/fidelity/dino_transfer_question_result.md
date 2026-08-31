@@ -464,3 +464,71 @@ geometry. The artifact therefore records
 No Euler row was executed and no new standalone-year arm is issued. The first
 repair target is closed, but a fresh year is not worthwhile until the profile
 source-order and live-anchor rows pass the registered initialization gate.
+
+## T1 initialization closure and admitted Euler score
+
+The preceding geometry-only status is superseded by the clean v5 peel at
+producer `9e7f786f60a73a28d66ad52c3ccfd1e3efb89d40`; artifact SHA-256
+`c3e83c62b77c4e1ebbb694b24f1c8fc2ca4b12cc1f22e1ad8e2f2b3915ddb439`.
+All initialization rows are exact: wet mask, latitude, T depth, common-depth
+T/S profiles, and resolved T/S each have zero mismatches and zero maximum
+difference. The live-anchor evaluation is therefore closed as well as the
+profile row.
+
+The profile owner was the executed CASE(4) scalar lowering and source
+association. `usrdef_istate.F90:135-148` contains `TANH`, not `EXP` or `SIN`;
+the linked DINO binary imports scalar `tanh@GLIBC_2.2.5`, so the faithful
+standalone initializer evaluates that source expression with scalar libm.
+The full-frame latitude maximum, wet-field minima, and literal blend at
+`usrdef_istate.F90:151-174` are evaluated before the 195 x 48 physical-core
+state is materialized. The old JAX/factored profiles, nominal/last-level
+anchors, shape mismatch, field mismatch, and admission failure remain red
+controls rather than scientific rows.
+
+Initialization admission unblocks E0. The cold Euler step is not at bar:
+
+| registered row | maximum absolute difference |
+|---|---:|
+| T after `tra_zdf` | `1.1374146413256625e-4 degC` |
+| S after `tra_zdf` | `7.927838410637378e-6 PSU` |
+| U after corrector | `7.966775323098411e-4 m/s` |
+| V after corrector | `7.835410691408680e-4 m/s` |
+| SSH after split | `1.0241625803217663e-2 m` |
+| filtered T/S carry | `1.1260706178628510e-4 degC` / `7.813895024355588e-6 PSU` |
+| filtered U/V carry | `8.101168385730717e-4` / `8.695164144368989e-4 m/s` |
+| filtered SSH carry | `1.1041102398412692e-2 m` |
+
+The first scientific failure is
+`conditional_euler_T_after_trazdf`, so the frozen outcome is
+`EULER_DEBT_conditional_euler_T_after_trazdf`. The previously repaired
+cold-start `tra_sbc` routing is real and retained: threading its external
+tracer rate through the first `_step_impl` reduced T error from
+`1.463e-2` to `1.137e-4 degC` and S from `8.39e-4` to `7.93e-6 PSU`, but did
+not close the step.
+
+Post-hoc localization, explicitly excluded from the frozen verdict, peels the
+slow momentum forcing using NEMO's own `hpg_dump`, `wnd_dump`, and `spg_dump`
+arrays. `dynspg_ts.F90:337-338` forms the depth mean, lines 368-369 remove the
+2-D Coriolis term, and lines 443-444 add centred wind. On the registered
+common-face population:
+
+- U HPG is exact zero on both models; the U total residual is bit-for-bit the
+  wind-projection residual. Only seven faces exceed `1e-15`, all in the seam
+  column; maximum `9.880195637883915e-9 m/s2`.
+- V wind is exact zero on both models; the V total residual equals the HPG
+  accumulation residual to `6.776263578034403e-21 m/s2`; maximum
+  `8.413501212734391e-11 m/s2`. This is the already registered from-rest HPG
+  debt from the `dynhpg.F90:351-385` recurrence.
+
+Those are physical operator residuals with nontrivial populations, not a
+last-bit source-association remainder. The campaign's Rule-1b precedent
+requires exhausted oracle arithmetic and a frozen `2e-14` normalized ceiling;
+it cannot be used to relabel these fields. The one-year launch gate is
+therefore false. The frozen prediction remains that a genuinely admitted
+repair would collapse independent-year SST RMS from `0.39 degC` toward the
+`~0.01 degC` bridge class, but no fresh GPU arm is issued from this result.
+
+`standalone_20y.py` now implements `--snap-final`, stamps the requested final
+whole-day fp64 3-D capture, and hard-fails if `--steps` does not end on a whole
+DINO day. Its claim-length admission now names this Euler debt rather than the
+closed geometry row.

@@ -117,165 +117,133 @@
     "wrong_core_plant": "FIRED"
   },
   "euler_admission": true,
-  "euler_outcome": "EULER_SCORED",
-  "first_over_bar": "substitute_nemo_anchors_T",
-  "initialization_outcome": "INIT_GEOMETRY_CONFIRMED",
-  "inputs": {
-    "/data/abyssal/dbalwada/RUN_KT2/DINO_00000002_restart.nc": {
-      "bytes": 227413460,
-      "sha256": "ad365178e6a5e4c5b5c08e523c5cd0b0c9b1ab25ffebee9a68a51ff981c4f033"
+  "euler_at_bar": false,
+  "euler_forcing_localization": {
+    "ownership": {
+      "rule_1b_eligibility": "NO_PHYSICAL_OPERATOR_RESIDUAL",
+      "u": "WIND_STRESS_PROJECTION",
+      "u_total_minus_wind_residual_max_abs": 0.0,
+      "v": "HPG_ACCUMULATION",
+      "v_total_minus_hpg_residual_max_abs": 6.776263578034403e-21
     },
-    "/data/abyssal/dbalwada/RUN_KT2/baro_dump_u_after.bin": {
-      "bytes": 3183040,
-      "sha256": "21543bf49c737831fd31d334935dc0578e414255826dbe41d4d53e62dc2efbca"
-    },
-    "/data/abyssal/dbalwada/RUN_KT2/baro_dump_v_after.bin": {
-      "bytes": 3183040,
-      "sha256": "0122369a91f336f2f30d7ebf4851aa418559bb39afcacdbe4b37728d28e9e6a1"
-    },
-    "/data/abyssal/dbalwada/RUN_KT2/mesh_mask.nc": {
-      "bytes": 31203524,
-      "sha256": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622"
-    },
-    "/data/abyssal/dbalwada/RUN_KT2/namelist_cfg": {
-      "bytes": 32228,
-      "sha256": "56b2810f30bcbc739ec18d9c107c0610062d26a5cba85d2d4ebde35f555b197a"
-    },
-    "/data/abyssal/dbalwada/RUN_KT2/spg_dump_pssh_final.bin": {
-      "bytes": 90944,
-      "sha256": "e9c7f247d1ad06952c5f9aa0e61af47427cdea9739e027f6a00f83df0a42695b"
-    },
-    "/data/abyssal/dbalwada/RUN_KT2/stp_dump_21_trazdf_sal.bin": {
-      "bytes": 3183040,
-      "sha256": "a0ea21e685b246d206a1d0f357c23a7d2bbb6f1299c1c61b2911a2397c4ca170"
-    },
-    "/data/abyssal/dbalwada/RUN_KT2/stp_dump_21_trazdf_tem.bin": {
-      "bytes": 3183040,
-      "sha256": "793f28ca4d99a1af225d58396be8a4796b08599596a82b43d3e51e2b5f6d5d74"
-    },
-    "/data/abyssal/dbalwada/RUN_TRAJ_Y1/DINO_00011520_restart.nc": {
-      "bytes": 227413460,
-      "sha256": "577fd423065653d6dc7d7da6dffd7735980bf89dd45ee083e07dec4ebf8bf208"
-    },
-    "/data/abyssal/dbalwada/RUN_TRAJ_Y1/DINO_1y_00010701_00011230_grid_T_0000.nc": {
-      "bytes": 91352,
-      "sha256": "332a575986beb268bf44c62b4ef65a817d40010f8cd2df8180dc70aa264c93b2"
-    },
-    "/data/abyssal/dbalwada/RUN_TRAJ_Y1/namelist_cfg": {
-      "bytes": 32312,
-      "sha256": "cd884d1f2bcc5afca9f22201dbe2739641eece26cf0ab824702ba88c4f115045"
-    },
-    "/data/abyssal/dbalwada/lego_bridged_d10.npz": {
-      "bytes": 82177413,
-      "sha256": "759abcc2e86346abf1e25ee49d1c83535e54789cc73ecab1a7686a604e8d7062"
-    },
-    "/data/abyssal/dbalwada/lego_bridged_kt2.npz": {
-      "bytes": 83667561,
-      "sha256": "3b9bec883ad79ad5e7dc43e95118c0f7ca903b2f39d8374eee0a74b2131661d9"
+    "qualification": "POST_HOC_LOCALIZATION_NOT_A_FROZEN_VERDICT",
+    "registered_population": "NEMO_AND_STANDALONE_COMMON_WET_FACES",
+    "rows": [
+      {
+        "bar": 1e-15,
+        "exact_mismatch_count": 8360,
+        "first_over_bar": {
+          "abs": 1.2498133449275123e-09,
+          "actual": 9.485939312649175e-09,
+          "expected": 8.236125967721663e-09,
+          "index": [
+            12,
+            47
+          ]
+        },
+        "max_abs": 9.880195637883915e-09,
+        "max_ulp": 1097362307844544,
+        "mismatch_count": 7,
+        "n": 9360,
+        "name": "POST_HOC_fslow_u_total",
+        "rms": 1.582994043571438e-10,
+        "status": "OVER_BAR"
+      },
+      {
+        "bar": 1e-15,
+        "exact_mismatch_count": 9312,
+        "first_over_bar": {
+          "abs": 1.837602680981831e-11,
+          "actual": 6.499648220197451e-07,
+          "expected": 6.499831980465549e-07,
+          "index": [
+            0,
+            0
+          ]
+        },
+        "max_abs": 8.413501212734391e-11,
+        "max_ulp": 326648726671,
+        "mismatch_count": 9216,
+        "n": 9312,
+        "name": "POST_HOC_fslow_v_total",
+        "rms": 3.790172435501663e-11,
+        "status": "OVER_BAR"
+      },
+      {
+        "bar": 1e-15,
+        "exact_mismatch_count": 8360,
+        "first_over_bar": {
+          "abs": 1.2498133449275123e-09,
+          "actual": 9.485939312649175e-09,
+          "expected": 8.236125967721663e-09,
+          "index": [
+            12,
+            47
+          ]
+        },
+        "max_abs": 9.880195637883915e-09,
+        "max_ulp": 1097362307844544,
+        "mismatch_count": 7,
+        "n": 9360,
+        "name": "POST_HOC_fslow_u_wind",
+        "rms": 1.582994043571438e-10,
+        "status": "OVER_BAR"
+      },
+      {
+        "bar": 1e-15,
+        "exact_mismatch_count": 0,
+        "first_over_bar": null,
+        "max_abs": 0.0,
+        "max_ulp": 0,
+        "mismatch_count": 0,
+        "n": 9312,
+        "name": "POST_HOC_fslow_v_wind",
+        "rms": 0.0,
+        "status": "PASS"
+      },
+      {
+        "bar": 1e-15,
+        "exact_mismatch_count": 0,
+        "first_over_bar": null,
+        "max_abs": 0.0,
+        "max_ulp": 0,
+        "mismatch_count": 0,
+        "n": 9360,
+        "name": "POST_HOC_fslow_u_hpg",
+        "rms": 0.0,
+        "status": "PASS"
+      },
+      {
+        "bar": 1e-15,
+        "exact_mismatch_count": 9312,
+        "first_over_bar": {
+          "abs": 1.837602680992419e-11,
+          "actual": 6.499648220197451e-07,
+          "expected": 6.49983198046555e-07,
+          "index": [
+            0,
+            0
+          ]
+        },
+        "max_abs": 8.413501212099116e-11,
+        "max_ulp": 326648726671,
+        "mismatch_count": 9216,
+        "n": 9312,
+        "name": "POST_HOC_fslow_v_hpg",
+        "rms": 3.790172435251062e-11,
+        "status": "OVER_BAR"
+      }
+    ],
+    "source": {
+      "lego_depth_mean": "ocean_model_latlon_cgrid.py:3740-3786",
+      "lego_wind": "ocean_pe_latlon_cgrid.py:3836-3940",
+      "nemo_hpg": "dynhpg.F90:345-380",
+      "nemo_slow_forcing": "dynspg_ts.F90:337,368,443"
     }
   },
-  "ladder_receipt": {
-    "bridge_artifact_dirty_tracked_files": 1,
-    "bridge_artifact_producer": "7c0f121baed6bc57243e849127040865dda2d597",
-    "day180_twin_sst_rms_degC": 0.005,
-    "dirty_override": "LEGOESM_ALLOW_DIRTY=1",
-    "first_d10_mid_run_edit_refusal": "USER_REPORTED_NO_HASH",
-    "independent_sst_rms_degC": 0.39,
-    "kt2_bridge_free_days": 359,
-    "kt2_claim_scope": "TWIN_CLASS_DAILY_ENDPOINT_WITH_OFFSET",
-    "kt2_daily_endpoint_ssh_rms_mm": 0.29,
-    "kt2_daily_endpoint_sst_rms_degC": 0.0104,
-    "kt2_endpoint_offset_days": 0.94,
-    "source": "user_reported_2026-08-30",
-    "temporary_restart_guard_override": "DINO_TWIN_MIN_SPEED"
-  },
-  "producer_dirty_tracked_files": false,
-  "producer_git_sha": "644cf8aa5ce6c78051cd12aed31861b21e1e6119",
-  "rows": [
-    {
-      "bar": 0.0,
-      "exact_mismatch_count": 0,
-      "first_over_bar": null,
-      "max_abs": 0.0,
-      "max_ulp": 0,
-      "mismatch_count": 0,
-      "n": 327600,
-      "name": "input_wet_mask",
-      "rms": 0.0,
-      "status": "PASS"
-    },
-    {
-      "bar": 0.0,
-      "exact_mismatch_count": 0,
-      "first_over_bar": null,
-      "max_abs": 0.0,
-      "max_ulp": 0,
-      "mismatch_count": 0,
-      "n": 9360,
-      "name": "input_latitude_deg",
-      "rms": 0.0,
-      "status": "PASS"
-    },
-    {
-      "bar": 0.0,
-      "exact_mismatch_count": 0,
-      "first_over_bar": null,
-      "max_abs": 0.0,
-      "max_ulp": 0,
-      "mismatch_count": 0,
-      "n": 324128,
-      "name": "input_t_depth_m",
-      "rms": 0.0,
-      "status": "PASS"
-    },
-    {
-      "bar": 1e-15,
-      "exact_mismatch_count": 0,
-      "first_over_bar": null,
-      "max_abs": 0.0,
-      "max_ulp": 0,
-      "mismatch_count": 0,
-      "n": 324128,
-      "name": "common_depth_T_profile",
-      "rms": 0.0,
-      "status": "PASS"
-    },
-    {
-      "bar": 1e-15,
-      "exact_mismatch_count": 0,
-      "first_over_bar": null,
-      "max_abs": 0.0,
-      "max_ulp": 0,
-      "mismatch_count": 0,
-      "n": 324128,
-      "name": "common_depth_S_profile",
-      "rms": 0.0,
-      "status": "PASS"
-    },
-    {
-      "bar": 1e-15,
-      "exact_mismatch_count": 0,
-      "first_over_bar": null,
-      "max_abs": 0.0,
-      "max_ulp": 0,
-      "mismatch_count": 0,
-      "n": 324128,
-      "name": "resolved_T_nemo_wet",
-      "rms": 0.0,
-      "status": "PASS"
-    },
-    {
-      "bar": 1e-15,
-      "exact_mismatch_count": 0,
-      "first_over_bar": null,
-      "max_abs": 0.0,
-      "max_ulp": 0,
-      "mismatch_count": 0,
-      "n": 324128,
-      "name": "resolved_S_nemo_wet",
-      "rms": 0.0,
-      "status": "PASS"
-    },
+  "euler_outcome": "EULER_DEBT_conditional_euler_T_after_trazdf",
+  "first_over_bar": "conditional_euler_T_after_trazdf",
+  "initialization_localization_and_controls": [
     {
       "bar": 1e-15,
       "exact_mismatch_count": 0,
@@ -383,6 +351,188 @@
       "name": "source_order_legacy_S",
       "rms": 0.0015863725185965953,
       "status": "OVER_BAR"
+    }
+  ],
+  "initialization_outcome": "INIT_CONFIRMED",
+  "inputs": {
+    "/data/abyssal/dbalwada/RUN_KT2/DINO_00000002_restart.nc": {
+      "bytes": 227413460,
+      "sha256": "ad365178e6a5e4c5b5c08e523c5cd0b0c9b1ab25ffebee9a68a51ff981c4f033"
+    },
+    "/data/abyssal/dbalwada/RUN_KT2/baro_dump_u_after.bin": {
+      "bytes": 3183040,
+      "sha256": "21543bf49c737831fd31d334935dc0578e414255826dbe41d4d53e62dc2efbca"
+    },
+    "/data/abyssal/dbalwada/RUN_KT2/baro_dump_v_after.bin": {
+      "bytes": 3183040,
+      "sha256": "0122369a91f336f2f30d7ebf4851aa418559bb39afcacdbe4b37728d28e9e6a1"
+    },
+    "/data/abyssal/dbalwada/RUN_KT2/hpg_dump_du.bin": {
+      "bytes": 3183040,
+      "sha256": "60c406b3323ec99f7560655639d45aa9e72e0fd9298c8b1a4c0569c6e1bf3985"
+    },
+    "/data/abyssal/dbalwada/RUN_KT2/hpg_dump_dv.bin": {
+      "bytes": 3183040,
+      "sha256": "80a4baa94ec50c491606bfd82edc174b49d493429ec175b728c719d45e6c839a"
+    },
+    "/data/abyssal/dbalwada/RUN_KT2/mesh_mask.nc": {
+      "bytes": 31203524,
+      "sha256": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622"
+    },
+    "/data/abyssal/dbalwada/RUN_KT2/namelist_cfg": {
+      "bytes": 32228,
+      "sha256": "56b2810f30bcbc739ec18d9c107c0610062d26a5cba85d2d4ebde35f555b197a"
+    },
+    "/data/abyssal/dbalwada/RUN_KT2/spg_dump_pssh_final.bin": {
+      "bytes": 90944,
+      "sha256": "e9c7f247d1ad06952c5f9aa0e61af47427cdea9739e027f6a00f83df0a42695b"
+    },
+    "/data/abyssal/dbalwada/RUN_KT2/spg_dump_zu_frc.bin": {
+      "bytes": 82784,
+      "sha256": "164363f79d3a1be797ae9a12b1e4ae4275a7eeadf42ea14b212907c2f5261c12"
+    },
+    "/data/abyssal/dbalwada/RUN_KT2/spg_dump_zv_frc.bin": {
+      "bytes": 82784,
+      "sha256": "5afba737ce03ac4ba7e139ff2acb5c0e70ebe4547a9d33e1cacd6f498933db0e"
+    },
+    "/data/abyssal/dbalwada/RUN_KT2/stp_dump_21_trazdf_sal.bin": {
+      "bytes": 3183040,
+      "sha256": "a0ea21e685b246d206a1d0f357c23a7d2bbb6f1299c1c61b2911a2397c4ca170"
+    },
+    "/data/abyssal/dbalwada/RUN_KT2/stp_dump_21_trazdf_tem.bin": {
+      "bytes": 3183040,
+      "sha256": "793f28ca4d99a1af225d58396be8a4796b08599596a82b43d3e51e2b5f6d5d74"
+    },
+    "/data/abyssal/dbalwada/RUN_KT2/wnd_dump_zu_frc_inc.bin": {
+      "bytes": 82784,
+      "sha256": "164363f79d3a1be797ae9a12b1e4ae4275a7eeadf42ea14b212907c2f5261c12"
+    },
+    "/data/abyssal/dbalwada/RUN_KT2/wnd_dump_zv_frc_inc.bin": {
+      "bytes": 82784,
+      "sha256": "72ecf1fe2e778a7ece1b73d1713587f2d99d641cf47a3a196a8fb5f04acb7d4a"
+    },
+    "/data/abyssal/dbalwada/RUN_TRAJ_Y1/DINO_00011520_restart.nc": {
+      "bytes": 227413460,
+      "sha256": "577fd423065653d6dc7d7da6dffd7735980bf89dd45ee083e07dec4ebf8bf208"
+    },
+    "/data/abyssal/dbalwada/RUN_TRAJ_Y1/DINO_1y_00010701_00011230_grid_T_0000.nc": {
+      "bytes": 91352,
+      "sha256": "332a575986beb268bf44c62b4ef65a817d40010f8cd2df8180dc70aa264c93b2"
+    },
+    "/data/abyssal/dbalwada/RUN_TRAJ_Y1/namelist_cfg": {
+      "bytes": 32312,
+      "sha256": "cd884d1f2bcc5afca9f22201dbe2739641eece26cf0ab824702ba88c4f115045"
+    },
+    "/data/abyssal/dbalwada/lego_bridged_d10.npz": {
+      "bytes": 82177413,
+      "sha256": "759abcc2e86346abf1e25ee49d1c83535e54789cc73ecab1a7686a604e8d7062"
+    },
+    "/data/abyssal/dbalwada/lego_bridged_kt2.npz": {
+      "bytes": 83667561,
+      "sha256": "3b9bec883ad79ad5e7dc43e95118c0f7ca903b2f39d8374eee0a74b2131661d9"
+    }
+  },
+  "ladder_receipt": {
+    "bridge_artifact_dirty_tracked_files": 1,
+    "bridge_artifact_producer": "7c0f121baed6bc57243e849127040865dda2d597",
+    "day180_twin_sst_rms_degC": 0.005,
+    "dirty_override": "LEGOESM_ALLOW_DIRTY=1",
+    "first_d10_mid_run_edit_refusal": "USER_REPORTED_NO_HASH",
+    "independent_sst_rms_degC": 0.39,
+    "kt2_bridge_free_days": 359,
+    "kt2_claim_scope": "TWIN_CLASS_DAILY_ENDPOINT_WITH_OFFSET",
+    "kt2_daily_endpoint_ssh_rms_mm": 0.29,
+    "kt2_daily_endpoint_sst_rms_degC": 0.0104,
+    "kt2_endpoint_offset_days": 0.94,
+    "source": "user_reported_2026-08-30",
+    "temporary_restart_guard_override": "DINO_TWIN_MIN_SPEED"
+  },
+  "producer_dirty_tracked_files": false,
+  "producer_git_sha": "9e7f786f60a73a28d66ad52c3ccfd1e3efb89d40",
+  "rows": [
+    {
+      "bar": 0.0,
+      "exact_mismatch_count": 0,
+      "first_over_bar": null,
+      "max_abs": 0.0,
+      "max_ulp": 0,
+      "mismatch_count": 0,
+      "n": 327600,
+      "name": "input_wet_mask",
+      "rms": 0.0,
+      "status": "PASS"
+    },
+    {
+      "bar": 0.0,
+      "exact_mismatch_count": 0,
+      "first_over_bar": null,
+      "max_abs": 0.0,
+      "max_ulp": 0,
+      "mismatch_count": 0,
+      "n": 9360,
+      "name": "input_latitude_deg",
+      "rms": 0.0,
+      "status": "PASS"
+    },
+    {
+      "bar": 0.0,
+      "exact_mismatch_count": 0,
+      "first_over_bar": null,
+      "max_abs": 0.0,
+      "max_ulp": 0,
+      "mismatch_count": 0,
+      "n": 324128,
+      "name": "input_t_depth_m",
+      "rms": 0.0,
+      "status": "PASS"
+    },
+    {
+      "bar": 1e-15,
+      "exact_mismatch_count": 0,
+      "first_over_bar": null,
+      "max_abs": 0.0,
+      "max_ulp": 0,
+      "mismatch_count": 0,
+      "n": 324128,
+      "name": "common_depth_T_profile",
+      "rms": 0.0,
+      "status": "PASS"
+    },
+    {
+      "bar": 1e-15,
+      "exact_mismatch_count": 0,
+      "first_over_bar": null,
+      "max_abs": 0.0,
+      "max_ulp": 0,
+      "mismatch_count": 0,
+      "n": 324128,
+      "name": "common_depth_S_profile",
+      "rms": 0.0,
+      "status": "PASS"
+    },
+    {
+      "bar": 1e-15,
+      "exact_mismatch_count": 0,
+      "first_over_bar": null,
+      "max_abs": 0.0,
+      "max_ulp": 0,
+      "mismatch_count": 0,
+      "n": 324128,
+      "name": "resolved_T_nemo_wet",
+      "rms": 0.0,
+      "status": "PASS"
+    },
+    {
+      "bar": 1e-15,
+      "exact_mismatch_count": 0,
+      "first_over_bar": null,
+      "max_abs": 0.0,
+      "max_ulp": 0,
+      "mismatch_count": 0,
+      "n": 324128,
+      "name": "resolved_S_nemo_wet",
+      "rms": 0.0,
+      "status": "PASS"
     },
     {
       "bar": 1e-15,
@@ -593,7 +743,7 @@
       "status": "OVER_BAR"
     }
   ],
-  "schema": "dino_ic_euler_peel_v4",
+  "schema": "dino_ic_euler_peel_v5",
   "session_id": "01a053d4-8e9f-7212-bbdb-19ba2d64e140",
   "wet_mask_receipt": {
     "common_wet": 324128,
