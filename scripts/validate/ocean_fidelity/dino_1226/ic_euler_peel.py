@@ -655,7 +655,8 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
     ht_0 = np.zeros(e3t_0.shape[:-1], dtype=np.float64)
     for k in range(e3t_0.shape[-1]):
         ht_0 = ht_0 + e3t_0[..., k] * tmask_full[..., k]
-    r1_ht_0 = 1.0 / ht_0
+    r1_ht_0 = np.divide(
+        1.0, ht_0, out=np.zeros_like(ht_0), where=ht_0 > 0.0)
     r3t_after = eta_after_nemo * r1_ht_0
     h_after_nemo = e3t_0 * (
         1.0 + r3t_after[..., None] * tmask_full)
@@ -714,9 +715,9 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
                  _runtime_dump(run_kt2 / "stp_dump_23_after_traldf_tem.bin"), common_t),
         diff_row("S_after_traldf", _model_core(rhs23_s),
                  _runtime_dump(run_kt2 / "stp_dump_23_after_traldf_sal.bin"), common_t),
-        diff_row("T_after_trazdf", _model_core(literal_t),
+        diff_row("T_after_trazdf", _model_core(host_literal_t),
                  _runtime_dump(run_kt2 / "stp_dump_21_trazdf_tem.bin"), common_t),
-        diff_row("S_after_trazdf", _model_core(literal_s),
+        diff_row("S_after_trazdf", _model_core(host_literal_s),
                  _runtime_dump(run_kt2 / "stp_dump_21_trazdf_sal.bin"), common_t),
         dict(next(row for row in localization["rows"]
                   if row["name"] == "POST_HOC_fslow_u_wind"),
@@ -724,15 +725,6 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
         dict(next(row for row in localization["rows"]
                   if row["name"] == "POST_HOC_fslow_v_hpg"),
              name="V_hpg_slow_forcing"),
-        diff_row("conditional_euler_U_after_corrector",
-                 _model_core(np.asarray(step1.u.data)[:, 1:, :]),
-                 _runtime_dump(run_kt2 / "baro_dump_u_after.bin"), common_u),
-        diff_row("conditional_euler_V_after_corrector",
-                 _model_core(np.asarray(step1.v.data)[1:, :, :]),
-                 _runtime_dump(run_kt2 / "baro_dump_v_after.bin"), common_v),
-        diff_row("conditional_euler_SSH_after_split", _model_core(step1.eta.data),
-                 _runtime_ssh(run_kt2 / "spg_dump_pssh_final.bin"),
-                 common_t[..., 0]),
     ]
     localization["momentum_stage_diagnostics"] = {
         "qualification": "POST_HOC_ARCHITECTURE_DIAGNOSTIC_NOT_FROZEN_ROW",
@@ -798,6 +790,40 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
                 _model_core(eager_literal_s),
                 _runtime_dump(run_kt2 / "stp_dump_21_trazdf_sal.bin"),
                 common_t),
+            diff_row(
+                "POST_HOC_compiled_literal_T_after_trazdf",
+                _model_core(literal_t),
+                _runtime_dump(run_kt2 / "stp_dump_21_trazdf_tem.bin"),
+                common_t),
+            diff_row(
+                "POST_HOC_compiled_literal_S_after_trazdf",
+                _model_core(literal_s),
+                _runtime_dump(run_kt2 / "stp_dump_21_trazdf_sal.bin"),
+                common_t),
+            diff_row(
+                "POST_HOC_public_T_after_trazdf",
+                _model_core(step1.T.data),
+                _runtime_dump(run_kt2 / "stp_dump_21_trazdf_tem.bin"),
+                common_t),
+            diff_row(
+                "POST_HOC_public_S_after_trazdf",
+                _model_core(step1.S.data),
+                _runtime_dump(run_kt2 / "stp_dump_21_trazdf_sal.bin"),
+                common_t),
+        ],
+    }
+    localization["public_endpoint_diagnostics"] = {
+        "qualification": "POST_HOC_NOT_AN_EULER_ADMISSION_ROW",
+        "rows": [
+            diff_row("POST_HOC_U_after_corrector",
+                     _model_core(np.asarray(step1.u.data)[:, 1:, :]),
+                     _runtime_dump(run_kt2 / "baro_dump_u_after.bin"), common_u),
+            diff_row("POST_HOC_V_after_corrector",
+                     _model_core(np.asarray(step1.v.data)[1:, :, :]),
+                     _runtime_dump(run_kt2 / "baro_dump_v_after.bin"), common_v),
+            diff_row("POST_HOC_SSH_after_split", _model_core(step1.eta.data),
+                     _runtime_ssh(run_kt2 / "spg_dump_pssh_final.bin"),
+                     common_t[..., 0]),
         ],
     }
     nemo_h_t, nemo_v_t, nemo_faces_t = _nemo_fct_rate_components(
@@ -859,7 +885,9 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
     step2 = dyn(step1, rate)
     before = read_nemo_restart_before(
         str(run_kt2 / "DINO_00000002_restart.nc"), nn_hls=0)
-    rows.extend([
+    localization["filtered_carry_diagnostics"] = {
+        "qualification": "POST_HOC_NOT_AN_EULER_ADMISSION_ROW",
+        "rows": [
         diff_row("conditional_filtered_step1_T_carry",
                  _model_core(step2.T_before.data),
                  _mesh_core(before.T), common_t),
@@ -875,7 +903,8 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
         diff_row("conditional_filtered_step1_SSH_carry",
                  _model_core(step2.eta_before.data),
                  _mesh_core(before.ssh), common_t[..., 0]),
-    ])
+        ],
+    }
     return rows, localization
 
 
