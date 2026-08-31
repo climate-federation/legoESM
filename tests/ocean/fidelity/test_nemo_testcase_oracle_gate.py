@@ -18,6 +18,10 @@ gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
 
 
+def test_unmeasured_is_a_first_class_disposition() -> None:
+    assert "UNMEASURED" in gate.VALID
+
+
 @pytest.mark.parametrize("token", ["T", ".T.", "true", ".TRUE."])
 def test_logical_parser_accepts_only_true_spellings(token: str) -> None:
     assert gate.parse_logical(token) is True

@@ -20,7 +20,15 @@ import netCDF4
 import numpy as np
 
 VALID = {"VERIFIED", "WAIVED", "UNMEASURED"}
-BASE_UNMEASURED = ["teos10_density", "rab", "bn2", "bbl_transport"]
+BASE_UNMEASURED = [
+    "teos10_density",
+    "rab",
+    "bn2",
+    "adaptive_vertical_advection_partition",
+    "bbl_transport",
+    "bbl_downslope_mask_geometry",
+    "global_tracer_inventory_closure",
+]
 META = {"nav_lon", "nav_lat", "nav_lev", "time_counter"}
 TARGET_NML = {
     "namrun.cn_exp",

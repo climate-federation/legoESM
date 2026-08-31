@@ -16,9 +16,12 @@ findings rather than a fully certifiable three-run set:
 * OVERFLOW-sco in the same pinned mode stops at step 4772/6120 under NEMO's own
   `stp_ctl` when bottom velocity reaches the 10 m/s safety limit.  There is no
   final restart or final entry record.  No fallback was attempted.
-* The completed runs exceed the preregistered 64-epsilon closed-tracer bar by
-  order `10^-12`.  Those values are scientifically tiny but are **DEBT**, not
-  relabelled matches.
+* **ERRATUM:** the earlier 64-epsilon tracer classification was
+  mis-constructed and its DEBT labels are retracted.  The corrected bar is
+  relative, tracer-scaled, and uses a `sqrt(N_steps) * eps(fp64)` floor.
+  LOCK salinity is AT-BAR; OVERFLOW-zps salinity is UNMEASURED.  Temperature's
+  640--796-epsilon relative excess remains UNMEASURED pending attribution,
+  including a possible `key_qco` thickness-weighting effect.
 * TEOS-10, `eos_rab`/BN2, FCT2 implicit, adaptive vertical advection, and BBL
   are source/namelist-arm verified.  `rab`, density, BN2, and BBL transport were
   not included in this first entry-dump format, so their numerical-array
@@ -58,9 +61,9 @@ and `8b78ad0f12726f689e95e46f7241af000c4eca5f2f8a5f112a2c570255bc2930`.
 
 | run | completion | documented-behaviour sanity | strict tracer bar |
 |---|---|---|---|
-| OVERFLOW-zps | CONFIRM, 6120/6120, final restart | cold-water thickness-weighted centre moves 10.000 to 96.1658 km; final `max(|u|,|v|)=5.29005 m/s` | DEBT: final T `[13.620424680472283, 20.000000000003535]`; S `[34.999999999999496, 35.00000000000071]` |
+| OVERFLOW-zps | CONFIRM, 6120/6120, final restart | cold-water thickness-weighted centre moves 10.000 to 96.1658 km; final `max(|u|,|v|)=5.29005 m/s` | UNMEASURED: final T excess 796 eps-relative; S excess 91.43 eps-relative exceeds the `sqrt(6120)=78.23` floor |
 | OVERFLOW-sco | REFUTE, stop 4772/6120 | NEMO reports `max |U|=10.00 m/s` at `(i,j,k)=(200,2,100)`; abort state retained | UNMEASURED at final; step 1 and 3060 exist |
-| LOCK_EXCHANGE-zco | CONFIRM, 61200/61200, final restart | cold-water thickness-weighted centre moves 16.000 to 27.6778 km; final `max(|u|,|v|)=0.932999 m/s` | DEBT: final T `[4.999999999999828, 30.000000000004263]`; S `[34.99999999999881, 35.00000000000102]` |
+| LOCK_EXCHANGE-zco | CONFIRM, 61200/61200, final restart | cold-water thickness-weighted centre moves 16.000 to 27.6778 km; final `max(|u|,|v|)=0.932999 m/s` | temperature UNMEASURED at 640 eps-relative; salinity AT-BAR at 152.69 eps-relative below the `sqrt(61200)=247.39` floor |
 
 The trajectory arrays are serial-local `206 x 7 x 101` for OVERFLOW and
 `134 x 7 x 21` for LOCK_EXCHANGE because they retain NEMO's two-cell halos.
@@ -88,6 +91,31 @@ OVERFLOW-sco has a valid mesh and resolved namelist but no final restart, so
 the exhaustive run-level gate correctly hard-fails at the missing-restart
 condition instead of granting a partial certificate.
 
+## Round-1 review reconciliation and BBL control
+
+The review claim that the BBL parameters match no OMIP configuration is
+**REFUTED**.  The actual target
+`/data/abyssal/dbalwada/ORCA1-omip/EXPREF/namelist_cfg:284-291`
+(SHA256 `7cfe2d47d78a00553cb28fe72c7e2be8655f96f0ea22920f0b8f17f5b2a47a0b`)
+contains exactly `ln_trabbl=.true.`, `nn_bbl_ldf=0`, `nn_bbl_adv=2`,
+`rn_ahtbbl=1000.`, and `rn_gambbl=20.`.  The original defect was the missing
+citation, now present in the dossier and OVERFLOW configurations.
+
+The preregistered sco control changed only `nambbl.ln_trabbl` from true to
+false, held the executable and all other resolved settings fixed, and still
+failed the same way: NEMO stopped at step 4773 with `|U|max=10.01 m/s` at
+`(200,2,100)`, versus step 4772 with BBL enabled.  BBL is therefore
+**REFUTED AS SOLE OWNER**.  In accordance with the preregistration, TEOS-10
+sigma-coordinate pressure-gradient truncation is the next suspect; no second
+arm was run.  The complete machine-readable receipt is
+`nemo_testcases_l1_bbl_control_receipt.json`.
+
+The mechanism concern remains valid even though sole ownership is refuted:
+`trabbl.F90:415-434` makes option 2 a density-gradient-proportional downslope
+transport, and the sco geometry makes its downslope sign mask nonzero across
+the interior columns.  Direct BBL transport and mask arrays remain
+UNMEASURED in the phase-1 dump.
+
 ## Artifact hashes
 
 | artifact | SHA256 |
@@ -111,12 +139,24 @@ exact three namelists, exact case-local `MY_SRC/stprk3.F90`, exhaustive
 manifests, and gate under `scripts/validate/ocean_fidelity/testcases/`.  Raw
 oracle runs remain under `/data/abyssal/dbalwada/nemo-testcases-l1/`.
 
+## Explicit remaining process debt
+
+These review findings are **DEBT**, not implied certifications:
+
+* Finding 6: boilerplate WAIVED reasons enforce inventory stability only; they
+  are not evidence that a human reviewed each array's scientific role.
+* Finding 10: the failed sco arm still needs an `--allow-incomplete-run` gate
+  mode and a gate-emitted committed partial-run artifact.
+* Finding 11: the vendored `stprk3.F90` should be reconsidered as a minimal
+  `.patch`; the five full `usrdef_*` hashes per case must be pinned in a
+  committed artifact rather than abbreviated dossier prose.
+* Finding 12: `cold_center_x_km` is labelled thickness-weighted while the
+  implementation uses reference `e3t_0`; its wet-domain semantics should be
+  audited against `tmask` explicitly before certification.
+
 ## Review status
 
-Two independent read-only adversarial-review sessions were launched as
-required by the campaign rules.  Both failed before reading the changes because
-the reviewer API endpoint was unreachable from the sandbox (`ENOTFOUND` /
-network denied).  There is therefore **no independent scientific review
-receipt** on this commit.  The HOLD verdict already forbids using these numbers
-as a phase-2 oracle certificate; review must be rerun when connectivity is
-available.
+Independent Claude adversarial review round 1 returned **HOLD**.  The OMIP
+parameter objection is refuted above; minimum-to-ship findings 3, 4, 5, 7, 8,
+and 9 are implemented and directly tested, while findings 6, 10, 11, and 12
+remain explicitly registered debt.  This receipt remains HOLD before phase 2.
