@@ -4467,6 +4467,7 @@ def compute_isoneutral_K33_latlon(
     native_slope_pn2: jnp.ndarray | None = None,
     native_slope_e3w: jnp.ndarray | None = None,
     native_slope_eta: jnp.ndarray | None = None,
+    native_slope_jacobian: jnp.ndarray | None = None,
     u_mask: jnp.ndarray | None = None,
     v_mask: jnp.ndarray | None = None,
     dt: float | None = None,
@@ -4556,11 +4557,18 @@ def compute_isoneutral_K33_latlon(
             _vm = _vm.at[1:-1, :].set(_m[:-1, :] * _m[1:, :])
         else:
             _vm = v_mask
-        _native_prd_J = _J if native_prd_jacobian is None else native_prd_jacobian
+        _native_J = (_J if native_slope_jacobian is None
+                     else jnp.asarray(native_slope_jacobian, dtype=T.dtype))
+        if _native_J.shape != eta.shape:
+            raise ValueError(
+                "native_slope_jacobian must have eta shape "
+                f"{eta.shape}, got {_native_J.shape}")
+        _native_prd_J = (_native_J if native_prd_jacobian is None
+                         else native_prd_jacobian)
         _native_eta = eta if native_slope_eta is None else native_slope_eta
         _, _, _wi, _wj = compute_nemo_native_slopes(
             _rho, T, S, _m, _um, _vm, z_coord, grid, cfg, _eosfn,
-            jacobian=_J, eta=_native_eta, H_bathy=H_bathy,
+            jacobian=_native_J, eta=_native_eta, H_bathy=H_bathy,
             prd_jacobian=_native_prd_J,
             prd_TS_override=native_prd_TS,
             pn2_override=native_slope_pn2,
@@ -4603,9 +4611,24 @@ def compute_isoneutral_K33_latlon(
         _e2v_c = _geom.dy_v[1:, :]
         # z*-scaled thickness with the SAME jacobian as the operator's e3t
         # (from the shared density_jacobian thread).
-        _e3t = z_coord.dz_ref[None, None, :] * _J[:, :, jnp.newaxis]
-        _e3w = 0.5 * (jnp.roll(_e3t, +1, 2) + _e3t)
-        _e3w = _e3w.at[:, :, 0].set(_e3t[:, :, 0])
+        if native_slope_e3w is None:
+            _e3t = (z_coord.dz_ref[None, None, :]
+                    * _native_J[:, :, jnp.newaxis])
+            _e3w = 0.5 * (jnp.roll(_e3t, +1, 2) + _e3t)
+            _e3w = _e3w.at[:, :, 0].set(_e3t[:, :, 0])
+        else:
+            _e3w = jnp.asarray(native_slope_e3w, dtype=T.dtype)
+            if _e3w.shape[-1] == T.shape[-1] - 1:
+                # The first W slot is not part of the TKE bundle.  It is
+                # unused by the returned interior K33, but nemo_iso_a33 forms
+                # the full array before slicing and requires a finite value.
+                surface = (z_coord.dz_ref[0]
+                           * _native_J)[..., jnp.newaxis]
+                _e3w = jnp.concatenate([surface, _e3w], axis=-1)
+            if _e3w.shape != T.shape:
+                raise ValueError(
+                    "native_slope_e3w must contain nlev or nlev-1 W levels; "
+                    f"got {_e3w.shape} for tracer shape {T.shape}")
         _msc = bool(getattr(cfg, "msc_stabilize", False))
         _, _akz = nemo_iso_a33(
             _aht, _um3, _vm3, _wm3, _wi, _wj,

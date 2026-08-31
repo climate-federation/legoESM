@@ -2327,6 +2327,38 @@ def test_native_carried_e3w_reaches_msc_a33_dispatch(monkeypatch):
                                       np.asarray(carried_e3w))
 
 
+def test_native_k33_uses_carried_slope_geometry(monkeypatch):
+    """Implicit K33 reuses ldf_slp's Kmm Jacobian and W thickness."""
+    import legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid as gm_mod
+
+    (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, _jacobian,
+     _rho, T, S, _cfg) = _stratified_with_meridional_tilt()
+    cfg = GMRediConfig(
+        kappa_GM=0.0, kappa_Redi=1000.0,
+        slope_scheme="nemo_iso_lap", slope_positions="nemo_native",
+        msc_stabilize=True, implicit_K33=True)
+    carried_J = jnp.full_like(eta, 1.000125)
+    carried_e3w = jnp.broadcast_to(z_coord.dz_ref, T.shape) * 1.000125
+    seen = []
+    real = gm_mod.compute_nemo_native_slopes
+
+    def capture(*args, **kwargs):
+        seen.append(kwargs["jacobian"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(gm_mod, "compute_nemo_native_slopes", capture)
+    K33 = gm_mod.compute_isoneutral_K33_latlon(
+        T, S, eta, H_bathy, grid, z_coord, cfg,
+        eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask,
+        native_slope_jacobian=carried_J,
+        native_slope_e3w=carried_e3w, dt=2700.0)
+
+    assert len(seen) == 1
+    np.testing.assert_array_equal(np.asarray(seen[0]), np.asarray(carried_J))
+    assert K33.shape == T.shape[:-1] + (T.shape[-1] - 1,)
+    assert bool(jnp.all(jnp.isfinite(K33)))
+
+
 class TestNemoNativeActive3dBottomTie:
     """#1226 (ldf_slp stage audit, 2026-07-28): ``_nemo_native_active_3d``
     must use ``z_coord.is_active`` (an EXACT per-column integer bottom-level

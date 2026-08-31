@@ -5169,6 +5169,7 @@ class LatLonCGridOceanModel:
                     native_slope_pn2=_gm_native_pn2,
                     native_slope_e3w=_gm_native_e3w,
                     native_slope_eta=state.eta.data,
+                    native_slope_jacobian=_gm_native_prd_J,
                     # #1226: the SAME wall masks the tendency dispatcher uses,
                     # so the nemo_native K33 slopes/masks are bit-identical to
                     # the explicit operator's (staircase-aware; the K33-side
