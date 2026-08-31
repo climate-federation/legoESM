@@ -1,20 +1,103 @@
-# DINO transfer question — T3 certified; T1 first divergence bound
+# DINO transfer question — transfer lane complete pending review
 
-Date: 2026-08-30. Session:
+Date: 2026-08-31. Session:
 `01a053d4-8e9f-7212-bbdb-19ba2d64e140`.
 
 T3 is **TRANSFER_CONFIRMED**. T2 is
-**PERPETUAL-FE-OUT-OF-MODEL-CLAIM-BY-USER** and has no science verdict. The
-forward-Euler crash is localized to the live continuity/surface-pressure fast
-pair under a plain temporal boxcar. Repeating NEMO's first-Euler nn_bt_flt=2
-AB3/AM4 temporal composition passes the frozen 40-step discriminator and the
-64-step clean-card gate, and remains the correct default for NEMO's actual one
-Euler bootstrap. No further perpetual-Euler stabilization is in scope. T1's
-first wave reached 360 cold-start days cleanly before a reducer-shape bug
-aborted its first capture. That reducer is repaired, but the new step-2 ladder
-peel blocks the science claim earlier: standalone wet mask, latitude
-evaluation, and T-depths are not NEMO-identical. No GPU, NEMO, MPI process,
-push, or remote action was launched here.
+**PERPETUAL-FE-OUT-OF-MODEL-CLAIM-BY-USER**: NEMO-covered use is one Euler
+bootstrap followed by MLF, and perpetual-Euler climate longevity is excluded
+by user decision. T1 is **COLD-START-TRANSFER-CONFIRMED**: the preregistered
+one-year discriminator confirms the frozen prediction. The transfer lane is
+therefore **COMPLETE-PENDING-REVIEW**. This does not promote the single member
+to the separate six-member, 20-year climate-family verdict frozen in the parent
+preregistration. No GPU, NEMO, MPI process, push, or remote action was launched
+by the agent in the binding round.
+
+## T1 headline — the frozen independent-year prediction confirmed
+
+The clean member-0 standalone artifact is
+`/data/abyssal/dbalwada/dino-standalone-y1-fixed`: 11,520 fp64 steps from its
+own analytic/from-rest state with `--snap-final`, no restart or bridge. It is
+scored against the independent NEMO from-rest year endpoint
+`RUN_TRAJ_Y1/DINO_00011520_restart.nc`. The committed scorer is
+`scripts/validate/ocean_fidelity/dino_1226/standalone_year_transfer_receipt.py`;
+the committed receipt is `dino_standalone_year_transfer_artifact.json`, SHA-256
+`23e08fdf4084b6e346d3631aecac150fbe2b64379117024eec3c81fe9f2b21b2`.
+It reports `OUTCOME=CONFIRM` from clean producer
+`d14e8eb696de6fa24ef84e662fde6ccc17200c91`.
+
+The headline day-360 scores are:
+
+| statistic | fixed independent year | prior independent year |
+|---|---:|---:|
+| SST RMS | `0.007586936458923034 degC` | `0.39 degC` |
+| SST maximum absolute | `0.2637286932718048 degC` | not recorded |
+| SSH RMS | `0.3070795636118303 mm` | not recorded |
+| 3-D T RMS | `0.0056596643780580415 degC` | not recorded |
+| 3-D T bias | `-5.292327156826694e-5 degC` | about `+4.5e-2 degC` |
+| 3-D S RMS | `5.671816962734792e-4 PSU` | not recorded |
+
+The frozen bet was `0.39 degC -> ~0.01 degC`, with `<=0.02 degC` confirming
+and `>=0.10 degC` refuting. The measured `0.0076 degC` confirms it. The former
+positive 3-D temperature bias is annihilated rather than merely reduced.
+
+### Complete four-rung ladder
+
+| rung | start/integration | day-360-class SST RMS | SSH receipt |
+|---|---|---:|---:|
+| 1 | restart-bridged twin, scored at day 180 | `0.005 degC` | not supplied |
+| 2 | bit-exact NEMO `kt=2` bridge, 359-day free run | `0.0104 degC` | `0.29 mm` |
+| 3 | pre-repair fully independent analytic start | `0.39 degC` | not supplied |
+| 4 | post-repair fully independent analytic start | `0.007586936458923034 degC` | `0.3070795636118303 mm` |
+
+Rung 2 remains a daily-series endpoint with the registered `0.94`-day offset;
+it is not silently upgraded to an exact final-snapshot comparison. Rung 4 has
+the exact scheduled fp64 final 3-D snapshot. Together the ladder shows that the
+year-long free integration was already twin-class and that the entire old
+independent gap was seeded by initialization plus the degenerate first Euler
+step.
+
+### The three repairs that close the gap
+
+1. **Initialization geometry:** source-order Mercator latitude, transitioned
+   depth/wet-mask operands, and NEMO's complete 199 x 52 construction frame.
+2. **Profile arithmetic:** scalar-libm `TANH`, source association, and live
+   full-frame latitude/bottom anchors for `usrdef_istate` CASE(4).
+3. **Coupled degenerate-Euler FCT:** the collapsed MLF first-step tracer order
+   and the horizontal/vertical FCT rate paths repaired as a cancelling pair,
+   followed by the source-ordered QCO `tra_zdf` geometry. No Rule-1b waiver was
+   used.
+
+### Handoff corrections and comparison frame
+
+The earlier handoff named `/data/abyssal/dbalwada/RUN_KT2/mesh_mask.nc` as the
+reducer mesh. Its SHA-256 is identical to the canonical mesh, but the imported
+campaign scorer opens and pathname-checks
+`/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/mesh_mask.nc`.
+The executed arm used that canonical path. The runner now fails at day 0 with
+the required pathname, and the corrected handoff names it explicitly.
+
+`--snap-final` stores legoESM's live full-ring `(199,52,35)` frame; NEMO's
+restart/mesh fields are `(199,52,36)` including dry terminal `jpk`. The
+committed comparison is therefore frame-adaptive and fail-closed: for this
+artifact it retains the complete horizontal construction frame and removes
+only terminal `jpk`. A planted unsupported frame fires. No two-ring crop was
+applied to the confirmed score.
+
+### Ledger-ready paragraph
+
+> **Transfer question — COMPLETE pending review (2026-08-31).** T3 proves the
+> versioned catalog recipe is config-identical and five-day bit-identical to
+> the oracle MLF card. T2 is scoped by user decision to NEMO-covered use (one
+> Euler bootstrap then MLF); perpetual-Euler climate longevity is out of model
+> claim. T1's frozen independent-year discriminator confirms: member 0, 11,520
+> fp64 standalone steps with a final 3-D snapshot score SST RMS `0.00759 degC`,
+> SSH RMS `0.307 mm`, 3-D T RMS `0.00566 degC` with bias `-5.29e-5 degC`, and
+> 3-D S RMS `5.67e-4 PSU` against NEMO's independent from-rest year. The old
+> `0.39 degC` SST gap and `+4.5e-2 degC` 3-D T bias collapse after three repairs:
+> initialization geometry, scalar/source-order profile evaluation, and the
+> coupled degenerate-Euler FCT path. This confirms cold-start transfer; it is
+> not the separate six-member 20-year climate-family verdict.
 
 ## T3 — catalog construction is certified
 

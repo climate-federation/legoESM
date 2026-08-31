@@ -62,6 +62,8 @@ def align_nemo_to_standalone(
     """Align NEMO T-frame data to a full-ring or two-ring-stripped snapshot."""
     if nemo.shape != mask.shape:
         raise ValueError(f"NEMO field shape {nemo.shape} != mask shape {mask.shape}")
+    if np.any(mask[..., -1]):
+        raise ValueError("NEMO terminal jpk is not uniformly dry")
     ny, nx, nz = nemo.shape
     full = (ny, nx, nz - 1)
     core = (ny - 4, nx - 4, nz - 1)
@@ -109,6 +111,7 @@ def classify(sst_rms: float) -> str:
 def self_test() -> dict[str, str]:
     nemo = np.arange(6 * 8 * 3, dtype=np.float64).reshape(6, 8, 3)
     mask = np.ones_like(nemo, dtype=bool)
+    mask[..., -1] = False
     full, full_mask, full_mode = align_nemo_to_standalone(
         (6, 8, 2), nemo, mask)
     core, core_mask, core_mode = align_nemo_to_standalone(
@@ -153,6 +156,7 @@ def run(args: argparse.Namespace) -> int:
         raise SystemExit("missing T1 receipt inputs: " + ", ".join(missing))
 
     manifest = json.loads(manifest_path.read_text())
+    reducer_receipt = json.loads(reducer_path.read_text())
     required_manifest = {
         "member": 0,
         "steps_completed": STEPS,
@@ -169,6 +173,11 @@ def run(args: argparse.Namespace) -> int:
              if manifest.get(name) != expected}
     if drift:
         raise SystemExit(f"standalone manifest contract drift: {drift}")
+    if (Path(reducer_receipt.get("reducer_mesh", "")).resolve() != mesh
+            or reducer_receipt.get("reducer_mesh_sha256") != file_sha256(mesh)):
+        raise SystemExit(
+            "standalone reducer receipt does not identify the supplied "
+            "canonical mesh path and hash")
     capture = next(
         (row for row in manifest.get("captures", [])
          if row.get("day") == DAY and row.get("step") == STEPS), None)
@@ -211,6 +220,12 @@ def run(args: argparse.Namespace) -> int:
         "producer_git_sha": producer,
         "producer_dirty_tracked_files": dirty,
         "outcome": outcome,
+        "claim_scope": {
+            "confirmed": "one-year cold-start transfer discriminator",
+            "not_claimed": "six-member 20-year climate-family equivalence",
+            "runner_manifest_claim_admissible": manifest.get("claim_admissible"),
+            "reason": "the runner reserves claim_admissible for its 20-year schedule",
+        },
         "frozen_prediction": {
             "text": "independent-year SST RMS 0.39 C collapses toward ~0.01 C",
             "confirm_sst_rms_degC_lte": CONFIRM_SST_RMS_DEGC,

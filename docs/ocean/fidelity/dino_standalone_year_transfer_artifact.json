@@ -1,0 +1,117 @@
+{
+  "controls": {
+    "core_frame_alignment": "PASS",
+    "full_frame_alignment": "PASS",
+    "prediction_classifier_plants": "FIRED",
+    "unsupported_frame_plant": "FIRED"
+  },
+  "four_rung_ladder": [
+    {
+      "rung": "twin_at_day180",
+      "scope": "restart-bridged twin",
+      "sst_rms_degC": 0.005
+    },
+    {
+      "rung": "bridged_at_step2_to_day360",
+      "scope": "359-day free run; daily endpoint offset 0.94 day",
+      "ssh_rms_mm": 0.29,
+      "sst_rms_degC": 0.0104
+    },
+    {
+      "T_3d_bias_degC": 0.045,
+      "rung": "standalone_before_repairs_day360",
+      "scope": "fully independent from rest; pre-fix",
+      "sst_rms_degC": 0.39
+    },
+    {
+      "S_3d_rms_PSU": 0.0005671816962734792,
+      "T_3d_bias_degC": -5.292327156826694e-05,
+      "T_3d_rms_degC": 0.0056596643780580415,
+      "rung": "standalone_after_repairs_day360",
+      "scope": "fully independent from rest; member 0; fixed",
+      "ssh_rms_mm": 0.3070795636118303,
+      "sst_rms_degC": 0.007586936458923034
+    }
+  ],
+  "frame_alignment": {
+    "mode": "full_nemo_construction_frame",
+    "nemo_T_shape_before_alignment": [
+      199,
+      52,
+      36
+    ],
+    "operation": "retain full horizontal construction frame; drop dry terminal jpk",
+    "standalone_T_shape": [
+      199,
+      52,
+      35
+    ]
+  },
+  "frozen_prediction": {
+    "confirm_sst_rms_degC_lte": 0.02,
+    "refute_sst_rms_degC_gte": 0.1,
+    "text": "independent-year SST RMS 0.39 C collapses toward ~0.01 C"
+  },
+  "inputs": {
+    "/data/abyssal/dbalwada/RUN_TRAJ_Y1/DINO_00011520_restart.nc": {
+      "bytes": 227413460,
+      "sha256": "577fd423065653d6dc7d7da6dffd7735980bf89dd45ee083e07dec4ebf8bf208"
+    },
+    "/data/abyssal/dbalwada/dino-standalone-y1-fixed/initial_receipt.json": {
+      "bytes": 1749,
+      "sha256": "b8ee3db305353653e5649c24cf1e335cff805083852778daddfece96f053842c"
+    },
+    "/data/abyssal/dbalwada/dino-standalone-y1-fixed/manifest.json": {
+      "bytes": 1490,
+      "sha256": "fbebf0d3f7482402d87d4569d2fc91af5870927e4d009479db2f5ff7edf853e8"
+    },
+    "/data/abyssal/dbalwada/dino-standalone-y1-fixed/reducer_convention_receipt.json": {
+      "bytes": 2009,
+      "sha256": "4742f2d59083d8007d17c7eaa2af84501673d7624e8b615a999e808b912118b1"
+    },
+    "/data/abyssal/dbalwada/dino-standalone-y1-fixed/snapshots/day_0360.npz": {
+      "bytes": 11744506,
+      "sha256": "b6248187d2535d12227fa82f72771756ff371906214baf86cc17b9cebd99f79c"
+    },
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/mesh_mask.nc": {
+      "bytes": 31203524,
+      "sha256": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622"
+    }
+  },
+  "outcome": "CONFIRM",
+  "producer_dirty_tracked_files": [],
+  "producer_git_sha": "d14e8eb696de6fa24ef84e662fde6ccc17200c91",
+  "repairs": [
+    "initialization geometry: Mercator latitude, stepped depth/mask, construction frame",
+    "initialization profile arithmetic: scalar libm tanh, source association, live anchors",
+    "coupled degenerate-Euler FCT: collapsed MLF horizontal/vertical rate paths"
+  ],
+  "schema": "dino_standalone_year_transfer_receipt_v1",
+  "scores": {
+    "S_3d_PSU": {
+      "bias": 1.1915794722547795e-06,
+      "max_abs": 0.10731240790562424,
+      "n": 342134,
+      "rms": 0.0005671816962734792
+    },
+    "T_3d_degC": {
+      "bias": -5.292327156826694e-05,
+      "max_abs": 0.6106441094614325,
+      "n": 342134,
+      "rms": 0.0056596643780580415
+    },
+    "ssh_m": {
+      "bias": -6.758893320920893e-05,
+      "max_abs": 0.0038450354325834657,
+      "n": 9920,
+      "rms": 0.0003070795636118303
+    },
+    "sst_degC": {
+      "bias": 6.22859519177479e-05,
+      "max_abs": 0.2637286932718048,
+      "n": 9920,
+      "rms": 0.007586936458923034
+    }
+  },
+  "session_id": "01a053d4-8e9f-7212-bbdb-19ba2d64e140"
+}

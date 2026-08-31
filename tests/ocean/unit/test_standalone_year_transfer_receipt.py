@@ -29,6 +29,7 @@ def test_frame_adaptive_alignment_and_plants():
 def test_alignment_refuses_mask_or_shape_drift():
     nemo = np.zeros((6, 8, 3))
     mask = np.ones_like(nemo, dtype=bool)
+    mask[..., -1] = False
     with pytest.raises(ValueError, match="mask shape"):
         RECEIPT.align_nemo_to_standalone(
             (6, 8, 2), nemo, mask[:, :-1])
