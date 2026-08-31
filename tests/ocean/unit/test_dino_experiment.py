@@ -630,6 +630,12 @@ class TestNemoFaithfulGrid:
         assert np.asarray(grid.lat).shape == (198,)     # equator on a face
         assert np.asarray(grid.lon).shape == (50,)
 
+    def test_unknown_coordinate_evaluator_fails_closed(self):
+        with pytest.raises(ValueError, match="coordinate_evaluation"):
+            create_mercator_grid(
+                n_lon=8, lat_max_deg=60.0,
+                coordinate_evaluation="not-an-oracle")
+
     def test_nemo_faithful_matches_nemo_mesh(self):
         # NEMO DINO R1: 48 zonal cells (T-centres [1.5,48.5]), 195 rows with the
         # equator ON a T-point (j=97 = 0.0°) at ±69.151°. The projection is
@@ -638,7 +644,9 @@ class TestNemoFaithfulGrid:
         cfg = nemo_faithful_dino_config()
         assert cfg.nemo_faithful_grid is True
         assert (cfg.lon_west_deg, cfg.lon_east_deg) == (1.0, 49.0)
-        assert cfg.sill_lon_m_deg == 1.0        # sill anchor co-set to west wall
+        # zgr_bat anchors the sill at zminlam, the U-face boundary (0 deg),
+        # not at the first T centre / configured T-frame edge (1 deg).
+        assert cfg.sill_lon_m_deg == 0.0
         grid = dino_lat_lon_grid(cfg)
         lat = np.degrees(np.asarray(grid.lat))
         lon = np.degrees(np.asarray(grid.lon))
@@ -650,7 +658,7 @@ class TestNemoFaithfulGrid:
 
     def test_nemo_faithful_bathymetry_domain_is_wet(self):
         # The co-set lon frame keeps the bathymetry valid (not an all-land
-        # domain) — the sill anchor tracks the western wall at 1.0.
+        # domain) — the sill anchor tracks NEMO's western U face at 0.0.
         import numpy as np
         from legoesm.ocean.experiments.dino import dino_lat_lon_bowl
         cfg = nemo_faithful_dino_config()
@@ -667,7 +675,7 @@ class TestNemoFaithfulGrid:
         cfg = nemo_faithful_dino_config(base=base)
         assert cfg.nemo_faithful_grid is True
         assert (cfg.lon_west_deg, cfg.lon_east_deg, cfg.sill_lon_m_deg) == (
-            1.0, 49.0, 1.0)
+            1.0, 49.0, 0.0)
         # recipe fields survive (eos, convection fidelity, barotropic solver)
         assert cfg.eos == "nemo_seos"
         assert cfg.convection_smooth_transition is False
@@ -1836,9 +1844,7 @@ class TestMaskedZco:
         return w, t
 
     def test_ladder_matches_f90_and_reference_run(self):
-        """The masked-zco ladder must equal the mi96_1d transliteration
-        AND the reference run's deptht (first/last wet values hardcoded
-        from DINO_1m_grid_T.nc, float32 storage)."""
+        """The mask ladder and final 3-D ladder are distinct NEMO operands."""
         from legoesm.ocean.experiments.dino import (
             DINOConfig, dino_lat_lon_grid, dino_lat_lon_vertical,
         )
@@ -1846,20 +1852,36 @@ class TestMaskedZco:
         cfg = dataclasses.replace(DINOConfig(),
                                   vertical_coordinate="masked_zco")
         g = dino_lat_lon_grid(cfg, n_lon=12)
-        coord = dino_lat_lon_vertical(g, cfg)
-        assert coord.n_levels == cfg.n_levels - 1     # NEMO jpk dummy level
-
+        # Independent translation of zgr_lib.F90:161-169: the one-dimensional
+        # reference profile which usrdef_zgr.F90:120 passes to k_bot.
         w_f90, t_f90 = self._mi96_f90(
             cfg.n_levels, cfg.H_deep, cfg.dz_min, float(cfg.k_th),
             cfg.a_cr)
+        mask_ladder = create_levy_stretched_z_star(
+            n_levels=cfg.n_levels - 1, H_max=cfg.H_deep,
+            dz_min=cfg.dz_min, k_th=float(cfg.k_th), a_cr=cfg.a_cr,
+            analytic_t_depths=True)
         np.testing.assert_allclose(
-            np.abs(np.asarray(coord.z_half_ref))[1:], w_f90[1:], rtol=1e-9)
+            np.abs(np.asarray(mask_ladder.z_half_ref))[1:],
+            w_f90[1:], rtol=1e-9)
         np.testing.assert_allclose(
-            np.abs(np.asarray(coord.z_full_ref)), t_f90[:-1], rtol=1e-9)
-        # reference-run oracle (deptht, f32): first two + last wet centre
+            np.abs(np.asarray(mask_ladder.z_full_ref)),
+            t_f90[:-1], rtol=1e-9)
+
+        # dino_lat_lon_vertical carries zgr_lib.F90:173-189's transitioned
+        # 3-D Hmax profile. These binary64 values are frozen from RUN_KT2's
+        # mesh_mask.nc rather than conflated with the mask operand above.
+        coord = dino_lat_lon_vertical(g, cfg)
+        assert coord.n_levels == cfg.n_levels - 1     # NEMO jpk dummy level
         np.testing.assert_allclose(
-            np.abs(np.asarray(coord.z_full_ref))[[0, 1, -1]],
-            [5.0335817, 15.322634, 3757.309], rtol=1e-6)
+            np.abs(np.asarray(coord.z_full_ref))[[0, 1, 24, 25, 30, 34]],
+            np.array([5.033581935322218, 15.32263396087056,
+                      912.826067919778, 1057.4073217181276,
+                      2109.7754862630018, 3716.092810263544]))
+
+        assert not np.array_equal(
+            np.asarray(coord.z_full_ref),
+            np.asarray(mask_ladder.z_full_ref))
 
     def test_snap_rule_matches_f90_transliteration(self):
         """k_bot per usrdef_zgr.F90 zgr_msk_top_bot:
@@ -1887,6 +1909,23 @@ class TestMaskedZco:
             k_bot[sel] = jk + 1                # NEMO 1-based level count
         np.testing.assert_array_equal(
             np.asarray(coord.bottom_level) + 1, k_bot)
+
+    def test_final_depth_mask_operand_is_a_firing_violation(self):
+        """Plant the old bug: use exported gdept instead of pdept_1d."""
+        from legoesm.ocean.experiments.dino import (
+            dino_config_for_recipe, dino_lat_lon_bowl, dino_lat_lon_grid,
+            dino_lat_lon_vertical, nemo_faithful_dino_config,
+        )
+        cfg = nemo_faithful_dino_config(
+            base=dino_config_for_recipe("nemo_dino_kamm_mlf"))
+        grid = dino_lat_lon_grid(cfg)
+        bowl = np.asarray(dino_lat_lon_bowl(grid, cfg))
+        coord = dino_lat_lon_vertical(grid, cfg)
+        planted = (
+            np.abs(np.asarray(coord.z_full_ref))[None, None, :]
+            < bowl[..., None])
+        mismatch = np.count_nonzero(planted != np.asarray(coord.is_active))
+        assert mismatch == 929
 
     def test_full_cells_and_snap_depth(self):
         import dataclasses

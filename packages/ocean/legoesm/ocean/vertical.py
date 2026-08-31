@@ -570,6 +570,7 @@ def create_levy_stretched_z_star(
     k_th: float,
     a_cr: float,
     analytic_t_depths: bool = False,
+    transition_depth_m: float | None = None,
 ) -> OceanZStarCoordinate:
     """Construct a Lévy (2010) / Madec-Imbard (1996) stretched z* grid.
 
@@ -598,6 +599,15 @@ def create_levy_stretched_z_star(
     DINO 36-interface ladder).  NEMO jpk convention: NEMO's ``jpk``
     counts INTERFACE indices (its level jpk is a permanently-masked
     dummy), so a NEMO config with jpk=36 maps to ``n_levels=35`` here.
+
+    ``transition_depth_m`` reproduces the second ``zgr_sco_mi96`` pass used
+    even by NEMO DINO's nominal z-coordinate. NEMO first constructs the 1-D
+    profile, finds the W level nearest ``rn_hco``, rebuilds the deeper 3-D
+    profile from that join, converts depth to e3, then reconstructs depth by
+    summation (``zgr_lib.F90:161-189``). ``None`` preserves the one-pass
+    constructor exactly. This static coordinate construction uses Python
+    binary64 source-order arithmetic; returned arrays remain ordinary JAX
+    pytrees.
     """
     if n_levels < 2:
         raise ValueError(f"n_levels must be >= 2, got {n_levels!r}")
@@ -605,6 +615,11 @@ def create_levy_stretched_z_star(
         raise ValueError(f"H_max must be > 0, got {H_max!r}")
     if dz_min <= 0.0:
         raise ValueError(f"dz_min must be > 0, got {dz_min!r}")
+    if transition_depth_m is not None and not (
+            0.0 < transition_depth_m < H_max):
+        raise ValueError(
+            "transition_depth_m must lie strictly inside (0, H_max), got "
+            f"{transition_depth_m!r} for H_max={H_max!r}")
 
     K_formula = n_levels + 1  # interface count (NEMO jpk convention)
 
@@ -616,11 +631,75 @@ def create_levy_stretched_z_star(
         a_cr=a_cr,
     )
 
-    # Interfaces at integer k = 1, 2, ..., K_formula → n_levels+1 interfaces
-    z_half_pos = [
+    # Interfaces at integer k = 1, 2, ..., K_formula → n_levels+1 interfaces.
+    first_w = [
         _levy_depth_at_k(float(k), a0, a1, a2, float(k_th), a_cr)
         for k in range(1, K_formula + 1)
     ]
+    first_t = [
+        _levy_depth_at_k(k + 0.5, a0, a1, a2, float(k_th), a_cr)
+        for k in range(1, K_formula + 1)
+    ]
+
+    if transition_depth_m is not None:
+        # Literal depth_to_e3 on the first pass (zgr_lib.F90:350-355).
+        e3w_first = [2.0 * (first_t[0] - first_w[0])]
+        e3w_first.extend(
+            first_t[k] - first_t[k - 1] for k in range(1, K_formula))
+        e3t_first = [
+            first_w[k + 1] - first_w[k] for k in range(K_formula - 1)]
+        e3t_first.append(2.0 * (first_t[-1] - first_w[-1]))
+
+        join_index = min(
+            range(K_formula),
+            key=lambda k: abs(first_w[k] - transition_depth_m))
+        # Fortran passes kkconst-1 into mi96_1d. With zero-based Python
+        # indexing that integer is exactly join_index.
+        remaining = (K_formula - 1) - join_index
+        th = math.tanh((1.0 - float(k_th)) / a_cr)
+        log_cosh_1 = math.log(math.cosh((1.0 - float(k_th)) / a_cr))
+        log_cosh_bottom = math.log(math.cosh(
+            (K_formula - join_index - float(k_th)) / a_cr))
+        b1 = ((e3w_first[join_index]
+               - (H_max - first_w[join_index]) / remaining)
+              / (th - a_cr / remaining
+                 * (log_cosh_bottom - log_cosh_1)))
+        b0 = e3w_first[join_index] - b1 * th
+        bsur = -b0 - b1 * a_cr * log_cosh_1
+
+        second_w = list(first_w)
+        second_t = list(first_t)
+        for array_index in range(join_index + 1, K_formula):
+            # F90 jk is one-based; the mi96 call's kkconst is join_index.
+            zw = float(array_index + 1 - join_index)
+            zt = zw + 0.5
+            second_w[array_index] = (
+                bsur + b0 * zw
+                + b1 * a_cr * math.log(math.cosh(
+                    (zw - float(k_th)) / a_cr))
+                + first_w[join_index])
+            second_t[array_index] = (
+                bsur + b0 * zt
+                + b1 * a_cr * math.log(math.cosh(
+                    (zt - float(k_th)) / a_cr))
+                + first_w[join_index])
+
+        # Literal depth_to_e3 followed by e3_to_depth
+        # (zgr_lib.F90:184-189,381-438).
+        e3w = [2.0 * (second_t[0] - second_w[0])]
+        e3w.extend(
+            second_t[k] - second_t[k - 1] for k in range(1, K_formula))
+        e3t = [
+            second_w[k + 1] - second_w[k] for k in range(K_formula - 1)]
+        e3t.append(2.0 * (second_t[-1] - second_w[-1]))
+        z_half_pos = [0.0]
+        z_full_pos = [0.5 * e3w[0]]
+        for k in range(1, K_formula):
+            z_half_pos.append(z_half_pos[-1] + e3t[k - 1])
+            z_full_pos.append(z_full_pos[-1] + e3w[k])
+    else:
+        z_half_pos = first_w
+        z_full_pos = first_t
 
     # legoESM convention: z negative below surface
     z_half_list = [-z for z in z_half_pos]
@@ -629,15 +708,13 @@ def create_levy_stretched_z_star(
     z_half_ref = jnp.asarray(z_half_list)
 
     dz_ref = z_half_ref[:-1] - z_half_ref[1:]
-    if analytic_t_depths:
+    if transition_depth_m is not None:
+        z_full_ref = jnp.asarray([-t for t in z_full_pos[:-1]])
+    elif analytic_t_depths:
         # NEMO mi96_1d pdept_1d: the SAME stretching formula at k+0.5
         # (one centre per cell, k = 1..n_levels; NEMO's dummy jpk-th
         # centre below the last interface is not represented).
-        t_pos = [
-            _levy_depth_at_k(k + 0.5, a0, a1, a2, float(k_th), a_cr)
-            for k in range(1, n_levels + 1)
-        ]
-        z_full_ref = jnp.asarray([-t for t in t_pos])
+        z_full_ref = jnp.asarray([-t for t in first_t[:-1]])
     else:
         z_full_ref = 0.5 * (z_half_ref[:-1] + z_half_ref[1:])
     dz_half_ref = z_full_ref[:-1] - z_full_ref[1:]

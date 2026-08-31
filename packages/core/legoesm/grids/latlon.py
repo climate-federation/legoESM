@@ -524,6 +524,7 @@ def create_mercator_grid(
     equator_on_tpoint: bool = False,
     n_lat: int | None = None,
     metric_convention: str = "exact",
+    coordinate_evaluation: str = "jax",
 ) -> LatLonGrid:
     """Mercator (isotropic) latitude-longitude grid.
 
@@ -618,6 +619,14 @@ def create_mercator_grid(
         T/u-face metric convention (see above). Default ``"exact"``
         keeps every existing caller BIT-IDENTICAL. Raises
         ``ValueError`` on any other value.
+    coordinate_evaluation : {"jax", "nemo_scalar"}, optional
+        Transcendental evaluation used for the static Mercator axes. ``"jax"``
+        preserves the general grid's compiled construction. ``"nemo_scalar"``
+        reproduces DINO ``usrdef_hgr.F90:106-109`` in source order with the
+        oracle's scalar binary64 libm: ``(1/rad)*asin(tanh((ddeg*rad)*k))``.
+        The NEMO-faithful DINO grid selects it through its existing
+        ``nemo_faithful_grid`` configuration; it is not a runtime physics
+        switch.
 
     Returns
     -------
@@ -651,6 +660,11 @@ def create_mercator_grid(
         raise ValueError(
             f"metric_convention must be 'exact' or 'nemo_isotropic', "
             f"got {metric_convention!r}"
+        )
+    if coordinate_evaluation not in ("jax", "nemo_scalar"):
+        raise ValueError(
+            "coordinate_evaluation must be 'jax' or 'nemo_scalar', "
+            f"got {coordinate_evaluation!r}"
         )
 
     if dtype is None:
@@ -703,9 +717,26 @@ def create_mercator_grid(
         k_center = k_face[:-1] + 0.5                                 # (n_lat,)
     n_lat = n_lat_out
 
-    # Mercator placement: sin(φ) = tanh(Δλ · k).
-    lat_face = jnp.arcsin(jnp.tanh(dlon * k_face))
-    lat = jnp.arcsin(jnp.tanh(dlon * k_center))
+    # Mercator placement: sin(φ) = tanh(Δλ · k).  NEMO stores the
+    # result in degrees, but keeping the scalar ASIN result here makes the
+    # existing jnp.degrees(grid.lat) call reproduce that stored gphit exactly.
+    if coordinate_evaluation == "nemo_scalar":
+        import math
+
+        rad = 3.141592653589793 / 180.0
+        ddeg = (lon_east_deg - lon_west_deg) / n_lon
+
+        def _scalar_axis(indices):
+            return jnp.asarray([
+                math.asin(math.tanh((ddeg * rad) * float(index)))
+                for index in np.asarray(indices)
+            ], dtype=jnp.float64)
+
+        lat_face = _scalar_axis(k_face)
+        lat = _scalar_axis(k_center)
+    else:
+        lat_face = jnp.arcsin(jnp.tanh(dlon * k_face))
+        lat = jnp.arcsin(jnp.tanh(dlon * k_center))
 
     # Longitude (cell centres).
     lon_w_rad = lon_west_deg * jnp.pi / 180.0

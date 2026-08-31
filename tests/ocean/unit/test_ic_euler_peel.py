@@ -23,6 +23,7 @@ def test_planted_controls_fire(peel):
     assert peel.self_test() == {
         "field_mismatch_plant": "FIRED",
         "wrong_core_plant": "FIRED",
+        "initialization_gate_plant": "FIRED",
     }
 
 
@@ -73,3 +74,13 @@ def test_parser_requires_receipt_inputs(peel):
         "--output", "/tmp/e.json",
     ])
     assert args.output == Path("/tmp/e.json")
+
+
+def test_initialization_gate_fails_closed(peel):
+    rows = [{"name": name, "status": "PASS"}
+            for name in peel.INIT_ADMISSION_ROWS]
+    assert peel.initialization_admitted(rows)
+    rows[0]["status"] = "OVER_BAR"
+    assert not peel.initialization_admitted(rows)
+    with pytest.raises(ValueError, match="missing initialization"):
+        peel.initialization_admitted(rows[:-1])

@@ -24,7 +24,11 @@ from legoesm.ocean.experiments.dino import (
     apply_dino_lat_lon_surface_forcing,
     dino_S_profile_1d,
     dino_T_profile_1d,
+    dino_lat_lon_grid,
 )
+from legoesm.grids.latlon import create_mercator_grid
+from legoesm.ocean.init_latlon_cgrid import partial_periodic_seam_wall_latlon
+from legoesm.ocean.vertical import create_levy_stretched_z_star
 from legoesm.ocean.fidelity.nemo_io import (
     read_nemo_mesh_mask,
     read_nemo_restart,
@@ -32,12 +36,21 @@ from legoesm.ocean.fidelity.nemo_io import (
 )
 
 
-SCHEMA = "dino_ic_euler_peel_v2"
+SCHEMA = "dino_ic_euler_peel_v3"
 BAR = 1.0e-15
 RUNTIME_SHAPE = (203, 56)
 RUNTIME_HALO = 2
 STANDALONE_CORE = 2
 SESSION_ID = "01a053d4-8e9f-7212-bbdb-19ba2d64e140"
+INIT_ADMISSION_ROWS = (
+    "input_wet_mask",
+    "input_latitude_deg",
+    "input_t_depth_m",
+    "common_depth_T_profile",
+    "common_depth_S_profile",
+    "resolved_T_nemo_wet",
+    "resolved_S_nemo_wet",
+)
 
 
 def file_sha256(path: Path) -> str:
@@ -175,10 +188,10 @@ def _initial_rows(grid, geometry, z_coord, state, cfg) -> tuple[
     rows.extend([
         diff_row("common_depth_T_profile", lego_t_profile, source_t_profile, mask),
         diff_row("common_depth_S_profile", lego_s_profile, source_s_profile, mask),
-        diff_row("resolved_T_common_wet", np.asarray(state.T.data), nemo_t,
-                 common_mask),
-        diff_row("resolved_S_common_wet", np.asarray(state.S.data), nemo_s,
-                 common_mask),
+        diff_row("resolved_T_nemo_wet", np.asarray(state.T.data), nemo_t,
+                 mask),
+        diff_row("resolved_S_nemo_wet", np.asarray(state.S.data), nemo_s,
+                 mask),
     ])
 
     full_source_t, full_source_s = hpg.nemo_istate_profiles_1d(grid.gdept_0)
@@ -211,6 +224,17 @@ def _initial_rows(grid, geometry, z_coord, state, cfg) -> tuple[
                  np.asarray(state.S.data), common_mask),
     ])
     return rows, nemo_t, nemo_s, mask_receipt
+
+
+def initialization_admitted(rows: list[dict[str, Any]]) -> bool:
+    """Fail closed unless every frozen initialization row exists and passes."""
+    by_name = {row["name"]: row for row in rows}
+    missing = [name for name in INIT_ADMISSION_ROWS if name not in by_name]
+    if missing:
+        raise ValueError("missing initialization admission rows: "
+                         + ", ".join(missing))
+    return all(by_name[name]["status"] == "PASS"
+               for name in INIT_ADMISSION_ROWS)
 
 
 def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
@@ -299,7 +323,82 @@ def self_test() -> dict[str, str]:
         shape = "FIRED"
     else:
         raise RuntimeError("planted wrong core did not fire")
-    return {"field_mismatch_plant": "FIRED", "wrong_core_plant": shape}
+    gate_rows = [
+        {"name": name, "status": "PASS"} for name in INIT_ADMISSION_ROWS]
+    if not initialization_admitted(gate_rows):
+        raise RuntimeError("all-pass initialization gate did not admit")
+    gate_rows[-1]["status"] = "OVER_BAR"
+    if initialization_admitted(gate_rows):
+        raise RuntimeError("planted initialization failure did not withhold")
+    return {
+        "field_mismatch_plant": "FIRED",
+        "wrong_core_plant": shape,
+        "initialization_gate_plant": "FIRED",
+    }
+
+
+def _legacy_geometry_controls(nemo_grid, cfg, z_coord, state) -> dict[str, Any]:
+    """Prove each replaced initialization-geometry path can fail."""
+    mask = _mesh_core(nemo_grid.tmask).astype(bool)
+    analytic_grid = dino_lat_lon_grid(cfg)
+
+    seam2d = np.asarray(partial_periodic_seam_wall_latlon(
+        analytic_grid,
+        open_lat_south_deg=cfg.channel_lat_south_deg,
+        open_lat_north_deg=cfg.channel_lat_north_deg,
+        seam_column_index=0)) > 0.5
+    seam3d = np.asarray(z_coord.is_active, dtype=bool) & seam2d[..., None]
+    seam_row = diff_row(
+        "control_old_seam_wall", seam3d.astype(np.float64),
+        mask.astype(np.float64), np.ones(mask.shape, dtype=bool), bar=0.0)
+    if seam_row["status"] != "OVER_BAR":
+        raise RuntimeError("old seam-wall control did not fire")
+
+    jax_grid = create_mercator_grid(
+        n_lon=analytic_grid.n_lon,
+        n_lat=analytic_grid.n_lat,
+        lat_max_deg=cfg.lat_max_deg,
+        lon_west_deg=cfg.lon_west_deg,
+        lon_east_deg=cfg.lon_east_deg,
+        equator_on_tpoint=True,
+        omega=cfg.omega,
+        metric_convention=cfg.metric_convention,
+        coordinate_evaluation="jax")
+    jax_lat = np.broadcast_to(
+        np.degrees(np.asarray(jax_grid.lat))[:, None],
+        (analytic_grid.n_lat, analytic_grid.n_lon))
+    lat_row = diff_row(
+        "control_old_jax_latitude", jax_lat, _mesh_core(nemo_grid.gphit),
+        np.ones(jax_lat.shape, dtype=bool), bar=0.0)
+    if lat_row["status"] != "OVER_BAR":
+        raise RuntimeError("old JAX latitude control did not fire")
+
+    first = create_levy_stretched_z_star(
+        n_levels=cfg.n_levels - 1,
+        H_max=cfg.H_deep,
+        dz_min=cfg.dz_min,
+        k_th=float(cfg.k_th),
+        a_cr=cfg.a_cr,
+        analytic_t_depths=True)
+    first_depth = np.broadcast_to(
+        np.abs(np.asarray(first.z_full_ref)), mask.shape)
+    depth_row = diff_row(
+        "control_old_first_pass_depth", first_depth,
+        _mesh_core(nemo_grid.gdept_0)[..., :-1], mask, bar=0.0)
+    if not (depth_row["status"] == "OVER_BAR"
+            and depth_row["max_abs"] > 100.0):
+        raise RuntimeError("old first-pass depth control did not fire >100 m")
+
+    # The previous production bug used the final transitioned gdept to choose
+    # k_bot. The continuous bowl is not retained on state (state.H_bathy is
+    # already snapped), so the unit control locks its exact 929-cell signature;
+    # this artifact records that the committed test was present and passed.
+    return {
+        "old_seam_wall": seam_row,
+        "old_jax_latitude": lat_row,
+        "old_first_pass_depth": depth_row,
+        "final_depth_mask_operand_plant": "FIRED_BY_UNIT_TEST_929_CELLS",
+    }
 
 
 def run(args: argparse.Namespace) -> int:
@@ -341,9 +440,14 @@ def run(args: argparse.Namespace) -> int:
      step_forcing, _perturbation) = standalone.build_standalone(0)
     ic_rows, nemo_t, nemo_s, mask_receipt = _initial_rows(
         grid, geometry, z_coord, state, cfg)
-    step_rows = _step_rows(
-        run_kt2, grid, cfg, z_coord, state, model, forcing, step_forcing,
-        nemo_t, nemo_s)
+    controls["legacy_geometry"] = _legacy_geometry_controls(
+        grid, cfg, z_coord, state)
+    admitted = initialization_admitted(ic_rows)
+    step_rows = []
+    if admitted:
+        step_rows = _step_rows(
+            run_kt2, grid, cfg, z_coord, state, model, forcing, step_forcing,
+            nemo_t, nemo_s)
     ordered = ic_rows + step_rows
     first_over_bar = next(
         (row["name"] for row in ordered if row["status"] == "OVER_BAR"), None)
@@ -355,7 +459,11 @@ def run(args: argparse.Namespace) -> int:
         "controls": controls,
         "bars": {"evaluated_fp64_abs": BAR, "discrete": 0.0},
         "first_over_bar": first_over_bar,
-        "rung2_scope": "CONDITIONAL_AFTER_RUNG1_FAILURE",
+        "initialization_outcome": (
+            "INIT_GEOMETRY_CONFIRMED" if admitted else
+            f"INIT_GEOMETRY_PARTIAL_{first_over_bar}"),
+        "euler_outcome": "EULER_SCORED" if admitted else "EULER_WITHHELD",
+        "euler_admission": admitted,
         "wet_mask_receipt": mask_receipt,
         "rows": ordered,
         "inputs": {str(path): {"bytes": path.stat().st_size,

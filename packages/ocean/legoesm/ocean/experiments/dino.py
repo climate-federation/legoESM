@@ -836,6 +836,10 @@ class DINOConfig:
     # r1_exact preset selects "masked_zco".  MPAS keeps its own column
     # handling and rejects "masked_zco".
     vertical_coordinate: str = "zstar"
+    # NEMO DINO namusr_def rn_hco: join depth for zgr_sco_mi96's second
+    # profile pass. It is inert on the legacy zstar coordinate and is consumed
+    # only by masked_zco. The oracle cards pin it explicitly in DINO_RECIPES.
+    z_coordinate_transition_depth_m: float = 1000.0
     barotropic_solver: str = "implicit_cn"
     barotropic_implicit_theta_eta: float = 0.55
     # When barotropic_solver="rigid_lid", DINO applies the FULL Veros-faithful
@@ -1200,6 +1204,7 @@ DINO_RECIPES: dict[str, dict] = {
         "eos_depth": "geometric",                # key_qco z*/gdept depth for S-EOS
         # -- Vertical coordinate (namusr_def: ln_zco_nam=T, ln_zps_nam=F -> full-step z) --
         "vertical_coordinate": "masked_zco",
+        "z_coordinate_transition_depth_m": 1000.0,  # rn_hco
         # -- Hydrostatic PGF (namdyn_hpg: ln_hpg_sco=T — forced by qco/nonlinear
         #    free surface even on z-levels; dynhpg.F90:181 rejects hpg_zco).
         #    "nemo_sco" = the hpg_sco transcription: qco (1+r3t) thickness
@@ -2064,7 +2069,9 @@ def _gauss_ring(lon, lat, lon0: float, lat0: float, ring_radius: float,
     return (depth_top - depth_bot) * jnp.exp(arg) + depth_bot
 
 
-def dino_bathymetry(lon_deg, lat_deg, cfg: DINOConfig | None = None):
+def dino_bathymetry(lon_deg, lat_deg, cfg: DINOConfig | None = None, *,
+                    domain_bounds_deg: tuple[float, float, float, float]
+                    | None = None):
     """Build DINO basin bathymetry at the given (lon, lat) points.
 
     Ports the analytical bathymetry construction from Kamm et al. 2025
@@ -2098,11 +2105,18 @@ def dino_bathymetry(lon_deg, lat_deg, cfg: DINOConfig | None = None):
     lon_deg = jnp.asarray(lon_deg)
     lat_deg = jnp.asarray(lat_deg)
 
-    # Domain extents
-    lon_min = cfg.lon_west_deg
-    lon_max = cfg.lon_east_deg
-    lat_min = -cfg.lat_max_deg
-    lat_max = cfg.lat_max_deg
+    # Domain extents. NEMO's zgr_get_boundaries scans the construction domain,
+    # including its asymmetric two-ring halo reach, rather than the stored
+    # physical core. The faithful DINO grid supplies those source-derived
+    # bounds through dino_lat_lon_bowl; every other caller keeps the legacy
+    # nominal config bounds.
+    if domain_bounds_deg is None:
+        lon_min = cfg.lon_west_deg
+        lon_max = cfg.lon_east_deg
+        lat_min = -cfg.lat_max_deg
+        lat_max = cfg.lat_max_deg
+    else:
+        lon_min, lon_max, lat_min, lat_max = domain_bounds_deg
 
     width_lon = lon_max - lon_min     # = 50°
     cha_min = cfg.channel_lat_south_deg
@@ -2116,7 +2130,7 @@ def dino_bathymetry(lon_deg, lat_deg, cfg: DINOConfig | None = None):
     # writes s_phi = cos(rad·phi_max) · s_lambda, which is the inverse
     # convention. Trusting the code (produces Fig 1).
     dist_lam_deg = 1.0 / cfg.s_lambda_inv_deg                              # 3°
-    dist_phi_deg = math.cos(math.radians(cfg.lat_max_deg)) * dist_lam_deg  # ~1.03°
+    dist_phi_deg = math.cos(math.radians(lat_max)) * dist_lam_deg
 
     # ------------------------------------------------------------------
     # Channel modification (paper eq A4): inside the channel band, the
@@ -2623,7 +2637,7 @@ def create_dino_z_star(cfg: DINOConfig | None = None) -> OceanZStarCoordinate:
     )
 
 
-def dino_masked_zco_coordinate(z_ref, H_bowl):
+def dino_masked_zco_coordinate(z_ref, H_bowl, *, mask_t_depth_ref=None):
     """NEMO ``zgr_msk_top_bot`` masked z-levels for the DINO bowl.
 
     Reproduces DINO_R1's ``ln_zco`` vertical grid: a cell (i,j,k) is wet
@@ -2638,9 +2652,14 @@ def dino_masked_zco_coordinate(z_ref, H_bowl):
     Parameters
     ----------
     z_ref : OceanZStarCoordinate
-        The 36-level Lévy reference grid (``create_dino_z_star``).
+        The final 36-level Lévy reference grid (``create_dino_z_star``).
     H_bowl : array (n_lat, n_lon)
         Continuous bowl bathymetry [m, positive down]; <= 0 on land.
+    mask_t_depth_ref : array, optional
+        One-dimensional T-depth operand used to choose ``k_bot``. NEMO DINO
+        passes ``pdept_1d`` to ``zgr_msk_top_bot`` (``usrdef_zgr.F90:120``),
+        while its stepped/exported ``pdept`` is the later 3-D result from
+        ``zgr_sco_mi96``. ``None`` preserves the legacy same-ladder behavior.
 
     Returns
     -------
@@ -2651,12 +2670,15 @@ def dino_masked_zco_coordinate(z_ref, H_bowl):
     from legoesm.ocean.vertical import create_partial_cell_coordinate
 
     abs_half = jnp.abs(jnp.asarray(z_ref.z_half_ref))       # (nlev+1,)
-    # gdept(k) = the coordinate's own t-depths — ANALYTIC (mi96 zt=k+0.5)
-    # when the ladder was built with analytic_t_depths=True; NEMO's wet
-    # test uses pdept_1d, and midpoint surrogates put k_bot one level
-    # too shallow wherever H falls between the midpoint and the analytic
-    # centre (up to ~4.6 m apart on the DINO grid — codex r3 HIGH).
-    centers = jnp.abs(jnp.asarray(z_ref.z_full_ref))        # (nlev,)
+    # NEMO's wet test uses the one-dimensional pdept_1d operand, not the
+    # final 3-D pdept exported as gdept_0. These coincide on the legacy path
+    # but differ below rn_hco on the faithful DINO card.
+    centers = jnp.abs(jnp.asarray(
+        z_ref.z_full_ref if mask_t_depth_ref is None else mask_t_depth_ref))
+    if centers.shape != (z_ref.n_levels,):
+        raise ValueError(
+            f"mask_t_depth_ref shape {centers.shape} != "
+            f"({z_ref.n_levels},)")
     H = jnp.asarray(H_bowl)
     # NEMO rule: wet iff gdept(k) < H  (strict; usrdef_zgr WHERE clause)
     n_wet = jnp.sum(centers[None, None, :] < H[..., None], axis=-1)
@@ -2675,10 +2697,43 @@ def dino_lat_lon_bowl(grid, cfg: DINOConfig | None = None):
     if cfg is None:
         cfg = DINOConfig()
     lat_deg_1d = jnp.degrees(grid.lat)
-    lon_deg_1d = jnp.degrees(grid.lon)
-    lon_deg_1d = (lon_deg_1d + 180.0) % 360.0 - 180.0
+    if cfg.nemo_faithful_grid:
+        # usrdef_hgr.F90 constructs T longitudes directly in degrees as
+        # zlam0 + rn_e1_deg * REAL(mig-1).  Do not round-trip these analytic
+        # half-index operands through radians: that changes 3,315 physical
+        # values by one ULP before zgr_bat applies its wet-level thresholds.
+        ddeg = (cfg.lon_east_deg - cfg.lon_west_deg) / grid.n_lon
+        lon_deg_1d = jnp.asarray(
+            cfg.lon_west_deg + ddeg * (np.arange(grid.n_lon) + 0.5),
+            dtype=grid.lon.dtype,
+        )
+    else:
+        lon_deg_1d = jnp.degrees(grid.lon)
+        lon_deg_1d = (lon_deg_1d + 180.0) % 360.0 - 180.0
     lon2d, lat2d = jnp.meshgrid(lon_deg_1d, lat_deg_1d, indexing="xy")
-    return dino_bathymetry(lon2d, lat2d, cfg)
+    bounds = None
+    if cfg.nemo_faithful_grid:
+        # usrdef_zgr::zgr_get_boundaries scans NEMO's nn_hls=2 construction
+        # frame. Relative to the physical faces it includes hls-1 rings at the
+        # low edge and hls rings at the high edge (RUN_KT2 ocean.output:
+        # lon 0..51; Mercator indices -98.5..99.5). Derive rather than fit the
+        # printed degrees so the receipt remains analytic.
+        halo = 2
+        ddeg = (cfg.lon_east_deg - cfg.lon_west_deg) / grid.n_lon
+        K = (grid.n_lat - 1) // 2
+        rad = 3.141592653589793 / 180.0
+        inv_rad = 1.0 / rad
+
+        def _nemo_lat_deg(index):
+            return inv_rad * math.asin(math.tanh((ddeg * rad) * index))
+
+        bounds = (
+            cfg.lon_west_deg - (halo - 1) * ddeg,
+            cfg.lon_east_deg + halo * ddeg,
+            _nemo_lat_deg(-K - 0.5 - (halo - 1)),
+            _nemo_lat_deg(K + 0.5 + halo),
+        )
+    return dino_bathymetry(lon2d, lat2d, cfg, domain_bounds_deg=bounds)
 
 
 def dino_lat_lon_vertical(grid, cfg: DINOConfig | None = None):
@@ -2703,9 +2758,23 @@ def dino_lat_lon_vertical(grid, cfg: DINOConfig | None = None):
             k_th=float(cfg.k_th),
             a_cr=cfg.a_cr,
             analytic_t_depths=True,
+            transition_depth_m=cfg.z_coordinate_transition_depth_m,
+        )
+        # usrdef_zgr.F90:112-120: zgr_sco_mi96 returns both the 1-D
+        # reference ladder and the transitioned 3-D ladder, then k_bot is
+        # selected from pdept_1d. Reuse the same constructor with its existing
+        # no-transition selector to reproduce that distinct mask operand.
+        z_nemo_mask = create_levy_stretched_z_star(
+            n_levels=cfg.n_levels - 1,
+            H_max=cfg.H_deep,
+            dz_min=cfg.dz_min,
+            k_th=float(cfg.k_th),
+            a_cr=cfg.a_cr,
+            analytic_t_depths=True,
         )
         coord, _H_snap = dino_masked_zco_coordinate(
-            z_nemo, dino_lat_lon_bowl(grid, cfg))
+            z_nemo, dino_lat_lon_bowl(grid, cfg),
+            mask_t_depth_ref=z_nemo_mask.z_full_ref)
         return coord
     raise ValueError(
         f"unknown DINOConfig.vertical_coordinate "
@@ -2859,7 +2928,10 @@ def nemo_faithful_dino_config(base: DINOConfig | None = None) -> DINOConfig:
         nemo_faithful_grid=True,
         lon_west_deg=_NEMO_DINO_LON_WEST,
         lon_east_deg=_NEMO_DINO_LON_EAST,
-        sill_lon_m_deg=_NEMO_DINO_LON_WEST,
+        # zgr_bat anchors gauss_ring/smooth_step at zminlam returned by
+        # zgr_get_boundaries, not the first physical U face. With nn_hls=2
+        # that source-owned minimum is 0 degrees (ocean.output:382).
+        sill_lon_m_deg=0.0,
     )
 
 
@@ -2909,6 +2981,7 @@ def dino_lat_lon_grid(cfg: DINOConfig | None = None, n_lon: int = 50):
             # readers of grid.dy/grid.area (diagnostics, CFL) then see the
             # same convention as the tendencies.
             metric_convention=cfg.metric_convention,
+            coordinate_evaluation="nemo_scalar",
         )
 
     return create_mercator_grid(
@@ -2978,6 +3051,12 @@ def dino_lat_lon_initial_state_arrays(
                 "mask would silently mis-broadcast against T/S/H_bathy."
             )
         land_mask = jnp.asarray(land_mask_override).astype(T.dtype)
+    elif cfg.nemo_faithful_grid:
+        # NEMO DINO selects ln_Iperio=.true.; its physical 195 x 48 core has
+        # no synthetic western seam-wall column. The bathymetric bowl remains
+        # shallow there, but zgr_msk_top_bot keeps it wet. Reuse the existing
+        # faithful-grid selector rather than adding a second topology switch.
+        land_mask = jnp.ones((grid.n_lat, grid.n_lon), dtype=T.dtype)
     else:
         # Land mask: thin wrapper over the general lat-lon partial-
         # periodic seam-wall helper. Channel is open between
