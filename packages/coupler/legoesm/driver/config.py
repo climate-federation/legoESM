@@ -839,6 +839,19 @@ class ExperimentConfig(NamedTuple):
     # rises, the throttle shrinks it back, and evaporation stops (2 W/m2 over
     # bare soil, surface 8-12 K hot).
     land_surface_scheme: str = "two_leaf"
+    # --- P-model optimality switches for the coupled land tile ---
+    # Routed onto the ACTIVE surface scheme's config (two_leaf/clm_ml canopy
+    # switches; simple_seb -> the big-leaf StomataConfig). "prescribed"/"table"
+    # keep legacy behaviour bit-for-bit.
+    land_capacity_scheme: str = "prescribed"   # "prescribed" | "p_model"
+    land_g1_source: str = "table"              # "table" | "p_model"
+    # Per-scheme stomatal-model selection ("" = keep that scheme's default).
+    land_two_leaf_stomatal_model: str = ""     # "" | ball_berry | medlyn | leuning
+    land_clm_ml_stomatal_model: str = ""       # "" | medlyn | ball_berry | wue | leuning
+    land_simple_seb_stomata_model: str = ""    # "" | ball_berry | medlyn | leuning
+    # Allow resuming from a land IC written before the P-model acclimation
+    # state existed (explicit, recorded reset; refused otherwise).
+    land_pmodel_cold_restart: bool = False
     # Initial multilayer soil water as a fraction of saturation (theta_init =
     # frac * theta_sat) for the cold-start (#730). Default 0.5 is byte-identical to
     # the init_multilayer_land_state default. The multilayer over-evaporation wet
@@ -2720,6 +2733,58 @@ class ExperimentConfig(NamedTuple):
             )
         # Land surface-scheme membership (mirror the model_driver dispatch so a
         # typo fails here, not at run time).
+        _valid_cap = ("prescribed", "p_model")
+        if self.land_capacity_scheme not in _valid_cap:
+            errors.append(
+                f"land_capacity_scheme must be one of {_valid_cap}, "
+                f"got {self.land_capacity_scheme!r}")
+        _valid_g1 = ("table", "p_model")
+        if self.land_g1_source not in _valid_g1:
+            errors.append(
+                f"land_g1_source must be one of {_valid_g1}, "
+                f"got {self.land_g1_source!r}")
+        _valid_tl_sm = ("", "ball_berry", "medlyn", "leuning")
+        if self.land_two_leaf_stomatal_model not in _valid_tl_sm:
+            errors.append(
+                f"land_two_leaf_stomatal_model must be one of {_valid_tl_sm}, "
+                f"got {self.land_two_leaf_stomatal_model!r}")
+        _valid_ml_sm = ("", "medlyn", "ball_berry", "wue", "leuning")
+        if self.land_clm_ml_stomatal_model not in _valid_ml_sm:
+            errors.append(
+                f"land_clm_ml_stomatal_model must be one of {_valid_ml_sm}, "
+                f"got {self.land_clm_ml_stomatal_model!r}")
+        _valid_seb_sm = ("", "ball_berry", "medlyn", "leuning")
+        if self.land_simple_seb_stomata_model not in _valid_seb_sm:
+            errors.append(
+                f"land_simple_seb_stomata_model must be one of "
+                f"{_valid_seb_sm}, got "
+                f"{self.land_simple_seb_stomata_model!r}")
+        # Cross-checks: the switches must not be silently inert.
+        _pm_any = (self.land_capacity_scheme == "p_model"
+                   or self.land_g1_source == "p_model")
+        if (_pm_any and not self.use_multilayer_land
+                and self.land_surface_scheme != "simple_seb"):
+            errors.append(
+                "a land P-model switch is set but use_multilayer_land is off: "
+                "the pipeline slab carries no acclimation state, so the "
+                "switch would be silently inert")
+        if (_pm_any and self.land_surface_scheme == "simple_seb"
+                and not self.land_stomatal_beta):
+            errors.append(
+                "a land P-model switch is set under simple_seb but "
+                "land_stomatal_beta is off: the big-leaf stomatal path is "
+                "disabled and the switch would be silently inert")
+        if self.land_g1_source == "p_model":
+            _eff_sm = {
+                "two_leaf": self.land_two_leaf_stomatal_model or "ball_berry",
+                "clm_ml": self.land_clm_ml_stomatal_model or "wue",
+                "simple_seb": self.land_simple_seb_stomata_model or "ball_berry",
+            }.get(self.land_surface_scheme, "")
+            if _eff_sm != "medlyn":
+                errors.append(
+                    "land_g1_source='p_model' predicts a MEDLYN slope; select "
+                    "the medlyn stomatal model for the active scheme "
+                    f"(effective model is {_eff_sm!r})")
         _valid_land_surface = ("simple_seb", "two_leaf", "clm_ml")
         if self.land_surface_scheme not in _valid_land_surface:
             errors.append(

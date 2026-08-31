@@ -61,6 +61,13 @@ EXPECTED_VALIDATED: frozenset[str] = frozenset(
         "surface_thermo_convention",
         "surface_stability_scheme",  # already guarded (config.py); ratchet entry
         "land_surface_scheme",
+        # P-model land switches + per-scheme stomatal selectors (membership-
+        # checked in validate_strict incl. inertness cross-checks; 2026-08-31).
+        "land_capacity_scheme",
+        "land_g1_source",
+        "land_two_leaf_stomatal_model",
+        "land_clm_ml_stomatal_model",
+        "land_simple_seb_stomata_model",
         "gravity_wave_drag",
         "physics_parameterization",
         "ic",

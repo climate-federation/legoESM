@@ -134,3 +134,100 @@ if __name__ == "__main__":
         test_land_ml_survives_carry_aux_npz_roundtrip(Path(d))
     test_restore_is_noop_for_slab_land()
     print("ok")
+
+
+# ---------------------------------------------------------------------------
+# P-model acclimation state (flattened land_ml_pmodel_* keys; PR6)
+# ---------------------------------------------------------------------------
+from legoesm.land.p_model import PModelAcclimState  # noqa: E402
+
+
+def _pm_state(scale: float) -> PModelAcclimState:
+    return PModelAcclimState(*[
+        scale * (i + 1) * np.ones((4,), dtype=np.float32) for i in range(5)])
+
+
+def _cfg(cold=False):
+    return SimpleNamespace(convection="none", land_pmodel_cold_restart=cold)
+
+
+def test_pmodel_acclim_survives_roundtrip(tmp_path):
+    saved = _state(1.0)._replace(pmodel_acclim=_pm_state(1.0))
+    src = SimpleNamespace(
+        _carry_aux={}, _land_ml_state=saved,
+        _double_moment_step_inputs=lambda: {}, config=_cfg())
+    aux = ModelDriver._checkpoint_carry_aux(src)
+    assert "land_ml_pmodel_iabs_mean" in aux
+    assert "land_ml_pmodel_acclim" not in aux  # flattened, never stacked
+    np.savez(tmp_path / "c.npz", **aux)
+    loaded = dict(np.load(tmp_path / "c.npz"))
+    dst = SimpleNamespace(
+        _carry_aux=loaded,
+        _land_ml_state=_state(99.0)._replace(pmodel_acclim=_pm_state(9.0)),
+        config=_cfg())
+    ModelDriver._restore_land_ml_from_carry_aux(dst)
+    got = dst._land_ml_state.pmodel_acclim
+    assert isinstance(got, PModelAcclimState)  # type restored, not a raw array
+    for name, want in zip(PModelAcclimState._fields, _pm_state(1.0)):
+        np.testing.assert_allclose(getattr(got, name), want)
+
+
+def test_old_checkpoint_into_pmodel_run_refused_unless_flagged(tmp_path):
+    src = SimpleNamespace(
+        _carry_aux={}, _land_ml_state=_state(1.0),  # NO pmodel state saved
+        _double_moment_step_inputs=lambda: {}, config=_cfg())
+    aux = ModelDriver._checkpoint_carry_aux(src)
+    template = _state(2.0)._replace(pmodel_acclim=_pm_state(3.0))
+    dst = SimpleNamespace(_carry_aux=dict(aux), _land_ml_state=template,
+                          config=_cfg(cold=False))
+    with pytest.raises(ValueError, match="cold-start"):
+        ModelDriver._restore_land_ml_from_carry_aux(dst)
+    dst2 = SimpleNamespace(_carry_aux=dict(aux), _land_ml_state=template,
+                           config=_cfg(cold=True))
+    ModelDriver._restore_land_ml_from_carry_aux(dst2)
+    got = dst2._land_ml_state.pmodel_acclim
+    for name, want in zip(PModelAcclimState._fields, _pm_state(3.0)):
+        np.testing.assert_allclose(getattr(got, name), want)  # fresh init kept
+
+
+def test_pmodel_checkpoint_into_switched_off_run_refused_unless_flagged(tmp_path):
+    saved = _state(1.0)._replace(pmodel_acclim=_pm_state(1.0))
+    src = SimpleNamespace(
+        _carry_aux={}, _land_ml_state=saved,
+        _double_moment_step_inputs=lambda: {}, config=_cfg())
+    aux = ModelDriver._checkpoint_carry_aux(src)
+    template = _state(2.0)  # switches off: pmodel_acclim None
+    dst = SimpleNamespace(_carry_aux=dict(aux), _land_ml_state=template,
+                          config=_cfg(cold=False))
+    with pytest.raises(ValueError, match="discard"):
+        ModelDriver._restore_land_ml_from_carry_aux(dst)
+    dst2 = SimpleNamespace(_carry_aux=dict(aux), _land_ml_state=template,
+                           config=_cfg(cold=True))
+    ModelDriver._restore_land_ml_from_carry_aux(dst2)
+    assert dst2._land_ml_state.pmodel_acclim is None
+
+
+def test_partial_pmodel_keys_refused(tmp_path):
+    saved = _state(1.0)._replace(pmodel_acclim=_pm_state(1.0))
+    src = SimpleNamespace(
+        _carry_aux={}, _land_ml_state=saved,
+        _double_moment_step_inputs=lambda: {}, config=_cfg())
+    aux = ModelDriver._checkpoint_carry_aux(src)
+    del aux["land_ml_pmodel_vpd_mean_pa"]
+    dst = SimpleNamespace(
+        _carry_aux=dict(aux),
+        _land_ml_state=_state(2.0)._replace(pmodel_acclim=_pm_state(3.0)),
+        config=_cfg())
+    with pytest.raises(ValueError, match="PARTIAL"):
+        ModelDriver._restore_land_ml_from_carry_aux(dst)
+
+
+def test_clm_ml_canopy_state_checkpoint_refused_loudly():
+    """Pre-existing hazard turned refusal: np.asarray on the nested CLM-ML
+    canopy pytree would silently corrupt the checkpoint."""
+    saved = _state(1.0)._replace(canopy_state=object())
+    src = SimpleNamespace(
+        _carry_aux={}, _land_ml_state=saved,
+        _double_moment_step_inputs=lambda: {}, config=_cfg())
+    with pytest.raises(NotImplementedError, match="canopy_state"):
+        ModelDriver._checkpoint_carry_aux(src)
