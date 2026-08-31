@@ -62,7 +62,7 @@ def test_nemo_testcase_cards_are_fp64_source_pinned(
     assert not np.asarray(state.eta.data).any()
 
     cfg = recipe.model_config
-    assert cfg.eos == "veros_gsw"
+    assert cfg.eos == "nemo_teos10"
     assert cfg.tracer_advection == "fct2"
     assert cfg.momentum_advection == "flux_form"
     assert cfg.momentum_flux_scheme == "upwind3"

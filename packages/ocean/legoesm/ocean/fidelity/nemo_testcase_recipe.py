@@ -44,7 +44,9 @@ def _model_config() -> LatLonCGridOceanConfig:
 
     return LatLonCGridOceanConfig.from_flat(
         constants=NEMO_CONSTANTS_CONFIG,
-        eos="veros_gsw",
+        # Resolved ln_TEOS10=.true.; NEMO 5.0.2 eosbn2.F90:1920-2108
+        # selects the Roquet TEOS-10 coefficient table and :260-288 evaluates it.
+        eos="nemo_teos10",
         tracer_advection="fct2",
         tracer_time_integrator="euler",
         momentum_advection="flux_form",
