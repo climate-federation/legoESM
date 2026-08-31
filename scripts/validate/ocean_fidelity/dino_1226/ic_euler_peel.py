@@ -678,6 +678,11 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
             standalone.DT_SECONDS, wet, evaluation="nemo_literal"))(
                 content_t, content_s, ktr, h_after_nemo, e3w_now,
                 lego_t_full)
+    eager_literal_t, eager_literal_s = (
+        implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
+            content_t / h_after_nemo, content_s / h_after_nemo,
+            content_t, content_s, ktr, h_after_nemo, e3w_now,
+            standalone.DT_SECONDS, lego_t_full, evaluation="nemo_literal"))
     host_literal_t = _host_literal_nemo_tracer_solve(
         np.asarray(content_t), ktr, h_after_nemo, e3w_now,
         lego_t_full, standalone.DT_SECONDS)
@@ -781,6 +786,16 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
             diff_row(
                 "POST_HOC_host_literal_S_after_trazdf",
                 _model_core(host_literal_s),
+                _runtime_dump(run_kt2 / "stp_dump_21_trazdf_sal.bin"),
+                common_t),
+            diff_row(
+                "POST_HOC_eager_literal_T_after_trazdf",
+                _model_core(eager_literal_t),
+                _runtime_dump(run_kt2 / "stp_dump_21_trazdf_tem.bin"),
+                common_t),
+            diff_row(
+                "POST_HOC_eager_literal_S_after_trazdf",
+                _model_core(eager_literal_s),
                 _runtime_dump(run_kt2 / "stp_dump_21_trazdf_sal.bin"),
                 common_t),
         ],
