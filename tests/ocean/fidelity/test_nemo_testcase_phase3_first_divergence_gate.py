@@ -57,11 +57,19 @@ def test_planted_rhs_violation_turns_numerical_row_red():
     assert planted["normalized_max_abs"] > gate.BAR
 
 
-def test_nonzero_stage_depth_mean_cannot_pass_as_split_stage_zero():
-    oracle = np.array([0.0, 1.0e-3], dtype=np.float64)
-    candidate = np.zeros_like(oracle)
-    row = gate.score("stage", oracle, candidate, np.ones(2, dtype=bool))
-    assert row["status"] == "DEBT"
+def test_thickness_weighted_mean_does_not_silently_become_level_mean():
+    values = np.array([[0.0, 2.0]], dtype=np.float64)
+    stretched = np.array([[1.0, 3.0]], dtype=np.float64)
+    got = gate.thickness_weighted_mean(values, stretched)
+    np.testing.assert_array_equal(got, np.array([1.5]))
+    assert float(got[0]) != float(np.mean(values, axis=-1)[0])
+
+
+def test_level_mean_assumption_holds_only_for_uniform_thickness():
+    values = np.array([[0.0, 2.0]], dtype=np.float64)
+    uniform = np.ones_like(values)
+    got = gate.thickness_weighted_mean(values, uniform)
+    np.testing.assert_array_equal(got, np.mean(values, axis=-1))
 
 
 def test_parsers_reject_bad_magic(tmp_path):

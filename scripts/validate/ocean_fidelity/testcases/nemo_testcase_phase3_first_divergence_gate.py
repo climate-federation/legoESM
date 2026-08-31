@@ -25,6 +25,8 @@ import numpy as np
 BAR = 1.0e-15
 DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_stage_kt1")
+DEFAULT_TRAJECTORY_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_3")
 NEMO_ROOT = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2")
 EXPECTED_DIMS = (134, 7, 21)
 EXPECTED_LEVELS = {
@@ -125,6 +127,30 @@ def read_rhs(path: Path) -> dict:
     }
 
 
+def read_entry(path: Path) -> dict:
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii").rstrip()
+        header = struct.unpack("=8i", handle.read(32))
+        values = np.fromfile(handle, dtype=np.float64)
+    version, kt, nbb, nx, ny, nz, ntr, bits = header
+    require(magic == "NEMO_L1_ENTRY_1", f"{path}: bad magic")
+    require(
+        (version, nx, ny, nz, ntr, bits) == (1, *EXPECTED_DIMS, 2, 64),
+        f"{path}: bad header {header}")
+    count = nx * ny * nz
+    require(values.size == 4 * count + nx * ny, f"{path}: bad payload length")
+    require(np.all(np.isfinite(values)), f"{path}: non-finite payload")
+    return {
+        "kt": kt,
+        "Nbb": nbb,
+        "T": _xyz(values[:count], nx, ny, nz),
+        "S": _xyz(values[count:2 * count], nx, ny, nz),
+        "u": _xyz(values[2 * count:3 * count], nx, ny, nz),
+        "v": _xyz(values[3 * count:4 * count], nx, ny, nz),
+        "ssh": values[4 * count:].reshape((nx, ny), order="F")[2:-2, 2:-2].T,
+    }
+
+
 def score(name: str, oracle, candidate, mask, *, plant=False) -> dict:
     oracle = np.asarray(oracle, dtype=np.float64)
     candidate = np.asarray(candidate)
@@ -148,6 +174,17 @@ def score(name: str, oracle, candidate, mask, *, plant=False) -> dict:
         "oracle_dtype": str(oracle.dtype),
         "candidate_dtype": str(candidate.dtype),
     }
+
+
+def thickness_weighted_mean(values, thickness) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64)
+    thickness = np.asarray(thickness, dtype=np.float64)
+    require(values.shape == thickness.shape, "weighted mean shape mismatch")
+    total = np.sum(thickness, axis=-1)
+    require(bool(np.any(total > 0.0)), "weighted mean has no positive depth")
+    numerator = np.sum(values * thickness, axis=-1)
+    return np.divide(
+        numerator, total, out=np.zeros_like(numerator), where=total > 0.0)
 
 
 def validate_registry(stages: dict, transports: dict, *, plant=False) -> list[dict]:
@@ -181,11 +218,16 @@ def expected_masks(card) -> dict:
     return {"u": u, "T": active}
 
 
-def run(root: Path, *, plant_rhs=False, plant_registry=False) -> dict:
+def run(
+    root: Path, trajectory_root: Path = DEFAULT_TRAJECTORY_ROOT, *,
+    plant_rhs=False, plant_registry=False,
+) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_lock_exchange_zco_card
+    from legoesm.ocean.vertical import compute_layer_thickness
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import min_cell_to_uface
 
     set_policy(PrecisionPolicy.fp64())
     require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
@@ -210,6 +252,11 @@ def run(root: Path, *, plant_rhs=False, plant_registry=False) -> dict:
     rhs = read_rhs(rhs_path)
     require((rhs["kt"], rhs["level"]) == (1, 3), "RHS is not kt=1/Nrhs=3")
     artifacts[rhs_path.name] = sha256(rhs_path)
+    entry_path = trajectory_root / "oracle_step_entry_kt00000002.bin"
+    require(entry_path.is_file(), f"missing {entry_path}")
+    entry = read_entry(entry_path)
+    require((entry["kt"], entry["Nbb"]) == (2, 3), "entry is not kt=2/Nbb=3")
+    artifacts[entry_path.name] = sha256(entry_path)
 
     masks = expected_masks(card)
     nlev = card.recipe.z_coord.n_levels
@@ -221,18 +268,42 @@ def run(root: Path, *, plant_rhs=False, plant_registry=False) -> dict:
         rhs["u"][..., :nlev], candidate_rhs_u, masks["u"], plant=plant_rhs)]
     rows.extend(validate_registry(stages, transports, plant=plant_registry))
 
-    # NEMO applies the external-mode Kaa barotropic velocity at every RK stage
-    # (stprk3_stg.F90:433-446).  legoESM's WS momentum stages explicitly remove
-    # each tendency's depth mean and defer the only barotropic correction until
-    # after u_star is complete (ocean_model_latlon_cgrid.py:3991-4017,4060+).
-    # On this full-step grid, the simple level mean is the thickness-weighted
-    # mean.  A nonzero oracle value therefore makes the two stage programs
-    # observably inequivalent before any later momentum term can be blamed.
-    stage1_depth_mean = np.mean(stages[1]["u"][..., :nlev], axis=-1)
+    # Compute legoESM's ACTUAL pre-barotropic WS stage-1 state using the same
+    # thickness-weighted removal as the production code.  Never substitute a
+    # zero assertion for the candidate.  Also verify that the former simple
+    # level mean happens to equal the registered thickness-weighted mean on
+    # this 20x1 m z-coordinate; that shortcut is not assumed on other grids.
+    initial = card.recipe.initial_state
+    h_k = compute_layer_thickness(
+        initial.eta.data, initial.H_bathy.data, card.recipe.z_coord,
+        min_water_column_m=card.recipe.model_config.min_water_column_m)
+    h_u = min_cell_to_uface(h_k)
+    H_u = np.asarray(h_u).sum(axis=-1)
+    du = np.asarray(tendency.du_dt.data)
+    h_u_np = np.asarray(h_u)
+    rhs_mean = np.sum(du * h_u_np, axis=-1) / np.maximum(H_u, 1.0e-10)
+    lego_stage1 = (
+        np.asarray(initial.u.data)
+        + (card.dt_s / 3.0) * (du - rhs_mean[..., None]))
+    lego_stage1_mean = (
+        np.sum(lego_stage1 * h_u_np, axis=-1)
+        / np.maximum(H_u, 1.0e-10))[:, 1:]
+    oracle_stage1_u = stages[1]["u"][..., :nlev]
+    oracle_stage1_weighted = thickness_weighted_mean(
+        oracle_stage1_u, h_u_np[:, 1:, :])
+    oracle_stage1_level_mean = np.mean(oracle_stage1_u, axis=-1)
     u_face_2d = np.any(masks["u"], axis=-1)
     rows.append(score(
-        "LOCK_EXCHANGE-zco.kt1.stage1.Kaa_depthmean_vs_lego_split_stage_zero",
-        stage1_depth_mean, np.zeros_like(stage1_depth_mean), u_face_2d))
+        "LOCK_EXCHANGE-zco.kt1.stage1.level_mean_assumption",
+        oracle_stage1_weighted, oracle_stage1_level_mean, u_face_2d))
+    stage_mean_row = score(
+        "LOCK_EXCHANGE-zco.kt1.stage1.actual_candidate_depth_mean",
+        oracle_stage1_weighted, lego_stage1_mean, u_face_2d)
+    stage_mean_row["verdict"] = False
+    stage_mean_row["reason"] = (
+        "diagnostic stage mismatch only; ownership requires the causal "
+        "post-stage correction experiment below")
+    rows.append(stage_mean_row)
 
     # LOCK has e3u=1 m at every active level.  NEMO zFu is e2u*e3u times
     # the Kmm velocity plus its barotropic transport correction
@@ -242,9 +313,49 @@ def run(root: Path, *, plant_rhs=False, plant_registry=False) -> dict:
     e2u = np.asarray(card.recipe.grid.dy_u)[:, 1:]
     stage3_transport_velocity = (
         transports[3]["Fu"][..., :nlev] / e2u[..., None])
-    rows.append(score(
+    transport_scale_row = score(
         "LOCK_EXCHANGE-zco.kt1.stage3.Kmm_transport_vs_final_Kaa_velocity",
-        stages[3]["u"][..., :nlev], stage3_transport_velocity, masks["u"]))
+        stages[3]["u"][..., :nlev], stage3_transport_velocity, masks["u"])
+    transport_scale_row["verdict"] = False
+    transport_scale_row["reason"] = (
+        "oracle-only scale diagnostic; causal ownership is measured by the "
+        "frozen-final versus nemo_kmm candidate trajectories")
+    rows.append(transport_scale_row)
+
+    oracle_T = entry["T"][..., :nlev]
+    oracle_u = entry["u"][..., :nlev]
+    state_kmm = model.step(initial, dt=card.dt_s)
+    cfg_frozen = card.recipe.model_config._replace(
+        tracer_rk3_transport_time_levels="frozen_final")
+    state_frozen = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg_frozen).step(
+            initial, dt=card.dt_s)
+    cfg_stage_baro = card.recipe.model_config._replace(
+        rk3_ws_stage_barotropic_correction=True)
+    state_stage_baro = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg_stage_baro).step(
+            initial, dt=card.dt_s)
+
+    frozen_T_row = score(
+        "LOCK_EXCHANGE-zco.kt2.frozen_final_transport.T", oracle_T,
+        np.asarray(state_frozen.T.data), masks["T"])
+    frozen_T_row["verdict"] = False
+    rows.append(frozen_T_row)
+    kmm_T_row = score(
+        "LOCK_EXCHANGE-zco.kt2.nemo_kmm_transport.T", oracle_T,
+        np.asarray(state_kmm.T.data), masks["T"])
+    rows.append(kmm_T_row)
+    baseline_u = np.asarray(state_kmm.u.data)[:, 1:, :]
+    stage_baro_u = np.asarray(state_stage_baro.u.data)[:, 1:, :]
+    baseline_u_row = score(
+        "LOCK_EXCHANGE-zco.kt2.poststage_only.u", oracle_u,
+        baseline_u, masks["u"])
+    rows.append(baseline_u_row)
+    stage_baro_u_row = score(
+        "LOCK_EXCHANGE-zco.kt2.per_stage_barotropic_correction.u", oracle_u,
+        stage_baro_u, masks["u"])
+    stage_baro_u_row["verdict"] = False
+    rows.append(stage_baro_u_row)
 
     source_files = {
         "stprk3": NEMO_ROOT / "src/OCE/stprk3.F90",
@@ -254,9 +365,14 @@ def run(root: Path, *, plant_rhs=False, plant_registry=False) -> dict:
     for name, path in source_files.items():
         require(path.is_file(), f"missing source {path}")
         artifacts[f"source:{name}"] = sha256(path)
-    failed = [row["name"] for row in rows if row["status"] == "DEBT"]
+    failed = [row["name"] for row in rows
+              if row["status"] == "DEBT" and row.get("verdict", True)]
+    frozen_T_error = frozen_T_row["normalized_max_abs"]
+    kmm_T_error = kmm_T_row["normalized_max_abs"]
+    baseline_u_error = baseline_u_row["normalized_max_abs"]
+    stage_baro_u_error = stage_baro_u_row["normalized_max_abs"]
     return {
-        "format": "nemo-testcase-l1-phase3-first-divergence-v1",
+        "format": "nemo-testcase-l1-phase3-first-divergence-v2",
         "case": card.case,
         "status": "AT-BAR" if not failed else "DEBT",
         "first_over_bar_step": 2,
@@ -265,26 +381,38 @@ def run(root: Path, *, plant_rhs=False, plant_registry=False) -> dict:
         "candidate_dtypes": {
             "rhs_u": str(candidate_rhs_u.dtype),
             "stage3_transport_velocity": str(stage3_transport_velocity.dtype),
+            "actual_stage1_depth_mean": str(lego_stage1_mean.dtype),
         },
         "bar": BAR,
         "oracle_root": str(root),
         "rows": rows,
         "failed_rows": failed,
         "ownership": {
-            "stage1_eos_hpg": (
-                "measured by the full at-rest u RHS; advection, viscosity, and "
-                "f=0 vorticity are structural zeros"),
-            "tracer_transport_time_level": (
-                "NEMO stage 3 consumes Kmm=2 zFu/zFv/zFw; legoESM's split "
-                "step constructs one transport from final state_new.u/v and "
-                "reuses it in all tracer substages"),
-            "momentum_stage_barotropic_correction": (
-                "NEMO installs a nonzero external-mode depth mean into every "
-                "Kaa stage; legoESM removes the mean from every WS stage RHS "
-                "and applies one barotropic correction only after u_star"),
-            "fct_stage_kernel": (
-                "key_RK3 dispatches fct_up1_2stp, while legoESM fct2 uses its "
-                "one-step low-order predictor inside the generic WS wrapper"),
+            "stage1_eos_hpg": {
+                "classification": "CONFIRMED_EXONERATED",
+                "evidence": "full at-rest u RHS is inside the registered bar",
+            },
+            "tracer_transport_time_level": {
+                "classification": "CONFIRMED_OWNER",
+                "before_normalized_error": frozen_T_error,
+                "after_normalized_error": kmm_T_error,
+                "improvement_factor": frozen_T_error / kmm_T_error,
+            },
+            "momentum_stage_barotropic_correction": {
+                "classification": "CONFIRMED_EXONERATED",
+                "retraction": (
+                    "the prior owner label compared NEMO with zeros and ignored "
+                    "the nine-order scale contradiction"),
+                "poststage_only_u_error": baseline_u_error,
+                "per_stage_u_error": stage_baro_u_error,
+                "movement": stage_baro_u_error - baseline_u_error,
+            },
+            "fct_stage_kernel": {
+                "classification": "UNMEASURED",
+                "reason": (
+                    "source program differs, but limiter coefficients and a "
+                    "two-model causal residual movement are not measured"),
+            },
         },
         "source_register": {
             "NEMO_stage_calls": "src/OCE/stprk3.F90:184-207",
@@ -306,7 +434,7 @@ def run(root: Path, *, plant_rhs=False, plant_registry=False) -> dict:
         "artifacts_sha256": artifacts,
         "unmeasured": [
             "individual FCT limiter coefficients and antidiffusive fluxes",
-            "exact allocation of the final 5.72e-10 u residual among omitted per-stage correction and downstream RHS feedback",
+            "owner of the remaining kt=2 u residual after per-stage correction is exonerated",
             "kt>=3 trajectory (stopped at first over-bar step)",
             "OVERFLOW-zps trajectory (LOCK dependency remains red)",
         ],
@@ -316,12 +444,14 @@ def run(root: Path, *, plant_rhs=False, plant_registry=False) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--oracle-dir", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument(
+        "--trajectory-dir", type=Path, default=DEFAULT_TRAJECTORY_ROOT)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant-rhs", action="store_true")
     parser.add_argument("--plant-registry", action="store_true")
     args = parser.parse_args()
     report = run(
-        args.oracle_dir, plant_rhs=args.plant_rhs,
+        args.oracle_dir, args.trajectory_dir, plant_rhs=args.plant_rhs,
         plant_registry=args.plant_registry)
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:

@@ -127,6 +127,24 @@ def score(
     return row
 
 
+def mark_uninformative(row: dict, field: str, kt: int, reference, mask) -> dict:
+    """Downgrade vacuous at-bar controls without hiding a real failure."""
+    if row["status"] != "AT-BAR" or kt < 2:
+        return row
+    wet_values = np.asarray(reference)[np.asarray(mask, dtype=bool)]
+    if field == "S" and np.unique(wet_values).size == 1:
+        row["status"] = "UNINFORMATIVE"
+        row["reason"] = (
+            "oracle salinity is spatially uniform (n_unique=1); "
+            "this row cannot detect transport/time-level errors")
+    elif field == "ssh" and np.count_nonzero(wet_values) == 0:
+        row["status"] = "UNINFORMATIVE"
+        row["reason"] = (
+            "oracle SSH is identically zero; the row only bounds "
+            "candidate absolute noise and cannot corroborate alignment")
+    return row
+
+
 def run(case: str, oracle_root: Path, max_step: int, *, plant=False) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -165,6 +183,8 @@ def run(case: str, oracle_root: Path, max_step: int, *, plant=False) -> dict:
                 f"{case}.kt{kt}.before.{field}", reference,
                 candidate[field], masks[field], plant=plant and kt == 1
                 and field == "T", allow_empty_no_active_face=field == "v"))
+            rows[-1] = mark_uninformative(
+                rows[-1], field, kt, reference, masks[field])
         exact_here = all(row["exact"] for row in rows)
         over = [row["name"].rsplit(".", 1)[-1] for row in rows
                 if row["status"] == "DEBT"]
@@ -198,6 +218,10 @@ def run(case: str, oracle_root: Path, max_step: int, *, plant=False) -> dict:
             "n_barotropic_substeps": cfg.barotropic.n_barotropic_substeps,
             "vertical_momentum_scheme": cfg.vertical_momentum_scheme,
             "tracer_time_integrator": cfg.tracer_time_integrator,
+            "tracer_rk3_transport_time_levels": (
+                cfg.tracer_rk3_transport_time_levels),
+            "rk3_ws_stage_barotropic_correction": (
+                cfg.rk3_ws_stage_barotropic_correction),
         },
         "first_over_bar": first_over_bar,
         "steps": steps,

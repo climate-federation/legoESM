@@ -55,3 +55,22 @@ def test_report_selector_inventory_includes_eos_depth_and_resolved_substeps():
     source = GATE_PATH.read_text()
     assert '"eos_depth": cfg.eos_depth' in source
     assert '"n_barotropic_substeps": cfg.barotropic.n_barotropic_substeps' in source
+    assert '"tracer_rk3_transport_time_levels"' in source
+
+
+def test_uniform_and_zero_rows_are_not_allowed_to_imply_corroboration():
+    mask = np.ones(3, dtype=bool)
+    salt = gate.mark_uninformative(
+        {"status": "AT-BAR"}, "S", 2, np.full(3, 35.0), mask)
+    ssh = gate.mark_uninformative(
+        {"status": "AT-BAR"}, "ssh", 2, np.zeros(3), mask)
+    assert salt["status"] == "UNINFORMATIVE"
+    assert "n_unique=1" in salt["reason"]
+    assert ssh["status"] == "UNINFORMATIVE"
+    assert "identically zero" in ssh["reason"]
+
+
+def test_uninformative_classifier_never_hides_debt():
+    row = gate.mark_uninformative(
+        {"status": "DEBT"}, "S", 2, np.full(2, 35.0), np.ones(2, bool))
+    assert row["status"] == "DEBT"
