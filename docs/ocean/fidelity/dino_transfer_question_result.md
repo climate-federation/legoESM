@@ -406,3 +406,61 @@ after that row passes.
 `kamm_twin_90d.py --snap-final` now adds the exact `--days` endpoint to the 3-D
 snapshot schedule and fails if `--save-3d` is absent. Thus a future 359-day
 repeat can capture day 359 even though it is not a multiple of 30.
+
+## T1 initialization-geometry repair — exact; initialization stops next
+
+The geometry preregistration is
+`PREREG_dino_standalone_init_geometry_repair.md`. The clean CPU/fp64 v3 peel
+was produced by `17a03abde73248d95feb23f184a198fb39ec9f3a`; its artifact
+SHA-256 is
+`448696a845a6f751e3acf68dd8bb31ee4956bfbb3dca70a7538a628bfc1792ec`.
+
+The repaired operands and their owners are:
+
+- **Mercator T latitude:** NEMO forms the integer half-index at
+  `cfgs/DINO/MY_SRC/usrdef_hgr.F90:96` and evaluates
+  `ASIN(TANH(rn_e1_deg*rad*ztj))` at line 106. The faithful grid now selects
+  the scalar source-order evaluator at
+  `packages/core/legoesm/grids/latlon.py:723-736`; the general JAX evaluator
+  remains the default.
+- **Final stepped depth:** NEMO constructs `pdept_1d` at
+  `cfgs/DINO/MY_SRC/zgr_lib.F90:161-169`, constructs the transitioned 3-D
+  `pdept` at lines 173-181, and recomputes depths from `e3` at lines 184-189.
+  legoESM extends the existing `create_levy_stretched_z_star` constructor with
+  the `rn_hco=1000 m` transition and resolves it explicitly on both DINO oracle
+  cards.
+- **Wet-level mask:** the subtle operand is not the exported transitioned
+  `gdept`. `usrdef_zgr.F90:112-120` passes the one-dimensional `pdept_1d` to
+  `zgr_msk_top_bot`. legoESM now builds that operand through the same vertical
+  constructor's existing no-transition path and passes it separately at
+  `packages/ocean/legoesm/ocean/experiments/dino.py:2763-2777`. Using final
+  `gdept` for this decision is the planted old bug and changes exactly 929
+  cells.
+- **Horizontal bathymetry frame/topology:** `zgr_get_boundaries` reads U/V
+  construction boundaries (`usrdef_zgr.F90:405-408`), which the executed run
+  prints as lon `0..51` and latitude
+  `-69.678802541192084..70.023256525040722`. The faithful bowl derives that
+  two-ring frame, anchors the sill at the western U boundary, and omits the
+  artificial seam wall from the 195 x 48 scored core. General DINO defaults
+  are unchanged.
+
+The registered geometry rows are now exact: `input_wet_mask`,
+`input_latitude_deg`, and `input_t_depth_m` each have zero mismatches and zero
+maximum difference. All old-path controls fire: seam wall (5,085 cells), JAX
+latitude (5,472 values; `5.684341886080802e-14` degree), first-pass-only final
+depth (80,768 values; `104.96931566119792 m`), and the 929-cell final-depth
+mask plant.
+
+Initialization is not yet admitted. The next row, source-order evaluation of
+the common-depth profiles, exceeds the frozen `1e-15` bar by
+`4.440892098500626e-15 degC` and `1.4210854715202004e-14 PSU`. Resolved
+standalone T/S remain over bar by `0.04079998207163005 degC` and
+`0.003602379509992204 PSU`; substituting NEMO's live latitude/bottom anchors
+on the now-identical geometry makes both fields exactly equal, identifying the
+larger remaining state owner as analytic-anchor evaluation rather than
+geometry. The artifact therefore records
+`INIT_GEOMETRY_PARTIAL_common_depth_T_profile` and `EULER_WITHHELD`.
+
+No Euler row was executed and no new standalone-year arm is issued. The first
+repair target is closed, but a fresh year is not worthwhile until the profile
+source-order and live-anchor rows pass the registered initialization gate.
