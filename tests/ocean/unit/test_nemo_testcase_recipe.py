@@ -69,6 +69,8 @@ def test_nemo_testcase_cards_are_fp64_source_pinned(
     assert cfg.momentum_flux_scheme == "upwind3"
     assert cfg.momentum_time_integrator == "rk3_ws"
     assert cfg.tracer_time_integrator == "rk3_ws"
+    assert cfg.tracer_rk3_transport_time_levels == "nemo_kmm"
+    assert cfg.rk3_ws_stage_barotropic_correction is False
     assert cfg.vertical_momentum_scheme == "nemo_up3"
     assert cfg.pgf_scheme == "nemo_sco"
     assert cfg.pgf_quadrature == "nemo_trapezoid"

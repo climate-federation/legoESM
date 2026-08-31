@@ -57,6 +57,9 @@ def _model_config(
         # NEMO key_RK3: stprk3_stg.F90:112-249,519-559 restarts tracer
         # stages from Kbb with dt/3, dt/2, and dt.
         tracer_time_integrator="rk3_ws",
+        # stprk3.F90:194-207 swaps Kaa into Kmm between stages;
+        # stprk3_stg.F90:250-303 builds each tracer transport from that Kmm.
+        tracer_rk3_transport_time_levels="nemo_kmm",
         momentum_advection="flux_form",
         momentum_flux_scheme="upwind3",
         momentum_time_integrator="rk3_ws",

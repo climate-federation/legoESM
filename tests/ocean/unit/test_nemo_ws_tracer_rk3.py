@@ -4,6 +4,8 @@ import jax.numpy as jnp
 import numpy as np
 
 import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as model_module
+from legoesm.core.precision import PrecisionPolicy, set_policy
+from legoesm.ocean.fidelity.nemo_testcase_recipe import build_lock_exchange_zco_card
 
 
 def test_nemo_ws_tracer_stage_polynomial(monkeypatch):
@@ -44,3 +46,24 @@ def test_nemo_ws_tracer_zero_flux_is_exact_identity(monkeypatch):
     )
     np.testing.assert_array_equal(np.asarray(got_a), np.asarray(tracer))
     np.testing.assert_array_equal(np.asarray(got_b), np.asarray(tracer))
+
+
+def test_nemo_ws_real_fct_flux_changes_on_wrong_transport_time_level():
+    """Exercise real FCT geometry; a frozen final velocity must fail this pin."""
+    set_policy(PrecisionPolicy.fp64())
+    card = build_lock_exchange_zco_card()
+    cfg_kmm = card.recipe.model_config
+    cfg_wrong = cfg_kmm._replace(
+        tracer_rk3_transport_time_levels="frozen_final")
+    model_kmm = model_module.LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg_kmm)
+    model_wrong = model_module.LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg_wrong)
+    state_kmm = model_kmm.step(card.recipe.initial_state, dt=card.dt_s)
+    state_wrong = model_wrong.step(card.recipe.initial_state, dt=card.dt_s)
+    delta = np.max(np.abs(
+        np.asarray(state_kmm.T.data) - np.asarray(state_wrong.T.data)))
+    # Wrong Kaa reuse changes the real limiter/flux path by ~2.70e-5 K.
+    assert delta > 2.0e-5
+    np.testing.assert_array_equal(
+        np.asarray(state_kmm.S.data), np.asarray(state_wrong.S.data))

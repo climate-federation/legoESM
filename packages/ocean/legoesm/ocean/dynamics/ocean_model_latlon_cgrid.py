@@ -994,6 +994,7 @@ def _nemo_ws_rk3_tracer_pair_step(
     active_3d: jnp.ndarray,
     recon_fill_mask: jnp.ndarray | None = None,
     linssh_top_flux: bool = False,
+    stage_transport_geometry=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """NEMO key_RK3 tracer stage program (Wicker--Skamarock form).
 
@@ -1005,10 +1006,19 @@ def _nemo_ws_rk3_tracer_pair_step(
     same stage Courant factor.  This selector changes no existing ``rk3``
     (SSP) user.
     """
-    def _flux_pair(a_val, b_val, stage_dt):
+    if stage_transport_geometry is None:
+        stage_transport_geometry = (
+            (mass_flux_u, mass_flux_v, w_baro, h_k_old, h_u_old, h_v_old),
+        ) * 3
+    if len(stage_transport_geometry) != 3:
+        raise ValueError("stage_transport_geometry must contain exactly 3 stages")
+
+    def _flux_pair(a_val, b_val, stage_dt, stage_index):
+        mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage = (
+            stage_transport_geometry[stage_index])
         (dh_a, dv_a), (dh_b, dv_b) = compute_advection_flux_div_pair(
-            a_val, b_val, tracer_advection, mass_flux_u, mass_flux_v,
-            w_baro, h_k_old, h_u_old, h_v_old, grid, stage_dt,
+            a_val, b_val, tracer_advection, mf_u, mf_v,
+            w_stage, h_stage, hu_stage, hv_stage, grid, stage_dt,
             recon_fill_mask=recon_fill_mask,
             linssh_top_flux=linssh_top_flux,
         )
@@ -1021,13 +1031,13 @@ def _nemo_ws_rk3_tracer_pair_step(
 
     h_one_third = h_k_old + (h_k_new - h_k_old) / 3.0
     h_one_half = 0.5 * (h_k_old + h_k_new)
-    fd0_a, fd0_b = _flux_pair(tr_a, tr_b, dt / 3.0)
+    fd0_a, fd0_b = _flux_pair(tr_a, tr_b, dt / 3.0, 0)
     a1 = _stage(tr_a, fd0_a, dt / 3.0, h_one_third)
     b1 = _stage(tr_b, fd0_b, dt / 3.0, h_one_third)
-    fd1_a, fd1_b = _flux_pair(a1, b1, dt / 2.0)
+    fd1_a, fd1_b = _flux_pair(a1, b1, dt / 2.0, 1)
     a2 = _stage(tr_a, fd1_a, dt / 2.0, h_one_half)
     b2 = _stage(tr_b, fd1_b, dt / 2.0, h_one_half)
-    fd2_a, fd2_b = _flux_pair(a2, b2, dt)
+    fd2_a, fd2_b = _flux_pair(a2, b2, dt, 2)
     return (
         _stage(tr_a, fd2_a, dt, h_k_new),
         _stage(tr_b, fd2_b, dt, h_k_new),
@@ -2940,6 +2950,28 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"tracer_time_integrator must be one of {_valid_time_int}, "
                 f"got {config.tracer_time_integrator!r}")
+        _rk3_transport_levels = getattr(
+            config, "tracer_rk3_transport_time_levels", "frozen_final")
+        if _rk3_transport_levels not in ("frozen_final", "nemo_kmm"):
+            raise ValueError(
+                "tracer_rk3_transport_time_levels must be 'frozen_final' or "
+                f"'nemo_kmm', got {_rk3_transport_levels!r}")
+        if (_rk3_transport_levels == "nemo_kmm"
+                and config.tracer_time_integrator != "rk3_ws"):
+            raise ValueError(
+                'tracer_rk3_transport_time_levels="nemo_kmm" requires '
+                'tracer_time_integrator="rk3_ws"')
+        if (_rk3_transport_levels == "nemo_kmm"
+                and getattr(config, "momentum_time_integrator", "euler")
+                != "rk3_ws"):
+            raise ValueError(
+                'tracer_rk3_transport_time_levels="nemo_kmm" requires '
+                'momentum_time_integrator="rk3_ws" so Kmm stages exist')
+        if (_rk3_transport_levels == "nemo_kmm"
+                and getattr(config, "gm_redi", None) is not None):
+            raise ValueError(
+                'tracer_rk3_transport_time_levels="nemo_kmm" does not yet '
+                "support staged GM bolus transports")
         if getattr(config, "store_salt_flux", False):
             # Refuse-not-ignore: the capture stores "the flux the model
             # applied", which is only well-defined per step on the euler
@@ -2986,6 +3018,11 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"momentum_time_integrator must be one of {_valid_mom_int}, "
                 f"got {_mom_ti!r}")
+        if (getattr(config, "rk3_ws_stage_barotropic_correction", False)
+                and _mom_ti != "rk3_ws"):
+            raise ValueError(
+                "rk3_ws_stage_barotropic_correction=True requires "
+                'momentum_time_integrator="rk3_ws"')
 
         # Implicit surface-forcing placement (Veros) requires the implicit
         # vertical-mixing solve — that is where the surface TRACER source is
@@ -3936,6 +3973,7 @@ class LatLonCGridOceanModel:
         # ``self.tendencies(..., dt=dt)`` call keeps ``dt`` (= dt_tracer), which
         # is the tracer flux-limiter timestep.  dt_mom_ratio=1.0 (default) ⇒
         # dt_mom == dt ⇒ bit-identical for all existing configs.
+        _nemo_ws_velocity_stages = None
         if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3":
             u0 = state.u.data
             v0 = state.v.data
@@ -4011,6 +4049,10 @@ class LatLonCGridOceanModel:
             p1u, p1v = _mom_pert_ws(u1, v1, True)
             u2 = u0 + (dt_mom / 2.0) * p1u
             v2 = v0 + (dt_mom / 2.0) * p1v
+            # Kmm inputs to NEMO tracer stages 1/2/3 after the stprk3.F90
+            # swaps are Kbb, stage-1 Kaa, and stage-2 Kaa respectively
+            # (stprk3.F90:194-207; stprk3_stg.F90:250-303,456-519).
+            _nemo_ws_velocity_stages = ((u0, v0), (u1, v1), (u2, v2))
             # stage 3 (dt), RHS(u2) with lateral viscosity
             p2u, p2v = _mom_pert_ws(u2, v2, False)
             u_star = u0 + dt_mom * p2u
@@ -4364,6 +4406,55 @@ class LatLonCGridOceanModel:
                 **_baro_seed,
             )
 
+        # Causal NEMO-RK3 experiment: HYB is the live stprk3_stg barotropic
+        # update (module default at :44; stages at :143-144,206-207,225), so
+        # every Kaa stage receives the final external-mode velocity.  The
+        # historical legoESM split instead runs all baroclinic WS stages with
+        # zero-mean RHS and performs one replacement after u_star.  When this
+        # opt-in is selected, recompute the two tendency-bearing stages with
+        # the ACTUAL post-solve depth mean and install that same mean at every
+        # Kaa, exactly where NEMO does at stprk3_stg.F90:433-446.  Defaults stay
+        # byte-identical; this option exists so the ownership experiment is a
+        # real candidate-vs-candidate trajectory, not a zero-array assertion.
+        if getattr(_cfg_b, "rk3_ws_stage_barotropic_correction", False):
+            def _replace_stage_mean(u_in, v_in, target_u, target_v):
+                mean_u = (jnp.sum(u_in * h_u_pre, axis=-1) / H_u_pre
+                          * state.u_mask.data)
+                mean_v = (jnp.sum(v_in * h_v_pre, axis=-1) / H_v_pre
+                          * state.v_mask.data)
+                return (
+                    (u_in + (target_u - mean_u)[..., jnp.newaxis])
+                    * u_mask_3d,
+                    (v_in + (target_v - mean_v)[..., jnp.newaxis])
+                    * v_mask_3d,
+                )
+
+            target_u = (jnp.sum(state_new.u.data * h_u_pre, axis=-1)
+                        / H_u_pre * state.u_mask.data)
+            target_v = (jnp.sum(state_new.v.data * h_v_pre, axis=-1)
+                        / H_v_pre * state.v_mask.data)
+            u1_raw = u0 + (dt_mom / 3.0) * du_dt_pert
+            v1_raw = v0 + (dt_mom / 3.0) * dv_dt_pert
+            u1_corr, v1_corr = _replace_stage_mean(
+                u1_raw, v1_raw, target_u, target_v)
+            p1u_corr, p1v_corr = _mom_pert_ws(u1_corr, v1_corr, True)
+            u2_raw = u0 + (dt_mom / 2.0) * p1u_corr
+            v2_raw = v0 + (dt_mom / 2.0) * p1v_corr
+            u2_corr, v2_corr = _replace_stage_mean(
+                u2_raw, v2_raw, target_u, target_v)
+            p2u_corr, p2v_corr = _mom_pert_ws(u2_corr, v2_corr, False)
+            u3_raw = u0 + dt_mom * p2u_corr
+            v3_raw = v0 + dt_mom * p2v_corr
+            u3_corr, v3_corr = _replace_stage_mean(
+                u3_raw, v3_raw, target_u, target_v)
+            u3_corr = u3_corr.at[:, -1].set(u3_corr[:, 0])
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=u3_corr),
+                v=state_new.v.replace(data=v3_corr),
+            )
+            _nemo_ws_velocity_stages = (
+                (u0, v0), (u1_corr, v1_corr), (u2_corr, v2_corr))
+
         # NEMO's WZV call 2 consumes the raw boxcar pssh(Kaa) produced by
         # dyn_spg_ts (:991,1003). Keep that exact within-step operand before
         # legoESM's separate global eta-drift projection below modifies the
@@ -4679,6 +4770,47 @@ class LatLonCGridOceanModel:
             w_baro = diagnose_w_from_flux_div(
                 flux_div_k, _zc, thickness_weighted=True,
             )
+
+        _nemo_ws_stage_transport_geometry = None
+        if (getattr(_cfg_b, "tracer_rk3_transport_time_levels",
+                    "frozen_final") == "nemo_kmm"):
+            if _nemo_ws_velocity_stages is None:
+                raise ValueError(
+                    "nemo_kmm tracer transports require materialized WS "
+                    "momentum stages")
+            # QCO Kmm thickness ladder: stage 1 reads Kbb, stage 2 reads the
+            # stage-1 Kaa (1/3), and stage 3 reads stage-2 Kaa (1/2).
+            # stprk3_stg.F90:160-168,195-213,225-234 constructs those r3/e3
+            # levels before :250-303 builds zFu/zFv/zFw from Kmm.
+            h_k_one_third = h_k_old + (h_k_new - h_k_old) / 3.0
+            h_k_one_half = 0.5 * (h_k_old + h_k_new)
+            stage_h_k = (h_k_old, h_k_one_third, h_k_one_half)
+
+            def _stage_transport(stage_velocity, h_stage):
+                u_stage, v_stage = stage_velocity
+                hu_stage = _min_uface_op(h_stage)
+                hv_stage = _min_vface_op(h_stage)
+                Hu_stage_depth = jnp.sum(hu_stage, axis=-1)
+                Hv_stage_depth = jnp.sum(hv_stage, axis=-1)
+                Hu_stage_raw = jnp.sum(hu_stage * u_stage, axis=-1)
+                Hv_stage_raw = jnp.sum(hv_stage * v_stage, axis=-1)
+                u_stage_corr = u_stage + (
+                    (Hu_avg - Hu_stage_raw)
+                    / jnp.maximum(Hu_stage_depth, 1.0e-10))[..., jnp.newaxis]
+                v_stage_corr = v_stage + (
+                    (Hv_avg - Hv_stage_raw)
+                    / jnp.maximum(Hv_stage_depth, 1.0e-10))[..., jnp.newaxis]
+                mf_u = hu_stage * u_stage_corr * u_mask_3d_tracer
+                mf_v = hv_stage * v_stage_corr * v_mask_3d_tracer
+                stage_div = divergence_cgrid(mf_u, mf_v, _grid)
+                w_stage = diagnose_w_from_flux_div(
+                    stage_div, _zc, thickness_weighted=True)
+                return mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage
+
+            _nemo_ws_stage_transport_geometry = tuple(
+                _stage_transport(velocity, h_stage)
+                for velocity, h_stage in zip(
+                    _nemo_ws_velocity_stages, stage_h_k, strict=True))
 
         # Advecting mass fluxes for the TRACER scheme.  Default = the base
         # (momentum/continuity) mass flux; when GM runs with
@@ -5246,6 +5378,7 @@ class LatLonCGridOceanModel:
                     h_k_old, h_k_new, h_u_old, h_v_old,
                     _grid, dt, active_3d, recon_fill_mask=_wall_fill_mask,
                     linssh_top_flux=_linssh,
+                    stage_transport_geometry=_nemo_ws_stage_transport_geometry,
                 )
                 _pair_divs = (None, None)
             else:
