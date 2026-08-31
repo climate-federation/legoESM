@@ -221,6 +221,19 @@ def run(root: Path, *, plant_rhs=False, plant_registry=False) -> dict:
         rhs["u"][..., :nlev], candidate_rhs_u, masks["u"], plant=plant_rhs)]
     rows.extend(validate_registry(stages, transports, plant=plant_registry))
 
+    # NEMO applies the external-mode Kaa barotropic velocity at every RK stage
+    # (stprk3_stg.F90:433-446).  legoESM's WS momentum stages explicitly remove
+    # each tendency's depth mean and defer the only barotropic correction until
+    # after u_star is complete (ocean_model_latlon_cgrid.py:3991-4017,4060+).
+    # On this full-step grid, the simple level mean is the thickness-weighted
+    # mean.  A nonzero oracle value therefore makes the two stage programs
+    # observably inequivalent before any later momentum term can be blamed.
+    stage1_depth_mean = np.mean(stages[1]["u"][..., :nlev], axis=-1)
+    u_face_2d = np.any(masks["u"], axis=-1)
+    rows.append(score(
+        "LOCK_EXCHANGE-zco.kt1.stage1.Kaa_depthmean_vs_lego_split_stage_zero",
+        stage1_depth_mean, np.zeros_like(stage1_depth_mean), u_face_2d))
+
     # LOCK has e3u=1 m at every active level.  NEMO zFu is e2u*e3u times
     # the Kmm velocity plus its barotropic transport correction
     # (stprk3_stg.F90:257-303).  Compare that actual stage-3 tracer transport
@@ -265,6 +278,10 @@ def run(root: Path, *, plant_rhs=False, plant_registry=False) -> dict:
                 "NEMO stage 3 consumes Kmm=2 zFu/zFv/zFw; legoESM's split "
                 "step constructs one transport from final state_new.u/v and "
                 "reuses it in all tracer substages"),
+            "momentum_stage_barotropic_correction": (
+                "NEMO installs a nonzero external-mode depth mean into every "
+                "Kaa stage; legoESM removes the mean from every WS stage RHS "
+                "and applies one barotropic correction only after u_star"),
             "fct_stage_kernel": (
                 "key_RK3 dispatches fct_up1_2stp, while legoESM fct2 uses its "
                 "one-step low-order predictor inside the generic WS wrapper"),
@@ -282,11 +299,14 @@ def run(root: Path, *, plant_rhs=False, plant_registry=False) -> dict:
             "lego_WS_wrapper": (
                 "packages/ocean/legoesm/ocean/dynamics/"
                 "ocean_model_latlon_cgrid.py:5242-5251"),
+            "lego_WS_momentum_split": (
+                "packages/ocean/legoesm/ocean/dynamics/"
+                "ocean_model_latlon_cgrid.py:3991-4017,4060-4065"),
         },
         "artifacts_sha256": artifacts,
         "unmeasured": [
             "individual FCT limiter coefficients and antidiffusive fluxes",
-            "post-stage1 momentum split between per-stage barotropic correction and later RHS terms",
+            "exact allocation of the final 5.72e-10 u residual among omitted per-stage correction and downstream RHS feedback",
             "kt>=3 trajectory (stopped at first over-bar step)",
             "OVERFLOW-zps trajectory (LOCK dependency remains red)",
         ],

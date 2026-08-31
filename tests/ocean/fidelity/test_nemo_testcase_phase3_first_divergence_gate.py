@@ -57,6 +57,13 @@ def test_planted_rhs_violation_turns_numerical_row_red():
     assert planted["normalized_max_abs"] > gate.BAR
 
 
+def test_nonzero_stage_depth_mean_cannot_pass_as_split_stage_zero():
+    oracle = np.array([0.0, 1.0e-3], dtype=np.float64)
+    candidate = np.zeros_like(oracle)
+    row = gate.score("stage", oracle, candidate, np.ones(2, dtype=bool))
+    assert row["status"] == "DEBT"
+
+
 def test_parsers_reject_bad_magic(tmp_path):
     path = tmp_path / "bad.bin"
     path.write_bytes(b"NOT_A_STAGE_____" + b"\0" * 64)
