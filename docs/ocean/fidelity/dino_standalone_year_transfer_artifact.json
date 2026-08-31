@@ -1,4 +1,10 @@
 {
+  "claim_scope": {
+    "confirmed": "one-year cold-start transfer discriminator",
+    "not_claimed": "six-member 20-year climate-family equivalence",
+    "reason": "the runner reserves claim_admissible for its 20-year schedule",
+    "runner_manifest_claim_admissible": false
+  },
   "controls": {
     "core_frame_alignment": "PASS",
     "full_frame_alignment": "PASS",
@@ -80,7 +86,7 @@
   },
   "outcome": "CONFIRM",
   "producer_dirty_tracked_files": [],
-  "producer_git_sha": "d14e8eb696de6fa24ef84e662fde6ccc17200c91",
+  "producer_git_sha": "079432b47fc94336dd69d81aa23cc1deed1deb9c",
   "repairs": [
     "initialization geometry: Mercator latitude, stepped depth/mask, construction frame",
     "initialization profile arithmetic: scalar libm tanh, source association, live anchors",

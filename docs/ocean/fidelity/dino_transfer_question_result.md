@@ -22,9 +22,9 @@ scored against the independent NEMO from-rest year endpoint
 `RUN_TRAJ_Y1/DINO_00011520_restart.nc`. The committed scorer is
 `scripts/validate/ocean_fidelity/dino_1226/standalone_year_transfer_receipt.py`;
 the committed receipt is `dino_standalone_year_transfer_artifact.json`, SHA-256
-`23e08fdf4084b6e346d3631aecac150fbe2b64379117024eec3c81fe9f2b21b2`.
+`50b6952e46deb15296b8aeb8149caad27122b81a4f39e59e01b2cdbca3d82ca0`.
 It reports `OUTCOME=CONFIRM` from clean producer
-`d14e8eb696de6fa24ef84e662fde6ccc17200c91`.
+`079432b47fc94336dd69d81aa23cc1deed1deb9c`.
 
 The headline day-360 scores are:
 
