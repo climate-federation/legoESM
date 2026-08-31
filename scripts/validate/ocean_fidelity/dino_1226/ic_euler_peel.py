@@ -406,12 +406,15 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
         S_before=common.S, eta_before=common.eta)
 
     def _cold_impl(st, ext_rate, apply_vmix):
+        n2_bundle = model._tke_step_entry_n2_bundle(
+            st, z_coord=z_coord, config=model.config)
         return model._step_impl(
             st, standalone.DT_SECONDS, surface_forcing=step_forcing,
             _apply_implicit_vmix=apply_vmix,
             _barotropic_before_state=(
                 common.eta.data, common.u.data, common.v.data),
             _external_tracer_rate=ext_rate,
+            _tke_n2_bundle_override=n2_bundle,
             _apply_cold_start_after_reconcile=False,
             z_coord=z_coord, config=model.config)
 
