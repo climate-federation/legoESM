@@ -81,10 +81,11 @@ from legoesm.land.leaf_biophysics import (
     arrhenius_factor,
     water_viscosity_ratio,
 )
-from legoesm.land.canopy.photosynthesis import (
-    jmax_temperature_response,
-    vcmax_temperature_response,
-)
+# NB: the Kattge & Knorr 25C-normalisation responses are imported at FUNCTION
+# scope inside acclimated_capacities: a top-level import closes the cycle
+# land.config -> p_model -> canopy.photosynthesis -> canopy.__init__ ->
+# canopy.config -> p_model (CLAUDE.md: function-scope deferred imports for
+# legitimate cross-module cycles).
 
 __physics_contract__ = {
     "summary": (
@@ -338,6 +339,11 @@ def acclimated_capacities(
             "PModelAcclimState. Initialise it (init_pmodel_acclim) or select "
             "capacity_scheme='prescribed' / g1_source='table'."
         )
+    from legoesm.land.canopy.photosynthesis import (
+        jmax_temperature_response,
+        vcmax_temperature_response,
+    )
+
     tg_k = acclim.t_mean_K
     tg_c = tg_k - constants.T_freeze
     chi, xi, ci, gamma_star, big_k = optimal_chi(
