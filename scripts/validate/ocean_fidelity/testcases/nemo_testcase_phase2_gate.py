@@ -23,6 +23,9 @@ UNMEASURED = [
     "bn2",
     "fct_tendency",
     "adaptive_vertical_advection_partition",
+    "active_up3_vertical_momentum_parity",
+    "oracle_barotropic_time_filters",
+    "tracer_rk3_parity",
     "bbl_transport",
 ]
 ROOTS = {
