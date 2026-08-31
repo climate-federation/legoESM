@@ -698,13 +698,19 @@ def _step_multilayer_land_impl(
             # INTERIM REFUSAL: the P-model optimum is C3 (FvCB); a C4 PFT
             # column under the injection would silently run C4 physiology on
             # a C3 optimum.  PFTs are static host ints, so check loudly here.
-            from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import (
-                MLpftconMod as _pftmod)
-            _pfts = ([int(x) for x in clm_ml_pft_per_col]
-                     if clm_ml_pft_per_col is not None
-                     else [int(_cc_ml.pft_clm)])
+            from legoesm.land.canopy.clm_ml_backend.clm_src_main import (
+                pftconMod as _pftmod)
+            try:
+                _pfts = ([int(x) for x in clm_ml_pft_per_col]
+                         if clm_ml_pft_per_col is not None
+                         else [int(_cc_ml.pft_clm)])
+            except (TypeError, jax.errors.TracerIntegerConversionError) as e:
+                raise ValueError(
+                    "the CLM-ML P-model C4 check needs CONCRETE host PFT "
+                    "indices; clm_ml_pft_per_col arrived traced. Pass the "
+                    "static per-column PFT list.") from e
             _c4 = [pf for pf in _pfts
-                   if int(round(float(_pftmod.MLpftcon.c3psn[pf]))) != 1]
+                   if int(round(float(_pftmod.pftcon.c3psn[pf]))) != 1]
             if _c4:
                 raise ValueError(
                     f"CLM-ML P-model capacity/g1 source does not support C4 "

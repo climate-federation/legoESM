@@ -998,10 +998,17 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
                 ps_init_pa=jnp.mean(fz.p_surface),
                 cfg=land_config.p_model,
                 co2_init_ppm=jnp.mean(fz.co2_ppmv))
-            _pm_traj = acclim_trajectory(
+            _traj_post = acclim_trajectory(
                 _init, T_K=fz.T_lowest, ppfd=_ppfd, vpd_pa=_vpd,
                 co2_ppm=fz.co2_ppmv, ps_pa=fz.p_surface,
                 cfg=land_config.p_model, dt=float(d.dt_s))
+            # PRE-step alignment (parity with the prognostic lane, which
+            # evaluates capacities from the state BEFORE advancing it):
+            # step i uses the state after step i-1; step 0 uses the init.
+            _pm_traj = jax.tree_util.tree_map(
+                lambda leaf, i0: jnp.concatenate(
+                    [i0[None, ...], leaf[:-1]], axis=0),
+                _traj_post, _init)
             print(f"  p_model: diagnostic pre-pass acclimation trajectory "
                   f"({int(fz.T_lowest.shape[0])} steps, causal running means; "
                   f"cold-start from site-mean T/Ps/CO2)")

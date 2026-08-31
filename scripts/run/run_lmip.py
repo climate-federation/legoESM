@@ -551,10 +551,9 @@ def _load_restart(restart_path: Path, config: MultiLayerLandConfig,
     # P-model acclimation state: restore when present; a P-model-active config
     # resuming an archive WITHOUT it is a scientific reset of the acclimated
     # capacities and is refused unless --pmodel-cold-restart made it explicit.
-    from legoesm.land.surface_scheme import TwoLeafCanopyConfig as _TLC
+    from legoesm.land.p_model import pmodel_switches_active
     _ss = config.surface_scheme
-    _pm_active = isinstance(_ss, _TLC) and (
-        _ss.capacity_scheme == "p_model" or _ss.g1_source == "p_model")
+    _pm_active = pmodel_switches_active(_ss, config.stomata)
     _pm_keys = [f"pmodel_{f}" for f in PModelAcclimState._fields]
     if all(k in data for k in _pm_keys):
         state = state._replace(pmodel_acclim=PModelAcclimState(

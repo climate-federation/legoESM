@@ -2762,12 +2762,12 @@ class ExperimentConfig(NamedTuple):
         # Cross-checks: the switches must not be silently inert.
         _pm_any = (self.land_capacity_scheme == "p_model"
                    or self.land_g1_source == "p_model")
-        if (_pm_any and not self.use_multilayer_land
-                and self.land_surface_scheme != "simple_seb"):
+        if _pm_any and not self.use_multilayer_land:
             errors.append(
                 "a land P-model switch is set but use_multilayer_land is off: "
-                "the pipeline slab carries no acclimation state, so the "
-                "switch would be silently inert")
+                "the pipeline slab carries no acclimation state (for any "
+                "surface scheme, simple_seb included), so the switch would "
+                "be silently inert")
         if (_pm_any and self.land_surface_scheme == "simple_seb"
                 and not self.land_stomatal_beta):
             errors.append(

@@ -2459,6 +2459,11 @@ def LeafPhotosynthesis(
             g0_val = _g0_BB_jnp[pft]  # JAX scalar — differentiable
             g1_val = _g1_BB_jnp[pft]  # JAX scalar — differentiable
         elif gs_type == 3:  # Leuning: g0 from the BB residual table; a1 rides g1
+            # INTERIM (GLM review): g0 is a co-fit residual of the per-PFT
+            # Ball-Berry form; pairing it with the global Leuning a1/D0 can
+            # bias minimum-gs / high-VPD closure per PFT. A joint per-PFT
+            # (a1, g0) Leuning refit is the calibration follow-up; a1/D0 are
+            # tier-2 tunables so the refit needs no code change.
             g0_val = _g0_BB_jnp[pft]
             g1_val = jnp.asarray(leuning_a1)
         else:

@@ -32,6 +32,7 @@ def test_land_ml_survives_carry_aux_npz_roundtrip(tmp_path):
     src = SimpleNamespace(
         _carry_aux={}, _land_ml_state=saved,
         _double_moment_step_inputs=lambda: {},
+        _land_soil_dz=lambda: np.zeros(6, dtype=np.float64),
         config=SimpleNamespace(convection="none"),
     )
 
@@ -62,6 +63,7 @@ def test_none_optional_fields_survive_roundtrip(tmp_path):
     src = SimpleNamespace(
         _carry_aux={}, _land_ml_state=saved,
         _double_moment_step_inputs=lambda: {},
+        _land_soil_dz=lambda: np.zeros(6, dtype=np.float64),
         config=SimpleNamespace(convection="none"),
     )
     aux = ModelDriver._checkpoint_carry_aux(src)
@@ -94,6 +96,7 @@ def test_partial_checkpoint_raises(tmp_path):
     src = SimpleNamespace(
         _carry_aux={}, _land_ml_state=saved,
         _double_moment_step_inputs=lambda: {},
+        _land_soil_dz=lambda: np.zeros(6, dtype=np.float64),
         config=SimpleNamespace(convection="none"),
     )
     aux = ModelDriver._checkpoint_carry_aux(src)
@@ -155,7 +158,8 @@ def test_pmodel_acclim_survives_roundtrip(tmp_path):
     saved = _state(1.0)._replace(pmodel_acclim=_pm_state(1.0))
     src = SimpleNamespace(
         _carry_aux={}, _land_ml_state=saved,
-        _double_moment_step_inputs=lambda: {}, config=_cfg())
+        _double_moment_step_inputs=lambda: {},
+        _land_soil_dz=lambda: np.zeros(6, dtype=np.float64), config=_cfg())
     aux = ModelDriver._checkpoint_carry_aux(src)
     assert "land_ml_pmodel_iabs_mean" in aux
     assert "land_ml_pmodel_acclim" not in aux  # flattened, never stacked
@@ -175,7 +179,8 @@ def test_pmodel_acclim_survives_roundtrip(tmp_path):
 def test_old_checkpoint_into_pmodel_run_refused_unless_flagged(tmp_path):
     src = SimpleNamespace(
         _carry_aux={}, _land_ml_state=_state(1.0),  # NO pmodel state saved
-        _double_moment_step_inputs=lambda: {}, config=_cfg())
+        _double_moment_step_inputs=lambda: {},
+        _land_soil_dz=lambda: np.zeros(6, dtype=np.float64), config=_cfg())
     aux = ModelDriver._checkpoint_carry_aux(src)
     template = _state(2.0)._replace(pmodel_acclim=_pm_state(3.0))
     dst = SimpleNamespace(_carry_aux=dict(aux), _land_ml_state=template,
@@ -194,7 +199,8 @@ def test_pmodel_checkpoint_into_switched_off_run_refused_unless_flagged(tmp_path
     saved = _state(1.0)._replace(pmodel_acclim=_pm_state(1.0))
     src = SimpleNamespace(
         _carry_aux={}, _land_ml_state=saved,
-        _double_moment_step_inputs=lambda: {}, config=_cfg())
+        _double_moment_step_inputs=lambda: {},
+        _land_soil_dz=lambda: np.zeros(6, dtype=np.float64), config=_cfg())
     aux = ModelDriver._checkpoint_carry_aux(src)
     template = _state(2.0)  # switches off: pmodel_acclim None
     dst = SimpleNamespace(_carry_aux=dict(aux), _land_ml_state=template,
@@ -211,7 +217,8 @@ def test_partial_pmodel_keys_refused(tmp_path):
     saved = _state(1.0)._replace(pmodel_acclim=_pm_state(1.0))
     src = SimpleNamespace(
         _carry_aux={}, _land_ml_state=saved,
-        _double_moment_step_inputs=lambda: {}, config=_cfg())
+        _double_moment_step_inputs=lambda: {},
+        _land_soil_dz=lambda: np.zeros(6, dtype=np.float64), config=_cfg())
     aux = ModelDriver._checkpoint_carry_aux(src)
     del aux["land_ml_pmodel_vpd_mean_pa"]
     dst = SimpleNamespace(
@@ -228,6 +235,7 @@ def test_clm_ml_canopy_state_checkpoint_refused_loudly():
     saved = _state(1.0)._replace(canopy_state=object())
     src = SimpleNamespace(
         _carry_aux={}, _land_ml_state=saved,
-        _double_moment_step_inputs=lambda: {}, config=_cfg())
+        _double_moment_step_inputs=lambda: {},
+        _land_soil_dz=lambda: np.zeros(6, dtype=np.float64), config=_cfg())
     with pytest.raises(NotImplementedError, match="canopy_state"):
         ModelDriver._checkpoint_carry_aux(src)
