@@ -47,10 +47,10 @@
     "ic_temperature_plus_1c": "RED: exact error inf > 0"
   },
   "tests": {
-    "direct_lane": {"card": 9, "phase2_gate": 7, "oracle_gate": 18, "total": 34},
-    "canonical_nemo_sco": 7,
-    "vertical_regressions": {"partial_cell_phase0": 15, "full_step": 5, "total": 20},
-    "passed_total": 61
+    "review_round_2_four_lane_files": {"card": 9, "phase2_gate": 7, "oracle_gate": 18, "canonical_nemo_sco": 7, "total": 41},
+    "current_four_lane_files_after_r1": {"card": 9, "phase2_gate": 7, "oracle_gate": 18, "canonical_nemo_sco": 8, "total": 42},
+    "supporting_vertical_regressions": {"partial_cell_phase0": 15, "full_step": 5, "total": 20},
+    "current_combined_executed_total": 62
   },
   "unmeasured": [
     "kt_gt_1_trajectory",

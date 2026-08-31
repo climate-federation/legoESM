@@ -1877,11 +1877,13 @@ def _bc_ke_and_pressure_gradients(
                     "O(gdept−z_mid) spurious rest-η PGF at steps.")
             # Same ladder selection as the p' quadrature in
             # _bc_geometry_and_density (exact NEMO gdept_1d when carried).
-            t_depth = (
-                jnp.abs(z_coord.z_full_ref)
-                if getattr(z_coord, "t_depth_ref", None) is None
-                else jnp.asarray(z_coord.t_depth_ref)
-            )
+            if getattr(z_coord, "t_depth_ref", None) is None:
+                raise ValueError(
+                    'pgf_scheme="nemo_sco" requires an explicit '
+                    "t_depth_ref; an arithmetic-midpoint fallback does not "
+                    "reproduce NEMO gdept on a stretched external grid"
+                )
+            t_depth = jnp.asarray(z_coord.t_depth_ref)
             # r3t = ssh/ht_0 with ht_0 = Σ_k e3t_0·tmask (the staircase
             # depth).  Land columns (ht_0 = 0): eta_safe is already masked
             # to 0 there; the floor only guards the division (faces touching

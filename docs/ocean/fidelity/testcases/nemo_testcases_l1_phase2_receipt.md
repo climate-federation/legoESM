@@ -115,12 +115,17 @@ All planted controls exit nonzero:
 - LOCK `e1t + 1 m`: `0.002 > 1e-15`;
 - wet T `+1 C`: exact error `inf > 0`.
 
-Test-count reconciliation: the reviewer's 29 was the real original direct-lane
-count (6 card + 5 phase-2 gate + 18 oracle-gate tests). The reported 49 also
-included 20 vertical-coordinate regressions (15 partial-cell phase-0 + 5
-full-step); it was a combined count, not a direct-lane count. After these fixes
-the executed breakdown is 34 direct-lane tests (9 + 7 + 18), 7 canonical
-`nemo_sco` tests, and the same 20 vertical regressions: **61 passed total**.
+Test-count reconciliation: the reviewer's 29 was the real original count across
+the three then-current lane files (6 card + 5 phase-2 gate + 18 oracle-gate
+tests). The reported 49 additionally included 20 generic vertical-coordinate
+regressions (15 partial-cell phase-0 + 5 full-step), so it was a combined run,
+not a lane-file count. At review-round-2 input, the reviewer was exactly right:
+the **four lane files contained 41 tests** (9 card + 7 phase-2 gate + 18 oracle
+gate + 7 canonical `nemo_sco`), while 20 generic vertical regressions made the
+separately combined run 61. Residual r1 adds one direct `nemo_sco` test, so the
+current counts are **42 lane tests** and 20 supporting regressions, 62 only when
+explicitly described as the combined execution. These are not averaged or
+competing measurements.
 
 | artifact | SHA256 |
 |---|---|

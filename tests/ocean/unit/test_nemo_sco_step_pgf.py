@@ -59,6 +59,7 @@ from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.vertical import (
     create_full_step_coordinate,
     create_ocean_z_star,
+    create_z_star_from_thicknesses,
 )
 
 NX, NY, NZ = 8, 6, 8
@@ -81,7 +82,9 @@ def _grid():
 
 def _staircase(bottom_level_2d):
     """Full-step staircase coordinate (NEMO ln_zco masked z-levels)."""
-    z_ref = create_ocean_z_star(n_levels=NZ, H_max=H_MAX)
+    dz = np.full((NZ,), H_MAX / NZ, dtype=np.float64)
+    gdept = (np.arange(NZ, dtype=np.float64) + 0.5) * dz[0]
+    z_ref = create_z_star_from_thicknesses(dz, t_depth_ref_m=gdept)
     return create_full_step_coordinate(z_ref, jnp.asarray(bottom_level_2d))
 
 
@@ -345,6 +348,16 @@ def test_nemo_sco_requires_trapezoid_quadrature():
             _cfg(pgf_quadrature="cell_integral"))
     # the valid pairing passes model validation
     LatLonCGridOceanModel._validate_config(_cfg())
+
+
+def test_nemo_sco_requires_explicit_t_depth_reference():
+    """The SCO slope term reads NEMO gdept, never an inferred midpoint."""
+    z_ref = create_z_star_from_thicknesses(
+        np.full((NZ,), H_MAX / NZ, dtype=np.float64)
+    )
+    coord = create_full_step_coordinate(z_ref, _x_staircase(3))
+    with pytest.raises(ValueError, match="requires an explicit t_depth_ref"):
+        _pgf_diag(coord, np.zeros((NY, NX)), _cfg())
 
 
 def test_nemo_sco_requires_partial_coord():
