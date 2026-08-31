@@ -32,7 +32,7 @@ from legoesm.ocean.fidelity.nemo_io import (
 )
 
 
-SCHEMA = "dino_ic_euler_peel_v1"
+SCHEMA = "dino_ic_euler_peel_v2"
 BAR = 1.0e-15
 RUNTIME_SHAPE = (203, 56)
 RUNTIME_HALO = 2
@@ -138,7 +138,7 @@ def _runtime_ssh(path: Path) -> np.ndarray:
 
 
 def _initial_rows(grid, geometry, z_coord, state, cfg) -> tuple[
-        list[dict[str, Any]], np.ndarray, np.ndarray]:
+        list[dict[str, Any]], np.ndarray, np.ndarray, dict[str, int]]:
     if grid.gdept_0 is None:
         raise ValueError("mesh_mask.nc lacks gdept_0")
     nemo_t, nemo_s = hpg.nemo_istate_case4(
@@ -149,6 +149,14 @@ def _initial_rows(grid, geometry, z_coord, state, cfg) -> tuple[
     lego_mask = (np.asarray(z_coord.is_active, dtype=bool)
                  & _broadcast_mask(
                      np.asarray(state.land_mask.data) > 0.5, mask.shape))
+    common_mask = mask & lego_mask
+    mask_receipt = {
+        "nemo_wet": int(np.count_nonzero(mask)),
+        "lego_wet": int(np.count_nonzero(lego_mask)),
+        "common_wet": int(np.count_nonzero(common_mask)),
+        "nemo_wet_lego_dry": int(np.count_nonzero(mask & ~lego_mask)),
+        "nemo_dry_lego_wet": int(np.count_nonzero(~mask & lego_mask)),
+    }
     lego_depth = np.asarray(z_coord.nemo_gdept_0)
     lego_lat = np.asarray(geometry.native_lat_T_deg)
     rows = [
@@ -167,8 +175,10 @@ def _initial_rows(grid, geometry, z_coord, state, cfg) -> tuple[
     rows.extend([
         diff_row("common_depth_T_profile", lego_t_profile, source_t_profile, mask),
         diff_row("common_depth_S_profile", lego_s_profile, source_s_profile, mask),
-        diff_row("resolved_T", np.asarray(state.T.data), nemo_t, mask),
-        diff_row("resolved_S", np.asarray(state.S.data), nemo_s, mask),
+        diff_row("resolved_T_common_wet", np.asarray(state.T.data), nemo_t,
+                 common_mask),
+        diff_row("resolved_S_common_wet", np.asarray(state.S.data), nemo_s,
+                 common_mask),
     ])
 
     full_source_t, full_source_s = hpg.nemo_istate_profiles_1d(grid.gdept_0)
@@ -187,18 +197,20 @@ def _initial_rows(grid, geometry, z_coord, state, cfg) -> tuple[
         t_bot=float(legacy_t_prof[..., -1].min()),
         s_bot=float(legacy_s_prof[..., -1].min()))
     rows.extend([
-        diff_row("substitute_nemo_depth_T", source_lego_depth, nemo_t, mask),
-        diff_row("substitute_nemo_depth_S", source_lego_depth_s, nemo_s, mask),
+        diff_row("substitute_nemo_depth_T_common_wet", source_lego_depth,
+                 nemo_t, common_mask),
+        diff_row("substitute_nemo_depth_S_common_wet", source_lego_depth_s,
+                 nemo_s, common_mask),
         diff_row("substitute_nemo_anchors_T", source_lego_anchors,
-                 np.asarray(state.T.data), mask),
+                 np.asarray(state.T.data), common_mask),
         diff_row("substitute_nemo_anchors_S", source_lego_anchors_s,
-                 np.asarray(state.S.data), mask),
+                 np.asarray(state.S.data), common_mask),
         diff_row("source_order_legacy_T", source_legacy,
-                 np.asarray(state.T.data), mask),
+                 np.asarray(state.T.data), common_mask),
         diff_row("source_order_legacy_S", source_legacy_s,
-                 np.asarray(state.S.data), mask),
+                 np.asarray(state.S.data), common_mask),
     ])
-    return rows, nemo_t, nemo_s
+    return rows, nemo_t, nemo_s, mask_receipt
 
 
 def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
@@ -223,18 +235,29 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
     mask_t = _mesh_core(grid.tmask).astype(bool)
     mask_u = _mesh_core(grid.umask).astype(bool)
     mask_v = _mesh_core(grid.vmask).astype(bool)
+    lego_t = (np.asarray(z_coord.is_active, dtype=bool)
+              & _broadcast_mask(
+                  np.asarray(state.land_mask.data) > 0.5, mask_t.shape))
+    lego_u = lego_t & np.roll(lego_t, -1, axis=1)
+    lego_v = np.zeros_like(lego_t)
+    lego_v[:-1] = lego_t[:-1] & lego_t[1:]
+    common_t = mask_t & lego_t
+    common_u = mask_u & lego_u
+    common_v = mask_v & lego_v
     rows = [
-        diff_row("euler_T_after_trazdf", np.asarray(step1.T.data),
-                 _runtime_dump(run_kt2 / "stp_dump_21_trazdf_tem.bin"), mask_t),
-        diff_row("euler_S_after_trazdf", np.asarray(step1.S.data),
-                 _runtime_dump(run_kt2 / "stp_dump_21_trazdf_sal.bin"), mask_t),
-        diff_row("euler_U_after_corrector", np.asarray(step1.u.data)[:, 1:, :],
-                 _runtime_dump(run_kt2 / "baro_dump_u_after.bin"), mask_u),
-        diff_row("euler_V_after_corrector", np.asarray(step1.v.data)[1:, :, :],
-                 _runtime_dump(run_kt2 / "baro_dump_v_after.bin"), mask_v),
-        diff_row("euler_SSH_after_split", np.asarray(step1.eta.data),
+        diff_row("conditional_euler_T_after_trazdf", np.asarray(step1.T.data),
+                 _runtime_dump(run_kt2 / "stp_dump_21_trazdf_tem.bin"), common_t),
+        diff_row("conditional_euler_S_after_trazdf", np.asarray(step1.S.data),
+                 _runtime_dump(run_kt2 / "stp_dump_21_trazdf_sal.bin"), common_t),
+        diff_row("conditional_euler_U_after_corrector",
+                 np.asarray(step1.u.data)[:, 1:, :],
+                 _runtime_dump(run_kt2 / "baro_dump_u_after.bin"), common_u),
+        diff_row("conditional_euler_V_after_corrector",
+                 np.asarray(step1.v.data)[1:, :, :],
+                 _runtime_dump(run_kt2 / "baro_dump_v_after.bin"), common_v),
+        diff_row("conditional_euler_SSH_after_split", np.asarray(step1.eta.data),
                  _runtime_ssh(run_kt2 / "spg_dump_pssh_final.bin"),
-                 mask_t[..., 0]),
+                 common_t[..., 0]),
     ]
     step1, rate = apply_dino_lat_lon_surface_forcing(
         step1, forcing, z_coord, cfg, standalone.DT_SECONDS,
@@ -243,18 +266,21 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
     before = read_nemo_restart_before(
         str(run_kt2 / "DINO_00000002_restart.nc"), nn_hls=0)
     rows.extend([
-        diff_row("filtered_step1_T_carry", np.asarray(step2.T_before.data),
-                 _mesh_core(before.T), mask_t),
-        diff_row("filtered_step1_S_carry", np.asarray(step2.S_before.data),
-                 _mesh_core(before.S), mask_t),
-        diff_row("filtered_step1_U_carry",
+        diff_row("conditional_filtered_step1_T_carry",
+                 np.asarray(step2.T_before.data),
+                 _mesh_core(before.T), common_t),
+        diff_row("conditional_filtered_step1_S_carry",
+                 np.asarray(step2.S_before.data),
+                 _mesh_core(before.S), common_t),
+        diff_row("conditional_filtered_step1_U_carry",
                  np.asarray(step2.u_before.data)[:, 1:, :],
-                 _mesh_core(before.u), mask_u),
-        diff_row("filtered_step1_V_carry",
+                 _mesh_core(before.u), common_u),
+        diff_row("conditional_filtered_step1_V_carry",
                  np.asarray(step2.v_before.data)[1:, :, :],
-                 _mesh_core(before.v), mask_v),
-        diff_row("filtered_step1_SSH_carry", np.asarray(step2.eta_before.data),
-                 _mesh_core(before.ssh), mask_t[..., 0]),
+                 _mesh_core(before.v), common_v),
+        diff_row("conditional_filtered_step1_SSH_carry",
+                 np.asarray(step2.eta_before.data),
+                 _mesh_core(before.ssh), common_t[..., 0]),
     ])
     return rows
 
@@ -313,7 +339,7 @@ def run(args: argparse.Namespace) -> int:
 
     (cfg, geometry, z_coord, state, _model_cfg, model, forcing,
      step_forcing, _perturbation) = standalone.build_standalone(0)
-    ic_rows, nemo_t, nemo_s = _initial_rows(
+    ic_rows, nemo_t, nemo_s, mask_receipt = _initial_rows(
         grid, geometry, z_coord, state, cfg)
     step_rows = _step_rows(
         run_kt2, grid, cfg, z_coord, state, model, forcing, step_forcing,
@@ -329,6 +355,8 @@ def run(args: argparse.Namespace) -> int:
         "controls": controls,
         "bars": {"evaluated_fp64_abs": BAR, "discrete": 0.0},
         "first_over_bar": first_over_bar,
+        "rung2_scope": "CONDITIONAL_AFTER_RUNG1_FAILURE",
+        "wet_mask_receipt": mask_receipt,
         "rows": ordered,
         "inputs": {str(path): {"bytes": path.stat().st_size,
                                "sha256": file_sha256(path)}
