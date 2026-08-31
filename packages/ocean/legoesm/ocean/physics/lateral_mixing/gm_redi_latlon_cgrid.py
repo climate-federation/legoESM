@@ -4344,6 +4344,11 @@ def gm_redi_tracer_tendency_latlon(
                 gm_bolus_kappa_face_average=_gm_kfa,
                 return_bolus=return_bolus_transport,
                 kappa_Redi_v=kappa_Redi_v_eff,
+                # NEMO uses the same carried e3w(Kmm) in the MSC coefficient
+                # and its explicit A33 post-factor (traldf_iso.F90:325-332;
+                # traldf_iso_scheme.h90:126).  Rebuilding it from adjacent
+                # T thicknesses mixes a different geometry into the operator.
+                msc_e3w_override=native_slope_e3w,
                 face_thickness_u=_flux_e3u,
                 face_thickness_v=_flux_e3v,
                 vertical_skew_evaluation=_skew_eval,
@@ -4360,6 +4365,7 @@ def gm_redi_tracer_tendency_latlon(
                 kappa_GM=kappa_GM, gm_bolus_advection=_gm_bolus,
                 gm_bolus_kappa_face_average=_gm_kfa,
                 kappa_Redi_v=kappa_Redi_v_eff,
+                msc_e3w_override=native_slope_e3w,
                 face_thickness_u=_flux_e3u,
                 face_thickness_v=_flux_e3v,
                 vertical_skew_evaluation=_skew_eval,

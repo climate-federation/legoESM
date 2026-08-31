@@ -2263,6 +2263,43 @@ class TestK33NemoNativeA33:
                     dt=2700.0)
 
 
+def test_native_carried_e3w_reaches_msc_a33_dispatch(monkeypatch):
+    """The one carried Kmm W thickness feeds both slope and MSC consumers."""
+    import legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid as gm_mod
+
+    (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, _jacobian,
+     _rho, T, S, _cfg) = _stratified_with_meridional_tilt()
+    cfg = GMRediConfig(
+        kappa_GM=0.0, kappa_Redi=1000.0,
+        slope_scheme="nemo_iso_lap", slope_positions="nemo_native",
+        slope_n2="nemo_bn2", mld_criterion="n2_integral",
+        msc_stabilize=True, implicit_K33=True)
+    nlev = T.shape[-1]
+    carried_n2 = jnp.full(T.shape, 1.0e-5, dtype=T.dtype)
+    carried_n2 = carried_n2.at[..., 0].set(0.0)
+    carried_e3w = jnp.broadcast_to(
+        z_coord.dz_ref, T.shape).at[..., 0].multiply(1.125)
+    seen = []
+
+    def capture(q, *_args, **kwargs):
+        seen.append(kwargs.get("msc_e3w_override"))
+        return jnp.zeros_like(q)
+
+    monkeypatch.setattr(
+        gm_mod, "nemo_iso_lap_tracer_tendency_latlon_cgrid", capture)
+    gm_mod.gm_redi_tracer_tendency_latlon(
+        T, S, eta, H_bathy, grid, z_coord, cfg,
+        eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask,
+        native_slope_pn2=carried_n2, native_slope_e3w=carried_e3w,
+        dt=2700.0)
+
+    assert len(seen) == 2
+    for got in seen:
+        assert got is not None
+        np.testing.assert_array_equal(np.asarray(got),
+                                      np.asarray(carried_e3w))
+
+
 class TestNemoNativeActive3dBottomTie:
     """#1226 (ldf_slp stage audit, 2026-07-28): ``_nemo_native_active_3d``
     must use ``z_coord.is_active`` (an EXACT per-column integer bottom-level
