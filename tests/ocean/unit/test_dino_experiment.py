@@ -2718,6 +2718,94 @@ class TestSurfaceFluxDivisor:
 
 
 # ---------------------------------------------------------------------
+# DINO cold Euler tra_sbc time integration
+# ---------------------------------------------------------------------
+
+class TestDinoSurfaceRestoringTimeIntegration:
+    """NEMO's first Euler step writes raw tra_sbc flux/e3t into Krhs."""
+
+    @staticmethod
+    def _fixture(cfg):
+        from legoesm.ocean.experiments.dino import (
+            create_dino_z_star, dino_lat_lon_grid, dino_lat_lon_state,
+            dino_lat_lon_surface_forcing_arrays,
+        )
+        z = create_dino_z_star(cfg)
+        g = dino_lat_lon_grid(cfg, n_lon=8)
+        st = dino_lat_lon_state(g, z, cfg)
+        return z, st, dino_lat_lon_surface_forcing_arrays(g, cfg)
+
+    def test_defaults_and_oracle_cards_are_explicit(self):
+        assert (DINOConfig().surface_restoring_time_integration
+                == "implicit_euler")
+        for recipe in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
+            cfg = dino.dino_config_for_recipe(recipe)
+            assert (cfg.surface_restoring_time_integration
+                    == "nemo_explicit_rhs"), recipe
+
+    def test_unknown_selector_fails_closed(self):
+        import dataclasses
+        from legoesm.ocean.experiments.dino import (
+            apply_dino_lat_lon_surface_forcing,
+        )
+        cfg = dataclasses.replace(
+            DINOConfig(), surface_restoring_time_integration="bogus")
+        z, st, frc = self._fixture(cfg)
+        with pytest.raises(
+                ValueError, match="surface_restoring_time_integration"):
+            apply_dino_lat_lon_surface_forcing(st, frc, z, cfg, 2700.0)
+
+    def test_explicit_rhs_matches_source_algebra_and_implicit_plant_moves(self):
+        """Independent top-cell tra_sbc formula; implicit is the plant."""
+        import dataclasses
+        from legoesm.ocean.experiments.dino import (
+            apply_dino_lat_lon_surface_forcing,
+        )
+        cfg = dataclasses.replace(
+            DINOConfig(), surface_restoring_time_integration="nemo_explicit_rhs")
+        z, st, frc = self._fixture(cfg)
+        dt = 2700.0
+        out = apply_dino_lat_lon_surface_forcing(st, frc, z, cfg, dt)
+        implicit_cfg = dataclasses.replace(
+            cfg, surface_restoring_time_integration="implicit_euler")
+        implicit = apply_dino_lat_lon_surface_forcing(
+            st, frc, z, implicit_cfg, dt)
+
+        dz = float(z.dz_ref[0])
+        tau_T = cfg.rho_0 * cfg.c_p * dz / cfg.A_theta
+        tau_S = cfg.rho_0 * dz / cfg.A_S
+        T = np.asarray(st.T.data[..., 0])
+        S = np.asarray(st.S.data[..., 0])
+        T_star = np.asarray(frc["T_star_2d"])
+        S_star = np.asarray(frc["S_star_2d"])
+        Q = np.asarray(frc["Q_sr_2d"])
+        # usrdef_sbc qns/sfx followed by trasbc's single /e3t. The Jerlov
+        # deposit is common to both selector arms, so recover it by subtracting
+        # the known explicit surface term from the production increment.
+        expected_surface_T = (-(T - T_star) / tau_T
+                              - Q / (cfg.rho_0 * cfg.c_p * dz))
+        expected_surface_S = -(S - S_star) / tau_S
+        implicit_surface_T = (-(T - T_star) / (tau_T + dt)
+                              - Q / (cfg.rho_0 * cfg.c_p * dz))
+        implicit_surface_S = -(S - S_star) / (tau_S + dt)
+        got_delta_T = np.asarray(
+            out.T.data[..., 0] - implicit.T.data[..., 0])
+        got_delta_S = np.asarray(
+            out.S.data[..., 0] - implicit.S.data[..., 0])
+        wet = np.asarray(st.land_mask.data) > 0.5
+        np.testing.assert_allclose(
+            got_delta_T[wet],
+            dt * (expected_surface_T - implicit_surface_T)[wet],
+            rtol=2e-12, atol=2e-14)
+        np.testing.assert_allclose(
+            got_delta_S[wet],
+            dt * (expected_surface_S - implicit_surface_S)[wet],
+            rtol=2e-12, atol=2e-14)
+        assert np.count_nonzero(got_delta_T[wet]) > 0
+        assert np.count_nonzero(got_delta_S[wet]) > 0
+
+
+# ---------------------------------------------------------------------
 # #1226 c_p truncation (eosbn2.F90:1899 rcp)
 # ---------------------------------------------------------------------
 

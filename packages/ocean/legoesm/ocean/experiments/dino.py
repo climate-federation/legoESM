@@ -205,6 +205,15 @@ class DINOConfig:
     A_theta: float = 40.0          # T-restoring heat flux coefficient [W/m²/K]
     A_S: float = 3.858e-3          # S-restoring salt flux coefficient [kg/m²/s]
     L_phi_deg: float = 140.0       # meridional extent for cosine profile [deg]
+    # Time integration of the surface restoring flux. ``implicit_euler`` is
+    # the historical legoESM DINO path (effective denominator tau+dt) and
+    # remains the default for every non-oracle card. ``nemo_explicit_rhs``
+    # transcribes DINO's executed tra_sbc path: usrdef_sbc constructs qns/sfx
+    # from Kbb, then trasbc writes flux/e3t into ts(Krhs) without a tau+dt
+    # weakening before trazdf consumes that accumulator. The two NEMO cards
+    # opt in below. Unknown values fail in the applicator before any state is
+    # changed.
+    surface_restoring_time_integration: str = "implicit_euler"
 
     # Restoring profile values (annual-mean equivalents of eqs B1-B4)
     T_star_eq: float = 27.0        # equatorial target T [°C]
@@ -1133,6 +1142,8 @@ def dino_r1_exact_config(**overrides) -> DINOConfig:
         forcing_annual_cycle=True,
         wind_through_step=True,
         surface_flux_divisor="nemo_live",   # trasbc.F90:152-153 live e3t (#1226)
+        # stpmlf.F90:498 -> trasbc.F90:145-153: raw Krhs, no tau+dt.
+        surface_restoring_time_integration="nemo_explicit_rhs",
     )
     # Stabilizer floor off: the oracle background viscosity is avm0 exactly.
     base = _dc.replace(base, tke_momentum_visc_bg=base.A_v_bg)
@@ -1597,6 +1608,10 @@ DINO_RECIPES: dict[str, dict] = {
         # trasbc.F90:152-153 live top-cell divisor (#1226) -- see
         # DINOConfig.surface_flux_divisor docstring.
         "surface_flux_divisor": "nemo_live",
+        # stpmlf.F90:498 -> trasbc.F90:145-153: surface restoring is an
+        # explicit RHS term. The historical implicit-Euler weakening is not
+        # present in the oracle.
+        "surface_restoring_time_integration": "nemo_explicit_rhs",
         # traqsr.F90:665-712 qsr_2BD live gdepw ladder (#1226) -- see
         # DINOConfig.shortwave_penetration_ladder docstring.
         "shortwave_penetration_ladder": "nemo_live",
@@ -4528,8 +4543,23 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
             f"Unknown DINOConfig.surface_flux_divisor {divisor!r}: expected "
             "'static' or 'nemo_live'.")
 
-    # T/S restoring via the legoESM module with implicit=True. Paper
-    # eq 8 split = subtract_qsr=True (Q_sr provided as sw_down).
+    # T/S restoring via the shared module. The historical DINO path uses an
+    # analytic implicit-Euler weakening. NEMO's executed first-Euler and MLF
+    # paths do not: stpmlf.F90:498 calls tra_sbc, whose trasbc.F90:145-153
+    # writes the raw flux/e3t into Krhs. Keep that distinction explicit and
+    # fail closed; silently accepting a typo would move the cold-start state.
+    _restoring_ti = getattr(
+        cfg, "surface_restoring_time_integration", "implicit_euler")
+    if _restoring_ti == "implicit_euler":
+        _restoring_implicit = True
+    elif _restoring_ti == "nemo_explicit_rhs":
+        _restoring_implicit = False
+    else:
+        raise ValueError(
+            "Unknown DINOConfig.surface_restoring_time_integration "
+            f"{_restoring_ti!r}: expected 'implicit_euler' or "
+            "'nemo_explicit_rhs'.")
+    # Paper eq 8 split = subtract_qsr=True (Q_sr provided as sw_down).
     tau_T = tau_from_flux_coefficient(cfg.A_theta, cfg.rho_0, cfg.c_p, dz_0_live)
     tau_S = tau_from_flux_coefficient(cfg.A_S, cfg.rho_0, 1.0, dz_0_live)
     restoring_cfg = RestoringConfig(
@@ -4537,7 +4567,7 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
         T_star_array=T_star_2d,
         S_star_array=forcing["S_star_2d"],
         subtract_qsr=True,
-        implicit=True,
+        implicit=_restoring_implicit,
     )
     rest_out = restoring_surface_forcing(
         state.T.data, state.S.data, _LatLonGridShim(state, cell_mask),
