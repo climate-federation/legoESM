@@ -203,11 +203,10 @@ def test_runner_surface_has_no_restart_or_bridge_selector():
     assert "restart_paths\": []" in source
 
 
-def test_claim_length_refuses_the_measured_euler_debt():
-    """Exact initialization does not bypass the still-red Euler gate."""
-    assert RUNNER.claim_admission_reasons() == (
-        RUNNER.IC_EULER_BLOCKER,)
-    assert "conditional_euler_T_after_trazdf" in RUNNER.IC_EULER_BLOCKER
+def test_claim_length_admits_after_frozen_euler_closure():
+    """The runner records the exact committed gate that released the arm."""
+    assert RUNNER.claim_admission_reasons() == ()
+    assert RUNNER.IC_EULER_ADMISSION == "dino_ic_euler_peel_v9:EULER_AT_BAR"
 
 
 def test_runner_exposes_fail_closed_final_snapshot_flag():
