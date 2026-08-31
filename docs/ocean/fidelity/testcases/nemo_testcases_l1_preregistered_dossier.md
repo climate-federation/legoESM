@@ -41,9 +41,8 @@ the resulting density/BN2 fields rather than carrying that number across EOSes.
 
 The source implements zco (`nn_COORD=0`), zps (`1`), and sco (`2`) branches
 (`usrdef_zgr.F90:71-85`).  This lane runs **zps and sco**.  zps is the primary
-receipt: the partial-cell minimum is 10% of the 20 m reference thickness
-(`usrdef_zgr.F90:202-214`), and the bottom U/V/F thicknesses equal T thickness
-because thickness increases monotonically in i and is invariant in j
+receipt: the bottom U/V/F thicknesses equal T thickness because thickness
+increases monotonically in i and is invariant in j
 (`usrdef_zgr.F90:177-187`).  Thus it exercises the exact local specialization
 of the neighboring-cell face minimum.  sco is the controlled vertical-coordinate
 variant, with every non-coordinate setting held equal.  zco is not run because
@@ -147,12 +146,23 @@ These predicates are decided before receipt runs:
    nonzero, while zero-flux global tracer inventory closure stays within the
    gate-coded `64 * eps * max(initial absolute inventory,1)` envelope.  Values
    are reported, never silently reclassified.
-6. **CONFIRM zps min rule** iff every bottom T cell obeys the source's 2 m
-   minimum/re-indexing rule and every active U/V/F bottom thickness equals the
-   local neighboring minimum to fp64 comparison tolerance.  Otherwise
-   **REFUTE**.
+6. **CONFIRM zps face-min rule** iff every active U/V/F bottom thickness equals
+   the local neighboring minimum to fp64 comparison tolerance.  The separate
+   2 m minimum/re-indexing arm at `usrdef_zgr.F90:202-214` is registered but
+   must be classified from the compiled vertical-coordinate key before use.
+   Otherwise **REFUTE**.
 
 TEOS-10 density, `rab`, and BN2; adaptive vertical advection; and BBL activity
 are coverage receipts: the exact active namelist/source arms and finite output
 arrays must be present.  Their numerical oracle values are emitted without a
 legoESM comparison in phase 1.
+
+## Post-run Rule-0 erratum (does not alter the registered bar)
+
+The preregistration initially associated the source's 10% minimum-thickness
+arm with the zps receipt.  Compiled-arm reconciliation shows that statement was
+wrong: the pinned OVERFLOW build has `key_vco_3d`, so the active zps code is
+`usrdef_zgr.F90:157-188`; the 10% arm at lines 202-214 is guarded by
+`lk_vco_1d3d` and is dead.  The gate therefore certifies the active
+neighboring-face minimum specialization and explicitly waives the dead 10%
+arm.  It never prints a 10%-minimum certification for this build.
