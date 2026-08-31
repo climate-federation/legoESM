@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.canopy.sif import leaf_sif
 from legoesm.land.carbon.config import CarbonState
@@ -33,6 +34,7 @@ def compute_effective_beta(
     carbon_state: CarbonState | None,
     dt: float,
     land_params=None,
+    pmodel_acclim=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray | None, jnp.ndarray | None]:
     """Compute effective moisture availability beta, with optional stomatal/carbon coupling.
 
@@ -69,6 +71,11 @@ def compute_effective_beta(
         Farquhar path with ``stomata.sif`` set produces it; the Jarvis fallback
         has no Ci/An to invert).
     """
+    # Fail-early validation of the static switch fields (typos, inconsistent
+    # P-model combinations, switches on disabled stomata) — the config is
+    # static, so this runs at trace time, not per step.
+    config.stomata.validate()
+
     # Override stomatal / carbon config fields with spatial arrays if provided.
     # ``_fC4`` (per-column C4 area fraction) drives the canonical-FvCB C3/C4 blend
     # in the coupled solver; it is a per-cell PFT-derived field, so it is carried
@@ -90,13 +97,50 @@ def compute_effective_beta(
     gpp_farq = None
     sif = None
 
+    # --- P-model optimality parameter source (big-leaf full set) ---
+    # Acclimated Vcmax25 replaces the prescribed capacity, the predicted
+    # Medlyn slope replaces g1_med (when selected), and the coordination
+    # rjv25 + acclimated growth temperature thread into the FvCB solve.
+    _pm_on = (config.stomata.capacity_scheme == "p_model"
+              or config.stomata.g1_source == "p_model")
+    _rjv25 = None
+    _tgc_c = None
+    if _pm_on:
+        # INTERIM REFUSAL (until the C4 P-model extension lands): a
+        # mixed-vegetation configuration (per-cell fC4 supplied) under the
+        # big-leaf P model would silently run C4 columns on a C3 optimum.
+        # ``land_params.fC4 is not None`` is a static structure check, so
+        # this refuses configured C4 data loudly at trace time (a zero-C4
+        # array is also refused — conservative by design, revisit with C4).
+        if land_params is not None and land_params.fC4 is not None:
+            raise ValueError(
+                "the big-leaf P-model capacity/g1 source does not support "
+                "mixed C3/C4 vegetation yet (land_params.fC4 is set); the "
+                "C4 optimality extension is a separate change. Drop the fC4 "
+                "field or use capacity_scheme='prescribed'.")
+        if not (config.carbon.scheme == "differland"
+                and carbon_state is not None and config.stomata.enabled):
+            raise ValueError(
+                "P-model big-leaf switches require the coupled Farquhar "
+                "path (stomata.enabled with carbon.scheme='differland' and "
+                "a carbon state); the Jarvis fallback has no Vcmax/g1 for "
+                "the P model to supply.")
+        from legoesm.land.p_model import acclimated_capacities
+        _caps = acclimated_capacities(pmodel_acclim, config.p_model)
+        if config.stomata.capacity_scheme == "p_model":
+            _stomata = _stomata._replace(Vc_max25=_caps.vcmax25_leaf)
+            _rjv25 = _caps.rjv25
+            _tgc_c = pmodel_acclim.t_mean_K - constants.T_freeze
+        if config.stomata.g1_source == "p_model":
+            _stomata = _stomata._replace(g1_med=_caps.g1_kpa)
+
     if config.stomata.enabled:
         if config.carbon.scheme == "differland" and carbon_state is not None:
             LAI = carbon_state.C_fol / _carbon.LCMA
             leaf = solve_coupled_farquhar_ci(
                 T_sfc, forcing.sw_down, forcing.co2_ppmv,
                 forcing.q_lowest, forcing.p_surface, LAI, beta_soil,
-                _stomata, _fC4)
+                _stomata, _fC4, rjv25=_rjv25, TgC_C=_tgc_c)
             gs, gpp_farq = leaf.gs, leaf.gpp
             beta = compute_stomatal_beta(
                 gs, LAI, beta_soil, _stomata)

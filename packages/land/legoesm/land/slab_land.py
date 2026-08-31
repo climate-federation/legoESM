@@ -168,6 +168,7 @@ def step_land(
         albedo_land=albedo_land,
         emissivity=emissivity,
         z0=z0,
+        pmodel_acclim=state.pmodel_acclim,
     )
     tau_x = surface_out.tau_x
     tau_y = surface_out.tau_y
@@ -329,9 +330,11 @@ def step_land(
         lat_arr = lat if lat is not None else jnp.zeros_like(T_soil)
         # Recompute Farquhar GPP with updated T and moisture so that
         # photosynthesis and respiration use consistent end-of-step state.
+        # start-of-step acclim state: the acclimated capacities move on a
+        # ~15-day timescale, so the end-of-step distinction is negligible here.
         _, gpp_farq_new, _ = compute_effective_beta(
             T_soil_new, forcing, beta_soil_new, config, carbon_state, dt,
-            land_params=lp,
+            land_params=lp, pmodel_acclim=state.pmodel_acclim,
         )
         carbon_state_new, co2_flux = step_carbon(
             carbon_state, forcing.sw_down, T_soil_new, forcing.co2_ppmv,

@@ -252,6 +252,14 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # parameters while claiming optimality (or vice versa).
         ("packages/land/legoesm/land/surface_scheme/two_leaf_canopy.py",
          "compute_two_leaf_canopy_fluxes"),
+        # Big-leaf P-model switches + stomatal-model dispatch: guarded at the
+        # StomataConfig.validate() fail-early entry (invoked by
+        # compute_effective_beta) AND at the solver's fn-entry raise; the
+        # P-model injection block itself refuses the Jarvis fallback and
+        # configured C4 data loudly (2026-08-31).
+        ("packages/land/legoesm/land/stomata.py", "validate"),
+        ("packages/land/legoesm/land/stomata_utils.py",
+         "compute_effective_beta"),
         # LE_module leaf-energy dispatch (BT|PM): the internal residual uses a
         # bare ``else: # PM``, so a typo silently runs Penman-Monteith. Guarded
         # at the config validator AND at the solver entry (direct-call path).

@@ -726,6 +726,7 @@ def _step_multilayer_land_impl(
             albedo_land=albedo_land,
             emissivity=emissivity,
             z0=z0,
+            pmodel_acclim=state.pmodel_acclim,
         )
     else:
         raise ValueError(
@@ -1267,7 +1268,7 @@ def _step_multilayer_land_impl(
             # the carbon cycle sees a consistent end-of-step GPP.
             _, gpp_override, _ = compute_effective_beta(
                 T_surface_new, forcing, beta_soil_new, config, carbon_state,
-                dt, land_params=lp)
+                dt, land_params=lp, pmodel_acclim=pmodel_acclim_new)
         carbon_state_new, co2_flux = step_carbon(
             carbon_state, forcing.sw_down, T_surface_new, forcing.co2_ppmv,
             beta_soil_new, lat_arr, doy, forcing.precip_total, config.carbon,

@@ -225,6 +225,47 @@ class StomataConfig(NamedTuple):
     # --- Leuning (1995) stomatal model (stomata_model="leuning") ---
     a1_leuning: float = 9.0        # [-] Leuning slope (CABLE C3 default)
     d0_leuning_kpa: float = 1.5    # [kPa] VPD sensitivity scale D0
+    # --- P-model optimality switches (land/p_model.py; appended last) ---
+    # Source of the big-leaf photosynthetic capacity / Medlyn slope; the
+    # PModelConfig itself lives once per land config (config.p_model).
+    capacity_scheme: str = "prescribed"   # "prescribed" | "p_model"
+    g1_source: str = "table"              # "table" | "p_model"
+
+    def validate(self) -> "StomataConfig":
+        """Fail-early check of the static dispatch/switch fields.
+
+        Called at the non-jitted entry (``stomata_utils.compute_effective_
+        beta``) so a typo or an inconsistent P-model combination aborts at
+        setup with a clear message rather than deep in a trace.
+        """
+        if self.stomata_model not in ("ball_berry", "medlyn", "leuning"):
+            raise ValueError(
+                f"unknown stomata_model {self.stomata_model!r}; the stomatal "
+                "conductance scheme must be one of "
+                "('ball_berry', 'medlyn', 'leuning')")
+        from legoesm.land.p_model import (
+            VALID_CAPACITY_SCHEMES, VALID_G1_SOURCES)
+        if self.capacity_scheme not in VALID_CAPACITY_SCHEMES:
+            raise ValueError(
+                f"unknown capacity_scheme {self.capacity_scheme!r}; the "
+                f"photosynthetic-capacity source must be one of "
+                f"{VALID_CAPACITY_SCHEMES}")
+        if self.g1_source not in VALID_G1_SOURCES:
+            raise ValueError(
+                f"unknown g1_source {self.g1_source!r}; the Medlyn-slope "
+                f"scheme must be one of {VALID_G1_SOURCES}")
+        if self.g1_source == "p_model" and self.stomata_model != "medlyn":
+            raise ValueError(
+                "g1_source='p_model' predicts a MEDLYN slope and requires "
+                f"stomata_model='medlyn'; got {self.stomata_model!r}.")
+        if (self.capacity_scheme == "p_model"
+                or self.g1_source == "p_model") and not self.enabled:
+            raise ValueError(
+                "a P-model switch is set on the big-leaf StomataConfig but "
+                "stomata are DISABLED (enabled=False): the switch would be "
+                "silently inert. Enable the coupled stomatal path or reset "
+                "the switch.")
+        return self
 
 
 # =====================================================================
@@ -384,6 +425,7 @@ def _bigleaf_assimilation(
     Vcmax25_eff: jnp.ndarray,
     TgC_C: jnp.ndarray | float,
     fC4: jnp.ndarray | float,
+    rjv25: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Big-leaf GROSS + net assimilation via the canonical FvCB kernels.
 
@@ -408,7 +450,7 @@ def _bigleaf_assimilation(
     (A_net, A_gross) : net (gross - Rd) and floored gross assimilation
         [umol CO2/m2/s].  GPP uses the gross rate; the stomata coupling uses net.
     """
-    c3 = c3_assimilation(T_leaf, Ci, APAR_umol, Vcmax25_eff, TgC_C)
+    c3 = c3_assimilation(T_leaf, Ci, APAR_umol, Vcmax25_eff, TgC_C, rjv25=rjv25)
     c4 = c4_assimilation(T_leaf, Ci, APAR_umol, Vcmax25_eff)
     a_gross = (1.0 - fC4) * c3.a_gross + fC4 * c4.a_gross
     rd = (1.0 - fC4) * c3.rd + fC4 * c4.rd
@@ -425,6 +467,8 @@ def solve_coupled_farquhar_ci(
     beta_soil: jnp.ndarray,
     config: StomataConfig,
     fC4: jnp.ndarray | float = 0.0,
+    rjv25: jnp.ndarray | None = None,
+    TgC_C: jnp.ndarray | float | None = None,
 ) -> CoupledLeafState:
     """Solve the coupled FvCB-stomata system; return the converged leaf state.
 
@@ -485,6 +529,11 @@ def solve_coupled_farquhar_ci(
     VPD_kPa = jnp.maximum(e_sat - e_air, 0.0) / 1000.0
     RH = jnp.clip(e_air / jnp.maximum(e_sat, 1.0), 0.0, 1.0)
 
+    # Growth temperature: the acclimation-state daytime mean when the P model
+    # supplies it (TgC_C), else the fixed big-leaf reference (25 degC; this
+    # lane has no prognostic TgC EMA of its own).
+    _tgc_eff = _TGC_REF_BIGLEAF_C if TgC_C is None else TgC_C
+
     # Gamma*(T) for the Leuning supply term — the SAME canonical compensation
     # point the FvCB kernel uses (single source; no re-derivation).
     gamma_star_leaf = co2_compensation_point(T_leaf)
@@ -495,7 +544,7 @@ def solve_coupled_farquhar_ci(
     # Fixed-point iteration (unrolled for JIT compatibility)
     for _ in range(config.n_iter_ags):
         A_net, _ = _bigleaf_assimilation(
-            Ci, APAR_umol, T_leaf, Vcmax25_eff, _TGC_REF_BIGLEAF_C, fC4)
+            Ci, APAR_umol, T_leaf, Vcmax25_eff, _tgc_eff, fC4, rjv25=rjv25)
 
         if config.stomata_model == "medlyn":
             gs = medlyn_gs(A_net, VPD_kPa, Ca, config.g1_med, config.g0)
@@ -513,7 +562,7 @@ def solve_coupled_farquhar_ci(
 
     # Final evaluation
     A_net, A_gross = _bigleaf_assimilation(
-        Ci, APAR_umol, T_leaf, Vcmax25_eff, _TGC_REF_BIGLEAF_C, fC4)
+        Ci, APAR_umol, T_leaf, Vcmax25_eff, _tgc_eff, fC4, rjv25=rjv25)
 
     if config.stomata_model == "medlyn":
         gs = medlyn_gs(A_net, VPD_kPa, Ca, config.g1_med, config.g0)
