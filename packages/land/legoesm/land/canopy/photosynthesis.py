@@ -297,6 +297,7 @@ def c3_assimilation(
     APAR: jax.Array,
     Vcmax25: jax.Array,
     TgC: jax.Array,
+    rjv25: jax.Array | None = None,
 ) -> LeafAssimilation:
     """Canonical FvCB C3 gross assimilation + dark respiration (Bonan ch. 11).
 
@@ -305,6 +306,9 @@ def c3_assimilation(
     rate ``A`` and dark respiration ``Rd`` separately (see :class:`LeafAssimilation`).
 
     Parameters as :func:`c3_photosynthesis` minus the parity-only ``Ps``/``alf``.
+    ``rjv25`` optionally overrides the Kattge & Knorr acclimated
+    ``Jmax25/Vcmax25`` ratio (the P model supplies its coordination-optimal
+    ratio here); ``None`` keeps the K&K default bit-for-bit.
     """
     # Acclimation only valid for TgC in [11, 35] degC; clip to the boundary
     # acclimation state outside (avoid unphysical Kattge & Knorr extrapolation).
@@ -313,7 +317,8 @@ def c3_assimilation(
     # Acclimation (Kattge & Knorr 2007)
     dS_v = _delta_s_vcmax(TgC_a)
     dS_j = _delta_s_jmax(TgC_a)
-    Jmax25 = _jmax25_over_vcmax25(TgC_a) * Vcmax25
+    jv_ratio = _jmax25_over_vcmax25(TgC_a) if rjv25 is None else rjv25
+    Jmax25 = jv_ratio * Vcmax25
 
     # Instantaneous T-response of kinetic constants and capacities
     Kc = _KC25 * _arrhenius(Tf, _HA_KC)
@@ -355,6 +360,7 @@ def c3_photosynthesis(
     Ps: jax.Array,
     alf: jax.Array,
     TgC: jax.Array,
+    rjv25: jax.Array | None = None,
 ) -> jax.Array:
     """Net assimilation rate for canonical FvCB C3 photosynthesis.
 
@@ -374,7 +380,7 @@ def c3_photosynthesis(
     An : net assimilation rate [umol m-2 s-1], clamped to >= 0
     """
     del Ps, alf  # signature parity; FvCB uses _PHI_PSII and mole-fraction Ci
-    r = c3_assimilation(Tf, Ci, APAR, Vcmax25, TgC)
+    r = c3_assimilation(Tf, Ci, APAR, Vcmax25, TgC, rjv25=rjv25)
     An = r.a_gross - r.rd
     return jnp.where(An < 0.0, 0.0, An)
 
@@ -460,6 +466,7 @@ def photosynthesis(
     Ps: jax.Array,
     alf: jax.Array,
     TgC: jax.Array,
+    rjv25: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Net AND gross assimilation for a mixed C3/C4 canopy.
 
@@ -495,7 +502,7 @@ def photosynthesis(
     # Use the inner FvCB assimilation (which exposes a_gross + rd) so GROSS GPP
     # can be returned alongside NET An — without changing the single-value
     # c3/c4_photosynthesis wrappers relied on elsewhere.
-    r_c3 = c3_assimilation(Tf, Ci, APAR, Vcmax25_C3, TgC)
+    r_c3 = c3_assimilation(Tf, Ci, APAR, Vcmax25_C3, TgC, rjv25=rjv25)
     r_c4 = c4_assimilation(Tf, Ci, APAR, Vcmax25_C4)
     An_C3 = jnp.where(r_c3.a_gross - r_c3.rd < 0.0, 0.0, r_c3.a_gross - r_c3.rd)
     An_C4 = jnp.where(r_c4.a_gross - r_c4.rd < 0.0, 0.0, r_c4.a_gross - r_c4.rd)

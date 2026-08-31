@@ -196,6 +196,10 @@ class CanopyForcingBundle(NamedTuple):
     # so LE rises with wetness (interception loss).  0.0 = dry (no interception,
     # the default so every existing bundle construction is unchanged).
     fwet: jax.Array = 0.0
+    # Optional Jmax25/Vcmax25 ratio override (P model, land/p_model.py).  None
+    # keeps the kernel's Kattge & Knorr acclimated ratio bit-for-bit.  Appended
+    # last so positional bundle constructions stay valid.
+    rjv25: jax.Array | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -258,10 +262,12 @@ def _canopy_residual(
     # in ``canopy_forward``, so discard it here.
     An_Sun, _ = photosynthesis(
         T_phot_sun, Ci_Sun, b.APAR_Sun,
-        b.Vcmax25_Sun, b.Vcmax25_C4Sun, b.fC4, b.Ps, b.alf, b.TgC)
+        b.Vcmax25_Sun, b.Vcmax25_C4Sun, b.fC4, b.Ps, b.alf, b.TgC,
+        rjv25=b.rjv25)
     An_Sh, _ = photosynthesis(
         T_phot_sh,  Ci_Sh,  b.APAR_Sh,
-        b.Vcmax25_Sh, b.Vcmax25_C4Sh, b.fC4, b.Ps, b.alf, b.TgC)
+        b.Vcmax25_Sh, b.Vcmax25_C4Sh, b.fC4, b.Ps, b.alf, b.TgC,
+        rjv25=b.rjv25)
 
     # ---- Leaf microclimate (FULLY_COUPLED: leaves use canopy air space) ----
     e_c, es_c, VPD_c, RH_c, desTc, ddesTc, gamma_c = canopy_met_variables(
@@ -412,10 +418,12 @@ def canopy_forward(
     # respiration against the carbon model's r_maint_fol*C_fol).
     An_Sun, Agross_Sun = photosynthesis(
         T_phot_sun, Ci_Sun, b.APAR_Sun,
-        b.Vcmax25_Sun, b.Vcmax25_C4Sun, b.fC4, b.Ps, b.alf, b.TgC)
+        b.Vcmax25_Sun, b.Vcmax25_C4Sun, b.fC4, b.Ps, b.alf, b.TgC,
+        rjv25=b.rjv25)
     An_Sh, Agross_Sh = photosynthesis(
         T_phot_sh,  Ci_Sh,  b.APAR_Sh,
-        b.Vcmax25_Sh, b.Vcmax25_C4Sh, b.fC4, b.Ps, b.alf, b.TgC)
+        b.Vcmax25_Sh, b.Vcmax25_C4Sh, b.fC4, b.Ps, b.alf, b.TgC,
+        rjv25=b.rjv25)
 
     # FULLY_COUPLED: leaves and soil share the canopy air space (Tc, q_c).
     e_c, es_c, VPD_c, RH_c, desTc, ddesTc, gamma_c = canopy_met_variables(
