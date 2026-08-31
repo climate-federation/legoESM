@@ -147,7 +147,7 @@ _GRID = [
 def _mk_state(T, D, ca, P, iabs=400.0):
     one = jnp.ones((1,), dtype=jnp.float64)
     return pm.PModelAcclimState(
-        ppfd_ema=iabs * one, iabs_mean=iabs * one, t_mean_K=T * one,
+        iabs_mean=iabs * one, t_mean_K=T * one,
         vpd_mean_pa=D * one, co2_mean_ppm=ca * one, ps_ema=P * one)
 
 
@@ -223,9 +223,9 @@ def test_ema_recurrence_exact():
         vpd_pa=jnp.full((1,), 1200.0), co2_ppm=jnp.full((1,), 410.0),
         ps_pa=jnp.full((1,), _O_PATM), cfg=cfg, dt=dt)
     alpha = dt / cfg.tau_acclim_s
-    ema = 300.0 + alpha * (600.0 - 300.0)
-    gain = 1.0 - math.exp(-alpha * 600.0 / (ema + cfg.ppfd_ref_floor))
-    assert float(s2.ppfd_ema[0]) == pytest.approx(ema, rel=1e-12)
+    gain = 1.0 - math.exp(-alpha * 600.0 / (300.0 + cfg.ppfd_ref_floor))
+    assert float(s2.iabs_mean[0]) == pytest.approx(
+        300.0 + gain * (600.0 - 300.0), rel=1e-12)
     assert float(s2.t_mean_K[0]) == pytest.approx(
         293.15 + gain * (300.0 - 293.15), rel=1e-12)
     assert float(s2.vpd_mean_pa[0]) == pytest.approx(

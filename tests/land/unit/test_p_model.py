@@ -29,7 +29,6 @@ _REF = dict(
 def _state(ppfd=400.0, t_c=25.0, vpd=1000.0, co2=400.0, ps=constants.p_atm_std):
     one = jnp.ones((1,))
     return pm.PModelAcclimState(
-        ppfd_ema=ppfd * one,
         iabs_mean=ppfd * one,
         t_mean_K=(constants.T_freeze + t_c) * one,
         vpd_mean_pa=vpd * one,
@@ -119,6 +118,14 @@ def test_night_steps_hold_daytime_means():
     caps = pm.acclimated_capacities(s, cfg)
     assert np.isfinite(float(caps.vcmax25_leaf[0]))
     assert np.isfinite(float(caps.g1_kpa[0]))
+    # Polar SUNRISE: the first bright step after months of darkness moves the
+    # held mean at ~the EMA rate (gain ~ dt*w/(tau*w_ref)), not in one jump —
+    # the gain reference is the HELD daytime-mean PPFD, which did not decay.
+    bright = {**dark, "T_K": jnp.full((1,), constants.T_freeze + 5.0),
+              "ppfd": jnp.full((1,), 1200.0)}
+    s2 = pm.advance_pmodel_acclim(s, cfg=cfg, dt=1800.0, **bright)
+    moved = abs(float(s2.t_mean_K[0]) - float(s.t_mean_K[0]))
+    assert moved < 0.5  # a near-1 gain would move ~15 K toward the +5 C air
 
 
 def test_daytime_means_track_daytime_not_diurnal_average():
@@ -167,7 +174,7 @@ def test_init_state_uses_config_constants_and_override():
     cfg = pm.PModelConfig()
     s = pm.init_pmodel_acclim(
         3, t_init_K=285.0, ps_init_pa=90000.0, cfg=cfg)
-    assert s.ppfd_ema.shape == (3,)
+    assert s.iabs_mean.shape == (3,)
     assert float(s.iabs_mean[0]) == cfg.init_ppfd
     assert float(s.vpd_mean_pa[0]) == cfg.init_vpd_pa
     assert float(s.co2_mean_ppm[0]) == cfg.init_co2_ppm
@@ -207,5 +214,5 @@ def test_init_multilayer_state_carries_acclim_iff_switch_active():
         stomatal_model="medlyn"))
     s = init_multilayer_land_state(4, cfg_on, pmodel_co2_init_ppm=390.0)
     assert s.pmodel_acclim is not None
-    assert s.pmodel_acclim.ppfd_ema.shape == (4,)
+    assert s.pmodel_acclim.iabs_mean.shape == (4,)
     assert float(s.pmodel_acclim.co2_mean_ppm[0]) == 390.0

@@ -212,14 +212,17 @@ VALID_G1_SOURCES = ("table", "p_model")
 class PModelAcclimState(NamedTuple):
     """Running daytime-mean acclimation drivers, all shape ``(ncol,)``.
 
-    ``ppfd_ema`` is a plain EMA of instantaneous PPFD (the gain reference);
     ``iabs_mean``/``t_mean_K``/``vpd_mean_pa``/``co2_mean_ppm`` are
-    PPFD-gain-weighted means (update gain ~ instantaneous PPFD, so night
-    steps leave them HELD rather than decayed — a daytime-mean proxy);
-    ``ps_ema`` is a plain EMA (pressure barely varies diurnally).
+    PPFD-gain-weighted means (update gain ~ instantaneous PPFD over the HELD
+    daytime-mean PPFD, so night steps leave them held rather than decayed — a
+    daytime-mean proxy); ``ps_ema`` is a plain EMA (pressure barely varies
+    diurnally).  The gain reference is ``iabs_mean`` itself: because it is
+    held (not decayed) through darkness, the first sunlit step after a polar
+    night sees gain ~ dt/tau — a plain-EMA-rate resumption — instead of the
+    near-1 jump a decaying reference would give (which would erase the
+    acclimated memory in one step).
     """
 
-    ppfd_ema: jax.Array
     iabs_mean: jax.Array
     t_mean_K: jax.Array
     vpd_mean_pa: jax.Array
@@ -369,7 +372,6 @@ def init_pmodel_acclim(
     full = lambda v: jnp.full((ncol,), v, dtype=dtype)  # noqa: E731
     co2 = cfg.init_co2_ppm if co2_init_ppm is None else co2_init_ppm
     return PModelAcclimState(
-        ppfd_ema=full(cfg.init_ppfd),
         iabs_mean=full(cfg.init_ppfd),
         t_mean_K=full(0.0) + jnp.asarray(t_init_K, dtype=dtype),
         vpd_mean_pa=full(cfg.init_vpd_pa),
@@ -391,20 +393,22 @@ def advance_pmodel_acclim(
 ) -> PModelAcclimState:
     """One acclimation step: PPFD-gain-weighted running daytime means.
 
-    Plain EMA for the PPFD reference and pressure; for the daytime means the
-    per-step gain is ``1 - exp(-dt*w / (tau*w_ref))`` with ``w`` the
-    instantaneous PPFD and ``w_ref`` the PPFD EMA — smooth, in [0, 1), ~the
-    plain EMA gain in steady daylight, and exactly 0 at night so dark periods
-    HOLD the last daytime mean instead of decaying it (polar night stays
-    finite; no `max` subgradient anywhere).
+    The per-step gain is ``1 - exp(-dt*w / (tau*w_ref))`` with ``w`` the
+    instantaneous PPFD and ``w_ref`` the HELD daytime-mean PPFD
+    (``iabs_mean``) — smooth, in [0, 1), ~the plain EMA gain dt/tau in steady
+    daylight (w ~ w_ref), and exactly 0 at night so dark periods HOLD the
+    last daytime mean instead of decaying it (polar night stays finite; no
+    ``max`` subgradient anywhere).  Using the held mean as the reference —
+    not a plain PPFD EMA, which decays through the night — keeps the
+    first-sunlight gain after a long dark spell at ~dt/tau instead of ~1, so
+    a polar sunrise re-acclimates on the tau timescale rather than in one
+    step.  Pressure keeps a plain EMA.
     """
     alpha = dt / cfg.tau_acclim_s
-    ppfd_ema = acclim.ppfd_ema + alpha * (ppfd - acclim.ppfd_ema)
-    w_ref = ppfd_ema + cfg.ppfd_ref_floor
+    w_ref = acclim.iabs_mean + cfg.ppfd_ref_floor
     gain = 1.0 - jnp.exp(-alpha * ppfd / w_ref)
     step = lambda mean, x: mean + gain * (x - mean)  # noqa: E731
     return PModelAcclimState(
-        ppfd_ema=ppfd_ema,
         iabs_mean=step(acclim.iabs_mean, ppfd),
         t_mean_K=step(acclim.t_mean_K, T_K),
         vpd_mean_pa=step(acclim.vpd_mean_pa, vpd_pa),

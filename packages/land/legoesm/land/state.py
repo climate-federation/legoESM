@@ -76,7 +76,7 @@ class MultiLayerLandState(NamedTuple):
     W_canopy: jax.Array | None = None
     # P-model acclimation state (``land/p_model.py``: PPFD-gain-weighted
     # running daytime means of T/PPFD/VPD/CO2/pressure), a
-    # ``PModelAcclimState`` pytree of six (ncol,) arrays.  Present iff a
+    # ``PModelAcclimState`` pytree of five (ncol,) arrays.  Present iff a
     # two-leaf P-model switch (``capacity_scheme``/``g1_source``) is active;
     # ``None`` otherwise.  Appended last (positional-ABI rule).
     pmodel_acclim: Any | None = None

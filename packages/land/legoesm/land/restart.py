@@ -244,7 +244,7 @@ def save_land_restart(
         val = getattr(state, field, None)
         if val is not None:
             payload[field] = np.asarray(val)
-    # P-model acclimation state (six (ncol,) arrays) — written only when the
+    # P-model acclimation state (five (ncol,) arrays) — written only when the
     # P-model switches are active (state carries it).
     _pm = getattr(state, "pmodel_acclim", None)
     if _pm is not None:

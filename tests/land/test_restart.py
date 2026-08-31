@@ -422,7 +422,7 @@ def _fake_pmodel_acclim(ncol=_NCOL):
     import jax.numpy as _jnp
     one = _jnp.ones((ncol,))
     return PModelAcclimState(
-        ppfd_ema=400.0 * one, iabs_mean=380.0 * one, t_mean_K=293.0 * one,
+        iabs_mean=380.0 * one, t_mean_K=293.0 * one,
         vpd_mean_pa=900.0 * one, co2_mean_ppm=410.0 * one,
         ps_ema=101000.0 * one)
 
