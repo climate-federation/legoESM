@@ -57,6 +57,14 @@ def test_runtime_dump_mapping(peel, tmp_path):
     assert core[0, 0, 0] == raw[0, 4, 4]
 
 
+def test_horizontal_mask_broadcasts_only_over_levels(peel):
+    mask = np.array([[True, False], [False, True]])
+    expanded = peel._broadcast_mask(mask, (2, 2, 3))
+    assert expanded.shape == (2, 2, 3)
+    assert np.array_equal(expanded[..., 0], mask)
+    assert np.array_equal(expanded[..., 2], mask)
+
+
 def test_parser_requires_receipt_inputs(peel):
     parser = peel.build_parser()
     args = parser.parse_args([

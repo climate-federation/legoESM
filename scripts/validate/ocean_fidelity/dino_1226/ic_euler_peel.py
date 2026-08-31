@@ -101,7 +101,10 @@ def diff_row(name: str, actual: np.ndarray, expected: np.ndarray,
 
 
 def _broadcast_mask(mask: np.ndarray, shape: tuple[int, ...]) -> np.ndarray:
-    return np.broadcast_to(np.asarray(mask, dtype=bool), shape)
+    array = np.asarray(mask, dtype=bool)
+    if array.ndim + 1 == len(shape):
+        array = array[..., None]
+    return np.broadcast_to(array, shape)
 
 
 def _mesh_core(value: np.ndarray) -> np.ndarray:
