@@ -78,6 +78,13 @@ class DINOConfig:
     # co-sets lon_west/lon_east/sill_lon_m_deg); ``dino_lat_lon_grid`` raises if
     # the frame is inconsistent. See docs/ocean/fidelity/dino_tendency_certificate.md.
     nemo_faithful_grid: bool = False
+    # Evaluation convention for the analytic CASE(4) initial condition.
+    # ``jax_factored`` is the historical, differentiable construction and
+    # remains the default for every non-oracle recipe. ``nemo_scalar_source``
+    # is the DINO-oracle construction: scalar libm TANH, literal Fortran
+    # association, full nn_hls=2 latitude MAXVAL, and live wet-cell MINVAL
+    # anchors. It is legal only with the faithful grid + masked-zco geometry.
+    initial_condition_evaluation: str = "jax_factored"
     channel_lat_south_deg: float = -65.0  # southern edge of re-entrant channel
     channel_lat_north_deg: float = -45.0  # northern edge of re-entrant channel
     channel_width_deg: float = 20.0       # Δφ_c in eq A4 (= |lat_n - lat_s|)
@@ -1205,6 +1212,10 @@ DINO_RECIPES: dict[str, dict] = {
         # -- Vertical coordinate (namusr_def: ln_zco_nam=T, ln_zps_nam=F -> full-step z) --
         "vertical_coordinate": "masked_zco",
         "z_coordinate_transition_depth_m": 1000.0,  # rn_hco
+        # usrdef_istate.F90:135-174: scalar-libm TANH, source association,
+        # full construction-frame MAXVAL(gphit), and wet-field MINVAL anchors.
+        # The MLF card inherits this; non-oracle recipes keep jax_factored.
+        "initial_condition_evaluation": "nemo_scalar_source",
         # -- Hydrostatic PGF (namdyn_hpg: ln_hpg_sco=T — forced by qco/nonlinear
         #    free surface even on z-levels; dynhpg.F90:181 rejects hpg_zco).
         #    "nemo_sco" = the hpg_sco transcription: qco (1+r3t) thickness
@@ -2529,6 +2540,49 @@ def dino_S_profile_1d(z_pos):
     return deep * weight_deep + shallow * weight_shallow
 
 
+def _scalar_libm_tanh(value: np.ndarray) -> np.ndarray:
+    """Evaluate binary64 ``tanh`` one scalar at a time through host libm.
+
+    The executed NEMO DINO binary imports scalar ``tanh@GLIBC_2.2.5`` and no
+    vector TANH symbol.  This helper is used only while constructing the fixed
+    analytic oracle initial state; it is not part of a stepped/JIT tendency.
+    """
+    array = np.asarray(value, dtype=np.float64)
+    flat = np.fromiter(
+        (math.tanh(float(item)) for item in array.ravel(order="C")),
+        dtype=np.float64,
+        count=array.size,
+    )
+    return flat.reshape(array.shape)
+
+
+def dino_nemo_istate_profiles_1d(z_pos) -> tuple[np.ndarray, np.ndarray]:
+    """NEMO CASE(4) depth profiles with executed scalar-TANH lowering.
+
+    Operations retain the written association of
+    ``cfgs/DINO/MY_SRC/usrdef_istate.F90:135-148``.  The return is NumPy
+    float64 because the oracle path is a static analytic state constructor;
+    the ordinary ``dino_*_profile_1d`` functions remain pure JAX for general
+    differentiable use.
+    """
+    z = np.asarray(z_pos, dtype=np.float64)
+    tanh = _scalar_libm_tanh
+    t = ((16.0 - 12.0 * tanh((z - 400.0) / 700.0))
+         * (-tanh((500.0 - z) / 150.0) + 1.0) / 2.0
+         + (15.0 * (1.0 - tanh((z - 50.0) / 1500.0))
+            - 1.4 * tanh((z - 100.0) / 100.0)
+            + 7.0 * (1500.0 - z) / 1500.0)
+         * (-tanh((z - 500.0) / 150.0) + 1.0) / 2.0)
+    s = ((36.25 - 1.13 * tanh((z - 305.0) / 460.0))
+         * (-tanh((500.0 - z) / 150.0) + 1.0) / 2.0
+         + (35.55 + 1.25 * (5000.0 - z) / 5000.0
+            - 1.62 * tanh((z - 60.0) / 650.0)
+            + 0.2 * tanh((z - 35.0) / 100.0)
+            + 0.2 * tanh((z - 1000.0) / 5000.0))
+         * (-tanh((z - 500.0) / 150.0) + 1.0) / 2.0)
+    return t, s
+
+
 def dino_initial_T_S(
     lat_deg,
     z_full_ref,
@@ -2994,6 +3048,55 @@ def dino_lat_lon_grid(cfg: DINOConfig | None = None, n_lon: int = 50):
     )
 
 
+def _dino_nemo_full_t_lat_max_deg(grid, cfg: DINOConfig) -> float:
+    """Return CASE(4) ``MAXVAL(gphit)`` on NEMO's nn_hls=2 frame.
+
+    The public grid stores the 195-row physical core (Mercator indices
+    -97..97). NEMO evaluates ``usrdef_istate`` on the 199-row construction
+    array, whose northern T index is 99. This is the T-point companion to the
+    already source-owned U-boundary indices in :func:`dino_lat_lon_bowl`.
+    """
+    if grid.n_lat != _NEMO_DINO_NLAT or grid.n_lon != _NEMO_DINO_NLON:
+        raise ValueError(
+            "nemo_scalar_source requires the 195x48 NEMO DINO grid; got "
+            f"{grid.n_lat}x{grid.n_lon}")
+    ddeg = (cfg.lon_east_deg - cfg.lon_west_deg) / grid.n_lon
+    core_half = (grid.n_lat - 1) // 2
+    halo = 2
+    rad = math.pi / 180.0
+    return math.asin(math.tanh((ddeg * rad) * (core_half + halo))) / rad
+
+
+def _dino_nemo_case4_state(grid, z_coord, cfg: DINOConfig):
+    """Construct the physical-core CASE(4) state in NEMO source order."""
+    if not (cfg.nemo_faithful_grid
+            and cfg.vertical_coordinate == "masked_zco"):
+        raise ValueError(
+            "initial_condition_evaluation='nemo_scalar_source' requires "
+            "nemo_faithful_grid=True and vertical_coordinate='masked_zco'")
+    depth = np.abs(np.asarray(z_coord.z_full_ref, dtype=np.float64))
+    if depth.shape != (z_coord.n_levels,):
+        raise ValueError(
+            f"faithful T-depth shape {depth.shape} != ({z_coord.n_levels},)")
+    t_prof, s_prof = dino_nemo_istate_profiles_1d(depth)
+    shape = (grid.n_lat, grid.n_lon, z_coord.n_levels)
+    mask = np.asarray(z_coord.is_active, dtype=np.float64)
+    if mask.shape != shape:
+        raise ValueError(f"faithful wet-mask shape {mask.shape} != {shape}")
+    t_uniform = np.broadcast_to(t_prof, shape) * mask
+    s_uniform = np.broadcast_to(s_prof, shape) * mask
+    phi_max = _dino_nemo_full_t_lat_max_deg(grid, cfg)
+    t_bot = float(np.min(t_uniform + 100.0 * (1.0 - mask)))
+    s_bot = float(np.min(s_uniform + 100.0 * (1.0 - mask)))
+    lat = np.asarray(jnp.degrees(grid.lat), dtype=np.float64)
+    inv_phi_max = 1.0 / phi_max
+    lat_term = (phi_max - np.abs(lat))[:, None, None]
+    t = ((t_uniform - t_bot) * lat_term * inv_phi_max + t_bot) * mask
+    s = ((s_uniform - s_bot) * lat_term * inv_phi_max + s_bot) * mask
+    dtype = jnp.asarray(z_coord.z_full_ref).dtype
+    return jnp.asarray(t, dtype=dtype), jnp.asarray(s, dtype=dtype)
+
+
 def dino_lat_lon_initial_state_arrays(
     grid,
     z_coord: OceanZStarCoordinate,
@@ -3031,12 +3134,23 @@ def dino_lat_lon_initial_state_arrays(
     # Bathymetry (shared canonical construction)
     H_bathy = dino_lat_lon_bowl(grid, cfg)
 
-    # ICs: T(lat, z), S(lat, z) — broadcast over longitude
-    T_lat_z, S_lat_z = dino_initial_T_S(lat_deg_1d, z_coord.z_full_ref, cfg)
-    T = jnp.broadcast_to(T_lat_z[:, None, :],
-                         (grid.n_lat, grid.n_lon, z_coord.n_levels))
-    S = jnp.broadcast_to(S_lat_z[:, None, :],
-                         (grid.n_lat, grid.n_lon, z_coord.n_levels))
+    # ICs: preserve the historical pure-JAX/factored path everywhere except
+    # the two explicit oracle cards. Their static constructor follows
+    # usrdef_istate.F90:135-174, including scalar TANH and live anchors.
+    if cfg.initial_condition_evaluation == "jax_factored":
+        T_lat_z, S_lat_z = dino_initial_T_S(
+            lat_deg_1d, z_coord.z_full_ref, cfg)
+        T = jnp.broadcast_to(T_lat_z[:, None, :],
+                             (grid.n_lat, grid.n_lon, z_coord.n_levels))
+        S = jnp.broadcast_to(S_lat_z[:, None, :],
+                             (grid.n_lat, grid.n_lon, z_coord.n_levels))
+    elif cfg.initial_condition_evaluation == "nemo_scalar_source":
+        T, S = _dino_nemo_case4_state(grid, z_coord, cfg)
+    else:
+        raise ValueError(
+            "initial_condition_evaluation must be 'jax_factored' or "
+            f"'nemo_scalar_source', got "
+            f"{cfg.initial_condition_evaluation!r}")
 
     if land_mask_override is not None:
         # i-periodic / re-entrant (NEMO ln_Iperio): the caller (the NEMO

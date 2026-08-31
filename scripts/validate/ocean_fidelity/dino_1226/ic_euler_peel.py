@@ -25,6 +25,7 @@ from legoesm.ocean.experiments.dino import (
     dino_S_profile_1d,
     dino_T_profile_1d,
     dino_lat_lon_grid,
+    dino_nemo_istate_profiles_1d,
 )
 from legoesm.grids.latlon import create_mercator_grid
 from legoesm.ocean.init_latlon_cgrid import partial_periodic_seam_wall_latlon
@@ -36,7 +37,7 @@ from legoesm.ocean.fidelity.nemo_io import (
 )
 
 
-SCHEMA = "dino_ic_euler_peel_v3"
+SCHEMA = "dino_ic_euler_peel_v4"
 BAR = 1.0e-15
 RUNTIME_SHAPE = (203, 56)
 RUNTIME_HALO = 2
@@ -183,8 +184,7 @@ def _initial_rows(grid, geometry, z_coord, state, cfg) -> tuple[
 
     nemo_depth = _mesh_core(grid.gdept_0)
     source_t_profile, source_s_profile = hpg.nemo_istate_profiles_1d(nemo_depth)
-    lego_t_profile = np.asarray(dino_T_profile_1d(nemo_depth))
-    lego_s_profile = np.asarray(dino_S_profile_1d(nemo_depth))
+    lego_t_profile, lego_s_profile = dino_nemo_istate_profiles_1d(nemo_depth)
     rows.extend([
         diff_row("common_depth_T_profile", lego_t_profile, source_t_profile, mask),
         diff_row("common_depth_S_profile", lego_s_profile, source_s_profile, mask),
@@ -389,6 +389,18 @@ def _legacy_geometry_controls(nemo_grid, cfg, z_coord, state) -> dict[str, Any]:
             and depth_row["max_abs"] > 100.0):
         raise RuntimeError("old first-pass depth control did not fire >100 m")
 
+    nemo_depth = _mesh_core(nemo_grid.gdept_0)
+    source_t, source_s = hpg.nemo_istate_profiles_1d(nemo_depth)
+    old_t = np.asarray(dino_T_profile_1d(nemo_depth))
+    old_s = np.asarray(dino_S_profile_1d(nemo_depth))
+    old_t_row = diff_row(
+        "control_old_jax_factored_T_profile", old_t, source_t, mask)
+    old_s_row = diff_row(
+        "control_old_jax_factored_S_profile", old_s, source_s, mask)
+    if (old_t_row["status"] != "OVER_BAR"
+            or old_s_row["status"] != "OVER_BAR"):
+        raise RuntimeError("old JAX/factored profile control did not fire")
+
     # The previous production bug used the final transitioned gdept to choose
     # k_bot. The continuous bowl is not retained on state (state.H_bathy is
     # already snapped), so the unit control locks its exact 929-cell signature;
@@ -397,6 +409,8 @@ def _legacy_geometry_controls(nemo_grid, cfg, z_coord, state) -> dict[str, Any]:
         "old_seam_wall": seam_row,
         "old_jax_latitude": lat_row,
         "old_first_pass_depth": depth_row,
+        "old_jax_factored_T_profile": old_t_row,
+        "old_jax_factored_S_profile": old_s_row,
         "final_depth_mask_operand_plant": "FIRED_BY_UNIT_TEST_929_CELLS",
     }
 

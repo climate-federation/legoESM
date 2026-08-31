@@ -98,6 +98,8 @@ import argparse
 import dataclasses
 import os
 
+import math
+
 import numpy as np
 
 RUN_DEFAULT = ("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/"
@@ -120,20 +122,29 @@ def nemo_istate_profiles_1d(
     (degC, PSU) -- the unmasked, horizontally-uniform profiles before the
     meridional blend.
     """
-    z = gdept
-    t = ((16.0 - 12.0 * np.tanh((z - 400.0) / 700.0))
-         * (-np.tanh((500.0 - z) / 150.0) + 1.0) / 2.0
-         + (15.0 * (1.0 - np.tanh((z - 50.0) / 1500.0))
-            - 1.4 * np.tanh((z - 100.0) / 100.0)
+    z = np.asarray(gdept, dtype=np.float64)
+
+    def scalar_tanh(value):
+        array = np.asarray(value, dtype=np.float64)
+        return np.fromiter(
+            (math.tanh(float(item)) for item in array.ravel(order="C")),
+            dtype=np.float64, count=array.size).reshape(array.shape)
+
+    # The executed NEMO binary imports scalar tanh@GLIBC_2.2.5 (and no vector
+    # TANH symbol). Retain the literal association at source lines 135-148.
+    t = ((16.0 - 12.0 * scalar_tanh((z - 400.0) / 700.0))
+         * (-scalar_tanh((500.0 - z) / 150.0) + 1.0) / 2.0
+         + (15.0 * (1.0 - scalar_tanh((z - 50.0) / 1500.0))
+            - 1.4 * scalar_tanh((z - 100.0) / 100.0)
             + 7.0 * (1500.0 - z) / 1500.0)
-         * (-np.tanh((z - 500.0) / 150.0) + 1.0) / 2.0)
-    s = ((36.25 - 1.13 * np.tanh((z - 305.0) / 460.0))
-         * (-np.tanh((500.0 - z) / 150.0) + 1.0) / 2.0
+         * (-scalar_tanh((z - 500.0) / 150.0) + 1.0) / 2.0)
+    s = ((36.25 - 1.13 * scalar_tanh((z - 305.0) / 460.0))
+         * (-scalar_tanh((500.0 - z) / 150.0) + 1.0) / 2.0
          + (35.55 + 1.25 * (5000.0 - z) / 5000.0
-            - 1.62 * np.tanh((z - 60.0) / 650.0)
-            + 0.2 * np.tanh((z - 35.0) / 100.0)
-            + 0.2 * np.tanh((z - 1000.0) / 5000.0))
-         * (-np.tanh((z - 500.0) / 150.0) + 1.0) / 2.0)
+            - 1.62 * scalar_tanh((z - 60.0) / 650.0)
+            + 0.2 * scalar_tanh((z - 35.0) / 100.0)
+            + 0.2 * scalar_tanh((z - 1000.0) / 5000.0))
+         * (-scalar_tanh((z - 500.0) / 150.0) + 1.0) / 2.0)
     return t, s
 
 
@@ -183,9 +194,10 @@ def nemo_istate_case4(gdept: np.ndarray, gphit: np.ndarray,
              if t_bot is None else float(t_bot))
     s_bot = (float(np.min(s + 100.0 * (1.0 - tmask)))
              if s_bot is None else float(s_bot))
-    blend = ((phi_max - np.abs(gphit)) / phi_max)[..., None]
-    t_out = ((t - t_bot) * blend + t_bot) * tmask
-    s_out = ((s - s_bot) * blend + s_bot) * tmask
+    inv_phi_max = 1.0 / phi_max
+    lat_term = (phi_max - np.abs(gphit))[..., None]
+    t_out = ((t - t_bot) * lat_term * inv_phi_max + t_bot) * tmask
+    s_out = ((s - s_bot) * lat_term * inv_phi_max + s_bot) * tmask
     return t_out, s_out
 
 

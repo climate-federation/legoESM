@@ -44,6 +44,7 @@ from legoesm.ocean.experiments.dino import (
     dino_lat_lon_grid,
     dino_lat_lon_initial_state_arrays,
     dino_lat_lon_model_config,
+    dino_nemo_istate_profiles_1d,
     nemo_faithful_dino_config,
     dino_top_layer_S_tendency,
     dino_top_layer_T_tendency,
@@ -1040,6 +1041,66 @@ class TestPartialPeriodicSeamLatLon:
 # ---------------------------------------------------------------------
 
 class TestLatLonInitialState:
+    def test_oracle_cards_select_source_initializer_and_guard_scope(self):
+        for recipe in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
+            assert (dino_config_for_recipe(recipe).initial_condition_evaluation
+                    == "nemo_scalar_source")
+        assert DINOConfig().initial_condition_evaluation == "jax_factored"
+
+        cfg = dataclasses.replace(
+            DINOConfig(), initial_condition_evaluation="unknown")
+        grid = dino_lat_lon_grid(cfg, n_lon=6)
+        zc = create_levy_stretched_z_star(
+            n_levels=4, H_max=cfg.H_deep, dz_min=400.0,
+            k_th=3.0, a_cr=2.0)
+        with pytest.raises(ValueError, match="initial_condition_evaluation"):
+            dino_lat_lon_initial_state_arrays(grid, zc, cfg)
+
+        scoped = dataclasses.replace(
+            cfg, initial_condition_evaluation="nemo_scalar_source")
+        with pytest.raises(ValueError, match="nemo_faithful_grid=True"):
+            dino_lat_lon_initial_state_arrays(grid, zc, scoped)
+
+    def test_faithful_initial_state_uses_live_source_anchors(self):
+        cfg = nemo_faithful_dino_config(
+            base=dino_config_for_recipe("nemo_dino_kamm_mlf"))
+        grid = dino_lat_lon_grid(cfg)
+        zc = dino.dino_lat_lon_vertical(grid, cfg)
+        t, s, _, _ = dino_lat_lon_initial_state_arrays(grid, zc, cfg)
+        t = np.asarray(t)
+        s = np.asarray(s)
+
+        # usrdef_istate.F90:151 scans the two halo T rows too: physical
+        # indices -97..97 become construction indices -99..99.
+        phi_max = 69.85173502222084
+        profile_t, profile_s = dino_nemo_istate_profiles_1d(
+            np.abs(np.asarray(zc.z_full_ref)))
+        mask = np.asarray(zc.is_active, dtype=np.float64)
+        shape = mask.shape
+        uniform_t = np.broadcast_to(profile_t, shape) * mask
+        uniform_s = np.broadcast_to(profile_s, shape) * mask
+        t_bot = np.min(uniform_t + 100.0 * (1.0 - mask))
+        s_bot = np.min(uniform_s + 100.0 * (1.0 - mask))
+        # Follow the constructor's configured precision. The campaign probe
+        # sets fp64; the unit-suite default may intentionally be fp32.
+        lat = np.asarray(
+            jnp.degrees(grid.lat), dtype=np.float64)[:, None, None]
+        inv = 1.0 / phi_max
+        expected_t = ((uniform_t - t_bot)
+                      * (phi_max - np.abs(lat)) * inv + t_bot) * mask
+        expected_s = ((uniform_s - s_bot)
+                      * (phi_max - np.abs(lat)) * inv + s_bot) * mask
+        np.testing.assert_array_equal(t, expected_t.astype(t.dtype))
+        np.testing.assert_array_equal(s, expected_s.astype(s.dtype))
+
+        # Planted legacy anchors must be observably different.
+        old_t, old_s = dino_initial_T_S(
+            np.degrees(np.asarray(grid.lat)), zc.z_full_ref, cfg)
+        old_t = np.broadcast_to(np.asarray(old_t)[:, None, :], shape)
+        old_s = np.broadcast_to(np.asarray(old_s)[:, None, :], shape)
+        assert np.max(np.abs(t[mask > 0.5] - old_t[mask > 0.5])) > 1.0e-6
+        assert np.max(np.abs(s[mask > 0.5] - old_s[mask > 0.5])) > 1.0e-6
+
     def test_T_S_field_shapes(self):
         # Use a coarser grid for test speed (4-level z, 6 lon, ~12 lat).
         cfg = DINOConfig()
@@ -1612,7 +1673,12 @@ class TestSurfaceTendencyPlacement:
             create_dino_z_star, dino_lat_lon_grid, dino_lat_lon_state,
             dino_lat_lon_surface_forcing_arrays, dino_config_for_recipe,
         )
-        cfg = dino_config_for_recipe("nemo_dino_kamm_mlf")
+        # This forcing-placement unit uses a synthetic z* grid, not the
+        # faithful masked-zco IC geometry. Select the legacy initializer
+        # explicitly; the oracle selector correctly refuses this fixture.
+        cfg = dataclasses.replace(
+            dino_config_for_recipe("nemo_dino_kamm_mlf"),
+            initial_condition_evaluation="jax_factored")
         z = create_dino_z_star(cfg)
         g = dino_lat_lon_grid(cfg, n_lon=8)
         st = dino_lat_lon_state(g, z, cfg)
@@ -1655,7 +1721,9 @@ class TestSurfaceTendencyPlacement:
             dino_lat_lon_model_config, dino_lat_lon_surface_forcing_arrays,
             dino_config_for_recipe,
         )
-        cfg = dino_config_for_recipe("nemo_dino_kamm")  # forward-Euler card
+        cfg = dataclasses.replace(
+            dino_config_for_recipe("nemo_dino_kamm"),  # forward-Euler card
+            initial_condition_evaluation="jax_factored")
         z = create_dino_z_star(cfg)
         g = dino_lat_lon_grid(cfg, n_lon=8)
         mc, _ = dino_lat_lon_model_config(g, cfg, physics=True)
@@ -1702,6 +1770,7 @@ class TestSurfaceTendencyPlacement:
         # surface-tendency placement, so use the documented legacy N2 arm.
         cfg = dataclasses.replace(
             dino_config_for_recipe("nemo_dino_kamm_mlf"),
+            initial_condition_evaluation="jax_factored",
             tke_preclosure_coeff_source="current_subiteration",
             tke_matrix_evaluation="factored",
             tke_solver_evaluation="shared_thomas",
