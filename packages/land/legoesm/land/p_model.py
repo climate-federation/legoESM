@@ -472,7 +472,10 @@ def acclimated_capacities_c4(
     inversion divides by the HOST Collatz kernel's RAW temperature factor
     (``c4_vcmax_temperature_response``, which is ~0.87 at 25 degC by the
     kernel's own convention), so the kernel reproduces the optimum at the
-    growth temperature.  No Jmax ratio: the Collatz kernel has none.
+    growth temperature.  The returned value is therefore the EFFECTIVE
+    25 degC base the kernel multiplies — not a literal 25 degC rate (GLM
+    review) — exactly the semantics of the prescribed ``Vcmax25_C4`` it
+    replaces.  No Jmax ratio: the Collatz kernel has none.
     """
     if acclim is None:
         raise ValueError(
