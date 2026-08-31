@@ -162,13 +162,20 @@ def score(name: str, oracle, candidate, mask, *, plant=False) -> dict:
         candidate = candidate.copy()
         candidate[tuple(np.argwhere(active)[0])] += 1.0
     require(np.all(np.isfinite(candidate[active])), f"{name}: candidate non-finite")
-    scale = max(float(np.max(np.abs(oracle[active]))), 1.0)
-    error = float(np.max(np.abs(candidate[active] - oracle[active]))) / scale
+    reference_max_abs = float(np.max(np.abs(oracle[active])))
+    absolute_error = np.abs(candidate[active] - oracle[active])
+    absolute_max = float(np.max(absolute_error))
+    absolute_mean = float(np.mean(absolute_error))
+    scale = max(reference_max_abs, 1.0)
+    error = absolute_max / scale
     return {
         "name": name,
         "status": "AT-BAR" if error <= BAR else "DEBT",
         "exact": bool(np.array_equal(candidate[active], oracle[active])),
         "normalized_max_abs": error,
+        "absolute_max": absolute_max,
+        "absolute_mean": absolute_mean,
+        "reference_max_abs": reference_max_abs,
         "bar": BAR,
         "n": int(active.sum()),
         "oracle_dtype": str(oracle.dtype),
@@ -434,7 +441,8 @@ def run(
         "artifacts_sha256": artifacts,
         "unmeasured": [
             "individual FCT limiter coefficients and antidiffusive fluxes",
-            "owner of the remaining kt=2 u residual after per-stage correction is exonerated",
+            "owner of the remaining kt=2 u residual; the per-stage "
+            "barotropic correction is exonerated",
             "kt>=3 trajectory (stopped at first over-bar step)",
             "OVERFLOW-zps trajectory (LOCK dependency remains red)",
         ],
