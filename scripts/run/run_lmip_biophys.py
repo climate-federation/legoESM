@@ -141,6 +141,9 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         # canopy).  See lmip_config.validate_config for bounds/validation.
         stomatal_model=cfg.physics.get("stomatal_model", "ball_berry"),
         stomata_enabled=bool(cfg.physics.get("stomata_enabled", False)),
+        canopy_capacity_scheme=cfg.physics.get(
+            "canopy_capacity_scheme", "prescribed"),
+        canopy_g1_source=cfg.physics.get("canopy_g1_source", "table"),
         calibrated_land_physics=bool(
             cfg.physics.get("calibrated_land_physics", False)),
         vc_max25=cfg.physics.get("vc_max25", None),
@@ -171,6 +174,7 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         land_frac_min=cfg.land_frac_min,
         # CLI overrides the config here for chaining ergonomics.
         restart_from=cli_args.restart_from or cfg.restart.get("from", ""),
+        pmodel_cold_restart=bool(getattr(cli_args, "pmodel_cold_restart", False)),
         output_config="",                        # embedded output block is used directly
         _cfg_output_tapes=cfg.output,            # -> load_output_config indirection below
         _cfg_luc=cfg.raw.get("land_use_change") or {},   # E_LUC bookkeeping block
@@ -387,7 +391,10 @@ def run(args) -> int:
         # The two-leaf canopy carries its OWN mechanistic Ball-Berry/Medlyn
         # stomata (selected by CanopyConfig.stomatal_model); per-column Vcmax25
         # comes from the surfdata PFT map.
-        surf = CanopyConfig(max_iters=50, tol=1e-2, stomatal_model=args.stomatal_model)
+        surf = CanopyConfig(
+            max_iters=50, tol=1e-2, stomatal_model=args.stomatal_model,
+            capacity_scheme=args.canopy_capacity_scheme,
+            g1_source=args.canopy_g1_source).validate()
     elif args.surface_scheme == "simple_seb":
         surf = SimpleSEBConfig()
     else:
@@ -399,13 +406,25 @@ def run(args) -> int:
     # ignores it (it has its own leaf conductance).  Only override a scalar the
     # user actually set (None -> land default / per-PFT surfdata value).
     _stom = {"enabled": bool(args.stomata_enabled), "stomata_model": args.stomatal_model}
+    if args.surface_scheme == "simple_seb":
+        # simple_seb: the P-model switches live on the big-leaf StomataConfig.
+        _stom["capacity_scheme"] = args.canopy_capacity_scheme
+        _stom["g1_source"] = args.canopy_g1_source
     if args.vc_max25 is not None:
         _stom["Vc_max25"] = float(args.vc_max25)
     if args.gs_max is not None:
         _stom["gs_max"] = float(args.gs_max)
     if args.g1 is not None:
+        if args.canopy_g1_source == "p_model":
+            raise ValueError(
+                "--g1 with physics.canopy_g1_source=p_model would be silently "
+                "inert (the optimality slope overwrites it); drop one.")
         _stom["g1_bb" if args.stomatal_model == "ball_berry" else "g1_med"] = float(args.g1)
-    stomata = StomataConfig(**_stom)
+    if args.vc_max25 is not None and args.canopy_capacity_scheme == "p_model":
+        raise ValueError(
+            "--vc-max25 with physics.canopy_capacity_scheme=p_model would be "
+            "silently inert (the optimality capacity overwrites it); drop one.")
+    stomata = StomataConfig(**_stom).validate()
 
     # --- Surface albedo + root-zone parameters, straight from the config ------
     # Generic values under generic names: ``physics.albedo`` carries
@@ -590,12 +609,21 @@ def run(args) -> int:
         from legoesm.core.field import Field
         from legoesm.land.state import LandState
         z = lambda: jnp.zeros(ncol)
+        from legoesm.land.p_model import (
+            init_pmodel_acclim, pmodel_switches_active)
+        _pm0 = None
+        if pmodel_switches_active(config.surface_scheme, config.stomata):
+            from legoesm import constants as _c
+            _pm0 = init_pmodel_acclim(
+                ncol, t_init_K=T0, ps_init_pa=_c.p_atm_std,
+                cfg=config.p_model)
         state = LandState(
             T_soil=Field(T0, name="T_soil", units="K"),
             W_bucket=Field(jnp.full(ncol, 100.0), name="W_bucket", units="kg/m2"),
             snow_depth=Field(z(), name="snow_depth", units="kg/m2"),
             snow_age=Field(z(), name="snow_age", units="s"),
             runoff=z(),
+            pmodel_acclim=_pm0,
         )
     else:
         if args.restart_from:
@@ -625,7 +653,9 @@ def run(args) -> int:
             # raises a carry pytree-structure mismatch.  Graft onto a canonical
             # cold-start template, as model_driver and run_land_spinup do.
             state = merge_land_restart_into_template(
-                loaded, init_multilayer_land_state(ncol, config, T_init=288.0))
+                loaded, init_multilayer_land_state(ncol, config, T_init=288.0),
+                allow_pmodel_cold_start=bool(
+                    getattr(args, "pmodel_cold_restart", False)))
             print(f"restart: loaded state from {args.restart_from} "
                   f"(t_end_s={restart_meta['t_end_s']:.1f}, "
                   f"steps_completed={restart_meta['n_steps_completed']})")
@@ -735,6 +765,13 @@ def run(args) -> int:
             values["T_soil_top"] = _ZEROS
             values["theta_soil_top"] = _ZEROS
             values["snow_depth"] = _ZEROS
+        _pm_state = getattr(new_state, "pmodel_acclim", None)
+        if _pm_state is not None:
+            from legoesm.land.p_model import acclimated_capacities as _acc
+            _caps_d = _acc(_pm_state, config.p_model)
+            values["pmodel_chi"] = _caps_d.chi
+            values["pmodel_vcmax25"] = _caps_d.vcmax25_leaf
+            values["pmodel_g1"] = _caps_d.g1_kpa
         # --- atomic per-column NaN-revert guard (ported from run_ec_site) ---
         # Columns are independent, so if a column's state update goes non-finite,
         # revert THAT column to its previous state (jnp.where): a diverging boreal
@@ -1015,6 +1052,11 @@ def build_parser() -> argparse.ArgumentParser:
                          "scripts/run/init_experiment.py)")
     ap.add_argument("--output-dir", required=True,
                     help="experiment output directory (auto-created)")
+    ap.add_argument("--pmodel-cold-restart", action="store_true",
+                    dest="pmodel_cold_restart",
+                    help="allow resuming a P-model-active run from a restart "
+                         "written before the acclimation state existed (an "
+                         "explicit, recorded reset; refused otherwise).")
     ap.add_argument("--restart-from", default="",
                     help="override the config's restart.from field — the most "
                          "common per-run change (chained warm starts)")

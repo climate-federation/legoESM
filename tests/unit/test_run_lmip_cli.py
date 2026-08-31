@@ -397,3 +397,20 @@ def test_stomatal_model_selectable_on_every_scheme():
     # Bogus choice rejected by argparse.
     with pytest.raises(SystemExit):
         _parse_args(["--lat", "45.0", "--clm-ml-stomatal-model", "jarvis"])
+
+
+def test_ec_site_pmodel_flags_parse_and_guard():
+    """run_ec_site: the P-model switches parse, and the scale-flag guards
+    refuse silently-inert combinations."""
+    import pytest
+    from scripts.run.run_ec_site import run_site
+
+    with pytest.raises(ValueError, match="inert"):
+        run_site("/nonexistent.nc", "diagnostic", "/tmp/x", 8,
+                 capacity_scheme="p_model", vcmax_scale=1.2)
+    with pytest.raises(ValueError, match="inert"):
+        run_site("/nonexistent.nc", "diagnostic", "/tmp/x", 8,
+                 g1_source="p_model", stomatal_m_scale=0.8)
+    with pytest.raises(ValueError, match="two providers|providers"):
+        run_site("/nonexistent.nc", "prognostic", "/tmp/x", 8,
+                 canopy="clmml", capacity_scheme="p_model", clmml_vcmax25=60.0)

@@ -172,6 +172,19 @@ def validate_config(data: dict) -> LMIPConfig:
         raise ValueError(
             f"physics.stomatal_model={physics['stomatal_model']!r} not in {_STOMATA_MODELS}")
     physics.setdefault("stomata_enabled", False)
+    # --- P-model optimality switches (land/p_model.py) ---
+    physics.setdefault("canopy_capacity_scheme", "prescribed")
+    physics.setdefault("canopy_g1_source", "table")
+    from legoesm.land.p_model import VALID_CAPACITY_SCHEMES, VALID_G1_SOURCES
+    if physics["canopy_capacity_scheme"] not in VALID_CAPACITY_SCHEMES:
+        raise ValueError(
+            f"physics.canopy_capacity_scheme="
+            f"{physics['canopy_capacity_scheme']!r} not in "
+            f"{VALID_CAPACITY_SCHEMES}")
+    if physics["canopy_g1_source"] not in VALID_G1_SOURCES:
+        raise ValueError(
+            f"physics.canopy_g1_source={physics['canopy_g1_source']!r} "
+            f"not in {VALID_G1_SOURCES}")
     physics.setdefault("snow_albedo_feedback", True)
     # Soil-water freeze/thaw (apparent-heat-capacity zero-curtain, off by
     # default = bit-identical sensible-only soil heat).  Enabling it stabilises

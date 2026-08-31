@@ -404,6 +404,36 @@ def init_pmodel_acclim(
     )
 
 
+def acclim_trajectory(
+    init: "PModelAcclimState",
+    *,
+    T_K: jax.Array,
+    ppfd: jax.Array,
+    vpd_pa: jax.Array,
+    co2_ppm: jax.Array,
+    ps_pa: jax.Array,
+    cfg: "PModelConfig",
+    dt: float,
+) -> "PModelAcclimState":
+    """Scan the acclimation update over a driver time series.
+
+    Drivers have a leading time axis ((n_time, ...) per leaf); returns the
+    PER-STEP state trajectory (leaves (n_time, ...)) so a diagnostic
+    (state-free) driver can evaluate the acclimated capacities at every
+    timestep with the causal running mean up to that step (offline pre-pass;
+    e.g. run_ec_site --mode diagnostic).
+    """
+    def _f(carry, x):
+        t_k, w, d_pa, ca, ps = x
+        new = advance_pmodel_acclim(
+            carry, T_K=t_k, ppfd=w, vpd_pa=d_pa, co2_ppm=ca, ps_pa=ps,
+            cfg=cfg, dt=dt)
+        return new, new
+
+    _, traj = jax.lax.scan(_f, init, (T_K, ppfd, vpd_pa, co2_ppm, ps_pa))
+    return traj
+
+
 def advance_pmodel_acclim(
     acclim: PModelAcclimState,
     *,
