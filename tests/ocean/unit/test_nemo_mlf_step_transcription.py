@@ -153,16 +153,19 @@ def test_cold_euler_threads_mlf_tracer_content_into_literal_zdf(monkeypatch):
 
 def test_cold_euler_forces_nemo_ordered_advective_scope():
     """The public no-history dispatch must not inherit total-scope fusion."""
-    state, model = _channel(tracer_combine="thickness_weighted")
+    state, model = _channel(
+        tracer_combine="thickness_weighted",
+        cold_euler_surface_stress_implicit=True)
     seen = []
 
     def capture(_self, entry, _dt, **kwargs):
-        seen.append(kwargs.get("_ab2_scope_override"))
+        seen.append((kwargs.get("_ab2_scope_override"),
+                     kwargs["config"].surface_stress_implicit))
         return entry
 
     model._step_impl = MethodType(capture, model)
     model._leapfrog_step(state, _DT)
-    assert seen == ["advective"]
+    assert seen == [("advective", True)]
 
 
 # ---------------------------------------------------------------------------

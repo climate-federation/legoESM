@@ -2275,7 +2275,6 @@ class LatLonCGridOceanConfig(NamedTuple):
     # barotropic.nemo_stage_mean_imposition (stprk3_stg:440) — REQUIRED with
     # this flag (validated at model init). Default False: bit-identical.
     surface_stress_implicit: bool = False
-
     # --- Adaptive-implicit vertical momentum advection ---
     # (Shchepetkin 2015 / NEMO ``ln_zad_Aimp``).  Appended at the end of
     # the NamedTuple to preserve positional construction for legacy
@@ -2808,6 +2807,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # deliberately leaving U on the already bit-exact factored path.
     # Appended for positional compatibility.
     nemo_sco_hpg_accumulation_evaluation: str = "factored"
+    # NEMO stp_MLF's single l_1st_euler bootstrap always deposits wind inside
+    # dyn_zdf, even when a legoESM card uses the explicit-stress composition on
+    # regular steps. Appended for positional compatibility. False preserves
+    # every non-fidelity card; True is legal only on a leapfrog-family outer
+    # integrator and applies to that one no-history step.
+    cold_euler_surface_stress_implicit: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

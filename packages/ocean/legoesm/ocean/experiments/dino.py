@@ -256,6 +256,7 @@ class DINOConfig:
     # dynspg_ts.F90 ~L360).  Requires wind_through_step=True (the stress must
     # reach model.step's surface_forcing).  Default False = prior behaviour.
     surface_stress_implicit: bool = False
+    cold_euler_surface_stress_implicit: bool = False
     # NEMO trasbc.F90:152-153 surface-flux divisor (#1226): NEMO divides the
     # MLF-averaged non-solar T/S flux by the LIVE top-cell thickness
     # ``e3t(:,:,1,Kmm) = e3t_0*(1+r3t)`` (``r3t = ssh/ht_0``, domqco.F90:160)
@@ -1703,6 +1704,10 @@ DINO_RECIPES: dict[str, dict] = {
 DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     **DINO_RECIPES["nemo_dino_kamm"],
     "outer_integrator": "leapfrog",       # NEMO stp_MLF (key_qco, no key_RK3)
+    # stpmlf.F90's l_1st_euler path still deposits wind inside dyn_zdf
+    # (dynzdf.F90:353-361); regular-step placement remains independently
+    # frozen by surface_stress_implicit=False.
+    "cold_euler_surface_stress_implicit": True,
     # NEMO dynspg_ts has no eta-diffusion term.  Zero damping is faithful and
     # stable in the MLF frame; the FE sibling retains its required 0.01 crutch.
     "barotropic_diffusion_alpha": 0.0,
@@ -3952,6 +3957,8 @@ def dino_lat_lon_model_config(
         coriolis_placement=cfg.coriolis_placement,
         # NEMO dynzdf wind placement (see DINOConfig.surface_stress_implicit).
         surface_stress_implicit=cfg.surface_stress_implicit,
+        cold_euler_surface_stress_implicit=(
+            cfg.cold_euler_surface_stress_implicit),
         # NEMO dynzdf composition (#1226; see DINOConfig field docstrings).
         zdf_drag_in_matrix=cfg.zdf_drag_in_matrix,
         zdf_baroclinic_only=cfg.zdf_baroclinic_only,

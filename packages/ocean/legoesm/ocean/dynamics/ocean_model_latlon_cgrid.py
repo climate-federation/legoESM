@@ -2677,6 +2677,12 @@ class LatLonCGridOceanModel:
                 "has no perpetual-forward-Euler oracle analogue. Got "
                 f"outer_integrator={_outer_int!r}, which would silently ignore "
                 "the setting.")
+        if (getattr(config, "cold_euler_surface_stress_implicit", False)
+                and _outer_int not in _leapfrog_family):
+            raise ValueError(
+                "cold_euler_surface_stress_implicit=True requires a "
+                "leapfrog-family outer integrator: NEMO has one Euler "
+                "bootstrap followed by MLF, not a perpetual-Euler analogue")
         # "leapfrog" (_leapfrog_step, two-pass) and "nemo_mlf" (_nemo_mlf_step,
         # P2 single-pass transcription, docs/ocean/fidelity/
         # nemo_mlf_step_transcription_spec.md) are the SAME leap-frog-family
@@ -9445,6 +9451,9 @@ class LatLonCGridOceanModel:
                 u_before=state.u, v_before=state.v, T_before=state.T,
                 S_before=state.S, eta_before=state.eta,
             )
+            _cold_cfg = _cfg_b
+            if getattr(_cfg_b, "cold_euler_surface_stress_implicit", False):
+                _cold_cfg = _cfg_b._replace(surface_stress_implicit=True)
             naa = self._step_impl(
                 _entry, dt, freshwater=freshwater,
                 surface_forcing=surface_forcing, sponge=sponge, grid=_grid,
@@ -9475,7 +9484,7 @@ class LatLonCGridOceanModel:
                 _apply_cold_start_after_reconcile=(
                     _cfg_b.barotropic.barotropic_cold_start_after_reconcile
                     == "nemo_mlf_baro_corr"),
-                z_coord=z_coord, config=config, iwm_fields=iwm_fields)
+                z_coord=z_coord, config=_cold_cfg, iwm_fields=iwm_fields)
             naa = naa._replace(
                 u_before=state.u, v_before=state.v, T_before=state.T,
                 S_before=state.S, eta_before=state.eta,
