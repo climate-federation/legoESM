@@ -108,7 +108,7 @@ def test_cold_euler_threads_mlf_tracer_content_into_literal_zdf(monkeypatch):
     eta = 0.1 * jnp.sin(lon_phase)[None, :]
     eta = jnp.broadcast_to(eta, state.eta.data.shape) * state.land_mask.data
     state = state._replace(eta=state.eta.replace(data=eta))
-    original_content = ocean_model.thickness_weighted_tracer_content
+    original_content = ocean_model.nemo_euler_tracer_content_rhs
     content_calls = []
 
     def planted_content(*args, **kwargs):
@@ -122,7 +122,7 @@ def test_cold_euler_threads_mlf_tracer_content_into_literal_zdf(monkeypatch):
         return value
 
     monkeypatch.setattr(
-        ocean_model, "thickness_weighted_tracer_content", planted_content)
+        ocean_model, "nemo_euler_tracer_content_rhs", planted_content)
     calls = []
 
     def capture(_self, solve_state, _dt, _forcing=None, *,
@@ -149,6 +149,20 @@ def test_cold_euler_threads_mlf_tracer_content_into_literal_zdf(monkeypatch):
         # A control that can fail: the planted live content value reaches the
         # solve, while the old local reconstruction does not contain it.
         assert float(np.max(np.abs(actual - legacy))) >= 0.125
+
+
+def test_cold_euler_forces_nemo_ordered_advective_scope():
+    """The public no-history dispatch must not inherit total-scope fusion."""
+    state, model = _channel(tracer_combine="thickness_weighted")
+    seen = []
+
+    def capture(_self, entry, _dt, **kwargs):
+        seen.append(kwargs.get("_ab2_scope_override"))
+        return entry
+
+    model._step_impl = MethodType(capture, model)
+    model._leapfrog_step(state, _DT)
+    assert seen == ["advective"]
 
 
 # ---------------------------------------------------------------------------

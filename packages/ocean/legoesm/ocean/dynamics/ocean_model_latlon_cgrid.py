@@ -1289,6 +1289,15 @@ def thickness_weighted_tracer_content(t_before, t_now, t_expl, d_diss,
             + h_now * d_diss)
 
 
+def nemo_euler_tracer_content_rhs(t_before, rhs, h_before, h_now, dt):
+    """NEMO ``tra_zdf`` collapsed-Euler content in source association."""
+    b = jax.lax.optimization_barrier
+    before_content = b(h_before * t_before)
+    timed_thickness = b(jnp.asarray(dt, dtype=h_now.dtype) * h_now)
+    tendency_content = b(timed_thickness * rhs)
+    return b(before_content + tendency_content)
+
+
 def _thickness_weighted_asselin(now, before, after,
                                 e3_now, e3_before, e3_after, e3_f,
                                 gamma, mask):
@@ -5390,7 +5399,7 @@ class LatLonCGridOceanModel:
                     # peel.  Capture before the content update so a 1e-15 row
                     # does not subtract nearly equal endpoint states.  The
                     # private gate is false for every production call.
-                    if _return_cold_euler_tracer_rhs:
+                    if _return_cold_euler_tracer_rhs or _cold_nemo_euler:
                         _direct_rate = -total_flux_div / jnp.maximum(
                             h_k_old, 1.0e-30)
                         if tr_name == 'T':
@@ -5679,12 +5688,21 @@ class LatLonCGridOceanModel:
             else:
                 _cold_dT_diss = _diss_dT_incr
                 _cold_dS_diss = _diss_dS_incr
-            _cold_content_t = thickness_weighted_tracer_content(
-                state.T_before.data, state.T.data, state_new.T.data,
-                _cold_dT_diss, h_k_old, h_k_old, h_k_new)
-            _cold_content_s = thickness_weighted_tracer_content(
-                state.S_before.data, state.S.data, state_new.S.data,
-                _cold_dS_diss, h_k_old, h_k_old, h_k_new)
+            if _T_adv_rate_direct is None or _S_adv_rate_direct is None:
+                raise ValueError(
+                    "cold NEMO Euler tracer content requires direct advection")
+            _cold_rhs_t = jax.lax.optimization_barrier(
+                tend.dT_dt.data + _T_adv_rate_direct)
+            _cold_rhs_s = jax.lax.optimization_barrier(
+                tend.dS_dt.data + _S_adv_rate_direct)
+            _cold_rhs_t = jax.lax.optimization_barrier(
+                _cold_rhs_t + _cold_dT_diss / dt)
+            _cold_rhs_s = jax.lax.optimization_barrier(
+                _cold_rhs_s + _cold_dS_diss / dt)
+            _cold_content_t = nemo_euler_tracer_content_rhs(
+                state.T_before.data, _cold_rhs_t, h_k_old, h_k_old, dt)
+            _cold_content_s = nemo_euler_tracer_content_rhs(
+                state.S_before.data, _cold_rhs_s, h_k_old, h_k_old, dt)
             _cold_nemo_tracer_content_rhs = (
                 _cold_content_t, _cold_content_s)
 
@@ -9431,6 +9449,12 @@ class LatLonCGridOceanModel:
                 _entry, dt, freshwater=freshwater,
                 surface_forcing=surface_forcing, sponge=sponge, grid=_grid,
                 vertex_mask=vertex_mask, t_seconds=t_seconds,
+                # NEMO's cold Euler step keeps the normal MLF operator order:
+                # tra_adv consumes the accumulated RHS before tra_ldf adds its
+                # Nbb-evaluated increment (stpmlf.F90:528,548).  The card's
+                # generic ``ab2_scope='total'`` updates tracers in the opposite
+                # fused order and is not a legal collapsed-MLF bootstrap.
+                _ab2_scope_override="advective",
                 # DINO keeps ``ln_bt_fw=.FALSE.`` even on ``l_1st_euler``:
                 # dynspg_ts.F90:578-586 therefore seeds sshn_e/un_e/vn_e from
                 # Kbb.  istate.F90:97-99/135-137 made Kbb==Kmm for this one
