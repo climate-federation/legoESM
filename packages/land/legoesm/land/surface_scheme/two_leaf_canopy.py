@@ -468,7 +468,9 @@ def compute_two_leaf_canopy_fluxes(
             fwet=(jnp.zeros_like(w_frac_rz) if fwet is None
                   else jnp.broadcast_to(fwet, w_frac_rz.shape)),
             rjv25=rjv25,
-            d0_leuning_kpa=cc.d0_leuning_kpa,
+            # broadcast: every bundle leaf is vmapped over columns, so the
+            # scalar config float must be (ncol,)
+            d0_leuning_kpa=jnp.full(ncol, cc.d0_leuning_kpa),
         )
 
     def _solve_one_col(x0, bun):

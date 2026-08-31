@@ -4,8 +4,7 @@
 (medlyn=0, ball_berry=1, wue=2 default).  The applier must patch BOTH module
 namespaces (``MLLeafPhotosynthesisMod`` imports ``gs_type`` by value, the same
 trap as the layering counts), and ``vcmax25_override`` — the per-site value that
-goes beyond the global PFT table — requires the Medlyn path.  These need no
-``clm-ml-jax``: the backend modules are faked in ``sys.modules``.
+goes beyond the global PFT table — requires the Medlyn path.  Uses the REAL vendored backend modules with state reset per test.
 """
 from __future__ import annotations
 
@@ -24,15 +23,17 @@ from legoesm.land.canopy.config import (
 
 @pytest.fixture
 def fake_backend(monkeypatch):
-    ctl = types.ModuleType("multilayer_canopy.MLclm_varctl")
-    ctl.gs_type = 2
-    photo = types.ModuleType("multilayer_canopy.MLLeafPhotosynthesisMod")
-    photo.gs_type = 2                      # by-value copy the kernel branches on
-    pkg = sys.modules.get("multilayer_canopy") or types.ModuleType("multilayer_canopy")
-    monkeypatch.setitem(sys.modules, "multilayer_canopy", pkg)
-    monkeypatch.setitem(sys.modules, "multilayer_canopy.MLclm_varctl", ctl)
-    monkeypatch.setitem(sys.modules,
-                        "multilayer_canopy.MLLeafPhotosynthesisMod", photo)
+    """The REAL vendored backend modules with their process-global stomatal
+    state reset to the wue default and restored afterwards.  (The former
+    sys.modules fakes broke as soon as any other test imported the real
+    backend first — the interface imports by the legoesm path, which then
+    resolves to the cached real modules, not the fakes.)"""
+    import legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varctl as ctl
+    import legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLLeafPhotosynthesisMod as photo
+    import legoesm.land.canopy.clm_ml_interface as iface
+    monkeypatch.setattr(ctl, "gs_type", 2)
+    monkeypatch.setattr(photo, "gs_type", 2)
+    monkeypatch.setattr(iface, "_APPLIED_GS_TYPE", None)
     return ctl, photo
 
 
@@ -85,7 +86,7 @@ def test_switching_model_clears_kernel_caches(fake_backend, monkeypatch):
     class _Cached:              # stand-in for an lru_cache'd factory
         def cache_clear(self):
             cleared["n"] += 1
-    photo.some_kernel_factory = _Cached()
+    monkeypatch.setattr(photo, "some_kernel_factory", _Cached(), raising=False)
     monkeypatch.setattr(iface, "_APPLIED_GS_TYPE", None, raising=False)
 
     iface._apply_stomatal_model(CLMMLCanopyConfig(stomatal_model="medlyn"))

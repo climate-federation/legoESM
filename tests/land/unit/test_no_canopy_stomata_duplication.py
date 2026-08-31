@@ -24,7 +24,8 @@ def test_single_neutral_stomata_module():
     assert not (_LAND / "stomatal_kernels.py").exists(), (
         "stomatal_kernels.py must not exist — folded into land/stomata.py")
     src = _STOMATA.read_text()
-    assert "def ball_berry_gs(" in src and "def medlyn_gs(" in src
+    assert ("def ball_berry_gs(" in src and "def medlyn_gs(" in src
+            and "def leuning_gs(" in src)
     # The H2O:CO2 diffusivity ratio is single-sourced in leaf_biophysics; the
     # stomata module imports it (does not carry its own literal copy).
     assert "DIFFUSIVITY_RATIO_H2O_CO2" in src
@@ -54,14 +55,16 @@ def test_no_other_module_defines_the_gs_kernels():
         if py == _STOMATA:
             continue
         src = py.read_text()
-        if "def ball_berry_gs(" in src or "def medlyn_gs(" in src:
+        if ("def ball_berry_gs(" in src or "def medlyn_gs(" in src
+                or "def leuning_gs(" in src):
             offenders.append(str(py.relative_to(_LAND)))
     assert not offenders, f"gs kernels re-defined outside land/stomata.py: {offenders}"
 
 
 def test_canopy_energy_balance_imports_from_neutral_module():
     src = _ENERGY_BALANCE.read_text()
-    assert "from legoesm.land.stomata import ball_berry_gs, medlyn_gs" in src, (
+    assert ("from legoesm.land.stomata import ball_berry_gs, leuning_gs, "
+            "medlyn_gs" in src), (
         "canopy/energy_balance.py must import the gs kernels from land.stomata")
     # ...and must not re-inline the formula.
     assert "* RH / Cs_safe" not in src and "jnp.sqrt(VPD" not in src, (

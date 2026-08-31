@@ -59,7 +59,9 @@ def test_slab_two_leaf_pmodel_runs_and_advances_state():
     acclim = init_pmodel_acclim(
         ncol, t_init_K=290.0, ps_init_pa=101325.0, cfg=cfg.p_model)
     st = _slab_state(ncol, acclim=acclim)
-    new_state, resp, _ = step_land(st, _forcing(ncol), cfg, U_min=1.0, dt=1800.0)
+    # forcing T differs from the cold-start mean so the daytime gain moves it
+    new_state, resp, _ = step_land(
+        st, _forcing(ncol, T_lowest=296.0), cfg, U_min=1.0, dt=1800.0)
     assert new_state.pmodel_acclim is not None
     # daytime step: the gain-weighted means moved toward the forcing
     assert float(new_state.pmodel_acclim.t_mean_K[0]) != pytest.approx(
@@ -98,9 +100,20 @@ def test_mosaic_unit_patch_matches_direct_call_with_pmodel():
     acclim = init_pmodel_acclim(
         1, t_init_K=290.0, ps_init_pa=101325.0, cfg=land_cfg.p_model)
     forcing = _forcing(1)
+    from legoesm.land.canopy.config import CanopyLandParams
+    params = CanopyLandParams(
+        LAI=jnp.full(1, 3.0), hc=jnp.full(1, 12.0), fC4=jnp.zeros(1),
+        FNonVeg=jnp.zeros(1), CI=jnp.full(1, 0.7), kn=jnp.full(1, 0.3),
+        Vcmax25_C3_leaf=jnp.full(1, 60.0), Vcmax25_C4_leaf=jnp.full(1, 40.0),
+        m_C3=jnp.full(1, 9.0), m_C4=jnp.full(1, 4.0),
+        b0_C3=jnp.full(1, 0.01), b0_C4=jnp.full(1, 0.04),
+        alf=jnp.full(1, 0.3), TgC=jnp.full(1, 20.0),
+        ALB_VIS=jnp.full(1, 0.1), ALB_NIR=jnp.full(1, 0.2),
+        emissivity=jnp.full(1, 0.97), rz0m=jnp.full(1, 0.055),
+        rd=jnp.full(1, 0.67))
     kw = dict(
         T_soil_top=jnp.full((1,), 289.0), forcing=forcing, canopy_config=cc,
-        land_config=land_cfg, canopy_params=None,
+        land_config=land_cfg, canopy_params=params,
         w_frac_rz=jnp.ones((1,)), wind_speed=jnp.full((1,), 3.0),
         wind_dir_x=jnp.ones((1,)), wind_dir_y=jnp.zeros((1,)),
         soil_thermal_fn=lambda G, dt_: jnp.full(jnp.shape(G), 289.0),
@@ -109,7 +122,7 @@ def test_mosaic_unit_patch_matches_direct_call_with_pmodel():
     mosaic = compute_mosaic_canopy_fluxes(
         mosaic=PatchMosaicConfig(patches=(PatchSpec(frac=1.0),)), **kw)
     np.testing.assert_allclose(
-        np.asarray(mosaic.lh_flux), np.asarray(direct.lh_flux), rtol=1e-6)
+        np.asarray(mosaic.lhflx), np.asarray(direct.lhflx), rtol=1e-6)
     np.testing.assert_allclose(
         np.asarray(mosaic.gpp), np.asarray(direct.gpp), rtol=1e-6)
 

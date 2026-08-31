@@ -110,7 +110,7 @@ def water_density(T_K: jax.Array, P_Pa: jax.Array) -> jax.Array:
     lam = _poly_ascending(_TUMLIRZ_LAMBDA, tc)
     po = _poly_ascending(_TUMLIRZ_PO, tc)
     vinf = _poly_ascending(_TUMLIRZ_VINF, tc)
-    pbar = 1e-5 * P_Pa  # [Pa] -> [bar]
+    pbar = 1e-5 * P_Pa  # coeff-ok: exact unit conversion Pa -> bar
     v = vinf + lam / (po + pbar)  # specific volume [cm3/g]
     return 1e3 / v
 
