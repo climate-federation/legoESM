@@ -80,7 +80,7 @@ __param_spec__ = {
         "excluded": {
             "ci_ca_c4": (
                 "C4-characteristic intercellular:ambient CO2 setpoint [-]; FIXED (not "
-                "trained). The model's Farquhar is C3-only, so the C4 branch regulates to a "
+                "trained). The big-leaf solve shares one C3-kinetics Ci across pathways, so the C4 branch regulates to a "
                 "prescribed C4 Ci/Ca (~0.4) rather than a solved leaf state; in the C4 form "
                 "the trained part enters ONLY through the product (b4 + (b3-s)*phi - a)*Ci/Ca, "
                 "so freeing BOTH phi and Ci/Ca is a non-identifiable degeneracy -- phi is the "
@@ -361,7 +361,8 @@ class D13CConfig(NamedTuple):
     intercellular:ambient CO2 ratio ``ci_ca_c4``.
 
     C4 Ci/Ca treatment (option (a) -- fixed setpoint).  The model's Farquhar
-    biochemistry is C3-only, so it supplies no FAITHFUL C4 leaf Ci (a C3-kinetics
+    big-leaf solve shares one C3-kinetics Ci across pathways (even under the
+    C4 P-model capacities), so it supplies no FAITHFUL C4 leaf Ci (a C3-kinetics
     Ci run for a C4 PFT is not the true CO2-concentrated bundle-sheath state).
     The C4 branch therefore uses a prescribed C4-characteristic Ci/Ca (~0.4; C4
     leaves regulate Ci/Ca relatively tightly) rather than the solved C3 Ci, so

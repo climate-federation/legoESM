@@ -815,9 +815,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    dest="canopy_capacity_scheme",
                    help="Source of the two-leaf C3 leaf capacities: "
                         "'prescribed' (default, PFT tables) or 'p_model' "
-                        "(acclimated optimality Vcmax25 + Jmax25/Vcmax25; "
-                        "C4 capacity stays prescribed until the C4 extension "
-                        "lands). Two-leaf scheme only.")
+                        "(acclimated optimality Vcmax25 + Jmax25/Vcmax25 for "
+                        "C3 and the rpmodel-c4 optimum for C4 columns).")
     p.add_argument("--canopy-g1-source", default="table",
                    choices=["table", "p_model"],
                    dest="canopy_g1_source",

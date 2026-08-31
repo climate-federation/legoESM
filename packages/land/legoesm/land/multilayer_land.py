@@ -716,6 +716,11 @@ def _step_multilayer_land_impl(
             _ncol_ml = int(T_surface.shape[0])
             if len(_is_c3) == 1:
                 _is_c3 = _is_c3 * _ncol_ml
+            elif len(_is_c3) != _ncol_ml:
+                raise ValueError(
+                    f"clm_ml_pft_per_col has {len(_is_c3)} entries for "
+                    f"{_ncol_ml} columns; the P-model pathway mask needs one "
+                    "PFT per column (or a single shared PFT).")
             _c3_mask = jnp.asarray(_is_c3, dtype=bool)
             _caps_ml = acclimated_capacities(state.pmodel_acclim, config.p_model)
             _caps4_ml = acclimated_capacities_c4(

@@ -46,7 +46,9 @@ selection: ``leaf_delta13C = jnp.where(is_c4, delta_C4, delta_C3)`` -- BOTH bran
 differentiable, so the C4 archetypes now return a FAITHFUL C4 value and are INCLUDED in the
 calibration delta13C loss (no more C4 masking).
 
-Why a FIXED C4 Ci/Ca (option (a)).  The model's Farquhar biochemistry is C3-only
+Why a FIXED C4 Ci/Ca (option (a)).  The big-leaf coupled solve shares ONE
+Vcmax/Ci across pathways (even with the C4 P-model capacities), so it still
+yields no faithful C4 leaf Ci; historically the Farquhar biochemistry was C3-only
 (:mod:`legoesm.land.stomata` -- the C4 PFTs ``c4_grass`` / ``crop_c4`` are run through
 C3 kinetics), so the solved ``Ci`` is NOT a faithful C4 leaf state (it lacks the CO2-
 concentrating bundle-sheath step).  Rather than feed a wrong C3-kinetics Ci into the C4 form,
