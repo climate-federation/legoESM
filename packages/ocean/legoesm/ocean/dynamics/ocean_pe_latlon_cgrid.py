@@ -49,7 +49,12 @@ from legoesm.grids.operators_latlon_cgrid import (  # noqa: F401
     upwind_cell_to_uface as upwind_to_u_points,
     upwind_cell_to_vface as upwind_to_v_points,
 )
-from legoesm.ocean.eos import make_eos_fn, nemo_bn2_live_ladders
+from legoesm.ocean.eos import (
+    NemoSEOSConfig,
+    make_eos_fn,
+    nemo_bn2_live_ladders,
+    nemo_seos_prd_literal,
+)
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     OceanPartialCellCoordinate,
@@ -1608,7 +1613,7 @@ _nemo_qco_zad_operands = nemo_qco_wzv_operands
 
 
 def _bc_ke_and_pressure_gradients(
-    u, v, p_prime_filled, rho_prime, grid, config, z_coord,
+    u, v, T, S, p_prime_filled, rho_prime, grid, config, z_coord,
     eta_safe, H_bathy, g_val, mask,
 ):
     """Stages 6 / 6-7 / 6b: kinetic-energy gradient (centered, Hollingsworth,
@@ -1928,11 +1933,25 @@ def _bc_ke_and_pressure_gradients(
                         "nemo_sco_hpg_accumulation_evaluation="
                         "'nemo_v_literal' requires nemo_een_barotropic, "
                         "nemo_e3w_0, and nemo_gdept_0 operands")
+                if getattr(config, "eos", None) != "nemo_seos":
+                    raise ValueError(
+                        "nemo_sco_hpg_accumulation_evaluation="
+                        "'nemo_v_literal' requires eos='nemo_seos': its "
+                        "literal rhd operand is NEMO S-EOS-specific")
                 _rho0 = jnp.asarray(config.rho_0, dtype=rho_m.dtype)
-                _rhd = rho_m / _rho0
                 _e3w = (jnp.asarray(_e3w0, dtype=rho_m.dtype)
                         * stretch)
                 _gdept = gdept_z0
+                # Reuse the campaign's already-certified source-ordered prd
+                # helper. NEMO eosbn2 writes ``rhd = zn*r1_rho0`` directly;
+                # deriving it from lego's in-situ density via
+                # ``(rho-rho0)/rho0`` first rounds the small anomaly against
+                # the 1026 kg/m3 offset and moves the cold V update by two
+                # ulps. The geometric live gdept is the same Kmm operand hpg_sco
+                # reads below (eosbn2.F90:301-305; dynhpg.F90:348-380).
+                _rhd = nemo_seos_prd_literal(
+                    T, S, _gdept,
+                    NemoSEOSConfig(rho0=float(config.rho_0)))
                 _rhd_n = jnp.concatenate(
                     [_rhd[1:], jnp.zeros_like(_rhd[:1])], axis=0)
                 _e3w_n = jnp.concatenate(
@@ -4471,7 +4490,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     _weno_order = {"weno5": 5, "weno7": 7, "weno9": 9}.get(_mom_adv)
     dKE_dx, dp_dx, dKE_dy, dp_dy, direct_hpg_v = (
         _bc_ke_and_pressure_gradients(
-        u, v, p_prime_filled, rho_prime, grid, config, z_coord,
+        u, v, T, S, p_prime_filled, rho_prime, grid, config, z_coord,
         eta_safe, H_bathy, g_val, mask,
     ))
     # Flux-form momentum advection (stage 7b below) provides the FULL horizontal
