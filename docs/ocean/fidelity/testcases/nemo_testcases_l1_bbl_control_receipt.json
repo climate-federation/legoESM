@@ -11,6 +11,11 @@
     "exit_code": 123
   },
   "fixed_executable_sha256": "eb4acf9651b887a3da8834281112d472692caa0bbadcb0d69779e91dee92e6cb",
+  "config_hashes": {
+    "committed_namelist_cfg": "5bf45231d14a08354d8cc03693680f60375d4972eeab0f4979cf3b5969727e19",
+    "run_namelist_cfg": "05250200fb357842049870b12e79e3269e848970a75383d545dc06d842106271",
+    "difference": "committed copy strips one final blank line; parsed namelist semantics are identical"
+  },
   "namelist_semantic_diff_from_failed_sco": {
     "nambbl.ln_trabbl": [
       ".true.",
@@ -41,7 +46,7 @@
     "interpretation": "nn_bbl_adv=2 computes density-gradient-proportional downslope transport; disabling it delays the safety stop by one step but does not remove it"
   },
   "sha256": {
-    "namelist_cfg": "05250200fb357842049870b12e79e3269e848970a75383d545dc06d842106271",
+    "run_namelist_cfg": "05250200fb357842049870b12e79e3269e848970a75383d545dc06d842106271",
     "output.namelist.dyn": "fd7e485ed7a84d4856dc4a717749b1afd1450a58747625f1cece766bd1c06ffc",
     "control_stdout.log": "e8d8fd37bf900d6c077bf0dd855930441c319f374327887d94cd53e4871945c7",
     "ocean.output": "26d1259e69908038e9b906649875d27aafd90efd3b177424fbcbcd2f5fe2cc44",

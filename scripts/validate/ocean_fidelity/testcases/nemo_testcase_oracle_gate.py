@@ -20,6 +20,7 @@ import netCDF4
 import numpy as np
 
 VALID = {"VERIFIED", "WAIVED", "UNMEASURED"}
+GROSS_TRACER_EXCESS_RELATIVE = 1.0e-6
 BASE_UNMEASURED = [
     "teos10_density",
     "rab",
@@ -70,6 +71,19 @@ def parse_logical(value: str, key: str = "logical") -> bool:
     if token in {"F", "FALSE"}:
         return False
     raise GateError(f"resolved selector {key} has invalid logical {value!r}")
+
+
+def tracer_bar(excess_relative: float, floor_relative: float) -> str:
+    """Classify a measured tracer range against its registered fp64 floor."""
+    return "AT-BAR" if excess_relative <= floor_relative else "UNMEASURED"
+
+
+def measured_trajectory_status(records: list[dict]) -> str:
+    """Summarize measured rows independently of the prose-only gap ledger."""
+    unresolved = any(
+        row[name] == "UNMEASURED" for row in records for name in ("temperature_bar", "salinity_bar")
+    )
+    return "UNMEASURED" if unresolved else "VERIFIED"
 
 
 def sha256(path: Path) -> str:
@@ -383,8 +397,8 @@ def trajectory(root: Path, case: str, steps: list[int], dims: tuple[int, int, in
         require(bool(wet_t.size and wet_s.size), "empty wet tracer field")
         # Relative closed-range excess, scaled separately for each tracer.
         # The fp64 roundoff floor is sqrt(N_steps) * eps * field_scale.
-        # Temperature is intentionally UNMEASURED pending attribution of its
-        # 640--796 eps relative excess (including possible qco weighting).
+        # Roundoff-scale excess is classified without prejudging its origin;
+        # a separate gross guard ensures a real limiter failure cannot pass.
         temp_scale = max(abs(tlo), abs(thi), 1.0)
         sal_scale = 35.0
         temp_excess = max(tlo - float(wet_t.min()), float(wet_t.max()) - thi, 0.0)
@@ -392,7 +406,16 @@ def trajectory(root: Path, case: str, steps: list[int], dims: tuple[int, int, in
         floor_relative = np.sqrt(float(step)) * eps
         temp_relative = temp_excess / temp_scale
         sal_relative = sal_excess / sal_scale
-        sal_status = "AT-BAR" if sal_relative <= floor_relative else "UNMEASURED"
+        require(
+            temp_relative <= GROSS_TRACER_EXCESS_RELATIVE,
+            f"gross temperature range excursion at step {step}: {temp_relative:.17g} relative",
+        )
+        require(
+            sal_relative <= GROSS_TRACER_EXCESS_RELATIVE,
+            f"gross salinity range excursion at step {step}: {sal_relative:.17g} relative",
+        )
+        temp_status = tracer_bar(temp_relative, floor_relative)
+        sal_status = tracer_bar(sal_relative, floor_relative)
         temp_global = temp.reshape((nx, ny, nz), order="F")[2:-2, 2:-2, :].transpose(2, 1, 0)
         cold_weight = np.maximum(thi - temp_global, 0.0) * e3_global * tmask_global
         cold_center = float(np.sum(cold_weight * x_global[None, None, :]) / np.sum(cold_weight))
@@ -415,7 +438,7 @@ def trajectory(root: Path, case: str, steps: list[int], dims: tuple[int, int, in
                 "temperature_excess_eps_relative": temp_relative / eps,
                 "salinity_excess_relative": sal_relative,
                 "salinity_excess_eps_relative": sal_relative / eps,
-                "temperature_bar": "UNMEASURED",
+                "temperature_bar": temp_status,
                 "salinity_bar": sal_status,
             }
         )
@@ -432,7 +455,6 @@ def main() -> int:
     ap.add_argument("--plant-unaccounted", action="store_true")
     ap.add_argument("--plant-geometry", action="store_true")
     ap.add_argument("--geometry-coverage-only", action="store_true")
-    ap.add_argument("--report-only", action="store_true")
     args = ap.parse_args()
     root = args.run_dir.resolve()
     if args.emit_manifest:
@@ -464,11 +486,15 @@ def main() -> int:
     # side; mesh_mask is written on the 202x3 / 130x3 global domain.
     dims = (206, 7, 101) if args.case == "overflow" else (134, 7, 21)
     t = trajectory(root, args.case, steps, dims)
-    unmeasured = [*BASE_UNMEASURED, "temperature_range_roundoff_origin"]
+    unmeasured = list(BASE_UNMEASURED)
+    if any(r["temperature_bar"] == "UNMEASURED" for r in t["records"]):
+        unmeasured.append("temperature_range_roundoff_origin")
     if any(r["salinity_bar"] == "UNMEASURED" for r in t["records"]):
         unmeasured.append("salinity_range_roundoff_origin")
     report = {
-        "status": "UNMEASURED" if unmeasured else "VERIFIED",
+        # Coverage gaps are carried separately in `unmeasured`; status reports
+        # only whether a measured trajectory row cleared its registered bar.
+        "status": measured_trajectory_status(t["records"]),
         "case": args.case,
         "coord": args.coord,
         "inventory_counts": {k: len(v) for k, v in inventory.items()},

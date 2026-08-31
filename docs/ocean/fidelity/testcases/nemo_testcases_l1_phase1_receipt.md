@@ -21,7 +21,11 @@ findings rather than a fully certifiable three-run set:
   relative, tracer-scaled, and uses a `sqrt(N_steps) * eps(fp64)` floor.
   LOCK salinity is AT-BAR; OVERFLOW-zps salinity is UNMEASURED.  Temperature's
   640--796-epsilon relative excess remains UNMEASURED pending attribution,
-  including a possible `key_qco` thickness-weighting effect.
+  including a possible `key_qco` thickness-weighting effect.  Both tracers are
+  nevertheless protected by a non-negotiable `1e-6` relative gross-excursion
+  hard failure; UNMEASURED cannot hide a physically large limiter violation.
+  Top-level `status` summarizes only measured trajectory rows; the independent
+  `unmeasured` list carries prose-only coverage gaps without forcing status.
 * TEOS-10, `eos_rab`/BN2, FCT2 implicit, adaptive vertical advection, and BBL
   are source/namelist-arm verified.  `rab`, density, BN2, and BBL transport were
   not included in this first entry-dump format, so their numerical-array
@@ -120,15 +124,21 @@ UNMEASURED in the phase-1 dump.
 
 | artifact | SHA256 |
 |---|---|
-| zps namelist / resolved namelist | `ec1eac4a45fb8c07a0facce5e4eefb6510d8e3f1e364f5c5597e60ae83ccc53e` / `0656e18075595ecf70e2524445574a100b910e05f047b3d52a5a44f32b49c32e` |
+| zps committed / run / resolved namelist | `cb53829b8b19098a50eeaec49a0d1338bcde8f65fcb991d1f1ce4b228d28b5a3` / `ec1eac4a45fb8c07a0facce5e4eefb6510d8e3f1e364f5c5597e60ae83ccc53e` / `0656e18075595ecf70e2524445574a100b910e05f047b3d52a5a44f32b49c32e` |
 | zps stdout / mesh / restart | `bb40d3c52cbe7a86c86703db8c80d10f68b387e3d15a25ae2f3a5f0f19b24949` / `4692b893eddee3eea5cee2e6f04e1d7fc55e6685100e349369051a6914cbd280` / `dab392f2f058b44e8c10c600a41c9be73ba37656e2af478193a3f6f27bd67160` |
-| sco namelist / resolved namelist | `e14142fdb0ed187b5766d398dd9bd9f2681929e4d965b7a402250e71d01632a3` / `6617a3d769a51c0781971e1b72b7e079b705b20f00b41d004f790e361f953859` |
+| sco committed / run / resolved namelist | `ff220a7befd1899b0fe31066767ac76153e7282fa40e68ffe1c63288d95a922a` / `e14142fdb0ed187b5766d398dd9bd9f2681929e4d965b7a402250e71d01632a3` / `6617a3d769a51c0781971e1b72b7e079b705b20f00b41d004f790e361f953859` |
 | sco stdout / mesh / abort | `9b6e392c91eccd53aaf377ce68152bc2b9a14195bb6db61fb6e172e17c6245cd` / `3a5225c64bd0a79c690123e02b6e0e55dd62c9bd37497c2324fa1292d80b2da9` / `9804cc1d151032c94b4003667a1faf8f9ea7cd2bd2120c2faf15d385993d6dbc` |
-| LOCK namelist / resolved namelist | `ae34648ecdf44893e8543f0516511d239ce59161fa5b2de9924f0169d8185dd4` / `a2151e39c484c0065d04b1513ed16246e16dc19f1fcae04e38b7c34d8140f636` |
+| LOCK committed = run / resolved namelist | `ae34648ecdf44893e8543f0516511d239ce59161fa5b2de9924f0169d8185dd4` / `a2151e39c484c0065d04b1513ed16246e16dc19f1fcae04e38b7c34d8140f636` |
 | LOCK stdout / mesh / restart | `6fad276368f7b4a91d80b38152eb865dcc93bff6d7a011316ef0d674978b5a46` / `ec3200f559cb44ee76d00498aac168dd6452cc29bd0abdf955dfc4ab061ed935` / `15a7883e5e27df2fec36716c29375ec947892a842ee901e5526e10525db5c7a6` |
+| sco no-BBL committed / run / resolved namelist | `5bf45231d14a08354d8cc03693680f60375d4972eeab0f4979cf3b5969727e19` / `05250200fb357842049870b12e79e3269e848970a75383d545dc06d842106271` / `fd7e485ed7a84d4856dc4a717749b1afd1450a58747625f1cece766bd1c06ffc` |
+
+The zps/sco committed files intentionally add the post-run ORCA1-OMIP source
+citation as comments; the no-BBL committed file differs from the executed copy
+only by a stripped final blank line.  The table therefore pins both byte
+representations.  Parsed namelist semantics are unchanged.
 
 Trajectory hashes are emitted record-by-record by
-`nemo_testcase_oracle_gate.py --report-only` and are also covered by the final
+`nemo_testcase_oracle_gate.py` and are also covered by the final
 run-root checksum manifest.
 
 ## Reproduction surface
