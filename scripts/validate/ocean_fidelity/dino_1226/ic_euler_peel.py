@@ -652,7 +652,10 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
     # r3t=ssh*r1_ht_0, then domzgr_substitute.h90:46/126 evaluates
     # E3t_0*(1+r3t*tmask).  The algebraically equivalent (H+ssh)/H form
     # rounds differently and is not an oracle operand at this last-bit bar.
-    r1_ht_0 = 1.0 / np.asarray(entry.H_bathy.data)
+    ht_0 = np.zeros(e3t_0.shape[:-1], dtype=np.float64)
+    for k in range(e3t_0.shape[-1]):
+        ht_0 = ht_0 + e3t_0[..., k] * tmask_full[..., k]
+    r1_ht_0 = 1.0 / ht_0
     r3t_after = eta_after_nemo * r1_ht_0
     h_after_nemo = e3t_0 * (
         1.0 + r3t_after[..., None] * tmask_full)

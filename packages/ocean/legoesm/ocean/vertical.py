@@ -161,8 +161,18 @@ def nemo_qco_live_t_thicknesses(eta, H_bathy, z_coord, wet3):
     if raw.shape != wet.shape:
         raise ValueError(
             f"raw nemo_e3t_0 shape {raw.shape} != wet T shape {wet.shape}")
+    if H.shape != raw.shape[:-1]:
+        raise ValueError(
+            f"H_bathy shape {H.shape} != raw T horizontal shape {raw.shape[:-1]}")
     wet2 = (jnp.sum(wet, axis=-1) > 0.0).astype(dtype)
-    r1_h0 = b(wet2 / b(H + one - wet2))
+    # ``ht_0`` is the stored raw T-column sum, not the nominal/snapped
+    # bathymetry scalar.  DINO's 35 rounded e3t_0 rows left-sum to
+    # 3999.9999999999045 m where the analytic card says 4000 m; that last-bit
+    # distinction is exactly what r1_ht_0 in dom_qco_r3c consumes.
+    h0 = jnp.zeros_like(H)
+    for k in range(raw.shape[-1]):
+        h0 = b(h0 + b(raw[..., k] * wet[..., k]))
+    r1_h0 = b(wet2 / b(h0 + one - wet2))
     r3t = b(eta * r1_h0)
     return b(raw * b(one + b(r3t[..., None] * wet)))
 
