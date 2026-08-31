@@ -162,6 +162,48 @@ def compute_nemo_boxcar_centred_weights(
     )
 
 
+def compute_nemo_boxcar_raw_transport_weights(
+    n_substeps: int,
+    dtype: jnp.dtype,
+    substep_scale: int = 1,
+):
+    """Return NEMO's unnormalised ``wgtbtp2`` and ``r1_wgt2s`` divisor.
+
+    ``dynspg_ts.F90:1227-1294`` builds a raw 0/1 primary boxcar, forms each
+    secondary weight by summing the remaining primary weights, accumulates
+    ``za2 * zhU * r1_e2u`` with that raw integer-like ``za2``, and divides the
+    completed transport once at :999-1000.  The shared filter helper above
+    deliberately returns pre-normalised SM2005 weights; these arrays preserve
+    the distinct source association needed by DINO's literal accumulator.
+
+    Returns ``(wgtbtp2, r1_wgt2s, n_loop)``.  Shape/window validation mirrors
+    :func:`compute_nemo_boxcar_centred_weights` without changing its generic
+    arithmetic or byte contract.
+    """
+    import numpy as _np
+    if n_substeps < 2:
+        raise ValueError(
+            f"nemo_boxcar_centred needs n_substeps >= 2, got {n_substeps!r}")
+    if substep_scale < 1 or n_substeps % substep_scale != 0:
+        raise ValueError(
+            f"substep_scale={substep_scale!r} must be >=1 and divide "
+            f"n_substeps={n_substeps!r} (n_substeps = nn_e * substep_scale).")
+    half_width = n_substeps // substep_scale
+    jn = _np.arange(1, 3 * n_substeps + 1, dtype=_np.float64)
+    primary = (
+        _np.abs(jn - n_substeps) / half_width < 1.0
+    ).astype(_np.float64)
+    n_loop = int(_np.max(_np.where(primary > 0.0)[0]) + 1)
+    primary = primary[:n_loop]
+    secondary = _np.cumsum(primary[::-1], dtype=_np.float64)[::-1]
+    divisor = secondary.sum(dtype=_np.float64)
+    return (
+        jnp.asarray(secondary, dtype=dtype),
+        jnp.asarray(divisor, dtype=dtype),
+        n_loop,
+    )
+
+
 def nemo_auto_substeps(
     dt: float,
     H_max_wet: float,
@@ -348,18 +390,17 @@ def after_level_column_mean_reconcile(
         e3u(i,j,k,t)  ->  e3u_0(i,j,k) * (1 + r3u(i,j,t)*umask(i,j,k))
         r1_hu(i,j,t)  ->  r1_hu_0(i,j) / (1 + r3u(i,j,t))
 
-    On a wet cell ``umask = 1``, so the ``(1 + r3u(Kaa))`` factor is CONSTANT
-    over ``k`` within a column and appears once in the sum and once, inverted,
-    in the divisor.  It CANCELS EXACTLY::
+    On a wet cell ``umask = 1``, the ``(1 + r3u(Kaa))`` factor is constant
+    over ``k`` and cancels as an algebraic identity::
 
         zue * r1_hu(Kaa) = SUM_k( e3u_0 * u * umask ) / hu_0
 
-    So NEMO's reconciliation is INDEPENDENT OF THE TIME LEVEL and weights by
-    the fixed REFERENCE ladder ``e3u_0 / hu_0``.  This kernel therefore takes
-    the reference face thickness, not a live one.  RETRACTED 2026-08-21: an
-    earlier revision took the live AFTER-level thickness and its docstring
-    called that "the after-level thickness NEMO divides by".  That was a true
-    reading of the Fortran text and a false reading of its arithmetic.
+    This generic kernel evaluates that cancelled identity with the reference
+    ladder.  It is not execution-equivalent at the final ULP: registered round
+    49 showed that NEMO's separately materialized live reduction and reciprocal
+    are required for a bit-exact DINO result.  Production DINO therefore calls
+    :func:`nemo_literal_after_level_reconcile`; this kernel remains the generic
+    algebraic operator and its direct callers keep their prior behavior.
 
     HOW THE CALLER MUST BUILD ``h_face_ref``, and one thing NOT to assume.
     NEMO builds ``e3u_0`` as an ARITHMETIC mean of the adjacent ``e3t_0``
@@ -413,6 +454,54 @@ def after_level_column_mean_reconcile(
     depth = jnp.maximum(jnp.sum(h, axis=-1, keepdims=True), min_water_col)
     own_mean = jnp.sum(h * f, axis=-1, keepdims=True) / depth
     return (field - own_mean + target_mean) * face_mask3
+
+
+def nemo_literal_after_level_reconcile(
+    field: jnp.ndarray,
+    h_face_live: jnp.ndarray,
+    r1_h_live: jnp.ndarray,
+    target_mean: jnp.ndarray,
+    face_mask3: jnp.ndarray,
+) -> jnp.ndarray:
+    """Execute DINO ``mlf_baro_corr`` without algebraic QCO cancellation.
+
+    This is ``cfgs/DINO/MY_SRC/stpmlf.F90:752-765`` in source order: form
+    each live-thickness transport, left-accumulate levels, multiply by the
+    independently materialized live reciprocal depth, then subtract that mean
+    and add the barotropic target.  ``h_face_live`` is positive downward; this
+    operation only replaces a depth mean, so no vertical sign enters it.
+    """
+    b = jax.lax.optimization_barrier
+    field = jnp.asarray(field)
+    h_face_live = jnp.asarray(h_face_live, dtype=field.dtype)
+    r1_h_live = jnp.asarray(r1_h_live, dtype=field.dtype)
+    target_mean = jnp.asarray(target_mean, dtype=field.dtype)
+    face_mask3 = jnp.asarray(face_mask3, dtype=field.dtype)
+    if field.shape != h_face_live.shape or field.shape != face_mask3.shape:
+        raise ValueError(
+            "literal after-level field/thickness/mask shapes must match; got "
+            f"{field.shape}/{h_face_live.shape}/{face_mask3.shape}")
+    if r1_h_live.shape != field.shape[:-1]:
+        raise ValueError(
+            "literal after-level reciprocal must omit only the level axis; "
+            f"got {r1_h_live.shape} for field {field.shape}")
+    if target_mean.shape == field.shape[:-1]:
+        target_mean = target_mean[..., None]
+    if target_mean.shape != field.shape[:-1] + (1,):
+        raise ValueError(
+            "literal after-level target must have a singleton level axis; "
+            f"got {target_mean.shape} for field {field.shape}")
+
+    first = b(b(h_face_live[..., 0] * field[..., 0]) * face_mask3[..., 0])
+    transport = first
+    for jk in range(1, field.shape[-1]):
+        term = b(
+            b(h_face_live[..., jk] * field[..., jk])
+            * face_mask3[..., jk])
+        transport = b(transport + term)
+    own_mean = b(transport * r1_h_live)
+    corrected = b(b(field - own_mean[..., None]) + target_mean)
+    return b(corrected * face_mask3)
 
 
 def bebt_blend(

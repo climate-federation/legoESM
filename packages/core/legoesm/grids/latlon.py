@@ -558,7 +558,7 @@ def create_mercator_grid(
       It DOES, since #1455, select the latitude at which the two
       v-face scale factors are evaluated: NEMO builds both from its
       own V-point Mercator latitude ``gphiv``
-      (``usrdef_hgr.F90:113``/``:117``), i.e. at the half-integer row
+      (``usrdef_hgr.F90:113``/``:118``), i.e. at the half-integer row
       index, whereas ``"exact"`` averages the two adjacent tracer
       latitudes.  ``asin(tanh(.))`` is nonlinear, so those are
       different latitudes -- on DINO by up to 0.0011 degrees, making
@@ -1034,6 +1034,7 @@ def ensure_geometry(
     omega: float | None = None,
     *,
     metric_convention: str = "exact",
+    vface_zonal_metric_evaluation: str = "nemo_vpoint",
     coriolis_placement: str = "cell_average",
 ) -> "LatLonCGridGeometry":
     """Convert a ``LatLonGrid`` to ``LatLonCGridGeometry`` if needed.
@@ -1072,6 +1073,11 @@ def ensure_geometry(
         returns above skip conversion entirely, so an already-built
         geometry's convention cannot be changed here). Default
         ``"exact"`` is BIT-IDENTICAL to every existing caller.
+    vface_zonal_metric_evaluation : {"legacy_tracer_midpoint", "nemo_vpoint"}
+        Selects the latitude used for ``dx_v`` when ``metric_convention`` is
+        ``"nemo_isotropic"`` on a variable-dlat grid.  The default preserves
+        the NEMO-faithful V-point construction; the legacy value is an explicit
+        counterfactual for the #1455 climate attribution experiment.
 
     Returns
     -------
@@ -1108,6 +1114,7 @@ def ensure_geometry(
         # geometries are bit-unchanged.
         lat_face_1d=getattr(grid, "lat_v", None),
         metric_convention=metric_convention,
+        vface_zonal_metric_evaluation=vface_zonal_metric_evaluation,
         coriolis_placement=coriolis_placement,
     )
 
@@ -1313,6 +1320,14 @@ class LatLonCGridGeometry(NamedTuple):
     # ``n_lat`` (``None`` passes through unchanged).
     seam_wall_rows: jax.Array | None = None
 
+    # Optional native T-point latitude in degrees.  NEMO evaluates a few
+    # source profiles from the mesh's stored ``gphit`` values, before any
+    # degree->radian->degree coordinate round trip.  The bridge alone fills
+    # this field; regular/tripolar constructors retain ``None`` so existing
+    # grids have the same pytree leaves and arithmetic as before.  Appended
+    # at the NamedTuple end to preserve positional callers.
+    native_lat_T_deg: jax.Array | None = None
+
     # ------------------------------------------------------------------
     # GridProtocol properties
     # ------------------------------------------------------------------
@@ -1431,6 +1446,7 @@ def create_latlon_geometry(
     lon_1d: jax.Array | None = None,
     lat_face_1d: jax.Array | None = None,
     metric_convention: str = "exact",
+    vface_zonal_metric_evaluation: str = "nemo_vpoint",
     coriolis_placement: str = "cell_average",
 ) -> LatLonCGridGeometry:
     """Create a regular lat-lon ``LatLonCGridGeometry``.
@@ -1487,7 +1503,7 @@ def create_latlon_geometry(
         (NEMO's ``e1v``) and ``dy_v`` (NEMO's ``e2v``) are evaluated —
         NEMO's own V-point Mercator latitude ``gphiv`` rather than the
         mean of the two adjacent tracer latitudes (#1455,
-        ``usrdef_hgr.F90:113``/``:117``); under this convention the two
+        ``usrdef_hgr.F90:113``/``:118``); under this convention the two
         are ONE quantity, bit-for-bit on the interior.  ``cos_lat_v``
         (the raw face-latitude cosine) is not touched by this flag.
         The flag ALSO selects the vertex
@@ -1514,6 +1530,12 @@ def create_latlon_geometry(
         Raises ``ValueError`` on any other value. Ignored
         on uniform-dlat grids (scalar-dlat branch has no ``dlat_1d``
         to override).
+    vface_zonal_metric_evaluation : {"legacy_tracer_midpoint", "nemo_vpoint"}
+        The one-variable #1455 selector for NEMO-isotropic, variable-dlat
+        grids. ``"nemo_vpoint"`` evaluates ``dx_v`` at NEMO's analytic
+        V-point Mercator latitude; ``"legacy_tracer_midpoint"`` reproduces
+        the prior adjacent-T-latitude midpoint.  It changes ``dx_v`` only:
+        T/u metrics, true face coordinates, and ``dy_v`` are held fixed.
 
     coriolis_placement : {"cell_average", "face_latitude"}, optional
         Where the Coriolis parameter at the v-point / vertex is
@@ -1586,6 +1608,13 @@ def create_latlon_geometry(
         raise ValueError(
             f"metric_convention must be 'exact' or 'nemo_isotropic', "
             f"got {metric_convention!r}"
+        )
+    if vface_zonal_metric_evaluation not in (
+            "legacy_tracer_midpoint", "nemo_vpoint"):
+        raise ValueError(
+            "vface_zonal_metric_evaluation must be "
+            "'legacy_tracer_midpoint' or 'nemo_vpoint', got "
+            f"{vface_zonal_metric_evaluation!r}"
         )
     if n_lon is None:
         n_lon = 2 * n_lat
@@ -1766,7 +1795,12 @@ def create_latlon_geometry(
     # v-face latitudes: midpoints between cell centers, with poles at
     # ends.  cos(lat_v) at poles is exactly 0 (wall BC in regular
     # lat-lon).  This matches the inline computation in divergence_cgrid.
-    if metric_convention == "nemo_isotropic" and _is_variable_dlat:
+    _use_nemo_vpoint = (
+        metric_convention == "nemo_isotropic"
+        and _is_variable_dlat
+        and vface_zonal_metric_evaluation == "nemo_vpoint"
+    )
+    if _use_nemo_vpoint:
         # GATED ON A NON-UNIFORM MERIDIONAL COORDINATE, deliberately
         # (adversarial review finding 1).  The whole defect below exists only
         # because the meridional coordinate is NONLINEAR: on a uniform-dlat
@@ -1799,7 +1833,7 @@ def create_latlon_geometry(
         # ``cos_lat_v_1d`` is the cosine of the TRUE v-face latitude that the
         # variable-dlat branch above already carries (``lat_face``), and is the
         # same array the ``nemo_isotropic`` ``dy_v`` below consumes -- NEMO's
-        # mesh is isotropic (``pe2v = pe1v``, usrdef_hgr.F90:117), so under
+        # mesh is isotropic (``pe2v = pe1v``, usrdef_hgr.F90:118), so under
         # this convention the two v-face scale factors are ONE quantity.
         #
         # One semantic difference between the branches, stated because it is
@@ -1823,14 +1857,14 @@ def create_latlon_geometry(
         cos_lat_v = jnp.pad(cos_lat_v_interior, (1, 1))  # (n_lat+1,)
 
     # dx_v = R * cos(lat_v) * dlon — zonal extent of the v-face
-    if metric_convention == "nemo_isotropic" and _is_variable_dlat:
+    if _use_nemo_vpoint:
         # Same gate as the cos_lat_v branch above: on a uniform-dlat grid this
         # convention leaves the v-face zonal width alone entirely.
         # ``(radius * dlon) * cos`` -- the SAME association order the
         # ``nemo_isotropic`` ``dy_v`` below uses, so the two v-face scale
         # factors come out BIT-IDENTICAL on the interior rather than differing
         # by a floating-point ulp.  NEMO's DINO mesh has ``e1v == e2v`` to the
-        # last bit (one formula, usrdef_hgr.F90:113 and :117), and reproducing
+        # last bit (one formula, usrdef_hgr.F90:113 and :118), and reproducing
         # that isotropy exactly is free here.
         dx_v = (radius * dlon) * cos_lat_v[:, jnp.newaxis] \
             * jnp.ones((1, n_lon))
@@ -1856,7 +1890,7 @@ def create_latlon_geometry(
     else:
         dy_v = jnp.full((n_lat + 1, n_lon), float(radius * dlat), dtype=dtype)
     if metric_convention == "nemo_isotropic":
-        # NEMO usrdef_hgr.F90:117 -- pe2v = ra*rad*COS(rad*gphiv)*rn_e1_deg,
+        # NEMO usrdef_hgr.F90:118 -- pe2v = ra*rad*COS(rad*gphiv)*rn_e1_deg,
         # the SAME expression as pe1v.  Under the isotropic convention the
         # meridional v-point scale factor IS the zonal one, evaluated at the
         # TRUE v-face latitude (cos_lat_v, NOT the pole-zeroed #516 transport

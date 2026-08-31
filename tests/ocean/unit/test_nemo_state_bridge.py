@@ -8,6 +8,7 @@ placement.
 import numpy as np
 import pytest
 
+from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean.fidelity.nemo_io import NemoBeforeState, NemoGrid, NemoState
 from legoesm.ocean.fidelity.nemo_state_bridge import (
     bridge_before_state_topo,
@@ -38,6 +39,12 @@ def _synthetic():
         gdepw_1d=np.array([0.0, 10.0, 30.0]),
         tmask=np.ones((NY, NX, NZ)), umask=np.ones((NY, NX, NZ)),
         vmask=np.ones((NY, NX, NZ)),
+        gdept_0=np.broadcast_to(
+            np.array([5.0, 20.0, 45.0]), (NY, NX, NZ)),
+        gdepw_0=np.broadcast_to(
+            np.array([0.0, 10.0, 30.0]), (NY, NX, NZ)),
+        e3w_0=np.broadcast_to(
+            np.array([10.0, 15.0, 25.0]), (NY, NX, NZ)),
     )
     rng = np.random.default_rng(0)
     state = NemoState(
@@ -60,6 +67,11 @@ def test_bridge_geometry_and_staggering():
     assert st.u.data.shape == (NY, NX + 1, NZ)      # west-face array, n_lon+1
     assert st.v.data.shape == (NY + 1, NX, NZ)      # south-face array, n_lat+1
     assert st.eta.data.shape == (NY, NX)
+    assert out.z_coord.nemo_e3w_mesh_reference is True
+    assert np.array_equal(
+        np.asarray(out.z_coord.nemo_e3w_0), grid.e3w_0)
+    assert np.array_equal(
+        np.asarray(out.z_coord.nemo_gdepw_0), grid.gdepw_0)
 
     # Staggering. legoESM u[j,i] is the WEST face of T-cell (j,i)
     # (latlon_cgrid_operators.py:3623); NEMO u(i) is the EAST face = west face of
@@ -157,12 +169,21 @@ def _synthetic_topo():
 def test_topo_bridge_geometry_matches_nemo_metrics():
     """Built geometry reproduces NEMO's e1t/e2t/ff_t (Mercator, from mesh arrays)."""
     grid, state, _ = _synthetic_topo()
-    out = bridge_nemo_to_legoesm_topo(grid, state, periodic_i=True)
+    out = bridge_nemo_to_legoesm_topo(
+        grid, state, periodic_i=True, carry_native_lat_deg=True)
     geom = out.geometry
     # dx_T = e1t, dy_T = e2t, f_T = ff_t to near-roundoff (x64).
     assert np.max(np.abs(np.asarray(geom.dx_T) - grid.e1t)) < 1e-4 * grid.e1t.max()
     assert np.max(np.abs(np.asarray(geom.dy_T) - grid.e2t)) < 1e-4 * grid.e2t.max()
     assert out.f_match_max_abs < 1e-3 * np.abs(grid.ff_t).max()
+    # Native degrees are a first-class oracle operand: a radian round trip is
+    # allowed to differ by ULPs, but this carried field must not.
+    np.testing.assert_array_equal(np.asarray(geom.native_lat_T_deg), grid.gphit)
+
+    # Scope pin: generic/non-oracle NEMO bridges retain the historical
+    # geometry pytree and do not carry the optional degree-valued field.
+    generic = bridge_nemo_to_legoesm_topo(grid, state, periodic_i=True)
+    assert generic.geometry.native_lat_T_deg is None
 
 
 def test_topo_bridge_metric_convention_default_is_bit_identical():
@@ -174,6 +195,45 @@ def test_topo_bridge_metric_convention_default_is_bit_identical():
     for f in ("dx_T", "dy_T", "area_T", "dx_v", "dy_v", "area_q"):
         np.testing.assert_array_equal(
             getattr(out_default.geometry, f), getattr(out_exact.geometry, f))
+
+
+def test_topo_bridge_carries_raw_een_coefficient_operands_without_rebuilding():
+    """The literal dyn_cor_2D builder receives native mesh arrays bytewise.
+
+    Missing any member keeps the optional bundle absent; a partial bundle must
+    never be completed from lego geometry because last-bit metric association
+    and the wall rows are observable at the fidelity bar.
+    """
+    grid, state, _ = _synthetic_topo()
+    e3 = np.broadcast_to(
+        grid.e3t_1d[None, None, :], (TNY, TNX, TNZ)).copy()
+    fmask = np.array(grid.tmask, copy=True)
+    carried = grid._replace(
+        e3u_0=e3, e3v_0=e3 + 0.25, e3f_0=e3 + 0.5,
+        hu_0=np.sum(e3 * grid.umask, axis=-1),
+        hv_0=np.sum((e3 + 0.25) * grid.vmask, axis=-1),
+        fmask=fmask, e2u=grid.e2t + 1.0, e1v=grid.e1t + 2.0,
+        e1f=grid.e1t + 3.0, e2f=grid.e2t + 4.0)
+    old_policy = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        out = bridge_nemo_to_legoesm_topo(
+            carried, state, periodic_i=True, full_step=True)
+    finally:
+        set_policy(old_policy)
+    raw = out.z_coord.nemo_een_barotropic
+    assert raw is not None
+    for name in raw._fields:
+        if name == "hf_0":
+            expected = np.sum(carried.e3f_0 * carried.fmask, axis=-1)
+        else:
+            expected = getattr(carried, name)
+        np.testing.assert_array_equal(np.asarray(getattr(raw, name)), expected)
+
+    missing = carried._replace(e2f=None)
+    out_missing = bridge_nemo_to_legoesm_topo(
+        missing, state, periodic_i=True, full_step=True)
+    assert out_missing.z_coord.nemo_een_barotropic is None
 
 
 def test_topo_bridge_metric_convention_isotropic_forwards_and_raises():

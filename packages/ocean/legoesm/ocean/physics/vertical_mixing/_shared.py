@@ -314,6 +314,9 @@ def avm_weighted_shear_production(
     dz_half: jnp.ndarray,
     u_mask: jnp.ndarray, v_mask: jnp.ndarray,
     kappaM_T: jnp.ndarray,
+    *,
+    face_metrics: tuple[jnp.ndarray, jnp.ndarray,
+                        jnp.ndarray, jnp.ndarray] | None = None,
 ) -> jnp.ndarray:
     r"""NEMO ``zdf_sh2`` shear-PRODUCTION term ``p_sh2`` with the viscosity
     face-averaged INSIDE the face sum, exactly as ``zdfsh2.F90:80-94``
@@ -365,10 +368,10 @@ def avm_weighted_shear_production(
         viscosity — face-summed here via array rolls, matching NEMO's
         ``avm(ji+1,jj,jk)+avm(ji,jj,jk)`` exactly; NOT new staggered state.
         NB time level: NEMO computes ``zdf_sh2`` ONCE per step from the
-        previous-step ``p_avm``; legoESM's orchestrator wires the CURRENT
-        sub-iteration ``K_M_curr`` (same convention its pre-existing tpoint
-        path uses) — a documented deviation of the sub-iteration loop
-        structure, not of this function.
+        previous-step ``p_avm``.  The faithful ``step_entry`` orchestrator
+        supplies that carried field and freezes this function's result; the
+        explicit legacy ``implicit_solve_state`` path supplies the current
+        sub-iteration ``K_M_curr``.
 
     Returns
     -------
@@ -386,11 +389,30 @@ def avm_weighted_shear_production(
         du_bef = u_face_b[..., :-1] - u_face_b[..., 1:]
         return du_now * du_bef / dz_sq_face
 
-    dz_sq_u = jnp.concatenate([dz_sq, dz_sq[:, -1:, :]], axis=1)
-    dz_sq_v = jnp.concatenate([dz_sq, dz_sq[-1:, :, :]], axis=0)
+    if face_metrics is None:
+        dz_sq_u = jnp.concatenate([dz_sq, dz_sq[:, -1:, :]], axis=1)
+        dz_sq_v = jnp.concatenate([dz_sq, dz_sq[-1:, :, :]], axis=0)
+    else:
+        if len(face_metrics) != 4:
+            raise ValueError("face_metrics must contain e3u_now/e3u_before/"
+                             "e3v_now/e3v_before")
+        e3u_now, e3u_before, e3v_now, e3v_before = face_metrics
+        expected_u = u_face_now.shape[:-1] + (u_face_now.shape[-1] - 1,)
+        expected_v = v_face_now.shape[:-1] + (v_face_now.shape[-1] - 1,)
+        if (e3u_now.shape != expected_u or e3u_before.shape != expected_u
+                or e3v_now.shape != expected_v or e3v_before.shape != expected_v):
+            raise ValueError(
+                "live zdf_sh2 face metrics have wrong shape: expected "
+                f"u={expected_u}, v={expected_v}; got "
+                f"{e3u_now.shape}/{e3u_before.shape}/"
+                f"{e3v_now.shape}/{e3v_before.shape}")
+        dz_sq_u = jnp.maximum(e3u_now, _EPS) * jnp.maximum(e3u_before, _EPS)
+        dz_sq_v = jnp.maximum(e3v_now, _EPS) * jnp.maximum(e3v_before, _EPS)
 
-    zsh2u_bare = _face_shear_over_dzsq(u_face_now, u_face_before, dz_sq_u) * wumask
-    zsh2v_bare = _face_shear_over_dzsq(v_face_now, v_face_before, dz_sq_v) * wvmask
+    zsh2u_bare = _face_shear_over_dzsq(
+        u_face_now, u_face_before, dz_sq_u) * wumask
+    zsh2v_bare = _face_shear_over_dzsq(
+        v_face_now, v_face_before, dz_sq_v) * wvmask
 
     coast_u = 2.0 - u_mask[:, :-1, 1:] * u_mask[:, 1:, 1:]
     coast_v = 2.0 - v_mask[:-1, :, 1:] * v_mask[1:, :, 1:]
@@ -411,8 +433,21 @@ def avm_weighted_shear_production(
     kM_right_v = jnp.concatenate([kappaM_T, kappaM_T[-1:, :, :]], axis=0)
     kM_face_v = kM_left_v + kM_right_v          # (n_lat+1, n_lon, nlev-1)
 
-    zsh2u = kM_face_u * zsh2u_bare
-    zsh2v = kM_face_v * zsh2v_bare
+    if face_metrics is None:
+        # Historical association, kept byte-identical for every unchanged
+        # card: form the bare shear first, then multiply by face avm.
+        zsh2u = kM_face_u * zsh2u_bare
+        zsh2v = kM_face_v * zsh2v_bare
+    else:
+        # Literal zdfsh2.F90:80-89 association.  At the 1e-15 bar,
+        # ``avm*(du*du/divisor)`` is observably different from NEMO's
+        # ``avm*du*du/divisor`` even though they are algebraically equal.
+        du_n = u_face_now[..., :-1] - u_face_now[..., 1:]
+        du_b = u_face_before[..., :-1] - u_face_before[..., 1:]
+        dv_n = v_face_now[..., :-1] - v_face_now[..., 1:]
+        dv_b = v_face_before[..., :-1] - v_face_before[..., 1:]
+        zsh2u = kM_face_u * du_n * du_b / dz_sq_u * wumask
+        zsh2v = kM_face_v * dv_n * dv_b / dz_sq_v * wvmask
 
     p_sh2 = 0.25 * (
         (zsh2u[:, :-1, :] + zsh2u[:, 1:, :]) * coast_u
@@ -486,6 +521,7 @@ def compute_N2(
     adiabatic_over_dz_half: bool = False,
     t_depth: jnp.ndarray | None = None,
     w_depth: jnp.ndarray | None = None,
+    e3w_int: jnp.ndarray | None = None,
     n2_eos_form: str = "seos",
 ) -> jnp.ndarray:
     """N^2 at interfaces (shared by the TKE and CATKE closures).
@@ -535,7 +571,7 @@ def compute_N2(
         # NEMO's rn2 feeds BOTH zdfevd and zdftke, so the TKE closure consumes
         # the same trigger as convection.
         if (T_cell is None or S_cell is None
-                or t_depth is None or w_depth is None):
+                or t_depth is None or w_depth is None or e3w_int is None):
             raise ValueError(
                 "n2_mode='nemo_bn2' requires T_cell, S_cell and the geometric "
                 "depth ladders t_depth (gdept) / w_depth (interior gdepw) — "
@@ -568,6 +604,7 @@ def compute_N2(
         from legoesm.ocean.eos import compute_buoyancy_frequency_nemo_bn2
         return compute_buoyancy_frequency_nemo_bn2(
             T_cell, S_cell, t_depth, w_depth, g=g, eos_form=n2_eos_form,
+            e3w_int=e3w_int,
         )
     raise ValueError(
         f"Unknown n2_mode={n2_mode!r}; expected 'insitu', 'insitu_signed', "

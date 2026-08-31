@@ -24,6 +24,7 @@ Gates (spec §5a rung (a), risk register #1 item 4 / #2 / #6):
 from __future__ import annotations
 
 import os
+from types import MethodType
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
@@ -180,6 +181,77 @@ def test_nemo_mlf_diverges_from_leapfrog_only_via_gm_redi_tracer_source():
     np.testing.assert_allclose(
         np.asarray(s2_mlf.v.data), np.asarray(s2_lf.v.data),
         rtol=1e-8, atol=3e-5)
+
+
+def test_shipped_leapfrog_second_step_threads_one_entry_n2_bundle_to_gm_redi():
+    """Both explicit-only passes retain the one bundle built at step entry."""
+    from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+    from legoesm.ocean.physics.vertical_mixing.tke import TKEEntryN2Bundle
+
+    state, model = _channel(
+        K_h=2.0e4, A_h=2.0e4, implicit_vmix_e3t_now_divisor=True,
+        gm_redi=GMRediConfig(
+            kappa_GM=0.0, kappa_Redi=1.0e3,
+            slope_scheme="nemo_iso_lap", slope_positions="nemo_native",
+            slope_n2_evaluation="carried_step_entry"))
+    shape = state.T.data.shape
+    w_shape = shape[:-1] + (shape[-1] - 1,)
+    bundle = TKEEntryN2Bundle(
+        rn2=jnp.full(w_shape, 1.0e-5),
+        rn2b=jnp.full(w_shape, 1.25e-5),
+        gdepw_Kmm=jnp.broadcast_to(
+            (jnp.cumsum(model.z_coord.dz_ref)
+             - model.z_coord.dz_ref)[1:], w_shape),
+        e3w_Kmm=jnp.broadcast_to(model.z_coord.dz_ref[1:], w_shape),
+        e3t_Kmm=jnp.broadcast_to(model.z_coord.dz_ref, shape),
+    )
+    calls = []
+
+    def entry_bundle(_self, step_state, **_kwargs):
+        calls.append(step_state)
+        return bundle
+
+    model._tke_step_entry_n2_bundle = MethodType(entry_bundle, model)
+    s1 = model._leapfrog_step(state, _DT)
+    calls.clear()
+    s2 = model._leapfrog_step(s1, _DT)
+    assert len(calls) == 1
+    assert np.all(np.isfinite(np.asarray(s2.T.data)))
+
+
+def test_prd_before_source_tracks_integrator_time_levels(monkeypatch):
+    """Forward Euler uses current entry state; leapfrog uses shifting Nbb."""
+    import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as model_mod
+    from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+
+    gm_cfg = GMRediConfig(
+        slope_prd_geometry_stage="before_step",
+        slope_prd_evaluation="nemo_literal")
+    seen = []
+
+    def capture_gm(T, S, *_args, **kwargs):
+        seen.append((kwargs["native_prd_TS"], T, S))
+        return jnp.zeros_like(T), jnp.zeros_like(S)
+
+    monkeypatch.setattr(model_mod, "gm_redi_tracer_tendency_latlon", capture_gm)
+    for integrator, use_before in (("forward_euler", False), ("leapfrog", True)):
+        state, model = _channel(
+            K_h=0.0, A_h=0.0, outer_integrator=integrator,
+            momentum_time_integrator=("rk3" if integrator == "forward_euler"
+                                      else "euler"),
+            gm_redi=gm_cfg)
+        before_T = state.T.replace(data=state.T.data + 7.0)
+        before_S = state.S.replace(data=state.S.data - 0.4)
+        before_eta = state.eta.replace(data=state.eta.data + 0.25)
+        state = state._replace(
+            T_before=before_T, S_before=before_S, eta_before=before_eta,
+            u_before=state.u, v_before=state.v)
+        model._step_impl(state, 1.0, _apply_implicit_vmix=False)
+        native_TS, _, _ = seen[-1]
+        expected_T = state.T_before.data if use_before else state.T.data
+        expected_S = state.S_before.data if use_before else state.S.data
+        np.testing.assert_array_equal(np.asarray(native_TS[0]), np.asarray(expected_T))
+        np.testing.assert_array_equal(np.asarray(native_TS[1]), np.asarray(expected_S))
 
 
 def test_nemo_mlf_runs_no_nan_multistep():

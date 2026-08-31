@@ -128,6 +128,7 @@ CLI flags, for portability off this box.
 """
 import argparse
 import dataclasses
+import hashlib
 import json
 import os
 import time
@@ -135,6 +136,7 @@ import time
 import jax
 import jax.numpy as jnp
 import numpy as np
+from legoesm.core.field import Field
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.experiments.dino import (
     apply_dino_lat_lon_surface_forcing,
@@ -143,12 +145,12 @@ from legoesm.ocean.experiments.dino import (
     dino_lat_lon_surface_forcing_arrays,
     dino_step_surface_forcing,
 )
-from legoesm.core.field import Field
 from legoesm.ocean.fidelity.nemo_io import (
     read_nemo_mesh_mask,
     read_nemo_restart,
     read_nemo_restart_before,
     read_nemo_restart_en,
+    read_nemo_restart_tke_coefficients,
 )
 from legoesm.ocean.fidelity.nemo_state_bridge import (
     NEMO_E3T_MODES,
@@ -201,6 +203,86 @@ LEGACY_STORAGE_DTYPES = {"T3d": "float32", "S3d": "float32", "eta3d": "float32",
                          "u3d": "float32", "v3d": "float32",
                          "eta": "float32", "sst": "float32",
                          "u": "float32", "v": "float32"}
+
+
+def _stress_content_sha256(tau_x, tau_y) -> str:
+    """Content identity for the two T-point before-stress arrays."""
+    digest = hashlib.sha256()
+    for name, value in (("tau_x", tau_x), ("tau_y", tau_y)):
+        array = np.ascontiguousarray(np.asarray(value))
+        digest.update(name.encode("ascii"))
+        digest.update(str(array.dtype).encode("ascii"))
+        digest.update(json.dumps(array.shape).encode("ascii"))
+        digest.update(array.tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def _initial_state_sha256(state) -> str:
+    """Compact bit identity of the actual prognostic/before state at t=0."""
+    digest = hashlib.sha256()
+    names = (
+        "T", "S", "u", "v", "eta",
+        "T_before", "S_before", "u_before", "v_before", "eta_before",
+        "tau_x_prev", "tau_y_prev", "land_mask", "u_mask", "v_mask",
+    )
+    for name in names:
+        value = getattr(state, name, None)
+        if value is None:
+            digest.update(f"{name}:None|".encode("ascii"))
+            continue
+        value = getattr(value, "data", value)
+        array = np.ascontiguousarray(np.asarray(value))
+        digest.update(name.encode("ascii"))
+        digest.update(array.dtype.str.encode("ascii"))
+        digest.update(json.dumps(array.shape).encode("ascii"))
+        digest.update(array.tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def _analytic_dino_tpoint_stress(grid, cfg, *, t_seconds: float):
+    """Load analytic DINO T-point stress and bind it to one seasonal time."""
+    if not np.isfinite(t_seconds) or t_seconds < 0.0:
+        raise ValueError(
+            f"before-stress reconstruction time must be finite and >=0, got "
+            f"{t_seconds!r}")
+    forcing = dino_lat_lon_surface_forcing_arrays(grid, cfg)
+    surface = dino_step_surface_forcing(forcing)
+    if surface is None or surface.tau_x is None or surface.tau_y is None:
+        raise SystemExit("DINO analytic T-point stress loader returned no stress")
+    tau_x = jnp.asarray(surface.tau_x)
+    tau_y = jnp.asarray(surface.tau_y)
+    return tau_x, tau_y, _stress_content_sha256(tau_x, tau_y)
+
+
+def reconstruct_dino_before_stress_tpoint(state, grid, cfg, *, t_seconds: float):
+    """Replace only the bridged before-stress carry with analytic T stress.
+
+    This is oracle-mimicry glue: NEMO restart ``utau_b/vtau_b`` are already
+    U/V-point fields, whereas legoESM's canonical carry is T-point.  Rebuild
+    the prior T field through DINO's existing forcing loaders; never invert
+    the face field.  DINO wind is time independent, but ``t_seconds`` binds
+    this reconstruction to the restart's actual prior seasonal clock.
+    """
+    tau_x, tau_y, content_hash = _analytic_dino_tpoint_stress(
+        grid, cfg, t_seconds=t_seconds)
+    if state.tau_x_prev is None or state.tau_y_prev is None:
+        raise SystemExit(
+            "--bridge-before-stress-tpoint requires bridged before stress")
+    if (tau_x.shape != state.tau_x_prev.shape
+            or tau_y.shape != state.tau_y_prev.shape):
+        raise SystemExit(
+            "T-point before-stress shape mismatch: "
+            f"analytic={tau_x.shape}/{tau_y.shape} "
+            f"bridge={state.tau_x_prev.shape}/{state.tau_y_prev.shape}")
+    rebuilt = state._replace(tau_x_prev=tau_x, tau_y_prev=tau_y)
+    receipt = {
+        "bridge_before_stress_stagger": "T",
+        "bridge_before_stress_reconstruction_seconds": float(t_seconds),
+        "bridge_before_stress_sha256": content_hash,
+    }
+    print("BEFORE-STRESS BRIDGE: reconstructed analytic T-point carry "
+          f"at t={t_seconds:.0f}s sha256={content_hash}", flush=True)
+    return rebuilt, receipt
 
 
 def verify_day0_matches_restart(st, restart_state, land_mask, *, tol: float = 1e-8) -> None:
@@ -268,7 +350,9 @@ def verify_day0_matches_restart(st, restart_state, land_mask, *, tol: float = 1e
         )
 
 
-def bridge_tke_from_restart(st, restart_en, land_mask):
+def bridge_tke_from_restart(st, restart_en, land_mask, *,
+                            restart_avm=None, restart_avt=None,
+                            restart_dissl=None):
     """Seed ``st.tke`` from a NEMO restart's ``en`` (TKE closure integrator memory).
 
     ``restart_en`` is the raw ``(n_lat, n_lon, jpk)`` array from
@@ -283,8 +367,41 @@ def bridge_tke_from_restart(st, restart_en, land_mask):
     en_interior = np.asarray(restart_en, dtype=np.float64)[..., 1:]  # drop w-level 0 (surface)
     wet = (np.asarray(land_mask) > 0.5)[:, :, None]
     tke_data = jnp.asarray(np.where(wet, en_interior, 0.0), dtype=st.T.data.dtype)
-    return st._replace(tke=Field(data=tke_data, name="tke",
-                                  dims=("lat", "lon", "level"), units="m^2/s^2"))
+    updates = dict(tke=Field(data=tke_data, name="tke",
+                            dims=("lat", "lon", "level"), units="m^2/s^2"))
+    supplied = (restart_avm, restart_avt, restart_dissl)
+    if any(x is not None for x in supplied) and any(x is None for x in supplied):
+        raise ValueError(
+            "restart_avm, restart_avt, and restart_dissl must be supplied "
+            "together")
+    if restart_avm is not None:
+        avm = np.asarray(restart_avm, dtype=np.float64)
+        avt = np.asarray(restart_avt, dtype=np.float64)
+        dissl = np.asarray(restart_dissl, dtype=np.float64)
+        if (avm.shape != restart_en.shape or avt.shape != restart_en.shape
+                or dissl.shape != restart_en.shape):
+            raise ValueError(
+                "restart avm_k/avt_k/dissl must match en shape; got "
+                f"{avm.shape}/{avt.shape}/{dissl.shape} vs {restart_en.shape}")
+        updates.update(
+            tke_avm=Field(
+                data=jnp.asarray(np.where(wet, avm[..., 1:], 0.0),
+                                 dtype=st.T.data.dtype),
+                name="tke_avm", dims=("lat", "lon", "level"), units="m^2/s"),
+            tke_avt=Field(
+                data=jnp.asarray(np.where(wet, avt[..., 1:], 0.0),
+                                 dtype=st.T.data.dtype),
+                name="tke_avt", dims=("lat", "lon", "level"), units="m^2/s"),
+            tke_avm_surface=Field(
+                data=jnp.asarray(np.where(wet[..., 0], avm[..., 0], 0.0),
+                                 dtype=st.T.data.dtype),
+                name="tke_avm_surface", dims=("lat", "lon"), units="m^2/s"),
+            tke_dissl=Field(
+                data=jnp.asarray(np.where(wet, dissl[..., 1:], 0.0),
+                                 dtype=st.T.data.dtype),
+                name="tke_dissl", dims=("lat", "lon", "level"), units="s^-1"),
+        )
+    return st._replace(**updates)
 
 
 def _print_before_bridge_verify(st, before, grid) -> None:
@@ -501,6 +618,11 @@ def restart_elapsed_seconds(path: str) -> float:
             f"with kt={kt:.0f} x DT={DT:.0f} s ({t_from_kt:.0f} s) -- the "
             "restart was written at a different timestep than this harness runs")
     return t_from_days
+
+
+# Compatibility for branch-local committed probes written before main made the
+# helper public.  Keep the old spelling until those frozen scorers are retired.
+_restart_elapsed_seconds = restart_elapsed_seconds
 
 
 def seasonal_t0_seconds(restart_path: str) -> float:
@@ -1046,9 +1168,29 @@ def start_mode_of(stamped) -> str | None:
 
 def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                        bridge_tke: bool = False, bridge_before: bool = True,
+                       bridge_before_stress_tpoint: bool = True,
                        vmix_scheme: str | None = None,
                        use_gm_redi: bool | None = None,
                        surface_tendency_placement: str | None = None,
+                       barotropic_continuity_evaluation: str | None = None,
+                       vface_zonal_metric_evaluation: str | None = None,
+                       tke_preclosure_coeff_source: str | None = None,
+                       tke_matrix_evaluation: str | None = None,
+                       tke_solver_evaluation: str | None = None,
+                       zdf_implicit_solver_evaluation: str | None = None,
+                       tke_etau_exponential_evaluation: str | None = None,
+                       tke_htau_evaluation: str | None = None,
+                       tke_mxl_raw_evaluation: str | None = None,
+                       tke_langmuir_evaluation: str | None = None,
+                       tke_shear_evaluation_stage: str | None = None,
+                       tke_shear_metric_source: str | None = None,
+                       tke_n2_evaluation_stage: str | None = None,
+                       dino_wind_profile_evaluation: str | None = None,
+                       gm_redi_slope_n2_evaluation: str | None = None,
+                       gm_redi_slope_prd_evaluation: str | None = None,
+                       gm_redi_slope_metric_evaluation: str | None = None,
+                       gm_redi_slope_face_thickness_evaluation: str | None = None,
+                       gm_redi_slope_depth_evaluation: str | None = None,
                        u_m: float | None = None,
                        restart_file: str = RESTART_FILE,
                        e3t_mode: str | None = None):
@@ -1079,6 +1221,13 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
     tendency rate is folded into the Nnn RHS instead, see dino.py:262-281).
     ``None`` (default) leaves the recipe's own value.
 
+    ``bridge_before_stress_tpoint``: bridge-only correction for NEMO's U/V
+    restart stress, enabled by default. Requires ``bridge_before`` and
+    replaces only legoESM's T-point previous-stress carry with the existing
+    analytic DINO forcing at the restart's own time. ``False`` is the
+    known-wrong historical U-as-T reproduction path, not a model-config
+    selector.
+
     ``u_m``: optional override of ``DINOConfig.U_M`` (NEMO ``rn_Uv``, the
     lateral viscous velocity scale [m/s], card default 0.27).  It is the
     ONLY input to the lateral-viscosity coefficient on this card --
@@ -1094,18 +1243,134 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
     # recorded on; the twin default is applied in run_twin, one level up and
     # handed down through e3t_mode. e3t_mode=None keeps the bridge's own
     # resolution (LEGOESM_NEMO_E3T, else the 1-D ladder) exactly as before.
-    g = read_nemo_mesh_mask(f"{run_traj}/mesh_mask.nc", nn_hls=0)
-    s = read_nemo_restart(f"{run_stepdump}/{restart_file}", nn_hls=0)
-    br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True,
-                                     e3t_mode=e3t_mode)
+    if bridge_before_stress_tpoint and not bridge_before:
+        raise SystemExit(
+            "--bridge-before-stress-tpoint requires --bridge-before; a "
+            "T-point prior-stress carry cannot be attached to an Euler start")
     cfg = dataclasses.replace(dino_config_for_recipe(recipe),
         lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)
+    g = read_nemo_mesh_mask(f"{run_traj}/mesh_mask.nc", nn_hls=0)
+    s = read_nemo_restart(f"{run_stepdump}/{restart_file}", nn_hls=0)
+    br = bridge_nemo_to_legoesm_topo(
+        g, s, periodic_i=True, full_step=True, e3t_mode=e3t_mode,
+        vface_zonal_metric_evaluation=(
+            vface_zonal_metric_evaluation
+            if vface_zonal_metric_evaluation is not None
+            else cfg.vface_zonal_metric_evaluation),
+        coriolis_placement=cfg.coriolis_placement,
+        carry_native_lat_deg=(cfg.tke_htau_evaluation == "nemo_literal"))
     if vmix_scheme is not None:
         cfg = dataclasses.replace(cfg, vmix_scheme=vmix_scheme)
     if use_gm_redi is not None:
         cfg = dataclasses.replace(cfg, use_gm_redi=use_gm_redi)
     if surface_tendency_placement is not None:
         cfg = dataclasses.replace(cfg, surface_tendency_placement=surface_tendency_placement)
+    if barotropic_continuity_evaluation is not None:
+        if barotropic_continuity_evaluation not in ("generic", "nemo_literal"):
+            raise ValueError("barotropic_continuity_evaluation must be "
+                             "'generic' or 'nemo_literal'")
+        cfg = dataclasses.replace(
+            cfg, barotropic_continuity_evaluation=barotropic_continuity_evaluation)
+    if vface_zonal_metric_evaluation is not None:
+        if vface_zonal_metric_evaluation not in (
+                "legacy_tracer_midpoint", "nemo_vpoint"):
+            raise ValueError(
+                "vface_zonal_metric_evaluation must be "
+                "'legacy_tracer_midpoint' or 'nemo_vpoint'")
+        cfg = dataclasses.replace(
+            cfg, vface_zonal_metric_evaluation=vface_zonal_metric_evaluation)
+    if tke_preclosure_coeff_source is not None:
+        if tke_preclosure_coeff_source not in (
+                "carried_previous_step", "current_subiteration"):
+            raise ValueError(
+                "tke_preclosure_coeff_source must be "
+                "'carried_previous_step' or 'current_subiteration'")
+        cfg = dataclasses.replace(
+            cfg, tke_preclosure_coeff_source=tke_preclosure_coeff_source)
+    if tke_matrix_evaluation is not None:
+        if tke_matrix_evaluation not in ("nemo_literal", "factored"):
+            raise ValueError(
+                "tke_matrix_evaluation must be 'nemo_literal' or 'factored'")
+        cfg = dataclasses.replace(
+            cfg, tke_matrix_evaluation=tke_matrix_evaluation)
+    if tke_solver_evaluation is not None:
+        if tke_solver_evaluation not in ("nemo_literal", "shared_thomas"):
+            raise ValueError(
+                "tke_solver_evaluation must be 'nemo_literal' or "
+                "'shared_thomas'")
+        cfg = dataclasses.replace(
+            cfg, tke_solver_evaluation=tke_solver_evaluation)
+    if zdf_implicit_solver_evaluation is not None:
+        if zdf_implicit_solver_evaluation not in (
+                "nemo_literal", "shared_thomas"):
+            raise ValueError(
+                "zdf_implicit_solver_evaluation must be 'nemo_literal' or "
+                "'shared_thomas'")
+        cfg = dataclasses.replace(
+            cfg,
+            zdf_implicit_solver_evaluation=zdf_implicit_solver_evaluation)
+    for value, field, choices in (
+        (tke_etau_exponential_evaluation,
+         "tke_etau_exponential_evaluation", ("nemo_literal", "jax_expression")),
+        (tke_htau_evaluation, "tke_htau_evaluation",
+         ("nemo_literal", "jax_expression")),
+        (tke_mxl_raw_evaluation, "tke_mxl_raw_evaluation",
+         ("nemo_literal", "factored")),
+        (gm_redi_slope_n2_evaluation, "gm_redi_slope_n2_evaluation",
+         ("carried_step_entry", "recompute")),
+        (gm_redi_slope_prd_evaluation, "gm_redi_slope_prd_evaluation",
+         ("nemo_literal", "density_roundtrip")),
+        (gm_redi_slope_metric_evaluation,
+         "gm_redi_slope_metric_evaluation", ("nemo_reciprocal", "division")),
+        (gm_redi_slope_face_thickness_evaluation,
+         "gm_redi_slope_face_thickness_evaluation",
+         ("nemo_qco_live", "static_face")),
+        (gm_redi_slope_depth_evaluation, "gm_redi_slope_depth_evaluation",
+         ("nemo_qco_live_literal", "legacy_jacobian_t_surface")),
+    ):
+        if value is not None:
+            if value not in choices:
+                raise ValueError(f"{field} must be one of {choices}; got {value!r}")
+            cfg = dataclasses.replace(cfg, **{field: value})
+    if tke_langmuir_evaluation is not None:
+        if tke_langmuir_evaluation not in ("nemo_literal", "vectorized"):
+            raise ValueError(
+                "tke_langmuir_evaluation must be 'nemo_literal' or "
+                "'vectorized'")
+        cfg = dataclasses.replace(
+            cfg, tke_langmuir_evaluation=tke_langmuir_evaluation)
+    if tke_shear_evaluation_stage is not None:
+        if tke_shear_evaluation_stage not in (
+                "step_entry", "implicit_solve_state"):
+            raise ValueError(
+                "tke_shear_evaluation_stage must be 'step_entry' or "
+                "'implicit_solve_state'")
+        cfg = dataclasses.replace(
+            cfg, tke_shear_evaluation_stage=tke_shear_evaluation_stage)
+    if tke_shear_metric_source is not None:
+        if tke_shear_metric_source not in (
+                "nemo_qco_live_face", "tpoint_jacobian"):
+            raise ValueError(
+                "tke_shear_metric_source must be 'nemo_qco_live_face' or "
+                "'tpoint_jacobian'")
+        cfg = dataclasses.replace(
+            cfg, tke_shear_metric_source=tke_shear_metric_source)
+    if tke_n2_evaluation_stage is not None:
+        if tke_n2_evaluation_stage not in (
+                "step_entry", "implicit_solve_state"):
+            raise ValueError(
+                "tke_n2_evaluation_stage must be 'step_entry' or "
+                "'implicit_solve_state'")
+        cfg = dataclasses.replace(
+            cfg, tke_n2_evaluation_stage=tke_n2_evaluation_stage)
+    if dino_wind_profile_evaluation is not None:
+        if dino_wind_profile_evaluation not in (
+                "nemo_literal", "factored_smoothstep"):
+            raise ValueError(
+                "dino_wind_profile_evaluation must be 'nemo_literal' or "
+                "'factored_smoothstep'")
+        cfg = dataclasses.replace(
+            cfg, dino_wind_profile_evaluation=dino_wind_profile_evaluation)
     if u_m is not None:
         if not (u_m > 0.0):
             raise ValueError(f"u_m (rn_Uv) must be > 0, got {u_m!r}")
@@ -1185,10 +1450,15 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
     # tke_shear_production="nemo_burchard", both of which READ these fields
     # every step -- bridging is what makes those axes correct from step 0
     # instead of only after the model's own Euler-start populates them.
+    restart_path = f"{run_stepdump}/{restart_file}"
     if bridge_before:
-        before = read_nemo_restart_before(f"{run_stepdump}/{restart_file}", nn_hls=0)
+        before = read_nemo_restart_before(restart_path, nn_hls=0)
         st = bridge_before_state_topo(br._replace(state=st), g, before, periodic_i=True)
         _print_before_bridge_verify(st, before, g)
+        if bridge_before_stress_tpoint:
+            prior_time = restart_elapsed_seconds(restart_path)
+            st, _ = reconstruct_dino_before_stress_tpoint(
+                st, br.geometry, cfg, t_seconds=prior_time)
 
     # OPTIONAL: bridge NEMO's developed TKE closure memory (`en`) onto lego's
     # cold-start `state.tke` -- isolates whether the TKE cold-start (vs the
@@ -1198,13 +1468,37 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
     # not a silent behavior change.
     if bridge_tke:
         en_restart = read_nemo_restart_en(f"{run_stepdump}/{restart_file}", nn_hls=0)
-        st = bridge_tke_from_restart(st, en_restart, br.land_mask)
+        _carry_coeffs = (cfg.tke_preclosure_coeff_source
+                         == "carried_previous_step")
+        if _carry_coeffs:
+            avm_restart, avt_restart, dissl_restart = (
+                read_nemo_restart_tke_coefficients(
+                f"{run_stepdump}/{restart_file}", nn_hls=0)
+            )
+        else:
+            avm_restart = avt_restart = dissl_restart = None
+        st = bridge_tke_from_restart(
+            st, en_restart, br.land_mask,
+            restart_avm=avm_restart, restart_avt=avt_restart,
+            restart_dissl=dissl_restart)
         wet = np.asarray(br.land_mask) > 0.5
         d_en = float(np.max(np.abs(
             np.asarray(st.tke.data)[wet] - en_restart[..., 1:][wet])))
         print(f"TKE BRIDGE: seeded state.tke from NEMO restart en "
               f"(w-level 1..{en_restart.shape[-1]-1} -> interior interface "
               f"0..{en_restart.shape[-1]-2})  max|d_en|={d_en:.3e}", flush=True)
+        if _carry_coeffs:
+            d_avm = float(np.max(np.abs(
+                np.asarray(st.tke_avm.data)[wet] - avm_restart[..., 1:][wet])))
+            d_avt = float(np.max(np.abs(
+                np.asarray(st.tke_avt.data)[wet] - avt_restart[..., 1:][wet])))
+            d_dissl = float(np.max(np.abs(
+                np.asarray(st.tke_dissl.data)[wet]
+                - dissl_restart[..., 1:][wet])))
+            print("TKE COEFFICIENT BRIDGE: restart avm_k/avt_k/dissl -> carried "
+                  f"closure pair max|d_avm|={d_avm:.3e} "
+                  f"max|d_avt|={d_avt:.3e} max|d_dissl|={d_dissl:.3e}",
+                  flush=True)
 
     mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
     if os.environ.get("DINO_NEMO_KMM_DIVISOR") is not None:
@@ -1248,7 +1542,11 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
           f"barotropic_drag_substep={mc.barotropic_drag_substep}", flush=True)
 
     model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)
-    forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
+    # NEMO evaluates the analytic wind at its stored gphiu operand.  Keep that
+    # raw degree-valued mesh field through the bridge: radians->degrees would
+    # perturb 154 row-8 columns beyond the registered 1e-15 bar.
+    forcing = dino_lat_lon_surface_forcing_arrays(
+        br.geometry, cfg, wind_lat_deg=g.gphit[:, 0])
     sf = dino_step_surface_forcing(forcing)
     print(f"slope_scheme={mc.gm_redi.slope_scheme} "
           f"kappa_GM_max={float(jnp.max(jnp.abs(mc.gm_redi.kappa_GM))):.1f}")
@@ -1259,9 +1557,29 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
 def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = False,
              run_traj: str = RUN_TRAJ, run_stepdump: str = RUN_STEPDUMP,
              bridge_tke: bool = False, bridge_before: bool = True,
+             bridge_before_stress_tpoint: bool = True,
              vmix_scheme: str | None = None,
              use_gm_redi: bool | None = None,
              surface_tendency_placement: str | None = None,
+             barotropic_continuity_evaluation: str | None = None,
+             vface_zonal_metric_evaluation: str | None = None,
+             tke_preclosure_coeff_source: str | None = None,
+             tke_matrix_evaluation: str | None = None,
+             tke_solver_evaluation: str | None = None,
+             zdf_implicit_solver_evaluation: str | None = None,
+             tke_etau_exponential_evaluation: str | None = None,
+             tke_htau_evaluation: str | None = None,
+             tke_mxl_raw_evaluation: str | None = None,
+             tke_langmuir_evaluation: str | None = None,
+             tke_shear_evaluation_stage: str | None = None,
+             tke_shear_metric_source: str | None = None,
+             tke_n2_evaluation_stage: str | None = None,
+             dino_wind_profile_evaluation: str | None = None,
+             gm_redi_slope_n2_evaluation: str | None = None,
+             gm_redi_slope_prd_evaluation: str | None = None,
+             gm_redi_slope_metric_evaluation: str | None = None,
+             gm_redi_slope_face_thickness_evaluation: str | None = None,
+             gm_redi_slope_depth_evaluation: str | None = None,
              u_m: float | None = None,
              restart_file: str = RESTART_FILE,
              perturb_seed: int | None = None,
@@ -1270,6 +1588,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
              perturb_baro_key: str = "dU_avg",
              perturb_baro_scale: float = 1.0,
              daily_acc: bool = False,
+             save_step_eta: bool = False,
              snap_days: tuple[int, ...] | None = None,
              fp64_3d: bool = False,
              legacy_1d_ladder: bool = False) -> bool:
@@ -1313,7 +1632,20 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     days NEMO's own ``nn_stock`` restarts land on -- the alternative,
     growing the module-level tuple, would silently change every sibling
     probe's artifact.
+
+    ``save_step_eta``: replace the default daily/float32 ``eta`` payload with
+    every-step/float64 eta plus relative ``t_seconds`` for the campaign's
+    Nyquist-safe 2dt scorer. The daily field remains under ``eta_daily``.
+    ``bridge_before_stress_tpoint`` defaults on and reconstructs only the
+    initial T-point previous-stress carry. ``False`` reproduces the historical
+    U-as-T bridge defect. Later-step carry behavior remains the model's
+    ordinary ``_seed_centred_forcing_carry`` path.
     """
+    _producer_sha_entry, _producer_dirty_entry = _git_provenance()
+    if (_producer_dirty_entry
+            and os.environ.get("LEGOESM_ALLOW_DIRTY") != "1"):
+        raise SystemExit("REFUSING run_twin from a dirty tracked tree; the "
+                         "artifact producer identity would be ambiguous")
     # Resolved here and handed DOWN as an argument -- nothing is written into the
     # environment, so two ladders can be built in one process without either
     # inheriting the other's setting.
@@ -1322,8 +1654,29 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     br, cfg, mc, model, forcing, sf, st = _build_twin_state(
         recipe, run_traj, run_stepdump, bridge_tke=bridge_tke,
         bridge_before=bridge_before, vmix_scheme=vmix_scheme,
+        bridge_before_stress_tpoint=bridge_before_stress_tpoint,
         use_gm_redi=use_gm_redi, restart_file=restart_file,
         surface_tendency_placement=surface_tendency_placement,
+        barotropic_continuity_evaluation=barotropic_continuity_evaluation,
+        vface_zonal_metric_evaluation=vface_zonal_metric_evaluation,
+        tke_preclosure_coeff_source=tke_preclosure_coeff_source,
+        tke_matrix_evaluation=tke_matrix_evaluation,
+        tke_solver_evaluation=tke_solver_evaluation,
+        zdf_implicit_solver_evaluation=zdf_implicit_solver_evaluation,
+        tke_etau_exponential_evaluation=tke_etau_exponential_evaluation,
+        tke_htau_evaluation=tke_htau_evaluation,
+        tke_mxl_raw_evaluation=tke_mxl_raw_evaluation,
+        tke_langmuir_evaluation=tke_langmuir_evaluation,
+        tke_shear_evaluation_stage=tke_shear_evaluation_stage,
+        tke_shear_metric_source=tke_shear_metric_source,
+        tke_n2_evaluation_stage=tke_n2_evaluation_stage,
+        dino_wind_profile_evaluation=dino_wind_profile_evaluation,
+        gm_redi_slope_n2_evaluation=gm_redi_slope_n2_evaluation,
+        gm_redi_slope_prd_evaluation=gm_redi_slope_prd_evaluation,
+        gm_redi_slope_metric_evaluation=gm_redi_slope_metric_evaluation,
+        gm_redi_slope_face_thickness_evaluation=(
+            gm_redi_slope_face_thickness_evaluation),
+        gm_redi_slope_depth_evaluation=gm_redi_slope_depth_evaluation,
         u_m=u_m, e3t_mode=ladder_mode)
 
     # #1455 review: the stamp must be a RECEIPT, not a restatement of the flag.
@@ -1352,6 +1705,35 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
             "actually starts from must agree.")
     start_mode = observed_start
 
+    # Receipt, not a restatement of the selector: reconstruct the expected
+    # analytic T field through the same loaders and compare it to the carry
+    # actually present on the built state before stamping "T".
+    restart_path = f"{run_stepdump}/{restart_file}"
+    if bridge_before_stress_tpoint:
+        reconstruction_time = restart_elapsed_seconds(restart_path)
+        expected_x, expected_y, expected_hash = _analytic_dino_tpoint_stress(
+            br.geometry, cfg, t_seconds=reconstruction_time)
+        if (not np.array_equal(np.asarray(st.tau_x_prev), np.asarray(expected_x))
+                or not np.array_equal(
+                    np.asarray(st.tau_y_prev), np.asarray(expected_y))):
+            raise SystemExit(
+                "BEFORE-STRESS STAMP MISMATCH: selector requested T-point "
+                "reconstruction but the built carry differs from the "
+                "existing DINO analytic forcing loader")
+        bridge_before_stress_stagger = "T"
+        bridge_before_stress_sha256 = expected_hash
+    else:
+        reconstruction_time = float("nan")
+        bridge_before_stress_stagger = (
+            "U_AS_T_LEGACY" if bridge_before else "NONE")
+        bridge_before_stress_sha256 = (
+            _stress_content_sha256(st.tau_x_prev, st.tau_y_prev)
+            if st.tau_x_prev is not None and st.tau_y_prev is not None else "")
+    print("BEFORE-STRESS RECEIPT: "
+          f"stagger={bridge_before_stress_stagger} "
+          f"reconstruction_seconds={reconstruction_time} "
+          f"sha256={bridge_before_stress_sha256}", flush=True)
+
     # #1455 512517fdc + review a0cd04b8: the BINDING precision check, on the
     # materialized geometry and state (arrays cannot lie about their dtype the
     # way the policy global can). Shared gate, not a re-derivation.
@@ -1371,6 +1753,8 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         print(f"PERTURB seed={perturb_seed} eps={perturb_eps:.3e}: "
               f"max|dT|={d_t:.3e}  max_rel|dT/T|={rel:.3e}", flush=True)
         st = st._replace(T=st.T.replace(data=t_pert))
+
+    initial_state_sha256 = _initial_state_sha256(st)
 
     nsteps = STEPS_PER_DAY * n_days
 
@@ -1393,6 +1777,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     # from the same restart.  Stamping it next to the clock the twin USED lets
     # a scorer reject ANY offset that is not NEMO's, not merely t0=0.
     t0_reference_sec = restart_elapsed_seconds(f"{run_stepdump}/{restart_file}")
+    resolved_snap_days = resolve_snap_days(snap_days, n_days, save_3d)
     # Everything about this run a comparison must hold fixed.  A two-arm A/B
     # that changes the clock and something else is a confound, and nothing in
     # the artifact could see it before this stamp existed.
@@ -1401,8 +1786,61 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         "run_traj": run_traj, "run_stepdump": run_stepdump,
         "restart_file": restart_file,
         "bridge_tke": bool(bridge_tke), "bridge_before": bool(bridge_before),
+        "bridge_before_stress_tpoint": bool(bridge_before_stress_tpoint),
         "vmix_scheme": vmix_scheme, "use_gm_redi": use_gm_redi,
         "surface_tendency_placement": surface_tendency_placement,
+        "barotropic_continuity_evaluation":
+            cfg.barotropic_continuity_evaluation,
+        "vface_zonal_metric_evaluation":
+            cfg.vface_zonal_metric_evaluation,
+        "save_3d": bool(save_3d),
+        "snap_days": list(resolved_snap_days),
+        "save_step_eta": bool(save_step_eta),
+        # Resolved production selectors, not merely the optional CLI
+        # overrides.  These receipts make the faithful and legacy climate
+        # arms distinguishable even when both are launched from defaults.
+        "tke_preclosure_coeff_source": cfg.tke_preclosure_coeff_source,
+        "tke_matrix_evaluation": cfg.tke_matrix_evaluation,
+        "tke_solver_evaluation": cfg.tke_solver_evaluation,
+        "zdf_implicit_solver_evaluation":
+            cfg.zdf_implicit_solver_evaluation,
+        "tke_etau_exponential_evaluation":
+            cfg.tke_etau_exponential_evaluation,
+        "tke_htau_evaluation": cfg.tke_htau_evaluation,
+        "tke_mxl_raw_evaluation": cfg.tke_mxl_raw_evaluation,
+        "tke_langmuir_evaluation": cfg.tke_langmuir_evaluation,
+        "tke_shear_evaluation_stage": cfg.tke_shear_evaluation_stage,
+        "tke_shear_metric_source": cfg.tke_shear_metric_source,
+        "tke_n2_evaluation_stage": cfg.tke_n2_evaluation_stage,
+        "dino_wind_profile_evaluation":
+            cfg.dino_wind_profile_evaluation,
+        "gm_redi_slope_n2_evaluation": cfg.gm_redi_slope_n2_evaluation,
+        "gm_redi_slope_prd_geometry_stage":
+            cfg.gm_redi_slope_prd_geometry_stage,
+        "gm_redi_slope_prd_evaluation": cfg.gm_redi_slope_prd_evaluation,
+        "gm_redi_slope_metric_evaluation": cfg.gm_redi_slope_metric_evaluation,
+        "gm_redi_slope_face_thickness_evaluation":
+            cfg.gm_redi_slope_face_thickness_evaluation,
+        "gm_redi_flux_face_thickness_evaluation":
+            cfg.gm_redi_flux_face_thickness_evaluation,
+        "gm_redi_horizontal_evaluation": cfg.gm_redi_horizontal_evaluation,
+        "gm_redi_vertical_skew_evaluation":
+            cfg.gm_redi_vertical_skew_evaluation,
+        "gm_redi_a33_evaluation": cfg.gm_redi_a33_evaluation,
+        "gm_redi_w_slope_stage_evaluation":
+            cfg.gm_redi_w_slope_stage_evaluation,
+        "gm_redi_slope_depth_evaluation": cfg.gm_redi_slope_depth_evaluation,
+        "gm_treguier_vertical_reduction_evaluation":
+            cfg.gm_treguier_vertical_reduction_evaluation,
+        "gm_treguier_sqrt_evaluation": cfg.gm_treguier_sqrt_evaluation,
+        "barotropic_transport_accumulation_evaluation":
+            cfg.barotropic_transport_accumulation_evaluation,
+        "barotropic_seed_evaluation": cfg.barotropic_seed_evaluation,
+        "barotropic_een_coefficient_evaluation":
+            cfg.barotropic_een_coefficient_evaluation,
+        "barotropic_pgf_evaluation": cfg.barotropic_pgf_evaluation,
+        "zad_qco_evaluation": cfg.zad_qco_evaluation,
+        "wzv_call2_evaluation": cfg.wzv_call2_evaluation,
         "perturb_seed": perturb_seed, "perturb_eps": float(perturb_eps),
         # DELIBERATELY NOT recorded here: --fp64-3d. run_config is compared
         # BYTE-FOR-BYTE between two arms by twin_seasonal_clock_ab.py, which
@@ -1534,8 +1972,17 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     sst_daily = np.full((n_days, n_lat, n_lon), np.nan, dtype=np.float32)
     u_daily = np.full((n_days, n_lat, n_lon), np.nan, dtype=np.float32)
     v_daily = np.full((n_days, n_lat, n_lon), np.nan, dtype=np.float32)
+    eta_step = None
+    if save_step_eta:
+        if control_dtype_stamp != "float64":
+            raise SystemExit(
+                "--save-step-eta requires a materialized float64 control "
+                f"state, got {control_dtype_stamp}; casting fp32 output to "
+                "float64 would forge precision")
+        eta_step = np.full((nsteps, n_lat, n_lon), np.nan, dtype=np.float64)
+        print(f"per-step eta enabled: {nsteps} samples at float64", flush=True)
 
-    snaps = resolve_snap_days(snap_days, n_days, save_3d)
+    snaps = resolved_snap_days
     snap_np = snapshot_dtype(fp64_3d)
     snap_name = np.dtype(snap_np).name
     t3d, s3d, eta3d, u3d, v3d = {}, {}, {}, {}, {}
@@ -1592,6 +2039,12 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
             st = apply_dino_lat_lon_surface_forcing(
                 st, forcing, br.z_coord, cfg, DT, t_seconds=t0_sec + (k + 1) * DT)
             st = dyn(st)
+
+        if eta_step is not None:
+            eta_now64 = np.asarray(st.eta.data, dtype=np.float64)
+            if not np.isfinite(eta_now64).all():
+                raise SystemExit(f"FATAL: non-finite per-step eta at step {k + 1}")
+            eta_step[k] = eta_now64
 
         if (k + 1) % STEPS_PER_DAY == 0:
             day_idx = (k + 1) // STEPS_PER_DAY - 1
@@ -1662,6 +2115,14 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         _reduced_status = (f"{_reduced_status}; reduction failed on days "
                            f"{sorted(_reduce_fail)}: "
                            f"{_reduce_fail[sorted(_reduce_fail)[0]]}")
+
+    _producer_sha_exit, _producer_dirty_exit = _git_provenance()
+    if (_producer_sha_exit != _producer_sha_entry
+            or _producer_dirty_exit != _producer_dirty_entry):
+        raise SystemExit(
+            "REFUSING to save: producing checkout changed during integration "
+            f"(entry={_producer_sha_entry}/{_producer_dirty_entry}, "
+            f"exit={_producer_sha_exit}/{_producer_dirty_exit})")
     save_kwargs = dict(
         eta=eta_daily, sst=sst_daily, u=u_daily, v=v_daily,
         land_mask=land_mask.astype(np.float32),
@@ -1686,6 +2147,13 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         # content hash exists to prevent, and this dimension gets the same
         # treatment.
         twin_start_mode=np.str_(start_mode),
+        # Round-3 bridge-only stagger receipt. "T" is stamped only after the
+        # built carry was compared byte-for-byte with the existing analytic
+        # DINO forcing loader at the restart's own time.
+        bridge_before_stress_stagger=np.str_(bridge_before_stress_stagger),
+        bridge_before_stress_reconstruction_seconds=np.float64(
+            reconstruction_time),
+        bridge_before_stress_sha256=np.str_(bridge_before_stress_sha256),
         # #1455 512517fdc: stamp the precision the arm was built at.
         control_dtype=np.str_(control_dtype_stamp),
         # #1455: stamp the lateral viscous velocity the arm ran at (NEMO's
@@ -1717,6 +2185,10 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         # #1455 follow-up: the clock NEMO is on, and the rest of the recipe.
         seasonal_t0_reference_seconds=np.float64(t0_reference_sec),
         run_config=np.str_(run_config),
+        producer_git_sha=np.str_(_producer_sha_entry),
+        producer_dirty_tracked_files=np.int32(_producer_dirty_entry),
+        codex_session_id=np.str_(os.environ.get("CODEX_SESSION_ID", "")),
+        initial_state_sha256=np.str_(initial_state_sha256),
     )
     if daily_acc:
         # #1455 Phase-2: stamp the perturbation next to the response it caused,
@@ -1730,6 +2202,13 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         # The MEASURED injected transport, the number every retention factor
         # divides by.  Stamped so the scorer never has to be told it.
         save_kwargs["injected_sv"] = np.float64(_injected_sv)
+    if eta_step is not None:
+        save_kwargs["eta_daily"] = save_kwargs["eta"]
+        save_kwargs["eta"] = eta_step
+        save_kwargs["t_seconds"] = (
+            np.arange(1, nsteps + 1, dtype=np.float64) * DT)
+        save_kwargs["capture_every_steps"] = np.int32(1)
+        save_kwargs["dt_seconds"] = np.float64(DT)
     for d in _stored_days:
         save_kwargs[f"T3d_day{d}"] = t3d[d]
         save_kwargs[f"S3d_day{d}"] = s3d[d]
@@ -1787,6 +2266,26 @@ def _parse_args(argv=None):
                          "earlier help string said it did; retracted). "
                          "--no-bridge-before is the legacy forward-Euler start "
                          "-- see --legacy-euler-start")
+    stress_carry = p.add_mutually_exclusive_group()
+    stress_carry.add_argument(
+        "--bridge-before-stress-tpoint",
+        dest="bridge_before_stress_tpoint", action="store_true",
+        help="use the faithful analytic DINO T-point prior-stress reconstruction "
+             "at the restart's own prior seasonal time (DEFAULT ON since "
+             "2026-08-28). Requires --bridge-before; stamps stagger/time/content "
+             "identity. Does not change model config or later-step carry behavior")
+    stress_carry.add_argument(
+        "--bridge-before-stress-legacy-u-as-t",
+        dest="bridge_before_stress_tpoint", action="store_false",
+        help="opt into the known-wrong historical bridge that stores NEMO's "
+             "U/V-point prior stress as a T-point carry. Reproduction only; "
+             "artifacts stamp U_AS_T_LEGACY")
+    # Resolve the default after parsing ``bridge_before``: a bridged start
+    # faithfully reconstructs the T-point carry by default, while an Euler
+    # start has no prior-stress carry to reconstruct.  An explicit
+    # ``--bridge-before-stress-tpoint --legacy-euler-start`` remains True and
+    # is refused by _build_twin_state's fail-closed compatibility gate.
+    p.set_defaults(bridge_before_stress_tpoint=None)
     p.add_argument("--legacy-euler-start", dest="bridge_before",
                    action="store_false",
                    help="start the twin from a forward-Euler step instead of "
@@ -1816,6 +2315,89 @@ def _parse_args(argv=None):
                          "(#1492 A/B: 'applied_now' legacy defect vs "
                          "'leapfrog_rhs' NEMO-faithful fix); default None "
                          "leaves the recipe's own value")
+    p.add_argument(
+        "--barotropic-continuity-evaluation", default=None,
+        choices=("generic", "nemo_literal"),
+        help="one-variable QCO continuity association selector; default None "
+             "uses the recipe (NEMO cards use nemo_literal)")
+    p.add_argument(
+        "--vface-zonal-metric-evaluation", default=None,
+        choices=("legacy_tracer_midpoint", "nemo_vpoint"),
+        help="one-variable V-face Mercator e1v selector; default None uses "
+             "the recipe (NEMO cards use nemo_vpoint)")
+    p.add_argument(
+        "--tke-preclosure-coeff-source", default=None,
+        choices=("carried_previous_step", "current_subiteration"),
+        help="override the TKE pre-solve avm_k/avt_k lifetime; default None "
+             "uses the recipe (DINO NEMO cards carry the previous-step pair; "
+             "current_subiteration is historical reproduction)")
+    p.add_argument(
+        "--tke-matrix-evaluation", default=None,
+        choices=("nemo_literal", "factored"),
+        help="override the TKE matrix construction; default None uses the "
+             "recipe (DINO NEMO cards use literal zdftke source order; "
+             "factored is historical reproduction)")
+    p.add_argument(
+        "--tke-solver-evaluation", default=None,
+        choices=("nemo_literal", "shared_thomas"),
+        help="override the TKE tridiagonal recurrence; default None uses "
+             "the recipe (DINO NEMO cards use the literal zdftke scans; "
+             "shared_thomas is historical reproduction)")
+    p.add_argument(
+        "--zdf-implicit-solver-evaluation", default=None,
+        choices=("nemo_literal", "shared_thomas"),
+        help="override the final dynzdf/trazdf matrix and recurrence "
+             "evaluation; default None uses the recipe (DINO NEMO cards "
+             "use literal source order; shared_thomas is historical "
+             "reproduction)")
+    p.add_argument("--tke-etau-exponential-evaluation", default=None,
+                   choices=("nemo_literal", "jax_expression"))
+    p.add_argument("--tke-htau-evaluation", default=None,
+                   choices=("nemo_literal", "jax_expression"))
+    p.add_argument("--tke-mxl-raw-evaluation", default=None,
+                   choices=("nemo_literal", "factored"))
+    p.add_argument(
+        "--tke-langmuir-evaluation", default=None,
+        choices=("nemo_literal", "vectorized"),
+        help="override the Langmuir source construction; default None uses "
+             "the recipe (DINO NEMO cards use literal zdftke source order; "
+             "vectorized is historical reproduction)")
+    p.add_argument(
+        "--tke-shear-evaluation-stage", default=None,
+        choices=("step_entry", "implicit_solve_state"),
+        help="override the zdf_sh2 evaluation lifetime; default None uses "
+             "the recipe (complete DINO NEMO cards freeze step-entry p_sh2; "
+             "implicit_solve_state is historical reproduction)")
+    p.add_argument(
+        "--tke-shear-metric-source", default=None,
+        choices=("nemo_qco_live_face", "tpoint_jacobian"),
+        help="override zdf_sh2 vertical face metrics; default None uses the "
+             "recipe (DINO NEMO cards use live NOW/BEFORE QCO metrics; "
+             "tpoint_jacobian is historical reproduction)")
+    p.add_argument(
+        "--tke-n2-evaluation-stage", default=None,
+        choices=("step_entry", "implicit_solve_state"),
+        help="override rn2/rn2b/live-geometry evaluation lifetime; default "
+             "None uses the recipe (complete DINO NEMO cards retain the "
+             "step-entry bundle; implicit_solve_state is historical "
+             "reproduction)")
+    p.add_argument(
+        "--dino-wind-profile-evaluation", default=None,
+        choices=("nemo_literal", "factored_smoothstep"),
+        help="override DINO's wind-profile evaluation; default None uses the "
+             "recipe (complete DINO NEMO cards use the literal Fortran "
+             "association; factored_smoothstep is historical reproduction)")
+    p.add_argument("--gm-redi-slope-n2-evaluation", default=None,
+                   choices=("carried_step_entry", "recompute"))
+    p.add_argument("--gm-redi-slope-prd-evaluation", default=None,
+                   choices=("nemo_literal", "density_roundtrip"))
+    p.add_argument("--gm-redi-slope-metric-evaluation", default=None,
+                   choices=("nemo_reciprocal", "division"))
+    p.add_argument("--gm-redi-slope-face-thickness-evaluation", default=None,
+                   choices=("nemo_qco_live", "static_face"))
+    p.add_argument("--gm-redi-slope-depth-evaluation", default=None,
+                   choices=("nemo_qco_live_literal",
+                            "legacy_jacobian_t_surface"))
     p.add_argument("--u-m", dest="u_m", type=float, default=None,
                    help="override DINOConfig.U_M (NEMO rn_Uv, the lateral "
                         "viscous velocity [m/s]; card default 0.27). The "
@@ -1876,7 +2458,14 @@ def _parse_args(argv=None):
                         "The 0/30/60/90 snapshot grid cannot resolve a decay "
                         "timescale of days, which is what the retention "
                         "measurement is pre-registered to discriminate.")
-    return p.parse_args(argv)
+    p.add_argument("--save-step-eta", action="store_true",
+                   help="store every-step eta at float64 under the scorer's "
+                        "eta/t_seconds contract; preserve daily eta as "
+                        "eta_daily. Required for 2dt/Nyquist scoring")
+    args = p.parse_args(argv)
+    if args.bridge_before_stress_tpoint is None:
+        args.bridge_before_stress_tpoint = bool(args.bridge_before)
+    return args
 
 
 def _smoke_check_vmix_scheme_override():
@@ -1977,6 +2566,19 @@ def _eq_leaf(a, b) -> bool:
         return a is b or a == b
 
 
+def _git_provenance() -> tuple[str, int]:
+    """Return producing HEAD and tracked-dirt count for artifact stamps."""
+    import subprocess
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))))
+    sha = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+    dirt = subprocess.run(
+        ["git", "-C", repo, "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True, text=True).stdout.strip()
+    return sha, len(dirt.splitlines()) if dirt else 0
+
+
 def provenance_gate() -> None:
     """Stamp source provenance and REFUSE to run from a dirty tracked tree.
 
@@ -2042,14 +2644,42 @@ def main(argv=None):
     run_twin(args.recipe, args.out, n_days=args.days, save_3d=args.save_3d,
               run_traj=args.run_traj, run_stepdump=args.run_stepdump,
               bridge_tke=args.bridge_tke, bridge_before=args.bridge_before,
+              bridge_before_stress_tpoint=args.bridge_before_stress_tpoint,
               vmix_scheme=args.vmix_scheme, use_gm_redi=args.use_gm_redi,
               surface_tendency_placement=args.surface_tendency_placement,
+              barotropic_continuity_evaluation=(
+                  args.barotropic_continuity_evaluation),
+              vface_zonal_metric_evaluation=(
+                  args.vface_zonal_metric_evaluation),
+              tke_preclosure_coeff_source=args.tke_preclosure_coeff_source,
+              tke_matrix_evaluation=args.tke_matrix_evaluation,
+              tke_solver_evaluation=args.tke_solver_evaluation,
+              zdf_implicit_solver_evaluation=(
+                  args.zdf_implicit_solver_evaluation),
+              tke_etau_exponential_evaluation=(
+                  args.tke_etau_exponential_evaluation),
+              tke_htau_evaluation=args.tke_htau_evaluation,
+              tke_mxl_raw_evaluation=args.tke_mxl_raw_evaluation,
+              tke_langmuir_evaluation=args.tke_langmuir_evaluation,
+              tke_shear_evaluation_stage=args.tke_shear_evaluation_stage,
+              tke_shear_metric_source=args.tke_shear_metric_source,
+              tke_n2_evaluation_stage=args.tke_n2_evaluation_stage,
+              dino_wind_profile_evaluation=args.dino_wind_profile_evaluation,
+              gm_redi_slope_n2_evaluation=args.gm_redi_slope_n2_evaluation,
+              gm_redi_slope_prd_evaluation=args.gm_redi_slope_prd_evaluation,
+              gm_redi_slope_metric_evaluation=(
+                  args.gm_redi_slope_metric_evaluation),
+              gm_redi_slope_face_thickness_evaluation=(
+                  args.gm_redi_slope_face_thickness_evaluation),
+              gm_redi_slope_depth_evaluation=(
+                  args.gm_redi_slope_depth_evaluation),
               u_m=args.u_m,
               perturb_seed=args.perturb_seed, perturb_eps=args.perturb_eps,
               perturb_baro=args.perturb_baro,
               perturb_baro_key=args.perturb_baro_key,
               perturb_baro_scale=args.perturb_baro_scale,
               daily_acc=args.daily_acc,
+              save_step_eta=args.save_step_eta,
               snap_days=(None if args.snap_days is None else
                          tuple(int(x) for x in args.snap_days.split(","))),
               fp64_3d=args.fp64_3d,

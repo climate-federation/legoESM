@@ -394,7 +394,7 @@ class TestNemoIsotropicMetricConvention:
         # dy_v -- the MERIDIONAL v-point spacing -- was in this list
         # conservatively, not because the invariant consumes it.  It is NEMO's
         # e2v, and ldf_slp's vslp divides by it, so it MUST follow the
-        # convention (#1226: NEMO usrdef_hgr.F90:117 sets pe2v = pe1v).
+        # convention (#1226: NEMO usrdef_hgr.F90:118 sets pe2v = pe1v).
         #
         # NARROWED AGAIN 2026-08-27 (#1455), for the SAME reason and with the
         # same evidence, this time for dx_v itself.  dx_v was in this list on
@@ -464,7 +464,7 @@ class TestNemoIsotropicMetricConvention:
         assert float(np.abs(_dxv_i[0]).max()) == 0.0
         assert float(np.abs(_dxv_i[-1]).max()) == 0.0
         # Under nemo_isotropic the two v-face scale factors are ONE quantity
-        # (usrdef_hgr.F90:113 == :117), bit-for-bit on the interior.
+        # (usrdef_hgr.F90:113 == :118), bit-for-bit on the interior.
         np.testing.assert_array_equal(
             _dxv_i[_int], np.asarray(geom_iso.dy_v, dtype=np.float64)[_int],
             err_msg="nemo_isotropic must give e1v == e2v on the interior")
@@ -473,10 +473,10 @@ class TestNemoIsotropicMetricConvention:
         assert not np.array_equal(
             np.asarray(geom_exact.dy_v), np.asarray(geom_iso.dy_v)), (
             "dy_v is unchanged under nemo_isotropic -- NEMO's e2v = e1v "
-            "(usrdef_hgr.F90:117) is then NOT being reproduced, and vslp "
+            "(usrdef_hgr.F90:118) is then NOT being reproduced, and vslp "
             "cannot reach the bar")
         # It must equal NEMO's closed form e2v = ra*rad*COS(gphiv)*rn_e1_deg
-        # (usrdef_hgr.F90:117).  NOTE this is deliberately NOT compared against
+        # (usrdef_hgr.F90:118).  NOTE this is deliberately NOT compared against
         # geom.dx_v: dx_v is the #516 TRANSPORT metric and is hard-zeroed at
         # the poles (no meridional flux through the pole wall), whereas NEMO's
         # e2v carries no such zeroing.  Same closed form, different boundary
@@ -485,7 +485,7 @@ class TestNemoIsotropicMetricConvention:
         np.testing.assert_allclose(
             np.asarray(geom_iso.dy_v)[:, 0], expected, rtol=1e-6,
             err_msg="under nemo_isotropic, dy_v must be NEMO's e2v = "
-                    "R*dlon*cos(lat_v) (pe2v = pe1v, usrdef_hgr.F90:117)")
+                    "R*dlon*cos(lat_v) (pe2v = pe1v, usrdef_hgr.F90:118)")
         # The #516 helper itself: identical on grids that only differ by
         # metric_convention (it reads grid.lat, which this flag never
         # touches).

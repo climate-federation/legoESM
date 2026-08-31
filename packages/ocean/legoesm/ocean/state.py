@@ -553,6 +553,17 @@ class LatLonCGridOceanState(NamedTuple):
     # (dt = dt_mom) seeded from this field and stores the updated TKE back.
     # Default None -> inert (Mode-B diagnostic chain): zero behaviour change.
     tke: object = None
+    # NEMO TKE-closure coefficient memory (avm_k/avt_k). These are the
+    # post-tke_avn closure values, before EVD/IWM composition, carried to the
+    # next step when tke_preclosure_coeff_source="carried_previous_step".
+    tke_avm: object = None
+    tke_avt: object = None
+    # NEMO's SAVE'd ``dissl`` = sqrt(en)/zmxld closure memory.  The literal
+    # zdftke matrix/RHS consumes this carried value before post-solve tke_avn
+    # overwrites it; None remains inert on every non-literal card.
+    tke_dissl: object = None
+    # Surface W-level avm_k used by NEMO's z=0 TKE matrix/wave denominator.
+    tke_avm_surface: object = None
     # Prior-step ADVECTIVE TKE tendency [m^2/s^3] at the interior interfaces
     # (W-grid), 3-D Field (n_lat, n_lon, nlev-1) — the Adams-Bashforth history
     # dtke^{n-1} for the prognostic-TKE superbee advection (Veros vs.dtke,
@@ -966,9 +977,10 @@ class MomentumTendencyDiagnostics(NamedTuple):
     Av_vert_u, Av_vert_v : Field
         A_v · ∂²u/∂z² (vertical viscosity on the perturbation)
     phys_u, phys_v : Field
-        ``phys.du_dt`` / ``phys.dv_dt`` from the surface-forcing physics
-        module (wind stress at the surface; possibly other physics
-        contributions if active)
+        ``phys.du_dt`` / ``phys.dv_dt`` from the configured physics module.
+    surface_stress_u, surface_stress_v : Field
+        Explicit external wind-stress tendency deposited in the surface cell.
+        Zero when no stress is supplied or ``surface_stress_implicit=True``.
     sponge_u, sponge_v : Field
         Sponge restoring (0 when no sponge)
     total_u, total_v : Field
@@ -1002,6 +1014,8 @@ class MomentumTendencyDiagnostics(NamedTuple):
     Av_vert_v: Field
     phys_u: Field
     phys_v: Field
+    surface_stress_u: Field
+    surface_stress_v: Field
     sponge_u: Field
     sponge_v: Field
     total_u: Field
@@ -1110,6 +1124,31 @@ class BarotropicConfig(NamedTuple):
     # selecting "nemo_ssh_avg" is conservation-inert (machine-gated by
     # test_partial_cells_phase7.py::TestNemoSshAvgFaceDepthGate).
     barotropic_face_depth: str = "min_rule"
+    # Arithmetic used to assemble the continuity flux/divergence. ``generic``
+    # retains the shared FV operator. ``nemo_literal`` preserves NEMO's
+    # e2u*U*H / e1v*V*H operand order and multiply-by-reciprocal divergence.
+    barotropic_continuity_evaluation: str = "generic"
+    # Time-mean advective-transport accumulation. ``generic`` retains the
+    # pre-normalised SM2005 weight times cancelled H*U form. ``nemo_literal``
+    # carries raw wgtbtp2, accumulates za2*zhU*r1_e2u (V analog), and divides
+    # the completed sum once by r1_wgt2s (dynspg_ts.F90:734-737,999-1000).
+    barotropic_transport_accumulation_evaluation: str = "generic"
+    # Frozen EEN coefficient construction. ``generic`` retains the shared
+    # AL81 association. ``nemo_literal`` materializes NEMO dyn_cor_2D_init's
+    # eight coefficients with its triad, vertical recurrence, and post-factor
+    # association from bridge-carried raw QCO operands.
+    barotropic_een_coefficient_evaluation: str = "generic"
+    # Arithmetic used only for the 3-D -> 2-D velocity reduction that seeds
+    # the split-explicit window. ``generic`` retains the shared fused stacked
+    # reduction byte-for-byte. ``nemo_literal`` preserves the active DINO MLF
+    # restart construction: live Kbb QCO face thickness, surface-to-bottom
+    # accumulation, then r1_hu_0/(1+r3u) (V analog), istate.F90:149-155.
+    # Requires barotropic_seed_face_depth="nemo_ssh_avg" so the live face
+    # thickness and its separately associated reciprocal describe one state.
+    barotropic_seed_evaluation: str = "generic"
+    # Split-explicit surface-PGF arithmetic. ``nemo_literal`` consumes the
+    # carried U/V face metrics and preserves dynspg_ts.F90:776-780 ordering.
+    barotropic_pgf_evaluation: str = "generic"
     # Which OUTER time level seeds the FROZEN in-window EEN barotropic-Coriolis
     # coefficients (#1226 zero-deviation item 4; only read when
     # barotropic_coriolis is "een"/"een_metric").  NEMO freezes the dyn_cor_2D
@@ -1303,21 +1342,14 @@ class BarotropicConfig(NamedTuple):
     # faithful pair is velocity_avg + nemo_mlf_baro_corr; transport_avg +
     # nemo_mlf_baro_corr commits, in NEMO's slot, the average NEMO throws away.
     #
-    # RETRACTED 2026-08-21: this field was first documented as switching to
-    # "the AFTER-level thickness NEMO divides by".  NEMO's weighting is
-    # TIME-LEVEL INDEPENDENT -- under key_qco the (1+r3u) free-surface factor
-    # cancels exactly between e3u(Kaa) and r1_hu(Kaa) -- so the faithful weight
-    # is the REFERENCE ladder e3u_0/hu_0, which is what the kernel now uses.
-    # Any statement sized against "the after-thickness half" must be re-read.
+    # ROUND-49 RETRACTION: treating the key_qco factor as cancelled is
+    # algebraically valid but not execution-equivalent at the last bit.  The
+    # faithful path carries raw pre-projection Kaa SSH, executes live e3u/e3v
+    # reduction, then applies the independently built r1_hu/r1_hv post-factor.
     #
-    # AND ON THE DINO CARD THAT HALF IS INERT OUTRIGHT, not merely small: DINO
-    # runs a pure z-coordinate with NO partial steps (namelist_cfg:70-72,
-    # ln_zco_nam=.true. / ln_zps_nam=.false.) and legoESM's restart bridge
-    # builds a matching full-step coordinate, so the reference ladder is the
-    # uniform dz on every wet face and this kernel reproduces NEMO's
-    # SUM_k e3u_0*u*umask / hu_0 exactly. A second retraction, 2026-08-21: an
-    # earlier note said the thickness half "bites only through partial cells --
-    # which the DINO card does have". It does not.
+    # DINO still has no partial steps (namelist_cfg:70-72), but the live QCO
+    # execution is not inert: its mathematically cancelling scale changes the
+    # final few ULPs through multiplication/reduction/division association.
     #
     # SCOPE, named rather than left to be discovered: the site is in the
     # leap-frog branch of each outer step, so it is NOT applied on the
@@ -1773,11 +1805,18 @@ class LatLonCGridOceanConfig(NamedTuple):
     # usr_def_hgr.F90 closed form ``pe1t = pe2t`` (see
     # create_mercator_grid's docstring for the full citation) -- ONLY the
     # nemo_dino_kamm*/nemo_faithful_grid oracle cards set this; every other
-    # recipe stays on "exact". Does NOT touch the v-face metric (#516
-    # vface_zonal_cos_lat invariant) -- see ensure_geometry/
-    # create_latlon_geometry docstrings. Dispatch raises in
+    # recipe stays on "exact". The separate selector below chooses the
+    # corrected versus legacy dx_v latitude only when this convention is
+    # nemo_isotropic on a variable-dlat grid; the #516 shared-metric
+    # invariants hold under either value. Dispatch raises in
     # LatLonCGridOceanModel._validate_config on an unknown value.
     metric_convention: str = "exact"
+
+    # Latitude used by the V-face zonal metric on variable-dlat,
+    # nemo_isotropic grids. ``nemo_vpoint`` is the corrected #1455 behavior;
+    # ``legacy_tracer_midpoint`` exists only as a controlled attribution arm.
+    # It is forwarded to ensure_geometry and affects dx_v only.
+    vface_zonal_metric_evaluation: str = "nemo_vpoint"
 
     # Where the Coriolis parameter at the v-point / vertex is EVALUATED
     # (#1455).  Fed to ``legoesm.grids.latlon.ensure_geometry`` at model
@@ -2163,6 +2202,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     # "nemo_faithful": dynzad.F90:86-119 has NO interior mask at all; masking
     # is deferred to dynzdf.F90:121's post-hoc *umask(jk) on the tendency.
     zad_bottom_face_mask: str = "min_rule"
+    # Coupled QCO operand evaluation for NEMO dynzad.  "generic" preserves
+    # the historical z-star w + min-face thickness path byte-for-byte;
+    # "nemo_literal" supplies Kaa-continuity ww and live Kmm e3u/e3v as one
+    # inseparable operand pair.  Only meaningful with nemo_advective.
+    zad_qco_evaluation: str = "generic"
+    # Post-barotropic WZV call-2 composition. ``nemo_literal`` pairs the
+    # second Kmm hdiv with actual barotropic Kaa r3t; depends on the coupled
+    # call-1 QCO operands above. Generic default is byte-compatible.
+    wzv_call2_evaluation: str = "generic"
     # Lateral (harmonic) momentum-viscosity OPERATOR form. Selects how the A_h
     # Laplacian viscosity acts on the vector velocity field:
     #   "vector_laplacian" (default) — legoESM's VECTOR Laplacian
@@ -2752,6 +2800,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # flux the model applied", so those configs RAISE instead of storing a
     # lie.
     store_salt_flux: bool = False
+    # Evaluation order of the final ZDF implicit applications.  The generic
+    # historical path normalises each matrix row and calls the shared Thomas
+    # solver.  ``nemo_literal`` preserves dynzdf/trazdf's unnormalised written
+    # matrices and their three separate ordered recurrences.  Appended to keep
+    # every positional constructor byte-compatible.
+    zdf_implicit_solver_evaluation: str = "shared_thomas"
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

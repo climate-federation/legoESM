@@ -868,8 +868,10 @@ def build_nemo_gyre_recipe(
     # abyssal circulation (surf/deep rms(u) 0.20 vs NEMO 8.2); linssh flips it
     # to NEMO's surface-intensified structure (5.91) and collapses the abyssal
     # density drift to NEMO's level. See nemo_gyre_fidelity_plan.md item A.
-    z_coord = create_z_star_from_thicknesses(e3t_wet, gdept_wet)._replace(
-        linear_free_surface=True)
+    z_coord = create_z_star_from_thicknesses(
+        e3t_wet, gdept_wet,
+        nemo_e3w_source="depth_difference",
+    )._replace(linear_free_surface=True)
     n_lev = int(e3t_wet.size)
 
     # Beta-plane geometry (uniform 106 km metric, NEMO f = f0 + beta*y).

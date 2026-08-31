@@ -93,6 +93,10 @@ def _assert_close(a, b, atol, what):
     dict(barotropic_div_damp=0.02),             # + divergence damping
     dict(barotropic_time_filter="power_law"),   # n_loop > n_substeps
     dict(barotropic_wide_halo_chunk=3),         # multi-chunk (re-exchange)
+    dict(                                        # round-59 raw recurrence
+        barotropic_time_filter="nemo_boxcar_centred",
+        barotropic_transport_accumulation_evaluation="nemo_literal",
+        barotropic_wide_halo_chunk=3),
 ])
 def test_serial_wide_matches_standard(setup, flat):
     grid, z_coord, state = setup

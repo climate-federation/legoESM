@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 jax.config.update("jax_enable_x64", True)
@@ -21,6 +22,7 @@ from legoesm.ocean.dynamics.barotropic_common import (
     bebt_blend,
     compute_filter_weights,
     compute_nemo_boxcar_centred_weights,
+    compute_nemo_boxcar_raw_transport_weights,
     maxvel_clip,
     precision_aware_rel_tol,
 )
@@ -67,6 +69,29 @@ class TestNemoBoxcarSubstepScale:
             compute_nemo_boxcar_centred_weights(46, jnp.float64, substep_scale=4)
         with pytest.raises(ValueError):
             compute_nemo_boxcar_centred_weights(46, jnp.float64, substep_scale=0)
+
+    def test_raw_transport_window_matches_nemo_source_order(self):
+        """DINO keeps integer-like wgtbtp2 and divides once by 2070."""
+        raw, divisor, n_loop = compute_nemo_boxcar_raw_transport_weights(
+            46, jnp.float64, substep_scale=2)
+        _, _, normalized, normalized_n_loop = (
+            compute_nemo_boxcar_centred_weights(
+                46, jnp.float64, substep_scale=2))
+        assert n_loop == normalized_n_loop == 68
+        assert float(divisor) == 2070.0
+        assert jnp.array_equal(raw[:24], jnp.full((24,), 45.0))
+        assert jnp.array_equal(raw[24:], jnp.arange(44.0, 0.0, -1.0))
+        np_raw = np.asarray(raw / divisor)
+        np_normalized = np.asarray(normalized)
+        np.testing.assert_allclose(np_raw, np_normalized, rtol=0.0, atol=8e-18)
+        assert not np.array_equal(np_raw, np_normalized), (
+            "raw final-division and pre-normalised weights unexpectedly became "
+            "bit-identical; the association control cannot detect a collapse")
+
+    def test_raw_transport_bad_scale_raises(self):
+        with pytest.raises(ValueError):
+            compute_nemo_boxcar_raw_transport_weights(
+                46, jnp.float64, substep_scale=4)
 
 
 # ---------------------------------------------------------------------------

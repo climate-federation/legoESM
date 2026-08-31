@@ -10,8 +10,8 @@ ladder) the seed is EXACT (2.19e-16) and the error instead GROWS through the
 substep loop -- the opposite finding, and the reason this stage exists: does
 the (now separately identified) per-substep growth come from the slow
 forcing zu_frc/zv_frc/ssh_frc (computed once, added unchanged every substep)
-or from a per-substep-recomputed term?  See STAGE 6's own comments for the
-measurement and the decisive forcing-vs-substep-1 ratio.  STAGE 4/5's own
+or from a per-substep-recomputed term?  STAGE 6 measures the forcing and
+reports scalar norm comparisons as non-causal diagnostics only.  STAGE 4/5's own
 seed-attribution conclusion is NOT retracted here (it was a real, correctly-
 measured result AT e3t='off' -- just not the mode this repo's current best
 answer uses); it is superseded as the operative e3t=both story, not deleted.
@@ -72,7 +72,7 @@ constructed by the depth-averaging operator, and (B) is exonerated.
 
 Targets the WORST remaining fidelity row, ``dyn_spg_ts puu_b`` (|x|ratio
 0.9872 -- the largest unexplained gap on the board), plus its siblings
-``un_adv`` (0.9916) and ``pssh`` (0.9986).  The decisive question: is the
+``un_adv`` (0.9916) and ``pssh`` (0.9986).  The ordering question: is the
 error already present after substep 1 (a per-substep TRANSCRIPTION bug), or
 does it grow over the ~68 substeps (an ACCUMULATION problem -- substep count,
 filter weights, or final averaging)?
@@ -136,6 +136,7 @@ Run::
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import os
 import re
 
@@ -355,15 +356,28 @@ def main() -> int:
         f"icycle={icycle} != 3*nn_e-1={3*nn_e-1} -- nn_bt_flt=2 boxcar window-edge "
         "assumption violated, re-derive the substep count before trusting anything below")
 
-    # --- Build the legoESM twin state from the SAME restart NEMO's dumps came from
+    # --- Build the legoESM twin state from the SAME restart NEMO's dumps came from.
+    # Resolve the production card before bridging because the current
+    # nemo_literal TKE closure consumes NEMO's native T-point latitude.
+    cfg = dataclasses.replace(dino_config_for_recipe("nemo_dino_kamm_mlf"),
+                               lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)
     g = read_nemo_mesh_mask(os.path.join(RUN_DIR, "mesh_mask.nc"), nn_hls=0)
     s = read_nemo_restart(os.path.join(RUN_DIR, RESTART_FILE), nn_hls=0)
-    br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True)
+    _bridge_kwargs = {
+        "periodic_i": True,
+        "full_step": True,
+        "omega": cfg.omega,
+        "coriolis_placement": cfg.coriolis_placement,
+    }
+    if "carry_native_lat_deg" in inspect.signature(bridge_nemo_to_legoesm_topo).parameters:
+        _bridge_kwargs["carry_native_lat_deg"] = (
+            getattr(cfg, "tke_htau_evaluation", None) == "nemo_literal"
+            or getattr(cfg, "gm_treguier_final_evaluation", None) == "nemo_literal"
+        )
+    br = bridge_nemo_to_legoesm_topo(g, s, **_bridge_kwargs)
     before = read_nemo_restart_before(os.path.join(RUN_DIR, RESTART_FILE), nn_hls=0)
     st = bridge_before_state_topo(br._replace(state=br.state), g, before, periodic_i=True)
 
-    cfg = dataclasses.replace(dino_config_for_recipe("nemo_dino_kamm_mlf"),
-                               lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)
     mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
     require_fp64(br.geometry, br.z_coord, st, context="spg_substep_chain twin state")
 
@@ -802,32 +816,12 @@ def main() -> int:
           "same weights, :2890). No mismatch found -- THE RULE: exact match, "
           "no invented correction.")
 
-    # --- STAGE 7 item (3): is 8.03e-3 quantitatively consistent with the
-    # depth-mean of the known 3-D trend-error rows (dyn_ldf 3.9e-3, dyn_vor EEN
-    # 1.2e-3, dyn_adv ZAD 4.9e-3, dyn_cor_2d 1.2e-3)? Only meaningful if STAGE
-    # 7's static-weight test does NOT collapse the error (i.e. RHS-side, not
-    # weight-side) -- reported unconditionally as a magnitude sanity check,
-    # NOT asserted as a match (no NEMO per-term 3-D dump was read here to
-    # verify the individual level-by-level RHS agreement; this is a
-    # plausibility check on ROOT-SUM-SQUARE magnitude only).
-    _known_rows_rss = float(np.sqrt(3.9e-3**2 + 1.2e-3**2 + 4.9e-3**2 + 1.2e-3**2))
-    print(f"\nSTAGE 7 item 3 (magnitude plausibility ONLY, not a per-level "
-          f"verification): RSS of known 3-D trend-error rows "
-          f"(dyn_ldf 3.9e-3, dyn_vor EEN 1.2e-3, dyn_adv ZAD 4.9e-3, "
-          f"dyn_cor_2d 1.2e-3) = {_known_rows_rss:.4e} vs zu_frc's established "
-          f"8.03e-3 -- {'CONSISTENT-MAGNITUDE' if abs(_known_rows_rss-8.03e-3) < 3e-3 else 'NOT closely matched'} "
-          "(this is NOT proof of a shared root cause -- would need per-level "
-          "correlation of the actual du_dt error field against each term's own "
-          "error field, not run here).")
+    print("\nSTAGE 7 item 3: WITHDRAWN -- the former hard-coded RSS comparison "
+          "mixed historical row values with this run's live forcing score and "
+          "did not localize an operand.")
 
-    print("\nSTAGE 4 VERDICT: if e_u3d_before/e_v3d_before (the raw 3-D before-level "
-          "velocity, direct restart comparison, no depth-averaging involved at all) "
-          "is already at the ~2-3e-2 err_norm level seen at the STAGE-1 seed, the "
-          "error is INHERITED at the bridge/restart-read step -- attribution (A), "
-          "the depth-averaging operator is exonerated. If e_u3d_before/"
-          "e_v3d_before is CLEAN (near roundoff) while the STAGE-1 seed still shows "
-          "~2-3e-2, the averaging/weighting itself introduces the error -- "
-          "attribution (B).")
+    print("\nSTAGE 4 INPUT/SEED CHECK: compare the live 3-D before-level receipt "
+          "and live depth-mean seed without importing historical magnitudes.")
     print(f"  e_u3d_before={e_u3d_before:.4e}  e_v3d_before={e_v3d_before:.4e}  "
           f"(cf. STAGE-1 seed: e_uninit={e_uninit:.4e}  e_vninit={e_vninit:.4e})")
 
@@ -854,30 +848,16 @@ def main() -> int:
           f"final(pvv_b)={e_pvv:.4e}")
     print(f"  ssh    : loop-entry seed={0.0:.4e}  substep-1={e_ssh_s1:.4e}  "
           f"final(pssh)={e_pssh:.4e}")
-    print("The u/v error is ALREADY 2.3-3.0e-2 at the LOOP-ENTRY SEED, i.e. "
-          "BEFORE the substep loop runs even once, and stays essentially FLAT "
-          "(2.3e-2 -> 2.3e-2 -> 3.1e-2) from seed -> substep-1 -> final. This "
-          "is NOT accumulation (an accumulation signature would need a clean "
-          "seed/substep-1 and a large final gap) -- the defect is already "
-          "present in the loop-ENTRY SEED itself (the depth-mean of the "
-          "before-level 3-D velocity, i.e. barotropic_seed_face_depth/the "
-          "before-level bridge), before dyn_spg_ts's substep recurrence ever "
-          "runs. ssh has NO such defect (0 at seed, 7.6e-4 at substep-1, "
-          "4.3e-3 final) -- the residual is velocity-specific, not a shared "
-          "ssh/eta problem, which points at the U/V depth-mean construction "
-          "specifically (the before-level 3-D-to-2-D reduction), not the "
-          "eta continuity/PGF chain.")
-    print(f"\nSTAGE 4 RESULT (this iteration): e_u3d_before={e_u3d_before:.4e}  "
-          f"e_v3d_before={e_v3d_before:.4e} -- the 3-D before-level velocity "
-          "(state.u_before/v_before) is BIT-IDENTICAL to NEMO's restart ub/vb "
-          "at EVERY level (0.0000e+00 err_norm, 35/35 levels, both components) "
-          "-- see the per-level table above. The bridge does nothing but a "
-          "Neumann-fill + C-grid face relabel to this array, so the INPUT to "
-          "the depth-average is proven correct. Yet the depth-MEAN of that "
-          "same exact input (STAGE-1 seed, e_uninit/e_vninit) is already "
-          f"{e_uninit:.4e}/{e_vninit:.4e}. This is a CLEAN, unambiguous "
-          "attribution to (B): the averaging/weighting -- NOT (A) the 3-D "
-          "velocity -- introduces the seed error. (A) is EXONERATED.")
+    if max(e_uninit, e_vninit) <= 1.0e-12:
+        print("The loop-entry U/V seed is MATCHED at the accumulation bar; "
+              "no seed defect is present to attribute. Divergence begins in a "
+              "later operand/output.")
+    elif max(e_u3d_before, e_v3d_before) <= 1.0e-12:
+        print("The 3-D before-level receipt is clean but the depth-mean seed is "
+              "not; this localizes the seed divergence to the averaging path.")
+    else:
+        print("The 3-D before-level receipt is already divergent; the seed "
+              "cannot localize the defect to averaging.")
 
     # =========================================================================
     # STAGE 5 (this iteration): the (B) denominator -- WET LEVEL COUNT at the
@@ -1059,7 +1039,10 @@ def main() -> int:
         print(f"\n  PAYOFF RESULT: seed err_norm with legoESM weights = "
               f"{e_uninit:.4e}/{e_vninit:.4e} (u/v)  ->  with NEMO's own "
               f"e3u_0*umask/e3v_0*vmask weights = {e_u_payoff:.4e}/{e_v_payoff:.4e} (u/v).")
-        if e_u_payoff < 1e-6 and e_v_payoff < 1e-6:
+        if max(e_uninit, e_vninit) <= 1.0e-12:
+            print("  SEED ALREADY MATCHED -- the NEMO-weighted payoff is a "
+                  "redundant roundoff check and makes no ownership claim.")
+        elif e_u_payoff < 1e-6 and e_v_payoff < 1e-6:
             print("  COLLAPSED TO ROUNDOFF -- the weighting/wet-level-count DOES "
                   "own the seed error; STAGE 5's (1a)/(1c) count-diff localisation "
                   "IS the exact defect.")
@@ -1080,20 +1063,12 @@ def main() -> int:
           "the reconciled, e3t-mode-explicit measurement.")
 
     # =========================================================================
-    # STAGE 6 (this iteration): re-run the decisive seed/substep-1/final chain
-    # UNDER THE EXPLICIT e3t MODE PRECONDITION, and test the slow-forcing
-    # hypothesis directly: is zu_frc/zv_frc/ssh_frc (computed ONCE before the
-    # loop, dynspg_ts.F90:341-495, and added identically every substep at
-    # :802-812/831 "ua_e(ji,jj) = ... + zu_frc(ji,jj)") wrong by the same
-    # ~2.97e-04 (in the same err_norm units) that the substep-1 measurement
-    # already shows?  A linear-in-substep-count error (67.2x over 68 substeps)
-    # is exactly the signature of a constant per-substep addend being
-    # slightly wrong -- and zu_frc/zv_frc/ssh_frc ARE the only per-substep
-    # additive terms held constant across the whole jn=1..icycle loop (the
-    # SSH-gradient zu_spg and Coriolis+drag zu_trd terms are recomputed EVERY
-    # substep from the evolving un_e/ssh_e state, so they cannot themselves
-    # be "the same constant added 68 times" -- only zu_frc/zv_frc/ssh_frc fit
-    # that description; see the module docstring's substep-body term list).
+    # STAGE 6 (this iteration): re-run the seed/substep-1/final chain UNDER THE
+    # EXPLICIT e3t MODE PRECONDITION and measure the slow forcing assembled
+    # before the loop.  zu_frc/zv_frc are reused within the substep loop, while
+    # pressure-gradient, Coriolis, and drag depend on evolving state.  Scalar
+    # error-norm comparisons cannot preserve vector direction or cancellation,
+    # so they are descriptive only and do not assign causal ownership.
     print("\n" + "=" * 78)
     print("=== STAGE 6: slow-forcing (zu_frc/zv_frc/ssh_frc) direct measurement ===")
     print(f"    (LEGOESM_NEMO_E3T={e3t_mode!r})")
@@ -1133,7 +1108,7 @@ def main() -> int:
           "(near 1.0 -> seam-concentrated; near 0 -> spread through the interior, "
           "i.e. more consistent with a uniform per-column bug than a boundary artifact)")
 
-    # --- STAGE 6b: THE DECISIVE ARITHMETIC.  zu_frc/zv_frc carry UNITS of
+    # --- STAGE 6b: unit-consistent magnitude arithmetic.  zu_frc/zv_frc carry UNITS of
     # [m/s^2] (a momentum-trend forcing, dynspg_ts.F90:341-345 SUM(e3u*puu)*
     # r1_hu); ub_substep1/un_e carry units of [m/s].  A bare err_norm-to-
     # err_norm ratio conflates the two different physical quantities and is
@@ -1156,98 +1131,62 @@ def main() -> int:
           f"{rDt_e * float(captured['n_substeps']):.3f} should be 2*DT={2 * DT:.1f})")
     diff_zufrc_rms = e_zufrc * float(np.sqrt(np.mean(nemo_zu_frc[umask2] ** 2)))
     diff_zvfrc_rms = e_zvfrc * float(np.sqrt(np.mean(nemo_zv_frc[vmask2] ** 2)))
-    predicted_u_s1_from_forcing = rDt_e * diff_zufrc_rms / float(np.sqrt(np.mean(nemo_un_init[umask2] ** 2)))
-    predicted_v_s1_from_forcing = rDt_e * diff_zvfrc_rms / float(np.sqrt(np.mean(nemo_vn_init[vmask2] ** 2)))
+    scaled_forcing_u_norm = rDt_e * diff_zufrc_rms / float(np.sqrt(np.mean(nemo_un_init[umask2] ** 2)))
+    scaled_forcing_v_norm = rDt_e * diff_zvfrc_rms / float(np.sqrt(np.mean(nemo_vn_init[vmask2] ** 2)))
     print("\n" + "=" * 78)
-    print("=== STAGE 6b: THE DECISIVE ARITHMETIC (unit-consistent: rDt_e * forcing-error, "
-          "same [m/s] normalisation as ub_substep1/vb_substep1) ===")
-    print(f"  predicted substep-1 err_norm from forcing alone (rDt_e*|zu_frc diff|/RMS(un_e)):"
-          f"  u={predicted_u_s1_from_forcing:.4e}  v={predicted_v_s1_from_forcing:.4e}")
+    print("=== STAGE 6b: MAGNITUDE-ONLY arithmetic (unit-consistent: rDt_e * "
+          "forcing-error norm, same [m/s] normalisation as ub_substep1/vb_substep1) ===")
+    print(f"  forcing-difference norm scaled by rDt_e (rDt_e*|zu_frc diff|/RMS(un_e)):"
+          f"  u={scaled_forcing_u_norm:.4e}  v={scaled_forcing_v_norm:.4e}")
     print(f"  MEASURED substep-1 err_norm (STAGE 2, same run)                              :"
           f"  u={e_ub_s1:.4e}  v={e_vb_s1:.4e}")
-    ratio_u = predicted_u_s1_from_forcing / e_ub_s1 if e_ub_s1 else float("nan")
-    ratio_v = predicted_v_s1_from_forcing / e_vb_s1 if e_vb_s1 else float("nan")
-    print(f"  ratio predicted/measured: u={ratio_u:.3f}  v={ratio_v:.3f}  "
-          "(near 1.0 -> the forcing error, propagated through ONE substep's own "
-          "rDt_e, quantitatively reproduces the measured substep-1 error -- the "
-          "forcing owns it; far from 1.0 -> forcing does not explain substep-1, "
-          "a per-substep-recomputed term must instead)")
-    FORCING_OWNS_THRESHOLD_LO, FORCING_OWNS_THRESHOLD_HI = 0.5, 2.0  # order-of-magnitude match band
-    forcing_is_clean = e_zufrc < 1e-8 and e_zvfrc < 1e-8
-    forcing_owns_it = (FORCING_OWNS_THRESHOLD_LO < ratio_u < FORCING_OWNS_THRESHOLD_HI)
-    if forcing_is_clean:
-        print("\n  VERDICT: forcing is CLEAN (roundoff-level err_norm) -- the slow-"
-              "forcing hypothesis is FALSIFIED. zu_frc/zv_frc are NOT the source "
-              "of the linear accumulation; a per-substep term (SSH gradient zu_spg, "
-              "Coriolis+drag zu_trd, or the ssh/velocity update itself) must be "
-              "introducing a small error EACH iteration instead.")
-    elif forcing_owns_it:
-        print(f"\n  VERDICT: the slow forcing OWNS the substep-1 error. Propagating "
-              f"zu_frc's own measured error through exactly ONE substep's rDt_e "
-              f"predicts err_norm={predicted_u_s1_from_forcing:.4e} (u), matching the "
-              f"independently measured substep-1 err_norm={e_ub_s1:.4e} to "
-              f"{ratio_u:.2f}x. Since zu_frc/zv_frc are frozen constants added "
-              "UNCHANGED every one of the 68 substeps (dynspg_ts.F90:802-808), this "
-              "SAME constant increment repeats every iteration -- exactly the "
-              "linear-accumulation signature (ratio 67.2 over 68 substeps) already "
-              "measured for the final error. The v-component check is reported "
-              f"alongside (ratio={ratio_v:.2f}) for completeness, though it is "
-              "noisier because vn_e_init's own RMS is small.")
-    else:
-        print(f"\n  VERDICT: forcing does NOT quantitatively explain substep-1 (ratio "
-              f"{ratio_u:.3f}/{ratio_v:.3f}, outside the 0.5-2x match band) -- the "
-              "slow-forcing hypothesis is NOT confirmed by this measurement; a "
-              "per-substep-recomputed term is the more likely source instead.")
+    ratio_u = scaled_forcing_u_norm / e_ub_s1 if e_ub_s1 else float("nan")
+    ratio_v = scaled_forcing_v_norm / e_vb_s1 if e_vb_s1 else float("nan")
+    print(f"  scalar norm ratio (scaled forcing/substep-1): u={ratio_u:.3f}  v={ratio_v:.3f}  "
+          "(diagnostic only: scalar norm agreement discards vector direction and "
+          "cannot detect cancellation with pressure-gradient/Coriolis/drag errors)")
+    print("\n  NO CAUSAL VERDICT: the assembled forcing is independently DIVERGED, "
+          "but these norm ratios do not establish how much of the substep-output "
+          "difference it causes. A held-forcing counterfactual or vector "
+          "term-by-term residual is required.")
 
-    # --- STAGE 6c (only meaningful if forcing is clean -- run regardless for
-    # the record, since substep-1 state vs its NEMO dump is cheap and already
-    # measured in STAGE 2 above as e_ssh_s1/e_ub_s1/e_vb_s1): term-by-term
-    # accounting is NOT re-derived here (STAGE 2 already isolates substep 1's
+    # --- STAGE 6c: term-by-term accounting is NOT re-derived here (STAGE 2
+    # already isolates substep 1's
     # OUTPUT state; isolating which individual term -- zu_spg vs zu_trd vs
     # zu_frc -- caused it would need instrumenting each addend separately,
     # which is future work, not claimed here).
-    if not forcing_is_clean:
-        print("\n--- STAGE 6c: skipped (forcing hypothesis holds per 6b; no need to "
-              "search per-substep terms) ---")
-    else:
-        print("\n--- STAGE 6c: forcing falsified -- substep-1 state (already measured "
-              "in STAGE 2 above) is the next candidate. Per-substep terms in NEMO's "
-              "loop body (dynspg_ts.F90:591-916) that are recomputed EVERY jn (thus "
-              "candidates for a per-iteration bug, unlike the constant zu_frc/zv_frc):"
-              "\n    1. AB3-AM4 mid-step extrapolation (ua_e/va_e from un_e/ub_e/ubb_e, :610-616)"
-              "\n    2. SSH continuity update (ssha_e from sshn_e + flux divergence, :672-673)"
-              "\n    3. Back-interpolated SSH for the PGF, zsshp2_e (:747-749)"
-              "\n    4. Surface-pressure-gradient term zu_spg (:752-755)"
-              "\n    5. 2-D Coriolis zu_trd = dyn_cor_2D(ua_e,va_e) (:757), + tide (:770-774) "
-              "+ bottom drag zCdU_u*un_e*hur_e (:779-782)"
-              "\n    6. Velocity update ua_e = un_e + rDt_e*(zu_spg + zu_trd + zu_frc) (:802-808)"
-              f"\n  STAGE 2 above already measured the COMBINED substep-1 OUTPUT error "
-              f"(ub_substep1={e_ub_s1:.4e}, vb_substep1={e_vb_s1:.4e}, ssh_substep1="
-              f"{e_ssh_s1:.4e}) -- attributing it to ONE of terms 1-6 individually "
-              "would require dumping/comparing each addend separately (not done here; "
-              "flagged as follow-up, not claimed).")
+    print("\n--- STAGE 6c: term attribution remains UNMEASURED ---"
+          "\n    1. AB3-AM4 mid-step extrapolation (ua_e/va_e from un_e/ub_e/ubb_e, "
+          "cfgs/DINO/MY_SRC/dynspg_ts.F90:644-648)"
+          "\n    2. SSH continuity update (ssha_e from sshn_e + flux divergence, :722-725)"
+          "\n    3. Back-interpolated SSH for the PGF, zsshp2_e (:770-773)"
+          "\n    4. Surface-pressure-gradient term zu_spg/zv_spg (:776-780)"
+          "\n    5. 2-D Coriolis zu_trd/zv_trd (:784), tide (:810-817), and bottom drag "
+          "(:819-825)"
+          "\n    6. Vector velocity update (:838-850)"
+          f"\n  STAGE 2 measured only the COMBINED output error (ub_substep1={e_ub_s1:.4e}, "
+          f"vb_substep1={e_vb_s1:.4e}, ssh_substep1={e_ssh_s1:.4e}); no term "
+          "among 1-6 is assigned ownership here.")
 
-    # --- STAGE 6d: consistency check -- does per-substep-constant * 68
-    # explain the final error?
+    # --- STAGE 6d: shape-only norm-growth diagnostic.  Multiplying the first
+    # substep's scalar error norm by the substep count is not a propagation
+    # model: it discards vector direction, filtering, and state feedback.
     print("\n" + "=" * 78)
-    print("=== STAGE 6d: consistency check (linear-accumulation arithmetic) ===")
+    print("=== STAGE 6d: noncausal scalar norm-growth shape check ===")
     n_substeps_final = icycle
-    per_substep_u = e_ub_s1  # substep-1 error IS (by definition) 1x the per-substep increment
-    predicted_final_u = per_substep_u * n_substeps_final
-    frac_explained_u = predicted_final_u / e_puu if e_puu else float("nan")
-    per_substep_v = e_vb_s1
-    predicted_final_v = per_substep_v * n_substeps_final
-    frac_explained_v = predicted_final_v / e_pvv if e_pvv else float("nan")
+    scaled_first_u = e_ub_s1 * n_substeps_final
+    scaled_to_final_u = scaled_first_u / e_puu if e_puu else float("nan")
+    scaled_first_v = e_vb_s1 * n_substeps_final
+    scaled_to_final_v = scaled_first_v / e_pvv if e_pvv else float("nan")
     print(f"  u: substep-1 err_norm={e_ub_s1:.4e} x {n_substeps_final} substeps = "
-          f"{predicted_final_u:.4e}  vs measured final(puu_b)={e_puu:.4e}  "
-          f"-> fraction explained={frac_explained_u:.3f}")
+          f"{scaled_first_u:.4e}  vs measured final(puu_b)={e_puu:.4e}  "
+          f"-> scalar ratio={scaled_to_final_u:.3f}")
     print(f"  v: substep-1 err_norm={e_vb_s1:.4e} x {n_substeps_final} substeps = "
-          f"{predicted_final_v:.4e}  vs measured final(pvv_b)={e_pvv:.4e}  "
-          f"-> fraction explained={frac_explained_v:.3f}")
-    print("  (fraction near 1.0 -> linear accumulation from a per-substep-constant "
-          "error fully explains the final gap; far from 1.0 -> the growth is not "
-          "purely linear/constant-per-substep, or e3t_mode/normalisation differs "
-          "between this run's substep-1 and final measurements)")
+          f"{scaled_first_v:.4e}  vs measured final(pvv_b)={e_pvv:.4e}  "
+          f"-> scalar ratio={scaled_to_final_v:.3f}")
+    print("  NONCAUSAL SHAPE CHECK ONLY: near-one scalar ratios neither identify a "
+          "constant increment nor explain the final vector gap. A causal result "
+          "requires a held-term counterfactual or vector recurrence residual.")
 
     print("\n" + "=" * 78)
     print("STAGE 6 SUMMARY:")
@@ -1255,10 +1194,10 @@ def main() -> int:
     print(f"  forcing err_norm         : zu_frc={e_zufrc:.4e}  zv_frc={e_zvfrc:.4e}")
     print(f"  substep-1 err_norm       : ub_substep1={e_ub_s1:.4e}  vb_substep1={e_vb_s1:.4e}")
     print(f"  final err_norm           : puu_b={e_puu:.4e}  pvv_b={e_pvv:.4e}")
-    print(f"  forcing_is_clean={forcing_is_clean}  forcing_owns_it={forcing_owns_it}  "
-          f"ratio(predicted_from_forcing/measured_substep1)=u:{ratio_u:.3f} v:{ratio_v:.3f}  "
-          f"fraction_of_final_explained_by_linear(substep1*{n_substeps_final})="
-          f"u:{frac_explained_u:.3f} v:{frac_explained_v:.3f}")
+    print(f"  magnitude_ratio(scaled_forcing_norm/measured_substep1_norm), NONCAUSAL="
+          f"u:{ratio_u:.3f} v:{ratio_v:.3f}  "
+          f"noncausal_scalar_ratio((substep1_norm*{n_substeps_final})/final_norm)="
+          f"u:{scaled_to_final_u:.3f} v:{scaled_to_final_v:.3f}")
 
     return 0
 

@@ -1671,6 +1671,65 @@ class TestNemoRiZriTranscription:
                               jnp.asarray(kappaM), cfg)
         return np.asarray(Pr)
 
+    def test_literal_nemo_association_is_bit_exact_and_old_paths_are_red(self):
+        """Matched-step scalar whose algebraically equivalent paths differ.
+
+        The hexadecimal inputs make this a stable hand-computed fp64 case.
+        NEMO evaluates ``(rn2b*p_avm)/zdiv`` and then constructs ``pdlr``
+        literally before taking its reciprocal.  Multiplying by ``1/zdiv``
+        or collapsing the pdlr expression to a clipped product is one ulp
+        different on this case, so either historical shortcut turns red.
+        """
+        rn2b = np.asarray([
+            np.float64.fromhex("0x1.04fa0afaa6d02p-14"),
+            np.float64.fromhex("0x1.ffc95566895cap-15"),
+        ])
+        p_avm = np.asarray([
+            np.float64.fromhex("0x1.95141a74aca4ap-4"),
+            np.float64.fromhex("0x1.7d1cb254e6652p-4"),
+        ])
+        p_sh2 = np.asarray([
+            np.float64.fromhex("0x1.693ab8013e477p-16"),
+            np.float64.fromhex("0x1.9c874ac1cebd0p-16"),
+        ])
+        rn_bshear = np.float64(1.0e-20)
+        ri_cri = np.float64(2.0) / (
+            np.float64(2.0) + np.float64(0.7) / np.float64(0.1))
+
+        zdiv = p_sh2 + rn_bshear
+        zri = (rn2b * p_avm) / zdiv
+        pdlr = np.maximum(
+            np.float64(0.1), ri_cri / np.maximum(ri_cri, zri))
+        expected = np.float64(1.0) / pdlr
+
+        cfg = TKEConfig(
+            prandtl_mode="nemo_ri", bshear_floor=float(rn_bshear),
+            prandtl_ri_coeff=float(np.float64(1.0) / ri_cri),
+            tke_n2_evaluation_stage="step_entry")
+        got = np.asarray(_prandtl_number(
+            jnp.asarray(rn2b), jnp.ones(2), jnp.asarray(p_avm), cfg,
+            p_sh2_override=jnp.asarray(p_sh2)))
+        np.testing.assert_array_equal(got, expected)
+
+        reciprocal_first = rn2b * p_avm * (np.float64(1.0) / zdiv)
+        old_direct_pr = np.maximum(
+            np.float64(1.0), np.minimum(
+                np.float64(10.0),
+                (np.float64(1.0) / ri_cri) * zri))
+        old_legacy_pr = np.maximum(
+            np.float64(1.0), np.minimum(
+                np.float64(10.0),
+                (np.float64(1.0) / ri_cri) * reciprocal_first))
+        assert np.any(reciprocal_first != zri)
+        assert np.any(old_direct_pr != expected)
+        assert np.any(old_legacy_pr != expected)
+
+        legacy = cfg._replace(tke_n2_evaluation_stage="implicit_solve_state")
+        legacy_got = np.asarray(_prandtl_number(
+            jnp.asarray(rn2b), jnp.ones(2), jnp.asarray(p_avm), legacy,
+            p_sh2_override=jnp.asarray(p_sh2)))
+        np.testing.assert_array_equal(legacy_got, old_legacy_pr)
+
     def test_matches_independent_loop_port_turbulent_column(self):
         rng = np.random.default_rng(42)
         n = 25

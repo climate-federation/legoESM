@@ -18,6 +18,26 @@ from legoesm.grids.latlon import create_latlon_geometry
 from legoesm.ocean.dynamics.latlon_cgrid_operators import vertex_coriolis
 
 
+def test_no_recipe_selects_face_latitude_before_its_owner_is_exact():
+    """A selector-only arm is partial until the literal builder lands."""
+    from legoesm.ocean.experiments.dino import (
+        DINOConfig, DINO_RECIPES, dino_config_for_recipe)
+
+    assert DINOConfig().coriolis_placement == "cell_average"
+    selected = {
+        name for name in DINO_RECIPES
+        if dino_config_for_recipe(name).coriolis_placement == "face_latitude"
+    }
+    assert selected == set()
+
+
+def test_nonfaithful_recipe_keeps_the_cell_average_byte_pin():
+    from legoesm.ocean.experiments.dino import dino_config_for_recipe
+
+    assert dino_config_for_recipe(
+        "legoesm_default").coriolis_placement == "cell_average"
+
+
 def _pair(**kw):
     base = dict(n_lat=12, n_lon=4, omega=1.0e-4, dtype=jnp.float64)
     base.update(kw)
