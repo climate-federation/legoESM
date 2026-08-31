@@ -1841,8 +1841,9 @@ def _bc_ke_and_pressure_gradients(
             dp_dx = dp_dx_smc.astype(dp_dx.dtype)
             dp_dy = dp_dy_smc.astype(dp_dy.dtype)
         elif pgf_scheme == "nemo_sco":
-            # NEMO ``hpg_sco`` (dynhpg.F90 5.0.1:340-390, the DINO namdyn_hpg
-            # selection) transcribed for the full-step staircase under qco.
+            # NEMO ``hpg_sco`` (NEMO 5.0.2 dynhpg.F90:340-390; selected by
+            # ln_hpg_sco through dynhpg.F90:117-123, distinct from hpg_djc)
+            # transcribed for the full-step staircase under qco.
             # Conventions: depth positive DOWN, ``p' = +g·∫ρ' dz``; the u-trend
             # applied downstream is ``-(1/ρ0)·dp_dx`` (KE_PGF assembly), so
             # NEMO's trend = zhpi + zuap maps to

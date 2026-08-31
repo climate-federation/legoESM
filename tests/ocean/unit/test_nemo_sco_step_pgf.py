@@ -5,7 +5,7 @@ discrete pressure force at topography-adjacent u-faces (channel wall pgf
 NEMO +0.586e9 vs legoESM −0.816e9 m^4/s^2 — a sign flip — while interior pgf
 matched to 1.5%).  Root cause: the legacy ``adcroft`` PGF on the masked-zco
 staircase is the eta=0 along-level gradient ONLY; NEMO ``hpg_sco``
-(dynhpg.F90 5.0.1:340-390, the DINO ``namdyn_hpg`` selection) additionally
+(NEMO 5.0.2 dynhpg.F90:340-390, selected at :117-123) additionally
 carries the qco ``(1+r3t)`` thickness stretch of the hydrostatic integral
 and the ``gdept_z0`` slope-correction term (zuap) — the eta-proportional
 terms that transmit the discrete topographic form stress at steps.
@@ -212,7 +212,7 @@ def test_f90_recurrence_oracle_nonuniform_rho():
     AND k), unequal step depths and nonzero eta (codex r3 MED): the uniform-
     rho' telescope tests cannot catch a vertical-weight/pairing error that
     preserves the free-surface identity.  Here zhpi+zuap is transliterated
-    from dynhpg.F90 5.0.1:340-390 + the qco macros — surface formula,
+    from NEMO 5.0.2 dynhpg.F90:340-390 + the qco macros — surface formula,
     (rhd(k)+rhd(k-1)) pairing, per-column (1+r3t) e3w stretch, gdept_z0
     slope term, below-seafloor rhd mask, and the metric division — and every
     wet u/v face/level must match the model's KE_PGF to roundoff."""
@@ -316,6 +316,10 @@ def test_eta_zero_reduces_to_adcroft_bitwise():
                        np.asarray(diag.KE_PGF_v.data))
     np.testing.assert_array_equal(out["nemo_sco"][0], out["adcroft"][0])
     np.testing.assert_array_equal(out["nemo_sco"][1], out["adcroft"][1])
+    # Level-isopycnal qco rest control, not merely agreement between two
+    # potentially wrong schemes: the PGF itself must vanish on every face.
+    assert np.max(np.abs(out["nemo_sco"][0])) == 0.0
+    assert np.max(np.abs(out["nemo_sco"][1])) == 0.0
 
 
 def test_staircase_rest_stays_at_rest():

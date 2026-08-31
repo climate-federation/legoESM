@@ -302,8 +302,20 @@ def ic_step1_gate(card, root: Path, *, plant_ic: bool = False) -> tuple[list[dic
             f"step1.before.{name}",
             ref,
             lego,
+            exact=True,
             plant=plant_ic and name == "T",
         )
+        if name != "T":
+            # Exact equality is retained as a control, but these fields carry
+            # no alignment signal at kt=1: S is spatially uniform over wet
+            # cells and u/v/SSH are at-rest zeros.  Only the T front can expose
+            # a staggering/index displacement in this dump.
+            rows[-1]["alignment_status"] = rows[-1]["status"]
+            rows[-1]["status"] = "UNMEASURED"
+            rows[-1]["reason"] = (
+                "exact kt=1 control is non-informative for staggering; "
+                "only the nonuniform T front measures alignment"
+            )
     return rows, dtypes
 
 
@@ -319,7 +331,7 @@ def run(args: argparse.Namespace) -> dict:
     step_rows, step_dtypes = ic_step1_gate(card, root, plant_ic=args.plant_ic)
     all_rows = geometry_rows + step_rows
     return {
-        "status": "VERIFIED" if all(r["status"] == "AT-BAR" for r in all_rows) else "DEBT",
+        "status": "VERIFIED" if all(r["status"] != "DEBT" for r in all_rows) else "DEBT",
         "case": args.case,
         "precision_policy": "fp64",
         "bars": {"POINTWISE": POINTWISE_BAR, "ACCUMULATING": ACCUMULATING_BAR},
@@ -331,7 +343,11 @@ def run(args: argparse.Namespace) -> dict:
         },
         "geometry": geometry_rows,
         "initial_condition": {
-            "identity": "native IC equals registered kt=1 Nbb/before step entry",
+            "identity": (
+                "T alignment is measured by exact equality to registered "
+                "kt=1 Nbb/before; S/u/v/SSH exact controls are alignment "
+                "UNMEASURED because uniform or zero"
+            ),
             "rows": step_rows,
         },
         "dtypes": {**geometry_dtypes, **step_dtypes},

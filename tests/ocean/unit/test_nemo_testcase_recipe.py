@@ -3,6 +3,7 @@ import numpy as np
 import pytest
 
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+import legoesm.ocean.fidelity.nemo_testcase_recipe as testcase_recipe
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     build_lock_exchange_zco_card,
     build_nemo_testcase_card,
@@ -27,7 +28,8 @@ def _restore_precision():
 def test_nemo_testcase_cards_are_fp64_source_pinned(
     builder, shape, nlev, dt, cold, warm
 ):
-    set_policy(PrecisionPolicy.fp32())
+    # The harness owns policy selection; cards merely honor the active policy.
+    set_policy(PrecisionPolicy.fp64())
     card = builder()
     recipe = card.recipe
     state = recipe.initial_state
@@ -65,7 +67,15 @@ def test_nemo_testcase_cards_are_fp64_source_pinned(
     assert cfg.momentum_advection == "flux_form"
     assert cfg.momentum_flux_scheme == "upwind3"
     assert cfg.momentum_time_integrator == "rk3_ws"
+    assert cfg.pgf_scheme == "nemo_sco"
+    assert cfg.pgf_quadrature == "nemo_trapezoid"
     assert cfg.adaptive_implicit_vertadv
+
+
+def test_card_builder_does_not_mutate_precision_policy():
+    set_policy(PrecisionPolicy.fp32())
+    build_lock_exchange_zco_card()
+    assert get_policy() == PrecisionPolicy.fp32()
 
 
 def test_testcase_cards_pin_the_certified_bbl_selectors():
@@ -91,13 +101,24 @@ def test_nemo_testcase_dispatch_rejects_unknown_case():
         build_nemo_testcase_card("OVERFLOW-sco")
 
 
+def test_nemo_testcase_dispatch_does_not_hide_builder_keyerror(monkeypatch):
+    def broken_builder():
+        raise KeyError("internal-card-defect")
+
+    monkeypatch.setattr(testcase_recipe, "build_overflow_zps_card", broken_builder)
+    with pytest.raises(KeyError, match="internal-card-defect"):
+        testcase_recipe.build_nemo_testcase_card("OVERFLOW-zps")
+
+
 def test_nemo_tpoint_bottom_rule_is_selectable_and_unsnapped():
     from legoesm.ocean.vertical import (
         create_partial_cell_coordinate,
         create_z_star_from_thicknesses,
     )
 
-    z_ref = create_z_star_from_thicknesses(jnp.full((3,), 20.0))
+    z_ref = create_z_star_from_thicknesses(
+        jnp.full((3,), 20.0), t_depth_ref_m=jnp.asarray([10.0, 30.0, 50.0])
+    )
     depth = jnp.asarray([[39.9999, 40.0001, 50.0]])
     legacy = create_partial_cell_coordinate(z_ref, depth)
     nemo = create_partial_cell_coordinate(
@@ -110,3 +131,28 @@ def test_nemo_tpoint_bottom_rule_is_selectable_and_unsnapped():
     assert float(nemo.h_partial[0, 2, 1]) == 20.0
     with pytest.raises(ValueError, match="bottom_index_rule"):
         create_partial_cell_coordinate(z_ref, depth, bottom_index_rule="average")
+
+
+def test_nemo_tpoint_requires_explicit_t_depth_on_stretched_grid():
+    from legoesm.ocean.vertical import (
+        create_partial_cell_coordinate,
+        create_z_star_from_thicknesses,
+    )
+
+    # Midpoints are [5, 20, 45] m, whereas the external T points are
+    # [5, 25, 50] m.  At H=22 m the midpoint fallback would silently choose
+    # bottom level 1 while NEMO's actual T-point rule chooses level 0.
+    depth = jnp.asarray([[22.0]])
+    missing = create_z_star_from_thicknesses([10.0, 20.0, 30.0])
+    with pytest.raises(ValueError, match="requires an explicit t_depth_ref"):
+        create_partial_cell_coordinate(
+            missing, depth, bottom_index_rule="nemo_tpoint"
+        )
+
+    pinned = create_z_star_from_thicknesses(
+        [10.0, 20.0, 30.0], t_depth_ref_m=[5.0, 25.0, 50.0]
+    )
+    nemo = create_partial_cell_coordinate(
+        pinned, depth, bottom_index_rule="nemo_tpoint"
+    )
+    assert int(nemo.bottom_level[0, 0]) == 0

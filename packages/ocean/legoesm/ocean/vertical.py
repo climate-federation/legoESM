@@ -741,7 +741,9 @@ def create_partial_cell_coordinate(
         ``k_bot`` from ``pdept_1d(k) < H <= pdept_1d(k+1)`` and then clip the
         bottom thickness at the reference bottom interface.  The latter also
         retains near-full last-bit thicknesses instead of applying legoESM's
-        legacy near-full snap.
+        legacy near-full snap.  It requires an explicit ``z_coord.t_depth_ref``;
+        no arithmetic-midpoint fallback is allowed because that changes
+        ``k_bot`` on stretched external grids.
 
     Returns
     -------
@@ -772,15 +774,16 @@ def create_partial_cell_coordinate(
     # down, exactly as usrdef_zgr.F90:140-143/157-160 executes.
     n_lead = H.ndim
     H_exp = H[..., jnp.newaxis]                     # (..., 1)
-    index_depths = (
-        jnp.abs(
-            z_coord.t_depth_ref
-            if z_coord.t_depth_ref is not None
-            else z_coord.z_full_ref
-        )
-        if bottom_index_rule == "nemo_tpoint"
-        else abs_z_half
-    )
+    if bottom_index_rule == "nemo_tpoint":
+        if z_coord.t_depth_ref is None:
+            raise ValueError(
+                'bottom_index_rule="nemo_tpoint" requires an explicit '
+                "t_depth_ref; an arithmetic-midpoint fallback can select "
+                "the wrong NEMO bottom level on a stretched grid"
+            )
+        index_depths = jnp.abs(z_coord.t_depth_ref)
+    else:
+        index_depths = abs_z_half
     interfaces_above = jnp.sum(
         index_depths[(jnp.newaxis,) * n_lead + (slice(None),)] < H_exp,
         axis=-1,

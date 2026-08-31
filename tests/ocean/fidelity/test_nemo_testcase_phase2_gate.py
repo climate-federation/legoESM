@@ -64,3 +64,16 @@ def test_testcase_kt1_dump_is_registered_before():
     from legoesm.ocean.fidelity.time_levels import time_level_for_dump
 
     assert time_level_for_dump("oracle_step_entry_kt00000001.bin") == "before"
+
+
+@pytest.mark.parametrize("case", sorted(gate.ROOTS))
+def test_kt1_rows_are_exact_but_only_temperature_measures_alignment(case):
+    card = gate._card(case)
+    rows, _ = gate.ic_step1_gate(card, gate.ROOTS[case])
+    by_name = {row["name"].rsplit(".", 1)[-1]: row for row in rows}
+    assert by_name["T"]["bar"] == 0.0
+    assert by_name["T"]["status"] == "AT-BAR"
+    for name in ("S", "u", "v", "ssh"):
+        assert by_name[name]["bar"] == 0.0
+        assert by_name[name]["alignment_status"] == "AT-BAR"
+        assert by_name[name]["status"] == "UNMEASURED"

@@ -13,7 +13,6 @@ from typing import NamedTuple
 import jax.numpy as jnp
 import numpy as np
 
-from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.grids.latlon import create_beta_plane_cgrid_geometry
 from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
 from legoesm.ocean.fidelity.nemo_recipe import NEMORecipe
@@ -52,7 +51,10 @@ def _model_config() -> LatLonCGridOceanConfig:
         momentum_flux_scheme="upwind3",
         momentum_time_integrator="rk3_ws",
         vertical_momentum_scheme="nemo_advective",
-        pgf_scheme="smc03",
+        # NEMO 5.0.2 dynhpg.F90:117-123 dispatches ln_hpg_sco (the resolved
+        # value on both cards) to hpg_sco, not hpg_djc.  The canonical
+        # nemo_sco option transcribes its recurrence at :340-390.
+        pgf_scheme="nemo_sco",
         pgf_quadrature="nemo_trapezoid",
         barotropic_solver="explicit_substep",
         barotropic_time_filter="cosine",
@@ -126,7 +128,6 @@ def _native_initial_state(
 def build_lock_exchange_zco_card() -> NEMOTestcaseCard:
     """Certified LOCK_EXCHANGE: 64 km x 20 m, flat full-step z coordinate."""
 
-    set_policy(PrecisionPolicy.fp64())
     grid = _cartesian_grid(130, 500.0)
     x_km = jnp.broadcast_to(
         jnp.asarray((np.arange(130, dtype=np.float64) - 0.5) * 0.5)[None, :],
@@ -134,7 +135,10 @@ def build_lock_exchange_zco_card() -> NEMOTestcaseCard:
     )
     wet = _closed_box_mask(3, 130)
     bathymetry = wet * 20.0
-    z_ref = create_z_star_from_thicknesses(jnp.full((20,), 1.0))
+    z_ref = create_z_star_from_thicknesses(
+        jnp.full((20,), 1.0),
+        t_depth_ref_m=np.arange(20, dtype=np.float64) + 0.5,
+    )
     bottom = jnp.where(wet > 0.0, 19, -1)
     z_coord = create_full_step_coordinate(z_ref, bottom)
     state = _native_initial_state(
@@ -157,7 +161,6 @@ def build_lock_exchange_zco_card() -> NEMOTestcaseCard:
 def build_overflow_zps_card() -> NEMOTestcaseCard:
     """Certified OVERFLOW: tanh bathymetry with z partial bottom cells."""
 
-    set_policy(PrecisionPolicy.fp64())
     grid = _cartesian_grid(202, 1000.0)
     wet = _closed_box_mask(3, 202)
     # Static source geometry: evaluate with host fp64 libm, matching the NEMO
@@ -173,7 +176,10 @@ def build_overflow_zps_card() -> NEMOTestcaseCard:
     )
     depth = jnp.broadcast_to(jnp.asarray(depth_1d)[None, :], (3, 202))
     bathymetry = jnp.where(wet > 0.0, depth, 0.0)
-    z_ref = create_z_star_from_thicknesses(jnp.full((100,), 20.0))
+    z_ref = create_z_star_from_thicknesses(
+        jnp.full((100,), 20.0),
+        t_depth_ref_m=10.0 + 20.0 * np.arange(100, dtype=np.float64),
+    )
     z_coord = create_partial_cell_coordinate(
         z_ref, bathymetry, bottom_index_rule="nemo_tpoint"
     )
@@ -206,12 +212,11 @@ def build_nemo_testcase_card(case: str) -> NEMOTestcaseCard:
         "LOCK_EXCHANGE-zco": build_lock_exchange_zco_card,
         "OVERFLOW-zps": build_overflow_zps_card,
     }
-    try:
-        return builders[case]()
-    except KeyError as exc:
+    if case not in builders:
         raise ValueError(
             f"unknown NEMO testcase {case!r}; expected one of {sorted(builders)}"
-        ) from exc
+        )
+    return builders[case]()
 
 
 __all__ = (
