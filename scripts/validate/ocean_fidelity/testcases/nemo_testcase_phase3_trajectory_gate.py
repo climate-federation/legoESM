@@ -193,7 +193,9 @@ def run(case: str, oracle_root: Path, max_step: int, *, plant=False) -> dict:
         "oracle_root": str(oracle_root),
         "selectors": {
             "eos": cfg.eos,
+            "eos_depth": cfg.eos_depth,
             "barotropic_time_filter": cfg.barotropic.barotropic_time_filter,
+            "n_barotropic_substeps": cfg.barotropic.n_barotropic_substeps,
             "vertical_momentum_scheme": cfg.vertical_momentum_scheme,
             "tracer_time_integrator": cfg.tracer_time_integrator,
         },

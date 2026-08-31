@@ -50,6 +50,9 @@ def _model_config(
         # Resolved ln_TEOS10=.true.; NEMO 5.0.2 eosbn2.F90:1920-2108
         # selects the Roquet TEOS-10 coefficient table and :260-288 evaluates it.
         eos="nemo_teos10",
+        # eosbn2.F90:253-258 passes the live geometric gdept to the polynomial;
+        # do not recover depth from legoESM's iterated in-situ pressure.
+        eos_depth="geometric",
         tracer_advection="fct2",
         # NEMO key_RK3: stprk3_stg.F90:112-249,519-559 restarts tracer
         # stages from Kbb with dt/3, dt/2, and dt.

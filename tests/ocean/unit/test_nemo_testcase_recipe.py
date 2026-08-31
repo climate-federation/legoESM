@@ -63,6 +63,7 @@ def test_nemo_testcase_cards_are_fp64_source_pinned(
 
     cfg = recipe.model_config
     assert cfg.eos == "nemo_teos10"
+    assert cfg.eos_depth == "geometric"
     assert cfg.tracer_advection == "fct2"
     assert cfg.momentum_advection == "flux_form"
     assert cfg.momentum_flux_scheme == "upwind3"

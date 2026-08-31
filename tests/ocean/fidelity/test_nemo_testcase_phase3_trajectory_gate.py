@@ -45,3 +45,13 @@ def test_empty_structural_face_is_loud_unmeasured_but_nonzero_still_red():
         "v", zeros, np.array([1.0, 0.0]), empty,
         allow_empty_no_active_face=True)
     assert nonzero["status"] == "DEBT"
+
+
+def test_report_selector_inventory_includes_eos_depth_and_resolved_substeps():
+    """The trajectory receipt must expose both post-review card corrections."""
+    # Full ``run`` coverage lives in the science invocation because constructing
+    # the card is the expensive part.  Keep this direct source-inventory guard
+    # independent so deleting either provenance field fails on CPU-only CI.
+    source = GATE_PATH.read_text()
+    assert '"eos_depth": cfg.eos_depth' in source
+    assert '"n_barotropic_substeps": cfg.barotropic.n_barotropic_substeps' in source
