@@ -45,7 +45,7 @@ from legoesm.ocean.fidelity.nemo_io import (
 )
 
 
-SCHEMA = "dino_ic_euler_peel_v7"
+SCHEMA = "dino_ic_euler_peel_v8"
 BAR = 1.0e-15
 RUNTIME_SHAPE = (203, 56)
 RUNTIME_HALO = 2
@@ -469,6 +469,9 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
     def _cold_impl(st, ext_rate, apply_vmix):
         n2_bundle = model._tke_step_entry_n2_bundle(
             st, z_coord=z_coord, config=model.config)
+        cold_config = model.config
+        if getattr(model.config, "cold_euler_surface_stress_implicit", False):
+            cold_config = model.config._replace(surface_stress_implicit=True)
         return model._step_impl(
             st, standalone.DT_SECONDS, surface_forcing=step_forcing,
             _apply_implicit_vmix=apply_vmix,
@@ -481,7 +484,7 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
             _return_cold_euler_fct_faces=True,
             _cold_nemo_euler=True,
             _apply_cold_start_after_reconcile=False,
-            z_coord=z_coord, config=model.config)
+            z_coord=z_coord, config=cold_config)
 
     pre_zdf, _pre_zdf_bundle = jax.jit(
         lambda st, ext_rate: _cold_impl(st, ext_rate, False))(entry, rate)
@@ -617,6 +620,12 @@ def _step_rows(run_kt2: Path, grid, cfg, z_coord, state, model,
             diff_row("POST_HOC_V_combined_zdf_vs_dynzdf",
                      _model_core(np.asarray(post_zdf.v.data)[1:, :, :]),
                      _runtime_dump(run_kt2 / "stp_dump_08_dynzdf_v.bin"), common_v),
+            diff_row("POST_HOC_U_before_mlf_baro_corr",
+                     _model_core(np.asarray(post_zdf.u.data)[:, 1:, :]),
+                     _runtime_dump(run_kt2 / "baro_dump_u_before.bin"), common_u),
+            diff_row("POST_HOC_V_before_mlf_baro_corr",
+                     _model_core(np.asarray(post_zdf.v.data)[1:, :, :]),
+                     _runtime_dump(run_kt2 / "baro_dump_v_before.bin"), common_v),
         ],
     }
     nemo_h_t, nemo_v_t, nemo_faces_t = _nemo_fct_rate_components(
@@ -836,6 +845,7 @@ def run(args: argparse.Namespace) -> int:
         "fct_dump_zwz_up_sal.bin", "fct_dump_zwx_anti_sal.bin",
         "fct_dump_zwy_anti_sal.bin", "fct_dump_zwz_anti_sal.bin",
         "stp_dump_21_trazdf_tem.bin", "stp_dump_21_trazdf_sal.bin",
+        "baro_dump_u_before.bin", "baro_dump_v_before.bin",
         "baro_dump_u_after.bin", "baro_dump_v_after.bin",
         "spg_dump_pssh_final.bin", "spg_dump_zu_frc.bin",
         "spg_dump_zv_frc.bin", "wnd_dump_zu_frc_inc.bin",
