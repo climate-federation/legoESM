@@ -21,6 +21,9 @@ import numpy as np
 import hpg_tendency_compare as hpg
 import standalone_20y as standalone
 from legoesm.core.precision import PrecisionPolicy, set_policy
+from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+    nemo_literal_depth_mean,
+)
 from legoesm.ocean.experiments.dino import apply_dino_lat_lon_surface_forcing
 from legoesm.ocean.fidelity.nemo_io import read_nemo_mesh_mask
 
@@ -65,6 +68,7 @@ def diff(name: str, actual, expected, mask) -> dict:
         "mismatch_count": int(np.count_nonzero(selected > BAR)),
         "status": "PASS" if not indices.size else "OVER_BAR",
         "first_over_bar": first,
+        "over_bar_indices": [list(map(int, index)) for index in indices[:64]],
     }
 
 
@@ -128,7 +132,7 @@ def capture_cold_step(model, state, forcing, step_forcing, z_coord, cfg):
         jax.lax.fori_loop = original_fori
     if "carries" not in captured or "loop" not in captured:
         raise RuntimeError("barotropic substep capture did not fire")
-    return captured
+    return captured, common
 
 
 def run(args: argparse.Namespace) -> int:
@@ -154,7 +158,7 @@ def run(args: argparse.Namespace) -> int:
      step_forcing, _perturbation) = standalone.build_standalone(0)
     state = state._replace(
         T=state.T.replace(data=nemo_t), S=state.S.replace(data=nemo_s))
-    captured = capture_cold_step(
+    captured, common = capture_cold_step(
         model, state, forcing, step_forcing, z_coord, cfg)
     loop = captured["loop"]
     carries = captured["carries"]
@@ -189,6 +193,35 @@ def run(args: argparse.Namespace) -> int:
              slow_forcing("spg_dump_zu_frc.bin"), umask),
         diff("slow_forcing_V", np.asarray(loop["F_slow_v"])[1:, :],
              slow_forcing("spg_dump_zv_frc.bin"), vmask),
+    ]
+    tendencies, diagnostics = model.tendencies_with_diagnostics(
+        common, step_forcing, dt=standalone.DT_SECONDS)
+    raw = z_coord.nemo_een_barotropic
+    vwet = raw.vmask[..., 0]
+    r1_hv = np.where(np.asarray(vwet) > 0.5, 1.0 / np.asarray(raw.hv_0), 0.0)
+
+    def literal_v(value) -> np.ndarray:
+        return np.asarray(nemo_literal_depth_mean(
+            np.asarray(value)[1:, :, :],
+            np.asarray(raw.e3v_0) * np.asarray(raw.vmask),
+            np.asarray(vwet), r1_hv))
+
+    h_v = np.asarray(raw.e3v_0) * np.asarray(raw.vmask)
+    nemo_hpg_v = np.sum(
+        hpg.read_dump(str(run_dir / "hpg_dump_dv.bin"), 35, 203, 56)[
+            edge:-edge, edge:-edge, :] * h_v,
+        axis=-1) * r1_hv
+    nemo_wind_v = slow_forcing("wnd_dump_zv_frc_inc.bin")
+    rows[2:2] = [
+        diff("slow_forcing_V_HPG_component",
+             literal_v(diagnostics.KE_PGF_v.data), nemo_hpg_v, vmask),
+        diff("slow_forcing_V_wind_component",
+             literal_v(diagnostics.surface_stress_v.data), nemo_wind_v,
+             vmask),
+        diff("slow_forcing_V_component_sum_closure",
+             literal_v(diagnostics.KE_PGF_v.data)
+             + literal_v(diagnostics.surface_stress_v.data),
+             np.asarray(loop["F_slow_v"])[1:, :], vmask),
     ]
     for index in range(icycle):
         jn = index + 1
