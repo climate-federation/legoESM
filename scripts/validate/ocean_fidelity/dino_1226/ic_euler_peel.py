@@ -19,6 +19,7 @@ import numpy as np
 import hpg_tendency_compare as hpg
 import kamm_twin_90d as twin
 import standalone_20y as standalone
+from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ocean.experiments.dino import (
     apply_dino_lat_lon_surface_forcing,
     dino_S_profile_1d,
@@ -295,6 +296,7 @@ def run(args: argparse.Namespace) -> int:
         raise SystemExit("missing peel inputs: " + ", ".join(missing))
 
     controls = self_test()
+    set_policy(PrecisionPolicy.fp64())
     grid = read_nemo_mesh_mask(str(run_kt2 / "mesh_mask.nc"), nn_hls=0)
     restart = read_nemo_restart(
         str(run_kt2 / "DINO_00000002_restart.nc"), nn_hls=0)
