@@ -5288,7 +5288,7 @@ class LatLonCGridOceanModel:
             for tr_name in ['T', 'S']:
                 tr = T_mid if tr_name == 'T' else S_mid
 
-                if _tti == "rk3":
+                if _tti in ("rk3", "rk3_ws"):
                     # Computed by the pair step above.
                     continue
                 else:
