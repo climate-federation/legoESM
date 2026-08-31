@@ -189,6 +189,55 @@ def test_live_een_barotropic_coriolis_runs_no_nan():
     assert np.all(np.isfinite(np.asarray(s.eta.data)))
 
 
+def test_live_een_subtraction_reads_step_entry_kmm_not_post_rhs_state():
+    """NEMO removes dyn_cor_2D evaluated on ``puu_b/pvv_b(Kmm)``.
+
+    ``dynspg_ts.F90:296-306`` performs that subtraction before the substep
+    loop; Kmm is the step-entry velocity, whereas legoESM's ``state_mid`` is
+    the post-tendency u*.  Both are captured here and deliberately made
+    distinct, so passing u* to the subtraction helper is a red failure.
+    """
+    import unittest.mock as mock
+    from legoesm.ocean.dynamics import barotropic_latlon_cgrid as baro
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as model_mod
+
+    state, model = _leapfrog_channel(
+        barotropic_coriolis="een", barotropic_coriolis_split="live")
+    rng = np.random.default_rng(203)
+    state = state._replace(
+        u=state.u.replace(data=(
+            state.u.data + 0.02 * jnp.asarray(rng.standard_normal(state.u.data.shape))
+        ) * state.u_mask.data[..., None]),
+        v=state.v.replace(data=(
+            state.v.data + 0.02 * jnp.asarray(rng.standard_normal(state.v.data.shape))
+        ) * state.v_mask.data[..., None]),
+    )
+    seen = {}
+    real_pre = baro.barotropic_coriolis_een_pre_step
+    real_loop = model_mod.barotropic_substeps_latlon_cgrid
+
+    def capture_pre(u, v, *args, **kwargs):
+        seen["u_sub"] = np.asarray(u)
+        seen["v_sub"] = np.asarray(v)
+        return real_pre(u, v, *args, **kwargs)
+
+    def capture_loop(state_mid, *args, **kwargs):
+        seen["u_mid"] = np.asarray(state_mid.u.data)
+        seen["v_mid"] = np.asarray(state_mid.v.data)
+        return real_loop(state_mid, *args, **kwargs)
+
+    with mock.patch.object(
+            baro, "barotropic_coriolis_een_pre_step", capture_pre), \
+            mock.patch.object(
+                model_mod, "barotropic_substeps_latlon_cgrid", capture_loop):
+        model._step_impl(state, _DT)
+
+    np.testing.assert_array_equal(seen["u_sub"], np.asarray(state.u.data))
+    np.testing.assert_array_equal(seen["v_sub"], np.asarray(state.v.data))
+    assert np.max(np.abs(seen["u_mid"] - seen["u_sub"])) > 1e-8
+    assert np.max(np.abs(seen["v_mid"] - seen["v_sub"])) > 1e-8
+
+
 def test_boxcar_ab3_live_split_runs_no_nan():
     # NEMO nn_bt_flt=2 (barotropic_time_filter="nemo_boxcar_ab3") = the AB3
     # velocity predictor + ts_bck_interp(alpha=0) ssh temporal dissipation +

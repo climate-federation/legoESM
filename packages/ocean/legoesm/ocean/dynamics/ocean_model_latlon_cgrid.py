@@ -4278,12 +4278,14 @@ class LatLonCGridOceanModel:
                     # planetary term rides the vertex-f EEN transport-form flux,
                     # so the pre-step subtraction must use the SAME EEN stencil
                     # the substep loop applies live (dyn_cor_2D). Built from the
-                    # Nnn thickness (h_k_pre, = state_mid.eta since the barotropic
-                    # solve has not yet updated eta) and the POST-slow-tendency
-                    # barotropic velocity (state_mid.u/v = NOW/Kmm) — matching
+                    # Nnn thickness (h_k_pre, = state.eta) and the STEP-ENTRY
+                    # barotropic velocity (state.u/v = NOW/Kmm) — matching
                     # NEMO, which subtracts the Kmm barotropic Coriolis from zu_frc
                     # (dynspg_ts.F90:359) and re-applies dyn_cor_2D LIVE (:689) on
-                    # the evolving transport.  NB under the leap-frog (residual #1)
+                    # the evolving transport. ``state_mid`` is POST-tendency u*,
+                    # not Kmm; using it injected a spurious cold-start V forcing
+                    # at the two retained longitude edges. NB under leap-frog
+                    # (residual #1)
                     # the substep loop is SEEDED from the BEFORE level (Nbb), so at
                     # substep 0 the live term acts on the Nbb transport while this
                     # subtraction removed the Nnn/Kmm Coriolis — they do NOT cancel
@@ -4310,7 +4312,7 @@ class LatLonCGridOceanModel:
                         "barotropic_een_coefficient_evaluation", "generic")
                     (_cor_u_sub, _cor_v_sub,
                      _een_pre_built) = barotropic_coriolis_een_pre_step(
-                        state_mid.u.data, state_mid.v.data, h_k_pre, _grid,
+                        state.u.data, state.v.data, h_k_pre, _grid,
                         state.land_mask.data, state.u_mask.data,
                         state.v_mask.data, _min_wc, F_slow_u.dtype,
                         metric_complete=(_bt_cor_split == "een_metric"),
