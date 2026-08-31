@@ -674,6 +674,45 @@ def test_euler_corrector_is_after_implicit_mixing(method, outer):
     assert events == ["implicit", "reconcile"]
 
 
+@pytest.mark.parametrize("method,outer", _PATHS)
+def test_euler_split_explicit_seed_is_the_pre_tendency_kbb(method, outer):
+    """The cold Euler fast loop starts at Kbb, not post-RHS ``state_mid``.
+
+    NEMO's DINO configuration keeps ``ln_bt_fw=.FALSE.`` on the first Euler
+    step, so ``dynspg_ts.F90:578-586`` reads Kbb.  ``istate.F90:97-99`` has
+    already collapsed Kbb onto Kmm.  The wrapper spies on the public
+    split-explicit kernel and the planted nonzero entry state makes a fallback
+    to its internally-built post-tendency state observable.
+    """
+    import unittest.mock as mock
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as omlc
+
+    state, model = _channel(
+        outer=outer, after="nemo_mlf_baro_corr", dino_drag=True)
+    state = state._replace(
+        eta=state.eta.replace(data=state.eta.data + 0.031),
+        u=state.u.replace(data=state.u.data + 0.002 * state.u_mask.data[..., None]),
+        v=state.v.replace(data=state.v.data - 0.003 * state.v_mask.data[..., None]),
+    )
+    expected = tuple(np.asarray(value) for value in (
+        state.eta.data, state.u.data, state.v.data))
+    seen = []
+    real = omlc.barotropic_substeps_latlon_cgrid
+
+    def capture(*args, **kwargs):
+        seen.append(tuple(np.asarray(kwargs[name]) for name in (
+            "eta_init", "u_init", "v_init")))
+        return real(*args, **kwargs)
+
+    with mock.patch.object(
+            omlc, "barotropic_substeps_latlon_cgrid", capture):
+        getattr(model, method)(state, _DT)
+
+    assert len(seen) == 1
+    for actual, wanted in zip(seen[0], expected):
+        np.testing.assert_array_equal(actual, wanted)
+
+
 def test_the_weighting_fix_is_bit_identical_on_the_SHIPPED_DINO_geometry():
     """WHY NO A/B WAS RUN FOR THE MIN->MEAN CORRECTION, as a measurement.
 

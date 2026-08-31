@@ -9186,6 +9186,17 @@ class LatLonCGridOceanModel:
                 _entry, dt, freshwater=freshwater,
                 surface_forcing=surface_forcing, sponge=sponge, grid=_grid,
                 vertex_mask=vertex_mask, t_seconds=t_seconds,
+                # DINO keeps ``ln_bt_fw=.FALSE.`` even on ``l_1st_euler``:
+                # dynspg_ts.F90:578-586 therefore seeds sshn_e/un_e/vn_e from
+                # Kbb.  istate.F90:97-99/135-137 made Kbb==Kmm for this one
+                # cold step, so pass the pre-tendency entry state explicitly.
+                # Letting _step_impl fall back to ``state_mid`` instead seeds
+                # the fast loop from the post-slow-forcing velocity.  That is
+                # algebraically zero-mean on an ideal common face mask, but it
+                # is not NEMO's operator and was measurably nonzero at the
+                # construction-frame seam.
+                _barotropic_before_state=(
+                    state.eta.data, state.u.data, state.v.data),
                 # NEMO still executes tra_sbc on its l_1st_euler step
                 # (stpmlf.F90:190, then tra_sbc at :498). The cold-start
                 # branch used to drop this registered RHS entirely, even
@@ -9662,6 +9673,12 @@ class LatLonCGridOceanModel:
                 _entry, dt, freshwater=freshwater,
                 surface_forcing=surface_forcing, sponge=sponge, grid=_grid,
                 vertex_mask=vertex_mask, t_seconds=t_seconds,
+                # DINO's centred split-explicit loop reads Kbb even while
+                # stp_MLF is in its one-step Euler mode.  At cold start
+                # istate has collapsed Kbb==Kmm, so seed from the original
+                # pre-tendency fields, identically to _leapfrog_step above.
+                _barotropic_before_state=(
+                    state.eta.data, state.u.data, state.v.data),
                 _apply_cold_start_after_reconcile=(
                     _cfg_b.barotropic.barotropic_cold_start_after_reconcile
                     == "nemo_mlf_baro_corr"),
