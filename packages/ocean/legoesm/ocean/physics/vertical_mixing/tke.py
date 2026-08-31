@@ -351,6 +351,9 @@ class TKEEntryN2Bundle(NamedTuple):
     # Full-grid surface W thickness from raw nemo_e3w_0*(1+r3t). The interior
     # e3w_Kmm field above intentionally has nlev-1 eosbn2 interfaces.
     e3w_surface_Kmm: jnp.ndarray | None = None
+    # Optional geometry for NEMO's dry jpk-th T row. Compact DINO states omit
+    # the row, but nn_mxl=3 reads its e3t once at the deepest wet W row.
+    e3t_bottom_Kmm: jnp.ndarray | None = None
 
 
 class TKECarryOutput(NamedTuple):
@@ -805,17 +808,19 @@ def compute_mixing_lengths(
         # documented, BOUNDED proxy (was UNBOUNDED before this fix).
         _seed = jnp.broadcast_to(
             jnp.asarray(cfg.mxl_min, dtype=lT.dtype), lT.shape[1:])
-        if raw_evaluation == "nemo_literal":
-            # NEMO leaves zmxlm(jpk) at rmxl_min and uses that UNMODIFIED
-            # terminal pad as the carry for the first jk=jpkm1 iteration.
-            # Do not apply a fictitious update to jpk itself from raw en(jpk).
+        if raw_evaluation == "nemo_literal" and n_e3 == n_l:
+            # Full NEMO-shaped states retain the dry jpk pad as their last
+            # carried row. It stays rmxl_min and is not itself updated.
             _, ldn_rest = jax.lax.scan(
                 _down, _seed, (lT[1:-1][::-1], e3T[2:][::-1]))
             ldn = jnp.concatenate(
                 [lT[:1], ldn_rest[::-1], _seed[None]], axis=0)
         else:
-            # Historical shared recurrence, retained bit-for-bit outside the
-            # two literal DINO cards.
+            # Compact DINO states omit the dry jpk pad but can carry its e3t
+            # as the one extra geometry row. NEMO zdftke.F90:804-806 starts
+            # at jk=jpkm1, so this first update is real:
+            # min(rmxl_min + e3t(jpk), raw(jpkm1)). Skipping it pins the
+            # deepest wet diffusivity to the background floor.
             first_ldn = jnp.minimum(_seed + e3_bottom, lT[-1])
             _, ldn_rest = jax.lax.scan(
                 _down, first_ldn, (lT[1:-1][::-1], e3T[2:][::-1]))
@@ -2659,6 +2664,16 @@ def tke_vertical_mixing(
         # length scans on the later implicit-solve Jacobian, so every sloping
         # column used the wrong e3t operand at zdftke.F90:800-806.
         dz_cell_mxl = precomputed_n2_bundle.e3t_Kmm
+        _e3t_bottom = getattr(
+            precomputed_n2_bundle, "e3t_bottom_Kmm", None)
+        if _e3t_bottom is not None:
+            if _e3t_bottom.shape != tke_old.shape[:-1]:
+                raise ValueError(
+                    "precomputed_n2_bundle.e3t_bottom_Kmm must match the "
+                    f"horizontal TKE shape; got {_e3t_bottom.shape} vs "
+                    f"{tke_old.shape[:-1]}.")
+            dz_cell_mxl = jnp.concatenate(
+                [dz_cell_mxl, _e3t_bottom[..., None]], axis=-1)
 
     _shear_stage = getattr(
         cfg, "tke_shear_evaluation_stage", "implicit_solve_state")

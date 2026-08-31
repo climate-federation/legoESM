@@ -354,7 +354,7 @@ def test_literal_raw_mxl_matches_hand_computed_source_order_and_red_control():
             cfg._replace(tke_mxl_raw_evaluation="unknown"), dz_cell=dz)
 
 
-def test_literal_mxl_ldown_keeps_jpk_terminal_seed_unmodified():
+def test_literal_mxl_ldown_distinguishes_retained_and_compact_jpk():
     e = jnp.asarray([[2.0, 3.0, 1.0e8]])
     n2 = jnp.full_like(e, 1.0e-12)
     dz_cell = jnp.asarray([[1.0, 2.0, 3.0, 4.0]])
@@ -367,6 +367,14 @@ def test_literal_mxl_ldown_keeps_jpk_terminal_seed_unmodified():
     # The final carried slot is NEMO's untouched jpk pad, not another raw
     # buoyancy-length row.  The old recurrence produced 4.01 here.
     assert float(lk[0, -1]) == 0.01
+
+    widened, _ = tke_mod.compute_mixing_lengths(
+        e, n2, jnp.ones_like(e), cfg,
+        dz_cell=jnp.concatenate([dz_cell, jnp.asarray([[5.0]])], axis=-1),
+        l_surface_anchor=jnp.asarray([0.01]))
+    # A compact state omits jpk itself: the final carried row is jpkm1, so
+    # NEMO's first bottom-up update consumes the separately carried e3t(jpk).
+    assert float(widened[0, -1]) == 5.01
     legacy, _ = tke_mod.compute_mixing_lengths(
         e, n2, jnp.ones_like(e),
         cfg._replace(tke_mxl_raw_evaluation="factored"),
@@ -812,11 +820,13 @@ def test_step_entry_n2_bundle_feeds_every_registered_tke_consumer(monkeypatch):
         gdepw_Kmm=jnp.asarray([[1.5, 4.0]]),
         e3w_Kmm=jnp.asarray([[1.5, 2.5]]),
         e3t_Kmm=jnp.asarray([[1.0, 2.0, 3.0]]),
+        e3t_bottom_Kmm=jnp.asarray([4.0]),
     )
-    seen = {"mxl": [], "closure": []}
+    seen = {"mxl": [], "mxl_dz_cell": [], "closure": []}
 
     def fake_mxl(e, n2, *args, **kwargs):
         seen["mxl"].append(np.asarray(n2))
+        seen["mxl_dz_cell"].append(np.asarray(kwargs["dz_cell"]))
         return jnp.ones_like(e), jnp.ones_like(e)
 
     def fake_closure(*args, **kwargs):
@@ -854,6 +864,11 @@ def test_step_entry_n2_bundle_feeds_every_registered_tke_consumer(monkeypatch):
 
     for actual in seen["mxl"]:
         np.testing.assert_array_equal(actual, bundle.rn2)
+    expected_mxl_e3t = np.concatenate(
+        [np.asarray(bundle.e3t_Kmm),
+         np.asarray(bundle.e3t_bottom_Kmm)[..., None]], axis=-1)
+    for actual in seen["mxl_dz_cell"]:
+        np.testing.assert_array_equal(actual, expected_mxl_e3t)
     for actual, actual_before in seen["closure"]:
         np.testing.assert_array_equal(actual, bundle.rn2)
         np.testing.assert_array_equal(actual_before, bundle.rn2b)

@@ -6414,9 +6414,15 @@ class LatLonCGridOceanModel:
                 jnp.asarray(tmask, dtype=bool),
                 e3t_0_array * zrw_stretch[..., jnp.newaxis],
                 e3t_0_array)
+        terminal_e3t = getattr(_zc, "nemo_terminal_e3t_ref", None)
+        if terminal_e3t is not None:
+            terminal_e3t = jnp.broadcast_to(
+                jnp.asarray(terminal_e3t, dtype=e3t.dtype),
+                state.eta.data.shape)
         return TKEEntryN2Bundle(
             rn2=rn2, rn2b=rn2b, gdepw_Kmm=gdepw, e3w_Kmm=e3w,
-            e3t_Kmm=e3t, e3w_surface_Kmm=e3w_surface)
+            e3t_Kmm=e3t, e3w_surface_Kmm=e3w_surface,
+            e3t_bottom_Kmm=terminal_e3t)
 
     def _tke_step_entry_p_sh2(
         self, state, *, eta_now=None, u_now=None, v_now=None,

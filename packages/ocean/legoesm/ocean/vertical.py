@@ -233,6 +233,10 @@ class OceanZStarCoordinate(NamedTuple):
     nemo_e2u: jnp.ndarray | None = None
     nemo_e1v: jnp.ndarray | None = None
     nemo_een_barotropic: NemoEENBarotropicOperands | None = None
+    # Geometry of NEMO's permanently masked jpk-th T row.  A compact DINO
+    # state omits that row, but zdftke reads its thickness once in the bottom-
+    # up mixing-length recurrence for the deepest wet W row (jpkm1).
+    nemo_terminal_e3t_ref: jnp.ndarray | None = None
 
 
 def create_ocean_z_star(
@@ -719,6 +723,9 @@ def create_levy_stretched_z_star(
         z_full_ref = 0.5 * (z_half_ref[:-1] + z_half_ref[1:])
     dz_half_ref = z_full_ref[:-1] - z_full_ref[1:]
 
+    terminal_e3t = (
+        e3t[-1] if transition_depth_m is not None
+        else 2.0 * (first_t[-1] - first_w[-1]))
     return OceanZStarCoordinate(
         n_levels=n_levels,
         H_max=H_max,
@@ -726,6 +733,7 @@ def create_levy_stretched_z_star(
         z_half_ref=z_half_ref,
         dz_ref=dz_ref,
         dz_half_ref=dz_half_ref,
+        nemo_terminal_e3t_ref=jnp.asarray(terminal_e3t),
     )
 
 
@@ -792,6 +800,7 @@ class OceanPartialCellCoordinate(NamedTuple):
     nemo_e2u: jnp.ndarray | None = None
     nemo_e1v: jnp.ndarray | None = None
     nemo_een_barotropic: NemoEENBarotropicOperands | None = None
+    nemo_terminal_e3t_ref: jnp.ndarray | None = None
 
 
 def create_partial_cell_coordinate(
@@ -915,6 +924,8 @@ def create_partial_cell_coordinate(
         nemo_e1v=getattr(z_coord, "nemo_e1v", None),
         nemo_een_barotropic=getattr(
             z_coord, "nemo_een_barotropic", None),
+        nemo_terminal_e3t_ref=getattr(
+            z_coord, "nemo_terminal_e3t_ref", None),
     )
 
 
@@ -995,6 +1006,8 @@ def create_full_step_coordinate(
         nemo_e1v=getattr(z_coord, "nemo_e1v", None),
         nemo_een_barotropic=getattr(
             z_coord, "nemo_een_barotropic", None),
+        nemo_terminal_e3t_ref=getattr(
+            z_coord, "nemo_terminal_e3t_ref", None),
     )
 
 

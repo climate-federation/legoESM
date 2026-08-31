@@ -1984,6 +1984,33 @@ class TestMxlChoice3LdownSeed:
         np.testing.assert_allclose(l_k, l_k_ref, rtol=1e-8)
         np.testing.assert_allclose(l_eps, l_eps_ref, rtol=1e-8)
 
+    def test_literal_compact_state_consumes_true_terminal_e3t(self):
+        """The literal compact state still executes NEMO's jpkm1 update."""
+        l_sfc = 0.02
+        mxl_min = 0.01
+        l_int_raw = np.array([9.0, 20.0, 30.0])
+        e3t_body = np.array([1.0, 2.0, 3.0, 4.0])
+        e3t_bottom = 5.0
+        l_k_ref, l_eps_ref = self._nemo_mxl3_reference(
+            l_sfc, l_int_raw, e3t_body, e3t_bottom, mxl_min)
+
+        # With N2=2 the literal raw length sqrt(2*e/N2) is sqrt(e).
+        e = jnp.asarray(l_int_raw**2)[None, None, :]
+        n2 = jnp.full_like(e, 2.0)
+        dz_cell = jnp.asarray(
+            np.concatenate([e3t_body, [e3t_bottom]]))[None, None, :]
+        cfg = TKEConfig(
+            tke_mxl_choice=3, mxl_min=mxl_min,
+            tke_mxl_raw_evaluation="nemo_literal")
+        l_k, l_eps = compute_mixing_lengths(
+            e, n2, jnp.zeros_like(e), cfg, dz_cell=dz_cell,
+            l_surface_anchor=jnp.asarray([[l_sfc]]))
+
+        np.testing.assert_array_equal(np.asarray(l_k)[0, 0], l_k_ref)
+        np.testing.assert_array_equal(np.asarray(l_eps)[0, 0], l_eps_ref)
+        assert float(l_k[0, 0, -1]) == min(
+            mxl_min + e3t_bottom, l_int_raw[-1])
+
     def test_old_seed_would_give_unbounded_length(self):
         """Non-vacuous: reproduce the OLD (buggy) seed behaviour by hand
         (seed = the raw buoyancy length at the deepest row, instead of

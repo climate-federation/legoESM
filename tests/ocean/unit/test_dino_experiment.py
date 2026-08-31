@@ -2009,6 +2009,10 @@ class TestMaskedZco:
         assert not np.array_equal(
             np.asarray(coord.z_full_ref),
             np.asarray(mask_ladder.z_full_ref))
+        # NEMO retains one dry jpk T row below legoESM's compact 35-cell
+        # state. zdftke's bottom-up nn_mxl=3 scan reads that row's e3t once.
+        assert float(coord.nemo_terminal_e3t_ref) == pytest.approx(
+            617.46228681330, rel=1e-13)
 
     def test_snap_rule_matches_f90_transliteration(self):
         """k_bot per usrdef_zgr.F90 zgr_msk_top_bot:
