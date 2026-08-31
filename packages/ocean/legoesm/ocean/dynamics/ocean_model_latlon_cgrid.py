@@ -4611,8 +4611,10 @@ class LatLonCGridOceanModel:
         # 2D u_mask/v_mask are non-zero at the topographic-step face
         # (both surface columns are wet) but the face must be closed
         # below the shallower seafloor.  Using compute_face_masks_3d on
-        # the partial coord's is_active gives the correct per-level
-        # closed-wall faces.  For pure z\\* the 3D mask collapses to the
+        # the partial coord's is_active, intersected with the 2-D land mask,
+        # gives the correct NEMO tmask and per-level closed-wall faces.  The
+        # intersection matters for construction frames whose outer land rows
+        # retain a valid full-depth coordinate.  For pure z\\* the 3D mask collapses to the
         # 2D mask broadcast across all levels — bit-exact backwards-compat.
         # Likewise, ``active_3d`` gates inactive cells (below the
         # partial seafloor) where h_k_old = h_k_new = 0; without this
@@ -4620,12 +4622,15 @@ class LatLonCGridOceanModel:
         # amplifies tiny float-precision residuals into huge spurious
         # tracer values inside the ground.
         if isinstance(_zc, OceanPartialCellCoordinate):
+            active_3d = (
+                _zc.is_active.astype(h_u_old.dtype)
+                * mask[..., jnp.newaxis].astype(h_u_old.dtype)
+            )
             u_mask_3d_tracer, v_mask_3d_tracer = compute_face_masks_3d(
-                _zc.is_active, _grid,
+                active_3d, _grid,
             )
             u_mask_3d_tracer = u_mask_3d_tracer.astype(h_u_old.dtype)
             v_mask_3d_tracer = v_mask_3d_tracer.astype(h_v_old.dtype)
-            active_3d = _zc.is_active.astype(h_u_old.dtype)
         else:
             u_mask_3d_tracer = state.u_mask.data[..., jnp.newaxis]
             v_mask_3d_tracer = state.v_mask.data[..., jnp.newaxis]
@@ -5278,8 +5283,9 @@ class LatLonCGridOceanModel:
             # _compute_advection_flux_div) so the stencil sees a flat extension
             # = the physical no-flux insulating wall, while the flux-form
             # UPDATE / gating below keeps the ORIGINAL dead-cell value.  Use the
-            # per-level ``active_3d`` (= is_active) mask, NOT the 2D surface
-            # land_mask, so the fill also cleans TOPOGRAPHIC-STEP dead cells in
+            # per-level ``active_3d`` (= is_active * land_mask) mask, not the
+            # 2-D surface land_mask alone, so the fill also cleans
+            # TOPOGRAPHIC-STEP dead cells in
             # partial-cell runs (flat-bottom: active_3d is (n_lat,n_lon,1) and
             # the fill is bit-identical to the 2D-mask path).
             _wall_fill_mask = (

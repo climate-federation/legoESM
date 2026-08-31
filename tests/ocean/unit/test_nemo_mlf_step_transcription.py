@@ -513,6 +513,60 @@ def test_fct_tracer_before_survives_single_pass_merge():
         "-- _fct_tracer_before may have been silently dropped by the merge")
 
 
+def test_partial_cell_fct_mask_includes_construction_frame_land(monkeypatch):
+    """The FCT/nonosc mask is NEMO's full tmask, not depth activity alone.
+
+    DINO's construction frame keeps a valid full-depth coordinate beneath its
+    outer land row.  Passing ``z_coord.is_active`` alone therefore lets the
+    land tracer value (zero) into the first wet row's seven-point limiter
+    stencil.  Spy on the production advection call so this test guards the
+    model wiring, while the coordinate-only planted control proves the row is
+    genuinely capable of being misclassified.
+    """
+    import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as model_mod
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.vertical import (
+        create_ocean_z_star,
+        create_partial_cell_coordinate,
+    )
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+
+    grid = create_latlon_grid(8, 16)
+    z_ref = create_ocean_z_star(n_levels=4, H_max=4000.0)
+    H = jnp.full((grid.n_lat, grid.n_lon), 4000.0)
+    z_coord = create_partial_cell_coordinate(z_ref, H)
+    land = jnp.ones_like(H).at[0, :].set(0.0).at[-1, :].set(0.0)
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z_coord, H_bathy_override=H, land_mask_override=land)
+    cfg = LatLonCGridOceanConfig.from_flat(
+        outer_integrator="forward_euler", momentum_time_integrator="rk3",
+        tracer_advection="fct2", K_h=0.0, A_h=0.0,
+        implicit_vertical_mixing=False, n_barotropic_substeps=2,
+        enable_runtime_checks=False)
+    model = model_mod.LatLonCGridOceanModel(grid, z_coord, cfg)
+    seen = []
+
+    def capture_pair(tr_a, tr_b, *_args, **kwargs):
+        seen.append(kwargs["recon_fill_mask"])
+        zeros_a = jnp.zeros_like(tr_a)
+        zeros_b = jnp.zeros_like(tr_b)
+        return ((zeros_a, zeros_a), (zeros_b, zeros_b))
+
+    monkeypatch.setattr(model_mod, "compute_advection_flux_div_pair",
+                        capture_pair)
+    model._step_impl(state, 1.0, _apply_implicit_vmix=False)
+
+    assert len(seen) == 1
+    expected = z_coord.is_active.astype(state.T.data.dtype) * land[..., None]
+    np.testing.assert_array_equal(np.asarray(seen[0]), np.asarray(expected))
+    coordinate_only = z_coord.is_active.astype(state.T.data.dtype)
+    assert bool(jnp.all(coordinate_only[0] == 1.0))
+    assert bool(jnp.all(expected[0] == 0.0)), (
+        "planted control is vacuous: construction-frame land must differ "
+        "from coordinate-only depth activity")
+
+
 def test_nemo_mlf_step_uses_fct_before_end_to_end():
     """End-to-end: ``_nemo_mlf_step`` itself (not a bare ``_step_impl`` call)
     passes ``_fct_tracer_before`` -- verified by comparing against a
