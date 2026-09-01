@@ -59,6 +59,7 @@ from legoesm.ocean.dynamics.barotropic_common import (
     compute_filter_weights,
     compute_nemo_boxcar_centred_weights,
     compute_nemo_boxcar_forward_weights,
+    compute_nemo_forward_raw_transport_weights,
     compute_nemo_boxcar_raw_transport_weights,
     compute_power_law_filter_weights,
     coriolis_at_faces,
@@ -1662,15 +1663,25 @@ def _transport_accumulator_weights(
         raise ValueError(
             "unknown barotropic_transport_accumulation_evaluation "
             f"{evaluation!r}: must be one of ('generic', 'nemo_literal').")
-    if config.barotropic.barotropic_time_filter not in (
-            "nemo_boxcar_centred", "nemo_boxcar_ab3"):
+    _filter = config.barotropic.barotropic_time_filter
+    if _filter not in (
+            "nemo_boxcar_centred", "nemo_boxcar_ab3",
+            "nemo_boxcar1_ab3", "nemo_ab3am4"):
         raise ValueError(
             "barotropic_transport_accumulation_evaluation='nemo_literal' "
             "requires barotropic_time_filter in "
-            "('nemo_boxcar_centred', 'nemo_boxcar_ab3').")
-    raw_weights, divisor, raw_n_loop = (
-        compute_nemo_boxcar_raw_transport_weights(
-            n_substeps, dtype, substep_scale=substep_scale))
+            "the NEMO boxcar/AB3 filter family.")
+    if _filter == "nemo_boxcar1_ab3":
+        raw_weights, divisor, raw_n_loop = (
+            compute_nemo_forward_raw_transport_weights(n_substeps, dtype))
+    elif _filter == "nemo_ab3am4":
+        raw_weights = jnp.ones((n_loop,), dtype=dtype)
+        divisor = jnp.asarray(n_loop, dtype=dtype)
+        raw_n_loop = n_loop
+    else:
+        raw_weights, divisor, raw_n_loop = (
+            compute_nemo_boxcar_raw_transport_weights(
+                n_substeps, dtype, substep_scale=substep_scale))
     if raw_n_loop != n_loop:
         raise AssertionError(
             "NEMO raw and normalized transport windows disagree: "

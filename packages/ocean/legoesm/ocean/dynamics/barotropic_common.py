@@ -239,6 +239,31 @@ def compute_nemo_boxcar_raw_transport_weights(
     )
 
 
+def compute_nemo_forward_raw_transport_weights(
+    n_substeps: int, dtype: jnp.dtype,
+):
+    """Raw ``wgtbtp2`` for ln_bt_fw=T, nn_bt_flt=1.
+
+    Literal transcription of ``ts_wgt`` primary CASE(1), its tail sum at
+    dynspg_ts.F90:1097-1102, and the single post-accumulation divisor at
+    :999-1000.
+    """
+    import numpy as _np
+    if n_substeps < 2:
+        raise ValueError(
+            f"nemo_boxcar_forward needs n_substeps >= 2, got {n_substeps!r}")
+    jn = _np.arange(1, 3 * n_substeps + 1, dtype=_np.float64)
+    primary = (
+        _np.abs(jn - n_substeps) / n_substeps < 0.5
+    ).astype(_np.float64)
+    n_loop = int(_np.max(_np.where(primary > 0.0)[0]) + 1)
+    secondary = _np.cumsum(
+        primary[:n_loop][::-1], dtype=_np.float64)[::-1]
+    return (jnp.asarray(secondary, dtype=dtype),
+            jnp.asarray(secondary.sum(dtype=_np.float64), dtype=dtype),
+            n_loop)
+
+
 def nemo_auto_substeps(
     dt: float,
     H_max_wet: float,

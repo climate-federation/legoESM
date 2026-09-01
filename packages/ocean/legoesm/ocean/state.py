@@ -2069,29 +2069,18 @@ class LatLonCGridOceanConfig(NamedTuple):
     #   is NOT preserved in this form — new extrema may appear with
     #   nonlinear limiters (TVD, WENO, FCT).
     tracer_time_integrator: str = "euler"  # also "ab2", "rk3" (SSP), "rk3_ws" (NEMO dt/3,dt/2,dt)
-    # FCT low-order predictor.  "one_step" is the historical Zalesak base.
-    # "nemo_rk3_two_step" transcribes key_RK3 fct_up1_2stp's half-step
-    # upwind guess and trapezoidal full-step upwind flux; validation restricts
-    # it to the WS-RK3 FCT path so every other user remains byte-identical.
-    tracer_fct_low_order_predictor: str = "one_step"
-    # Velocity/geometry time levels supplied to the NEMO WS tracer stages.
-    # None resolves during model validation: "nemo_kmm" for rk3_ws, otherwise
-    # "frozen_final" so every non-WS user's resolved config and behaviour remain
-    # unchanged.  Explicit "frozen_final" is the selectable legacy split step:
-    # one post-barotropic transport is reused by all stages.  "nemo_kmm"
-    # supplies Kbb, stage-1 Kaa, and stage-2 Kaa transports to stages 1, 2, and
-    # 3 respectively, matching stprk3.F90:194-207 and
-    # stprk3_stg.F90:250-303,456-519.
-    tracer_rk3_transport_time_levels: str | None = None
-    # Causal fidelity experiment for NEMO's per-stage Kaa external-mode
-    # replacement (stprk3_stg.F90:433-446).  Default false preserves every
-    # existing user's single post-stage barotropic correction.
-    rk3_ws_stage_barotropic_correction: bool = False
-    # Couple the WS stage rerun to NEMO's distinct advecting transport mean:
-    # zFu/zFv replace uu_b/vv_b by un_adv/hu,vn_adv/hv before both momentum
-    # UP3 and tracer FCT (stprk3_stg.F90:257-274,316,326-331,456-519).
-    # Requires the stage barotropic rerun; False preserves the prior arm.
-    rk3_ws_momentum_transport_reconcile: bool = False
+    # NEMO's key_RK3 is one coupled, unbranched scheme identity: Kmm stage
+    # transports, the two-step FCT predictor, the per-stage barotropic
+    # correction, and the distinct advecting-transport mean are mandatory
+    # parts of tracer_time_integrator/momentum_time_integrator="rk3_ws".
+    # NEMO has no switches for those internal choices, so neither does the
+    # public legoESM configuration.  Causal A/B controls use private test hooks.
+    # stprk3_stg.F90:257-274,433-446; traadv_fct.F90:470-641.
+    # Advective bottom boundary layer.  0 disables it; 2 selects NEMO's
+    # Campin--Goosse density-driven scheme (trabbl.F90:415-454).  Unlike the
+    # removed RK3 micro-selectors, this is an actual NEMO namelist switch.
+    bbl_adv_option: int = 0
+    bbl_gamma_s: float = 0.0
     ab2_epsilon: float = 0.1  # AB2 stabilization (MITgcm ABepsBar) — also the
     #   Adams-Bashforth ε for the OUTER integrator (Veros AB_eps=0.1).
     # Outer (baroclinic) time integrator. "forward_euler" (default) = the existing

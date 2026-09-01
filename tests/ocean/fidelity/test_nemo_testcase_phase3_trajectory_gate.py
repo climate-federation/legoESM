@@ -55,9 +55,8 @@ def test_report_selector_inventory_includes_eos_depth_and_resolved_substeps():
     source = GATE_PATH.read_text()
     assert '"eos_depth": cfg.eos_depth' in source
     assert '"n_barotropic_substeps": cfg.barotropic.n_barotropic_substeps' in source
-    assert '"tracer_rk3_transport_time_levels"' in source
-    assert '"tracer_fct_low_order_predictor"' in source
-    assert '"rk3_ws_momentum_transport_reconcile"' in source
+    assert '"rk3_ws_scheme_identity"' in source
+    assert '"bbl_adv_option"' in source
 
 
 def test_continue_after_first_is_explicit_and_preserves_first_debt():

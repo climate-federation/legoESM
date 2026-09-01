@@ -41,7 +41,8 @@ class NEMOTestcaseCard(NamedTuple):
 
 
 def _model_config(
-    *, barotropic_time_filter: str, n_barotropic_substeps: int
+    *, barotropic_time_filter: str, n_barotropic_substeps: int,
+    bbl_adv_option: int, bbl_gamma_s: float,
 ) -> LatLonCGridOceanConfig:
     """The selectors shared by both certified ``key_qco + key_RK3`` runs."""
 
@@ -57,20 +58,13 @@ def _model_config(
         # NEMO key_RK3: stprk3_stg.F90:112-249,519-559 restarts tracer
         # stages from Kbb with dt/3, dt/2, and dt.
         tracer_time_integrator="rk3_ws",
-        # key_RK3 dispatches FCT to fct_up1_2stp, whose half-step upstream
-        # guess and averaged full-step low-order flux are at
-        # traadv_fct.F90:470-641.
-        tracer_fct_low_order_predictor="nemo_rk3_two_step",
-        # stprk3.F90:194-207 swaps Kaa into Kmm between stages;
-        # stprk3_stg.F90:250-303 builds each tracer transport from that Kmm.
-        tracer_rk3_transport_time_levels="nemo_kmm",
         momentum_advection="flux_form",
         momentum_flux_scheme="upwind3",
         momentum_time_integrator="rk3_ws",
-        # HYB installs the external-mode Kaa mean at every stage and builds
-        # zFu/zFv with the distinct un_adv/vn_adv transport mean.
-        rk3_ws_stage_barotropic_correction=True,
-        rk3_ws_momentum_transport_reconcile=True,
+        # key_RK3 is a single scheme identity: Kmm transports + two-step FCT
+        # + per-stage external-mode correction + distinct un_adv/hu transport.
+        # NEMO exposes no switches for these internals (stprk3_stg.F90:
+        # 257-274,433-446), so legoESM exposes none either.
         # ln_dynadv_up3 dispatches to dynadv_up3 (dynadv.F90:87-89); its
         # vertical UP3 flux is dynadv_up3.F90:239-365. dynzad is dead here.
         vertical_momentum_scheme="nemo_up3",
@@ -82,8 +76,23 @@ def _model_config(
         barotropic_solver="explicit_substep",
         barotropic_time_filter=barotropic_time_filter,
         n_barotropic_substeps=n_barotropic_substeps,
+        barotropic_face_depth="nemo_ssh_avg",
+        barotropic_continuity_evaluation="nemo_literal",
+        barotropic_transport_accumulation_evaluation="nemo_literal",
+        barotropic_seed_face_depth="nemo_ssh_avg",
+        barotropic_seed_evaluation="nemo_literal",
+        barotropic_pgf_evaluation="nemo_literal",
+        barotropic_reconcile_target="transport_avg",
+        # This is numerical diffusion in the free-surface equation, not
+        # NEMO's similarly named time-filter alpha.  The oracle has no such
+        # stabilizer, so Rule 9 requires an exact zero on certified cards.
+        barotropic_diffusion_alpha=0.0,
+        bbl_adv_option=bbl_adv_option,
+        bbl_gamma_s=bbl_gamma_s,
         adaptive_implicit_vertadv=True,
         implicit_vertical_mixing=True,
+        zdf_implicit_solver_evaluation="nemo_literal",
+        implicit_vmix_e3t_now_divisor=True,
         A_h=0.0,
         B_h=0.0,
         C_smag=0.0,
@@ -198,6 +207,8 @@ def build_lock_exchange_zco_card() -> NEMOTestcaseCard:
     model_config = _model_config(
         barotropic_time_filter="nemo_ab3am4",
         n_barotropic_substeps=_resolved_auto_substeps(grid, bathymetry, 1.0),
+        bbl_adv_option=0,
+        bbl_gamma_s=0.0,
     )
     recipe = NEMORecipe(
         model_config=model_config,
@@ -207,9 +218,11 @@ def build_lock_exchange_zco_card() -> NEMOTestcaseCard:
         land_mask=wet,
         initial_state=state,
     )
-    return NEMOTestcaseCard(
+    card = NEMOTestcaseCard(
         "LOCK_EXCHANGE-zco", recipe, 1.0, 61200, 1, 0, 0, 0.0, 0.0
     )
+    validate_nemo_testcase_card(card)
+    return card
 
 
 def build_overflow_zps_card() -> NEMOTestcaseCard:
@@ -250,6 +263,8 @@ def build_overflow_zps_card() -> NEMOTestcaseCard:
         n_barotropic_substeps=_resolved_auto_substeps(
             grid, effective_bathymetry, 10.0
         ),
+        bbl_adv_option=2,
+        bbl_gamma_s=20.0,
     )
     recipe = NEMORecipe(
         model_config=model_config,
@@ -261,9 +276,69 @@ def build_overflow_zps_card() -> NEMOTestcaseCard:
     )
     # The shared canonical BBL implementation lives in ocean.physics.bbl_adv;
     # these pins let the phase-2 fidelity harness select it without solver glue.
-    return NEMOTestcaseCard(
+    card = NEMOTestcaseCard(
         "OVERFLOW-zps", recipe, 10.0, 6120, 1, 2, 0, 1000.0, 20.0
     )
+    validate_nemo_testcase_card(card)
+    return card
+
+
+def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
+    """Reject any card composition not exercised by its named oracle run."""
+    expected = {
+        "LOCK_EXCHANGE-zco": ("nemo_ab3am4", 1, 0, 0.0),
+        "OVERFLOW-zps": ("nemo_boxcar1_ab3", 3, 2, 20.0),
+    }
+    if card.case not in expected:
+        raise ValueError(f"unknown NEMO testcase card {card.case!r}")
+    cfg = card.recipe.model_config
+    filt, count, bbl_option, gamma = expected[card.case]
+    actual = (
+        cfg.barotropic.barotropic_time_filter,
+        cfg.barotropic.n_barotropic_substeps,
+        cfg.bbl_adv_option,
+        cfg.bbl_gamma_s,
+    )
+    if actual != (filt, count, bbl_option, gamma):
+        raise ValueError(
+            f"{card.case} filter/substep/BBL composition {actual!r} does not "
+            f"match the executed oracle {(filt, count, bbl_option, gamma)!r}")
+    required = {
+        "barotropic_face_depth": "nemo_ssh_avg",
+        "barotropic_continuity_evaluation": "nemo_literal",
+        "barotropic_transport_accumulation_evaluation": "nemo_literal",
+        "barotropic_seed_face_depth": "nemo_ssh_avg",
+        "barotropic_seed_evaluation": "nemo_literal",
+        "barotropic_pgf_evaluation": "nemo_literal",
+    }
+    for field, value in required.items():
+        got = getattr(cfg.barotropic, field)
+        if got != value:
+            raise ValueError(
+                f"{card.case} requires {field}={value!r}, got {got!r}")
+    if cfg.barotropic.barotropic_diffusion_alpha != 0.0:
+        raise ValueError(
+            f"{card.case} forbids unmatched live eta diffusion")
+    if (cfg.zdf_implicit_solver_evaluation != "nemo_literal"
+            or not cfg.implicit_vmix_e3t_now_divisor):
+        raise ValueError(
+            f"{card.case} requires the NEMO literal implicit-ZDF program")
+    if not cfg.tracer_wall_neumann_fill:
+        raise ValueError(
+            f"{card.case} requires NEMO's closed-wall tracer halo fill")
+    if cfg.barotropic.barotropic_reconcile_target != "transport_avg":
+        raise ValueError(
+            f"{card.case} requires NEMO's un_adv/hu transport reconciliation")
+    # The namelists select ENS, while these Cartesian cases have f=0 and only
+    # one wet y row.  Prove the inherited rotation operator is structurally
+    # eliminated; otherwise reject rather than silently run an AL81/Matsuno
+    # third model.
+    f_t = np.asarray(card.recipe.grid.f_T)
+    wet = np.asarray(card.recipe.land_mask) > 0.5
+    if np.any(f_t != 0.0) or np.count_nonzero(np.any(wet, axis=1)) != 1:
+        raise ValueError(
+            f"{card.case} legacy rotation is permitted only when f=0 and "
+            "the meridional operator is structurally absent")
 
 
 def build_nemo_testcase_card(case: str) -> NEMOTestcaseCard:
@@ -285,4 +360,5 @@ __all__ = (
     "build_lock_exchange_zco_card",
     "build_overflow_zps_card",
     "build_nemo_testcase_card",
+    "validate_nemo_testcase_card",
 )

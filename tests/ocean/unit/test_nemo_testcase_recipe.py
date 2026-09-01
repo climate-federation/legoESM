@@ -8,6 +8,7 @@ from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     build_lock_exchange_zco_card,
     build_nemo_testcase_card,
     build_overflow_zps_card,
+    validate_nemo_testcase_card,
 )
 
 
@@ -69,14 +70,15 @@ def test_nemo_testcase_cards_are_fp64_source_pinned(
     assert cfg.momentum_flux_scheme == "upwind3"
     assert cfg.momentum_time_integrator == "rk3_ws"
     assert cfg.tracer_time_integrator == "rk3_ws"
-    assert cfg.tracer_fct_low_order_predictor == "nemo_rk3_two_step"
-    assert cfg.tracer_rk3_transport_time_levels == "nemo_kmm"
-    assert cfg.rk3_ws_stage_barotropic_correction is True
-    assert cfg.rk3_ws_momentum_transport_reconcile is True
+    assert "tracer_fct_low_order_predictor" not in cfg._fields
+    assert "tracer_rk3_transport_time_levels" not in cfg._fields
+    assert "rk3_ws_stage_barotropic_correction" not in cfg._fields
+    assert "rk3_ws_momentum_transport_reconcile" not in cfg._fields
     assert cfg.vertical_momentum_scheme == "nemo_up3"
     assert cfg.pgf_scheme == "nemo_sco"
     assert cfg.pgf_quadrature == "nemo_trapezoid"
     assert cfg.adaptive_implicit_vertadv
+    assert cfg.barotropic.barotropic_diffusion_alpha == 0.0
 
 
 def test_testcase_cards_select_their_resolved_barotropic_filters():
@@ -88,6 +90,41 @@ def test_testcase_cards_select_their_resolved_barotropic_filters():
     # runs: LOCK ocean.output:763 and OVERFLOW ocean.output:879.
     assert lock_baro.n_barotropic_substeps == 1
     assert overflow_baro.n_barotropic_substeps == 3
+
+
+@pytest.mark.parametrize(
+    ("builder", "field", "value"),
+    [
+        (build_lock_exchange_zco_card, "barotropic_time_filter",
+         "nemo_boxcar1_ab3"),
+        (build_overflow_zps_card, "n_barotropic_substeps", 1),
+        (build_overflow_zps_card, "barotropic_diffusion_alpha", 0.01),
+    ],
+)
+def test_card_validation_rejects_unattested_compositions(builder, field, value):
+    card = builder()
+    baro = card.recipe.model_config.barotropic._replace(**{field: value})
+    cfg = card.recipe.model_config._replace(barotropic=baro)
+    mutated = card._replace(recipe=card.recipe._replace(model_config=cfg))
+    with pytest.raises(ValueError):
+        validate_nemo_testcase_card(mutated)
+
+
+def test_global_validation_rejects_frankenstein_rk3_and_eos_pgf_pairs():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    card = build_lock_exchange_zco_card()
+    base = card.recipe.model_config
+    bad = (
+        base._replace(momentum_time_integrator="euler"),
+        base._replace(tracer_advection="ppm_fct"),
+        base._replace(eos_depth="insitu"),
+        base._replace(pgf_scheme="adcroft"),
+    )
+    for cfg in bad:
+        with pytest.raises(ValueError):
+            LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, cfg)
 
 
 def test_testcase_cards_construct_the_shared_canonical_model():

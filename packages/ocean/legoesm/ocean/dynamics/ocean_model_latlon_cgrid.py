@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 from functools import partial
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -993,6 +994,16 @@ def _ssp_rk3_tracer_pair_step(
     return a_new, b_new
 
 
+class _NEMOWSRK3TestHooks(NamedTuple):
+    """Private causal controls; never part of a constructible model config."""
+
+    stage_barotropic_correction: bool = True
+    momentum_transport_reconcile: bool = True
+    kmm_tracer_transports: bool = True
+    two_step_fct_predictor: bool = True
+    disable_bbl: bool = False
+
+
 def _nemo_ws_rk3_tracer_pair_step(
     tr_a: jnp.ndarray,
     tr_b: jnp.ndarray,
@@ -1010,7 +1021,8 @@ def _nemo_ws_rk3_tracer_pair_step(
     recon_fill_mask: jnp.ndarray | None = None,
     linssh_top_flux: bool = False,
     stage_transport_geometry=None,
-    fct_low_order_predictor: str = "one_step",
+    fct_low_order_predictor: str = "nemo_rk3_two_step",
+    bbl_context=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """NEMO key_RK3 tracer stage program (Wicker--Skamarock form).
 
@@ -1043,7 +1055,33 @@ def _nemo_ws_rk3_tracer_pair_step(
             fct_base_thickness=h_k_old,
             fct_after_thickness=h_after,
         )
-        return dh_a + dv_a, dh_b + dv_b
+        fd_a, fd_b = dh_a + dv_a, dh_b + dv_b
+        if stage_index == 2 and bbl_context is not None:
+            from legoesm.ocean.physics.bbl_adv import (
+                apply_bbl_adv_tendency,
+                bbl_transports,
+            )
+            geom, area, dy_u, dx_v, gamma_s, rho0 = bbl_context
+            live_depth = jnp.cumsum(h_stage, axis=-1) - 0.5 * h_stage
+            live_bottom_depth = jnp.take_along_axis(
+                live_depth, geom.bot_k[..., None], axis=-1)[..., 0]
+            utr, vtr = bbl_transports(
+                tr_a, tr_b, geom, dy_u, dx_v,
+                gamma_s=gamma_s, rho_0=rho0,
+                bottom_depth_m=live_bottom_depth,
+            )
+            zero_a, zero_b = jnp.zeros_like(tr_a), jnp.zeros_like(tr_b)
+            bbl_a, bbl_b = apply_bbl_adv_tendency(
+                zero_a, zero_b, tr_a, tr_b, h_stage, area, geom, utr, vtr,
+                nlev=tr_a.shape[-1],
+            )
+            # tra_bbl adds a concentration tendency to Krhs using Kbb tracers
+            # and Kmm volume (stprk3_stg.F90:588; trabbl.F90:129-136,243-284).
+            # This helper evolves content, so convert h*Krhs to a negative
+            # flux divergence before the final dt update.
+            fd_a = fd_a - h_stage * bbl_a
+            fd_b = fd_b - h_stage * bbl_b
+        return fd_a, fd_b
 
     def _stage(base, flux_div, stage_dt, h_stage):
         out = (h_k_old * base - stage_dt * flux_div) / jnp.maximum(
@@ -1470,8 +1508,11 @@ class LatLonCGridOceanModel:
         config: LatLonCGridOceanConfig | None = None,
         *,
         iwm_forcing=None,
+        _nemo_ws_test_hooks: _NEMOWSRK3TestHooks | None = None,
     ):
         self.z_coord = z_coord
+        self._nemo_ws_test_hooks = (
+            _nemo_ws_test_hooks or _NEMOWSRK3TestHooks())
         self.config = self._validate_config(
             config or LatLonCGridOceanConfig.from_flat())
         # Convert LatLonGrid -> LatLonCGridGeometry once at construction.
@@ -1861,14 +1902,6 @@ class LatLonCGridOceanModel:
         config: LatLonCGridOceanConfig,
     ) -> LatLonCGridOceanConfig:
         """Resolve conditional defaults, then validate configuration ranges."""
-        if config.tracer_rk3_transport_time_levels is None:
-            config = config._replace(
-                tracer_rk3_transport_time_levels=(
-                    "nemo_kmm"
-                    if config.tracer_time_integrator == "rk3_ws"
-                    else "frozen_final"
-                )
-            )
         nonnegative = {
             "A_h": config.lateral_viscosity.A_h,
             "B_h": config.lateral_viscosity.B_h,
@@ -1877,6 +1910,7 @@ class LatLonCGridOceanModel:
             "K_v": config.K_v,
             "hyperdiff_coeff": config.hyperdiff_coeff,
             "barotropic_diffusion_alpha": config.barotropic.barotropic_diffusion_alpha,
+            "bbl_gamma_s": config.bbl_gamma_s,
         }
         for name, value in nonnegative.items():
             if value < 0.0:
@@ -2306,6 +2340,13 @@ class LatLonCGridOceanModel:
                 f"{sorted(VALID_VERTICAL_MOMENTUM_SCHEME)}, "
                 f"got {_vert_mom_scheme!r}",
             )
+        if (_vert_mom_scheme == "nemo_up3"
+                and (config.momentum_advection != "flux_form"
+                     or config.momentum_flux_scheme != "upwind3")):
+            raise ValueError(
+                "vertical_momentum_scheme='nemo_up3' is one dynadv_up3 "
+                "program and requires momentum_advection='flux_form' with "
+                "momentum_flux_scheme='upwind3'")
         # #1226 level-29-onset fix: bottom/straddling-face mask convention for
         # nemo_advective_vertical_momentum_advection (only consumed under
         # vertical_momentum_scheme="nemo_advective"; validated unconditionally
@@ -2884,6 +2925,21 @@ class LatLonCGridOceanModel:
                 'pgf_scheme="nemo_sco" requires pgf_quadrature='
                 '"nemo_trapezoid" (NEMO dynhpg pairs the hpg_sco stencil '
                 "with its trapezoid vertical quadrature).")
+        if (getattr(config, "pgf_quadrature", "cell_integral")
+                == "nemo_trapezoid" and pgf_scheme != "nemo_sco"):
+            raise ValueError(
+                'pgf_quadrature="nemo_trapezoid" is the hpg_sco recurrence '
+                'and requires pgf_scheme="nemo_sco"')
+        _eos_name = getattr(config, "eos", "linear")
+        _eos_depth = getattr(config, "eos_depth", "insitu")
+        if _eos_name == "nemo_teos10" and _eos_depth != "geometric":
+            raise ValueError(
+                'eos="nemo_teos10" requires eos_depth="geometric"; NEMO '
+                "passes gdept directly to eosbn2")
+        if _eos_depth == "geometric" and _eos_name != "nemo_teos10":
+            raise ValueError(
+                'eos_depth="geometric" is certified only with '
+                'eos="nemo_teos10"')
         _rdsm = getattr(config, "runoff_depth_spread_map", None)
         if _rdsm is not None:
             import numpy as _np
@@ -2983,55 +3039,36 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"tracer_time_integrator must be one of {_valid_time_int}, "
                 f"got {config.tracer_time_integrator!r}")
-        _fct_predictor = getattr(
-            config, "tracer_fct_low_order_predictor", "one_step")
-        if _fct_predictor not in ("one_step", "nemo_rk3_two_step"):
+        _mom_ti_for_ws = getattr(config, "momentum_time_integrator", "euler")
+        if ((config.tracer_time_integrator == "rk3_ws")
+                != (_mom_ti_for_ws == "rk3_ws")):
             raise ValueError(
-                "tracer_fct_low_order_predictor must be 'one_step' or "
-                f"'nemo_rk3_two_step', got {_fct_predictor!r}")
-        if (_fct_predictor == "nemo_rk3_two_step"
-                and (config.tracer_time_integrator != "rk3_ws"
-                     or config.tracer_advection not in ("fct2", "ppm_fct"))):
-            raise ValueError(
-                "tracer_fct_low_order_predictor='nemo_rk3_two_step' "
-                "requires rk3_ws with fct2 or ppm_fct")
-        _rk3_transport_levels = getattr(
-            config, "tracer_rk3_transport_time_levels", "frozen_final")
-        if _rk3_transport_levels not in ("frozen_final", "nemo_kmm"):
-            raise ValueError(
-                "tracer_rk3_transport_time_levels must be 'frozen_final' or "
-                f"'nemo_kmm', got {_rk3_transport_levels!r}")
-        if (_rk3_transport_levels == "nemo_kmm"
-                and config.tracer_time_integrator != "rk3_ws"):
-            raise ValueError(
-                'tracer_rk3_transport_time_levels="nemo_kmm" requires '
-                'tracer_time_integrator="rk3_ws"')
-        if (_rk3_transport_levels == "nemo_kmm"
-                and getattr(config, "momentum_time_integrator", "euler")
-                != "rk3_ws"):
-            raise ValueError(
-                'tracer_rk3_transport_time_levels="nemo_kmm" requires '
-                'momentum_time_integrator="rk3_ws" so Kmm stages exist')
-        if (_rk3_transport_levels == "nemo_kmm"
-                and getattr(config, "gm_redi", None) is not None):
-            raise ValueError(
-                'tracer_rk3_transport_time_levels="nemo_kmm" does not yet '
-                "support staged GM bolus transports")
-        if getattr(config, "rk3_ws_momentum_transport_reconcile", False):
-            if config.tracer_time_integrator != "rk3_ws" or getattr(
-                    config, "momentum_time_integrator", "euler") != "rk3_ws":
+                "NEMO rk3_ws is one coupled momentum/tracer stage program; "
+                "select rk3_ws for both integrators or for neither")
+        if config.tracer_time_integrator == "rk3_ws":
+            if config.tracer_advection != "fct2":
                 raise ValueError(
-                    "rk3_ws_momentum_transport_reconcile requires WS-RK3 "
-                    "momentum and tracers")
-            if not getattr(config, "rk3_ws_stage_barotropic_correction", False):
-                raise ValueError(
-                    "rk3_ws_momentum_transport_reconcile requires "
-                    "rk3_ws_stage_barotropic_correction=True")
+                    "the certified NEMO rk3_ws scheme identity requires "
+                    "tracer_advection='fct2'; FCT4/PPM is not certified")
             if (config.momentum_advection != "flux_form"
-                    or config.momentum_flux_scheme != "upwind3"):
+                    or config.momentum_flux_scheme != "upwind3"
+                    or getattr(config, "vertical_momentum_scheme",
+                               "upwind_perturbation") != "nemo_up3"):
                 raise ValueError(
-                    "rk3_ws_momentum_transport_reconcile requires NEMO's "
-                    "flux_form/upwind3 momentum path")
+                    "NEMO rk3_ws requires the coupled flux_form/upwind3/"
+                    "nemo_up3 momentum program")
+            if getattr(config, "outer_integrator", "forward_euler") != "forward_euler":
+                raise ValueError(
+                    "NEMO rk3_ws does not compose with a second outer "
+                    "integrator")
+            if getattr(config, "gm_redi", None) is not None:
+                raise ValueError(
+                    "NEMO rk3_ws does not yet support staged GM bolus "
+                    "transports")
+        if config.bbl_adv_option not in (0, 2):
+            raise ValueError("bbl_adv_option must be 0 or 2")
+        if config.bbl_adv_option == 2 and config.bbl_gamma_s <= 0.0:
+            raise ValueError("bbl_adv_option=2 requires bbl_gamma_s > 0")
         if getattr(config, "store_salt_flux", False):
             # Refuse-not-ignore: the capture stores "the flux the model
             # applied", which is only well-defined per step on the euler
@@ -3078,12 +3115,6 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"momentum_time_integrator must be one of {_valid_mom_int}, "
                 f"got {_mom_ti!r}")
-        if (getattr(config, "rk3_ws_stage_barotropic_correction", False)
-                and _mom_ti != "rk3_ws"):
-            raise ValueError(
-                "rk3_ws_stage_barotropic_correction=True requires "
-                'momentum_time_integrator="rk3_ws"')
-
         # Implicit surface-forcing placement (Veros) requires the implicit
         # vertical-mixing solve — that is where the surface TRACER source is
         # added (the backward-Euler RHS).  With explicit vertical mixing there
@@ -4490,17 +4521,17 @@ class LatLonCGridOceanModel:
                 **_baro_seed,
             )
 
-        # Causal NEMO-RK3 experiment: HYB is the live stprk3_stg barotropic
+        # NEMO-RK3 scheme identity: HYB is the live stprk3_stg barotropic
         # update (module default at :44; stages at :143-144,206-207,225), so
         # every Kaa stage receives the final external-mode velocity.  The
-        # historical legoESM split instead runs all baroclinic WS stages with
-        # zero-mean RHS and performs one replacement after u_star.  When this
-        # opt-in is selected, recompute the two tendency-bearing stages with
+        # historical legoESM split ran all baroclinic WS stages with zero-mean
+        # RHS and performed one replacement after u_star.  Recompute the two
+        # tendency-bearing stages with
         # the ACTUAL post-solve depth mean and install that same mean at every
-        # Kaa, exactly where NEMO does at stprk3_stg.F90:433-446.  Defaults stay
-        # byte-identical; this option exists so the ownership experiment is a
-        # real candidate-vs-candidate trajectory, not a zero-array assertion.
-        if getattr(_cfg_b, "rk3_ws_stage_barotropic_correction", False):
+        # Kaa, exactly where NEMO does at stprk3_stg.F90:433-446.  The private
+        # hook can disable this only for causal tests; public rk3_ws has no arm.
+        if (getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws"
+                and self._nemo_ws_test_hooks.stage_barotropic_correction):
             def _replace_stage_mean(u_in, v_in, target_u, target_v):
                 mean_u = (jnp.sum(u_in * h_u_pre, axis=-1) / H_u_pre
                           * state.u_mask.data)
@@ -4525,8 +4556,8 @@ class LatLonCGridOceanModel:
             v1_raw = v0 + (dt_mom / 3.0) * dv_dt_pert
             u1_corr, v1_corr = _replace_stage_mean(
                 u1_raw, v1_raw, target_u, target_v)
-            _use_transport_reconcile = getattr(
-                _cfg_b, "rk3_ws_momentum_transport_reconcile", False)
+            _use_transport_reconcile = (
+                self._nemo_ws_test_hooks.momentum_transport_reconcile)
             _transport_target = (
                 (transport_target_u, transport_target_v)
                 if _use_transport_reconcile else None)
@@ -4885,8 +4916,8 @@ class LatLonCGridOceanModel:
             )
 
         _nemo_ws_stage_transport_geometry = None
-        if (getattr(_cfg_b, "tracer_rk3_transport_time_levels",
-                    "frozen_final") == "nemo_kmm"):
+        if (getattr(_cfg_b, "tracer_time_integrator", "euler") == "rk3_ws"
+                and self._nemo_ws_test_hooks.kmm_tracer_transports):
             if _nemo_ws_velocity_stages is None:
                 raise ValueError(
                     "nemo_kmm tracer transports require materialized WS "
@@ -5485,6 +5516,25 @@ class LatLonCGridOceanModel:
                 )
                 _pair_divs = (None, None)
             elif _tti == "rk3_ws":
+                _bbl_context = None
+                if (_cfg_b.bbl_adv_option == 2
+                        and not self._nemo_ws_test_hooks.disable_bbl):
+                    from legoesm.ocean.physics.bbl_adv import (
+                        bbl_static_geometry,
+                    )
+                    _h_ref = jnp.asarray(_zc.h_partial)
+                    if _h_ref.ndim == 1:
+                        _h_ref = jnp.broadcast_to(_h_ref, h_k_old.shape)
+                    _bbl_geom = bbl_static_geometry(
+                        _h_ref, state.land_mask.data)
+                    _bbl_context = (
+                        _bbl_geom,
+                        jnp.asarray(_grid.area_T),
+                        jnp.asarray(_grid.dy_u)[:, 1:-1],
+                        jnp.asarray(_grid.dx_v)[1:-1, :],
+                        _cfg_b.bbl_gamma_s,
+                        _cfg_b.rho_0,
+                    )
                 T_corrected, S_corrected = _nemo_ws_rk3_tracer_pair_step(
                     T_mid, S_mid, _adv,
                     mass_flux_u_tr, mass_flux_v_tr, w_baro_tr,
@@ -5492,8 +5542,11 @@ class LatLonCGridOceanModel:
                     _grid, dt, active_3d, recon_fill_mask=_wall_fill_mask,
                     linssh_top_flux=_linssh,
                     stage_transport_geometry=_nemo_ws_stage_transport_geometry,
-                    fct_low_order_predictor=getattr(
-                        _cfg_b, "tracer_fct_low_order_predictor", "one_step"),
+                    fct_low_order_predictor=(
+                        "nemo_rk3_two_step"
+                        if self._nemo_ws_test_hooks.two_step_fct_predictor
+                        else "one_step"),
+                    bbl_context=_bbl_context,
                 )
                 _pair_divs = (None, None)
             else:

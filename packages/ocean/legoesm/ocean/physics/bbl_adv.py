@@ -36,7 +36,7 @@ on the tripole the cyclic halo columns are slaved by ``ew_cyclic_overlap``
 so the seam exchange is represented through the overlap, and on a regular
 grid the wrap face is omitted — one face of ~360 at 1 deg, negligible and
 safe).  References: Beckmann & Doscher (1997) JPO; Campin & Goosse (1999)
-Tellus; NEMO 5.0.1 ``TRA/trabbl.F90``.
+Tellus; NEMO 5.0.2 ``TRA/trabbl.F90``.
 """
 
 from __future__ import annotations
@@ -81,7 +81,7 @@ __physics_contract__ = {
     "differentiable": True,
     "reference": (
         "Campin & Goosse (1999) Tellus 51A 412-430; Beckmann & Doscher "
-        "(1997) JPO 27 581-591; NEMO 5.0.1 TRA/trabbl.F90 (ORCA1 RUN_REF: "
+        "(1997) JPO 27 581-591; NEMO 5.0.2 TRA/trabbl.F90 (ORCA1 RUN_REF: "
         "nn_bbl_adv=2, rn_gambbl=20 s)"
     ),
     "idealized_test": (
@@ -175,7 +175,8 @@ def _bottom_ts(T, S, bot_k):
 
 def bbl_transports(T: jnp.ndarray, S: jnp.ndarray, geom: BBLGeometry,
                    dy_u: jnp.ndarray, dx_v: jnp.ndarray, *,
-                   gamma_s: float, rho_0: float):
+                   gamma_s: float, rho_0: float,
+                   bottom_depth_m: jnp.ndarray | None = None):
     """Campin-Goosse down-slope transports per face [m^3/s].
 
         tr = facewidth * e3_bbl * (g*gamma) * max(0, zgdrho) * mgrh
@@ -187,21 +188,22 @@ def bbl_transports(T: jnp.ndarray, S: jnp.ndarray, geom: BBLGeometry,
 
         zgdrho = max(0, abar*(T_deep - T_shelf) - bbar*(S_deep - S_shelf))
 
-    which is the linearized (rho_shelf - rho_deep)/rho — positive only when
+    which is the linearized (rho_shelf - rho_deep)/rho0 — positive only when
     the shelf bottom cell is denser.  A naive direct-density difference at
     the face-mean pressure misses the compressibility asymmetry across
     steep shelf-to-deep faces (codex HIGH) — exactly the overflow faces
     this scheme exists for.
     """
-    from legoesm.ocean.eos import (
-        haline_contraction_coeff, thermal_expansion_coeff,
-    )
+    from legoesm.ocean.eos import nemo_roquet_alpha_beta
     g_gamma = constants.g * gamma_s
 
     Tb, Sb = _bottom_ts(T, S, geom.bot_k)
-    p_bot = rho_0 * constants.g * geom.dep_bot          # per-cell bottom p
-    alpha = thermal_expansion_coeff(Tb, Sb, p_bot)
-    beta = haline_contraction_coeff(Tb, Sb, p_bot)
+    depth = geom.dep_bot if bottom_depth_m is None else bottom_depth_m
+    # NEMO option 2 calls eos_rab on Kbb bottom T/S at each column's Kmm
+    # geometric depth, then averages alpha/beta across the face before the
+    # density gate (trabbl.F90:342-353,415-454).  The Roquet helper is the
+    # literal eosbn2 polynomial, including NEMO's rho0=1026 normalization.
+    alpha, beta = nemo_roquet_alpha_beta(Tb, Sb, depth, rho0=rho_0)
 
     def _face_tr(axis):
         if axis == 0:   # j-faces

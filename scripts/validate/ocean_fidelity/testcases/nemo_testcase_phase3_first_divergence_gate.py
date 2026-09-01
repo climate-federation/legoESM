@@ -234,7 +234,10 @@ def run(
 ) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSRK3TestHooks,
+    )
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_lock_exchange_zco_card
     from legoesm.ocean.vertical import compute_layer_thickness
     from legoesm.ocean.dynamics.latlon_cgrid_operators import min_cell_to_uface
@@ -335,29 +338,28 @@ def run(
     oracle_T = entry["T"][..., :nlev]
     oracle_u = entry["u"][..., :nlev]
     state_kmm = model.step(initial, dt=card.dt_s)
-    cfg_frozen = card.recipe.model_config._replace(
-        tracer_rk3_transport_time_levels="frozen_final",
-        rk3_ws_stage_barotropic_correction=False,
-        rk3_ws_momentum_transport_reconcile=False)
     state_frozen = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, cfg_frozen).step(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            stage_barotropic_correction=False,
+            momentum_transport_reconcile=False,
+            kmm_tracer_transports=False)).step(
             initial, dt=card.dt_s)
-    cfg_baseline = card.recipe.model_config._replace(
-        rk3_ws_stage_barotropic_correction=False,
-        rk3_ws_momentum_transport_reconcile=False)
     state_baseline = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, cfg_baseline).step(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            stage_barotropic_correction=False,
+            momentum_transport_reconcile=False)).step(
             initial, dt=card.dt_s)
-    cfg_stage_baro = card.recipe.model_config._replace(
-        rk3_ws_stage_barotropic_correction=True,
-        rk3_ws_momentum_transport_reconcile=False)
     state_stage_baro = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, cfg_stage_baro).step(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            momentum_transport_reconcile=False)).step(
             initial, dt=card.dt_s)
-    cfg_one_step_fct = card.recipe.model_config._replace(
-        tracer_fct_low_order_predictor="one_step")
     state_one_step_fct = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, cfg_one_step_fct).step(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            two_step_fct_predictor=False)).step(
             initial, dt=card.dt_s)
 
     frozen_T_row = score(
@@ -469,6 +471,17 @@ def run(
         "rows": rows,
         "failed_rows": failed,
         "ownership": {
+            "scheme_identity_collapse": {
+                "classification": "CONFIRMED_STRUCTURAL",
+                "evidence": (
+                    "public RK3 micro-selectors were removed; selecting the "
+                    "NEMO WS-RK3 program now always runs Kmm transports, the "
+                    "two-step FCT predictor, per-stage barotropic correction, "
+                    "and distinct advecting-transport reconciliation together"),
+                "nested_arms": (
+                    "NEMO runs both stage correction and transport reconcile; "
+                    "stprk3_stg.F90:433-446 and :257-274"),
+            },
             "stage1_eos_hpg": {
                 "classification": "CONFIRMED_EXONERATED",
                 "evidence": "full at-rest u RHS is inside the registered bar",
@@ -489,11 +502,16 @@ def run(
                 "movement": stage_baro_u_error - baseline_u_error,
             },
             "momentum_stage_advecting_transport": {
-                "classification": "PLAUSIBLE_PARTIAL_OWNER",
+                "classification": "UNMEASURED_AFTER_STRUCTURAL_COLLAPSE",
                 "stage_mean_only_u_error": stage_baro_u_error,
                 "stage_mean_plus_transport_u_error": full_u_error,
                 "movement": full_u_error - stage_baro_u_error,
-                "reason": "70% residual reduction, but the row remains over bar",
+                "retraction": (
+                    "the former 70% partial-owner label belonged to a nested "
+                    "micro-selector composition that is no longer a public "
+                    "model; with NEMO's mandatory final un_adv/hu reconcile, "
+                    "the private nested control has zero movement and cannot "
+                    "assign ownership"),
             },
             "horizontal_up3_spatial_operator": {
                 "classification": "CONFIRMED_EXONERATED",
@@ -532,8 +550,9 @@ def run(
         "artifacts_sha256": artifacts,
         "unmeasured": [
             "individual FCT limiter coefficients and antidiffusive fluxes",
-            "owner of the remaining kt=2 u residual after stage transport; "
-            "live-Kmm horizontal UP3 and vertical viscosity are exonerated",
+            "owner of the remaining kt=2 u residual under the structurally "
+            "complete final un_adv/hu reconciliation; the former nested-stage "
+            "control is non-discriminating",
             "kt>=3 and OVERFLOW are reported by the separate explicit "
             "owner-exhausted continuation artifact, not this first-step gate",
         ],

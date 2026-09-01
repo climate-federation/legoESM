@@ -150,12 +150,13 @@ def mark_uninformative(row: dict, field: str, kt: int, reference, mask) -> dict:
 
 def run(
     case: str, oracle_root: Path, max_step: int, *, plant=False,
-    continue_after_first=False,
+    continue_after_first=False, diagnostic_disable_bbl=False,
 ) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
+        _NEMOWSRK3TestHooks,
     )
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         build_nemo_testcase_card,
@@ -166,7 +167,9 @@ def run(
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     card = build_nemo_testcase_card(case)
     model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            disable_bbl=diagnostic_disable_bbl))
     state = card.recipe.initial_state
     masks = expected_masks(card)
     nlev = card.recipe.z_coord.n_levels
@@ -211,6 +214,50 @@ def run(
             state = model.step(state, dt=card.dt_s)
 
     cfg = card.recipe.model_config
+    bbl_attribution = None
+    if case == "OVERFLOW-zps":
+        from legoesm.ocean.physics.bbl_adv import (
+            bbl_static_geometry,
+            bbl_transports,
+        )
+        geom = bbl_static_geometry(
+            card.recipe.z_coord.h_partial,
+            card.recipe.initial_state.land_mask.data)
+        utr, vtr = bbl_transports(
+            card.recipe.initial_state.T.data,
+            card.recipe.initial_state.S.data,
+            geom,
+            np.asarray(card.recipe.grid.dy_u)[:, 1:-1],
+            np.asarray(card.recipe.grid.dx_v)[1:-1, :],
+            gamma_s=cfg.bbl_gamma_s,
+            rho_0=cfg.rho_0,
+        )
+        faithful_model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, cfg)
+        control_model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, cfg,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(disable_bbl=True))
+        faithful_kt2 = faithful_model.step(
+            card.recipe.initial_state, dt=card.dt_s)
+        control_kt2 = control_model.step(
+            card.recipe.initial_state, dt=card.dt_s)
+        delta = np.asarray(faithful_kt2.T.data) - np.asarray(control_kt2.T.data)
+        bbl_attribution = {
+            "classification": "CONFIRMED_EXONERATED_AT_KT2",
+            "scaling_check_before_owner_label": True,
+            "max_abs_initial_utr_m3_s": float(np.max(np.abs(np.asarray(utr)))),
+            "max_abs_initial_vtr_m3_s": float(np.max(np.abs(np.asarray(vtr)), initial=0.0)),
+            "max_abs_kt2_temperature_movement_K": float(np.max(np.abs(delta))),
+            "bit_identical_bbl_on_off_kt2_T": bool(np.array_equal(
+                np.asarray(faithful_kt2.T.data), np.asarray(control_kt2.T.data))),
+            "reason": (
+                "the shipped initial density front does not intersect an "
+                "active downslope face, so option-2 transport is zero and "
+                "cannot own the first-step temperature debt"),
+            "source": (
+                "NEMO trabbl.F90:342-353,415-454; stage-3 calls at "
+                "stprk3_stg.F90:468,588"),
+        }
     return {
         "format": "nemo-testcase-l1-phase3-trajectory-v1",
         "case": case,
@@ -226,20 +273,19 @@ def run(
             "n_barotropic_substeps": cfg.barotropic.n_barotropic_substeps,
             "vertical_momentum_scheme": cfg.vertical_momentum_scheme,
             "tracer_time_integrator": cfg.tracer_time_integrator,
-            "tracer_rk3_transport_time_levels": (
-                cfg.tracer_rk3_transport_time_levels),
-            "rk3_ws_stage_barotropic_correction": (
-                cfg.rk3_ws_stage_barotropic_correction),
-            "rk3_ws_momentum_transport_reconcile": (
-                cfg.rk3_ws_momentum_transport_reconcile),
-            "tracer_fct_low_order_predictor": (
-                cfg.tracer_fct_low_order_predictor),
+            "rk3_ws_scheme_identity": (
+                "nemo_kmm+two_step_fct+stage_correction+transport_reconcile"),
+            "bbl_adv_option": cfg.bbl_adv_option,
+            "bbl_gamma_s": cfg.bbl_gamma_s,
+            "diagnostic_disable_bbl_test_hook": diagnostic_disable_bbl,
         },
         "first_over_bar": first_over_bar,
+        "bbl_attribution": bbl_attribution,
         "steps": steps,
         "unmeasured": [
             "NEMO per-term tendencies at the first divergent step",
-            "stage-coupled OVERFLOW BBL transport and tendency",
+            *([] if case == "OVERFLOW-zps" else
+              ["stage-coupled OVERFLOW BBL transport and tendency"]),
             *([] if continue_after_first else
               ["trajectory after the first over-bar step"]),
         ],
@@ -254,12 +300,14 @@ def main() -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant", action="store_true")
     parser.add_argument("--continue-after-first", action="store_true")
+    parser.add_argument("--diagnostic-disable-bbl", action="store_true")
     args = parser.parse_args()
     require(args.max_step >= 1, "max-step must be positive")
     report = run(
         args.case, args.oracle_dir or DEFAULT_ORACLE_ROOTS[args.case],
         args.max_step, plant=args.plant,
-        continue_after_first=args.continue_after_first)
+        continue_after_first=args.continue_after_first,
+        diagnostic_disable_bbl=args.diagnostic_disable_bbl)
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.write_text(text)

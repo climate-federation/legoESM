@@ -236,6 +236,95 @@ card construction, and invalid auto-substep inputs.  These implementations
 close the former **selector availability** waivers; the coupled RK3 program is
 separately red below.
 
+## Structural-collapse and BBL wiring round
+
+**Standing rule refinement (binding for this and future rounds): where NEMO
+has no switch, legoESM gets no switch.** The four owner-hunt fields
+`tracer_rk3_transport_time_levels`, `tracer_fct_low_order_predictor`,
+`rk3_ws_stage_barotropic_correction`, and
+`rk3_ws_momentum_transport_reconcile` were branch-only and had no external
+users. They are removed from `LatLonCGridOceanConfig`. Selecting the coupled
+tracer/momentum `rk3_ws` program now unconditionally means Kmm stage
+transports, the RK3 two-step FCT predictor, the per-stage external-mode
+correction, and the distinct `un_adv/hu` transport reconciliation. NEMO runs
+the last two together at `src/OCE/stprk3_stg.F90:433-446` and `:257-274`;
+the prior nested arms were not a reference model. Causal controls now enter
+only through `_NEMOWSRK3TestHooks`. Families 1--4 in the earlier audit are
+therefore structurally unrepresentable in public configuration.
+
+The remaining accepted reject dispositions are executable guards:
+
+- family 5: tracer and momentum WS-RK3 must be selected together;
+- family 6: this certified scheme identity accepts FCT2, not the unattested
+  FCT4/PPM composition;
+- family 7: `nemo_up3` requires the single flux-form/upwind3 momentum program;
+- families 8--10: `nemo_teos10` and geometric depth are bidirectionally paired,
+  as are `nemo_sco` and `nemo_trapezoid`;
+- family 11: `validate_nemo_testcase_card` pins each named oracle's filter,
+  auto-substep count, and BBL tuple and rejects mutations;
+- family 12: validation proves `f=0` and exactly one wet meridional row, so the
+  inherited rotation operator is structurally absent; a geometry that makes it
+  live is rejected;
+- family 13: the cards select NEMO-literal face-depth, continuity,
+  transport-accumulation, seed, surface-PGF, and implicit-ZDF programs.
+  Literal raw `wgtbtp2` accumulation was extended to the executed filter-1 and
+  filter-3 windows from `dynspg_ts.F90:1058-1102,999-1000`. The unmatched live
+  eta diffusion is zero, explicitly enforcing Rule 9.
+  The stage-end closed-wall tracer fill is pinned to NEMO's `lbc_lnk` call
+  (`stprk3_stg.F90:614-626`), and final 3-D momentum reconciliation selects
+  `un_adv/hu` transport (`dynspg_ts.F90:1170-1172`).
+
+Pre-implementation search found the shared canonical operator in
+`packages/ocean/legoesm/ocean/physics/bbl_adv.py` and analytic tests in
+`tests/ocean/unit/test_bbl_adv.py`; solver integration was missing. The search
+also found that its option-2 density gate used Wright derivatives while NEMO
+calls `eos_rab`. It now uses the literal Roquet TEOS-10 alpha/beta polynomial
+on Kbb bottom T/S at each column's Kmm geometric depth
+(`src/OCE/TRA/trabbl.F90:342-353,415-454`). Static slope indices and the
+minimum bottom-cell face thickness follow `tra_bbl_init:507-533`; the closed
+three-leg tendency follows `tra_bbl_adv:243-284`. Solver wiring is at RK stage
+3 only, matching `stprk3_stg.F90:468,588`, with Kbb tracers and Kmm volume.
+The capped host-Euler wrapper was not used because its cap has no oracle
+analogue.
+
+The required scaling check exonerates BBL at the first OVERFLOW divergence.
+On the shipped kt=1 state, `max|utr_bbl|=max|vtr_bbl|=0`; the faithful and
+private BBL-disabled candidates are bit-identical in kt=2 temperature
+(`max|delta T|=0 K`). The initial density front has not reached an active
+downslope face, so BBL cannot own the old `5.26e-7` normalized T debt.
+Classification: **CONFIRMED EXONERATED AT kt=2**, not a plausible owner. A
+synthetic dense-shelf violation through the real model step proves the stage-3
+path fires and retains closed-exchange tracer content to its fp64 accumulation
+floor.
+
+The simultaneous removal of unattested generic arithmetic changed the faithful
+OVERFLOW kt=2 score from `5.26e-7` to `2.1810780026e-8` in T; SSH is
+`1.2372313177e-7`. Correctly selecting NEMO's final `un_adv/hu` transport
+reconciliation exposes a new `2.4321816013e-2` u debt. The source-backed arm
+is retained; restoring the known-wrong velocity-average arm would violate the
+standing rule. This round does **not** assign the
+T improvement to BBL: the BBL on/off result is exactly zero. Attribution among
+the newly selected literal free-surface/ZDF operands is UNMEASURED. The
+machine artifact `overflow_trajectory_gate_structural_collapse_bbl.json`
+carries the scaling check, source register, fp64 stamp, and remaining debt;
+the companion BBL-off artifact is retained as the causal control. The
+regenerated LOCK ownership JSON records that NEMO's stage correction and
+transport reconciliation ship as one collapsed scheme identity. Under the
+complete final `un_adv/hu` reconciliation, the old nested stage-transport
+control has zero movement. Its former 70% partial-owner label is therefore
+retracted for the current scheme and replaced by
+`UNMEASURED_AFTER_STRUCTURAL_COLLAPSE`; the owner of the new final-reconcile
+u debt is UNMEASURED.
+
+Focused verification for this round is **113 tests across seven explicitly
+listed files**: 15 card + 6 WS-RK3 + 8 BBL + 54 barotropic-common + 17 config
+footguns + 7 trajectory-gate + 6 first-divergence-gate tests. The first run
+found two stale test expectations (a conservation tolerance that omitted the
+large content scale and an EOS test that constructed the now-rejected
+NEMO-polynomial/insitu pairing); both were corrected, then the identical
+113-test scope passed. This count is separate from every historical count
+above and is neither averaged nor merged with them.
+
 ## First divergence and ownership
 
 The finer-cadence NEMO run used the certified phase-1 binary and configuration,
@@ -318,10 +407,11 @@ cadence oracle used the certified zps binary/configuration on one CPU process,
 changing only `nn_itend=3` and `nn_stock=1`; hashes pin both namelists, output,
 and all three dumps.  No certified configuration or binary was modified.
 
-OVERFLOW's u/SSH debt precedes any defensible BBL ownership claim: BBL affects
-tracers, not the external-mode SSH discrepancy.  The canonical BBL kernel
-exists and the card pins `nn_bbl_adv=2, rn_gambbl=20`, but its stage-coupled
-trajectory contribution remains UNMEASURED and is not credited either way.
+The prior statement that stage-coupled BBL remained UNMEASURED is retracted by
+the structural-collapse round above. The wired on/off control is bit-identical
+at kt=2 because its initial transport is zero, so BBL is now CONFIRMED
+EXONERATED at that step. The u/SSH debt remains independent evidence that the
+first owner lies outside this tracer-only term.
 
 ## Gates, controls, test reconciliation, and artifacts
 
@@ -363,7 +453,8 @@ receipt reproducible without committing quota-heavy binary dumps.
 - owner of the final LOCK `1.7121e-10` wet-point L-infinity u residual after
   distinct stage transport; live-Kmm UP3 and vertical viscosity are exonerated;
 - individual NEMO/legoESM FCT limiter coefficients and antidiffusive fluxes;
-- OVERFLOW-zps kt=2 owner decomposition and stage-coupled BBL transport;
+- owner of the remaining OVERFLOW-zps kt=2 T/u/SSH debt after BBL was
+  confirmed inactive; attribution among newly selected literal operands;
 - LOCK and OVERFLOW states beyond kt=3;
 - long-trajectory phenomenology and statistical equivalence, which are beyond
   this first-divergence dispatch.
