@@ -156,3 +156,23 @@ extends `gplant_mol` down to its spec bound (5e-4) rather than stopping at 1e-3.
 **Sequencing (hold-out protection, unchanged):** the dry-site ladder runs only
 after the stage-1 verdict is fixed and published, because two of the five dry
 sites (US-SRM, US-Var) are stage-1 hold-outs.
+
+
+## Stage-1 screen result + compensation diagnostic (measured)
+
+* 5x5 screen: best point (kphio=0.040, beta=60) — the LOW-LOW corner, so
+  pre-registered rule 1 fires: **UNRESOLVED**, no tuned value recommended
+  (training improvement +6.5%; US-Whs and FR-Pue regress at that point).
+* **Compensation diagnostic (GLM-proposed, run on the same outputs): a
+  GPP-only re-ranking AND an LE-only re-ranking each independently pick the
+  SAME corner (0.040, 60).** Under the interpretation fixed before running it,
+  divergence would have meant kphio was being spent to buy LE at GPP's
+  expense; CONVERGENCE means both fluxes genuinely prefer lower capacities —
+  the corner-seeking is NOT flux-trading compensation, and the calibration
+  remains legitimate. The extension grid (kphio down to 0.020, beta down to
+  30, previous corner as overlap control) is the running next probe.
+* Open mechanism question (PLAUSIBLE, unmeasured): the preferred kphio is
+  heading toward roughly HALF the rpmodel default — a factor suggestive of a
+  light-accounting convention mismatch between rpmodel's incident-light kphio
+  (absorptance folded in) and the host canopy's own absorption profile.
+  To be checked against the extension result, not assumed.

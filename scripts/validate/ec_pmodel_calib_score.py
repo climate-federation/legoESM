@@ -52,6 +52,9 @@ def _nrmse(ds, key):
     return (s["rmse"] / sd if sd > 0 else np.nan), s
 
 
+OBJECTIVE = "joint"  # set from --objective in main()
+
+
 def score_point(base_dir, tag, sites):
     """(objective, {site: {flux: (nrmse, skill)}}) or (nan, partial) if any
     site is missing — a grid point may not win by dropping a hard site."""
@@ -64,7 +67,8 @@ def score_point(base_dir, tag, sites):
         per[site] = {f: _nrmse(ds, k) for k, f in (("gpp", "GPP"),
                                                    ("le", "LE"))}
         ds.close()
-    vals = [0.5 * per[s]["GPP"][0] + 0.5 * per[s]["LE"][0] for s in sites]
+    w = {"joint": (0.5, 0.5), "gpp": (1.0, 0.0), "le": (0.0, 1.0)}[OBJECTIVE]
+    vals = [w[0] * per[s]["GPP"][0] + w[1] * per[s]["LE"][0] for s in sites]
     if not np.all(np.isfinite(vals)):
         return np.nan, per
     return float(np.mean(vals)), per
@@ -74,7 +78,16 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--base-dir", default="diagnostics/ec_site_calib")
     ap.add_argument("--sites", nargs="+", default=TRAIN)
+    ap.add_argument("--objective", default="joint",
+                    choices=["joint", "gpp", "le"],
+                    help="joint = the pre-registered 0.5/0.5 objective; "
+                         "gpp/le = single-flux re-ranking, a DIAGNOSTIC of "
+                         "parameter compensation (GLM review: if the LE-only "
+                         "optimum pins at the floor while the GPP-only one "
+                         "sits interior, kphio is being spent to buy LE)")
     args = ap.parse_args()
+    global OBJECTIVE
+    OBJECTIVE = args.objective
 
     rows = []
     for b in BETA_GRID:
@@ -83,8 +96,11 @@ def main() -> int:
             obj, per = score_point(args.base_dir, tag, args.sites)
             rows.append((k, b, tag, obj, per))
 
+    _desc = {"joint": "0.5*nRMSE(GPP) + 0.5*nRMSE(LE)",
+             "gpp": "nRMSE(GPP) only [compensation diagnostic]",
+             "le": "nRMSE(LE) only [compensation diagnostic]"}[args.objective]
     print(f"objective = mean over {len(args.sites)} training sites of "
-          "0.5*nRMSE(GPP) + 0.5*nRMSE(LE)   (lower better)\n")
+          f"{_desc}   (lower better)\n")
     print("kphio     beta   objective")
     for k, b, _, obj, _ in rows:
         print(f"{k:<9s} {b:<6s} " + ("   n/a (incomplete)"
