@@ -144,6 +144,9 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         canopy_capacity_scheme=cfg.physics.get(
             "canopy_capacity_scheme", "prescribed"),
         canopy_g1_source=cfg.physics.get("canopy_g1_source", "table"),
+        canopy_vcmax_profile=cfg.physics.get("canopy_vcmax_profile", "kn"),
+        transpiration_stress=cfg.physics.get(
+            "transpiration_stress", "beta_theta"),
         calibrated_land_physics=bool(
             cfg.physics.get("calibrated_land_physics", False)),
         vc_max25=cfg.physics.get("vc_max25", None),
@@ -410,7 +413,8 @@ def run(args) -> int:
         surf = CanopyConfig(
             max_iters=50, tol=1e-2, stomatal_model=args.stomatal_model,
             capacity_scheme=args.canopy_capacity_scheme,
-            g1_source=args.canopy_g1_source).validate()
+            g1_source=args.canopy_g1_source,
+            vcmax_profile=args.canopy_vcmax_profile).validate()
     elif args.surface_scheme == "simple_seb":
         surf = SimpleSEBConfig()
     else:
@@ -503,7 +507,8 @@ def run(args) -> int:
             # Soil-water latent zero-curtain: off is bit-identical sensible-only
             # heat; on stabilises freezing boreal/Arctic columns.  Preserved
             # through init_land_surface_data (which only _replace()s hydraulics).
-            thermal=SoilThermalConfig(enable_freeze_thaw=bool(args.enable_freeze_thaw)))
+            thermal=SoilThermalConfig(enable_freeze_thaw=bool(args.enable_freeze_thaw)),
+            transpiration_stress=args.transpiration_stress)
         # A land initial condition is only meaningful for the model it was
         # equilibrated under, so a spin-up feeding a calibrated coupled run has to
         # use the same one — including its soil column, which this driver
