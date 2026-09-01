@@ -401,6 +401,8 @@ def run_legoesm(output: Path, arm: str, end_step: int, capture_start: int) -> di
             "baseline",
             "no_tracer_vertical_transport",
             "no_primary_transport_average",
+            "no_adaptive_implicit_momentum",
+            "no_adaptive_implicit_momentum",
         },
         f"bad arm {arm}",
     )
@@ -412,6 +414,8 @@ def run_legoesm(output: Path, arm: str, end_step: int, capture_start: int) -> di
     hooks = _NEMOWSRK3TestHooks(
         disable_tracer_vertical_transport=(arm == "no_tracer_vertical_transport"),
         primary_transport_average=(arm != "no_primary_transport_average"),
+        disable_adaptive_implicit_momentum=(
+            arm == "no_adaptive_implicit_momentum"),
     )
     model = LatLonCGridOceanModel(
         card.recipe.grid,
@@ -513,8 +517,19 @@ def run_legoesm(output: Path, arm: str, end_step: int, capture_start: int) -> di
     return artifact
 
 
-def paired_step_scale(output: Path, completed_before: int) -> dict:
-    """Measure the private tracer-vertical arm from the identical input state."""
+def paired_step_scale(
+    output: Path,
+    completed_before: int,
+    arm_name: str = "disable_tracer_vertical_transport",
+) -> dict:
+    """Measure one private arm from the identical input state."""
+    require(
+        arm_name in {
+            "disable_tracer_vertical_transport",
+            "disable_adaptive_implicit_momentum",
+        },
+        f"bad paired scale arm {arm_name}",
+    )
     require(completed_before >= 0, "negative completed-before step")
     set_policy(PrecisionPolicy.fp64())
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
@@ -526,9 +541,7 @@ def paired_step_scale(output: Path, completed_before: int) -> dict:
         card.recipe.grid,
         card.recipe.z_coord,
         card.recipe.model_config,
-        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
-            disable_tracer_vertical_transport=True
-        ),
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(**{arm_name: True}),
     )
     state = card.recipe.initial_state
     for _ in range(completed_before):
@@ -588,7 +601,7 @@ def paired_step_scale(output: Path, completed_before: int) -> dict:
         "case": "OVERFLOW-zps",
         "backend": jax.default_backend(),
         "precision_policy": repr(get_policy()),
-        "arm": "disable_tracer_vertical_transport",
+        "arm": arm_name,
         "arm_reference": "experimental harness ablation; no reference model",
         "same_input_state": True,
         "rows": rows,
@@ -983,6 +996,14 @@ def main() -> int:
         type=Path,
         default=DEFAULT_CANDIDATE / "paired_step_scale.json",
     )
+    scale_parser.add_argument(
+        "--arm",
+        choices=(
+            "disable_tracer_vertical_transport",
+            "disable_adaptive_implicit_momentum",
+        ),
+        default="disable_tracer_vertical_transport",
+    )
     summary_parser = sub.add_parser("summarize-run")
     summary_parser.add_argument("--root", type=Path, default=DEFAULT_CANDIDATE)
     compare_parser = sub.add_parser("compare-arms")
@@ -1013,7 +1034,7 @@ def main() -> int:
         )
         return 1 if report["status"] == "DEBT" else 0
     elif args.command == "paired-step-scale":
-        paired_step_scale(args.output, args.completed_before)
+        paired_step_scale(args.output, args.completed_before, args.arm)
     elif args.command == "summarize-run":
         summarize_run(args.root)
     elif args.command == "compare-arms":

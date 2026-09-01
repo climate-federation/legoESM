@@ -72,6 +72,18 @@ def test_private_primary_transport_arm_changes_only_private_hook():
     assert changed == ["primary_transport_average"]
 
 
+def test_private_adaptive_momentum_arm_changes_only_private_hook():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks
+
+    baseline = _NEMOWSRK3TestHooks()
+    arm = _NEMOWSRK3TestHooks(disable_adaptive_implicit_momentum=True)
+    changed = [
+        name for name, before, after in zip(baseline._fields, baseline, arm, strict=True)
+        if before != after
+    ]
+    assert changed == ["disable_adaptive_implicit_momentum"]
+
+
 def test_shifted_step_control_fails_time_alignment(monkeypatch, tmp_path):
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_overflow_zps_card
 

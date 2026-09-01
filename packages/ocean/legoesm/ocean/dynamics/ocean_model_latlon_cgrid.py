@@ -1010,6 +1010,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # stage-3 vertical tracer transport.  This hook only zeroes the w transport
     # handed to the tracer flux path; horizontal transport is unchanged.
     disable_tracer_vertical_transport: bool = False
+    # Experimental OVERFLOW localization only.  NEMO's resolved
+    # ln_zad_Aimp is true, so public cards always retain adaptive momentum;
+    # this hook asks whether legoESM's current post-program approximation is
+    # itself an instability owner before the source-exact package is written.
+    disable_adaptive_implicit_momentum: bool = False
     # Return a momentum stage's instantaneous velocity in the prognostic u/v
     # slots after the full step has run.  Private fidelity instrumentation only;
     # zero leaves the returned state untouched.
@@ -5016,6 +5021,7 @@ class LatLonCGridOceanModel:
         #     so running it would unpin the prescribed flow mid-step for zero
         #     physical effect on T/S.
         if (getattr(_cfg_b, "adaptive_implicit_vertadv", False)
+                and not self._nemo_ws_test_hooks.disable_adaptive_implicit_momentum
                 and _pflow is None):
             from legoesm.ocean.dynamics.latlon_cgrid_operators import (
                 interp_cell_to_vface,
