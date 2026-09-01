@@ -17,6 +17,10 @@ from typing import NamedTuple
 import jax
 
 from legoesm.land.canopy.sif import SIFConfig
+
+# Valid canopy Vcmax25 depth profiles (see radiative_transfer.canopy
+# Vcmax integral and coordination_kn).
+VALID_VCMAX_PROFILES = ("kn", "coordination")
 from legoesm.land.p_model import (
     VALID_CAPACITY_SCHEMES,
     VALID_G1_SOURCES,
@@ -264,6 +268,19 @@ class CanopyConfig(NamedTuple):
     # a second instance in one built tree would make land.p_model.* overrides
     # unroutable (params-reachability AMBIGUOUS).  This config carries only
     # the string switches.
+    # --- Vcmax25 depth profile (appended last) ---
+    # "kn" (default — exponential nitrogen profile with the tabulated kn,
+    # bit-identical legacy behaviour) or "coordination" — the profile follows
+    # a fraction ``vcmax_light_frac`` of the two-stream's DIFFUSE-PAR light
+    # envelope (kn_eff = vcmax_light_frac * 0.72 * LAI in the kn exponent
+    # convention).  This is a diffuse-REFERENCE envelope, not the full
+    # time-mean absorbed light (the daily beam term is omitted; design
+    # review, codex).  Observed within-canopy Vcmax gradients are SHALLOWER
+    # than the light gradient (de Pury & Farquhar 1997 PCE; Niinemets),
+    # hence the fraction with default 0.35 (obs range ~0.25-0.45, GLM
+    # design review); strict proportionality is vcmax_light_frac=1.
+    vcmax_profile: str = "kn"             # "kn" | "coordination"
+    vcmax_light_frac: float = 0.35
 
     def validate(self) -> "CanopyConfig":
         """Fail-early check of the static string-dispatch fields.
@@ -293,6 +310,10 @@ class CanopyConfig(NamedTuple):
             raise ValueError(
                 f"unknown g1_source {self.g1_source!r}; the Medlyn-slope scheme "
                 f"must be one of {VALID_G1_SOURCES}")
+        if self.vcmax_profile not in VALID_VCMAX_PROFILES:
+            raise ValueError(
+                f"unknown vcmax_profile {self.vcmax_profile!r}; the canopy "
+                f"Vcmax25 depth profile must be one of {VALID_VCMAX_PROFILES}")
         # NB: g1_source='p_model' with a non-Medlyn stomatal model is legal
         # ONLY under transpiration_stress='phydro' (whose slope mapping
         # covers every model); this config cannot see that switch, so the
@@ -312,6 +333,7 @@ __param_spec__ = {
         },
         "params": {
             "d0_leuning_kpa": {"units": "kPa", "bounds": (0.5, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stomata", "reference": "Leuning 1995 PCE eq. 8; CABLE D0=1.5 kPa", "shape": None},
+            "vcmax_light_frac": {"units": "-", "bounds": (0.1, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "canopy_profile", "reference": "fraction of the diffuse-PAR extinction the Vcmax25 profile follows; obs ~0.25-0.45 (de Pury & Farquhar 1997; Niinemets); 1 = strict light proportionality", "shape": None},
             "epsf": {
                 "units": "1", "bounds": (0.90, 1.0), "tunable_tier": 2,
                 "transform": "sigmoid", "category": "radiation",

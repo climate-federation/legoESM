@@ -418,3 +418,22 @@ def test_ec_site_pmodel_flags_parse_and_guard():
     with pytest.raises(ValueError, match="two providers|providers"):
         run_site("/nonexistent.nc", "prognostic", "/tmp/x", 8,
                  canopy="clmml", capacity_scheme="p_model", clmml_vcmax25=60.0)
+
+
+def test_vcmax_profile_flag_routes_and_refuses():
+    from scripts.run.run_lmip import _parse_args, build_config_from_args
+
+    land = build_config_from_args(_parse_args(
+        ["--lat", "45.0", "--land-surface-scheme", "two_leaf",
+         "--canopy-vcmax-profile", "coordination"])).land
+    assert land.surface_scheme.vcmax_profile == "coordination"
+    # default untouched
+    land_d = build_config_from_args(_parse_args(
+        ["--lat", "45.0", "--land-surface-scheme", "two_leaf"])).land
+    assert land_d.surface_scheme.vcmax_profile == "kn"
+    # two-leaf-only: CLM-ML has its own nitrogen profile
+    import pytest
+    with pytest.raises(ValueError, match="two-leaf"):
+        build_config_from_args(_parse_args(
+            ["--lat", "45.0", "--land-surface-scheme", "clm_ml",
+             "--canopy-vcmax-profile", "coordination"]))

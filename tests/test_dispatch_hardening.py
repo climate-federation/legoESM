@@ -250,6 +250,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # a trace-time backstop at the two-leaf flux entry, so a hand-built
         # config that skipped validate() cannot silently run prescribed
         # parameters while claiming optimality (or vice versa).
+        # vcmax_profile (kn|coordination, 2026-09-01) is guarded by the SAME
+        # two functions: CanopyConfig.validate() membership + a static raise
+        # at the two-leaf flux entry before the jitted RT call.
         ("packages/land/legoesm/land/surface_scheme/two_leaf_canopy.py",
          "compute_two_leaf_canopy_fluxes"),
         # transpiration_stress dispatch (beta_theta|phydro): guarded at the

@@ -41,7 +41,7 @@ from legoesm.land.p_model import (
     acclimated_capacities_c4,
 )
 from legoesm.land.canopy.radiative_transfer import (
-    split_sw_components, canopy_shortwave_rt,
+    split_sw_components, canopy_shortwave_rt, coordination_kn,
 )
 from legoesm.land.canopy.sif import two_leaf_canopy_sif
 from legoesm.land.canopy.stability import (
@@ -469,6 +469,14 @@ def compute_two_leaf_canopy_fluxes(
     SZA = jnp.degrees(jnp.arccos(jnp.clip(cos_zenith, 0.0, 1.0 - 1e-7)))
     PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV = split_sw_components(
         forcing.sw_down, cos_zenith)
+
+    # ---- Vcmax25 depth profile (static dispatch OUTSIDE the jitted RT) ----
+    if cc.vcmax_profile == "coordination":
+        kn = coordination_kn(LAI, cc.vcmax_light_frac)
+    elif cc.vcmax_profile != "kn":
+        raise ValueError(
+            f"unknown vcmax_profile {cc.vcmax_profile!r}; the canopy Vcmax25 "
+            f"depth profile must be one of ('kn', 'coordination')")
 
     sw_rt = canopy_shortwave_rt(
         PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV,

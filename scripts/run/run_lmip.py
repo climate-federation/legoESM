@@ -168,6 +168,13 @@ def _build_surface_scheme(args: argparse.Namespace):
     name = getattr(args, "land_surface_scheme", "simple_seb")
     _cap = getattr(args, "canopy_capacity_scheme", "prescribed")
     _g1s = getattr(args, "canopy_g1_source", "table")
+    _vp = getattr(args, "canopy_vcmax_profile", "kn")
+    if _vp != "kn" and name != "two_leaf":
+        raise ValueError(
+            "--canopy-vcmax-profile applies to the two-leaf canopy only "
+            f"(got --land-surface-scheme {name!r}); the CLM-ML backend has "
+            "its own nitrogen profile and the big-leaf stomata have no "
+            "canopy depth profile.")
     if name == "simple_seb":
         # simple_seb routes the P-model switches onto StomataConfig in
         # build_config_from_args (they live with the big-leaf stomata there).
@@ -180,6 +187,8 @@ def _build_surface_scheme(args: argparse.Namespace):
             overrides["capacity_scheme"] = _cap
         if _g1s != "table":
             overrides["g1_source"] = _g1s
+        if _vp != "kn":
+            overrides["vcmax_profile"] = _vp
         cfg = TwoLeafCanopyConfig()._replace(**overrides) if overrides \
             else TwoLeafCanopyConfig()
         # Fail-early on invalid combos (e.g. g1_source=p_model without medlyn).
@@ -825,6 +834,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "'prescribed' (default, PFT tables) or 'p_model' "
                         "(acclimated optimality Vcmax25 + Jmax25/Vcmax25 for "
                         "C3 and the rpmodel-c4 optimum for C4 columns).")
+    p.add_argument("--canopy-vcmax-profile", default="kn",
+                   choices=["kn", "coordination"],
+                   dest="canopy_vcmax_profile",
+                   help="Two-leaf canopy Vcmax25 depth profile: 'kn' "
+                        "(default, exponential nitrogen profile) or "
+                        "'coordination' (profile follows a tunable fraction "
+                        "of the diffuse-PAR light envelope; "
+                        "land.two_leaf_canopy.vcmax_light_frac via --params).")
     p.add_argument("--canopy-g1-source", default="table",
                    choices=["table", "p_model"],
                    dest="canopy_g1_source",

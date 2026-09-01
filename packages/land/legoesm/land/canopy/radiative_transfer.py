@@ -96,6 +96,21 @@ _KD_LW        = 0.78       # diffuse longwave extinction
 _KB_BEAM      = 0.5        # direct-beam extinction numerator = G-function for a
                            # spherical (uniform) leaf-angle distribution (Ryu 2011)
 
+def coordination_kn(LAI: jax.Array, light_frac: float) -> jax.Array:
+    """Coordination-hypothesis nitrogen extinction (vcmax_profile="coordination").
+
+    The Vcmax25 depth profile follows a fraction ``light_frac`` of the
+    two-stream's DIFFUSE-PAR light envelope.  In this module's kn convention
+    the exponent is ``kn * CI * x`` with x = cumulative LAI fraction (kn
+    integrates over the whole canopy depth), so the per-unit-LAI diffuse
+    extinction ``_KD_PAR`` maps to ``kn = light_frac * _KD_PAR * LAI``.
+    This is a diffuse-REFERENCE envelope (daily beam term omitted), and
+    ``light_frac < 1`` reflects observed Vcmax gradients being shallower
+    than the light gradient (de Pury & Farquhar 1997; Niinemets).
+    """
+    return light_frac * _KD_PAR * LAI
+
+
 
 def canopy_cover(LAI: jax.Array, CI: jax.Array) -> jax.Array:
     """Fraction of the ground shaded by foliage, ``1 - exp(-G CI LAI)``.
