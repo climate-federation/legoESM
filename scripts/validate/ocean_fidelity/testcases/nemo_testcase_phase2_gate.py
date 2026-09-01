@@ -452,6 +452,13 @@ def ic_step1_gate(card, root: Path, *, plant_ic: bool = False) -> tuple[list[dic
                 "exact kt=1 control is non-informative for staggering; "
                 "only the nonuniform T front measures alignment"
             )
+        elif card.case == "GYRE-zco" and name in {"u", "v", "ssh"}:
+            rows[-1]["exact_control_status"] = rows[-1]["status"]
+            rows[-1]["status"] = "UNINFORMATIVE"
+            rows[-1]["reason"] = (
+                "exact at-rest zero is a consistency control, not an "
+                "informative trajectory or staggering measurement"
+            )
     return rows, dtypes
 
 
@@ -493,7 +500,8 @@ def _source_gyre_sbc(lat_deg, wet, t_seconds: float) -> dict[str, np.ndarray]:
         wind_shape = math.sin(math.pi * (lat - 15.0) / (29.0 - 15.0))
         out["utau_pa"][index] = -amplitude * wind_shape
         out["vtau_pa"][index] = amplitude * wind_shape
-    mean_emp = np.sum(np.where(wet, out["emp_kg_m2_s"], 0.0)) / np.sum(wet)
+    # Literal usrdef_sbc.F90:134-140: unmasked emp numerator, wet denominator.
+    mean_emp = np.sum(out["emp_kg_m2_s"]) / np.sum(wet)
     out["emp_kg_m2_s"] -= mean_emp * wet
     out["taum_pa"] = np.sqrt(out["utau_pa"] ** 2 + out["vtau_pa"] ** 2)
     out["wndm_m_s"] = np.sqrt(out["taum_pa"] / (1.22 * 1.5e-3))
@@ -515,6 +523,7 @@ def forcing_gate(card, *, plant_forcing: bool = False) -> tuple[list[dict], dict
     wet = np.asarray(card.recipe.land_mask) > 0.5
     for label, seconds in (
         ("kt1", card.dt_s),
+        ("quarter_year", card.dt_s + 90.0 * 86400.0),
         ("half_year", card.dt_s + 180.0 * 86400.0),
     ):
         oracle = _source_gyre_sbc(lat, wet, seconds)

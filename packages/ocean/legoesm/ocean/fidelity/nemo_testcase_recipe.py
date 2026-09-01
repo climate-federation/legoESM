@@ -571,7 +571,10 @@ def gyre_surface_boundary_condition(
     t_star = nemo_gyre_t_star(lat, t_seconds)
     emp_raw = nemo_gyre_emp(lat, t_seconds)
     wet = jnp.asarray(card.recipe.land_mask) > 0.5
-    emp_mean = jnp.sum(jnp.where(wet, emp_raw, 0.0)) / jnp.sum(wet)
+    # NEMO usrdef_sbc.F90:122-140 fills emp over the whole A2D array, then
+    # divides the UNMASKED numerator glob_2Dsum(emp) by the wet tmask count.
+    # Land therefore contributes to the mean removed only from wet cells.
+    emp_mean = jnp.sum(emp_raw) / jnp.sum(wet)
     emp = emp_raw - emp_mean * wet
     utau, vtau = nemo_gyre_wind(lat, t_seconds)
     taum = jnp.sqrt(utau * utau + vtau * vtau)

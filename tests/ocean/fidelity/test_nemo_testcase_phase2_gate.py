@@ -76,7 +76,12 @@ def test_kt1_rows_follow_case_alignment_contract(case):
     for name in ("S", "u", "v", "ssh"):
         assert by_name[name]["bar"] == 0.0
         if case == "GYRE-zco":
-            assert by_name[name]["status"] == "AT-BAR"
+            if name == "S":
+                assert by_name[name]["status"] == "AT-BAR"
+            else:
+                assert by_name[name]["exact_control_status"] == "AT-BAR"
+                assert by_name[name]["status"] == "UNINFORMATIVE"
+                assert by_name[name]["reason"]
         else:
             assert by_name[name]["alignment_status"] == "AT-BAR"
             assert by_name[name]["status"] == "UNMEASURED"

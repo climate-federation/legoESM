@@ -3,6 +3,10 @@ import legoesm.ocean.fidelity.nemo_testcase_recipe as testcase_recipe
 import numpy as np
 import pytest
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+from legoesm.ocean.fidelity.nemo_recipe import (
+    nemo_gyre_emp,
+    nemo_gyre_seasonal_cosines,
+)
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     build_gyre_zco_card,
     build_lock_exchange_zco_card,
@@ -131,10 +135,21 @@ def test_gyre_card_pins_rotated_grid_mi96_ic_and_seasonal_sbc():
     at_half_year = gyre_surface_boundary_condition(
         card, card.dt_s + 180.0 * 86400.0
     )
+    cos1, cos2 = nemo_gyre_seasonal_cosines(card.dt_s + 90.0 * 86400.0)
+    assert float(cos1) == pytest.approx(0.159, abs=5.0e-4)
+    assert float(cos2) == pytest.approx(-0.356, abs=5.0e-4)
     assert at_kt1.qsr_w_m2.dtype == jnp.float64
     assert not np.array_equal(at_kt1.qsr_w_m2, at_half_year.qsr_w_m2)
     wet = np.asarray(recipe.land_mask) > 0.5
-    assert abs(float(np.sum(np.asarray(at_kt1.emp_kg_m2_s)[wet]))) < 1.0e-17
+    lat = np.asarray(recipe.grid.native_lat_T_deg)
+    raw_emp = np.asarray(nemo_gyre_emp(lat, card.dt_s))
+    final_emp = np.asarray(at_kt1.emp_kg_m2_s)
+    land_contribution = float(np.sum(raw_emp[~wet]))
+    assert land_contribution != 0.0
+    assert np.array_equal(final_emp[~wet], raw_emp[~wet])
+    assert float(np.sum(final_emp[wet])) == pytest.approx(
+        -land_contribution, abs=5.0e-18
+    )
 
 
 @pytest.mark.parametrize(

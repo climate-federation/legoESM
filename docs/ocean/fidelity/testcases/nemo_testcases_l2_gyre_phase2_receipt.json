@@ -38,15 +38,18 @@
     "max_row": "geometry.e3w_1d"
   },
   "seasonal_forcing": {
-    "samples": ["kt1", "half_year"],
-    "rows": 14,
+    "samples": ["kt1", "quarter_year", "half_year"],
+    "rows": 21,
     "status": "AT-BAR",
-    "max_normalized_abs": 2.0328790734103208e-20
+    "max_normalized_abs": 3.3881317890172014e-20,
+    "emp_mean_numerator": "unmasked_704_cells",
+    "emp_mean_denominator": "wet_600_cells"
   },
   "step1_before": {
     "time_level_source": "time_level_for_dump",
     "storage_bits": 64,
-    "exact_rows": ["T", "S", "u", "v", "ssh"],
+    "informative_exact_rows": ["T", "S"],
+    "uninformative_exact_controls": ["u", "v", "ssh"],
     "max_error": 0.0
   },
   "planted_controls": {
@@ -65,7 +68,7 @@
     "mesh_sha256": "3bf5d10e36dc52336b9797b13eb1efb4f02d25e0fb3a0c450ac6ce69e65471df",
     "step1_dump_sha256": "9def5f4986853f497a5e0507bea185fe1ec4348715e2aeca0b14507df8e24fa0",
     "manifest_sha256": "397f0331086e8e6d8d6ee00425418453e1fe46ac401c435487a2f123eba19918",
-    "full_gate_report_sha256": "217e66e93dc69a9fc5b867cd05562d6c9974b6aeda51bce75f4cd6bb35223554",
+    "full_gate_report_sha256": "66512c808a75841b09cb4099ba7e8b00b512f0880f09b51c99f4f299822ef116",
     "usrdef_hgr_sha256": "7921aaa7dc9494aa48506f2bd8a6bca3e3952894ef72734fac3e9c050f83011e",
     "usrdef_sbc_sha256": "a2af8adfa5f640947ee3b407138018daa246bc66c6fe887fec7e535bb08fe140",
     "usrdef_istate_sha256": "a597a2add7279a5bdbf1e1292ee02702860e940d2685e743cad3dcac0d878220",
