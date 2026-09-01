@@ -28,8 +28,8 @@ trajectory-match claims.
 | LOCK kt=2 SSH | `4.7797e-28`, but oracle identically zero | UNINFORMATIVE |
 | LOCK kt=2 v | no active meridional face; stored zeros checked | UNMEASURED |
 | LOCK kt=3 T/S/u/SSH | `9.1634e-12 / 2.0301e-16 / 2.0540e-9 / 1.3553e-18`; S uninformative, SSH at bar | DEBT |
-| OVERFLOW kt=2 T/S/u/SSH | `2.40035e-8 / 2.0301e-16 / 4.12103e-6 / 1.23723e-7`; S uninformative | DEBT |
-| OVERFLOW kt=3 T/S/u/SSH | `2.86506e-7 / 4.0602e-16 / 1.54030e-5 / 4.47222e-6`; S at bar | DEBT |
+| OVERFLOW kt=2 T/S/u/SSH | `2.40035e-8 / 2.0301e-16 / 3.95605e-6 / 1.23723e-7`; S uninformative | DEBT |
+| OVERFLOW kt=3 T/S/u/SSH | `2.86507e-7 / 2.0301e-16 / 1.48997e-5 / 5.12822e-6`; S at bar | DEBT |
 
 Every candidate floating array in both gates is `float64`, the entry point
 sets and verifies `PrecisionPolicy.fp64()`, and the reported JAX backend was
@@ -306,6 +306,9 @@ the frame correction, the regenerated faithful scores are T
 `2.4003458243e-8`, u `4.1210339357e-6`, and SSH `1.2372313177e-7`.  The
 `2.1810780026e-8` T value is retained only as the explicitly named
 `wrong_prognostic_transport_frame` control; it is not the faithful card.
+This is a real, previously uncredited improvement: the correctly framed
+OVERFLOW instantaneous-u score moved from `2.4321816013e-2` to
+`4.1210339357e-6`, a factor of about `5901`.
 
 Focused verification for this round is **113 tests across seven explicitly
 listed files**: 15 card + 6 WS-RK3 + 8 BBL + 54 barotropic-common + 17 config
@@ -526,6 +529,60 @@ The first-over-bar entry remains kt=2: LOCK in T/u, OVERFLOW in T/u/SSH.
 The continuation therefore measures growth from an already-divergent prefix;
 it makes no trajectory-match claim.
 
+## Primary-transport arm and kt=60 continuation
+
+The next source read found a branch the card exercised but legoESM did not:
+OVERFLOW resolves `ln_dynadv_vec=F` with variable volume, so NEMO accumulates
+the primary external mode as `wgtbtp1*ua_e*hu_e` rather than velocity
+(`src/OCE/DYN/dynspg_ts.F90:823-834`), then divides by the Kaa face depth only
+after the primary SSH average is complete (`:956-979`).  This is not a NEMO
+switch and therefore is not a legoESM selector: the canonical NEMO RK3
+flux-form scheme identity now executes it unconditionally.  Its only ablation
+is the private test hook used by the owner gate.
+
+The stage-by-stage scaling result refutes this term as the remaining kt=2 T
+owner.  Relative to the faithful `4.8007010989e-7 K` absolute T residual, the
+velocity-average ablation moves T by only `9.4502184e-13 K` (`1.97e-6` of the
+residual).  It is **REFUTED_AS_PRIMARY_OWNER**.  The source-required arm does,
+however, improve the final instantaneous-u score from `4.1210339357e-6` to
+`3.9560471201e-6 m/s`.  Stage-1/2/3 instantaneous-u errors are now
+`2.2873001e-7`, `1.0007265e-6`, and `3.9560471e-6 m/s`; the legacy primary
+arm gives `6.3674138e-8`, `8.3571138e-7`, and `4.1210339e-6 m/s`.  The required
+stage correction remains a **PLAUSIBLE_CONTRIBUTOR_NOT_OWNER** for T: its
+one-variable omission explains `24.7836%` but leaves `3.6109159e-7 K` and
+simultaneously destroys stage-u alignment.  The other registered arms are
+refuted as primary owners.  The remaining roughly 75% is therefore
+**UNMEASURED_AFTER_REGISTERED_ARMS**; the owner hunt is exhausted, not cleared.
+
+Both isolated NEMO configurations were rebuilt with the same conda/gfortran
+toolchain after extending only the read-only entry-dump bound from 10 to 60.
+Fresh CPU runs used `nn_itend=nn_stock=60`, completed normally, and produced
+60 entry plus 60 barotropic-frame records per case.  Their kt=1--10 entry
+records are byte-identical to the certified short runs.  The current kt=60
+normalized wet-point L-infinity scores are:
+
+| case | T | S | instantaneous u | SSH |
+|---|---:|---:|---:|---:|
+| LOCK | `3.95492e-6` | `2.84217e-15` | `7.41114e-6` | `3.84974e-6` |
+| OVERFLOW-zps | `7.96523e-4` | `3.65422e-15` | `4.13339e-3` | `1.98816e-4` |
+
+The gate keeps the reviewer-requested two-line computation explicit:
+`ratios = errors[1:] / errors[:-1]`, followed by
+`ratios_monotone_decreasing = all(diff(ratios) < 0)`.  Reconciliation changes
+the earlier prose: full-history ratios decrease monotonically for LOCK T/SSH
+and OVERFLOW T, but not for LOCK u or OVERFLOW u/SSH.  On the registered tail
+window (kt=32--60), log-log fits are preferred over semilog fits for LOCK
+T/u/SSH (`p=3.545/3.306/5.079`) and OVERFLOW T/u (`p=1.707/1.697`).
+OVERFLOW SSH is bounded/oscillatory with negative fitted rate and `p=-0.675`.
+No field selects the exponential-fit/open-mode label: the measured evidence is
+polynomial accumulation or bounded oscillation, not an amplifying mode.
+The earlier reviewer's `p≈1.5--3.9` range holds for four of the five growing
+tail series; LOCK SSH is the measured exception and is reported, not averaged.
+
+The pre-primary-transport kt=2--10 OVERFLOW rows immediately above are retained
+as historical round output.  The current gate JSON and the kt=2/3 verdict rows
+at the top of this receipt supersede them.
+
 ## Gates, controls, test reconciliation, and artifacts
 
 `nemo_testcase_phase3_trajectory_gate.py` is fail-closed on dump headers,
@@ -567,6 +624,17 @@ first-divergence gate + 3 EOS gate + 7 WS-RK3 + 15 testcase-card`; all 43
 passed in the final post-edit run.  This is the collected breakdown for this
 round, not an average or substitution for any historical count above.
 
+For the primary-transport/kt=60 closure, the final focused invocation ran
+**48 tests across five files**: `9 trajectory-gate + 2 stage-sweep-gate + 8
+WS-RK3 + 15 testcase-card + 14 AB3/filter`; all 48 selected tests passed.  Two
+pre-existing NEMO-gyre model-step tests in the AB3 file were explicitly
+deselected because they construct the validation-rejected
+`pgf_quadrature="nemo_trapezoid" + pgf_scheme!="nemo_sco"` Frankenstein
+configuration and are outside these two certified cards.  The first run's one
+in-scope failure was the new live-arm assertion using `>1e-12 K` against the
+measured `9.4502e-13 K`; it was corrected to the non-vacuous `>0` assertion
+without changing any science code, then the exact 48-test scope passed.
+
 Full artifact hashes are committed in
 `nemo_testcases_l1_phase3_artifacts.sha256`.  The trajectory and diagnostic
 JSONs are external run products under
@@ -582,9 +650,10 @@ receipt reproducible without committing quota-heavy binary dumps.
 - individual NEMO/legoESM FCT limiter coefficients and antidiffusive fluxes;
 - NEMO `utr_bbl` at kt=1 (legoESM BBL is confirmed inactive; NEMO is only
   geometrically plausible inactive);
-- owner of the remaining OVERFLOW-zps kt=2 T/u/SSH debt; the stage-primary
-  omission is a scale-compatible T contributor but not an owner, and the
-  correction itself is confirmed required by the direct stage-u comparison;
-- term-level explanation of the measured kt=4--10 growth in either case;
-- long-trajectory phenomenology and statistical equivalence, which are beyond
-  this first-divergence dispatch.
+- owner of the remaining OVERFLOW-zps kt=2 T/u/SSH debt after all registered
+  one-variable arms; the stage-primary omission is a scale-compatible T
+  contributor but not an owner, and the correction itself is confirmed
+  required by the direct stage-u comparison;
+- term-level explanation of the measured kt=4--60 polynomial accumulation in
+  either case;
+- long-trajectory phenomenology and statistical equivalence beyond 60 steps.

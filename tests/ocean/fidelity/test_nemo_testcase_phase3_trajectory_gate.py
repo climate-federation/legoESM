@@ -73,7 +73,28 @@ def test_owner_hunt_is_explicit_and_one_variable():
     assert 'parser.add_argument("--owner-controls"' in source
     assert '"scaling_check_before_owner_label": True' in source
     assert '"DIAGNOSTIC_ONE_VARIABLE_ARM"' in source
-    assert '"owner_label": "UNMEASURED"' in source
+    assert 'owner_label = "CONFIRMED_OWNER"' in source
+    assert 'owner_label = "PLAUSIBLE_CONTRIBUTOR_NOT_OWNER"' in source
+    assert 'owner_label = "REFUTED_AS_PRIMARY_OWNER"' in source
+
+
+def test_growth_characterization_measures_ratios_and_prefers_power_law():
+    steps = []
+    for kt in range(2, 12):
+        rows = []
+        for field in ("T", "u", "ssh"):
+            rows.append({
+                "name": f"case.kt{kt}.before.{field}",
+                "status": "DEBT",
+                "normalized_max_abs": float(kt ** 2),
+            })
+        steps.append({"kt": kt, "rows": rows})
+    report = gate.characterize_growth(steps)
+    assert report["T"]["successive_step_ratios"] == [
+        float((kt + 1) ** 2 / kt ** 2) for kt in range(2, 11)]
+    assert report["T"]["ratios_monotone_decreasing"] is True
+    assert report["T"]["classification"] == "POLYNOMIAL_FIT_PREFERRED"
+    assert abs(report["T"]["tail_power_law_exponent_p"] - 2.0) < 1.0e-12
 
 
 def test_uniform_and_zero_rows_are_not_allowed_to_imply_corroboration():

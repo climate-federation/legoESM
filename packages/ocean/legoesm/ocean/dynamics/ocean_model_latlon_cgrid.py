@@ -1002,6 +1002,9 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     kmm_tracer_transports: bool = True
     two_step_fct_predictor: bool = True
     disable_bbl: bool = False
+    # Private ablation of dynspg_ts's flux-form primary transport average.
+    # Public NEMO RK3 configurations always keep this true.
+    primary_transport_average: bool = True
     # Return a momentum stage's instantaneous velocity in the prognostic u/v
     # slots after the full step has run.  Private fidelity instrumentation only;
     # zero leaves the returned state untouched.
@@ -4522,6 +4525,14 @@ class LatLonCGridOceanModel:
                 if _een_pre_shared is not None:
                     _baro_seed = dict(
                         _baro_seed, een_pre_override=_een_pre_shared)
+                if (
+                    getattr(_cfg_b, "momentum_time_integrator", "euler")
+                    == "rk3_ws"
+                    and not self._nemo_ws_test_hooks.primary_transport_average
+                ):
+                    _baro_seed = dict(
+                        _baro_seed,
+                        _nemo_primary_transport_average_test_override=False)
             state_new, (Hu_avg, Hv_avg) = _baro_fn(
                 state_mid, dt_s, _nbaro,
                 _grid, _zc, _cfg_b,

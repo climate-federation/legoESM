@@ -148,6 +148,63 @@ def mark_uninformative(row: dict, field: str, kt: int, reference, mask) -> dict:
     return row
 
 
+def characterize_growth(steps: list[dict]) -> dict:
+    """Measure ratio trend and polynomial/exponential fit, field by field."""
+    result = {}
+    for field in ("T", "u", "ssh"):
+        points = []
+        for step in steps:
+            row = next(row for row in step["rows"]
+                       if row["name"].endswith(f".{field}"))
+            if step["kt"] >= 2 and row["status"] == "DEBT":
+                points.append((step["kt"], row["normalized_max_abs"]))
+        if len(points) < 4 or any(error <= 0.0 for _, error in points):
+            result[field] = {
+                "status": "UNMEASURED",
+                "reason": "fewer than four positive DEBT samples",
+            }
+            continue
+        kt = np.asarray([point[0] for point in points], dtype=np.float64)
+        errors = np.asarray([point[1] for point in points], dtype=np.float64)
+        ratios = errors[1:] / errors[:-1]
+        ratios_monotone_decreasing = bool(np.all(np.diff(ratios) < 0.0))
+        n_tail = max(4, len(points) // 2)
+        x = kt[-n_tail:]
+        y = np.log(errors[-n_tail:])
+
+        def fit(abscissa):
+            slope, intercept = np.polyfit(abscissa, y, 1)
+            predicted = intercept + slope * abscissa
+            ss_res = float(np.sum((y - predicted) ** 2))
+            ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+            return float(slope), 1.0 - ss_res / ss_tot if ss_tot else 1.0
+
+        power, polynomial_r2 = fit(np.log(x))
+        exponential_rate, exponential_r2 = fit(x)
+        if exponential_rate <= 0.0:
+            classification = "BOUNDED_OR_DECAYING_NO_AMPLIFYING_MODE"
+        elif polynomial_r2 >= exponential_r2:
+            classification = "POLYNOMIAL_FIT_PREFERRED"
+        else:
+            classification = "EXPONENTIAL_FIT_PREFERRED_OPEN_MODE_QUESTION"
+        result[field] = {
+            "status": "MEASURED",
+            "classification": classification,
+            "steps": [int(value) for value in kt],
+            "normalized_errors": [float(value) for value in errors],
+            "successive_step_ratios": [float(value) for value in ratios],
+            "ratios_monotone_decreasing": ratios_monotone_decreasing,
+            "tail_ratios_monotone_decreasing": bool(
+                np.all(np.diff(ratios[-max(3, n_tail - 1):]) < 0.0)),
+            "tail_window_steps": [int(value) for value in x],
+            "tail_power_law_exponent_p": power,
+            "tail_polynomial_loglog_r2": polynomial_r2,
+            "tail_exponential_rate_per_step": exponential_rate,
+            "tail_exponential_semilog_r2": exponential_r2,
+        }
+    return result
+
+
 def run(
     case: str, oracle_root: Path, max_step: int, *, plant=False,
     continue_after_first=False, diagnostic_disable_bbl=False,
@@ -292,6 +349,16 @@ def run(
                 values = np.asarray(state_control.T.data)
                 movement = float(np.max(np.abs(values[active_T] - faithful_T[active_T])))
                 error = t_abs_error(values)
+                ratio = movement / faithful_error
+                improves = error < faithful_error
+                if error / max(float(np.max(np.abs(oracle_T[active_T]))), 1.0) <= BAR:
+                    owner_label = "CONFIRMED_OWNER"
+                elif improves and ratio >= 0.1:
+                    owner_label = "PLAUSIBLE_CONTRIBUTOR_NOT_OWNER"
+                elif ratio < 0.1 or not improves:
+                    owner_label = "REFUTED_AS_PRIMARY_OWNER"
+                else:
+                    owner_label = "UNMEASURED"
                 controls.append({
                     "name": name,
                     "classification": "DIAGNOSTIC_ONE_VARIABLE_ARM",
@@ -300,15 +367,19 @@ def run(
                     "faithful_absolute_max_error_K": faithful_error,
                     "control_absolute_max_error_K": error,
                     "candidate_movement_K": movement,
-                    "movement_over_faithful_error": movement / faithful_error,
+                    "movement_over_faithful_error": ratio,
                     "error_change_K": error - faithful_error,
-                    "owner_label": "UNMEASURED",
+                    "owner_label": owner_label,
                     "reason": (
                         "scale and movement only; a legacy/private one-sided "
                         "candidate control cannot establish two-model ownership"),
                 })
 
             hook_arms = (
+                ("legacy_velocity_primary_average", _NEMOWSRK3TestHooks(
+                    primary_transport_average=False),
+                 "private ablation of NEMO dynspg_ts.F90:823-834,956-979",
+                 "flux-form primary transport average only"),
                 ("legacy_one_step_fct", _NEMOWSRK3TestHooks(
                     two_step_fct_predictor=False),
                  "legoESM legacy, pre-existing one-step FCT",
@@ -344,7 +415,7 @@ def run(
                 "NEMO un_adv tracer transport, not a prognostic state frame",
                 "prognostic primary velocity replaced by time-mean transport")
             overflow_t_owner_hunt = {
-                "status": "FIRST_DIVERGENCE_REMAINS_UNOWNED",
+                "status": "UNMEASURED_AFTER_REGISTERED_ARMS",
                 "first_over_bar": "kt=2 T",
                 "faithful_absolute_max_error_K": faithful_error,
                 "faithful_normalized_max_error": faithful_error / max(
@@ -376,9 +447,12 @@ def run(
         "first_over_bar": first_over_bar,
         "bbl_attribution": bbl_attribution,
         "overflow_t_owner_hunt": overflow_t_owner_hunt,
+        "growth_characterization": characterize_growth(steps),
         "steps": steps,
         "unmeasured": [
             "NEMO per-term tendencies at the first divergent step",
+            *(["remaining OVERFLOW kt=2 T owner after registered arms"]
+              if case == "OVERFLOW-zps" else []),
             *([] if case == "OVERFLOW-zps" else
               ["stage-coupled OVERFLOW BBL transport and tendency"]),
             *([] if continue_after_first else

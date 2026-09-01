@@ -26,6 +26,7 @@ def test_nemo_ws_microselectors_are_not_public_config():
     assert "tracer_fct_low_order_predictor" not in fields
     assert "rk3_ws_stage_barotropic_correction" not in fields
     assert "rk3_ws_momentum_transport_reconcile" not in fields
+    assert "primary_transport_average" not in fields
 
 
 def test_nemo_ws_private_stage_velocity_exposure_is_diagnostic_only():
@@ -42,6 +43,8 @@ def test_nemo_ws_private_stage_velocity_exposure_is_diagnostic_only():
                 card.recipe.initial_state, dt=card.dt_s)
     assert np.max(np.abs(
         np.asarray(stage1.u.data) - np.asarray(normal.u.data))) > 1.0e-12
+    # T-unchanged guards tracer wiring only: the hook writes u/v slots alone;
+    # its structural post-step placement is the stage-noninterference guarantee.
     np.testing.assert_array_equal(
         np.asarray(stage1.T.data), np.asarray(normal.T.data))
     with pytest.raises(ValueError, match="expose_momentum_stage"):
@@ -49,6 +52,24 @@ def test_nemo_ws_private_stage_velocity_exposure_is_diagnostic_only():
             card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
             _nemo_ws_test_hooks=model_module._NEMOWSRK3TestHooks(
                 expose_momentum_stage=4))
+
+
+def test_nemo_overflow_primary_transport_average_is_source_bound_and_live():
+    """Flux-form RK3 uses NEMO's transport primary; only the test hook ablates."""
+    set_policy(PrecisionPolicy.fp64())
+    card = build_overflow_zps_card()
+    faithful = model_module.LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config).step(
+            card.recipe.initial_state, dt=card.dt_s)
+    ablated = model_module.LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=model_module._NEMOWSRK3TestHooks(
+            primary_transport_average=False)).step(
+                card.recipe.initial_state, dt=card.dt_s)
+    assert np.max(np.abs(
+        np.asarray(faithful.u.data) - np.asarray(ablated.u.data))) > 1.0e-12
+    assert np.max(np.abs(
+        np.asarray(faithful.T.data) - np.asarray(ablated.T.data))) > 0.0
 
 
 def test_nemo_two_step_fct_is_a_live_real_flux_arm():

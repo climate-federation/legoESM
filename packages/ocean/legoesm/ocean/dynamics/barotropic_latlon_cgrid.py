@@ -1117,6 +1117,7 @@ def _run_substep_loop(
     drag_r_u=None, drag_r_v=None,
     tide_basis=None, tide_cos=None, tide_sin=None,
     transport_sum_init=None,
+    primary_transport_average=False,
 ):
     """The forward-backward substep loop (verbatim extraction).
 
@@ -1496,10 +1497,24 @@ def _run_substep_loop(
             else:
                 eta_new = _clamp_redistribute(eta_new, eta_floor, mask, area)
 
-        # Accumulate eta, U_bar, V_bar with cosine filter weights
+        # Primary average.  In NEMO's RK3 flux-form branch this is a transport,
+        # not a velocity: dynspg_ts.F90:823-834 accumulates
+        # wgtbtp1*ua_e*hu_e, and :956-979 divides the completed mean by the
+        # face depth assembled from the averaged Kaa SSH.  The vector/linssh
+        # branch retains the pre-existing velocity average.
         eta_sum_new = eta_sum_c + w_i * eta_new
-        U_sum_new = U_sum_c + w_i * U_bar_new
-        V_sum_new = V_sum_c + w_i * V_bar_new
+        if primary_transport_average:
+            if _face_depth_mode == "nemo_ssh_avg":
+                H_u_primary, H_v_primary = _ssh_avg_face_depths(eta_new)
+            else:
+                H_primary = jnp.maximum(
+                    eta_new + H_bathy, min_water_col) * mask
+                H_u_primary, H_v_primary = _face_depths(H_primary)
+            U_sum_new = U_sum_c + w_i * U_bar_new * H_u_primary
+            V_sum_new = V_sum_c + w_i * V_bar_new * H_v_primary
+        else:
+            U_sum_new = U_sum_c + w_i * U_bar_new
+            V_sum_new = V_sum_c + w_i * V_bar_new
 
         if ab3_za is not None:
             # rotate the AB3/AM4 histories (dynspg_ts:805-815)
@@ -1762,6 +1777,7 @@ def barotropic_substeps_latlon_cgrid(
     v_now=None,
     substep_scale: int = 1,
     een_pre_override=None,
+    _nemo_primary_transport_average_test_override=None,
 ) -> LatLonCGridOceanState:
     """Run barotropic substeps on a C-grid lat-lon grid.
 
@@ -2108,6 +2124,19 @@ def barotropic_substeps_latlon_cgrid(
         "nemo_boxcar_ab3", "nemo_boxcar1_ab3")
     _ab3 = _filter in (
         "nemo_ab3am4", "nemo_boxcar_ab3", "nemo_boxcar1_ab3")
+    # NEMO exposes no independent switch here.  Its RK3 + flux-form scheme
+    # identity necessarily runs the transport primary at dynspg_ts.F90:
+    # 823-834,956-979.  The underscore argument is a private fidelity-harness
+    # ablation, never a model configuration selector.
+    _primary_transport_average = (
+        getattr(config, "momentum_time_integrator", "euler") == "rk3_ws"
+        and getattr(config, "momentum_advection", "vector_invariant")
+        == "flux_form"
+        and _boxcar_ab3
+    )
+    if _nemo_primary_transport_average_test_override is not None:
+        _primary_transport_average = bool(
+            _nemo_primary_transport_average_test_override)
     if _boxcar_ab3:
         # NEMO nn_bt_flt=1/2: the barotropic sub-state is re-initialised EVERY
         # baroclinic step (ll_init=ll_bt_av=T, dynspg_ts.F90:202/469-476) ⇒ the
@@ -2151,6 +2180,7 @@ def barotropic_substeps_latlon_cgrid(
         tide_basis=_tide_basis, tide_cos=_tide_cos, tide_sin=_tide_sin,
         een_pre=_een_pre,
         drag_r_u=_drag_r_u, drag_r_v=_drag_r_v,
+        primary_transport_average=_primary_transport_average,
     )
     (eta_f, U_bar_f, V_bar_f,
      Hu_sum_f, Hv_sum_f, eta_sum_f, U_sum_f, V_sum_f) = _finals[:8]
@@ -2182,6 +2212,21 @@ def barotropic_substeps_latlon_cgrid(
         eta_avg = eta_sum_f / w_total
         U_bar_avg = U_sum_f / w_total
         V_bar_avg = V_sum_f / w_total
+        if _primary_transport_average:
+            if config.barotropic.barotropic_face_depth == "nemo_ssh_avg":
+                _H_u_primary, _H_v_primary = _nemo_ssh_avg_apply(
+                    eta_avg, u_mask, v_mask, grid, _area,
+                    _nemo_ssh_avg_prep(H_bathy, mask, grid, _dt,
+                                       north_fold_mask(grid)))
+            else:
+                _H_primary = jnp.maximum(
+                    eta_avg + H_bathy, min_water_col) * mask
+                _H_u_primary, _H_v_primary = _min_rule_face_depths(
+                    _H_primary, mask, grid, north_fold_mask(grid))
+            U_bar_avg = U_bar_avg / jnp.maximum(
+                _H_u_primary, min_water_col)
+            V_bar_avg = V_bar_avg / jnp.maximum(
+                _H_v_primary, min_water_col)
 
     # SOTA-local split-explicit: the per-substep clamp was LOCAL (no allreduce);
     # restore GLOBAL mass conservation with ONE redistribute call on the

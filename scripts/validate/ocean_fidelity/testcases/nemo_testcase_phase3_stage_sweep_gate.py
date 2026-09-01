@@ -214,6 +214,9 @@ def run(case: str, root: Path, *, plant_stage=False) -> dict:
     if case == "OVERFLOW-zps":
         arms = {
             "faithful": _NEMOWSRK3TestHooks(),
+            "legacy_velocity_primary_average": _NEMOWSRK3TestHooks(
+                primary_transport_average=False
+            ),
             "omit_stage_primary_velocity_correction": _NEMOWSRK3TestHooks(
                 stage_barotropic_correction=False
             ),
@@ -317,9 +320,13 @@ def run(case: str, root: Path, *, plant_stage=False) -> dict:
         improving = control_row["absolute_max"] < faithful_row["absolute_max"]
         arm_results[arm] = classify_arm(faithful_row, control_row, arm_move, improving=improving)
         arm_results[arm]["target"] = target
-        arm_results[arm]["one_variable"] = (
-            "stage_barotropic_correction" if "primary" in arm else "momentum_transport_reconcile"
-        )
+        if arm == "legacy_velocity_primary_average":
+            one_variable = "flux_form_primary_transport_average"
+        elif "primary" in arm:
+            one_variable = "stage_barotropic_correction"
+        else:
+            one_variable = "momentum_transport_reconcile"
+        arm_results[arm]["one_variable"] = one_variable
 
     if case == "LOCK_EXCHANGE-zco" and not any(
         result["clears_bar"] for result in arm_results.values()
