@@ -283,8 +283,8 @@ def _plot_case(data: CaseData, output: Path, git_sha: str) -> Path:
         sharey=True,
         constrained_layout=True,
     )
-    fig.get_layout_engine().set(rect=(0.0, 0.075, 1.0, 0.96))
-    fig.suptitle(f"{CASES[data.case]['title']}: temperature sections")
+    fig.get_layout_engine().set(rect=(0.0, 0.075, 1.0, 0.875))
+    fig.suptitle(f"{CASES[data.case]['title']}: temperature sections", y=0.985)
     state_mappable = None
     diff_limits: list[float] = []
     for column, kt in enumerate(PLOT_STEPS):
@@ -405,7 +405,7 @@ def _plot_summary(artifact_root: Path, output: Path, git_sha: str) -> Path:
         gate_hashes[case] = _sha256(gate_path)
 
     fig, axes = plt.subplots(1, 2, figsize=(10.8, 4.5), constrained_layout=True)
-    fig.get_layout_engine().set(rect=(0.0, 0.095, 1.0, 0.96))
+    fig.get_layout_engine().set(rect=(0.0, 0.095, 1.0, 0.855))
     colors = {"LOCK_EXCHANGE-zco": "#2166ac", "OVERFLOW-zps": "#b2182b"}
     for ax, field, title in zip(
         axes,
@@ -433,7 +433,7 @@ def _plot_summary(artifact_root: Path, output: Path, git_sha: str) -> Path:
         ax.set_title(title)
         ax.grid(True, which="both", color="0.87", linewidth=0.6)
         ax.legend(frameon=False, fontsize=8.5)
-    fig.suptitle("Lane 1 trajectory-error growth through kt=60")
+    fig.suptitle("Lane 1 trajectory-error growth through kt=60", y=0.985)
     footer = (
         f"cases=LOCK_EXCHANGE-zco,OVERFLOW-zps; kt=1..60; frame={ERROR_FRAME}\n"
         f"tail p read from certified kt60 gate JSON; git={git_sha}; "
