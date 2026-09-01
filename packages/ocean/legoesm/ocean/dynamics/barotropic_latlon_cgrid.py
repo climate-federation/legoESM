@@ -1102,6 +1102,36 @@ def barotropic_coriolis_een_pre_step(u_3d, v_3d, h_k, grid, mask, u_mask,
     return cor_u, cor_v
 
 
+def _nemo_flux_form_external_velocity_update(
+    velocity_entry,
+    depth_entry,
+    depth_pgf,
+    depth_midpoint,
+    depth_kmm,
+    depth_exit,
+    pgf,
+    transport_tendency,
+    slow_forcing,
+    dt_s,
+    wet_mask,
+    min_water_col,
+):
+    """NEMO key_qcoTest_FluxForm external-mode transport update.
+
+    This is the literal ``ua_e``/``va_e`` numerator and exit-depth division
+    from NEMO 5.0.2 ``dynspg_ts.F90:731-761``.  It is deliberately not a
+    selector: NEMO's WS-RK3 flux-form identity has no alternate composition.
+    """
+    return (
+        depth_entry * velocity_entry
+        + dt_s * (
+            depth_pgf * pgf
+            + depth_midpoint * transport_tendency
+            + depth_kmm * slow_forcing
+        )
+    ) / jnp.maximum(depth_exit, min_water_col) * wet_mask
+
+
 def _run_substep_loop(
     eta, U_bar, V_bar,
     *,
@@ -1118,6 +1148,8 @@ def _run_substep_loop(
     tide_basis=None, tide_cos=None, tide_sin=None,
     transport_sum_init=None,
     primary_transport_average=False,
+    return_trace=False,
+    nemo_flux_form_update_test_override=None,
 ):
     """The forward-backward substep loop (verbatim extraction).
 
@@ -1210,6 +1242,27 @@ def _run_substep_loop(
         return _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area,
                                    _ssh_avg_prep)
 
+    # NEMO key_RK3 + flux-form momentum is one unbranched scheme identity.
+    # dynspg_ts.F90:731-761 advances FACE TRANSPORT, with the outer Kmm depth
+    # frozen across the external window; NEMO exposes no velocity-form arm.
+    # Other integrators/advection families retain the legacy velocity update.
+    _nemo_flux_form_update = (
+        getattr(config, "momentum_time_integrator", "euler") == "rk3_ws"
+        and getattr(config, "momentum_advection", "vector_invariant")
+        == "flux_form"
+    )
+    # Harness-only causal arm.  This is deliberately absent from public
+    # configuration: NEMO exposes no switch inside its WS-RK3 flux-form
+    # identity.  Production always follows the source-attested branch above.
+    if nemo_flux_form_update_test_override is not None:
+        _nemo_flux_form_update = bool(nemo_flux_form_update_test_override)
+    if _nemo_flux_form_update:
+        if _face_depth_mode != "nemo_ssh_avg":
+            raise ValueError(
+                "NEMO WS-RK3 flux-form external update requires "
+                "barotropic_face_depth='nemo_ssh_avg'")
+        H_u_kmm, H_v_kmm = _ssh_avg_face_depths(eta)
+
     def substep_body(wts_i, carry):
         """Single barotropic substep with BEBT, slow forcing, MAXVEL, and cosine filter.
 
@@ -1280,6 +1333,7 @@ def _run_substep_loop(
             V_mid = za_i[0] * V_bar_c + za_i[1] * Vb_c + za_i[2] * Vbb_c
         else:
             U_mid, V_mid = U_bar_c, V_bar_c
+        eta_mid = eta_c
         if ab3_za is not None and not linear_free_surface:
             # NEMO vvl continuity-flux depth at jn+1/2 (dynspg_ts.F90:556-595):
             # the ssh is extrapolated with the SAME za coefficients as the
@@ -1414,9 +1468,22 @@ def _run_substep_loop(
             _drag_u = -drag_r_u * U_bar_c / jnp.maximum(H_u, min_water_col)
         else:
             _drag_u = 0.0
-        U_bar_new = (U_bar_c + dt_s * (
-            _cor_u + _drag_u + _pgf_u + F_slow_u_i
-        )) * u_mask
+        if _nemo_flux_form_update:
+            # key_qcoTest_FluxForm literal branch:
+            #   ua = (hu_e*un + dt*(zhu_bck*spg + zhup2*trd
+            #                        + hu(Kmm)*frc)) / hu_a
+            # dynspg_ts.F90:736-760.  eta_pgf supplies zhu_bck, eta_new
+            # supplies the exit inverse depth, and H_u_flux is zhup2.
+            H_u_pgf, H_v_pgf = _ssh_avg_face_depths(eta_pgf)
+            H_u_exit, H_v_exit = _ssh_avg_face_depths(eta_new)
+            U_bar_new = _nemo_flux_form_external_velocity_update(
+                U_bar_c, H_u, H_u_pgf, H_u_flux, H_u_kmm, H_u_exit,
+                _pgf_u, _cor_u + _drag_u, F_slow_u_i, dt_s, u_mask,
+                min_water_col)
+        else:
+            U_bar_new = (U_bar_c + dt_s * (
+                _cor_u + _drag_u + _pgf_u + F_slow_u_i
+            )) * u_mask
 
         # U averaged to v-points for the backward Coriolis half-step,
         # cell-pad-first (shared interp_u_to_vface_4pt): the partition-
@@ -1441,9 +1508,15 @@ def _run_substep_loop(
             _drag_v = -drag_r_v * V_bar_c / jnp.maximum(H_v, min_water_col)
         else:
             _drag_v = 0.0
-        V_bar_new = (V_bar_c + dt_s * (
-            _cor_v + _drag_v + _pgf_v + F_slow_v_i
-        )) * v_mask
+        if _nemo_flux_form_update:
+            V_bar_new = _nemo_flux_form_external_velocity_update(
+                V_bar_c, H_v, H_v_pgf, H_v_flux, H_v_kmm, H_v_exit,
+                _pgf_v, _cor_v + _drag_v, F_slow_v_i, dt_s, v_mask,
+                min_water_col)
+        else:
+            V_bar_new = (V_bar_c + dt_s * (
+                _cor_v + _drag_v + _pgf_v + F_slow_v_i
+            )) * v_mask
 
         # Divergence damping: grad(div(u_bar)) (#205)
         if use_div_damp:
@@ -1518,11 +1591,30 @@ def _run_substep_loop(
 
         if ab3_za is not None:
             # rotate the AB3/AM4 histories (dynspg_ts:805-815)
-            return (eta_new, U_bar_new, V_bar_new,
-                    Hu_sum_new, Hv_sum_new, eta_sum_new, U_sum_new, V_sum_new,
-                    U_bar_c, Ub_c, V_bar_c, Vb_c, eta_c, etab_c)
-        return (eta_new, U_bar_new, V_bar_new,
+            new_carry = (
+                eta_new, U_bar_new, V_bar_new,
+                Hu_sum_new, Hv_sum_new, eta_sum_new, U_sum_new, V_sum_new,
+                U_bar_c, Ub_c, V_bar_c, Vb_c, eta_c, etab_c)
+        else:
+            new_carry = (
+                eta_new, U_bar_new, V_bar_new,
                 Hu_sum_new, Hv_sum_new, eta_sum_new, U_sum_new, V_sum_new)
+        if return_trace:
+            # Private fidelity-harness frame registry.  The values are the
+            # actual operands above, returned without mutation or callbacks;
+            # the production path never requests them.  Names/order are
+            # pinned by nemo_testcases_l1_overflow_barotropic_preregister.md.
+            trace = (
+                eta_c, U_bar_c, V_bar_c,
+                eta_mid, U_mid, V_mid,
+                flux_u, flux_v, eta_new, eta_pgf,
+                _pgf_u, _pgf_v, F_slow_u_i, F_slow_v_i,
+                jnp.asarray(_drag_u) * jnp.ones_like(U_bar_c),
+                jnp.asarray(_drag_v) * jnp.ones_like(V_bar_c),
+                U_bar_new, V_bar_new, eta_new,
+            )
+            return new_carry, trace
+        return new_carry
 
     if ab3_za is not None:
         if ab3_hist is not None:
@@ -1568,6 +1660,17 @@ def _run_substep_loop(
         # (n_loop, n_lat, n_lon+1), which at n_loop ~ 960 is infeasible.
         _xs = _xs + (tide_cos, tide_sin)
 
+    if return_trace:
+        # A trace is a harness artifact, not a differentiability choice.  Scan
+        # materialises every frame while preserving the identical recurrence.
+        def scan_trace_body(carry, wts_i):
+            new_carry, trace = substep_body(wts_i, carry)
+            return new_carry, trace
+
+        finals, trace = jax.lax.scan(
+            scan_trace_body, init_carry, xs=_xs, length=n_loop,
+        )
+        return finals, trace
     if config.barotropic.differentiable_barotropic:
         # scan path: pass (averaging, transport) weights as xs per substep
         def scan_body(carry, wts_i):
@@ -1778,6 +1881,8 @@ def barotropic_substeps_latlon_cgrid(
     substep_scale: int = 1,
     een_pre_override=None,
     _nemo_primary_transport_average_test_override=None,
+    _nemo_substep_trace_test_hook=False,
+    _nemo_flux_form_update_test_override=None,
 ) -> LatLonCGridOceanState:
     """Run barotropic substeps on a C-grid lat-lon grid.
 
@@ -2165,7 +2270,7 @@ def barotropic_substeps_latlon_cgrid(
         _ab3_zb = _ab3_zb.astype(eta.dtype)
     else:
         _ab3_za = _ab3_zb = _ab3_hist = None
-    _finals = _run_substep_loop(
+    _loop_result = _run_substep_loop(
         eta, U_bar, V_bar,
         dt_s=dt_s, n_loop=n_loop, w_filter=w_filter, w_transport=w_transport,
         grid=grid, config=config, g=g, H_bathy=H_bathy, mask=mask,
@@ -2181,7 +2286,14 @@ def barotropic_substeps_latlon_cgrid(
         een_pre=_een_pre,
         drag_r_u=_drag_r_u, drag_r_v=_drag_r_v,
         primary_transport_average=_primary_transport_average,
+        return_trace=_nemo_substep_trace_test_hook,
+        nemo_flux_form_update_test_override=(
+            _nemo_flux_form_update_test_override),
     )
+    if _nemo_substep_trace_test_hook:
+        _finals, _substep_trace = _loop_result
+    else:
+        _finals = _loop_result
     (eta_f, U_bar_f, V_bar_f,
      Hu_sum_f, Hv_sum_f, eta_sum_f, U_sum_f, V_sum_f) = _finals[:8]
 
@@ -2276,6 +2388,8 @@ def barotropic_substeps_latlon_cgrid(
             _finals[2] - _finals[10], _finals[2] - _finals[11],
             _finals[0] - _finals[12], _finals[0] - _finals[13],
         ))
+    if _nemo_substep_trace_test_hook:
+        return state_new, (Hu_avg, Hv_avg), _substep_trace
     return state_new, (Hu_avg, Hv_avg)
 
 

@@ -6,6 +6,9 @@ import numpy as np
 import pytest
 
 import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as model_module
+from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+    _nemo_flux_form_external_velocity_update,
+)
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.fidelity.nemo_testcase_recipe import build_lock_exchange_zco_card
@@ -70,6 +73,36 @@ def test_nemo_overflow_primary_transport_average_is_source_bound_and_live():
         np.asarray(faithful.u.data) - np.asarray(ablated.u.data))) > 1.0e-12
     assert np.max(np.abs(
         np.asarray(faithful.T.data) - np.asarray(ablated.T.data))) > 0.0
+
+
+def test_nemo_flux_form_external_update_is_literal_and_depth_sensitive():
+    """dynspg_ts.F90:731-761 uses five distinct face-depth operands."""
+    velocity = jnp.asarray([[0.25, -0.5]], dtype=jnp.float64)
+    h_entry = jnp.asarray([[10.0, 11.0]], dtype=jnp.float64)
+    h_pgf = jnp.asarray([[9.0, 12.0]], dtype=jnp.float64)
+    h_mid = jnp.asarray([[8.0, 13.0]], dtype=jnp.float64)
+    h_kmm = jnp.asarray([[7.0, 14.0]], dtype=jnp.float64)
+    h_exit = jnp.asarray([[6.0, 15.0]], dtype=jnp.float64)
+    pgf = jnp.asarray([[0.1, -0.2]], dtype=jnp.float64)
+    transport = jnp.asarray([[0.3, 0.4]], dtype=jnp.float64)
+    slow = jnp.asarray([[-0.5, 0.6]], dtype=jnp.float64)
+    wet = jnp.asarray([[1.0, 0.0]], dtype=jnp.float64)
+    dt = jnp.asarray(2.0, dtype=jnp.float64)
+    actual = _nemo_flux_form_external_velocity_update(
+        velocity, h_entry, h_pgf, h_mid, h_kmm, h_exit,
+        pgf, transport, slow, dt, wet, jnp.asarray(1.0e-10))
+    expected = (
+        h_entry * velocity
+        + dt * (h_pgf * pgf + h_mid * transport + h_kmm * slow)
+    ) / h_exit * wet
+    np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+
+    # Synthetic violation: replacing the midpoint depth by the entry depth is
+    # not an algebraic no-op and must move a live wet face.
+    violated = _nemo_flux_form_external_velocity_update(
+        velocity, h_entry, h_pgf, h_entry, h_kmm, h_exit,
+        pgf, transport, slow, dt, wet, jnp.asarray(1.0e-10))
+    assert not np.array_equal(np.asarray(actual), np.asarray(violated))
 
 
 def test_nemo_two_step_fct_is_a_live_real_flux_arm():
