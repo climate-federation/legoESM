@@ -1,61 +1,79 @@
-"""``--grid fesom`` stage-B1 gate: registered, mesh-dir required, and every
-unwired OMIP physics selector rejected LOUDLY (three-grid unification plan;
-silent drops forbidden).
+"""``--grid fesom`` stage gate: ALLOWLIST semantics against the REAL parser.
 
-Shown non-vacuous by construction: each assertion matches the gate's own
-message text, which exists only on the fesom branch.
+GLM review 2026-09-01: a blocklist is fail-open as the driver grows — every
+USER-SET selector not on the wired allowlist must be rejected, including
+flags added to the driver AFTER this test was written (that is the point of
+the inversion, and why these tests drive the real parser, not a stub).
 """
 from __future__ import annotations
-
-import argparse
 
 import pytest
 
 from scripts.run.run_omip_core2 import (
-    _FESOM_B1_UNSUPPORTED,
+    _FESOM_WIRED_DESTS,
+    _build_arg_parser,
     validate_fesom_stage,
 )
 
+BASE = ["--grid", "fesom", "--fesom-mesh-dir", "/some/mesh",
+        "--output", "/some/out", "--no-emp"]
 
-def _args(**kw) -> argparse.Namespace:
-    base = {attr: None for attr, _ in _FESOM_B1_UNSUPPORTED}
-    base["fesom_mesh_dir"] = "/some/mesh"
-    base.update(kw)
-    return argparse.Namespace(**base)
+
+def _parse(extra=()):
+    p = _build_arg_parser()
+    return p.parse_args(BASE + list(extra)), p
 
 
 def test_mesh_dir_required():
+    p = _build_arg_parser()
+    args = p.parse_args(["--grid", "fesom", "--output", "/o", "--no-emp"])
     with pytest.raises(SystemExit, match="fesom-mesh-dir"):
-        validate_fesom_stage(_args(fesom_mesh_dir=None))
+        validate_fesom_stage(args, p)
 
 
 def test_clean_args_pass():
-    validate_fesom_stage(_args())  # no raise
+    args, p = _parse()
+    validate_fesom_stage(args, p)  # no raise
 
 
-@pytest.mark.parametrize("attr,flag", _FESOM_B1_UNSUPPORTED)
-def test_every_unwired_selector_rejected(attr, flag):
+@pytest.mark.parametrize("extra", [
+    ["--dm2dc"], ["--iwm"], ["--runoff"], ["--mle"], ["--isf"],
+    ["--bbl-adv"], ["--prognostic-sea-ice"], ["--woa-init"],
+    ["--momentum-rk3"], ["--geothermal"], ["--sw-rgb-chl"],
+    ["--sss-restore"], ["--gateway-transports"], ["--partial-cell"],
+])
+def test_physics_selectors_rejected(extra):
+    args, p = _parse(extra)
     with pytest.raises(SystemExit, match="silently dropped"):
-        validate_fesom_stage(_args(**{attr: True}))
+        validate_fesom_stage(args, p)
 
 
-def test_reject_lists_the_offending_flag():
-    with pytest.raises(SystemExit, match=r"--dm2dc"):
-        validate_fesom_stage(_args(dm2dc=True))
+def test_arbitrary_user_set_value_rejected():
+    """The allowlist catches ANY non-default user setting, not only the
+    flags a blocklist happened to enumerate (the fail-open GLM closed)."""
+    args, p = _parse(["--sss-restore-tau-days", "30"])
+    with pytest.raises(SystemExit, match="sss-restore-tau-days"):
+        validate_fesom_stage(args, p)
+
+
+def test_no_emp_optout_allowed():
+    """Turning OFF a default-on lever the lane cannot run is exactly what
+    the gate demands — must not be rejected."""
+    args, p = _parse()
+    assert args.emp_freshwater is False
+    validate_fesom_stage(args, p)
+
+
+def test_allowlist_is_tight():
+    """Every allowlisted dest exists on the parser (a typo here would
+    silently reopen the gate for the misspelled flag)."""
+    p = _build_arg_parser()
+    defaults = {a.dest for a in p._actions}
+    missing = _FESOM_WIRED_DESTS - defaults
+    assert not missing, f"allowlisted dests not on the parser: {missing}"
 
 
 def test_grid_choice_registered():
-    """The parser accepts --grid fesom (argparse would exit(2) with
-    'invalid choice' otherwise). Proven via the real entry point's parser
-    the same way the sibling CLI tests do: --help exits 0 and mentions
-    fesom."""
-    import subprocess
-    import sys
-    from pathlib import Path
-    root = Path(__file__).resolve().parents[2]
-    out = subprocess.run(
-        [sys.executable, str(root / "scripts/run/run_omip_core2.py"),
-         "--help"],
-        capture_output=True, text=True, timeout=300)
-    assert out.returncode == 0
-    assert "fesom" in out.stdout
+    p = _build_arg_parser()
+    args = p.parse_args(BASE)
+    assert args.grid == "fesom"

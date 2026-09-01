@@ -1985,41 +1985,39 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
     return grid, z_coord, model, state, np.asarray(H_bathy)
 
 
-_FESOM_B1_UNSUPPORTED = (
-    # (args attribute, flag string) — every OMIP physics/forcing selector the
-    # FESOM lane cannot honour at unification stage B1 (UNFORCED plumbing).
-    # Accept-and-ignore is forbidden; each lever is re-admitted by the stage
-    # that actually wires it (B2 wind stress, B3 heat/freshwater, B4
-    # IC/ice/SSS/runoff, B6 iwm/isf).
-    ("runoff", "--runoff"), ("sss_restore", "--sss-restore"),
-    ("dm2dc", "--dm2dc"), ("sw_rgb_chl", "--sw-rgb-chl"),
-    ("mle", "--mle"), ("geothermal", "--geothermal"),
-    ("isf", "--isf"), ("iwm", "--iwm"), ("bbl_adv", "--bbl-adv"),
-    ("prognostic_sea_ice", "--prognostic-sea-ice"),
-    ("woa_init", "--woa-init"), ("nemo_monthly_init", "--nemo-monthly-init"),
-    ("partial_cell", "--partial-cell"), ("nemo_vertical", "--nemo-vertical"),
-    ("momentum_rk3", "--momentum-rk3"),
-    ("adaptive_implicit_vertadv", "--adaptive-implicit-vertadv"),
-    ("ice_albedo", "--ice-albedo"), ("ice_thermo", "--ice-thermo"),
-    ("gateway_transports", "--gateway-transports"),
-    ("emp_freshwater", "--emp-freshwater"),
-)
+# Selectors the FESOM lane HONOURS at its current stage (an ALLOWLIST:
+# GLM review 2026-09-01 — a blocklist is fail-open as the driver grows;
+# every flag the USER SET that is not listed here is rejected).  Grows one
+# stage at a time (B2 wind stress, B3 heat/freshwater, B4 IC/ice/SSS/runoff).
+_FESOM_WIRED_DESTS = frozenset({
+    "grid", "fesom_mesh_dir", "fesom_ic_dir", "dt", "years",
+    "snapshot_every_days", "output",
+    # explicitly-neutral opt-OUTs (turning a thing OFF the lane cannot run
+    # is exactly what the gate demands):
+    "emp_freshwater",
+})
 
 
-def validate_fesom_stage(args) -> None:
-    """Stage-B1 gate for ``--grid fesom``: hard-reject every selector the
-    lane does not wire yet (three-grid unification plan; silent drops
-    forbidden)."""
+def validate_fesom_stage(args, parser) -> None:
+    """Stage gate for ``--grid fesom``: reject every USER-SET selector the
+    lane does not wire yet (allowlist; silent drops forbidden).  User-set =
+    differs from the parser default, so other lanes' truthy geometry
+    defaults do not false-positive."""
     if not args.fesom_mesh_dir:
         raise SystemExit("--grid fesom requires --fesom-mesh-dir (a "
                          "fesom_jax C-exported mesh directory).")
-    bad = [flag for attr, flag in _FESOM_B1_UNSUPPORTED
-           if getattr(args, attr, None)]
+    bad = sorted(
+        dest for dest, val in vars(args).items()
+        if dest not in _FESOM_WIRED_DESTS
+        and val != parser.get_default(dest))
     if bad:
         raise SystemExit(
             "--grid fesom is at unification stage B1 (UNFORCED plumbing): "
-            "these selectors are not wired on the FESOM lane yet and would "
-            "be silently dropped: " + " ".join(bad))
+            "these user-set selectors are not wired on the FESOM lane yet "
+            "and would be silently dropped: "
+            + " ".join("--" + d.replace("_", "-") for d in bad)
+            + " (names are argparse dests; a flag set via its inverse, "
+            "e.g. --no-emp, reports its dest)")
 
 
 def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None):
@@ -2077,9 +2075,22 @@ def run_fesom_b1_smoke(args, grid, z_coord, model, state) -> None:
 
     from scripts.run.run_fesom_core2 import write_snapshot
 
+    import json
+
     out = Path(args.output); out.mkdir(parents=True, exist_ok=True)
     dt = float(args.dt)
-    n_steps = int(round(args.years * 365.0 * 86400.0 / dt))
+    # SAME duration rule as the main loop (codex B1 CRITICAL: ignoring
+    # --smoke here ran --years under a flag that promises 10 days).
+    total_days = 10.0 if args.smoke else args.years * 365.0
+    n_steps = int(round(total_days * 86400.0 / dt))
+    if n_steps <= 0:
+        raise SystemExit(f"fesom B1: non-positive duration "
+                         f"({total_days} days at dt={dt}s -> {n_steps} "
+                         "steps); refusing to write 'final' for a run that "
+                         "never stepped.")
+    if args.snapshot_every_days and args.snapshot_every_days < 1:
+        raise SystemExit("fesom B1: --snapshot-every-days < 1 would alias "
+                         "multiple snapshots onto one dayNNNN tag.")
     snap_every = (int(round(args.snapshot_every_days * 86400.0 / dt))
                   if args.snapshot_every_days else 0)
     print(f"[fesom-b1] UNFORCED smoke: {n_steps} steps of dt={dt}s "
@@ -2090,7 +2101,16 @@ def run_fesom_b1_smoke(args, grid, z_coord, model, state) -> None:
         if snap_every and step % snap_every == 0:
             d = int(round(step * dt / 86400.0))
             write_snapshot(out, f"day{d:04d}", state.inner, model.mesh)
+    _T_fin = np.asarray(state.inner.T)
+    if not np.all(np.isfinite(_T_fin)):
+        raise SystemExit("fesom B1: non-finite temperature after "
+                         f"{n_steps} steps — refusing to report success.")
     write_snapshot(out, "final", state.inner, model.mesh)
+    (out / "run_manifest.json").write_text(json.dumps({
+        "lane": "fesom_b1_unforced", "git_sha": _source_revision(),
+        "n_steps": n_steps, "dt_s": dt, "total_days": total_days,
+        "argv": sys.argv,
+    }, indent=1))
     print(f"[fesom-b1] done: {n_steps} steps; snapshots in {out}")
 
 
@@ -6216,7 +6236,7 @@ def main() -> int:
         # The stage gate hard-rejects every physics/forcing selector the
         # lane does not wire yet; the full OMIP host loop joins at B2/B3
         # when the adapter gains a surface-forcing channel.
-        validate_fesom_stage(args)
+        validate_fesom_stage(args, p)
         grid, z_coord, model, state, H_bathy = build_fesom_ocean(
             args.fesom_mesh_dir, args.dt, ic_dir=args.fesom_ic_dir)
         run_fesom_b1_smoke(args, grid, z_coord, model, state)
