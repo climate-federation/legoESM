@@ -26,6 +26,14 @@ therefore forbidden here.
 
 ## Exact resolved overlay
 
+The copied configuration is built with the shipped `OCE SAS ICE` component
+set so `EXP_SASICE` resolves `src/SAS/sbcssm.F90` and reads its
+`namsbc_sas` ocean/ice boundary fields.  A plain C1D `OCE ICE TOP` build links
+`src/OCE/SBC/sbcssm.F90`, reports `nn_components=0`, evolves the one-metre
+ocean column, and does not execute the documented stand-alone-surface path.
+That discriminator stopped at ocean step 3178 on salinity and is retained
+under the run root as a finding; it cannot satisfy this contract.
+
 Resolution is `namelist_ice_cfg` over `namelist_ice_ref`
 (`icestp.F90:259-260`, with the per-block read pairs beginning at
 `icestp.F90:345-346`).  Every changed row below is either the ORCA1 target or a
