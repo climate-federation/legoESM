@@ -58,6 +58,8 @@ def test_metric_registry_and_planted_controls_are_wired():
     assert 'score_parser.add_argument("--plant-state"' in source
     assert 'score_parser.add_argument("--plant-census"' in source
     assert 'score_parser.add_argument("--plant-unregistered"' in source
+    assert 'run_parser.add_argument("--check-finite-every-step"' in source
+    assert '"first_nonfinite_completed_step": completed + 1' in source
     assert "names == REGISTERED_METRICS[case]" in source
     assert stats.REGISTERED_METRICS["LOCK_EXCHANGE-zco"] == {
         "front_position_km",

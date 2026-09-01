@@ -49,6 +49,8 @@ CASES = {
         "restart_hash": "15a7883e5e27df2fec36716c29375ec947892a842ee901e5526e10525db5c7a6",
         "namelist_hash": "ae34648ecdf44893e8543f0516511d239ce59161fa5b2de9924f0169d8185dd4",
         "binary_hash": "d297e236afd0097fc64533f4182fada9d58cc0458c359af06e08106fb796a259",
+        "phase3_gate": ARTIFACT_ROOT / "phase3/lock_trajectory_gate_kt60.json",
+        "phase3_gate_hash": "bcde1f59e92cd132c5f1622af75156a7901c7dd06be198564ca04fa66f0709ac",
         "temperature_range": (5.0, 30.0),
     },
     "OVERFLOW-zps": {
@@ -66,6 +68,8 @@ CASES = {
         "restart_hash": "dab392f2f058b44e8c10c600a41c9be73ba37656e2af478193a3f6f27bd67160",
         "namelist_hash": "ec1eac4a45fb8c07a0facce5e4eefb6510d8e3f1e364f5c5597e60ae83ccc53e",
         "binary_hash": "eb4acf9651b887a3da8834281112d472692caa0bbadcb0d69779e91dee92e6cb",
+        "phase3_gate": ARTIFACT_ROOT / "phase3/overflow_trajectory_gate_kt60.json",
+        "phase3_gate_hash": "98856a4fdf5301ae364aa6ced6af6656b4015cfd8581495b5ee5b5e367acb98f",
         "temperature_range": (10.0, 20.0),
     },
 }
@@ -150,7 +154,14 @@ def _state_arrays(state) -> dict[str, np.ndarray]:
     }
 
 
-def run_legoesm(case: str, precision: str, output_dir: Path, stamped_sha: str) -> dict:
+def run_legoesm(
+    case: str,
+    precision: str,
+    output_dir: Path,
+    stamped_sha: str,
+    *,
+    check_finite_every_step: bool = False,
+) -> dict:
     policy = PrecisionPolicy.fp64() if precision == "fp64" else PrecisionPolicy.fp32()
     set_policy(policy)
     require(get_policy() == policy, f"failed to set {precision} policy")
@@ -205,6 +216,34 @@ def run_legoesm(case: str, precision: str, output_dir: Path, stamped_sha: str) -
         if completed == int(CASES[case]["n_steps"]):
             break
         state = model.step(state, dt=card.dt_s)
+        if check_finite_every_step:
+            finite = {
+                name: bool(np.all(np.isfinite(values)))
+                for name, values in _state_arrays(state).items()
+            }
+            if not all(finite.values()):
+                failure = {
+                    "format": "nemo-testcase-l1-full-failure-v1",
+                    "preregistration_commit": PREREG_SHA,
+                    "git_sha": stamped_sha,
+                    "case": case,
+                    "precision": precision,
+                    "backend": jax.default_backend(),
+                    "devices": [str(device) for device in jax.devices()],
+                    "first_nonfinite_completed_step": completed + 1,
+                    "physical_time_s": (completed + 1) * float(CASES[case]["dt_s"]),
+                    "fields_finite": finite,
+                    "wall_time_s": time.perf_counter() - started,
+                    "state_dtypes": initial_dtypes,
+                    "geometry_dtypes": geometry_dtypes,
+                    "diagnostic_check_every_step": True,
+                }
+                failure_path = output_dir / "failure.json"
+                failure_path.write_text(json.dumps(failure, indent=2, sort_keys=True) + "\n")
+                print(json.dumps(failure, indent=2, sort_keys=True), flush=True)
+                raise StatisticalError(
+                    f"{case} {precision}: first nonfinite completed step {completed + 1}"
+                )
         percentage = int(100 * (completed + 1) / int(CASES[case]["n_steps"]))
         if percentage >= next_progress:
             print(
@@ -249,6 +288,7 @@ def run_legoesm(case: str, precision: str, output_dir: Path, stamped_sha: str) -
         "state_dtypes": initial_dtypes,
         "geometry_dtypes": geometry_dtypes,
         "states_sha256": sha256(state_path),
+        "diagnostic_check_every_step": check_finite_every_step,
     }
     metadata_path = output_dir / "metadata.json"
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
@@ -505,8 +545,11 @@ def arm_metrics(case: str, states: dict[int, dict], source: str, coefficients) -
             require(bool(np.any(cold)), f"{source}: no cold plume at t={time_s}")
             descent.append(float(np.max(centres[cold])))
             crossings = ascending_crossings(x_km, _bottom_values(fields["T"], active, row), 15.0)
-            require(crossings.size > 0, f"{source}: no overflow front at t={time_s}")
-            fronts.append(float(crossings[0]))
+            require(
+                crossings.size == 1,
+                f"{source}: expected one overflow front at t={time_s}, got {crossings.size}",
+            )
+            fronts.append(float(crossings[-1]))
             crossing_counts.append(int(crossings.size))
         final = mapped[int(times[-1])]
         _, active, volume, _ = _geometry(case, final["ssh"])
@@ -548,7 +591,10 @@ def arm_metrics(case: str, states: dict[int, dict], source: str, coefficients) -
             fields = mapped[int(time_s)]
             _, active, volume, _ = _geometry(case, fields["ssh"])
             crossings = ascending_crossings(x_km, _bottom_values(fields["T"], active, row), 17.5)
-            require(crossings.size > 0, f"{source}: no lock front at t={time_s}")
+            require(
+                crossings.size == 1,
+                f"{source}: expected one lock front at t={time_s}, got {crossings.size}",
+            )
             fronts.append(float(crossings[-1]))
             crossing_counts.append(int(crossings.size))
             rpe.append(_rpe(fields, case, coefficients))
@@ -631,6 +677,53 @@ def _field_linf(case: str, arms: dict[str, dict[int, dict]], field: str) -> dict
     }
 
 
+def deterministic_bridge(case: str, arms: dict[str, dict[int, dict]]) -> dict:
+    """Join the certified before-entry kt1..60 series to full-run samples."""
+    path = Path(CASES[case]["phase3_gate"])
+    require(sha256(path) == CASES[case]["phase3_gate_hash"], f"{case}: phase3 gate hash")
+    phase3 = json.loads(path.read_text())
+    require(phase3["case"] == case and len(phase3["steps"]) == 60, "phase3 ladder mismatch")
+    result = {
+        "phase3_gate": str(path),
+        "phase3_gate_sha256": sha256(path),
+        "join": (
+            "phase3 kt is Nbb/before at completed_step=kt-1; midpoint is the same "
+            "before-entry frame; final point changes frame to tn/un restart after N_steps"
+        ),
+        "series": {},
+    }
+    card = build_nemo_testcase_card(case)
+    masks = expected_masks(card)
+    for field in ("T", "u"):
+        completed_steps = []
+        values = []
+        for step in phase3["steps"]:
+            rows = [row for row in step["rows"] if row["name"].rsplit(".", 1)[-1] == field]
+            require(len(rows) == 1, f"{case} kt{step['kt']} {field}: row inventory")
+            completed_steps.append(int(step["kt"]) - 1)
+            values.append(float(rows[0]["normalized_max_abs"]))
+        mask = masks[field]
+        for time_s in sorted(arms["N2"]):
+            completed = int(round(time_s / float(CASES[case]["dt_s"])))
+            if completed <= completed_steps[-1]:
+                continue
+            oracle = mapped_fields(arms["N2"][time_s], "N2")[field]
+            candidate = mapped_fields(arms["L64"][time_s], "L64")[field]
+            scale = max(float(np.max(np.abs(oracle[mask]))), 1.0)
+            completed_steps.append(completed)
+            values.append(float(np.max(np.abs(candidate[mask] - oracle[mask]))) / scale)
+        require(
+            completed_steps[-2:] == [int(CASES[case]["mid_kt"]) - 1, int(CASES[case]["n_steps"])],
+            f"{case} {field}: full-duration bridge samples",
+        )
+        result["series"][field] = {
+            "completed_steps": completed_steps,
+            "normalized_max_abs": values,
+            "staggering": "T centre" if field == "T" else "instantaneous U face",
+        }
+    return result
+
+
 def _row(
     name: str, candidate: float, floor: float, spread: float, units: str, reduction: str
 ) -> dict:
@@ -687,6 +780,7 @@ def score_case(
 
     coefficients = parse_teos10_density_coefficients()
     metrics = {arm: arm_metrics(case, states, arm, coefficients) for arm, states in arms.items()}
+    bridge = deterministic_bridge(case, arms)
     rows = []
 
     def curve(name: str, units: str):
@@ -786,6 +880,7 @@ def score_case(
         ),
         "legoesm_runs": {"fp64": l64_metadata, "fp32": l32_metadata},
         "metrics": metrics,
+        "deterministic_bridge": bridge,
         "rows": sorted(rows, key=lambda row: row["name"]),
         "controls": {
             "plant_state": plant_state,
@@ -803,6 +898,7 @@ def main() -> int:
     run_parser.add_argument("--precision", choices=("fp64", "fp32"), required=True)
     run_parser.add_argument("--output-dir", type=Path, required=True)
     run_parser.add_argument("--git-sha", default=None)
+    run_parser.add_argument("--check-finite-every-step", action="store_true")
     score_parser = subparsers.add_parser("score")
     score_parser.add_argument("--case", choices=tuple(CASES), required=True)
     score_parser.add_argument("--lego-root", type=Path, default=FULL_ROOT / "legoesm")
@@ -813,7 +909,13 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.command == "run-legoesm":
-        report = run_legoesm(args.case, args.precision, args.output_dir, args.git_sha or git_sha())
+        report = run_legoesm(
+            args.case,
+            args.precision,
+            args.output_dir,
+            args.git_sha or git_sha(),
+            check_finite_every_step=args.check_finite_every_step,
+        )
     else:
         set_policy(PrecisionPolicy.fp64())
         require(bool(jax.config.jax_enable_x64), "scoring requires JAX x64")
