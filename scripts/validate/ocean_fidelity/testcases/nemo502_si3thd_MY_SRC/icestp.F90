@@ -260,11 +260,9 @@ CONTAINS
       WRITE(num_l3xchg) emp_oce, wndm_ice, sstfrz, rCdU_ice
       WRITE(num_l3xchg) snwice_mass, snwice_mass_b, snwice_fmass
       WRITE(num_l3xchg) utau, vtau, taum, qsr, qns, emp, sfx, fr_i
+      ! The terminal step may be revisited; process teardown owns CLOSE so a
+      ! second nitend call cannot reopen this STATUS='REPLACE' stream.
       FLUSH(num_l3xchg)
-      IF( kt == nitend ) THEN
-         CLOSE(num_l3xchg)
-         num_l3xchg = -1
-      ENDIF
    END SUBROUTINE l3xchg_dump
 
 

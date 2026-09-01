@@ -12,6 +12,7 @@ import pytest
 
 
 GATE_PATH = Path(__file__).parents[3] / "scripts/validate/ocean_fidelity/testcases/nemo_si3thd_oracle_gate.py"
+MY_SRC = Path(__file__).parents[3] / "scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC"
 SPEC = importlib.util.spec_from_file_location("nemo_si3thd_oracle_gate", GATE_PATH)
 assert SPEC and SPEC.loader
 gate = importlib.util.module_from_spec(SPEC)
@@ -92,3 +93,11 @@ def test_restart_missing_required_fails(tmp_path: Path) -> None:
         ds.renameVariable("v_i", "not_v_i")
     with pytest.raises(gate.GateError, match="restart required missing"):
         gate.check_restart(path)
+
+
+def test_oracle_streams_are_not_closed_and_replaced_at_nitend() -> None:
+    """A repeated terminal call must append, not replace the full-year stream."""
+    for source in (MY_SRC / "icethd.F90", MY_SRC / "icestp.F90"):
+        text = source.read_text(encoding="utf-8")
+        assert "STATUS='REPLACE'" in text
+        assert "CLOSE(num_l3" not in text

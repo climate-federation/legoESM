@@ -251,11 +251,9 @@ CONTAINS
       CALL l3thd_header( kt, kstage, 0 )
       WRITE(num_l3thd) a_i, v_i, v_s, sv_i, oa_i, t_su, a_ip, v_ip, v_il, e_i, e_s, szv_i
       IF( kstage == 7 ) THEN
+         ! NEMO can revisit nitend during terminal handling.  Keep the stream
+         ! open until process teardown so STATUS='REPLACE' cannot truncate it.
          FLUSH(num_l3thd)
-         IF( kt == nitend ) THEN
-            CLOSE(num_l3thd)
-            num_l3thd = -1
-         ENDIF
       ENDIF
    END SUBROUTINE l3thd_dump_global
 
