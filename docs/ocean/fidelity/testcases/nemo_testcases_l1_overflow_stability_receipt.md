@@ -268,17 +268,26 @@ needed after the coverage table.
 
 | artifact | SHA-256 |
 |---|---|
-| resolved coverage JSON | `b22281a4f2389edcd29b354e663369c2d13398df7716fe5e576057b81d68bed5` |
+| resolved coverage JSON | `f843679436f9c174ef3809e8ade31b32118e694916b643c3fc53c1517f1d216a` |
 | adaptive-momentum same-input scale | `d7ef743ae95d5f7553f5763673d53f7ec04fa0662040587872e9c9b73762e2b1` |
 | adaptive-momentum arm `run.json` | `3d3a51b3a15ea96150bfa187cdcc807ee4a758e11c049b431fd0c11e113d580d` |
 | adaptive-momentum matched score | `8d642cbd0385bcde27ae9baad880757e61cc92318cb03958500f30a516f60679` |
 | adaptive-momentum run summary | `3162b99bf49bc155e01b1c0a110f8846bd0533b8892d49870d8415a2a6e4279f` |
 | BBL same-input scale | `a87ec2fdfb5aa8b8c8805a76d6edc614bf216eabd3a56d3fbcf6804f55cfc6a0` |
-| machine verdict | `cfb67081d01c5ca59bca581634600fc6414f290d1dcb9d8ff1cc82af5181e8ce` |
+| machine verdict | `6b0143b5b30ee65a87b50ca771c7aef2af33f78a1ba4eac5926d0f1bba8b5cba` |
 
-The coverage JSON and machine verdict stamp scorer commit `4865140afcbf`;
+The coverage JSON and machine verdict stamp scorer commit `b8fb77fec3ef`;
 the full adaptive arm stamps runner commit `5e68669f5e8f`.  The focused current
-breakdown is **31 tests**: 11 stability-probe/coverage/label controls plus 20
+breakdown is **32 tests**: 12 stability-probe/coverage/label controls plus 20
 adaptive-implicit vertical-advection unit tests.  All ran CPU/fp64 with
 `JAX_PLATFORMS=cpu`, `JAX_ENABLE_X64=1`; every state and geometry dtype in the
 arm receipt is `float64`.
+
+Independent adversarial review is **UNMEASURED**.  A read-only Codex review was
+attempted after the commits, but the sandbox denied both WebSocket and HTTPS
+network transport before a reviewer response was produced.  The subsequent
+local fail-closed audit found and fixed a verdict-path vacuity: a successful
+run records `first_nonfinite_completed_step=null`, which the first loader could
+not classify as CONFIRMED.  The committed control now proves a finite 6,120-
+step arm reaches CONFIRMED while a short null-failure run goes red.  This
+self-audit is not represented as independent review.
