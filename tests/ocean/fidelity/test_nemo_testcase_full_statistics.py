@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import json
 from pathlib import Path
 
 import numpy as np
@@ -68,6 +70,56 @@ def test_gross_temperature_control_hard_fails():
     values = np.asarray([10.0, 20.001], dtype=np.float64)
     with pytest.raises(stats.StatisticalError, match="gross T excursion"):
         stats._snap_temperature(values, "OVERFLOW-zps", values.dtype)
+
+
+def test_precision_scaled_guard_requires_pinned_accumulation_artifact(tmp_path):
+    artifact = tmp_path / "fp32_trace.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "preregistration_commit": stats.FP32_DISCRIMINATOR_PREREG_SHA,
+                "case": "OVERFLOW-zps",
+                "precision": "fp32",
+                "all_finite": True,
+                "classification": {
+                    "classification": "PRECISION_ACCUMULATION",
+                    "n_steps": 3060,
+                },
+            }
+        )
+    )
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    guard, evidence = stats.precision_floor_guard(
+        "OVERFLOW-zps",
+        "L32",
+        np.dtype(np.float32),
+        discriminator_path=artifact,
+        expected_sha256=digest,
+    )
+    assert guard == 6120 * np.finfo(np.float32).eps
+    assert evidence["formula"] == "max(1e-6, N_steps * eps(dtype))"
+    values = np.asarray([10.0, 20.0022], dtype=np.float32)
+    _, receipt = stats._snap_temperature(
+        values,
+        "OVERFLOW-zps",
+        values.dtype,
+        gross_guard_relative=guard,
+        guard_evidence=evidence,
+    )
+    assert receipt["roundoff_status"] == "UNMEASURED"
+
+
+def test_precision_scaled_guard_rejects_tampered_artifact(tmp_path):
+    artifact = tmp_path / "fp32_trace.json"
+    artifact.write_text("{}")
+    with pytest.raises(stats.StatisticalError, match="hash mismatch"):
+        stats.precision_floor_guard(
+            "OVERFLOW-zps",
+            "L32",
+            np.dtype(np.float32),
+            discriminator_path=artifact,
+            expected_sha256="0" * 64,
+        )
 
 
 def test_fp32_trace_classifier_accepts_gradual_precision_accumulation():

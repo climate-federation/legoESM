@@ -34,6 +34,12 @@ ARTIFACT_ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l1")
 FULL_ROOT = ARTIFACT_ROOT / "full_statistical"
 PREREG_SHA = "27e569b20932e44a0fc1d1f4812c7fe8b4fc79b2"
 FP32_DISCRIMINATOR_PREREG_SHA = "b3a813c8a2e3"
+FP32_DISCRIMINATOR_PATH = (
+    ARTIFACT_ROOT / "round3_aimp/fp32_temperature_trace_3060.json"
+)
+FP32_DISCRIMINATOR_SHA256 = (
+    "a093cf1127da5a4572010d8f49fa7fda752b99b9d847ba1a47e0c58a79907dfa"
+)
 CASES = {
     "LOCK_EXCHANGE-zco": {
         "slug": "lock_exchange_zco",
@@ -670,7 +676,55 @@ def rightmost_ascending_crossing(
     return float(crossings[-1]), int(crossings.size)
 
 
-def _snap_temperature(values: np.ndarray, case: str, dtype: np.dtype) -> tuple[np.ndarray, dict]:
+def precision_floor_guard(
+    case: str,
+    source: str,
+    dtype: np.dtype,
+    *,
+    discriminator_path: Path = FP32_DISCRIMINATOR_PATH,
+    expected_sha256: str = FP32_DISCRIMINATOR_SHA256,
+) -> tuple[float, dict]:
+    """Return the preregistered guard only for the validated OVERFLOW L32 arm."""
+    if case != "OVERFLOW-zps" or source != "L32":
+        return 1.0e-6, {"basis": "fixed gross-excursion guard", "relative_guard": 1.0e-6}
+    require(np.dtype(dtype) == np.dtype(np.float32), "OVERFLOW L32 floor arm must be fp32")
+    require(sha256(discriminator_path) == expected_sha256, "fp32 discriminator hash mismatch")
+    discriminator = json.loads(discriminator_path.read_text())
+    classification = discriminator["classification"]
+    require(
+        discriminator["preregistration_commit"] == FP32_DISCRIMINATOR_PREREG_SHA,
+        "fp32 discriminator preregistration mismatch",
+    )
+    require(
+        discriminator["case"] == case
+        and discriminator["precision"] == "fp32"
+        and discriminator["all_finite"] is True
+        and classification["classification"] == "PRECISION_ACCUMULATION"
+        and classification["n_steps"] == int(CASES[case]["mid_kt"]),
+        "fp32 discriminator did not confirm precision accumulation",
+    )
+    relative_guard = max(
+        1.0e-6, int(CASES[case]["n_steps"]) * float(np.finfo(dtype).eps)
+    )
+    return relative_guard, {
+        "basis": "preregistered linear precision-accumulation floor-arm guard",
+        "formula": "max(1e-6, N_steps * eps(dtype))",
+        "relative_guard": relative_guard,
+        "discriminator": str(discriminator_path),
+        "discriminator_sha256": expected_sha256,
+        "discriminator_preregistration_commit": FP32_DISCRIMINATOR_PREREG_SHA,
+        "classification": classification,
+    }
+
+
+def _snap_temperature(
+    values: np.ndarray,
+    case: str,
+    dtype: np.dtype,
+    *,
+    gross_guard_relative: float = 1.0e-6,
+    guard_evidence: dict | None = None,
+) -> tuple[np.ndarray, dict]:
     low, high = CASES[case]["temperature_range"]
     eps = np.finfo(dtype).eps
     scale = max(abs(low), abs(high), 1.0)
@@ -680,7 +734,7 @@ def _snap_temperature(values: np.ndarray, case: str, dtype: np.dtype) -> tuple[n
     excess = max(low - raw_min, raw_max - high, 0.0)
     excess_relative = excess / scale
     require(
-        excess_relative <= 1.0e-6,
+        excess_relative <= gross_guard_relative,
         f"{case}: gross T excursion raw=[{raw_min:.17g},{raw_max:.17g}] "
         f"excess={excess:.17g} relative={excess_relative:.17g}",
     )
@@ -691,7 +745,9 @@ def _snap_temperature(values: np.ndarray, case: str, dtype: np.dtype) -> tuple[n
         "excess_relative": excess_relative,
         "endpoint_floor_K": floor,
         "roundoff_status": "AT-BAR" if excess <= floor else "UNMEASURED",
-        "gross_guard_relative": 1.0e-6,
+        "gross_guard_relative": gross_guard_relative,
+        "gross_guard_evidence": guard_evidence
+        or {"basis": "fixed gross-excursion guard", "relative_guard": gross_guard_relative},
     }
 
 
@@ -756,8 +812,14 @@ def arm_metrics(case: str, states: dict[int, dict], source: str, coefficients) -
         bathy = np.asarray(card.recipe.initial_state.H_bathy.data)
         slope = (bathy > 500.0) & (bathy < 2000.0)
         select = active & slope[..., None]
+        temperature_dtype = np.asarray(final["T"]).dtype
+        gross_guard, guard_evidence = precision_floor_guard(case, source, temperature_dtype)
         final_values, range_receipt = _snap_temperature(
-            np.asarray(final["T"])[select], case, np.asarray(final["T"]).dtype
+            np.asarray(final["T"])[select],
+            case,
+            temperature_dtype,
+            gross_guard_relative=gross_guard,
+            guard_evidence=guard_evidence,
         )
         weights = volume[select]
         bins = np.linspace(10.0, 20.0, 41)
