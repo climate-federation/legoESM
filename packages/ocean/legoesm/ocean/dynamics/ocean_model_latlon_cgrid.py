@@ -1005,6 +1005,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # Private ablation of dynspg_ts's flux-form primary transport average.
     # Public NEMO RK3 configurations always keep this true.
     primary_transport_average: bool = True
+    # Experimental operator-class ablation for the OVERFLOW stability probe.
+    # NEMO has no such switch: public RK3 configurations always retain their
+    # stage-3 vertical tracer transport.  This hook only zeroes the w transport
+    # handed to the tracer flux path; horizontal transport is unchanged.
+    disable_tracer_vertical_transport: bool = False
     # Return a momentum stage's instantaneous velocity in the prognostic u/v
     # slots after the full step has run.  Private fidelity instrumentation only;
     # zero leaves the returned state untouched.
@@ -5568,7 +5573,16 @@ class LatLonCGridOceanModel:
                     h_k_old, h_k_new, h_u_old, h_v_old,
                     _grid, dt, active_3d, recon_fill_mask=_wall_fill_mask,
                     linssh_top_flux=_linssh,
-                    stage_transport_geometry=_nemo_ws_stage_transport_geometry,
+                    stage_transport_geometry=(
+                        tuple(
+                            (mf_u, mf_v, jnp.zeros_like(w_stage), h_stage,
+                             hu_stage, hv_stage)
+                            for mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage
+                            in _nemo_ws_stage_transport_geometry
+                        )
+                        if self._nemo_ws_test_hooks.disable_tracer_vertical_transport
+                        else _nemo_ws_stage_transport_geometry
+                    ),
                     fct_low_order_predictor=(
                         "nemo_rk3_two_step"
                         if self._nemo_ws_test_hooks.two_step_fct_predictor
