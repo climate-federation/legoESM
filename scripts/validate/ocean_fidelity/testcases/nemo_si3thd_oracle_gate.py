@@ -32,14 +32,14 @@ def sha256(path: Path) -> str:
 
 
 STAGES = {
-    0: ("ENTRY", "now", "icethd.F90:86-115"),
-    1: ("POST_ZDF", "now", "icethd.F90:148"),
-    2: ("POST_DH", "now", "icethd.F90:150"),
-    3: ("POST_TEMP1", "now", "icethd.F90:152"),
-    4: ("POST_SAL", "now", "icethd.F90:154"),
-    5: ("POST_TEMP2", "now", "icethd.F90:156"),
-    6: ("POST_DO", "now", "icethd.F90:181"),
-    7: ("EXIT", "now", "icethd.F90:183-216"),
+    0: ("ENTRY", "now: global pre-thermodynamics", "icethd.F90:112"),
+    1: ("POST_ZDF", "now: selected-category 1D", "icethd.F90:151-152"),
+    2: ("POST_DH", "now: selected-category 1D", "icethd.F90:154-155"),
+    3: ("POST_TEMP1", "now: selected-category 1D", "icethd.F90:157-158"),
+    4: ("POST_SAL", "now: selected-category 1D", "icethd.F90:160-161"),
+    5: ("POST_TEMP2", "now: selected-category 1D", "icethd.F90:163-164"),
+    6: ("POST_DO", "now: global post-open-water growth, pre-correction", "icethd.F90:189-190"),
+    7: ("EXIT", "now: global post-correction/LBC", "icethd.F90:221-225"),
 }
 
 REQUIRED_RESTART = {
@@ -159,7 +159,7 @@ def read_thd_frames(path: Path, plant: bool = False, nsteps: int = 8760) -> tupl
                 version, step, stage, payload, nx, ny, nc, ni, ns, npti, bits = struct.unpack("=11i", raw)
                 require((version, step, stage, nc, ni, ns, bits) == (1, kt, wanted_stage, 1, 3, 3, 64),
                         f"thermo frame registry violation at step {kt} stage {wanted_stage}")
-                require(stage in STAGES and STAGES[stage][1] == "now", "unregistered time level")
+                require(stage in STAGES and STAGES[stage][1].startswith("now:"), "unregistered time level")
                 n2 = nx * ny
                 if payload == 0:
                     nval = n2 * nc * 9 + n2 * nc * (ni + ns + ni)
@@ -264,6 +264,10 @@ def run(root: Path, forcing: Path, archive: Path, plant_restart: bool = False,
         "archive_sha256": sha256(archive),
         "resolved_sha256": {"ocean": sha256(root / "output.namelist.dyn"),
                             "ice": sha256(root / "output.namelist.ice")},
+        "frame_registry": {
+            str(stage): {"name": name, "time_level": time_level, "source": source}
+            for stage, (name, time_level, source) in STAGES.items()
+        },
         "thermodynamics": read_thd_frames(root / "oracle_si3_thd_frames.bin", plant_thickness)[1],
         "exchange": read_exchange_frames(root / "oracle_si3_exchange_frames.bin", plant_exchange),
         "restart": check_restart(restarts[0], plant_restart),
