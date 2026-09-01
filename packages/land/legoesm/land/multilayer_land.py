@@ -552,6 +552,39 @@ def _step_multilayer_land_impl(
     # Surface scheme dispatch
     # =================================================================
     canopy_state_new = None  # updated only by CLMMLCanopyConfig branch
+    # --- P-hydro transpiration-stress source (dispatch-hardened) ---
+    if config.transpiration_stress not in ("beta_theta", "phydro"):
+        raise ValueError(
+            f"unknown transpiration_stress scheme "
+            f"{config.transpiration_stress!r}; must be one of "
+            "('beta_theta', 'phydro')")
+    _phydro_supply = None
+    if config.transpiration_stress == "phydro":
+        if isinstance(config.surface_scheme, CLMMLCanopyConfig):
+            raise ValueError(
+                "transpiration_stress='phydro' is not supported with the "
+                "CLM-ML scheme (it carries its OWN plant hydraulics; "
+                "composing both would double-count the supply limit).")
+        if not pmodel_switches_active(config.surface_scheme, config.stomata):
+            raise ValueError(
+                "transpiration_stress='phydro' needs a P-model switch "
+                "(capacity_scheme/g1_source='p_model') to feed the profit "
+                "optimum into; with prescribed parameters the switch would "
+                "be silently inert.")
+        from legoesm.land.phydro import soil_root_supply
+        # LAI for the per-leaf-area supply: same priority the canopy resolves
+        # (override > per-column params > scalar default).
+        _lai_sup = compute_prognostic_lai(
+            carbon_state, config, config.surface_scheme)
+        if _lai_sup is None:
+            _lai_sup = _get(lp, "LAI", None) if lp is not None else None
+        if _lai_sup is None:
+            _lai_sup = jnp.full(T_surface.shape, 1.5)  # coeff-ok: canopy default LAI fallback
+        # Reuse the step's own per-column root profile (single source).
+        _phydro_supply = soil_root_supply(
+            psi, theta, grid.dz, root_frac, _lai_sup,
+            config.hydraulics, config.phydro)
+
     if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
         # Canopy surface scheme: Newton closure with Picard loop that
         # advances soil thermal tentatively between passes.
@@ -604,6 +637,7 @@ def _step_multilayer_land_impl(
                 state.W_canopy, _pai_i, config.interception)
 
         surface_out = compute_two_leaf_canopy_fluxes(
+            phydro_supply=_phydro_supply,
             T_soil_top=T_surface,
             forcing=forcing,
             canopy_config=config.surface_scheme,
@@ -781,6 +815,7 @@ def _step_multilayer_land_impl(
             emissivity=emissivity,
             z0=z0,
             pmodel_acclim=state.pmodel_acclim,
+            phydro_supply=_phydro_supply,
         )
     else:
         raise ValueError(

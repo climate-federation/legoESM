@@ -307,6 +307,14 @@ def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
         if _seb_pm:
             _sto = _sto._replace(capacity_scheme=_cap, g1_source=_g1s)
         land = land._replace(stomata=_sto.validate())
+    if getattr(args, "transpiration_stress", "beta_theta") != "beta_theta":
+        if args.land_surface_scheme == "clm_ml":
+            raise ValueError(
+                "--transpiration-stress phydro is not supported with "
+                "--land-surface-scheme clm_ml (CLM-ML has its own plant "
+                "hydraulics).")
+        land = land._replace(
+            transpiration_stress=args.transpiration_stress)
     # Sub-grid elevation-band snow (opt-in): for an offline column, the sub-grid
     # relief std [m] is supplied directly (--elev-std-m); a coarse gridded run gets
     # it per cell from the CLM STD_ELEV map instead (coupled driver).
@@ -823,6 +831,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Source of the Medlyn slope g1: 'table' (default, "
                         "per-PFT) or 'p_model' (least-cost xi; requires "
                         "--canopy-stomatal-model medlyn). Two-leaf only.")
+    p.add_argument("--transpiration-stress", default="beta_theta",
+                   choices=["beta_theta", "phydro"],
+                   dest="transpiration_stress",
+                   help="Water-stress source for transpiration/photosynthesis: "
+                        "'beta_theta' (default, empirical root-zone theta "
+                        "multiplier) or 'phydro' (Joshi-2022 profit optimum "
+                        "on the SPA plant-hydraulics supply; REPLACES the "
+                        "multiplier; needs a p_model switch and a "
+                        "two_leaf/simple_seb scheme).")
     p.add_argument("--pmodel-cold-restart", action="store_true",
                    dest="pmodel_cold_restart",
                    help="Allow resuming a P-model run from a restart that has "

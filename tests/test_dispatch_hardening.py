@@ -252,6 +252,11 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # parameters while claiming optimality (or vice versa).
         ("packages/land/legoesm/land/surface_scheme/two_leaf_canopy.py",
          "compute_two_leaf_canopy_fluxes"),
+        # transpiration_stress dispatch (beta_theta|phydro): guarded at the
+        # multilayer step entry (2026-09-01); an unknown value must raise,
+        # never silently run the empirical theta stress.
+        ("packages/land/legoesm/land/multilayer_land.py",
+         "_step_multilayer_land_impl"),
         # Big-leaf P-model switches + stomatal-model dispatch: guarded at the
         # StomataConfig.validate() fail-early entry (invoked by
         # compute_effective_beta, whose own refusals are inertness guards, not

@@ -211,6 +211,7 @@ def compute_two_leaf_canopy_fluxes(
     soil_surface_relsat: jnp.ndarray | None = None,
     fwet: jnp.ndarray | None = None,
     pmodel_acclim=None,  # PModelAcclimState | None (land/p_model.py)
+    phydro_supply=None,  # PhydroSupply | None (land/phydro.py)
 ) -> SurfaceFluxOutput:
     """Compute surface fluxes via the two-leaf canopy Newton + Picard closure.
 
@@ -364,20 +365,52 @@ def compute_two_leaf_canopy_fluxes(
         # Raises with a clear message when this caller does not carry the
         # acclimation state (slab-land / patch-mosaic until wired): no silent
         # fall-back to prescribed parameters.
-        _caps = acclimated_capacities(pmodel_acclim, land_config.p_model)
+        _phydro_on = getattr(
+            land_config, "transpiration_stress", "beta_theta") == "phydro"
+        if _phydro_on and phydro_supply is None:
+            raise ValueError(
+                "transpiration_stress='phydro' but no PhydroSupply was "
+                "threaded to the canopy (phydro_supply=None): this caller "
+                "does not carry the soil-to-leaf supply state.")
+        if _phydro_on:
+            # C3 capacities/slope from the PROFIT optimum on the SPA supply
+            # (the empirical theta stress is replaced below); C4 columns keep
+            # the rpmodel-c4 least-cost optimum (both optimality sources).
+            from legoesm.land.phydro import phydro_optimum, slope_for_model
+            _hcaps = phydro_optimum(
+                pmodel_acclim, phydro_supply, land_config.phydro,
+                land_config.p_model)
+            _caps = None
+        else:
+            _caps = acclimated_capacities(pmodel_acclim, land_config.p_model)
         _caps4 = acclimated_capacities_c4(pmodel_acclim, land_config.p_model)
         if cc.capacity_scheme == "p_model":
             # C3 leaf-top capacity + Jmax25/Vcmax25 ratio, and the C4 leaf-top
             # capacity (rpmodel c4 method: full-kinetics chi with beta/9,
             # mj = mc = 1; no Jmax — the Collatz branch has none).
-            Vc3_leaf = _caps.vcmax25_leaf
-            rjv25 = _caps.rjv25
+            if _phydro_on:
+                Vc3_leaf = _hcaps.vcmax25_leaf
+                rjv25 = _hcaps.rjv25
+            else:
+                Vc3_leaf = _caps.vcmax25_leaf
+                rjv25 = _caps.rjv25
             Vc4_leaf = _caps4.vcmax25_c4_leaf
         if cc.g1_source == "p_model":
-            # Predicted Medlyn slopes replace the tabulated C3 AND C4 slopes;
-            # the soil-moisture stress below multiplies them exactly as it
-            # does the tabulated ones (deliberate: one consistent stress path).
-            m_C3 = _caps.g1_kpa
+            # Predicted slopes replace the tabulated C3 AND C4 slopes; the
+            # soil-moisture stress below multiplies them exactly as it does
+            # the tabulated ones (deliberate: one consistent stress path) —
+            # except under phydro, where that stress is replaced entirely.
+            if _phydro_on:
+                from legoesm.land.p_model import optimal_chi as _ochi
+                _, _, _, _gs_pa, _ = _ochi(
+                    pmodel_acclim.t_mean_K, pmodel_acclim.vpd_mean_pa,
+                    pmodel_acclim.co2_mean_ppm, pmodel_acclim.ps_ema,
+                    land_config.p_model)
+                m_C3 = slope_for_model(
+                    cc.stomatal_model, _hcaps.chi, pmodel_acclim, _gs_pa,
+                    d0_leuning_kpa=cc.d0_leuning_kpa)
+            else:
+                m_C3 = _caps.g1_kpa
             m_C4 = _caps4.g1_c4_kpa
 
     # ---- Soil moisture stress ----
@@ -388,7 +421,14 @@ def compute_two_leaf_canopy_fluxes(
     # root-zone beta (legacy behaviour).  Using the root-zone beta for soil evap
     # over-estimated forest-floor evaporation (it stays wet while the surface
     # dries), inflating LE and starving H.
-    fStress_vcmax = w_frac_rz         # Vcmax / transpiration down-regulation
+    # Under phydro the water limitation lives INSIDE the profit optimum
+    # (supply cap + hydraulic risk cost): the empirical multiplier is
+    # replaced by 1 (user decision ASK-14; GLM: anything else double-counts).
+    if (getattr(land_config, "transpiration_stress", "beta_theta")
+            == "phydro"):
+        fStress_vcmax = jnp.ones_like(w_frac_rz)
+    else:
+        fStress_vcmax = w_frac_rz     # Vcmax / transpiration down-regulation
     fStress_soil  = (w_frac_rz if w_frac_soil_evap is None
                      else w_frac_soil_evap)   # soil evaporation stress
 
