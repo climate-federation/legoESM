@@ -120,8 +120,13 @@ forming a bottom-trapped dense plume (NEMO 5 manual, OVERFLOW time-series;
 3. **Final slope temperature distribution.** The slope is frozen as columns
    with `500 m < H_bathy < 2000 m`. Form a volume-weighted histogram on fixed
    0.25 C bins spanning `[10,20] C`; report the probability vector and score
-   total-variation distance `0.5*sum|p_L-p_N|`. Values outside the closed
-   initial range hard-fail before binning.
+   total-variation distance `0.5*sum|p_L-p_N|`. The already-certified phase-1
+   endpoint convention applies before binning: an excess no larger than
+   `sqrt(N_steps)*eps(dtype)*max(|T_endpoints|,1)` is snapped to its nearest
+   endpoint for bin membership only, while raw extrema are emitted. A larger
+   excess hard-fails. This clarification is made before any new legoESM metric
+   is computed and responds to the pre-existing phase-1 roundoff receipt, not
+   to an extension-arm result.
 4. **Final slope water-mass census.** On the same volume and without clipping,
    report fractions `cold=[10,12)`, `mixed=[12,18)`, and
    `ambient=[18,20]` C. The score is the maximum absolute fraction difference.
