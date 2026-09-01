@@ -581,6 +581,12 @@ def acclim_trajectory(
             cfg=cfg, dt=dt)
         return new, new
 
+    # Promote the carry to the drivers' dtype up front: an f32 init state
+    # (e.g. built from float32 NetCDF driver values) against f64 forcing
+    # under JAX_ENABLE_X64 makes the scan carry change dtype across the
+    # body, which lax.scan rejects.
+    _dt = jnp.result_type(T_K, ppfd, vpd_pa, co2_ppm, ps_pa)
+    init = jax.tree_util.tree_map(lambda x: x.astype(_dt), init)
     _, traj = jax.lax.scan(_f, init, (T_K, ppfd, vpd_pa, co2_ppm, ps_pa))
     return traj
 

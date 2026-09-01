@@ -318,3 +318,23 @@ def test_biophys_tape_metadata_covers_pmodel_vars():
     assert 'values["pmodel_n_rubisco_leaf"]' in src
     assert 'values["pmodel_n_electron_transport_leaf"]' in src
     assert "nitrogen_diagnostics" in src
+
+
+def test_acclim_trajectory_promotes_f32_init_under_x64():
+    """EC diagnostic pre-pass: an f32 init state (float32 NetCDF driver
+    values) against f64 forcing under x64 must not break the scan carry
+    (caught live on US-MMS: 'carry input and carry output must have equal
+    types')."""
+    from legoesm.land.p_model import (PModelConfig, acclim_trajectory,
+                                      init_pmodel_acclim)
+    cfg = PModelConfig()
+    init = init_pmodel_acclim(1, t_init_K=290.0, ps_init_pa=101325.0,
+                              cfg=cfg, co2_init_ppm=400.0)
+    init_f32 = jax.tree_util.tree_map(
+        lambda x: x.astype(jnp.float32), init)
+    n = 8
+    f64 = lambda v: jnp.full((n, 1), v, dtype=jnp.float64)
+    traj = acclim_trajectory(init_f32, T_K=f64(290.0), ppfd=f64(500.0),
+                             vpd_pa=f64(800.0), co2_ppm=f64(400.0),
+                             ps_pa=f64(101325.0), cfg=cfg, dt=1800.0)
+    assert np.all(np.isfinite(np.asarray(traj.iabs_mean)))
