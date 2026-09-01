@@ -176,3 +176,21 @@ sites (US-SRM, US-Var) are stage-1 hold-outs.
   light-accounting convention mismatch between rpmodel's incident-light kphio
   (absorptance folded in) and the host canopy's own absorption profile.
   To be checked against the extension result, not assumed.
+
+
+## Extension result (measured; full 7x7 discovered grid)
+
+* Joint objective: optimum **(kphio=0.040, beta=60), INTERIOR** on the
+  extended axes; overlap control reproduced the screen objective exactly
+  (0.9135). Improvement vs default: joint +6.5%, GPP-only +13.9%.
+* GPP-only re-ranking: same interior point — genuine optimum, not
+  flux-trading.
+* LE-only re-ranking: floor-seeks (kphio=0.020 boundary). Explained by a
+  PRE-EXISTING, arm-independent latent-heat bias: the production baseline
+  already carries LE bias +41 W/m2 at FR-Pue and +32 at US-MMS (ladder CSV,
+  base_bb arm) — no photosynthetic parameter can remove it, so LE alone keeps
+  pushing kphio down. The recommendation rests on the joint/GPP interior
+  agreement; the LE residual is an open finding on the HARNESS/soil-evap side,
+  logged separately.
+* Pending: pre-registered rule 2 — (0.040, 60) vs default on the 7 held-out
+  sites (array 9597644). No recommendation until that returns.
