@@ -240,3 +240,46 @@ reduces the matched-window U growth plus terminal T growth, **PLAUSIBLE** for a
 delay of at least 100 steps with both reduced at least 2x, and otherwise
 UNMEASURED.  The late-time scale result complements, rather than overwrites,
 the earlier kt=2 BBL ablation.
+
+## Round 3 frozen prediction: source-exact `ln_zad_Aimp` package
+
+This prediction is committed before any legoESM integration using the new
+implementation.  The resolved OVERFLOW-zps oracle has `ln_zad_Aimp=.true.`
+and `nn_fct_imp=1`; there is no switch among the following operations, so the
+public `rk3_ws` NEMO identity receives them as one unbranched package:
+
+1. At RK3 stage 3, build the momentum transports from Kmm and partition `ww`
+   into explicit `ww` and implicit `wi` before `dyn_adv`
+   (`src/OCE/stprk3_stg.F90:257-304`).
+2. Use the transport-form Wicker criterion with `Cu_min_v=0.8`,
+   `Cu_max_v=1.1`, and `Cu_max_h=1.1`.  The horizontal Courant number is the
+   signed inflow sum divided by T-cell Kmm volume; the vertical Courant number
+   uses `e3w(Kmm)` and selects the upstream T cell by the sign of `ww`
+   (`src/OCE/DYN/sshwzv.F90:744-748,773-843`).
+3. Feed explicit `ww` to UP3 momentum advection and fold the area-weighted
+   momentum-face `wi` into the stage-3 `dyn_zdf` tridiagonal together with
+   `rn_avm0=1e-4` (`src/OCE/DYN/dynzdf.F90:97-142,181-270`).
+4. Recompute tracer transports after the stage momentum/barotropic correction,
+   partition their stage-3 `ww`, use explicit `ww` in both halves of FCT, and
+   include the optimized `nn_fct_imp=1` zero-order `wi*T(Kbb)` divergence in
+   both low-order predictors (`src/OCE/TRA/traadv.F90:220-227`;
+   `src/OCE/TRA/traadv_fct.F90:140-145,470-607`).
+5. Fold that same tracer `wi` into the single stage-3 tracer vertical matrix,
+   together with any active diffusivity (`src/OCE/stprk3_stg.F90:583-599`;
+   `src/OCE/TRA/trazdf.F90:118-293`).
+
+Erratum: the prior receipt described a bottom-up running maximum as an input to
+the split coefficient.  `wAimp_RK3_t` stores that maximum in `z2d`, but every
+live branch overwrites `zcff` from the current interface `zCu_v`; the preceding
+interface does not enter the coefficient (`sshwzv.F90:812-843`).  The literal
+transcription and tests therefore must not manufacture that dependency.
+
+**Pre-stated terminal prediction.**  If this package owns the OVERFLOW
+non-finite event, the certified fp64 card completes all **6,120** steps with a
+finite state.  Completion is the only `CONFIRMED` ownership outcome.  If the
+run remains non-finite, its first non-finite completed step is recorded and the
+package is a `CONTRIBUTOR`, not the owner, even when it delays failure.  Before
+the full run, the certified kt=1 exact and kt=2 gate values must remain at their
+recorded bars; any regression stops the run and is repaired rather than
+reclassified.  The completed run, if any, is passed unchanged to the frozen
+full-duration statistical scorer.
