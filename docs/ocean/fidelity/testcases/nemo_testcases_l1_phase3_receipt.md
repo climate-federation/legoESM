@@ -107,6 +107,129 @@ NEMO recomputes the executed count from depth, metric, gravity, timestep, and
 `nn_e=3`.  `nemo_auto_substeps` and both cards now reproduce those executed
 values and accept NEMO's valid one-substep result.
 
+## Standing rule: no Frankenstein compositions
+
+**Binding user decision (2026-08-31):** every selectable arm must name the
+reference configuration that exercises it: either a NEMO source/namelist
+citation or **legoESM legacy, pre-existing behavior**.  Provenance of two arms
+separately does not attest their composition.  A combination that no reference
+model runs must either (a) be rejected by validation or (b) require an explicit
+experimental flag and warning; it may never be a silent third model.  This rule
+applies to this and every later round.
+
+This audit instantiated both cards through `LatLonCGridOceanModel` under the
+fp64 policy, rather than reading recipe declarations alone.  It inventories the
+explicit card selectors, inherited selectors that are numerically live on the
+cards, and every arm introduced by this lane.  `Lcfg` and `Ocfg` below mean the
+executed phase-3 LOCK and OVERFLOW `namelist_cfg` files under
+`/data/abyssal/dbalwada/nemo-testcases-l1/phase3/{lock,overflow}_kt1_3/`.
+No validation semantics changed in this audit; the dispositions below are
+proposals to resolve before more trajectory claims.
+
+### Instantiated card-arm provenance
+
+| selector arm | card(s) | reference that exercises the arm |
+|---|---|---|
+| `metric_convention="exact"` | both | NEMO LOCK/OVERFLOW `usrdef_hgr.F90:88-97` (constant Cartesian scale factors) |
+| `vface_zonal_metric_evaluation="nemo_vpoint"` | both | NEMO LOCK/OVERFLOW `usrdef_hgr.F90:75-97` (separate T/U/V/F coordinates and metrics) |
+| full-step z coordinate | LOCK | NEMO `tests/LOCK_EXCHANGE/MY_SRC/usrdef_zgr.F90:92-108,146-155`; shipped `key_vco_1d` configuration |
+| `bottom_index_rule="nemo_tpoint"` | OVERFLOW | NEMO `tests/OVERFLOW/MY_SRC/usrdef_zgr.F90:157-186`; `tools/DOMAINcfg/src/domzgr.F90:1163-1169` |
+| `eos="nemo_teos10"` | both | executed `ocean.output:157` (LOCK), `:159` (OVERFLOW); `src/OCE/TRA/eosbn2.F90:1920-2108` |
+| `eos_depth="geometric"` | both | NEMO `src/OCE/TRA/eosbn2.F90:253-288`, which passes live `gdept` |
+| `tracer_advection="fct2"` | both | `Lcfg:68-71`; `Ocfg:69-72` (`ln_traadv_fct=T`, `nn_fct_h=nn_fct_v=2`) |
+| `tracer_time_integrator="rk3_ws"` | both | shipped case `cpp_*.fcm:1` (`key_RK3`); `src/OCE/stprk3.F90:184-207` and `stprk3_stg.F90:535-559` |
+| `momentum_time_integrator="rk3_ws"` | both | same `key_RK3` configurations; `stprk3_stg.F90:112-238,306-446` |
+| `tracer_fct_low_order_predictor="nemo_rk3_two_step"` | both | `src/OCE/TRA/traadv_fct.F90:153-161,470-641` under `key_RK3` |
+| `tracer_rk3_transport_time_levels="nemo_kmm"` | both | `stprk3.F90:194-207`; `stprk3_stg.F90:250-303,456-519` |
+| `rk3_ws_stage_barotropic_correction=True` | both | NEMO HYB stage program, `stprk3_stg.F90:118-168,204-234,433-446` |
+| `rk3_ws_momentum_transport_reconcile=True` | both | NEMO `un_adv/hu` correction, `stprk3_stg.F90:257-274,315-333` |
+| `momentum_advection="flux_form"` | both | `Lcfg:82-85`; `Ocfg:83-86`; `src/OCE/DYN/dynadv.F90:78-90` |
+| `momentum_flux_scheme="upwind3"` | both | same namelist rows; `src/OCE/DYN/dynadv_up3.F90:141-365` |
+| `vertical_momentum_scheme="nemo_up3"` | both | same active UP3 call; `dynadv.F90:87-89`, `dynadv_up3.F90:239-365` |
+| `pgf_scheme="nemo_sco"` | both | `Lcfg:95-98`; `Ocfg:96-99`; `src/OCE/DYN/dynhpg.F90:117-123,340-390` |
+| `pgf_quadrature="nemo_trapezoid"` | both | NEMO `dynhpg.F90:340-380` surface/interior recurrence |
+| `barotropic_solver="explicit_substep"` | both | `Lcfg:100-106`; `Ocfg:101-104` (`ln_dynspg_ts=T`) |
+| `barotropic_time_filter="nemo_ab3am4"` | LOCK | `Lcfg:105-106`; executed `ocean.output:758-760`; `dynspg_ts.F90:1068-1094` |
+| `barotropic_time_filter="nemo_boxcar1_ab3"` | OVERFLOW | `Ocfg:101-104` plus reference defaults; executed `ocean.output:892`; `dynspg_ts.F90:1265-1273` |
+| auto substeps `1` / `3` | LOCK / OVERFLOW | both `namelist_ref:1099-1100`; executed outputs `:764` / `:897`; `dynspg_ts.F90:1223-1240` |
+| `adaptive_implicit_vertadv=True` | both | `Lcfg:126-134`; `Ocfg:123-131`; stage-3 partition at `stprk3_stg.F90:281-303` |
+| `implicit_vertical_mixing=True`, `A_v=1e-4`, `K_v=0` | both | same `namzdf` rows; stage-3 `dyn_zdf` call at `stprk3_stg.F90:428-430` |
+| explicit lateral tracer/momentum mixing off | both | `Lcfg:74-78,109-123`; `Ocfg:75-79,106-120` |
+| `lateral_side_bc="free_slip"` | both | `Lcfg:39`; `Ocfg:40` (`rn_shlat=0`) |
+| BBL off | LOCK metadata | executed `ocean.output:647-650` (`ln_trabbl=F`) |
+| BBL advective option 2, diffusive option 0, gamma 20 s | OVERFLOW metadata | `Ocfg:134-140`; executed `ocean.output:776-783` |
+| `outer_integrator="forward_euler"` | both | **legoESM legacy, pre-existing behavior**; here it is the no-extra-wrapper sentinel around the selected inner WS-RK3 program, not an Euler replacement for that program |
+| `vorticity_scheme="al81"` | both | **legoESM legacy, pre-existing behavior**; inherited, while NEMO selects ENS at `Lcfg:88-93` / `Ocfg:89-94` |
+| `coriolis_scheme="matsuno_split"` | both | **legoESM legacy, pre-existing behavior**; inherited; both oracle grids set `f=0` at `usrdef_hgr.F90:100-104`, so the mismatch is currently a dead-arm fact, not an attestation |
+| `tracer_wall_neumann_fill=True` | both | **legoESM legacy, pre-existing behavior**; no NEMO case citation presently attests the halo-fill equivalence |
+| `barotropic_face_depth="min_rule"` | both | **legoESM legacy, pre-existing behavior** |
+| `barotropic_continuity_evaluation="generic"` | both | **legoESM legacy, pre-existing behavior** |
+| `barotropic_transport_accumulation_evaluation="generic"` | both | **legoESM legacy, pre-existing behavior** |
+| `barotropic_seed_evaluation="generic"` | both | **legoESM legacy, pre-existing behavior** |
+| `barotropic_seed_face_depth="min_rule"` | both | **legoESM legacy, pre-existing behavior** |
+| `barotropic_pgf_evaluation="generic"` | both | **legoESM legacy, pre-existing behavior** |
+| `barotropic_reconcile_target="velocity_avg"` | both | NEMO `src/OCE/DYN/dynspg_ts.F90:1170-1172`; the arm is attested, but its present composition with the preceding generic arithmetic is not |
+| `barotropic_diffusion_alpha=0.01`, reference dt 60 s | both | **legoESM legacy, pre-existing behavior**; this positive coefficient is a live extra eta-diffusion operator, not NEMO's `rn_bt_alpha` filter parameter |
+| `zdf_implicit_solver_evaluation="shared_thomas"` | both | **legoESM legacy, pre-existing behavior**; the available `nemo_literal` arithmetic is not selected |
+| `implicit_vmix_dzw_slot=False`, `implicit_vmix_e3t_now_divisor=False` | both | **legoESM legacy, pre-existing behavior**; these stored time-level arms enter the active implicit-mixing program |
+
+Selectors that are dispatch-inactive under these cards (WENO, EEN, leapfrog,
+AB2, lateral-viscosity, forcing, GM/Redi, and MLF-only evaluation arms) are not
+misrepresented as reference components.  Their stored defaults remain legacy,
+but they do not enter the realized testcase program.  The nonrotating
+vorticity/Coriolis pair is listed despite being dead because it is a visible
+card default and a future geometry change would make it live.
+
+### Lane-added arm provenance
+
+| added selector arm | reference |
+|---|---|
+| `bottom_index_rule="nemo_tpoint"` | NEMO OVERFLOW `usrdef_zgr.F90:157-186` |
+| `barotropic_time_filter="nemo_boxcar1_ab3"` | NEMO OVERFLOW `nn_bt_flt=1`, executed output `:892`; `dynspg_ts.F90:1265-1273` |
+| tracer `rk3_ws` | NEMO `key_RK3`; `stprk3.F90:184-207`, `stprk3_stg.F90:535-559` |
+| momentum `rk3_ws` | NEMO `key_RK3`; `stprk3_stg.F90:112-238,306-446` |
+| `nemo_up3` | NEMO `ln_dynadv_up3=T`; `dynadv.F90:87-89`, `dynadv_up3.F90:141-365` |
+| `nemo_teos10` | NEMO executed `ln_TEOS10=T`; `eosbn2.F90:1920-2108` |
+| `nemo_rk3_two_step` | NEMO `key_RK3` dispatch to `fct_up1_2stp`, `traadv_fct.F90:153-161,470-641` |
+| `one_step` | **legoESM legacy, pre-existing behavior** |
+| transport level `nemo_kmm` | NEMO `stprk3.F90:194-207`; `stprk3_stg.F90:250-303` |
+| transport level `frozen_final` | **legoESM legacy, pre-existing behavior** |
+| transport-level sentinel `None` | no numerical arm: validation resolves it to `nemo_kmm` only for tracer `rk3_ws`, otherwise the legacy `frozen_final` arm |
+| stage barotropic correction `True` | NEMO `stprk3_stg.F90:433-446` |
+| stage barotropic correction `False` | **legoESM legacy, pre-existing behavior** (one post-stage split correction) |
+| momentum transport reconcile `True` | NEMO `stprk3_stg.F90:257-274,315-333` |
+| momentum transport reconcile `False` | **legoESM legacy, pre-existing behavior** |
+
+### Presently constructible, unattested compositions
+
+The direct construction audit proved every family below currently passes model
+construction unless explicitly described as metadata-only.  These are
+composition families, not an attempt to enumerate their Cartesian product.
+
+| # | presently constructible family | why unattested | proposed resolution |
+|---:|---|---|---|
+| 1 | tracer `rk3_ws` + `frozen_final` transports | NEMO advances Kmm between stages; legacy freezes one final transport | **(b)** require a specific experimental flag/warning; it remains useful as the registered causal control |
+| 2 | tracer `rk3_ws` FCT + `one_step` predictor | NEMO `key_RK3` calls `fct_up1_2stp`; one-step is legacy | **(b)** experimental flag/warning for the causal control |
+| 3 | WS-RK3 + stage correction `True` + transport reconcile `False` | keeps NEMO's Kaa mean but omits NEMO's distinct `un_adv/hu` transport | **(b)** experimental flag/warning for the measured stage-mean control |
+| 4 | WS-RK3 + both stage correction and transport reconcile `False` | embeds legoESM's one-post-solve split inside NEMO's stage loop | **(b)** experimental flag/warning; never an ordinary card |
+| 5 | only one of tracer/momentum integrators is `rk3_ws` | NEMO `key_RK3` owns one coupled momentum/tracer stage program | **(a)** reject; no reference or required control needs the decoupled program |
+| 6 | `nemo_rk3_two_step` + `ppm_fct` | validation permits it, but the certified cases and literal tests exercise only FCT2 (`nn_fct_h=nn_fct_v=2`) | **(a)** reject until an exact NEMO FCT4/PPM mapping and reference configuration are certified |
+| 7 | `vertical_momentum_scheme="nemo_up3"` with horizontal momentum other than flux-form/upwind3 | NEMO `dynadv` selects horizontal and vertical UP3 as one routine | **(a)** require the coupled flux-form/upwind3 selections |
+| 8 | `eos="nemo_teos10"` + non-geometric (`insitu`) depth | NEMO passes geometric `gdept`; this pairing caused the measured phase-3 EOS/HPG error | **(a)** require geometric depth |
+| 9 | `eos_depth="geometric"` + a non-NEMO EOS | the new depth arm has no cited non-NEMO reference | **(a)** restrict the arm to cited EOS configurations |
+| 10 | `pgf_quadrature="nemo_trapezoid"` + PGF other than `nemo_sco` | NEMO trapezoid was transcribed as part of `hpg_sco`; validation enforces only the forward implication | **(a)** enforce the reverse pairing too |
+| 11 | swapping LOCK/OVERFLOW NEMO filters or overriding their auto-substep counts | each arm is NEMO-attested, but the mutated testcase card is not the executed reference configuration | **(a)** case-card validation must pin filter, alpha, and resolved count together |
+| 12 | certified cards with inherited `al81`/`matsuno_split` | these are legacy arms while the oracle namelists select ENS and the RK3 source owns Coriolis staging; `f=0` only makes the present mismatch inert | **(a)** select/implement the NEMO ENS/stage arm or validate a formally eliminated dead operator; do not call the legacy pair a NEMO selection |
+| 13 | NEMO RK3/filter cards with legacy tracer wall fill, positive generic eta diffusion, generic barotropic face-depth/continuity/accumulation/seed/PGF arithmetic, and generic implicit-mixing arithmetic/time levels | every legacy arm has provenance, but no cited model runs this mixture; several canonical `nemo_literal` arms exist, while filter-1/filter-3 transport accumulation and the exact RK3 ZDF composition are not yet covered | **(a)** certified-card validation must reject the legacy group after the missing literal coverage is implemented and pinned; the extra eta diffusion must be disabled unless a reference is supplied |
+| 14 | OVERFLOW metadata selects BBL option 2 while `model_config` has no consumed BBL selector | the NEMO arm is cited, but the legoESM solver does not execute it | **(a)** reject an “oracle-complete” OVERFLOW trajectory card until the canonical BBL selector is wired; retain the present card only as loudly incomplete/UNMEASURED |
+
+Thus the current cards are source-coherent for the explicitly pinned
+EOS/PGF/RK3/FCT/UP3/filter selections, but they do **not** yet satisfy the new
+standing composition rule as oracle-complete cards because families 12--14 are
+present in the resolved configuration.  No further trajectory match should be
+promoted until those current-card families are resolved.  Families 1--4 are
+diagnostic controls, not candidate reference models.
+
 Direct tests cover the filter recurrence/window, UP3 literal recurrence,
 rest/zero-flux controls, differentiability, WS stage polynomial, EOS literal,
 card construction, and invalid auto-substep inputs.  These implementations
