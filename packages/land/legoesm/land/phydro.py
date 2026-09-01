@@ -21,7 +21,8 @@ water potential (instantaneous, like the empirical stress it replaces):
 with A the Jmax-cost-discounted coordination rate ``phi0*Iabs*mj'(chi)`` and
 ``chi`` closed by supply-demand (A = gs*ca*(1-chi)).  The one-dimensional
 optimum over ``dpsi`` is found on a smooth sigmoid map onto the admissible
-interval ``(0, psi_s - minlwp)`` by unrolled damped Newton (differentiable).
+interval ``(0, psi_s - minlwp)`` by unrolled bounded gradient ascent
+(differentiable).
 
 DELIBERATE DEPARTURES (each reviewed; see the PR trail):
 
@@ -98,8 +99,8 @@ __physics_contract__ = {
         "tests/land/unit/test_phydro.py: wet-soil optimum has dpsi* > 0 and "
         "finite capacities; capacities decrease monotonically as psi_s "
         "dries toward minlwp and -> 0 smoothly; gamma up -> dpsi* down; "
-        "stationarity |dProfit/dz| ~ 0 at the returned optimum and profit "
-        "beats +/- perturbations; gradients finite everywhere."
+        "profit at the returned optimum dominates +/-10% perturbations of "
+        "the same objective; gradients finite everywhere."
     ),
 }
 
@@ -216,7 +217,7 @@ def soil_root_supply(
     rld = rbd / (_ROOT_DENSITY_GM3 * jnp.pi * _ROOT_RADIUS_M ** 2)
     root_dist = jnp.sqrt(1.0 / (rld * jnp.pi))
     # A23 (radial soil-to-root) + A24 (root tissue).  _ROOT_RESIST is in the
-    # SPA mmol convention; 1e-3 converts the resulting resistance to the
+    # SPA mmol convention; the *1e3 converts the resulting resistance to the
     # mol convention used throughout this module.
     soilr1 = jnp.log(root_dist / _ROOT_RADIUS_M) / (
         2.0 * jnp.pi * rld * dz * jnp.maximum(hk_mol, 1e-30))
@@ -292,8 +293,8 @@ def phydro_optimum(
 
     Maximizes ``phi0*Iabs*mj'(chi(dpsi)) - gamma*dpsi^2`` over the smoothly
     capped draw-down ``dpsi in (0, psi_s - minlwp)`` (sigmoid-mapped, so the
-    corner at the cap is smooth), by unrolled damped Newton on the map
-    variable — fully differentiable.  Capacities at the optimum come from
+    corner at the cap is smooth), by unrolled bounded gradient ascent on
+    the map variable — fully differentiable.  Capacities at the optimum come from
     the SHARED chi->capacity algebra (``p_model.capacities_from_chi``).
     """
     if acclim is None:

@@ -81,9 +81,10 @@ def test_defaults_bit_identical_passthrough():
 def test_validate_matrix():
     with pytest.raises(ValueError, match="capacity_scheme"):
         StomataConfig(enabled=True, capacity_scheme="pmodel").validate()
-    with pytest.raises(ValueError, match="medlyn"):
-        StomataConfig(enabled=True, stomata_model="ball_berry",
-                      g1_source="p_model").validate()
+    # ball_berry + g1_source='p_model' validates (phydro covers it); the
+    # least-cost-only combination raises at compute_effective_beta.
+    StomataConfig(enabled=True, stomata_model="ball_berry",
+                  g1_source="p_model").validate()
     with pytest.raises(ValueError, match="inert"):
         StomataConfig(enabled=False, capacity_scheme="p_model").validate()
     StomataConfig(enabled=True, stomata_model="leuning").validate()

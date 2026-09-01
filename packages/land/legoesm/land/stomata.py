@@ -254,10 +254,8 @@ class StomataConfig(NamedTuple):
             raise ValueError(
                 f"unknown g1_source {self.g1_source!r}; the Medlyn-slope "
                 f"scheme must be one of {VALID_G1_SOURCES}")
-        if self.g1_source == "p_model" and self.stomata_model != "medlyn":
-            raise ValueError(
-                "g1_source='p_model' predicts a MEDLYN slope and requires "
-                f"stomata_model='medlyn'; got {self.stomata_model!r}.")
+        # NB: g1_source='p_model' + non-Medlyn is legal only under phydro
+        # (cross-checked at compute_effective_beta, which sees the switch).
         if (self.capacity_scheme == "p_model"
                 or self.g1_source == "p_model") and not self.enabled:
             raise ValueError(

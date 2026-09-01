@@ -367,6 +367,14 @@ def compute_two_leaf_canopy_fluxes(
         # fall-back to prescribed parameters.
         _phydro_on = getattr(
             land_config, "transpiration_stress", "beta_theta") == "phydro"
+        if (cc.g1_source == "p_model" and cc.stomatal_model != "medlyn"
+                and not _phydro_on):
+            raise ValueError(
+                "g1_source='p_model' predicts a MEDLYN slope under the "
+                "least-cost stomatal model dispatch; with "
+                f"stomatal_model={cc.stomatal_model!r} select "
+                "transpiration_stress='phydro' (whose slope mapping covers "
+                "every model) or g1_source='table'.")
         if _phydro_on and phydro_supply is None:
             raise ValueError(
                 "transpiration_stress='phydro' but no PhydroSupply was "

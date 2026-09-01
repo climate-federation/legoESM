@@ -81,8 +81,9 @@ def test_two_leaf_gs_branch_uses_kernel():
     # CanopyConfig accepts the new model and still cross-checks the P-model g1.
     from legoesm.land.canopy.config import CanopyConfig
     CanopyConfig(stomatal_model="leuning").validate()
-    with pytest.raises(ValueError, match="medlyn"):
-        CanopyConfig(stomatal_model="leuning", g1_source="p_model").validate()
+    # leuning + g1_source='p_model' validates (phydro's slope mapping covers
+    # it); the least-cost-only combination is refused at the consumers.
+    CanopyConfig(stomatal_model="leuning", g1_source="p_model").validate()
 
 
 def test_clm_ml_quadratic_closes_the_implicit_leuning_equation():

@@ -118,6 +118,15 @@ def compute_effective_beta(
             acclimated_capacities, acclimated_capacities_c4)
         _phydro_on = getattr(
             config, "transpiration_stress", "beta_theta") == "phydro"
+        if (config.stomata.g1_source == "p_model"
+                and config.stomata.stomata_model != "medlyn"
+                and not _phydro_on):
+            raise ValueError(
+                "g1_source='p_model' predicts a MEDLYN slope under the "
+                "least-cost stomatal model dispatch; with "
+                f"stomata_model={config.stomata.stomata_model!r} select "
+                "transpiration_stress='phydro' (whose slope mapping covers "
+                "every model) or g1_source='table'.")
         if _phydro_on:
             if phydro_supply is None:
                 raise ValueError(

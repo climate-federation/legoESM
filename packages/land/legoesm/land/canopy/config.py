@@ -293,11 +293,11 @@ class CanopyConfig(NamedTuple):
             raise ValueError(
                 f"unknown g1_source {self.g1_source!r}; the Medlyn-slope scheme "
                 f"must be one of {VALID_G1_SOURCES}")
-        if self.g1_source == "p_model" and self.stomatal_model != "medlyn":
-            raise ValueError(
-                "g1_source='p_model' predicts a MEDLYN slope and requires "
-                f"stomatal_model='medlyn'; got {self.stomatal_model!r}. "
-                "Select stomatal_model='medlyn' or g1_source='table'.")
+        # NB: g1_source='p_model' with a non-Medlyn stomatal model is legal
+        # ONLY under transpiration_stress='phydro' (whose slope mapping
+        # covers every model); this config cannot see that switch, so the
+        # cross-check lives at the consumers (multilayer step /
+        # compute_effective_beta / the two-leaf p_model block).
         return self
 
 

@@ -194,10 +194,11 @@ def test_canopy_config_validates_switches():
         CanopyConfig(capacity_scheme="pmodel").validate()
     with pytest.raises(ValueError, match="g1_source"):
         CanopyConfig(g1_source="xi").validate()
-    with pytest.raises(ValueError, match="medlyn"):
-        CanopyConfig(g1_source="p_model", stomatal_model="ball_berry").validate()
-    # Composability: predicted g1 with medlyn OK; capacities-only with the
-    # default ball_berry stomata OK (g1 substitution simply skipped).
+    # g1_source='p_model' + non-medlyn is legal AT CONFIG LEVEL (the
+    # phydro slope mapping covers every model); the least-cost-only
+    # combination is refused at the consumers, which can see the
+    # transpiration_stress switch (see test_phydro_wiring).
+    CanopyConfig(g1_source="p_model", stomatal_model="ball_berry").validate()
     CanopyConfig(g1_source="p_model", stomatal_model="medlyn").validate()
     CanopyConfig(capacity_scheme="p_model").validate()
 

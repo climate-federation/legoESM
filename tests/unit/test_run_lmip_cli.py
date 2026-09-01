@@ -319,14 +319,18 @@ def test_pmodel_bogus_choice_rejected():
         _parse_args(["--lat", "45.0", "--canopy-capacity-scheme", "pmodel"])
 
 
-def test_pmodel_g1_requires_medlyn():
-    import pytest
+def test_pmodel_g1_nonmedlyn_builds_for_phydro():
+    """g1_source='p_model' with the default ball_berry stomata BUILDS (the
+    phydro slope mapping covers every model); running it without phydro is
+    refused at the land step, which sees both switches."""
     from scripts.run.run_lmip import _parse_args, build_config_from_args
 
-    with pytest.raises(ValueError, match="medlyn"):
-        build_config_from_args(_parse_args(
-            ["--lat", "45.0", "--land-surface-scheme", "two_leaf",
-             "--canopy-g1-source", "p_model"]))
+    land = build_config_from_args(_parse_args(
+        ["--lat", "45.0", "--land-surface-scheme", "two_leaf",
+         "--canopy-g1-source", "p_model",
+         "--transpiration-stress", "phydro"])).land
+    assert land.surface_scheme.g1_source == "p_model"
+    assert land.transpiration_stress == "phydro"
 
 
 def test_pmodel_flags_route_per_scheme():

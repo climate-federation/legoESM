@@ -124,3 +124,25 @@ def test_cli_round_trip():
              "--clm-ml-stomatal-model", "medlyn",
              "--canopy-capacity-scheme", "p_model",
              "--transpiration-stress", "phydro"]))
+
+
+def test_g1_nonmedlyn_requires_phydro_at_the_step():
+    """Least-cost g1 is a Medlyn quantity: p_model g1 + ball_berry WITHOUT
+    phydro is refused at the consumer; WITH phydro it runs (the slope maps
+    onto the active model)."""
+    cfg_bad = MultiLayerLandConfig(surface_scheme=CanopyConfig(
+        stomatal_model="ball_berry", capacity_scheme="p_model",
+        g1_source="p_model").validate())
+    st = init_multilayer_land_state(2, cfg_bad)
+    with pytest.raises(ValueError, match="MEDLYN"):
+        step_multilayer_land(st, _forcing(2), cfg_bad, U_min=1.0, dt=1800.0)
+
+    cfg_ok = MultiLayerLandConfig(
+        surface_scheme=CanopyConfig(
+            stomatal_model="ball_berry", capacity_scheme="p_model",
+            g1_source="p_model").validate(),
+        transpiration_stress="phydro")
+    st2 = init_multilayer_land_state(2, cfg_ok)
+    _, resp, _ = step_multilayer_land(st2, _forcing(2), cfg_ok, U_min=1.0,
+                                      dt=1800.0)
+    assert np.all(np.isfinite(np.asarray(resp.lhflx)))
