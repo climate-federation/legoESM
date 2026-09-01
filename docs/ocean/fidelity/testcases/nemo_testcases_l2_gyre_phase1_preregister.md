@@ -70,7 +70,8 @@ key_qco key_vco_1d3d key_RK3
 
 The run otherwise retains the shipped GYRE dynamics and forcing: free-slip
 walls, FCT2 active tracers, vector momentum with C2 kinetic energy and ENE
-vorticity, z-coordinate pressure gradient, split-explicit Demange filter 3,
+vorticity, the lane-1 canonical `hpg_sco` pressure gradient required by qco,
+split-explicit Demange filter 3,
 level Laplacian momentum diffusion, isoneutral tracer diffusion, TKE plus EVD,
 nonlinear bottom drag, and the analytic surface boundary condition.  The
 resolved `output.namelist.dyn`, `cpp.history`, executable, copied inputs,
@@ -119,3 +120,15 @@ Geometry/coverage sees the oracle artifact inventory and analytic mesh
 identities; it is blind to whether legoESM reproduces them.  The phase therefore
 leaves legoESM geometry, IC, kt=1 parity, RK stages, tendencies, and trajectory
 **UNMEASURED**.
+
+## Pre-step source-resolution correction
+
+The first executable invocation stopped during initialization, before step 1
+and before any entry dump, with `dyn_hpg_init : non-linear free surface
+incompatible with hpg_zco`.  `dynhpg.F90:188-197` enforces one pressure-gradient
+arm and `:117-123` dispatches `ln_hpg_sco` to `hpg_sco`; lane 1 already certifies
+that canonical qco arm.  The successful run is therefore preregistered with
+the shipped `ln_hpg_zco` changed true -> false and `ln_hpg_sco` false -> true.
+This is the only additional scientific selector change.  The stopped
+initialization produced no model-step measurement and is retained as a failed
+bring-up artifact.
