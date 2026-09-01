@@ -1998,7 +1998,8 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      runoff_depth_spread_m=None, mle=None,
                      bottom_drag_scheme=None, bottom_drag_cd0=None,
                      bottom_drag_cdmax=None, bottom_drag_z0=None,
-                     bottom_drag_ke0=None, iwm=None, ddm=None,
+                     bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
+                     ddm=None,
                      vertical_mixing=None, ew_cyclic_overlap=False):
     """Build an MPAS (icosahedral Voronoi) ocean for the faithful CORE-II NEMO
     comparison — the 4th grid.  Reuses ``run_omip._create_setup('mpas', ...)``
@@ -2070,10 +2071,6 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
         print("[setup] mpas TKE card: molecular backgrounds "
               "(A_v=1.4e-6, K_v=1e-10) + preset convection stripped "
               "(tripole-equivalent closure environment)")
-    if iwm is not None and iwm.enabled:
-        raise SystemExit(
-            "--iwm is not wired on the MPAS vertical-mixing bridge yet "
-            "(lat-lon / tripole only)")
     if ddm is not None and ddm.enabled:
         raise SystemExit(
             "--double-diffusion is not wired on the MPAS vertical-mixing "
@@ -2152,7 +2149,22 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
         # 2-D leading axis; MPAS cells are 1-D (nCells,).
         z_coord, H_bathy, land_mask = make_partial_cell(z_coord, H_bathy, land_mask)
 
-    model = MPASOceanModel(mesh, z_coord, config)
+    _iwm_maps = None
+    if iwm is not None and iwm.enabled and iwm_forcing_file:
+        # NEMO zdfiwm forcing maps regridded onto the (nCells,) Voronoi cell
+        # centres (paired 1-D coords, area-consistent power renorm); K_iwm
+        # itself is recomputed each step from THIS mesh's own N²/geometry.
+        from legoesm.ocean.iwm_forcing import load_iwm_forcing
+        _iwm_maps = load_iwm_forcing(
+            iwm_forcing_file,
+            np.degrees(np.asarray(mesh.latCell)),
+            np.degrees(np.asarray(mesh.lonCell)),
+            land_mask=land_mask,
+            target_area=np.asarray(mesh.areaCell),
+            paired_cells=True)
+        print(f"[setup] mpas zdfiwm ENABLED (maps=file:{iwm_forcing_file}, "
+              f"mevar={iwm.mevar} tsdiff={iwm.tsdiff})")
+    model = MPASOceanModel(mesh, z_coord, config, iwm_forcing=_iwm_maps)
     print(f"[setup] mpas backend: Voronoi (TRiSK)"
           f"{' + partial cells' if partial_cell else ''}")
     state = rest_state_mpas_ocean(mesh, z_coord, H_max=H_max)
@@ -6037,7 +6049,8 @@ def main() -> int:
             bottom_drag_cdmax=args.bottom_drag_cdmax,
             bottom_drag_z0=args.bottom_drag_z0,
             bottom_drag_ke0=args.bottom_drag_ke0,
-            iwm=_iwm_cfg, ddm=_ddm_cfg,
+            iwm=_iwm_cfg, iwm_forcing_file=args.iwm_forcing_file,
+            ddm=_ddm_cfg,
             # --mpas-vmix: 'tke' runs the NEMO ORCA1 zdftke card through the
             # SAME builder the tripole uses (the "tripole_" prefix is
             # historical — pure grid-agnostic config construction; its
@@ -6051,10 +6064,12 @@ def main() -> int:
             # comparison is measuring the card, not the grid.  Every knob is
             # threaded — a knob accepted by _validate_tke_card_grid and then
             # dropped here is the silent-discard footgun that guard exists to
-            # prevent.  iwm stays None: the MPAS TKE bridge rejects it.
+            # prevent.  iwm threads through (2026-09-01): MPASOceanModel now
+            # applies zdfiwm additively at model level, same as the lat-lon
+            # lane.
             vertical_mixing=(
                 build_tripole_vmix_config(
-                    "tke", iwm=None,
+                    "tke", iwm=_iwm_cfg,
                     tke_eice=args.tke_eice,
                     tke_surface_bc=args.tke_surface_bc,
                     tke_mxl_choice=args.tke_mxl_choice,
@@ -6291,10 +6306,10 @@ def main() -> int:
         # NEMO ISF 'spe' prescribed melt: load the monthly Depoorter fields
         # on the model tracer grid (eORCA1 passthrough on the tripole;
         # nearest-wet + melt-total-preserving regrid elsewhere).
-        if app_grid_type not in ("tripole", "latlon"):
+        if app_grid_type not in ("tripole", "latlon", "mpas"):
             raise SystemExit(
-                "--isf is wired for tripole/latlon (host post-step apply); "
-                f"got {args.grid!r}")
+                "--isf is wired for tripole/latlon/mpas (host post-step "
+                f"apply); got {args.grid!r}")
         if not args.isf_forcing_file:
             raise SystemExit(
                 "--isf requires --isf-forcing-file (the NEMO "
@@ -6314,17 +6329,24 @@ def main() -> int:
                 "the SAME ice-shelf melt at depth; verify the two files carry "
                 "the same sornfisf climatology.", RuntimeWarning)
         from legoesm.ocean.forcing.isf_spe import load_isf_spe_forcing
+        _isf_paired = app_grid_type == "mpas"
         if app_grid_type == "tripole":
             _isf_lat = np.degrees(np.asarray(grid.lat_T))
             _isf_lon = np.degrees(np.asarray(grid.lon_T))
+        elif _isf_paired:
+            # MPAS Voronoi: 1-D PAIRED cell centres, not grid axes.
+            _isf_lat = np.degrees(np.asarray(grid.latCell))
+            _isf_lon = np.degrees(np.asarray(grid.lonCell))
         else:
             _isf_lat = np.degrees(np.asarray(grid.lat))
             _isf_lon = np.degrees(np.asarray(grid.lon))
+        _isf_area = np.asarray(getattr(grid, "areaCell", grid.area))
         isf_forcing = load_isf_spe_forcing(
             args.isf_forcing_file, _isf_lat, _isf_lon,
-            land_mask=np.asarray(state.land_mask.data))
-        _isf_tot = [float((isf_forcing.fwf[m]
-                           * np.asarray(grid.area)).sum()) * 1e-9
+            land_mask=np.asarray(state.land_mask.data),
+            paired_cells=_isf_paired,
+            target_area=_isf_area if _isf_paired else None)
+        _isf_tot = [float((isf_forcing.fwf[m] * _isf_area).sum()) * 1e-9
                     for m in range(12)]
         print(f"[setup] ISF 'spe' melt loaded: monthly totals "
               f"{min(_isf_tot):.3f}-{max(_isf_tot):.3f} mSv-scale "
@@ -6588,14 +6610,15 @@ def main() -> int:
             # into MPASOceanConfig.  The freshwater application in
             # ocean_pe_mpas.py reads runoff_depth_spread_map via the shared
             # resolve_runoff_spread_arg selector (same code path as the
-            # C-grid).  ``grid`` holds the Voronoi mesh here.  MPAS has no
-            # iwm_forcing (rejected in build_mpas_ocean), so the C-grid's
-            # iwm_forcing= kwarg is intentionally omitted.
+            # C-grid).  ``grid`` holds the Voronoi mesh here.  The zdfiwm
+            # maps survive the rebuild (codex 2026-09-01: a rebuild that
+            # drops them silently reverts --iwm).
             from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
             model = MPASOceanModel(
                 grid, z_coord,
                 model.config._replace(
-                    runoff_depth_spread_map=jnp.asarray(_h_rnf)))
+                    runoff_depth_spread_map=jnp.asarray(_h_rnf)),
+                iwm_forcing=getattr(model, "_iwm_forcing", None))
         else:
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
                 LatLonCGridOceanModel,
@@ -6654,7 +6677,8 @@ def main() -> int:
             from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
             model = MPASOceanModel(
                 grid, z_coord,
-                model.config._replace(**_fw_cfg_kw))
+                model.config._replace(**_fw_cfg_kw),
+                iwm_forcing=getattr(model, "_iwm_forcing", None))
         elif app_grid_type in ("latlon", "tripole"):
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
                 LatLonCGridOceanModel,

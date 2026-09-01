@@ -153,11 +153,39 @@ class MPASOceanModel:
         mesh: VoronoiMesh,
         z_coord: OceanZStarCoordinate,
         config: MPASOceanConfig | None = None,
+        *,
+        iwm_forcing=None,
     ):
         self.mesh = mesh
         self.z_coord = z_coord
         self.config = config or MPASOceanConfig()
         self._cfl_checked = False
+        # Internal wave-driven mixing (zdfiwm) static forcing maps
+        # (IWMForcing of de Lavergne power/decay fields on THIS mesh's
+        # (nCells,) cell centres), captured as closure constants by the
+        # jitted step.  Both-or-neither with the config switch — mirrors
+        # the lat-lon C-grid model.
+        self._iwm_forcing = iwm_forcing
+        _vmix_cfg_init = (self.config.physics.vertical_mixing
+                          if getattr(self.config, "physics", None) is not None
+                          else None)
+        _iwm_cfg_init = (getattr(_vmix_cfg_init, "iwm", None)
+                         if _vmix_cfg_init is not None else None)
+        self._iwm_cfg = (_iwm_cfg_init
+                         if (_iwm_cfg_init is not None
+                             and _iwm_cfg_init.enabled) else None)
+        if iwm_forcing is not None and self._iwm_cfg is None:
+            raise ValueError(
+                "iwm_forcing was supplied but "
+                "physics.vertical_mixing.iwm.enabled is not True — the maps "
+                "would be silently ignored.")
+        if (self._iwm_cfg is not None
+                and not getattr(self.config, "implicit_vertical_mixing",
+                                False)):
+            raise ValueError(
+                "vertical_mixing.iwm.enabled=True requires "
+                "implicit_vertical_mixing=True on MPAS (zdfiwm contributes "
+                "to the implicit avt/avm profiles).")
 
         # ONE MODEL, ONE SET OF CONSTANTS. This configuration carries its own
         # gravity and reference density, and its physics pipeline carries a
@@ -317,7 +345,8 @@ class MPASOceanModel:
                 )
                 self._kpp_profiles_fn = make_kpp_profiles_mpas(
                     _vm_cfg, eos_fn=self._eos_fn,
-                    constants_config=self._constants_config)
+                    constants_config=self._constants_config,
+                    iwm_applied_by_model=True)
 
         # Build TKE profile function for the implicit vertical mixing path.
         # Like KPP, TKE returns raw (A_v, K_v) cell profiles that feed the
@@ -338,7 +367,8 @@ class MPASOceanModel:
                 )
                 self._tke_profiles_fn = make_tke_profiles_mpas(
                     _vm_cfg_tke, eos_fn=self._eos_fn,
-                    constants_config=self._constants_config)
+                    constants_config=self._constants_config,
+                    iwm_applied_by_model=True)
                 self._tke_prognostic = bool(
                     getattr(_vm_cfg_tke.tke, "prognostic", False))
 
@@ -627,6 +657,27 @@ class MPASOceanModel:
                 # Mask land cells
                 _K_conv_profile = _K_conv_profile * mask[:, None]
                 K_v_cell = K_v_cell + _K_conv_profile
+
+            # --- NEMO zdfiwm: internal-wave-driven mixing, ADDITIVE on top
+            # of the closure (zdfphy order: closure first, zdf_iwm adds onto
+            # avt/avm) — same contribution and same iwm_K_profile call as
+            # the lat-lon lane; K_iwm is recomputed from THIS grid's own
+            # N²/geometry, only the static power maps were remapped. ---
+            if self._iwm_cfg is not None:
+                from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+                    iwm_K_profile,
+                )
+                _K_iwm = iwm_K_profile(
+                    state, z_coord, self.config.physics, self._iwm_cfg,
+                    eos_fn=self._eos_fn,
+                    iwm_fields=self._iwm_forcing,
+                ).astype(K_v_cell.dtype)
+                if _active_half_c is not None:
+                    _K_iwm = jnp.where(_active_half_c, _K_iwm, 0.0)
+                _K_iwm = _K_iwm * mask[:, None]
+                K_v_cell = K_v_cell + _K_iwm
+                A_v_kpp_cells = (_K_iwm if A_v_kpp_cells is None
+                                 else A_v_kpp_cells + _K_iwm)
 
             # Zero sub-seafloor and land before solve (safe input)
             T_solve = T_new * active_3d

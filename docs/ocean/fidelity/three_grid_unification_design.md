@@ -99,6 +99,51 @@ B5. Vertical mixing: PHASE 1 keep fesom's CVMix-TKE port (a validated TKE
    recs 5/11/17 + plateau trajectories; cross-grid band tables + maps.
 All PRs: codex + GLM adversarial review before merge; probes committed.
 
+## Review dispositions (GLM + codex, 2026-09-01 — design reviewed BEFORE code)
+Adopted (design amended accordingly):
+- Staging: A1 isf-only 30d arm, THEN A2 iwm arm (both reviewers; isf meltwater
+  stabilizes columns and damps K_iwm via 1/N2 — coupled, so separate arms).
+- iwm remap target = the static forcing ATLAS only; K_iwm recomputed from each
+  grid's own N2 (GLM CRITICAL; design already intended this, now explicit).
+- iwm ctor kwarg must survive the MPAS runoff-depth/freshwater-config model
+  REBUILDS at run_omip_core2.py:6586-6607/6653-6665 (codex MAJOR) — add a
+  rebuild-preservation test.
+- iwm TKE energy feed (rn_efr) ports WITH the K splice (GLM MINOR).
+- B translator sign/unit table (codex CRITICALs, each becomes a unit test):
+  bc_T uses NON-SOLAR heat only (q_net minus SW — SW enters via sw_3d);
+  bc_T = +dt*q_nonsolar/VCPW (fesom RHS is -dt*heat_flux/VCPW, opposite sign
+  convention); stress negated (legoESM applies -tau, fesom stress_surf is
+  ocean-convention); water_flux = -F_fw/rho_w (fesom positive-UP); sw_3d needs
+  layer-heating [K/s] -> interface-flux [K*m/s] reconstruction from the shared
+  RGB kernel; bc_S conversion to fesom's time-integrated PSU*m increment;
+  zstar must be EXPLICITLY selected in B1 (adapter defaults linfs => virtual
+  salt) before use_virt_salt=False is legal; either/or guard so the host-loop
+  SSS-restore applicator (run_omip_core2.py:8191-8205/8300-8337) cannot fire
+  on top of the injected water_flux channel.
+- B1 gains a closed surface heat/freshwater BUDGET test (GLM CRITICAL): sum of
+  injected fluxes == ocean column heat/FW change over a step, on the real mesh.
+- Bulk runs per-step against FESOM's OWN SST/ice state (GLM CRITICAL) — same
+  contract as the MPAS lane; never computed on another grid and remapped.
+- Ice model runs NATIVELY on the fesom mesh via the standard lane (GLM MAJOR).
+- B5 order inverted per GLM: run the single-column TKE twin (fesom CVMix-TKE
+  vs legoESM orca1-TKE, identical column+forcing) FIRST to bound the closure
+  residual and set 3D tolerances, before any 3D FESOM arm is interpreted.
+- NEW B6 (GLM CRITICAL gap): FESOM iwm + isf parity via the same grid-agnostic
+  kernels (iwm K on (N,nl) columns + additive splice into fesom impl_vert_diff
+  needs one Kv-profile hook in fesom_jax; isf via the shared host applicator).
+  FESOM bbl explicitly DEFERRED with rationale: third unstructured port,
+  pending A3's edge formulation proving out on MPAS first.
+- Acceptance metrics defined: 30d arms validate CODE parity only (regression
+  vs baseline within band-table tolerances); climate-level equivalence is the
+  matched 180d x3 with d30/60/90 GATEWAY scores + plateau trajectories; the
+  residuals ledger (EOS, TKE closure phase 1, vertical coordinate, GM/visc
+  settings, bathymetry/strait geometry, runoff placement, forcing cadence)
+  is carried in this doc and each item is measured, not assumed away.
+Rejected/deferred (with reason):
+- "Confirm GATEWAY EOS basis" — carried as a check in B1 (grep nameos), cheap.
+- GLM's dcEdge/dvEdge + ssh-including bottom depth + dye/conservation tests
+  for A3: adopted as A3's test list verbatim.
+
 ## Known open risks (flagged, not hidden)
 - bbl edge-port numerics (A3) and the B3 sign/unit translator are the two
   highest-defect-risk pieces; both get analytic tests before any GPU run.
