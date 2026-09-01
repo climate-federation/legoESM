@@ -402,6 +402,7 @@ def run_legoesm(output: Path, arm: str, end_step: int, capture_start: int) -> di
             "no_tracer_vertical_transport",
             "no_primary_transport_average",
             "no_adaptive_implicit_momentum",
+            "no_bbl",
         },
         f"bad arm {arm}",
     )
@@ -415,6 +416,7 @@ def run_legoesm(output: Path, arm: str, end_step: int, capture_start: int) -> di
         primary_transport_average=(arm != "no_primary_transport_average"),
         disable_adaptive_implicit_momentum=(
             arm == "no_adaptive_implicit_momentum"),
+        disable_bbl=(arm == "no_bbl"),
     )
     model = LatLonCGridOceanModel(
         card.recipe.grid,
@@ -526,6 +528,7 @@ def paired_step_scale(
         arm_name in {
             "disable_tracer_vertical_transport",
             "disable_adaptive_implicit_momentum",
+            "disable_bbl",
         },
         f"bad paired scale arm {arm_name}",
     )
@@ -978,6 +981,7 @@ def main() -> int:
             "no_tracer_vertical_transport",
             "no_primary_transport_average",
             "no_adaptive_implicit_momentum",
+            "no_bbl",
         ),
         default="baseline",
     )
@@ -1001,6 +1005,7 @@ def main() -> int:
         choices=(
             "disable_tracer_vertical_transport",
             "disable_adaptive_implicit_momentum",
+            "disable_bbl",
         ),
         default="disable_tracer_vertical_transport",
     )

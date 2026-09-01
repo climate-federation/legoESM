@@ -223,3 +223,20 @@ measures reduced by at least 2x is **PLAUSIBLE**.  Failure within 2,870--2,884
 and movement below 10% is **REFUTED_PRIMARY**.  All other outcomes remain
 UNMEASURED.  Even a confirmation localizes wrong legoESM arithmetic; it does
 not authorize shipping the no-adaptive arm, because NEMO has no such switch.
+
+### Arm E: BBL late-time scale discriminator
+
+Arm E is frozen before its metric is computed.  It uses the existing private
+`disable_bbl` hook and changes only the certified card's Campin--Goosse
+stage-3 tracer transport; all public selectors remain the NEMO configuration.
+This is localization instrumentation, not a reference configuration: the
+executed oracle has `ln_trabbl=T`, `nn_bbl_adv=2`, and `rn_gambbl=20`.
+At the identical baseline completed-step-2,875 input, the arm must change T or
+U at that field's baseline increment maximum by at least 0.1 of the baseline
+one-step increment.  If neither reaches 0.1, BBL is **REFUTED_PRIMARY** for the
+terminal event and no full arm is allowed.  If either reaches 0.1, a full arm
+is allowed; BBL is **CONFIRMED** only if the arm completes 6,120 steps and
+reduces the matched-window U growth plus terminal T growth, **PLAUSIBLE** for a
+delay of at least 100 steps with both reduced at least 2x, and otherwise
+UNMEASURED.  The late-time scale result complements, rather than overwrites,
+the earlier kt=2 BBL ablation.
