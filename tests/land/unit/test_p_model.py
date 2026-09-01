@@ -289,19 +289,32 @@ def test_nitrogen_diagnostics_oracle_and_canaries():
 def test_biophys_tape_metadata_covers_pmodel_vars():
     """Every P-model tape variable run_lmip_biophys can emit has CF metadata
     (the writer falls back to EMPTY attrs on a missing key - silent, so this
-    is the gate), and the two nitrogen diagnostics are labelled C3-only /
-    no-feedback with g m-2 units."""
-    import importlib.util, pathlib
+    is the gate), the two nitrogen diagnostics are labelled C3-only /
+    no-feedback with g m-2 units, and the emission lines exist in the step
+    body (deleting the wiring fails here).  The script is parsed with ast,
+    NOT imported - importing it flips process-global JAX/x64 state (codex)."""
+    import ast, pathlib
     root = pathlib.Path(__file__).resolve().parents[3]
-    spec = importlib.util.spec_from_file_location(
-        "_biophys", root / "scripts" / "run" / "run_lmip_biophys.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    meta = mod._VAR_META
+    src = (root / "scripts" / "run" / "run_lmip_biophys.py").read_text()
+
+    tree = ast.parse(src)
+    meta = None
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and node.targets
+                and getattr(node.targets[0], "id", "") == "_VAR_META"):
+            meta = ast.literal_eval(node.value)
+    assert meta is not None
     for key in ("pmodel_chi", "pmodel_vcmax25", "pmodel_g1",
-                "pmodel_n_rubisco_leaf", "pmodel_n_et_leaf"):
+                "pmodel_n_rubisco_leaf", "pmodel_n_electron_transport_leaf"):
         assert key in meta and meta[key].get("units"), key
-    for key in ("pmodel_n_rubisco_leaf", "pmodel_n_et_leaf"):
+    for key in ("pmodel_n_rubisco_leaf", "pmodel_n_electron_transport_leaf"):
         assert meta[key]["units"] == "g m-2"
         assert "C3 only" in meta[key]["long_name"]
         assert "no feedback" in meta[key]["long_name"]
+        assert "nitrogen" in meta[key]["long_name"]
+
+    # emission wiring present (fails if the tape lines are deleted); the
+    # symbol that runs is the _step_body values dict in this script.
+    assert 'values["pmodel_n_rubisco_leaf"]' in src
+    assert 'values["pmodel_n_electron_transport_leaf"]' in src
+    assert "nitrogen_diagnostics" in src

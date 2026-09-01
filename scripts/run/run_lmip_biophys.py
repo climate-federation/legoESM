@@ -236,7 +236,7 @@ _VAR_META = {
                      "Vcmax25 (LUNA NUE 294.2 umol CO2/s/gN; diagnostic only, "
                      "C3 only, no feedback)",
         "units": "g m-2"},
-    "pmodel_n_et_leaf": {
+    "pmodel_n_electron_transport_leaf": {
         "long_name": "implied nitrogen in electron transport from the C3 leaf-top "
                      "acclimated Jmax25 (LUNA NUE 1257 umol e-/s/gN; diagnostic "
                      "only, C3 only, no feedback)",
@@ -789,10 +789,18 @@ def run(args) -> int:
             values["pmodel_vcmax25"] = _caps_d.vcmax25_leaf
             values["pmodel_g1"] = _caps_d.g1_kpa
             from legoesm.land.p_model import nitrogen_diagnostics as _ndiag
-            _n_rub, _n_et = _ndiag(_caps_d.vcmax25_leaf,
-                                   _caps_d.vcmax25_leaf * _caps_d.rjv25)
+            _n_rub, _n_etr = _ndiag(_caps_d.vcmax25_leaf,
+                                    _caps_d.vcmax25_leaf * _caps_d.rjv25)
+            # C3-only diagnostic: mask pure-C4 columns to NaN (their C3
+            # capacities are computed but unused - GLM review); partial
+            # blends stay raw (the C3 pathway genuinely runs there).
+            _fC4_d = getattr(land_params_t, "fC4", None)
+            if _fC4_d is not None:
+                _c4_only = _fC4_d >= 1.0
+                _n_rub = jnp.where(_c4_only, jnp.nan, _n_rub)
+                _n_etr = jnp.where(_c4_only, jnp.nan, _n_etr)
             values["pmodel_n_rubisco_leaf"] = _n_rub
-            values["pmodel_n_et_leaf"] = _n_et
+            values["pmodel_n_electron_transport_leaf"] = _n_etr
         # --- atomic per-column NaN-revert guard (ported from run_ec_site) ---
         # Columns are independent, so if a column's state update goes non-finite,
         # revert THAT column to its previous state (jnp.where): a diverging boreal
