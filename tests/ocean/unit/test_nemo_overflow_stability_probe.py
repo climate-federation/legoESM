@@ -70,3 +70,21 @@ def test_private_primary_transport_arm_changes_only_private_hook():
         if before != after
     ]
     assert changed == ["primary_transport_average"]
+
+
+def test_shifted_step_control_fails_time_alignment(monkeypatch, tmp_path):
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_overflow_zps_card
+
+    card = build_overflow_zps_card()
+    fields = PROBE._state_arrays(card.recipe.initial_state)
+    oracle = {**fields, "step": 1}
+    monkeypatch.setattr(PROBE, "read_entry", lambda *_: oracle)
+    monkeypatch.setattr(PROBE, "_load_candidate", lambda *_: fields)
+    monkeypatch.setattr(
+        PROBE,
+        "_certified_kt1_control",
+        lambda *_: {"status": "VERIFIED_TEST_DOUBLE"},
+    )
+    with pytest.raises(PROBE.ProbeError, match="planted step-number mismatch"):
+        PROBE.score(tmp_path, tmp_path, start_completed=0, end_completed=0,
+                    plant="shift_step")
