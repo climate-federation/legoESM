@@ -114,12 +114,15 @@ def test_shifted_step_control_fails_time_alignment(monkeypatch, tmp_path):
                     plant="shift_step")
 
 
-def test_resolved_coverage_is_file_driven_and_loud_about_aimp(tmp_path):
+def test_resolved_coverage_is_file_driven_and_certifies_aimp(tmp_path):
     resolved = PROBE.DEFAULT_ORACLE / "output.namelist.dyn"
     report = PROBE.overflow_resolved_coverage(
         resolved, tmp_path / "coverage.json")
-    assert report["status"] == "UNMEASURED"
-    assert report["unmeasured"] == ["namzdf.ln_zad_aimp"]
+    assert report["status"] == "VERIFIED"
+    assert report["unmeasured"] == []
+    aimp = next(row for row in report["rows"]
+                if row["key"] == "namzdf.ln_zad_aimp")
+    assert aimp["status"] == "VERIFIED"
     assert sum(report["counts"].values()) == len(PROBE.OVERFLOW_RESOLVED_KEYS)
     assert report["barotropic_composition"]["status"] == "VERIFIED"
     assert report["barotropic_composition"]["oracle"]["runtime_nn_e"] == 3

@@ -39,6 +39,93 @@ _AIMP_CU_MAX = 0.30
 _H_FLOOR = 1.0e-10
 
 
+class NemoAdaptiveImplicitPartition(NamedTuple):
+    """NEMO RK3 ``wAimp`` transport split on T-point interfaces."""
+
+    w_explicit: jnp.ndarray
+    w_implicit: jnp.ndarray
+    fraction: jnp.ndarray
+    courant_horizontal: jnp.ndarray
+    courant_vertical: jnp.ndarray
+
+
+def nemo_wicker_aimp_partition_transport(
+    mass_flux_u: jnp.ndarray,
+    mass_flux_v: jnp.ndarray,
+    w: jnp.ndarray,
+    h_t_kmm: jnp.ndarray,
+    e3w_kmm: jnp.ndarray,
+    area_t: jnp.ndarray,
+    dy_u: jnp.ndarray,
+    dx_v: jnp.ndarray,
+    dt: float,
+) -> NemoAdaptiveImplicitPartition:
+    """Literal NEMO 5.0.2 RK3 transport-form adaptive partition.
+
+    This transcribes ``sshwzv.F90:wAimp_RK3_t``'s live
+    ``np_transport`` arm (lines 773--843).  ``mass_flux_u/v`` are legoESM's
+    thickness transports [m2/s] on redundant west/east and south/north C-grid
+    faces; multiplication by the face width reconstructs NEMO's ``zFu/zFv``
+    volume transports [m3/s].  ``w`` is the T-point vertical velocity [m/s]
+    with surface and bottom interfaces included.
+
+    NEMO stores a bottom-up maximum vertical Courant number for diagnostics,
+    but that value does not enter the split coefficient: every coefficient
+    branch overwrites ``zcff`` from the current interface ``zCu_v``.  This
+    routine therefore has no artificial cross-interface recurrence.
+    """
+    dtype = w.dtype
+    dt_a = jnp.asarray(dt, dtype=dtype)
+    area = jnp.asarray(area_t, dtype=dtype)
+    hu_transport = mass_flux_u * jnp.asarray(dy_u, dtype=dtype)[..., None]
+    hv_transport = mass_flux_v * jnp.asarray(dx_v, dtype=dtype)[..., None]
+    inflow = (
+        jnp.maximum(hu_transport[:, 1:, :], 0.0)
+        - jnp.minimum(hu_transport[:, :-1, :], 0.0)
+        + jnp.maximum(hv_transport[1:, :, :], 0.0)
+        - jnp.minimum(hv_transport[:-1, :, :], 0.0)
+    )
+    cu_h = dt_a * inflow / jnp.maximum(
+        area[..., None] * h_t_kmm, jnp.asarray(_H_FLOOR, dtype=dtype))
+
+    nlev = h_t_kmm.shape[-1]
+    if w.shape[-1] != nlev + 1 or e3w_kmm.shape[-1] != nlev + 1:
+        raise ValueError("w and e3w_kmm must contain nlev+1 interfaces")
+    w_int = w[..., 1:nlev]
+    cu_v_int = dt_a * jnp.abs(w_int) / jnp.maximum(
+        e3w_kmm[..., 1:nlev], jnp.asarray(_H_FLOOR, dtype=dtype))
+    # Positive (upward) w takes the horizontal Courant number from the lower
+    # T cell; non-positive w takes it from the upper cell (sshwzv:816--820).
+    cu_h_int = jnp.where(w_int > 0.0, cu_h[..., 1:], cu_h[..., :-1])
+    one = jnp.asarray(1.0, dtype=dtype)
+    cu_min = jnp.asarray(0.8, dtype=dtype) * (one - cu_h_int / 1.1)
+    cu_max = jnp.asarray(1.1, dtype=dtype) * (one - cu_h_int / 1.1)
+    cu_cut = 2.0 * cu_max - cu_min
+    delta = cu_v_int - cu_min
+    tiny = jnp.asarray(jnp.finfo(dtype).tiny, dtype=dtype)
+    mid = one / (
+        one + 4.0 * cu_max * (cu_max - cu_min)
+        / jnp.maximum(delta * delta, tiny))
+    high = (cu_v_int - cu_max) / jnp.maximum(
+        cu_v_int, tiny)
+    frac_int = jnp.where(
+        cu_v_int <= cu_min,
+        jnp.zeros_like(cu_v_int),
+        jnp.where(cu_v_int < cu_cut, mid, high),
+    )
+    frac_int = jnp.clip(frac_int, 0.0, 1.0)
+    pad = ((0, 0),) * (frac_int.ndim - 1) + ((1, 1),)
+    fraction = jnp.pad(frac_int, pad)
+    cu_v = jnp.pad(cu_v_int, pad)
+    return NemoAdaptiveImplicitPartition(
+        (1.0 - fraction) * w,
+        fraction * w,
+        fraction,
+        cu_h,
+        cu_v,
+    )
+
+
 class NemoQCOLiveFaceGeometry(NamedTuple):
     """Executed DINO-QCO face thickness and reciprocal operands."""
 

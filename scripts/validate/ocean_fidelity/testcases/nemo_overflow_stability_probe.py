@@ -174,10 +174,10 @@ namtra_mle.ln_mle
 namzdf.ln_zdfcst namzdf.ln_zdfddm namzdf.ln_zdfevd namzdf.ln_zdfgls
 namzdf.ln_zdfiwm namzdf.ln_zdfmfc namzdf.ln_zdfnpc namzdf.ln_zdfosm
 namzdf.ln_zdfric namzdf.ln_zdfswm namzdf.ln_zdftke
-namzdf.nn_avb namzdf.nn_havtb namzdf.rn_avm0 namzdf.rn_avt0
+namzdf.ln_zad_aimp namzdf.nn_avb namzdf.nn_havtb namzdf.rn_avm0 namzdf.rn_avt0
 """.split())
 
-OVERFLOW_UNMEASURED_KEYS = frozenset({"namzdf.ln_zad_aimp"})
+OVERFLOW_UNMEASURED_KEYS = frozenset()
 
 
 def _state_arrays(state) -> dict[str, np.ndarray]:
