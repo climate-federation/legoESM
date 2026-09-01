@@ -5,6 +5,29 @@ no comparison arm has been launched at this commit.** This post-PR extension
 freezes the transition from deterministic trajectory fidelity to statistical
 equivalence for the certified `LOCK_EXCHANGE-zco` and `OVERFLOW-zps` cards.
 
+### Pre-score amendment: endpoint membership is not an FCT verdict
+
+After the first preregistration commit and the N4 executions, but still before
+computing any L64/L32 metric, a dry run of the scorer against N2 alone found
+that the proposed endpoint snap predicate would reject the certified oracle:
+OVERFLOW N2 ends at `20.00000000000307 C`, an excess of
+`3.0695e-12 K`, while its `sqrt(6120)*eps*20` floor is only
+`3.4741e-13 K`. This is not new physics evidence. It reproduces the phase-1
+finding that the temperature excess is **UNMEASURED** at 796 epsilon-relative
+(`nemo_testcases_l1_phase1_receipt.md:21-26,68`). The phase-1 gate separately
+hard-fails only a gross relative excursion above `1e-6`
+(`nemo_testcase_oracle_gate.py:399-415`).
+
+The endpoint convention below is therefore amended before any legoESM metric:
+the scorer prints the raw excess, the `sqrt(N)*eps` floor, and `AT-BAR` or
+`UNMEASURED`; it hard-fails an excess/field-scale above `1e-6`; and it snaps to
+the nearest endpoint only for histogram-bin and census-boundary membership.
+This bookkeeping operation cannot promote the FCT verdict and never modifies
+the deterministic field comparison. The planted `10 K` wet-cell excursion
+still hard-fails. This amendment retracts only the proposed hard failure at
+the roundoff-classification floor; all metric distances and the three-way
+statistical verdict table remain unchanged.
+
 ## Question, arms, and immutable samples
 
 The question is whether legoESM's full-duration solution is distinguishable
@@ -121,13 +144,15 @@ forming a bottom-trapped dense plume (NEMO 5 manual, OVERFLOW time-series;
    with `500 m < H_bathy < 2000 m`. Form a volume-weighted histogram on fixed
    0.25 C bins spanning `[10,20] C`; report the probability vector and score
    total-variation distance `0.5*sum|p_L-p_N|`. The already-certified phase-1
-   endpoint convention applies before binning: an excess no larger than
-   `sqrt(N_steps)*eps(dtype)*max(|T_endpoints|,1)` is snapped to its nearest
-   endpoint for bin membership only, while raw extrema are emitted. A larger
-   excess hard-fails. This clarification is made before any new legoESM metric
-   is computed and responds to the pre-existing phase-1 roundoff receipt, not
-   to an extension-arm result.
-4. **Final slope water-mass census.** On the same volume and without clipping,
+   endpoint convention applies before binning: raw excess is classified
+   against `sqrt(N_steps)*eps(dtype)*max(|T_endpoints|,1)` and remains loudly
+   `UNMEASURED` when above it. An excess larger than `1e-6` relative hard-fails;
+   otherwise only endpoint membership is snapped while raw extrema are
+   emitted. This clarification is made before any new legoESM metric is
+   computed and responds to the pre-existing phase-1 roundoff receipt, not to
+   an extension-arm result.
+4. **Final slope water-mass census.** On the same volume (with only the
+   endpoint-membership convention above),
    report fractions `cold=[10,12)`, `mixed=[12,18)`, and
    `ambient=[18,20]` C. The score is the maximum absolute fraction difference.
 5. **Deterministic T/U bridge.** Registered as above.
