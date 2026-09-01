@@ -138,7 +138,10 @@ are under `/tmp/l1_figures_full/`. OVERFLOW has no three-time section or metric
 curve figure because no finite legoESM midpoint/final state exists. The failure
 figure states that absence directly instead of drawing unobserved fields.
 
-Eight direct scorer tests pass. In addition, the planted wet T control moves
+The final lane testcase subset is 55/55 passing: 8 full-statistics tests,
+18 phase-1 oracle-gate tests, 7 phase-2 tests, 3 EOS tests, 8 first-divergence
+tests, 2 stage-sweep tests, and 9 trajectory-gate tests. In addition, the
+planted wet T control moves
 LOCK `temperature_linf` to `OUTSIDE`; the planted unregistered-metric control
 exits nonzero on the inventory mismatch; the endpoint test preserves loud
 `UNMEASURED` classification while the gross excursion hard-fails. The planted
