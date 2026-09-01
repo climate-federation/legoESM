@@ -96,6 +96,13 @@ def test_optimum_certificates_and_regime():
     p_star = profit_at(jnp.full((1,), d_star))
     assert p_star >= profit_at(jnp.full((1,), d_star * 0.9)) - 1e-6
     assert p_star >= profit_at(jnp.full((1,), d_star * 1.1)) - 1e-6
+    # GLM refinement: two probes are not an optimality certificate for the
+    # 1-D problem. Sweep the WHOLE feasible dpsi interval on a dense grid
+    # and require the returned optimum to dominate every grid point.
+    d_max = float(sup.psi_s_mpa[0]) - cfg.minlwp_mpa
+    grid_best = max(profit_at(jnp.full((1,), float(d)))
+                    for d in np.linspace(1e-3, d_max, 201))
+    assert p_star >= grid_best - 1e-4 * max(abs(grid_best), 1.0)
 
 
 def test_drought_flat_then_collapse():
