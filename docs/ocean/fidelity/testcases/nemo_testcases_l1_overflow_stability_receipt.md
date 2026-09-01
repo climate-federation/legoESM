@@ -1,11 +1,75 @@
 # Lane 1 OVERFLOW-zps non-finite investigation receipt
 
-Status: **CONFIRMED OUTSIDE; initiating owner remains UNMEASURED.**  NEMO 5.0.2
-completes the pinned 6,120-step `key_qco + key_RK3` case; the certified legoESM
-card first becomes non-finite after completed step 2,877 in fp64 (2,879 in
-fp32).  No damping, clipping, diffusion, limiter, or card selector was added.
+Status: **STABILITY OWNER CONFIRMED; STATISTICAL RUNG OUTSIDE.**  The
+source-exact NEMO 5.0.2 `ln_zad_Aimp` RK3 package makes the certified legoESM
+OVERFLOW-zps card complete all 6,120 steps in both fp64 and fp32.  The prior
+failures at completed steps 2,877/2,879 were therefore caused by legoESM's
+approximate adaptive-implicit composition.  No damping, clipping, diffusion,
+limiter, or oracle-absent selector was added.  The frozen statistical scorer
+nevertheless returns `OUTSIDE`: fp32 violates its preregistered gross
+temperature-excursion guard, so it cannot supply a roundoff floor.
 
-## Executive finding
+## Round 3 resolution: source-exact adaptive-implicit package
+
+Commit `7876b3ea869f` froze the terminal prediction before any new integration:
+completion of all 6,120 fp64 steps would confirm ownership; any later failure
+would classify the package only as a contributor.  Commit `5b59e923e0bc`
+then replaced the public NEMO WS-RK3 post-step approximation with one
+unbranched source identity:
+
+- The stage-3 transport-form Courant criterion uses horizontal inflow,
+  sign-selected upstream-cell `Cu_h`, `Cu_min_v=0.8`, `Cu_max_v=1.1`, and
+  `Cu_max_h=1.1` (`sshwzv.F90:773-843`).
+- Stage-3 momentum sends explicit `ww` through UP3 and folds the
+  e1e2t-area-weighted `wi` into the same vertical-viscosity tridiagonal
+  (`stprk3_stg.F90:257-304,309-336,419-446`;
+  `dynzdf.F90:181-195,233-270`).
+- Tracers recompute the corrected stage-3 transport, use explicit `ww` in
+  both FCT predictor steps, subtract the optimized `nn_fct_imp=1`
+  zero-order `wi*T(Kbb)` divergence in both predictors, and fold the same
+  `wi` into the one tracer ZDF matrix (`traadv.F90:220-227`;
+  `traadv_fct.F90:140-145,470-607`; `trazdf.F90:207-216,271-285`).
+
+The exact package completed 6,120 fp64 steps on CPU in `467.8001 s`, with
+every-step finite checks, and completed the fp32 companion in `288.5956 s`.
+This satisfies the frozen confirm predicate, so the stability owner is
+**CONFIRMED**.  The former near-identical fp64/fp32 failure pair was a
+deterministic structural mismatch, not roundoff accumulation; its removal in
+both precision arms is the discriminating result.
+
+The short gates did not regress their certified classification.  kt=1 remains
+bit-exact for T/S/U/SSH.  At kt=2 the normalized L-infinity rows are T
+`2.40035055e-8`, U `3.08238867e-6`, and SSH `1.23723132e-7`; the U row improves
+from the prior approximately `4.12e-6` class, while T and SSH remain at their
+recorded values/classes.  Resolved coverage is now 68 VERIFIED, 40 WAIVED,
+and **0 UNMEASURED**; `namzdf.ln_zad_aimp` is no longer a boolean-only claim.
+
+The full-duration scorer first exposed and then repaired a latent mismatch
+between its code and the frozen preregistration: the preregistered front is the
+rightmost connected ascending crossing, whereas the code rejected any state
+with more than one crossing.  Commit `a9fa35365478` applies the registered
+rightmost reduction and adds multiple/missing-crossing controls.  It does not
+relax a scientific bar.  The rerun produces a machine-readable `OUTSIDE`
+report for all six registered metrics because L32 ends at `20.002197265625 C`:
+its `0.002197265625 K`, `1.0986328125e-4` relative excess exceeds the frozen
+`1e-6` gross guard.  L64 itself remains finite and below the gross guard
+(`20.000000000008576 C` maximum), but statistical equivalence cannot be
+classified without a valid precision-floor arm.
+
+Round-3 artifacts (all under
+`/data/abyssal/dbalwada/nemo-testcases-l1/round3_aimp/`):
+
+| artifact | SHA256 |
+|---|---|
+| resolved coverage | `376a53b4d893a831fee98c70fcde142bf5b424437d36c307f796b1fab0698401` |
+| kt=1/2 gate | `683c175f8ea942c9ab9cba19f02fb3c35f96ba22024760581ca64260f9027e3f` |
+| fp64 metadata | `fbd02221ddab494a11f7d1110694072b241360d7a060756a2a27fb0d44511a51` |
+| fp64 states | `6a8520bb2cf82d74dc0c9658989cdda36f032fbc9bd4c4abc515fff07acc3373` |
+| fp32 metadata | `7cc10f9f7dc171356a2df682096cef96e5d568a89be8f434071afa73c96b4084` |
+| fp32 states | `4d24f03c79a4b25622d13f2b8226dde831ef021a613d86ce9c04ef5ebea06166` |
+| statistical report | `1038939cd39d738bbee6a259917fd35665b658d35b091f09a11e9cc3dcad2a0e` |
+
+## Pre-fix executive finding (retained as the first-divergence record)
 
 The new every-step comparison separates initiation from terminal amplification.
 The common state is exact at kt=1.  Instantaneous U and SSH first leave NEMO's
@@ -45,21 +109,23 @@ are off (`overflow_zps/namelist_cfg:123-140`; matched `ocean.output:630-660`).
 Missing stabilizing mixing/convection is **SOURCE-EXONERATED**.
 
 NEMO evaluates its adaptive Wicker--Skamarock partition twice in RK3 stage 3,
-for velocity and transport (`src/OCE/stprk3_stg.F90:281-303`).  The live
-criterion combines horizontal and vertical Courant numbers, a bottom-up
-running maximum, and the 0.8/1.1 thresholds
+for velocity and transport (`src/OCE/stprk3_stg.F90:281-303`).  The routine
+combines horizontal and vertical Courant numbers with the 0.8/1.1 thresholds
+for the live coefficient and separately accumulates a bottom-up maximum for
+diagnostic output; that maximum does not enter the split coefficient
 (`src/OCE/DYN/sshwzv.F90:696-873`).  Its explicit and implicit tracer pieces
 enter FCT and the vertical tridiagonal solve
 (`src/OCE/TRA/traadv_fct.F90:141-167,286-330`;
 `src/OCE/TRA/trazdf.F90:207-225`).
 
-legoESM's only implementation is the older local vertical-only momentum form
+Before round 3, legoESM's only implementation was the older local vertical-only momentum form
 in `packages/ocean/legoesm/ocean/vertical.py:1716-1909`; it is applied after
 the completed RK3 program in
 `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:4996-5054`.
-The tracer WS-RK3 stages receive unpartitioned vertical transport and have no
-matching implicit tracer solve.  This is a **SOURCE-CONFIRMED MISMATCH**, not a
-confirmed failure owner.
+The tracer WS-RK3 stages received unpartitioned vertical transport and had no
+matching implicit tracer solve.  This was a **SOURCE-CONFIRMED MISMATCH**;
+round 3's completed discriminating run promotes it to the confirmed stability
+owner.
 
 ## Comparator frame, inventory, and dtypes
 
@@ -168,10 +234,11 @@ Independent adversarial review status is **UNMEASURED** for this round; no
 shipping claim is made beyond the measured OUTSIDE finding and labeled owner
 ledger.
 
-## Resolved-physics coverage continuation (2026-09-01)
+## Pre-round-3 resolved-physics coverage continuation (historical)
 
-**Outcome: the tested register is exhausted without a confirmed initiating
-owner.**  The file-driven coverage pass eliminates a missing NEMO convection,
+**Historical outcome, superseded by the round-3 confirmation above:** the
+then-tested register was exhausted without a confirmed initiating owner.  The
+file-driven coverage pass eliminated a missing NEMO convection,
 momentum-advection-form, momentum-LDF, or barotropic-selector mechanism.  The
 current legoESM adaptive-momentum approximation is a **PLAUSIBLE late
 amplifier**: removing only that rewrite delays failure by 1,051 steps and
