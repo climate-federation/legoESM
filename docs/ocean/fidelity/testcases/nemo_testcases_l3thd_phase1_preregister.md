@@ -78,11 +78,17 @@ pre-thermodynamics copy made by `store_fields` at `icestp.F90:184`.
 Unregistered stage codes, wrong order, missing/duplicate steps, non-finite
 values, non-fp64 storage, or a frame count other than `8760*8` hard-fail.
 
-After `ice_update_flx` (`icestp.F90:213`), `MY_SRC/icestp.F90` writes one
+After `ice_update_flx` (`icestp.F90:213`) and the same step's
+`ice_update_tau` (`icestp.F90:233`), `MY_SRC/icestp.F90` writes one
 exchange frame per step containing every SI3 array in `sbc_ice.F90:42-105`
 except the explicitly CICE-only rows, plus `utau,vtau,taum,qsr,qns,emp,sfx,
 fr_i,tn_ice`.  The exchange registry is fail-closed and all arrays must be
 finite fp64 values.
+
+The thermo stream uses payload code 0 for the geographic arrays at ENTRY,
+POST_DO, and EXIT, and payload code 1 for the selected-column 1-D arrays
+immediately after ZDF, DH, TEMP1, SAL, and TEMP2.  This records the actual
+boundary state without calling a 1-D-to-2-D conversion and changing state.
 
 ## Restart coverage contract
 
