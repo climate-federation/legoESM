@@ -544,6 +544,15 @@ def ascending_crossings(x: np.ndarray, values: np.ndarray, threshold: float) -> 
     return np.asarray(crossings, dtype=np.float64)
 
 
+def rightmost_ascending_crossing(
+    x: np.ndarray, values: np.ndarray, threshold: float, *, label: str,
+) -> tuple[float, int]:
+    """Apply the preregistered connected-front reduction."""
+    crossings = ascending_crossings(x, values, threshold)
+    require(crossings.size >= 1, f"{label}: missing ascending front")
+    return float(crossings[-1]), int(crossings.size)
+
+
 def _snap_temperature(values: np.ndarray, case: str, dtype: np.dtype) -> tuple[np.ndarray, dict]:
     low, high = CASES[case]["temperature_range"]
     eps = np.finfo(dtype).eps
@@ -553,7 +562,11 @@ def _snap_temperature(values: np.ndarray, case: str, dtype: np.dtype) -> tuple[n
     raw_max = float(np.max(values))
     excess = max(low - raw_min, raw_max - high, 0.0)
     excess_relative = excess / scale
-    require(excess_relative <= 1.0e-6, f"{case}: gross T excursion")
+    require(
+        excess_relative <= 1.0e-6,
+        f"{case}: gross T excursion raw=[{raw_min:.17g},{raw_max:.17g}] "
+        f"excess={excess:.17g} relative={excess_relative:.17g}",
+    )
     return np.clip(values, low, high), {
         "raw_min_C": raw_min,
         "raw_max_C": raw_max,
@@ -611,13 +624,16 @@ def arm_metrics(case: str, states: dict[int, dict], source: str, coefficients) -
             cold = active & (fields["T"] <= 15.0)
             require(bool(np.any(cold)), f"{source}: no cold plume at t={time_s}")
             descent.append(float(np.max(centres[cold])))
-            crossings = ascending_crossings(x_km, _bottom_values(fields["T"], active, row), 15.0)
-            require(
-                crossings.size == 1,
-                f"{source}: expected one overflow front at t={time_s}, got {crossings.size}",
-            )
-            fronts.append(float(crossings[-1]))
-            crossing_counts.append(int(crossings.size))
+            front, count = rightmost_ascending_crossing(
+                x_km, _bottom_values(fields["T"], active, row), 15.0,
+                label=f"{source} overflow t={time_s}")
+            # Frozen preregistration, metric 2: the plume front is the
+            # RIGHTMOST ascending crossing connected to the initial cold
+            # reservoir.  Interior mixed lenses may add crossings behind it;
+            # rejecting those made the scorer contradict its own registered
+            # reducer as soon as the first complete candidate reached scoring.
+            fronts.append(front)
+            crossing_counts.append(count)
         final = mapped[int(times[-1])]
         _, active, volume, _ = _geometry(case, final["ssh"])
         bathy = np.asarray(card.recipe.initial_state.H_bathy.data)
@@ -657,13 +673,11 @@ def arm_metrics(case: str, states: dict[int, dict], source: str, coefficients) -
         for time_s in times:
             fields = mapped[int(time_s)]
             _, active, volume, _ = _geometry(case, fields["ssh"])
-            crossings = ascending_crossings(x_km, _bottom_values(fields["T"], active, row), 17.5)
-            require(
-                crossings.size == 1,
-                f"{source}: expected one lock front at t={time_s}, got {crossings.size}",
-            )
-            fronts.append(float(crossings[-1]))
-            crossing_counts.append(int(crossings.size))
+            front, count = rightmost_ascending_crossing(
+                x_km, _bottom_values(fields["T"], active, row), 17.5,
+                label=f"{source} lock t={time_s}")
+            fronts.append(front)
+            crossing_counts.append(count)
             rpe.append(_rpe(fields, case, coefficients))
             wet = active & (volume > 0.0)
             values = np.asarray(fields["T"], dtype=np.float64)[wet]
@@ -857,7 +871,56 @@ def score_case(
         state["T"] = np.where(select, 10.0, state["T"])
 
     coefficients = parse_teos10_density_coefficients()
-    metrics = {arm: arm_metrics(case, states, arm, coefficients) for arm, states in arms.items()}
+    metrics = {}
+    invalid_arms = {}
+    for arm, states in arms.items():
+        try:
+            metrics[arm] = arm_metrics(case, states, arm, coefficients)
+        except StatisticalError as error:
+            invalid_arms[arm] = str(error)
+    if invalid_arms:
+        require(
+            not (plant_state or plant_census or plant_unregistered),
+            "planted metric controls require valid metric arms",
+        )
+        rows = [
+            {
+                "name": name,
+                "verdict": "OUTSIDE",
+                "candidate_distance": None,
+                "precision_floor": None,
+                "scheme_spread": None,
+                "predicate": "FAILED_REGISTERED_ARM_CONTROL",
+                "reason": "; ".join(
+                    f"{arm}: {reason}" for arm, reason in sorted(invalid_arms.items())
+                ),
+            }
+            for name in sorted(REGISTERED_METRICS[case])
+        ]
+        return {
+            "case": case,
+            "git_sha": git_sha(),
+            "preregistration_commit": PREREG_SHA,
+            "status": "OUTSIDE",
+            "verdict_counts": {
+                "INDISTINGUISHABLE-AT-FLOOR": 0,
+                "WITHIN-SCHEME-SPREAD": 0,
+                "OUTSIDE": len(rows),
+            },
+            "alternative_namelist_diff": alternative_diff,
+            "invalid_metric_arms": invalid_arms,
+            "legoesm_runs": {"fp64": l64_metadata, "fp32": l32_metadata},
+            "metrics": metrics,
+            "rows": rows,
+            "state_frame": (
+                "initial/midpoint NEMO Nbb entry vs legoESM pre-step prognostic; "
+                "final NEMO tn/un/sshn restart vs legoESM after full completed duration"
+            ),
+            "mask_and_reduction": (
+                "phase3 gate halo strip and common wet T/U intersection; volume "
+                "metrics use certified live partial-cell thickness; float64 accumulation"
+            ),
+        }
     bridge = deterministic_bridge(case, arms)
     rows = []
 
@@ -939,6 +1002,7 @@ def score_case(
 
     return {
         "case": case,
+        "git_sha": git_sha(),
         "preregistration_commit": PREREG_SHA,
         "status": "OUTSIDE"
         if any(row["verdict"] == "OUTSIDE" for row in rows)

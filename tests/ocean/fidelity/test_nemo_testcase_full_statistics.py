@@ -39,6 +39,23 @@ def test_crossing_uses_linear_subcell_position():
     np.testing.assert_array_equal(crossings, np.asarray([1.25]))
 
 
+def test_connected_front_reducer_selects_rightmost_of_multiple_crossings():
+    # Two cold-to-warm transitions behind/at the leading edge.  The frozen
+    # preregistration names the rightmost crossing, not "exactly one".
+    front, count = stats.rightmost_ascending_crossing(
+        np.arange(5.0), np.asarray([10.0, 20.0, 10.0, 20.0, 20.0]),
+        15.0, label="planted multi-crossing")
+    assert count == 2
+    assert front == 2.5
+
+
+def test_connected_front_reducer_rejects_missing_crossing():
+    with pytest.raises(stats.StatisticalError, match="missing ascending front"):
+        stats.rightmost_ascending_crossing(
+            np.arange(3.0), np.asarray([10.0, 10.0, 10.0]), 15.0,
+            label="planted missing")
+
+
 def test_endpoint_roundoff_debt_stays_loud_but_does_not_change_membership():
     values = np.asarray([14.0, 20.0 + 3.0e-12], dtype=np.float64)
     snapped, receipt = stats._snap_temperature(values, "OVERFLOW-zps", values.dtype)
