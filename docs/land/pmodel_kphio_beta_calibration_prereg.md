@@ -228,3 +228,31 @@ SHALLOWER minlwp (-1.0) improved GPP. Grid:
   them)
 * objective and "pays" rule as pre-registered in the stage-2 amendment
   (majority of dry sites, per-site normalised).
+
+
+## STAGE-2 RESULT (dry-site P-hydro ladder; measured, pre-registered rule applied)
+
+Per-site joint objective (0.5*nRMSE(GPP)+0.5*nRMSE(LE)), arm vs the beta_theta
+anchor at the five dry sites:
+
+* **P-hydro PAYS under realistic conductance**: `gplant_mol=1e-3,
+  minlwp=-1.0` beats the anchor at **5/5 sites** (mean 0.909 -> 0.804, -12%),
+  and five more low-conductance cells pay at >=4/5. The interior 1e-3 column
+  is preferred over the 5e-4 spec-floor column (which scores a lower mean,
+  0.783, but sits on the bound and degrades correlation and LE RMSE medians).
+* **The shipped default (4e-3, -2.0) is the WORST cell in the grid** (mean
+  1.084, loses at 4/5 sites) — this is why the 14-site ladder said "phydro
+  does not pay": the default whole-plant conductance lets semiarid vegetation
+  move ~4x too much water, and the -2 MPa floor is too deep for these
+  ecosystems' operating range.
+* Direction is coherent across both parameters: less conductance + a
+  shallower drawdown floor = better at every dry site.
+
+**Pre-registered caveats stand**: single global conductance (screen, not a
+per-PFT verdict); the anchor is an implicitly tuned baseline; leaf-water-
+potential observations remain the unrun discriminating instrument.
+
+**Recommendation (requires user sign-off — a scheme-default change)**:
+adopt `gplant_mol=1e-3`, `minlwp_mpa=-1.0` as the PHydroConfig defaults on the
+research branch, or carry them as the documented dry-site card. Not changed
+unilaterally.
