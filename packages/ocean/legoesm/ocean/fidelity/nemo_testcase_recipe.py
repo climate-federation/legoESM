@@ -16,12 +16,19 @@ from legoesm.grids.latlon import create_beta_plane_cgrid_geometry
 from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
 from legoesm.ocean.dynamics.barotropic_common import nemo_auto_substeps
 from legoesm.ocean.fidelity.nemo_recipe import (
+    NEMOModelRecipeConfig,
     NEMORecipe,
+    nemo_lat_lon_model_config,
     nemo_gyre_emp,
     nemo_gyre_qsr,
     nemo_gyre_t_star,
     nemo_gyre_wind,
 )
+from legoesm.ocean.physics.convection.config import (
+    EnhancedDiffusionConfig,
+    OceanConvectionConfig,
+)
+from legoesm.ocean.physics.shortwave_penetration import ShortwavePenetrationConfig
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.vertical import (
@@ -60,9 +67,135 @@ class GYRESurfaceBoundaryCondition(NamedTuple):
 
 def _model_config(
     *, barotropic_time_filter: str, n_barotropic_substeps: int,
-    bbl_adv_option: int, bbl_gamma_s: float,
+    bbl_adv_option: int, bbl_gamma_s: float, whole_step_identity: str,
 ) -> LatLonCGridOceanConfig:
     """The selectors shared by both certified ``key_qco + key_RK3`` runs."""
+
+    if whole_step_identity not in {"lane1_flux_up3", "gyre_vector_ene_c2"}:
+        raise ValueError(
+            "unknown whole_step_identity; expected 'lane1_flux_up3' or "
+            "'gyre_vector_ene_c2'"
+        )
+
+    if whole_step_identity == "gyre_vector_ene_c2":
+        # One collapsed resolved-GYRE identity.  The numerical blocks come from
+        # the canonical NEMO/DINO card; only this testcase's OMIP TEOS-10/SCO,
+        # RK3, and resolved GYRE parameter selections are supplied here.
+        config = nemo_lat_lon_model_config(
+            NEMOModelRecipeConfig(
+                momentum_core="vector_invariant_ene",
+                eos="nemo_teos10",
+                tracer_advection="fct2",
+                pgf_scheme="nemo_sco",
+                pgf_quadrature="nemo_trapezoid",
+                barotropic_solver="explicit_substep",
+                n_barotropic_substeps=n_barotropic_substeps,
+                barotropic_time_filter=barotropic_time_filter,
+                momentum_time_integrator="rk3_ws",
+                adaptive_implicit_vertadv=False,
+                implicit_vertical_mixing=True,
+                A_h=1.0e5,
+                A_h_lat_scaling=False,
+                A_h_floor=0.0,
+                C_smag_lap=0.0,
+                B_h=0.0,
+                K_h=0.0,
+                K_bih=0.0,
+                gm_redi=True,
+                kappa_GM=0.0,
+                kappa_Redi=1000.0,
+                redi_S_max=0.01,
+                lateral_operator="nemo_iso_lap",
+                mle=False,
+                rgb_shortwave=False,
+                normalize_freshwater=False,
+                freeze_floor=False,
+                bottom_drag_scheme="nemo_quadratic",
+            )
+        )
+        tke = config.physics.vertical_mixing.tke._replace(
+            # OMIP-style TEOS-10 deviation: both zdftke and zdfevd consume
+            # eosbn2, not the S-EOS identity used by shipped GYRE.
+            n2_mode="nemo_bn2",
+            n2_eos_form="teos10",
+            buoyancy_timing="pre_mixing",
+            shear_production="pre_solve",
+            prandtl_mode="nemo_ri",
+            positivity="floor",
+            tke_surface_bc_level="nemo_z0",
+            tke_buoyancy_sink="nemo_explicit",
+            mxl_min=0.01,
+            mxl0_min_m=0.04,
+            tke_dry_wmask=True,
+            kappaM_max=float("inf"),
+            tke_preclosure_coeff_source="carried_previous_step",
+            tke_matrix_evaluation="nemo_literal",
+            tke_solver_evaluation="nemo_literal",
+            tke_etau_exponential_evaluation="jax_expression",
+            tke_htau_evaluation="jax_expression",
+            tke_mxl_raw_evaluation="factored",
+            tke_langmuir_evaluation="vectorized",
+            tke_shear_evaluation_stage="step_entry",
+            # RK3 has no leapfrog eta-before carrier; the QCO live metric is
+            # reconstructed at the current stage from the same raw ladder.
+            tke_shear_metric_source="tpoint_jacobian",
+            tke_n2_evaluation_stage="step_entry",
+        )
+        physics = config.physics._replace(
+            vertical_mixing=config.physics.vertical_mixing._replace(
+                tke=tke, vmix_background_mode="nemo_max_floor"
+            ),
+            convection=OceanConvectionConfig(
+                scheme="enhanced_diffusion",
+                enhanced_diffusion=EnhancedDiffusionConfig(
+                    K_conv=100.0,
+                    nu_conv=100.0,
+                    K_bg=0.0,
+                    nu_bg=0.0,
+                    smooth_transition=False,
+                    n2_mode="nemo_bn2",
+                    n2_eos_form="teos10",
+                    n2_threshold=-1.0e-12,
+                    two_level_trigger=True,
+                ),
+            ),
+            shortwave_penetration=ShortwavePenetrationConfig(
+                scheme="jerlov_2band", water_type="I"
+            ),
+            mle=None,
+        )
+        return config._replace(
+            physics=physics,
+            eos_depth="geometric",
+            tracer_time_integrator="rk3_ws",
+            vertical_momentum_scheme="nemo_advective",
+            zad_bottom_face_mask="nemo_faithful",
+            zad_qco_evaluation="nemo_literal",
+            wzv_call2_evaluation="nemo_literal",
+            vorticity_scheme="ene_total",
+            coriolis_scheme="explicit_ab2",
+            barotropic_coriolis_split="frozen",
+            lateral_viscosity_operator="nemo_div_curl",
+            lateral_viscosity_e3_weighting="nemo_e3",
+            surface_stress_implicit=True,
+            bbl_adv_option=bbl_adv_option,
+            bbl_gamma_s=bbl_gamma_s,
+            zdf_implicit_solver_evaluation="nemo_literal",
+            implicit_vmix_e3t_now_divisor=True,
+            use_conservation_fixer=False,
+            fix_eta_drift=False,
+            barotropic=config.barotropic._replace(
+                barotropic_diffusion_alpha=0.0,
+                barotropic_face_depth="nemo_ssh_avg",
+                barotropic_continuity_evaluation="nemo_literal",
+                barotropic_transport_accumulation_evaluation="nemo_literal",
+                barotropic_seed_face_depth="nemo_ssh_avg",
+                barotropic_seed_evaluation="nemo_literal",
+                barotropic_pgf_evaluation="nemo_literal",
+                barotropic_reconcile_target="velocity_avg",
+                nemo_stage_mean_imposition=True,
+            ),
+        )
 
     return LatLonCGridOceanConfig.from_flat(
         constants=NEMO_CONSTANTS_CONFIG,
@@ -408,6 +541,7 @@ def build_lock_exchange_zco_card() -> NEMOTestcaseCard:
         n_barotropic_substeps=_resolved_auto_substeps(grid, bathymetry, 1.0),
         bbl_adv_option=0,
         bbl_gamma_s=0.0,
+        whole_step_identity="lane1_flux_up3",
     )
     recipe = NEMORecipe(
         model_config=model_config,
@@ -464,6 +598,7 @@ def build_overflow_zps_card() -> NEMOTestcaseCard:
         ),
         bbl_adv_option=2,
         bbl_gamma_s=20.0,
+        whole_step_identity="lane1_flux_up3",
     )
     recipe = NEMORecipe(
         model_config=model_config,
@@ -487,8 +622,26 @@ def build_gyre_zco_card() -> NEMOTestcaseCard:
 
     grid = _gyre_grid()
     wet = _closed_box_mask(22, 32)
+    wet_np = np.asarray(wet)
+    u_wet_native = wet_np * np.roll(wet_np, -1, axis=1)
+    v_wet_native = wet_np * np.roll(wet_np, -1, axis=0)
+    area_native = np.asarray(grid.dx_T) * np.asarray(grid.dy_T)
+    reference_depth = float(_GYRE_GDEPW_1D[30])
+    native_3d = (22, 32, 30)
     z_ref = create_z_star_from_thicknesses(
-        _GYRE_E3T_1D[:30], t_depth_ref_m=_GYRE_GDEPT_1D[:30]
+        _GYRE_E3T_1D[:30],
+        t_depth_ref_m=_GYRE_GDEPT_1D[:30],
+        nemo_gdept_0_m=np.broadcast_to(_GYRE_GDEPT_1D[:30], native_3d),
+        nemo_gdepw_0_m=np.broadcast_to(_GYRE_GDEPW_1D[:30], native_3d),
+        nemo_e3t_0_m=np.broadcast_to(_GYRE_E3T_1D[:30], native_3d),
+        nemo_e3w_0_m=np.broadcast_to(_GYRE_E3W_1D[:30], native_3d),
+        nemo_hu_0_m=reference_depth * u_wet_native,
+        nemo_hv_0_m=reference_depth * v_wet_native,
+        nemo_e1e2t_m=area_native,
+        nemo_e1e2u_m=area_native,
+        nemo_e1e2v_m=area_native,
+        nemo_e2u_m=np.full_like(area_native, 106000.0),
+        nemo_e1v_m=np.full_like(area_native, 106000.0),
     )
     # The generic constructor deliberately recovers dz from a cumulative-sum
     # interface ladder.  NEMO stores both source-produced arrays and its
@@ -528,6 +681,7 @@ def build_gyre_zco_card() -> NEMOTestcaseCard:
         n_barotropic_substeps=50,
         bbl_adv_option=0,
         bbl_gamma_s=0.0,
+        whole_step_identity="gyre_vector_ene_c2",
     )
     recipe = NEMORecipe(
         model_config=model_config,

@@ -3060,21 +3060,35 @@ class LatLonCGridOceanModel:
                 raise ValueError(
                     "the certified NEMO rk3_ws scheme identity requires "
                     "tracer_advection='fct2'; FCT4/PPM is not certified")
-            if (config.momentum_advection != "flux_form"
-                    or config.momentum_flux_scheme != "upwind3"
-                    or getattr(config, "vertical_momentum_scheme",
-                               "upwind_perturbation") != "nemo_up3"):
+            _ws_flux_up3 = (
+                config.momentum_advection == "flux_form"
+                and config.momentum_flux_scheme == "upwind3"
+                and getattr(config, "vertical_momentum_scheme",
+                            "upwind_perturbation") == "nemo_up3"
+            )
+            _ws_vector_ene_c2 = (
+                config.momentum_advection == "vector_invariant"
+                and getattr(config, "vorticity_scheme", "al81") == "ene_total"
+                and getattr(config, "ke_gradient_scheme", "centered") == "c2"
+                and getattr(config, "vertical_momentum_scheme",
+                            "upwind_perturbation") == "nemo_advective"
+                and not getattr(config, "adaptive_implicit_vertadv", False)
+            )
+            if not (_ws_flux_up3 or _ws_vector_ene_c2):
                 raise ValueError(
-                    "NEMO rk3_ws requires the coupled flux_form/upwind3/"
-                    "nemo_up3 momentum program")
+                    "NEMO rk3_ws requires one complete momentum program: "
+                    "flux_form/upwind3/nemo_up3 or "
+                    "vector_invariant/ene_total/c2/nemo_advective")
             if getattr(config, "outer_integrator", "forward_euler") != "forward_euler":
                 raise ValueError(
                     "NEMO rk3_ws does not compose with a second outer "
                     "integrator")
-            if getattr(config, "gm_redi", None) is not None:
+            _ws_gm_redi = getattr(config, "gm_redi", None)
+            if (_ws_gm_redi is not None
+                    and getattr(_ws_gm_redi, "kappa_GM", 0.0) != 0.0):
                 raise ValueError(
                     "NEMO rk3_ws does not yet support staged GM bolus "
-                    "transports")
+                    "transports; pure Redi (kappa_GM=0) is supported")
         if config.bbl_adv_option not in (0, 2):
             raise ValueError("bbl_adv_option must be 0 or 2")
         if config.bbl_adv_option == 2 and config.bbl_gamma_s <= 0.0:

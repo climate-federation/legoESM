@@ -54,6 +54,31 @@ def test_full_rk3_inventory_and_scaling_precede_owner_labels():
     assert '"CONFIRMED_OWNER"' in source
     assert '"PLAUSIBLE_CONTRIBUTOR_NOT_OWNER"' in source
     assert '"REFUTED_AS_PRIMARY_OWNER"' in source
+    assert '"operator_scaling_before_owner"' in source
+    assert '"UNMEASURED_SCALING_ONLY"' in source
+
+
+def test_resolved_program_coverage_is_oracle_block_driven():
+    source = PATH.read_text()
+    for block in (
+        "namdyn_adv",
+        "namdyn_vor",
+        "namdyn_hpg",
+        "namdyn_spg",
+        "namdyn_ldf",
+        "namtra_adv",
+        "namtra_ldf",
+        "namtra_eiv",
+        "namtra_qsr",
+        "namtra_dmp",
+        "namtra_mle",
+        "namzdf",
+        "namzdf_tke",
+    ):
+        assert f'"{block}"' in source
+    assert '"resolved_program_coverage"' in source
+    assert 'coverage_checks["namdyn_vor"] = False' in source
+    assert '"--plant-coverage"' in source
 
 
 def test_seasonal_sbc_controls_split_surface_and_freshwater_inputs():

@@ -62,6 +62,33 @@
     "u": {"classification": "BOUNDED_OR_DECAYING_NO_AMPLIFYING_MODE", "tail_power": -1.8540726911292147},
     "ssh": {"classification": "POLYNOMIAL_FIT_PREFERRED", "tail_power": 2.610959375196431}
   },
+  "claude_phase3_redirect": {
+    "status": "DEBT",
+    "coverage_preregister_commit": "ee6b5aed0",
+    "resolved_program_blocks": 13,
+    "resolved_program_unaccounted": 0,
+    "kt1_exact": true,
+    "kt2_normalized_max_abs": {
+      "T": 0.0022011146495261743,
+      "S": 0.0001095339477691381,
+      "u": 0.05959892337101344,
+      "v": 0.037669958034661236,
+      "ssh": 0.0014793035345182532
+    },
+    "stage1_momentum_before": {
+      "u": 0.0001465032210595928,
+      "v": 0.058579299575484675,
+      "v_over_u": 399.847
+    },
+    "stage1_momentum_corrected": {
+      "u": 0.0001305741086612574,
+      "v": 0.00013169038482681593
+    },
+    "operator_scaling_owner_status": "UNMEASURED_SCALING_ONLY",
+    "gate_report_sha256": "d7fac51e3094681514fd6d0c510595388fab5c0b0972a8832f1ba598e0cdf859",
+    "backend": "cpu",
+    "dtype": "float64"
+  },
   "unmeasured": [
     "numerical T/S agreement at internal Kaa stages",
     "numerical barotropic primary/advecting-frame agreement",
@@ -79,7 +106,8 @@
   },
   "review": {
     "claude_phase2": "SHIP; four requested corrections closed before phase 3",
-    "phase3_external": "OUTSTANDING",
+    "claude_phase3": "SHIP honest debt round; major coverage redirect implemented after review",
+    "phase3_redirect_closure_review": "OUTSTANDING",
     "glm": "OUTSTANDING",
     "dual_review_claim": false
   }

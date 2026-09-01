@@ -161,6 +161,109 @@ is clean.
 | entering RHS / first BT frame | `a09426f638de0ce384b739621d08cf7ae27d41339cadcc2f16f8bbd3de215c45` / `b8f474af46b665773152bd2f152d20f29f658b51a052422dcb35dc406fdf2fa9` |
 
 All remaining per-file hashes are embedded in the full JSON gate report.
-Claude's review covered Phase 2 and required the four corrections now closed;
-Phase 3 has not yet received an external adversarial verdict.  GLM review
-remains outstanding, and no dual-review claim is made.
+Claude's Phase 2 review required the four corrections now closed.  Claude's
+Phase 3 review and its redirect appear below; GLM review remains outstanding,
+and no dual-review claim is made.
+
+## Claude phase-3 redirect closure
+
+Claude's phase-3 verdict was **SHIP as an honest debt round**, with a major
+coverage finding: the trajectory card did not arm the resolved GYRE operator
+program.  The historical measurements above remain valid for that incomplete
+card.  They are not evidence against the corrected card.  Coverage was frozen
+before implementation in `ee6b5aed0`; the corrected run stops again at `kt=2`.
+
+### Full resolved-program coverage
+
+The inventory is driven by every `namdyn*`, `namzdf*`, and `namtra*` block in
+the resolved `output.namelist.dyn`, not by a suspected-term checklist.
+
+| block | resolved NEMO selection | corrected collapsed card | gate |
+|---|---|---|---|
+| `namdyn_adv` | vector invariant, C2 KE | vector invariant + `c2` + `nemo_advective` vertical path | VERIFIED |
+| `namdyn_vor` | ENE total vorticity | `ene_total` at F points | VERIFIED |
+| `namdyn_hpg` | SCO | `nemo_sco`, NEMO trapezoid | VERIFIED |
+| `namdyn_spg` | TS, auto 50, filter 3/alpha .07 | 50, `nemo_ab3am4`, .07 | VERIFIED |
+| `namdyn_ldf` | level Laplacian, `Uv=2`, `Lv=100000` | `nemo_div_curl`, `nemo_e3`, `Ah=100000` | VERIFIED |
+| `namtra_adv` | FCT 2/2 | `fct2` in WS-RK3 | VERIFIED |
+| `namtra_ldf` | standard isoneutral Laplacian, `Ud=.02`, `Ld=100000` | `nemo_iso_lap`, Redi 1000, slope cap .01 | VERIFIED |
+| `namtra_eiv` | off | GM/bolus coefficient zero | VERIFIED-INACTIVE |
+| `namtra_qsr` | two band, `.58/.35/23` | Jerlov type I exact literals | VERIFIED |
+| `namtra_dmp` | off | no tracer damping | VERIFIED-INACTIVE |
+| `namtra_mle` | off | no MLE | VERIFIED-INACTIVE |
+| `namzdf` | TKE+EVD; `evd=100`; `avm0=1.2e-4`, `avt0=1.2e-5`; adaptive ZAD off | prognostic TKE, momentum+tracer EVD 100, matching floors, adaptive off | VERIFIED |
+| `namzdf_tke` | `.1/.7/67.83`, `mxl=3`, `mxl0`, Ri-Prandtl, LC, surface/bottom BCs | canonical NEMO prognostic closure with TEOS-10 BN2 | VERIFIED |
+
+The card has no unaccounted requested block.  The three live omissions beyond
+Claude's six were tracer isoneutral diffusion, exact two-band penetration, and
+`ln_zad_aimp=.false.`.  Inactive CST/RIC/GLS/OSM/MFC/NPC/DDM/SWM/IWM selectors
+remain written waivers.  The fail-closed gate emits all 13 rows and its planted
+`namdyn_vor` violation exits 2.
+
+### Pre-implementation search and reuse
+
+Search found, and the implementation reused, the DINO/NEMO canonical options:
+vector-invariant momentum, ENE-total (`dynvor.F90:406-536`), C2 KE
+(`dynkeg.F90:104-123`), `nemo_advective` ZAD, `nemo_div_curl` level viscosity,
+`nemo_iso_lap` Redi, prognostic TKE, EVD, and Jerlov two-band penetration.
+No new physical recurrence was added.  The WS-RK3 validator was widened from
+one complete flux-UP3 identity to exactly two complete identities; hybrids and
+nonzero staged GM bolus still raise.  GYRE's independently generated MI96
+`gdept/e3w` pair has one four-ULP recurrence miss at level 23, so both raw
+oracle operands are retained under a four-ULP construction gate with a larger
+planted mismatch test.
+
+### Review redirect evidence
+
+| Claude row | incomplete card | corrected selection |
+|---|---|---|
+| momentum advection | flux-form UP3 | vector invariant + NEMO advective ZAD |
+| F-point vorticity | bypassed AL81 declaration | ENE total `(f+zeta)/e3f` |
+| KE gradient | centered | C2 mean-of-squares |
+| momentum LDF | `Ah=0` | level Laplacian, `Ah=100000 m2/s` |
+| vertical momentum closure | constant `1e-4`, no TKE/EVD | prognostic TKE + EVD, floor `1.2e-4` |
+| vertical tracer closure | `Kv=0` | TKE tracer floor `1.2e-5` + EVD |
+
+The incomplete stage-1 residuals were u `1.465032210595928e-4` and v
+`5.8579299575484675e-2`: v/u = `399.85`.  After coverage completion they are
+u `1.305741086612574e-4` and v `1.3169038482681593e-4`.  The 400x asymmetry is
+gone, consistent with the review's vorticity redirect.  This is structural
+evidence, not a sole-owner claim.  Stage-3 u remains
+`5.959892337101344e-2`, so the barotropic-composition boundary remains open.
+
+### Corrected kt=1, kt=2, and scaling-first sweep
+
+`kt=1` remains bit-exact in fp64; at-rest u/v/SSH remain UNINFORMATIVE.  The
+corrected `kt=2` row remains DEBT:
+
+| field | normalized max error |
+|---|---:|
+| T | `2.2011146495261743e-3` |
+| S | `1.095339477691381e-4` |
+| u | `5.959892337101344e-2` |
+| v | `3.7669958034661236e-2` |
+| SSH | `1.4793035345182532e-3` |
+
+Each arm changes one registered scheme identity.  The table reports magnitude
+before any label; every owner remains `UNMEASURED_SCALING_ONLY`.
+
+| armed term removed | field | corrected residual | term magnitude | residual / term |
+|---|---|---:|---:|---:|
+| vector/ENE/C2 identity | v | `3.766996e-2` | `7.401938e-9` | `5.089202e6` |
+| level momentum Laplacian | u | `5.959892e-2` | `9.179315e-9` | `6.492742e6` |
+| isoneutral tracer Laplacian | T | `2.201115e-3` | `5.547859e-7` | `3.967503e3` |
+| TKE+EVD+background identity | T | `2.201115e-3` | `3.604915e-3` | `0.610587` |
+| TKE+EVD+background identity | v | `3.766996e-2` | `8.914170e-2` | `0.422585` |
+| two-band shortwave | T | `2.201115e-3` | `1.799818e-3` | `1.222965` |
+
+Thus the remaining T and v residuals are at the scale of the TKE/EVD and
+shortwave arms; u is millions of times larger than either newly armed
+momentum term at the completed-step frame.  Scale agreement is not ownership,
+and no post-hoc owner label is made.
+
+Corrected gate artifact:
+`legoesm_phase3_redirect_gate.json`, SHA256
+`d7fac51e3094681514fd6d0c510595388fab5c0b0972a8832f1ba598e0cdf859`.
+Backend is CPU; state, geometry, and oracle arrays report fp64.  The focused
+coverage/card/gate suite passes 48 tests.  GLM review remains outstanding; this
+receipt makes no dual-review claim.

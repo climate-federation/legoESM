@@ -290,6 +290,7 @@ def run(
     plant_state=False,
     plant_registry=False,
     plant_arm=False,
+    plant_coverage=False,
 ) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -310,6 +311,71 @@ def run(
     # required source-inclusive realization of that real-freshwater contract.
     cfg = card.recipe.model_config._replace(
         freshwater_closure="real_freshwater", fix_eta_drift=True
+    )
+    tke_cfg = cfg.physics.vertical_mixing.tke
+    evd_cfg = cfg.physics.convection.enhanced_diffusion
+    coverage_checks = {
+        "namdyn_adv": (
+            cfg.momentum_advection == "vector_invariant"
+            and cfg.ke_gradient_scheme == "c2"
+            and cfg.vertical_momentum_scheme == "nemo_advective"
+        ),
+        "namdyn_vor": cfg.vorticity_scheme == "ene_total",
+        "namdyn_hpg": cfg.pgf_scheme == "nemo_sco",
+        "namdyn_spg": (
+            cfg.barotropic.barotropic_time_filter == "nemo_ab3am4"
+            and cfg.barotropic.n_barotropic_substeps == 50
+        ),
+        "namdyn_ldf": (
+            cfg.lateral_viscosity_operator == "nemo_div_curl"
+            and cfg.lateral_viscosity_e3_weighting == "nemo_e3"
+            and cfg.lateral_viscosity.A_h == 1.0e5
+        ),
+        "namtra_adv": cfg.tracer_advection == "fct2",
+        "namtra_ldf": (
+            cfg.gm_redi is not None
+            and cfg.gm_redi.slope_scheme == "nemo_iso_lap"
+            and cfg.gm_redi.kappa_Redi == 1000.0
+        ),
+        "namtra_eiv": cfg.gm_redi is not None and cfg.gm_redi.kappa_GM == 0.0,
+        "namtra_qsr": (
+            cfg.physics.shortwave_penetration.scheme == "jerlov_2band"
+            and cfg.physics.shortwave_penetration.water_type == "I"
+        ),
+        "namtra_dmp": getattr(cfg, "tracer_damping", None) is None,
+        "namtra_mle": cfg.physics.mle is None,
+        "namzdf": (
+            cfg.adaptive_implicit_vertadv is False
+            and cfg.A_v == 0.0
+            and cfg.K_v == 0.0
+            and cfg.physics.vertical_mixing.scheme == "tke"
+            and cfg.physics.convection.scheme == "enhanced_diffusion"
+            and evd_cfg.K_conv == 100.0
+            and evd_cfg.nu_conv == 100.0
+        ),
+        "namzdf_tke": (
+            tke_cfg.prognostic
+            and tke_cfg.c_k == 0.1
+            and tke_cfg.c_eps == 0.7
+            and tke_cfg.tke_mxl_choice == 3
+            and tke_cfg.lc
+            and tke_cfg.kappaM_min == 1.2e-4
+            and tke_cfg.kappaH_min == 1.2e-5
+            and tke_cfg.n2_eos_form == "teos10"
+        ),
+    }
+    if plant_coverage:
+        coverage_checks["namdyn_vor"] = False
+    coverage_rows = [
+        {
+            "name": f"resolved_program.{block}",
+            "status": "VERIFIED" if ok else "DEBT",
+        }
+        for block, ok in coverage_checks.items()
+    ]
+    require(
+        all(row["status"] == "VERIFIED" for row in coverage_rows),
+        f"resolved-program coverage failure: {coverage_rows}",
     )
     model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, cfg)
     masks = expected_masks(card)
@@ -459,6 +525,7 @@ def run(
     }
     arm_rows = validate_one_variable_arms(arm_manifest, plant=plant_arm)
     arms = {}
+    operator_scaling = []
     if max_step >= 2:
         oracle2 = read_entry(root / "oracle_step_entry_kt00000002.bin")
         faithful_fields = lego_fields(faithful_kt2)
@@ -533,6 +600,77 @@ def run(
                 "field_rows": field_rows,
             }
 
+        operator_arm_configs = {
+            "momentum_scheme_identity": cfg._replace(
+                momentum_advection="flux_form",
+                momentum_flux_scheme="upwind3",
+                vertical_momentum_scheme="nemo_up3",
+                vorticity_scheme="al81",
+                ke_gradient_scheme="centered",
+                adaptive_implicit_vertadv=True,
+                zad_bottom_face_mask="min_rule",
+                zad_qco_evaluation="generic",
+                wzv_call2_evaluation="generic",
+            ),
+            "momentum_level_laplacian": cfg._replace(
+                lateral_viscosity=cfg.lateral_viscosity._replace(A_h=0.0)
+            ),
+            "tracer_isoneutral_laplacian": cfg._replace(gm_redi=None),
+            "tke_evd_background_identity": cfg._replace(
+                physics=None, A_v=1.0e-4, K_v=0.0
+            ),
+            "two_band_shortwave": cfg._replace(
+                physics=cfg.physics._replace(shortwave_penetration=None)
+            ),
+        }
+        for name, arm_cfg in operator_arm_configs.items():
+            control = LatLonCGridOceanModel(
+                card.recipe.grid, card.recipe.z_coord, arm_cfg
+            ).step(
+                card.recipe.initial_state,
+                dt=card.dt_s,
+                freshwater=freshwater0,
+                surface_forcing=surface0,
+            )
+            control_fields = lego_fields(control)
+            for field in ("T", "S", "u", "v", "ssh"):
+                reference = (
+                    oracle2[field]
+                    if field == "ssh"
+                    else oracle2[field][..., :nlev]
+                )
+                active = masks[field]
+                scale = max(float(np.max(np.abs(reference[active]))), 1.0)
+                residual = float(
+                    np.max(
+                        np.abs(
+                            faithful_fields[field][active] - reference[active]
+                        )
+                    )
+                    / scale
+                )
+                term = float(
+                    np.max(
+                        np.abs(
+                            control_fields[field][active]
+                            - faithful_fields[field][active]
+                        )
+                    )
+                    / scale
+                )
+                operator_scaling.append(
+                    {
+                        "operator_arm": name,
+                        "field": field,
+                        "faithful_residual": residual,
+                        "term_magnitude": term,
+                        "residual_over_term": (
+                            residual / term if term else None
+                        ),
+                        "owner_label": "UNMEASURED_SCALING_ONLY",
+                    }
+                )
+
     failed_controls = [row["name"] for row in registry_rows + arm_rows if row["status"] == "DEBT"]
     require(not failed_controls, f"planted/control failure: {failed_controls}")
     status = "AT-BAR" if first_over_bar is None else "DEBT"
@@ -573,8 +711,10 @@ def run(
             "barotropic_frame_numerics": "UNMEASURED",
         },
         "registry_rows": registry_rows,
+        "resolved_program_coverage": coverage_rows,
         "arm_manifest_rows": arm_rows,
         "one_variable_arms": arms,
+        "operator_scaling_before_owner": operator_scaling,
         "owner_verdict": "UNMEASURED_AFTER_REGISTERED_ARMS",
         "growth_characterization": _trajectory_growth(steps),
         "steps": steps,
@@ -595,6 +735,7 @@ def main(argv=None) -> int:
     parser.add_argument("--plant-state", action="store_true")
     parser.add_argument("--plant-registry", action="store_true")
     parser.add_argument("--plant-arm", action="store_true")
+    parser.add_argument("--plant-coverage", action="store_true")
     args = parser.parse_args(argv)
     try:
         report = run(
@@ -603,6 +744,7 @@ def main(argv=None) -> int:
             plant_state=args.plant_state,
             plant_registry=args.plant_registry,
             plant_arm=args.plant_arm,
+            plant_coverage=args.plant_coverage,
         )
     except (GateError, OSError, ValueError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)

@@ -89,6 +89,57 @@ def test_nemo_testcase_cards_are_fp64_source_pinned(
     assert cfg.barotropic.barotropic_reconcile_target == "velocity_avg"
 
 
+def test_gyre_card_selects_complete_resolved_operator_program():
+    set_policy(PrecisionPolicy.fp64())
+    cfg = build_gyre_zco_card().recipe.model_config
+    assert cfg.momentum_advection == "vector_invariant"
+    assert cfg.vorticity_scheme == "ene_total"
+    assert cfg.ke_gradient_scheme == "c2"
+    assert cfg.vertical_momentum_scheme == "nemo_advective"
+    assert cfg.adaptive_implicit_vertadv is False
+    assert cfg.lateral_viscosity_operator == "nemo_div_curl"
+    assert cfg.lateral_viscosity_e3_weighting == "nemo_e3"
+    assert cfg.lateral_viscosity.A_h == 1.0e5
+    assert cfg.gm_redi.kappa_GM == 0.0
+    assert cfg.gm_redi.kappa_Redi == 1000.0
+    assert cfg.gm_redi.slope_scheme == "nemo_iso_lap"
+    assert cfg.A_v == 0.0 and cfg.K_v == 0.0
+    assert cfg.physics.vertical_mixing.scheme == "tke"
+    assert cfg.physics.vertical_mixing.tke.prognostic is True
+    assert cfg.physics.vertical_mixing.tke.kappaM_min == 1.2e-4
+    assert cfg.physics.vertical_mixing.tke.kappaH_min == 1.2e-5
+    assert cfg.physics.vertical_mixing.tke.n2_eos_form == "teos10"
+    assert cfg.physics.convection.scheme == "enhanced_diffusion"
+    assert cfg.physics.convection.enhanced_diffusion.K_conv == 100.0
+    assert cfg.physics.convection.enhanced_diffusion.nu_conv == 100.0
+    assert cfg.physics.shortwave_penetration.scheme == "jerlov_2band"
+    assert cfg.physics.shortwave_penetration.water_type == "I"
+
+
+def test_gyre_whole_step_identity_rejects_hybrid_and_staged_gm():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    set_policy(PrecisionPolicy.fp64())
+    recipe = build_gyre_zco_card().recipe
+    LatLonCGridOceanModel(recipe.grid, recipe.z_coord, recipe.model_config)
+    with pytest.raises(ValueError, match="one complete momentum program"):
+        LatLonCGridOceanModel(
+            recipe.grid,
+            recipe.z_coord,
+            recipe.model_config._replace(ke_gradient_scheme="centered"),
+        )
+    with pytest.raises(ValueError, match="staged GM bolus"):
+        LatLonCGridOceanModel(
+            recipe.grid,
+            recipe.z_coord,
+            recipe.model_config._replace(
+                gm_redi=recipe.model_config.gm_redi._replace(kappa_GM=1.0)
+            ),
+        )
+
+
 def test_testcase_cards_select_their_resolved_barotropic_filters():
     lock_baro = build_lock_exchange_zco_card().recipe.model_config.barotropic
     overflow_baro = build_overflow_zps_card().recipe.model_config.barotropic
@@ -121,6 +172,15 @@ def test_gyre_card_pins_rotated_grid_mi96_ic_and_seasonal_sbc():
     assert np.array_equal(np.asarray(recipe.grid.native_lat_T_deg), source["gphit"])
     assert np.array_equal(np.asarray(recipe.grid.f_T), source["ff_t"])
     assert np.array_equal(np.asarray(recipe.z_coord.dz_ref), ladder["e3t_1d"][:30])
+    assert np.array_equal(
+        np.asarray(recipe.z_coord.nemo_e3w_0)[1, 1], ladder["e3w_1d"][:30]
+    )
+    assert np.count_nonzero(np.asarray(recipe.z_coord.nemo_hu_0)) == 580
+    assert np.count_nonzero(np.asarray(recipe.z_coord.nemo_hv_0)) == 570
+    assert np.array_equal(
+        np.asarray(recipe.z_coord.nemo_e1e2t),
+        np.asarray(recipe.grid.dx_T) * np.asarray(recipe.grid.dy_T),
+    )
     assert np.array_equal(
         np.asarray(recipe.z_coord.t_depth_ref), ladder["gdept_1d"][:30]
     )

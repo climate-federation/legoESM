@@ -474,17 +474,29 @@ def create_z_star_from_thicknesses(
         nemo_een_barotropic = NemoEENBarotropicOperands(*(
             jnp.asarray(x, dtype=get_policy().control) for x in raw))
     if nemo_gdept_0 is not None and nemo_e3w_0 is not None:
-        gdept_np = np.asarray(nemo_gdept_0)
-        e3w_np = np.asarray(nemo_e3w_0)
+        # Validate the caller's fp64 oracle operands before policy casting;
+        # a float32 runtime policy must not manufacture a source-recurrence
+        # failure during construction.
+        gdept_np = np.asarray(nemo_gdept_0_m, dtype=np.float64)
+        e3w_np = np.asarray(nemo_e3w_0_m, dtype=np.float64)
         if gdept_np.shape != e3w_np.shape:
             raise ValueError(
                 "nemo_gdept_0_m and nemo_e3w_0_m must have identical shapes, "
                 f"got {gdept_np.shape} and {e3w_np.shape}")
-        if not np.array_equal(
-                np.diff(gdept_np, axis=-1), e3w_np[..., 1:]):
+        gdept_spacing = np.diff(gdept_np, axis=-1)
+        e3w_interior = e3w_np[..., 1:]
+        # NEMO's shipped GYRE MI96 literals contain one four-ULP recurrence
+        # miss (level 23) because gdept and e3w are independently evaluated
+        # source arrays.  Preserve both oracle operands; reject discrepancies
+        # larger than that demonstrated fp64 arithmetic envelope.
+        recurrence_tol = 4.0 * np.spacing(
+            np.maximum(np.abs(gdept_spacing), np.abs(e3w_interior))
+        )
+        if np.any(np.abs(gdept_spacing - e3w_interior) > recurrence_tol):
             raise ValueError(
-                "nemo_gdept_0_m differences must exactly equal interior "
-                "nemo_e3w_0_m where mesh_reference identity is claimed")
+                "nemo_gdept_0_m differences must equal interior "
+                "nemo_e3w_0_m within the four-ULP NEMO mesh-reference "
+                "arithmetic envelope")
     return OceanZStarCoordinate(
         n_levels=n_levels,
         H_max=H_max,
