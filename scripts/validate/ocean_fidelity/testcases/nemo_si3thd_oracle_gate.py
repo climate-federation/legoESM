@@ -49,13 +49,39 @@ REQUIRED_RESTART = {
     *(f"e_i_l{i:02d}" for i in range(1, 4)),
     *(f"szv_i_l{i:02d}" for i in range(1, 4)),
 }
-META_RESTART = {"nav_lon", "nav_lat", "time_counter", "x", "y"}
+META_RESTART = {"nav_lon", "nav_lat", "numcat", "time_counter", "x", "y"}
+_MOMENT_PREFIXES = ("sx", "sy", "sxx", "syy", "sxy")
+_PRATHER_MANDATORY = {
+    f"{prefix}{field}"
+    for prefix in _MOMENT_PREFIXES
+    for field in ("ice", "sn", "a", "age", "sal")
+} | {
+    f"{prefix}{field}_l{layer:02d}"
+    for prefix in _MOMENT_PREFIXES
+    for field in ("c0", "e")
+    for layer in range(1, 4)
+}
+_PRATHER_OPTIONAL = {
+    f"{prefix}{field}_l{layer:02d}"
+    for prefix in _MOMENT_PREFIXES
+    for field in ("si",)
+    for layer in range(1, 4)
+} | {
+    f"{prefix}{field}"
+    for prefix in _MOMENT_PREFIXES
+    for field in ("ap", "vp", "vl")
+}
 WAIVED_RESTART = {
     "cnd_ice": "Jules coupling inactive",
     "t1_ice": "Jules coupling inactive",
     "stress1_i": "ln_c1d skips ice dynamics",
     "stress2_i": "ln_c1d skips ice dynamics",
     "stress12_i": "ln_c1d skips ice dynamics",
+    **{f"t_s_l{layer:02d}": "derived from verified e_s layer; icerst writes enthalpy"
+       for layer in range(1, 4)},
+    **{name: "ln_c1d skips Prather advection" for name in sorted(_PRATHER_MANDATORY)},
+    **{name: "Prather advection inactive and option-4 salinity/ponds inactive"
+       for name in sorted(_PRATHER_OPTIONAL)},
 }
 
 
@@ -161,8 +187,12 @@ def read_thd_frames(path: Path, plant: bool = False, nsteps: int = 8760) -> tupl
     changes = series[24:] - series[:-24]
     require(np.any(changes > 0), "documented seasonal growth absent")
     require(np.any(changes < 0), "documented seasonal melt absent")
-    return thickness, {"frames": count, "min_thickness_m": float(series.min()),
+    return thickness, {"frames": count, "initial_thickness_m": float(series[0]),
+                       "final_thickness_m": float(series[-1]),
+                       "min_thickness_m": float(series.min()),
+                       "min_thickness_step": int(series.argmin()) + 1,
                        "max_thickness_m": float(series.max()),
+                       "max_thickness_step": int(series.argmax()) + 1,
                        "max_24h_growth_m": float(changes.max()),
                        "max_24h_melt_m": float(changes.min())}
 
@@ -178,7 +208,16 @@ def read_exchange_frames(path: Path, plant: bool = False, nsteps: int = 8760) ->
             version, step, nx, ny, nc, bits = struct.unpack("=6i", raw)
             require((version, step, nc, bits) == (1, kt, 1, 64), f"exchange registry step {kt}")
             n2 = nx * ny
-            nval = 13 * n2 * nc + 23 * n2
+            # key_si3_1D retains full ocean/halo arrays only where NEMO's
+            # declarations require them. A2D(0) is the one wet column and
+            # A2D(1) is its one-cell halo (sbc_ice.F90:123-151;
+            # sbc_oce.F90:196-224). The write order in icestp.F90 therefore
+            # contains 13 category-reduced, 13 reduced, one A2D(1), and nine
+            # full jpi*jpj arrays. This is 260 fp64 values for C1D's 5x5
+            # allocated domain and 36 for the unit-test's halo-free 1x1.
+            nr = max(1, nx - 4) * max(1, ny - 4)
+            nr1 = max(1, nx - 2) * max(1, ny - 2)
+            nval = 13 * nr * nc + 13 * nr + nr1 + 9 * n2
             values = np.fromfile(handle, dtype=np.float64, count=nval)
             require(values.size == nval, "truncated exchange payload")
             require(np.all(np.isfinite(values)), f"non-finite exchange payload step {kt}")
