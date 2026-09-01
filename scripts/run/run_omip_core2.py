@@ -6025,6 +6025,13 @@ def main() -> int:
         )
         app_grid_type = "cubed_sphere"
     elif args.grid == "mpas":
+        if args.iwm and args.mpas_vmix != "tke":
+            # The KPP override path builds no iwm config, so the loaded maps
+            # would hit the model's both-or-neither reject mid-build (codex
+            # 2026-09-01) — refuse up front; the harmonized card runs tke.
+            raise SystemExit(
+                "--iwm on MPAS requires --mpas-vmix tke (the zdftke card "
+                "threads the iwm config; the KPP override does not).")
         grid, z_coord, model, state, H_bathy = build_mpas_ocean(
             args.nlev, args.H_max, args.mesh,
             level=args.mpas_level, lloyd_iterations=args.mpas_lloyd,
@@ -6340,7 +6347,8 @@ def main() -> int:
         else:
             _isf_lat = np.degrees(np.asarray(grid.lat))
             _isf_lon = np.degrees(np.asarray(grid.lon))
-        _isf_area = np.asarray(getattr(grid, "areaCell", grid.area))
+        _isf_area = np.asarray(grid.areaCell if hasattr(grid, "areaCell")
+                               else grid.area)
         isf_forcing = load_isf_spe_forcing(
             args.isf_forcing_file, _isf_lat, _isf_lon,
             land_mask=np.asarray(state.land_mask.data),

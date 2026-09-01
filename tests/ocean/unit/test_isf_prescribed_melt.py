@@ -271,9 +271,10 @@ def test_loader_paired_cells_mpas(tmp_path):
     assert g.fwf.shape == (12, n_cells)
     assert g.zmin.shape == (12, n_cells)
     # melt-total preserved in m^2 units: sum(out*A_tgt) == sum(src*A_src_est)
-    dlam = np.abs(np.gradient(np.deg2rad(lon2d), axis=-1))
-    dphi = np.abs(np.gradient(np.deg2rad(lat2d), axis=-2))
-    src_area = constants.R_earth ** 2 * np.cos(np.deg2rad(lat2d)) * dlam * dphi
+    from legoesm.ocean.forcing.curvilinear_regrid import (
+        estimate_curvilinear_cell_area,
+    )
+    src_area = estimate_curvilinear_cell_area(lat2d, lon2d)
     for m in [0, 6, 11]:
         src = float((fwf[m] * src_area).sum())
         tgt = float((g.fwf[m] * cell_area).sum())

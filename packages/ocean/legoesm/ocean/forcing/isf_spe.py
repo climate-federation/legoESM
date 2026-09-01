@@ -22,6 +22,7 @@ import numpy as np
 from legoesm.ocean.forcing.curvilinear_regrid import (
     NearestWetRegridder,
     coords_match,
+    estimate_curvilinear_cell_area,
 )
 
 _FWF_VAR = "sornfisf"
@@ -106,12 +107,8 @@ def load_isf_spe_forcing(
         if target_area is not None:
             # Weights must share one unit or the renorm ratio is meaningless:
             # target passes true cell areas [m^2], so estimate the source's
-            # curvilinear cell areas from its nav coordinate spacing.
-            from legoesm import constants
-            _dlam = np.abs(np.gradient(np.deg2rad(src_lon), axis=-1))
-            _dphi = np.abs(np.gradient(np.deg2rad(src_lat), axis=-2))
-            src_w = (constants.R_earth ** 2
-                     * np.cos(np.deg2rad(src_lat)) * _dlam * _dphi)
+            # curvilinear cell areas (seam/fold-aware) to match.
+            src_w = estimate_curvilinear_cell_area(src_lat, src_lon)
             tgt_w = np.asarray(target_area, dtype=np.float64)
         else:
             src_w = np.cos(np.deg2rad(src_lat))

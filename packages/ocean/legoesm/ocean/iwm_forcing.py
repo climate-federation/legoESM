@@ -126,11 +126,10 @@ def load_iwm_forcing(
         # them (or an estimate) on the other — cos-lat vs m^2 mixes units
         # and rescales the totals by ~1/cell-area.
         if source_area is None and target_area is not None:
-            from legoesm import constants
-            _dlam = np.abs(np.gradient(np.deg2rad(src_lon), axis=-1))
-            _dphi = np.abs(np.gradient(np.deg2rad(src_lat), axis=-2))
-            src_w = (constants.R_earth ** 2
-                     * np.cos(np.deg2rad(src_lat)) * _dlam * _dphi)
+            from legoesm.ocean.forcing.curvilinear_regrid import (
+                estimate_curvilinear_cell_area,
+            )
+            src_w = estimate_curvilinear_cell_area(src_lat, src_lon)
         elif source_area is None:
             src_w = np.cos(np.deg2rad(src_lat))
         else:

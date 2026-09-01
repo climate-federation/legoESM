@@ -126,9 +126,10 @@ def test_paired_cells_mpas(tmp_path):
                          paired_cells=True, target_area=cell_area)
     # paired: (nCells,), never the (nCells, nCells) meshgrid cross
     assert np.asarray(f.ensq).shape == (n_cells,)
-    dlam = np.abs(np.gradient(np.deg2rad(lon2d), axis=-1))
-    dphi = np.abs(np.gradient(np.deg2rad(lat2d), axis=-2))
-    src_area = constants.R_earth ** 2 * np.cos(np.deg2rad(lat2d)) * dlam * dphi
+    from legoesm.ocean.forcing.curvilinear_regrid import (
+        estimate_curvilinear_cell_area,
+    )
+    src_area = estimate_curvilinear_cell_area(lat2d, lon2d)
     for name, field in (("power_bot", f.ebot), ("power_nsq", f.ensq)):
         src_total = float((vals[name] * src_area).sum())
         tgt_total = float((np.asarray(field) * cell_area).sum())
