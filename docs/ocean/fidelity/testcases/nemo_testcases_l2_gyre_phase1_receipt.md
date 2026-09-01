@@ -46,6 +46,10 @@ The running `usrdef_*` source is the OCE GYRE implementation:
   the analytic seasonal momentum, heat, and freshwater forcing (Hazeleger and
   Drijfhout 2000).
 
+The resolved `nn_itend=4320`, `rn_Dt=14400`, `nn_GYRE=1`, and `jpkglo=31`
+are shipped GYRE defaults; 4,320 four-hour steps are 720 days, exactly two
+360-day years.
+
 Physics-only compilation used OCE with `key_qco key_vco_1d3d key_RK3`.  These
 are the ocean keys in `/data/abyssal/dbalwada/ORCA1-omip/cpp_ORCA1.fcm`; ice,
 ISF, TOP, and XIOS were omitted.  The shipped PISCES selector explicitly has
@@ -121,11 +125,13 @@ Both preregistered controls fired:
 - planted file-side unregistered mesh array: exit 1,
   `DEBT: mesh coverage mismatch: missing=['PLANTED_UNACCOUNTED_FILE_ARRAY'], extra=[]`.
 
-Two independent adversarial reviews initially returned HOLD on provenance,
+Two Codex-internal adversarial passes initially returned HOLD on provenance,
 schema/topology, MI96-bar, and phenomenology non-vacuity gaps.  Every finding
-was dispositioned in the gate or receipt; both reviewers then reran the gate,
-confirmed byte-identical machine output and the 18 lane-1 regression tests,
-and returned APPROVE with no remaining blocker.
+was dispositioned in the gate or receipt; both internal passes then reran the
+gate and returned APPROVE.  They are not the repository's required dual
+review.  Claude reviewed the resulting Phase-1 package afterward and returned
+**SHIP** in the present review round, conditional only on the corrections now
+recorded here.  The independent GLM review remains outstanding.
 
 The remaining items are explicitly outside the phase-1 claim and stay in the
 machine receipt's `unmeasured` ledger: TEOS-10 density values, `rab`, `bn2`,

@@ -37,8 +37,21 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     # condition at first-step entry, not a now/after state.
     "oracle_step_entry_kt00000001.bin": (
         "before",
-        "tests/*_OMIP_L1/MY_SRC/stprk3.F90:88-100 writes "
-        "ts/uu/vv/ssh(...,Nbb) before forcing, stp_2D, and RK stages",
+        "scripts/validate/ocean_fidelity/testcases/nemo502_MY_SRC/"
+        "stprk3.F90:88-100 (used byte-for-byte by testcase lanes 1 and 2) "
+        "writes ts/uu/vv/ssh(...,Nbb) before forcing, stp_2D, and RK stages",
+    ),
+    "oracle_step_entry_kt00002160.bin": (
+        "before",
+        "scripts/validate/ocean_fidelity/testcases/nemo502_MY_SRC/"
+        "stprk3.F90:88-100 writes the GYRE midpoint ts/uu/vv/ssh(...,Nbb) "
+        "before forcing, stp_2D, and RK stages",
+    ),
+    "oracle_step_entry_kt00004320.bin": (
+        "before",
+        "scripts/validate/ocean_fidelity/testcases/nemo502_MY_SRC/"
+        "stprk3.F90:88-100 writes the GYRE final ts/uu/vv/ssh(...,Nbb) "
+        "before forcing, stp_2D, and RK stages",
     ),
     # eos_rab / bn2 family: T/S at Nbb, geometry at Nnn.
     "dump_alpha_b.bin": ("before", "stpmlf.F90:184 eos_rab(ts(...,Nbb), rab_b, Nnn)"),

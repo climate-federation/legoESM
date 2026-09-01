@@ -731,15 +731,21 @@ def trajectory(root: Path, case: str, steps: list[int], dims: tuple[int, int, in
 
 def gyre_trajectory(root: Path, steps: list[int]) -> dict:
     """Check exact GYRE IC structure and gross seasonal spin-up phenomenology."""
+    from legoesm.ocean.fidelity.time_levels import time_level_for_dump
+
     nx, ny, nz = 36, 26, 31  # serial local domain, including two-cell halos
     count = nx * ny * nz
     with netCDF4.Dataset(find_one(root, "mesh_mask*.nc")) as mesh:
         wet = np.asarray(mesh.variables["tmask"][0], dtype=bool)
         latitude = np.asarray(mesh.variables["gphit"][0])
     records = []
+    dump_level: str | None = None
     for step in steps:
         path = root / f"oracle_step_entry_kt{step:08d}.bin"
         require(path.is_file(), f"missing trajectory step {step}")
+        level = time_level_for_dump(path.name)
+        require(level == "before", f"trajectory {step} is not registered before")
+        dump_level = level
         with path.open("rb") as fh:
             magic = fh.read(16).decode("ascii").rstrip()
             version, got_step, nbb, jpi, jpj, jpk, jpts, storage = struct.unpack("=8i", fh.read(32))
@@ -801,7 +807,7 @@ def gyre_trajectory(root: Path, steps: list[int]) -> dict:
         "GYRE final SSH lacks north-south double-gyre structure",
     )
     return {
-        "time_level": "Nbb/before",
+        "time_level": f"Nbb/{dump_level}",
         "storage_bits": 64,
         "initial_condition_status": "VERIFIED",
         "seasonal_gyre_spinup_status": "VERIFIED",
