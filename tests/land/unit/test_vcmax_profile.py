@@ -36,7 +36,7 @@ def test_coordination_kn_oracle():
     # kn convention: exponent kn*CI*x, x = cumulative LAI fraction, so the
     # per-unit-LAI diffuse extinction 0.72 maps to kn = f * 0.72 * LAI.
     got = float(coordination_kn(jnp.asarray(5.0), 0.35))
-    assert got == pytest.approx(0.35 * 0.72 * 5.0, rel=1e-12)
+    assert got == pytest.approx(0.35 * 0.72 * 5.0, rel=1e-6)  # f32
     assert float(coordination_kn(jnp.asarray(0.0), 0.35)) == 0.0
 
 
