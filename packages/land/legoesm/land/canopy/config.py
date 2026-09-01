@@ -279,6 +279,15 @@ class CanopyConfig(NamedTuple):
     # than the light gradient (de Pury & Farquhar 1997 PCE; Niinemets),
     # hence the fraction with default 0.35 (obs range ~0.25-0.45, GLM
     # design review); strict proportionality is vcmax_light_frac=1.
+    # NOTE (GLM diff review): with the leaf-top value held fixed and NO
+    # canopy-total rescale, enabling this option REDUCES canopy-integrated
+    # capacity as LAI grows (mean multiplier (1-e^-eps)/eps, eps =
+    # f*0.72*CI*LAI: ~0.70 at LAI=3, ~0.36 at LAI=10, vs ~0.86 LAI-invariant
+    # for kn=0.3) — GPP deltas vs the kn default are dominated by that
+    # total, which IS the coordination physics, not an artifact.  The
+    # profile is model-wide static dispatch (no per-column mixing), and
+    # f=1 (strict light proportionality) nearly extinguishes deep-canopy
+    # capacity at high LAI (bottom/top ~ e^-5.8 at LAI=8).
     vcmax_profile: str = "kn"             # "kn" | "coordination"
     vcmax_light_frac: float = 0.35
 
@@ -314,6 +323,17 @@ class CanopyConfig(NamedTuple):
             raise ValueError(
                 f"unknown vcmax_profile {self.vcmax_profile!r}; the canopy "
                 f"Vcmax25 depth profile must be one of {VALID_VCMAX_PROFILES}")
+        # No inert parameters: vcmax_light_frac is read ONLY by the
+        # coordination profile, so a non-default value under "kn" would be
+        # silently ignored (e.g. via --params) — refuse it.
+        if (self.vcmax_profile == "kn"
+                and self.vcmax_light_frac
+                != self._field_defaults["vcmax_light_frac"]):
+            raise ValueError(
+                f"vcmax_light_frac={self.vcmax_light_frac} is only read by "
+                f"vcmax_profile='coordination' (got 'kn'); it would be "
+                f"silently inert - select the coordination profile or drop "
+                f"the override")
         # NB: g1_source='p_model' with a non-Medlyn stomatal model is legal
         # ONLY under transpiration_stress='phydro' (whose slope mapping
         # covers every model); this config cannot see that switch, so the

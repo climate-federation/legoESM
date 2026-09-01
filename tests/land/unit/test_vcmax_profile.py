@@ -45,6 +45,10 @@ def test_config_validates_profile():
     CanopyConfig(vcmax_profile="coordination").validate()
     with pytest.raises(ValueError, match="vcmax_profile"):
         CanopyConfig(vcmax_profile="light").validate()
+    # inert-parameter refusal: the fraction is only read by coordination
+    CanopyConfig(vcmax_profile="coordination", vcmax_light_frac=0.5).validate()
+    with pytest.raises(ValueError, match="inert"):
+        CanopyConfig(vcmax_profile="kn", vcmax_light_frac=0.5).validate()
 
 
 def test_rt_canopy_total_drops_under_coordination_at_high_lai():
@@ -63,6 +67,28 @@ def test_rt_canopy_total_drops_under_coordination_at_high_lai():
     # strict light proportionality (f=1) is steeper still
     out_f1 = canopy_shortwave_rt(*args, coordination_kn(lai, 1.0))
     assert float(out_f1.Vcmax25_C3Sun[0] + out_f1.Vcmax25_C3Sh[0]) < tot_co
+
+
+def test_lai_gradient_finite_through_coordination_kn():
+    """The coordination profile opens a direct LAI gradient path through the
+    N-profile exponent (kn_eff = f*0.72*LAI) that did not exist under a
+    constant kn — check it is finite and nonzero, including near LAI -> 0
+    where the max(kn*CI, 1e-6) integral guards engage (GLM diff review)."""
+    import jax
+
+    def canopy_total(lai_scalar):
+        lai = jnp.full((1,), lai_scalar)
+        args = [jnp.full((1,), v) for v in
+                (300.0, 90.0, 320.0, 95.0, 12.0, 30.0)]
+        rest = [jnp.full((1,), v) for v in (0.8, 0.08, 0.25, 60.0, 30.0)]
+        out = canopy_shortwave_rt(*args, lai, *rest,
+                                  coordination_kn(lai, 0.35))
+        return (out.Vcmax25_C3Sun + out.Vcmax25_C3Sh)[0]
+
+    for lai0 in (5.0, 0.5, 1e-4):
+        g = float(jax.grad(canopy_total)(lai0))
+        assert np.isfinite(g), lai0
+    assert abs(float(jax.grad(canopy_total)(5.0))) > 0.0
 
 
 def test_step_switch_binds_and_typo_raises():
