@@ -368,34 +368,13 @@ def acclimated_capacities(
             "PModelAcclimState. Initialise it (init_pmodel_acclim) or select "
             "capacity_scheme='prescribed' / g1_source='table'."
         )
-    from legoesm.land.canopy.photosynthesis import (
-        jmax_temperature_response,
-        vcmax_temperature_response,
-    )
-
     tg_k = acclim.t_mean_K
-    tg_c = tg_k - constants.T_freeze
     chi, xi, ci, gamma_star, big_k = optimal_chi(
         tg_k, acclim.vpd_mean_pa, acclim.co2_mean_ppm, acclim.ps_ema, cfg
     )
-
-    mj = (ci - gamma_star) / (ci + 2.0 * gamma_star)
-    mj_safe = _smooth_floor(mj, C_STAR + cfg.mj_floor_eps, cfg.mj_floor_width)
-    k = (C_STAR / mj_safe) ** (2.0 / 3.0)  # in (0, 1) by the floor
-    sqrt_1mk = jnp.sqrt(1.0 - k)
-
-    # mj'/mc = sqrt(1-k) * (mj/mc), with mj/mc = (ci + K)/(ci + 2 Gamma*).
-    mj_over_mc = (ci + big_k) / (ci + 2.0 * gamma_star)
-    phi0 = _phi0(tg_k, cfg)
-    iabs = acclim.iabs_mean
-
-    f_v = vcmax_temperature_response(tg_k, tg_c)
-    f_j = jmax_temperature_response(tg_k, tg_c)
-
-    vcmax25 = phi0 * iabs * sqrt_1mk * mj_over_mc / f_v
-    # Jmax_growth / Vcmax_growth = 4*sqrt((1-k)/k) / (sqrt(1-k)*mj/mc)
-    #                            = 4 / (sqrt(k) * mj/mc)   (phi0, Iabs cancel)
-    rjv25 = (4.0 / (jnp.sqrt(k) * mj_over_mc)) * (f_v / f_j)
+    vcmax25, rjv25 = capacities_from_chi(
+        chi=chi, ci_pa=ci, gamma_star_pa=gamma_star, big_k_pa=big_k,
+        tg_k=tg_k, iabs=acclim.iabs_mean, phi0=_phi0(tg_k, cfg), cfg=cfg)
 
     # Medlyn slope: matching ci/ca = g1/(g1 + sqrt(D)) to the xi term of
     # Stocker eq. 8 (Gamma*/ca term neglected — standard) gives g1 = xi;
@@ -404,6 +383,50 @@ def acclimated_capacities(
     return PModelCapacities(
         vcmax25_leaf=vcmax25, rjv25=rjv25, g1_kpa=g1_kpa, chi=chi, xi_sqrt_pa=xi
     )
+
+
+def capacities_from_chi(
+    *,
+    chi: jax.Array,
+    ci_pa: jax.Array,
+    gamma_star_pa: jax.Array,
+    big_k_pa: jax.Array,
+    tg_k: jax.Array,
+    iabs: jax.Array,
+    phi0: jax.Array,
+    cfg: PModelConfig,
+) -> tuple[jax.Array, jax.Array]:
+    """Coordination capacities (Vcmax25, rjv25) at a GIVEN optimal chi.
+
+    The chi -> capacity algebra shared by the least-cost optimum
+    (:func:`acclimated_capacities`) and the P-hydro profit optimum
+    (``land/phydro.py``): Wang-2017 limitation on the smooth-floored mj,
+    ``Vcmax_growth = phi0*Iabs*mj'/mc`` via the analytic ``mj/mc`` ratio,
+    both normalised to 25 degC with the host Kattge & Knorr responses.
+    """
+    from legoesm.land.canopy.photosynthesis import (
+        jmax_temperature_response,
+        vcmax_temperature_response,
+    )
+
+    del chi  # capacity algebra runs on ci/Gamma*/K directly
+    tg_c = tg_k - constants.T_freeze
+    mj = (ci_pa - gamma_star_pa) / (ci_pa + 2.0 * gamma_star_pa)
+    mj_safe = _smooth_floor(mj, C_STAR + cfg.mj_floor_eps, cfg.mj_floor_width)
+    k = (C_STAR / mj_safe) ** (2.0 / 3.0)  # in (0, 1) by the floor
+    sqrt_1mk = jnp.sqrt(1.0 - k)
+
+    # mj'/mc = sqrt(1-k) * (mj/mc), with mj/mc = (ci + K)/(ci + 2 Gamma*).
+    mj_over_mc = (ci_pa + big_k_pa) / (ci_pa + 2.0 * gamma_star_pa)
+
+    f_v = vcmax_temperature_response(tg_k, tg_c)
+    f_j = jmax_temperature_response(tg_k, tg_c)
+
+    vcmax25 = phi0 * iabs * sqrt_1mk * mj_over_mc / f_v
+    # Jmax_growth / Vcmax_growth = 4*sqrt((1-k)/k) / (sqrt(1-k)*mj/mc)
+    #                            = 4 / (sqrt(k) * mj/mc)   (phi0, Iabs cancel)
+    rjv25 = (4.0 / (jnp.sqrt(k) * mj_over_mc)) * (f_v / f_j)
+    return vcmax25, rjv25
 
 
 def init_pmodel_acclim(
