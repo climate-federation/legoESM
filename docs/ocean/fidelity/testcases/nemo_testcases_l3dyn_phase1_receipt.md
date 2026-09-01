@@ -9,7 +9,9 @@ Tracker: climate-federation/legoESM #1699.
 
 Oracle tree: `/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2`, commit
 `dcc7fb8c1779fa8409e41e4ce3ab7d45b9ceb796`.
-Repo commit stamped into every gate/manifest JSON: `git_sha` field.
+Repo commit stamped into every gate/manifest JSON: `git_sha` field — it is the
+commit the gate was *run* at, i.e. the parent of the commit that carries the
+manifest, since a manifest cannot contain its own commit hash.
 Every run is a single-process CPU execution of `nemo.exe` (no `mpirun`, no GPU),
 built with `arch-conda.fcm` (`-fdefault-real-8`); the instrument additionally
 aborts unless `STORAGE_SIZE(1._wp) == 64`, and every emitted frame header
