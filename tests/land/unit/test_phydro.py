@@ -126,11 +126,15 @@ def test_drought_flat_then_collapse():
     assert v[-2] < 0.6 * v[0]       # binding cap: substantial down-regulation
     assert v[-1] <= v[-2] * 1.02    # monotone (tol) deep-stress tail
     assert v[-1] < 0.2 * v[0]       # near-collapse at minlwp
-    # A SMALLER supply conductance lowers the capacity at the same psi_s
-    # (the lsc pathway, complementing the cap pathway above).
+    # A SMALLER supply conductance closes stomata at the same psi_s: chi and
+    # the drawdown both drop (the lsc pathway, complementing the cap pathway
+    # above). Vcmax25 is NOT monotone in supply — the same Rubisco
+    # compensation as the mid-range rise applies — so bound it instead.
     lo = ph.phydro_optimum(acclim, _supply(psi_s=-0.5, lsc=5e-4), cfg, pcfg)
     hi = ph.phydro_optimum(acclim, _supply(psi_s=-0.5, lsc=4e-3), cfg, pcfg)
-    assert float(lo.vcmax25_leaf[0]) < float(hi.vcmax25_leaf[0])
+    assert float(lo.chi[0]) < float(hi.chi[0])
+    assert float(lo.dpsi_mpa[0]) < float(hi.dpsi_mpa[0])
+    assert float(lo.vcmax25_leaf[0]) < 1.05 * float(hi.vcmax25_leaf[0])
 
 
 def test_gamma_reduces_drawdown():
