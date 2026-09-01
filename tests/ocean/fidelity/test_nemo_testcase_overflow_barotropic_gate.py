@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
+import sys
 import struct
 from pathlib import Path
 
@@ -66,3 +68,22 @@ def test_frame_registry_is_complete_and_nonduplicated():
     assert len(gate.FIELDS) == 19
     assert len(set(gate.FIELDS)) == 19
     assert set(gate.STAGGER.values()) == {"T", "U", "V"}
+    gate.validate_frame_registry()
+
+
+def test_frame_registry_fails_closed_on_an_unregistered_frame():
+    incomplete = dict(gate.FRAME_REGISTRY)
+    incomplete.pop("eta_pgf")
+    with pytest.raises(gate.GateError, match="missing=.*eta_pgf"):
+        gate.validate_frame_registry(incomplete)
+
+
+def test_planted_entry_cli_exits_nonzero_end_to_end():
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPT), "--plant-entry", "--control-only"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert '"status": "DEBT"' in completed.stdout
