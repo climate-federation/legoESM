@@ -49,6 +49,7 @@ __all__ = [
     "FesomOceanModel",
     "build_flat_bottom_mesh",
     "create_lock_exchange_state",
+    "omip_to_surface_fluxes",
     "use_legoesm_constants",
     "rescale_mesh_coriolis",
 ]
@@ -158,6 +159,18 @@ class FesomOceanGrid:
     @property
     def lat(self):
         return jnp.asarray(self.mesh.geo_coord_nod2D[:, 1], dtype=jnp.float64)
+
+    # MPAS-style PAIRED-CELL aliases (radians, GEOGRAPHIC frame).  Consumers
+    # that support any 1-D unstructured mesh key on ``latCell``/``lonCell``
+    # (e.g. ``dm2dc_sw_factor``'s per-cell diurnal SW branch); on FESOM the
+    # "cells" are the mesh NODES (where tracers/scalar forcing live).
+    @property
+    def latCell(self):
+        return jnp.asarray(self.mesh.geo_coord_nod2D[:, 1], dtype=jnp.float64)
+
+    @property
+    def lonCell(self):
+        return jnp.asarray(self.mesh.geo_coord_nod2D[:, 0], dtype=jnp.float64)
 
 
 # =============================================================================
@@ -1036,6 +1049,224 @@ def create_lock_exchange_state(mesh: "Mesh", config: Any) -> FesomOceanState:
 
 
 # =============================================================================
+# OMIP surface-forcing -> fesom SurfaceFluxes translator (unification B2/B3)
+# =============================================================================
+
+#: fesom's chl fallback when no chlorophyll field is provided: the documented
+#: ``chl_const=0.1`` convention of ``fesom_jax.surface_forcing`` (mg/m^3),
+#: fed to the Sweeney two-band kernel's own [0.02, ...] clamp.
+_FESOM_CHL_CONST = 0.1
+
+
+def omip_to_surface_fluxes(mesh, state, sf, fw, dt, *, rho_w, vcpw):
+    """Translate legoESM's shared CORE-II surface forcing into a fesom_jax
+    :class:`~fesom_jax.surface_forcing.SurfaceFluxes` for injection at
+    ``fesom_jax.step(step_forcing=None, surface_fluxes=...)`` — bypassing
+    fesom's own L&Y bulk / Sweeney shortwave / PHC restore.  Interior
+    dynamics untouched.
+
+    SIGN / UNIT TABLE (every row verified against the named consumer)
+    -----------------------------------------------------------------
+    ==============  ======================================  =========================================
+    quantity        legoESM input                           fesom output
+    ==============  ======================================  =========================================
+    q_net           ``sf.q_net`` [W/m^2] POSITIVE INTO       ``heat_flux`` [W/m^2] POSITIVE-UP
+                    ocean, INCLUDES shortwave                (fesom bulk convention, forcing.py:241)
+    sw_down         ``sf.sw_down`` [W/m^2] into ocean,       ``sw_3d`` [K*m/s] interface fluxes
+                    the penetrative channel                  (tracer_diff.py:121-125 divergence)
+    tau_x/tau_y     ``sf.tau_*`` [N/m^2] ATMOSPHERIC         ``stress_surf``/``stress_node_surf``
+                    convention (-rho_a Cd |U| u, the drag    [N/m^2] stress ON the ocean, mesh
+                    ON the atmosphere)                       ROTATED frame (momentum.py:360)
+    freshwater      ``fw`` net [kg/m^2/s] POSITIVE INTO      ``water_flux`` [m/s] POSITIVE-UP
+                    ocean (``net_freshwater_flux``)          (evap-like; step.py zstar SSH source)
+    bc_T            --                                       ``-dt*heat_flux/vcpw`` [degC*m]
+    bc_S            --                                       ZEROS (SSS restore / virtual salt =
+                                                             stage B4; zstar uses use_virt_salt=False)
+    ==============  ======================================  =========================================
+
+    HEAT SPLIT.  Non-solar heat INTO the ocean is ``q_ns = q_net - sw_down``.
+    The shortwave deposition depends on the kernel:
+
+    * ``sf.chl is None`` -> fesom's OWN ``cal_shortwave_rad`` (Sweeney-2005
+      two-band, constant chl ``_FESOM_CHL_CONST``): fesom keeps the non-visible
+      46% of net SW at the surface and penetrates the visible 54%.  Calling it
+      with ``heat_flux=-q_net`` and ``shortwave=sw_down/(1-BULK_ALBW)`` (its
+      ``0.54*(1-albw)`` prefactor then evaluates to exactly ``0.54*sw_down``)
+      reproduces fesom's own pipeline expressed in NET shortwave — NO second
+      albedo is applied (legoESM's applicator owns the albedo).  Result:
+      ``heat_flux = -(q_ns + 0.46*sw_down)``, ``sw_3d[surf] = 0.54*sw_down/vcpw``.
+    * ``sf.chl`` given -> the SHARED legoESM RGB kernel
+      (``ocean/physics/shortwave_penetration.py``, NEMO tra_qsr RGB): 100% of
+      ``sw_down`` enters the column through the 4-band interface-fraction
+      profile (the IR band absorbs near-surface), so ``heat_flux = -q_ns`` and
+      ``sw_3d[surf] = sw_down/vcpw``.  The kernel returns LAYER heating; the
+      interface [K*m/s] profile fesom's ``tracer_diff`` consumes is
+      reconstructed by a bottom-up cumulative sum of the absorbed-fraction
+      profile (exact inverse of the kernel's ``I_face`` difference).
+
+    Both branches deposit exactly ``q_net`` in total (per column, on a mesh
+    whose face/volume control areas coincide) — the closure the unit test pins.
+
+    STRESS SIGN + FRAME.  legoESM's ``air_sea_fluxes`` returns tau in the
+    ATMOSPHERIC convention (``-rho_a Cd |U| u``, opposing the wind); the
+    lat-lon core applies the ``-tau`` ocean reaction
+    (``ocean_pe_latlon_cgrid.surface_stress_faces``: ``tau_e_T = -sf.tau_x``).
+    fesom's momentum consumes ``stress_surf`` as the stress ON the ocean
+    (``momentum.py:360``: ``fu += zinv_top*stress_surf/rho0`` — positive
+    accelerates the ocean eastward).  Hence ``s = -1``: node stress =
+    ``-[sf.tau_x, sf.tau_y]``.  fesom integrates in the mesh's ROTATED frame
+    (Euler 50/15/-90 applied at mesh build — the ``load_mesh`` invariant
+    ``coord_nod2D = R(geo_coord_nod2D)``), so the geographic east/north stress
+    is rotated with fesom's own ``fesom_vector_g2r`` kernel, exactly as the
+    JRA reader rotates the wind.
+
+    Parameters
+    ----------
+    mesh : fesom_jax.mesh.Mesh
+    state : fesom_jax.state.State
+        Start-of-step native state (``hnode`` -> live zstar geometry for the
+        SW profile).
+    sf : legoesm.ocean.state.OceanSurfaceForcing or None
+        ``None`` -> zero stress / zero heat (freshwater-only forcing).
+    fw : legoesm.ocean.freshwater.FreshwaterForcing or None
+        ``None`` -> ``water_flux = 0``.
+    dt : float
+        The model timestep [s] the returned ``bc_T``/``bc_S`` are scaled by.
+    rho_w : float
+        Freshwater density [kg/m^3] for kg/m^2/s -> m/s (pass
+        ``legoesm.constants.rho_water``; equals fesom's 1/BULK_INV_RHOWAT).
+    vcpw : float
+        Volumetric heat capacity of seawater [J/(m^3 K)] (pass
+        ``fesom_jax.config.VCPW`` — the value fesom's tracer forcing is built
+        on; NOT overridden by ``use_legoesm_constants``).
+    """
+    _require_fesom_jax()
+    from fesom_jax import ale as _ale
+    from fesom_jax import jra55 as _jra55
+    from fesom_jax.forcing import BULK_ALBW, cal_shortwave_rad
+    from fesom_jax.surface_forcing import SurfaceFluxes
+
+    nod2D = int(mesh.nod2D)
+    nl = int(mesh.nl)
+    zeros_n = jnp.zeros((nod2D,), dtype=jnp.float64)
+
+    # ---- heat + shortwave --------------------------------------------------
+    # Sign convention at this term: q_net/sw_down POSITIVE INTO the ocean
+    # (legoESM applicator); fesom heat_flux POSITIVE-UP (ocean loses).
+    q_net = (jnp.asarray(sf.q_net, dtype=jnp.float64)
+             if sf is not None and sf.q_net is not None else zeros_n)
+    sw_net = (jnp.asarray(sf.sw_down, dtype=jnp.float64)
+              if sf is not None and sf.sw_down is not None else zeros_n)
+    chl = None if sf is None else getattr(sf, "chl", None)
+
+    # CAVITY GATE (codex B2/B3 MAJOR): a node whose TOP layer is dry sits
+    # under an ice-shelf cavity — no atmosphere contact, so NO surface heat,
+    # shortwave, freshwater or wind stress reaches it (fesom's own bulk gates
+    # everything on open_water the same way).  Gating here covers BOTH SW
+    # kernels and every downstream flux built from q_net/sw_net.
+    top_open = jnp.asarray(mesh.node_layer_mask[:, 0], dtype=jnp.float64)
+    q_net = q_net * top_open
+    sw_net = sw_net * top_open
+
+    # Live zstar interface depths from the carried thicknesses (identical to
+    # the static mesh geometry at cold start / linfs) — the same re-point the
+    # fesom step gives its internal cal_shortwave_rad call.
+    zbar3, _ = _ale.live_geometry(mesh, state.hnode)
+
+    if chl is None:
+        # fesom's OWN Sweeney two-band kernel, net-shortwave mapping (see
+        # docstring): heat_flux_pene = -q_net + 0.54*sw_net;
+        # sw_3d[surf] = 0.54*sw_net/vcpw.
+        chl_const = jnp.full((nod2D,), _FESOM_CHL_CONST, dtype=jnp.float64)
+        heat_flux, sw_3d = cal_shortwave_rad(
+            mesh, -q_net, sw_net / (1.0 - BULK_ALBW), chl_const,
+            open_water=top_open > 0.5, zbar3=zbar3)
+    else:
+        # Shared legoESM RGB kernel: get the per-layer ABSORBED FRACTION by
+        # driving the kernel with unit sw / unit rho*c (the optics depend only
+        # on chl + dz), then rebuild the interface-flux profile bottom-up.
+        from legoesm.ocean.physics.shortwave_penetration import (
+            ShortwavePenetrationConfig,
+            shortwave_penetration_rgb_tendency,
+        )
+        dz_live = jnp.where(mesh.node_layer_mask,
+                            jnp.asarray(state.hnode, dtype=jnp.float64), 0.0)
+        frac_per_m = shortwave_penetration_rgb_tendency(
+            jnp.ones((nod2D,), dtype=jnp.float64),
+            jnp.asarray(chl, dtype=jnp.float64),
+            dz_live,
+            mesh.node_layer_mask,
+            config=ShortwavePenetrationConfig(scheme="rgb_chl"),
+            rho_0=1.0, c_sw=1.0,
+        )                                        # = frac_absorbed / dz  [1/m]
+        frac_abs = frac_per_m * dz_live          # fraction absorbed per layer
+        # Interface fraction at the TOP face of layer k = sum of everything
+        # absorbed at or below k (the kernel deposits 100% in the wet column,
+        # so the below-bottom faces are exactly 0).
+        i_face = jnp.cumsum(frac_abs[:, ::-1], axis=1)[:, ::-1]  # (nod2D, nl)
+        sw_3d = (sw_net / vcpw)[:, None] * i_face
+        # 100% of sw_down goes through the column profile -> the surface bc
+        # keeps only the non-solar part (positive-up).
+        heat_flux = -(q_net - sw_net)
+
+    # fesom_tracer_diff.c:43-75 convention: bc_T = -dt*heat_flux/vcpw (a
+    # positive-INTO-ocean q_ns therefore RAISES the surface temperature).
+    bc_T = -dt * heat_flux / vcpw
+    # bc_S: ZERO — SSS restoring / virtual salt is stage B4, and the zstar
+    # runs use use_virt_salt=False, so a zero bc_S is the consistent no-op.
+    bc_S = zeros_n
+
+    # ---- momentum ----------------------------------------------------------
+    if sf is not None and sf.tau_x is not None and sf.tau_y is not None:
+        # SIGN (s = -1): atmospheric-convention tau -> stress ON the ocean.
+        # See the docstring's STRESS SIGN + FRAME paragraph for the evidence.
+        tau_e = -jnp.asarray(sf.tau_x, dtype=jnp.float64)
+        tau_n = -jnp.asarray(sf.tau_y, dtype=jnp.float64)
+        # FRAME: geographic east/north -> mesh ROTATED frame with fesom's own
+        # g2r kernel (magnitude-preserving), same as the JRA wind rotation.
+        geo = jnp.asarray(mesh.geo_coord_nod2D, dtype=jnp.float64)
+        rot = jnp.asarray(mesh.coord_nod2D, dtype=jnp.float64)
+        M = jnp.asarray(_jra55._rotation_matrix())
+        sx, sy = _jra55._vector_g2r(
+            tau_e, tau_n, geo[:, 0], geo[:, 1], rot[:, 0], rot[:, 1], M)
+        # cavity gate: no wind stress reaches an ice-shelf-covered node.
+        stress_node = jnp.stack([sx * top_open, sy * top_open], axis=-1)
+    else:
+        stress_node = jnp.zeros((nod2D, 2), dtype=jnp.float64)
+    # node -> element: simple mean of the 3 vertices (fesom_bulk.c convention,
+    # forcing.py:279-281).
+    ev = mesh.elem_nodes                                    # (elem2D, 3)
+    stress_surf = (stress_node[ev[:, 0]] + stress_node[ev[:, 1]]
+                   + stress_node[ev[:, 2]]) / 3.0
+
+    # ---- freshwater --------------------------------------------------------
+    if fw is not None:
+        from legoesm.ocean.freshwater import net_freshwater_flux
+        # Sign convention at this term: net_freshwater_flux is POSITIVE INTO
+        # the ocean [kg/m^2/s]; fesom water_flux is POSITIVE-UP [m/s]
+        # (evap-like: + = ocean loses water), so the conversion carries a
+        # sign flip AND the kg/m^2/s -> m/s density division.
+        F_fw = jnp.asarray(net_freshwater_flux(fw), dtype=jnp.float64)
+        # cavity gate: precip/evap cannot cross an ice shelf.
+        water_flux = -F_fw * top_open / rho_w
+    else:
+        water_flux = zeros_n
+
+    assert sw_3d.shape == (nod2D, nl), (sw_3d.shape, (nod2D, nl))
+    return SurfaceFluxes(
+        stress_surf=stress_surf,
+        bc_T=bc_T,
+        bc_S=bc_S,
+        sw_3d=sw_3d,
+        stress_node_surf=stress_node,
+        heat_flux=heat_flux,
+        water_flux=water_flux,
+        virtual_salt=zeros_n,
+        relax_salt=zeros_n,
+    )
+
+
+# =============================================================================
 # Model adapter
 # =============================================================================
 
@@ -1110,23 +1341,33 @@ class FesomOceanModel:
             getattr(config, "vertical_coordinate", "linfs")
             if config is not None else "linfs")
         self._ssh_op = fssh.build_ssh_operator(mesh, dt=self._dt)
+        # Unforced-path (pi) element wind stress: zeros.  On a FORCED step the
+        # injected SurfaceFluxes.stress_surf overrides this inside fesom's step.
         self._stress_surf = jnp.zeros((int(mesh.elem2D), 2), dtype=jnp.float64)
         self._params = Params(
             k_ver=jnp.asarray(k_ver, dtype=jnp.float64),
             a_ver=jnp.asarray(a_ver, dtype=jnp.float64),
         )
+        # One-shot announcement of which SW-penetration kernel the forcing
+        # translator ran (provenance; printed on the first forced step).
+        self._sw_kernel_announced = False
 
     def step(self, state: FesomOceanState, dt: float, *,
              surface_forcing=None, freshwater=None,
              t_seconds=None) -> FesomOceanState:
         """Advance *state* by one baroclinic step of ``dt`` seconds.
 
-        ``surface_forcing`` / ``freshwater`` are accepted for signature
-        parity with the other ocean models but REJECTED until the FESOM
-        forcing-injection stages land (three-grid unification plan B2/B3):
-        accept-and-ignore would silently run an unforced ocean under a
-        forced driver — the exact silent-drop footgun the OMIP lane
-        forbids.  ``t_seconds`` is metadata-only and ignored.
+        ``surface_forcing`` (a legoESM ``OceanSurfaceForcing``) and
+        ``freshwater`` (a legoESM ``FreshwaterForcing``) are translated by
+        :func:`omip_to_surface_fluxes` into a fesom
+        ``SurfaceFluxes`` and INJECTED at the fesom step's surface-BC seam
+        (``step_jit(..., step_forcing=None, surface_fluxes=...)``) — fesom's
+        own L&Y bulk / Sweeney shortwave / PHC restore are bypassed and the
+        interior dynamics are untouched (unification stages B2+B3).  Forcing
+        REQUIRES the z-star vertical coordinate: under linfs the freshwater
+        channel would need a virtual-salt closure (stage B4), so a forced
+        call on a linfs model raises rather than mis-applying it.
+        ``t_seconds`` is metadata-only and ignored.
 
         ``is_first_step`` is read from ``state.is_first_step`` (a STATIC
         meta field — a compile-time constant).  The returned state has
@@ -1144,13 +1385,13 @@ class FesomOceanModel:
             ``is_first_step`` flips (True → False) through a
             ``lax.scan`` body — the carry's treedef changes.
         """
-        if surface_forcing is not None or freshwater is not None:
+        forced = surface_forcing is not None or freshwater is not None
+        if forced and self._ale_cfg is None:
             raise NotImplementedError(
-                "FesomOceanModel.step received surface_forcing/freshwater, "
-                "but the FESOM forcing-injection path is not built yet "
-                "(unification plan B2/B3). Refusing to run UNFORCED under "
-                "a forced driver — that would silently drop every surface "
-                "flux.")
+                "FESOM forcing injection requires "
+                "FesomOceanConfig(vertical_coordinate='zstar'): under linfs "
+                "the real-freshwater channel needs a virtual-salt closure "
+                "(unification stage B4). Refusing to force a linfs model.")
         dt = float(dt)
         if not math.isclose(dt, self._dt, rel_tol=1e-12):
             raise ValueError(
@@ -1163,6 +1404,29 @@ class FesomOceanModel:
         from fesom_jax import step as fstep
         from fesom_jax.pp import compute_vel_nodes
 
+        surface_fluxes = None
+        if forced:
+            from fesom_jax import config as _fcfg
+            from legoesm import constants as _C
+            # vcpw: fesom's OWN VCPW (the value its tracer forcing is built
+            # on; deliberately NOT in use_legoesm_constants' override set).
+            # rho_w: legoESM's freshwater density — numerically identical to
+            # fesom's 1/BULK_INV_RHOWAT (1000 kg/m^3).
+            surface_fluxes = omip_to_surface_fluxes(
+                self.mesh, state.inner, surface_forcing, freshwater,
+                self._dt, rho_w=float(_C.rho_water),
+                vcpw=float(_fcfg.VCPW))
+            if not self._sw_kernel_announced:
+                _has_chl = (surface_forcing is not None
+                            and getattr(surface_forcing, "chl", None)
+                            is not None)
+                print("[fesom-forcing] SW penetration kernel: "
+                      + ("legoESM RGB chlorophyll (shared NEMO tra_qsr "
+                         "kernel, sf.chl)" if _has_chl else
+                         "fesom Sweeney two-band (cal_shortwave_rad, "
+                         f"chl_const={_FESOM_CHL_CONST})"))
+                self._sw_kernel_announced = True
+
         new_inner = fstep.step_jit(
             state.inner,
             self.mesh,
@@ -1172,6 +1436,7 @@ class FesomOceanModel:
             dt=self._dt,
             is_first_step=state.is_first_step,
             ale_cfg=self._ale_cfg,
+            surface_fluxes=surface_fluxes,
         )
 
         # Materialise the per-step node velocity ONCE.  ``u`` / ``v``

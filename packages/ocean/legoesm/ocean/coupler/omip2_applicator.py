@@ -715,6 +715,13 @@ def _sample_omip2_forcing(forcing, idx_t, grid, grid_type):
         lat_pts = np.degrees(np.asarray(grid.latCell))
         lon_pts = np.degrees(np.asarray(grid.lonCell))
         return _sample_forcing_points(forcing, idx_t, lat_pts, lon_pts)
+    if grid_type == "fesom":
+        # FESOM triangular mesh: 1-D PAIRED node (lat, lon) points (radians
+        # on the FesomOceanGrid facade) — same nearest-neighbour treatment
+        # as the MPAS Voronoi cell centres.
+        lat_pts = np.degrees(np.asarray(grid.lat))
+        lon_pts = np.degrees(np.asarray(grid.lon))
+        return _sample_forcing_points(forcing, idx_t, lat_pts, lon_pts)
     raise NotImplementedError(
         f"_sample_omip2_forcing does not support grid_type={grid_type!r}"
     )

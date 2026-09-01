@@ -37,15 +37,28 @@ def test_clean_args_pass():
 
 
 @pytest.mark.parametrize("extra", [
-    ["--dm2dc"], ["--iwm"], ["--runoff"], ["--mle"], ["--isf"],
+    ["--iwm"], ["--runoff"], ["--mle"], ["--isf"],
     ["--bbl-adv"], ["--prognostic-sea-ice"], ["--woa-init"],
-    ["--momentum-rk3"], ["--geothermal"], ["--sw-rgb-chl"],
+    ["--momentum-rk3"], ["--geothermal"],
     ["--sss-restore"], ["--gateway-transports"], ["--partial-cell"],
 ])
 def test_physics_selectors_rejected(extra):
+    # NOTE --runoff stays rejected at B2+B3: load_runoff_monthly's coastal
+    # spread has no 1-D-unstructured (FESOM node) smoother wired.
     args, p = _parse(extra)
     with pytest.raises(SystemExit, match="silently dropped"):
         validate_fesom_stage(args, p)
+
+
+@pytest.mark.parametrize("extra", [
+    ["--dm2dc"], ["--sw-rgb-chl"], ["--sw-rgb-chl", "--chl-file", "/c.nc"],
+    ["--fesom-unforced"], ["--smoke"],
+])
+def test_b2b3_forcing_selectors_allowed(extra):
+    """Stage B2+B3 wired the CORE-II forcing selectors through the fesom
+    forced loop — the gate must now let them through."""
+    args, p = _parse(extra)
+    validate_fesom_stage(args, p)  # no raise
 
 
 def test_arbitrary_user_set_value_rejected():

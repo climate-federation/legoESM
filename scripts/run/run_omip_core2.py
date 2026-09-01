@@ -1988,13 +1988,17 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
 # Selectors the FESOM lane HONOURS at its current stage (an ALLOWLIST:
 # GLM review 2026-09-01 — a blocklist is fail-open as the driver grows;
 # every flag the USER SET that is not listed here is rejected).  Grows one
-# stage at a time (B2 wind stress, B3 heat/freshwater, B4 IC/ice/SSS/runoff).
+# stage at a time (B2 wind stress + B3 heat/freshwater are IN; B4
+# ice/SSS-restore/runoff pending).
+# NOTE (runoff, deliberately NOT allowlisted): load_runoff_monthly's coastal
+# spread dispatches structured-2-D (laplacian_smooth_2d) vs Voronoi
+# (cellsOnCell); the FESOM node mesh is 1-D unstructured with NEITHER
+# topology wired, so --runoff would need a node-adjacency smoother first.
 _FESOM_WIRED_DESTS = frozenset({
-    "grid", "fesom_mesh_dir", "fesom_ic_dir", "dt", "years",
-    "snapshot_every_days", "output",
-    # explicitly-neutral opt-OUTs (turning a thing OFF the lane cannot run
-    # is exactly what the gate demands):
-    "emp_freshwater",
+    "grid", "fesom_mesh_dir", "fesom_ic_dir", "fesom_unforced", "dt", "years",
+    "snapshot_every_days", "output", "smoke",
+    # B2+B3 forcing selectors, wired through the fesom forced loop:
+    "emp_freshwater", "dm2dc", "sw_rgb_chl", "chl_file", "forcing_path",
 })
 
 
@@ -2006,15 +2010,25 @@ def validate_fesom_stage(args, parser) -> None:
     if not args.fesom_mesh_dir:
         raise SystemExit("--grid fesom requires --fesom-mesh-dir (a "
                          "fesom_jax C-exported mesh directory).")
+    if getattr(args, "fesom_unforced", False):
+        # The unforced smoke consumes NO forcing selectors — accepting them
+        # there would silently drop them (codex B2/B3 MAJOR).
+        _b23 = [d for d in ("dm2dc", "sw_rgb_chl", "chl_file")
+                if vars(args).get(d) != parser.get_default(d)]
+        if _b23:
+            raise SystemExit(
+                "--fesom-unforced runs the UNFORCED smoke; these forcing "
+                "selectors would be silently dropped: "
+                + " ".join("--" + d.replace("_", "-") for d in _b23))
     bad = sorted(
         dest for dest, val in vars(args).items()
         if dest not in _FESOM_WIRED_DESTS
         and val != parser.get_default(dest))
     if bad:
         raise SystemExit(
-            "--grid fesom is at unification stage B1 (UNFORCED plumbing): "
-            "these user-set selectors are not wired on the FESOM lane yet "
-            "and would be silently dropped: "
+            "--grid fesom is at unification stage B2+B3 (CORE-II bulk "
+            "forcing injection): these user-set selectors are not wired on "
+            "the FESOM lane yet and would be silently dropped: "
             + " ".join("--" + d.replace("_", "-") for d in bad)
             + " (names are argparse dests; a flag set via its inverse, "
             "e.g. --no-emp, reports its dest)")
@@ -2053,7 +2067,14 @@ def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None):
     model = FesomOceanModel(mesh, z_coord, config)
     if ic_dir:
         from fesom_jax.phc_ic import cold_start_state
-        inner = cold_start_state(mesh, ic_dir)
+        # seed_sea_ice=False (codex B2/B3 CRITICAL): the PHC cold start seeds
+        # a static a_ice=0.9 where SST<0, but the injected fluxes carry NO
+        # ice partition yet — seeded ice would sit inert while its nodes
+        # receive full open-water SW and wind stress.  The legoESM prognostic
+        # ice lane arrives at stage B4; until then the fesom lane runs
+        # ice-free (polar surface fluxes are known-wrong there and the lane
+        # is not scored on polar bands before B4).
+        inner = cold_start_state(mesh, ic_dir, seed_sea_ice=False)
         state = FesomOceanState.from_fesom(inner, model.mesh)
     else:
         state = create_rest_state(mesh, z_coord,
@@ -2112,6 +2133,110 @@ def run_fesom_b1_smoke(args, grid, z_coord, model, state) -> None:
         "argv": sys.argv,
     }, indent=1))
     print(f"[fesom-b1] done: {n_steps} steps; snapshots in {out}")
+
+
+def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
+    """Stage-B2+B3 execution path: CORE-II bulk forcing computed ONCE by the
+    SHARED grid-agnostic applicator (``compute_omip2_surface_forcing`` +
+    ``compute_omip2_freshwater_forcing``) and injected into the FESOM step at
+    the ``SurfaceFluxes`` seam (``model.step(surface_forcing=sf,
+    freshwater=fw)``).
+
+    This is the INTERMEDIATE forced loop inside the fesom branch, NOT the
+    main OMIP host loop: the host loop's per-grid extras (SSS restoring, ISF,
+    prognostic ice, BBL, gateway diagnostics, SPMD lanes, ...) are stage-B4+
+    work and every selector for them is hard-rejected by
+    :func:`validate_fesom_stage`, so nothing is silently dropped.  The loop
+    mirrors the host loop's forcing cadence exactly: ``_idx_t`` 6-hourly
+    record selection, the NEMO ln_dm2dc mid-step diurnal-SW window, and the
+    calendar-month chlorophyll slice."""
+    from pathlib import Path
+
+    import json
+
+    from scripts.run.run_fesom_core2 import write_snapshot
+    from legoesm.ocean.forcing import load_core2_nyf
+    from legoesm.ocean.coupler import (
+        compute_omip2_surface_forcing,
+        compute_omip2_freshwater_forcing,
+    )
+
+    out = Path(args.output); out.mkdir(parents=True, exist_ok=True)
+    dt = float(args.dt)
+    total_days = 10.0 if args.smoke else args.years * 365.0
+    n_steps = int(round(total_days * 86400.0 / dt))
+    if n_steps <= 0:
+        raise SystemExit(f"fesom forced loop: non-positive duration "
+                         f"({total_days} days at dt={dt}s -> {n_steps} "
+                         "steps).")
+    if args.snapshot_every_days and args.snapshot_every_days < 1:
+        raise SystemExit("fesom forced loop: --snapshot-every-days < 1 would "
+                         "alias multiple snapshots onto one dayNNNN tag.")
+    snap_every = (int(round(args.snapshot_every_days * 86400.0 / dt))
+                  if args.snapshot_every_days else 0)
+
+    forcing = load_core2_nyf(
+        allow_synthetic=False,
+        cache_dir=(Path(args.forcing_path) if args.forcing_path else None),
+    )
+    n_rec = int(forcing.u10.shape[0])
+    lat_deg = np.degrees(np.asarray(grid.lat))
+    lon_deg = np.degrees(np.asarray(grid.lon))
+    chl_clim = None
+    if args.sw_rgb_chl:
+        chl_clim = load_nemo_chl_monthly(grid, "fesom", lat_deg, lon_deg,
+                                         chl_file=args.chl_file)
+    print(f"[fesom-forced] CORE-II bulk injection (B2+B3): {n_steps} steps "
+          f"of dt={dt}s, {n_rec} forcing records, "
+          f"emp={'on' if args.emp_freshwater else 'OFF (--no-emp)'}, "
+          f"dm2dc={'on' if args.dm2dc else 'off'}, "
+          f"sw_rgb_chl={'on' if args.sw_rgb_chl else 'off'}; "
+          f"NO runoff/SSS-restore/ice (stage B4)")
+    for step in range(1, n_steps + 1):
+        it = _idx_t(step, dt, n_rec)
+        _dm2dc_win = None
+        if args.dm2dc:
+            # NEMO time axis at step MIDPOINTS (same window the host loop
+            # builds; day.F90 seeds nsec_day at dt/2).
+            _t_mid = (step - 0.5) * dt
+            _sec_of_day = _t_mid % _SEC_PER_DAY
+            _t_lo = (_sec_of_day - 0.5 * dt) / _SEC_PER_DAY
+            _dm2dc_win = (
+                int((_t_mid / _SEC_PER_DAY) % 365.0) + 1,
+                365.0,
+                _t_lo,
+                _t_lo + dt / _SEC_PER_DAY,
+            )
+        sf = compute_omip2_surface_forcing(
+            state, forcing=forcing, idx_t=it,
+            grid=grid, grid_type="fesom",
+            dm2dc_window=_dm2dc_win,
+        )
+        if chl_clim is not None:
+            sf = sf._replace(chl=chl_clim[_runoff_month_idx(step, dt)])
+        fw = None
+        if args.emp_freshwater:
+            fw = compute_omip2_freshwater_forcing(
+                state, forcing=forcing, idx_t=it, grid=grid,
+                grid_type="fesom", runoff_R=None,
+                emp=args.emp_freshwater)
+        state = model.step(state, dt, surface_forcing=sf, freshwater=fw)
+        if snap_every and step % snap_every == 0:
+            d = int(round(step * dt / 86400.0))
+            write_snapshot(out, f"day{d:04d}", state.inner, model.mesh)
+    _T_fin = np.asarray(state.inner.T)
+    if not np.all(np.isfinite(_T_fin)):
+        raise SystemExit("fesom forced loop: non-finite temperature after "
+                         f"{n_steps} steps — refusing to report success.")
+    write_snapshot(out, "final", state.inner, model.mesh)
+    (out / "run_manifest.json").write_text(json.dumps({
+        "lane": "fesom_b2b3_core2_forced", "git_sha": _source_revision(),
+        "n_steps": n_steps, "dt_s": dt, "total_days": total_days,
+        "emp_freshwater": bool(args.emp_freshwater),
+        "dm2dc": bool(args.dm2dc), "sw_rgb_chl": bool(args.sw_rgb_chl),
+        "argv": sys.argv,
+    }, indent=1))
+    print(f"[fesom-forced] done: {n_steps} steps; snapshots in {out}")
 
 
 def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
@@ -4564,8 +4689,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "grid + NEMO bathy on cube cells; parked, resolution-limited), "
                         "mpas (icosahedral Voronoi + NEMO bathy; resolution free via "
                         "--mpas-level), or fesom (FESOM2 unstructured core via "
-                        "FesomOceanModel; three-grid unification stage B1 — "
-                        "UNFORCED plumbing only, physics flags rejected).")
+                        "FesomOceanModel; three-grid unification stage B2+B3 — "
+                        "shared CORE-II bulk injected at the SurfaceFluxes "
+                        "seam; unwired selectors rejected).")
     p.add_argument("--fesom-mesh-dir", type=str, default=None,
                    help="--grid fesom: fesom_jax C-exported mesh directory "
                         "(real bathymetry, e.g. the CORE2 mesh).")
@@ -4573,6 +4699,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="--grid fesom: PHC3.0 IC directory for "
                         "fesom_jax.phc_ic.cold_start_state (omit for the "
                         "stratified rest state).")
+    p.add_argument("--fesom-unforced", action="store_true",
+                   help="--grid fesom: run the stage-B1 UNFORCED smoke loop "
+                        "(zero stress, no heat/freshwater) instead of the "
+                        "default CORE-II forced loop (stages B2+B3).")
     p.add_argument("--latlon-res", type=str, default="180x360",
                    help="lat-lon resolution NxM for --grid latlon_bathy.")
     p.add_argument("--cube-n", type=int, default=48,
@@ -6232,14 +6362,19 @@ def main() -> int:
         )
         app_grid_type = "mpas"
     elif args.grid == "fesom":
-        # Three-grid unification stage B1: dispatch + UNFORCED smoke only.
-        # The stage gate hard-rejects every physics/forcing selector the
-        # lane does not wire yet; the full OMIP host loop joins at B2/B3
-        # when the adapter gains a surface-forcing channel.
+        # Three-grid unification stages B2+B3: the shared CORE-II bulk is
+        # computed ONCE (grid-agnostic applicator) and injected at fesom's
+        # SurfaceFluxes seam via the intermediate forced loop.  The stage
+        # gate hard-rejects every selector the lane does not wire yet
+        # (SSS restore / runoff / ice / host-loop extras = stage B4+).
+        # --fesom-unforced keeps the B1 zero-forcing smoke reachable.
         validate_fesom_stage(args, p)
         grid, z_coord, model, state, H_bathy = build_fesom_ocean(
             args.fesom_mesh_dir, args.dt, ic_dir=args.fesom_ic_dir)
-        run_fesom_b1_smoke(args, grid, z_coord, model, state)
+        if args.fesom_unforced:
+            run_fesom_b1_smoke(args, grid, z_coord, model, state)
+        else:
+            run_fesom_forced_loop(args, grid, z_coord, model, state)
         return 0
     else:
         _nlat, _nlon = (int(x) for x in args.latlon_res.split("x"))
