@@ -191,13 +191,18 @@ def apply_bbl_adv_step_mpas(state, geom: BBLGeometryMPAS, dt: float, *,
     h_k = geom.h_ref
     tr = bbl_transports_mpas(T, S, geom, dv_edge,
                              gamma_s=gamma_s, rho_0=rho_0)
-    # Face-local exchange cap — same 0.25*V_min/dt bound as the structured
-    # twin (inactive at production scales; engages only on pathological
-    # tiny-volume faces).
+    # Exchange cap — the structured twin's 0.25*V_min/dt bound, additionally
+    # divided by the number of ACTIVE incident edges on the busier of the
+    # edge's two cells: a hexagonal cell can receive ~6 converging edges,
+    # and 6 x 0.25 = 1.5 cell volumes per step would destabilize (codex
+    # 2026-09-01 MAJOR). Inactive at production scales.
     area_ = jnp.asarray(area, dtype=jnp.float64)
     e3_bot = jnp.take_along_axis(h_k, geom.bot_k[:, None], axis=-1)[:, 0]
     V_bot = area_ * jnp.maximum(e3_bot, 1.0e-3)  # coeff-ok: thickness floor [m]
-    cap = 0.25 * jnp.minimum(V_bot[geom.c1], V_bot[geom.c2]) / dt
+    n_inc = jnp.zeros(area_.shape[0], dtype=jnp.float64)
+    n_inc = n_inc.at[geom.c1].add(geom.active).at[geom.c2].add(geom.active)
+    div = jnp.maximum(jnp.maximum(n_inc[geom.c1], n_inc[geom.c2]), 1.0)
+    cap = 0.25 * jnp.minimum(V_bot[geom.c1], V_bot[geom.c2]) / (dt * div)
     tr = jnp.sign(tr) * jnp.minimum(jnp.abs(tr), cap)
     dT, dS = apply_bbl_adv_tendency_mpas(
         jnp.zeros_like(T), jnp.zeros_like(S), T, S, h_k, area_, geom, tr,

@@ -4819,7 +4819,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "denser than the deep neighbour (Gibraltar/Med, "
                         "Denmark Strait, Antarctic overflows — unresolved at "
                         "1 deg without it). Host post-step exchange, exactly "
-                        "tracer-conserving. latlon/tripole only.")
+                        "tracer-conserving. latlon/tripole/mpas.")
     p.add_argument("--bbl-gamma-s", type=float, default=20.0,
                    help="Advective-BBL coefficient gamma [s] (NEMO "
                         "rn_gambbl=20).")
