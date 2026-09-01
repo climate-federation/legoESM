@@ -1036,18 +1036,22 @@ def score_case(
 
     if plant_state:
         final_time = max(arms["L64"])
-        arms["L64"][final_time]["T"] = np.array(arms["L64"][final_time]["T"], copy=True)
         mask = expected_masks(build_nemo_testcase_card(case))["T"]
         location = tuple(np.argwhere(mask)[0])
-        arms["L64"][final_time]["T"][location] += 10.0
+        for arm in ("L64", "L32"):
+            arms[arm][final_time]["T"] = np.array(arms[arm][final_time]["T"], copy=True)
+            arms[arm][final_time]["T"][location] += 10.0
     if plant_census and case == "OVERFLOW-zps":
         final_time = max(arms["L64"])
-        state = arms["L64"][final_time]
         card = build_nemo_testcase_card(case)
         mask = expected_masks(card)["T"]
         bathy = np.asarray(card.recipe.initial_state.H_bathy.data)
         select = mask & ((bathy > 500.0) & (bathy < 2000.0))[..., None]
-        state["T"] = np.where(select, 10.0, state["T"])
+        # Plant candidate and precision arm together.  Planting L64 alone also
+        # enlarges |L32-L64| and can make the floor cancel the planted signal.
+        for arm in ("L64", "L32"):
+            state = arms[arm][final_time]
+            state["T"] = np.where(select, 10.0, state["T"])
 
     coefficients = parse_teos10_density_coefficients()
     metrics = {}
@@ -1168,15 +1172,16 @@ def score_case(
         f"{case}: metric coverage mismatch {names ^ REGISTERED_METRICS[case]}",
     )
     if plant_state:
+        row = next(row for row in rows if row["name"] == "temperature_linf")
         require(
-            next(row for row in rows if row["name"] == "temperature_linf")["verdict"] == "OUTSIDE",
-            "planted state did not go red",
+            row["verdict"] == "OUTSIDE" and row["candidate_distance"] >= 0.45,
+            "planted state did not produce its registered gross distance",
         )
     if plant_census and case == "OVERFLOW-zps":
+        row = next(row for row in rows if row["name"] == "final_water_mass_census")
         require(
-            next(row for row in rows if row["name"] == "final_water_mass_census")["verdict"]
-            == "OUTSIDE",
-            "planted census did not go red",
+            row["verdict"] == "OUTSIDE" and row["candidate_distance"] >= 0.9,
+            "planted census did not produce its registered gross distance",
         )
 
     return {
