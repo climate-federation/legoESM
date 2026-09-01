@@ -57,6 +57,8 @@ def test_report_selector_inventory_includes_eos_depth_and_resolved_substeps():
     assert '"n_barotropic_substeps": cfg.barotropic.n_barotropic_substeps' in source
     assert '"rk3_ws_scheme_identity"' in source
     assert '"bbl_adv_option"' in source
+    assert '"instantaneous_prognostic_Nbb"' in source
+    assert '"staggering_and_reduction"' in source
 
 
 def test_continue_after_first_is_explicit_and_preserves_first_debt():
@@ -64,6 +66,14 @@ def test_continue_after_first_is_explicit_and_preserves_first_debt():
     assert "continue_after_first=False" in source
     assert "if first_over_bar is None:" in source
     assert "if not continue_after_first:" in source
+
+
+def test_owner_hunt_is_explicit_and_one_variable():
+    source = GATE_PATH.read_text()
+    assert 'parser.add_argument("--owner-controls"' in source
+    assert '"scaling_check_before_owner_label": True' in source
+    assert '"DIAGNOSTIC_ONE_VARIABLE_ARM"' in source
+    assert '"owner_label": "UNMEASURED"' in source
 
 
 def test_uniform_and_zero_rows_are_not_allowed_to_imply_corroboration():

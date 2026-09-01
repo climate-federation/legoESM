@@ -79,6 +79,7 @@ def test_nemo_testcase_cards_are_fp64_source_pinned(
     assert cfg.pgf_quadrature == "nemo_trapezoid"
     assert cfg.adaptive_implicit_vertadv
     assert cfg.barotropic.barotropic_diffusion_alpha == 0.0
+    assert cfg.barotropic.barotropic_reconcile_target == "velocity_avg"
 
 
 def test_testcase_cards_select_their_resolved_barotropic_filters():

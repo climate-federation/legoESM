@@ -82,7 +82,12 @@ def _model_config(
         barotropic_seed_face_depth="nemo_ssh_avg",
         barotropic_seed_evaluation="nemo_literal",
         barotropic_pgf_evaluation="nemo_literal",
-        barotropic_reconcile_target="transport_avg",
+        # NEMO commits the primary velocity-weighted uu_b(Kaa) into the RK3
+        # prognostic velocity (dynspg_ts.F90:845-847;
+        # stprk3_stg.F90:433-446).  The distinct un_adv transport time mean
+        # remains the tracer-flux operand at stprk3_stg.F90:257-274; it is not
+        # a prognostic-velocity frame.
+        barotropic_reconcile_target="velocity_avg",
         # This is numerical diffusion in the free-surface equation, not
         # NEMO's similarly named time-filter alpha.  The oracle has no such
         # stabilizer, so Rule 9 requires an exact zero on certified cards.
@@ -326,9 +331,9 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
     if not cfg.tracer_wall_neumann_fill:
         raise ValueError(
             f"{card.case} requires NEMO's closed-wall tracer halo fill")
-    if cfg.barotropic.barotropic_reconcile_target != "transport_avg":
+    if cfg.barotropic.barotropic_reconcile_target != "velocity_avg":
         raise ValueError(
-            f"{card.case} requires NEMO's un_adv/hu transport reconciliation")
+            f"{card.case} requires NEMO's prognostic uu_b(Kaa) velocity frame")
     # The namelists select ENS, while these Cartesian cases have f=0 and only
     # one wet y row.  Prove the inherited rotation operator is structurally
     # eliminated; otherwise reject rather than silently run an AL81/Matsuno

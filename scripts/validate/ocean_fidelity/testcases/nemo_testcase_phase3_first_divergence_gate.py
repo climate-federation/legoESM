@@ -26,6 +26,8 @@ DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_stage_kt1")
 DEFAULT_TRAJECTORY_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_3")
+DEFAULT_FRAME_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_frames_kt1_3")
 NO_ADV_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_stage_kt1_no_adv")
 NO_AVM_ROOT = Path(
@@ -154,6 +156,34 @@ def read_entry(path: Path) -> dict:
     }
 
 
+def read_bt_frames(path: Path) -> dict:
+    """Read primary barotropic velocity and distinct advecting transport."""
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii").rstrip()
+        header = struct.unpack("=6i", handle.read(24))
+        values = np.fromfile(handle, dtype=np.float64)
+    version, kt, kaa, nx, ny, bits = header
+    require(magic == "NEMO_L1_BTFRM_1", f"{path}: bad magic")
+    require(
+        (version, nx, ny, bits) == (1, EXPECTED_DIMS[0], EXPECTED_DIMS[1], 64),
+        f"{path}: bad header {header}")
+    count = nx * ny
+    require(values.size == 4 * count, f"{path}: bad payload length")
+    require(np.all(np.isfinite(values)), f"{path}: non-finite payload")
+
+    def xy(block):
+        return block.reshape((nx, ny), order="F")[2:-2, 2:-2].T
+
+    return {
+        "kt": kt,
+        "Kaa": kaa,
+        "u_primary": xy(values[:count]),
+        "v_primary": xy(values[count:2 * count]),
+        "un_adv": xy(values[2 * count:3 * count]),
+        "vn_adv": xy(values[3 * count:]),
+    }
+
+
 def score(name: str, oracle, candidate, mask, *, plant=False) -> dict:
     oracle = np.asarray(oracle, dtype=np.float64)
     candidate = np.asarray(candidate)
@@ -230,6 +260,7 @@ def expected_masks(card) -> dict:
 
 def run(
     root: Path, trajectory_root: Path = DEFAULT_TRAJECTORY_ROOT, *,
+    frame_root: Path = DEFAULT_FRAME_ROOT,
     plant_rhs=False, plant_registry=False,
 ) -> dict:
     import jax
@@ -270,6 +301,12 @@ def run(
     entry = read_entry(entry_path)
     require((entry["kt"], entry["Nbb"]) == (2, 3), "entry is not kt=2/Nbb=3")
     artifacts[entry_path.name] = sha256(entry_path)
+    frame_path = frame_root / "oracle_bt_frames_kt00000001.bin"
+    require(frame_path.is_file(), f"missing {frame_path}")
+    bt_frames = read_bt_frames(frame_path)
+    require((bt_frames["kt"], bt_frames["Kaa"]) == (1, 3),
+            "barotropic frame dump is not kt=1/Kaa=3")
+    artifacts[frame_path.name] = sha256(frame_path)
 
     masks = expected_masks(card)
     nlev = card.recipe.z_coord.n_levels
@@ -338,6 +375,16 @@ def run(
     oracle_T = entry["T"][..., :nlev]
     oracle_u = entry["u"][..., :nlev]
     state_kmm = model.step(initial, dt=card.dt_s)
+    # Harness-only extraction of the SECOND returned barotropic product.  The
+    # production card stays on the primary velocity frame; selecting the
+    # transport target here merely materialises Hu_avg/H so its depth integral
+    # can be compared to NEMO un_adv itself.  It is never a public testcase arm.
+    cfg_transport_diag = card.recipe.model_config._replace(
+        barotropic=card.recipe.model_config.barotropic._replace(
+            barotropic_reconcile_target="transport_avg"))
+    state_transport_diag = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg_transport_diag).step(
+            initial, dt=card.dt_s)
     state_frozen = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
@@ -382,6 +429,7 @@ def run(
     baseline_u_row = score(
         "LOCK_EXCHANGE-zco.kt2.poststage_only.u", oracle_u,
         baseline_u, masks["u"])
+    baseline_u_row["verdict"] = False
     rows.append(baseline_u_row)
     stage_baro_u_row = score(
         "LOCK_EXCHANGE-zco.kt2.per_stage_barotropic_correction.u", oracle_u,
@@ -389,9 +437,94 @@ def run(
     stage_baro_u_row["verdict"] = False
     rows.append(stage_baro_u_row)
     full_u_row = score(
-        "LOCK_EXCHANGE-zco.kt2.stage_mean_and_transport_reconcile.u",
+        "LOCK_EXCHANGE-zco.kt2.instantaneous_prognostic_u",
         oracle_u, full_u, masks["u"])
+    full_u_row.update({
+        "frame": "instantaneous_prognostic_Nbb",
+        "staggering_and_reduction": (
+            "oracle uu(:,:,:,Nbb) and legoESM prognostic u are both C-grid "
+            "U-face instantaneous 3-D velocities; both are scored on the "
+            "same wet U-face mask by elementwise L-infinity, with no depth "
+            "or substep-time reduction"),
+    })
     rows.append(full_u_row)
+
+    frame_artifact_u = np.asarray(state_transport_diag.u.data)[:, 1:, :]
+    frame_artifact_row = score(
+        "LOCK_EXCHANGE-zco.kt2.wrong_time_mean_transport_as_state.u",
+        oracle_u, frame_artifact_u, masks["u"])
+    frame_artifact_row.update({
+        "verdict": False,
+        "frame": "INTENTIONALLY_MISMATCHED_CONTROL",
+        "staggering_and_reduction": (
+            "oracle is instantaneous C-grid U-face uu(:,:,:,Nbb), while "
+            "the control intentionally substitutes legoESM's vertically "
+            "reconciled substep-time-mean Hu_avg/H; both are reduced by the "
+            "same wet 3-D U-face L-infinity only to quantify the frame artifact"),
+    })
+    rows.append(frame_artifact_row)
+
+    u_face_2d = np.any(masks["u"], axis=-1)
+    oracle_entry_depth_mean = thickness_weighted_mean(
+        oracle_u, h_u_np[:, 1:, :])
+    primary_frame_row = score(
+        "LOCK_EXCHANGE-zco.kt1_to_kt2.oracle_primary_u_frame_consistency",
+        bt_frames["u_primary"], oracle_entry_depth_mean, u_face_2d)
+    primary_frame_row.update({
+        "frame": "instantaneous_primary_velocity",
+        "staggering_and_reduction": (
+            "oracle puu_b(Kaa) and the thickness-weighted depth mean of oracle "
+            "uu(:,:,:,Nbb) at the next entry are both instantaneous 2-D "
+            "C-grid U-face velocities; both use the same wet 2-D U-face mask "
+            "and elementwise L-infinity, with only the stated thickness "
+            "reduction applied to the 3-D entry field"),
+    })
+    rows.append(primary_frame_row)
+
+    lego_un_adv = np.sum(
+        np.asarray(state_transport_diag.u.data) * h_u_np, axis=-1)[:, 1:]
+    transport_row = score(
+        "LOCK_EXCHANGE-zco.kt1_to_kt2.time_mean_u_transport",
+        bt_frames["un_adv"], lego_un_adv, u_face_2d)
+    transport_row.update({
+        "frame": "substep_time_mean_transport",
+        "units": "m2 s-1 per unit U-face width",
+        "staggering_and_reduction": (
+            "oracle un_adv and legoESM Hu_avg are both C-grid U-face, "
+            "vertically integrated transports accumulated over the kt=1 "
+            "barotropic substep window; both are scored on the same wet "
+            "2-D U-face mask by elementwise L-infinity, with no additional "
+            "depth or time reduction"),
+    })
+    rows.append(transport_row)
+
+    # Report baroclinic shape independently of the depth-uniform frame offset.
+    oracle_mean = thickness_weighted_mean(oracle_u, h_u_np[:, 1:, :])
+    candidate_mean = thickness_weighted_mean(full_u, h_u_np[:, 1:, :])
+    oracle_prime = oracle_u - oracle_mean[..., None]
+    candidate_prime = full_u - candidate_mean[..., None]
+    baroclinic_row = score(
+        "LOCK_EXCHANGE-zco.kt2.instantaneous_u_baroclinic_residual",
+        oracle_prime, candidate_prime, masks["u"])
+    error_3d = full_u - oracle_u
+    active_columns = np.any(masks["u"], axis=-1)
+    column_spreads = np.ptp(error_3d, axis=-1)[active_columns]
+    baroclinic_row.update({
+        "frame": "instantaneous_prognostic_Nbb_baroclinic_anomaly",
+        "max_per_column_vertical_error_spread": float(np.max(column_spreads)),
+        "staggering_and_reduction": (
+            "both sides start from the instantaneous C-grid U-face fields "
+            "above, subtract their own thickness-weighted column mean, and "
+            "apply the same wet 3-D U-face L-infinity reduction"),
+    })
+    rows.append(baroclinic_row)
+    artifact_error = frame_artifact_u - oracle_u
+    artifact_mean = thickness_weighted_mean(
+        artifact_error, h_u_np[:, 1:, :])
+    artifact_spread = np.ptp(artifact_error, axis=-1)[active_columns]
+    stage1_mean_max = float(np.max(np.abs(
+        oracle_stage1_weighted[u_face_2d])))
+    artifact_mean_max = float(np.max(np.abs(artifact_mean[u_face_2d])))
 
     # Direct source-form causal control: the existing NEMO no-advection run
     # differs only by ln_dynadv_OFF.  Stage 1 is identical, so its stage-2
@@ -471,6 +604,22 @@ def run(
         "rows": rows,
         "failed_rows": failed,
         "ownership": {
+            "prognostic_state_frame": {
+                "classification": "CONFIRMED_FRAME_ARTIFACT",
+                "explicit_regression_m_s": frame_artifact_row["absolute_max"],
+                "restored_instantaneous_error_m_s": full_u_row["absolute_max"],
+                "max_per_column_vertical_error_spread_m_s": float(
+                    np.max(artifact_spread)),
+                "spread_over_max_error": float(
+                    np.max(artifact_spread)) / frame_artifact_row["absolute_max"],
+                "stage1_Kaa_depth_mean_over_artifact_depth_mean": (
+                    stage1_mean_max / artifact_mean_max),
+                "evidence": (
+                    "the deliberately mismatched transport-as-state control "
+                    "reproduces the 1.135e-3 regression; restoring primary "
+                    "uu_b(Kaa) removes it, while raw NEMO un_adv and legoESM "
+                    "Hu_avg agree in their separate transport row"),
+            },
             "scheme_identity_collapse": {
                 "classification": "CONFIRMED_STRUCTURAL",
                 "evidence": (
@@ -502,16 +651,16 @@ def run(
                 "movement": stage_baro_u_error - baseline_u_error,
             },
             "momentum_stage_advecting_transport": {
-                "classification": "UNMEASURED_AFTER_STRUCTURAL_COLLAPSE",
+                "classification": "PLAUSIBLE_PARTIAL_OWNER",
                 "stage_mean_only_u_error": stage_baro_u_error,
                 "stage_mean_plus_transport_u_error": full_u_error,
                 "movement": full_u_error - stage_baro_u_error,
                 "retraction": (
-                    "the former 70% partial-owner label belonged to a nested "
-                    "micro-selector composition that is no longer a public "
-                    "model; with NEMO's mandatory final un_adv/hu reconcile, "
-                    "the private nested control has zero movement and cannot "
-                    "assign ownership"),
+                    "this private nested arm is not the source of the later "
+                    "1.135e-3 regression; that regression came solely from "
+                    "substituting the transport time mean as prognostic state. "
+                    "The scale-compatible 5.98e-10 to 1.71e-10 movement remains "
+                    "a one-sided plausible result, not confirmed ownership"),
             },
             "horizontal_up3_spatial_operator": {
                 "classification": "CONFIRMED_EXONERATED",
@@ -534,6 +683,8 @@ def run(
             "NEMO_stage_calls": "src/OCE/stprk3.F90:184-207",
             "NEMO_Kmm_transport": "src/OCE/stprk3_stg.F90:257-303",
             "NEMO_stage_barotropic_correction": "src/OCE/stprk3_stg.F90:433-446",
+            "NEMO_primary_velocity_frame": "src/OCE/DYN/dynspg_ts.F90:845-847; src/OCE/stprk3_stg.F90:433-446",
+            "NEMO_time_mean_transport_frame": "src/OCE/DYN/dynspg_ts.F90:509,641-642,843-844; src/OCE/stprk3_stg.F90:257-274",
             "NEMO_tracer_transport_call": "src/OCE/stprk3_stg.F90:456-519",
             "NEMO_RK3_FCT_dispatch": "src/OCE/TRA/traadv_fct.F90:153-161",
             "NEMO_FCT_two_step": "src/OCE/TRA/traadv_fct.F90:470-641",
@@ -550,9 +701,7 @@ def run(
         "artifacts_sha256": artifacts,
         "unmeasured": [
             "individual FCT limiter coefficients and antidiffusive fluxes",
-            "owner of the remaining kt=2 u residual under the structurally "
-            "complete final un_adv/hu reconciliation; the former nested-stage "
-            "control is non-discriminating",
+            "owner of the remaining kt=2 instantaneous baroclinic u residual",
             "kt>=3 and OVERFLOW are reported by the separate explicit "
             "owner-exhausted continuation artifact, not this first-step gate",
         ],
@@ -564,12 +713,14 @@ def main() -> int:
     parser.add_argument("--oracle-dir", type=Path, default=DEFAULT_ROOT)
     parser.add_argument(
         "--trajectory-dir", type=Path, default=DEFAULT_TRAJECTORY_ROOT)
+    parser.add_argument("--frame-dir", type=Path, default=DEFAULT_FRAME_ROOT)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant-rhs", action="store_true")
     parser.add_argument("--plant-registry", action="store_true")
     args = parser.parse_args()
     report = run(
-        args.oracle_dir, args.trajectory_dir, plant_rhs=args.plant_rhs,
+        args.oracle_dir, args.trajectory_dir, frame_root=args.frame_dir,
+        plant_rhs=args.plant_rhs,
         plant_registry=args.plant_registry)
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:

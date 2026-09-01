@@ -81,3 +81,21 @@ def test_parsers_reject_bad_magic(tmp_path):
         pass
     else:
         raise AssertionError("bad stage magic passed")
+
+
+def test_bt_frame_parser_rejects_bad_magic(tmp_path):
+    path = tmp_path / "bad-frame.bin"
+    path.write_bytes(b"NOT_A_BT_FRAME__" + b"\0" * 64)
+    try:
+        gate.read_bt_frames(path)
+    except (gate.GateError, UnicodeError):
+        pass
+    else:
+        raise AssertionError("bad barotropic-frame magic passed")
+
+
+def test_frame_rows_name_both_staggering_and_reduction():
+    source = GATE_PATH.read_text()
+    assert "instantaneous_prognostic_u" in source
+    assert "time_mean_u_transport" in source
+    assert source.count('"staggering_and_reduction"') >= 3

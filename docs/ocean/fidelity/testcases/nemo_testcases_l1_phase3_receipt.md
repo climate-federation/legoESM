@@ -22,13 +22,14 @@ trajectory-match claims.
 | LOCK time-level ladder | Kaa `3,2,3`; Kmm `1,3,2` | VERIFIED |
 | LOCK kt=1 entry | T/S/u/SSH exact; v structurally absent | exact prefix |
 | LOCK kt=2 T | `1.5821e-13` normalized (`4.7464e-12 K` absolute) | DEBT |
-| LOCK kt=2 u | `1.7121e-10 m/s` after stage-transport reconcile | DEBT |
+| LOCK kt=2 instantaneous u (`uu(Nbb)` vs prognostic u) | `1.7120868e-10 m/s` | DEBT |
+| LOCK kt=1→2 time-mean u transport (`un_adv` vs `Hu_avg`) | `8.6736e-19 m2/s` | AT-BAR |
 | LOCK kt=2 S | exact, but oracle `n_unique=1` | UNINFORMATIVE |
 | LOCK kt=2 SSH | `4.7797e-28`, but oracle identically zero | UNINFORMATIVE |
 | LOCK kt=2 v | no active meridional face; stored zeros checked | UNMEASURED |
-| LOCK kt=3 T/S/u/SSH | `2.03e-9 / 2.02e-9 / 2.05e-9 / 4.04e-8` | DEBT |
-| OVERFLOW kt=2 T/S/u/SSH | `5.26e-7 / 4.93e-7 / 8.24e-6 / 2.54e-4` | DEBT |
-| OVERFLOW kt=3 T/S/u/SSH | `2.95e-6 / 2.76e-6 / 1.09e-4 / 1.15e-3` | DEBT |
+| LOCK kt=3 T/S/u/SSH | `9.1634e-12 / 2.0301e-16 / 2.0540e-9 / 1.3553e-18`; S uninformative, SSH at bar | DEBT |
+| OVERFLOW kt=2 T/S/u/SSH | `2.40035e-8 / 2.0301e-16 / 4.12103e-6 / 1.23723e-7`; S uninformative | DEBT |
+| OVERFLOW kt=3 T/S/u/SSH | `2.86506e-7 / 4.0602e-16 / 1.54030e-5 / 4.47222e-6`; S at bar | DEBT |
 
 Every candidate floating array in both gates is `float64`, the entry point
 sets and verifies `PrecisionPolicy.fp64()`, and the reported JAX backend was
@@ -287,34 +288,24 @@ three-leg tendency follows `tra_bbl_adv:243-284`. Solver wiring is at RK stage
 The capped host-Euler wrapper was not used because its cap has no oracle
 analogue.
 
-The required scaling check exonerates BBL at the first OVERFLOW divergence.
-On the shipped kt=1 state, `max|utr_bbl|=max|vtr_bbl|=0`; the faithful and
-private BBL-disabled candidates are bit-identical in kt=2 temperature
-(`max|delta T|=0 K`). The initial density front has not reached an active
-downslope face, so BBL cannot own the old `5.26e-7` normalized T debt.
-Classification: **CONFIRMED EXONERATED AT kt=2**, not a plausible owner. A
-synthetic dense-shelf violation through the real model step proves the stage-3
-path fires and retains closed-exchange tracer content to its fp64 accumulation
-floor.
+The BBL scaling check is deliberately one-sided.  On legoESM's shipped kt=1
+state, `max|utr_bbl|=max|vtr_bbl|=0`; its faithful and private BBL-disabled
+candidates are bit-identical in kt=2 temperature (`max|delta T|=0 K`).  This
+is **CONFIRMED INACTIVE on the legoESM side**.  NEMO's `utr_bbl` was not read,
+so the corresponding oracle conclusion is only **PLAUSIBLE from the common
+geometry**, not confirmed and not a two-model exoneration.  The former blanket
+`CONFIRMED_EXONERATED_AT_KT2` label is retracted in both gate JSON and this
+receipt.  A synthetic dense-shelf violation still proves that legoESM's real
+stage-3 BBL path fires and conserves closed-exchange tracer content to its fp64
+accumulation floor.
 
-The simultaneous removal of unattested generic arithmetic changed the faithful
-OVERFLOW kt=2 score from `5.26e-7` to `2.1810780026e-8` in T; SSH is
-`1.2372313177e-7`. Correctly selecting NEMO's final `un_adv/hu` transport
-reconciliation exposes a new `2.4321816013e-2` u debt. The source-backed arm
-is retained; restoring the known-wrong velocity-average arm would violate the
-standing rule. This round does **not** assign the
-T improvement to BBL: the BBL on/off result is exactly zero. Attribution among
-the newly selected literal free-surface/ZDF operands is UNMEASURED. The
-machine artifact `overflow_trajectory_gate_structural_collapse_bbl.json`
-carries the scaling check, source register, fp64 stamp, and remaining debt;
-the companion BBL-off artifact is retained as the causal control. The
-regenerated LOCK ownership JSON records that NEMO's stage correction and
-transport reconciliation ship as one collapsed scheme identity. Under the
-complete final `un_adv/hu` reconciliation, the old nested stage-transport
-control has zero movement. Its former 70% partial-owner label is therefore
-retracted for the current scheme and replaced by
-`UNMEASURED_AFTER_STRUCTURAL_COLLAPSE`; the owner of the new final-reconcile
-u debt is UNMEASURED.
+The structural-collapse round originally reported OVERFLOW kt=2 T at
+`2.1810780026e-8` and u at `2.4321816013e-2`.  Those values came from replacing
+the prognostic primary velocity with the distinct time-mean transport.  After
+the frame correction, the regenerated faithful scores are T
+`2.4003458243e-8`, u `4.1210339357e-6`, and SSH `1.2372313177e-7`.  The
+`2.1810780026e-8` T value is retained only as the explicitly named
+`wrong_prognostic_transport_frame` control; it is not the faithful card.
 
 Focused verification for this round is **113 tests across seven explicitly
 listed files**: 15 card + 6 WS-RK3 + 8 BBL + 54 barotropic-common + 17 config
@@ -365,12 +356,15 @@ evidence class:
    flux/FCT path.  Against the same kt=2 dump, selecting it moves T from
    `8.9924674545e-7` to `1.2970365522e-13`, a `6.933087e6` improvement.  The
    remaining T value is still DEBT against the registered `1e-15` bar.
-4. **Distinct WS advecting transport — PLAUSIBLE PARTIAL OWNER.**  NEMO
-   replaces the live Kmm depth mean by `un_adv/hu` in `zFu/zFv` while retaining
-   Kmm as the advected velocity (`stprk3_stg.F90:257-274,316,326-331`).  The
-   stage-mean-only arm worsens u from `5.7155454103e-10` to
-   `5.9807602992e-10`; adding the distinct transport reduces it to
-   `1.7120868406e-10 m/s` (70%).  Debt remains, so this is partial ownership.
+4. **Distinct WS advecting transport — PLAUSIBLE PARTIAL OWNER of the
+   remaining instantaneous residual, not owner of the frame regression.**
+   NEMO replaces the live Kmm depth mean by `un_adv/hu` in `zFu/zFv` while
+   retaining Kmm as the advected velocity
+   (`stprk3_stg.F90:257-274,316,326-331`).  The private, one-sided control moves
+   instantaneous u from `5.9807602992e-10` to `1.7120868406e-10 m/s`; this is
+   scale-compatible but cannot establish confirmed two-model ownership.  It
+   did not cause the later `1.135e-3` regression, which is fully assigned to
+   the scoring-frame substitution below.
 5. **Horizontal UP3 spatial recurrence — CONFIRMED EXONERATED.**  A local
    hypothesis initially read `dynadv_up3`'s formal `Kbb` name without
    reconciling its caller.  The live RK3 caller passes `Kmm` into both slots.
@@ -385,33 +379,69 @@ evidence class:
    changes stage 3 by `1.1363e-8 m/s`, but the paired legoESM `A_v=0` arm leaves
    the residual at `1.7120953e-10`, unchanged at the relevant scale.
 
-Rule-1e reconciliation of the velocity scale is explicit rather than an
-average.  The review quoted `1.27e-12 m/s` without a statistic definition.  A
-fresh read of the whole registered wet u field does not reproduce that scalar:
-the gate's declared statistic is absolute L-infinity (`5.7155454103e-10
-m/s`), with wet-point mean absolute error `3.9333948945e-12 m/s`, RMS
-`3.1472972252e-11 m/s`, and reference maximum `2.2144535390e-3 m/s`.  These
-are different reductions and are therefore not interchangeable.  Both the
-review value and every reproduced field norm remain at least six orders below
-the `1.1354e-3 m/s` stage diagnostic, so the scaling refutation and the
-exoneration are unchanged.  Ownership of the remaining `1.7121e-10` u
-residual is UNMEASURED.
+### Scoring-frame retraction and Rule-1e reconciliation
+
+**LOCK kt=2 u regressed `1.7121e-10 -> 1.135e-3 m/s` under the collapsed
+scoring frame.**  This was a real regression in the gate, not a physical-model
+owner.  `dynspg_ts.F90:509,641-642,843-847` proves that `un_adv` is a
+secondary-weight, substep-time-mean transport, while `puu_b(Kaa)` is the
+separately normalized primary velocity.  `stprk3_stg.F90:433-446` installs
+that primary velocity in the RK3 after state.  The gate had compared NEMO
+`uu(:,:,:,Nbb)` against a legoESM field whose depth mean had instead been
+replaced by `Hu_avg/H`.
+
+The corrected gate now has two frame-labelled rows:
+
+- instantaneous: oracle `uu(:,:,:,Nbb)` and legoESM prognostic `u`, both 3-D
+  C-grid U-face fields, same wet-face mask, elementwise L-infinity, no depth or
+  time reduction;
+- transport: oracle `un_adv` and legoESM `Hu_avg`, both 2-D C-grid U-face,
+  vertically integrated substep-time-mean transports, same wet-face mask,
+  elementwise L-infinity, no further reduction.
+
+Restoring the primary velocity frame moves LOCK kt=2 u
+`1.135e-3 -> 1.7120868406e-10 m/s`, reproducing the pre-regression value.  The
+separate transport row is AT-BAR at `8.6736173799e-19 m2/s`.  The corrected
+instantaneous baroclinic-anomaly residual is `1.7120866476e-10 m/s`; it is
+reported independently and remains DEBT.  In the deliberately mismatched
+control, the vertical spread is `8.7839880e-10 m/s` against the
+`1.1353673e-3 m/s` maximum (ratio `7.7367e-7`), reproducing the reviewer's
+depth-uniform signature.  NEMO's raw `puu_b(Kaa)` also matches the next-entry
+thickness-weighted `uu(Nbb)` depth mean at `1.5510e-26 m/s`.  The raw NEMO
+frame dump comes from a read-only `stprk3.F90` call immediately after
+`stp_2D`; its rerun reproduced
+all three prior step-entry dumps byte-for-byte, so the new diagnostic did not
+alter the trajectory.
 
 ## Owner-exhausted trajectory continuation
 
 The continuation flag is explicit and defaults off.  It preserves kt=2 as the
 first-over-bar record and marks later rows as entering without an exact prefix.
-LOCK grows to the values in the verdict table at kt=3.  OVERFLOW-zps is exact
-at kt=1 and first diverges at kt=2 in T, S, u, and SSH.  The OVERFLOW finer-
+LOCK grows to the regenerated values in the verdict table at kt=3.  OVERFLOW-zps
+is exact at kt=1 and first diverges at kt=2 in T, u, and SSH; uniform S is
+explicitly UNINFORMATIVE rather than corroborating alignment.  The OVERFLOW finer-
 cadence oracle used the certified zps binary/configuration on one CPU process,
 changing only `nn_itend=3` and `nn_stock=1`; hashes pin both namelists, output,
 and all three dumps.  No certified configuration or binary was modified.
 
-The prior statement that stage-coupled BBL remained UNMEASURED is retracted by
-the structural-collapse round above. The wired on/off control is bit-identical
-at kt=2 because its initial transport is zero, so BBL is now CONFIRMED
-EXONERATED at that step. The u/SSH debt remains independent evidence that the
-first owner lies outside this tracer-only term.
+The OVERFLOW kt=2 T owner hunt registered the faithful absolute error first
+(`4.8006916487e-7 K`), then ran one-variable private controls.  No control is
+promoted to confirmed ownership because these are legoESM-side ablations only:
+
+| one changed operand | candidate movement / faithful T error | resulting absolute T error | disposition |
+|---|---:|---:|---|
+| one-step rather than NEMO two-step FCT predictor | `0.0762` | `4.8007318e-7 K` | scale present, gap unchanged |
+| frozen-final rather than Kmm tracer transport | `5360.85` | `2.5731008e-3 K` | decisively worse; Kmm remains required |
+| omit per-stage primary-velocity correction | `0.2478` | `3.6109159e-7 K` | next scale-compatible suspect; ownership UNMEASURED |
+| omit `un_adv/H` tracer-transport reconcile | `0.1217` | `5.3851318e-7 K` | worsens the gap |
+| substitute time-mean transport as prognostic state | `0.0913` | `4.3621560e-7 K` | wrong-frame control; explains old `2.1811e-8` normalized score |
+
+Thus the sweep stops honestly at OVERFLOW kt=2 T with the stage primary-
+velocity correction ranked for the next internal stage dump.  BBL is only
+legoESM-side CONFIRMED inactive and NEMO-side PLAUSIBLE inactive, as stated
+above.  LOCK kt=3 was walked after the kt=2 owner register was exhausted; its
+first continuation debts are T `9.1634e-12` and u `2.0540e-9`, with no new
+owner label from the already-divergent prefix.
 
 ## Gates, controls, test reconciliation, and artifacts
 
@@ -442,6 +472,12 @@ files**: `5 WS tracer + 11 card + 12 flux-form momentum + 17 config footguns +
 6 first-divergence gate + 7 trajectory gate`; all 58 passed.  This count is
 separate from, and does not revise or average, either historical count above.
 
+For the frame-correction round, the final focused invocation ran **116 tests
+across seven explicitly listed files**: `15 card + 6 WS-RK3 + 8 BBL + 54
+barotropic-common + 17 config-footguns + 8 trajectory-gate + 8
+first-divergence-gate`; all 116 passed.  This is the actual collected
+breakdown, not an averaged historical count.
+
 Full artifact hashes are committed in
 `nemo_testcases_l1_phase3_artifacts.sha256`.  The trajectory and diagnostic
 JSONs are external run products under
@@ -453,8 +489,11 @@ receipt reproducible without committing quota-heavy binary dumps.
 - owner of the final LOCK `1.7121e-10` wet-point L-infinity u residual after
   distinct stage transport; live-Kmm UP3 and vertical viscosity are exonerated;
 - individual NEMO/legoESM FCT limiter coefficients and antidiffusive fluxes;
-- owner of the remaining OVERFLOW-zps kt=2 T/u/SSH debt after BBL was
-  confirmed inactive; attribution among newly selected literal operands;
+- NEMO `utr_bbl` at kt=1 (legoESM BBL is confirmed inactive; NEMO is only
+  geometrically plausible inactive);
+- owner of the remaining OVERFLOW-zps kt=2 T/u/SSH debt; the one-variable
+  controls rank stage primary-velocity correction next but do not establish
+  two-model ownership;
 - LOCK and OVERFLOW states beyond kt=3;
 - long-trajectory phenomenology and statistical equivalence, which are beyond
   this first-divergence dispatch.

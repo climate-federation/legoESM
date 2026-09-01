@@ -151,6 +151,7 @@ def mark_uninformative(row: dict, field: str, kt: int, reference, mask) -> dict:
 def run(
     case: str, oracle_root: Path, max_step: int, *, plant=False,
     continue_after_first=False, diagnostic_disable_bbl=False,
+    owner_controls=False,
 ) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -192,6 +193,16 @@ def run(
                 f"{case}.kt{kt}.before.{field}", reference,
                 candidate[field], masks[field], plant=plant and kt == 1
                 and field == "T", allow_empty_no_active_face=field == "v"))
+            if field in ("u", "v"):
+                rows[-1].update({
+                    "frame": "instantaneous_prognostic_Nbb",
+                    "staggering_and_reduction": (
+                        f"oracle {field}{field}(:,:,:,Nbb) and legoESM "
+                        f"prognostic {field} are both C-grid {field.upper()}-face "
+                        "instantaneous 3-D fields; both use the same wet-face "
+                        "mask and an elementwise L-infinity reduction, with no "
+                        "depth or substep-time averaging"),
+                })
             rows[-1] = mark_uninformative(
                 rows[-1], field, kt, reference, masks[field])
         exact_here = all(row["exact"] for row in rows)
@@ -215,6 +226,7 @@ def run(
 
     cfg = card.recipe.model_config
     bbl_attribution = None
+    overflow_t_owner_hunt = None
     if case == "OVERFLOW-zps":
         from legoesm.ocean.physics.bbl_adv import (
             bbl_static_geometry,
@@ -243,7 +255,9 @@ def run(
             card.recipe.initial_state, dt=card.dt_s)
         delta = np.asarray(faithful_kt2.T.data) - np.asarray(control_kt2.T.data)
         bbl_attribution = {
-            "classification": "CONFIRMED_EXONERATED_AT_KT2",
+            "classification": "ONE_SIDED",
+            "legoesm_side": "CONFIRMED_INACTIVE_AT_KT2",
+            "nemo_side": "PLAUSIBLE_INACTIVE_FROM_GEOMETRY_ONLY",
             "scaling_check_before_owner_label": True,
             "max_abs_initial_utr_m3_s": float(np.max(np.abs(np.asarray(utr)))),
             "max_abs_initial_vtr_m3_s": float(np.max(np.abs(np.asarray(vtr)), initial=0.0)),
@@ -251,13 +265,93 @@ def run(
             "bit_identical_bbl_on_off_kt2_T": bool(np.array_equal(
                 np.asarray(faithful_kt2.T.data), np.asarray(control_kt2.T.data))),
             "reason": (
-                "the shipped initial density front does not intersect an "
-                "active downslope face, so option-2 transport is zero and "
-                "cannot own the first-step temperature debt"),
+                "legoESM's shipped initial density front does not intersect "
+                "an active downslope face, so its option-2 transport is zero. "
+                "The same NEMO conclusion is geometrically plausible but is "
+                "not confirmed because utr_bbl was not read from NEMO"),
             "source": (
                 "NEMO trabbl.F90:342-353,415-454; stage-3 calls at "
                 "stprk3_stg.F90:468,588"),
         }
+        if owner_controls:
+            oracle2 = read_entry(
+                oracle_root / "oracle_step_entry_kt00000002.bin", case)
+            oracle_T = oracle2["T"][..., :nlev]
+            active_T = masks["T"]
+            faithful_T = np.asarray(faithful_kt2.T.data)
+
+            def t_abs_error(values):
+                return float(np.max(np.abs(
+                    np.asarray(values)[active_T] - oracle_T[active_T])))
+
+            faithful_error = t_abs_error(faithful_T)
+            require(faithful_error > 0.0, "OVERFLOW owner hunt is vacuous")
+            controls = []
+
+            def add_control(name, state_control, reference, changed_operand):
+                values = np.asarray(state_control.T.data)
+                movement = float(np.max(np.abs(values[active_T] - faithful_T[active_T])))
+                error = t_abs_error(values)
+                controls.append({
+                    "name": name,
+                    "classification": "DIAGNOSTIC_ONE_VARIABLE_ARM",
+                    "reference_arm": reference,
+                    "changed_operand": changed_operand,
+                    "faithful_absolute_max_error_K": faithful_error,
+                    "control_absolute_max_error_K": error,
+                    "candidate_movement_K": movement,
+                    "movement_over_faithful_error": movement / faithful_error,
+                    "error_change_K": error - faithful_error,
+                    "owner_label": "UNMEASURED",
+                    "reason": (
+                        "scale and movement only; a legacy/private one-sided "
+                        "candidate control cannot establish two-model ownership"),
+                })
+
+            hook_arms = (
+                ("legacy_one_step_fct", _NEMOWSRK3TestHooks(
+                    two_step_fct_predictor=False),
+                 "legoESM legacy, pre-existing one-step FCT",
+                 "two-step FCT predictor only"),
+                ("legacy_frozen_final_tracer_transport", _NEMOWSRK3TestHooks(
+                    kmm_tracer_transports=False),
+                 "legoESM legacy, pre-existing frozen-final transport",
+                 "Kmm tracer transport time level only"),
+                ("omit_stage_barotropic_correction", _NEMOWSRK3TestHooks(
+                    stage_barotropic_correction=False),
+                 "legoESM legacy, pre-existing post-stage split",
+                 "per-stage primary velocity correction only"),
+                ("omit_transport_reconcile", _NEMOWSRK3TestHooks(
+                    momentum_transport_reconcile=False),
+                 "private harness ablation of NEMO stprk3_stg.F90:257-274",
+                 "un_adv/H advecting-transport reconcile only"),
+            )
+            for name, hooks, reference, operand in hook_arms:
+                control_state = LatLonCGridOceanModel(
+                    card.recipe.grid, card.recipe.z_coord, cfg,
+                    _nemo_ws_test_hooks=hooks).step(
+                        card.recipe.initial_state, dt=card.dt_s)
+                add_control(name, control_state, reference, operand)
+
+            transport_cfg = cfg._replace(
+                barotropic=cfg.barotropic._replace(
+                    barotropic_reconcile_target="transport_avg"))
+            add_control(
+                "wrong_prognostic_transport_frame",
+                LatLonCGridOceanModel(
+                    card.recipe.grid, card.recipe.z_coord, transport_cfg).step(
+                        card.recipe.initial_state, dt=card.dt_s),
+                "NEMO un_adv tracer transport, not a prognostic state frame",
+                "prognostic primary velocity replaced by time-mean transport")
+            overflow_t_owner_hunt = {
+                "status": "FIRST_DIVERGENCE_REMAINS_UNOWNED",
+                "first_over_bar": "kt=2 T",
+                "faithful_absolute_max_error_K": faithful_error,
+                "faithful_normalized_max_error": faithful_error / max(
+                    float(np.max(np.abs(oracle_T[active_T]))), 1.0),
+                "scaling_check_before_owner_label": True,
+                "one_variable_controls": controls,
+            }
     return {
         "format": "nemo-testcase-l1-phase3-trajectory-v1",
         "case": case,
@@ -281,6 +375,7 @@ def run(
         },
         "first_over_bar": first_over_bar,
         "bbl_attribution": bbl_attribution,
+        "overflow_t_owner_hunt": overflow_t_owner_hunt,
         "steps": steps,
         "unmeasured": [
             "NEMO per-term tendencies at the first divergent step",
@@ -301,13 +396,15 @@ def main() -> int:
     parser.add_argument("--plant", action="store_true")
     parser.add_argument("--continue-after-first", action="store_true")
     parser.add_argument("--diagnostic-disable-bbl", action="store_true")
+    parser.add_argument("--owner-controls", action="store_true")
     args = parser.parse_args()
     require(args.max_step >= 1, "max-step must be positive")
     report = run(
         args.case, args.oracle_dir or DEFAULT_ORACLE_ROOTS[args.case],
         args.max_step, plant=args.plant,
         continue_after_first=args.continue_after_first,
-        diagnostic_disable_bbl=args.diagnostic_disable_bbl)
+        diagnostic_disable_bbl=args.diagnostic_disable_bbl,
+        owner_controls=args.owner_controls)
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.write_text(text)
