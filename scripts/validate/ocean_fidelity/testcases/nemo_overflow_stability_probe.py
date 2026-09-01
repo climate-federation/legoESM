@@ -88,8 +88,290 @@ expected_masks = _PHASE3.expected_masks
 lego_fields = _PHASE3.lego_fields
 
 
+def _load_oracle_gate():
+    path = REPO_ROOT / (
+        "scripts/validate/ocean_fidelity/testcases/"
+        "nemo_testcase_oracle_gate.py"
+    )
+    spec = importlib.util.spec_from_file_location("nemo_l1_oracle_gate", path)
+    require(spec is not None and spec.loader is not None, f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_ORACLE_GATE = _load_oracle_gate()
+namelist_values = _ORACLE_GATE.namelist_values
+parse_logical = _ORACLE_GATE.parse_logical
+
+
+# File-side inventory for the requested resolved blocks.  A new or removed
+# NEMO key makes the gate red before a scientific disposition can be claimed.
+OVERFLOW_RESOLVED_KEYS = frozenset("""
+namdyn_adv.ln_dynadv_cen2 namdyn_adv.ln_dynadv_off namdyn_adv.ln_dynadv_up3
+namdyn_adv.ln_dynadv_vec namdyn_adv.nn_dynkeg
+namdyn_hpg.ln_hpg_djc namdyn_hpg.ln_hpg_djc_vnh namdyn_hpg.ln_hpg_djc_vnv
+namdyn_hpg.ln_hpg_isf namdyn_hpg.ln_hpg_prj namdyn_hpg.ln_hpg_sco
+namdyn_hpg.ln_hpg_zco
+namdyn_ldf.ln_dynldf_blp namdyn_ldf.ln_dynldf_hor namdyn_ldf.ln_dynldf_iso
+namdyn_ldf.ln_dynldf_lap namdyn_ldf.ln_dynldf_lev namdyn_ldf.ln_dynldf_off
+namdyn_ldf.nn_ahm_ijk_t namdyn_ldf.nn_dynldf_typ namdyn_ldf.rn_ahm_b
+namdyn_ldf.rn_csmc namdyn_ldf.rn_lv namdyn_ldf.rn_maxfac
+namdyn_ldf.rn_minfac namdyn_ldf.rn_uv
+namdyn_spg.ln_bt_auto namdyn_spg.ln_bt_fw namdyn_spg.ln_dynspg_exp
+namdyn_spg.ln_dynspg_ts namdyn_spg.nn_bt_flt namdyn_spg.nn_e
+namdyn_spg.rn_bt_alpha namdyn_spg.rn_bt_cmax
+namdyn_vor.ln_dynvor_een namdyn_vor.ln_dynvor_ene namdyn_vor.ln_dynvor_ens
+namdyn_vor.ln_dynvor_ent namdyn_vor.ln_dynvor_mix namdyn_vor.ln_dynvor_msk
+namdyn_vor.nn_e3f_typ
+namtra_adv.ln_mus_ups namtra_adv.ln_traadv_cen namtra_adv.ln_traadv_fct
+namtra_adv.ln_traadv_mus namtra_adv.ln_traadv_off namtra_adv.ln_traadv_qck
+namtra_adv.ln_traadv_ubs namtra_adv.nn_cen_h namtra_adv.nn_cen_v
+namtra_adv.nn_fct_h namtra_adv.nn_fct_imp namtra_adv.nn_fct_v
+namtra_adv.nn_ubs_v
+namtra_dmp.cn_resto namtra_dmp.ln_tradmp namtra_dmp.nn_zdmp
+namtra_eiv.ln_eke_equ namtra_eiv.ln_ldfeiv namtra_eiv.nn_aei_ijk_t
+namtra_eiv.rn_le namtra_eiv.rn_ue
+namtra_ldf.ln_botmix_triad namtra_ldf.ln_traldf_blp namtra_ldf.ln_traldf_hor
+namtra_ldf.ln_traldf_iso namtra_ldf.ln_traldf_lap namtra_ldf.ln_traldf_lev
+namtra_ldf.ln_traldf_msc namtra_ldf.ln_traldf_off
+namtra_ldf.ln_traldf_triad namtra_ldf.ln_triad_iso namtra_ldf.nn_aht_ijk_t
+namtra_ldf.rn_ld namtra_ldf.rn_slpmax namtra_ldf.rn_sw_triad namtra_ldf.rn_ud
+namtra_mle.ln_mle namtra_mle.nn_conv namtra_mle.nn_mld_uv namtra_mle.nn_mle
+namtra_mle.rn_ce namtra_mle.rn_lat namtra_mle.rn_lf
+namtra_mle.rn_rho_c_mle namtra_mle.rn_time
+namzdf.ln_zad_aimp namzdf.ln_zdfcst namzdf.ln_zdfddm namzdf.ln_zdfevd
+namzdf.ln_zdfgls namzdf.ln_zdfiwm namzdf.ln_zdfmfc namzdf.ln_zdfnpc
+namzdf.ln_zdfosm namzdf.ln_zdfric namzdf.ln_zdfswm namzdf.ln_zdftke
+namzdf.nn_avb namzdf.nn_evdm namzdf.nn_havtb namzdf.nn_npc namzdf.nn_npcp
+namzdf.rn_avm0 namzdf.rn_avt0 namzdf.rn_avts namzdf.rn_evd namzdf.rn_hsbfr
+""".split())
+
+# Executed selectors and numeric operands whose legoESM binding is explicit.
+# Inactive-family operands remain inventoried, but are WAIVED with their dead
+# controlling selector rather than pretending that their values were tested.
+OVERFLOW_VERIFIED_KEYS = frozenset("""
+namdyn_adv.ln_dynadv_cen2 namdyn_adv.ln_dynadv_off namdyn_adv.ln_dynadv_up3
+namdyn_adv.ln_dynadv_vec
+namdyn_hpg.ln_hpg_djc namdyn_hpg.ln_hpg_isf namdyn_hpg.ln_hpg_prj
+namdyn_hpg.ln_hpg_sco namdyn_hpg.ln_hpg_zco
+namdyn_ldf.ln_dynldf_blp namdyn_ldf.ln_dynldf_hor namdyn_ldf.ln_dynldf_iso
+namdyn_ldf.ln_dynldf_lap namdyn_ldf.ln_dynldf_lev namdyn_ldf.ln_dynldf_off
+namdyn_spg.ln_bt_auto namdyn_spg.ln_bt_fw namdyn_spg.ln_dynspg_exp
+namdyn_spg.ln_dynspg_ts namdyn_spg.nn_bt_flt namdyn_spg.nn_e
+namdyn_spg.rn_bt_alpha namdyn_spg.rn_bt_cmax
+namdyn_vor.ln_dynvor_een namdyn_vor.ln_dynvor_ene namdyn_vor.ln_dynvor_ens
+namdyn_vor.ln_dynvor_ent namdyn_vor.ln_dynvor_mix namdyn_vor.ln_dynvor_msk
+namtra_adv.ln_traadv_cen namtra_adv.ln_traadv_fct namtra_adv.ln_traadv_mus
+namtra_adv.ln_traadv_off namtra_adv.ln_traadv_qck namtra_adv.ln_traadv_ubs
+namtra_adv.nn_fct_h namtra_adv.nn_fct_imp namtra_adv.nn_fct_v
+namtra_dmp.ln_tradmp namtra_eiv.ln_eke_equ namtra_eiv.ln_ldfeiv
+namtra_ldf.ln_botmix_triad namtra_ldf.ln_traldf_blp namtra_ldf.ln_traldf_hor
+namtra_ldf.ln_traldf_iso namtra_ldf.ln_traldf_lap namtra_ldf.ln_traldf_lev
+namtra_ldf.ln_traldf_msc namtra_ldf.ln_traldf_off
+namtra_ldf.ln_traldf_triad namtra_ldf.ln_triad_iso
+namtra_mle.ln_mle
+namzdf.ln_zdfcst namzdf.ln_zdfddm namzdf.ln_zdfevd namzdf.ln_zdfgls
+namzdf.ln_zdfiwm namzdf.ln_zdfmfc namzdf.ln_zdfnpc namzdf.ln_zdfosm
+namzdf.ln_zdfric namzdf.ln_zdfswm namzdf.ln_zdftke
+namzdf.nn_avb namzdf.nn_havtb namzdf.rn_avm0 namzdf.rn_avt0
+""".split())
+
+OVERFLOW_UNMEASURED_KEYS = frozenset({"namzdf.ln_zad_aimp"})
+
+
 def _state_arrays(state) -> dict[str, np.ndarray]:
     return {name: np.asarray(value) for name, value in lego_fields(state).items()}
+
+
+def overflow_resolved_coverage(
+    resolved_namelist: Path,
+    output: Path | None = None,
+    *,
+    plant_unaccounted: bool = False,
+    card=None,
+) -> dict:
+    """Fail-closed disposition of every resolved namdyn/namzdf/namtra key.
+
+    ``output.namelist.dyn`` is the file side of the threat model.  The
+    registry is deliberately exact: a new NEMO key is missing from the ledger,
+    while a removed key leaves a stale ledger entry.  Both stop the gate.
+    """
+    values = namelist_values(resolved_namelist)
+    selected = {
+        key: value for key, value in values.items()
+        if key.split(".", 1)[0].startswith(("namdyn", "namzdf", "namtra"))
+    }
+    if plant_unaccounted:
+        selected["namzdf.planted_file_side_key"] = "T"
+    missing = sorted(set(selected) - OVERFLOW_RESOLVED_KEYS)
+    stale = sorted(OVERFLOW_RESOLVED_KEYS - set(selected))
+    require(not missing, f"unaccounted resolved NEMO keys: {missing}")
+    require(not stale, f"stale coverage-ledger keys: {stale}")
+
+    # Resolve the card as a single reference configuration.  These checks bind
+    # active NEMO choices to canonical legoESM selectors; inactive operands are
+    # still inventoried below but cannot be evidence for a live operator.
+    if card is None:
+        card = build_overflow_zps_card()
+    cfg = card.recipe.model_config
+    expected_card = {
+        "tracer_advection": (cfg.tracer_advection, "fct2"),
+        "tracer_time_integrator": (cfg.tracer_time_integrator, "rk3_ws"),
+        "momentum_advection": (cfg.momentum_advection, "flux_form"),
+        "momentum_flux_scheme": (cfg.momentum_flux_scheme, "upwind3"),
+        "vertical_momentum_scheme": (cfg.vertical_momentum_scheme, "nemo_up3"),
+        "pgf_scheme": (cfg.pgf_scheme, "nemo_sco"),
+        "adaptive_implicit_vertadv": (cfg.adaptive_implicit_vertadv, True),
+        "implicit_vertical_mixing": (cfg.implicit_vertical_mixing, True),
+        "A_h": (cfg.lateral_viscosity.A_h, 0.0),
+        "B_h": (cfg.lateral_viscosity.B_h, 0.0),
+        "K_h": (cfg.K_h, 0.0),
+        "K_bih": (cfg.K_bih, 0.0),
+        "A_v": (cfg.A_v, 1.0e-4),
+        "K_v": (cfg.K_v, 0.0),
+        "gm_redi": (cfg.gm_redi, None),
+        "physics": (cfg.physics, None),
+        "barotropic_time_filter": (
+            cfg.barotropic.barotropic_time_filter, "nemo_boxcar1_ab3"),
+        "n_barotropic_substeps": (
+            cfg.barotropic.n_barotropic_substeps, 3),
+        "barotropic_diffusion_alpha": (
+            cfg.barotropic.barotropic_diffusion_alpha, 0.0),
+    }
+    for name, (got, expected) in expected_card.items():
+        require(got == expected, f"card {name}: got {got!r}, expected {expected!r}")
+
+    expected_logicals = {
+        "namdyn_adv.ln_dynadv_off": False,
+        "namdyn_adv.ln_dynadv_vec": False,
+        "namdyn_adv.ln_dynadv_cen2": False,
+        "namdyn_adv.ln_dynadv_up3": True,
+        "namdyn_ldf.ln_dynldf_off": True,
+        "namdyn_spg.ln_dynspg_exp": False,
+        "namdyn_spg.ln_dynspg_ts": True,
+        "namdyn_spg.ln_bt_fw": True,
+        "namdyn_spg.ln_bt_auto": True,
+        "namtra_adv.ln_traadv_fct": True,
+        "namtra_dmp.ln_tradmp": False,
+        "namtra_eiv.ln_ldfeiv": False,
+        "namtra_eiv.ln_eke_equ": False,
+        "namtra_ldf.ln_traldf_off": True,
+        "namtra_mle.ln_mle": False,
+        "namzdf.ln_zdfcst": True,
+        "namzdf.ln_zdfevd": False,
+        "namzdf.ln_zdfnpc": False,
+        "namzdf.ln_zdfmfc": False,
+        "namzdf.ln_zdfosm": False,
+        "namzdf.ln_zad_aimp": True,
+    }
+    for key, expected in expected_logicals.items():
+        require(parse_logical(selected[key], key) is expected,
+                f"{key} does not match the certified executed value")
+    expected_numeric = {
+        "namdyn_spg.nn_bt_flt": 1.0,
+        "namdyn_spg.rn_bt_alpha": 0.0,
+        "namdyn_spg.rn_bt_cmax": 0.8,
+        "namtra_adv.nn_fct_h": 2.0,
+        "namtra_adv.nn_fct_v": 2.0,
+        "namtra_adv.nn_fct_imp": 1.0,
+        "namzdf.rn_avm0": 1.0e-4,
+        "namzdf.rn_avt0": 0.0,
+    }
+    for key, expected in expected_numeric.items():
+        got = float(selected[key])
+        require(got == expected, f"{key}: got {got!r}, expected {expected!r}")
+
+    from legoesm.ocean.dynamics.barotropic_common import (
+        compute_nemo_boxcar_forward_weights,
+        compute_nemo_forward_raw_transport_weights,
+    )
+    primary, primary_divisor, transport, n_loop = (
+        compute_nemo_boxcar_forward_weights(3, np.dtype(np.float64)))
+    raw_transport, raw_divisor, raw_n_loop = (
+        compute_nemo_forward_raw_transport_weights(3, np.dtype(np.float64)))
+    primary = np.asarray(primary)
+    transport = np.asarray(transport)
+    raw_transport = np.asarray(raw_transport)
+    require(n_loop == raw_n_loop == 4, "OVERFLOW forward filter loop must have 4 iterations")
+    require(np.array_equal(primary, np.asarray([0.0, 1/3, 1/3, 1/3])),
+            f"wrong primary boxcar weights {primary}")
+    require(float(primary_divisor) == 1.0, "wrong normalized primary divisor")
+    require(np.array_equal(raw_transport, np.asarray([3.0, 3.0, 2.0, 1.0])),
+            f"wrong raw secondary weights {raw_transport}")
+    require(float(raw_divisor) == 9.0, "wrong raw secondary divisor")
+    require(np.array_equal(transport, raw_transport / float(raw_divisor)),
+            "normalized and literal secondary weights disagree")
+
+    rows = []
+    for key in sorted(selected):
+        if key in OVERFLOW_UNMEASURED_KEYS:
+            status = "UNMEASURED"
+            reason = (
+                "active NEMO adaptive-implicit program: boolean selection is "
+                "bound, but exact wi partition plus momentum/tracer application "
+                "has not yet been certified on the approach-window states"
+            )
+        elif key in OVERFLOW_VERIFIED_KEYS:
+            status = "VERIFIED"
+            reason = (
+                "active selector/card operand, or executed-off family selector "
+                "whose absence is source- and card-bound"
+            )
+        else:
+            status = "WAIVED"
+            reason = (
+                "inactive-family operand; inventory-stability disposition only, "
+                "not a review of the dead algorithm"
+            )
+        rows.append({
+            "key": key,
+            "nemo_resolved_value": selected[key],
+            "status": status,
+            "reason": reason,
+        })
+    unmeasured = [row["key"] for row in rows if row["status"] == "UNMEASURED"]
+    report = {
+        "format": "nemo-testcase-l1-overflow-resolved-coverage-v1",
+        "git_sha": git_sha(),
+        "case": "OVERFLOW-zps",
+        "resolved_namelist": str(resolved_namelist),
+        "resolved_namelist_sha256": sha256(resolved_namelist),
+        "prefixes": ["namdyn*", "namzdf", "namtra*"],
+        "counts": {
+            status: sum(row["status"] == status for row in rows)
+            for status in ("VERIFIED", "WAIVED", "UNMEASURED")
+        },
+        "unmeasured": unmeasured,
+        "barotropic_composition": {
+            "oracle": {
+                "ln_bt_fw": True,
+                "ln_bt_auto": True,
+                "nn_bt_flt": 1,
+                "rn_bt_alpha": 0.0,
+                "runtime_nn_e": 3,
+                "primary_weights": primary.tolist(),
+                "raw_secondary_weights": raw_transport.tolist(),
+                "secondary_divisor": float(raw_divisor),
+                "loop_iterations": n_loop,
+            },
+            "legoesm": {
+                "filter": cfg.barotropic.barotropic_time_filter,
+                "n_substeps": cfg.barotropic.n_barotropic_substeps,
+                "primary_weights": primary.tolist(),
+                "raw_secondary_weights": raw_transport.tolist(),
+                "secondary_divisor": float(raw_divisor),
+                "loop_iterations": n_loop,
+            },
+            "status": "VERIFIED",
+        },
+        "status": "UNMEASURED" if unmeasured else "VERIFIED",
+        "rows": rows,
+    }
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    return report
 
 
 def _budget(state, card) -> dict[str, float]:
@@ -711,6 +993,13 @@ def main() -> int:
     primary_parser.add_argument("--baseline-root", type=Path, default=DEFAULT_CANDIDATE)
     primary_parser.add_argument("--arm-root", type=Path, required=True)
     primary_parser.add_argument("--output", type=Path, required=True)
+    coverage_parser = sub.add_parser("coverage")
+    coverage_parser.add_argument(
+        "--resolved-namelist", type=Path,
+        default=DEFAULT_ORACLE / "output.namelist.dyn",
+    )
+    coverage_parser.add_argument("--output", type=Path, required=True)
+    coverage_parser.add_argument("--plant-unaccounted", action="store_true")
     args = parser.parse_args()
     if args.command == "run-legoesm":
         run_legoesm(args.output, args.arm, args.end_step, args.capture_start)
@@ -729,8 +1018,16 @@ def main() -> int:
         summarize_run(args.root)
     elif args.command == "compare-arms":
         compare_arms(args.baseline_root, args.arm_root, args.output)
-    else:
+    elif args.command == "compare-primary-arm":
         compare_primary_arm(args.baseline_root, args.arm_root, args.output)
+    else:
+        report = overflow_resolved_coverage(
+            args.resolved_namelist,
+            args.output,
+            plant_unaccounted=args.plant_unaccounted,
+        )
+        print(json.dumps({key: value for key, value in report.items()
+                          if key != "rows"}, indent=2))
     return 0
 
 

@@ -88,3 +88,35 @@ def test_shifted_step_control_fails_time_alignment(monkeypatch, tmp_path):
     with pytest.raises(PROBE.ProbeError, match="planted step-number mismatch"):
         PROBE.score(tmp_path, tmp_path, start_completed=0, end_completed=0,
                     plant="shift_step")
+
+
+def test_resolved_coverage_is_file_driven_and_loud_about_aimp(tmp_path):
+    resolved = PROBE.DEFAULT_ORACLE / "output.namelist.dyn"
+    report = PROBE.overflow_resolved_coverage(
+        resolved, tmp_path / "coverage.json")
+    assert report["status"] == "UNMEASURED"
+    assert report["unmeasured"] == ["namzdf.ln_zad_aimp"]
+    assert sum(report["counts"].values()) == len(PROBE.OVERFLOW_RESOLVED_KEYS)
+    assert report["barotropic_composition"]["status"] == "VERIFIED"
+    assert report["barotropic_composition"]["oracle"]["runtime_nn_e"] == 3
+    assert report["barotropic_composition"]["oracle"][
+        "raw_secondary_weights"] == [3.0, 3.0, 2.0, 1.0]
+
+
+def test_resolved_coverage_planted_file_side_key_goes_red():
+    resolved = PROBE.DEFAULT_ORACLE / "output.namelist.dyn"
+    with pytest.raises(PROBE.ProbeError, match="unaccounted resolved NEMO keys"):
+        PROBE.overflow_resolved_coverage(
+            resolved, plant_unaccounted=True)
+
+
+def test_resolved_coverage_rejects_card_momentum_form_mutation():
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_overflow_zps_card
+
+    card = build_overflow_zps_card()
+    bad_cfg = card.recipe.model_config._replace(momentum_advection="vector_invariant")
+    bad_recipe = card.recipe._replace(model_config=bad_cfg)
+    bad_card = card._replace(recipe=bad_recipe)
+    with pytest.raises(PROBE.ProbeError, match="card momentum_advection"):
+        PROBE.overflow_resolved_coverage(
+            PROBE.DEFAULT_ORACLE / "output.namelist.dyn", card=bad_card)

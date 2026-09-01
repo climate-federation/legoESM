@@ -164,3 +164,62 @@ SSH matched-window L-infinity at kt=2601 fall by at least 2x.  It refutes that
 term as primary if failure remains in 2,870--2,884 and both errors move under
 10%.  Earlier failure or mixed movement is `PLAUSIBLE`, never `CONFIRMED`.
 No production selector or stabilizer is armed.
+
+## Frozen resolved-coverage addendum before the next arm
+
+The new file-driven gate inventories every one of the **108** resolved keys in
+the executed `namdyn*`, `namzdf`, and `namtra*` blocks.  Its registry is exact:
+a planted file-side key fails as missing, a removed key fails as stale, and a
+card mutation from flux to vector momentum fails before integration.  The
+coverage result is 67 VERIFIED, 40 WAIVED inactive-family operands, and one
+loud UNMEASURED row: `namzdf.ln_zad_aimp`.  WAIVED means inventory stability
+only, not review of a dead algorithm.
+
+This pass refutes the proposed missing-convection mechanism.  The resolved
+oracle has `ln_zdfevd=F`, `ln_zdfnpc=F`, and all other specific convection
+closures off; `zdfphy.F90:181-197` therefore prints “no specific scheme used.”
+It selects only constant vertical mixing with `rn_avm0=1e-4` and `rn_avt0=0`
+(`zdfphy.F90:151-179,207-215`).  Momentum is flux-form UP3
+(`dynadv.F90:78-90`) and lateral momentum diffusion returns without allocating
+viscosity arrays (`ldfdyn.F90:220-239`).  Enabling EVD, convection, or an LDF
+would consequently be a Rule-9 stabilizer that the reference does not run; no
+such arm is permitted.
+
+The per-case barotropic composition is VERIFIED, not inherited from a lane
+default.  The resolved values are `ln_bt_fw=T`, `ln_bt_auto=T`,
+`nn_bt_flt=1`, `rn_bt_alpha=0`, and the executed Courant calculation resolves
+`nn_e=3` (`dynspg_ts.F90:1200-1240`; matched `ocean.output:848-878`).  For
+three substeps, NEMO's exact filter rule (`dynspg_ts.F90:1041-1108`) gives
+primary weights `[0,1,1,1]/3`, raw secondary weights `[3,3,2,1]`, divisor 9,
+and four loop iterations.  The certified card produces those arrays exactly.
+The `rn_bt_alpha=0` back interpolation uses the live AB3-AM4 coefficients
+`0.614/0.285/0.088/0.013` (`dynspg_ts.F90:1676-1711`).  No barotropic
+selector mismatch is exposed by this coverage round.
+
+The remaining active gap is narrower and source-bound.  NEMO partitions
+`ww/wi` at RK3 stage 3 (`traadv.F90:220-227`); with the resolved optimized
+`nn_fct_imp=1`, the implicit transport is removed from both halves of FCT's
+two-step low-order predictor (`traadv_fct.F90:140-145,526-536`) while the
+explicit transport remains in the flux.  legoESM instead applies its older
+local adaptive momentum solve after the complete stage program and supplies
+unpartitioned vertical transport to tracer FCT.  The boolean therefore remains
+UNMEASURED until its arithmetic and time levels are compared; it is not marked
+VERIFIED merely because both configurations spell “adaptive implicit.”
+
+### Arm D: current legoESM adaptive-momentum localization
+
+Arm D is a private harness ablation, not a public selector or reference model:
+it suppresses only legoESM's current post-program adaptive vertical-momentum
+rewrite while retaining the certified card, tracer transport, FCT, BBL,
+barotropic solver, mixing, geometry, timestep, and fp64 policy.  Before a full
+arm, a same-input completed-step-2,875 measurement must show that the arm's
+one-step U effect is at least 0.1 times the baseline one-step U increment at
+the baseline increment maximum; otherwise the term is scale-incompatible and
+the full arm is not run.  If scale-compatible, the current implementation is
+**CONFIRMED** as an instability owner only if the arm completes 6,120 finite
+steps and reduces both the matched U growth and the terminal T growth at their
+registered slope-front loci.  A delay of at least 100 steps with both growth
+measures reduced by at least 2x is **PLAUSIBLE**.  Failure within 2,870--2,884
+and movement below 10% is **REFUTED_PRIMARY**.  All other outcomes remain
+UNMEASURED.  Even a confirmation localizes wrong legoESM arithmetic; it does
+not authorize shipping the no-adaptive arm, because NEMO has no such switch.
