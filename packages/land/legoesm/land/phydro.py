@@ -148,7 +148,7 @@ _ROOT_RESIST = 25.0        # [MPa s g mmol-1 H2O] root resistivity (root_resist_
 
 # --- numerics (module constants; iteration counts are never config) ---
 _N_CHI_ITER = 15    # inner supply-demand chi fixed point (damped)
-_N_DPSI_ITER = 25   # outer damped Newton on the sigmoid-mapped dpsi
+_N_DPSI_ITER = 40   # outer bounded gradient ascent on the mapped dpsi
 _RBD_FLOOR = 1e-10  # coeff-ok: Bonan A23 root-biomass-density floor [g/m3]
 
 
@@ -259,6 +259,15 @@ def _chi_supply_demand(
     ca_frac = ca_pa / ps_pa  # mol/mol
     from legoesm.land.p_model import C_STAR
 
+    # Lower chi bound = the mj = c* critical point (where the Wang-limited
+    # light rate truly reaches zero): letting chi dive below it into the
+    # smooth-floored mj zone breaks the fixed-point equality and produced a
+    # non-monotone deep-stress tail (probe-diagnosed).  ci_crit solves
+    # mj(ci) = m with m = c* + 2*eps: ci = Gamma*(1+2m)/(1-m).
+    _m_crit = C_STAR + 2.0 * pcfg.mj_floor_eps
+    chi_floor = jnp.clip(
+        gamma_star_pa * (1.0 + 2.0 * _m_crit) / (1.0 - _m_crit) / ca_pa,
+        0.05, 0.9)
     chi = jnp.full_like(gs_mol, 0.7)
     for _ in range(_N_CHI_ITER):
         ci = chi * ca_pa
@@ -268,7 +277,7 @@ def _chi_supply_demand(
         k = (C_STAR / mj_safe) ** (2.0 / 3.0)
         a_coord = phi0 * iabs * mj_safe * jnp.sqrt(1.0 - k)  # [umol]
         denom = jnp.maximum(gs_mol * ca_frac * 1e6, 1e-9)
-        chi_new = jnp.clip(1.0 - a_coord / denom, 0.05, 0.98)
+        chi_new = jnp.clip(1.0 - a_coord / denom, chi_floor, 0.98)
         chi = 0.5 * (chi + chi_new)  # damped
     return chi
 
@@ -326,23 +335,41 @@ def phydro_optimum(
         a = phi0 * iabs * mj_safe * jnp.sqrt(1.0 - k)
         return jnp.sum(a - cfg.gamma_cost * dpsi * dpsi), (dpsi, chi)
 
+    # Bounded gradient ascent on the concave profit (Hessian-free: a Newton
+    # step needs grad-of-grad THROUGH the unrolled chi fixed point, which
+    # made the traced graph an order of magnitude larger for no accuracy
+    # gain at this tolerance).  The step is normalised by the natural profit
+    # scale and clipped, so early iterations are stable far from the optimum
+    # and late ones contract onto it.
     grad_fn = jax.grad(lambda z: profit(z)[0])
-    hess_diag = jax.grad(lambda z: jnp.sum(grad_fn(z)))
-
+    g_scale = jnp.maximum(phi0 * iabs, 1.0)  # [umol] profit magnitude
     z = jnp.zeros_like(supply.psi_s_mpa)
     for _ in range(_N_DPSI_ITER):
         g = grad_fn(z)
-        h = hess_diag(z)
-        # Concave interior: h < 0. Damped Newton with a bounded step; the
-        # tanh bound keeps early iterations stable far from the optimum.
-        step = g / (jnp.abs(h) + 1e-6)
-        z = z + jnp.tanh(step)
+        z = z + jnp.clip(4.0 * g / g_scale, -0.5, 0.5)
 
     _, (dpsi_star, chi_star) = profit(z)
     ci_star = chi_star * ca_pa
     vcmax25, rjv25 = capacities_from_chi(
         chi=chi_star, ci_pa=ci_star, gamma_star_pa=gamma_star,
         big_k_pa=big_k, tg_k=tg_k, iabs=iabs, phi0=phi0, cfg=pcfg)
+
+    # Supply-utilisation factor: at an interior optimum the chi fixed point
+    # closes A_demand = A_coordination and this is ~1; at the DRY corner the
+    # chi clip + the mj smooth floor leave a phantom coordination rate while
+    # the supply-side A = gs*ca*(1-chi) -> 0 — the ratio scales the
+    # capacities smoothly to zero with the supply (review-run defect fix).
+    from legoesm.land.p_model import C_STAR as _CS
+    gs_star = supply.lsc_mol * dpsi_star / (DIFFUSIVITY_RATIO_H2O_CO2 * d_frac)
+    a_dem = gs_star * (ca_pa / acclim.ps_ema) * (1.0 - chi_star) * 1e6
+    mj_s = _smooth_floor(
+        (ci_star - gamma_star) / (ci_star + 2.0 * gamma_star),
+        _CS + pcfg.mj_floor_eps, pcfg.mj_floor_width)
+    k_s = (_CS / mj_s) ** (2.0 / 3.0)
+    a_coord = phi0 * iabs * mj_s * jnp.sqrt(1.0 - k_s)
+    supply_factor = jnp.clip(a_dem / jnp.maximum(a_coord, 1e-9), 0.0, 1.0)
+    vcmax25 = vcmax25 * supply_factor
+
     return PhydroCapacities(
         vcmax25_leaf=vcmax25, rjv25=rjv25, chi=chi_star, dpsi_mpa=dpsi_star)
 

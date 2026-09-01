@@ -58,22 +58,39 @@ def test_phydro_refused_on_clm_ml():
         step_multilayer_land(st, _forcing(2), cfg, U_min=1.0, dt=1800.0)
 
 
-def test_phydro_two_leaf_step_runs_and_dries_down():
-    """One step runs finitely under phydro; a DRY column carries lower
-    optimality Vcmax than a wet one (the stress now lives in the optimum)."""
-    cfg = _cfg(transpiration_stress="phydro")
-    st_wet = init_multilayer_land_state(2, cfg, theta_init=0.35)
-    st_dry = init_multilayer_land_state(2, cfg, theta_init=0.12)
-    new_wet, resp_wet, _ = step_multilayer_land(
-        st_wet, _forcing(2), cfg, U_min=1.0, dt=1800.0)
-    new_dry, resp_dry, _ = step_multilayer_land(
-        st_dry, _forcing(2), cfg, U_min=1.0, dt=1800.0)
-    for r in (resp_wet, resp_dry):
+def test_phydro_two_leaf_step_runs_and_switch_binds():
+    """One step runs finitely under phydro, and the switch CHANGES the
+    fluxes relative to beta_theta on a water-limited column (the empirical
+    multiplier is replaced by the profit optimum — a step-level flux
+    inequality between wet/dry columns is confounded by soil evaporation
+    and the energy partition, so the binding-switch check is the honest
+    step-level assertion; the optimum-level drought response is pinned in
+    test_phydro.py)."""
+    cfg_ph = _cfg(transpiration_stress="phydro")
+    cfg_bt = _cfg()
+    st = init_multilayer_land_state(2, cfg_ph, theta_init=0.14)
+    _, resp_ph, _ = step_multilayer_land(
+        st, _forcing(2), cfg_ph, U_min=1.0, dt=1800.0)
+    _, resp_bt, _ = step_multilayer_land(
+        st, _forcing(2), cfg_bt, U_min=1.0, dt=1800.0)
+    for r in (resp_ph, resp_bt):
         assert np.all(np.isfinite(np.asarray(r.T_sfc)))
         assert np.all(np.isfinite(np.asarray(r.lhflx)))
-    # Drier soil -> lower latent flux through the profit optimum (no
-    # empirical multiplier is applied under phydro).
-    assert float(jnp.mean(resp_dry.lhflx)) <= float(jnp.mean(resp_wet.lhflx)) + 1e-6
+    assert not np.allclose(np.asarray(resp_ph.lhflx),
+                           np.asarray(resp_bt.lhflx), atol=1e-3)
+    # And the SUPPLY responds to drying: a drier column has lower lsc.
+    from legoesm.land.phydro import soil_root_supply
+    from legoesm.land.soil_grid import make_soil_grid
+    grid = make_soil_grid(cfg_ph.soil_grid)
+    st_dry = init_multilayer_land_state(2, cfg_ph, theta_init=0.08)
+    nlev = st.theta_soil.shape[1]
+    rf = jnp.full((2, nlev), 1.0 / nlev)
+    lai = jnp.full((2,), 3.0)
+    sup_wet = soil_root_supply(st.psi_soil, st.theta_soil, grid.dz, rf, lai,
+                               cfg_ph.hydraulics, cfg_ph.phydro)
+    sup_dry = soil_root_supply(st_dry.psi_soil, st_dry.theta_soil, grid.dz,
+                               rf, lai, cfg_ph.hydraulics, cfg_ph.phydro)
+    assert float(sup_dry.lsc_mol[0]) < float(sup_wet.lsc_mol[0])
 
 
 def test_beta_theta_default_unchanged():
