@@ -194,3 +194,37 @@ sites (US-SRM, US-Var) are stage-1 hold-outs.
   logged separately.
 * Pending: pre-registered rule 2 — (0.040, 60) vs default on the 7 held-out
   sites (array 9597644). No recommendation until that returns.
+
+
+## STAGE-1 FINAL VERDICT (hold-out evaluated; closed)
+
+**No tuned value is recommended.** The interior training optimum
+(kphio=0.040, beta=60) does NOT beat the default on the held-out half
+(0.8389 vs 0.8370) — pre-registered rule 2 fires: the +6.5% training
+improvement (+13.9% GPP-only) was overfitting to the training sites'
+composition. Defaults (0.081785, 146) stand.
+
+Reading (PLAUSIBLE): the diagnostic-mode GPP overshoot is real but
+heterogeneous across sites, and a single GLOBAL scalar kphio cannot reduce it
+without degrading other sites in equal measure. The two live follow-up levers,
+in order: (1) the factor-of-two light-convention question (mechanism check on
+the leaf-level Iabs/kphio absorptance convention vs the host canopy's own
+absorption — a code-reading + oracle exercise, no GPU); (2) per-PFT or
+per-climate kphio (a shape='n_pft' spec change - a real scope decision, not
+taken unilaterally).
+
+## Stage-2 dry-site ladder — grid FIXED from the measured screen
+
+Slice: `gplant_mol` x `minlwp_mpa` (ranked 1 and 2 by the sensitivity screen;
+gamma_cost ranked last and is dropped). Directions from the screen: LOWER
+gplant improved both fluxes (best screened point 1e-3, near the screened edge);
+SHALLOWER minlwp (-1.0) improved GPP. Grid:
+
+* `gplant_mol`: 5e-4 (spec floor), 1e-3, 2e-3, 4e-3 (default)
+* `minlwp_mpa`: -1.0, -1.5, -2.0 (default)
+* anchor arm: `transpiration_stress=beta_theta`, same P-model bundle
+* sites: US-SRM, US-Whs, US-Ton, US-Var, FR-Pue (hold-outs released — the
+  stage-1 verdict above is fixed and published before any stage-2 run touches
+  them)
+* objective and "pays" rule as pre-registered in the stage-2 amendment
+  (majority of dry sites, per-site normalised).
