@@ -402,7 +402,6 @@ def run_legoesm(output: Path, arm: str, end_step: int, capture_start: int) -> di
             "no_tracer_vertical_transport",
             "no_primary_transport_average",
             "no_adaptive_implicit_momentum",
-            "no_adaptive_implicit_momentum",
         },
         f"bad arm {arm}",
     )
@@ -978,6 +977,7 @@ def main() -> int:
             "baseline",
             "no_tracer_vertical_transport",
             "no_primary_transport_average",
+            "no_adaptive_implicit_momentum",
         ),
         default="baseline",
     )
