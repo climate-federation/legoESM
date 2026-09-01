@@ -57,12 +57,20 @@ def _model_config(
         # NEMO key_RK3: stprk3_stg.F90:112-249,519-559 restarts tracer
         # stages from Kbb with dt/3, dt/2, and dt.
         tracer_time_integrator="rk3_ws",
+        # key_RK3 dispatches FCT to fct_up1_2stp, whose half-step upstream
+        # guess and averaged full-step low-order flux are at
+        # traadv_fct.F90:470-641.
+        tracer_fct_low_order_predictor="nemo_rk3_two_step",
         # stprk3.F90:194-207 swaps Kaa into Kmm between stages;
         # stprk3_stg.F90:250-303 builds each tracer transport from that Kmm.
         tracer_rk3_transport_time_levels="nemo_kmm",
         momentum_advection="flux_form",
         momentum_flux_scheme="upwind3",
         momentum_time_integrator="rk3_ws",
+        # HYB installs the external-mode Kaa mean at every stage and builds
+        # zFu/zFv with the distinct un_adv/vn_adv transport mean.
+        rk3_ws_stage_barotropic_correction=True,
+        rk3_ws_momentum_transport_reconcile=True,
         # ln_dynadv_up3 dispatches to dynadv_up3 (dynadv.F90:87-89); its
         # vertical UP3 flux is dynadv_up3.F90:239-365. dynzad is dead here.
         vertical_momentum_scheme="nemo_up3",

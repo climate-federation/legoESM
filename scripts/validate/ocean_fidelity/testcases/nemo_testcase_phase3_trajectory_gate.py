@@ -2,8 +2,11 @@
 """First-divergence trajectory gate for the certified NEMO testcases.
 
 The NEMO records are the Nbb/before entry state.  legoESM's card initial state
-therefore maps to kt=1 and one completed ``model.step`` maps to kt=2.  The gate
-stops immediately after the first step containing an over-bar field.
+therefore maps to kt=1 and one completed ``model.step`` maps to kt=2.  The
+default gate stops immediately after first debt.  ``--continue-after-first``
+is the explicit owner-exhausted sweep arm: it preserves that first-divergence
+record and walks the remaining registered states without pretending they have
+an exact entering prefix.
 """
 
 from __future__ import annotations
@@ -145,7 +148,10 @@ def mark_uninformative(row: dict, field: str, kt: int, reference, mask) -> dict:
     return row
 
 
-def run(case: str, oracle_root: Path, max_step: int, *, plant=False) -> dict:
+def run(
+    case: str, oracle_root: Path, max_step: int, *, plant=False,
+    continue_after_first=False,
+) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -197,8 +203,10 @@ def run(case: str, oracle_root: Path, max_step: int, *, plant=False) -> dict:
         })
         exact_prefix = exact_prefix and exact_here
         if over:
-            first_over_bar = {"kt": kt, "fields": over}
-            break
+            if first_over_bar is None:
+                first_over_bar = {"kt": kt, "fields": over}
+            if not continue_after_first:
+                break
         if kt < max_step:
             state = model.step(state, dt=card.dt_s)
 
@@ -222,13 +230,18 @@ def run(case: str, oracle_root: Path, max_step: int, *, plant=False) -> dict:
                 cfg.tracer_rk3_transport_time_levels),
             "rk3_ws_stage_barotropic_correction": (
                 cfg.rk3_ws_stage_barotropic_correction),
+            "rk3_ws_momentum_transport_reconcile": (
+                cfg.rk3_ws_momentum_transport_reconcile),
+            "tracer_fct_low_order_predictor": (
+                cfg.tracer_fct_low_order_predictor),
         },
         "first_over_bar": first_over_bar,
         "steps": steps,
         "unmeasured": [
             "NEMO per-term tendencies at the first divergent step",
-            "OVERFLOW BBL transport until LOCK is owned",
-            "trajectory after the first over-bar step",
+            "stage-coupled OVERFLOW BBL transport and tendency",
+            *([] if continue_after_first else
+              ["trajectory after the first over-bar step"]),
         ],
     }
 
@@ -240,11 +253,13 @@ def main() -> int:
     parser.add_argument("--max-step", type=int, default=3)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant", action="store_true")
+    parser.add_argument("--continue-after-first", action="store_true")
     args = parser.parse_args()
     require(args.max_step >= 1, "max-step must be positive")
     report = run(
         args.case, args.oracle_dir or DEFAULT_ORACLE_ROOTS[args.case],
-        args.max_step, plant=args.plant)
+        args.max_step, plant=args.plant,
+        continue_after_first=args.continue_after_first)
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.write_text(text)

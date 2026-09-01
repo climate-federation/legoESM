@@ -53,6 +53,23 @@ def test_nemo_ws_transport_default_is_conditional_and_legacy_is_explicit():
         np.testing.assert_array_equal(np.asarray(default), np.asarray(explicit))
 
 
+def test_nemo_two_step_fct_is_a_live_real_flux_arm():
+    """The source-ordered FCT predictor must move a nontrivial WS result."""
+    set_policy(PrecisionPolicy.fp64())
+    card = build_lock_exchange_zco_card()
+    cfg_two = card.recipe.model_config
+    cfg_one = cfg_two._replace(tracer_fct_low_order_predictor="one_step")
+    state_two = model_module.LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg_two).step(
+            card.recipe.initial_state, dt=card.dt_s)
+    state_one = model_module.LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg_one).step(
+            card.recipe.initial_state, dt=card.dt_s)
+    movement = np.max(np.abs(
+        np.asarray(state_two.T.data) - np.asarray(state_one.T.data)))
+    assert movement > 1.0e-12
+
+
 def test_nemo_ws_tracer_stage_polynomial(monkeypatch):
     rate = 0.2
 

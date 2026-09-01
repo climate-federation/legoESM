@@ -9,10 +9,11 @@ Preregistration: `a6ff36fec1f`
 ## Verdict
 
 **EOS and the selector implementations are complete; trajectory parity remains
-DEBT at the first evolved LOCK state, kt=2.**  The exact state prefix ends
-at kt=1.  In accordance with the preregistered first-divergence rule, neither
-kt=3 nor the OVERFLOW-zps trajectory was scored.  This is a stopped, owned
-first divergence—not a trajectory-match claim.
+DEBT at the first evolved state of both cases, kt=2.**  The exact state prefix
+ends at kt=1.  After the currently measurable LOCK kt=2 owners were exhausted,
+the explicit owner-exhausted sweep scored kt=3 and OVERFLOW-zps while retaining
+kt=2 as the registered first-over-bar step.  These are red measurements, not
+trajectory-match claims.
 
 | dependency | result | disposition |
 |---|---:|---|
@@ -20,12 +21,14 @@ first divergence—not a trajectory-match claim.
 | stage-1 LOCK full u RHS (at-rest HPG owner) | `3.6863e-17` | AT-BAR |
 | LOCK time-level ladder | Kaa `3,2,3`; Kmm `1,3,2` | VERIFIED |
 | LOCK kt=1 entry | T/S/u/SSH exact; v structurally absent | exact prefix |
-| LOCK kt=2 T | `1.2970e-13` (`6.93e6` improvement) | DEBT |
-| LOCK kt=2 u | `5.7155e-10` | DEBT |
+| LOCK kt=2 T | `1.5821e-13` normalized (`4.7464e-12 K` absolute) | DEBT |
+| LOCK kt=2 u | `1.7121e-10 m/s` after stage-transport reconcile | DEBT |
 | LOCK kt=2 S | exact, but oracle `n_unique=1` | UNINFORMATIVE |
 | LOCK kt=2 SSH | `4.7797e-28`, but oracle identically zero | UNINFORMATIVE |
 | LOCK kt=2 v | no active meridional face; stored zeros checked | UNMEASURED |
-| kt>=3 and OVERFLOW trajectory | stopped behind LOCK kt=2 | UNMEASURED |
+| LOCK kt=3 T/S/u/SSH | `2.03e-9 / 2.02e-9 / 2.05e-9 / 4.04e-8` | DEBT |
+| OVERFLOW kt=2 T/S/u/SSH | `5.26e-7 / 4.93e-7 / 8.24e-6 / 2.54e-4` | DEBT |
+| OVERFLOW kt=3 T/S/u/SSH | `2.95e-6 / 2.76e-6 / 1.09e-4 / 1.15e-3` | DEBT |
 
 Every candidate floating array in both gates is `float64`, the entry point
 sets and verifies `PrecisionPolicy.fp64()`, and the reported JAX backend was
@@ -49,6 +52,8 @@ selectable options:
 - `nemo_up3` vertical momentum advection;
 - `rk3_ws` for momentum and tracer stage coefficients;
 - `nemo_kmm` stage-resolved tracer transports;
+- `nemo_rk3_two_step` FCT low-order prediction;
+- WS external-mode and distinct advecting-transport reconciliation;
 - `nemo_teos10` with `eos_depth="geometric"`.
 
 The default configuration of every unrelated card remains unchanged.  The
@@ -83,6 +88,8 @@ The cards now resolve the oracle programs per case:
 | vertical momentum | `nemo_up3` | `nemo_up3` | `dynadv.F90:78-90`; `dynadv_up3.F90:250-358` |
 | outer/tracer stages | `rk3_ws` | `rk3_ws` | `stprk3.F90:184-207`; `stprk3_stg.F90:535-570` |
 | tracer transport levels | `nemo_kmm` | `nemo_kmm` | `stprk3.F90:194-207`; `stprk3_stg.F90:160-168,195-213,225-303,456-519` |
+| FCT low-order predictor | `nemo_rk3_two_step` | `nemo_rk3_two_step` | `traadv_fct.F90:153-161,470-641` |
+| stage velocity/transport reconcile | Kaa external mean + `un_adv/hu` | same | `stprk3_stg.F90:257-274,433-446` |
 
 **Resolved default decision (standing Rule 3):** the stored selector sentinel
 resolves at model validation to `nemo_kmm` only when
@@ -146,11 +153,25 @@ evidence class:
    flux/FCT path.  Against the same kt=2 dump, selecting it moves T from
    `8.9924674545e-7` to `1.2970365522e-13`, a `6.933087e6` improvement.  The
    remaining T value is still DEBT against the registered `1e-15` bar.
-4. **FCT two-step program — UNMEASURED.**  NEMO dispatches `fct_up1_2stp`
-   under `key_RK3` (`traadv_fct.F90:153-161,470-641`), while legoESM still has
-   its generic FCT staging.  Source difference is not causal ownership:
-   limiter coefficients, antidiffusive fluxes, and a two-model intervention
-   have not been measured.
+4. **Distinct WS advecting transport — PLAUSIBLE PARTIAL OWNER.**  NEMO
+   replaces the live Kmm depth mean by `un_adv/hu` in `zFu/zFv` while retaining
+   Kmm as the advected velocity (`stprk3_stg.F90:257-274,316,326-331`).  The
+   stage-mean-only arm worsens u from `5.7155454103e-10` to
+   `5.9807602992e-10`; adding the distinct transport reduces it to
+   `1.7120868406e-10 m/s` (70%).  Debt remains, so this is partial ownership.
+5. **Horizontal UP3 spatial recurrence — CONFIRMED EXONERATED.**  A local
+   hypothesis initially read `dynadv_up3`'s formal `Kbb` name without
+   reconciling its caller.  The live RK3 caller passes `Kmm` into both slots.
+   Replaying `dynadv_up3.F90:141-212` against the baseline/no-advection NEMO
+   pair matches the causal stage-2 tendency at `4.7314e-19` absolute.
+6. **FCT two-step program — PLAUSIBLE PARTIAL OWNER.**  The shared selectable
+   implementation transcribes the half-step upstream guess and averaged
+   full-step low-order flux (`traadv_fct.F90:470-641`).  Within the otherwise
+   identical faithful stage-reconcile arm it reduces LOCK T from
+   `7.4358e-12` to `4.7464e-12 K`; it remains over bar.
+7. **Vertical viscosity — CONFIRMED EXONERATED.**  NEMO's `rn_avm0=0` control
+   changes stage 3 by `1.1363e-8 m/s`, but the paired legoESM `A_v=0` arm leaves
+   the residual at `1.7120953e-10`, unchanged at the relevant scale.
 
 Rule-1e reconciliation of the velocity scale is explicit rather than an
 average.  The review quoted `1.27e-12 m/s` without a statistic definition.  A
@@ -161,8 +182,23 @@ m/s`), with wet-point mean absolute error `3.9333948945e-12 m/s`, RMS
 are different reductions and are therefore not interchangeable.  Both the
 review value and every reproduced field norm remain at least six orders below
 the `1.1354e-3 m/s` stage diagnostic, so the scaling refutation and the
-exoneration are unchanged.  Ownership of the remaining u residual is
-UNMEASURED.
+exoneration are unchanged.  Ownership of the remaining `1.7121e-10` u
+residual is UNMEASURED.
+
+## Owner-exhausted trajectory continuation
+
+The continuation flag is explicit and defaults off.  It preserves kt=2 as the
+first-over-bar record and marks later rows as entering without an exact prefix.
+LOCK grows to the values in the verdict table at kt=3.  OVERFLOW-zps is exact
+at kt=1 and first diverges at kt=2 in T, S, u, and SSH.  The OVERFLOW finer-
+cadence oracle used the certified zps binary/configuration on one CPU process,
+changing only `nn_itend=3` and `nn_stock=1`; hashes pin both namelists, output,
+and all three dumps.  No certified configuration or binary was modified.
+
+OVERFLOW's u/SSH debt precedes any defensible BBL ownership claim: BBL affects
+tracers, not the external-mode SSH discrepancy.  The canonical BBL kernel
+exists and the card pins `nn_bbl_adv=2, rn_gambbl=20`, but its stage-coupled
+trajectory contribution remains UNMEASURED and is not credited either way.
 
 ## Gates, controls, test reconciliation, and artifacts
 
@@ -188,6 +224,11 @@ difference.  The Roquet set hash-pins all 52 TEOS-10 density coefficients from
 local IEEE-754 bytes and proves that a planted `1e-11` coefficient perturbation
 changes the digest, without reading the NEMO checkout.
 
+For this continuation, the exact focused invocation ran **58 tests across six
+files**: `5 WS tracer + 11 card + 12 flux-form momentum + 17 config footguns +
+6 first-divergence gate + 7 trajectory gate`; all 58 passed.  This count is
+separate from, and does not revise or average, either historical count above.
+
 Full artifact hashes are committed in
 `nemo_testcases_l1_phase3_artifacts.sha256`.  The trajectory and diagnostic
 JSONs are external run products under
@@ -196,11 +237,10 @@ receipt reproducible without committing quota-heavy binary dumps.
 
 ## Loud UNMEASURED register
 
-- owner of the final `5.7155e-10` wet-point L-infinity u residual; the
-  per-stage barotropic correction is causally exonerated;
+- owner of the final LOCK `1.7121e-10` wet-point L-infinity u residual after
+  distinct stage transport; live-Kmm UP3 and vertical viscosity are exonerated;
 - individual NEMO/legoESM FCT limiter coefficients and antidiffusive fluxes;
-- every LOCK state at kt>=3, by the stop rule;
-- every OVERFLOW-zps trajectory state and its BBL transport, because LOCK is
-  still red;
+- OVERFLOW-zps kt=2 owner decomposition and stage-coupled BBL transport;
+- LOCK and OVERFLOW states beyond kt=3;
 - long-trajectory phenomenology and statistical equivalence, which are beyond
   this first-divergence dispatch.

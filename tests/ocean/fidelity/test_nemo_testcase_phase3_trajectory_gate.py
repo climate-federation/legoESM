@@ -56,6 +56,15 @@ def test_report_selector_inventory_includes_eos_depth_and_resolved_substeps():
     assert '"eos_depth": cfg.eos_depth' in source
     assert '"n_barotropic_substeps": cfg.barotropic.n_barotropic_substeps' in source
     assert '"tracer_rk3_transport_time_levels"' in source
+    assert '"tracer_fct_low_order_predictor"' in source
+    assert '"rk3_ws_momentum_transport_reconcile"' in source
+
+
+def test_continue_after_first_is_explicit_and_preserves_first_debt():
+    source = GATE_PATH.read_text()
+    assert "continue_after_first=False" in source
+    assert "if first_over_bar is None:" in source
+    assert "if not continue_after_first:" in source
 
 
 def test_uniform_and_zero_rows_are_not_allowed_to_imply_corroboration():

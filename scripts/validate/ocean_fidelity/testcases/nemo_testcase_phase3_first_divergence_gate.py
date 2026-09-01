@@ -2,12 +2,11 @@
 """Own the LOCK kt=2 first divergence with stage-level oracle evidence.
 
 This gate is intentionally diagnostic and red.  It establishes that the live
-EOS/HPG stage-1 RHS is at the campaign bar, then inventories the first active
-program mismatch: NEMO's stage-3 tracer operator consumes the stage-2 Kmm
-transport, whereas legoESM's split step builds every tracer substage from the
-single final corrected velocity.  The source/call-site register is written to
-the JSON report; numerical rows are computed from the committed instrument's
-binary stage records.
+EOS/HPG stage-1 RHS is at the campaign bar, measures the Kmm tracer program,
+the distinct WS advecting transport, literal live-Kmm UP3, two-step FCT, and
+vertical-viscosity controls, and leaves the remaining residual loud.  The
+source/call-site register is written to the JSON report; numerical rows are
+computed from committed instrument records.
 """
 
 from __future__ import annotations
@@ -27,6 +26,10 @@ DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_stage_kt1")
 DEFAULT_TRAJECTORY_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_3")
+NO_ADV_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_stage_kt1_no_adv")
+NO_AVM_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_stage_kt1_no_avm")
 NEMO_ROOT = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2")
 EXPECTED_DIMS = (134, 7, 21)
 EXPECTED_LEVELS = {
@@ -333,14 +336,28 @@ def run(
     oracle_u = entry["u"][..., :nlev]
     state_kmm = model.step(initial, dt=card.dt_s)
     cfg_frozen = card.recipe.model_config._replace(
-        tracer_rk3_transport_time_levels="frozen_final")
+        tracer_rk3_transport_time_levels="frozen_final",
+        rk3_ws_stage_barotropic_correction=False,
+        rk3_ws_momentum_transport_reconcile=False)
     state_frozen = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, cfg_frozen).step(
             initial, dt=card.dt_s)
+    cfg_baseline = card.recipe.model_config._replace(
+        rk3_ws_stage_barotropic_correction=False,
+        rk3_ws_momentum_transport_reconcile=False)
+    state_baseline = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg_baseline).step(
+            initial, dt=card.dt_s)
     cfg_stage_baro = card.recipe.model_config._replace(
-        rk3_ws_stage_barotropic_correction=True)
+        rk3_ws_stage_barotropic_correction=True,
+        rk3_ws_momentum_transport_reconcile=False)
     state_stage_baro = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, cfg_stage_baro).step(
+            initial, dt=card.dt_s)
+    cfg_one_step_fct = card.recipe.model_config._replace(
+        tracer_fct_low_order_predictor="one_step")
+    state_one_step_fct = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg_one_step_fct).step(
             initial, dt=card.dt_s)
 
     frozen_T_row = score(
@@ -349,11 +366,17 @@ def run(
     frozen_T_row["verdict"] = False
     rows.append(frozen_T_row)
     kmm_T_row = score(
-        "LOCK_EXCHANGE-zco.kt2.nemo_kmm_transport.T", oracle_T,
-        np.asarray(state_kmm.T.data), masks["T"])
+        "LOCK_EXCHANGE-zco.kt2.nemo_stage_reconcile_two_step_fct.T",
+        oracle_T, np.asarray(state_kmm.T.data), masks["T"])
     rows.append(kmm_T_row)
-    baseline_u = np.asarray(state_kmm.u.data)[:, 1:, :]
+    one_step_T_row = score(
+        "LOCK_EXCHANGE-zco.kt2.nemo_stage_reconcile_one_step_fct.T",
+        oracle_T, np.asarray(state_one_step_fct.T.data), masks["T"])
+    one_step_T_row["verdict"] = False
+    rows.append(one_step_T_row)
+    baseline_u = np.asarray(state_baseline.u.data)[:, 1:, :]
     stage_baro_u = np.asarray(state_stage_baro.u.data)[:, 1:, :]
+    full_u = np.asarray(state_kmm.u.data)[:, 1:, :]
     baseline_u_row = score(
         "LOCK_EXCHANGE-zco.kt2.poststage_only.u", oracle_u,
         baseline_u, masks["u"])
@@ -363,6 +386,56 @@ def run(
         stage_baro_u, masks["u"])
     stage_baro_u_row["verdict"] = False
     rows.append(stage_baro_u_row)
+    full_u_row = score(
+        "LOCK_EXCHANGE-zco.kt2.stage_mean_and_transport_reconcile.u",
+        oracle_u, full_u, masks["u"])
+    rows.append(full_u_row)
+
+    # Direct source-form causal control: the existing NEMO no-advection run
+    # differs only by ln_dynadv_OFF.  Stage 1 is identical, so its stage-2
+    # difference divided by dt/2 is the applied UP3 tendency.  Re-evaluate
+    # dynadv_up3.F90:141-212 from the dumped live Kmm u and zFu.  Crucially,
+    # stprk3_stg.F90:316,326-331 passes Kmm into BOTH velocity-level slots.
+    no_adv_path = NO_ADV_ROOT / "oracle_stage_kt00000001_s2.bin"
+    require(no_adv_path.is_file(), f"missing {no_adv_path}")
+    no_adv_stage2 = read_stage(no_adv_path)
+    artifacts["control:no_adv_stage2"] = sha256(no_adv_path)
+    u_kmm = stages[1]["u"][..., :nlev]
+    Fu = transports[2]["Fu"][..., :nlev]
+    lap = np.roll(u_kmm, 1, axis=1) - 2.0 * u_kmm + np.roll(
+        u_kmm, -1, axis=1)
+    u_sum = u_kmm + np.roll(u_kmm, -1, axis=1)
+    lap_up = np.where(u_sum > 0.0, lap, np.roll(lap, -1, axis=1))
+    flux = 0.25 * (Fu + np.roll(Fu, -1, axis=1)) * (
+        u_sum - lap_up / 3.0)
+    area = np.asarray(card.recipe.grid.area)
+    area_u = 0.5 * (area + np.roll(area, 1, axis=1))
+    area_u = np.concatenate([area_u, area_u[:, :1]], axis=1)[:, 1:]
+    literal_hadv = -(flux - np.roll(flux, 1, axis=1)) / np.maximum(
+        area_u[..., None] * h_u_np[:, 1:, :], 1.0e-12)
+    literal_hadv -= thickness_weighted_mean(
+        literal_hadv, h_u_np[:, 1:, :])[..., None]
+    oracle_hadv = (
+        stages[2]["u"][..., :nlev]
+        - no_adv_stage2["u"][..., :nlev]) * (2.0 / card.dt_s)
+    rows.append(score(
+        "LOCK_EXCHANGE-zco.kt1.stage2.literal_live_Kmm_UP3",
+        oracle_hadv, literal_hadv, masks["u"]))
+
+    no_avm_path = NO_AVM_ROOT / "oracle_stage_kt00000001_s3.bin"
+    require(no_avm_path.is_file(), f"missing {no_avm_path}")
+    no_avm_stage3 = read_stage(no_avm_path)
+    artifacts["control:no_avm_stage3"] = sha256(no_avm_path)
+    cfg_no_avm = card.recipe.model_config._replace(A_v=0.0)
+    state_no_avm = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg_no_avm).step(
+            initial, dt=card.dt_s)
+    no_avm_row = score(
+        "LOCK_EXCHANGE-zco.kt2.no_vertical_viscosity.u",
+        no_avm_stage3["u"][..., :nlev],
+        np.asarray(state_no_avm.u.data)[:, 1:, :], masks["u"])
+    no_avm_row["verdict"] = False
+    rows.append(no_avm_row)
 
     source_files = {
         "stprk3": NEMO_ROOT / "src/OCE/stprk3.F90",
@@ -378,6 +451,7 @@ def run(
     kmm_T_error = kmm_T_row["normalized_max_abs"]
     baseline_u_error = baseline_u_row["normalized_max_abs"]
     stage_baro_u_error = stage_baro_u_row["normalized_max_abs"]
+    full_u_error = full_u_row["normalized_max_abs"]
     return {
         "format": "nemo-testcase-l1-phase3-first-divergence-v2",
         "case": card.case,
@@ -414,11 +488,28 @@ def run(
                 "per_stage_u_error": stage_baro_u_error,
                 "movement": stage_baro_u_error - baseline_u_error,
             },
+            "momentum_stage_advecting_transport": {
+                "classification": "PLAUSIBLE_PARTIAL_OWNER",
+                "stage_mean_only_u_error": stage_baro_u_error,
+                "stage_mean_plus_transport_u_error": full_u_error,
+                "movement": full_u_error - stage_baro_u_error,
+                "reason": "70% residual reduction, but the row remains over bar",
+            },
+            "horizontal_up3_spatial_operator": {
+                "classification": "CONFIRMED_EXONERATED",
+                "evidence": "literal live-Kmm source recurrence matches the no-advection control",
+            },
+            "vertical_viscosity": {
+                "classification": "CONFIRMED_EXONERATED",
+                "evidence": "matched rn_avm0/A_v=0 control leaves the residual unchanged",
+            },
             "fct_stage_kernel": {
-                "classification": "UNMEASURED",
-                "reason": (
-                    "source program differs, but limiter coefficients and a "
-                    "two-model causal residual movement are not measured"),
+                "classification": "PLAUSIBLE_PARTIAL_OWNER",
+                "one_step_error": one_step_T_row["normalized_max_abs"],
+                "two_step_error": kmm_T_row["normalized_max_abs"],
+                "movement": (kmm_T_row["normalized_max_abs"]
+                             - one_step_T_row["normalized_max_abs"]),
+                "reason": "causal improvement, but the row remains over bar",
             },
         },
         "source_register": {
@@ -441,10 +532,10 @@ def run(
         "artifacts_sha256": artifacts,
         "unmeasured": [
             "individual FCT limiter coefficients and antidiffusive fluxes",
-            "owner of the remaining kt=2 u residual; the per-stage "
-            "barotropic correction is exonerated",
-            "kt>=3 trajectory (stopped at first over-bar step)",
-            "OVERFLOW-zps trajectory (LOCK dependency remains red)",
+            "owner of the remaining kt=2 u residual after stage transport; "
+            "live-Kmm horizontal UP3 and vertical viscosity are exonerated",
+            "kt>=3 and OVERFLOW are reported by the separate explicit "
+            "owner-exhausted continuation artifact, not this first-step gate",
         ],
     }
 

@@ -468,6 +468,9 @@ def _compute_advection_flux_div(
     linssh_top_flux: bool = False,
     tr_before: jnp.ndarray | None = None,
     return_h_fluxes: bool = False,
+    fct_low_order_predictor: str = "one_step",
+    fct_base_thickness=None,
+    fct_after_thickness=None,
 ):
     """Compute advection flux divergence for a single tracer field.
 
@@ -554,6 +557,9 @@ def _compute_advection_flux_div(
             # limiting), so the limiter's after-thickness must not move
             # (codex 2026-08-10 on the h_new certification fix).
             fixed_thickness=linssh_top_flux,
+            low_order_predictor=fct_low_order_predictor,
+            base_thickness=fct_base_thickness,
+            after_thickness=fct_after_thickness,
         )
     elif tracer_advection == "ppm":
         from legoesm.ocean.advection import (
@@ -712,6 +718,9 @@ def compute_advection_flux_div_pair(
     tr_a_before: jnp.ndarray | None = None,
     tr_b_before: jnp.ndarray | None = None,
     return_b_h_fluxes: bool = False,
+    fct_low_order_predictor: str = "one_step",
+    fct_base_thickness=None,
+    fct_after_thickness=None,
 ):
     """Advection flux divergence for TWO tracers (T, S) in one pass.
 
@@ -766,6 +775,9 @@ def compute_advection_flux_div_pair(
             recon_fill_mask=recon_fill_mask,
             linssh_top_flux=linssh_top_flux,
             tr_before=tr_a_before,
+            fct_low_order_predictor=fct_low_order_predictor,
+            fct_base_thickness=fct_base_thickness,
+            fct_after_thickness=fct_after_thickness,
         )
         out_b = _compute_advection_flux_div(
             tr_b, tracer_advection, mass_flux_u, mass_flux_v,
@@ -774,6 +786,9 @@ def compute_advection_flux_div_pair(
             linssh_top_flux=linssh_top_flux,
             tr_before=tr_b_before,
             return_h_fluxes=return_b_h_fluxes,
+            fct_low_order_predictor=fct_low_order_predictor,
+            fct_base_thickness=fct_base_thickness,
+            fct_after_thickness=fct_after_thickness,
         )
         if return_b_h_fluxes:
             div_b, vert_b, sf_u, sf_v = out_b
@@ -995,6 +1010,7 @@ def _nemo_ws_rk3_tracer_pair_step(
     recon_fill_mask: jnp.ndarray | None = None,
     linssh_top_flux: bool = False,
     stage_transport_geometry=None,
+    fct_low_order_predictor: str = "one_step",
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """NEMO key_RK3 tracer stage program (Wicker--Skamarock form).
 
@@ -1013,7 +1029,7 @@ def _nemo_ws_rk3_tracer_pair_step(
     if len(stage_transport_geometry) != 3:
         raise ValueError("stage_transport_geometry must contain exactly 3 stages")
 
-    def _flux_pair(a_val, b_val, stage_dt, stage_index):
+    def _flux_pair(a_val, b_val, stage_dt, stage_index, h_after):
         mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage = (
             stage_transport_geometry[stage_index])
         (dh_a, dv_a), (dh_b, dv_b) = compute_advection_flux_div_pair(
@@ -1021,6 +1037,11 @@ def _nemo_ws_rk3_tracer_pair_step(
             w_stage, h_stage, hu_stage, hv_stage, grid, stage_dt,
             recon_fill_mask=recon_fill_mask,
             linssh_top_flux=linssh_top_flux,
+            tr_a_before=tr_a,
+            tr_b_before=tr_b,
+            fct_low_order_predictor=fct_low_order_predictor,
+            fct_base_thickness=h_k_old,
+            fct_after_thickness=h_after,
         )
         return dh_a + dv_a, dh_b + dv_b
 
@@ -1031,13 +1052,15 @@ def _nemo_ws_rk3_tracer_pair_step(
 
     h_one_third = h_k_old + (h_k_new - h_k_old) / 3.0
     h_one_half = 0.5 * (h_k_old + h_k_new)
-    fd0_a, fd0_b = _flux_pair(tr_a, tr_b, dt / 3.0, 0)
+    fd0_a, fd0_b = _flux_pair(
+        tr_a, tr_b, dt / 3.0, 0, h_one_third)
     a1 = _stage(tr_a, fd0_a, dt / 3.0, h_one_third)
     b1 = _stage(tr_b, fd0_b, dt / 3.0, h_one_third)
-    fd1_a, fd1_b = _flux_pair(a1, b1, dt / 2.0, 1)
+    fd1_a, fd1_b = _flux_pair(
+        a1, b1, dt / 2.0, 1, h_one_half)
     a2 = _stage(tr_a, fd1_a, dt / 2.0, h_one_half)
     b2 = _stage(tr_b, fd1_b, dt / 2.0, h_one_half)
-    fd2_a, fd2_b = _flux_pair(a2, b2, dt, 2)
+    fd2_a, fd2_b = _flux_pair(a2, b2, dt, 2, h_k_new)
     return (
         _stage(tr_a, fd2_a, dt, h_k_new),
         _stage(tr_b, fd2_b, dt, h_k_new),
@@ -2960,6 +2983,18 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"tracer_time_integrator must be one of {_valid_time_int}, "
                 f"got {config.tracer_time_integrator!r}")
+        _fct_predictor = getattr(
+            config, "tracer_fct_low_order_predictor", "one_step")
+        if _fct_predictor not in ("one_step", "nemo_rk3_two_step"):
+            raise ValueError(
+                "tracer_fct_low_order_predictor must be 'one_step' or "
+                f"'nemo_rk3_two_step', got {_fct_predictor!r}")
+        if (_fct_predictor == "nemo_rk3_two_step"
+                and (config.tracer_time_integrator != "rk3_ws"
+                     or config.tracer_advection not in ("fct2", "ppm_fct"))):
+            raise ValueError(
+                "tracer_fct_low_order_predictor='nemo_rk3_two_step' "
+                "requires rk3_ws with fct2 or ppm_fct")
         _rk3_transport_levels = getattr(
             config, "tracer_rk3_transport_time_levels", "frozen_final")
         if _rk3_transport_levels not in ("frozen_final", "nemo_kmm"):
@@ -2982,6 +3017,21 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 'tracer_rk3_transport_time_levels="nemo_kmm" does not yet '
                 "support staged GM bolus transports")
+        if getattr(config, "rk3_ws_momentum_transport_reconcile", False):
+            if config.tracer_time_integrator != "rk3_ws" or getattr(
+                    config, "momentum_time_integrator", "euler") != "rk3_ws":
+                raise ValueError(
+                    "rk3_ws_momentum_transport_reconcile requires WS-RK3 "
+                    "momentum and tracers")
+            if not getattr(config, "rk3_ws_stage_barotropic_correction", False):
+                raise ValueError(
+                    "rk3_ws_momentum_transport_reconcile requires "
+                    "rk3_ws_stage_barotropic_correction=True")
+            if (config.momentum_advection != "flux_form"
+                    or config.momentum_flux_scheme != "upwind3"):
+                raise ValueError(
+                    "rk3_ws_momentum_transport_reconcile requires NEMO's "
+                    "flux_form/upwind3 momentum path")
         if getattr(config, "store_salt_flux", False):
             # Refuse-not-ignore: the capture stores "the flux the model
             # applied", which is only well-defined per step on the euler
@@ -3435,7 +3485,8 @@ class LatLonCGridOceanModel:
                    ab2_scope_override: str | None = None,
                    ldf_state=None, z_coord=None, config=None,
                    zad_continuity_dt=None,
-                   zad_freshwater_eta_tendency=None):
+                   zad_freshwater_eta_tendency=None,
+                   momentum_flux_transport_velocity=None):
         """Compute baroclinic tendencies.
 
         ``momentum_only=True`` skips the (T/S-frozen) tracer-diffusion
@@ -3484,6 +3535,7 @@ class LatLonCGridOceanModel:
             ldf_state=ldf_state,
             zad_continuity_dt=zad_continuity_dt,
             zad_freshwater_eta_tendency=zad_freshwater_eta_tendency,
+            momentum_flux_transport_velocity=momentum_flux_transport_velocity,
         )
 
     def tendencies_with_diagnostics(
@@ -4038,16 +4090,36 @@ class LatLonCGridOceanModel:
             u0 = state.u.data
             v0 = state.v.data
 
-            def _mom_pert_ws(u_in, v_in, skip_ldf):
+            def _mom_pert_ws(
+                u_in, v_in, skip_ldf, transport_mean=None,
+            ):
                 st = state._replace(
                     u=state.u.replace(data=u_in * u_mask_3d),
                     v=state.v.replace(data=v_in * v_mask_3d),
                 )
+                transport_velocity = None
+                if transport_mean is not None:
+                    transport_u_mean, transport_v_mean = transport_mean
+                    current_u_mean = (
+                        jnp.sum(u_in * h_u_pre, axis=-1) / H_u_pre
+                        * state.u_mask.data)
+                    current_v_mean = (
+                        jnp.sum(v_in * h_v_pre, axis=-1) / H_v_pre
+                        * state.v_mask.data)
+                    transport_velocity = (
+                        (u_in + (transport_u_mean - current_u_mean)[..., None])
+                        * u_mask_3d,
+                        (v_in + (transport_v_mean - current_v_mean)[..., None])
+                        * v_mask_3d,
+                    )
                 td = self.tendencies(st, surface_forcing, sponge=sponge, dt=dt,
                                      momentum_only=True,
                                      precomputed_geom_density=_geom_density,
                                      grid=_grid, vertex_mask=_vmask,
-                                     skip_lateral_viscosity=skip_ldf, z_coord=z_coord, config=config)
+                                     skip_lateral_viscosity=skip_ldf,
+                                     z_coord=z_coord, config=config,
+                                     momentum_flux_transport_velocity=(
+                                         transport_velocity))
                 _du = td.du_dt.data
                 _dv = td.dv_dt.data
                 _Fu = jnp.sum(_du * h_u_pre, axis=-1) / H_u_pre * state.u_mask.data
@@ -4445,16 +4517,27 @@ class LatLonCGridOceanModel:
                         / H_u_pre * state.u_mask.data)
             target_v = (jnp.sum(state_new.v.data * h_v_pre, axis=-1)
                         / H_v_pre * state.v_mask.data)
+            transport_target_u = (
+                Hu_avg / H_u_pre * state.u_mask.data)
+            transport_target_v = (
+                Hv_avg / H_v_pre * state.v_mask.data)
             u1_raw = u0 + (dt_mom / 3.0) * du_dt_pert
             v1_raw = v0 + (dt_mom / 3.0) * dv_dt_pert
             u1_corr, v1_corr = _replace_stage_mean(
                 u1_raw, v1_raw, target_u, target_v)
-            p1u_corr, p1v_corr = _mom_pert_ws(u1_corr, v1_corr, True)
+            _use_transport_reconcile = getattr(
+                _cfg_b, "rk3_ws_momentum_transport_reconcile", False)
+            _transport_target = (
+                (transport_target_u, transport_target_v)
+                if _use_transport_reconcile else None)
+            p1u_corr, p1v_corr = _mom_pert_ws(
+                u1_corr, v1_corr, True, _transport_target)
             u2_raw = u0 + (dt_mom / 2.0) * p1u_corr
             v2_raw = v0 + (dt_mom / 2.0) * p1v_corr
             u2_corr, v2_corr = _replace_stage_mean(
                 u2_raw, v2_raw, target_u, target_v)
-            p2u_corr, p2v_corr = _mom_pert_ws(u2_corr, v2_corr, False)
+            p2u_corr, p2v_corr = _mom_pert_ws(
+                u2_corr, v2_corr, False, _transport_target)
             u3_raw = u0 + dt_mom * p2u_corr
             v3_raw = v0 + dt_mom * p2v_corr
             u3_corr, v3_corr = _replace_stage_mean(
@@ -4464,8 +4547,26 @@ class LatLonCGridOceanModel:
                 u=state_new.u.replace(data=u3_corr),
                 v=state_new.v.replace(data=v3_corr),
             )
-            _nemo_ws_velocity_stages = (
-                (u0, v0), (u1_corr, v1_corr), (u2_corr, v2_corr))
+            if _use_transport_reconcile:
+                def _transport_stage(u_in, v_in):
+                    mean_u = (jnp.sum(u_in * h_u_pre, axis=-1) / H_u_pre
+                              * state.u_mask.data)
+                    mean_v = (jnp.sum(v_in * h_v_pre, axis=-1) / H_v_pre
+                              * state.v_mask.data)
+                    return (
+                        (u_in + (transport_target_u - mean_u)[..., None])
+                        * u_mask_3d,
+                        (v_in + (transport_target_v - mean_v)[..., None])
+                        * v_mask_3d,
+                    )
+                _nemo_ws_velocity_stages = (
+                    _transport_stage(u0, v0),
+                    _transport_stage(u1_corr, v1_corr),
+                    _transport_stage(u2_corr, v2_corr),
+                )
+            else:
+                _nemo_ws_velocity_stages = (
+                    (u0, v0), (u1_corr, v1_corr), (u2_corr, v2_corr))
 
         # NEMO's WZV call 2 consumes the raw boxcar pssh(Kaa) produced by
         # dyn_spg_ts (:991,1003). Keep that exact within-step operand before
@@ -5391,6 +5492,8 @@ class LatLonCGridOceanModel:
                     _grid, dt, active_3d, recon_fill_mask=_wall_fill_mask,
                     linssh_top_flux=_linssh,
                     stage_transport_geometry=_nemo_ws_stage_transport_geometry,
+                    fct_low_order_predictor=getattr(
+                        _cfg_b, "tracer_fct_low_order_predictor", "one_step"),
                 )
                 _pair_divs = (None, None)
             else:

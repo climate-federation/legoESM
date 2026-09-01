@@ -4116,6 +4116,7 @@ def _up3_reconstruct(far_pos, adv_pos, adv_neg, far_neg, transport):
 
 def _bc_horizontal_momentum_advection_flux_form(
     du_dt, dv_dt, u, v, h_u, h_v, u_mask_3d, v_mask_3d, mask, grid, config,
+    transport_velocity=None,
 ):
     """Flux-form horizontal momentum advection (alternative to the
     vector-invariant PV flux, `_bc_pv_flux`) — the Veros/MOM6/MITgcm form
@@ -4151,7 +4152,9 @@ def _bc_horizontal_momentum_advection_flux_form(
         if scheme == "centered":
             return 0.5 * (adv_pos + adv_neg)
         if scheme == "upwind3":
-            # 3rd-order upwind-biased (NEMO/ROMS UP3); see _up3_reconstruct.
+            # NEMO stprk3_stg.F90:316,326-331 passes Kmm as BOTH dyn_adv
+            # velocity levels, so dynadv_up3.F90:141-191 evaluates the face
+            # value and curvature from the same live WS-stage velocity.
             return _up3_reconstruct(far_pos, adv_pos, adv_neg, far_neg, transport)
         # 1st-order upwind (default).
         return jnp.where(transport > 0.0, adv_pos, adv_neg)
@@ -4164,9 +4167,15 @@ def _bc_horizontal_momentum_advection_flux_form(
     face_dx_v = flux_form_vface_zonal_length(grid)[:, jnp.newaxis, jnp.newaxis]  # (n_lat+1,1,1)
     area = grid.area[..., jnp.newaxis]                            # (n_lat,n_lon,1)
 
-    # Volume transports through faces [m^3/s] (h-weighted velocity x face length).
-    Q_u = h_u * u * u_mask_3d * dy_u            # (n_lat, n_lon+1, nlev)
-    Q_v = h_v * v * v_mask_3d * face_dx_v       # (n_lat+1, n_lon, nlev)
+    # Volume transports through faces [m^3/s] (h-weighted velocity x face
+    # length).  NEMO WS-RK3 supplies zFu/zFv separately: stprk3_stg.F90:
+    # 257-274 replaces the Kmm velocity's barotropic mean by un_adv/hu before
+    # dynadv_up3 consumes the transport at :326-331.  The advected face value
+    # remains the unmodified Kmm ``u``/``v`` argument.
+    transport_u, transport_v = (
+        (u, v) if transport_velocity is None else transport_velocity)
+    Q_u = h_u * transport_u * u_mask_3d * dy_u   # (n_lat, n_lon+1, nlev)
+    Q_v = h_v * transport_v * v_mask_3d * face_dx_v  # (n_lat+1,n_lon,nlev)
 
     def _upwind(adv_pos, adv_neg, transport):
         # Upstream value: take adv_pos where transport > 0 (flow from that side).
@@ -4181,9 +4190,10 @@ def _bc_horizontal_momentum_advection_flux_form(
     # the far cells from the DISTINCT core u[:, :-1] (faces 0..n_lon-1) via
     # rolls so the reconstruction does not depend on the periodic wrap column
     # u[:, n_lon] (matches the wrap-robust style of the v-momentum x-part).
-    u_c = _recon(u[:, :-1, :], u[:, 1:, :], Qx_c,
-                 far_pos=jnp.roll(u[:, :-1, :], 1, axis=1),       # face c-1
-                 far_neg=jnp.roll(u[:, :-1, :], -2, axis=1))      # face c+2; west when Qx>0
+    u_core = u[:, :-1, :]
+    u_c = _recon(u_core, u[:, 1:, :], Qx_c,
+                 far_pos=jnp.roll(u_core, 1, axis=1),       # face c-1
+                 far_neg=jnp.roll(u_core, -2, axis=1))      # face c+2; west when Qx>0
     Fx_uu = Qx_c * u_c                                           # (n_lat,n_lon,nlev)
     # divergence to u-points (periodic in lon): flux[centre J] - flux[centre J-1].
     _dx = Fx_uu - jnp.roll(Fx_uu, 1, axis=1)
@@ -4282,6 +4292,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     ldf_state=None,
     zad_continuity_dt=None,
     zad_freshwater_eta_tendency=None,
+    momentum_flux_transport_velocity=None,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -4477,6 +4488,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v = (
             _bc_horizontal_momentum_advection_flux_form(
                 du_dt, dv_dt, u, v, h_u, h_v, u_mask_3d, v_mask_3d, mask, grid, config,
+                transport_velocity=momentum_flux_transport_velocity,
             )
         )
     else:
