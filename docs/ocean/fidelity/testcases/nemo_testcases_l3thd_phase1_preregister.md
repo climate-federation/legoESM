@@ -27,12 +27,15 @@ therefore forbidden here.
 ## Exact resolved overlay
 
 The copied configuration is built with the shipped `OCE SAS ICE` component
-set so `EXP_SASICE` resolves `src/SAS/sbcssm.F90` and reads its
-`namsbc_sas` ocean/ice boundary fields.  A plain C1D `OCE ICE TOP` build links
-`src/OCE/SBC/sbcssm.F90`, reports `nn_components=0`, evolves the one-metre
-ocean column, and does not execute the documented stand-alone-surface path.
-That discriminator stopped at ocean step 3178 on salinity and is retained
-under the run root as a finding; it cannot satisfy this contract.
+set and without the shipped C1D `key_RK3`/`key_top`, so `EXP_SASICE` resolves
+`src/SAS/step.F90` plus `src/SAS/sbcssm.F90` and reads its `namsbc_sas`
+ocean/ice boundary fields.  Keeping `key_RK3` makes `nemogcm.F90:166` call the
+ocean RK3 stepper even when SAS sources are present.  That discriminator
+evolved the one-metre ocean and stopped at step 3178 with salinity 100, while
+the real ERA5 `sss` is exactly 34 throughout.  It is retained under the run
+root as a finding and cannot satisfy this contract.  `key_xios` is also
+excluded following lane 1; these three excluded keys are listed as FLAGGED
+FOR FUTURE DELETION in the receipt rather than removed from shipped C1D.
 
 Resolution is `namelist_ice_cfg` over `namelist_ice_ref`
 (`icestp.F90:259-260`, with the per-block read pairs beginning at
