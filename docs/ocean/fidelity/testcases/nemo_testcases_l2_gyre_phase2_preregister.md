@@ -88,9 +88,9 @@ card at `kt=1` entry time and at a half-year phase displacement:
   restoring target temperature from the rotated T-point latitude.
 * `usrdef_sbc.F90:122-145` constructs the piecewise freshwater flux and
   removes its wet-area mean.
-* `usrdef_sbc.F90:161-176` constructs U/V double-gyre wind stress on their
-  native staggered latitudes; `:179-184` constructs stress and wind
-  magnitudes.
+* `usrdef_sbc.F90:161-176` constructs the grid-aligned U/V double-gyre wind
+  stress from the stored T-point `gphit`; `:179-184` constructs stress and
+  wind magnitudes.
 
 The field is a transcription receipt only: this phase does not advance a
 forced legoESM step.  A nonzero planted perturbation to a wet solar-flux value

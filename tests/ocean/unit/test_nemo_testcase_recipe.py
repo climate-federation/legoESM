@@ -1,13 +1,16 @@
 import jax.numpy as jnp
+import legoesm.ocean.fidelity.nemo_testcase_recipe as testcase_recipe
 import numpy as np
 import pytest
-
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
-import legoesm.ocean.fidelity.nemo_testcase_recipe as testcase_recipe
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+    build_gyre_zco_card,
     build_lock_exchange_zco_card,
     build_nemo_testcase_card,
     build_overflow_zps_card,
+    gyre_horizontal_coordinates,
+    gyre_surface_boundary_condition,
+    gyre_vertical_ladder,
     validate_nemo_testcase_card,
 )
 
@@ -85,12 +88,50 @@ def test_nemo_testcase_cards_are_fp64_source_pinned(
 def test_testcase_cards_select_their_resolved_barotropic_filters():
     lock_baro = build_lock_exchange_zco_card().recipe.model_config.barotropic
     overflow_baro = build_overflow_zps_card().recipe.model_config.barotropic
+    gyre_baro = build_gyre_zco_card().recipe.model_config.barotropic
     assert lock_baro.barotropic_time_filter == "nemo_ab3am4"
     assert overflow_baro.barotropic_time_filter == "nemo_boxcar1_ab3"
+    assert gyre_baro.barotropic_time_filter == "nemo_ab3am4"
     # Resolved ln_bt_auto counts, independently printed by the pinned NEMO
     # runs: LOCK ocean.output:763 and OVERFLOW ocean.output:879.
     assert lock_baro.n_barotropic_substeps == 1
     assert overflow_baro.n_barotropic_substeps == 3
+    assert gyre_baro.n_barotropic_substeps == 50
+
+
+def test_gyre_card_pins_rotated_grid_mi96_ic_and_seasonal_sbc():
+    set_policy(PrecisionPolicy.fp64())
+    card = build_gyre_zco_card()
+    recipe = card.recipe
+    source = gyre_horizontal_coordinates()
+    ladder = gyre_vertical_ladder()
+
+    assert (recipe.grid.n_lat, recipe.grid.n_lon) == (22, 32)
+    assert recipe.z_coord.n_levels == 30
+    assert card.dt_s == 14400.0
+    assert card.n_steps == 4320
+    assert card.surface_boundary_condition == "gyre_usrdef_sbc"
+    assert np.array_equal(np.asarray(recipe.grid.native_lat_T_deg), source["gphit"])
+    assert np.array_equal(np.asarray(recipe.grid.f_T), source["ff_t"])
+    assert np.array_equal(np.asarray(recipe.z_coord.dz_ref), ladder["e3t_1d"][:30])
+    assert np.array_equal(
+        np.asarray(recipe.z_coord.t_depth_ref), ladder["gdept_1d"][:30]
+    )
+    assert np.count_nonzero(np.asarray(recipe.land_mask)) == 600
+    assert not np.asarray(recipe.initial_state.u.data).any()
+    assert not np.asarray(recipe.initial_state.v.data).any()
+    assert not np.asarray(recipe.initial_state.eta.data).any()
+    assert np.ptp(np.asarray(recipe.initial_state.T.data)[1:-1, 1:-1]) > 0.0
+    assert np.ptp(np.asarray(recipe.initial_state.S.data)[1:-1, 1:-1]) > 0.0
+
+    at_kt1 = gyre_surface_boundary_condition(card, card.dt_s)
+    at_half_year = gyre_surface_boundary_condition(
+        card, card.dt_s + 180.0 * 86400.0
+    )
+    assert at_kt1.qsr_w_m2.dtype == jnp.float64
+    assert not np.array_equal(at_kt1.qsr_w_m2, at_half_year.qsr_w_m2)
+    wet = np.asarray(recipe.land_mask) > 0.5
+    assert abs(float(np.sum(np.asarray(at_kt1.emp_kg_m2_s)[wet]))) < 1.0e-17
 
 
 @pytest.mark.parametrize(
