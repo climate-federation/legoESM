@@ -225,6 +225,22 @@ _VAR_META = {
                        "standard_name": "land_area_fraction"},
     "revert_count":   {"long_name": "count of steps the NaN-revert guard fired for this cell",
                        "units": "1"},
+    "pmodel_chi":     {"long_name": "P-model acclimated ci/ca ratio (leaf-top)",
+                       "units": "1"},
+    "pmodel_vcmax25": {"long_name": "P-model acclimated leaf-top C3 Vcmax at 25C (per m2 leaf)",
+                       "units": "umol m-2 s-1"},
+    "pmodel_g1":      {"long_name": "P-model predicted Medlyn slope g1 (leaf-top acclimated)",
+                       "units": "kPa 0.5"},
+    "pmodel_n_rubisco_leaf": {
+        "long_name": "implied nitrogen in Rubisco from the C3 leaf-top acclimated "
+                     "Vcmax25 (LUNA NUE 294.2 umol CO2/s/gN; diagnostic only, "
+                     "C3 only, no feedback)",
+        "units": "g m-2"},
+    "pmodel_n_et_leaf": {
+        "long_name": "implied nitrogen in electron transport from the C3 leaf-top "
+                     "acclimated Jmax25 (LUNA NUE 1257 umol e-/s/gN; diagnostic "
+                     "only, C3 only, no feedback)",
+        "units": "g m-2"},
 }
 
 
@@ -772,6 +788,11 @@ def run(args) -> int:
             values["pmodel_chi"] = _caps_d.chi
             values["pmodel_vcmax25"] = _caps_d.vcmax25_leaf
             values["pmodel_g1"] = _caps_d.g1_kpa
+            from legoesm.land.p_model import nitrogen_diagnostics as _ndiag
+            _n_rub, _n_et = _ndiag(_caps_d.vcmax25_leaf,
+                                   _caps_d.vcmax25_leaf * _caps_d.rjv25)
+            values["pmodel_n_rubisco_leaf"] = _n_rub
+            values["pmodel_n_et_leaf"] = _n_et
         # --- atomic per-column NaN-revert guard (ported from run_ec_site) ---
         # Columns are independent, so if a column's state update goes non-finite,
         # revert THAT column to its previous state (jnp.where): a diverging boreal

@@ -202,6 +202,19 @@ _KPHIO_C4_REF_TC = 15.0
 # --- numerics (smooth guards) ---
 _PHI0_FLOOR_WIDTH = 0.01  # coeff-ok: softplus width keeping phi0 >= 0 smooth
 
+# --- LUNA nitrogen use efficiencies (CTSM LunaMod.F90:76-77, verbatim) ---
+# Diagnostic-only (PR5): the model carries NO nitrogen cycle; these convert
+# C3 capacities into implied N pools for output tapes and NOTHING reads them
+# back (no-feedback guarantee).  CTSM pins the ROUNDED values (comments there
+# give the products 6.22*47.3 = 294.206 and 8.06*156 = 1257.36; the code uses
+# 294.2 / 1257.0) — we copy the code values exactly.  C3 ONLY: the constants
+# do not apply to the C4 pathway.  Provenance is secondhand in CTSM (Rogers
+# 2014; Coste 2005 via Xu et al 2012) and 47.3 umol/gRubisco/s sits at the
+# high end of specific-activity estimates — carry ~+/-50% structural
+# uncertainty when interpreting the pools.
+_F_C25_UMOL_GN_S = 294.2   # umol CO2 /s /gN in Rubisco (= 6.22 gRub/gN * 47.3)
+_F_J25_UMOL_GN_S = 1257.0  # umol e- /s /gN in electron transport (= 8.06 * 156)
+
 
 class PModelConfig(NamedTuple):
     """Configuration for the P-model optimality parameter source.
@@ -522,6 +535,24 @@ def acclimated_capacities_c4(
     return PModelCapacitiesC4(
         vcmax25_c4_leaf=vcmax25_c4, g1_c4_kpa=g1_c4, chi_c4=chi,
         xi_c4_sqrt_pa=xi)
+
+
+def nitrogen_diagnostics(vcmax25_leaf: jax.Array,
+                         jmax25_leaf: jax.Array):
+    """Implied C3 photosynthetic nitrogen pools, per m2 LEAF (diagnostic only).
+
+    Returns ``(n_rubisco, n_et)`` in g N m-2 leaf: nitrogen bound in Rubisco
+    implied by ``vcmax25_leaf`` and in the electron-transport chain implied by
+    ``jmax25_leaf`` (both leaf-top acclimated capacities, umol m-2 leaf s-1),
+    via the LUNA nitrogen use efficiencies (see the constants block above).
+    Deliberately NO total: light-capture N needs chlorophyll-allocation
+    assumptions this model does not carry, and a sum omitting it would read
+    as leaf N (GLM design review).  C3 only — the constants do not apply to
+    C4.  Nothing in the model reads these values back; they exist for tapes
+    and for a future N closure to compare against.
+    """
+    return (vcmax25_leaf / _F_C25_UMOL_GN_S,
+            jmax25_leaf / _F_J25_UMOL_GN_S)
 
 
 def acclim_trajectory(

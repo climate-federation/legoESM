@@ -256,3 +256,52 @@ def test_c4_capacities_raise_without_state():
     from legoesm.land.p_model import acclimated_capacities_c4
     with pytest.raises(ValueError, match="acclimation state"):
         acclimated_capacities_c4(None, pm.PModelConfig())
+
+
+def test_nitrogen_diagnostics_oracle_and_canaries():
+    """PR5 diagnostics: independent scalar oracle (constants re-typed here
+    from CTSM LunaMod.F90:76-77, NOT imported), canaries pinning the exact
+    CTSM code values (294.2 / 1257.0, the ROUNDED pins - the comment products
+    are 294.206 / 1257.36), and the no-total design (function returns exactly
+    two pools; light-capture N is deliberately absent)."""
+    import legoesm.land.p_model as pm
+    from legoesm.land.p_model import nitrogen_diagnostics
+
+    # canaries on the exact CTSM code values
+    assert pm._F_C25_UMOL_GN_S == 294.2
+    assert pm._F_J25_UMOL_GN_S == 1257.0
+
+    v = jnp.asarray([100.0, 30.0])
+    j = jnp.asarray([180.0, 60.0])
+    out = nitrogen_diagnostics(v, j)
+    assert len(out) == 2  # no silent "total photosynthetic N"
+    n_rub, n_et = out
+    # independent oracle: N = capacity / (binding * specific activity)
+    assert float(n_rub[0]) == pytest.approx(100.0 / 294.2, rel=1e-6)
+    assert float(n_rub[1]) == pytest.approx(30.0 / 294.2, rel=1e-6)
+    assert float(n_et[0]) == pytest.approx(180.0 / 1257.0, rel=1e-6)
+    assert float(n_et[1]) == pytest.approx(60.0 / 1257.0, rel=1e-6)
+    # plausibility: a strong leaf (Vcmax25=100) implies ~0.34 gN/m2 in
+    # Rubisco - within observed leaf N (~1-3 gN/m2)
+    assert 0.1 < float(n_rub[0]) < 1.0
+
+
+def test_biophys_tape_metadata_covers_pmodel_vars():
+    """Every P-model tape variable run_lmip_biophys can emit has CF metadata
+    (the writer falls back to EMPTY attrs on a missing key - silent, so this
+    is the gate), and the two nitrogen diagnostics are labelled C3-only /
+    no-feedback with g m-2 units."""
+    import importlib.util, pathlib
+    root = pathlib.Path(__file__).resolve().parents[3]
+    spec = importlib.util.spec_from_file_location(
+        "_biophys", root / "scripts" / "run" / "run_lmip_biophys.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    meta = mod._VAR_META
+    for key in ("pmodel_chi", "pmodel_vcmax25", "pmodel_g1",
+                "pmodel_n_rubisco_leaf", "pmodel_n_et_leaf"):
+        assert key in meta and meta[key].get("units"), key
+    for key in ("pmodel_n_rubisco_leaf", "pmodel_n_et_leaf"):
+        assert meta[key]["units"] == "g m-2"
+        assert "C3 only" in meta[key]["long_name"]
+        assert "no feedback" in meta[key]["long_name"]
