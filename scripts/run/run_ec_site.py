@@ -801,7 +801,9 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
              savanna_grass_pft: int = 14, savanna_grass_root_m: float = 0.5,
              savanna_grass_fc4: float = 1.0,
              capacity_scheme: str = "prescribed", g1_source: str = "table",
-             canopy_stomatal_model: str | None = None) -> dict:
+             canopy_stomatal_model: str | None = None,
+             transpiration_stress: str = "beta_theta",
+             vcmax_profile: str = "kn") -> dict:
     if mode not in ("diagnostic", "prognostic"):
         raise ValueError(f"mode {mode!r} not supported (diagnostic|prognostic)")
     if canopy not in ("two_leaf", "clmml"):
@@ -811,6 +813,17 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     # would be silently inert — refuse loudly (no hidden choices).
     _pm_cap = capacity_scheme == "p_model"
     _pm_g1 = g1_source == "p_model"
+    if transpiration_stress != "beta_theta" and mode != "prognostic":
+        # Diagnostic mode drives the canopy directly (no multilayer land
+        # step), and P-hydro lives in the multilayer step - refuse loudly.
+        raise ValueError(
+            "--transpiration-stress phydro requires --mode prognostic "
+            "(diagnostic mode prescribes the soil and never runs the "
+            "multilayer land step that hosts the P-hydro supply)")
+    if vcmax_profile != "kn" and canopy != "two_leaf":
+        raise ValueError(
+            "--canopy-vcmax-profile applies to the two-leaf canopy only "
+            "(the CLM-ML backend has its own nitrogen profile)")
     if _pm_cap and any(v not in (None, 1.0) for v in (
             vcmax_scale, vcmax_c3_scale, vcmax_c4_scale)):
         raise ValueError(
@@ -899,6 +912,7 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         canopy_config = TwoLeafCanopyConfig(
             max_iters=30, stress_b0=stress_b0,
             capacity_scheme=capacity_scheme, g1_source=g1_source,
+            vcmax_profile=vcmax_profile,
             **({"stomatal_model": canopy_stomatal_model}
                if canopy_stomatal_model is not None else {})).validate()
     elif canopy == "clmml":
@@ -938,6 +952,9 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         soil_evap_resistance_exp=soil_evap_resistance_exp,
         root_depth=root_depth, z_ref=z_ref, texture=texture,
         interception=interception, plant_wilting_point=plant_wilting_point)
+    if transpiration_stress != "beta_theta":
+        land_config = land_config._replace(
+            transpiration_stress=transpiration_stress)
 
     # Independent C3 (tree) / C4 (grass) canopy-param tuning for savanna sites.
     # A per-pathway flag (``--vcmax-c3-scale`` etc.) wins; otherwise the combined
@@ -1269,6 +1286,19 @@ def main() -> int:
                          "'p_model' (least-cost xi; requires the medlyn "
                          "stomatal model; incompatible with the "
                          "--stomatal-m-*-scale flags).")
+    ap.add_argument("--transpiration-stress", default="beta_theta",
+                    choices=["beta_theta", "phydro"],
+                    dest="transpiration_stress",
+                    help="root-zone transpiration limitation: 'beta_theta' "
+                         "(default, empirical soil-moisture stress) or "
+                         "'phydro' (Joshi-2022 hydraulic profit optimum; "
+                         "prognostic mode + a P-model switch required)")
+    ap.add_argument("--canopy-vcmax-profile", default="kn",
+                    choices=["kn", "coordination"],
+                    dest="canopy_vcmax_profile",
+                    help="two-leaf canopy Vcmax25 depth profile: 'kn' "
+                         "(default nitrogen profile) or 'coordination' "
+                         "(fraction of the diffuse-light envelope)")
     ap.add_argument("--canopy-stomatal-model", default=None,
                     choices=["ball_berry", "medlyn", "leuning"],
                     dest="canopy_stomatal_model",
@@ -1317,7 +1347,9 @@ def main() -> int:
                  interception=args.interception,
                  capacity_scheme=args.canopy_capacity_scheme,
                  g1_source=args.canopy_g1_source,
-                 canopy_stomatal_model=args.canopy_stomatal_model)
+                 canopy_stomatal_model=args.canopy_stomatal_model,
+                 transpiration_stress=args.transpiration_stress,
+                 vcmax_profile=args.canopy_vcmax_profile)
     return 0
 
 
