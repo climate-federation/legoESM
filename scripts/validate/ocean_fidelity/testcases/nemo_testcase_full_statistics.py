@@ -415,6 +415,73 @@ def load_legoesm_states(case: str, precision: str, root: Path) -> tuple[dict, di
     return dict(sorted(states.items())), metadata
 
 
+def load_legoesm_failure(case: str, precision: str, root: Path) -> dict | None:
+    path = root / CASES[case]["slug"] / precision / "failure.json"
+    if not path.is_file():
+        return None
+    failure = json.loads(path.read_text())
+    require(failure["format"] == "nemo-testcase-l1-full-failure-v1", "failure format")
+    require(failure["case"] == case and failure["precision"] == precision, "failure identity")
+    require(failure["preregistration_commit"] == PREREG_SHA, "failure preregistration")
+    require(failure["diagnostic_check_every_step"] is True, "failure diagnostic cadence")
+    require(
+        0 < int(failure["first_nonfinite_completed_step"]) < int(CASES[case]["n_steps"]),
+        "failure step outside incomplete-run interval",
+    )
+    require(not all(failure["fields_finite"].values()), "failure artifact is vacuous")
+    return {**failure, "artifact": str(path), "artifact_sha256": sha256(path)}
+
+
+def score_incomplete_case(case: str, lego_root: Path, failures: dict[str, dict]) -> dict:
+    """Classify every registered metric OUTSIDE when the candidate is non-finite."""
+    require(set(failures) == {"fp64", "fp32"}, f"{case}: incomplete failure inventory")
+    rows = [
+        {
+            "name": name,
+            "verdict": "OUTSIDE",
+            "candidate_distance": None,
+            "precision_floor": None,
+            "scheme_spread": None,
+            "units": "not computed",
+            "predicate": "missing/non-finite registered full-duration input",
+            "reduction": "not run; fail-closed before metric reduction",
+            "reason": (
+                f"fp64 first non-finite completed step "
+                f"{failures['fp64']['first_nonfinite_completed_step']} of "
+                f"{CASES[case]['n_steps']}"
+            ),
+        }
+        for name in sorted(REGISTERED_METRICS[case])
+    ]
+    require({row["name"] for row in rows} == REGISTERED_METRICS[case], "failure metric coverage")
+    return {
+        "case": case,
+        "preregistration_commit": PREREG_SHA,
+        "status": "OUTSIDE",
+        "verdict_counts": {
+            "INDISTINGUISHABLE-AT-FLOOR": 0,
+            "WITHIN-SCHEME-SPREAD": 0,
+            "OUTSIDE": len(rows),
+        },
+        "alternative_namelist_diff": verify_alternative_namelist(case),
+        "state_frame": "full-duration comparison unavailable: candidate became non-finite",
+        "mask_and_reduction": "not applied to missing full-duration candidate states",
+        "legoesm_runs": {precision: failures[precision] for precision in ("fp64", "fp32")},
+        "metrics": {},
+        "deterministic_bridge": {
+            "status": "TRUNCATED_BEFORE_REGISTERED_MIDPOINT",
+            "phase3_gate": str(CASES[case]["phase3_gate"]),
+            "phase3_gate_sha256": sha256(Path(CASES[case]["phase3_gate"])),
+        },
+        "rows": rows,
+        "controls": {
+            "failure_inventory": sorted(failures),
+            "all_registered_metrics_forced_outside": True,
+        },
+        "lego_root": str(lego_root),
+    }
+
+
 def mapped_fields(fields: dict, source: str) -> dict[str, np.ndarray]:
     if source.startswith("L"):
         return {
@@ -750,6 +817,17 @@ def score_case(
     plant_unregistered: bool = False,
 ) -> dict:
     spec = CASES[case]
+    failures = {
+        precision: failure
+        for precision in ("fp64", "fp32")
+        if (failure := load_legoesm_failure(case, precision, lego_root)) is not None
+    }
+    if failures:
+        require(
+            not (plant_state or plant_census or plant_unregistered),
+            "planted metric controls require complete states",
+        )
+        return score_incomplete_case(case, lego_root, failures)
     alternative_diff = verify_alternative_namelist(case)
     roots = {"N2": Path(spec["baseline"]), "N4": Path(spec["alternative"])}
     arms = {

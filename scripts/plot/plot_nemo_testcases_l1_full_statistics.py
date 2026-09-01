@@ -372,6 +372,55 @@ def plot_metrics(case: str, report: dict, output: Path, figure_sha: str) -> Path
     return path
 
 
+def plot_failure(case: str, report: dict, output: Path, figure_sha: str) -> Path:
+    """Publish the missing-section reason instead of fabricating comparisons."""
+    target = int(STATS.CASES[case]["n_steps"])
+    runs = report["legoesm_runs"]
+    completed = [
+        target,
+        target,
+        runs["fp64"]["first_nonfinite_completed_step"],
+        runs["fp32"]["first_nonfinite_completed_step"],
+    ]
+    labels = ["NEMO\nFCT2", "NEMO\nFCT4", "legoESM\nfp64", "legoESM\nfp32"]
+    colors = [ARM_COLORS[arm] for arm in ARMS]
+    fig, ax = plt.subplots(figsize=(8.6, 5.2), constrained_layout=True)
+    fig.get_layout_engine().set(rect=(0.0, 0.14, 1.0, 0.88))
+    bars = ax.bar(labels, completed, color=colors)
+    ax.axhline(target, color="black", linestyle="--", linewidth=1.0, label="required duration")
+    for bar, value in zip(bars, completed):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            value + 0.02 * target,
+            f"{value:,}",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
+    ax.set_ylim(0, target * 1.13)
+    ax.set_ylabel("Completed steps before first non-finite state")
+    ax.set_title(
+        f"{case}: full-duration comparison unavailable\n"
+        "all preregistered metric verdicts = OUTSIDE",
+        fontsize=13,
+    )
+    ax.grid(True, axis="y", color="0.88", linewidth=0.6)
+    ax.legend(frameon=False)
+    fields64 = ",".join(name for name, ok in runs["fp64"]["fields_finite"].items() if not ok)
+    fields32 = ",".join(name for name, ok in runs["fp32"]["fields_finite"].items() if not ok)
+    footer = (
+        f"case={case}; required={target}; fp64 first non-finite={completed[2]} "
+        f"({fields64}); fp32 first non-finite={completed[3]} ({fields32})\n"
+        "No midpoint/final legoESM state, statistical metric, or three-time section "
+        f"was invented; CPU artifacts loaded; figure_git={figure_sha}"
+    )
+    fig.text(0.01, 0.008, footer, ha="left", va="bottom", fontsize=7)
+    path = output / f"{STATS.CASES[case]['slug']}_full_duration_failure.png"
+    fig.savefig(path, dpi=300, bbox_inches="tight", metadata={"Description": footer})
+    plt.close(fig)
+    return path
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--full-root", type=Path, default=DEFAULT_FULL_ROOT)
@@ -394,10 +443,13 @@ def main() -> int:
         reports[case] = report
     generated = []
     for case in ("OVERFLOW-zps", "LOCK_EXCHANGE-zco"):
-        generated.append(
-            plot_sections(section_data(case, lego_root), args.output_dir, args.git_sha)
-        )
-        generated.append(plot_metrics(case, reports[case], args.output_dir, args.git_sha))
+        if reports[case]["metrics"]:
+            generated.append(
+                plot_sections(section_data(case, lego_root), args.output_dir, args.git_sha)
+            )
+            generated.append(plot_metrics(case, reports[case], args.output_dir, args.git_sha))
+        else:
+            generated.append(plot_failure(case, reports[case], args.output_dir, args.git_sha))
     copied = []
     for path in generated:
         destination = args.copy_dir / path.name
