@@ -19,6 +19,18 @@ from pathlib import Path
 
 import numpy as np
 
+
+def git_sha() -> str:
+    """Exact legoESM producer revision; fail closed off Git."""
+    import subprocess
+
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise RuntimeError(f"cannot stamp legoESM git SHA: {error}") from error
+
 BAR = 1.0e-15
 DEFAULT_ORACLE_ROOTS = {
     "LOCK_EXCHANGE-zco": Path(
@@ -425,6 +437,7 @@ def run(
             }
     return {
         "format": "nemo-testcase-l1-phase3-trajectory-v1",
+        "legoesm_git_sha": git_sha(),
         "case": case,
         "status": "AT-BAR" if first_over_bar is None else "DEBT",
         "precision_policy": "fp64",
