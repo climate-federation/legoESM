@@ -500,8 +500,10 @@ def _source_gyre_sbc(lat_deg, wet, t_seconds: float) -> dict[str, np.ndarray]:
         wind_shape = math.sin(math.pi * (lat - 15.0) / (29.0 - 15.0))
         out["utau_pa"][index] = -amplitude * wind_shape
         out["vtau_pa"][index] = amplitude * wind_shape
-    # Literal usrdef_sbc.F90:134-140: unmasked emp numerator, wet denominator.
-    mean_emp = np.sum(out["emp_kg_m2_s"]) / np.sum(wet)
+    # glob_2Dsum receives an unmasked array but excludes the 104 non-owned
+    # boundary-ring cells; the kt=1 dynspg_ts eta frame independently pins this
+    # 600-owned-cell numerator.
+    mean_emp = np.sum(out["emp_kg_m2_s"] * wet) / np.sum(wet)
     out["emp_kg_m2_s"] -= mean_emp * wet
     out["taum_pa"] = np.sqrt(out["utau_pa"] ** 2 + out["vtau_pa"] ** 2)
     out["wndm_m_s"] = np.sqrt(out["taum_pa"] / (1.22 * 1.5e-3))

@@ -844,7 +844,8 @@ def _build_een_barotropic_inputs(h_k, grid, mask, u_mask, v_mask, dtype,
                                  dz_ref=None,
                                  coefficient_evaluation="generic",
                                  eta=None,
-                                 z_coord=None):
+                                 z_coord=None,
+                                 scheme="een"):
     """Precompute the geometry inputs for the EEN barotropic Coriolis (node 16).
 
     NEMO ``dyn_spg_ts::dyn_cor_2D`` applies an ENSTROPHY-conserving EEN
@@ -889,6 +890,11 @@ def _build_een_barotropic_inputs(h_k, grid, mask, u_mask, v_mask, dtype,
         raise ValueError(
             "unknown barotropic_een_coefficient_evaluation "
             f"{coefficient_evaluation!r}; expected 'generic' or 'nemo_literal'")
+    if scheme not in ("ene", "een"):
+        raise ValueError(f"unknown barotropic PV-flux scheme {scheme!r}")
+    if coefficient_evaluation == "nemo_literal" and scheme != "een":
+        raise ValueError(
+            "nemo_literal barotropic coefficients currently cover EEN only")
     if coefficient_evaluation == "nemo_literal" and not metric_complete:
         raise ValueError(
             "barotropic_een_coefficient_evaluation='nemo_literal' requires "
@@ -921,7 +927,7 @@ def _build_een_barotropic_inputs(h_k, grid, mask, u_mask, v_mask, dtype,
     out = dict(e3u=e3u, e3v=e3v, hu=hu, hv=hv, h_vtx=h_vtx, f_vtx=f_vtx,
                vtx_mask=vtx_mask, u_mask_3d=u_mask_3d, v_mask_3d=v_mask_3d,
                metric_complete=bool(metric_complete),
-               q_boundary=een_q_boundary)
+               q_boundary=een_q_boundary, scheme=scheme)
     if metric_complete:
         # NEMO horizontal scale factors (dyn_cor_2D_init, dynspg_ts.F90:1349-
         # 1379): e1u/e1v [zonal widths] and e2u/e2v [meridional widths] at the
@@ -1055,6 +1061,37 @@ def een_barotropic_coriolis(U_bar, V_bar, pre, eps=1.0e-10):
     return cor_u, cor_v
 
 
+def ene_barotropic_coriolis(U_bar, V_bar, pre, eps=1.0e-10):
+    """NEMO ``np_ENE`` Sadourny barotropic Coriolis at F-points.
+
+    This is the depth-integrated sibling of the already-canonical 3-D
+    ``pv_flux_ene`` operator.  It reuses the same frozen Kmm thickness bundle
+    as the EEN path but selects NEMO dynspg_ts.F90:1383-1412's 1/4 two-point
+    recurrence instead of the 1/12 AL81 triads.  Horizontal metric widths are
+    folded in exactly as for :func:`een_barotropic_coriolis`.
+    """
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import pv_flux_ene
+
+    nlev = pre["e3u"].shape[-1]
+    U_src, V_src = U_bar, V_bar
+    if pre.get("metric_complete", False):
+        U_src = U_bar * pre["e2u"]
+        V_src = V_bar * pre["e1v"]
+    u3 = jnp.broadcast_to(U_src[..., None], U_src.shape + (nlev,))
+    v3 = jnp.broadcast_to(V_src[..., None], V_src.shape + (nlev,))
+    diag_u, diag_v = pv_flux_ene(
+        jnp.zeros_like(pre["h_vtx"]), pre["h_vtx"], pre["e3v"], v3,
+        pre["e3u"], u3, pre["u_mask_3d"], pre["v_mask_3d"],
+        pre["vtx_mask"], f_vtx=pre["f_vtx"],
+    )
+    cor_u = jnp.sum(pre["e3u"] * diag_u, axis=-1) / jnp.maximum(pre["hu"], eps)
+    cor_v = jnp.sum(pre["e3v"] * diag_v, axis=-1) / jnp.maximum(pre["hv"], eps)
+    if pre.get("metric_complete", False):
+        cor_u = cor_u / jnp.maximum(pre["e1u"], eps)
+        cor_v = cor_v / jnp.maximum(pre["e2v"], eps)
+    return cor_u, cor_v
+
+
 def barotropic_coriolis_een_pre_step(u_3d, v_3d, h_k, grid, mask, u_mask,
                                      v_mask, min_water_col, dtype,
                                      metric_complete=False,
@@ -1065,7 +1102,8 @@ def barotropic_coriolis_een_pre_step(u_3d, v_3d, h_k, grid, mask, u_mask,
                                      eta=None,
                                      z_coord=None,
                                      pre=None,
-                                     return_pre=False):
+                                     return_pre=False,
+                                     scheme="een"):
     """Pre-step EEN barotropic Coriolis ``(cor_u, cor_v)`` for the live split.
 
     NEMO ``dynspg_ts.F90:296-300`` subtracts ``dyn_cor_2D(puu_b, pvv_b)`` — the
@@ -1093,10 +1131,14 @@ def barotropic_coriolis_een_pre_step(u_3d, v_3d, h_k, grid, mask, u_mask,
             dz_ref=dz_ref,
             coefficient_evaluation=coefficient_evaluation,
             eta=eta,
-            z_coord=z_coord)
+            z_coord=z_coord,
+            scheme=scheme)
     U_bar, V_bar = _depth_average_to_faces(
         u_3d, v_3d, h_k, min_water_col, mask, u_mask, v_mask, grid)
-    cor_u, cor_v = een_barotropic_coriolis(U_bar, V_bar, pre)
+    if scheme == "ene":
+        cor_u, cor_v = ene_barotropic_coriolis(U_bar, V_bar, pre)
+    else:
+        cor_u, cor_v = een_barotropic_coriolis(U_bar, V_bar, pre)
     if return_pre:
         return cor_u, cor_v, pre
     return cor_u, cor_v
@@ -1118,6 +1160,7 @@ def _run_substep_loop(
     tide_basis=None, tide_cos=None, tide_sin=None,
     transport_sum_init=None,
     primary_transport_average=False,
+    return_trace=False,
 ):
     """The forward-backward substep loop (verbatim extraction).
 
@@ -1280,6 +1323,7 @@ def _run_substep_loop(
             V_mid = za_i[0] * V_bar_c + za_i[1] * Vb_c + za_i[2] * Vbb_c
         else:
             U_mid, V_mid = U_bar_c, V_bar_c
+        eta_mid = eta_c
         if ab3_za is not None and not linear_free_surface:
             # NEMO vvl continuity-flux depth at jn+1/2 (dynspg_ts.F90:556-595):
             # the ssh is extrapolated with the SAME za coefficients as the
@@ -1378,7 +1422,10 @@ def _run_substep_loop(
             # energy conservation; NEMO passes punb/pvnb together).  The
             # planetary f rides the depth-integrated AL81 12-point triad, which
             # exerts a restoring on the 2Δx checkerboard the 4-pt avg annihilates.
-            _cor_u_een, _cor_v_een = een_barotropic_coriolis(
+            _cor_fn = (ene_barotropic_coriolis
+                       if een_pre.get("scheme", "een") == "ene"
+                       else een_barotropic_coriolis)
+            _cor_u_een, _cor_v_een = _cor_fn(
                 _U_cor_src_cur, _V_cor_src, een_pre)
         V_west = jnp.roll(_V_cor_src, 1, axis=1)
         V_at_u = 0.25 * (_V_cor_src[:-1] + _V_cor_src[1:]
@@ -1518,11 +1565,27 @@ def _run_substep_loop(
 
         if ab3_za is not None:
             # rotate the AB3/AM4 histories (dynspg_ts:805-815)
-            return (eta_new, U_bar_new, V_bar_new,
-                    Hu_sum_new, Hv_sum_new, eta_sum_new, U_sum_new, V_sum_new,
-                    U_bar_c, Ub_c, V_bar_c, Vb_c, eta_c, etab_c)
-        return (eta_new, U_bar_new, V_bar_new,
-                Hu_sum_new, Hv_sum_new, eta_sum_new, U_sum_new, V_sum_new)
+            new_carry = (eta_new, U_bar_new, V_bar_new,
+                         Hu_sum_new, Hv_sum_new, eta_sum_new, U_sum_new, V_sum_new,
+                         U_bar_c, Ub_c, V_bar_c, Vb_c, eta_c, etab_c)
+        else:
+            new_carry = (eta_new, U_bar_new, V_bar_new,
+                         Hu_sum_new, Hv_sum_new, eta_sum_new, U_sum_new, V_sum_new)
+        if return_trace:
+            # WRITE-equivalent diagnostic frame for the NEMO dynspg_ts
+            # boundary audit.  No value from this tuple feeds the carry.
+            trace = (
+                eta_c, U_bar_c, V_bar_c,
+                eta_mid, U_mid, V_mid,
+                eta_new, eta_pgf,
+                _pgf_u, _pgf_v,
+                _cor_u + _drag_u, _cor_v + _drag_v,
+                F_slow_u_i, F_slow_v_i,
+                U_bar_new, V_bar_new,
+                flux_u, flux_v,
+            )
+            return new_carry, trace
+        return new_carry
 
     if ab3_za is not None:
         if ab3_hist is not None:
@@ -1568,13 +1631,15 @@ def _run_substep_loop(
         # (n_loop, n_lat, n_lon+1), which at n_loop ~ 960 is infeasible.
         _xs = _xs + (tide_cos, tide_sin)
 
-    if config.barotropic.differentiable_barotropic:
+    if config.barotropic.differentiable_barotropic or return_trace:
         # scan path: pass (averaging, transport) weights as xs per substep
         def scan_body(carry, wts_i):
+            if return_trace:
+                return substep_body(wts_i, carry)
             new_carry = substep_body(wts_i, carry)
             return new_carry, None
 
-        finals, _ = jax.lax.scan(
+        finals, traces = jax.lax.scan(
             scan_body, init_carry, xs=_xs, length=n_loop,
         )
     else:
@@ -1590,6 +1655,10 @@ def _run_substep_loop(
 
         finals = jax.lax.fori_loop(0, n_loop, fori_body, init_carry)
 
+        traces = None
+
+    if return_trace:
+        return finals, traces
     return finals
 
 
@@ -1778,6 +1847,7 @@ def barotropic_substeps_latlon_cgrid(
     substep_scale: int = 1,
     een_pre_override=None,
     _nemo_primary_transport_average_test_override=None,
+    _return_substep_trace=False,
 ) -> LatLonCGridOceanState:
     """Run barotropic substeps on a C-grid lat-lon grid.
 
@@ -1969,10 +2039,11 @@ def barotropic_substeps_latlon_cgrid(
     # EEN (kills the 2Δx checkerboard null mode / deep-eq jet).  Validated at
     # fn entry on the static config value (dispatch hardening).
     _bt_cor = getattr(config.barotropic, "barotropic_coriolis", "avg")
-    if _bt_cor not in ("avg", "een", "een_metric"):
+    if _bt_cor not in ("avg", "ene", "ene_metric", "een", "een_metric"):
         raise ValueError(
             "unknown barotropic_coriolis scheme "
-            f"{_bt_cor!r}: must be one of ('avg', 'een', 'een_metric').")
+            f"{_bt_cor!r}: must be one of ('avg', 'ene', 'ene_metric', "
+            "'een', 'een_metric').")
     # EEN coefficient seed level (#1226 zero-deviation item 4).  NEMO freezes
     # the dyn_cor_2D coefficients over the substep window at Kmm=NOW
     # (dyn_cor_2D_init(Kmm), dynspg_ts.F90:355 + :1349-1379 — every e3u/e3v/
@@ -1999,7 +2070,7 @@ def barotropic_substeps_latlon_cgrid(
         raise ValueError(
             "een_pre_override is reserved for the nemo_literal coefficient path")
     _een_pre = None
-    if _bt_cor in ("een", "een_metric") and add_barotropic_coriolis:
+    if _bt_cor in ("ene", "ene_metric", "een", "een_metric") and add_barotropic_coriolis:
         # "een_metric" (node-16 finale) folds NEMO's e1v/r1_e1u (u) and e2u/
         # r1_e2v (v) horizontal metrics into the EEN coefficients — the factors
         # the per-unit-width "een" operator drops (dynspg_ts.F90:1349-1379).
@@ -2018,7 +2089,7 @@ def barotropic_substeps_latlon_cgrid(
                 _een_seed == "nemo_kmm" and _seed_override) else eta)
             _een_pre = _build_een_barotropic_inputs(
                 _h_k_een, grid, mask, u_mask, v_mask, eta.dtype,
-                metric_complete=(_bt_cor == "een_metric"),
+                metric_complete=_bt_cor.endswith("_metric"),
                 een_q_boundary=getattr(
                     config, "een_q_boundary", "neumann_fill"),
                 een_e3f_scheme=getattr(config, "een_e3f_scheme", "min"),
@@ -2027,7 +2098,13 @@ def barotropic_substeps_latlon_cgrid(
                 dz_ref=getattr(z_coord, "dz_ref", None),
                 coefficient_evaluation=_een_eval,
                 eta=_eta_een,
-                z_coord=z_coord)
+                z_coord=z_coord,
+                scheme=(
+                    "ene"
+                    if _bt_cor.startswith("ene")
+                    and not _bt_cor.startswith("een")
+                    else "een"
+                ))
 
     coeffs = _dissipation_coeffs(config, grid, _area, dt_s, eta.dtype, mask)
 
@@ -2165,7 +2242,7 @@ def barotropic_substeps_latlon_cgrid(
         _ab3_zb = _ab3_zb.astype(eta.dtype)
     else:
         _ab3_za = _ab3_zb = _ab3_hist = None
-    _finals = _run_substep_loop(
+    _loop_result = _run_substep_loop(
         eta, U_bar, V_bar,
         dt_s=dt_s, n_loop=n_loop, w_filter=w_filter, w_transport=w_transport,
         grid=grid, config=config, g=g, H_bathy=H_bathy, mask=mask,
@@ -2181,7 +2258,12 @@ def barotropic_substeps_latlon_cgrid(
         een_pre=_een_pre,
         drag_r_u=_drag_r_u, drag_r_v=_drag_r_v,
         primary_transport_average=_primary_transport_average,
+        return_trace=_return_substep_trace,
     )
+    if _return_substep_trace:
+        _finals, _substep_trace = _loop_result
+    else:
+        _finals = _loop_result
     (eta_f, U_bar_f, V_bar_f,
      Hu_sum_f, Hv_sum_f, eta_sum_f, U_sum_f, V_sum_f) = _finals[:8]
 
@@ -2276,6 +2358,8 @@ def barotropic_substeps_latlon_cgrid(
             _finals[2] - _finals[10], _finals[2] - _finals[11],
             _finals[0] - _finals[12], _finals[0] - _finals[13],
         ))
+    if _return_substep_trace:
+        return state_new, (Hu_avg, Hv_avg), _substep_trace
     return state_new, (Hu_avg, Hv_avg)
 
 

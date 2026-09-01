@@ -207,9 +207,11 @@ def test_gyre_card_pins_rotated_grid_mi96_ic_and_seasonal_sbc():
     land_contribution = float(np.sum(raw_emp[~wet]))
     assert land_contribution != 0.0
     assert np.array_equal(final_emp[~wet], raw_emp[~wet])
-    assert float(np.sum(final_emp[wet])) == pytest.approx(
-        -land_contribution, abs=5.0e-18
-    )
+    # glob_2Dsum's unmasked source argument is still ownership-masked: the
+    # cropped card's 104 boundary-ring cells are not owned contributions.
+    assert float(np.sum(final_emp[wet])) == pytest.approx(0.0, abs=1.0e-17)
+    assert card.recipe.model_config.barotropic_coriolis_split == "live"
+    assert card.recipe.model_config.barotropic.barotropic_coriolis == "ene_metric"
 
 
 @pytest.mark.parametrize(

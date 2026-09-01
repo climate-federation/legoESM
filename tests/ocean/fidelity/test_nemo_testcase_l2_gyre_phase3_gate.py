@@ -58,9 +58,8 @@ def test_full_rk3_inventory_and_scaling_precede_owner_labels():
     assert '"UNMEASURED_SCALING_ONLY"' in source
 
 
-def test_resolved_program_coverage_is_oracle_block_driven():
-    source = PATH.read_text()
-    for block in (
+def test_resolved_program_coverage_parses_runtime_namelist(tmp_path):
+    blocks = (
         "namdyn_adv",
         "namdyn_vor",
         "namdyn_hpg",
@@ -74,11 +73,42 @@ def test_resolved_program_coverage_is_oracle_block_driven():
         "namtra_mle",
         "namzdf",
         "namzdf_tke",
-    ):
-        assert f'"{block}"' in source
+    )
+    resolved = tmp_path / "output.namelist.dyn"
+    resolved.write_text("".join(f"&{block.upper()}\n /\n" for block in blocks))
+    assert gate.resolved_namelist_blocks(resolved) == set(blocks)
+    rows = gate.resolved_program_coverage_rows(
+        resolved, {block: True for block in blocks}
+    )
+    assert all(row["status"] == "VERIFIED" for row in rows)
+
+    # A future fourteenth group is discovered from the runtime artifact and
+    # fails because the static card-disposition map has no row for it.
+    resolved.write_text(
+        resolved.read_text() + "&NAMTRA_FUTURE\n /\n"
+    )
+    rows = gate.resolved_program_coverage_rows(
+        resolved, {block: True for block in blocks}
+    )
+    future = next(row for row in rows if row["name"].endswith("namtra_future"))
+    assert future["status"] == "DEBT"
+    assert future["runtime_namelist_present"] is True
+    assert future["card_disposition_present"] is False
+
+
+def test_resolved_program_coverage_gate_and_planted_control_are_wired():
+    source = PATH.read_text()
     assert '"resolved_program_coverage"' in source
+    assert "resolved_program_coverage_rows" in source
     assert 'coverage_checks["namdyn_vor"] = False' in source
     assert '"--plant-coverage"' in source
+
+
+def test_momentum_scaling_arms_are_near_null_not_exonerated():
+    source = PATH.read_text()
+    assert '"NEAR-NULL_AT_KT2"' in source
+    assert '"UNMEASURED_SCALING_ONLY"' in source
+    assert "EXONERATED" not in source
 
 
 def test_seasonal_sbc_controls_split_surface_and_freshwater_inputs():
@@ -86,3 +116,34 @@ def test_seasonal_sbc_controls_split_surface_and_freshwater_inputs():
     assert '"changed_operands": ["surface_forcing"]' in source
     assert '"changed_operands": ["freshwater"]' in source
     assert "surface_and_freshwater_forcing_pytree" not in source
+
+
+def test_causal_oracle_operands_and_substep_control_are_wired():
+    source = PATH.read_text()
+    for token in (
+        "read_zdf_entry",
+        "read_qsr_stage3",
+        "read_bt_substeps",
+        '"DIAGNOSTIC_ONE_VARIABLE_CAUSAL_ARM"',
+        '"CAUSAL_NEAR_NULL_AFTER_DIRECT_MATCH"',
+        '"CAUSAL_CONTRIBUTOR_NOT_SOLE_OWNER"',
+        '"barotropic_substep_boundary"',
+        '"--plant-barotropic"',
+    ):
+        assert token in source
+    assert '"scaling_check_before_owner_label": True' in source
+
+
+def test_bt_trace_native_stagger_mapping():
+    eta = np.zeros((2, 3, 4), dtype=np.float64)
+    u = np.zeros((2, 3, 5), dtype=np.float64)
+    v = np.zeros((2, 4, 4), dtype=np.float64)
+    assert gate._trace_native(eta, "eta_entry").shape == (2, 3, 4)
+    assert gate._trace_native(u, "u_entry").shape == (2, 3, 4)
+    assert gate._trace_native(v, "v_entry").shape == (2, 3, 4)
+
+
+def test_causal_arm_near_null_is_not_an_owner_claim():
+    source = PATH.read_text()
+    assert '"CAUSAL_NEAR_NULL_AFTER_DIRECT_MATCH"' in source
+    assert "EXONERATED" not in source

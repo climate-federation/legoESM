@@ -8,6 +8,10 @@ Preregistration: `e0e1b89639874c7d1e8c777028d30ffa9f943557`
 
 Committed gate: `99a1ab9e6`
 
+Latest authoritative follow-up: the causal and within-substep result is in
+`nemo_testcases_l2_gyre_phase3_barotropic_receipt.md`.  Historical numbers
+below are retained as the audit trail for the card state that produced them.
+
 ## Verdict
 
 **DEBT at the first completed whole step (`kt=2`); continued under the
@@ -175,8 +179,10 @@ before implementation in `ee6b5aed0`; the corrected run stops again at `kt=2`.
 
 ### Full resolved-program coverage
 
-The inventory is driven by every `namdyn*`, `namzdf*`, and `namtra*` block in
-the resolved `output.namelist.dyn`, not by a suspected-term checklist.
+The inventory is driven by a runtime parse of every `namdyn*`, `namzdf*`, and
+`namtra*` block in the resolved `output.namelist.dyn`, then joined against the
+card's static scientific-disposition checklist.  A future unmatched block is
+DEBT; this is block discovery, not runtime parsing of every selector value.
 
 | block | resolved NEMO selection | corrected collapsed card | gate |
 |---|---|---|---|
@@ -260,6 +266,10 @@ Thus the remaining T and v residuals are at the scale of the TKE/EVD and
 shortwave arms; u is millions of times larger than either newly armed
 momentum term at the completed-step frame.  Scale agreement is not ownership,
 and no post-hoc owner label is made.
+
+The two momentum arms are therefore **NEAR-NULL AT kt=2** and have no
+discriminating power; that label is not exoneration.  The fail-closed gate and
+runtime-namelist regression test carry this annotation explicitly.
 
 Corrected gate artifact:
 `legoesm_phase3_redirect_gate.json`, SHA256

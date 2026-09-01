@@ -174,7 +174,10 @@ def _model_config(
             wzv_call2_evaluation="nemo_literal",
             vorticity_scheme="ene_total",
             coriolis_scheme="explicit_ab2",
-            barotropic_coriolis_split="frozen",
+            # GYRE's np_ENE dyn_cor_2D is subcycled live: subtract the Kmm
+            # ENE Coriolis from zu_frc, then reapply it to every AB3 mid-step
+            # velocity (dynspg_ts.F90:359,689; nn_bt_flt=3).
+            barotropic_coriolis_split="live",
             lateral_viscosity_operator="nemo_div_curl",
             lateral_viscosity_e3_weighting="nemo_e3",
             surface_stress_implicit=True,
@@ -192,6 +195,9 @@ def _model_config(
                 barotropic_seed_face_depth="nemo_ssh_avg",
                 barotropic_seed_evaluation="nemo_literal",
                 barotropic_pgf_evaluation="nemo_literal",
+                barotropic_coriolis="ene_metric",
+                barotropic_een_seed="nemo_kmm",
+                barotropic_een_coefficient_evaluation="generic",
                 barotropic_reconcile_target="velocity_avg",
                 nemo_stage_mean_imposition=True,
             ),
@@ -725,10 +731,12 @@ def gyre_surface_boundary_condition(
     t_star = nemo_gyre_t_star(lat, t_seconds)
     emp_raw = nemo_gyre_emp(lat, t_seconds)
     wet = jnp.asarray(card.recipe.land_mask) > 0.5
-    # NEMO usrdef_sbc.F90:122-140 fills emp over the whole A2D array, then
-    # divides the UNMASKED numerator glob_2Dsum(emp) by the wet tmask count.
-    # Land therefore contributes to the mean removed only from wet cells.
-    emp_mean = jnp.sum(emp_raw) / jnp.sum(wet)
+    # Runtime substep evidence resolves a subtle ownership point hidden by the
+    # source string: glob_2Dsum receives unmasked ``emp``, but excludes GYRE's
+    # 104 non-owned boundary-ring cells.  Those are the same cells represented
+    # by ``wet=False`` in this cropped 22x32 card.  The oracle kt=1 eta update
+    # pins the resulting 600-owned-cell numerator exactly.
+    emp_mean = jnp.sum(emp_raw * wet) / jnp.sum(wet)
     emp = emp_raw - emp_mean * wet
     utau, vtau = nemo_gyre_wind(lat, t_seconds)
     taum = jnp.sqrt(utau * utau + vtau * vtau)
@@ -793,6 +801,10 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
             f"{card.case} requires NEMO's prognostic uu_b(Kaa) velocity frame")
     wet = np.asarray(card.recipe.land_mask) > 0.5
     if card.case == "GYRE-zco":
+        if (cfg.barotropic_coriolis_split != "live"
+                or cfg.barotropic.barotropic_coriolis != "ene_metric"):
+            raise ValueError(
+                "GYRE-zco requires live ENE barotropic Coriolis composition")
         require_rotation = (
             np.any(np.asarray(card.recipe.grid.f_T) != 0.0)
             and np.count_nonzero(np.any(wet, axis=1)) == 20

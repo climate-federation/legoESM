@@ -1011,6 +1011,14 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     expose_momentum_stage: int = 0
 
 
+class _NEMOWSBarotropicTrace(NamedTuple):
+    """Private WRITE-only equivalent returned by the GYRE boundary gate."""
+
+    state_after_barotropic: object
+    substeps: object
+    slow_forcing: object
+
+
 def _nemo_ws_rk3_tracer_pair_step(
     tr_a: jnp.ndarray,
     tr_b: jnp.ndarray,
@@ -2988,15 +2996,17 @@ class LatLonCGridOceanModel:
                 # form EEN flux, so the subtraction must ALSO be EEN
                 # (barotropic.barotropic_coriolis="een"); the legacy 4-pt-avg
                 # face-f "avg" stencil would leave an O(1) residual Coriolis.
+                _required_bt = (("ene", "ene_metric") if _vs == "ene_total"
+                                else ("een", "een_metric"))
                 if getattr(config.barotropic, "barotropic_coriolis",
-                           "avg") not in ("een", "een_metric"):
+                           "avg") not in _required_bt:
                     raise ValueError(
                         f'vorticity_scheme="{_vs}" with '
                         'barotropic_coriolis_split="live" requires '
-                        'barotropic.barotropic_coriolis="een"/"een_metric" (NEMO '
-                        "dyn_spg_ts::dyn_cor_2D EEN): the _total planetary "
-                        "term is the vertex-f EEN transport-form flux, so the "
-                        "live pre-step subtraction must use the SAME EEN "
+                        f"barotropic.barotropic_coriolis in {_required_bt!r}: "
+                        "the _total planetary term and dyn_spg_ts::dyn_cor_2D "
+                        "must use the SAME ENE/EEN transport-form flux, so the "
+                        "live pre-step subtraction must use the SAME "
                         "stencil to cancel — the 4-pt-avg \"avg\" stencil "
                         "would not. Got barotropic_coriolis="
                         f'{getattr(config.barotropic, "barotropic_coriolis", "avg")!r}.')
@@ -3034,16 +3044,10 @@ class LatLonCGridOceanModel:
                     "Coriolis (1.5*cor^n - 0.5*cor^(n-1)) would not cancel the "
                     "single-time pre-step subtraction, leaving a transient "
                     "residual planetary Coriolis in the forcing.")
-            if getattr(config.barotropic, "barotropic_time_filter",
-                       "cosine") == "nemo_ab3am4":
-                raise ValueError(
-                    'barotropic_coriolis_split="live" is incompatible with '
-                    'barotropic_time_filter="nemo_ab3am4": the AB3 substep '
-                    "applies the live Coriolis to the EXTRAPOLATED mid-step "
-                    "velocity U_mid while the pre-step subtraction uses the "
-                    "plain pre-step U_bar, so substep-0 would not cancel "
-                    "bit-exactly. Use the boxcar filter (nn_bt_flt=2, NEMO's "
-                    "DINO selection) with the live split.")
+            # nn_bt_flt=3 deliberately applies live Coriolis to the AB3
+            # mid-step velocity after subtracting the plain Kmm value from the
+            # frozen forcing (GYRE dynspg_ts.F90:359,689).  Their non-cancellation
+            # is the intended AB3 evolution, not an incompatibility.
         _valid_time_int = {"euler", "ab2", "rk3", "rk3_ws"}
         if config.tracer_time_integrator not in _valid_time_int:
             raise ValueError(
@@ -3673,6 +3677,9 @@ class LatLonCGridOceanModel:
                    _barotropic_before_state=None,
                    _fct_tracer_before=None,
                    _external_tracer_rate=None,
+                   _shortwave_tendency_test_delta=None,
+                   _vertical_K_test_override=None,
+                   _return_barotropic_substeps: bool = False,
                    _ldf_state=None, _tke_n2_bundle_override=None,
                    _return_raw_kaa_qco: bool = False,
                    z_coord=None, config=None, iwm_fields=None):
@@ -3849,7 +3856,12 @@ class LatLonCGridOceanModel:
                 dT_dt=tend.dT_dt.replace(data=tend.dT_dt.data + _dT_ext),
                 dS_dt=tend.dS_dt.replace(data=tend.dS_dt.data + _dS_ext),
             )
-
+        # GYRE causal-arm controls.  Each changes exactly one diagnosed
+        # operand and is reachable only through this private implementation
+        # method; production ``step`` never supplies either argument.
+        if _shortwave_tendency_test_delta is not None:
+            tend = tend._replace(dT_dt=tend.dT_dt.replace(
+                data=tend.dT_dt.data + _shortwave_tendency_test_delta))
         # AB2 "advective" scope (Veros-faithful): the DISSIPATIVE tendencies are
         # WITHHELD from tend.{du,dv,dT,dS}_dt and exposed on tend.{...}_diss so
         # they can be applied at WEIGHT 1.0 (forward-Euler) rather than being
@@ -4403,7 +4415,7 @@ class LatLonCGridOceanModel:
                 # remains; the EEN path cancels exactly (same helper both sides).
                 _bt_cor_split = getattr(
                     _cfg_b.barotropic, "barotropic_coriolis", "avg")
-                if _bt_cor_split in ("een", "een_metric"):
+                if _bt_cor_split in ("ene", "ene_metric", "een", "een_metric"):
                     # NEMO ln_dynvor_een DINO (nemo_dino_kamm_mlf): the _total
                     # planetary term rides the vertex-f EEN transport-form flux,
                     # so the pre-step subtraction must use the SAME EEN stencil
@@ -4438,12 +4450,15 @@ class LatLonCGridOceanModel:
                     _een_eval = getattr(
                         _cfg_b.barotropic,
                         "barotropic_een_coefficient_evaluation", "generic")
+                    _bt_pv_scheme = (
+                        "ene" if _bt_cor_split in ("ene", "ene_metric")
+                        else "een")
                     (_cor_u_sub, _cor_v_sub,
                      _een_pre_built) = barotropic_coriolis_een_pre_step(
                         state_mid.u.data, state_mid.v.data, h_k_pre, _grid,
                         state.land_mask.data, state.u_mask.data,
                         state.v_mask.data, _min_wc, F_slow_u.dtype,
-                        metric_complete=(_bt_cor_split == "een_metric"),
+                        metric_complete=_bt_cor_split.endswith("_metric"),
                         # Same EEN q-boundary / e3f rules as the 3-D EEN and
                         # as the substep loop's own _build_een_barotropic_inputs
                         # — otherwise this subtraction uses a DIFFERENT operator
@@ -4458,7 +4473,8 @@ class LatLonCGridOceanModel:
                         coefficient_evaluation=_een_eval,
                         eta=state.eta.data,
                         z_coord=_zc,
-                        return_pre=True)
+                        return_pre=True,
+                        scheme=_bt_pv_scheme)
                     if _een_eval == "nemo_literal":
                         _een_pre_shared = _een_pre_built
                     F_slow_u = (F_slow_u - _cor_u_sub) * state.u_mask.data
@@ -4547,7 +4563,12 @@ class LatLonCGridOceanModel:
                     _baro_seed = dict(
                         _baro_seed,
                         _nemo_primary_transport_average_test_override=False)
-            state_new, (Hu_avg, Hv_avg) = _baro_fn(
+                if _return_barotropic_substeps:
+                    _baro_seed = dict(_baro_seed, _return_substep_trace=True)
+            elif _return_barotropic_substeps:
+                raise NotImplementedError(
+                    "GYRE substep trace requires the standard-halo barotropic path")
+            _baro_result = _baro_fn(
                 state_mid, dt_s, _nbaro,
                 _grid, _zc, _cfg_b,
                 F_slow_eta=F_slow_eta,
@@ -4557,6 +4578,13 @@ class LatLonCGridOceanModel:
                 t_seconds=t_seconds,  # traced model time for the equilibrium tide
                 **_baro_seed,
             )
+            if _return_barotropic_substeps:
+                state_new, (Hu_avg, Hv_avg), _substep_trace = _baro_result
+                return _NEMOWSBarotropicTrace(
+                    state_new, _substep_trace,
+                    (F_slow_eta, F_slow_u, F_slow_v),
+                )
+            state_new, (Hu_avg, Hv_avg) = _baro_result
 
         # NEMO-RK3 scheme identity: HYB is the live stprk3_stg barotropic
         # update (module default at :44; stages at :143-144,206-207,225), so
@@ -5984,6 +6012,7 @@ class LatLonCGridOceanModel:
                     # implicit_vmix_e3t_now_divisor is off.
                     eta_now=state.eta.data,
                     u_now=state.u.data, v_now=state.v.data,
+                    effective_K_test_override=_vertical_K_test_override,
                 z_coord=z_coord, config=config, iwm_fields=iwm_fields)
             else:
                 _n2_tracers = self._n2_before_advection_tracers(state, z_coord=z_coord, config=config)
@@ -6000,6 +6029,7 @@ class LatLonCGridOceanModel:
                     # NEMO e3w(Kmm) divisor (#1226 W1): see the sibling call.
                     eta_now=state.eta.data,
                     u_now=state.u.data, v_now=state.v.data,
+                    effective_K_test_override=_vertical_K_test_override,
                 z_coord=z_coord, config=config, iwm_fields=iwm_fields)
         if tke_new is not None:
             # Veros order (integrate_tke): the implicit solve writes
@@ -7252,6 +7282,7 @@ class LatLonCGridOceanModel:
         K_diss_v_w=None,
         return_K_diss_v: bool = False,
         return_K_profiles: bool = False,
+        effective_K_test_override=None,
         grid=None,
         n2_tracers=None,
         n2_tracers_before=None,
@@ -7565,6 +7596,14 @@ class LatLonCGridOceanModel:
                     n2_tracers_before=n2_tracers_before,
                     eta_now=eta_now,
                 )
+
+        # Private GYRE causal arm: replace the EFFECTIVE profiles at the exact
+        # solve boundary, after prognostic TKE/EVD/background/IWM composition.
+        # Putting these values into K_v_phys/A_v_phys would take the surfaced-K
+        # fast path and double-count the closure; this hook deliberately leaves
+        # the prognostic TKE update intact and changes only the consumed pair.
+        if effective_K_test_override is not None:
+            K_v_cell, A_v_cell = effective_K_test_override
 
         # DIAGNOSTIC CAPTURE (return_K_profiles): the interface diffusivity
         # K_v_cell (heat, NEMO avt) and viscosity A_v_cell (momentum, avm) at
@@ -8292,7 +8331,8 @@ class LatLonCGridOceanModel:
         ``K_v=None`` so the solve computes the profile itself). This runs the
         SAME setup the step runs — ``_step_impl`` with the implicit mixing
         turned off to obtain the surfaced ``K_v_phys``/``tke_source`` inputs,
-        then ``_apply_implicit_vertical_mixing`` with ``return_K_profiles`` —
+        then ``_apply_implicit_vertical_mixing`` on that explicit state with
+        ``return_K_profiles`` —
         and returns the coefficients at the point the solve reads them, AFTER
         the closure, the config background and the additive internal-wave
         mixing. It is the model's own code, not a re-derivation, so the number
@@ -8303,11 +8343,13 @@ class LatLonCGridOceanModel:
         No prognostic field is advanced.
         """
         _grid = grid if grid is not None else self.grid
+        _tke_n2_bundle = self._tke_step_entry_n2_bundle(state)
         state_expl, (K_v_phys, A_v_phys, k33_implicit,
                      surface_tracer_forcing, tke_source,
                      diss_incr, tracer_source) = self._step_impl(
             state, dt, surface_forcing=surface_forcing,
-            _apply_implicit_vmix=False, grid=_grid)
+            _apply_implicit_vmix=False, grid=_grid,
+            _tke_n2_bundle_override=_tke_n2_bundle)
         _tke_prog = self._tke_prognostic_active()
         _tke_old = (state.tke.data if (_tke_prog and state.tke is not None)
                     else None)
@@ -8316,11 +8358,14 @@ class LatLonCGridOceanModel:
         # N² (step-entry, before-advection), same carried TKE, same NOW eta,
         # same surfaced physics K.
         return self._apply_implicit_vertical_mixing(
-            state, dt, surface_forcing,
+            state_expl, dt, surface_forcing,
             K_v_phys=K_v_phys, A_v_phys=A_v_phys,
             dt_mom=dt_mom, tke_old=_tke_old, tke_source=tke_source,
             n2_tracers=self._n2_before_advection_tracers(state),
+            n2_tracers_before=self._n2_nemo_before_tracers(state),
+            tke_n2_bundle=_tke_n2_bundle,
             eta_now=state.eta.data,
+            u_now=state.u.data, v_now=state.v.data,
             return_K_profiles=True, grid=_grid,
         )
 
@@ -8328,7 +8373,9 @@ class LatLonCGridOceanModel:
              freshwater=None, surface_forcing=None,
              sponge=None, *, grid=None,
              vertex_mask=None, t_seconds=None,
-             external_tracer_rate=None) -> LatLonCGridOceanState:
+             external_tracer_rate=None,
+             _shortwave_tendency_test_delta=None,
+             _vertical_K_test_override=None) -> LatLonCGridOceanState:
         """Advance one time step using split-explicit stepping.
 
         ``external_tracer_rate`` (optional ``(dT_dt, dS_dt)`` array pair,
@@ -8424,17 +8471,27 @@ class LatLonCGridOceanModel:
                 f"got outer_integrator={self.config.outer_integrator!r}. "
                 "Passing it under another integrator would be a silent "
                 "no-op.")
+        if ((_shortwave_tendency_test_delta is not None
+             or _vertical_K_test_override is not None)
+                and self.config.outer_integrator != "forward_euler"):
+            raise ValueError(
+                "private GYRE causal-arm overrides are implemented only for "
+                "outer_integrator='forward_euler'.")
         return self._step_jitted(
             state, dt, freshwater, surface_forcing, sponge,
             grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
-            external_tracer_rate=external_tracer_rate)
+            external_tracer_rate=external_tracer_rate,
+            _shortwave_tendency_test_delta=_shortwave_tendency_test_delta,
+            _vertical_K_test_override=_vertical_K_test_override)
 
     @partial(jax.jit, static_argnums=(0,))
     def _step_jitted(self, state: LatLonCGridOceanState, dt: float,
                      freshwater=None, surface_forcing=None,
                      sponge=None, *, grid=None,
                      vertex_mask=None, t_seconds=None,
-                     external_tracer_rate=None) -> LatLonCGridOceanState:
+                     external_tracer_rate=None,
+                     _shortwave_tendency_test_delta=None,
+                     _vertical_K_test_override=None) -> LatLonCGridOceanState:
         """JIT body of :meth:`step` (split out so the vertex-mask cache
         fill runs eagerly — see the ``step`` docstring).
 
@@ -8503,7 +8560,11 @@ class LatLonCGridOceanModel:
                                         surface_forcing=surface_forcing,
                                         sponge=sponge,
                                         grid=grid, vertex_mask=vertex_mask,
-                                        t_seconds=t_seconds)
+                                        t_seconds=t_seconds,
+                                        _shortwave_tendency_test_delta=(
+                                            _shortwave_tendency_test_delta),
+                                        _vertical_K_test_override=(
+                                            _vertical_K_test_override))
         # Feature-gated on a STATIC config bool (CLAUDE.md feature-gating
         # exception): a Python ``if`` selects the branch at trace time, so
         # the freeze-floor clamp is only traced when enabled — no jnp.where

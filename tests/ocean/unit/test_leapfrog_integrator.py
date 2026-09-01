@@ -193,8 +193,8 @@ def test_boxcar_ab3_live_split_runs_no_nan():
     # NEMO nn_bt_flt=2 (barotropic_time_filter="nemo_boxcar_ab3") = the AB3
     # velocity predictor + ts_bck_interp(alpha=0) ssh temporal dissipation +
     # boxcar averaging, composed WITH the live EEN barotropic Coriolis (the
-    # nemo_dino_kamm_mlf config). The validator must ACCEPT this pairing (only
-    # nemo_ab3am4 is rejected with the live split), and it must step finite.
+    # nemo_dino_kamm_mlf config). The validator must ACCEPT this pairing and it
+    # must step finite.
     state, model = _leapfrog_channel(
         barotropic_coriolis="een", barotropic_coriolis_split="live",
         barotropic_time_filter="nemo_boxcar_ab3")
@@ -220,14 +220,18 @@ def test_leapfrog_before_seed_wide_halo_not_implemented():
         model.step(s, dt=_DT)       # leapfrog pass → before-seed → guard
 
 
-def test_ab3am4_live_split_still_rejected():
-    # nemo_ab3am4 (nn_bt_flt=3, cross-window carry => substep-0 extrapolates)
-    # stays incompatible with the live split; only the ramp-every-step
-    # nemo_boxcar_ab3 (nn_bt_flt=2) is allowed.
-    with pytest.raises(ValueError, match="nemo_ab3am4"):
-        _leapfrog_channel(barotropic_coriolis="een",
-                          barotropic_coriolis_split="live",
-                          barotropic_time_filter="nemo_ab3am4")
+def test_ab3am4_live_split_runs_no_nan():
+    # GYRE's resolved nn_bt_flt=3 path deliberately combines the AB3/AM4
+    # predictor with live ENE Coriolis. The pre-step Kmm subtraction and the
+    # mid-step live operator therefore need not cancel after substep zero.
+    state, model = _leapfrog_channel(
+        barotropic_coriolis="een", barotropic_coriolis_split="live",
+        barotropic_time_filter="nemo_ab3am4")
+    s = state
+    for _ in range(4):
+        s = model.step(s, dt=_DT)
+    assert np.all(np.isfinite(np.asarray(s.u.data)))
+    assert np.all(np.isfinite(np.asarray(s.v.data)))
 
 
 def test_unknown_vorticity_scheme_raises():

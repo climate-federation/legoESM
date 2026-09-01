@@ -102,14 +102,20 @@ degenerate opposite-sign symmetry of the original two samples.
 The planted nonzero wet `qsr + 1` control exits 1 at
 `0.0060207666701617753 > 1e-15`.
 
-Claude review caught a shared card/gate source misread in the freshwater mean.
-The superseded implementation masked the `emp` numerator to the 600 wet cells.
-NEMO actually fills all 704 A2D cells, then evaluates unmasked
-`glob_2Dsum(emp) / glob_2Dsum(tmask)` at `usrdef_sbc.F90:122-140` before
-subtracting that mean only on wet cells.  **FAITHFUL WINS:** both card and
-independent gate now use the unmasked numerator and wet denominator.  A direct
-test requires the 104-cell land contribution to be nonzero, unchanged by mean
-removal, and balanced by the final wet sum.
+Claude review caught a shared card/gate source misread in the freshwater mean
+and correctly required the runtime behavior, not self-agreement, to win.  The
+source passes the unmasked 704-cell `emp` array to `glob_2Dsum` and divides by
+`glob_2Dsum(tmask)` at `usrdef_sbc.F90:122-140`; the Phase-2 interpretation was
+that all 704 numerator cells therefore contributed.  The later write-only
+barotropic trace provides the missing runtime discriminator: NEMO's first SSH
+increment implies `8.50091456831154e-6`, exactly the numerator over the 600
+owned cells, not the naive 704-cell value `9.166209883944753e-6`.  The global
+reduction excludes the 104 non-owned boundary-ring cells even though its
+argument is syntactically unmasked.  **Correction:** card and independent gate
+now use the owned/wet numerator and denominator; the boundary-ring raw values
+remain nonzero and unchanged, while the owned final EMP sum is zero to fp64
+roundoff.  The superseded “land contribution enters the numerator” claim is
+retracted rather than silently rewritten.
 
 ## Geometry, entry level, controls, and tests
 
