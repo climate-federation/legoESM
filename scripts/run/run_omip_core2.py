@@ -6365,18 +6365,36 @@ def main() -> int:
         # NEMO advective BBL (trabbl nn_bbl_adv=2): static geometry from the
         # partial-cell reference thicknesses + NEMO mask; host post-step
         # application (same pattern as restoring / ice-thermo).
-        if app_grid_type not in ("tripole", "latlon"):
-            raise ValueError("--bbl-adv is wired for tripole/latlon only "
-                             f"(got grid {args.grid!r}).")
+        if app_grid_type not in ("tripole", "latlon", "mpas"):
+            raise ValueError("--bbl-adv is wired for tripole/latlon/mpas "
+                             f"only (got grid {args.grid!r}).")
         from legoesm.ocean.vertical import OceanPartialCellCoordinate
         if not isinstance(z_coord, OceanPartialCellCoordinate):
             raise ValueError("--bbl-adv requires --partial-cell (the BBL "
                              "geometry comes from per-cell bottom levels).")
-        from legoesm.ocean.physics.bbl_adv import bbl_static_geometry
-        bbl_geom = bbl_static_geometry(
-            jnp.asarray(z_coord.h_partial),
-            jnp.asarray(state.land_mask.data))
-        if app_grid_type == "tripole":
+        if app_grid_type == "mpas":
+            # Voronoi: edge-indexed twin (same trabbl physics; face width =
+            # dvEdge, the transverse extent of the face between the cells).
+            from legoesm.ocean.physics.bbl_adv_mpas import (
+                bbl_static_geometry_mpas,
+            )
+            bbl_geom = bbl_static_geometry_mpas(
+                jnp.asarray(z_coord.h_partial),
+                jnp.asarray(state.land_mask.data),
+                jnp.asarray(grid.cellsOnEdge))
+            bbl_face_widths = (jnp.asarray(grid.dvEdge), None)
+            print(f"[setup] BBL-adv ON (Campin-Goosse gamma="
+                  f"{args.bbl_gamma_s}s, mpas): active edges "
+                  f"{int(np.asarray(bbl_geom.active).sum())}"
+                  f"/{int(bbl_geom.mgrh.shape[0])}")
+        else:
+            from legoesm.ocean.physics.bbl_adv import bbl_static_geometry
+            bbl_geom = bbl_static_geometry(
+                jnp.asarray(z_coord.h_partial),
+                jnp.asarray(state.land_mask.data))
+        if app_grid_type == "mpas":
+            pass  # widths set above
+        elif app_grid_type == "tripole":
             # tripole carries face metrics: dy_u (n_lat, n_lon+1 with wrap),
             # dx_v (n_lat+1, n_lon). Interior faces: between cols i,i+1 ->
             # u-face index i+1; between rows j,j+1 -> v-face index j+1.
@@ -6397,11 +6415,12 @@ def main() -> int:
             _dxv = jnp.asarray(
                 (_R * np.cos(_latv) * _dlon)[:, None]
                 * np.ones((1, _nlon)))
-        bbl_face_widths = (_dyu, _dxv)
-        print(f"[setup] BBL-adv ON (Campin-Goosse gamma={args.bbl_gamma_s}s): "
-              f"active i-faces "
-              f"{int(np.asarray(bbl_geom.u_active).sum())}, j-faces "
-              f"{int(np.asarray(bbl_geom.v_active).sum())}")
+        if app_grid_type != "mpas":
+            bbl_face_widths = (_dyu, _dxv)
+            print(f"[setup] BBL-adv ON (Campin-Goosse "
+                  f"gamma={args.bbl_gamma_s}s): active i-faces "
+                  f"{int(np.asarray(bbl_geom.u_active).sum())}, j-faces "
+                  f"{int(np.asarray(bbl_geom.v_active).sum())}")
 
     lat2d, lon2d = _grid_lat2d_deg(grid, args.grid)
 
@@ -8456,15 +8475,28 @@ def main() -> int:
             # NEMO advective BBL (Campin-Goosse): dense shelf bottom water
             # descends the slope. Host post-step exchange, exactly tracer-
             # conserving; transports recomputed from current bottom T/S.
-            from legoesm.ocean.physics.bbl_adv import apply_bbl_adv_step
-            state = apply_bbl_adv_step(
-                state, bbl_geom, dt,
-                gamma_s=args.bbl_gamma_s,
-                rho_0=float(model.config.rho_0),
-                area_2d=jnp.asarray(grid.area),
-                dy_u_faces=bbl_face_widths[0],
-                dx_v_faces=bbl_face_widths[1],
-                nlev=int(args.nlev))
+            from legoesm.ocean.physics.bbl_adv_mpas import BBLGeometryMPAS
+            if isinstance(bbl_geom, BBLGeometryMPAS):
+                from legoesm.ocean.physics.bbl_adv_mpas import (
+                    apply_bbl_adv_step_mpas,
+                )
+                state = apply_bbl_adv_step_mpas(
+                    state, bbl_geom, dt,
+                    gamma_s=args.bbl_gamma_s,
+                    rho_0=float(model.config.rho_0),
+                    area=jnp.asarray(grid.areaCell),
+                    dv_edge=bbl_face_widths[0],
+                    nlev=int(bbl_geom.h_ref.shape[-1]))
+            else:
+                from legoesm.ocean.physics.bbl_adv import apply_bbl_adv_step
+                state = apply_bbl_adv_step(
+                    state, bbl_geom, dt,
+                    gamma_s=args.bbl_gamma_s,
+                    rho_0=float(model.config.rho_0),
+                    area_2d=jnp.asarray(grid.area),
+                    dy_u_faces=bbl_face_widths[0],
+                    dx_v_faces=bbl_face_widths[1],
+                    nlev=int(args.nlev))
         if nudge_tau_s > 0 and (nudge_release_s <= 0 or step * dt < nudge_release_s):
             a = dt / nudge_tau_s
             # WOA nudging is genuinely FULL-3-D (every level relaxes toward
