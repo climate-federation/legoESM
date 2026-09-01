@@ -448,8 +448,12 @@ def run(
             "changed_operands": ["momentum_transport_reconcile"],
             "hooks": _NEMOWSRK3TestHooks(momentum_transport_reconcile=False),
         },
-        "omit_seasonal_sbc": {
-            "changed_operands": ["surface_and_freshwater_forcing_pytree"],
+        "omit_surface_boundary_forcing": {
+            "changed_operands": ["surface_forcing"],
+            "hooks": _NEMOWSRK3TestHooks(),
+        },
+        "omit_freshwater_forcing": {
+            "changed_operands": ["freshwater"],
             "hooks": _NEMOWSRK3TestHooks(),
         },
     }
@@ -462,8 +466,18 @@ def run(
             arm_model = LatLonCGridOceanModel(
                 card.recipe.grid, card.recipe.z_coord, cfg, _nemo_ws_test_hooks=manifest["hooks"]
             )
-            if name == "omit_seasonal_sbc":
-                control = arm_model.step(card.recipe.initial_state, dt=card.dt_s)
+            if name == "omit_surface_boundary_forcing":
+                control = arm_model.step(
+                    card.recipe.initial_state,
+                    dt=card.dt_s,
+                    freshwater=freshwater0,
+                )
+            elif name == "omit_freshwater_forcing":
+                control = arm_model.step(
+                    card.recipe.initial_state,
+                    dt=card.dt_s,
+                    surface_forcing=surface0,
+                )
             else:
                 control = arm_model.step(
                     card.recipe.initial_state,

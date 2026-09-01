@@ -54,3 +54,10 @@ def test_full_rk3_inventory_and_scaling_precede_owner_labels():
     assert '"CONFIRMED_OWNER"' in source
     assert '"PLAUSIBLE_CONTRIBUTOR_NOT_OWNER"' in source
     assert '"REFUTED_AS_PRIMARY_OWNER"' in source
+
+
+def test_seasonal_sbc_controls_split_surface_and_freshwater_inputs():
+    source = PATH.read_text()
+    assert '"changed_operands": ["surface_forcing"]' in source
+    assert '"changed_operands": ["freshwater"]' in source
+    assert "surface_and_freshwater_forcing_pytree" not in source
