@@ -1988,18 +1988,48 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
 # Selectors the FESOM lane HONOURS at its current stage (an ALLOWLIST:
 # GLM review 2026-09-01 — a blocklist is fail-open as the driver grows;
 # every flag the USER SET that is not listed here is rejected).  Grows one
-# stage at a time (B2 wind stress + B3 heat/freshwater are IN; B4
-# ice/SSS-restore/runoff pending).
-# NOTE (runoff, deliberately NOT allowlisted): load_runoff_monthly's coastal
-# spread dispatches structured-2-D (laplacian_smooth_2d) vs Voronoi
-# (cellsOnCell); the FESOM node mesh is 1-D unstructured with NEITHER
-# topology wired, so --runoff would need a node-adjacency smoother first.
+# stage at a time (B2 wind stress + B3 heat/freshwater; B4 adds prognostic
+# ice + SSS restore (water_flux channel) + runoff + NEMO-monthly/WOA IC).
 _FESOM_WIRED_DESTS = frozenset({
     "grid", "fesom_mesh_dir", "fesom_ic_dir", "fesom_unforced", "dt", "years",
     "snapshot_every_days", "output", "smoke",
     # B2+B3 forcing selectors, wired through the fesom forced loop:
     "emp_freshwater", "dm2dc", "sw_rgb_chl", "chl_file", "forcing_path",
+    # B4 — prognostic sea ice (legoESM ice, free-drift, 1 category):
+    "prognostic_sea_ice", "prognostic_ice_dynamics", "ice_init",
+    "ice_ocean_heat_coeff", "ice_thermo_sw_trans",
+    # B4 — SSS restoring (water_flux channel ONLY: FesomOceanState.S is a
+    # read-only facade, so the post-step tracer applicator cannot write back):
+    "sss_restore", "sss_restore_channel", "sss_restore_tau_days",
+    "sss_restore_bound_mmday", "sss_restore_file",
+    "sss_restore_normalization", "sss_ice_gate_nemo",
+    # B4 — Dai-Trenberth runoff (node-adjacency coastal spread from
+    # mesh.edges via FesomOceanGrid.cellsOnCell):
+    "runoff", "runoff_spread_passes",
+    # B4 — NEMO-monthly / WOA initial condition:
+    "nemo_monthly_init", "nemo_init_month", "woa_init", "woa_t", "woa_s",
 })
+
+# B4 selectors that CONSUME the forced loop's forcing/coupling — meaningless
+# under the B1 --fesom-unforced smoke, where accepting them would silently
+# drop them (same rule as the B2/B3 forcing selectors).  IC selectors
+# (nemo_monthly_init/woa_init/...) are NOT here: the unforced smoke
+# legitimately starts from them.
+_FESOM_FORCED_ONLY_DESTS = (
+    "dm2dc", "sw_rgb_chl", "chl_file",
+    "prognostic_sea_ice", "prognostic_ice_dynamics", "ice_init",
+    "ice_ocean_heat_coeff", "ice_thermo_sw_trans",
+    "sss_restore", "sss_restore_channel", "sss_restore_tau_days",
+    "sss_restore_bound_mmday", "sss_restore_file",
+    "sss_restore_normalization", "sss_ice_gate_nemo",
+    "runoff", "runoff_spread_passes",
+    # codex B4 MAJOR (partially adopted): the UNFORCED smoke never loads
+    # forcing, so a forcing SOURCE selector there is a silent drop.  The
+    # P-E opt-OUT (--no-emp) stays legal — disabling a channel that does
+    # not run drops nothing, and rejecting it would break the natural
+    # "unforced, and explicitly no P-E" card.
+    "forcing_path",
+)
 
 
 def validate_fesom_stage(args, parser) -> None:
@@ -2010,39 +2040,78 @@ def validate_fesom_stage(args, parser) -> None:
     if not args.fesom_mesh_dir:
         raise SystemExit("--grid fesom requires --fesom-mesh-dir (a "
                          "fesom_jax C-exported mesh directory).")
+    # codex B4 MAJOR: dangling IC sub-options would be silently dropped.
+    if (args.nemo_init_month != parser.get_default("nemo_init_month")
+            and args.nemo_monthly_init is None):
+        raise SystemExit("--nemo-init-month without --nemo-monthly-init "
+                         "does nothing on the fesom lane.")
+    if ((args.woa_t != parser.get_default("woa_t")
+         or args.woa_s != parser.get_default("woa_s"))
+            and not args.woa_init):
+        raise SystemExit("--woa-t/--woa-s without --woa-init do nothing on "
+                         "the fesom lane.")
     if getattr(args, "fesom_unforced", False):
         # The unforced smoke consumes NO forcing selectors — accepting them
         # there would silently drop them (codex B2/B3 MAJOR).
-        _b23 = [d for d in ("dm2dc", "sw_rgb_chl", "chl_file")
+        _b23 = [d for d in _FESOM_FORCED_ONLY_DESTS
                 if vars(args).get(d) != parser.get_default(d)]
         if _b23:
             raise SystemExit(
                 "--fesom-unforced runs the UNFORCED smoke; these forcing "
                 "selectors would be silently dropped: "
                 + " ".join("--" + d.replace("_", "-") for d in _b23))
+    if getattr(args, "sss_restore", False) \
+            and args.sss_restore_channel != "water_flux":
+        # FesomOceanState.S is a read-only PROPERTY of the inner fesom
+        # state — the post-step tracer applicator (the 'tracer' channel)
+        # cannot write the restored salinity back, so the tracer channel
+        # would silently do nothing.  Water-flux (NEMO nn_sssr=2) enters
+        # via fw.restoring -> the translator's water_flux; that is the
+        # ONLY channel wired on this lane.
+        raise SystemExit(
+            "--grid fesom: --sss-restore requires --sss-restore-channel "
+            "water_flux (and --sss-restore-normalization live_s): the "
+            "tracer channel is a post-step salinity edit, which cannot "
+            "write into the read-only FESOM state facade.")
+    if getattr(args, "sss_restore", False) \
+            and args.sss_restore_file is None \
+            and not (args.woa_init or args.nemo_monthly_init):
+        raise SystemExit(
+            "--grid fesom: --sss-restore needs a target — pass "
+            "--sss-restore-file (NEMO sn_sss monthly climatology) or an "
+            "initialised surface (--woa-init / --nemo-monthly-init) for "
+            "the IC-surface target.")
     bad = sorted(
         dest for dest, val in vars(args).items()
         if dest not in _FESOM_WIRED_DESTS
         and val != parser.get_default(dest))
     if bad:
         raise SystemExit(
-            "--grid fesom is at unification stage B2+B3 (CORE-II bulk "
-            "forcing injection): these user-set selectors are not wired on "
+            "--grid fesom is at unification stage B4 (CORE-II bulk forcing "
+            "+ prognostic ice + SSS restore + runoff + NEMO IC): these "
+            "user-set selectors are not wired on "
             "the FESOM lane yet and would be silently dropped: "
             + " ".join("--" + d.replace("_", "-") for d in bad)
             + " (names are argparse dests; a flag set via its inverse, "
             "e.g. --no-emp, reports its dest)")
 
 
-def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None):
-    """FESOM core in the OMIP driver (three-grid unification B1).
+def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None, *,
+                      nemo_monthly_init=None, nemo_init_month: int = 1,
+                      woa_init: bool = False, woa_t=None, woa_s=None):
+    """FESOM core in the OMIP driver (three-grid unification B1; IC B4).
 
     Loads the REAL-bathymetry fesom_jax mesh (NOT the idealized
     flat-bottom builder), wraps it in the FesomOceanModel adapter on the
     z-star ALE coordinate (selected EXPLICITLY here: the linfs default
     forces virtual salt, and stage B3's real-freshwater channel is only
-    correct under z-star — codex design review), and builds either the
-    PHC3.0 cold start (``ic_dir``) or the stratified rest state.
+    correct under z-star — codex design review), and builds the initial
+    T/S from (in order of application, later wins — same semantics as the
+    host lanes, where --nemo-monthly-init REPLACES the WOA T/S):
+    PHC3.0 cold start (``ic_dir``) / stratified rest, then ``woa_init``
+    (annual WOA18 via the shared ``compute_woa_3d``), then
+    ``nemo_monthly_init`` (NEMO sn_tem/sn_sal at ``nemo_init_month``,
+    vertically interpolated onto the mesh's own ladder).
     Returns the standard ``(grid, z_coord, model, state, H_bathy)`` tuple.
     """
     from types import SimpleNamespace
@@ -2054,26 +2123,29 @@ def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None):
         FesomOceanModel,
         FesomOceanState,
         create_rest_state,
+        with_fields,
     )
 
     mesh = load_mesh(mesh_dir)
     # mesh.Z: (nl-1,) NEGATIVE real mid-level depths; the shim carries just
-    # what legoESM-side consumers read (z_full_ref, n_levels). --nlev /
-    # --nemo-dz do not apply: the fesom mesh OWNS its vertical grid.
+    # what legoESM-side consumers read (z_full_ref, n_levels, and — for the
+    # WOA IC's deep-fill — the positive layer thicknesses dz_ref from the
+    # zbar interface ladder). --nlev / --nemo-dz do not apply: the fesom
+    # mesh OWNS its vertical grid.
     _z_full = np.asarray(mesh.Z, dtype=np.float64)
-    z_coord = SimpleNamespace(z_full_ref=_z_full, n_levels=int(_z_full.size))
+    _dz_ref = -np.diff(np.asarray(mesh.zbar, dtype=np.float64))
+    z_coord = SimpleNamespace(z_full_ref=_z_full, n_levels=int(_z_full.size),
+                              dz_ref=_dz_ref)
     config = FesomOceanConfig(dt=float(dt), vertical_coordinate="zstar",
                               constants="legoesm")
     model = FesomOceanModel(mesh, z_coord, config)
     if ic_dir:
         from fesom_jax.phc_ic import cold_start_state
-        # seed_sea_ice=False (codex B2/B3 CRITICAL): the PHC cold start seeds
-        # a static a_ice=0.9 where SST<0, but the injected fluxes carry NO
-        # ice partition yet — seeded ice would sit inert while its nodes
-        # receive full open-water SW and wind stress.  The legoESM prognostic
-        # ice lane arrives at stage B4; until then the fesom lane runs
-        # ice-free (polar surface fluxes are known-wrong there and the lane
-        # is not scored on polar bands before B4).
+        # seed_sea_ice=False: the PHC cold start would seed a static
+        # a_ice=0.9 on the INNER fesom state, but the fesom-internal ice
+        # path is bypassed under SurfaceFluxes injection — the legoESM
+        # prognostic ice (B4, --prognostic-sea-ice + --ice-init) is the one
+        # ice model on this lane, so a seeded inner a_ice would sit inert.
         inner = cold_start_state(mesh, ic_dir, seed_sea_ice=False)
         state = FesomOceanState.from_fesom(inner, model.mesh)
     else:
@@ -2081,9 +2153,42 @@ def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None):
                                   vertical_coordinate="zstar")
     grid = FesomOceanGrid(model.mesh)
     H_bathy = jnp.asarray(-np.asarray(mesh.depth, dtype=np.float64))
+    _ic_desc = "PHC:" + ic_dir if ic_dir else "stratified rest"
+    if woa_init:
+        # Shared WOA18 path (compute_woa_3d -> init_ocean_from_woa): the
+        # FesomOceanGrid facade exposes latCell/lonCell, so the loader's
+        # unstructured branch applies; the node-cloud land mask drives the
+        # same flood-fill the MPAS lane uses.
+        _lm = np.asarray(state.land_mask.data)
+        T_woa, S_woa = compute_woa_3d(grid, z_coord, woa_t, woa_s,
+                                      np.asarray(H_bathy), _lm)
+        state = with_fields(state, model.mesh,
+                            T=np.asarray(T_woa), S=np.asarray(S_woa))
+        _ic_desc = f"WOA18 ({Path(woa_t).name})"
+    if nemo_monthly_init is not None:
+        # NEMO monthly init (sn_tem/sn_sal) with VERTICAL interpolation onto
+        # the mesh's own ladder: target_depths = -mesh.Z (mesh.Z is
+        # NEGATIVE-down mid-level depths; the loader wants positive-down,
+        # matching the file's deptht).  NOTE the file is TEOS-10
+        # contemp/presalt vs the fesom EOS-80 state — consumed AS-IS, the
+        # same documented convention caveat (~0.1-0.3 C) the other lanes
+        # carry (load_nemo_monthly_init_ts docstring).
+        from legoesm.ocean.forcing.nemo_native_fields import (
+            load_nemo_monthly_init_ts,
+        )
+        _lat_deg = np.degrees(np.asarray(grid.lat))
+        _lon_deg = np.degrees(np.asarray(grid.lon))
+        T_ic, S_ic = load_nemo_monthly_init_ts(
+            nemo_monthly_init[0], nemo_monthly_init[1],
+            _lat_deg, _lon_deg, n_levels=int(z_coord.n_levels),
+            month=int(nemo_init_month),
+            target_depths=-_z_full)
+        state = with_fields(state, model.mesh, T=T_ic, S=S_ic)
+        _ic_desc = (f"NEMO monthly m{int(nemo_init_month)} "
+                    f"({nemo_monthly_init[0].rsplit('/', 1)[-1]})")
     print(f"[setup] fesom mesh {mesh_dir}: nod2D={int(mesh.nod2D)}, "
           f"nl-1={_z_full.size} real levels, zstar ALE, "
-          f"IC={'PHC:' + ic_dir if ic_dir else 'stratified rest'}")
+          f"IC={_ic_desc}")
     return grid, z_coord, model, state, H_bathy
 
 
@@ -2136,29 +2241,44 @@ def run_fesom_b1_smoke(args, grid, z_coord, model, state) -> None:
 
 
 def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
-    """Stage-B2+B3 execution path: CORE-II bulk forcing computed ONCE by the
-    SHARED grid-agnostic applicator (``compute_omip2_surface_forcing`` +
+    """Stage-B2+B3+B4 execution path: CORE-II bulk forcing computed ONCE by
+    the SHARED grid-agnostic applicator (``compute_omip2_surface_forcing`` +
     ``compute_omip2_freshwater_forcing``) and injected into the FESOM step at
     the ``SurfaceFluxes`` seam (``model.step(surface_forcing=sf,
-    freshwater=fw)``).
+    freshwater=fw)``).  B4 adds, mirroring the host loop's ordering
+    (ice step -> freshwater build -> ice/ocean blend -> pre-step SSS
+    restoring -> ocean step):
 
-    This is the INTERMEDIATE forced loop inside the fesom branch, NOT the
-    main OMIP host loop: the host loop's per-grid extras (SSS restoring, ISF,
-    prognostic ice, BBL, gateway diagnostics, SPMD lanes, ...) are stage-B4+
-    work and every selector for them is hard-rejected by
-    :func:`validate_fesom_stage`, so nothing is silently dropped.  The loop
-    mirrors the host loop's forcing cadence exactly: ``_idx_t`` 6-hourly
-    record selection, the NEMO ln_dm2dc mid-step diurnal-SW window, and the
-    calendar-month chlorophyll slice."""
+    * PROGNOSTIC SEA ICE (``--prognostic-sea-ice``): the canonical
+      ``legoesm.ice.step_sea_ice`` on the node cloud (free-drift,
+      transport='none', 1 category — the fesom mesh has no strain-rate /
+      flux-divergence ice operators), blended via the ONE shared
+      ``blend_ice_ocean_forcing``; brine salt reaches fesom through
+      ``sf.salt_flux`` -> ``bc_S`` in the translator.
+    * SSS RESTORING (``--sss-restore``, WATER-FLUX channel only): the
+      shared ``compute_sss_restoring_flux`` feeds ``fw.restoring`` (->
+      translator ``water_flux``) + the NEMO ``qns`` heat term.
+    * RUNOFF (``--runoff``): Dai-Trenberth monthly, node-adjacency coastal
+      spread (``FesomOceanGrid.cellsOnCell`` from ``mesh.edges``).
+
+    Remaining host-loop extras (ISF, BBL, gateway diagnostics, SPMD lanes,
+    ...) stay hard-rejected by :func:`validate_fesom_stage`, so nothing is
+    silently dropped.  The loop mirrors the host loop's forcing cadence
+    exactly: ``_idx_t`` 6-hourly record selection, the NEMO ln_dm2dc
+    mid-step diurnal-SW window, and the calendar-month chlorophyll/runoff/
+    SSS-target slices."""
     from pathlib import Path
 
     import json
 
     from scripts.run.run_fesom_core2 import write_snapshot
+    from legoesm import constants as _const
     from legoesm.ocean.forcing import load_core2_nyf
+    from legoesm.ocean.freshwater import FreshwaterForcing
     from legoesm.ocean.coupler import (
         compute_omip2_surface_forcing,
         compute_omip2_freshwater_forcing,
+        sample_omip2_forcing,
     )
 
     out = Path(args.output); out.mkdir(parents=True, exist_ok=True)
@@ -2186,12 +2306,153 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
     if args.sw_rgb_chl:
         chl_clim = load_nemo_chl_monthly(grid, "fesom", lat_deg, lon_deg,
                                          chl_file=args.chl_file)
-    print(f"[fesom-forced] CORE-II bulk injection (B2+B3): {n_steps} steps "
-          f"of dt={dt}s, {n_rec} forcing records, "
+
+    # --- B4: prognostic sea ice on the node cloud -------------------------
+    ice_config = None
+    ice_state = None
+    _ice_T_freeze = float(_const.T_freeze)   # degC ocean T -> K for ice
+    if args.prognostic_sea_ice:
+        from legoesm.ice import (
+            SeaIceConfig, init_dynamic_ice_state, step_sea_ice,
+            uses_new_physics,
+        )
+        from legoesm.ice.config import BrineConfig
+        from legoesm.coupler.ocean_forcing import blend_ice_ocean_forcing
+        # FesomOceanGrid has NO strain-rate / flux-divergence ice operators
+        # (grid_supports_ice_dynamics/transport are both False), so the
+        # rheology degrades to free_drift and transport stays 'none' —
+        # thermodynamics + free-drift stress/brine/melt coupling only (the
+        # same degrade path the tripole prints).  step_sea_ice then takes
+        # grid=None (free_drift is elementwise; only EVP/transport need it).
+        _ice_dyn = args.prognostic_ice_dynamics
+        if _ice_dyn in ("mevp", "evp"):
+            print(f"[setup] prognostic ice: fesom node mesh lacks "
+                  f"strain-rate ops -> dynamics {_ice_dyn!r} -> 'free_drift' "
+                  "(transport 'none'; brine salt + melt freshwater + "
+                  "ocean-heat export PRESERVED).")
+            _ice_dyn = "free_drift"
+        ice_config = SeaIceConfig(
+            dynamics=_ice_dyn,
+            transport="none",
+            n_categories=1,
+            brine=BrineConfig(enabled=True),
+            # Under-ice transmitted SW owned by the ICE model; the blend
+            # passes sw_transmittance_ice=0.0 (same closure as the host).
+            sw_transmittance_const=float(args.ice_thermo_sw_trans),
+        )
+        if args.ice_ocean_heat_coeff is not None:
+            ice_config = ice_config._replace(
+                ocean_heat_transfer_coeff=float(args.ice_ocean_heat_coeff))
+        ice_shape = _ice_state_spatial_shape(grid, "fesom")
+        # Zero-ice cold start; S_ice_init=0 matches the host lanes' seed.
+        ice_state = init_dynamic_ice_state(ice_shape, S_ice_init=0.0)
+        ice_state = ice_state._replace(
+            concentration=ice_state.concentration.replace(
+                data=jnp.zeros_like(ice_state.concentration.data)))
+        if args.ice_init is not None:
+            # NEMO SI3 January ice IC — the loader's 1-D point-list branch
+            # regrids straight onto the node cloud (shape-generic).
+            from legoesm.ocean.forcing.nemo_native_fields import (
+                load_nemo_ice_init,
+            )
+            _ice_ic = load_nemo_ice_init(
+                args.ice_init, lat_deg, lon_deg,
+                np.asarray(state.land_mask.data))
+            ice_state = _apply_ice_init(ice_state, _ice_ic)
+            _a0, _c0, _h0, _ = _ice_global_stats(
+                ice_state, grid, state.land_mask.data)
+            print(f"[setup] ICE INIT from "
+                  f"{args.ice_init.rsplit('/', 1)[-1]}: "
+                  f"area={_a0 / 1.0e12:.3f}e6 km2 mean_conc={_c0:.3f} "
+                  f"max_h={_h0:.3f} m")
+        print(f"[setup] PROGNOSTIC SEA ICE (fesom): step_sea_ice "
+              f"dynamics={_ice_dyn!r} transport='none' brine=ON on node "
+              f"cloud {ice_shape}; salt->bc_S, ice_fw->water_flux, "
+              "heat->q_net via blend_ice_ocean_forcing.")
+
+    # --- B4: SSS restoring (water_flux channel; gate enforced upstream) ---
+    sss_restore_cfg = None
+    sss_restore_target = None
+    _sss_monthly = False
+    if args.sss_restore:
+        # validate_fesom_stage already enforced --sss-restore-channel
+        # water_flux (the tracer channel cannot write into the read-only
+        # FESOM state facade) and main() enforced normalization live_s.
+        from legoesm.ocean.forcing.sss_restoring import (
+            SSSRestoringConfig,
+            compute_sss_restoring_flux,
+        )
+        if not (float(args.sss_restore_tau_days) > 0.0):
+            raise SystemExit("--sss-restore-tau-days must be > 0.")
+        _cfg_kwargs = {}
+        if args.sss_ice_gate_nemo:
+            _cfg_kwargs["ice_gate_mode"] = "nemo_linear"
+        if args.sss_restore_normalization is not None:
+            _cfg_kwargs["normalization"] = args.sss_restore_normalization
+        if args.sss_restore_bound_mmday is not None:
+            if not (float(args.sss_restore_bound_mmday) > 0.0):
+                raise SystemExit("--sss-restore-bound-mmday must be > 0.")
+            # mm/day water-equivalent -> kg/m^2/s (rho_water * m/day / s/day).
+            _cfg_kwargs["max_flux_kg_m2_s"] = (
+                float(args.sss_restore_bound_mmday) * 1.0e-3 / _SEC_PER_DAY
+                * float(_const.rho_water))
+        sss_restore_cfg = SSSRestoringConfig(
+            enabled=True,
+            tau_restore_days_default=float(args.sss_restore_tau_days),
+            **_cfg_kwargs,
+        )
+        if args.sss_restore_file is not None:
+            from legoesm.ocean.forcing.nemo_native_fields import (
+                load_nemo_sss_restoring_climatology,
+            )
+            sss_restore_target = load_nemo_sss_restoring_climatology(
+                args.sss_restore_file, lat_deg, lon_deg,
+                np.asarray(state.land_mask.data) > 0.5)     # (12, nod2D)
+        else:
+            # IC-surface target (requires an initialised state — gated in
+            # validate_fesom_stage).
+            sss_restore_target = np.asarray(
+                state.S.data, dtype=np.float64)[..., 0].copy()
+        _wet = np.asarray(state.land_mask.data) > 0.5
+        _sss_monthly = (sss_restore_target.shape[0] == 12
+                        and sss_restore_target.ndim == _wet.ndim + 1)
+        print(f"[setup] SSS restoring ON (water_flux channel): tau_default="
+              f"{args.sss_restore_tau_days:.0f} d; target = "
+              f"{'NEMO sn_sss monthly clim' if _sss_monthly else 'IC-surface SSS'}")
+
+    # --- B4: Dai-Trenberth runoff with node-adjacency coastal spread ------
+    runoff_monthly = None
+    if args.runoff:
+        if args.runoff_spread_passes is not None \
+                and int(args.runoff_spread_passes) < 0:
+            raise SystemExit("--runoff-spread-passes must be >= 0 "
+                             f"(got {args.runoff_spread_passes})")
+        # Default 8 passes, matching the MPAS unstructured default (same
+        # mechanism: the IDW k=4 regrid concentrates each river into ~4
+        # cells; see the MPAS spread-passes sensitivity note in main()).
+        _spread = (int(args.runoff_spread_passes)
+                   if args.runoff_spread_passes is not None else 8)
+        # Wet mask for the spread = TOP-LAYER wet nodes
+        # (mesh.node_layer_mask[:, 0]): an ice-shelf cavity node has no
+        # river/atmosphere contact, so runoff must not be spread into it
+        # (state.land_mask is any-wet-layer and would include cavities).
+        _wet_top = np.asarray(model.mesh.node_layer_mask[:, 0],
+                              dtype=np.float64)
+        runoff_monthly = load_runoff_monthly(
+            grid, "fesom", lat_deg, lon_deg, args.mesh,
+            land_mask=_wet_top, spread_passes=_spread,
+            # --isf is not wired on the fesom lane (gate-rejected), so the
+            # surface runoff keeps the ice-shelf-melt component.
+            exclude_isf=False)
+
+    print(f"[fesom-forced] CORE-II bulk injection (B2+B3+B4): {n_steps} "
+          f"steps of dt={dt}s, {n_rec} forcing records, "
           f"emp={'on' if args.emp_freshwater else 'OFF (--no-emp)'}, "
           f"dm2dc={'on' if args.dm2dc else 'off'}, "
-          f"sw_rgb_chl={'on' if args.sw_rgb_chl else 'off'}; "
-          f"NO runoff/SSS-restore/ice (stage B4)")
+          f"sw_rgb_chl={'on' if args.sw_rgb_chl else 'off'}, "
+          f"ice={'PROGNOSTIC' if ice_config is not None else 'off'}, "
+          f"sss_restore={'on' if sss_restore_cfg is not None else 'off'}, "
+          f"runoff={'on' if runoff_monthly is not None else 'off'}")
     for step in range(1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
         _dm2dc_win = None
@@ -2214,12 +2475,107 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
         )
         if chl_clim is not None:
             sf = sf._replace(chl=chl_clim[_runoff_month_idx(step, dt)])
+        # --- prognostic ice step (B4; mirrors the host loop's block) ------
+        ice_resp = None
+        if ice_config is not None:
+            forc_ice = sample_omip2_forcing(forcing, it, grid, "fesom")
+            if _dm2dc_win is not None:
+                # SAME diurnal SW modulation the ocean forcing gets — the
+                # ice tile must not integrate the raw daily-mean SW while
+                # the ocean sees the sbcdcy-modulated one.
+                from legoesm.ocean.coupler.omip2_applicator import (
+                    dm2dc_sw_factor,
+                )
+                forc_ice = dict(forc_ice)
+                forc_ice["sw_down"] = (
+                    np.asarray(forc_ice["sw_down"], dtype=np.float64)
+                    * dm2dc_sw_factor(grid, _dm2dc_win))
+            atm_ice = _build_atm_to_surface_core2(forc_ice)
+            # Ocean T is potential temperature [degC]; ice wants SST [K].
+            sst_K = jnp.asarray(state.T.data)[..., 0] + _ice_T_freeze
+            # Surface current, ROTATED frame -> GEOGRAPHIC east/north (the
+            # ice model's velocity contract).
+            ocn_u, ocn_v = _surface_currents(state, grid, "fesom")
+            # Partition time level: the concentration the thermodynamics
+            # integrated the atmospheric fluxes over (falls back to the
+            # pre-call concentration), so ice + open water together receive
+            # exactly the incident flux (A + (1-A) = 1).
+            _ice_conc_pre = ice_state.concentration.data
+            ice_state, ice_resp = step_sea_ice(
+                ice_state, atm_ice, sst_K, ocn_u, ocn_v,
+                ice_config, U_min=0.0, dt=dt, grid=None)
+            if getattr(ice_resp, "ice_concentration_thermo", None) is not None:
+                _ice_conc_pre = ice_resp.ice_concentration_thermo
         fw = None
-        if args.emp_freshwater:
+        _R = (runoff_monthly[_runoff_month_idx(step, dt)]
+              if runoff_monthly is not None else None)
+        # Build the freshwater struct if the atmospheric P-E / runoff is
+        # wanted OR the prognostic ice needs an ``ice_fw`` carrier.
+        if args.emp_freshwater or _R is not None or ice_resp is not None:
             fw = compute_omip2_freshwater_forcing(
                 state, forcing=forcing, idx_t=it, grid=grid,
-                grid_type="fesom", runoff_R=None,
+                grid_type="fesom", runoff_R=_R,
                 emp=args.emp_freshwater)
+        if ice_resp is not None:
+            # ONE shared, mask-aware partition (coupler.ocean_forcing):
+            # open-water stress/evap/heat/SW x f_open=(1-A); ice basal
+            # heat, brine salt (-> sf.salt_flux -> translator bc_S),
+            # melt/freeze freshwater and ice stress added exactly once.
+            # sf was built UNMASKED (ice_albedo=None -> raw SW), so the SW
+            # albedo/partition happens here and only here (raw_core2).
+            fw, sf = blend_ice_ocean_forcing(
+                open_sf=sf, open_fw=fw, ice_resp=ice_resp,
+                ice_concentration=_ice_conc_pre,
+                ocean_mask=state.land_mask.data,
+                sw_partition="raw_core2",
+                alpha_ocean=float(_const.alpha_ocean_broadband),
+                sw_transmittance_ice=0.0,
+                ice_owns_snow_reservoir=uses_new_physics(ice_config),
+            )
+        # --- SSS restoring, WATER-FLUX channel (B4; pre-step, like NEMO
+        # sbcssr: the flux is computed from the NOW-level SSS and enters
+        # the freshwater budget + the qns heat term) --------------------
+        if sss_restore_cfg is not None:
+            _sss_ice = None
+            if ice_resp is not None:
+                # Live (ocean-masked) prognostic ice gates the restoring.
+                _lc = ice_state.concentration.data
+                _sss_ice = _lc * jnp.asarray(state.land_mask.data, _lc.dtype)
+            _S_now = state.S.data[..., 0]
+            _T_now = state.T.data[..., 0]          # potential temp [degC]
+            _lm = jnp.asarray(state.land_mask.data, _S_now.dtype)
+            _tgt = (sss_restore_target[_runoff_month_idx(step, dt)]
+                    if _sss_monthly else sss_restore_target)
+            _sss_out = compute_sss_restoring_flux(
+                S_model_top=_S_now,
+                S_target=jnp.asarray(_tgt, _S_now.dtype),
+                lat_deg=jnp.asarray(lat_deg, _S_now.dtype),
+                lon_deg=jnp.asarray(lon_deg, _S_now.dtype),
+                ice_concentration=(jnp.zeros_like(_S_now)
+                                   if _sss_ice is None
+                                   else jnp.asarray(_sss_ice, _S_now.dtype)),
+                config=sss_restore_cfg,
+                river_runoff=None,
+                sst_C=_T_now,
+            )
+            # Land cells contribute nothing to either budget.
+            _fw_restore = _sss_out["freshwater_flux"] * _lm
+            if fw is None:
+                # No P-E/runoff/ice this run: the restoring IS physical
+                # water under this channel, so give it a zero carrier.
+                _z = jnp.zeros_like(_fw_restore)
+                fw = FreshwaterForcing(precip=_z, evap=_z, runoff=_z,
+                                       ice_fw=_z, restoring=_fw_restore)
+            else:
+                fw = fw._replace(restoring=_fw_restore)
+            # NEMO's qns term (sbcssr.F90:138) is positive INTO the ocean,
+            # matching q_net — adds with no sign flip.  sf.freshwater (the
+            # KPP surface-buoyancy channel on the C-grid lanes) is NOT set:
+            # the fesom translator has no consumer for it.
+            _q_restore = _sss_out["heat_flux"] * _lm
+            sf = sf._replace(
+                q_net=(_q_restore if sf.q_net is None
+                       else sf.q_net + _q_restore))
         state = model.step(state, dt, surface_forcing=sf, freshwater=fw)
         if snap_every and step % snap_every == 0:
             d = int(round(step * dt / 86400.0))
@@ -2229,11 +2585,29 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
         raise SystemExit("fesom forced loop: non-finite temperature after "
                          f"{n_steps} steps — refusing to report success.")
     write_snapshot(out, "final", state.inner, model.mesh)
+    if ice_state is not None:
+        # Final prognostic-ice state next to the ocean snapshot (the ice is
+        # not part of the fesom inner state, so the ocean snapshot alone
+        # would silently drop it).
+        np.savez(out / "ice_final.npz",
+                 concentration=np.asarray(ice_state.concentration.data),
+                 h_ice=np.asarray(ice_state.h_ice.data),
+                 h_snow=np.asarray(ice_state.h_snow.data))
+        _af, _cf, _hf, _ = _ice_global_stats(
+            ice_state, grid, state.land_mask.data)
+        print(f"[fesom-forced] final ice: area={_af / 1.0e12:.3f}e6 km2 "
+              f"mean_conc={_cf:.3f} max_h={_hf:.3f} m")
     (out / "run_manifest.json").write_text(json.dumps({
-        "lane": "fesom_b2b3_core2_forced", "git_sha": _source_revision(),
+        "lane": "fesom_b4_core2_forced", "git_sha": _source_revision(),
         "n_steps": n_steps, "dt_s": dt, "total_days": total_days,
         "emp_freshwater": bool(args.emp_freshwater),
         "dm2dc": bool(args.dm2dc), "sw_rgb_chl": bool(args.sw_rgb_chl),
+        "prognostic_sea_ice": bool(args.prognostic_sea_ice),
+        "sss_restore": bool(args.sss_restore),
+        "sss_restore_channel": args.sss_restore_channel,
+        "runoff": bool(args.runoff),
+        "nemo_monthly_init": bool(args.nemo_monthly_init),
+        "woa_init": bool(args.woa_init),
         "argv": sys.argv,
     }, indent=1))
     print(f"[fesom-forced] done: {n_steps} steps; snapshots in {out}")
@@ -2792,13 +3166,17 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
         # regrid concentrates each river in ~1 model cell -> over-fresh spots that
         # hurt SSS. Spread over a coastal band via ocean-masked averaging, then
         # the area-conservative renorm below restores the exact source total.
-        # MPAS uses the Voronoi-topology smoother (cellsOnCell neighbour-average);
-        # the structured laplacian_smooth_2d does NOT apply to an unstructured mesh
-        # (the reason MPAS was previously left UN-spread -> big rivers like the
-        # Amazon/Arctic over-concentrated in the ~4 IDW cells -> local -2 to -3 PSU
-        # over-freshening; lat-lon/cube were smoothed but MPAS was not).
+        # MPAS + FESOM use the unstructured-topology smoother (cellsOnCell
+        # neighbour-average); the structured laplacian_smooth_2d does NOT apply
+        # to an unstructured mesh (the reason MPAS was previously left
+        # UN-spread -> big rivers like the Amazon/Arctic over-concentrated in
+        # the ~4 IDW cells -> local -2 to -3 PSU over-freshening; lat-lon/cube
+        # were smoothed but MPAS was not).  The FESOM node mesh exposes the
+        # SAME (maxDeg, n) / degree table via FesomOceanGrid.cellsOnCell /
+        # nEdgesOnCell (built once from mesh.edges), so both grids share the
+        # one smoother.
         if ocean is not None and spread_passes > 0:
-            _is_voronoi = (grid_type == "mpas")
+            _is_voronoi = grid_type in ("mpas", "fesom")
             _coc = np.asarray(grid.cellsOnCell) if _is_voronoi else None
             _nec = np.asarray(grid.nEdgesOnCell) if _is_voronoi else None
             for _ in range(int(spread_passes)):
@@ -3435,13 +3813,17 @@ def _grid_lat2d_deg(grid, grid_type):
 def _ice_state_spatial_shape(grid, app_grid_type):
     """Spatial shape of a per-cell ice field on the ocean grid.
 
-    MPAS Voronoi -> ``(nCells,)``; lat-lon / tripole C-grid -> ``(n_lat, n_lon)``
-    (the ocean T-point shape).  Matches ``_base_spatial_ndim`` in
-    ``legoesm.ice.sea_ice`` so ``init_dynamic_ice_state(shape)`` builds a
-    single-category state with the right rank for ``step_sea_ice``.
+    MPAS Voronoi / FESOM node cloud -> ``(nCells,)`` / ``(nod2D,)``;
+    lat-lon / tripole C-grid -> ``(n_lat, n_lon)`` (the ocean T-point
+    shape).  Matches ``_base_spatial_ndim`` in ``legoesm.ice.sea_ice`` so
+    ``init_dynamic_ice_state(shape)`` builds a single-category state with
+    the right rank for ``step_sea_ice``.
     """
     if app_grid_type == "mpas":
         return (int(np.asarray(grid.latCell).shape[0]),)
+    if app_grid_type == "fesom":
+        # FESOM triangular mesh: scalar (and ice) fields live on the NODES.
+        return (int(np.asarray(grid.lat).shape[0]),)
     if app_grid_type == "tripole":
         return tuple(int(s) for s in np.asarray(grid.lat_T).shape)
     if app_grid_type == "latlon":
@@ -3449,7 +3831,7 @@ def _ice_state_spatial_shape(grid, app_grid_type):
                 int(np.asarray(grid.lon).shape[0]))
     raise ValueError(
         f"--prognostic-sea-ice: unsupported grid_type {app_grid_type!r} for the "
-        "ice-state spatial shape (supported: mpas, tripole, latlon).")
+        "ice-state spatial shape (supported: mpas, fesom, tripole, latlon).")
 
 
 def _require_prognostic_ice_for_itd_flags(ice_categories, ice_ridging,
@@ -3620,6 +4002,17 @@ def _surface_currents(state, grid, app_grid_type):
         from legoesm.ocean.init_mpas import reconstruct_cell_velocity
         u_sfc, v_sfc = reconstruct_cell_velocity(state.u.data[:, 0], grid)
         return u_sfc, v_sfc
+    if app_grid_type == "fesom":
+        # FESOM: the per-node surface velocity leaf lives in the mesh's
+        # ROTATED frame (uv_node is compute_vel_nodes of the rotated-frame
+        # element velocity); rotate back to GEOGRAPHIC east/north with the
+        # exact inverse (transpose) of fesom's own g2r node kernel.
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            rotated_to_geographic_node_vector,
+        )
+        uv_sfc = state.uv_node[:, 0, :]                    # (nod2D, 2) rotated
+        return rotated_to_geographic_node_vector(
+            grid.mesh, uv_sfc[:, 0], uv_sfc[:, 1])
     # latlon / tripole C-grid: u on EW faces (n_lat, n_lon+1), v on NS faces
     # (n_lat+1, n_lon).  Tripole MUST come back geographic (grid-relative i/j
     # would be frame-mixed with the geographic winds in free drift and rotated
@@ -6101,7 +6494,13 @@ def main() -> int:
     # TWICE: once as volume through eta / z-star, and again as the closure's
     # virtual-salt tendency.  (codex 9387241 RED, verified.)
     if (args.sss_restore_channel == "water_flux"
-            and args.freshwater_closure != "real_freshwater"):
+            and args.freshwater_closure != "real_freshwater"
+            # FESOM exemption (B4): the fesom lane has NO virtual-salt
+            # closure at all — freshwater is REAL by construction (z-star
+            # ALE + the translator's water_flux channel), so the
+            # double-application this guard prevents cannot occur, and
+            # --freshwater-closure does not reach the fesom core.
+            and args.grid != "fesom"):
         raise SystemExit(
             "--sss-restore-channel water_flux requires --freshwater-closure "
             "real_freshwater: the default virtual_salt_flux closure derives "
@@ -6370,7 +6769,10 @@ def main() -> int:
         # --fesom-unforced keeps the B1 zero-forcing smoke reachable.
         validate_fesom_stage(args, p)
         grid, z_coord, model, state, H_bathy = build_fesom_ocean(
-            args.fesom_mesh_dir, args.dt, ic_dir=args.fesom_ic_dir)
+            args.fesom_mesh_dir, args.dt, ic_dir=args.fesom_ic_dir,
+            nemo_monthly_init=args.nemo_monthly_init,
+            nemo_init_month=args.nemo_init_month,
+            woa_init=args.woa_init, woa_t=args.woa_t, woa_s=args.woa_s)
         if args.fesom_unforced:
             run_fesom_b1_smoke(args, grid, z_coord, model, state)
         else:

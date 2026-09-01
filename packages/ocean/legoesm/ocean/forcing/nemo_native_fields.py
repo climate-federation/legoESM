@@ -142,6 +142,46 @@ def load_nemo_sss_restoring_climatology(
     return out
 
 
+def _read_depth_axis(path: str, var: str = "deptht") -> np.ndarray:
+    """1-D positive-down depth ladder [m] of a NEMO init file.
+
+    Raises (never guesses a ladder) when the variable is absent or not
+    strictly increasing — a mis-levelled vertical interpolation is a
+    silently wrong IC, not an error.
+    """
+    import netCDF4
+
+    with netCDF4.Dataset(path) as ds:
+        if var not in ds.variables:
+            raise ValueError(
+                f"{path}: depth axis {var!r} not found (needed for "
+                f"vertical interpolation onto a non-NEMO ladder); has "
+                f"{sorted(ds.variables)[:12]}")
+        depths = np.asarray(ds.variables[var][:], dtype=np.float64).ravel()
+    if depths.size < 2 or not np.all(np.diff(depths) > 0.0) \
+            or not np.all(depths >= 0.0):
+        raise ValueError(
+            f"{path}: {var!r} must be a strictly increasing positive-down "
+            f"ladder; got {depths[:4]}...{depths[-2:]}")
+    return depths
+
+
+def _interp_columns_to_depths(field: np.ndarray, src_depths: np.ndarray,
+                              target_depths: np.ndarray) -> np.ndarray:
+    """np.interp every column of ``field (..., nlev_src)`` from the
+    ``src_depths`` ladder onto ``target_depths`` (both 1-D, positive-down,
+    strictly increasing).  Vectorised over columns via shared bracketing
+    indices (the ladder is column-independent); out-of-range targets clamp
+    to the end values — exactly ``np.interp``'s semantics.
+    """
+    src = np.asarray(src_depths, dtype=np.float64)
+    tgt = np.asarray(target_depths, dtype=np.float64)
+    j = np.clip(np.searchsorted(src, tgt), 1, src.size - 1)
+    w = (tgt - src[j - 1]) / (src[j] - src[j - 1])
+    w = np.clip(w, 0.0, 1.0)          # end-clamp (np.interp behaviour)
+    return field[..., j - 1] * (1.0 - w) + field[..., j] * w
+
+
 def load_nemo_monthly_init_ts(
     temp_path: str,
     salt_path: str,
@@ -151,16 +191,27 @@ def load_nemo_monthly_init_ts(
     month: int = 1,
     temp_var: str = "contemp",
     salt_var: str = "presalt",
+    target_depths: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """(T, S) 3-D initial state for the given month (1-based).
 
-    The files carry NEMO's 75 reference levels; the model must run the
-    SAME ladder (the ``nemolev`` configurations) — anything else raises
-    rather than silently interpolating.  Note the temperature variable
-    is Conservative Temperature (``contemp``): the reference NEMO run
+    The files carry NEMO's 75 reference levels.  Default
+    (``target_depths=None``): the model must run the SAME ladder (the
+    ``nemolev`` configurations) — anything else raises rather than
+    silently interpolating.  Note the temperature variable is
+    Conservative Temperature (``contemp``): the reference NEMO run
     reads it with the same label into its TEOS-10 state; the faithful
     runs consume it as-is (documented convention difference for the
     EOS-80-style EOS paths).
+
+    ``target_depths`` (1-D, POSITIVE-DOWN cell-centre depths [m], length
+    ``n_levels``, strictly increasing — e.g. ``-mesh.Z`` for a FESOM
+    mesh whose ``Z`` is negative-down): enables a model ladder different
+    from the file's.  The horizontal regrid still runs per SOURCE level
+    (the wet mask shrinks with depth), the NaN fill runs FIRST on the
+    source ladder, then each column is linearly interpolated from the
+    file's ``deptht`` ladder onto ``target_depths`` (end-clamped,
+    ``np.interp`` semantics).
     """
     if not (1 <= int(month) <= 12):
         raise ValueError(f"month must be 1..12, got {month!r}")
@@ -171,11 +222,31 @@ def load_nemo_monthly_init_ts(
             raise ValueError(
                 f"{name} init: expected (12, nlev, y, x), got {arr.shape}")
     nlev_src = T_arr.shape[1]
-    if nlev_src != int(n_levels):
-        raise ValueError(
-            f"NEMO monthly init has {nlev_src} levels; the model runs "
-            f"{n_levels}. The loader is exact-ladder only (nemolev runs) "
-            "— no vertical interpolation.")
+    src_depths = None
+    if target_depths is None:
+        if nlev_src != int(n_levels):
+            raise ValueError(
+                f"NEMO monthly init has {nlev_src} levels; the model runs "
+                f"{n_levels}. The loader is exact-ladder only (nemolev "
+                "runs) unless target_depths is given "
+                "— no implicit vertical interpolation.")
+    else:
+        target_depths = np.asarray(target_depths, dtype=np.float64).ravel()
+        if target_depths.size != int(n_levels):
+            raise ValueError(
+                f"target_depths has {target_depths.size} levels; the model "
+                f"runs {n_levels}.")
+        if not np.all(np.diff(target_depths) > 0.0) \
+                or not np.all(target_depths >= 0.0):
+            raise ValueError(
+                "target_depths must be strictly increasing POSITIVE-DOWN "
+                f"depths [m]; got {target_depths[:4]}... (a negative-down "
+                "ladder like mesh.Z must be negated by the caller).")
+        src_depths = _read_depth_axis(temp_path)
+        if src_depths.size != nlev_src:
+            raise ValueError(
+                f"{temp_path}: deptht has {src_depths.size} entries but the "
+                f"field carries {nlev_src} levels.")
     m = int(month) - 1
     shape = np.asarray(lat_T_deg).shape
     T_out = np.empty(shape + (nlev_src,), dtype=np.float64)
@@ -204,6 +275,12 @@ def load_nemo_monthly_init_ts(
             bad = ~np.isfinite(out[..., k])
             if bad.any():
                 out[..., k][bad] = np.nanmean(out[..., k])
+    if target_depths is not None:
+        # NaN fill ran FIRST (above) on the source ladder, so every column
+        # is finite before the vertical interpolation — a NaN neighbour
+        # would otherwise poison both bracketing levels.
+        T_out = _interp_columns_to_depths(T_out, src_depths, target_depths)
+        S_out = _interp_columns_to_depths(S_out, src_depths, target_depths)
     return T_out, S_out
 
 

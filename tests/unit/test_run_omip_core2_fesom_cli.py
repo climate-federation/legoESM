@@ -37,14 +37,14 @@ def test_clean_args_pass():
 
 
 @pytest.mark.parametrize("extra", [
-    ["--iwm"], ["--runoff"], ["--mle"], ["--isf"],
-    ["--bbl-adv"], ["--prognostic-sea-ice"], ["--woa-init"],
+    ["--iwm"], ["--mle"], ["--isf"],
+    ["--bbl-adv"],
     ["--momentum-rk3"], ["--geothermal"],
-    ["--sss-restore"], ["--gateway-transports"], ["--partial-cell"],
+    ["--gateway-transports"], ["--partial-cell"],
+    ["--ice-categories", "2"], ["--ice-ridging"],
+    ["--river-mouth-restoring-gate"],
 ])
 def test_physics_selectors_rejected(extra):
-    # NOTE --runoff stays rejected at B2+B3: load_runoff_monthly's coastal
-    # spread has no 1-D-unstructured (FESOM node) smoother wired.
     args, p = _parse(extra)
     with pytest.raises(SystemExit, match="silently dropped"):
         validate_fesom_stage(args, p)
@@ -61,11 +61,80 @@ def test_b2b3_forcing_selectors_allowed(extra):
     validate_fesom_stage(args, p)  # no raise
 
 
+@pytest.mark.parametrize("extra", [
+    # B4 — prognostic ice (free-drift, 1 category)
+    ["--prognostic-sea-ice"],
+    ["--prognostic-sea-ice", "--ice-init", "/ice.nc"],
+    ["--prognostic-sea-ice", "--ice-ocean-heat-coeff", "0.005"],
+    ["--prognostic-sea-ice", "--prognostic-ice-dynamics", "free_drift"],
+    # B4 — runoff (node-adjacency coastal spread)
+    ["--runoff"],
+    ["--runoff", "--runoff-spread-passes", "4"],
+    # B4 — SSS restoring, WATER-FLUX channel with a target
+    ["--sss-restore", "--sss-restore-channel", "water_flux",
+     "--sss-restore-file", "/sss.nc"],
+    ["--sss-restore", "--sss-restore-channel", "water_flux",
+     "--sss-restore-file", "/sss.nc", "--sss-restore-tau-days", "45.5",
+     "--sss-restore-bound-mmday", "4.0",
+     "--sss-restore-normalization", "live_s", "--sss-ice-gate-nemo"],
+    ["--sss-restore", "--sss-restore-channel", "water_flux", "--woa-init"],
+    # B4 — NEMO monthly / WOA initial condition
+    ["--woa-init"],
+    ["--woa-init", "--woa-t", "/t.nc", "--woa-s", "/s.nc"],
+    ["--nemo-monthly-init", "/t.nc", "/s.nc"],
+    ["--nemo-monthly-init", "/t.nc", "/s.nc", "--nemo-init-month", "7"],
+])
+def test_b4_selectors_allowed(extra):
+    """Stage B4 wired prognostic ice + SSS restore (water_flux) + runoff +
+    the NEMO-monthly/WOA IC — the gate must now let them through."""
+    args, p = _parse(extra)
+    validate_fesom_stage(args, p)  # no raise
+
+
+def test_sss_restore_tracer_channel_rejected():
+    """The tracer channel is a post-step salinity edit; FesomOceanState.S
+    is a read-only facade, so the fesom lane accepts ONLY water_flux."""
+    for extra in (["--sss-restore", "--sss-restore-file", "/sss.nc"],
+                  ["--sss-restore", "--sss-restore-file", "/sss.nc",
+                   "--sss-restore-channel", "tracer"]):
+        args, p = _parse(extra)
+        with pytest.raises(SystemExit, match="water_flux"):
+            validate_fesom_stage(args, p)
+
+
+def test_sss_restore_needs_a_target():
+    args, p = _parse(["--sss-restore", "--sss-restore-channel",
+                      "water_flux"])
+    with pytest.raises(SystemExit, match="target"):
+        validate_fesom_stage(args, p)
+
+
+@pytest.mark.parametrize("extra", [
+    ["--prognostic-sea-ice"], ["--runoff"],
+    ["--sss-restore", "--sss-restore-channel", "water_flux",
+     "--sss-restore-file", "/sss.nc"],
+])
+def test_b4_selectors_rejected_under_unforced_smoke(extra):
+    """--fesom-unforced consumes no forcing/coupling — accepting a B4
+    coupling selector there would silently drop it."""
+    args, p = _parse(["--fesom-unforced"] + extra)
+    with pytest.raises(SystemExit, match="silently dropped"):
+        validate_fesom_stage(args, p)
+
+
+def test_ic_selectors_allowed_under_unforced_smoke():
+    """IC selectors legitimately configure the B1 smoke's initial state —
+    they must NOT be caught by the unforced-drop check."""
+    args, p = _parse(["--fesom-unforced",
+                      "--nemo-monthly-init", "/t.nc", "/s.nc"])
+    validate_fesom_stage(args, p)  # no raise
+
+
 def test_arbitrary_user_set_value_rejected():
     """The allowlist catches ANY non-default user setting, not only the
     flags a blocklist happened to enumerate (the fail-open GLM closed)."""
-    args, p = _parse(["--sss-restore-tau-days", "30"])
-    with pytest.raises(SystemExit, match="sss-restore-tau-days"):
+    args, p = _parse(["--forcing-ramp-days", "5"])
+    with pytest.raises(SystemExit, match="forcing-ramp-days"):
         validate_fesom_stage(args, p)
 
 

@@ -368,3 +368,85 @@ class TestSaltClosure:
         d_meas = sss1 - sss0
         assert d_meas < 0.0, "SSS did not drop under uniform rain"
         np.testing.assert_allclose(d_meas, d_pred, rtol=0.1)
+
+
+# ===========================================================================
+# B4: real brine salt (sf.salt_flux -> bc_S) + node-rotation inverse
+# ===========================================================================
+
+SALT_TEST = 2.0e-6   # brine salt-mass flux [kg(salt)/m^2/s] INTO the ocean
+
+
+class TestBrineSalt:
+    def test_positive_brine_bc_s_sign_and_units(self, flat_mesh, rest_state):
+        """SIGN: positive sf.salt_flux (brine rejection on freeze, + = salt
+        INTO the ocean) must give a POSITIVE bc_S — fesom applies bc_S
+        additively to the surface salinity.  UNITS: kg(salt)/m^2/s ->
+        PSU*m via dt * 1e3 / rho_ref (exact kg/kg -> g/kg conversion over
+        a rho_ref column mass), matching fesom's real_salt_flux
+        convention (ice_thermo.py: rsf [PSU*m/s]; bc_S = dt*rsf)."""
+        from fesom_jax.config import DENSITY_0, VCPW
+        sf = OceanSurfaceForcing(salt_flux=_full(flat_mesh, SALT_TEST))
+        out = omip_to_surface_fluxes(
+            flat_mesh, rest_state.inner, sf, None, DT,
+            rho_w=float(constants.rho_water), vcpw=float(VCPW),
+            rho_ref=float(DENSITY_0))
+        expect = DT * SALT_TEST * 1.0e3 / float(DENSITY_0)
+        np.testing.assert_allclose(np.asarray(out.bc_S), expect, rtol=1e-12)
+        assert float(np.asarray(out.bc_S).min()) > 0.0
+        # The salt channel must not leak into any other flux.
+        assert float(np.abs(np.asarray(out.heat_flux)).max()) == 0.0
+        assert float(np.abs(np.asarray(out.water_flux)).max()) == 0.0
+        assert float(np.abs(np.asarray(out.virtual_salt)).max()) == 0.0
+
+    def test_positive_brine_raises_surface_salinity(self, model, flat_mesh,
+                                                    rest_state):
+        """Consumer-level check: one forced step with ONLY a brine salt flux
+        RAISES the (area-weighted) surface salinity — the sign a flipped
+        conversion would invert."""
+        sf = OceanSurfaceForcing(salt_flux=_full(flat_mesh, SALT_TEST))
+        st1 = model.step(rest_state, DT, surface_forcing=sf)
+        w = np.asarray(flat_mesh.areasvol)[:, 0]
+        S0 = np.asarray(rest_state.inner.S)[:, 0]
+        S1 = np.asarray(st1.inner.S)[:, 0]
+        d = float((w * (S1 - S0)).sum() / w.sum())
+        assert d > 0.0, f"surface salinity did not rise under brine (d={d})"
+
+    def test_salt_flux_without_rho_ref_is_refused(self, flat_mesh,
+                                                  rest_state):
+        """A caller supplying salt but no conversion density must be
+        refused loudly — silently dropping the brine channel is the
+        failure mode the guard exists for."""
+        from fesom_jax.config import VCPW
+        sf = OceanSurfaceForcing(salt_flux=_full(flat_mesh, SALT_TEST))
+        with pytest.raises(ValueError, match="rho_ref"):
+            omip_to_surface_fluxes(
+                flat_mesh, rest_state.inner, sf, None, DT,
+                rho_w=float(constants.rho_water), vcpw=float(VCPW))
+
+
+class TestRotationInverse:
+    def test_r2g_inverts_g2r_on_random_vectors(self, pi_mesh):
+        """rotated_to_geographic_node_vector must be the EXACT inverse
+        (transpose) of fesom's own node g2r kernel: r2g(g2r(v)) == v to
+        roundoff on random per-node vectors, and both directions preserve
+        magnitude (the map is orthogonal)."""
+        from fesom_jax import jra55
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            rotated_to_geographic_node_vector,
+        )
+        rng = np.random.default_rng(20260901)
+        n = int(pi_mesh.nod2D)
+        u = rng.normal(size=n)
+        v = rng.normal(size=n)
+        geo = np.asarray(pi_mesh.geo_coord_nod2D)
+        rot = np.asarray(pi_mesh.coord_nod2D)
+        ur, vr = jra55._vector_g2r(
+            u, v, geo[:, 0], geo[:, 1], rot[:, 0], rot[:, 1],
+            jra55._rotation_matrix())
+        # forward is magnitude-preserving (orthogonality precondition)
+        np.testing.assert_allclose(np.hypot(np.asarray(ur), np.asarray(vr)),
+                                   np.hypot(u, v), rtol=1e-12)
+        ub, vb = rotated_to_geographic_node_vector(pi_mesh, ur, vr)
+        np.testing.assert_allclose(np.asarray(ub), u, rtol=0, atol=1e-12)
+        np.testing.assert_allclose(np.asarray(vb), v, rtol=0, atol=1e-12)
