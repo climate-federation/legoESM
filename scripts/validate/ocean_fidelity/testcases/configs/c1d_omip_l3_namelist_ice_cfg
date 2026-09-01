@@ -72,14 +72,14 @@
    ln_icedH         = .true.     ! ice ref:157; inherited by ORCA1
    ln_icedA         = .false.    ! ORCA1 ice cfg:87
    ln_icedO         = .true.     ! ice ref:159; inherited by ORCA1
-   ln_icedQ         = .true.     ! ice ref:160; inherited by ORCA1
+   ln_leadhfx       = .true.     ! ice ref:160; inherited by ORCA1
 /
 !------------------------------------------------------------------------------
 &namthd_zdf     !   Ice heat diffusion
 !------------------------------------------------------------------------------
    ln_zdf_BL99      = .true.     ! ice ref:165; inherited by ORCA1
-   ln_cnd_P07       = .true.     ! ice ref:167; inherited by ORCA1
-   ln_cnd_U64       = .false.    ! ice ref:168; exclusive with P07
+   ln_cndi_P07      = .true.     ! ice ref:167; inherited by ORCA1
+   ln_cndi_U64      = .false.    ! ice ref:166; exclusive with P07
    rn_cnd_s         = 0.5        ! ORCA1 ice cfg:92
    rn_kappa_i       = 1.0        ! ice ref:170; inherited by ORCA1
    rn_kappa_s       = 10.0       ! ice ref:171; inherited by ORCA1

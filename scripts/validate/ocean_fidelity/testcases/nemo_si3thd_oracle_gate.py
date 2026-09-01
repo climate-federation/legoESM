@@ -94,8 +94,9 @@ def check_resolved(root: Path) -> dict[str, str]:
         "nameos.ln_eos80": False, "namdom.ln_c1d": True,
         "nampar.ln_icethd": True, "namitd.ln_cat_hfn": True,
         "namthd.ln_icedh": True, "namthd.ln_iceda": False,
-        "namthd.ln_icedo": True, "namthd_zdf.ln_zdf_bl99": True,
-        "namthd_zdf.ln_cnd_p07": True, "namthd_zdf.ln_cnd_u64": False,
+        "namthd.ln_icedo": True, "namthd.ln_leadhfx": True,
+        "namthd_zdf.ln_zdf_bl99": True,
+        "namthd_zdf.ln_cndi_p07": True, "namthd_zdf.ln_cndi_u64": False,
         "namthd_sal.ln_flushing": True, "namthd_sal.ln_drainage": True,
         "namthd_pnd.ln_pnd": False,
     }

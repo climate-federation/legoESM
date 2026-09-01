@@ -227,6 +227,33 @@
 !!    namzdf_iwm    tidal mixing parameterization                       (ln_zdfiwm=T)
 !!======================================================================
 !
+! Required singleton choices inherited from the shipped C1D column deck.
+! EXP_SASICE omits these groups; NEMO 5 initializes them even with ln_c1d=T.
+&namdrg
+   ln_non_lin     = .true.  ! shipped C1D EXP_PAPA/namelist_cfg:250
+/
+&namtra_adv
+   ln_traadv_OFF  = .true.  ! shipped C1D EXP_PAPA/namelist_cfg:288; column-inert
+/
+&namtra_ldf
+   ln_traldf_OFF  = .true.  ! shipped C1D EXP_PAPA/namelist_cfg:294; column-inert
+/
+&namdyn_adv
+   ln_dynadv_OFF  = .true.  ! shipped C1D EXP_PAPA/namelist_cfg:328; column-inert
+/
+&namdyn_vor
+   ln_dynvor_ene  = .true.  ! shipped C1D EXP_PAPA/namelist_cfg:333; column-inert
+/
+&namdyn_hpg
+   ln_hpg_sco     = .true.  ! shipped C1D EXP_PAPA/namelist_cfg:338; column-inert
+/
+&namdyn_ldf
+   ln_dynldf_OFF  = .true.  ! shipped C1D EXP_PAPA/namelist_cfg:348; column-inert
+/
+&namzdf
+   ln_zdfgls      = .true.  ! shipped C1D EXP_PAPA/namelist_cfg:370
+/
+!
 !!======================================================================
 !!                  ***  Diagnostics namelists  ***                   !!
 !!                                                                    !!
