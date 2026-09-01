@@ -167,3 +167,118 @@ artifacts.
 Independent adversarial review status is **UNMEASURED** for this round; no
 shipping claim is made beyond the measured OUTSIDE finding and labeled owner
 ledger.
+
+## Resolved-physics coverage continuation (2026-09-01)
+
+**Outcome: the tested register is exhausted without a confirmed initiating
+owner.**  The file-driven coverage pass eliminates a missing NEMO convection,
+momentum-advection-form, momentum-LDF, or barotropic-selector mechanism.  The
+current legoESM adaptive-momentum approximation is a **PLAUSIBLE late
+amplifier**: removing only that rewrite delays failure by 1,051 steps and
+suppresses the baseline terminal growth, but the arm still becomes non-finite
+at step 3,928 rather than completing the oracle's 6,120 steps.  BBL is
+**REFUTED_PRIMARY** at the terminal event's scale.  The kt=2 U/SSH initiating
+arithmetic owner therefore remains **UNMEASURED**.
+
+### Pre-implementation search and fail-closed coverage
+
+Searched before adding any arm: the existing resolved-namelist parser and
+file-side planted-control gate in
+`scripts/validate/ocean_fidelity/testcases/nemo_testcase_oracle_gate.py`, the
+certified card builder and validator in
+`packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py`, the canonical
+barotropic filter helpers in `barotropic_common.py`, the adaptive vertical
+operator in `vertical.py`, the WS-RK3 call path in
+`ocean_model_latlon_cgrid.py`, and the existing private BBL hook.  Found and
+reused all of them; no duplicate parser, solver, public selector, or
+Frankenstein card was added.
+
+The committed gate inventories all **108** file-side keys in the executed
+`namdyn*`, `namzdf`, and `namtra*` blocks.  Exact ledger equality is required;
+the planted extra file key fails as missing, and a flux-to-vector card mutation
+fails before integration.  The disposition is:
+
+| status | rows | meaning |
+|---|---:|---|
+| VERIFIED | 67 | live card binding or source-bound executed-off selector |
+| WAIVED | 40 | dead-family operand; inventory stability only, not review |
+| UNMEASURED | 1 | active `namzdf.ln_zad_aimp` arithmetic and time levels |
+
+The matched resolved namelist SHA-256 is
+`2ed353704f87a1a9fa0cb09ec33452f238cd442ccf2afa7db591acd4898d84d0`.
+It has `ln_zdfevd=F`, `ln_zdfnpc=F`, and every other specific convective
+closure off.  NEMO's executed dispatcher consequently selects “no specific
+scheme used” (`src/OCE/ZDF/zdfphy.F90:181-197`) and the constant closure with
+`rn_avm0=1e-4`, `rn_avt0=0` (`:151-179,207-215`).  Enabling EVD, convection,
+or tracer diffusion would be an oracle-absent Rule-9 stabilizer and was not
+armed.  Momentum is flux-form UP3 (`src/OCE/DYN/dynadv.F90:78-90`), while
+`ln_dynldf_off=T` returns before viscosity arrays are allocated
+(`src/OCE/LDF/ldfdyn.F90:220-239`).
+
+The per-case external-mode composition is **VERIFIED** against the resolved
+values, not a lane default: `ln_bt_fw=T`, `ln_bt_auto=T`, `nn_bt_flt=1`,
+`rn_bt_alpha=0`, runtime `nn_e=3`.  NEMO's executed weight builder
+(`src/OCE/DYN/dynspg_ts.F90:1041-1108,1223-1240`) and legoESM both produce
+primary `[0,1,1,1]/3`, raw secondary `[3,3,2,1]`, divisor 9, and four loop
+iterations.  The live zero-alpha back interpolation is the same
+`0.614/0.285/0.088/0.013` arm (`:1676-1711`).  This verifies the registered
+substep count/filter composition; it does not convert the still-unowned kt=2
+U/SSH arithmetic residual into a match.
+
+### Scaling-first arms and reconciliation
+
+Both arms are private experimental harness ablations with **no reference
+model**.  Public cards still run NEMO's named configuration.
+
+| arm | frozen scale result | trajectory movement | label |
+|---|---|---|---|
+| suppress legoESM's current post-program adaptive momentum rewrite | same-input step-2,875 U effect `2,766.778 m/s`, ratio `0.815468` of the baseline increment | non-finite `2,877 -> 3,928`; kt=2,877 U error `621.703 -> 3.90185` (`159.336x` reduction); step-2,876 T increment `314,761 -> 0.0967489 K` (`3.25338e6x`) | **PLAUSIBLE amplifier**, not CONFIRMED |
+| suppress Campin--Goosse BBL transport | effect at the registered T and U increment maxima exactly zero; global T effect only `5.733e-8` of the increment | full arm forbidden below the frozen 0.1 scale floor | **REFUTED_PRIMARY** |
+
+Arm D's step-3,928 failure is again a slope-front redistribution event: its
+last finite large increments localize near x=46--51 km and z about 530--630 m,
+and volume remains closed to `1.80e-16` relative.  It cannot receive a
+CONFIRMED label because it does not complete 6,120 steps.  The movement instead
+shows that legoESM's current post-stage adaptive rewrite is a powerful
+late-time amplifier.  NEMO does not expose a no-adaptive switch, so the arm is
+not a correction and cannot ship.
+
+The sole coverage UNMEASURED row is source-specific.  NEMO constructs its
+Wicker horizontal/vertical Courant partition bottom-up at RK3 stage 3
+(`src/OCE/DYN/sshwzv.F90:710-847`), then uses the explicit and implicit
+transports in the resolved optimized `nn_fct_imp=1` two-step predictor
+(`src/OCE/TRA/traadv.F90:220-227`;
+`src/OCE/TRA/traadv_fct.F90:140-145,526-536`) and the momentum/tracer implicit
+applications at their NEMO time levels.  legoESM's current local vertical-only,
+post-program approximation is not that package.  The next implementation debt
+is therefore the **source-exact, unbranched NEMO RK3 `ln_zad_Aimp` package**;
+it must be implemented as one scheme identity, not as public micro-selectors.
+Until that package runs the oracle duration and the kt=2 U/SSH term is owned,
+the initiating owner remains **UNMEASURED**.
+
+The fp64/fp32 failure steps 2,877/2,879 still support a deterministic structural
+interpretation, not roundoff accumulation.  This remains labeled PLAUSIBLE,
+not CONFIRMED, because no matched fp32 approach-window diagnostic was added.
+
+### Continuation artifacts
+
+Run root remains
+`/data/abyssal/dbalwada/nemo-testcases-l1/stability/`; no new NEMO run was
+needed after the coverage table.
+
+| artifact | SHA-256 |
+|---|---|
+| resolved coverage JSON | `b22281a4f2389edcd29b354e663369c2d13398df7716fe5e576057b81d68bed5` |
+| adaptive-momentum same-input scale | `d7ef743ae95d5f7553f5763673d53f7ec04fa0662040587872e9c9b73762e2b1` |
+| adaptive-momentum arm `run.json` | `3d3a51b3a15ea96150bfa187cdcc807ee4a758e11c049b431fd0c11e113d580d` |
+| adaptive-momentum matched score | `8d642cbd0385bcde27ae9baad880757e61cc92318cb03958500f30a516f60679` |
+| adaptive-momentum run summary | `3162b99bf49bc155e01b1c0a110f8846bd0533b8892d49870d8415a2a6e4279f` |
+| BBL same-input scale | `a87ec2fdfb5aa8b8c8805a76d6edc614bf216eabd3a56d3fbcf6804f55cfc6a0` |
+| machine verdict | `cfb67081d01c5ca59bca581634600fc6414f290d1dcb9d8ff1cc82af5181e8ce` |
+
+The coverage JSON and machine verdict stamp scorer commit `4865140afcbf`;
+the full adaptive arm stamps runner commit `5e68669f5e8f`.  The focused current
+breakdown is **31 tests**: 11 stability-probe/coverage/label controls plus 20
+adaptive-implicit vertical-advection unit tests.  All ran CPU/fp64 with
+`JAX_PLATFORMS=cpu`, `JAX_ENABLE_X64=1`; every state and geometry dtype in the
+arm receipt is `float64`.
