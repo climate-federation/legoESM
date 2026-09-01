@@ -909,8 +909,8 @@ for _stage, _kaa, _kmm in ((1, 3, 1), (2, 2, 3), (3, 3, 2)):
 _DUMP_TIME_LEVEL["oracle_rhs_kt00000001.bin"] = (
     "now",
     "scripts/validate/ocean_fidelity/testcases/nemo502_MY_SRC/"
-    "stprk3.F90:378-389 writes the explicitly passed Nrhs momentum state "
-    "after stp_2D and before the three RK stages",
+    "stprk3.F90:205-206,377-389 writes the explicitly passed Nrhs=3 "
+    "momentum state after stp_2D and before the three RK stages",
 )
 del _kt, _step, _stage, _kaa, _kmm
 

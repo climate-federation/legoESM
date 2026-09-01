@@ -136,7 +136,7 @@ def read_rhs(path: Path) -> dict:
         values = np.fromfile(handle, dtype=np.float64)
     version, kt, nrhs, nx, ny, nz, bits = header
     require(magic == "NEMO_L1_RHS___1", f"{path}: bad magic")
-    require((version, kt, nrhs, nx, ny, nz, bits) == (1, 1, 2, *DIMS, 64), f"{path}: bad header")
+    require((version, kt, nrhs, nx, ny, nz, bits) == (1, 1, 3, *DIMS, 64), f"{path}: bad header")
     require(values.size == 2 * nx * ny * nz, f"{path}: bad payload")
     return {"Nrhs": nrhs, "registry_level": level}
 
@@ -149,8 +149,9 @@ def read_bt(path: Path, expected_kt: int) -> dict:
         values = np.fromfile(handle, dtype=np.float64)
     version, kt, kaa, nx, ny, bits = header
     require(magic == "NEMO_L1_BTFRM_1", f"{path}: bad magic")
+    expected_kaa = 3 if expected_kt % 2 else 1
     require(
-        (version, kt, kaa, nx, ny, bits) == (1, expected_kt, 3, DIMS[0], DIMS[1], 64),
+        (version, kt, kaa, nx, ny, bits) == (1, expected_kt, expected_kaa, DIMS[0], DIMS[1], 64),
         f"{path}: bad header",
     )
     require(values.size == 4 * nx * ny, f"{path}: bad payload")
@@ -357,7 +358,11 @@ def run(
     for kt in range(1, max_step + 1):
         path = root / f"oracle_step_entry_kt{kt:08d}.bin"
         oracle = read_entry(path)
-        require((oracle["kt"], oracle["Nbb"]) == (kt, 1 if kt == 1 else 3), f"{path}: wrong Nbb")
+        expected_nbb = 1 if kt % 2 else 3
+        require(
+            (oracle["kt"], oracle["Nbb"]) == (kt, expected_nbb),
+            f"{path}: wrong Nbb",
+        )
         artifacts[path.name] = sha256(path)
         candidate = lego_fields(state)
         rows = []
