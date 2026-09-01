@@ -49,6 +49,8 @@ from legoesm.ocean.vertical import (
     flux_form_vertical_tracer_advection_centered,
     nemo_qco_live_face_geometry_from_operands,
     nemo_qco_live_face_thicknesses,
+    nemo_up3_vertical_momentum_advection,
+    nemo_wicker_aimp_partition_transport,
 )
 from legoesm.ocean.state import (
     LatLonCGridOceanState,
@@ -1024,6 +1026,63 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # slots after the full step has run.  Private fidelity instrumentation only;
     # zero leaves the returned state untouched.
     expose_momentum_stage: int = 0
+    # Harness-only Arm A: restore the pre-fix Kbb EOS/HPG operands in stages
+    # 2/3. Public NEMO WS-RK3 always uses live Kmm T/S/ssh.
+    freeze_stage_hpg_operands: bool = False
+    # Harness-only Arm B: omit dyn_adv_up3's vertical flux from EVERY stage
+    # RHS.  Public NEMO WS-RK3 always calls the full dyn_adv package each
+    # stage (stprk3_stg.F90:315,331-334).
+    omit_stage_vertical_up3: bool = False
+    # Private operand diagnostic: return the stage-advanced tracer carried by
+    # Kmm after stage 1 or 2. Zero leaves the returned tracer untouched.
+    expose_tracer_stage: int = 0
+
+
+def _nemo_ws_stage_transport(
+    stage_velocity, h_stage, stage_index, *, Hu_avg, Hv_avg, u_mask_3d,
+    v_mask_3d, grid, z_coord, config, dt,
+):
+    """NEMO ``stprk3_stg.F90:257-304`` Kmm stage transport triplet.
+
+    ``zFu = e2u*e3u(Kmm)*(uu(Kmm) + zub)`` with ``zub = un_adv/hu(Kmm) -
+    uu_b(Kmm)`` (:270-277): the stage velocity's thickness mean is replaced
+    by the external time-mean transport, and ``ww`` follows from continuity of
+    that transport with the qco stage-thickness term (``wzv`` np_transport,
+    sshwzv.F90:315-335).  Stage 3 splits ``ww`` into the explicit advection
+    share and the implicit ``wi`` (``wAimp``, :298-302); stages 1-2 carry
+    ``wi = 0`` (:287).  ONE triplet per stage feeds both ``dyn_adv``
+    (:315,331-334) and ``tra_adv`` (:456-519).  Returns
+    ``(mf_u, mf_v, w_explicit, h_stage, hu_stage, hv_stage, wi_stage)``.
+    """
+    u_stage, v_stage = stage_velocity
+    hu_stage = min_cell_to_uface(h_stage)
+    hv_stage = min_cell_to_vface(h_stage, grid)
+    Hu_stage_depth = jnp.sum(hu_stage, axis=-1)
+    Hv_stage_depth = jnp.sum(hv_stage, axis=-1)
+    Hu_stage_raw = jnp.sum(hu_stage * u_stage, axis=-1)
+    Hv_stage_raw = jnp.sum(hv_stage * v_stage, axis=-1)
+    u_stage_corr = u_stage + (
+        (Hu_avg - Hu_stage_raw)
+        / jnp.maximum(Hu_stage_depth, 1.0e-10))[..., jnp.newaxis]
+    v_stage_corr = v_stage + (
+        (Hv_avg - Hv_stage_raw)
+        / jnp.maximum(Hv_stage_depth, 1.0e-10))[..., jnp.newaxis]
+    mf_u = hu_stage * u_stage_corr * u_mask_3d
+    mf_v = hv_stage * v_stage_corr * v_mask_3d
+    stage_div = divergence_cgrid(mf_u, mf_v, grid)
+    w_stage = diagnose_w_from_flux_div(
+        stage_div, z_coord, thickness_weighted=True)
+    wi_stage = jnp.zeros_like(w_stage)
+    if (stage_index == 2
+            and getattr(config, "adaptive_implicit_vertadv", False)):
+        e3w_int = 0.5 * (h_stage[..., :-1] + h_stage[..., 1:])
+        e3w = jnp.concatenate(
+            [h_stage[..., :1], e3w_int, h_stage[..., -1:]], axis=-1)
+        split = nemo_wicker_aimp_partition_transport(
+            mf_u, mf_v, w_stage, h_stage, e3w,
+            grid.area_T, grid.dy_u, grid.dx_v, dt)
+        w_stage, wi_stage = split.w_explicit, split.w_implicit
+    return (mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage, wi_stage)
 
 
 def _nemo_ws_rk3_tracer_pair_step(
@@ -1045,6 +1104,7 @@ def _nemo_ws_rk3_tracer_pair_step(
     stage_transport_geometry=None,
     fct_low_order_predictor: str = "nemo_rk3_two_step",
     bbl_context=None,
+    stop_after_stage: int = 3,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """NEMO key_RK3 tracer stage program (Wicker--Skamarock form).
 
@@ -1062,6 +1122,8 @@ def _nemo_ws_rk3_tracer_pair_step(
         ) * 3
     if len(stage_transport_geometry) != 3:
         raise ValueError("stage_transport_geometry must contain exactly 3 stages")
+    if stop_after_stage not in (1, 2, 3):
+        raise ValueError("stop_after_stage must be 1, 2, or 3")
 
     def _flux_pair(a_val, b_val, stage_dt, stage_index, h_after):
         stage_geom = stage_transport_geometry[stage_index]
@@ -1073,18 +1135,36 @@ def _nemo_ws_rk3_tracer_pair_step(
              wi_stage) = stage_geom
         else:
             raise ValueError("each stage transport geometry needs 6 or 7 arrays")
-        (dh_a, dv_a), (dh_b, dv_b) = compute_advection_flux_div_pair(
-            a_val, b_val, tracer_advection, mf_u, mf_v,
-            w_stage, h_stage, hu_stage, hv_stage, grid, stage_dt,
-            recon_fill_mask=recon_fill_mask,
-            linssh_top_flux=linssh_top_flux,
-            tr_a_before=tr_a,
-            tr_b_before=tr_b,
-            fct_low_order_predictor=fct_low_order_predictor,
-            fct_base_thickness=h_k_old,
-            fct_after_thickness=h_after,
-            fct_implicit_w=wi_stage,
-        )
+        # NEMO key_RK3 runs the FCT limiter at stage 3 ONLY: traadv.F90:281-282
+        # forces ``ll_dofct = .FALSE.`` for ``kstg /= 3`` and :361-364 then
+        # dispatches ``np_FCT`` to ``tra_adv_cen(nn_fct_h, nn_fct_v)``, the
+        # plain 2nd-order centred flux (traadv_cen.F90:140-149, 196-210) with
+        # the stage transport and Kmm tracer.  There is no NEMO switch here,
+        # so there is none in legoESM: the certified WS card selects ``fct2``
+        # (= nn_fct_h/v = 2) and stages 1-2 take the matching ``centered``
+        # flux.  Running the limiter at every stage put the front cells'
+        # stage-1 increment at 0x / 2x NEMO's (the upwind low-order
+        # signature), which is what fed the stage-2 EOS/HPG operands.
+        if tracer_advection == "fct2" and stage_index < 2:
+            (dh_a, dv_a), (dh_b, dv_b) = compute_advection_flux_div_pair(
+                a_val, b_val, "centered", mf_u, mf_v,
+                w_stage, h_stage, hu_stage, hv_stage, grid, stage_dt,
+                recon_fill_mask=recon_fill_mask,
+                linssh_top_flux=linssh_top_flux,
+            )
+        else:
+            (dh_a, dv_a), (dh_b, dv_b) = compute_advection_flux_div_pair(
+                a_val, b_val, tracer_advection, mf_u, mf_v,
+                w_stage, h_stage, hu_stage, hv_stage, grid, stage_dt,
+                recon_fill_mask=recon_fill_mask,
+                linssh_top_flux=linssh_top_flux,
+                tr_a_before=tr_a,
+                tr_b_before=tr_b,
+                fct_low_order_predictor=fct_low_order_predictor,
+                fct_base_thickness=h_k_old,
+                fct_after_thickness=h_after,
+                fct_implicit_w=wi_stage,
+            )
         fd_a, fd_b = dh_a + dv_a, dh_b + dv_b
         if stage_index == 2 and bbl_context is not None:
             from legoesm.ocean.physics.bbl_adv import (
@@ -1124,10 +1204,14 @@ def _nemo_ws_rk3_tracer_pair_step(
         tr_a, tr_b, dt / 3.0, 0, h_one_third)
     a1 = _stage(tr_a, fd0_a, dt / 3.0, h_one_third)
     b1 = _stage(tr_b, fd0_b, dt / 3.0, h_one_third)
+    if stop_after_stage == 1:
+        return a1, b1
     fd1_a, fd1_b = _flux_pair(
         a1, b1, dt / 2.0, 1, h_one_half)
     a2 = _stage(tr_a, fd1_a, dt / 2.0, h_one_half)
     b2 = _stage(tr_b, fd1_b, dt / 2.0, h_one_half)
+    if stop_after_stage == 2:
+        return a2, b2
     fd2_a, fd2_b = _flux_pair(a2, b2, dt, 2, h_k_new)
     return (
         _stage(tr_a, fd2_a, dt, h_k_new),
@@ -4102,7 +4186,9 @@ class LatLonCGridOceanModel:
         # is the tracer flux-limiter timestep.  dt_mom_ratio=1.0 (default) ⇒
         # dt_mom == dt ⇒ bit-identical for all existing configs.
         _nemo_ws_velocity_stages = None
+        _nemo_ws_live_stage_geometry = None
         _nemo_ws_exposed_momentum_stage = None
+        _nemo_ws_exposed_tracer_stage = None
         if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3":
             u0 = state.u.data
             v0 = state.v.data
@@ -4157,11 +4243,22 @@ class LatLonCGridOceanModel:
 
             def _mom_pert_ws(
                 u_in, v_in, skip_ldf, transport_mean=None,
+                stage_tracers_eta=None, extra_rhs=None,
             ):
                 st = state._replace(
                     u=state.u.replace(data=u_in * u_mask_3d),
                     v=state.v.replace(data=v_in * v_mask_3d),
                 )
+                stage_geom_density = _geom_density
+                if stage_tracers_eta is not None:
+                    stage_T, stage_S, stage_eta = stage_tracers_eta
+                    st = st._replace(
+                        T=state.T.replace(data=stage_T),
+                        S=state.S.replace(data=stage_S),
+                        eta=state.eta.replace(data=stage_eta),
+                    )
+                    stage_geom_density = compute_frozen_geom_density(
+                        st, _grid, _zc, _cfg_b)
                 transport_velocity = None
                 if transport_mean is not None:
                     transport_u_mean, transport_v_mean = transport_mean
@@ -4179,7 +4276,7 @@ class LatLonCGridOceanModel:
                     )
                 td = self.tendencies(st, surface_forcing, sponge=sponge, dt=dt,
                                      momentum_only=True,
-                                     precomputed_geom_density=_geom_density,
+                                     precomputed_geom_density=stage_geom_density,
                                      grid=_grid, vertex_mask=_vmask,
                                      skip_lateral_viscosity=skip_ldf,
                                      z_coord=z_coord, config=config,
@@ -4187,6 +4284,9 @@ class LatLonCGridOceanModel:
                                          transport_velocity))
                 _du = td.du_dt.data
                 _dv = td.dv_dt.data
+                if extra_rhs is not None:
+                    _du = _du + extra_rhs[0]
+                    _dv = _dv + extra_rhs[1]
                 _Fu = jnp.sum(_du * h_u_pre, axis=-1) / H_u_pre * state.u_mask.data
                 _Fv = jnp.sum(_dv * h_v_pre, axis=-1) / H_v_pre * state.v_mask.data
                 return _du - _Fu[..., jnp.newaxis], _dv - _Fv[..., jnp.newaxis]
@@ -4598,27 +4698,123 @@ class LatLonCGridOceanModel:
                 Hu_avg / H_u_pre * state.u_mask.data)
             transport_target_v = (
                 Hv_avg / H_v_pre * state.v_mask.data)
-            u1_raw = u0 + (dt_mom / 3.0) * du_dt_pert
-            v1_raw = v0 + (dt_mom / 3.0) * dv_dt_pert
-            u1_corr, v1_corr = _replace_stage_mean(
-                u1_raw, v1_raw, target_u, target_v)
             _use_transport_reconcile = (
                 self._nemo_ws_test_hooks.momentum_transport_reconcile)
             _transport_target = (
                 (transport_target_u, transport_target_v)
                 if _use_transport_reconcile else None)
+
+            # NEMO stprk3_stg.F90:257-304 builds ONE Kmm transport triplet
+            # (zFu, zFv, zFw) per stage that dyn_adv (:315,331-334) and
+            # tra_adv (:456-519) both consume, and :309-334,433-468
+            # interleaves each barotropically corrected momentum stage with
+            # its tracer stage.  So stage 2 evaluates eos+hpg on the stage-1
+            # Kaa T/S/ssh, stage 3 on the stage-2 Kaa, and every stage RHS
+            # carries dyn_adv_up3's vertical flux on that stage's explicit ww
+            # (wAimp splits stage 3 only, :298-302).  The two hooks are
+            # private one-variable controls; the public identity has no arm.
+            _freeze_hpg = self._nemo_ws_test_hooks.freeze_stage_hpg_operands
+            _omit_vert = self._nemo_ws_test_hooks.omit_stage_vertical_up3
+            _h_live_new = compute_layer_thickness(
+                state_new.eta.data, state_new.H_bathy.data, _zc,
+                min_water_column_m=_cfg_b.min_water_column_m)
+            _h_live_one_third = h_k_old + (_h_live_new - h_k_old) / 3.0
+            _h_live_one_half = 0.5 * (h_k_old + _h_live_new)
+            _eta_live_one_third = (
+                state.eta.data
+                + (state_new.eta.data - state.eta.data) / 3.0)
+            _eta_live_one_half = 0.5 * (
+                state.eta.data + state_new.eta.data)
+            if isinstance(_zc, OceanPartialCellCoordinate):
+                _u_live_mask, _v_live_mask = compute_face_masks_3d(
+                    _zc.is_active, _grid)
+                _u_live_mask = _u_live_mask.astype(h_k_old.dtype)
+                _v_live_mask = _v_live_mask.astype(h_k_old.dtype)
+                _active_live = _zc.is_active.astype(h_k_old.dtype)
+            else:
+                _u_live_mask = state.u_mask.data[..., None]
+                _v_live_mask = state.v_mask.data[..., None]
+                _active_live = mask_3d
+            _stage_transport_kw = dict(
+                Hu_avg=Hu_avg, Hv_avg=Hv_avg, u_mask_3d=_u_live_mask,
+                v_mask_3d=_v_live_mask, grid=_grid, z_coord=_zc,
+                config=_cfg_b, dt=dt)
+            _wall_live = (
+                _active_live
+                if getattr(_cfg_b, "tracer_wall_neumann_fill", True)
+                else None)
+
+            def _stage_vertical_up3(u_stage, v_stage, geom):
+                # dynadv_up3.F90:239-358: vertical flux of the stage Kmm
+                # velocity on the stage transport's explicit ww, divided by
+                # e3u(Kmm).  Identically zero from rest (kt=1 stage 1).
+                if _omit_vert:
+                    return None
+                return (
+                    nemo_up3_vertical_momentum_advection(
+                        u_stage * u_mask_3d, interp_cell_to_uface(geom[2]),
+                        geom[4], face_active=_u_live_mask),
+                    nemo_up3_vertical_momentum_advection(
+                        v_stage * v_mask_3d,
+                        interp_cell_to_vface(geom[2], _grid),
+                        geom[5], face_active=_v_live_mask),
+                )
+
+            def _stage_tracers(stop_after_stage, stage_geometry):
+                return _nemo_ws_rk3_tracer_pair_step(
+                    state_new.T.data, state_new.S.data,
+                    _cfg_b.tracer_advection,
+                    _g0[0], _g0[1], _g0[2], h_k_old, _h_live_new,
+                    _g0[4], _g0[5], _grid, dt, _active_live,
+                    recon_fill_mask=_wall_live,
+                    linssh_top_flux=getattr(_zc, "linear_free_surface", False),
+                    stage_transport_geometry=stage_geometry,
+                    stop_after_stage=stop_after_stage,
+                )
+
+            # stage 1 (dt/3): Kmm = Kbb transport, full RHS incl. vertical UP3
+            _g0 = _nemo_ws_stage_transport(
+                (u0, v0), h_k_old, 0, **_stage_transport_kw)
+            _vert0 = _stage_vertical_up3(u0, v0, _g0)
+            u1_raw = u0 + (dt_mom / 3.0) * (
+                du_dt_pert if _vert0 is None else du_dt_pert + _vert0[0])
+            v1_raw = v0 + (dt_mom / 3.0) * (
+                dv_dt_pert if _vert0 is None else dv_dt_pert + _vert0[1])
+            u1_corr, v1_corr = _replace_stage_mean(
+                u1_raw, v1_raw, target_u, target_v)
+            _T_stage1, _S_stage1 = _stage_tracers(1, (_g0, _g0, _g0))
+            if self._nemo_ws_test_hooks.expose_tracer_stage == 1:
+                _nemo_ws_exposed_tracer_stage = (_T_stage1, _S_stage1)
+            # stage 2 (dt/2): Kmm = stage-1 Kaa
+            _g1 = _nemo_ws_stage_transport(
+                (u1_corr, v1_corr), _h_live_one_third, 1,
+                **_stage_transport_kw)
             p1u_corr, p1v_corr = _mom_pert_ws(
-                u1_corr, v1_corr, True, _transport_target)
+                u1_corr, v1_corr, True, _transport_target,
+                None if _freeze_hpg else (
+                    _T_stage1, _S_stage1, _eta_live_one_third),
+                _stage_vertical_up3(u1_corr, v1_corr, _g1))
             u2_raw = u0 + (dt_mom / 2.0) * p1u_corr
             v2_raw = v0 + (dt_mom / 2.0) * p1v_corr
             u2_corr, v2_corr = _replace_stage_mean(
                 u2_raw, v2_raw, target_u, target_v)
+            _T_stage2, _S_stage2 = _stage_tracers(2, (_g0, _g1, _g1))
+            if self._nemo_ws_test_hooks.expose_tracer_stage == 2:
+                _nemo_ws_exposed_tracer_stage = (_T_stage2, _S_stage2)
+            # stage 3 (dt): Kmm = stage-2 Kaa; ww split into explicit/implicit
+            _g2 = _nemo_ws_stage_transport(
+                (u2_corr, v2_corr), _h_live_one_half, 2,
+                **_stage_transport_kw)
             p2u_corr, p2v_corr = _mom_pert_ws(
-                u2_corr, v2_corr, False, _transport_target)
+                u2_corr, v2_corr, False, _transport_target,
+                None if _freeze_hpg else (
+                    _T_stage2, _S_stage2, _eta_live_one_half),
+                _stage_vertical_up3(u2_corr, v2_corr, _g2))
             u3_raw = u0 + dt_mom * p2u_corr
             v3_raw = v0 + dt_mom * p2v_corr
             u3_corr, v3_corr = _replace_stage_mean(
                 u3_raw, v3_raw, target_u, target_v)
+            _nemo_ws_live_stage_geometry = (_g0, _g1, _g2)
             u3_corr = u3_corr.at[:, -1].set(u3_corr[:, 0])
             state_new = state_new._replace(
                 u=state_new.u.replace(data=u3_corr),
@@ -4799,10 +4995,6 @@ class LatLonCGridOceanModel:
         # (Hallberg & Adcroft 2009, Shchepetkin & McWilliams 2005).
         _min_uface_op = min_cell_to_uface
         _min_vface_op = lambda f: min_cell_to_vface(f, _grid)
-        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-            divergence_cgrid, interp_cell_to_uface,
-        )
-
         mask = state.land_mask.data
 
         # Layer thickness at face points (min-rule, partial-cell aware
@@ -4975,93 +5167,38 @@ class LatLonCGridOceanModel:
                 raise ValueError(
                     "nemo_kmm tracer transports require materialized WS "
                     "momentum stages")
-            # QCO Kmm thickness ladder: stage 1 reads Kbb, stage 2 reads the
-            # stage-1 Kaa (1/3), and stage 3 reads stage-2 Kaa (1/2).
-            # stprk3_stg.F90:160-168,195-213,225-234 constructs those r3/e3
-            # levels before :250-303 builds zFu/zFv/zFw from Kmm.
-            h_k_one_third = h_k_old + (h_k_new - h_k_old) / 3.0
-            h_k_one_half = 0.5 * (h_k_old + h_k_new)
-            stage_h_k = (h_k_old, h_k_one_third, h_k_one_half)
-
-            def _stage_transport(stage_velocity, h_stage, stage_index):
-                u_stage, v_stage = stage_velocity
-                hu_stage = _min_uface_op(h_stage)
-                hv_stage = _min_vface_op(h_stage)
-                Hu_stage_depth = jnp.sum(hu_stage, axis=-1)
-                Hv_stage_depth = jnp.sum(hv_stage, axis=-1)
-                Hu_stage_raw = jnp.sum(hu_stage * u_stage, axis=-1)
-                Hv_stage_raw = jnp.sum(hv_stage * v_stage, axis=-1)
-                u_stage_corr = u_stage + (
-                    (Hu_avg - Hu_stage_raw)
-                    / jnp.maximum(Hu_stage_depth, 1.0e-10))[..., jnp.newaxis]
-                v_stage_corr = v_stage + (
-                    (Hv_avg - Hv_stage_raw)
-                    / jnp.maximum(Hv_stage_depth, 1.0e-10))[..., jnp.newaxis]
-                mf_u = hu_stage * u_stage_corr * u_mask_3d_tracer
-                mf_v = hv_stage * v_stage_corr * v_mask_3d_tracer
-                stage_div = divergence_cgrid(mf_u, mf_v, _grid)
-                w_stage = diagnose_w_from_flux_div(
-                    stage_div, _zc, thickness_weighted=True)
-                wi_stage = jnp.zeros_like(w_stage)
-                if (stage_index == 2
-                        and getattr(_cfg_b, "adaptive_implicit_vertadv", False)):
-                    from legoesm.ocean.vertical import (
-                        nemo_wicker_aimp_partition_transport,
-                    )
-                    e3w_int = 0.5 * (h_stage[..., :-1] + h_stage[..., 1:])
-                    e3w = jnp.concatenate(
-                        [h_stage[..., :1], e3w_int, h_stage[..., -1:]],
-                        axis=-1)
-                    split = nemo_wicker_aimp_partition_transport(
-                        mf_u, mf_v, w_stage, h_stage, e3w,
-                        _grid.area_T, _grid.dy_u, _grid.dx_v, dt)
-                    w_stage, wi_stage = split.w_explicit, split.w_implicit
-                return (mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage,
-                        wi_stage)
-
-            _nemo_ws_stage_transport_geometry = tuple(
-                _stage_transport(velocity, h_stage, stage_index)
-                for stage_index, (velocity, h_stage) in enumerate(zip(
-                    _nemo_ws_velocity_stages, stage_h_k, strict=True)))
+            if _nemo_ws_live_stage_geometry is not None:
+                # stprk3_stg.F90:257-304: the momentum program's Kmm triplets
+                # are the tracer transports too (tra_adv_trp reuses zF).
+                _nemo_ws_stage_transport_geometry = (
+                    _nemo_ws_live_stage_geometry)
+            else:
+                # Legacy stage-correction-off harness arm: rebuild the Kmm
+                # ladder from the uncorrected stages.  Stage 1 reads Kbb,
+                # stage 2 the stage-1 Kaa (1/3), stage 3 the stage-2 Kaa
+                # (1/2): stprk3_stg.F90:160-168,195-213,225-234 before
+                # :250-303 builds zFu/zFv/zFw from Kmm.
+                h_k_one_third = h_k_old + (h_k_new - h_k_old) / 3.0
+                h_k_one_half = 0.5 * (h_k_old + h_k_new)
+                stage_h_k = (h_k_old, h_k_one_third, h_k_one_half)
+                _nemo_ws_stage_transport_geometry = tuple(
+                    _nemo_ws_stage_transport(
+                        velocity, h_stage, stage_index,
+                        Hu_avg=Hu_avg, Hv_avg=Hv_avg,
+                        u_mask_3d=u_mask_3d_tracer,
+                        v_mask_3d=v_mask_3d_tracer, grid=_grid,
+                        z_coord=_zc, config=_cfg_b, dt=dt)
+                    for stage_index, (velocity, h_stage) in enumerate(zip(
+                        _nemo_ws_velocity_stages, stage_h_k, strict=True)))
 
             if (getattr(_cfg_b, "adaptive_implicit_vertadv", False)
                     and not self._nemo_ws_test_hooks.disable_adaptive_implicit_momentum):
-                # stprk3_stg.F90:295-304: flux-form momentum consumes the
-                # stage-3 explicit share before dyn_zdf; dynzdf.F90:252-270
-                # folds the implicit share into the one stage-3 matrix.  The
-                # same corrected Kmm transports are recomputed for tracers at
-                # stprk3_stg:456-519, so the partition above is their common
-                # stage-3 operand on this flux-form card.
-                (_mf3u, _mf3v, _w3_exp, _h3, _hu3, _hv3,
-                 _nemo_ws_aimp_tracer_w) = _nemo_ws_stage_transport_geometry[2]
-                from legoesm.ocean.vertical import (
-                    nemo_up3_vertical_momentum_advection,
-                )
-                from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-                    interp_cell_to_vface,
-                )
-                _u2, _v2 = _nemo_ws_velocity_stages[2]
-                _w3u_exp = interp_cell_to_uface(_w3_exp)
-                _w3v_exp = interp_cell_to_vface(_w3_exp, _grid)
-                _du3v = nemo_up3_vertical_momentum_advection(
-                    _u2, _w3u_exp, _hu3, face_active=u_mask_3d_tracer)
-                _dv3v = nemo_up3_vertical_momentum_advection(
-                    _v2, _w3v_exp, _hv3, face_active=v_mask_3d_tracer)
-                # The barotropic mode belongs to dynspg.  Add only the
-                # thickness-mean-free stage RHS here; the certified mean is
-                # imposed again after the fused dyn_zdf solve below.
-                _du3m = (jnp.sum(_du3v * _hu3, axis=-1)
-                         / jnp.maximum(jnp.sum(_hu3, axis=-1), 1.0e-10))
-                _dv3m = (jnp.sum(_dv3v * _hv3, axis=-1)
-                         / jnp.maximum(jnp.sum(_hv3, axis=-1), 1.0e-10))
-                state_new = state_new._replace(
-                    u=state_new.u.replace(data=(
-                        state_new.u.data + dt_mom * (_du3v - _du3m[..., None]))
-                        * u_mask_3d),
-                    v=state_new.v.replace(data=(
-                        state_new.v.data + dt_mom * (_dv3v - _dv3m[..., None]))
-                        * v_mask_3d),
-                )
+                # stprk3_stg.F90:298-302 partitions the stage-3 ww.  The
+                # explicit share already entered the stage-3 momentum RHS
+                # (dyn_adv, :331-334) and the tracer FCT above; dynzdf.F90:
+                # 252-270 folds the implicit share into the one stage-3
+                # matrix, area-weighted to the velocity faces.
+                _nemo_ws_aimp_tracer_w = _nemo_ws_stage_transport_geometry[2][6]
                 _area_wi = (_grid.area_T[..., None]
                             * _nemo_ws_aimp_tracer_w)
                 _area_u = (_grid.dx_u * _grid.dy_u)[..., None]
@@ -5105,9 +5242,6 @@ class LatLonCGridOceanModel:
                 and getattr(_cfg_b, "momentum_time_integrator", "euler")
                 != "rk3_ws"
                 and _pflow is None):
-            from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-                interp_cell_to_vface,
-            )
             from legoesm.ocean.vertical import (
                 adaptive_implicit_vertical_momentum_advection,
             )
@@ -6159,6 +6293,12 @@ class LatLonCGridOceanModel:
             state_new = state_new._replace(
                 u=state_new.u.replace(data=_stage_u),
                 v=state_new.v.replace(data=_stage_v),
+            )
+        if _nemo_ws_exposed_tracer_stage is not None:
+            _stage_T, _stage_S = _nemo_ws_exposed_tracer_stage
+            state_new = state_new._replace(
+                T=state_new.T.replace(data=_stage_T),
+                S=state_new.S.replace(data=_stage_S),
             )
 
         state_new = cast_pytree(state_new, None, "storage", allow_downcast=True)

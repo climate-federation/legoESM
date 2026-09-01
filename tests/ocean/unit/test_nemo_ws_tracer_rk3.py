@@ -227,3 +227,30 @@ def test_overflow_bbl_is_live_inside_real_rk3_stage3():
     content_scale = np.sum(
         np.abs(area * h * np.asarray(initial.T.data)))
     assert abs(content_delta) <= 1024.0 * np.finfo(np.float64).eps * content_scale
+
+
+def test_nemo_ws_fct_limits_stage3_only_and_centres_stages_1_2(monkeypatch):
+    """traadv.F90:281-282,361-364: FCT at kstg=3 only; cen2 at stages 1-2."""
+    seen = []
+
+    def recording_flux_pair(a, b, scheme, *args, **kwargs):
+        seen.append((scheme, "tr_a_before" in kwargs))
+        return (jnp.zeros_like(a), jnp.zeros_like(a)), (
+            jnp.zeros_like(b), jnp.zeros_like(b))
+
+    monkeypatch.setattr(
+        model_module, "compute_advection_flux_div_pair", recording_flux_pair)
+    tracer = jnp.array([[[1.0, 2.0]]], dtype=jnp.float64)
+    h = jnp.ones_like(tracer)
+    model_module._nemo_ws_rk3_tracer_pair_step(
+        tracer, tracer, "fct2", h, h, jnp.ones((1, 1, 3)),
+        h, h, h, h, object(), 2.0, h,
+    )
+    assert seen == [("centered", False), ("centered", False), ("fct2", True)]
+    seen.clear()
+    model_module._nemo_ws_rk3_tracer_pair_step(
+        tracer, tracer, "centered", h, h, jnp.ones((1, 1, 3)),
+        h, h, h, h, object(), 2.0, h,
+    )
+    # Non-FCT NEMO schemes run the same operator at every stage.
+    assert [scheme for scheme, _ in seen] == ["centered"] * 3

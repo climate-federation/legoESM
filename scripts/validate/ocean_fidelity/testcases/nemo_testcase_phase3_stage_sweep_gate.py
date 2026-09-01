@@ -45,6 +45,18 @@ def require(ok: bool, message: str) -> None:
         raise GateError(message)
 
 
+def git_sha() -> str:
+    """Exact legoESM producer revision; fail closed off Git."""
+    import subprocess
+
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise GateError(f"cannot stamp legoESM git SHA: {error}") from error
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -55,6 +67,10 @@ def sha256(path: Path) -> str:
 
 def _xyz(values: np.ndarray, nx: int, ny: int, nz: int) -> np.ndarray:
     return values.reshape((nx, ny, nz), order="F")[2:-2, 2:-2].transpose(1, 0, 2)
+
+
+def _xy(values: np.ndarray, nx: int, ny: int) -> np.ndarray:
+    return values.reshape((nx, ny), order="F")[2:-2, 2:-2].T
 
 
 def read_stage(path: Path, case: str, expected_stage: int) -> dict:
@@ -79,11 +95,13 @@ def read_stage(path: Path, case: str, expected_stage: int) -> dict:
         "stage": stage,
         "Kaa": kaa,
         "T": _xyz(values[:count], nx, ny, nz),
+        "S": _xyz(values[count : 2 * count], nx, ny, nz),
         "u": _xyz(values[2 * count : 3 * count], nx, ny, nz),
+        "ssh": _xy(values[4 * count :], nx, ny),
     }
 
 
-def read_entry(path: Path, case: str) -> dict:
+def read_entry(path: Path, case: str, expected=(2, 3)) -> dict:
     with path.open("rb") as handle:
         magic = handle.read(16).decode("ascii").rstrip()
         header = struct.unpack("=8i", handle.read(32))
@@ -95,11 +113,88 @@ def read_entry(path: Path, case: str) -> dict:
     )
     count = nx * ny * nz
     require(values.size == 4 * count + nx * ny, f"{path}: bad payload")
-    require((kt, nbb) == (2, 3), f"{path}: expected kt=2/Nbb=3")
+    require((kt, nbb) == tuple(expected), f"{path}: expected kt/Nbb {expected}")
     return {
         "T": _xyz(values[:count], nx, ny, nz),
+        "S": _xyz(values[count : 2 * count], nx, ny, nz),
         "u": _xyz(values[2 * count : 3 * count], nx, ny, nz),
+        "ssh": _xy(values[4 * count :], nx, ny),
     }
+
+
+# ---------------------------------------------------------------------------
+# hpg_sco replay (NEMO 5.0.2 dynhpg.F90:340-390 with the key_qco macros
+# domzgr_substitute.h90:131,139,145 and r3t = ssh/ht_0, domqco.F90:160) on the
+# single wet row of the OVERFLOW-zps card.  Ported from the independent hunt
+# (docs/ocean/fidelity/testcases/overflow_kt2_independent_hunt.md) so its
+# numbers are gate numbers.  Face index i is the U face east of T column i.
+# ---------------------------------------------------------------------------
+def read_row_mesh(root: Path) -> dict:
+    import netCDF4
+
+    with netCDF4.Dataset(str(root / "mesh_mask.nc")) as data:
+        def field(name):
+            return np.asarray(data.variables[name][:]).squeeze()
+
+        tmask = field("tmask")[:, 1, :].T.astype(np.float64)
+        umask = field("umask")[:, 1, :].T.astype(np.float64)
+        e3t_0 = np.asarray(field("e3t_0")[:, 1, :].T, dtype=np.float64)
+        e3u_0 = np.asarray(field("e3u_0")[:, 1, :].T, dtype=np.float64)
+        e3w_1d = np.asarray(field("e3w_1d"), dtype=np.float64)
+        gdept_1d = np.asarray(field("gdept_1d"), dtype=np.float64)
+        e1u = np.asarray(field("e1u")[1], dtype=np.float64)
+        # tests/OVERFLOW/MY_SRC/usrdef_zgr.F90:164-166 (key_vco_3d): the
+        # partial cell reduces e3t_0/e3u_0 only; e3w/gdept stay 1-D ladders.
+        require(
+            np.array_equal(field("e3w_0")[:, 1, :].T, np.broadcast_to(e3w_1d, e3t_0.shape))
+            and np.array_equal(field("gdept_0")[:, 1, :].T, np.broadcast_to(gdept_1d, e3t_0.shape)),
+            "mesh_mask e3w_0/gdept_0 are not the 1-D ladders: hpg_sco replay not applicable",
+        )
+    ht_0 = np.sum(e3t_0 * tmask, axis=-1)
+    hu_0 = np.sum(e3u_0 * umask, axis=-1)
+    return {
+        "tmask": tmask, "umask": umask, "e3t_0": e3t_0, "e3u_0": e3u_0,
+        "e3w_1d": e3w_1d, "gdept_1d": gdept_1d, "e1u": e1u,
+        "r1_ht_0": np.where(ht_0 > 0, 1.0 / np.maximum(ht_0, 1e-300), 0.0),
+        "hu_0": hu_0,
+    }
+
+
+def hpg_sco_row(
+    mesh: dict, T, S, ssh, eos_fn, g: float, rho0: float, eos_pressure_per_metre: float,
+) -> np.ndarray:
+    """dynhpg.F90:340-390 u-trend ``zhpi + zuap`` on one row, (i_face, k).
+
+    ``g`` is the oracle's ``grav`` (the HPG coefficient); ``eos_pressure_per_
+    metre`` is whatever the supplied ``eos_fn`` divides by to recover depth
+    (legoESM ``nemo_roquet_eos``: ``zh = p/(rho0*constants.g)``, so pass
+    ``rho0*constants.g`` to hand it the exact live ``gdept``).
+    """
+    T = np.asarray(T, dtype=np.float64)
+    S = np.asarray(S, dtype=np.float64)
+    ssh = np.asarray(ssh, dtype=np.float64)
+    ni, nz = T.shape
+    r3t = ssh * mesh["r1_ht_0"]
+    gdept = mesh["gdept_1d"][None, :] * (1.0 + r3t)[:, None]     # gdept_0*(1+r3t)
+    e3w = mesh["e3w_1d"][None, :] * (1.0 + r3t)[:, None]         # E3w_0*(1+r3t)
+    gdept_z0 = gdept - ssh[:, None]                               # gdept - ssh
+    rho = np.asarray(eos_fn(T, S, eos_pressure_per_metre * gdept), dtype=np.float64)
+    rhd = (rho / rho0 - 1.0) * mesh["tmask"]
+    zcoef0 = -g * 0.5
+    trend = np.zeros((ni, nz))
+    west = slice(0, ni - 1)
+    east = slice(1, ni)
+    r1_e1u = 1.0 / mesh["e1u"][west]
+    zhpi = zcoef0 * r1_e1u * (e3w[east, 0] * rhd[east, 0] - e3w[west, 0] * rhd[west, 0])
+    zuap = -zcoef0 * (rhd[east, 0] + rhd[west, 0]) * (gdept_z0[east, 0] - gdept_z0[west, 0]) * r1_e1u
+    trend[west, 0] = zhpi + zuap
+    for k in range(1, nz - 1):
+        zhpi = zhpi + zcoef0 * r1_e1u * (
+            e3w[east, k] * (rhd[east, k] + rhd[east, k - 1])
+            - e3w[west, k] * (rhd[west, k] + rhd[west, k - 1]))
+        zuap = -zcoef0 * (rhd[east, k] + rhd[west, k]) * (gdept_z0[east, k] - gdept_z0[west, k]) * r1_e1u
+        trend[west, k] = zhpi + zuap
+    return trend * mesh["umask"]
 
 
 def score(name: str, oracle, candidate, mask, *, plant=False, quantity="u") -> dict:
@@ -150,6 +245,16 @@ def movement(faithful, control, mask) -> dict:
     return {"absolute_max": value}
 
 
+def remove_depth_mean(values, thickness, mask):
+    values = np.asarray(values, dtype=np.float64)
+    thickness = np.asarray(thickness, dtype=np.float64)
+    active = np.asarray(mask, dtype=bool)
+    weights = thickness * active
+    mean = np.sum(values * weights, axis=-1) / np.maximum(
+        np.sum(weights, axis=-1), np.finfo(np.float64).tiny)
+    return values - mean[..., None]
+
+
 def expected_masks(card) -> dict:
     wet = np.asarray(card.recipe.initial_state.land_mask.data) > 0.5
     active = np.asarray(card.recipe.z_coord.is_active) & wet[..., None]
@@ -182,7 +287,7 @@ def classify_arm(
     }
 
 
-def run(case: str, root: Path, *, plant_stage=False) -> dict:
+def run(case: str, root: Path, *, plant_stage=False, plant_operand=False) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -214,6 +319,12 @@ def run(case: str, root: Path, *, plant_stage=False) -> dict:
     if case == "OVERFLOW-zps":
         arms = {
             "faithful": _NEMOWSRK3TestHooks(),
+            "freeze_stage_hpg_operands": _NEMOWSRK3TestHooks(
+                freeze_stage_hpg_operands=True
+            ),
+            "omit_stage_vertical_up3": _NEMOWSRK3TestHooks(
+                omit_stage_vertical_up3=True
+            ),
             "legacy_velocity_primary_average": _NEMOWSRK3TestHooks(
                 primary_transport_average=False
             ),
@@ -235,6 +346,16 @@ def run(case: str, root: Path, *, plant_stage=False) -> dict:
     states = {}
     stage_states = {}
     rows = []
+    baroclinic_rows = []
+    from legoesm.ocean.vertical import compute_layer_thickness
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import min_cell_to_uface
+    h0 = compute_layer_thickness(
+        card.recipe.initial_state.eta.data,
+        card.recipe.initial_state.H_bathy.data,
+        card.recipe.z_coord,
+        min_water_column_m=card.recipe.model_config.min_water_column_m,
+    )
+    hu0 = np.asarray(min_cell_to_uface(h0))[:, 1:, :]
     for arm, hooks in arms.items():
         states[arm] = LatLonCGridOceanModel(
             card.recipe.grid,
@@ -263,6 +384,16 @@ def run(case: str, root: Path, *, plant_stage=False) -> dict:
             )
             row["verdict"] = arm == "faithful"
             rows.append(row)
+            baroclinic_rows.append(score(
+                f"{case}.kt1.stage{stage}.{arm}.baroclinic_u",
+                remove_depth_mean(
+                    oracle_stages[stage]["u"][..., :nlev], hu0,
+                    masks["u"]),
+                remove_depth_mean(
+                    np.asarray(stage_state.u.data)[:, 1:, :], hu0,
+                    masks["u"]),
+                masks["u"],
+            ))
 
     faithful_u = score(
         f"{case}.kt2.faithful.instantaneous_u",
@@ -272,6 +403,15 @@ def run(case: str, root: Path, *, plant_stage=False) -> dict:
     )
     faithful_u["frame"] = "instantaneous_prognostic_Nbb"
     rows.append(faithful_u)
+    faithful_u_bc = score(
+        f"{case}.kt2.faithful.baroclinic_u",
+        remove_depth_mean(oracle_entry["u"][..., :nlev], hu0, masks["u"]),
+        remove_depth_mean(
+            np.asarray(states["faithful"].u.data)[:, 1:, :], hu0,
+            masks["u"]),
+        masks["u"],
+    )
+    baroclinic_rows.append(faithful_u_bc)
     faithful_T = score(
         f"{case}.kt2.faithful.T",
         oracle_entry["T"][..., :nlev],
@@ -294,6 +434,14 @@ def run(case: str, root: Path, *, plant_stage=False) -> dict:
         )
         control_u.update({"verdict": False, "frame": "instantaneous_prognostic_Nbb"})
         rows.append(control_u)
+        control_u_bc = score(
+            f"{case}.kt2.{arm}.baroclinic_u",
+            remove_depth_mean(oracle_entry["u"][..., :nlev], hu0, masks["u"]),
+            remove_depth_mean(
+                np.asarray(states[arm].u.data)[:, 1:, :], hu0, masks["u"]),
+            masks["u"],
+        )
+        baroclinic_rows.append(control_u_bc)
         control_T = score(
             f"{case}.kt2.{arm}.T",
             oracle_entry["T"][..., :nlev],
@@ -303,7 +451,10 @@ def run(case: str, root: Path, *, plant_stage=False) -> dict:
         )
         control_T.update({"verdict": False, "frame": "instantaneous_tracer_Nbb"})
         rows.append(control_T)
-        target = "T" if case == "OVERFLOW-zps" else "u"
+        target = (
+            "u" if arm in ("freeze_stage_hpg_operands", "omit_stage_vertical_up3")
+            else "T" if case == "OVERFLOW-zps" else "u"
+        )
         faithful_row = faithful_T if target == "T" else faithful_u
         control_row = control_T if target == "T" else control_u
         faithful_field = (
@@ -320,7 +471,11 @@ def run(case: str, root: Path, *, plant_stage=False) -> dict:
         improving = control_row["absolute_max"] < faithful_row["absolute_max"]
         arm_results[arm] = classify_arm(faithful_row, control_row, arm_move, improving=improving)
         arm_results[arm]["target"] = target
-        if arm == "legacy_velocity_primary_average":
+        if arm == "freeze_stage_hpg_operands":
+            one_variable = "stage-2/3 EOS+HPG T/S/ssh time level"
+        elif arm == "omit_stage_vertical_up3":
+            one_variable = "vertical UP3 in each momentum-stage RHS"
+        elif arm == "legacy_velocity_primary_average":
             one_variable = "flux_form_primary_transport_average"
         elif "primary" in arm:
             one_variable = "stage_barotropic_correction"
@@ -365,7 +520,201 @@ def run(case: str, root: Path, *, plant_stage=False) -> dict:
             "arms": arm_results,
         }
 
+    stage_operand_ownership = None
+    operand_rows = []
+    replay = None
+    if case == "OVERFLOW-zps":
+        def _bc_row(stage, arm):
+            suffix = f".stage{stage}.{arm}.baroclinic_u"
+            return next(row for row in baroclinic_rows if suffix in row["name"])
+
+        def _within(value, target):
+            return 0.5 * target <= value <= 2.0 * target
+
+        # Arm A (live stage EOS/HPG operands) was preregistered WITHOUT Arm B:
+        # its frozen prediction is read off the omit-vertical arm (A only).
+        # Arm B (vertical UP3 in every stage RHS) is read off the faithful
+        # arm (A + B).  The frozen-operand arm (B only) isolates the HPG
+        # operand time level as the one remaining variable.
+        a_only_s2 = _bc_row(2, "omit_stage_vertical_up3")
+        a_only_k2 = next(row for row in baroclinic_rows if row["name"].endswith(
+            "kt2.omit_stage_vertical_up3.baroclinic_u"))
+        b_only_s2 = _bc_row(2, "freeze_stage_hpg_operands")
+        b_only_k2 = next(row for row in baroclinic_rows if row["name"].endswith(
+            "kt2.freeze_stage_hpg_operands.baroclinic_u"))
+        live_s2 = _bc_row(2, "faithful")
+        live_s3 = _bc_row(3, "faithful")
+        live_k2 = faithful_u_bc
+        confirmed_a = (
+            a_only_k2["absolute_max"] <= 7.0e-7
+            and _within(a_only_s2["absolute_max"], 1.65e-7)
+        )
+        confirmed_b = (
+            _within(live_s2["absolute_max"], 1.0e-10)
+            and _within(live_s3["absolute_max"], 2.6e-7)
+        )
+        stage_operand_ownership = {
+            "arm_a_live_stage_hpg_operands": {
+                "label": "CONFIRMED" if confirmed_a else "REFUTED",
+                "scaling_check_before_owner_label": True,
+                "frozen_prediction": (
+                    "A without B: kt2 <=7e-7; stage2 approximately 1.65e-7 "
+                    "within factor 2 (nemo_testcases_l1_overflow_stage_"
+                    "composition_preregister.md)"),
+                "a_only_stage2_baroclinic_u_error_m_s": a_only_s2["absolute_max"],
+                "a_only_kt2_baroclinic_u_error_m_s": a_only_k2["absolute_max"],
+                "b_only_stage2_baroclinic_u_error_m_s": b_only_s2["absolute_max"],
+                "b_only_kt2_baroclinic_u_error_m_s": b_only_k2["absolute_max"],
+                "one_variable_vs_faithful": "stage-2/3 EOS+HPG T/S/ssh time level",
+            },
+            "arm_b_vertical_up3_every_stage": {
+                "label": "CONFIRMED" if confirmed_b else "REFUTED",
+                "scaling_check_before_owner_label": True,
+                "frozen_prediction": (
+                    "A + B: stage2 approximately 1e-10, stage3 approximately "
+                    "2.6e-7, each within factor 2"),
+                "live_stage2_baroclinic_u_error_m_s": live_s2["absolute_max"],
+                "live_stage3_baroclinic_u_error_m_s": live_s3["absolute_max"],
+                "live_kt2_baroclinic_u_error_m_s": live_k2["absolute_max"],
+                "one_variable_vs_faithful": "vertical UP3 in each momentum-stage RHS",
+            },
+        }
+
+        # ---- stage tracer/ssh operands as the faithful arm hands them to the
+        # stage-2/3 eos+dyn_hpg calls, against NEMO's stage Kaa dumps ----
+        wet2d = masks["T"].any(axis=-1)
+        eta0 = np.asarray(card.recipe.initial_state.eta.data)
+        operand_states = {}
+        for stage in (1, 2):
+            operand_states[stage] = LatLonCGridOceanModel(
+                card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+                _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_tracer_stage=stage),
+            ).step(card.recipe.initial_state, dt=card.dt_s)
+        eta_new = np.asarray(operand_states[1].eta.data)
+        # HYB stage ssh: stprk3_stg.F90:146 (2/3 Kbb + 1/3 ssha), :209 (1/2 each)
+        stage_ssh = {1: eta0 + (eta_new - eta0) / 3.0, 2: 0.5 * (eta0 + eta_new)}
+        for stage in (1, 2):
+            for name, oracle_field, candidate in (
+                ("T", oracle_stages[stage]["T"][..., :nlev],
+                 np.asarray(operand_states[stage].T.data)),
+                ("S", oracle_stages[stage]["S"][..., :nlev],
+                 np.asarray(operand_states[stage].S.data)),
+            ):
+                row = score(
+                    f"{case}.kt1.stage{stage}.faithful.tracer_operand_{name}",
+                    oracle_field, candidate, masks["T"], quantity="T",
+                    plant=plant_operand and stage == 1 and name == "T",
+                )
+                row["frame"] = "instantaneous_tracer_Kaa"
+                row["staggering_and_reduction"] = (
+                    "oracle ts(:,:,:,jn,Kaa) after the stage tracer update and "
+                    "legoESM's exposed WS-RK3 stage tracer are both instantaneous "
+                    "3-D T-point fields; elementwise L-infinity on the wet T mask")
+                operand_rows.append(row)
+            row = score(
+                f"{case}.kt1.stage{stage}.faithful.ssh_operand",
+                oracle_stages[stage]["ssh"], stage_ssh[stage], wet2d, quantity="T",
+            )
+            row["frame"] = "instantaneous_ssh_Kaa"
+            row["staggering_and_reduction"] = (
+                "oracle ssh(:,:,Kaa) and legoESM's HYB stage eta are both "
+                "instantaneous 2-D T-point sea levels; elementwise L-infinity "
+                "on the wet column mask")
+            operand_rows.append(row)
+
+        # ---- hpg_sco replay: instrument check + operand-difference prediction
+        entry1_path = root / "oracle_step_entry_kt00000001.bin"
+        require(entry1_path.is_file(), f"missing {entry1_path}")
+        entry1 = read_entry(entry1_path, case, expected=(1, 1))
+        artifacts[entry1_path.name] = sha256(entry1_path)
+        mesh_path = root / "mesh_mask.nc"
+        require(mesh_path.is_file(), f"missing {mesh_path}")
+        artifacts[mesh_path.name] = sha256(mesh_path)
+        mesh = read_row_mesh(root)
+        require(int(wet2d.sum(axis=1).astype(bool).sum()) == 1, "replay expects one wet row")
+        cfg = card.recipe.model_config
+        from legoesm.ocean.eos import make_eos_fn
+        require(cfg.eos == "nemo_teos10", f"replay expects nemo_teos10, got {cfg.eos}")
+        eos_fn = make_eos_fn(cfg.eos, None, rho0=cfg.rho_0)
+        model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+        act = masks["u"][1]
+        pad = lambda a: np.concatenate(  # noqa: E731
+            [a, np.zeros(a.shape[:-1] + (mesh["tmask"].shape[-1] - a.shape[-1],))], axis=-1)
+        init = card.recipe.initial_state
+        T0 = np.asarray(init.T.data)
+        S0 = np.asarray(init.S.data)
+
+        def lego_hpg(T_full, S_full, ssh_full):
+            state = init._replace(
+                T=init.T.replace(data=np.where(masks["T"], T_full[..., :nlev], T0)),
+                S=init.S.replace(data=np.where(masks["T"], S_full[..., :nlev], S0)),
+                eta=init.eta.replace(data=np.where(wet2d, ssh_full, eta0)),
+            )
+            du = model.tendencies(state, dt=card.dt_s, momentum_only=True).du_dt.data
+            return pad(np.asarray(du)[1, 1:, :])
+
+        from legoesm import constants as _constants
+
+        def replay(T_full, S_full, ssh_full):
+            return hpg_sco_row(
+                mesh, T_full[1], S_full[1], ssh_full[1], eos_fn, cfg.g, cfg.rho_0,
+                cfg.rho_0 * _constants.g)
+
+        act_row = np.zeros_like(mesh["umask"], dtype=bool)
+        act_row[:, :nlev] = act
+        act_row[-1] = False
+        s1 = oracle_stages[1]
+        replay_rows = []
+        for label, operands in (
+            ("rest", (entry1["T"], entry1["S"], entry1["ssh"])),
+            ("nemo_stage1_kaa", (s1["T"], s1["S"], s1["ssh"])),
+        ):
+            row = score(
+                f"{case}.replay.instrument.legoesm_hpg_vs_hpg_sco.{label}",
+                replay(*operands), lego_hpg(*operands), act_row,
+            )
+            row["frame"] = "instantaneous_u_rhs_from_given_T_S_ssh"
+            row["staggering_and_reduction"] = (
+                "legoESM momentum tendency at rest velocity (u=v=0: HPG only "
+                "on this card) and the dynhpg.F90:340-390 replay are both "
+                "U-face trends on the wet row; elementwise L-infinity")
+            replay_rows.append(row)
+        H_nemo_s1 = replay(s1["T"], s1["S"], s1["ssh"])
+        H_frozen = replay(entry1["T"], entry1["S"], entry1["ssh"])
+        H_lego_s1 = replay(
+            pad(np.asarray(operand_states[1].T.data)),
+            pad(np.asarray(operand_states[1].S.data)), stage_ssh[1])
+        e3u_row = mesh["e3u_0"]
+
+        def stage2_prediction(H_candidate):
+            diff = remove_depth_mean(
+                (card.dt_s / 2.0) * (H_candidate - H_nemo_s1), e3u_row, act_row)
+            return float(np.max(np.abs(diff[act_row])))
+
+        measured_a = movement(
+            remove_depth_mean(
+                np.asarray(stage_states["faithful"][2].u.data)[:, 1:, :], hu0, masks["u"]),
+            remove_depth_mean(
+                np.asarray(stage_states["freeze_stage_hpg_operands"][2].u.data)[:, 1:, :],
+                hu0, masks["u"]),
+            masks["u"])["absolute_max"]
+        replay = {
+            "instrument_rows": replay_rows,
+            "predicted_stage2_baroclinic_u_error_from_frozen_kbb_operands_m_s": (
+                stage2_prediction(H_frozen)),
+            "measured_stage2_baroclinic_u_movement_frozen_vs_live_m_s": measured_a,
+            "predicted_over_measured": (
+                stage2_prediction(H_frozen) / measured_a if measured_a else float("inf")),
+            "predicted_stage2_baroclinic_u_error_from_legoesm_stage1_operands_m_s": (
+                stage2_prediction(H_lego_s1)),
+            "source": (
+                "dynhpg.F90:340-390; domzgr_substitute.h90:131,139,145; "
+                "domqco.F90:160; eos at live gdept (eosbn2.F90:1166)"),
+        }
+
     failed = [row["name"] for row in rows if row["status"] == "DEBT" and row.get("verdict", True)]
+    failed += [row["name"] for row in operand_rows if row["status"] == "DEBT"]
     return {
         "format": "nemo-testcase-l1-phase3-stage-sweep-v1",
         "case": case,
@@ -383,10 +732,25 @@ def run(case: str, root: Path, *, plant_stage=False) -> dict:
             "stage2": "Kaa=2 after stprk3_stg.F90:433-446",
             "stage3": "Kaa=3 after stprk3_stg.F90:433-446",
             "next_entry": "kt=2 Nbb=3 from stprk3.F90 step-entry instrument",
+            "stage1_tracer_operand": (
+                "ts(:,:,:,:,Kaa=3) after the stage-1 update stprk3_stg.F90:"
+                "535-552; consumed as Kmm by stage-2 eos/dyn_hpg (:317-320) "
+                "after the stprk3.F90:218 Nnn<->Naa swap"),
+            "stage2_tracer_operand": (
+                "ts(:,:,:,:,Kaa=2) after stage 2; consumed as Kmm by stage-3 "
+                "eos/dyn_hpg after the stprk3.F90:224 swap"),
+            "stage1_ssh_operand": "HYB ssh(Kaa)=2/3 ssh(Kbb)+1/3 ssha, stprk3_stg.F90:146",
+            "stage2_ssh_operand": "HYB ssh(Kaa)=1/2(ssh(Kbb)+ssha), stprk3_stg.F90:209",
         },
         "rows": rows,
+        "baroclinic_rows": baroclinic_rows,
+        "stage_operand_rows": operand_rows,
+        "hpg_sco_replay": replay,
         "failed_rows": failed,
         "ownership": ownership,
+        "stage_operand_ownership": stage_operand_ownership,
+        "controls": {"plant_stage": plant_stage, "plant_operand": plant_operand},
+        "legoesm_git_sha": git_sha(),
         "artifacts": artifacts,
     }
 
@@ -397,9 +761,11 @@ def main(argv=None) -> int:
     parser.add_argument("--oracle-root", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant-stage", action="store_true")
+    parser.add_argument("--plant-operand", action="store_true")
     args = parser.parse_args(argv)
     try:
-        report = run(args.case, args.oracle_root or ROOTS[args.case], plant_stage=args.plant_stage)
+        report = run(args.case, args.oracle_root or ROOTS[args.case],
+                     plant_stage=args.plant_stage, plant_operand=args.plant_operand)
     except (GateError, OSError, ValueError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 2
