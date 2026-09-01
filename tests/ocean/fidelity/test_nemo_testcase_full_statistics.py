@@ -53,6 +53,13 @@ def test_gross_temperature_control_hard_fails():
         stats._snap_temperature(values, "OVERFLOW-zps", values.dtype)
 
 
+def test_planted_census_distance_goes_outside():
+    baseline = np.asarray([0.2, 0.5, 0.3])
+    planted = np.asarray([1.0, 0.0, 0.0])
+    candidate = stats._curve_distance(planted, baseline)
+    assert stats.verdict(candidate, floor=0.0, spread=0.1) == "OUTSIDE"
+
+
 def test_metric_registry_and_planted_controls_are_wired():
     source = SCRIPT.read_text()
     assert 'score_parser.add_argument("--plant-state"' in source
