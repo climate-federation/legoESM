@@ -176,6 +176,18 @@ TARGET_DYN_NML = {
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
+CONFIG_DIR = Path(__file__).with_name("configs")
+CONFIG_STEM = {"3.1": "ice_adv1d_l3", "3.2": "ice_adv2d_l3", "3.3": "ice_adv2d_rhg_l3"}
+
+# Ice-ocean drag is quadratic and both stress terms carry the same U-point ice
+# fraction `zaU`, so it cancels and free drift is a closed-form identity:
+#   utau_ice = rho0 * rn_Cd_io * |u_ice|^2      (icedyn_rhg_evp.F90:580-590,310)
+# `utau_ice` is a case constant, not a namelist entry.
+ICE_ADV2D_UTAU_ICE_PA = 1.3  # tests/ICE_ADV2D/MY_SRC/usrdef_sbc.F90:93
+# Band on that identity.  The rheology is what is under test, not the third
+# digit: a broken stress balance, drag law or aEVP solve moves the steady speed
+# by tens of percent, while the measured margin is ~2e-10 (receipt section 4).
+FREE_DRIFT_REL_TOL = 1.0e-2
 
 
 def git_sha() -> str:
@@ -187,6 +199,27 @@ def git_sha() -> str:
         text=True,
         cwd=REPO_ROOT,
     ).stdout.strip()
+
+
+def input_namelists(root: Path, rung: str) -> dict[str, str]:
+    """Bind the committed input decks to the run that consumed them.
+
+    The gate otherwise only reads NEMO's RESOLVED `output.namelist.*`, so the
+    committed `configs/` copies would be documentation that nothing checks.
+    """
+    digests: dict[str, str] = {}
+    for name in ("namelist_cfg", "namelist_ice_cfg"):
+        used = root / name
+        committed = CONFIG_DIR / f"{CONFIG_STEM[rung]}_{name}"
+        require(used.is_file(), f"run input deck absent: {used}")
+        require(committed.is_file(), f"committed input deck absent: {committed}")
+        digest = sha256(used)
+        require(
+            digest == sha256(committed),
+            f"{name} used by the run differs from committed {committed.name}",
+        )
+        digests[name] = digest
+    return digests
 
 
 def find_one(root: Path, patterns: tuple[str, ...]) -> Path:
@@ -209,10 +242,6 @@ def run_files(root: Path) -> dict[str, Path]:
     for name, path in files.items():
         require(path.is_file(), f"{name} file is absent: {path}")
     return files
-
-
-def _inventory_files(files: dict[str, Path]) -> dict[str, Path]:
-    return {name: path for name, path in files.items() if name != "ocean_output"}
 
 
 def inventory(root: Path) -> tuple[dict[str, Path], dict[str, set[str]]]:
@@ -377,8 +406,9 @@ def disposition_template(root: Path, rung: str) -> dict:
     nlay_i, nlay_s, nn_icesal, ponds = _resolved_ice_settings(root)
     return {
         "format": FORMAT,
+        "git_sha": git_sha(),
         "rung": rung,
-        "files": {name: sha256(path) for name, path in _inventory_files(files).items()},
+        "files": {name: sha256(path) for name, path in files.items()},
         "entries": entries,
         "restart_contract": restart_contract(rung, nlay_i, nlay_s, nn_icesal, ponds),
     }
@@ -390,6 +420,18 @@ def check_manifest(root: Path, rung: str, manifest: dict, plant_unaccounted: boo
         actual["mesh"].add("PLANTED_UNACCOUNTED_FILE_ARRAY")
     require(manifest.get("format") == FORMAT, "bad manifest format")
     require(manifest.get("rung") == rung, "manifest rung mismatch")
+    # Provenance is a claim like any other: a manifest may not carry a made-up
+    # commit string.
+    stamped = manifest.get("git_sha", "")
+    require(
+        isinstance(stamped, str) and re.fullmatch(r"[0-9a-f]{40}", stamped) is not None,
+        f"manifest git_sha is not a 40-hex commit: {stamped!r}",
+    )
+    # Every disposition is REGENERATED from the run rather than trusted from the
+    # file, so a VERIFIED row cannot be silently downgraded to WAIVED (which
+    # would skip its numeric/finite/fp64 check) by editing the manifest.  Same
+    # ratchet the Appendix-A contract already gets below.
+    expected_entries = disposition_template(root, rung)["entries"]
     for namespace, names in actual.items():
         ledger = manifest.get("entries", {}).get(namespace, {})
         require(
@@ -398,8 +440,8 @@ def check_manifest(root: Path, rung: str, manifest: dict, plant_unaccounted: boo
             f"extra={sorted(set(ledger) - names)}",
         )
         require(
-            manifest.get("files", {}).get(namespace) == sha256(files[namespace]),
-            f"{namespace} SHA256 mismatch",
+            ledger == expected_entries[namespace],
+            f"{namespace} dispositions differ from the regenerated coverage template",
         )
         for name, item in ledger.items():
             require(item.get("status") in VALID, f"{namespace}.{name}: bad disposition")
@@ -417,6 +459,12 @@ def check_manifest(root: Path, rung: str, manifest: dict, plant_unaccounted: boo
             require(np.all(np.isfinite(data)), f"{namespace}.{name} contains non-finite values")
             if namespace == "restart" and np.issubdtype(data.dtype, np.floating):
                 require(data.dtype == np.float64, f"restart.{name} is not fp64")
+
+    for name, path in files.items():
+        require(
+            manifest.get("files", {}).get(name) == sha256(path),
+            f"{name} SHA256 mismatch",
+        )
 
     restart_names = actual["restart"]
     restart_ledger = manifest["entries"]["restart"]
@@ -645,6 +693,39 @@ def wet_window(root: Path) -> tuple[slice, slice]:
     return window
 
 
+def free_drift_speed(root: Path) -> dict[str, float]:
+    """Steady free-drift speed implied by the run's OWN resolved constants.
+
+    Nothing here is defaulted: `rn_Cd_io` is read from the resolved ice
+    namelist and `rho0` from the run's `ocean.output`.
+    """
+    values = namelist_values(run_files(root)["namelist_ice"])
+    require("namsbc.rn_cd_io" in values, "missing resolved selector namsbc.rn_cd_io")
+    cd_io = float(values["namsbc.rn_cd_io"].replace("D", "E").replace("d", "e"))
+    text = run_files(root)["ocean_output"].read_text(errors="replace")
+    match = re.search(r"volumic mass of reference\s+rho0\s*=\s*([-+.\deEdD]+)", text)
+    require(match is not None, "ocean.output does not print the resolved rho0")
+    assert match is not None
+    rho0 = float(match.group(1).replace("D", "E").replace("d", "e"))
+    require(rho0 > 0.0 and cd_io > 0.0, f"non-positive rho0={rho0} or rn_Cd_io={cd_io}")
+    return {
+        "rho0_kg_m3": rho0,
+        "rn_cd_io": cd_io,
+        "utau_ice_pa": ICE_ADV2D_UTAU_ICE_PA,
+        "u_free_drift_m_s": float(np.sqrt(ICE_ADV2D_UTAU_ICE_PA / (rho0 * cd_io))),
+        "relative_tolerance": FREE_DRIFT_REL_TOL,
+    }
+
+
+def cell_area(root: Path) -> np.ndarray:
+    """T-cell area in the frames' (x, y) order, from the mesh NEMO wrote."""
+    with netCDF4.Dataset(run_files(root)["mesh"]) as ds:
+        e1t, e2t = _array(ds, "e1t"), _array(ds, "e2t")
+    while e1t.ndim > 2:
+        e1t, e2t = e1t[0], e2t[0]
+    return np.asarray(e1t * e2t).T
+
+
 def conservation_diagnostics(root: Path) -> dict:
     """Preregistered predicate: any printed SI3 `: violation` line is REFUTE.
 
@@ -655,12 +736,30 @@ def conservation_diagnostics(root: Path) -> dict:
     files = run_files(root)
     contents = files["ocean_output"].read_text(errors="replace")
     hits = re.findall(r"^.*:\s*violation\s+.*$", contents, flags=re.IGNORECASE | re.MULTILINE)
+    # The instrument stamps every ice step entry, so each printed violation can be
+    # attributed to the step it was raised in rather than only counted.
+    heat: list[float] = []
+    events: list[dict[str, float]] = []
+    step = float("nan")
+    for line in contents.splitlines():
+        stamp = re.search(r"LANE3_ICE_STEP_ENTRY_DUMP\s+(\d+)", line)
+        if stamp:
+            step = float(stamp.group(1))
+            continue
+        found = re.search(r":\s*violation heat cons\. \[J\]\s*=\s*([-+.\deEdD]+)", line)
+        if found:
+            value = float(found.group(1).replace("D", "E").replace("d", "e"))
+            heat.append(value)
+            events.append({"kt": step, "violation_j": value})
     return {
         "status": "CONFIRM" if not hits else "REFUTE",
         "criterion": "zero SI3 native-threshold conservation violations",
         "source": "icectl.F90:67-78,166-190,232-236; namelist_ice_ref:318-319",
         "violation_count": len(hits),
         "violations": [hit.strip() for hit in hits],
+        "violation_heat_j": heat,
+        "violation_heat_j_total": float(sum(heat)),
+        "violation_heat_events": events,
     }
 
 
@@ -669,6 +768,7 @@ def phenomenology(
     first: dict[str, np.ndarray],
     final: dict[str, np.ndarray],
     window: tuple[slice, slice] = (slice(None), slice(None)),
+    free_drift: dict[str, float] | None = None,
 ) -> dict:
     a0, a1 = _interior(first["a_i"])[window], final["a_i"][window]
     v0, v1 = _interior(first["v_i"])[window], final["v_i"][window]
@@ -763,6 +863,23 @@ def phenomenology(
         predicate(response > 0.0, "constant positive x-stress produced no positive ice velocity")
         predicate(state_change > 0.0, "rheology+advection state did not change")
         report.update(final_u_ice_max=response, ice_volume_max_abs_change=state_change)
+        # The documented claim is that the rheology CALCULATES the velocity the
+        # constant stress implies, so the bar is the free-drift identity the run's
+        # own constants fix -- not merely "the ice moved".
+        require(free_drift is not None, "rung 3.3 needs the resolved free-drift constants")
+        assert free_drift is not None
+        predicted = free_drift["u_free_drift_m_s"]
+        miss = abs(response - predicted) / predicted
+        predicate(
+            miss <= free_drift["relative_tolerance"],
+            f"steady ice speed {response} misses the free-drift identity {predicted} "
+            f"by {miss} (band {free_drift['relative_tolerance']})",
+        )
+        report.update(
+            u_free_drift_predicted_m_s=predicted,
+            u_free_drift_relative_miss=miss,
+            u_free_drift_source="icedyn_rhg_evp.F90:310,580-590; usrdef_sbc.F90:93",
+        )
     report["refuted_predicates"] = refuted
     if refuted:
         report["status"] = "REFUTE"
@@ -776,6 +893,9 @@ def trajectory(root: Path, rung: str) -> dict:
     first_arrays = final_arrays = None
     frame_hashes: list[str] = []
     header0: dict[str, int] | None = None
+    window = wet_window(root)
+    area = cell_area(root)[window]
+    scan: list[dict[str, float]] = []
     for step, path in enumerate(paths, start=1):
         header, arrays = read_frame(path)
         require(header["kt"] == step, f"frame sequence mismatch at {path.name}: kt={header['kt']}")
@@ -793,8 +913,27 @@ def trajectory(root: Path, rung: str) -> dict:
             )
         final_arrays = arrays
         frame_hashes.append(sha256(path))
+        a_i = _interior(arrays["a_i"])[window]
+        v_i = _interior(arrays["v_i"])[window]
+        h_i = np.divide(v_i, a_i, out=np.zeros_like(v_i), where=a_i != 0.0)
+        enthalpy = _interior(arrays["e_i"])[window].sum(axis=(2, 3)) + _interior(arrays["e_s"])[
+            window
+        ].sum(axis=(2, 3))
+        scan.append(
+            {
+                "kt": float(header["kt"]),
+                "a_i_max": float(np.max(a_i)),
+                "h_i_max": float(np.max(h_i)),
+                "a_i_sum": float(np.sum(a_i, dtype=np.float64)),
+                "v_i_sum": float(np.sum(v_i, dtype=np.float64)),
+                "ice_snow_enthalpy_j": float(np.sum(enthalpy * area, dtype=np.float64)),
+            }
+        )
     assert header0 is not None and first_arrays is not None and final_arrays is not None
     aggregate = hashlib.sha256("\n".join(frame_hashes).encode()).hexdigest()
+    peak_a = max(scan, key=lambda row: row["a_i_max"])
+    peak_h = max(scan, key=lambda row: row["h_i_max"])
+    free_drift = free_drift_speed(root) if rung == "3.3" else None
     return {
         "frame_count": len(paths),
         "first_sha256": frame_hashes[0],
@@ -805,6 +944,33 @@ def trajectory(root: Path, rung: str) -> dict:
             {"name": name, "shape": list(shape), "time_level": level, "source": source}
             for name, shape, level, source in FRAME_REGISTRY
         ],
+        "free_drift": free_drift,
+        # Measured over EVERY frame, so no claim about the trajectory rests on an
+        # endpoint sample or on an uncommitted probe.  Reported, not scored.
+        "full_scan_unclassified": {
+            "domain": "surface-tmask wet window, interior of the two-cell halo",
+            "trajectory_a_i_max": peak_a["a_i_max"],
+            "trajectory_a_i_max_kt": peak_a["kt"],
+            "trajectory_h_i_max": peak_h["h_i_max"],
+            "trajectory_h_i_max_kt": peak_h["kt"],
+            "a_i_sum_first": scan[0]["a_i_sum"],
+            "a_i_sum_second": scan[1]["a_i_sum"] if len(scan) > 1 else None,
+            "a_i_sum_last": scan[-1]["a_i_sum"],
+            "v_i_sum_first": scan[0]["v_i_sum"],
+            "v_i_sum_last": scan[-1]["v_i_sum"],
+            "ice_snow_enthalpy_j_first": scan[0]["ice_snow_enthalpy_j"],
+            "ice_snow_enthalpy_j_last": scan[-1]["ice_snow_enthalpy_j"],
+            "ice_snow_enthalpy_j_loss": scan[0]["ice_snow_enthalpy_j"]
+            - scan[-1]["ice_snow_enthalpy_j"],
+            "ice_snow_enthalpy_j_step_losses": [
+                {
+                    "kt": scan[i]["kt"],
+                    "loss_j": scan[i]["ice_snow_enthalpy_j"] - scan[i + 1]["ice_snow_enthalpy_j"],
+                }
+                for i in range(len(scan) - 1)
+                if scan[i]["ice_snow_enthalpy_j"] != scan[i + 1]["ice_snow_enthalpy_j"]
+            ],
+        },
         "phenomenology": phenomenology(
             rung,
             first_arrays,
@@ -812,7 +978,8 @@ def trajectory(root: Path, rung: str) -> dict:
                 name: _restart_array(run_files(root)["restart"], name)
                 for name in ("a_i", "v_i", "u_ice")
             },
-            wet_window(root),
+            window,
+            free_drift,
         ),
     }
 
@@ -830,7 +997,6 @@ def main() -> int:
     root = args.run_dir.resolve()
     if args.emit_manifest:
         manifest = disposition_template(root, args.rung)
-        manifest["git_sha"] = git_sha()
         print(json.dumps(manifest, indent=2, sort_keys=True))
         return 0
     require(args.manifest is not None, "--manifest is required")
@@ -838,9 +1004,28 @@ def main() -> int:
     counts = check_manifest(root, args.rung, manifest, plant_unaccounted=args.plant_unaccounted)
     selectors = resolved_selectors(root, args.rung)
     keys = cpp_keys(args.case_dir.resolve())
+    decks = input_namelists(root, args.rung)
     geom = geometry(root, args.rung, plant_field=args.plant_field)
     traj = trajectory(root, args.rung)
     conservation = conservation_diagnostics(root)
+    losses = {
+        row["kt"]: row["loss_j"]
+        for row in traj["full_scan_unclassified"]["ice_snow_enthalpy_j_step_losses"]
+    }
+    # Reported, not scored: does each printed heat violation equal the ice+snow
+    # enthalpy that left the frames during that same step?  The last step has no
+    # successor frame to difference, so it carries no ratio.
+    attribution = [
+        {
+            "kt": event["kt"],
+            "violation_j": event["violation_j"],
+            "frame_enthalpy_loss_j": losses.get(event["kt"]),
+            "ratio": (
+                event["violation_j"] / losses[event["kt"]] if losses.get(event["kt"]) else None
+            ),
+        }
+        for event in conservation["violation_heat_events"]
+    ]
     print(
         json.dumps(
             {
@@ -853,9 +1038,11 @@ def main() -> int:
                 "inventory_counts": counts,
                 "resolved_inherited_settings": selectors,
                 "cpp": keys,
+                "input_decks_sha256": decks,
                 "geometry": geom,
                 "trajectory": traj,
                 "conservation_diagnostics": conservation,
+                "heat_residual_attribution_unclassified": attribution,
                 "unmeasured": [
                     "legoesm_alignment",
                     "post-dynamics_stage_arrays",

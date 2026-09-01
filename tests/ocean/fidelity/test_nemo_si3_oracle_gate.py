@@ -41,6 +41,9 @@ def _minimal_run(root: Path, *, nx: int = 59, ny: int = 59, nz: int = 2) -> None
     (root / "ocean.output").write_text("run complete\n")
 
 
+INSTRUMENT = GATE_PATH.parent / "nemo502_MY_SRC/si3_l3/icestp.F90"
+
+
 def test_frame_registry_is_complete_unique_and_sourced() -> None:
     assert len(gate.FRAME_REGISTRY) == 19
     assert len({row[0] for row in gate.FRAME_REGISTRY}) == len(gate.FRAME_REGISTRY)
@@ -49,6 +52,22 @@ def test_frame_registry_is_complete_unique_and_sourced() -> None:
         for row in gate.FRAME_REGISTRY
     )
     assert all("icestp.F90:154-171" in row[3] for row in gate.FRAME_REGISTRY)
+
+
+def test_frame_registry_order_matches_the_committed_instrument() -> None:
+    """The registry is what NAMES each array, so its ORDER is load-bearing.
+
+    Reordering the instrument's WRITE statements without reordering the registry
+    would silently mislabel every field and every other test would still pass.
+    """
+    lines = INSTRUMENT.read_text().splitlines()
+    payload = [
+        line.split(")", 1)[1] for line in lines if "WRITE(itraj)" in line and "cl_magic" not in line
+    ]
+    written = [name.strip() for line in payload for name in line.split(",")]
+    assert written == [row[0] for row in gate.FRAME_REGISTRY]
+    header = next(line for line in lines if "WRITE(itraj)" in line and "cl_magic" in line)
+    assert header.rstrip().endswith(f", {len(gate.FRAME_REGISTRY)}")
 
 
 def test_frame_round_trip_uses_fp64_and_fortran_order(tmp_path: Path) -> None:
@@ -111,17 +130,38 @@ def test_planted_geometry_field_perturbation_goes_red(tmp_path: Path) -> None:
         gate.geometry(tmp_path, "3.1", plant_field=True)
 
 
-def test_manifest_contract_omission_and_unmeasured_mesh_go_red(tmp_path: Path) -> None:
+def test_manifest_contract_omission_and_status_downgrade_go_red(tmp_path: Path) -> None:
     _minimal_run(tmp_path)
     manifest = gate.disposition_template(tmp_path, "3.1")
     manifest["restart_contract"].pop("t_s_l01")
     with pytest.raises(gate.GateError, match="exhaustive Appendix-A contract"):
         gate.check_manifest(tmp_path, "3.1", manifest)
 
+    # A VERIFIED row downgraded to WAIVED would SKIP its numeric/finite/fp64
+    # check, so every disposition is regenerated rather than trusted.
     manifest = gate.disposition_template(tmp_path, "3.1")
-    manifest["entries"]["mesh"]["e1t"]["status"] = "UNMEASURED"
-    with pytest.raises(gate.GateError, match="UNMEASURED is forbidden"):
+    manifest["entries"]["mesh"]["e1t"] = {"status": "WAIVED", "reason": "reviewer waived this"}
+    with pytest.raises(gate.GateError, match="mesh dispositions differ from the regenerated"):
         gate.check_manifest(tmp_path, "3.1", manifest)
+
+    manifest = gate.disposition_template(tmp_path, "3.1")
+    manifest["git_sha"] = "not-a-real-commit"
+    with pytest.raises(gate.GateError, match="git_sha is not a 40-hex commit"):
+        gate.check_manifest(tmp_path, "3.1", manifest)
+
+    # ocean.output carries the conservation verdict, so it is hash-pinned too.
+    manifest = gate.disposition_template(tmp_path, "3.1")
+    (tmp_path / "ocean.output").write_text("run complete, edited\n")
+    with pytest.raises(gate.GateError, match="ocean_output SHA256 mismatch"):
+        gate.check_manifest(tmp_path, "3.1", manifest)
+    (tmp_path / "ocean.output").write_text("run complete\n")
+
+    template = gate.disposition_template(tmp_path, "3.1")
+    assert {"VERIFIED", "WAIVED"} >= {
+        item["status"]
+        for namespace in ("mesh", "restart")
+        for item in template["entries"][namespace].values()
+    }
 
 
 def test_phenomenology_maximum_preservation_control_goes_red() -> None:
@@ -142,6 +182,23 @@ def test_phenomenology_maximum_preservation_control_goes_red() -> None:
     assert verdict["status"] == "REFUTE"
     claims = verdict["refuted_predicates"]
     assert any("maximum-concentration preservation refuted" in row for row in claims)
+
+
+def test_free_drift_identity_control_goes_red() -> None:
+    """Rung 3.3's bar is the free-drift identity, not merely "the ice moved"."""
+    initial = {"a_i": np.ones((9, 9, 1)), "v_i": np.ones((9, 9, 1)), "u_ice": np.zeros((9, 9))}
+    final = {
+        "a_i": np.ones((5, 5, 1)),
+        "v_i": np.full((5, 5, 1), 2.0),
+        "u_ice": np.full((5, 5), 0.5033997477580665),
+    }
+    constants = {"u_free_drift_m_s": 0.5033997477580665, "relative_tolerance": 1.0e-2}
+    assert gate.phenomenology("3.3", initial, final, free_drift=constants)["status"] == "CONFIRM"
+
+    off = dict(constants, u_free_drift_m_s=0.6)
+    verdict = gate.phenomenology("3.3", initial, final, free_drift=off)
+    assert verdict["status"] == "REFUTE"
+    assert any("free-drift identity" in row for row in verdict["refuted_predicates"])
 
 
 def test_native_conservation_violation_is_refuted(tmp_path: Path) -> None:
@@ -194,18 +251,47 @@ def _cli(rung: str, *extra: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+PLANT_MESSAGE = {
+    "--plant-unaccounted": "mesh coverage mismatch: missing=['PLANTED_UNACCOUNTED_FILE_ARRAY']",
+    "--plant-field": "e1t metric",
+}
+
+
 @pytest.mark.parametrize("rung", sorted(RUN_ROOTS))
-@pytest.mark.parametrize("control", ["--plant-unaccounted", "--plant-field"])
+@pytest.mark.parametrize("control", sorted(PLANT_MESSAGE))
 def test_cli_planted_controls_exit_nonzero(rung: str, control: str) -> None:
-    """End-to-end: each preregistered plant must make the shipped CLI exit red."""
+    """End-to-end: each preregistered plant must make the shipped CLI exit red.
+
+    Rungs 3.1 and 3.2 already exit 1 unplanted, so a bare returncode assertion
+    would pass on four of the six arms even if the plants were no-ops.  The
+    plant's own message is what discriminates.
+    """
     run_dir, case_dir, _ = RUN_ROOTS[rung]
     if not run_dir.is_dir() or not case_dir.is_dir():
         pytest.skip(f"oracle run root absent: {run_dir}")
-    assert _cli(rung, control).returncode != 0
+    result = _cli(rung, control)
+    assert result.returncode != 0
+    assert PLANT_MESSAGE[control] in result.stderr, result.stderr[-400:]
+
+
+def test_cli_rejects_a_run_whose_input_deck_is_not_the_committed_one() -> None:
+    """The committed input decks are bound to the run, not just documentation."""
+    run_dir, case_dir, _ = RUN_ROOTS["3.1"]
+    if not run_dir.is_dir() or not case_dir.is_dir():
+        pytest.skip(f"oracle run root absent: {run_dir}")
+    assert gate.input_namelists(run_dir, "3.1")
+    with pytest.raises(gate.GateError, match="differs from committed ice_adv2d_l3_namelist_cfg"):
+        gate.input_namelists(run_dir, "3.2")
 
 
 def test_cli_clean_rung_is_green_and_refuted_rungs_are_red() -> None:
-    """The controls only prove anything if the unplanted arms are not always red."""
+    """The controls only prove anything if the unplanted arms are not always red.
+
+    Rungs 3.1 and 3.2 are expected DEBT because of MEASURED oracle behaviour
+    (19 native heat-conservation violations; the Prather maximum not preserved).
+    If SI3 ever stops producing those, this test goes red -- that is a signal to
+    re-read section 4 of the receipt, not a regression in this lane.
+    """
     for rung, expected_green in (("3.3", True), ("3.1", False), ("3.2", False)):
         run_dir, case_dir, _ = RUN_ROOTS[rung]
         if not run_dir.is_dir() or not case_dir.is_dir():
@@ -214,3 +300,20 @@ def test_cli_clean_rung_is_green_and_refuted_rungs_are_red() -> None:
         assert (result.returncode == 0) is expected_green, result.stderr[-400:]
         payload = json.loads(result.stdout)
         assert payload["status"] == ("VERIFIED" if expected_green else "DEBT")
+
+
+def test_cli_rung_3_1_phenomenology_confirms_on_the_wet_window() -> None:
+    """Pins the land-rim fix that this rung's phenomenology verdict rests on.
+
+    ICE_ADV1D's one-cell land rim is identically zero, so a whole-array
+    reduction reports a y-spread of ~2.687 for `a_i` and refutes the documented
+    y-homogeneity.  Over the wet window it is exactly zero.  Without this
+    assertion, reverting `wet_window()` leaves the whole suite green.
+    """
+    run_dir, case_dir, _ = RUN_ROOTS["3.1"]
+    if not run_dir.is_dir() or not case_dir.is_dir():
+        pytest.skip(f"oracle run root absent: {run_dir}")
+    report = json.loads(_cli("3.1").stdout)["trajectory"]["phenomenology"]
+    assert report["status"] == "CONFIRM", report["refuted_predicates"]
+    assert report["y_homogeneity_max_abs"] == 0.0
+    assert report["refuted_predicates"] == []

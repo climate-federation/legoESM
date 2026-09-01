@@ -3025,10 +3025,11 @@
     "mesh": "a74a6cd55b11084715b0e4e964f820ea9c2e222a73bd02f960edf73b58970503",
     "namelist_dyn": "fa4c442c361b44fc14291efe19a98086ce53a9bf89d874467ce160196724b460",
     "namelist_ice": "3990bbc8b8a71499f0c3958338eea393697308768a8010b426b16ea8a20873b5",
+    "ocean_output": "8512581c3022c6be20e07bb2db90570a5d683c13e050fac38143b76485026f0b",
     "restart": "863ee8ea8204618baa57b0d3d1aeec08acff4c7e6f55a47437630a82bbd748b0"
   },
   "format": "nemo-si3-l3-coverage-v1",
-  "git_sha": "9a6e09f051cad6374cce81324e180527d89bf42a",
+  "git_sha": "b4adf7d7734549c835e9b106a85319e0b3748f6f",
   "restart_contract": {
     "a_i": {
       "reason": "Appendix A active restart prognostic; loaded from final SI3 restart",
