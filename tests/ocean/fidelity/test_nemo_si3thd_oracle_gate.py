@@ -101,3 +101,5 @@ def test_oracle_streams_are_not_closed_and_replaced_at_nitend() -> None:
         text = source.read_text(encoding="utf-8")
         assert "STATUS='REPLACE'" in text
         assert "CLOSE(num_l3" not in text
+        assert "IF( num_l3" not in text
+        assert "IF( .NOT. ll_l3" in text

@@ -53,6 +53,7 @@ MODULE icethd
    REAL(wp)               ::   zcfl_drain_max, zcfl_flush_max
    INTEGER                ::   numcfl                        ! outfile unit
    INTEGER, SAVE          ::   num_l3thd = -1               ! write-only oracle stream
+   LOGICAL, SAVE          ::   ll_l3thd_opened = .FALSE.    ! NEWUNIT values may be negative
 
    !! * Substitutions
 #  include "do_loop_substitute.h90"
@@ -229,10 +230,11 @@ CONTAINS
 
    SUBROUTINE l3thd_open
       INTEGER :: ios
-      IF( num_l3thd < 0 ) THEN
+      IF( .NOT. ll_l3thd_opened ) THEN
          OPEN( NEWUNIT=num_l3thd, FILE='oracle_si3_thd_frames.bin', STATUS='REPLACE', &
             &  ACCESS='STREAM', FORM='UNFORMATTED', ACTION='WRITE', IOSTAT=ios )
          IF( ios /= 0 ) CALL ctl_stop( 'l3thd_open: cannot open oracle_si3_thd_frames.bin' )
+         ll_l3thd_opened = .TRUE.
       ENDIF
    END SUBROUTINE l3thd_open
 

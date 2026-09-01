@@ -85,6 +85,7 @@ MODULE icestp
    PUBLIC   ice_init   ! called by sbcmod.F90
 
    INTEGER, SAVE :: num_l3xchg = -1   ! write-only oracle exchange stream
+   LOGICAL, SAVE :: ll_l3xchg_opened = .FALSE. ! NEWUNIT values may be negative
 
    !! * Substitutions
 #  include "do_loop_substitute.h90"
@@ -245,10 +246,11 @@ CONTAINS
       INTEGER, INTENT(in) :: kt
       INTEGER :: ios
       CHARACTER(LEN=16), PARAMETER :: cmagic = 'NEMO_L3XCHG_001'
-      IF( num_l3xchg < 0 ) THEN
+      IF( .NOT. ll_l3xchg_opened ) THEN
          OPEN( NEWUNIT=num_l3xchg, FILE='oracle_si3_exchange_frames.bin', STATUS='REPLACE', &
             &  ACCESS='STREAM', FORM='UNFORMATTED', ACTION='WRITE', IOSTAT=ios )
          IF( ios /= 0 ) CALL ctl_stop( 'l3xchg_dump: cannot open oracle_si3_exchange_frames.bin' )
+         ll_l3xchg_opened = .TRUE.
       ENDIF
       WRITE(num_l3xchg) cmagic
       WRITE(num_l3xchg) 1, kt, jpi, jpj, jpl, STORAGE_SIZE(1._wp)
