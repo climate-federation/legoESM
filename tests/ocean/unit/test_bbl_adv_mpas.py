@@ -147,3 +147,66 @@ def test_flat_bottom_and_land_inactive():
     tr = bbl_transports_mpas(T, S, ge2, jnp.asarray([5.0e4]),
                              gamma_s=GAMMA, rho_0=RHO0)
     assert float(jnp.abs(tr[0])) == 0.0
+
+
+def test_many_to_one_convergence_bounded():
+    """GLM review HIGH: 8 shelf cells all draining into ONE deep basin cell.
+
+    The per-edge cap divided by the incident-edge count must bound the
+    SUMMED exchange: after one (large) step no tracer goes non-physical and
+    the basin's exchanged volume fraction stays <= 0.25; conservation holds.
+    """
+    from legoesm.ocean.physics.bbl_adv_mpas import apply_bbl_adv_step_mpas
+    import dataclasses
+
+    nlev = 5
+    n_sh = 8
+    n_cells = n_sh + 1                       # cell 0 = deep basin
+    h = np.zeros((n_cells, nlev))
+    h[0, :] = 100.0                          # deep: all wet
+    h[1:, :2] = 100.0                        # shelves: 2 wet levels
+    T = np.full((n_cells, nlev), 4.0)
+    S = np.full((n_cells, nlev), 34.8)
+    T[1:], S[1:] = 0.0, 36.5                 # very dense shelf water
+    coe = np.stack([np.arange(1, n_cells), np.zeros(n_sh, dtype=int)])
+    mask = np.ones(n_cells)
+    area = np.full(n_cells, 1.0e6)           # tiny cells => caps ENGAGE
+    dv = np.full(n_sh, 1.0e5)
+    dt = 3600.0
+
+    ge = bbl_static_geometry_mpas(jnp.asarray(h), jnp.asarray(mask),
+                                  jnp.asarray(coe))
+    assert float(ge.active.sum()) == n_sh
+
+    class _F:                                # minimal Field/state stand-ins
+        def __init__(self, d):
+            self.data = d
+
+        def replace(self, data):
+            return _F(data)
+
+    class _State:
+        def __init__(self, T, S):
+            self.T, self.S = _F(T), _F(S)
+
+        def _replace(self, T, S):
+            return _State(T.data, S.data)
+
+    s0 = _State(jnp.asarray(T), jnp.asarray(S))
+    s1 = apply_bbl_adv_step_mpas(
+        s0, ge, dt, gamma_s=GAMMA, rho_0=RHO0,
+        area=jnp.asarray(area), dv_edge=jnp.asarray(dv), nlev=nlev)
+
+    T1 = np.asarray(s1.T.data)
+    S1 = np.asarray(s1.S.data)
+    assert np.all(np.isfinite(T1)) and np.all(np.isfinite(S1))
+    # no overshoot past the source range (the tell of >1 volume exchanged)
+    assert T1.min() >= -1e-9 and T1.max() <= 4.0 + 1e-9
+    assert S1.min() >= 34.8 - 1e-9 and S1.max() <= 36.5 + 1e-9
+    # conservation under the tendency's volume weights
+    V = area[:, None] * np.maximum(h, 1.0e-3)
+    for f0, f1, name in ((T, T1, "heat"), (S, S1, "salt")):
+        tot0, tot1 = float((V * f0).sum()), float((V * f1).sum())
+        assert abs(tot1 - tot0) / abs(tot0) < 1e-12, name
+    # the basin bottom actually received dense shelf water (scheme active)
+    assert S1[0, -1] > 34.8 + 1e-6

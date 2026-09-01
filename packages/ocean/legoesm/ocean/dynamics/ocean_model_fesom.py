@@ -1116,8 +1116,17 @@ class FesomOceanModel:
             a_ver=jnp.asarray(a_ver, dtype=jnp.float64),
         )
 
-    def step(self, state: FesomOceanState, dt: float) -> FesomOceanState:
+    def step(self, state: FesomOceanState, dt: float, *,
+             surface_forcing=None, freshwater=None,
+             t_seconds=None) -> FesomOceanState:
         """Advance *state* by one baroclinic step of ``dt`` seconds.
+
+        ``surface_forcing`` / ``freshwater`` are accepted for signature
+        parity with the other ocean models but REJECTED until the FESOM
+        forcing-injection stages land (three-grid unification plan B2/B3):
+        accept-and-ignore would silently run an unforced ocean under a
+        forced driver — the exact silent-drop footgun the OMIP lane
+        forbids.  ``t_seconds`` is metadata-only and ignored.
 
         ``is_first_step`` is read from ``state.is_first_step`` (a STATIC
         meta field — a compile-time constant).  The returned state has
@@ -1135,6 +1144,13 @@ class FesomOceanModel:
             ``is_first_step`` flips (True → False) through a
             ``lax.scan`` body — the carry's treedef changes.
         """
+        if surface_forcing is not None or freshwater is not None:
+            raise NotImplementedError(
+                "FesomOceanModel.step received surface_forcing/freshwater, "
+                "but the FESOM forcing-injection path is not built yet "
+                "(unification plan B2/B3). Refusing to run UNFORCED under "
+                "a forced driver — that would silently drop every surface "
+                "flux.")
         dt = float(dt)
         if not math.isclose(dt, self._dt, rel_tol=1e-12):
             raise ValueError(
