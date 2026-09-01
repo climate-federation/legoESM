@@ -9,8 +9,73 @@ approximate adaptive-implicit composition.  No damping, clipping, diffusion,
 limiter, or oracle-absent selector was added.  The frozen statistical scorer
 now returns a fully classified `OUTSIDE` verdict.  After the round-4
 barotropic source correction and same-revision fp32 floor rerun, four metrics
-are `OUTSIDE` and two are `WITHIN-SCHEME-SPREAD`; no metric is
-`INDISTINGUISHABLE-AT-FLOOR`.
+were `OUTSIDE` and two `WITHIN-SCHEME-SPREAD`; after the round-5 RK3
+stage-composition fixes (kt=2 U owner MEASURED and fixed, `3.31e-6 ->
+2.60e-7`) three metrics are `OUTSIDE` and three `WITHIN-SCHEME-SPREAD`; no
+metric is `INDISTINGUISHABLE-AT-FLOOR`.
+
+## Round 5: RK3 stage composition (takeover of the codex round)
+
+The round-4 HOLD is closed in commit `3a68e43338a4`: the 19 frames are
+registered to their exact `dynspg_ts.F90` assignments and time levels, the
+gate JSON stamps the legoESM git SHA and the pytest-log sha256, the planted
+entry control exits nonzero end to end, and the literal flux-form external
+update is disclosed as PRODUCTION-ACTIVE and KEPT (Rule 8).  Decision
+record: with the update, the 19 substep-1 frames are 13 AT-BAR, 5 UNMEASURED
+(no active V face) and one DEBT — `u_exit` at `1.87350135e-15`, which is
+identical in the legacy arm and equals `dt x` the `5.62917768e-16` slow-U
+input residual (ratio `0.998`), i.e. inherited from the slow forcing, not
+produced by the update; substeps 2-4 go from `2.6e-9 / 1.3e-7 / 5.6e-7` to
+`3.5e-15 / 4.9e-15 / 5.9e-15`.  The kt=2 pair
+(U `3.08238867e-06 -> 3.31108168e-06`, SSH `1.23723132e-07 ->
+1.04916076e-14`, T unchanged) stays disclosed side by side; the
+"3 -> 4 OUTSIDE" regression of round 4 is re-scored below on the same
+literal-update arm after the stage-composition fixes.
+
+The kt=2 initiator the round-4 gate left UNMEASURED ("post-external RK3
+stage composition") is now MEASURED and owned by three composition defects
+inside the WS-RK3 identity, fixed in `614bed818bb4` (full ledger in
+`nemo_testcases_l1_phase3_receipt.md`): FCT at tracer stages 1-2 where NEMO
+runs `tra_adv_cen` (`traadv.F90:281-282,361-364`); stage-2/3 `eos+dyn_hpg`
+on Kbb where NEMO uses the stage Kmm (`stprk3_stg.F90:317-320`); and the
+`dyn_adv_up3` vertical flux applied once per step where NEMO carries it in
+every stage RHS (`:315,331-334`).  kt=2 instantaneous U falls
+`3.31108168e-06 -> 2.59844026e-07`, T `2.40034479e-08 -> 1.27424627e-08`,
+SSH unchanged at `1.04916076e-14`; kt=10 U `1.40474350e-04 ->
+2.64522041e-05`, T `1.35356455e-05 -> 5.55186262e-06`, SSH unchanged.
+
+Both 6,120-step arms complete on CPU with every-step finite checks at
+commit `c8f506a69545` (fp64 states `0599482dd41d...`, fp32 states
+`c73306a060b8...`); the kt=1--60 bridge is re-pinned to
+`stage_composition/overflow_trajectory_gate_kt60.json` (`086dbd6fc7a6...`),
+replacing the round-4 bridge.  The reissued verdict on the SAME scorer,
+floor protocol and NEMO spread:
+
+| metric | before | after | fp32 floor before | fp32 floor after | NEMO spread | verdict before | verdict after |
+|---|---:|---:|---:|---:|---:|---|---|
+| final_temperature_histogram_tv | `0.0537796` | `0.0423046` | `0.0237045` | `0.0194058` | `0.044231` | OUTSIDE | WITHIN-SCHEME-SPREAD |
+| final_water_mass_census | `0.0150395` | `0.0169753` | `0.00349422` | `0.00157409` | `0.00336209` | OUTSIDE | OUTSIDE |
+| instantaneous_u_linf | `0.969889` | `0.999211` | `0.456889` | `0.402734` | `0.672694` | OUTSIDE | OUTSIDE |
+| plume_descent_m | `0.904647` | `16.9554` | `0.100003` | `0.0087228` | `1499.62` | WITHIN-SCHEME-SPREAD | WITHIN-SCHEME-SPREAD |
+| plume_front_km | `1.00947` | `4.04936` | `0.561019` | `0.0837761` | `121.931` | WITHIN-SCHEME-SPREAD | WITHIN-SCHEME-SPREAD |
+| temperature_linf | `0.394129` | `0.379492` | `0.0809865` | `0.140318` | `0.356744` | OUTSIDE | OUTSIDE |
+
+Round-5 artifacts under `/data/abyssal/dbalwada/nemo-testcases-l1/`:
+
+| artifact (under `/data/abyssal/dbalwada/nemo-testcases-l1/`) | SHA256 |
+|---|---|
+| `barotropic_walk/review_round/frame_gate_hold_round.json` | `414934a67c763aca734fe5dfee2c51cd76cf19ca1b3c95e2d33490e55e2dfa02` |
+| `barotropic_walk/review_round/pytest_barotropic_gate_hold_round.log` | `64a815b7a0608d37ab43bcd3a7377d8a559ecd7692fd45baaf9818f0ce66b62a` |
+| `stage_composition/legoesm/overflow_zps/fp32/metadata.json` | `dfaa8b66f927bd3e6a75bc9aae79771ad1390f29f00fbe91ad213c9fedc28207` |
+| `stage_composition/legoesm/overflow_zps/fp32/states.npz` | `c73306a060b8cd74bdabc56465eefa4b6414d403ea0cc1d9187bf6b2d20de3f7` |
+| `stage_composition/legoesm/overflow_zps/fp64/metadata.json` | `6470d575cca23987c94b73696bc2f811e3f65f099d9086931ace43247733150a` |
+| `stage_composition/legoesm/overflow_zps/fp64/states.npz` | `0599482dd41dba259494cc277c4ad36dabbb2c7bdd370177d5430226038ccdff` |
+| `stage_composition/lock_stage_sweep_gate_kt2.json` | `a3716cb258e33da4143d4da3fc5bd0fde2ebedc94872a4606a51c766809f5a4c` |
+| `stage_composition/lock_trajectory_gate_kt10.json` | `4332b47664820b6a67769f17ea4de5c1d2efc449db7070d8a3f3564d350788c6` |
+| `stage_composition/overflow_stage_sweep_gate_kt2.json` | `5bdcd995da66758199f3ad2db5cc44b97f42e093962476c2b86624d676c5dc9c` |
+| `stage_composition/overflow_statistics.json` | `a9aca2d78dae62e8de4da4edd61233b101160637ed769a476254841f3c05df26` |
+| `stage_composition/overflow_trajectory_gate_kt10.json` | `bcc8a68d26c918954329173fe955aec82155502db5b64743cac9ab963ab59377` |
+| `stage_composition/overflow_trajectory_gate_kt60.json` | `086dbd6fc7a61ea328ecda692d7ef3491092f9fc6127db5a661d5f81f5967712` |
 
 ## Round 4: OVERFLOW 19-frame external-mode walk
 

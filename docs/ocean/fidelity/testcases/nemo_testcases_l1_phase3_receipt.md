@@ -641,6 +641,219 @@ JSONs are external run products under
 `/data/abyssal/dbalwada/nemo-testcases-l1/phase3/`; their hashes make the
 receipt reproducible without committing quota-heavy binary dumps.
 
+## Stage-composition round: cen2 tracer stages, live HPG operands, per-stage vertical UP3
+
+Takeover of the codex session (out of credits mid-round) on branch
+`fidelity/nemo-testcases-l1-codex`.  Commits `3a68e43338a4` (frame registry,
+git-SHA stamps, planted-control exit status, Rule-8 disclosure of the literal
+flux-form external update), `614bed818bb4` (the three WS-RK3 composition
+fixes below + gate port), `c8f506a69545` (trajectory-gate SHA stamp).  Every
+number below is fp64 on CPU with `set_policy(PrecisionPolicy.fp64())` and
+printed `float64` candidate dtypes; every gate JSON carries
+`legoesm_git_sha`.
+
+### Rule 1e reconciliation: which implementation was wrong, and why
+
+Two lines had converged on the same owner candidate (the momentum-stage HPG
+operands frozen at Kbb), and codex's first Arm A had made things WORSE
+(stage-2 baroclinic U `7.80e-7 -> 1.77e-6 m/s`, kt=2 `3.31e-6 -> 6.70e-6`).
+Neither number was recorded until the disagreement was explained:
+
+1. **A quantity both probes had to agree on exactly** (Rule 1e step 2): the
+   stage-1 Kaa tracer that codex's Arm A handed to the stage-2 `eos+dyn_hpg`
+   call, against NEMO's stage-1 dump.  `max|T_lego - T_nemo| = 3.452e-4 K`
+   = 100 % of NEMO's own stage-1 change; the front cells' increments were
+   `0x` and `2x` NEMO's (i=20: `+2.3e-11` vs `-3.45e-4`; i=21: `-6.90e-4`
+   vs `-3.45e-4`).  That is the first-order-upwind signature of the FCT
+   low-order predictor, not NEMO's centred stage.
+2. **The oracle's source** (Rule 0): `traadv.F90:281-282` forces
+   `ll_dofct = .FALSE.` for `kstg /= 3`, and `:361-364` dispatches `np_FCT`
+   to `tra_adv_cen(nn_fct_h, nn_fct_v)` — 2nd-order centred
+   (`traadv_cen.F90:140-149, 196-210`) — at stages 1 and 2.  legoESM's WS
+   tracer program ran the full FCT limiter at every stage.
+3. **The instrument** (the hunt's `hpg_sco` replay): legoESM's own momentum
+   tendency on NEMO's stage-1 Kaa operands (`T_s1, S_s1, ssh_s1`, u=0)
+   agrees with the `dynhpg.F90:340-390` replay to `1.7e-16 m/s^2`
+   (rest control `9.2e-17`), i.e. Arm A's operand plumbing (density from
+   stage T/S at the live `gdept(1+r3t)`, `e3w(1+r3t)`, `gdept_z0 = gdept -
+   ssh`, HYB `ssh = ssha/3, ssha/2`) was right.  Fed codex's operands, the
+   replay predicts a stage-2 error of `1.766e-6 m/s` — exactly the measured
+   `1.766e-6`.
+
+**Verdict: codex's implementation was the wrong one, through an upstream
+defect it inherited rather than introduced** — legoESM's stage-1/2 tracer
+operator (FCT instead of `tra_adv_cen`).  The hunter's source readings and
+replay stand.  With `cen2` at stages 1-2 the stage-1 T operand is
+bit-exact (`0.0 K`), S `7.1e-15`, ssh `3.5e-15 m`; the stage-2 T operand is
+`2.83e-8 K` (normalized `1.4e-9`, DEBT), see the register below.
+
+### What NEMO does at each stage vs what legoESM now does
+
+| item | NEMO 5.0.2 (`key_RK3`, `key_qco`, flux-form UP3, FCT2) | legoESM `rk3_ws` after `614bed818bb4` |
+|---|---|---|
+| tracer stages 1-2 | `tra_adv_cen(2,2)` (`traadv.F90:281-282,361-364`) | `centered` flux pair, same stage transport (`_nemo_ws_rk3_tracer_pair_step`) — MATCH (stage-1 T exact) |
+| tracer stage 3 | `tra_adv_fct(Kbb,Kmm,Kaa)` with the RK3 two-step predictor | unchanged FCT2 path |
+| stage-2/3 EOS+HPG operands | `eos(ts,Kmm)`, `dyn_hpg(Kmm)`; Kmm = previous stage Kaa after the `stprk3.F90:218,224` swaps; ssh at HYB N+1/3, N+1/2 (`stprk3_stg.F90:146,209,317-320`) | stage tracers built interleaved with the momentum stages; `compute_frozen_geom_density` on the stage T/S/eta — MATCH (replay 1.7e-16) |
+| dyn_adv vertical UP3 | every stage on `zFw` from the stage Kmm transport (`stprk3_stg.F90:315,331-334`; `dynadv_up3.F90:239-358`); stage-3 `ww` split by `wAimp` (`:298-302`) | `nemo_up3_vertical_momentum_advection` in every stage RHS on the stage Kmm velocity and explicit `ww`; implicit share to the one ZDF matrix — the once-per-step post-hoc application is deleted |
+| stage transport triplet | one `(zFu,zFv,zFw)` per stage for dyn_adv and tra_adv (`stprk3_stg.F90:257-304`) | `_nemo_ws_stage_transport` (hoisted), shared by momentum and tracer stages |
+
+No public selector was added; NEMO has no switch at any of the three sites.
+The private hooks `freeze_stage_hpg_operands`, `omit_stage_vertical_up3`,
+`expose_tracer_stage` exist for the gate's one-variable arms only.
+
+### Arm outcomes against the frozen predictions
+
+Predictions were frozen in
+`nemo_testcases_l1_overflow_stage_composition_preregister.md` (Arm A
+without B; Arm B with A).  The stage sweep gate now carries both arms and
+labels them only after the scaling check:
+
+| arm | stage 1 | stage 2 | stage 3 = kt=2 entry | kt=2 T (K) |
+|---|---:|---:|---:|---:|
+| faithful (A + B) | `3.7618e-12` | `6.9081e-11` | `2.5984e-07` | `2.5485e-07` |
+| A only (omit per-stage vertical UP3) | `3.7618e-12` | `1.6478e-07` | `6.1803e-07` | `2.5485e-07` |
+| B only (frozen Kbb HPG operands) | `3.7618e-12` | `9.4460e-07` | `3.6884e-06` | `2.3672e-07` |
+
+- **Arm A (live stage HPG operands), measured on the A-only arm:** stage 2
+  `7.798e-7 -> 1.648e-7 m/s` (predicted `~1.65e-7`, within factor 2), kt=2
+  `3.311e-6 -> 6.180e-7` (predicted `<= 7e-7`): **CONFIRMED**.
+- **Arm B (vertical UP3 in every stage RHS), measured on the faithful arm:**
+  stage 2 `1.648e-7 -> 6.908e-11` (predicted `~1e-10`), stage 3 = kt=2
+  `-> 2.598e-7` (predicted `~2.6e-7`): **CONFIRMED**.
+- **B-only control (frozen Kbb operands, one variable from faithful):**
+  stage 2 `9.446e-7`, kt=2 `3.688e-6` — the replay's `E_hpg` alone
+  (`9.448e-7 / 3.68e-6`); the ported replay's predicted/measured stage-2
+  movement is `1.0002` and, fed legoESM's own stage-1 operands, it
+  predicts `5.20e-19 m/s` — the operand is no longer the owner.
+- Stage 1 (`3.76e-12`) is the missing qco stage factor
+  `(1+r3u(Kmm))/(1+r3u(Kaa))` (`stprk3_stg.F90:389-394`), measured by the
+  hunt at `3.8e-12` — PLAUSIBLE, below the current stage-3 floor by 5
+  orders, not touched.
+
+The mechanism of the stage-3 share of Arm B is **PLAUSIBLE, not
+decomposed**: the once-per-step post-hoc increment measured `1.18e-8 m/s^2`
+max inside the real step (`7.5e-12` from the `dynadv_up3` transcription on
+the same velocity with NEMO's dumped stage-3 `zFw`), so moving it into the
+stage-3 RHS cannot by itself account for the `6.18e-7 -> 2.60e-7` stage-3
+movement of the omit arm; the stage-2 term (`3.3e-8 m/s^2 x 5 s`) and its
+downstream effect through the corrected stage-2 velocity are the measured
+remainder.  The hunt's stage-3 `E_vert = 5.0e-7` attribution is therefore
+REVISED to "the two per-stage vertical terms together", not the stage-3 term
+alone.
+
+### kt=2 entry and the kt=2..10 trajectory (normalized L-inf, both cases)
+
+OVERFLOW-zps kt=2: T `2.40034479e-08 -> 1.27424627e-08`, U `3.31108168e-06
+-> 2.59844026e-07`, SSH `1.04916076e-14 -> 1.04916076e-14`.  "Before" is
+the round-4 literal-flux-form baseline (`overflow_kt1_10_flux_gate.json`,
+same barotropic arm), so each column pair differs only in this round's
+stage composition.
+
+OVERFLOW-zps:
+
+| kt | T before | T after | U before | U after | SSH before | SSH after |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2 | `2.40034479e-08` | `1.27424627e-08` | `3.31108168e-06` | `2.59844026e-07` | `1.04916076e-14` | `1.04916076e-14` |
+| 3 | `2.86529500e-07` | `1.63310582e-07` | `9.22615336e-06` | `3.37673071e-06` | `3.66567551e-09` | `3.75492262e-09` |
+| 4 | `9.70021745e-07` | `5.90530377e-07` | `1.50603834e-05` | `3.37636512e-06` | `1.07010798e-06` | `1.07119102e-06` |
+| 5 | `1.99077587e-06` | `1.16912537e-06` | `2.93540699e-05` | `3.28700281e-06` | `1.48167577e-05` | `1.48122887e-05` |
+| 6 | `3.25827731e-06` | `1.74603452e-06` | `5.59331066e-05` | `9.27687843e-06` | `4.00067365e-05` | `4.00019841e-05` |
+| 7 | `4.93252050e-06` | `2.39742496e-06` | `7.99314090e-05` | `1.15106208e-05` | `4.55653806e-05` | `4.55757512e-05` |
+| 8 | `7.23598252e-06` | `3.29132932e-06` | `9.16463001e-05` | `2.66872742e-05` | `7.97549653e-05` | `7.97135279e-05` |
+| 9 | `1.01527667e-05` | `4.40403288e-06` | `1.07033146e-04` | `3.21886997e-05` | `7.29954633e-05` | `7.29592804e-05` |
+| 10 | `1.35356455e-05` | `5.55186262e-06` | `1.40474350e-04` | `2.64522041e-05` | `9.24576527e-05` | `9.24110227e-05` |
+
+LOCK_EXCHANGE-zco:
+
+| kt | T before | T after | U before | U after | SSH before | SSH after |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2 | `1.58214182e-13` | `1.62773498e-13` | `1.71208363e-10` | `2.13880413e-10` | `4.78213792e-28` | `4.78213792e-28` |
+| 3 | `9.16339597e-12` | `5.20626505e-12` | `2.05231841e-09` | `2.13879378e-10` | `1.38235777e-18` | `1.35525272e-18` |
+| 4 | `4.84606725e-11` | `3.59465938e-11` | `4.84941135e-09` | `2.13851856e-10` | `2.41777084e-17` | `2.16027283e-17` |
+| 5 | `1.50835907e-10` | `1.21776485e-10` | `8.77140353e-09` | `2.13746464e-10` | `6.21324131e-16` | `6.41580871e-16` |
+| 6 | `3.61406312e-10` | `3.05194329e-10` | `1.38075895e-08` | `2.13440690e-10` | `3.66530956e-15` | `3.83130144e-15` |
+| 7 | `7.37113008e-10` | `6.40530355e-10` | `1.99444732e-08` | `2.12733880e-10` | `1.42910857e-14` | `1.56074155e-14` |
+| 8 | `1.34649660e-09` | `1.19372411e-09` | `2.71657579e-08` | `2.11363624e-10` | `4.41092475e-14` | `4.73124144e-14` |
+| 9 | `2.26942305e-09` | `2.04205328e-09` | `3.54524968e-08` | `2.08895765e-10` | `1.18974275e-13` | `1.26009229e-13` |
+| 10 | `3.59676472e-09` | `3.27381405e-09` | `4.47830601e-08` | `2.04777155e-10` | `2.71415052e-13` | `2.85172493e-13` |
+
+LOCK kt=2 is faithful-but-slightly-worse (T `1.582e-13 -> 1.628e-13`, U
+`1.712e-10 -> 2.139e-10`) while its kt=3..10 U error stops growing
+(`4.478e-8 -> 2.048e-10` at kt=10, flat at `~2.1e-10` from kt=2 on) and T
+improves at every later step; disclosed, not reverted (Rule 8).  The flat
+`2.1e-10` LOCK U residual is the next LOCK owner and is UNMEASURED.
+
+### Statistical scorer (6120 steps, fp64 and fp32, CPU)
+
+Same scorer, same NEMO FCT2/FCT4 spread, same-revision fp32 floor, both arms
+complete with every-step finite checks at `c8f506a69545` (fp64 `431.88 s`, fp32
+`226.32 s` wall).  `OUTSIDE` count `4 -> 3`, `WITHIN-SCHEME-SPREAD` `2 -> 3`; the
+final temperature histogram crosses into the NEMO scheme spread, `temperature_linf`
+improves but stays `OUTSIDE`, the water-mass census and instantaneous-U rows worsen
+slightly, and both plume rows move away from NEMO while staying far inside the
+scheme spread.  The frozen prediction target ('the 4 OUTSIDE rows') is therefore
+met for one row and NOT met for three: the kt=2 initiator is fixed, the 6120-step
+statistics are owned mostly by something else (Rule 3: the early-step gain does
+not survive the chaotic window).
+
+| metric | before | after | fp32 floor before | fp32 floor after | NEMO spread | verdict before | verdict after |
+|---|---:|---:|---:|---:|---:|---|---|
+| final_temperature_histogram_tv | `0.0537796` | `0.0423046` | `0.0237045` | `0.0194058` | `0.044231` | OUTSIDE | WITHIN-SCHEME-SPREAD |
+| final_water_mass_census | `0.0150395` | `0.0169753` | `0.00349422` | `0.00157409` | `0.00336209` | OUTSIDE | OUTSIDE |
+| instantaneous_u_linf | `0.969889` | `0.999211` | `0.456889` | `0.402734` | `0.672694` | OUTSIDE | OUTSIDE |
+| plume_descent_m | `0.904647` | `16.9554` | `0.100003` | `0.0087228` | `1499.62` | WITHIN-SCHEME-SPREAD | WITHIN-SCHEME-SPREAD |
+| plume_front_km | `1.00947` | `4.04936` | `0.561019` | `0.0837761` | `121.931` | WITHIN-SCHEME-SPREAD | WITHIN-SCHEME-SPREAD |
+| temperature_linf | `0.394129` | `0.379492` | `0.0809865` | `0.140318` | `0.356744` | OUTSIDE | OUTSIDE |
+
+### Retractions and revisions (Rule 11)
+
+- codex's first Arm-A implementation is RETIRED as a measurement of the
+  operand time level: it measured the FCT-vs-cen2 tracer-stage defect
+  through the HPG.  Its plumbing survives unchanged in the fix.
+- The hunt's stage-3 `E_vert` attribution is revised as above (the term was
+  present post hoc and measured `1.18e-8 m/s^2`, not `4.95e-8`); its
+  stage-2 attribution and both source readings are CONFIRMED by the gate.
+- The `stage_operand_ownership` block written by codex evaluated Arm A's
+  frozen prediction on the faithful arm; with Arm B landed that arm is A+B,
+  so the prediction is now evaluated on the omit-vertical arm (A only),
+  exactly as preregistered.
+
+### Next owner (PLAUSIBLE, UNMEASURED): kt=2 T `2.55e-7 K`
+
+The T residual is untouched by both arms (faithful `2.548e-7 K`, B-only
+`2.367e-7 K`, A-only `2.548e-7 K`), so it lives in the tracer program
+itself.  The stage-2 tracer operand already carries `2.83e-8 K` with the
+stage-1 velocity at `3.8e-12 m/s`; the remaining difference in that stage
+is the stage face thickness: NEMO's `e3u(Kmm) = e3u_0 (1 + r3u)` with
+`r3u` the `e1e2`-weighted mean of the two columns' `r3t`
+(`domqco.F90:218-222`), while `_nemo_ws_stage_transport` takes the min of
+the two stretched cell thicknesses.  At the OVERFLOW front (`r3t = +-3.3e-2
+/ 500`) the two differ by `6.6e-5` relative, times the stage change
+`9.5e-4 K` gives `~6e-8 K` — scale-compatible with the measured `2.8e-8 K`
+operand error and with the kt=2 `2.5e-7 K`.  legoESM already has the
+literal QCO face-thickness helper (`nemo_qco_live_face_thicknesses`, used
+by the `wzv_call2` literal path); routing the stage transports through it
+is the registered next arm.  Not run here (outside this round's two arms).
+
+### Provenance
+
+| artifact (under `/data/abyssal/dbalwada/nemo-testcases-l1/`) | SHA256 |
+|---|---|
+| `barotropic_walk/review_round/frame_gate_hold_round.json` | `414934a67c763aca734fe5dfee2c51cd76cf19ca1b3c95e2d33490e55e2dfa02` |
+| `barotropic_walk/review_round/pytest_barotropic_gate_hold_round.log` | `64a815b7a0608d37ab43bcd3a7377d8a559ecd7692fd45baaf9818f0ce66b62a` |
+| `stage_composition/legoesm/overflow_zps/fp32/metadata.json` | `dfaa8b66f927bd3e6a75bc9aae79771ad1390f29f00fbe91ad213c9fedc28207` |
+| `stage_composition/legoesm/overflow_zps/fp32/states.npz` | `c73306a060b8cd74bdabc56465eefa4b6414d403ea0cc1d9187bf6b2d20de3f7` |
+| `stage_composition/legoesm/overflow_zps/fp64/metadata.json` | `6470d575cca23987c94b73696bc2f811e3f65f099d9086931ace43247733150a` |
+| `stage_composition/legoesm/overflow_zps/fp64/states.npz` | `0599482dd41dba259494cc277c4ad36dabbb2c7bdd370177d5430226038ccdff` |
+| `stage_composition/lock_stage_sweep_gate_kt2.json` | `a3716cb258e33da4143d4da3fc5bd0fde2ebedc94872a4606a51c766809f5a4c` |
+| `stage_composition/lock_trajectory_gate_kt10.json` | `4332b47664820b6a67769f17ea4de5c1d2efc449db7070d8a3f3564d350788c6` |
+| `stage_composition/overflow_stage_sweep_gate_kt2.json` | `5bdcd995da66758199f3ad2db5cc44b97f42e093962476c2b86624d676c5dc9c` |
+| `stage_composition/overflow_statistics.json` | `a9aca2d78dae62e8de4da4edd61233b101160637ed769a476254841f3c05df26` |
+| `stage_composition/overflow_trajectory_gate_kt10.json` | `bcc8a68d26c918954329173fe955aec82155502db5b64743cac9ab963ab59377` |
+| `stage_composition/overflow_trajectory_gate_kt60.json` | `086dbd6fc7a61ea328ecda692d7ef3491092f9fc6127db5a661d5f81f5967712` |
+
+Focused CPU/fp64 tests: **163 passed across eleven explicitly listed files** at `c8f506a69545`: 9 OVERFLOW barotropic gate + 5 stage-sweep gate + 9 trajectory gate + 10 WS-RK3 tracer + 15 full statistics + 20 adaptive-implicit + 12 stability probe + 15 testcase card + 19 vertical momentum scheme + 10 rk3_ws/mxl3 + 39 leapfrog integrator.  Four tests in the last two files fail identically at the pre-takeover revision `5104de943784` (verified in a throwaway worktree): two construct the validation-rejected `nemo_trapezoid` + non-`nemo_sco` configuration and two the decoupled `rk3_ws` momentum/tracer program; both are construction-time `ValueError`s outside these cards and are not touched by this round.
+
 ## Loud UNMEASURED register
 
 - owner of the final LOCK `1.7121e-10` wet-point L-infinity u residual after
@@ -650,10 +863,14 @@ receipt reproducible without committing quota-heavy binary dumps.
 - individual NEMO/legoESM FCT limiter coefficients and antidiffusive fluxes;
 - NEMO `utr_bbl` at kt=1 (legoESM BBL is confirmed inactive; NEMO is only
   geometrically plausible inactive);
-- owner of the remaining OVERFLOW-zps kt=2 T/u/SSH debt after all registered
-  one-variable arms; the stage-primary omission is a scale-compatible T
-  contributor but not an owner, and the correction itself is confirmed
-  required by the direct stage-u comparison;
+- OVERFLOW-zps kt=2 U is now MEASURED and owned (stage-composition round
+  above: live stage HPG operands + per-stage vertical UP3 + cen2 tracer
+  stages, `3.311e-6 -> 2.598e-7`); the remaining `2.598e-7` U (stage 3),
+  the `3.8e-12` stage-1 qco factor, and the kt=2 T `2.55e-7 K` (registered
+  next arm: NEMO `e3u(Kmm) = e3u_0(1+r3u)` stage face thickness,
+  `domqco.F90:218-222`) stay UNMEASURED; the kt>=3 SSH walk is untouched;
+- LOCK U after this round sits flat at `2.1e-10` from kt=2 to kt=10 (was
+  growing to `4.5e-8`); its owner is UNMEASURED;
 - term-level explanation of the measured kt=4--60 polynomial accumulation in
   either case;
 - long-trajectory phenomenology and statistical equivalence beyond 60 steps.

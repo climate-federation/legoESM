@@ -75,8 +75,8 @@ CASES = {
         "restart_hash": "dab392f2f058b44e8c10c600a41c9be73ba37656e2af478193a3f6f27bd67160",
         "namelist_hash": "ec1eac4a45fb8c07a0facce5e4eefb6510d8e3f1e364f5c5597e60ae83ccc53e",
         "binary_hash": "eb4acf9651b887a3da8834281112d472692caa0bbadcb0d69779e91dee92e6cb",
-        "phase3_gate": ARTIFACT_ROOT / "barotropic_walk/overflow_kt1_60_flux_gate.json",
-        "phase3_gate_hash": "197a8959f9c72814c6c3a29fe92452ceaf87aafca5bd900536bc479a2ae83be2",
+        "phase3_gate": ARTIFACT_ROOT / "stage_composition/overflow_trajectory_gate_kt60.json",
+        "phase3_gate_hash": "086dbd6fc7a61ea328ecda692d7ef3491092f9fc6127db5a661d5f81f5967712",
         "temperature_range": (10.0, 20.0),
     },
 }
