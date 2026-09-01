@@ -728,7 +728,7 @@ def _snap_temperature(
     low, high = CASES[case]["temperature_range"]
     eps = np.finfo(dtype).eps
     scale = max(abs(low), abs(high), 1.0)
-    floor = math.sqrt(int(CASES[case]["n_steps"])) * eps * scale
+    floor = float(math.sqrt(int(CASES[case]["n_steps"])) * eps * scale)
     raw_min = float(np.min(values))
     raw_max = float(np.max(values))
     excess = max(low - raw_min, raw_max - high, 0.0)
