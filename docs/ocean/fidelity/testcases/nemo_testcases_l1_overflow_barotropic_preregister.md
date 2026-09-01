@@ -96,3 +96,26 @@ WS-RK3 + flux-form package; legacy schemes retain their existing path.
 Owner labels remain forbidden until the frame boundary, scaling check, and
 one-variable causal movement all agree.  After a landing, kt=2..10 and the
 6,120-step fp64 statistical scorer are mandatory regressions.
+
+## Frozen-predicate outcome (post-run addendum)
+
+The first-boundary prediction is confirmed only at the registered frame
+level: substep-1 `u_exit` is the first DEBT (`1.87350135e-15`).  The preceding
+`slow_u` row is AT-BAR but not exact (`5.62917768e-16`); multiplying it by the
+external `10/3 s` step predicts the exit tail with ratio `0.99846`.  Entry,
+midpoint transport, continuity, PGF, and zero drag are exonerated through that
+boundary.
+
+The substep-1 100x causal prediction is **REFUTED**: the literal NEMO
+flux-form update leaves its roundoff-scale exit unchanged.  It does remove the
+downstream legacy recurrence, improving substep-2--4 U exits by
+`7.23e5`, `2.60e7`, and `9.54e7` respectively, so it is the confirmed owner of
+that separate structural debt.
+
+The whole-step predicate is also **REFUTED**.  kt=2 instantaneous U moves from
+`3.08238867e-6` to `3.31108168e-6` instead of falling 10x; T is effectively
+unchanged and SSH improves from `1.23723132e-7` to `1.04916076e-14`.
+Therefore the transport update is not the kt=2 root initiator.  The external
+substep register is exhausted and the root operand remains **UNMEASURED** in
+the post-external RK3 stage composition.  These labels are emitted by the
+machine gate, not only by this addendum.

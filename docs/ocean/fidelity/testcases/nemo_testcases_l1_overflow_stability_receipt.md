@@ -7,9 +7,126 @@ OVERFLOW-zps card complete all 6,120 steps in both fp64 and fp32.  The prior
 failures at completed steps 2,877/2,879 were therefore caused by legoESM's
 approximate adaptive-implicit composition.  No damping, clipping, diffusion,
 limiter, or oracle-absent selector was added.  The frozen statistical scorer
-now returns a fully classified `OUTSIDE` verdict: three metrics are `OUTSIDE`,
-two are `WITHIN-SCHEME-SPREAD`, and one is
+now returns a fully classified `OUTSIDE` verdict.  After the round-4
+barotropic source correction and same-revision fp32 floor rerun, four metrics
+are `OUTSIDE` and two are `WITHIN-SCHEME-SPREAD`; no metric is
 `INDISTINGUISHABLE-AT-FLOOR`.
+
+## Round 4: OVERFLOW 19-frame external-mode walk
+
+Commit `c5882cb8aa18` froze the comparison before reading any new frame.  A
+separate NEMO configuration, `OVERFLOW_OMIP_L1_BTWALK`, added WRITE-only
+instrumentation to the executed `nn_bt_flt=1`, `rn_bt_alpha=0`, `nn_e=3`
+branch.  The resolved `nn_e=3` produces four cold-start boxcar substeps.
+The run uses `ln_bt_fw=T`, flux-form UP3 momentum, `ln_drg_OFF=T`, and `f=0`.
+The instrumented run's kt=1 step-entry file is byte-identical to the certified
+oracle (`cf0183e5...`), so instrumentation did not perturb the overlap state.
+
+The 19-frame gate compares NEMO and legoESM at the same instantaneous native
+T/U/V staggering after NEMO's two-cell halo strip, on the common certified wet
+mask, using an elementwise L-infinity reduction with no depth or substep-time
+average.  The time-level header is `Kbb=1, Kmm=1, Kaa=3`; the full registry is
+entry T/U/V, midpoint T/U/V, U/V transport, continuity SSH, PGF SSH and U/V,
+slow U/V, drag U/V, exit U/V, and exit SSH.  The reader hard-fails on magic,
+version, dimensions, time levels, substep count, field count, truncation, or
+trailing bytes.  Independent planted entry and exit controls make the gate
+red.
+
+Substep 1 is exact through midpoint transport, continuity, and PGF.  The U
+slow-forcing row differs by `5.62917768e-16`, still AT-BAR.  Multiplication by
+the `10/3 s` external step predicts `1.87639256e-15`; the measured first strict
+DEBT is the U exit at `1.87350135e-15`, ratio `0.99846`.  Drag is exact zero in
+both dumped operands, confirming the resolved OFF arm rather than inferring it
+from geometry.  PGF, continuity, slope face depth, and partial-cell metrics are
+therefore **CONFIRMED EXONERATED through the first strict boundary**.  The
+slow arithmetic tail is the **CONFIRMED first-boundary contributor** but is
+about nine orders below the kt=2 instantaneous-U debt and is
+**REFUTED as its root owner by scaling**.
+
+Source reading exposed a separate executed mismatch.  NEMO advances face
+transport, not velocity, in `dynspg_ts.F90:731-761`:
+
+`(hu_e*un_e + dt*(zhu_bck*spg + zhup2*trd + hu(Kmm)*frc)) / hu_a`.
+
+Commit `0ff51eca2bfd` transcribes that expression as an unbranched part of the
+NEMO WS-RK3 + flux-form identity; NEMO has no switch, so legoESM gets no public
+switch.  The legacy velocity update is accessible only through a private gate
+hook.  A synthetic test changes the midpoint-depth operand and proves the
+literal test is non-vacuous.  The arm is scale-causal inside the loop:
+
+| substep | legacy U-exit error | NEMO-form error | improvement |
+|---:|---:|---:|---:|
+| 1 | `1.87350135e-15` | `1.87350135e-15` | `1.0x` |
+| 2 | `2.55383398e-9` | `3.53189700e-15` | `7.23077e5x` |
+| 3 | `1.28549120e-7` | `4.94743135e-15` | `2.59830e7x` |
+| 4 | `5.60239321e-7` | `5.87030424e-15` | `9.54362e7x` |
+
+This confirms the literal update as the **structural owner of the downstream
+external-loop recurrence debt**.  It does not own the whole-step initiator.
+The frozen criterion required kt=2 instantaneous U to fall by at least 10x
+without a greater-than-10x T/SSH regression.  Instead U moves
+`3.08238867e-6 -> 3.31108168e-6` (a plain `7.42%` regression), T is unchanged
+to six significant figures, and SSH improves
+`1.23723132e-7 -> 1.04916076e-14`.  The root-initiator ownership claim is
+therefore **REFUTED BY THE FROZEN CAUSAL PREDICATE**.  The external substep
+register is exhausted: the remaining kt=2 U/T root operand is
+**UNMEASURED outside this register**, in the post-external RK3 stage
+composition.
+
+The required kt=2--10 regression is below.  Values are normalized common-wet
+L-infinity errors; U is instantaneous C-grid U-face Nbb on both sides.
+
+| kt | T before | T after | U before | U after | SSH before | SSH after |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2 | `2.40035055e-08` | `2.40034479e-08` | `3.08238867e-06` | `3.31108168e-06` | `1.23723132e-07` | `1.04916076e-14` |
+| 3 | `2.86533772e-07` | `2.86529500e-07` | `6.46235078e-06` | `9.22615336e-06` | `5.12880845e-06` | `3.66567551e-09` |
+| 4 | `9.70053135e-07` | `9.70021745e-07` | `1.16440779e-05` | `1.50603834e-05` | `2.64530059e-05` | `1.07010798e-06` |
+| 5 | `1.99089401e-06` | `1.99077587e-06` | `2.80038578e-05` | `2.93540699e-05` | `4.74630495e-05` | `1.48167577e-05` |
+| 6 | `3.25857142e-06` | `3.25827731e-06` | `5.97568478e-05` | `5.59331066e-05` | `4.72344006e-05` | `4.00067365e-05` |
+| 7 | `4.93304987e-06` | `4.93252050e-06` | `8.16437683e-05` | `7.99314090e-05` | `6.97196664e-05` | `4.55653806e-05` |
+| 8 | `7.23683063e-06` | `7.23598252e-06` | `8.92508130e-05` | `9.16463001e-05` | `8.65979411e-05` | `7.97549653e-05` |
+| 9 | `1.01541688e-05` | `1.01527667e-05` | `1.05130255e-04` | `1.07033146e-04` | `8.39242799e-05` | `7.29954633e-05` |
+| 10 | `1.35379486e-05` | `1.35356455e-05` | `1.41894266e-04` | `1.40474350e-04` | `8.66359613e-05` | `9.24576527e-05` |
+
+LOCK's kt=2 regression is neutral: T stays `1.58214182e-13` and U changes
+`1.71208684e-10 -> 1.71208363e-10`.  At kt=10 U changes
+`4.35050760e-8 -> 4.47830601e-8` while SSH improves
+`1.06780006e-10 -> 2.71415052e-13`.
+
+Both same-revision full-duration arms complete on CPU with every-step finite
+checks: fp64 in `404.5752 s`, fp32 in `268.5355 s`.  The current kt=1--60 gate
+(`197a8959...`) replaces the stale pre-arm bridge in the statistical scorer.
+The reissued verdict is:
+
+| metric | candidate | same-revision fp32 floor | NEMO scheme spread | verdict |
+|---|---:|---:|---:|---|
+| plume descent | `0.904647 m` | `0.100003 m` | `1499.623281 m` | `WITHIN-SCHEME-SPREAD` |
+| plume front | `1.009466 km` | `0.561019 km` | `121.930713 km` | `WITHIN-SCHEME-SPREAD` |
+| final T histogram TV | `0.0537796` | `0.0237045` | `0.0442310` | `OUTSIDE` |
+| final water-mass census | `0.0150395` | `0.00349422` | `0.00336209` | `OUTSIDE` |
+| instantaneous U L-inf | `0.969889` | `0.456889` | `0.672694` | `OUTSIDE` |
+| T L-inf | `0.394129` | `0.0809865` | `0.356744` | `OUTSIDE` |
+
+Round-4 artifacts under
+`/data/abyssal/dbalwada/nemo-testcases-l1/barotropic_walk/`:
+
+| artifact | SHA256 |
+|---|---|
+| NEMO WRITE-only `dynspg_ts.F90` | `f1ebfe150001de7c08e378749f3386e65374f83ca459af7fad8fa35ce43a73c0` |
+| NEMO binary | `84d2fb40eb6864921206335c4e1f2520d2120df1b2527945e23cbbe939b85284` |
+| NEMO resolved run namelist | `17cdebf82b03d9db69c32a5b6e54c7d089958e73daaff0ab60add4d3afdd6d5e` |
+| NEMO frame stream | `02b7e53362da1a69e695bdb9dab86ee6a8362b6906fef8d93f977372c26b035e` |
+| 19-frame gate | `b46f7390ef83702b0595fc267121008d170d7e36143eb7a03e2bd9638209a65b` |
+| current kt=1--60 gate | `197a8959f9c72814c6c3a29fe92452ceaf87aafca5bd900536bc479a2ae83be2` |
+| LOCK kt=1--10 regression | `2a9221853bb07a314d37de299ea82768a6a17753a5dc4c99bbe965786ba256c1` |
+| fp64 metadata / states | `ac148830e3b099e3d1a94566f0faec2a1dc1a7325fae2f147d0e00c35bd862c1` / `7ea95685241a631ebbea1b8ef554793f68ce4625fdcc4024b9c2649f2e607ea8` |
+| fp32 metadata / states | `014b21ac1aece9fcf0bf0263b900e53a9e2761b15cb375174977a242a20a2998` / `53cdc440425c03ed992abee044184014e1b2333de1fa5c6d5e7c35309595550e` |
+| statistical report | `5bb0165b77b6b849a0993b4ff15a959715aad456f4372d8bb00705a0dbe7b53f` |
+
+Focused CPU/fp64 validation is **56 passed**: 5 barotropic-gate controls,
+15 full-statistics controls, 9 real WS-RK3 tests, 15 testcase-card tests, and
+12 OVERFLOW stability-probe controls.  This is the collected five-file
+breakdown, not a cumulative campaign-test count.
 
 ## Round 3 resolution: source-exact adaptive-implicit package
 
