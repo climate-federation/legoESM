@@ -1985,6 +1985,115 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
     return grid, z_coord, model, state, np.asarray(H_bathy)
 
 
+_FESOM_B1_UNSUPPORTED = (
+    # (args attribute, flag string) — every OMIP physics/forcing selector the
+    # FESOM lane cannot honour at unification stage B1 (UNFORCED plumbing).
+    # Accept-and-ignore is forbidden; each lever is re-admitted by the stage
+    # that actually wires it (B2 wind stress, B3 heat/freshwater, B4
+    # IC/ice/SSS/runoff, B6 iwm/isf).
+    ("runoff", "--runoff"), ("sss_restore", "--sss-restore"),
+    ("dm2dc", "--dm2dc"), ("sw_rgb_chl", "--sw-rgb-chl"),
+    ("mle", "--mle"), ("geothermal", "--geothermal"),
+    ("isf", "--isf"), ("iwm", "--iwm"), ("bbl_adv", "--bbl-adv"),
+    ("prognostic_sea_ice", "--prognostic-sea-ice"),
+    ("woa_init", "--woa-init"), ("nemo_monthly_init", "--nemo-monthly-init"),
+    ("partial_cell", "--partial-cell"), ("nemo_vertical", "--nemo-vertical"),
+    ("momentum_rk3", "--momentum-rk3"),
+    ("adaptive_implicit_vertadv", "--adaptive-implicit-vertadv"),
+    ("ice_albedo", "--ice-albedo"), ("ice_thermo", "--ice-thermo"),
+    ("gateway_transports", "--gateway-transports"),
+    ("emp_freshwater", "--emp-freshwater"),
+)
+
+
+def validate_fesom_stage(args) -> None:
+    """Stage-B1 gate for ``--grid fesom``: hard-reject every selector the
+    lane does not wire yet (three-grid unification plan; silent drops
+    forbidden)."""
+    if not args.fesom_mesh_dir:
+        raise SystemExit("--grid fesom requires --fesom-mesh-dir (a "
+                         "fesom_jax C-exported mesh directory).")
+    bad = [flag for attr, flag in _FESOM_B1_UNSUPPORTED
+           if getattr(args, attr, None)]
+    if bad:
+        raise SystemExit(
+            "--grid fesom is at unification stage B1 (UNFORCED plumbing): "
+            "these selectors are not wired on the FESOM lane yet and would "
+            "be silently dropped: " + " ".join(bad))
+
+
+def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None):
+    """FESOM core in the OMIP driver (three-grid unification B1).
+
+    Loads the REAL-bathymetry fesom_jax mesh (NOT the idealized
+    flat-bottom builder), wraps it in the FesomOceanModel adapter on the
+    z-star ALE coordinate (selected EXPLICITLY here: the linfs default
+    forces virtual salt, and stage B3's real-freshwater channel is only
+    correct under z-star — codex design review), and builds either the
+    PHC3.0 cold start (``ic_dir``) or the stratified rest state.
+    Returns the standard ``(grid, z_coord, model, state, H_bathy)`` tuple.
+    """
+    from types import SimpleNamespace
+
+    from fesom_jax.mesh import load_mesh
+    from legoesm.ocean.dynamics.ocean_model_fesom import (
+        FesomOceanConfig,
+        FesomOceanGrid,
+        FesomOceanModel,
+        FesomOceanState,
+        create_rest_state,
+    )
+
+    mesh = load_mesh(mesh_dir)
+    # mesh.Z: (nl-1,) NEGATIVE real mid-level depths; the shim carries just
+    # what legoESM-side consumers read (z_full_ref, n_levels). --nlev /
+    # --nemo-dz do not apply: the fesom mesh OWNS its vertical grid.
+    _z_full = np.asarray(mesh.Z, dtype=np.float64)
+    z_coord = SimpleNamespace(z_full_ref=_z_full, n_levels=int(_z_full.size))
+    config = FesomOceanConfig(dt=float(dt), vertical_coordinate="zstar",
+                              constants="legoesm")
+    model = FesomOceanModel(mesh, z_coord, config)
+    if ic_dir:
+        from fesom_jax.phc_ic import cold_start_state
+        inner = cold_start_state(mesh, ic_dir)
+        state = FesomOceanState.from_fesom(inner, model.mesh)
+    else:
+        state = create_rest_state(mesh, z_coord,
+                                  vertical_coordinate="zstar")
+    grid = FesomOceanGrid(model.mesh)
+    H_bathy = jnp.asarray(-np.asarray(mesh.depth, dtype=np.float64))
+    print(f"[setup] fesom mesh {mesh_dir}: nod2D={int(mesh.nod2D)}, "
+          f"nl-1={_z_full.size} real levels, zstar ALE, "
+          f"IC={'PHC:' + ic_dir if ic_dir else 'stratified rest'}")
+    return grid, z_coord, model, state, H_bathy
+
+
+def run_fesom_b1_smoke(args, grid, z_coord, model, state) -> None:
+    """Stage-B1 execution path: UNFORCED steps + comparator-convention
+    snapshots.  The full OMIP host loop cannot run this lane until B2/B3
+    give it a surface-forcing channel — this loop exists so the dispatch,
+    adapter, IC and snapshot plumbing are exercised end to end."""
+    from pathlib import Path
+
+    from scripts.run.run_fesom_core2 import write_snapshot
+
+    out = Path(args.output); out.mkdir(parents=True, exist_ok=True)
+    dt = float(args.dt)
+    n_steps = int(round(args.years * 365.0 * 86400.0 / dt))
+    snap_every = (int(round(args.snapshot_every_days * 86400.0 / dt))
+                  if args.snapshot_every_days else 0)
+    print(f"[fesom-b1] UNFORCED smoke: {n_steps} steps of dt={dt}s "
+          f"(zero wind stress, no heat/freshwater — plumbing stage only; "
+          f"NOT a scored OMIP run)")
+    for step in range(1, n_steps + 1):
+        state = model.step(state, dt)
+        if snap_every and step % snap_every == 0:
+            d = int(round(step * dt / 86400.0))
+            write_snapshot(out, f"day{d:04d}", state.inner, model.mesh)
+    write_snapshot(out, "final", state.inner, model.mesh)
+    print(f"[fesom-b1] done: {n_steps} steps; snapshots in {out}")
+
+
 def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      lloyd_iterations: int = 20, woa_init: bool = False,
                      woa_t=None, woa_s=None, flat_bottom: bool = False,
@@ -4428,12 +4537,22 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "ORCA1 domain_cfg).")
     p.add_argument("--mesh", type=str, default=_MESH)
     p.add_argument("--grid", type=str, default="tripole",
-                   choices=["tripole", "latlon_bathy", "cubed_sphere", "mpas"],
+                   choices=["tripole", "latlon_bathy", "cubed_sphere", "mpas",
+                            "fesom"],
                    help="tripole (eORCA1 same-grid), latlon_bathy (regular lat-lon + "
                         "NEMO bathy + smc03 + polar filter), cubed_sphere (FV3 C-D "
                         "grid + NEMO bathy on cube cells; parked, resolution-limited), "
-                        "or mpas (icosahedral Voronoi + NEMO bathy; resolution free via "
-                        "--mpas-level).")
+                        "mpas (icosahedral Voronoi + NEMO bathy; resolution free via "
+                        "--mpas-level), or fesom (FESOM2 unstructured core via "
+                        "FesomOceanModel; three-grid unification stage B1 — "
+                        "UNFORCED plumbing only, physics flags rejected).")
+    p.add_argument("--fesom-mesh-dir", type=str, default=None,
+                   help="--grid fesom: fesom_jax C-exported mesh directory "
+                        "(real bathymetry, e.g. the CORE2 mesh).")
+    p.add_argument("--fesom-ic-dir", type=str, default=None,
+                   help="--grid fesom: PHC3.0 IC directory for "
+                        "fesom_jax.phc_ic.cold_start_state (omit for the "
+                        "stratified rest state).")
     p.add_argument("--latlon-res", type=str, default="180x360",
                    help="lat-lon resolution NxM for --grid latlon_bathy.")
     p.add_argument("--cube-n", type=int, default=48,
@@ -6092,6 +6211,16 @@ def main() -> int:
             ew_cyclic_overlap=bool(args.ew_cyclic_overlap),
         )
         app_grid_type = "mpas"
+    elif args.grid == "fesom":
+        # Three-grid unification stage B1: dispatch + UNFORCED smoke only.
+        # The stage gate hard-rejects every physics/forcing selector the
+        # lane does not wire yet; the full OMIP host loop joins at B2/B3
+        # when the adapter gains a surface-forcing channel.
+        validate_fesom_stage(args)
+        grid, z_coord, model, state, H_bathy = build_fesom_ocean(
+            args.fesom_mesh_dir, args.dt, ic_dir=args.fesom_ic_dir)
+        run_fesom_b1_smoke(args, grid, z_coord, model, state)
+        return 0
     else:
         _nlat, _nlon = (int(x) for x in args.latlon_res.split("x"))
         if args.n_gpus > 1 and _nlat % args.n_gpus != 0:
