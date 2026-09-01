@@ -48,8 +48,10 @@ wind forcing on the 360-day calendar.  The configured 4320 steps at 14400 s
 span exactly 720 days, hence two complete forcing years.
 
 Physics-only means no executed TOP/PISCES step.  The shipped
-`GYRE_PISCES/EXPREF/namelist_pisces_cfg:5` sets `ln_p4z=.false.`; the OMIP-style
-build also omits `key_top`, so that file is outside the executed call path.
+`GYRE_PISCES/EXPREF/namelist_pisces_cfg:4-5` sets `ln_p2z=.true.` and
+`ln_p4z=.false.`; therefore `ln_p4z` alone disables standard P4Z, not all
+biology.  The OMIP-style build omits `key_top`, so neither P2Z nor P4Z is in
+the executed call path.
 `trcnam_pisces.F90:46,58-85` is the source proving `ln_p4z` is the standard
 PISCES selection toggle.
 
@@ -79,8 +81,9 @@ stdout, mesh, final restart, and dump files must all be SHA256-pinned.
 
 ## Step-entry contract
 
-The lane-1 `stprk3.F90` instrumentation is reused with only lane and filename
-labels changed.  It writes `ts(:,:,:,:,Nbb)`, `uu(:,:,:,Nbb)`,
+The lane-1 `stprk3.F90` instrumentation is reused byte-for-byte, including its
+`NEMO_L1_ENTRY_1` magic and lane-1 marker label.  It writes
+`ts(:,:,:,:,Nbb)`, `uu(:,:,:,Nbb)`,
 `vv(:,:,:,Nbb)`, and `ssh(:,:,Nbb)` before calendar/forcing, `stp_2D`, or any
 RK stage.  Records are preregistered at steps `1`, `2160`, and `4320`; each
 must carry the magic/version, step, `Nbb`, local dimensions, `jpts=2`, and
@@ -96,8 +99,9 @@ or absent final restart hard-fail.
 
 Preregistered classifications:
 
-1. **CONFIRM build/run** iff cpp history is exactly the three keys above, the
-   executable exits zero at step 4320, a final restart exists, all three fp64
+1. **CONFIRM build/run** iff `cpp.history` resolves the compiled cpp file and
+   its `fppkeys` line is exactly the three keys above, the executable exits
+   zero at step 4320, a final restart exists, all three fp64
    entry records exist, and stdout has no `ctl_stop`, NaN, infinity, or floating
    exception.  Otherwise **REFUTE** with no fallback.
 2. **CONFIRM geometry** iff dimensions are `32 x 22 x 31`; all eight horizontal
