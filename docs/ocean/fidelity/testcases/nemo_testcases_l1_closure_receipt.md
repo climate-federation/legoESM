@@ -125,6 +125,9 @@ The quota-heavy runs and JSON reports live under
 `nemo_testcases_l1_phase3_artifacts.sha256`.  The two kt=60 oracle reruns each
 contain 60 entry and 60 barotropic-frame dumps; kt=1--10 entry dumps are
 byte-identical to the shorter certified runs.  Independent review shipped the
-geometry/kt=1 scope and both preceding phase-3 rounds.  This closure preserves
+geometry/kt=1 scope and both preceding phase-3 rounds.  Review coverage:
+Claude adversarial review across seven rounds (codex-authored work); the
+mandatory GLM second-reviewer pass has NOT run (reviewer unreachable) and
+remains OUTSTANDING — this lane is one reviewer short of the dual-review rule.  This closure preserves
 all remaining DEBT/UNMEASURED labels rather than promoting the continuation to
 trajectory parity.
