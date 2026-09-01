@@ -202,6 +202,14 @@ def validate_config(data: dict) -> LMIPConfig:
             f"{physics['transpiration_stress']!r} not in "
             "('beta_theta', 'phydro')")
     if (physics["transpiration_stress"] == "phydro"
+            and physics["land_mode"] != "multilayer"):
+        # The slab land builds LandConfig, which has no phydro fields - the
+        # switch would be silently DROPPED, not applied (codex review).
+        raise ValueError(
+            "physics.transpiration_stress='phydro' requires "
+            f"land_mode='multilayer' (got {physics['land_mode']!r}); the "
+            "slab land has no soil water-potential column")
+    if (physics["transpiration_stress"] == "phydro"
             and physics["canopy_capacity_scheme"] != "p_model"
             and physics["canopy_g1_source"] != "p_model"):
         raise ValueError(

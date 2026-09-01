@@ -31,12 +31,21 @@ _xsite = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(_xsite)
 
 TRAIN = ["US-MMS", "FI-Hyy", "DE-Gri", "US-Ne1", "US-Ton", "US-Whs", "FR-Pue"]
-# Grid as the LITERAL strings the sweep wrapper uses in its directory tags
-# (run_pmodel_calib_sweep.sbatch), so tag construction cannot drift from the
-# directories on disk.
-KPHIO_GRID = ["0.040", "0.055", "0.070", "0.081785", "0.100"]
-BETA_GRID = ["60", "92", "146", "224", "344"]
+# The grid is DISCOVERED from the k<kphio>_b<beta> directories on disk (so an
+# extension sweep is scored automatically and tag construction cannot drift);
+# edge detection uses the min/max of each discovered axis.
 DEFAULT = ("0.081785", "146")
+
+
+def discover_grid(base_dir):
+    import re
+    ks, bs = set(), set()
+    for name in sorted(os.listdir(base_dir)):
+        m = re.fullmatch(r"k([0-9.]+)_b([0-9.]+)", name)
+        if m and os.path.isdir(os.path.join(base_dir, name)):
+            ks.add(m.group(1)); bs.add(m.group(2))
+    key = float
+    return (sorted(ks, key=key), sorted(bs, key=key))
 
 
 def _nrmse(ds, key):
@@ -89,9 +98,13 @@ def main() -> int:
     global OBJECTIVE
     OBJECTIVE = args.objective
 
+    kphio_grid, beta_grid = discover_grid(args.base_dir)
+    if not kphio_grid:
+        raise SystemExit(f"no k*_b* grid directories under {args.base_dir}")
+    print(f"discovered grid: kphio={kphio_grid} beta={beta_grid}\n")
     rows = []
-    for b in BETA_GRID:
-        for k in KPHIO_GRID:
+    for b in beta_grid:
+        for k in kphio_grid:
             tag = f"k{k}_b{b}"
             obj, per = score_point(args.base_dir, tag, args.sites)
             rows.append((k, b, tag, obj, per))
@@ -120,8 +133,8 @@ def main() -> int:
     else:
         print("default control point MISSING - improvement not quantifiable")
 
-    edge = (best[0] in (KPHIO_GRID[0], KPHIO_GRID[-1])
-            or best[1] in (BETA_GRID[0], BETA_GRID[-1]))
+    edge = (best[0] in (kphio_grid[0], kphio_grid[-1])
+            or best[1] in (beta_grid[0], beta_grid[-1]))
     print("\nVERDICT: " + ("UNRESOLVED - the optimum sits on a grid boundary, "
                           "so the true optimum is outside the screened range; "
                           "no tuned value is recommended (pre-registered rule 1)"
