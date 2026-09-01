@@ -1029,6 +1029,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # Harness-only Arm A: restore the pre-fix Kbb EOS/HPG operands in stages
     # 2/3. Public NEMO WS-RK3 always uses live Kmm T/S/ssh.
     freeze_stage_hpg_operands: bool = False
+    # Harness-only SPLIT of the freeze arm (review round): freeze only the
+    # stage T/S (live eta) or only the stage eta (live T/S) handed to the
+    # stage-2/3 eos+hpg call.  Together they equal freeze_stage_hpg_operands.
+    freeze_stage_hpg_tracers: bool = False
+    freeze_stage_hpg_eta: bool = False
     # Harness-only Arm B: omit dyn_adv_up3's vertical flux from EVERY stage
     # RHS.  Public NEMO WS-RK3 always calls the full dyn_adv package each
     # stage (stprk3_stg.F90:315,331-334).
@@ -1105,8 +1110,15 @@ def _nemo_ws_rk3_tracer_pair_step(
     fct_low_order_predictor: str = "nemo_rk3_two_step",
     bbl_context=None,
     stop_after_stage: int = 3,
+    resume=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """NEMO key_RK3 tracer stage program (Wicker--Skamarock form).
+
+    ``resume=(k, a_k, b_k)`` hands in the already-advanced stage-``k`` pair
+    (k = 1 or 2) so stages ``<= k`` are not recomputed: the momentum program
+    builds the stage-1/2 tracers as the stage-2/3 ``eos+dyn_hpg`` operands
+    (stprk3_stg.F90:317-320) and the tracer program then finishes stage 3 on
+    the SAME arrays (``:456-519``: one stage ladder, not two).
 
     ``stprk3_stg.F90:112-249,519-559`` restarts every stage from Kbb and
     applies the previous stage RHS with ``dt/3``, ``dt/2``, then ``dt``.
@@ -1124,6 +1136,12 @@ def _nemo_ws_rk3_tracer_pair_step(
         raise ValueError("stage_transport_geometry must contain exactly 3 stages")
     if stop_after_stage not in (1, 2, 3):
         raise ValueError("stop_after_stage must be 1, 2, or 3")
+    resume_stage = 0
+    if resume is not None:
+        resume_stage, a_resume, b_resume = resume
+        if resume_stage not in (1, 2) or resume_stage >= stop_after_stage:
+            raise ValueError(
+                "resume must hand in stage 1 or 2, below stop_after_stage")
 
     def _flux_pair(a_val, b_val, stage_dt, stage_index, h_after):
         stage_geom = stage_transport_geometry[stage_index]
@@ -1200,16 +1218,22 @@ def _nemo_ws_rk3_tracer_pair_step(
 
     h_one_third = h_k_old + (h_k_new - h_k_old) / 3.0
     h_one_half = 0.5 * (h_k_old + h_k_new)
-    fd0_a, fd0_b = _flux_pair(
-        tr_a, tr_b, dt / 3.0, 0, h_one_third)
-    a1 = _stage(tr_a, fd0_a, dt / 3.0, h_one_third)
-    b1 = _stage(tr_b, fd0_b, dt / 3.0, h_one_third)
+    if resume_stage >= 1:
+        a1, b1 = a_resume, b_resume
+    else:
+        fd0_a, fd0_b = _flux_pair(
+            tr_a, tr_b, dt / 3.0, 0, h_one_third)
+        a1 = _stage(tr_a, fd0_a, dt / 3.0, h_one_third)
+        b1 = _stage(tr_b, fd0_b, dt / 3.0, h_one_third)
     if stop_after_stage == 1:
         return a1, b1
-    fd1_a, fd1_b = _flux_pair(
-        a1, b1, dt / 2.0, 1, h_one_half)
-    a2 = _stage(tr_a, fd1_a, dt / 2.0, h_one_half)
-    b2 = _stage(tr_b, fd1_b, dt / 2.0, h_one_half)
+    if resume_stage >= 2:
+        a2, b2 = a_resume, b_resume
+    else:
+        fd1_a, fd1_b = _flux_pair(
+            a1, b1, dt / 2.0, 1, h_one_half)
+        a2 = _stage(tr_a, fd1_a, dt / 2.0, h_one_half)
+        b2 = _stage(tr_b, fd1_b, dt / 2.0, h_one_half)
     if stop_after_stage == 2:
         return a2, b2
     fd2_a, fd2_b = _flux_pair(a2, b2, dt, 2, h_k_new)
@@ -4189,6 +4213,7 @@ class LatLonCGridOceanModel:
         _nemo_ws_live_stage_geometry = None
         _nemo_ws_exposed_momentum_stage = None
         _nemo_ws_exposed_tracer_stage = None
+        _nemo_ws_stage_tracers = None
         if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3":
             u0 = state.u.data
             v0 = state.v.data
@@ -4715,6 +4740,15 @@ class LatLonCGridOceanModel:
             # private one-variable controls; the public identity has no arm.
             _freeze_hpg = self._nemo_ws_test_hooks.freeze_stage_hpg_operands
             _omit_vert = self._nemo_ws_test_hooks.omit_stage_vertical_up3
+            # ln_zad_Aimp=.false. is a legal NEMO namelist value.  With the
+            # flag off, legoESM's ``tendencies()`` still carries the explicit
+            # vertical momentum advection inside every stage RHS
+            # (ocean_pe_latlon_cgrid: ``if not _aimp_vertadv: du_dt +=
+            # diag_vertadv_u``), so the per-stage term below is Aimp-only --
+            # exactly the gate the deleted once-per-step block had.  Adding it
+            # here as well double-counted the term for Aimp=False + rk3_ws.
+            _aimp_vertadv_ws = bool(
+                getattr(_cfg_b, "adaptive_implicit_vertadv", False))
             _h_live_new = compute_layer_thickness(
                 state_new.eta.data, state_new.H_bathy.data, _zc,
                 min_water_column_m=_cfg_b.min_water_column_m)
@@ -4748,7 +4782,7 @@ class LatLonCGridOceanModel:
                 # dynadv_up3.F90:239-358: vertical flux of the stage Kmm
                 # velocity on the stage transport's explicit ww, divided by
                 # e3u(Kmm).  Identically zero from rest (kt=1 stage 1).
-                if _omit_vert:
+                if _omit_vert or not _aimp_vertadv_ws:
                     return None
                 return (
                     nemo_up3_vertical_momentum_advection(
@@ -4760,7 +4794,14 @@ class LatLonCGridOceanModel:
                         geom[5], face_active=_v_live_mask),
                 )
 
-            def _stage_tracers(stop_after_stage, stage_geometry):
+            def _stage_tracers(stop_after_stage, stage_geometry, resume=None):
+                # Same base as the tracer program's T_mid (state_new.T is the
+                # post-physics-Euler T_new from step 2), same Kmm transports.
+                # NEMO advances ts(Kbb) by advection (+sbc) only at stages 1-2
+                # and adds every physics term at stage 3 (stprk3_stg.F90:
+                # 519-552 vs :556-600); legoESM's physics-Euler-then-stages
+                # ordering predates this round and is inert on the certified
+                # cards (K_h = K_v = 0, no forcing).
                 return _nemo_ws_rk3_tracer_pair_step(
                     state_new.T.data, state_new.S.data,
                     _cfg_b.tracer_advection,
@@ -4770,7 +4811,20 @@ class LatLonCGridOceanModel:
                     linssh_top_flux=getattr(_zc, "linear_free_surface", False),
                     stage_transport_geometry=stage_geometry,
                     stop_after_stage=stop_after_stage,
+                    resume=resume,
                 )
+
+            def _stage_hpg_operands(T_stage, S_stage, eta_stage):
+                # Operands of the stage-2/3 eos+dyn_hpg call.  ``None`` keeps
+                # the step-entry bundle (Kbb operands, harness Arm A control);
+                # the two split hooks freeze one operand class at a time.
+                if _freeze_hpg:
+                    return None
+                if self._nemo_ws_test_hooks.freeze_stage_hpg_tracers:
+                    T_stage, S_stage = state.T.data, state.S.data
+                if self._nemo_ws_test_hooks.freeze_stage_hpg_eta:
+                    eta_stage = state.eta.data
+                return (T_stage, S_stage, eta_stage)
 
             # stage 1 (dt/3): Kmm = Kbb transport, full RHS incl. vertical UP3
             _g0 = _nemo_ws_stage_transport(
@@ -4784,31 +4838,33 @@ class LatLonCGridOceanModel:
                 u1_raw, v1_raw, target_u, target_v)
             _T_stage1, _S_stage1 = _stage_tracers(1, (_g0, _g0, _g0))
             if self._nemo_ws_test_hooks.expose_tracer_stage == 1:
-                _nemo_ws_exposed_tracer_stage = (_T_stage1, _S_stage1)
+                _nemo_ws_exposed_tracer_stage = (
+                    _T_stage1, _S_stage1, _eta_live_one_third)
             # stage 2 (dt/2): Kmm = stage-1 Kaa
             _g1 = _nemo_ws_stage_transport(
                 (u1_corr, v1_corr), _h_live_one_third, 1,
                 **_stage_transport_kw)
             p1u_corr, p1v_corr = _mom_pert_ws(
                 u1_corr, v1_corr, True, _transport_target,
-                None if _freeze_hpg else (
-                    _T_stage1, _S_stage1, _eta_live_one_third),
+                _stage_hpg_operands(_T_stage1, _S_stage1, _eta_live_one_third),
                 _stage_vertical_up3(u1_corr, v1_corr, _g1))
             u2_raw = u0 + (dt_mom / 2.0) * p1u_corr
             v2_raw = v0 + (dt_mom / 2.0) * p1v_corr
             u2_corr, v2_corr = _replace_stage_mean(
                 u2_raw, v2_raw, target_u, target_v)
-            _T_stage2, _S_stage2 = _stage_tracers(2, (_g0, _g1, _g1))
+            _T_stage2, _S_stage2 = _stage_tracers(
+                2, (_g0, _g1, _g1), resume=(1, _T_stage1, _S_stage1))
             if self._nemo_ws_test_hooks.expose_tracer_stage == 2:
-                _nemo_ws_exposed_tracer_stage = (_T_stage2, _S_stage2)
+                _nemo_ws_exposed_tracer_stage = (
+                    _T_stage2, _S_stage2, _eta_live_one_half)
+            _nemo_ws_stage_tracers = (_T_stage2, _S_stage2)
             # stage 3 (dt): Kmm = stage-2 Kaa; ww split into explicit/implicit
             _g2 = _nemo_ws_stage_transport(
                 (u2_corr, v2_corr), _h_live_one_half, 2,
                 **_stage_transport_kw)
             p2u_corr, p2v_corr = _mom_pert_ws(
                 u2_corr, v2_corr, False, _transport_target,
-                None if _freeze_hpg else (
-                    _T_stage2, _S_stage2, _eta_live_one_half),
+                _stage_hpg_operands(_T_stage2, _S_stage2, _eta_live_one_half),
                 _stage_vertical_up3(u2_corr, v2_corr, _g2))
             u3_raw = u0 + dt_mom * p2u_corr
             v3_raw = v0 + dt_mom * p2v_corr
@@ -5811,6 +5867,16 @@ class LatLonCGridOceanModel:
                         if self._nemo_ws_test_hooks.two_step_fct_predictor
                         else "one_step"),
                     bbl_context=_bbl_context,
+                    # One stage ladder: stages 1-2 were advanced by the
+                    # momentum program on the same Kmm transports as the
+                    # stage-2/3 hpg operands; stage 3 finishes on them.  The
+                    # vertical-transport ablation hook rebuilds its own ladder.
+                    resume=(
+                        None
+                        if (_nemo_ws_stage_tracers is None
+                            or self._nemo_ws_test_hooks
+                            .disable_tracer_vertical_transport)
+                        else (2, *_nemo_ws_stage_tracers)),
                 )
                 _pair_divs = (None, None)
             else:
@@ -6295,10 +6361,12 @@ class LatLonCGridOceanModel:
                 v=state_new.v.replace(data=_stage_v),
             )
         if _nemo_ws_exposed_tracer_stage is not None:
-            _stage_T, _stage_S = _nemo_ws_exposed_tracer_stage
+            # The stage T/S/eta exactly as handed to the stage eos+dyn_hpg.
+            _stage_T, _stage_S, _stage_eta = _nemo_ws_exposed_tracer_stage
             state_new = state_new._replace(
                 T=state_new.T.replace(data=_stage_T),
                 S=state_new.S.replace(data=_stage_S),
+                eta=state_new.eta.replace(data=_stage_eta),
             )
 
         state_new = cast_pytree(state_new, None, "storage", allow_downcast=True)

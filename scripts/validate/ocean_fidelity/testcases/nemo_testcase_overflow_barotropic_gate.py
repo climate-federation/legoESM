@@ -13,7 +13,6 @@ import argparse
 import hashlib
 import json
 import struct
-import subprocess
 import sys
 from pathlib import Path
 
@@ -114,13 +113,13 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def git_sha() -> str:
-    """Return the exact legoESM producer revision; fail closed off Git."""
+def git_sha(*, allow_dirty: bool = False) -> str:
+    """Exact legoESM producer revision (fails closed on tracked dirt)."""
+    from legoesm.ocean.fidelity.provenance import git_sha as _stamp
+
     try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
-        ).strip()
-    except (OSError, subprocess.CalledProcessError) as error:
+        return _stamp(allow_dirty=allow_dirty)
+    except RuntimeError as error:
         raise GateError(f"cannot stamp legoESM git SHA: {error}") from error
 
 
@@ -207,10 +206,19 @@ def _candidate_frame(values, staggering: str) -> np.ndarray:
 
 
 def capture_legoesm_trace(*, flux_form_override) -> dict:
-    """Capture call 1 without changing the two-value production return."""
+    """Capture call 1 without changing the two-value production return.
+
+    ``flux_form_override=None`` is the PRODUCTION arm: the barotropic solver
+    resolves the literal flux-form update from the card's own config through
+    ``nemo_flux_form_update_active``; ``False`` forces the legacy velocity
+    update (harness-only control arm).
+    """
     import jax
     import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as ocean_model
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        nemo_flux_form_update_active,
+    )
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
     )
@@ -227,6 +235,10 @@ def capture_legoesm_trace(*, flux_form_override) -> dict:
     require(cfg.barotropic.n_barotropic_substeps == 3, "wrong nn_e")
     require(cfg.momentum_time_integrator == "rk3_ws", "wrong momentum integrator")
     require(cfg.momentum_advection == "flux_form", "wrong momentum form")
+    # Measured, not assumed: the production predicate the solver evaluates.
+    production_resolution = bool(nemo_flux_form_update_active(cfg))
+    require(production_resolution,
+            "production does not resolve to the literal flux-form update")
 
     original = ocean_model.barotropic_substeps_latlon_cgrid
     captured = []
@@ -284,6 +296,7 @@ def capture_legoesm_trace(*, flux_form_override) -> dict:
         "dtypes": dtypes,
         "backend": jax.default_backend(),
         "flux_form_override": flux_form_override,
+        "production_flux_form_update_active": production_resolution,
     }
 
 
@@ -347,7 +360,10 @@ def run(
     plant_entry=False,
     plant_exit=False,
     pytest_log: Path | None = None,
+    allow_dirty: bool = False,
 ) -> dict:
+    # Stamp FIRST so a dirty tree refuses before any compute (fail closed).
+    legoesm_git_sha = git_sha(allow_dirty=allow_dirty)
     validate_frame_registry()
     require(
         new_entry.read_bytes() == certified_entry.read_bytes(),
@@ -355,7 +371,7 @@ def run(
     )
     oracle = read_oracle_trace(oracle_path)
     baseline = capture_legoesm_trace(flux_form_override=False)
-    faithful = capture_legoesm_trace(flux_form_override=True)
+    faithful = capture_legoesm_trace(flux_form_override=None)   # production
     require(baseline["masks"].keys() == faithful["masks"].keys(), "mask registry drift")
 
     arms = {}
@@ -465,12 +481,26 @@ def run(
     slow_dt_prediction = first_slow["absolute_max"] * (10.0 / 3.0)
     slow_ratio = first_exit["absolute_max"] / max(slow_dt_prediction, np.finfo(float).tiny)
 
-    controls_ok = not plant_entry and not plant_exit
-    if plant_entry:
-        controls_ok = first["legacy_velocity_update"]["frame"] == "eta_entry"
-    if plant_exit:
-        controls_ok = first["legacy_velocity_update"]["frame"] == "u_exit"
-    require(controls_ok, "planted control did not become first DEBT")
+    # Planted controls must land as the FIRST DEBT of BOTH arms at substep 1
+    # with the +1.0 plant visible; otherwise the gate is broken (exit 2).
+    planted_frame = "eta_entry" if plant_entry else "u_exit" if plant_exit else None
+    if planted_frame is not None:
+        for arm_name, arm in arms.items():
+            landed = arm["first_over_bar"]
+            planted_row = next(
+                row for row in arm["substeps"][0]["rows"]
+                if row["name"].endswith(f".{planted_frame}"))
+            require(
+                landed is not None and landed["substep"] == 1
+                and landed["frame"] == planted_frame
+                and planted_row["absolute_max"] >= 0.5,
+                f"{arm_name}: planted {planted_frame} control did not become "
+                f"the first DEBT (got {landed})")
+    # Verdict = the production arm's own rows; the legacy arm is a control.
+    production_rows = [
+        row for substep in arms["nemo_flux_form_update"]["substeps"]
+        for row in substep["rows"]]
+    status = "DEBT" if any(row["status"] == "DEBT" for row in production_rows) else "AT-BAR"
 
     faithful_substep1 = [
         {
@@ -494,7 +524,7 @@ def run(
     return {
         "format": "nemo-testcase-l1-overflow-barotropic-gate-v1",
         "case": CASE,
-        "status": "DEBT",
+        "status": status,
         "bar": BAR,
         "resolved_program": {
             "nn_bt_flt": 1,
@@ -506,7 +536,9 @@ def run(
             "drag": "OFF",
             "rotation": "f=0",
         },
-        "legoesm_git_sha": git_sha(),
+        "legoesm_git_sha": legoesm_git_sha,
+        "production_flux_form_update_active": (
+            faithful["production_flux_form_update_active"]),
         "time_level_header": oracle["header"],
         "frame_time_level_registry": FRAME_REGISTRY,
         "artifacts": artifacts,
@@ -588,19 +620,6 @@ def run(
     }
 
 
-def _control_only_report(*, plant_entry: bool, plant_exit: bool) -> dict:
-    require(plant_entry or plant_exit, "--control-only requires a planted control")
-    oracle = np.zeros((2, 3), dtype=np.float64)
-    row = score_frame(
-        "eta_entry" if plant_entry else "u_exit",
-        oracle,
-        oracle.copy(),
-        np.ones_like(oracle, dtype=bool),
-        plant=True,
-    )
-    return {"status": row["status"], "row": row}
-
-
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--oracle", type=Path, default=DEFAULT_ORACLE)
@@ -610,13 +629,13 @@ def main(argv=None) -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant-entry", action="store_true")
     parser.add_argument("--plant-exit", action="store_true")
-    parser.add_argument("--control-only", action="store_true")
     parser.add_argument("--pytest-log", type=Path)
+    parser.add_argument("--allow-dirty", action="store_true",
+                        help="stamp '<sha>-dirty' instead of refusing a dirty tree")
     args = parser.parse_args(argv)
-    if args.control_only:
-        report = _control_only_report(
-            plant_entry=args.plant_entry, plant_exit=args.plant_exit)
-    else:
+    # Exit codes: 0 AT-BAR, 1 DEBT (measured), 2 gate failure (a planted
+    # control that did not land, a dirty tree, a bad oracle record).
+    try:
         report = run(
             args.oracle,
             args.new_entry,
@@ -625,7 +644,11 @@ def main(argv=None) -> int:
             plant_entry=args.plant_entry,
             plant_exit=args.plant_exit,
             pytest_log=args.pytest_log,
+            allow_dirty=args.allow_dirty,
         )
+    except GateError as error:
+        print(f"FAIL: {error}", file=sys.stderr)
+        return 2
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -635,8 +658,4 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except GateError as error:
-        print(f"DEBT: {error}", file=sys.stderr)
-        raise SystemExit(1)
+    raise SystemExit(main())

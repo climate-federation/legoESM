@@ -254,3 +254,125 @@ def test_nemo_ws_fct_limits_stage3_only_and_centres_stages_1_2(monkeypatch):
     )
     # Non-FCT NEMO schemes run the same operator at every stage.
     assert [scheme for scheme, _ in seen] == ["centered"] * 3
+
+
+def test_nemo_ws_tracer_resume_reuses_the_handed_stages(monkeypatch):
+    """One stage ladder: resume=(k, a_k, b_k) skips stages <= k exactly."""
+    rate = 0.2
+    calls = []
+
+    def linear_flux_pair(a, b, *args, **kwargs):
+        calls.append(1)
+        return (rate * a, jnp.zeros_like(a)), (rate * b, jnp.zeros_like(b))
+
+    monkeypatch.setattr(
+        model_module, "compute_advection_flux_div_pair", linear_flux_pair)
+    a0 = jnp.array([[[2.0]]], dtype=jnp.float64)
+    b0 = jnp.array([[[3.0]]], dtype=jnp.float64)
+    ones = jnp.ones_like(a0)
+    common = (ones, ones, jnp.ones((1, 1, 2)), ones, ones, ones, ones, object(), 0.5, ones)
+    full = model_module._nemo_ws_rk3_tracer_pair_step(a0, b0, "centered", *common)
+    assert len(calls) == 3
+    calls.clear()
+    s1 = model_module._nemo_ws_rk3_tracer_pair_step(
+        a0, b0, "centered", *common, stop_after_stage=1)
+    s2 = model_module._nemo_ws_rk3_tracer_pair_step(
+        a0, b0, "centered", *common, stop_after_stage=2, resume=(1, *s1))
+    out = model_module._nemo_ws_rk3_tracer_pair_step(
+        a0, b0, "centered", *common, resume=(2, *s2))
+    assert len(calls) == 3          # 1 + 1 + 1: no stage evaluated twice
+    np.testing.assert_array_equal(np.asarray(out[0]), np.asarray(full[0]))
+    np.testing.assert_array_equal(np.asarray(out[1]), np.asarray(full[1]))
+    # A planted wrong stage-2 operand must change the answer (non-vacuous).
+    planted = model_module._nemo_ws_rk3_tracer_pair_step(
+        a0, b0, "centered", *common, resume=(2, s2[0] + 1.0, s2[1]))
+    assert float(np.abs(np.asarray(planted[0]) - np.asarray(full[0])).max()) > 0.0
+    with pytest.raises(ValueError, match="resume"):
+        model_module._nemo_ws_rk3_tracer_pair_step(
+            a0, b0, "centered", *common, stop_after_stage=1, resume=(1, *s1))
+
+
+def _lock_step(hooks=None, **cfg_overrides):
+    set_policy(PrecisionPolicy.fp64())
+    card = build_lock_exchange_zco_card()
+    cfg = card.recipe.model_config._replace(**cfg_overrides)
+    model = model_module.LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg,
+        _nemo_ws_test_hooks=hooks or model_module._NEMOWSRK3TestHooks())
+    return card, model.step(card.recipe.initial_state, dt=card.dt_s)
+
+
+def test_nemo_ws_stage_vertical_up3_is_applied_only_under_aimp():
+    """ln_zad_Aimp=.false.: the explicit vertical term already sits inside
+    tendencies() (ocean_pe: ``if not _aimp_vertadv: du_dt += diag_vertadv_u``),
+    so the per-stage UP3 must not add it again; the omit hook is then a no-op."""
+    omit = model_module._NEMOWSRK3TestHooks(omit_stage_vertical_up3=True)
+    card, on_faithful = _lock_step()
+    assert card.recipe.model_config.adaptive_implicit_vertadv is True
+    _, on_omit = _lock_step(omit)
+    assert float(np.abs(np.asarray(on_omit.u.data) - np.asarray(on_faithful.u.data)).max()) > 0.0
+    _, off_faithful = _lock_step(adaptive_implicit_vertadv=False)
+    _, off_omit = _lock_step(omit, adaptive_implicit_vertadv=False)
+    np.testing.assert_array_equal(np.asarray(off_omit.u.data), np.asarray(off_faithful.u.data))
+    np.testing.assert_array_equal(np.asarray(off_omit.v.data), np.asarray(off_faithful.v.data))
+
+
+def test_nemo_ws_exposed_tracer_stage_carries_the_stage_ssh():
+    """expose_tracer_stage returns the HYB stage eta handed to eos+dyn_hpg
+    (stprk3_stg.F90:146 N+1/3, :209 N+1/2), not the final eta."""
+    card, entry = _tilted_entry_after_one_step()
+    normal = _lock_model().step(entry, dt=card.dt_s)
+    eta0 = np.asarray(entry.eta.data)
+    eta_new = np.asarray(normal.eta.data)
+    assert float(np.abs(eta_new - eta0).max()) > 1.0e-9
+    for stage, expected in ((1, eta0 + (eta_new - eta0) / 3.0), (2, 0.5 * (eta0 + eta_new))):
+        exposed = _lock_model(model_module._NEMOWSRK3TestHooks(
+            expose_tracer_stage=stage)).step(entry, dt=card.dt_s)
+        np.testing.assert_allclose(np.asarray(exposed.eta.data), expected, rtol=1e-14, atol=0)
+        assert float(np.abs(np.asarray(exposed.eta.data) - eta_new).max()) > 1.0e-9
+
+
+def _lock_model(hooks=None):
+    card = build_lock_exchange_zco_card()
+    return model_module.LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=hooks or model_module._NEMOWSRK3TestHooks())
+
+
+_TILTED = {}
+
+
+def _tilted_entry_after_one_step():
+    """LOCK's own eta stays ~1e-28 (symmetric front) and a forward-backward
+    step from rest leaves eta unchanged (continuity runs on u=0 first), so a
+    1 m tilt is planted and ONE step taken: the returned entry state has a
+    barotropic flow, and the next step's stage ladder is non-degenerate."""
+    if not _TILTED:
+        set_policy(PrecisionPolicy.fp64())
+        card = build_lock_exchange_zco_card()
+        init = card.recipe.initial_state
+        mask = np.asarray(init.land_mask.data)
+        tilt = 1.0 * np.linspace(-1.0, 1.0, mask.shape[1])[None, :] * mask
+        tilted = init._replace(eta=init.eta.replace(data=jnp.asarray(tilt, dtype=jnp.float64)))
+        _TILTED["card"] = card
+        _TILTED["entry"] = _lock_model().step(tilted, dt=card.dt_s)
+    return _TILTED["card"], _TILTED["entry"]
+
+
+def test_nemo_ws_split_freeze_hooks_compose_to_the_freeze_arm():
+    """freeze_stage_hpg_tracers + freeze_stage_hpg_eta == freeze_stage_hpg_operands
+    bit for bit, and each alone moves the step (so each is a live one-variable
+    arm).  The eta arm is inert on LOCK's own ~1e-28 eta (1 + eta/H == 1.0 in
+    fp64), so it is exercised on the tilted, once-stepped entry state."""
+    H = model_module._NEMOWSRK3TestHooks
+    _, faithful = _lock_step()
+    _, frozen = _lock_step(H(freeze_stage_hpg_operands=True))
+    _, both = _lock_step(H(freeze_stage_hpg_tracers=True, freeze_stage_hpg_eta=True))
+    np.testing.assert_array_equal(np.asarray(both.u.data), np.asarray(frozen.u.data))
+    np.testing.assert_array_equal(np.asarray(both.T.data), np.asarray(frozen.T.data))
+    _, tracers = _lock_step(H(freeze_stage_hpg_tracers=True))
+    assert float(np.abs(np.asarray(tracers.u.data) - np.asarray(faithful.u.data)).max()) > 0.0
+    card, entry = _tilted_entry_after_one_step()
+    live = _lock_model().step(entry, dt=card.dt_s)
+    eta_arm = _lock_model(H(freeze_stage_hpg_eta=True)).step(entry, dt=card.dt_s)
+    assert float(np.abs(np.asarray(eta_arm.u.data) - np.asarray(live.u.data)).max()) > 0.0

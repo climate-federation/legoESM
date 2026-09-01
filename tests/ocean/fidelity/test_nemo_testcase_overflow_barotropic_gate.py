@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
-import subprocess
-import sys
+import json
 import struct
 from pathlib import Path
 
@@ -78,12 +77,65 @@ def test_frame_registry_fails_closed_on_an_unregistered_frame():
         gate.validate_frame_registry(incomplete)
 
 
-def test_planted_entry_cli_exits_nonzero_end_to_end():
-    completed = subprocess.run(
-        [sys.executable, str(SCRIPT), "--plant-entry", "--control-only"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert completed.returncode != 0
-    assert '"status": "DEBT"' in completed.stdout
+ORACLE_PRESENT = all(path.is_file() for path in (
+    gate.DEFAULT_ORACLE, gate.DEFAULT_NEW_ENTRY, gate.DEFAULT_CERTIFIED_ENTRY,
+    gate.DEFAULT_TRAJECTORY))
+needs_oracle = pytest.mark.skipif(not ORACLE_PRESENT, reason="OVERFLOW oracle dumps absent")
+
+
+def test_production_predicate_is_the_card_resolution():
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import nemo_flux_form_update_active
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
+
+    cfg = build_nemo_testcase_card(gate.CASE).recipe.model_config
+    assert nemo_flux_form_update_active(cfg) is True
+    assert nemo_flux_form_update_active(cfg._replace(momentum_advection="vector_invariant")) is False
+    assert nemo_flux_form_update_active(cfg._replace(momentum_time_integrator="rk3")) is False
+
+
+@needs_oracle
+def test_planted_entry_control_exits_nonzero_end_to_end(tmp_path):
+    """The REAL gate (both arms, real oracle record) with the entry plant:
+    exit 1 (DEBT), the planted frame is the first DEBT of BOTH arms, and the
+    top-level status is computed from the production arm's rows."""
+    out = tmp_path / "planted.json"
+    code = gate.main(["--plant-entry", "--allow-dirty", "--output", str(out)])
+    assert code == 1
+    report = json.loads(out.read_text())
+    assert report["controls"] == {"plant_entry": True, "plant_exit": False}
+    for arm in report["arms"].values():
+        assert arm["first_over_bar"]["substep"] == 1
+        assert arm["first_over_bar"]["frame"] == "eta_entry"
+        assert arm["first_over_bar"]["normalized_max_abs"] >= 0.5
+    production_rows = [row for substep in report["arms"]["nemo_flux_form_update"]["substeps"]
+                       for row in substep["rows"]]
+    assert report["status"] == (
+        "DEBT" if any(row["status"] == "DEBT" for row in production_rows) else "AT-BAR")
+    assert report["production_flux_form_update_active"] is True
+    assert report["legoesm_git_sha"].split("-")[0] and len(report["legoesm_git_sha"].split("-")[0]) == 40
+
+
+@needs_oracle
+def test_undetected_plant_exits_two(monkeypatch):
+    """If the scorer stops seeing plants, the planted run must exit 2, not 1."""
+    real = gate.score_frame
+
+    def blind(name, oracle, candidate, mask, *, plant=False):
+        return real(name, oracle, candidate, mask, plant=False)
+
+    monkeypatch.setattr(gate, "score_frame", blind)
+    assert gate.main(["--plant-entry", "--allow-dirty"]) == 2
+
+
+def test_dirty_tree_is_refused_unless_allowed(monkeypatch):
+    import legoesm.ocean.fidelity.provenance as provenance
+
+    def dirty(*, allow_dirty=False, repo=None):
+        if allow_dirty:
+            return "f" * 40 + "-dirty"
+        raise RuntimeError("refusing to stamp")
+
+    monkeypatch.setattr(provenance, "git_sha", dirty)
+    with pytest.raises(gate.GateError, match="refusing to stamp"):
+        gate.git_sha()
+    assert gate.git_sha(allow_dirty=True).endswith("-dirty")

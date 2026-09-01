@@ -45,16 +45,22 @@ def require(ok: bool, message: str) -> None:
         raise GateError(message)
 
 
-def git_sha() -> str:
-    """Exact legoESM producer revision; fail closed off Git."""
-    import subprocess
+def git_sha(*, allow_dirty: bool = False) -> str:
+    """Exact legoESM producer revision (fails closed on tracked dirt)."""
+    from legoesm.ocean.fidelity.provenance import git_sha as _stamp
 
     try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
-        ).strip()
-    except (OSError, subprocess.CalledProcessError) as error:
+        return _stamp(allow_dirty=allow_dirty)
+    except RuntimeError as error:
         raise GateError(f"cannot stamp legoESM git SHA: {error}") from error
+
+
+def require_planted(rows: list[dict], name: str) -> None:
+    """A planted +1.0 must be visible in its row, else the gate is broken."""
+    row = next((row for row in rows if row["name"] == name), None)
+    require(row is not None, f"planted row {name} missing")
+    require(row["status"] == "DEBT" and row["absolute_max"] >= 0.5,
+            f"planted control {name} did not land: {row['absolute_max']:.3e}")
 
 
 def sha256(path: Path) -> str:
@@ -287,7 +293,8 @@ def classify_arm(
     }
 
 
-def run(case: str, root: Path, *, plant_stage=False, plant_operand=False) -> dict:
+def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
+        allow_dirty=False) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -298,6 +305,8 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False) -> dic
         build_nemo_testcase_card,
     )
 
+    # Stamp FIRST so a dirty tree refuses before any compute (fail closed).
+    legoesm_git_sha = git_sha(allow_dirty=allow_dirty)
     set_policy(PrecisionPolicy.fp64())
     require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
@@ -321,6 +330,13 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False) -> dic
             "faithful": _NEMOWSRK3TestHooks(),
             "freeze_stage_hpg_operands": _NEMOWSRK3TestHooks(
                 freeze_stage_hpg_operands=True
+            ),
+            # Split of the freeze arm (review round): one operand class each.
+            "freeze_stage_hpg_tracers": _NEMOWSRK3TestHooks(
+                freeze_stage_hpg_tracers=True
+            ),
+            "freeze_stage_hpg_eta": _NEMOWSRK3TestHooks(
+                freeze_stage_hpg_eta=True
             ),
             "omit_stage_vertical_up3": _NEMOWSRK3TestHooks(
                 omit_stage_vertical_up3=True
@@ -452,7 +468,8 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False) -> dic
         control_T.update({"verdict": False, "frame": "instantaneous_tracer_Nbb"})
         rows.append(control_T)
         target = (
-            "u" if arm in ("freeze_stage_hpg_operands", "omit_stage_vertical_up3")
+            "u" if arm in ("freeze_stage_hpg_operands", "freeze_stage_hpg_tracers",
+                           "freeze_stage_hpg_eta", "omit_stage_vertical_up3")
             else "T" if case == "OVERFLOW-zps" else "u"
         )
         faithful_row = faithful_T if target == "T" else faithful_u
@@ -472,7 +489,18 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False) -> dic
         arm_results[arm] = classify_arm(faithful_row, control_row, arm_move, improving=improving)
         arm_results[arm]["target"] = target
         if arm == "freeze_stage_hpg_operands":
-            one_variable = "stage-2/3 EOS+HPG T/S/ssh time level"
+            # NOT one variable: the stage eta also sets the h_k bundle that
+            # _bc_vertical_and_depthmean_velocity turns into the flux-form
+            # advection face thickness/w (ocean_pe_latlon_cgrid:4384-4395).
+            one_variable = (
+                "stage-2/3 EOS+HPG T/S/ssh time level AND the stage-eta "
+                "advection geometry (two variables; see the split arms)")
+        elif arm == "freeze_stage_hpg_tracers":
+            one_variable = "stage-2/3 EOS T/S time level (live stage eta)"
+        elif arm == "freeze_stage_hpg_eta":
+            one_variable = (
+                "stage-2/3 eta time level: HPG r3t stretching AND the "
+                "advection geometry it sets (live stage T/S)")
         elif arm == "omit_stage_vertical_up3":
             one_variable = "vertical UP3 in each momentum-stage RHS"
         elif arm == "legacy_velocity_primary_average":
@@ -545,17 +573,29 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False) -> dic
         live_s2 = _bc_row(2, "faithful")
         live_s3 = _bc_row(3, "faithful")
         live_k2 = faithful_u_bc
-        confirmed_a = (
-            a_only_k2["absolute_max"] <= 7.0e-7
-            and _within(a_only_s2["absolute_max"], 1.65e-7)
-        )
+        # The preregistered kt=2 baseline (3.31e-6) was measured on code that
+        # still applied the once-per-step post-hoc vertical UP3 after stage 3;
+        # the A-only arm carries NO vertical term, so its kt=2 leg differs
+        # from that baseline in two variables.  Arm A's label rests on the
+        # stage-2 leg alone (the post-hoc term landed after stage 3, so that
+        # leg IS one variable); the kt=2 leg is reported, not used.
+        confirmed_a = _within(a_only_s2["absolute_max"], 1.65e-7)
+        kt2_leg_a = a_only_k2["absolute_max"] <= 7.0e-7
         confirmed_b = (
             _within(live_s2["absolute_max"], 1.0e-10)
             and _within(live_s3["absolute_max"], 2.6e-7)
         )
         stage_operand_ownership = {
             "arm_a_live_stage_hpg_operands": {
-                "label": "CONFIRMED" if confirmed_a else "REFUTED",
+                "label": "CONFIRMED_ON_STAGE2_LEG" if confirmed_a else "REFUTED",
+                "kt2_leg": {
+                    "status": "TWO_VARIABLE_NOT_USED_FOR_LABEL",
+                    "predicate_met": kt2_leg_a,
+                    "reason": (
+                        "preregistered baseline 3.31e-6 carried the post-hoc "
+                        "once-per-step vertical UP3 after stage 3; the A-only "
+                        "arm carries no vertical term at all"),
+                },
                 "scaling_check_before_owner_label": True,
                 "frozen_prediction": (
                     "A without B: kt2 <=7e-7; stage2 approximately 1.65e-7 "
@@ -590,9 +630,10 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False) -> dic
                 card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
                 _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_tracer_stage=stage),
             ).step(card.recipe.initial_state, dt=card.dt_s)
-        eta_new = np.asarray(operand_states[1].eta.data)
-        # HYB stage ssh: stprk3_stg.F90:146 (2/3 Kbb + 1/3 ssha), :209 (1/2 each)
-        stage_ssh = {1: eta0 + (eta_new - eta0) / 3.0, 2: 0.5 * (eta0 + eta_new)}
+        # HYB stage ssh (stprk3_stg.F90:146 N+1/3, :209 N+1/2) exactly as the
+        # solver hands it to the stage eos+dyn_hpg (the hook exposes eta too).
+        stage_ssh = {stage: np.asarray(operand_states[stage].eta.data) for stage in (1, 2)}
+        s_uniform = np.unique(oracle_stages[1]["S"][..., :nlev][masks["T"]]).size == 1
         for stage in (1, 2):
             for name, oracle_field, candidate in (
                 ("T", oracle_stages[stage]["T"][..., :nlev],
@@ -610,6 +651,11 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False) -> dic
                     "oracle ts(:,:,:,jn,Kaa) after the stage tracer update and "
                     "legoESM's exposed WS-RK3 stage tracer are both instantaneous "
                     "3-D T-point fields; elementwise L-infinity on the wet T mask")
+                if name == "S" and s_uniform and row["status"] == "AT-BAR":
+                    row["status"] = "UNINFORMATIVE"
+                    row["reason"] = (
+                        "oracle stage salinity is spatially uniform (n_unique=1); "
+                        "this row cannot detect a stage-transport error")
                 operand_rows.append(row)
             row = score(
                 f"{case}.kt1.stage{stage}.faithful.ssh_operand",
@@ -617,9 +663,10 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False) -> dic
             )
             row["frame"] = "instantaneous_ssh_Kaa"
             row["staggering_and_reduction"] = (
-                "oracle ssh(:,:,Kaa) and legoESM's HYB stage eta are both "
+                "oracle ssh(:,:,Kaa) and legoESM's HYB stage eta (as handed to "
+                "the stage eos+dyn_hpg, exposed by the solver hook) are both "
                 "instantaneous 2-D T-point sea levels; elementwise L-infinity "
-                "on the wet column mask")
+                "on the wet column mask; note max(|ssh|,1)=1 normalization")
             operand_rows.append(row)
 
         # ---- hpg_sco replay: instrument check + operand-difference prediction
@@ -680,25 +727,45 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False) -> dic
                 "on this card) and the dynhpg.F90:340-390 replay are both "
                 "U-face trends on the wet row; elementwise L-infinity")
             replay_rows.append(row)
+        T_lego_s1 = pad(np.asarray(operand_states[1].T.data))
+        S_lego_s1 = pad(np.asarray(operand_states[1].S.data))
         H_nemo_s1 = replay(s1["T"], s1["S"], s1["ssh"])
         H_frozen = replay(entry1["T"], entry1["S"], entry1["ssh"])
-        H_lego_s1 = replay(
-            pad(np.asarray(operand_states[1].T.data)),
-            pad(np.asarray(operand_states[1].S.data)), stage_ssh[1])
+        H_lego_s1 = replay(T_lego_s1, S_lego_s1, stage_ssh[1])
+        H_frozen_tracers = replay(entry1["T"], entry1["S"], stage_ssh[1])
+        H_frozen_eta = replay(T_lego_s1, S_lego_s1, entry1["ssh"])
         e3u_row = mesh["e3u_0"]
 
-        def stage2_prediction(H_candidate):
+        def stage2_prediction(H_candidate, H_reference=H_nemo_s1):
             diff = remove_depth_mean(
-                (card.dt_s / 2.0) * (H_candidate - H_nemo_s1), e3u_row, act_row)
+                (card.dt_s / 2.0) * (H_candidate - H_reference), e3u_row, act_row)
             return float(np.max(np.abs(diff[act_row])))
 
-        measured_a = movement(
-            remove_depth_mean(
-                np.asarray(stage_states["faithful"][2].u.data)[:, 1:, :], hu0, masks["u"]),
-            remove_depth_mean(
-                np.asarray(stage_states["freeze_stage_hpg_operands"][2].u.data)[:, 1:, :],
-                hu0, masks["u"]),
-            masks["u"])["absolute_max"]
+        def stage2_movement(arm):
+            return movement(
+                remove_depth_mean(
+                    np.asarray(stage_states["faithful"][2].u.data)[:, 1:, :], hu0, masks["u"]),
+                remove_depth_mean(
+                    np.asarray(stage_states[arm][2].u.data)[:, 1:, :], hu0, masks["u"]),
+                masks["u"])["absolute_max"]
+
+        measured_a = stage2_movement("freeze_stage_hpg_operands")
+        # Each split arm moves ONE operand class off legoESM's own live stage
+        # operands, so its HPG-only prediction is E_hpg(frozen) - E_hpg(live
+        # legoESM): whatever the measured movement carries beyond that is a
+        # non-HPG consumer of the operand (the advection geometry for eta).
+        split = {}
+        for arm, H_arm in (("freeze_stage_hpg_tracers", H_frozen_tracers),
+                           ("freeze_stage_hpg_eta", H_frozen_eta)):
+            predicted = stage2_prediction(H_arm, H_lego_s1)
+            measured = stage2_movement(arm)
+            split[arm] = {
+                "predicted_hpg_only_stage2_movement_m_s": predicted,
+                "measured_stage2_movement_m_s": measured,
+                "measured_minus_predicted_m_s": measured - predicted,
+                "predicted_over_measured": (
+                    predicted / measured if measured else float("inf")),
+            }
         replay = {
             "instrument_rows": replay_rows,
             "predicted_stage2_baroclinic_u_error_from_frozen_kbb_operands_m_s": (
@@ -706,8 +773,10 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False) -> dic
             "measured_stage2_baroclinic_u_movement_frozen_vs_live_m_s": measured_a,
             "predicted_over_measured": (
                 stage2_prediction(H_frozen) / measured_a if measured_a else float("inf")),
+            "measured_minus_predicted_m_s": measured_a - stage2_prediction(H_frozen),
             "predicted_stage2_baroclinic_u_error_from_legoesm_stage1_operands_m_s": (
                 stage2_prediction(H_lego_s1)),
+            "split_arms": split,
             "source": (
                 "dynhpg.F90:340-390; domzgr_substitute.h90:131,139,145; "
                 "domqco.F90:160; eos at live gdept (eosbn2.F90:1166)"),
@@ -715,6 +784,12 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False) -> dic
 
     failed = [row["name"] for row in rows if row["status"] == "DEBT" and row.get("verdict", True)]
     failed += [row["name"] for row in operand_rows if row["status"] == "DEBT"]
+    # Planted controls: the planted row must carry the +1.0, else exit 2.
+    if plant_stage:
+        require_planted(rows, f"{case}.kt1.stage1.faithful.instantaneous_u")
+    if plant_operand:
+        require(case == "OVERFLOW-zps", "--plant-operand needs the OVERFLOW operand rows")
+        require_planted(operand_rows, f"{case}.kt1.stage1.faithful.tracer_operand_T")
     return {
         "format": "nemo-testcase-l1-phase3-stage-sweep-v1",
         "case": case,
@@ -750,7 +825,7 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False) -> dic
         "ownership": ownership,
         "stage_operand_ownership": stage_operand_ownership,
         "controls": {"plant_stage": plant_stage, "plant_operand": plant_operand},
-        "legoesm_git_sha": git_sha(),
+        "legoesm_git_sha": legoesm_git_sha,
         "artifacts": artifacts,
     }
 
@@ -762,10 +837,15 @@ def main(argv=None) -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant-stage", action="store_true")
     parser.add_argument("--plant-operand", action="store_true")
+    parser.add_argument("--allow-dirty", action="store_true",
+                        help="stamp '<sha>-dirty' instead of refusing a dirty tree")
     args = parser.parse_args(argv)
+    # Exit codes: 0 AT-BAR, 1 DEBT (measured), 2 gate failure (a planted
+    # control that did not land, a dirty tree, a bad oracle record).
     try:
         report = run(args.case, args.oracle_root or ROOTS[args.case],
-                     plant_stage=args.plant_stage, plant_operand=args.plant_operand)
+                     plant_stage=args.plant_stage, plant_operand=args.plant_operand,
+                     allow_dirty=args.allow_dirty)
     except (GateError, OSError, ValueError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 2

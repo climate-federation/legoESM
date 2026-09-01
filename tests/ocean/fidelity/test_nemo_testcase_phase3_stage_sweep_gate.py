@@ -1,9 +1,11 @@
 """Direct non-vacuity tests for the phase-3 WS stage sweep gate."""
 
 import importlib.util
+import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 PATH = Path("scripts/validate/ocean_fidelity/testcases/nemo_testcase_phase3_stage_sweep_gate.py")
@@ -99,3 +101,48 @@ def test_remove_depth_mean_is_exact_and_thickness_weighted():
     mean = (1.0 + 3.0 + 10.0) / 4.0
     np.testing.assert_allclose(out, values - mean, rtol=0, atol=1e-15)
     np.testing.assert_allclose(np.sum(out * thickness), 0.0, atol=1e-14)
+
+
+def test_require_planted_is_fail_closed():
+    rows = [{"name": "x", "status": "DEBT", "absolute_max": 1.0},
+            {"name": "y", "status": "DEBT", "absolute_max": 3.0e-12}]
+    GATE.require_planted(rows, "x")
+    with pytest.raises(GATE.GateError, match="did not land"):
+        GATE.require_planted(rows, "y")          # DEBT but no +1.0 visible
+    with pytest.raises(GATE.GateError, match="missing"):
+        GATE.require_planted(rows, "z")
+
+
+LOCK_ROOT = GATE.ROOTS["LOCK_EXCHANGE-zco"]
+needs_oracle = pytest.mark.skipif(
+    not (LOCK_ROOT / "oracle_stage_kt00000001_s1.bin").is_file(),
+    reason="LOCK stage dumps absent")
+
+
+@needs_oracle
+def test_planted_stage_control_exits_nonzero_end_to_end(tmp_path):
+    """The REAL LOCK sweep with --plant-stage: exit 1 (DEBT), the planted
+    stage-1 row carries the +1.0 and is listed in failed_rows."""
+    out = tmp_path / "planted.json"
+    code = GATE.main(["LOCK_EXCHANGE-zco", "--plant-stage", "--allow-dirty",
+                      "--output", str(out)])
+    assert code == 1
+    report = json.loads(out.read_text())
+    name = "LOCK_EXCHANGE-zco.kt1.stage1.faithful.instantaneous_u"
+    row = next(row for row in report["rows"] if row["name"] == name)
+    assert row["status"] == "DEBT" and row["absolute_max"] >= 0.5
+    assert name in report["failed_rows"]
+    assert report["controls"] == {"plant_stage": True, "plant_operand": False}
+    assert report["status"] == ("DEBT" if report["failed_rows"] else "AT-BAR")
+
+
+@needs_oracle
+def test_undetected_plant_exits_two(monkeypatch):
+    """If the scorer stops seeing plants, the planted run must exit 2, not 1."""
+    real = GATE.score
+
+    def blind(name, oracle, candidate, mask, *, plant=False, quantity="u"):
+        return real(name, oracle, candidate, mask, plant=False, quantity=quantity)
+
+    monkeypatch.setattr(GATE, "score", blind)
+    assert GATE.main(["LOCK_EXCHANGE-zco", "--plant-stage", "--allow-dirty"]) == 2

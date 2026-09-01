@@ -15,7 +15,6 @@ import importlib.util
 import json
 import math
 import re
-import subprocess
 import time
 from pathlib import Path
 
@@ -117,10 +116,14 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def git_sha() -> str:
-    return subprocess.run(
-        ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True
-    ).stdout.strip()
+def git_sha(*, allow_dirty: bool = False) -> str:
+    """Exact legoESM producer revision (fails closed on tracked dirt)."""
+    from legoesm.ocean.fidelity.provenance import git_sha as _stamp
+
+    try:
+        return _stamp(allow_dirty=allow_dirty)
+    except RuntimeError as error:
+        raise StatisticalError(f"cannot stamp legoESM git SHA: {error}") from error
 
 
 def _load_module(name: str, relative: str):
@@ -1223,11 +1226,13 @@ def main() -> int:
     run_parser.add_argument("--case", choices=tuple(CASES), required=True)
     run_parser.add_argument("--precision", choices=("fp64", "fp32"), required=True)
     run_parser.add_argument("--output-dir", type=Path, required=True)
-    run_parser.add_argument("--git-sha", default=None)
+    run_parser.add_argument("--allow-dirty", action="store_true",
+                            help="stamp '<sha>-dirty' instead of refusing a dirty tree")
     run_parser.add_argument("--check-finite-every-step", action="store_true")
     trace_parser = subparsers.add_parser("run-fp32-temperature-trace")
     trace_parser.add_argument("--output", type=Path, required=True)
-    trace_parser.add_argument("--git-sha", default=None)
+    trace_parser.add_argument("--allow-dirty", action="store_true",
+                              help="stamp '<sha>-dirty' instead of refusing a dirty tree")
     score_parser = subparsers.add_parser("score")
     score_parser.add_argument("--case", choices=tuple(CASES), required=True)
     score_parser.add_argument("--lego-root", type=Path, default=FULL_ROOT / "legoesm")
@@ -1242,11 +1247,12 @@ def main() -> int:
             args.case,
             args.precision,
             args.output_dir,
-            args.git_sha or git_sha(),
+            git_sha(allow_dirty=args.allow_dirty),
             check_finite_every_step=args.check_finite_every_step,
         )
     elif args.command == "run-fp32-temperature-trace":
-        report = run_fp32_temperature_trace(args.output, args.git_sha or git_sha())
+        report = run_fp32_temperature_trace(
+            args.output, git_sha(allow_dirty=args.allow_dirty))
     else:
         set_policy(PrecisionPolicy.fp64())
         require(bool(jax.config.jax_enable_x64), "scoring requires JAX x64")

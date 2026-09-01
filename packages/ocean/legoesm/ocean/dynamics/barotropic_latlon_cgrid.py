@@ -1242,15 +1242,7 @@ def _run_substep_loop(
         return _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area,
                                    _ssh_avg_prep)
 
-    # NEMO key_RK3 + flux-form momentum is one unbranched scheme identity.
-    # dynspg_ts.F90:731-761 advances FACE TRANSPORT, with the outer Kmm depth
-    # frozen across the external window; NEMO exposes no velocity-form arm.
-    # Other integrators/advection families retain the legacy velocity update.
-    _nemo_flux_form_update = (
-        getattr(config, "momentum_time_integrator", "euler") == "rk3_ws"
-        and getattr(config, "momentum_advection", "vector_invariant")
-        == "flux_form"
-    )
+    _nemo_flux_form_update = nemo_flux_form_update_active(config)
     # Harness-only causal arm.  This is deliberately absent from public
     # configuration: NEMO exposes no switch inside its WS-RK3 flux-form
     # identity.  Production always follows the source-attested branch above.
@@ -1859,6 +1851,23 @@ def _reconcile_targets(config, *, U_bar_avg, V_bar_avg, Hu_avg, Hv_avg,
     _H_v_now = jnp.maximum(
         jnp.sum(min_cell_to_vface(h_k_now, grid), axis=-1), min_water_col)
     return (Hu_avg / _H_u_now).astype(dtype), (Hv_avg / _H_v_now).astype(dtype)
+
+
+def nemo_flux_form_update_active(config) -> bool:
+    """NEMO key_RK3 + flux-form momentum is one unbranched scheme identity.
+
+    dynspg_ts.F90:731-761 advances FACE TRANSPORT, with the outer Kmm depth
+    frozen across the external window; NEMO exposes no velocity-form arm.
+    Other integrators/advection families retain the legacy velocity update.
+    This is THE production predicate (no public switch); the OVERFLOW
+    19-frame gate calls it to measure, not assume, that its production arm
+    resolves to the literal update.
+    """
+    return (
+        getattr(config, "momentum_time_integrator", "euler") == "rk3_ws"
+        and getattr(config, "momentum_advection", "vector_invariant")
+        == "flux_form"
+    )
 
 
 def barotropic_substeps_latlon_cgrid(

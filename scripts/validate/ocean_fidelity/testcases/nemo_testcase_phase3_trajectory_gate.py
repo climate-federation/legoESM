@@ -20,16 +20,14 @@ from pathlib import Path
 import numpy as np
 
 
-def git_sha() -> str:
-    """Exact legoESM producer revision; fail closed off Git."""
-    import subprocess
+def git_sha(*, allow_dirty: bool = False) -> str:
+    """Exact legoESM producer revision (fails closed on tracked dirt)."""
+    from legoesm.ocean.fidelity.provenance import git_sha as _stamp
 
     try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
-        ).strip()
-    except (OSError, subprocess.CalledProcessError) as error:
-        raise RuntimeError(f"cannot stamp legoESM git SHA: {error}") from error
+        return _stamp(allow_dirty=allow_dirty)
+    except RuntimeError as error:
+        raise GateError(f"cannot stamp legoESM git SHA: {error}") from error
 
 BAR = 1.0e-15
 DEFAULT_ORACLE_ROOTS = {
@@ -220,7 +218,7 @@ def characterize_growth(steps: list[dict]) -> dict:
 def run(
     case: str, oracle_root: Path, max_step: int, *, plant=False,
     continue_after_first=False, diagnostic_disable_bbl=False,
-    owner_controls=False,
+    owner_controls=False, allow_dirty=False,
 ) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -232,6 +230,8 @@ def run(
         build_nemo_testcase_card,
     )
 
+    # Stamp FIRST so a dirty tree refuses before any compute (fail closed).
+    legoesm_git_sha = git_sha(allow_dirty=allow_dirty)
     set_policy(PrecisionPolicy.fp64())
     require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
@@ -437,7 +437,7 @@ def run(
             }
     return {
         "format": "nemo-testcase-l1-phase3-trajectory-v1",
-        "legoesm_git_sha": git_sha(),
+        "legoesm_git_sha": legoesm_git_sha,
         "case": case,
         "status": "AT-BAR" if first_over_bar is None else "DEBT",
         "precision_policy": "fp64",
@@ -484,6 +484,8 @@ def main() -> int:
     parser.add_argument("--continue-after-first", action="store_true")
     parser.add_argument("--diagnostic-disable-bbl", action="store_true")
     parser.add_argument("--owner-controls", action="store_true")
+    parser.add_argument("--allow-dirty", action="store_true",
+                        help="stamp '<sha>-dirty' instead of refusing a dirty tree")
     args = parser.parse_args()
     require(args.max_step >= 1, "max-step must be positive")
     report = run(
@@ -491,7 +493,7 @@ def main() -> int:
         args.max_step, plant=args.plant,
         continue_after_first=args.continue_after_first,
         diagnostic_disable_bbl=args.diagnostic_disable_bbl,
-        owner_controls=args.owner_controls)
+        owner_controls=args.owner_controls, allow_dirty=args.allow_dirty)
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.write_text(text)
