@@ -70,6 +70,28 @@ def test_gross_temperature_control_hard_fails():
         stats._snap_temperature(values, "OVERFLOW-zps", values.dtype)
 
 
+def test_fp32_trace_classifier_accepts_gradual_precision_accumulation():
+    excess = np.linspace(0.0, 1.0e-3, 3061)
+    report = stats.classify_fp32_temperature_trace(excess, all_finite=True)
+    assert report["classification"] == "PRECISION_ACCUMULATION"
+    assert report["largest_jump_fraction_of_peak"] < 0.05
+    assert report["peak_ulp_per_step"] < 1.0
+
+
+def test_fp32_trace_classifier_detects_planted_limiter_jump():
+    excess = np.zeros(3061)
+    excess[2000:] = 1.0e-3
+    report = stats.classify_fp32_temperature_trace(excess, all_finite=True)
+    assert report["classification"] == "LIMITER_EVENT"
+    assert report["largest_jump_fraction_of_peak"] == 1.0
+
+
+def test_fp32_trace_classifier_fails_closed_on_nonfinite_state():
+    excess = np.linspace(0.0, 1.0e-3, 3061)
+    report = stats.classify_fp32_temperature_trace(excess, all_finite=False)
+    assert report["classification"] == "NONFINITE"
+
+
 def test_planted_census_distance_goes_outside():
     baseline = np.asarray([0.2, 0.5, 0.3])
     planted = np.asarray([1.0, 0.0, 0.0])

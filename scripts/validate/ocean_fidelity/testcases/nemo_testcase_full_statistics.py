@@ -33,6 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 ARTIFACT_ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l1")
 FULL_ROOT = ARTIFACT_ROOT / "full_statistical"
 PREREG_SHA = "27e569b20932e44a0fc1d1f4812c7fe8b4fc79b2"
+FP32_DISCRIMINATOR_PREREG_SHA = "b3a813c8a2e3"
 CASES = {
     "LOCK_EXCHANGE-zco": {
         "slug": "lock_exchange_zco",
@@ -294,6 +295,122 @@ def run_legoesm(
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
     print(json.dumps(metadata, indent=2, sort_keys=True), flush=True)
     return metadata
+
+
+def classify_fp32_temperature_trace(
+    excess: np.ndarray,
+    *,
+    all_finite: bool,
+    field_scale: float = 20.0,
+    eps: float = float(np.finfo(np.float32).eps),
+) -> dict:
+    """Apply the committed gradual-accumulation versus jump corridors."""
+    values = np.asarray(excess, dtype=np.float64)
+    require(values.ndim == 1 and values.size >= 2, "fp32 trace needs at least two steps")
+    require(np.all(values >= 0.0), "fp32 trace excess must be nonnegative")
+    n_steps = values.size - 1
+    peak = float(np.max(values))
+    increments = np.maximum(np.diff(values), 0.0)
+    jump_index = int(np.argmax(increments)) + 1
+    jump = float(increments[jump_index - 1])
+    jump_fraction = jump / peak if peak > 0.0 else 0.0
+    ulp_per_step = peak / (field_scale * eps * n_steps)
+    if not all_finite:
+        classification = "NONFINITE"
+    elif peak <= 0.0:
+        classification = "UNMEASURED"
+    elif jump_fraction >= 0.5:
+        classification = "LIMITER_EVENT"
+    elif jump_fraction <= 0.05 and ulp_per_step <= 1.0:
+        classification = "PRECISION_ACCUMULATION"
+    else:
+        classification = "UNMEASURED"
+    return {
+        "classification": classification,
+        "n_steps": n_steps,
+        "peak_excess_K": peak,
+        "largest_positive_jump_K": jump,
+        "largest_positive_jump_completed_step": jump_index,
+        "largest_jump_fraction_of_peak": jump_fraction,
+        "peak_ulp_per_step": ulp_per_step,
+        "corridors": {
+            "accumulation_max_jump_fraction": 0.05,
+            "accumulation_max_ulp_per_step": 1.0,
+            "limiter_event_min_jump_fraction": 0.5,
+        },
+    }
+
+
+def run_fp32_temperature_trace(output: Path, stamped_sha: str) -> dict:
+    """Run the preregistered 3,060-step OVERFLOW fp32 range discriminator."""
+    case = "OVERFLOW-zps"
+    policy = PrecisionPolicy.fp32()
+    set_policy(policy)
+    require(get_policy() == policy, "failed to set fp32 policy")
+    require(not bool(jax.config.jax_enable_x64), "fp32 trace requires jax_enable_x64=False")
+    card = build_nemo_testcase_card(case)
+    model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    state = card.recipe.initial_state
+    wet = expected_masks(card)["T"]
+    n_steps = int(CASES[case]["mid_kt"])
+    low, high = CASES[case]["temperature_range"]
+    trace = []
+    all_finite = True
+    started = time.perf_counter()
+    for completed in range(n_steps + 1):
+        arrays = _state_arrays(state)
+        finite = {name: bool(np.all(np.isfinite(value))) for name, value in arrays.items()}
+        all_finite = all_finite and all(finite.values())
+        temperature = arrays["T"][wet]
+        raw_min = float(np.min(temperature))
+        raw_max = float(np.max(temperature))
+        excess = max(low - raw_min, raw_max - high, 0.0)
+        trace.append(
+            {
+                "completed_step": completed,
+                "raw_min_C": raw_min,
+                "raw_max_C": raw_max,
+                "excess_K": excess,
+                "fields_finite": finite,
+            }
+        )
+        if completed < n_steps:
+            state = model.step(state, dt=card.dt_s)
+    classification = classify_fp32_temperature_trace(
+        np.asarray([row["excess_K"] for row in trace]), all_finite=all_finite
+    )
+    gross_threshold = 1.0e-6 * max(abs(low), abs(high), 1.0)
+    crossings = [row["completed_step"] for row in trace if row["excess_K"] > gross_threshold]
+    report = {
+        "format": "nemo-testcase-l1-fp32-temperature-trace-v1",
+        "preregistration_commit": FP32_DISCRIMINATOR_PREREG_SHA,
+        "git_sha": stamped_sha,
+        "case": case,
+        "precision": "fp32",
+        "precision_policy": repr(policy),
+        "jax_enable_x64": bool(jax.config.jax_enable_x64),
+        "backend": jax.default_backend(),
+        "devices": [str(device) for device in jax.devices()],
+        "temperature_dtype": str(np.asarray(state.T.data).dtype),
+        "geometry_dtypes": {
+            name: str(np.asarray(getattr(card.recipe.z_coord, name)).dtype)
+            for name in ("t_depth_ref", "dz_ref", "z_full_ref", "z_half_ref", "h_partial")
+        },
+        "all_finite": all_finite,
+        "gross_guard_relative": 1.0e-6,
+        "first_gross_excursion_completed_step": crossings[0] if crossings else None,
+        "classification": classification,
+        "reviewed_prior_scaling_context": {
+            "ratio_of_ratios": 0.477,
+            "estimated_ulp_per_step": 0.19,
+            "status": "PLAUSIBLE-strong before this discriminating arm",
+        },
+        "wall_time_s": time.perf_counter() - started,
+        "trace": trace,
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    return report
 
 
 def parse_namelist_values(path: Path) -> dict[str, str]:
@@ -1041,6 +1158,9 @@ def main() -> int:
     run_parser.add_argument("--output-dir", type=Path, required=True)
     run_parser.add_argument("--git-sha", default=None)
     run_parser.add_argument("--check-finite-every-step", action="store_true")
+    trace_parser = subparsers.add_parser("run-fp32-temperature-trace")
+    trace_parser.add_argument("--output", type=Path, required=True)
+    trace_parser.add_argument("--git-sha", default=None)
     score_parser = subparsers.add_parser("score")
     score_parser.add_argument("--case", choices=tuple(CASES), required=True)
     score_parser.add_argument("--lego-root", type=Path, default=FULL_ROOT / "legoesm")
@@ -1058,6 +1178,8 @@ def main() -> int:
             args.git_sha or git_sha(),
             check_finite_every_step=args.check_finite_every_step,
         )
+    elif args.command == "run-fp32-temperature-trace":
+        report = run_fp32_temperature_trace(args.output, args.git_sha or git_sha())
     else:
         set_policy(PrecisionPolicy.fp64())
         require(bool(jax.config.jax_enable_x64), "scoring requires JAX x64")
