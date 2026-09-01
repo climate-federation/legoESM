@@ -121,7 +121,7 @@ Round-4 artifacts under
 | LOCK kt=1--10 regression | `2a9221853bb07a314d37de299ea82768a6a17753a5dc4c99bbe965786ba256c1` |
 | fp64 metadata / states | `ac148830e3b099e3d1a94566f0faec2a1dc1a7325fae2f147d0e00c35bd862c1` / `7ea95685241a631ebbea1b8ef554793f68ce4625fdcc4024b9c2649f2e607ea8` |
 | fp32 metadata / states | `014b21ac1aece9fcf0bf0263b900e53a9e2761b15cb375174977a242a20a2998` / `53cdc440425c03ed992abee044184014e1b2333de1fa5c6d5e7c35309595550e` |
-| statistical report | `5bb0165b77b6b849a0993b4ff15a959715aad456f4372d8bb00705a0dbe7b53f` |
+| statistical report | `a99ebd4007426ebd35a8dbe30e1fa4c0a17bb3e3176af66add3b0963b99eab58` |
 
 Focused CPU/fp64 validation is **56 passed**: 5 barotropic-gate controls,
 15 full-statistics controls, 9 real WS-RK3 tests, 15 testcase-card tests, and
