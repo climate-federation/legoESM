@@ -76,3 +76,52 @@ recorded here as a known imbalance rather than silently balanced away).
    (US-Var, US-Whs, US-SRM, US-Ton) and their C4 pathway keeps published
    parameters, so this is a C3 calibration scored on a partly-C4 panel.
 4. Per-site regressions are reported even when the mean improves.
+
+
+---
+
+# Amendment — Stage 2: dry-site P-hydro ladder (pre-registered before it runs)
+
+Both design reviewers refused the first stage-2 sketch. Recorded here with the
+changes it forced.
+
+**Refused**: sweeping `gamma_cost` x `gplant_mol` and calling it
+"site-appropriate hydraulics". Those two are partly compensatory (they both
+modulate how aggressively the plant spends water), while `root_biomass_gm2`
+sets the soil-to-root resistance and `minlwp_mpa` sets the dry cutoff — so the
+slice was an assumption, and we hold no per-site hydraulic trait data that
+would justify the "site-appropriate" label.
+
+**Replaced by**: a one-at-a-time SENSITIVITY SCREEN over all four P-hydro
+parameters (`scripts/cluster/ec_site/run_phydro_sensitivity.sbatch`) at two dry
+sites, and the 2-D ladder slice is then chosen from the MEASURED response
+instead of asserted. The ladder is labelled a behaviour screen of P-hydro's
+hydraulic parameters, not a site-specific calibration.
+
+**Hold-out protection**: the screen runs only on US-Whs and US-Ton, which are
+stage-1 TRAINING sites. US-SRM and US-Var are stage-1 hold-outs and are
+excluded from every stage-2 run until the stage-1 verdict is fixed and
+published; only then may they enter the dry-site ladder.
+
+**What "P-hydro pays" means, fixed in advance**: at the dry sites, some
+parameter setting must beat the `beta_theta` anchor on the same objective as
+stage 1 (`0.5*nRMSE(GPP) + 0.5*nRMSE(LE)`, per-site normalised so the
+Mediterranean sites' larger absolute fluxes cannot dominate) at a MAJORITY of
+the dry sites, not merely on the multi-site mean. Anything else is reported as
+"does not pay at these sites with generic hydraulics".
+
+**Stated caveats, not corrected here**:
+* The `beta_theta` anchor is implicitly tuned on these ecosystems and has
+  absorbed compensating errors; P-hydro must get the whole supply chain right
+  with generic traits. A mixed result is the physically expected outcome of an
+  uncalibrated-vs-tuned comparison, not by itself a defect in the scheme.
+* Whole-plant conductance genuinely spans this sweep's whole range across shrub
+  / oak-savanna / Mediterranean-evergreen types, so a single global value makes
+  this a screen and never a verdict on P-hydro's fidelity.
+* Switching to P-hydro replaces the stress ARCHITECTURE (it removes the
+  empirical stress and re-routes capacity and slope through the hydraulic
+  optimum), so it is a one-SWITCH ladder but not a single-mechanism test.
+* The discriminating measurement neither stage runs is predicted leaf water
+  potential against observed predawn / midday values — that is what would
+  separate "P-hydro is mis-parameterised" from "P-hydro is wrong here".
+  Recorded as the recommended next instrument.
