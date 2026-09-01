@@ -7,8 +7,9 @@ OVERFLOW-zps card complete all 6,120 steps in both fp64 and fp32.  The prior
 failures at completed steps 2,877/2,879 were therefore caused by legoESM's
 approximate adaptive-implicit composition.  No damping, clipping, diffusion,
 limiter, or oracle-absent selector was added.  The frozen statistical scorer
-nevertheless returns `OUTSIDE`: fp32 violates its preregistered gross
-temperature-excursion guard, so it cannot supply a roundoff floor.
+now returns a fully classified `OUTSIDE` verdict: three metrics are `OUTSIDE`,
+two are `WITHIN-SCHEME-SPREAD`, and one is
+`INDISTINGUISHABLE-AT-FLOOR`.
 
 ## Round 3 resolution: source-exact adaptive-implicit package
 
@@ -49,17 +50,62 @@ from the prior approximately `4.12e-6` class, while T and SSH remain at their
 recorded values/classes.  Resolved coverage is now 68 VERIFIED, 40 WAIVED,
 and **0 UNMEASURED**; `namzdf.ln_zad_aimp` is no longer a boolean-only claim.
 
+The required kt=3--10 regression was scored against the same hash-pinned kt60
+oracle root as the certified predecessor (`98856a4f...`), resolving the
+otherwise disagreeing `4.121e-6` and `3.956e-6` historical kt=2 U values before
+recording a table.  Values are normalized wet-intersection L-infinity errors;
+U is instantaneous C-grid U-face `Nbb` on both sides.
+
+| kt | T before | T after | U before | U after | SSH before | SSH after |
+|---:|---:|---:|---:|---:|---:|---:|
+| 3 | `2.86506559e-7` | `2.86533772e-7` | `1.48996998e-5` | `6.46235078e-6` | `5.12822130e-6` | `5.12880845e-6` |
+| 4 | `9.69751797e-7` | `9.70053135e-7` | `3.12223642e-5` | `1.16440779e-5` | `2.64646724e-5` | `2.64530059e-5` |
+| 5 | `1.98970837e-6` | `1.99089401e-6` | `5.70663548e-5` | `2.80038578e-5` | `4.75242327e-5` | `4.74630495e-5` |
+| 6 | `3.25521608e-6` | `3.25857142e-6` | `8.64905185e-5` | `5.97568478e-5` | `4.72451204e-5` | `4.72344006e-5` |
+| 7 | `4.92499227e-6` | `4.93304987e-6` | `1.08568566e-4` | `8.16437683e-5` | `6.96928483e-5` | `6.97196664e-5` |
+| 8 | `7.22006930e-6` | `7.23683063e-6` | `1.27503714e-4` | `8.92508130e-5` | `8.54599094e-5` | `8.65979411e-5` |
+| 9 | `1.01233435e-5` | `1.01541688e-5` | `1.56823138e-4` | `1.05130255e-4` | `8.39364577e-5` | `8.39242799e-5` |
+| 10 | `1.34856007e-5` | `1.35379486e-5` | `1.97738709e-4` | `1.41894266e-4` | `8.66446322e-5` | `8.66359613e-5` |
+
+The package changes every post-initial step.  It reduces U by `2.30x` at kt=3
+and `1.39x` at kt=10, while T moves upward by at most `0.39%` and SSH remains
+within `1.33%` of the predecessor across this interval.  This is a regression
+table, not a claim that any row reaches the `1e-15` bar.
+
 The full-duration scorer first exposed and then repaired a latent mismatch
 between its code and the frozen preregistration: the preregistered front is the
 rightmost connected ascending crossing, whereas the code rejected any state
 with more than one crossing.  Commit `a9fa35365478` applies the registered
 rightmost reduction and adds multiple/missing-crossing controls.  It does not
 relax a scientific bar.  The rerun produces a machine-readable `OUTSIDE`
-report for all six registered metrics because L32 ends at `20.002197265625 C`:
-its `0.002197265625 K`, `1.0986328125e-4` relative excess exceeds the frozen
-`1e-6` gross guard.  L64 itself remains finite and below the gross guard
-(`20.000000000008576 C` maximum), but statistical equivalence cannot be
-classified without a valid precision-floor arm.
+report when L32 ended at `20.002197265625 C`: its `0.002197265625 K`,
+`1.0986328125e-4` relative excess exceeded the original fixed `1e-6` gross
+guard.  The reviewer-provided ratio-of-ratios `0.477` and approximately
+`0.19 ULP/step` made precision accumulation **PLAUSIBLE-strong**, not proven.
+Commit `b3a813c8a2e3` then froze a discriminating 3,060-step trace before it
+ran.  The trace is finite and classifies `PRECISION_ACCUMULATION`: peak excess
+`0.0027885437 K`, largest positive one-step jump `5.7220459e-6 K`, jump/peak
+`0.002052`, and peak `0.3822 ULP/step`.  A limiter-like jump would have required
+`jump/peak >= 0.5`.
+
+Only after that result, the scorer admitted L32 as a floor arm using the frozen
+relative eligibility guard `max(1e-6, N_steps*eps(dtype)) = 7.2956085e-4`.
+The fp64 guard remains exactly `1e-6`.  L32's range row remains loudly
+`UNMEASURED` against the stricter `sqrt(N)*eps` endpoint floor; the new guard
+establishes floor-arm eligibility, not FCT monotonicity.  The reissued fp64
+statistical verdict is:
+
+| metric | candidate | fp32 floor | NEMO scheme spread | verdict |
+|---|---:|---:|---:|---|
+| plume descent | `0.904742 m` | `0.042421 m` | `1499.623281 m` | `WITHIN-SCHEME-SPREAD` |
+| plume front | `1.009612 km` | `0.536798 km` | `121.930713 km` | `WITHIN-SCHEME-SPREAD` |
+| final T histogram TV | `0.0529614` | `0.0181573` | `0.0442310` | `OUTSIDE` |
+| final water-mass census | `0.0148908` | `0.00282271` | `0.00336209` | `OUTSIDE` |
+| instantaneous U L-inf | `0.972586` | `1.071714` | `0.672694` | `INDISTINGUISHABLE-AT-FLOOR` |
+| T L-inf | `0.394134` | `0.153583` | `0.356744` | `OUTSIDE` |
+
+Thus OVERFLOW fp64 is still `OUTSIDE` statistically, now for measured metric
+distances rather than an invalid floor arm.
 
 Round-3 artifacts (all under
 `/data/abyssal/dbalwada/nemo-testcases-l1/round3_aimp/`):
@@ -72,7 +118,9 @@ Round-3 artifacts (all under
 | fp64 states | `6a8520bb2cf82d74dc0c9658989cdda36f032fbc9bd4c4abc515fff07acc3373` |
 | fp32 metadata | `7cc10f9f7dc171356a2df682096cef96e5d568a89be8f434071afa73c96b4084` |
 | fp32 states | `4d24f03c79a4b25622d13f2b8226dde831ef021a613d86ce9c04ef5ebea06166` |
-| statistical report | `1038939cd39d738bbee6a259917fd35665b658d35b091f09a11e9cc3dcad2a0e` |
+| fp32 3,060-step range trace | `a093cf1127da5a4572010d8f49fa7fda752b99b9d847ba1a47e0c58a79907dfa` |
+| kt=1--10 gate, kt60 oracle frame | `5854acc4680f1a2c572b813331525b16b59959160874ca565fba18a332ee5670` |
+| statistical report | `2fab37b6c8fadb35074efc403c5abe6716d6fe634070c2fb299b2e65ff886c49` |
 
 ## Pre-fix executive finding (retained as the first-divergence record)
 
@@ -349,11 +397,19 @@ needed after the coverage table.
 | machine verdict | `6b0143b5b30ee65a87b50ca771c7aef2af33f78a1ba4eac5926d0f1bba8b5cba` |
 
 The coverage JSON and machine verdict stamp scorer commit `b8fb77fec3ef`;
-the full adaptive arm stamps runner commit `5e68669f5e8f`.  The focused current
-breakdown is **32 tests**: 12 stability-probe/coverage/label controls plus 20
-adaptive-implicit vertical-advection unit tests.  All ran CPU/fp64 with
+the full adaptive arm stamps runner commit `5e68669f5e8f`.  The **32 tests**
+reported here were the historical two-file Round-2 subset: 12 stability-probe/
+coverage/label controls plus 20 adaptive-implicit vertical-advection tests.
+Rule 1e reconciliation of the later counts is exact: the reviewer's **66** was
+the five pre-existing files (20 adaptive + 9 ZDF literal + 15 recipe + 12
+stability probe + 10 statistical); the author's **70** added the 4 new Wicker
+package literal tests.  This round adds 5 statistical controls, so the current
+six-file collection is **75 = 4 + 20 + 9 + 15 + 12 + 15**.  All ran CPU/fp64 with
 `JAX_PLATFORMS=cpu`, `JAX_ENABLE_X64=1`; every state and geometry dtype in the
-arm receipt is `float64`.
+arm receipt is `float64`.  Direct CLI controls make the planted state and census
+return `OUTSIDE`; the planted unregistered metric exits nonzero.  The state and
+census plants are applied to both L64 and L32 so their signal cannot cancel into
+the precision floor.
 
 Independent adversarial review is **UNMEASURED**.  A read-only Codex review was
 attempted after the commits, but the sandbox denied both WebSocket and HTTPS
