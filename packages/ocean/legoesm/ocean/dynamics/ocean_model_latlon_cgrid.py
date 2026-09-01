@@ -1002,6 +1002,10 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     kmm_tracer_transports: bool = True
     two_step_fct_predictor: bool = True
     disable_bbl: bool = False
+    # Return a momentum stage's instantaneous velocity in the prognostic u/v
+    # slots after the full step has run.  Private fidelity instrumentation only;
+    # zero leaves the returned state untouched.
+    expose_momentum_stage: int = 0
 
 
 def _nemo_ws_rk3_tracer_pair_step(
@@ -1513,6 +1517,9 @@ class LatLonCGridOceanModel:
         self.z_coord = z_coord
         self._nemo_ws_test_hooks = (
             _nemo_ws_test_hooks or _NEMOWSRK3TestHooks())
+        if self._nemo_ws_test_hooks.expose_momentum_stage not in (0, 1, 2, 3):
+            raise ValueError(
+                "expose_momentum_stage must be one of 0, 1, 2, or 3")
         self.config = self._validate_config(
             config or LatLonCGridOceanConfig.from_flat())
         # Convert LatLonGrid -> LatLonCGridGeometry once at construction.
@@ -4069,6 +4076,7 @@ class LatLonCGridOceanModel:
         # is the tracer flux-limiter timestep.  dt_mom_ratio=1.0 (default) ⇒
         # dt_mom == dt ⇒ bit-identical for all existing configs.
         _nemo_ws_velocity_stages = None
+        _nemo_ws_exposed_momentum_stage = None
         if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3":
             u0 = state.u.data
             v0 = state.v.data
@@ -4172,6 +4180,10 @@ class LatLonCGridOceanModel:
             p2u, p2v = _mom_pert_ws(u2, v2, False)
             u_star = u0 + dt_mom * p2u
             v_star = v0 + dt_mom * p2v
+            if self._nemo_ws_test_hooks.expose_momentum_stage == 1:
+                _nemo_ws_exposed_momentum_stage = (u1, v1)
+            elif self._nemo_ws_test_hooks.expose_momentum_stage == 2:
+                _nemo_ws_exposed_momentum_stage = (u2, v2)
         else:
             u_star = state.u.data + dt_mom * du_dt_pert
             v_star = state.v.data + dt_mom * dv_dt_pert
@@ -4578,6 +4590,10 @@ class LatLonCGridOceanModel:
                 u=state_new.u.replace(data=u3_corr),
                 v=state_new.v.replace(data=v3_corr),
             )
+            if self._nemo_ws_test_hooks.expose_momentum_stage == 1:
+                _nemo_ws_exposed_momentum_stage = (u1_corr, v1_corr)
+            elif self._nemo_ws_test_hooks.expose_momentum_stage == 2:
+                _nemo_ws_exposed_momentum_stage = (u2_corr, v2_corr)
             if _use_transport_reconcile:
                 def _transport_stage(u_in, v_in):
                     mean_u = (jnp.sum(u_in * h_u_pre, axis=-1) / H_u_pre
@@ -6011,6 +6027,18 @@ class LatLonCGridOceanModel:
                 u=state_new.u.replace(data=_u_pin),
                 v=state_new.v.replace(data=_v_pin),
                 eta=state_new.eta.replace(data=_eta_pin),
+            )
+
+        # Private oracle-fidelity seam: NEMO's stage dumps are written inside
+        # stprk3_stg immediately after each instantaneous Kaa update.  Expose
+        # stages 1/2 only after the ordinary step has completed so the
+        # diagnostic hook cannot perturb later stages.  Stage 3 is the normal
+        # returned prognostic velocity and therefore needs no substitution.
+        if _nemo_ws_exposed_momentum_stage is not None:
+            _stage_u, _stage_v = _nemo_ws_exposed_momentum_stage
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=_stage_u),
+                v=state_new.v.replace(data=_stage_v),
             )
 
         state_new = cast_pytree(state_new, None, "storage", allow_downcast=True)

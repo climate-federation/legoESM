@@ -22,9 +22,9 @@ import numpy as np
 BAR = 1.0e-15
 DEFAULT_ORACLE_ROOTS = {
     "LOCK_EXCHANGE-zco": Path(
-        "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_3"),
+        "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_10"),
     "OVERFLOW-zps": Path(
-        "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_3"),
+        "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10"),
 }
 
 

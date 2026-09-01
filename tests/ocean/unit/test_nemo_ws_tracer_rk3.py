@@ -3,6 +3,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as model_module
 from legoesm.core.precision import PrecisionPolicy, set_policy
@@ -25,6 +26,29 @@ def test_nemo_ws_microselectors_are_not_public_config():
     assert "tracer_fct_low_order_predictor" not in fields
     assert "rk3_ws_stage_barotropic_correction" not in fields
     assert "rk3_ws_momentum_transport_reconcile" not in fields
+
+
+def test_nemo_ws_private_stage_velocity_exposure_is_diagnostic_only():
+    """The fidelity seam returns Kaa stage velocity without changing tracers."""
+    set_policy(PrecisionPolicy.fp64())
+    card = build_lock_exchange_zco_card()
+    normal = model_module.LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config).step(
+            card.recipe.initial_state, dt=card.dt_s)
+    stage1 = model_module.LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=model_module._NEMOWSRK3TestHooks(
+            expose_momentum_stage=1)).step(
+                card.recipe.initial_state, dt=card.dt_s)
+    assert np.max(np.abs(
+        np.asarray(stage1.u.data) - np.asarray(normal.u.data))) > 1.0e-12
+    np.testing.assert_array_equal(
+        np.asarray(stage1.T.data), np.asarray(normal.T.data))
+    with pytest.raises(ValueError, match="expose_momentum_stage"):
+        model_module.LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=model_module._NEMOWSRK3TestHooks(
+                expose_momentum_stage=4))
 
 
 def test_nemo_two_step_fct_is_a_live_real_flux_arm():

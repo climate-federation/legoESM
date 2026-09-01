@@ -443,6 +443,89 @@ above.  LOCK kt=3 was walked after the kt=2 owner register was exhausted; its
 first continuation debts are T `9.1634e-12` and u `2.0540e-9`, with no new
 owner label from the already-divergent prefix.
 
+## Stage-primary control and contiguous kt=10 sweep
+
+This round continues the evidence ledger on issue **#1699**.  It creates no
+new public selector and changes no certified DINO or phase-1 testcase
+configuration.  A private read-only return seam exposes WS-RK3 stage-1 or
+stage-2 instantaneous velocity only after the full legoESM step has completed;
+therefore the diagnostic cannot perturb any later stage.  Stage 3 is the
+ordinary returned prognostic velocity.  NEMO's Kaa register is stage 1 = 3,
+stage 2 = 2, stage 3 = 3 at the dumps immediately following
+`src/OCE/stprk3_stg.F90:433-446`; the next entry is kt=2/Nbb=3 from the
+`stprk3.F90` entry instrument.  Every stage row names both operands as
+instantaneous 3-D C-grid U-face velocity and applies the identical wet-face
+elementwise L-infinity reduction with no depth or substep-time average.
+
+The registered OVERFLOW one-variable arm changes only
+`stage_barotropic_correction`.  The faithful kt=2 T absolute error is
+`4.8006916487e-7 K`; omission moves the candidate by `1.1897757091e-7 K`
+(`0.247834` of the faithful residual) and reduces the error to
+`3.6109159396e-7 K`, but does not clear the bar.  This is
+**PLAUSIBLE_CONTRIBUTOR_NOT_OWNER** on scale alone.  It is not a proposal to
+remove the correction: the direct stage-1 u error worsens from
+`6.3674137757e-8` to `4.5029698611e-2 m/s`.  The gate records the correction as
+**CONFIRMED_REQUIRED** and carries an explicit cancellation warning.  The
+remaining OVERFLOW T owner is UNMEASURED.
+
+LOCK's instantaneous-u tail was tested with exactly two one-variable arms, as
+registered.  Omission of the stage primary-velocity correction moves the
+candidate by `4.2989715926e-10 m/s` and worsens the residual from
+`1.7120868406e-10` to `5.7155454103e-10 m/s`.  Omission of momentum-transport
+reconciliation moves it by `6.1720004452e-10 m/s` and worsens it to
+`5.9807602992e-10 m/s`.  Both movements exceed the faithful tail, so the scale
+test is sensitive; neither arm improves or clears the bar.  Both are
+**REFUTED_AS_PRIMARY_OWNER**, and after the required two-arm limit the owner is
+registered **UNMEASURED_AFTER_TWO_ARMS**.  No third arm was run.
+
+The new NEMO configurations are isolated
+`tests/LOCK_EXCHANGE_OMIP_L1_P3` and `tests/OVERFLOW_OMIP_L1_P3`, compiled with
+the same conda/gfortran toolchain and pinned `key_qco`, vertical-coordinate,
+and `key_RK3` keys.  The latter was cloned from OVERFLOW solely to carry the
+same stage/entry instrument; the first generated cpp file incorrectly picked
+up `key_xios`, so that key was removed before the successful build.  Both CPU
+runs set `nn_itend=10`, write the final restart at 10, and completed normally.
+Their kt=1--3 entry dumps are byte-identical to the earlier certified dumps.
+The copied instrument writes all ten entry states and only the registered kt=1
+stage/RHS/transport records.  The legoESM harness requested a pinned GPU, but
+CUDA device discovery returned `CUDA_ERROR_NO_DEVICE` in this session; it ran
+fp64 on CPU instead.  Candidate T/u dtypes are printed as `float64` in both
+stage and trajectory JSONs.
+
+The table reports normalized wet-point L-infinity error against the exact
+NEMO entry state.  `v` is omitted because both tanks have no active
+meridional face and every row is UNMEASURED.  LOCK S at kt=2 and OVERFLOW S at
+kt=2 are UNINFORMATIVE because the oracle field is uniform; later S values are
+measured.  This explicit continuation does not restore an exact prefix after
+kt=2.
+
+| case | kt | T | S | instantaneous u | SSH |
+|---|---:|---:|---:|---:|---:|
+| LOCK | 1 | `0` | `0` | `0` | `0` |
+| LOCK | 2 | `1.58214e-13` | `0` (UNINFORMATIVE) | `1.71209e-10` | `4.78214e-28` (UNINFORMATIVE) |
+| LOCK | 3 | `9.16340e-12` | `2.03012e-16` (UNINFORMATIVE) | `2.05400e-9` | `1.35525e-18` |
+| LOCK | 4 | `4.84606e-11` | `2.03012e-16` | `4.85319e-9` | `4.92999e-14` |
+| LOCK | 5 | `1.50836e-10` | `4.06024e-16` | `8.77056e-9` | `5.03171e-13` |
+| LOCK | 6 | `3.61405e-10` | `4.06024e-16` | `1.37782e-8` | `2.44491e-12` |
+| LOCK | 7 | `7.37110e-10` | `2.03012e-16` | `1.98316e-8` | `8.23068e-12` |
+| LOCK | 8 | `1.34649e-9` | `4.06024e-16` | `2.68666e-8` | `2.21790e-11` |
+| LOCK | 9 | `2.26941e-9` | `4.06024e-16` | `3.47956e-8` | `5.14107e-11` |
+| LOCK | 10 | `3.59674e-9` | `4.06024e-16` | `4.35051e-8` | `1.06780e-10` |
+| OVERFLOW | 1 | `0` | `0` | `0` | `0` |
+| OVERFLOW | 2 | `2.40035e-8` | `2.03012e-16` (UNINFORMATIVE) | `4.12103e-6` | `1.23723e-7` |
+| OVERFLOW | 3 | `2.86506e-7` | `4.06024e-16` | `1.54030e-5` | `4.47222e-6` |
+| OVERFLOW | 4 | `9.69750e-7` | `4.06024e-16` | `3.15067e-5` | `2.40002e-5` |
+| OVERFLOW | 5 | `1.98970e-6` | `4.06024e-16` | `5.69749e-5` | `4.45039e-5` |
+| OVERFLOW | 6 | `3.25520e-6` | `4.06024e-16` | `8.63738e-5` | `4.47386e-5` |
+| OVERFLOW | 7 | `4.92497e-6` | `6.09037e-16` | `1.08575e-4` | `6.65274e-5` |
+| OVERFLOW | 8 | `7.22005e-6` | `1.01506e-15` | `1.27563e-4` | `8.33689e-5` |
+| OVERFLOW | 9 | `1.01233e-5` | `1.01506e-15` | `1.56818e-4` | `8.07337e-5` |
+| OVERFLOW | 10 | `1.34856e-5` | `8.12049e-16` | `1.97687e-4` | `8.21267e-5` |
+
+The first-over-bar entry remains kt=2: LOCK in T/u, OVERFLOW in T/u/SSH.
+The continuation therefore measures growth from an already-divergent prefix;
+it makes no trajectory-match claim.
+
 ## Gates, controls, test reconciliation, and artifacts
 
 `nemo_testcase_phase3_trajectory_gate.py` is fail-closed on dump headers,
@@ -478,6 +561,12 @@ barotropic-common + 17 config-footguns + 8 trajectory-gate + 8
 first-divergence-gate`; all 116 passed.  This is the actual collected
 breakdown, not an averaged historical count.
 
+For this stage/kt=10 continuation, the focused invocation ran **43 tests across
+six explicitly listed files**: `2 stage-sweep gate + 8 trajectory gate + 8
+first-divergence gate + 3 EOS gate + 7 WS-RK3 + 15 testcase-card`; all 43
+passed in the final post-edit run.  This is the collected breakdown for this
+round, not an average or substitution for any historical count above.
+
 Full artifact hashes are committed in
 `nemo_testcases_l1_phase3_artifacts.sha256`.  The trajectory and diagnostic
 JSONs are external run products under
@@ -487,13 +576,15 @@ receipt reproducible without committing quota-heavy binary dumps.
 ## Loud UNMEASURED register
 
 - owner of the final LOCK `1.7121e-10` wet-point L-infinity u residual after
-  distinct stage transport; live-Kmm UP3 and vertical viscosity are exonerated;
+  two scale-sensitive one-variable arms; status is
+  UNMEASURED_AFTER_TWO_ARMS, while live-Kmm UP3 and vertical viscosity remain
+  exonerated;
 - individual NEMO/legoESM FCT limiter coefficients and antidiffusive fluxes;
 - NEMO `utr_bbl` at kt=1 (legoESM BBL is confirmed inactive; NEMO is only
   geometrically plausible inactive);
-- owner of the remaining OVERFLOW-zps kt=2 T/u/SSH debt; the one-variable
-  controls rank stage primary-velocity correction next but do not establish
-  two-model ownership;
-- LOCK and OVERFLOW states beyond kt=3;
+- owner of the remaining OVERFLOW-zps kt=2 T/u/SSH debt; the stage-primary
+  omission is a scale-compatible T contributor but not an owner, and the
+  correction itself is confirmed required by the direct stage-u comparison;
+- term-level explanation of the measured kt=4--10 growth in either case;
 - long-trajectory phenomenology and statistical equivalence, which are beyond
   this first-divergence dispatch.
