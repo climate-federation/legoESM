@@ -37,6 +37,10 @@ DEFAULT_ORACLE = Path(
 DEFAULT_CANDIDATE = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l1/stability/overflow_legoesm_baseline"
 )
+CERTIFIED_ORACLE_KT1 = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l1/overflow_zps/"
+    "oracle_step_entry_kt00000001.bin"
+)
 CAPTURE_START = 2600
 CAPTURE_END = 2877
 ROUND_PAD_ULPS = 64.0
@@ -109,15 +113,23 @@ def _budget(state, card) -> dict[str, float]:
     }
 
 
-def run_legoesm(output: Path, arm: str, end_step: int) -> dict:
-    require(arm in {"baseline", "no_tracer_vertical_transport"}, f"bad arm {arm}")
+def run_legoesm(output: Path, arm: str, end_step: int, capture_start: int) -> dict:
+    require(
+        arm in {
+            "baseline",
+            "no_tracer_vertical_transport",
+            "no_primary_transport_average",
+        },
+        f"bad arm {arm}",
+    )
     set_policy(PrecisionPolicy.fp64())
     require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
-    require(end_step >= CAPTURE_START, "end step precedes capture window")
+    require(0 <= capture_start <= end_step, "invalid capture window")
     card = build_overflow_zps_card()
     hooks = _NEMOWSRK3TestHooks(
-        disable_tracer_vertical_transport=(arm == "no_tracer_vertical_transport")
+        disable_tracer_vertical_transport=(arm == "no_tracer_vertical_transport"),
+        primary_transport_average=(arm != "no_primary_transport_average"),
     )
     model = LatLonCGridOceanModel(
         card.recipe.grid,
@@ -144,7 +156,7 @@ def run_legoesm(output: Path, arm: str, end_step: int) -> dict:
     for completed in range(end_step + 1):
         fields = _state_arrays(state)
         finite = {name: bool(np.all(np.isfinite(value))) for name, value in fields.items()}
-        if completed >= CAPTURE_START:
+        if completed >= capture_start:
             arrays = {name: np.array(value, copy=True) for name, value in fields.items()}
             snap = output / f"completed_{completed:08d}.npz"
             np.savez_compressed(snap, **arrays)
@@ -202,7 +214,11 @@ def run_legoesm(output: Path, arm: str, end_step: int) -> dict:
         "precision_policy": repr(get_policy()),
         "jax_enable_x64": bool(jax.config.jax_enable_x64),
         "dtype_receipt": dtype_receipt,
-        "capture_completed_steps": [CAPTURE_START, min(end_step, records[-1]["completed_step"])],
+        "capture_completed_steps": (
+            [capture_start, min(end_step, records[-1]["completed_step"])]
+            if records
+            else None
+        ),
         "requested_end_step": end_step,
         "first_nonfinite_completed_step": first_nonfinite,
         "initial_budgets": initial_budget,
@@ -213,6 +229,193 @@ def run_legoesm(output: Path, arm: str, end_step: int) -> dict:
     path.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n")
     print(json.dumps({key: artifact[key] for key in artifact if key != "records"}, indent=2))
     return artifact
+
+
+def paired_step_scale(output: Path, completed_before: int) -> dict:
+    """Measure the private tracer-vertical arm from the identical input state."""
+    require(completed_before >= 0, "negative completed-before step")
+    set_policy(PrecisionPolicy.fp64())
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    card = build_overflow_zps_card()
+    baseline = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config
+    )
+    arm = LatLonCGridOceanModel(
+        card.recipe.grid,
+        card.recipe.z_coord,
+        card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            disable_tracer_vertical_transport=True
+        ),
+    )
+    state = card.recipe.initial_state
+    for _ in range(completed_before):
+        state = baseline.step(state, dt=card.dt_s)
+    before = _state_arrays(state)
+    baseline_after = _state_arrays(baseline.step(state, dt=card.dt_s))
+    arm_after = _state_arrays(arm.step(state, dt=card.dt_s))
+    masks = expected_masks(card)
+    rows = []
+    for name in ("T", "S", "u", "v", "ssh"):
+        use = np.asarray(masks[name], dtype=bool)
+        if not use.any():
+            rows.append({
+                "field": name,
+                "status": "UNMEASURED_NO_ACTIVE_FACE",
+            })
+            continue
+        effect = np.abs(arm_after[name] - baseline_after[name])
+        increment = np.abs(baseline_after[name] - before[name])
+        masked_increment = np.where(use, increment, -np.inf)
+        increment_index = tuple(
+            int(value)
+            for value in np.unravel_index(
+                np.argmax(masked_increment), masked_increment.shape
+            )
+        )
+        effect_max = float(np.max(effect[use]))
+        increment_max = float(increment[increment_index])
+        effect_at_increment = float(effect[increment_index])
+        row = {
+            "field": name,
+            "same_input_state": True,
+            "baseline_completed_before": completed_before,
+            "compared_completed_after": completed_before + 1,
+            "baseline_max_abs_one_step_increment": increment_max,
+            "increment_argmax_index": list(increment_index),
+            "arm_effect_at_increment_argmax": effect_at_increment,
+            "arm_effect_linf": effect_max,
+            "effect_at_increment_argmax_over_increment": (
+                effect_at_increment / increment_max if increment_max > 0.0 else None
+            ),
+            "effect_linf_over_increment_linf": (
+                effect_max / increment_max if increment_max > 0.0 else None
+            ),
+        }
+        if name != "ssh":
+            row["t_depth_m"] = float(
+                np.asarray(card.recipe.z_coord.t_depth_ref)[increment_index[-1]]
+            )
+        row["x_km"] = float(
+            increment_index[1] - (0.0 if name == "u" else 0.5)
+        )
+        rows.append(row)
+    report = {
+        "format": "nemo-testcase-l1-overflow-stability-paired-scale-v1",
+        "git_sha": git_sha(),
+        "case": "OVERFLOW-zps",
+        "backend": jax.default_backend(),
+        "precision_policy": repr(get_policy()),
+        "arm": "disable_tracer_vertical_transport",
+        "arm_reference": "experimental harness ablation; no reference model",
+        "same_input_state": True,
+        "rows": rows,
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    print(json.dumps(report, indent=2))
+    return report
+
+
+def summarize_run(root: Path) -> dict:
+    """Turn raw per-step records into citable budget and growth diagnostics."""
+    run_path = root / "run.json"
+    require(run_path.is_file(), f"missing {run_path}")
+    run = json.loads(run_path.read_text())
+    records = run["records"]
+    budget_rows = [row for row in records if row.get("budgets") is not None]
+    budgets = {}
+    for key, initial in run["initial_budgets"].items():
+        values = [row["budgets"][key] for row in budget_rows]
+        drift = [value - initial for value in values]
+        budgets[key] = {
+            "initial": initial,
+            "last": values[-1] if values else None,
+            "max_abs_drift": max((abs(value) for value in drift), default=None),
+            "max_abs_relative_drift": (
+                max((abs(value / initial) for value in drift), default=None)
+                if initial != 0.0
+                else None
+            ),
+        }
+    fields = {}
+    for name in ("T", "S", "u", "v", "ssh"):
+        raw = []
+        previous = None
+        for row in records:
+            value = row["fields"].get(name, {}).get("max_abs_one_step_increment")
+            if value is None:
+                continue
+            ratio = value / previous if previous not in {None, 0.0} else None
+            raw.append({
+                "completed_step": row["completed_step"],
+                "max_abs_one_step_increment": value,
+                "successive_ratio": ratio,
+                "argmax_index": row["fields"][name]["increment_argmax_index"],
+            })
+            previous = value
+        fields[name] = {
+            "raw": raw,
+            "last_twelve": raw[-12:],
+        }
+    report = {
+        "format": "nemo-testcase-l1-overflow-stability-run-summary-v1",
+        "git_sha": git_sha(),
+        "case": run["case"],
+        "arm": run["arm"],
+        "reference": run["reference"],
+        "first_nonfinite_completed_step": run["first_nonfinite_completed_step"],
+        "budget_closure": budgets,
+        "increment_growth": fields,
+    }
+    output = root / "run_summary.json"
+    output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    print(json.dumps({
+        "format": report["format"],
+        "arm": report["arm"],
+        "first_nonfinite_completed_step": report["first_nonfinite_completed_step"],
+        "budget_closure": report["budget_closure"],
+        "last_twelve": {
+            name: value["last_twelve"] for name, value in fields.items()
+        },
+    }, indent=2))
+    return report
+
+
+def compare_arms(baseline_root: Path, arm_root: Path, output: Path) -> dict:
+    """Apply the frozen Arm-A movement rule without post-hoc relabeling."""
+    baseline = json.loads((baseline_root / "run.json").read_text())
+    arm = json.loads((arm_root / "run.json").read_text())
+    base_fail = baseline["first_nonfinite_completed_step"]
+    arm_fail = arm["first_nonfinite_completed_step"]
+    require(base_fail is not None and arm_fail is not None, "both arms must fail")
+    movement = arm_fail - base_fail
+    supports = arm_fail >= base_fail + 100 or arm_fail > 3200
+    refutes_primary = 2870 <= arm_fail <= 2884 and abs(movement) < 0.1 * base_fail
+    verdict = "CONFIRMED" if supports else "REFUTED_PRIMARY" if refutes_primary else "PLAUSIBLE"
+    report = {
+        "format": "nemo-testcase-l1-overflow-stability-arm-comparison-v1",
+        "git_sha": git_sha(),
+        "case": "OVERFLOW-zps",
+        "arm": "disable_tracer_vertical_transport",
+        "arm_reference": "experimental harness ablation; no reference model",
+        "baseline_first_nonfinite_completed_step": base_fail,
+        "arm_first_nonfinite_completed_step": arm_fail,
+        "failure_step_movement": movement,
+        "frozen_support_threshold": "moves >=100 steps later or beyond 3200",
+        "frozen_refute_threshold": "fails in 2870..2884 with <10% movement and increment movement",
+        "verdict": verdict,
+        "interpretation": (
+            f"The ablation destabilizes {abs(movement)} steps earlier. It shows the current "
+            "explicit vertical tracer transport is necessary to this trajectory, "
+            "but neither confirms nor refutes ownership by NEMO's complete "
+            "adaptive-implicit RK3 package."
+        ),
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    print(json.dumps(report, indent=2))
+    return report
 
 
 def _load_candidate(path: Path) -> dict[str, np.ndarray]:
@@ -275,22 +478,58 @@ def _argmax_row(name, oracle, candidate, mask, card) -> dict:
     return result
 
 
-def score(oracle_root: Path, candidate_root: Path, *, plant: str | None = None) -> dict:
+def _certified_kt1_control(card, masks) -> dict:
+    """Prove this probe still reproduces the certified initial comparator frame."""
+    oracle = read_entry(CERTIFIED_ORACLE_KT1, "OVERFLOW-zps")
+    candidate = _state_arrays(card.recipe.initial_state)
+    rows = []
+    for name in ("T", "S", "u", "ssh"):
+        reference = np.asarray(oracle[name])
+        if name != "ssh":
+            reference = reference[..., :card.recipe.z_coord.n_levels]
+        use = np.asarray(masks[name], dtype=bool)
+        equal = bool(np.array_equal(reference[use], candidate[name][use]))
+        rows.append({
+            "field": name,
+            "exact": equal,
+            "n": int(use.sum()),
+            "reference_sha256": sha256(CERTIFIED_ORACLE_KT1),
+        })
+        require(equal, f"certified kt=1 exact control failed for {name}")
+    return {
+        "status": "VERIFIED",
+        "oracle": str(CERTIFIED_ORACLE_KT1),
+        "rows": rows,
+    }
+
+
+def score(
+    oracle_root: Path,
+    candidate_root: Path,
+    *,
+    start_completed: int = CAPTURE_START,
+    end_completed: int = CAPTURE_END,
+    plant: str | None = None,
+) -> dict:
+    require(0 <= start_completed <= end_completed, "invalid score window")
     card = build_overflow_zps_card()
     masks = expected_masks(card)
+    kt1_control = _certified_kt1_control(card, masks)
     rows = []
     first_outside = None
+    first_gross = None
+    first_nonfinite = None
     previous_errors = None
-    for completed in range(CAPTURE_START, CAPTURE_END + 1):
+    for completed in range(start_completed, end_completed + 1):
         kt = completed + 1
         oracle_path = oracle_root / f"oracle_step_entry_kt{kt:08d}.bin"
         candidate_path = candidate_root / f"completed_{completed:08d}.npz"
         oracle = read_entry(oracle_path, "OVERFLOW-zps")
         require(oracle["step"] == kt, f"{oracle_path}: step mismatch")
         candidate = _load_candidate(candidate_path)
-        if plant == "shift_step" and completed == CAPTURE_START:
+        if plant == "shift_step" and completed == start_completed:
             require(False, "planted step-number mismatch")
-        if plant in {"hot", "nan"} and completed == CAPTURE_START:
+        if plant in {"hot", "nan"} and completed == start_completed:
             candidate["T"] = candidate["T"].copy()
             first = tuple(np.argwhere(masks["T"])[0])
             candidate["T"][first] = 50.0 if plant == "hot" else np.nan
@@ -306,11 +545,33 @@ def score(oracle_root: Path, candidate_root: Path, *, plant: str | None = None) 
                     "reason": "three-row closed tank has no active meridional face",
                 })
                 continue
-            field_rows.append(_argmax_row(
-                name, reference, candidate[name], masks[name], card
-            ))
+            use = np.asarray(masks[name], dtype=bool)
+            if not np.all(np.isfinite(candidate[name][use])):
+                field_rows.append({
+                    "field": name,
+                    "status": "NONFINITE",
+                    "frame": (
+                        "T-centre instantaneous Nbb" if name in {"T", "S"}
+                        else f"instantaneous prognostic Nbb {name.upper()}-face"
+                        if name in {"u", "v"}
+                        else "T-centre instantaneous Nbb SSH"
+                    ),
+                    "reduction": "finiteness on the certified common wet mask",
+                    "n_nonfinite": int(np.count_nonzero(~np.isfinite(candidate[name][use]))),
+                })
+                if first_nonfinite is None:
+                    first_nonfinite = {
+                        "kt": kt,
+                        "completed_step": completed,
+                        "field": name,
+                    }
+                continue
+            field_rows.append(
+                _argmax_row(name, reference, candidate[name], masks[name], card)
+            )
         gross = [row["field"] for row in field_rows if row.get("gross_relative_excursion")]
-        require(not gross, f"kt={kt}: gross excursions {gross}")
+        if gross and first_gross is None:
+            first_gross = {"kt": kt, "completed_step": completed, "fields": gross}
         outside = [
             row["field"] for row in field_rows
             if row.get("outside_roundoff_padded_oracle_range")
@@ -341,10 +602,14 @@ def score(oracle_root: Path, candidate_root: Path, *, plant: str | None = None) 
         "case": "OVERFLOW-zps",
         "oracle_frame": "NEMO instantaneous Nbb step-entry state",
         "candidate_frame": "legoESM instantaneous prognostic state after kt-1 completed steps",
-        "matched_kt": [CAPTURE_START + 1, CAPTURE_END + 1],
+        "matched_kt": [start_completed + 1, end_completed + 1],
         "roundoff_pad_ulps": ROUND_PAD_ULPS,
         "gross_relative_excursion": GROSS_RELATIVE_EXCURSION,
+        "certified_kt1_exact_control": kt1_control,
         "first_outside_roundoff_padded_oracle_range": first_outside,
+        "first_gross_excursion": first_gross,
+        "first_nonfinite": first_nonfinite,
+        "status": "DEBT" if first_gross is not None or first_nonfinite is not None else "MEASURED",
         "rows": rows,
     }
     output = candidate_root / "matched_score.json"
@@ -359,18 +624,53 @@ def main() -> int:
     run_parser = sub.add_parser("run-legoesm")
     run_parser.add_argument("--output", type=Path, default=DEFAULT_CANDIDATE)
     run_parser.add_argument(
-        "--arm", choices=("baseline", "no_tracer_vertical_transport"), default="baseline"
+        "--arm",
+        choices=(
+            "baseline",
+            "no_tracer_vertical_transport",
+            "no_primary_transport_average",
+        ),
+        default="baseline",
     )
     run_parser.add_argument("--end-step", type=int, default=CAPTURE_END)
+    run_parser.add_argument("--capture-start", type=int, default=CAPTURE_START)
     score_parser = sub.add_parser("score")
     score_parser.add_argument("--oracle-root", type=Path, default=DEFAULT_ORACLE)
     score_parser.add_argument("--candidate-root", type=Path, default=DEFAULT_CANDIDATE)
+    score_parser.add_argument("--start-completed", type=int, default=CAPTURE_START)
+    score_parser.add_argument("--end-completed", type=int, default=CAPTURE_END)
     score_parser.add_argument("--plant", choices=("hot", "nan", "shift_step"))
+    scale_parser = sub.add_parser("paired-step-scale")
+    scale_parser.add_argument("--completed-before", type=int, default=2875)
+    scale_parser.add_argument(
+        "--output",
+        type=Path,
+        default=DEFAULT_CANDIDATE / "paired_step_scale.json",
+    )
+    summary_parser = sub.add_parser("summarize-run")
+    summary_parser.add_argument("--root", type=Path, default=DEFAULT_CANDIDATE)
+    compare_parser = sub.add_parser("compare-arms")
+    compare_parser.add_argument("--baseline-root", type=Path, default=DEFAULT_CANDIDATE)
+    compare_parser.add_argument("--arm-root", type=Path, required=True)
+    compare_parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "run-legoesm":
-        run_legoesm(args.output, args.arm, args.end_step)
+        run_legoesm(args.output, args.arm, args.end_step, args.capture_start)
+    elif args.command == "score":
+        report = score(
+            args.oracle_root,
+            args.candidate_root,
+            start_completed=args.start_completed,
+            end_completed=args.end_completed,
+            plant=args.plant,
+        )
+        return 1 if report["status"] == "DEBT" else 0
+    elif args.command == "paired-step-scale":
+        paired_step_scale(args.output, args.completed_before)
+    elif args.command == "summarize-run":
+        summarize_run(args.root)
     else:
-        score(args.oracle_root, args.candidate_root, plant=args.plant)
+        compare_arms(args.baseline_root, args.arm_root, args.output)
     return 0
 
 

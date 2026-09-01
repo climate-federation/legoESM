@@ -58,3 +58,15 @@ def test_private_vertical_transport_arm_changes_only_private_hook():
         if before != after
     ]
     assert changed == ["disable_tracer_vertical_transport"]
+
+
+def test_private_primary_transport_arm_changes_only_private_hook():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks
+
+    baseline = _NEMOWSRK3TestHooks()
+    arm = _NEMOWSRK3TestHooks(primary_transport_average=False)
+    changed = [
+        name for name, before, after in zip(baseline._fields, baseline, arm, strict=True)
+        if before != after
+    ]
+    assert changed == ["primary_transport_average"]

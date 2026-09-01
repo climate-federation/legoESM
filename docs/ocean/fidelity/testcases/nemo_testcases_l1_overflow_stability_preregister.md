@@ -130,3 +130,37 @@ standing no-Frankenstein rule.  Arm B confirms ownership only if it completes
 6,120 finite steps and reduces the matched approach-window growth at the same
 location; mere delay is `PLAUSIBLE`.  If Arm A refutes, Arm B is not armed in
 this round and the next candidate is ranked from the measured ledger.
+
+## Frozen addendum after Arm A, before the barotropic arm
+
+Arm A did not enter either preregistered terminal corridor: zeroing tracer
+vertical transport from initialization failed at completed step 240, 2,637
+steps earlier than baseline.  The same-input completed-2,875 scale diagnostic
+then found that this hook removes 99.961% of the next T increment at its x=41.5
+km, z=970 m maximum but changes U and SSH by exactly zero in that step.  The
+early exact-frame score independently fixes the sequence: U and SSH first leave
+the roundoff-padded NEMO range at kt=2 and become gross at kt=3; T remains
+inside the NEMO wet range through kt=60.  Thus explicit vertical tracer
+transport is a terminal T amplifier on an already-divergent velocity/free-
+surface state, not evidence that it initiates that state.
+
+The evidence ranking is therefore updated before any second arm:
+
+1. barotropic substep/transport composition on the slope -- **UNMEASURED,
+   highest rank**;
+2. NEMO's complete adaptive-implicit RK3 package -- **PLAUSIBLE terminal T
+   owner, root ownership UNMEASURED**;
+3. BBL stage transport -- **NEMO-side PLAUSIBLE**;
+4. earlier unowned T residual -- **UNMEASURED**;
+5. missing mixing/convection stabilizer -- **SOURCE-EXONERATED**.
+
+Arm C is the existing private `primary_transport_average=False` hook.  It
+changes only the `un_adv` primary-transport time average in the barotropic
+substep; NEMO always retains that average (`dynspg_ts.F90:509,641,843`), so this
+is localization instrumentation, not a selectable correction or reference
+configuration.  It supports the primary-transport composition as causal only
+if failure moves at least 100 steps later (or beyond 3,200) **and** both U and
+SSH matched-window L-infinity at kt=2601 fall by at least 2x.  It refutes that
+term as primary if failure remains in 2,870--2,884 and both errors move under
+10%.  Earlier failure or mixed movement is `PLAUSIBLE`, never `CONFIRMED`.
+No production selector or stabilizer is armed.
