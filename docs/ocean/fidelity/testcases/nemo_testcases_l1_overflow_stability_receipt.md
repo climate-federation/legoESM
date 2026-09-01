@@ -1,6 +1,7 @@
 # Lane 1 OVERFLOW-zps non-finite investigation receipt
 
-Status: **STABILITY OWNER CONFIRMED; STATISTICAL RUNG OUTSIDE.**  The
+Status: **NON-FINITE FAILURE OWNER: CONFIRMED (completion in both precisions);
+ROOT DIVERGENCE OWNER: PLAUSIBLE.**  The
 source-exact NEMO 5.0.2 `ln_zad_Aimp` RK3 package makes the certified legoESM
 OVERFLOW-zps card complete all 6,120 steps in both fp64 and fp32.  The prior
 failures at completed steps 2,877/2,879 were therefore caused by legoESM's
@@ -12,8 +13,9 @@ temperature-excursion guard, so it cannot supply a roundoff floor.
 ## Round 3 resolution: source-exact adaptive-implicit package
 
 Commit `7876b3ea869f` froze the terminal prediction before any new integration:
-completion of all 6,120 fp64 steps would confirm ownership; any later failure
-would classify the package only as a contributor.  Commit `5b59e923e0bc`
+root ownership required both completion of all 6,120 fp64 steps and reduced
+matched approach-window growth at the same location; any later failure would
+classify the package only as a contributor.  Commit `5b59e923e0bc`
 then replaced the public NEMO WS-RK3 post-step approximation with one
 unbranched source identity:
 
@@ -32,10 +34,13 @@ unbranched source identity:
 
 The exact package completed 6,120 fp64 steps on CPU in `467.8001 s`, with
 every-step finite checks, and completed the fp32 companion in `288.5956 s`.
-This satisfies the frozen confirm predicate, so the stability owner is
-**CONFIRMED**.  The former near-identical fp64/fp32 failure pair was a
-deterministic structural mismatch, not roundoff accumulation; its removal in
-both precision arms is the discriminating result.
+Completion in both precisions confirms ownership of the **non-finite failure**.
+No matched approach-window growth row was computed, and U/SSH already leave the
+NEMO range at kt=2 while the package acts downstream.  The full frozen root
+predicate is therefore unsatisfied: **root divergence ownership remains
+PLAUSIBLE**.  The former near-identical fp64/fp32 failure pair was a
+deterministic structural mismatch at the terminal event, not evidence that the
+package initiated the earlier trajectory divergence.
 
 The short gates did not regress their certified classification.  kt=1 remains
 bit-exact for T/S/U/SSH.  At kt=2 the normalized L-infinity rows are T

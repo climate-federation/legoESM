@@ -33,8 +33,8 @@ add.
 
 At RK3 stage 3 NEMO computes `ww/wi` twice, once from velocity and once from
 transport (`stprk3_stg.F90:281-303`).  The live Wicker--Skamarock partition uses
-horizontal Courant inflow, vertical Courant number, the bottom-to-top running
-maximum, and thresholds 0.8/1.1 (`sshwzv.F90:696-707,710-873`).  The explicit
+horizontal Courant inflow, the current-interface vertical Courant number, and
+thresholds 0.8/1.1 (`sshwzv.F90:696-707,710-873`).  The explicit
 part enters FCT and the implicit part enters both the FCT two-step predictor and
 the tracer tridiagonal solve (`traadv_fct.F90:141-167,286-330`;
 `trazdf.F90:207-225`).
@@ -268,18 +268,47 @@ public `rk3_ws` NEMO identity receives them as one unbranched package:
    together with any active diffusivity (`src/OCE/stprk3_stg.F90:583-599`;
    `src/OCE/TRA/trazdf.F90:118-293`).
 
-Erratum: the prior receipt described a bottom-up running maximum as an input to
-the split coefficient.  `wAimp_RK3_t` stores that maximum in `z2d`, but every
+Erratum: `wAimp_RK3_t` stores a bottom-up column diagnostic in `z2d`, but every
 live branch overwrites `zcff` from the current interface `zCu_v`; the preceding
 interface does not enter the coefficient (`sshwzv.F90:812-843`).  The literal
 transcription and tests therefore must not manufacture that dependency.
 
-**Pre-stated terminal prediction.**  If this package owns the OVERFLOW
-non-finite event, the certified fp64 card completes all **6,120** steps with a
-finite state.  Completion is the only `CONFIRMED` ownership outcome.  If the
-run remains non-finite, its first non-finite completed step is recorded and the
-package is a `CONTRIBUTOR`, not the owner, even when it delays failure.  Before
-the full run, the certified kt=1 exact and kt=2 gate values must remain at their
-recorded bars; any regression stops the run and is repaired rather than
-reclassified.  The completed run, if any, is passed unchanged to the frozen
-full-duration statistical scorer.
+**Pre-stated terminal prediction.**  Arm B confirms root ownership only if the
+certified fp64 card completes all **6,120** steps with finite state **and** the
+matched approach-window growth decreases at the same location.  Completion
+without that growth row confirms ownership of the non-finite failure but leaves
+root divergence ownership `PLAUSIBLE`.  If the run remains non-finite, its
+first non-finite completed step is recorded and the package is a `CONTRIBUTOR`,
+not the owner, even when it delays failure.  Before the full run, the certified
+kt=1 exact and kt=2 gate values must remain at their recorded bars; any
+regression stops the run and is repaired rather than reclassified.  The
+completed run, if any, is passed unchanged to the frozen full-duration
+statistical scorer.
+
+## Frozen fp32 accumulation discriminator
+
+This addendum is committed before computing the 3,060-step fp32 trace.  For
+every completed step `n=0..3060`, the probe records the raw wet-cell temperature
+range and
+
+`E_n = max(10 C - min(T_n), max(T_n) - 20 C, 0)`.
+
+Let `J=max_n max(E_n-E_(n-1),0)` and let `E*=max_n E_n`.  The arm classifies the
+departure as precision accumulation only when `E*>0`, `J/E* <= 0.05`, every
+state remains finite, and `E*/(20 C * eps32 * 3060) <= 1`.  It classifies a
+limiter-like event when `J/E* >= 0.5`; the interval between those thresholds is
+`UNMEASURED`.  These corridors are fixed before the trace.  A gradual trace
+must also report the previously reviewed scaling diagnostics, ratio-of-ratios
+`0.477` and about `0.19 ULP/step`, rather than silently substituting them for
+the committed classifier.
+
+If and only if this arm returns precision accumulation, the fp32 *floor-arm
+eligibility* guard becomes
+
+`max(1e-6, N_steps * eps(dtype))`
+
+in relative field-scale units.  The fp64 guard is therefore unchanged at
+`1e-6`; for fp32 this explicitly registers a conservative linear roundoff
+floor.  This does not certify FCT monotonicity or relabel a temperature-range
+excess as physical agreement.  A limiter-like jump instead forbids that guard
+and triggers a limiter-event investigation.
