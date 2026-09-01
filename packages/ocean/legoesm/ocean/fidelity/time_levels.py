@@ -871,6 +871,49 @@ for _iday in range(1, 11):
         _DUMP_TIME_LEVEL[f"eiv_dump_v_day{_nn}_rank{_rr}.bin"] = ("now", _FACE10_EIV_V_SOURCE)
 del _iday, _nn, _rank, _rr
 
+# NEMO testcase campaign whole-step RK3 records.  Lane 2 reuses lane 1's
+# byte-for-byte MY_SRC instrumentation, but every emitted basename is
+# registered here so gates cannot manufacture a time-level label from the
+# filename.  stprk3.F90 writes the step-entry Nbb state at :92-100; the stage
+# writer at :365-373 writes the explicit Kaa supplied after each stage.  The
+# transport writer records the Kmm operands consumed at stprk3_stg.F90:257-319.
+# The RHS and barotropic-frame writers capture their explicitly passed levels
+# at stprk3.F90:344-389.  Header checks in the testcase gate independently pin
+# the numeric Kaa/Kmm/Nrhs indices; these semantic labels select the comparison
+# role and deliberately fail closed for any new basename.
+for _kt in range(1, 11):
+    _step = f"{_kt:08d}"
+    _DUMP_TIME_LEVEL[f"oracle_step_entry_kt{_step}.bin"] = (
+        "before",
+        "scripts/validate/ocean_fidelity/testcases/nemo502_MY_SRC/"
+        "stprk3.F90:92-100 writes ts/uu/vv/ssh(...,Nbb) at whole-step entry",
+    )
+    _DUMP_TIME_LEVEL[f"oracle_bt_frames_kt{_step}.bin"] = (
+        "after",
+        "scripts/validate/ocean_fidelity/testcases/nemo502_MY_SRC/"
+        "stprk3.F90:344-352 writes uu_b/vv_b at the explicit klevel=Naa "
+        "plus composed un_adv/vn_adv after stp_2D",
+    )
+for _stage, _kaa, _kmm in ((1, 3, 1), (2, 2, 3), (3, 3, 2)):
+    _DUMP_TIME_LEVEL[f"oracle_stage_kt00000001_s{_stage}.bin"] = (
+        "after",
+        "scripts/validate/ocean_fidelity/testcases/nemo502_MY_SRC/"
+        f"stprk3.F90:365-373 writes the stage-{_stage} Kaa={_kaa} state",
+    )
+    _DUMP_TIME_LEVEL[f"oracle_transport_kt00000001_s{_stage}.bin"] = (
+        "now",
+        "scripts/validate/ocean_fidelity/testcases/nemo502_MY_SRC/"
+        f"stprk3_stg.F90:257-319 writes stage-{_stage} Kmm={_kmm} "
+        "advecting transports",
+    )
+_DUMP_TIME_LEVEL["oracle_rhs_kt00000001.bin"] = (
+    "now",
+    "scripts/validate/ocean_fidelity/testcases/nemo502_MY_SRC/"
+    "stprk3.F90:378-389 writes the explicitly passed Nrhs momentum state "
+    "after stp_2D and before the three RK stages",
+)
+del _kt, _step, _stage, _kaa, _kmm
+
 
 def register_dump(basename: str, level: TimeLevel, source: str) -> None:
     """Register a dump's time level, CITING the NEMO line that proves it.
