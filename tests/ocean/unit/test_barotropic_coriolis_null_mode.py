@@ -931,3 +931,83 @@ def test_nemo_literal_een_builder_requires_complete_raw_bridge_bundle():
         _nemo_literal_een_coefficients(
             jnp.zeros((3, 4)),
             SimpleNamespace(nemo_een_barotropic=None), jnp.float64)
+
+
+def test_nemo_literal_ene_coefficients_match_source_recurrence_and_red_scale():
+    """ENE uses the 1/4 two-point F stencil, not the EEN 1/12 triads."""
+    from types import SimpleNamespace
+
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        _nemo_literal_een_coefficients,
+    )
+    from legoesm.ocean.vertical import NemoEENBarotropicOperands
+
+    rng = np.random.default_rng(169902)
+    ny, nx, nz = 4, 7, 5
+    shape2, shape3 = (ny, nx), (ny, nx, nz)
+    e3u = 2.0 + rng.random(shape3)
+    e3v = 3.0 + rng.random(shape3)
+    e3f = 4.0 + rng.random(shape3)
+    ff = 1.0e-4 * rng.normal(size=shape2)
+    e1u = 10.0 + rng.random(shape2)
+    e1v = 11.0 + rng.random(shape2)
+    e2u = 12.0 + rng.random(shape2)
+    e2v = 13.0 + rng.random(shape2)
+    ones3 = np.ones(shape3)
+    raw = NemoEENBarotropicOperands(
+        ff_f=jnp.asarray(ff),
+        e3u_0=jnp.asarray(e3u), e3v_0=jnp.asarray(e3v),
+        e3f_0=jnp.asarray(e3f), umask=jnp.asarray(ones3),
+        vmask=jnp.asarray(ones3), fmask=jnp.asarray(ones3),
+        hu_0=jnp.asarray(e3u.sum(axis=-1)),
+        hv_0=jnp.asarray(e3v.sum(axis=-1)),
+        hf_0=jnp.asarray(e3f.sum(axis=-1)),
+        e1t=jnp.ones(shape2), e2t=jnp.ones(shape2),
+        e1u=jnp.asarray(e1u), e2u=jnp.asarray(e2u),
+        e1v=jnp.asarray(e1v), e2v=jnp.asarray(e2v),
+        e1f=jnp.ones(shape2), e2f=jnp.ones(shape2),
+    )
+    z = SimpleNamespace(nemo_een_barotropic=raw)
+    actual = {
+        name: np.asarray(value)
+        for name, value in _nemo_literal_een_coefficients(
+            jnp.zeros(shape2), z, jnp.float64, scheme="ene"
+        ).items()
+    }
+
+    def shift(value, di=0, dj=0):
+        out = np.roll(value, di, axis=1) if di else value
+        return np.roll(out, dj, axis=0) if dj else out
+
+    q = ff[..., None] / e3f
+    r1_hu = 1.0 / e3u.sum(axis=-1)
+    r1_hv = 1.0 / e3v.sum(axis=-1)
+    u_neighbor = {
+        "nw": (e3v, q, e1v),
+        "ne": (shift(e3v, -1, 0), q, shift(e1v, -1, 0)),
+        "sw": (shift(e3v, 0, 1), shift(q, 0, 1), shift(e1v, 0, 1)),
+        "se": (shift(e3v, -1, 1), shift(q, 0, 1), shift(e1v, -1, 1)),
+    }
+    v_neighbor = {
+        "nw": (shift(e3u, 1, -1), shift(q, 1, 0), shift(e2u, 1, -1)),
+        "ne": (shift(e3u, 0, -1), q, shift(e2u, 0, -1)),
+        "sw": (shift(e3u, 1, 0), shift(q, 1, 0), shift(e2u, 1, 0)),
+        "se": (e3u, q, e2u),
+    }
+    expected = {}
+    for corner, (neighbor, q_factor, metric) in u_neighbor.items():
+        expected[f"ffu_{corner}"] = (
+            0.25 / e1u * r1_hu * metric
+            * np.sum(e3u * neighbor * q_factor, axis=-1)
+        )
+    for corner, (neighbor, q_factor, metric) in v_neighbor.items():
+        expected[f"ffv_{corner}"] = (
+            0.25 / e2v * r1_hv * metric
+            * np.sum(e3v * neighbor * q_factor, axis=-1)
+        )
+    for name in expected:
+        np.testing.assert_allclose(actual[name], expected[name], rtol=2.0e-15, atol=0.0)
+
+    # Non-vacuity: the EEN scale is a material violation on this nonzero case.
+    wrong_een_scale = expected["ffu_nw"] / 3.0
+    assert np.max(np.abs(actual["ffu_nw"] - wrong_een_scale)) > 1.0e-8

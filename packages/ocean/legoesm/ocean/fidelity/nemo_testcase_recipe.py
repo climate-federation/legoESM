@@ -32,6 +32,7 @@ from legoesm.ocean.physics.shortwave_penetration import ShortwavePenetrationConf
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.vertical import (
+    NemoEENBarotropicOperands,
     create_full_step_coordinate,
     create_partial_cell_coordinate,
     create_z_star_from_thicknesses,
@@ -197,7 +198,7 @@ def _model_config(
                 barotropic_pgf_evaluation="nemo_literal",
                 barotropic_coriolis="ene_metric",
                 barotropic_een_seed="nemo_kmm",
-                barotropic_een_coefficient_evaluation="generic",
+                barotropic_een_coefficient_evaluation="nemo_literal",
                 barotropic_reconcile_target="velocity_avg",
                 nemo_stage_mean_imposition=True,
             ),
@@ -634,6 +635,32 @@ def build_gyre_zco_card() -> NEMOTestcaseCard:
     area_native = np.asarray(grid.dx_T) * np.asarray(grid.dy_T)
     reference_depth = float(_GYRE_GDEPW_1D[30])
     native_3d = (22, 32, 30)
+    zco_thickness = np.broadcast_to(_GYRE_E3T_1D[:30], native_3d)
+    umask_3d = np.broadcast_to(u_wet_native[..., None], native_3d)
+    vmask_3d = np.broadcast_to(v_wet_native[..., None], native_3d)
+    f_wet_native = u_wet_native * np.roll(u_wet_native, -1, axis=0)
+    f_wet_native[-1, :] = 0.0
+    fmask_3d = np.broadcast_to(f_wet_native[..., None], native_3d)
+    literal_barotropic_operands = NemoEENBarotropicOperands(
+        ff_f=np.asarray(grid.f_v)[1:],
+        e3u_0=zco_thickness,
+        e3v_0=zco_thickness,
+        e3f_0=zco_thickness,
+        umask=umask_3d,
+        vmask=vmask_3d,
+        fmask=fmask_3d,
+        hu_0=reference_depth * u_wet_native,
+        hv_0=reference_depth * v_wet_native,
+        hf_0=reference_depth * f_wet_native,
+        e1t=np.asarray(grid.dx_T),
+        e2t=np.asarray(grid.dy_T),
+        e1u=np.asarray(grid.dx_u)[:, 1:],
+        e2u=np.asarray(grid.dy_u)[:, 1:],
+        e1v=np.asarray(grid.dx_v)[1:],
+        e2v=np.asarray(grid.dy_v)[1:],
+        e1f=np.full((22, 32), 106000.0),
+        e2f=np.full((22, 32), 106000.0),
+    )
     z_ref = create_z_star_from_thicknesses(
         _GYRE_E3T_1D[:30],
         t_depth_ref_m=_GYRE_GDEPT_1D[:30],
@@ -648,6 +675,7 @@ def build_gyre_zco_card() -> NEMOTestcaseCard:
         nemo_e1e2v_m=area_native,
         nemo_e2u_m=np.full_like(area_native, 106000.0),
         nemo_e1v_m=np.full_like(area_native, 106000.0),
+        nemo_een_barotropic_m=literal_barotropic_operands,
     )
     # The generic constructor deliberately recovers dz from a cumulative-sum
     # interface ladder.  NEMO stores both source-produced arrays and its
@@ -802,9 +830,11 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
     wet = np.asarray(card.recipe.land_mask) > 0.5
     if card.case == "GYRE-zco":
         if (cfg.barotropic_coriolis_split != "live"
-                or cfg.barotropic.barotropic_coriolis != "ene_metric"):
+                or cfg.barotropic.barotropic_coriolis != "ene_metric"
+                or cfg.barotropic.barotropic_een_coefficient_evaluation
+                != "nemo_literal"):
             raise ValueError(
-                "GYRE-zco requires live ENE barotropic Coriolis composition")
+                "GYRE-zco requires the live literal-ENE barotropic composition")
         require_rotation = (
             np.any(np.asarray(card.recipe.grid.f_T) != 0.0)
             and np.count_nonzero(np.any(wet, axis=1)) == 20

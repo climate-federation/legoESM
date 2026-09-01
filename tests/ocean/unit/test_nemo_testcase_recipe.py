@@ -114,6 +114,8 @@ def test_gyre_card_selects_complete_resolved_operator_program():
     assert cfg.physics.convection.enhanced_diffusion.nu_conv == 100.0
     assert cfg.physics.shortwave_penetration.scheme == "jerlov_2band"
     assert cfg.physics.shortwave_penetration.water_type == "I"
+    assert cfg.barotropic.barotropic_coriolis == "ene_metric"
+    assert cfg.barotropic.barotropic_een_coefficient_evaluation == "nemo_literal"
 
 
 def test_gyre_whole_step_identity_rejects_hybrid_and_staged_gm():

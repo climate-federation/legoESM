@@ -728,8 +728,17 @@ def _dissipation_coeffs(config, grid, area, dt_s, dtype, mask):
             div_damp_coeff, div_damp_area_u, div_damp_area_v)
 
 
-def _nemo_literal_een_coefficients(eta, z_coord, dtype):
-    """Materialize dynspg_ts.F90:1517-1565's eight frozen coefficients."""
+def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een"):
+    """Materialize NEMO's eight frozen EEN or ENE coefficients.
+
+    ``scheme="een"`` transcribes ``dyn_cor_2D_init``'s 12-point triads;
+    ``scheme="ene"`` transcribes its four 2-point Sadourny coefficients.  The
+    name is retained because the EEN implementation and bridge bundle predate
+    the ENE sibling; both branches consume the same frozen Kmm geometry.
+    """
+    if scheme not in ("een", "ene"):
+        raise ValueError(
+            f"unknown literal barotropic PV-flux scheme {scheme!r}")
     raw = getattr(z_coord, "nemo_een_barotropic", None)
     if raw is None:
         raise ValueError(
@@ -743,7 +752,8 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype):
     one = jnp.asarray(1.0, dtype=dtype)
     half = jnp.asarray(0.5, dtype=dtype)
     quarter = jnp.asarray(0.25, dtype=dtype)
-    r1_12 = jnp.asarray(1.0 / 12.0, dtype=dtype)
+    leading_scale = jnp.asarray(
+        1.0 / 12.0 if scheme == "een" else 0.25, dtype=dtype)
     eta = jnp.asarray(eta, dtype=dtype)
     ff = jnp.asarray(raw.ff_f, dtype=dtype)
     e3u0 = jnp.asarray(raw.e3u_0, dtype=dtype)
@@ -790,33 +800,49 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype):
     def triad(a, c, d):
         return b(b(a + c) + d)
 
-    def coefficient(face, neighbor, neighbor_mask, q_args,
+    def coefficient(face, neighbor, neighbor_mask, q_factor,
                     neighbor_metric, local_metric, r1_h):
-        qsum = triad(*q_args)
-        term = b(b(b(face * neighbor) * neighbor_mask) * qsum)
+        term = b(b(b(face * neighbor) * neighbor_mask) * q_factor)
         acc = jnp.zeros_like(r1_h)
         for jk in range(term.shape[-1]):
             acc = b(acc + term[..., jk])
-        return b(b(b(b(r1_12 * b(one / local_metric)) * r1_h)
+        return b(b(b(b(leading_scale * b(one / local_metric)) * r1_h)
                      * neighbor_metric) * acc)
 
-    uq = {
-        "nw": (shift(q, 1, 0), q, shift(q, 0, 1)),
-        "ne": (shift(q, 0, 1), q, shift(q, -1, 0)),
-        "sw": (q, shift(q, 0, 1), shift(q, 1, 1)),
-        "se": (shift(q, -1, 1), shift(q, 0, 1), q),
-    }
+    if scheme == "een":
+        uq = {
+            "nw": triad(shift(q, 1, 0), q, shift(q, 0, 1)),
+            "ne": triad(shift(q, 0, 1), q, shift(q, -1, 0)),
+            "sw": triad(q, shift(q, 0, 1), shift(q, 1, 1)),
+            "se": triad(shift(q, -1, 1), shift(q, 0, 1), q),
+        }
+        vq = {
+            "se": triad(shift(q, 1, 0), q, shift(q, 0, 1)),
+            "sw": triad(shift(q, 1, 1), shift(q, 1, 0), q),
+            "ne": triad(shift(q, 0, -1), q, shift(q, 1, 0)),
+            "nw": triad(q, shift(q, 1, 0), shift(q, 1, -1)),
+        }
+    else:
+        # dynspg_ts.F90 np_ENE:1418-1446.  The northern U pair shares
+        # ff_f/e3f at F(i,j); the southern pair uses F(i,j-1).  The western V
+        # pair uses F(i-1,j); the eastern pair uses F(i,j).
+        uq = {
+            "nw": q,
+            "ne": q,
+            "sw": shift(q, 0, 1),
+            "se": shift(q, 0, 1),
+        }
+        vq = {
+            "nw": shift(q, 1, 0),
+            "ne": q,
+            "sw": shift(q, 1, 0),
+            "se": q,
+        }
     un = {
         "nw": (e3v, vmask, e1v),
         "ne": (shift(e3v, -1, 0), shift(vmask, -1, 0), shift(e1v, -1, 0)),
         "sw": (shift(e3v, 0, 1), shift(vmask, 0, 1), shift(e1v, 0, 1)),
         "se": (shift(e3v, -1, 1), shift(vmask, -1, 1), shift(e1v, -1, 1)),
-    }
-    vq = {
-        "se": (shift(q, 1, 0), q, shift(q, 0, 1)),
-        "sw": (shift(q, 1, 1), shift(q, 1, 0), q),
-        "ne": (shift(q, 0, -1), q, shift(q, 1, 0)),
-        "nw": (q, shift(q, 1, 0), shift(q, 1, -1)),
     }
     vn = {
         "nw": (shift(e3u, 1, -1), shift(umask, 1, -1), shift(e2u, 1, -1)),
@@ -892,13 +918,10 @@ def _build_een_barotropic_inputs(h_k, grid, mask, u_mask, v_mask, dtype,
             f"{coefficient_evaluation!r}; expected 'generic' or 'nemo_literal'")
     if scheme not in ("ene", "een"):
         raise ValueError(f"unknown barotropic PV-flux scheme {scheme!r}")
-    if coefficient_evaluation == "nemo_literal" and scheme != "een":
-        raise ValueError(
-            "nemo_literal barotropic coefficients currently cover EEN only")
     if coefficient_evaluation == "nemo_literal" and not metric_complete:
         raise ValueError(
             "barotropic_een_coefficient_evaluation='nemo_literal' requires "
-            "barotropic_coriolis='een_metric'")
+            "barotropic_coriolis='ene_metric' or 'een_metric'")
     e3u = min_cell_to_uface(h_k).astype(dtype)      # (nlat, nlon+1, nlev)
     e3v = min_cell_to_vface(h_k, grid).astype(dtype)  # (nlat+1, nlon, nlev)
     hu = jnp.sum(e3u, axis=-1)                       # (nlat, nlon+1)
@@ -942,9 +965,58 @@ def _build_een_barotropic_inputs(h_k, grid, mask, u_mask, v_mask, dtype,
                    e2u=geom.dy_u.astype(dtype), e2v=geom.dy_v.astype(dtype))
     if coefficient_evaluation == "nemo_literal":
         out["literal_coefficients"] = _nemo_literal_een_coefficients(
-            eta, z_coord, dtype)
+            eta, z_coord, dtype, scheme=scheme)
     out["coefficient_evaluation"] = coefficient_evaluation
     return out
+
+
+def _nemo_literal_barotropic_coriolis(U_bar, V_bar, coefficients,
+                                      *, return_terms=False):
+    """Apply frozen NEMO ENE/EEN coefficients in source association order."""
+    b = jax.lax.optimization_barrier
+
+    def source_pair(first, second):
+        terms = jnp.stack((b(first), b(second)), axis=0)
+
+        def add_one(acc, term):
+            return b(acc + term), None
+
+        return jax.lax.scan(add_one, jnp.zeros_like(first), terms)[0]
+
+    # Native NEMO arrays name the east/north face of T(i,j); legoESM stores
+    # redundant west/south faces.  Apply first, map only afterward.
+    ua = U_bar[:, 1:]
+    va = V_bar[1:, :]
+    east_v = jnp.roll(va, -1, axis=1)
+    south_v = jnp.concatenate([jnp.zeros_like(va[:1]), va[:-1]], axis=0)
+    southeast_v = jnp.roll(south_v, -1, axis=1)
+    north_u = jnp.concatenate([ua[1:], jnp.zeros_like(ua[:1])], axis=0)
+    west_u = jnp.roll(ua, 1, axis=1)
+    northwest_u = jnp.roll(north_u, 1, axis=1)
+    products = {
+        "u_nw": b(coefficients["ffu_nw"] * va),
+        "u_ne": b(coefficients["ffu_ne"] * east_v),
+        "u_sw": b(coefficients["ffu_sw"] * south_v),
+        "u_se": b(coefficients["ffu_se"] * southeast_v),
+        "v_sw": b(coefficients["ffv_sw"] * west_u),
+        "v_se": b(coefficients["ffv_se"] * ua),
+        "v_nw": b(coefficients["ffv_nw"] * northwest_u),
+        "v_ne": b(coefficients["ffv_ne"] * north_u),
+    }
+    products["u_north_pair"] = source_pair(products["u_nw"], products["u_ne"])
+    products["u_south_pair"] = source_pair(products["u_sw"], products["u_se"])
+    products["u_total"] = source_pair(
+        products["u_north_pair"], products["u_south_pair"])
+    products["v_south_pair"] = source_pair(products["v_sw"], products["v_se"])
+    products["v_north_pair"] = source_pair(products["v_nw"], products["v_ne"])
+    products["v_total"] = -source_pair(
+        products["v_south_pair"], products["v_north_pair"])
+    cor_u = jnp.concatenate([products["u_total"][:, -1:], products["u_total"]], axis=1)
+    cor_v = jnp.concatenate(
+        [jnp.zeros_like(products["v_total"][:1]), products["v_total"]], axis=0)
+    if return_terms:
+        return cor_u, cor_v, products
+    return cor_u, cor_v
 
 
 def een_barotropic_coriolis(U_bar, V_bar, pre, eps=1.0e-10):
@@ -988,53 +1060,8 @@ def een_barotropic_coriolis(U_bar, V_bar, pre, eps=1.0e-10):
       it is a fidelity refinement over the metric-less "een".
     """
     if pre.get("coefficient_evaluation", "generic") == "nemo_literal":
-        b = jax.lax.optimization_barrier
-        coeff = pre["literal_coefficients"]
-
-        def source_pair(first, second):
-            """Add two products without letting XLA reassociate the pair.
-
-            NEMO materializes each product and then executes the two binary
-            additions in source order.  ``optimization_barrier`` alone does
-            not stop XLA from reassociating the pair on CPU; the two-element
-            scan is the smallest JAX transform that preserves that association
-            while retaining JIT and reverse-mode autodiff support.
-            """
-            terms = jnp.stack((b(first), b(second)), axis=0)
-
-            def add_one(acc, term):
-                return b(acc + term), None
-
-            return jax.lax.scan(
-                add_one, jnp.zeros_like(first), terms)[0]
-
-        # Native NEMO arrays name the east/north face of T(i,j); legoESM
-        # stores redundant west/south faces. Apply first, map only afterward.
-        ua = U_bar[:, 1:]
-        va = V_bar[1:, :]
-        east_v = jnp.roll(va, -1, axis=1)
-        south_v = jnp.concatenate([jnp.zeros_like(va[:1]), va[:-1]], axis=0)
-        southeast_v = jnp.roll(south_v, -1, axis=1)
-        north_u = jnp.concatenate([ua[1:], jnp.zeros_like(ua[:1])], axis=0)
-        west_u = jnp.roll(ua, 1, axis=1)
-        northwest_u = jnp.roll(north_u, 1, axis=1)
-        u_nw = b(coeff["ffu_nw"] * va)
-        u_ne = b(coeff["ffu_ne"] * east_v)
-        u_sw = b(coeff["ffu_sw"] * south_v)
-        u_se = b(coeff["ffu_se"] * southeast_v)
-        cor_u_native = source_pair(
-            source_pair(u_nw, u_ne), source_pair(u_sw, u_se))
-        v_sw = b(coeff["ffv_sw"] * west_u)
-        v_se = b(coeff["ffv_se"] * ua)
-        v_nw = b(coeff["ffv_nw"] * northwest_u)
-        v_ne = b(coeff["ffv_ne"] * north_u)
-        cor_v_native = -source_pair(
-            source_pair(v_sw, v_se), source_pair(v_nw, v_ne))
-        cor_u = jnp.concatenate(
-            [cor_u_native[:, -1:], cor_u_native], axis=1)
-        cor_v = jnp.concatenate(
-            [jnp.zeros_like(cor_v_native[:1]), cor_v_native], axis=0)
-        return cor_u, cor_v
+        return _nemo_literal_barotropic_coriolis(
+            U_bar, V_bar, pre["literal_coefficients"])
 
     nlev = pre["e3u"].shape[-1]
     U_src, V_src = U_bar, V_bar
@@ -1070,6 +1097,10 @@ def ene_barotropic_coriolis(U_bar, V_bar, pre, eps=1.0e-10):
     recurrence instead of the 1/12 AL81 triads.  Horizontal metric widths are
     folded in exactly as for :func:`een_barotropic_coriolis`.
     """
+    if pre.get("coefficient_evaluation", "generic") == "nemo_literal":
+        return _nemo_literal_barotropic_coriolis(
+            U_bar, V_bar, pre["literal_coefficients"])
+
     from legoesm.ocean.dynamics.latlon_cgrid_operators import pv_flux_ene
 
     nlev = pre["e3u"].shape[-1]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import struct
 from pathlib import Path
 
 import numpy as np
@@ -43,7 +44,7 @@ def test_gate_reuses_registry_and_lane1_growth_instrument():
     assert "time_level_for_dump" in source
     assert 'with_name("nemo_testcase_phase3_trajectory_gate.py")' in source
     assert '"continue_after_first": True' in source
-    assert '"UNMEASURED_AFTER_REGISTERED_ARMS"' in source
+    assert '"ENE_COMPONENT_CONFIRMED; COMBINED_TRD_REMAINDER_UNMEASURED"' in source
 
 
 def test_full_rk3_inventory_and_scaling_precede_owner_labels():
@@ -132,6 +133,36 @@ def test_causal_oracle_operands_and_substep_control_are_wired():
     ):
         assert token in source
     assert '"scaling_check_before_owner_label": True' in source
+
+
+def test_ene_coefficient_reader_layout_and_planted_violation(tmp_path):
+    nx, ny = gate.DIMS[:2]
+    shape = (nx - 4, ny - 4)
+    blocks = [
+        np.asarray(index + np.arange(np.prod(shape)).reshape(shape, order="F"),
+                   dtype=np.float64)
+        for index in range(len(gate.ENE_COEFFICIENT_NAMES))
+    ]
+    path = tmp_path / "oracle_bt_ene_coeff_kt00000001.bin"
+    path.write_bytes(
+        b"NEMO_L2_ENECO_1 "
+        + struct.pack("=7i", 1, 1, 1, 2, nx, ny, 64)
+        + b"".join(block.ravel(order="F").tobytes() for block in blocks)
+    )
+    got = gate.read_ene_coefficients(path)
+    for name, expected in zip(gate.ENE_COEFFICIENT_NAMES, blocks):
+        np.testing.assert_array_equal(got[name], expected.T)
+
+    oracle = got["ffu_nw"]
+    active = np.ones_like(oracle, dtype=bool)
+    planted = oracle.copy()
+    planted[0, 0] += 1.0
+    row = gate.score("planted_ene", oracle, planted, active)
+    assert row["status"] == "DEBT"
+    assert row["absolute_max"] == 1.0
+    source = PATH.read_text()
+    assert '"--plant-ene-coefficient"' in source
+    assert "planted ENE coefficient did not fire" in source
 
 
 def test_bt_trace_native_stagger_mapping():

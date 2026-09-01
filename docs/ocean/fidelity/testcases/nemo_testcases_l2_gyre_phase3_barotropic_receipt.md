@@ -4,6 +4,11 @@ Date: 2026-09-01
 
 Session: `01a05cb9-7625-7f40-9e83-b3fa767b1945`
 
+This receipt freezes the `efdef59b28af` boundary round.  The subsequent ENE
+operand walk, corrected selector, and kt=10 rerun are authoritative in
+`nemo_testcases_l2_gyre_phase3_ene_operand_receipt.md`; numbers below are
+retained as the historical generic-coefficient control.
+
 Preregistration commit: `34ca9a913`
 
 Parent resolved-program commit: `fbeef5d4d3e0513f4b1b8bedbd2e8bc7c1a74e91`
