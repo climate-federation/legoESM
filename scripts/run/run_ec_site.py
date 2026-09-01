@@ -803,7 +803,8 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
              capacity_scheme: str = "prescribed", g1_source: str = "table",
              canopy_stomatal_model: str | None = None,
              transpiration_stress: str = "beta_theta",
-             vcmax_profile: str = "kn") -> dict:
+             vcmax_profile: str = "kn",
+             params_path: str | None = None) -> dict:
     if mode not in ("diagnostic", "prognostic"):
         raise ValueError(f"mode {mode!r} not supported (diagnostic|prognostic)")
     if canopy not in ("two_leaf", "clmml"):
@@ -955,6 +956,17 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     if transpiration_stress != "beta_theta":
         land_config = land_config._replace(
             transpiration_stress=transpiration_stress)
+    if params_path:
+        # Same calibration layer as the MIP drivers (run_lmip): the shared
+        # loader validates each key against the parameter registry
+        # (unknown / tier-0 / out-of-bounds all raise) and splices it into
+        # the matching nested *Config.  No harness-local override path.
+        from legoesm.driver.run_config_yaml import (
+            apply_params_to_config, load_params_config)
+        land_config = apply_params_to_config(
+            land_config, load_params_config(params_path),
+            driver="run_ec_site")
+        canopy_config = land_config.surface_scheme
 
     # Independent C3 (tree) / C4 (grass) canopy-param tuning for savanna sites.
     # A per-pathway flag (``--vcmax-c3-scale`` etc.) wins; otherwise the combined
@@ -1286,6 +1298,12 @@ def main() -> int:
                          "'p_model' (least-cost xi; requires the medlyn "
                          "stomatal model; incompatible with the "
                          "--stomatal-m-*-scale flags).")
+    ap.add_argument("--params", type=str, default=None,
+                    help="YAML calibration file of tuned parameters keyed by "
+                         "param_collector qualified name 'scheme_key.field' "
+                         "(e.g. land.p_model.kphio), validated against each "
+                         "scheme's __param_spec__ bounds and spliced into the "
+                         "land config - the same layer run_lmip --params uses")
     ap.add_argument("--transpiration-stress", default="beta_theta",
                     choices=["beta_theta", "phydro"],
                     dest="transpiration_stress",
@@ -1349,7 +1367,8 @@ def main() -> int:
                  g1_source=args.canopy_g1_source,
                  canopy_stomatal_model=args.canopy_stomatal_model,
                  transpiration_stress=args.transpiration_stress,
-                 vcmax_profile=args.canopy_vcmax_profile)
+                 vcmax_profile=args.canopy_vcmax_profile,
+                 params_path=args.params)
     return 0
 
 
