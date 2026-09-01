@@ -111,11 +111,13 @@ barotropic trace provides the missing runtime discriminator: NEMO's first SSH
 increment implies `8.50091456831154e-6`, exactly the numerator over the 600
 owned cells, not the naive 704-cell value `9.166209883944753e-6`.  The global
 reduction excludes the 104 non-owned boundary-ring cells even though its
-argument is syntactically unmasked.  **Correction:** card and independent gate
-now use the owned/wet numerator and denominator; the boundary-ring raw values
-remain nonzero and unchanged, while the owned final EMP sum is zero to fp64
-roundoff.  The superseded “land contribution enters the numerator” claim is
-retracted rather than silently rewritten.
+argument is syntactically unmasked: `lib_fortran_generic.h90:92,144-148`
+multiplies every 2-D operand by `smask0_i`, which `dommsk.F90:200-205` builds
+from the unique interior-domain mask.  **Correction:** card and independent
+gate now use the owned/wet numerator and denominator; the boundary-ring raw
+values remain nonzero and unchanged, while the owned final EMP sum is zero to
+fp64 roundoff.  The superseded “land contribution enters the numerator” claim
+is retracted rather than silently rewritten.
 
 ## Geometry, entry level, controls, and tests
 

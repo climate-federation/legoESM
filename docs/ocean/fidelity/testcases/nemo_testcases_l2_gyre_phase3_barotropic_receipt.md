@@ -15,7 +15,8 @@ TKE/EVD ordering established as a causal contributor.**  Substep 1 matches all
 registered entry, AB3-midpoint, continuity, PGF, ENE, slow-forcing, and exit
 frames at the `1e-15` bar.  At substep 2, `trd_u` is the first over-bar frame:
 absolute error `8.602761661688124e-12` against oracle magnitude
-`5.409032045634095e-10`; `trd_v` differs by `8.706079133797117e-12`.  The
+`5.409032045634095e-10`, i.e. `1.5904%` relative; `trd_v` differs by
+`8.706079133797117e-12`.  The
 following velocity exits differ by `2.477595358568228e-9` and
 `2.507350790534324e-9`.  This identifies the live barotropic ENE tendency
 boundary, not a sole coefficient owner.
@@ -104,8 +105,11 @@ retracted.  Although `usrdef_sbc.F90:122-140` passes the unmasked array to
 `8.50091456831154e-6`, exactly the 600-owned-cell numerator.  The naive
 704-cell value `9.166209883944753e-6` would create the measured
 `1.86749562283012e-7` first-substep SSH error.  The global reduction excludes
-the non-owned boundary ring.  Card, independent phase-2 gate, and tests now
-encode that runtime ownership result.
+the non-owned boundary ring.  This is also the source-defined behavior:
+`lib_fortran_generic.h90:92,144-148` multiplies each 2-D reduction operand by
+`smask0_i`, and `dommsk.F90:200-205` constructs `smask0_i` from the unique
+interior-domain mask.  Card, independent phase-2 gate, and tests now encode
+that source-and-runtime ownership result.
 
 Shortwave surface flux is AT-BAR (`2.842170943040401e-14` absolute,
 `1.7112048084759902e-16` normalized).  The original penetrative mismatch was
@@ -155,7 +159,7 @@ over-bar rows are the live ENE tendencies:
 
 | substep/frame | u absolute error | v absolute error | disposition |
 |---|---:|---:|---|
-| 2 `trd` | `8.602761661688124e-12` | `8.706079133797117e-12` | first DEBT boundary |
+| 2 `trd` | `8.602761661688124e-12` (`1.5904%` of oracle `5.409032045634095e-10`) | `8.706079133797117e-12` | first DEBT boundary |
 | 2 velocity exit | `2.477595358568228e-9` | `2.507350790534324e-9` | downstream DEBT |
 | 50 `trd` | `4.989158868354881e-10` | `5.863222494344802e-10` | accumulated DEBT |
 | 50 velocity exit | `5.636317706097865e-7` | `2.1332474430218844e-7` | accumulated DEBT |
