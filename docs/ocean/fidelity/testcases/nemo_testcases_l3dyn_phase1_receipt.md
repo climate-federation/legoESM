@@ -165,31 +165,78 @@ died.
 
 **Conservation: REFUTE.** SI3's own online ledger printed **19**
 `iceupdate : violation heat cons. [J]` lines, magnitudes 3.818 … 31.292 J
-(`icectl.F90:232-236`, threshold `rchk_t · rn_icechk_glo · ice_area · rDt_ice`).
+(`icectl.F90:236-237`, threshold `rchk_t · rn_icechk_glo · ice_area · rDt_ice`).
 Per the pre-registration this is REFUTE and is **not** relabelled.  What is
 measured about it, so the next lane does not re-derive it:
 
-* Largest event is 31.29 J on ~24 200 m² of ice over a 2 s step, i.e. a surface
-  heat-flux imbalance of **6.5e-4 W/m²**.  That is 115× *below* SI3's own
-  per-gridcell stop threshold (`rchk_t · rn_icechk_cel = 7.5e-2 W/m²`,
-  `icectl.F90:51,323`; `namelist_ice_ref:318`), which is why the run did not
-  abort.  It trips only the global warning, which `rn_icechk_glo = 1e-4`
-  tightens by four orders of magnitude.
-* Relative to the basin's total ice+snow enthalpy (2.687e12 J) the largest event
-  is 1.16e-11.
+* **RETRACTED, and the retraction matters more than the original claim.** An
+  earlier version of this receipt said the largest event was "115× below SI3's
+  own per-gridcell stop threshold … which is why the run did not abort", citing
+  `icectl.F90:51,323`.  That is wrong twice over.  (a) The aborting per-cell
+  check lives in `ice_cons2D`, and `ice_cons2D` is **never called on a
+  pure-advection path**: `icedyn.F90:144-168` runs only `ice_dyn_adv` +
+  `ice_var_zapsmall` for `np_dynADV1D`/`np_dynADV2D`, and every `CALL
+  ice_cons2D` in `src/ICE/` sits in `icedyn_rhg`, `icedyn_rdgrft`, `icecor`,
+  `iceitd`, `icethd`, `icethd_do` or `icethd_pnd`.  Rungs 3.1 and 3.2 therefore
+  run with **no aborting conservation check at all**; only rung 3.3 has one, via
+  `ice_dyn_rhg` (`icedyn_rhg.F90:64,102`), and it did not fire.  (b) The
+  comparison was also mean-against-max: 6.5e-4 W/m² is a global area-weighted
+  mean out of a `glob_2Dsum` (`icectl.F90:229`), while `rn_icechk_cel` gates a
+  per-gridcell `MAXVAL` (`icectl.F90:323`).  The receipt credited a guard that
+  never runs.
+* Largest event is 31.29 J, which over the ~24 200 m² of ice in a 2 s step is a
+  **global-mean** heat-flux imbalance of 6.5e-4 W/m².  Relative to the basin's
+  total ice+snow enthalpy (2.687e12 J) it is 1.16e-11.  The line is printed by
+  `ice_cons_final` (`icectl.F90:197-240`), which is **print-only**: it contains
+  no `ctl_stop`, and the only conservation `ctl_stop`s in the file are
+  `icectl.F90:358-360`, inside `ice_cons2D`.
 * **Rungs 3.2/3.3 being silent is not evidence that they conserve better.** The
   same threshold is a *flux* threshold multiplied by the ice timestep, so in
   absolute joules it is 600× looser at `rn_dt=1200 s` than at `2 s`; measured
   threshold-to-enthalpy ratios are 1.35e-13 (3.1) versus 3.25e-10 (3.2).  A
   3.1-sized relative imbalance would not have printed in 3.2.
-* Mechanism: **UNRESOLVED**.  All surface fluxes are zero in this case
-  (`tests/ICE_ADV1D/MY_SRC/usrdef_sbc.F90:119-128`), so the residual is inside
-  `qt_oce_ai − qt_atm_oi + diag_heat − diag_adv_heat` (`icectl.F90:221`).  It is
-  ~5e4× above the fp64 rounding floor of that sum (5.97e-4 J), so it is
-  **not** roundoff.  Candidate causes (all PLAUSIBLE, none discriminated):
-  convergent-flow concentration piling to `a_i` = 2.687 making `1 − at_i_b`
-  negative in `iceupdate.F90:105-119`; a `diag_heat`/`diag_adv_heat` staging
-  mismatch under `ln_icethd=F`.  Discriminating this is lane-4 work.
+* Mechanism: **RESOLVED — CONFIRMED, and it is a ledger defect, not lost heat.**
+  The residual is ~5e4× above the fp64 rounding floor of the sum (5.97e-4 J), so
+  it is not roundoff.  Three measurements, all emitted by the gate:
+
+  1. **Every printed violation equals the ice+snow enthalpy that left the
+     frames during that same step.**  The gate stamps each ice step entry, so
+     each violation is attributed to its step and joined against the frame
+     series (`heat_residual_attribution_unclassified`): 18 of the 19 events have
+     a successor frame to difference, and all 18 ratios lie in
+     **[0.999978, 1.000078]**.  The largest absolute residual is 9.2e-4 J
+     against an fp64 differencing floor of 6.0e-4 J on a 2.687e12 J sum — the
+     agreement is *at* the roundoff floor.  The 19th event is at `kt = 40`,
+     which has no successor frame.  Closure: 310.935 J of printed violations
+     minus that last 20.443 J event = 290.493 J, versus a measured total frame
+     enthalpy loss of **290.492 J**.
+  2. **The sink is a zap routine booking into `hfx_res`.**  `ice_var_zapsmall`
+     removes small-but-positive layer enthalpy into `hfx_res`
+     (`icevar.F90:657,671`) and runs on every ADV1D step (`icedyn.F90:157`);
+     `ice_var_zapneg` does the same for negative values inside Prather
+     (`icevar.F90:791,798,831`, called at `icedyn_adv_pra.F90:421`).
+  3. **The discriminating pair: the bracket that ACCOUNTS `hfx_res` is silent,
+     the ledger that DROPS it fires.**  `ice_cons_hsm`'s heat term includes
+     `− hfx_res` (`icectl.F90:110-111`) and is called for `icedyn_adv`
+     (`icedyn_adv.F90:113`) — **zero** `icedyn_adv` violation lines were
+     printed; all 19 are `iceupdate`.  With `ln_icethd = F`, `iceupdate.F90:118-119`
+     **overwrites** `qt_oce_ai` without any `hfx_*` term, so the `hfx_res` the
+     zap booked never reaches `ice_cons_final`'s ledger (`icectl.F90:221`),
+     while `diag_heat` still sees the enthalpy go.  SI3's end-of-step heat
+     ledger is structurally unclosed against zapping whenever `ln_icethd = F`.
+
+  **Also retracted:** the earlier candidate "convergent piling makes `1 − at_i_b`
+  negative in `iceupdate.F90:105-119`" is refuted by its own premise.  Under
+  `ln_icethd = F`, `qt_oce_ai − qt_atm_oi = −(1 − at_i_b) · qsr_oce`
+  (`iceupdate.F90:117-119`), and the case sets `qsr_oce = qns_oce = emp_oce = 0`
+  with `sprecip = 0`, hence `qemp_oce = 0`
+  (`tests/ICE_ADV1D/MY_SRC/usrdef_sbc.F90:119-140`).  That difference is
+  **identically zero whatever the sign of `1 − at_i_b`**.
+* Still PLAUSIBLE, not confirmed: which of `zapsmall` and `zapneg` dominates.
+  Every measured step is a net enthalpy *decrease*, which matches `zapsmall`
+  removing positive `e_i`; `zapneg` zaps *negative* enthalpy and would raise the
+  total (`icevar.F90:791`).  That is evidence, not proof that `zapneg` never
+  fires within a step.
 
 ### 3.2 ICE_ADV2D (prescribed velocity) — verdict: **phenomenology REFUTE, conservation CONFIRM**
 
@@ -213,7 +260,8 @@ Quoted expectations, `tests/README.rst:181-186` and
 | SI3 native violations | 0 | CONFIRM |
 
 Additional measurements taken to say *why* it is refuted, none of which change
-the verdict:
+the verdict.  All of them are emitted by the committed gate
+(`trajectory.full_scan_unclassified`), not by a throwaway probe:
 
 * **Concentration maximum is not exactly preserved but is preserved to 1.3e-12**
   at the endpoint — and it is genuinely *not* conserved mid-run: scanning all
@@ -223,9 +271,26 @@ the verdict:
   round trip (the patch traverses ~97 of the 99 doubly-periodic cells in 485
   steps at 0.5 m/s).
 * **The thickness overshoot is absent from the whole trajectory, not just the
-  endpoint.** Scanning all 485 frames, `max h_i` is largest at kt = 1 (2.0) and
-  never exceeds it.  So this REFUTE is not an artefact of sampling only the
-  final restart.
+  endpoint.** Over all 485 frames `max h_i` is largest at kt = 1 (2.0) and never
+  exceeds it.  So this REFUTE is not an artefact of sampling only the final
+  restart.
+* **What that REFUTE does and does not say.** The predicate is a *global* max of
+  the *ratio* `v_i / a_i` against its initial value.  A side lobe is a local
+  oscillation flanking the patch, which such a global maximum cannot see, and
+  the shipped note is *comparative* (Prather versus UM), which a single-scheme
+  run cannot test at all.  So the correct reading is narrow: **this run never
+  produces a thickness larger than it started with** — not "the shipped
+  documentation is wrong about Prather".
+* **This predicate is NOT ill-posed, unlike rung 3.1's `h_i` centroid.**  That
+  one was voided because its baseline distance is *exactly* `0.0`, so no run of
+  any kind could satisfy it — a property provable before seeing output.  This
+  one is plainly satisfiable: the sibling advected field does exactly what it
+  demands, with `max a_i` reaching 0.9252 against an initial 0.9.  A predicate a
+  run could have passed and did not is refuted, not void.
+* **The verdict is robust to the operationalisation.** The `max a_i` REFUTE was
+  written as exact float equality, which is a hard bar; but the mid-run
+  excursion to 0.9252 is **2.8 % above** the initial maximum, so max-preservation
+  fails under any tolerance looser than 2.8 % as well.
 * **The 0.49 concentration "drift" is a first-step effect, not a leak.**
   `sum a_i` is 2924.10 at kt = 1 and 1689.30 at kt = 2, then decays slowly to
   1483.02 at kt = 485, while `sum v_i` is 141.371666 at kt = 1 and 141.371665 at
@@ -244,11 +309,35 @@ rheology (ln_dynRHGADV=T)", driven by the shipped
 
 | number | value | verdict |
 |---|---|---|
-| final `max u_ice` [m/s] | 0.5033997478575521 | CONFIRM (positive; and within 0.7 % of the shipped 0.5 m/s annotation) |
+| final `max u_ice` [m/s] | 0.5033997478575521 | CONFIRM (positive) |
+| free-drift identity `sqrt(utau_ice / (rho0 · rn_Cd_io))` [m/s] | 0.5033997477580665 | CONFIRM — **gated**, relative miss **1.98e-10** against a 1e-2 band |
 | max abs change in `v_i` (entry kt=1 → final) | 1.6469 | CONFIRM (state evolved) |
 | SI3 native violations | 0 | CONFIRM |
 | total-`a_i` relative drift (UNCLASSIFIED) | 0.5036 | reported, not scored (same first-step zapping as 3.2) |
 | total-`v_i` relative drift (UNCLASSIFIED) | 5.580e-09 | reported, not scored |
+
+The free-drift row is the rung's substantive bar, and it is checked by the gate
+rather than admired in prose.  The documented claim is that the rheology
+*calculates* the velocity a constant stress implies, so the bar is the identity
+that stress balance fixes.  Ice-ocean drag is quadratic and both stress terms
+carry the same U-point ice fraction `zaU`, which therefore cancels
+(`icedyn_rhg_evp.F90:310,580-590`):
+
+> `utau_ice = rho0 · rn_Cd_io · |u_ice|²`
+
+Nothing in that is defaulted: `rn_Cd_io = 5.0e-3` is read from the run's
+resolved `output.namelist.ice`, `rho0 = 1026.0` from its own `ocean.output:162`,
+and `utau_ice = 1.3 N/m²` is the case constant at
+`tests/ICE_ADV2D/MY_SRC/usrdef_sbc.F90:93`.  Predicted 0.5033997477580665 m/s
+against measured 0.5033997478575521 m/s: the aEVP steady state **is** free drift
+to ten significant figures.  The shipped `"<=> 0.5 m/s"` annotation is that
+identity, rounded.  The gate's band is 1e-2 relative, which the run clears by a
+factor of 5e7; the band exists to catch a broken stress balance, drag law or
+aEVP solve, all of which move the steady speed by tens of percent.
+
+Rung 3.3 is also the **only** rung with an aborting per-cell conservation check:
+`ice_dyn_rhg` calls `ice_cons2D` (`icedyn_rhg.F90:64,102`), which `ctl_stop`s on
+a per-gridcell violation (`icectl.F90:323,355-360`).  It did not fire.
 
 Total concentration is deliberately not classified: `Hpiling`
 (`icedyn.F90:209-232`) may rescale it.
@@ -280,6 +369,15 @@ a listed-but-absent name is fatal, so **UNACCOUNTED is structurally 0**.
 
 * Every `VERIFIED` mesh/restart row is actually opened, is numeric, is finite,
   and — for floating restart fields — is asserted `float64`.
+* **The split itself is regenerated, not trusted.**  Every disposition and
+  reason is recomputed from the run and required to equal the manifest, the same
+  ratchet the Appendix-A contract already had.  Without that, a `VERIFIED` row
+  could be quietly re-labelled `WAIVED` with any non-empty reason string and
+  would then *skip* its numeric/finite/fp64 check — measured on the shipped
+  gate before the fix: downgrading 18 of the 31 VERIFIED mesh rows plus
+  `DELAY__r8_cflice` still exited 0 with `status: VERIFIED`.
+* Each manifest's `git_sha` is required to be a 40-hex commit rather than any
+  provenance string a hand edit might leave.
 * The four waived rows in each file are NEMO's own metadata variables.  The
   waiver set is no longer hand-written: it is NEMO's `meta(1:11)` list copied
   from `src/OCE/IOM/iom.F90:365-375`, which is what caught `numcat` (the SI3
@@ -356,23 +454,45 @@ masks binary.  3.2/3.3: 99×99×2, scale factors uniform at 3000.0 m, same.
 Both preregistered controls are run **end to end through the shipped CLI**
 against each of the three real run roots, and all six exit nonzero:
 
-| control | 3.1 | 3.2 | 3.3 | message |
+| control | 3.1 | 3.2 | 3.3 | message asserted |
 |---|---|---|---|---|
 | `--plant-unaccounted` (adds `PLANTED_UNACCOUNTED_FILE_ARRAY` to the discovered mesh inventory) | rc=1 | rc=1 | rc=1 | `mesh coverage mismatch: missing=['PLANTED_UNACCOUNTED_FILE_ARRAY']` |
 | `--plant-field` (adds 1 m to one in-memory `e1t` value) | rc=1 | rc=1 | rc=1 | `e1t metric` |
+
+The message is asserted, not just the exit code.  Rungs 3.1 and 3.2 already exit
+1 unplanted, so a bare `returncode != 0` assertion would have passed on four of
+these six arms even with both plants disabled — measured: with the unaccounted
+plant made a no-op, all three of its arms go red on the message and only the 3.3
+arm would have gone red on the exit code.
+
+Further controls, each shown to fail when its subject is reverted:
+
+| control | what it pins | measured on revert |
+|---|---|---|
+| wet-window regression on rung 3.1 | the land-rim fix that this rung's phenomenology verdict rests on | neuter `wet_window()` → that test alone goes red (`CONFIRM` → `REFUTE`); the other 18 stay green |
+| registry order versus the committed instrument | the `WRITE(itraj)` order that NAMES every frame array | swap two `FRAME_REGISTRY` rows → red at index 0 |
+| manifest status downgrade | a VERIFIED row silently re-labelled WAIVED (which would skip its numeric/finite/fp64 check) | `pytest.raises` on the regenerated-template mismatch |
+| manifest `git_sha` | a hand-written provenance string | `pytest.raises` on a non-40-hex value |
+| `ocean.output` hash | the file that carries the conservation verdict | `pytest.raises` on an edited copy |
+| committed input decks | run inputs drifting from `configs/` | `input_namelists(3.1 root, "3.2")` raises |
+| free-drift identity | rung 3.3's quantitative bar | a 0.6 m/s prediction gives REFUTE |
 
 Non-vacuity: the unplanted arms are **not** all red — rung 3.3 exits 0 with
 `status: VERIFIED`, while 3.1 and 3.2 exit 1 with `status: DEBT` for the
 substantive reasons in §4.  That asymmetry is itself asserted by a test.
 
-Tests: `tests/ocean/fidelity/test_nemo_si3_oracle_gate.py` — **15 passed**
-(`15 passed in 10.98s`).  They cover the frame round trip in fp64 Fortran order,
-registry completeness/uniqueness/sourcing, the Appendix-A contract dispositions,
-the contract-omission and `UNMEASURED`-in-mesh red paths, the phenomenology
-REFUTE path, the native-conservation REFUTE path, and the six CLI control
-invocations above (skipped, not silently passed, if the run roots are absent).
+Tests: `tests/ocean/fidelity/test_nemo_si3_oracle_gate.py` — **19 passed**
+(`19 passed in 12.16s`).  They cover the frame round trip in fp64 Fortran order,
+registry completeness/uniqueness/sourcing and its ORDER against the committed
+instrument, the Appendix-A contract dispositions, the contract-omission,
+status-downgrade, bad-`git_sha` and `ocean.output`-hash red paths, the
+phenomenology REFUTE path, the free-drift REFUTE path, the native-conservation
+REFUTE path, the input-deck binding, the rung-3.1 wet-window pin, and the six
+CLI control invocations above (skipped, not silently passed, if the run roots
+are absent).
 
-Repo-wide: `tests/ocean/fidelity/` reports `2 failed, 670 passed, 7 skipped`.
+Repo-wide: `tests/ocean/fidelity/` reports
+`2 failed, 674 passed, 7 skipped, 18 deselected in 161.96s`.
 Both failures — `test_recipe_case_board.py::test_every_oracle_comparison_has_a_row`
 (missing rows for `advection_nemo`, `grids_tripole_mpas`, `tendencies_nemo`,
 `three_way_nemo`) and `test_recipe_comparison.py::test_committed_markdown_is_fresh`
@@ -413,9 +533,13 @@ than only an error string.  Current exits: 3.1 = 1 (DEBT), 3.2 = 1 (DEBT),
 | 3.3 | `ocean.output` | `8512581c3022c6be20e07bb2db90570a5d683c13e050fac38143b76485026f0b` |
 | 3.3 | ordered frame-hash aggregate (485 frames) | `fcfd975bffe378bbbbe145a005fa29285d0e95413f586610ac1e658be8abd79b` |
 
-Every mesh/restart/namelist hash above is also embedded in the committed
-manifest for its rung, and the gate refuses to run against a file whose hash has
-moved.
+Every hash above — **including `ocean.output`**, which alone carries the
+conservation verdict — is embedded in the committed manifest for its rung, and
+the gate refuses to run against a file whose hash has moved.  The two input
+decks each run consumed (`namelist_cfg`, `namelist_ice_cfg`) are additionally
+required to be byte-identical to the committed copies under
+`scripts/validate/ocean_fidelity/testcases/configs/`, so those copies are bound
+to the runs rather than being documentation nothing checks.
 
 ## 9. UNMEASURED / UNVERIFIED — loud
 
@@ -428,9 +552,14 @@ moved.
   No landfast behaviour is measured or claimed.
 * **`rn_relast = 0.333` is recorded but inert** under `ln_aEVP=T`
   (`icedyn_rhg_evp.F90:236-247`): its value is pinned, its effect is UNMEASURED.
-* **Cause of the rung-3.1 heat-conservation violations: UNRESOLVED.** Magnitude
-  and thresholds are measured (§4); the mechanism is not, and the two candidate
-  causes named there are PLAUSIBLE only.
+* **Cause of the rung-3.1 heat-conservation violations: RESOLVED, CONFIRMED**
+  (§4) — SI3's end-of-step heat ledger drops `hfx_res` whenever
+  `ln_icethd = F`, so enthalpy removed by zapping is invisible to it.  Every
+  printed violation matches that step's frame enthalpy loss to the fp64
+  roundoff floor.  What remains UNMEASURED is only the split between
+  `zapsmall` and `zapneg`.  The earlier "negative open-water fraction"
+  candidate is RETRACTED as refuted, and the earlier per-gridcell-threshold
+  claim is RETRACTED as citing a guard that never runs on this path.
 * **Rung-3.2 `max a_i` mid-run overshoot to 0.925 at kt=8**: measured, but no
   claim is made about whether it is the "side lobes" the shipped README
   describes — that would need the field-shape diagnostic this phase did not
@@ -439,21 +568,35 @@ moved.
   reachable from this session either.
 * **Rungs 3.2/3.3 conservation silence is weak evidence**, quantified in §4:
   their conservation test is ~2400× less sensitive in relative terms than
-  rung 3.1's.
+  rung 3.1's, and rungs 3.1/3.2 have no aborting per-cell check at all.
+* **Prather side lobes: still UNMEASURED.** §4 now says precisely what rung
+  3.2's overshoot predicate does and does not measure; a field-shape diagnostic
+  able to see a *local* lobe was not preregistered and was not built.
+* **`rn_relast` is not the only pinned-but-inert row**; see §3.
 
 ## 10. Pre-registration amendments
 
-Recorded rather than silently applied.  No verdict was relabelled after seeing
-output; the two amendments below are instrument corrections and one ill-posed
-predicate.
+Recorded rather than silently applied.  **One of these amendments changes a
+verdict, and that is stated plainly here rather than left for a reader to
+discover:** with the preregistered whole-array reduction, rung 3.1's
+phenomenology is REFUTE (`y_homogeneity_max_abs` = 2.6873480199492166, refuting
+`a_i` 2.6873 / `v_i` 2.3410 / `h_i` 1.0); over the wet window it is CONFIRM with
+`y_homogeneity_max_abs` exactly 0.0.  The wet-window amendment is the **sole**
+reason rung 3.1 reads CONFIRM.  It is defended on NEMO's own masking rather than
+on the outcome — `dommsk` zeroes the one-cell land rim and `mesh_mask.tmask`
+rows and columns 0 and 58 are 0 — and it is now pinned by a test that goes red
+if it is reverted (§6).  An earlier version of this section asserted "no verdict
+was relabelled"; that sentence was wrong and is retracted.
 
 | preregistered text | amendment | reason |
 |---|---|---|
-| reductions over the field arrays | reductions over the **surface-tmask wet window** | ICE_ADV1D's land rim is identically zero by `dommsk`, and dominated every whole-array spread; ICE_ADV2D is fully wet so this is a no-op there |
+| reductions over the field arrays | reductions over the **surface-tmask wet window** | ICE_ADV1D's land rim is identically zero by `dommsk`, and dominated every whole-array spread; ICE_ADV2D is fully wet so this is a no-op there. **Flips rung 3.1 phenomenology REFUTE → CONFIRM** |
 | "all three centroid distances from basin centre strictly decrease" | `h_i` centroid convergence recorded **VOID-ILL-POSED**; `a_i` and `v_i` unchanged and both CONFIRM | `h_i`'s initial distance is exactly `0.0`, so the predicate cannot be satisfied by any run; a control that perturbs a zero is not a control |
 | `nz = 1` for rung 3.1 | `nz = 2` | NEMO's own `jpk = MAX(2, jpkglo)` (`mppini.F90:80`), confirmed in `ocean.output` |
 | `cn_exp` compared verbatim | compared after stripping quotes **and** blank padding | NEMO writes it back as a blank-padded `CHARACTER(lc)` field |
 | conservation/phenomenology raise on failure | verdict reported into the JSON, **exit still nonzero** | a refuted rung must still leave its measured numbers on the record |
+| rung 3.3 scored on "the ice moved" | additionally scored on the **free-drift identity** `sqrt(utau_ice / (rho0 · rn_Cd_io))`, band 1e-2 relative | the only green rung carried the whole non-vacuity argument on two predicates that no moving run could fail; the quantitative agreement was in the prose and gated nowhere.  Measured miss 1.98e-10 |
+| — | the gate additionally emits a **full-trajectory scan** and a per-step **heat-residual attribution** | numbers this receipt cites must come from the committed instrument, not a throwaway probe |
 
 ## 11. FLAGGED FOR FUTURE DELETION
 
