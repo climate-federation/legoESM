@@ -151,3 +151,17 @@ def test_frozen_adaptive_arm_labels_are_non_vacuous():
     assert PROBE._arm_d_label(2877, 3928, 159.0, 3.0e6) == "PLAUSIBLE"
     assert PROBE._arm_d_label(2877, 2877, 1.01, 1.01) == "REFUTED_PRIMARY"
     assert PROBE._arm_d_label(2877, 3000, 1.5, 3.0) == "UNMEASURED"
+
+
+def test_completed_arm_can_reach_confirmation_and_short_null_run_fails():
+    failure, completed = PROBE._arm_failure_for_label({
+        "first_nonfinite_completed_step": None,
+        "requested_end_step": 6120,
+    })
+    assert (failure, completed) == (6121, True)
+    assert PROBE._arm_d_label(2877, failure, 2.0, 2.0) == "CONFIRMED"
+    with pytest.raises(PROBE.ProbeError, match="not evidence"):
+        PROBE._arm_failure_for_label({
+            "first_nonfinite_completed_step": None,
+            "requested_end_step": 3200,
+        })

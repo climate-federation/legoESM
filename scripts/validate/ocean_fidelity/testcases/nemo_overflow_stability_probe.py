@@ -789,6 +789,16 @@ def _arm_d_label(
     return "UNMEASURED"
 
 
+def _arm_failure_for_label(run: dict) -> tuple[int, bool]:
+    """Map a finite full-duration run to the sentinel beyond the 6120 bar."""
+    failure = run["first_nonfinite_completed_step"]
+    if failure is not None:
+        return int(failure), False
+    require(run["requested_end_step"] >= 6120,
+            "null arm failure is not evidence of a full-duration completion")
+    return 6121, True
+
+
 def classify_coverage_round(
     coverage_path: Path,
     baseline_root: Path,
@@ -822,9 +832,9 @@ def classify_coverage_round(
     require(adaptive_scale_passes, "full adaptive arm ran below frozen scale")
     base_fail = baseline_run["first_nonfinite_completed_step"]
     adaptive_fail = adaptive_run["first_nonfinite_completed_step"]
-    require(base_fail is not None and adaptive_fail is not None,
-            "current artifacts must record both failure steps")
-    movement = adaptive_fail - base_fail
+    require(base_fail is not None, "baseline artifact must record its failure step")
+    adaptive_fail_for_label, adaptive_completed = _arm_failure_for_label(adaptive_run)
+    movement = adaptive_fail_for_label - base_fail
 
     def field_at_kt(report: dict, kt: int, field: str) -> dict:
         kt_rows = [row for row in report["rows"] if row["kt"] == kt]
@@ -846,7 +856,7 @@ def classify_coverage_round(
     adaptive_t_increment = increment_at(adaptive_run, 2876, "T")
     t_reduction = base_t_increment / adaptive_t_increment
     adaptive_label = _arm_d_label(
-        base_fail, adaptive_fail, u_reduction, t_reduction)
+        base_fail, adaptive_fail_for_label, u_reduction, t_reduction)
 
     bbl_t = scale_row(bbl_scale, "T")[
         "effect_at_increment_argmax_over_increment"]
@@ -872,6 +882,7 @@ def classify_coverage_round(
             "same_input_u_scale_ratio": adaptive_u_scale,
             "baseline_failure_step": base_fail,
             "arm_failure_step": adaptive_fail,
+            "arm_completed_6120": adaptive_completed,
             "failure_step_movement": movement,
             "kt2877_u_normalized_linf": {
                 "baseline": base_u,
