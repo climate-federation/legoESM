@@ -205,7 +205,7 @@ def run_legoesm(output: Path, arm: str, end_step: int, capture_start: int) -> di
         "case": "OVERFLOW-zps",
         "arm": arm,
         "reference": (
-            "NEMO 5.0.2 executed configuration"
+            "legoESM certified card targeting the NEMO 5.0.2 configuration"
             if arm == "baseline"
             else "experimental harness ablation; no reference model"
         ),
@@ -411,6 +411,60 @@ def compare_arms(baseline_root: Path, arm_root: Path, output: Path) -> dict:
             "but neither confirms nor refutes ownership by NEMO's complete "
             "adaptive-implicit RK3 package."
         ),
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    print(json.dumps(report, indent=2))
+    return report
+
+
+def compare_primary_arm(baseline_root: Path, arm_root: Path, output: Path) -> dict:
+    """Apply the frozen primary-transport localization verdict."""
+    baseline_run = json.loads((baseline_root / "run.json").read_text())
+    arm_run = json.loads((arm_root / "run.json").read_text())
+    baseline_score = json.loads((baseline_root / "matched_score.json").read_text())
+    arm_score = json.loads((arm_root / "matched_score.json").read_text())
+
+    def values(report):
+        step = next(row for row in report["rows"] if row["kt"] == 2601)
+        return {
+            row["field"]: row["normalized_linf"]
+            for row in step["fields"] if row["field"] in {"u", "ssh"}
+        }
+
+    baseline_values = values(baseline_score)
+    arm_values = values(arm_score)
+    relative_movement = {
+        name: abs(arm_values[name] - baseline_values[name]) / baseline_values[name]
+        for name in baseline_values
+    }
+    base_fail = baseline_run["first_nonfinite_completed_step"]
+    arm_fail = arm_run["first_nonfinite_completed_step"]
+    supports = (
+        (arm_fail >= base_fail + 100 or arm_fail > 3200)
+        and all(arm_values[name] <= 0.5 * baseline_values[name]
+                for name in baseline_values)
+    )
+    refutes_primary = (
+        2870 <= arm_fail <= 2884
+        and all(value < 0.1 for value in relative_movement.values())
+    )
+    verdict = "CONFIRMED" if supports else "REFUTED_PRIMARY" if refutes_primary else "PLAUSIBLE"
+    report = {
+        "format": "nemo-testcase-l1-overflow-stability-primary-arm-v1",
+        "git_sha": git_sha(),
+        "case": "OVERFLOW-zps",
+        "arm": "primary_transport_average=False",
+        "arm_reference": "experimental harness ablation; no reference model",
+        "baseline_first_nonfinite_completed_step": base_fail,
+        "arm_first_nonfinite_completed_step": arm_fail,
+        "failure_step_movement": arm_fail - base_fail,
+        "kt2601_normalized_linf": {
+            "baseline": baseline_values,
+            "arm": arm_values,
+            "relative_movement": relative_movement,
+        },
+        "verdict": verdict,
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
@@ -653,6 +707,10 @@ def main() -> int:
     compare_parser.add_argument("--baseline-root", type=Path, default=DEFAULT_CANDIDATE)
     compare_parser.add_argument("--arm-root", type=Path, required=True)
     compare_parser.add_argument("--output", type=Path, required=True)
+    primary_parser = sub.add_parser("compare-primary-arm")
+    primary_parser.add_argument("--baseline-root", type=Path, default=DEFAULT_CANDIDATE)
+    primary_parser.add_argument("--arm-root", type=Path, required=True)
+    primary_parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "run-legoesm":
         run_legoesm(args.output, args.arm, args.end_step, args.capture_start)
@@ -669,8 +727,10 @@ def main() -> int:
         paired_step_scale(args.output, args.completed_before)
     elif args.command == "summarize-run":
         summarize_run(args.root)
-    else:
+    elif args.command == "compare-arms":
         compare_arms(args.baseline_root, args.arm_root, args.output)
+    else:
+        compare_primary_arm(args.baseline_root, args.arm_root, args.output)
     return 0
 
 
