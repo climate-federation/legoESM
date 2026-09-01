@@ -125,3 +125,34 @@ the dry sites, not merely on the multi-site mean. Anything else is reported as
   potential against observed predawn / midday values — that is what would
   separate "P-hydro is mis-parameterised" from "P-hydro is wrong here".
   Recorded as the recommended next instrument.
+
+
+## Stage-2 sensitivity screen — RESULT (measured, 2 dry training sites)
+
+One-at-a-time response of the prognostic P-hydro arm at US-Whs + US-Ton
+(`diagnostics/phydro_sens/ladder_skill.csv`). Range = spread of the low/high
+perturbation around the default.
+
+| parameter | GPP RMSE range | LE bias range | rank |
+|---|---|---|---|
+| `gplant_mol` (5e-4 .. 2e-2) | **1.17** | **14.3** | 1 |
+| `minlwp_mpa` (-5 .. -0.5) | 0.77 | 9.0 | 2 |
+| `root_biomass_gm2` (50 .. 2000) | 0.74 | 10.1 | 3 |
+| `gamma_cost` (0.1 .. 10) | 0.23 | 3.7 | 4 (weakest) |
+
+**The assumed slice was wrong.** `gamma_cost` — half of the originally proposed
+grid — is the LEAST informative of the four, exactly as both reviewers
+predicted. The ladder slice is therefore **`gplant_mol` x `minlwp_mpa`**, chosen
+from this measurement rather than asserted.
+
+**Substantive finding (PLAUSIBLE, 2 sites):** LOWERING whole-plant conductance
+from the 4e-3 default to 1e-3 improves dry-site skill on both fluxes at once —
+GPP RMSE 2.75 -> 1.89 and bias +1.40 -> +0.47, LE bias +27.8 -> +19.2 W/m2.
+Direction is physically sensible (the default lets a semiarid plant move too
+much water), and it is the largest single-parameter improvement seen anywhere in
+this campaign. It sits near the low edge of the screened range, so the ladder
+extends `gplant_mol` down to its spec bound (5e-4) rather than stopping at 1e-3.
+
+**Sequencing (hold-out protection, unchanged):** the dry-site ladder runs only
+after the stage-1 verdict is fixed and published, because two of the five dry
+sites (US-SRM, US-Var) are stage-1 hold-outs.
