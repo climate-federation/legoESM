@@ -184,7 +184,7 @@ def plot_sections(data: SectionData, output: Path, figure_sha: str) -> Path:
         difference = candidate - oracle
         limit = float(np.max(np.abs(difference[data.mask])))
         require(limit > 0.0 or time_s == 0, f"{data.case} {time_s}: vacuous difference")
-        display_limit = max(limit, np.finfo(np.float64).tiny)
+        display_limit = limit if limit > 0.0 else 1.0e-15
         state_map = add_section(
             axes[0, column],
             data,
@@ -290,7 +290,7 @@ def bridge_panel(ax, report, field):
 
 def plot_metrics(case: str, report: dict, output: Path, figure_sha: str) -> Path:
     fig, axes = plt.subplots(2, 3, figsize=(13.4, 7.6), constrained_layout=True)
-    fig.get_layout_engine().set(rect=(0.0, 0.09, 1.0, 0.89))
+    fig.get_layout_engine().set(rect=(0.0, 0.09, 1.0, 0.81))
     fig.suptitle(f"{case}: preregistered full-duration metrics", y=0.99)
     if case == "OVERFLOW-zps":
         curve_panel(axes[0, 0], report, "plume_descent_m", "Depth (m)", "Deepest cold level")
@@ -355,7 +355,11 @@ def plot_metrics(case: str, report: dict, output: Path, figure_sha: str) -> Path
         plt.Line2D([], [], color=ARM_COLORS[arm], marker="o", label=ARM_LABELS[arm]) for arm in ARMS
     ]
     fig.legend(
-        handles=handles, loc="upper center", ncol=4, frameon=False, bbox_to_anchor=(0.5, 0.94)
+        handles=handles,
+        loc="upper center",
+        ncol=4,
+        frameon=False,
+        bbox_to_anchor=(0.5, 0.925),
     )
     footer = (
         f"case={case}; three registered states only; N2/N4/L64/L32; exact floor "
@@ -398,7 +402,7 @@ def plot_failure(case: str, report: dict, output: Path, figure_sha: str) -> Path
             fontsize=9,
         )
     ax.set_ylim(0, target * 1.13)
-    ax.set_ylabel("Completed steps before first non-finite state")
+    ax.set_ylabel("Completed steps (legoESM stops at first non-finite state)")
     ax.set_title(
         f"{case}: full-duration comparison unavailable\n"
         "all preregistered metric verdicts = OUTSIDE",
