@@ -144,3 +144,10 @@ def test_resolved_coverage_rejects_card_momentum_form_mutation():
     with pytest.raises(PROBE.ProbeError, match="card momentum_advection"):
         PROBE.overflow_resolved_coverage(
             PROBE.DEFAULT_ORACLE / "output.namelist.dyn", card=bad_card)
+
+
+def test_frozen_adaptive_arm_labels_are_non_vacuous():
+    assert PROBE._arm_d_label(2877, 6121, 2.0, 2.0) == "CONFIRMED"
+    assert PROBE._arm_d_label(2877, 3928, 159.0, 3.0e6) == "PLAUSIBLE"
+    assert PROBE._arm_d_label(2877, 2877, 1.01, 1.01) == "REFUTED_PRIMARY"
+    assert PROBE._arm_d_label(2877, 3000, 1.5, 3.0) == "UNMEASURED"

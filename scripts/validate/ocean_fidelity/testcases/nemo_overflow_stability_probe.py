@@ -769,6 +769,149 @@ def compare_primary_arm(baseline_root: Path, arm_root: Path, output: Path) -> di
     return report
 
 
+def _arm_d_label(
+    base_fail: int,
+    arm_fail: int,
+    u_reduction: float,
+    t_reduction: float,
+) -> str:
+    """Frozen adaptive-momentum label; split out for direct non-vacuity tests."""
+    movement = arm_fail - base_fail
+    if arm_fail > 6120 and u_reduction >= 2.0 and t_reduction >= 2.0:
+        return "CONFIRMED"
+    if movement >= 100 and u_reduction >= 2.0 and t_reduction >= 2.0:
+        return "PLAUSIBLE"
+    if (2870 <= arm_fail <= 2884
+            and abs(movement) / base_fail < 0.1
+            and u_reduction < (1.0 / 0.9)
+            and t_reduction < (1.0 / 0.9)):
+        return "REFUTED_PRIMARY"
+    return "UNMEASURED"
+
+
+def classify_coverage_round(
+    coverage_path: Path,
+    baseline_root: Path,
+    adaptive_root: Path,
+    adaptive_scale_path: Path,
+    bbl_scale_path: Path,
+    output: Path,
+) -> dict:
+    """Apply the frozen Arm-D/Arm-E rules without post-hoc judgment."""
+    coverage = json.loads(coverage_path.read_text())
+    baseline_run = json.loads((baseline_root / "run.json").read_text())
+    adaptive_run = json.loads((adaptive_root / "run.json").read_text())
+    baseline_score = json.loads((baseline_root / "matched_score.json").read_text())
+    adaptive_score = json.loads((adaptive_root / "matched_score.json").read_text())
+    adaptive_scale = json.loads(adaptive_scale_path.read_text())
+    bbl_scale = json.loads(bbl_scale_path.read_text())
+    require(coverage["unmeasured"] == ["namzdf.ln_zad_aimp"],
+            "coverage register changed after preregistration")
+    require(adaptive_scale["arm"] == "disable_adaptive_implicit_momentum",
+            "wrong adaptive scale artifact")
+    require(bbl_scale["arm"] == "disable_bbl", "wrong BBL scale artifact")
+
+    def scale_row(report: dict, field: str) -> dict:
+        hits = [row for row in report["rows"] if row["field"] == field]
+        require(len(hits) == 1, f"expected one scale row for {field}")
+        return hits[0]
+
+    adaptive_u_scale = scale_row(adaptive_scale, "u")[
+        "effect_at_increment_argmax_over_increment"]
+    adaptive_scale_passes = adaptive_u_scale >= 0.1
+    require(adaptive_scale_passes, "full adaptive arm ran below frozen scale")
+    base_fail = baseline_run["first_nonfinite_completed_step"]
+    adaptive_fail = adaptive_run["first_nonfinite_completed_step"]
+    require(base_fail is not None and adaptive_fail is not None,
+            "current artifacts must record both failure steps")
+    movement = adaptive_fail - base_fail
+
+    def field_at_kt(report: dict, kt: int, field: str) -> dict:
+        kt_rows = [row for row in report["rows"] if row["kt"] == kt]
+        require(len(kt_rows) == 1, f"missing kt={kt}")
+        hits = [row for row in kt_rows[0]["fields"] if row["field"] == field]
+        require(len(hits) == 1, f"missing {field} at kt={kt}")
+        return hits[0]
+
+    base_u = field_at_kt(baseline_score, 2877, "u")["normalized_linf"]
+    adaptive_u = field_at_kt(adaptive_score, 2877, "u")["normalized_linf"]
+    u_reduction = base_u / adaptive_u
+
+    def increment_at(run: dict, completed: int, field: str) -> float:
+        rows = [row for row in run["records"] if row["completed_step"] == completed]
+        require(len(rows) == 1, f"missing completed step {completed}")
+        return rows[0]["fields"][field]["max_abs_one_step_increment"]
+
+    base_t_increment = increment_at(baseline_run, 2876, "T")
+    adaptive_t_increment = increment_at(adaptive_run, 2876, "T")
+    t_reduction = base_t_increment / adaptive_t_increment
+    adaptive_label = _arm_d_label(
+        base_fail, adaptive_fail, u_reduction, t_reduction)
+
+    bbl_t = scale_row(bbl_scale, "T")[
+        "effect_at_increment_argmax_over_increment"]
+    bbl_u = scale_row(bbl_scale, "u")[
+        "effect_at_increment_argmax_over_increment"]
+    bbl_scale_passes = max(bbl_t, bbl_u) >= 0.1
+    bbl_label = "UNMEASURED" if bbl_scale_passes else "REFUTED_PRIMARY"
+    require(not bbl_scale_passes,
+            "BBL passed the scale gate; a full arm is required before closure")
+
+    report = {
+        "format": "nemo-testcase-l1-overflow-coverage-round-verdict-v1",
+        "git_sha": git_sha(),
+        "case": "OVERFLOW-zps",
+        "coverage": {
+            "status": coverage["status"],
+            "counts": coverage["counts"],
+            "unmeasured": coverage["unmeasured"],
+            "barotropic_composition": coverage["barotropic_composition"],
+        },
+        "adaptive_momentum_arm": {
+            "label": adaptive_label,
+            "same_input_u_scale_ratio": adaptive_u_scale,
+            "baseline_failure_step": base_fail,
+            "arm_failure_step": adaptive_fail,
+            "failure_step_movement": movement,
+            "kt2877_u_normalized_linf": {
+                "baseline": base_u,
+                "arm": adaptive_u,
+                "reduction_factor": u_reduction,
+            },
+            "completed2876_T_increment": {
+                "baseline": base_t_increment,
+                "arm": adaptive_t_increment,
+                "reduction_factor": t_reduction,
+            },
+            "reference": "experimental harness ablation; no reference model",
+        },
+        "bbl_arm": {
+            "label": bbl_label,
+            "same_input_effect_at_increment_ratio": {"T": bbl_t, "u": bbl_u},
+            "full_arm_allowed": bbl_scale_passes,
+            "reference": "experimental harness ablation; no reference model",
+        },
+        "initiating_owner": {
+            "label": "UNMEASURED",
+            "reason": (
+                "no arm completed 6120 and early kt=2 U/SSH arithmetic remains "
+                "unowned; Arm D identifies a major late amplifier only"
+            ),
+        },
+        "tested_register_exhausted": True,
+        "remaining_implementation_debt": [
+            "source-exact unbranched NEMO RK3 ln_zad_Aimp package: Wicker "
+            "ww/wi partition, optimized FCT predictor, tracer and momentum "
+            "implicit applications at the cited NEMO time levels"
+        ],
+        "status": "UNMEASURED",
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    print(json.dumps(report, indent=2))
+    return report
+
+
 def _load_candidate(path: Path) -> dict[str, np.ndarray]:
     require(path.is_file(), f"missing {path}")
     with np.load(path) as data:
@@ -1026,6 +1169,18 @@ def main() -> int:
     )
     coverage_parser.add_argument("--output", type=Path, required=True)
     coverage_parser.add_argument("--plant-unaccounted", action="store_true")
+    verdict_parser = sub.add_parser("classify-coverage-round")
+    verdict_parser.add_argument(
+        "--coverage", type=Path,
+        default=Path(
+            "/data/abyssal/dbalwada/nemo-testcases-l1/stability/"
+            "overflow_resolved_coverage.json"),
+    )
+    verdict_parser.add_argument("--baseline-root", type=Path, default=DEFAULT_CANDIDATE)
+    verdict_parser.add_argument("--adaptive-root", type=Path, required=True)
+    verdict_parser.add_argument("--adaptive-scale", type=Path, required=True)
+    verdict_parser.add_argument("--bbl-scale", type=Path, required=True)
+    verdict_parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "run-legoesm":
         run_legoesm(args.output, args.arm, args.end_step, args.capture_start)
@@ -1046,7 +1201,7 @@ def main() -> int:
         compare_arms(args.baseline_root, args.arm_root, args.output)
     elif args.command == "compare-primary-arm":
         compare_primary_arm(args.baseline_root, args.arm_root, args.output)
-    else:
+    elif args.command == "coverage":
         report = overflow_resolved_coverage(
             args.resolved_namelist,
             args.output,
@@ -1054,6 +1209,15 @@ def main() -> int:
         )
         print(json.dumps({key: value for key, value in report.items()
                           if key != "rows"}, indent=2))
+    else:
+        classify_coverage_round(
+            args.coverage,
+            args.baseline_root,
+            args.adaptive_root,
+            args.adaptive_scale,
+            args.bbl_scale,
+            args.output,
+        )
     return 0
 
 
