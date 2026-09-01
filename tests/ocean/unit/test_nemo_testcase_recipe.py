@@ -111,6 +111,9 @@ def test_gyre_card_pins_rotated_grid_mi96_ic_and_seasonal_sbc():
     assert card.dt_s == 14400.0
     assert card.n_steps == 4320
     assert card.surface_boundary_condition == "gyre_usrdef_sbc"
+    assert testcase_recipe._resolved_auto_substeps(
+        recipe.grid, recipe.initial_state.H_bathy.data, card.dt_s
+    ) == 50
     assert np.array_equal(np.asarray(recipe.grid.native_lat_T_deg), source["gphit"])
     assert np.array_equal(np.asarray(recipe.grid.f_T), source["ff_t"])
     assert np.array_equal(np.asarray(recipe.z_coord.dz_ref), ladder["e3t_1d"][:30])
