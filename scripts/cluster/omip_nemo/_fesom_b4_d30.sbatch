@@ -39,6 +39,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid fesom \
   --prognostic-sea-ice --prognostic-ice-dynamics free_drift \
   --ice-init $NEMOIN/Ice_initialization.nc --ice-ocean-heat-coeff 70 \
   --sss-restore --sss-restore-channel water_flux \
+  --sss-restore-normalization live_s \
   --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 \
   --sss-ice-gate-nemo \
   --sss-restore-file $NEMOIN/orca1_inputs/data_repository/input_fields/sss_climatology_for_restoring.nc \
