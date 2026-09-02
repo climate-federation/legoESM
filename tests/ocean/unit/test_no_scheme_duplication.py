@@ -29,8 +29,10 @@ from tests.ocean.unit._nemo_branch_isomorphism_baseline import (
     ARTIFICIAL_BRANCH_BASELINE,
     ROUTINE_REGISTRY,
     VALID_BASELINE_KINDS,
+    VALID_REFERENCE_MODELS,
     BaselineEntry,
     Impl,
+    Reference,
     RoutineRow,
 )
 
@@ -292,6 +294,35 @@ def _ast_symbol_exists(rel_path: str, symbol: str) -> bool:
     )
 
 
+def _reference_groups(row: RoutineRow) -> dict[tuple[str, str], list[Impl]]:
+    """Group ``row``'s impls by ``(reference.model, reference.arm)``. Two
+    impls landing in the same group means two legoESM symbols both claim to
+    be the SAME reference target — the literal definition of a duplicate,
+    independent of whatever ``disposition`` the row carries."""
+    groups: dict[tuple[str, str], list[Impl]] = {}
+    for impl in row.impls:
+        key = (impl.reference.model, impl.reference.arm)
+        groups.setdefault(key, []).append(impl)
+    return groups
+
+
+def _row_needs_baseline_entry(row: RoutineRow) -> bool:
+    """True if ``row``, as it stands right now, has a condition that
+    legitimately requires an ``ARTIFICIAL_BRANCH_BASELINE`` entry: an
+    ``ARTIFICIAL_BRANCH`` row with >=2 distinct impls (the original rule), a
+    reference-duplicate group (>=2 impls sharing one (model, arm)), or any
+    impl whose reference is still untriaged (``model="unclassified"``). Used
+    both to REQUIRE an entry (below) and, negated, to detect a STALE one —
+    one predicate, so the two checks can never drift apart."""
+    if row.disposition == "ARTIFICIAL_BRANCH" and len(set(row.impls)) >= 2:
+        return True
+    if any(len(set(g)) >= 2 for g in _reference_groups(row).values()):
+        return True
+    if any(impl.reference.model == "unclassified" for impl in row.impls):
+        return True
+    return False
+
+
 def find_isomorphism_violations(
     registry: tuple[RoutineRow, ...], baseline: dict[str, BaselineEntry],
 ) -> list[str]:
@@ -302,22 +333,50 @@ def find_isomorphism_violations(
     Rules:
       1. Every ``Impl`` named in the registry must AST-resolve (a rename or
          deletion cannot silently drop coverage).
-      2. A row with ``disposition == "ARTIFICIAL_BRANCH"`` and >=2 *distinct*
-         impls is a NEW undocumented artificial branch unless its
-         ``routine_id`` is a key in ``baseline`` — that is the ratchet:
-         legoESM may not grow a second implementation of a shared NEMO
-         routine without a human writing down why.
-      3. Shrink-only: a ``baseline`` key naming a routine_id that is missing,
-         or whose row no longer qualifies (disposition changed away from
-         ``ARTIFICIAL_BRANCH``, or collapsed to <=1 distinct impl), is stale
-         and must be deleted — a collapse PR is not allowed to leave the old
-         allowance sitting around.
-      4. Every baseline entry's ``kind`` must be one of ``VALID_BASELINE_KINDS``
+      2. Every impl's ``reference.model`` must be one of
+         ``VALID_REFERENCE_MODELS``, every ``reference.citation`` must be
+         non-empty, and a ``model="nemo"`` impl's ``arm`` may not be
+         ``""``/``"none"`` (a NEMO reference must name which arm it is).
+      3. DISPOSITION-INDEPENDENT duplicate check (closes the 2026-09-02
+         BLOCKING finding: a row's ``disposition`` string used to be the only
+         thing gating enforcement, so relabelling a row silently escaped the
+         ratchet). For EVERY row, regardless of ``disposition``: implementations
+         are grouped by ``(reference.model, reference.arm)``; a group of >=2
+         needs ``row.routine_id`` in ``baseline`` with ``kind`` ``nemo_duplicate``
+         or ``unclassified`` — a NEW artificial branch point (see
+         nemo_branch_isomorphism_map.md) otherwise.
+      4. Any impl whose ``reference.model == "unclassified"`` requires
+         ``row.routine_id`` in ``baseline`` (any kind) — an untriaged
+         reference cannot just be written down and forgotten; it must be
+         either cited for real or flagged for someone to triage.
+      5. An ``OTHER_RECIPE`` row (once it has >=2 impls to compare — a row
+         with 0/1 AST-checkable impl is not diversity-enforced, same carve-out
+         as the inline-branch rows) must resolve to >=2 distinct
+         ``(model, arm)`` groups, and at most one of its impls may cite
+         ``model="nemo"`` — two NEMO arms behind "OTHER_RECIPE" is
+         NEMO_SWITCH/ARTIFICIAL_BRANCH territory, not a genuine cross-recipe
+         fork (this is exactly the reviewer's demonstrated laundering: flip a
+         real nemo_duplicate's disposition and delete its baseline entry).
+      6. (original rule, kept) A row with ``disposition == "ARTIFICIAL_BRANCH"``
+         and >=2 *distinct* impls is a NEW undocumented artificial branch
+         unless its ``routine_id`` is a key in ``baseline``.
+      7. Shrink-only: a ``baseline`` key naming a routine_id that is missing,
+         or whose row no longer needs one (``_row_needs_baseline_entry`` is
+         now False), is stale and must be deleted — a collapse PR (or a
+         reference fully triaged out of ``unclassified``) is not allowed to
+         leave the old allowance sitting around.
+      8. Every baseline entry's ``kind`` must be one of ``VALID_BASELINE_KINDS``
          (legoESM hosts several recipes, so a 2nd implementation of one NEMO
          routine is only a defect if both claim the SAME reference arm — a
          separate reclassification pass assigns the real kind by editing
          this field, and a typo/free-text value here would silently defeat
          that data-only workflow).
+
+    Delegated rows (``disposition`` literally ``"see S-XX"``) share their
+    underlying impls with the row they point at and are exempt from rules
+    3/5/6 under their OWN routine_id — their duplication is already fully
+    enforced under the referenced row's id; re-requiring a second baseline
+    entry for the alias would just be bookkeeping noise, not a new defect.
     """
     errors: list[str] = []
     seen_ids: set[str] = set()
@@ -333,18 +392,79 @@ def find_isomorphism_violations(
                     f"{impl.symbol!r} no longer resolves in {impl.rel_path} "
                     "(renamed or removed? update the registry, or restore "
                     "the symbol)")
-
-        distinct = set(row.impls)
-        if row.disposition == "ARTIFICIAL_BRANCH" and len(distinct) >= 2:
-            if row.routine_id not in baseline:
+            ref = impl.reference
+            if ref.model not in VALID_REFERENCE_MODELS:
                 errors.append(
-                    f"{row.routine_id} ({row.nemo_routine}): {len(distinct)} "
-                    "distinct legoESM implementations of one NEMO routine "
-                    "with no NEMO switch backing the split, and NOT in "
-                    "ARTIFICIAL_BRANCH_BASELINE — this is a NEW artificial "
-                    "branch point (see nemo_branch_isomorphism_map.md); "
-                    "either delete the duplicate implementation or add a "
-                    "baseline entry naming the reason.")
+                    f"{row.routine_id} ({row.nemo_routine}): impl {impl.symbol!r} "
+                    f"reference.model={ref.model!r} is not one of "
+                    f"{sorted(VALID_REFERENCE_MODELS)} — fix the model field.")
+            if not ref.citation:
+                errors.append(
+                    f"{row.routine_id} ({row.nemo_routine}): impl {impl.symbol!r} "
+                    "has an empty reference.citation — every reference needs one "
+                    "(a NEMO file:line, a source path, a DOI/paper, or "
+                    "'legoESM legacy pre-existing: <commit or module>').")
+            if ref.model == "nemo" and ref.arm in ("", "none"):
+                errors.append(
+                    f"{row.routine_id} ({row.nemo_routine}): impl {impl.symbol!r} "
+                    f"has reference.model='nemo' with arm={ref.arm!r} — a NEMO "
+                    "reference must name its actual namelist/cpp arm, not "
+                    "'none', or it can't be told apart from any other NEMO impl "
+                    "in this row.")
+
+        delegated = row.disposition.startswith("see ")
+
+        if not delegated:
+            for key, impls_in_group in _reference_groups(row).items():
+                if len(set(impls_in_group)) >= 2:
+                    entry = baseline.get(row.routine_id)
+                    if entry is None or entry.kind not in ("nemo_duplicate", "unclassified"):
+                        errors.append(
+                            f"{row.routine_id} ({row.nemo_routine}): "
+                            f"{len(set(impls_in_group))} implementations share "
+                            f"reference model={key[0]!r} arm={key[1]!r} with no "
+                            "ARTIFICIAL_BRANCH_BASELINE entry whose kind is "
+                            "'nemo_duplicate' or 'unclassified' — this is a NEW "
+                            "artificial branch point regardless of the row's "
+                            "disposition label.")
+
+            if any(impl.reference.model == "unclassified" for impl in row.impls):
+                if row.routine_id not in baseline:
+                    errors.append(
+                        f"{row.routine_id} ({row.nemo_routine}): has an impl "
+                        "with reference.model='unclassified' and no "
+                        "ARTIFICIAL_BRANCH_BASELINE entry — classify its "
+                        "reference for real, or add a baseline entry so it "
+                        "can't hide.")
+
+            if row.disposition == "OTHER_RECIPE" and len(row.impls) >= 2:
+                distinct_groups = _reference_groups(row)
+                nemo_count = sum(1 for i in row.impls if i.reference.model == "nemo")
+                if len(distinct_groups) < 2:
+                    errors.append(
+                        f"{row.routine_id} ({row.nemo_routine}): disposition="
+                        f"OTHER_RECIPE but its {len(row.impls)} impl(s) collapse "
+                        f"to {len(distinct_groups)} distinct (model, arm) "
+                        "group(s) — not a genuine multi-recipe fork.")
+                if nemo_count > 1:
+                    errors.append(
+                        f"{row.routine_id} ({row.nemo_routine}): disposition="
+                        f"OTHER_RECIPE but {nemo_count} implementations cite "
+                        "reference.model='nemo' — two NEMO arms is "
+                        "NEMO_SWITCH/ARTIFICIAL_BRANCH territory, not a "
+                        "cross-recipe fork.")
+
+            distinct = set(row.impls)
+            if row.disposition == "ARTIFICIAL_BRANCH" and len(distinct) >= 2:
+                if row.routine_id not in baseline:
+                    errors.append(
+                        f"{row.routine_id} ({row.nemo_routine}): {len(distinct)} "
+                        "distinct legoESM implementations of one NEMO routine "
+                        "with no NEMO switch backing the split, and NOT in "
+                        "ARTIFICIAL_BRANCH_BASELINE — this is a NEW artificial "
+                        "branch point (see nemo_branch_isomorphism_map.md); "
+                        "either delete the duplicate implementation or add a "
+                        "baseline entry naming the reason.")
 
     registry_by_id = {r.routine_id: r for r in registry}
     for rid, entry in baseline.items():
@@ -360,12 +480,11 @@ def find_isomorphism_violations(
                 f"({entry.reason!r}): no such routine_id in the registry — "
                 "remove it (shrink-only).")
             continue
-        distinct = set(row.impls)
-        if not (row.disposition == "ARTIFICIAL_BRANCH" and len(distinct) >= 2):
+        if not _row_needs_baseline_entry(row):
             errors.append(
                 f"ARTIFICIAL_BRANCH_BASELINE has a stale entry {rid!r}: the "
-                f"branch was collapsed (disposition={row.disposition!r}, "
-                f"{len(distinct)} distinct impl(s) remain) — remove the "
+                f"branch was collapsed (disposition={row.disposition!r}) or "
+                "every impl's reference is now fully triaged — remove the "
                 "baseline entry (shrink-only).")
     return errors
 
@@ -417,16 +536,23 @@ def test_nemo_branch_isomorphism_registry_nonvacuous():
 
 # --- synthetic-violation self-checks: prove the checker can go red -----
 
+# A real, valid reference reused by self-checks that don't care about its
+# content — only that construction succeeds and it doesn't itself trip rule 2
+# (closed-set model / non-empty citation / nemo-arm-not-none).
+_OK_REF = Reference("nemo", "some_arm", "some_file.F90:1 (self-check placeholder)")
+
+
 def test_nemo_branch_isomorphism_flags_new_undocumented_duplicate():
     """Plant a NEW artificial branch — two real, distinct, existing symbols
-    under one ``ARTIFICIAL_BRANCH`` row that is in no baseline — and confirm
-    the checker rejects it. Proves rule 2 (">=2 impls needs a baseline
-    entry") actually fires rather than always passing."""
+    both citing the SAME reference, under one ``ARTIFICIAL_BRANCH`` row that
+    is in no baseline — and confirm the checker rejects it. Proves the
+    original rule (">=2 impls needs a baseline entry") actually fires rather
+    than always passing."""
     planted = RoutineRow(
         "FAKE-DUP", "planted duplicate (self-check only)", "ARTIFICIAL_BRANCH",
         "none", (
-            Impl("ocean/eos.py", "compute_buoyancy_frequency"),
-            Impl("ocean/eos.py", "compute_buoyancy_frequency_adiabatic"),
+            Impl("ocean/eos.py", "compute_buoyancy_frequency", _OK_REF),
+            Impl("ocean/eos.py", "compute_buoyancy_frequency_adiabatic", _OK_REF),
         ))
     errors = find_isomorphism_violations((planted,), {})
     assert any(
@@ -437,11 +563,11 @@ def test_nemo_branch_isomorphism_flags_new_undocumented_duplicate():
 
 def test_nemo_branch_isomorphism_flags_stale_baseline_entry():
     """Plant a baseline entry for a row that no longer duplicates (only one
-    distinct impl remains) and confirm the checker demands its removal.
-    Proves rule 3 (shrink-only) actually fires."""
+    distinct impl remains, fully triaged) and confirm the checker demands its
+    removal. Proves the shrink-only stale-entry rule actually fires."""
     planted = RoutineRow(
         "FAKE-COLLAPSED", "planted collapsed branch (self-check only)",
-        "SHARED", "none", (Impl("ocean/eos.py", "compute_buoyancy_frequency"),))
+        "SHARED", "none", (Impl("ocean/eos.py", "compute_buoyancy_frequency", _OK_REF),))
     errors = find_isomorphism_violations(
         (planted,),
         {"FAKE-COLLAPSED": BaselineEntry(
@@ -453,14 +579,15 @@ def test_nemo_branch_isomorphism_flags_stale_baseline_entry():
 
 def test_nemo_branch_isomorphism_flags_invalid_kind():
     """Plant a baseline entry whose ``kind`` is not one of the four allowed
-    strings and confirm the checker rejects it. Proves rule 4 (kind is a
-    closed set, so the reclassification pass can only ever land on a
-    recognized value) actually fires."""
+    strings and confirm the checker rejects it. Proves kind is a closed set,
+    so the reclassification pass can only ever land on a recognized value."""
     planted = RoutineRow(
         "FAKE-KIND", "planted bad-kind row (self-check only)",
         "ARTIFICIAL_BRANCH", "none", (
-            Impl("ocean/eos.py", "compute_buoyancy_frequency"),
-            Impl("ocean/eos.py", "compute_buoyancy_frequency_adiabatic"),
+            Impl("ocean/eos.py", "compute_buoyancy_frequency",
+                 Reference("nemo", "arm_a", "some_file.F90:1")),
+            Impl("ocean/eos.py", "compute_buoyancy_frequency_adiabatic",
+                 Reference("nemo", "arm_b", "some_file.F90:2")),
         ))
     errors = find_isomorphism_violations(
         (planted,),
@@ -477,8 +604,143 @@ def test_nemo_branch_isomorphism_flags_missing_symbol():
     planted = RoutineRow(
         "FAKE-MISSING", "planted missing-symbol row (self-check only)",
         "SHARED", "none",
-        (Impl("ocean/eos.py", "this_symbol_does_not_exist_anywhere_zzz"),))
+        (Impl("ocean/eos.py", "this_symbol_does_not_exist_anywhere_zzz", _OK_REF),))
     errors = find_isomorphism_violations((planted,), {})
     assert any(
         "FAKE-MISSING" in e and "no longer resolves" in e for e in errors
     ), f"missing symbol was not flagged: {errors}"
+
+
+def test_nemo_branch_isomorphism_flags_invalid_reference_model():
+    """Plant an impl whose ``reference.model`` is not in the closed set and
+    confirm the checker rejects it. Proves the model field can't silently
+    hold a typo/free-text value."""
+    planted = RoutineRow(
+        "FAKE-BAD-MODEL", "planted bad reference.model (self-check only)",
+        "SHARED", "none",
+        (Impl("ocean/eos.py", "compute_buoyancy_frequency",
+              Reference("not_a_real_model", "some_arm", "some_file.F90:1")),))
+    errors = find_isomorphism_violations((planted,), {})
+    assert any(
+        "FAKE-BAD-MODEL" in e and "not one of" in e and "reference.model" in e
+        for e in errors
+    ), f"invalid reference.model was not flagged: {errors}"
+
+
+def test_nemo_branch_isomorphism_flags_empty_citation():
+    """Plant an impl with an empty ``reference.citation`` and confirm the
+    checker rejects it. Proves every reference is forced to actually cite
+    something, not just carry a model/arm label."""
+    planted = RoutineRow(
+        "FAKE-EMPTY-CITATION", "planted empty citation (self-check only)",
+        "SHARED", "none",
+        (Impl("ocean/eos.py", "compute_buoyancy_frequency",
+              Reference("nemo", "some_arm", "")),))
+    errors = find_isomorphism_violations((planted,), {})
+    assert any(
+        "FAKE-EMPTY-CITATION" in e and "empty reference.citation" in e
+        for e in errors
+    ), f"empty citation was not flagged: {errors}"
+
+
+def test_nemo_branch_isomorphism_flags_nemo_arm_none():
+    """Plant an impl citing ``model='nemo'`` with ``arm='none'`` and confirm
+    the checker rejects it (independent-review item 4). Proves a NEMO
+    reference can't hide behind a placeholder arm that can never collide
+    with — or be told apart from — any other NEMO impl in the same row."""
+    planted = RoutineRow(
+        "FAKE-NEMO-ARM-NONE", "planted nemo arm='none' (self-check only)",
+        "SHARED", "none",
+        (Impl("ocean/eos.py", "compute_buoyancy_frequency",
+              Reference("nemo", "none", "some_file.F90:1")),))
+    errors = find_isomorphism_violations((planted,), {})
+    assert any(
+        "FAKE-NEMO-ARM-NONE" in e and "arm='none'" in e for e in errors
+    ), f"nemo arm='none' was not flagged: {errors}"
+
+
+def test_nemo_branch_isomorphism_flags_unclassified_without_baseline():
+    """Reproduce the reviewer's exact laundering (independent-review item 5,
+    self-check 1): a row shaped exactly like the real S-16 defect — one impl
+    genuinely citing NEMO, the other citing no non-NEMO reference at all
+    (``model="unclassified"``) — with its disposition flipped to
+    ``OTHER_RECIPE`` and its baseline entry removed. Confirms the checker
+    still goes red: an untriaged reference can no longer be laundered by
+    relabelling the row's disposition and deleting the baseline entry, because
+    the unclassified-needs-baseline rule is disposition-independent."""
+    planted = RoutineRow(
+        "FAKE-S16-LAUNDER", "planted S-16-style laundering (self-check only)",
+        "OTHER_RECIPE", "none", (
+            Impl("ocean/dynamics/barotropic_latlon_cgrid.py",
+                 "nemo_literal_continuity_divergence",
+                 Reference("nemo", "dyn_spg_ts_continuity", "dynspg_ts.F90:640-700")),
+            Impl("ocean/dynamics/barotropic_latlon_cgrid.py", "_run_substep_loop",
+                 Reference("unclassified", "dyn_spg_ts_continuity_generic",
+                           "no reference named in audit")),
+        ))
+    errors = find_isomorphism_violations((planted,), {})
+    assert any(
+        "FAKE-S16-LAUNDER" in e and "unclassified" in e and "baseline" in e
+        for e in errors
+    ), f"unclassified-without-baseline laundering was not flagged: {errors}"
+
+
+def test_nemo_branch_isomorphism_flags_matching_reference_group_without_baseline():
+    """Plant two impls that cite the identical (model, arm) reference under a
+    row whose disposition is NOT ``ARTIFICIAL_BRANCH`` (e.g. ``SHARED``) and
+    confirm the checker still rejects it. Proves the disposition-independent
+    duplicate-group rule (independent-review item 2) fires even when the
+    original ARTIFICIAL_BRANCH-only rule would stay silent."""
+    planted = RoutineRow(
+        "FAKE-SAME-REF-GROUP", "planted matching-reference group (self-check only)",
+        "SHARED", "none", (
+            Impl("ocean/eos.py", "compute_buoyancy_frequency",
+                 Reference("nemo", "same_arm", "some_file.F90:1")),
+            Impl("ocean/eos.py", "compute_buoyancy_frequency_adiabatic",
+                 Reference("nemo", "same_arm", "some_file.F90:2")),
+        ))
+    errors = find_isomorphism_violations((planted,), {})
+    assert any(
+        "FAKE-SAME-REF-GROUP" in e and "share reference" in e for e in errors
+    ), f"matching reference group was not flagged: {errors}"
+
+
+def test_nemo_branch_isomorphism_flags_other_recipe_without_diversity():
+    """Plant an ``OTHER_RECIPE`` row with only one impl (so it can never
+    resolve to >=2 distinct (model, arm) groups) — using an ``ARTIFICIAL_
+    BRANCH``-shaped disposition would be a different check, so this isolates
+    the diversity requirement (independent-review item 3, first clause)."""
+    planted = RoutineRow(
+        "FAKE-OTHER-RECIPE-NO-DIVERSITY",
+        "planted OTHER_RECIPE with no diversity (self-check only)",
+        "OTHER_RECIPE", "none", (
+            Impl("ocean/eos.py", "compute_buoyancy_frequency", _OK_REF),
+            Impl("ocean/eos.py", "compute_buoyancy_frequency_adiabatic", _OK_REF),
+        ))
+    errors = find_isomorphism_violations((planted,), {})
+    assert any(
+        "FAKE-OTHER-RECIPE-NO-DIVERSITY" in e and "distinct (model, arm)" in e
+        for e in errors
+    ), f"OTHER_RECIPE diversity violation was not flagged: {errors}"
+
+
+def test_nemo_branch_isomorphism_flags_other_recipe_both_nemo():
+    """Plant an ``OTHER_RECIPE`` row whose two impls have DIFFERENT arms (so
+    they pass the diversity check) but BOTH cite ``model='nemo'`` (self-check
+    2 of independent-review item 5). Confirms the checker rejects it: two
+    NEMO arms is not a cross-recipe fork, no matter how diverse the arm
+    labels look."""
+    planted = RoutineRow(
+        "FAKE-OTHER-RECIPE-BOTH-NEMO",
+        "planted OTHER_RECIPE row whose 2 arms both cite NEMO (self-check only)",
+        "OTHER_RECIPE", "none", (
+            Impl("ocean/eos.py", "compute_buoyancy_frequency_nemo_bn2",
+                 Reference("nemo", "ln_dynvor_ene", "dynvor.F90:100")),
+            Impl("ocean/eos.py", "compute_buoyancy_frequency",
+                 Reference("nemo", "ln_dynvor_een", "dynvor.F90:200")),
+        ))
+    errors = find_isomorphism_violations((planted,), {})
+    assert any(
+        "FAKE-OTHER-RECIPE-BOTH-NEMO" in e and "model='nemo'" in e
+        for e in errors
+    ), f"OTHER_RECIPE both-nemo laundering was not flagged: {errors}"
