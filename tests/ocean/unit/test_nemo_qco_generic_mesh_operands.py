@@ -197,3 +197,12 @@ def test_missing_operands_and_no_ladder_still_fail_closed():
     with pytest.raises(ValueError, match="raw NEMO mesh operands"):
         nemo_qco_resolved_mesh_operands(
             _NoLadder(), grid, u_mask, v_mask, jnp.float64, NLEV)
+
+    # A PARTIAL NEMO mesh must raise rather than quietly rebuild everything
+    # from the card: that would mix two operand provenances in one wzv call.
+    ops = nemo_qco_resolved_mesh_operands(
+        z_coord, grid, u_mask, v_mask, jnp.float64, NLEV)
+    partial = _attach_raw(z_coord, ops)._replace(nemo_e2u=None)
+    with pytest.raises(ValueError, match="some but not all"):
+        nemo_qco_resolved_mesh_operands(
+            partial, grid, u_mask, v_mask, jnp.float64, NLEV)

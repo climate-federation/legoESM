@@ -322,6 +322,16 @@ def nemo_qco_resolved_mesh_operands(
             e3t_0=e3t0, e3u_0=e3t0, e3v_0=e3t0, umask3=umask3, vmask3=vmask3,
             hu_0=hu0, hv_0=hv0, area_t=area_t, area_u=area_u, area_v=area_v,
             e2u=e2u, e1v=e1v)
+    if any(value is not None for value in raw):
+        # A PARTIAL NEMO mesh is a bridge defect, not a card without one:
+        # falling through to the card-built source here would silently mix
+        # two operand provenances inside one wzv call.
+        missing = [name for name, value in zip(raw_names, raw, strict=True)
+                   if value is None]
+        raise ValueError(
+            "the z-coordinate carries some but not all of NEMO's qco mesh "
+            f"operands; missing: {', '.join(missing)}. Attach the whole set "
+            "or none of it")
     if not isinstance(z_coord, OceanPartialCellCoordinate):
         raise ValueError(
             "the NEMO qco wzv arm needs either the raw NEMO mesh operands "
