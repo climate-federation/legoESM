@@ -839,7 +839,7 @@ is the registered next arm.  Not run here (outside this round's two arms).
 
 | artifact (under `/data/abyssal/dbalwada/nemo-testcases-l1/`) | SHA256 |
 |---|---|
-| `barotropic_walk/review_round/frame_gate_hold_round.json` | `414934a67c763aca734fe5dfee2c51cd76cf19ca1b3c95e2d33490e55e2dfa02` |
+| `barotropic_walk/review_round/frame_gate_hold_round_ab6ca17b6.json` | `59c0a4e056e87d74af04937a8638dcc279840c6f7ae7e78abf4499e6c7d43e42` |
 | `barotropic_walk/review_round/pytest_barotropic_gate_hold_round.log` | `64a815b7a0608d37ab43bcd3a7377d8a559ecd7692fd45baaf9818f0ce66b62a` |
 | `stage_composition/legoesm/overflow_zps/fp32/metadata.json` | `dfaa8b66f927bd3e6a75bc9aae79771ad1390f29f00fbe91ad213c9fedc28207` |
 | `stage_composition/legoesm/overflow_zps/fp32/states.npz` | `c73306a060b8cd74bdabc56465eefa4b6414d403ea0cc1d9187bf6b2d20de3f7` |
@@ -852,7 +852,7 @@ is the registered next arm.  Not run here (outside this round's two arms).
 | `stage_composition/overflow_trajectory_gate_kt10.json` | `bcc8a68d26c918954329173fe955aec82155502db5b64743cac9ab963ab59377` |
 | `stage_composition/overflow_trajectory_gate_kt60.json` | `086dbd6fc7a61ea328ecda692d7ef3491092f9fc6127db5a661d5f81f5967712` |
 
-Focused CPU/fp64 tests: **163 passed across eleven explicitly listed files** at `c8f506a69545`: 9 OVERFLOW barotropic gate + 5 stage-sweep gate + 9 trajectory gate + 10 WS-RK3 tracer + 15 full statistics + 20 adaptive-implicit + 12 stability probe + 15 testcase card + 19 vertical momentum scheme + 10 rk3_ws/mxl3 + 39 leapfrog integrator.  Four tests in the last two files fail identically at the pre-takeover revision `5104de943784` (verified in a throwaway worktree): two construct the validation-rejected `nemo_trapezoid` + non-`nemo_sco` configuration and two the decoupled `rk3_ws` momentum/tracer program; both are construction-time `ValueError`s outside these cards and are not touched by this round.
+Focused CPU/fp64 tests: **161 passed across eleven explicitly listed files** at `c8f506a69545`: 7 OVERFLOW barotropic gate + 5 stage-sweep gate + 9 trajectory gate + 10 WS-RK3 tracer + 15 full statistics + 20 adaptive-implicit + 12 stability probe + 15 testcase card + 19 vertical momentum scheme + 10 rk3_ws/mxl3 + 39 leapfrog integrator (corrected from a miscounted 163/9: the barotropic-gate file collects 7 tests at that revision, not 9).  Four tests in the last two files fail identically at the pre-takeover revision `5104de943784` (verified in a throwaway worktree): two construct the validation-rejected `nemo_trapezoid` + non-`nemo_sco` configuration and two the decoupled `rk3_ws` momentum/tracer program; both are construction-time `ValueError`s outside these cards and are not touched by this round.
 
 ## Loud UNMEASURED register
 

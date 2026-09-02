@@ -21,7 +21,7 @@ registered to their exact `dynspg_ts.F90` assignments and time levels, the
 gate JSON stamps the legoESM git SHA and the pytest-log sha256, the planted
 entry control exits nonzero end to end, and the literal flux-form external
 update is disclosed as PRODUCTION-ACTIVE and KEPT (Rule 8).  Decision
-record: with the update, the 19 substep-1 frames are 13 AT-BAR, 5 UNMEASURED
+record: with the update, the 19 substep-1 frames are 11 AT-BAR, 7 UNMEASURED
 (no active V face) and one DEBT — `u_exit` at `1.87350135e-15`, which is
 identical in the legacy arm and equals `dt x` the `5.62917768e-16` slow-U
 input residual (ratio `0.998`), i.e. inherited from the slow forcing, not
@@ -64,7 +64,7 @@ Round-5 artifacts under `/data/abyssal/dbalwada/nemo-testcases-l1/`:
 
 | artifact (under `/data/abyssal/dbalwada/nemo-testcases-l1/`) | SHA256 |
 |---|---|
-| `barotropic_walk/review_round/frame_gate_hold_round.json` | `414934a67c763aca734fe5dfee2c51cd76cf19ca1b3c95e2d33490e55e2dfa02` |
+| `barotropic_walk/review_round/frame_gate_hold_round_ab6ca17b6.json` | `59c0a4e056e87d74af04937a8638dcc279840c6f7ae7e78abf4499e6c7d43e42` |
 | `barotropic_walk/review_round/pytest_barotropic_gate_hold_round.log` | `64a815b7a0608d37ab43bcd3a7377d8a559ecd7692fd45baaf9818f0ce66b62a` |
 | `stage_composition/legoesm/overflow_zps/fp32/metadata.json` | `dfaa8b66f927bd3e6a75bc9aae79771ad1390f29f00fbe91ad213c9fedc28207` |
 | `stage_composition/legoesm/overflow_zps/fp32/states.npz` | `c73306a060b8cd74bdabc56465eefa4b6414d403ea0cc1d9187bf6b2d20de3f7` |
