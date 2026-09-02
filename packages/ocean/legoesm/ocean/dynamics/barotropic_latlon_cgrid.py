@@ -12,6 +12,31 @@ stencils, eliminating the 2*dx checkerboard null space of the A-grid.
 
 Parallels barotropic_latlon.py (A-grid) but with staggered variables.
 
+Reference for the generic (default) arm
+----------------------------------------
+Every ``barotropic_*_evaluation`` selector in this module (continuity,
+transport accumulation, PGF, seed, EEN-Coriolis) defaults to ``"generic"``;
+the alternative ``"nemo_literal"``/``"nemo_ssh_avg"`` values are a literal
+transcription of NEMO's ``dyn_spg_ts`` (see the ``nemo_literal_*`` helpers
+below and ``docs/ocean/fidelity/nemo_branch_isomorphism_map.md`` S-16). The
+``"generic"`` arm is **not** a NEMO port and is not a transcription of any
+single paper's equations either: it is legoESM's own in-house
+forward-backward split-explicit C-grid solver, introduced with no external
+citation by commit ``adbb49f83`` (2026-04-08, "Add C-grid lat-lon ocean
+model to fix checkerboard instability", #87). Its later closure choices were
+explicitly modeled on the standard MOM6/ROMS split-explicit family, per
+those commits' own messages: the substep time-averaging "follow[s] the
+standard approach in MOM6, MPAS-Ocean, and ROMS (Hallberg 1997, Shchepetkin
+& McWilliams 2005)" (commit ``06f4de939``, 2026-04-11, "Add barotropic
+time-averaging for split-explicit stability") and the BEBT semi-implicit
+pressure-gradient blend "match[es] MOM6 default" ``bebt=0.2`` (commit
+``3d0170d04``, 2026-04-20, #205). USER DECISION 2026-09-02: this arm is kept
+as a legitimate non-NEMO fork — it is the dycore of 19 idealized ocean
+test-matrix experiments via the ``default_wright_v1``/``legoesm_linear_v1``
+catalog recipes, plus ``legoesm_nemo_like_v1`` (renamed from ``nemo_v1``,
+which falsely implied this arm was NEMO's ``dyn_spg_ts``; see
+``legoesm.ocean.recipes``) — rather than collapsed onto the NEMO-literal arm.
+
 Wide-halo mode (opt-in, ``BarotropicConfig.barotropic_wide_halo``)
 ------------------------------------------------------------------
 The standard substep loop re-dispatches ~4 latitude halo pads per substep
