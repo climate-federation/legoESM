@@ -2014,7 +2014,7 @@ _FESOM_WIRED_DESTS = frozenset({
     "sss_restore_normalization", "sss_ice_gate_nemo",
     # B4 — Dai-Trenberth runoff (node-adjacency coastal spread from
     # mesh.edges via FesomOceanGrid.cellsOnCell):
-    "runoff", "runoff_spread_passes",
+    "runoff", "runoff_spread_passes", "river_mouth_restoring_gate",
     # B4 — NEMO-monthly / WOA initial condition:
     "nemo_monthly_init", "nemo_init_month", "woa_init", "woa_t", "woa_s",
 })
@@ -2031,7 +2031,7 @@ _FESOM_FORCED_ONLY_DESTS = (
     "sss_restore", "sss_restore_channel", "sss_restore_tau_days",
     "sss_restore_bound_mmday", "sss_restore_file",
     "sss_restore_normalization", "sss_ice_gate_nemo",
-    "runoff", "runoff_spread_passes",
+    "runoff", "runoff_spread_passes", "river_mouth_restoring_gate",
     # codex B4 MAJOR (partially adopted): the UNFORCED smoke never loads
     # forcing, so a forcing SOURCE selector there is a silent drop.  The
     # P-E opt-OUT (--no-emp) stays legal — disabling a channel that does
@@ -2590,7 +2590,9 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
                                    if _sss_ice is None
                                    else jnp.asarray(_sss_ice, _S_now.dtype)),
                 config=sss_restore_cfg,
-                river_runoff=None,
+                # River-mouth gate, same as the host loop: no restoring where
+                # the runoff map is wet (the mouth cells NEMO keeps fresh).
+                river_runoff=(_R if args.river_mouth_restoring_gate else None),
                 sst_C=_T_now,
             )
             # Land cells contribute nothing to either budget.

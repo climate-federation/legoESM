@@ -42,7 +42,6 @@ def test_clean_args_pass():
     ["--momentum-rk3"], ["--geothermal"],
     ["--gateway-transports"], ["--partial-cell"],
     ["--ice-categories", "2"], ["--ice-ridging"],
-    ["--river-mouth-restoring-gate"],
 ])
 def test_physics_selectors_rejected(extra):
     args, p = _parse(extra)
@@ -159,3 +158,12 @@ def test_grid_choice_registered():
     p = _build_arg_parser()
     args = p.parse_args(BASE)
     assert args.grid == "fesom"
+
+
+def test_river_mouth_gate_accepted_on_fesom():
+    """The river-mouth restoring gate is wired on the fesom lane (same
+    contract as the host loop: no SSS restoring where the runoff map is
+    wet) — it must pass the stage gate like the other lanes' cards."""
+    args, p = _parse(["--runoff", "--river-mouth-restoring-gate"])
+    validate_fesom_stage(args, p)  # no raise
+    assert args.river_mouth_restoring_gate

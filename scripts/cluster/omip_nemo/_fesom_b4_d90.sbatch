@@ -46,7 +46,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid fesom \
   --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 \
   --sss-ice-gate-nemo \
   --sss-restore-file $NEMOIN/orca1_inputs/data_repository/input_fields/sss_climatology_for_restoring.nc \
-  --runoff \
+  --runoff --river-mouth-restoring-gate \
   --forcing-ramp-days 5 \
   --dt 1800 --years 0.2466 --snapshot-every-days 15 \
   --output $ROOT/results/omip_nemo/fesom_b4_d90 2>&1 | tail -14
