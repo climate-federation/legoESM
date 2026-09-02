@@ -353,11 +353,21 @@ def main() -> int:
     tgt_lat = np.arange(-89.5, 90.0, r)
     tgt_lon = np.arange(0.5, 360.0, r)
 
+    n_below, sst_min = 0, float(np.nanmin(L["sst"]))
     if args.freeze_clamp_C is not None:
         n_below = int((L["sst"] < args.freeze_clamp_C).sum())
+        sst_min = float(np.nanmin(L["sst"]))
         L["sst"] = np.maximum(L["sst"], args.freeze_clamp_C)
         print(f"[freeze-clamp] floored legoESM SST at {args.freeze_clamp_C} C "
               f"({n_below} cells were below)")
+        # A liquid ocean below its freezing point is a MODEL DEFECT (NEMO's
+        # SI3 never lets it happen); the clamp exists so the SST score is not
+        # dominated by it, and it hid a -8 C supercooling for weeks. Shout.
+        if n_below > 0:
+            print(f"[freeze-clamp] WARNING: {n_below} wet cells supercooled "
+                  f"(min {sst_min:.2f} C) — the score below is on the FLOORED "
+                  "field; the raw state has an ocean below freezing.",
+                  flush=True)
     sstL, ocL = regrid_curv_to_latlon(L["sst"], L["lat"], L["lon"], L["mask"], tgt_lat, tgt_lon)
     sstN, ocN = regrid_curv_to_latlon(N["sst"], N["lat"], N["lon"], N["mask"], tgt_lat, tgt_lon)
     sssL, _ = regrid_curv_to_latlon(L["sss"], L["lat"], L["lon"], L["mask"], tgt_lat, tgt_lon)
@@ -476,6 +486,7 @@ def main() -> int:
     report = {
         "legoesm_snapshot": str(args.legoesm_snapshot),
         "nemo_gridt": str(args.nemo_gridt), "nemo_time_idx": args.nemo_time_idx,
+        "sst_supercooled_cells": n_below, "sst_raw_min_C": sst_min,
         "n_ocean_cells": int(ocean.sum()),
         "SST": sst, "SST_verdict": sst_v,
         "SST_bands": sst_bands,
