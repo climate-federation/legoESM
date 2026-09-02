@@ -1014,19 +1014,28 @@ ARTIFICIAL_BRANCH_BASELINE: dict[str, BaselineEntry] = {
             'bbl: ONE transcription of trabbl.F90:243-284 (bbl_transports + '
             'apply_bbl_adv_tendency), reached from two composition SITES. OVERFLOW folds it '
             "into the stage-3 tracer RHS (NEMO's own site, stprk3_stg.F90:468,498,588); the "
-            'OMIP driver calls apply_bbl_adv_step, which since 2026-09-02 adds NO arithmetic '
-            'of its own -- it calls the same two operators and integrates one forward-Euler '
-            'step. The 0.25*V/dt transport cap NEMO has none of is DELETED (Rule 9; '
-            'recipes.py never selects a capped arm), measured inert at ocean cell volumes and '
-            'non-vacuously live on a tiny-area face (tests/ocean/unit/test_bbl_adv.py). What '
-            'is left is a PLACEMENT branch, and it is not config-flippable: the in-model BBL '
-            'hook exists only in the WS-RK3 tracer lane '
-            '(ocean_model_latlon_cgrid.py, tracer_time_integrator="rk3_ws"), while ORCA1 runs '
-            'the forward-Euler tracer lane -- which itself has no NEMO arm. Setting '
-            'bbl_adv_option=2 on ORCA1 would silently run NO BBL. Collapsing the placement is '
-            'an OPEN ASK, not a flip.'
+            'OMIP driver calls apply_bbl_adv_step, which since 2026-09-02 adds no arithmetic '
+            'of its own beyond one forward-Euler update -- it calls the same two operators. '
+            'It does feed them the REFERENCE ladder (geom.h_ref/dep_bot) where the in-model '
+            'site feeds live stage thickness and live bottom depth '
+            '(ocean_model_latlon_cgrid.py:1290-1298), an O(eta/H) ~ 3e-4 operand difference. '
+            'The 0.25*V/dt transport cap NEMO has none of is DELETED on Rule 9 alone (NOT on '
+            'a recipe argument -- recipes.py has zero BBL mentions, and ~30 committed OMIP '
+            'decks DID select the capped path via --bbl-adv; what carries the deletion is '
+            'that trabbl.F90:243-284 clamps neither transport). Measured inert: the exchange '
+            'fraction reduces to g*gamma*(drho/rho0)*dt/e1t, max 0.048 on ORCA1 metrics at a '
+            'Denmark-Strait-exceeding contrast against a 0.25 cap; non-vacuously live on a '
+            'tiny-area face (tests/ocean/unit/test_bbl_adv.py). What is left is a PLACEMENT '
+            'branch, and it is not config-flippable: the in-model BBL hook exists only in the '
+            'WS-RK3 tracer lane (ocean_model_latlon_cgrid.py:6007), while ORCA1 runs the '
+            'forward-Euler tracer lane (the config default, state.py:2071) -- which itself '
+            'has no NEMO arm. Setting bbl_adv_option=2 on ORCA1 would SILENTLY run NO BBL, '
+            'and nothing cross-checks the pair at construction '
+            '(ocean_model_latlon_cgrid.py:3324-3327 validates only the value and gamma) -- an '
+            'OPEN ASK, since making it raise turns a tolerated condition into a hard error. '
+            'Collapsing the placement is a second ASK, not a flip.'
         ),
-        kind='nemo_duplicate',
+        kind='unclassified',
     ),
     "M-01": BaselineEntry(
         reason=(
