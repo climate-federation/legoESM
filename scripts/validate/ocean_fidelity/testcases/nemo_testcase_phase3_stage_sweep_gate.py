@@ -393,12 +393,16 @@ def classify_arm(
 
 def preregistered_prediction_check(
     case, scaling, rows, baroclinic_rows, stage_states, masks, arms,
+    *, plant_selector=False,
 ) -> dict:
     """Score the frozen predictions of
-    ``nemo_testcases_l1_overflow_face_thickness_preregister.md``.
+    ``nemo_testcases_l1_overflow_face_thickness_preregister.md`` (P1-P4) and
+    ``nemo_testcases_l1_stage3_baroclinic_preregister.md`` (S1/S2).
 
     Nothing here is inferred at run time: the windows are the committed
     constants, and each is compared with the arm's own measured movement.
+    ``plant_selector`` inflates the faithful stage-3 residual 1000x so the
+    S1 predicate must flip to NOT-MET (the ``--plant-prediction`` control).
     """
     def _row(collection, name):
         return next(row for row in collection if row["name"] == name)
@@ -482,6 +486,51 @@ def preregistered_prediction_check(
                 "predicted_over_residual": (
                     predicted[3] / faithful_u if faithful_u else float("inf")),
                 "status": ("MET" if predicted[3] < 0.01 * faithful_u else "NOT-MET"),
+                "note": (
+                    "frozen against the pre-selector-fix kt=2 u residual "
+                    "(2.5988e-07); after the UP3 selector round (S1) that "
+                    "residual is gone and this predicate reads NOT-MET by "
+                    "construction -- STALE, kept for the record"),
+            }
+    if "legacy_up3_transport_sign_selector" in arms:
+        # nemo_testcases_l1_stage3_baroclinic_preregister.md: the UP3 upwind
+        # selector (dynadv_up3.F90:166-170) owns the stage-3 baroclinic u
+        # debt; the legacy transport-sign arm must reproduce the pre-fix
+        # residual exactly (it IS the old code).
+        def _bc(stage, arm):
+            return _row(baroclinic_rows,
+                        f"{case}.kt1.stage{stage}.{arm}.baroclinic_u")["absolute_max"]
+        legacy = "legacy_up3_transport_sign_selector"
+        if case == "OVERFLOW-zps":
+            faithful3 = _bc(3, "faithful") * (1000.0 if plant_selector else 1.0)
+            legacy3 = _bc(3, legacy)
+            check["S1_up3_selector_owns_the_stage3_baroclinic_u"] = {
+                "predicate": (
+                    "faithful stage-3 baroclinic u < 1.0e-09 m/s (frozen: "
+                    "linearised replay 4.5e-10) and the legacy transport-sign "
+                    "arm reproduces the pre-fix 2.598798e-07 within 1%"),
+                "faithful_stage3_baroclinic_u_m_s": faithful3,
+                "legacy_selector_stage3_baroclinic_u_m_s": legacy3,
+                "status": ("MET" if (faithful3 < 1.0e-9
+                                     and abs(legacy3 - 2.598798e-7) < 2.6e-9)
+                           else "NOT-MET"),
+            }
+        else:
+            faithful2, faithful3 = _bc(2, "faithful"), _bc(3, "faithful")
+            legacy2, legacy3 = _bc(2, legacy), _bc(3, legacy)
+            check["S2_up3_selector_owns_the_LOCK_stage_debt"] = {
+                "predicate": (
+                    "faithful LOCK stage-2 and stage-3 baroclinic u <= 1e-15 "
+                    "and the legacy arm reproduces the pre-fix 9.7656e-11 / "
+                    "2.1388e-10 within 1%"),
+                "faithful_stage2_baroclinic_u_m_s": faithful2,
+                "faithful_stage3_baroclinic_u_m_s": faithful3,
+                "legacy_selector_stage2_baroclinic_u_m_s": legacy2,
+                "legacy_selector_stage3_baroclinic_u_m_s": legacy3,
+                "status": ("MET" if (max(faithful2, faithful3) <= 1.0e-15
+                                     and abs(legacy2 - 9.765645e-11) < 9.8e-13
+                                     and abs(legacy3 - 2.138804e-10) < 2.2e-12)
+                           else "NOT-MET"),
             }
     return check
 
@@ -1059,9 +1108,14 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
         for row in scaling["h2_qco_stage_factor"]:
             row["predicted_baroclinic_u_movement_m_s"] *= 1000.0
     prediction_check = preregistered_prediction_check(
-        case, scaling, rows, baroclinic_rows, stage_states, masks, arms)
+        case, scaling, rows, baroclinic_rows, stage_states, masks, arms,
+        plant_selector=plant_prediction)
     if plant_prediction:
-        gated = "P3_h2_is_refuted_as_the_stage3_owner"
+        # The gated predicate is the live round's owner claim (S1); the
+        # older P3 reads NOT-MET by construction since the selector round
+        # removed the residual it was scaled against, so it can no longer
+        # discriminate a plant.
+        gated = "S1_up3_selector_owns_the_stage3_baroclinic_u"
         require(gated in prediction_check,
                 f"planted prediction control needs {gated} (OVERFLOW only)")
         require(prediction_check[gated]["status"] == "NOT-MET",

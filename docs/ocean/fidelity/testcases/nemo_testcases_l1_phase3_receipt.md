@@ -1302,3 +1302,189 @@ MLF lane and its short-run gates were not run.
   RETRACTED, see the retraction block above: that line is in `_ab2_step`, and
   the DINO MLF cards were already on NEMO's rule;
 - whether the WS-RK3 identity is exercised by any card other than these two.
+
+## UP3 upwind-selector round: the OVERFLOW stage-3 baroclinic `u` owner, MEASURED
+
+Preregistered in `nemo_testcases_l1_stage3_baroclinic_preregister.md`
+(commit `02179b0eb`, frozen before the arm).  Code: `42ac525cc` (fix) and
+`8d6756a42` (review round: selector owned by the WS-RK3 identity at every
+stage).  All numbers fp64, CPU; baseline = the same gates re-run at
+`9070cf276` from a pristine worktree (`stage3_selector/gates_before/`).
+
+### Owner
+
+NEMO `dynadv_up3.F90:166,169-170` selects the UP3 upwind curvature of the
+T-point (same-direction) momentum fluxes by the sign of the advected-velocity
+pair `zui = uu(Kmm)_i + uu(Kmm)_{i+1}`, while the flux magnitude (`:176`) is
+the stage transport pair `zFu_i + zFu_{i+1}` with `zFu = e2u e3u (uu + zub)`
+(`stprk3_stg.F90:273`); the F-point cross fluxes select by the transport pair
+(`:179-187`).  legoESM's `_up3_reconstruct` (`opl:4078`) had both branch
+formulas but chose the branch by the sign of the transport it was handed.
+Under WS-RK3 the transport carries `zub`, and at kt=1 `zub` is about minus
+half the primary barotropic velocity (a linear ramp's time mean), so at the
+front T-pairs, top two levels, `zui = +0.023 m/s` while the transport pair is
+`-0.076 m^2/s` per unit `e2u`: the wrong curvature was used exactly there.
+Stage 2 has the same disagreement only at pairs whose curvature is exactly
+zero, hence "stage-3 only".
+
+Scaling (all m/s^2, e3u_0-weighted depth mean removed; `D_l` = legoESM's
+derived stage-3 RHS minus `hpg_sco` minus the `dynadv_up3` transcription on
+legoESM's own `u2` with NEMO's stage-3 transports; NEMO's own closure
+`4.6e-16`):
+
+| suspect | replay quantity | max | corr with `D_l` | slope | `max|D_l - pattern|` |
+|---|---|---:|---:|---:|---:|
+| Aimp partition (S-20) | `wi` on NEMO stage-3 transports (`Cu_v <= 1.7e-3`) | `0.0` | — | — | unchanged |
+| implicit ZDF solve | NEMO's whole stage-3 increment `1.086e-08 m/s` (24x below the debt) | — | — | — | unchanged |
+| stage-3 HPG operands | `dt*bc(H(lego s2) - H(nemo s2))`; legoESM HPG vs `hpg_sco` on the s2 operands `1.4e-16` | `1.6e-18` | — | — | unchanged |
+| lateral viscosity (stage-3-only `skip_ldf=False`) | `tend(skip=False) - tend(skip=True)` | `0.0` | — | — | unchanged |
+| vertical UP3 | transcription input sensitivity | `1.7e-13` | — | — | unchanged |
+| **UP3 upwind selector** | `bc(up3[transport sign]) - bc(up3[velocity sign])` | `2.5989e-08` | **`+0.999994`** | **`1.00015`** | **`4.55e-11`** |
+
+### Predictions vs outcomes
+
+| # | prediction | outcome |
+|---|---|---|
+| P1 | OVERFLOW stage-3 / kt=2 `u` `2.5988e-07 -> < 1.0e-09` (linearised `4.5e-10`) | `4.551736e-10` (571x) — **MET** |
+| P2 | OVERFLOW stage 1, 2 bit-identical | `6.501744e-15`, `9.433404e-11` — **MET** |
+| P3 | OVERFLOW kt=2 `T`, `S`, `SSH` bit-identical | `1.1191048e-14`, `2.030e-16`, `1.0491608e-14` — **MET** |
+| P4 | legacy arm reproduces the pre-fix stage-3 row | `2.598798e-07` exactly — **MET** (`control_over_faithful` 570.9, `CONFIRMED_REQUIRED`) |
+| P5 | LOCK kt=2 `u` improves `>= 3x` | `2.138804e-10 -> 2.298509e-17` — **MET** (7 orders) |
+| P6 | LOCK kt=2 `T`, `SSH` bit-identical | `T 1.627735e-13 -> 0.0` exactly, SSH identical — **REFUTED in the good direction**: LOCK's stage-2 `u` (`9.7656e-11 -> 2.86e-17`) was also the selector (its disagreement cells carry curvature), and the stage-2 Kmm transport feeds stage-3 FCT |
+| P7 (secondary) | the kt>=3 OVERFLOW SSH walk is seeded by this error | **REFUTED**: kt=10 SSH `9.237391e-05 -> 9.237444e-05`; the walk has another owner |
+| P9 | legacy paths bit-identical | 14 flux-form tests pass; no other caller passes a separate transport |
+
+LOCK_EXCHANGE-zco now clears the `1e-15` bar at every kt=1 stage and at
+kt=2 (stage sweep exit 0, `failed_rows: []`).
+
+### Trajectory (normalized L-inf on the entering state), before -> after
+
+OVERFLOW-zps:
+
+| kt | T | u | SSH |
+|---:|---|---|---|
+| 2 | `1.119105e-14 -> 1.119105e-14` | `2.598798e-07 -> 4.551736e-10` | `1.049161e-14 -> 1.049161e-14` |
+| 3 | `1.948087e-09 -> 7.788969e-12` | `3.373690e-06 -> 9.079022e-09` | `3.773822e-09 -> 3.774823e-09` |
+| 10 | `7.711785e-08 -> 4.046684e-08` | `2.644298e-05 -> 2.644302e-05` | `9.237391e-05 -> 9.237444e-05` |
+| 60 | `1.184430e-05 -> 1.184430e-05` | `2.507515e-04 -> 2.507516e-04` | `7.751799e-05 -> 7.751811e-05` |
+
+LOCK_EXCHANGE-zco:
+
+| kt | T | u | SSH |
+|---:|---|---|---|
+| 2 | `1.627735e-13 -> 0.0` | `2.138804e-10 -> 2.298509e-17` | `4.782138e-28 -> 4.782138e-28` |
+| 3 | `4.046541e-13 -> 1.184238e-16` | `2.138797e-10 -> 7.233654e-15` | `1.355253e-18 -> 1.355253e-18` |
+| 10 | `2.997306e-12 -> 1.681618e-14` | `2.070506e-10 -> 1.314126e-11` | `3.577033e-13 -> 3.574534e-13` |
+| 60 | `8.721191e-10 -> 8.755528e-10` | `7.496273e-08 -> 7.496602e-08` | `1.609018e-08 -> 1.609001e-08` |
+
+Rule 8 disclosure: LOCK kt=60 `T` moves `+0.4%` and `u` `+0.004%` in the
+worse direction (not ulp-level); kt=2..10 improve by 2-5 orders.  The
+OVERFLOW kt>=4 rows are unchanged to 5-6 digits: the kt=2 seed is gone and
+the later growth is owned by the untouched SSH walk.
+
+### Remaining OVERFLOW stage-3 debt, UNOWNED
+
+`4.551736e-10 m/s`, faces 19 and 21 (the faces flanking the front), linear
+in depth (face 21: `-1.6e-10` at k=18 to `-4.55e-10` at k=24), equal to the
+RHS-closure remainder `4.55e-11 m/s^2 x dt`.  Excluded: the bottom ZDF
+operand differences (columns 20/21 are exactly 500 m, no partial cell there;
+predicted movement `1.9e-16`), a single-face advecting-transport difference
+(corr `<= 0.33` against the unit-`dU` response at faces 18..22), the HPG
+(`1.4e-16`), the lateral term (`0.0`), the Aimp partition (`0.0`).
+
+### Statistics (6120 steps, fp64 + fp32, CPU), before -> after
+
+| metric | before | after | fp32 floor before | fp32 floor after | NEMO spread | verdict before | verdict after |
+|---|---:|---:|---:|---:|---:|---|---|
+| final_temperature_histogram_tv | `0.0390072` | `0.0620842` | `0.0174136` | `0.0181244` | `0.044231` | WITHIN-SCHEME-SPREAD | OUTSIDE |
+| final_water_mass_census | `0.0130347` | `0.0176424` | `0.00180818` | `0.000221017` | `0.00336209` | OUTSIDE | OUTSIDE |
+| instantaneous_u_linf | `0.832083` | `1.99404` | `0.773437` | `1.72399` | `0.672694` | OUTSIDE | OUTSIDE |
+| plume_descent_m | `16.9551` | `1499.8` | `0.038907` | `0.0742579` | `1499.62` | WITHIN-SCHEME-SPREAD | OUTSIDE |
+| plume_front_km | `4.03884` | `117.125` | `0.135393` | `0.0207441` | `121.931` | WITHIN-SCHEME-SPREAD | WITHIN-SCHEME-SPREAD |
+| temperature_linf | `0.379487` | `0.379253` | `0.122985` | `0.238998` | `0.356744` | OUTSIDE | OUTSIDE |
+
+Faithful-but-worse (Rule 8): 3 -> 5 `OUTSIDE`.  Disclosed, not reverted.
+The legoESM fp32-vs-fp64 floor for `instantaneous_u_linf` also more than
+doubles (`0.77 -> 1.72 m/s`), i.e. the two legoESM arms decorrelate more
+strongly from each other after the fix — the 6120-step state is chaotic and
+the plume-descent jump to the full slope depth is a registered-time
+threshold crossing, PLAUSIBLE, not decomposed.  Attribution between the
+stage-2/3 fix (`42ac525cc`) and the stage-1 extension (`8d6756a42`):
+measured with a third arm at `42ac525cc` (stages 2-3 only, `stage3_selector/v1_stage23_only/`): histogram `0.0608531`, census `0.0210638`, u_linf `1.54484` (fp32 floor `1.63044`, INDISTINGUISHABLE-AT-FLOOR), plume_descent `1499.89`, plume_front `117.14`, T_linf `0.379223` — i.e. the stage-2/3 selector fix alone carries the whole move (4 OUTSIDE / 1 WITHIN / 1 AT-FLOOR); the stage-1 extension then shifts rows by a few percent in both directions (census `0.0211 -> 0.0176`, u_linf `1.54 -> 1.99` against a floor of `1.6-1.7`), inside the fp32 noise of this decorrelated state.
+
+### Second finding (not fixed here)
+
+The step-entry `tendencies()` call that seeds WS-RK3 stage 1
+(`omlc:4070`) receives no separate transport: legoESM's stage-1 momentum
+advection uses `Q = h u(Kbb)` while NEMO's stage-1 `dyn_adv` (`:315`) is
+handed `zFu = e2u e3u (uu(Kbb) + zub)` with `zub = un_adv/hu(Kbb) -
+uu_b(Kbb)` built unconditionally at `:259-275`.  Inert at kt=1 (u = 0), live
+from kt=2; CONFIRMED by reading, UNMEASURED.  Candidate owner of the kt>=3
+SSH walk.  The S-21 row's "SHARED across the three RK3 cards" is true for
+the tracer stages and for momentum stages 2-3 only.
+
+### Reviews (two independent reviewers, the author reviewed nothing)
+
+Physics/oracle reviewer: SHIP.  Confirmed the `:166-187` mapping line by
+line; flagged (a) the no-transport default keeping the transport sign is a
+hidden choice for any non-RK3 NEMO card on `flux_form_upwind3`
+(`nemo_recipe.py:334`) — recorded, not flipped (ASK); (b) the stage-1
+finding above; (c) the remaining `4.55e-10` sits at the bottom, not where
+the replay's remainder sat — attribution to the ZDF operands was then
+MEASURED and excluded (above).
+Code reviewer: FIX-FIRST, three items, all fixed in `8d6756a42`: the
+`omit_momentum_transport_reconcile` gate arm had become two-variable
+(selector resolved from `transport_velocity is not None`) — the WS-RK3
+program now passes NEMO's rule explicitly at all three stages; the fallback
+comment's justification was false and is rewritten; the cross fluxes were
+untested (v == 0) — F10 isolates and pins them.
+
+### Controls
+
+- New unit tests fail on the reverted code, each verified by reverting:
+  F9 (velocity rule vs an independent assembly; legacy default bit-for-bit),
+  F10 (cross fluxes stay on the transport selector; fails when they are
+  switched), the model-level hook test (fails when the WS-RK3 program stops
+  passing the rule), and the S1/S2 predicate unit test (planted 1000x
+  inflation flips S1 to NOT-MET; a stale legacy arm flips it too).
+- `--plant-prediction` end-to-end on OVERFLOW (gate re-pointed from the now
+  permanently NOT-MET P3 predicate, whose scale reference this round
+  removed, to S1): exit `1` with `S1` reading NOT-MET on the planted `4.5517e-07` (report `stage3_selector/gates_after/overflow_plant_prediction.json`, stamped `8d6756a42-dirty` because the gate edit was uncommitted when the control ran); the same gate on LOCK exits `2` (`S1` is OVERFLOW-only), as `test_prediction_plant_is_fail_closed` asserts.
+- The two pre-existing golden/parity failures
+  (`test_baroclinic_decomposition_bit_identical`,
+  `test_modular_matches_monolithic_pe_rel`) fail identically at the pristine
+  `9070cf276` (verified in a throwaway worktree) and are not touched.
+
+### Tests
+
+Focused CPU/fp64: 14 flux-form momentum (incl. F9, F10), 3 WS qco stage
+faces (incl. the selector hook), 10 stage-sweep gate (incl. S1/S2 and the
+LOCK AT-BAR expectation), 44 across `test_no_scheme_duplication`,
+`test_nemo_ws_qco_stage_faces`, `test_no_private_cross_imports`; 49 of 51
+across `test_nemo_ws_tracer_rk3`, `test_baroclinic_decomposition`,
+`test_nemo_overflow_stability_probe`, `test_nemo_testcase_recipe`,
+`test_overflow_runner_parity` (the 2 pre-existing failures above).
+
+### Artifacts (`/data/abyssal/dbalwada/nemo-testcases-l1/`)
+
+| artifact | sha256 |
+|---|---|
+| `stage3_selector/gates_before/lock_stage_sweep_gate_kt2.json` | `d85a3ec23df3bc49018a2dc734c36877ff24a521f3c2e6ad98355e4c91a75045` |
+| `stage3_selector/gates_before/lock_trajectory_gate_kt10.json` | `b48b81e5fcebdc3b77f4b3f2745047c21fef62f37c627694e2850ae9193c7fbb` |
+| `stage3_selector/gates_before/lock_trajectory_gate_kt60.json` | `2add69f85a9e478fb2c84ddf9811eb3cfaf5dd60aec24d87935322c8cfe68f40` |
+| `stage3_selector/gates_before/overflow_stage_sweep_gate_kt2.json` | `83bd8b5b01d782db8468fb33762dd54701cd6c15d8042a9714cb17cf022aaa54` |
+| `stage3_selector/gates_before/overflow_trajectory_gate_kt10.json` | `a090221abb324400dd2fb21c20040a2a43a2249d605d3e2406311ebaf9d10532` |
+| `stage3_selector/gates_before/overflow_trajectory_gate_kt60.json` | `e687c3f70d0551bedcbbbd188c8e2189a56e74786730e6f480966bee78fa71f2` |
+| `stage3_selector/gates_after/lock_stage_sweep_gate_kt2.json` | `f6be76e5157f06332e0230425c1b3824efc8ce05a7d85c14c6e8e114fc6ee6ff` |
+| `stage3_selector/gates_after/lock_trajectory_gate_kt10.json` | `70d5e03ae6d2b78c3f989af4544157fe7f616fae83306898a7828d5403565090` |
+| `stage3_selector/gates_after/lock_trajectory_gate_kt60.json` | `57e46df417b182faf0e5aa9ead75a028f7e44000f8e93af1446a24cfb6901e59` |
+| `stage3_selector/gates_after/overflow_stage_sweep_gate_kt2.json` | `4c45a3665a9f73cdc40e99f109f38b8c2e59d411252c48b78e88c4e5c71e2daa` |
+| `stage3_selector/gates_after/overflow_trajectory_gate_kt10.json` | `601a27f7a1352dd0127d52a06bda24919e36c39013b6220daf989c4d2f804c2a` |
+| `stage3_selector/gates_after/overflow_trajectory_gate_kt60.json` | `13077a0974f9f6fd67cdc15e2788bb0230948ec17f21ca43d8472c9e1b6ca70e` |
+| `stage3_selector/before/overflow_statistics.json` | `86215bbb0b45bc980ed6718f02d030eaf760859480a1f9acc018e795c9fe889d` |
+| `stage3_selector/after/overflow_statistics.json` | `df4f64541d86f8a41d74aaa8ee9b70c9dd1258c5f6593abc971086e42e83fce8` |
+| `stage3_selector/before/legoesm/overflow_zps/fp32/metadata.json` | `847e4e6b476f7446944622251f41818b8e9962c034da9684b674daac2c8bbd9c` |
+| `stage3_selector/before/legoesm/overflow_zps/fp64/metadata.json` | `46ea99f4b4c7bc6732845bccc8c2f4d63f440a52cab274fc2d7a03a86e905fde` |
+| `stage3_selector/after/legoesm/overflow_zps/fp32/metadata.json` | `5d303611856ca0915d08c456f4f317195e2d279f1d00c617e6849d1ba4681997` |
+| `stage3_selector/after/legoesm/overflow_zps/fp64/metadata.json` | `82cd0f4c46e19de3617634ee448a881daccb20ab935b52960e3d72ea5e4ea7ce` |
+| `stage3_selector/v1_stage23_only/overflow_statistics.json` | `3dd6970b04b6a7f271770a3613bb052d092b09f922b2e079ba83a04c5ce87cad` |

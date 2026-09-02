@@ -164,3 +164,45 @@ def test_undetected_plant_exits_two(monkeypatch):
 
     monkeypatch.setattr(GATE, "score", blind)
     assert GATE.main(["LOCK_EXCHANGE-zco", "--plant-stage", "--allow-dirty"]) == 2
+
+
+def test_selector_prediction_s1_s2_and_the_plant_flip():
+    """The stage-3 baroclinic round's frozen predicates (S1 OVERFLOW, S2 LOCK)
+    read MET on the measured numbers and NOT-MET when the faithful stage-3
+    residual is planted 1000x (the --plant-prediction control), or when the
+    legacy arm stops reproducing the pre-fix debt."""
+    def rows_for(case, faithful3, legacy3, faithful2=None, legacy2=None):
+        out = []
+        for stage, f, l in ((2, faithful2, legacy2), (3, faithful3, legacy3)):
+            if f is None:
+                continue
+            out.append({"name": f"{case}.kt1.stage{stage}.faithful.baroclinic_u",
+                        "absolute_max": f})
+            out.append({"name": f"{case}.kt1.stage{stage}."
+                                "legacy_up3_transport_sign_selector.baroclinic_u",
+                        "absolute_max": l})
+        return out
+
+    arms = {"legacy_up3_transport_sign_selector": None}
+    ov = GATE.preregistered_prediction_check(
+        "OVERFLOW-zps", {}, [], rows_for("OVERFLOW-zps", 4.5517e-10, 2.598798e-07),
+        None, None, arms)
+    assert ov["S1_up3_selector_owns_the_stage3_baroclinic_u"]["status"] == "MET"
+    planted = GATE.preregistered_prediction_check(
+        "OVERFLOW-zps", {}, [], rows_for("OVERFLOW-zps", 4.5517e-10, 2.598798e-07),
+        None, None, arms, plant_selector=True)
+    assert planted["S1_up3_selector_owns_the_stage3_baroclinic_u"]["status"] == "NOT-MET"
+    stale_arm = GATE.preregistered_prediction_check(
+        "OVERFLOW-zps", {}, [], rows_for("OVERFLOW-zps", 4.5517e-10, 1.0e-07),
+        None, None, arms)
+    assert stale_arm["S1_up3_selector_owns_the_stage3_baroclinic_u"]["status"] == "NOT-MET"
+    lock = GATE.preregistered_prediction_check(
+        "LOCK_EXCHANGE-zco", {}, [],
+        rows_for("LOCK_EXCHANGE-zco", 2.3e-17, 2.138804e-10, 2.9e-17, 9.765645e-11),
+        None, None, arms)
+    assert lock["S2_up3_selector_owns_the_LOCK_stage_debt"]["status"] == "MET"
+    lock_bad = GATE.preregistered_prediction_check(
+        "LOCK_EXCHANGE-zco", {}, [],
+        rows_for("LOCK_EXCHANGE-zco", 2.3e-17, 2.138804e-10, 9.765645e-11, 9.765645e-11),
+        None, None, arms)
+    assert lock_bad["S2_up3_selector_owns_the_LOCK_stage_debt"]["status"] == "NOT-MET"
