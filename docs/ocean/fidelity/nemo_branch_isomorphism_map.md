@@ -840,3 +840,93 @@ levels, differentiability, no dangling references.
 `H_below(k)/ht_0` fraction), the scaling bound (with the correction recorded
 above), the exoneration, and the call-site structural finding. No REFUTED or
 UNDECIDED items.
+
+## 2026-09-02 S-35 arm result — the stage-3 `zub` reordering is REFUTED as an owner
+
+Preregistered first, in
+`docs/ocean/fidelity/testcases/nemo_testcases_l1_stage3_zub_preregister.md`
+(commit `e57b810fd`, before any arm ran).  fp64
+(`PrecisionPolicy.fp64()`, `JAX_ENABLE_X64=1`, dtypes printed and asserted
+`float64`), CPU, legoESM `e57b810fd`, clean tree.
+
+### Three corrections to this doc's own NEMO description of S-35
+
+Read off `nemo_5.0.2/src/OCE/stprk3_stg.F90` directly, not inferred:
+
+1. The correction runs at **ALL THREE stages**, not stage 3 only — the `:433`
+   banner reads "All stages: correct the barotropic component ... at Kaa =
+   N+1/3, N+1/2 or N+1" and the `DO_2D`/`DO_3D` block at `:439-446` sits
+   OUTSIDE any `kstg` guard.  legoESM's per-stage `_replace_stage_mean` at
+   stages 1 and 2 therefore HAS a NEMO counterpart; §2 item 6's phrase "L/O do
+   the correction inside the stage ladder" implied it did not.
+2. `dyn_zdf` is called at **stage 3 only** (`:430`, `IF( kstg == 3 )`), so the
+   before/after ordering question is vacuous at stages 1 and 2 and exists at
+   stage 3 alone.
+3. The weights are the **reference** thicknesses `e3u_0` / `r1_hu_0` (`:440`),
+   not `e3u(Kaa)`.  The update at `:444` is an ADDITIVE column-uniform shift,
+   so the correction can only move the `e3u_0`-weighted depth mean and cannot
+   touch the baroclinic anomaly at all.
+
+### Scaling, computed before the arm (from oracle dumps + the faithful arm)
+
+Because the two orders differ by a column-uniform shift, the reorder's
+leverage is bounded by the DEPTH-MEAN part of the residual:
+
+| card | stage-3 u residual | depth-mean part | baroclinic part | mean / full |
+|---|---|---|---|---|
+| OVERFLOW-zps | `2.598797930308122e-07` | `4.753142e-15` | `2.598797978e-07` | `1.83e-08` |
+| LOCK_EXCHANGE-zco | `2.138804128921056e-10` | `1.929880e-17` | `2.138803936e-10` | `9.02e-08` |
+
+### Arm: one variable, `nemo_stage_mean_imposition=True`
+
+Asserted at run time to be the ONLY differing `BarotropicConfig` field; the
+public cards, `recipes.py` and every selector are untouched.
+
+| card | u movement | T movement | SSH movement | stage-3 / kt=2 u residual before -> after |
+|---|---|---|---|---|
+| OVERFLOW-zps | `1.387779e-17 m/s` | `0.0 K` | `0.0 m` | `2.598797930308e-07` -> `2.598797930169e-07` |
+| LOCK_EXCHANGE-zco | `1.292470e-26 m/s` | `0.0 K` | `0.0 m` | `2.138804128921e-10` -> `2.138804128921e-10` (bit-identical) |
+
+kt=2 `T` residual `2.238210e-13 K` (OVERFLOW) / `4.883205e-12 K` (LOCK) and
+kt=2 SSH residual `1.049161e-14 m` / `4.782138e-28 m` are unchanged in every
+digit.  All eight frozen predictions Z1-Z8 **MET**; the refute threshold
+(`2.6e-08 m/s`) is missed by nine orders of magnitude.  **REFUTED.**
+
+### Proof the arm's path executed, and that it did not perturb a zero
+
+A roundoff-sized movement proves nothing unless the branch ran.  Wrapping
+`_fixed_depth_means` (the site-(b) helper) and counting calls per step:
+
+| card | faithful | arm |
+|---|---|---|
+| OVERFLOW-zps | 0 calls | **2 calls** |
+| LOCK_EXCHANGE-zco | 0 calls | **2 calls** |
+
+and the quantity the block perturbs is not a zero — the pre-solve depth mean
+is `4.502970e-02 m/s` (OVERFLOW) and `1.135367e-03 m/s` (LOCK).  The
+correction the block actually applies, `_du = mean_baro - mean_now`, i.e.
+exactly the depth-mean shift the implicit vertical solve introduces, is
+`8.673617e-19 m/s` (OVERFLOW) and `3.101927e-26 m/s` (LOCK) — a relative shift
+of `1.9e-17`, about `0.09 x` fp64 eps.
+
+**Mechanism, now measured rather than argued:** with `A_v = 1e-4`, zero bottom
+drag, no implicit surface stress and no-flux boundary conditions, the implicit
+vertical momentum solve conserves the thickness-weighted column integral of
+`u` to machine precision.  A conserved depth mean commutes with a
+column-uniform shift, so applying `zub` before or after `dyn_zdf` is a no-op on
+these two cards.
+
+### Consequences
+
+- The OVERFLOW kt=2 velocity debt `2.598797930308122e-07 m/s` is **100%
+  baroclinic** and remains **UNOWNED**.  S-35 is now explicitly EXONERATED for
+  it; do not re-chase this site.
+- §2 item 6's risk note "affects L/O gates only when the implicit solve
+  actually shifts the depth mean (A_v=1e-4, so small but nonzero)" is
+  **quantified and superseded**: the shift is `8.7e-19 m/s`, i.e. inert.
+- S-35 stays **ARTIFICIAL_BRANCH** with both sites and its registry baseline
+  entry, because the collapse was gated on the arm confirming.  Its
+  COLLAPSIBLE_NOW classification in the summary table is unchanged and is now
+  known to be **numerically free** on L/O (movement `<= 1.4e-17 m/s`) — but
+  collapsing is a behaviour change on every `rk3_ws` card and was not
+  authorised by this task, so it is left as a pending ASK, not done.
