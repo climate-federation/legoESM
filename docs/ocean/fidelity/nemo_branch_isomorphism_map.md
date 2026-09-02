@@ -930,3 +930,71 @@ these two cards.
   known to be **numerically free** on L/O (movement `<= 1.4e-17 m/s`) — but
   collapsing is a behaviour change on every `rk3_ws` card and was not
   authorised by this task, so it is left as a pending ASK, not done.
+
+## 2026-09-02 S-30 / S-12 collapse — the WS momentum ladder is now written once
+
+§2's rank-3 item is DONE, and S-12 with it (they are the same duplication seen
+from two altitudes).  Both rows move `ARTIFICIAL_BRANCH -> SHARED` in §1 above
+and in `tests/ocean/unit/_nemo_branch_isomorphism_baseline.py`; neither carried
+a baseline entry (both sites were inline code inside `_step_impl`, not
+AST-distinct symbols), so the shrink-only allow-list is unchanged.
+
+**What was deleted.**  The pre-barotropic copy of the Wicker-Skamarock stage
+recurrence, at what was `omlc:4253-4335`.  Its only consumer was the barotropic
+solve's velocity seed.  `u_star, v_star = u0, v0` replaces it (`omlc:4448`).
+
+**Why NEMO has nothing there.**  `stp_2D` evaluates the Kbb RHS ONCE
+(`stp2d.F90:126-171`), depth-means it into `Ue_rhs`/`Ve_rhs` (`:177-186`), and
+calls `dyn_spg_ts( kt, Kbb, Kbb, Krhs, uu, vv, ... )` at `:280-281` — `Kmm ==
+Kbb`, the BEFORE velocity, no stage in between.  legoESM already carried that
+depth mean separately in `F_slow_u`/`F_slow_v`.
+
+**What survives.**  One ladder, `omlc:4817-5025`, after the barotropic solve,
+where it can use the actual external-mode velocity — NEMO's own placement
+(`stprk3_stg.F90:344-374`, with the `zub` replacement at `:433-446`).  The
+private `stage_barotropic_correction` hook moved INSIDE `_replace_stage_mean`:
+it now ablates the per-stage external-mode replacement instead of selecting a
+second recurrence.
+
+**Cost removed.**  Two `tendencies()` evaluations per step on every `rk3_ws`
+card, and the failure mode that put the stage vertical-UP3 and live-HPG
+operand fixes into one copy only.
+
+**Measured** (fp64, CPU, collapse commit `28df515a8` vs `9070cf276`; full
+tables in `testcases/nemo_testcases_l1_phase3_receipt.md`):
+
+| | LOCK_EXCHANGE-zco | OVERFLOW-zps |
+|---|---|---|
+| certified rows compared, kt=1..10 | 50 | 50 |
+| rows bit-identical | 37 | 37 |
+| largest move | 0.006 ulp | 0.500 ulp |
+| every T and S row, kt=1..10 | bit-identical | bit-identical |
+| `first_over_bar` | `kt=2 {T,u}`, unchanged | `kt=2 {T,u,ssh}`, unchanged |
+| stage sweep, `faithful` arm | PASS, max 0.001 ulp | PASS, max 0.094 ulp |
+| DINO 5-day twin | worst array difference `0.000000e+00` | — |
+
+The bar is a machine check, not a judgement: `MAX_ULP_MOVE = 2` in
+`legoesm.ocean.fidelity.ulp_move_gate`, reached as `--compare-to` on both
+phase-3 gates, with a `--compare-plant-ulps 3` control that must turn it red
+(measured: it does, exit 1).
+
+**One arm is deliberately redefined.**  `omit_stage_primary_velocity_correction`
+moves 5.1e12 / 2.0e14 ulps, because the hook it drives no longer means "skip
+the post-solve ladder" (there is only one ladder) but "keep each stage's own
+depth mean".  Every OTHER sweep arm — `faithful`, the three `freeze_stage_hpg`
+arms, `omit_stage_vertical_up3`, `legacy_velocity_primary_average`,
+`legacy_stage_min_face_thickness`, `omit_stage_qco_factor`,
+`omit_momentum_transport_reconcile` — is inside the bar at <= 0.125 ulp, so
+the `.faithful.` filter used for the sweep comparison hides nothing.
+
+**Not claimed.**  The OVERFLOW kt=2 velocity debt is unchanged at
+`2.5987979300999553e-07 m/s` and stays UNOWNED — this collapse is exonerated
+for it, as S-35 already was.  The 6120-step statistical scorer was not re-run.
+GYRE, the third `rk3_ws` card, has no gate on this branch and was not run.
+
+**Left standing, named:** with one ladder, the tracer program's legacy
+stage-transport rebuild (its `_nemo_ws_live_stage_geometry is None` branch)
+is unreachable for every `rk3_ws` card, because the config validator couples
+the momentum and tracer integrators.  It is dead code, not a second NEMO
+implementation, and its removal is a separate one-line change with its own
+gate.

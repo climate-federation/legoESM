@@ -1116,6 +1116,10 @@ def main(argv=None) -> int:
     parser.add_argument("--plant-prediction", action="store_true")
     parser.add_argument("--allow-dirty", action="store_true",
                         help="stamp '<sha>-dirty' instead of refusing a dirty tree")
+    from legoesm.ocean.fidelity.ulp_move_gate import (
+        add_ulp_compare_arguments, run_ulp_comparison,
+    )
+    add_ulp_compare_arguments(parser)
     args = parser.parse_args(argv)
     # Exit codes: 0 AT-BAR, 1 DEBT (measured), 2 gate failure (a planted
     # control that did not land, a dirty tree, a bad oracle record).
@@ -1131,6 +1135,15 @@ def main(argv=None) -> int:
     if args.output:
         args.output.write_text(encoded)
     print(encoded, end="")
+    if args.compare_to:
+        # Exit status then reports the ULP COMPARISON against a committed
+        # reference, not this gate's own AT-BAR/DEBT verdict.  Every arm here
+        # other than "faithful" is a private ablation whose meaning a refactor
+        # may legitimately redefine, so a comparison of this gate normally
+        # passes --compare-rows-matching .faithful. and says so in the receipt.
+        comparison = run_ulp_comparison(args, report)
+        print(json.dumps(comparison, indent=2, sort_keys=True))
+        return 0 if comparison["status"] == "PASS" else 1
     return 0 if report["status"] == "AT-BAR" else 1
 
 

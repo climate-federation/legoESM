@@ -494,6 +494,10 @@ def main() -> int:
               "diagnose_w_from_flux_div. NEMO has no such switch"))
     parser.add_argument("--allow-dirty", action="store_true",
                         help="stamp '<sha>-dirty' instead of refusing a dirty tree")
+    from legoesm.ocean.fidelity.ulp_move_gate import (
+        add_ulp_compare_arguments, run_ulp_comparison,
+    )
+    add_ulp_compare_arguments(parser)
     args = parser.parse_args()
     require(args.max_step >= 1, "max-step must be positive")
     report = run(
@@ -507,6 +511,14 @@ def main() -> int:
     if args.output:
         args.output.write_text(text)
     print(text, end="")
+    if args.compare_to:
+        # The exit status now reports the ULP COMPARISON, not this gate's own
+        # AT-BAR/DEBT verdict: a re-association is being checked against a
+        # committed reference, and the DEBT status itself is one of the fields
+        # the comparison requires to be unchanged.
+        comparison = run_ulp_comparison(args, report)
+        print(json.dumps(comparison, indent=2, sort_keys=True))
+        return 0 if comparison["status"] == "PASS" else 1
     return 0 if report["status"] == "AT-BAR" else 1
 
 
