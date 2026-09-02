@@ -874,3 +874,332 @@ Focused CPU/fp64 tests: **161 passed across eleven explicitly listed files** at 
 - term-level explanation of the measured kt=4--60 polynomial accumulation in
   either case;
 - long-trajectory phenomenology and statistical equivalence beyond 60 steps.
+
+## Face-thickness and stage-qco round: the kt=2 T owner, MEASURED
+
+Preregistered in
+`nemo_testcases_l1_overflow_face_thickness_preregister.md` (commit
+`6f4204e11`), which was committed BEFORE either arm existed.  Both changes
+are unbranched parts of the NEMO WS-RK3 scheme identity; no public selector
+was added and no other scheme's path changed.
+
+**Headline: the OVERFLOW-zps `kt=2` temperature residual, registered as the
+next owner at the end of the previous round, is closed.  `2.548493e-07 K ->
+2.238210e-13 K` (normalized `1.274246e-08 -> 1.119105e-14`), a factor of
+1.14e6.  Its owner is the stage transport's FACE THICKNESS.**  The stage-1
+velocity residual `3.761789e-12 -> 1.811051e-15 m/s` is owned by the qco
+stage weighting, predicted to 0.05% before the arm ran.
+
+### What NEMO does vs what legoESM did (both readings verified in source)
+
+| term | NEMO 5.0.2 | legoESM before | legoESM now |
+|---|---|---|---|
+| stage face thickness | `e3u(Kmm) = e3u_0*(1 + r3u(Kmm)*umask)`, `domzgr_substitute.h90:127`, consumed at `stprk3_stg.F90:272-273`; `r3u = 0.5*(e1e2t_i*ssh_i + e1e2t_{i+1}*ssh_{i+1}) * r1_hu_0 * r1_e1e2u`, `domqco.F90:219-222` | `min_cell_to_uface(h_stage)` = min of the two STRETCHED T thicknesses (`ocean_model_latlon_cgrid.py:1063`) | the NEMO rule, built by `_nemo_ws_qco_stage_faces` |
+| reference face | `pe3u(:,:,:) = pe3t(:,:,:)`, `tests/OVERFLOW/MY_SRC/usrdef_zgr.F90:184` | `min(e3t_0_i, e3t_0_{i+1})` | unchanged |
+| stage velocity | `uu(Kaa) = ((1+r3u(Kbb))*uu(Kbb) + rDt*(1+r3u(Kmm))*uu(Krhs)) / (1+r3u(Kaa))`, `stprk3_stg.F90:373-378` and `dynzdf.F90`'s `key_qco` branch | `u_raw = u0 + stage_dt*RHS` | the NEMO weighting |
+| stage tracer | `ts(Kaa) = ((1+r3t(Kbb))*ts(Kbb) + rDt*(1+r3t(Kmm))*ts(Krhs)) / (1+r3t(Kaa))`, `:552-554` | already faithful (`_stage` divides by `h_stage`) | unchanged |
+
+Two source facts that had to be checked rather than assumed:
+
+* `r3u` is an `e1e2t`-weighted mean of **ssh** divided by `hu_0`, NOT the mean
+  of the two `r3t` (each of those divides by its own column's `ht_0`).  At the
+  OVERFLOW shelf break the two denominators differ by a factor of four.
+* the REFERENCE face was already right.  Measured on the card's own
+  `mesh_mask.nc`: `e3u_0 == min(e3t_0_i, e3t_0_{i+1})` **exactly** on all
+  16900 wet U faces.  Only the stretching was wrong, which is why this is a
+  one-variable change.
+
+`ln_dynadv_vec=.false.` with `key_qco` makes `lk_linssh` false, so the
+thickness-weighted branch at `:371-378` is the one both cards execute; the
+velocity-form branch at `:363-366` is dead here.
+
+### Rule 4: the rule was NOT re-implemented
+
+`grep -rn "r3u\|qco" packages/ocean/legoesm/ocean/` before writing anything
+found `vertical.py:140 nemo_qco_live_face_geometry_from_operands` and
+`vertical.py:197 nemo_qco_live_face_thicknesses`, the shared canonical
+`dom_qco_r3c` builders already used by the DINO ldfslp/dynzad path and by the
+`wzv_call2_evaluation="nemo_literal"` tracer path
+(`ocean_model_latlon_cgrid.py:5128`).  `_nemo_ws_qco_stage_faces` calls the
+`_from_operands` primitive and only maps its native east/north extent onto
+legoESM's redundant west/south layout; the wrapper was not usable directly
+because it reads operands from `z_coord.nemo_*` fields the L1 testcase cards
+do not carry.  **Instrument check before any arm:** on the OVERFLOW stage-1
+oracle ssh the helper reproduces the analytic `e3u_0*(1+r3u)` to `0.0` on
+every wet face, while the min rule is off by `1.3199826e-03 m`.
+
+### REACH TABLE — which cards execute the changed lines
+
+Every row was measured by instantiating the card and printing the selector,
+not read off a comment.
+
+| card | selector that routes it | executes the changed lines? |
+|---|---|---|
+| OVERFLOW-zps (`build_nemo_testcase_card`) | `momentum_time_integrator="rk3_ws"`, `tracer_time_integrator="rk3_ws"` | YES, both changes |
+| LOCK_EXCHANGE-zco (same builder) | same | YES, both changes — and MEASURED as a bit-identical no-op at kt=1 (below) |
+| GYRE (`build_nemo_gyre_recipe`) | `momentum_time_integrator="rk3_ws"`, `tracer_time_integrator="euler"` | the momentum stages would, but the card is UNCONSTRUCTIBLE on this branch: model construction raises `pgf_quadrature="nemo_trapezoid" is the hpg_sco recurrence and requires pgf_scheme="nemo_sco"`.  Five `test_nemo_recipe.py` GYRE tests fail identically at this round's base `28d166428`; pre-existing, untouched here |
+| DINO `kamm_mlf` (`build_nemo_recipe`) | `momentum_time_integrator="rk3"` (the `NEMOModelRecipeConfig` default) | no — the `rk3_ws` block is skipped, whichever `outer_integrator` the DINO screens select |
+| ORCA1 / OMIP (`run_omip_core2.py:5936,6096`) | `momentum_time_integrator = "rk3" if --momentum-rk3 else None` | no |
+
+Two live rows, so the LOCK no-op is the only cross-card check this change
+gets, and that is a FINDING, not a success: the WS-RK3 identity is exercised
+by exactly one non-degenerate card today.  Because DINO does not reach the
+change, its short-run bit-exact gates were not run; nothing on the MLF lane
+can move.
+
+**The same defect class DOES exist on the MLF lane, and is deliberately NOT
+fixed here.**  NEMO's MLF `dom_qco_r3c` (`domqco.F90:166-169`) uses the
+IDENTICAL `r3u` formula as the RK3 variant (`:219-222`) — both were read.
+legoESM's MLF transport face thickness is still
+`min_cell_to_uface(h_k)` (`ocean_model_latlon_cgrid.py:9237`), and main's
+PR #1642 separately moved the MLF *vertical-mixing* face control volume to a
+masked average (`:8130-8160`), which is a third rule again.  Changing the MLF
+transport face would move every DINO number and is a different one-variable
+round; recorded here as open debt.
+
+### Scaling BEFORE any owner label
+
+Recomputed by the gate itself on every run
+(`face_thickness_and_qco_scaling`), from the oracle kt=1 dumps and the card
+geometry only — no legoESM arm enters it.  These reproduce the frozen
+preregistration numbers exactly.
+
+H1, the face thickness.  The oracle's per-stage tracer increment is 100%
+advective on this card, so the predicted T movement is the relative transport
+error times that increment:
+
+| stage (Kmm level) | max abs Δe3u [m] | max rel Δe3u | oracle stage max abs ΔT [K] | predicted T movement [K] |
+|---|---:|---:|---:|---:|
+| 1 (Kbb, ssh ≡ 0) | `0.0` | `0.0` | `3.4518e-04` | `0.0` |
+| 2 (N+1/3) | `1.3199826e-03` | `6.5999e-05` | `6.0182e-04` | `3.9720e-08` |
+| 3 (N+1/2) | `1.9799739e-03` | `9.8999e-05` | `3.6980e-03` | `3.6609e-07` |
+| **total** | | | | **`4.0581e-07`** |
+
+H2, the qco stage weighting.  With `uu(Kbb)=0` at kt=1 the omitted factor
+leaves `u_lego - u_nemo = u_nemo*(r3u(Kaa)-r3u(Kmm))/(1+r3u(Kmm))`, and the
+stage barotropic correction removes its depth mean, so only the baroclinic
+part survives into the scored row:
+
+| stage | max abs r3u(Kaa) | max abs r3u(Kaa)−r3u(Kmm) | predicted baroclinic u movement | pre-fix residual | predicted/measured |
+|---|---:|---:|---:|---:|---:|
+| 1 | `3.4495e-05` | `3.4495e-05` | `3.7635e-12` | `3.761789e-12` | `1.0005` |
+| 2 | `5.1743e-05` | `1.7248e-05` | `6.1965e-11` | `6.908114e-11` | `0.897` |
+| 3 | `1.0349e-04` | `5.1743e-05` | `6.3212e-10` | `2.598440e-07` | `0.0024` |
+
+The stage-3 row is why H2 was preregistered as REFUTED for the `kt=2` u
+residual before any arm was run.
+
+### Arm outcomes against the frozen predictions
+
+Scored by the gate's `preregistered_prediction_check` block, which carries the
+committed windows as constants.
+
+| prediction | predicate | measured | status |
+|---|---|---|---|
+| P1 (H1 owns the T residual) | kt=2 T movement in `[2.03e-07, 8.12e-07] K` and the residual improves | movement `2.5484875e-07 K`; residual `2.5484897e-07 -> 2.2382096e-13 K` | **MET** (predicted `4.0581e-07`, 1.59x the movement) |
+| P2 (H1 is REFUTED for u) | stage-3 u movement `< 2.6e-08 m/s` | `7.958972e-11 m/s` | **MET** |
+| P3a (H2 owns stage 1) | faithful stage-1 baroclinic u `< 1.3e-13 m/s`, ablation reproduces the pre-fix value | `1.811051e-15 m/s`; ablation `3.761789e-12` vs predicted `3.7635e-12` | **MET** |
+| P3b (H2 owns stage 2) | faithful stage-2 baroclinic u `< 1.4e-11 m/s` | `9.433445e-11 m/s` | **NOT-MET** |
+| P3c (H2 is REFUTED as the stage-3 owner) | predicted stage-3 movement `< 0.01x` the kt=2 u residual | `6.3212e-10 / 2.5988e-07 = 0.0024`; measured movement `6.316738e-10` | **MET** |
+| P4 (both inert on LOCK) | every LOCK movement `< 1e-15` | H1 `0.0` / `0.0`; H2 `0.0` and `1.29e-26` | **MET** |
+
+**P3b is a genuine preregistration miss and is not being reinterpreted.**  The
+H2 stage-2 MOVEMENT prediction (`6.1965e-11`) is scale-compatible with what
+the arm moved, but turning that into a residual FLOOR assumed H2 owned the
+`6.908e-11`, and it does not: at stage 2 both corrections make the u residual
+slightly worse (pre-fix `6.908e-11`; H1 alone `7.477e-11`; H2 alone
+`8.865e-11`; both `9.433e-11`).  That is Rule 8 — faithful-but-worse on a
+term four orders below the stage-3 residual, disclosed, not reverted, and not
+hidden behind a default.
+
+### kt=2 entry, both cards (absolute L-infinity on the wet mask)
+
+| card | quantity | before | after |
+|---|---|---:|---:|
+| OVERFLOW-zps | T | `2.548493e-07 K` | `2.238210e-13 K` |
+| OVERFLOW-zps | u | `2.598440e-07 m/s` | `2.598798e-07 m/s` |
+| OVERFLOW-zps | SSH (normalized) | `1.0491608e-14` | `1.0491608e-14` |
+| LOCK_EXCHANGE-zco | T | `4.883205e-12 K` | `4.883205e-12 K` |
+| LOCK_EXCHANGE-zco | u | `2.138804e-10 m/s` | `2.138804e-10 m/s` |
+| LOCK_EXCHANGE-zco | SSH (normalized) | `4.7821379e-28` | `4.7821379e-28` |
+
+LOCK is bit-identical at every kt=1 stage and at kt=2, which is exactly what
+the source says must happen: its oracle `ssh` is identically zero at all three
+kt=1 stages (0 non-zero cells of 134x7) and legoESM's own `eta` after kt=1 is
+`4.78e-28 m`, so both face rules and both velocity updates coincide
+algebraically.  A no-op where the source predicts a no-op is the strongest
+control this round has.
+
+Stage rows, OVERFLOW-zps (instantaneous u, absolute):
+
+| stage | before | after |
+|---|---:|---:|
+| 1 | `3.757022e-12` | `6.501744e-15` |
+| 2 | `6.908155e-11` | `9.433404e-11` |
+| 3 | `2.598440e-07` | `2.598798e-07` |
+
+Stage-2 tracer operand (the row that measured the face-thickness defect
+directly): `2.833037e-08 K (DEBT) -> 3.552714e-15 K (AT-BAR)`.
+
+### kt=2..10 trajectory (normalized L-infinity, both cases)
+
+OVERFLOW-zps:
+
+| kt | T before | T after | U before | U after | SSH before | SSH after |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2 | `1.27424627e-08` | `1.11910481e-14` | `2.59844026e-07` | `2.59879793e-07` | `1.04916076e-14` | `1.04916076e-14` |
+| 3 | `1.63310582e-07` | `1.94808747e-09` | `3.37673071e-06` | `3.37369013e-06` | `3.75492262e-09` | `3.77382183e-09` |
+| 4 | `5.90530377e-07` | `1.87561953e-08` | `3.37636512e-06` | `3.35428742e-06` | `1.07119102e-06` | `1.07153587e-06` |
+| 5 | `1.16912537e-06` | `3.52748005e-08` | `3.28700281e-06` | `3.22624514e-06` | `1.48122887e-05` | `1.48051671e-05` |
+| 6 | `1.74603452e-06` | `5.00379945e-08` | `9.27687843e-06` | `9.27010239e-06` | `4.00019841e-05` | `3.99913513e-05` |
+| 7 | `2.39742496e-06` | `5.89796107e-08` | `1.15106208e-05` | `1.15021090e-05` | `4.55757512e-05` | `4.55794834e-05` |
+| 8 | `3.29132932e-06` | `5.99574620e-08` | `2.66872742e-05` | `2.66887966e-05` | `7.97135279e-05` | `7.96914266e-05` |
+| 9 | `4.40403288e-06` | `6.16954667e-08` | `3.21886997e-05` | `3.21852255e-05` | `7.29592804e-05` | `7.29419662e-05` |
+| 10 | `5.55186262e-06` | `7.71178526e-08` | `2.64522041e-05` | `2.64429824e-05` | `9.24110227e-05` | `9.23739063e-05` |
+
+LOCK_EXCHANGE-zco:
+
+| kt | T before | T after | U before | U after | SSH before | SSH after |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2 | `1.62773498e-13` | `1.62773498e-13` | `2.13880413e-10` | `2.13880413e-10` | `4.78213792e-28` | `4.78213792e-28` |
+| 3 | `5.20626505e-12` | `4.04654088e-13` | `2.13879378e-10` | `2.13879691e-10` | `1.35525272e-18` | `1.35525272e-18` |
+| 4 | `3.59465938e-11` | `8.40098361e-13` | `2.13851856e-10` | `2.13863540e-10` | `2.16027283e-17` | `2.16027283e-17` |
+| 5 | `1.21776485e-10` | `1.18554055e-12` | `2.13746464e-10` | `2.13790095e-10` | `6.41580871e-16` | `8.12355683e-16` |
+| 6 | `3.05194329e-10` | `1.53110117e-12` | `2.13440690e-10` | `2.13571487e-10` | `3.83130144e-15` | `5.59530367e-15` |
+| 7 | `6.40530355e-10` | `1.94392650e-12` | `2.12733880e-10` | `2.13058932e-10` | `1.56074155e-14` | `2.21587936e-14` |
+| 8 | `1.19372411e-09` | `2.29789521e-12` | `2.11363624e-10` | `2.12027803e-10` | `4.73124144e-14` | `6.59659286e-14` |
+| 9 | `2.04205328e-09` | `2.64973229e-12` | `2.08895765e-10` | `2.10163988e-10` | `1.26009229e-13` | `1.63752373e-13` |
+| 10 | `3.27381405e-09` | `2.99730611e-12` | `2.04777155e-10` | `2.07050559e-10` | `2.85172493e-13` | `3.57703289e-13` |
+
+LOCK's T improves 1092x at kt=10 even though the change is inert at kt=1: its
+`eta` leaves zero after the first step, and from kt=3 on the two rules
+diverge.  Its U and SSH move by a few percent in the worse direction and stay
+flat at `~2.1e-10` and `~3e-13`; disclosed, not reverted.  Why a `~1e-13 m`
+sea level produces a 1092x T change is **PLAUSIBLE, UNMEASURED**: `min` breaks
+the left-right symmetry of a lock exchange while the NEMO mean does not.
+
+kt=60 bridge (OVERFLOW-zps, before-entry normalized L-infinity at kt=60):
+T `1.027641e-04 -> 1.184430e-05`, u `4.193114e-04 -> 2.507515e-04`,
+S `2.639159e-15 -> 2.436147e-15`, ssh `7.757762e-05 -> 7.751799e-05`.
+
+### Statistical scorer (6120 steps, fp64 and fp32, CPU)
+
+Same scorer, same NEMO FCT2/FCT4 spread, same-revision fp32 floor, both arms
+complete with every-step finite checks at `7fc887dd93c1` (fp64 `421.41 s`,
+fp32 `217.95 s` wall).  The deterministic kt1..60 bridge was re-pinned to this
+round's gate, as it is model output.
+
+| metric | before | after | fp32 floor before | fp32 floor after | NEMO spread | verdict before | verdict after |
+|---|---:|---:|---:|---:|---:|---|---|
+| final_temperature_histogram_tv | `0.0423046` | `0.0390072` | `0.0194058` | `0.0174136` | `0.044231` | WITHIN-SCHEME-SPREAD | WITHIN-SCHEME-SPREAD |
+| final_water_mass_census | `0.0169753` | `0.0130347` | `0.00157409` | `0.00180818` | `0.00336209` | OUTSIDE | OUTSIDE |
+| instantaneous_u_linf | `0.999211` | `0.832083` | `0.402734` | `0.773437` | `0.672694` | OUTSIDE | OUTSIDE |
+| plume_descent_m | `16.9554` | `16.9551` | `0.0087228` | `0.038907` | `1499.62` | WITHIN-SCHEME-SPREAD | WITHIN-SCHEME-SPREAD |
+| plume_front_km | `4.04936` | `4.03884` | `0.0837761` | `0.135393` | `121.931` | WITHIN-SCHEME-SPREAD | WITHIN-SCHEME-SPREAD |
+| temperature_linf | `0.379492` | `0.379487` | `0.140318` | `0.122985` | `0.356744` | OUTSIDE | OUTSIDE |
+
+`OUTSIDE` stays 3 and `WITHIN-SCHEME-SPREAD` stays 3.  Every row improves or
+holds — the water-mass census drops from 5.05x to 3.88x the NEMO scheme
+spread and the instantaneous-u L-infinity from 1.49x to 1.24x — but no row
+crosses.  **A six-order kt=2 gain buys a few percent at 6120 steps: the
+long-run statistics are owned by something else, and this round does not
+change that verdict.**
+
+### Controls, and one control this round broke and repaired
+
+- `--plant-stage` on LOCK: exit `1`, planted row carries the `+1.0` and is in
+  `failed_rows`.
+- `test_undetected_plant_exits_two`: a scorer that stops seeing plants makes
+  the planted run exit `2`.  It FAILED at the base revision `28d166428`
+  (LLVM `Cannot allocate memory`) and passes here, because the gate now clears
+  the JAX compilation cache between arms.
+- `--plant-prediction` inflates the frozen H2 numbers 1000x and REQUIRES the
+  stage-3 refutation predicate to flip to NOT-MET; on LOCK that predicate does
+  not exist, so the planted run exits `2`.
+- **Adding `--plant-prediction` first BROKE the `--plant-operand` control.**
+  Its guard landed between the operand plant's case check and its
+  `require_planted` call, so the operand plant's landing check ran under the
+  wrong flag: `--plant-operand` silently stopped verifying its own plant.
+  Found by RUNNING the control, not by reading the diff; repaired in
+  `2dd8cee05` and both plants re-run.
+- Non-vacuity of the two new unit tests: both FAIL against the reverted source
+  (checked out from `HEAD~1`) and pass with it, and
+  `test_ws_stage_face_thickness_is_nemo_e3u_0_times_one_plus_r3u` additionally
+  asserts inline that the reverted min rule differs by more than `1e-6 m`.
+
+### Tests
+
+Focused CPU/fp64 run at `2dd8cee05`, nine explicitly listed files:
+**`7 failed, 106 passed in 645.49s`**
+(`test_nemo_ws_qco_stage_faces`, `test_nemo_ws_tracer_rk3`,
+`test_rk3_ws_and_mxl3`, `test_nemo_recipe`,
+`test_nemo_testcase_full_statistics`,
+`test_nemo_testcase_phase3_stage_sweep_gate`,
+`test_nemo_testcase_phase3_trajectory_gate`,
+`test_nemo_testcase_oracle_gate`,
+`test_nemo_testcase_overflow_barotropic_gate`).
+
+All seven failures reproduce IDENTICALLY at this round's base `28d166428`,
+run in a separate worktree with the same command: two `test_rk3_ws_and_mxl3`
+and five `test_nemo_recipe` cases whose configurations are rejected at model
+construction by `pgf_quadrature="nemo_trapezoid" ... requires
+pgf_scheme="nemo_sco"`.  Pre-existing, unrelated to this round, untouched.
+
+The base run had an EIGHTH failure this round FIXES:
+`test_undetected_plant_exits_two` died at `28d166428` with LLVM
+`Cannot allocate memory` (`vm.max_map_count`, not host RAM) and passes here
+because the gate now clears the JAX compilation cache between arms.
+
+Planted-control exit codes, run end to end on the real cards:
+`--plant-stage` on LOCK exit `1` with the planted row in `failed_rows`;
+`--plant-operand` on OVERFLOW exit `1` with
+`kt1.stage1.faithful.tracer_operand_T = 1.0000e+00 DEBT` in `failed_rows`;
+`--plant-prediction` on OVERFLOW exit `1` with the frozen stage-3 predicate
+flipped `MET -> NOT-MET` (planted prediction `6.3212e-07` vs the real
+`6.3212e-10`).  Each exits `2` instead if its plant fails to land.
+
+### Retractions and revisions (Rule 11)
+
+- The previous round's registered next-arm estimate for this residual
+  (`~6e-8 K`, from the stage-2 relative face error times one stage's change)
+  is SUPERSEDED, not retracted: the per-stage sum is `4.06e-07 K` because
+  stage 3 carries `3.66e-07` of it, and the measured movement was
+  `2.55e-07 K`.  Its description of `r3u` as "the `e1e2`-weighted mean of the
+  two columns' `r3t`" is CORRECTED: it is the weighted mean of `ssh` over
+  `hu_0`, which is a different number when the two columns have different
+  depths — exactly the OVERFLOW shelf break.
+- The stage-sweep gate's `classify_arm` label is NOT applicable to these two
+  arms: they ablate a LANDED fix, which inverts its "does the arm improve the
+  residual" question.  The ablation verdict is recorded in its own field
+  (`ablation_classification`) and the `classification` string for these two
+  rows should be ignored.
+
+### Provenance
+
+| artifact (under `/data/abyssal/dbalwada/nemo-testcases-l1/`) | SHA256 |
+|---|---|
+| `face_thickness/lock_stage_sweep_gate_kt2.json` | `b82f4bcedfde95cb883e5954e11048980cfe00b143e4a8dee2a897ca43fadc7e` |
+| `face_thickness/lock_trajectory_gate_kt10.json` | `1268c73c15063f0f4e16f653440d46c6eac0cd151b23f4d23c74a8d2fe11c8a5` |
+| `face_thickness/legoesm/overflow_zps/fp32/metadata.json` | `a9bab4071db0d7e322faa2217d7bc22122066115af3796e0bcb72ec8d0e7d621` |
+| `face_thickness/legoesm/overflow_zps/fp32/states.npz` | `aea3fe027d288a0e57e9e2f4c01ac7b0f3d3bb69ced9cd92d29d4381e8fe8565` |
+| `face_thickness/legoesm/overflow_zps/fp64/metadata.json` | `a49ed0aaa0666d83d5037fb9d3f52b688475eb0c9e479ff45f8223c72a5e1c3a` |
+| `face_thickness/legoesm/overflow_zps/fp64/states.npz` | `65a54c292cddde8ef2149cccb8deaefd50f847a8e363eb6e43301113a9b9b7d0` |
+| `face_thickness/overflow_stage_sweep_gate_kt2.json` | `f85c91324f7aa10b6b231216abbc4bff11beb4450226ddfa8cd49fb24b6ddf15` |
+| `face_thickness/overflow_statistics.json` | `cb975028e90d26579ff40b67b1bd4566790c71d70cda868fbf3dc4ae6a4af909` |
+| `face_thickness/overflow_trajectory_gate_kt10.json` | `d1c69f6e3f27f9271e80331eed79e1fdf707f9758eb1330952ba34e17d2cc88c` |
+| `face_thickness/overflow_trajectory_gate_kt60.json` | `0b46df0aa025c10ae3c7c7b371e2fe9c91cd4812bcaddbe4d4a9b50fc5d65582` |
+
+### What is now UNMEASURED after this round
+
+- the OVERFLOW `kt=2` u residual `2.598798e-07 m/s`, which appears entirely at
+  stage 3.  Both hypotheses of this round were preregistered as refuted for it
+  and both refutations held (H1 moved it `7.96e-11`, H2 `6.32e-10`);
+- the OVERFLOW stage-2 u residual `9.433e-11`, which BOTH faithful changes
+  make slightly worse than the pre-fix `6.908e-11`;
+- the LOCK u residual, still flat at `~2.1e-10` from kt=2 to kt=10;
+- `_replace_stage_mean` still weights with `min_cell_to_uface(h_k_pre)` where
+  `stprk3_stg.F90:438` uses `e3u_0` and `r1_hu_0`.  These agree exactly at
+  kt=1 (ssh = 0 at Kbb) and drift apart afterwards; not touched this round;
+- the MLF-lane face thickness (`ocean_model_latlon_cgrid.py:9237`), which has
+  the same defect against the identical `domqco.F90:166-169` formula;
+- whether the WS-RK3 identity is exercised by any card other than these two.
