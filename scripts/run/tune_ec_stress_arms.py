@@ -19,10 +19,17 @@ is host-side (SystemExit validation) and cannot trace; bounds here are
 enforced structurally by the sigmoid transform to the SAME ``__param_spec__``
 bounds.
 
-AD-safety (codex design review): this forward runs WITHOUT the harness's
-NaN-revert (``jnp.where`` rollback leaks NaN cotangents); a non-finite loss or
-gradient marks the SEED FAILED and the process exits with that verdict
-recorded — never masked into the objective.
+Optimizer: DERIVATIVE-FREE (per-seed Nelder-Mead on the sigmoid-bounded raw
+vector).  Gradient descent was the original design; the pre-registered FD gate
+REFUTED it before any tuning (measured 2026-09-02, US-Whs 2-train-year window):
+the phydro backward pass explodes (analytic dL/draw ~ 1.9e11 vs FD -44 — BPTT
+explosion through the year-long scan with the 40-step unrolled hydraulic inner
+loop, exactly the GLM design-review Q5 channel), and the beta arm's analytic/FD
+ratio was 0.082.  Per the repo AD-verification rule a gradient path that fails
+its check must not produce results, so the tuner optimises the SAME loss
+forward-only.  The forward still runs WITHOUT the harness NaN-revert; a
+non-finite candidate loss is assigned a large penalty (recorded per eval),
+and a seed whose BEST point is penalised is marked FAILED.
 
 Usage (one slurm task per invocation)::
 
@@ -268,11 +275,8 @@ def main():
     ap.add_argument("--arm", choices=["beta_theta", "phydro"])
     ap.add_argument("--init-id", type=int, default=0,
                     help="0 = defaults init; 1..5 = random seeds")
-    ap.add_argument("--steps", type=int, default=30)
-    ap.add_argument("--lr", type=float, default=0.05)
-    ap.add_argument("--fd-check", action="store_true",
-                    help="central finite-difference gate on one parameter "
-                         "(short window) then exit")
+    ap.add_argument("--evals", type=int, default=80,
+                    help="Nelder-Mead function-evaluation budget")
     ap.add_argument("--sites", nargs="+", default=SITES)
     args = ap.parse_args()
 
@@ -301,58 +305,45 @@ def main():
     raw = (default_raw(args.arm, site_defaults) if args.init_id == 0
            else seeded_raw(args.arm, args.init_id))
 
-    grad_fn = jax.jit(jax.value_and_grad(total_loss))
+    keys = sorted(_bounds(args.arm))
+    jit_loss = jax.jit(total_loss)
+    _PENALTY = 1.0e3   # non-finite forward -> recorded penalty, never masked
 
-    if args.fd_check:
-        # central difference on root_depth over the first site only
-        s0 = args.sites[0]
-        f = jax.jit(jax.value_and_grad(losses[s0]))
-        v, g = f(raw)
-        eps = 1e-3
-        rp = dict(raw); rp["root_depth"] += eps
-        rm = dict(raw); rm["root_depth"] -= eps
-        fd = (float(losses[s0](rp)) - float(losses[s0](rm))) / (2 * eps)
-        ratio = float(g["root_depth"]) / fd if fd != 0 else np.inf
-        print(f"FD gate {s0}: analytic={float(g['root_depth']):.6g} "
-              f"fd={fd:.6g} ratio={ratio:.4f}")
-        ok = 0.9 < ratio < 1.1
-        print("FD-GATE " + ("PASS" if ok else "FAIL"))
-        return 0 if ok else 1
-
-    import optax
-    opt = optax.adam(args.lr)
-    opt_state = opt.init(raw)
+    n_eval = [0]
     history = []
-    status = "ok"
-    for it in range(args.steps):
-        v, g = grad_fn(raw)
-        gleaves = np.array([float(jnp.abs(g[k])) for k in g])
-        if not np.isfinite(float(v)) or not np.all(np.isfinite(gleaves)):
-            status = f"FAILED_nonfinite_at_step_{it}"
-            print(status)
-            break
-        if it == 0 and (gleaves == 0.0).any():
-            dead = [k for k in g if float(jnp.abs(g[k])) == 0.0]
-            status = f"FAILED_inert_params:{dead}"
-            print(status)   # no-inert gate: abort, record
-            break
-        updates, opt_state = opt.update(g, opt_state)
-        raw = optax.apply_updates(raw, updates)
-        history.append(float(v))
-        print(f"step {it:3d} loss={float(v):.5f} "
-              + " ".join(f"{k}={float(x):.3g}"
-                         for k, x in constrain(raw, args.arm).items()),
-              flush=True)
+
+    def f_vec(x):
+        rawd = {k: float(v) for k, v in zip(keys, x)}
+        v = float(jit_loss(rawd))
+        finite = np.isfinite(v)
+        v = v if finite else _PENALTY
+        n_eval[0] += 1
+        history.append({"eval": n_eval[0], "loss": v, "finite": bool(finite),
+                        **{k: float(c) for k, c in
+                           constrain(rawd, args.arm).items()}})
+        print(f"eval {n_eval[0]:3d} loss={v:.5f} finite={finite}", flush=True)
+        return v
+
+    from scipy.optimize import minimize
+    x0 = np.array([raw[k] for k in keys])
+    res = minimize(f_vec, x0, method="Nelder-Mead",
+                   options={"maxfev": args.evals, "xatol": 1e-2,
+                            "fatol": 1e-4, "adaptive": True})
+    raw = {k: float(v) for k, v in zip(keys, res.x)}
+    best = min(history, key=lambda h: h["loss"])
+    status = ("ok" if best["finite"] else "FAILED_best_is_penalised")
+    print(f"best eval={best['eval']} loss={best['loss']:.5f} status={status}")
 
     os.makedirs(OUT_DIR, exist_ok=True)
     out = {
         "arm": args.arm, "init_id": args.init_id, "status": status,
-        "train_loss_history": history,
+        "optimizer": "nelder-mead (AD refuted by the FD gate; see docstring)",
+        "eval_history": history,
         "raw": {k: float(v) for k, v in raw.items()},
         "constrained": {k: float(v)
                         for k, v in constrain(raw, args.arm).items()},
         "sites": args.sites, "year_split": SPLIT_JSON,
-        "steps": args.steps, "lr": args.lr,
+        "evals": args.evals,
     }
     path = os.path.join(OUT_DIR, f"{args.arm}_init{args.init_id}.json")
     with open(path, "w") as fh:

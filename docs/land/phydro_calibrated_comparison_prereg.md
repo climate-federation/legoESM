@@ -96,3 +96,17 @@ The default-vs-default and default-vs-tuned cells are reported alongside
 * Single global parameter vector per arm (no per-PFT traits).
 * Leaf-water-potential observations remain unused; they stay the recommended
   discriminating instrument beyond flux skill.
+
+
+## DEVIATION (measured, 2026-09-02): gradient tuning refuted by its own gate
+
+The pre-registered FD gate FAILED for both arms before any tuning ran:
+beta arm analytic/FD ratio 0.082; phydro arm analytic gradient ~1.9e11 vs
+FD -44 — the backward pass explodes through the year-long prognostic scan
+containing the 40-step unrolled hydraulic inner loop (the exact channel GLM's
+design review flagged as Q5). Per the repo rule that an AD path failing its
+verification must not produce results, the tuner now optimises the IDENTICAL
+loss with per-seed Nelder-Mead (forward-only; non-finite candidates get a
+recorded 1e3 penalty; a seed whose best point is penalised is FAILED).
+Everything else in this pre-registration is unchanged: loss, year split,
+bounds, seeds, verdict rule.
