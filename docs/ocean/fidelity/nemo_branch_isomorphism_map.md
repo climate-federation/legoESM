@@ -662,3 +662,67 @@ baseline entry.
 | S-35 | yes | GYRE=both sites; LOCK/OVERFLOW=site (a) only (wrong side of dyn_zdf) | site (a) only | yes — `_fixed_depth_means` is model-generic | COLLAPSIBLE_NOW |
 | S-42 | yes | OVERFLOW=in-stage (2); LOCK=off (0) | separate driver-side `--bbl-adv` path, `bbl_adv_option` stays 0 | plausibly — same `BBLGeometry` the driver path already builds | COLLAPSIBLE_NOW |
 | M-01 | yes | DINO=`leapfrog`; `nemo_mlf` selected by no card (test-only) | n/a (MLF-only row) | yes, structurally — blocked on an unmeasured bit-agreement check, not an operand gap | COLLAPSIBLE_NOW (pending A/B) |
+
+## 2026-09-02 ORCA1 executed-arm corrections (appended; history above not rewritten)
+
+Full authoritative table: `docs/ocean/fidelity/orca1_card_executed_arms.md`
+(same worktree/HEAD as this section). Built by instantiating the actual
+production assembly path (`run_standard_faithful_1deg.sbatch` &rarr;
+`run_omip_core2.build_tripole` &rarr; `run_omip._create_setup("tripole")` &rarr;
+`nemo_match_tripole_model_config` &rarr; `config.replace_flat(**_ovr)`) in fp64
+on CPU, and cross-checked against NEMO's real ORCA1
+`namelist_cfg` (`/data/abyssal/dbalwada/ORCA1-omip/EXPREF/namelist_cfg`) read
+directly for the first time in this audit chain.
+
+**This resolves this doc's own §3 UNVERIFIED item** ("ORCA1's resolved
+`barotropic_face_depth`, `eos`, and `vorticity_scheme`: read off
+`LatLonCGridOceanConfig` defaults plus the sbatch flags ... NOT by
+constructing the config") — the config IS now constructed (mesh/grid/state
+mocked out; nothing about a scheme selector needed the mesh file). Resolved:
+`eos=wright`, `barotropic_solver=implicit_cn`, `vorticity_scheme=al81`,
+`momentum_time_integrator=rk3` (Shu-Osher SSP, a THIRD lane distinct from both
+`rk3_ws` and `leapfrog`), `outer_integrator=forward_euler`,
+`physics.vertical_mixing.scheme=tke` (NOT the "kpp (run-dependent)" the
+recipe's own block-mapping table implies for an untouched card — production
+overrides it via `--tripole-vmix tke`).
+
+**Per-row corrections/confirmations** (full evidence and the ranked work list
+in `orca1_ card_executed_arms.md`):
+
+- **S-16, S-18, S-19**: re-verified independently — CONFIRMED still correct.
+  S-18's "NEEDS_ORCA1_OPERANDS" framing is refined: the PRIMARY blocker for
+  ORCA1 is that `momentum_time_integrator="rk3"` (not `rk3_ws`) and
+  `outer_integrator="forward_euler"` (not `leapfrog`) mean ORCA1 calls NEITHER
+  known caller of this row's routine at all — the missing-mesh-operand gap
+  would only matter if a caller in ORCA1's own lane existed. What ORCA1
+  actually uses for r3u/r3v-equivalent face thickness in its own lane is
+  UNVERIFIED.
+- **S-29 corrected** (not merely confirmed): this doc's §3 called "ORCA1
+  resolves `ln_hpg_zps`" an inference, labelled PLAUSIBLE. Reading
+  `namelist_cfg` directly shows NEMO ORCA1 sets `ln_hpg_sco=.true.` (the only
+  `ln_hpg_*` line present), NOT `ln_hpg_zps`. The already-implemented
+  `nemo_sco` arm (`_bc_ke_and_pressure_gradients`, used by D/L/O/G) is exactly
+  the arm ORCA1 should run; it is blocked only by `run_omip_core2.py:4570`'s
+  `--pgf-scheme choices=[adcroft,smc03]`.
+- **S-35, S-42, M-01**: re-verified — CONFIRMED, no correction. S-35 and M-01
+  are rk3_ws-only / leapfrog-only and structurally NOT_EXECUTED for ORCA1 at
+  all (a stronger, ORCA1-specific statement this doc's own text for those rows
+  did not make). S-42's existing ORCA1 text is CONFIRMED and additionally now
+  cross-checked against the real namelist (`ln_trabbl=T`, `nn_bbl_adv=2`).
+- **Two findings new to this audit, not previously in this doc or the
+  registry, NOT added to either** (out of this task's scope): (1)
+  `barotropic_implicit_latlon_cgrid.py` — the module ORCA1 actually
+  dispatches to — runs its own uncited forward-backward "avg"-style
+  barotropic Coriolis unconditionally, a third, unregistered implementation
+  of S-17's quantity. (2) ORCA1's production TKE closure resolves all 10 of
+  S-07's structural sub-selectors to the generic/Veros default, not DINO's
+  `nemo_literal` set, despite `orca1_zdftke_config` being built as a literal
+  `&namzdf_tke` namelist-value transcription.
+- **19 real NEMO namelist switches read directly for the first time**
+  (`ln_teos10`, `ln_dynadv_vec`, `ln_dynvor_een`, `ln_hpg_sco`,
+  `ln_dynspg_ts`, `ln_zad_Aimp`, `ln_zdftke`, `ln_zdfevd`, `ln_traadv_fct`
+  +`nn_fct_h/v=2`, `ln_traldf_lap/_iso/_msc`, `nn_aht_ijk_t=21`, `ln_ldfeiv`
+  +`nn_aei_ijk_t=21`, `ln_trabbl`+`nn_bbl_adv=2`, `ln_qsr_rgb`,
+  `ln_dynldf_lap/_lev`) upgrade several of this doc's PLAUSIBLE claims to
+  CONFIRMED and correct one (S-29). Full citations in
+  `orca1_card_executed_arms.md`.
