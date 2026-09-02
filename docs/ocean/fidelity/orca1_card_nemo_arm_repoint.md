@@ -56,3 +56,19 @@ by 19 ocean test-matrix experiments (`default_wright_v1` /
 test_association_selector_holds_face_depth_and_drag_fixed` proves the two arms
 give bit-distinct `eta`. Unblocking is a separate decision about those 19
 cases, not an ORCA1 re-point.
+
+**2026-09-02 UPDATE — the "separate decision" above is now made.** USER
+DECISION: keep the generic arm as a legitimate non-NEMO fork (it is the real
+dycore of the 19 cases named above) and give it a real reference instead of
+leaving it collapse-BLOCKED indefinitely. The reference: legoESM's own
+in-house forward-backward split-explicit design (commit `adbb49f83`,
+2026-04-08, #87), whose time-averaging and BEBT closure explicitly followed
+the MOM6/ROMS family (Hallberg 1997; Shchepetkin & McWilliams 2005) per their
+own introducing commits — full evidence and the mechanical registry fix are
+in `nemo_branch_isomorphism_map.md`'s dated addendum under the S-16 section.
+No re-baseline of the 19 idealized cases. Companion decision, same PR: the
+recipe named `nemo_v1` above is RENAMED (it resolves this generic arm, not
+NEMO's `dyn_spg_ts` — see the recipe catalog / `recipes.py` for the new
+name); every reference to `nemo_v1` in this document is now to the recipe's
+OLD name, kept here as history of the diff this doc recorded, not as a
+live identifier.

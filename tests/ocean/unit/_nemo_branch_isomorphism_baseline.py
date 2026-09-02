@@ -89,7 +89,9 @@ belongs to no live card/reference and should just be deleted), or
    transcribed).
 3. Of the doc's 19 literally-``ARTIFICIAL_BRANCH``-tagged rows, an
    independent reclassification (table reproduced in the doc, §6) found 7
-   genuine ``nemo_duplicate`` defects (S-12, S-16, S-19, S-30, S-35,
+   genuine ``nemo_duplicate`` defects (S-12, S-16 (see the 2026-09-02 USER
+   DECISION note below — given a real reference and reclassified
+   ``OTHER_RECIPE`` after this pass first ran), S-19, S-30, S-35,
    S-42, M-01 — kept ``ARTIFICIAL_BRANCH``, baselined below where >=2 distinct
    AST symbols exist) and 12 ``other_recipe`` rows (S-03, S-04, S-07, S-09,
    S-18 (see the 2026-09-02 SECOND reclassification note below — collapsed by
@@ -508,13 +510,28 @@ ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
                         "legoESM legacy pre-existing: barotropic_latlon_cgrid.py (min_rule, no NEMO arm; "
                         "algebraically coincides with the nemo arm on a lat-lon C-grid)")),
     )),
-    RoutineRow("S-16", "dyn_spg_ts continuity/transport/spg", "ARTIFICIAL_BRANCH", "none", (
+    RoutineRow("S-16", "dyn_spg_ts continuity/transport/spg", "OTHER_RECIPE", (
+        "USER DECISION 2026-09-02: the generic arm is kept as a legitimate "
+        "non-NEMO fork (it is the dycore of 19 idealized test-matrix "
+        "experiments) and given a real reference instead of collapsing onto "
+        "the NEMO-literal arm — see nemo_branch_isomorphism_map.md's dated "
+        "addendum under the S-16 section for the evidence."
+    ), (
         Impl(_BLC, "nemo_literal_continuity_divergence",
              Reference("nemo", "dyn_spg_ts_continuity", "dynspg_ts.F90:~640-700,~840")),
         Impl(_BLC, "_run_substep_loop",
              Reference("legoesm_legacy", "dyn_spg_ts_continuity_generic",
-                        "legoESM legacy pre-existing: barotropic_latlon_cgrid.py (generic FV continuity "
-                        "form, unreferenced default)")),
+                        "legoESM legacy: in-house forward-backward split-explicit C-grid "
+                        "solver, introduced with no external citation by commit adbb49f83 "
+                        "(2026-04-08, 'Add C-grid lat-lon ocean model to fix checkerboard "
+                        "instability', #87); its time-averaging and BEBT closure were later "
+                        "explicitly modeled on the MOM6/ROMS split-explicit family per their "
+                        "own commit messages -- Hallberg (1997) J. Comput. Phys. 135 and "
+                        "Shchepetkin & McWilliams (2005) Ocean Modelling 9 (commits "
+                        "06f4de939 2026-04-11 and 3d0170d04 2026-04-20, #205) -- but this "
+                        "arm is not a literal transcription of either paper.",
+                        selected_by=("default_wright_v1", "legoesm_linear_v1",
+                                     "legoesm_nemo_like_v1"))),
     )),
     RoutineRow("S-17", "dyn_cor_2D (barotropic Coriolis)", "NEMO_SWITCH", "ln_dynvor_ene/een ('avg'/'frozen' = no NEMO arm)", (
         Impl(_BLC, "een_barotropic_coriolis",
@@ -941,27 +958,6 @@ ARTIFICIAL_BRANCH_BASELINE: dict[str, BaselineEntry] = {
             'card affected.'
         ),
         kind='unclassified',
-    ),
-    "S-16": BaselineEntry(
-        reason=(
-            'dyn_spg_ts continuity/transport/spg: 5 generic-vs-nemo_literal branch pairs for '
-            'one NEMO program (dynspg_ts.F90:604-609 zhU/zhV, :627 zhdiv, :641-642 un_adv, '
-            ':682-684 zu_spg); default is the generic arm. Reclassified 2026-09-02: '
-            'NEMO_DUPLICATE, CONFIRMED. '
-            'CORRECTION 2026-09-02 (MEASURED, fp64): the earlier clause "which ORCA1 runs" '
-            'is RETRACTED -- ORCA1 resolves barotropic_solver="implicit_cn" '
-            '(nemo_match_tripole_model_config, instantiated; every committed ORCA/eORCA '
-            'sbatch agrees), which dispatches to barotropic_implicit_latlon_cgrid.py and '
-            'its own private _depth_average_to_faces:96, reading NONE of the 5 selectors. '
-            'ORCA1 never executes the gated code; the value resolving to "generic" there is '
-            'inert. The generic arm is actually EXECUTED by the explicit_substep recipes '
-            'default_wright_v1 / legoesm_linear_v1 / nemo_v1 (call counters: divergence_cgrid '
-            'fires, nemo_literal_* never), i.e. by the 19 ocean test-matrix experiments '
-            'experiments/recipe_map.py tags with those two defaults. Collapse therefore '
-            'stays BLOCKED pending a separate decision about those 19 cases -- it is not an '
-            'ORCA1 re-point. Row keeps this baseline entry.'
-        ),
-        kind='nemo_duplicate',
     ),
     "S-19": BaselineEntry(
         reason=(

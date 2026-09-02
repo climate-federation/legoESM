@@ -317,7 +317,7 @@ classified below.
 | S-07 | `zdf_tke` internals (10 selectors) | one module `tke.py`, 10 `tke_*` fields, each documented "historical/generic" vs "DINO NEMO cards opt in" | default: 5 Veros fidelity recipes (`veros_acc_recipe.py`, `veros_acc_basic_recipe.py`, `veros_global_*_recipe.py`) construct `TKEConfig` untouched; nemo arm: DINO (`dino.py:1247-1256`) + GYRE (l2 branch) | each field's own comment names the arm's home explicitly (quoted) | **OTHER_RECIPE** | CONFIRMED |
 | S-09 | `ldf_slp` ldfslp.F90 (~9 selectors) | one module `gm_redi_latlon_cgrid.py`, `GMRediConfig` | default: Veros recipes (`veros_acc_recipe.py:218`, `veros_global_4deg_recipe.py:227`) construct `GMRediConfig` untouched; nemo arm (`slope_scheme="nemo_iso_lap"`): DINO + GYRE via `nemo_recipe.py:392` | each field documents "historical" vs "DINO NEMO cards opt in" | **OTHER_RECIPE** | CONFIRMED (top-level `slope_scheme`); PLAUSIBLE (the other ~8 sub-fields not individually re-traced) |
 | S-12 | `stp_2D` pre-step stp2d.F90:49-288 | no legoESM equivalent as a unit — a full 3-stage WS ladder run only to seed the barotropic solve | only cards with `momentum_time_integrator="rk3_ws"`: LOCK, OVERFLOW, GYRE (l2). No catalog recipe uses `rk3_ws` | none (structural, not a config selector) | **NEMO_DUPLICATE** (same defect as S-30, different altitude) | CONFIRMED |
-| S-16 | `dyn_spg_ts` continuity/transport/spg dynspg_ts.F90:~640-840 (5 selectors) | generic FV form (SM2005-style, unreferenced) vs `nemo_literal`/`nemo_ssh_avg` | nemo arm: DINO, LOCK, OVERFLOW (`_model_config`, this checkout), GYRE (l2); generic: ORCA1 (`run_omip_core2.py` never sets these fields) and one Veros frozen-state tendency probe (deliberate bit-identical default, not a physics claim) | generic names no NEMO/other-oracle reference; nemo arm cites dynspg_ts.F90 | **NEMO_DUPLICATE** | CONFIRMED |
+| S-16 | `dyn_spg_ts` continuity/transport/spg dynspg_ts.F90:~640-840 (5 selectors) | generic FV form (SM2005-style, unreferenced) vs `nemo_literal`/`nemo_ssh_avg` | nemo arm: DINO, LOCK, OVERFLOW (`_model_config`, this checkout), GYRE (l2); generic: ORCA1 (`run_omip_core2.py` never sets these fields) and one Veros frozen-state tendency probe (deliberate bit-identical default, not a physics claim) | generic names no NEMO/other-oracle reference; nemo arm cites dynspg_ts.F90 | ~~**NEMO_DUPLICATE**~~ **SUPERSEDED 2026-09-02 (USER DECISION): OTHER_RECIPE** — the generic arm is KEPT (it is the dycore of 19 idealized test-matrix experiments via `default_wright_v1`/`legoesm_linear_v1`, plus the renamed `nemo_v1`) and given a real reference: legoESM's own in-house forward-backward split-explicit design (commit `adbb49f83`, 2026-04-08, #87), whose time-averaging and BEBT closure were explicitly modeled on the MOM6/ROMS family (Hallberg 1997; Shchepetkin & McWilliams 2005) per their own introducing commits. See the dated addendum below the S-16 narrative section and the registry's S-16 row for the mechanical fix | CONFIRMED then, reclassified now |
 | S-18 | `dom_qco_r3c` r3u/r3v MEAN vs MIN domqco.F90:140-240 | `min_cell_to_uface`/`_vface` (Adcroft/Hill/Marshall 1997 MOM6/MITgcm convention, CONFIRMED cited) vs `nemo_qco_live_face_thicknesses` (NEMO MEAN) | MEAN: DINO + GYRE (l2); MIN: LOCK, OVERFLOW **on this checkout** (verified `_model_config` never sets `zad_qco_evaluation`/`wzv_call2_evaluation` — this is a live gap on the certified L1 cards too, not ORCA1-only as the source doc's framing implied) + ORCA1 | MIN cites Adcroft et al. 1997 (a real reference, but for a *different* model's convention, not NEMO); MEAN cites domqco.F90 | ~~**NEMO_DUPLICATE**~~ **SUPERSEDED 2026-09-02, post-1d6a7448d: OTHER_RECIPE** — this row's own "verified" gating claim was the error: `zad_qco_evaluation`/`wzv_call2_evaluation` gate `nemo_qco_wzv_operands` (S-19's routine, in `ocean_pe_latlon_cgrid.py`), not `_nemo_ws_stage_transport` (S-18's routine, in `ocean_model_latlon_cgrid.py`), which was never gated by them. See "Triage against HEAD 648e5cd69" below | CONFIRMED then, **RETRACTED** now |
 | S-19 | `wzv` sshwzv.F90 | `diagnose_w_from_flux_div` (generic) vs `nemo_qco_wzv_operands` (literal), same selector family as S-18 | same as S-18: DINO/GYRE on literal; LOCK/OVERFLOW/ORCA1 on generic | same as S-18 | **NEMO_DUPLICATE** | CONFIRMED |
 | S-25 | vertical momentum advection, non-NEMO arms | `upwind_perturbation` (default) / `centered_full` / `nemo_advective` | upwind_perturbation: unclaimed default, run by most catalog recipes + ORCA1 (no override); centered_full: `veros_faithful_v1`; nemo_advective: DINO + GYRE | centered_full cites Veros `core/momentum.py` (quoted); nemo_advective cites dynzad.F90; default names nothing | **OTHER_RECIPE** (ORCA1 landing on the unclaimed default instead of `nemo_advective` is a driver reachability gap, not a duplicate) | CONFIRMED |
@@ -336,8 +336,8 @@ classified below.
 
 | classification | rows | which |
 |---|---|---|
-| NEMO_DUPLICATE | 7 (was 8) | S-12, S-16, S-19, S-30, S-35, S-42, M-01 |
-| OTHER_RECIPE | 12 (was 11) | S-03, S-04, S-07, S-09, S-18 (moved here 2026-09-02, see below), S-25, S-27, S-29, S-32, S-33, S-34, S-40 |
+| NEMO_DUPLICATE | 6 (was 7, was 8) | S-12, S-19, S-30, S-35, S-42, M-01 |
+| OTHER_RECIPE | 13 (was 12, was 11) | S-03, S-04, S-07, S-09, S-16 (moved here 2026-09-02, see below), S-18 (moved here 2026-09-02, see below), S-25, S-27, S-29, S-32, S-33, S-34, S-40 |
 | ORPHAN | 0 | — |
 
 **S-18 moved NEMO_DUPLICATE -> OTHER_RECIPE, 2026-09-02 (post-1d6a7448d)**: the
@@ -346,15 +346,28 @@ as history. It was retracted the same day — see "Triage against HEAD
 648e5cd69" below for the correction and the registry's S-18 row for the
 mechanical fix.
 
+**S-16 moved NEMO_DUPLICATE -> OTHER_RECIPE, 2026-09-02 (USER DECISION, this
+PR)**: unlike S-18, this is not a retraction of a measurement error — the
+duplicate-ness finding stands (two legoESM implementations of one NEMO
+program). What changed is the disposition of the generic side: it is kept,
+deliberately, as a legitimate non-NEMO fork now carrying its own real
+reference (legoESM's own forward-backward split-explicit design, MOM6/ROMS-
+informed closure choices) rather than sitting unreferenced. See the dated
+addendum in the "S-16 (`dyn_spg_ts` continuity/transport/spg)" narrative
+section below and the registry's S-16 row for the mechanical fix.
+
 **Headline correction**: several rows this doc flagged among its top-priority
 "mistakes to collapse" — S-27 (Coriolis split), S-29 (PGF), S-33/S-34
 (ZDF solver/divisor) — are legitimate Veros/MITgcm/Oceananigans/paper-cited
 forks, each carrying a *different* real defect: ORCA1 (and, for S-34, DINO)
 simply never selects the NEMO arm it already has, a reachability/hidden-
-default bug, not duplicated NEMO implementation work. S-16/S-19 (barotropic
-transport, wzv) are confirmed genuine duplicates reaching **every** certified
-NEMO card, including LOCK/OVERFLOW on this checkout for S-19 (not just ORCA1,
-as this doc's own §0 framing suggested). **S-18 (qco face-thickness) is NOT**:
+default bug, not duplicated NEMO implementation work. S-19 (wzv) is a
+confirmed genuine duplicate reaching **every** certified NEMO card, including
+LOCK/OVERFLOW on this checkout (not just ORCA1, as this doc's own §0 framing
+suggested); S-16 (barotropic transport) was in the same shape until the
+2026-09-02 user decision above gave its generic side a real reference and
+moved it to OTHER_RECIPE — its NEMO side still reaches every certified NEMO
+card, that part of the finding is unchanged. **S-18 (qco face-thickness) is NOT**:
 the "reaches MIN on LOCK/OVERFLOW" claim below conflated S-18's own gate (a
 private test hook nothing sets) with S-19's `zad_qco_evaluation` — see the
 "Triage against HEAD 648e5cd69" section for the correction; S-18 moved to
@@ -568,6 +581,46 @@ duplicate-ness is not in doubt: `dynspg_ts.F90:604-609` (`zhU`/`zhV` metric
 transports), `:627` (`zhdiv`), `:641-642` (`un_adv` accumulation), `:682-684`
 (`zu_spg`) — ONE NEMO program, two legoESM implementations. The row keeps its
 baseline entry.
+
+**2026-09-02 USER DECISION: the "either/or" above is resolved — give the
+generic arm a real reference and keep it as an OTHER_RECIPE fork.** No
+re-baseline of the 19 idealized test-matrix cases.
+
+*Reference found* (read off the code's own git history, not invented):
+the generic arm — `_run_substep_loop`'s continuity divergence
+(`divergence_cgrid`), transport accumulation (`Hu_sum += w*flux_u`), PGF
+(`-g*gradient_{x,y}_cgrid(eta)`), and seed (the shared stacked reduction) —
+is **legoESM's own forward-backward split-explicit C-grid solver**,
+introduced with no external citation by commit `adbb49f83` (2026-04-08,
+"Add C-grid lat-lon ocean model to fix checkerboard instability", #87). It
+is not a transcription of NEMO's `dyn_spg_ts`, nor a literal port of any one
+paper's equations. Its later closure choices were explicitly modeled on the
+MOM6/ROMS split-explicit family, per those commits' own messages: the
+substep time-averaging "follow[s] the standard approach in MOM6, MPAS-Ocean,
+and ROMS (Hallberg 1997, Shchepetkin & McWilliams 2005)" (commit `06f4de939`,
+2026-04-11, "Add barotropic time-averaging for split-explicit stability")
+and the BEBT semi-implicit pressure-gradient blend "match[es] MOM6 default"
+`bebt=0.2` (commit `3d0170d04`, 2026-04-20, #205, "Add BEBT, cosine time
+filter, slow-forcing coupling to barotropic solver"). This doc's own §6.1
+row already called it "SM2005-style, unreferenced" — that framing is now
+made literal in the module docstring and the registry.
+
+*Mechanical fix* (same PR): `barotropic_latlon_cgrid.py`'s module docstring
+gained a paragraph naming this reference. The registry's S-16 row
+(`tests/ocean/unit/_nemo_branch_isomorphism_baseline.py`) changed disposition
+`ARTIFICIAL_BRANCH` -> `OTHER_RECIPE`; the `_run_substep_loop` `Impl`'s
+`Reference` is now `model="legoesm_legacy"`, citing the commits above, with
+`selected_by=("default_wright_v1", "legoesm_linear_v1", "legoesm_nemo_like_v1")`
+— the three lat-lon catalog recipes MEASURED (call-counter check, unchanged
+from the measurement above) to actually execute this arm. The row's
+`ARTIFICIAL_BRANCH_BASELINE` entry is removed (no longer needed —
+`_row_needs_baseline_entry` is now False for this row).
+
+*Companion decision, same PR*: the recipe named `nemo_v1` is renamed — see
+`docs/ocean/fidelity/orca1_card_nemo_arm_repoint.md` for the rename record —
+because it resolves this exact generic (non-NEMO) barotropic arm, not
+NEMO's `dyn_spg_ts`, so "nemo_v1" overclaimed fidelity precisely on the
+routine this row is about.
 
 ### S-35 (stage-3 `zub` barotropic correction)
 
