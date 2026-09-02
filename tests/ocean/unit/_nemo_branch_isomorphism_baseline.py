@@ -136,6 +136,36 @@ See ``tests/ocean/unit/test_no_scheme_duplication.py`` for the 7 synthetic
 self-checks proving each of these branches (plus the pre-existing 3) actually
 fires.
 
+**2026-09-02 THIRD independent review (HOLD, "common duplicate shape"
+laundering fixed in this pass)**: the reviewer showed the second-pass fix
+still missed the ordinary case — a row whose two impls simply cite DIFFERENT
+``arm`` strings (S-16's "dyn_spg_ts_continuity" vs
+"dyn_spg_ts_continuity_generic", S-18's real-but-uninvolved MITgcm citation,
+S-19's differently-named generic arm) never matches the (model, arm)-group
+rule, and once flipped to ``OTHER_RECIPE`` with its baseline entry deleted, 2
+distinct groups with only 1 ``nemo`` impl satisfies the diversity rule too —
+so the row escapes both existing checks for free. Fixed by adding
+``Reference.selected_by`` (the recipe/card names that actually route to an
+impl) plus a disposition-independent rule: any impl whose model is not
+``nemo``/``paper`` and whose ``selected_by`` names no genuine non-NEMO recipe
+is an UNREFERENCED ARM; a row pairing a ``nemo`` impl with one requires a
+baseline entry regardless of disposition or the arm's own label. Populated
+``selected_by`` only where ``nemo_branch_isomorphism_map.md`` §6.1 or the
+recipe catalog itself gives a real, grep-verified name (``omip_nemo_match_
+tripole_v1``/``_mpas_v1`` for S-03's insitu bn2; the Veros fidelity recipe
+files for S-03's adiabatic and S-07/S-07b's TKE/Langmuir defaults;
+``veros_faithful_v1`` for S-25's centered_full; ``default_wright_v1``/
+``legoesm_linear_v1`` for S-28_29's mitgcm adcroft citation; ``veros_faithful_
+v1``/``oceananigans_v1``/``mitgcm_v1`` for S-32's flux_divergence) — never
+invented. This surfaced 6 rows (S-02, S-04, S-15, S-25, S-26, S-32) that were
+previously unflagged despite pairing a ``nemo`` impl with a non-NEMO/non-paper
+arm nothing actually selects; each gets a new ``kind='unclassified'`` entry
+below with an honest "genuinely untriaged" reason — none of them invents a
+selector that is not real. See ``test_no_scheme_duplication.py`` for the 2
+new self-checks (the exact S-16-shaped laundering, and a fabricated
+``selected_by`` name) plus a live re-run of the reviewer's three flips
+(S-16/S-18/S-19), each confirmed to go red under this fix.
+
 Re-derive by re-reading ``docs/ocean/fidelity/nemo_branch_isomorphism_map.md``
 and re-grepping each ``impls`` symbol; do not hand-edit the disposition
 without updating the doc it transcribes.
@@ -179,10 +209,65 @@ class Reference(NamedTuple):
     — a NEMO reference must name its actual arm.
     ``citation`` — never empty. A NEMO file:line, a source path, a DOI/paper,
     or ``"legoESM legacy pre-existing: <commit or module>"``.
+    ``selected_by`` — (2026-09-02 second-review fix, closes the "common
+    duplicate shape" laundering: a row escapes the (model, arm)-matching
+    duplicate rule for free the moment its two impls' ``arm`` strings differ,
+    even when neither is genuinely selected by anything.) The recipe/card
+    names (verifiable against ``list_recipes()`` or the closed
+    ``KNOWN_CARDS``/``EXTRA_NON_NEMO_RECIPE_FILES`` lists below) that
+    ACTUALLY route to this implementation. Empty by default — do not invent
+    one; leave it empty wherever the audit doc's "selected by" column names
+    nothing concrete for this specific arm. A non-``nemo``, non-``paper``
+    impl with an empty ``selected_by`` is an UNREFERENCED ARM (see the
+    checker's ``_is_legitimately_referenced``): ``legoesm_legacy``/
+    ``unclassified`` carry no external validation at all, and even a
+    ``veros``/``mitgcm``/``oceananigans`` model's OWN citation (e.g. "Adcroft,
+    Hill & Marshall 1997" for S-18's MIN convention) is not by itself proof
+    that a real non-NEMO recipe runs it FOR that reason — S-18's own citation
+    is real, but every actual consumer of that arm (LOCK, OVERFLOW, ORCA1) is
+    a NEMO-fidelity CARD, not a distinct model recipe, which is exactly why
+    S-18 is a genuine duplicate despite the citation looking legitimate.
+    ``paper`` is the one model that stands on its own without a
+    ``selected_by``: it names an external, peer-reviewed FORMULA (Wright
+    1997, Visbeck et al. 1997), not a claim of "this literally transcribes
+    model X's recipe" that needs a live consumer to back it up.
     """
     model: str
     arm: str
     citation: str
+    selected_by: tuple[str, ...] = ()
+
+
+# Closed list of NEMO-fidelity CARD/driver identifiers a ``selected_by`` tuple
+# may verifiably name (2026-09-02 second-review fix, item 3). These are real,
+# grep-confirmed entry points — but note they do NOT legitimize a non-nemo,
+# non-paper impl on their own (see ``_is_legitimately_referenced`` in the
+# test): a NEMO card landing on a non-NEMO-cited default is precisely the
+# S-16/S-18/S-19 defect, not a distinct recipe's deliberate choice. This dict
+# exists so a real card name in ``selected_by`` is not mistaken for a
+# made-up/misspelled one by the verifiability check.
+KNOWN_CARDS: dict[str, str] = {
+    "DINO": "ocean/experiments/dino.py:53 (DINOConfig)",
+    "GYRE": "ocean/fidelity/nemo_recipe.py:347 (nemo_lat_lon_model_config)",
+    "LOCK": "ocean/fidelity/nemo_testcase_recipe.py:191 (build_lock_exchange_zco_card)",
+    "OVERFLOW": "ocean/fidelity/nemo_testcase_recipe.py:233 (build_overflow_zps_card)",
+    "ORCA1": "scripts/run/run_omip_core2.py:1 (CORE-II eORCA1 driver module)",
+}
+
+# Genuine non-NEMO fidelity recipe FILES the audit doc names (S-03/S-07/S-07b)
+# that are not entries in ``legoesm.ocean.recipes.list_recipes()`` (that
+# catalog holds only the scheme-bundle dicts; these are standalone recipe
+# modules under ``ocean/fidelity/``) — grep-confirmed to exist. Naming one of
+# these in ``selected_by`` DOES legitimize a non-nemo impl (see
+# ``_is_legitimately_referenced``): each is a real, separate model's own
+# recipe, not a NEMO card falling through to a default.
+EXTRA_NON_NEMO_RECIPE_FILES: dict[str, str] = {
+    "veros_acc_recipe": "ocean/fidelity/veros_acc_recipe.py",
+    "veros_acc_basic_recipe": "ocean/fidelity/veros_acc_basic_recipe.py",
+    "veros_global_1deg_recipe": "ocean/fidelity/veros_global_1deg_recipe.py",
+    "veros_global_4deg_recipe": "ocean/fidelity/veros_global_4deg_recipe.py",
+    "veros_global_flexible_recipe": "ocean/fidelity/veros_global_flexible_recipe.py",
+}
 
 
 class Impl(NamedTuple):
@@ -268,9 +353,12 @@ ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
         Impl(_EOS, "compute_buoyancy_frequency",
              Reference("legoesm_legacy", "insitu",
                         "legoESM legacy pre-existing: ocean/eos.py (unreferenced legacy/KPP default, "
-                        "audit CONFIRMED no NEMO/Veros/MITgcm citation)")),
+                        "audit CONFIRMED no NEMO/Veros/MITgcm citation)",
+                        selected_by=("omip_nemo_match_tripole_v1", "omip_nemo_match_mpas_v1"))),
         Impl(_EOS, "compute_buoyancy_frequency_adiabatic",
-             Reference("veros", "adiabatic", "Veros config.py:310-316 (Veros's own N2 scheme)")),
+             Reference("veros", "adiabatic", "Veros config.py:310-316 (Veros's own N2 scheme)",
+                        selected_by=("veros_global_4deg_recipe", "veros_acc_recipe",
+                                     "veros_acc_basic_recipe"))),
     )),
     RoutineRow("S-04", "bn2 live-e3w/gdepw geometry", "OTHER_RECIPE", (
         "none; reclassified 2026-09-02 (CONFIRMED gating / PLAUSIBLE no-alt-user): "
@@ -299,7 +387,10 @@ ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
         Impl(_TKE, "_solve_tke_backward_euler",
              Reference("legoesm_legacy", "default_tke_solver",
                         "legoESM legacy pre-existing: ocean/physics/vertical_mixing/tke.py "
-                        "(Veros-default TKEConfig construction, unreferenced)")),
+                        "(Veros-default TKEConfig construction, unreferenced)",
+                        selected_by=("veros_acc_recipe", "veros_acc_basic_recipe",
+                                     "veros_global_1deg_recipe", "veros_global_4deg_recipe",
+                                     "veros_global_flexible_recipe"))),
     )),
     RoutineRow("S-07b", "zdf_tke langmuir sub-branch", "OTHER_RECIPE", (
         "none (tke_langmuir_evaluation); reclassified 2026-09-02 (CONFIRMED): "
@@ -310,7 +401,10 @@ ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
         Impl(_TKE, "nemo_langmuir_tke_source",
              Reference("legoesm_legacy", "default_langmuir",
                         "legoESM legacy pre-existing: ocean/physics/vertical_mixing/tke.py "
-                        "(Veros-default construction, unreferenced despite the 'nemo' name)")),
+                        "(Veros-default construction, unreferenced despite the 'nemo' name)",
+                        selected_by=("veros_acc_recipe", "veros_acc_basic_recipe",
+                                     "veros_global_1deg_recipe", "veros_global_4deg_recipe",
+                                     "veros_global_flexible_recipe"))),
     )),
     RoutineRow("S-08", "zdf_evd", "NEMO_SWITCH", "ln_zdfevd, nn_evdm", (
         Impl(_ENH_DIFF, "enhanced_diffusion_convection",
@@ -446,7 +540,8 @@ ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
                         "legoESM legacy pre-existing: ocean/vertical.py (unclaimed default, "
                         "ORCA1 lands here — driver reachability gap)")),
         Impl(_VERTICAL, "flux_form_vertical_momentum_advection_centered",
-             Reference("veros", "centered_full", "Veros core/momentum.py (centered vertical momentum advection)")),
+             Reference("veros", "centered_full", "Veros core/momentum.py (centered vertical momentum advection)",
+                        selected_by=("veros_faithful_v1",))),
         Impl(_VERTICAL, "nemo_advective_vertical_momentum_advection",
              Reference("nemo", "ln_dynadv_vec_zad", "dynzad.F90:86-119 (see S-24)")),
     )),
@@ -489,7 +584,8 @@ ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
         Impl(_PGF_SMC03, "compute_pressure_at_target_smc03",
              Reference("paper", "smc03", "Shchepetkin & McWilliams (2003) PGF scheme")),
         Impl(_PGF_AHH08, "column_pressure_integrals_ahh08",
-             Reference("mitgcm", "adcroft", "Adcroft, Hallberg & Hill (2008) MITgcm PGF scheme (pgf_ahh08.py)")),
+             Reference("mitgcm", "adcroft", "Adcroft, Hallberg & Hill (2008) MITgcm PGF scheme (pgf_ahh08.py)",
+                        selected_by=("default_wright_v1", "legoesm_linear_v1"))),
     )),
     RoutineRow("S-30", "stage momentum time-stepping (WS ladder written twice)", "ARTIFICIAL_BRANCH", (
         "key_qco; one function _step_impl, ladder #1 at omlc:4253-4335 (seeds "
@@ -523,7 +619,8 @@ ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
                         "legoESM legacy pre-existing: ocean/dynamics/latlon_cgrid_operators.py "
                         "(unclaimed default incl. ORCA1)")),
         Impl(_LCOPS, "flux_divergence_viscosity_cgrid",
-             Reference("veros", "flux_divergence", "Veros core/friction.py harmonic_friction")),
+             Reference("veros", "flux_divergence", "Veros core/friction.py harmonic_friction",
+                        selected_by=("veros_faithful_v1", "oceananigans_v1", "mitgcm_v1"))),
     )),
     RoutineRow("S-33_34", "dyn_zdf / e3w(Kmm) divisor", "OTHER_RECIPE", (
         "none (one function, two internal branch sites -- omlc:7537 (the "
@@ -682,6 +779,65 @@ ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
 # the module docstring), UNLESS one of its impls is still ``unclassified``
 # (S-38) or its impls still form a same-(model,arm) duplicate group.
 ARTIFICIAL_BRANCH_BASELINE: dict[str, BaselineEntry] = {
+    "S-02": BaselineEntry(
+        reason=(
+            'eos_rab: eos_density_derivatives (generic finite-difference derivative dispatch, '
+            'arm=generic_derivative_dispatch) has no recipe naming it in selected_by -- not one '
+            'of the 19 rows the 2026-09-02 reclassification pass audited, so this is genuinely '
+            'untriaged, not a confirmed non-issue: unknown whether any recipe actually needs this '
+            'arm distinctly from nemo_roquet/nemo_seos/wright.'
+        ),
+        kind='unclassified',
+    ),
+    "S-04": BaselineEntry(
+        reason=(
+            "bn2 live-e3w/gdepw geometry: the doc's own OTHER_RECIPE note says 'no Veros/MITgcm/"
+            "Oceananigans recipe touches tke_n2_evaluation_stage at all' for the default_ladder "
+            'arm -- genuinely no non-NEMO recipe selects it away from nemo_bn2_live_ladders '
+            '(DINO+GYRE). Kept OTHER_RECIPE per the audit (a NEMO-only opt-in switch, not a '
+            'driver reachability gap), but the disposition-independent unreferenced-arm rule '
+            'still requires this entry since nothing legitimizes the default arm.'
+        ),
+        kind='unclassified',
+    ),
+    "S-15": BaselineEntry(
+        reason=(
+            'dom_qco_r3c backward face depth (zhu_bck): _min_rule_face_depths (min_rule) has no '
+            'recipe in selected_by -- not one of the 19 rows the 2026-09-02 pass audited. The two '
+            'NEMO arms coincide algebraically on a lat-lon C-grid, so this is lower-risk than '
+            'S-18/S-19, but genuinely untriaged: unknown whether any recipe needs min_rule '
+            'distinctly from nemo_ssh_avg_face_depth.'
+        ),
+        kind='unclassified',
+    ),
+    "S-25": BaselineEntry(
+        reason=(
+            "vertical momentum advection, non-NEMO arms: upwind_perturbation is the doc's own "
+            "'unclaimed default, run by most catalog recipes + ORCA1 (no override)' -- no recipe "
+            'deliberately selects it away from nemo_advective_vertical_momentum_advection. '
+            'centered_full IS properly referenced (veros_faithful_v1); this entry covers only the '
+            'unreferenced default arm the disposition-independent rule still flags.'
+        ),
+        kind='unclassified',
+    ),
+    "S-26": BaselineEntry(
+        reason=(
+            'dyn_vor: pv_flux_al81_partial_cell (al81) has no recipe in selected_by -- not one of '
+            "the 19 rows the 2026-09-02 pass audited; the row's own note says only 'ORCA1 lands "
+            "here', and ORCA1 is a NEMO-fidelity card, not a distinct recipe. Genuinely untriaged."
+        ),
+        kind='unclassified',
+    ),
+    "S-32": BaselineEntry(
+        reason=(
+            "dyn_ldf -> ldf_lap: vector_laplacian_dissipation_cgrid (vector_laplacian) is the "
+            "doc's own 'unclaimed default incl. ORCA1' / 'unreferenced' arm -- no recipe "
+            'deliberately selects it away from nemo_div_curl. flux_divergence IS properly '
+            'referenced (veros_faithful_v1, oceananigans_v1, mitgcm_v1); this entry covers only '
+            'the unreferenced legacy default the disposition-independent rule still flags.'
+        ),
+        kind='unclassified',
+    ),
     "S-14": BaselineEntry(
         reason=(
             'dyn_spg_ts external velocity update gate carries an extra '

@@ -27,6 +27,8 @@ import pytest
 from tests.legoesm_paths import legoesm_source_path
 from tests.ocean.unit._nemo_branch_isomorphism_baseline import (
     ARTIFICIAL_BRANCH_BASELINE,
+    EXTRA_NON_NEMO_RECIPE_FILES,
+    KNOWN_CARDS,
     ROUTINE_REGISTRY,
     VALID_BASELINE_KINDS,
     VALID_REFERENCE_MODELS,
@@ -306,19 +308,80 @@ def _reference_groups(row: RoutineRow) -> dict[tuple[str, str], list[Impl]]:
     return groups
 
 
+def _non_nemo_recipe_names() -> frozenset[str]:
+    """Names that DO legitimize a non-``nemo``/non-``paper`` impl's
+    ``selected_by``: real entries from the recipe catalog
+    (``legoesm.ocean.recipes.list_recipes()``) plus the small closed set of
+    additional non-NEMO fidelity recipe FILES the audit doc names
+    (``EXTRA_NON_NEMO_RECIPE_FILES`` in the registry) that aren't catalog
+    entries. Deliberately excludes ``KNOWN_CARDS`` (DINO/GYRE/LOCK/OVERFLOW/
+    ORCA1) — a NEMO-fidelity card landing on a non-NEMO-cited arm is exactly
+    the S-16/S-18/S-19 defect, not a distinct recipe's deliberate choice."""
+    from legoesm.ocean.recipes import list_recipes
+    return frozenset(list_recipes()) | frozenset(EXTRA_NON_NEMO_RECIPE_FILES)
+
+
+def _known_selector_names() -> frozenset[str]:
+    """Every name a ``selected_by`` tuple may verifiably contain (2026-09-02
+    second-review fix, item 3): real recipes plus the closed card/driver list.
+    Used only for the "is this name real, not a typo/fabrication" check — see
+    ``_non_nemo_recipe_names`` above for which of these actually legitimize an
+    impl."""
+    return _non_nemo_recipe_names() | frozenset(KNOWN_CARDS)
+
+
+def _is_legitimately_referenced(impl: Impl, non_nemo_recipe_names: frozenset[str]) -> bool:
+    """True if ``impl`` needs no further justification. ``nemo`` needs none
+    (it IS the reference this whole ratchet measures against) and ``paper``
+    needs none (an external peer-reviewed FORMULA citation — Wright 1997,
+    Visbeck et al. 1997 — stands on its own, unlike a claim of "this
+    transcribes model X's recipe" which needs a live consumer to back it up).
+    Every other model (``legoesm_legacy``, ``unclassified``, and even
+    ``veros``/``mitgcm``/``oceananigans`` — S-18's MIN convention cites a real
+    paper but is run only by NEMO-fidelity cards, not a distinct recipe, which
+    is exactly why it is a genuine duplicate) needs ``selected_by`` to name at
+    least one real, non-NEMO-card recipe."""
+    if impl.reference.model in ("nemo", "paper"):
+        return True
+    return any(name in non_nemo_recipe_names for name in impl.reference.selected_by)
+
+
+def _unreferenced_arms(row: RoutineRow, non_nemo_recipe_names: frozenset[str]) -> list[Impl]:
+    """The impls in ``row`` that are not legitimately referenced (see above)."""
+    return [i for i in row.impls if not _is_legitimately_referenced(i, non_nemo_recipe_names)]
+
+
+def _row_has_nemo_plus_unreferenced_arm(row: RoutineRow, non_nemo_recipe_names: frozenset[str]) -> bool:
+    """True if ``row`` mixes a ``nemo``-model impl with >=1 unreferenced arm
+    (2026-09-02 second-review fix, closes the "common duplicate shape"
+    laundering demonstrated on S-16/S-18/S-19): flipping a genuine
+    nemo_duplicate row's disposition away from ``ARTIFICIAL_BRANCH`` and
+    deleting its baseline entry used to be enough to escape detection the
+    instant the two impls' ``arm`` strings merely LOOKED different — this
+    check is disposition-independent and does not care what string the
+    unreferenced arm chose for itself."""
+    if not any(i.reference.model == "nemo" for i in row.impls):
+        return False
+    return bool(_unreferenced_arms(row, non_nemo_recipe_names))
+
+
 def _row_needs_baseline_entry(row: RoutineRow) -> bool:
     """True if ``row``, as it stands right now, has a condition that
     legitimately requires an ``ARTIFICIAL_BRANCH_BASELINE`` entry: an
     ``ARTIFICIAL_BRANCH`` row with >=2 distinct impls (the original rule), a
-    reference-duplicate group (>=2 impls sharing one (model, arm)), or any
-    impl whose reference is still untriaged (``model="unclassified"``). Used
-    both to REQUIRE an entry (below) and, negated, to detect a STALE one —
-    one predicate, so the two checks can never drift apart."""
+    reference-duplicate group (>=2 impls sharing one (model, arm)), any impl
+    whose reference is still untriaged (``model="unclassified"``), or (2026-
+    09-02 second-review fix) a ``nemo`` impl paired with >=1 unreferenced arm
+    regardless of the arm's own label. Used both to REQUIRE an entry (below)
+    and, negated, to detect a STALE one — one predicate, so the two checks
+    can never drift apart."""
     if row.disposition == "ARTIFICIAL_BRANCH" and len(set(row.impls)) >= 2:
         return True
     if any(len(set(g)) >= 2 for g in _reference_groups(row).values()):
         return True
     if any(impl.reference.model == "unclassified" for impl in row.impls):
+        return True
+    if _row_has_nemo_plus_unreferenced_arm(row, _non_nemo_recipe_names()):
         return True
     return False
 
@@ -371,15 +434,36 @@ def find_isomorphism_violations(
          separate reclassification pass assigns the real kind by editing
          this field, and a typo/free-text value here would silently defeat
          that data-only workflow).
+      9. (2026-09-02 THIRD-review fix, closes the "common duplicate shape"
+         laundering that rules 3/5 still missed) Every name in any impl's
+         ``reference.selected_by`` must be a real, verifiable identifier — in
+         ``legoesm.ocean.recipes.list_recipes()``, in
+         ``EXTRA_NON_NEMO_RECIPE_FILES``, or in ``KNOWN_CARDS`` — else a
+         made-up/misspelled name would silently launder an impl. AND,
+         disposition-independent: a row with >=1 ``nemo`` impl and >=1
+         UNREFERENCED arm (any non-``nemo``/non-``paper`` impl whose
+         ``selected_by`` names no genuine non-NEMO recipe — see
+         ``_is_legitimately_referenced``) needs ``row.routine_id`` in
+         ``baseline`` with ``kind`` ``nemo_duplicate`` or ``unclassified``.
+         This is what actually closes the gap rules 3/5 left open: S-16,
+         S-18 and S-19 each pair a ``nemo`` impl with a differently-named
+         non-``nemo`` impl, so rule 3's (model, arm)-matching never fires;
+         and once disposition is flipped to ``OTHER_RECIPE``, rule 5's
+         diversity check is satisfied too, because 2 DIFFERENTLY-CITED impls
+         (even an unreferenced one) already count as 2 distinct groups. Rule
+         9 does not care what the unreferenced arm's own label looks like —
+         only whether anything real actually selects it.
 
     Delegated rows (``disposition`` literally ``"see S-XX"``) share their
     underlying impls with the row they point at and are exempt from rules
-    3/5/6 under their OWN routine_id — their duplication is already fully
+    3/5/6/9 under their OWN routine_id — their duplication is already fully
     enforced under the referenced row's id; re-requiring a second baseline
     entry for the alias would just be bookkeeping noise, not a new defect.
     """
     errors: list[str] = []
     seen_ids: set[str] = set()
+    known_names = _known_selector_names()
+    non_nemo_recipe_names = _non_nemo_recipe_names()
     for row in registry:
         if row.routine_id in seen_ids:
             errors.append(f"duplicate routine_id in registry: {row.routine_id}")
@@ -411,6 +495,15 @@ def find_isomorphism_violations(
                     "reference must name its actual namelist/cpp arm, not "
                     "'none', or it can't be told apart from any other NEMO impl "
                     "in this row.")
+            for name in ref.selected_by:
+                if name not in known_names:
+                    errors.append(
+                        f"{row.routine_id} ({row.nemo_routine}): impl {impl.symbol!r} "
+                        f"has selected_by name {name!r} that is not in "
+                        "list_recipes() or the closed KNOWN_CARDS/"
+                        "EXTRA_NON_NEMO_RECIPE_FILES lists — fix the typo, or add "
+                        "the identifier to the closed list with its file:line if "
+                        "it is real.")
 
         delegated = row.disposition.startswith("see ")
 
@@ -436,6 +529,21 @@ def find_isomorphism_violations(
                         "ARTIFICIAL_BRANCH_BASELINE entry — classify its "
                         "reference for real, or add a baseline entry so it "
                         "can't hide.")
+
+            unreferenced = _unreferenced_arms(row, non_nemo_recipe_names)
+            if any(i.reference.model == "nemo" for i in row.impls) and unreferenced:
+                entry = baseline.get(row.routine_id)
+                if entry is None or entry.kind not in ("nemo_duplicate", "unclassified"):
+                    names = ", ".join(sorted(i.symbol for i in unreferenced))
+                    errors.append(
+                        f"{row.routine_id} ({row.nemo_routine}): pairs a nemo "
+                        f"impl with unreferenced arm(s) [{names}] (no recipe in "
+                        "selected_by names them, and their model is not "
+                        "'paper') with no ARTIFICIAL_BRANCH_BASELINE entry "
+                        "whose kind is 'nemo_duplicate' or 'unclassified' — "
+                        "this is a duplicate regardless of the row's "
+                        "disposition label or the unreferenced arm's own "
+                        "arm-string (the S-16/S-18/S-19 laundering shape).")
 
             if row.disposition == "OTHER_RECIPE" and len(row.impls) >= 2:
                 distinct_groups = _reference_groups(row)
@@ -722,6 +830,49 @@ def test_nemo_branch_isomorphism_flags_other_recipe_without_diversity():
         "FAKE-OTHER-RECIPE-NO-DIVERSITY" in e and "distinct (model, arm)" in e
         for e in errors
     ), f"OTHER_RECIPE diversity violation was not flagged: {errors}"
+
+
+def test_nemo_branch_isomorphism_flags_legacy_arm_unreferenced_laundering():
+    """Reproduce the THIRD-review "common duplicate shape" finding exactly:
+    a ``nemo`` impl paired with a ``legoesm_legacy`` impl whose ``arm`` string
+    is simply DIFFERENT (not a matching (model, arm) pair — rule 3 stays
+    silent) and whose ``selected_by`` is EMPTY (no recipe actually runs it),
+    under ``disposition="OTHER_RECIPE"`` with no baseline entry (rule 5's
+    diversity check is satisfied: 2 distinct groups, only 1 nemo). This is
+    the literal S-16/S-18/S-19 shape after being laundered exactly as the
+    reviewer demonstrated. Confirms rule 9 still rejects it."""
+    planted = RoutineRow(
+        "FAKE-LEGACY-LAUNDER", "planted legacy-arm laundering (self-check only)",
+        "OTHER_RECIPE", "none", (
+            Impl("ocean/eos.py", "compute_buoyancy_frequency_nemo_bn2",
+                 Reference("nemo", "nemo_own_arm", "some_file.F90:1")),
+            Impl("ocean/eos.py", "compute_buoyancy_frequency",
+                 Reference("legoesm_legacy", "totally_different_arm_name", "legoESM legacy pre-existing: x")),
+        ))
+    errors = find_isomorphism_violations((planted,), {})
+    assert any(
+        "FAKE-LEGACY-LAUNDER" in e and "unreferenced arm" in e for e in errors
+    ), f"legacy-arm unreferenced laundering was not flagged: {errors}"
+
+
+def test_nemo_branch_isomorphism_flags_fake_selected_by_name():
+    """Plant an impl whose ``selected_by`` names a recipe that does not exist
+    and confirm the checker rejects it (item 3): a made-up/misspelled recipe
+    name must not silently legitimize an unreferenced arm."""
+    planted = RoutineRow(
+        "FAKE-BAD-SELECTED-BY", "planted fake selected_by name (self-check only)",
+        "OTHER_RECIPE", "none", (
+            Impl("ocean/eos.py", "compute_buoyancy_frequency_nemo_bn2",
+                 Reference("nemo", "nemo_own_arm", "some_file.F90:1")),
+            Impl("ocean/eos.py", "compute_buoyancy_frequency",
+                 Reference("legoesm_legacy", "some_arm", "legoESM legacy pre-existing: x",
+                            selected_by=("this_recipe_does_not_exist_zzz",))),
+        ))
+    errors = find_isomorphism_violations((planted,), {})
+    assert any(
+        "FAKE-BAD-SELECTED-BY" in e and "this_recipe_does_not_exist_zzz" in e
+        for e in errors
+    ), f"fake selected_by name was not flagged: {errors}"
 
 
 def test_nemo_branch_isomorphism_flags_other_recipe_both_nemo():
