@@ -40,8 +40,9 @@ np_seos              eosbn2.F90:297   zh = gdept(ji,jj,jk,Knn)
 so `rn_mu1*zh` — the S-EOS thermobaric term — is exactly the consumer. Both
 pairs already carry a receipt in this tree:
 
-* `nemo_teos10` — `nemo_testcases_l1_phase3_receipt.md:139`; pinning geometric
-  took the LOCK stage-1 u RHS error from `5.6854e-9` to `3.6863e-17`.
+* `nemo_teos10` — `nemo_testcases_l1_phase3_receipt.md:139` is the arm's
+  provenance row; `:73-79` of the same file carries the number, where pinning
+  geometric took the LOCK stage-1 u RHS error from `5.6854e-9` to `3.6863e-17`.
 * `nemo_seos` — `../dino_tendency_certificate.md:15-16`, "required for the
   S-EOS thermobaric depth term"; certified S-EOS density max abs drho' `1.5e-5`.
 
@@ -127,3 +128,24 @@ already failing.
 `tests/test_validate_strict_coverage.py::test_known_unvalidated_is_shrink_only_and_real`
 is likewise red at `d1e4270ca`, before this change (stale `grid_type` entry).
 Both left for their owners.
+
+## Review
+
+One adversarial reviewer (Claude-authored code, so codex + GLM was the standing
+requirement; the codex CLI is unavailable on this account, so this landed with
+ONE reviewer, not the required two — stated here rather than implied).
+
+Verdict APPROVE, no Critical or Important findings. The reviewer independently
+read `eosbn2.F90` and confirmed the core claim: both the `np_teos10/np_eos80`
+arm (`:260`) and the `np_seos` arm (`:297`) consume live `gdept`, and the
+geometric-depth mechanism in `compute_ocean_rho` /
+`iterate_eos_and_pressure_anomaly` special-cases no EOS. Two citation-precision
+suggestions, both checked rather than applied on trust:
+
+* UPHELD — the `5.6854e-9 -> 3.6863e-17` numbers live at `:73-79` of the
+  phase-3 receipt, not at `:139`; `:139` is the arm's provenance row. The
+  citation is now split accordingly, here and in the code comment.
+* REFUTED — the reviewer read the guard's intent row as row 6. It is row 9:
+  phase-3 receipt `:220` reads `| 9 | eos_depth="geometric" + a non-NEMO EOS |
+  the new depth arm has no cited non-NEMO reference | (a) restrict the arm to
+  cited EOS configurations |`. "Row 9" stands, unchanged.

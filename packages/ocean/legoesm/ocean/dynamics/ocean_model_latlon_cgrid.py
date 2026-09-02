@@ -3159,8 +3159,9 @@ class LatLonCGridOceanModel:
         #   np_teos10/np_eos80  eosbn2.F90:260  zh = gdept(ji,jj,jk,Knn)*r1_Z0
         #   np_seos             eosbn2.F90:297  zh = gdept(ji,jj,jk,Knn)
         # Receipts: docs/ocean/fidelity/testcases/nemo_testcases_l1_phase3_receipt.md:139
-        # (nemo_teos10, LOCK/OVERFLOW; pinning geometric took the LOCK stage-1 u
-        # RHS error 5.6854e-9 -> 3.6863e-17) and
+        # (nemo_teos10, LOCK/OVERFLOW -- the arm's provenance row; the number
+        # behind it is at :73-79 of the same file, where pinning geometric took
+        # the LOCK stage-1 u RHS error 5.6854e-9 -> 3.6863e-17) and
         # docs/ocean/fidelity/dino_tendency_certificate.md:15-16 (nemo_seos, DINO
         # nemo_paper/nemo_dino_kamm/_mlf; "required for the S-EOS thermobaric
         # depth term", max|drho'| 1.5e-5).  Adding an EOS here requires the same:
