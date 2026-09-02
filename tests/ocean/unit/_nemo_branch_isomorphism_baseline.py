@@ -572,9 +572,33 @@ ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
         Impl(_VERTICAL, "diagnose_w_from_flux_div",
              Reference("legoesm_legacy", "wzv_generic",
                         "legoESM legacy pre-existing: ocean/vertical.py (generic w diagnostic, "
-                        "unreferenced default)")),
+                        "unreferenced default). MEASURED 2026-09-02 against the NEMO arm on the "
+                        "certified L1 cards at the WS-RK3 stage call site (stprk3_stg.F90:297): "
+                        "stage w differs by 3.0e-18 m/s (OVERFLOW) / 2.4e-21 m/s (LOCK), i.e. "
+                        "1e-15 of |w|, and every kt=1..10 trajectory row is BIT-IDENTICAL. The "
+                        "branch is arithmetic association only -- it does NOT own OVERFLOW's "
+                        "2.599e-7 kt=2 velocity debt. Numbers + the non-vacuity control (a "
+                        "planted +1e-6 on the literal w moves kt=2 T by 5.1e-9) in "
+                        "scripts/validate/ocean_fidelity/testcases/nemo_testcase_wzv_arm_probe.py "
+                        "and docs/ocean/fidelity/testcases/"
+                        "nemo_testcases_l1_wzv_arm_preregister.md",
+                        selected_by=("LOCK", "OVERFLOW", "ORCA1",
+                                      "veros_faithful_v1", "mitgcm_v1",
+                                      "oceananigans_v1"))),
         Impl(_OPL, "nemo_qco_wzv_operands",
-             Reference("nemo", "wzv_nemo_literal", "sshwzv.F90 (np_velocity/np_transport arg, nemo literal operands)")),
+             Reference("nemo", "wzv_nemo_literal",
+                        "sshwzv.F90:273-387 (qco arm :331-336) + divhor.F90:108-141; the "
+                        "np_velocity/np_transport argument is the only NEMO-side branch. "
+                        "Constructible on EVERY card since the mesh operands are now resolved by "
+                        "vertical.py nemo_qco_resolved_mesh_operands -- NEMO's own hu_0/e1e2*/"
+                        "e2u/e1v when the card carries mesh_mask.nc (DINO/GYRE, byte-identical), "
+                        "otherwise rebuilt from the card's grid + reference ladder "
+                        "(domain.F90:145; usrdef_zgr.F90:179-186). The two remaining reachability "
+                        "walls are NEMO's own: zad_qco_evaluation='nemo_literal' gates the MLF/"
+                        "dynzad call sites (stpmlf.F90:227,270) and requires "
+                        "vertical_momentum_scheme='nemo_advective', which NEMO's RK3 flux-form "
+                        "lane does not run (dynadv_up3 + ln_zad_Aimp instead)",
+                        selected_by=("DINO", "GYRE"))),
     )),
     RoutineRow("S-20", "wAimp", "SHARED", "ln_zad_Aimp", (
         Impl(_VERTICAL, "nemo_wicker_aimp_partition_transport",
