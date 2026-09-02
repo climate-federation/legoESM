@@ -26,8 +26,10 @@ import pytest
 from tests.legoesm_paths import legoesm_source_path
 from tests.ocean.unit._nemo_branch_isomorphism_baseline import (
     ARTIFICIAL_BRANCH_BASELINE,
-    Impl,
     ROUTINE_REGISTRY,
+    VALID_BASELINE_KINDS,
+    BaselineEntry,
+    Impl,
     RoutineRow,
 )
 
@@ -245,7 +247,7 @@ def _ast_symbol_exists(rel_path: str, symbol: str) -> bool:
 
 
 def find_isomorphism_violations(
-    registry: tuple[RoutineRow, ...], baseline: dict[str, str],
+    registry: tuple[RoutineRow, ...], baseline: dict[str, BaselineEntry],
 ) -> list[str]:
     """Pure checker: ``registry`` + ``baseline`` -> violation strings (empty
     = clean). Factored out so the production gate below and the synthetic
@@ -264,6 +266,12 @@ def find_isomorphism_violations(
          ``ARTIFICIAL_BRANCH``, or collapsed to <=1 distinct impl), is stale
          and must be deleted — a collapse PR is not allowed to leave the old
          allowance sitting around.
+      4. Every baseline entry's ``kind`` must be one of ``VALID_BASELINE_KINDS``
+         (legoESM hosts several recipes, so a 2nd implementation of one NEMO
+         routine is only a defect if both claim the SAME reference arm — a
+         separate reclassification pass assigns the real kind by editing
+         this field, and a typo/free-text value here would silently defeat
+         that data-only workflow).
     """
     errors: list[str] = []
     seen_ids: set[str] = set()
@@ -293,13 +301,18 @@ def find_isomorphism_violations(
                     "baseline entry naming the reason.")
 
     registry_by_id = {r.routine_id: r for r in registry}
-    for rid, reason in baseline.items():
+    for rid, entry in baseline.items():
+        if entry.kind not in VALID_BASELINE_KINDS:
+            errors.append(
+                f"ARTIFICIAL_BRANCH_BASELINE[{rid!r}].kind={entry.kind!r} is "
+                f"not one of {sorted(VALID_BASELINE_KINDS)} — fix the kind "
+                "field (data-only edit, no code change needed).")
         row = registry_by_id.get(rid)
         if row is None:
             errors.append(
                 f"ARTIFICIAL_BRANCH_BASELINE has a stale entry {rid!r} "
-                f"({reason!r}): no such routine_id in the registry — remove "
-                "it (shrink-only).")
+                f"({entry.reason!r}): no such routine_id in the registry — "
+                "remove it (shrink-only).")
             continue
         distinct = set(row.impls)
         if not (row.disposition == "ARTIFICIAL_BRANCH" and len(distinct) >= 2):
@@ -356,10 +369,31 @@ def test_nemo_branch_isomorphism_flags_stale_baseline_entry():
         "FAKE-COLLAPSED", "planted collapsed branch (self-check only)",
         "SHARED", "none", (Impl("ocean/eos.py", "compute_buoyancy_frequency"),))
     errors = find_isomorphism_violations(
-        (planted,), {"FAKE-COLLAPSED": "stale reason from a finished collapse"})
+        (planted,),
+        {"FAKE-COLLAPSED": BaselineEntry(
+            "stale reason from a finished collapse", "unclassified")})
     assert any(
         "FAKE-COLLAPSED" in e and "collapsed" in e for e in errors
     ), f"stale baseline entry was not flagged: {errors}"
+
+
+def test_nemo_branch_isomorphism_flags_invalid_kind():
+    """Plant a baseline entry whose ``kind`` is not one of the four allowed
+    strings and confirm the checker rejects it. Proves rule 4 (kind is a
+    closed set, so the reclassification pass can only ever land on a
+    recognized value) actually fires."""
+    planted = RoutineRow(
+        "FAKE-KIND", "planted bad-kind row (self-check only)",
+        "ARTIFICIAL_BRANCH", "none", (
+            Impl("ocean/eos.py", "compute_buoyancy_frequency"),
+            Impl("ocean/eos.py", "compute_buoyancy_frequency_adiabatic"),
+        ))
+    errors = find_isomorphism_violations(
+        (planted,),
+        {"FAKE-KIND": BaselineEntry("some reason", "not_a_real_kind")})
+    assert any(
+        "FAKE-KIND" in e and "not one of" in e for e in errors
+    ), f"invalid kind was not flagged: {errors}"
 
 
 def test_nemo_branch_isomorphism_flags_missing_symbol():

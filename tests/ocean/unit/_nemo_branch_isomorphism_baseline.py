@@ -41,6 +41,19 @@ the audit's own note / ranked-branches section. Collapsing a branch (the
 audit's collapse plans) means the fix reduces that row's distinct impls to
 <=1 and this dict's entry must be deleted in the SAME PR (stale-entry check).
 
+Per USER CORRECTION (2026-09-02): legoESM hosts several recipes (NEMO, Veros,
+MITgcm, Oceananigans, legacy legoESM), so a second implementation is only a
+defect when two implementations claim the SAME reference arm — a NEMO
+namelist/cpp switch OR a named non-NEMO reference (recipe + citation). Each
+baseline entry therefore also carries a ``kind`` classifying which case it
+is: ``"nemo_duplicate"`` (two impls of one NEMO arm — the real defect this
+ratchet exists for), ``"other_recipe"`` (the "duplicate" is actually another
+oracle's own transcription — not a defect), ``"orphan"`` (one of the impls
+belongs to no live card/reference and should just be deleted), or
+``"unclassified"`` (not yet triaged). Every entry seeded from the audit is
+``"unclassified"`` — a separate reclassification pass assigns the real kind
+by editing this data file, never by changing the checker.
+
 Re-derive by re-reading ``docs/ocean/fidelity/nemo_branch_isomorphism_map.md``
 and re-grepping each ``impls`` symbol; do not hand-edit the disposition
 without updating the doc it transcribes.
@@ -49,6 +62,13 @@ without updating the doc it transcribes.
 from __future__ import annotations
 
 from typing import NamedTuple
+
+# The only kinds a baseline entry's ``kind`` field may take. See the
+# docstring above. Kept here (not just in the test) so both the checker and
+# any future reclassification tooling import one source of truth.
+VALID_BASELINE_KINDS = frozenset({
+    "nemo_duplicate", "other_recipe", "orphan", "unclassified",
+})
 
 
 class Impl(NamedTuple):
@@ -59,6 +79,11 @@ class Impl(NamedTuple):
     # (top-level or nested — a nested helper like ``_replace_stage_mean``
     # is a legitimate implementation symbol for its own row).
     symbol: str
+
+
+class BaselineEntry(NamedTuple):
+    reason: str   # the audit's note explaining why this branch is tolerated
+    kind: str     # one of VALID_BASELINE_KINDS — see module docstring
 
 
 class RoutineRow(NamedTuple):
@@ -248,102 +273,149 @@ ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
 # ROUTINE_REGISTRY entry is disposition="ARTIFICIAL_BRANCH" with >=2 distinct
 # impls; once a collapse PR lands (see the doc's "collapse plan" per row) and
 # the row drops to <=1 distinct impl, DELETE the entry in that same PR.
-ARTIFICIAL_BRANCH_BASELINE: dict[str, str] = {
-    "S-03": (
-        "bn2: 3 impls of one NEMO routine (eosbn2.F90:253-288); DINO/GYRE on "
-        "nemo_bn2, ORCA1 arm UNVERIFIED, not reached by L1 (ln_zdfcst)."
+ARTIFICIAL_BRANCH_BASELINE: dict[str, BaselineEntry] = {
+    "S-03": BaselineEntry(
+        reason=(
+            'bn2: 3 impls of one NEMO routine (eosbn2.F90:253-288); DINO/GYRE on nemo_bn2, '
+            'ORCA1 arm UNVERIFIED, not reached by L1 (ln_zdfcst).'
+        ),
+        kind='unclassified',
     ),
-    "S-04": (
-        "bn2 live-e3w/gdepw geometry: generic-vs-literal pair for one NEMO "
-        "expression (eosbn2.F90:253-258); part of the ~48-selector family."
+    "S-04": BaselineEntry(
+        reason=(
+            'bn2 live-e3w/gdepw geometry: generic-vs-literal pair for one NEMO expression '
+            '(eosbn2.F90:253-258); part of the ~48-selector family.'
+        ),
+        kind='unclassified',
     ),
-    "S-07": (
-        "zdf_tke solver: tke_solver_evaluation is a two-arm selector for one "
-        "NEMO program (zdftke.F90); default is the non-NEMO arm."
+    "S-07": BaselineEntry(
+        reason=(
+            'zdf_tke solver: tke_solver_evaluation is a two-arm selector for one NEMO program '
+            '(zdftke.F90); default is the non-NEMO arm.'
+        ),
+        kind='unclassified',
     ),
-    "S-07b": (
-        "zdf_tke langmuir source: tke_langmuir_evaluation is a two-arm "
-        "selector for one NEMO program (zdftke.F90); default is the "
-        "non-NEMO arm."
+    "S-07b": BaselineEntry(
+        reason=(
+            'zdf_tke langmuir source: tke_langmuir_evaluation is a two-arm selector for one '
+            'NEMO program (zdftke.F90); default is the non-NEMO arm.'
+        ),
+        kind='unclassified',
     ),
-    "S-14": (
-        "dyn_spg_ts external velocity update gate carries an extra "
-        "momentum_time_integrator=='rk3_ws' conjunct NEMO's own gate "
-        "(dynspg_ts.F90:719) does not have — latent mis-route for any "
-        "future MLF+flux-form card; no current card affected."
+    "S-14": BaselineEntry(
+        reason=(
+            'dyn_spg_ts external velocity update gate carries an extra '
+            "momentum_time_integrator=='rk3_ws' conjunct NEMO's own gate (dynspg_ts.F90:719) "
+            'does not have — latent mis-route for any future MLF+flux-form card; no current '
+            'card affected.'
+        ),
+        kind='unclassified',
     ),
-    "S-16": (
-        "dyn_spg_ts continuity/transport/spg: 5 generic-vs-nemo_literal "
-        "branch pairs for one NEMO program (dynspg_ts.F90:~640-840); "
-        "default is the generic arm, which ORCA1 runs."
+    "S-16": BaselineEntry(
+        reason=(
+            'dyn_spg_ts continuity/transport/spg: 5 generic-vs-nemo_literal branch pairs for '
+            'one NEMO program (dynspg_ts.F90:~640-840); default is the generic arm, which '
+            'ORCA1 runs.'
+        ),
+        kind='unclassified',
     ),
-    "S-18": (
-        "RANK 1 (highest-value collapse). dom_qco_r3c r3u/r3v face "
-        "thickness: MIN-of-live-thickness vs NEMO's surface-weighted MEAN "
-        "(domqco.F90:165-170) for one quantity; DINO/GYRE reach MEAN at "
-        "ldf_slp/dyn_zad, LOCK/OVERFLOW/ORCA1 reach MIN everywhere "
-        "including the shared dyn_adv/tra_adv operand. Mean-vs-min "
-        "measurement was IN FLIGHT at audit time — do not collapse ahead "
-        "of it."
+    "S-18": BaselineEntry(
+        reason=(
+            'RANK 1 (highest-value collapse). dom_qco_r3c r3u/r3v face thickness: '
+            "MIN-of-live-thickness vs NEMO's surface-weighted MEAN (domqco.F90:165-170) for "
+            'one quantity; DINO/GYRE reach MEAN at ldf_slp/dyn_zad, LOCK/OVERFLOW/ORCA1 reach '
+            'MIN everywhere including the shared dyn_adv/tra_adv operand. Mean-vs-min '
+            'measurement was IN FLIGHT at audit time — do not collapse ahead of it.'
+        ),
+        kind='unclassified',
     ),
-    "S-19": (
-        "wzv: one NEMO routine (sshwzv.F90), two legoESM impls; default is "
-        "the non-NEMO (generic) one."
+    "S-19": BaselineEntry(
+        reason=(
+            'wzv: one NEMO routine (sshwzv.F90), two legoESM impls; default is the non-NEMO '
+            '(generic) one.'
+        ),
+        kind='unclassified',
     ),
-    "S-27": (
-        "Coriolis time placement: NEMO always carries Coriolis inside "
-        "dyn_vor's RHS; the Matsuno rotation sub-step (matsuno_split) is a "
-        "legoESM invention, inert on LOCK/OVERFLOW (f=0) but LIVE on "
-        "ORCA1 — HIGH-risk collapse, needs a one-variable A/B (rank 9)."
+    "S-27": BaselineEntry(
+        reason=(
+            "Coriolis time placement: NEMO always carries Coriolis inside dyn_vor's RHS; the "
+            'Matsuno rotation sub-step (matsuno_split) is a legoESM invention, inert on '
+            'LOCK/OVERFLOW (f=0) but LIVE on ORCA1 — HIGH-risk collapse, needs a one-variable '
+            'A/B (rank 9).'
+        ),
+        kind='unclassified',
     ),
-    "S-28_29": (
-        "RANK 2. dyn_hpg: nemo_sco is the transcribed NEMO arm but is "
-        "UNREACHABLE from the ORCA1 driver (--pgf-scheme restricted to "
-        "{adcroft, smc03}); 3 non-NEMO-arm-reachable PGF impls exist "
-        "(_bc_ke_and_pressure_gradients embeds nemo_sco+adcroft inline, "
-        "plus the smc03 and ahh08 modules)."
+    "S-28_29": BaselineEntry(
+        reason=(
+            'RANK 2. dyn_hpg: nemo_sco is the transcribed NEMO arm but is UNREACHABLE from '
+            'the ORCA1 driver (--pgf-scheme restricted to {adcroft, smc03}); 3 '
+            'non-NEMO-arm-reachable PGF impls exist (_bc_ke_and_pressure_gradients embeds '
+            'nemo_sco+adcroft inline, plus the smc03 and ahh08 modules).'
+        ),
+        kind='unclassified',
     ),
-    "S-32": (
-        "dyn_ldf -> ldf_lap: 3 operator forms implement one NEMO arm "
-        "(ln_dynldf_lap); flux_divergence is Veros's, vector_laplacian "
-        "(ORCA1's default) has no NEMO arm."
+    "S-32": BaselineEntry(
+        reason=(
+            'dyn_ldf -> ldf_lap: 3 operator forms implement one NEMO arm (ln_dynldf_lap); '
+            "flux_divergence is Veros's, vector_laplacian (ORCA1's default) has no NEMO arm."
+        ),
+        kind='unclassified',
     ),
-    "S-35": (
-        "stage-3 zub barotropic correction: NEMO does dyn_zdf then zub, one "
-        "site (stprk3_stg.F90:430,433-446); L/O apply the correction only "
-        "BEFORE the implicit solve (wrong side), GYRE has both sites."
+    "S-35": BaselineEntry(
+        reason=(
+            'stage-3 zub barotropic correction: NEMO does dyn_zdf then zub, one site '
+            '(stprk3_stg.F90:430,433-446); L/O apply the correction only BEFORE the implicit '
+            'solve (wrong side), GYRE has both sites.'
+        ),
+        kind='unclassified',
     ),
-    "S-37": (
-        "tra_adv: ORCA1 runs superbee (Veros), which maps to no NEMO arm "
-        "(traadv_mus/_ubs/_qck are ABSENT)."
+    "S-37": BaselineEntry(
+        reason=(
+            'tra_adv: ORCA1 runs superbee (Veros), which maps to no NEMO arm '
+            '(traadv_mus/_ubs/_qck are ABSENT).'
+        ),
+        kind='unclassified',
     ),
-    "S-42": (
-        "bbl: shared transport/tendency arithmetic, two compositions — "
-        "OVERFLOW folds it into the stage-3 tracer RHS (NEMO's site), "
-        "ORCA1 calls a host post-step Euler with an extra transport cap "
-        "NEMO has none of."
+    "S-42": BaselineEntry(
+        reason=(
+            'bbl: shared transport/tendency arithmetic, two compositions — OVERFLOW folds it '
+            "into the stage-3 tracer RHS (NEMO's site), ORCA1 calls a host post-step Euler "
+            'with an extra transport cap NEMO has none of.'
+        ),
+        kind='unclassified',
     ),
-    "M-01": (
-        "RANK 5. stp_MLF: two implementations, one dead. _nemo_mlf_step "
-        "(single dyn_ldf(Kbb,Kmm) pass, structurally faithful) is selected "
-        "by no card; only a probe script calls it directly."
+    "M-01": BaselineEntry(
+        reason=(
+            'RANK 5. stp_MLF: two implementations, one dead. _nemo_mlf_step (single '
+            'dyn_ldf(Kbb,Kmm) pass, structurally faithful) is selected by no card; only a '
+            'probe script calls it directly.'
+        ),
+        kind='unclassified',
     ),
-    "M-04": (
-        "tra_atf_qco/dyn_atf_qco tracer_combine: 'concentration' (the "
-        "default, resolved by the certified DINO card) has no NEMO arm "
-        "under key_qco and drifts heat by +8.6e-6 vs NEMO's +3.4e-16."
+    "M-04": BaselineEntry(
+        reason=(
+            "tra_atf_qco/dyn_atf_qco tracer_combine: 'concentration' (the default, resolved "
+            'by the certified DINO card) has no NEMO arm under key_qco and drifts heat by '
+            "+8.6e-6 vs NEMO's +3.4e-16."
+        ),
+        kind='unclassified',
     ),
-    "M-05": (
-        "mlf_baro_corr: 'off' (barotropic_after_reconcile default) has no "
-        "NEMO arm for an MLF+dynspg_ts card; DINO itself is on the "
-        "faithful value, but the default is the non-NEMO one."
+    "M-05": BaselineEntry(
+        reason=(
+            "mlf_baro_corr: 'off' (barotropic_after_reconcile default) has no NEMO arm for an "
+            'MLF+dynspg_ts card; DINO itself is on the faithful value, but the default is the '
+            'non-NEMO one.'
+        ),
+        kind='unclassified',
     ),
-    "CARD-ASSEMBLY": (
-        "Three separate card-assembly paths for one RK3/MLF identity: "
-        "LOCK/OVERFLOW build via a bare from_flat() that silently keeps 6 "
-        "non-NEMO defaults (al81, matsuno_split, barotropic_coriolis=avg, "
-        "een_seed=window_start, zad_qco_evaluation=generic, "
-        "wzv_call2_evaluation=generic) the GYRE/DINO assemblers would set "
-        "to the NEMO arm."
+    "CARD-ASSEMBLY": BaselineEntry(
+        reason=(
+            'Three separate card-assembly paths for one RK3/MLF identity: LOCK/OVERFLOW build '
+            'via a bare from_flat() that silently keeps 6 non-NEMO defaults (al81, '
+            'matsuno_split, barotropic_coriolis=avg, een_seed=window_start, '
+            'zad_qco_evaluation=generic, wzv_call2_evaluation=generic) the GYRE/DINO '
+            'assemblers would set to the NEMO arm.'
+        ),
+        kind='unclassified',
     ),
 }
