@@ -44,6 +44,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid fesom \
   --sss-ice-gate-nemo \
   --sss-restore-file $NEMOIN/orca1_inputs/data_repository/input_fields/sss_climatology_for_restoring.nc \
   --runoff \
+  --forcing-ramp-days 5 \
   --dt 1800 --years 0.0823288 --snapshot-every-days 30 \
   --output $ROOT/results/omip_nemo/fesom_b4_d30 2>&1 | tail -14
 echo "=== run rc=$? ==="

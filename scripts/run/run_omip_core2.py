@@ -1995,6 +1995,7 @@ _FESOM_WIRED_DESTS = frozenset({
     "snapshot_every_days", "output", "smoke",
     # B2+B3 forcing selectors, wired through the fesom forced loop:
     "emp_freshwater", "dm2dc", "sw_rgb_chl", "chl_file", "forcing_path",
+    "forcing_ramp_days",
     # B4 — prognostic sea ice (legoESM ice, free-drift, 1 category):
     "prognostic_sea_ice", "prognostic_ice_dynamics", "ice_init",
     "ice_ocean_heat_coeff", "ice_thermo_sw_trans",
@@ -2300,6 +2301,7 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
         cache_dir=(Path(args.forcing_path) if args.forcing_path else None),
     )
     n_rec = int(forcing.u10.shape[0])
+    _ramp_s = float(args.forcing_ramp_days) * _SEC_PER_DAY
     lat_deg = np.degrees(np.asarray(grid.lat))
     lon_deg = np.degrees(np.asarray(grid.lon))
     chl_clim = None
@@ -2468,11 +2470,21 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
                 _t_lo,
                 _t_lo + dt / _SEC_PER_DAY,
             )
+        # Cold-start shock ramp (--forcing-ramp-days; the SAME scaling the
+        # host loop applies): the fesom lane runs dt=1800 s — 12x the other
+        # lanes' step — and the full-strength CORE-II forcing on the sharp
+        # NEMO-monthly IC crossed CFL within day 1 (measured: |u|max
+        # +0.2 m/s PER STEP in the un-ramped adjustment).
+        ramp = (min(1.0, (step * dt) / _ramp_s) if _ramp_s > 0.0 else 1.0)
         sf = compute_omip2_surface_forcing(
             state, forcing=forcing, idx_t=it,
             grid=grid, grid_type="fesom",
             dm2dc_window=_dm2dc_win,
         )
+        if ramp < 1.0:
+            sf = sf._replace(tau_x=sf.tau_x * ramp, tau_y=sf.tau_y * ramp,
+                             q_net=sf.q_net * ramp,
+                             sw_down=sf.sw_down * ramp)
         if chl_clim is not None:
             sf = sf._replace(chl=chl_clim[_runoff_month_idx(step, dt)])
         # --- prognostic ice step (B4; mirrors the host loop's block) ------
@@ -2515,7 +2527,7 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
             fw = compute_omip2_freshwater_forcing(
                 state, forcing=forcing, idx_t=it, grid=grid,
                 grid_type="fesom", runoff_R=_R,
-                emp=args.emp_freshwater)
+                emp=args.emp_freshwater, ramp=ramp)
         if ice_resp is not None:
             # ONE shared, mask-aware partition (coupler.ocean_forcing):
             # open-water stress/evap/heat/SW x f_open=(1-A); ice basal
