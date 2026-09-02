@@ -57,6 +57,9 @@ _SEC_PER_DAY = 86400.0
 _SEC_PER_6H = 21600.0
 _YEAR_S = 365.0 * _SEC_PER_DAY
 _MESH = "data/grids/eORCA1.2_mesh_mask.nc"
+# _MESH doubles as the SOURCE-grid land mask for NEMO's ORCA1 input files
+# (nemo_src_tmask_for), whatever --mesh the TARGET grid runs on (eORCA025
+# cards regrid the same ORCA1 files) — codex 9600100.
 # NEMO ldf_eiv (nn_aei_ijk_t=21) kappa_GM defaults, defined ONCE and shared by
 # `build_tripole`'s signature and the `--gm-aei0` / `--gm-kappa-min` argparse
 # defaults so the two can never drift.
@@ -1998,7 +2001,7 @@ _FESOM_WIRED_DESTS = frozenset({
     "forcing_ramp_days",
     # B4 — prognostic sea ice (legoESM ice, free-drift, 1 category):
     "prognostic_sea_ice", "prognostic_ice_dynamics", "ice_init",
-    "ice_ocean_heat_coeff", "ice_thermo_sw_trans",
+    "ice_ocean_heat_coeff", "ice_thermo_sw_trans", "ice_lead_freeze_source",
     # B4 — SSS restoring (water_flux channel ONLY: FesomOceanState.S is a
     # read-only facade, so the post-step tracer applicator cannot write back):
     "sss_restore", "sss_restore_channel", "sss_restore_tau_days",
@@ -2019,7 +2022,7 @@ _FESOM_WIRED_DESTS = frozenset({
 _FESOM_FORCED_ONLY_DESTS = (
     "dm2dc", "sw_rgb_chl", "chl_file",
     "prognostic_sea_ice", "prognostic_ice_dynamics", "ice_init",
-    "ice_ocean_heat_coeff", "ice_thermo_sw_trans",
+    "ice_ocean_heat_coeff", "ice_thermo_sw_trans", "ice_lead_freeze_source",
     "sss_restore", "sss_restore_channel", "sss_restore_tau_days",
     "sss_restore_bound_mmday", "sss_restore_file",
     "sss_restore_normalization", "sss_ice_gate_nemo",
@@ -2347,6 +2350,8 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
         if args.ice_ocean_heat_coeff is not None:
             ice_config = ice_config._replace(
                 ocean_heat_transfer_coeff=float(args.ice_ocean_heat_coeff))
+        ice_config = ice_config._replace(
+            lead_freeze_source=str(args.ice_lead_freeze_source))
         ice_shape = _ice_state_spatial_shape(grid, "fesom")
         # Zero-ice cold start; S_ice_init=0 matches the host lanes' seed.
         ice_state = init_dynamic_ice_state(ice_shape, S_ice_init=0.0)
@@ -2415,7 +2420,7 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
             sss_restore_target = load_nemo_sss_restoring_climatology(
                 args.sss_restore_file, lat_deg, lon_deg,
                 np.asarray(state.land_mask.data) > 0.5,     # (12, nod2D)
-                src_tmask=nemo_src_tmask_for(args.mesh, args.sss_restore_file))
+                src_tmask=nemo_src_tmask_for(_MESH, args.sss_restore_file))
         else:
             # IC-surface target (requires an initialised state — gated in
             # validate_fesom_stage).
@@ -2521,7 +2526,9 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
             _ice_conc_pre = ice_state.concentration.data
             ice_state, ice_resp = step_sea_ice(
                 ice_state, atm_ice, sst_K, ocn_u, ocn_v,
-                ice_config, U_min=0.0, dt=dt, grid=None)
+                ice_config, U_min=0.0, dt=dt, grid=None,
+                q_open_top=_q_open_top(sf, float(np.asarray(z_coord.dz_ref)[0])),
+                ocean_dz_top_m=float(np.asarray(z_coord.dz_ref)[0]))
             if getattr(ice_resp, "ice_concentration_thermo", None) is not None:
                 _ice_conc_pre = ice_resp.ice_concentration_thermo
         fw = None
@@ -4090,6 +4097,24 @@ def _surface_currents_geographic(state, grid, app_grid_type):
     return rotate_tpoint_currents_to_geographic(u_c, v_c, cos_a_u, sin_a_u)
 
 
+def _q_open_top(sf, dz_top_m: float):
+    """Open-water heat entering the ocean's TOP layer [W/m2 per open area]
+    for the sea-ice lead heat budget (SeaIceConfig.lead_freeze_source=
+    'nemo_qlead'; NEMO icesbc zqld = (1-A)*(qns_oce + qsr_oce*frq_m)).
+    ``sf`` is the UNMASKED raw_core2 bulk (q_net = q_non_sw + sw_down, sw_down
+    raw downwelling): non-solar part + the open-water net SW share absorbed in
+    the top cell by the same optics the ocean runs (RGB-chl when sf.chl is
+    set, else two-band)."""
+    from legoesm import constants as _c
+    from legoesm.ocean.physics.shortwave_penetration import (
+        top_layer_absorbed_fraction,
+    )
+    q_non_sw = sf.q_net - sf.sw_down
+    chl = getattr(sf, "chl", None)
+    frac = top_layer_absorbed_fraction(dz_top_m, chl_surface=chl)
+    return q_non_sw + sf.sw_down * (1.0 - float(_c.alpha_ocean_broadband)) * frac
+
+
 def _build_atm_to_surface_core2(forc, ramp=1.0):
     """Build an :class:`AtmToSurface` from the CORE-II fields ALREADY sampled
     onto the ocean grid by :func:`sample_omip2_forcing`.
@@ -5423,6 +5448,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "(Arctic-relevant: fresher shelf water freezes warmer). "
                         "Requires --freeze-floor and/or --ice-thermo (else no "
                         "consumer -> hard error).")
+    p.add_argument("--ice-lead-freeze-source", type=str, default="nemo_qlead",
+                   choices=["ice_skin", "nemo_qlead"],
+                   help="SeaIceConfig.lead_freeze_source for --prognostic-sea-ice. "
+                        "nemo_qlead (default, NEMO SI3 icesbc.F90:357-405): lead "
+                        "ice forms from the open-water cooling BEYOND the "
+                        "freezing deficit and its latent heat returns to the "
+                        "ocean, so the top cell never drops below T_freeze. "
+                        "ice_skin: legacy ice-skin-deficit lead freeze with the "
+                        "ocean debited L_f (double-counts the coupler's open-water "
+                        "cooling; polar SST reached -3 C by day 105 on every grid).")
     p.add_argument("--ice-ocean-heat-coeff", type=float, default=None,
                    help="Ocean->ice basal turbulent heat-transfer coefficient "
                         "[W/m^2/K] for --prognostic-sea-ice "
@@ -7161,7 +7196,7 @@ def main() -> int:
             args.nemo_monthly_init[0], args.nemo_monthly_init[1],
             lat2d, lon2d, n_levels=int(z_coord.n_levels),
             month=int(args.nemo_init_month),
-            src_tmask=nemo_src_tmask_for(args.mesh, args.nemo_monthly_init[0]))
+            src_tmask=nemo_src_tmask_for(_MESH, args.nemo_monthly_init[0]))
         _Td = state.T.data.dtype
         state = state._replace(
             T=state.T.replace(data=jnp.asarray(_T_ic, dtype=_Td)),
@@ -7221,7 +7256,7 @@ def main() -> int:
             sss_restore_target = load_nemo_sss_restoring_climatology(
                 args.sss_restore_file, lat2d, lon2d,
                 np.asarray(state.land_mask.data) > 0.5,   # (12, n_lat, n_lon)
-                src_tmask=nemo_src_tmask_for(args.mesh, args.sss_restore_file))
+                src_tmask=nemo_src_tmask_for(_MESH, args.sss_restore_file))
         else:
             sss_restore_target = np.asarray(
                 state.S.data, dtype=np.float64)[..., 0].copy()  # surface SSS
@@ -7540,6 +7575,8 @@ def main() -> int:
         if args.ice_ocean_heat_coeff is not None:
             ice_config = ice_config._replace(
                 ocean_heat_transfer_coeff=float(args.ice_ocean_heat_coeff))
+        ice_config = ice_config._replace(
+            lead_freeze_source=str(args.ice_lead_freeze_source))
         ice_shape = _ice_state_spatial_shape(grid, app_grid_type)
         # Zero-ice cold start (h=0, concentration=0); spins up from the forcing.
         ice_state = init_dynamic_ice_state(ice_shape, S_ice_init=0.0)
@@ -8730,9 +8767,15 @@ def main() -> int:
             _ice_conc_pre = ice_state.concentration.data
             if _ice_conc_pre.ndim > np.asarray(state.land_mask.data).ndim:
                 _ice_conc_pre = jnp.sum(_ice_conc_pre, axis=-1)  # multi-cat
+            # NEMO lead heat budget inputs (lead_freeze_source=nemo_qlead):
+            # the OPEN-water non-solar flux the coupler will hand the ocean
+            # over leads (sf is the unmasked raw_core2 bulk: q_net =
+            # q_non_sw + sw_down) and the top-cell thickness for zqfr.
             ice_state, ice_resp = step_sea_ice(
                 ice_state, atm_ice, sst_K, ocn_u, ocn_v,
-                ice_config, U_min=0.0, dt=dt, grid=grid)
+                ice_config, U_min=0.0, dt=dt, grid=grid,
+                q_open_top=_q_open_top(sf, float(np.asarray(z_coord.dz_ref)[0])),
+                ocean_dz_top_m=float(np.asarray(z_coord.dz_ref)[0]))
             if args.ew_cyclic_overlap and app_grid_type == "tripole":
                 # Re-slave the duplicated ORCA halo columns after transport
                 # (codex: the C-grid ice advection wraps with period nx, off

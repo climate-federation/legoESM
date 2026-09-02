@@ -71,24 +71,38 @@ def read_nemo_tmask_interior(mesh_path: str) -> np.ndarray:
 
 
 def nemo_src_tmask_for(mesh_path: str, field_path: str,
-                       var: str = "nav_lat") -> np.ndarray | None:
-    """``read_nemo_tmask_interior(mesh_path)`` when its interior matches the
-    (y, x) grid of ``field_path``; otherwise ``None`` with a LOUD warning
-    (the run then regrids from flood-filled land — the pre-2026-09-02
-    behaviour).  Keeps a mesh of another resolution from raising inside the
-    IC loader while never letting the mismatch pass silently."""
+                       coord_tol_deg: float = 1e-3) -> np.ndarray:
+    """``read_nemo_tmask_interior(mesh_path)`` PROVEN to sit on the grid of
+    ``field_path``: the mesh_mask's ``gphit``/``glamt`` interior must match
+    the file's ``nav_lat``/``nav_lon`` to ``coord_tol_deg`` (measured
+    7.6e-6 / 5.3e-5 deg for eORCA1.2 vs the 4p2 IC files; any other halo
+    offset differs by whole degrees).  A shape check alone cannot see an
+    off-by-one row/column, and a mismatched mesh must RAISE — falling back
+    to "finite == wet" re-arms the flood-fill bug this guards against."""
     import netCDF4
 
     with netCDF4.Dataset(field_path) as ds:
-        yx = tuple(ds.variables[var].shape[-2:])
-    tm = read_nemo_tmask_interior(mesh_path)
-    if tm.shape[-2:] != yx:
-        print(f"[nemo-tmask] WARN: mesh_mask {mesh_path} interior "
-              f"{tm.shape[-2:]} != {field_path} grid {yx}; regridding "
-              "WITHOUT NEMO's land mask (samples flood-filled land cells).",
-              flush=True)
-        return None
-    return tm
+        f_lat = np.asarray(ds.variables["nav_lat"][:], dtype=np.float64)
+        f_lon = np.asarray(ds.variables["nav_lon"][:], dtype=np.float64)
+    with netCDF4.Dataset(mesh_path) as ds:
+        m_lat = np.asarray(ds.variables["gphit"][:], dtype=np.float64)
+        m_lon = np.asarray(ds.variables["glamt"][:], dtype=np.float64)
+    m_lat = m_lat.reshape(m_lat.shape[-2:])[:-1, 1:-1]
+    m_lon = m_lon.reshape(m_lon.shape[-2:])[:-1, 1:-1]
+    if m_lat.shape != f_lat.shape:
+        raise ValueError(
+            f"mesh_mask {mesh_path} interior {m_lat.shape} != {field_path} "
+            f"grid {f_lat.shape}: pass the mesh_mask of the grid the NEMO "
+            "field lives on (its land mask is needed; the file is "
+            "flood-filled over land).")
+    dlat = float(np.abs(m_lat - f_lat).max())
+    dlon = float(np.abs(((m_lon - f_lon + 180.0) % 360.0) - 180.0).max())
+    if dlat > coord_tol_deg or dlon > coord_tol_deg:
+        raise ValueError(
+            f"mesh_mask {mesh_path} interior coordinates do not match "
+            f"{field_path} (max |dlat| {dlat:.3e}, |dlon| {dlon:.3e} deg > "
+            f"{coord_tol_deg}): halo offset or different grid.")
+    return read_nemo_tmask_interior(mesh_path)
 
 
 def embed_orca_interior(src: np.ndarray, n_lat: int,

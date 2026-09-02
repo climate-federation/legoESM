@@ -196,20 +196,35 @@ def test_regrid_skips_flood_filled_land_when_tmask_given(tmp_path):
                                                src_tmask=tmask)
     assert good[0, 0] == 35.0           # masked: nearest WET cell
 
-    # mesh_mask with halos (1, nlev, y+1, x+2) -> interior mask; shape guard
+    # mesh_mask with halos (1, nlev, y+1, x+2) -> interior mask, PROVEN on
+    # the file's grid by its gphit/glamt interior matching nav_lat/nav_lon
     m = tmp_path / "mesh_mask.nc"
+    glat = np.zeros((4, 5)); glon = np.zeros((4, 5))
+    glat[:-1, 1:-1] = lat_i; glon[:-1, 1:-1] = lon_i
     with netCDF4.Dataset(m, "w") as ds:
         ds.createDimension("t", 1); ds.createDimension("z", 1)
         ds.createDimension("y", 4); ds.createDimension("x", 5)
         v = ds.createVariable("tmask", "i1", ("t", "z", "y", "x"))
         full = np.ones((1, 1, 4, 5), np.int8); full[0, 0, 1, 2] = 0
         v[:] = full
+        v = ds.createVariable("gphit", "f8", ("t", "y", "x")); v[:] = glat
+        v = ds.createVariable("glamt", "f8", ("t", "y", "x")); v[:] = glon
     tm = nemo_src_tmask_for(str(m), str(p))
-    assert tm is not None and tm.shape == (1, 3, 3) and not tm[0, 1, 1]
-    with netCDF4.Dataset(m, "a") as ds:
-        pass
-    # a mesh of another resolution -> None (warned), never a crash
+    assert tm.shape == (1, 3, 3) and not tm[0, 1, 1]
+    # a mesh of another resolution / offset grid must RAISE, never fall
+    # back to "finite == wet" (that is the bug this guards against)
     lat_big = np.zeros((7, 10)); lon_big = np.zeros((7, 10))
     p2 = tmp_path / "sss_big.nc"
     _write_sss_nc(p2, lat_big[:-1, 1:-1], lon_big[:-1, 1:-1], 6, 8)
-    assert nemo_src_tmask_for(str(m), str(p2)) is None
+    with pytest.raises(ValueError, match="interior"):
+        nemo_src_tmask_for(str(m), str(p2))
+    p3 = tmp_path / "sss_shift.nc"
+    with netCDF4.Dataset(p3, "w") as ds:
+        ds.createDimension("time_counter", 12)
+        ds.createDimension("y", 3); ds.createDimension("x", 3)
+        v = ds.createVariable("nav_lat", "f8", ("y", "x")); v[:] = lat_i + 1.0
+        v = ds.createVariable("nav_lon", "f8", ("y", "x")); v[:] = lon_i
+        v = ds.createVariable("presalt", "f8", ("time_counter", "y", "x"))
+        v[:] = 35.0
+    with pytest.raises(ValueError, match="coordinates do not match"):
+        nemo_src_tmask_for(str(m), str(p3))

@@ -197,8 +197,15 @@ def step_sea_ice(
     U_min: float,
     dt: float,
     grid=None,
+    *,
+    q_open_top=None,
+    ocean_dz_top_m=None,
 ):
     """Step the sea ice model forward by dt seconds.
+
+    ``q_open_top`` [W/m2 per OPEN-water area, + into ocean] and
+    ``ocean_dz_top_m`` [m] feed ``SeaIceConfig.lead_freeze_source ==
+    "nemo_qlead"`` (NEMO's lead heat budget); ignored under "ice_skin".
 
     Dispatches to slab or dynamic model based on config.
 
@@ -386,8 +393,15 @@ def step_sea_ice(
         # multi-category config (skipping ITD remap / ridging) or vice versa.
         _validate_dynamic_state_shape(state.h_ice.data.shape, config, grid)
         return _step_dynamic_v2(state, forcing, ocean_sst, ocean_u, ocean_v,
-                                config, U_min, dt, grid)
+                                config, U_min, dt, grid,
+                                q_open_top=q_open_top,
+                                ocean_dz_top_m=ocean_dz_top_m)
     else:
+        if config.lead_freeze_source != "ice_skin":
+            raise ValueError(
+                f"SeaIceConfig.lead_freeze_source={config.lead_freeze_source!r} "
+                "is implemented on the new-physics (v2) thermodynamics only; "
+                "the legacy dynamic/slab paths run 'ice_skin'.")
         # Legacy dynamic path (free_drift / EVP / mEVP without new physics):
         # apply the same grid-aware shape validation as the new-physics path
         # so config.n_categories and the state array cannot disagree on any
@@ -1707,6 +1721,8 @@ def _thermo_v2(
     *,
     open_water_fraction: jnp.ndarray | None = None,
     enable_lead_freeze: bool = True,
+    q_open_top=None,
+    ocean_dz_top_m=None,
 ) -> dict:
     """Extended thermodynamics: snow + brine + SW scheme + ponds aware.
 
@@ -1926,24 +1942,58 @@ def _thermo_v2(
     #    ``h_new_ice`` into the lead area.  Partial-cover cells DO
     #    contribute: ``(1 − conc)`` of the cell is open water and can
     #    refreeze.
-    freeze_flux_open = jnp.maximum(-Q_sfc, 0.0)
     lead_area = jnp.clip(
         (1.0 - conc) if open_water_fraction is None else open_water_fraction,
         0.0, 1.0,
     )
-    # ``dh_dt_open`` is the local lead-ice thickening rate per unit
-    # lead area, driven by the destabilising surface flux.
-    dh_dt_open_raw = freeze_flux_open / (config.rho_ice * config.L_f)
-    # Gate on ocean supercooling: lead ice cannot form over an above-freezing
-    # mixed layer.  ``freeze_flux_open`` is the ICE-skin atmospheric deficit and
-    # never sees the SST, so without this gate ice grows over warm water (audit
-    # finding #2).  ``ocean_sst <= T_freeze_ocean`` (data-dependent select).
-    dh_dt_open_raw = jnp.where(
-        ocean_sst <= config.T_freeze_ocean, dh_dt_open_raw, 0.0,
-    )
-    dh_dt_open = dh_dt_open_raw if enable_lead_freeze else jnp.zeros_like(dh_dt_open_raw)
-    # Per-grid-cell new volume contributed by lead-freezing this step.
-    delta_V_lead_freeze = jnp.maximum(dh_dt_open * lead_area * dt, 0.0)
+    if config.lead_freeze_source == "ice_skin":
+        freeze_flux_open = jnp.maximum(-Q_sfc, 0.0)
+        # ``dh_dt_open`` is the local lead-ice thickening rate per unit
+        # lead area, driven by the destabilising surface flux.
+        dh_dt_open_raw = freeze_flux_open / (config.rho_ice * config.L_f)
+        # Gate on ocean supercooling: lead ice cannot form over an
+        # above-freezing mixed layer.  ``freeze_flux_open`` is the ICE-skin
+        # atmospheric deficit and never sees the SST, so without this gate ice
+        # grows over warm water (audit finding #2).
+        dh_dt_open_raw = jnp.where(
+            ocean_sst <= config.T_freeze_ocean, dh_dt_open_raw, 0.0,
+        )
+        dh_dt_open = (dh_dt_open_raw if enable_lead_freeze
+                      else jnp.zeros_like(dh_dt_open_raw))
+        # Per-grid-cell new volume contributed by lead-freezing this step.
+        delta_V_lead_freeze = jnp.maximum(dh_dt_open * lead_area * dt, 0.0)
+    elif config.lead_freeze_source == "nemo_qlead":
+        # NEMO SI3 lead heat budget, icesbc.F90:357-405 (5.0.1):
+        #   zqld = (1-A) * qns_oce * rDt_ice         open-water cooling [J/m2]
+        #   zqfr = rho0*rcp*e3t_m*(t_bo - sst)      energy to reach freezing
+        #   qlead = MIN(0, zqld - zqfr)             -> ice_thd_do new ice
+        # The ocean cools at most to Tf: the coupler hands it zqld, and the
+        # lead term of ocean_heat_extraction RETURNS -qlead (see the sign
+        # switch at the composition).  A supercooled cell (zqfr > 0) freezes
+        # back toward Tf even at A = 1 (frazil).  Only the NON-solar
+        # open-water flux enters zqld here: SW over leads reaches the ocean
+        # through the coupler's SW channel and NEMO's frq_m surface share is
+        # a ledger item, not a sign.  ponytail: SW share omitted, add if the
+        # summer lead budget matters.
+        if q_open_top is None or ocean_dz_top_m is None:
+            raise ValueError(
+                "lead_freeze_source='nemo_qlead' needs q_open_top and "
+                "ocean_dz_top_m (step_sea_ice kwargs).")
+        zqld = lead_area * jnp.asarray(q_open_top) * dt
+        zqfr = (constants.rho_ocean * constants.c_p_seawater
+                * jnp.asarray(ocean_dz_top_m)
+                * (config.T_freeze_ocean - ocean_sst))
+        qlead = jnp.minimum(0.0, zqld - zqfr)
+        delta_V_lead_freeze = (-qlead / (config.rho_ice * config.L_f)
+                               if enable_lead_freeze else jnp.zeros_like(qlead))
+        # Area growth below reads dh_dt_open * lead_area; at A = 1 the
+        # frazil volume thickens the pack instead (V_after_lead keeps it).
+        dh_dt_open = delta_V_lead_freeze / (dt * jnp.maximum(lead_area, 1e-6))
+    else:
+        raise ValueError(
+            f"Unknown SeaIceConfig.lead_freeze_source="
+            f"{config.lead_freeze_source!r}; expected 'ice_skin' or "
+            "'nemo_qlead'.")
 
     # Update concentration and mean thickness so the lead-freeze ice
     # volume is captured even in partial-cover cells:
@@ -2285,9 +2335,14 @@ def _thermo_v2(
     #     channel and closes the energy budget without a skin re-solve — upgrade
     #     to an atmospheric credit if/when the 0-layer skin gains an enthalpy
     #     channel.
+    # Lead-freeze latent sign: "ice_skin" DEBITS the ocean (legacy; correct
+    # only where the ocean does not separately receive the open-water flux);
+    # "nemo_qlead" RETURNS it (-qlead/dt), so the coupler's (1-A)*q_open
+    # cooling nets to at most the freezing deficit (NEMO icesbc.F90:398).
+    _lead_latent_sign = -1.0 if config.lead_freeze_source == "nemo_qlead" else 1.0
     ocean_heat_extraction = (
         F_ocean * conc * ocean_heat_scale
-        + delta_V_lead_freeze * config.rho_ice * config.L_f / dt
+        + _lead_latent_sign * delta_V_lead_freeze * config.rho_ice * config.L_f / dt
         + refreeze_ice_m * config.rho_ice * config.L_f / dt * conc_new
         # Surplus surface-melt heat from a melt-out step warms the ocean
         # (ocean GAINS -> NEGATIVE extraction); previously this energy was
@@ -2345,6 +2400,9 @@ def _step_dynamic_v2(
     U_min: float,
     dt: float,
     grid=None,
+    *,
+    q_open_top=None,
+    ocean_dz_top_m=None,
 ) -> tuple[DynamicSeaIceState, TileResponse]:
     """Extended dynamic sea-ice step with Tier-1 + Tier-2 physics.
 
@@ -2547,6 +2605,8 @@ def _step_dynamic_v2(
                 forcing, ocean_sst, config, U_min, dt,
                 open_water_fraction=open_water_agg,
                 enable_lead_freeze=(k == 0),
+                q_open_top=q_open_top,
+                ocean_dz_top_m=ocean_dz_top_m,
             )
             h_list.append(result["h"])
             T_list.append(result["T"])
@@ -2648,6 +2708,8 @@ def _step_dynamic_v2(
         result = _thermo_v2(
             h, T_ice, conc, h_snow, S_ice, pond_area, pond_depth,
             forcing, ocean_sst, config, U_min, dt,
+            q_open_top=q_open_top,
+            ocean_dz_top_m=ocean_dz_top_m,
         )
         h = result["h"]
         T_ice = result["T"]

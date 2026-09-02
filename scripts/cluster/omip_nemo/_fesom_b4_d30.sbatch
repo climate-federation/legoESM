@@ -37,6 +37,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid fesom \
     $NEMOIN/orca1_inputs/data_repository/initial_conditions/woce_salt_monthly_init_4p2.nc \
   --dm2dc --sw-rgb-chl \
   --prognostic-sea-ice --prognostic-ice-dynamics free_drift \
+  --ice-lead-freeze-source nemo_qlead \
   --ice-init $NEMOIN/Ice_initialization.nc --ice-ocean-heat-coeff 70 \
   --sss-restore --sss-restore-channel water_flux \
   --sss-restore-normalization live_s \
