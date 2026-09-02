@@ -88,11 +88,13 @@ belongs to no live card/reference and should just be deleted), or
    in the same pass below (its third arm, ``nemo_advective``, is now also
    transcribed).
 3. Of the doc's 19 literally-``ARTIFICIAL_BRANCH``-tagged rows, an
-   independent reclassification (table reproduced in the doc, §6) found 8
-   genuine ``nemo_duplicate`` defects (S-12, S-16, S-18, S-19, S-30, S-35,
+   independent reclassification (table reproduced in the doc, §6) found 7
+   genuine ``nemo_duplicate`` defects (S-12, S-16, S-19, S-30, S-35,
    S-42, M-01 — kept ``ARTIFICIAL_BRANCH``, baselined below where >=2 distinct
-   AST symbols exist) and 11 ``other_recipe`` rows (S-03, S-04, S-07, S-09,
-   S-25, S-27, S-28_29's S-29 component, S-32, S-33_34, S-40 — moved to
+   AST symbols exist) and 12 ``other_recipe`` rows (S-03, S-04, S-07, S-09,
+   S-18 (see the 2026-09-02 SECOND reclassification note below — collapsed by
+   1d6a7448d after this pass first ran, then reclassified), S-25, S-27,
+   S-28_29's S-29 component, S-32, S-33_34, S-40 — moved to
    disposition ``OTHER_RECIPE`` and OUT of the baseline dict, since the
    "duplicate" arm is a legitimately different, separately-cited reference;
    the registry's ``nemo_switch`` field now names each arm's reference).
@@ -166,6 +168,33 @@ new self-checks (the exact S-16-shaped laundering, and a fabricated
 ``selected_by`` name) plus a live re-run of the reviewer's three flips
 (S-16/S-18/S-19), each confirmed to go red under this fix.
 
+**2026-09-02 SECOND reclassification (S-18 only, post-1d6a7448d)**: re-tracing
+the actual call graph shows the "LOCK/OVERFLOW resolve MIN" finding above was
+itself a misreading, not a fact that changed. Both the WS-RK3 stage transport
+(``_nemo_ws_qco_stage_faces``) and the MLF tracer transport already called the
+shared kernel ``nemo_qco_live_face_geometry_from_operands`` even at audit time
+— commit 1d6a7448d ("One NEMO qco face thickness, reached by the RK3 and MLF
+lanes alike") describes itself as a "PURE REFACTOR" with "the operand order,
+the arithmetic ... unchanged", and the diff confirms it: it merely routes both
+lanes through one adapter symbol, ``vertical.nemo_qco_live_face_geometry_cgrid``
+(grep-verified: both call sites resolve to it on this checkout;
+``nemo_qco_live_face_thicknesses`` is now a thin wrapper serving only the
+separate S-19/wzv and S-43/GM-Redi consumers) and adds a non-vacuous pinning
+test. The row's actual second impl, ``min_cell_to_uface``, was never computing
+this quantity for LOCK/OVERFLOW/ORCA1 — the earlier pass conflated its own
+citation of ``zad_qco_evaluation``/``wzv_call2_evaluation`` (S-19's gates, read
+inside the PE lane's ``nemo_qco_wzv_operands``) with this row's own gate
+(``_NEMOWSRK3TestHooks.legacy_stage_min_face_thickness``, which no card ever
+sets True). S-18 is reclassified ``OTHER_RECIPE`` and dropped from the
+baseline: ``min_cell_to_uface``'s real, separately-cited role (the MOM6/MITgcm
+hFacW=min convention for the PE-lane depth-average/slow-forcing) is genuinely
+reached by the non-NEMO recipes too (``veros_faithful_v1``/``mitgcm_v1``/
+``oceananigans_v1`` structurally cannot reach the NEMO arm — it needs raw NEMO
+mesh operands their z-coordinates never carry), unlike the still-open S-26
+case this docstring's ``Reference`` section now cites instead. See
+``docs/ocean/fidelity/nemo_branch_isomorphism_map.md``'s "Triage against HEAD
+648e5cd69" section for the full trace.
+
 Re-derive by re-reading ``docs/ocean/fidelity/nemo_branch_isomorphism_map.md``
 and re-grepping each ``impls`` symbol; do not hand-edit the disposition
 without updating the doc it transcribes.
@@ -221,12 +250,15 @@ class Reference(NamedTuple):
     impl with an empty ``selected_by`` is an UNREFERENCED ARM (see the
     checker's ``_is_legitimately_referenced``): ``legoesm_legacy``/
     ``unclassified`` carry no external validation at all, and even a
-    ``veros``/``mitgcm``/``oceananigans`` model's OWN citation (e.g. "Adcroft,
-    Hill & Marshall 1997" for S-18's MIN convention) is not by itself proof
-    that a real non-NEMO recipe runs it FOR that reason — S-18's own citation
-    is real, but every actual consumer of that arm (LOCK, OVERFLOW, ORCA1) is
-    a NEMO-fidelity CARD, not a distinct model recipe, which is exactly why
-    S-18 is a genuine duplicate despite the citation looking legitimate.
+    ``veros``/``mitgcm``/``oceananigans`` model's OWN citation is not by
+    itself proof that a real non-NEMO recipe runs it FOR that reason (S-26's
+    ``al81`` cites no recipe at all and stays genuinely untriaged for exactly
+    this reason). S-18 was believed to be such a case ("Adcroft, Hill &
+    Marshall 1997" for its MIN convention, but every named consumer was a
+    NEMO-fidelity CARD, not a distinct model recipe) until the 2026-09-02
+    reclassification below found real non-NEMO consumers
+    (``veros_faithful_v1``/``mitgcm_v1``/``oceananigans_v1``) for it — see the
+    row's own note for the measurement.
     ``paper`` is the one model that stands on its own without a
     ``selected_by``: it names an external, peer-reviewed FORMULA (Wright
     1997, Visbeck et al. 1997), not a claim of "this literally transcribes
@@ -490,12 +522,51 @@ ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
         Impl(_BLC, "barotropic_coriolis_een_pre_step",
              Reference("nemo", "ln_dynvor_een_prestep", "dynspg_ts.F90:359,689 (een pre-step build)")),
     )),
-    RoutineRow("S-18", "dom_qco_r3c (r3u/r3v face thickness)", "ARTIFICIAL_BRANCH", "key_qco", (
+    RoutineRow("S-18", "dom_qco_r3c (r3u/r3v face thickness)", "OTHER_RECIPE", (
+        "key_qco; reclassified 2026-09-02 (post-1d6a7448d, CONFIRMED): the "
+        "prior 'LOCK/OVERFLOW resolve MIN' finding was itself a misreading, "
+        "not a fact 1d6a7448d changed -- both the WS-RK3 stage transport "
+        "(_nemo_ws_qco_stage_faces) and the MLF tracer transport already "
+        "delegated to the shared kernel "
+        "nemo_qco_live_face_geometry_from_operands at audit time (commit "
+        "1d6a7448d, 'One NEMO qco face thickness, reached by the RK3 and MLF "
+        "lanes alike', calls itself a PURE REFACTOR, arithmetic unchanged); it "
+        "unified both call sites onto one adapter symbol, "
+        "vertical.nemo_qco_live_face_geometry_cgrid (verified: both call "
+        "sites, omlc:5260 included, grep to it on this checkout), and pinned "
+        "it with a non-vacuous test. min_cell_to_uface's only "
+        "remaining role for this specific quantity is a private, "
+        "never-selected test hook (_NEMOWSRK3TestHooks."
+        "legacy_stage_min_face_thickness, omlc:1049, set True only inside "
+        "scripts/validate/.../nemo_testcase_phase3_stage_sweep_gate.py, never "
+        "by a production card); every other min_cell_to_uface call this row "
+        "used to cite (omlc:1379-1384 Matsuno-split Coriolis depth-average, "
+        "S-27; omlc:1093 the REFERENCE e3u_0 at eta=0, itself NEMO's own "
+        "domzgr min-rule per usrdef_zgr.F90:179-186) is a DIFFERENT NEMO "
+        "routine, not dom_qco_r3c. What remains a real, cited, separately-"
+        "reached arm is min_cell_to_uface's MOM6/MITgcm hFacW=min role in the "
+        "PE-lane depth-average/slow-forcing (opl:1364, omlc:4125), used "
+        "identically by every lat-lon C-grid card AND by the non-NEMO "
+        "recipes (they can never reach the NEMO arm -- it requires raw NEMO "
+        "mesh operands their z-coordinates do not carry)."
+    ), (
+        Impl(_VERTICAL, "nemo_qco_live_face_geometry_cgrid",
+             Reference("nemo", "dom_qco_r3c_shared_kernel",
+                        "domqco.F90:165-170,219-222 (dom_qco_r3c / dom_qco_r3c_RK3, one shared "
+                        "kernel since 1d6a7448d; nemo_qco_live_face_thicknesses, vertical.py:286, "
+                        "is now a thin wrapper delegating to "
+                        "nemo_qco_live_face_geometry_from_operands, vertical.py:140 -- the same "
+                        "kernel this symbol calls -- for the separate S-19/wzv and S-43/GM-Redi "
+                        "consumers)")),
         Impl(_LCOPS, "min_cell_to_uface",
-             Reference("mitgcm", "r3u_face_thickness_min",
-                        "Adcroft, Hill & Marshall (1997) MOM6/MITgcm partial-cell convention")),
-        Impl(_VERTICAL, "nemo_qco_live_face_thicknesses",
-             Reference("nemo", "r3u_face_thickness_mean", "domqco.F90:165-170 (key_qco surface-weighted MEAN)")),
+             Reference("mitgcm", "min_rule_transport_face",
+                        "Adcroft, Hill & Marshall (1997) MOM6/MITgcm hFacW=min convention "
+                        "(latlon_cgrid_operators.py:277-284); cited in place at "
+                        "ocean_model_latlon_cgrid.py:1379-1384 as commit 1d6a7448d's own "
+                        "'real legoESM scheme selection with its own reference ... not a "
+                        "defective NEMO transcription'",
+                        selected_by=("DINO", "LOCK", "OVERFLOW", "ORCA1",
+                                      "veros_faithful_v1", "mitgcm_v1", "oceananigans_v1"))),
     )),
     RoutineRow("S-19", "wzv", "ARTIFICIAL_BRANCH", "none (np_velocity/np_transport arg)", (
         Impl(_VERTICAL, "diagnose_w_from_flux_div",
@@ -852,18 +923,6 @@ ARTIFICIAL_BRANCH_BASELINE: dict[str, BaselineEntry] = {
             'dyn_spg_ts continuity/transport/spg: 5 generic-vs-nemo_literal branch pairs for '
             'one NEMO program (dynspg_ts.F90:~640-840); default is the generic arm, which '
             'ORCA1 runs. Reclassified 2026-09-02: NEMO_DUPLICATE, CONFIRMED.'
-        ),
-        kind='nemo_duplicate',
-    ),
-    "S-18": BaselineEntry(
-        reason=(
-            'RANK 1 (highest-value collapse). dom_qco_r3c r3u/r3v face thickness: '
-            "MIN-of-live-thickness vs NEMO's surface-weighted MEAN (domqco.F90:165-170) for "
-            'one quantity; DINO/GYRE reach MEAN at ldf_slp/dyn_zad, LOCK/OVERFLOW/ORCA1 reach '
-            'MIN everywhere including the shared dyn_adv/tra_adv operand. Mean-vs-min '
-            'measurement was IN FLIGHT at audit time — do not collapse ahead of it. '
-            'Reclassified 2026-09-02: NEMO_DUPLICATE, CONFIRMED — LOCK/OVERFLOW resolve MIN '
-            'on this checkout too, a live gap on the certified L1 cards, not just ORCA1.'
         ),
         kind='nemo_duplicate',
     ),

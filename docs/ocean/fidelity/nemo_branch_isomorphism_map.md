@@ -79,7 +79,7 @@ Cards: `D`=DINO kamm_mlf (MLF), `L`=LOCK_EXCHANGE-zco, `O`=OVERFLOW-zps,
 | S-15 | `dyn_spg_ts` backward face depth `zhu_bck` dynspg_ts.F90:738-747 | `key_qcoTest_FluxForm` (simple avg) vs default (e1e2t-weighted avg) | D L O G A | `blc:451 nemo_ssh_avg_face_depth` (+`_nemo_ssh_avg_prep/_apply`); `blc:581 _min_rule_face_depths` | `barotropic_face_depth` (`nemo_ssh_avg`/`min_rule`) | NEMO_SWITCH; on a lat-lon C-grid `e1e2t(i,j)==e1e2t(i+1,j)` so the two NEMO arms coincide (CONFIRMED algebraically, not measured). `min_rule` = ARTIFICIAL (no NEMO arm), ORCA1 on it (UNVERIFIED which arm ORCA1 resolves — `barotropic_face_depth` default is `min_rule`) |
 | S-16 | `dyn_spg_ts` continuity / transport accumulation / spg dynspg_ts.F90:~640-700,~840 | none | D L O G | `blc:494 nemo_literal_metric_transports`, `:512 nemo_literal_accumulate_transport`, `:548 nemo_literal_continuity_divergence`, `:224 _nemo_literal_barotropic_pressure_gradient`, `:147 _nemo_literal_seed_from_reference_mesh` vs the generic inline arms in `_run_substep_loop` | `barotropic_continuity_evaluation`, `barotropic_transport_accumulation_evaluation`, `barotropic_pgf_evaluation`, `barotropic_seed_evaluation`, `barotropic_seed_face_depth` | ARTIFICIAL_BRANCH x5 — NEMO has one program; defaults are the generic arm; ORCA1 on defaults |
 | S-17 | `dyn_cor_2D` (in-substep barotropic Coriolis) dynspg_ts.F90:359,689 | `ln_dynvor_ene/ens/een` | D G | `blc:944 een_barotropic_coriolis`, `:1058 barotropic_coriolis_een_pre_step`, `:731 _nemo_literal_een_coefficients`, `:840 _build_een_barotropic_inputs`; generic 4-pt `f_u*V_at_u` at `blc:1441,1494` | `barotropic_coriolis` (`avg`/`een`/`een_metric`/`ene_metric`), `barotropic_coriolis_split` (`frozen`/`live`), `barotropic_een_seed`, `barotropic_een_coefficient_evaluation` | NEMO_SWITCH on ene/een; `avg` + `frozen` = ARTIFICIAL (no NEMO arm) and is what L/O/A resolve to |
-| S-18 | `dom_qco_r3c` / `dom_qco_r3c_RK3` domqco.F90:140-186, :189-240 (r3u = **surface-weighted MEAN** of ssh) | `key_qco`; `key_qcoTest_FluxForm` sub-arm | D L O G A | (a) `dynamics/latlon_cgrid_operators.py:277 min_cell_to_uface` / `:312 min_cell_to_vface` — **MIN of live thickness**, used by `omlc:1063 _nemo_ws_stage_transport`, `omlc:4031`, `blc:334,896,1850`; (b) `vertical.py:197 nemo_qco_live_face_thicknesses` (+`nemo_qco_live_face_geometry_from_operands`) — r3u MEAN, used at `omlc:5128`, `opl:1508`, `gm_redi_latlon_cgrid.py:954,4252` | (b) gated by `zad_qco_evaluation="nemo_literal"` / `wzv_call2_evaluation="nemo_literal"` / `gm_redi_*_face_thickness_evaluation="nemo_qco_live"` | **ARTIFICIAL_BRANCH (rank 1)** — two impls of one NEMO quantity; D/G reach the MEAN rule at ldfslp/zad, L/O/A reach the MIN rule at every site. IN FLIGHT: a separate agent is measuring mean-vs-min in `/tmp/codex-testcases` |
+| S-18 | `dom_qco_r3c` / `dom_qco_r3c_RK3` domqco.F90:140-186, :189-240 (r3u = **surface-weighted MEAN** of ssh) | `key_qco`; `key_qcoTest_FluxForm` sub-arm | D L O G A | ~~(a) `dynamics/latlon_cgrid_operators.py:277 min_cell_to_uface`/`:312 min_cell_to_vface` — MIN of live thickness, used by `omlc:1063 _nemo_ws_stage_transport`~~ **CORRECTED 2026-09-02 (post-1d6a7448d) — see the "Triage against HEAD 648e5cd69" section below.** `_nemo_ws_stage_transport`'s stage-transport builder (`_nemo_ws_qco_stage_faces`) does NOT call `min_cell_to_uface` for this quantity (that citation conflated this row with S-19's `zad_qco_evaluation` gate, which lives in a different function, `nemo_qco_wzv_operands`); it calls the shared kernel via `vertical.py:218 nemo_qco_live_face_geometry_cgrid` (`:140 nemo_qco_live_face_geometry_from_operands` underneath), same as the MLF tracer transport and GM/Redi. `min_cell_to_uface`'s citation at `omlc:1379-1384` is a genuinely different routine (Matsuno-split Coriolis depth-average, S-27) | `zad_qco_evaluation`/`wzv_call2_evaluation`/`gm_redi_*_face_thickness_evaluation` gate the SEPARATE S-19/S-43 consumers of the shared kernel, not this row | **OTHER_RECIPE** (was `ARTIFICIAL_BRANCH (rank 1)`) — one NEMO kernel (`nemo_qco_live_face_geometry_cgrid`/`_from_operands`) reached by every card, beside `min_cell_to_uface`'s real, separately-cited MOM6/MITgcm hFacW=min role (PE-lane depth-average/slow-forcing, `opl:1364`/`omlc:4125`), reached by DINO/LOCK/OVERFLOW/ORCA1 **and** by `veros_faithful_v1`/`mitgcm_v1`/`oceananigans_v1` (which structurally cannot reach the NEMO arm — no raw NEMO mesh operands) |
 | S-19 | `wzv` sshwzv.F90 (np_velocity / np_transport) | none (arg-level) | D L O G A | `vertical.py:1293 diagnose_w_from_flux_div` (generic); `opl:~1450 nemo_qco_wzv_operands` (literal, incl. `nemo_qco_kmm_velocity_cycle`) | `wzv_call2_evaluation` (`generic`/`nemo_literal`) | ARTIFICIAL_BRANCH — one NEMO routine, two impls; D/G literal, L/O/A generic |
 | S-20 | `wAimp` sshwzv.F90 (adaptive-implicit w split) | `ln_zad_Aimp` | L O A | `vertical.py:52 nemo_wicker_aimp_partition_transport` (called at `omlc:1085` per stage) | `adaptive_implicit_vertadv` | SHARED (one impl). ORCA1 consumes it at a different site (`omlc:5300+` post-program) — composition differs |
 | S-21 | stage transport `zFu/zFv` + `zub` correction stprk3_stg.F90:257-277 | none (RK3 identity) | L O G | `omlc:1046 _nemo_ws_stage_transport` | none (private, `_NEMOWSRK3TestHooks` only) | SHARED across the three RK3 cards |
@@ -119,20 +119,14 @@ Cards: `D`=DINO kamm_mlf (MLF), `L`=LOCK_EXCHANGE-zco, `O`=OVERFLOW-zps,
 
 Ranked by (cards affected) x (how much arithmetic diverges) x (whether the default is the non-NEMO arm).
 
-1. **`dom_qco_r3c` r3u/r3v face thickness — MIN vs MEAN (S-18).**
-   `min_cell_to_uface`/`min_cell_to_vface` (live-thickness MIN) and
-   `nemo_qco_live_face_thicknesses` (NEMO's surface-weighted MEAN of ssh over
-   `e3u_0`) both implement `domqco.F90:165-170`. DINO/GYRE reach the MEAN at
-   `ldf_slp` and `dyn_zad`; LOCK/OVERFLOW/ORCA1 reach the MIN everywhere,
-   including inside `_nemo_ws_stage_transport` (the operand of BOTH `dyn_adv`
-   and `tra_adv`).
-   *Collapse:* make `nemo_qco_live_face_thicknesses` the single `e3u(Kmm)`
-   producer for every qco card and delete `zad_qco_evaluation` /
-   `wzv_call2_evaluation` / `gm_redi_*_face_thickness_evaluation`.
-   *Risk:* HIGH-VALUE, HIGH-CHURN. Changes every RK3 card's transport
-   bit-for-bit, so the certified DINO twin and both L1 gates must be re-run.
-   The mean-vs-min measurement is IN FLIGHT in `/tmp/codex-testcases`; do not
-   land ahead of it.
+1. ~~**`dom_qco_r3c` r3u/r3v face thickness — MIN vs MEAN (S-18).**~~
+   **RESOLVED 2026-09-02 (post-1d6a7448d) — not a duplicate.** The premise of
+   this item was wrong: `_nemo_ws_stage_transport` never actually reached the
+   MIN rule for this quantity (the "LOCK/OVERFLOW reach MIN everywhere"
+   framing conflated this row's own gate, a private test hook nothing sets,
+   with S-19's `zad_qco_evaluation`). Both lanes already delegated to one
+   shared kernel; see the "Triage against HEAD 648e5cd69" section below and
+   the registry's S-18 row (now `OTHER_RECIPE`). No collapse needed here.
 
 2. **PGF: `nemo_sco` unreachable from the ORCA1 driver (S-29).**
    `run_omip_core2.py:4570` restricts `--pgf-scheme` to `{adcroft, smc03}`;
@@ -324,7 +318,7 @@ classified below.
 | S-09 | `ldf_slp` ldfslp.F90 (~9 selectors) | one module `gm_redi_latlon_cgrid.py`, `GMRediConfig` | default: Veros recipes (`veros_acc_recipe.py:218`, `veros_global_4deg_recipe.py:227`) construct `GMRediConfig` untouched; nemo arm (`slope_scheme="nemo_iso_lap"`): DINO + GYRE via `nemo_recipe.py:392` | each field documents "historical" vs "DINO NEMO cards opt in" | **OTHER_RECIPE** | CONFIRMED (top-level `slope_scheme`); PLAUSIBLE (the other ~8 sub-fields not individually re-traced) |
 | S-12 | `stp_2D` pre-step stp2d.F90:49-288 | no legoESM equivalent as a unit — a full 3-stage WS ladder run only to seed the barotropic solve | only cards with `momentum_time_integrator="rk3_ws"`: LOCK, OVERFLOW, GYRE (l2). No catalog recipe uses `rk3_ws` | none (structural, not a config selector) | **NEMO_DUPLICATE** (same defect as S-30, different altitude) | CONFIRMED |
 | S-16 | `dyn_spg_ts` continuity/transport/spg dynspg_ts.F90:~640-840 (5 selectors) | generic FV form (SM2005-style, unreferenced) vs `nemo_literal`/`nemo_ssh_avg` | nemo arm: DINO, LOCK, OVERFLOW (`_model_config`, this checkout), GYRE (l2); generic: ORCA1 (`run_omip_core2.py` never sets these fields) and one Veros frozen-state tendency probe (deliberate bit-identical default, not a physics claim) | generic names no NEMO/other-oracle reference; nemo arm cites dynspg_ts.F90 | **NEMO_DUPLICATE** | CONFIRMED |
-| S-18 | `dom_qco_r3c` r3u/r3v MEAN vs MIN domqco.F90:140-240 | `min_cell_to_uface`/`_vface` (Adcroft/Hill/Marshall 1997 MOM6/MITgcm convention, CONFIRMED cited) vs `nemo_qco_live_face_thicknesses` (NEMO MEAN) | MEAN: DINO + GYRE (l2); MIN: LOCK, OVERFLOW **on this checkout** (verified `_model_config` never sets `zad_qco_evaluation`/`wzv_call2_evaluation` — this is a live gap on the certified L1 cards too, not ORCA1-only as the source doc's framing implied) + ORCA1 | MIN cites Adcroft et al. 1997 (a real reference, but for a *different* model's convention, not NEMO); MEAN cites domqco.F90 | **NEMO_DUPLICATE** | CONFIRMED |
+| S-18 | `dom_qco_r3c` r3u/r3v MEAN vs MIN domqco.F90:140-240 | `min_cell_to_uface`/`_vface` (Adcroft/Hill/Marshall 1997 MOM6/MITgcm convention, CONFIRMED cited) vs `nemo_qco_live_face_thicknesses` (NEMO MEAN) | MEAN: DINO + GYRE (l2); MIN: LOCK, OVERFLOW **on this checkout** (verified `_model_config` never sets `zad_qco_evaluation`/`wzv_call2_evaluation` — this is a live gap on the certified L1 cards too, not ORCA1-only as the source doc's framing implied) + ORCA1 | MIN cites Adcroft et al. 1997 (a real reference, but for a *different* model's convention, not NEMO); MEAN cites domqco.F90 | ~~**NEMO_DUPLICATE**~~ **SUPERSEDED 2026-09-02, post-1d6a7448d: OTHER_RECIPE** — this row's own "verified" gating claim was the error: `zad_qco_evaluation`/`wzv_call2_evaluation` gate `nemo_qco_wzv_operands` (S-19's routine, in `ocean_pe_latlon_cgrid.py`), not `_nemo_ws_stage_transport` (S-18's routine, in `ocean_model_latlon_cgrid.py`), which was never gated by them. See "Triage against HEAD 648e5cd69" below | CONFIRMED then, **RETRACTED** now |
 | S-19 | `wzv` sshwzv.F90 | `diagnose_w_from_flux_div` (generic) vs `nemo_qco_wzv_operands` (literal), same selector family as S-18 | same as S-18: DINO/GYRE on literal; LOCK/OVERFLOW/ORCA1 on generic | same as S-18 | **NEMO_DUPLICATE** | CONFIRMED |
 | S-25 | vertical momentum advection, non-NEMO arms | `upwind_perturbation` (default) / `centered_full` / `nemo_advective` | upwind_perturbation: unclaimed default, run by most catalog recipes + ORCA1 (no override); centered_full: `veros_faithful_v1`; nemo_advective: DINO + GYRE | centered_full cites Veros `core/momentum.py` (quoted); nemo_advective cites dynzad.F90; default names nothing | **OTHER_RECIPE** (ORCA1 landing on the unclaimed default instead of `nemo_advective` is a driver reachability gap, not a duplicate) | CONFIRMED |
 | S-27 | Coriolis time placement | `matsuno_split` (default, unreferenced legacy) vs `explicit_ab2` (in-RHS) | matsuno_split: unclaimed default, incl. ORCA1 (unset); explicit_ab2: `veros_faithful_v1`, `oceananigans_v1`, `mitgcm_v1` (recipes.py) **and** DINO + GYRE (this arm is simultaneously Veros's own scheme AND NEMO's real Coriolis placement) | explicit_ab2 docstring: "VEROS-FAITHFUL" + DINOConfig comment "(MITgcm/Oceananigans/Veros)" + cites dynspg_ts.F90 for GYRE's use; matsuno_split names nothing | **OTHER_RECIPE** (ORCA1 defaulting to matsuno_split while live is the real gap the source doc's own item 9 names — a missing override, not a second NEMO implementation) | CONFIRMED |
@@ -342,20 +336,29 @@ classified below.
 
 | classification | rows | which |
 |---|---|---|
-| NEMO_DUPLICATE | 8 | S-12, S-16, S-18, S-19, S-30, S-35, S-42, M-01 |
-| OTHER_RECIPE | 11 | S-03, S-04, S-07, S-09, S-25, S-27, S-29, S-32, S-33, S-34, S-40 |
+| NEMO_DUPLICATE | 7 (was 8) | S-12, S-16, S-19, S-30, S-35, S-42, M-01 |
+| OTHER_RECIPE | 12 (was 11) | S-03, S-04, S-07, S-09, S-18 (moved here 2026-09-02, see below), S-25, S-27, S-29, S-32, S-33, S-34, S-40 |
 | ORPHAN | 0 | — |
+
+**S-18 moved NEMO_DUPLICATE -> OTHER_RECIPE, 2026-09-02 (post-1d6a7448d)**: the
+row above still records this pass's original (CONFIRMED, at the time) verdict
+as history. It was retracted the same day — see "Triage against HEAD
+648e5cd69" below for the correction and the registry's S-18 row for the
+mechanical fix.
 
 **Headline correction**: several rows this doc flagged among its top-priority
 "mistakes to collapse" — S-27 (Coriolis split), S-29 (PGF), S-33/S-34
 (ZDF solver/divisor) — are legitimate Veros/MITgcm/Oceananigans/paper-cited
 forks, each carrying a *different* real defect: ORCA1 (and, for S-34, DINO)
 simply never selects the NEMO arm it already has, a reachability/hidden-
-default bug, not duplicated NEMO implementation work. Conversely S-16/S-18/
-S-19 (barotropic transport, qco face-thickness, wzv) are confirmed genuine
-duplicates reaching **every** certified NEMO card, including LOCK/OVERFLOW on
-this checkout for S-18/S-19 (not just ORCA1, as this doc's own §0 framing
-suggested).
+default bug, not duplicated NEMO implementation work. S-16/S-19 (barotropic
+transport, wzv) are confirmed genuine duplicates reaching **every** certified
+NEMO card, including LOCK/OVERFLOW on this checkout for S-19 (not just ORCA1,
+as this doc's own §0 framing suggested). **S-18 (qco face-thickness) is NOT**:
+the "reaches MIN on LOCK/OVERFLOW" claim below conflated S-18's own gate (a
+private test hook nothing sets) with S-19's `zad_qco_evaluation` — see the
+"Triage against HEAD 648e5cd69" section for the correction; S-18 moved to
+OTHER_RECIPE the same day.
 
 S-12 and S-30 are both genuine NEMO_DUPLICATE (S-30 is this doc's own rank-3
 collapse item, §2 above — the one row with an already-realized bug: a fix to
@@ -392,3 +395,208 @@ real committed unit test (`tests/ocean/unit/test_nemo_mlf_step_transcription.py`
 and names a NEMO reference, so it fails the ORPHAN bar ("selected by no
 recipe **and** naming no reference") on the reference prong — it stays
 NEMO_DUPLICATE (validated-but-unpromoted).
+
+## Triage against HEAD 648e5cd69
+
+Worktree `/tmp/wt-branch-iso`, branch `fidelity/nemo-branch-isomorphism-audit`,
+HEAD `648e5cd69` (clean). Read-only re-verification of six rows against the
+CURRENT tree — every claim below is a fresh grep/read on this checkout, not a
+citation of the §6 table above (which is now stale for S-18, see its own
+struck-through rows). NEMO source
+`/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src/OCE`.
+
+### S-18 (dom_qco_r3c) — see the registry fix, summary only
+
+Reclassified `ARTIFICIAL_BRANCH` → `OTHER_RECIPE` in this same commit (see the
+struck-through §1 item 1, §6.1 row, and §6.2 count above). The "LOCK/OVERFLOW
+reach MIN" finding this doc and the registry both carried was a misreading:
+`_nemo_ws_stage_transport`'s face-thickness builder (`_nemo_ws_qco_stage_faces`
+→ `vertical.py:218 nemo_qco_live_face_geometry_cgrid` →
+`vertical.py:140 nemo_qco_live_face_geometry_from_operands`) was never gated by
+`zad_qco_evaluation`/`wzv_call2_evaluation` — those gate a *different*
+function, `ocean_pe_latlon_cgrid.py:1472 nemo_qco_wzv_operands` (S-19's own
+routine). `min_cell_to_uface`'s only competing role for THIS quantity is
+`_NEMOWSRK3TestHooks.legacy_stage_min_face_thickness`
+(`ocean_model_latlon_cgrid.py:1049`), set `True` only inside
+`scripts/validate/ocean_fidelity/testcases/nemo_testcase_phase3_stage_sweep_gate.py`,
+never by a production card. `min_cell_to_uface`'s real role (MOM6/MITgcm
+hFacW=min, `latlon_cgrid_operators.py:277-284`) is the PE-lane
+depth-average/slow-forcing (`ocean_pe_latlon_cgrid.py:1364`,
+`ocean_model_latlon_cgrid.py:4125`), reached by DINO/LOCK/OVERFLOW/ORCA1 *and*
+by `veros_faithful_v1`/`mitgcm_v1`/`oceananigans_v1` (confirmed real catalog
+names via `legoesm.ocean.recipes.list_recipes()`), none of which can ever
+reach the NEMO arm (it needs `z_coord.nemo_hu_0`/`nemo_e1e2*`, only present on
+NEMO-mesh-carrying coordinates). Classification: **ALREADY_COLLAPSED /
+OTHER_RECIPE** (both apply: the genuine WS-RK3-vs-MLF structural duplication
+was already resolved by commit `1d6a7448d`, a pure refactor per its own
+message; the row's remaining second impl was never a duplicate of this
+quantity at all).
+
+### S-19 (`wzv`) — generic vs `nemo_literal`
+
+1. **Duplicate present at HEAD?** Yes. `vertical.py:1374
+   diagnose_w_from_flux_div` (generic) vs `ocean_pe_latlon_cgrid.py:1472
+   nemo_qco_wzv_operands` (literal), both reachable — confirmed by direct
+   `grep`, both symbols AST-resolve and both have live callers
+   (`ocean_model_latlon_cgrid.py:456,1154,5340` for the generic diagnostic;
+   `ocean_model_latlon_cgrid.py:5333` for the literal path). Gated by
+   `state.py:2221 zad_qco_evaluation` / `:2225 wzv_call2_evaluation`, both
+   default `"generic"`.
+2. **What do the certified cards run?** DINO's certified card
+   (`dino.py:1418-1419`, inside `dino_r1_exact_config`) explicitly sets both to
+   `"nemo_literal"`. `nemo_testcase_recipe.py` (LOCK/OVERFLOW's builder) never
+   sets either field (`grep` — zero hits) → both stay at the config default
+   `"generic"`, i.e. LOCK/OVERFLOW do **not** reach the NEMO arm for `wzv`.
+3. **ORCA1?** `scripts/run/run_omip_core2.py` never sets either field (`grep`
+   — zero hits) → resolves `"generic"`, same as LOCK/OVERFLOW.
+4. **Any non-NEMO recipe/card/matrix reaches the legacy arm deliberately?** No.
+   `packages/ocean/legoesm/ocean/recipes.py` never sets either field for any
+   catalog recipe (`veros_faithful_v1`/`mitgcm_v1`/`oceananigans_v1` all fall
+   to the same unclaimed `"generic"` default as ORCA1) — this is the "unclaimed
+   default", not a deliberate OTHER_RECIPE selection.
+5. **Config-only re-point?** No, for LOCK/OVERFLOW *and* ORCA1.
+   `nemo_qco_wzv_operands` hard-`raise`s unless `z_coord` carries
+   `nemo_e3t_0`/`nemo_hu_0`/`nemo_hv_0`/`nemo_e1e2t`/`nemo_e1e2u`/`nemo_e1e2v`
+   (`ocean_pe_latlon_cgrid.py:1494-1503`) — unlike S-18's
+   `_nemo_ws_qco_stage_faces`, this function does **not** fall back to building
+   these operands generically from the card's own grid; it requires the raw
+   NEMO mesh fields to already be attached to `z_coord`. ORCA1's driver reads
+   `data/grids/eORCA1.2_mesh_mask.nc` via `read_mesh_mask_bathy` but that
+   helper (per its call sites, `run_omip_core2.py:1378` etc.) returns only
+   `land_mask`/`H_bathy`, not the `nemo_hu_0`/`nemo_e1e2*` fields the function
+   needs — same missing-operand wall as S-18's ORCA1 case. LOCK/OVERFLOW carry
+   the same structural gap (their z-coordinate is not built from a real NEMO
+   mesh_mask at all).
+6. **Classification: NEEDS_ORCA1_OPERANDS** (extends to LOCK/OVERFLOW too —
+   `nemo_qco_wzv_operands` would need the generic-operand-construction fallback
+   `_nemo_ws_qco_stage_faces` already has before any of the three cards could
+   be re-pointed by config alone).
+
+*Recommendation*: give `nemo_qco_wzv_operands` the same generic-operand
+fallback `_nemo_ws_qco_stage_faces` uses (build `hu_0`/`e1e2*` from the card's
+own grid when `z_coord.nemo_*` is absent) before attempting the collapse.
+
+### S-16 (`dyn_spg_ts` continuity/transport/spg)
+
+1. **Duplicate present at HEAD?** Yes. `barotropic_latlon_cgrid.py:548
+   nemo_literal_continuity_divergence` (+ 4 sibling `nemo_literal_*`/
+   `nemo_ssh_avg_*` helpers) vs `:1135 _run_substep_loop`'s generic inline arms,
+   gated by 5 selectors (`barotropic_continuity_evaluation`,
+   `_transport_accumulation_evaluation`, `_pgf_evaluation`, `_seed_evaluation`,
+   `_seed_face_depth`), all defaulting to `"generic"`/`"min_rule"`
+   (`state.py:1130`).
+2. **Certified cards?** `nemo_testcase_recipe.py:80-84` (LOCK/OVERFLOW) sets
+   ALL FIVE to their NEMO-literal values. DINO (`dino.py:1516` + siblings, same
+   `dino_r1_exact_config` override block as S-19) also sets the NEMO arm. GYRE
+   (l2 branch, per the existing §6.1 row, unchanged) too. So — unlike S-18/
+   S-19 — **LOCK/OVERFLOW genuinely reach the NEMO arm on this checkout.**
+3. **ORCA1?** `scripts/run/run_omip_core2.py` never sets any of the 5 fields
+   (`grep` — zero hits) → resolves the generic default.
+4. **Non-NEMO recipe reach?** No — `recipes.py` never sets these fields either
+   (zero hits); same unclaimed-default pattern as ORCA1, not a deliberate
+   OTHER_RECIPE fork.
+5. **Config-only re-point for ORCA1?** Yes. `nemo_literal_continuity_divergence`
+   (`barotropic_latlon_cgrid.py:548-577`) takes only `H_u, H_v, U, V, u_mask,
+   v_mask, grid` — ordinary model-generic operands, no `z_coord.nemo_*`
+   fields. The `"nemo_ssh_avg"` face-depth rule (`_nemo_ssh_avg_prep`/`_apply`,
+   called near `barotropic_latlon_cgrid.py:1230`) likewise only needs
+   `H_bathy, mask, grid, dtype` — everything ORCA1 already has. No missing
+   operand blocks this arm, unlike S-18/S-19.
+6. **Classification: COLLAPSIBLE_NOW** — ORCA1 is a five-field config flip
+   away from the arm its own DINO/LOCK/OVERFLOW/GYRE siblings already run; no
+   new code or operand needed. (Per Rule 3/the map's own §2 ranked item 12,
+   the actual default flip is a one-line-per-field ASK, not a silent move.)
+
+### S-35 (stage-3 `zub` barotropic correction)
+
+1. **Duplicate present at HEAD?** Yes. Site (a) `ocean_model_latlon_cgrid.py:
+   4800 _replace_stage_mean`, called unconditionally per WS-RK3 stage (call
+   sites `:4963,4979,4997`). Site (b) `:6555 _fixed_depth_means`, called at
+   `:6382,6465` but gated: `_impose_mean = getattr(_cfg_b.barotropic,
+   "nemo_stage_mean_imposition", False) and _apply_implicit_vmix` (`:6378-6380`).
+2. **Certified cards?** `nemo_stage_mean_imposition` defaults `False`
+   (`state.py:1265`). Only `fidelity/nemo_recipe.py:978` (GYRE) sets it `True`.
+   `nemo_testcase_recipe.py` (LOCK/OVERFLOW) never sets it (`grep` — zero
+   hits) → both stay on site (a) only, i.e. the WRONG side of `dyn_zdf` per
+   NEMO (`stprk3_stg.F90:430,433-446`) — a live gap on the certified L1 cards.
+3. **ORCA1?** `run_omip_core2.py` never sets it either → same site-(a)-only
+   gap.
+4. **Non-NEMO recipe reach?** No — `recipes.py` never sets this field (zero
+   hits); unclaimed default shared with ORCA1/LOCK/OVERFLOW.
+5. **Config-only re-point?** Yes, structurally: `_fixed_depth_means(self, st,
+   z_coord=None, config=None, grid=None)` takes only model-generic arguments,
+   no NEMO mesh operand. Flipping `nemo_stage_mean_imposition=True` for LOCK/
+   OVERFLOW/ORCA1 needs no new code.
+6. **Classification: COLLAPSIBLE_NOW** — same config-flip shape as S-16, no
+   operand gap. (The map's own §2 ranked item 6 already flags this as a
+   pending Rule-3 ASK, "Risk: LOW-MEDIUM... needs re-running the phase-3
+   gates" — a real, live TODO, not resolved.)
+
+### S-42 (BBL: in-stage vs driver post-step)
+
+1. **Duplicate present at HEAD?** Yes. `physics/bbl_adv.py:232
+   apply_bbl_adv_tendency` (in-stage), called from
+   `ocean_model_latlon_cgrid.py:1278` — gated by `bbl_adv_option` (default `0`,
+   `state.py:2082`). `physics/bbl_adv.py:312 apply_bbl_adv_step` (driver
+   post-step Euler with an extra transport cap), called ONLY from
+   `scripts/run/run_omip_core2.py:8421` — its sole caller in the whole tree.
+2. **Certified cards?** `nemo_testcase_recipe.py:215` (LOCK) sets
+   `bbl_adv_option=0` (BBL off — flat bottom, no bathymetric step). `:271`
+   (OVERFLOW) sets `bbl_adv_option=2` (BBL on, in-stage) — the NEMO arm.
+3. **ORCA1?** Never sets `bbl_adv_option` in `run_omip_core2.py` (`grep` —
+   zero hits) → stays at the config default `0` (in-model BBL OFF). Instead it
+   has its OWN CLI flag, `--bbl-adv` (`run_omip_core2.py:4803`), which drives
+   `apply_bbl_adv_step` entirely outside the `bbl_adv_option` dispatch — two
+   disconnected selectors for the same NEMO physics (`trabbl.F90`).
+4. **Non-NEMO recipe reach?** No — `recipes.py` never sets `bbl_adv_option`;
+   not checked, no catalog recipe runs a bathymetric-step case that would need
+   BBL at all.
+5. **Config-only re-point for ORCA1?** Plausibly yes, not fully proven here.
+   `apply_bbl_adv_tendency` needs `h_k, area, geom: BBLGeometry` — the same
+   `BBLGeometry` object `run_omip_core2.py:6345` already builds
+   (`bbl_static_geometry`) to feed its OWN `--bbl-adv` driver path. No NEMO-
+   mesh-only operand is visible in the signature, so setting
+   `bbl_adv_option=2` in ORCA1's config (instead of `--bbl-adv`) looks
+   structurally feasible, but the two paths' extra transport cap difference
+   (noted in the existing §6.1 row) means this needs an A/B, not just a flip.
+6. **Classification: COLLAPSIBLE_NOW** (operands already exist; needs an A/B
+   + Rule-3 ASK before the default moves, not new plumbing).
+
+### M-01 (`stp_MLF`: `_leapfrog_step` vs `_nemo_mlf_step`)
+
+1. **Duplicate present at HEAD?** Yes. `ocean_model_latlon_cgrid.py:9842
+   _leapfrog_step` vs `:10379 _nemo_mlf_step`, dispatched at `:8938`/`:8949` on
+   `outer_integrator in ("leapfrog", "nemo_mlf")` — both are real, wired
+   dispatch values (multiple `raise` guards elsewhere reference both, e.g.
+   `:2998,3062,3473,4731`), not a stub.
+2. **Certified cards?** DINO's certified card uses `outer_integrator=
+   "leapfrog"` (repeatedly documented in `dino.py`, e.g. `:302,323,627,638,
+   998,1484,1720,1904` — "Requires outer_integrator='leapfrog'"). No
+   production card or catalog recipe sets `"nemo_mlf"` (`grep` across
+   `dino.py`/`recipes.py` — zero hits); its only caller outside the dispatch
+   itself is the committed test `tests/ocean/unit/
+   test_nemo_mlf_step_transcription.py` (22 test functions).
+3. **ORCA1?** N/A — M-01 is MLF-only (DINO is the sole MLF-lane card in the
+   catalog); ORCA1 runs RK3, not MLF.
+4. **Non-NEMO recipe reach?** No — `"nemo_mlf"` names a structural
+   transcription choice, not a scheme any catalog recipe selects.
+5. **Config-only re-point?** Yes, in principle — `outer_integrator="nemo_mlf"`
+   is already a first-class dispatch value; no missing operand blocks it. But
+   the map's own §2 ranked item 5 says bit-agreement between `_leapfrog_step`
+   and `_nemo_mlf_step` still needs to be PROVEN before re-pointing DINO at
+   it — that measurement was not found to have been run on this checkout
+   (only the transcription test's own internal checks, not a DINO-card A/B).
+6. **Classification: COLLAPSIBLE_NOW, gated on an unmeasured bit-agreement
+   check** — not an operand gap (there is none here); the blocker is a
+   not-yet-run A/B, per the map's own existing plan.
+
+### Summary table
+
+| row | duplicate still live? | certified-card arm | ORCA1 arm | config-only re-point? | classification |
+|---|---|---|---|---|---|
+| S-18 | resolved (was a misreading) | n/a | n/a | n/a | ALREADY_COLLAPSED / OTHER_RECIPE |
+| S-19 | yes | DINO=literal; LOCK/OVERFLOW=generic | generic | no — needs raw NEMO mesh operands `nemo_qco_wzv_operands` doesn't build generically | NEEDS_ORCA1_OPERANDS |
+| S-16 | yes | DINO/LOCK/OVERFLOW/GYRE=nemo_literal | generic | yes — NEMO arm needs only grid/mask, no NEMO mesh operand | COLLAPSIBLE_NOW |
+| S-35 | yes | GYRE=both sites; LOCK/OVERFLOW=site (a) only (wrong side of dyn_zdf) | site (a) only | yes — `_fixed_depth_means` is model-generic | COLLAPSIBLE_NOW |
+| S-42 | yes | OVERFLOW=in-stage (2); LOCK=off (0) | separate driver-side `--bbl-adv` path, `bbl_adv_option` stays 0 | plausibly — same `BBLGeometry` the driver path already builds | COLLAPSIBLE_NOW |
+| M-01 | yes | DINO=`leapfrog`; `nemo_mlf` selected by no card (test-only) | n/a (MLF-only row) | yes, structurally — blocked on an unmeasured bit-agreement check, not an operand gap | COLLAPSIBLE_NOW (pending A/B) |
