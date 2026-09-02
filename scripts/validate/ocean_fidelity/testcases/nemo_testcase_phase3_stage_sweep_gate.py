@@ -1059,10 +1059,10 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
         require_planted(rows, f"{case}.kt1.stage1.faithful.instantaneous_u")
     if plant_operand:
         require(case == "OVERFLOW-zps", "--plant-operand needs the OVERFLOW operand rows")
+        require_planted(operand_rows, f"{case}.kt1.stage1.faithful.tracer_operand_T")
     if plant_prediction:
         require(case == "OVERFLOW-zps",
                 "--plant-prediction needs the OVERFLOW prediction rows")
-        require_planted(operand_rows, f"{case}.kt1.stage1.faithful.tracer_operand_T")
     return {
         "format": "nemo-testcase-l1-phase3-stage-sweep-v1",
         "case": case,
