@@ -18,11 +18,18 @@ the offending file so the duplication can be folded back into
 
 from __future__ import annotations
 
+import ast
 import pathlib
 
 import pytest
 
 from tests.legoesm_paths import legoesm_source_path
+from tests.ocean.unit._nemo_branch_isomorphism_baseline import (
+    ARTIFICIAL_BRANCH_BASELINE,
+    Impl,
+    ROUTINE_REGISTRY,
+    RoutineRow,
+)
 
 DYN = legoesm_source_path("ocean/dynamics/ocean_tendency_common.py").parent
 
@@ -205,3 +212,165 @@ def test_common_modules_import_cleanly():
     for name in ("compute_filter_weights", "bebt_blend", "maxvel_clip"):
         assert hasattr(mod_bt, name), (
             f"barotropic_common does not expose {name}")
+
+
+# ---------------------------------------------------------------------
+# NEMO branch-isomorphism ratchet (fidelity audit, 2026-09).
+#
+# USER PRINCIPLE: legoESM's branch structure must be isomorphic to NEMO's —
+# the only legitimate branch points are NEMO's own namelist/cpp switches. A
+# second legoESM implementation of a NEMO routine that NEMO treats as ONE arm
+# (a scheme-local twin, a '_ws'/'_nemo_kmm' copy of a shared helper, a
+# per-case selector NEMO does not have) is an artificial branch even when
+# both copies are individually correct, because a fix landed in one does not
+# reach the other.
+#
+# See ``docs/ocean/fidelity/nemo_branch_isomorphism_map.md`` for the audit
+# and ``_nemo_branch_isomorphism_baseline.py`` for the registry this checks.
+# ---------------------------------------------------------------------
+
+def _ast_symbol_exists(rel_path: str, symbol: str) -> bool:
+    """True if a ``def``/``class`` named ``symbol`` is AST-resolvable
+    anywhere in the file at ``rel_path`` (top-level or nested — a helper
+    nested inside another function is a legitimate implementation symbol)."""
+    path = legoesm_source_path(rel_path)
+    if not path.is_file():
+        return False
+    tree = ast.parse(path.read_text())
+    return any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and node.name == symbol
+        for node in ast.walk(tree)
+    )
+
+
+def find_isomorphism_violations(
+    registry: tuple[RoutineRow, ...], baseline: dict[str, str],
+) -> list[str]:
+    """Pure checker: ``registry`` + ``baseline`` -> violation strings (empty
+    = clean). Factored out so the production gate below and the synthetic
+    self-checks exercise the exact same logic.
+
+    Rules:
+      1. Every ``Impl`` named in the registry must AST-resolve (a rename or
+         deletion cannot silently drop coverage).
+      2. A row with ``disposition == "ARTIFICIAL_BRANCH"`` and >=2 *distinct*
+         impls is a NEW undocumented artificial branch unless its
+         ``routine_id`` is a key in ``baseline`` — that is the ratchet:
+         legoESM may not grow a second implementation of a shared NEMO
+         routine without a human writing down why.
+      3. Shrink-only: a ``baseline`` key naming a routine_id that is missing,
+         or whose row no longer qualifies (disposition changed away from
+         ``ARTIFICIAL_BRANCH``, or collapsed to <=1 distinct impl), is stale
+         and must be deleted — a collapse PR is not allowed to leave the old
+         allowance sitting around.
+    """
+    errors: list[str] = []
+    seen_ids: set[str] = set()
+    for row in registry:
+        if row.routine_id in seen_ids:
+            errors.append(f"duplicate routine_id in registry: {row.routine_id}")
+        seen_ids.add(row.routine_id)
+
+        for impl in row.impls:
+            if not _ast_symbol_exists(impl.rel_path, impl.symbol):
+                errors.append(
+                    f"{row.routine_id} ({row.nemo_routine}): registry symbol "
+                    f"{impl.symbol!r} no longer resolves in {impl.rel_path} "
+                    "(renamed or removed? update the registry, or restore "
+                    "the symbol)")
+
+        distinct = set(row.impls)
+        if row.disposition == "ARTIFICIAL_BRANCH" and len(distinct) >= 2:
+            if row.routine_id not in baseline:
+                errors.append(
+                    f"{row.routine_id} ({row.nemo_routine}): {len(distinct)} "
+                    "distinct legoESM implementations of one NEMO routine "
+                    "with no NEMO switch backing the split, and NOT in "
+                    "ARTIFICIAL_BRANCH_BASELINE — this is a NEW artificial "
+                    "branch point (see nemo_branch_isomorphism_map.md); "
+                    "either delete the duplicate implementation or add a "
+                    "baseline entry naming the reason.")
+
+    registry_by_id = {r.routine_id: r for r in registry}
+    for rid, reason in baseline.items():
+        row = registry_by_id.get(rid)
+        if row is None:
+            errors.append(
+                f"ARTIFICIAL_BRANCH_BASELINE has a stale entry {rid!r} "
+                f"({reason!r}): no such routine_id in the registry — remove "
+                "it (shrink-only).")
+            continue
+        distinct = set(row.impls)
+        if not (row.disposition == "ARTIFICIAL_BRANCH" and len(distinct) >= 2):
+            errors.append(
+                f"ARTIFICIAL_BRANCH_BASELINE has a stale entry {rid!r}: the "
+                f"branch was collapsed (disposition={row.disposition!r}, "
+                f"{len(distinct)} distinct impl(s) remain) — remove the "
+                "baseline entry (shrink-only).")
+    return errors
+
+
+def test_nemo_branch_isomorphism_registry_is_clean():
+    """Production gate: every registered symbol still exists, every
+    undocumented 2+-impl artificial branch is baselined with a reason, and
+    the baseline carries no stale entries."""
+    errors = find_isomorphism_violations(ROUTINE_REGISTRY, ARTIFICIAL_BRANCH_BASELINE)
+    assert not errors, "\n".join(errors)
+
+
+def test_nemo_branch_isomorphism_registry_nonvacuous():
+    """Anti-vacuity: the registry and baseline actually have rows (an empty
+    registry would make the gate above pass trivially)."""
+    assert len(ROUTINE_REGISTRY) >= 20, (
+        "NEMO branch-isomorphism registry looks empty/truncated")
+    assert len(ARTIFICIAL_BRANCH_BASELINE) >= 5, (
+        "artificial-branch baseline looks empty/truncated")
+
+
+# --- synthetic-violation self-checks: prove the checker can go red -----
+
+def test_nemo_branch_isomorphism_flags_new_undocumented_duplicate():
+    """Plant a NEW artificial branch — two real, distinct, existing symbols
+    under one ``ARTIFICIAL_BRANCH`` row that is in no baseline — and confirm
+    the checker rejects it. Proves rule 2 (">=2 impls needs a baseline
+    entry") actually fires rather than always passing."""
+    planted = RoutineRow(
+        "FAKE-DUP", "planted duplicate (self-check only)", "ARTIFICIAL_BRANCH",
+        "none", (
+            Impl("ocean/eos.py", "compute_buoyancy_frequency"),
+            Impl("ocean/eos.py", "compute_buoyancy_frequency_adiabatic"),
+        ))
+    errors = find_isomorphism_violations((planted,), {})
+    assert any(
+        "FAKE-DUP" in e and "NOT in ARTIFICIAL_BRANCH_BASELINE" in e
+        for e in errors
+    ), f"planted duplicate was not flagged: {errors}"
+
+
+def test_nemo_branch_isomorphism_flags_stale_baseline_entry():
+    """Plant a baseline entry for a row that no longer duplicates (only one
+    distinct impl remains) and confirm the checker demands its removal.
+    Proves rule 3 (shrink-only) actually fires."""
+    planted = RoutineRow(
+        "FAKE-COLLAPSED", "planted collapsed branch (self-check only)",
+        "SHARED", "none", (Impl("ocean/eos.py", "compute_buoyancy_frequency"),))
+    errors = find_isomorphism_violations(
+        (planted,), {"FAKE-COLLAPSED": "stale reason from a finished collapse"})
+    assert any(
+        "FAKE-COLLAPSED" in e and "collapsed" in e for e in errors
+    ), f"stale baseline entry was not flagged: {errors}"
+
+
+def test_nemo_branch_isomorphism_flags_missing_symbol():
+    """Plant a registry row naming a symbol that does not exist and confirm
+    the checker rejects it. Proves a rename/deletion cannot silently drop
+    coverage."""
+    planted = RoutineRow(
+        "FAKE-MISSING", "planted missing-symbol row (self-check only)",
+        "SHARED", "none",
+        (Impl("ocean/eos.py", "this_symbol_does_not_exist_anywhere_zzz"),))
+    errors = find_isomorphism_violations((planted,), {})
+    assert any(
+        "FAKE-MISSING" in e and "no longer resolves" in e for e in errors
+    ), f"missing symbol was not flagged: {errors}"

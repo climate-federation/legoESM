@@ -1,0 +1,349 @@
+"""Registry for the NEMO branch-isomorphism ratchet (fidelity audit, 2026-09).
+
+USER PRINCIPLE this enforces (see ``docs/ocean/fidelity/nemo_branch_isomorphism_map.md``):
+legoESM's branch structure must be ISOMORPHIC to NEMO's. Where NEMO shares one
+routine across configurations, legoESM must share ONE implementation too — the
+only legitimate branch points are NEMO's own namelist/cpp switches. A SECOND
+legoESM implementation of the same NEMO routine (a scheme-local twin, a
+'_ws'/'_nemo_kmm' copy of a shared helper, a per-case selector NEMO does not
+have) is an ARTIFICIAL BRANCH even when both copies are individually correct,
+because a fix landed in one does not reach the other — this happened for real
+during the audit (``_stage_vertical_up3`` / live-HPG fixes landed in the WS
+"ladder #2" only; see the doc's ranked item 3).
+
+``ROUTINE_REGISTRY`` transcribes the audit's "Routine -> implementation map"
+(one entry per NEMO routine the audit examined). Each entry names:
+  * ``disposition`` — the audit's classification: ``SHARED`` (one legoESM
+    impl reached by every card that reaches the NEMO routine — correct),
+    ``NEMO_SWITCH`` (several impls, each a REAL distinct NEMO namelist arm —
+    legitimate), ``ARTIFICIAL_BRANCH`` (several impls for what NEMO treats as
+    ONE arm — a defect), ``ABSENT`` (NEMO routine has no legoESM counterpart),
+    or ``UNVERIFIED`` (audit did not trace far enough to classify).
+  * ``impls`` — the legoESM symbols (module path under the ``legoesm``
+    namespace + a name AST-resolvable inside it) the audit identified as
+    implementing this routine. Populated only where the audit named a
+    concrete, independently-defined symbol (a top-level or nested ``def``/
+    ``class``) that a grep against the tree at audit time (2026-09-01)
+    confirmed exists — see the doc's per-row ``file:line`` citations. Left
+    empty where the audit's note names a config selector, an inline branch
+    with no enclosing symbol of its own, or a directory glob rather than one
+    checkable symbol; those rows are still listed (full map coverage) but
+    carry no AST/duplication enforcement. NOT every one of the audit's ~48
+    ``*_evaluation`` sub-selectors is transcribed (rank-10 in the doc's ranked
+    list) — two representative, individually-verified pairs are (TKE solver,
+    GM/Redi face-thickness); the rest is documented debt, not silently
+    dropped coverage (see the doc for the full ~48-name list).
+
+``ARTIFICIAL_BRANCH_BASELINE`` is the SHRINK-ONLY allow-list: a routine_id may
+appear here only if its registry row is ``disposition="ARTIFICIAL_BRANCH"``
+AND has >=2 *distinct* ``impls`` right now. The reason string is lifted from
+the audit's own note / ranked-branches section. Collapsing a branch (the
+audit's collapse plans) means the fix reduces that row's distinct impls to
+<=1 and this dict's entry must be deleted in the SAME PR (stale-entry check).
+
+Re-derive by re-reading ``docs/ocean/fidelity/nemo_branch_isomorphism_map.md``
+and re-grepping each ``impls`` symbol; do not hand-edit the disposition
+without updating the doc it transcribes.
+"""
+
+from __future__ import annotations
+
+from typing import NamedTuple
+
+
+class Impl(NamedTuple):
+    # Path under the ``legoesm`` namespace (passed to
+    # ``tests.legoesm_paths.legoesm_source_path``), e.g. ``"ocean/eos.py"``.
+    rel_path: str
+    # Name of a ``def``/``class`` AST-resolvable anywhere in that file
+    # (top-level or nested — a nested helper like ``_replace_stage_mean``
+    # is a legitimate implementation symbol for its own row).
+    symbol: str
+
+
+class RoutineRow(NamedTuple):
+    routine_id: str          # matches the doc's S-xx / M-xx row id
+    nemo_routine: str        # short label, e.g. "eos_rab", "stp_MLF"
+    disposition: str         # SHARED | NEMO_SWITCH | ARTIFICIAL_BRANCH | ABSENT | UNVERIFIED
+    nemo_switch: str         # the namelist/cpp switch(es), or "none" / "n/a"
+    impls: tuple[Impl, ...] = ()
+
+
+_EOS = "ocean/eos.py"
+_DINO = "ocean/experiments/dino.py"
+_NEMO_RECIPE = "ocean/fidelity/nemo_recipe.py"
+_TESTCASE_RECIPE = "ocean/fidelity/nemo_testcase_recipe.py"
+_RESTORING = "ocean/physics/surface_forcing/restoring.py"
+_BULK_OMIP = "ocean/bulk_flux_omip.py"
+_CONST_VMIX = "ocean/physics/vertical_mixing/constant.py"
+_TKE = "ocean/physics/vertical_mixing/tke.py"
+_ENH_DIFF = "ocean/physics/convection/enhanced_diffusion.py"
+_GM_REDI = "ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py"
+_LM_CONFIG = "ocean/physics/lateral_mixing/config.py"
+_LCOPS = "ocean/dynamics/latlon_cgrid_operators.py"
+_VERTICAL = "ocean/vertical.py"
+_OMLC = "ocean/dynamics/ocean_model_latlon_cgrid.py"
+_OPL = "ocean/dynamics/ocean_pe_latlon_cgrid.py"
+_BLC = "ocean/dynamics/barotropic_latlon_cgrid.py"
+_BLC_IMPLICIT = "ocean/dynamics/barotropic_implicit_latlon_cgrid.py"
+_RIGID_LID = "ocean/dynamics/rigid_lid_latlon_cgrid.py"
+_BAROTROPIC_COMMON = "ocean/dynamics/barotropic_common.py"
+_PGF_SMC03 = "ocean/dynamics/pgf_smc03.py"
+_PGF_AHH08 = "ocean/dynamics/pgf_ahh08.py"
+_BBL = "ocean/physics/bbl_adv.py"
+_ADVECTION = "ocean/advection.py"
+_SHORTWAVE = "ocean/physics/shortwave_penetration.py"
+
+
+ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
+    RoutineRow("S-01", "sbc", "NEMO_SWITCH", "ln_usr vs bulk formulae", (
+        Impl(_DINO, "dino_step_surface_forcing"),
+        Impl(_RESTORING, "restoring_surface_forcing"),
+        Impl(_BULK_OMIP, "air_sea_fluxes"),
+    )),
+    RoutineRow("S-02", "eos_rab", "NEMO_SWITCH", "ln_teos10 / ln_seos (ORCA1 'wright' = no NEMO arm)", (
+        Impl(_EOS, "nemo_roquet_alpha_beta"),
+        Impl(_EOS, "nemo_seos_alpha_beta"),
+        Impl(_EOS, "eos_density_derivatives"),
+        Impl(_EOS, "wright_eos"),
+    )),
+    RoutineRow("S-03", "bn2", "ARTIFICIAL_BRANCH", "none (one NEMO routine)", (
+        Impl(_EOS, "compute_buoyancy_frequency_nemo_bn2"),
+        Impl(_EOS, "compute_buoyancy_frequency"),
+        Impl(_EOS, "compute_buoyancy_frequency_adiabatic"),
+    )),
+    RoutineRow("S-04", "bn2 live-e3w/gdepw geometry", "ARTIFICIAL_BRANCH", "none", (
+        Impl(_EOS, "nemo_bn2_live_ladders"),
+        Impl(_EOS, "nemo_bn2_depth_ladders"),
+    )),
+    RoutineRow("S-05", "zdf_phy -> zdf_cst", "SHARED", "ln_zdfcst", (
+        Impl(_CONST_VMIX, "constant_vertical_mixing"),
+    )),
+    RoutineRow("S-06", "zdf_phy -> zdf_tke", "SHARED", "ln_zdftke", ()),
+    RoutineRow("S-07", "zdf_tke solver sub-branch", "ARTIFICIAL_BRANCH", "none (tke_solver_evaluation)", (
+        Impl(_TKE, "_nemo_literal_tke_solve"),
+        Impl(_TKE, "_solve_tke_backward_euler"),
+    )),
+    RoutineRow("S-07b", "zdf_tke langmuir sub-branch", "ARTIFICIAL_BRANCH", "none (tke_langmuir_evaluation)", (
+        Impl(_TKE, "_nemo_literal_langmuir_operands"),
+        Impl(_TKE, "nemo_langmuir_tke_source"),
+    )),
+    RoutineRow("S-08", "zdf_evd", "NEMO_SWITCH", "ln_zdfevd, nn_evdm", (
+        Impl(_ENH_DIFF, "enhanced_diffusion_convection"),
+    )),
+    RoutineRow("S-09", "ldf_slp", "ARTIFICIAL_BRANCH", "none (~12 *_evaluation sub-selectors)", (
+        Impl(_GM_REDI, "compute_nemo_native_slopes"),
+    )),
+    RoutineRow("S-10", "ldf_tra / ldf_eiv", "NEMO_SWITCH", "nn_aht_ijk_t / nn_aei_ijk_t (Visbeck = no NEMO arm)", (
+        Impl(_LM_CONFIG, "TreguierConfig"),
+        Impl(_LM_CONFIG, "VisbeckConfig"),
+        Impl(_OMLC, "static_kappa_redi_override"),
+    )),
+    RoutineRow("S-13", "dyn_spg_ts external substep loop", "SHARED", "ln_dynspg_ts (cross-oracle: implicit/rigid-lid are non-NEMO)", (
+        Impl(_BLC, "barotropic_substeps_latlon_cgrid"),
+    )),
+    RoutineRow("S-14", "dyn_spg_ts external velocity update gate", "ARTIFICIAL_BRANCH", "ln_dynadv_vec .OR. lk_linssh (legoESM gate ANDs in an extra rk3_ws conjunct NEMO's does not have; no current card mis-routed)", (
+        Impl(_BLC, "_nemo_flux_form_external_velocity_update"),
+        Impl(_BLC, "substep_body"),
+    )),
+    RoutineRow("S-16", "dyn_spg_ts continuity/transport/spg", "ARTIFICIAL_BRANCH", "none", (
+        Impl(_BLC, "nemo_literal_continuity_divergence"),
+        Impl(_BLC, "_run_substep_loop"),
+    )),
+    RoutineRow("S-17", "dyn_cor_2D (barotropic Coriolis)", "NEMO_SWITCH", "ln_dynvor_ene/een ('avg'/'frozen' = no NEMO arm)", (
+        Impl(_BLC, "een_barotropic_coriolis"),
+        Impl(_BLC, "barotropic_coriolis_een_pre_step"),
+    )),
+    RoutineRow("S-18", "dom_qco_r3c (r3u/r3v face thickness)", "ARTIFICIAL_BRANCH", "key_qco", (
+        Impl(_LCOPS, "min_cell_to_uface"),
+        Impl(_VERTICAL, "nemo_qco_live_face_thicknesses"),
+    )),
+    RoutineRow("S-19", "wzv", "ARTIFICIAL_BRANCH", "none (np_velocity/np_transport arg)", (
+        Impl(_VERTICAL, "diagnose_w_from_flux_div"),
+        Impl(_OPL, "nemo_qco_wzv_operands"),
+    )),
+    RoutineRow("S-20", "wAimp", "SHARED", "ln_zad_Aimp", (
+        Impl(_VERTICAL, "nemo_wicker_aimp_partition_transport"),
+    )),
+    RoutineRow("S-21", "stage transport triplet zFu/zFv/zFw", "SHARED", "none (RK3 identity)", (
+        Impl(_OMLC, "_nemo_ws_stage_transport"),
+    )),
+    RoutineRow("S-23", "dyn_adv_up3 vertical flux", "SHARED", "ln_dynadv_up3", (
+        Impl(_VERTICAL, "nemo_up3_vertical_momentum_advection"),
+    )),
+    RoutineRow("S-24", "dyn_zad", "SHARED", "ln_dynadv_vec", (
+        Impl(_VERTICAL, "nemo_advective_vertical_momentum_advection"),
+    )),
+    RoutineRow("S-25", "vertical momentum advection, non-NEMO arms", "ABSENT (ORCA1 only, no NEMO counterpart)", "none", (
+        Impl(_VERTICAL, "flux_form_vertical_momentum_advection"),
+        Impl(_VERTICAL, "flux_form_vertical_momentum_advection_centered"),
+    )),
+    RoutineRow("S-26", "dyn_vor (vor_ene/vor_ens/vor_een)", "ABSENT (vor_ens missing; al81 = no NEMO arm)", "ln_dynvor_ene/_ens/_een", (
+        Impl(_LCOPS, "pv_flux_al81_partial_cell"),
+        Impl(_LCOPS, "pv_flux_ene"),
+    )),
+    RoutineRow("S-27", "Coriolis time placement", "ARTIFICIAL_BRANCH", "none (NEMO always inside dyn_vor RHS)", (
+        Impl(_OMLC, "_forward_backward_coriolis_3d"),
+        Impl(_OPL, "latlon_cgrid_ocean_baroclinic_tendencies"),
+    )),
+    RoutineRow("S-28_29", "dyn_hpg -> hpg_sco / ORCA1 PGF", "ARTIFICIAL_BRANCH", "ln_hpg_sco vs ln_hpg_zps (hpg_zps/zco/djc ABSENT)", (
+        Impl(_OPL, "_bc_ke_and_pressure_gradients"),
+        Impl(_PGF_SMC03, "compute_pressure_at_target_smc03"),
+        Impl(_PGF_AHH08, "column_pressure_integrals_ahh08"),
+    )),
+    RoutineRow("S-32", "dyn_ldf -> ldf_lap (viscosity operator form)", "ARTIFICIAL_BRANCH", "ln_dynldf_lap (one arm, 3 legoESM operator forms)", (
+        Impl(_LCOPS, "nemo_ldf_lap_viscosity_cgrid"),
+        Impl(_LCOPS, "vector_laplacian_dissipation_cgrid"),
+        Impl(_LCOPS, "flux_divergence_viscosity_cgrid"),
+    )),
+    RoutineRow("S-33_34", "dyn_zdf / e3w(Kmm) divisor", "ARTIFICIAL_BRANCH", "none (one function, internal divisor branch -- not AST-distinct symbols; not baseline-enforced here)", (
+        Impl(_OMLC, "_apply_implicit_vertical_mixing"),
+    )),
+    RoutineRow("S-35", "stage-3 zub barotropic correction", "ARTIFICIAL_BRANCH", "none (NEMO: dyn_zdf then zub, one site)", (
+        Impl(_OMLC, "_replace_stage_mean"),
+        Impl(_OMLC, "_fixed_depth_means"),
+    )),
+    RoutineRow("S-37", "tra_adv dispatch", "ARTIFICIAL_BRANCH", "ln_traadv_fct (SHARED for D/L/O/G; ORCA1 runs superbee, a Veros scheme, no NEMO arm)", (
+        Impl(_OMLC, "_nemo_ws_rk3_tracer_pair_step"),
+        Impl(_OMLC, "compute_advection_flux_div_pair"),
+        Impl(_ADVECTION, "fct_tracer_advection"),
+        Impl(_ADVECTION, "_veros_superbee_face_flux"),
+    )),
+    RoutineRow("S-38", "tra_adv_fct implicit-w treatment", "UNVERIFIED", "nn_fct_imp", (
+        Impl(_ADVECTION, "fct_tracer_advection"),
+    )),
+    RoutineRow("S-40", "tra_sbc placement (DINO-scoped selector)", "ARTIFICIAL_BRANCH", "none (nn_fsbc; RK3 cards have no equivalent knob)", (
+        Impl(_DINO, "_check_surface_tendency_placement"),
+    )),
+    RoutineRow("S-41", "tra_qsr", "NEMO_SWITCH", "ln_qsr_2bd / ln_qsr_rgb", (
+        Impl(_SHORTWAVE, "apply_shortwave_penetration"),
+    )),
+    RoutineRow("S-42", "bbl + tra_bbl", "ARTIFICIAL_BRANCH", "ln_trabbl, nn_bbl_adv=2 (one NEMO program, two compositions)", (
+        Impl(_BBL, "apply_bbl_adv_tendency"),
+        Impl(_BBL, "apply_bbl_adv_step"),
+    )),
+    RoutineRow("S-45", "tra_npc", "ABSENT", "ln_zdfnpc", ()),
+    RoutineRow("M-01", "stp_MLF whole-step composition", "ARTIFICIAL_BRANCH", "absence of key_RK3 (nemo_mlf selected by no card)", (
+        Impl(_OMLC, "_leapfrog_step"),
+        Impl(_OMLC, "_nemo_mlf_step"),
+    )),
+    RoutineRow("M-04", "tra_atf_qco / dyn_atf_qco (tracer_combine)", "ARTIFICIAL_BRANCH", "key_qco ('concentration' = no NEMO arm)", (
+        Impl(_OMLC, "thickness_weighted_tracer_combine"),
+        Impl(_OMLC, "thickness_weighted_tracer_content"),
+    )),
+    RoutineRow("M-05", "mlf_baro_corr", "ARTIFICIAL_BRANCH", "ln_dynspg_ts ('off' = no NEMO arm)", (
+        Impl(_BAROTROPIC_COMMON, "after_level_column_mean_reconcile"),
+        Impl(_BAROTROPIC_COMMON, "nemo_literal_after_level_reconcile"),
+    )),
+    RoutineRow("CARD-ASSEMBLY", "card assembly (three assemblers, one RK3 identity)", "ARTIFICIAL_BRANCH", "n/a — legoESM-side; NEMO has one namelist per configuration", (
+        Impl(_TESTCASE_RECIPE, "_model_config"),
+        Impl(_NEMO_RECIPE, "nemo_lat_lon_model_config"),
+        Impl(_DINO, "dino_lat_lon_model_config"),
+    )),
+)
+
+
+# Shrink-only allow-list: routine_id -> the audit's reason this artificial
+# branch is currently tolerated. A row may be listed ONLY while its
+# ROUTINE_REGISTRY entry is disposition="ARTIFICIAL_BRANCH" with >=2 distinct
+# impls; once a collapse PR lands (see the doc's "collapse plan" per row) and
+# the row drops to <=1 distinct impl, DELETE the entry in that same PR.
+ARTIFICIAL_BRANCH_BASELINE: dict[str, str] = {
+    "S-03": (
+        "bn2: 3 impls of one NEMO routine (eosbn2.F90:253-288); DINO/GYRE on "
+        "nemo_bn2, ORCA1 arm UNVERIFIED, not reached by L1 (ln_zdfcst)."
+    ),
+    "S-04": (
+        "bn2 live-e3w/gdepw geometry: generic-vs-literal pair for one NEMO "
+        "expression (eosbn2.F90:253-258); part of the ~48-selector family."
+    ),
+    "S-07": (
+        "zdf_tke solver: tke_solver_evaluation is a two-arm selector for one "
+        "NEMO program (zdftke.F90); default is the non-NEMO arm."
+    ),
+    "S-07b": (
+        "zdf_tke langmuir source: tke_langmuir_evaluation is a two-arm "
+        "selector for one NEMO program (zdftke.F90); default is the "
+        "non-NEMO arm."
+    ),
+    "S-14": (
+        "dyn_spg_ts external velocity update gate carries an extra "
+        "momentum_time_integrator=='rk3_ws' conjunct NEMO's own gate "
+        "(dynspg_ts.F90:719) does not have — latent mis-route for any "
+        "future MLF+flux-form card; no current card affected."
+    ),
+    "S-16": (
+        "dyn_spg_ts continuity/transport/spg: 5 generic-vs-nemo_literal "
+        "branch pairs for one NEMO program (dynspg_ts.F90:~640-840); "
+        "default is the generic arm, which ORCA1 runs."
+    ),
+    "S-18": (
+        "RANK 1 (highest-value collapse). dom_qco_r3c r3u/r3v face "
+        "thickness: MIN-of-live-thickness vs NEMO's surface-weighted MEAN "
+        "(domqco.F90:165-170) for one quantity; DINO/GYRE reach MEAN at "
+        "ldf_slp/dyn_zad, LOCK/OVERFLOW/ORCA1 reach MIN everywhere "
+        "including the shared dyn_adv/tra_adv operand. Mean-vs-min "
+        "measurement was IN FLIGHT at audit time — do not collapse ahead "
+        "of it."
+    ),
+    "S-19": (
+        "wzv: one NEMO routine (sshwzv.F90), two legoESM impls; default is "
+        "the non-NEMO (generic) one."
+    ),
+    "S-27": (
+        "Coriolis time placement: NEMO always carries Coriolis inside "
+        "dyn_vor's RHS; the Matsuno rotation sub-step (matsuno_split) is a "
+        "legoESM invention, inert on LOCK/OVERFLOW (f=0) but LIVE on "
+        "ORCA1 — HIGH-risk collapse, needs a one-variable A/B (rank 9)."
+    ),
+    "S-28_29": (
+        "RANK 2. dyn_hpg: nemo_sco is the transcribed NEMO arm but is "
+        "UNREACHABLE from the ORCA1 driver (--pgf-scheme restricted to "
+        "{adcroft, smc03}); 3 non-NEMO-arm-reachable PGF impls exist "
+        "(_bc_ke_and_pressure_gradients embeds nemo_sco+adcroft inline, "
+        "plus the smc03 and ahh08 modules)."
+    ),
+    "S-32": (
+        "dyn_ldf -> ldf_lap: 3 operator forms implement one NEMO arm "
+        "(ln_dynldf_lap); flux_divergence is Veros's, vector_laplacian "
+        "(ORCA1's default) has no NEMO arm."
+    ),
+    "S-35": (
+        "stage-3 zub barotropic correction: NEMO does dyn_zdf then zub, one "
+        "site (stprk3_stg.F90:430,433-446); L/O apply the correction only "
+        "BEFORE the implicit solve (wrong side), GYRE has both sites."
+    ),
+    "S-37": (
+        "tra_adv: ORCA1 runs superbee (Veros), which maps to no NEMO arm "
+        "(traadv_mus/_ubs/_qck are ABSENT)."
+    ),
+    "S-42": (
+        "bbl: shared transport/tendency arithmetic, two compositions — "
+        "OVERFLOW folds it into the stage-3 tracer RHS (NEMO's site), "
+        "ORCA1 calls a host post-step Euler with an extra transport cap "
+        "NEMO has none of."
+    ),
+    "M-01": (
+        "RANK 5. stp_MLF: two implementations, one dead. _nemo_mlf_step "
+        "(single dyn_ldf(Kbb,Kmm) pass, structurally faithful) is selected "
+        "by no card; only a probe script calls it directly."
+    ),
+    "M-04": (
+        "tra_atf_qco/dyn_atf_qco tracer_combine: 'concentration' (the "
+        "default, resolved by the certified DINO card) has no NEMO arm "
+        "under key_qco and drifts heat by +8.6e-6 vs NEMO's +3.4e-16."
+    ),
+    "M-05": (
+        "mlf_baro_corr: 'off' (barotropic_after_reconcile default) has no "
+        "NEMO arm for an MLF+dynspg_ts card; DINO itself is on the "
+        "faithful value, but the default is the non-NEMO one."
+    ),
+    "CARD-ASSEMBLY": (
+        "Three separate card-assembly paths for one RK3/MLF identity: "
+        "LOCK/OVERFLOW build via a bare from_flat() that silently keeps 6 "
+        "non-NEMO defaults (al81, matsuno_split, barotropic_coriolis=avg, "
+        "een_seed=window_start, zad_qco_evaluation=generic, "
+        "wzv_call2_evaluation=generic) the GYRE/DINO assemblers would set "
+        "to the NEMO arm."
+    ),
+}
