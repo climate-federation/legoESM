@@ -203,6 +203,104 @@ def hpg_sco_row(
     return trend * mesh["umask"]
 
 
+def face_thickness_and_qco_scaling(card, masks, nlev, oracle_stages, entry1, hu0):
+    """Preregistered scaling for the two stage-geometry hypotheses.
+
+    Computed from the ORACLE kt=1 dumps and the card's own geometry only --
+    no legoESM arm enters -- so the frozen predictions in
+    ``nemo_testcases_l1_overflow_face_thickness_preregister.md`` are
+    reproduced on every run.
+
+    H1: NEMO's stage face thickness is ``e3u_0*(1+r3u(Kmm))``
+    (domqco.F90:219-222, domzgr_substitute.h90:127); legoESM's pre-fix rule
+    was ``min`` of the two stretched T thicknesses.  The oracle's per-stage
+    tracer increment is 100% advective on these cards (K_h = K_v = 0, no
+    surface forcing), so the predicted T movement is the relative transport
+    error times that increment.
+
+    H2: NEMO weights every stage velocity update by ``(1+r3u(Kbb))`` /
+    ``(1+r3u(Kmm))`` / ``(1+r3u(Kaa))`` (stprk3_stg.F90:373-378).  With
+    ``uu(Kbb) = 0`` at kt=1 the omitted factor leaves
+    ``u_lego - u_nemo = u_nemo*(r3u(Kaa)-r3u(Kmm))/(1+r3u(Kmm))``, and the
+    stage barotropic correction removes its depth mean.
+    """
+    import jax.numpy as jnp
+
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        compute_face_masks_3d,
+        min_cell_to_uface,
+    )
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        _nemo_ws_qco_stage_faces,
+    )
+    from legoesm.ocean.vertical import compute_layer_thickness
+
+    init = card.recipe.initial_state
+    z_coord = card.recipe.z_coord
+    grid = card.recipe.grid
+    min_wc = card.recipe.model_config.min_water_column_m
+    h_ref = compute_layer_thickness(
+        jnp.zeros_like(init.eta.data), init.H_bathy.data, z_coord,
+        min_water_column_m=min_wc)
+    u_mask3, v_mask3 = compute_face_masks_3d(z_coord.is_active, grid)
+    u_mask3 = u_mask3.astype(h_ref.dtype)
+    v_mask3 = v_mask3.astype(h_ref.dtype)
+    wet_u = np.asarray(masks["u"], dtype=bool)
+    wet_t = np.asarray(masks["T"], dtype=bool)
+
+    kmm_ssh = {1: entry1["ssh"], 2: oracle_stages[1]["ssh"],
+               3: oracle_stages[2]["ssh"]}
+    kmm_T = {1: entry1["T"], 2: oracle_stages[1]["T"],
+             3: oracle_stages[2]["T"]}
+    h1_rows, h2_rows = [], []
+    predicted_T = 0.0
+    for stage in (1, 2, 3):
+        eta = jnp.asarray(kmm_ssh[stage], dtype=h_ref.dtype)
+        h_stage = compute_layer_thickness(
+            eta, init.H_bathy.data, z_coord, min_water_column_m=min_wc)
+        nemo_u = np.asarray(_nemo_ws_qco_stage_faces(
+            eta, h_ref, u_mask3, v_mask3, grid)[0])[:, 1:, :nlev]
+        min_u = np.asarray(min_cell_to_uface(h_stage))[:, 1:, :nlev]
+        delta = np.abs(min_u - nemo_u)[wet_u]
+        relative = float(np.max(delta / nemo_u[wet_u]))
+        d_tracer = float(np.max(np.abs(
+            (oracle_stages[stage]["T"][..., :nlev]
+             - kmm_T[stage][..., :nlev])[wet_t])))
+        predicted_T += relative * d_tracer
+        h1_rows.append({
+            "stage": stage,
+            "max_abs_delta_e3u_m": float(np.max(delta)),
+            "max_relative_delta_e3u": relative,
+            "oracle_stage_max_abs_delta_T_K": d_tracer,
+            "predicted_T_movement_K": relative * d_tracer,
+        })
+
+        r3a = np.asarray(_nemo_ws_qco_stage_faces(
+            jnp.asarray(oracle_stages[stage]["ssh"], dtype=h_ref.dtype),
+            h_ref, u_mask3, v_mask3, grid)[2])[:, 1:] - 1.0
+        r3m = np.asarray(_nemo_ws_qco_stage_faces(
+            eta, h_ref, u_mask3, v_mask3, grid)[2])[:, 1:] - 1.0
+        u_bc = remove_depth_mean(
+            oracle_stages[stage]["u"][..., :nlev], hu0, masks["u"])
+        h2_rows.append({
+            "stage": stage,
+            "max_abs_r3u_kaa": float(np.max(np.abs(r3a[wet_u.any(axis=-1)]))),
+            "max_abs_r3u_kaa_minus_kmm": float(
+                np.max(np.abs((r3a - r3m)[wet_u.any(axis=-1)]))),
+            "predicted_baroclinic_u_movement_m_s": float(np.max(np.abs(
+                ((r3a - r3m) / (1.0 + r3m))[..., None] * u_bc)[wet_u])),
+        })
+    return {
+        "source": (
+            "domqco.F90:219-222; domzgr_substitute.h90:127; "
+            "stprk3_stg.F90:272-273,373-378; dynzdf.F90 key_qco branch"),
+        "inputs": "oracle kt=1 stage dumps and the card geometry only",
+        "h1_face_thickness": h1_rows,
+        "h1_predicted_total_T_movement_K": predicted_T,
+        "h2_qco_stage_factor": h2_rows,
+    }
+
+
 def score(name: str, oracle, candidate, mask, *, plant=False, quantity="u") -> dict:
     oracle = np.asarray(oracle, dtype=np.float64)
     candidate = np.asarray(candidate)
@@ -324,6 +422,10 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
     require(entry_path.is_file(), f"missing {entry_path}")
     oracle_entry = read_entry(entry_path, case)
     artifacts[entry_path.name] = sha256(entry_path)
+    entry1_path_scaling = root / "oracle_step_entry_kt00000001.bin"
+    require(entry1_path_scaling.is_file(), f"missing {entry1_path_scaling}")
+    entry1_for_scaling = read_entry(entry1_path_scaling, case, expected=(1, 1))
+    artifacts[entry1_path_scaling.name] = sha256(entry1_path_scaling)
 
     if case == "OVERFLOW-zps":
         arms = {
@@ -347,6 +449,14 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
             "omit_stage_primary_velocity_correction": _NEMOWSRK3TestHooks(
                 stage_barotropic_correction=False
             ),
+            # Face-thickness / qco-factor round (preregistered in
+            # nemo_testcases_l1_overflow_face_thickness_preregister.md).
+            "legacy_stage_min_face_thickness": _NEMOWSRK3TestHooks(
+                legacy_stage_min_face_thickness=True
+            ),
+            "omit_stage_qco_factor": _NEMOWSRK3TestHooks(
+                omit_stage_qco_factor=True
+            ),
         }
     else:
         arms = {
@@ -356,6 +466,12 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
             ),
             "omit_momentum_transport_reconcile": _NEMOWSRK3TestHooks(
                 momentum_transport_reconcile=False
+            ),
+            "legacy_stage_min_face_thickness": _NEMOWSRK3TestHooks(
+                legacy_stage_min_face_thickness=True
+            ),
+            "omit_stage_qco_factor": _NEMOWSRK3TestHooks(
+                omit_stage_qco_factor=True
             ),
         }
 
@@ -410,6 +526,21 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
                     masks["u"]),
                 masks["u"],
             ))
+        # Each arm compiles three fresh executables; with 9 arms the process
+        # exhausts vm.max_map_count (LLVM "Unable to allocate section memory")
+        # long before host RAM.  Materialize the arm's fields as numpy, then
+        # drop the compilation cache.  Pure resource hygiene: no arithmetic.
+        states[arm] = states[arm]._replace(
+            u=states[arm].u.replace(data=np.asarray(states[arm].u.data)),
+            T=states[arm].T.replace(data=np.asarray(states[arm].T.data)),
+            eta=states[arm].eta.replace(data=np.asarray(states[arm].eta.data)),
+        )
+        for stage in (1, 2):
+            stage_states[arm][stage] = stage_states[arm][stage]._replace(
+                u=stage_states[arm][stage].u.replace(
+                    data=np.asarray(stage_states[arm][stage].u.data)))
+        stage_states[arm][3] = states[arm]
+        jax.clear_caches()
 
     faithful_u = score(
         f"{case}.kt2.faithful.instantaneous_u",
@@ -469,7 +600,8 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
         rows.append(control_T)
         target = (
             "u" if arm in ("freeze_stage_hpg_operands", "freeze_stage_hpg_tracers",
-                           "freeze_stage_hpg_eta", "omit_stage_vertical_up3")
+                           "freeze_stage_hpg_eta", "omit_stage_vertical_up3",
+                           "omit_stage_qco_factor")
             else "T" if case == "OVERFLOW-zps" else "u"
         )
         faithful_row = faithful_T if target == "T" else faithful_u
@@ -503,6 +635,14 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
                 "advection geometry it sets (live stage T/S)")
         elif arm == "omit_stage_vertical_up3":
             one_variable = "vertical UP3 in each momentum-stage RHS"
+        elif arm == "legacy_stage_min_face_thickness":
+            one_variable = (
+                "stage transport face thickness: NEMO e3u_0*(1+r3u(Kmm)) "
+                "(domqco.F90:219-222) vs min of the two stretched T cells")
+        elif arm == "omit_stage_qco_factor":
+            one_variable = (
+                "qco weighting of the stage velocity update "
+                "(stprk3_stg.F90:373-378)")
         elif arm == "legacy_velocity_primary_average":
             one_variable = "flux_form_primary_transport_average"
         elif "primary" in arm:
@@ -782,6 +922,9 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
                 "domqco.F90:160; eos at live gdept (eosbn2.F90:1166)"),
         }
 
+    scaling = face_thickness_and_qco_scaling(
+        card, masks, nlev, oracle_stages, entry1_for_scaling, hu0)
+
     failed = [row["name"] for row in rows if row["status"] == "DEBT" and row.get("verdict", True)]
     failed += [row["name"] for row in operand_rows if row["status"] == "DEBT"]
     # Planted controls: the planted row must carry the +1.0, else exit 2.
@@ -821,6 +964,7 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
         "baroclinic_rows": baroclinic_rows,
         "stage_operand_rows": operand_rows,
         "hpg_sco_replay": replay,
+        "face_thickness_and_qco_scaling": scaling,
         "failed_rows": failed,
         "ownership": ownership,
         "stage_operand_ownership": stage_operand_ownership,

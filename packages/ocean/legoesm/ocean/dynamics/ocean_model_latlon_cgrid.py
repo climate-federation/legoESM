@@ -1041,13 +1041,85 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # Private operand diagnostic: return the stage-advanced tracer carried by
     # Kmm after stage 1 or 2. Zero leaves the returned tracer untouched.
     expose_tracer_stage: int = 0
+    # Harness-only ablation of NEMO's qco stage face thickness: restore the
+    # pre-fix min-of-stretched-T-thicknesses rule in the stage transport.
+    # NEMO has no such switch (e3u(Kmm) is a macro), so public WS-RK3 cards
+    # always use e3u_0*(1+r3u).
+    legacy_stage_min_face_thickness: bool = False
+    # Harness-only ablation of the qco stage velocity weighting
+    # (stprk3_stg.F90:373-378 and dynzdf.F90's key_qco branch): restore the
+    # unweighted ``u_raw = u_Kbb + stage_dt*RHS``.  Public WS-RK3 always
+    # carries the (1+r3u(Kbb)) / (1+r3u(Kmm)) / (1+r3u(Kaa)) factors.
+    omit_stage_qco_factor: bool = False
+
+
+def _nemo_ws_qco_stage_faces(eta, h_ref, u_mask_3d, v_mask_3d, grid):
+    """NEMO ``e3u/e3v(Kmm)`` and ``1 + r3u/r3v`` for one WS-RK3 stage ssh.
+
+    ``dom_qco_r3c_RK3`` (domqco.F90:219-222) builds the U-face free-surface
+    ratio as an ``e1e2t``-weighted mean of **ssh** divided by ``hu_0`` --
+    NOT the mean of the two ``r3t``, which each divide by their own column's
+    ``ht_0`` -- and ``domzgr_substitute.h90:127`` then gives
+    ``e3u(Kmm) = e3u_0*(1 + r3u(Kmm)*umask)``.  Taking the ``min`` of the two
+    stretched T-cell thicknesses instead is first-order wrong in the ssh
+    difference across the face.
+
+    The rule itself is NOT re-implemented here: this reuses the shared
+    canonical ``nemo_qco_live_face_geometry_from_operands`` (vertical.py:140,
+    the same builder the DINO ldfslp/dynzad and ``nemo_literal`` tracer paths
+    call).  The wrapper ``nemo_qco_live_face_thicknesses`` reads the operands
+    off ``z_coord.nemo_*`` fields the L1 testcase cards do not carry, so the
+    operands are assembled here from the card's own grid.
+
+    ``e3u_0`` is the min-rule face of the REFERENCE thicknesses: NEMO's own
+    partial-cell reference face is the shallower neighbour's
+    (``tests/OVERFLOW/MY_SRC/usrdef_zgr.F90:179-186``), and on the certified
+    OVERFLOW-zps ``mesh_mask.nc`` ``e3u_0 == min(e3t_0_i, e3t_0_{i+1})``
+    exactly on all 16900 wet U faces.  Only the STRETCHING differed.
+
+    Inputs and outputs use legoESM's redundant west/south face layout; the
+    helper's native east/north extent is mapped once here.
+
+    Returns ``(h_u, h_v, one_plus_r3u, one_plus_r3v)`` with the thicknesses
+    3-D and the ratios 2-D.
+    """
+    geom_grid = ensure_geometry(grid)
+    e3u_0 = min_cell_to_uface(h_ref)[:, 1:, :]
+    e3v_0 = min_cell_to_vface(h_ref, grid)[1:, :, :]
+    dtype = e3u_0.dtype
+    umask3 = jnp.asarray(u_mask_3d, dtype=dtype)[:, 1:, :]
+    vmask3 = jnp.asarray(v_mask_3d, dtype=dtype)[1:, :, :]
+    # domain.F90:145: hu_0 accumulates e3u_0*umask, so a closed face adds zero.
+    hu_0 = jnp.sum(e3u_0 * umask3, axis=-1)
+    hv_0 = jnp.sum(e3v_0 * vmask3, axis=-1)
+    area_u = (geom_grid.dx_u * geom_grid.dy_u)[:, 1:]
+    area_v = (geom_grid.dx_v * geom_grid.dy_v)[1:, :]
+    geom = nemo_qco_live_face_geometry_from_operands(
+        jnp.asarray(eta, dtype=dtype), e3u_0, e3v_0, umask3, vmask3,
+        hu_0, hv_0, jnp.asarray(geom_grid.area_T, dtype=dtype),
+        jnp.where(hu_0 > 0.0, area_u, 1.0),
+        jnp.where(hv_0 > 0.0, area_v, 1.0),
+    )
+    one = jnp.asarray(1.0, dtype=dtype)
+    return (
+        jnp.concatenate([geom.e3u[:, -1:, :], geom.e3u], axis=1),
+        jnp.concatenate([jnp.zeros_like(geom.e3v[:1]), geom.e3v], axis=0),
+        jnp.concatenate([one + geom.r3u[:, -1:], one + geom.r3u], axis=1),
+        jnp.concatenate(
+            [jnp.ones_like(geom.r3v[:1]), one + geom.r3v], axis=0),
+    )
 
 
 def _nemo_ws_stage_transport(
-    stage_velocity, h_stage, stage_index, *, Hu_avg, Hv_avg, u_mask_3d,
-    v_mask_3d, grid, z_coord, config, dt,
+    stage_velocity, h_stage, stage_index, *, eta_stage, h_ref, Hu_avg, Hv_avg,
+    u_mask_3d, v_mask_3d, grid, z_coord, config, dt,
+    legacy_min_face_thickness=False,
 ):
     """NEMO ``stprk3_stg.F90:257-304`` Kmm stage transport triplet.
+
+    ``e3u(Kmm)`` is NEMO's qco face thickness ``e3u_0*(1 + r3u(Kmm))``
+    (``domqco.F90:219-222``, ``domzgr_substitute.h90:127``), built by
+    ``_nemo_ws_qco_stage_faces`` from ``eta_stage``.
 
     ``zFu = e2u*e3u(Kmm)*(uu(Kmm) + zub)`` with ``zub = un_adv/hu(Kmm) -
     uu_b(Kmm)`` (:270-277): the stage velocity's thickness mean is replaced
@@ -1060,8 +1132,14 @@ def _nemo_ws_stage_transport(
     ``(mf_u, mf_v, w_explicit, h_stage, hu_stage, hv_stage, wi_stage)``.
     """
     u_stage, v_stage = stage_velocity
-    hu_stage = min_cell_to_uface(h_stage)
-    hv_stage = min_cell_to_vface(h_stage, grid)
+    if legacy_min_face_thickness:
+        # Private ablation control ONLY (_NEMOWSRK3TestHooks); NEMO has no
+        # such switch and the WS-RK3 identity never selects this arm.
+        hu_stage = min_cell_to_uface(h_stage)
+        hv_stage = min_cell_to_vface(h_stage, grid)
+    else:
+        hu_stage, hv_stage, _, _ = _nemo_ws_qco_stage_faces(
+            eta_stage, h_ref, u_mask_3d, v_mask_3d, grid)
     Hu_stage_depth = jnp.sum(hu_stage, axis=-1)
     Hv_stage_depth = jnp.sum(hv_stage, axis=-1)
     Hu_stage_raw = jnp.sum(hu_stage * u_stage, axis=-1)
@@ -4769,10 +4847,38 @@ class LatLonCGridOceanModel:
                 _u_live_mask = state.u_mask.data[..., None]
                 _v_live_mask = state.v_mask.data[..., None]
                 _active_live = mask_3d
+            # e3t_0: the reference (eta = 0) thickness ladder, so that
+            # h_stage = e3t_0*(1 + eta/H) and sum_k e3t_0 = H_bathy.
+            _h_ref_ws = compute_layer_thickness(
+                jnp.zeros_like(state.eta.data), state.H_bathy.data, _zc,
+                min_water_column_m=_cfg_b.min_water_column_m)
+            _legacy_min_faces = (
+                self._nemo_ws_test_hooks.legacy_stage_min_face_thickness)
             _stage_transport_kw = dict(
-                Hu_avg=Hu_avg, Hv_avg=Hv_avg, u_mask_3d=_u_live_mask,
+                h_ref=_h_ref_ws, Hu_avg=Hu_avg, Hv_avg=Hv_avg,
+                u_mask_3d=_u_live_mask,
                 v_mask_3d=_v_live_mask, grid=_grid, z_coord=_zc,
-                config=_cfg_b, dt=dt)
+                config=_cfg_b, dt=dt,
+                legacy_min_face_thickness=_legacy_min_faces)
+            # stprk3_stg.F90:373-378 (and dynzdf.F90's key_qco branch at
+            # stage 3) weight EVERY stage velocity update by
+            # (1+r3u(Kbb)) / (1+r3u(Kmm)) / (1+r3u(Kaa)).  legoESM's tracer
+            # stage already carries the analogue (``_stage`` divides by
+            # h_stage, NEMO :552-554); the momentum stage did not.
+            def _qco_ratios(eta_stage):
+                if self._nemo_ws_test_hooks.omit_stage_qco_factor:
+                    return (
+                        jnp.ones_like(state.u_mask.data)[..., None],
+                        jnp.ones_like(state.v_mask.data)[..., None],
+                    )
+                _, _, _opu, _opv = _nemo_ws_qco_stage_faces(
+                    eta_stage, _h_ref_ws, _u_live_mask, _v_live_mask, _grid)
+                return _opu[..., None], _opv[..., None]
+
+            _qu_b, _qv_b = _qco_ratios(state.eta.data)
+            _qu_13, _qv_13 = _qco_ratios(_eta_live_one_third)
+            _qu_12, _qv_12 = _qco_ratios(_eta_live_one_half)
+            _qu_aa, _qv_aa = _qco_ratios(state_new.eta.data)
             _wall_live = (
                 _active_live
                 if getattr(_cfg_b, "tracer_wall_neumann_fill", True)
@@ -4828,12 +4934,16 @@ class LatLonCGridOceanModel:
 
             # stage 1 (dt/3): Kmm = Kbb transport, full RHS incl. vertical UP3
             _g0 = _nemo_ws_stage_transport(
-                (u0, v0), h_k_old, 0, **_stage_transport_kw)
+                (u0, v0), h_k_old, 0, eta_stage=state.eta.data,
+                **_stage_transport_kw)
             _vert0 = _stage_vertical_up3(u0, v0, _g0)
-            u1_raw = u0 + (dt_mom / 3.0) * (
+            # Stage 1: Kmm = Kbb, so the RHS carries (1 + r3u(Kbb)).
+            u1_raw = (_qu_b * u0 + (dt_mom / 3.0) * _qu_b * (
                 du_dt_pert if _vert0 is None else du_dt_pert + _vert0[0])
-            v1_raw = v0 + (dt_mom / 3.0) * (
+            ) / _qu_13
+            v1_raw = (_qv_b * v0 + (dt_mom / 3.0) * _qv_b * (
                 dv_dt_pert if _vert0 is None else dv_dt_pert + _vert0[1])
+            ) / _qv_13
             u1_corr, v1_corr = _replace_stage_mean(
                 u1_raw, v1_raw, target_u, target_v)
             _T_stage1, _S_stage1 = _stage_tracers(1, (_g0, _g0, _g0))
@@ -4843,13 +4953,13 @@ class LatLonCGridOceanModel:
             # stage 2 (dt/2): Kmm = stage-1 Kaa
             _g1 = _nemo_ws_stage_transport(
                 (u1_corr, v1_corr), _h_live_one_third, 1,
-                **_stage_transport_kw)
+                eta_stage=_eta_live_one_third, **_stage_transport_kw)
             p1u_corr, p1v_corr = _mom_pert_ws(
                 u1_corr, v1_corr, True, _transport_target,
                 _stage_hpg_operands(_T_stage1, _S_stage1, _eta_live_one_third),
                 _stage_vertical_up3(u1_corr, v1_corr, _g1))
-            u2_raw = u0 + (dt_mom / 2.0) * p1u_corr
-            v2_raw = v0 + (dt_mom / 2.0) * p1v_corr
+            u2_raw = (_qu_b * u0 + (dt_mom / 2.0) * _qu_13 * p1u_corr) / _qu_12
+            v2_raw = (_qv_b * v0 + (dt_mom / 2.0) * _qv_13 * p1v_corr) / _qv_12
             u2_corr, v2_corr = _replace_stage_mean(
                 u2_raw, v2_raw, target_u, target_v)
             _T_stage2, _S_stage2 = _stage_tracers(
@@ -4861,13 +4971,13 @@ class LatLonCGridOceanModel:
             # stage 3 (dt): Kmm = stage-2 Kaa; ww split into explicit/implicit
             _g2 = _nemo_ws_stage_transport(
                 (u2_corr, v2_corr), _h_live_one_half, 2,
-                **_stage_transport_kw)
+                eta_stage=_eta_live_one_half, **_stage_transport_kw)
             p2u_corr, p2v_corr = _mom_pert_ws(
                 u2_corr, v2_corr, False, _transport_target,
                 _stage_hpg_operands(_T_stage2, _S_stage2, _eta_live_one_half),
                 _stage_vertical_up3(u2_corr, v2_corr, _g2))
-            u3_raw = u0 + dt_mom * p2u_corr
-            v3_raw = v0 + dt_mom * p2v_corr
+            u3_raw = (_qu_b * u0 + dt_mom * _qu_12 * p2u_corr) / _qu_aa
+            v3_raw = (_qv_b * v0 + dt_mom * _qv_12 * p2v_corr) / _qv_aa
             u3_corr, v3_corr = _replace_stage_mean(
                 u3_raw, v3_raw, target_u, target_v)
             _nemo_ws_live_stage_geometry = (_g0, _g1, _g2)
@@ -5237,15 +5347,31 @@ class LatLonCGridOceanModel:
                 h_k_one_third = h_k_old + (h_k_new - h_k_old) / 3.0
                 h_k_one_half = 0.5 * (h_k_old + h_k_new)
                 stage_h_k = (h_k_old, h_k_one_third, h_k_one_half)
+                _eta_bb = state.eta.data
+                _eta_aa = state_new.eta.data
+                stage_eta = (
+                    _eta_bb,
+                    _eta_bb + (_eta_aa - _eta_bb) / 3.0,
+                    0.5 * (_eta_bb + _eta_aa),
+                )
+                _h_ref_legacy = compute_layer_thickness(
+                    jnp.zeros_like(_eta_bb), state.H_bathy.data, _zc,
+                    min_water_column_m=_cfg_b.min_water_column_m)
                 _nemo_ws_stage_transport_geometry = tuple(
                     _nemo_ws_stage_transport(
                         velocity, h_stage, stage_index,
+                        eta_stage=eta_stage, h_ref=_h_ref_legacy,
                         Hu_avg=Hu_avg, Hv_avg=Hv_avg,
                         u_mask_3d=u_mask_3d_tracer,
                         v_mask_3d=v_mask_3d_tracer, grid=_grid,
-                        z_coord=_zc, config=_cfg_b, dt=dt)
-                    for stage_index, (velocity, h_stage) in enumerate(zip(
-                        _nemo_ws_velocity_stages, stage_h_k, strict=True)))
+                        z_coord=_zc, config=_cfg_b, dt=dt,
+                        legacy_min_face_thickness=(
+                            self._nemo_ws_test_hooks
+                            .legacy_stage_min_face_thickness))
+                    for stage_index, (velocity, h_stage, eta_stage)
+                    in enumerate(zip(
+                        _nemo_ws_velocity_stages, stage_h_k, stage_eta,
+                        strict=True)))
 
             if (getattr(_cfg_b, "adaptive_implicit_vertadv", False)
                     and not self._nemo_ws_test_hooks.disable_adaptive_implicit_momentum):
