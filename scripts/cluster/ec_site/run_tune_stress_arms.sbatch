@@ -9,7 +9,7 @@
 #   Then:  python scripts/run/tune_ec_stress_arms.py --verdict   (cheap, login OK)
 # Nelder-Mead budgets (prereg deviation 2): EVALS_A=200 (4 params) EVALS_B=400
 # (8 params), overridable through the environment.
-#SBATCH --account=glab --partition=glab1 --time=48:00:00 --cpus-per-task=16 --mem=64G
+#SBATCH --account=glab --partition=glab1 --time=72:00:00 --cpus-per-task=16 --mem=64G
 #SBATCH --job-name=tune_stress --array=0-11
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/.claude/worktrees/pmodel-land/scripts/tmp/_tune_stress_%a.log
 set -uo pipefail

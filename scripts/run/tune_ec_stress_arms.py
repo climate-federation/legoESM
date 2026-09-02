@@ -538,17 +538,49 @@ def main():
     history = []
     t0 = time.time()
 
+    os.makedirs(OUT_DIR, exist_ok=True)
+    path = os.path.join(OUT_DIR, f"{args.arm}_init{args.init_id}.json")
+
+    def write_artifact(status, res=None):
+        """Written after EVERY eval (status 'running') so a walltime kill
+        still leaves the best point so far; final call sets the verdict."""
+        finite_hist = [h for h in history if h["finite"]]
+        best = min(finite_hist, key=lambda h: h["loss"]) if finite_hist else None
+        raw_best = best["raw"] if best else None
+        out = {
+            "arm": args.arm, "init_id": args.init_id, "status": status,
+            "optimizer": "nelder-mead (AD refuted by the FD gate; see docstring)",
+            "converged": bool(res.success) if res is not None else None,
+            "scipy_message": str(res.message) if res is not None else None,
+            "n_nonfinite": len(history) - len(finite_hist),
+            "n_evals": len(history), "evals": args.evals,
+            "best_eval": best["eval"] if best else None,
+            "best_loss": best["loss"] if best else None,
+            "raw": raw_best,
+            "constrained": ({k: float(v) for k, v in
+                             constrain(raw_best, args.arm).items()}
+                            if raw_best else None),
+            "eval_history": history,
+            "sites": args.sites, "year_split": SPLIT_JSON,
+        }
+        tmp = path + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(out, fh, indent=1)
+        os.replace(tmp, path)
+        return best
+
     def f_vec(x):
         rawd = {k: float(v) for k, v in zip(keys, x)}
         v = total_loss(rawd)
         finite = bool(np.isfinite(v))
         n_eval[0] += 1
         history.append({"eval": n_eval[0], "loss": v if finite else None,
-                        "finite": finite,
+                        "finite": finite, "raw": rawd,
                         **{k: float(c) for k, c in
                            constrain(rawd, args.arm).items()}})
         print(f"eval {n_eval[0]:3d} loss={v:.5f} finite={finite} "
               f"t={time.time() - t0:.0f}s", flush=True)
+        write_artifact("running")
         # non-finite forward -> +inf: always the worst vertex, never a
         # candidate optimum (a finite loss can exceed any fixed penalty)
         return v if finite else np.inf
@@ -566,35 +598,12 @@ def main():
     for c, p in workers:
         c.send(None)
         p.join()
-    raw = {k: float(v) for k, v in zip(keys, res.x)}
-    finite_hist = [h for h in history if h["finite"]]
-    n_nonfinite = len(history) - len(finite_hist)
-    if finite_hist:
-        best = min(finite_hist, key=lambda h: h["loss"])
-        status = "ok"
-    else:
-        best = {"eval": -1, "loss": float("nan")}
-        status = "FAILED_no_finite_eval"
+    status = ("ok" if any(h["finite"] for h in history)
+              else "FAILED_no_finite_eval")
+    best = write_artifact(status, res) or {"eval": -1, "loss": float("nan")}
     print(f"best eval={best['eval']} loss={best['loss']:.5f} status={status} "
-          f"nonfinite={n_nonfinite}/{len(history)} converged={res.success} "
-          f"({res.message})")
-
-    os.makedirs(OUT_DIR, exist_ok=True)
-    out = {
-        "arm": args.arm, "init_id": args.init_id, "status": status,
-        "optimizer": "nelder-mead (AD refuted by the FD gate; see docstring)",
-        "converged": bool(res.success), "scipy_message": str(res.message),
-        "n_nonfinite": n_nonfinite, "n_evals": len(history),
-        "eval_history": history,
-        "raw": {k: float(v) for k, v in raw.items()},
-        "constrained": {k: float(v)
-                        for k, v in constrain(raw, args.arm).items()},
-        "sites": args.sites, "year_split": SPLIT_JSON,
-        "evals": args.evals,
-    }
-    path = os.path.join(OUT_DIR, f"{args.arm}_init{args.init_id}.json")
-    with open(path, "w") as fh:
-        json.dump(out, fh, indent=1)
+          f"nonfinite={sum(not h['finite'] for h in history)}/{len(history)} "
+          f"converged={res.success} ({res.message})")
     print(f"-> {path}  status={status}")
     return 0
 
