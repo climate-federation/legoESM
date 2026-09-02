@@ -274,14 +274,24 @@ def _deleted_cap_transports(geom, area, utr, vtr, dt):
             jnp.sign(vtr) * jnp.minimum(jnp.abs(vtr), cap_v))
 
 
-def test_host_step_is_exactly_the_shared_in_stage_operator():
-    """The host post-step wrapper adds NO arithmetic of its own.
+def test_host_step_adds_no_arithmetic_of_its_own():
+    """The host post-step wrapper IS the shared operator plus one Euler step.
 
-    Both former S-42 paths must reduce to one transcription of
-    ``trabbl.F90:243-284``: the in-stage site (``bbl_transports`` +
-    ``apply_bbl_adv_tendency``, folded into the WS-RK3 stage-3 tracer RHS)
-    and the driver's host step must agree bit-for-bit on a synthetic slope
-    where the BBL is ACTIVE, once the non-NEMO transport cap is gone.
+    S-42's two paths must reduce to ONE transcription of
+    ``trabbl.F90:243-284``.  This pins the half that is checkable in
+    isolation: on a synthetic slope where the BBL is ACTIVE, calling
+    ``bbl_transports`` + ``apply_bbl_adv_tendency`` directly and stepping
+    ``pt += dt*d(pt)/dt`` reproduces ``apply_bbl_adv_step`` BIT-FOR-BIT, so
+    the wrapper contributes no arithmetic of its own once the non-NEMO
+    transport cap is gone.
+
+    What this does NOT show, stated so the name cannot be over-read: the
+    in-stage site is not bit-identical to the host step in a RUN, because it
+    feeds the operator LIVE stage thickness and LIVE bottom depth
+    (``ocean_model_latlon_cgrid.py:1290-1298``) where the host wrapper feeds
+    the REFERENCE ladder ``geom.h_ref`` and ``geom.dep_bot``.  That is the
+    placement difference S-42 still carries; it is not a second
+    transcription, and it is not what this test is about.
     """
     dt = 600.0
     h, mask, T, S, geom, dy_u, dx_v, area, utr, vtr = _host_step_pieces(1.0e9)
