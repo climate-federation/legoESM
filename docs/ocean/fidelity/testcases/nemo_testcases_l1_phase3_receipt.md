@@ -1189,6 +1189,19 @@ flipped `MET -> NOT-MET` (planted prediction `6.3212e-07` vs the real
 | `face_thickness/overflow_trajectory_gate_kt10.json` | `d1c69f6e3f27f9271e80331eed79e1fdf707f9758eb1330952ba34e17d2cc88c` |
 | `face_thickness/overflow_trajectory_gate_kt60.json` | `0b46df0aa025c10ae3c7c7b371e2fe9c91cd4812bcaddbe4d4a9b50fc5d65582` |
 
+Every gate JSON above stamps `legoesm_git_sha = ccb8e563e1fe91c799f652b49df5b4bf86521357`
+on a CLEAN tree; the two later commits (`7efe057d2` re-pin, `2dd8cee05`
+control repair) touch no model code, so those artifacts remain the current
+model's output.  The statistics runs stamp `7fc887dd93c1bc38c60c16b0faba1da4b7c30028`.
+
+All five reach-table rows were settled structurally as well as by
+instantiation: `_nemo_ws_qco_stage_faces` and `_nemo_ws_stage_transport` are
+called from exactly five sites (`ocean_model_latlon_cgrid.py:1141` inside the
+transport itself, and `:4874,4936,4954,4972,5361`), every one of them inside
+`_step_impl`'s `momentum_time_integrator == "rk3_ws"` block.  DINO's card
+resolves that selector to `"rk3"`, so the changed lines cannot execute on the
+MLF lane and its short-run gates were not run.
+
 ### What is now UNMEASURED after this round
 
 - the OVERFLOW `kt=2` u residual `2.598798e-07 m/s`, which appears entirely at
