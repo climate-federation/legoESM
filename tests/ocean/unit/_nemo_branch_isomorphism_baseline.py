@@ -1020,12 +1020,24 @@ ARTIFICIAL_BRANCH_BASELINE: dict[str, BaselineEntry] = {
     ),
     "M-01": BaselineEntry(
         reason=(
-            'RANK 5. stp_MLF: two implementations, one dead. _nemo_mlf_step (single '
-            'dyn_ldf(Kbb,Kmm) pass, structurally faithful) is selected by no card; only a '
-            'probe script calls it directly. Reclassified 2026-09-02: NEMO_DUPLICATE, '
-            'CONFIRMED — (b) has real committed test coverage '
-            '(test_nemo_mlf_step_transcription.py), so it is validated-but-unpromoted, not '
-            'dead code / ORPHAN.'
+            'RANK 5. stp_MLF: two implementations. _nemo_mlf_step (single '
+            'dyn_ldf(Kbb,Kmm) pass, structurally faithful to stpmlf.F90:275,437) is selected '
+            'by no card; _leapfrog_step (two _step_impl passes) is what the certified DINO '
+            'card runs. Reclassified 2026-09-02: NEMO_DUPLICATE, CONFIRMED — (b) has real '
+            'committed test coverage (test_nemo_mlf_step_transcription.py), so it is '
+            'validated-but-unpromoted, not dead code / ORPHAN. MEASURED 2026-09-02 on the '
+            'certified card (mlf_step_mechanism_ab.py, fp64, both arms on the SAME state '
+            'under the SAME jit, identity control 0.0): the two DIFFER from step 1 in every '
+            'prognostic field -- T 4.963e-4 degC, S 4.192e-5 PSU, u 5.196e-6 m/s, '
+            'v 9.568e-6 m/s, eta 5.725e-6 m, i.e. 8.6e10 ulp of field scale against a 2-ulp '
+            'collapse bar. So this row is a measured DIFFERENCE, not a re-association, and '
+            'the card is NOT repointed. Ablating GM/Redi cuts the TRACER gap ~2900x '
+            '(confirming the transcription test s predicted mechanism) and leaves the '
+            'MOMENTUM gap bit-unchanged, which that test attributes to XLA fusion noise -- '
+            'unsettled, recorded rather than folded in. Independently, nemo_mlf hard-requires '
+            'implicit_vmix_e3t_now_divisor=True (ocean_model_latlon_cgrid.py:3019) which the '
+            'DINO card sets False, so a config-level repoint would move S-34 at the same '
+            'time.'
         ),
         kind='nemo_duplicate',
     ),

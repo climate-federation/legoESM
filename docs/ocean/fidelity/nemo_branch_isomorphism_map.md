@@ -1145,3 +1145,66 @@ answers and is not a default to move silently.
 and kt=1..10 trajectory gates are bit-identical across this change — measured,
 not assumed; see the commit message.
 
+
+
+## 2026-09-02 M-01 (`stp_MLF` written twice) — MEASURED DIFFERENCE, no collapse
+
+The row's collapse question is whether DINO's certified
+`outer_integrator="leapfrog"` (`_leapfrog_step`, two `_step_impl` passes) can be
+repointed at `_nemo_mlf_step`, the structurally faithful single pass in which
+only `dyn_ldf`/`tra_ldf`/Redi read the before level as their own call argument
+(`stpmlf.F90:275`, `:437`). Answer: no. Measured, not argued.
+
+**Harness.** `scripts/validate/ocean_fidelity/dino_1226/mlf_step_mechanism_ab.py`,
+fp64 (policy set explicitly — `JAX_ENABLE_X64` alone leaves the bridge at f32),
+CPU, card `nemo_dino_kamm_mlf` bridged from NEMO's day-180 restart with
+`LEGOESM_NEMO_E3T=both`. Both arms are applied to the SAME state, under the SAME
+`jax.jit` wrapper, with the same surface forcing and external tracer rate; the
+trajectory then advances on the certified (leapfrog) arm, so every row is a
+one-step A/B rather than a compounding one. `--bridge-tke` is on because the card
+selects `tke_shear_evaluation_stage="step_entry"` +
+`tke_preclosure_coeff_source="carried_previous_step"`, which require a carried
+`avm_k` that only the restart bridge supplies; both arms see the same seed.
+
+**Identity control**: `_leapfrog_step` against itself is `0.0` on every field, so a
+non-zero reading below is the METHOD, not the harness.
+
+| max abs difference | T [degC] | S [PSU] | u [m/s] | v [m/s] | eta [m] |
+|---|---|---|---|---|---|
+| step 1 | 4.963e-4 | 4.192e-5 | 5.196e-6 | 9.568e-6 | 5.725e-6 |
+| step 2 | 4.968e-4 | 4.191e-5 | 1.477e-6 | 1.573e-6 | 1.062e-6 |
+| step 1, GM/Redi OFF | 1.709e-7 | 1.783e-8 | 5.196e-6 | 9.568e-6 | 5.725e-6 |
+
+Worst row is T at step 1: **8.6e10 ulp** of its own field scale. The bar for a
+collapse is 2 ulp. **M-01 is a measured DIFFERENCE, not a re-association**, and
+the certified DINO card is NOT repointed.
+
+**Two things the GM/Redi ablation settles.** Turning GM/Redi off drops the
+tracer difference by a factor ~2900 (T 4.96e-4 -> 1.71e-7), which CONFIRMS
+GM/Redi's tracer source as the mechanism the committed transcription test
+already predicted (`tests/ocean/unit/test_nemo_mlf_step_transcription.py`: the
+two-pass method feeds it `T_mid ~ Nbb`, the one-pass method the raw `Nbb` of
+`stpmlf.F90:437`). But the MOMENTUM difference is **bit-unchanged by that
+ablation** — `u`, `v` and `eta` at step 1 are the same to all printed digits
+with GM/Redi on and off. So the momentum gap is NOT the GM/Redi channel. The
+transcription test calls its momentum residual "XLA JIT-fusion floating-point
+noise" seeded at ~1e-9 and amplified through the barotropic substeps; on the
+DINO card that residual is 5.2e-6 m/s in `u` and 9.6e-6 m/s in `v`, and this
+row does not establish which of the two explanations owns it. Recorded as
+UNVERIFIED rather than folded into the GM/Redi story.
+
+**Also blocked structurally, independent of the numbers.** `outer_integrator=
+"nemo_mlf"` hard-requires `implicit_vmix_e3t_now_divisor=True`
+(`ocean_model_latlon_cgrid.py:3019`), which DINO's certified card sets False
+(S-34). So the collapse could not be a one-variable config move even if the
+states agreed: it would flip S-34's divisor at the same time. The A/B above
+sidesteps that by calling the two methods directly at DINO's own config, which
+is why it isolates the mechanism.
+
+**Disposition: ARTIFICIAL_BRANCH stays.** Two implementations of one NEMO
+routine remain, and the faithful one is still selected by no card. The open item
+is now a physics question with a price tag, not a refactor: adopting
+`stpmlf.F90:437`'s literal `pts(:,:,:,:,Kbb)` read moves the certified DINO
+tracer field by ~5e-4 degC per step, so it needs the Rule-8 treatment (a
+faithful change that moves a certified number is a finding, not a revert), and
+a decision from the user before any card moves.
