@@ -18,6 +18,14 @@ import jax
 
 from legoesm.land.canopy.sif import SIFConfig
 
+# Valid canopy Vcmax25 depth profiles (see radiative_transfer.canopy
+# Vcmax integral and coordination_kn).
+VALID_VCMAX_PROFILES = ("kn", "coordination")
+from legoesm.land.p_model import (
+    VALID_CAPACITY_SCHEMES,
+    VALID_G1_SOURCES,
+)
+
 
 # ---------------------------------------------------------------------------
 # PFT Vcmax25 lookup table [μmol m-2 s-1], columns [tropical, temperate, boreal]
@@ -140,7 +148,7 @@ PFT_CANOPY_HEIGHT: dict[str, float] = {
 # ---------------------------------------------------------------------------
 # Valid values for the static leaf-gas-exchange dispatch field.  Kept next to
 # the config so the fail-early validator and the config default cannot drift.
-_VALID_STOMATAL_MODELS = ("ball_berry", "medlyn")
+_VALID_STOMATAL_MODELS = ("ball_berry", "medlyn", "leuning")
 VALID_LE_MODULES = ("BT", "PM")
 
 # Valid values for the CLM-ML canopy-airspace turbulence dispatch field
@@ -153,7 +161,7 @@ VALID_CLM_ML_TURBULENCE_SCHEMES = ("rsl_bonan", "most")
 # "medlyn" wires the traced per-site ``vcmaxpft_jax`` injection path (used for
 # gradient-based Vcmax25 training).  Public so the interface applier and the
 # validator share one source of truth.
-CLM_ML_STOMATAL_GS_TYPE = {"medlyn": 0, "ball_berry": 1, "wue": 2}
+CLM_ML_STOMATAL_GS_TYPE = {"medlyn": 0, "ball_berry": 1, "wue": 2, "leuning": 3}
 VALID_CLM_ML_STOMATAL_MODELS = tuple(CLM_ML_STOMATAL_GS_TYPE)
 
 
@@ -180,7 +188,11 @@ class CanopyConfig(NamedTuple):
     # and intercept; "medlyn" interprets ``m`` as the Medlyn g1 slope
     # [kPa^0.5] and ``b0`` as g0 [mol/m2/s].  Captured as a static
     # Python string via functools.partial — never traced.
-    stomatal_model: str = "ball_berry"      # "ball_berry" | "medlyn"
+    stomatal_model: str = "ball_berry"      # "ball_berry" | "medlyn" | "leuning"
+    # Leuning (1995) VPD sensitivity scale D0 [kPa]; the slope a1 rides the
+    # per-column m_C3/m_C4 slot (the same semantic overload ball_berry/medlyn
+    # use for their slopes — see _compute_gs_and_ci).  CABLE C3 default.
+    d0_leuning_kpa: float = 1.5
     use_ta_for_photosynthesis: bool = False  # use Ta (True) or Tf (False) for photosynthesis
     # Energy-balance latent-heat cap that keeps the leaf-temperature Newton
     # solve from diverging (NaN leaf T -> NaN fluxes) under hot/dry/high-VPD
@@ -240,6 +252,45 @@ class CanopyConfig(NamedTuple):
     # and defaults this to the legacy True.
     stress_b0: bool = True
 
+    # --- P-model optimality switches (land/p_model.py; appended last) ---
+    # Source of the leaf photosynthetic capacities: "prescribed" (default —
+    # PFT tables / CanopyLandParams, bit-identical legacy behaviour) or
+    # "p_model" (acclimated leaf-top Vcmax25 + Jmax25/Vcmax25 ratio from the
+    # least-cost/coordination optimum at the running daytime-mean drivers;
+    # C4 capacities and slopes come from the rpmodel c4 method with the
+    # beta/9 cost ratio — both pathways optimality-supplied).
+    capacity_scheme: str = "prescribed"   # "prescribed" | "p_model"
+    # Source of the Medlyn slope: "table" (default — per-PFT m_C3/m_C4) or
+    # "p_model" (predicted g1 = xi; requires stomatal_model="medlyn").
+    g1_source: str = "table"              # "table" | "p_model"
+    # NB: the P-model tunables (PModelConfig) live ONCE per land config at
+    # the root (MultiLayerLandConfig.p_model / LandConfig.p_model), not here —
+    # a second instance in one built tree would make land.p_model.* overrides
+    # unroutable (params-reachability AMBIGUOUS).  This config carries only
+    # the string switches.
+    # --- Vcmax25 depth profile (appended last) ---
+    # "kn" (default — exponential nitrogen profile with the tabulated kn,
+    # bit-identical legacy behaviour) or "coordination" — the profile follows
+    # a fraction ``vcmax_light_frac`` of the two-stream's DIFFUSE-PAR light
+    # envelope (kn_eff = vcmax_light_frac * 0.72 * LAI in the kn exponent
+    # convention).  This is a diffuse-REFERENCE envelope, not the full
+    # time-mean absorbed light (the daily beam term is omitted; design
+    # review, codex).  Observed within-canopy Vcmax gradients are SHALLOWER
+    # than the light gradient (de Pury & Farquhar 1997 PCE; Niinemets),
+    # hence the fraction with default 0.35 (obs range ~0.25-0.45, GLM
+    # design review); strict proportionality is vcmax_light_frac=1.
+    # NOTE (GLM diff review): with the leaf-top value held fixed and NO
+    # canopy-total rescale, enabling this option REDUCES canopy-integrated
+    # capacity as LAI grows (mean multiplier (1-e^-eps)/eps, eps =
+    # f*0.72*CI*LAI: ~0.70 at LAI=3, ~0.36 at LAI=10, vs ~0.86 LAI-invariant
+    # for kn=0.3) — GPP deltas vs the kn default are dominated by that
+    # total, which IS the coordination physics, not an artifact.  The
+    # profile is model-wide static dispatch (no per-column mixing), and
+    # f=1 (strict light proportionality) nearly extinguishes deep-canopy
+    # capacity at high LAI (bottom/top ~ e^-5.8 at LAI=8).
+    vcmax_profile: str = "kn"             # "kn" | "coordination"
+    vcmax_light_frac: float = 0.35
+
     def validate(self) -> "CanopyConfig":
         """Fail-early check of the static string-dispatch fields.
 
@@ -259,6 +310,35 @@ class CanopyConfig(NamedTuple):
                 f"must be one of {VALID_LE_MODULES} ('BT'=bulk transfer, "
                 f"'PM'=Penman-Monteith). The internal dispatch is a bare "
                 f"'else: # PM', so a typo would silently run PM.")
+        if self.capacity_scheme not in VALID_CAPACITY_SCHEMES:
+            raise ValueError(
+                f"unknown capacity_scheme {self.capacity_scheme!r}; the "
+                f"photosynthetic-capacity source must be one of "
+                f"{VALID_CAPACITY_SCHEMES}")
+        if self.g1_source not in VALID_G1_SOURCES:
+            raise ValueError(
+                f"unknown g1_source {self.g1_source!r}; the Medlyn-slope scheme "
+                f"must be one of {VALID_G1_SOURCES}")
+        if self.vcmax_profile not in VALID_VCMAX_PROFILES:
+            raise ValueError(
+                f"unknown vcmax_profile {self.vcmax_profile!r}; the canopy "
+                f"Vcmax25 depth profile must be one of {VALID_VCMAX_PROFILES}")
+        # No inert parameters: vcmax_light_frac is read ONLY by the
+        # coordination profile, so a non-default value under "kn" would be
+        # silently ignored (e.g. via --params) — refuse it.
+        if (self.vcmax_profile == "kn"
+                and self.vcmax_light_frac
+                != self._field_defaults["vcmax_light_frac"]):
+            raise ValueError(
+                f"vcmax_light_frac={self.vcmax_light_frac} is only read by "
+                f"vcmax_profile='coordination' (got 'kn'); it would be "
+                f"silently inert - select the coordination profile or drop "
+                f"the override")
+        # NB: g1_source='p_model' with a non-Medlyn stomatal model is legal
+        # ONLY under transpiration_stress='phydro' (whose slope mapping
+        # covers every model); this config cannot see that switch, so the
+        # cross-check lives at the consumers (multilayer step /
+        # compute_effective_beta / the two-leaf p_model block).
         return self
 
 
@@ -272,6 +352,8 @@ __param_spec__ = {
             "tol": "numerics: Newton-Raphson convergence tolerance",
         },
         "params": {
+            "d0_leuning_kpa": {"units": "kPa", "bounds": (0.5, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stomata", "reference": "Leuning 1995 PCE eq. 8; CABLE D0=1.5 kPa", "shape": None},
+            "vcmax_light_frac": {"units": "-", "bounds": (0.1, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "canopy_profile", "reference": "fraction of the diffuse-PAR extinction the Vcmax25 profile follows; obs ~0.25-0.45 (de Pury & Farquhar 1997; Niinemets); 1 = strict light proportionality", "shape": None},
             "epsf": {
                 "units": "1", "bounds": (0.90, 1.0), "tunable_tier": 2,
                 "transform": "sigmoid", "category": "radiation",
@@ -318,6 +400,8 @@ __param_spec__ = {
             ),
         },
         "params": {
+            "a1_leuning": {"units": "1", "bounds": (2.0, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stomata", "reference": "Leuning 1995 PCE eq. 8; CABLE C3 a1=9 (De Kauwe et al. 2015 GMD)", "shape": None},
+            "d0_leuning_kpa": {"units": "kPa", "bounds": (0.5, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stomata", "reference": "Leuning 1995 PCE eq. 8; CABLE D0=1.5 kPa", "shape": None},
             "o2ref": {
                 "units": "mmol/mol",
                 "bounds": (180.0, 230.0),
@@ -614,6 +698,12 @@ class CLMMLCanopyConfig(NamedTuple):
     # (``vcmax25_override``) can flow gradients — under "wue" that injection is
     # inert and Vcmax25 is applied through the module-global lookup instead.
     stomatal_model: str = "wue"
+    # Leuning (1995) stomatal parameters (stomatal_model="leuning"): slope a1
+    # and VPD scale D0.  Installed process-globally into the backend by
+    # _apply_stomatal_model (same by-value pattern as gs_type); g0 reuses the
+    # backend per-PFT Ball-Berry residual-conductance table.
+    a1_leuning: float = 9.0
+    d0_leuning_kpa: float = 1.5
 
     # Per-site Vcmax25 override [µmol m-2 s-1].  ``None`` (default) keeps the
     # MLpftcon per-PFT lookup value.  A float replaces the global lookup for THIS
@@ -805,6 +895,19 @@ class CLMMLCanopyConfig(NamedTuple):
     # dominant-PFT map changes bare/other-PFT columns off pft_clm, so a faithful run
     # wants the full CLM PFT parameterisation validated first.
     use_surfdata_pft: bool = False
+    # --- P-model optimality switches (land/p_model.py; appended last) ---
+    # capacity_scheme="p_model" injects the acclimated per-column leaf-top
+    # Vcmax25 into the canopy nitrogen profile (generic per-column provider;
+    # the per-PFT table stays the default) AND unifies the growth-temperature
+    # clock (the P-model acclimation temperature replaces the backend's
+    # 10-day t_a10 for the Kattge & Knorr entropies).  g1_source="p_model"
+    # injects the predicted per-column Medlyn slope (requires
+    # stomatal_model="medlyn").  pmodel_rjv25 additionally replaces the
+    # backend's Jmax25:Vcmax25 acclimation ratio with the coordination
+    # optimum (option; off keeps the backend closure).
+    capacity_scheme: str = "prescribed"   # "prescribed" | "p_model"
+    g1_source: str = "table"              # "table" | "p_model"
+    pmodel_rjv25: bool = False
 
     def validate(self) -> "CLMMLCanopyConfig":
         """Fail-early check of the static string-dispatch fields.
@@ -842,5 +945,28 @@ class CLMMLCanopyConfig(NamedTuple):
                 f"unknown CLM-ML stomatal_model {self.stomatal_model!r}; must be "
                 f"one of {VALID_CLM_ML_STOMATAL_MODELS} "
                 "('wue'=water-use-efficiency optimization (default), "
-                "'medlyn'=Medlyn 2011, 'ball_berry'=Ball-Berry)")
+                "'medlyn'=Medlyn 2011, 'ball_berry'=Ball-Berry, "
+                "'leuning'=Leuning 1995)")
+        if self.capacity_scheme not in VALID_CAPACITY_SCHEMES:
+            raise ValueError(
+                f"unknown capacity_scheme {self.capacity_scheme!r}; the "
+                f"photosynthetic-capacity source must be one of "
+                f"{VALID_CAPACITY_SCHEMES}")
+        if self.g1_source not in VALID_G1_SOURCES:
+            raise ValueError(
+                f"unknown g1_source {self.g1_source!r}; the Medlyn-slope "
+                f"scheme must be one of {VALID_G1_SOURCES}")
+        if self.g1_source == "p_model" and self.stomatal_model != "medlyn":
+            raise ValueError(
+                "g1_source='p_model' predicts a MEDLYN slope and requires "
+                f"stomatal_model='medlyn'; got {self.stomatal_model!r}.")
+        if self.capacity_scheme == "p_model" and self.vcmax25_override is not None:
+            raise ValueError(
+                "capacity_scheme='p_model' and vcmax25_override are two "
+                "providers for one canopy-top Vcmax25; select one.")
+        if self.pmodel_rjv25 and self.capacity_scheme != "p_model":
+            raise ValueError(
+                "pmodel_rjv25=True (coordination Jmax25:Vcmax25 ratio) "
+                "requires capacity_scheme='p_model'; the ratio has no meaning "
+                "without the optimality capacity source.")
         return self

@@ -1,0 +1,71 @@
+# LMIP global lane with the P-model switches ON, SYNTHETIC forcing.
+#
+# Purpose: prove the global (2 deg, all land columns) lane runs the optimality
+# switches end to end and tapes their diagnostics.  This is a LANE CHECK, not
+# an evaluation: synthetic forcing carries no real meteorology, so NO skill
+# claim can be made from it.  Global scoring against observations needs CRU-JRA
+# forcing + the ILAMB obs archive, neither of which is staged on this machine
+# (see docs/land/pmodel_kphio_beta_calibration_prereg.md and the campaign notes).
+#
+#   python scripts/run/run_lmip_biophys.py \
+#       --config config/lmip/lmip_pmodel_synthetic_smoke.yaml \
+#       --output-dir diagnostics/lmip_pmodel_smoke
+template_name: biophysics/lmip_pmodel_synthetic_smoke
+template_version: 1.0.0
+description: P-model switch lane check on the global LMIP driver, synthetic
+  forcing, short window
+
+grid:
+  type: latlon
+  resolution: 90                  # 90 x 180 ~ 2 deg (the production LMIP grid)
+
+physics:
+  land_mode: multilayer
+  surface_scheme: two_leaf_canopy
+  bulk_scheme: most
+  stomatal_model: medlyn          # required by g1_source=p_model
+  snow_albedo_feedback: true
+  snow_scheme: single
+  enable_freeze_thaw: true        # REQUIRED globally (boreal columns NaN without)
+  soil_n_layers: 10
+  soil_depth_m: 3.0
+  soil_growth_factor: 2.0
+  # --- the switches under test (each named explicitly, no reliance on defaults) ---
+  canopy_capacity_scheme: p_model
+  canopy_g1_source: p_model
+  canopy_vcmax_profile: coordination
+  transpiration_stress: beta_theta
+  vc_max25: null
+  g1: null
+  gs_max: null
+  stomata_enabled: false
+
+forcing:
+  source: synthetic
+  data_dir: ''                    # '' selects the synthetic generator
+  year_start: 1
+  year_end: 1
+
+surfdata:
+  path: data/legoesm_surfdata_c260716.nc
+  land_cover_dataset: clm5
+
+time:
+  dt: 3600.0
+  n_steps: 240                    # 10 days hourly — lane check only
+  start_doy: 0.0
+
+restart:
+  from: ''
+
+land_frac_min: 0.0
+land_mask_file: ''
+
+output:
+  tapes:
+  - name: daily
+    freq: daily
+    average: mean
+    vars: [T_sfc, Rnet, shflx, lhflx, LAI, GPP, ET, transp, soil_evap, runoff,
+           precip, reverted, pmodel_chi, pmodel_vcmax25, pmodel_g1,
+           pmodel_n_rubisco_leaf, pmodel_n_electron_transport_leaf]

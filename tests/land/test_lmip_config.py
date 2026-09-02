@@ -364,3 +364,17 @@ def test_pft_root_lists_reject_nonsense(mutate, match):
     bad["physics"].update(r)
     with pytest.raises(ValueError, match=match):
         validate_config(bad)
+
+
+def test_pmodel_switch_keys_default_and_validate():
+    cfg = validate_config(_minimal())
+    assert cfg.physics["canopy_capacity_scheme"] == "prescribed"
+    assert cfg.physics["canopy_g1_source"] == "table"
+    bad = _minimal()
+    bad["physics"]["canopy_capacity_scheme"] = "pmodel"
+    with pytest.raises(ValueError, match="canopy_capacity_scheme"):
+        validate_config(bad)
+    bad2 = _minimal()
+    bad2["physics"]["canopy_g1_source"] = "xi"
+    with pytest.raises(ValueError, match="canopy_g1_source"):
+        validate_config(bad2)

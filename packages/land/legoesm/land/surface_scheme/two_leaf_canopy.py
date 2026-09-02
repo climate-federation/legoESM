@@ -34,8 +34,14 @@ from legoesm.land.canopy.config import (
     VCMAX25_C4_DEFAULT,
 )
 from legoesm.land.canopy.photosynthesis import co2_compensation_point
+from legoesm.land.p_model import (
+    VALID_CAPACITY_SCHEMES,
+    VALID_G1_SOURCES,
+    acclimated_capacities,
+    acclimated_capacities_c4,
+)
 from legoesm.land.canopy.radiative_transfer import (
-    split_sw_components, canopy_shortwave_rt,
+    split_sw_components, canopy_shortwave_rt, coordination_kn,
 )
 from legoesm.land.canopy.sif import two_leaf_canopy_sif
 from legoesm.land.canopy.stability import (
@@ -204,6 +210,8 @@ def compute_two_leaf_canopy_fluxes(
     w_frac_soil_evap: jnp.ndarray | None = None,
     soil_surface_relsat: jnp.ndarray | None = None,
     fwet: jnp.ndarray | None = None,
+    pmodel_acclim=None,  # PModelAcclimState | None (land/p_model.py)
+    phydro_supply=None,  # PhydroSupply | None (land/phydro.py)
 ) -> SurfaceFluxOutput:
     """Compute surface fluxes via the two-leaf canopy Newton + Picard closure.
 
@@ -339,6 +347,80 @@ def compute_two_leaf_canopy_fluxes(
     else:
         TgC = _get(lp, "TgC", forcing.T_lowest - constants.T_freeze)
 
+    # ---- P-model optimality parameter source (static dispatch) ----
+    # Trace-time backstop for the two switches (CanopyConfig.validate() is the
+    # fail-early guard at line ~249 above; a typo can still arrive through a
+    # hand-built config that skipped validate()).
+    if cc.capacity_scheme not in VALID_CAPACITY_SCHEMES:
+        raise ValueError(
+            f"unknown capacity_scheme {cc.capacity_scheme!r}; the "
+            f"photosynthetic-capacity source must be one of "
+            f"{VALID_CAPACITY_SCHEMES}")
+    if cc.g1_source not in VALID_G1_SOURCES:
+        raise ValueError(
+            f"unknown g1_source {cc.g1_source!r}; the Medlyn-slope scheme "
+            f"must be one of {VALID_G1_SOURCES}")
+    rjv25 = None
+    if cc.capacity_scheme == "p_model" or cc.g1_source == "p_model":
+        # Raises with a clear message when this caller does not carry the
+        # acclimation state (slab-land / patch-mosaic until wired): no silent
+        # fall-back to prescribed parameters.
+        _phydro_on = getattr(
+            land_config, "transpiration_stress", "beta_theta") == "phydro"
+        if (cc.g1_source == "p_model" and cc.stomatal_model != "medlyn"
+                and not _phydro_on):
+            raise ValueError(
+                "g1_source='p_model' predicts a MEDLYN slope under the "
+                "least-cost stomatal model dispatch; with "
+                f"stomatal_model={cc.stomatal_model!r} select "
+                "transpiration_stress='phydro' (whose slope mapping covers "
+                "every model) or g1_source='table'.")
+        if _phydro_on and phydro_supply is None:
+            raise ValueError(
+                "transpiration_stress='phydro' but no PhydroSupply was "
+                "threaded to the canopy (phydro_supply=None): this caller "
+                "does not carry the soil-to-leaf supply state.")
+        if _phydro_on:
+            # C3 capacities/slope from the PROFIT optimum on the SPA supply
+            # (the empirical theta stress is replaced below); C4 columns keep
+            # the rpmodel-c4 least-cost optimum (both optimality sources).
+            from legoesm.land.phydro import phydro_optimum, slope_for_model
+            _hcaps = phydro_optimum(
+                pmodel_acclim, phydro_supply, land_config.phydro,
+                land_config.p_model)
+            _caps = None
+        else:
+            _caps = acclimated_capacities(pmodel_acclim, land_config.p_model)
+        _caps4 = acclimated_capacities_c4(pmodel_acclim, land_config.p_model)
+        if cc.capacity_scheme == "p_model":
+            # C3 leaf-top capacity + Jmax25/Vcmax25 ratio, and the C4 leaf-top
+            # capacity (rpmodel c4 method: full-kinetics chi with beta/9,
+            # mj = mc = 1; no Jmax — the Collatz branch has none).
+            if _phydro_on:
+                Vc3_leaf = _hcaps.vcmax25_leaf
+                rjv25 = _hcaps.rjv25
+            else:
+                Vc3_leaf = _caps.vcmax25_leaf
+                rjv25 = _caps.rjv25
+            Vc4_leaf = _caps4.vcmax25_c4_leaf
+        if cc.g1_source == "p_model":
+            # Predicted slopes replace the tabulated C3 AND C4 slopes; the
+            # soil-moisture stress below multiplies them exactly as it does
+            # the tabulated ones (deliberate: one consistent stress path) —
+            # except under phydro, where that stress is replaced entirely.
+            if _phydro_on:
+                from legoesm.land.p_model import optimal_chi as _ochi
+                _, _, _, _gs_pa, _ = _ochi(
+                    pmodel_acclim.t_mean_K, pmodel_acclim.vpd_mean_pa,
+                    pmodel_acclim.co2_mean_ppm, pmodel_acclim.ps_ema,
+                    land_config.p_model)
+                m_C3 = slope_for_model(
+                    cc.stomatal_model, _hcaps.chi, pmodel_acclim, _gs_pa,
+                    d0_leuning_kpa=cc.d0_leuning_kpa)
+            else:
+                m_C3 = _caps.g1_kpa
+            m_C4 = _caps4.g1_c4_kpa
+
     # ---- Soil moisture stress ----
     # Photosynthesis/transpiration down-regulation uses the ROOT-ZONE beta.
     # Bare-soil evaporation is governed by the fast-drying SURFACE layer, not the
@@ -347,7 +429,14 @@ def compute_two_leaf_canopy_fluxes(
     # root-zone beta (legacy behaviour).  Using the root-zone beta for soil evap
     # over-estimated forest-floor evaporation (it stays wet while the surface
     # dries), inflating LE and starving H.
-    fStress_vcmax = w_frac_rz         # Vcmax / transpiration down-regulation
+    # Under phydro the water limitation lives INSIDE the profit optimum
+    # (supply cap + hydraulic risk cost): the empirical multiplier is
+    # replaced by 1 (user decision ASK-14; GLM: anything else double-counts).
+    if (getattr(land_config, "transpiration_stress", "beta_theta")
+            == "phydro"):
+        fStress_vcmax = jnp.ones_like(w_frac_rz)
+    else:
+        fStress_vcmax = w_frac_rz     # Vcmax / transpiration down-regulation
     fStress_soil  = (w_frac_rz if w_frac_soil_evap is None
                      else w_frac_soil_evap)   # soil evaporation stress
 
@@ -380,6 +469,14 @@ def compute_two_leaf_canopy_fluxes(
     SZA = jnp.degrees(jnp.arccos(jnp.clip(cos_zenith, 0.0, 1.0 - 1e-7)))
     PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV = split_sw_components(
         forcing.sw_down, cos_zenith)
+
+    # ---- Vcmax25 depth profile (static dispatch OUTSIDE the jitted RT) ----
+    if cc.vcmax_profile == "coordination":
+        kn = coordination_kn(LAI, cc.vcmax_light_frac)
+    elif cc.vcmax_profile != "kn":
+        raise ValueError(
+            f"unknown vcmax_profile {cc.vcmax_profile!r}; the canopy Vcmax25 "
+            f"depth profile must be one of ('kn', 'coordination')")
 
     sw_rt = canopy_shortwave_rt(
         PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV,
@@ -430,6 +527,10 @@ def compute_two_leaf_canopy_fluxes(
             r_soil_surface=r_soil_surface,
             fwet=(jnp.zeros_like(w_frac_rz) if fwet is None
                   else jnp.broadcast_to(fwet, w_frac_rz.shape)),
+            rjv25=rjv25,
+            # broadcast: every bundle leaf is vmapped over columns, so the
+            # scalar config float must be (ncol,)
+            d0_leuning_kpa=jnp.full(ncol, cc.d0_leuning_kpa),
         )
 
     def _solve_one_col(x0, bun):

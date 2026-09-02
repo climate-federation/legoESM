@@ -196,6 +196,13 @@ class CanopyForcingBundle(NamedTuple):
     # so LE rises with wetness (interception loss).  0.0 = dry (no interception,
     # the default so every existing bundle construction is unchanged).
     fwet: jax.Array = 0.0
+    # Optional Jmax25/Vcmax25 ratio override (P model, land/p_model.py).  None
+    # keeps the kernel's Kattge & Knorr acclimated ratio bit-for-bit.  Appended
+    # last so positional bundle constructions stay valid.
+    rjv25: jax.Array | None = None
+    # Leuning D0 [kPa] (CanopyConfig.d0_leuning_kpa) — consumed only when
+    # stomatal_model == "leuning"; None otherwise.  Appended last.
+    d0_leuning_kpa: jax.Array | float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -258,10 +265,12 @@ def _canopy_residual(
     # in ``canopy_forward``, so discard it here.
     An_Sun, _ = photosynthesis(
         T_phot_sun, Ci_Sun, b.APAR_Sun,
-        b.Vcmax25_Sun, b.Vcmax25_C4Sun, b.fC4, b.Ps, b.alf, b.TgC)
+        b.Vcmax25_Sun, b.Vcmax25_C4Sun, b.fC4, b.Ps, b.alf, b.TgC,
+        rjv25=b.rjv25)
     An_Sh, _ = photosynthesis(
         T_phot_sh,  Ci_Sh,  b.APAR_Sh,
-        b.Vcmax25_Sh, b.Vcmax25_C4Sh, b.fC4, b.Ps, b.alf, b.TgC)
+        b.Vcmax25_Sh, b.Vcmax25_C4Sh, b.fC4, b.Ps, b.alf, b.TgC,
+        rjv25=b.rjv25)
 
     # ---- Leaf microclimate (FULLY_COUPLED: leaves use canopy air space) ----
     e_c, es_c, VPD_c, RH_c, desTc, ddesTc, gamma_c = canopy_met_variables(
@@ -275,23 +284,27 @@ def _canopy_residual(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, q_f_Sun, q_c, RH_c, VPD_c,
             b.lam, b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
-            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
+            d0_leuning_kpa=b.d0_leuning_kpa)
         _, LE_Sh, H_Sh, Tf_Sh_new, gs_Sh, Ci_Sh_new = leaf_energy_balance_bt(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, q_f_Sh, q_c, RH_c, VPD_c,
             b.lam, b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
-            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
+            d0_leuning_kpa=b.d0_leuning_kpa)
     else:  # PM
         _, LE_Sun, H_Sun, Tf_Sun_new, gs_Sun, Ci_Sun_new = leaf_energy_balance_pm(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
-            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
+            d0_leuning_kpa=b.d0_leuning_kpa)
         _, LE_Sh, H_Sh, Tf_Sh_new, gs_Sh, Ci_Sh_new = leaf_energy_balance_pm(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
-            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
+            d0_leuning_kpa=b.d0_leuning_kpa)
 
     # ---- Soil energy balance (prescribed Ts; G diagnosed as residual) ----
     q_s = saturation_specific_humidity(Ts, b.Ps)
@@ -412,10 +425,12 @@ def canopy_forward(
     # respiration against the carbon model's r_maint_fol*C_fol).
     An_Sun, Agross_Sun = photosynthesis(
         T_phot_sun, Ci_Sun, b.APAR_Sun,
-        b.Vcmax25_Sun, b.Vcmax25_C4Sun, b.fC4, b.Ps, b.alf, b.TgC)
+        b.Vcmax25_Sun, b.Vcmax25_C4Sun, b.fC4, b.Ps, b.alf, b.TgC,
+        rjv25=b.rjv25)
     An_Sh, Agross_Sh = photosynthesis(
         T_phot_sh,  Ci_Sh,  b.APAR_Sh,
-        b.Vcmax25_Sh, b.Vcmax25_C4Sh, b.fC4, b.Ps, b.alf, b.TgC)
+        b.Vcmax25_Sh, b.Vcmax25_C4Sh, b.fC4, b.Ps, b.alf, b.TgC,
+        rjv25=b.rjv25)
 
     # FULLY_COUPLED: leaves and soil share the canopy air space (Tc, q_c).
     e_c, es_c, VPD_c, RH_c, desTc, ddesTc, gamma_c = canopy_met_variables(
@@ -428,23 +443,27 @@ def canopy_forward(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, q_f_Sun, q_c, RH_c, VPD_c,
             b.lam, b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
-            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
+            d0_leuning_kpa=b.d0_leuning_kpa)
         Rn_Sh,  LE_Sh,  H_Sh,  _, gs_Sh, _  = leaf_energy_balance_bt(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, q_f_Sh, q_c, RH_c, VPD_c,
             b.lam, b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
-            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
+            d0_leuning_kpa=b.d0_leuning_kpa)
     else:
         Rn_Sun, LE_Sun, H_Sun, _, gs_Sun, _ = leaf_energy_balance_pm(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
-            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
+            d0_leuning_kpa=b.d0_leuning_kpa)
         Rn_Sh,  LE_Sh,  H_Sh,  _, gs_Sh,  _ = leaf_energy_balance_pm(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
-            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
+            d0_leuning_kpa=b.d0_leuning_kpa)
 
     # Wet-leaf evaporation (interception loss): the fwet share of each leaf's
     # latent flux, which is sourced from the canopy-water store rather than

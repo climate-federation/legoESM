@@ -65,7 +65,7 @@ import jax.numpy as jnp
 from legoesm import constants
 
 # Module-local conversion factor (not a physical constant per se).
-_APAR_CONVERSION = 4.56           # [W m-2] → [μmol m-2 s-1] for PAR
+PAR_W_TO_UMOL = 4.56           # [W m-2] → [μmol m-2 s-1] for PAR (public: P model reuses it)
 
 # --- Weiss & Norman (1985) broadband → spectral fractions [-] ---
 _PAR_FRACTION = 0.48
@@ -95,6 +95,21 @@ _RHO_UV       = 0.05       # UV reflectance (leaf + soil, PAR-like band)
 _KD_LW        = 0.78       # diffuse longwave extinction
 _KB_BEAM      = 0.5        # direct-beam extinction numerator = G-function for a
                            # spherical (uniform) leaf-angle distribution (Ryu 2011)
+
+def coordination_kn(LAI: jax.Array, light_frac: float) -> jax.Array:
+    """Coordination-hypothesis nitrogen extinction (vcmax_profile="coordination").
+
+    The Vcmax25 depth profile follows a fraction ``light_frac`` of the
+    two-stream's DIFFUSE-PAR light envelope.  In this module's kn convention
+    the exponent is ``kn * CI * x`` with x = cumulative LAI fraction (kn
+    integrates over the whole canopy depth), so the per-unit-LAI diffuse
+    extinction ``_KD_PAR`` maps to ``kn = light_frac * _KD_PAR * LAI``.
+    This is a diffuse-REFERENCE envelope (daily beam term omitted), and
+    ``light_frac < 1`` reflects observed Vcmax gradients being shallower
+    than the light gradient (de Pury & Farquhar 1997; Niinemets).
+    """
+    return light_frac * _KD_PAR * LAI
+
 
 
 def canopy_cover(LAI: jax.Array, CI: jax.Array) -> jax.Array:
@@ -387,8 +402,8 @@ def canopy_shortwave_rt(
     ASW_Soil = APAR_Soil + ANIR_Soil + AUV_Soil
 
     # ---- Convert APAR W m-2 → μmol m-2 s-1 ----
-    APAR_Sun = APAR_Sun * _APAR_CONVERSION
-    APAR_Sh  = APAR_Sh  * _APAR_CONVERSION
+    APAR_Sun = APAR_Sun * PAR_W_TO_UMOL
+    APAR_Sh  = APAR_Sh  * PAR_W_TO_UMOL
 
     # ---- Vcmax25 canopy integration via nitrogen extinction profile ----
     # (Sellers 1985 / DifferBESS: exponential N profile with extinction kn)

@@ -84,6 +84,8 @@ def compute_simple_seb_fluxes(
     albedo_land,
     emissivity,
     z0,
+    pmodel_acclim=None,
+    phydro_supply=None,
 ) -> SurfaceFluxOutput:
     """Compute SimpleSEB surface fluxes for one time step.
 
@@ -125,7 +127,8 @@ def compute_simple_seb_fluxes(
     # --- Stomatal + Farquhar beta (uses forcing.sw_down, co2, q_lowest) ---
     beta, gpp_farq, sif_farq = compute_effective_beta(
         T_surface, forcing, beta_soil, land_config, carbon_state, dt,
-        land_params=land_params)
+        land_params=land_params, pmodel_acclim=pmodel_acclim,
+        phydro_supply=phydro_supply)
 
     # Ratio used in the post-flux q_surface recomputation to carry
     # stomatal limitation through the updated soil-moisture state.

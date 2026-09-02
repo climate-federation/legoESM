@@ -632,3 +632,31 @@ def test_config_separates_soil_and_plant_wilting():
     c = MultiLayerLandConfig(theta_wp=0.15, theta_wp_plant=0.06)
     assert c.theta_wp == 0.15 and c.theta_wp_plant == 0.06
     assert MultiLayerLandConfig(theta_wp=0.15).theta_wp_plant is None   # default
+
+
+def test_run_site_phydro_and_profile_wiring(tmp_path):
+    """PR3/PR4 switch wiring in the EC harness: phydro refuses diagnostic
+    mode loudly, runs in prognostic mode with the P-model switches, and the
+    coordination profile changes the diagnostic fluxes (switch binds)."""
+    import numpy as np
+    import pytest
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc)
+    mod = _load_driver_module()
+
+    with pytest.raises(ValueError, match="prognostic"):
+        mod.run_site(driver_nc, "diagnostic", str(tmp_path / "o1"), chunk=8,
+                     transpiration_stress="phydro")
+
+    m_ph = mod.run_site(driver_nc, "prognostic", str(tmp_path / "o2"),
+                        chunk=96, capacity_scheme="p_model",
+                        g1_source="p_model", canopy_stomatal_model="medlyn",
+                        transpiration_stress="phydro")
+    assert np.isfinite(m_ph["GPP"]["rmse"])
+
+    m_kn = mod.run_site(driver_nc, "diagnostic", str(tmp_path / "o3"),
+                        chunk=96)
+    m_co = mod.run_site(driver_nc, "diagnostic", str(tmp_path / "o4"),
+                        chunk=96, vcmax_profile="coordination")
+    assert np.isfinite(m_co["GPP"]["rmse"])
+    assert m_co["GPP"]["bias"] != m_kn["GPP"]["bias"]

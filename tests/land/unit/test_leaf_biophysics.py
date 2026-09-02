@@ -68,3 +68,32 @@ def test_differentiable():
     assert np.isfinite(float(g)) and float(g) > 0.0
     gp = jax.grad(lambda T: lb.peaked_arrhenius_factor(T, 72000.0, 200000.0, 649.0))(300.0)
     assert np.isfinite(float(gp))
+
+
+def test_water_density_canaries():
+    # Fisher & Dial (1975) Tumlirz EOS: fresh water at 25 degC, 1 atm is
+    # ~997.05 kg/m3; at 4 degC density exceeds the 25 degC value.
+    rho25 = float(lb.water_density(lb.T_REF_K, constants.p_atm_std))
+    assert rho25 == pytest.approx(997.05, abs=0.5)
+    rho4 = float(lb.water_density(constants.T_freeze + 4.0, constants.p_atm_std))
+    assert rho4 > rho25
+
+
+def test_water_viscosity_canaries():
+    # Huber et al. (2009): mu(25 degC, 1 atm) = 8.900e-4 Pa s (their check
+    # value 890.02 uPa s at 298.15 K).
+    mu25 = float(lb.water_viscosity(lb.T_REF_K, constants.p_atm_std))
+    assert mu25 == pytest.approx(8.900e-4, rel=1e-3)
+    # Viscosity falls with temperature.
+    mu10 = float(lb.water_viscosity(constants.T_freeze + 10.0, constants.p_atm_std))
+    assert mu10 > mu25
+
+
+def test_water_viscosity_ratio_reference_and_gradient():
+    # eta* == 1 exactly at the 25 degC / standard-atmosphere reference.
+    eta_ref = float(lb.water_viscosity_ratio(lb.T_REF_K, constants.p_atm_std))
+    assert eta_ref == pytest.approx(1.0, rel=1e-6)
+    # Colder water is more viscous -> eta* > 1 below 25 degC.
+    assert float(lb.water_viscosity_ratio(constants.T_freeze + 10.0, constants.p_atm_std)) > 1.0
+    g = jax.grad(lambda T: lb.water_viscosity_ratio(T, jnp.asarray(constants.p_atm_std)))(300.0)
+    assert np.isfinite(float(g)) and float(g) < 0.0

@@ -1161,8 +1161,23 @@ class ModelDriver:
                 # Optional fields (TgC, surface_water) may be None — np.asarray
                 # would pickle a 0-d object array into the npz and crash the
                 # load-side jnp.asarray. Skip; restore only replaces saved keys.
-                if _v is not None:
-                    base[f"land_ml_{_f}"] = np.asarray(_v)
+                if _v is None:
+                    continue
+                if _f == "pmodel_acclim":
+                    # NamedTuple pytree: np.asarray would stack it into a
+                    # typeless (5, ncol) array. Flatten to per-leaf keys
+                    # (mirrors land/restart.py's pmodel_* payload).
+                    for _leaf_name, _leaf in zip(type(_v)._fields, _v):
+                        base[f"land_ml_pmodel_{_leaf_name}"] = np.asarray(_leaf)
+                    continue
+                if _f == "canopy_state":
+                    # CLM-ML nested pytree: no serialiser (same refusal as the
+                    # offline land restart). Silent np.asarray would corrupt.
+                    raise NotImplementedError(
+                        "checkpointing the CLM-ML canopy_state is not "
+                        "implemented (nested mlcanopy pytree); coupled "
+                        "CLM-ML runs cannot checkpoint the land state yet.")
+                base[f"land_ml_{_f}"] = np.asarray(_v)
         return base if base else None
 
     def _restore_dm_tracers_from_carry_aux(self) -> None:
@@ -1289,6 +1304,12 @@ class ModelDriver:
         if template is None:
             return  # slab run: keys removed above, nothing to restore
         import jax.numpy as jnp
+        from legoesm.land.p_model import PModelAcclimState, init_pmodel_acclim
+        # P-model acclimation leaves are flattened to per-leaf keys at save
+        # time; pop them BEFORE the exact-field-set check.
+        _pm_keys = {f"pmodel_{n}": n for n in PModelAcclimState._fields}
+        _pm_popped = {n: popped.pop(k) for k, n in _pm_keys.items()
+                      if k in popped}
         valid = set(template._fields)
         unknown = set(popped) - valid
         if unknown:
@@ -1296,7 +1317,8 @@ class ModelDriver:
                 f"land_ml checkpoint has unknown field(s) {sorted(unknown)}; "
                 f"current MultiLayerLandState fields are {sorted(valid)}")
         expected = {f for f in template._fields
-                    if getattr(template, f) is not None}
+                    if getattr(template, f) is not None
+                    and f != "pmodel_acclim"}
         got = set(popped)
         if got != expected:
             raise ValueError(
@@ -1336,6 +1358,45 @@ class ModelDriver:
                     f"{tuple(arr.shape)}, expected {tuple(ref.shape)} "
                     "(resolution / soil-layer-count skew)")
             fields[name] = arr
+        # --- P-model acclimation state: never a silent reset/loss ---
+        _tmpl_pm = getattr(template, "pmodel_acclim", None)
+        if _tmpl_pm is not None:
+            if len(_pm_popped) == len(PModelAcclimState._fields):
+                _leaves = []
+                for _n, _ref in zip(PModelAcclimState._fields, _tmpl_pm):
+                    _arr = _to_local(jnp.asarray(_pm_popped[_n]))
+                    if _arr.shape != _ref.shape:
+                        raise ValueError(
+                            f"land_ml checkpoint field 'pmodel_{_n}' has "
+                            f"shape {tuple(_arr.shape)}, expected "
+                            f"{tuple(_ref.shape)} (resolution skew)")
+                    _leaves.append(_arr)
+                fields["pmodel_acclim"] = PModelAcclimState(*_leaves)
+            elif _pm_popped:
+                raise ValueError(
+                    "land_ml checkpoint carries a PARTIAL P-model acclimation "
+                    f"state (only {sorted(_pm_popped)}); refusing to mix "
+                    "restored and cold-start acclimation leaves.")
+            elif not bool(getattr(self.config, "land_pmodel_cold_restart",
+                                  False)):
+                raise ValueError(
+                    "the checkpoint has no P-model acclimation state but a "
+                    "P-model switch is active; resuming would silently "
+                    "cold-start the acclimated capacities. Set "
+                    "land_pmodel_cold_restart=True (run_amip "
+                    "--land-pmodel-cold-restart) to accept the reset "
+                    "explicitly.")
+            # else: explicit cold restart — keep the template's fresh init.
+        elif _pm_popped:
+            if not bool(getattr(self.config, "land_pmodel_cold_restart",
+                                False)):
+                raise ValueError(
+                    "the checkpoint carries a P-model acclimation state but "
+                    "the resumed configuration has every P-model switch off; "
+                    "refusing to silently discard the acclimated memory. "
+                    "Turn the switch back on, or set "
+                    "land_pmodel_cold_restart=True to drop it deliberately.")
+            # explicit: drop the saved acclimation with the flag as the record
         self._land_ml_state = template._replace(**fields)
 
     def _validate_microphysics_tracer_state(
@@ -2886,6 +2947,48 @@ class ModelDriver:
             from legoesm.land.config import apply_biophysics_lmip_two_leaf
             base = apply_biophysics_lmip_two_leaf(base)
 
+        # --- P-model switches + per-scheme stomatal-model selection ---
+        # Applied AFTER the calibration overlay (which replaces
+        # surface_scheme wholesale) so the run's resolved switches win.
+        _cap = self.config.land_capacity_scheme
+        _g1s = self.config.land_g1_source
+        if _scheme_name == "two_leaf":
+            _ov = {}
+            if self.config.land_two_leaf_stomatal_model:
+                _ov["stomatal_model"] = self.config.land_two_leaf_stomatal_model
+            if _cap != "prescribed":
+                _ov["capacity_scheme"] = _cap
+            if _g1s != "table":
+                _ov["g1_source"] = _g1s
+            if _ov:
+                base = base._replace(
+                    surface_scheme=base.surface_scheme._replace(
+                        **_ov).validate())
+        elif _scheme_name == "clm_ml":
+            _ov = {}
+            if self.config.land_clm_ml_stomatal_model:
+                _ov["stomatal_model"] = self.config.land_clm_ml_stomatal_model
+            if _cap != "prescribed":
+                _ov["capacity_scheme"] = _cap
+            if _g1s != "table":
+                _ov["g1_source"] = _g1s
+            if _ov:
+                base = base._replace(
+                    surface_scheme=base.surface_scheme._replace(
+                        **_ov).validate())
+        if _scheme_name == "simple_seb" or                 self.config.land_simple_seb_stomata_model:
+            _sov = {}
+            if self.config.land_simple_seb_stomata_model:
+                _sov["stomata_model"] =                     self.config.land_simple_seb_stomata_model
+            if _scheme_name == "simple_seb":
+                if _cap != "prescribed":
+                    _sov["capacity_scheme"] = _cap
+                if _g1s != "table":
+                    _sov["g1_source"] = _g1s
+            if _sov:
+                base = base._replace(
+                    stomata=base.stomata._replace(**_sov).validate())
+
         params, cfg = clm_multilayer_setup(surface_map, base_config=base)
 
         # RE-APPLY THE CALIBRATION'S ALBEDO SCALARS, AFTER the bake.
@@ -3181,7 +3284,10 @@ class ModelDriver:
         # restart round-trips only the core prognostic fields; the optional
         # structural fields would otherwise be None and break the segment scan).
         _template = init_multilayer_land_state(
-            ncol, cfg, T_init=T_init, theta_init=theta_init)
+            ncol, cfg, T_init=T_init, theta_init=theta_init,
+            # P-model acclimation cold start: the run's CO2 (the config record)
+            # and the standard atmosphere for the pressure mean.
+            pmodel_co2_init_ppm=float(self.config.co2_ppmv))
         _land_ic_path = getattr(self.config, "land_ic_path", "")
         if _land_ic_path:
             # #746 item 1: a spun-up land IC (offline run_land_spinup restart)
@@ -3212,7 +3318,10 @@ class ModelDriver:
             # Graft the restart's prognostic columns onto the canonical template
             # (fixes the pytree structure), then cast the array leaves to the
             # run's storage precision (the restart deserialises float64).
-            _merged = merge_land_restart_into_template(_ic_state, _template)
+            _merged = merge_land_restart_into_template(
+                _ic_state, _template,
+                allow_pmodel_cold_start=bool(
+                    self.config.land_pmodel_cold_restart))
             # A REGRIDDED state's matric potential is not this run's.  The
             # Richards step evolves potential directly, but potential and water
             # content are tied through each column's own soil-texture retention

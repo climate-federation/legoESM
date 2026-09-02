@@ -205,7 +205,7 @@ _PSIHAT_RSL: dict[str, Any] | None = None
 _DIFF_TURBULENCE_SCHEME: str | None = None
 # Backend gs_type in force from the last ``_apply_stomatal_model``; used to clear
 # the leaf-kernel lru_caches only on an actual stomatal-model switch.
-_APPLIED_GS_TYPE: int | None = None
+_APPLIED_GS_TYPE: tuple | None = None
 
 # Last turbulence scheme concretely APPLIED + VERIFIED to the process-global ψ̂
 # tables by an eager (non-traced) _apply_turbulence_scheme call.  A traced step
@@ -304,13 +304,19 @@ def _apply_stomatal_model(canopy_config: CLMMLCanopyConfig) -> None:
     # case pays nothing).  This is a serial-process guard; concurrent mixed-model
     # calls remain unsupported (the state is process-global) — one stomatal model
     # per process is the contract.  Upstream fix: key the caches on gs_type.
+    # Leuning parameters ride the same by-value module-global pattern; a
+    # changed value must also invalidate the cached kernel factories (the
+    # kernels close over the module globals as static Python floats).
+    _leun = (float(canopy_config.a1_leuning), float(canopy_config.d0_leuning_kpa) * 1000.0)
+    _photo.leuning_a1 = _leun[0]
+    _photo.leuning_d0_pa = _leun[1]
     global _APPLIED_GS_TYPE
-    if _APPLIED_GS_TYPE is not None and _APPLIED_GS_TYPE != gs:
+    if _APPLIED_GS_TYPE is not None and _APPLIED_GS_TYPE != (gs,) + _leun:
         for _name in dir(_photo):
             _fn = getattr(_photo, _name, None)
             if hasattr(_fn, "cache_clear"):
                 _fn.cache_clear()
-    _APPLIED_GS_TYPE = gs
+    _APPLIED_GS_TYPE = (gs,) + _leun
 
 
 def _apply_turbulence_scheme(scheme: str, *, differentiable: bool = False) -> None:
@@ -1671,6 +1677,10 @@ def compute_clm_ml_canopy_fluxes(
     lai_override: jnp.ndarray | None = None,
     vcmaxpft_jax: jnp.ndarray | None = None,
     g1_medlyn_jax: jnp.ndarray | None = None,
+    vcmax25_col_jax: jnp.ndarray | None = None,
+    g1_med_col_jax: jnp.ndarray | None = None,
+    jv_ratio_col_jax: jnp.ndarray | None = None,
+    tacclim_col_jax: jnp.ndarray | None = None,
     grid_info: Any | None = None,
     pft_per_col: "np.ndarray | None" = None,
 ) -> tuple[SurfaceFluxOutput, CanopyState]:
@@ -1964,6 +1974,10 @@ def compute_clm_ml_canopy_fluxes(
             ("psi_soil", psi_soil),
             ("theta_soil", theta_soil),
             ("lai_override", lai_override),
+            ("vcmax25_col_jax", vcmax25_col_jax),
+            ("g1_med_col_jax", g1_med_col_jax),
+            ("jv_ratio_col_jax", jv_ratio_col_jax),
+            ("tacclim_col_jax", tacclim_col_jax),
             ("vcmaxpft_jax", vcmaxpft_jax),
             ("g1_medlyn_jax", g1_medlyn_jax),
         ]
@@ -2269,9 +2283,10 @@ def compute_clm_ml_canopy_fluxes(
             if vcmaxpft_jax is not None or g1_medlyn_jax is not None:
                 raise NotImplementedError(
                     "CLM-ML multi-column (ncol>1) traceable forward does not support "
-                    "the trainable-param overrides (vcmaxpft_jax / g1_medlyn_jax): "
-                    "those belong to the single-column jax.grad training path. "
-                    "Differentiate one column at a time."
+                    "the per-PFT trainable-param overrides (vcmaxpft_jax / "
+                    "g1_medlyn_jax): those belong to the single-column jax.grad "
+                    "training path. For a multi-column per-location capacity use "
+                    "the per-column injection (vcmax25_col_jax / g1_med_col_jax)."
                 )
             # Realign by each GridInfo's OWN patch index (``.p``), NOT tuple
             # position: the loop below drives column c -> patch c+1, so a tuple
@@ -2369,6 +2384,44 @@ def compute_clm_ml_canopy_fluxes(
         vcmaxpft_jax = _pftmod.MLpftcon.vcmaxpft.at[_pft].set(
             float(canopy_config.vcmax25_override))
 
+    # --- Generic per-COLUMN canopy-top injections (provider-agnostic) ---
+    # (ncol,) column arrays -> 1-based patch indexing via a zero pad at slot 0
+    # (the S3 scan and the eager loops address patches 1..ncol).
+    _pm_col_kwargs: dict[str, Any] = {}
+    if vcmax25_col_jax is not None or jv_ratio_col_jax is not None \
+            or g1_med_col_jax is not None:
+        if vcmax25_col_jax is not None and (
+                vcmaxpft_jax is not None
+                or canopy_config.vcmax25_override is not None):
+            raise ValueError(
+                "two providers configured for the CLM-ML canopy-top Vcmax25: "
+                "the per-column vcmax25_col_jax injection cannot be combined "
+                "with vcmaxpft_jax or CLMMLCanopyConfig.vcmax25_override; "
+                "select one.")
+        from legoesm.land.canopy.config import CLM_ML_STOMATAL_GS_TYPE
+        if g1_med_col_jax is not None and (
+                CLM_ML_STOMATAL_GS_TYPE[canopy_config.stomatal_model] != 0):
+            raise ValueError(
+                "g1_med_col_jax supplies a per-column MEDLYN slope but the "
+                f"stomatal_model is {canopy_config.stomatal_model!r} "
+                "(gs_type != 0); the injection would be silently inert. "
+                "Select stomatal_model='medlyn' or drop the injection.")
+        for _nm, _arr in (("vcmax25_col_jax", vcmax25_col_jax),
+                          ("g1_med_col_jax", g1_med_col_jax),
+                          ("jv_ratio_col_jax", jv_ratio_col_jax)):
+            if _arr is not None:
+                if jnp.shape(_arr) != (ncol,):
+                    raise ValueError(
+                        f"{_nm} must have shape (ncol,) = ({ncol},); got "
+                        f"{jnp.shape(_arr)}")
+        _pad = lambda a: jnp.pad(jnp.asarray(a), (1, 0))  # noqa: E731
+        if vcmax25_col_jax is not None:
+            _pm_col_kwargs["vcmax25top_col"] = _pad(vcmax25_col_jax)
+        if jv_ratio_col_jax is not None:
+            _pm_col_kwargs["jv_ratio_col"] = _pad(jv_ratio_col_jax)
+        if g1_med_col_jax is not None:
+            _pm_col_kwargs["g1_med_col"] = _pad(g1_med_col_jax)
+
     def _call_mlcanopy(mlc, flt, num, gridobj, cosz):
         _opt_kwargs: dict[str, Any] = {}
         if gridobj is not None:
@@ -2382,6 +2435,13 @@ def compute_clm_ml_canopy_fluxes(
             _opt_kwargs["vcmaxpft_jax"] = vcmaxpft_jax
         if g1_medlyn_jax is not None:
             _opt_kwargs["g1_MED_jax"] = g1_medlyn_jax
+        _opt_kwargs.update(_pm_col_kwargs)
+        if tacclim_col_jax is not None:
+            # Unified growth-temperature clock: the caller's acclimation
+            # temperature replaces the backend's own 10-day t_a10 mean for
+            # the Kattge & Knorr entropies / j2v closure this step.
+            mlc = mlc._replace(tacclim_forcing=jnp.pad(
+                jnp.asarray(tacclim_col_jax), (1, 0)))
         return MLCanopyFluxes(
             bounds=bounds,
             num_exposedvegp=num,

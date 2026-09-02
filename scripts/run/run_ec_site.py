@@ -276,14 +276,15 @@ _U_MIN = 1.0
 
 def _diagnostic_fluxes(d: ECSiteDriver, canopy_config: TwoLeafCanopyConfig,
                        land_config: MultiLayerLandConfig, chunk: int,
-                       mosaic: "PatchMosaicConfig | None" = None):
+                       mosaic: "PatchMosaicConfig | None" = None,
+                       pmodel_traj=None):
     """vmap the canopy over time with the soil state PRESCRIBED from the driver.
 
     Returns (gpp_gC, le_wm2, h_wm2, t_surface) each shape (n_time,).  When
     ``mosaic`` is given, each timestep runs the N-patch mosaic (tree + grass +
     ... tiles, area-weighted) instead of the single blended canopy.
     """
-    def _step(T_soil_t, forcing_t, params_t, w_frac_t):
+    def _step(T_soil_t, forcing_t, params_t, w_frac_t, acclim_t=None):
         # Mirror production: floor wind as sqrt(u^2 + v^2 + U_min^2) (the canopy
         # never sees raw calm wind in the coupled model).
         wind_t = jnp.sqrt(forcing_t.u_lowest ** 2 + forcing_t.v_lowest ** 2
@@ -298,19 +299,28 @@ def _diagnostic_fluxes(d: ECSiteDriver, canopy_config: TwoLeafCanopyConfig,
             soil_thermal_fn=lambda G, dt_: T_soil_t,
             dt=d.dt_s,
             LAI_override=params_t.LAI, TgC_override=params_t.TgC,
+            pmodel_acclim=acclim_t,
         )
         out = (compute_two_leaf_canopy_fluxes(**kw) if mosaic is None
                else compute_mosaic_canopy_fluxes(mosaic=mosaic, **kw))
         return out.gpp, out.lhflx, out.shflx, out.T_surface
 
-    vstep = jax.jit(jax.vmap(_step))
+    if pmodel_traj is None:
+        vstep = jax.jit(jax.vmap(
+            lambda Ts, f, p, w: _step(Ts, f, p, w)))
+    else:
+        vstep = jax.jit(jax.vmap(_step))
     n = int(d.forcing.T_lowest.shape[0])
     gpp, le, h, ts = [], [], [], []
     for i in range(0, n, chunk):
         sl = slice(i, min(i + chunk, n))
         f = jax.tree_util.tree_map(lambda a: a[sl], d.forcing)
         p = jax.tree_util.tree_map(lambda a: a[sl], d.canopy_params)
-        g, l, hh, t = vstep(d.T_soil_top[sl], f, p, d.w_frac_rz[sl])
+        if pmodel_traj is None:
+            g, l, hh, t = vstep(d.T_soil_top[sl], f, p, d.w_frac_rz[sl])
+        else:
+            a_t = jax.tree_util.tree_map(lambda x: x[sl], pmodel_traj)
+            g, l, hh, t = vstep(d.T_soil_top[sl], f, p, d.w_frac_rz[sl], a_t)
         gpp.append(np.asarray(g).ravel()); le.append(np.asarray(l).ravel())
         h.append(np.asarray(hh).ravel()); ts.append(np.asarray(t).ravel())
     return (np.concatenate(gpp), np.concatenate(le),
@@ -384,7 +394,10 @@ def _two_leaf_mosaic_prognostic(d: ECSiteDriver, mosaic: "PatchMosaicConfig", *,
                                 z_ref: float, texture, interception: bool,
                                 plant_wilting_point: float | None, stress_b0: bool,
                                 root_depth: float, u_min: float,
-                                nudge_tau_days: float):
+                                nudge_tau_days: float,
+                                capacity_scheme: str = "prescribed",
+                                g1_source: str = "table",
+                                canopy_stomatal_model: str | None = None):
     """Two-leaf mosaic OUTER-loop (prognostic): one two-leaf column per tile with
     its OWN rooting depth (deep tree vs shallow grass) → its own prognostic
     water-stress, then area-weight.  This is the big-leaf analogue of the CLM-ML
@@ -395,7 +408,11 @@ def _two_leaf_mosaic_prognostic(d: ECSiteDriver, mosaic: "PatchMosaicConfig", *,
     fracs = [p.frac for p in mosaic.patches]
     results = []
     for p in mosaic.patches:
-        cc = TwoLeafCanopyConfig(max_iters=30, stress_b0=stress_b0)
+        cc = TwoLeafCanopyConfig(
+            max_iters=30, stress_b0=stress_b0,
+            capacity_scheme=capacity_scheme, g1_source=g1_source,
+            **({"stomatal_model": canopy_stomatal_model}
+               if canopy_stomatal_model is not None else {})).validate()
         rd = root_depth if p.root_depth_m is None else float(p.root_depth_m)
         lc = _build_land_config(
             cc, soil, bottom_bc, soil_depth_m, k_sat_decay_m=k_sat_decay_m,
@@ -782,11 +799,48 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
              stomatal_m_c4_scale: float | None = None,
              mosaic: str = "none", tree_frac: float = 0.4,
              savanna_grass_pft: int = 14, savanna_grass_root_m: float = 0.5,
-             savanna_grass_fc4: float = 1.0) -> dict:
+             savanna_grass_fc4: float = 1.0,
+             capacity_scheme: str = "prescribed", g1_source: str = "table",
+             canopy_stomatal_model: str | None = None,
+             transpiration_stress: str = "beta_theta",
+             vcmax_profile: str = "kn",
+             params_path: str | None = None) -> dict:
     if mode not in ("diagnostic", "prognostic"):
         raise ValueError(f"mode {mode!r} not supported (diagnostic|prognostic)")
     if canopy not in ("two_leaf", "clmml"):
         raise ValueError(f"canopy {canopy!r} not supported (two_leaf|clmml)")
+    # P-model switches vs the manual scale flags: the canopy overwrites the
+    # scaled quantity when the optimality source is on, so a non-default scale
+    # would be silently inert — refuse loudly (no hidden choices).
+    _pm_cap = capacity_scheme == "p_model"
+    _pm_g1 = g1_source == "p_model"
+    if transpiration_stress != "beta_theta" and mode != "prognostic":
+        # Diagnostic mode drives the canopy directly (no multilayer land
+        # step), and P-hydro lives in the multilayer step - refuse loudly.
+        raise ValueError(
+            "--transpiration-stress phydro requires --mode prognostic "
+            "(diagnostic mode prescribes the soil and never runs the "
+            "multilayer land step that hosts the P-hydro supply)")
+    if vcmax_profile != "kn" and canopy != "two_leaf":
+        raise ValueError(
+            "--canopy-vcmax-profile applies to the two-leaf canopy only "
+            "(the CLM-ML backend has its own nitrogen profile)")
+    if _pm_cap and any(v not in (None, 1.0) for v in (
+            vcmax_scale, vcmax_c3_scale, vcmax_c4_scale)):
+        raise ValueError(
+            "--canopy-capacity-scheme p_model overwrites Vcmax25 with the "
+            "optimality value; --vcmax-scale/--vcmax-c3-scale/--vcmax-c4-scale "
+            "would be silently inert. Drop the scales or the switch.")
+    if _pm_g1 and any(v not in (None, 1.0) for v in (
+            stomatal_m_scale, stomatal_m_c3_scale, stomatal_m_c4_scale)):
+        raise ValueError(
+            "--canopy-g1-source p_model overwrites the stomatal slope; the "
+            "--stomatal-m-*-scale flags would be silently inert. Drop the "
+            "scales or the switch.")
+    if _pm_cap and canopy == "clmml" and clmml_vcmax25 is not None:
+        raise ValueError(
+            "--canopy-capacity-scheme p_model and --clmml-vcmax25 are two "
+            "providers for one canopy-top Vcmax25; select one.")
     # N-patch mosaic (tree + grass tiles) for savanna sites.  Fail early on an
     # unknown selection or an unsupported combination (dispatch hardening).  The
     # concrete mosaic configs are built lower down, once the site root depth is
@@ -856,7 +910,12 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     # deciduous / senescent canopy self-limits because its LAI -> 0.  This is
     # the physically-general default for the offline sites (see EC_SITE_PHYSICS).
     if canopy == "two_leaf":
-        canopy_config = TwoLeafCanopyConfig(max_iters=30, stress_b0=stress_b0)
+        canopy_config = TwoLeafCanopyConfig(
+            max_iters=30, stress_b0=stress_b0,
+            capacity_scheme=capacity_scheme, g1_source=g1_source,
+            vcmax_profile=vcmax_profile,
+            **({"stomatal_model": canopy_stomatal_model}
+               if canopy_stomatal_model is not None else {})).validate()
     elif canopy == "clmml":
         # CLM-ML multilayer canopy.  num_ml_steps=None derives the canopy
         # sub-step from dtime_ml_target_s (300 s), so an hourly EC driver
@@ -874,14 +933,18 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         # MLpftcon table constant.  An explicit CLI value still wins.
         pft_resolved = (clm_pft_for_site(d.igbp, d.climate)
                         if clm_pft is None else int(clm_pft))
-        vcmax_resolved = (_site_mean_vcmax25(d)
-                          if clmml_vcmax25 is None else clmml_vcmax25)
+        # Under the P-model capacity source the per-site Vcmax override is a
+        # second provider — the optimality value wins and the override stays
+        # unset (validated by CLMMLCanopyConfig).
+        vcmax_resolved = (None if _pm_cap else (
+            _site_mean_vcmax25(d) if clmml_vcmax25 is None else clmml_vcmax25))
         print(f"  clmml: pft={pft_resolved} (IGBP={int(d.igbp)}, {d.climate}), "
               f"Vcmax25={vcmax_resolved!r}, stomatal={clmml_stomatal}")
         canopy_config = CLMMLCanopyConfig(
             pft_clm=pft_resolved, turbulence_scheme=clmml_turbulence,
             stomatal_model=clmml_stomatal,
-            vcmax25_override=vcmax_resolved).validate()
+            vcmax25_override=vcmax_resolved,
+            capacity_scheme=capacity_scheme, g1_source=g1_source).validate()
     else:
         raise ValueError(f"canopy {canopy!r} not supported (two_leaf|clmml)")
     land_config = _build_land_config(
@@ -890,6 +953,20 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         soil_evap_resistance_exp=soil_evap_resistance_exp,
         root_depth=root_depth, z_ref=z_ref, texture=texture,
         interception=interception, plant_wilting_point=plant_wilting_point)
+    if transpiration_stress != "beta_theta":
+        land_config = land_config._replace(
+            transpiration_stress=transpiration_stress)
+    if params_path:
+        # Same calibration layer as the MIP drivers (run_lmip): the shared
+        # loader validates each key against the parameter registry
+        # (unknown / tier-0 / out-of-bounds all raise) and splices it into
+        # the matching nested *Config.  No harness-local override path.
+        from legoesm.driver.run_config_yaml import (
+            apply_params_to_config, load_params_config)
+        land_config = apply_params_to_config(
+            land_config, load_params_config(params_path),
+            driver="run_ec_site")
+        canopy_config = land_config.surface_scheme
 
     # Independent C3 (tree) / C4 (grass) canopy-param tuning for savanna sites.
     # A per-pathway flag (``--vcmax-c3-scale`` etc.) wins; otherwise the combined
@@ -929,8 +1006,44 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     reverted = None
     ts_soil = swc_soil = ustar = None
     if mode == "diagnostic":
+        # P-model diagnostic PRE-PASS (user decision): the state-free
+        # diagnostic driver gets the causal acclimation running means from a
+        # one-shot scan over the site forcing, evaluated per timestep.
+        _pm_traj = None
+        if canopy == "two_leaf" and (_pm_cap or _pm_g1):
+            from legoesm.land.canopy.energy_balance import canopy_met_variables
+            from legoesm.land.canopy.radiative_transfer import (
+                PAR_W_TO_UMOL, split_sw_components)
+            from legoesm.land.p_model import (
+                acclim_trajectory, init_pmodel_acclim)
+            fz = d.forcing
+            _pd, _pf, _, _, _ = split_sw_components(fz.sw_down, fz.cos_zenith)
+            _ppfd = (_pd + _pf) * PAR_W_TO_UMOL
+            _, _, _vpd, _, _, _, _ = canopy_met_variables(
+                fz.p_surface, fz.T_lowest, fz.q_lowest)
+            _init = init_pmodel_acclim(
+                int(fz.T_lowest.shape[-1]),
+                t_init_K=jnp.mean(fz.T_lowest),
+                ps_init_pa=jnp.mean(fz.p_surface),
+                cfg=land_config.p_model,
+                co2_init_ppm=jnp.mean(fz.co2_ppmv))
+            _traj_post = acclim_trajectory(
+                _init, T_K=fz.T_lowest, ppfd=_ppfd, vpd_pa=_vpd,
+                co2_ppm=fz.co2_ppmv, ps_pa=fz.p_surface,
+                cfg=land_config.p_model, dt=float(d.dt_s))
+            # PRE-step alignment (parity with the prognostic lane, which
+            # evaluates capacities from the state BEFORE advancing it):
+            # step i uses the state after step i-1; step 0 uses the init.
+            _pm_traj = jax.tree_util.tree_map(
+                lambda leaf, i0: jnp.concatenate(
+                    [i0[None, ...], leaf[:-1]], axis=0),
+                _traj_post, _init)
+            print(f"  p_model: diagnostic pre-pass acclimation trajectory "
+                  f"({int(fz.T_lowest.shape[0])} steps, causal running means; "
+                  f"cold-start from site-mean T/Ps/CO2)")
         gpp_gC, le, h, _ = _diagnostic_fluxes(d, canopy_config, land_config, chunk,
-                                              mosaic=mosaic_cfg)
+                                              mosaic=mosaic_cfg,
+                                              pmodel_traj=_pm_traj)
     elif mosaic_cfg is not None:
         # Two-leaf prognostic OUTER-loop mosaic (per-tile rooting -> per-tile water
         # stress).  Preserves the prognostic 8-tuple output schema.
@@ -940,7 +1053,10 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
             soil_evap_resistance_exp=soil_evap_resistance_exp, z_ref=z_ref,
             texture=texture, interception=interception,
             plant_wilting_point=plant_wilting_point, stress_b0=stress_b0,
-            root_depth=float(root_depth), u_min=u_min, nudge_tau_days=nudge_tau_days)
+            root_depth=float(root_depth), u_min=u_min,
+            nudge_tau_days=nudge_tau_days,
+            capacity_scheme=capacity_scheme, g1_source=g1_source,
+            canopy_stomatal_model=canopy_stomatal_model)
     elif clmml_mosaic is not None:
         # CLM-ML outer-loop mosaic: run each tile as its own prognostic column and
         # area-weight (soil-state / ustar diagnostics area-weighted; reverted =
@@ -1168,6 +1284,45 @@ def main() -> int:
                     help="PLANT wilting point [m3/m3] for root-zone transpiration, "
                          "SEPARATE from the soil wilting point; below the soil "
                          "value = deep-rooted extraction (e.g. phreatophytes)")
+    ap.add_argument("--canopy-capacity-scheme", default="prescribed",
+                    choices=["prescribed", "p_model"],
+                    dest="canopy_capacity_scheme",
+                    help="source of the leaf photosynthetic capacities: "
+                         "'prescribed' (default, site/PFT values) or 'p_model' "
+                         "(acclimated optimality Vcmax25 + Jmax ratio; "
+                         "incompatible with the --vcmax-*-scale flags and "
+                         "--clmml-vcmax25).")
+    ap.add_argument("--canopy-g1-source", default="table",
+                    choices=["table", "p_model"], dest="canopy_g1_source",
+                    help="source of the Medlyn slope: 'table' (default) or "
+                         "'p_model' (least-cost xi; requires the medlyn "
+                         "stomatal model; incompatible with the "
+                         "--stomatal-m-*-scale flags).")
+    ap.add_argument("--params", type=str, default=None,
+                    help="YAML calibration file of tuned parameters keyed by "
+                         "param_collector qualified name 'scheme_key.field' "
+                         "(e.g. land.p_model.kphio), validated against each "
+                         "scheme's __param_spec__ bounds and spliced into the "
+                         "land config - the same layer run_lmip --params uses")
+    ap.add_argument("--transpiration-stress", default="beta_theta",
+                    choices=["beta_theta", "phydro"],
+                    dest="transpiration_stress",
+                    help="root-zone transpiration limitation: 'beta_theta' "
+                         "(default, empirical soil-moisture stress) or "
+                         "'phydro' (Joshi-2022 hydraulic profit optimum; "
+                         "prognostic mode + a P-model switch required)")
+    ap.add_argument("--canopy-vcmax-profile", default="kn",
+                    choices=["kn", "coordination"],
+                    dest="canopy_vcmax_profile",
+                    help="two-leaf canopy Vcmax25 depth profile: 'kn' "
+                         "(default nitrogen profile) or 'coordination' "
+                         "(fraction of the diffuse-light envelope)")
+    ap.add_argument("--canopy-stomatal-model", default=None,
+                    choices=["ball_berry", "medlyn", "leuning"],
+                    dest="canopy_stomatal_model",
+                    help="two-leaf stomatal conductance model (unset keeps the "
+                         "config default ball_berry; required as 'medlyn' for "
+                         "--canopy-g1-source p_model).")
     ap.add_argument("--canopy-interception", dest="interception",
                     action="store_true", default=False,
                     help="enable the shared canopy-water interception scheme "
@@ -1207,7 +1362,13 @@ def main() -> int:
                  clmml_vcmax25=args.clmml_vcmax25,
                  plant_wilting_point=args.plant_wilting_point,
                  spinup_steps=args.spinup_steps,
-                 interception=args.interception)
+                 interception=args.interception,
+                 capacity_scheme=args.canopy_capacity_scheme,
+                 g1_source=args.canopy_g1_source,
+                 canopy_stomatal_model=args.canopy_stomatal_model,
+                 transpiration_stress=args.transpiration_stress,
+                 vcmax_profile=args.canopy_vcmax_profile,
+                 params_path=args.params)
     return 0
 
 

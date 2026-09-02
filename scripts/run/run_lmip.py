@@ -72,6 +72,8 @@ from legoesm.land.richards import RichardsConfig
 from legoesm.land.carbon.config import CarbonConfig, som_total
 from legoesm.land.carbon.carbon_cycle import init_carbon_state
 from legoesm.land.lmip_forcing import make_synthetic_lmip_forcing
+from legoesm import constants
+from legoesm.land.p_model import PModelAcclimState, init_pmodel_acclim
 from legoesm.land.multilayer_land import (
     step_multilayer_land,
     init_multilayer_land_state,
@@ -164,10 +166,33 @@ def _build_surface_scheme(args: argparse.Namespace):
     """
     from legoesm.land.surface_scheme import SimpleSEBConfig, TwoLeafCanopyConfig
     name = getattr(args, "land_surface_scheme", "simple_seb")
+    _cap = getattr(args, "canopy_capacity_scheme", "prescribed")
+    _g1s = getattr(args, "canopy_g1_source", "table")
+    _vp = getattr(args, "canopy_vcmax_profile", "kn")
+    if _vp != "kn" and name != "two_leaf":
+        raise ValueError(
+            "--canopy-vcmax-profile applies to the two-leaf canopy only "
+            f"(got --land-surface-scheme {name!r}); the CLM-ML backend has "
+            "its own nitrogen profile and the big-leaf stomata have no "
+            "canopy depth profile.")
     if name == "simple_seb":
+        # simple_seb routes the P-model switches onto StomataConfig in
+        # build_config_from_args (they live with the big-leaf stomata there).
         return SimpleSEBConfig()
     if name == "two_leaf":
-        return TwoLeafCanopyConfig()
+        overrides = {}
+        if getattr(args, "canopy_stomatal_model", None) is not None:
+            overrides["stomatal_model"] = args.canopy_stomatal_model
+        if _cap != "prescribed":
+            overrides["capacity_scheme"] = _cap
+        if _g1s != "table":
+            overrides["g1_source"] = _g1s
+        if _vp != "kn":
+            overrides["vcmax_profile"] = _vp
+        cfg = TwoLeafCanopyConfig()._replace(**overrides) if overrides \
+            else TwoLeafCanopyConfig()
+        # Fail-early on invalid combos (e.g. g1_source=p_model without medlyn).
+        return cfg.validate()
     if name == "clm_ml":
         from legoesm.land.canopy.config import CLMMLCanopyConfig
         cfg = CLMMLCanopyConfig()
@@ -176,9 +201,16 @@ def _build_surface_scheme(args: argparse.Namespace):
             overrides["pft_clm"] = int(args.clm_ml_pft)
         if getattr(args, "clm_ml_turbulence_scheme", None) is not None:
             overrides["turbulence_scheme"] = args.clm_ml_turbulence_scheme
+        if getattr(args, "clm_ml_stomatal_model", None) is not None:
+            overrides["stomatal_model"] = args.clm_ml_stomatal_model
+        if _cap != "prescribed":
+            overrides["capacity_scheme"] = _cap
+        if _g1s != "table":
+            overrides["g1_source"] = _g1s
         if getattr(args, "clm_ml_dtime_target", None) is not None:
             overrides["dtime_ml_target_s"] = float(args.clm_ml_dtime_target)
-        return cfg._replace(**overrides) if overrides else cfg
+        cfg = cfg._replace(**overrides) if overrides else cfg
+        return cfg.validate()
     raise ValueError(
         f"Unknown --land-surface-scheme {name!r}; "
         "expected one of 'simple_seb', 'two_leaf', 'clm_ml'.")
@@ -257,6 +289,41 @@ def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
             freeze_dormancy_threshold_K=args.freeze_dormancy_threshold_k,
         ),
     )
+    # Big-leaf stomatal throttle (simple_seb only): the two-leaf / CLM-ML
+    # canopies carry their OWN stomata, so enabling the separate StomataConfig
+    # beta under them would down-regulate the same conductance twice (see the
+    # biophysics_lmip_two_leaf_setup rationale) — refuse rather than trap.
+    _stomata_on = getattr(args, "stomata_enabled", False)
+    _stomata_model = getattr(args, "stomata_model", None)
+    if (_stomata_on or _stomata_model is not None) and \
+            args.land_surface_scheme != "simple_seb":
+        raise ValueError(
+            "--stomata-enabled / --stomata-model configure the big-leaf "
+            "StomataConfig and are only meaningful with --land-surface-scheme "
+            f"simple_seb (got {args.land_surface_scheme!r}); the two_leaf and "
+            "clm_ml canopies carry their own stomatal models "
+            "(--canopy-stomatal-model / --clm-ml-stomatal-model).")
+    _cap = getattr(args, "canopy_capacity_scheme", "prescribed")
+    _g1s = getattr(args, "canopy_g1_source", "table")
+    _seb_pm = (args.land_surface_scheme == "simple_seb"
+               and (_cap, _g1s) != ("prescribed", "table"))
+    if _stomata_on or _stomata_model is not None or _seb_pm:
+        _sto = land.stomata
+        if _stomata_on:
+            _sto = _sto._replace(enabled=True)
+        if _stomata_model is not None:
+            _sto = _sto._replace(stomata_model=_stomata_model)
+        if _seb_pm:
+            _sto = _sto._replace(capacity_scheme=_cap, g1_source=_g1s)
+        land = land._replace(stomata=_sto.validate())
+    if getattr(args, "transpiration_stress", "beta_theta") != "beta_theta":
+        if args.land_surface_scheme == "clm_ml":
+            raise ValueError(
+                "--transpiration-stress phydro is not supported with "
+                "--land-surface-scheme clm_ml (CLM-ML has its own plant "
+                "hydraulics).")
+        land = land._replace(
+            transpiration_stress=args.transpiration_stress)
     # Sub-grid elevation-band snow (opt-in): for an offline column, the sub-grid
     # relief std [m] is supplied directly (--elev-std-m); a coarse gridded run gets
     # it per cell from the CLM STD_ELEV map instead (coupled driver).
@@ -454,10 +521,14 @@ def _save_restart(
             )
     if soil_frozen_fraction is not None:
         payload["soil_frozen_fraction"] = np.asarray(soil_frozen_fraction)
+    if getattr(state, "pmodel_acclim", None) is not None:
+        for _fname, _val in zip(PModelAcclimState._fields, state.pmodel_acclim):
+            payload[f"pmodel_{_fname}"] = np.asarray(_val)
     np.savez_compressed(str(restart_path), **payload)
 
 
-def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
+def _load_restart(restart_path: Path, config: MultiLayerLandConfig,
+                  allow_pmodel_cold_start: bool = False):
     """Load a restart checkpoint and reconstruct MultiLayerLandState."""
     from legoesm.land.state import MultiLayerLandState
     data = np.load(str(restart_path))
@@ -494,6 +565,28 @@ def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
         state = state._replace(
             ice_bands=jnp.asarray(data["ice_bands"]) if "ice_bands" in data
             else jnp.zeros((ncol, nb)))
+    # P-model acclimation state: restore when present; a P-model-active config
+    # resuming an archive WITHOUT it is a scientific reset of the acclimated
+    # capacities and is refused unless --pmodel-cold-restart made it explicit.
+    from legoesm.land.p_model import pmodel_switches_active
+    _ss = config.surface_scheme
+    _pm_active = pmodel_switches_active(_ss, config.stomata)
+    _pm_keys = [f"pmodel_{f}" for f in PModelAcclimState._fields]
+    if all(k in data for k in _pm_keys):
+        state = state._replace(pmodel_acclim=PModelAcclimState(
+            *[jnp.asarray(data[k]) for k in _pm_keys]))
+    elif _pm_active:
+        if not allow_pmodel_cold_start:
+            raise ValueError(
+                f"restart {restart_path} has no P-model acclimation state but "
+                "a P-model switch is active; resuming would silently "
+                "cold-start the acclimated capacities. Pass "
+                "--pmodel-cold-restart to accept the reset explicitly.")
+        state = state._replace(pmodel_acclim=init_pmodel_acclim(
+            int(state.snow_depth.shape[0]),
+            t_init_K=state.T_soil[:, 0],
+            ps_init_pa=constants.p_atm_std,
+            cfg=config.p_model))
     start_step = int(data["step"])
     start_day = float(data["day"])
     carbon_state = None
@@ -707,6 +800,71 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "upstream design value). num_ml_steps is derived from it, "
                         "so the canopy air budget stays at its design sub-step "
                         "whatever host --dt is used.")
+    p.add_argument("--clm-ml-stomatal-model", default=None,
+                   choices=["medlyn", "ball_berry", "wue", "leuning"],
+                   dest="clm_ml_stomatal_model",
+                   help="CLM-ML leaf stomatal-conductance model for "
+                        "--land-surface-scheme clm_ml. Unset keeps the "
+                        "CLMMLCanopyConfig default (wue).")
+    p.add_argument("--stomata-enabled", action="store_true",
+                   dest="stomata_enabled",
+                   help="simple_seb only: enable the big-leaf coupled "
+                        "Farquhar stomatal beta (StomataConfig.enabled). "
+                        "Refused with two_leaf/clm_ml, whose canopies carry "
+                        "their own stomata (enabling both would down-regulate "
+                        "the same conductance twice).")
+    p.add_argument("--stomata-model", default=None,
+                   choices=["ball_berry", "medlyn", "leuning"],
+                   dest="stomata_model",
+                   help="Big-leaf (simple_seb) stomatal conductance model "
+                        "(StomataConfig.stomata_model). Unset keeps the "
+                        "config default (ball_berry). The Jarvis fallback is "
+                        "selected structurally (stomata enabled + carbon "
+                        "scheme none), not by name.")
+    p.add_argument("--canopy-stomatal-model", default=None,
+                   choices=["ball_berry", "medlyn", "leuning"],
+                   dest="canopy_stomatal_model",
+                   help="Two-leaf stomatal conductance model. Unset keeps the "
+                        "CanopyConfig default (ball_berry). Required as "
+                        "'medlyn' when --canopy-g1-source p_model.")
+    p.add_argument("--canopy-capacity-scheme", default="prescribed",
+                   choices=["prescribed", "p_model"],
+                   dest="canopy_capacity_scheme",
+                   help="Source of the two-leaf C3 leaf capacities: "
+                        "'prescribed' (default, PFT tables) or 'p_model' "
+                        "(acclimated optimality Vcmax25 + Jmax25/Vcmax25 for "
+                        "C3 and the rpmodel-c4 optimum for C4 columns).")
+    p.add_argument("--canopy-vcmax-profile", default="kn",
+                   choices=["kn", "coordination"],
+                   dest="canopy_vcmax_profile",
+                   help="Two-leaf canopy Vcmax25 depth profile: 'kn' "
+                        "(default, exponential nitrogen profile) or "
+                        "'coordination' (profile follows a tunable fraction "
+                        "of the diffuse-PAR light envelope; "
+                        "land.two_leaf_canopy.vcmax_light_frac via --params).")
+    p.add_argument("--canopy-g1-source", default="table",
+                   choices=["table", "p_model"],
+                   dest="canopy_g1_source",
+                   help="Source of the Medlyn slope g1: 'table' (default, "
+                        "per-PFT) or 'p_model' (least-cost xi; requires "
+                        "--canopy-stomatal-model medlyn). Two-leaf only.")
+    p.add_argument("--transpiration-stress", default="beta_theta",
+                   choices=["beta_theta", "phydro"],
+                   dest="transpiration_stress",
+                   help="Water-stress source for transpiration/photosynthesis: "
+                        "'beta_theta' (default, empirical root-zone theta "
+                        "multiplier) or 'phydro' (Joshi-2022 profit optimum "
+                        "on the SPA plant-hydraulics supply; REPLACES the "
+                        "multiplier; needs a p_model switch and a "
+                        "two_leaf/simple_seb scheme).")
+    p.add_argument("--pmodel-cold-restart", action="store_true",
+                   dest="pmodel_cold_restart",
+                   help="Allow resuming a P-model run from a restart that has "
+                        "no P-model acclimation state (an archive written "
+                        "before the switches were on). The acclimation "
+                        "restarts from the configured cold-start values - an "
+                        "explicit, recorded reset. Without this flag such a "
+                        "resume is refused.")
     p.add_argument("--output", default="lmip_output",
                    help="Output directory")
     p.add_argument("--checkpoint-days", type=int, default=100,
@@ -892,7 +1050,8 @@ def main() -> None:
     if args.restart_from is not None:
         print(f"Loading restart from {args.restart_from}")
         state, carbon_state, start_step, start_day_abs, carbon_phi = _load_restart(
-            Path(args.restart_from), config
+            Path(args.restart_from), config,
+            allow_pmodel_cold_start=getattr(args, "pmodel_cold_restart", False),
         )
         print(f"  Resumed at step {start_step}, day {start_day_abs:.2f}")
         # The LMIP restart format persists only soil/snow/carbon, not the CLM-ML

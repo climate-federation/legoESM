@@ -6,6 +6,8 @@ from typing import Any, NamedTuple
 
 from legoesm import constants
 from legoesm.land.carbon.config import CarbonConfig
+from legoesm.land.p_model import PModelConfig
+from legoesm.land.phydro import PHydroConfig
 from legoesm.land.stomata import StomataConfig
 from legoesm.land.snow_bands import ElevationSnowBandConfig
 from legoesm.land.soil_grid import SoilGridConfig
@@ -116,6 +118,10 @@ class LandConfig(NamedTuple):
     # Niu 2005 / CLM4.5).  Unknown -> ValueError at dispatch.
     runoff_scheme: str = "bucket"
     topmodel: TopmodelConfig = TopmodelConfig()
+    # P-model optimality tunables (land/p_model.py) — exactly ONE instance per
+    # land config (routable as land.p_model.*); the scheme/stomata configs
+    # carry only the string switches that activate it.  Appended last.
+    p_model: PModelConfig = PModelConfig()
 
 
 class MultiLayerLandConfig(NamedTuple):
@@ -218,6 +224,18 @@ class MultiLayerLandConfig(NamedTuple):
     # leaf — reducing soil infiltration and re-partitioning the canopy latent
     # flux.  The CLM-ML canopy has its OWN internal interception and ignores this.
     interception: Any | None = None
+    # P-model optimality tunables (land/p_model.py) — exactly ONE instance per
+    # land config (routable as land.p_model.*); the scheme/stomata configs
+    # carry only the string switches that activate it.  Appended last.
+    p_model: PModelConfig = PModelConfig()
+    # Transpiration water-stress source: "beta_theta" (default — the empirical
+    # root-zone theta multiplier, bit-identical legacy) or "phydro" (the Joshi
+    # profit optimum on the SPA supply REPLACES the multiplier; requires a
+    # p_model capacity/g1 switch to feed and a two_leaf/simple_seb scheme —
+    # CLM-ML carries its own plant hydraulics).  Unknown -> ValueError at the
+    # step dispatch.
+    transpiration_stress: str = "beta_theta"  # "beta_theta" | "phydro"
+    phydro: PHydroConfig = PHydroConfig()
 
 
 def resolve_land_config(land_mode: str, land_config=None):
@@ -342,6 +360,27 @@ def biophysics_lmip_two_leaf_setup() -> dict:
         snow_albedo_feedback=True,
         surface_scheme=TwoLeafCanopyConfig(),
     )
+
+
+def biophysics_lmip_p_model_setup() -> dict:
+    """Two-leaf biophysics mode with the P-model optimality source active.
+
+    Identical to :func:`biophysics_lmip_two_leaf_setup` except the canopy
+    runs Medlyn stomata with BOTH P-model switches on: acclimated Vcmax25 +
+    Jmax25/Vcmax25 from the coordination optimum and the predicted least-cost
+    Medlyn slope g1 = xi (Stocker et al. 2020; see ``land/p_model.py``).
+    NOTE: the calibrated per-PFT Vc_max25/g1 tables of the two-leaf setup are
+    bypassed by construction here — scores are not comparable to the
+    calibrated two-leaf run until the P model is itself calibrated
+    (``--params land.p_model.*``).
+    """
+    setup = biophysics_lmip_two_leaf_setup()
+    setup["surface_scheme"] = TwoLeafCanopyConfig(
+        stomatal_model="medlyn",
+        capacity_scheme="p_model",
+        g1_source="p_model",
+    ).validate()
+    return setup
 
 
 def apply_biophysics_lmip_two_leaf(config: MultiLayerLandConfig) -> MultiLayerLandConfig:

@@ -1390,6 +1390,45 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "evaporates at potential, and with them on it throttles "
                              "BARE GROUND with a conductance that has no leaf-area "
                              "dependence. 'clm_ml' is the full multilayer canopy.")
+    parser.add_argument("--land-capacity-scheme",
+                        choices=["prescribed", "p_model"],
+                        default=_EXPERIMENT_DEFAULTS.land_capacity_scheme,
+                        dest="land_capacity_scheme",
+                        help="Source of the land photosynthetic capacities: "
+                             "'prescribed' (default, PFT tables) or 'p_model' "
+                             "(acclimated optimality Vcmax25 + Jmax ratio; "
+                             "requires use_multilayer_land except under "
+                             "simple_seb + land-stomatal-beta).")
+    parser.add_argument("--land-g1-source",
+                        choices=["table", "p_model"],
+                        default=_EXPERIMENT_DEFAULTS.land_g1_source,
+                        dest="land_g1_source",
+                        help="Source of the Medlyn stomatal slope: 'table' "
+                             "(default) or 'p_model' (least-cost xi; the "
+                             "active scheme's stomatal model must be medlyn).")
+    parser.add_argument("--land-two-leaf-stomatal-model",
+                        choices=["", "ball_berry", "medlyn", "leuning"],
+                        default=_EXPERIMENT_DEFAULTS.land_two_leaf_stomatal_model,
+                        dest="land_two_leaf_stomatal_model",
+                        help="Two-leaf canopy stomatal model ('' keeps the "
+                             "scheme default ball_berry).")
+    parser.add_argument("--land-clm-ml-stomatal-model",
+                        choices=["", "medlyn", "ball_berry", "wue", "leuning"],
+                        default=_EXPERIMENT_DEFAULTS.land_clm_ml_stomatal_model,
+                        dest="land_clm_ml_stomatal_model",
+                        help="CLM-ML stomatal model ('' keeps the scheme "
+                             "default wue).")
+    parser.add_argument("--land-simple-seb-stomata-model",
+                        choices=["", "ball_berry", "medlyn", "leuning"],
+                        default=_EXPERIMENT_DEFAULTS.land_simple_seb_stomata_model,
+                        dest="land_simple_seb_stomata_model",
+                        help="Big-leaf (simple_seb) stomatal model ('' keeps "
+                             "the scheme default ball_berry).")
+    parser.add_argument("--land-pmodel-cold-restart", action="store_true",
+                        dest="land_pmodel_cold_restart",
+                        help="Allow resuming from a land IC/checkpoint that "
+                             "has no P-model acclimation state (explicit, "
+                             "recorded reset; refused otherwise).")
     parser.add_argument("--clm-ml-use-surfdata-pft", action=argparse.BooleanOptionalAction,
                         default=_EXPERIMENT_DEFAULTS.clm_ml_use_surfdata_pft,
                         dest="clm_ml_use_surfdata_pft",
@@ -2018,6 +2057,12 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_soil_moisture_init_frac=args.land_soil_moisture_init_frac,
         land_soil_init=args.land_soil_init,
         land_surface_scheme=args.land_surface_scheme,
+        land_capacity_scheme=args.land_capacity_scheme,
+        land_g1_source=args.land_g1_source,
+        land_two_leaf_stomatal_model=args.land_two_leaf_stomatal_model,
+        land_clm_ml_stomatal_model=args.land_clm_ml_stomatal_model,
+        land_simple_seb_stomata_model=args.land_simple_seb_stomata_model,
+        land_pmodel_cold_restart=args.land_pmodel_cold_restart,
         clm_ml_use_surfdata_pft=args.clm_ml_use_surfdata_pft,
         land_ic_path=args.land_ic,
         sponge_enabled=args.sponge_enabled,

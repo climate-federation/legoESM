@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.canopy.sif import leaf_sif
 from legoesm.land.carbon.config import CarbonState
@@ -33,6 +34,8 @@ def compute_effective_beta(
     carbon_state: CarbonState | None,
     dt: float,
     land_params=None,
+    pmodel_acclim=None,
+    phydro_supply=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray | None, jnp.ndarray | None]:
     """Compute effective moisture availability beta, with optional stomatal/carbon coupling.
 
@@ -69,6 +72,11 @@ def compute_effective_beta(
         Farquhar path with ``stomata.sif`` set produces it; the Jarvis fallback
         has no Ci/An to invert).
     """
+    # Fail-early validation of the static switch fields (typos, inconsistent
+    # P-model combinations, switches on disabled stomata) — the config is
+    # static, so this runs at trace time, not per step.
+    config.stomata.validate()
+
     # Override stomatal / carbon config fields with spatial arrays if provided.
     # ``_fC4`` (per-column C4 area fraction) drives the canonical-FvCB C3/C4 blend
     # in the coupled solver; it is a per-cell PFT-derived field, so it is carried
@@ -90,13 +98,105 @@ def compute_effective_beta(
     gpp_farq = None
     sif = None
 
+    # --- P-model optimality parameter source (big-leaf full set) ---
+    # Acclimated Vcmax25 replaces the prescribed capacity, the predicted
+    # Medlyn slope replaces g1_med (when selected), and the coordination
+    # rjv25 + acclimated growth temperature thread into the FvCB solve.
+    _pm_on = (config.stomata.capacity_scheme == "p_model"
+              or config.stomata.g1_source == "p_model")
+    _rjv25 = None
+    _tgc_c = None
+    if _pm_on:
+        if not (config.carbon.scheme == "differland"
+                and carbon_state is not None and config.stomata.enabled):
+            raise ValueError(
+                "P-model big-leaf switches require the coupled Farquhar "
+                "path (stomata.enabled with carbon.scheme='differland' and "
+                "a carbon state); the Jarvis fallback has no Vcmax/g1 for "
+                "the P model to supply.")
+        from legoesm.land.p_model import (
+            acclimated_capacities, acclimated_capacities_c4)
+        _phydro_on = getattr(
+            config, "transpiration_stress", "beta_theta") == "phydro"
+        if (config.stomata.g1_source == "p_model"
+                and config.stomata.stomata_model != "medlyn"
+                and not _phydro_on):
+            raise ValueError(
+                "g1_source='p_model' predicts a MEDLYN slope under the "
+                "least-cost stomatal model dispatch; with "
+                f"stomata_model={config.stomata.stomata_model!r} select "
+                "transpiration_stress='phydro' (whose slope mapping covers "
+                "every model) or g1_source='table'.")
+        if _phydro_on:
+            if phydro_supply is None:
+                raise ValueError(
+                    "transpiration_stress='phydro' but no PhydroSupply was "
+                    "threaded to the big-leaf stomata (phydro_supply=None).")
+            from legoesm.land.phydro import phydro_optimum, slope_for_model
+            from legoesm.land.p_model import optimal_chi as _ochi
+            _hcaps = phydro_optimum(
+                pmodel_acclim, phydro_supply, config.phydro, config.p_model)
+            _, _, _, _gs_pa_h, _ = _ochi(
+                pmodel_acclim.t_mean_K, pmodel_acclim.vpd_mean_pa,
+                pmodel_acclim.co2_mean_ppm, pmodel_acclim.ps_ema,
+                config.p_model)
+            _caps = None
+        else:
+            _caps = acclimated_capacities(pmodel_acclim, config.p_model)
+        _caps4 = acclimated_capacities_c4(pmodel_acclim, config.p_model)
+        # The big-leaf kernel shares ONE Vcmax25 (and one Medlyn slope)
+        # across its C3/C4 branches and area-blends the RATES by fC4; in
+        # production fC4 is the dominant-PFT 0/1 flag, so the linear
+        # capacity blend below is EXACT at both endpoints and inherits the
+        # kernel's own single-capacity approximation for intermediate fC4
+        # (codex design review).
+        _vc3 = _hcaps.vcmax25_leaf if _phydro_on else _caps.vcmax25_leaf
+        _rjv_src = _hcaps.rjv25 if _phydro_on else _caps.rjv25
+        if config.stomata.capacity_scheme == "p_model":
+            _stomata = _stomata._replace(
+                Vc_max25=((1.0 - _fC4) * _vc3
+                          + _fC4 * _caps4.vcmax25_c4_leaf))
+            _rjv25 = _rjv_src  # consumed by the C3 branch only
+            _tgc_c = pmodel_acclim.t_mean_K - constants.T_freeze
+        if config.stomata.g1_source == "p_model":
+            if _phydro_on:
+                # Slope for the ACTIVE model from the profit optimum's chi;
+                # blended with the C4 least-cost slope as before.  Note the
+                # slope slot per model: g1_med (medlyn), g1_bb (ball_berry),
+                # a1_leuning (leuning).
+                _slope3 = slope_for_model(
+                    config.stomata.stomata_model, _hcaps.chi, pmodel_acclim,
+                    _gs_pa_h,
+                    d0_leuning_kpa=config.stomata.d0_leuning_kpa)
+                _sm = config.stomata.stomata_model
+                if _sm == "medlyn":
+                    _stomata = _stomata._replace(
+                        g1_med=((1.0 - _fC4) * _slope3
+                                + _fC4 * _caps4.g1_c4_kpa))
+                elif _sm == "ball_berry":
+                    _stomata = _stomata._replace(g1_bb=_slope3)
+                else:  # leuning (validate() restricts the set)
+                    _stomata = _stomata._replace(a1_leuning=_slope3)
+            else:
+                _stomata = _stomata._replace(
+                    g1_med=((1.0 - _fC4) * _caps.g1_kpa
+                            + _fC4 * _caps4.g1_c4_kpa))
+
     if config.stomata.enabled:
         if config.carbon.scheme == "differland" and carbon_state is not None:
             LAI = carbon_state.C_fol / _carbon.LCMA
+            # Under phydro the water limitation is inside the optimum: the
+            # solver's beta_soil capacity fold is neutralised (ones) so the
+            # stress is not double-counted; beta_theta keeps the legacy fold.
+            _beta_for_solver = (jnp.ones_like(beta_soil)
+                                if _pm_on and getattr(
+                                    config, "transpiration_stress",
+                                    "beta_theta") == "phydro"
+                                else beta_soil)
             leaf = solve_coupled_farquhar_ci(
                 T_sfc, forcing.sw_down, forcing.co2_ppmv,
-                forcing.q_lowest, forcing.p_surface, LAI, beta_soil,
-                _stomata, _fC4)
+                forcing.q_lowest, forcing.p_surface, LAI, _beta_for_solver,
+                _stomata, _fC4, rjv25=_rjv25, TgC_C=_tgc_c)
             gs, gpp_farq = leaf.gs, leaf.gpp
             beta = compute_stomatal_beta(
                 gs, LAI, beta_soil, _stomata)

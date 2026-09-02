@@ -32,6 +32,8 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm.land.p_model import PModelAcclimState
+
 logger = logging.getLogger(__name__)
 
 # Relative tolerance for comparing a restart's soil layer thicknesses against the
@@ -242,6 +244,12 @@ def save_land_restart(
         val = getattr(state, field, None)
         if val is not None:
             payload[field] = np.asarray(val)
+    # P-model acclimation state (five (ncol,) arrays) — written only when the
+    # P-model switches are active (state carries it).
+    _pm = getattr(state, "pmodel_acclim", None)
+    if _pm is not None:
+        for _fname, _val in zip(PModelAcclimState._fields, _pm):
+            payload[f"pmodel_{_fname}"] = np.asarray(_val)
 
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -405,6 +413,10 @@ def load_land_restart(
         for field in _MULTILAYER_OPTIONAL_ARRAY_FIELDS
         if field in data.files
     }
+    _pm_keys = [f"pmodel_{f}" for f in PModelAcclimState._fields]
+    pmodel_acclim = (
+        PModelAcclimState(*[jnp.asarray(data[k]) for k in _pm_keys])
+        if all(k in data.files for k in _pm_keys) else None)
     state = MultiLayerLandState(
         T_soil=T,
         psi_soil=jnp.asarray(data["psi_soil"]),
@@ -414,6 +426,7 @@ def load_land_restart(
         snow_depth=jnp.asarray(data["snow_depth"]),
         snow_age=jnp.asarray(data["snow_age"]),
         TgC=jnp.asarray(data["TgC"]) if "TgC" in data.files else None,
+        pmodel_acclim=pmodel_acclim,
         **optional,
     )
     meta = {
@@ -426,7 +439,8 @@ def load_land_restart(
     return state, meta
 
 
-def merge_land_restart_into_template(loaded, template):
+def merge_land_restart_into_template(loaded, template,
+                                     allow_pmodel_cold_start: bool = False):
     """Return ``template`` with its prognostic fields replaced by ``loaded``'s.
 
     A restart round-trips the core prognostic fields (``_MULTILAYER_FIELDS`` +
@@ -469,6 +483,33 @@ def merge_land_restart_into_template(loaded, template):
                 f"land restart field '{name}' has shape {tuple(arr.shape)}, "
                 f"expected {tuple(ref.shape)} (band-count / resolution skew)")
         fields[name] = arr
+    # P-model acclimation state: NEVER silently cold-started (a fresh state is
+    # a scientific reset of the acclimated capacities, not a compatibility
+    # shim).  Template carries it (P-model switches active) but the restart
+    # predates it -> hard error unless the caller explicitly allowed the reset
+    # (run_lmip --pmodel-cold-restart), in which case the template's freshly
+    # initialised state is kept and the reset is the caller's recorded choice.
+    _ref_pm = getattr(template, "pmodel_acclim", None)
+    _ld_pm = getattr(loaded, "pmodel_acclim", None)
+    if _ref_pm is not None:
+        if _ld_pm is None:
+            if not allow_pmodel_cold_start:
+                raise ValueError(
+                    "land restart has no P-model acclimation state but the run "
+                    "has a P-model switch active; loading it would silently "
+                    "cold-start the acclimated capacities. Re-run with the "
+                    "cold-restart flag (run_lmip --pmodel-cold-restart) to "
+                    "accept the reset explicitly, or restart from an archive "
+                    "written by a P-model run.")
+        else:
+            for _fname, _arr, _ref in zip(
+                    PModelAcclimState._fields, _ld_pm, _ref_pm):
+                if hasattr(_arr, "shape") and _arr.shape != _ref.shape:
+                    raise ValueError(
+                        f"land restart field 'pmodel_{_fname}' has shape "
+                        f"{tuple(_arr.shape)}, expected {tuple(_ref.shape)} "
+                        f"(resolution skew)")
+            fields["pmodel_acclim"] = _ld_pm
     return template._replace(**fields)
 
 

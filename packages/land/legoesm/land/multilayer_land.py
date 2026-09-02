@@ -60,6 +60,16 @@ from legoesm.land.surface_scheme.two_leaf_canopy import (
     advance_TgC_ema,
     compute_prognostic_lai,
 )
+from legoesm.land.canopy.energy_balance import canopy_met_variables
+from legoesm.land.canopy.radiative_transfer import (
+    PAR_W_TO_UMOL,
+    split_sw_components,
+)
+from legoesm.land.p_model import (
+    advance_pmodel_acclim,
+    init_pmodel_acclim,
+    pmodel_switches_active,
+)
 from legoesm.surface_albedo import land_albedo as compute_land_albedo
 from legoesm.surface_albedo import (
     dry_soil_brightening,
@@ -542,6 +552,39 @@ def _step_multilayer_land_impl(
     # Surface scheme dispatch
     # =================================================================
     canopy_state_new = None  # updated only by CLMMLCanopyConfig branch
+    # --- P-hydro transpiration-stress source (dispatch-hardened) ---
+    if config.transpiration_stress not in ("beta_theta", "phydro"):
+        raise ValueError(
+            f"unknown transpiration_stress scheme "
+            f"{config.transpiration_stress!r}; must be one of "
+            "('beta_theta', 'phydro')")
+    _phydro_supply = None
+    if config.transpiration_stress == "phydro":
+        if isinstance(config.surface_scheme, CLMMLCanopyConfig):
+            raise ValueError(
+                "transpiration_stress='phydro' is not supported with the "
+                "CLM-ML scheme (it carries its OWN plant hydraulics; "
+                "composing both would double-count the supply limit).")
+        if not pmodel_switches_active(config.surface_scheme, config.stomata):
+            raise ValueError(
+                "transpiration_stress='phydro' needs a P-model switch "
+                "(capacity_scheme/g1_source='p_model') to feed the profit "
+                "optimum into; with prescribed parameters the switch would "
+                "be silently inert.")
+        from legoesm.land.phydro import soil_root_supply
+        # LAI for the per-leaf-area supply: same priority the canopy resolves
+        # (override > per-column params > scalar default).
+        _lai_sup = compute_prognostic_lai(
+            carbon_state, config, config.surface_scheme)
+        if _lai_sup is None:
+            _lai_sup = _get(lp, "LAI", None) if lp is not None else None
+        if _lai_sup is None:
+            _lai_sup = jnp.full(T_surface.shape, 1.5)  # coeff-ok: canopy default LAI fallback
+        # Reuse the step's own per-column root profile (single source).
+        _phydro_supply = soil_root_supply(
+            psi, theta, grid.dz, root_frac, _lai_sup,
+            config.hydraulics, config.phydro)
+
     if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
         # Canopy surface scheme: Newton closure with Picard loop that
         # advances soil thermal tentatively between passes.
@@ -594,6 +637,7 @@ def _step_multilayer_land_impl(
                 state.W_canopy, _pai_i, config.interception)
 
         surface_out = compute_two_leaf_canopy_fluxes(
+            phydro_supply=_phydro_supply,
             T_soil_top=T_surface,
             forcing=forcing,
             canopy_config=config.surface_scheme,
@@ -608,6 +652,7 @@ def _step_multilayer_land_impl(
             TgC_override=TgC_override,
             LAI_override=LAI_override,
             fwet=_fwet_pre,
+            pmodel_acclim=state.pmodel_acclim,
             # Bare-soil evaporation efficiency = TWO complementary top-layer
             # limiters, applied as a beta conductance efficiency in the canopy
             # soil energy balance (both tie evaporation to the fast-drying
@@ -679,6 +724,56 @@ def _step_multilayer_land_impl(
         clmml_forcing = forcing._replace(
             u_lowest=jnp.where(_calm, forcing.u_lowest * _sc, U_min),
             v_lowest=jnp.where(_calm, forcing.v_lowest * _sc, 0.0))
+        # --- P-model optimality parameter source (CLM-ML lane) ---
+        _cc_ml = config.surface_scheme
+        _v_col = _g1_col = _jv_col = _tacc_col = None
+        if pmodel_switches_active(_cc_ml):
+            from legoesm.land.p_model import (
+                acclimated_capacities, acclimated_capacities_c4)
+            # Per-column PATHWAY selection: PFTs are static host ints, so the
+            # C3/C4 mask is concrete (c3psn from the host pftcon table); C4
+            # columns get the rpmodel-c4 optimum (beta/9, mj=mc=1), C3
+            # columns the coordination optimum.
+            from legoesm.land.canopy.clm_ml_backend.clm_src_main import (
+                pftconMod as _pftmod)
+            try:
+                _pfts = ([int(x) for x in clm_ml_pft_per_col]
+                         if clm_ml_pft_per_col is not None
+                         else [int(_cc_ml.pft_clm)])
+            except (TypeError, jax.errors.TracerIntegerConversionError) as e:
+                raise ValueError(
+                    "the CLM-ML P-model pathway selection needs CONCRETE "
+                    "host PFT indices; clm_ml_pft_per_col arrived traced. "
+                    "Pass the static per-column PFT list.") from e
+            _is_c3 = [int(round(float(_pftmod.pftcon.c3psn[pf]))) == 1
+                      for pf in _pfts]
+            _ncol_ml = int(T_surface.shape[0])
+            if len(_is_c3) == 1:
+                _is_c3 = _is_c3 * _ncol_ml
+            elif len(_is_c3) != _ncol_ml:
+                raise ValueError(
+                    f"clm_ml_pft_per_col has {len(_is_c3)} entries for "
+                    f"{_ncol_ml} columns; the P-model pathway mask needs one "
+                    "PFT per column (or a single shared PFT).")
+            _c3_mask = jnp.asarray(_is_c3, dtype=bool)
+            _caps_ml = acclimated_capacities(state.pmodel_acclim, config.p_model)
+            _caps4_ml = acclimated_capacities_c4(
+                state.pmodel_acclim, config.p_model)
+            if _cc_ml.capacity_scheme == "p_model":
+                _v_col = jnp.where(_c3_mask, _caps_ml.vcmax25_leaf,
+                                   _caps4_ml.vcmax25_c4_leaf)
+                # Unified growth-temperature clock (user decision): the
+                # P-model acclimation temperature replaces the backend's own
+                # 10-day t_a10 mean for the K&K entropies / j2v closure.
+                _tacc_col = state.pmodel_acclim.t_mean_K
+                if _cc_ml.pmodel_rjv25:
+                    # C3-only by construction: the backend zeroes jmax25top
+                    # for C4 columns regardless of the injected ratio.
+                    _jv_col = _caps_ml.rjv25
+            if _cc_ml.g1_source == "p_model":
+                _g1_col = jnp.where(_c3_mask, _caps_ml.g1_kpa,
+                                    _caps4_ml.g1_c4_kpa)
+
         surface_out, canopy_state_new = compute_clm_ml_canopy_fluxes(
             T_soil_top=T_surface,
             forcing=clmml_forcing,
@@ -697,6 +792,10 @@ def _step_multilayer_land_impl(
             pft_per_col=clm_ml_pft_per_col,
             vcmaxpft_jax=clm_ml_vcmaxpft_jax,
             g1_medlyn_jax=clm_ml_g1_medlyn_jax,
+            vcmax25_col_jax=_v_col,
+            g1_med_col_jax=_g1_col,
+            jv_ratio_col_jax=_jv_col,
+            tacclim_col_jax=_tacc_col,
         )
     elif isinstance(config.surface_scheme, SimpleSEBConfig):
         # SimpleSEB: bulk fluxes with skin T = T_soil[:, 0].
@@ -715,6 +814,8 @@ def _step_multilayer_land_impl(
             albedo_land=albedo_land,
             emissivity=emissivity,
             z0=z0,
+            pmodel_acclim=state.pmodel_acclim,
+            phydro_supply=_phydro_supply,
         )
     else:
         raise ValueError(
@@ -1066,6 +1167,33 @@ def _step_multilayer_land_impl(
     else:
         TgC_new = None
 
+    # --- Advance the P-model acclimation state (only when state carries it) ---
+    if state.pmodel_acclim is not None:
+        # Drivers from the same forcing the canopy saw this step: top-of-canopy
+        # PPFD from the shared SW split, VPD [Pa] from the shared met helper.
+        _par_dir, _par_diff, _, _, _ = split_sw_components(
+            forcing.sw_down, forcing.cos_zenith)
+        _ppfd_toc = (_par_dir + _par_diff) * PAR_W_TO_UMOL
+        _, _, _vpd_pa, _, _, _, _ = canopy_met_variables(
+            forcing.p_surface, forcing.T_lowest, forcing.q_lowest)
+        pmodel_acclim_new = advance_pmodel_acclim(
+            state.pmodel_acclim,
+            T_K=forcing.T_lowest,
+            ppfd=_ppfd_toc,
+            # Raw VPD (can be slightly negative in supersaturated air): the
+            # consumer (optimal_chi) applies the SMOOTH floor; a hard maximum
+            # here would add a gradient kink at saturation.
+            vpd_pa=_vpd_pa,
+            co2_ppm=jnp.broadcast_to(
+                jnp.asarray(forcing.co2_ppmv), _ppfd_toc.shape),
+            ps_pa=jnp.broadcast_to(
+                jnp.asarray(forcing.p_surface), _ppfd_toc.shape),
+            cfg=config.p_model,
+            dt=dt,
+        )
+    else:
+        pmodel_acclim_new = None
+
     # --- Build new state ---
     # Preserve the INPUT state's precision.  The Richards + soil-thermal solves run
     # in an internal working precision that is float64 whenever the hydraulics config
@@ -1109,6 +1237,11 @@ def _step_multilayer_land_impl(
         # store (no ``None`` -> array carry-structure change under a scan).
         W_canopy=(_match(W_canopy_new, state.W_canopy)
                   if state.W_canopy is not None else None),
+        # P-model acclimation carry: a NamedTuple pytree of (ncol,) leaves —
+        # per-leaf dtype cast via tree-map (same reason as the scalar _match).
+        pmodel_acclim=(jax.tree.map(_match, pmodel_acclim_new,
+                                    state.pmodel_acclim)
+                       if state.pmodel_acclim is not None else None),
     )
 
     # --- Post-step surface state for coupler ---
@@ -1224,7 +1357,7 @@ def _step_multilayer_land_impl(
             # the carbon cycle sees a consistent end-of-step GPP.
             _, gpp_override, _ = compute_effective_beta(
                 T_surface_new, forcing, beta_soil_new, config, carbon_state,
-                dt, land_params=lp)
+                dt, land_params=lp, pmodel_acclim=pmodel_acclim_new)
         carbon_state_new, co2_flux = step_carbon(
             carbon_state, forcing.sw_down, T_surface_new, forcing.co2_ppmv,
             beta_soil_new, lat_arr, doy, forcing.precip_total, config.carbon,
@@ -1469,6 +1602,8 @@ def init_multilayer_land_state(
     T_init: float = 280.0,  # coeff-ok: initial condition (default land skin/soil temperature)
     theta_init: float | None = None,
     TgC_init: float | None = None,
+    pmodel_co2_init_ppm: float | None = None,
+    pmodel_ps_init_pa: float | None = None,
 ) -> MultiLayerLandState:
     """Create initial multi-layer land state.
 
@@ -1543,6 +1678,23 @@ def init_multilayer_land_state(
     else:
         canopy_state = None
 
+    # P-model acclimation state: created iff the two-leaf scheme has a P-model
+    # switch active.  T/pressure come from the initial condition; PPFD/VPD
+    # (and CO2 unless the driver overrides with the run value) come from the
+    # PModelConfig init fields — every cold-start value is in the resolved
+    # config, no hidden choice.
+    pmodel_acclim = None
+    if pmodel_switches_active(config.surface_scheme, config.stomata):
+        pmodel_acclim = init_pmodel_acclim(
+            ncol,
+            t_init_K=jnp.asarray(T_init),  # scalar or per-column, broadcasts
+            ps_init_pa=(constants.p_atm_std if pmodel_ps_init_pa is None
+                        else pmodel_ps_init_pa),
+            cfg=config.p_model,
+            co2_init_ppm=pmodel_co2_init_ppm,
+            dtype=T_soil.dtype,
+        )
+
     return MultiLayerLandState(
         T_soil=T_soil,
         psi_soil=psi_soil,
@@ -1559,6 +1711,7 @@ def init_multilayer_land_state(
         canopy_state=canopy_state,
         # Dry canopy at start; carried only when interception is configured.
         W_canopy=(jnp.zeros(ncol) if config.interception is not None else None),
+        pmodel_acclim=pmodel_acclim,
     )
 
 

@@ -65,6 +65,80 @@ HA_GAMMA = 37830.0
 DIFFUSIVITY_RATIO_H2O_CO2 = 1.6
 
 
+# --- Water viscosity + density (Huber et al. 2009; Fisher & Dial 1975) ---
+# Transcribed verbatim from the rpmodel R source (geco-bern/rpmodel,
+# R/subroutines.R: viscosity_h2o, density_h2o): Huber et al. (2009),
+# J. Phys. Chem. Ref. Data 38, 101-125, with water density from the Tumlirz
+# equation of state (Fisher & Dial 1975, Marine Physical Laboratory Tech.
+# Rept., San Diego).  Used by the P model's least-cost xi (cost of water
+# transport scales with viscosity).
+_VISC_TK_AST = 647.096  # [K] Huber reference temperature
+_VISC_RHO_AST = 322.0  # [kg/m3] Huber reference density
+_VISC_MU_AST = 1e-6  # [Pa s] Huber reference viscosity
+# Huber eq. 11 / Table 2: mu0 denominator, ascending powers of (1/tbar).
+_VISC_MU0_COEFFS = (1.67752, 2.20462, 0.6366564, -0.241605)
+# Huber Table 3: row j multiplies (rbar-1)^j, column i multiplies ctbar^i.
+_VISC_H = (
+    (0.520094, 0.0850895, -1.08374, -0.289555, 0.0, 0.0),
+    (0.222531, 0.999115, 1.88797, 1.26613, 0.0, 0.120573),
+    (-0.281378, -0.906851, -0.772479, -0.489837, -0.257040, 0.0),
+    (0.161913, 0.257399, 0.0, 0.0, 0.0, 0.0),
+    (-0.0325372, 0.0, 0.0, 0.0698452, 0.0, 0.0),
+    (0.0, 0.0, 0.0, 0.0, 0.00872102, 0.0),
+    (0.0, 0.0, 0.0, -0.00435673, 0.0, -0.000593264),
+)
+# Fisher & Dial (1975) Tumlirz-equation polynomials, ascending powers of T [degC].
+_TUMLIRZ_LAMBDA = (1788.316, 21.55053, -0.4695911, 3.096363e-3, -7.341182e-6)  # [bar cm3/g]
+_TUMLIRZ_PO = (5918.499, 58.05267, -1.1253317, 6.6123869e-3, -1.4661625e-5)  # [bar]
+_TUMLIRZ_VINF = (  # [cm3/g]
+    0.6980547, -7.435626e-4, 3.704258e-5, -6.315724e-7, 9.829576e-9,
+    -1.197269e-10, 1.005461e-12, -5.437898e-15, 1.69946e-17, -2.295063e-20,
+)
+
+
+def _poly_ascending(coeffs: tuple[float, ...], x: jax.Array) -> jax.Array:
+    """Horner evaluation of a polynomial given ascending-power coefficients."""
+    y = jnp.zeros_like(x)
+    for c in reversed(coeffs):
+        y = y * x + c
+    return y
+
+
+def water_density(T_K: jax.Array, P_Pa: jax.Array) -> jax.Array:
+    """Density of pure water [kg/m3] (Tumlirz equation, Fisher & Dial 1975)."""
+    tc = T_K - constants.T_freeze
+    lam = _poly_ascending(_TUMLIRZ_LAMBDA, tc)
+    po = _poly_ascending(_TUMLIRZ_PO, tc)
+    vinf = _poly_ascending(_TUMLIRZ_VINF, tc)
+    pbar = 1e-5 * P_Pa  # coeff-ok: exact unit conversion Pa -> bar
+    v = vinf + lam / (po + pbar)  # specific volume [cm3/g]
+    return 1e3 / v
+
+
+def water_viscosity(T_K: jax.Array, P_Pa: jax.Array) -> jax.Array:
+    """Dynamic viscosity of pure water [Pa s] (Huber et al. 2009)."""
+    tbar = T_K / _VISC_TK_AST
+    rbar = water_density(T_K, P_Pa) / _VISC_RHO_AST
+    mu0 = 1e2 * jnp.sqrt(tbar) / _poly_ascending(_VISC_MU0_COEFFS, 1.0 / tbar)
+    ctbar = 1.0 / tbar - 1.0
+    mu1 = jnp.zeros_like(tbar)
+    for i in range(6):
+        inner = jnp.zeros_like(tbar)
+        for j in range(7):
+            inner = inner + _VISC_H[j][i] * (rbar - 1.0) ** j
+        mu1 = mu1 + ctbar**i * inner
+    mu1 = jnp.exp(rbar * mu1)
+    return mu0 * mu1 * _VISC_MU_AST
+
+
+def water_viscosity_ratio(T_K: jax.Array, P_Pa: jax.Array) -> jax.Array:
+    """eta* = eta(T, P) / eta(25 degC, standard atmosphere), the P model's
+    relative cost of water transport (Stocker et al. 2020 GMD, eq. 9)."""
+    return water_viscosity(T_K, P_Pa) / water_viscosity(
+        jnp.asarray(T_REF_K), jnp.asarray(constants.p_atm_std)
+    )
+
+
 def arrhenius_factor(T_K: jax.Array, Ha: float | jax.Array) -> jax.Array:
     """Normalised Arrhenius temperature response (Bonan eq. 11.34).
 

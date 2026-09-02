@@ -160,6 +160,8 @@ __param_spec__ = {
             "g0": {"units": "1", "bounds": (0.0033, 0.03), "tunable_tier": 2, "transform": "sigmoid", "category": "stomata", "reference": "Ball-Berry 1987 / Medlyn 2011", "shape": None},
             "g1_bb": {"units": "1", "bounds": (2.97, 27.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stomata", "reference": "Ball-Berry 1987", "shape": None},
             "g1_med": {"units": "1", "bounds": (1.32, 12.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stomata", "reference": "Medlyn 2011", "shape": None},
+            "a1_leuning": {"units": "1", "bounds": (2.0, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stomata", "reference": "Leuning 1995 PCE eq. 8; CABLE C3 a1=9 (De Kauwe et al. 2015 GMD)", "shape": None},
+            "d0_leuning_kpa": {"units": "kPa", "bounds": (0.5, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stomata", "reference": "Leuning 1995 PCE eq. 8; CABLE D0=1.5 kPa", "shape": None},
             "gs_max": {"units": "1", "bounds": (0.099, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "stomata", "reference": "Jarvis 1976", "shape": None},
             "gs_ref": {"units": "1", "bounds": (0.099, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "stomata", "reference": "beta-coupling reference gs", "shape": None},
             "k_ext": {"units": "1", "bounds": (0.165, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Beer-law canopy extinction (Sellers 1992)", "shape": None},
@@ -220,6 +222,48 @@ class StomataConfig(NamedTuple):
     # output on SurfaceFluxOutput.sif (coupled Farquhar path only — the Jarvis
     # fallback has no Ci/An to invert). Static config leaf, never traced.
     sif: SIFConfig | None = None
+    # --- Leuning (1995) stomatal model (stomata_model="leuning") ---
+    a1_leuning: float = 9.0        # [-] Leuning slope (CABLE C3 default)
+    d0_leuning_kpa: float = 1.5    # [kPa] VPD sensitivity scale D0
+    # --- P-model optimality switches (land/p_model.py; appended last) ---
+    # Source of the big-leaf photosynthetic capacity / Medlyn slope; the
+    # PModelConfig itself lives once per land config (config.p_model).
+    capacity_scheme: str = "prescribed"   # "prescribed" | "p_model"
+    g1_source: str = "table"              # "table" | "p_model"
+
+    def validate(self) -> "StomataConfig":
+        """Fail-early check of the static dispatch/switch fields.
+
+        Called at the non-jitted entry (``stomata_utils.compute_effective_
+        beta``) so a typo or an inconsistent P-model combination aborts at
+        setup with a clear message rather than deep in a trace.
+        """
+        if self.stomata_model not in ("ball_berry", "medlyn", "leuning"):
+            raise ValueError(
+                f"unknown stomata_model {self.stomata_model!r}; the stomatal "
+                "conductance scheme must be one of "
+                "('ball_berry', 'medlyn', 'leuning')")
+        from legoesm.land.p_model import (
+            VALID_CAPACITY_SCHEMES, VALID_G1_SOURCES)
+        if self.capacity_scheme not in VALID_CAPACITY_SCHEMES:
+            raise ValueError(
+                f"unknown capacity_scheme {self.capacity_scheme!r}; the "
+                f"photosynthetic-capacity source must be one of "
+                f"{VALID_CAPACITY_SCHEMES}")
+        if self.g1_source not in VALID_G1_SOURCES:
+            raise ValueError(
+                f"unknown g1_source {self.g1_source!r}; the Medlyn-slope "
+                f"scheme must be one of {VALID_G1_SOURCES}")
+        # NB: g1_source='p_model' + non-Medlyn is legal only under phydro
+        # (cross-checked at compute_effective_beta, which sees the switch).
+        if (self.capacity_scheme == "p_model"
+                or self.g1_source == "p_model") and not self.enabled:
+            raise ValueError(
+                "a P-model switch is set on the big-leaf StomataConfig but "
+                "stomata are DISABLED (enabled=False): the switch would be "
+                "silently inert. Enable the coupled stomatal path or reset "
+                "the switch.")
+        return self
 
 
 # =====================================================================
@@ -276,6 +320,40 @@ def medlyn_gs(
         g0 + DIFFUSIVITY_RATIO_H2O_CO2 * (1.0 + g1 / jnp.sqrt(VPD)) * A_pos / Cs_safe,
         g0,
     )
+
+
+def leuning_gs(
+    A: jnp.ndarray,
+    VPD_kPa: jnp.ndarray,
+    Cs: jnp.ndarray,
+    gamma_star: jnp.ndarray,
+    a1: jnp.ndarray | float,
+    d0_kpa: jnp.ndarray | float,
+    g0: jnp.ndarray | float,
+) -> jnp.ndarray:
+    """Leuning (1995) stomatal conductance [mol H2O/m2/s].
+
+    Single source of the gs numerics (explicit-arg, see :func:`ball_berry_gs`):
+    ``gs = g0 + a1 * max(A, 0) / ((Cs - Gamma*) * (1 + VPD/D0))``, lower-bounded
+    by ``g0`` (Leuning 1995 PCE 18 339-355, eq. 8: Ball-Berry-Leuning with the
+    CO2 compensation point removed from the supply and a hyperbolic VPD
+    response).  ``a1`` [-] and ``d0_kpa`` [kPa] per CABLE's C3 calibration
+    (a1 = 9.0, D0 = 1.5 kPa; De Kauwe et al. 2015 GMD and refs therein).
+
+    Parameters
+    ----------
+    A : net assimilation rate [umol CO2/m2/s]
+    VPD_kPa : leaf-surface vapour pressure deficit [kPa]
+    Cs : CO2 at the leaf surface [umol/mol]
+    gamma_star : CO2 compensation point Gamma* [umol/mol]
+    a1 : Leuning slope [-]
+    d0_kpa : VPD sensitivity scale D0 [kPa]
+    g0 : residual conductance [mol/m2/s]
+    """
+    A_pos = jnp.maximum(A, 0.0)
+    cs_term = jnp.maximum(Cs - gamma_star, 1.0)
+    vpd_term = 1.0 + jnp.maximum(VPD_kPa, 0.0) / d0_kpa
+    return jnp.maximum(g0 + a1 * A_pos / (cs_term * vpd_term), g0)
 
 
 def jarvis_gs(
@@ -345,6 +423,7 @@ def _bigleaf_assimilation(
     Vcmax25_eff: jnp.ndarray,
     TgC_C: jnp.ndarray | float,
     fC4: jnp.ndarray | float,
+    rjv25: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Big-leaf GROSS + net assimilation via the canonical FvCB kernels.
 
@@ -369,7 +448,7 @@ def _bigleaf_assimilation(
     (A_net, A_gross) : net (gross - Rd) and floored gross assimilation
         [umol CO2/m2/s].  GPP uses the gross rate; the stomata coupling uses net.
     """
-    c3 = c3_assimilation(T_leaf, Ci, APAR_umol, Vcmax25_eff, TgC_C)
+    c3 = c3_assimilation(T_leaf, Ci, APAR_umol, Vcmax25_eff, TgC_C, rjv25=rjv25)
     c4 = c4_assimilation(T_leaf, Ci, APAR_umol, Vcmax25_eff)
     a_gross = (1.0 - fC4) * c3.a_gross + fC4 * c4.a_gross
     rd = (1.0 - fC4) * c3.rd + fC4 * c4.rd
@@ -386,6 +465,8 @@ def solve_coupled_farquhar_ci(
     beta_soil: jnp.ndarray,
     config: StomataConfig,
     fC4: jnp.ndarray | float = 0.0,
+    rjv25: jnp.ndarray | None = None,
+    TgC_C: jnp.ndarray | float | None = None,
 ) -> CoupledLeafState:
     """Solve the coupled FvCB-stomata system; return the converged leaf state.
 
@@ -405,10 +486,10 @@ def solve_coupled_farquhar_ci(
     ``(gs, gpp)``) and the SIF diagnostic (``canopy/sif.py``, which also needs
     ``A_net``, ``Ci``, ``APAR`` and ``Gamma*``).
     """
-    if config.stomata_model not in ("ball_berry", "medlyn"):
+    if config.stomata_model not in ("ball_berry", "medlyn", "leuning"):
         raise ValueError(
             f"Unknown stomata_model {config.stomata_model!r}; "
-            "expected one of: 'ball_berry', 'medlyn'."
+            "expected one of: 'ball_berry', 'medlyn', 'leuning'."
         )
 
     # PAR in umol photons/m2/s
@@ -446,16 +527,28 @@ def solve_coupled_farquhar_ci(
     VPD_kPa = jnp.maximum(e_sat - e_air, 0.0) / 1000.0
     RH = jnp.clip(e_air / jnp.maximum(e_sat, 1.0), 0.0, 1.0)
 
+    # Growth temperature: the acclimation-state daytime mean when the P model
+    # supplies it (TgC_C), else the fixed big-leaf reference (25 degC; this
+    # lane has no prognostic TgC EMA of its own).
+    _tgc_eff = _TGC_REF_BIGLEAF_C if TgC_C is None else TgC_C
+
+    # Gamma*(T) for the Leuning supply term — the SAME canonical compensation
+    # point the FvCB kernel uses (single source; no re-derivation).
+    gamma_star_leaf = co2_compensation_point(T_leaf)
+
     # Initial guess for Ci (typical C3 ratio)
     Ci = _CI_CA_INIT_RATIO * Ca
 
     # Fixed-point iteration (unrolled for JIT compatibility)
     for _ in range(config.n_iter_ags):
         A_net, _ = _bigleaf_assimilation(
-            Ci, APAR_umol, T_leaf, Vcmax25_eff, _TGC_REF_BIGLEAF_C, fC4)
+            Ci, APAR_umol, T_leaf, Vcmax25_eff, _tgc_eff, fC4, rjv25=rjv25)
 
         if config.stomata_model == "medlyn":
             gs = medlyn_gs(A_net, VPD_kPa, Ca, config.g1_med, config.g0)
+        elif config.stomata_model == "leuning":
+            gs = leuning_gs(A_net, VPD_kPa, Ca, gamma_star_leaf,
+                            config.a1_leuning, config.d0_leuning_kpa, config.g0)
         else:
             gs = ball_berry_gs(A_net, RH, Ca, config.g1_bb, config.g0)
 
@@ -467,10 +560,13 @@ def solve_coupled_farquhar_ci(
 
     # Final evaluation
     A_net, A_gross = _bigleaf_assimilation(
-        Ci, APAR_umol, T_leaf, Vcmax25_eff, _TGC_REF_BIGLEAF_C, fC4)
+        Ci, APAR_umol, T_leaf, Vcmax25_eff, _tgc_eff, fC4, rjv25=rjv25)
 
     if config.stomata_model == "medlyn":
         gs = medlyn_gs(A_net, VPD_kPa, Ca, config.g1_med, config.g0)
+    elif config.stomata_model == "leuning":
+        gs = leuning_gs(A_net, VPD_kPa, Ca, gamma_star_leaf,
+                        config.a1_leuning, config.d0_leuning_kpa, config.g0)
     else:
         gs = ball_berry_gs(A_net, RH, Ca, config.g1_bb, config.g0)
 

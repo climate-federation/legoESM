@@ -318,6 +318,7 @@ def compute_mosaic_canopy_fluxes(
     dt: float,
     LAI_override: jnp.ndarray | None = None,   # (1,) grid driver LAI
     TgC_override: jnp.ndarray | None = None,   # (1,)
+    pmodel_acclim=None,  # PModelAcclimState with (1,) leaves | None
 ) -> SurfaceFluxOutput:
     """Run the ``N``-patch mosaic and return one area-weighted grid ``SurfaceFluxOutput``.
 
@@ -364,6 +365,14 @@ def compute_mosaic_canopy_fluxes(
     # per-patch root-weighted beta is the follow-up).  Clipped to a valid beta.
     w_n = jnp.clip(_bcast_patch(w_frac_rz, n) * w_scale, 0.0, 1.0)
     TgC_n = None if TgC_override is None else _bcast_patch(TgC_override, n)
+    # ONE shared acclimation state across patches: the acclimated capacities
+    # are a pure function of the SHARED grid forcing (air T, incident PPFD,
+    # VPD, CO2, pressure), so the broadcast is exact — every patch sees the
+    # same chi/Vcmax25/g1, and area-weighting the resulting fluxes stays
+    # consistent.  Per-patch acclimation belongs to the OUTER-loop prognostic
+    # mosaic (one MultiLayerLandState per tile), which carries it for free.
+    pm_n = (jax.tree_util.tree_map(lambda a: _bcast_patch(a, n), pmodel_acclim)
+            if pmodel_acclim is not None else None)
 
     # The soil-thermal callback must return the patch-shaped skin T (the diagnostic
     # caller ignores G and returns the prescribed Ts); broadcast to the flux shape.
@@ -375,6 +384,7 @@ def compute_mosaic_canopy_fluxes(
         land_config=land_config, canopy_params=params_n, w_frac_rz=w_n,
         wind_speed=wind_n, wind_dir_x=dirx_n, wind_dir_y=diry_n,
         soil_thermal_fn=_stf_n, dt=dt, LAI_override=lai_n, TgC_override=TgC_n,
+        pmodel_acclim=pm_n,
     )
     return _area_weight(out, fracs)
 

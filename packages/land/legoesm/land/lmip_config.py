@@ -172,6 +172,55 @@ def validate_config(data: dict) -> LMIPConfig:
         raise ValueError(
             f"physics.stomatal_model={physics['stomatal_model']!r} not in {_STOMATA_MODELS}")
     physics.setdefault("stomata_enabled", False)
+    # --- P-model optimality switches (land/p_model.py) ---
+    physics.setdefault("canopy_capacity_scheme", "prescribed")
+    physics.setdefault("canopy_g1_source", "table")
+    from legoesm.land.p_model import VALID_CAPACITY_SCHEMES, VALID_G1_SOURCES
+    if physics["canopy_capacity_scheme"] not in VALID_CAPACITY_SCHEMES:
+        raise ValueError(
+            f"physics.canopy_capacity_scheme="
+            f"{physics['canopy_capacity_scheme']!r} not in "
+            f"{VALID_CAPACITY_SCHEMES}")
+    if physics["canopy_g1_source"] not in VALID_G1_SOURCES:
+        raise ValueError(
+            f"physics.canopy_g1_source={physics['canopy_g1_source']!r} "
+            f"not in {VALID_G1_SOURCES}")
+    # Canopy Vcmax25 depth profile (PR4) and the transpiration-limitation
+    # architecture (PR3).  Both default to the legacy behaviour; a config that
+    # does not name them runs exactly as before.
+    physics.setdefault("canopy_vcmax_profile", "kn")
+    physics.setdefault("transpiration_stress", "beta_theta")
+    from legoesm.land.canopy.config import VALID_VCMAX_PROFILES
+    if physics["canopy_vcmax_profile"] not in VALID_VCMAX_PROFILES:
+        raise ValueError(
+            f"physics.canopy_vcmax_profile="
+            f"{physics['canopy_vcmax_profile']!r} not in "
+            f"{VALID_VCMAX_PROFILES}")
+    if physics["transpiration_stress"] not in ("beta_theta", "phydro"):
+        raise ValueError(
+            f"physics.transpiration_stress="
+            f"{physics['transpiration_stress']!r} not in "
+            "('beta_theta', 'phydro')")
+    if (physics["transpiration_stress"] == "phydro"
+            and physics["land_mode"] != "multilayer"):
+        # The slab land builds LandConfig, which has no phydro fields - the
+        # switch would be silently DROPPED, not applied (codex review).
+        raise ValueError(
+            "physics.transpiration_stress='phydro' requires "
+            f"land_mode='multilayer' (got {physics['land_mode']!r}); the "
+            "slab land has no soil water-potential column")
+    if (physics["transpiration_stress"] == "phydro"
+            and physics["canopy_capacity_scheme"] != "p_model"
+            and physics["canopy_g1_source"] != "p_model"):
+        raise ValueError(
+            "physics.transpiration_stress='phydro' needs a P-model switch on "
+            "(canopy_capacity_scheme or canopy_g1_source = 'p_model'): the "
+            "hydraulic optimum supplies the acclimated capacities/slope")
+    if (physics["canopy_vcmax_profile"] != "kn"
+            and physics["surface_scheme"] != "two_leaf_canopy"):
+        raise ValueError(
+            "physics.canopy_vcmax_profile applies to the two-leaf canopy only "
+            f"(got surface_scheme={physics['surface_scheme']!r})")
     physics.setdefault("snow_albedo_feedback", True)
     # Soil-water freeze/thaw (apparent-heat-capacity zero-curtain, off by
     # default = bit-identical sensible-only soil heat).  Enabling it stabilises

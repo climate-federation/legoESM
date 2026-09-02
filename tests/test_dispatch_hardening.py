@@ -244,6 +244,28 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # kernel _compute_gs_and_ci as a trace-time backstop.
         ("packages/land/legoesm/land/canopy/config.py", "validate"),
         ("packages/land/legoesm/land/canopy/energy_balance.py", "_compute_gs_and_ci"),
+        # P-model switches (capacity_scheme: prescribed|p_model, g1_source:
+        # table|p_model): hardened at introduction (2026-08-31). Guarded at
+        # BOTH ends: CanopyConfig.validate() (the ``validate`` pair above) and
+        # a trace-time backstop at the two-leaf flux entry, so a hand-built
+        # config that skipped validate() cannot silently run prescribed
+        # parameters while claiming optimality (or vice versa).
+        # vcmax_profile (kn|coordination, 2026-09-01) is guarded by the SAME
+        # two functions: CanopyConfig.validate() membership + a static raise
+        # at the two-leaf flux entry before the jitted RT call.
+        ("packages/land/legoesm/land/surface_scheme/two_leaf_canopy.py",
+         "compute_two_leaf_canopy_fluxes"),
+        # transpiration_stress dispatch (beta_theta|phydro): guarded at the
+        # multilayer step entry (2026-09-01); an unknown value must raise,
+        # never silently run the empirical theta stress.
+        ("packages/land/legoesm/land/multilayer_land.py",
+         "_step_multilayer_land_impl"),
+        # Big-leaf P-model switches + stomatal-model dispatch: guarded at the
+        # StomataConfig.validate() fail-early entry (invoked by
+        # compute_effective_beta, whose own refusals are inertness guards, not
+        # unknown-dispatch raises) AND at the solver's fn-entry raise
+        # (2026-08-31).
+        ("packages/land/legoesm/land/stomata.py", "validate"),
         # LE_module leaf-energy dispatch (BT|PM): the internal residual uses a
         # bare ``else: # PM``, so a typo silently runs Penman-Monteith. Guarded
         # at the config validator AND at the solver entry (direct-call path).

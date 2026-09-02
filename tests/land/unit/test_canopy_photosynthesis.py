@@ -136,3 +136,46 @@ def test_c3_electron_transport_jmax_bounded():
     # Saturating: a 2x light increase yields < 5% more assimilation.
     assert An_4000 >= An_2000
     assert (An_4000 - An_2000) / An_2000 < 0.05
+
+
+def test_jmax_temperature_response_public():
+    """Public Jmax normalisation: unity at 25 degC, K&K composition, peaked."""
+    import jax.numpy as _jnp
+    TgC = _jnp.array(20.0)
+    assert float(photo.jmax_temperature_response(photo._T_REF, TgC)) == pytest.approx(
+        1.0, abs=1e-12)
+    # Composition matches the private pieces c3_assimilation itself uses.
+    T = _jnp.array(303.15)
+    expected = photo._arrhenius_peaked(
+        T, photo._HA_JMAX, photo._HD_JMAX, photo._delta_s_jmax(TgC))
+    assert float(photo.jmax_temperature_response(T, TgC)) == pytest.approx(
+        float(expected), rel=1e-12)
+    # Peaked: declines well above the optimum.
+    hi = float(photo.jmax_temperature_response(photo._T_REF + 20.0, TgC))
+    lo = float(photo.jmax_temperature_response(photo._T_REF + 3.0, TgC))
+    assert hi < lo
+
+
+def test_rjv25_default_is_kattge_knorr_bitwise():
+    """rjv25=None keeps the K&K acclimated ratio bit-for-bit; supplying that
+    exact ratio explicitly reproduces the default; a different ratio moves Aj."""
+    import jax.numpy as _jnp
+    args = dict(Tf=_jnp.array(298.15), Ci=_jnp.array(280.0),
+                APAR=_jnp.array(800.0), Vcmax25=_jnp.array(60.0),
+                TgC=_jnp.array(20.0))
+    base = photo.c3_assimilation(**args)
+    explicit = photo.c3_assimilation(
+        **args, rjv25=photo._jmax25_over_vcmax25(_jnp.clip(args["TgC"], 11.0, 35.0)))
+    assert float(base.a_gross) == float(explicit.a_gross)
+    assert float(base.rd) == float(explicit.rd)
+    lower = photo.c3_assimilation(**args, rjv25=_jnp.array(1.0))
+    assert float(lower.a_gross) < float(base.a_gross)  # Jmax-starved
+    # Mixed-canopy wrapper threads it too.
+    An_a, _ = photo.photosynthesis(
+        args["Tf"], args["Ci"], args["APAR"], _jnp.array(60.0), _jnp.array(45.0),
+        _jnp.array(0.0), _jnp.array(101325.0), _jnp.array(0.3), args["TgC"])
+    An_b, _ = photo.photosynthesis(
+        args["Tf"], args["Ci"], args["APAR"], _jnp.array(60.0), _jnp.array(45.0),
+        _jnp.array(0.0), _jnp.array(101325.0), _jnp.array(0.3), args["TgC"],
+        rjv25=_jnp.array(1.0))
+    assert An_b < An_a

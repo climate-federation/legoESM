@@ -57,7 +57,7 @@ from legoesm.land.canopy import radiative_transfer as rt             # noqa: E40
 from legoesm.land.canopy.radiative_transfer import (                 # noqa: E402
     split_sw_components,
     canopy_shortwave_rt,
-    _APAR_CONVERSION,
+    PAR_W_TO_UMOL,
     _PAR_FRACTION, _NIR_FRACTION, _UV_FRACTION,
     _ERBS_KT_LOW, _ERBS_KT_HIGH, _ERBS_LOW_SLOPE,
     _ERBS_MID_C0, _ERBS_MID_C1, _ERBS_MID_C2, _ERBS_MID_C3, _ERBS_MID_C4,
@@ -411,7 +411,7 @@ def test_rt_constants_match_published_literals():
     assert _KD_NIR_COEF == _O_KD_NIR_COEF == 0.35
     assert _RHO_UV == _O_RHO_UV == 0.05
     assert _KB_BEAM == _O_KB_BEAM == 0.5
-    assert _APAR_CONVERSION == _O_APAR_CONV == 4.56
+    assert PAR_W_TO_UMOL == _O_APAR_CONV == 4.56
     assert _NIGHT_RAMP_CENTER_WM2 == _O_RAMP_CENTER == 30.0
     assert _NIGHT_RAMP_HALFWIDTH_WM2 == _O_RAMP_HALF == 20.0
 

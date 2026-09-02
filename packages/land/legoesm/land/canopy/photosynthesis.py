@@ -255,6 +255,41 @@ def vcmax_temperature_response(Tf: jax.Array, TgC: jax.Array) -> jax.Array:
     return _arrhenius_peaked(Tf, _HA_VCMAX, _HD_VCMAX, _delta_s_vcmax(TgC_a))
 
 
+def c4_vcmax_temperature_response(Tf: jax.Array) -> jax.Array:
+    """RAW Collatz C4 Vcmax temperature factor the kernel applies.
+
+    ``Vcmax(T) = Vcmax25 * Q10^((T-Tref)/10) / (fH(T) * fL(T))`` — deliberately
+    NOT normalised to 1 at 25 degC: the high/low-T deactivations fH/fL are
+    mildly active at the reference (factor ~0.87), and that is the kernel's
+    (Collatz/CLM5) convention.  Public so the P model can divide its growth-T
+    optimal Vcmax by THIS exact factor — the kernel then reproduces the
+    optimum at the growth temperature (codex design review: a re-normalised
+    helper here would leave a constant fH*fL(25) bias).
+    """
+    q10_pow = jnp.power(_Q10_C4, (Tf - _T_REF) / 10.0)
+    fH = 1.0 + jnp.exp(_S1_C4 * (Tf - _S2_C4))
+    fL = 1.0 + jnp.exp(_S3_C4 * (_S4_C4 - Tf))
+    return q10_pow / (fH * fL)
+
+
+def jmax_temperature_response(Tf: jax.Array, TgC: jax.Array) -> jax.Array:
+    """Normalised Jmax temperature response (Kattge & Knorr 2007 peaked Arrhenius).
+
+    Returns f(T) such that ``Jmax(T) = f(T) * Jmax25``; f == 1 at 25 degC.
+    Public sibling of :func:`vcmax_temperature_response` — the P model
+    (``land/p_model.py``) needs BOTH normalisations to convert its
+    growth-temperature optimal capacities to 25 degC values with the exact
+    constants this kernel applies on the way back up.
+
+    Parameters
+    ----------
+    Tf  : leaf temperature [K]
+    TgC : growth temperature [degC] (clipped to the K&K calibration range)
+    """
+    TgC_a = jnp.clip(TgC, _TGC_LO, _TGC_HI)
+    return _arrhenius_peaked(Tf, _HA_JMAX, _HD_JMAX, _delta_s_jmax(TgC_a))
+
+
 # ---------------------------------------------------------------------------
 # C3 photosynthesis (canonical FvCB; Bonan ch. 11 / CLM5 §2.9)
 # ---------------------------------------------------------------------------
@@ -279,6 +314,7 @@ def c3_assimilation(
     APAR: jax.Array,
     Vcmax25: jax.Array,
     TgC: jax.Array,
+    rjv25: jax.Array | None = None,
 ) -> LeafAssimilation:
     """Canonical FvCB C3 gross assimilation + dark respiration (Bonan ch. 11).
 
@@ -287,6 +323,9 @@ def c3_assimilation(
     rate ``A`` and dark respiration ``Rd`` separately (see :class:`LeafAssimilation`).
 
     Parameters as :func:`c3_photosynthesis` minus the parity-only ``Ps``/``alf``.
+    ``rjv25`` optionally overrides the Kattge & Knorr acclimated
+    ``Jmax25/Vcmax25`` ratio (the P model supplies its coordination-optimal
+    ratio here); ``None`` keeps the K&K default bit-for-bit.
     """
     # Acclimation only valid for TgC in [11, 35] degC; clip to the boundary
     # acclimation state outside (avoid unphysical Kattge & Knorr extrapolation).
@@ -295,7 +334,8 @@ def c3_assimilation(
     # Acclimation (Kattge & Knorr 2007)
     dS_v = _delta_s_vcmax(TgC_a)
     dS_j = _delta_s_jmax(TgC_a)
-    Jmax25 = _jmax25_over_vcmax25(TgC_a) * Vcmax25
+    jv_ratio = _jmax25_over_vcmax25(TgC_a) if rjv25 is None else rjv25
+    Jmax25 = jv_ratio * Vcmax25
 
     # Instantaneous T-response of kinetic constants and capacities
     Kc = _KC25 * _arrhenius(Tf, _HA_KC)
@@ -337,6 +377,7 @@ def c3_photosynthesis(
     Ps: jax.Array,
     alf: jax.Array,
     TgC: jax.Array,
+    rjv25: jax.Array | None = None,
 ) -> jax.Array:
     """Net assimilation rate for canonical FvCB C3 photosynthesis.
 
@@ -356,7 +397,7 @@ def c3_photosynthesis(
     An : net assimilation rate [umol m-2 s-1], clamped to >= 0
     """
     del Ps, alf  # signature parity; FvCB uses _PHI_PSII and mole-fraction Ci
-    r = c3_assimilation(Tf, Ci, APAR, Vcmax25, TgC)
+    r = c3_assimilation(Tf, Ci, APAR, Vcmax25, TgC, rjv25=rjv25)
     An = r.a_gross - r.rd
     return jnp.where(An < 0.0, 0.0, An)
 
@@ -379,10 +420,8 @@ def c4_assimilation(
     item = (Tf - _T_REF) / 10.0
     q10_pow = jnp.power(_Q10_C4, item)
 
-    Vcmax_o = Vcmax25 * q10_pow
-    fH = 1.0 + jnp.exp(_S1_C4 * (Tf - _S2_C4))
-    fL = 1.0 + jnp.exp(_S3_C4 * (_S4_C4 - Tf))
-    Vcmax = Vcmax_o / (fH * fL)
+    # Single-source T response (shared with the P model's 25C inversion).
+    Vcmax = Vcmax25 * c4_vcmax_temperature_response(Tf)
 
     Rd25 = _RD25_FRAC_C4 * Vcmax25
     Rd = Rd25 * q10_pow / (1.0 + jnp.exp(_S5_C4 * (Tf - _S6_C4)))
@@ -442,6 +481,7 @@ def photosynthesis(
     Ps: jax.Array,
     alf: jax.Array,
     TgC: jax.Array,
+    rjv25: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Net AND gross assimilation for a mixed C3/C4 canopy.
 
@@ -477,7 +517,7 @@ def photosynthesis(
     # Use the inner FvCB assimilation (which exposes a_gross + rd) so GROSS GPP
     # can be returned alongside NET An — without changing the single-value
     # c3/c4_photosynthesis wrappers relied on elsewhere.
-    r_c3 = c3_assimilation(Tf, Ci, APAR, Vcmax25_C3, TgC)
+    r_c3 = c3_assimilation(Tf, Ci, APAR, Vcmax25_C3, TgC, rjv25=rjv25)
     r_c4 = c4_assimilation(Tf, Ci, APAR, Vcmax25_C4)
     An_C3 = jnp.where(r_c3.a_gross - r_c3.rd < 0.0, 0.0, r_c3.a_gross - r_c3.rd)
     An_C4 = jnp.where(r_c4.a_gross - r_c4.rd < 0.0, 0.0, r_c4.a_gross - r_c4.rd)

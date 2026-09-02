@@ -32,6 +32,12 @@ from legoesm.land.carbon.config import CarbonState
 from legoesm.land.config import LandConfig
 from legoesm.land.snow_budget import update_snow
 from legoesm.land.state import LandState
+from legoesm.land.canopy.energy_balance import canopy_met_variables
+from legoesm.land.canopy.radiative_transfer import (
+    PAR_W_TO_UMOL,
+    split_sw_components,
+)
+from legoesm.land.p_model import advance_pmodel_acclim
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.surface_scheme import (
     SimpleSEBConfig,
@@ -59,6 +65,32 @@ def _get(lp, name: str, fallback):
     if lp is None:
         return fallback
     return getattr(lp, name, fallback)
+
+
+def _advance_slab_pmodel(state, forcing, config, dt):
+    """Advance the optional P-model acclimation state (both slab arms).
+
+    Same drivers as the multilayer lane: top-of-canopy PPFD from the shared
+    SW split, VPD from the shared met helper; elementwise, so it works on the
+    slab's native (ncol,) or (6, n, n) shapes.  ``None`` stays ``None``.
+    """
+    if state.pmodel_acclim is None:
+        return None
+    par_dir, par_diff, _, _, _ = split_sw_components(
+        forcing.sw_down, forcing.cos_zenith)
+    ppfd_toc = (par_dir + par_diff) * PAR_W_TO_UMOL
+    _, _, vpd_pa, _, _, _, _ = canopy_met_variables(
+        forcing.p_surface, forcing.T_lowest, forcing.q_lowest)
+    return advance_pmodel_acclim(
+        state.pmodel_acclim,
+        T_K=forcing.T_lowest,
+        ppfd=ppfd_toc,
+        vpd_pa=vpd_pa,
+        co2_ppm=jnp.broadcast_to(jnp.asarray(forcing.co2_ppmv), ppfd_toc.shape),
+        ps_pa=jnp.broadcast_to(jnp.asarray(forcing.p_surface), ppfd_toc.shape),
+        cfg=config.p_model,
+        dt=dt,
+    )
 
 
 def step_land(
@@ -136,6 +168,7 @@ def step_land(
         albedo_land=albedo_land,
         emissivity=emissivity,
         z0=z0,
+        pmodel_acclim=state.pmodel_acclim,
     )
     tau_x = surface_out.tau_x
     tau_y = surface_out.tau_y
@@ -252,6 +285,7 @@ def step_land(
         snow_age=state.snow_age.replace(data=snow_age_new),
         runoff=runoff,
         TgC=TgC_new,
+        pmodel_acclim=_advance_slab_pmodel(state, forcing, config, dt),
     )
 
     # Post-step albedo: reflects updated snow state for the next atmosphere step
@@ -296,9 +330,11 @@ def step_land(
         lat_arr = lat if lat is not None else jnp.zeros_like(T_soil)
         # Recompute Farquhar GPP with updated T and moisture so that
         # photosynthesis and respiration use consistent end-of-step state.
+        # start-of-step acclim state: the acclimated capacities move on a
+        # ~15-day timescale, so the end-of-step distinction is negligible here.
         _, gpp_farq_new, _ = compute_effective_beta(
             T_soil_new, forcing, beta_soil_new, config, carbon_state, dt,
-            land_params=lp,
+            land_params=lp, pmodel_acclim=state.pmodel_acclim,
         )
         carbon_state_new, co2_flux = step_carbon(
             carbon_state, forcing.sw_down, T_soil_new, forcing.co2_ppmv,
@@ -489,6 +525,8 @@ def _step_land_canopy(
         dt=dt,
         TgC_override=TgC_override,
         LAI_override=LAI_override,
+        pmodel_acclim=(jax.tree.map(_flat, state.pmodel_acclim)
+                       if state.pmodel_acclim is not None else None),
     )
 
     # --- Slab post-flux: snow, bucket, T_soil dT/dt (flattened) ---
@@ -579,6 +617,7 @@ def _step_land_canopy(
         snow_age=state.snow_age.replace(data=snow_age_new),
         runoff=runoff,
         TgC=TgC_new,
+        pmodel_acclim=_advance_slab_pmodel(state, forcing, config, dt),
     )
 
     # Post-step coupler-facing surface state (re-uses canopy-derived
