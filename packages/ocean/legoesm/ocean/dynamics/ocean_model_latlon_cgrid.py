@@ -1006,6 +1006,9 @@ def _ssp_rk3_tracer_pair_step(
 class _NEMOWSRK3TestHooks(NamedTuple):
     """Private causal controls; never part of a constructible model config."""
 
+    # Ablates the per-stage external-mode REPLACEMENT inside the one WS stage
+    # ladder (stprk3_stg.F90:433-446): each stage then keeps its own depth
+    # mean.  It does not select a second ladder -- there is only one.
     stage_barotropic_correction: bool = True
     momentum_transport_reconcile: bool = True
     kmm_tracer_transports: bool = True
@@ -4428,25 +4431,22 @@ class LatLonCGridOceanModel:
                 _Fv = jnp.sum(_dv * h_v_pre, axis=-1) / H_v_pre * state.v_mask.data
                 return _du - _Fu[..., jnp.newaxis], _dv - _Fv[..., jnp.newaxis]
 
-            # stage 1 (dt/3), RHS = the stage-1 full tendency (incl. LDF)
-            u1 = u0 + (dt_mom / 3.0) * du_dt_pert
-            v1 = v0 + (dt_mom / 3.0) * dv_dt_pert
-            # stage 2 (dt/2), RHS(u1) WITHOUT lateral viscosity
-            p1u, p1v = _mom_pert_ws(u1, v1, True)
-            u2 = u0 + (dt_mom / 2.0) * p1u
-            v2 = v0 + (dt_mom / 2.0) * p1v
-            # Kmm inputs to NEMO tracer stages 1/2/3 after the stprk3.F90
-            # swaps are Kbb, stage-1 Kaa, and stage-2 Kaa respectively
-            # (stprk3.F90:194-207; stprk3_stg.F90:250-303,456-519).
-            _nemo_ws_velocity_stages = ((u0, v0), (u1, v1), (u2, v2))
-            # stage 3 (dt), RHS(u2) with lateral viscosity
-            p2u, p2v = _mom_pert_ws(u2, v2, False)
-            u_star = u0 + dt_mom * p2u
-            v_star = v0 + dt_mom * p2v
-            if self._nemo_ws_test_hooks.expose_momentum_stage == 1:
-                _nemo_ws_exposed_momentum_stage = (u1, v1)
-            elif self._nemo_ws_test_hooks.expose_momentum_stage == 2:
-                _nemo_ws_exposed_momentum_stage = (u2, v2)
+            # The barotropic solve is seeded with the BEFORE velocity, not with
+            # a momentum ladder.  NEMO's stp_2D evaluates the Kbb RHS ONCE
+            # (eos/dyn_hpg/dyn_ldf/dyn_vor/wzv/dyn_adv at stp2d.F90:126-171),
+            # depth-means it into Ue_rhs/Ve_rhs (:177-186) and then calls
+            #   CALL dyn_spg_ts( kt, Kbb, Kbb, Krhs, uu, vv, ... )
+            # at stp2d.F90:280-281 -- Kmm == Kbb, i.e. uu at the BEFORE level,
+            # with no momentum stage in between.  The depth mean of that single
+            # RHS is what F_slow_u/F_slow_v already carry into the solver here.
+            # The WS stage recurrence belongs to stprk3_stg (stprk3_stg.F90:
+            # 344-374) and now runs exactly once, after the barotropic solve,
+            # where it can use the actual external-mode velocity.  It used to be
+            # written a SECOND time at this point purely to produce this seed:
+            # two extra `tendencies()` evaluations per step, and a fix applied
+            # to one copy silently left the other stale.
+            u_star = u0
+            v_star = v0
         else:
             u_star = state.u.data + dt_mom * du_dt_pert
             v_star = state.v.data + dt_mom * dv_dt_pert
@@ -4806,16 +4806,18 @@ class LatLonCGridOceanModel:
 
         # NEMO-RK3 scheme identity: HYB is the live stprk3_stg barotropic
         # update (module default at :44; stages at :143-144,206-207,225), so
-        # every Kaa stage receives the final external-mode velocity.  The
-        # historical legoESM split ran all baroclinic WS stages with zero-mean
-        # RHS and performed one replacement after u_star.  Recompute the two
-        # tendency-bearing stages with
-        # the ACTUAL post-solve depth mean and install that same mean at every
+        # every Kaa stage receives the final external-mode velocity.  This is
+        # the ONE WS stage ladder (stprk3_stg.F90:344-374): it runs for every
+        # rk3_ws step, with the ACTUAL post-solve depth mean installed at every
         # Kaa, exactly where NEMO does at stprk3_stg.F90:433-446.  The private
-        # hook can disable this only for causal tests; public rk3_ws has no arm.
-        if (getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws"
-                and self._nemo_ws_test_hooks.stage_barotropic_correction):
+        # ``stage_barotropic_correction`` hook ablates that external-mode
+        # REPLACEMENT (below) for causal tests; it no longer selects between two
+        # recurrences, because there is only one.  Public rk3_ws has no arm.
+        if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws":
             def _replace_stage_mean(u_in, v_in, target_u, target_v):
+                if not self._nemo_ws_test_hooks.stage_barotropic_correction:
+                    # Private causal arm: keep the stage's own depth mean.
+                    return u_in * u_mask_3d, v_in * v_mask_3d
                 mean_u = (jnp.sum(u_in * h_u_pre, axis=-1) / H_u_pre
                           * state.u_mask.data)
                 mean_v = (jnp.sum(v_in * h_v_pre, axis=-1) / H_v_pre

@@ -103,12 +103,16 @@ belongs to no live card/reference and should just be deleted), or
    "Disagreements" subsection) — the nemo_duplicate/other_recipe/orphan axis
    is new with this pass, not a revision of the doc's own SHARED/NEMO_SWITCH/
    ARTIFICIAL_BRANCH/ABSENT/UNVERIFIED dispositions.
-   S-12 and S-30 are genuine ``nemo_duplicate`` defects by the audit's own
-   framing (S-30 is the doc's rank-3 collapse item) but their two branch sites
-   are inline code inside one function (``_step_impl``), not AST-distinct
-   symbols — same carve-out as S-33/S-34, so they carry no baseline entry
-   (mechanically unenforceable, not silently dropped: the reason lives in the
-   row's own ``nemo_switch`` text).
+   S-12 and S-30 were genuine ``nemo_duplicate`` defects by the audit's own
+   framing (S-30 is the doc's rank-3 collapse item) whose two branch sites were
+   inline code inside one function (``_step_impl``), not AST-distinct symbols —
+   same carve-out as S-33/S-34, so they never carried a baseline entry.
+   **COLLAPSED 2026-09-02**: the pre-barotropic WS momentum ladder is deleted
+   and the barotropic solve is seeded with the BEFORE velocity, as
+   ``stp_2D`` does (``stp2d.F90:177-186,280-281``); one ladder survives, after
+   the solve. Both rows are now ``SHARED`` with that single site. The move was
+   gated at ≤2 float64 ulp per certified row with T/S bit-identical — see
+   ``legoesm.ocean.fidelity.ulp_move_gate`` and the phase-3 receipts.
 
 **2026-09-02 second independent review (HOLD, one BLOCKING finding fixed in
 this pass)**: the checker only ever validated rows tagged
@@ -469,22 +473,21 @@ ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
         "nn_ahm_ijk_t=0; scalar A_h/A_h_lat_scaling config constant, no "
         "function symbol to check"
     ), ()),
-    RoutineRow("S-12", "stp_2D pre-step (Kbb RHS seeding dyn_spg_ts)", "ARTIFICIAL_BRANCH", (
-        "none; one function _step_impl runs a full WS 3-stage momentum ladder "
-        "at BOTH branch sites (omlc:4253-4335, ladder #1, seeds the barotropic "
-        "solve; omlc:4830-4886, ladder #2, kept/corrected -- same two sites as "
-        "S-30's citation, since it is the same _step_impl duplication viewed "
-        "from stp_2D's perspective) where NEMO evaluates a single Kbb RHS "
-        "(stp2d.F90:127-196) -- same defect as S-30 at a different altitude; "
-        "both sites are inline code inside _step_impl, not AST-distinct "
-        "symbols, so this duplication is OUTSIDE THE CHECKER'S REACH (residual "
-        "risk) until a refactor promotes the two ladder sites to named symbols"
+    RoutineRow("S-12", "stp_2D pre-step (Kbb RHS seeding dyn_spg_ts)", "SHARED", (
+        "none; COLLAPSED 2026-09-02 (same commit as S-30, which is this defect "
+        "at the stprk3_stg altitude). _step_impl now seeds the barotropic solve "
+        "the way stp_2D does: ONE Kbb RHS, its depth mean carried in "
+        "F_slow_u/F_slow_v, and the BEFORE velocity handed to the solver "
+        "(u_star = u0, omlc:4448, transcribing stp2d.F90:177-186 and the "
+        "CALL dyn_spg_ts(kt, Kbb, Kbb, ...) at stp2d.F90:280-281). The WS "
+        "momentum ladder that used to be evaluated here purely to build that "
+        "seed is deleted; the one surviving ladder is S-30's."
     ), (
         Impl(_OMLC, "_step_impl",
-             Reference("nemo", "stp_2D_preseed_multi_arm",
-                        "stp2d.F90:49-288 (both ladder sites inline in _step_impl -- omlc:4253-4335 "
-                        "and omlc:4830-4886, same two sites as S-30 -- not AST-distinct, "
-                        "see docstring)")),
+             Reference("nemo", "stp_2D_preseed",
+                        "stp2d.F90:177-186,280-281 (single Kbb RHS depth mean + BEFORE "
+                        "velocity seed; inline in _step_impl at omlc:4448, not an "
+                        "AST-distinct symbol)")),
     )),
     RoutineRow("S-13", "dyn_spg_ts external substep loop", "SHARED", "ln_dynspg_ts (cross-oracle: implicit/rigid-lid are non-NEMO)", (
         Impl(_BLC, "barotropic_substeps_latlon_cgrid",
@@ -682,20 +685,22 @@ ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
              Reference("mitgcm", "adcroft", "Adcroft, Hallberg & Hill (2008) MITgcm PGF scheme (pgf_ahh08.py)",
                         selected_by=("default_wright_v1", "legoesm_linear_v1"))),
     )),
-    RoutineRow("S-30", "stage momentum time-stepping (WS ladder written twice)", "ARTIFICIAL_BRANCH", (
-        "key_qco; one function _step_impl, ladder #1 at omlc:4253-4335 (seeds "
-        "the barotropic solve only, no barotropic correction) and ladder #2 "
-        "at omlc:4830-4886 (barotropic-corrected, kept, overwrites "
-        "state_new.u/v) -- both always run when momentum_time_integrator= "
-        "'rk3_ws'; genuine nemo_duplicate per the audit (rank-3 collapse item, "
-        "an already-realized bug: a fix to _stage_vertical_up3/live-HPG landed "
-        "in ladder #2 only) but the two sites are inline code inside one "
-        "function, not AST-distinct symbols, so not baseline-enforced here"
+    RoutineRow("S-30", "stage momentum time-stepping (one WS ladder)", "SHARED", (
+        "key_qco; COLLAPSED 2026-09-02 (the audit's rank-3 item). The WS stage "
+        "recurrence used to be written TWICE inside _step_impl -- once before "
+        "the barotropic solve to build its seed, once after it, corrected -- "
+        "which is how a fix to _stage_vertical_up3/live-HPG landed in the "
+        "second copy only. The pre-solve copy is deleted (see S-12: NEMO's "
+        "stp_2D has no ladder there); the ONE surviving ladder runs after the "
+        "barotropic solve at omlc:4817-5025 for every rk3_ws step, and the "
+        "private stage_barotropic_correction hook now ablates the per-stage "
+        "external-mode replacement inside it instead of selecting a second "
+        "recurrence. Still inline code, not an AST-distinct symbol."
     ), (
         Impl(_OMLC, "_step_impl",
-             Reference("nemo", "ws_stage_ladder_multi_arm",
-                        "stprk3_stg.F90:344-374 (both ladder sites inline in _step_impl, not "
-                        "AST-distinct — see docstring)")),
+             Reference("nemo", "ws_stage_ladder",
+                        "stprk3_stg.F90:344-374 (single post-barotropic ladder, inline in "
+                        "_step_impl at omlc:4817-5025, not AST-distinct)")),
     )),
     RoutineRow("S-31", "stage 2/3 eos(Kmm)+dyn_hpg(Kmm) operands", "SHARED", "none", (
         Impl(_OMLC, "_stage_hpg_operands",
