@@ -110,3 +110,51 @@ loss with per-seed Nelder-Mead (forward-only; non-finite candidates get a
 recorded 1e3 penalty; a seed whose best point is penalised is FAILED).
 Everything else in this pre-registration is unchanged: loss, year split,
 bounds, seeds, verdict rule.
+
+## DEVIATION 2 (2026-09-02, dual review of the Nelder-Mead tuner; user-approved)
+
+Measured: one evaluation = 12 min with the 5 sites run in sequence (smoke,
+16 CPUs). Both reviewers judged 80 evaluations a local polish in 8-D.
+Changes, each asked and approved before any production run:
+
+* **Non-finite forward -> +inf**, not 1e3 (codex P0: a finite normalised-MSE
+  loss can exceed any fixed penalty, so a NaN point could be selected; GLM: a
+  flat plateau gives the simplex no direction). Per-seed non-finite count and
+  scipy convergence status are recorded; a seed is FAILED only if NO finite
+  evaluation exists.
+* **Budget 200 evals (arm A, 4 params) / 400 evals (arm B, 8 params)** —
+  ~50 per parameter, equal per-parameter search (GLM: a fixed budget starves
+  the 8-param arm). The 5 site forwards run in parallel processes so an
+  evaluation costs one site-forward of wall-clock.
+* **Initial simplex width 1.0 in raw (logit) space** (~25% of a parameter's
+  range at mid-range); scipy's default 5%-of-x0 steps cannot move materially.
+* **Headline pairing = the SELECTED seed per arm** (best train loss), paired
+  per-site-per-test-year with the 5% margin and 4/5 site sign rule as written;
+  a site-level bootstrap CI of the median is printed next to it. The
+  matched-seed population (same init id in both arms) is reported as
+  SECONDARY. The earlier sentence "reported central value is the seed-median"
+  mixed two estimators (GLM) and is superseded for the verdict; the seed
+  spread is still reported as the multimodality check.
+* **init 0 is the GLOBAL-MEAN texture init** (wp/fc averaged over the 5 sites;
+  one vector tunes all sites), not the per-site default. The untuned
+  "default" cell of the 4-cell matrix uses the PER-SITE texture defaults —
+  exactly what the harness runs (codex P1).
+* **Test-year coverage floor 20% -> 10%** (codex P0, user-approved): US-Whs
+  never exceeds 15% joint GPP+LE coverage in any year, so the 20% floor left
+  it with NO test year and the 4-of-5 site rule would have run on four sites.
+  At 10% US-Whs has 9 test years and US-SRM gains two; train years (top-2
+  coverage) are unchanged. The split table was re-frozen before any tuning.
+  The verdict now refuses to run unless all five sites are paired.
+* Bug fix (not a choice): the initial soil state is now taken from the first
+  timestep of the SELECTED years, not the whole driver (codex P0: a held-out
+  year could initialise the training forward).
+
+Stated limits added by the round-2 review (GLM): held-out YEARS at the SAME
+sites test temporal generalisation only — arm B's extra parameters can absorb
+time-invariant site structure that transfers across years but not across
+sites (leave-one-site-out refit is the follow-up, not part of this verdict);
+with 5 sites the >=4/5 sign rule is weak (exact one-sided p=0.19; 5/5 gives
+0.03) and the site bootstrap is descriptive only; the 200/400 budgets
+confound "more parameters" with "more search" — B's best loss within its
+first 200 evaluations is recorded in the eval history and is the
+budget-matched control.

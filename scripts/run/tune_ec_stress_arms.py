@@ -2,7 +2,8 @@
 
 Protocol: ``docs/land/phydro_calibrated_comparison_prereg.md`` (pre-registered
 before this file existed; both design reviews folded in).  One process tunes
-ONE (arm, init) pair by Adam through the prognostic multilayer land scan:
+ONE (arm, init) pair through the prognostic multilayer land scan (5 site
+forwards in parallel worker processes):
 
 * arm ``beta_theta``: tunes the shared soil/root set
   {root_depth, theta_wp, theta_fc(=wp+gap), soil_evap_litter_resistance_s_m}
@@ -35,6 +36,18 @@ Usage (one slurm task per invocation)::
 
     python scripts/run/tune_ec_stress_arms.py --write-year-split   # once, obs-only
     python scripts/run/tune_ec_stress_arms.py --arm phydro --init-id 3
+    python scripts/run/tune_ec_stress_arms.py --arm phydro --init-id 3 --evaluate
+    python scripts/run/tune_ec_stress_arms.py --arm phydro --init-id -1 --evaluate  # untuned defaults
+    python scripts/run/tune_ec_stress_arms.py --verdict
+
+``--evaluate`` scores one (arm, init) cell on the TEST years only, one forward
+per site-year, and writes ``<arm>_init<k>_test.json`` (per-site per-year joint
+loss).  ``--verdict`` applies the pre-registered rule mechanically to every
+test file present: seed SELECTION on train loss; HEADLINE = the selected
+seeds paired per-site-per-year (A_tuned - B_tuned)/A_tuned with a 5% relative
+margin and >= 4/5 site sign consistency (all five sites required, any
+penalised paired site-year withholds the verdict); matched-seed population
+and seed spread reported as secondary.
 """
 from __future__ import annotations
 
@@ -43,6 +56,7 @@ import importlib.util
 import json
 import os
 import sys
+import time
 
 import numpy as np
 
@@ -67,9 +81,9 @@ from legoesm.land.multilayer_land import (  # noqa: E402
 SITES = ["US-SRM", "US-Whs", "US-Ton", "US-Var", "FR-Pue"]
 DRV = "/burg-archive/glab/users/jf3423/DifferBESS/data/sitelevel/nc"
 OUT_DIR = os.path.join(_ROOT, "results", "ec_stress_tuning")
-SPLIT_JSON = os.path.join(OUT_DIR, "year_split.json")
+SPLIT_JSON = os.path.join(_ROOT, "docs", "land", "phydro_calibrated_year_split.json")  # committed (prereg)
 N_TRAIN_YEARS = 2
-MIN_TEST_COVER = 0.20
+MIN_TEST_COVER = 0.10   # prereg deviation 2: 0.20 left US-Whs with no test year
 
 # Tuned parameters: name -> (bounds_lo, bounds_hi), matching __param_spec__
 # (land.multilayer / land.phydro).  theta_fc is derived (= theta_wp + gap).
@@ -203,12 +217,16 @@ def build_site(site, arm, years):
     # cannot inject NaN into the loss (weights are zero there anyway).
     obs_g = np.where(jv, obs_g, 0.0)
     obs_l = np.where(jv, obs_l, 0.0)
-    var_g = float(np.var(obs_g[jv])) if jv.any() else 1.0
-    var_l = float(np.var(obs_l[jv])) if jv.any() else 1.0
+    if jv.sum() < 2:
+        raise SystemExit(f"{site} years={years}: <2 joint-valid samples")
+    var_g = float(np.var(obs_g[jv]))
+    var_l = float(np.var(obs_l[jv]))
 
-    Ts = np.asarray(d.T_soil_top).ravel()
+    # IC from the SELECTED slice only (codex P0: whole-driver first value
+    # could come from a held-out year)
+    Ts = np.asarray(d.T_soil_top).ravel()[sel]
     T_init = float(Ts[np.isfinite(Ts)][0])
-    th = np.asarray(d.theta_soil).ravel()
+    th = np.asarray(d.theta_soil).ravel()[sel]
     th0 = th[np.isfinite(th)]
     theta_r = float(lc.hydraulics.theta_r)
     theta_sat = float(lc.hydraulics.theta_sat)
@@ -269,12 +287,204 @@ def site_loss_fn(site_pack, arm):
     return loss
 
 
+def _result_path(arm, init_id, suffix=""):
+    tag = "default" if init_id < 0 else f"init{init_id}"
+    return os.path.join(OUT_DIR, f"{arm}_{tag}{suffix}.json")
+
+
+def evaluate(arm, init_id, split, sites):
+    """Score one cell on TEST years: one forward per (site, year)."""
+    if init_id < 0:
+        # untuned defaults = what the harness runs: PER-SITE texture wp/fc,
+        # everything else at config defaults (raw resolved per site below)
+        raw = None
+        train_loss = None
+    else:
+        with open(_result_path(arm, init_id)) as fh:
+            tuned = json.load(fh)
+        if tuned["status"] != "ok":
+            raise SystemExit(f"{arm} init{init_id} status={tuned['status']}; "
+                             "not evaluated")
+        raw = tuned["raw"]
+        train_loss = min(h["loss"] for h in tuned["eval_history"] if h["finite"])
+    per_site = {}
+    for s in sites:
+        per_site[s] = {}
+        for y in split[s]["test"]:
+            pack = build_site(s, arm, [y])
+            r = raw if raw is not None else default_raw(arm, pack["site_defaults"])
+            v = float(jax.jit(site_loss_fn(pack, arm))(r))
+            per_site[s][str(y)] = v if np.isfinite(v) else None
+            print(f"{arm} init{init_id} {s} {y}: loss={v:.5f}", flush=True)
+    out = {"arm": arm, "init_id": init_id, "train_loss": train_loss,
+           "constrained": ({k: float(v) for k, v in constrain(raw, arm).items()}
+                           if raw is not None else "per-site defaults"),
+           "test_loss": per_site}
+    path = _result_path(arm, init_id, "_test")
+    with open(path, "w") as fh:
+        json.dump(out, fh, indent=1)
+    print(f"-> {path}")
+
+
+def verdict(margin=0.05, min_sites_consistent=4):
+    """Pre-registered verdict rule, applied to whatever test files exist."""
+    import glob
+    cells = {}
+    for p in glob.glob(os.path.join(OUT_DIR, "*_test.json")):
+        with open(p) as fh:
+            r = json.load(fh)
+        cells.setdefault(r["arm"], {})[r["init_id"]] = r
+
+    def flat(r):
+        # a non-finite test forward is penalised (+inf), never masked
+        return {(s, y): (np.inf if v is None else v)
+                for s, ys in r["test_loss"].items() for y, v in ys.items()}
+
+    def site_mean(r):
+        return float(np.mean(list(flat(r).values())))
+
+    def paired(ra, rb):
+        """Relative paired differences (A-B)/A per site-year, >0 = B better;
+        both penalised -> 0, one penalised -> +/-1 (capped)."""
+        fa, fb = flat(ra), flat(rb)
+        keys = sorted(set(fa) & set(fb))
+        rel = {}
+        for k in keys:
+            if np.isinf(fa[k]) and np.isinf(fb[k]):
+                rel[k] = 0.0
+            elif np.isinf(fb[k]):
+                rel[k] = -1.0
+            elif np.isinf(fa[k]):
+                rel[k] = 1.0
+            else:
+                rel[k] = (fa[k] - fb[k]) / fa[k]
+        return rel
+
+    def rule(rel):
+        med = float(np.median(list(rel.values())))
+        sites = sorted({s for s, _y in rel})
+        sign = {s: int(np.sign(np.median([v for (ss, _y), v in rel.items()
+                                          if ss == s]))) for s in sites}
+        n_pos = sum(v > 0 for v in sign.values())
+        n_neg = sum(v < 0 for v in sign.values())
+        return med, n_pos, n_neg
+
+    summary = {}
+    for arm, by_init in cells.items():
+        tuned = {k: r for k, r in by_init.items() if k >= 0}
+        # selection over ALL ok tuning artifacts (not only those already
+        # scored on test), then require the selected seed's test artifact
+        train_all = {}
+        for p in glob.glob(os.path.join(OUT_DIR, f"{arm}_init*.json")):
+            if p.endswith("_test.json"):
+                continue
+            with open(p) as fh:
+                t = json.load(fh)
+            if t["status"] == "ok":
+                train_all[t["init_id"]] = min(
+                    h["loss"] for h in t["eval_history"] if h["finite"])
+        sel = min(train_all, key=train_all.get) if train_all else None
+        if sel is not None and sel not in tuned:
+            raise SystemExit(f"{arm}: best-train seed {sel} has no test "
+                             "artifact; run --evaluate for it first")
+        summary[arm] = {
+            "default_test": site_mean(by_init[-1]) if -1 in by_init else None,
+            "tuned_seed_test": {k: site_mean(r) for k, r in tuned.items()},
+            "tuned_seed_train": {k: r["train_loss"] for k, r in tuned.items()},
+            "selected_seed": sel,
+            "selected_test": site_mean(tuned[sel]) if sel is not None else None,
+            "seed_median_test": (float(np.median([site_mean(r) for r in tuned.values()]))
+                                 if tuned else None),
+            "n_penalised_site_years": {k: int(sum(np.isinf(v) for v in flat(r).values()))
+                                       for k, r in by_init.items()},
+        }
+    print(json.dumps(summary, indent=1))
+    a, b = summary.get("beta_theta", {}), summary.get("phydro", {})
+    if a.get("selected_seed") is None or b.get("selected_seed") is None:
+        print("VERDICT: incomplete (need >=1 ok tuned seed per arm)")
+        return
+    ra = cells["beta_theta"][a["selected_seed"]]
+    rb = cells["phydro"][b["selected_seed"]]
+    rel = paired(ra, rb)
+    covered = sorted({s for s, _y in rel})
+    if covered != sorted(SITES):
+        print(f"VERDICT: INCOMPLETE — paired test coverage only for {covered}; "
+              f"the >=4/5 rule needs all of {SITES}")
+        return
+    n_pen = sum(np.isinf(flat(ra)[k]) or np.isinf(flat(rb)[k]) for k in rel)
+    if n_pen:
+        print(f"VERDICT: WITHHELD — {n_pen} paired site-years penalised "
+              "(non-finite forward) in the selected seeds")
+        return
+    med, n_pos, n_neg = rule(rel)
+    # site-level cluster bootstrap of the median (sites are the independent
+    # units; seeds fixed at the selected ones)
+    sites = sorted({s for s, _y in rel})
+    rng = np.random.default_rng(0)
+    boots = []
+    for _ in range(2000):
+        pick = rng.choice(sites, size=len(sites), replace=True)
+        vals = [v for s in pick for (ss, _y), v in rel.items() if ss == s]
+        boots.append(np.median(vals))
+    lo, hi = np.percentile(boots, [2.5, 97.5])
+    from scipy.stats import binomtest
+    p_sign = binomtest(max(n_pos, n_neg), len(sites), 0.5, alternative="greater").pvalue
+    print(f"HEADLINE selected seeds A={a['selected_seed']} B={b['selected_seed']}: "
+          f"median (A-B)/A = {med:+.4f} [site-bootstrap 95% {lo:+.4f},{hi:+.4f}, "
+          f"descriptive only at n={len(sites)}] over {len(rel)} site-years; "
+          f"sites B better={n_pos} A better={n_neg} (exact sign test p={p_sign:.3f})")
+    # secondary: seed population, matched seeds (same init id both arms)
+    common = sorted(k for k in cells["beta_theta"] if k >= 0 and k in cells["phydro"])
+    pop = [rule(paired(cells["beta_theta"][k], cells["phydro"][k]))[0] for k in common]
+    if pop:
+        print(f"SECONDARY matched-seed medians (A-B)/A: "
+              + " ".join(f"seed{k}={m:+.4f}" for k, m in zip(common, pop))
+              + f"  -> median over seeds {np.median(pop):+.4f}")
+    win = med > margin and n_pos >= min_sites_consistent
+    lose = med < -margin and n_neg >= min_sites_consistent
+    print("VERDICT: " + ("P-hydro WINS (tuned vs tuned)" if win else
+                         "beta_theta WINS (tuned vs tuned)" if lose else
+                         "no demonstrated advantage of the hydraulic optimum "
+                         "over the tuned empirical stress at these sites"))
+
+
+_SIMPLEX_WIDTH_RAW = 1.0
+
+
+def _site_worker(conn, site, arm, years):
+    import traceback
+    try:
+        pack = build_site(site, arm, years)
+        f = jax.jit(site_loss_fn(pack, arm))
+        conn.send(("ok", pack["site_defaults"]))
+        while True:
+            raw = conn.recv()
+            if raw is None:
+                return
+            conn.send(("ok", float(f(raw))))
+    except BaseException:
+        conn.send(("err", f"{site}: {traceback.format_exc()}"))
+        raise
+
+
+def _recv(conn):
+    tag, payload = conn.recv()
+    if tag != "ok":
+        raise SystemExit(f"site worker failed:\n{payload}")
+    return payload
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--write-year-split", action="store_true")
+    ap.add_argument("--evaluate", action="store_true",
+                    help="score (arm, init) on TEST years; init -1 = untuned")
+    ap.add_argument("--verdict", action="store_true")
     ap.add_argument("--arm", choices=["beta_theta", "phydro"])
-    ap.add_argument("--init-id", type=int, default=0,
-                    help="0 = defaults init; 1..5 = random seeds")
+    ap.add_argument("--init-id", type=int, default=0, choices=range(-1, 6),
+                    help="0 = defaults init (global-mean texture wp/fc); "
+                         "1..5 = random seeds; -1 = untuned per-site "
+                         "defaults (--evaluate only)")
     ap.add_argument("--evals", type=int, default=80,
                     help="Nelder-Mead function-evaluation budget")
     ap.add_argument("--sites", nargs="+", default=SITES)
@@ -283,61 +493,98 @@ def main():
     if args.write_year_split:
         write_year_split()
         return 0
+    if args.verdict:
+        verdict()
+        return 0
     if not args.arm:
-        raise SystemExit("--arm required (or --write-year-split)")
+        raise SystemExit("--arm required (or --write-year-split / --verdict)")
 
     with open(SPLIT_JSON) as fh:
         split = json.load(fh)
 
-    packs = {s: build_site(s, args.arm, split[s]["train"])
-             for s in args.sites}
-    losses = {s: site_loss_fn(p, args.arm) for s, p in packs.items()}
+    if args.evaluate:
+        evaluate(args.arm, args.init_id, split, args.sites)
+        return 0
+    if args.init_id < 0:
+        raise SystemExit("--init-id -1 only valid with --evaluate")
+
+    # One worker process per site: the 5 site forwards are independent, so
+    # each eval costs one site-forward of wall-clock instead of five.
+    import multiprocessing as mp
+    ctx = mp.get_context("spawn")
+    workers = []
+    for s in args.sites:
+        parent, child = ctx.Pipe()
+        p = ctx.Process(target=_site_worker,
+                        args=(child, s, args.arm, split[s]["train"]))
+        p.start()
+        workers.append((parent, p))
+    site_defaults_all = [_recv(c) for c, _p in workers]
 
     def total_loss(raw):
-        return jnp.mean(jnp.stack([losses[s](raw) for s in args.sites]))
+        for c, _p in workers:
+            c.send(raw)
+        return float(np.mean([_recv(c) for c, _p in workers]))
 
     site_defaults = {
-        "theta_wp": float(np.mean([p["site_defaults"]["theta_wp"]
-                                   for p in packs.values()])),
-        "fc_gap": float(np.mean([p["site_defaults"]["fc_gap"]
-                                 for p in packs.values()])),
-    }
+        k: float(np.mean([d[k] for d in site_defaults_all]))
+        for k in ("theta_wp", "fc_gap")}
     raw = (default_raw(args.arm, site_defaults) if args.init_id == 0
            else seeded_raw(args.arm, args.init_id))
 
     keys = sorted(_bounds(args.arm))
-    jit_loss = jax.jit(total_loss)
-    _PENALTY = 1.0e3   # non-finite forward -> recorded penalty, never masked
 
     n_eval = [0]
     history = []
+    t0 = time.time()
 
     def f_vec(x):
         rawd = {k: float(v) for k, v in zip(keys, x)}
-        v = float(jit_loss(rawd))
-        finite = np.isfinite(v)
-        v = v if finite else _PENALTY
+        v = total_loss(rawd)
+        finite = bool(np.isfinite(v))
         n_eval[0] += 1
-        history.append({"eval": n_eval[0], "loss": v, "finite": bool(finite),
+        history.append({"eval": n_eval[0], "loss": v if finite else None,
+                        "finite": finite,
                         **{k: float(c) for k, c in
                            constrain(rawd, args.arm).items()}})
-        print(f"eval {n_eval[0]:3d} loss={v:.5f} finite={finite}", flush=True)
-        return v
+        print(f"eval {n_eval[0]:3d} loss={v:.5f} finite={finite} "
+              f"t={time.time() - t0:.0f}s", flush=True)
+        # non-finite forward -> +inf: always the worst vertex, never a
+        # candidate optimum (a finite loss can exceed any fixed penalty)
+        return v if finite else np.inf
 
     from scipy.optimize import minimize
     x0 = np.array([raw[k] for k in keys])
+    # initial simplex of width 1.0 in raw space (~25% of a parameter's range
+    # at mid-range); scipy's default 5%-of-x0 steps cannot move materially
+    simplex = np.vstack([x0] + [x0 + _SIMPLEX_WIDTH_RAW * np.eye(len(keys))[i]
+                                for i in range(len(keys))])
     res = minimize(f_vec, x0, method="Nelder-Mead",
                    options={"maxfev": args.evals, "xatol": 1e-2,
-                            "fatol": 1e-4, "adaptive": True})
+                            "fatol": 1e-4, "adaptive": True,
+                            "initial_simplex": simplex})
+    for c, p in workers:
+        c.send(None)
+        p.join()
     raw = {k: float(v) for k, v in zip(keys, res.x)}
-    best = min(history, key=lambda h: h["loss"])
-    status = ("ok" if best["finite"] else "FAILED_best_is_penalised")
-    print(f"best eval={best['eval']} loss={best['loss']:.5f} status={status}")
+    finite_hist = [h for h in history if h["finite"]]
+    n_nonfinite = len(history) - len(finite_hist)
+    if finite_hist:
+        best = min(finite_hist, key=lambda h: h["loss"])
+        status = "ok"
+    else:
+        best = {"eval": -1, "loss": float("nan")}
+        status = "FAILED_no_finite_eval"
+    print(f"best eval={best['eval']} loss={best['loss']:.5f} status={status} "
+          f"nonfinite={n_nonfinite}/{len(history)} converged={res.success} "
+          f"({res.message})")
 
     os.makedirs(OUT_DIR, exist_ok=True)
     out = {
         "arm": args.arm, "init_id": args.init_id, "status": status,
         "optimizer": "nelder-mead (AD refuted by the FD gate; see docstring)",
+        "converged": bool(res.success), "scipy_message": str(res.message),
+        "n_nonfinite": n_nonfinite, "n_evals": len(history),
         "eval_history": history,
         "raw": {k: float(v) for k, v in raw.items()},
         "constrained": {k: float(v)
