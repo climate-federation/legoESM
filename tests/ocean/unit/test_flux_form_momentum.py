@@ -273,3 +273,76 @@ def test_F7_gyre_stability_flux_form():
     )
     fin_vi, _, _ = _run("vector_invariant")
     assert fin_vi, "vector_invariant baseline produced non-finite state"
+
+
+def test_F9_up3_selector_follows_advected_velocity_pair_with_separate_transport():
+    """NEMO dynadv_up3.F90:166-170: with a SEPARATE advecting transport (the
+    WS-RK3 stage ``zFu = e2u e3u (uu + zub)``), the T-point UP3 branch is chosen
+    by the sign of the advected-velocity pair ``uu_i + uu_{i+1}``, not by the
+    transport pair.  Build a curved zonal profile and a transport shifted by a
+    uniform ``zub`` large enough to flip the pair sign on part of the row, then
+    check the tendency against an independent assembly of NEMO's rule.
+
+    Non-vacuous: on the reverted selector (branch by transport sign) the
+    default result equals the ``up3_upwind_selector="transport"`` control and
+    differs from the NEMO reference, so both assertions fail.
+    """
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _up3_reconstruct
+
+    nlat, nlon, nlev = _NLAT, _NLON, _NLEV
+    x = np.arange(nlon + 1, dtype=np.float64)
+    prof = 0.10 * np.sin(2.0 * np.pi * x / nlon) ** 3      # curved, sign-changing
+    u = np.broadcast_to(prof[None, :, None], (nlat, nlon + 1, nlev)).copy()
+    v = np.zeros((nlat + 1, nlon, nlev))
+    zub = -0.06                                             # |zub| > |u| on part of the row
+    u_t = u + zub
+    args = _setup(u, v, scheme="upwind3")
+    du0, dv0, uj, vj, h_u, h_v, u_mask_3d, v_mask_3d, mask, grid, cfg = args
+    tv = (jnp.asarray(u_t), jnp.asarray(v))
+    _, _, hadv_default, _ = _bc_horizontal_momentum_advection_flux_form(
+        du0, dv0, uj, vj, h_u, h_v, u_mask_3d, v_mask_3d, mask, grid, cfg,
+        transport_velocity=tv)
+    _, _, hadv_transport, _ = _bc_horizontal_momentum_advection_flux_form(
+        du0, dv0, uj, vj, h_u, h_v, u_mask_3d, v_mask_3d, mask, grid, cfg,
+        transport_velocity=tv, up3_upwind_selector="transport")
+    _, _, hadv_velocity, _ = _bc_horizontal_momentum_advection_flux_form(
+        du0, dv0, uj, vj, h_u, h_v, u_mask_3d, v_mask_3d, mask, grid, cfg,
+        transport_velocity=tv, up3_upwind_selector="velocity")
+
+    # The pair signs really disagree somewhere on this row (else the test is
+    # a no-op by construction).
+    u_core = u[:, :-1, :]
+    pair_vel = u_core + u[:, 1:, :]
+    pair_tr = (u_t[:, :-1, :] + u_t[:, 1:, :])
+    assert bool(np.any((pair_vel > 0) != (pair_tr > 0))), "selector never disagrees"
+
+    # Independent assembly of the zonal flux with NEMO's selector (v == 0, so
+    # the meridional flux is identically zero): the T-point face value picks
+    # its upwind curvature by the advected-velocity pair, the flux magnitude is
+    # the transport pair.
+    dy_u = (np.asarray(grid.dy) * 0.5)[:, None, None]
+    Q = np.asarray(h_u) * u_t * np.asarray(u_mask_3d) * dy_u
+    Qx_c = 0.5 * (Q[:, :-1, :] + Q[:, 1:, :])
+    u_c = np.asarray(_up3_reconstruct(
+        jnp.asarray(np.roll(u_core, 1, axis=1)), jnp.asarray(u_core),
+        jnp.asarray(u[:, 1:, :]), jnp.asarray(np.roll(u_core, -2, axis=1)),
+        jnp.asarray(pair_vel)))
+    Fx = Qx_c * u_c
+    net = Fx - np.roll(Fx, 1, axis=1)
+    net_u = np.concatenate([net, net[:, :1, :]], axis=1)
+    area = np.asarray(grid.area)
+    a_uc = 0.5 * (area + np.roll(area, 1, axis=1))
+    A_u = np.concatenate([a_uc, a_uc[:, :1]], axis=1)[..., None]
+    ref = -net_u / (A_u * np.asarray(h_u))
+
+    default = np.asarray(hadv_default)
+    scale = float(np.max(np.abs(ref)))
+    assert scale > 0.0
+    assert np.array_equal(default, np.asarray(hadv_velocity)), (
+        "a separate transport must resolve the default selector to NEMO's rule")
+    assert float(np.max(np.abs(default - ref))) <= 1e-13 * scale, (
+        float(np.max(np.abs(default - ref))), scale)
+    # The legacy transport-sign control differs by a first-order amount at the
+    # disagreeing faces (the UP3 third-difference term), i.e. the selector is
+    # a live variable of this tendency, not a relabelling.
+    assert float(np.max(np.abs(default - np.asarray(hadv_transport)))) > 1e-3 * scale

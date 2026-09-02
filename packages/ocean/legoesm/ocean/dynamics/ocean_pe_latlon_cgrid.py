@@ -4098,6 +4098,7 @@ def _up3_reconstruct(far_pos, adv_pos, adv_neg, far_neg, transport):
 def _bc_horizontal_momentum_advection_flux_form(
     du_dt, dv_dt, u, v, h_u, h_v, u_mask_3d, v_mask_3d, mask, grid, config,
     transport_velocity=None,
+    up3_upwind_selector=None,
 ):
     """Flux-form horizontal momentum advection (alternative to the
     vector-invariant PV flux, `_bc_pv_flux`) — the Veros/MOM6/MITgcm form
@@ -4121,14 +4122,37 @@ def _bc_horizontal_momentum_advection_flux_form(
             "Use 'vector_invariant' on tripolar, or extend this substage."
         )
     scheme = config.momentum_flux_scheme
+    # UP3 upwind SELECTOR.  NEMO dynadv_up3.F90:166-177: the T-point
+    # (same-direction) fluxes choose the upwind curvature by the sign of the
+    # ADVECTED velocity pair ``zui = uu_i + uu_{i+1}`` (:166, :169-170) while
+    # the flux magnitude is the transport pair ``zFu_i + zFu_{i+1}`` (:176);
+    # the F-point (cross) fluxes select by the transport pair (:179-187).
+    # Under WS-RK3 the transport carries ``zub`` (stprk3_stg.F90:273), so the
+    # two signs differ wherever ``|uu_i + uu_{i+1}| < |zub_i + zub_{i+1}|``
+    # (OVERFLOW kt=1 stage 3: the front face, top two levels).  With no
+    # separate transport ``Q = h u`` and the rules coincide except at a
+    # partial-cell face with a near-zero pair sum; that legacy path keeps the
+    # transport sign bit-for-bit.  ``None`` resolves to NEMO's rule whenever a
+    # separate transport is supplied; ``"transport"`` exists only for the
+    # private one-variable ablation (``_NEMOWSRK3TestHooks``).
+    if up3_upwind_selector is None:
+        up3_upwind_selector = (
+            "velocity" if transport_velocity is not None else "transport")
+    if up3_upwind_selector not in ("velocity", "transport"):
+        raise ValueError(
+            "up3_upwind_selector must be 'velocity' or 'transport', got "
+            f"{up3_upwind_selector!r}")
 
-    def _recon(adv_pos, adv_neg, transport, far_pos=None, far_neg=None):
+    def _recon(adv_pos, adv_neg, transport, far_pos=None, far_neg=None,
+               *, same_direction=False):
         """Reconstruct the advected velocity at a face.
 
         ``adv_pos``/``adv_neg`` are the two cells straddling the face (upstream
         side for transport>0 is ``adv_pos``). ``far_pos``/``far_neg`` are the
         next cells outward (only used by "upwind3"): ``far_pos`` is beyond
         ``adv_pos`` on the +flow upstream side, ``far_neg`` beyond ``adv_neg``.
+        ``same_direction`` marks the T-point fluxes (u advected in x, v in y),
+        whose UP3 branch NEMO selects by the advected-velocity pair.
         """
         if scheme == "centered":
             return 0.5 * (adv_pos + adv_neg)
@@ -4136,7 +4160,11 @@ def _bc_horizontal_momentum_advection_flux_form(
             # NEMO stprk3_stg.F90:316,326-331 passes Kmm as BOTH dyn_adv
             # velocity levels, so dynadv_up3.F90:141-191 evaluates the face
             # value and curvature from the same live WS-stage velocity.
-            return _up3_reconstruct(far_pos, adv_pos, adv_neg, far_neg, transport)
+            selector = (
+                adv_pos + adv_neg
+                if (same_direction and up3_upwind_selector == "velocity")
+                else transport)
+            return _up3_reconstruct(far_pos, adv_pos, adv_neg, far_neg, selector)
         # 1st-order upwind (default).
         return jnp.where(transport > 0.0, adv_pos, adv_neg)
 
@@ -4174,7 +4202,8 @@ def _bc_horizontal_momentum_advection_flux_form(
     u_core = u[:, :-1, :]
     u_c = _recon(u_core, u[:, 1:, :], Qx_c,
                  far_pos=jnp.roll(u_core, 1, axis=1),       # face c-1
-                 far_neg=jnp.roll(u_core, -2, axis=1))      # face c+2; west when Qx>0
+                 far_neg=jnp.roll(u_core, -2, axis=1),      # face c+2; west when Qx>0
+                 same_direction=True)
     Fx_uu = Qx_c * u_c                                           # (n_lat,n_lon,nlev)
     # divergence to u-points (periodic in lon): flux[centre J] - flux[centre J-1].
     _dx = Fx_uu - jnp.roll(Fx_uu, 1, axis=1)
@@ -4217,7 +4246,8 @@ def _bc_horizontal_momentum_advection_flux_form(
     n_v = v.shape[0]                                            # n_lat+1
     v_c = _recon(v[:-1, :, :], v[1:, :, :], Qy_c,
                  far_pos=v_pad[0:n_v - 1, :, :],
-                 far_neg=v_pad[3:n_v + 2, :, :])                # south when Qy>0
+                 far_neg=v_pad[3:n_v + 2, :, :],                # south when Qy>0
+                 same_direction=True)
     Fy_vv = Qy_c * v_c                                          # (n_lat,n_lon,nlev)
     # divergence to v-points (interior lat-faces; poles are walls -> 0).
     net_merid_v_int = Fy_vv[1:, :, :] - Fy_vv[:-1, :, :]       # (n_lat-1,n_lon,nlev)
@@ -4274,6 +4304,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     zad_continuity_dt=None,
     zad_freshwater_eta_tendency=None,
     momentum_flux_transport_velocity=None,
+    up3_upwind_selector=None,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -4470,6 +4501,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             _bc_horizontal_momentum_advection_flux_form(
                 du_dt, dv_dt, u, v, h_u, h_v, u_mask_3d, v_mask_3d, mask, grid, config,
                 transport_velocity=momentum_flux_transport_velocity,
+                up3_upwind_selector=up3_upwind_selector,
             )
         )
     else:

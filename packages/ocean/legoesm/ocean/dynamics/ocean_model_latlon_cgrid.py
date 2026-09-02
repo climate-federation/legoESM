@@ -1060,6 +1060,12 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # has no such switch -- it is one routine -- so this exists only to
     # measure the two arms against each other on the certified cards.
     literal_stage_wzv: bool = False
+    # One-variable ablation of the UP3 upwind-selector fix: restore the
+    # transport-sign branch choice in the stage horizontal momentum
+    # advection.  NEMO dynadv_up3.F90:166-170 has no switch -- the T-point
+    # UP3 fluxes always pick the upwind curvature by the sign of the advected
+    # velocity pair -- so public WS-RK3 cards never select this.
+    legacy_up3_transport_sign_selector: bool = False
 
 
 def _nemo_ws_qco_stage_faces(eta, h_ref, u_mask_3d, v_mask_3d, grid):
@@ -3770,7 +3776,8 @@ class LatLonCGridOceanModel:
                    ldf_state=None, z_coord=None, config=None,
                    zad_continuity_dt=None,
                    zad_freshwater_eta_tendency=None,
-                   momentum_flux_transport_velocity=None):
+                   momentum_flux_transport_velocity=None,
+                   up3_upwind_selector=None):
         """Compute baroclinic tendencies.
 
         ``momentum_only=True`` skips the (T/S-frozen) tracer-diffusion
@@ -3820,6 +3827,7 @@ class LatLonCGridOceanModel:
             zad_continuity_dt=zad_continuity_dt,
             zad_freshwater_eta_tendency=zad_freshwater_eta_tendency,
             momentum_flux_transport_velocity=momentum_flux_transport_velocity,
+            up3_upwind_selector=up3_upwind_selector,
         )
 
     def tendencies_with_diagnostics(
@@ -4418,7 +4426,16 @@ class LatLonCGridOceanModel:
                                      skip_lateral_viscosity=skip_ldf,
                                      z_coord=z_coord, config=config,
                                      momentum_flux_transport_velocity=(
-                                         transport_velocity))
+                                         transport_velocity),
+                                     # dynadv_up3.F90:166-170 selects the UP3
+                                     # branch by the advected-velocity pair;
+                                     # the private hook restores the legacy
+                                     # transport sign for the gate's arm only.
+                                     up3_upwind_selector=(
+                                         "transport"
+                                         if self._nemo_ws_test_hooks
+                                         .legacy_up3_transport_sign_selector
+                                         else None))
                 _du = td.du_dt.data
                 _dv = td.dv_dt.data
                 if extra_rhs is not None:

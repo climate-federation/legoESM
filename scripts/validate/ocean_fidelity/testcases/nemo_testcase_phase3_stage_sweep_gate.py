@@ -552,6 +552,12 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
             "omit_stage_qco_factor": _NEMOWSRK3TestHooks(
                 omit_stage_qco_factor=True
             ),
+            # Stage-3 baroclinic round (preregistered in
+            # nemo_testcases_l1_stage3_baroclinic_preregister.md): ablate the
+            # UP3 upwind-selector fix (dynadv_up3.F90:166-170).
+            "legacy_up3_transport_sign_selector": _NEMOWSRK3TestHooks(
+                legacy_up3_transport_sign_selector=True
+            ),
         }
     else:
         arms = {
@@ -567,6 +573,9 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
             ),
             "omit_stage_qco_factor": _NEMOWSRK3TestHooks(
                 omit_stage_qco_factor=True
+            ),
+            "legacy_up3_transport_sign_selector": _NEMOWSRK3TestHooks(
+                legacy_up3_transport_sign_selector=True
             ),
         }
 
@@ -696,7 +705,8 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
         target = (
             "u" if arm in ("freeze_stage_hpg_operands", "freeze_stage_hpg_tracers",
                            "freeze_stage_hpg_eta", "omit_stage_vertical_up3",
-                           "omit_stage_qco_factor")
+                           "omit_stage_qco_factor",
+                           "legacy_up3_transport_sign_selector")
             else "T" if case == "OVERFLOW-zps" else "u"
         )
         faithful_row = faithful_T if target == "T" else faithful_u
@@ -715,8 +725,9 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
         improving = control_row["absolute_max"] < faithful_row["absolute_max"]
         arm_results[arm] = classify_arm(faithful_row, control_row, arm_move, improving=improving)
         arm_results[arm]["target"] = target
-        if arm in ("legacy_stage_min_face_thickness", "omit_stage_qco_factor"):
-            # These two arms ABLATE a landed fix, so classify_arm's "does the
+        if arm in ("legacy_stage_min_face_thickness", "omit_stage_qco_factor",
+                   "legacy_up3_transport_sign_selector"):
+            # These arms ABLATE a landed fix, so classify_arm's "does the
             # arm improve the residual" question is inverted: the meaningful
             # statement is whether REMOVING the NEMO rule makes the target
             # worse.  Recorded explicitly rather than by reading the inverted
@@ -754,6 +765,11 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
             one_variable = (
                 "qco weighting of the stage velocity update "
                 "(stprk3_stg.F90:373-378)")
+        elif arm == "legacy_up3_transport_sign_selector":
+            one_variable = (
+                "UP3 upwind selector of the stage horizontal momentum "
+                "advection: NEMO's advected-velocity pair sign "
+                "(dynadv_up3.F90:166-170) vs the stage-transport pair sign")
         elif arm == "legacy_velocity_primary_average":
             one_variable = "flux_form_primary_transport_average"
         elif "primary" in arm:
