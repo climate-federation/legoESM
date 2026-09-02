@@ -4067,12 +4067,26 @@ class LatLonCGridOceanModel:
         # 1-3 derivation on the same frozen state; pinned by the parity gate).
         _geom_density = compute_frozen_geom_density(
             state, _grid, _zc, _cfg_b)
+        # NEMO WS-RK3 scheme identity: dynadv_up3.F90:166-170 selects the
+        # T-point UP3 branch by the advected-velocity pair at EVERY stage
+        # (stage 1 here, stages 2-3 in _mom_pert_ws).  ``None`` (every other
+        # integrator) keeps the historical transport-sign selector; the
+        # private hook restores it for the stage-sweep gate's one-variable
+        # arm only.
+        if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws":
+            _ws_up3_selector = (
+                "transport"
+                if self._nemo_ws_test_hooks.legacy_up3_transport_sign_selector
+                else "velocity")
+        else:
+            _ws_up3_selector = None
         tend = self.tendencies(state, surface_forcing, sponge=sponge, dt=dt,
                                precomputed_geom_density=_geom_density,
                                grid=_grid, vertex_mask=_vmask,
                                ab2_scope_override=_ab2_scope_override,
                                ldf_state=_ldf_state, z_coord=z_coord, config=config,
-                               zad_continuity_dt=dt)
+                               zad_continuity_dt=dt,
+                               up3_upwind_selector=_ws_up3_selector)
         # #1492 DINO surface_tendency_placement="leapfrog_rhs": fold the
         # externally-supplied surface tracer RATE into the SAME explicit RHS
         # every other tendency uses -- BEFORE the diss-withholding split and
@@ -4427,15 +4441,14 @@ class LatLonCGridOceanModel:
                                      z_coord=z_coord, config=config,
                                      momentum_flux_transport_velocity=(
                                          transport_velocity),
-                                     # dynadv_up3.F90:166-170 selects the UP3
-                                     # branch by the advected-velocity pair;
-                                     # the private hook restores the legacy
-                                     # transport sign for the gate's arm only.
-                                     up3_upwind_selector=(
-                                         "transport"
-                                         if self._nemo_ws_test_hooks
-                                         .legacy_up3_transport_sign_selector
-                                         else None))
+                                     # dynadv_up3.F90:166-170: the WS-RK3
+                                     # stage RHS selects the UP3 branch by the
+                                     # advected-velocity pair whether or not a
+                                     # separate transport is supplied (so the
+                                     # gate's transport-reconcile arm stays
+                                     # one-variable); the private hook
+                                     # restores the legacy transport sign.
+                                     up3_upwind_selector=_ws_up3_selector)
                 _du = td.du_dt.data
                 _dv = td.dv_dt.data
                 if extra_rhs is not None:

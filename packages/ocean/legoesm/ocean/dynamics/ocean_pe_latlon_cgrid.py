@@ -4075,16 +4075,17 @@ def _bc_sponge_relaxation(du_dt, dv_dt, dT_dt, dS_dt, T, S, u, v, sponge, grid,
     return du_dt, dv_dt, dT_dt, dS_dt, diag_sponge_u, diag_sponge_v
 
 
-def _up3_reconstruct(far_pos, adv_pos, adv_neg, far_neg, transport):
+def _up3_reconstruct(far_pos, adv_pos, adv_neg, far_neg, selector):
     """3rd-order upwind-biased face reconstruction (NEMO/ROMS UP3, kappa=1/3).
 
     For a face straddled by cells (``adv_pos``, ``adv_neg``) with the next
     cells outward (``far_pos`` beyond ``adv_pos``, ``far_neg`` beyond
     ``adv_neg``), returns the upwind-biased face value selected by the sign of
-    ``transport``:
+    ``selector`` (the face transport, or -- NEMO dynadv_up3.F90:166-170 for
+    the T-point fluxes -- the advected-velocity pair ``adv_pos + adv_neg``):
 
-        transport > 0:  (-far_pos + 5·adv_pos + 2·adv_neg) / 6
-        transport < 0:  ( 2·adv_pos + 5·adv_neg - far_neg) / 6
+        selector > 0:  (-far_pos + 5·adv_pos + 2·adv_neg) / 6
+        selector <= 0: ( 2·adv_pos + 5·adv_neg - far_neg) / 6
 
     Reconstructs constants and linears exactly; the upstream bias supplies a
     3rd-derivative (biharmonic-like) implicit dissipation. Silvestri et al.
@@ -4092,7 +4093,7 @@ def _up3_reconstruct(far_pos, adv_pos, adv_neg, far_neg, transport):
     """
     pos = (-far_pos + 5.0 * adv_pos + 2.0 * adv_neg) / 6.0
     neg = (2.0 * adv_pos + 5.0 * adv_neg - far_neg) / 6.0
-    return jnp.where(transport > 0.0, pos, neg)
+    return jnp.where(selector > 0.0, pos, neg)
 
 
 def _bc_horizontal_momentum_advection_flux_form(
@@ -4127,17 +4128,19 @@ def _bc_horizontal_momentum_advection_flux_form(
     # ADVECTED velocity pair ``zui = uu_i + uu_{i+1}`` (:166, :169-170) while
     # the flux magnitude is the transport pair ``zFu_i + zFu_{i+1}`` (:176);
     # the F-point (cross) fluxes select by the transport pair (:179-187).
-    # Under WS-RK3 the transport carries ``zub`` (stprk3_stg.F90:273), so the
-    # two signs differ wherever ``|uu_i + uu_{i+1}| < |zub_i + zub_{i+1}|``
-    # (OVERFLOW kt=1 stage 3: the front face, top two levels).  With no
-    # separate transport ``Q = h u`` and the rules coincide except at a
-    # partial-cell face with a near-zero pair sum; that legacy path keeps the
-    # transport sign bit-for-bit.  ``None`` resolves to NEMO's rule whenever a
-    # separate transport is supplied; ``"transport"`` exists only for the
-    # private one-variable ablation (``_NEMOWSRK3TestHooks``).
+    # Under WS-RK3 the stage transport carries ``zub`` (stprk3_stg.F90:273),
+    # so the two signs differ wherever ``|uu_i + uu_{i+1}| < |zub_i +
+    # zub_{i+1}|`` (OVERFLOW kt=1 stage 3: the front face, top two levels).
+    # ``"velocity"`` is NEMO's rule and is what the WS-RK3 stage program
+    # passes (scheme identity, every stage, with or without a separate
+    # transport).  ``None`` keeps the historical transport-sign selector for
+    # every other caller bit-for-bit.  Note that with ``Q = h u L`` the two
+    # rules can still differ wherever the thickness or face-length weighting
+    # flips a near-zero pair sum (partial cells, latitude-varying v-face
+    # length), so a non-RK3 NEMO card on ``flux_form``+``upwind3`` currently
+    # runs the transport rule -- a recorded, un-flipped choice.
     if up3_upwind_selector is None:
-        up3_upwind_selector = (
-            "velocity" if transport_velocity is not None else "transport")
+        up3_upwind_selector = "transport"
     if up3_upwind_selector not in ("velocity", "transport"):
         raise ValueError(
             "up3_upwind_selector must be 'velocity' or 'transport', got "

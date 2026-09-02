@@ -145,8 +145,11 @@ def test_prediction_plant_is_fail_closed(tmp_path):
     assert GATE.main(["LOCK_EXCHANGE-zco", "--plant-prediction", "--allow-dirty",
                       "--output", str(tmp_path / "planted.json")]) == 2
     plain = tmp_path / "plain.json"
+    # LOCK reaches the 1e-15 bar at every kt=1 stage and at kt=2 since the
+    # UP3 upwind-selector fix (dynadv_up3.F90:166-170); a DEBT exit here is a
+    # regression, not the expected state.
     assert GATE.main(["LOCK_EXCHANGE-zco", "--allow-dirty",
-                      "--output", str(plain)]) == 1
+                      "--output", str(plain)]) == 0
     check = json.loads(plain.read_text())["preregistered_prediction_check"]
     assert check and all(entry["status"] == "MET" for entry in check.values())
 
