@@ -51,7 +51,8 @@ at `646415f02`, fp64:
 
 S-16 therefore stays **BLOCKED**: the generic arm it would delete is executed
 by 19 ocean test-matrix experiments (`default_wright_v1` /
-`legoesm_linear_v1`) plus the `nemo_v1` catalog dycore, and the committed test
+`legoesm_linear_v1`) plus the `legoesm_nemo_like_v1` catalog dycore (renamed
+from `nemo_v1` 2026-09-02), and the committed test
 `test_barotropic_continuity_and_drag.py::
 test_association_selector_holds_face_depth_and_drag_fixed` proves the two arms
 give bit-distinct `eta`. Unblocking is a separate decision about those 19
@@ -67,8 +68,8 @@ the MOM6/ROMS family (Hallberg 1997; Shchepetkin & McWilliams 2005) per their
 own introducing commits — full evidence and the mechanical registry fix are
 in `nemo_branch_isomorphism_map.md`'s dated addendum under the S-16 section.
 No re-baseline of the 19 idealized cases. Companion decision, same PR: the
-recipe named `nemo_v1` above is RENAMED (it resolves this generic arm, not
-NEMO's `dyn_spg_ts` — see the recipe catalog / `recipes.py` for the new
-name); every reference to `nemo_v1` in this document is now to the recipe's
-OLD name, kept here as history of the diff this doc recorded, not as a
-live identifier.
+recipe formerly named `nemo_v1` is RENAMED to `legoesm_nemo_like_v1` (it
+resolves this generic arm, not NEMO's `dyn_spg_ts`, so the old name
+overclaimed fidelity precisely on the routine this doc is about — see
+`recipes.py`). This document's own references above are updated to the new
+name.

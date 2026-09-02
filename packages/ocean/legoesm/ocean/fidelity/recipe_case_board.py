@@ -124,7 +124,7 @@ CASES: tuple[dict, ...] = (
          ref_kind=ORACLE, ref="Veros / NEMO (OMIP)",
          results=[
              _r("latlon_cgrid", "veros_faithful_v1", TODO, "Veros global transfer (1°/4°/flexible) — re-confirm via scorecard"),
-             _r("latlon_cgrid", "nemo_v1", TODO, "NEMO-faithful dycore — re-confirm via scorecard"),
+             _r("latlon_cgrid", "legoesm_nemo_like_v1", TODO, "NEMO-style dycore (barotropic solver is legoESM's own generic arm, not NEMO's) — re-confirm via scorecard"),
              _r("latlon_cgrid (tripole)", "omip_nemo_match_tripole_v1", TODO, "tripole eORCA025 NEMO-climate-match (SST RMSE ~1.15)"),
              _r("mpas (ico6)", "omip_nemo_match_mpas_v1", TODO, "MPAS ico6 NEMO-climate-match (SST RMSE ~0.84, best grid)"),
          ]),
