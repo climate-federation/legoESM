@@ -343,6 +343,32 @@ def main() -> int:
     print(f"  TRUE NEMO GAP    midpoint/e3w_0 - 1 : "
           f"max|{np.abs(mid_vs_ctr).max():.4e}|  "
           f"median|{np.median(np.abs(mid_vs_ctr)):.4e}|")
+
+    # --- SHIPPED DIVISOR vs D_NEMO (the receipt row for the arm collapse) ---
+    # The card's executing divisor is now produced by the single canonical
+    # ``nemo_e3w_kmm`` (trazdf.F90:219-221 / dynzdf.F90:200-203).  Compare it
+    # against NEMO's own mesh ``e3w_0`` * (1+r3t) built INDEPENDENTLY here from
+    # ``mesh_mask.nc`` and the state's eta -- Rule 10: print the number the
+    # claim rests on rather than trusting the constructor's own identity check.
+    from legoesm.ocean.physics.vertical_mixing import nemo_e3w_kmm
+    from legoesm.ocean.eos import nemo_r3t_stretch
+    from legoesm.ocean.vertical import compute_layer_thickness
+    _eta = _np(st.eta.data)
+    _H = _np(st.H_bathy.data)
+    _stretch = nemo_r3t_stretch(zc, jnp.asarray(_eta), jnp.asarray(_H))
+    _e3t_now = compute_layer_thickness(
+        jnp.asarray(_eta), jnp.asarray(_H), zc,
+        min_water_column_m=mc.min_water_column_m)
+    _shipped = _np(nemo_e3w_kmm(zc, _e3t_now, _stretch))
+    _d_nemo = np.broadcast_to(_E3W_REF, _shipped.shape) * (
+        1.0 + np.where(_H > 0.0, _eta / np.where(_H > 0.0, _H, 1.0), 0.0)
+    )[..., None]
+    _wet = np.broadcast_to(_np(st.land_mask.data)[..., None] > 0.5,
+                           _shipped.shape)
+    _rel = np.abs(_shipped[_wet] / _d_nemo[_wet] - 1.0)
+    print(f"  SHIPPED DIVISOR  nemo_e3w_kmm / (e3w_0*(1+r3t)) - 1 : "
+          f"max|{_rel.max():.4e}|  median|{np.median(_rel):.4e}|  "
+          f"n={_rel.size}  dtype={_shipped.dtype}")
     print("  per-k  dz_ref   z_full_ref   NEMO_e3w_0   dz_half_ref   midpoint")
     for k in range(min(dzr.shape[-1], 36)):
         c = ctr[..., k].mean() if k < ctr.shape[-1] else float("nan")
