@@ -317,11 +317,25 @@ def apply_bbl_adv_step(state, geom: BBLGeometry, dt: float, *,
     transports from the CURRENT bottom T/S and integrate one forward-Euler
     exchange step ``pt += dt * d(pt)/dt``.
 
-    Operator-split with the dynamics exactly like NEMO applies trabbl within
-    its sequential tracer trends.  Stability: the exchange is a bounded
-    relaxation between cells; with NEMO's gamma=20 s and 1-deg cells the
-    per-step exchange fraction ``|tr|*dt/V`` is << 1 at any ocean dt (see the
-    unit test's magnitude check).
+    COMPOSITION, stated honestly (branch-isomorphism audit S-42): this is NOT
+    NEMO's composition.  NEMO adds ``tra_bbl``'s exchange into the tracer
+    right-hand side of the step itself (``stprk3_stg.F90:468,498,588`` on the
+    RK3 lane, ``stpmlf.F90`` on the MLF lane), reading the BEFORE-level
+    tracers; this wrapper applies the SAME operator as a separate forward-
+    Euler update after the step, on the updated tracers and the reference
+    thicknesses.  The arithmetic is shared — ``bbl_transports`` and
+    ``apply_bbl_adv_tendency`` below are the single transcription of
+    ``trabbl.F90:243-284`` and this function adds none of its own — but the
+    placement is a host operator split that has no NEMO arm.  It exists
+    because the only in-model BBL site lives in the WS-RK3 tracer lane
+    (``ocean_model_latlon_cgrid.py``, ``tracer_time_integrator="rk3_ws"``)
+    and the OMIP driver runs the forward-Euler tracer lane, which itself has
+    no NEMO arm.  Collapsing the two onto one site is an OPEN item.
+
+    Stability: the exchange is a bounded relaxation between cells; with
+    NEMO's gamma=20 s and 1-deg cells the per-step exchange fraction
+    ``|tr|*dt/V`` is << 1 at any ocean dt (see the unit test's magnitude
+    check).  NEMO clamps neither transport, so neither does this.
 
     Parameters
     ----------
@@ -343,18 +357,11 @@ def apply_bbl_adv_step(state, geom: BBLGeometry, dt: float, *,
     utr, vtr = bbl_transports(
         T, S, geom, dy_u_faces, dx_v_faces,
         gamma_s=gamma_s, rho_0=rho_0)
-    # Face-local exchange cap (codex MED): the host-split Euler exchange
-    # fraction |tr|*dt/V must stay << 1 for every touched cell.  Cap |tr|
-    # at 0.25*V_min/dt with V_min = min bottom-cell volume of the two
-    # columns — inactive at ORCA1 scales (fraction ~1e-2), engages only on
-    # pathological tiny-area/extreme-drho faces. Sign/zero pattern kept.
-    area = jnp.asarray(area_2d, dtype=jnp.float64)
-    e3_bot = jnp.take_along_axis(h_k, geom.bot_k[..., None], axis=-1)[..., 0]
-    V_bot = area * jnp.maximum(e3_bot, 1.0e-3)  # coeff-ok: bottom-cell thickness floor [m]
-    cap_u = 0.25 * jnp.minimum(V_bot[:, :-1], V_bot[:, 1:]) / dt
-    cap_v = 0.25 * jnp.minimum(V_bot[:-1, :], V_bot[1:, :]) / dt
-    utr = jnp.sign(utr) * jnp.minimum(jnp.abs(utr), cap_u)
-    vtr = jnp.sign(vtr) * jnp.minimum(jnp.abs(vtr), cap_v)
+    # No transport cap.  NEMO's tra_bbl_adv (trabbl.F90:243-284) clamps
+    # neither utr_bbl nor vtr_bbl, and no non-NEMO recipe selects a capped
+    # arm (recipes.py never mentions BBL), so a cap here would be a
+    # stabilizer the oracle lacks — removed 2026-09-02 under the
+    # branch-isomorphism audit (S-42).
     zero = jnp.zeros_like(T)
     dT, dS = apply_bbl_adv_tendency(
         zero, jnp.zeros_like(S), T, S, h_k, jnp.asarray(area_2d), geom,

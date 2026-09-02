@@ -811,14 +811,16 @@ ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
         Impl(_SHORTWAVE, "apply_shortwave_penetration",
              Reference("nemo", "ln_qsr_2bd_or_rgb", "traqsr.F90 (ln_qsr_2bd/ln_qsr_rgb)")),
     )),
-    RoutineRow("S-42", "bbl + tra_bbl", "ARTIFICIAL_BRANCH", "ln_trabbl, nn_bbl_adv=2 (one NEMO program, two compositions)", (
+    RoutineRow("S-42", "bbl + tra_bbl", "ARTIFICIAL_BRANCH", "ln_trabbl, nn_bbl_adv=2 (one NEMO program, ONE transcription, two composition SITES)", (
         Impl(_BBL, "apply_bbl_adv_tendency",
              Reference("nemo", "trabbl_bbl_exchange",
-                        "trabbl.F90:129-136,243-284 (in-stage composition, OVERFLOW)")),
+                        "trabbl.F90:129-136,243-284 -- the single transcription of the 3-leg "
+                        "exchange; in-stage site (WS-RK3 stage-3 tracer RHS, OVERFLOW)")),
         Impl(_BBL, "apply_bbl_adv_step",
              Reference("nemo", "trabbl_bbl_exchange",
-                        "trabbl.F90:129-136,243-284 + Campin & Goosse BBL exchange (driver post-step "
-                        "composition, ORCA1)")),
+                        "trabbl.F90:129-136,243-284 -- CALLS the same bbl_transports + "
+                        "apply_bbl_adv_tendency (no arithmetic of its own since 2026-09-02); what "
+                        "remains is the host post-step forward-Euler PLACEMENT, ORCA1")),
     )),
     RoutineRow("S-43", "tra_ldf", "see S-09", "ln_traldf_lap+ln_traldf_iso", (
         Impl(_GM_REDI, "compute_nemo_native_slopes",
@@ -999,10 +1001,20 @@ ARTIFICIAL_BRANCH_BASELINE: dict[str, BaselineEntry] = {
     ),
     "S-42": BaselineEntry(
         reason=(
-            'bbl: shared transport/tendency arithmetic, two compositions — OVERFLOW folds it '
-            "into the stage-3 tracer RHS (NEMO's site), ORCA1 calls a host post-step Euler "
-            'with an extra transport cap NEMO has none of. Reclassified 2026-09-02: '
-            'NEMO_DUPLICATE, CONFIRMED.'
+            'bbl: ONE transcription of trabbl.F90:243-284 (bbl_transports + '
+            'apply_bbl_adv_tendency), reached from two composition SITES. OVERFLOW folds it '
+            "into the stage-3 tracer RHS (NEMO's own site, stprk3_stg.F90:468,498,588); the "
+            'OMIP driver calls apply_bbl_adv_step, which since 2026-09-02 adds NO arithmetic '
+            'of its own -- it calls the same two operators and integrates one forward-Euler '
+            'step. The 0.25*V/dt transport cap NEMO has none of is DELETED (Rule 9; '
+            'recipes.py never selects a capped arm), measured inert at ocean cell volumes and '
+            'non-vacuously live on a tiny-area face (tests/ocean/unit/test_bbl_adv.py). What '
+            'is left is a PLACEMENT branch, and it is not config-flippable: the in-model BBL '
+            'hook exists only in the WS-RK3 tracer lane '
+            '(ocean_model_latlon_cgrid.py, tracer_time_integrator="rk3_ws"), while ORCA1 runs '
+            'the forward-Euler tracer lane -- which itself has no NEMO arm. Setting '
+            'bbl_adv_option=2 on ORCA1 would silently run NO BBL. Collapsing the placement is '
+            'an OPEN ASK, not a flip.'
         ),
         kind='nemo_duplicate',
     ),

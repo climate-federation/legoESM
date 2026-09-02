@@ -103,7 +103,7 @@ Cards: `D`=DINO kamm_mlf (MLF), `L`=LOCK_EXCHANGE-zco, `O`=OVERFLOW-zps,
 | S-39 | tracer stage time-stepping (qco `(1+r3t)` weighting) stprk3_stg.F90:540-560 | `key_qco` | L O G | `omlc:1214 _stage` inside `_nemo_ws_rk3_tracer_pair_step` (uses `h_one_third`/`h_one_half`) | none | SHARED |
 | S-40 | `tra_sbc` / `tra_sbc_RK3` trasbc.F90; stprk3_stg.F90:521 | `nn_fsbc` | D G A | `physics/surface_forcing/*`; DINO `surface_tendency_placement` (`applied_now`/`leapfrog_rhs`) | `surface_tendency_placement` (DINOConfig only) | ARTIFICIAL_BRANCH — a DINO-scoped selector for a NEMO site every card has; RK3 cards have no equivalent |
 | S-41 | `tra_qsr` traqsr.F90 | `ln_traqsr`, `ln_qsr_2bd`/`ln_qsr_rgb` | G A | `physics/shortwave_penetration.py:443 apply_shortwave_penetration` | `shortwave_penetration.scheme` (`jerlov_2band`/`rgb_chl`) | NEMO_SWITCH |
-| S-42 | `bbl` + `tra_bbl` trabbl.F90:129-136,243-284; stprk3_stg.F90:468,498,588 | `ln_trabbl`, `nn_bbl_adv=2` | O A | `physics/bbl_adv.py:176 bbl_transports` + `:232 apply_bbl_adv_tendency` — called in-stage at `omlc:1188` (OVERFLOW) **and** via `physics/bbl_adv.py:312 apply_bbl_adv_step` from `run_omip_core2.py:8420` (ORCA1, host post-step Euler + an extra transport cap NEMO has none of) | `bbl_adv_option` vs driver `--bbl-adv` | ARTIFICIAL_BRANCH — shared arithmetic, two compositions, and the ORCA1 path adds a clamp |
+| S-42 | `bbl` + `tra_bbl` trabbl.F90:129-136,243-284; stprk3_stg.F90:468,498,588 | `ln_trabbl`, `nn_bbl_adv=2` | O A | `physics/bbl_adv.py:176 bbl_transports` + `:232 apply_bbl_adv_tendency` — called in-stage at `omlc:1188` (OVERFLOW) **and** via `physics/bbl_adv.py:312 apply_bbl_adv_step` from `run_omip_core2.py:8420` (ORCA1, host post-step Euler + an extra transport cap NEMO has none of) | `bbl_adv_option` vs driver `--bbl-adv` | ARTIFICIAL_BRANCH — ONE transcription, two composition SITES. **2026-09-02: the clamp is DELETED** and `apply_bbl_adv_step` now adds no arithmetic of its own; the remaining branch is PLACEMENT and is NOT config-flippable (see the S-42 addendum) |
 | S-43 | `tra_ldf` traldf_iso.F90 | `ln_traldf_lap`+`ln_traldf_iso` | D G A | `physics/lateral_mixing/gm_redi_latlon_cgrid.py` | `lateral_tracer_mixing`, `gm_redi.*` | see S-09 |
 | S-44 | `tra_zdf` trazdf.F90 | always | D L O G A | `omlc:7537 _apply_implicit_vertical_mixing` (same fn as `dyn_zdf`) | `zdf_implicit_solver_evaluation` | see S-33/S-34 |
 | S-45 | `tra_npc` tranpc.F90 | `ln_zdfnpc` | — | none | — | ABSENT (no card selects it) |
@@ -1088,3 +1088,60 @@ ADMITS; 2 ulps of the row's own field scale gives 3.0 on one OVERFLOW stage-1
 row and REFUSES by one ulp. That choice is left to the user; the gate constant
 was not touched, and the looseness is now written into the module's blind-spot
 list.
+
+
+## 2026-09-02 S-42 (BBL) — the clamp is gone; the remaining branch is PLACEMENT, and it is blocked
+
+**What the row actually contains at HEAD.** There are not two transcriptions of
+`tra_bbl_adv`. `physics/bbl_adv.py:312 apply_bbl_adv_step` CALLS
+`bbl_transports` (`:176`) and `apply_bbl_adv_tendency` (`:232`) — the same two
+functions the in-stage site calls from
+`ocean_model_latlon_cgrid.py:1286-1305`. The arithmetic of
+`trabbl.F90:243-284` is written ONCE. This corrects the row's earlier
+"two independent NEMO-trabbl transcriptions" framing (its own baseline reason
+string already said "shared transport/tendency arithmetic").
+
+**Landed: the transport cap is deleted (Rule 9).** `apply_bbl_adv_step` used to
+clamp `|utr|`/`|vtr|` at `0.25*V_min/dt`. NEMO's `tra_bbl_adv`
+(`trabbl.F90:243-284`) clamps neither `utr_bbl` nor `vtr_bbl`, and
+`recipes.py` never mentions BBL, so no non-NEMO recipe selected the capped arm.
+Measured in `tests/ocean/unit/test_bbl_adv.py`:
+
+| | old capped path | survivor |
+|---|---|---|
+| ORCA1-like face (area 1e9 m^2, dt 600 s) | cap never binds | T/S **bit-identical** to the capped path |
+| pathological face (area 1e6 m^2) | cap binds, transport reduced | uncapped NEMO transport, states differ |
+
+so the deletion is inert for every production configuration and non-vacuous as
+a test. Restoring the cap turns
+`test_transport_cap_is_gone_and_moved_nothing_at_ocean_scales` red (verified).
+
+**REFUSED as a config flip: routing ORCA1 through the in-stage site.** The
+in-model BBL hook is built only inside the WS-RK3 tracer lane
+(`ocean_model_latlon_cgrid.py:6007`, under `elif _tti == "rk3_ws":`) and is
+passed only to `_nemo_ws_rk3_tracer_pair_step`. ORCA1 resolves
+`tracer_time_integrator="euler"` (`run_omip_core2.py:7463`), whose branch has
+no BBL hook at all. So setting `bbl_adv_option=2` on ORCA1 — the "config-only
+re-point" the earlier triage called *plausible* — would silently run **no BBL**
+on a production lane that currently runs it (`--bbl-adv` is passed by
+`scripts/cluster/omip_nemo/run_standard_faithful_1deg.sbatch:67` and ~20 A/B
+decks). Deleting `apply_bbl_adv_step` without first building a euler-lane site
+would do the same. That earlier triage line is RETRACTED.
+
+**And the site to collapse ONTO does not exist as a NEMO arm.** NEMO applies
+`tra_bbl` inside the tracer step's RHS, at `stprk3_stg.F90:468,498,588` (RK3)
+or `stpmlf.F90` (MLF). ORCA1's legoESM lane is a forward-Euler tracer step,
+which transcribes neither. Wiring BBL into it would invent a THIRD composition,
+not collapse onto NEMO's.
+
+**Disposition: ARTIFICIAL_BRANCH stays, with the branch narrowed to placement.**
+The open item is a Rule-3 ASK, one line: does ORCA1's BBL keep the host
+post-step split (today), or does the OMIP lane move to a NEMO tracer lane
+(RK3-stage or MLF) that has NEMO's own `tra_bbl` site? That changes ORCA1's
+answers and is not a default to move silently.
+
+**Gates.** LOCK_EXCHANGE-zco and OVERFLOW-zps never call `apply_bbl_adv_step`
+(their BBL, where on at all, is the in-stage site), so both cards' stage-sweep
+and kt=1..10 trajectory gates are bit-identical across this change — measured,
+not assumed; see the commit message.
+
