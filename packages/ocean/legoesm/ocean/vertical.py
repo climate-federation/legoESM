@@ -206,9 +206,12 @@ def nemo_qco_mesh_operands(z_coord, dtype):
         "nemo_e1e2v",
     ))
     if any(value is None for value in refs):
+        missing = [name for name, value in zip((
+            "nemo_hu_0", "nemo_hv_0", "nemo_e1e2t", "nemo_e1e2u",
+            "nemo_e1e2v"), refs, strict=True) if value is None]
         raise ValueError(
-            "nemo_qco_live_face_thicknesses requires raw NEMO hu_0/hv_0 "
-            "and e1e2t/e1e2u/e1e2v fields")
+            "NEMO qco face thicknesses need the raw NEMO mesh operands on "
+            f"the z-coordinate; missing: {', '.join(missing)}")
     return tuple(jnp.asarray(value, dtype=dtype) for value in refs)
 
 
@@ -243,9 +246,10 @@ def nemo_qco_live_face_geometry_cgrid(
     NEMO shares the routine, a second legoESM implementation would be an
     artificial branch point, so both lanes call this one:
 
-    * WS-RK3 stage transport -- ``stprk3_stg.F90:272-273`` consumes
-      ``e3u(Kmm)`` in the single ``zFu/zFv/zFw`` triplet that feeds both
-      ``dyn_adv`` and ``tra_adv``;
+    * WS-RK3 stage transport -- ``stprk3_stg.F90:273-274`` consumes
+      ``e3u(Kmm)``/``e3v(Kmm)`` in the single ``zFu``/``zFv`` pair that feeds
+      both ``dyn_adv`` and ``tra_adv`` (``zFw`` is built separately at
+      ``:301`` and carries no ``e3``);
     * MLF tracer transport -- ``traadv.F90:329-330``, inside the
       ``#if ! defined key_RK3`` branch opened at ``:313``, builds
       ``zuu = e2u*e3u(ji,jj,jk,Kmm)*zptu`` from the same ``e3u(Kmm)``.

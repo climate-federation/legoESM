@@ -986,31 +986,60 @@ So the DINO cards were already on NEMO's rule for the tracer transport
 (`ocean_model_latlon_cgrid.py`'s `wzv_call2_evaluation == "nemo_literal"`
 branch, which called `vertical.nemo_qco_live_face_thicknesses`), and no DINO
 number could have moved by adopting it.  The `generic` arm's `min` rule is a
-REAL legoESM scheme selection with its own reference — the MOM6/MITgcm `hFacW`
-convention, Adcroft–Hill–Marshall 1997 eq. 11–13, cited in place at
-`ocean_model_latlon_cgrid.py:1379-1384` — not a defective transcription of
-NEMO, and it is left alone.
+REAL legoESM scheme selection, not a defective transcription of NEMO, and it
+is left alone.  Its in-place citation (the MOM6/MITgcm `hFacW` convention,
+Adcroft–Hill–Marshall 1997 eq. 11–13, at
+`ocean_model_latlon_cgrid.py:1379-1384`) covers only the REFERENCE part:
+AHM97's `hFacW` is a FIXED fraction, and taking the min of the two STRETCHED
+thicknesses is a nonlinear-free-surface extension that postdates that paper.
+The check that would settle whether the extension is a scheme or a defect is
+free-surface/tracer consistency — advect a uniform tracer under that face
+thickness and confirm it stays uniform — and it is NOT run here.
 
 What WAS an artificial branch point: the two lanes reached the shared rule
 through two DIFFERENT wrappers, each carrying its own copy of the
 native-east/north → redundant-west/south face map.  Both now call the one
 `vertical.nemo_qco_live_face_geometry_cgrid`.  Pure refactor: identical
 operand order, identical arithmetic, verified by re-running all four phase-3
-gates before and after.
+gates before and after.  Two copies of that map survive elsewhere and are
+NOT touched here, because they sit on the dynzad/`sshwzv` path rather than on
+either time-stepping lane, and that path cannot be exercised today (the DINO
+cards are unconstructible, below): `ocean_pe_latlon_cgrid.py:1493-1509`
+re-opens the same five-field operand lookup and `:1520-1524` re-implements the
+same native-to-redundant concatenate.
 
-`_replace_stage_mean` is a separate, still-open finding, and NOT a shared
-routine: NEMO's RK3 stage correction weights with the REFERENCE ladder
-(`stprk3_stg.F90:438-439`, `SUM( e3u_0(ji,jj,:)*uu(...,Kaa) ) * r1_hu_0`)
-while its MLF counterpart `mlf_baro_corr` weights with the LIVE after-level
-face (`stpmlf.F90:514-522`, `e3u(ji,jj,jk,Kaa)` and `r1_hu(:,:,Kaa)`), so the
-two lanes legitimately differ there.  legoESM's `_replace_stage_mean` uses the
-live Kbb `min_cell_to_uface(h_k_pre)` and the live `H_u_pre`, which agree with
-`e3u_0`/`hu_0` exactly at `kt=1` (ssh ≡ 0) and drift afterwards — measured on
-the LOCK tilted post-step entry state (`max|eta| = 0.9845 m`):
-`max|h_u_pre − e3u_0| = 4.922e-02 m` (4.92 % relative) and
-`max|H_u_pre − hu_0| = 9.845e-01 m` (4.92 %).  Correcting it would move the
-`kt=2..10` trajectory, i.e. it is its own one-variable round, and it is NOT
-landed with the refactor above.
+`_replace_stage_mean` is CLEARED, not deferred — and the first version of
+this block got that wrong.
+
+NEMO's RK3 stage barotropic correction weights the depth mean with the
+REFERENCE ladder (`stprk3_stg.F90:440-441`,
+`uu_b(Kaa) - SUM( e3u_0(ji,jj,:)*uu(ji,jj,:,Kaa) ) * r1_hu_0`), while its MLF
+counterpart `mlf_baro_corr` weights with the LIVE after-level face
+(`stpmlf.F90:514-522`, `e3u(ji,jj,jk,Kaa)` and `r1_hu(:,:,Kaa)`).  legoESM's
+`_replace_stage_mean` uses the live Kbb `min_cell_to_uface(h_k_pre)` over the
+live `H_u_pre`.
+
+**RETRACTED:** this block first reported `max|h_u_pre − e3u_0| = 4.922e-02 m`
+(4.92 %) on the LOCK tilted entry state and concluded that correcting the
+weighting "would move the `kt=2..10` trajectory".  That is the WEIGHT
+difference, which is the wrong quantity: a depth mean is invariant under a
+per-column rescaling of its weight, and under `key_qco` the free-surface
+stretch is uniform in the vertical, so both NEMO forms and legoESM's collapse
+to the same mean whenever one neighbour wins the min rule at every level.  An
+independent physics review raised the cancellation; re-measured directly, in
+fp64, on both certified cards:
+
+| card | max abs eta [m] | max abs (h_u_pre − e3u_0) [m] | max per-column spread of h_u_pre/e3u_0 | max abs depth-mean difference [m/s] |
+|---|---:|---:|---:|---:|
+| LOCK_EXCHANGE-zco | 0.9845 | 4.922e-02 | 0.0 | 2.168e-19 |
+| OVERFLOW-zps | 0.9881 | 3.952e-02 | 2.220e-16 | 6.939e-18 |
+
+The ratio `h_u_pre/e3u_0` is depth-uniform to at most one ULP on both cards,
+so legoESM already reproduces `stprk3_stg.F90:440-441` to roundoff and there
+is nothing to correct.  The residual risk is a mesh on which the min rule's
+WINNER flips with depth (a partial-cell step whose shallower side carries the
+higher ssh); neither certified card does that.  No code change — and the
+one-variable round this block previously scoped would have measured a null.
 
 ### Scaling BEFORE any owner label
 

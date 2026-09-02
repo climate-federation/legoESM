@@ -138,8 +138,16 @@ def test_mlf_tracer_transport_reaches_the_same_symbol():
     executing function's source rather than by stepping the card.
     """
     body = inspect.getsource(model_module.LatLonCGridOceanModel._step_impl)
-    assert 'wzv_call2_evaluation", "generic") == "nemo_literal"' in body
-    assert "nemo_qco_live_face_geometry_cgrid(" in body
+    # _step_impl is ~2700 lines and mentions the selector more than once, so
+    # a whole-body `in` would bind on any unrelated occurrence.  Slice the
+    # ONE branch that builds the tracer transport's face thickness -- it is
+    # the block that assigns _h_u_tracer -- and assert inside it.
+    marker = "_h_u_tracer"
+    assert body.count(marker) >= 1
+    start = body.index("nemo_e3t_0")
+    branch = body[start:body.index(marker, start) + 400]
+    assert "nemo_qco_live_face_geometry_cgrid(" in branch
+    assert "nemo_qco_mesh_operands(" in branch
     # No second builder may survive on this lane.
     assert "nemo_qco_live_face_thicknesses" not in body
 
