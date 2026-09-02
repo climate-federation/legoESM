@@ -48,9 +48,22 @@ both cards.  `first_over_bar` is unchanged (LOCK `kt=2 {T,u}`, OVERFLOW
 `kt=2 {T,u,ssh}`).  The kt=2 velocity debt is therefore unchanged and stays
 UNOWNED — this collapse is exonerated for it.
 
-The 6120-step statistical scorer was NOT re-run: its inputs moved by at most
-0.5 ulp, so the 3 OUTSIDE / 3 WITHIN-SCHEME-SPREAD split is EXPECTED to hold,
-which is a prediction and not a measurement.
+The 6120-step statistical scorer was NOT re-run, and after adversarial review
+the 3 OUTSIDE / 3 WITHIN-SCHEME-SPREAD split is recorded as **UNMEASURED**,
+not as "expected to hold".  The gate's own growth block for OVERFLOW gives tail
+exponential rates of `0.203/step` (ssh), `0.269/step` (u) and `0.083/step` (T)
+and cannot discriminate exponential from polynomial on a four-point tail, so a
+`1e-16` seed either reaches order one in a few hundred steps or never matters,
+and 10 steps do not tell us which.  Discriminator: ~300 steps on both
+revisions, `max|delta u|` per step on a semilog axis.
+
+Two further corrections from the same review, both detailed in the phase-3
+receipt: the tracer FIELDS are not bit-identical even though the tracer ROWS
+are -- OVERFLOW T departs from kt=7 at five cells, reaching `1.07e-14 K` by
+kt=11 -- and the "pure re-association" claim is certified for **f = 0 only**,
+because both L1 cards are non-rotating and the Matsuno rotation that sits
+between the deleted ladder and the barotropic seed is the identity there.  On a
+rotating rk3_ws card (GYRE) it is not, and that card has no gate here.
 
 The bar is mechanical, not a judgement: `legoesm.ocean.fidelity.ulp_move_gate`,
 reached as `--compare-to` on both phase-3 gates, with a `--compare-plant-ulps 3`

@@ -5384,8 +5384,14 @@ class LatLonCGridOceanModel:
                 _nemo_ws_stage_transport_geometry = (
                     _nemo_ws_live_stage_geometry)
             else:
-                # Legacy stage-correction-off harness arm: rebuild the Kmm
-                # ladder from the uncorrected stages.  Stage 1 reads Kbb,
+                # UNREACHABLE since the S-30/S-12 collapse, kept only because
+                # deleting it is a separate change with its own gate: with one
+                # WS ladder, `_nemo_ws_live_stage_geometry` is set for every
+                # rk3_ws momentum step, and `_validate_config` requires rk3_ws
+                # for BOTH integrators or for neither, so a tracer program on
+                # rk3_ws always finds it.  (Historically this rebuilt the Kmm
+                # ladder for the arm that skipped the whole post-solve ladder.)
+                # Stage 1 reads Kbb,
                 # stage 2 the stage-1 Kaa (1/3), stage 3 the stage-2 Kaa
                 # (1/2): stprk3_stg.F90:160-168,195-213,225-234 before
                 # :250-303 builds zFu/zFv/zFw from Kmm.

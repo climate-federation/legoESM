@@ -29,10 +29,27 @@ mantissa, which is a near-cancellation and carries no such meaning.
 
 * it reads REDUCTIONS, not fields.  Two states differing at a single cell by
   exactly the amount already attained elsewhere give identical rows.  The
-  T/S prong is therefore "the tracer reduction did not move", which is
-  necessary for bit-identity and not sufficient for it.
+  T/S prong is therefore "the tracer RESIDUAL did not move", which is
+  necessary for bit-identity and NOT sufficient for it.  This is not
+  hypothetical: over ten OVERFLOW-zps steps the T rows here were bit-identical
+  while the T FIELD departed from kt=7 onward at five cells.  Run
+  ``scripts/validate/ocean_fidelity/testcases/nemo_testcase_state_ulp_probe.py``
+  before writing "the field is bit-identical"; this gate cannot support that
+  sentence.
+* the row scale is floored at 1 (``max(max|oracle|, 1)``), so for a field whose
+  maximum is below 1 the bar admits MORE than ``MAX_ULP_MOVE`` ulps of the
+  field, by the reciprocal of that maximum.  Measured on the stage sweeps: the
+  largest admitted move was 1.5 ulps of its own field scale, and one row sat at
+  3.0 -- i.e. this bar is loose in the admitting direction by up to ~4 decades
+  on a small-magnitude field.  Tightening it requires the gates to emit each
+  row's ``reference_max_abs`` (the stage sweep does, the trajectory gate does
+  not) and a re-pin of the references.
 * it compares only rows that both reports contain, under their own names, and
   fails closed on any name appearing in one and not the other.
+* outside the rows it compares only ``status``, ``first_over_bar``,
+  ``selectors`` and ``precision_policy``, and only when a key is present in
+  both reports -- ``first_over_bar`` is absent from the stage-sweep schema, so
+  that prong is INERT there and the result says so.
 * it says nothing about rows produced by a PRIVATE ABLATION ARM whose meaning
   the change under test deliberately redefines.  Filter those out explicitly
   (``row_filter``) and say so in the receipt; do not let them fail silently.
@@ -223,7 +240,16 @@ def compare_gate_reports(
                     f"{name}: field {key!r} changed {old!r} -> {new!r} "
                     "(only measured residuals may move at all)")
 
-    for key in ("first_over_bar", "status"):
+    # Report-level fields that must not move.  A key absent from BOTH reports
+    # is INERT, not satisfied -- ``first_over_bar`` does not exist in the
+    # stage-sweep schema, and a receipt must not claim a prong that never ran.
+    checked_report_keys, inert_report_keys = [], []
+    for key in ("first_over_bar", "status", "selectors", "precision_policy"):
+        in_reference, in_candidate = key in reference, key in candidate
+        if not in_reference and not in_candidate:
+            inert_report_keys.append(key)
+            continue
+        checked_report_keys.append(key)
         old, new = reference.get(key, "<absent>"), candidate.get(key, "<absent>")
         if old != new:
             violations.append(f"{key} changed {old!r} -> {new!r}")
@@ -235,6 +261,8 @@ def compare_gate_reports(
         "ulp_at_unit_scale": ULP,
         "n_certified_rows_compared": len(set(reference_rows) & set(candidate_rows)),
         "row_filter_applied": row_filter is not None,
+        "report_keys_checked": checked_report_keys,
+        "report_keys_absent_from_both_so_unchecked": inert_report_keys,
         "first_over_bar": candidate.get("first_over_bar", "<absent>"),
         "largest_move_ulps": max((m["ulps"] for m in moves), default=0.0),
         "moves": [m for m in moves if m["move"] != 0.0],
@@ -253,15 +281,23 @@ def plant_ulp_move(
     if it does not, the comparison is inspecting nothing.  Mutates ``report``
     in place (callers hand it a freshly parsed copy) and returns it.
     """
-    rows = certified_rows(report, row_filter=row_filter)
-    if not rows:
-        raise ValueError("nothing to plant into: no certified rows in report")
-    # Prefer a non-tracer row: a tracer row's bar is bit-identity, so planting
-    # there would fail for ANY move and would not probe the ulp bar itself.
-    ordered = sorted(rows)
-    name = next((n for n in ordered if not _is_tracer_row(n)), ordered[0])
-    row = rows[name]
     key = "normalized_max_abs"
+    rows = certified_rows(report, row_filter=row_filter)
+    # The target must be a NON-TRACER row (a tracer row's bar is bit-identity,
+    # so any move there fails and the ulp bar is never exercised) with a
+    # NONZERO residual (a zero-residual row carries ``exact=True``, and moving
+    # it fails on the derived-field consistency check instead of on the move --
+    # which made an earlier version of this control vacuous: it stayed red with
+    # ``MOVABLE_ROW_KEYS`` emptied, i.e. with the bar deleted outright).
+    name = next(
+        (n for n in sorted(rows)
+         if not _is_tracer_row(n) and float(rows[n].get(key, 0.0)) != 0.0),
+        None)
+    if name is None:
+        raise ValueError(
+            "nothing to plant into: no non-tracer certified row with a "
+            "nonzero residual, so a plant could not exercise the ulp bar")
+    row = rows[name]
     # No extra key is written: the plant must fail on the MOVE, not on a
     # schema difference the comparison would have caught anyway.
     row[key] = float(row[key]) + n_ulps * row_move_tolerance(row, key, max_ulp=1)
@@ -308,4 +344,20 @@ def run_ulp_comparison(args, report: dict) -> dict:
     result = compare_gate_reports(reference, candidate, row_filter=row_filter)
     result["reference"] = str(args.compare_to)
     result["planted_ulp_move"] = planted
+    # Record WHICH rows were compared, not just that a filter ran: a receipt
+    # citing a filtered comparison has to be auditable from its own JSON.
+    result["row_filter_substring"] = substring
     return result
+
+
+def comparison_exit_code(result: dict) -> int:
+    """0 pass, 1 the bar refused it, 2 the gate itself is broken.
+
+    A requested plant that does NOT land is case 2, never case 0: a control
+    that silently reports success is the failure mode this whole module is
+    built to avoid.
+    """
+    planted = result.get("planted_ulp_move")
+    if planted is not None and result["status"] == "PASS":
+        return 2
+    return 0 if result["status"] == "PASS" else 1

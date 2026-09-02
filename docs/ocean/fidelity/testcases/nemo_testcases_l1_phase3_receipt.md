@@ -1539,3 +1539,124 @@ sha256  83bd8b5b01d782db8468fb33762dd54701cd6c15d8042a9714cb17cf022aaa54  nemo_t
   is unreachable for every `rk3_ws` card (the config validator couples the two
   integrators).  Left in place, named here, not deleted — a separate one-line
   collapse with its own gate.
+
+### RETRACTION and correction, same day, after dual adversarial review
+
+Two independent reviewers read the collapse and its gate. Both landed on the
+same scope error, and following it up produced a RETRACTION of a claim made
+three sections above. Recorded here next to the claim it replaces (Rule 11).
+
+**RETRACTED: "every T and S row at every step is bit-identical" was written in
+a way that reads as a claim about the TRACER FIELDS. It is not one.** It is a
+claim about the gate's REDUCTIONS, which is what the gate measures, and the
+two differ. Measured with the new committed probe
+`scripts/validate/ocean_fidelity/testcases/nemo_testcase_state_ulp_probe.py`
+(per-cell, wet mask, the trajectory gate's own staggering slice, fp64, ten
+steps, `9070cf276` vs `28df515a8`):
+
+| case | field | bit-identical | cells ever differing | max abs difference | max ulp (cells >= 1e-10 of field max) |
+|---|---|---|---:|---|---:|
+| LOCK | T | YES | 0 | 0 | 0 |
+| LOCK | S | YES | 0 | 0 | 0 |
+| LOCK | v | YES | 0 | 0 | 0 |
+| LOCK | u | no | 3467 | `6.9389e-18` | 69 |
+| LOCK | eta | no | 160 | `2.1684e-19` | 2 |
+| OVERFLOW | S | YES | 0 | 0 | 0 |
+| OVERFLOW | v | YES | 0 | 0 | 0 |
+| OVERFLOW | **T** | **no, from kt=7** | 37 | `1.0658e-14` K | 5 |
+| OVERFLOW | u | no | 15704 | `1.1102e-16` | 96 |
+| OVERFLOW | eta | no | 376 | `2.7756e-16` | 12 |
+
+OVERFLOW's T field is bit-identical for six steps and then departs at five
+cells, growing to twelve cells and `1.07e-14 K` by ten steps, while the T ROW
+stayed bit-identical throughout — the moved cells are simply not the cell that
+attains the maximum residual. That is the gate's declared blind spot firing in
+practice, and it is why the probe now exists and is committed.
+
+Physically this is unavoidable rather than surprising: once the velocity moves
+at all, the tracers it advects must eventually move. NO re-association that
+touches velocity can hold tracer fields bit-identical indefinitely. What can be
+said, and now is: T and S are bit-identical through kt=6 on OVERFLOW and
+through all ten steps on LOCK, and every certified ROW is bit-identical.
+
+**The bar has two readings and they disagree.** "At most 2 ulp of float64" per
+certified number resolves to ADMIT or REFUSE depending on the normalising
+scale, and both readings are defensible:
+
+| reading | what is bounded | measured worst | verdict |
+|---|---|---:|---|
+| 2 ulps at UNIT scale (what the gate implements) | the normalised gate row | 0.500 ulp | ADMIT |
+| 2 ulps of the row's own FIELD scale | the field behind the row | 3.0 ulp (OVERFLOW kt=1 stage-1 u, scale `0.0622`) | REFUSE by one ulp |
+| 2 ulps per CELL of the raw field | the state itself | 96 ulp (OVERFLOW u), 5 ulp (OVERFLOW T) | REFUSE |
+
+The third row needs reading with care rather than alarm: the perturbation
+enters as a column-uniform barotropic shift, so it is an ABSOLUTE quantity of
+size ~`2e-17 m/s`, and it therefore lands on a cell of magnitude `1e-4` of the
+field maximum as `1e4` times as many ulps as on the largest cell. A per-cell
+ulp count is the wrong instrument for an absolute perturbation. The second row
+is the sharpest defensible statement: the largest velocity in the OVERFLOW
+stage-1 field moved by three ulps of itself, one more than the bar.
+
+**This is a DECISION, not a finding, and it is left to the user.** The gate as
+committed implements the first reading and passes. Nothing here re-runs the
+bar downward: the constant is `MAX_ULP_MOVE = 2` and the looseness is now
+written into the module's own blind-spot list, with the measured factor.
+
+**SCOPE: the "pure re-association" claim is certified for f = 0 only.** Both
+reviewers found this independently and it is the more important of the two.
+`nemo_testcase_recipe.py:158-159` builds both cards with `f0=0.0, beta=0.0`,
+and the cards leave `coriolis_scheme` at its `matsuno_split` default. At f = 0
+the Matsuno rotation between the deleted ladder and the barotropic seed is the
+exact identity, so the seed's 3-D structure has no channel into the solve at
+all. It is NOT the identity on a rotating card: `_forward_backward_coriolis_3d`
+reads the full 3-D profile, and the four-point average of a field with zero
+`h_v`-weighted mean does not in general have zero `h_u`-weighted mean where
+column weights vary, so the barotropic seed's DEPTH MEAN would change at
+`O(dt^2 f)` — first order, not roundoff. The same applies to the EEN
+barotropic-Coriolis pre-step, which also reads the 3-D field (and which the
+change arguably makes MORE faithful, since NEMO removes the barotropic
+Coriolis from the Kbb depth mean at `dynspg_ts.F90:358`).
+
+GYRE is the third `rk3_ws` card, it is rotating, and it has no gate on this
+branch. So: on LOCK and OVERFLOW this is a measured re-association; on GYRE it
+is an UNMEASURED behaviour change. Gate GYRE before repeating the
+re-association claim there. Not done here, and not fixed by pinning
+`coriolis_scheme` in the `rk3_ws` validator — that would be a silent selector
+choice.
+
+**UPGRADED from "expected" to UNMEASURED: the 6120-step statistical scorer.**
+The earlier text argued the six frozen metrics should hold because the inputs
+moved by at most 0.5 ulp at kt=10. That inference does not survive the gate's
+own growth block for OVERFLOW: tail exponential rates `0.203/step` (ssh),
+`0.269/step` (u), `0.083/step` (T), and the fits cannot discriminate
+exponential from polynomial on a four-point tail (semilog r2 `0.738` vs loglog
+`0.766` for ssh; `0.738` vs `0.694` for T, which the gate itself labels
+`EXPONENTIAL_FIT_PREFERRED_OPEN_MODE_QUESTION`). If exponential, a `1e-16`
+seed reaches order one in a few hundred steps, far inside 6120; if polynomial,
+it never matters. Those rates also characterise the legoESM-vs-NEMO
+DISCRETISATION error, not this perturbation's own growth, which is a further
+untested assumption. Treat the long-run statistics as UNMEASURED for this
+collapse. The cheap discriminator is ~300 OVERFLOW steps on both revisions with
+`max|delta u|` plotted per step on a semilog axis.
+
+**Gate hardening from the same review, landed here:** the planted control used
+to target the alphabetically first non-tracer row, which on both trajectory
+references is a zero-residual row — so the plant went red through the derived
+`exact` consistency check rather than through the ulp bar, and stayed red even
+with the bar deleted outright. Verified by emptying `MOVABLE_ROW_KEYS` and
+watching the old assertion still pass. The plant now targets a nonzero-residual
+row, the test asserts a sub-bar plant PASSES and an over-bar plant fails on a
+MOVE violation, and emptying `MOVABLE_ROW_KEYS` now turns all four reference
+tests red. The comparison also now checks top-level `selectors` and
+`precision_policy`, records which report-level keys were absent from both
+reports and therefore NOT checked (`first_over_bar` does not exist in the
+stage-sweep schema, so that prong is inert there), records the row-filter
+substring, and exits 2 when a requested plant fails to land.
+
+Reviewers: two, independent, both Claude (the codex CLI is unavailable on this
+account, so the standing codex+GLM pairing was met with two independent Claude
+reviewers instead — stated rather than implied). Both APPROVED the NEMO
+citation after reading `stp2d.F90` themselves; both raised the f=0 scope as the
+leading finding. Every finding above was re-measured before being acted on; the
+per-cell probe was written because a reviewer's claim about T could not be
+settled from the gate JSONs.

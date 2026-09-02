@@ -495,7 +495,7 @@ def main() -> int:
     parser.add_argument("--allow-dirty", action="store_true",
                         help="stamp '<sha>-dirty' instead of refusing a dirty tree")
     from legoesm.ocean.fidelity.ulp_move_gate import (
-        add_ulp_compare_arguments, run_ulp_comparison,
+        add_ulp_compare_arguments, comparison_exit_code, run_ulp_comparison,
     )
     add_ulp_compare_arguments(parser)
     args = parser.parse_args()
@@ -518,7 +518,13 @@ def main() -> int:
         # the comparison requires to be unchanged.
         comparison = run_ulp_comparison(args, report)
         print(json.dumps(comparison, indent=2, sort_keys=True))
-        return 0 if comparison["status"] == "PASS" else 1
+        code = comparison_exit_code(comparison)
+        if code == 2:
+            print("PLANTED CONTROL DID NOT LAND: a planted "
+                  f"{comparison['planted_ulp_move']}-ulp move left the "
+                  "comparison green, so the comparison is inspecting nothing",
+                  file=sys.stderr)
+        return code
     return 0 if report["status"] == "AT-BAR" else 1
 
 

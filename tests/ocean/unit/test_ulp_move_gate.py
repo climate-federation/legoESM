@@ -163,16 +163,58 @@ def test_plant_helper_targets_a_non_tracer_row_and_is_caught():
         "the plant landed on a tracer row, so it did not probe the ulp bar")
 
 
+def test_plant_helper_refuses_when_no_row_could_exercise_the_bar():
+    report = _report()
+    for row in report["steps"][0]["rows"]:
+        row["normalized_max_abs"] = 0.0
+        row["exact"] = True
+    with pytest.raises(ValueError, match="nonzero residual"):
+        plant_ulp_move(report, MAX_ULP_MOVE + 1)
+
+
 @pytest.mark.skipif(not REFERENCE_JSONS, reason="no committed phase-3 reference JSON")
 @pytest.mark.parametrize("path", REFERENCE_JSONS, ids=lambda p: p.stem)
-def test_committed_reference_against_itself_passes_and_a_plant_fails(path):
-    """Same checks, on the real gate schema rather than a hand-written one."""
+def test_committed_reference_plant_is_calibrated_and_not_vacuous(path):
+    """The real gate schema, and a control that can tell the bar from noise.
+
+    The failure this guards was live and shipped once: the plant used to land
+    on a zero-residual row, so it went red through the derived-``exact``
+    consistency check rather than through the ulp bar -- red even with
+    ``MOVABLE_ROW_KEYS`` emptied, i.e. with the bar DELETED.  Asserting only
+    "the plant fails" could not see that.  So assert three things: the
+    reference reproduces itself, a SUB-bar plant PASSES, and an OVER-bar plant
+    fails specifically on a MOVE violation naming the ulp count.
+    """
     reference = json.loads(path.read_text())
     assert compare_gate_reports(reference, copy.deepcopy(reference))["status"] == "PASS"
-    planted = plant_ulp_move(copy.deepcopy(reference), MAX_ULP_MOVE + 1)
-    result = compare_gate_reports(reference, planted)
-    assert result["status"] == "FAIL", "a 3-ulp plant went unnoticed"
+
+    under = plant_ulp_move(copy.deepcopy(reference), MAX_ULP_MOVE - 1)
+    calibration = compare_gate_reports(reference, under)
+    assert calibration["status"] == "PASS", (
+        f"a {MAX_ULP_MOVE - 1}-ulp plant is inside the bar and must pass; "
+        f"it did not, so the control cannot calibrate: {calibration['violations']}")
+
+    over = plant_ulp_move(copy.deepcopy(reference), MAX_ULP_MOVE + 1)
+    result = compare_gate_reports(reference, over)
+    assert result["status"] == "FAIL", "an over-bar plant went unnoticed"
     assert result["n_certified_rows_compared"] > 0
+    moves = [v for v in result["violations"] if "moved" in v and "ulp" in v]
+    assert moves, (
+        "the plant went red for some reason OTHER than the ulp bar, so this "
+        f"control does not test the bar: {result['violations']}")
+
+
+def test_report_level_keys_absent_from_both_are_reported_as_unchecked():
+    """A prong that never ran must not read as a prong that passed."""
+    result = compare_gate_reports(_report(), _report())
+    assert "first_over_bar" in result["report_keys_checked"]
+    assert "selectors" in result["report_keys_absent_from_both_so_unchecked"]
+
+
+def test_selectors_change_fails():
+    reference = _report(selectors={"eos": "nemo_teos10"})
+    candidate = _report(selectors={"eos": "wright"})
+    assert compare_gate_reports(reference, candidate)["status"] == "FAIL"
 
 
 def test_exact_flag_may_flip_when_the_residual_move_is_admitted():

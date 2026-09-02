@@ -998,3 +998,37 @@ is unreachable for every `rk3_ws` card, because the config validator couples
 the momentum and tracer integrators.  It is dead code, not a second NEMO
 implementation, and its removal is a separate one-line change with its own
 gate.
+
+### Same-day corrections to the section above, after dual adversarial review
+
+Full detail and numbers in `testcases/nemo_testcases_l1_phase3_receipt.md`
+("RETRACTION and correction"). Three things in the table above are narrower
+than they read:
+
+1. **"every T and S row bit-identical" is a claim about the gate's REDUCTIONS,
+   not about the tracer FIELDS.** Measured per cell with the new committed
+   probe `nemo_testcase_state_ulp_probe.py`: OVERFLOW's T field is
+   bit-identical for six steps and then departs at five cells, reaching
+   `1.07e-14 K` at twelve cells by ten steps, while its T row never moves. LOCK
+   T/S/v are bit-identical throughout; OVERFLOW S/v are too. This is
+   unavoidable in principle — once velocity moves, advected tracers follow —
+   and it is the gate's own declared blind spot firing in practice.
+2. **The "pure re-association" claim is certified for f = 0 only.** Both L1
+   cards are built with `f0=0.0, beta=0.0`, so the Matsuno rotation sitting
+   between the deleted ladder and the barotropic seed is the exact identity and
+   the seed's 3-D structure has no channel into the solve. On a ROTATING
+   `rk3_ws` card the four-point Coriolis average of a zero-`h_v`-mean field does
+   not have zero `h_u`-weighted mean where column weights vary, so the seed's
+   depth mean would change at `O(dt^2 f)` — first order. GYRE is rotating and
+   ungated here: on GYRE this is an UNMEASURED behaviour change, not a
+   re-association.
+3. **The 6120-step statistics are UNMEASURED, not "expected to hold".** The
+   growth fits cannot separate exponential from polynomial on a four-point
+   tail.
+
+The bar itself has two defensible readings that disagree on the verdict: 2 ulps
+at unit scale (what the gate implements) gives a worst move of 0.500 and
+ADMITS; 2 ulps of the row's own field scale gives 3.0 on one OVERFLOW stage-1
+row and REFUSES by one ulp. That choice is left to the user; the gate constant
+was not touched, and the looseness is now written into the module's blind-spot
+list.
