@@ -133,8 +133,8 @@ def test_ic_selectors_allowed_under_unforced_smoke():
 def test_arbitrary_user_set_value_rejected():
     """The allowlist catches ANY non-default user setting, not only the
     flags a blocklist happened to enumerate (the fail-open GLM closed)."""
-    args, p = _parse(["--forcing-ramp-days", "5"])
-    with pytest.raises(SystemExit, match="forcing-ramp-days"):
+    args, p = _parse(["--bbl-adv"])
+    with pytest.raises(SystemExit, match="bbl-adv"):
         validate_fesom_stage(args, p)
 
 
