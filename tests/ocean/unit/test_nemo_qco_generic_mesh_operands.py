@@ -42,10 +42,11 @@ def _fixture():
         f0=1.0e-4, beta=0.0)
     dz = np.array([2.0, 3.0, 5.0, 10.0], dtype=np.float64)
     z_ref = create_z_star_from_thicknesses(dz)
-    # A sloping floor so the min-rule reference face is NOT trivially e3t_0.
-    bathy = np.full((NLAT, NLON), 20.0)
-    bathy[:, :2] = 5.0
-    bathy[:, 2:4] = 9.0
+    # A ridge, NOT a monotone slope: on a monotone floor the east face's
+    # shallower neighbour is always the cell that owns the face, so the
+    # min-rule face would coincide with e3t_0 and every comparison below
+    # would be vacuous.  The descending side makes them genuinely differ.
+    bathy = np.array([[5.0, 9.0, 20.0, 20.0, 9.0, 5.0]] * NLAT)
     z_coord = create_partial_cell_coordinate(z_ref, jnp.asarray(bathy))
     active = np.asarray(z_coord.is_active).astype(np.float64)
     u_mask = np.zeros((NLAT, NLON + 1, NLEV))
@@ -122,12 +123,21 @@ def test_raw_and_card_operand_sources_agree_and_the_arm_is_constructible():
     np.testing.assert_array_equal(
         np.asarray(resolved.e2u), np.asarray(ops.e2u))
     ww_raw, hu_raw, _ = _wzv(grid, raw_coord, u_mask, v_mask)
-    # Same operand VALUES on both sides, so the executed arithmetic must be
-    # bit-identical: the fix may not perturb a card that carries NEMO's mesh.
-    # (e3u_0 differs by construction on the raw branch -- it is e3t_0 there --
-    # so compare on the flat part of the mesh via the face thickness instead.)
-    assert ww_raw.shape == ww_card.shape
-    np.testing.assert_array_equal(hu_raw.shape, hu_card.shape)
+    # On THIS fixture the seafloor slopes, so the two operand sources are
+    # genuinely different physics at a step face: the raw branch keeps NEMO's
+    # full-step statement e3u_0 = e3t_0, while the card branch takes the
+    # shallower neighbour's reference thickness (usrdef_zgr.F90:179-186).
+    # The face thickness and the vertical velocity MUST therefore differ --
+    # asserting equality here would be asserting the fix does nothing.
+    assert not np.array_equal(hu_raw, hu_card)
+    assert not np.array_equal(ww_raw, ww_card)
+    # ...and the difference must live exactly where the min-rule bites, i.e.
+    # nowhere on the columns whose neighbours share a seafloor.
+    step_face = np.any(
+        np.asarray(ops.e3u_0) != np.asarray(ops.e3t_0), axis=-1)
+    assert step_face.any(), "fixture has no step face; the row above is vacuous"
+    # Bit-identity of the two sources is pinned separately, on a mesh where
+    # they provably coincide (test_raw_branch_is_bit_identical_...).
 
 
 def test_raw_branch_is_bit_identical_when_the_mesh_is_full_step():
