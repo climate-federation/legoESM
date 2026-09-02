@@ -2,7 +2,9 @@
 
 Branch `fidelity/dino-zdf-divisor-scaling` from `9070cf276`. Preregistration:
 `dino_zdf_divisor_scaling_preregister.md` (committed first, `11d0270c5`).
-Probe: `scripts/validate/ocean_fidelity/dino_1226/dino_zdf_divisor_scaling.py`.
+Probe: `scripts/validate/ocean_fidelity/dino_1226/dino_zdf_divisor_scaling.py`;
+every number below is in `dino_zdf_divisor_scaling_artifact.json` next to this
+file, with its commands, precision, ladder and NEMO donor paths.
 All numbers fp64 (`PrecisionPolicy.fp64()`, control dtype and every geometry
 array printed as `float64`), CPU, on the twin's production ladder
 `LEGOESM_NEMO_E3T=both` — the ladder the 20-year producer ran
@@ -15,11 +17,14 @@ thickness that is **systematically ~0.3% larger** than NEMO's, at every step of
 the 20 years, with the error **smallest in the mixed layer and largest in the
 abyss**. Its implicit vertical coupling `K/D` is therefore ~0.3% too weak in
 the deep interior. One step of that costs 5e-4 to 9e-4 of the vertical-mixing
-term. Against the 20-year water-mass-census gap, the per-step signal is
-**~1.3e3 times larger than the persistent bias that gap requires** — so the
-divisor is **SCALE-COMPATIBLE** with the census and variability families and
-cannot be excluded. It is NOT an attribution: only a both-sided 20-year arm can
-supply that, and it was not run.
+term, and over five days it grows 72x in temperature and 500-600x in the
+velocities — with a contamination control of exactly zero, so all of it is the
+divisor. Against the 20-year water-mass-census gap, only **0.2-0.3%** of that
+measured divergence rate needs to persist to produce the whole gap; the
+preregistered CONFIRM band was hit. So the divisor is **SCALE-COMPATIBLE** with
+the census, MLD and variability families and **cannot be excluded**. It is NOT
+an attribution: only a both-sided 20-year arm can supply that, and it was not
+run.
 
 ## 1. The two divisors (Rule 0 — the oracle's own lines)
 
@@ -68,9 +73,12 @@ Verified against the oracle's own `mesh_mask.nc` (`RUN_20Y`): `e3w_1d[1:]` minus
 `0.5*(e3t_k + e3t_{k-1})` is 7.3e-4 rising to 3.2e-3. The two are not the same
 object on a stretched grid.
 
-**legoESM's divisor** — `ocean_model_latlon_cgrid.py`, the `else` branch of the
-divisor block inside `_apply_implicit_vertical_mixing`, reached from
-`_leapfrog_step` (the card's `outer_integrator='leapfrog'`):
+**legoESM's divisor** — `ocean_model_latlon_cgrid.py:8114`, the `else` branch of
+the divisor block inside `_apply_implicit_vertical_mixing` (defined at `:7706`),
+reached from `_leapfrog_step` (`:9867`, calling the solve at `:10278`) because
+the card resolves `outer_integrator='leapfrog'`. The path is proven to execute
+dynamically as well: ablating this divisor moves the step's own output by
+0.21 K (section 4, C4).
 
 ```
 D_lego(i,j,k) = 0.5*(dz_k + dz_{k+1}) * (1 + eta_AFTER / H)
@@ -96,9 +104,12 @@ unreferenced legacy divisor while its own NEMO arm sits unselected.
   `(eta+H)/H` is identically NEMO's `(1 + r3t)`, so this is the only channel
   through which ssh enters, and it vanishes whenever the two levels agree.
 * **(c) partial-cell bottoms** — **not in play**. DINO runs full-step
-  `ln_zco_nam = .true.` (`RUN_20Y/namelist_cfg:70`), and legoESM's `h_partial`
-  equals `dz_ref` on every active cell to `0.0`. Both models have square
-  bottoms here.
+  `ln_zco_nam = .true.` (`RUN_20Y/namelist_cfg:70`); its `e3t_0`/`e3w_0` are
+  horizontally uniform at every level (measured, per-level min == max); the
+  twin's bridge is built with `full_step=True` (`kamm_twin_90d.py:1302`); and on
+  the bridged production ladder `h_partial` equals `dz_ref` on all **342,134**
+  active cells with max deviation `0.0`. Both models have square bottoms here,
+  so no part of the gap below is a partial-cell effect.
 
 Because the Jacobian cancels, the ratio `D_lego/D_nemo` is **purely geometric
 and state-independent** — measured identical (to all printed digits) at the
@@ -125,6 +136,13 @@ of NEMO's `e3t_0`, so `dz_half_ref` equals `build_dz_half(dz_ref)` to
 therefore reads `e3w_0` from the oracle's `mesh_mask.nc` rather than
 reconstructing it, and checks it is horizontally uniform rather than assuming
 it.
+
+**Side-finding, one line, not pursued.** The shipped "NEMO" arm
+`implicit_vmix_e3t_now_divisor=True` builds `build_dz_half(e3t_now)` — the NOW
+thickness at the **midpoint** slot. On a *uniform* vertical grid the midpoint
+and the T-point depth difference coincide, so that arm is NEMO-exact there; on a
+*stretched* ladder it is not. The cards that select it today (LOCK_EXCHANGE,
+OVERFLOW, GYRE per `nemo_branch_isomorphism_map.md:40`) were not checked here.
 
 Also noted and **not** pursued (out of scope, already owned by #1455): NEMO's
 3-D `e3t_0`/`e3w_0` diverge from its own 1-D `e3t_1d`/`e3w_1d` below k=25, by
@@ -212,16 +230,41 @@ from the archive; the leapfrog BEFORE level and the TKE carry are still the
 restart's, so the absolute increments are inflated by a start-up shock. Use the
 RATIOS and the state-independence of the divisor field, not the absolutes.
 
-## 5b. The 5-day integrated arm (preregistered)
+## 5b. The 5-day integrated arm — preregistered prediction CONFIRMED
 
-PENDING — the two arms are integrating 160 steps from the day-180 restart as
-this is written. The preregistered prediction (fixed in
-`dino_zdf_divisor_scaling_preregister.md` before the run): day-5 `max|dT|` in
-`[1e-3, 2e-2] K` CONFIRMS a live, growing lever; `< 3e-4 K` REFUTES it as one.
+Two arms, 160 steps (5 days at `dt = 2700 s`) from the day-180 bridged NEMO
+restart, identical in every respect except the implicit-solve divisor. Both
+stayed finite; 161-165 s of integration each.
+
+| field | day-5 max abs | day-5 rms | growth vs one step (max) |
+|---|---|---|---|
+| T | 8.127e-3 K | 5.291e-5 | **72x** |
+| S | 1.017e-3 g/kg | 4.522e-6 | 207x |
+| u | 2.193e-2 m/s | 1.081e-4 | 624x |
+| v | 9.151e-3 m/s | 5.492e-5 | 521x |
+
+**Contamination control at day 5: exactly `0.0` on T, S, u and v.** The entire
+5-day divergence is the divisor, nothing else.
+
+Against the preregistration (`dino_zdf_divisor_scaling_preregister.md`,
+committed at `11d0270c5` before this ran):
+
+* CONFIRM band was `max|dT|` in `[1e-3, 2e-2] K` — **measured 8.13e-3 K, inside
+  the band**.
+* REFUTE condition was `< 3e-4 K` — **not met**.
+
+**Verdict: CONFIRMED live and growing.** Coherent linear accumulation over 160
+steps would give 160x; pure saturation would give 1x. T grew 72x and the
+velocities 500-600x, so the difference is amplifying dynamically rather than
+being absorbed locally by the backward-Euler solve.
+
+Worth stating plainly: after **five days**, the divisor alone has produced local
+salinity differences of 1.0e-3 g/kg — roughly **100 times the entire 20-year
+abyssal census gap** (1.09e-5 g/kg) the equivalence test refuted on.
 
 ## 6. Scaling against the 20-year divergence
 
-DINO's 20 model years = 7200 d = 6.2208e8 s = 2.336e5 steps at `dt = 2700 s`.
+DINO's 20 model years = 7200 d = 6.2208e8 s = 2.304e5 steps at `dt = 2700 s`.
 "Required rate" is the family's gap spread evenly over that window; "available
 rate" is the measured one-step divisor signal divided by `dt`; **f** is the
 fraction of the divisor signal that must rectify to produce the gap.
@@ -231,8 +274,8 @@ fraction of the divisor signal that must rectify to produce the gap.
 | ts_water_mass_census | REFUTE, R=104 | `north of band.abyss_ge1400m.S_mean` | 1.092e-5 g/kg | 1.755e-14 g/kg/s | 2.520e-11 / 1.819e-9 | **7.0e-4** | **SCALE-COMPATIBLE** |
 | ts_water_mass_census (T) | R=21 | `north of band.abyss_ge1400m.T_mean` | 2.281e-4 K | 3.667e-13 K/s | 4.758e-10 / 4.183e-8 | **7.7e-4** | **SCALE-COMPATIBLE** |
 | mld_seasonal_cycle | REFUTE, R=3.0 | `mld.north of band.month05` | 0.0316 m on 86.0 m | fractional 3.68e-4 | fractional mixing change 1.0e-3 to 2.1e-3 in the upper 100 m | ~0.2-0.4 | **SCALE-COMPATIBLE, PLAUSIBLE only** |
-| basin_row_transports | REFUTE, R=86 | `row.190.mean` | 4.71e-3 Sv on 0.367 Sv | fractional 1.29e-2 | per-step u perturbation 6.3e-4 of the step's own u increment | — | **UNRESOLVED** |
-| variability | REFUTE, R=9.6 | abyssal `S_mean.deseasonalized_std` | 7.72e-7 on 5.11e-5 | fractional 1.51e-2 | — | — | **UNRESOLVED** |
+| basin_row_transports | REFUTE, R=86 | `row.190.mean` | 4.71e-3 Sv on 0.367 Sv | fractional 1.29e-2 | day-5 rms u divergence 1.08e-4 m/s | — | **UNRESOLVED** (no transport sensitivity measured) |
+| variability | REFUTE, R=9.6 | abyssal `S_mean.deseasonalized_std` | 7.72e-7 on 5.11e-5 | fractional 1.51e-2 | day-5 rms S divergence 4.52e-6 g/kg, 5.9x the gap | — | **UNRESOLVED** (a variance statistic has no linear translation) |
 | acc_series | UNRESOLVED, R=0.90 | `acc.full.month09` | 0.451 Sv | — | — | — | not distinguishable at 20 y |
 | density_contrasts | UNRESOLVED, R=1.34 | `density.deep.month04` | 7.11e-4 | — | — | — | not distinguishable at 20 y |
 
@@ -250,6 +293,21 @@ f               = 1.7554e-14 / 2.520e-11     = 6.96e-4
 so **0.07% of the divisor's own per-step salinity signal, rectified, produces
 the entire 20-year census gap**. On the max-abs signal the requirement falls to
 1e-5. The same arithmetic on abyssal temperature gives f = 7.7e-4.
+
+**The same scaling anchored on the 5-day arm instead**, which is stronger
+because it contains the actual dynamical growth rather than one isolated step:
+
+```
+                        salinity                    temperature
+day-5 rms difference    4.5224e-6 g/kg              5.2907e-5 K
+over 5 d = 4.32e5 s     1.0468e-11 g/kg/s           1.2247e-10 K/s
+required rate (above)   1.7554e-14 g/kg/s           3.6667e-13 K/s
+f                       1.68e-3                     2.99e-3
+```
+
+i.e. **0.2-0.3% of the measured 5-day divergence rate, sustained, is the whole
+20-year census gap.** Both anchors agree to within a factor of ~4 and both sit
+2.5 to 3 orders of magnitude above the requirement.
 
 **MLD, the honest version.** The divisor weakens the vertical mixing coupling by
 1.0e-3 to 2.1e-3 in the upper 100 m; the MLD gap is 3.68e-4 of the MLD. That
