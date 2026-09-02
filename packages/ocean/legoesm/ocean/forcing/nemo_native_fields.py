@@ -145,18 +145,23 @@ def load_nemo_sss_restoring_climatology(
 def _read_depth_axis(path: str, var: str = "deptht") -> np.ndarray:
     """1-D positive-down depth ladder [m] of a NEMO init file.
 
-    Raises (never guesses a ladder) when the variable is absent or not
-    strictly increasing — a mis-levelled vertical interpolation is a
-    silently wrong IC, not an error.
+    NEMO files carry the ladder as ``deptht`` (grid_T outputs) or
+    ``nav_lev`` (the woce_*_monthly_init IC layout) — accept both, first
+    match wins.  Raises (never guesses a ladder) when neither is present
+    or the axis is not strictly increasing — a mis-levelled vertical
+    interpolation is a silently wrong IC, not an error.
     """
     import netCDF4
 
+    candidates = (var, "nav_lev") if var == "deptht" else (var,)
     with netCDF4.Dataset(path) as ds:
-        if var not in ds.variables:
+        found = next((c for c in candidates if c in ds.variables), None)
+        if found is None:
             raise ValueError(
-                f"{path}: depth axis {var!r} not found (needed for "
+                f"{path}: depth axis {candidates!r} not found (needed for "
                 f"vertical interpolation onto a non-NEMO ladder); has "
                 f"{sorted(ds.variables)[:12]}")
+        var = found
         depths = np.asarray(ds.variables[var][:], dtype=np.float64).ravel()
     if depths.size < 2 or not np.all(np.diff(depths) > 0.0) \
             or not np.all(depths >= 0.0):
