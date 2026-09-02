@@ -957,6 +957,61 @@ masked average (`:8130-8160`), which is a third rule again.  Changing the MLF
 transport face would move every DINO number and is a different one-variable
 round; recorded here as open debt.
 
+#### RETRACTION (next round, branch `fidelity/face-thickness-shared`)
+
+**The paragraph above misattributes the site, and its "open debt" conclusion
+does not follow.**  Retracted here rather than quietly corrected, because a
+stale confident pointer gets built on.
+
+`ocean_model_latlon_cgrid.py:9237` at this round's base `28d166428` is
+`h_u = min_cell_to_uface(h_k)` whose ENCLOSING function is `_ab2_step`
+(`def` at `:9108`) — the Veros Adams-Bashforth-2 outer integrator, which is
+not the MLF lane at all — and that line is a barotropic/baroclinic DEPTH-MEAN
+WEIGHT, not a transport face thickness.  The MLF lane's own steppers are
+`_leapfrog_step` (`:9824` at tip) and `_nemo_mlf_step` (`:10361`); their
+depth-mean weights are separate sites again.
+
+What the MLF lane actually does, measured by instantiating each card and
+printing the resolved selectors (fp64, CPU):
+
+| card | `outer_integrator` | `momentum` / `tracer` integrator | `wzv_call2_evaluation` | tracer-transport face rule |
+|---|---|---|---|---|
+| DINO `nemo_dino_kamm_mlf` | `leapfrog` | `euler` / `euler` | `nemo_literal` | ALREADY `e3u_0*(1+r3u)` |
+| DINO `nemo_dino_kamm` | `forward_euler` | `euler` / `euler` | `nemo_literal` | ALREADY `e3u_0*(1+r3u)` |
+| ORCA1 / OMIP (`run_omip_core2.py`) | `forward_euler` | `euler` / `euler` | `generic` | min-rule |
+| OVERFLOW-zps, LOCK_EXCHANGE-zco | `forward_euler` | `rk3_ws` / `rk3_ws` | `generic` | `e3u_0*(1+r3u)` in the stage transport |
+| GYRE | `forward_euler` | `rk3_ws` / `euler` | `generic` | stage transport only |
+
+So the DINO cards were already on NEMO's rule for the tracer transport
+(`ocean_model_latlon_cgrid.py`'s `wzv_call2_evaluation == "nemo_literal"`
+branch, which called `vertical.nemo_qco_live_face_thicknesses`), and no DINO
+number could have moved by adopting it.  The `generic` arm's `min` rule is a
+REAL legoESM scheme selection with its own reference — the MOM6/MITgcm `hFacW`
+convention, Adcroft–Hill–Marshall 1997 eq. 11–13, cited in place at
+`ocean_model_latlon_cgrid.py:1379-1384` — not a defective transcription of
+NEMO, and it is left alone.
+
+What WAS an artificial branch point: the two lanes reached the shared rule
+through two DIFFERENT wrappers, each carrying its own copy of the
+native-east/north → redundant-west/south face map.  Both now call the one
+`vertical.nemo_qco_live_face_geometry_cgrid`.  Pure refactor: identical
+operand order, identical arithmetic, verified by re-running all four phase-3
+gates before and after.
+
+`_replace_stage_mean` is a separate, still-open finding, and NOT a shared
+routine: NEMO's RK3 stage correction weights with the REFERENCE ladder
+(`stprk3_stg.F90:438-439`, `SUM( e3u_0(ji,jj,:)*uu(...,Kaa) ) * r1_hu_0`)
+while its MLF counterpart `mlf_baro_corr` weights with the LIVE after-level
+face (`stpmlf.F90:514-522`, `e3u(ji,jj,jk,Kaa)` and `r1_hu(:,:,Kaa)`), so the
+two lanes legitimately differ there.  legoESM's `_replace_stage_mean` uses the
+live Kbb `min_cell_to_uface(h_k_pre)` and the live `H_u_pre`, which agree with
+`e3u_0`/`hu_0` exactly at `kt=1` (ssh ≡ 0) and drift afterwards — measured on
+the LOCK tilted post-step entry state (`max|eta| = 0.9845 m`):
+`max|h_u_pre − e3u_0| = 4.922e-02 m` (4.92 % relative) and
+`max|H_u_pre − hu_0| = 9.845e-01 m` (4.92 %).  Correcting it would move the
+`kt=2..10` trajectory, i.e. it is its own one-variable round, and it is NOT
+landed with the refactor above.
+
 ### Scaling BEFORE any owner label
 
 Recomputed by the gate itself on every run
@@ -1213,6 +1268,8 @@ MLF lane and its short-run gates were not run.
 - `_replace_stage_mean` still weights with `min_cell_to_uface(h_k_pre)` where
   `stprk3_stg.F90:438` uses `e3u_0` and `r1_hu_0`.  These agree exactly at
   kt=1 (ssh = 0 at Kbb) and drift apart afterwards; not touched this round;
-- the MLF-lane face thickness (`ocean_model_latlon_cgrid.py:9237`), which has
-  the same defect against the identical `domqco.F90:166-169` formula;
+- ~~the MLF-lane face thickness (`ocean_model_latlon_cgrid.py:9237`), which
+  has the same defect against the identical `domqco.F90:166-169` formula~~ —
+  RETRACTED, see the retraction block above: that line is in `_ab2_step`, and
+  the DINO MLF cards were already on NEMO's rule;
 - whether the WS-RK3 identity is exercised by any card other than these two.

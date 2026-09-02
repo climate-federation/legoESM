@@ -47,8 +47,9 @@ from legoesm.ocean.vertical import (
     flux_form_vertical_tracer_advection,
     flux_form_vertical_tracer_advection_tvd,
     flux_form_vertical_tracer_advection_centered,
+    nemo_qco_live_face_geometry_cgrid,
     nemo_qco_live_face_geometry_from_operands,
-    nemo_qco_live_face_thicknesses,
+    nemo_qco_mesh_operands,
     nemo_up3_vertical_momentum_advection,
     nemo_wicker_aimp_partition_transport,
 )
@@ -1064,12 +1065,17 @@ def _nemo_ws_qco_stage_faces(eta, h_ref, u_mask_3d, v_mask_3d, grid):
     stretched T-cell thicknesses instead is first-order wrong in the ssh
     difference across the face.
 
-    The rule itself is NOT re-implemented here: this reuses the shared
-    canonical ``nemo_qco_live_face_geometry_from_operands`` (vertical.py:140,
-    the same builder the DINO ldfslp/dynzad and ``nemo_literal`` tracer paths
-    call).  The wrapper ``nemo_qco_live_face_thicknesses`` reads the operands
-    off ``z_coord.nemo_*`` fields the L1 testcase cards do not carry, so the
-    operands are assembled here from the card's own grid.
+    This function assembles OPERANDS only.  The rule -- and the map from
+    NEMO's native east/north faces onto legoESM's redundant west/south
+    layout -- lives in the single shared
+    ``nemo_qco_live_face_geometry_cgrid`` (vertical.py), which the MLF
+    tracer transport calls too, because NEMO's own ``dom_qco_r3c``
+    (``domqco.F90:166-169``, MLF) and ``dom_qco_r3c_RK3`` (``:219-222``)
+    are the same statement.  The operands differ between the two lanes only
+    in their SOURCE: the DINO/ORCA cards carry NEMO's own ``hu_0`` and
+    ``e1e2*`` on ``z_coord.nemo_*``, while the L1 testcase cards do not, so
+    they are built here from the card's own grid and reference ladder
+    (``domain.F90:145`` for ``hu_0``).
 
     ``e3u_0`` is the min-rule face of the REFERENCE thicknesses: NEMO's own
     partial-cell reference face is the shallower neighbour's
@@ -1094,19 +1100,11 @@ def _nemo_ws_qco_stage_faces(eta, h_ref, u_mask_3d, v_mask_3d, grid):
     hv_0 = jnp.sum(e3v_0 * vmask3, axis=-1)
     area_u = (geom_grid.dx_u * geom_grid.dy_u)[:, 1:]
     area_v = (geom_grid.dx_v * geom_grid.dy_v)[1:, :]
-    geom = nemo_qco_live_face_geometry_from_operands(
+    return nemo_qco_live_face_geometry_cgrid(
         jnp.asarray(eta, dtype=dtype), e3u_0, e3v_0, umask3, vmask3,
         hu_0, hv_0, jnp.asarray(geom_grid.area_T, dtype=dtype),
         jnp.where(hu_0 > 0.0, area_u, 1.0),
         jnp.where(hv_0 > 0.0, area_v, 1.0),
-    )
-    one = jnp.asarray(1.0, dtype=dtype)
-    return (
-        jnp.concatenate([geom.e3u[:, -1:, :], geom.e3u], axis=1),
-        jnp.concatenate([jnp.zeros_like(geom.e3v[:1]), geom.e3v], axis=0),
-        jnp.concatenate([one + geom.r3u[:, -1:], one + geom.r3u], axis=1),
-        jnp.concatenate(
-            [jnp.ones_like(geom.r3v[:1]), one + geom.r3v], axis=0),
     )
 
 
@@ -5235,13 +5233,15 @@ class LatLonCGridOceanModel:
                 u_mask_3d_tracer[:, 1:, :], dtype=state.eta.data.dtype)
             _raw_vmask = jnp.asarray(
                 v_mask_3d_tracer[1:, :, :], dtype=state.eta.data.dtype)
-            _live_u_raw, _live_v_raw = nemo_qco_live_face_thicknesses(
-                state.eta.data, _zc, _e3t0, _e3t0,
-                _raw_umask, _raw_vmask)
-            _h_u_tracer = jnp.concatenate(
-                [_live_u_raw[:, -1:, :], _live_u_raw], axis=1)
-            _h_v_tracer = jnp.concatenate(
-                [jnp.zeros_like(_live_v_raw[:1]), _live_v_raw], axis=0)
+            # The SAME shared builder the WS-RK3 stage transport calls
+            # (_nemo_ws_qco_stage_faces): NEMO's MLF dom_qco_r3c
+            # (domqco.F90:166-169) and dom_qco_r3c_RK3 (:219-222) are the
+            # same r3u statement, so legoESM has one implementation reached
+            # by both lanes.  Only the OPERAND SOURCE differs -- this lane's
+            # cards carry NEMO's own hu_0/e1e2* on z_coord.nemo_*.
+            _h_u_tracer, _h_v_tracer, _, _ = nemo_qco_live_face_geometry_cgrid(
+                state.eta.data, _e3t0, _e3t0, _raw_umask, _raw_vmask,
+                *nemo_qco_mesh_operands(_zc, state.eta.data.dtype))
         else:
             # H + Hu reductions per face share the h_u_old/h_v_old weight
             # on the level axis — fuse into one stack each.  Keep this entire
