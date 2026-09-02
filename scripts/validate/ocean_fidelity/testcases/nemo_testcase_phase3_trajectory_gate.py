@@ -218,7 +218,7 @@ def characterize_growth(steps: list[dict]) -> dict:
 def run(
     case: str, oracle_root: Path, max_step: int, *, plant=False,
     continue_after_first=False, diagnostic_disable_bbl=False,
-    owner_controls=False, allow_dirty=False,
+    owner_controls=False, allow_dirty=False, arm_literal_stage_wzv=False,
 ) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -239,7 +239,8 @@ def run(
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
-            disable_bbl=diagnostic_disable_bbl))
+            disable_bbl=diagnostic_disable_bbl,
+            literal_stage_wzv=arm_literal_stage_wzv))
     state = card.recipe.initial_state
     masks = expected_masks(card)
     nlev = card.recipe.z_coord.n_levels
@@ -456,6 +457,7 @@ def run(
             "bbl_adv_option": cfg.bbl_adv_option,
             "bbl_gamma_s": cfg.bbl_gamma_s,
             "diagnostic_disable_bbl_test_hook": diagnostic_disable_bbl,
+            "arm_literal_stage_wzv_test_hook": arm_literal_stage_wzv,
         },
         "first_over_bar": first_over_bar,
         "bbl_attribution": bbl_attribution,
@@ -484,6 +486,12 @@ def main() -> int:
     parser.add_argument("--continue-after-first", action="store_true")
     parser.add_argument("--diagnostic-disable-bbl", action="store_true")
     parser.add_argument("--owner-controls", action="store_true")
+    parser.add_argument(
+        "--arm-literal-stage-wzv", action="store_true",
+        help=("one-variable S-19 arm: route the WS-RK3 stage cross-level "
+              "velocity through nemo_qco_wzv_operands (sshwzv.F90:331-336 "
+              "as called at stprk3_stg.F90:297) instead of the generic "
+              "diagnose_w_from_flux_div. NEMO has no such switch"))
     parser.add_argument("--allow-dirty", action="store_true",
                         help="stamp '<sha>-dirty' instead of refusing a dirty tree")
     args = parser.parse_args()
@@ -493,7 +501,8 @@ def main() -> int:
         args.max_step, plant=args.plant,
         continue_after_first=args.continue_after_first,
         diagnostic_disable_bbl=args.diagnostic_disable_bbl,
-        owner_controls=args.owner_controls, allow_dirty=args.allow_dirty)
+        owner_controls=args.owner_controls, allow_dirty=args.allow_dirty,
+        arm_literal_stage_wzv=args.arm_literal_stage_wzv)
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.write_text(text)

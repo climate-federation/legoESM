@@ -56,7 +56,7 @@ from legoesm.ocean.vertical import (
     compute_layer_thickness,
     compute_ocean_jacobian,
     nemo_qco_live_face_geometry_from_operands,
-    nemo_qco_live_face_thicknesses,
+    nemo_qco_resolved_mesh_operands,
 )
 from legoesm.ocean.state import (
     LatLonCGridOceanState,
@@ -1390,7 +1390,7 @@ def _bc_vertical_and_depthmean_velocity(
 
 
 def nemo_qco_kmm_velocity_cycle(
-    eta_now, u, v, un_adv, vn_adv, z_coord, u_mask_3d, v_mask_3d,
+    eta_now, u, v, un_adv, vn_adv, z_coord, u_mask_3d, v_mask_3d, grid=None,
 ):
     """Execute and undo DINO's transient Kmm barotropic rewrite.
 
@@ -1405,23 +1405,14 @@ def nemo_qco_kmm_velocity_cycle(
         raise ValueError(
             "literal Kmm velocity cycle requires an "
             "OceanPartialCellCoordinate carrying the raw NEMO QCO mesh")
-    refs = tuple(getattr(z_coord, name, None) for name in (
-        "nemo_e3t_0", "nemo_hu_0", "nemo_hv_0", "nemo_e1e2t",
-        "nemo_e1e2u", "nemo_e1e2v",
-    ))
-    if any(value is None for value in refs):
-        raise ValueError(
-            "literal Kmm velocity cycle requires raw NEMO e3t_0, "
-            "hu_0/hv_0, and e1e2t/e1e2u/e1e2v operands")
-    e3t0, hu0, hv0, area_t, area_u, area_v = (
-        jnp.asarray(value, dtype=eta_now.dtype) for value in refs)
     nlev = u.shape[-1]
-    e3t0 = e3t0[..., :nlev]
-    raw_umask = jnp.asarray(u_mask_3d[:, 1:, :], dtype=eta_now.dtype)
-    raw_vmask = jnp.asarray(v_mask_3d[1:, :, :], dtype=eta_now.dtype)
+    ops = nemo_qco_resolved_mesh_operands(
+        z_coord, grid, u_mask_3d, v_mask_3d, eta_now.dtype, nlev)
+    hu0, hv0 = ops.hu_0, ops.hv_0
+    raw_umask, raw_vmask = ops.umask3, ops.vmask3
     geom = nemo_qco_live_face_geometry_from_operands(
-        eta_now, e3t0, e3t0, raw_umask, raw_vmask,
-        hu0, hv0, area_t, area_u, area_v)
+        eta_now, ops.e3u_0, ops.e3v_0, raw_umask, raw_vmask,
+        hu0, hv0, ops.area_t, ops.area_u, ops.area_v)
     un_adv = jnp.asarray(un_adv, dtype=eta_now.dtype)
     vn_adv = jnp.asarray(vn_adv, dtype=eta_now.dtype)
     if un_adv.shape != u.shape[:2] or vn_adv.shape != v.shape[:2]:
@@ -1491,22 +1482,18 @@ def nemo_qco_wzv_operands(
         raise ValueError(
             "zad_qco_evaluation='nemo_literal' requires an "
             "OceanPartialCellCoordinate carrying the raw NEMO QCO mesh")
-    refs = tuple(getattr(z_coord, name, None) for name in (
-        "nemo_e3t_0", "nemo_hu_0", "nemo_hv_0", "nemo_e1e2t",
-        "nemo_e1e2u", "nemo_e1e2v",
-    ))
-    if any(value is None for value in refs):
-        raise ValueError(
-            "zad_qco_evaluation='nemo_literal' requires raw NEMO e3t_0, "
-            "hu_0/hv_0, and e1e2t/e1e2u/e1e2v operands")
-    e3t0, _hu0, _hv0, area_t, area_u, area_v = (
-        jnp.asarray(value, dtype=eta_now.dtype) for value in refs)
     nlev = u.shape[-1]
-    e3t0 = e3t0[..., :nlev]
-    raw_umask = jnp.asarray(u_mask_3d[:, 1:, :], dtype=eta_now.dtype)
-    raw_vmask = jnp.asarray(v_mask_3d[1:, :, :], dtype=eta_now.dtype)
-    live_u_raw, live_v_raw = nemo_qco_live_face_thicknesses(
-        eta_now, z_coord, e3t0, e3t0, raw_umask, raw_vmask)
+    # NEMO's own mesh when the card carries it (DINO/GYRE: byte-identical to
+    # the raw statement this replaced), otherwise the identical operands
+    # rebuilt from the card's grid + reference ladder -- so LOCK_EXCHANGE,
+    # OVERFLOW and ORCA1 can select this arm by config like every other card.
+    ops = nemo_qco_resolved_mesh_operands(
+        z_coord, grid, u_mask_3d, v_mask_3d, eta_now.dtype, nlev)
+    e3t0, area_t = ops.e3t_0, ops.area_t
+    raw_umask, raw_vmask = ops.umask3, ops.vmask3
+    live_u_raw, live_v_raw = nemo_qco_live_face_geometry_from_operands(
+        eta_now, ops.e3u_0, ops.e3v_0, raw_umask, raw_vmask,
+        ops.hu_0, ops.hv_0, area_t, ops.area_u, ops.area_v)[:2]
 
     if transport_after_override is not None:
         if eta_after_override is None:
@@ -1515,7 +1502,7 @@ def nemo_qco_wzv_operands(
                 "requires eta_after_override")
         u, v, _, _ = nemo_qco_kmm_velocity_cycle(
             eta_now, u, v, *transport_after_override, z_coord,
-            u_mask_3d, v_mask_3d)
+            u_mask_3d, v_mask_3d, grid)
 
     # NEMO native U/V arrays store the east/north face of each T cell.  Map
     # once to legoESM's redundant west/south face layout for dynzad.
@@ -1536,13 +1523,7 @@ def nemo_qco_wzv_operands(
     r1_h0 = jax.lax.optimization_barrier(1.0 / h0_safe)
     r3_now = jax.lax.optimization_barrier(eta_now * r1_h0)
     live_t = e3t0 * (1.0 + r3_now[..., None] * tmask) * tmask
-    raw_e2u = getattr(z_coord, "nemo_e2u", None)
-    raw_e1v = getattr(z_coord, "nemo_e1v", None)
-    if raw_e2u is None or raw_e1v is None:
-        raise ValueError(
-            "zad_qco_evaluation='nemo_literal' requires raw NEMO e2u/e1v")
-    e2u = jnp.asarray(raw_e2u, dtype=eta_now.dtype)
-    e1v = jnp.asarray(raw_e1v, dtype=eta_now.dtype)
+    e2u, e1v = ops.e2u, ops.e1v
     r1_area_t = jax.lax.optimization_barrier(1.0 / area_t)
     flux_levels = []
     barotropic_div = jnp.zeros_like(eta_now)

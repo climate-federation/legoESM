@@ -80,7 +80,7 @@ Cards: `D`=DINO kamm_mlf (MLF), `L`=LOCK_EXCHANGE-zco, `O`=OVERFLOW-zps,
 | S-16 | `dyn_spg_ts` continuity / transport accumulation / spg dynspg_ts.F90:~640-700,~840 | none | D L O G | `blc:494 nemo_literal_metric_transports`, `:512 nemo_literal_accumulate_transport`, `:548 nemo_literal_continuity_divergence`, `:224 _nemo_literal_barotropic_pressure_gradient`, `:147 _nemo_literal_seed_from_reference_mesh` vs the generic inline arms in `_run_substep_loop` | `barotropic_continuity_evaluation`, `barotropic_transport_accumulation_evaluation`, `barotropic_pgf_evaluation`, `barotropic_seed_evaluation`, `barotropic_seed_face_depth` | ARTIFICIAL_BRANCH x5 — NEMO has one program; defaults are the generic arm; ORCA1 on defaults |
 | S-17 | `dyn_cor_2D` (in-substep barotropic Coriolis) dynspg_ts.F90:359,689 | `ln_dynvor_ene/ens/een` | D G | `blc:944 een_barotropic_coriolis`, `:1058 barotropic_coriolis_een_pre_step`, `:731 _nemo_literal_een_coefficients`, `:840 _build_een_barotropic_inputs`; generic 4-pt `f_u*V_at_u` at `blc:1441,1494` | `barotropic_coriolis` (`avg`/`een`/`een_metric`/`ene_metric`), `barotropic_coriolis_split` (`frozen`/`live`), `barotropic_een_seed`, `barotropic_een_coefficient_evaluation` | NEMO_SWITCH on ene/een; `avg` + `frozen` = ARTIFICIAL (no NEMO arm) and is what L/O/A resolve to |
 | S-18 | `dom_qco_r3c` / `dom_qco_r3c_RK3` domqco.F90:140-186, :189-240 (r3u = **surface-weighted MEAN** of ssh) | `key_qco`; `key_qcoTest_FluxForm` sub-arm | D L O G A | ~~(a) `dynamics/latlon_cgrid_operators.py:277 min_cell_to_uface`/`:312 min_cell_to_vface` — MIN of live thickness, used by `omlc:1063 _nemo_ws_stage_transport`~~ **CORRECTED 2026-09-02 (post-1d6a7448d) — see the "Triage against HEAD 648e5cd69" section below.** `_nemo_ws_stage_transport`'s stage-transport builder (`_nemo_ws_qco_stage_faces`) does NOT call `min_cell_to_uface` for this quantity (that citation conflated this row with S-19's `zad_qco_evaluation` gate, which lives in a different function, `nemo_qco_wzv_operands`); it calls the shared kernel via `vertical.py:218 nemo_qco_live_face_geometry_cgrid` (`:140 nemo_qco_live_face_geometry_from_operands` underneath), same as the MLF tracer transport and GM/Redi. `min_cell_to_uface`'s citation at `omlc:1379-1384` is a genuinely different routine (Matsuno-split Coriolis depth-average, S-27) | `zad_qco_evaluation`/`wzv_call2_evaluation`/`gm_redi_*_face_thickness_evaluation` gate the SEPARATE S-19/S-43 consumers of the shared kernel, not this row | **OTHER_RECIPE** (was `ARTIFICIAL_BRANCH (rank 1)`) — one NEMO kernel (`nemo_qco_live_face_geometry_cgrid`/`_from_operands`) reached by every card, beside `min_cell_to_uface`'s real, separately-cited MOM6/MITgcm hFacW=min role (PE-lane depth-average/slow-forcing, `opl:1364`/`omlc:4125`), reached by DINO/LOCK/OVERFLOW/ORCA1 **and** by `veros_faithful_v1`/`mitgcm_v1`/`oceananigans_v1` (which structurally cannot reach the NEMO arm — no raw NEMO mesh operands) |
-| S-19 | `wzv` sshwzv.F90 (np_velocity / np_transport) | none (arg-level) | D L O G A | `vertical.py:1293 diagnose_w_from_flux_div` (generic); `opl:~1450 nemo_qco_wzv_operands` (literal, incl. `nemo_qco_kmm_velocity_cycle`) | `wzv_call2_evaluation` (`generic`/`nemo_literal`) | ARTIFICIAL_BRANCH — one NEMO routine, two impls; D/G literal, L/O/A generic |
+| S-19 | `wzv` sshwzv.F90 (np_velocity / np_transport) | none (arg-level) | D L O G A | `vertical.py diagnose_w_from_flux_div` (generic); `opl nemo_qco_wzv_operands` (literal, incl. `nemo_qco_kmm_velocity_cycle`) | `wzv_call2_evaluation` (`generic`/`nemo_literal`) | ARTIFICIAL_BRANCH — one NEMO routine, two impls; D/G literal, L/O/A generic. **MEASURED 2026-09-02** — the branch is arithmetic association only: stage `w` differs 3.0e-18 m/s (OVERFLOW) / 2.4e-21 m/s (LOCK), every kt=1..10 row BIT-IDENTICAL, and it does NOT own OVERFLOW's 2.599e-7 kt=2 velocity debt. Operand wall REMOVED (`nemo_qco_resolved_mesh_operands`); the remaining wall is NEMO's own call-site split. See "S-19 arm result" below |
 | S-20 | `wAimp` sshwzv.F90 (adaptive-implicit w split) | `ln_zad_Aimp` | L O A | `vertical.py:52 nemo_wicker_aimp_partition_transport` (called at `omlc:1085` per stage) | `adaptive_implicit_vertadv` | SHARED (one impl). ORCA1 consumes it at a different site (`omlc:5300+` post-program) — composition differs |
 | S-21 | stage transport `zFu/zFv` + `zub` correction stprk3_stg.F90:257-277 | none (RK3 identity) | L O G | `omlc:1046 _nemo_ws_stage_transport` | none (private, `_NEMOWSRK3TestHooks` only) | SHARED across the three RK3 cards |
 | S-22 | `dyn_adv` dispatch dynadv.F90:87-89 | `ln_dynadv_vec` / `ln_dynadv_cen2` / `ln_dynadv_up3` | D G A (vec) / L O (up3) | `opl` flux-form UP3 path (`momentum_flux_scheme="upwind3"`) vs vector-invariant path (`opl:2203+`) | `momentum_advection`, `momentum_flux_scheme` | NEMO_SWITCH |
@@ -657,7 +657,7 @@ baseline entry.
 | row | duplicate still live? | certified-card arm | ORCA1 arm | config-only re-point? | classification |
 |---|---|---|---|---|---|
 | S-18 | resolved (was a misreading) | n/a | n/a | n/a | ALREADY_COLLAPSED / OTHER_RECIPE |
-| S-19 | yes | DINO=literal; LOCK/OVERFLOW=generic | generic | no — needs raw NEMO mesh operands `nemo_qco_wzv_operands` doesn't build generically | NEEDS_ORCA1_OPERANDS |
+| S-19 | yes | DINO=literal; LOCK/OVERFLOW=generic | generic | ~~no~~ **YES since 2026-09-02** — `nemo_qco_resolved_mesh_operands` rebuilds `hu_0`/`e1e2*`/`e2u`/`e1v` from any card's own grid + reference ladder | ~~NEEDS_ORCA1_OPERANDS~~ **MEASURED_INERT** (see "S-19 arm result") |
 | S-16 | yes | DINO/LOCK/OVERFLOW/GYRE=nemo_literal | **not on this path** — ORCA1 resolves `barotropic_solver=implicit_cn` (measured), which never runs the gated code | n/a for ORCA1; the generic arm's real consumers are 19 test-matrix experiments + `nemo_v1` | **BLOCKED** (was COLLAPSIBLE_NOW — retracted 2026-09-02, see the S-16 retraction above) |
 | S-35 | yes | GYRE=both sites; LOCK/OVERFLOW=site (a) only (wrong side of dyn_zdf) | site (a) only | yes — `_fixed_depth_means` is model-generic | COLLAPSIBLE_NOW |
 | S-42 | yes | OVERFLOW=in-stage (2); LOCK=off (0) | separate driver-side `--bbl-adv` path, `bbl_adv_option` stays 0 | plausibly — same `BBLGeometry` the driver path already builds | COLLAPSIBLE_NOW |
@@ -726,3 +726,117 @@ in `orca1_ card_executed_arms.md`):
   `ln_dynldf_lap/_lev`) upgrade several of this doc's PLAUSIBLE claims to
   CONFIRMED and correct one (S-29). Full citations in
   `orca1_card_executed_arms.md`.
+
+## S-19 arm result (2026-09-02, branch `fidelity/nemo-wzv-generic-operands`)
+
+Predictions were registered first in
+`docs/ocean/fidelity/testcases/nemo_testcases_l1_wzv_arm_preregister.md`
+(commit `25f738583`), which also carries the full operand table and the NEMO
+call-site inventory. Outcome, all fp64:
+
+**1. The operand wall is gone.** `nemo_qco_wzv_operands` and
+`nemo_qco_kmm_velocity_cycle` now resolve NEMO's `hu_0`/`hv_0`/`e1e2t`/
+`e1e2u`/`e1e2v`/`e2u`/`e1v` through one `nemo_qco_resolved_mesh_operands`:
+NEMO's own arrays verbatim when a card carries `mesh_mask.nc`, otherwise
+rebuilt from the card's grid and reference ladder by the SAME
+`nemo_qco_card_mesh_operands` that `_nemo_ws_qco_stage_faces` uses (no second
+copy). LOCK_EXCHANGE, OVERFLOW and ORCA1 can now select the NEMO arm.
+
+**2. A second wall was found, and it is NEMO's own.**
+`zad_qco_evaluation='nemo_literal'` requires
+`vertical_momentum_scheme='nemo_advective'`, which is itself refused with
+`adaptive_implicit_vertadv=True`. Those selectors gate NEMO's MLF/`dynzad`
+call sites (`stpmlf.F90:227,270`). The L1 cards run NEMO's RK3 flux-form lane
+(`dynadv_up3` + `ln_zad_Aimp`, where `dynzad` is dead), whose `wzv` call is
+`stprk3_stg.F90:297`. So the row's two impls were never selectable against
+each other by those selectors on these cards; the arm below was run at the
+RK3 stage call site through the private
+`_NEMOWSRK3TestHooks.literal_stage_wzv` control.
+
+**3. The branch is arithmetic association, nothing else.**
+
+| | LOCK_EXCHANGE-zco | OVERFLOW-zps |
+|---|---|---|
+| predicted bound on max abs dw (kt=1 state) | <= 1.2e-20 m/s | <= 5.2e-18 m/s |
+| measured max abs dw, stage 1/2/3 | 2.4e-21 / 9.5e-21 | 3.0e-18 / 5.9e-18 / 3.0e-18 |
+| relative to max abs stage w | ~1e-15 | ~1e-15 |
+| kt=2 `T` / `u` / `ssh`, generic -> literal | 1.6277e-13 / 2.1388e-10 / 4.78e-28 -> unchanged | 1.1191e-14 / 2.5988e-07 / 1.0492e-14 -> unchanged |
+| kt=10 `T` / `u` / `ssh` | 3.00e-12 / 2.07e-10 / 3.58e-13 -> unchanged | 7.71e-08 / 2.64e-05 / 9.24e-05 -> unchanged |
+| every kt=1..10 trajectory row | BIT-IDENTICAL | BIT-IDENTICAL |
+
+Non-vacuity, run in the same probe: the literal branch was entered 3 times per
+step on both cards, its stage `w` is NOT bit-identical to the generic one, and
+a planted +1e-6 scaling inside it moves kt=2 `T` by 5.1e-9 (OVERFLOW) /
+3.2e-11 (LOCK). So the null is a measurement, not a dead switch.
+
+**4. P6 — DINO is untouched.** 5-day `nemo_dino_kamm_mlf` twin, 160 leapfrog
+steps, `LEGOESM_NEMO_E3T=both`, CPU fp64, byte-identical invocation, one
+variable (the commit): base `646415f02` vs HEAD `267c7b673`.
+
+```
+33 keys, worst numeric array difference = 0.000000e+00
+non-identical keys: ['producer_git_sha']    (646415f02... -> 267c7b673...)
+sha256 3cbfa0fe50911608a4fb04cfe089b8a5884989bb6662933f64f753bc8e5742ab  BASE
+sha256 0ed4963776f53b3c4a492289ec8e94aef5317b5e64bb127777589efe4ad5086f  HEAD
+```
+
+Same blind spot as `dino_reach_check.md`: the archive stores surface slices in
+float32, so this resolves a base-vs-HEAD difference only to ~1e-7 relative and
+only at the surface. What carries the claim is that pairing plus the raw
+branch's operand-for-operand identity, not the surface fields alone.
+
+**5. Stage sweep, and the profile of the debt this row does not own.** The
+phase-3 stage sweep re-run at HEAD reproduces the certified faithful row
+exactly (`kt1.stage3.faithful.instantaneous_u = 2.598797930308122e-07`, the
+same 16 digits as before the refactor). It also shows where the debt is born:
+
+| OVERFLOW-zps kt=1, faithful arm | stage 1 | stage 2 | stage 3 |
+|---|---|---|---|
+| instantaneous u vs NEMO Kaa | 6.502e-15 | 9.433e-11 | 2.599e-07 |
+
+so the kt=2 velocity residual is a STAGE-3 event, four orders above stage 2.
+`wzv` runs identically at all three stages, which is a second, independent
+reason it is not the owner.
+
+P1-P6 all CONFIRMED. **The S-19 branch is exonerated as an owner of OVERFLOW's
+kt=2 velocity debt** (Rule 4: the arm moves the metric by exactly zero, eight
+orders below the debt).
+
+**Correction to the preregistration's stated bound.** Section 4 of the
+preregister derives its bound for the FREE-SURFACE term only; it does not cover
+the second difference between the arms, which is that the literal path executes
+NEMO's divide-by-`e3t`-then-multiply-back literally while the generic path
+cancels it algebraically. That channel is closed empirically instead, by
+diffing the full 3-D stage `w` arrays: measured 3.0e-18..5.9e-18 m/s, the same
+order as the free-surface bound, so the conclusion is unaffected. Raised by the
+mechanism reviewer; recorded here rather than silently folded in.
+
+**Disposition.** The arm was NOT promoted to unbranched behaviour, because the
+condition for that was "confirmed as an improvement", and it is not an
+improvement — it is indistinguishable. Collapsing the row is still the right
+end state under "one NEMO routine, one legoESM implementation", but it changes
+executed arithmetic on certified cards at the 1e-18 level and therefore is a
+one-line ASK, not a silent default move. OPEN.
+
+### Review
+
+Two independent adversarial reviewers, both on Claude-authored code (the codex
+CLI is unavailable on this account, so the standing codex+GLM pair was served
+by two fresh subagents with disjoint briefs -- stated rather than implied).
+
+*Diff reviewer.* One Critical: the operand resolver had no guard for a
+z-coordinate carrying SOME but not all of the eight raw NEMO fields, so a
+half-attached bridge would have stopped raising and silently rebuilt every
+operand from the card. Fixed in `03f0a1a07` (found independently before the
+review returned; the reviewer confirmed the fix). One Important: the new
+operand-source test asserted only on array SHAPES and could not fail, and its
+fixture's monotone floor made the min-rule face coincide with `e3t_0` anyway.
+Fixed in `267c7b673` (ridge fixture, real assertions). Verified clean: raw-path
+bit-identity, the `_nemo_ws_qco_stage_faces` refactor, the arm's Kbb/Kaa time
+levels, differentiability, no dangling references.
+
+*Mechanism reviewer.* CONFIRMED all four claims -- the same-weighting algebra
+(`r3t = ssh*r1_ht_0`, `domqco.F90:160,209`, giving the identical
+`H_below(k)/ht_0` fraction), the scaling bound (with the correction recorded
+above), the exoneration, and the call-site structural finding. No REFUTED or
+UNDECIDED items.

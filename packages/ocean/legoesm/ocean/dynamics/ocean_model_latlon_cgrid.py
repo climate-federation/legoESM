@@ -49,6 +49,7 @@ from legoesm.ocean.vertical import (
     flux_form_vertical_tracer_advection_centered,
     nemo_qco_live_face_geometry_cgrid,
     nemo_qco_live_face_geometry_from_operands,
+    nemo_qco_card_mesh_operands,
     nemo_qco_mesh_operands,
     nemo_up3_vertical_momentum_advection,
     nemo_wicker_aimp_partition_transport,
@@ -1052,6 +1053,13 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # unweighted ``u_raw = u_Kbb + stage_dt*RHS``.  Public WS-RK3 always
     # carries the (1+r3u(Kbb)) / (1+r3u(Kmm)) / (1+r3u(Kaa)) factors.
     omit_stage_qco_factor: bool = False
+    # One-variable arm for the S-19 wzv branch: route the WS-RK3 stage
+    # cross-level velocity through the SAME nemo_qco_wzv_operands the MLF
+    # lane calls (sshwzv.F90:331-336, entered from stprk3_stg.F90:297 with
+    # np_transport) instead of the generic diagnose_w_from_flux_div.  NEMO
+    # has no such switch -- it is one routine -- so this exists only to
+    # measure the two arms against each other on the certified cards.
+    literal_stage_wzv: bool = False
 
 
 def _nemo_ws_qco_stage_faces(eta, h_ref, u_mask_3d, v_mask_3d, grid):
@@ -1077,11 +1085,11 @@ def _nemo_ws_qco_stage_faces(eta, h_ref, u_mask_3d, v_mask_3d, grid):
     they are built here from the card's own grid and reference ladder
     (``domain.F90:145`` for ``hu_0``).
 
-    ``e3u_0`` is the min-rule face of the REFERENCE thicknesses: NEMO's own
-    partial-cell reference face is the shallower neighbour's
-    (``tests/OVERFLOW/MY_SRC/usrdef_zgr.F90:179-186``), and on the certified
-    OVERFLOW-zps ``mesh_mask.nc`` ``e3u_0 == min(e3t_0_i, e3t_0_{i+1})``
-    exactly on all 16900 wet U faces.  Only the STRETCHING differed.
+    The operand construction itself lives in ``vertical.py``'s shared
+    ``nemo_qco_card_mesh_operands`` (``e3u_0`` = the min-rule face of the
+    REFERENCE thicknesses, ``hu_0`` = ``domain.F90:145``), which the PE
+    lane's ``nemo_qco_wzv_operands`` also calls, so a card without NEMO's
+    ``mesh_mask.nc`` reaches the NEMO arm on both lanes.
 
     Inputs and outputs use legoESM's redundant west/south face layout; the
     helper's native east/north extent is mapped once here.
@@ -1089,29 +1097,22 @@ def _nemo_ws_qco_stage_faces(eta, h_ref, u_mask_3d, v_mask_3d, grid):
     Returns ``(h_u, h_v, one_plus_r3u, one_plus_r3v)`` with the thicknesses
     3-D and the ratios 2-D.
     """
-    geom_grid = ensure_geometry(grid)
-    e3u_0 = min_cell_to_uface(h_ref)[:, 1:, :]
-    e3v_0 = min_cell_to_vface(h_ref, grid)[1:, :, :]
-    dtype = e3u_0.dtype
-    umask3 = jnp.asarray(u_mask_3d, dtype=dtype)[:, 1:, :]
-    vmask3 = jnp.asarray(v_mask_3d, dtype=dtype)[1:, :, :]
-    # domain.F90:145: hu_0 accumulates e3u_0*umask, so a closed face adds zero.
-    hu_0 = jnp.sum(e3u_0 * umask3, axis=-1)
-    hv_0 = jnp.sum(e3v_0 * vmask3, axis=-1)
-    area_u = (geom_grid.dx_u * geom_grid.dy_u)[:, 1:]
-    area_v = (geom_grid.dx_v * geom_grid.dy_v)[1:, :]
+    dtype = jnp.asarray(h_ref).dtype
+    # domain.F90:145 (hu_0 = SUM(e3u_0*umask)) and the C-grid metrics: ONE
+    # builder, shared with the PE lane's wzv arm, so the two lanes cannot
+    # drift apart in how they reconstruct NEMO's mesh from a card's grid.
+    ops = nemo_qco_card_mesh_operands(h_ref, u_mask_3d, v_mask_3d, grid, dtype)
     return nemo_qco_live_face_geometry_cgrid(
-        jnp.asarray(eta, dtype=dtype), e3u_0, e3v_0, umask3, vmask3,
-        hu_0, hv_0, jnp.asarray(geom_grid.area_T, dtype=dtype),
-        jnp.where(hu_0 > 0.0, area_u, 1.0),
-        jnp.where(hv_0 > 0.0, area_v, 1.0),
+        jnp.asarray(eta, dtype=dtype), ops.e3u_0, ops.e3v_0, ops.umask3,
+        ops.vmask3, ops.hu_0, ops.hv_0, ops.area_t, ops.area_u, ops.area_v,
     )
 
 
 def _nemo_ws_stage_transport(
     stage_velocity, h_stage, stage_index, *, eta_stage, h_ref, Hu_avg, Hv_avg,
     u_mask_3d, v_mask_3d, grid, z_coord, config, dt,
-    legacy_min_face_thickness=False,
+    legacy_min_face_thickness=False, eta_before=None, eta_after=None,
+    literal_wzv=False,
 ):
     """NEMO ``stprk3_stg.F90:257-304`` Kmm stage transport triplet.
 
@@ -1151,8 +1152,25 @@ def _nemo_ws_stage_transport(
     mf_u = hu_stage * u_stage_corr * u_mask_3d
     mf_v = hv_stage * v_stage_corr * v_mask_3d
     stage_div = divergence_cgrid(mf_u, mf_v, grid)
-    w_stage = diagnose_w_from_flux_div(
-        stage_div, z_coord, thickness_weighted=True)
+    if literal_wzv:
+        # sshwzv.F90:331-336 (qco arm), entered from stprk3_stg.F90:297 as
+        # ``wzv(kstp, Kbb, Kmm, Kaa, zFu, zFv, ww, np_transport)``: the SAME
+        # routine the MLF lane calls, so legoESM calls the same function --
+        # ``e2u*e3u(Kmm)*(uu+zub)`` differenced and divided by ``e1e2t`` and
+        # live ``e3t(Kmm)`` (divhor.F90:116-123,139-141), then the
+        # ``r1_Dt*e3t_0*(r3t(Kaa)-r3t(Kbb))`` stretching term.
+        _tmask3 = (
+            z_coord.is_active.astype(h_stage.dtype)
+            if isinstance(z_coord, OceanPartialCellCoordinate)
+            else jnp.ones_like(h_stage))
+        w_stage, _, _ = nemo_qco_wzv_operands(
+            eta_stage, eta_before, u_stage, v_stage, grid, z_coord,
+            u_mask_3d, v_mask_3d, _tmask3, dt,
+            eta_after_override=eta_after,
+            transport_after_override=(Hu_avg, Hv_avg))
+    else:
+        w_stage = diagnose_w_from_flux_div(
+            stage_div, z_coord, thickness_weighted=True)
     wi_stage = jnp.zeros_like(w_stage)
     if (stage_index == 2
             and getattr(config, "adaptive_implicit_vertadv", False)):
@@ -4875,7 +4893,13 @@ class LatLonCGridOceanModel:
                 u_mask_3d=_u_live_mask,
                 v_mask_3d=_v_live_mask, grid=_grid, z_coord=_zc,
                 config=_cfg_b, dt=dt,
-                legacy_min_face_thickness=_legacy_min_faces)
+                legacy_min_face_thickness=_legacy_min_faces,
+                # wzv's Kbb/Kaa ssh operands (sshwzv.F90:334): the step-entry
+                # level and the barotropic after-level, the same pair NEMO
+                # passes at stprk3_stg.F90:297.
+                eta_before=state.eta.data,
+                eta_after=state_new.eta.data,
+                literal_wzv=self._nemo_ws_test_hooks.literal_stage_wzv)
             # stprk3_stg.F90:373-378 (and dynzdf.F90's key_qco branch at
             # stage 3) weight EVERY stage velocity update by
             # (1+r3u(Kbb)) / (1+r3u(Kmm)) / (1+r3u(Kaa)).  legoESM's tracer
@@ -5238,7 +5262,8 @@ class LatLonCGridOceanModel:
             # velocity but tra_adv still saw the generic state_new velocity.
             u_corrected, v_corrected, _, _ = nemo_qco_kmm_velocity_cycle(
                 state.eta.data, state.u.data, state.v.data,
-                Hu_avg, Hv_avg, _zc, u_mask_3d_tracer, v_mask_3d_tracer)
+                Hu_avg, Hv_avg, _zc, u_mask_3d_tracer, v_mask_3d_tracer,
+                _grid)
             # traadv.F90:328-331 consumes the SAME live Kmm QCO face
             # thickness as the literal velocity cycle, not lego's generic
             # min-of-neighbour thickness. Build the native east/north faces
@@ -10330,7 +10355,7 @@ class LatLonCGridOceanModel:
                         for name in _raw_cycle_refs)):
             _, _, kmm_u, kmm_v = nemo_qco_kmm_velocity_cycle(
                 state.eta.data, state.u.data, state.v.data,
-                kaa_hu_avg, kaa_hv_avg, _zc, u_mask3, v_mask3)
+                kaa_hu_avg, kaa_hv_avg, _zc, u_mask3, v_mask3, _grid)
         u_f = _asselin(kmm_u, state.u_before.data, naa.u.data, u_mask3)
         u_f = u_f.at[:, -1].set(u_f[:, 0])
         v_f = _asselin(kmm_v, state.v_before.data, naa.v.data, v_mask3)
@@ -10670,7 +10695,7 @@ class LatLonCGridOceanModel:
                         for name in _raw_cycle_refs)):
             _, _, kmm_u, kmm_v = nemo_qco_kmm_velocity_cycle(
                 state.eta.data, state.u.data, state.v.data,
-                kaa_hu_avg, kaa_hv_avg, _zc, u_mask3, v_mask3)
+                kaa_hu_avg, kaa_hv_avg, _zc, u_mask3, v_mask3, _grid)
         u_f = _asselin(kmm_u, state.u_before.data, naa.u.data, u_mask3)
         u_f = u_f.at[:, -1].set(u_f[:, 0])
         v_f = _asselin(kmm_v, state.v_before.data, naa.v.data, v_mask3)
