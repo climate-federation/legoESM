@@ -921,8 +921,21 @@ ARTIFICIAL_BRANCH_BASELINE: dict[str, BaselineEntry] = {
     "S-16": BaselineEntry(
         reason=(
             'dyn_spg_ts continuity/transport/spg: 5 generic-vs-nemo_literal branch pairs for '
-            'one NEMO program (dynspg_ts.F90:~640-840); default is the generic arm, which '
-            'ORCA1 runs. Reclassified 2026-09-02: NEMO_DUPLICATE, CONFIRMED.'
+            'one NEMO program (dynspg_ts.F90:604-609 zhU/zhV, :627 zhdiv, :641-642 un_adv, '
+            ':682-684 zu_spg); default is the generic arm. Reclassified 2026-09-02: '
+            'NEMO_DUPLICATE, CONFIRMED. '
+            'CORRECTION 2026-09-02 (MEASURED, fp64): the earlier clause "which ORCA1 runs" '
+            'is RETRACTED -- ORCA1 resolves barotropic_solver="implicit_cn" '
+            '(nemo_match_tripole_model_config, instantiated; every committed ORCA/eORCA '
+            'sbatch agrees), which dispatches to barotropic_implicit_latlon_cgrid.py and '
+            'its own private _depth_average_to_faces:96, reading NONE of the 5 selectors. '
+            'ORCA1 never executes the gated code; the value resolving to "generic" there is '
+            'inert. The generic arm is actually EXECUTED by the explicit_substep recipes '
+            'default_wright_v1 / legoesm_linear_v1 / nemo_v1 (call counters: divergence_cgrid '
+            'fires, nemo_literal_* never), i.e. by the 19 ocean test-matrix experiments '
+            'experiments/recipe_map.py tags with those two defaults. Collapse therefore '
+            'stays BLOCKED pending a separate decision about those 19 cases -- it is not an '
+            'ORCA1 re-point. Row keeps this baseline entry.'
         ),
         kind='nemo_duplicate',
     ),

@@ -507,6 +507,68 @@ own grid when `z_coord.nemo_*` is absent) before attempting the collapse.
    new code or operand needed. (Per Rule 3/the map's own §2 ranked item 12,
    the actual default flip is a one-line-per-field ASK, not a silent move.)
 
+**2026-09-02 RETRACTION of items 3, 5 and 6 above (MEASURED on this checkout,
+fp64).** They claimed ORCA1 "resolves the generic default" and that the
+collapse is a five-field ORCA1 config flip. Both are wrong, in exactly the way
+S-18's retracted claim was wrong: a config field can RESOLVE to `"generic"` on
+a card that never EXECUTES the code that field gates.
+
+* **ORCA1 is not on this code path at all.** Instantiating the ORCA1/OMIP
+  standard card's own builder on this checkout —
+  `fidelity/nemo_match_recipe.py:394 nemo_match_tripole_model_config()`, the
+  config `run_omip_core2.py --grid tripole` builds — prints
+  `barotropic.barotropic_solver = "implicit_cn"` (measured, not read off a
+  comment). `scripts/cluster/omip_nemo/run_standard_faithful_1deg.sbatch`
+  passes no `--barotropic-solver`, so it takes that; the five other committed
+  ORCA/eORCA cards (`_e025_fullcard_smoke_{4gpu,4gpu_fp32,8gpu,8gpu_nobbl}`,
+  `run_eorca025_4gpu_multinode`) pass `--barotropic-solver implicit_cn`
+  explicitly. `implicit_cn` dispatches to
+  `dynamics/barotropic_implicit_latlon_cgrid.py`, which carries its OWN
+  private `_depth_average_to_faces` (`:96`, called at `:1370`) and reads NONE
+  of the five selectors — `_run_substep_loop` and the split-explicit
+  `_depth_average_to_faces` never run on ORCA1. The five fields resolving to
+  `"generic"` there is an INERT VALUE, not a running arm. Consequence: the
+  ORCA1 resolved-config diff for this row is EMPTY, and the ORCA1 re-point
+  mandate cannot authorise this collapse because ORCA1 is not what it changes.
+* **The generic arm's real consumers are non-NEMO recipes and test-matrix
+  cases.** `barotropic_solver` defaults to `"explicit_substep"`
+  (`state.py:1403`) and three catalog recipes select it: `default_wright_v1`,
+  `legoesm_linear_v1`, `nemo_v1`. MEASURED (fp64, call counters on the
+  module's own symbols, 3 substeps on an 8x16 basin): all three call
+  `divergence_cgrid` and never `nemo_literal_continuity_divergence` /
+  `nemo_literal_accumulate_transport` /
+  `_nemo_literal_barotropic_pressure_gradient` /
+  `_nemo_literal_seed_from_reference_mesh`. Via
+  `experiments/recipe_map.py` — whose tags are drift-tested against each
+  experiment's REAL assembled config by `tests/ocean/unit/test_recipe_map.py`
+  — those two default recipes are the dycore of 19 ocean test-matrix
+  experiments: `acc_channel`, `baroclinic`, `baroclinic_gyre`,
+  `barotropic_wave`, `geostrophic_adjustment`, `global_barotropic_wind`,
+  `inertia_gravity_wave`, `isomip_plus`, `lock_exchange`, `munk_gyre`,
+  `neverworld2_lite`, `overflow`, `phillips_two_layer`, `regional_gyre`,
+  `rest_state`, `stommel_gyre_tracer` (`default_wright_v1`) plus
+  `global_overturning`, `eady_instability`, `held_larichev`
+  (`legoesm_linear_v1`).
+* **The two arms are NOT numerically equivalent**, so this is not a free
+  deletion: the committed test `tests/ocean/unit/
+  test_barotropic_continuity_and_drag.py::
+  test_association_selector_holds_face_depth_and_drag_fixed` asserts the two
+  arms produce bit-DISTINCT `eta`.
+
+**Revised triage: NEMO_DUPLICATE (classification UNCHANGED) but BLOCKED for
+collapse, not `COLLAPSIBLE_NOW`.** Collapsing S-16 moves the numbers of 19
+test-matrix experiments plus the `nemo_v1` catalog dycore. It does NOT move
+ORCA1. Unblocking it needs a separate, explicitly-asked decision about those
+19 idealized cases (either re-baseline them on the NEMO arm, or give the
+generic FV arm a real reference and keep it as an OTHER_RECIPE fork) — it is
+not an ORCA1 re-point.
+
+The NEMO oracle lines are re-confirmed on this checkout, so the row's
+duplicate-ness is not in doubt: `dynspg_ts.F90:604-609` (`zhU`/`zhV` metric
+transports), `:627` (`zhdiv`), `:641-642` (`un_adv` accumulation), `:682-684`
+(`zu_spg`) — ONE NEMO program, two legoESM implementations. The row keeps its
+baseline entry.
+
 ### S-35 (stage-3 `zub` barotropic correction)
 
 1. **Duplicate present at HEAD?** Yes. Site (a) `ocean_model_latlon_cgrid.py:
@@ -596,7 +658,7 @@ own grid when `z_coord.nemo_*` is absent) before attempting the collapse.
 |---|---|---|---|---|---|
 | S-18 | resolved (was a misreading) | n/a | n/a | n/a | ALREADY_COLLAPSED / OTHER_RECIPE |
 | S-19 | yes | DINO=literal; LOCK/OVERFLOW=generic | generic | no — needs raw NEMO mesh operands `nemo_qco_wzv_operands` doesn't build generically | NEEDS_ORCA1_OPERANDS |
-| S-16 | yes | DINO/LOCK/OVERFLOW/GYRE=nemo_literal | generic | yes — NEMO arm needs only grid/mask, no NEMO mesh operand | COLLAPSIBLE_NOW |
+| S-16 | yes | DINO/LOCK/OVERFLOW/GYRE=nemo_literal | **not on this path** — ORCA1 resolves `barotropic_solver=implicit_cn` (measured), which never runs the gated code | n/a for ORCA1; the generic arm's real consumers are 19 test-matrix experiments + `nemo_v1` | **BLOCKED** (was COLLAPSIBLE_NOW — retracted 2026-09-02, see the S-16 retraction above) |
 | S-35 | yes | GYRE=both sites; LOCK/OVERFLOW=site (a) only (wrong side of dyn_zdf) | site (a) only | yes — `_fixed_depth_means` is model-generic | COLLAPSIBLE_NOW |
 | S-42 | yes | OVERFLOW=in-stage (2); LOCK=off (0) | separate driver-side `--bbl-adv` path, `bbl_adv_option` stays 0 | plausibly — same `BBLGeometry` the driver path already builds | COLLAPSIBLE_NOW |
 | M-01 | yes | DINO=`leapfrog`; `nemo_mlf` selected by no card (test-only) | n/a (MLF-only row) | yes, structurally — blocked on an unmeasured bit-agreement check, not an operand gap | COLLAPSIBLE_NOW (pending A/B) |
