@@ -740,25 +740,35 @@ ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
                         selected_by=("veros_faithful_v1", "oceananigans_v1", "mitgcm_v1"))),
     )),
     RoutineRow("S-33_34", "dyn_zdf / e3w(Kmm) divisor", "OTHER_RECIPE", (
-        "none (one function, two internal branch sites -- omlc:7537 (the "
-        "`zdf_implicit_solver_evaluation` shared_thomas/nemo_literal switch, "
-        "S-33's own site) and omlc:7928 (the `_dzw_slot`/"
-        "`implicit_vmix_e3t_now_divisor` divisor branch, S-34's own site), "
-        "both inside `_apply_implicit_vertical_mixing` -- neither is an "
-        "AST-distinct symbol; this duplication is OUTSIDE THE CHECKER'S REACH "
-        "(residual risk) until a refactor promotes the divisor arms to named "
-        "symbols); reclassified 2026-09-02 (CONFIRMED selection facts, "
-        "PLAUSIBLE exact F90 citation): NEMO arm cites trazdf.F90:219-220 "
-        "(LOCK/OVERFLOW/GYRE), Veros arm cites Veros thermodynamics.py:267 "
-        "(veros_faithful_v1), legacy midpoint (DINO+unclaimed default+ORCA1) "
-        "names no reference. Only one AST-checkable symbol exists (all 3 "
-        "branches share it); not diversity-enforced here."
+        "S-34 IS NOW SHARED (collapsed 2026-09-02): NEMO's e3w(Kmm) divisor "
+        "is no longer a selectable arm. The `implicit_vmix_e3t_now_divisor` "
+        "flag is DELETED and the divisor is UNBRANCHED inside the NEMO "
+        "identity `zdf_implicit_solver_evaluation=\"nemo_literal\"`, produced "
+        "by ONE canonical symbol -- `physics/vertical_mixing/implicit_solver."
+        "py::nemo_e3w_kmm` -- which BOTH the tracer solve and the momentum "
+        "solve call (e3uw_0 == e3w_0, zgr_lib.F90:111-112). Every card that "
+        "runs the routine (DINO nemo_dino_kamm_mlf, LOCK_EXCHANGE, OVERFLOW, "
+        "GYRE) reaches that one implementation; the hidden-default defect "
+        "(certified DINO card silently on the unreferenced legacy midpoint) is "
+        "GONE. Receipt: docs/ocean/fidelity/dino_zdf_divisor_arm_receipt.md. "
+        "The row stays OTHER_RECIPE because it also covers S-33, whose "
+        "`shared_thomas`/`nemo_literal` solver-evaluation fork is unchanged "
+        "and is a genuine cross-recipe fork (ORCA1 + every catalog recipe on "
+        "shared_thomas). Two arms survive at the divisor site and are NOT "
+        "NEMO's: the Veros dzw slot (`implicit_vmix_dzw_slot`, cited to Veros "
+        "thermodynamics.py:267, selected by veros_faithful_v1) and the legacy "
+        "midpoint default (unclaimed default incl. ORCA1) -- both reached only "
+        "OFF the NEMO identity. Still only one AST-checkable symbol "
+        "(omlc:7537's `_apply_implicit_vertical_mixing` encloses both sites), "
+        "so the residual risk noted before persists for S-33; not "
+        "diversity-enforced here."
     ), (
         Impl(_OMLC, "_apply_implicit_vertical_mixing",
-             Reference("nemo", "e3w_kmm_divisor_multi_arm",
-                        "trazdf.F90:219-220 (+ Veros thermodynamics.py:267; legacy midpoint default; "
-                        "all 3 branches select across two legoESM branch sites, omlc:7537 and "
-                        "omlc:7928, neither AST-distinct — see docstring)")),
+             Reference("nemo", "zdf_implicit_program",
+                        "trazdf.F90:219-221 / dynzdf.F90:200-203 (S-34's divisor is now the "
+                        "single shared nemo_e3w_kmm; the remaining fork on this symbol is "
+                        "S-33's shared_thomas/nemo_literal solver evaluation, omlc:7537, "
+                        "not AST-distinct — see docstring)")),
     )),
     RoutineRow("S-35", "stage-3 zub barotropic correction", "ARTIFICIAL_BRANCH", "none (NEMO: dyn_zdf then zub, one site)", (
         Impl(_OMLC, "_replace_stage_mean",

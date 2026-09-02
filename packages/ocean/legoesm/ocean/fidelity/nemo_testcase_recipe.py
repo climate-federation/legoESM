@@ -96,8 +96,10 @@ def _model_config(
         bbl_gamma_s=bbl_gamma_s,
         adaptive_implicit_vertadv=True,
         implicit_vertical_mixing=True,
+        # NEMO's e3w(Kmm) implicit-solve divisor (trazdf.F90:219-221,
+        # dynzdf.F90:200-203) comes WITH this identity — it is not a
+        # separate flag, because NEMO has no such switch.
         zdf_implicit_solver_evaluation="nemo_literal",
-        implicit_vmix_e3t_now_divisor=True,
         A_h=0.0,
         B_h=0.0,
         C_smag=0.0,
@@ -324,10 +326,10 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
     if cfg.barotropic.barotropic_diffusion_alpha != 0.0:
         raise ValueError(
             f"{card.case} forbids unmatched live eta diffusion")
-    if (cfg.zdf_implicit_solver_evaluation != "nemo_literal"
-            or not cfg.implicit_vmix_e3t_now_divisor):
+    if cfg.zdf_implicit_solver_evaluation != "nemo_literal":
         raise ValueError(
-            f"{card.case} requires the NEMO literal implicit-ZDF program")
+            f"{card.case} requires the NEMO literal implicit-ZDF program "
+            "(which carries NEMO's e3w(Kmm) gradient divisor)")
     if not cfg.tracer_wall_neumann_fill:
         raise ValueError(
             f"{card.case} requires NEMO's closed-wall tracer halo fill")

@@ -3020,14 +3020,16 @@ class LatLonCGridOceanModel:
             # leapfrog card) governs only whether to flip that card's default;
             # it does not transfer to nemo_mlf, which changes the surrounding
             # composition the divisor sits inside.
-            if not getattr(config, "implicit_vmix_e3t_now_divisor", False):
+            if getattr(config, "zdf_implicit_solver_evaluation",
+                       "shared_thomas") != "nemo_literal":
                 raise ValueError(
                     'outer_integrator="nemo_mlf" requires '
-                    "implicit_vmix_e3t_now_divisor=True: nemo_mlf is a literal "
-                    "transcription of stpmlf.F90's dyn_zdf/tra_zdf calls, whose "
-                    "implicit-solve gradient divisor is e3w(Kmm) (trazdf.F90:"
-                    "219-220), not legoESM's default after-solve midpoint slot. "
-                    "Set implicit_vmix_e3t_now_divisor=True.")
+                    'zdf_implicit_solver_evaluation="nemo_literal": nemo_mlf '
+                    "is a literal transcription of stpmlf.F90's dyn_zdf/tra_zdf "
+                    "calls, whose implicit-solve gradient divisor is e3w(Kmm) "
+                    "(trazdf.F90:219-221), not legoESM's default after-solve "
+                    "midpoint slot. That divisor is part of the NEMO identity, "
+                    'so select it: zdf_implicit_solver_evaluation="nemo_literal".')
             # RETRACTED 2026-08-21 (#1455): the waiver this guard used to
             # rest on said mlf_baro_corr (stpmlf.F90 row 30) was "PROVABLY a
             # no-op" under surface_stress_implicit=False, because no depth-mean
@@ -3426,28 +3428,17 @@ class LatLonCGridOceanModel:
                 "no implicit solve to host it. Set implicit_vertical_mixing=True, "
                 "or implicit_vmix_dzw_slot=False to keep the midpoint slot.")
 
-        # NEMO-faithful e3w(Kmm) divisor (#1226 W1): same "needs an implicit
-        # solve to host it" reasoning as implicit_vmix_dzw_slot above, plus
-        # mutual exclusion — the two flags pick DIFFERENT divisor slots
-        # (Veros dzw vs NEMO e3w(Kmm)); selecting both is ambiguous, not a
-        # silent priority order.
-        if (getattr(config, "implicit_vmix_e3t_now_divisor", False)
-                and not config.implicit_vertical_mixing):
-            raise ValueError(
-                "implicit_vmix_e3t_now_divisor=True requires "
-                "implicit_vertical_mixing=True: the NEMO e3w(Kmm) gradient "
-                "slot is the divisor of the backward-Euler tracer/momentum-"
-                "friction vertical-diffusion solve (trazdf.F90:219-220). With "
-                "explicit vertical mixing there is no implicit solve to host "
-                "it. Set implicit_vertical_mixing=True, or "
-                "implicit_vmix_e3t_now_divisor=False to keep the midpoint "
-                "slot.")
-        if (getattr(config, "implicit_vmix_dzw_slot", False)
-                and getattr(config, "implicit_vmix_e3t_now_divisor", False)):
-            raise ValueError(
-                "implicit_vmix_dzw_slot and implicit_vmix_e3t_now_divisor are "
-                "mutually exclusive: both select the implicit-solve gradient "
-                "divisor (Veros dzw vs NEMO e3w(Kmm)) — set at most one.")
+        # The NEMO e3w(Kmm) divisor is no longer a flag: it belongs to the
+        # NEMO identity (zdf_implicit_solver_evaluation="nemo_literal"), which
+        # selects the literal dyn_zdf/tra_zdf program it lives in.  The old
+        # mutual-exclusion raise against `implicit_vmix_e3t_now_divisor` goes
+        # with the field.  It is NOT retargeted onto the identity: that would
+        # make a previously-tolerated combination a hard error, no card in the
+        # tree selects both (`veros_faithful_v1`, the only dzw consumer, runs
+        # `shared_thomas`), and it would break the committed divisor probe that
+        # plants a coordinate through the dzw slot.  Precedence is explicit and
+        # documented at the divisor block instead: the Veros dzw slot is
+        # checked FIRST, so a config selecting both gets Veros's divisor.
 
         # Additive momentum vertical-friction placement (Veros solve_stream.py)
         # is defined relative to the AB2 outer integrator (the increment is
@@ -6485,9 +6476,9 @@ class LatLonCGridOceanModel:
                     grid=_grid, n2_tracers=_n2_tracers,
                     n2_tracers_before=_n2_tracers_before,
                     tke_n2_bundle=_tke_n2_bundle,
-                    # NEMO e3w(Kmm) divisor (#1226 W1): state_new is the
-                    # post-update AFTER state; state.eta is NOW. No-op when
-                    # implicit_vmix_e3t_now_divisor is off.
+                    # NEMO e3w(Kmm) divisor: state_new is the post-update
+                    # AFTER state; state.eta is NOW. Read only under the NEMO
+                    # identity (zdf_implicit_solver_evaluation="nemo_literal").
                     eta_now=state.eta.data,
                     u_now=state.u.data, v_now=state.v.data,
                     nemo_aimp_tracer_w=_nemo_ws_aimp_tracer_w,
@@ -7896,8 +7887,9 @@ class LatLonCGridOceanModel:
         _tke_ctx = None
         from legoesm.ocean.physics.vertical_mixing import (
             implicit_vertical_diffusion_ocean_batched, build_dz_half,
-            compute_vertical_K_profiles,
+            compute_vertical_K_profiles, nemo_e3w_kmm,
         )
+        from legoesm.ocean.eos import nemo_r3t_stretch
         from legoesm.ocean.vertical import compute_ocean_jacobian
         from legoesm.ocean.dynamics.latlon_cgrid_operators import (
             interp_cell_to_uface,
@@ -8127,14 +8119,21 @@ class LatLonCGridOceanModel:
         # (config.implicit_vmix_dzw_slot, #428) uses the coordinate's
         # center-to-center spacing dz_half_ref·J = Veros's dzw, which differs from
         # the midpoint on a u_centered z-coordinate.  NO-OP on a midpoint z-star.
-        # The NEMO-faithful slot (config.implicit_vmix_e3t_now_divisor, #1226 W1)
-        # instead uses the NOW-level (pre-solve) thickness midpoint, matching
-        # NEMO's e3w(Kmm) (trazdf.F90:219-220).  Call sites that pass a
-        # post-update AFTER state (_leapfrog_step's naa_expl — the DINO
-        # kamm_mlf production path; _unsplit_ab2_step's state_corr;
-        # _ab2_step's state_ab2; _step_impl's state_new) thread the true NOW
-        # eta explicitly via ``eta_now``; the momentum-only friction call
-        # passes the step-entry state directly, so its fallback
+        # The NEMO identity (zdf_implicit_solver_evaluation="nemo_literal", the
+        # literal dyn_zdf/tra_zdf program) divides by e3w(Kmm) UNBRANCHED —
+        # NEMO has no switch here, so neither do we: one canonical
+        # ``nemo_e3w_kmm`` serves the tracer solve and the momentum solve
+        # (e3uw_0 IS e3w_0 on the zco branch, zgr_lib.F90:111-112).  The former
+        # ``implicit_vmix_e3t_now_divisor`` flag, which fixed only the time
+        # level and kept the midpoint SLOT, is GONE: it selected a divisor NEMO
+        # does not have, and the certified DINO card never set it (measured
+        # +0.29% median / +0.90% max too large, abyss-weighted —
+        # docs/ocean/fidelity/dino_zdf_divisor_scaling.md).
+        # Call sites that pass a post-update AFTER state (_leapfrog_step's
+        # naa_expl — the DINO kamm_mlf production path; _unsplit_ab2_step's
+        # state_corr; _ab2_step's state_ab2; _step_impl's state_new) thread the
+        # true NOW eta explicitly via ``eta_now``; the momentum-only friction
+        # call passes the step-entry state directly, so its fallback
         # (eta_now=None -> state.eta) IS the NOW eta.  A future call site
         # that passes an AFTER state without eta_now would silently divide by
         # the AFTER thickness — thread eta_now there too, and ``u_now``/
@@ -8143,21 +8142,26 @@ class LatLonCGridOceanModel:
         # Static Python bools (feature-gating exception, CLAUDE.md) — config
         # is not traced.
         _dzw_slot = bool(getattr(_cfg_b, "implicit_vmix_dzw_slot", False))
-        _e3t_now_slot = bool(
-            getattr(_cfg_b, "implicit_vmix_e3t_now_divisor", False))
-        # Cell-centered NOW thickness (only computed / used under the e3t_now
-        # slot; also feeds the u/v-face divisor below so tracer and momentum
-        # solves share one NOW-eta evaluation).
+        _zdf_literal = (getattr(
+            _cfg_b, "zdf_implicit_solver_evaluation", "shared_thomas")
+            == "nemo_literal")
+        # Cell-centered NOW thickness and NOW (1+r3t) (only computed / used
+        # under the NEMO identity; both feed the u/v-face divisor below so the
+        # tracer and momentum solves share one NOW-eta evaluation).
         e3t_now = None
+        _stretch_now = None
         if _dzw_slot:
             dz_half_cell = (_zc.dz_half_ref
                             * J_cell[..., jnp.newaxis]).astype(dz_cell.dtype)
-        elif _e3t_now_slot:
+        elif _zdf_literal:
             _eta_now = eta_now if eta_now is not None else state.eta.data
             e3t_now = compute_layer_thickness(
                 _eta_now, state.H_bathy.data, _zc,
                 min_water_column_m=_cfg_b.min_water_column_m)
-            dz_half_cell = build_dz_half(e3t_now).astype(dz_cell.dtype)
+            _stretch_now = nemo_r3t_stretch(
+                _zc, _eta_now, state.H_bathy.data)
+            dz_half_cell = nemo_e3w_kmm(
+                _zc, e3t_now, _stretch_now).astype(dz_cell.dtype)
         else:
             dz_half_cell = build_dz_half(dz_cell)
 
@@ -8329,18 +8333,26 @@ class LatLonCGridOceanModel:
                 J_v = interp_to_v_points(J_cell[..., jnp.newaxis], _grid)
                 dz_half_u = (_zc.dz_half_ref * J_u).astype(dz_u.dtype)
                 dz_half_v = (_zc.dz_half_ref * J_v).astype(dz_v.dtype)
-            elif _e3t_now_slot:
-                # NEMO e3w(Kmm) at u/v-faces (#1226 W1): interpolate the SAME
-                # NOW-level thickness (e3t_now, cell-centered above) to the
-                # faces with the SAME interps that built the UNMASKED
-                # dz_{u,v}_open, matching the dzw-slot sibling's
-                # face-consistency pattern.  NEMO closes this interface with
-                # ``wumask`` (dynzdf.F90:183-185), not with a zeroed e3uw, so
-                # the mask does not belong on the gradient slot either.
-                e3t_now_u = interp_cell_to_uface(e3t_now)
-                e3t_now_v = interp_to_v_points(e3t_now, _grid)
-                dz_half_u = build_dz_half(e3t_now_u).astype(dz_u.dtype)
-                dz_half_v = build_dz_half(e3t_now_v).astype(dz_v.dtype)
+            elif _zdf_literal:
+                # NEMO e3uw(Kmm)/e3vw(Kmm) at u/v-faces: the SAME canonical
+                # e3w(Kmm) the tracer solve divides by, mapped to the face —
+                # ``zgr_lib.F90:111-112`` sets pe3uw = pe3vw = pe3w on the zco
+                # branch, so there is one object, not two.  The face map is the
+                # SAME interp that built the UNMASKED dz_{u,v}_open.  NEMO
+                # closes this interface with ``wumask`` (dynzdf.F90:200-203),
+                # not with a zeroed e3uw, so the mask does not belong on the
+                # gradient slot either.
+                # DISCLOSED, not fixed here: NEMO stretches e3uw by r3u — the
+                # AREA-WEIGHTED ssh average over the two T cells divided by
+                # hu_0 (domqco.F90:164-167) — while this face map averages the
+                # already-stretched T-point field.  That is a separate row.
+                dz_half_u = nemo_e3w_kmm(
+                    _zc, e3t_now, _stretch_now,
+                    to_point=interp_cell_to_uface).astype(dz_u.dtype)
+                dz_half_v = nemo_e3w_kmm(
+                    _zc, e3t_now, _stretch_now,
+                    to_point=lambda f: interp_to_v_points(f, _grid),
+                ).astype(dz_v.dtype)
             else:
                 dz_half_u = build_dz_half(dz_u_open)
                 dz_half_v = build_dz_half(dz_v_open)
@@ -8545,9 +8557,8 @@ class LatLonCGridOceanModel:
             and do_tracers and do_momentum
             and not getattr(_cfg_b, "zdf_drag_in_matrix", False)
         )
-        _zdf_literal = (getattr(
-            _cfg_b, "zdf_implicit_solver_evaluation", "shared_thomas")
-            == "nemo_literal")
+        # (``_zdf_literal`` — the NEMO identity — is resolved once, above the
+        # divisor block that also keys off it.)
         # The source-ordered path is intentionally not routed through the
         # performance-only batched solver: doing so would replace its three
         # separate recurrences with the shared generic lowering.
@@ -10340,13 +10351,13 @@ class LatLonCGridOceanModel:
                 n2_tracers=self._n2_before_advection_tracers(state, z_coord=z_coord, config=config),
                 n2_tracers_before=self._n2_nemo_before_tracers(state, z_coord=z_coord, config=config),
                 tke_n2_bundle=_tke_n2_bundle,
-                # NEMO e3w(Kmm) divisor (config.implicit_vmix_e3t_now_divisor,
-                # #1226 W1): naa_expl.eta is the barotropic AFTER/Kaa level
-                # ("h at state_expl.eta is the Kaa thickness" above);
-                # state.eta is the Nnn/NOW level (the same eta h_k is built
-                # from). This is THE production path for the DINO kamm_mlf
-                # recipe (outer_integrator=leapfrog). No-op when the flag is
-                # off.
+                # NEMO e3w(Kmm) divisor (trazdf.F90:219-221): naa_expl.eta is
+                # the barotropic AFTER/Kaa level ("h at state_expl.eta is the
+                # Kaa thickness" above); state.eta is the Nnn/NOW level (the
+                # same eta h_k is built from). This is THE production path for
+                # the DINO kamm_mlf recipe (outer_integrator=leapfrog). Read
+                # only under the NEMO identity
+                # (zdf_implicit_solver_evaluation="nemo_literal").
                 eta_now=state.eta.data,
                 u_now=state.u.data, v_now=state.v.data,
                 nemo_tracer_content_rhs=_nemo_tracer_content_rhs,
@@ -10520,13 +10531,13 @@ class LatLonCGridOceanModel:
         at NEMO's own position (after ``dyn_zdf``, before the Asselin filter).
         It stays OPT-IN, so a card that does not select it is unchanged.
 
-        Implicit-vmix divisor (spec §6-4, resolved decision 4): this method
-        does NOT itself raise on ``config.implicit_vmix_e3t_now_divisor`` (that
-        construction-time hard-require is P2's config-surface work) — it simply
-        uses whatever the config's divisor is via the SAME ``eta_now=`` kwarg
-        ``_leapfrog_step`` already threads to ``_apply_implicit_vertical_
-        mixing``.  P2 will add the raise when ``outer_integrator="nemo_mlf"``
-        is wired.
+        Implicit-vmix divisor (spec §6-4, resolved decision 4): the divisor
+        is no longer a separate flag — it belongs to the NEMO identity
+        ``zdf_implicit_solver_evaluation="nemo_literal"``, which
+        ``outer_integrator="nemo_mlf"`` hard-requires at construction.  This
+        method simply uses that divisor via the SAME ``eta_now=`` kwarg
+        ``_leapfrog_step`` already threads to
+        ``_apply_implicit_vertical_mixing``.
         """
         _zc = self.z_coord if z_coord is None else z_coord  # SPMD band override
         _cfg_b = self.config if config is None else config  # SPMD band override
@@ -10925,10 +10936,10 @@ class LatLonCGridOceanModel:
             state_corr, dt, surface_forcing, K33_iso=k33_iso, grid=_grid,
             # NEMO eosbn2 Nnow N²: step-entry (before-advection) T/S.
             n2_tracers=self._n2_before_advection_tracers(state, z_coord=z_coord, config=config),
-            # NEMO e3w(Kmm) divisor (config.implicit_vmix_e3t_now_divisor,
-            # #1226 W1): the true pre-barotropic-solve NOW eta (state_corr.eta
-            # is the AFTER/Naa level built at step 3 above). No-op when the
-            # flag is off (eta_now is read only inside the _e3t_now_slot branch).
+            # NEMO e3w(Kmm) divisor (trazdf.F90:219-221): the true
+            # pre-barotropic-solve NOW eta (state_corr.eta is the AFTER/Naa
+            # level built at step 3 above). Read only under the NEMO identity
+            # (zdf_implicit_solver_evaluation="nemo_literal").
             eta_now=state.eta.data,
             u_now=state.u.data, v_now=state.v.data, z_coord=z_coord, config=config, iwm_fields=iwm_fields)
 
