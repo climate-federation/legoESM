@@ -8888,6 +8888,44 @@ def main() -> int:
                 else:
                     print(f"[fwbudget-bands] SKIPPED: lat {_latb.shape} does "
                           f"not align with the mask {_wb.shape}", flush=True)
+                # Under-ice HEAT handed to the ocean (2026-09-02): the polar
+                # top cell supercools ~1 K per 100 d on every grid while NEMO
+                # never drops below freezing, and snapshot column budgets lose
+                # ~34 W/m2 under FULL cover where no ice-side term should
+                # extract anything.  Area-weighted means per cover class so the
+                # applied flux can be reconciled with the state's dH/dt.
+                try:
+                    if (_latb is not None and _latb.shape == _wb.shape
+                            and ice_resp is not None and sf.q_net is not None):
+                        _A = np.asarray(_ice_conc_pre, dtype=np.float64)
+                        _qn = np.asarray(sf.q_net, dtype=np.float64)
+                        _swh = (np.asarray(sf.sw_down, dtype=np.float64)
+                                if sf.sw_down is not None else np.zeros_like(_qn))
+                        _ext = np.asarray(
+                            getattr(ice_resp, "ocean_heat_extraction", 0.0),
+                            dtype=np.float64) * np.ones_like(_qn)
+                        _sst = np.asarray(state.T.data, dtype=np.float64)[..., 0]
+                        _wgt = _Ab * _wb
+                        print(f"[heat-icecover] day={step * dt / 86400.0:.2f} "
+                              "W/m2, + = into ocean:", flush=True)
+                        for _bn, _lm in (("arctic_N_of_60N", _latb >= 60),
+                                         ("antarctic_S_of_60S", _latb < -60)):
+                            for _cn, _cm in (("A>=0.99", _A >= 0.99),
+                                             ("0.5<=A<0.99", (_A >= 0.5) & (_A < 0.99)),
+                                             ("A<0.15", _A < 0.15)):
+                                _m = _lm & _cm & (_wgt > 0)
+                                if not _m.any():
+                                    continue
+                                _w = _wgt[_m] / _wgt[_m].sum()
+                                print(f"[heat-icecover]   {_bn:18s} {_cn:12s} n={int(_m.sum()):6d} "
+                                      f"q_net={float((_qn[_m]*_w).sum()):8.2f} "
+                                      f"sw={float((_swh[_m]*_w).sum()):7.2f} "
+                                      f"ice_extract={float((_ext[_m]*_w).sum()):8.2f} "
+                                      f"SST={float((_sst[_m]*_w).sum()):7.3f} "
+                                      f"A={float((_A[_m]*_w).sum()):.3f}", flush=True)
+                except Exception as _hx:  # a print must never end an integration
+                    print(f"[heat-icecover] SKIPPED: {type(_hx).__name__}: {_hx}",
+                          flush=True)
             # _ocean_step = single-device model.step (default), the lat-band
             # SPMD global-in/global-out step (--n-gpus > 1), or the PERSISTENT
             # sharded inner step (--spmd-persistent-state); all apply the

@@ -40,13 +40,13 @@ for g in trpvisc180 mpasfullharm180; do
 done
 echo; echo "########## THREE-WAY maps + zonal means"
 for pair in "30 $GW_T 5" "90 $GW_T 17" "105 $REF_T 3"; do
-  set -- $pair; day=$1; f=$2; idx=$3
-  t=$R/trp_visc180/snapshot_day0$day.npz; m=$R/mpas_fullharm_180d/snapshot_day0$day.npz
+  set -- $pair; printf -v day %04d $1; f=$2; idx=$3
+  t=$R/trp_visc180/snapshot_day$day.npz; m=$R/mpas_fullharm_180d/snapshot_day$day.npz
   [ -r "$t" ] && [ -r "$m" ] || { echo "SKIP three-way d$day"; continue; }
   $PY -u scripts/validate/ocean_fidelity/compare_three_way_nemo.py \
     --tripole "$t" --mpas "$m" --nemo-gridt "$f" --nemo-time-idx $idx \
     --label-tripole "tripole visc180" --label-mpas "MPAS fullharm180" \
-    --out-dir $R/threeway180_d0$day 2>&1 | tail -30
+    --out-dir $R/threeway180_d$day 2>&1 | tail -30
   echo "=== three-way d$day rc=$?"
 done
 echo DONE
