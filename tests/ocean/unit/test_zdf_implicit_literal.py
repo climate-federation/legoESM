@@ -227,7 +227,6 @@ def test_production_literal_route_uses_full_step_active_masks():
         A_v=1.0e-3, K_v=1.0e-4, A_h=0.0, K_h=0.0,
         implicit_vertical_mixing=True,
         zdf_implicit_solver_evaluation="nemo_literal",
-        implicit_vmix_e3t_now_divisor=True,
     )
     out = LatLonCGridOceanModel(grid, z_coord, cfg)._apply_implicit_vertical_mixing(
         state, 1800.0, surface_forcing=None)

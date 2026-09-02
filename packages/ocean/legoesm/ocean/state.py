@@ -2572,28 +2572,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     #     is unchanged — only the gradient slot moves.  Requires
     #     ``implicit_vertical_mixing=True`` (rejected otherwise at config
     #     validation).  Default False ⇒ BIT-IDENTICAL for every existing config.
+    # NEMO's own divisor is NOT a flag: ``e3w(Kmm)`` (trazdf.F90:219-221,
+    # dynzdf.F90:200-203) is unbranched inside the NEMO identity
+    # ``zdf_implicit_solver_evaluation="nemo_literal"``, so this Veros slot
+    # is mutually exclusive with that identity (rejected at construction).
     implicit_vmix_dzw_slot: bool = False
-    # --- NEMO-faithful implicit-solve gradient divisor (#1226 W1) ---
-    # NEMO (trazdf.F90:219-220) builds the SAME gradient divisor from
-    # ``e3w(...,Kmm)`` — called from stpmlf.F90:370 as
-    # ``tra_zdf(kstp, Nbb, Nnn, Nrhs, ts, Naa)``, whose dummy arg ``Kmm`` binds
-    # to ``Nnn``, NEMO's NOW time level.  legoESM's default divisor
-    # (``implicit_vmix_dzw_slot=False``) is the midpoint of the AFTER-solve
-    # thickness (``build_dz_half(dz_cell)``, ``dz_cell`` built from the
-    # barotropic-updated ``state_corr.eta``); this option instead builds the
-    # center-to-center divisor from the NOW-level (Nnn/Kmm) thickness,
-    # threaded to ``_apply_implicit_vertical_mixing`` via its ``eta_now``
-    # kwarg by every call site that passes a post-update AFTER state
-    # (_leapfrog_step — the DINO kamm_mlf production path — plus
-    # _unsplit_ab2_step, _ab2_step, _step_impl); the momentum-only friction
-    # call passes the step-entry NOW state directly (fallback correct).
-    # Mutually exclusive with ``implicit_vmix_dzw_slot`` (both pick the same
-    # divisor SLOT — Veros dzw vs NEMO e3w(Kmm) — selecting both is a config
-    # error, not a fallback). Requires ``implicit_vertical_mixing=True`` (same
-    # guard as ``implicit_vmix_dzw_slot``). Default False ⇒ BIT-IDENTICAL for
-    # every existing config. OPT-IN measurement knob only — NOT wired into any
-    # recipe/kamm card (measurement decides).
-    implicit_vmix_e3t_now_divisor: bool = False
     # --- Meridionally-FLAT (Oceananigans `Flat`-y topology) ---
     # When True, every meridional DIFFERENCE operator returns 0 — the faithful
     # legoESM analog of an Oceananigans `topology=(…, Flat, …)` dimension

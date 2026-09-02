@@ -51,7 +51,8 @@ LEGOESM'S EXECUTING ARM
     D_lego = build_dz_half(h_partial * J(eta_AFTER))
            = 0.5*(dz_k + dz_{k+1}) * (1 + eta_AFTER / H)
 
-with both ``implicit_vmix_dzw_slot`` and ``implicit_vmix_e3t_now_divisor``
+with both ``implicit_vmix_dzw_slot`` and the (since-removed)
+``implicit_vmix_e3t_now_divisor``
 False on the certified card (measured here, Rule 10).  So it differs from NEMO
 in TWO independent ways:
 
@@ -60,7 +61,7 @@ in TWO independent ways:
 
 ``implicit_vmix_dzw_slot=True`` fixes (a) only (it uses ``z_coord.dz_half_ref``,
 which on this card IS NEMO's ``e3w_0`` -- measured, rel 0.0);
-``implicit_vmix_e3t_now_divisor=True`` fixes (b) only.  Neither flag alone is
+``implicit_vmix_e3t_now_divisor=True`` fixed (b) only.  Neither flag alone was
 NEMO.  On a single call with one state, eta_NOW == eta_AFTER, so the dzw arm IS
 exactly NEMO's divisor and isolates (a) as a clean one-variable arm (Rule 7).
 
@@ -300,7 +301,7 @@ def main() -> int:
                             int(np.asarray(br.z_coord.dz_ref).shape[-1]))
 
     print("\n--- RESOLVED CARD (Rule 10: instantiate and print) ---")
-    for f in ("implicit_vmix_dzw_slot", "implicit_vmix_e3t_now_divisor",
+    for f in ("implicit_vmix_dzw_slot", "zdf_implicit_solver_evaluation",
               "implicit_vertical_mixing", "outer_integrator"):
         print(f"  {f:34s} = {getattr(mc, f, '<absent>')!r}")
     zc = br.z_coord
@@ -357,7 +358,8 @@ def main() -> int:
 
     results = {"git_sha": sha, "recipe": args.recipe,
                "flags": {f: bool(getattr(mc, f, False)) for f in (
-                   "implicit_vmix_dzw_slot", "implicit_vmix_e3t_now_divisor")},
+                   "implicit_vmix_dzw_slot",
+                   "zdf_implicit_solver_evaluation")},
                "static_slot_offset": {
                    "max_abs": float(np.abs(static_rel).max()),
                    "median_abs": float(np.median(np.abs(static_rel)))},
