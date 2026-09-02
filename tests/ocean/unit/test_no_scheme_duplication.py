@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
+import re
 
 import pytest
 
@@ -231,6 +232,51 @@ def test_common_modules_import_cleanly():
 # and ``_nemo_branch_isomorphism_baseline.py`` for the registry this checks.
 # ---------------------------------------------------------------------
 
+_DOC_PATH = pathlib.Path(__file__).resolve().parents[3] / (
+    "docs/ocean/fidelity/nemo_branch_isomorphism_map.md")
+
+# A doc-row id, at the start of a markdown table row: "| S-03 | ..." or
+# "| M-01 | ...". Matches only the audit's "Routine -> implementation map"
+# table (section 1) and the reclassification table appended in section 6 —
+# no other table in the doc uses this first-column format.
+_DOC_ROW_ID_RE = re.compile(r"^\|\s*([SM]-\d+)\s*\|")
+
+# A registry routine_id may cover more than one doc row id (e.g. "S-28_29"
+# covers both S-28 and S-29) or fewer than a full id (e.g. "S-07b" is a named
+# sub-branch of doc row "S-07"). Ids that don't match either shape (e.g.
+# "CARD-ASSEMBLY") are legoESM-internal rows with no doc-row counterpart.
+_COMBINED_ID_RE = re.compile(r"^([SM])-(\d+)_(\d+)$")
+_SUFFIXED_ID_RE = re.compile(r"^([SM])-(\d+)[a-z]$")
+
+
+def _doc_row_ids() -> set[str]:
+    """The set of S-xx/M-xx row ids the audit doc actually enumerates,
+    parsed straight from its own markdown table(s) — the doc is the source
+    of truth for "how many routines were audited", not a hardcoded count."""
+    text = _DOC_PATH.read_text()
+    ids: set[str] = set()
+    for line in text.splitlines():
+        m = _DOC_ROW_ID_RE.match(line)
+        if m:
+            ids.add(m.group(1))
+    return ids
+
+
+def _covered_doc_ids(routine_id: str) -> set[str]:
+    """Doc row id(s) a given registry ``routine_id`` counts as covering."""
+    if re.match(r"^[SM]-\d+$", routine_id):
+        return {routine_id}
+    m = _COMBINED_ID_RE.match(routine_id)
+    if m:
+        letter, n1, n2 = m.groups()
+        return {f"{letter}-{n1}", f"{letter}-{n2}"}
+    m = _SUFFIXED_ID_RE.match(routine_id)
+    if m:
+        letter, n = m.groups()
+        return {f"{letter}-{n}"}
+    return set()
+
+
 def _ast_symbol_exists(rel_path: str, symbol: str) -> bool:
     """True if a ``def``/``class`` named ``symbol`` is AST-resolvable
     anywhere in the file at ``rel_path`` (top-level or nested — a helper
@@ -332,11 +378,39 @@ def test_nemo_branch_isomorphism_registry_is_clean():
     assert not errors, "\n".join(errors)
 
 
+def test_nemo_branch_isomorphism_registry_covers_all_doc_rows():
+    """Coverage gate (independent-review Finding 1, 2026-09-02): every S-xx/
+    M-xx row the audit doc enumerates must appear in ROUTINE_REGISTRY — fully
+    enforced (AST-resolvable impls) or as an explicit placeholder row (empty
+    or single-symbol impls with a one-line reason). A doc row silently
+    missing from the registry is exactly how S-11, S-12, S-15, S-22, S-30,
+    S-31, S-36, S-39, S-43, S-44, M-02, M-03, M-06 went unenforced despite the
+    module docstring's "full map coverage" claim."""
+    doc_ids = _doc_row_ids()
+    covered: set[str] = set()
+    for row in ROUTINE_REGISTRY:
+        covered |= _covered_doc_ids(row.routine_id)
+    missing = sorted(doc_ids - covered)
+    assert not missing, (
+        f"{len(missing)} doc row(s) missing from ROUTINE_REGISTRY: {missing} "
+        "-- add a RoutineRow (see nemo_branch_isomorphism_map.md for the "
+        "citation), even if only as an unenforced placeholder with a reason.")
+
+
 def test_nemo_branch_isomorphism_registry_nonvacuous():
     """Anti-vacuity: the registry and baseline actually have rows (an empty
-    registry would make the gate above pass trivially)."""
-    assert len(ROUTINE_REGISTRY) >= 20, (
-        "NEMO branch-isomorphism registry looks empty/truncated")
+    registry would make the gate above pass trivially). The registry-size
+    check is tightened to EQUALITY with the doc's own row count (not a loose
+    ">=20") so a future truncation of either side is caught immediately."""
+    doc_row_count = len(_doc_row_ids())
+    assert doc_row_count >= 20, (
+        "doc row parser found too few rows -- broken regex, or "
+        "nemo_branch_isomorphism_map.md itself looks empty/truncated "
+        f"({doc_row_count} rows)")
+    assert len(ROUTINE_REGISTRY) == doc_row_count, (
+        f"ROUTINE_REGISTRY has {len(ROUTINE_REGISTRY)} rows, doc has "
+        f"{doc_row_count} -- see test_nemo_branch_isomorphism_registry_"
+        "covers_all_doc_rows for which one(s)")
     assert len(ARTIFICIAL_BRANCH_BASELINE) >= 5, (
         "artificial-branch baseline looks empty/truncated")
 

@@ -297,3 +297,98 @@ Ranked by (cards affected) x (how much arithmetic diverges) x (whether the defau
   the ~12 `gm_redi_*_evaluation` arms were not individually traced to their
   NEMO lines.
 - No claim here is backed by a numeric run. Everything is source-traced.
+
+## 6. 2026-09-02 reclassification (mistake vs. legitimate multi-recipe fork)
+
+Independent follow-up pass, reproduced verbatim from a separate agent's
+reclassification table (source checkout `/tmp/l1-overflow-ro` @ `28d166428`,
+branch `fidelity/nemo-testcases-l1-codex`; GYRE card read at
+`b2f7c298`/`fidelity/nemo-testcases-l2-gyre-codex` via `git show`, not merged
+to that checkout; no tracked file modified in either checkout). Applied to
+`tests/ocean/unit/_nemo_branch_isomorphism_baseline.py` in the same PR that
+added this section — see that file's module docstring for the mechanical
+consequences (registry `disposition` changes, baseline-dict removals).
+
+**Count correction**: this doc literally tags **19** rows `ARTIFICIAL_BRANCH`
+(S-03, S-04, S-07, S-09, S-12, S-16, S-18, S-19, S-25, S-27, S-29, S-30,
+S-32, S-33, S-34, S-35, S-40, S-42, M-01 — grep-counted), not 27. All 19 are
+classified below.
+
+### 6.1 Full table
+
+| # | NEMO routine | implementations | selected by (recipes/cards) | reference named | classification | confidence |
+|---|---|---|---|---|---|---|
+| S-03 | `bn2` eosbn2.F90:253-288 | `eos.py:2627` insitu; `eos.py:2667` adiabatic; `eos.py:624` nemo_bn2 | insitu: KPP module + OMIP climate-match recipes (`omip_nemo_match_tripole_v1`/`_mpas_v1`) + any untouched card; adiabatic: Veros recipes (`veros_global_4deg_recipe.py:217`, `veros_acc_*recipe.py`); nemo_bn2: DINO, GYRE, and ORCA1 (`run_omip_core2.py:770`, confirmed, upgrades doc's "UNVERIFIED" to CONFIRMED) | nemo_bn2 cites eosbn2.F90 directly; adiabatic = Veros's own scheme (config.py:310-316); insitu = unreferenced legacy/KPP default | **OTHER_RECIPE** | CONFIRMED |
+| S-04 | `bn2` live-e3w geometry eosbn2.F90:253-258 | `eos.py:754/775/892/590` (nemo_literal geometry) vs `preassembled_live` (default) | nemo arm: DINO + GYRE only (both `n2_mode="nemo_bn2"` AND `tke_n2_evaluation_stage="step_entry"`); no Veros/MITgcm/Oceananigans recipe touches `tke_n2_evaluation_stage` at all | nemo arm cites eosbn2.F90 (config.py:352-356); default names no reference | **OTHER_RECIPE** | CONFIRMED (gating); PLAUSIBLE (no non-NEMO recipe will ever need the alt arm — absence of evidence) |
+| S-07 | `zdf_tke` internals (10 selectors) | one module `tke.py`, 10 `tke_*` fields, each documented "historical/generic" vs "DINO NEMO cards opt in" | default: 5 Veros fidelity recipes (`veros_acc_recipe.py`, `veros_acc_basic_recipe.py`, `veros_global_*_recipe.py`) construct `TKEConfig` untouched; nemo arm: DINO (`dino.py:1247-1256`) + GYRE (l2 branch) | each field's own comment names the arm's home explicitly (quoted) | **OTHER_RECIPE** | CONFIRMED |
+| S-09 | `ldf_slp` ldfslp.F90 (~9 selectors) | one module `gm_redi_latlon_cgrid.py`, `GMRediConfig` | default: Veros recipes (`veros_acc_recipe.py:218`, `veros_global_4deg_recipe.py:227`) construct `GMRediConfig` untouched; nemo arm (`slope_scheme="nemo_iso_lap"`): DINO + GYRE via `nemo_recipe.py:392` | each field documents "historical" vs "DINO NEMO cards opt in" | **OTHER_RECIPE** | CONFIRMED (top-level `slope_scheme`); PLAUSIBLE (the other ~8 sub-fields not individually re-traced) |
+| S-12 | `stp_2D` pre-step stp2d.F90:49-288 | no legoESM equivalent as a unit — a full 3-stage WS ladder run only to seed the barotropic solve | only cards with `momentum_time_integrator="rk3_ws"`: LOCK, OVERFLOW, GYRE (l2). No catalog recipe uses `rk3_ws` | none (structural, not a config selector) | **NEMO_DUPLICATE** (same defect as S-30, different altitude) | CONFIRMED |
+| S-16 | `dyn_spg_ts` continuity/transport/spg dynspg_ts.F90:~640-840 (5 selectors) | generic FV form (SM2005-style, unreferenced) vs `nemo_literal`/`nemo_ssh_avg` | nemo arm: DINO, LOCK, OVERFLOW (`_model_config`, this checkout), GYRE (l2); generic: ORCA1 (`run_omip_core2.py` never sets these fields) and one Veros frozen-state tendency probe (deliberate bit-identical default, not a physics claim) | generic names no NEMO/other-oracle reference; nemo arm cites dynspg_ts.F90 | **NEMO_DUPLICATE** | CONFIRMED |
+| S-18 | `dom_qco_r3c` r3u/r3v MEAN vs MIN domqco.F90:140-240 | `min_cell_to_uface`/`_vface` (Adcroft/Hill/Marshall 1997 MOM6/MITgcm convention, CONFIRMED cited) vs `nemo_qco_live_face_thicknesses` (NEMO MEAN) | MEAN: DINO + GYRE (l2); MIN: LOCK, OVERFLOW **on this checkout** (verified `_model_config` never sets `zad_qco_evaluation`/`wzv_call2_evaluation` — this is a live gap on the certified L1 cards too, not ORCA1-only as the source doc's framing implied) + ORCA1 | MIN cites Adcroft et al. 1997 (a real reference, but for a *different* model's convention, not NEMO); MEAN cites domqco.F90 | **NEMO_DUPLICATE** | CONFIRMED |
+| S-19 | `wzv` sshwzv.F90 | `diagnose_w_from_flux_div` (generic) vs `nemo_qco_wzv_operands` (literal), same selector family as S-18 | same as S-18: DINO/GYRE on literal; LOCK/OVERFLOW/ORCA1 on generic | same as S-18 | **NEMO_DUPLICATE** | CONFIRMED |
+| S-25 | vertical momentum advection, non-NEMO arms | `upwind_perturbation` (default) / `centered_full` / `nemo_advective` | upwind_perturbation: unclaimed default, run by most catalog recipes + ORCA1 (no override); centered_full: `veros_faithful_v1`; nemo_advective: DINO + GYRE | centered_full cites Veros `core/momentum.py` (quoted); nemo_advective cites dynzad.F90; default names nothing | **OTHER_RECIPE** (ORCA1 landing on the unclaimed default instead of `nemo_advective` is a driver reachability gap, not a duplicate) | CONFIRMED |
+| S-27 | Coriolis time placement | `matsuno_split` (default, unreferenced legacy) vs `explicit_ab2` (in-RHS) | matsuno_split: unclaimed default, incl. ORCA1 (unset); explicit_ab2: `veros_faithful_v1`, `oceananigans_v1`, `mitgcm_v1` (recipes.py) **and** DINO + GYRE (this arm is simultaneously Veros's own scheme AND NEMO's real Coriolis placement) | explicit_ab2 docstring: "VEROS-FAITHFUL" + DINOConfig comment "(MITgcm/Oceananigans/Veros)" + cites dynspg_ts.F90 for GYRE's use; matsuno_split names nothing | **OTHER_RECIPE** (ORCA1 defaulting to matsuno_split while live is the real gap the source doc's own item 9 names — a missing override, not a second NEMO implementation) | CONFIRMED |
+| S-29 | `dyn_hpg` on ORCA1 (`ln_hpg_zps`) | `adcroft` (default) / `smc03` / `nemo_sco` (unreachable from ORCA1) | `run_omip_core2.py:4570` `--pgf-scheme choices=[adcroft,smc03]` (nemo_sco absent, CONFIRMED); adcroft: default recipes; smc03: `eady_weno5_v1`; nemo_sco: DINO/LOCK/OVERFLOW/GYRE | adcroft cites Adcroft/Hallberg/Hill 2008 in `pgf_ahh08.py` (state.py's own comment says "Adcroft & Campin 2004" for the same string — citation-year mismatch, flagged, unresolved); smc03 cites Shchepetkin & McWilliams 2003 | **OTHER_RECIPE** (both ORCA1-reachable arms are real, separately-cited non-NEMO papers with genuine recipe consumers; the defect is the driver CLI cannot reach `nemo_sco` at all — a reachability gap, not duplicated NEMO work) | CONFIRMED |
+| S-30 | WS momentum ladder written twice stprk3_stg.F90:344-374 | ladder #1 (seeds barotropic solve only) vs ladder #2 (barotropic-corrected, kept) — same recurrence, both always run | only cards with `momentum_time_integrator="rk3_ws"`: LOCK, OVERFLOW, GYRE. No catalog recipe, no ORCA1 (uses `"rk3"`, a third distinct branch) | none — no non-NEMO recipe ever reaches `rk3_ws` | **NEMO_DUPLICATE** | CONFIRMED |
+| S-32 | `dyn_ldf`->`ldf_lap` dynldf_lap_blp.F90 | `nemo_div_curl` / `vector_laplacian` (default) / `flux_divergence` | nemo_div_curl: DINO + GYRE; vector_laplacian: unclaimed default incl. ORCA1; flux_divergence: `veros_faithful_v1`, `oceananigans_v1`, `mitgcm_v1` | nemo_div_curl cites "NEMO dyn_ldf_lev_lap" (dino.py:914); flux_divergence cites Veros `core/friction.py harmonic_friction`; vector_laplacian names nothing | **OTHER_RECIPE** (clean 3-way split; side-finding: DINO's `off` vs GYRE's `nemo_e3` e3-weighting sub-flag is a MEASURED deliberate choice — an A/B found `nemo_e3` worsens DINO's gate rows — not an oversight) | CONFIRMED |
+| S-33 | `dyn_zdf`/`tra_zdf` implicit solver | `shared_thomas` (default, generic normalized-row solver) vs `nemo_literal` (unnormalized NEMO recurrence) | shared_thomas: unclaimed default incl. all catalog recipes + ORCA1; nemo_literal: DINO, LOCK, OVERFLOW, GYRE | shared_thomas names nobody's oracle fidelity (ordinary numerics); nemo_literal implicitly contrasts against dynzdf/trazdf (F90 line not independently re-derived) | **OTHER_RECIPE** (ORCA1 on shared_thomas instead of nemo_literal is the same reachability-gap pattern as S-25/27/29/32, not duplicated NEMO work) | CONFIRMED (selection facts); PLAUSIBLE (exact F90 citation) |
+| S-34 | `trazdf`/`dynzdf` divisor e3w(Kmm) | legacy midpoint (default, both flags False) / `implicit_vmix_e3t_now_divisor=True` (NEMO) / `implicit_vmix_dzw_slot=True` (Veros) | legacy: DINO (certified kamm_mlf card — does NOT set the NEMO flag, stays on legacy!) + unclaimed default recipes + ORCA1; NEMO arm: LOCK, OVERFLOW, GYRE; Veros arm: `veros_faithful_v1` | NEMO arm cites trazdf.F90:219-220 (quoted verbatim, still accurate); Veros arm cites Veros `thermodynamics.py:267` (quoted); legacy names nothing | **OTHER_RECIPE**, with a flagged separate Rule-3 defect: DINO is a certified NEMO card silently running the unreferenced legacy divisor instead of its own available NEMO arm — a hidden-default bug, not a duplicate-implementation bug | CONFIRMED |
+| S-35 | stage-3 barotropic correction `zub` stprk3_stg.F90:433-446 | site (a) `_replace_stage_mean` (before the implicit solve) vs site (b) `_impose_mean` (after the implicit solve) | site (a): every rk3_ws card unconditionally (LOCK, OVERFLOW, GYRE); site (b): gated by `nemo_stage_mean_imposition` (default False) — only GYRE (l2) sets it True; LOCK/OVERFLOW never do | **both comments cite the identical NEMO line range** stprk3_stg.F90:433-446/:440 | **NEMO_DUPLICATE** — GYRE runs both (redundant); LOCK/OVERFLOW run only the wrong-side-of-`dyn_zdf` one | CONFIRMED |
+| S-40 | `tra_sbc`/`tra_sbc_RK3` trasbc.F90 | `applied_now` (pre-step mutation, legacy) vs `leapfrog_rhs` (folds into MLF Nnn RHS) | applied_now: DINO's non-MLF oracle sub-recipes (`veros`/`mitgcm`/`oceananigans` DINO variants); leapfrog_rhs: only the certified MLF card (`nemo_dino_kamm_mlf`) — and `run_dino.py:625-634` hard-forbids the buggy pairing (`leapfrog` + `applied_now`) via `SystemExit` | leapfrog_rhs cites tra_sbc.F90 Nnn-RHS placement; applied_now names nothing | **OTHER_RECIPE** — RK3 cards (GYRE/L/O/ORCA1) have no equivalent selector because their own site is hard-wired, not selectable; the one two-arm case (DINO) already has a driver-level guard closing the Rule-3 failure mode | CONFIRMED |
+| S-42 | `bbl`/`tra_bbl` trabbl.F90 | `apply_bbl_adv_tendency` (in-stage) vs `apply_bbl_adv_step` (driver post-step Euler, extra `0.25*V/dt` cap NEMO lacks) | in-stage: OVERFLOW (`bbl_adv_option=2`); driver-only: ORCA1's `--bbl-adv` flag — which **never sets** `bbl_adv_option` (grep confirmed zero hits), so ORCA1's in-model dispatch stays permanently off at its 0 default while physics runs through the separate driver path instead | **both docstrings cite NEMO trabbl / Campin & Goosse BBL exchange for the same routine** | **NEMO_DUPLICATE** — two independent NEMO-trabbl transcriptions with zero common selector between them | CONFIRMED |
+| M-01 | `stp_MLF` whole-step composition stpmlf.F90:108-473 | `_leapfrog_step` (two `_step_impl` passes) vs `_nemo_mlf_step` (one pass, single-pass transcription) | dispatch exists NOW at `outer_integrator` ("leapfrog"->a, "nemo_mlf"->b — contradicts (b)'s own stale docstring claiming it's unwired); DINO's certified card selects `"leapfrog"` (a). No recipe/card selects `"nemo_mlf"`. (b) DOES have real committed test coverage (`tests/ocean/unit/test_nemo_mlf_step_transcription.py`) — correction to source doc, which called it probe-only/dead | both cite stpmlf.F90 `stp_MLF` directly; (b) additionally cites a spec doc | **NEMO_DUPLICATE** (not ORPHAN: (b) names a reference and has real test coverage — it is validated-but-unpromoted, not dead) | CONFIRMED |
+
+### 6.2 Counts
+
+| classification | rows | which |
+|---|---|---|
+| NEMO_DUPLICATE | 8 | S-12, S-16, S-18, S-19, S-30, S-35, S-42, M-01 |
+| OTHER_RECIPE | 11 | S-03, S-04, S-07, S-09, S-25, S-27, S-29, S-32, S-33, S-34, S-40 |
+| ORPHAN | 0 | — |
+
+**Headline correction**: several rows this doc flagged among its top-priority
+"mistakes to collapse" — S-27 (Coriolis split), S-29 (PGF), S-33/S-34
+(ZDF solver/divisor) — are legitimate Veros/MITgcm/Oceananigans/paper-cited
+forks, each carrying a *different* real defect: ORCA1 (and, for S-34, DINO)
+simply never selects the NEMO arm it already has, a reachability/hidden-
+default bug, not duplicated NEMO implementation work. Conversely S-16/S-18/
+S-19 (barotropic transport, qco face-thickness, wzv) are confirmed genuine
+duplicates reaching **every** certified NEMO card, including LOCK/OVERFLOW on
+this checkout for S-18/S-19 (not just ORCA1, as this doc's own §0 framing
+suggested).
+
+S-12 and S-30 are both genuine NEMO_DUPLICATE (S-30 is this doc's own rank-3
+collapse item, §2 above — the one row with an already-realized bug: a fix to
+`_stage_vertical_up3`/live-HPG landed in "ladder #2" only). Neither carries a
+baseline-dict entry: both duplicate sites are inline code inside one function
+(`_step_impl`), not AST-distinct symbols, so the ratchet cannot mechanically
+enforce them — same carve-out already used for S-33/S-34's divisor branch.
+The classification (genuine defect, not a false alarm) still stands; only the
+mechanical enforcement is unavailable until a refactor promotes the two sites
+to named symbols.
+
+### 6.3 Disagreements
+
+**None.** The nemo_duplicate/other_recipe/orphan axis is new with this pass —
+the audit doc (§0-§5 above) never itself assigned a "kind" to compare
+against, so no row's OTHER_RECIPE/NEMO_DUPLICATE verdict here contradicts a
+prior claim in this doc. Two adjacent, non-blocking items are worth a mention
+so they aren't mistaken for a disagreement: (a) S-29/S-28's PGF citations
+have an unresolved citation-year mismatch (`state.py`'s field comment says
+"Adcroft & Campin 2004" where `pgf_ahh08.py`'s docstring says "Adcroft,
+Hallberg & Hill 2008" for what is presumably the same code) — flagged as a
+separate, still-open finding, explicitly said not to change the row's
+verdict; (b) S-27's docstring claim that `coriolis_scheme="explicit_ab2"`
+hard-requires `barotropic_solver="rigid_lid"` is contradicted by GYRE's card
+(which pairs it with `barotropic_solver="explicit_substep"` successfully) —
+a code-vs-docstring inconsistency, not a reclassification dispute, and also
+does not change S-27's verdict.
+
+### 6.4 ORPHAN candidates
+
+Zero of the 19 rows classify ORPHAN. `_nemo_mlf_step` (M-01) was the one
+candidate this doc's §2 rank-5 item suggested might be dead code; it has a
+real committed unit test (`tests/ocean/unit/test_nemo_mlf_step_transcription.py`)
+and names a NEMO reference, so it fails the ORPHAN bar ("selected by no
+recipe **and** naming no reference") on the reference prong — it stays
+NEMO_DUPLICATE (validated-but-unpromoted).
