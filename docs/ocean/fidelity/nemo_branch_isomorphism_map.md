@@ -1281,3 +1281,31 @@ BIT-IDENTITY on tracer rows makes ANY re-association permanently
 un-collapsible, however faithful, because re-association is exactly what
 changes the last bits. That is a property of the bar, not a physics verdict on
 this row, and it will recur on every future collapse that touches a tracer.
+
+## 2026-09-02 S-44 — `dyn_adv_up3` upwind SELECTOR (new row; owner of the OVERFLOW stage-3 `u` debt)
+
+| id | NEMO routine | NEMO switch | cards | legoESM implementation | selector | classification |
+|---|---|---|---|---|---|---|
+| S-44 | `dyn_adv_up3` T-point upwind branch: `zui = uu_i + uu_{i+1}` (dynadv_up3.F90:166,169-170), flux magnitude `zFu_i + zFu_{i+1}` (:176); F-point cross fluxes by the transport pair (:179-187) | none (one routine) | L O | `opl:4078 _up3_reconstruct` reached from `_bc_horizontal_momentum_advection_flux_form`; the WS-RK3 stage program passes `up3_upwind_selector="velocity"` at every stage (`omlc:4070` step-entry call, `_mom_pert_ws` stages 2-3); every other caller keeps the historical transport-sign selector | none public; private `_NEMOWSRK3TestHooks.legacy_up3_transport_sign_selector` (gate ablation arm only) | SHARED on the WS-RK3 cards (fixed `42ac525cc`, `8d6756a42`); **recorded, un-flipped choice** for a non-RK3 NEMO card on `flux_form_upwind3` (`nemo_recipe.py:334`), which still runs the transport sign — ASK before flipping |
+
+Measured: OVERFLOW-zps kt=1 stage-3 baroclinic `u` `2.598798e-07 -> 4.551736e-10 m/s`
+(replay corr `0.999994`, slope `1.00015`); LOCK_EXCHANGE-zco stage 2/3 and kt=2
+`u`, `T` all at the `1e-15` bar (`2.9e-17`, `2.3e-17`, `T = 0.0`).  Receipt:
+`nemo_testcases_l1_phase3_receipt.md`, "UP3 upwind-selector round"; preregistration
+`nemo_testcases_l1_stage3_baroclinic_preregister.md`.
+
+Corrections to existing rows:
+
+- **S-21** ("stage transport `zFu/zFv` + `zub` correction … SHARED across the three RK3
+  cards"): true for the tracer stages and for momentum stages 2-3.  The step-entry
+  `tendencies()` call that seeds momentum stage 1 (`omlc:4070`) is handed NO separate
+  transport, so stage-1 momentum advection runs on `Q = h u(Kbb)` while NEMO's stage-1
+  `dyn_adv` (`stprk3_stg.F90:315`) consumes `zFu = e2u e3u (uu(Kbb) + zub)` built
+  unconditionally at `:259-275`.  Inert at kt=1, live from kt=2 — CONFIRMED by reading,
+  UNMEASURED; candidate owner of the kt>=3 OVERFLOW SSH walk.
+- **S-33/S-34** (dynzdf operands), bottom-localised, measured inert for the front columns
+  (no partial cell at columns 20/21) and bounded by NEMO's whole stage-3 increment
+  `1.09e-08` elsewhere: legoESM `e3uw(Kmm)` = midpoint of `e3t_now` (12.25 m at a
+  partial-cell interface) vs NEMO `e3uw_0 = e3w_1d = 20 m` (`usrdef_zgr.F90:167`);
+  legoESM `e3u(Kaa)` = masked cell->face average vs NEMO `e3u_0 = min` at a staircase
+  face.  Neither owns the remaining `4.55e-10`.
