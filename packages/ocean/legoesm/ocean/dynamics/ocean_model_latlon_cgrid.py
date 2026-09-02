@@ -5526,12 +5526,22 @@ class LatLonCGridOceanModel:
         # pts(:,:,:,:,Kbb)``) -- so under the single-pass transcription it
         # reads the RAW Nbb tracers directly (MORE faithful than the two-pass
         # mechanism's "T_mid ~= Nbb", which was Nbb plus that discarded pass's
-        # own small Euler correction).  GM bolus transport / K_33 / EKE
-        # production (all row 27, Nnn) are UNCHANGED -- only the isoneutral
-        # tendency's (T, S) READ swaps; ``density_jacobian``/``eta``/``kappa``
-        # below stay on the step's own (Nnn) state, matching rows 8/9 (already
-        # conformant, ``_step_impl`` never widens what reads Nbb here beyond
-        # this one tendency's tracer argument -- Rule 1d guard).  ``None``
+        # own small Euler correction).
+        #
+        # CORRECTED 2026-09-02 (M-01 mechanism review).  This comment used to
+        # claim "GM bolus transport / K_33 / EKE production are UNCHANGED --
+        # only the isoneutral tendency's (T, S) READ swaps".  That is FALSE,
+        # and the code ~230 lines below says so itself: ``_T_gm_in``/
+        # ``_S_gm_in`` are the tracer source for BOTH
+        # ``gm_redi_density_and_jacobian`` (which builds the neutral slopes and
+        # K33) AND ``gm_redi_tracer_tendency_latlon`` (which builds the bolus
+        # streamfunction), and they MUST agree on their time level or K33 would
+        # disagree with the flux it augments.  So the swap moves the whole
+        # GM/Redi operand set, slopes included -- which is why the measured
+        # tracer difference between the two stp_MLF mechanisms runs through the
+        # slope denominator (d_z rho) rather than linearly in the tracer
+        # perturbation.  ``eta``/``H_bathy``/``kappa`` DO stay on the step's own
+        # (Nnn) state.  ``None``
         # (every other caller) ⇒ bit-identical.
         _T_gm_in = T_mid if _ldf_state is None else _ldf_state[0]
         _S_gm_in = S_mid if _ldf_state is None else _ldf_state[1]

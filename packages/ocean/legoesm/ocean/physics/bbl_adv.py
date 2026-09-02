@@ -323,19 +323,34 @@ def apply_bbl_adv_step(state, geom: BBLGeometry, dt: float, *,
     RK3 lane, ``stpmlf.F90`` on the MLF lane), reading the BEFORE-level
     tracers; this wrapper applies the SAME operator as a separate forward-
     Euler update after the step, on the updated tracers and the reference
-    thicknesses.  The arithmetic is shared — ``bbl_transports`` and
+    thicknesses.  The arithmetic is shared: ``bbl_transports`` and
     ``apply_bbl_adv_tendency`` below are the single transcription of
-    ``trabbl.F90:243-284`` and this function adds none of its own — but the
-    placement is a host operator split that has no NEMO arm.  It exists
+    ``trabbl.F90:243-284``, and this function adds no arithmetic of its own
+    beyond one forward-Euler update.  It does feed them DIFFERENT operands
+    though: the reference ladder ``geom.h_ref`` / ``geom.dep_bot``, where the
+    in-model site passes the live stage thickness and a recomputed live bottom
+    depth (``ocean_model_latlon_cgrid.py:1290-1298``) -- an O(eta/H) ~ 3e-4
+    difference.  So the placement is a host operator split with no NEMO arm,
+    and its operands are the reference ones.  It exists
     because the only in-model BBL site lives in the WS-RK3 tracer lane
     (``ocean_model_latlon_cgrid.py``, ``tracer_time_integrator="rk3_ws"``)
     and the OMIP driver runs the forward-Euler tracer lane, which itself has
     no NEMO arm.  Collapsing the two onto one site is an OPEN item.
 
-    Stability: the exchange is a bounded relaxation between cells; with
-    NEMO's gamma=20 s and 1-deg cells the per-step exchange fraction
-    ``|tr|*dt/V`` is << 1 at any ocean dt (see the unit test's magnitude
-    check).  NEMO clamps neither transport, so neither does this.
+    Stability -- the criterion, not one example.  ``e3_bbl`` cancels between
+    transport and volume (``tr`` ~ ``width*e3_bbl``, ``V`` ~ ``area*e3_bot``,
+    and ``e3_bbl`` is the min of the two bottom thicknesses), so the per-step
+    exchange fraction reduces to
+
+        |tr|*dt/V  =  g * gamma_s * (drho/rho_0) * dt / e1t
+
+    which is thickness-INDEPENDENT.  The deleted ``0.25`` cap could therefore
+    bind only for ``drho/rho_0 > e1t / (4*g*gamma_s*dt)``.  MEASURED on ORCA1's
+    own metrics at 60N, dt=3600 s, with a Denmark-Strait-exceeding contrast
+    (dT=13.5 degC, dS=2.5 PSU): max fraction 0.048, transports up to 4.1 Sv; at
+    an absurd drho/rho_0 = 1e-2 with dt=5400 s it is 0.19.  The cap never bound
+    in any production configuration.  NEMO clamps neither ``utr_bbl`` nor
+    ``vtr_bbl`` (``trabbl.F90:243-284``), so neither does this.
 
     Parameters
     ----------

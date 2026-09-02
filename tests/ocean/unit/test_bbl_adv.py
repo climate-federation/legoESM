@@ -309,6 +309,19 @@ def test_host_step_adds_no_arithmetic_of_its_own():
     assert np.array_equal(T_host, T_ref)
     assert np.array_equal(S_host, S_ref)
 
+    # ... and again on the PATHOLOGICAL face, where the deleted clamp WOULD
+    # have bound.  Without this the assertion above is inert against the cap
+    # (at ocean cell volumes the clamp never engages, so a restored clamp
+    # leaves it green) and the whole guard rests on one other test.
+    _, _, T2, S2, geom2, dy_u2, dx_v2, area2, utr2, vtr2 = _host_step_pieces(
+        1.0e6)
+    dT2, dS2 = apply_bbl_adv_tendency(
+        jnp.zeros_like(T2), jnp.zeros_like(S2), T2, S2, geom2.h_ref, area2,
+        geom2, utr2, vtr2, nlev=6)
+    T2_host, S2_host = _run_host_step(T2, S2, geom2, dy_u2, dx_v2, area2, dt)
+    assert np.array_equal(T2_host, np.asarray(T2) + dt * np.asarray(dT2))
+    assert np.array_equal(S2_host, np.asarray(S2) + dt * np.asarray(dS2))
+
 
 def test_survivor_matches_trabbl_three_leg_formula():
     """The surviving tendency IS ``tra_bbl_adv``'s three legs, term by term.
@@ -335,6 +348,25 @@ def test_survivor_matches_trabbl_three_leg_formula():
             zu * (t[0, iid, jk + 1] - t[0, iid, jk]) * zbtr, rel=1e-12)
     assert dT[0, iid, ikud] == pytest.approx(
         zu * (t[0, iis, ikus] - t[0, iid, ikud]) * zbtr, rel=1e-12)
+
+    # NEMO uses zu_bbl = ABS(utr_bbl) and picks shelf/deep off mgrh, so the
+    # tendency must be INVARIANT under flipping the slope (which flips both
+    # the sign of utr and the shelf/deep assignment).  With a down-slope
+    # transport of one sign only, `abs` is the identity and the mgrh<0 branch
+    # never runs, so neither is pinned by the rows above.
+    h_m = jnp.asarray(np.flip(np.asarray(geom.h_ref), axis=1))
+    T_m = jnp.asarray(np.flip(np.asarray(T), axis=1))
+    S_m = jnp.asarray(np.flip(np.asarray(S), axis=1))
+    geom_m = bbl_static_geometry(h_m, jnp.ones((1, 2)))
+    assert float(geom_m.mgrhu[0, 0]) == -float(geom.mgrhu[0, 0]) != 0.0
+    utr_m, vtr_m = bbl_transports(T_m, S_m, geom_m, dy_u, dx_v,
+                                  gamma_s=GAMMA, rho_0=RHO0)
+    assert float(utr_m[0, 0]) == pytest.approx(-float(utr[0, 0]), rel=1e-12)
+    dT_m, _ = apply_bbl_adv_tendency(
+        jnp.zeros_like(T_m), jnp.zeros_like(S_m), T_m, S_m, h_m, area,
+        geom_m, utr_m, vtr_m, nlev=6)
+    np.testing.assert_allclose(np.asarray(dT_m), np.flip(dT, axis=1),
+                               rtol=1e-12, atol=0.0)
 
 
 def test_transport_cap_is_gone_and_moved_nothing_at_ocean_scales():

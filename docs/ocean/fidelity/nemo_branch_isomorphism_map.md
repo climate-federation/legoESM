@@ -329,7 +329,7 @@ classified below.
 | S-34 | `trazdf`/`dynzdf` divisor e3w(Kmm) | legacy midpoint (default, both flags False) / `implicit_vmix_e3t_now_divisor=True` (NEMO) / `implicit_vmix_dzw_slot=True` (Veros) | legacy: DINO (certified kamm_mlf card — does NOT set the NEMO flag, stays on legacy!) + unclaimed default recipes + ORCA1; NEMO arm: LOCK, OVERFLOW, GYRE; Veros arm: `veros_faithful_v1` | NEMO arm cites trazdf.F90:219-220 (quoted verbatim, still accurate); Veros arm cites Veros `thermodynamics.py:267` (quoted); legacy names nothing | **OTHER_RECIPE**, with a flagged separate Rule-3 defect: DINO is a certified NEMO card silently running the unreferenced legacy divisor instead of its own available NEMO arm — a hidden-default bug, not a duplicate-implementation bug | CONFIRMED |
 | S-35 | stage-3 barotropic correction `zub` stprk3_stg.F90:433-446 | site (a) `_replace_stage_mean` (before the implicit solve) vs site (b) `_impose_mean` (after the implicit solve) | site (a): every rk3_ws card unconditionally (LOCK, OVERFLOW, GYRE); site (b): gated by `nemo_stage_mean_imposition` (default False) — only GYRE (l2) sets it True; LOCK/OVERFLOW never do | **both comments cite the identical NEMO line range** stprk3_stg.F90:433-446/:440 | **NEMO_DUPLICATE** — GYRE runs both (redundant); LOCK/OVERFLOW run only the wrong-side-of-`dyn_zdf` one | CONFIRMED |
 | S-40 | `tra_sbc`/`tra_sbc_RK3` trasbc.F90 | `applied_now` (pre-step mutation, legacy) vs `leapfrog_rhs` (folds into MLF Nnn RHS) | applied_now: DINO's non-MLF oracle sub-recipes (`veros`/`mitgcm`/`oceananigans` DINO variants); leapfrog_rhs: only the certified MLF card (`nemo_dino_kamm_mlf`) — and `run_dino.py:625-634` hard-forbids the buggy pairing (`leapfrog` + `applied_now`) via `SystemExit` | leapfrog_rhs cites tra_sbc.F90 Nnn-RHS placement; applied_now names nothing | **OTHER_RECIPE** — RK3 cards (GYRE/L/O/ORCA1) have no equivalent selector because their own site is hard-wired, not selectable; the one two-arm case (DINO) already has a driver-level guard closing the Rule-3 failure mode | CONFIRMED |
-| S-42 | `bbl`/`tra_bbl` trabbl.F90 | `apply_bbl_adv_tendency` (in-stage) vs `apply_bbl_adv_step` (driver post-step Euler, extra `0.25*V/dt` cap NEMO lacks) | in-stage: OVERFLOW (`bbl_adv_option=2`); driver-only: ORCA1's `--bbl-adv` flag — which **never sets** `bbl_adv_option` (grep confirmed zero hits), so ORCA1's in-model dispatch stays permanently off at its 0 default while physics runs through the separate driver path instead | **both docstrings cite NEMO trabbl / Campin & Goosse BBL exchange for the same routine** | **NEMO_DUPLICATE** — two independent NEMO-trabbl transcriptions with zero common selector between them | CONFIRMED |
+| S-42 | `bbl`/`tra_bbl` trabbl.F90 | `apply_bbl_adv_tendency` (in-stage) vs `apply_bbl_adv_step` (driver post-step Euler; its extra `0.25*V/dt` cap is **DELETED 2026-09-02**) | in-stage: OVERFLOW (`bbl_adv_option=2`); driver-only: ORCA1's `--bbl-adv` flag — which **never sets** `bbl_adv_option` (grep confirmed zero hits), so ORCA1's in-model dispatch stays permanently off at its 0 default while physics runs through the separate driver path instead | **both docstrings cite NEMO trabbl / Campin & Goosse BBL exchange for the same routine** | ~~**NEMO_DUPLICATE** — two independent NEMO-trabbl transcriptions~~ **RETRACTED 2026-09-02**: `apply_bbl_adv_step` CALLS the same two operators, so there is ONE transcription and a PLACEMENT branch; see the S-42 addendum | RETRACTED |
 | M-01 | `stp_MLF` whole-step composition stpmlf.F90:108-473 | `_leapfrog_step` (two `_step_impl` passes) vs `_nemo_mlf_step` (one pass, single-pass transcription) | dispatch exists NOW at `outer_integrator` ("leapfrog"->a, "nemo_mlf"->b — contradicts (b)'s own stale docstring claiming it's unwired); DINO's certified card selects `"leapfrog"` (a). No recipe/card selects `"nemo_mlf"`. (b) DOES have real committed test coverage (`tests/ocean/unit/test_nemo_mlf_step_transcription.py`) — correction to source doc, which called it probe-only/dead | both cite stpmlf.F90 `stp_MLF` directly; (b) additionally cites a spec doc | **NEMO_DUPLICATE** (not ORPHAN: (b) names a reference and has real test coverage — it is validated-but-unpromoted, not dead) | CONFIRMED |
 
 ### 6.2 Counts
@@ -716,7 +716,7 @@ routine this row is about.
 | S-19 | yes | DINO=literal; LOCK/OVERFLOW=generic | generic | ~~no~~ **YES since 2026-09-02** — `nemo_qco_resolved_mesh_operands` rebuilds `hu_0`/`e1e2*`/`e2u`/`e1v` from any card's own grid + reference ladder | ~~NEEDS_ORCA1_OPERANDS~~ **MEASURED_INERT** (see "S-19 arm result") |
 | S-16 | yes (both arms remain; kept deliberately, not a defect) | DINO/LOCK/OVERFLOW/GYRE=nemo_literal | **not on this path** — ORCA1 resolves `barotropic_solver=implicit_cn` (measured), which never runs the gated code | n/a for ORCA1; the generic arm's real consumers are 19 test-matrix experiments + `legoesm_nemo_like_v1` (renamed from `nemo_v1`) | **OTHER_RECIPE** (was BLOCKED/COLLAPSIBLE_NOW — 2026-09-02 USER DECISION: give the generic arm a real reference and keep both arms, no collapse; see the S-16 addendum above) |
 | S-35 | yes | GYRE=both sites; LOCK/OVERFLOW=site (a) only (wrong side of dyn_zdf) | site (a) only | yes — `_fixed_depth_means` is model-generic | COLLAPSIBLE_NOW |
-| S-42 | yes | OVERFLOW=in-stage (2); LOCK=off (0) | separate driver-side `--bbl-adv` path, `bbl_adv_option` stays 0 | plausibly — same `BBLGeometry` the driver path already builds | COLLAPSIBLE_NOW |
+| S-42 | yes | OVERFLOW=in-stage (2); LOCK=off (0) | separate driver-side `--bbl-adv` path, `bbl_adv_option` stays 0 | ~~plausibly~~ **NO — RETRACTED 2026-09-02**: the in-model hook is rk3_ws-only and ORCA1 runs the euler tracer lane, so the flip would run NO BBL | ~~COLLAPSIBLE_NOW~~ **BLOCKED** (see the S-42 addendum) |
 | M-01 | yes | DINO=`leapfrog`; `nemo_mlf` selected by no card (test-only) | n/a (MLF-only row) | yes, structurally — blocked on an unmeasured bit-agreement check, not an operand gap | COLLAPSIBLE_NOW (pending A/B) |
 
 ## 2026-09-02 ORCA1 executed-arm corrections (appended; history above not rewritten)
@@ -1180,8 +1180,7 @@ collapse is 2 ulp. **M-01 is a measured DIFFERENCE, not a re-association**, and
 the certified DINO card is NOT repointed.
 
 **Two things the GM/Redi ablation settles.** Turning GM/Redi off drops the
-tracer difference by a factor ~2900 (T 4.96e-4 -> 1.71e-7), which CONFIRMS
-GM/Redi's tracer source as the mechanism the committed transcription test
+tracer difference by a factor ~2900 on this state (T 4.96e-4 -> 1.71e-7) — a ratio, not a characterisation: the swapped operand enters through the neutral-slope denominator, so it is not expected to be stable across stratifications. What it does establish is GM/Redi's tracer source as the mechanism the committed transcription test
 already predicted (`tests/ocean/unit/test_nemo_mlf_step_transcription.py`: the
 two-pass method feeds it `T_mid ~ Nbb`, the one-pass method the raw `Nbb` of
 `stpmlf.F90:437`). But the MOMENTUM difference is **bit-unchanged by that
@@ -1189,9 +1188,14 @@ ablation** — `u`, `v` and `eta` at step 1 are the same to all printed digits
 with GM/Redi on and off. So the momentum gap is NOT the GM/Redi channel. The
 transcription test calls its momentum residual "XLA JIT-fusion floating-point
 noise" seeded at ~1e-9 and amplified through the barotropic substeps; on the
-DINO card that residual is 5.2e-6 m/s in `u` and 9.6e-6 m/s in `v`, and this
-row does not establish which of the two explanations owns it. Recorded as
-UNVERIFIED rather than folded into the GM/Redi story.
+DINO card that residual is 5.2e-6 m/s in `u` and 9.6e-6 m/s in `v`. The mechanism
+reviewer names a third candidate and it is the more likely one: the two-pass arm
+runs its whole second `_step_impl` on a full before-level state, so `dyn_ldf` sees
+before-level `eta` and therefore before-level `h_k`/`h_u`/`h_v` and viscosity,
+while `_ldf_state` swaps only the tracer/velocity operand and leaves the
+thicknesses at the now level. A 5000x amplification of 1e-9 in ONE step through a
+stable barotropic solve is not credible, so "fusion noise" is probably the wrong
+owner. Left UNVERIFIED — neither explanation is measured here.
 
 **Also blocked structurally, independent of the numbers.** `outer_integrator=
 "nemo_mlf"` hard-requires `implicit_vmix_e3t_now_divisor=True`
@@ -1235,6 +1239,13 @@ references:
 The harness is deterministic here: the same OVERFLOW trajectory run twice
 across the S-42 commit was byte-identical, so the three moves are the arm.
 
+And the SHAPE of those three moves argues FOR algebraic equivalence, not
+against it: kt=1..7 are bit-identical, then 2.665e-16, 3.553e-16, 3.553e-16 —
+flat, not doubling. Chaotic amplification is exponential; this is a sub-ulp
+per-step increment crossing the rounding threshold at step 8 and saturating.
+So "almost free but not free" is the right wording and must not be upgraded to
+"the two arms disagree".
+
 **2. Why that is a refusal and not a rounding argument.** The committed gate
 (`legoesm/ocean/fidelity/ulp_move_gate.py`) holds TRACER rows to BIT-IDENTITY,
 not to `MAX_ULP_MOVE`. All three moved rows are `T`. 1.2-1.6 ulp is inside the
@@ -1264,3 +1275,9 @@ NEMO's two different `wzv` calls, and each card reaches the one its lane has.
 COLLAPSIBLE.** The open question is a one-line ASK: OVERFLOW's kt=8..10
 temperature rows move 1.2-1.6 ulp under the faithful arm — is that admissible
 for a tracer row (the gate says no), or does the row stay branched?
+
+**A structural consequence worth naming with it.** A bar that demands
+BIT-IDENTITY on tracer rows makes ANY re-association permanently
+un-collapsible, however faithful, because re-association is exactly what
+changes the last bits. That is a property of the bar, not a physics verdict on
+this row, and it will recur on every future collapse that touches a tracer.

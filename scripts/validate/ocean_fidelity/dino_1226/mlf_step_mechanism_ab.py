@@ -19,6 +19,13 @@ at the faithful implementation without moving a certified number. That is a
 MEASUREMENT, and this is it: at every step both methods are applied to the SAME
 state, under the SAME jit, differing in one thing only — the method.
 
+Why the PRIVATE methods and not ``outer_integrator="nemo_mlf"``: that public
+value hard-requires ``implicit_vmix_e3t_now_divisor=True``
+(``ocean_model_latlon_cgrid.py:3019``), which the certified DINO card sets
+False. Going through the dispatch would therefore change TWO things at once
+(the step composition and S-34's implicit-solve divisor). Calling the two
+methods directly at the card's own config is what makes this one-variable.
+
 Run (fp64, CPU):
 
     JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python mlf_step_mechanism_ab.py \
@@ -137,17 +144,23 @@ def main(argv=None) -> int:
         a = lf(st_f, ext)
         b = mlf(st_f, ext)
         if k == 0:
-            # Identity control: the same arm twice must be exactly zero, so a
-            # nonzero reading below is the METHOD, not the harness.
+            # Determinism control -- and ONLY that.  The same arm twice must be
+            # exactly zero, which rules out a nondeterministic harness.  It
+            # does NOT rule out the two arms differing because they are two
+            # separate jit traces with different fusion; the discriminator for
+            # that is --no-gm-redi, which must collapse the tracer difference
+            # if the GM/Redi operand swap is the mechanism.
             a2 = lf(st_f, ext)
             for name in FIELDS:
                 d, _ = field_move(getattr(a, name).data, getattr(a2, name).data)
                 if d != 0.0:
                     raise SystemExit(
-                        f"identity control failed: leapfrog vs leapfrog moved "
-                        f"{name} by {d:.3e}; the harness is not deterministic")
-            print("identity control: leapfrog vs leapfrog = 0.0 on all fields",
-                  flush=True)
+                        f"determinism control failed: leapfrog vs leapfrog "
+                        f"moved {name} by {d:.3e}; the harness is not "
+                        "deterministic")
+            print("determinism control: leapfrog vs leapfrog = 0.0 on all "
+                  "fields (does not exclude cross-trace fusion; use "
+                  "--no-gm-redi for that)", flush=True)
         row = {"step": k + 1}
         for name in FIELDS:
             diff, ulps = field_move(getattr(a, name).data,
