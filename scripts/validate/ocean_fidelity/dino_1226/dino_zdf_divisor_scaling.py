@@ -100,7 +100,6 @@ from legoesm.core.precision import PrecisionPolicy, set_policy
 
 set_policy(PrecisionPolicy.fp64())
 
-import dataclasses  # noqa: E402
 import numpy as np  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 
@@ -279,6 +278,10 @@ def main() -> int:
                     help="comma list of restart,m0_day360,m0_day7200")
     ap.add_argument("--archive", default=ARCHIVE)
     ap.add_argument("--json-out", default=None)
+    ap.add_argument("--days", type=int, default=0,
+                    help="also integrate the executing and NEMO-divisor arms "
+                         "this many days from the restart and diff the end "
+                         "states (0 = one-step only)")
     args = ap.parse_args()
 
     sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
@@ -513,6 +516,62 @@ def main() -> int:
                   f"  (i)={arm / vm if vm else float('nan'):.4e}"
                   f"  (ii)={arm / tot if tot else float('nan'):.4e}")
         results["states"][name] = entry
+
+    # ---------------- integrated arm (preregistered) ----------------
+    if args.days > 0:
+        import time as _time
+        import jax
+        steps = 32 * args.days
+        print(f"\n=== INTEGRATED ARM: {args.days} day(s) = {steps} steps ===")
+
+        def jstep(m):
+            if getattr(cfg, "surface_tendency_placement",
+                       "applied_now") == "leapfrog_rhs":
+                return jax.jit(lambda s_, e_: m.step(
+                    s_, DT, surface_forcing=sf, external_tracer_rate=e_))
+            return jax.jit(lambda s_: m.step(s_, DT, surface_forcing=sf))
+
+        from legoesm.ocean.experiments.dino import (
+            apply_dino_lat_lon_surface_forcing,
+        )
+        _rhs = getattr(cfg, "surface_tendency_placement",
+                       "applied_now") == "leapfrog_rhs"
+        traj = {}
+        for key in ("A_exec", "B_nemo", "B_ctl"):
+            dyn = jstep(arms[key])
+            s_ = states["restart"]
+            t_ = _time.time()
+            for k in range(steps):
+                ts = t0_sec + (k + 1) * DT
+                if _rhs:
+                    s_, rate = apply_dino_lat_lon_surface_forcing(
+                        s_, forcing, zc, cfg, DT, t_seconds=ts,
+                        return_rate=True)
+                    s_ = dyn(s_, rate)
+                else:
+                    s_ = apply_dino_lat_lon_surface_forcing(
+                        s_, forcing, zc, cfg, DT, t_seconds=ts)
+                    s_ = dyn(s_)
+            traj[key] = s_
+            print(f"  {key}: {steps} steps in {_time.time() - t_:.0f}s  "
+                  f"finite={bool(np.isfinite(_np(s_.T.data)).all())}")
+        d_int = field_diffs(traj["A_exec"], traj["B_nemo"])
+        d_int_c = field_diffs(traj["A_exec"], traj["B_ctl"])
+        print(f"  day-{args.days} arm difference (executing vs NEMO divisor):")
+        for k, v in d_int.items():
+            print(f"    {k}: max={v['max_abs']:.4e}  rms={v['rms']:.4e}")
+        print("  contamination control: "
+              + "  ".join(f"{k}={v['max_abs']:.2e}"
+                          for k, v in d_int_c.items()))
+        one = results["states"]["restart"]["arm_diff"]
+        print(f"  growth vs one step, T: "
+              f"{d_int['T']['max_abs'] / one['T']['max_abs']:.1f}x")
+        results["integrated"] = {
+            "days": args.days, "steps": steps,
+            "arm_diff": d_int, "contamination": d_int_c,
+            "growth_T_vs_one_step":
+                d_int["T"]["max_abs"] / one["T"]["max_abs"],
+        }
 
     if args.json_out:
         with open(args.json_out, "w") as fh:
