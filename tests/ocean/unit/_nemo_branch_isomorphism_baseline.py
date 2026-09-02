@@ -970,7 +970,17 @@ ARTIFICIAL_BRANCH_BASELINE: dict[str, BaselineEntry] = {
         reason=(
             'wzv: one NEMO routine (sshwzv.F90), two legoESM impls; default is the non-NEMO '
             '(generic) one. Reclassified 2026-09-02: NEMO_DUPLICATE, CONFIRMED — same '
-            'LOCK/OVERFLOW-reach correction as S-18.'
+            'LOCK/OVERFLOW-reach correction as S-18. COLLAPSE REFUSED 2026-09-02 (round 2): '
+            'routing the WS-RK3 stage wzv through the literal arm leaves LOCK byte-identical '
+            'but moves OVERFLOW kt=8/9/10 before.T by 1.2/1.6/1.6 ulp, and ulp_move_gate '
+            'holds TRACER rows to BIT-IDENTITY, not to MAX_ULP_MOVE — so the gate goes red '
+            'and nothing was landed. The earlier "every kt=1..10 row BIT-IDENTICAL" claim in '
+            'the map is RETRACTED for OVERFLOW at this HEAD. diagnose_w_from_flux_div also '
+            'cannot be deleted: MPAS (ocean_pe_mpas.py:312, ocean_model_mpas.py:980), the '
+            'C-D grid (ocean_pe_cdgrid.py:361) and the lat-lon PE lane '
+            '(ocean_pe_latlon_cgrid.py:1369) all call it, and NEMO cards themselves reach it '
+            'at the MLF call-2 site because they resolve wzv_call2_evaluation="generic" — so '
+            'the row cannot become OTHER_RECIPE either.'
         ),
         kind='nemo_duplicate',
     ),

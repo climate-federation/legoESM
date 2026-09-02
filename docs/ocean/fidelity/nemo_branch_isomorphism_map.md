@@ -1208,3 +1208,59 @@ is now a physics question with a price tag, not a refactor: adopting
 tracer field by ~5e-4 degC per step, so it needs the Rule-8 treatment (a
 faithful change that moves a certified number is a finding, not a revert), and
 a decision from the user before any card moves.
+
+
+## 2026-09-02 S-19 (`wzv`) round 2 — the collapse is REFUSED by the committed bar
+
+The ask was to make the NEMO `wzv` arm the unbranched behaviour of the NEMO
+WS-RK3 identity and of the NEMO MLF identity, and to delete
+`diagnose_w_from_flux_div` unless a non-NEMO recipe selects it. Neither half
+survives contact with the measurement.
+
+**1. RETRACTION.** The "S-19 arm result" section above records "every kt=1..10
+trajectory row BIT-IDENTICAL" on both cards. That was measured on
+`fidelity/nemo-wzv-generic-operands` at `267c7b673`. It is NO LONGER TRUE at
+this HEAD (after the S-30/S-12 momentum-ladder collapse). Re-measured, fp64
+CPU, `--arm-literal-stage-wzv --compare-to` against the same committed
+references:
+
+| | LOCK_EXCHANGE-zco | OVERFLOW-zps |
+|---|---|---|
+| gate JSON vs the baseline run | byte-identical except the arm's own selector | **three rows move** |
+| moved rows | none | `kt8.before.T` 2.665e-16 (1.200 ulp), `kt9.before.T` 3.553e-16 (1.600 ulp), `kt10.before.T` 3.553e-16 (1.600 ulp) |
+| `largest_move_ulps` | 0.006 (unchanged) | 1.600 |
+| `first_over_bar` | kt=2 {T,u} — unchanged | kt=2 {T,u,ssh} — unchanged |
+| `--compare-to` verdict | fails only on the selector | **FAIL** |
+
+The harness is deterministic here: the same OVERFLOW trajectory run twice
+across the S-42 commit was byte-identical, so the three moves are the arm.
+
+**2. Why that is a refusal and not a rounding argument.** The committed gate
+(`legoesm/ocean/fidelity/ulp_move_gate.py`) holds TRACER rows to BIT-IDENTITY,
+not to `MAX_ULP_MOVE`. All three moved rows are `T`. 1.2-1.6 ulp is inside the
+2-ulp bar for a velocity row and outside the bar for a tracer row, and
+relaxing that distinction would be weakening the gate. So the collapse is
+REFUSED and nothing was landed for this row.
+
+**3. And `diagnose_w_from_flux_div` cannot be deleted regardless.** It is the
+generic vertical-velocity diagnostic for three other lanes —
+`ocean_pe_mpas.py:312` and `ocean_model_mpas.py:980` (MPAS),
+`ocean_pe_cdgrid.py:361` (C-D grid), `ocean_pe_latlon_cgrid.py:1369` and
+`ocean_model_latlon_cgrid.py:457` (the lat-lon PE lane), plus
+`fidelity/box_heat_budget.py:310`. So the row cannot become OTHER_RECIPE
+either: LOCK/OVERFLOW/ORCA1 are NEMO cards and they resolve
+`wzv_call2_evaluation="generic"`, so a NEMO card still reaches the generic arm
+at the MLF call-2 site (`ocean_model_latlon_cgrid.py:5367`).
+
+**4. The second site is NEMO's own split, restated.** `wzv_call2_evaluation=
+"nemo_literal"` requires `zad_qco_evaluation="nemo_literal"`, which requires
+`vertical_momentum_scheme="nemo_advective"`, which is refused together with
+`adaptive_implicit_vertadv=True`. Those selectors gate NEMO's MLF/`dynzad`
+call sites; the L1 cards run NEMO's RK3 flux-form lane where `dynzad` is dead.
+The two sites are not two implementations competing for one call — they are
+NEMO's two different `wzv` calls, and each card reaches the one its lane has.
+
+**Disposition: ARTIFICIAL_BRANCH stays, and the row is now BLOCKED rather than
+COLLAPSIBLE.** The open question is a one-line ASK: OVERFLOW's kt=8..10
+temperature rows move 1.2-1.6 ulp under the faithful arm — is that admissible
+for a tracer row (the gate says no), or does the row stay branched?
