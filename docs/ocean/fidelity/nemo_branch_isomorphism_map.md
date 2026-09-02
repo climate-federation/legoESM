@@ -643,10 +643,47 @@ step on both cards, its stage `w` is NOT bit-identical to the generic one, and
 a planted +1e-6 scaling inside it moves kt=2 `T` by 5.1e-9 (OVERFLOW) /
 3.2e-11 (LOCK). So the null is a measurement, not a dead switch.
 
-P1-P5 all CONFIRMED; P6 (DINO untouched) confirmed separately by the 5-day
-`nemo_dino_kamm_mlf` twin. **The S-19 branch is exonerated as an owner of
-OVERFLOW's kt=2 velocity debt** (Rule 4: the arm moves the metric by exactly
-zero, eight orders below the debt).
+**4. P6 — DINO is untouched.** 5-day `nemo_dino_kamm_mlf` twin, 160 leapfrog
+steps, `LEGOESM_NEMO_E3T=both`, CPU fp64, byte-identical invocation, one
+variable (the commit): base `646415f02` vs HEAD `267c7b673`.
+
+```
+33 keys, worst numeric array difference = 0.000000e+00
+non-identical keys: ['producer_git_sha']    (646415f02... -> 267c7b673...)
+sha256 3cbfa0fe50911608a4fb04cfe089b8a5884989bb6662933f64f753bc8e5742ab  BASE
+sha256 0ed4963776f53b3c4a492289ec8e94aef5317b5e64bb127777589efe4ad5086f  HEAD
+```
+
+Same blind spot as `dino_reach_check.md`: the archive stores surface slices in
+float32, so this resolves a base-vs-HEAD difference only to ~1e-7 relative and
+only at the surface. What carries the claim is that pairing plus the raw
+branch's operand-for-operand identity, not the surface fields alone.
+
+**5. Stage sweep, and the profile of the debt this row does not own.** The
+phase-3 stage sweep re-run at HEAD reproduces the certified faithful row
+exactly (`kt1.stage3.faithful.instantaneous_u = 2.598797930308122e-07`, the
+same 16 digits as before the refactor). It also shows where the debt is born:
+
+| OVERFLOW-zps kt=1, faithful arm | stage 1 | stage 2 | stage 3 |
+|---|---|---|---|
+| instantaneous u vs NEMO Kaa | 6.502e-15 | 9.433e-11 | 2.599e-07 |
+
+so the kt=2 velocity residual is a STAGE-3 event, four orders above stage 2.
+`wzv` runs identically at all three stages, which is a second, independent
+reason it is not the owner.
+
+P1-P6 all CONFIRMED. **The S-19 branch is exonerated as an owner of OVERFLOW's
+kt=2 velocity debt** (Rule 4: the arm moves the metric by exactly zero, eight
+orders below the debt).
+
+**Correction to the preregistration's stated bound.** Section 4 of the
+preregister derives its bound for the FREE-SURFACE term only; it does not cover
+the second difference between the arms, which is that the literal path executes
+NEMO's divide-by-`e3t`-then-multiply-back literally while the generic path
+cancels it algebraically. That channel is closed empirically instead, by
+diffing the full 3-D stage `w` arrays: measured 3.0e-18..5.9e-18 m/s, the same
+order as the free-surface bound, so the conclusion is unaffected. Raised by the
+mechanism reviewer; recorded here rather than silently folded in.
 
 **Disposition.** The arm was NOT promoted to unbranched behaviour, because the
 condition for that was "confirmed as an improvement", and it is not an
@@ -654,3 +691,26 @@ improvement — it is indistinguishable. Collapsing the row is still the right
 end state under "one NEMO routine, one legoESM implementation", but it changes
 executed arithmetic on certified cards at the 1e-18 level and therefore is a
 one-line ASK, not a silent default move. OPEN.
+
+### Review
+
+Two independent adversarial reviewers, both on Claude-authored code (the codex
+CLI is unavailable on this account, so the standing codex+GLM pair was served
+by two fresh subagents with disjoint briefs -- stated rather than implied).
+
+*Diff reviewer.* One Critical: the operand resolver had no guard for a
+z-coordinate carrying SOME but not all of the eight raw NEMO fields, so a
+half-attached bridge would have stopped raising and silently rebuilt every
+operand from the card. Fixed in `03f0a1a07` (found independently before the
+review returned; the reviewer confirmed the fix). One Important: the new
+operand-source test asserted only on array SHAPES and could not fail, and its
+fixture's monotone floor made the min-rule face coincide with `e3t_0` anyway.
+Fixed in `267c7b673` (ridge fixture, real assertions). Verified clean: raw-path
+bit-identity, the `_nemo_ws_qco_stage_faces` refactor, the arm's Kbb/Kaa time
+levels, differentiability, no dangling references.
+
+*Mechanism reviewer.* CONFIRMED all four claims -- the same-weighting algebra
+(`r3t = ssh*r1_ht_0`, `domqco.F90:160,209`, giving the identical
+`H_below(k)/ht_0` fraction), the scaling bound (with the correction recorded
+above), the exoneration, and the call-site structural finding. No REFUTED or
+UNDECIDED items.
