@@ -1846,3 +1846,104 @@ across `test_nemo_ws_tracer_rk3`, `test_baroclinic_decomposition`,
 | `stage3_selector/after/legoesm/overflow_zps/fp32/metadata.json` | `5d303611856ca0915d08c456f4f317195e2d279f1d00c617e6849d1ba4681997` |
 | `stage3_selector/after/legoesm/overflow_zps/fp64/metadata.json` | `82cd0f4c46e19de3617634ee448a881daccb20ab935b52960e3d72ea5e4ea7ce` |
 | `stage3_selector/v1_stage23_only/overflow_statistics.json` | `3dd6970b04b6a7f271770a3613bb052d092b09f922b2e079ba83a04c5ce87cad` |
+
+## S-21 stage-1 transport round: the kt>=3 walk is NOT stage-1 `zub`, MEASURED
+
+Preregistered in `nemo_testcases_l1_stage1_transport_preregister.md` (commit
+`49f7b8c14`, frozen before the free-run arm was scored).  All numbers fp64,
+CPU, at `bd4097f89` plus the one-variable arm patch; the arm's legacy side was
+verified bit-identical to the pristine `bd4097f89` tree at every scored row on
+both cards.  The verdict on the LEAD is REFUTED, so per the round's own
+protocol the fix is NOT landed here and the 6120-step statistics were NOT run.
+
+### The divergence (real, cited)
+
+NEMO builds ONE Kmm stage transport per RK3 stage,
+`zFu = e2u*e3u(Kmm)*(uu(Kmm) + zub*umask)` with
+`zub = un_adv/hu(Kmm) - uu_b(Kmm)` (`stprk3_stg.F90:265-275`, `n_baro_upd =
+np_HYB` at `:44`), and hands it to stage 1's `dyn_adv` at `:315` exactly as it
+does to stages 2-3 at `:333`.  The 3-D slot stage 1 accumulates into holds
+`stp_2D`'s Kbb `dyn_hpg` (assigned, `stp2d.F90:128` / `dynhpg.F90:294`),
+`dyn_ldf` (`:131`) and `dyn_vor` (`:146`); `dyn_adv_up3` at `:172` is called
+with `pUe`/`pVe` and so writes only the 2-D barotropic seed
+(`dynadv_up3.F90:158-202`).
+
+legoESM's stage 1 steps with the step-entry `tendencies()` result
+(`ocean_model_latlon_cgrid.py:4087-4093`, then `:5011-5017`), which is
+evaluated BEFORE the barotropic solve at `:4826` produces `Hu_avg` and
+therefore advects with `Q = h u(Kbb)`, i.e. `zub = 0`; stages 2-3 do carry it
+through `_mom_pert_ws` (`:4439-4454`).  Difference, per unit `e2u`:
+`dF_u = e3u(Kbb) * zub * umask`, entering the UP3 T-point flux linearly once
+the branch is fixed by the advected-velocity pair (S-44).  Exactly zero at
+kt=1 (rest), live from kt=2.
+
+### Scaling and arm
+
+| quantity | value |
+|---|---:|
+| stage-1 RHS difference, OVERFLOW kt=2 entry | `3.136020e-07 m/s^2` (face 21, k=24; 12x the stage-3 error the UP3 round removed) |
+| its structure | linear in depth, sign change at k=12, faces 19-22 only |
+| one-step `u` response at the kt=3 entry | `2.664653e-11` = `0.3%` of the residual, corr `0.38` |
+| one-step `ssh` response, every kt, both cards | `0.0` EXACTLY |
+
+The `ssh` zero is structural: the barotropic solve runs before the stage
+ladder, is seeded by a `F_slow` this term does not touch, and
+`_replace_stage_mean` re-imposes the identical depth mean at every stage.
+
+Free-run one-variable arm (legacy hook = pristine `bd4097f89`, faithful =
+stage-1 transport applied as the difference of the same helper with and
+without the transport, so the arm is one-variable by construction):
+
+| card | kt | `T` | `u` | SSH |
+|---|---:|---|---|---|
+| OVERFLOW | 2 | `1.119105e-14` -> same | `4.551736e-10` -> same | `1.050549e-14` -> same |
+| OVERFLOW | 3 | `7.788969e-12 -> 6.851053e-12` | `9.079022e-09 -> 9.105049e-09` | `3.774823e-09` -> same |
+| OVERFLOW | 10 | `4.046684e-08 -> 4.046700e-08` | `2.644302e-05` -> same | `9.237444e-05` -> same |
+| OVERFLOW | 60 | `1.184430e-05` -> same | `2.507516e-04` -> same | `7.751811e-05` -> same |
+| LOCK | 2 | `0.0` -> same | `2.276825e-17` -> same (AT BAR) | `0.0` -> same |
+| LOCK | 3 | `1.184238e-16` -> same | `7.233653e-15 -> 7.267792e-15` | `1.355253e-18` -> same |
+| LOCK | 10 | `1.681618e-14 -> 1.693460e-14` | `1.314126e-11 -> 1.314215e-11` | `3.574534e-13` -> same |
+| LOCK | 60 | `8.755528e-10 -> 8.755466e-10` | `7.496602e-08 -> 7.496604e-08` | `1.609001e-08` -> same |
+
+Predictions Q1-Q8 all MET, including Q8 whose prediction WAS the refutation:
+kt=2 bit-identical on both cards, kt=3 `u` moved `+0.29%` (OVERFLOW) and
+`+0.47%` (LOCK), kt=3 SSH bit-identical, kt=10/60 unchanged to 7 digits.  Q9
+(the six statistics rows) was gated on Q8 confirming and was NOT run.
+
+Two kt=2 baseline rows differ from the UP3 round's receipt — OVERFLOW SSH
+`1.049161e-14 -> 1.050549e-14` and LOCK `u` `2.298509e-17 -> 2.276825e-17`.
+Both arms agree on them, so they are the `bd4097f89` merge (the barotropic
+branch), not S-21.  LOCK stays AT BAR at kt=2.
+
+### Retraction
+
+The UP3 round's second finding named stage-1 `zub` a "candidate owner of the
+kt>=3 OVERFLOW SSH walk".  RETRACTED: it cannot move `ssh` within a step at
+all, and it carries `0.3%` of the kt=3 `u` residual and nothing measurable at
+kt=10 or kt=60.  The kt>=3 walk owner is still UNKNOWN.  S-21 remains an open
+one-routine / two-implementations DEBT.
+
+### Instrument finding: `plume_descent_m` is a threshold-crossing artifact
+
+`nemo_testcase_full_statistics.py:797-801` reduces the row to
+`max(cell centre | T <= 15 C)` and `:1112-1120` scores
+`max_t |L64 - N2|` against `spread = max_t |N4 - N2|`.  On the registered times
+the final-time value is effectively two-valued — the plume either still has a
+cell on the deep bottom or does not:
+
+| arm | t=0 | t=8.5 h | t=17 h |
+|---|---:|---:|---:|
+| N2 (NEMO, registered namelist) | 490.0 | 1986.58 | 1989.97 |
+| N4 (NEMO, alternative namelist) | 490.0 | 1969.52 | 490.34 |
+| L64 before the UP3 fix | 490.0 | 1969.63 | 1989.80 |
+| L64 after the UP3 fix | 490.0 | 1987.95 | 490.17 |
+
+NEMO's own two arms already differ by the whole basin (`1499.63 m`), so the
+UP3 round's `16.96 -> 1499.8 m` is the candidate crossing to N4's branch and
+scoring OUTSIDE by `0.18 m` inside a `1500 m` step; the same event reads
+WITHIN-SCHEME-SPREAD through `plume_front_km` (`117.13` vs spread `121.93`).
+The row can neither confirm nor refute a fix at its current sampling, and the
+UP3 round's `plume_descent_m` OUTSIDE verdict should be read as uninformative
+rather than as a physical degradation.  NOT FIXED: any robust reducer (volume
+weighting, a percentile, denser registered times) is a new scientific choice
+that changes this row and needs its own preregistration — ASK.
