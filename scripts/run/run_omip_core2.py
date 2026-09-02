@@ -6610,12 +6610,13 @@ def main() -> int:
             f"--gm-kappa-min {args.gm_kappa_min:g} exceeds --gm-aei0 "
             f"{args.gm_aei0:g}: the floor would override the NEMO cap on every "
             f"wet cell.")
-    if args.river_mouth_restoring_gate and not args.runoff:
+    if args.river_mouth_restoring_gate and not (args.runoff
+                                                and args.sss_restore):
         raise ValueError(
-            "--river-mouth-restoring-gate requires --runoff (the gate masks "
-            "restoring where the Dai-Trenberth runoff field is active; "
-            "without --runoff there is no runoff field and the gate would "
-            "silently do nothing).")
+            "--river-mouth-restoring-gate requires --runoff AND --sss-restore "
+            "(the gate masks RESTORING where the Dai-Trenberth runoff field is "
+            "active; with either missing there is nothing to mask and the flag "
+            "would silently do nothing — codex 9600951).")
     if args.sss_ice_gate_nemo and not args.sss_restore:
         raise ValueError(
             "--sss-ice-gate-nemo requires --sss-restore (it only changes the "
