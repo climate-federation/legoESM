@@ -135,3 +135,25 @@ def test_config_guards(flat_mesh, z_shim):
             VerticalMixingConfig(scheme="tke", tke=TKEConfig(prognostic=False)))
     with pytest.raises(ValueError, match="scheme='tke'"):
         make_tke_profiles_fesom(VerticalMixingConfig(scheme="none"))
+
+
+def test_eice_card_runs_unforced_and_fails_fast_forced_without_ice(flat_mesh, z_shim):
+    """The ORCA1 card sets eice=3 (under-ice attenuation). Unforced (the B1
+    smoke: no fluxes, no ice) must run; forced WITHOUT an ice field must raise
+    rather than silently skip the attenuation (codex 9600324 CRITICAL)."""
+    cfg = VerticalMixingConfig(scheme="tke", tke=TKEConfig(prognostic=True, eice=3))
+    fn = make_tke_profiles_fesom(cfg)
+    zg = fesom_zgeom(flat_mesh)
+    state = create_rest_state(flat_mesh, z_shim, stratified=True,
+                              vertical_coordinate="zstar")
+    Kv, _, _ = fn(state, flat_mesh, zg, None, dt_tke=DT)
+    assert np.isfinite(np.asarray(Kv)).all()
+    with pytest.raises(ValueError, match="ice_concentration"):
+        fn(state, flat_mesh, zg, _wind(flat_mesh), dt_tke=DT)
+    n = int(flat_mesh.nod2D)
+    sf = _wind(flat_mesh)._replace(ice_concentration=jnp.full((n,), 0.9))
+    Kv_ice, _, _ = fn(state, flat_mesh, zg, sf, dt_tke=DT)
+    Kv_open, _, _ = fn(state, flat_mesh, zg, _wind(flat_mesh)._replace(
+        ice_concentration=jnp.zeros((n,))), dt_tke=DT)
+    # 90% ice attenuates the wind-driven surface mixing (eice=3: 1-4A -> 0)
+    assert float(jnp.median(Kv_ice[:, 1])) <= float(jnp.median(Kv_open[:, 1]))

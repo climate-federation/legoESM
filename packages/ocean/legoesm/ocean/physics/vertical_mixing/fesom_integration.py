@@ -123,11 +123,16 @@ def make_tke_profiles_fesom(config: VerticalMixingConfig, eos_fn=None,
         nlev = int(zgeom.n_levels)
         nl = nlev + 1
         inner = state.inner
-        # Live layer thickness (z*): uniform stretch of the reference ladder.
+        # Live layer thickness: fesom's z* stretches only the layers above
+        # a set depth (fesom_jax/ale.py), so the centre-to-centre spacing
+        # comes from the LIVE hnode column, not from a uniform stretch
+        # (codex 9600324 MAJOR).  J (surface stretch) only feeds the
+        # reference-ladder pieces of the closure.
         hnode = jnp.asarray(inner.hnode, dtype=jnp.float64)[:, :nlev]
         layer_mask = jnp.asarray(mesh.node_layer_mask)[:, :nlev]
+        h_live = jnp.where(layer_mask, hnode, zgeom.dz_ref[None, :])
+        dz_half = 0.5 * (h_live[:, :-1] + h_live[:, 1:])            # (nod, nlev-1)
         J = jnp.where(layer_mask[:, 0], hnode[:, 0] / zgeom.dz_ref[0], 1.0)
-        dz_half = zgeom.dz_half_ref[None, :] * J[:, None]           # (nod, nlev-1)
         uv = jnp.asarray(state.uv_node, dtype=jnp.float64)[:, :nlev]
         u_node = jnp.where(layer_mask, uv[..., 0], 0.0)
         v_node = jnp.where(layer_mask, uv[..., 1], 0.0)
@@ -141,7 +146,10 @@ def make_tke_profiles_fesom(config: VerticalMixingConfig, eos_fn=None,
         tau_y = getattr(surface_forcing, "tau_y", None) if surface_forcing is not None else None
         ice_frac = (getattr(surface_forcing, "ice_concentration", None)
                     if (_eice != 0 and surface_forcing is not None) else None)
-        if _eice != 0 and ice_frac is None:
+        # Forced without an ice field: fail fast (the MPAS-bridge contract).
+        # UNFORCED (surface_forcing None, the B1 smoke path): no fluxes, no
+        # ice, no wave sources to attenuate — nothing to gate (codex 9600324).
+        if _eice != 0 and ice_frac is None and surface_forcing is not None:
             raise ValueError(
                 f"TKEConfig.eice={_eice} requires surface_forcing.ice_concentration "
                 "on FESOM (attach it as the host loop does for MPAS) or set eice=0.")
