@@ -3153,10 +3153,27 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 'eos="nemo_teos10" requires eos_depth="geometric"; NEMO '
                 "passes gdept directly to eosbn2")
-        if _eos_depth == "geometric" and _eos_name != "nemo_teos10":
+        # NEMO's eos_insitu feeds the LIVE geometric gdept to the polynomial in
+        # BOTH of its pressure-dependent arms, so both are certified for the
+        # geometric depth ladder:
+        #   np_teos10/np_eos80  eosbn2.F90:260  zh = gdept(ji,jj,jk,Knn)*r1_Z0
+        #   np_seos             eosbn2.F90:297  zh = gdept(ji,jj,jk,Knn)
+        # Receipts: docs/ocean/fidelity/testcases/nemo_testcases_l1_phase3_receipt.md:139
+        # (nemo_teos10, LOCK/OVERFLOW; pinning geometric took the LOCK stage-1 u
+        # RHS error 5.6854e-9 -> 3.6863e-17) and
+        # docs/ocean/fidelity/dino_tendency_certificate.md:15-16 (nemo_seos, DINO
+        # nemo_paper/nemo_dino_kamm/_mlf; "required for the S-EOS thermobaric
+        # depth term", max|drho'| 1.5e-5).  Adding an EOS here requires the same:
+        # the oracle line showing it takes gdept, and a receipt measuring it.
+        _geometric_certified_eos = {"nemo_teos10", "nemo_seos"}
+        if (_eos_depth == "geometric"
+                and _eos_name not in _geometric_certified_eos):
             raise ValueError(
-                'eos_depth="geometric" is certified only with '
-                'eos="nemo_teos10"')
+                'eos_depth="geometric" is certified only with eos in '
+                f'{sorted(_geometric_certified_eos)} (NEMO eos_insitu passes '
+                "live gdept in its np_teos10/np_eos80 arm, eosbn2.F90:260, and "
+                "its np_seos arm, eosbn2.F90:297); got "
+                f"eos={_eos_name!r}")
         _rdsm = getattr(config, "runoff_depth_spread_map", None)
         if _rdsm is not None:
             import numpy as _np
