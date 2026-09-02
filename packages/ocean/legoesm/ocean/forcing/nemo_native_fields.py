@@ -49,6 +49,48 @@ def _read_var(path: str, var: str) -> tuple[np.ndarray, np.ndarray,
     return arr, lat, lon
 
 
+def read_nemo_tmask_interior(mesh_path: str) -> np.ndarray:
+    """NEMO's own 3-D wet mask on the eORCA1 INTERIOR, ``(nlev, y, x)`` bool.
+
+    The NEMO input files (``woce_*_monthly_init``, ``sss_climatology_for_
+    restoring``) are FLOOD-FILLED: every land / below-seafloor cell holds a
+    finite number NEMO never reads because ``tmask`` is 0 there (40914 of
+    106208 finite surface cells are land; along the Ligurian coast the
+    filled values at 200 m are S~31 next to 38.4 wet water).  A regridder
+    that takes "finite" as "wet" samples them.  The mesh_mask carries the
+    halos ``(1, nlev, y+1, x+2)``; the interior is ``[:-1, 1:-1]``.
+    """
+    import netCDF4
+
+    with netCDF4.Dataset(mesh_path) as ds:
+        if "tmask" not in ds.variables:
+            raise ValueError(f"{mesh_path}: no 'tmask' variable")
+        tm = np.asarray(ds.variables["tmask"][:])
+    tm = tm.reshape(tm.shape[-3:])
+    return tm[:, :-1, 1:-1] > 0.5
+
+
+def nemo_src_tmask_for(mesh_path: str, field_path: str,
+                       var: str = "nav_lat") -> np.ndarray | None:
+    """``read_nemo_tmask_interior(mesh_path)`` when its interior matches the
+    (y, x) grid of ``field_path``; otherwise ``None`` with a LOUD warning
+    (the run then regrids from flood-filled land — the pre-2026-09-02
+    behaviour).  Keeps a mesh of another resolution from raising inside the
+    IC loader while never letting the mismatch pass silently."""
+    import netCDF4
+
+    with netCDF4.Dataset(field_path) as ds:
+        yx = tuple(ds.variables[var].shape[-2:])
+    tm = read_nemo_tmask_interior(mesh_path)
+    if tm.shape[-2:] != yx:
+        print(f"[nemo-tmask] WARN: mesh_mask {mesh_path} interior "
+              f"{tm.shape[-2:]} != {field_path} grid {yx}; regridding "
+              "WITHOUT NEMO's land mask (samples flood-filled land cells).",
+              flush=True)
+        return None
+    return tm
+
+
 def embed_orca_interior(src: np.ndarray, n_lat: int,
                         n_lon: int) -> np.ndarray:
     """Embed an eORCA-interior field (..., y, x) into the model's
@@ -77,7 +119,7 @@ def embed_orca_interior(src: np.ndarray, n_lat: int,
 
 
 def _to_model_grid_2d(field_i, src_lat, src_lon, lat_T_deg, lon_T_deg,
-                      wet_mask, regridder=None):
+                      wet_mask, regridder=None, src_wet=None):
     """One 2-D interior field -> model grid (embed or nearest-wet).
 
     Structured targets (regular lat-lon / tripole) pass a 2-D ``lat_T_deg``:
@@ -89,8 +131,8 @@ def _to_model_grid_2d(field_i, src_lat, src_lon, lat_T_deg, lon_T_deg,
     lat_arr = np.asarray(lat_T_deg)
     if lat_arr.ndim == 1:                      # unstructured (MPAS) paired pts
         if regridder is None:
-            src_wet = np.isfinite(field_i)
-            regridder = NearestWetRegridder(src_lon, src_lat, src_wet,
+            regridder = NearestWetRegridder(src_lon, src_lat,
+                                            _source_wet(field_i, src_wet),
                                             lon_T_deg, lat_T_deg,
                                             structured=False)
         return regridder(field_i), regridder
@@ -101,10 +143,24 @@ def _to_model_grid_2d(field_i, src_lat, src_lon, lat_T_deg, lon_T_deg,
                              np.asarray(lon_T_deg)[:-1, 1:-1])):
         return embed_orca_interior(field_i, n_lat, n_lon), regridder
     if regridder is None:
-        src_wet = np.isfinite(field_i)
-        regridder = NearestWetRegridder(src_lon, src_lat, src_wet,
+        regridder = NearestWetRegridder(src_lon, src_lat,
+                                        _source_wet(field_i, src_wet),
                                         lon_T_deg, lat_T_deg)
     return regridder(field_i), regridder
+
+
+def _source_wet(field_i, src_wet):
+    """Source cells the nearest-wet regridder may sample: finite AND (when
+    NEMO's tmask is supplied) wet in NEMO — the input files are flood-filled
+    over land / below the seafloor (see read_nemo_tmask_interior)."""
+    wet = np.isfinite(field_i)
+    if src_wet is None:
+        return wet
+    src_wet = np.asarray(src_wet, dtype=bool)
+    if src_wet.shape != wet.shape:
+        raise ValueError(
+            f"src_wet shape {src_wet.shape} != source field {wet.shape}")
+    return wet & src_wet
 
 
 def load_nemo_sss_restoring_climatology(
@@ -113,8 +169,14 @@ def load_nemo_sss_restoring_climatology(
     lon_T_deg: np.ndarray,
     wet_mask: np.ndarray,
     var: str = "presalt",
+    src_tmask: np.ndarray | None = None,
 ) -> np.ndarray:
     """(12, n_lat, n_lon) monthly SSS-restoring target [PSU].
+
+    ``src_tmask`` (``(nlev, y, x)`` or ``(y, x)`` bool, see
+    ``read_nemo_tmask_interior``): NEMO's wet mask on the source grid — the
+    file is flood-filled over land, so regridding grids must pass it or the
+    nearest-"wet" search samples land values.
 
     Native-grid tripole runs embed directly (halo fill); other grids
     regrid nearest-wet.  Land cells are filled with the nearest wet
@@ -129,10 +191,13 @@ def load_nemo_sss_restoring_climatology(
             f"{path}: expected (12, y, x) monthly SSS, got {arr.shape}")
     out = np.empty((12,) + np.asarray(lat_T_deg).shape, dtype=np.float64)
     regridder = None
+    _src_wet0 = (None if src_tmask is None
+                 else np.asarray(src_tmask, dtype=bool).reshape(
+                     (-1,) + arr.shape[-2:])[0])
     for m in range(12):
         out[m], regridder = _to_model_grid_2d(
             arr[m], src_lat, src_lon, lat_T_deg, lon_T_deg, wet_mask,
-            regridder)
+            regridder, src_wet=_src_wet0)
     # NaN-free: fill any remaining gaps (land / unmapped) with the
     # monthly wet mean so masked applies never touch NaNs.
     for m in range(12):
@@ -197,8 +262,16 @@ def load_nemo_monthly_init_ts(
     temp_var: str = "contemp",
     salt_var: str = "presalt",
     target_depths: np.ndarray | None = None,
+    src_tmask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """(T, S) 3-D initial state for the given month (1-based).
+
+    ``src_tmask`` (``(nlev, y, x)`` bool from ``read_nemo_tmask_interior``):
+    NEMO's per-level wet mask on the source grid.  The IC files are
+    flood-filled over land and below the seafloor; regridding grids MUST
+    pass it or the per-level nearest-"wet" search samples those fills (the
+    FESOM Ligurian column got S~31 at 200 m from a land cell next to 38.4
+    water and blew up within a day).  The native tripole embed ignores it.
 
     The files carry NEMO's 75 reference levels.  Default
     (``target_depths=None``): the model must run the SAME ladder (the
@@ -227,6 +300,12 @@ def load_nemo_monthly_init_ts(
             raise ValueError(
                 f"{name} init: expected (12, nlev, y, x), got {arr.shape}")
     nlev_src = T_arr.shape[1]
+    if src_tmask is not None:
+        src_tmask = np.asarray(src_tmask, dtype=bool)
+        if src_tmask.shape != T_arr.shape[1:]:
+            raise ValueError(
+                f"src_tmask shape {src_tmask.shape} != IC field "
+                f"{T_arr.shape[1:]} (nlev, y, x)")
     src_depths = None
     if target_depths is None:
         if nlev_src != int(n_levels):
@@ -262,12 +341,19 @@ def load_nemo_monthly_init_ts(
         # on the regrid path (codex r11 MED#1). T and S share the level's
         # bathymetry, so one regridder serves both. Native-embed targets
         # never build one (coords_match short-circuits).
+        _sw_k = None if src_tmask is None else np.asarray(src_tmask)[k]
+        if _sw_k is not None and not np.any(np.isfinite(T_arr[m, k]) & _sw_k):
+            # NEMO's deepest level(s) are all land: nothing to sample, leave
+            # NaN for the below-seafloor fill below (was: regridder raise).
+            T_out[..., k] = np.nan
+            S_out[..., k] = np.nan
+            continue
         T_out[..., k], regridder_k = _to_model_grid_2d(
             T_arr[m, k], src_lat, src_lon, lat_T_deg, lon_T_deg, None,
-            None)
+            None, src_wet=_sw_k)
         S_out[..., k], _ = _to_model_grid_2d(
             S_arr[m, k], src_lat, src_lon, lat_T_deg, lon_T_deg, None,
-            regridder_k)
+            regridder_k, src_wet=_sw_k)
     # Finite everywhere: below-seafloor / land cells inherit the deepest
     # finite value of their column (masked in the model, but the state
     # arrays must be NaN-free), then any all-NaN column takes the level

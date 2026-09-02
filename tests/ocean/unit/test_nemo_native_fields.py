@@ -164,3 +164,52 @@ def test_monthly_init_unstructured_target(tmp_path):
     assert np.isfinite(T).all() and np.isfinite(S).all()
     # month indexing survives: contemp = 10 + m at month 2 (index 1)
     np.testing.assert_allclose(T[:, 0], 10.0 + 1, atol=1e-6)
+
+
+def test_regrid_skips_flood_filled_land_when_tmask_given(tmp_path):
+    """NEMO's IC / restoring files are flood-filled: land cells hold finite
+    junk.  With ``src_tmask`` the nearest-WET search must skip them; without
+    it (the pre-fix behaviour) the same target samples the junk — so the
+    test fails if the mask is ignored."""
+    from legoesm.ocean.forcing.nemo_native_fields import nemo_src_tmask_for
+
+    # 3x3 source: centre cell is LAND holding 5.0 (junk); wet ring holds 35.
+    lat_i = np.array([[-1.0, -1.0, -1.0], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]])
+    lon_i = np.array([[9.0, 10.0, 11.0]] * 3)
+    p = tmp_path / "sss.nc"
+    with netCDF4.Dataset(p, "w") as ds:
+        ds.createDimension("time_counter", 12)
+        ds.createDimension("y", 3); ds.createDimension("x", 3)
+        v = ds.createVariable("nav_lat", "f8", ("y", "x")); v[:] = lat_i
+        v = ds.createVariable("nav_lon", "f8", ("y", "x")); v[:] = lon_i
+        v = ds.createVariable("presalt", "f8", ("time_counter", "y", "x"))
+        fld = np.full((3, 3), 35.0); fld[1, 1] = 5.0
+        v[:] = np.broadcast_to(fld, (12, 3, 3))
+    tmask = np.ones((1, 3, 3), bool); tmask[0, 1, 1] = False
+    # unstructured target: one point ON the land cell centre
+    tgt_lat = np.array([0.0]); tgt_lon = np.array([10.0])
+    junk = load_nemo_sss_restoring_climatology(str(p), tgt_lat, tgt_lon,
+                                               np.ones(1, bool))
+    assert junk[0, 0] == 5.0            # pre-fix: samples the land fill
+    good = load_nemo_sss_restoring_climatology(str(p), tgt_lat, tgt_lon,
+                                               np.ones(1, bool),
+                                               src_tmask=tmask)
+    assert good[0, 0] == 35.0           # masked: nearest WET cell
+
+    # mesh_mask with halos (1, nlev, y+1, x+2) -> interior mask; shape guard
+    m = tmp_path / "mesh_mask.nc"
+    with netCDF4.Dataset(m, "w") as ds:
+        ds.createDimension("t", 1); ds.createDimension("z", 1)
+        ds.createDimension("y", 4); ds.createDimension("x", 5)
+        v = ds.createVariable("tmask", "i1", ("t", "z", "y", "x"))
+        full = np.ones((1, 1, 4, 5), np.int8); full[0, 0, 1, 2] = 0
+        v[:] = full
+    tm = nemo_src_tmask_for(str(m), str(p))
+    assert tm is not None and tm.shape == (1, 3, 3) and not tm[0, 1, 1]
+    with netCDF4.Dataset(m, "a") as ds:
+        pass
+    # a mesh of another resolution -> None (warned), never a crash
+    lat_big = np.zeros((7, 10)); lon_big = np.zeros((7, 10))
+    p2 = tmp_path / "sss_big.nc"
+    _write_sss_nc(p2, lat_big[:-1, 1:-1], lon_big[:-1, 1:-1], 6, 8)
+    assert nemo_src_tmask_for(str(m), str(p2)) is None

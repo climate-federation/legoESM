@@ -2176,6 +2176,7 @@ def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None, *,
         # carry (load_nemo_monthly_init_ts docstring).
         from legoesm.ocean.forcing.nemo_native_fields import (
             load_nemo_monthly_init_ts,
+            nemo_src_tmask_for,
         )
         _lat_deg = np.degrees(np.asarray(grid.lat))
         _lon_deg = np.degrees(np.asarray(grid.lon))
@@ -2183,7 +2184,8 @@ def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None, *,
             nemo_monthly_init[0], nemo_monthly_init[1],
             _lat_deg, _lon_deg, n_levels=int(z_coord.n_levels),
             month=int(nemo_init_month),
-            target_depths=-_z_full)
+            target_depths=-_z_full,
+            src_tmask=nemo_src_tmask_for(_MESH, nemo_monthly_init[0]))
         state = with_fields(state, model.mesh, T=T_ic, S=S_ic)
         _ic_desc = (f"NEMO monthly m{int(nemo_init_month)} "
                     f"({nemo_monthly_init[0].rsplit('/', 1)[-1]})")
@@ -2407,9 +2409,13 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
             from legoesm.ocean.forcing.nemo_native_fields import (
                 load_nemo_sss_restoring_climatology,
             )
+            from legoesm.ocean.forcing.nemo_native_fields import (
+                nemo_src_tmask_for,
+            )
             sss_restore_target = load_nemo_sss_restoring_climatology(
                 args.sss_restore_file, lat_deg, lon_deg,
-                np.asarray(state.land_mask.data) > 0.5)     # (12, nod2D)
+                np.asarray(state.land_mask.data) > 0.5,     # (12, nod2D)
+                src_tmask=nemo_src_tmask_for(args.mesh, args.sss_restore_file))
         else:
             # IC-surface target (requires an initialised state — gated in
             # validate_fesom_stage).
@@ -7149,11 +7155,13 @@ def main() -> int:
         # all grids take the same NEMO monthly WOA start (2026-08-30).
         from legoesm.ocean.forcing.nemo_native_fields import (
             load_nemo_monthly_init_ts,
+            nemo_src_tmask_for,
         )
         _T_ic, _S_ic = load_nemo_monthly_init_ts(
             args.nemo_monthly_init[0], args.nemo_monthly_init[1],
             lat2d, lon2d, n_levels=int(z_coord.n_levels),
-            month=int(args.nemo_init_month))
+            month=int(args.nemo_init_month),
+            src_tmask=nemo_src_tmask_for(args.mesh, args.nemo_monthly_init[0]))
         _Td = state.T.data.dtype
         state = state._replace(
             T=state.T.replace(data=jnp.asarray(_T_ic, dtype=_Td)),
@@ -7208,10 +7216,12 @@ def main() -> int:
         if args.sss_restore_file is not None:
             from legoesm.ocean.forcing.nemo_native_fields import (
                 load_nemo_sss_restoring_climatology,
+                nemo_src_tmask_for,
             )
             sss_restore_target = load_nemo_sss_restoring_climatology(
                 args.sss_restore_file, lat2d, lon2d,
-                np.asarray(state.land_mask.data) > 0.5)   # (12, n_lat, n_lon)
+                np.asarray(state.land_mask.data) > 0.5,   # (12, n_lat, n_lon)
+                src_tmask=nemo_src_tmask_for(args.mesh, args.sss_restore_file))
         else:
             sss_restore_target = np.asarray(
                 state.S.data, dtype=np.float64)[..., 0].copy()  # surface SSS
