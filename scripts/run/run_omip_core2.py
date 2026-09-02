@@ -1995,6 +1995,11 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
 # ice + SSS restore (water_flux channel) + runoff + NEMO-monthly/WOA IC).
 _FESOM_WIRED_DESTS = frozenset({
     "grid", "fesom_mesh_dir", "fesom_ic_dir", "fesom_unforced", "dt", "years",
+    # vertical-mixing closure + the zdftke card knobs it consumes (same set
+    # the MPAS lane threads; _validate_tke_card_grid gates them):
+    "fesom_vmix", "tke_eice", "tke_surface_bc", "tke_mxl_choice",
+    "tke_prognostic", "tke_n2_mode", "tke_n2_eos_form", "tke_kappa_convention",
+    "tke_shear_production", "tke_lc", "tke_etau",
     "snapshot_every_days", "output", "smoke",
     # B2+B3 forcing selectors, wired through the fesom forced loop:
     "emp_freshwater", "dm2dc", "sw_rgb_chl", "chl_file", "forcing_path",
@@ -2102,7 +2107,8 @@ def validate_fesom_stage(args, parser) -> None:
 
 def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None, *,
                       nemo_monthly_init=None, nemo_init_month: int = 1,
-                      woa_init: bool = False, woa_t=None, woa_s=None):
+                      woa_init: bool = False, woa_t=None, woa_s=None,
+                      vertical_mixing: str = "fesom", vmix_config=None):
     """FESOM core in the OMIP driver (three-grid unification B1; IC B4).
 
     Loads the REAL-bathymetry fesom_jax mesh (NOT the idealized
@@ -2141,8 +2147,9 @@ def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None, *,
     z_coord = SimpleNamespace(z_full_ref=_z_full, n_levels=int(_z_full.size),
                               dz_ref=_dz_ref)
     config = FesomOceanConfig(dt=float(dt), vertical_coordinate="zstar",
-                              constants="legoesm")
-    model = FesomOceanModel(mesh, z_coord, config)
+                              constants="legoesm",
+                              vertical_mixing=str(vertical_mixing))
+    model = FesomOceanModel(mesh, z_coord, config, vmix_config=vmix_config)
     if ic_dir:
         from fesom_jax.phc_ic import cold_start_state
         # seed_sea_ice=False: the PHC cold start would seed a static
@@ -2557,6 +2564,9 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
                 sw_transmittance_ice=0.0,
                 ice_owns_snow_reservoir=uses_new_physics(ice_config),
             )
+            # Same partition-time-level concentration to the closure (the
+            # TKE eice under-ice attenuation reads it), as the host loop does.
+            sf = sf._replace(ice_concentration=_ice_conc_pre)
         # --- SSS restoring, WATER-FLUX channel (B4; pre-step, like NEMO
         # sbcssr: the flux is computed from the NOW-level SSS and enters
         # the freshwater budget + the qns heat term) --------------------
@@ -3043,7 +3053,8 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
                             tke_prognostic=None, tke_kappa_convention=None,
                             tke_shear_production=None,
                             tke_n2_mode=None, tke_n2_eos_form=None,
-                            tke_lc=None, tke_etau=None, mpas_vmix="kpp"):
+                            tke_lc=None, tke_etau=None, mpas_vmix="kpp",
+                            fesom_vmix="fesom"):
     """Reject the zdftke card knobs unless the tke closure is active.
 
     ``--tke-eice`` / ``--tke-surface-bc`` / ``--tke-mxl-choice`` are applied
@@ -3084,15 +3095,16 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
                         ("--tke-kappa-convention", tke_kappa_convention),
                     ("--tke-shear-production", tke_shear_production)):
         _active = ((grid == "tripole" and tripole_vmix == "tke")
-                   or (grid == "mpas" and mpas_vmix == "tke"))
+                   or (grid == "mpas" and mpas_vmix == "tke")
+                   or (grid == "fesom" and fesom_vmix == "legoesm_tke"))
         if _val is not None and not _active:
             raise SystemExit(
                 f"{_flag} configures the zdftke closure and takes effect ONLY "
-                "under --grid tripole --tripole-vmix tke or --grid mpas "
-                f"--mpas-vmix tke; got --grid {grid!r} --tripole-vmix "
-                f"{tripole_vmix!r} --mpas-vmix {mpas_vmix!r}, where it is "
-                f"silently discarded. Add the matching --tripole-vmix tke / "
-                f"--mpas-vmix tke, or drop {_flag}.")
+                "under --grid tripole --tripole-vmix tke, --grid mpas "
+                "--mpas-vmix tke or --grid fesom --fesom-vmix legoesm_tke; "
+                f"got --grid {grid!r} --tripole-vmix {tripole_vmix!r} "
+                f"--mpas-vmix {mpas_vmix!r} --fesom-vmix {fesom_vmix!r}, where "
+                f"it is silently discarded. Select the closure, or drop {_flag}.")
 
 
 def _validate_pcg_variant_grid(grid, barotropic_pcg_variant=None,
@@ -5135,6 +5147,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="--grid fesom: PHC3.0 IC directory for "
                         "fesom_jax.phc_ic.cold_start_state (omit for the "
                         "stratified rest state).")
+    p.add_argument("--fesom-vmix", type=str, default="legoesm_tke",
+                   choices=["fesom", "legoesm_tke"],
+                   help="Vertical-mixing closure on --grid fesom. legoesm_tke "
+                        "(default): the legoESM/NEMO ORCA1 zdftke card the "
+                        "tripole and MPAS lanes run (same --tke-* knobs), "
+                        "computed on the node columns and injected at fesom_jax's "
+                        "vertical_mixing seam. fesom: fesom_jax's own closure "
+                        "(measured day-30 Southern Ocean MLD 18.6 m vs NEMO 41 m, "
+                        "SST +1.45 C). ONE closure across the three grids.")
     p.add_argument("--fesom-unforced", action="store_true",
                    help="--grid fesom: run the stage-B1 UNFORCED smoke loop "
                         "(zero stress, no heat/freshwater) instead of the "
@@ -6490,7 +6511,8 @@ def main() -> int:
                             tke_n2_mode=args.tke_n2_mode,
                             tke_n2_eos_form=args.tke_n2_eos_form,
                             tke_lc=args.tke_lc, tke_etau=args.tke_etau,
-                            mpas_vmix=args.mpas_vmix)
+                            mpas_vmix=args.mpas_vmix,
+                            fesom_vmix=args.fesom_vmix)
     # --gm-treguier is applied in build_tripole's GM/Redi override only; on any
     # other grid (or with GM disabled) it would be silently discarded.
     if args.gm_treguier and args.grid != "tripole":
@@ -6825,7 +6847,22 @@ def main() -> int:
             args.fesom_mesh_dir, args.dt, ic_dir=args.fesom_ic_dir,
             nemo_monthly_init=args.nemo_monthly_init,
             nemo_init_month=args.nemo_init_month,
-            woa_init=args.woa_init, woa_t=args.woa_t, woa_s=args.woa_s)
+            woa_init=args.woa_init, woa_t=args.woa_t, woa_s=args.woa_s,
+            # ONE closure across the three grids: the SAME zdftke card
+            # builder + knobs the tripole/MPAS lanes use.
+            vertical_mixing=args.fesom_vmix,
+            vmix_config=(build_tripole_vmix_config(
+                "tke", iwm=None,
+                tke_eice=args.tke_eice,
+                tke_surface_bc=args.tke_surface_bc,
+                tke_mxl_choice=args.tke_mxl_choice,
+                tke_prognostic=args.tke_prognostic,
+                tke_n2_mode=args.tke_n2_mode,
+                tke_n2_eos_form=args.tke_n2_eos_form,
+                tke_kappa_convention=args.tke_kappa_convention,
+                tke_shear_production=args.tke_shear_production,
+                tke_lc=args.tke_lc, tke_etau=args.tke_etau)
+                if args.fesom_vmix == "legoesm_tke" else None))
         if args.fesom_unforced:
             run_fesom_b1_smoke(args, grid, z_coord, model, state)
         else:

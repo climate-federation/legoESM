@@ -115,6 +115,16 @@ class FesomOceanConfig(NamedTuple):
     # Omega 2.7e-3, R_earth 5.9e-4, g 3.9e-4). Select "fesom" for oracle
     # work where reproducing FESOM2 exactly is the point.
     constants: str = "legoesm"
+    # Vertical-mixing closure: "fesom" (fesom_jax's own PP/KPP/TKE, selected
+    # by its configs) or "legoesm_tke" — the legoESM/NEMO-card TKE closure the
+    # tripole and MPAS lanes run, computed on the node columns by
+    # ``vertical_mixing.fesom_integration.make_tke_profiles_fesom`` and
+    # injected at fesom_jax's ``step(vertical_mixing=(Kv, Av))`` seam.  The
+    # model constructor then REQUIRES ``vmix_config`` (a
+    # ``VerticalMixingConfig(scheme='tke')``).  Measured 2026-09-02 (day 30):
+    # fesom's own closure left the Southern Ocean mixed layer at 18.6 m vs
+    # NEMO's 41 m with SST +1.45 C where the other two grids sat at +0.2.
+    vertical_mixing: str = "fesom"
 
 
 # =============================================================================
@@ -1437,7 +1447,8 @@ class FesomOceanModel:
     JIT-safety.
     """
 
-    def __init__(self, mesh: "Mesh", z_coord: Any, config: FesomOceanConfig):
+    def __init__(self, mesh: "Mesh", z_coord: Any, config: FesomOceanConfig,
+                 *, vmix_config=None):
         _require_fesom_jax()
         from fesom_jax import config as fconfig
         from fesom_jax import ssh as fssh
@@ -1505,6 +1516,30 @@ class FesomOceanModel:
         # One-shot announcement of which SW-penetration kernel the forcing
         # translator ran (provenance; printed on the first forced step).
         self._sw_kernel_announced = False
+        # Vertical-mixing closure (FesomOceanConfig.vertical_mixing).
+        _vmix_mode = getattr(config, "vertical_mixing", "fesom")
+        self._tke_profiles_fn = None
+        if _vmix_mode == "legoesm_tke":
+            if vmix_config is None:
+                raise ValueError(
+                    "FesomOceanConfig(vertical_mixing='legoesm_tke') requires "
+                    "FesomOceanModel(..., vmix_config=VerticalMixingConfig("
+                    "scheme='tke', tke=...)) — the same card the tripole/MPAS "
+                    "lanes build (build_tripole_vmix_config).")
+            from legoesm.ocean.physics.vertical_mixing.fesom_integration import (
+                fesom_zgeom, make_tke_profiles_fesom,
+            )
+            self._tke_profiles_fn = make_tke_profiles_fesom(vmix_config)
+            self._zgeom = fesom_zgeom(mesh)
+        elif _vmix_mode != "fesom":
+            raise ValueError(
+                f"FesomOceanConfig.vertical_mixing={_vmix_mode!r}; expected "
+                "'fesom' or 'legoesm_tke'.")
+        elif vmix_config is not None:
+            raise ValueError(
+                "vmix_config given but FesomOceanConfig.vertical_mixing='fesom' "
+                "— the legoESM closure would be silently ignored; select "
+                "vertical_mixing='legoesm_tke' or drop vmix_config.")
 
     def step(self, state: FesomOceanState, dt: float, *,
              surface_forcing=None, freshwater=None,
@@ -1585,6 +1620,16 @@ class FesomOceanModel:
                          f"chl_const={_FESOM_CHL_CONST})"))
                 self._sw_kernel_announced = True
 
+        vertical_mixing = None
+        tke_nl = None
+        if self._tke_profiles_fn is not None:
+            # legoESM TKE on the node columns (the tripole/MPAS card), handed
+            # to fesom's step at its diffusivity seam; prognostic TKE rides in
+            # inner.tke (interface slots, same indexing as Kv).
+            Kv_nod, Av_elem, tke_nl = self._tke_profiles_fn(
+                state, self.mesh, self._zgeom, surface_forcing,
+                dt_tke=self._dt)
+            vertical_mixing = (Kv_nod, Av_elem)
         new_inner = fstep.step_jit(
             state.inner,
             self.mesh,
@@ -1595,7 +1640,10 @@ class FesomOceanModel:
             is_first_step=state.is_first_step,
             ale_cfg=self._ale_cfg,
             surface_fluxes=surface_fluxes,
+            vertical_mixing=vertical_mixing,
         )
+        if tke_nl is not None:
+            new_inner = dataclasses.replace(new_inner, tke=tke_nl)
 
         # Materialise the per-step node velocity ONCE.  ``u`` / ``v``
         # become cheap slices of this leaf.
