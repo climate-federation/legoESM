@@ -132,8 +132,23 @@ def test_planted_stage_control_exits_nonzero_end_to_end(tmp_path):
     row = next(row for row in report["rows"] if row["name"] == name)
     assert row["status"] == "DEBT" and row["absolute_max"] >= 0.5
     assert name in report["failed_rows"]
-    assert report["controls"] == {"plant_stage": True, "plant_operand": False}
+    assert report["controls"] == {
+        "plant_stage": True, "plant_operand": False, "plant_prediction": False}
     assert report["status"] == ("DEBT" if report["failed_rows"] else "AT-BAR")
+
+
+@needs_oracle
+def test_prediction_plant_is_fail_closed(tmp_path):
+    """--plant-prediction inflates the frozen H2 numbers 1000x and REQUIRES the
+    stage-3 refutation predicate to flip.  On LOCK that predicate does not
+    exist, so the planted run must exit 2 rather than silently pass."""
+    assert GATE.main(["LOCK_EXCHANGE-zco", "--plant-prediction", "--allow-dirty",
+                      "--output", str(tmp_path / "planted.json")]) == 2
+    plain = tmp_path / "plain.json"
+    assert GATE.main(["LOCK_EXCHANGE-zco", "--allow-dirty",
+                      "--output", str(plain)]) == 1
+    check = json.loads(plain.read_text())["preregistered_prediction_check"]
+    assert check and all(entry["status"] == "MET" for entry in check.values())
 
 
 @needs_oracle

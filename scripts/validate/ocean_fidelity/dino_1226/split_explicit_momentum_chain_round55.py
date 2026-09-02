@@ -857,7 +857,11 @@ def main() -> int:
     original = model_module.add_bolus_to_advecting_flux
     original_solver = model_module.barotropic_substeps_latlon_cgrid
     original_cycle = model_module.nemo_qco_kmm_velocity_cycle
-    original_thickness = model_module.nemo_qco_live_face_thicknesses
+    # The MLF tracer transport's live-thickness entry is now the SHARED
+    # NEMO qco builder (vertical.nemo_qco_live_face_geometry_cgrid, the one
+    # the WS-RK3 stage transport calls too), and it returns legoESM's
+    # REDUNDANT west/south faces, so the capture is sliced to native below.
+    original_thickness = model_module.nemo_qco_live_face_geometry_cgrid
     solver_calls = 0
     transport_substitutions = 0
     solver_transport_captures = []
@@ -1017,7 +1021,7 @@ def main() -> int:
     if args.capture_cycle:
         model_module.nemo_qco_kmm_velocity_cycle = observed_cycle
     if args.live_thickness_entry:
-        model_module.nemo_qco_live_face_thicknesses = observed_thickness
+        model_module.nemo_qco_live_face_geometry_cgrid = observed_thickness
     if args.capture_bolus_operands:
         gm_module.nemo_eiv_bolus_transport = observed_bolus
     if args.capture_kappa_operands:
@@ -1031,14 +1035,14 @@ def main() -> int:
         model_module.add_bolus_to_advecting_flux = original
         model_module.barotropic_substeps_latlon_cgrid = original_solver
         model_module.nemo_qco_kmm_velocity_cycle = original_cycle
-        model_module.nemo_qco_live_face_thicknesses = original_thickness
+        model_module.nemo_qco_live_face_geometry_cgrid = original_thickness
         gm_module.nemo_eiv_bolus_transport = original_bolus
         gm_module.compute_treguier_kappa_gm_nemo_native = original_kappa
         gm_module.nemo_iso_lap_tracer_tendency_latlon_cgrid = original_redi
     restored = (model_module.add_bolus_to_advecting_flux is original
                 and model_module.barotropic_substeps_latlon_cgrid is original_solver
                 and model_module.nemo_qco_kmm_velocity_cycle is original_cycle
-                and model_module.nemo_qco_live_face_thicknesses
+                and model_module.nemo_qco_live_face_geometry_cgrid
                 is original_thickness
                 and gm_module.nemo_eiv_bolus_transport is original_bolus)
     restored = (restored
@@ -1115,7 +1119,7 @@ def main() -> int:
         if len(thickness_captures) != 1:
             raise SystemExit(
                 "expected exactly one tracer live-thickness capture")
-        live_u_raw = thickness_captures[0][0][..., :35]
+        live_u_raw = thickness_captures[0][0][:, 1:, :35]
         values["e3u"] = live_u_raw
         values["e2e3u"] = e2u[:, 1:, :] * live_u_raw
     bolus_operand_metrics = {}

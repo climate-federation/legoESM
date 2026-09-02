@@ -14,6 +14,47 @@ stage-composition fixes (kt=2 U owner MEASURED and fixed, `3.31e-6 ->
 2.60e-7`) three metrics are `OUTSIDE` and three `WITHIN-SCHEME-SPREAD`; no
 metric is `INDISTINGUISHABLE-AT-FLOOR`.
 
+## Round 6: qco stage face thickness and stage weighting
+
+Full ledger, source citations, reach table and controls in
+`nemo_testcases_l1_phase3_receipt.md` ("Face-thickness and stage-qco round").
+Preregistered in
+`nemo_testcases_l1_overflow_face_thickness_preregister.md` before either arm
+existed.
+
+The kt=2 TEMPERATURE residual that round 5 left as its registered next owner
+is CLOSED.  Two unbranched corrections to the WS-RK3 identity: the stage
+transport now uses NEMO's `e3u(Kmm) = e3u_0*(1 + r3u(Kmm))`
+(`domqco.F90:219-222`, `domzgr_substitute.h90:127`) instead of the min of the
+two stretched T thicknesses, and every stage velocity update now carries the
+qco weighting `(1+r3u(Kbb)) / (1+r3u(Kmm)) / (1+r3u(Kaa))`
+(`stprk3_stg.F90:373-378`).  The tracer stage already carried its analogue.
+
+kt=2, OVERFLOW-zps, absolute L-infinity on the wet mask:
+T `2.548493e-07 -> 2.238210e-13 K` (1.14e6x); u `2.598440e-07 ->
+2.598798e-07 m/s`; SSH unchanged at `1.0491608e-14` normalized.  Stage-1 u
+`3.757022e-12 -> 6.501744e-15`, stage-2 `6.908155e-11 -> 9.433404e-11`,
+stage-3 `2.598440e-07 -> 2.598798e-07`.  kt=10 T `5.55186262e-06 ->
+7.71178526e-08` normalized; kt=60 before-entry T `1.027641e-04 ->
+1.184430e-05`, u `4.193114e-04 -> 2.507515e-04`.
+
+Six of seven frozen predictions were MET, including the two that
+preregistered these hypotheses as REFUTED for the u residual.  The miss is
+P3b: the stage-2 u residual does not collapse — both corrections make it
+slightly WORSE than the pre-fix `6.908e-11` (`9.433e-11`).  Rule 8:
+disclosed, not reverted, four orders below the stage-3 residual.
+
+The 6120-step statistics keep 3 OUTSIDE / 3 WITHIN-SCHEME-SPREAD.  Every row
+improves or holds (water-mass census 5.05x -> 3.88x the NEMO scheme spread,
+instantaneous-u L-infinity 1.49x -> 1.24x) and none crosses, so the "3 -> 4
+OUTSIDE" regression of round 4 remains at 3 and the long-run statistics stay
+owned by something this round did not touch.
+
+LOCK_EXCHANGE-zco is bit-identical at every kt=1 stage and at kt=2, which the
+source predicts: its oracle `ssh` is identically zero at all three kt=1 stages
+so both face rules and both velocity updates coincide.  Its kt>=3 T improves
+1092x by kt=10; its u and SSH move a few percent in the worse direction.
+
 ## Round 5: RK3 stage composition (takeover of the codex round)
 
 The round-4 HOLD is closed in commit `3a68e43338a4`: the 19 frames are

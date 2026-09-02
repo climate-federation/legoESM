@@ -203,6 +203,104 @@ def hpg_sco_row(
     return trend * mesh["umask"]
 
 
+def face_thickness_and_qco_scaling(card, masks, nlev, oracle_stages, entry1, hu0):
+    """Preregistered scaling for the two stage-geometry hypotheses.
+
+    Computed from the ORACLE kt=1 dumps and the card's own geometry only --
+    no legoESM arm enters -- so the frozen predictions in
+    ``nemo_testcases_l1_overflow_face_thickness_preregister.md`` are
+    reproduced on every run.
+
+    H1: NEMO's stage face thickness is ``e3u_0*(1+r3u(Kmm))``
+    (domqco.F90:219-222, domzgr_substitute.h90:127); legoESM's pre-fix rule
+    was ``min`` of the two stretched T thicknesses.  The oracle's per-stage
+    tracer increment is 100% advective on these cards (K_h = K_v = 0, no
+    surface forcing), so the predicted T movement is the relative transport
+    error times that increment.
+
+    H2: NEMO weights every stage velocity update by ``(1+r3u(Kbb))`` /
+    ``(1+r3u(Kmm))`` / ``(1+r3u(Kaa))`` (stprk3_stg.F90:373-378).  With
+    ``uu(Kbb) = 0`` at kt=1 the omitted factor leaves
+    ``u_lego - u_nemo = u_nemo*(r3u(Kaa)-r3u(Kmm))/(1+r3u(Kmm))``, and the
+    stage barotropic correction removes its depth mean.
+    """
+    import jax.numpy as jnp
+
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        compute_face_masks_3d,
+        min_cell_to_uface,
+    )
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        _nemo_ws_qco_stage_faces,
+    )
+    from legoesm.ocean.vertical import compute_layer_thickness
+
+    init = card.recipe.initial_state
+    z_coord = card.recipe.z_coord
+    grid = card.recipe.grid
+    min_wc = card.recipe.model_config.min_water_column_m
+    h_ref = compute_layer_thickness(
+        jnp.zeros_like(init.eta.data), init.H_bathy.data, z_coord,
+        min_water_column_m=min_wc)
+    u_mask3, v_mask3 = compute_face_masks_3d(z_coord.is_active, grid)
+    u_mask3 = u_mask3.astype(h_ref.dtype)
+    v_mask3 = v_mask3.astype(h_ref.dtype)
+    wet_u = np.asarray(masks["u"], dtype=bool)
+    wet_t = np.asarray(masks["T"], dtype=bool)
+
+    kmm_ssh = {1: entry1["ssh"], 2: oracle_stages[1]["ssh"],
+               3: oracle_stages[2]["ssh"]}
+    kmm_T = {1: entry1["T"], 2: oracle_stages[1]["T"],
+             3: oracle_stages[2]["T"]}
+    h1_rows, h2_rows = [], []
+    predicted_T = 0.0
+    for stage in (1, 2, 3):
+        eta = jnp.asarray(kmm_ssh[stage], dtype=h_ref.dtype)
+        h_stage = compute_layer_thickness(
+            eta, init.H_bathy.data, z_coord, min_water_column_m=min_wc)
+        nemo_u = np.asarray(_nemo_ws_qco_stage_faces(
+            eta, h_ref, u_mask3, v_mask3, grid)[0])[:, 1:, :nlev]
+        min_u = np.asarray(min_cell_to_uface(h_stage))[:, 1:, :nlev]
+        delta = np.abs(min_u - nemo_u)[wet_u]
+        relative = float(np.max(delta / nemo_u[wet_u]))
+        d_tracer = float(np.max(np.abs(
+            (oracle_stages[stage]["T"][..., :nlev]
+             - kmm_T[stage][..., :nlev])[wet_t])))
+        predicted_T += relative * d_tracer
+        h1_rows.append({
+            "stage": stage,
+            "max_abs_delta_e3u_m": float(np.max(delta)),
+            "max_relative_delta_e3u": relative,
+            "oracle_stage_max_abs_delta_T_K": d_tracer,
+            "predicted_T_movement_K": relative * d_tracer,
+        })
+
+        r3a = np.asarray(_nemo_ws_qco_stage_faces(
+            jnp.asarray(oracle_stages[stage]["ssh"], dtype=h_ref.dtype),
+            h_ref, u_mask3, v_mask3, grid)[2])[:, 1:] - 1.0
+        r3m = np.asarray(_nemo_ws_qco_stage_faces(
+            eta, h_ref, u_mask3, v_mask3, grid)[2])[:, 1:] - 1.0
+        u_bc = remove_depth_mean(
+            oracle_stages[stage]["u"][..., :nlev], hu0, masks["u"])
+        h2_rows.append({
+            "stage": stage,
+            "max_abs_r3u_kaa": float(np.max(np.abs(r3a[wet_u.any(axis=-1)]))),
+            "max_abs_r3u_kaa_minus_kmm": float(
+                np.max(np.abs((r3a - r3m)[wet_u.any(axis=-1)]))),
+            "predicted_baroclinic_u_movement_m_s": float(np.max(np.abs(
+                ((r3a - r3m) / (1.0 + r3m))[..., None] * u_bc)[wet_u])),
+        })
+    return {
+        "source": (
+            "domqco.F90:219-222; domzgr_substitute.h90:127; "
+            "stprk3_stg.F90:272-273,373-378; dynzdf.F90 key_qco branch"),
+        "inputs": "oracle kt=1 stage dumps and the card geometry only",
+        "h1_face_thickness": h1_rows,
+        "h1_predicted_total_T_movement_K": predicted_T,
+        "h2_qco_stage_factor": h2_rows,
+    }
+
+
 def score(name: str, oracle, candidate, mask, *, plant=False, quantity="u") -> dict:
     oracle = np.asarray(oracle, dtype=np.float64)
     candidate = np.asarray(candidate)
@@ -293,8 +391,103 @@ def classify_arm(
     }
 
 
+def preregistered_prediction_check(
+    case, scaling, rows, baroclinic_rows, stage_states, masks, arms,
+) -> dict:
+    """Score the frozen predictions of
+    ``nemo_testcases_l1_overflow_face_thickness_preregister.md``.
+
+    Nothing here is inferred at run time: the windows are the committed
+    constants, and each is compared with the arm's own measured movement.
+    """
+    def _row(collection, name):
+        return next(row for row in collection if row["name"] == name)
+
+    def _stage_move(arm, stage):
+        return movement(
+            np.asarray(stage_states["faithful"][stage].u.data)[:, 1:, :],
+            np.asarray(stage_states[arm][stage].u.data)[:, 1:, :],
+            masks["u"])["absolute_max"]
+
+    check = {}
+    if "legacy_stage_min_face_thickness" in arms:
+        faithful_T = _row(rows, f"{case}.kt2.faithful.T")["absolute_max"]
+        control_T = _row(
+            rows, f"{case}.kt2.legacy_stage_min_face_thickness.T")["absolute_max"]
+        moved_T = abs(control_T - faithful_T)
+        predicted_T = scaling["h1_predicted_total_T_movement_K"]
+        moved_u = _stage_move("legacy_stage_min_face_thickness", 3)
+        if case == "OVERFLOW-zps":
+            check["P1_h1_moves_kt2_T_within_2x_of_scaling"] = {
+                "predicate": "2.03e-07 <= |movement| <= 8.12e-07 K and the residual improves",
+                "predicted_from_oracle_dumps_K": predicted_T,
+                "faithful_kt2_T_residual_K": faithful_T,
+                "legacy_min_rule_kt2_T_residual_K": control_T,
+                "measured_movement_K": moved_T,
+                "status": ("MET" if (2.03e-7 <= moved_T <= 8.12e-7
+                                     and faithful_T < control_T) else "NOT-MET"),
+            }
+            check["P2_h1_is_refuted_for_the_u_residual"] = {
+                "predicate": "stage-3 u movement < 2.6e-08 m/s",
+                "measured_stage3_u_movement_m_s": moved_u,
+                "status": "MET" if moved_u < 2.6e-8 else "NOT-MET",
+            }
+        else:
+            check["P4_h1_is_inert_on_LOCK"] = {
+                "predicate": "every movement < 1e-15 (oracle ssh is identically zero)",
+                "measured_stage3_u_movement_m_s": moved_u,
+                "measured_kt2_T_movement_K": moved_T,
+                "status": ("MET" if max(moved_u, moved_T) < 1.0e-15 else "NOT-MET"),
+            }
+    if "omit_stage_qco_factor" in arms:
+        predicted = {row["stage"]: row["predicted_baroclinic_u_movement_m_s"]
+                     for row in scaling["h2_qco_stage_factor"]}
+        for stage, floor in ((1, 1.3e-13), (2, 1.4e-11)):
+            faithful = _row(
+                baroclinic_rows,
+                f"{case}.kt1.stage{stage}.faithful.baroclinic_u")["absolute_max"]
+            control = _row(
+                baroclinic_rows,
+                f"{case}.kt1.stage{stage}.omit_stage_qco_factor.baroclinic_u",
+            )["absolute_max"]
+            if case == "OVERFLOW-zps":
+                check[f"P3_h2_owns_stage{stage}"] = {
+                    "predicate": (
+                        f"faithful stage-{stage} baroclinic u < {floor:.1e} m/s "
+                        "and the omission reproduces the pre-fix residual"),
+                    "predicted_movement_m_s": predicted[stage],
+                    "faithful_baroclinic_u_m_s": faithful,
+                    "omitted_baroclinic_u_m_s": control,
+                    "status": ("MET" if (faithful < floor and control > faithful)
+                               else "NOT-MET"),
+                }
+            else:
+                check[f"P4_h2_is_inert_on_LOCK_stage{stage}"] = {
+                    "predicate": "movement < 1e-15 (oracle ssh is identically zero)",
+                    "predicted_movement_m_s": predicted[stage],
+                    "measured_movement_m_s": _stage_move(
+                        "omit_stage_qco_factor", stage),
+                    "status": ("MET" if _stage_move("omit_stage_qco_factor", stage)
+                               < 1.0e-15 else "NOT-MET"),
+                }
+        if case == "OVERFLOW-zps":
+            faithful_u = _row(
+                rows, f"{case}.kt2.faithful.instantaneous_u")["absolute_max"]
+            check["P3_h2_is_refuted_as_the_stage3_owner"] = {
+                "predicate": (
+                    "predicted stage-3 movement is < 0.01x the faithful kt=2 u "
+                    "residual, so the kt=2 u row does not clear"),
+                "predicted_stage3_movement_m_s": predicted[3],
+                "faithful_kt2_u_residual_m_s": faithful_u,
+                "predicted_over_residual": (
+                    predicted[3] / faithful_u if faithful_u else float("inf")),
+                "status": ("MET" if predicted[3] < 0.01 * faithful_u else "NOT-MET"),
+            }
+    return check
+
+
 def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
-        allow_dirty=False) -> dict:
+        plant_prediction=False, allow_dirty=False) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -324,6 +517,10 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
     require(entry_path.is_file(), f"missing {entry_path}")
     oracle_entry = read_entry(entry_path, case)
     artifacts[entry_path.name] = sha256(entry_path)
+    entry1_path_scaling = root / "oracle_step_entry_kt00000001.bin"
+    require(entry1_path_scaling.is_file(), f"missing {entry1_path_scaling}")
+    entry1_for_scaling = read_entry(entry1_path_scaling, case, expected=(1, 1))
+    artifacts[entry1_path_scaling.name] = sha256(entry1_path_scaling)
 
     if case == "OVERFLOW-zps":
         arms = {
@@ -347,6 +544,14 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
             "omit_stage_primary_velocity_correction": _NEMOWSRK3TestHooks(
                 stage_barotropic_correction=False
             ),
+            # Face-thickness / qco-factor round (preregistered in
+            # nemo_testcases_l1_overflow_face_thickness_preregister.md).
+            "legacy_stage_min_face_thickness": _NEMOWSRK3TestHooks(
+                legacy_stage_min_face_thickness=True
+            ),
+            "omit_stage_qco_factor": _NEMOWSRK3TestHooks(
+                omit_stage_qco_factor=True
+            ),
         }
     else:
         arms = {
@@ -356,6 +561,12 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
             ),
             "omit_momentum_transport_reconcile": _NEMOWSRK3TestHooks(
                 momentum_transport_reconcile=False
+            ),
+            "legacy_stage_min_face_thickness": _NEMOWSRK3TestHooks(
+                legacy_stage_min_face_thickness=True
+            ),
+            "omit_stage_qco_factor": _NEMOWSRK3TestHooks(
+                omit_stage_qco_factor=True
             ),
         }
 
@@ -410,6 +621,21 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
                     masks["u"]),
                 masks["u"],
             ))
+        # Each arm compiles three fresh executables; with 9 arms the process
+        # exhausts vm.max_map_count (LLVM "Unable to allocate section memory")
+        # long before host RAM.  Materialize the arm's fields as numpy, then
+        # drop the compilation cache.  Pure resource hygiene: no arithmetic.
+        states[arm] = states[arm]._replace(
+            u=states[arm].u.replace(data=np.asarray(states[arm].u.data)),
+            T=states[arm].T.replace(data=np.asarray(states[arm].T.data)),
+            eta=states[arm].eta.replace(data=np.asarray(states[arm].eta.data)),
+        )
+        for stage in (1, 2):
+            stage_states[arm][stage] = stage_states[arm][stage]._replace(
+                u=stage_states[arm][stage].u.replace(
+                    data=np.asarray(stage_states[arm][stage].u.data)))
+        stage_states[arm][3] = states[arm]
+        jax.clear_caches()
 
     faithful_u = score(
         f"{case}.kt2.faithful.instantaneous_u",
@@ -469,7 +695,8 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
         rows.append(control_T)
         target = (
             "u" if arm in ("freeze_stage_hpg_operands", "freeze_stage_hpg_tracers",
-                           "freeze_stage_hpg_eta", "omit_stage_vertical_up3")
+                           "freeze_stage_hpg_eta", "omit_stage_vertical_up3",
+                           "omit_stage_qco_factor")
             else "T" if case == "OVERFLOW-zps" else "u"
         )
         faithful_row = faithful_T if target == "T" else faithful_u
@@ -488,6 +715,22 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
         improving = control_row["absolute_max"] < faithful_row["absolute_max"]
         arm_results[arm] = classify_arm(faithful_row, control_row, arm_move, improving=improving)
         arm_results[arm]["target"] = target
+        if arm in ("legacy_stage_min_face_thickness", "omit_stage_qco_factor"):
+            # These two arms ABLATE a landed fix, so classify_arm's "does the
+            # arm improve the residual" question is inverted: the meaningful
+            # statement is whether REMOVING the NEMO rule makes the target
+            # worse.  Recorded explicitly rather than by reading the inverted
+            # label.
+            worse = control_row["absolute_max"] > faithful_row["absolute_max"]
+            factor = (control_row["absolute_max"] / faithful_row["absolute_max"]
+                      if faithful_row["absolute_max"] else float("inf"))
+            arm_results[arm]["arm_kind"] = "ablation_of_landed_fix"
+            arm_results[arm]["removing_the_nemo_rule_worsens_the_target"] = worse
+            arm_results[arm]["control_over_faithful"] = factor
+            arm_results[arm]["ablation_classification"] = (
+                "CONFIRMED_REQUIRED" if worse and factor >= 10.0
+                else "REQUIRED_SMALL_EFFECT" if worse
+                else "NOT_REQUIRED_BY_THIS_TARGET")
         if arm == "freeze_stage_hpg_operands":
             # NOT one variable: the stage eta also sets the h_k bundle that
             # _bc_vertical_and_depthmean_velocity turns into the flux-form
@@ -503,6 +746,14 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
                 "advection geometry it sets (live stage T/S)")
         elif arm == "omit_stage_vertical_up3":
             one_variable = "vertical UP3 in each momentum-stage RHS"
+        elif arm == "legacy_stage_min_face_thickness":
+            one_variable = (
+                "stage transport face thickness: NEMO e3u_0*(1+r3u(Kmm)) "
+                "(domqco.F90:219-222) vs min of the two stretched T cells")
+        elif arm == "omit_stage_qco_factor":
+            one_variable = (
+                "qco weighting of the stage velocity update "
+                "(stprk3_stg.F90:373-378)")
         elif arm == "legacy_velocity_primary_average":
             one_variable = "flux_form_primary_transport_average"
         elif "primary" in arm:
@@ -782,6 +1033,25 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
                 "domqco.F90:160; eos at live gdept (eosbn2.F90:1166)"),
         }
 
+    scaling = face_thickness_and_qco_scaling(
+        card, masks, nlev, oracle_stages, entry1_for_scaling, hu0)
+    if plant_prediction:
+        # Planted control for the prediction block: inflate the frozen H2
+        # predictions by 1000x.  Every stage predicate must then read NOT-MET;
+        # if any still reads MET the block is not looking at these numbers and
+        # the gate exits 2.
+        for row in scaling["h2_qco_stage_factor"]:
+            row["predicted_baroclinic_u_movement_m_s"] *= 1000.0
+    prediction_check = preregistered_prediction_check(
+        case, scaling, rows, baroclinic_rows, stage_states, masks, arms)
+    if plant_prediction:
+        gated = "P3_h2_is_refuted_as_the_stage3_owner"
+        require(gated in prediction_check,
+                f"planted prediction control needs {gated} (OVERFLOW only)")
+        require(prediction_check[gated]["status"] == "NOT-MET",
+                "planted prediction control did not land: "
+                f"{prediction_check[gated]}")
+
     failed = [row["name"] for row in rows if row["status"] == "DEBT" and row.get("verdict", True)]
     failed += [row["name"] for row in operand_rows if row["status"] == "DEBT"]
     # Planted controls: the planted row must carry the +1.0, else exit 2.
@@ -790,6 +1060,9 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
     if plant_operand:
         require(case == "OVERFLOW-zps", "--plant-operand needs the OVERFLOW operand rows")
         require_planted(operand_rows, f"{case}.kt1.stage1.faithful.tracer_operand_T")
+    if plant_prediction:
+        require(case == "OVERFLOW-zps",
+                "--plant-prediction needs the OVERFLOW prediction rows")
     return {
         "format": "nemo-testcase-l1-phase3-stage-sweep-v1",
         "case": case,
@@ -821,10 +1094,13 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
         "baroclinic_rows": baroclinic_rows,
         "stage_operand_rows": operand_rows,
         "hpg_sco_replay": replay,
+        "face_thickness_and_qco_scaling": scaling,
+        "preregistered_prediction_check": prediction_check,
         "failed_rows": failed,
         "ownership": ownership,
         "stage_operand_ownership": stage_operand_ownership,
-        "controls": {"plant_stage": plant_stage, "plant_operand": plant_operand},
+        "controls": {"plant_stage": plant_stage, "plant_operand": plant_operand,
+                     "plant_prediction": plant_prediction},
         "legoesm_git_sha": legoesm_git_sha,
         "artifacts": artifacts,
     }
@@ -837,6 +1113,7 @@ def main(argv=None) -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant-stage", action="store_true")
     parser.add_argument("--plant-operand", action="store_true")
+    parser.add_argument("--plant-prediction", action="store_true")
     parser.add_argument("--allow-dirty", action="store_true",
                         help="stamp '<sha>-dirty' instead of refusing a dirty tree")
     args = parser.parse_args(argv)
@@ -845,6 +1122,7 @@ def main(argv=None) -> int:
     try:
         report = run(args.case, args.oracle_root or ROOTS[args.case],
                      plant_stage=args.plant_stage, plant_operand=args.plant_operand,
+                     plant_prediction=args.plant_prediction,
                      allow_dirty=args.allow_dirty)
     except (GateError, OSError, ValueError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
