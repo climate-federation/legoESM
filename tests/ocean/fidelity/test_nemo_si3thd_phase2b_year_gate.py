@@ -166,6 +166,11 @@ def test_round6_dh_operand_streams_replay_and_fail_closed(gate, tmp_path) -> Non
     with pytest.raises(gate.phase2.GateError, match="duplicate DH-remap step"):
         gate._read_dh_remap_operands(duplicate)
 
+    reversed_order = tmp_path / "planted_reversed_dh_remap.bin"
+    reversed_order.write_bytes(remap_source[276:] + remap_source[:276])
+    with pytest.raises(gate.phase2.GateError, match="DH-remap record order"):
+        gate._read_dh_remap_operands(reversed_order)
+
     truncated = tmp_path / "planted_truncated_dh_remap.bin"
     truncated.write_bytes(remap_source[:-1])
     with pytest.raises(gate.phase2.GateError, match="bad DH-remap payload"):
@@ -186,8 +191,12 @@ def test_round6_snow_remap_jit_and_gradients_are_finite() -> None:
         gradient = jax.grad(
             lambda energy: jnp.sum(remap(thickness, energy))
         )(enthalpy)
+        thickness_gradient = jax.grad(
+            lambda depth: jnp.sum(remap(depth, enthalpy))
+        )(thickness)
         assert bool(jnp.all(jnp.isfinite(value)))
         assert bool(jnp.all(jnp.isfinite(gradient)))
+        assert bool(jnp.all(jnp.isfinite(thickness_gradient)))
 
 
 def test_round6_combined_dh_owner_and_plant(gate) -> None:
