@@ -22,6 +22,7 @@ GATE_PATH = Path(__file__).with_name("nemo_si3_phase2_adv2d_gate.py")
 POINTWISE_BAR = 1.0e-15
 PREPARE_STEPS = 15
 DEBT_STEP = 16
+ORACLE_INPUT_KT = 16
 ORACLE_ENTRY_KT = 17
 ULP_LIMIT = 2
 TARGET_TRACER = "szv_i_l01"
@@ -349,6 +350,16 @@ def run_replay(root: Path) -> dict:
         "after_x": (after_x, moments_x),
     }
 
+    input_frame_path = root / f"oracle_ice_step_entry_kt{ORACLE_INPUT_KT:08d}.bin"
+    input_frame = gate._read_oracle_frame(root, kt=ORACLE_INPUT_KT, card=card)
+    input_rows = []
+    for tracer in ICE_ADV2D_TRACERS:
+        oracle_input = np.asarray(gate._entry_tracer(input_frame, tracer), dtype=np.float64)
+        candidate_input = np.asarray(gate.state_field(card, state, tracer), dtype=np.float64)
+        input_rows.append(
+            _field_row(tracer, oracle_input, candidate_input, candidate_input)
+        )
+
     frame_path = root / f"oracle_ice_step_entry_kt{ORACLE_ENTRY_KT:08d}.bin"
     frame = gate._read_oracle_frame(root, kt=ORACLE_ENTRY_KT, card=card)
     halo = card.halo_width
@@ -360,12 +371,23 @@ def run_replay(root: Path) -> dict:
         rows.append(_field_row(tracer, oracle, prod, replay_field))
 
     target = next(row for row in rows if row["name"] == TARGET_TRACER)
-    classification = (
-        "RE-ASSOCIATION"
-        if target["replay_ulp_at_production_max"] <= ULP_LIMIT
+    input_target = next(row for row in input_rows if row["name"] == TARGET_TRACER)
+    if (
+        target["replay_ulp_at_production_max"] <= ULP_LIMIT
         and target["production_max_ulp"] > ULP_LIMIT
-        else "IMPLEMENTATION_OR_INPUT_DEBT"
-    )
+    ):
+        classification = "RE-ASSOCIATION"
+    elif (
+        np.array_equal(np.asarray(production.contents), np.asarray(replay.contents))
+        and all(
+            np.array_equal(np.asarray(left), np.asarray(right))
+            for left, right in zip(production.moments, replay.moments, strict=True)
+        )
+        and input_target["production_max_ulp"] > ULP_LIMIT
+    ):
+        classification = "INHERITED_STEP_ENTRY_DEBT"
+    else:
+        classification = "IMPLEMENTATION_OR_UNMEASURED_MOMENT_INPUT_DEBT"
     moment_rows = []
     for moment_name, prod_moment, replay_moment in zip(
         transport.SI3_PRATHER_MOMENT_NAMES,
@@ -403,10 +425,12 @@ def run_replay(root: Path) -> dict:
         "oracle_entry_kt": ORACLE_ENTRY_KT,
         "sweep_order": "y_then_x",
         "target": target,
+        "target_input": input_target,
         "first_production_replay_stage_difference": _first_stage_difference(
             production_stages, replay_stages
         ),
         "tracer_rows": rows,
+        "input_tracer_rows": input_rows,
         "moment_rows": moment_rows,
         "planted_control": {
             "status": "RED",
@@ -415,6 +439,8 @@ def run_replay(root: Path) -> dict:
         "provenance": {
             "oracle_frame": str(frame_path),
             "oracle_frame_sha256": _sha256(frame_path),
+            "oracle_input_frame": str(input_frame_path),
+            "oracle_input_frame_sha256": _sha256(input_frame_path),
             "candidate_input_sha256": _array_sha256(
                 np.asarray(state.contents),
                 *(np.asarray(value) for value in state.moments),

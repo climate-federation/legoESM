@@ -25,9 +25,14 @@ def test_ulp_distance_is_exact_and_non_vacuous():
 
 def test_written_order_replay_classifies_and_plant_changes_output():
     report = replay.run_replay(replay.ROOT)
-    assert report["classification"] in {"RE-ASSOCIATION", "IMPLEMENTATION_OR_INPUT_DEBT"}
+    assert report["classification"] in {
+        "RE-ASSOCIATION",
+        "INHERITED_STEP_ENTRY_DEBT",
+        "IMPLEMENTATION_OR_UNMEASURED_MOMENT_INPUT_DEBT",
+    }
     assert report["target"]["production_normalized_max_abs"] > replay.POINTWISE_BAR
     assert len(report["tracer_rows"]) == 16
+    assert len(report["input_tracer_rows"]) == 16
     assert len(report["moment_rows"]) == 80
     assert report["planted_control"]["status"] == "RED"
     assert report["planted_control"]["changed_v_i_max_ulp"] > 0
