@@ -387,3 +387,56 @@ def test_validate_config_accepts_bbl_off_on_any_lane():
             tracer_time_integrator=lane, bbl_adv_option=0,
         )
         LatLonCGridOceanModel._validate_config(cfg)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Footgun 6 — S-46/S-47 nemo_up3 requires momentum_time_integrator='rk3_ws'
+# ---------------------------------------------------------------------------
+
+
+def test_validate_config_rejects_nemo_up3_off_the_rk3_ws_lane():
+    """momentum_flux_scheme='nemo_up3' selects NEMO's dyn_adv_up3 T-point
+    upwind SELECTOR on its own (S-46: keyed by the reference, not the time
+    integrator -- 9bbf9f7bd). But NEMO's own face THICKNESS for that same
+    routine, e3u(Kmm), is wired only inside the momentum_time_integrator=
+    'rk3_ws' stage program (S-47, 60d0c5420); every other integrator falls
+    back to the legacy min-of-stretched-face-thickness rule S-47 measured as
+    first-order wrong. nemo_up3 paired with any other momentum_time_integrator
+    is therefore a combination NEMO itself never runs, and must raise at
+    construction."""
+    for lane in ("euler", "rk3"):  # momentum_time_integrator has no "ab2" arm
+        bad = LatLonCGridOceanConfig.from_flat(
+            momentum_advection="flux_form", momentum_flux_scheme="nemo_up3",
+            momentum_time_integrator=lane, tracer_time_integrator=lane,
+        )
+        with pytest.raises(
+            ValueError, match="requires momentum_time_integrator='rk3_ws'"
+        ):
+            LatLonCGridOceanModel._validate_config(bad)
+
+
+def test_validate_config_accepts_nemo_up3_on_the_rk3_ws_lane():
+    """The one lane NEMO actually runs nemo_up3 on -- rk3_ws, which wires the
+    S-47 face-thickness fix -- must still construct cleanly."""
+    ok = LatLonCGridOceanConfig.from_flat(
+        tracer_time_integrator="rk3_ws", momentum_time_integrator="rk3_ws",
+        tracer_advection="fct2", momentum_advection="flux_form",
+        momentum_flux_scheme="nemo_up3", vertical_momentum_scheme="nemo_up3",
+    )
+    LatLonCGridOceanModel._validate_config(ok)  # must not raise
+
+
+def test_validate_config_accepts_oceananigans_up3_on_every_non_rk3_ws_lane():
+    """oceananigans_up3 is the OTHER UP3 reference arm (Silvestri/Oceananigans,
+    not NEMO) -- the new nemo_up3 x rk3_ws pairing guard must not false-reject
+    it on any lane. rk3_ws itself is excluded: it already requires
+    momentum_flux_scheme='nemo_up3' specifically (a separate, pre-existing
+    guard -- test_validate_config_accepts_nemo_up3_on_the_rk3_ws_lane above),
+    so oceananigans_up3 cannot pair with rk3_ws regardless of this guard."""
+    for lane in ("euler", "rk3"):  # momentum_time_integrator has no "ab2" arm
+        cfg = LatLonCGridOceanConfig.from_flat(
+            momentum_advection="flux_form",
+            momentum_flux_scheme="oceananigans_up3",
+            momentum_time_integrator=lane, tracer_time_integrator=lane,
+        )
+        LatLonCGridOceanModel._validate_config(cfg)  # must not raise

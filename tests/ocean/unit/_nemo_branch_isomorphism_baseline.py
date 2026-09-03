@@ -855,7 +855,12 @@ ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
         "none (one NEMO routine); the two Impl rows are two REFERENCE arms of "
         "ONE legoESM implementation, selected by momentum_flux_scheme "
         "('nemo_up3' / 'oceananigans_up3'). Private ablation hook only: "
-        "_NEMOWSRK3TestHooks.legacy_up3_transport_sign_selector"
+        "_NEMOWSRK3TestHooks.legacy_up3_transport_sign_selector. "
+        "2026-09-03: the SELECTOR itself is integrator-agnostic, but public "
+        "construction of momentum_flux_scheme='nemo_up3' now REQUIRES "
+        "momentum_time_integrator='rk3_ws' -- its only face-thickness-faithful "
+        "home is the WS-RK3 stage program (see S-47); _validate_config refuses "
+        "the pairing elsewhere (tests/ocean/unit/test_config_footguns.py)"
     ), (
         Impl(_OPL, "_up3_reconstruct",
              Reference("nemo", "ln_dynadv_up3",
@@ -873,7 +878,15 @@ ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
                         "by the transport pair); Silvestri et al. 2024 'UP3'",
                         selected_by=("oceananigans_v1",))),
     )),
-    RoutineRow("S-47", "dyn_adv_up3 face thickness e3u(Kmm)", "SHARED", "none (one macro; RK3 identity)", (
+    RoutineRow("S-47", "dyn_adv_up3 face thickness e3u(Kmm)", "SHARED", (
+        "none (one macro; RK3 identity). 2026-09-03: because this fix is wired "
+        "only inside the momentum_time_integrator='rk3_ws' stage program, "
+        "_validate_config now refuses momentum_flux_scheme='nemo_up3' on any "
+        "other momentum_time_integrator -- without this stage pair, nemo_up3 "
+        "falls back to the legacy min-of-stretched-T-thickness rule this row "
+        "measured as first-order wrong, a pairing NEMO never runs (see S-46; "
+        "tests/ocean/unit/test_config_footguns.py)"
+    ), (
         Impl(_OPL, "_bc_horizontal_momentum_advection_flux_form",
              Reference("nemo", "dyn_adv_up3_e3u_kmm",
                        "dynadv_up3.F90:160,205-207; domzgr_substitute.h90:127; the WS-RK3 "

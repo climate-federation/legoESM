@@ -1340,6 +1340,17 @@ it forces `rk3_ws`, which requires the `nemo_up3` vertical arm the UP3
 `_momentum_options` block does not set).  Its numbers are in the commit
 message and the phase-3 receipt.
 
+**2026-09-03 — that non-WS-RK3 construction is now REFUSED.** S-47 below wires
+NEMO's own `e3u(Kmm)` face thickness only inside the `rk3_ws` stage program;
+off that lane, `nemo_up3` falls back to the legacy min-of-stretched-T-thickness
+rule S-47 measured as first-order wrong — a pairing NEMO itself never runs.
+`_validate_config` now raises on `momentum_flux_scheme="nemo_up3"` paired with
+any `momentum_time_integrator` other than `rk3_ws`
+(`tests/ocean/unit/test_config_footguns.py`), so the `rest`/`eady`
+`flux_form_upwind3` arm above is constructible only with
+`momentum_time_integrator="rk3_ws"` too; a non-NEMO UP3 arm on those setups
+selects `momentum_flux_scheme="oceananigans_up3"` instead.
+
 **Open follow-up (NOT silently taken here).** NEMO evaluates `dyn_adv_up3`'s
 curvature at `Kbb`; `stprk3_stg.F90:316,326-331` passes `Kmm` as BOTH velocity
 levels, which is why the WS-RK3 lane is faithful with one live velocity.  A

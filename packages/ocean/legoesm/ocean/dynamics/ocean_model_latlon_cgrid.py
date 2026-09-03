@@ -3362,6 +3362,35 @@ class LatLonCGridOceanModel:
                 raise ValueError(
                     "NEMO rk3_ws does not yet support staged GM bolus "
                     "transports")
+        if (config.momentum_flux_scheme == "nemo_up3"
+                and _mom_ti_for_ws != "rk3_ws"):
+            # S-47 (docs/ocean/fidelity/nemo_branch_isomorphism_map.md):
+            # momentum_flux_scheme="nemo_up3" selects NEMO's dyn_adv_up3
+            # T-point upwind SELECTOR (dynadv_up3.F90:166,169-170, the
+            # advected-velocity pair) on its own -- 9bbf9f7bd keys that
+            # selector by the reference the caller names, not the time
+            # integrator. But NEMO's own face THICKNESS for that same
+            # routine, e3u(Kmm) (dynadv_up3.F90:160,205-207), is wired only
+            # inside the momentum_time_integrator="rk3_ws" stage program
+            # (60d0c5420, momentum_flux_face_thickness from
+            # _nemo_ws_qco_stage_faces); every other integrator falls back
+            # to the legacy min-of-stretched-T-thickness rule S-47 measured
+            # as a first-order-wrong reconstruction of that same macro. So
+            # nemo_up3 on any integrator other than rk3_ws gets NEMO's
+            # selector without NEMO's face thickness -- a pairing NEMO
+            # itself never runs.
+            raise ValueError(
+                "momentum_flux_scheme='nemo_up3' (NEMO dyn_adv_up3's "
+                "T-point upwind selector) requires "
+                "momentum_time_integrator='rk3_ws' -- the only lane that "
+                "wires NEMO's own e3u(Kmm) face thickness (S-47) into that "
+                f"selector; got momentum_time_integrator={_mom_ti_for_ws!r}"
+                ", which would pair NEMO's selector with the legacy "
+                "min-of-stretched-face-thickness rule NEMO does not use. "
+                "Select momentum_time_integrator='rk3_ws' for NEMO's full "
+                "nemo_up3 program, or use "
+                "momentum_flux_scheme='oceananigans_up3' (the "
+                "transport-selector arm) on this integrator.")
         if config.bbl_adv_option not in (0, 2):
             raise ValueError("bbl_adv_option must be 0 or 2")
         if config.bbl_adv_option == 2 and config.bbl_gamma_s <= 0.0:

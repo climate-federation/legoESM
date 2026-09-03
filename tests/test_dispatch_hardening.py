@@ -313,6 +313,12 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # typo/mismatch on euler/ab2/rk3 used to resolve bbl_adv_option=2 and
         # silently run NO boundary layer. Lock the guard so it can't be
         # silently deleted; test_config_footguns.py exercises it directly.
+        # Also guards momentum_flux_scheme="nemo_up3" x momentum_time_integrator
+        # pairing (S-46/S-47, same map doc): NEMO's e3u(Kmm) face thickness for
+        # dyn_adv_up3 is wired only inside the rk3_ws stage program, so nemo_up3
+        # on any other integrator would silently run the legacy (measured
+        # first-order-wrong) face-thickness rule instead -- a pairing NEMO
+        # itself never runs. test_config_footguns.py exercises it directly.
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_validate_config"),
         # outer_integrator dispatch (nemo_mlf P2, docs/ocean/fidelity/
         # nemo_mlf_step_transcription_spec.md §4/§7): a typo here would
