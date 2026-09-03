@@ -66,12 +66,50 @@ ports the five-moment 1-D program from the shipped oracle source:
 * five-moment restart enumeration: `:1383-1497`.
 
 The kernel accepts a packed `(x-with-halo, y-with-halo, tracer)` extensive
-state and five equally shaped prognostic moment arrays.  The card rejects
-nonzero V, so it cannot silently claim the unported 2-D alternating sweep.
+state and five equally shaped prognostic moment arrays.  Its x sweep now
+preserves NEMO's general donor ordering: positive slabs are computed and
+removed first (`icedyn_adv_pra.F90:570-616`), then negative slabs are computed
+from those updated donor boxes (`:618-664`), before the two receiver merges
+(`:666-707`).  The synthetic dual-outflow control at
+`test_nemo_si3_phase2_gate.py:143-188` exercises a cell exporting through both
+faces and checks its content, first moment, and second moment against that
+ordered scalar program.  The card rejects nonzero V, so it cannot silently
+claim the unported 2-D alternating sweep.
 The rung resolves two CFL subcycles.  `Hbig` uses the dynamics-entry thickness
 for both subcycles because SI3 does not recover the intensive `ph_i` work field
-until after the dynamics call (`icedyn_adv_pra.F90:142-160,355-367`).  Omitting
-`Hbig` is non-vacuously outside the bar by more than `1e-11` at entry `kt=16`.
+until after the dynamics call (`icedyn_adv_pra.F90:142-160,355-367`).  Both
+volume and concentration indices are now mandatory (`transport.py:916-923`),
+so the public dispatch cannot silently omit `Hbig`; the omission control at
+`test_nemo_si3_phase2_gate.py:124-140` raises.  A deliberate threshold ablation
+is non-vacuously outside the bar by more than `1e-11` at entry `kt=16`.
+
+## Rung-3.1 independent-review HOLD and closure
+
+The first phase-2 receipt failed to disclose that
+`tests/test_no_inline_physics_coeffs.py` rejected both new source files.  The
+independent review therefore placed this rung on HOLD.  The failure was real:
+Prather coefficients, CFL thresholds, `Hbig` thresholds, and fixed testcase
+profile values appeared as anonymous arithmetic literals.
+
+They now live in sourced module-level provenance blocks:
+
+* `transport.py:77-85` names the limiter/merge coefficients, the two CFL
+  thresholds, the `0.15` `Hbig` threshold, and `rn_himax=99 m`, citing
+  `icedyn_adv_pra.F90:124-126,553,681,702,1000` and
+  `cfgs/SHARED/namelist_ice_ref:46` (not overridden by ORCA1);
+* `nemo_testcase_recipe.py:43-69` names the shipped grid, clock, ORCA1 deck,
+  prescribed-velocity, initial-profile, temperature, and salinity values,
+  citing `namelist_cfg`, `namelist_ice_cfg`, `usrdef_*`, `icedyn.F90`, and
+  `make_initice.py` line by line.
+
+Targeted ratchet results after the correction are **2 passed** for the two
+source files under `test_no_inline_physics_coeffs.py`, and **25 passed** for
+all selected touched transport/card/test paths under
+`test_no_hardcoded_constants.py`.  The complete ratchets were also run.  They
+retain two unrelated inline-coefficient failures (`gm_redi_latlon_cgrid.py`,
+`tke.py`: 352 passed / 2 failed) and five unrelated hardcoded-constant
+failures (FV3 coupling plus three existing DINO tests: 3386 passed / 5 failed /
+2 skipped).  None of those seven files is changed by this dispatch.
 
 The card holds immutable selectors separately from an explicit
 `ICEAdv1DState`; all five moments are leaves of that prognostic state.  The
@@ -156,13 +194,13 @@ plants above.
 ## Verification record
 
 * `pytest` over the phase-1/phase-2 fidelity gates and ice transport/state
-  units: **66 passed, 1 skipped**.
-* Focused phase-2 suite: **12 passed**; this includes complete-card JIT, reverse-mode,
+  units: **68 passed, 1 skipped**.
+* Focused phase-2 suite: **14 passed**; this includes complete-card JIT, reverse-mode,
   source-essential `Hbig`, restart carry, geometry/state plants, coverage
-  plant, full trajectory, and loud endpoint DEBT.
-* Two independent adversarial reviewers approved the frozen implementation
-  after the restart loader was changed to revalidate reconstructed state and a
-  planted nonzero-`v_ice` restart was shown to fail.
+  plant, general dual-outflow ordering, mandatory Hbig indices, full
+  trajectory, and loud endpoint DEBT.
+* The earlier two adversarial approvals predated this independent-review HOLD;
+  this section supersedes the earlier review status rather than concealing it.
 * Ruff (`F,E501,I`): clean for every changed Python file.
 * `mypy --follow-imports=skip --ignore-missing-imports` reports no issues in
   the new card and phase-2 gate.  The natural `mypy --ignore-missing-imports`
@@ -179,12 +217,12 @@ plants above.
 
 | artifact | SHA256 |
 |---|---|
-| phase-2 gate JSON | `9f0d1ceb78e2309755dc70fc47f938387292e38f7c267df97a9f121ee7aa8ab6` |
+| phase-2 gate JSON | `c658fbc39272ff6848310dd707067e1518ff85856b39f444eb03cebf66b84a78` |
 | oracle `mesh_mask.nc` | `ba0e884eab64dd4ef659b21e6369d5999bda20e1e243c5c541ae5b93008148ad` |
 | oracle `output.init_ice.nc` | `7b9affc6f958cec9be7d193fbd021da11dd95fa2b115dd76c48ef8788492cb3f` |
 | oracle final ice restart | `bc49d8dd9633210a1c8f759b60c27919d48a789637dffae7ef7ee66682488dca` |
-| changed `transport.py` | `e93ee63547441764a28e27abbf27879666f13b47d29f60f1a15369ffe99abae4` |
-| card recipe | `c0156607bea8c41182f6451979d3fd37c0db11a79ce11067826d007672c6d124` |
+| changed `transport.py` | `48111ec1c0058c22b966ffb127173f18414e8f50ef848a486726d19613679fd5` |
+| card recipe | `df689ceeb0747a334bebce2683d92d4161b7ba3e12e4c678d214a80f02d86323` |
 | phase-2 gate source | `9fa55f6876378842b60cd3d975850355f64934f92995f97bbe5f4d4425a95927` |
 
 ## Loudly UNMEASURED / deferred

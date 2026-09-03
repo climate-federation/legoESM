@@ -40,6 +40,34 @@ ICE_ADV1D_TRACERS = (
 )
 ICE_ADV1D_RESTART_FORMAT = "legoesm-ice-adv1d-state-v1"
 
+# Shipped ICE_ADV1D/ORCA1 card values.  The profile is intentionally a fixed
+# oracle testcase transcription, not a tunable production parameterization.
+_ICE_ADV1D_GRID_SIZE = 59  # usrdef_nam.F90:73-75 with namelist_cfg:19-20
+_ICE_ADV1D_SPACING_M = 4.0  # ICE_ADV1D/EXPREF/namelist_cfg:19-20
+_ICE_ADV1D_ORIGIN_M = -118.0  # usrdef_hgr.F90:76-89; phase-1 mesh gate
+_ICE_ADV1D_HALO_WIDTH = 2  # built cpp/domain halo; phase-1 frame registry
+_ICE_ADV1D_N_STEPS = 40  # ICE_ADV1D/EXPREF/namelist_cfg:29-30
+_ICE_ADV1D_DT_S = 2.0  # ICE_ADV1D/EXPREF/namelist_cfg:37
+_ICE_ADV1D_JPL = 1  # ORCA1 namelist_ice_cfg:24
+_ICE_ADV1D_NLAY_I = 3  # ORCA1 namelist_ice_cfg:25
+_ICE_ADV1D_NLAY_S = 3  # ORCA1 namelist_ice_cfg:26
+_ICE_ADV1D_NN_ICESAL = 2  # ORCA1 namelist_ice_cfg:108
+_ICE_ADV1D_U_PROFILE_FACTOR = 1.5  # icedyn.F90:149-153
+_ICE_ADV1D_PRATHER_SUBCYCLES = 2  # icedyn_adv_pra.F90:119-131 for this card CFL
+_ICE_ADV1D_BASE_THICKNESS_M = 1.0  # make_initice.py:97
+_ICE_ADV1D_NOTCH_THICKNESS_M = 0.2  # make_initice.py:101-102
+_ICE_ADV1D_NOTCH_START = 15  # make_initice.py:101
+_ICE_ADV1D_NOTCH_STOP = 44  # make_initice.py:101 (inclusive 43)
+_ICE_ADV1D_BACKGROUND_CONCENTRATION = 0.001  # make_initice.py:106
+_ICE_ADV1D_MAX_CONCENTRATION = 0.9  # make_initice.py:110-113
+_ICE_ADV1D_RAMP_START = 10  # make_initice.py:110
+_ICE_ADV1D_RAMP_PEAK = 29  # make_initice.py:110-112
+_ICE_ADV1D_RAMP_STOP = 48  # make_initice.py:112
+_ICE_ADV1D_RAMP_OFFSET = 9.0  # make_initice.py:111
+_ICE_ADV1D_RAMP_WIDTH = 20.0  # make_initice.py:111
+_ICE_ADV1D_INITIAL_TEMPERATURE_K = 270.0  # make_initice.py:56-57,90-91
+_ICE_ADV1D_INITIAL_SALINITY_G_KG = 0.1  # ORCA1 namelist_ice_cfg:115
+
 
 class ICEAdv1DState(NamedTuple):
     """Prognostic and prescribed-at-step-boundary state for ICE_ADV1D."""
@@ -122,26 +150,38 @@ def _initial_fields_xy(size: int, wet: np.ndarray) -> dict[str, np.ndarray]:
 
     # The shipped NetCDF variables are `f` (float32).  Build in that storage
     # type first, exactly as the oracle input file, then promote to fp64.
-    h: np.ndarray = np.ones((size, size), dtype=np.float32)
-    h[15:44, :] = np.float32(0.2)
-    a: np.ndarray = np.full((size, size), np.float32(0.001), dtype=np.float32)
+    h: np.ndarray = np.full(
+        (size, size), np.float32(_ICE_ADV1D_BASE_THICKNESS_M), dtype=np.float32
+    )
+    h[_ICE_ADV1D_NOTCH_START:_ICE_ADV1D_NOTCH_STOP, :] = np.float32(
+        _ICE_ADV1D_NOTCH_THICKNESS_M
+    )
+    a: np.ndarray = np.full(
+        (size, size),
+        np.float32(_ICE_ADV1D_BACKGROUND_CONCENTRATION),
+        dtype=np.float32,
+    )
     for x in range(size):
-        if 10 <= x <= 29:
-            a[x, :] = np.float32(0.9 * (x - 9.0) / 20.0)
-        elif 29 < x <= 48:
-            a[x, :] = np.float32(0.9)
+        if _ICE_ADV1D_RAMP_START <= x <= _ICE_ADV1D_RAMP_PEAK:
+            a[x, :] = np.float32(
+                _ICE_ADV1D_MAX_CONCENTRATION
+                * (x - _ICE_ADV1D_RAMP_OFFSET)
+                / _ICE_ADV1D_RAMP_WIDTH
+            )
+        elif _ICE_ADV1D_RAMP_PEAK < x <= _ICE_ADV1D_RAMP_STOP:
+            a[x, :] = np.float32(_ICE_ADV1D_MAX_CONCENTRATION)
     h = h.astype(np.float64) * wet
     a = a.astype(np.float64) * wet
     v_i = h * a
     v_s = np.zeros_like(v_i)
-    salinity = np.float64(0.1)  # iceistate.F90:334-340; ref rn_simin
+    salinity = np.float64(_ICE_ADV1D_INITIAL_SALINITY_G_KG)
     sv_i = salinity * v_i
 
     # iceistate.F90:357-367 with t_i=270 K and a uniform 0.1 g/kg layer
     # salinity.  Every constant is the named NEMO-parity constant from the
     # canonical constants module; no card-local physical literal is used.
     melt_temperature = constants.T_freeze - constants.mu_ice_freeze * salinity
-    temperature = np.float64(270.0)  # case input, make_initice.py:56
+    temperature = np.float64(_ICE_ADV1D_INITIAL_TEMPERATURE_K)
     phase_fraction = max(
         0.0,
         1.0
@@ -150,7 +190,7 @@ def _initial_fields_xy(size: int, wet: np.ndarray) -> dict[str, np.ndarray]:
     )
     ice_energy_per_layer_volume = (
         constants.rho_ice
-        / 3.0
+        / _ICE_ADV1D_NLAY_I
         * (
             constants.c_p_ice_nemo * (melt_temperature - temperature)
             + constants.L_fus_nemo * phase_fraction
@@ -181,9 +221,9 @@ def build_ice_adv1d_card(ocean_surface_temperature_c: np.ndarray) -> ICEAdv1DCar
     set_policy(PrecisionPolicy.fp64())
     if get_policy() != PrecisionPolicy.fp64():
         raise RuntimeError("ICE_ADV1D card requires PrecisionPolicy.fp64()")
-    size = 59
-    spacing = 4.0
-    halo = 2
+    size = _ICE_ADV1D_GRID_SIZE
+    spacing = _ICE_ADV1D_SPACING_M
+    halo = _ICE_ADV1D_HALO_WIDTH
     grid = create_beta_plane_cgrid_geometry(
         size,
         size,
@@ -191,8 +231,8 @@ def build_ice_adv1d_card(ocean_surface_temperature_c: np.ndarray) -> ICEAdv1DCar
         dy_m=spacing,
         f0=0.0,
         beta=0.0,
-        x_origin_m=-118.0,
-        y_origin_m=-118.0,
+        x_origin_m=_ICE_ADV1D_ORIGIN_M,
+        y_origin_m=_ICE_ADV1D_ORIGIN_M,
         cartesian_pseudo_lat=False,
         dtype=jnp.float64,
     )
@@ -223,11 +263,14 @@ def build_ice_adv1d_card(ocean_surface_temperature_c: np.ndarray) -> ICEAdv1DCar
     u_mask[-1, :] = False
     u_mask_full = np.pad(u_mask, halo, constant_values=False)
     prescribed_u_ice = jnp.asarray(
-        1.5 * coefficient[:, None] * u_mask_full, dtype=jnp.float64
+        _ICE_ADV1D_U_PROFILE_FACTOR * coefficient[:, None] * u_mask_full,
+        dtype=jnp.float64,
     )
     u_ice = jnp.zeros_like(prescribed_u_ice)
     v_ice = jnp.zeros_like(prescribed_u_ice)
-    t_surface_global = np.where(wet_global, np.float64(270.0), 0.0)
+    t_surface_global = np.where(
+        wet_global, np.float64(_ICE_ADV1D_INITIAL_TEMPERATURE_K), 0.0
+    )
     t_surface = jnp.asarray(np.pad(t_surface_global, halo), dtype=jnp.float64)
     empty_surface_temperature = jnp.asarray(
         np.pad(ocean_surface_temperature_c + constants.T_freeze, halo, mode="edge"),
@@ -247,15 +290,15 @@ def build_ice_adv1d_card(ocean_surface_temperature_c: np.ndarray) -> ICEAdv1DCar
             v_ice=v_ice,
             t_surface=t_surface,
         ),
-        dt_s=2.0,
+        dt_s=_ICE_ADV1D_DT_S,
         dx_m=spacing,
         dy_m=spacing,
         halo_width=halo,
-        n_steps=40,
-        jpl=1,
-        nlay_i=3,
-        nlay_s=3,
-        nn_icesal=2,
+        n_steps=_ICE_ADV1D_N_STEPS,
+        jpl=_ICE_ADV1D_JPL,
+        nlay_i=_ICE_ADV1D_NLAY_I,
+        nlay_s=_ICE_ADV1D_NLAY_S,
+        nn_icesal=_ICE_ADV1D_NN_ICESAL,
         thermodynamics=False,
         ponds=False,
         landfast=False,
@@ -268,15 +311,15 @@ def validate_ice_adv1d_card(
     expected = (
         "ICE_ADV1D_OMIP_L3",
         "si3_prather",
-        1,
-        3,
-        3,
-        2,
-        2.0,
-        4.0,
-        4.0,
-        2,
-        40,
+        _ICE_ADV1D_JPL,
+        _ICE_ADV1D_NLAY_I,
+        _ICE_ADV1D_NLAY_S,
+        _ICE_ADV1D_NN_ICESAL,
+        _ICE_ADV1D_DT_S,
+        _ICE_ADV1D_SPACING_M,
+        _ICE_ADV1D_SPACING_M,
+        _ICE_ADV1D_HALO_WIDTH,
+        _ICE_ADV1D_N_STEPS,
         False,
         False,
         False,
@@ -359,7 +402,7 @@ def step_ice_adv1d_card(
         halo_width=halo,
         ice_volume_index=ICE_ADV1D_TRACERS.index("v_i"),
         concentration_index=ICE_ADV1D_TRACERS.index("a_i"),
-        subcycles=2,
+        subcycles=_ICE_ADV1D_PRATHER_SUBCYCLES,
     )
     return apply_ice_adv1d_zapsmall(card, state, contents, moments)
 

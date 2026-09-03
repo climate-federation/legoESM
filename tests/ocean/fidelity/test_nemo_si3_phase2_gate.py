@@ -8,6 +8,7 @@ from pathlib import Path
 
 import jax
 import jax.numpy as jnp
+import legoesm.ice.transport as ice_transport
 import numpy as np
 import pytest
 from legoesm.ice.fidelity.nemo_testcase_recipe import (
@@ -85,6 +86,8 @@ def test_zero_content_zeroes_all_five_prather_moments():
         dx=4.0,
         dy=4.0,
         halo_width=2,
+        ice_volume_index=0,
+        concentration_index=0,
         subcycles=1,
     )
     assert all(
@@ -118,12 +121,84 @@ def test_kt1_and_first_completed_step_clear_the_pointwise_bar():
     assert float(np.max(np.abs(lego_t - oracle_t))) <= gate.POINTWISE_BAR
 
 
-def test_hbig_concentration_correction_is_non_vacuous():
+def test_prather_requires_hbig_indices():
+    shape = (7, 7, 1)
+    contents = jnp.ones(shape, dtype=jnp.float64)
+    zero = jnp.zeros_like(contents)
+    with pytest.raises(ValueError, match="requires volume and concentration indices"):
+        advect_si3_prather_1d(
+            contents,
+            (zero, zero, zero, zero, zero),
+            jnp.zeros(shape[:2], dtype=jnp.float64),
+            jnp.zeros(shape[:2], dtype=jnp.float64),
+            jnp.ones(shape[:2], dtype=jnp.float64),
+            jnp.ones(shape[:2], dtype=bool),
+            1.0,
+            dx=1.0,
+            dy=1.0,
+            subcycles=1,
+        )
+
+
+def test_prather_dual_outflow_uses_nemo_sequential_donor_residual():
+    shape = (7, 5, 2)
+    contents = jnp.zeros(shape, dtype=jnp.float64).at[3, 2, :].set(1.0)
+    sx = jnp.zeros_like(contents).at[3, 2, :].set(0.4)
+    sxx = jnp.zeros_like(contents).at[3, 2, :].set(0.2)
+    zero = jnp.zeros_like(contents)
+    u_ice = jnp.zeros(shape[:2], dtype=jnp.float64)
+    u_ice = u_ice.at[2, 2].set(-0.3).at[3, 2].set(0.2)
+    result, result_moments, _ = advect_si3_prather_1d(
+        contents,
+        (sx, zero, sxx, zero, zero),
+        u_ice,
+        jnp.zeros(shape[:2], dtype=jnp.float64),
+        jnp.ones(shape[:2], dtype=jnp.float64),
+        jnp.ones(shape[:2], dtype=bool),
+        1.0,
+        dx=1.0,
+        dy=1.0,
+        ice_volume_index=0,
+        concentration_index=1,
+        subcycles=1,
+    )
+    # icedyn_adv_pra.F90:590-597 first leaves the right-going residual;
+    # :618-664 then extracts the left-going slab from that residual.
+    right_fraction = 0.2
+    right_one = 1.0 - right_fraction
+    content_after_right = 1.0 - right_fraction * (
+        1.0 + right_one * (0.4 + (right_one - right_fraction) * 0.2)
+    )
+    sx_after_right = right_one**2 * (0.4 - 3.0 * right_fraction * 0.2)
+    sxx_after_right = right_one**3 * 0.2
+    left_fraction = 0.3 / right_one
+    left_one = 1.0 - left_fraction
+    left_flux = left_fraction * (
+        content_after_right
+        - left_one
+        * (sx_after_right - (left_one - left_fraction) * sxx_after_right)
+    )
+    expected_content = content_after_right - left_flux
+    expected_sx = left_one**2 * (
+        sx_after_right + 3.0 * left_fraction * sxx_after_right
+    )
+    expected_sxx = left_one**3 * sxx_after_right
+    assert float(result[3, 2, 0]) == pytest.approx(expected_content)
+    assert float(result_moments[0][3, 2, 0]) == pytest.approx(expected_sx)
+    assert float(result_moments[2][3, 2, 0]) == pytest.approx(expected_sxx)
+
+
+def test_hbig_concentration_correction_is_non_vacuous(monkeypatch):
     card = _build_card()
     with_hbig = card.initial_state
-    without_hbig = card.initial_state
     for _ in range(15):
         with_hbig = step_ice_adv1d_card(card, with_hbig)
+
+    monkeypatch.setattr(
+        ice_transport, "_SI3_PRA_HBIG_CONCENTRATION_THRESHOLD", -np.inf
+    )
+    without_hbig = card.initial_state
+    for _ in range(15):
         area = card.dx_m * card.dy_m
         contents, moments, _ = advect_si3_prather_1d(
             without_hbig.contents,
@@ -136,6 +211,8 @@ def test_hbig_concentration_correction_is_non_vacuous():
             dx=card.dx_m,
             dy=card.dy_m,
             halo_width=card.halo_width,
+            ice_volume_index=ICE_ADV1D_TRACERS.index("v_i"),
+            concentration_index=ICE_ADV1D_TRACERS.index("a_i"),
             subcycles=2,
         )
         without_hbig = apply_ice_adv1d_zapsmall(
