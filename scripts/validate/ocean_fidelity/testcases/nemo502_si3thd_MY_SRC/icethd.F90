@@ -54,6 +54,8 @@ MODULE icethd
    INTEGER                ::   numcfl                        ! outfile unit
    INTEGER, SAVE          ::   num_l3thd = -1               ! write-only oracle stream
    LOGICAL, SAVE          ::   ll_l3thd_opened = .FALSE.    ! NEWUNIT values may be negative
+   INTEGER, SAVE          ::   num_l3zin = -1               ! exact ZDF-entry forcing stream
+   LOGICAL, SAVE          ::   ll_l3zin_opened = .FALSE.
 
    !! * Substitutions
 #  include "do_loop_substitute.h90"
@@ -142,6 +144,7 @@ CONTAINS
             !
                               CALL ice_thd_1d2d( jl, 1 )            ! --- Move to 1D arrays --- !
             !                                                       ! --- & Change units of e_i, e_s from J/m2 to J/m3 --- !
+                              CALL l3zin_dump( kt, jl )
             !
             dh_s_tot  (1:npti) = 0._wp                              ! --- some init --- !  (important to have them here)
             dh_i_sum  (1:npti) = 0._wp ; dh_i_bom(1:npti) = 0._wp ; dh_i_itm(1:npti) = 0._wp
@@ -266,6 +269,26 @@ CONTAINS
       WRITE(num_l3thd) a_i_1d(1:npti), h_i_1d(1:npti), h_s_1d(1:npti), t_su_1d(1:npti), &
          & e_i_1d(1:npti,1:nlay_i), e_s_1d(1:npti,1:nlay_s), sz_i_1d(1:npti,1:nlay_i)
    END SUBROUTINE l3thd_dump_1d
+
+
+   SUBROUTINE l3zin_dump( kt, kl )
+      INTEGER, INTENT(in) :: kt, kl
+      INTEGER :: ios
+      CHARACTER(LEN=16), PARAMETER :: cmagic = 'NEMO_L3ZIN_001'
+      IF( .NOT. ll_l3zin_opened ) THEN
+         OPEN( NEWUNIT=num_l3zin, FILE='oracle_si3_zdf_inputs.bin', STATUS='REPLACE', &
+            & ACCESS='STREAM', FORM='UNFORMATTED', ACTION='WRITE', IOSTAT=ios )
+         IF( ios /= 0 ) CALL ctl_stop( 'l3zin_dump: cannot open ZDF-input stream' )
+         ll_l3zin_opened = .TRUE.
+      ENDIF
+      WRITE(num_l3zin) cmagic
+      WRITE(num_l3zin) 1, kt, kl, npti, STORAGE_SIZE(1._wp), 13 * npti
+      WRITE(num_l3zin) qns_ice_1d(1:npti), qsr_ice_1d(1:npti), dqns_ice_1d(1:npti), &
+         & qtr_ice_top_1d(1:npti), t_bo_1d(1:npti), sss_1d(1:npti), &
+         & evap_ice_1d(1:npti), sprecip_1d(1:npti), qprec_ice_1d(1:npti), &
+         & qcn_ice_1d(1:npti), qsb_ice_bot_1d(1:npti), fhld_1d(1:npti), qml_ice_1d(1:npti)
+      FLUSH(num_l3zin)
+   END SUBROUTINE l3zin_dump
 
 
    SUBROUTINE ice_thd_temp
