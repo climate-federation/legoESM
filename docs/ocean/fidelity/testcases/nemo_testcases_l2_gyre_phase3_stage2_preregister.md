@@ -100,3 +100,25 @@ faithful corrected stage-2 velocity and post-`tra_adv_trp` transport clear
 its measured scale.  Otherwise report the surviving operand without an owner
 label.  Scaling precedes ownership, and no public Frankenstein switch is
 permitted.
+
+### Raw-RHS gauge continuation
+
+The source-correct vector recurrence changes the post-`tra_adv_trp` transport
+by only `O(1e-10)` absolute against its `O(1e-5)` horizontal residual, so it
+is retained as a fidelity correction but is **NEAR-NULL / NOT AN OWNER** of
+the open boundary.  The committed source-term gates already show HPG,
+vorticity, and advection are AT-BAR after removing their reference-depth
+means, while their raw depth-uniform gauge differs.  Because NEMO forms raw
+`Kaa` from the unprojected `Krhs` and only then replaces the mean
+(`stprk3_stg.F90:365-369,433-446`), that gauge can survive through fp64
+association even though it cancels algebraically.
+
+A WRITE-only candidate seam will expose the complete stage-2 `Krhs`, and a
+one-variable arm will replace only it with the existing oracle
+`after_advection` arrays from `oracle_rkstage2_terms_kt00000001.bin`.  The gate
+will score raw RHS, raw Kaa, corrected Kaa, and the post-`tra_adv_trp`
+transport in that order.  **CONFIRM raw-RHS gauge ownership** only if the
+oracle-RHS arm clears the downstream stage-2 and transport boundary with
+movement at the faithful residual scale; otherwise the first surviving row
+remains the boundary.  Dtype, header, registry, and planted controls remain
+fail-closed.
