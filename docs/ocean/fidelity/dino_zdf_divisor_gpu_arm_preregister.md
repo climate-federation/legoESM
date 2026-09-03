@@ -202,3 +202,73 @@ admission gate is unchanged and still has to fire.
 | override the scorer's producer pin for the single new member | **UNASKED**, forced: the frozen scorer refuses any member not stamped `ddd3a8476afd`, which is every member this arm can produce. Printed at run time; no other guard relaxed |
 | score the single member as a distance-vs-floor table rather than a family verdict | **UNASKED**, forced by the preregistered bootstrap needing an ensemble; the limitation is stated in the artifact itself, not only here |
 | the fourth reach run (`0d1d49c26`) beyond the two the brief named | **UNASKED**, additive: it is the control that shows the reach gate can see the fix at all, which is what makes the two `0.0` rows meaningful rather than vacuous |
+
+---
+
+# RESULT — year-1 battery (added after the run; everything above was frozen first)
+
+Preregistration committed `f2920ee71` at **21:14:39**; the first battery arm was
+written at **21:24:32** and the score at **21:41:41**, same day.  Nothing above
+this line was edited afterwards.
+
+Score `year1/dino_climate_rebattery_score.json`, sha256
+`9a81a6fbb64f12e434da3cd6e421ffe4634c5092c295d29dd700058dedf58ac6`.
+`epoch_duplicate_identity = true`: `climate_a` and `climate_b` are bit-identical
+(`4b7912fa...`), and so are `wall_a`/`wall_b` (`3dda420b...`), which retires the
+one-GPU deviation of section 4 — the duplicate gate fired exactly as it did on
+two GPUs in round 94.  All four arms share round-94's initial state
+`01ec6db577943529f72a6fb225b8bca4b0af6e1e818f8dfc50b222df619344a8`.
+
+| bar | round-94 `9548be86` | divisor tip `0d1d49c2` | movement | frozen bar | verdict |
+|---|---:|---:|---:|---|---|
+| southern-basin day-90 MLD RMS | `1.037972e-04 m` | `1.104221e-04 m` | `+6.6e-06 m`, away | CONFIRM at `<= 11.2397455 m` | **CONFIRM**, unchanged |
+| day-360 southern-basin transport gap | `-2.318376e-02 Sv` | `-2.521523e-02 Sv` | `-2.03e-03 Sv`, away | outside `2F`, `F = 6.173656e-02 Sv` | **CONFIRMED**, unchanged |
+| wall first-8-step ratio | `1.199732107` | `1.199522305` | `-2.1e-04`, safer | `<= 1.25` | **CONFIRMED**, unchanged |
+| wall first-8-step share | `0.109118838` | `0.108997294` | `-1.2e-04`, safer | `<= 0.17` | **CONFIRMED**, unchanged |
+
+**All three registered bars pass, none of them moves resolvably.**  The two
+"away from NEMO" movements are `0.033` of the transport floor and `6e-07` of the
+MLD bar; the NEMO southern-basin MLD frame is `3243.79 m`, so that row moved by
+`2e-09` relative.  The wall row, flagged in section 4 as the one at risk because
+the fix moves 5-day surface `u` by `1.7e-02 m/s`, moved the *safe* way and kept
+`4%` headroom.
+
+**Reading, stated at the ceiling the measurement supports:** the divisor is
+INVISIBLE at one year on every registered year-1 metric.  That is what section 4
+predicted and it is the honest null — one year is far too short for an abyssal
+mixing bias, and a year-1 null neither supports nor damages the 20-year
+hypothesis.  Nothing here is evidence about the water-mass census.
+
+New row with no round-94 counterpart, recorded not interpreted: channel MLD RMS
+`6.7085 m` against a NEMO channel frame of `256.21 m`; equatorial MLD RMS
+`2.34e-07 m`.  The round-94 receipt published only the southern-basin row, so
+these two have no "before" and are not compared.
+
+## 20-year member — launch record, still running
+
+Launched on GPU 1 at the same commit, `nohup`, control member (no
+`--perturb-seed`), `member20y/run.json` carrying the SHA, every flag, the
+resolved config and the config diff.  Measured rate `1.793 s/day` over the first
+2350 days; projected total `13011 s` (`3.61 h`), against the capstone m0's
+`15487 s` for the same 230,400 leapfrog steps.  Writes
+`member20y/m0_divisor.npz` with the capstone key schema and a `DONE`/`FAILED`
+marker.  Score it with `member20y/score.sh`.
+
+**Two controls on the scoring instrument were run before the member exists:**
+
+* the frozen scorer's `reduce_legoesm` re-run on the capstone's OWN `m0`
+  reproduces the capstone reduced archive's member-0 column **bit-exactly**,
+  766/766 statistics, worst absolute difference `0.000000e+00`;
+* the same run is also the **null** for the single-member table, and it moves
+  the goalposts: a member of the *unchanged* ensemble already scores
+  `213/766` statistics "toward NEMO", not `383`, and `R_single` for
+  `acc_series` and `density_contrasts` inflates from `0.903`/`1.34` to
+  `1.565`/`1.821` from single-member scatter alone.  The abyssal census row does
+  NOT inflate (`104.0` against the ensemble's `104.4`), which is why one member
+  is informative there and not in those two families.
+  Full null in `member20y/NULL_README.txt`.
+
+Two early cross-checks, both clean: the 20-year member and the year-1
+`climate_a` arm — independent runs on different GPUs with different output
+flags — agree to every printed digit at days 10/30/60; and both differ from
+capstone `m0` only in `max|u|`, in the fourth decimal, first visible at day 30.
