@@ -2,7 +2,7 @@
 """OVERFLOW-zps ``final_water_mass_census``: anatomy of the one OUTSIDE row.
 
 The statistic, read from the scorer rather than from its name
-(``nemo_testcase_full_statistics.py:826-845`` and ``:1133-1143``):
+(``nemo_testcase_full_statistics.py:816-846`` and ``:1133-1143``):
 
 * REGION -- wet cells whose column bathymetry satisfies ``500 m < H < 2000 m``
   (``arm_metrics``: ``slope = (bathy > 500.0) & (bathy < 2000.0)``), i.e. the

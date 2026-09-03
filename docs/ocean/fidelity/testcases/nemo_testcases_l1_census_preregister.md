@@ -10,7 +10,7 @@ plus `JAX_ENABLE_X64=1`), CPU.
 
 ## 0. What the statistic actually is (read from the scorer, not from its name)
 
-`nemo_testcase_full_statistics.py:826-845` and `:1133-1143`:
+`nemo_testcase_full_statistics.py:816-846` and `:1133-1143`:
 
 * REGION -- wet cells whose column bathymetry satisfies `500 m < H < 2000 m`
   (`slope = (bathy > 500.0) & (bathy < 2000.0)`), i.e. the continental SLOPE.
