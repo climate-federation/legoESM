@@ -532,6 +532,32 @@ def preregistered_prediction_check(
                                      and abs(legacy3 - 2.138804e-10) < 2.2e-12)
                            else "NOT-MET"),
             }
+    if "legacy_hadv_min_face_thickness" in arms and case == "OVERFLOW-zps":
+        # nemo_testcases_l1_stage3_remainder_preregister.md P1/P2/P4: the
+        # stage momentum-advection thickness owns the stage-3 remainder
+        # (frozen: linearised replay 7.1e-12) and the stage-2 residual; the
+        # legacy min-rule arm IS the pre-fix code and must reproduce
+        # 4.551736e-10 / 9.433404e-11 within 1%.
+        def _bc3(stage, arm):
+            return _row(baroclinic_rows,
+                        f"{case}.kt1.stage{stage}.{arm}.baroclinic_u")["absolute_max"]
+        legacy_h = "legacy_hadv_min_face_thickness"
+        f2, f3 = _bc3(2, "faithful"), _bc3(3, "faithful")
+        l2, l3 = _bc3(2, legacy_h), _bc3(3, legacy_h)
+        check["S3_hadv_face_thickness_owns_the_stage3_remainder"] = {
+            "predicate": (
+                "faithful stage-3 baroclinic u <= 1.0e-11 and stage-2 <= 3.0e-12 "
+                "m/s; the legacy min-rule arm reproduces the pre-fix "
+                "4.551736e-10 / 9.433404e-11 within 1%"),
+            "faithful_stage2_baroclinic_u_m_s": f2,
+            "faithful_stage3_baroclinic_u_m_s": f3,
+            "legacy_hadv_stage2_baroclinic_u_m_s": l2,
+            "legacy_hadv_stage3_baroclinic_u_m_s": l3,
+            "status": ("MET" if (f3 <= 1.0e-11 and f2 <= 3.0e-12
+                                 and abs(l3 - 4.551736e-10) < 4.6e-12
+                                 and abs(l2 - 9.433404e-11) < 9.5e-13)
+                       else "NOT-MET"),
+        }
     return check
 
 
@@ -607,6 +633,12 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
             "legacy_up3_transport_sign_selector": _NEMOWSRK3TestHooks(
                 legacy_up3_transport_sign_selector=True
             ),
+            # Stage-3 remainder round (preregistered in
+            # nemo_testcases_l1_stage3_remainder_preregister.md): ablate the
+            # NEMO e3u(Kmm) in the stage flux-form momentum advection.
+            "legacy_hadv_min_face_thickness": _NEMOWSRK3TestHooks(
+                legacy_hadv_min_face_thickness=True
+            ),
         }
     else:
         arms = {
@@ -625,6 +657,9 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
             ),
             "legacy_up3_transport_sign_selector": _NEMOWSRK3TestHooks(
                 legacy_up3_transport_sign_selector=True
+            ),
+            "legacy_hadv_min_face_thickness": _NEMOWSRK3TestHooks(
+                legacy_hadv_min_face_thickness=True
             ),
         }
 
@@ -755,7 +790,8 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
             "u" if arm in ("freeze_stage_hpg_operands", "freeze_stage_hpg_tracers",
                            "freeze_stage_hpg_eta", "omit_stage_vertical_up3",
                            "omit_stage_qco_factor",
-                           "legacy_up3_transport_sign_selector")
+                           "legacy_up3_transport_sign_selector",
+                           "legacy_hadv_min_face_thickness")
             else "T" if case == "OVERFLOW-zps" else "u"
         )
         faithful_row = faithful_T if target == "T" else faithful_u
@@ -775,7 +811,8 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
         arm_results[arm] = classify_arm(faithful_row, control_row, arm_move, improving=improving)
         arm_results[arm]["target"] = target
         if arm in ("legacy_stage_min_face_thickness", "omit_stage_qco_factor",
-                   "legacy_up3_transport_sign_selector"):
+                   "legacy_up3_transport_sign_selector",
+                   "legacy_hadv_min_face_thickness"):
             # These arms ABLATE a landed fix, so classify_arm's "does the
             # arm improve the residual" question is inverted: the meaningful
             # statement is whether REMOVING the NEMO rule makes the target
@@ -819,6 +856,12 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
                 "UP3 upwind selector of the stage horizontal momentum "
                 "advection: NEMO's advected-velocity pair sign "
                 "(dynadv_up3.F90:166-170) vs the stage-transport pair sign")
+        elif arm == "legacy_hadv_min_face_thickness":
+            one_variable = (
+                "face thickness of the stage flux-form momentum advection: "
+                "NEMO e3u(Kmm) = e3u_0*(1+r3u(Kmm)) (dynadv_up3.F90:160,"
+                "205-207; domzgr_substitute.h90:127) vs tendencies()' min of "
+                "the two stretched T cells")
         elif arm == "legacy_velocity_primary_average":
             one_variable = "flux_form_primary_transport_average"
         elif "primary" in arm:

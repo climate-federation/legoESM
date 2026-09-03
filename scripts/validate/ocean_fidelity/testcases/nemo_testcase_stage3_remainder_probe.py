@@ -471,6 +471,15 @@ def growth(*, max_kt: int, out_dir: Path, allow_dirty: bool, frames: bool) -> di
     report["arms"]["one_step_injection"] = {kt: inj[kt] for kt in sorted(inj)}
 
     # --- exact@2 trajectory and plus_du@2 trajectory ---
+    # What a reseed keeps from the card initial state (inactive cells, every
+    # history slot): the plus_du entry vs legoESM's own kt=2 state on ALL
+    # stored cells, so a reseed-vs-free difference later is attributable.
+    _pd_state = reseed(2, du_nemo)[0]
+    report["reseed_vs_free_kt2_all_cells"] = {
+        f: float(np.max(np.abs(np.asarray(getattr(_pd_state, f).data)
+                               - np.asarray(getattr(free_states[2], f).data))))
+        for f in ("T", "S", "u", "v", "eta")}
+    print("[reseed vs free kt=2, all cells]", report["reseed_vs_free_kt2_all_cells"], flush=True)
     for name, du in (("exact2_traj", None), ("plus_du2_traj", du_nemo)):
         st, r0, _ = reseed(2, du)
         rows = {2: r0}
