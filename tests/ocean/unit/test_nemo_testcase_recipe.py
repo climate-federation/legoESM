@@ -171,9 +171,6 @@ def test_overflow_card_carries_source_exact_unmasked_bbl_mesh_operands():
     )
     assert np.asarray(z.nemo_bbl_e3u_0).shape == (3, 201, 100)
     assert np.asarray(z.nemo_bbl_e3v_0).shape == (2, 202, 100)
-    assert z.nemo_e3w_mesh_reference is True
-    np.testing.assert_array_equal(
-        np.asarray(z.nemo_e3w_0), np.full((100,), 20.0))
     geom = nemo_bbl_static_geometry(
         z.h_partial,
         recipe.land_mask,
@@ -189,6 +186,25 @@ def test_overflow_card_carries_source_exact_unmasked_bbl_mesh_operands():
     bottom = np.asarray(z.bottom_level)[1]
     same_bottom = bottom[:-1] == bottom[1:]
     assert not np.any(np.asarray(geom.u_active)[1][same_bottom])
+
+
+def test_overflow_aimp_arm_uses_raw_w_ladder_without_mutating_zdf_slot():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        _nemo_aimp_reference_e3w_int,
+    )
+
+    card = build_overflow_zps_card()
+    z = card.recipe.z_coord
+    h = np.asarray(z.h_partial)
+    stretch = np.full(h.shape[:-1], 1.00025)
+    got = np.asarray(_nemo_aimp_reference_e3w_int(z, h, stretch))
+    expected = np.broadcast_to(20.0 * stretch[..., None], got.shape)
+    np.testing.assert_array_equal(got, expected)
+    midpoint = 0.5 * (h[..., :-1] + h[..., 1:]) * stretch[..., None]
+    wet = np.asarray(z.is_active[..., :-1] & z.is_active[..., 1:])
+    assert np.max(np.abs(got[wet] - midpoint[wet])) > 4.9
+    # The one-variable arm must not silently alter the separate ZDF consumer.
+    assert z.nemo_e3w_0 is None
 
 
 def test_overflow_card_uses_partial_cells_and_minimum_face_rule():

@@ -1225,15 +1225,14 @@ def _nemo_ws_stage_transport(
     if (stage_index == 2
             and getattr(config, "adaptive_implicit_vertadv", False)):
         if nemo_aimp_reference_w_metric:
-            from legoesm.ocean.physics.vertical_mixing import nemo_e3w_kmm
-
             # domzgr_substitute.h90:131: e3w(Kmm)=e3w_0*(1+r3t(Kmm));
             # domqco.F90:209: r3t=ssh/ht_0.  The canonical helper returns
             # NEMO jk=2..jpk interior interfaces; boundary entries are unused
             # by wAimp_RK3_t and are padded only to the local nlev+1 layout.
             stretch = 1.0 + eta_stage / jnp.maximum(
                 jnp.sum(h_ref, axis=-1), 1.0e-10)
-            e3w_int = nemo_e3w_kmm(z_coord, h_stage, stretch)
+            e3w_int = _nemo_aimp_reference_e3w_int(
+                z_coord, h_stage, stretch)
             e3w = jnp.concatenate(
                 [e3w_int[..., :1], e3w_int, e3w_int[..., -1:]], axis=-1)
         else:
@@ -1245,6 +1244,26 @@ def _nemo_ws_stage_transport(
             grid.area_T, grid.dy_u, grid.dx_v, dt)
         w_stage, wi_stage = split.w_explicit, split.w_implicit
     return (mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage, wi_stage)
+
+
+def _nemo_aimp_reference_e3w_int(z_coord, h_stage, stretch):
+    """Private Arm-2 raw ``e3w_0`` from the pinned NEMO T-depth ladder.
+
+    OVERFLOW ``usrdef_zgr.F90:157-168`` leaves ``gdept_0``/``e3w_0`` on the
+    20 m reference ladder.  On NEMO's indexing, the interfaces consumed by
+    ``wAimp_RK3_t`` are exactly ``gdept_0(k)-gdept_0(k-1)``.  Deriving that
+    frozen arm operand here keeps the experiment from also changing the
+    separate ``tra_zdf``/``dyn_zdf`` divisor through ``z_coord.nemo_e3w_0``.
+    """
+    gdept = getattr(z_coord, "nemo_gdept_0", None)
+    if gdept is None:
+        raise ValueError("NEMO adaptive-split W metric requires nemo_gdept_0")
+    raw_int = jnp.diff(jnp.asarray(gdept), axis=-1)
+    if raw_int.ndim == 1:
+        raw_int = jnp.broadcast_to(raw_int, h_stage.shape[:-1] + raw_int.shape)
+    elif raw_int.shape != h_stage.shape[:-1] + (h_stage.shape[-1] - 1,):
+        raise ValueError("nemo_gdept_0 is incompatible with the stage geometry")
+    return raw_int * jnp.asarray(stretch)[..., None]
 
 
 def _nemo_ws_rk3_tracer_pair_step(

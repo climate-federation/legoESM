@@ -261,7 +261,6 @@ def build_overflow_zps_card() -> NEMOTestcaseCard:
         # on the uniform reference ladder under ld_zps.  Carry the source
         # operands rather than reconstructing W spacing from partial e3t.
         nemo_gdept_0_m=_gdept_1d,
-        nemo_e3w_0_m=np.full((100,), 20.0, dtype=np.float64),
     )
     z_coord = create_partial_cell_coordinate(
         z_ref, bathymetry, bottom_index_rule="nemo_tpoint"

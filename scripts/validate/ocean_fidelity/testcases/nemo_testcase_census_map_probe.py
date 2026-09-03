@@ -460,16 +460,16 @@ def command_aimp_scaling(args) -> None:
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         _nemo_ws_qco_stage_faces,
         _nemo_ws_stage_transport,
+        _nemo_aimp_reference_e3w_int,
     )
-    from legoesm.ocean.physics.vertical_mixing import nemo_e3w_kmm
     from legoesm.ocean.vertical import compute_layer_thickness
 
     set_policy(PrecisionPolicy.fp64())
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     card = STATS.build_nemo_testcase_card(CASE)
     z = card.recipe.z_coord
-    require(z.nemo_e3w_0 is not None and z.nemo_e3w_mesh_reference,
-            "OVERFLOW card lacks raw NEMO e3w_0")
+    require(z.nemo_gdept_0 is not None,
+            "OVERFLOW card lacks the pinned NEMO gdept_0 ladder")
     states = STATS.load_legoesm_states(CASE, "fp64", args.lego_root)[0]
     grid = card.recipe.grid
     u_mask, v_mask = compute_face_masks_3d(z.is_active, grid)
@@ -502,7 +502,7 @@ def command_aimp_scaling(args) -> None:
         reference = _nemo_ws_stage_transport(
             (u, v), h, 2, nemo_aimp_reference_w_metric=True, **common)
         stretch = 1.0 + eta / jnp.maximum(jnp.sum(h_ref, axis=-1), 1.0e-10)
-        ref_int = nemo_e3w_kmm(z, h, stretch)
+        ref_int = _nemo_aimp_reference_e3w_int(z, h, stretch)
         midpoint_int = 0.5 * (h[..., :-1] + h[..., 1:])
         wet_int = np.asarray(z.is_active[..., :-1] & z.is_active[..., 1:])
         old_wi = np.asarray(legacy[6])
