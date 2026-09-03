@@ -242,12 +242,12 @@ def test_validate_config_rejects_unknown_momentum_flux_scheme():
 
 
 def test_validate_config_rejects_unqualified_upwind3():
-    """The bare ``"upwind3"`` names no reference model — NEMO's dynadv_up3 and
+    """The bare ``"nemo_up3"`` names no reference model — NEMO's dynadv_up3 and
     Oceananigans' UpwindBiased(3) select the T-point upwind branch by different
     quantities — so a caller must name the arm it claims (``nemo_up3`` /
     ``oceananigans_up3``) or fail construction."""
     bad = LatLonCGridOceanConfig.from_flat(
-        momentum_advection="flux_form", momentum_flux_scheme="upwind3",
+        momentum_advection="flux_form", momentum_flux_scheme="nemo_up3",
     )
     with pytest.raises(ValueError, match="momentum_flux_scheme must be one of"):
         LatLonCGridOceanModel._validate_config(bad)
@@ -337,7 +337,7 @@ def test_validate_config_accepts_flux_form_with_valid_scheme():
 
     The two UP3 arms are separate scheme names (``nemo_up3`` /
     ``oceananigans_up3``) because their references pick the T-point upwind
-    branch differently; the unqualified ``"upwind3"`` names no reference and
+    branch differently; the unqualified ``"nemo_up3"`` names no reference and
     is refused (see test below)."""
     for scheme in ("upwind", "centered", "oceananigans_up3"):
         cfg = LatLonCGridOceanConfig.from_flat(
@@ -373,7 +373,7 @@ def test_validate_config_accepts_bbl_in_stage_on_the_rk3_ws_lane():
     ok = LatLonCGridOceanConfig.from_flat(
         tracer_time_integrator="rk3_ws", momentum_time_integrator="rk3_ws",
         tracer_advection="fct2", momentum_advection="flux_form",
-        momentum_flux_scheme="upwind3", vertical_momentum_scheme="nemo_up3",
+        momentum_flux_scheme="nemo_up3", vertical_momentum_scheme="nemo_up3",
         bbl_adv_option=2, bbl_gamma_s=20.0,
     )
     LatLonCGridOceanModel._validate_config(ok)  # must not raise
