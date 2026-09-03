@@ -36,25 +36,27 @@ References
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import jax
 import jax.numpy as jnp
 import numpy as np
-
-from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.operators import gradient_x, gradient_y
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.halo_latlon import pad_halo_latlon
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.grids.voronoi import VoronoiMesh
-from legoesm.ice.rheology import (
-    ice_strength,
-    strain_rates,
-    evp_stress_update,
-    mevp_stress_update,
-    cell_gradient_voronoi,
-)
 from legoesm.ice.config import SeaIceConfig
+from legoesm.ice.rheology import (
+    cell_gradient_voronoi,
+    evp_stress_update,
+    ice_strength,
+    mevp_stress_update,
+    strain_rates,
+)
+
+from legoesm import constants
 
 # Canonical defaults for the dynamics solver kwargs live on ``SeaIceConfig`` (the
 # single source of truth callers pass in); the function signatures below default
@@ -75,6 +77,130 @@ _MEVP_BETA_DEFAULT = 500.0
 # Ice-area presence threshold [-]: cells with concentration below this carry no
 # dynamics (distinct from the h_ice_min thickness floor).
 _ICE_PRESENCE_THRESHOLD = 0.01
+
+# NEMO 5.0.2 SI3 C-grid aEVP coefficients.  These are named here because the
+# coefficient ratchet forbids burying published/source values in expressions.
+# Source: src/ICE/icedyn_rhg_evp.F90:164-166,189-192,235-247,401-510,
+# 523-741 in the pinned NEMO 5.0.2 oracle.
+_SI3_ZERO = 0.0
+_SI3_ONE = 1.0
+_SI3_HALF = 0.5
+_SI3_QUARTER = 0.25
+_SI3_TWO = 2.0
+_SI3_STRESS_CROSS_WEIGHT = 2.0
+_SI3_SHEAR_STRESS_WEIGHT = 0.5
+_SI3_ALPHA_FLOOR = 50.0
+_SI3_MASS_FLOOR_KG_M2 = 1.0
+_SI3_LOW_CONCENTRATION = 0.001
+_SI3_ICE_PRESENCE = 1.0e-10
+_SI3_DENOMINATOR_FLOOR = 1.0e-20
+_SI3_LOW_MASS_OCEAN_FACTOR = 0.01
+_SI3_FAST_MASK_REDUCTION = 0.99
+_SI3_REQUIRED_HALO = 2
+_SI3_REQUIRED_CATEGORY_COUNT = 1
+
+
+class SI3CGridMetrics(NamedTuple):
+    """Same-index T/U/V/F metrics used by SI3's C-grid aEVP arm.
+
+    Every leaf has the NEMO allocated shape, including both halo widths.  The
+    unusual common shape is intentional: it preserves the source indexing in
+    ``icedyn_rhg_evp.F90`` rather than restaggering through an A-grid adapter.
+    """
+
+    e1t: jnp.ndarray
+    e2t: jnp.ndarray
+    e1u: jnp.ndarray
+    e2u: jnp.ndarray
+    e1v: jnp.ndarray
+    e2v: jnp.ndarray
+    e1f: jnp.ndarray
+    e2f: jnp.ndarray
+    area_t: jnp.ndarray
+    area_u: jnp.ndarray
+    area_v: jnp.ndarray
+    area_f: jnp.ndarray
+
+
+class SI3CGridAEVPConfig(NamedTuple):
+    """The explicit, narrow selector/configuration for the SI3 C-grid arm."""
+
+    scheme: str
+    staggering: str
+    dt_s: float
+    n_subcycles: int
+    eccentricity: float
+    creep_limit_s_inv: float
+    strength_parameter_pa: float
+    strength_decay: float
+    rho_snow: float
+    rho_ice: float
+    rho_water: float
+    rho_ocean: float
+    gravity: float
+    drag_io: float
+    halo_width: int
+    category_count: int
+    landfast: bool
+    convergence_check: int
+
+
+class SI3CGridAEVPState(NamedTuple):
+    """Prognostic C-grid velocity and transformed SI3 stress carry."""
+
+    u_ice_u: jnp.ndarray
+    v_ice_v: jnp.ndarray
+    stress1_t: jnp.ndarray
+    stress2_t: jnp.ndarray
+    stress12_f: jnp.ndarray
+
+
+class SI3CGridAEVPForcing(NamedTuple):
+    """Outer-step fields consumed by the resolved rung-3.3 momentum solve."""
+
+    concentration_t: jnp.ndarray
+    ice_volume_t: jnp.ndarray
+    snow_volume_t: jnp.ndarray
+    pond_volume_t: jnp.ndarray
+    lid_volume_t: jnp.ndarray
+    air_stress_u_t: jnp.ndarray
+    air_stress_v_t: jnp.ndarray
+    ocean_u_u: jnp.ndarray
+    ocean_v_v: jnp.ndarray
+    ssh_t: jnp.ndarray
+    coriolis_t: jnp.ndarray
+    tmask_t: jnp.ndarray
+    umask_u: jnp.ndarray
+    vmask_v: jnp.ndarray
+    fast_tmask: jnp.ndarray
+
+
+@jax.custom_jvp
+def _si3_sqrt(value: jnp.ndarray) -> jnp.ndarray:
+    """Exact sqrt primal with a finite zero-subgradient at the cusp.
+
+    SI3 evaluates unfloored square roots at ``icedyn_rhg_evp.F90:421,446,
+    468,534-536,585-587,640-642,692-694``.  Adding a primal floor would break
+    the oracle.  The derivative at exactly zero is mathematically undefined;
+    choosing the finite zero subgradient preserves every forward value while
+    keeping the selectable solver usable under reverse-mode AD.
+    """
+
+    return jnp.sqrt(value)
+
+
+@_si3_sqrt.defjvp
+def _si3_sqrt_jvp(primals, tangents):
+    (value,) = primals
+    (value_dot,) = tangents
+    root = jnp.sqrt(value)
+    safe_root = jnp.where(value > _SI3_ZERO, root, _SI3_ONE)
+    derivative = jnp.where(
+        value > _SI3_ZERO,
+        _SI3_HALF * value_dot / safe_root,
+        _SI3_ZERO,
+    )
+    return root, derivative
 
 
 def _is_latlon_grid(grid) -> bool:
@@ -590,6 +716,597 @@ def evp_solver(
         )
 
     return u_f, v_f, s11_f, s22_f, s12_f
+
+
+# ==============================================================================
+# SI3 C-grid adaptive EVP solver (NEMO 5.0.2 exact-card arm)
+# ==============================================================================
+
+def _si3_periodic_halo(value: jnp.ndarray) -> jnp.ndarray:
+    """Rebuild both halo widths on the one-rank doubly periodic SI3 card."""
+
+    interior = value[
+        _SI3_REQUIRED_HALO:-_SI3_REQUIRED_HALO,
+        _SI3_REQUIRED_HALO:-_SI3_REQUIRED_HALO,
+        ...,
+    ]
+    tail = ((0, 0),) * (value.ndim - 2)
+    padding = (
+        (_SI3_REQUIRED_HALO, _SI3_REQUIRED_HALO),
+        (_SI3_REQUIRED_HALO, _SI3_REQUIRED_HALO),
+    ) + tail
+    return jnp.pad(interior, padding, mode="wrap")
+
+
+def _si3_set(array: jnp.ndarray, row_slice: slice, value: jnp.ndarray) -> jnp.ndarray:
+    """Functional write helper for a two-dimensional same-index SI3 array."""
+
+    return array.at[row_slice, row_slice].set(value[row_slice, row_slice])
+
+
+def _si3_f_shear(
+    u_ice: jnp.ndarray,
+    v_ice: jnp.ndarray,
+    metrics: SI3CGridMetrics,
+    fimask: jnp.ndarray,
+    previous: jnp.ndarray,
+) -> jnp.ndarray:
+    """SI3 F-point shear in icedyn_rhg_evp.F90:392-399 statement order."""
+
+    u_north = jnp.roll(u_ice, -1, axis=1)
+    v_east = jnp.roll(v_ice, -1, axis=0)
+    r1_e1u = _SI3_ONE / metrics.e1u
+    r1_e2v = _SI3_ONE / metrics.e2v
+    value = (
+        (
+            (u_north * jnp.roll(r1_e1u, -1, axis=1) - u_ice * r1_e1u)
+            * metrics.e1f
+            * metrics.e1f
+        )
+        + (
+            (v_east * jnp.roll(r1_e2v, -1, axis=0) - v_ice * r1_e2v)
+            * metrics.e2f
+            * metrics.e2f
+        )
+    ) * (_SI3_ONE / metrics.area_f) * fimask
+    wide = slice(0, -1)
+    return _si3_set(previous, wide, value)
+
+
+def _si3_t_deformation(
+    u_ice: jnp.ndarray,
+    v_ice: jnp.ndarray,
+    shear_f: jnp.ndarray,
+    metrics: SI3CGridMetrics,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Return T divergence, tension and four-F shear square (:401-424)."""
+
+    u_west = jnp.roll(u_ice, 1, axis=0)
+    v_south = jnp.roll(v_ice, 1, axis=1)
+    shear_west = jnp.roll(shear_f, 1, axis=0)
+    shear_south = jnp.roll(shear_f, 1, axis=1)
+    shear_southwest = jnp.roll(shear_west, 1, axis=1)
+    area_f_west = jnp.roll(metrics.area_f, 1, axis=0)
+    area_f_south = jnp.roll(metrics.area_f, 1, axis=1)
+    area_f_southwest = jnp.roll(area_f_west, 1, axis=1)
+    shear_square = (
+        (
+            shear_f * shear_f * metrics.area_f
+            + shear_west * shear_west * area_f_west
+        )
+        + (
+            shear_south * shear_south * area_f_south
+            + shear_southwest * shear_southwest * area_f_southwest
+        )
+    ) * _SI3_QUARTER * (_SI3_ONE / metrics.area_t)
+    divergence = (
+        (
+            metrics.e2u * u_ice
+            - jnp.roll(metrics.e2u, 1, axis=0) * u_west
+        )
+        + (
+            metrics.e1v * v_ice
+            - jnp.roll(metrics.e1v, 1, axis=1) * v_south
+        )
+    ) * (_SI3_ONE / metrics.area_t)
+    tension = (
+        (
+            u_ice * (_SI3_ONE / metrics.e2u)
+            - u_west * jnp.roll(_SI3_ONE / metrics.e2u, 1, axis=0)
+        )
+        * metrics.e2t
+        * metrics.e2t
+        - (
+            v_ice * (_SI3_ONE / metrics.e1v)
+            - v_south * jnp.roll(_SI3_ONE / metrics.e1v, 1, axis=1)
+        )
+        * metrics.e1t
+        * metrics.e1t
+    ) * (_SI3_ONE / metrics.area_t)
+    return divergence, tension, shear_square
+
+
+def _si3_stress_divergence(
+    stress1_t: jnp.ndarray,
+    stress2_t: jnp.ndarray,
+    stress12_f: jnp.ndarray,
+    metrics: SI3CGridMetrics,
+    *,
+    outer_weight: float = _SI3_HALF,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """SI3 transformed-stress divergence, source order at :495-510.
+
+    ``outer_weight`` exists only to make the preregistered planted violation
+    direct and non-vacuous.  Production callers do not override it.
+    """
+
+    stress1_east = jnp.roll(stress1_t, -1, axis=0)
+    stress1_north = jnp.roll(stress1_t, -1, axis=1)
+    stress2_east = jnp.roll(stress2_t, -1, axis=0)
+    stress2_north = jnp.roll(stress2_t, -1, axis=1)
+    stress12_south = jnp.roll(stress12_f, 1, axis=1)
+    stress12_west = jnp.roll(stress12_f, 1, axis=0)
+    e2t_east = jnp.roll(metrics.e2t, -1, axis=0)
+    e1t_north = jnp.roll(metrics.e1t, -1, axis=1)
+    force_u = outer_weight * (
+        (
+            (stress1_east - stress1_t) * metrics.e2u
+            + (
+                stress2_east * e2t_east * e2t_east
+                - stress2_t * metrics.e2t * metrics.e2t
+            )
+            * (_SI3_ONE / metrics.e2u)
+        )
+        + (
+            stress12_f * metrics.e1f * metrics.e1f
+            - stress12_south
+            * jnp.roll(metrics.e1f, 1, axis=1)
+            * jnp.roll(metrics.e1f, 1, axis=1)
+        )
+        * _SI3_STRESS_CROSS_WEIGHT
+        * (_SI3_ONE / metrics.e1u)
+    ) * (_SI3_ONE / metrics.area_u)
+    force_v = outer_weight * (
+        (
+            (stress1_north - stress1_t) * metrics.e1v
+            - (
+                stress2_north * e1t_north * e1t_north
+                - stress2_t * metrics.e1t * metrics.e1t
+            )
+            * (_SI3_ONE / metrics.e1v)
+        )
+        + (
+            stress12_f * metrics.e2f * metrics.e2f
+            - stress12_west
+            * jnp.roll(metrics.e2f, 1, axis=0)
+            * jnp.roll(metrics.e2f, 1, axis=0)
+        )
+        * _SI3_STRESS_CROSS_WEIGHT
+        * (_SI3_ONE / metrics.e2v)
+    ) * (_SI3_ONE / metrics.area_v)
+    halo_one = slice(1, -1)
+    zeros = jnp.zeros_like(stress1_t)
+    return _si3_set(zeros, halo_one, force_u), _si3_set(zeros, halo_one, force_v)
+
+
+def _validate_si3_cgrid_aevp_static(config: SI3CGridAEVPConfig) -> None:
+    """Reject every unimplemented selector cross-product before tracing."""
+
+    expected = (
+        "si3_aevp",
+        "si3_c_grid",
+        _SI3_REQUIRED_HALO,
+        _SI3_REQUIRED_CATEGORY_COUNT,
+        False,
+        0,
+    )
+    actual = (
+        config.scheme,
+        config.staggering,
+        config.halo_width,
+        config.category_count,
+        config.landfast,
+        config.convergence_check,
+    )
+    if actual != expected:
+        raise ValueError(
+            "SI3 C-grid aEVP selector composition "
+            f"{actual!r} != {expected!r}; no Frankenstein fallback"
+        )
+    if config.n_subcycles < 1:
+        raise ValueError("SI3 C-grid aEVP requires at least one subcycle")
+
+
+def si3_cgrid_aevp_solver(
+    state: SI3CGridAEVPState,
+    forcing: SI3CGridAEVPForcing,
+    metrics: SI3CGridMetrics,
+    config: SI3CGridAEVPConfig,
+    *,
+    differentiable: bool = False,
+) -> SI3CGridAEVPState:
+    """Run NEMO/SI3's C-grid adaptive-EVP momentum solver.
+
+    This selectable arm is a line-ordered transcription of
+    ``icedyn_rhg_evp.F90:187-843`` for the preregistered one-category,
+    landfast-off composition.  It intentionally keeps NEMO's common
+    same-index T/U/V/F storage and its asymmetric loop extents.  Existing
+    A-grid ``evp_solver`` and ``mevp_solver`` are not called or modified.
+    """
+
+    _validate_si3_cgrid_aevp_static(config)
+    shape = state.u_ice_u.shape
+    leaves = (*state, *forcing, *metrics)
+    if len(shape) != 2 or any(value.shape != shape for value in leaves):
+        raise ValueError("SI3 C-grid aEVP requires same-shape two-dimensional leaves")
+
+    at_i = forcing.concentration_t
+    zmsk = (at_i >= _SI3_ICE_PRESENCE).astype(state.u_ice_u.dtype)
+    tmask = forcing.tmask_t
+    fimask_raw = (
+        tmask
+        * jnp.roll(tmask, -1, axis=0)
+        * jnp.roll(tmask, -1, axis=1)
+        * jnp.roll(jnp.roll(tmask, -1, axis=0), -1, axis=1)
+    )
+    fimask = _si3_periodic_halo(
+        _si3_set(jnp.zeros_like(tmask), slice(2, -2), fimask_raw)
+    )
+    eccentricity_square = config.eccentricity * config.eccentricity
+    inverse_eccentricity_square = _SI3_ONE / eccentricity_square
+    mass_t = (
+        config.rho_snow * forcing.snow_volume_t
+        + config.rho_ice * forcing.ice_volume_t
+        + config.rho_water * (forcing.pond_volume_t + forcing.lid_volume_t)
+    )
+    mass_coriolis_t = mass_t * forcing.coriolis_t
+    dt_over_mass_t = config.dt_s / jnp.maximum(mass_t, _SI3_MASS_FLOOR_KG_M2)
+
+    # H79 guard is deliberately outside the shared helper, matching
+    # icedyn_rdgrft.F90:1048-1056 and leaving the A-grid helper unchanged.
+    strength_formula = ice_strength(
+        forcing.ice_volume_t,
+        at_i,
+        config.strength_parameter_pa,
+        config.strength_decay,
+    )
+    strength_t = jnp.where(at_i > _SI3_ICE_PRESENCE, strength_formula, _SI3_ZERO)
+
+    area_t_east = jnp.roll(metrics.area_t, -1, axis=0)
+    area_t_north = jnp.roll(metrics.area_t, -1, axis=1)
+    mass_t_east = jnp.roll(mass_t, -1, axis=0)
+    mass_t_north = jnp.roll(mass_t, -1, axis=1)
+    at_i_east = jnp.roll(at_i, -1, axis=0)
+    at_i_north = jnp.roll(at_i, -1, axis=1)
+    za_u = (
+        _SI3_HALF * (at_i * metrics.area_t + at_i_east * area_t_east)
+        * (_SI3_ONE / metrics.area_u)
+        * forcing.umask_u
+    )
+    za_v = (
+        _SI3_HALF * (at_i * metrics.area_t + at_i_north * area_t_north)
+        * (_SI3_ONE / metrics.area_v)
+        * forcing.vmask_v
+    )
+    mass_u = (
+        _SI3_HALF * (mass_t * metrics.area_t + mass_t_east * area_t_east)
+        * (_SI3_ONE / metrics.area_u)
+        * forcing.umask_u
+    )
+    mass_v = (
+        _SI3_HALF * (mass_t * metrics.area_t + mass_t_north * area_t_north)
+        * (_SI3_ONE / metrics.area_v)
+        * forcing.vmask_v
+    )
+    ocean_v_u = _SI3_QUARTER * (
+        (
+            forcing.ocean_v_v + jnp.roll(forcing.ocean_v_v, 1, axis=1)
+        )
+        + (
+            jnp.roll(forcing.ocean_v_v, -1, axis=0)
+            + jnp.roll(jnp.roll(forcing.ocean_v_v, -1, axis=0), 1, axis=1)
+        )
+    ) * forcing.umask_u
+    ocean_u_v = _SI3_QUARTER * (
+        (
+            forcing.ocean_u_u + jnp.roll(forcing.ocean_u_u, 1, axis=0)
+        )
+        + (
+            jnp.roll(forcing.ocean_u_u, -1, axis=1)
+            + jnp.roll(jnp.roll(forcing.ocean_u_u, 1, axis=0), -1, axis=1)
+        )
+    ) * forcing.vmask_v
+    inverse_dt = _SI3_ONE / config.dt_s
+    mass_over_dt_u = mass_u * inverse_dt
+    mass_over_dt_v = mass_v * inverse_dt
+    tau_air_u = (
+        za_u
+        * _SI3_HALF
+        * (forcing.air_stress_u_t + jnp.roll(forcing.air_stress_u_t, -1, axis=0))
+        * (_SI3_TWO - forcing.umask_u)
+        * jnp.maximum(tmask, jnp.roll(tmask, -1, axis=0))
+    )
+    tau_air_v = (
+        za_v
+        * _SI3_HALF
+        * (forcing.air_stress_v_t + jnp.roll(forcing.air_stress_v_t, -1, axis=1))
+        * (_SI3_TWO - forcing.vmask_v)
+        * jnp.maximum(tmask, jnp.roll(tmask, -1, axis=1))
+    )
+    drag_u = (
+        config.rho_ocean
+        * za_u
+        * _SI3_HALF
+        * (config.drag_io + config.drag_io)
+        * (_SI3_TWO - forcing.umask_u)
+        * jnp.maximum(tmask, jnp.roll(tmask, -1, axis=0))
+    )
+    drag_v = (
+        config.rho_ocean
+        * za_v
+        * _SI3_HALF
+        * (config.drag_io + config.drag_io)
+        * (_SI3_TWO - forcing.vmask_v)
+        * jnp.maximum(tmask, jnp.roll(tmask, -1, axis=1))
+    )
+    slope_u = (
+        -mass_u
+        * config.gravity
+        * (jnp.roll(forcing.ssh_t, -1, axis=0) - forcing.ssh_t)
+        * (_SI3_ONE / metrics.e1u)
+    )
+    slope_v = (
+        -mass_v
+        * config.gravity
+        * (jnp.roll(forcing.ssh_t, -1, axis=1) - forcing.ssh_t)
+        * (_SI3_ONE / metrics.e2v)
+    )
+    mass_mask_u = (mass_u > _SI3_ZERO).astype(state.u_ice_u.dtype)
+    mass_mask_v = (mass_v > _SI3_ZERO).astype(state.v_ice_v.dtype)
+    active_u = ~((mass_u <= _SI3_MASS_FLOOR_KG_M2) & (za_u <= _SI3_LOW_CONCENTRATION))
+    active_v = ~((mass_v <= _SI3_MASS_FLOOR_KG_M2) & (za_v <= _SI3_LOW_CONCENTRATION))
+    active_u = active_u.astype(state.u_ice_u.dtype)
+    active_v = active_v.astype(state.v_ice_v.dtype)
+    fast_u = jnp.maximum(forcing.fast_tmask, jnp.roll(forcing.fast_tmask, -1, axis=0))
+    fast_v = jnp.maximum(forcing.fast_tmask, jnp.roll(forcing.fast_tmask, -1, axis=1))
+
+    halo_one = slice(1, -1)
+    interior = slice(2, -2)
+
+    def subcycle(iteration, carry):
+        u_ice, v_ice, stress1, stress2, stress12 = carry
+        shear = _si3_f_shear(
+            u_ice, v_ice, metrics, fimask, jnp.zeros_like(stress12)
+        )
+        divergence, tension, shear_square = _si3_t_deformation(
+            u_ice, v_ice, shear, metrics
+        )
+        delta_value = _si3_sqrt(
+            divergence * divergence
+            + (tension * tension + shear_square) * inverse_eccentricity_square
+        ) * zmsk
+        p_over_delta_value = (
+            strength_t / (delta_value + config.creep_limit_s_inv) * zmsk
+        )
+        delta_t = _si3_periodic_halo(
+            _si3_set(jnp.zeros_like(delta_value), interior, delta_value)
+        )
+        p_over_delta_t = _si3_periodic_halo(
+            _si3_set(jnp.zeros_like(p_over_delta_value), interior, p_over_delta_value)
+        )
+
+        # SI3 intentionally recomputes these operands for the wide stress loop.
+        divergence, tension, ignored_shear_square = _si3_t_deformation(
+            u_ice, v_ice, shear, metrics
+        )
+        del ignored_shear_square
+        alpha_t = jnp.maximum(
+            _SI3_ALPHA_FLOOR,
+            jnp.pi
+            * _si3_sqrt(
+                _SI3_HALF
+                * p_over_delta_t
+                * (_SI3_ONE / metrics.area_t)
+                * dt_over_mass_t
+            ),
+        )
+        inverse_alpha_t = _SI3_ONE / (alpha_t + _SI3_ONE)
+        stress1_value = (
+            stress1 * alpha_t
+            + p_over_delta_t
+            * (
+                divergence * (_SI3_ONE + _SI3_ZERO)
+                - delta_t * (_SI3_ONE - _SI3_ZERO)
+            )
+        ) * inverse_alpha_t * zmsk
+        stress2_value = (
+            stress2 * alpha_t
+            + p_over_delta_t
+            * (
+                tension
+                * inverse_eccentricity_square
+                * (_SI3_ONE + _SI3_ZERO)
+            )
+        ) * inverse_alpha_t * zmsk
+        stress1 = _si3_set(stress1, slice(1, None), stress1_value)
+        stress2 = _si3_set(stress2, slice(1, None), stress2_value)
+
+        beta_t = jnp.maximum(
+            _SI3_ALPHA_FLOOR,
+            jnp.pi
+            * _si3_sqrt(
+                _SI3_HALF
+                * p_over_delta_t
+                * (_SI3_ONE / metrics.area_t)
+                * dt_over_mass_t
+            ),
+        )
+        alpha_f = jnp.maximum(
+            jnp.maximum(beta_t, jnp.roll(beta_t, -1, axis=0)),
+            jnp.maximum(
+                jnp.roll(beta_t, -1, axis=1),
+                jnp.roll(jnp.roll(beta_t, -1, axis=0), -1, axis=1),
+            ),
+        )
+        p_over_delta_f = _SI3_QUARTER * (
+            (p_over_delta_t + jnp.roll(p_over_delta_t, -1, axis=0))
+            + (
+                jnp.roll(p_over_delta_t, -1, axis=1)
+                + jnp.roll(jnp.roll(p_over_delta_t, -1, axis=0), -1, axis=1)
+            )
+        )
+        stress12_value = (
+            stress12 * alpha_f
+            + p_over_delta_f
+            * (
+                shear
+                * inverse_eccentricity_square
+                * (_SI3_ONE + _SI3_ZERO)
+            )
+            * _SI3_SHEAR_STRESS_WEIGHT
+        ) / (alpha_f + _SI3_ONE)
+        stress12 = _si3_set(stress12, slice(0, -1), stress12_value)
+
+        force_u, force_v = _si3_stress_divergence(
+            stress1, stress2, stress12, metrics
+        )
+        cross_v_u = _SI3_QUARTER * (
+            (v_ice + jnp.roll(v_ice, 1, axis=1))
+            + (
+                jnp.roll(v_ice, -1, axis=0)
+                + jnp.roll(jnp.roll(v_ice, -1, axis=0), 1, axis=1)
+            )
+        ) * forcing.umask_u
+        cross_u_v = _SI3_QUARTER * (
+            (u_ice + jnp.roll(u_ice, 1, axis=0))
+            + (
+                jnp.roll(u_ice, -1, axis=1)
+                + jnp.roll(jnp.roll(u_ice, 1, axis=0), -1, axis=1)
+            )
+        ) * forcing.vmask_v
+
+        def update_u(current_u, current_v, write_slice):
+            drag_magnitude = drag_u * _si3_sqrt(
+                (current_u - forcing.ocean_u_u) * (current_u - forcing.ocean_u_u)
+                + (cross_v_u - ocean_v_u) * (cross_v_u - ocean_v_u)
+            )
+            coriolis_u = _SI3_QUARTER * (_SI3_ONE / metrics.e1u) * (
+                mass_coriolis_t
+                * (
+                    metrics.e1v * current_v
+                    + jnp.roll(metrics.e1v, 1, axis=1)
+                    * jnp.roll(current_v, 1, axis=1)
+                )
+                + jnp.roll(mass_coriolis_t, -1, axis=0)
+                * (
+                    jnp.roll(metrics.e1v, -1, axis=0)
+                    * jnp.roll(current_v, -1, axis=0)
+                    + jnp.roll(jnp.roll(metrics.e1v, -1, axis=0), 1, axis=1)
+                    * jnp.roll(jnp.roll(current_v, -1, axis=0), 1, axis=1)
+                )
+            )
+            ocean_stress = drag_magnitude * (forcing.ocean_u_u - current_u)
+            rhs = force_u + tau_air_u + coriolis_u + slope_u + ocean_stress
+            beta_u = jnp.maximum(beta_t, jnp.roll(beta_t, -1, axis=0))
+            value = (
+                mass_over_dt_u * (beta_u * current_u + state.u_ice_u)
+                + rhs
+                + drag_magnitude * current_u
+            ) / jnp.maximum(
+                _SI3_DENOMINATOR_FLOOR,
+                mass_over_dt_u * (beta_u + _SI3_ONE) + drag_magnitude,
+            )
+            value = (
+                value * active_u
+                + forcing.ocean_u_u * _SI3_LOW_MASS_OCEAN_FACTOR * (_SI3_ONE - active_u)
+            ) * mass_mask_u
+            value = value * (_SI3_ONE - _SI3_FAST_MASK_REDUCTION * fast_u)
+            return _si3_set(current_u, write_slice, value)
+
+        def update_v(current_u, current_v, write_slice):
+            drag_magnitude = drag_v * _si3_sqrt(
+                (current_v - forcing.ocean_v_v) * (current_v - forcing.ocean_v_v)
+                + (cross_u_v - ocean_u_v) * (cross_u_v - ocean_u_v)
+            )
+            coriolis_v = -_SI3_QUARTER * (_SI3_ONE / metrics.e2v) * (
+                mass_coriolis_t
+                * (
+                    metrics.e2u * current_u
+                    + jnp.roll(metrics.e2u, 1, axis=0)
+                    * jnp.roll(current_u, 1, axis=0)
+                )
+                + jnp.roll(mass_coriolis_t, -1, axis=1)
+                * (
+                    jnp.roll(metrics.e2u, -1, axis=1)
+                    * jnp.roll(current_u, -1, axis=1)
+                    + jnp.roll(jnp.roll(metrics.e2u, 1, axis=0), -1, axis=1)
+                    * jnp.roll(jnp.roll(current_u, 1, axis=0), -1, axis=1)
+                )
+            )
+            ocean_stress = drag_magnitude * (forcing.ocean_v_v - current_v)
+            rhs = force_v + tau_air_v + coriolis_v + slope_v + ocean_stress
+            beta_v = jnp.maximum(beta_t, jnp.roll(beta_t, -1, axis=1))
+            value = (
+                mass_over_dt_v * (beta_v * current_v + state.v_ice_v)
+                + rhs
+                + drag_magnitude * current_v
+            ) / jnp.maximum(
+                _SI3_DENOMINATOR_FLOOR,
+                mass_over_dt_v * (beta_v + _SI3_ONE) + drag_magnitude,
+            )
+            value = (
+                value * active_v
+                + forcing.ocean_v_v * _SI3_LOW_MASS_OCEAN_FACTOR * (_SI3_ONE - active_v)
+            ) * mass_mask_v
+            value = value * (_SI3_ONE - _SI3_FAST_MASK_REDUCTION * fast_v)
+            return _si3_set(current_v, write_slice, value)
+
+        # jter is one-based in NEMO.  Even: V halo-1 then U interior; odd:
+        # U halo-1 then V interior (icedyn_rhg_evp.F90:530-741).
+        def even_pair(pair):
+            pair_u, pair_v = pair
+            pair_v = update_v(pair_u, pair_v, halo_one)
+            pair_u = update_u(pair_u, pair_v, interior)
+            return pair_u, pair_v
+
+        def odd_pair(pair):
+            pair_u, pair_v = pair
+            pair_u = update_u(pair_u, pair_v, halo_one)
+            pair_v = update_v(pair_u, pair_v, interior)
+            return pair_u, pair_v
+
+        # lax.fori_loop supplies a zero-based iteration index.
+        u_ice, v_ice = jax.lax.cond(
+            (iteration + 1) % 2 == 0,
+            even_pair,
+            odd_pair,
+            (u_ice, v_ice),
+        )
+        u_ice = _si3_periodic_halo(u_ice)
+        v_ice = _si3_periodic_halo(v_ice)
+        return u_ice, v_ice, stress1, stress2, stress12
+
+    initial = tuple(state)
+    if differentiable:
+        def scan_body(carry, iteration):
+            updated = subcycle(iteration, carry)
+            return updated, None
+
+        final, _ = jax.lax.scan(
+            scan_body,
+            initial,
+            xs=jnp.arange(config.n_subcycles),
+        )
+    else:
+        final = jax.lax.fori_loop(0, config.n_subcycles, subcycle, initial)
+    u_final, v_final, stress1_final, stress2_final, stress12_final = final
+    return SI3CGridAEVPState(
+        u_ice_u=u_final,
+        v_ice_v=v_final,
+        stress1_t=_si3_periodic_halo(stress1_final),
+        stress2_t=_si3_periodic_halo(stress2_final),
+        stress12_f=_si3_periodic_halo(stress12_final),
+    )
 
 
 # ==============================================================================
