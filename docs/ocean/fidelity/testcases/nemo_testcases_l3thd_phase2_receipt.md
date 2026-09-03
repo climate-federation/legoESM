@@ -269,7 +269,7 @@ exited 1:
 The post-owner Phase-2 test file reports:
 
 ```text
-============================= 11 passed in 14.65s ==============================
+============================= 11 passed in 15.52s ==============================
 ```
 
 CPU/fp64 tests from the implementation round also had 92 passing tests across
@@ -296,7 +296,7 @@ For the post-owner Python changes, the same exact-path ratchet selection
 reports:
 
 ```text
-====================== 5 passed, 3382 deselected in 0.60s ======================
+====================== 5 passed, 3382 deselected in 0.62s ======================
 ```
 
 The new flooding regression exercises an active-flooding column and proves
