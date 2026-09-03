@@ -141,3 +141,22 @@ iff raw stage-2 RHS and corrected Kaa clear `1e-15`, and the legacy arm restores
 the prior residual at its scale.  Otherwise no ENE-thickness owner label is
 allowed.  This is folded into the existing vector/ENE WS-RK3 identity and the
 isomorphism register, not exposed as a public selector.
+
+### ENE F-point `e3f_vor(Kmm)` continuation
+
+The Kmm U/V face-thickness correction is near-null at the raw-RHS boundary.
+The next ENE operand is the F-point divisor.  Under `key_qco`, NEMO uses
+`e3f_vor = e3f_0vor*(1+r3f*fe3mask)`
+(`DOM/domzgr_substitute.h90:125-130`), and the RK3 `r3f` is the explicitly
+parenthesized four-cell surface-weighted SSH average
+(`DOM/domqco.F90:233-246`; stage-2 interpolation at
+`stprk3_stg.F90:202-203`).  GYRE's uniform reference geometry makes this the
+existing canonical `een_e3f_scheme="nemo_avg"`; the card currently inherits
+the generic vertex minimum.
+
+The one-variable arm selects `nemo_avg` without changing ENE, velocity, or
+face transports.  **CONFIRM** iff raw stage-2 RHS and corrected Kaa clear
+`1e-15`, the inherited-min arm restores the old `5.03e-10`/`5.93e-10` raw
+residual at its scale, and the downstream post-`tra_adv_trp` triplet moves at
+that scale.  Otherwise the selector is not assigned ownership.  This uses the
+pre-existing canonical option; no second ENE implementation is permitted.
