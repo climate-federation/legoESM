@@ -25,10 +25,11 @@ Oracle roots: `/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv1d/final`,
 `/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv2d_rhg/final`.
 Rung-3.1/3.2 gate artifacts are the corresponding
 `phase2/nemo_si3_phase2_gate.json` files.  The rung-3.3 full artifact is
-`ice_adv2d_rhg/phase2/nemo_si3_phase2_rung33_trajectory.json`; its earlier
-partial artifact remains at `ice_adv2d_rhg/legoesm/rung33_partial_gate.json`
+`ice_adv2d_rhg/phase2/nemo_si3_phase2_rung33_trajectory.round5.json`; its earlier
+partial artifact is at
+`ice_adv2d_rhg/phase2/nemo_si3_phase2_rung33_partial.json`
 and its A-grid preservation control is
-`ice_adv2d_rhg/legoesm/rung33_agrid_guard.json`.
+`ice_adv2d_rhg/phase2/nemo_si3_phase2_rung33_agrid_guard.json`.
 
 ## Rung 3.1 verdict
 
@@ -524,6 +525,49 @@ reported bit-mask/table sites); `fv3_native_physics_coupling.py:113`;
 `test_dino_vface_zonal_width_nemo.py:210`; and
 `test_dino_wall_balance.py:115`.  None is modified here.
 
+### Round-5 harness review closure
+
+The path-dependent A-grid guard was replaced by `git -C` against the checkout
+containing the guard.  It now executes both pre-existing arms before and after
+the rung-3.3 boundary.  EVP is byte-identical at SHA256
+`e4ecb3561c33b7d246ef8122807dcb7c9f690dc96c20dd6d9e5a024d0b9351d1`;
+mEVP is byte-identical at
+`83b4727c5d1d35698368a1697f21b87a537dd424678bb4aa431c96190b840282`.
+No repository or worktree path is embedded in the command.
+
+The earlier stress-divergence plant was defective as a trajectory control: it
+compared two calls to the same helper and never reached a registered model
+row.  It is retracted.  The replacement changes the weight inside the real
+100-subcycle solver, advances the complete dynamics-plus-Prather card, and
+scores `trajectory.post_step_00000001.u_ice` against the oracle.  The planted
+row is DEBT at `3.896295744876266e-06` under the immutable gate metric
+(`7.752461843608436e-06` relative to the oracle U maximum), so it binds through
+the scored trajectory.
+
+Gate `status` and process exit are now derived from registered row statuses
+(and, for the partial gate, its nonempty unmeasured registry); neither result
+is a hand-written outcome.  Every pointwise row now reports both the campaign
+metric `max_abs / max(max|oracle|,1)` and the companion field-relative value
+`max_abs / max|oracle|`.  Zero-reference rows use `0` for an exact comparison
+and `null` for a nonzero residual, rather than hiding an undefined ratio.
+
+Review requested rejecting every `rn_ishlat` other than zero, but the pinned
+oracle resolves `rn_ishlat=2` (`ocean.output:658` and
+`output.namelist.ice:225`).  Relabeling it zero would violate the selector
+contract even though this all-wet periodic geometry makes the distinction
+numerically inert.  The implemented closure instead reproduces the resolved
+nonzero F-mask repair exactly (`icedyn_rhg_evp.F90:215-224`) and rejects every
+value other than `2`; a reverted/zero selector test fails closed.  Likewise,
+`drag_io` is now a same-shape T-point forcing field and the solver forms
+`0.5*(drag_io(i,j)+drag_io(i+1,j))` at U and the north-neighbor form at V,
+matching `icedyn_rhg_evp.F90:307-313`.  A nonuniform-field test prevents a
+future scalar-only regression.
+
+All six SI3 fidelity test modules moved from `tests/ocean/fidelity/` to
+`tests/ice/fidelity/`.  The combined relocated phase-1 and phase-2 set is
+**63 passed in 136.78 s** on CPU with x64 enabled; the focused revised
+rung-3.3 set is **13 passed in 19.34 s**.
+
 ### Round-4 stress replay and full trajectory closure
 
 **Overall rung-3.3 result: DEBT.**  The exact bar remains normalized pointwise
@@ -567,16 +611,18 @@ bounds.  The observed U/V errors are `4.996003610813204e-16` and
 active momentum denominator therefore explains how a normalized stress DEBT
 can coexist with AT-BAR velocity at that boundary.
 
-Requested normalized growth table:
+Requested growth table.  Each cell is `immutable-gate / field-relative`; the
+second value is diagnostic and does not replace or relax the first value's
+`1e-15` classification bar:
 
 | step | U | V | stress1 | stress2 | stress12 | `a_i` | `v_i` | `v_s` |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | `4.996e-16` | `2.632e-16` | `2.678e-14` | `1.888e-14` | `1.798e-14` | `3.331e-16` | `2.484e-16` | `8.327e-17` |
-| 10 | `1.110e-15` | `6.251e-16` | `4.761e-13` | `3.649e-11` | `4.489e-11` | `1.332e-15` | `8.755e-16` | `2.359e-16` |
-| 50 | `1.110e-15` | `9.845e-16` | `5.461e-12` | `8.875e-10` | `4.525e-10` | `4.885e-15` | `2.433e-15` | `4.441e-16` |
-| 100 | `1.110e-15` | `9.823e-16` | `4.711e-12` | `7.228e-10` | `3.529e-10` | `5.329e-15` | `4.495e-15` | `6.106e-16` |
-| 200 | `3.442e-15` | `2.558e-15` | `7.252e-9` | `5.835e-9` | `1.194e-9` | `1.499e-14` | `1.126e-14` | `2.054e-15` |
-| 485 | `7.105e-15` | `5.513e-15` | `9.387e-9` | `8.959e-9` | `1.562e-9` | `1.066e-13` | `6.753e-14` | `1.008e-14` |
+| 1 | `4.996e-16 / 9.941e-16` | `2.632e-16 / 1.100e-14` | `2.678e-14 / 2.678e-14` | `1.888e-14 / 1.888e-14` | `1.798e-14 / 1.798e-14` | `3.331e-16 / 3.681e-16` | `2.484e-16 / 2.484e-16` | `8.327e-17 / 4.657e-16` |
+| 10 | `1.110e-15 / 2.205e-15` | `6.251e-16 / 7.691e-12` | `4.761e-13 / 4.761e-13` | `3.649e-11 / 3.649e-11` | `4.489e-11 / 4.489e-11` | `1.332e-15 / 1.444e-15` | `8.755e-16 / 8.755e-16` | `2.359e-16 / 1.329e-15` |
+| 50 | `1.110e-15 / 2.205e-15` | `9.845e-16 / 1.207e-9` | `5.461e-12 / 1.744e-11` | `8.875e-10 / 1.053e-8` | `4.525e-10 / 1.166e-8` | `4.885e-15 / 5.351e-15` | `2.433e-15 / 2.433e-15` | `4.441e-16 / 2.561e-15` |
+| 100 | `1.110e-15 / 2.205e-15` | `9.823e-16 / 3.871e-7` | `4.711e-12 / 1.531e-8` | `7.228e-10 / 7.966e-6` | `3.529e-10 / 7.027e-6` | `5.329e-15 / 5.807e-15` | `4.495e-15 / 4.495e-15` | `6.106e-16 / 3.636e-15` |
+| 200 | `3.442e-15 / 6.837e-15` | `2.558e-15 / 5.947e-7` | `7.252e-9 / 4.428e-4` | `5.835e-9 / 7.039e-1` | `1.194e-9 / 4.055e-4` | `1.499e-14 / 1.659e-14` | `1.126e-14 / 1.126e-14` | `2.054e-15 / 1.286e-14` |
+| 485 | `7.105e-15 / 1.411e-14` | `5.513e-15 / 1.528e-6` | `9.387e-9 / 7.771e-4` | `8.959e-9 / 7.735e-1` | `1.562e-9 / 7.609e-4` | `1.066e-13 / 1.181e-13` | `6.753e-14 / 6.753e-14` | `1.008e-14 / 7.160e-14` |
 
 The per-boundary rows show smooth accumulated floating-point separation; no
 single threshold/mask/parity branch event like the rung-3.1 column event is
@@ -676,6 +722,20 @@ Rung-3.3 round-4 artifacts (implementation commit `ba07bc7b202`):
 | trajectory/restart gate source | `a605af06726e1be62f009ba7acdc0bcc3773c7ebd28c6ac4b66d82583a1d93cd` |
 | rung-3.3 controls | `e681a258acf0fcc9fc3c020ff09a282ba7c54a3009e433227282cdc8adfc09c7` |
 
+Rung-3.3 round-5 harness-review artifacts:
+
+| artifact | SHA256 |
+|---|---|
+| full trajectory with companion relative rows | `2135a1f39677e1eada47752b4b5542dd454d4fa96a38b207510a707604a920a6` |
+| scored-row planted-control partial gate | `4f5141e5bc228f198a9bb82cc8a3eafc711a993b83732d8beca0629baae4a8fe` |
+| path-independent EVP/mEVP guard | `6f5fd71d159d7e0edc2219d7d76ef06f323662f4e5e557f147a8e193a8ecc317` |
+| unchanged written-order replay | `04267dbc77d229c2a752e3210574eb3331547a1f84860b4d8f3d17e4086116e6` |
+| `dynamics.py` | `059a99ad24d6f95a4e8034ec296cdc9778219d2a56f2bf87f47c89851a422c65` |
+| rung-3.3 card | `3cac7bc999a7f5cbc41f8b546f0b6a3c6ca744b7aa7fe948c48df92ce75c8245` |
+| common phase-2 scorer | `d61709508604d645119c13cf6c7c265512498249bd29c37bf98cfbf8f484e4f3` |
+| partial gate | `f93ef19f8ffb598c671ace4035fe1fd5bf53af8845379c2d2bd16bfeca3e69b7` |
+| full gate | `3eb4293ef7c3ed444aa9a36902bdf290e45fb2be6cf46bd7c1f0384283cd6713` |
+
 ## Loudly UNMEASURED / deferred
 
 Within-step x/y Prather split states; ORCA1
@@ -704,7 +764,11 @@ is not reached; then classify the stress debt with a source-written-order
 subcycle replay, show the stress-divergence/velocity arithmetic, sweep all 485
 boundaries, validate all prognostics/three stresses/80 moments at restart, and
 measure the shipped README phenomenology on both models; branch bundle; no
-push and no shipped-NEMO modification.
+push and no shipped-NEMO modification; make the A-grid guard checkout-relative
+and cover EVP plus mEVP; route the stress-divergence plant through a scored
+trajectory row; derive gate status/exit from rows; close the `rn_ishlat` and
+2-D `drag_io` generalization gaps; publish field-relative errors beside the
+immutable gate metric; and place SI3 tests under `tests/ice/fidelity/`.
 
 **UNASKED choices:** no default change to existing ice transport; no ocean-SOM
 replacement or arithmetic-changing common refactor; no rung-3.3 claim beyond
@@ -712,4 +776,6 @@ the measured gate rows; no thermodynamics, ridging/rafting, landfast,
 coupled-ocean, multi-category, or general production-restart claim outside the
 new card contract; no analytic oracle; no tolerance relaxation; no numerical
 classification of the README's qualitative maximum/side-lobe sentence; no
-claim that a DEBT or UNMEASURED row is matched or faithful.
+claim that a DEBT or UNMEASURED row is matched or faithful; no relabeling of
+the pinned oracle's `rn_ishlat=2` as zero merely because the two branches are
+inert on this all-wet periodic card.

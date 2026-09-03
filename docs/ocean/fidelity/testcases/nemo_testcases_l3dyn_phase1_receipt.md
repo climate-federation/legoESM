@@ -483,7 +483,7 @@ Non-vacuity: the unplanted arms are **not** all red — rung 3.3 exits 0 with
 `status: VERIFIED`, while 3.1 and 3.2 exit 1 with `status: DEBT` for the
 substantive reasons in §4.  That asymmetry is itself asserted by a test.
 
-Tests: `tests/ocean/fidelity/test_nemo_si3_oracle_gate.py` — **21 passed**
+Tests: `tests/ice/fidelity/test_nemo_si3_oracle_gate.py` — **21 passed**
 (`21 passed in 11.92s`). They cover the frame round trip in fp64 Fortran order,
 registry completeness/uniqueness/sourcing and its ORDER against the committed
 instrument, the Appendix-A contract dispositions, the contract-omission,

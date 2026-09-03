@@ -74,13 +74,21 @@ def _detailed_score(name: str, oracle, candidate) -> dict[str, object]:
     )
     absolute = np.abs(candidate - oracle)
     index = np.unravel_index(int(np.argmax(absolute)), absolute.shape)
-    scale = max(1.0, float(np.max(np.abs(oracle))))
+    oracle_max_abs = float(np.max(np.abs(oracle)))
+    scale = max(1.0, oracle_max_abs)
     normalized = float(absolute[index]) / scale
+    relative = (
+        float(absolute[index]) / oracle_max_abs
+        if oracle_max_abs > 0.0
+        else (0.0 if float(absolute[index]) == 0.0 else None)
+    )
     return {
         "name": name,
         "status": "AT-BAR" if normalized <= POINTWISE_BAR else "DEBT",
         "normalized_max_abs": normalized,
+        "relative_max_abs": relative,
         "max_abs": float(absolute[index]),
+        "oracle_max_abs": oracle_max_abs,
         "scale": scale,
         "max_abs_index_xy": [int(value) for value in index],
         "oracle_at_max": float(oracle[index]),
@@ -501,9 +509,10 @@ def run_gate(root: Path = ROOT) -> tuple[dict[str, object], int]:
         ),
         "documented rheology-generated velocity was not observed",
     )
+    overall_status = rung33_gate._status_from_rows(rows)
     report = {
         "format": "nemo-si3-phase2-rung33-trajectory-v1",
-        "status": "DEBT",
+        "status": overall_status,
         "bar": POINTWISE_BAR,
         "backend": jax.default_backend(),
         "precision_policy": "fp64",
@@ -581,7 +590,7 @@ def run_gate(root: Path = ROOT) -> tuple[dict[str, object], int]:
             "restart": _sha256(restart_path),
         },
     }
-    return report, 1
+    return report, 0 if overall_status == "AT-BAR" else 1
 
 
 def main() -> int:

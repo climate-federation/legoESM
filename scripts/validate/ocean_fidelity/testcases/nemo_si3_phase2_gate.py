@@ -73,18 +73,34 @@ def _score(
     if plant:
         lego = lego.copy()
         lego.flat[0] += 1.0
+    if oracle.dtype == np.bool_ or lego.dtype == np.bool_:
+        absolute = np.not_equal(lego, oracle).astype(np.float64)
+        oracle_magnitude = oracle.astype(np.float64)
+    else:
+        absolute = np.abs(lego - oracle)
+        oracle_magnitude = np.abs(oracle)
+    max_abs = float(np.max(absolute, initial=0.0))
+    oracle_max_abs = float(np.max(oracle_magnitude, initial=0.0))
+    relative_max_abs = (
+        max_abs / oracle_max_abs
+        if oracle_max_abs > 0.0
+        else (0.0 if max_abs == 0.0 else None)
+    )
     if exact:
         error = 0.0 if np.array_equal(oracle, lego) else float("inf")
         bar = 0.0
     else:
-        scale = max(float(np.max(np.abs(oracle), initial=0.0)), 1.0)
-        error = float(np.max(np.abs(lego - oracle), initial=0.0)) / scale
+        scale = max(oracle_max_abs, 1.0)
+        error = max_abs / scale
         bar = POINTWISE_BAR
     row = {
         "name": name,
         "status": "AT-BAR" if error <= bar else "DEBT",
         "arithmetic_class": "EXACT" if exact else "POINTWISE",
         "normalized_max_abs": error,
+        "max_abs": max_abs,
+        "oracle_max_abs": oracle_max_abs,
+        "relative_max_abs": relative_max_abs,
         "bar": bar,
         "n": int(oracle.size),
     }

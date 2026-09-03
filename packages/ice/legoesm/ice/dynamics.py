@@ -98,6 +98,7 @@ _SI3_LOW_MASS_OCEAN_FACTOR = 0.01
 _SI3_FAST_MASK_REDUCTION = 0.99
 _SI3_REQUIRED_HALO = 2
 _SI3_REQUIRED_CATEGORY_COUNT = 1
+_SI3_REQUIRED_RN_ISHLAT = 2.0
 
 
 class SI3CGridMetrics(NamedTuple):
@@ -138,7 +139,7 @@ class SI3CGridAEVPConfig(NamedTuple):
     rho_water: float
     rho_ocean: float
     gravity: float
-    drag_io: float
+    rn_ishlat: float
     halo_width: int
     category_count: int
     landfast: bool
@@ -165,6 +166,7 @@ class SI3CGridAEVPForcing(NamedTuple):
     lid_volume_t: jnp.ndarray
     air_stress_u_t: jnp.ndarray
     air_stress_v_t: jnp.ndarray
+    drag_io_t: jnp.ndarray
     ocean_u_u: jnp.ndarray
     ocean_v_v: jnp.ndarray
     ssh_t: jnp.ndarray
@@ -897,6 +899,7 @@ def _validate_si3_cgrid_aevp_static(config: SI3CGridAEVPConfig) -> None:
         "si3_c_grid",
         _SI3_REQUIRED_HALO,
         _SI3_REQUIRED_CATEGORY_COUNT,
+        _SI3_REQUIRED_RN_ISHLAT,
         False,
         0,
     )
@@ -905,6 +908,7 @@ def _validate_si3_cgrid_aevp_static(config: SI3CGridAEVPConfig) -> None:
         config.staggering,
         config.halo_width,
         config.category_count,
+        config.rn_ishlat,
         config.landfast,
         config.convergence_check,
     )
@@ -924,6 +928,7 @@ def si3_cgrid_aevp_solver(
     config: SI3CGridAEVPConfig,
     *,
     differentiable: bool = False,
+    stress_divergence_outer_weight: float = _SI3_HALF,
 ) -> SI3CGridAEVPState:
     """Run NEMO/SI3's C-grid adaptive-EVP momentum solver.
 
@@ -932,6 +937,9 @@ def si3_cgrid_aevp_solver(
     landfast-off composition.  It intentionally keeps NEMO's common
     same-index T/U/V/F storage and its asymmetric loop extents.  Existing
     A-grid ``evp_solver`` and ``mevp_solver`` are not called or modified.
+    ``stress_divergence_outer_weight`` is an instrumentation seam for a scored
+    planted-violation run; production retains NEMO's 0.5 at
+    ``icedyn_rhg_evp.F90:497,505``.
     """
 
     _validate_si3_cgrid_aevp_static(config)
@@ -943,12 +951,24 @@ def si3_cgrid_aevp_solver(
     at_i = forcing.concentration_t
     zmsk = (at_i >= _SI3_ICE_PRESENCE).astype(state.u_ice_u.dtype)
     tmask = forcing.tmask_t
-    fimask_raw = (
+    fimask_ocean = (
         tmask
         * jnp.roll(tmask, -1, axis=0)
         * jnp.roll(tmask, -1, axis=1)
         * jnp.roll(jnp.roll(tmask, -1, axis=0), -1, axis=1)
     )
+    # The pinned ORCA1/case deck resolves rn_ishlat=2.  Reproduce the
+    # nonzero-boundary repair from icedyn_rhg_evp.F90:215-224 even though the
+    # all-wet periodic rung makes it inert; static validation rejects every
+    # selector other than this one measured arm.
+    fimask_boundary = config.rn_ishlat * jnp.minimum(
+        _SI3_ONE,
+        jnp.maximum(
+            jnp.maximum(forcing.umask_u, jnp.roll(forcing.umask_u, -1, axis=1)),
+            jnp.maximum(forcing.vmask_v, jnp.roll(forcing.vmask_v, -1, axis=0)),
+        ),
+    )
+    fimask_raw = jnp.where(fimask_ocean == _SI3_ZERO, fimask_boundary, fimask_ocean)
     fimask = _si3_periodic_halo(
         _si3_set(jnp.zeros_like(tmask), slice(2, -2), fimask_raw)
     )
@@ -1037,7 +1057,7 @@ def si3_cgrid_aevp_solver(
         config.rho_ocean
         * za_u
         * _SI3_HALF
-        * (config.drag_io + config.drag_io)
+        * (forcing.drag_io_t + jnp.roll(forcing.drag_io_t, -1, axis=0))
         * (_SI3_TWO - forcing.umask_u)
         * jnp.maximum(tmask, jnp.roll(tmask, -1, axis=0))
     )
@@ -1045,7 +1065,7 @@ def si3_cgrid_aevp_solver(
         config.rho_ocean
         * za_v
         * _SI3_HALF
-        * (config.drag_io + config.drag_io)
+        * (forcing.drag_io_t + jnp.roll(forcing.drag_io_t, -1, axis=1))
         * (_SI3_TWO - forcing.vmask_v)
         * jnp.maximum(tmask, jnp.roll(tmask, -1, axis=1))
     )
@@ -1168,7 +1188,11 @@ def si3_cgrid_aevp_solver(
         stress12 = _si3_set(stress12, slice(0, -1), stress12_value)
 
         force_u, force_v = _si3_stress_divergence(
-            stress1, stress2, stress12, metrics
+            stress1,
+            stress2,
+            stress12,
+            metrics,
+            outer_weight=stress_divergence_outer_weight,
         )
         cross_v_u = _SI3_QUARTER * (
             (v_ice + jnp.roll(v_ice, 1, axis=1))

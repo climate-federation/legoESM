@@ -49,6 +49,8 @@ _RHG_CREEP_LIMIT_S_INV = 2.0e-9
 _RHG_STRENGTH_PARAMETER_PA = 2.0e4
 _RHG_STRENGTH_DECAY = 20.0
 _RHG_DRAG_IO = 5.0e-3
+_RHG_RN_ISHLAT = 2.0  # output.namelist.ice:225; repair at icedyn_rhg_evp.F90:215-224
+_RHG_STRESS_DIVERGENCE_WEIGHT = 0.5  # icedyn_rhg_evp.F90:497,505
 _RHG_AIR_STRESS_U = 1.3  # ICE_ADV2D/MY_SRC/usrdef_sbc.F90:83-96
 _RHG_AIR_STRESS_V = 0.0  # ICE_ADV2D/MY_SRC/usrdef_sbc.F90:83-96
 _RHG_REQUIRED_SHAPE = (103, 103)  # ocean.output:64-65, two-cell halo
@@ -154,6 +156,9 @@ def build_ice_adv2d_rhg_card(
         lid_volume_t=zero,
         air_stress_u_t=jnp.full(shape, _RHG_AIR_STRESS_U, dtype=jnp.float64),
         air_stress_v_t=jnp.full(shape, _RHG_AIR_STRESS_V, dtype=jnp.float64),
+        # icestp.F90:332 initializes the T-point field; icedyn_rhg_evp.F90:310-313
+        # performs the directional neighbor average used by the solver.
+        drag_io_t=jnp.full(shape, _RHG_DRAG_IO, dtype=jnp.float64),
         ocean_u_u=zero,
         ocean_v_v=zero,
         ssh_t=zero,
@@ -186,7 +191,7 @@ def build_ice_adv2d_rhg_card(
         rho_water=constants.rho_water,
         rho_ocean=constants.rho_ocean_nemo,
         gravity=constants.g_nemo,
-        drag_io=_RHG_DRAG_IO,
+        rn_ishlat=_RHG_RN_ISHLAT,
         halo_width=base.halo_width,
         category_count=base.jpl,
         landfast=False,
@@ -269,6 +274,7 @@ def step_ice_adv2d_rhg_card(
     *,
     completed_steps: int,
     differentiable: bool = False,
+    stress_divergence_outer_weight: float = _RHG_STRESS_DIVERGENCE_WEIGHT,
 ) -> ICEAdv2DRHGState:
     """Advance dynamics, Prather transport, Hbig/Hsnow, then zapsmall."""
 
@@ -280,6 +286,7 @@ def step_ice_adv2d_rhg_card(
         card.metrics,
         card.dynamics_config,
         differentiable=differentiable,
+        stress_divergence_outer_weight=stress_divergence_outer_weight,
     )
     area = card.base.dx_m * card.base.dy_m
     cell_area = jnp.full(dynamics.u_ice_u.shape, area, dtype=jnp.float64)

@@ -12,7 +12,6 @@ import numpy as np
 import pytest
 from legoesm.ice.dynamics import (
     SI3CGridAEVPState,
-    _si3_stress_divergence,
     si3_cgrid_aevp_solver,
 )
 from legoesm.ice.fidelity.nemo_adv2d_rhg_testcase_recipe import (
@@ -76,29 +75,61 @@ def test_rung33_card_is_fp64_and_fail_closed():
         )
 
 
-def test_stress_divergence_weight_plant_binds_on_the_card():
+def test_stress_divergence_weight_plant_reaches_scored_card_trajectory():
     card = _card()
-    dynamics = step_ice_adv2d_rhg_card(card, completed_steps=0).dynamics
-    force = _si3_stress_divergence(
-        dynamics.stress1_t,
-        dynamics.stress2_t,
-        dynamics.stress12_f,
-        card.metrics,
+    baseline = step_ice_adv2d_rhg_card(card, completed_steps=0)
+    planted = step_ice_adv2d_rhg_card(
+        card,
+        completed_steps=0,
+        stress_divergence_outer_weight=_PLANTED_WEIGHT,
     )
-    planted = _si3_stress_divergence(
-        dynamics.stress1_t,
-        dynamics.stress2_t,
-        dynamics.stress12_f,
-        card.metrics,
-        outer_weight=_PLANTED_WEIGHT,
+    difference = float(
+        jnp.max(jnp.abs(baseline.dynamics.u_ice_u - planted.dynamics.u_ice_u))
     )
-    difference = max(
-        float(jnp.max(jnp.abs(actual - changed)))
-        for actual, changed in zip(force, planted)
-    )
-    scale = max(float(jnp.max(jnp.abs(value))) for value in force)
+    scale = float(jnp.max(jnp.abs(baseline.dynamics.u_ice_u)))
     assert scale > 0.0
     assert difference / max(1.0, scale) > _POINTWISE_BAR
+
+
+def test_rn_ishlat_outside_resolved_orca1_arm_is_rejected_before_tracing():
+    card = _card()
+    assert card.dynamics_config.rn_ishlat == 2.0
+    with pytest.raises(ValueError, match="no Frankenstein fallback"):
+        si3_cgrid_aevp_solver(
+            card.initial_state.dynamics,
+            _forcing_for_state(card.forcing_template, card.initial_state, card.base),
+            card.metrics,
+            card.dynamics_config._replace(rn_ishlat=0.0),
+        )
+
+
+def test_drag_io_t_is_directionally_averaged_like_nemo():
+    card = _card()
+    forcing = _forcing_for_state(card.forcing_template, card.initial_state, card.base)
+    ramp = jnp.arange(forcing.drag_io_t.shape[0], dtype=jnp.float64)[:, None]
+    ramp = jnp.broadcast_to(ramp, forcing.drag_io_t.shape) * _TEST_PERTURBATION
+    changed = forcing._replace(drag_io_t=forcing.drag_io_t + ramp)
+    moving = card.initial_state.dynamics._replace(
+        u_ice_u=jnp.full_like(card.initial_state.dynamics.u_ice_u, 0.1)
+    )
+    result = si3_cgrid_aevp_solver(
+        moving,
+        changed,
+        card.metrics,
+        card.dynamics_config._replace(n_subcycles=1),
+    )
+    assert np.all(np.isfinite(np.asarray(result.u_ice_u)))
+    assert not np.array_equal(
+        np.asarray(result.u_ice_u),
+        np.asarray(
+            si3_cgrid_aevp_solver(
+                moving,
+                forcing,
+                card.metrics,
+                card.dynamics_config._replace(n_subcycles=1),
+            ).u_ice_u
+        ),
+    )
 
 
 def test_f_stress_deliberately_has_no_t_presence_mask():

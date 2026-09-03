@@ -32,10 +32,18 @@ replay = importlib.util.module_from_spec(_REPLAY_SPEC)
 _REPLAY_SPEC.loader.exec_module(replay)
 
 
+def test_status_and_exit_inputs_are_derived_from_rows_and_coverage():
+    at_bar = [{"status": "AT-BAR"}]
+    debt = [{"status": "AT-BAR"}, {"status": "DEBT"}]
+    assert gate._status_from_rows(at_bar) == "AT-BAR"
+    assert gate._status_from_rows(at_bar, {"later": "UNMEASURED"}) == "UNMEASURED"
+    assert gate._status_from_rows(debt, {"later": "UNMEASURED"}) == "DEBT"
+
+
 def test_partial_gate_has_exact_registry_and_loud_debt_boundary():
     report, code = gate.run_gate()
     assert code == 1
-    assert report["status"] == "UNMEASURED"
+    assert report["status"] == "DEBT"
     assert report["numeric_status"] == "DEBT"
     assert len(report["rows"]) == 68
     names = {row["name"] for row in report["debt"]}
@@ -43,6 +51,7 @@ def test_partial_gate_has_exact_registry_and_loud_debt_boundary():
     assert "trajectory.post_step_00000001.stress2_i" in names
     assert "trajectory.post_step_00000001.stress12_i" in names
     assert report["binding_control"]["status"] == "RED_AS_REQUIRED"
+    assert report["binding_control"]["scored_row"]["status"] == "DEBT"
     assert report["unmeasured"]
 
 
@@ -54,10 +63,25 @@ def test_geometry_plant_goes_red_and_registry_omission_is_fatal():
         gate._validate_registry(report["rows"][:-1])
 
 
+def test_small_velocity_row_reports_relative_error_beside_gate_metric():
+    rows = []
+    dtypes = {}
+    oracle = np.asarray([0.024, -0.012], dtype=np.float64)
+    candidate = oracle.copy()
+    candidate[0] += 2.4e-15
+    row = gate._score(rows, dtypes, "control.v_ice", oracle, candidate)
+    assert row["normalized_max_abs"] < row["relative_max_abs"]
+    assert row["relative_max_abs"] == pytest.approx(
+        row["max_abs"] / row["oracle_max_abs"]
+    )
+
+
 def test_existing_a_grid_solver_is_byte_identical_to_preregister_boundary():
     report = agrid_guard.run_guard()
     assert report["byte_identical"] is True
-    assert report["before_sha256"] == report["after_sha256"]
+    assert set(report["schemes"]) == {"evp", "mevp"}
+    for result in report["schemes"].values():
+        assert result["before_sha256"] == result["after_sha256"]
 
 
 def test_written_order_replay_classifies_stress_debt_as_reassociation():

@@ -141,30 +141,39 @@ def _validate_registry(rows: list[dict]) -> None:
     )
 
 
-def _binding_stress_control(card, dynamics) -> dict[str, float | str]:
-    from legoesm.ice.dynamics import _si3_stress_divergence
+def _status_from_rows(rows: list[dict], unmeasured: dict | None = None) -> str:
+    """Derive the only allowed overall verdict from measurements/coverage."""
 
-    source = _si3_stress_divergence(
-        dynamics.stress1_t,
-        dynamics.stress2_t,
-        dynamics.stress12_f,
-        card.metrics,
+    if any(row["status"] == "DEBT" for row in rows):
+        return "DEBT"
+    if unmeasured:
+        return "UNMEASURED"
+    return "AT-BAR"
+
+
+def _binding_stress_control(card, oracle_frame) -> dict[str, object]:
+    """Perturb the production solver and require a scored trajectory row to fail."""
+
+    from legoesm.ice.fidelity.nemo_adv2d_rhg_testcase_recipe import (
+        step_ice_adv2d_rhg_card,
     )
-    planted = _si3_stress_divergence(
-        dynamics.stress1_t,
-        dynamics.stress2_t,
-        dynamics.stress12_f,
-        card.metrics,
-        outer_weight=PLANTED_STRESS_DIVERGENCE_WEIGHT,
+
+    planted = step_ice_adv2d_rhg_card(
+        card,
+        completed_steps=0,
+        stress_divergence_outer_weight=PLANTED_STRESS_DIVERGENCE_WEIGHT,
     )
-    scale = max(float(np.max(np.abs(np.asarray(value)))) for value in source)
-    difference = max(
-        float(np.max(np.abs(np.asarray(value - changed))))
-        for value, changed in zip(source, planted)
+    rows: list[dict] = []
+    dtypes: dict[str, dict[str, str]] = {}
+    row = _score(
+        rows,
+        dtypes,
+        "plant.trajectory.post_step_00000001.u_ice",
+        _oracle_field(oracle_frame, "u_ice"),
+        _candidate_field(card, planted, "u_ice"),
     )
-    normalized = difference / max(1.0, scale)
-    require(normalized > POINTWISE_BAR, "stress-divergence planted control did not bind")
-    return {"status": "RED_AS_REQUIRED", "normalized_max_abs": normalized}
+    require(row["status"] == "DEBT", "internal stress-divergence plant did not score red")
+    return {"status": "RED_AS_REQUIRED", "scored_row": row}
 
 
 def run_gate(root: Path = ROOT, *, plant_geometry: bool = False) -> tuple[dict, int]:
@@ -204,11 +213,17 @@ def run_gate(root: Path = ROOT, *, plant_geometry: bool = False) -> tuple[dict, 
                 _candidate_field(card, state, name),
             )
     _validate_registry(rows)
-    numeric_status = "DEBT" if any(row["status"] == "DEBT" for row in rows) else "AT-BAR"
+    numeric_status = _status_from_rows(rows)
     debt = [row for row in rows if row["status"] == "DEBT"]
+    unmeasured = {
+        "trajectory_frames_3_to_485": "UNMEASURED: partial gate delegates to full gate",
+        "restart_carry": "UNMEASURED: partial gate delegates to full gate",
+        "first_divergence_owner": "UNMEASURED: partial gate delegates to replay gate",
+    }
+    overall_status = _status_from_rows(rows, unmeasured)
     report = {
         "format": "nemo-si3-phase2-rung33-partial-v1",
-        "status": "UNMEASURED",
+        "status": overall_status,
         "numeric_status": numeric_status,
         "bar": POINTWISE_BAR,
         "root": str(root),
@@ -221,14 +236,10 @@ def run_gate(root: Path = ROOT, *, plant_geometry: bool = False) -> tuple[dict, 
         "dtypes": dtypes,
         "rows": rows,
         "debt": debt,
-        "binding_control": _binding_stress_control(card, completed.dynamics),
-        "unmeasured": {
-            "trajectory_frames_3_to_485": "UNMEASURED: sweep not implemented at this boundary",
-            "restart_carry": "UNMEASURED: 80 moments plus three stresses not yet gated",
-            "first_divergence_owner": "UNMEASURED: source-ordered stress replay not yet complete",
-        },
+        "binding_control": _binding_stress_control(card, second),
+        "unmeasured": unmeasured,
     }
-    return report, 1
+    return report, 0 if overall_status == "AT-BAR" else 1
 
 
 def main() -> int:

@@ -138,6 +138,7 @@ def _oracle_forcing(card, frame: dict[str, np.ndarray]):
         lid_volume_t=scalar("v_il"),
         air_stress_u_t=np.asarray(template.air_stress_u_t),
         air_stress_v_t=np.asarray(template.air_stress_v_t),
+        drag_io_t=np.asarray(template.drag_io_t),
         ocean_u_u=np.asarray(template.ocean_u_u),
         ocean_v_v=np.asarray(template.ocean_v_v),
         ssh_t=np.asarray(template.ssh_t),
@@ -234,7 +235,7 @@ def _setup(card, forcing) -> dict[str, np.ndarray | float]:
         cfg.rho_ocean
         * za_u
         * 0.5
-        * (cfg.drag_io + cfg.drag_io)
+        * (f["drag_io_t"] + _roll(f["drag_io_t"], -1, 0))
         * (2.0 - f["umask_u"])
         * np.maximum(f["tmask_t"], _roll(f["tmask_t"], -1, 0))
     )
@@ -242,7 +243,7 @@ def _setup(card, forcing) -> dict[str, np.ndarray | float]:
         cfg.rho_ocean
         * za_v
         * 0.5
-        * (cfg.drag_io + cfg.drag_io)
+        * (f["drag_io_t"] + _roll(f["drag_io_t"], -1, 1))
         * (2.0 - f["vmask_v"])
         * np.maximum(f["tmask_t"], _roll(f["tmask_t"], -1, 1))
     )

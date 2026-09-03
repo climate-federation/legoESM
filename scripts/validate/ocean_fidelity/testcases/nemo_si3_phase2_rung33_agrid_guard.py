@@ -21,6 +21,7 @@ _CARD_N_EVP = 3
 _CARD_CONCENTRATION = 0.8
 _CARD_WIND_U_M_S = 3.0
 _CARD_WIND_PERTURBATION = 1.0e-4
+_REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
 def _digest(values) -> str:
@@ -33,15 +34,15 @@ def _digest(values) -> str:
     return digest.hexdigest()
 
 
-def run_guard(before_ref: str = _PREREGISTER_COMMIT) -> dict[str, str | bool]:
+def run_guard(before_ref: str = _PREREGISTER_COMMIT) -> dict[str, object]:
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.ice import dynamics as current
 
     source = subprocess.check_output(
         [
             "git",
-            "--git-dir=/tmp/codex-si3dyn-git",
-            "--work-tree=/tmp/codex-si3dyn",
+            "-C",
+            str(_REPO_ROOT),
             "show",
             f"{before_ref}:packages/ice/legoesm/ice/dynamics.py",
         ],
@@ -73,23 +74,44 @@ def run_guard(before_ref: str = _PREREGISTER_COMMIT) -> dict[str, str | bool]:
         grid,
         _CARD_DT_S,
     )
-    keywords = {"N_evp": _CARD_N_EVP, "differentiable": False}
-    old_state = before.evp_solver(*arguments, **keywords)
-    new_state = current.evp_solver(*arguments, **keywords)
-    old_hash = _digest(old_state)
-    new_hash = _digest(new_state)
-    byte_identical = all(
-        np.array_equal(np.asarray(old), np.asarray(new))
-        for old, new in zip(old_state, new_state)
-    )
-    if not byte_identical:
-        raise RuntimeError("existing A-grid EVP state changed after C-grid implementation")
+    schemes: dict[str, dict[str, str | bool]] = {}
+    for name, old_solver, new_solver, keywords in (
+        (
+            "evp",
+            before.evp_solver,
+            current.evp_solver,
+            {"N_evp": _CARD_N_EVP, "differentiable": False},
+        ),
+        (
+            "mevp",
+            before.mevp_solver,
+            current.mevp_solver,
+            {"N_mevp": _CARD_N_EVP, "differentiable": False},
+        ),
+    ):
+        old_state = old_solver(*arguments, **keywords)
+        new_state = new_solver(*arguments, **keywords)
+        byte_identical = all(
+            np.array_equal(np.asarray(old), np.asarray(new))
+            for old, new in zip(old_state, new_state)
+        )
+        if not byte_identical:
+            raise RuntimeError(
+                f"existing A-grid {name} state changed after C-grid implementation"
+            )
+        schemes[name] = {
+            "before_sha256": _digest(old_state),
+            "after_sha256": _digest(new_state),
+            "byte_identical": byte_identical,
+        }
     return {
-        "format": "nemo-si3-rung33-agrid-guard-v1",
+        "format": "nemo-si3-rung33-agrid-guard-v2",
         "before_ref": before_ref,
-        "before_sha256": old_hash,
-        "after_sha256": new_hash,
-        "byte_identical": byte_identical,
+        "checkout": str(_REPO_ROOT),
+        "schemes": schemes,
+        "byte_identical": all(
+            bool(result["byte_identical"]) for result in schemes.values()
+        ),
     }
 
 
