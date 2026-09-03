@@ -17,6 +17,7 @@ from legoesm.ice.bitz_lipscomb import (
     ice_temperature_from_enthalpy,
     option2_salinity_profile,
     snow_enthalpy_from_temperature,
+    snow_temperature_from_enthalpy,
 )
 from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_card
 from legoesm.ice.config import SI3ThermoConfig, validate_si3_thermo_config
@@ -84,6 +85,19 @@ def test_nemo_constants_and_enthalpy_roundtrip_are_fp64() -> None:
     np.testing.assert_allclose(recovered, temp, rtol=0.0, atol=2.0e-13)
     assert (c.c_ice, c.latent_fusion, c.k_ice, c.k_snow, c.lead_albedo) == (
         2096.7, 333360.1, 2.034396, 0.5, 0.066,
+    )
+
+
+def test_snow_temperature_inverse_applies_nemo_bounds() -> None:
+    """`icevar.F90:404-416` never supplies ZDF snow above freezing."""
+
+    c = NEMO_SI3_CONSTANTS_CONFIG
+    energy = jnp.asarray([[0.0, 1.0e12, -1.0e12]], dtype=jnp.float64)
+    temperature = snow_temperature_from_enthalpy(energy, c)
+    assert temperature.dtype == jnp.float64
+    np.testing.assert_array_equal(
+        np.asarray(temperature),
+        np.asarray([[c.T0, c.T0 - 100.0, c.T0]], dtype=np.float64),
     )
 
 

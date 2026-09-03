@@ -297,14 +297,19 @@ def snow_enthalpy_from_temperature(T_K, constants: IceConstantsConfig):
 
 
 def snow_temperature_from_enthalpy(e, constants: IceConstantsConfig):
-    # `icethd_dh.F90:498-503` operation order, also used by the carried snow
-    # temperature state entering the next selected thermodynamic step.
+    """Invert snow enthalpy with NEMO's global-to-equivalent bounds.
+
+    `icevar.F90:404-416` reconstructs this diagnostic immediately before each
+    `ice_thd` call and bounds it to ``[rt0-100, rt0]``.  The same algebra also
+    appears in `icethd_dh.F90:498-503` after snow remapping.
+    """
     inverse_rho_snow = 1.0 / constants.rho_snow
     inverse_c_ice = 1.0 / constants.c_ice
-    return constants.T0 + (
+    unbounded = constants.T0 + (
         -e * inverse_rho_snow * inverse_c_ice
         + constants.latent_fusion * inverse_c_ice
     )
+    return jnp.clip(unbounded, constants.T0 - 100.0, constants.T0)
 
 
 def p07_conductivity(T_K, S, constants: IceConstantsConfig):
@@ -403,6 +408,7 @@ def _si3_zdf_bl99_step(
     *,
     _maximum_iterations: int = _MAX_ITERATIONS,
     _nemo_branch_ranges: bool = True,
+    _nemo_snow_temperature_bounds: bool = True,
 ) -> SI3ZDFResult:
     """Iterative 3+3-layer BL99/P07 solve for the resolved ORCA1 arm.
 
@@ -419,7 +425,16 @@ def _si3_zdf_bl99_step(
     T_surface_input = jnp.asarray(T_surface, dtype=dtype)
     S_layers = jnp.asarray(S_layers, dtype=dtype)
     T_i_old = ice_temperature_from_enthalpy(e_ice, S_layers, constants)
-    T_s_old = snow_temperature_from_enthalpy(jnp.asarray(e_snow, dtype=dtype), constants)
+    e_snow = jnp.asarray(e_snow, dtype=dtype)
+    T_s_old = snow_temperature_from_enthalpy(e_snow, constants)
+    if not _nemo_snow_temperature_bounds:
+        # Gate-only one-variable arm reproducing the pre-Phase-4 operand.
+        inverse_rho_snow = 1.0 / constants.rho_snow
+        inverse_c_ice = 1.0 / constants.c_ice
+        T_s_old = constants.T0 + (
+            -e_snow * inverse_rho_snow * inverse_c_ice
+            + constants.latent_fusion * inverse_c_ice
+        )
     # NEMO's equivalent-state conversion resets absent snow to T0 before ZDF
     # (`icevar.F90:404-416`).  The stored absent-layer enthalpy is therefore
     # not a temperature carrier when h_s == 0.
@@ -896,13 +911,15 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
                            _snow_deposition: bool = True,
                            _surface_melt: bool = True,
                            _zdf_branch_ranges: bool = True,
-                           _basal_melt: bool = True) -> SI3StepTrace:
+                           _basal_melt: bool = True,
+                           _nemo_snow_temperature_bounds: bool = True) -> SI3StepTrace:
     """Execute the selected `ice_thd` chain and retain every oracle boundary."""
 
     zdf = _si3_zdf_bl99_step(
         state.e_ice, state.e_snow, state.S_layers, state.h_ice, state.h_snow,
         state.T_surface, forcing, dt, constants,
         _nemo_branch_ranges=_zdf_branch_ranges,
+        _nemo_snow_temperature_bounds=_nemo_snow_temperature_bounds,
     )
     post_zdf = state._replace(T_surface=zdf.T_surface, e_ice=zdf.e_ice,
                               e_snow=zdf.e_snow)

@@ -24,11 +24,12 @@ import nemo_si3thd_phase2_gate as phase2
 BAR = phase2.BAR
 REPLAY_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l3/"
-    "c1d_omip_l3_sasice_phase2b_replay"
+    "c1d_omip_l3_sasice_phase4_operands"
 )
 EXPANDED_ZDF_SHA256 = "aad46579fb2d2cc19299d7a25992802525603bb9858adf1e892ff5d85bf40442"
 REASSOC_SHA256 = "4b832b0c274d6aab032f16958224ebfb6fea603af22e1a1f1d474ff71b1e4589"
-REPORT_STEPS = (1, 10, 100, 1000, 8760)
+ROUND4_ZDF_INPUT_SHA256 = "cd1b15c821f19442a840e99c067c640e5146b754fc137a2c81e88856d6ea7efd"
+REPORT_STEPS = (1, 10, 100, 1000, 3000, 5000, 8760)
 CONTINUOUS_FIELDS = ("t_su", "e_i", "e_s", "h_i", "h_s", "a_i", "sv_i")
 BASELINE_JSON = (
     Path(__file__).resolve().parents[4]
@@ -390,7 +391,7 @@ def _branch_label(stage_index: int, frames, exact_input, T0: float) -> str:
 
 
 def _branch_detail(stage_index: int, frames, candidates, offset: int,
-                   T0: float) -> dict[str, object]:
+                   T0: float, exact_input=None) -> dict[str, object]:
     """Expose both operands of the ZDF branch comparison."""
 
     if stage_index != 1:
@@ -400,7 +401,7 @@ def _branch_detail(stage_index: int, frames, candidates, offset: int,
     entry = phase2._center_global(frames[0])
     snow_volume = float(entry["v_s"])
     snow_energy = np.asarray(entry["e_s"])
-    return {
+    detail = {
         "nemo_surface_melting_condition": oracle_tsu >= T0,
         "legoesm_surface_melting_condition": lego_tsu >= T0,
         "surface_melting_condition_differs": ((oracle_tsu >= T0)
@@ -408,12 +409,11 @@ def _branch_detail(stage_index: int, frames, candidates, offset: int,
         "nemo_snow_present_condition": float(frames[1]["h_s"][0]) > 0.0,
         "entry_snow_volume_m": snow_volume,
         "entry_snow_enthalpy_all_zero": bool(np.all(snow_energy == 0.0)),
-        "entry_temperature_operand_status": (
-            "NOT_REGISTERED: t_s is carried by NEMO but absent from ENTRY frame"
-            if snow_volume > 0.0 and np.all(snow_energy == 0.0)
-            else "recoverable from registered enthalpy at this volume"
-        ),
+        "entry_temperature_operand_status": "REGISTERED_POST_GLO2EQV_PRE_ZDF",
     }
+    if exact_input is not None and "t_s" in exact_input:
+        detail["nemo_t_s_operand_K"] = np.asarray(exact_input["t_s"]).tolist()
+    return detail
 
 
 def _operator_sweep(thd_path: Path, zin_path: Path, card, step_function, *,
@@ -427,6 +427,8 @@ def _operator_sweep(thd_path: Path, zin_path: Path, card, step_function, *,
         "frames_compared": 0, "field_rows_compared": 0,
         "over_bar_field_rows": 0, "maximum_normalised_error": 0.0,
         "first_over_bar_frame": None,
+        "largest_outlier": None,
+        "per_step": [],
         "execution": "eager batched; same arithmetic path as phase-2 boundary gate",
     }
     if retain_over_bar_rows:
@@ -464,12 +466,19 @@ def _operator_sweep(thd_path: Path, zin_path: Path, card, step_function, *,
             for offset, frames in enumerate(chunk_frames):
                 kt = first_step + offset
                 exact_input = exact_inputs[offset]
+                step_record = {
+                    "step": kt,
+                    "maximum_normalised_error": 0.0,
+                    "over_bar_field_rows": 0,
+                    "owner": None,
+                }
                 summary["frames_compared"] += len(frames)
                 if kt in snapshot_steps:
                     summary["full_state_snapshots"][str(kt)] = {
                         "exact_zdf_input": {
                             name: np.asarray(exact_input[name]).tolist()
-                            for name in phase2.ZDF_INPUT_NAMES
+                            for name in (*phase2.ZDF_INPUT_NAMES,
+                                         *phase2.ZDF_STATE_OPERAND_NAMES)
                         },
                         "frames": [],
                     }
@@ -507,12 +516,33 @@ def _operator_sweep(thd_path: Path, zin_path: Path, card, step_function, *,
                         absolute, normalised = _normalised_error(
                             np.atleast_1d(wanted), np.atleast_1d(got)
                         )
+                        scale = max(1.0, float(np.max(np.abs(wanted))))
+                        outlier = {
+                            "step": kt,
+                            "sub_call": phase2.STAGES[stage_index][1],
+                            "variable": name,
+                            "absolute_numerator": absolute,
+                            "normalisation_denominator": scale,
+                            "normalised_quotient": normalised,
+                            "branch": _branch_label(
+                                stage_index, frames, exact_input,
+                                card.config.ice_constants.T0,
+                            ),
+                        }
+                        if normalised >= step_record["maximum_normalised_error"]:
+                            step_record["maximum_normalised_error"] = normalised
+                            step_record["owner"] = outlier
+                        largest = summary["largest_outlier"]
+                        if (largest is None
+                                or normalised > largest["normalised_quotient"]):
+                            summary["largest_outlier"] = outlier
                         summary["field_rows_compared"] += 1
                         summary["maximum_normalised_error"] = max(
                             summary["maximum_normalised_error"], normalised
                         )
                         if normalised > BAR:
                             summary["over_bar_field_rows"] += 1
+                            step_record["over_bar_field_rows"] += 1
                             record = {
                                 "sub_call": phase2.STAGES[stage_index][1],
                                 "variable": name,
@@ -525,6 +555,7 @@ def _operator_sweep(thd_path: Path, zin_path: Path, card, step_function, *,
                                 **_branch_detail(
                                     stage_index, frames, candidates, offset,
                                     card.config.ice_constants.T0,
+                                    exact_input,
                                 ),
                             }
                             if summary["first_over_bar_frame"] is None:
@@ -540,9 +571,33 @@ def _operator_sweep(thd_path: Path, zin_path: Path, card, step_function, *,
                                     if normalised > threshold and summary[key] is None:
                                         summary[key] = {"step": kt, **record,
                                                         "reporting_threshold": threshold}
+                summary["per_step"].append(step_record)
         phase2.require(thd.read(1) == b"", "trailing thermodynamics frame")
         phase2.require(zin.read(1) == b"", "trailing ZDF input frame")
     return summary
+
+
+def _validate_operator_trajectory(operator, *, plant=False) -> None:
+    """Fail closed on the complete exact-entry trajectory and max attribution."""
+
+    rows = list(operator["per_step"])
+    if plant:
+        rows.pop()
+    phase2.require(len(rows) == 8760, "oracle-entry per-step count")
+    phase2.require([row["step"] for row in rows] == list(range(1, 8761)),
+                   "oracle-entry per-step sequence")
+    recomputed = max(rows, key=lambda row: row["maximum_normalised_error"])
+    largest = operator["largest_outlier"]
+    phase2.require(
+        largest is not None
+        and largest["step"] == recomputed["step"]
+        and largest["normalised_quotient"]
+        == recomputed["maximum_normalised_error"]
+        and largest["absolute_numerator"]
+        / largest["normalisation_denominator"]
+        == largest["normalised_quotient"],
+        "oracle-entry largest-outlier attribution",
+    )
 
 
 def _validate_step74_branch_snapshot(operator, *, plant=False) -> None:
@@ -589,12 +644,12 @@ def _arm_row(oracle, disabled, enabled, name: str) -> dict[str, object]:
 
 
 def _owner_arms(root: Path, card, *, plant_deposition=False,
-                plant_surface=False) -> dict[str, object]:
+                plant_surface=False, plant_snow_temperature=False) -> dict[str, object]:
     """Evaluate preregistered one-variable DH arms on exact NEMO entries."""
 
     from legoesm.ice.bitz_lipscomb import si3_column_step_arrays
 
-    selected = _read_exact_steps(root, (73, 74, 3836, 4238))
+    selected = _read_exact_steps(root, (73, 74, 3836, 4238, 4239, 5285))
 
     def trace(step, **kwargs):
         frames, exact = selected[step]
@@ -641,6 +696,52 @@ def _owner_arms(root: Path, card, *, plant_deposition=False,
         "surface-melt arm failed 100-fold discriminator",
     )
 
+    snow_temperature_steps = []
+    for step in (4239, 5285):
+        frames, exact = selected[step]
+        enabled = trace(step)
+        disabled = trace(step, _nemo_snow_temperature_bounds=False)
+        if plant_snow_temperature:
+            enabled = disabled
+        oracle = frames[1]
+        on = phase2._selected_from_arrays(enabled.post_zdf)
+        off = phase2._selected_from_arrays(disabled.post_zdf)
+        rows = [_arm_row(oracle[name], off[name], on[name], name)
+                for name in ("t_su", "e_i", "e_s")]
+        entry = phase2._entry_arrays(frames[0])
+        c = card.config.ice_constants
+        unbounded = c.T0 + (
+            -np.asarray(entry.e_snow) / c.rho_snow / c.c_ice
+            + c.latent_fusion / c.c_ice
+        )
+        dumped = np.asarray(exact["t_s"])
+        snow_temperature_steps.append({
+            "step": step,
+            "registered_time_level": phase2.ZDF_STATE_OPERAND_REGISTRY["t_s"],
+            "nemo_t_s_operand_K": dumped.tolist(),
+            "source_replay_K": np.clip(unbounded, c.T0 - 100.0, c.T0).tolist(),
+            "pre_fix_unbounded_operand_K": unbounded.tolist(),
+            "source_replay_bit_exact": bool(np.array_equal(
+                dumped, np.clip(unbounded, c.T0 - 100.0, c.T0)
+            )),
+            "nemo_cold_surface_condition": bool(oracle["t_su"][0] < c.T0),
+            "pre_fix_cold_surface_condition": bool(off["t_su"][0] < c.T0),
+            "post_fix_cold_surface_condition": bool(on["t_su"][0] < c.T0),
+            "rows": rows,
+        })
+    phase2.require(
+        all(row["source_replay_bit_exact"] for row in snow_temperature_steps),
+        "registered snow temperature disagrees with NEMO source replay",
+    )
+    phase2.require(
+        min(
+            row["improvement_factor"]
+            for step in snow_temperature_steps for row in step["rows"]
+            if row["variable"] == "e_i"
+        ) >= 100.0,
+        "snow-temperature bounds arm failed 100-fold discriminator",
+    )
+
     _, exact73 = selected[73]
     return {
         "step74_negative_evaporation_deposition": {
@@ -660,6 +761,17 @@ def _owner_arms(root: Path, card, *, plant_deposition=False,
             "first_ice_removal_step": 4238,
             "snow_then_ice_order": True,
             "rows": surface_rows,
+            "verdict": "CONFIRMED",
+        },
+        "snow_temperature_bounds": {
+            "source": (
+                "icestp.F90:182-206; icevar.F90:404-416; "
+                "icethd.F90:343-355,418-435; "
+                "icethd_zdf_bl99.F90:159-198,433-513"
+            ),
+            "nemo_predicate": "v_s > epsi20 (epsi20=1e-20), then [rt0-100,rt0]",
+            "legoesm_pre_fix_predicate": "h_s > 0, unbounded enthalpy inverse",
+            "steps": snow_temperature_steps,
             "verdict": "CONFIRMED",
         },
     }
@@ -876,11 +988,13 @@ def _phenomenology_rows(nemo, fp64, fp32) -> list[dict[str, object]]:
 
 def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
         plant_truncate=False, plant_branch_census=False,
-        plant_deposition=False, plant_surface=False) -> dict[str, object]:
+        plant_deposition=False, plant_surface=False,
+        plant_snow_temperature=False,
+        plant_operator_trajectory=False) -> dict[str, object]:
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ice.bitz_lipscomb import si3_column_step_arrays
     from legoesm.ice.c1d_omip_l3 import (
-        FORCING_SHA256, THERMO_STREAM_SHA256, ZDF_INPUT_STREAM_SHA256,
+        FORCING_SHA256, THERMO_STREAM_SHA256,
         build_c1d_omip_l3_card,
     )
 
@@ -892,12 +1006,14 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
     zin_path = root / "oracle_si3_zdf_inputs.bin"
     phase2.require(phase2.sha256(card.forcing_path) == FORCING_SHA256, "forcing SHA256")
     phase2.require(phase2.sha256(thd_path) == THERMO_STREAM_SHA256, "thermo SHA256")
-    phase2.require(phase2.sha256(zin_path) == ZDF_INPUT_STREAM_SHA256, "ZDF input SHA256")
+    phase2.require(phase2.sha256(zin_path) == ROUND4_ZDF_INPUT_SHA256,
+                   "Round-4 ZDF input SHA256")
     arithmetic = _arithmetic_replay(root, card.config.ice_constants,
                                     plant=plant_arithmetic)
     owner_arms = _owner_arms(
         root, card, plant_deposition=plant_deposition,
         plant_surface=plant_surface,
+        plant_snow_temperature=plant_snow_temperature,
     )
 
     def eager_step(state, forcing):
@@ -918,9 +1034,10 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
     ))
     operator = _operator_sweep(
         thd_path, zin_path, card, eager_step, retain_over_bar_rows=True,
-        snapshot_steps=(73, 74, 75, 76),
+        snapshot_steps=(73, 74, 75, 76, 4239, 5285),
     )
     _validate_step74_branch_snapshot(operator, plant=plant_branch_census)
+    _validate_operator_trajectory(operator, plant=plant_operator_trajectory)
     continuous_per_step = []
     sample_table: dict[str, object] = {}
     h_nemo, h_fp64, h_fp32 = [], [], []
@@ -1030,6 +1147,14 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
                            "legoesm_floor_run": str(state32.e_ice.dtype)},
         "card": {"name": card.name, "dt_seconds": card.dt_seconds,
                  "nsteps": card.nsteps, "scope": "ORCA1-resolved identity only"},
+        "frame_registry": {
+            "thermodynamics": {
+                str(stage): {"name": name, "time_level": time_level,
+                             "source": source}
+                for stage, name, time_level, source in phase2.STAGES
+            },
+            "zdf_state_operands": phase2.ZDF_STATE_OPERAND_REGISTRY,
+        },
         "hashes": {
             "forcing": phase2.sha256(card.forcing_path),
             "thermodynamics": phase2.sha256(thd_path),
@@ -1092,12 +1217,16 @@ def main() -> None:
     parser.add_argument("--plant-branch-census", action="store_true")
     parser.add_argument("--plant-deposition", action="store_true")
     parser.add_argument("--plant-surface", action="store_true")
+    parser.add_argument("--plant-snow-temperature", action="store_true")
+    parser.add_argument("--plant-operator-trajectory", action="store_true")
     args = parser.parse_args()
     result = run(root=args.root, plant_arithmetic=args.plant_arithmetic,
                  plant_truncate=args.plant_truncate,
                  plant_branch_census=args.plant_branch_census,
                  plant_deposition=args.plant_deposition,
-                 plant_surface=args.plant_surface)
+                 plant_surface=args.plant_surface,
+                 plant_snow_temperature=args.plant_snow_temperature,
+                 plant_operator_trajectory=args.plant_operator_trajectory)
     rendered = json.dumps(result, indent=2, sort_keys=True)
     if args.json:
         args.json.write_text(rendered + "\n")

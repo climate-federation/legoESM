@@ -33,6 +33,20 @@ ZDF_INPUT_NAMES = (
     "evaporation", "snow_precipitation", "qprec_ice", "qcn_ice_bottom",
     "qsb_ice_bottom", "fhld", "qlead",
 )
+ZDF_STATE_OPERAND_NAMES = ("t_s",)
+ZDF_STATE_OPERAND_REGISTRY = {
+    "t_s": {
+        "shape": "(npti,nlay_s)",
+        "time_level": (
+            "current ice step after ice_var_glo2eqv(2) and ice_thd_1d2d; "
+            "immediately before ice_thd_zdf"
+        ),
+        "source": (
+            "icestp.F90:182-206; icethd.F90:343-355,418-435; "
+            "icethd_zdf_bl99.F90:189-199"
+        ),
+    },
+}
 ZDF_OPERAND_REGISTRY = {
     0: ("INIT", 25, "icethd_zdf_bl99.F90:159-230"),
     1: ("ITER_P07_KAPPA", 20, "icethd_zdf_bl99.F90:261-335"),
@@ -128,16 +142,23 @@ def _read_exchange_step(stream, wanted_step: int) -> dict[str, np.ndarray]:
 
 
 def _read_zdf_input_step(stream, wanted_step: int) -> dict[str, np.ndarray]:
-    require(stream.read(16) == b"NEMO_L3ZIN_001  ", "ZDF-input magic")
+    magic = stream.read(16)
+    require(magic in (b"NEMO_L3ZIN_001  ", b"NEMO_L3ZIN_002  "),
+            "ZDF-input magic")
     version, step, category, npti, bits, nval = struct.unpack("=6i", stream.read(24))
-    require(
-        (version, step, category, npti, bits, nval)
-        == (1, wanted_step, 1, 1, 64, len(ZDF_INPUT_NAMES)),
-        "ZDF-input header",
-    )
+    expected = len(ZDF_INPUT_NAMES) + (3 if version == 2 else 0)
+    require((version, step, category, npti, bits, nval)
+            == (version, wanted_step, 1, 1, 64, expected)
+            and version in (1, 2)
+            and magic == (b"NEMO_L3ZIN_002  " if version == 2
+                          else b"NEMO_L3ZIN_001  "), "ZDF-input header")
     values = np.fromfile(stream, np.float64, nval)
     require(values.size == nval and np.all(np.isfinite(values)), "bad ZDF-input payload")
-    return {name: values[i:i + 1] for i, name in enumerate(ZDF_INPUT_NAMES)}
+    result = {name: values[i:i + 1] for i, name in enumerate(ZDF_INPUT_NAMES)}
+    if version == 2:
+        result["t_s"] = values[len(ZDF_INPUT_NAMES):].reshape((npti, 3), order="F")
+    result["_version"] = np.asarray(version)
+    return result
 
 
 def _read_zdf_operands(path: Path) -> list[dict[str, object]]:

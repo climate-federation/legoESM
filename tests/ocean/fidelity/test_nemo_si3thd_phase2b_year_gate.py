@@ -85,15 +85,65 @@ def test_phenomenology_floor_classification_is_literal(gate) -> None:
     assert len(rows) == 6
 
 
-def test_phase3_owner_arms_confirm_and_plants_exit_red(gate) -> None:
+def test_owner_arms_confirm_and_plants_exit_red(gate) -> None:
     card = build_c1d_omip_l3_card(oracle_root=gate.REPLAY_ROOT)
     result = gate._owner_arms(gate.REPLAY_ROOT, card)
     assert result["step74_negative_evaporation_deposition"]["verdict"] == "CONFIRMED"
     assert result["surface_melt"]["verdict"] == "CONFIRMED"
+    assert result["snow_temperature_bounds"]["verdict"] == "CONFIRMED"
+    assert all(step["source_replay_bit_exact"]
+               for step in result["snow_temperature_bounds"]["steps"])
+    split = result["snow_temperature_bounds"]["steps"][1]
+    assert split["step"] == 5285
+    assert split["nemo_cold_surface_condition"] is True
+    assert split["pre_fix_cold_surface_condition"] is False
+    assert split["post_fix_cold_surface_condition"] is True
     with pytest.raises(gate.phase2.GateError, match="deposition arm"):
         gate._owner_arms(gate.REPLAY_ROOT, card, plant_deposition=True)
     with pytest.raises(gate.phase2.GateError, match="surface-melt arm"):
         gate._owner_arms(gate.REPLAY_ROOT, card, plant_surface=True)
+    with pytest.raises(gate.phase2.GateError, match="snow-temperature bounds arm"):
+        gate._owner_arms(gate.REPLAY_ROOT, card, plant_snow_temperature=True)
+
+
+def test_round4_zdf_operand_stream_registers_tiny_snow_temperature(gate) -> None:
+    path = gate.REPLAY_ROOT / "oracle_si3_zdf_inputs.bin"
+    wanted = {}
+    with path.open("rb") as stream:
+        for step in range(1, 5286):
+            exact = gate.phase2._read_zdf_input_step(stream, step)
+            if step in (4239, 5285):
+                wanted[step] = exact
+    assert set(wanted) == {4239, 5285}
+    freezing = build_c1d_omip_l3_card().config.ice_constants.T0
+    for exact in wanted.values():
+        assert int(exact["_version"]) == 2
+        np.testing.assert_array_equal(exact["t_s"], np.full((1, 3), freezing))
+    registry = gate.phase2.ZDF_STATE_OPERAND_REGISTRY["t_s"]
+    assert "immediately before ice_thd_zdf" in registry["time_level"]
+    assert "icethd.F90:343-355" in registry["source"]
+
+
+def test_operator_per_step_and_outlier_controls_exit_red(gate) -> None:
+    rows = [
+        {"step": step, "maximum_normalised_error": float(step),
+         "over_bar_field_rows": 0, "owner": None}
+        for step in range(1, 8761)
+    ]
+    operator = {
+        "per_step": rows,
+        "largest_outlier": {
+            "step": 8760, "absolute_numerator": 8760.0,
+            "normalisation_denominator": 1.0,
+            "normalised_quotient": 8760.0,
+        },
+    }
+    gate._validate_operator_trajectory(operator)
+    with pytest.raises(gate.phase2.GateError, match="per-step count"):
+        gate._validate_operator_trajectory(operator, plant=True)
+    operator["largest_outlier"]["normalisation_denominator"] = 2.0
+    with pytest.raises(gate.phase2.GateError, match="largest-outlier"):
+        gate._validate_operator_trajectory(operator)
 
 
 def test_phase3_branch_census_plant_exits_red(gate) -> None:

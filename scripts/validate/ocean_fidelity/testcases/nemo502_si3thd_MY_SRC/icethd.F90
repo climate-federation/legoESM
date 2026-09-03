@@ -277,7 +277,7 @@ CONTAINS
    SUBROUTINE l3zin_dump( kt, kl )
       INTEGER, INTENT(in) :: kt, kl
       INTEGER :: ios
-      CHARACTER(LEN=16), PARAMETER :: cmagic = 'NEMO_L3ZIN_001'
+      CHARACTER(LEN=16), PARAMETER :: cmagic = 'NEMO_L3ZIN_002'
       IF( .NOT. ll_l3zin_opened ) THEN
          OPEN( NEWUNIT=num_l3zin, FILE='oracle_si3_zdf_inputs.bin', STATUS='REPLACE', &
             & ACCESS='STREAM', FORM='UNFORMATTED', ACTION='WRITE', IOSTAT=ios )
@@ -285,11 +285,12 @@ CONTAINS
          ll_l3zin_opened = .TRUE.
       ENDIF
       WRITE(num_l3zin) cmagic
-      WRITE(num_l3zin) 1, kt, kl, npti, STORAGE_SIZE(1._wp), 13 * npti
+      WRITE(num_l3zin) 2, kt, kl, npti, STORAGE_SIZE(1._wp), ( 13 + nlay_s ) * npti
       WRITE(num_l3zin) qns_ice_1d(1:npti), qsr_ice_1d(1:npti), dqns_ice_1d(1:npti), &
          & qtr_ice_top_1d(1:npti), t_bo_1d(1:npti), sss_1d(1:npti), &
          & evap_ice_1d(1:npti), sprecip_1d(1:npti), qprec_ice_1d(1:npti), &
-         & qcn_ice_1d(1:npti), qsb_ice_bot_1d(1:npti), fhld_1d(1:npti), qml_ice_1d(1:npti)
+         & qcn_ice_1d(1:npti), qsb_ice_bot_1d(1:npti), fhld_1d(1:npti), qml_ice_1d(1:npti), &
+         & t_s_1d(1:npti,1:nlay_s)
       FLUSH(num_l3zin)
    END SUBROUTINE l3zin_dump
 
