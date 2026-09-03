@@ -139,3 +139,65 @@ def test_dirty_tree_is_refused_unless_allowed(monkeypatch):
     with pytest.raises(gate.GateError, match="refusing to stamp"):
         gate.git_sha()
     assert gate.git_sha(allow_dirty=True).endswith("-dirty")
+
+
+def _write_zero_trace_kt(path: Path, kt: int) -> None:
+    """A kt>=2 record: RK3 rotates Nbb<->Naa at every step end (stprk3.F90:213)."""
+    nx, ny, ncycle, nfields, bits = gate.EXPECTED
+    full = np.zeros(nx * ny, dtype=np.float64).tobytes()
+    a2d = np.zeros((nx - 4) * (ny - 4), dtype=np.float64).tobytes()
+    kbb, kaa = (1, 3) if kt % 2 == 1 else (3, 1)
+    with path.open("wb") as handle:
+        handle.write(b"NEMO_L1_OVBT_1  ")
+        handle.write(struct.pack("=11i", 1, kt, 1, kbb, kbb, kaa, ncycle, nx, ny, nfields, bits))
+        for jn in range(1, ncycle + 1):
+            handle.write(struct.pack("=i", jn))
+            for name in gate.FIELDS:
+                handle.write(a2d if name in ("slow_u", "slow_v") else full)
+
+
+def test_oracle_reader_pins_the_requested_step_and_rotated_time_levels(tmp_path):
+    path = tmp_path / "trace_kt2.bin"
+    _write_zero_trace_kt(path, 2)
+    report = gate.read_oracle_trace(path, expected_kt=2)
+    assert (report["header"]["Kbb"], report["header"]["Kmm"], report["header"]["Kaa"]) == (3, 3, 1)
+    with pytest.raises(gate.GateError, match="bad header"):
+        gate.read_oracle_trace(path)          # default expected_kt=1 refuses a kt=2 record
+    with path.open("r+b") as handle:          # Kmm != Kbb is not an RK3 dyn_spg_ts call
+        handle.seek(16 + 4 * 4)
+        handle.write(struct.pack("=i", 1))
+    with pytest.raises(gate.GateError, match="unexpected time levels"):
+        gate.read_oracle_trace(path, expected_kt=2)
+    odd = tmp_path / "trace_kt3.bin"          # kt parity pins the rotated triple
+    _write_zero_trace_kt(odd, 3)
+    assert gate.read_oracle_trace(odd, expected_kt=3)["header"]["Kbb"] == 1
+    _write_zero_trace_kt(odd, 2)              # a kt=2 triple labelled kt=3
+    odd.write_bytes(odd.read_bytes()[:20] + struct.pack("=i", 3) + odd.read_bytes()[24:])
+    with pytest.raises(gate.GateError, match="unexpected time levels"):
+        gate.read_oracle_trace(odd, expected_kt=3)
+
+
+def test_kt_walk_masked_stagger_rows_are_inventory_not_first_divergence():
+    """A stagger with no active face (the tank's V faces) never owns the first
+    divergence, whatever value the stored points hold; an active U row does."""
+    zeros = np.zeros((3, 4))
+    oracle = {"substeps": [{name: zeros for name in gate.FIELDS}]}
+    frames = {name: zeros.copy() for name in gate.FIELDS}
+    frames["pgf_v"] = zeros + 1.0e-3      # stored, masked, must not be scored
+    frames["u_exit"] = zeros + 1.0e-9     # active, must be the first DEBT
+    candidate = {
+        "substeps": [frames],
+        "masks": {"T": np.ones_like(zeros, dtype=bool),
+                  "U": np.ones_like(zeros, dtype=bool),
+                  "V": np.zeros_like(zeros, dtype=bool)},
+    }
+    substeps, first, masked = gate._score_substeps("arm", oracle, candidate)
+    rows = {row["name"].rsplit(".", 1)[-1]: row for row in substeps[0]["rows"]}
+    # The kt=1 gate's gross-zero verdict is kept on the masked stagger ...
+    assert rows["pgf_v"]["status"] == "DEBT"
+    assert rows["pgf_v"]["alignment_row"] is False
+    assert masked == [{"substep": 1, "frame": "pgf_v", "absolute_max": 1.0e-3}]
+    # ... but it can never be the first divergence; the active row is.
+    assert rows["u_exit"]["alignment_row"] is True
+    assert first == {"substep": 1, "frame": "u_exit",
+                     "normalized_max_abs": 1.0e-9, "absolute_max": 1.0e-9}

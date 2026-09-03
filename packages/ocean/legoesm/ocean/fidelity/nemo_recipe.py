@@ -150,7 +150,7 @@ NEMO_BLOCK_MAPPING: tuple[tuple[str, str, str], ...] = (
     (
         "UP3 momentum option",
         "momentum_core",
-        "flux_form_upwind3 selects momentum_flux_scheme=upwind3",
+        "flux_form_upwind3 selects momentum_flux_scheme=nemo_up3",
     ),
     (
         "tracer advection",
@@ -334,7 +334,8 @@ def _momentum_options(momentum_core: str) -> dict[str, object]:
     if momentum_core == "flux_form_upwind3":
         return {
             "momentum_advection": "flux_form",
-            "momentum_flux_scheme": "upwind3",
+            # The NEMO-referenced UP3 arm (dynadv_up3.F90:166,169-170).
+            "momentum_flux_scheme": "nemo_up3",
             "ke_gradient_scheme": "centered",
         }
     raise ValueError(

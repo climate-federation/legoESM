@@ -150,15 +150,22 @@ def _xy_a2d(values: np.ndarray, nx: int, ny: int) -> np.ndarray:
     return values.reshape((nx - 4, ny - 4), order="F").T
 
 
-def read_oracle_trace(path: Path) -> dict:
-    """Read the mixed full-halo/A2D NEMO stream record, refusing leftovers."""
+def read_oracle_trace(path: Path, expected_kt: int = 1) -> dict:
+    """Read the mixed full-halo/A2D NEMO stream record, refusing leftovers.
+
+    ``expected_kt`` is the ocean step the record must carry.  RK3 calls
+    ``dyn_spg_ts`` with ``Kmm == Kbb`` (stp2d.F90:281) and rotates
+    ``Nbb <-> Naa`` at every step end (stprk3.F90:213), so the level triple is
+    ``(1,1,3)`` at kt=1 and ``(3,3,1)`` at kt=2; both are checked structurally.
+    """
     with path.open("rb") as handle:
         magic = _read_exact(handle, 16, str(path)).decode("ascii").rstrip()
         header = struct.unpack("=11i", _read_exact(handle, 44, str(path)))
         (version, kt, call, kbb, kmm, kaa, ncycle, nx, ny, nfields, bits) = header
         require(magic == "NEMO_L1_OVBT_1", f"{path}: bad magic {magic!r}")
         require(
-            (version, kt, call, nx, ny, ncycle, nfields, bits) == (1, 1, 1, *EXPECTED),
+            (version, kt, call, nx, ny, ncycle, nfields, bits)
+            == (1, expected_kt, 1, *EXPECTED),
             f"{path}: bad header {header}",
         )
         full_count = nx * ny
@@ -177,7 +184,8 @@ def read_oracle_trace(path: Path) -> dict:
                 )
             substeps.append(frames)
         require(handle.read(1) == b"", f"{path}: trailing unregistered bytes")
-    require((kbb, kmm, kaa) == (1, 1, 3), f"{path}: unexpected time levels")
+    require((kbb, kmm, kaa) == ((1, 1, 3) if kt % 2 == 1 else (3, 3, 1)),
+            f"{path}: unexpected time levels {(kbb, kmm, kaa)} at kt={kt}")
     return {
         "header": {
             "version": version,
@@ -205,13 +213,73 @@ def _candidate_frame(values, staggering: str) -> np.ndarray:
     return values[1:, :]
 
 
-def capture_legoesm_trace(*, flux_form_override) -> dict:
-    """Capture call 1 without changing the two-value production return.
+def _trajectory_gate():
+    """The sibling trajectory gate: one entry-dump reader, one stagger map."""
+    import importlib.util
+
+    script = Path(__file__).with_name("nemo_testcase_phase3_trajectory_gate.py")
+    spec = importlib.util.spec_from_file_location(
+        "nemo_testcase_phase3_trajectory_gate", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def state_from_oracle_entry(state, entry: dict, active_masks: dict):
+    """Overwrite the ACTIVE prognostic cells of ``state`` with a NEMO
+    ``oracle_step_entry`` record (ts/uu/vv/ssh at Nbb).
+
+    Inverse of the trajectory gate's ``lego_fields`` stagger map: NEMO stores
+    one u record per T column (its east face), legoESM one extra western wall
+    face at ``u[:, 0]`` (``v[0]`` likewise).  Inactive cells keep legoESM's
+    own values; a wet-mask disagreement would surface as a frame residual.
+    """
+    import jax.numpy as jnp
+
+    nlev = int(np.asarray(state.T.data).shape[-1])
+
+    def merged(current, reference, mask):
+        current = np.array(current, dtype=np.float64, copy=True)
+        reference = np.asarray(reference, dtype=np.float64)
+        return np.where(np.asarray(mask, dtype=bool), reference, current)
+
+    T = merged(state.T.data, entry["T"][..., :nlev], active_masks["T"])
+    S = merged(state.S.data, entry["S"][..., :nlev], active_masks["S"])
+    u = np.array(state.u.data, dtype=np.float64, copy=True)
+    u[:, 1:, :] = merged(u[:, 1:, :], entry["u"][..., :nlev], active_masks["u"])
+    v = np.array(state.v.data, dtype=np.float64, copy=True)
+    v[1:, :, :] = merged(v[1:, :, :], entry["v"][..., :nlev], active_masks["v"])
+    eta = merged(state.eta.data, entry["ssh"], active_masks["ssh"])
+    return state._replace(
+        T=state.T.replace(data=jnp.asarray(T)),
+        S=state.S.replace(data=jnp.asarray(S)),
+        u=state.u.replace(data=jnp.asarray(u)),
+        v=state.v.replace(data=jnp.asarray(v)),
+        eta=state.eta.replace(data=jnp.asarray(eta)),
+    )
+
+
+def capture_legoesm_trace(*, flux_form_override, kt: int = 1,
+                          reseed_entry: dict | None = None,
+                          legacy_seed_faces: bool = False,
+                          start_state=None) -> dict:
+    """Capture the ``kt``-th solve without changing the two-value production
+    return.
 
     ``flux_form_override=None`` is the PRODUCTION arm: the barotropic solver
     resolves the literal flux-form update from the card's own config through
     ``nemo_flux_form_update_active``; ``False`` forces the legacy velocity
     update (harness-only control arm).
+
+    ``kt`` selects which step's external solve is captured: the first
+    ``kt - 1`` steps run as the production trajectory gate runs them, the
+    ``kt``-th under ``jax.disable_jit`` with the trace hook.  ``reseed_entry``
+    (a NEMO ``oracle_step_entry_kt{kt}`` record) replaces legoESM's own
+    kt-entry prognostic state by NEMO's, so the captured solve starts from
+    an EXACT entry and its first over-bar frame names the operand rather
+    than an inherited residual.  ``start_state`` hands the kt-entry state in
+    directly (a caller-built trajectory, e.g. the stage-3 remainder probe's
+    perturbed arm); it is mutually exclusive with ``reseed_entry``.
     """
     import jax
     import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as ocean_model
@@ -242,9 +310,10 @@ def capture_legoesm_trace(*, flux_form_override) -> dict:
 
     original = ocean_model.barotropic_substeps_latlon_cgrid
     captured = []
+    armed = []
 
     def wrapper(*args, **kwargs):
-        if not captured:
+        if armed and not captured:
             kwargs = dict(kwargs)
             kwargs["_nemo_substep_trace_test_hook"] = True
             kwargs["_nemo_flux_form_update_test_override"] = flux_form_override
@@ -253,13 +322,33 @@ def capture_legoesm_trace(*, flux_form_override) -> dict:
             return state_new, transports
         return original(*args, **kwargs)
 
+    require(kt >= 1, "kt must be positive")
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks
+
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            legacy_seed_min_rule_faces=legacy_seed_faces))
+    state = card.recipe.initial_state
+    require(reseed_entry is None or start_state is None,
+            "reseed_entry and start_state are mutually exclusive")
+    if start_state is not None:
+        state = start_state
+    elif reseed_entry is not None:
+        require(int(reseed_entry["step"]) == kt,
+                f"re-seed record is kt={reseed_entry['step']}, wanted {kt}")
+        active = _trajectory_gate().expected_masks(card)
+        state = state_from_oracle_entry(state, reseed_entry, active)
+    else:
+        for _ in range(kt - 1):
+            state = model.step(state, dt=card.dt_s)
     ocean_model.barotropic_substeps_latlon_cgrid = wrapper
     try:
-        model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, cfg)
+        armed.append(True)
         # The test hook must materialise its operand arrays on the host; a
         # traced Python closure would retain DynamicJaxprTracers instead.
         with jax.disable_jit():
-            model.step(card.recipe.initial_state, dt=card.dt_s)
+            model.step(state, dt=card.dt_s)
     finally:
         ocean_model.barotropic_substeps_latlon_cgrid = original
     require(len(captured) == 1, f"captured {len(captured)} call-1 traces")
@@ -275,7 +364,6 @@ def capture_legoesm_trace(*, flux_form_override) -> dict:
                 for index, name in enumerate(FIELDS)
             }
         )
-    state = card.recipe.initial_state
     masks = {
         "T": np.asarray(state.land_mask.data, dtype=bool),
         "U": np.asarray(state.u_mask.data[:, 1:], dtype=bool),
@@ -297,6 +385,10 @@ def capture_legoesm_trace(*, flux_form_override) -> dict:
         "backend": jax.default_backend(),
         "flux_form_override": flux_form_override,
         "production_flux_form_update_active": production_resolution,
+        "kt": kt,
+        "reseeded_from_oracle_entry": reseed_entry is not None,
+        "started_from_caller_state": start_state is not None,
+        "legacy_seed_faces_test_hook": legacy_seed_faces,
     }
 
 
@@ -620,8 +712,155 @@ def run(
     }
 
 
+def _score_substeps(arm_name: str, oracle: dict, candidate: dict) -> tuple[list, dict | None, list]:
+    substeps = []
+    first_over_bar = None
+    masked_over_bar = []
+    for jn, (reference_frames, candidate_frames) in enumerate(
+        zip(oracle["substeps"], candidate["substeps"]), start=1
+    ):
+        rows = []
+        for name in FIELDS:
+            row = score_frame(
+                f"{arm_name}.substep{jn}.{name}", reference_frames[name],
+                candidate_frames[name], candidate["masks"][STAGGER[name]])
+            row.update({
+                "frame": "instantaneous_external_substep_operand",
+                "oracle_time_level": FRAME_REGISTRY[name]["time_level"],
+                "oracle_source": FRAME_REGISTRY[name]["source"],
+            })
+            # A stagger with no active face in the certified tank (the
+            # three-row OVERFLOW has no wet V face) keeps score_frame's
+            # gross-zero verdict exactly as the kt=1 gate does, but is not an
+            # alignment row: a value on a face the update masks (ssvmask,
+            # dynspg_ts.F90:757-760) can never be the first divergence.
+            row["alignment_row"] = bool(
+                np.asarray(candidate["masks"][STAGGER[name]]).any())
+            rows.append(row)
+            if row["status"] == "DEBT" and not row["alignment_row"]:
+                masked_over_bar.append({
+                    "substep": jn, "frame": name,
+                    "absolute_max": row["absolute_max"]})
+            if (first_over_bar is None and row["status"] == "DEBT"
+                    and row["alignment_row"]):
+                first_over_bar = {
+                    "substep": jn, "frame": name,
+                    "normalized_max_abs": row["normalized_max_abs"],
+                    "absolute_max": row["absolute_max"],
+                }
+        substeps.append({"substep": jn, "rows": rows})
+    return substeps, first_over_bar, masked_over_bar
+
+
+def run_kt_walk(kt: int, oracle_root: Path, entry_root: Path, *,
+                allow_dirty: bool = False, legacy_seed_faces: bool = False) -> dict:
+    """Frame-by-frame first divergence of the kt-th external solve, kt >= 2.
+
+    Two production arms: ``inherited_entry`` starts the solve from legoESM's
+    own kt-entry state (whatever residual it already carries), and
+    ``reseeded_from_oracle_entry`` starts it from NEMO's dumped kt-entry
+    prognostic state, so a frame over the bar there is produced INSIDE the
+    step by an operand the barotropic solve consumes or a memory NEMO carries
+    that the prognostic state does not.
+    """
+    legoesm_git_sha = git_sha(allow_dirty=allow_dirty)
+    validate_frame_registry()
+    require(kt >= 2, "run_kt_walk is the kt>=2 walk; kt=1 is run()")
+    trace_path = oracle_root / f"oracle_overflow_bt_substeps_kt{kt:08d}_call1.bin"
+    entry_path = entry_root / f"oracle_step_entry_kt{kt:08d}.bin"
+    oracle = read_oracle_trace(trace_path, expected_kt=kt)
+    trajectory = _trajectory_gate()
+    entry = trajectory.read_entry(entry_path, CASE)
+    require(int(entry["step"]) == kt, f"{entry_path}: step mismatch")
+
+    arms = {}
+    for arm_name, reseed in (("inherited_entry", None),
+                             ("reseeded_from_oracle_entry", entry)):
+        candidate = capture_legoesm_trace(
+            flux_form_override=None, kt=kt, reseed_entry=reseed,
+            legacy_seed_faces=legacy_seed_faces)
+        substeps, first, masked = _score_substeps(arm_name, oracle, candidate)
+        arms[arm_name] = {
+            "substeps": substeps,
+            "first_over_bar": first,
+            "masked_stagger_rows_over_bar": masked,
+            "reseeded_fields": (
+                ["T", "S", "u", "v", "eta"] if reseed is not None else []),
+            "fields_kept_from_the_card_initial_state": (
+                ["w (diagnostic, recomputed in step)", "every None-seeded "
+                 "history slot (bt_hist, eta_before, F_slow_*_prev, ...)"]
+                if reseed is not None else []),
+            "backend": candidate["backend"],
+            "dtypes": candidate["dtypes"],
+            "reseeded_from_oracle_entry": candidate["reseeded_from_oracle_entry"],
+            "legacy_seed_faces_test_hook": candidate["legacy_seed_faces_test_hook"],
+        }
+
+    # The kt-entry prognostic residual the inherited arm starts from, scored
+    # exactly as the trajectory gate scores it (same masks, same reduction).
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks
+
+    card = build_nemo_testcase_card(CASE)
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            legacy_seed_min_rule_faces=legacy_seed_faces))
+    state = card.recipe.initial_state
+    for _ in range(kt - 1):
+        state = model.step(state, dt=card.dt_s)
+    masks = trajectory.expected_masks(card)
+    nlev = card.recipe.z_coord.n_levels
+    fields = trajectory.lego_fields(state)
+    entry_residual = {}
+    for field in ("T", "S", "u", "v", "ssh"):
+        reference = np.asarray(entry[field])
+        if field != "ssh":
+            reference = reference[..., :nlev]
+        row = trajectory.score(
+            f"{CASE}.kt{kt}.before.{field}", reference, fields[field],
+            masks[field], allow_empty_no_active_face=field == "v")
+        entry_residual[field] = {
+            "status": row["status"], "exact": row["exact"],
+            "normalized_max_abs": row["normalized_max_abs"]}
+
+    return {
+        "format": "nemo-testcase-l1-overflow-barotropic-kt-walk-v1",
+        "case": CASE,
+        "kt": kt,
+        "bar": BAR,
+        "legoesm_git_sha": legoesm_git_sha,
+        "time_level_header": oracle["header"],
+        "frame_time_level_registry": FRAME_REGISTRY,
+        "artifacts": {
+            "oracle_trace": {"path": str(trace_path), "sha256": sha256(trace_path)},
+            "oracle_entry": {"path": str(entry_path), "sha256": sha256(entry_path)},
+        },
+        "kt_entry_prognostic_residual_inherited_arm": entry_residual,
+        "legacy_seed_faces_test_hook": legacy_seed_faces,
+        "arms": arms,
+        "status": ("AT-BAR" if arms["reseeded_from_oracle_entry"]["first_over_bar"] is None
+                   else "DEBT"),
+    }
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--kt", type=int, default=1,
+                        help="ocean step whose external solve is walked; "
+                             ">=2 selects run_kt_walk")
+    parser.add_argument("--oracle-root", type=Path,
+                        help="directory holding oracle_overflow_bt_substeps_kt*_call1.bin (kt>=2)")
+    parser.add_argument("--entry-root", type=Path,
+                        help="directory holding oracle_step_entry_kt*.bin (kt>=2)")
+    parser.add_argument(
+        "--arm-legacy-seed-faces", action="store_true",
+        help=("one-variable arm (kt>=2): restore the min-of-stretched-cells "
+              "rescale in the loop-entry seed instead of NEMO's "
+              "e3u_0*(1+r3u) (dynspg_ts.F90:487 / stprk3_stg.F90:440). "
+              "NEMO has no such switch"))
     parser.add_argument("--oracle", type=Path, default=DEFAULT_ORACLE)
     parser.add_argument("--new-entry", type=Path, default=DEFAULT_NEW_ENTRY)
     parser.add_argument("--certified-entry", type=Path, default=DEFAULT_CERTIFIED_ENTRY)
@@ -636,6 +875,21 @@ def main(argv=None) -> int:
     # Exit codes: 0 AT-BAR, 1 DEBT (measured), 2 gate failure (a planted
     # control that did not land, a dirty tree, a bad oracle record).
     try:
+        require(not (args.arm_legacy_seed_faces and args.kt < 2),
+                "--arm-legacy-seed-faces is a kt>=2 walk control; at kt=1 the "
+                "seed multiplies a zero velocity and the flag would be inert")
+        if args.kt >= 2:
+            require(args.oracle_root is not None and args.entry_root is not None,
+                    "--kt >= 2 needs --oracle-root and --entry-root")
+            report = run_kt_walk(args.kt, args.oracle_root, args.entry_root,
+                                 allow_dirty=args.allow_dirty,
+                                 legacy_seed_faces=args.arm_legacy_seed_faces)
+            text = json.dumps(report, indent=2, sort_keys=True) + "\n"
+            if args.output:
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                args.output.write_text(text)
+            print(text, end="")
+            return 0 if report["status"] == "AT-BAR" else 1
         report = run(
             args.oracle,
             args.new_entry,

@@ -189,7 +189,7 @@ def test_shipped_leapfrog_second_step_threads_one_entry_n2_bundle_to_gm_redi():
     from legoesm.ocean.physics.vertical_mixing.tke import TKEEntryN2Bundle
 
     state, model = _channel(
-        K_h=2.0e4, A_h=2.0e4, implicit_vmix_e3t_now_divisor=True,
+        K_h=2.0e4, A_h=2.0e4, zdf_implicit_solver_evaluation="nemo_literal",
         gm_redi=GMRediConfig(
             kappa_GM=0.0, kappa_Redi=1.0e3,
             slope_scheme="nemo_iso_lap", slope_positions="nemo_native",
@@ -584,10 +584,10 @@ def test_finalize_lbc_masking_is_idempotent():
 
 def _nemo_mlf_channel(n_lat=8, n_lon=16, **cfg_kw):
     """Same IC/grid as ``_channel`` but wired to the REAL dispatch
-    (``outer_integrator="nemo_mlf"``, requiring the NEMO divisor per the
-    construction-time hard-require) -- exercises ``model.step()``/
-    ``_step_jitted``, not the private method directly."""
-    cfg_kw.setdefault("implicit_vmix_e3t_now_divisor", True)
+    (``outer_integrator="nemo_mlf"``, requiring the NEMO implicit-ZDF
+    identity per the construction-time hard-require) -- exercises
+    ``model.step()``/``_step_jitted``, not the private method directly."""
+    cfg_kw.setdefault("zdf_implicit_solver_evaluation", "nemo_literal")
     cfg_kw["outer_integrator"] = "nemo_mlf"
     return _channel(n_lat=n_lat, n_lon=n_lon, **cfg_kw)
 
@@ -615,14 +615,15 @@ def test_step_jitted_rejects_unknown_outer_integrator():
 
 def test_nemo_mlf_requires_nemo_kmm_divisor():
     """Resolved decision 4: ``outer_integrator="nemo_mlf"`` construction-time
-    HARD-REQUIRES ``implicit_vmix_e3t_now_divisor=True`` -- a transcription
-    that still permits a non-NEMO implicit-solve divisor stops being a
-    transcription at that row (stpmlf.F90 row 22/29). The standalone-A/B NULL
-    result governs only the EXISTING leapfrog card; it does not waive the
-    requirement here."""
-    with pytest.raises(ValueError, match="implicit_vmix_e3t_now_divisor"):
+    HARD-REQUIRES the NEMO implicit-ZDF identity
+    ``zdf_implicit_solver_evaluation="nemo_literal"`` -- a transcription that
+    still permits a non-NEMO implicit-solve divisor stops being a
+    transcription at that row (stpmlf.F90 row 22/29, trazdf.F90:219-221).
+    NEMO's e3w(Kmm) divisor is no longer a separate flag; it comes with that
+    identity, so this is the guard that carries it."""
+    with pytest.raises(ValueError, match="zdf_implicit_solver_evaluation"):
         _channel(K_h=2.0e4, A_h=2.0e4, outer_integrator="nemo_mlf",
-                 implicit_vmix_e3t_now_divisor=False)
+                 zdf_implicit_solver_evaluation="shared_thomas")
 
 
 def test_nemo_mlf_rejects_surface_stress_implicit():
@@ -633,7 +634,7 @@ def test_nemo_mlf_rejects_surface_stress_implicit():
     it rather than run an un-transcribed row 30."""
     with pytest.raises(ValueError, match="surface_stress_implicit"):
         _channel(K_h=2.0e4, A_h=2.0e4, outer_integrator="nemo_mlf",
-                 implicit_vmix_e3t_now_divisor=True,
+                 zdf_implicit_solver_evaluation="nemo_literal",
                  surface_stress_implicit=True)
 
 
@@ -754,17 +755,18 @@ def test_dino_outer_integrator_env_knob_roundtrips(monkeypatch, tmp_path):
                 raise SystemExit(
                     f"Unknown DINO_OUTER_INTEGRATOR={_OI!r}: expected "
                     "'leapfrog' or 'nemo_mlf'")
-            # nemo_mlf HARD-REQUIRES the NEMO e3w(Kmm) divisor at construction
-            # (spec resolved decision 4) -- auto-force it so the env knob
-            # alone is sufficient, matching how the recipe would set both
-            # fields together on a real named-recipe A/B variant (P5).
+            # nemo_mlf HARD-REQUIRES the NEMO implicit-ZDF identity at
+            # construction (spec resolved decision 4; it carries NEMO's
+            # e3w(Kmm) divisor) -- auto-force it so the env knob alone is
+            # sufficient, matching how the recipe would set both fields
+            # together on a real named-recipe A/B variant (P5).
             mc = mc._replace(
                 outer_integrator=_OI,
-                implicit_vmix_e3t_now_divisor=(
-                    True if _OI == "nemo_mlf"
-                    else mc.implicit_vmix_e3t_now_divisor))
+                zdf_implicit_solver_evaluation=(
+                    "nemo_literal" if _OI == "nemo_mlf"
+                    else mc.zdf_implicit_solver_evaluation))
         RESULT_OUTER_INTEGRATOR = mc.outer_integrator
-        RESULT_DIVISOR = mc.implicit_vmix_e3t_now_divisor
+        RESULT_DIVISOR = mc.zdf_implicit_solver_evaluation
         """)
     script = tmp_path / "_snippet.py"
     script.write_text(snippet)
@@ -776,7 +778,7 @@ def test_dino_outer_integrator_env_knob_roundtrips(monkeypatch, tmp_path):
     monkeypatch.setenv("DINO_OUTER_INTEGRATOR", "nemo_mlf")
     ns = runpy.run_path(str(script))
     assert ns["RESULT_OUTER_INTEGRATOR"] == "nemo_mlf"
-    assert ns["RESULT_DIVISOR"] is True
+    assert ns["RESULT_DIVISOR"] == "nemo_literal"
 
     monkeypatch.setenv("DINO_OUTER_INTEGRATOR", "bogus")
     with pytest.raises(SystemExit, match="DINO_OUTER_INTEGRATOR"):

@@ -266,7 +266,9 @@ def _channel(outer="leapfrog", after="off", partial=True, dino_drag=False,
         barotropic_time_filter="nemo_boxcar_centred",
         barotropic_after_reconcile=after)
     if outer == "nemo_mlf":
-        kw["implicit_vmix_e3t_now_divisor"] = True   # construction requirement
+        # construction requirement: nemo_mlf is a literal transcription, so it
+        # hard-requires the NEMO implicit-ZDF identity (which carries e3w(Kmm))
+        kw["zdf_implicit_solver_evaluation"] = "nemo_literal"
     if dino_drag:
         kw.update(bottom_drag_scheme="nemo_quadratic", zdf_drag_in_matrix=True,
                   zdf_baroclinic_only=True, barotropic_drag_substep=True)
