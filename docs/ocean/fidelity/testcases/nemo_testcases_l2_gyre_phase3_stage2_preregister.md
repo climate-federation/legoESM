@@ -182,3 +182,20 @@ corrected Kaa, and downstream transport clear the bar and the legacy arm
 restores the former residual at scale.  Synthetic coastal-q and `/4` versus
 `/sum(tmask)` violation tests are required; the isomorphism tripwire must keep
 one `pv_flux_ene` implementation.
+
+### Direct `vor_ene` operand stream
+
+Neither coastal-q nor the available F-thickness selector moves the raw ENE
+residual at a discriminating scale.  Before another implementation change, a
+config-local WRITE-only `dynvor.F90` extension will record, for the stage-2
+`Kmm=3` call only, each level's post-division `zwz=(f+curl)/e3f_vor` and the
+already-materialized `zwx=e2u*e3u*u`, `zwy=e1v*e3v*v` operands
+(`dynvor.F90:469-490,518-522`).  It will not alter shipped NEMO source.
+
+The candidate gate will obtain the same intermediates from the sole
+`pv_flux_ene` implementation through a WRITE-only return option.  Header,
+dimensions, fp64, finite owned values, central registry, and a planted q
+violation must pass; ordinary stage, kt=2, and restart hashes must remain
+bit-identical.  The first operand over `1e-15` owns the next boundary.  Only
+after that direct comparison may a one-variable arm be constructed, with
+movement printed relative to the faithful residual before any label.
