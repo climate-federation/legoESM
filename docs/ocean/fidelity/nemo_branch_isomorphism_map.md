@@ -1320,6 +1320,31 @@ Corrections to existing rows:
   kt=3 `u` `9.079022e-09 -> 9.105049e-09`, kt=10/60 unchanged to 7 digits, kt=2
   bit-identical on both cards).  Its 6120-step statistics ride with the
   SSH-walk seed round (`nemo_testcases_l1_ssh_walk_preregister.md`).
+- **S-18 (seed corollary, 2026-09-02, SSH-walk round)** — a THIRD construction of
+  NEMO's `e3u(Kmm)` existed on the barotropic LOOP-ENTRY seed of every card that
+  does not carry `mesh_mask.nc` (LOCK/OVERFLOW): `barotropic_latlon_cgrid.py`
+  `_depth_average_to_faces` (`seed_evaluation="nemo_literal"`, card path) took the
+  per-level MIN of the two STRETCHED T-cell thicknesses (`min_cell_to_uface(h_k)`)
+  rescaled by `H_u_nemo / min(H_west, H_east)`, summed against the literal inverse
+  `1/H_u_nemo`.  Where the two columns' reference depths differ (the OVERFLOW-zps
+  shelf break) the level-min and the column-min follow different columns, so the
+  weights sum to `hu_0 (1+r3t_e)(1+r3u)/(1+r3t_w)` and a uniform velocity is returned
+  scaled by `(1+r3t_e)/(1+r3t_w)` — measured `1.05e-9 -> 3.1e-7 -> 4.3e-6 m/s`
+  against NEMO's carried `uu_b(Kbb)` at kt=2..4 with NEMO's EXACT entry state, the
+  re-injected owner of the kt>=3 OVERFLOW SSH walk (kt=10 SSH `9.237e-5 -> 1.474e-6`).
+  **COLLAPSED** onto the one shared kernel (`vertical.py`
+  `nemo_qco_card_mesh_operands` + `nemo_qco_live_face_geometry_from_operands`, the same
+  pair `_nemo_ws_qco_stage_faces` and the MLF tracer transport use) in
+  `_nemo_literal_seed_from_card_mesh`; the carried-mesh (DINO) seed is untouched;
+  `_NEMOWSRK3TestHooks.legacy_seed_min_rule_faces` is the harness-only control.  The
+  PE-lane depth-average / slow-forcing use of `min_cell_to_uface` (`opl:1364`,
+  `omlc h_u_pre`) is normalised by its own sum and therefore unbiased for a uniform
+  velocity; it remains the MOM6/MITgcm hFacW citation.  It is NOT the owner of the
+  residual `slow_u` operand: the independent review measured its normalised weight
+  error against NEMO's `e3u_0/hu_0` rule at the OVERFLOW kt=2 entry as `4.65e-9` at
+  ONE face (u-column 23, a 26|26 partial-cell mismatch) and `<= 1.7e-16` everywhere
+  else, far too small to supply `slow_u = 1.30e-10` (see the SSH-walk receipt, open
+  item 2, for the discriminating measurement).
 - **S-33/S-34** (dynzdf operands), bottom-localised, measured inert for the front columns
   (no partial cell at columns 20/21) and bounded by NEMO's whole stage-3 increment
   `1.09e-08` elsewhere: legoESM `e3uw(Kmm)` = midpoint of `e3t_now` (12.25 m at a

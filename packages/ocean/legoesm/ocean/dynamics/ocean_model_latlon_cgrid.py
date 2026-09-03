@@ -1069,6 +1069,12 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # UP3 fluxes always pick the upwind curvature by the sign of the advected
     # velocity pair -- so public WS-RK3 cards never select this.
     legacy_up3_transport_sign_selector: bool = False
+    # One-variable ablation of the barotropic loop-entry seed fix: restore the
+    # min-of-stretched-cells rescale in the card-mesh ``nemo_literal`` seed
+    # instead of NEMO's ``e3u_0*(1+r3u)`` (``dynspg_ts.F90:487`` seeds with
+    # ``puu_b(Kmm)``, imposed by ``stprk3_stg.F90:439-446``).  NEMO has no
+    # such switch; public cards never select this.
+    legacy_seed_min_rule_faces: bool = False
 
 
 def _nemo_ws_qco_stage_faces(eta, h_ref, u_mask_3d, v_mask_3d, grid):
@@ -4814,6 +4820,16 @@ class LatLonCGridOceanModel:
                     _baro_seed = dict(
                         _baro_seed,
                         _nemo_primary_transport_average_test_override=False)
+                if self._nemo_ws_test_hooks.legacy_seed_min_rule_faces:
+                    _baro_seed = dict(
+                        _baro_seed,
+                        _nemo_legacy_seed_faces_test_override=True)
+            elif self._nemo_ws_test_hooks.legacy_seed_min_rule_faces:
+                raise ValueError(
+                    "legacy_seed_min_rule_faces is a one-variable control of "
+                    "the standard-halo explicit substep solver's loop-entry "
+                    "seed; this configuration routes the external solve "
+                    "elsewhere, so the control would silently not land.")
             state_new, (Hu_avg, Hv_avg) = _baro_fn(
                 state_mid, dt_s, _nbaro,
                 _grid, _zc, _cfg_b,

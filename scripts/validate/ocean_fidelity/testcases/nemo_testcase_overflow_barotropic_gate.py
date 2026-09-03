@@ -184,8 +184,8 @@ def read_oracle_trace(path: Path, expected_kt: int = 1) -> dict:
                 )
             substeps.append(frames)
         require(handle.read(1) == b"", f"{path}: trailing unregistered bytes")
-    require(kbb == kmm and kaa != kbb and {kbb, kaa} <= {1, 3},
-            f"{path}: unexpected time levels {(kbb, kmm, kaa)}")
+    require((kbb, kmm, kaa) == ((1, 1, 3) if kt % 2 == 1 else (3, 3, 1)),
+            f"{path}: unexpected time levels {(kbb, kmm, kaa)} at kt={kt}")
     return {
         "header": {
             "version": version,
@@ -704,9 +704,10 @@ def run(
     }
 
 
-def _score_substeps(arm_name: str, oracle: dict, candidate: dict) -> tuple[list, dict | None]:
+def _score_substeps(arm_name: str, oracle: dict, candidate: dict) -> tuple[list, dict | None, list]:
     substeps = []
     first_over_bar = None
+    masked_over_bar = []
     for jn, (reference_frames, candidate_frames) in enumerate(
         zip(oracle["substeps"], candidate["substeps"]), start=1
     ):
@@ -720,26 +721,27 @@ def _score_substeps(arm_name: str, oracle: dict, candidate: dict) -> tuple[list,
                 "oracle_time_level": FRAME_REGISTRY[name]["time_level"],
                 "oracle_source": FRAME_REGISTRY[name]["source"],
             })
-            if not bool(np.asarray(candidate["masks"][STAGGER[name]]).any()):
-                # No active face of this stagger in the certified tank (the
-                # three-row OVERFLOW has no wet V face): the row is a stored-
-                # value inventory, never an alignment claim, so it cannot be
-                # the first divergence.  score_frame already says so for the
-                # at-bar case; a non-zero value on a face the update masks
-                # (ssvmask, dynspg_ts.F90:757-760) is reported, not scored.
-                row["status"] = "UNMEASURED"
-                row["reason"] = (
-                    "no active face of this stagger; stored values reported "
-                    "as an inventory only")
+            # A stagger with no active face in the certified tank (the
+            # three-row OVERFLOW has no wet V face) keeps score_frame's
+            # gross-zero verdict exactly as the kt=1 gate does, but is not an
+            # alignment row: a value on a face the update masks (ssvmask,
+            # dynspg_ts.F90:757-760) can never be the first divergence.
+            row["alignment_row"] = bool(
+                np.asarray(candidate["masks"][STAGGER[name]]).any())
             rows.append(row)
-            if first_over_bar is None and row["status"] == "DEBT":
+            if row["status"] == "DEBT" and not row["alignment_row"]:
+                masked_over_bar.append({
+                    "substep": jn, "frame": name,
+                    "absolute_max": row["absolute_max"]})
+            if (first_over_bar is None and row["status"] == "DEBT"
+                    and row["alignment_row"]):
                 first_over_bar = {
                     "substep": jn, "frame": name,
                     "normalized_max_abs": row["normalized_max_abs"],
                     "absolute_max": row["absolute_max"],
                 }
         substeps.append({"substep": jn, "rows": rows})
-    return substeps, first_over_bar
+    return substeps, first_over_bar, masked_over_bar
 
 
 def run_kt_walk(kt: int, oracle_root: Path, entry_root: Path, *,
@@ -769,10 +771,17 @@ def run_kt_walk(kt: int, oracle_root: Path, entry_root: Path, *,
         candidate = capture_legoesm_trace(
             flux_form_override=None, kt=kt, reseed_entry=reseed,
             legacy_seed_faces=legacy_seed_faces)
-        substeps, first = _score_substeps(arm_name, oracle, candidate)
+        substeps, first, masked = _score_substeps(arm_name, oracle, candidate)
         arms[arm_name] = {
             "substeps": substeps,
             "first_over_bar": first,
+            "masked_stagger_rows_over_bar": masked,
+            "reseeded_fields": (
+                ["T", "S", "u", "v", "eta"] if reseed is not None else []),
+            "fields_kept_from_the_card_initial_state": (
+                ["w (diagnostic, recomputed in step)", "every None-seeded "
+                 "history slot (bt_hist, eta_before, F_slow_*_prev, ...)"]
+                if reseed is not None else []),
             "backend": candidate["backend"],
             "dtypes": candidate["dtypes"],
             "reseeded_from_oracle_entry": candidate["reseeded_from_oracle_entry"],
@@ -858,6 +867,9 @@ def main(argv=None) -> int:
     # Exit codes: 0 AT-BAR, 1 DEBT (measured), 2 gate failure (a planted
     # control that did not land, a dirty tree, a bad oracle record).
     try:
+        require(not (args.arm_legacy_seed_faces and args.kt < 2),
+                "--arm-legacy-seed-faces is a kt>=2 walk control; at kt=1 the "
+                "seed multiplies a zero velocity and the flag would be inert")
         if args.kt >= 2:
             require(args.oracle_root is not None and args.entry_root is not None,
                     "--kt >= 2 needs --oracle-root and --entry-root")

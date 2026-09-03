@@ -168,6 +168,13 @@ def test_oracle_reader_pins_the_requested_step_and_rotated_time_levels(tmp_path)
         handle.write(struct.pack("=i", 1))
     with pytest.raises(gate.GateError, match="unexpected time levels"):
         gate.read_oracle_trace(path, expected_kt=2)
+    odd = tmp_path / "trace_kt3.bin"          # kt parity pins the rotated triple
+    _write_zero_trace_kt(odd, 3)
+    assert gate.read_oracle_trace(odd, expected_kt=3)["header"]["Kbb"] == 1
+    _write_zero_trace_kt(odd, 2)              # a kt=2 triple labelled kt=3
+    odd.write_bytes(odd.read_bytes()[:20] + struct.pack("=i", 3) + odd.read_bytes()[24:])
+    with pytest.raises(gate.GateError, match="unexpected time levels"):
+        gate.read_oracle_trace(odd, expected_kt=3)
 
 
 def test_kt_walk_masked_stagger_rows_are_inventory_not_first_divergence():
@@ -184,9 +191,13 @@ def test_kt_walk_masked_stagger_rows_are_inventory_not_first_divergence():
                   "U": np.ones_like(zeros, dtype=bool),
                   "V": np.zeros_like(zeros, dtype=bool)},
     }
-    substeps, first = gate._score_substeps("arm", oracle, candidate)
+    substeps, first, masked = gate._score_substeps("arm", oracle, candidate)
     rows = {row["name"].rsplit(".", 1)[-1]: row for row in substeps[0]["rows"]}
-    assert rows["pgf_v"]["status"] == "UNMEASURED"
-    assert rows["pgf_v"]["absolute_max"] == 1.0e-3
+    # The kt=1 gate's gross-zero verdict is kept on the masked stagger ...
+    assert rows["pgf_v"]["status"] == "DEBT"
+    assert rows["pgf_v"]["alignment_row"] is False
+    assert masked == [{"substep": 1, "frame": "pgf_v", "absolute_max": 1.0e-3}]
+    # ... but it can never be the first divergence; the active row is.
+    assert rows["u_exit"]["alignment_row"] is True
     assert first == {"substep": 1, "frame": "u_exit",
                      "normalized_max_abs": 1.0e-9, "absolute_max": 1.0e-9}
