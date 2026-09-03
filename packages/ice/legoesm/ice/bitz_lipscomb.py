@@ -174,10 +174,19 @@ def option2_salinity_profile(S_bulk, sss):
     return S_bulk[..., None] * (alpha[..., None] * z + (1.0 - alpha[..., None]))
 
 
-def ice_enthalpy_from_temperature(T_K, S, constants: IceConstantsConfig):
+def ice_enthalpy_from_temperature(T_K, S, constants: IceConstantsConfig, *,
+                                  _nemo_order: bool = True):
     """NEMO positive energy-of-melting `icevar.F90:938-946` [J m-3]."""
 
     T_m = -constants.liquidus_slope * S
+    if not _nemo_order:
+        T_c = jnp.minimum(T_K - constants.T0, -_EPS10)
+        T_c = jnp.minimum(T_c, T_m)
+        return constants.rho_ice * (
+            constants.c_ice * (T_m - T_c)
+            + constants.latent_fusion * jnp.maximum(0.0, 1.0 - T_m / T_c)
+            - constants.c_ocean * T_m
+        )
     # Preserve the assignment order in `icevar.F90:938-946`: first clip the
     # Kelvin temperature, then form Celsius, and finally evaluate the three
     # parenthesised energy terms.  This is the selected SI3 identity's
@@ -194,7 +203,8 @@ def ice_enthalpy_from_temperature(T_K, S, constants: IceConstantsConfig):
     return constants.rho_ice * ((sensible + latent) - ocean)
 
 
-def ice_temperature_from_enthalpy(e, S, constants: IceConstantsConfig | None = None):
+def ice_temperature_from_enthalpy(e, S, constants: IceConstantsConfig | None = None,
+                                  *, _nemo_order: bool = True):
     """Invert enthalpy [K] in the selected NEMO or legacy convention.
 
     Supplying ``constants`` selects NEMO's positive energy-of-melting
@@ -216,6 +226,17 @@ def ice_temperature_from_enthalpy(e, S, constants: IceConstantsConfig | None = N
         return T_c + canonical_constants.T_freeze
 
     T_m = -constants.liquidus_slope * S
+    if not _nemo_order:
+        b = (
+            (constants.c_ocean - constants.c_ice) * T_m
+            + e / constants.rho_ice
+            - constants.latent_fusion
+        )
+        disc = jnp.maximum(
+            b * b - 4.0 * constants.c_ice * constants.latent_fusion * T_m,
+            0.0,
+        )
+        return constants.T0 - (b + jnp.sqrt(disc)) / (2.0 * constants.c_ice)
     # Written order of `icethd.F90:233-243`.  NEMO multiplies by its
     # precomputed reciprocals and applies `* 0.5 * r1_rcpi`; the algebraically
     # equivalent combined division loses observable ULPs in the oracle gate.
@@ -296,7 +317,8 @@ def snow_enthalpy_from_temperature(T_K, constants: IceConstantsConfig):
     )
 
 
-def snow_temperature_from_enthalpy(e, constants: IceConstantsConfig):
+def snow_temperature_from_enthalpy(e, constants: IceConstantsConfig, *,
+                                   _nemo_order: bool = True):
     """Invert snow enthalpy with NEMO's global-to-equivalent bounds.
 
     `icevar.F90:404-416` reconstructs this diagnostic immediately before each
@@ -305,10 +327,15 @@ def snow_temperature_from_enthalpy(e, constants: IceConstantsConfig):
     """
     inverse_rho_snow = 1.0 / constants.rho_snow
     inverse_c_ice = 1.0 / constants.c_ice
-    unbounded = constants.T0 + (
-        -e * inverse_rho_snow * inverse_c_ice
-        + constants.latent_fusion * inverse_c_ice
-    )
+    if _nemo_order:
+        unbounded = constants.T0 + (
+            -e * inverse_rho_snow * inverse_c_ice
+            + constants.latent_fusion * inverse_c_ice
+        )
+    else:
+        unbounded = constants.T0 + (
+            -e / constants.rho_snow + constants.latent_fusion
+        ) / constants.c_ice
     return jnp.clip(unbounded, constants.T0 - 100.0, constants.T0)
 
 
@@ -368,6 +395,7 @@ def _si3_zdf_bl99_step(
     _maximum_iterations: int = _MAX_ITERATIONS,
     _nemo_branch_ranges: bool = True,
     _nemo_snow_temperature_bounds: bool = True,
+    _nemo_eos_order: bool = True,
 ) -> SI3ZDFResult:
     """Iterative 3+3-layer BL99/P07 solve for the resolved ORCA1 arm.
 
@@ -383,9 +411,13 @@ def _si3_zdf_bl99_step(
     h_snow = jnp.asarray(h_snow, dtype=dtype)
     T_surface_input = jnp.asarray(T_surface, dtype=dtype)
     S_layers = jnp.asarray(S_layers, dtype=dtype)
-    T_i_old = ice_temperature_from_enthalpy(e_ice, S_layers, constants)
+    T_i_old = ice_temperature_from_enthalpy(
+        e_ice, S_layers, constants, _nemo_order=_nemo_eos_order
+    )
     e_snow = jnp.asarray(e_snow, dtype=dtype)
-    T_s_old = snow_temperature_from_enthalpy(e_snow, constants)
+    T_s_old = snow_temperature_from_enthalpy(
+        e_snow, constants, _nemo_order=_nemo_eos_order
+    )
     if not _nemo_snow_temperature_bounds:
         # Gate-only one-variable arm reproducing the pre-Phase-4 operand.
         inverse_rho_snow = 1.0 / constants.rho_snow
@@ -585,7 +617,9 @@ def _si3_zdf_bl99_step(
     Tsu, _, Ti, Ts, qns, _, iterations = jax.lax.fori_loop(
         0, _maximum_iterations, body, init
     )
-    e_i = ice_enthalpy_from_temperature(Ti, S_layers, constants)
+    e_i = ice_enthalpy_from_temperature(
+        Ti, S_layers, constants, _nemo_order=_nemo_eos_order
+    )
     e_s = snow_enthalpy_from_temperature(Ts, constants)
 
     # Interface conductive diagnostics, `icethd_zdf_bl99.F90:743-761`.
@@ -903,6 +937,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
                            _nemo_snow_temperature_bounds: bool = True,
                            _nemo_basal_layer_loop: bool = True,
                            _snow_ice_salinity: bool = True,
+                           _nemo_eos_order: bool = True,
                            ) -> SI3StepTrace:
     """Execute the selected `ice_thd` chain and retain every oracle boundary."""
 
@@ -911,6 +946,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         state.T_surface, forcing, dt, constants,
         _nemo_branch_ranges=_zdf_branch_ranges,
         _nemo_snow_temperature_bounds=_nemo_snow_temperature_bounds,
+        _nemo_eos_order=_nemo_eos_order,
     )
     post_zdf = state._replace(T_surface=zdf.T_surface, e_ice=zdf.e_ice,
                               e_snow=zdf.e_snow)
