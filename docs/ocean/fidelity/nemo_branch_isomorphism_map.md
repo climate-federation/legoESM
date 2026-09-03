@@ -1448,3 +1448,63 @@ not the depth-mean weights (see the S-18 bullet above); **S-21** -- the
 "SHARED across the three RK3 cards" statement now also holds for the
 momentum advection's thickness, which had silently diverged from the
 transport's.
+
+## 2026-09-03 S-48 follow-up — the stage depth-mean WEIGHTS, and the census row
+
+Receipt: `testcases/nemo_testcases_l1_census_receipt.md`; instrument
+`scripts/validate/ocean_fidelity/testcases/nemo_testcase_census_map_probe.py`
+(`faces` command).  No model code changed.
+
+**The rule.**  NEMO removes a REFERENCE-weighted depth mean from every WS-RK3
+stage velocity:
+
+```fortran
+zub(ji,jj) = uu_b(ji,jj,Kaa) - SUM( e3u_0(ji,jj,:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj)  ! stprk3_stg.F90:440
+hu_0(:,:)  = hu_0(:,:) + e3u_0(:,:,jk) * umask(:,:,jk)                                 ! domain.F90:145
+```
+
+legoESM removes a LIVE-weighted one: `_replace_stage_mean` uses
+`sum(u*h_u_pre)/H_u_pre` with `h_u_pre = min_cell_to_uface(h_k_pre)`
+(`ocean_model_latlon_cgrid.py:4264`), `h_k_pre` being the ssh-stretched
+thickness.  This was the phantom round's open item 3, recorded UNMEASURED.
+
+**RETRACTED before it was believed.**  A first pass claimed the two weightings
+are algebraically identical, because under z*/qco every level of a column
+carries one `1 + r3u`.  That is true of NEMO's `e3u_0`-based mean and FALSE of
+legoESM's, which takes a MIN over two columns whose Jacobians differ, so the
+per-level argmin can switch sides.  The first pass had measured
+reference-against-reference.  Caught by the diff reviewer, whose independent
+probe reproduced the corrected values to the last digit.
+
+**Measured** (free run from the card's initial state, fp64, gate u frame):
+
+| kt | max `\|live - ref\|` per-level weight | wet levels differing `> 1e-12` | at gate faces 20/21/22 |
+|---:|---:|---:|---:|
+| 1 | `0.0` | 0 | `0.0` |
+| 2 | `2.323655e-09` | 26 | `6.94e-18` |
+| 5 | `3.761720e-06` | 105 | `6.94e-18` |
+| 9 | `8.609751e-06` | 167 | `6.94e-18` |
+| 10 | `7.570658e-06` | 173 | `6.94e-18` |
+
+Reference-against-reference is still EXACT (`e3u_0` vs the model's reference
+face thickness, `hu_0` vs its column depth, and the two reference weight
+ratios: all `0.0` over every wet face), so the GEOMETRY is certified; the
+branch is in the WEIGHT the stage mean uses, and only where a face's two
+columns differ in depth.
+
+**Disposition.**  CLOSED at the `k=24` injection faces (gate 20/21/22 have
+equal bathymetry on both sides, so the min picks one uniform Jacobian and the
+difference is one ULP at every step) -- which is what the `k=24` ownership
+question needed.  **OPEN, and now the ranked next arm, on every staircase
+face**, where `8.6e-6` by kt=9 is the same order as the `k=24` injections
+(`7.06e-12` at kt=2, `4.18e-9` at kt=3) that the OVERFLOW trajectory rows are
+made of.  Landing it means using NEMO's reference weights in
+`_replace_stage_mean`; that changes carried state, so it needs its own
+preregistration and an ASK.
+
+**Not a finding about the census.**  The same round instrumented the one
+OVERFLOW statistic still outside the NEMO scheme spread
+(`final_water_mass_census`) and could NOT attribute it: the row is not monotone
+in bulk mixing (NEMO's own FCT4 run moves it the same direction as legoESM
+while moving the dilution measure the opposite way), so no operator attribution
+to that row is supported yet.  See the receipt's retraction list.
