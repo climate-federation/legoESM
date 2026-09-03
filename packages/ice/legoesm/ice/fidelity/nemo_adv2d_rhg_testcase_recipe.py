@@ -8,7 +8,10 @@ arm; it does not introduce another sea-ice model or another transport kernel.
 
 from __future__ import annotations
 
-from typing import NamedTuple
+import hashlib
+import json
+from pathlib import Path
+from typing import NamedTuple, cast
 
 import jax.numpy as jnp
 import numpy as np
@@ -26,6 +29,7 @@ from legoesm.ice.fidelity.nemo_adv2d_testcase_recipe import (
     apply_ice_adv2d_source_corrections,
     apply_ice_adv2d_zapsmall,
     build_ice_adv2d_card,
+    ice_adv2d_card_contract_sha256,
 )
 from legoesm.ice.transport import (
     SI3PratherMoments,
@@ -51,6 +55,7 @@ _RHG_REQUIRED_SHAPE = (103, 103)  # ocean.output:64-65, two-cell halo
 _RHG_REQUIRED_JPL = 1
 _RHG_REQUIRED_NLAY_I = 3
 _RHG_REQUIRED_NLAY_S = 3
+ICE_ADV2D_RHG_RESTART_FORMAT = "legoesm-ice-adv2d-rhg-state-v1"
 
 
 class ICEAdv2DRHGState(NamedTuple):
@@ -231,9 +236,7 @@ def validate_ice_adv2d_rhg_card(
         card.dynamics_config.n_subcycles,
     )
     if actual != expected:
-        raise ValueError(
-            f"ICE_ADV2D_RHG selector composition {actual!r} != {expected!r}"
-        )
+        raise ValueError(f"ICE_ADV2D_RHG selector composition {actual!r} != {expected!r}")
     state = card.initial_state if state is None else state
     array_leaves = (
         state.contents,
@@ -320,3 +323,138 @@ def step_ice_adv2d_rhg_card(
         dynamics=dynamics,
         t_surface=corrected.t_surface,
     )
+
+
+def ice_adv2d_rhg_card_contract_sha256(card: ICEAdv2DRHGCard) -> str:
+    """Stable selector/parameter identity for restart compatibility."""
+
+    cfg = card.dynamics_config
+    payload = {
+        "base": ice_adv2d_card_contract_sha256(card.base),
+        "case": card.case,
+        "transport_scheme": card.transport_scheme,
+        "dynamics_scheme": card.dynamics_scheme,
+        "rheology_staggering": card.rheology_staggering,
+        "dynamics": {name: getattr(cfg, name) for name in cfg._fields},
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def save_ice_adv2d_rhg_restart(
+    path: Path,
+    card: ICEAdv2DRHGCard,
+    state: ICEAdv2DRHGState,
+    *,
+    completed_steps: int,
+) -> None:
+    """Write all rung-3.3 prognostics, including stresses and moments."""
+
+    validate_ice_adv2d_rhg_card(card, state)
+    if not 0 <= completed_steps <= card.base.n_steps:
+        raise ValueError("ICE_ADV2D_RHG completed_steps out of range")
+    payload: dict[str, np.ndarray] = {
+        "format": np.asarray(ICE_ADV2D_RHG_RESTART_FORMAT),
+        "completed_steps": np.asarray(completed_steps, dtype=np.int64),
+        "card_contract_sha256": np.asarray(ice_adv2d_rhg_card_contract_sha256(card)),
+        "contents": np.asarray(state.contents),
+        "bulk_salt_diagnostic": np.asarray(state.bulk_salt_diagnostic),
+        "t_surface": np.asarray(state.t_surface),
+        "u_ice": np.asarray(state.dynamics.u_ice_u),
+        "v_ice": np.asarray(state.dynamics.v_ice_v),
+        "stress1_i": np.asarray(state.dynamics.stress1_t),
+        "stress2_i": np.asarray(state.dynamics.stress2_t),
+        "stress12_i": np.asarray(state.dynamics.stress12_f),
+    }
+    payload.update(
+        {f"moment_{index}": np.asarray(value) for index, value in enumerate(state.moments)}
+    )
+    np.savez(path, **payload)  # type: ignore[arg-type]
+
+
+def load_ice_adv2d_rhg_restart(path: Path, card: ICEAdv2DRHGCard) -> tuple[ICEAdv2DRHGState, int]:
+    """Load a fail-closed rung-3.3 restart without defaulting any carry."""
+
+    validate_ice_adv2d_rhg_card(card)
+    state_names = {
+        "contents",
+        "bulk_salt_diagnostic",
+        "t_surface",
+        "u_ice",
+        "v_ice",
+        "stress1_i",
+        "stress2_i",
+        "stress12_i",
+    }
+    moment_names = {f"moment_{index}" for index in range(5)}
+    metadata = {"format", "completed_steps", "card_contract_sha256"}
+    expected = state_names | moment_names | metadata
+    with np.load(path, allow_pickle=False) as archive:
+        if set(archive.files) != expected:
+            missing = sorted(expected - set(archive.files))
+            extra = sorted(set(archive.files) - expected)
+            raise ValueError(f"ICE_ADV2D_RHG restart keys missing={missing}, extra={extra}")
+        if archive["format"].item() != ICE_ADV2D_RHG_RESTART_FORMAT:
+            raise ValueError("ICE_ADV2D_RHG restart format mismatch")
+        if archive["card_contract_sha256"].item() != ice_adv2d_rhg_card_contract_sha256(card):
+            raise ValueError("ICE_ADV2D_RHG restart card contract mismatch")
+        if archive["completed_steps"].dtype.kind not in "iu":
+            raise ValueError("ICE_ADV2D_RHG restart clock is not integer")
+        completed_steps = int(archive["completed_steps"].item())
+        arrays = {name: archive[name].copy() for name in state_names | moment_names}
+    if not 0 <= completed_steps <= card.base.n_steps:
+        raise ValueError("ICE_ADV2D_RHG restart clock out of range")
+    template = card.initial_state
+    templates = {
+        "contents": template.contents,
+        "bulk_salt_diagnostic": template.bulk_salt_diagnostic,
+        "t_surface": template.t_surface,
+        "u_ice": template.dynamics.u_ice_u,
+        "v_ice": template.dynamics.v_ice_v,
+        "stress1_i": template.dynamics.stress1_t,
+        "stress2_i": template.dynamics.stress2_t,
+        "stress12_i": template.dynamics.stress12_f,
+    }
+    for name, reference in templates.items():
+        value = arrays[name]
+        reference_array = np.asarray(reference)
+        if value.shape != reference_array.shape or value.dtype != reference_array.dtype:
+            raise ValueError(f"ICE_ADV2D_RHG restart {name} shape/dtype mismatch")
+    for index, reference in enumerate(template.moments):
+        value = arrays[f"moment_{index}"]
+        reference_array = np.asarray(reference)
+        if value.shape != reference_array.shape or value.dtype != reference_array.dtype:
+            raise ValueError(f"ICE_ADV2D_RHG restart moment_{index} shape/dtype mismatch")
+    dynamics = SI3CGridAEVPState(
+        u_ice_u=jnp.asarray(arrays["u_ice"]),
+        v_ice_v=jnp.asarray(arrays["v_ice"]),
+        stress1_t=jnp.asarray(arrays["stress1_i"]),
+        stress2_t=jnp.asarray(arrays["stress2_i"]),
+        stress12_f=jnp.asarray(arrays["stress12_i"]),
+    )
+    state = ICEAdv2DRHGState(
+        contents=jnp.asarray(arrays["contents"]),
+        bulk_salt_diagnostic=jnp.asarray(arrays["bulk_salt_diagnostic"]),
+        moments=cast(
+            SI3PratherMoments,
+            tuple(jnp.asarray(arrays[f"moment_{index}"]) for index in range(5)),
+        ),
+        dynamics=dynamics,
+        t_surface=jnp.asarray(arrays["t_surface"]),
+    )
+    validate_ice_adv2d_rhg_card(card, state)
+    return state, completed_steps
+
+
+__all__ = (
+    "ICE_ADV2D_RHG_RESTART_FORMAT",
+    "ICEAdv2DRHGCard",
+    "ICEAdv2DRHGState",
+    "build_ice_adv2d_rhg_card",
+    "ice_adv2d_rhg_card_contract_sha256",
+    "load_ice_adv2d_rhg_restart",
+    "save_ice_adv2d_rhg_restart",
+    "step_ice_adv2d_rhg_card",
+    "validate_ice_adv2d_rhg_card",
+)
