@@ -219,7 +219,7 @@ def overflow_resolved_coverage(
         "tracer_advection": (cfg.tracer_advection, "fct2"),
         "tracer_time_integrator": (cfg.tracer_time_integrator, "rk3_ws"),
         "momentum_advection": (cfg.momentum_advection, "flux_form"),
-        "momentum_flux_scheme": (cfg.momentum_flux_scheme, "upwind3"),
+        "momentum_flux_scheme": (cfg.momentum_flux_scheme, "nemo_up3"),
         "vertical_momentum_scheme": (cfg.vertical_momentum_scheme, "nemo_up3"),
         "pgf_scheme": (cfg.pgf_scheme, "nemo_sco"),
         "adaptive_implicit_vertadv": (cfg.adaptive_implicit_vertadv, True),

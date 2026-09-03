@@ -27,7 +27,7 @@ the sbatch + `LatLonCGridOceanConfig` defaults for everything not passed.
 | eos_depth | geometric | geometric | geometric | geometric | **insitu** (default) |
 | tracer_advection | fct2 | fct2 | fct2 | fct2 | **superbee** |
 | momentum_advection | vector_invariant | flux_form | flux_form | vector_invariant | vector_invariant |
-| momentum_flux_scheme | upwind (inert) | upwind3 | upwind3 | n/a | upwind (inert) |
+| momentum_flux_scheme | upwind (inert) | nemo_up3 | nemo_up3 | n/a | upwind (inert) |
 | vertical_momentum_scheme | nemo_advective | nemo_up3 | nemo_up3 | nemo_advective | **upwind_perturbation** |
 | vorticity_scheme | een_total | **al81** | **al81** | ene_total | **al81** |
 | coriolis_scheme | explicit_ab2 | **matsuno_split** | **matsuno_split** | explicit_ab2 | **matsuno_split** |
@@ -1296,17 +1296,54 @@ un-collapsible, however faithful, because re-association is exactly what
 changes the last bits. That is a property of the bar, not a physics verdict on
 this row, and it will recur on every future collapse that touches a tracer.
 
-## 2026-09-02 S-44 — `dyn_adv_up3` upwind SELECTOR (new row; owner of the OVERFLOW stage-3 `u` debt)
+## 2026-09-02 S-46 — `dyn_adv_up3` T-point upwind SELECTOR (new row; owner of the OVERFLOW stage-3 `u` debt)
 
 | id | NEMO routine | NEMO switch | cards | legoESM implementation | selector | classification |
 |---|---|---|---|---|---|---|
-| S-44 | `dyn_adv_up3` T-point upwind branch: `zui = uu_i + uu_{i+1}` (dynadv_up3.F90:166,169-170), flux magnitude `zFu_i + zFu_{i+1}` (:176); F-point cross fluxes by the transport pair (:179-187) | none (one routine) | L O | `opl:4078 _up3_reconstruct` reached from `_bc_horizontal_momentum_advection_flux_form`; the WS-RK3 stage program passes `up3_upwind_selector="velocity"` at every stage (`omlc:4070` step-entry call, `_mom_pert_ws` stages 2-3); every other caller keeps the historical transport-sign selector | none public; private `_NEMOWSRK3TestHooks.legacy_up3_transport_sign_selector` (gate ablation arm only) | SHARED on the WS-RK3 cards (fixed `42ac525cc`, `8d6756a42`); **recorded, un-flipped choice** for a non-RK3 NEMO card on `flux_form_upwind3` (`nemo_recipe.py:334`), which still runs the transport sign — ASK before flipping |
+| S-46 | `dyn_adv_up3` T-point upwind branch (dynadv_up3.F90:166,169-170 `zui = uu_i + uu_{i+1}`, `zvj` :172; magnitude by the transport pair :176; F-point cross fluxes :179-187 and vertical flux :294-295 by the transport pair) | none (one routine) | L O; plus any card citing NEMO for its momentum advection | `opl:4114 _up3_reconstruct`, reached from `_bc_horizontal_momentum_advection_flux_form` — ONE implementation, TWO reference arms (sub-table below) | `momentum_flux_scheme` (`nemo_up3` / `oceananigans_up3`); no bare `upwind3` | SHARED — the T-point selector follows the REFERENCE the caller names, not the time integrator (scoped 2026-09-02) |
+
+The two reference arms of that one implementation:
+
+| arm | reference | T-point upwind selector | `momentum_flux_scheme` | selected by |
+|---|---|---|---|---|
+| NEMO | NEMO 5.0.2 `dynadv_up3.F90:166,169-170` (`zui = puu(ji)+puu(ji+1)`) | the ADVECTED-VELOCITY pair | `nemo_up3` | LOCK, OVERFLOW cards (`nemo_testcase_recipe.py`); `nemo_recipe.py` `momentum_core="flux_form_upwind3"` |
+| Oceananigans | `UpwindBiased(order=3)`, `upwind_biased_advective_fluxes.jl:18-24` (`ũ = symmetric_interpolate(Ax_qᶠᶜᶜ, U)`, the transport) | the TRANSPORT pair | `oceananigans_up3` | `oceananigans_v1` decks — Silvestri UP3 jet (`silvestri_schemes.py`), `internal_tide` comparator |
 
 Measured: OVERFLOW-zps kt=1 stage-3 baroclinic `u` `2.598798e-07 -> 4.551736e-10 m/s`
 (replay corr `0.999994`, slope `1.00015`); LOCK_EXCHANGE-zco stage 2/3 and kt=2
 `u`, `T` all at the `1e-15` bar (`2.9e-17`, `2.3e-17`, `T = 0.0`).  Receipt:
 `nemo_testcases_l1_phase3_receipt.md`, "UP3 upwind-selector round"; preregistration
 `nemo_testcases_l1_stage3_baroclinic_preregister.md`.
+
+**2026-09-02 SCOPE FIX — the selector is keyed by the REFERENCE, not by the
+time integrator.**  The row above originally read "the WS-RK3 stage program
+passes `up3_upwind_selector="velocity"`; every other caller keeps the
+transport-sign selector", i.e. a NEMO-referenced card that was not WS-RK3 ran
+Oceananigans' rule.  That was a hidden branch point: ONE public scheme value
+(`momentum_flux_scheme="upwind3"`) served two references whose T-point
+selectors genuinely differ, and which one you got depended on
+`momentum_time_integrator`.  Split into the two named arms above; the bare
+`"upwind3"` is removed from `VALID_MOMENTUM_FLUX_SCHEME`, so a caller that does
+not name its reference now fails validation instead of inheriting one.  The
+integrator gate in `omlc` is gone; the private
+`_NEMOWSRK3TestHooks.legacy_up3_transport_sign_selector` survives unchanged as
+the stage-sweep gate's one-variable ablation arm.
+
+The one caller whose arm this MOVES is `nemo_recipe.py`'s
+`momentum_core="flux_form_upwind3"` option on a non-WS-RK3 integrator (no card
+selects it; the `rest`/`eady` setups can construct it, and `gyre` cannot —
+it forces `rk3_ws`, which requires the `nemo_up3` vertical arm the UP3
+`_momentum_options` block does not set).  Its numbers are in the commit
+message and the phase-3 receipt.
+
+**Open follow-up (NOT silently taken here).** NEMO evaluates `dyn_adv_up3`'s
+curvature at `Kbb`; `stprk3_stg.F90:316,326-331` passes `Kmm` as BOTH velocity
+levels, which is why the WS-RK3 lane is faithful with one live velocity.  A
+NEMO UP3 caller on an MLF/leapfrog integrator would additionally need the
+`Kbb` curvature, which legoESM does not supply — such a caller does not exist
+today (no MLF card selects `flux_form_upwind3`), and the `rest`/`eady` NEMO
+recipe option is a single-level RK3 lane, not MLF.  Do not hand a future MLF
+UP3 card `Kmm` and call it faithful.
 
 Corrections to existing rows:
 

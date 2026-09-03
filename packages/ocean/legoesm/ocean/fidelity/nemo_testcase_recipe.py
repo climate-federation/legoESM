@@ -59,7 +59,10 @@ def _model_config(
         # stages from Kbb with dt/3, dt/2, and dt.
         tracer_time_integrator="rk3_ws",
         momentum_advection="flux_form",
-        momentum_flux_scheme="upwind3",
+        # dynadv_up3.F90:166,169-170 -- the NEMO-referenced UP3 arm (the
+        # T-point fluxes select the upwind curvature by the advected-
+        # velocity pair).  See UP3_REFERENCE_SELECTOR.
+        momentum_flux_scheme="nemo_up3",
         momentum_time_integrator="rk3_ws",
         # key_RK3 is a single scheme identity: Kmm transports + two-step FCT
         # + per-stage external-mode correction + distinct un_adv/hu transport.

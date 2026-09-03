@@ -145,7 +145,7 @@ proposals to resolve before more trajectory claims.
 | `rk3_ws_stage_barotropic_correction=True` | both | NEMO HYB stage program, `stprk3_stg.F90:118-168,204-234,433-446` |
 | `rk3_ws_momentum_transport_reconcile=True` | both | NEMO `un_adv/hu` correction, `stprk3_stg.F90:257-274,315-333` |
 | `momentum_advection="flux_form"` | both | `Lcfg:82-85`; `Ocfg:83-86`; `src/OCE/DYN/dynadv.F90:78-90` |
-| `momentum_flux_scheme="upwind3"` | both | same namelist rows; `src/OCE/DYN/dynadv_up3.F90:141-365` |
+| `momentum_flux_scheme="nemo_up3"` | both | same namelist rows; `src/OCE/DYN/dynadv_up3.F90:141-365`.  (Renamed from the unqualified `"upwind3"` 2026-09-02: that one value served BOTH the NEMO and the Oceananigans UP3, whose T-point upwind selectors differ — see the map doc's S-46.) |
 | `vertical_momentum_scheme="nemo_up3"` | both | same active UP3 call; `dynadv.F90:87-89`, `dynadv_up3.F90:239-365` |
 | `pgf_scheme="nemo_sco"` | both | `Lcfg:95-98`; `Ocfg:96-99`; `src/OCE/DYN/dynhpg.F90:117-123,340-390` |
 | `pgf_quadrature="nemo_trapezoid"` | both | NEMO `dynhpg.F90:340-380` surface/interior recurrence |
@@ -215,7 +215,7 @@ composition families, not an attempt to enumerate their Cartesian product.
 | 4 | WS-RK3 + both stage correction and transport reconcile `False` | embeds legoESM's one-post-solve split inside NEMO's stage loop | **(b)** experimental flag/warning; never an ordinary card |
 | 5 | only one of tracer/momentum integrators is `rk3_ws` | NEMO `key_RK3` owns one coupled momentum/tracer stage program | **(a)** reject; no reference or required control needs the decoupled program |
 | 6 | `nemo_rk3_two_step` + `ppm_fct` | validation permits it, but the certified cases and literal tests exercise only FCT2 (`nn_fct_h=nn_fct_v=2`) | **(a)** reject until an exact NEMO FCT4/PPM mapping and reference configuration are certified |
-| 7 | `vertical_momentum_scheme="nemo_up3"` with horizontal momentum other than flux-form/upwind3 | NEMO `dynadv` selects horizontal and vertical UP3 as one routine | **(a)** require the coupled flux-form/upwind3 selections |
+| 7 | `vertical_momentum_scheme="nemo_up3"` with horizontal momentum other than flux-form/`nemo_up3` | NEMO `dynadv` selects horizontal and vertical UP3 as one routine | **(a)** require the coupled flux-form/`nemo_up3` selections |
 | 8 | `eos="nemo_teos10"` + non-geometric (`insitu`) depth | NEMO passes geometric `gdept`; this pairing caused the measured phase-3 EOS/HPG error | **(a)** require geometric depth |
 | 9 | `eos_depth="geometric"` + a non-NEMO EOS | the new depth arm has no cited non-NEMO reference | **(a)** restrict the arm to cited EOS configurations |
 | 10 | `pgf_quadrature="nemo_trapezoid"` + PGF other than `nemo_sco` | NEMO trapezoid was transcribed as part of `hpg_sco`; validation enforces only the forward implication | **(a)** enforce the reverse pairing too |
@@ -258,7 +258,7 @@ The remaining accepted reject dispositions are executable guards:
 - family 5: tracer and momentum WS-RK3 must be selected together;
 - family 6: this certified scheme identity accepts FCT2, not the unattested
   FCT4/PPM composition;
-- family 7: `nemo_up3` requires the single flux-form/upwind3 momentum program;
+- family 7: `nemo_up3` requires the single flux-form/`nemo_up3` momentum program;
 - families 8--10: `nemo_teos10` and geometric depth are bidirectionally paired,
   as are `nemo_sco` and `nemo_trapezoid`;
 - family 11: `validate_nemo_testcase_card` pins each named oracle's filter,
@@ -1786,7 +1786,11 @@ the tracer stages and for momentum stages 2-3 only.
 Physics/oracle reviewer: SHIP.  Confirmed the `:166-187` mapping line by
 line; flagged (a) the no-transport default keeping the transport sign is a
 hidden choice for any non-RK3 NEMO card on `flux_form_upwind3`
-(`nemo_recipe.py:334`) — recorded, not flipped (ASK); (b) the stage-1
+(`nemo_recipe.py:334`) — recorded, not flipped (ASK); **CLOSED 2026-09-02**:
+the selector is now keyed by the REFERENCE the caller's
+`momentum_flux_scheme` names (`nemo_up3` / `oceananigans_up3`), not by the
+time integrator, and the unqualified `"upwind3"` is refused — see the map
+doc's S-46; (b) the stage-1
 finding above; (c) the remaining `4.55e-10` sits at the bottom, not where
 the replay's remainder sat — attribution to the ZDF operands was then
 MEASURED and excluded (above).

@@ -162,7 +162,43 @@ VALID_WENO_MOMENTUM = frozenset({"weno5", "weno7", "weno9"})
 VALID_WENO_SMOOTHNESS = frozenset({"split", "standard"})
 # Reconstruction schemes for the advected velocity in the flux-form path
 # (config.momentum_flux_scheme; only used when momentum_advection="flux_form").
-VALID_MOMENTUM_FLUX_SCHEME = frozenset({"upwind", "centered", "upwind3"})
+#
+# The two 3rd-order upwind-biased ("UP3") arms are the SAME kappa=1/3
+# reconstruction with DIFFERENT upwind selectors for the T-point (same-
+# direction) fluxes, because their reference models differ there.  They are
+# separate scheme names so a card NAMES the reference it claims instead of
+# inheriting one from its time integrator:
+#
+#   "nemo_up3"          NEMO 5.0.2 dynadv_up3.F90.  The T-point along-flow
+#                       fluxes select the upwind curvature by the sign of the
+#                       ADVECTED-VELOCITY pair -- ``zui = puu(ji,jj,jk,Kmm) +
+#                       puu(ji+1,jj,jk,Kmm)`` (:166), used at :169-170 (and
+#                       ``zvj`` at :172) -- while the flux MAGNITUDE is the
+#                       transport pair (:176).  The F-point cross fluxes
+#                       (:179-187, zFuj/zFvi) and the vertical flux (:294-295,
+#                       zFwi) select by the TRANSPORT pair.  Same routine, and
+#                       so the same name, as the vertical arm
+#                       ``vertical_momentum_scheme="nemo_up3"``: one
+#                       dynadv_up3 program.
+#   "oceananigans_up3"  Oceananigans ``UpwindBiased(order=3)``, the "UP3" of
+#                       Silvestri et al. (2024).
+#                       ``upwind_biased_advective_fluxes.jl:18-24`` forms
+#                       ``u~ = symmetric_interpolate(Ax_q, U)`` -- the
+#                       TRANSPORT -- and upwind-biases the product by its
+#                       sign, so EVERY flux family (T-point included) selects
+#                       by the transport pair.
+#
+# There is deliberately no bare "upwind3": with ``Q = h u L`` the transport
+# pair and the velocity pair disagree wherever a thickness, a face length or
+# a mask flips a near-zero pair sum, so an unqualified name would be a hidden
+# choice of reference.  A caller that passes one fails validation.
+VALID_MOMENTUM_FLUX_SCHEME = frozenset(
+    {"upwind", "centered", "nemo_up3", "oceananigans_up3"})
+# T-point (same-direction) UP3 upwind selector per reference arm; see above.
+UP3_REFERENCE_SELECTOR = {
+    "nemo_up3": "velocity",
+    "oceananigans_up3": "transport",
+}
 # Stage-8 VERTICAL momentum-advection scheme (config.vertical_momentum_scheme),
 # independent of the HORIZONTAL momentum_advection dispatch above:
 #   "upwind_perturbation" (default, bit-identical) — 1st-order interface
@@ -4088,8 +4124,10 @@ def _up3_reconstruct(far_pos, adv_pos, adv_neg, far_neg, selector):
         selector <= 0: ( 2·adv_pos + 5·adv_neg - far_neg) / 6
 
     Reconstructs constants and linears exactly; the upstream bias supplies a
-    3rd-derivative (biharmonic-like) implicit dissipation. Silvestri et al.
-    2024 "UP3" = Oceananigans ``UpwindBiased(order=3)``.
+    3rd-derivative (biharmonic-like) implicit dissipation.  WHICH quantity is
+    handed in as ``selector`` is the reference arm's own choice, not a free
+    parameter -- see ``UP3_REFERENCE_SELECTOR`` next to
+    ``VALID_MOMENTUM_FLUX_SCHEME`` for the NEMO / Oceananigans citations.
     """
     pos = (-far_pos + 5.0 * adv_pos + 2.0 * adv_neg) / 6.0
     neg = (2.0 * adv_pos + 5.0 * adv_neg - far_neg) / 6.0
@@ -4123,24 +4161,36 @@ def _bc_horizontal_momentum_advection_flux_form(
             "Use 'vector_invariant' on tripolar, or extend this substage."
         )
     scheme = config.momentum_flux_scheme
-    # UP3 upwind SELECTOR.  NEMO dynadv_up3.F90:166-177: the T-point
-    # (same-direction) fluxes choose the upwind curvature by the sign of the
-    # ADVECTED velocity pair ``zui = uu_i + uu_{i+1}`` (:166, :169-170) while
-    # the flux magnitude is the transport pair ``zFu_i + zFu_{i+1}`` (:176);
-    # the F-point (cross) fluxes select by the transport pair (:179-187).
-    # Under WS-RK3 the stage transport carries ``zub`` (stprk3_stg.F90:273),
-    # so the two signs differ wherever ``|uu_i + uu_{i+1}| < |zub_i +
-    # zub_{i+1}|`` (OVERFLOW kt=1 stage 3: the front face, top two levels).
-    # ``"velocity"`` is NEMO's rule and is what the WS-RK3 stage program
-    # passes (scheme identity, every stage, with or without a separate
-    # transport).  ``None`` keeps the historical transport-sign selector for
-    # every other caller bit-for-bit.  Note that with ``Q = h u L`` the two
-    # rules can still differ wherever the thickness or face-length weighting
-    # flips a near-zero pair sum (partial cells, latitude-varying v-face
-    # length), so a non-RK3 NEMO card on ``flux_form``+``upwind3`` currently
-    # runs the transport rule -- a recorded, un-flipped choice.
+    # Fail-fast on an unknown reconstruction rather than falling through to the
+    # 1st-order upwind ``else`` below (dispatch hardening).  This also catches
+    # a stale bare ``"upwind3"``, which would otherwise silently become a
+    # 1st-order scheme on any path that skips the model's config validator.
+    if scheme not in VALID_MOMENTUM_FLUX_SCHEME:
+        raise ValueError(
+            f"momentum_flux_scheme must be one of "
+            f"{sorted(VALID_MOMENTUM_FLUX_SCHEME)}, got {scheme!r}")
+    # UP3 T-point upwind SELECTOR, keyed by the REFERENCE the scheme name
+    # claims (``UP3_REFERENCE_SELECTOR``, cited at its definition):
+    # ``nemo_up3`` -> the advected-velocity pair, ``oceananigans_up3`` -> the
+    # transport pair.  Both arms keep the transport pair for the F-point cross
+    # fluxes, which is what NEMO does too (dynadv_up3.F90:179-187).
+    #
+    # The two rules genuinely differ: with ``Q = h u L`` the transport pair
+    # sum is thickness- and face-length-weighted, so its sign flips relative to
+    # the plain velocity pair wherever a near-zero pair sum is re-weighted
+    # (partial cells, latitude-varying v-face length, a masked neighbour), and
+    # under WS-RK3 the stage transport additionally carries ``zub``
+    # (stprk3_stg.F90:273) -- OVERFLOW kt=1 stage 3, front face, top two
+    # levels.
+    #
+    # ``up3_upwind_selector`` is a PRIVATE override for the fidelity harness's
+    # one-variable ablation arm only (no card sets it); ``None`` = use the
+    # scheme's own reference rule.  The ``.get`` fallback is reached ONLY by
+    # "upwind"/"centered", which never consult the selector -- ``scheme`` is
+    # already checked against the closed set above, so no UP3 arm can fall
+    # through to an unnamed reference.
     if up3_upwind_selector is None:
-        up3_upwind_selector = "transport"
+        up3_upwind_selector = UP3_REFERENCE_SELECTOR.get(scheme, "transport")
     if up3_upwind_selector not in ("velocity", "transport"):
         raise ValueError(
             "up3_upwind_selector must be 'velocity' or 'transport', got "
@@ -4152,14 +4202,14 @@ def _bc_horizontal_momentum_advection_flux_form(
 
         ``adv_pos``/``adv_neg`` are the two cells straddling the face (upstream
         side for transport>0 is ``adv_pos``). ``far_pos``/``far_neg`` are the
-        next cells outward (only used by "upwind3"): ``far_pos`` is beyond
+        next cells outward (only used by the UP3 arms): ``far_pos`` is beyond
         ``adv_pos`` on the +flow upstream side, ``far_neg`` beyond ``adv_neg``.
         ``same_direction`` marks the T-point fluxes (u advected in x, v in y),
         whose UP3 branch NEMO selects by the advected-velocity pair.
         """
         if scheme == "centered":
             return 0.5 * (adv_pos + adv_neg)
-        if scheme == "upwind3":
+        if scheme in UP3_REFERENCE_SELECTOR:
             # NEMO stprk3_stg.F90:316,326-331 passes Kmm as BOTH dyn_adv
             # velocity levels, so dynadv_up3.F90:141-191 evaluates the face
             # value and curvature from the same live WS-stage velocity.
@@ -4198,7 +4248,7 @@ def _bc_horizontal_momentum_advection_flux_form(
     # ============ u-momentum at u-points (n_lat, n_lon+1) ============
     # x-flux at cell centres: transport_x_centre * u_advected_centre.
     Qx_c = 0.5 * (Q_u[:, :-1, :] + Q_u[:, 1:, :])                 # (n_lat,n_lon,nlev)
-    # u advected to cell centre; periodic-lon 4-pt stencil for upwind3. Build
+    # u advected to cell centre; periodic-lon 4-pt stencil for the UP3 arms. Build
     # the far cells from the DISTINCT core u[:, :-1] (faces 0..n_lon-1) via
     # rolls so the reconstruction does not depend on the periodic wrap column
     # u[:, n_lon] (matches the wrap-robust style of the v-momentum x-part).
@@ -4219,7 +4269,7 @@ def _bc_horizontal_momentum_advection_flux_form(
     # u to lat-faces (vertices): interior avg of adjacent u rows; poles unused (Qy=0 there).
     u_south = u[:-1, :, :]
     u_north = u[1:, :, :]
-    # Edge-padded (Neumann) 4-pt meridional stencil for upwind3. Boundary
+    # Edge-padded (Neumann) 4-pt meridional stencil for the UP3 arms. Boundary
     # vertices where the stencil is incomplete are damped by Qy→0 at the poles.
     u_pad = jnp.concatenate([u[:1, :, :], u, u[-1:, :, :]], axis=0)  # (n_lat+2,...)
     n_lat_u = u.shape[0]
