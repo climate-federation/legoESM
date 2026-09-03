@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 from pathlib import Path
 
@@ -106,6 +107,27 @@ def test_phase3_branch_census_plant_exits_red(gate) -> None:
     gate._validate_step74_branch_snapshot(operator)
     with pytest.raises(gate.phase2.GateError, match="branch census plant"):
         gate._validate_step74_branch_snapshot(operator, plant=True)
+
+
+def test_phase3_committed_censuses_retain_rows_and_branch_predicates(gate) -> None:
+    directory = Path("docs/ocean/fidelity/testcases")
+    before = json.loads(
+        (directory / "nemo_testcases_l3thd_phase3_baseline_operator.json")
+        .read_text()
+    )
+    after = json.loads(
+        (directory / "nemo_testcases_l3thd_phase3_year_gate.json").read_text()
+    )["oracle_entry_operator_sweep"]
+    assert before["over_bar_field_rows"] == 116_274
+    assert before["first_above_1e-12"]["step"] == 74
+    assert before["first_above_1e-3"]["step"] == 3837
+    assert after["first_over_bar_frame"]["step"] > before["first_over_bar_frame"]["step"]
+    assert after["first_above_1e-12"]["step"] == 4239
+    assert after["first_above_1e-3"]["step"] == 5285
+    assert after["first_above_1e-3"]["surface_melting_condition_differs"] is True
+    assert sum(len(rows) for rows in after["over_bar_by_step"].values()) == 37_659
+    assert all(len(after["full_state_snapshots"][str(step)]["frames"]) == 8
+               for step in (73, 74, 75, 76))
 
 
 def test_truncated_thermodynamics_frame_fails_closed(gate, tmp_path: Path) -> None:

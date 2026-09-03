@@ -410,7 +410,7 @@ def _branch_detail(stage_index: int, frames, candidates, offset: int,
         "entry_snow_enthalpy_all_zero": bool(np.all(snow_energy == 0.0)),
         "entry_temperature_operand_status": (
             "NOT_REGISTERED: t_s is carried by NEMO but absent from ENTRY frame"
-            if 0.0 < snow_volume <= 1.0e-20 and np.all(snow_energy == 0.0)
+            if snow_volume > 0.0 and np.all(snow_energy == 0.0)
             else "recoverable from registered enthalpy at this volume"
         ),
     }
