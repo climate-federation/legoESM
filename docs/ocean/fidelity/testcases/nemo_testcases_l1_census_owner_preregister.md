@@ -166,3 +166,43 @@ added.  FCT's bottom flux is already structurally zero where NEMO's masked
 and Aimp adjustments are source-defined at `:526-557,596-625`; only the
 budget instrument may promote a more specific mismatch.
 
+## Committed addendum: keep the raw W-metric consumers one-variable
+
+The first Arm-2 implementation attempt exposed a hidden coupling before it
+completed 612 steps: populating `z_coord.nemo_e3w_0` changed both
+`wAimp_RK3_t` **and** the active literal vertical-viscosity solve.  That run
+was interrupted and wrote no artifact.  Commit `8ace6513aa` records the
+retraction in executable code and restores a genuinely one-variable Aimp arm.
+
+This matters because NEMO uses the same raw `e3w_0*(1+r3t(Kmm))` object in
+both consumers (`domzgr_substitute.h90:131`): `wAimp_RK3_t` divides the
+vertical Courant number by it (`sshwzv.F90:812-843`), while `dyn_zdf` divides
+the constant-viscosity gradient by `e3uw(Kmm)` (`dynzdf.F90:190-205`).  The
+resolved OVERFLOW values are `rn_avm0=1e-4`, `rn_avt0=0`; therefore the ZDF
+arm is momentum-only directly and can affect T only through the evolved
+velocity.  It is a live source mismatch, not a tracer-diffusion hypothesis.
+
+The remaining frozen sequence is:
+
+1. **Arm 2a:** raw W metric in the Aimp partition only; legacy midpoint in
+   ZDF.
+2. **Arm 2b:** raw W metric in ZDF only; legacy midpoint in Aimp.
+3. **Arm 2c:** both consumers use the one NEMO W metric.  This is the actual
+   reference package and is run only if neither one-variable arm owns; it is
+   not a Frankenstein combination.
+
+Each arm starts from the now-source-faithful BBL baseline whose measured
+fp64 census distance is `0.01003241135670166`.  The frozen classifications are:
+
+* **CONFIRMED owner:** final distance `<=0.003362090947063974`, movement
+  toward NEMO `>=0.006670320409637686`, and no new OUTSIDE row;
+* **CONFIRMED contributor:** movement toward NEMO
+  `>=0.0014131684158793859` but final distance remains above spread;
+* **REFUTED:** wrong-sign movement or absolute movement
+  `<0.001003241135670166`;
+* otherwise **PLAUSIBLE**.
+
+The same stage, kt=60, frame, full-statistics, no-damping, and first-owner
+stopping rules above apply.  If the separate arms are inert but their combined
+reference package moves the result, ownership is **CONFIRMED INTERACTION**,
+not assigned to either constituent post hoc.
