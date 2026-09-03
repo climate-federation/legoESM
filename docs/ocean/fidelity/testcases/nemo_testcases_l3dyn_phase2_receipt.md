@@ -806,7 +806,8 @@ untouched.
 The full kt=1 gate scores eleven geometry/mask arrays plus all 32 transported
 fields, surface temperature, bulk salt diagnostic, U/V, and three stresses:
 50 rows are AT-BAR.  The worst row is `stress1_i`, normalized maximum
-`6.869504964868156e-16`; the candidate leaf dtype registry is only `float64`.
+`6.869504964868156e-16`; every numeric candidate row is `float64` and the three
+mask rows are `bool`.
 The binding internal trajectory plant changes `v_s` by `1e-10` and is caught
 as DEBT (`9.999999439624929e-11` normalized), proving that the scored trajectory
 path—not a helper self-comparison—goes red.
