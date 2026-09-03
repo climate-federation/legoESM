@@ -56,3 +56,24 @@ values, and a central time-level-registry entry.  The same instrumented run's
 ordinary stage and kt=2 state hashes must equal the already pinned hashes, or
 the record is rejected.  A planted pre-ZDF tracer value must become DEBT.
 No external adversarial review has occurred for this round.
+
+## ZDF Kmm time-level continuation
+
+Source inspection after the first stage-3 run identifies one narrower matrix
+boundary.  Stage 3 establishes `Kmm = N+1/2` and its `r3f` at
+`stprk3_stg.F90:218-235`; `tra_zdf` then divides both off-diagonals by
+`e3w(...,Kmm)` at `trazdf.F90:207-221`.  The candidate currently threads the
+whole-step entry SSH into that divisor.  Before the production rerun, freeze
+this discriminator as follows:
+
+- the faithful arm supplies the already-materialized stage-2/N+1/2 SSH to the
+  existing canonical `nemo_e3w_kmm` helper;
+- a private one-variable legacy arm restores only the entry-SSH operand;
+- **CONFIRM** iff the faithful final T/S rows clear `1e-15`, the legacy arm
+  reproduces the prior final residual within 1%, and the oracle-operand literal
+  recurrence is at bar;
+- **REFUTE** otherwise.  Scaling is printed before any owner label.
+
+The exploratory source-order arithmetic used to select this arm is post-hoc
+and is not citable campaign evidence; only the committed gate reruns below may
+support the receipt.
