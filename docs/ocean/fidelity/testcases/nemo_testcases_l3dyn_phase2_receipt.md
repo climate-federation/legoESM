@@ -629,6 +629,18 @@ single threshold/mask/parity branch event like the rung-3.1 column event is
 observed.  The full artifact retains every boundary and maximizing cell rather
 than only this requested sample.
 
+The round-5 reviewer-requested compounding rate is now named explicitly.  The
+clearest approximately three-percent window in the registered table is the
+`a_i` absolute residual from step 10 to step 50:
+`(4.884981308350689e-15 / 1.3322676295501878e-15)^(1/40) - 1 =
+3.3015375767554644%` per outer step.  This is a windowed rate, not a claimed
+constant exponent over all 485 steps.  Its source is the **nonlinear
+sensitivity of the rheology trajectory**: the compiled-loop stress
+re-association changes the carried C-grid velocity, and that velocity feeds the
+otherwise shared Prather arm on the following outer step.  The absence of a
+discrete predicate change in the per-boundary registry is why this is recorded
+as compounding nonlinear sensitivity rather than a branch event.
+
 At the final restart, all 23 ordinary registered fields are loaded and scored:
 four are AT-BAR (`oa_i`, `v_il`, carried `sv_i`, and surface temperature) and
 19 are DEBT.  All 80 discovered Prather moments are loaded and scored: 10 are
@@ -735,6 +747,22 @@ Rung-3.3 round-5 harness-review artifacts:
 | common phase-2 scorer | `d61709508604d645119c13cf6c7c265512498249bd29c37bf98cfbf8f484e4f3` |
 | partial gate | `f93ef19f8ffb598c671ace4035fe1fd5bf53af8845379c2d2bd16bfeca3e69b7` |
 | full gate | `3eb4293ef7c3ed444aa9a36902bdf290e45fb2be6cf46bd7c1f0384283cd6713` |
+
+Round-5 follow-up adds direct pytest execution of the 610-line full trajectory
+gate's scorer, fail-closed shape/dtype/finiteness paths, phenomenology shape
+census, and CLI artifact/derived-exit path.  This closes the earlier coverage
+gap; it does not rerun or relabel the scientific trajectory.  The direct file
+is **6 passed in 0.11 s**.  The two requested ratchets both include this test
+file and the unchanged trajectory gate: inline-physics reports 17 passing
+tests plus one skip after its two checkout-discovery failures, while the
+hardcoded-constant run reports 2,436 passed and one skip after five unrelated
+checkout/legacy-test failures.  The new test itself is exercised and green in
+both runs; its literal test fixtures are at lines 25--38 and 41--63, and its
+CLI/derived-exit control is at lines 80--92.  Ruff is clean.
+
+| round-5 follow-up artifact | SHA256 |
+|---|---|
+| direct full-trajectory-gate pytest | `1eea43ce06a884c1237ce7c47396bca539ad0a5b91693c642122a38e9de2d664` |
 
 ## Loudly UNMEASURED / deferred
 
