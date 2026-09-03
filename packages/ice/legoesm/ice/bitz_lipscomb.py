@@ -79,6 +79,7 @@ class SI3StepTrace(NamedTuple):
 
 
 _EPS10 = 1.0e-10
+_EPS20 = 1.0e-20
 _H_MIN = 1.0e-3
 _T_CONVERGENCE = 1.0e-4
 _T_SURFACE_EPS = 1.0e-5
@@ -656,6 +657,58 @@ def _piecewise_remap(thickness, enthalpy, new_total, n_layers: int = 3):
     return jnp.where(dz_new[..., None] > _EPS10, content / dz_new[..., None], 0.0)
 
 
+def _nemo_snow_enthalpy_remap(thickness, enthalpy):
+    """NEMO ``snw_ent`` cumulative remap (`icethd_dh.F90:535-613`)."""
+
+    zero = jnp.zeros_like(thickness[..., 0])
+    old_h_cumulative = [zero]
+    old_e_cumulative = [zero]
+    total = zero
+    for layer in range(4):
+        total = total + thickness[..., layer]
+        old_h_cumulative.append(total)
+        old_e_cumulative.append(
+            old_e_cumulative[-1]
+            + enthalpy[..., layer] * thickness[..., layer]
+        )
+    old_h_cumulative = jnp.stack(old_h_cumulative, axis=-1)
+    old_e_cumulative = jnp.stack(old_e_cumulative, axis=-1)
+
+    new_layer = total * (1.0 / 3.0)
+    new_h_cumulative = [zero]
+    for _ in range(3):
+        new_h_cumulative.append(new_h_cumulative[-1] + new_layer)
+    new_h_cumulative = jnp.stack(new_h_cumulative, axis=-1)
+    new_e_cumulative = jnp.zeros_like(new_h_cumulative)
+    for old in range(1, 5):
+        for new in range(1, 3):
+            selected = (
+                (new_h_cumulative[..., new] <= old_h_cumulative[..., old])
+                & (new_h_cumulative[..., new] > old_h_cumulative[..., old - 1])
+            )
+            denominator = old_h_cumulative[..., old] - old_h_cumulative[..., old - 1]
+            safe_denominator = jnp.where(selected, denominator, 1.0)
+            interpolated = (
+                old_e_cumulative[..., old - 1]
+                * (old_h_cumulative[..., old] - new_h_cumulative[..., new])
+                + old_e_cumulative[..., old]
+                * (new_h_cumulative[..., new] - old_h_cumulative[..., old - 1])
+            ) / safe_denominator
+            new_e_cumulative = new_e_cumulative.at[..., new].set(jnp.where(
+                selected, interpolated, new_e_cumulative[..., new]
+            ))
+    new_e_cumulative = new_e_cumulative.at[..., 3].set(
+        old_e_cumulative[..., 4]
+    )
+    return jnp.stack([
+        jnp.maximum(
+            0.0,
+            new_e_cumulative[..., layer] - new_e_cumulative[..., layer - 1],
+        ) / jnp.maximum(new_layer, _EPS20)
+        for layer in range(1, 4)
+    ], axis=-1)
+
+
 def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
              forcing: SI3SurfaceForcing, dt: float,
              constants: IceConstantsConfig, *,
@@ -664,6 +717,8 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
              _basal_melt: bool = True,
              _nemo_basal_layer_loop: bool = True,
              _snow_ice_salinity: bool = True,
+             _nemo_snow_sublimation_order: bool = True,
+             _nemo_snow_remap: bool = True,
              ) -> SI3ColumnArrays:
     """Resolved no-lateral-melt thickness sequence (`icethd_dh.F90:91-533`)."""
 
@@ -674,13 +729,24 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
     snow_partition = 1.0 - jnp.power(
         jnp.maximum(1.0 - a, 0.0), _SNOW_BLOW_FRACTION
     )
-    h_precip = snow_partition * forcing.snow_precipitation * dt / (
-        jnp.maximum(a, _EPS10) * constants.rho_snow
-    )
+    inverse_snow_density = 1.0 / constants.rho_snow
+    if _nemo_snow_sublimation_order:
+        h_precip = (
+            snow_partition * forcing.snow_precipitation * dt
+            * inverse_snow_density / jnp.maximum(a, _EPS10)
+        )
+        old_snow_layer = h_s0 * (1.0 / 3.0)
+    else:
+        h_precip = snow_partition * forcing.snow_precipitation * dt / (
+            jnp.maximum(a, _EPS10) * constants.rho_snow
+        )
+        old_snow_layer = h_s0 / 3.0
     hseg_s = jnp.concatenate(
-        [h_precip[..., None], jnp.broadcast_to((h_s0 / 3.0)[..., None], state.e_snow.shape)],
+        [h_precip[..., None],
+         jnp.broadcast_to(old_snow_layer[..., None], state.e_snow.shape)],
         axis=-1,
     )
+    h_s_work = h_s0 + h_precip
     # `ze_s(0)` is initialized to zero and is assigned from qprec only inside
     # NEMO's positive-snowfall arm (`icethd_dh.F90:166-177`).  In particular,
     # a nonzero qprec diagnostic with zero snowfall must not suppress the
@@ -690,33 +756,60 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
         jnp.maximum(0.0, -forcing.qprec_ice),
         0.0,
     )
-    deposition = jnp.where(
-        _snow_deposition,
-        jnp.maximum(-forcing.evaporation * dt / constants.rho_snow, 0.0),
-        0.0,
-    )
     deposited_enthalpy = constants.rho_snow * (
         constants.latent_fusion
         - constants.c_ice * (zdf.T_surface - constants.T0)
     )
-    segment_zero_enthalpy = jnp.where(
-        (deposition > 0.0) & (precip_enthalpy == 0.0),
-        deposited_enthalpy,
-        precip_enthalpy,
-    )
-    hseg_s = hseg_s.at[..., 0].add(deposition)
     eseg_s = jnp.concatenate(
-        [segment_zero_enthalpy[..., None], zdf.e_snow], axis=-1
+        [precip_enthalpy[..., None], zdf.e_snow], axis=-1
     )
-    remaining_mass = jnp.maximum(forcing.evaporation * dt, 0.0)
-    kept = []
-    for k in range(4):
-        remove = jnp.minimum(remaining_mass / constants.rho_snow, hseg_s[..., k])
-        kept.append(hseg_s[..., k] - remove)
-        remaining_mass = jnp.maximum(
-            remaining_mass - remove * constants.rho_snow, 0.0
+    if _nemo_snow_sublimation_order:
+        evaporation = jnp.where(
+            _snow_deposition | (forcing.evaporation >= 0.0),
+            forcing.evaporation,
+            0.0,
         )
-    hseg_s = jnp.stack(kept, axis=-1)
+        snow_delta = jnp.maximum(
+            -evaporation * inverse_snow_density * dt,
+            -h_s_work,
+        )
+        remaining_mass = evaporation * dt + snow_delta * constants.rho_snow
+        eseg_s = eseg_s.at[..., 0].set(jnp.where(
+            (snow_delta > 0.0) & (eseg_s[..., 0] == 0.0),
+            deposited_enthalpy,
+            eseg_s[..., 0],
+        ))
+        kept = []
+        for k in range(4):
+            delta = jnp.maximum(-hseg_s[..., k], snow_delta)
+            h_s_work = jnp.maximum(0.0, h_s_work + delta)
+            kept.append(jnp.maximum(0.0, hseg_s[..., k] + delta))
+            snow_delta = jnp.minimum(snow_delta - delta, 0.0)
+        hseg_s = jnp.stack(kept, axis=-1)
+    else:
+        deposition = jnp.where(
+            _snow_deposition,
+            jnp.maximum(-forcing.evaporation * dt / constants.rho_snow, 0.0),
+            0.0,
+        )
+        eseg_s = eseg_s.at[..., 0].set(jnp.where(
+            (deposition > 0.0) & (eseg_s[..., 0] == 0.0),
+            deposited_enthalpy,
+            eseg_s[..., 0],
+        ))
+        hseg_s = hseg_s.at[..., 0].add(deposition)
+        remaining_mass = jnp.maximum(forcing.evaporation * dt, 0.0)
+        kept = []
+        for k in range(4):
+            remove = jnp.minimum(
+                remaining_mass / constants.rho_snow, hseg_s[..., k]
+            )
+            kept.append(hseg_s[..., k] - remove)
+            remaining_mass = jnp.maximum(
+                remaining_mass - remove * constants.rho_snow, 0.0
+            )
+        hseg_s = jnp.stack(kept, axis=-1)
+        h_s_work = jnp.sum(hseg_s, axis=-1)
 
     # Surface melt consumes the four snow segments before ice
     # (`icethd_dh.F90:204-280`).  Unlike the shared bulk snow helper, this path
@@ -740,6 +833,7 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
             0.0,
         )
         melted_snow.append(hseg_s[..., k] + delta)
+        h_s_work = jnp.maximum(0.0, h_s_work + delta)
         surface_energy = jnp.maximum(
             surface_energy + delta * eseg_s[..., k], 0.0
         )
@@ -883,7 +977,7 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
     # thickness and include its seawater+snow energy as the top remap segment.
     h_i, h_s_final, flood = snow_ice_flooding(
         h_i_pre_flood,
-        jnp.sum(hseg_s, axis=-1),
+        h_s_work,
         constants.rho_ice,
         constants.rho_snow,
         constants.rho_ocean,
@@ -907,7 +1001,11 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
         flood > 0.0, flood_content / jnp.maximum(flood, 1.0e-20), 0.0
     ))
     e_i = _piecewise_remap(hseg_i, eseg_i, h_i)
-    e_s = _piecewise_remap(hseg_s, eseg_s, h_s_final)
+    e_s = (
+        _nemo_snow_enthalpy_remap(hseg_s, eseg_s)
+        if _nemo_snow_remap
+        else _piecewise_remap(hseg_s, eseg_s, h_s_final)
+    )
 
     snow_ice_salinity = (
         forcing.sss
@@ -938,6 +1036,8 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
                            _nemo_basal_layer_loop: bool = True,
                            _snow_ice_salinity: bool = True,
                            _nemo_eos_order: bool = True,
+                           _nemo_snow_sublimation_order: bool = True,
+                           _nemo_snow_remap: bool = True,
                            ) -> SI3StepTrace:
     """Execute the selected `ice_thd` chain and retain every oracle boundary."""
 
@@ -957,6 +1057,8 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         _basal_melt=_basal_melt,
         _nemo_basal_layer_loop=_nemo_basal_layer_loop,
         _snow_ice_salinity=_snow_ice_salinity,
+        _nemo_snow_sublimation_order=_nemo_snow_sublimation_order,
+        _nemo_snow_remap=_nemo_snow_remap,
     )
     # `ice_thd_temp` is diagnostic because enthalpy is prognostic (:221-247).
     post_temp1 = post_dh

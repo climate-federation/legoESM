@@ -25,11 +25,13 @@ import nemo_si3thd_phase2_gate as phase2
 BAR = phase2.BAR
 REPLAY_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l3/"
-    "c1d_omip_l3_sasice_phase4_operands"
+    "c1d_omip_l3_sasice_phase6_dh_operands_writeonly"
 )
 EXPANDED_ZDF_SHA256 = "aad46579fb2d2cc19299d7a25992802525603bb9858adf1e892ff5d85bf40442"
 REASSOC_SHA256 = "4b832b0c274d6aab032f16958224ebfb6fea603af22e1a1f1d474ff71b1e4589"
 ROUND4_ZDF_INPUT_SHA256 = "cd1b15c821f19442a840e99c067c640e5146b754fc137a2c81e88856d6ea7efd"
+DH_OPERAND_SHA256 = "9efbcb9113c2748f9085c519092848596daf0f573ba8a4625d02ee3c08bc8b14"
+DH_REMAP_SHA256 = "8fbeb7df70b3c66b4e7acdd7ab0df3ed8fc01bfaa6150dbc47e3b444638b40a5"
 REPORT_STEPS = (1, 10, 100, 1000, 3000, 5000, 8760)
 CONTINUOUS_FIELDS = ("t_su", "e_i", "e_s", "h_i", "h_s", "a_i", "sv_i")
 BASELINE_JSON = (
@@ -49,6 +51,36 @@ PHASE3_JSON = (
     / "docs/ocean/fidelity/testcases/nemo_testcases_l3thd_phase3_year_gate.json"
 )
 PHASE3_JSON_SHA256 = "77c78a816b254484afe06632d77378336ddac1153ef9190d17c555f41c45a6e1"
+PHASE5_JSON = (
+    Path(__file__).resolve().parents[4]
+    / "docs/ocean/fidelity/testcases/nemo_testcases_l3thd_phase5_year_gate.json"
+)
+PHASE5_JSON_SHA256 = "d5cd3dc274687b56370075ea51b9df82cc01bf912727e25f2078b6c26fe95cc7"
+
+DH_OPERAND_REGISTRY = {
+    0: ("INITIALIZED", "after segment initialization, before snowfall; "
+        "zdeltah/zevap are explicit unavailable zero sentinels",
+        "icethd_dh.F90:127-145"),
+    1: ("POST_PRECIP", "after snowfall, before sublimation/deposition; "
+        "zdeltah/zevap are explicit unavailable zero sentinels",
+        "icethd_dh.F90:166-177"),
+    2: ("POST_SUBLIMATION", "after sequential snow sublimation/deposition",
+        "icethd_dh.F90:179-202"),
+    3: ("POST_SNOW_MELT", "after snow-first surface melt",
+        "icethd_dh.F90:204-225"),
+    4: ("POST_ICE_SURFACE", "after ice surface melt and sublimation",
+        "icethd_dh.F90:231-315"),
+    5: ("POST_BASAL", "after basal growth/melt",
+        "icethd_dh.F90:321-424"),
+    6: ("POST_NO_ICE", "after complete-ice-loss snow removal",
+        "icethd_dh.F90:426-439"),
+    7: ("POST_FLOOD", "after basal-up snow-ice conversion",
+        "icethd_dh.F90:441-485"),
+    8: ("SNW_ENT", "inside snw_ent after cumulative remap",
+        "icethd_dh.F90:535-613"),
+    9: ("POST_SNW_ENT", "after snw_ent, before snow-temperature inverse",
+        "icethd_dh.F90:494-507"),
+}
 
 
 def _ulp_distance(left: float, right: float) -> int:
@@ -58,6 +90,342 @@ def _ulp_distance(left: float, right: float) -> int:
     phase2.require(np.isfinite(x) and np.isfinite(y), "ULP nonfinite")
     phase2.require(np.signbit(x) == np.signbit(y), "ULP sign mismatch")
     return abs(int(x.view(np.int64)) - int(y.view(np.int64)))
+
+
+def _read_dh_operands(path: Path) -> dict[int, list[dict[str, object]]]:
+    """Read the fixed C1D DH branch operands and fail closed on their order."""
+
+    grouped: dict[int, list[dict[str, object]]] = {}
+    with path.open("rb") as stream:
+        while magic := stream.read(16):
+            phase2.require(magic == b"NEMO_L3DHO_001  ", "DH-operand magic")
+            raw = stream.read(24)
+            phase2.require(len(raw) == 24, "truncated DH-operand header")
+            version, step, stage, point, bits, nval = struct.unpack("=6i", raw)
+            phase2.require(
+                (version, point, bits, nval) == (1, 1, 64, 28)
+                and stage in DH_OPERAND_REGISTRY,
+                f"DH-operand header {(version, step, stage, point, bits, nval)}",
+            )
+            values = np.fromfile(stream, np.float64, nval)
+            phase2.require(values.size == nval and np.all(np.isfinite(values)),
+                           "bad DH-operand payload")
+            grouped.setdefault(step, []).append({
+                "stage": stage,
+                "name": DH_OPERAND_REGISTRY[stage][0],
+                "time_level": DH_OPERAND_REGISTRY[stage][1],
+                "source": DH_OPERAND_REGISTRY[stage][2],
+                "h_i": values[0], "h_s": values[1],
+                "zdeltah": values[2], "zevap_rema": values[3],
+                "zq_top": values[4], "dh_snowice": values[5],
+                "zh_s": values[6:10], "ze_s": values[10:14],
+                "zh_i": values[14:19], "zh_i_old": values[19:24],
+                "sum_zh_s": values[24], "sum_zh_s_ze_s": values[25],
+                "sprecip": values[26], "evaporation": values[27],
+            })
+    phase2.require(set(grouped) == {4242, 5734},
+                   f"DH-operand steps {sorted(grouped)}")
+    for step, frames in grouped.items():
+        phase2.require([frame["stage"] for frame in frames]
+                       == [0, 1, 2, 3, 4, 5, 6, 7, 9],
+                       f"step {step}: DH-operand order")
+    return grouped
+
+
+def _read_dh_remap_operands(path: Path) -> dict[int, dict[str, object]]:
+    """Read the two registered `snw_ent` cumulative-remap records."""
+
+    result = {}
+    record_order = []
+    with path.open("rb") as stream:
+        while magic := stream.read(16):
+            phase2.require(magic == b"NEMO_L3DHR_001  ", "DH-remap magic")
+            raw = stream.read(20)
+            phase2.require(len(raw) == 20, "truncated DH-remap header")
+            version, step, stage, bits, nval = struct.unpack("=5i", raw)
+            phase2.require((version, stage, bits, nval) == (1, 8, 64, 30),
+                           f"DH-remap header {(version, step, stage, bits, nval)}")
+            values = np.fromfile(stream, np.float64, nval)
+            phase2.require(values.size == nval and np.all(np.isfinite(values)),
+                           "bad DH-remap payload")
+            phase2.require(step not in result,
+                           f"duplicate DH-remap step {step}")
+            record_order.append(step)
+            result[step] = {
+                "stage": stage, "name": DH_OPERAND_REGISTRY[stage][0],
+                "time_level": DH_OPERAND_REGISTRY[stage][1],
+                "source": DH_OPERAND_REGISTRY[stage][2],
+                "zh_s": values[0:4], "ze_s": values[4:8],
+                "zhnew": values[8], "zh_cum0": values[9:14],
+                "zeh_cum0": values[14:19], "zh_cum1": values[19:23],
+                "zeh_cum1": values[23:27], "e_s": values[27:30],
+            }
+        phase2.require(stream.read(1) == b"", "trailing DH-remap bytes")
+    phase2.require(record_order == [4242, 5734],
+                   f"DH-remap record order {record_order}")
+    return result
+
+
+def _snow_enthalpy_remap_replay(thickness, enthalpy) -> dict[str, np.ndarray | float]:
+    """Scalar binary64 replay of NEMO `snw_ent` in written order."""
+
+    thickness = np.asarray(thickness, dtype=np.float64)
+    enthalpy = np.asarray(enthalpy, dtype=np.float64)
+    zh_cum0 = np.zeros(5, dtype=np.float64)
+    zeh_cum0 = np.zeros(5, dtype=np.float64)
+    for index in range(1, 5):
+        zeh_cum0[index] = zeh_cum0[index - 1] + (
+            enthalpy[index - 1] * thickness[index - 1]
+        )
+        zh_cum0[index] = zh_cum0[index - 1] + thickness[index - 1]
+    zhnew = np.float64(np.sum(thickness) * np.float64(1.0 / 3.0))
+    zh_cum1 = np.zeros(4, dtype=np.float64)
+    for index in range(1, 4):
+        zh_cum1[index] = zh_cum1[index - 1] + zhnew
+    zeh_cum1 = np.zeros(4, dtype=np.float64)
+    for old in range(1, 5):
+        for new in range(1, 3):
+            if zh_cum1[new] <= zh_cum0[old] and zh_cum1[new] > zh_cum0[old - 1]:
+                zeh_cum1[new] = (
+                    zeh_cum0[old - 1] * (zh_cum0[old] - zh_cum1[new])
+                    + zeh_cum0[old] * (zh_cum1[new] - zh_cum0[old - 1])
+                ) / (zh_cum0[old] - zh_cum0[old - 1])
+    zeh_cum1[3] = zeh_cum0[4]
+    remapped = np.empty(3, dtype=np.float64)
+    for index in range(1, 4):
+        remapped[index - 1] = max(
+            np.float64(0.0), zeh_cum1[index] - zeh_cum1[index - 1]
+        ) / max(zhnew, np.float64(1.0e-20))
+    return {
+        "zh_cum0": zh_cum0, "zeh_cum0": zeh_cum0,
+        "zhnew": zhnew, "zh_cum1": zh_cum1,
+        "zeh_cum1": zeh_cum1, "e_s": remapped,
+    }
+
+
+def _snow_sublimation_replay(frame, rho_snow: float, dt: float) -> dict[str, object]:
+    """Scalar replay of `icethd_dh.F90:179-202` in written order."""
+
+    rho = np.float64(rho_snow)
+    timestep = np.float64(dt)
+    inverse_rho = np.float64(1.0) / rho
+    evaporation = np.float64(frame["evaporation"])
+    h_s = np.float64(frame["h_s"])
+    zh_s = np.array(frame["zh_s"], dtype=np.float64, copy=True)
+    zdeltah = max(
+        np.float64(-evaporation * inverse_rho * timestep),
+        np.float64(-h_s),
+    )
+    zevap_rema = np.float64(evaporation * timestep + zdeltah * rho)
+    for layer in range(4):
+        delta = max(np.float64(-zh_s[layer]), zdeltah)
+        h_s = max(np.float64(0.0), np.float64(h_s + delta))
+        zh_s[layer] = max(
+            np.float64(0.0), np.float64(zh_s[layer] + delta)
+        )
+        zdeltah = min(np.float64(zdeltah - delta), np.float64(0.0))
+    return {
+        "h_s": h_s, "zh_s": zh_s, "zdeltah": zdeltah,
+        "zevap_rema": zevap_rema,
+    }
+
+
+def _dh_owner_evidence(root: Path, card, *, plant=False,
+                       plant_bridge=False) -> dict[str, object]:
+    """Own the preregistered kt5734 DH interaction and retain its controls."""
+
+    from legoesm.ice.bitz_lipscomb import (
+        _piecewise_remap,
+        si3_column_step_arrays,
+    )
+
+    operand_path = root / "oracle_si3_dh_operands.bin"
+    remap_path = root / "oracle_si3_dh_remap_operands.bin"
+    phase2.require(phase2.sha256(operand_path) == DH_OPERAND_SHA256,
+                   "DH-operand SHA256")
+    phase2.require(phase2.sha256(remap_path) == DH_REMAP_SHA256,
+                   "DH-remap SHA256")
+    operands = _read_dh_operands(operand_path)
+    remaps = _read_dh_remap_operands(remap_path)
+
+    replay_rows = {}
+    for step in (4242, 5734):
+        post_precip = next(row for row in operands[step] if row["stage"] == 1)
+        post_sublimation = next(
+            row for row in operands[step] if row["stage"] == 2
+        )
+        replay = _snow_sublimation_replay(
+            post_precip, card.config.ice_constants.rho_snow, card.dt_seconds
+        )
+        sublimation_ulps = {
+            "h_s": _ulp_distance(replay["h_s"], post_sublimation["h_s"]),
+            "zdeltah": _ulp_distance(
+                replay["zdeltah"], post_sublimation["zdeltah"]
+            ),
+            "zevap_rema": _ulp_distance(
+                replay["zevap_rema"], post_sublimation["zevap_rema"]
+            ),
+            "zh_s": [
+                _ulp_distance(left, right)
+                for left, right in zip(
+                    replay["zh_s"], post_sublimation["zh_s"], strict=True
+                )
+            ],
+        }
+        phase2.require(
+            max(sublimation_ulps.values(), key=lambda value: (
+                max(value) if isinstance(value, list) else value
+            )) is not None,
+            "sublimation ULP registry",
+        )
+        phase2.require(
+            max(
+                max(value) if isinstance(value, list) else value
+                for value in sublimation_ulps.values()
+            ) <= 2,
+            f"step {step}: NEMO sublimation replay exceeds 2 ULP",
+        )
+        remap_replay = _snow_enthalpy_remap_replay(
+            remaps[step]["zh_s"], remaps[step]["ze_s"]
+        )
+        remap_ulps = [
+            _ulp_distance(left, right)
+            for left, right in zip(
+                remap_replay["e_s"], remaps[step]["e_s"], strict=True
+            )
+        ]
+        phase2.require(max(remap_ulps) <= 2,
+                       f"step {step}: snw_ent replay exceeds 2 ULP")
+        replay_rows[str(step)] = {
+            "sublimation_max_ulp": max(
+                max(value) if isinstance(value, list) else value
+                for value in sublimation_ulps.values()
+            ),
+            "sublimation_ulps": sublimation_ulps,
+            "post_sublimation_nemo": {
+                name: (value.tolist() if isinstance(value, np.ndarray)
+                       else float(value))
+                for name, value in replay.items()
+            },
+            "remap_max_ulp": max(remap_ulps),
+            "remap_ulps": remap_ulps,
+            "remapped_e_s": np.asarray(remap_replay["e_s"]).tolist(),
+        }
+
+    selected = _read_exact_steps(
+        root, (4241, 4242, 4243, 5733, 5734, 5735)
+    )
+    for step in (4242, 5734):
+        initialized = next(
+            row for row in operands[step] if row["stage"] == 0
+        )
+        _validate_exact_entry_bridge(
+            selected[step][0], initialized,
+            plant=plant_bridge and step == 5734,
+        )
+
+    def trace(step, **kwargs):
+        frames, exact = selected[step]
+        state = jax.tree.map(
+            lambda value: jnp.asarray(value, dtype=jnp.float64),
+            _exact_1d_entry(frames),
+        )
+        return jax.device_get(si3_column_step_arrays(
+            state, _forcing(exact, jnp.float64), card.dt_seconds,
+            card.config.ice_constants, **kwargs,
+        ))
+
+    enabled = trace(5734)
+    legacy = trace(
+        5734, _nemo_snow_sublimation_order=False,
+        _nemo_snow_remap=False,
+    )
+    sublimation_only = trace(5734, _nemo_snow_remap=False)
+    remap_only = trace(5734, _nemo_snow_sublimation_order=False)
+    oracle = selected[5734][0][2]
+    enabled_row = phase2._selected_from_arrays(enabled.post_dh)
+    legacy_row = phase2._selected_from_arrays(legacy.post_dh)
+    sublimation_only_row = phase2._selected_from_arrays(
+        sublimation_only.post_dh
+    )
+    remap_only_row = phase2._selected_from_arrays(remap_only.post_dh)
+    if plant:
+        enabled_row = legacy_row
+    row = _arm_row(
+        oracle["e_s"], legacy_row["e_s"], enabled_row["e_s"], "e_s"
+    )
+    phase2.require(row["improvement_factor"] >= 100.0,
+                   "DH sublimation/remap arm failed 100-fold discriminator")
+    phase2.require(
+        np.array_equal(sublimation_only_row["e_s"], legacy_row["e_s"])
+        and np.array_equal(remap_only_row["e_s"], legacy_row["e_s"]),
+        "DH single-operation arms must be final-output inert",
+    )
+    phase2.require(
+        all(np.array_equal(left[name], right[name])
+            for left, right in ((
+                phase2._selected_from_arrays(enabled.post_zdf),
+                phase2._selected_from_arrays(legacy.post_zdf),
+            ),)
+            for name in phase2.SELECTED_NAMES),
+        "DH arm changed an upstream boundary",
+    )
+    enabled_4242 = phase2._selected_from_arrays(trace(4242).post_dh)
+    legacy_4242 = phase2._selected_from_arrays(trace(
+        4242, _nemo_snow_sublimation_order=False,
+        _nemo_snow_remap=False,
+    ).post_dh)
+    phase2.require(np.array_equal(enabled_4242["h_i"], legacy_4242["h_i"]),
+                   "kt4242 isolation from snow-remap arm")
+
+    scaling = []
+    residual = np.asarray(remaps[5734]["zh_s"])
+    enthalpy = np.asarray(remaps[5734]["ze_s"])
+    for scale in (1.0, 0.5, 0.25):
+        scaled = residual * np.float64(scale)
+        nemo = np.asarray(_snow_enthalpy_remap_replay(scaled, enthalpy)["e_s"])
+        legacy_scaled = np.asarray(_piecewise_remap(
+            jnp.asarray(scaled), jnp.asarray(enthalpy), jnp.asarray(0.0)
+        ))
+        scaling.append({
+            "residual_scale": scale,
+            "residual_thickness_m": float(np.sum(scaled)),
+            "nemo_e_s_J_m3": nemo.tolist(),
+            "legacy_e_s_J_m3": legacy_scaled.tolist(),
+            "absolute_error_J_m3": float(np.max(np.abs(nemo - legacy_scaled))),
+        })
+
+    return {
+        "verdict": "CONFIRMED two-operation interaction",
+        "first_different_branch": {
+            "step": 5734,
+            "stage": "POST_SUBLIMATION",
+            "nemo_condition_and_update": (
+                "zdeltah=max(-evap/rhos*dt,-h_s); segment delta=max(-zh_s,zdeltah)"
+            ),
+            "legoesm_legacy_condition_and_update": (
+                "remove=min(remaining_mass/rho_snow,segment thickness)"
+            ),
+            "nemo_residual_segment_m": float(remaps[5734]["zh_s"][-1]),
+            "legoesm_legacy_residual_segment_m": 0.0,
+            "source": "icethd_dh.F90:179-202",
+        },
+        "replays": replay_rows,
+        "private_arms": {
+            "combined": row,
+            "sublimation_only_final_e_s": sublimation_only_row["e_s"].tolist(),
+            "remap_only_final_e_s": remap_only_row["e_s"].tolist(),
+            "legacy_final_e_s": legacy_row["e_s"].tolist(),
+            "kt4242_h_i_bit_identical": True,
+        },
+        "scaling_before_owner": scaling,
+        "operand_registry": {
+            str(stage): {"name": row[0], "time_level": row[1], "source": row[2]}
+            for stage, row in DH_OPERAND_REGISTRY.items()
+        },
+        "boundary_snapshot_steps": [4241, 4242, 4243, 5733, 5734, 5735],
+        "nemo_switch": "NONE; source operations are unconditional",
+    }
 
 
 def _read_operand_steps(path: Path) -> dict[int, list[dict[str, object]]]:
@@ -257,7 +625,7 @@ def _arithmetic_replay(root: Path, constants, *, plant=False) -> dict[str, objec
                 continue
             entry = jax.tree.map(
                 lambda value: jnp.asarray(value, dtype=jnp.float64),
-                phase2._entry_arrays(thermo[0]),
+                _exact_1d_entry(thermo),
             )
             zdf = _si3_zdf_bl99_step(
                 entry.e_ice, entry.e_snow, entry.S_layers, entry.h_ice,
@@ -330,6 +698,31 @@ def _forcing(values, dtype):
     return SI3SurfaceForcing(*(
         jnp.asarray(values[name], dtype=dtype) for name in phase2.ZDF_INPUT_NAMES
     ))
+
+
+def _exact_1d_entry(frames):
+    """Bridge NEMO's unchanged registered 1-D thickness operands."""
+
+    entry = phase2._entry_arrays(frames[0])
+    return entry._replace(
+        h_ice=np.asarray(frames[1]["h_i"], dtype=np.float64),
+        h_snow=np.asarray(frames[1]["h_s"], dtype=np.float64),
+    )
+
+
+def _validate_exact_entry_bridge(frames, dh_initialized, *, plant=False) -> None:
+    """Plantable kt5734 check that quotient reconstruction is not exact."""
+
+    bridged = _exact_1d_entry(frames)
+    if plant:
+        bridged = phase2._entry_arrays(frames[0])
+    phase2.require(
+        np.array_equal(np.asarray(bridged.h_snow),
+                       np.atleast_1d(dh_initialized["h_s"]))
+        and np.array_equal(np.asarray(bridged.h_ice),
+                           np.atleast_1d(dh_initialized["h_i"])),
+        "exact-entry 1-D thickness bridge",
+    )
 
 
 def _metric_fields(global_state: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
@@ -452,7 +845,7 @@ def _operator_sweep(thd_path: Path, zin_path: Path, card, step_function, *,
                 frames = phase2._read_thd_step(thd, kt)
                 exact = phase2._read_zdf_input_step(zin, kt)
                 chunk_frames.append(frames)
-                entries.append(phase2._entry_arrays(frames[0]))
+                entries.append(_exact_1d_entry(frames))
                 exact_inputs.append(exact)
             batch_entry = jax.tree.map(
                 lambda *values: jnp.asarray(np.concatenate(values, axis=0),
@@ -643,7 +1036,7 @@ def _scope_ablation_sweep(thd_path: Path, zin_path: Path, card) -> dict[str, obj
             for kt in range(first_step, last_step + 1):
                 chunk_frames.append(phase2._read_thd_step(thd, kt))
                 exact_inputs.append(phase2._read_zdf_input_step(zin, kt))
-                entries.append(phase2._entry_arrays(chunk_frames[-1][0]))
+                entries.append(_exact_1d_entry(chunk_frames[-1]))
             batch_entry = jax.tree.map(
                 lambda *values: jnp.asarray(np.concatenate(values, axis=0),
                                             dtype=jnp.float64),
@@ -861,7 +1254,7 @@ def _continuous_jump_attribution(continuous, operator) -> dict[str, object]:
     # These rows are post-hoc diagnostics selected from the committed complete
     # trajectory; they are not promoted to preregistered owners.
     selected = ((4239, "e_i"), (4239, "h_i"), (4943, "h_s"),
-                (5045, "t_su"), (5238, "t_su"))
+                (5495, "t_su"), (5850, "t_su"))
     rows = []
     for step, variable in selected:
         previous = continuous[step - 2]["fields"][variable]["normalised_linf"]
@@ -885,7 +1278,7 @@ def _continuous_jump_attribution(continuous, operator) -> dict[str, object]:
                 exact_step["maximum_normalised_error"] <= 2.0e-15
             ),
         })
-    initial_noise_steps = [4239, 5045]
+    initial_noise_steps = [4239, 5495]
     noise_result = all(
         operator["per_step"][step - 1]["maximum_normalised_error"] <= 2.0e-15
         for step in initial_noise_steps
@@ -899,16 +1292,18 @@ def _continuous_jump_attribution(continuous, operator) -> dict[str, object]:
         "rows": rows,
         "initial_threshold_amplification_from_2e-15_class_steps": noise_result,
         "terminal_classification": (
-            "MIXED DEBT: the kt4239 and kt5045 continuous jumps amplify "
-            "2e-15-class exact-entry differences, but later exact-entry "
-            "injections exceed 1e-12 and 1e-3; the whole remaining trajectory "
-            "cannot be classified as summation-order noise"
+            "MIXED DEBT: the kt4239 and kt5495 continuous jumps amplify "
+            "2e-15-class exact-entry differences, but kt4242 remains the first "
+            "injection above 1e-12 and subnormal-snow ZDF rows exceed 1e-3 "
+            "from kt5842; the whole remaining trajectory cannot be classified "
+            "as summation-order noise"
         ),
         "material_exact_entry_debt": material,
         "next_discriminator": (
             "bit-exact whole-step NEMO summation order is required to remove "
-            "the threshold-amplified component; operand-level DH dumps at the "
-            "first material rows are required before assigning the later debt"
+            "the threshold-amplified component; kt4242 needs a separate DH "
+            "ice-thickness operand replay, and kt5842 needs a ZDF discriminator "
+            "for NEMO-positive subnormal snow versus JAX/XLA arithmetic"
         ),
     }
 
@@ -1032,7 +1427,7 @@ def _owner_arms(root: Path, card, *, plant_deposition=False,
         frames, exact = selected[step]
         state = jax.tree.map(
             lambda value: jnp.asarray(value, dtype=jnp.float64),
-            phase2._entry_arrays(frames[0]),
+            _exact_1d_entry(frames),
         )
         return jax.device_get(si3_column_step_arrays(
             state, _forcing(exact, jnp.float64), card.dt_seconds,
@@ -1178,7 +1573,7 @@ def _melt_scaling(root: Path, card) -> dict[str, object]:
             for step in range(first_step, last_step + 1):
                 frames = phase2._read_thd_step(thd, step)
                 exact = phase2._read_zdf_input_step(zin, step)
-                entries.append(phase2._entry_arrays(frames[0]))
+                entries.append(_exact_1d_entry(frames))
                 exact_inputs.append(exact)
             state = jax.tree.map(
                 lambda *values: jnp.asarray(np.concatenate(values, axis=0),
@@ -1369,7 +1764,9 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
         plant_snow_temperature=False,
         plant_operator_trajectory=False,
         plant_outlier_attribution=False,
-        plant_scope_accounting=False) -> dict[str, object]:
+        plant_scope_accounting=False,
+        plant_dh_owner=False,
+        plant_entry_bridge=False) -> dict[str, object]:
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ice.bitz_lipscomb import si3_column_step_arrays
     from legoesm.ice.c1d_omip_l3 import (
@@ -1393,6 +1790,9 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
         root, card, plant_deposition=plant_deposition,
         plant_surface=plant_surface,
         plant_snow_temperature=plant_snow_temperature,
+    )
+    dh_owner = _dh_owner_evidence(
+        root, card, plant=plant_dh_owner, plant_bridge=plant_entry_bridge
     )
 
     def eager_step(state, forcing):
@@ -1423,7 +1823,10 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
     }
     operator = _operator_sweep(
         thd_path, zin_path, card, eager_step, retain_over_bar_rows=True,
-        snapshot_steps=(73, 74, 75, 76, 4239, 5285),
+        snapshot_steps=(
+            73, 74, 75, 76, 4239, 4241, 4242, 4243, 5285,
+            5733, 5734, 5735,
+        ),
     )
     _validate_step74_branch_snapshot(operator, plant=plant_branch_census)
     _validate_operator_trajectory(
@@ -1574,9 +1977,12 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
     )
     phase2.require(phase2.sha256(PHASE3_JSON) == PHASE3_JSON_SHA256,
                    "Phase-3 year JSON SHA256")
+    phase2.require(phase2.sha256(PHASE5_JSON) == PHASE5_JSON_SHA256,
+                   "Phase-5 year JSON SHA256")
     baseline = json.loads(BASELINE_JSON.read_text())
     baseline_operator = json.loads(BASELINE_OPERATOR_JSON.read_text())
     phase3 = json.loads(PHASE3_JSON.read_text())
+    phase5 = json.loads(PHASE5_JSON.read_text())
     baseline_first = baseline_operator["first_over_bar_frame"]
     phase2.require(
         operator["first_over_bar_frame"]["step"] > baseline_first["step"],
@@ -1596,11 +2002,7 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
     before_after = {}
     for report_step in REPORT_STEPS:
         key = str(report_step)
-        baseline_fields = phase3["continuous_trajectory"]["sample_steps"].get(key)
-        if baseline_fields is None:
-            baseline_fields = phase3["continuous_trajectory"]["per_step"][
-                report_step - 1
-            ]["fields"]
+        baseline_fields = phase5["continuous_trajectory"]["sample_steps"][key]
         before_after[key] = {
             field: {
                 "before_normalised_linf": baseline_fields[field]["normalised_linf"],
@@ -1637,9 +2039,15 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
                 BASELINE_OPERATOR_JSON
             ),
             "phase3_year_json": phase2.sha256(PHASE3_JSON),
+            "phase5_year_json": phase2.sha256(PHASE5_JSON),
+            "dh_operands": phase2.sha256(root / "oracle_si3_dh_operands.bin"),
+            "dh_remap_operands": phase2.sha256(
+                root / "oracle_si3_dh_remap_operands.bin"
+            ),
         },
         "arithmetic_replay": arithmetic,
         "owner_arms": owner_arms,
+        "round6_dh_owner": dh_owner,
         "round4_bundled_change_ablations": {
             "exact_entry": scope_ablations,
             "continuous": scope_continuous,
@@ -1683,7 +2091,7 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
             "legoesm_fp32": fp32_phen,
             "private_arm_no_surface_melt": no_surface_phen,
             "private_arm_no_basal_melt": no_basal_phen,
-            "before_legoesm_fp64": phase3["phenomenology"]["legoesm_fp64"],
+            "before_legoesm_fp64": phase5["phenomenology"]["legoesm_fp64"],
             "classification_rows": _phenomenology_rows(nemo_phen, fp64_phen, fp32_phen),
             "floor_scope": "legoesm fp32-vs-fp64, not a NEMO scheme spread",
         },
@@ -1707,6 +2115,8 @@ def main() -> None:
     parser.add_argument("--plant-operator-trajectory", action="store_true")
     parser.add_argument("--plant-outlier-attribution", action="store_true")
     parser.add_argument("--plant-scope-accounting", action="store_true")
+    parser.add_argument("--plant-dh-owner", action="store_true")
+    parser.add_argument("--plant-entry-bridge", action="store_true")
     args = parser.parse_args()
     result = run(root=args.root, plant_arithmetic=args.plant_arithmetic,
                  plant_truncate=args.plant_truncate,
@@ -1716,7 +2126,9 @@ def main() -> None:
                  plant_snow_temperature=args.plant_snow_temperature,
                  plant_operator_trajectory=args.plant_operator_trajectory,
                  plant_outlier_attribution=args.plant_outlier_attribution,
-                 plant_scope_accounting=args.plant_scope_accounting)
+                 plant_scope_accounting=args.plant_scope_accounting,
+                 plant_dh_owner=args.plant_dh_owner,
+                 plant_entry_bridge=args.plant_entry_bridge)
     rendered = json.dumps(result, indent=2, sort_keys=True)
     if args.json:
         args.json.write_text(rendered + "\n")

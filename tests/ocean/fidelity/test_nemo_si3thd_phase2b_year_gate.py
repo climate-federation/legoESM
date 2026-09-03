@@ -7,6 +7,8 @@ import json
 import sys
 from pathlib import Path
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 from legoesm.core.precision import PrecisionPolicy, set_policy
@@ -122,6 +124,91 @@ def test_round4_zdf_operand_stream_registers_tiny_snow_temperature(gate) -> None
     registry = gate.phase2.ZDF_STATE_OPERAND_REGISTRY["t_s"]
     assert "immediately before ice_thd_zdf" in registry["time_level"]
     assert "icethd.F90:343-355" in registry["source"]
+
+
+def test_round6_dh_operand_streams_replay_and_fail_closed(gate, tmp_path) -> None:
+    from legoesm.ice.bitz_lipscomb import _nemo_snow_enthalpy_remap
+
+    operands = gate._read_dh_operands(
+        gate.REPLAY_ROOT / "oracle_si3_dh_operands.bin"
+    )
+    remaps = gate._read_dh_remap_operands(
+        gate.REPLAY_ROOT / "oracle_si3_dh_remap_operands.bin"
+    )
+    assert set(operands) == {4242, 5734}
+    assert remaps[5734]["zh_s"][-1] == 2.117582368135751e-22
+    for step in (4242, 5734):
+        replay = gate._snow_enthalpy_remap_replay(
+            remaps[step]["zh_s"], remaps[step]["ze_s"]
+        )
+        np.testing.assert_array_equal(replay["e_s"], remaps[step]["e_s"])
+        np.testing.assert_array_equal(
+            np.asarray(_nemo_snow_enthalpy_remap(
+                remaps[step]["zh_s"], remaps[step]["ze_s"]
+            )),
+            remaps[step]["e_s"],
+        )
+
+    planted = tmp_path / "planted_dh_operands.bin"
+    planted.write_bytes(
+        b"PLANTED_BAD_MAGIC" + (
+            gate.REPLAY_ROOT / "oracle_si3_dh_operands.bin"
+        ).read_bytes()[16:]
+    )
+    with pytest.raises(gate.phase2.GateError, match="DH-operand magic"):
+        gate._read_dh_operands(planted)
+
+    remap_source = (
+        gate.REPLAY_ROOT / "oracle_si3_dh_remap_operands.bin"
+    ).read_bytes()
+    duplicate = tmp_path / "planted_duplicate_dh_remap.bin"
+    duplicate.write_bytes(remap_source + remap_source[:276])
+    with pytest.raises(gate.phase2.GateError, match="duplicate DH-remap step"):
+        gate._read_dh_remap_operands(duplicate)
+
+    truncated = tmp_path / "planted_truncated_dh_remap.bin"
+    truncated.write_bytes(remap_source[:-1])
+    with pytest.raises(gate.phase2.GateError, match="bad DH-remap payload"):
+        gate._read_dh_remap_operands(truncated)
+
+
+def test_round6_snow_remap_jit_and_gradients_are_finite() -> None:
+    from legoesm.ice.bitz_lipscomb import _nemo_snow_enthalpy_remap
+
+    enthalpy = jnp.asarray([1.0, 2.0, 3.0, 4.0], dtype=jnp.float64)
+    remap = jax.jit(_nemo_snow_enthalpy_remap)
+    for thickness in (
+        jnp.asarray([0.1, 0.2, 0.3, 0.4], dtype=jnp.float64),
+        jnp.asarray([0.0, 0.0, 0.0, 2.0e-22], dtype=jnp.float64),
+        jnp.zeros(4, dtype=jnp.float64),
+    ):
+        value = remap(thickness, enthalpy)
+        gradient = jax.grad(
+            lambda energy: jnp.sum(remap(thickness, energy))
+        )(enthalpy)
+        assert bool(jnp.all(jnp.isfinite(value)))
+        assert bool(jnp.all(jnp.isfinite(gradient)))
+
+
+def test_round6_combined_dh_owner_and_plant(gate) -> None:
+    card = build_c1d_omip_l3_card(oracle_root=gate.REPLAY_ROOT)
+    result = gate._dh_owner_evidence(gate.REPLAY_ROOT, card)
+    assert result["verdict"] == "CONFIRMED two-operation interaction"
+    assert result["replays"]["5734"]["sublimation_max_ulp"] == 0
+    assert result["replays"]["5734"]["remap_max_ulp"] == 0
+    assert result["private_arms"]["kt4242_h_i_bit_identical"] is True
+    assert result["private_arms"]["combined"]["improvement_factor"] > 100.0
+    with pytest.raises(
+        gate.phase2.GateError,
+        match="DH sublimation/remap arm failed 100-fold discriminator",
+    ):
+        gate._dh_owner_evidence(gate.REPLAY_ROOT, card, plant=True)
+    with pytest.raises(
+        gate.phase2.GateError, match="exact-entry 1-D thickness bridge"
+    ):
+        gate._dh_owner_evidence(
+            gate.REPLAY_ROOT, card, plant_bridge=True
+        )
 
 
 def test_operator_per_step_and_outlier_controls_exit_red(gate) -> None:
