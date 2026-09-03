@@ -118,3 +118,16 @@ scale; **REFUTE** iff it is AT-BAR.  A later one-variable correction must move
 the final residual at its scale before any owner label.  No alternate FCT
 implementation may be added: any correction belongs inside the canonical
 S-37 NEMO FCT identity and its isomorphism registration.
+
+## Stage-3 FCT transport operand
+
+The committed advection-content gate confirms the entire direct-content debt
+is already present before stage-3 physical sources.  Stage-2 T/S are already
+AT-BAR, so the next ordered FCT input is the stage-3 `zFu/zFv/zFw` triplet
+built at `stprk3_stg.F90:257-304` and consumed by `tra_adv` at `:463`.
+The existing WRITE-only transport record and private exposure hook will be
+scored on their native owned masks.  **CONFIRM transport ownership** only if a
+row is DEBT and a one-variable oracle-transport arm moves the advection-content
+or final residual at the same scale; **REFUTE** if all informative rows are
+AT-BAR.  The stage-1 structural-zero `zFw` exception does not apply to this
+stage-3 record.  A planted owned-cell perturbation must fail closed.
