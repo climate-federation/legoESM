@@ -769,6 +769,7 @@ def phenomenology(
     final: dict[str, np.ndarray],
     window: tuple[slice, slice] = (slice(None), slice(None)),
     free_drift: dict[str, float] | None = None,
+    maximum_trajectory: dict[str, float | str | bool] | None = None,
 ) -> dict:
     a0, a1 = _interior(first["a_i"])[window], final["a_i"][window]
     v0, v1 = _interior(first["v_i"])[window], final["v_i"][window]
@@ -784,7 +785,7 @@ def phenomenology(
         if not holds:
             refuted.append(claim)
 
-    report: dict[str, float | str | list[str]] = {
+    report: dict[str, object] = {
         "status": "CONFIRM",
         "sample": "step-entry kt=1 versus completed-run final ice restart",
         "domain": "surface-tmask wet window (mesh_mask.tmask bounding box)",
@@ -844,14 +845,17 @@ def phenomenology(
         h0 = np.divide(v0, a0, out=np.zeros_like(v0), where=a0 != 0.0)
         h1 = np.divide(v1, a1, out=np.zeros_like(v1), where=a1 != 0.0)
         overshoot = float(np.max(h1) - np.max(h0))
-        predicate(
-            float(np.max(a1)) == float(np.max(a0)),
-            "documented Prather maximum-concentration preservation refuted",
-        )
+        require(maximum_trajectory is not None, "rung 3.2 needs its step-boundary max series")
+        assert maximum_trajectory is not None
         predicate(overshoot > 0.0, "documented Prather ice-thickness overshoot not detected")
         report.update(
             initial_a_i_max=float(np.max(a0)),
             final_a_i_max=float(np.max(a1)),
+            maximum_concentration_documentation_status=(
+                "UNMEASURED: the shipped qualitative Prather-versus-UM remark supplies "
+                "no quantitative max-preservation band"
+            ),
+            maximum_concentration_step_boundary_diagnostic=maximum_trajectory,
             initial_h_i_max=float(np.max(h0)),
             final_h_i_max=float(np.max(h1)),
             h_i_overshoot=overshoot,
@@ -883,7 +887,42 @@ def phenomenology(
     report["refuted_predicates"] = refuted
     if refuted:
         report["status"] = "REFUTE"
+    elif rung == "3.2":
+        report["status"] = "UNMEASURED"
     return report
+
+
+def maximum_trajectory_diagnostic(
+    samples: list[dict[str, float | str]],
+) -> dict[str, float | str | bool]:
+    """Describe, but do not classify, max-concentration changes at step boundaries.
+
+    The shipped README supplies no numerical tolerance, and SI3 itself notes that
+    Prather fields are not perfectly bounded (``icedyn_adv_pra.F90:418-420``).
+    Consequently this diagnostic cannot turn the qualitative documentation into
+    an exact floating-point predicate.
+    """
+    require(len(samples) >= 2, "maximum trajectory needs at least two samples")
+    baseline = float(samples[0]["a_i_max"])
+    require(
+        baseline != 0.0,
+        "relative maximum trajectory is undefined for a zero baseline",
+    )
+    deviations = [float(row["a_i_max"]) - baseline for row in samples]
+    worst_index = max(range(len(samples)), key=lambda index: abs(deviations[index]))
+    worst = samples[worst_index]
+    return {
+        "sample": "all SI3 step-entry boundaries plus the completed-run final restart",
+        "coverage": "initial, post-steps 1..N-1, and post-step N; no within-step split states",
+        "baseline_a_i_max": baseline,
+        "all_sampled_maxima_exactly_equal": all(value == 0.0 for value in deviations),
+        "worst_signed_excursion": deviations[worst_index],
+        "worst_abs_relative_excursion": abs(deviations[worst_index]) / abs(baseline),
+        "worst_sample_kt": float(worst["kt"]),
+        "worst_sample_phase": str(worst["phase"]),
+        "minimum_sampled_a_i_max": min(float(row["a_i_max"]) for row in samples),
+        "maximum_sampled_a_i_max": max(float(row["a_i_max"]) for row in samples),
+    }
 
 
 def trajectory(root: Path, rung: str) -> dict:
@@ -934,6 +973,24 @@ def trajectory(root: Path, rung: str) -> dict:
     peak_a = max(scan, key=lambda row: row["a_i_max"])
     peak_h = max(scan, key=lambda row: row["h_i_max"])
     free_drift = free_drift_speed(root) if rung == "3.3" else None
+    final_restart = {
+        name: _restart_array(run_files(root)["restart"], name)
+        for name in ("a_i", "v_i", "u_ice")
+    }
+    maximum_diagnostic = None
+    if rung == "3.2":
+        maximum_samples: list[dict[str, float | str]] = [
+            {"phase": "step_entry", "kt": row["kt"], "a_i_max": row["a_i_max"]}
+            for row in scan
+        ]
+        maximum_samples.append(
+            {
+                "phase": "post_step_final_restart",
+                "kt": float(expected),
+                "a_i_max": float(np.max(final_restart["a_i"][window])),
+            }
+        )
+        maximum_diagnostic = maximum_trajectory_diagnostic(maximum_samples)
     return {
         "frame_count": len(paths),
         "first_sha256": frame_hashes[0],
@@ -974,12 +1031,10 @@ def trajectory(root: Path, rung: str) -> dict:
         "phenomenology": phenomenology(
             rung,
             first_arrays,
-            {
-                name: _restart_array(run_files(root)["restart"], name)
-                for name in ("a_i", "v_i", "u_ice")
-            },
+            final_restart,
             window,
             free_drift,
+            maximum_diagnostic,
         ),
     }
 
@@ -1026,6 +1081,18 @@ def main() -> int:
         }
         for event in conservation["violation_heat_events"]
     ]
+    unmeasured = [
+        "legoesm_alignment",
+        "post-dynamics_stage_arrays",
+        "landfast_L16_deferred_lane4",
+    ]
+    if args.rung == "3.2":
+        unmeasured.extend(
+            [
+                "maximum_concentration_documentation_conformance",
+                "within_step_prather_split_states",
+            ]
+        )
     print(
         json.dumps(
             {
@@ -1043,11 +1110,7 @@ def main() -> int:
                 "trajectory": traj,
                 "conservation_diagnostics": conservation,
                 "heat_residual_attribution_unclassified": attribution,
-                "unmeasured": [
-                    "legoesm_alignment",
-                    "post-dynamics_stage_arrays",
-                    "landfast_L16_deferred_lane4",
-                ],
+                "unmeasured": unmeasured,
             },
             indent=2,
             sort_keys=True,

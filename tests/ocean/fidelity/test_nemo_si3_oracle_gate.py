@@ -164,7 +164,32 @@ def test_manifest_contract_omission_and_status_downgrade_go_red(tmp_path: Path) 
     }
 
 
-def test_phenomenology_maximum_preservation_control_goes_red() -> None:
+def test_maximum_trajectory_diagnostic_is_non_vacuous() -> None:
+    equal = [
+        {"phase": "step_entry", "kt": 1.0, "a_i_max": 0.9},
+        {"phase": "step_entry", "kt": 2.0, "a_i_max": 0.9},
+        {"phase": "post_step_final_restart", "kt": 2.0, "a_i_max": 0.9},
+    ]
+    report = gate.maximum_trajectory_diagnostic(equal)
+    assert report["all_sampled_maxima_exactly_equal"] is True
+    assert report["worst_abs_relative_excursion"] == 0.0
+
+    intermediate = [dict(row) for row in equal]
+    intermediate[1]["a_i_max"] = 1.0
+    report = gate.maximum_trajectory_diagnostic(intermediate)
+    assert report["all_sampled_maxima_exactly_equal"] is False
+    assert report["worst_sample_phase"] == "step_entry"
+    assert report["worst_sample_kt"] == 2.0
+    assert report["worst_abs_relative_excursion"] > 0.1
+
+    restart = [dict(row) for row in equal]
+    restart[-1]["a_i_max"] = 0.8
+    report = gate.maximum_trajectory_diagnostic(restart)
+    assert report["all_sampled_maxima_exactly_equal"] is False
+    assert report["worst_sample_phase"] == "post_step_final_restart"
+
+
+def test_phenomenology_does_not_invent_a_maximum_preservation_band() -> None:
     shape3 = (9, 9, 1)
     final_shape3 = (5, 5, 1)
     final_shape2 = (5, 5)
@@ -174,14 +199,48 @@ def test_phenomenology_maximum_preservation_control_goes_red() -> None:
         "u_ice": np.zeros((9, 9)),
     }
     final = {
-        "a_i": np.full(final_shape3, 0.5),
+        "a_i": np.ones(final_shape3),
         "v_i": np.ones(final_shape3),
         "u_ice": np.zeros(final_shape2),
     }
-    verdict = gate.phenomenology("3.2", initial, final)
+    maximum = gate.maximum_trajectory_diagnostic(
+        [
+            {"phase": "step_entry", "kt": 1.0, "a_i_max": 1.0},
+            {"phase": "step_entry", "kt": 2.0, "a_i_max": 1.25},
+            {"phase": "post_step_final_restart", "kt": 2.0, "a_i_max": 1.0},
+        ]
+    )
+    verdict = gate.phenomenology("3.2", initial, final, maximum_trajectory=maximum)
     assert verdict["status"] == "REFUTE"
     claims = verdict["refuted_predicates"]
-    assert any("maximum-concentration preservation refuted" in row for row in claims)
+    assert not any("maximum-concentration" in row for row in claims)
+    assert verdict["maximum_concentration_documentation_status"].startswith("UNMEASURED")
+    assert verdict["maximum_concentration_step_boundary_diagnostic"][
+        "worst_abs_relative_excursion"
+    ] == 0.25
+
+
+def test_unmeasured_maximum_conformance_cannot_go_green() -> None:
+    initial = {
+        "a_i": np.ones((9, 9, 1)),
+        "v_i": np.ones((9, 9, 1)),
+        "u_ice": np.zeros((9, 9)),
+    }
+    final = {
+        "a_i": np.ones((5, 5, 1)),
+        "v_i": np.full((5, 5, 1), 2.0),
+        "u_ice": np.zeros((5, 5)),
+    }
+    maximum = gate.maximum_trajectory_diagnostic(
+        [
+            {"phase": "step_entry", "kt": 1.0, "a_i_max": 1.0},
+            {"phase": "post_step_final_restart", "kt": 1.0, "a_i_max": 1.0},
+        ]
+    )
+    verdict = gate.phenomenology("3.2", initial, final, maximum_trajectory=maximum)
+    assert verdict["refuted_predicates"] == []
+    assert verdict["h_i_overshoot"] == 1.0
+    assert verdict["status"] == "UNMEASURED"
 
 
 def test_free_drift_identity_control_goes_red() -> None:
@@ -288,7 +347,7 @@ def test_cli_clean_rung_is_green_and_refuted_rungs_are_red() -> None:
     """The controls only prove anything if the unplanted arms are not always red.
 
     Rungs 3.1 and 3.2 are expected DEBT because of MEASURED oracle behaviour
-    (19 native heat-conservation violations; the Prather maximum not preserved).
+    (19 native heat-conservation violations; no positive thickness overshoot).
     If SI3 ever stops producing those, this test goes red -- that is a signal to
     re-read section 4 of the receipt, not a regression in this lane.
     """

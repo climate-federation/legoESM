@@ -251,7 +251,8 @@ Quoted expectations, `tests/README.rst:181-186` and
 
 | number | value | verdict |
 |---|---|---|
-| `max a_i`, initial → final | 0.8999999761581422 → 0.8999999761570061 (Δ = −1.14e-12, rel 1.3e-12) | **REFUTE** as written (predicate demanded exact preservation) |
+| `max a_i`, initial → final | 0.8999999761581422 → 0.8999999761570061 (Δ = −1.14e-12, rel 1.3e-12) | **UNMEASURED documentation conformance**; endpoint values reported, no unsourced tolerance |
+| worst step-boundary `max a_i` excursion | +0.02519473924661253 at entry kt=8; 0.027994155460050227 relative | **MEASURED-UNCLASSIFIED** |
 | `max h_i`, initial → final | 2.0 → 1.2395552072741867 | — |
 | `h_i` overshoot (final − initial max) | **−0.7604** | **REFUTE** (predicate demanded strictly positive) |
 | upper side-lobe cell count (`h_i` > initial max) | **0** | **REFUTE** (predicate demanded > 0) |
@@ -260,16 +261,27 @@ Quoted expectations, `tests/README.rst:181-186` and
 | SI3 native violations | 0 | CONFIRM |
 
 Additional measurements taken to say *why* it is refuted, none of which change
-the verdict.  All of them are emitted by the committed gate
-(`trajectory.full_scan_unclassified`), not by a throwaway probe:
+the verdict. All of them are emitted by the committed gate under
+`trajectory`, not by a throwaway probe:
 
-* **Concentration maximum is not exactly preserved but is preserved to 1.3e-12**
-  at the endpoint — and it is genuinely *not* conserved mid-run: scanning all
-  485 frames, `max a_i` peaks at **0.9251947 at kt = 8**, 2.8 % above the
-  initial 0.9.  So the shipped note "Prather conserves the max values" is a
-  scheme description, not a bit-identity, and the endpoint agreement is a
-  round trip (the patch traverses ~97 of the 99 doubly-periodic cells in 485
-  steps at 0.5 m/s).
+* **RETRACTED: the exact endpoint maximum-concentration predicate.** The phase-1
+  pre-registration compared entry kt=1 to the final restart, but that is not a
+  valid quantitative operationalisation of the shipped qualitative,
+  Prather-versus-UM remark. The README supplies no tolerance, and the selected
+  source itself says its advected fields are "not perfectly bounded" before
+  `ice_var_zapneg` (`icedyn_adv_pra.F90:418-421`). The endpoint difference no
+  longer contributes a REFUTE. Documentation conformance is loudly
+  **UNMEASURED** until a source-backed band or comparative UM experiment is
+  pre-registered.
+* **The replacement is diagnostic, not a new post-hoc predicate.** The committed
+  gate scans all 485 step-entry frames plus the post-step-485 restart: initial,
+  post-steps 1--484, and post-step 485. It records the worst absolute relative
+  excursion, its sign, step and phase. `max a_i` peaks at
+  **0.9251947154047547 at entry kt=8**, +0.02519473924661253 or
+  **2.7994155460050227 %** from the initial 0.8999999761581422. This is
+  **MEASURED-UNCLASSIFIED** because it may be part of the documented
+  side-lobe/overshoot behaviour. Within-step x/y split states are not sampled
+  and remain UNMEASURED.
 * **The thickness overshoot is absent from the whole trajectory, not just the
   endpoint.** Over all 485 frames `max h_i` is largest at kt = 1 (2.0) and never
   exceeds it.  So this REFUTE is not an artefact of sampling only the final
@@ -281,16 +293,6 @@ the verdict.  All of them are emitted by the committed gate
   run cannot test at all.  So the correct reading is narrow: **this run never
   produces a thickness larger than it started with** — not "the shipped
   documentation is wrong about Prather".
-* **This predicate is NOT ill-posed, unlike rung 3.1's `h_i` centroid.**  That
-  one was voided because its baseline distance is *exactly* `0.0`, so no run of
-  any kind could satisfy it — a property provable before seeing output.  This
-  one is plainly satisfiable: the sibling advected field does exactly what it
-  demands, with `max a_i` reaching 0.9252 against an initial 0.9.  A predicate a
-  run could have passed and did not is refuted, not void.
-* **The verdict is robust to the operationalisation.** The `max a_i` REFUTE was
-  written as exact float equality, which is a hard bar; but the mid-run
-  excursion to 0.9252 is **2.8 % above** the initial maximum, so max-preservation
-  fails under any tolerance looser than 2.8 % as well.
 * **The 0.49 concentration "drift" is a first-step effect, not a leak.**
   `sum a_i` is 2924.10 at kt = 1 and 1689.30 at kt = 2, then decays slowly to
   1483.02 at kt = 485, while `sum v_i` is 141.371666 at kt = 1 and 141.371665 at
@@ -481,13 +483,15 @@ Non-vacuity: the unplanted arms are **not** all red — rung 3.3 exits 0 with
 `status: VERIFIED`, while 3.1 and 3.2 exit 1 with `status: DEBT` for the
 substantive reasons in §4.  That asymmetry is itself asserted by a test.
 
-Tests: `tests/ocean/fidelity/test_nemo_si3_oracle_gate.py` — **19 passed**
-(`19 passed in 12.16s`).  They cover the frame round trip in fp64 Fortran order,
+Tests: `tests/ocean/fidelity/test_nemo_si3_oracle_gate.py` — **21 passed**
+(`21 passed in 11.92s`). They cover the frame round trip in fp64 Fortran order,
 registry completeness/uniqueness/sourcing and its ORDER against the committed
 instrument, the Appendix-A contract dispositions, the contract-omission,
 status-downgrade, bad-`git_sha` and `ocean.output`-hash red paths, the
-phenomenology REFUTE path, the free-drift REFUTE path, the native-conservation
-REFUTE path, the input-deck binding, the rung-3.1 wet-window pin, and the six
+phenomenology REFUTE path, the maximum-trajectory diagnostic's equal,
+intermediate-only and restart-only controls, the free-drift REFUTE path, the
+UNMEASURED aggregate fail-closed path, the native-conservation REFUTE path, the
+input-deck binding, the rung-3.1 wet-window pin, and the six
 CLI control invocations above (skipped, not silently passed, if the run roots
 are absent).
 
@@ -560,10 +564,12 @@ to the runs rather than being documentation nothing checks.
   `zapsmall` and `zapneg`.  The earlier "negative open-water fraction"
   candidate is RETRACTED as refuted, and the earlier per-gridcell-threshold
   claim is RETRACTED as citing a guard that never runs on this path.
-* **Rung-3.2 `max a_i` mid-run overshoot to 0.925 at kt=8**: measured, but no
-  claim is made about whether it is the "side lobes" the shipped README
-  describes — that would need the field-shape diagnostic this phase did not
-  preregister.
+* **Rung-3.2 maximum-concentration documentation conformance: UNMEASURED.** The
+  previous exact endpoint predicate is retracted above. The step-boundary peak
+  of 0.925 at kt=8 remains measured but unclassified; no claim is made about
+  whether it is the "side lobes" the shipped README describes. No ICE_ADV2D
+  notebook exists in the shipped tree; the available documentation is the case
+  README and `tests/README.rst`.
 * **Tracker #1699 live issue contents: UNVERIFIED** — `api.github.com` was not
   reachable from this session either.
 * **Rungs 3.2/3.3 conservation silence is weak evidence**, quantified in §4:
@@ -597,6 +603,13 @@ was relabelled"; that sentence was wrong and is retracted.
 | conservation/phenomenology raise on failure | verdict reported into the JSON, **exit still nonzero** | a refuted rung must still leave its measured numbers on the record |
 | rung 3.3 scored on "the ice moved" | additionally scored on the **free-drift identity** `sqrt(utau_ice / (rho0 · rn_Cd_io))`, band 1e-2 relative | the only green rung carried the whole non-vacuity argument on two predicates that no moving run could fail; the quantitative agreement was in the prose and gated nowhere.  Measured miss 1.98e-10 |
 | — | the gate additionally emits a **full-trajectory scan** and a per-step **heat-residual attribution** | numbers this receipt cites must come from the committed instrument, not a throwaway probe |
+| entry-kt=1 versus final-restart exact `max(a_i)` predicate | **RETRACTED**; documentation conformance is UNMEASURED, with all step boundaries reported MEASURED-UNCLASSIFIED | the shipped qualitative Prather-versus-UM remark gives no float tolerance; an endpoint round trip is not trajectory evidence, and the source says the scheme is not perfectly bounded |
+
+The gate aggregates component status with `REFUTE > UNMEASURED > CONFIRM`:
+if the independent thickness predicate is made to pass in the planted test,
+rung-3.2 phenomenology remains UNMEASURED and the top-level gate remains red.
+Both maximum-concentration documentation conformance and unsampled within-step
+Prather split states also appear in the root `unmeasured` inventory.
 
 ## 11. FLAGGED FOR FUTURE DELETION
 
