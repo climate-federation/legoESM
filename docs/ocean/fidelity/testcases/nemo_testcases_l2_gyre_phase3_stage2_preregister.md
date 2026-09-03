@@ -80,3 +80,23 @@ A planted nonzero stage-2 HPG/RHS violation must become DEBT at the registered
 row.  Internal tracer-stage agreement and all downstream owner labels remain
 UNMEASURED until these checks actually run.  No external adversarial review
 has occurred for this round.
+
+## Vector-invariant stage-update continuation
+
+The valid post-`tra_adv_trp` stage-3 transport arm traces the complete
+advection-content residual upstream to the stage-2 momentum state.  Every
+source-ordered stage-2 tendency operand is already AT-BAR, so the next
+boundary is the literal stage update.  NEMO selects the velocity branch when
+`ln_dynadv_vec=.true.`: `stprk3_stg.F90:365-369` computes
+`Kaa = (Kbb + rDt*Krhs)*mask`.  The candidate instead applies the QCO
+thickness weights from the flux-form branch at `:370-386` even though that
+branch is dead for resolved GYRE.
+
+The faithful correction will select the literal velocity recurrence for
+stages 1 and 2 inside the existing WS-RK3 identity.  A private one-variable
+legacy arm will restore the old QCO-weighted recurrence.  **CONFIRM** iff the
+faithful corrected stage-2 velocity and post-`tra_adv_trp` transport clear
+`1e-15`, while the legacy arm reproduces the former stage-2/transport debt at
+its measured scale.  Otherwise report the surviving operand without an owner
+label.  Scaling precedes ownership, and no public Frankenstein switch is
+permitted.
