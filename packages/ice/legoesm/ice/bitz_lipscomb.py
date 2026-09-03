@@ -629,6 +629,7 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
              _surface_melt: bool = True,
              _basal_melt: bool = True,
              _nemo_basal_layer_loop: bool = True,
+             _snow_ice_salinity: bool = True,
              ) -> SI3ColumnArrays:
     """Resolved no-lateral-melt thickness sequence (`icethd_dh.F90:91-533`)."""
 
@@ -879,9 +880,13 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
         * (constants.rho_ice - constants.rho_snow)
         / constants.rho_ice
     )
+    snow_ice_salt_change = jnp.where(
+        _snow_ice_salinity,
+        (snow_ice_salinity - state.S_bulk) * flood,
+        0.0,
+    )
     S_bulk = state.S_bulk + (
-        (snow_ice_salinity - state.S_bulk) * flood
-        + (S_new - state.S_bulk) * dh_growth
+        snow_ice_salt_change + (S_new - state.S_bulk) * dh_growth
     ) / jnp.maximum(h_i, _EPS10)
     return SI3ColumnArrays(a, h_i, h_s_final, zdf.T_surface, e_i, e_s,
                            S_bulk, state.S_layers, state.age_volume)
@@ -897,6 +902,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
                            _basal_melt: bool = True,
                            _nemo_snow_temperature_bounds: bool = True,
                            _nemo_basal_layer_loop: bool = True,
+                           _snow_ice_salinity: bool = True,
                            ) -> SI3StepTrace:
     """Execute the selected `ice_thd` chain and retain every oracle boundary."""
 
@@ -914,6 +920,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         _surface_melt=_surface_melt,
         _basal_melt=_basal_melt,
         _nemo_basal_layer_loop=_nemo_basal_layer_loop,
+        _snow_ice_salinity=_snow_ice_salinity,
     )
     # `ice_thd_temp` is diagnostic because enthalpy is prognostic (:221-247).
     post_temp1 = post_dh
