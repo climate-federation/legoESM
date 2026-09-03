@@ -107,6 +107,7 @@ Cards: `D`=DINO kamm_mlf (MLF), `L`=LOCK_EXCHANGE-zco, `O`=OVERFLOW-zps,
 | S-43 | `tra_ldf` traldf_iso.F90 | `ln_traldf_lap`+`ln_traldf_iso` | D G A | `physics/lateral_mixing/gm_redi_latlon_cgrid.py` | `lateral_tracer_mixing`, `gm_redi.*` | see S-09 |
 | S-44 | `tra_zdf` trazdf.F90 | always | D L O G A | `omlc:7537 _apply_implicit_vertical_mixing` (same fn as `dyn_zdf`) | `zdf_implicit_solver_evaluation` | see S-33/S-34 |
 | S-45 | `tra_npc` tranpc.F90 | `ln_zdfnpc` | — | none | — | ABSENT (no card selects it) |
+| S-47 | `dyn_adv_up3` face THICKNESS: `zFu = e2u*e3u(Kmm)*uu` (dynadv_up3.F90:160), divisor `e3u(Kmm)` (:205-207), `e3u(Kmm) = e3u_0*(1+r3u(Kmm))` (domzgr_substitute.h90:127, domqco.F90:219-220); under WS-RK3 the same thickness in the stage transport (stprk3_stg.F90:273) | none (one macro) | L O | `opl:_bc_horizontal_momentum_advection_flux_form` consumes `momentum_flux_face_thickness` = the stage pair from `omlc:_nemo_ws_qco_stage_faces` (-> `vertical.nemo_qco_live_face_geometry_cgrid`, the S-18/S-21 kernel) at all four WS-RK3 `tendencies()` sites; every other caller keeps `tendencies()`' own `min_cell_to_uface(h_k)` | none public; private `_NEMOWSRK3TestHooks.legacy_hadv_min_face_thickness` (gate ablation arm only) | SHARED on the WS-RK3 cards (**LANDED 2026-09-02**, `tests/ocean/unit/test_nemo_ws_hadv_face_thickness.py`); the min-of-STRETCHED-T rule was a THIRD construction of `e3u(Kmm)` (after S-18's seed and S-21's transport), first order wrong in the ssh difference across the face; owner of the OVERFLOW kt=2 stage-3 `u` remainder, the stage-2 residual and the `slow_u` debt (receipt `nemo_testcases_l1_stage3_remainder_receipt.md`) |
 | **MLF-only rows below** | | | | | | |
 | M-01 | `stp_MLF` whole-step composition stpmlf.F90:108-473 | no `key_RK3` | D | `omlc:9698 _leapfrog_step` (two `_step_impl` passes) **and** `omlc:10235 _nemo_mlf_step` (one pass, `_ldf_state=`) | `outer_integrator` (`leapfrog`/`nemo_mlf`) | **ARTIFICIAL_BRANCH (rank 5)** — two impls of `stp_MLF`; `nemo_mlf` is selected by NO card (only `scripts/validate/ocean_fidelity/dino_1226/split_explicit_momentum_chain_round47.py:204` calls it directly) = dead branch |
 | M-02 | `ssh_nxt` (+`div_hor`) sshwzv.F90; stpmlf.F90:214 | none | D | inside `blc` barotropic solve (eta from the substep window) | `barotropic_*` | SHARED |
@@ -1390,10 +1391,57 @@ Corrections to existing rows:
   error against NEMO's `e3u_0/hu_0` rule at the OVERFLOW kt=2 entry as `4.65e-9` at
   ONE face (u-column 23, a 26|26 partial-cell mismatch) and `<= 1.7e-16` everywhere
   else, far too small to supply `slow_u = 1.30e-10` (see the SSH-walk receipt, open
-  item 2, for the discriminating measurement).
+  item 2, for the discriminating measurement).  **2026-09-02, S-47**: the
+  `slow_u` operand WAS a third `min_cell_to_uface` site -- not the depth-mean
+  WEIGHTS (correctly exonerated above) but the advection OPERATOR's face
+  thickness inside `tendencies()` (`opl:1364`), whose min-of-stretched-T rule
+  enters the neighbouring faces' T-point fluxes and does not cancel there.
+  Collapsed onto the same kernel; see the S-47 section below.
 - **S-33/S-34** (dynzdf operands), bottom-localised, measured inert for the front columns
   (no partial cell at columns 20/21) and bounded by NEMO's whole stage-3 increment
   `1.09e-08` elsewhere: legoESM `e3uw(Kmm)` = midpoint of `e3t_now` (12.25 m at a
   partial-cell interface) vs NEMO `e3uw_0 = e3w_1d = 20 m` (`usrdef_zgr.F90:167`);
   legoESM `e3u(Kaa)` = masked cell->face average vs NEMO `e3u_0 = min` at a staircase
   face.  Neither owns the remaining `4.55e-10`.
+
+## 2026-09-02 S-47 — `dyn_adv_up3` face THICKNESS (new row; owner of the OVERFLOW stage-3 remainder AND the `slow_u` debt)
+
+Preregistration `nemo_testcases_l1_stage3_remainder_preregister.md`
+(commit `f8247f9a3`, frozen before the arm); receipt
+`nemo_testcases_l1_stage3_remainder_receipt.md`.
+
+NEMO consumes ONE face thickness in `dyn_adv_up3`: `zFu = e2u*e3u(Kmm)*uu`
+(`dynadv_up3.F90:160`, or the stage transport `stprk3_stg.F90:273`) and the
+divisor `e3u(ji,jj,jk,Kmm)` of the flux divergence (`:205-207`), with
+`e3u(Kmm) = e3u_0*(1+r3u(Kmm)*umask)` (`domzgr_substitute.h90:127`) and
+`r3u` the `e1e2t`-weighted ssh mean over `hu_0` (`domqco.F90:219-220`).
+legoESM's `latlon_cgrid_ocean_baroclinic_tendencies` built its own
+`h_u = min_cell_to_uface(compute_layer_thickness(eta))` (`opl:1221,1364`)
+and handed it to the flux-form momentum advection (`opl:4504`): the MIN of
+the two STRETCHED T thicknesses, `e3u_0*(1 + min(r3t_W, r3t_E))` on equal
+columns, i.e. `-0.5*|ssh_W - ssh_E|/hu_0` off NEMO's rule -- the same
+first-order defect S-18 (seed) and S-21 (transport) had, at a third site.
+It cancels in the T-point flux divergence AT the front face (both fluxes
+around it carry the same `c_20 F_20`) and survives at the flanking faces
+19/21, which is exactly where the `4.55e-10` remainder and the `slow_u` debt
+sat.
+
+Replay on NEMO's stage-2 Kaa operands (legoESM's own operator, `h_u` the
+only variable): stage-3 remainder corr `0.99979`, slope `0.989`, residual
+`7.1e-12` of `4.55e-10`; stage-2 residual corr `0.9998`, slope `0.989`;
+`slow_u` at kt=2/3/4 corr `1.0000 / 0.9999 / 0.974`, slope `1.000 / 0.9997
+/ 0.999`.  Every other stage-3 operator (HPG, vertical UP3, qco ratios,
+transport triplet, implicit ZDF, stage-mean weights) `<= 1e-15 m/s` on the
+same operands.  Landed (`60d0c5420`): the WS-RK3 stage program hands the
+stage's `(e3u, e3v)(Kmm)` pair from `_nemo_ws_qco_stage_faces` to all four
+of its `tendencies()` calls through the new `momentum_flux_face_thickness`
+argument; every other caller is bit-identical.  Measured at kt=1 (stage
+sweep): OVERFLOW stage-3 / kt=2 `u` `4.551736e-10 -> 7.064252e-12`, stage 2
+`9.433404e-11 -> 1.566344e-12`, stage 1 bit-identical, LOCK bit-identical;
+the legacy arm reproduces the pre-fix rows bit for bit.
+
+Corrections to existing rows: **S-18** -- the `slow_u` operand was this site,
+not the depth-mean weights (see the S-18 bullet above); **S-21** -- the
+"SHARED across the three RK3 cards" statement now also holds for the
+momentum advection's thickness, which had silently diverged from the
+transport's.

@@ -873,6 +873,13 @@ ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
                         "by the transport pair); Silvestri et al. 2024 'UP3'",
                         selected_by=("oceananigans_v1",))),
     )),
+    RoutineRow("S-47", "dyn_adv_up3 face thickness e3u(Kmm)", "SHARED", "none (one macro; RK3 identity)", (
+        Impl(_OPL, "_bc_horizontal_momentum_advection_flux_form",
+             Reference("nemo", "dyn_adv_up3_e3u_kmm",
+                       "dynadv_up3.F90:160,205-207; domzgr_substitute.h90:127; the WS-RK3 "
+                       "stage pair from _nemo_ws_qco_stage_faces via momentum_flux_face_thickness "
+                       "(tests/ocean/unit/test_nemo_ws_hadv_face_thickness.py)")),
+    )),
     RoutineRow("M-01", "stp_MLF whole-step composition", "ARTIFICIAL_BRANCH", "absence of key_RK3 (nemo_mlf selected by no card)", (
         Impl(_OMLC, "_leapfrog_step",
              Reference("nemo", "stp_MLF", "stpmlf.F90:108-473 (two _step_impl passes)")),

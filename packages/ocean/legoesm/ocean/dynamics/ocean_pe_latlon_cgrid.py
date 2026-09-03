@@ -4358,6 +4358,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     zad_freshwater_eta_tendency=None,
     momentum_flux_transport_velocity=None,
     up3_upwind_selector=None,
+    momentum_flux_face_thickness=None,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -4550,9 +4551,23 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # Veros/MOM6 style) or the default vector-invariant PV flux. Both fill the
     # same diagnostic slot. ---
     if _mom_adv == "flux_form":
+        # NEMO dynadv_up3 consumes ONE face thickness -- e3u(Kmm) =
+        # e3u_0*(1+r3u(Kmm)) (domzgr_substitute.h90:127; domqco.F90:219-220)
+        # -- in the transport zFu (stprk3_stg.F90:273) and as the divisor of
+        # the flux divergence (dynadv_up3.F90:205-207).  The WS-RK3 stage
+        # program hands that pair in (built once by _nemo_ws_qco_stage_faces,
+        # the same kernel the tracer transport and the vertical UP3 use);
+        # every other caller keeps this function's own min-rule h_u/h_v,
+        # bit-identical.  The min of the two STRETCHED T thicknesses is first
+        # order wrong in the ssh difference across the face (measured: the
+        # whole OVERFLOW-zps kt=2 stage-3 u remainder and the slow_u debt).
+        _h_u_adv, _h_v_adv = (
+            (h_u, h_v) if momentum_flux_face_thickness is None
+            else momentum_flux_face_thickness)
         du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v = (
             _bc_horizontal_momentum_advection_flux_form(
-                du_dt, dv_dt, u, v, h_u, h_v, u_mask_3d, v_mask_3d, mask, grid, config,
+                du_dt, dv_dt, u, v, _h_u_adv, _h_v_adv, u_mask_3d, v_mask_3d,
+                mask, grid, config,
                 transport_velocity=momentum_flux_transport_velocity,
                 up3_upwind_selector=up3_upwind_selector,
             )

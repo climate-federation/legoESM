@@ -1075,6 +1075,14 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # ``puu_b(Kmm)``, imposed by ``stprk3_stg.F90:439-446``).  NEMO has no
     # such switch; public cards never select this.
     legacy_seed_min_rule_faces: bool = False
+    # One-variable ablation of the stage momentum-advection face thickness:
+    # restore ``tendencies()``'s own min-of-stretched-T-thicknesses ``h_u``
+    # in the flux-form momentum advection at every WS-RK3 site (the
+    # step-entry Kbb call, the S-21 stage-1 helper calls, the stage-2/3
+    # ``_mom_pert_ws`` calls) instead of NEMO's ``e3u(Kmm) = e3u_0*(1+r3u)``
+    # (domzgr_substitute.h90:127; dynadv_up3.F90:160,205-207).  NEMO has no
+    # such switch -- e3u is a macro -- so public cards never select this.
+    legacy_hadv_min_face_thickness: bool = False
 
 
 def _nemo_ws_qco_stage_faces(eta, h_ref, u_mask_3d, v_mask_3d, grid):
@@ -3798,7 +3806,8 @@ class LatLonCGridOceanModel:
                    zad_continuity_dt=None,
                    zad_freshwater_eta_tendency=None,
                    momentum_flux_transport_velocity=None,
-                   up3_upwind_selector=None):
+                   up3_upwind_selector=None,
+                   momentum_flux_face_thickness=None):
         """Compute baroclinic tendencies.
 
         ``momentum_only=True`` skips the (T/S-frozen) tracer-diffusion
@@ -3849,6 +3858,7 @@ class LatLonCGridOceanModel:
             zad_freshwater_eta_tendency=zad_freshwater_eta_tendency,
             momentum_flux_transport_velocity=momentum_flux_transport_velocity,
             up3_upwind_selector=up3_upwind_selector,
+            momentum_flux_face_thickness=momentum_flux_face_thickness,
         )
 
     def tendencies_with_diagnostics(
@@ -4100,13 +4110,41 @@ class LatLonCGridOceanModel:
             "transport"
             if self._nemo_ws_test_hooks.legacy_up3_transport_sign_selector
             else None)
+        # The momentum-advection FACE THICKNESS, unlike the selector above,
+        # IS a property of the WS-RK3 stage program (isomorphism row S-47):
+        # NEMO's dyn_adv_up3 consumes e3u(Kmm) while legoESM's tendencies()
+        # rebuilt its own min-of-stretched-T pair.  ``None`` (every other
+        # integrator) keeps that historical min rule.
+        _ws_face_thickness_kbb = None
+        if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws":
+            # NEMO's e3u/e3v(Kbb) = e3u_0*(1+r3u(Kbb)) for the step-entry
+            # dyn_adv (stp2d.F90:172 -> dynadv_up3.F90:160; the same pair
+            # stage 1 consumes through zFu at stprk3_stg.F90:273-274), from
+            # the ONE shared kernel; ``None`` (the private legacy hook) keeps
+            # tendencies()' own min-of-stretched-thicknesses rule.
+            if isinstance(_zc, OceanPartialCellCoordinate):
+                _ws_u_live_mask, _ws_v_live_mask = compute_face_masks_3d(
+                    _zc.is_active, _grid)
+                _ws_u_live_mask = _ws_u_live_mask.astype(state.eta.data.dtype)
+                _ws_v_live_mask = _ws_v_live_mask.astype(state.eta.data.dtype)
+            else:
+                _ws_u_live_mask = state.u_mask.data[..., None]
+                _ws_v_live_mask = state.v_mask.data[..., None]
+            _ws_h_ref = compute_layer_thickness(
+                jnp.zeros_like(state.eta.data), state.H_bathy.data, _zc,
+                min_water_column_m=_cfg_b.min_water_column_m)
+            if not self._nemo_ws_test_hooks.legacy_hadv_min_face_thickness:
+                _ws_face_thickness_kbb = _nemo_ws_qco_stage_faces(
+                    state.eta.data, _ws_h_ref, _ws_u_live_mask,
+                    _ws_v_live_mask, _grid)[:2]
         tend = self.tendencies(state, surface_forcing, sponge=sponge, dt=dt,
                                precomputed_geom_density=_geom_density,
                                grid=_grid, vertex_mask=_vmask,
                                ab2_scope_override=_ab2_scope_override,
                                ldf_state=_ldf_state, z_coord=z_coord, config=config,
                                zad_continuity_dt=dt,
-                               up3_upwind_selector=_up3_selector_override)
+                               up3_upwind_selector=_up3_selector_override,
+                               momentum_flux_face_thickness=_ws_face_thickness_kbb)
         # #1492 DINO surface_tendency_placement="leapfrog_rhs": fold the
         # externally-supplied surface tracer RATE into the SAME explicit RHS
         # every other tendency uses -- BEFORE the diss-withholding split and
@@ -4423,6 +4461,7 @@ class LatLonCGridOceanModel:
             def _mom_pert_ws(
                 u_in, v_in, skip_ldf, transport_mean=None,
                 stage_tracers_eta=None, extra_rhs=None,
+                stage_face_thickness=None,
             ):
                 st = state._replace(
                     u=state.u.replace(data=u_in * u_mask_3d),
@@ -4468,7 +4507,14 @@ class LatLonCGridOceanModel:
                                      # gate's transport-reconcile arm stays
                                      # one-variable); the private hook
                                      # restores the legacy transport sign.
-                                     up3_upwind_selector=_up3_selector_override)
+                                     up3_upwind_selector=_up3_selector_override,
+                                     # stprk3_stg.F90:273 / dynadv_up3.F90:
+                                     # 205-207: the stage's e3u/e3v(Kmm)
+                                     # from _nemo_ws_qco_stage_faces keyed on
+                                     # the stage ssh (None under the legacy
+                                     # thickness hook).
+                                     momentum_flux_face_thickness=(
+                                         stage_face_thickness))
                 _du = td.du_dt.data
                 _dv = td.dv_dt.data
                 if extra_rhs is not None:
@@ -5049,9 +5095,29 @@ class LatLonCGridOceanModel:
             # 3.136e-07 m/s^2 at the OVERFLOW kt=2 entry, exactly zero from
             # rest).
             _du1_rhs, _dv1_rhs = du_dt_pert, dv_dt_pert
+            # The stage's NEMO e3u/e3v(Kmm) pair for the flux-form momentum
+            # advection, from the ONE kernel (_nemo_ws_qco_stage_faces) keyed
+            # on the stage ssh -- NOT read off the stage transport's geom[4],
+            # so the older ``legacy_stage_min_face_thickness`` transport arm
+            # stays one-variable (review finding).  The private hook hands
+            # None so tendencies() falls back to its own min-rule thickness.
+            _legacy_hadv_h = (
+                self._nemo_ws_test_hooks.legacy_hadv_min_face_thickness)
+
+            def _stage_face_thickness(eta_stage):
+                if _legacy_hadv_h:
+                    return None
+                return _nemo_ws_qco_stage_faces(
+                    eta_stage, _h_ref_ws, _u_live_mask, _v_live_mask, _grid)[:2]
+
+            _face_thickness_kbb = _stage_face_thickness(state.eta.data)
             if _transport_target is not None:
-                _p0_with_zub = _mom_pert_ws(u0, v0, False, _transport_target)
-                _p0_no_zub = _mom_pert_ws(u0, v0, False, None)
+                _p0_with_zub = _mom_pert_ws(
+                    u0, v0, False, _transport_target,
+                    stage_face_thickness=_face_thickness_kbb)
+                _p0_no_zub = _mom_pert_ws(
+                    u0, v0, False, None,
+                    stage_face_thickness=_face_thickness_kbb)
                 _du1_rhs = _du1_rhs + (_p0_with_zub[0] - _p0_no_zub[0])
                 _dv1_rhs = _dv1_rhs + (_p0_with_zub[1] - _p0_no_zub[1])
             # Stage 1: Kmm = Kbb, so the RHS carries (1 + r3u(Kbb)).
@@ -5074,7 +5140,8 @@ class LatLonCGridOceanModel:
             p1u_corr, p1v_corr = _mom_pert_ws(
                 u1_corr, v1_corr, True, _transport_target,
                 _stage_hpg_operands(_T_stage1, _S_stage1, _eta_live_one_third),
-                _stage_vertical_up3(u1_corr, v1_corr, _g1))
+                _stage_vertical_up3(u1_corr, v1_corr, _g1),
+                stage_face_thickness=_stage_face_thickness(_eta_live_one_third))
             u2_raw = (_qu_b * u0 + (dt_mom / 2.0) * _qu_13 * p1u_corr) / _qu_12
             v2_raw = (_qv_b * v0 + (dt_mom / 2.0) * _qv_13 * p1v_corr) / _qv_12
             u2_corr, v2_corr = _replace_stage_mean(
@@ -5092,7 +5159,8 @@ class LatLonCGridOceanModel:
             p2u_corr, p2v_corr = _mom_pert_ws(
                 u2_corr, v2_corr, False, _transport_target,
                 _stage_hpg_operands(_T_stage2, _S_stage2, _eta_live_one_half),
-                _stage_vertical_up3(u2_corr, v2_corr, _g2))
+                _stage_vertical_up3(u2_corr, v2_corr, _g2),
+                stage_face_thickness=_stage_face_thickness(_eta_live_one_half))
             u3_raw = (_qu_b * u0 + dt_mom * _qu_12 * p2u_corr) / _qu_aa
             v3_raw = (_qv_b * v0 + dt_mom * _qv_12 * p2v_corr) / _qv_aa
             u3_corr, v3_corr = _replace_stage_mean(
