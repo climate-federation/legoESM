@@ -30,6 +30,7 @@ from legoesm.ice.dynamics import (
     free_drift_velocity,
     mevp_solver,
     ocean_ice_stress,
+    si3_cgrid_deformation,
     stress_divergence,
 )
 from legoesm.ice.itd import (
@@ -114,6 +115,7 @@ __all__ = [
     "free_drift_velocity",
     "air_ice_stress",
     "ocean_ice_stress",
+    "si3_cgrid_deformation",
     # ITD
     "category_bounds",
     "upper_bounds",

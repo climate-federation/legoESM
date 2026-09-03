@@ -921,6 +921,81 @@ def _validate_si3_cgrid_aevp_static(config: SI3CGridAEVPConfig) -> None:
         raise ValueError("SI3 C-grid aEVP requires at least one subcycle")
 
 
+def _si3_cgrid_fmask(
+    forcing: SI3CGridAEVPForcing,
+    config: SI3CGridAEVPConfig,
+    dtype,
+) -> jnp.ndarray:
+    """Construct SI3's F-point ocean/boundary mask at source lines 204-224."""
+
+    tmask = forcing.tmask_t
+    ocean = (
+        tmask
+        * jnp.roll(tmask, -1, axis=0)
+        * jnp.roll(tmask, -1, axis=1)
+        * jnp.roll(jnp.roll(tmask, -1, axis=0), -1, axis=1)
+    )
+    boundary = config.rn_ishlat * jnp.minimum(
+        _SI3_ONE,
+        jnp.maximum(
+            jnp.maximum(forcing.umask_u, jnp.roll(forcing.umask_u, -1, axis=1)),
+            jnp.maximum(forcing.vmask_v, jnp.roll(forcing.vmask_v, -1, axis=0)),
+        ),
+    )
+    raw = jnp.where(ocean == _SI3_ZERO, boundary, ocean).astype(dtype)
+    return _si3_periodic_halo(
+        _si3_set(jnp.zeros_like(raw), slice(2, -2), raw)
+    )
+
+
+def si3_cgrid_deformation(
+    state: SI3CGridAEVPState,
+    forcing: SI3CGridAEVPForcing,
+    metrics: SI3CGridMetrics,
+    config: SI3CGridAEVPConfig,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Return final C-grid divergence and deformation for redistribution.
+
+    This is the single implementation of ``icedyn_rhg_evp.F90:788-836`` used
+    by the rung-3.4 ``rhg -> adv -> rdgrft`` composition.  The returned T-point
+    arrays populate only NEMO's physical ``DO_2D(0,0,0,0)`` region; diagnostics
+    outside that region are intentionally zero because SI3 does not exchange
+    their halos before ``icedyn_rdgrft.F90:234-237`` packs physical cells.
+    """
+
+    _validate_si3_cgrid_aevp_static(config)
+    shape = state.u_ice_u.shape
+    leaves = (*state, *forcing, *metrics)
+    if len(shape) != 2 or any(value.shape != shape for value in leaves):
+        raise ValueError("SI3 C-grid deformation requires same-shape 2-D leaves")
+    fimask = _si3_cgrid_fmask(forcing, config, state.u_ice_u.dtype)
+    shear_f = _si3_f_shear(
+        state.u_ice_u,
+        state.v_ice_v,
+        metrics,
+        fimask,
+        jnp.zeros_like(state.stress12_f),
+    )
+    divergence, tension, shear_square = _si3_t_deformation(
+        state.u_ice_u, state.v_ice_v, shear_f, metrics
+    )
+    ice_mask = (forcing.concentration_t >= _SI3_ICE_PRESENCE).astype(
+        state.u_ice_u.dtype
+    )
+    divergence = divergence * ice_mask
+    deformation = _si3_sqrt(
+        divergence * divergence
+        + (tension * tension + shear_square)
+        / (config.eccentricity * config.eccentricity)
+    ) * ice_mask
+    interior = slice(2, -2)
+    zero = jnp.zeros_like(divergence)
+    return (
+        _si3_set(zero, interior, divergence),
+        _si3_set(zero, interior, deformation),
+    )
+
+
 def si3_cgrid_aevp_solver(
     state: SI3CGridAEVPState,
     forcing: SI3CGridAEVPForcing,
@@ -951,27 +1026,11 @@ def si3_cgrid_aevp_solver(
     at_i = forcing.concentration_t
     zmsk = (at_i >= _SI3_ICE_PRESENCE).astype(state.u_ice_u.dtype)
     tmask = forcing.tmask_t
-    fimask_ocean = (
-        tmask
-        * jnp.roll(tmask, -1, axis=0)
-        * jnp.roll(tmask, -1, axis=1)
-        * jnp.roll(jnp.roll(tmask, -1, axis=0), -1, axis=1)
-    )
     # The pinned ORCA1/case deck resolves rn_ishlat=2.  Reproduce the
     # nonzero-boundary repair from icedyn_rhg_evp.F90:215-224 even though the
     # all-wet periodic rung makes it inert; static validation rejects every
     # selector other than this one measured arm.
-    fimask_boundary = config.rn_ishlat * jnp.minimum(
-        _SI3_ONE,
-        jnp.maximum(
-            jnp.maximum(forcing.umask_u, jnp.roll(forcing.umask_u, -1, axis=1)),
-            jnp.maximum(forcing.vmask_v, jnp.roll(forcing.vmask_v, -1, axis=0)),
-        ),
-    )
-    fimask_raw = jnp.where(fimask_ocean == _SI3_ZERO, fimask_boundary, fimask_ocean)
-    fimask = _si3_periodic_halo(
-        _si3_set(jnp.zeros_like(tmask), slice(2, -2), fimask_raw)
-    )
+    fimask = _si3_cgrid_fmask(forcing, config, state.u_ice_u.dtype)
     eccentricity_square = config.eccentricity * config.eccentricity
     inverse_eccentricity_square = _SI3_ONE / eccentricity_square
     mass_t = (

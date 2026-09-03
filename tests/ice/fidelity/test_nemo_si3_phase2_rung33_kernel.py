@@ -13,6 +13,7 @@ import pytest
 from legoesm.ice.dynamics import (
     SI3CGridAEVPState,
     si3_cgrid_aevp_solver,
+    si3_cgrid_deformation,
 )
 from legoesm.ice.fidelity.nemo_adv2d_rhg_testcase_recipe import (
     _forcing_for_state,
@@ -150,6 +151,31 @@ def test_f_stress_deliberately_has_no_t_presence_mask():
     assert float(jnp.max(jnp.abs(result.stress2_t))) == 0.0
     # icedyn_rhg_evp.F90:488-489 has no zmsk on stress12.
     assert float(jnp.max(jnp.abs(result.stress12_f))) > 0.0
+
+
+def test_final_deformation_diagnostic_binds_to_velocity_gradients():
+    card = _card()
+    forcing = _forcing_for_state(
+        card.forcing_template, card.initial_state, card.base
+    )._replace(
+        concentration_t=jnp.ones_like(card.forcing_template.concentration_t)
+    )
+    zero_divergence, zero_deformation = si3_cgrid_deformation(
+        card.initial_state.dynamics, forcing, card.metrics, card.dynamics_config
+    )
+    np.testing.assert_array_equal(zero_divergence, 0.0)
+    np.testing.assert_array_equal(zero_deformation, 0.0)
+
+    impulse = card.initial_state.dynamics._replace(
+        u_ice_u=card.initial_state.dynamics.u_ice_u.at[20, 20].set(
+            _TEST_PERTURBATION
+        )
+    )
+    divergence, deformation = si3_cgrid_deformation(
+        impulse, forcing, card.metrics, card.dynamics_config
+    )
+    assert float(jnp.max(jnp.abs(divergence))) > 0.0
+    assert float(jnp.max(deformation)) > 0.0
 
 
 def test_full_hundred_subcycle_kernel_jits_and_differentiates():
