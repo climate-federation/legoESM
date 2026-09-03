@@ -219,6 +219,7 @@ def run(
     case: str, oracle_root: Path, max_step: int, *, plant=False,
     continue_after_first=False, diagnostic_disable_bbl=False,
     owner_controls=False, allow_dirty=False, arm_literal_stage_wzv=False,
+    arm_legacy_seed_faces=False,
 ) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -240,7 +241,8 @@ def run(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             disable_bbl=diagnostic_disable_bbl,
-            literal_stage_wzv=arm_literal_stage_wzv))
+            literal_stage_wzv=arm_literal_stage_wzv,
+            legacy_seed_min_rule_faces=arm_legacy_seed_faces))
     state = card.recipe.initial_state
     masks = expected_masks(card)
     nlev = card.recipe.z_coord.n_levels
@@ -458,6 +460,7 @@ def run(
             "bbl_gamma_s": cfg.bbl_gamma_s,
             "diagnostic_disable_bbl_test_hook": diagnostic_disable_bbl,
             "arm_literal_stage_wzv_test_hook": arm_literal_stage_wzv,
+            "arm_legacy_seed_faces_test_hook": arm_legacy_seed_faces,
         },
         "first_over_bar": first_over_bar,
         "bbl_attribution": bbl_attribution,
@@ -492,6 +495,12 @@ def main() -> int:
               "velocity through nemo_qco_wzv_operands (sshwzv.F90:331-336 "
               "as called at stprk3_stg.F90:297) instead of the generic "
               "diagnose_w_from_flux_div. NEMO has no such switch"))
+    parser.add_argument(
+        "--arm-legacy-seed-faces", action="store_true",
+        help=("one-variable arm: restore the min-of-stretched-cells rescale "
+              "in the barotropic loop-entry seed instead of NEMO's "
+              "e3u_0*(1+r3u) (dynspg_ts.F90:487 / stprk3_stg.F90:440). "
+              "NEMO has no such switch"))
     parser.add_argument("--allow-dirty", action="store_true",
                         help="stamp '<sha>-dirty' instead of refusing a dirty tree")
     from legoesm.ocean.fidelity.ulp_move_gate import (
@@ -506,7 +515,8 @@ def main() -> int:
         continue_after_first=args.continue_after_first,
         diagnostic_disable_bbl=args.diagnostic_disable_bbl,
         owner_controls=args.owner_controls, allow_dirty=args.allow_dirty,
-        arm_literal_stage_wzv=args.arm_literal_stage_wzv)
+        arm_literal_stage_wzv=args.arm_literal_stage_wzv,
+        arm_legacy_seed_faces=args.arm_legacy_seed_faces)
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.write_text(text)
