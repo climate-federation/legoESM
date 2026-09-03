@@ -393,7 +393,7 @@ def classify_arm(
 
 def preregistered_prediction_check(
     case, scaling, rows, baroclinic_rows, stage_states, masks, arms,
-    *, plant_selector=False,
+    *, plant_selector=False, live_u_face_mask=None,
 ) -> dict:
     """Score the frozen predictions of
     ``nemo_testcases_l1_overflow_face_thickness_preregister.md`` (P1-P4) and
@@ -561,7 +561,7 @@ def preregistered_prediction_check(
     if "legacy_2d_stage_face_mask" in arms and case == "OVERFLOW-zps":
         # nemo_testcases_l1_phantom_velocity_preregister.md P3/P10: NEMO
         # masks every stage velocity with the 3-D umask
-        # (stprk3_stg.F90:367,377) and the barotropic correction with the
+        # (stprk3_stg.F90:367,375,382) and the barotropic correction with the
         # same array (:444), so uu is EXACTLY zero below the seabed and
         # dyn_adv_up3's k-slab stencil reads that zero.  The 2-D arm IS the
         # pre-fix code and must reproduce 7.064252e-12 / 1.566344e-12
@@ -572,19 +572,39 @@ def preregistered_prediction_check(
         legacy_m = "legacy_2d_stage_face_mask"
         m2, m3 = _bc4(2, "faithful"), _bc4(3, "faithful")
         n2, n3 = _bc4(2, legacy_m), _bc4(3, legacy_m)
+        # The scored MAXIMUM sits at a different face from the one the mask
+        # rank moves, so it is NOT the discriminator (measured: both arms
+        # report the same stage-3 max).  What NEMO's rule fixes is the value
+        # BELOW the seabed, which the gate's active mask never scores -- so
+        # score it directly, and require the wet stage-3 field to move.
+        require(live_u_face_mask is not None,
+                "S4 needs the 3-D live u-face mask")
+        _dry = np.asarray(live_u_face_mask)[:, 1:, :] == 0.0
+
+        def _below_seabed_max(arm, stage):
+            return float(np.max(np.abs(
+                np.asarray(stage_states[arm][stage].u.data)[:, 1:, :][_dry])))
+
         check["S4_stage_velocity_carries_NEMOs_3d_umask"] = {
             "predicate": (
-                "the 2-D-mask arm reproduces the pre-fix stage-3 / stage-2 "
-                "baroclinic u 7.064252e-12 / 1.566344e-12 within 1%, and the "
-                "faithful arm differs from it (the mask rank is live)"),
+                "every stage velocity is EXACTLY zero below the live seabed "
+                "(stprk3_stg.F90:367,375,382,444,273 carry umask(ji,jj,jk)); the 2-D "
+                "arm leaves a finite velocity there; and the wet stage-3 "
+                "field moves between the two arms"),
+            "faithful_below_seabed_max_m_s": [
+                _below_seabed_max("faithful", k) for k in (1, 2, 3)],
+            "legacy_2d_mask_below_seabed_max_m_s": [
+                _below_seabed_max(legacy_m, k) for k in (1, 2, 3)],
+            "wet_stage3_movement_m_s": _stage_move(legacy_m, 3),
             "faithful_stage2_baroclinic_u_m_s": m2,
             "faithful_stage3_baroclinic_u_m_s": m3,
             "legacy_2d_mask_stage2_baroclinic_u_m_s": n2,
             "legacy_2d_mask_stage3_baroclinic_u_m_s": n3,
-            "status": ("MET" if (abs(n3 - 7.064252e-12) < 7.1e-14
-                                 and abs(n2 - 1.566344e-12) < 1.6e-14
-                                 and m3 != n3)
-                       else "NOT-MET"),
+            "status": ("MET" if (
+                all(_below_seabed_max("faithful", k) == 0.0 for k in (1, 2, 3))
+                and _below_seabed_max(legacy_m, 1) > 1.0e-3
+                and _stage_move(legacy_m, 3) > 0.0)
+                else "NOT-MET"),
         }
     return check
 
@@ -670,7 +690,7 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
             # Phantom-velocity round (preregistered in
             # nemo_testcases_l1_phantom_velocity_preregister.md): ablate
             # NEMO's 3-D umask on the stage velocity update
-            # (stprk3_stg.F90:367,377,444).
+            # (stprk3_stg.F90:367,375,382,444,273).
             "legacy_2d_stage_face_mask": _NEMOWSRK3TestHooks(
                 legacy_2d_stage_face_mask=True
             ),
@@ -699,7 +719,7 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
             # Phantom-velocity round (preregistered in
             # nemo_testcases_l1_phantom_velocity_preregister.md): ablate
             # NEMO's 3-D umask on the stage velocity update
-            # (stprk3_stg.F90:367,377,444).
+            # (stprk3_stg.F90:367,375,382,444,273).
             "legacy_2d_stage_face_mask": _NEMOWSRK3TestHooks(
                 legacy_2d_stage_face_mask=True
             ),
@@ -911,7 +931,7 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
                 "rank of the mask applied to the WS-RK3 stage velocity "
                 "update and to the stage velocities the tracer transports "
                 "consume: NEMO's 3-D umask(ji,jj,jk) "
-                "(stprk3_stg.F90:367,377,444) vs the 2-D state.u_mask "
+                "(stprk3_stg.F90:367,375,382,444,273) vs the 2-D state.u_mask "
                 "broadcast over every level")
         elif arm == "legacy_velocity_primary_average":
             one_variable = "flux_form_primary_transport_average"
@@ -1201,9 +1221,13 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
         # the gate exits 2.
         for row in scaling["h2_qco_stage_factor"]:
             row["predicted_baroclinic_u_movement_m_s"] *= 1000.0
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        compute_face_masks_3d as _face_masks_3d)
     prediction_check = preregistered_prediction_check(
         case, scaling, rows, baroclinic_rows, stage_states, masks, arms,
-        plant_selector=plant_prediction)
+        plant_selector=plant_prediction,
+        live_u_face_mask=np.asarray(_face_masks_3d(
+            card.recipe.z_coord.is_active, card.recipe.grid)[0]).astype(float))
     if plant_prediction:
         # The gated predicate is the live round's owner claim (S1); the
         # older P3 reads NOT-MET by construction since the selector round

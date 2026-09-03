@@ -1,10 +1,12 @@
 """The WS-RK3 stage velocity carries NEMO's 3-D ``umask``, not a 2-D one.
 
-``stprk3_stg.F90:367`` (``ln_dynadv_vec .OR. lk_linssh``) and ``:377`` (the
-compiled ``key_qco`` branch) multiply EVERY stage velocity by
-``umask(ji,jj,jk)``, and ``:444`` adds the barotropic correction as
-``zub(ji,jj)*umask(ji,jj,jk)`` -- so NEMO's ``uu`` is EXACTLY zero below the
-seabed.  ``dyn_adv_up3`` then READS that zero: its k-slab stencil does not
+``stprk3_stg.F90:367`` (``ln_dynadv_vec .OR. lk_linssh``), ``:375`` (the
+compiled ``key_qco`` branch) and ``:382`` (the ``#else``) multiply the stage-1
+and stage-2 velocity update by ``umask(ji,jj,jk)`` (stage 3's update lives in
+``dyn_zdf``, masked there); ``:444`` adds the barotropic correction as
+``zub(ji,jj)*umask(ji,jj,jk)``; and ``:273-274`` masks the SAME correction
+inside the advective transport ``dyn_adv_up3`` consumes.  So NEMO's ``uu``
+AND the transport built from it are EXACTLY zero below the seabed.  ``dyn_adv_up3`` then READS that zero: its k-slab stencil does not
 skip a dry neighbour (``dynadv_up3.F90:142-143`` ``zlu_uu``, ``:160``
 ``zFu``, ``:166-176`` ``zFu_t``).
 

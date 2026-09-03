@@ -1087,8 +1087,9 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # ``state.u_mask`` broadcast over every level in the WS-RK3 stage
     # velocity update and in the stage velocities the tracer transports
     # consume, instead of NEMO's 3-D ``umask(ji,jj,jk)``
-    # (``stprk3_stg.F90:367,377`` on every stage and ``:444`` on the
-    # barotropic correction).  With the 2-D rule a face that is wet at ANY
+    # (``stprk3_stg.F90:367,375,382`` on every stage-1/2 update, ``:444`` on the
+    # barotropic correction and ``:273`` on the same correction inside the
+    # advective transport).  With the 2-D rule a face that is wet at ANY
     # level keeps the depth-mean increment at EVERY level BELOW its own
     # seabed, and ``dynadv_up3``'s k-slab stencil reads that value where
     # NEMO reads an exact zero.  NEMO has no such switch -- ``umask`` is the
@@ -4111,8 +4112,37 @@ class LatLonCGridOceanModel:
                 _ws_u_live_mask = _ws_u_live_mask.astype(state.eta.data.dtype)
                 _ws_v_live_mask = _ws_v_live_mask.astype(state.eta.data.dtype)
             else:
+                # An OceanZStarCoordinate carries no per-level active flag, so
+                # the 2-D face mask IS the only mask available on that path;
+                # a staircase there keeps the pre-fix behaviour.  Recorded,
+                # not silently guarded: no certified card takes this branch
+                # (both testcase cards build OceanPartialCellCoordinate).
                 _ws_u_live_mask = state.u_mask.data[..., None]
                 _ws_v_live_mask = state.v_mask.data[..., None]
+            # stprk3_stg.F90:367 (vec/linssh), :375 (the compiled key_qco
+            # branch) and :382 (the #else) multiply the stage velocity by
+            # ``umask(ji,jj,jk)``; :444 adds the barotropic correction as
+            # ``zub(ji,jj)*umask(ji,jj,jk)``; and :273 masks the SAME
+            # correction inside the advective transport,
+            # ``zFu = e2u*e3u(Kmm)*( uu(Kmm) + zub*umask(ji,jj,jk) )``.
+            # NEMO's velocity and its advective transport are therefore
+            # EXACTLY zero below the seabed, which is what dyn_adv_up3's
+            # k-slab stencil reads when it reaches a dry face
+            # (dynadv_up3.F90:142-143 ``zlu_uu``, :160 ``zFu``, :166-176
+            # ``zFu_t``): it does not skip a dry neighbour, it reads its zero.
+            # Masking with the 2-D face mask broadcast over levels left the
+            # depth-mean increment standing at every level below a staircase
+            # face's own seabed, where the deeper neighbour's wet bottom level
+            # then read it as a stencil neighbour.  The private hook restores
+            # the 2-D rule; NEMO has no such switch.
+            _ws_stage_u_mask = (
+                state.u_mask.data[..., jnp.newaxis]
+                if self._nemo_ws_test_hooks.legacy_2d_stage_face_mask
+                else _ws_u_live_mask)
+            _ws_stage_v_mask = (
+                state.v_mask.data[..., jnp.newaxis]
+                if self._nemo_ws_test_hooks.legacy_2d_stage_face_mask
+                else _ws_v_live_mask)
             _ws_h_ref = compute_layer_thickness(
                 jnp.zeros_like(state.eta.data), state.H_bathy.data, _zc,
                 min_water_column_m=_cfg_b.min_water_column_m)
@@ -4471,11 +4501,16 @@ class LatLonCGridOceanModel:
                     current_v_mean = (
                         jnp.sum(v_in * h_v_pre, axis=-1) / H_v_pre
                         * state.v_mask.data)
+                    # stprk3_stg.F90:273-274: the SAME barotropic correction
+                    # enters the advective transport masked by the 3-D
+                    # umask/vmask -- ``zFu = e2u*e3u(Kmm)*( uu(Kmm) +
+                    # zub*umask(ji,jj,jk) )`` -- and this array is what
+                    # dyn_adv_up3 consumes as its transport.
                     transport_velocity = (
                         (u_in + (transport_u_mean - current_u_mean)[..., None])
-                        * u_mask_3d,
+                        * _ws_stage_u_mask,
                         (v_in + (transport_v_mean - current_v_mean)[..., None])
-                        * v_mask_3d,
+                        * _ws_stage_v_mask,
                     )
                 td = self.tendencies(st, surface_forcing, sponge=sponge, dt=dt,
                                      momentum_only=True,
@@ -4901,28 +4936,6 @@ class LatLonCGridOceanModel:
         # REPLACEMENT (below) for causal tests; it no longer selects between two
         # recurrences, because there is only one.  Public rk3_ws has no arm.
         if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws":
-            # stprk3_stg.F90:367 (vec/linssh) and :377 (the compiled key_qco
-            # branch) multiply EVERY stage velocity by ``umask(ji,jj,jk)``,
-            # and :444 adds the barotropic correction as
-            # ``zub(ji,jj)*umask(ji,jj,jk)`` -- the 3-D mask in both places.
-            # NEMO's ``uu`` is therefore EXACTLY zero below the seabed, which
-            # is what dyn_adv_up3's k-slab stencil reads when it reaches a dry
-            # face (dynadv_up3.F90:142-143 ``zlu_uu``, :160 ``zFu``, :166-176
-            # ``zFu_t``): it does not skip a dry neighbour, it reads its zero.
-            # Masking with the 2-D face mask broadcast over levels left the
-            # depth-mean increment standing at every level below a staircase
-            # face's own seabed, where the deeper neighbour's wet bottom level
-            # then read it as a stencil neighbour.  Same 3-D live face mask
-            # the stage face-thickness kernel already uses (:4097-4104).
-            _ws_stage_u_mask = (
-                u_mask_3d
-                if self._nemo_ws_test_hooks.legacy_2d_stage_face_mask
-                else _ws_u_live_mask)
-            _ws_stage_v_mask = (
-                v_mask_3d
-                if self._nemo_ws_test_hooks.legacy_2d_stage_face_mask
-                else _ws_v_live_mask)
-
             def _replace_stage_mean(u_in, v_in, target_u, target_v):
                 if not self._nemo_ws_test_hooks.stage_barotropic_correction:
                     # Private causal arm: keep the stage's own depth mean.

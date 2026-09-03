@@ -517,7 +517,7 @@ def main() -> int:
         help=("one-variable ablation of the stage face-mask rank (private "
               "_NEMOWSRK3TestHooks control; NEMO has no such switch): "
               "restore the 2-D state.u_mask broadcast over levels instead of "
-              "NEMO's 3-D umask(ji,jj,jk) (stprk3_stg.F90:367,377,444)"))
+              "NEMO's 3-D umask(ji,jj,jk) (stprk3_stg.F90:367,375,382,444,273)"))
     parser.add_argument("--allow-dirty", action="store_true",
                         help="stamp '<sha>-dirty' instead of refusing a dirty tree")
     from legoesm.ocean.fidelity.ulp_move_gate import (

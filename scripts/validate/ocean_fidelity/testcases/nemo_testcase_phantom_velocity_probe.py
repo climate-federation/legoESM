@@ -164,6 +164,55 @@ def face_profile(u, live_u, faces=FRONT_FACES) -> dict:
     return out
 
 
+def _transport_operand_below_seabed(card, live_u) -> dict:
+    """Below-live-seabed ``max abs`` of the transport velocity each WS-RK3
+    stage hands to the horizontal UP3 momentum advection.
+
+    The end-of-step prognostic state is not this array: the stage program
+    builds a separate barotropically-reconciled transport and passes it as
+    ``momentum_flux_transport_velocity``.  NEMO masks the same correction
+    there (``stprk3_stg.F90:273-274``), so it must be zero below the seabed
+    too.  Measured by intercepting the model's own ``tendencies`` calls with
+    tracing disabled, so the arrays are concrete; the model is otherwise
+    untouched."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+
+    live_j = jnp.asarray(live_u)
+    original = LatLonCGridOceanModel.tendencies
+    out = {}
+    try:
+        for label, legacy in (("faithful", False), ("legacy_2d_mask", True)):
+            seen = []
+
+            def spy(self, *args, _seen=seen, **kwargs):
+                pair = kwargs.get("momentum_flux_transport_velocity")
+                if pair is not None:
+                    _seen.append(float(jnp.max(jnp.abs(
+                        jnp.where(live_j == 0.0, pair[0], 0.0)))))
+                return original(self, *args, **kwargs)
+
+            LatLonCGridOceanModel.tendencies = spy
+            model = LatLonCGridOceanModel(
+                card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+                _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                    legacy_2d_stage_face_mask=legacy))
+            with jax.disable_jit():
+                model.step(card.recipe.initial_state, dt=card.dt_s)
+            require(len(seen) > 0,
+                    "no stage handed a transport velocity to tendencies(); the "
+                    "probe is inspecting nothing")
+            out[label] = seen
+    finally:
+        LatLonCGridOceanModel.tendencies = original
+    require(max(out["legacy_2d_mask"]) > 1.0e-3,
+            "the 2-D arm does not reproduce the pre-fix transport operand: "
+            f"{out['legacy_2d_mask']}")
+    return out
+
+
 # ---------------------------------------------------------------------------
 # census
 # ---------------------------------------------------------------------------
@@ -241,6 +290,20 @@ def census(*, max_kt: int, out_dir: Path, allow_dirty: bool) -> dict:
         report["arms"][label] = {"kt1": dry_summary(s.u.data, live_u)}
         print(f"[arm {label}] kt=1 |u below seabed| max "
               f"{report['arms'][label]['kt1']['max_abs']:.6e}", flush=True)
+
+    # --- the OPERAND, not just the state: the array actually handed to
+    #     dyn_adv_up3 as its transport.  NEMO masks the barotropic correction
+    #     inside it too (stprk3_stg.F90:273-274,
+    #     ``zFu = e2u*e3u(Kmm)*( uu(Kmm) + zub*umask(ji,jj,jk) )``), and the
+    #     end-of-step STATE can be clean while this array is not -- which is
+    #     exactly what an independent review caught. ---
+    report["transport_operand"] = _transport_operand_below_seabed(card, live_u)
+    print(f"[transport operand] below-seabed |transport_u| per stage: "
+          f"{report['transport_operand']['faithful']} (faithful) vs "
+          f"{report['transport_operand']['legacy_2d_mask']} (2-D arm)", flush=True)
+    require(max(report["transport_operand"]["faithful"]) == 0.0,
+            "the transport velocity handed to dyn_adv_up3 is nonzero below "
+            f"the seabed: {report['transport_operand']['faithful']}")
 
     # --- control: LOCK's 3-D live mask IS the 2-D broadcast, so no card
     #     without a staircase can carry a phantom at all ---
