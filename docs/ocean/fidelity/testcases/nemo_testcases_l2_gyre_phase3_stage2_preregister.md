@@ -160,3 +160,25 @@ face transports.  **CONFIRM** iff raw stage-2 RHS and corrected Kaa clear
 residual at its scale, and the downstream post-`tra_adv_trp` triplet moves at
 that scale.  Otherwise the selector is not assigned ownership.  This uses the
 pre-existing canonical option; no second ENE implementation is permitted.
+
+### ENE coastal q and `nn_e3f_typ=0` continuation
+
+The four-cell `/sum(tmask)` selector is near-null and is not the owner.  The
+resolved oracle output pins `ln_dynvor_msk=.false.` and `nn_e3f_typ=0`
+(`ocean.output:813,815`).  NEMO therefore leaves coastal relative vorticity
+live (`dynvor.F90:469-477`) and constructs reference `e3f_0vor` from the
+masked four-cell sum divided by four, not by the wet count
+(`dynvor.F90`, `nn_e3f_typ` case 0).  The candidate ENE routine currently
+Neumann-fills q unconditionally, and its available `nemo_avg` selector is the
+case-1 `/sum(tmask)` sibling.  The raw-RHS maxima lie on the first wet row or
+column, making this the next source-ordered discriminator.
+
+The faithful arm will (1) reuse the existing `nemo_live` coastal-q behavior
+inside the one ENE implementation and (2) add the missing literal
+`nemo_avg4` F-thickness selector beside `nemo_avg`, then select both as an
+inseparable resolved-GYRE ENE identity.  A private legacy arm restores
+Neumann fill plus the prior vertex rule.  **CONFIRM** only if raw stage-2 RHS,
+corrected Kaa, and downstream transport clear the bar and the legacy arm
+restores the former residual at scale.  Synthetic coastal-q and `/4` versus
+`/sum(tmask)` violation tests are required; the isomorphism tripwire must keep
+one `pv_flux_ene` implementation.
