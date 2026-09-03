@@ -454,14 +454,28 @@ def command_bbl_scaling(args) -> None:
 
 def _effect_row(card, entering, full_after, alternate_after, term: str) -> dict:
     full = arm_state("L64", _state_fields(full_after))
-    alternate = arm_state("L64", _state_fields(alternate_after))
     T_delta = np.asarray(full_after.T.data) - np.asarray(alternate_after.T.data)
     active = full["_active"]
     select = full["_select"]
     volume = full["_volume"]
+    census_distance = None
+    census_status = "MEASURED"
+    census_reason = None
+    try:
+        alternate = arm_state("L64", _state_fields(alternate_after))
+        census_distance = _distance(full, alternate)
+    except STATS.StatisticalError as error:
+        # A private diagnostic ablation is allowed to reveal why it is not a
+        # valid model arm.  Do not clip it into the scorer's temperature
+        # envelope and manufacture a census: retain its raw T/heat leverage,
+        # make the classification unavailable, and quote the hard-guard error.
+        census_status = "GROSS-EXCURSION"
+        census_reason = str(error)
     return {
         "term": term,
-        "census_distance_full_vs_ablation": _distance(full, alternate),
+        "census_status": census_status,
+        "census_reason": census_reason,
+        "census_distance_full_vs_ablation": census_distance,
         "T_linf_K": float(np.max(np.abs(T_delta[active]))),
         "T_rms_K": float(np.sqrt(np.mean(T_delta[active] ** 2))),
         "slope_heat_difference_K_m3": float(np.sum(T_delta[select] * volume[select])),
