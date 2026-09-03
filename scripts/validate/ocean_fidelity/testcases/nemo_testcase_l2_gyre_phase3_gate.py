@@ -281,13 +281,15 @@ def read_qsr_stage3(path: Path) -> dict:
     }
 
 
-BT_SUBSTEP_NAMES = (
-    "eta_entry", "u_entry", "v_entry",
-    "eta_mid", "u_mid", "v_mid",
-    "eta_exit", "eta_pgf",
-    "pgf_u", "pgf_v", "trd_u", "trd_v", "slow_u", "slow_v",
-    "u_exit", "v_exit", "transport_metric_u", "transport_metric_v",
-)
+# The solver returns ONE keyed barotropic substep frame (see
+# barotropic_latlon_cgrid._run_substep_loop); this map is the mimicry-only glue
+# from THIS oracle dump's field names to that frame's keys, and it lives in the
+# harness, never in the model.  Only two names differ; every other name is
+# shared with the L1-overflow registry verbatim.
+BT_TRACE_KEY = {
+    "transport_metric_u": "transport_u",
+    "transport_metric_v": "transport_v",
+}
 
 ORACLE_BT_SUBSTEP_NAMES = (
     "eta_entry", "u_entry", "v_entry",
@@ -864,8 +866,7 @@ def run(
                 f"{CASE}.kt1.bt.jn02.{component}_mid_from_jn01_exit",
                 bt_substeps[f"{component}_exit"][0],
                 _trace_native(
-                    trace.substeps[BT_SUBSTEP_NAMES.index(f"{component}_mid")],
-                    f"{component}_mid",
+                    trace.substeps[f"{component}_mid"], f"{component}_mid",
                 )[1],
                 masks[component][..., 0],
             )
@@ -925,8 +926,8 @@ def run(
     oracle_u_mid, oracle_v_mid = full_faces(
         bt_substeps["u_mid"][1], bt_substeps["v_mid"][1]
     )
-    candidate_u_mid = trace.substeps[BT_SUBSTEP_NAMES.index("u_mid")][1]
-    candidate_v_mid = trace.substeps[BT_SUBSTEP_NAMES.index("v_mid")][1]
+    candidate_u_mid = trace.substeps["u_mid"][1]
+    candidate_v_mid = trace.substeps["v_mid"][1]
     oracle_cor_u, oracle_cor_v, oracle_terms = _nemo_literal_barotropic_coriolis(
         oracle_u_mid,
         oracle_v_mid,
@@ -979,7 +980,7 @@ def run(
     causal_rows = []
     for component in ("u", "v"):
         native_literal = _trace_native(
-            literal_trace.substeps[BT_SUBSTEP_NAMES.index(f"trd_{component}")],
+            literal_trace.substeps[f"trd_{component}"],
             f"trd_{component}",
         )[1]
         causal_rows.append(
@@ -991,10 +992,10 @@ def run(
             )
         )
     generic_native_u = _trace_native(
-        generic_trace.substeps[BT_SUBSTEP_NAMES.index("trd_u")], "trd_u"
+        generic_trace.substeps["trd_u"], "trd_u"
     )[1]
     literal_native_u = _trace_native(
-        literal_trace.substeps[BT_SUBSTEP_NAMES.index("trd_u")], "trd_u"
+        literal_trace.substeps["trd_u"], "trd_u"
     )[1]
     active_u = masks["u"][..., 0]
     generic_residual = float(
@@ -1031,7 +1032,6 @@ def run(
         "slow_u", "slow_v", "eta_exit", "eta_pgf",
         "pgf_u", "pgf_v", "trd_u", "trd_v", "u_exit", "v_exit",
     )
-    trace_index = {name: index for index, name in enumerate(BT_SUBSTEP_NAMES)}
     trace_masks = {
         "eta": masks["ssh"],
         "u": masks["u"][..., 0],
@@ -1041,7 +1041,8 @@ def run(
     barotropic_first_over_bar = None
     for substep in range(50):
         for name in trace_order:
-            candidate = _trace_native(trace.substeps[trace_index[name]], name)[substep]
+            candidate = _trace_native(
+                trace.substeps[BT_TRACE_KEY.get(name, name)], name)[substep]
             stagger = "u" if name.startswith("u_") or name.endswith("_u") else (
                 "v" if name.startswith("v_") or name.endswith("_v") else "eta"
             )
@@ -1260,7 +1261,14 @@ def run(
         operator_arm_configs = {
             "momentum_scheme_identity": cfg._replace(
                 momentum_advection="flux_form",
-                momentum_flux_scheme="upwind3",
+                # Renamed by the isomorphism branch's UP3 selector split
+                # (9bbf9f7bd): the public "upwind3" resolved NEMO's
+                # advected-velocity-pair rule (dynadv_up3.F90:166,169-172)
+                # whenever momentum_time_integrator == "rk3_ws", which this
+                # arm's base card is, and Oceananigans' transport rule
+                # otherwise.  "nemo_up3" names that same NEMO rule, so this
+                # control arm is unchanged in behaviour.
+                momentum_flux_scheme="nemo_up3",
                 vertical_momentum_scheme="nemo_up3",
                 vorticity_scheme="al81",
                 ke_gradient_scheme="centered",

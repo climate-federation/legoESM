@@ -42,6 +42,7 @@ import os
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.timestepping.tridiagonal import (
     thomas_solve,
@@ -347,6 +348,7 @@ def implicit_vertical_diffusion_nemo_momentum(
     wet: jax.Array,
     *,
     extra_diag: jax.Array | float = 0.0,
+    implicit_w: jax.Array | None = None,
 ) -> jax.Array:
     """Literal NEMO ``dynzdf`` momentum matrix and ordered solve.
 
@@ -394,6 +396,19 @@ def implicit_vertical_diffusion_nemo_momentum(
     diagonal = jax.lax.optimization_barrier(diagonal - upper)
     diagonal = jax.lax.optimization_barrier(
         diagonal + jnp.asarray(extra_diag, dtype=dtype))
+    if implicit_w is not None:
+        if implicit_w.shape != field.shape[:-1] + (field.shape[-1] + 1,):
+            raise ValueError("implicit_w must contain nlev+1 interfaces")
+        # NEMO dynzdf.F90:252-267, live flux-form branch. ``implicit_w``
+        # already carries the e1e2t-area-weighted momentum-face velocity.
+        w_top = implicit_w[..., :-1]
+        w_bottom = implicit_w[..., 1:]
+        inv_dz = wet_f / jnp.where(wet_f > 0.0, dz_after, 1.0)
+        dt_a = jnp.asarray(dt, dtype=dtype)
+        lower = lower + dt_a * jnp.minimum(w_top, 0.0) * inv_dz
+        upper = upper - dt_a * jnp.maximum(w_bottom, 0.0) * inv_dz
+        diagonal = diagonal + dt_a * (
+            jnp.maximum(w_top, 0.0) - jnp.minimum(w_bottom, 0.0)) * inv_dz
     diagonal = jnp.where(wet_f > 0.0, diagonal,
                          jnp.asarray(1.0, dtype=dtype))
     return _nemo_ordered_solve(lower, diagonal, upper, field) * wet_f
@@ -407,6 +422,7 @@ def implicit_vertical_diffusion_nemo_tracer_pair(
     e3w_now: jax.Array,
     dt: float,
     wet: jax.Array,
+    implicit_w: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Literal NEMO ``trazdf`` content matrix and paired ordered solves."""
     if content_rhs_1.shape != content_rhs_2.shape:
@@ -437,6 +453,19 @@ def implicit_vertical_diffusion_nemo_tracer_pair(
     upper = jnp.concatenate([coeff, zero], axis=-1)
     coefficient_sum = jax.lax.optimization_barrier(lower + upper)
     diagonal = jax.lax.optimization_barrier(e3t_after - coefficient_sum)
+    if implicit_w is not None:
+        if implicit_w.shape != content_rhs_1.shape[:-1] + (
+                content_rhs_1.shape[-1] + 1,):
+            raise ValueError("implicit_w must contain nlev+1 interfaces")
+        # NEMO trazdf.F90:207-216: the adaptive upwind transport is fused
+        # into the same thickness-form matrix as vertical diffusion.
+        w_top = implicit_w[..., :-1]
+        w_bottom = implicit_w[..., 1:]
+        dt_a = jnp.asarray(dt, dtype=dtype)
+        lower = lower + dt_a * jnp.minimum(w_top, 0.0)
+        upper = upper - dt_a * jnp.maximum(w_bottom, 0.0)
+        diagonal = diagonal + dt_a * (
+            jnp.maximum(w_top, 0.0) - jnp.minimum(w_bottom, 0.0))
     diagonal = jnp.where(wet_f > 0.0, diagonal,
                          jnp.asarray(1.0, dtype=dtype))
     out_1 = _nemo_ordered_solve(
@@ -456,8 +485,11 @@ def implicit_vertical_diffusion_ocean_momentum_dispatch(
     *,
     evaluation: str = "shared_thomas",
     extra_diag: jax.Array | float = 0.0,
+    implicit_w: jax.Array | None = None,
 ) -> jax.Array:
     """Static production dispatch for the final momentum ZDF application."""
+    if evaluation == "shared_thomas" and implicit_w is not None:
+        raise ValueError("implicit_w requires evaluation='nemo_literal'")
     if evaluation == "shared_thomas":
         return implicit_vertical_diffusion_ocean(
             field, avm_face, dz_after, e3w_now, dt,
@@ -465,7 +497,7 @@ def implicit_vertical_diffusion_ocean_momentum_dispatch(
     if evaluation == "nemo_literal":
         return implicit_vertical_diffusion_nemo_momentum(
             field, avm_face, dz_after, e3w_now, dt, wet,
-            extra_diag=extra_diag)
+            extra_diag=extra_diag, implicit_w=implicit_w)
     raise ValueError(
         "unknown ZDF momentum solver evaluation "
         f"{evaluation!r}; expected 'shared_thomas' or 'nemo_literal'")
@@ -483,14 +515,18 @@ def implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
     wet: jax.Array,
     *,
     evaluation: str = "shared_thomas",
+    implicit_w: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Static production dispatch for the paired tracer ZDF application."""
+    if evaluation == "shared_thomas" and implicit_w is not None:
+        raise ValueError("implicit_w requires evaluation='nemo_literal'")
     if evaluation == "shared_thomas":
         return implicit_vertical_diffusion_ocean_pair(
             field_1, field_2, K, dz_after, e3w_now, dt)
     if evaluation == "nemo_literal":
         return implicit_vertical_diffusion_nemo_tracer_pair(
-            content_rhs_1, content_rhs_2, K, dz_after, e3w_now, dt, wet)
+            content_rhs_1, content_rhs_2, K, dz_after, e3w_now, dt, wet,
+            implicit_w=implicit_w)
     raise ValueError(
         "unknown ZDF tracer solver evaluation "
         f"{evaluation!r}; expected 'shared_thomas' or 'nemo_literal'")
@@ -721,3 +757,106 @@ def build_dz_half(dz: jax.Array) -> jax.Array:
     system.
     """
     return 0.5 * (dz[..., :-1] + dz[..., 1:])
+
+
+def nemo_e3w_kmm(z_coord, e3t_now, stretch, *, to_point=None):
+    """NEMO's implicit-solve gradient divisor ``e3w(:,:,jk,Kmm)``.
+
+    NEMO's ``tra_zdf``/``dyn_zdf`` divide the vertical gradient by ``e3w`` at
+    the NOW time level, and by nothing else::
+
+        TRA/trazdf.F90:219-221      zwi = -p2dt*zwt(jk  ) / e3w(ji,jj,jk  ,Kmm)
+                                    zws = -p2dt*zwt(jk+1) / e3w(ji,jj,jk+1,Kmm)
+        DYN/dynzdf.F90:200-203      zzwi = -zDt_2*(avm(ji+1,jj,jk)+avm(ji,jj,jk))
+                                         / (e3u(...,Kaa) * e3uw(ji,jj,jk,Kmm)) * wumask
+
+    with, under ``key_qco key_vco_3d`` (DINO's ``cpp_DINO.fcm``),
+
+        DOM/domzgr_substitute.h90:131   e3w(i,j,k,t)  = E3w_0(i,j,k) *(1+r3t(i,j,t))
+        DOM/domzgr_substitute.h90:108   E3w_0(i,j,k)  = e3w_3d(i,j,k)
+        DOM/domzgr_substitute.h90:49    Time(r3,i,j,t) = *(1._wp + r3(i,j,t))
+
+    and ``e3w_0(k) = gdept_0(k) - gdept_0(k-1)`` — the T-POINT DEPTH
+    DIFFERENCE, which on a stretched ladder is NOT the interface midpoint
+    ``0.5*(e3t_k + e3t_{k-1})``.  The momentum divisor is the same object:
+    ``zgr_lib.F90:111-112`` sets ``pe3uw(:,:,:) = pe3w(:,:,:)`` on the ``zco``
+    branch DINO runs, so this one function serves both solves.
+
+    Returned at the point ``to_point`` maps to: ``None`` = T points (the
+    tracer solve), otherwise the U- or V-face interpolator (the momentum
+    solve, NEMO's ``e3uw``/``e3vw``).
+
+    ``e3w_0`` is resolved in exactly ONE place, with this precedence:
+
+    1. the card's RAW NEMO mesh ``e3w_0`` when it carries one
+       (``z_coord.nemo_e3w_0`` under ``nemo_e3w_mesh_reference``).  The
+       constructor already proves that field equals ``diff(gdept_0)`` on the
+       interior (``vertical.py`` ``create_z_star_from_thicknesses``), so this
+       is NEMO's own array, not a reconstruction of it.
+    2. otherwise ``diff(gdept_0)`` for a coordinate whose T points ARE the
+       cell midpoints, which is the midpoint of the LIVE thickness
+       ``e3t_now`` — including a partial bottom cell, where NEMO's ``zps``
+       re-centres the T point on the thinned cell and its ``e3w_0`` becomes
+       that same midpoint.
+
+    Arm 2 FAILS CLOSED: a coordinate whose own ``t_depth_ref`` is not the
+    midpoint ladder has a stretched T-point ladder that arm 2 cannot
+    reproduce, and it must supply the NEMO mesh field instead of silently
+    getting the wrong ``e3w_0``.
+
+    Parameters
+    ----------
+    z_coord : the vertical coordinate (reference ladders + optional NEMO mesh).
+    e3t_now : array ``(..., nlev)`` — LIVE NOW-level cell thickness at the
+        point being asked for (T points, or already interpolated to the face).
+    stretch : array ``(...)`` — NEMO's ``(1 + r3t)`` at the NOW level, from
+        :func:`legoesm.ocean.eos.nemo_r3t_stretch`.
+    to_point : callable or None — maps a T-point field to the requested point.
+
+    Returns
+    -------
+    array ``(..., nlev-1)`` — ``e3w(Kmm)`` on the interior interfaces, aligned
+    so that entry ``i`` is the interface between cells ``i`` and ``i+1``
+    (NEMO's ``jk = i+1`` in 1-based indexing).
+    """
+    raw = nemo_e3w0_reference(z_coord)
+    if raw is None:
+        h = e3t_now if to_point is None else to_point(e3t_now)
+        return build_dz_half(h)
+    e3w = jnp.asarray(raw)[..., 1:] * jnp.asarray(stretch)[..., jnp.newaxis]
+    return e3w if to_point is None else to_point(e3w)
+
+
+def nemo_e3w0_reference(z_coord):
+    """The card's raw NEMO ``e3w_0`` mesh field, or ``None`` if it has none.
+
+    ``None`` selects :func:`nemo_e3w_kmm`'s midpoint arm, and this function
+    raises if that arm would be wrong — i.e. if the coordinate declares a
+    T-point depth ladder (``t_depth_ref``) that is NOT the interface-midpoint
+    ladder ``|z_full_ref|``.  There is no third behaviour and no silent
+    fallback.
+    """
+    raw = getattr(z_coord, "nemo_e3w_0", None)
+    if raw is not None and getattr(z_coord, "nemo_e3w_mesh_reference", False):
+        if jnp.shape(raw)[-1] != z_coord.n_levels:
+            raise ValueError(
+                f"z_coord.nemo_e3w_0 trailing size {jnp.shape(raw)[-1]} != "
+                f"n_levels={z_coord.n_levels}")
+        return raw
+    t_depth = getattr(z_coord, "t_depth_ref", None)
+    if t_depth is not None:
+        # Static reference ladders: a concrete constructor-captured array, so
+        # this is a Python-level check, never a traced one.
+        gap = float(np.max(np.abs(
+            np.asarray(t_depth) - np.abs(np.asarray(z_coord.z_full_ref)))))
+        if gap > 0.0:
+            raise ValueError(
+                "NEMO e3w(Kmm) divisor: this coordinate's t_depth_ref is not "
+                f"the interface-midpoint ladder (max|t_depth_ref - "
+                f"|z_full_ref||={gap:.6e} m), so e3w_0 = gdept_0(k) - "
+                "gdept_0(k-1) (trazdf.F90:219-221 with "
+                "domzgr_substitute.h90:108) cannot be built from the midpoint "
+                "of the live thickness. Supply the NEMO mesh e3w_0 "
+                "(nemo_e3w_0_m=..., nemo_e3w_source='mesh_reference') on this "
+                "coordinate.")
+    return None

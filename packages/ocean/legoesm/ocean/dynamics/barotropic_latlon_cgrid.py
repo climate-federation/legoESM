@@ -12,6 +12,31 @@ stencils, eliminating the 2*dx checkerboard null space of the A-grid.
 
 Parallels barotropic_latlon.py (A-grid) but with staggered variables.
 
+Reference for the generic (default) arm
+----------------------------------------
+Every ``barotropic_*_evaluation`` selector in this module (continuity,
+transport accumulation, PGF, seed, EEN-Coriolis) defaults to ``"generic"``;
+the alternative ``"nemo_literal"``/``"nemo_ssh_avg"`` values are a literal
+transcription of NEMO's ``dyn_spg_ts`` (see the ``nemo_literal_*`` helpers
+below and ``docs/ocean/fidelity/nemo_branch_isomorphism_map.md`` S-16). The
+``"generic"`` arm is **not** a NEMO port and is not a transcription of any
+single paper's equations either: it is legoESM's own in-house
+forward-backward split-explicit C-grid solver, introduced with no external
+citation by commit ``adbb49f83`` (2026-04-08, "Add C-grid lat-lon ocean
+model to fix checkerboard instability", #87). Its later closure choices were
+explicitly modeled on the standard MOM6/ROMS split-explicit family, per
+those commits' own messages: the substep time-averaging "follow[s] the
+standard approach in MOM6, MPAS-Ocean, and ROMS (Hallberg 1997, Shchepetkin
+& McWilliams 2005)" (commit ``06f4de939``, 2026-04-11, "Add barotropic
+time-averaging for split-explicit stability") and the BEBT semi-implicit
+pressure-gradient blend "match[es] MOM6 default" ``bebt=0.2`` (commit
+``3d0170d04``, 2026-04-20, #205). USER DECISION 2026-09-02: this arm is kept
+as a legitimate non-NEMO fork — it is the dycore of 19 idealized ocean
+test-matrix experiments via the ``default_wright_v1``/``legoesm_linear_v1``
+catalog recipes, plus ``legoesm_nemo_like_v1`` (renamed from ``nemo_v1``,
+which falsely implied this arm was NEMO's ``dyn_spg_ts``; see
+``legoesm.ocean.recipes``) — rather than collapsed onto the NEMO-literal arm.
+
 Wide-halo mode (opt-in, ``BarotropicConfig.barotropic_wide_halo``)
 ------------------------------------------------------------------
 The standard substep loop re-dispatches ~4 latitude halo pads per substep
@@ -33,7 +58,13 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.grids.latlon import LatLonGrid, ensure_geometry
-from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness
+from legoesm.ocean.vertical import (
+    OceanPartialCellCoordinate,
+    OceanZStarCoordinate,
+    compute_layer_thickness,
+    nemo_qco_card_mesh_operands,
+    nemo_qco_live_face_geometry_from_operands,
+)
 from legoesm.ocean.state import LatLonCGridOceanState, LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     fold_is_local,
@@ -236,6 +267,74 @@ def _nemo_literal_barotropic_pressure_gradient(eta_pgf, grid, g, u_mask, v_mask)
     return pgf_u * u_mask, pgf_v * v_mask
 
 
+def _nemo_literal_seed_from_card_mesh(
+    u_3d, v_3d, eta_dyn, H_bathy, min_water_col, u_mask, v_mask, grid, z_coord,
+):
+    """NEMO ``puu_b(Kmm)`` loop-entry seed for a card WITHOUT NEMO's mesh.
+
+    ``dynspg_ts.F90:487`` seeds the external loop with ``puu_b(Kmm)``, which
+    ``stprk3_stg.F90:439-446`` has imposed on ``uu`` at every stage with the
+    ``e3u_0/hu_0`` weights; the live face thickness is
+    ``e3u(Kmm) = e3u_0*(1 + r3u(Kmm))`` (``domzgr_substitute.h90``) with
+    ``r3u`` the ``e1e2t``-weighted ssh mean over ``hu_0``
+    (``domqco.F90:219-222``).  Those operands come from the ONE shared kernel
+    every NEMO consumer in legoESM already uses (``vertical.py``:
+    ``nemo_qco_card_mesh_operands`` -> ``e3u_0`` = min-rule of the REFERENCE
+    ladder, ``hu_0 = SUM(e3u_0*umask)`` (``domain.F90:145``);
+    ``nemo_qco_live_face_geometry_from_operands`` -> ``e3u``, ``r1_hu``), and
+    the sum is the same source-ordered ``istate.F90:149-155`` recurrence the
+    reference-mesh seed uses.
+
+    NOT the per-level min of the two STRETCHED T-cell thicknesses rescaled by
+    a column-depth ratio (the previous card path): on a face whose two
+    columns have different reference depths the per-level min follows the
+    less-stretched column while the column min follows the shallower one, so
+    the weights summed to ``hu_0*(1+r3t_e)*(1+r3u)/(1+r3t_w)`` and a uniform
+    velocity came back scaled by ``(1+r3t_e)/(1+r3t_w)`` -- measured
+    ``1.05e-9 -> 3.1e-7 -> 4.3e-6 m/s`` at the OVERFLOW-zps shelf break at
+    kt=2..4, the re-injected owner of the kt>=3 SSH walk (receipt
+    ``nemo_testcases_l1_ssh_walk_preregister.md``).
+    """
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks_3d
+
+    if z_coord is None:
+        raise ValueError(
+            "barotropic_seed_evaluation='nemo_literal' needs the card's "
+            "z-coordinate: NEMO's e3u_0 is the min-rule of the reference "
+            "ladder (domain.F90:145), which cannot be recovered from a live "
+            "thickness alone; pass z_coord (both production call sites do).")
+    dtype = jnp.asarray(eta_dyn).dtype
+    eta_dyn = jnp.asarray(eta_dyn, dtype=dtype)
+    # e3t_0: the reference (eta = 0) ladder, exactly as the WS-RK3 stage
+    # transport builds it (ocean_model_latlon_cgrid ``_h_ref_ws``).
+    h_ref = compute_layer_thickness(
+        jnp.zeros_like(eta_dyn), H_bathy, z_coord,
+        min_water_column_m=min_water_col).astype(dtype)
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        u_mask3, v_mask3 = compute_face_masks_3d(z_coord.is_active, grid)
+        u_mask3 = u_mask3.astype(dtype)
+        v_mask3 = v_mask3.astype(dtype)
+    else:
+        u_mask3 = jnp.asarray(u_mask, dtype=dtype)[..., None]
+        v_mask3 = jnp.asarray(v_mask, dtype=dtype)[..., None]
+    ops = nemo_qco_card_mesh_operands(h_ref, u_mask3, v_mask3, grid, dtype)
+    geom = nemo_qco_live_face_geometry_from_operands(
+        eta_dyn, ops.e3u_0, ops.e3v_0, ops.umask3, ops.vmask3,
+        ops.hu_0, ops.hv_0, ops.area_t, ops.area_u, ops.area_v,
+    )
+    wet2_u = (ops.hu_0 > 0.0).astype(dtype)
+    wet2_v = (ops.hv_0 > 0.0).astype(dtype)
+    un_native = _nemo_literal_seed_depth_mean(
+        jnp.asarray(u_3d, dtype=dtype)[:, 1:, :], geom.e3u * ops.umask3,
+        wet2_u, geom.r1_hu)
+    vn_native = _nemo_literal_seed_depth_mean(
+        jnp.asarray(v_3d, dtype=dtype)[1:, :, :], geom.e3v * ops.vmask3,
+        wet2_v, geom.r1_hv)
+    un = jnp.concatenate([un_native[:, -1:], un_native], axis=1)
+    vn = jnp.concatenate([jnp.zeros_like(vn_native[:1]), vn_native], axis=0)
+    return un, vn
+
+
 def _depth_average_to_faces(
     u_3d: jnp.ndarray,
     v_3d: jnp.ndarray,
@@ -252,6 +351,7 @@ def _depth_average_to_faces(
     H_bathy: jnp.ndarray | None = None,
     area: jnp.ndarray | None = None,
     z_coord=None,
+    legacy_seed_min_rule_faces: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute depth-averaged velocities at C-grid face points.
 
@@ -325,6 +425,14 @@ def _depth_average_to_faces(
             u_3d, v_3d, h_k, eta_dyn, u_mask, v_mask, z_coord)
         if mesh_seed is not None:
             return mesh_seed
+        if not legacy_seed_min_rule_faces:
+            # Card without NEMO's mesh: the same NEMO e3u(Kmm) as every
+            # other qco consumer.  ``legacy_seed_min_rule_faces`` is the
+            # harness-only one-variable control (min-of-stretched-cells
+            # rescale below); NEMO has no such switch.
+            return _nemo_literal_seed_from_card_mesh(
+                u_3d, v_3d, eta_dyn, H_bathy, min_water_col, u_mask, v_mask,
+                grid, z_coord)
 
     # h at u/v-faces — min-rule (MOM6/MITgcm hFacW convention).
     # Must match the PE tendency and slow-forcing depth-average which
@@ -1175,6 +1283,36 @@ def barotropic_coriolis_een_pre_step(u_3d, v_3d, h_k, grid, mask, u_mask,
     return cor_u, cor_v
 
 
+def _nemo_flux_form_external_velocity_update(
+    velocity_entry,
+    depth_entry,
+    depth_pgf,
+    depth_midpoint,
+    depth_kmm,
+    depth_exit,
+    pgf,
+    transport_tendency,
+    slow_forcing,
+    dt_s,
+    wet_mask,
+    min_water_col,
+):
+    """NEMO key_qcoTest_FluxForm external-mode transport update.
+
+    This is the literal ``ua_e``/``va_e`` numerator and exit-depth division
+    from NEMO 5.0.2 ``dynspg_ts.F90:731-761``.  It is deliberately not a
+    selector: NEMO's WS-RK3 flux-form identity has no alternate composition.
+    """
+    return (
+        depth_entry * velocity_entry
+        + dt_s * (
+            depth_pgf * pgf
+            + depth_midpoint * transport_tendency
+            + depth_kmm * slow_forcing
+        )
+    ) / jnp.maximum(depth_exit, min_water_col) * wet_mask
+
+
 def _run_substep_loop(
     eta, U_bar, V_bar,
     *,
@@ -1192,6 +1330,7 @@ def _run_substep_loop(
     transport_sum_init=None,
     primary_transport_average=False,
     return_trace=False,
+    nemo_flux_form_update_test_override=None,
 ):
     """The forward-backward substep loop (verbatim extraction).
 
@@ -1283,6 +1422,19 @@ def _run_substep_loop(
         byte-identical to the prior inline closure."""
         return _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area,
                                    _ssh_avg_prep)
+
+    _nemo_flux_form_update = nemo_flux_form_update_active(config)
+    # Harness-only causal arm.  This is deliberately absent from public
+    # configuration: NEMO exposes no switch inside its WS-RK3 flux-form
+    # identity.  Production always follows the source-attested branch above.
+    if nemo_flux_form_update_test_override is not None:
+        _nemo_flux_form_update = bool(nemo_flux_form_update_test_override)
+    if _nemo_flux_form_update:
+        if _face_depth_mode != "nemo_ssh_avg":
+            raise ValueError(
+                "NEMO WS-RK3 flux-form external update requires "
+                "barotropic_face_depth='nemo_ssh_avg'")
+        H_u_kmm, H_v_kmm = _ssh_avg_face_depths(eta)
 
     def substep_body(wts_i, carry):
         """Single barotropic substep with BEBT, slow forcing, MAXVEL, and cosine filter.
@@ -1492,9 +1644,22 @@ def _run_substep_loop(
             _drag_u = -drag_r_u * U_bar_c / jnp.maximum(H_u, min_water_col)
         else:
             _drag_u = 0.0
-        U_bar_new = (U_bar_c + dt_s * (
-            _cor_u + _drag_u + _pgf_u + F_slow_u_i
-        )) * u_mask
+        if _nemo_flux_form_update:
+            # key_qcoTest_FluxForm literal branch:
+            #   ua = (hu_e*un + dt*(zhu_bck*spg + zhup2*trd
+            #                        + hu(Kmm)*frc)) / hu_a
+            # dynspg_ts.F90:736-760.  eta_pgf supplies zhu_bck, eta_new
+            # supplies the exit inverse depth, and H_u_flux is zhup2.
+            H_u_pgf, H_v_pgf = _ssh_avg_face_depths(eta_pgf)
+            H_u_exit, H_v_exit = _ssh_avg_face_depths(eta_new)
+            U_bar_new = _nemo_flux_form_external_velocity_update(
+                U_bar_c, H_u, H_u_pgf, H_u_flux, H_u_kmm, H_u_exit,
+                _pgf_u, _cor_u + _drag_u, F_slow_u_i, dt_s, u_mask,
+                min_water_col)
+        else:
+            U_bar_new = (U_bar_c + dt_s * (
+                _cor_u + _drag_u + _pgf_u + F_slow_u_i
+            )) * u_mask
 
         # U averaged to v-points for the backward Coriolis half-step,
         # cell-pad-first (shared interp_u_to_vface_4pt): the partition-
@@ -1519,9 +1684,15 @@ def _run_substep_loop(
             _drag_v = -drag_r_v * V_bar_c / jnp.maximum(H_v, min_water_col)
         else:
             _drag_v = 0.0
-        V_bar_new = (V_bar_c + dt_s * (
-            _cor_v + _drag_v + _pgf_v + F_slow_v_i
-        )) * v_mask
+        if _nemo_flux_form_update:
+            V_bar_new = _nemo_flux_form_external_velocity_update(
+                V_bar_c, H_v, H_v_pgf, H_v_flux, H_v_kmm, H_v_exit,
+                _pgf_v, _cor_v + _drag_v, F_slow_v_i, dt_s, v_mask,
+                min_water_col)
+        else:
+            V_bar_new = (V_bar_c + dt_s * (
+                _cor_v + _drag_v + _pgf_v + F_slow_v_i
+            )) * v_mask
 
         # Divergence damping: grad(div(u_bar)) (#205)
         if use_div_damp:
@@ -1596,25 +1767,51 @@ def _run_substep_loop(
 
         if ab3_za is not None:
             # rotate the AB3/AM4 histories (dynspg_ts:805-815)
-            new_carry = (eta_new, U_bar_new, V_bar_new,
-                         Hu_sum_new, Hv_sum_new, eta_sum_new, U_sum_new, V_sum_new,
-                         U_bar_c, Ub_c, V_bar_c, Vb_c, eta_c, etab_c)
+            new_carry = (
+                eta_new, U_bar_new, V_bar_new,
+                Hu_sum_new, Hv_sum_new, eta_sum_new, U_sum_new, V_sum_new,
+                U_bar_c, Ub_c, V_bar_c, Vb_c, eta_c, etab_c)
         else:
-            new_carry = (eta_new, U_bar_new, V_bar_new,
-                         Hu_sum_new, Hv_sum_new, eta_sum_new, U_sum_new, V_sum_new)
+            new_carry = (
+                eta_new, U_bar_new, V_bar_new,
+                Hu_sum_new, Hv_sum_new, eta_sum_new, U_sum_new, V_sum_new)
         if return_trace:
-            # WRITE-equivalent diagnostic frame for the NEMO dynspg_ts
-            # boundary audit.  No value from this tuple feeds the carry.
-            trace = (
-                eta_c, U_bar_c, V_bar_c,
-                eta_mid, U_mid, V_mid,
-                eta_new, eta_pgf,
-                _pgf_u, _pgf_v,
-                _cor_u + _drag_u, _cor_v + _drag_v,
-                F_slow_u_i, F_slow_v_i,
-                U_bar_new, V_bar_new,
-                flux_u, flux_v,
-            )
+            # Private fidelity-harness frame registry, KEYED BY NAME.  Both
+            # the L1-overflow and the L2-GYRE barotropic harnesses score
+            # SUBSETS of this one frame, so there is exactly one registry here
+            # and no per-card trace layout.  The values are the actual
+            # operands above, returned without mutation or callbacks; the
+            # production path never requests them.  Names are pinned by
+            # nemo_testcases_l1_overflow_barotropic_preregister.md and
+            # nemo_testcases_l2_gyre_phase3_barotropic_preregister.md; keying
+            # by name rather than by position is what lets both pins hold at
+            # once (the two preregisters fixed incompatible orders).
+            trace = {
+                "eta_entry": eta_c,
+                "u_entry": U_bar_c,
+                "v_entry": V_bar_c,
+                "eta_mid": eta_mid,
+                "u_mid": U_mid,
+                "v_mid": V_mid,
+                "transport_u": flux_u,
+                "transport_v": flux_v,
+                "eta_continuity": eta_new,
+                "eta_pgf": eta_pgf,
+                "pgf_u": _pgf_u,
+                "pgf_v": _pgf_v,
+                "slow_u": F_slow_u_i,
+                "slow_v": F_slow_v_i,
+                "drag_u": jnp.asarray(_drag_u) * jnp.ones_like(U_bar_c),
+                "drag_v": jnp.asarray(_drag_v) * jnp.ones_like(V_bar_c),
+                "u_exit": U_bar_new,
+                "v_exit": V_bar_new,
+                "eta_exit": eta_new,
+                # L2 GYRE live-ENE arm: dynspg_ts.F90:686-701 forms the
+                # Coriolis and bottom-drag contributions as ONE momentum trend
+                # operand; the GYRE ENE walk scores that sum, not drag alone.
+                "trd_u": _cor_u + _drag_u,
+                "trd_v": _cor_v + _drag_v,
+            }
             return new_carry, trace
         return new_carry
 
@@ -1662,15 +1859,24 @@ def _run_substep_loop(
         # (n_loop, n_lat, n_lon+1), which at n_loop ~ 960 is infeasible.
         _xs = _xs + (tide_cos, tide_sin)
 
-    if config.barotropic.differentiable_barotropic or return_trace:
+    if return_trace:
+        # A trace is a harness artifact, not a differentiability choice.  Scan
+        # materialises every frame while preserving the identical recurrence.
+        def scan_trace_body(carry, wts_i):
+            new_carry, trace = substep_body(wts_i, carry)
+            return new_carry, trace
+
+        finals, trace = jax.lax.scan(
+            scan_trace_body, init_carry, xs=_xs, length=n_loop,
+        )
+        return finals, trace
+    if config.barotropic.differentiable_barotropic:
         # scan path: pass (averaging, transport) weights as xs per substep
         def scan_body(carry, wts_i):
-            if return_trace:
-                return substep_body(wts_i, carry)
             new_carry = substep_body(wts_i, carry)
             return new_carry, None
 
-        finals, traces = jax.lax.scan(
+        finals, _ = jax.lax.scan(
             scan_body, init_carry, xs=_xs, length=n_loop,
         )
     else:
@@ -1686,10 +1892,6 @@ def _run_substep_loop(
 
         finals = jax.lax.fori_loop(0, n_loop, fori_body, init_carry)
 
-        traces = None
-
-    if return_trace:
-        return finals, traces
     return finals
 
 
@@ -1858,6 +2060,23 @@ def _reconcile_targets(config, *, U_bar_avg, V_bar_avg, Hu_avg, Hv_avg,
     return (Hu_avg / _H_u_now).astype(dtype), (Hv_avg / _H_v_now).astype(dtype)
 
 
+def nemo_flux_form_update_active(config) -> bool:
+    """NEMO key_RK3 + flux-form momentum is one unbranched scheme identity.
+
+    dynspg_ts.F90:731-761 advances FACE TRANSPORT, with the outer Kmm depth
+    frozen across the external window; NEMO exposes no velocity-form arm.
+    Other integrators/advection families retain the legacy velocity update.
+    This is THE production predicate (no public switch); the OVERFLOW
+    19-frame gate calls it to measure, not assume, that its production arm
+    resolves to the literal update.
+    """
+    return (
+        getattr(config, "momentum_time_integrator", "euler") == "rk3_ws"
+        and getattr(config, "momentum_advection", "vector_invariant")
+        == "flux_form"
+    )
+
+
 def barotropic_substeps_latlon_cgrid(
     state: LatLonCGridOceanState,
     dt_s: float,
@@ -1878,7 +2097,9 @@ def barotropic_substeps_latlon_cgrid(
     substep_scale: int = 1,
     een_pre_override=None,
     _nemo_primary_transport_average_test_override=None,
-    _return_substep_trace=False,
+    _nemo_substep_trace_test_hook=False,
+    _nemo_flux_form_update_test_override=None,
+    _nemo_legacy_seed_faces_test_override=None,
 ) -> LatLonCGridOceanState:
     """Run barotropic substeps on a C-grid lat-lon grid.
 
@@ -2040,6 +2261,8 @@ def barotropic_substeps_latlon_cgrid(
         u, v, h_k, min_water_col, mask, u_mask, v_mask, grid,
         seed_face_depth=_seed_fd, seed_evaluation=_seed_eval,
         eta_dyn=eta, H_bathy=H_bathy, area=_area, z_coord=z_coord,
+        legacy_seed_min_rule_faces=bool(
+            _nemo_legacy_seed_faces_test_override or False),
     )
     # 3-D depth-mean REPLACEMENT reference (u' = u − ū_corr): the NOW-level
     # barotropic mean over the NOW eta.  With the MLF before-level seed the
@@ -2289,9 +2512,11 @@ def barotropic_substeps_latlon_cgrid(
         een_pre=_een_pre,
         drag_r_u=_drag_r_u, drag_r_v=_drag_r_v,
         primary_transport_average=_primary_transport_average,
-        return_trace=_return_substep_trace,
+        return_trace=_nemo_substep_trace_test_hook,
+        nemo_flux_form_update_test_override=(
+            _nemo_flux_form_update_test_override),
     )
-    if _return_substep_trace:
+    if _nemo_substep_trace_test_hook:
         _finals, _substep_trace = _loop_result
     else:
         _finals = _loop_result
@@ -2389,7 +2614,7 @@ def barotropic_substeps_latlon_cgrid(
             _finals[2] - _finals[10], _finals[2] - _finals[11],
             _finals[0] - _finals[12], _finals[0] - _finals[13],
         ))
-    if _return_substep_trace:
+    if _nemo_substep_trace_test_hook:
         return state_new, (Hu_avg, Hv_avg), _substep_trace
     return state_new, (Hu_avg, Hv_avg)
 

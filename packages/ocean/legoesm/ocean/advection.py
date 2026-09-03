@@ -840,6 +840,7 @@ def fct_tracer_advection(
     low_order_predictor: str = "one_step",
     base_thickness: jnp.ndarray | None = None,
     after_thickness: jnp.ndarray | None = None,
+    implicit_w: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """FCT tracer advection: high-order accuracy with guaranteed monotonicity.
 
@@ -1004,8 +1005,18 @@ def fct_tracer_advection(
     # and the antidiffusive difference consumed by nonosc.
     h_base = h_k if base_thickness is None else base_thickness
     if low_order_predictor == "nemo_rk3_two_step":
+        implicit_mass_div = 0.0
+        if implicit_w is not None:
+            if implicit_w.shape != tracer.shape[:-1] + (nlev + 1,):
+                raise ValueError("implicit_w must contain nlev+1 interfaces")
+            # Resolved nn_fct_imp=1: traadv_fct.F90:528-536 subtracts
+            # (wi_top-wi_bottom)*T(Kbb) in the half-step predictor; the same
+            # zero-order term is used again at :598-607 for the full predictor.
+            implicit_mass_div = (
+                implicit_w[..., :-1] - implicit_w[..., 1:]) * base
         q_mid = grad_safe_ratio(
-            h_base * base - (0.5 * dt) * (div_h_low + vert_div_low),
+            h_base * base - (0.5 * dt) * (
+                div_h_low + vert_div_low + implicit_mass_div),
             jnp.maximum(h_k, eps),
             h_k > ratio_grad_floor(tracer.dtype),
         )
@@ -1070,7 +1081,10 @@ def fct_tracer_advection(
 
     # Provisional low-order (upwind) update in AFTER-thickness form.
     q_td = grad_safe_ratio(
-        h_base * base - dt * (div_h_low + vert_div_low),
+        h_base * base - dt * (
+            div_h_low + vert_div_low + (
+                (implicit_w[..., :-1] - implicit_w[..., 1:]) * base
+                if implicit_w is not None else 0.0)),
         jnp.maximum(h_new, eps),
         h_new > t_grad_h,
     )

@@ -74,7 +74,7 @@ def test_nemo_testcase_cards_are_fp64_source_pinned(
     assert cfg.eos_depth == "geometric"
     assert cfg.tracer_advection == "fct2"
     assert cfg.momentum_advection == "flux_form"
-    assert cfg.momentum_flux_scheme == "upwind3"
+    assert cfg.momentum_flux_scheme == "nemo_up3"
     assert cfg.momentum_time_integrator == "rk3_ws"
     assert cfg.tracer_time_integrator == "rk3_ws"
     assert "tracer_fct_low_order_predictor" not in cfg._fields
@@ -244,11 +244,28 @@ def test_global_validation_rejects_frankenstein_rk3_and_eos_pgf_pairs():
         base._replace(momentum_time_integrator="euler"),
         base._replace(tracer_advection="ppm_fct"),
         base._replace(eos_depth="insitu"),
-        base._replace(pgf_scheme="adcroft"),
     )
     for cfg in bad:
         with pytest.raises(ValueError):
             LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, cfg)
+
+
+def test_card_validation_rejects_a_swapped_pressure_gradient():
+    """`pgf_scheme` moved from the MODEL guard to the CARD validator.
+
+    The model-level trapezoid allow-list was widened to
+    {"nemo_sco", "adcroft"} on the oracle's own evidence -- hpg_zco
+    (dynhpg.F90:270-296) accumulates the same e3w(Kmm) trapezoid as hpg_sco
+    (:343-374) -- so `adcroft` + `nemo_trapezoid` builds now.  It is still a
+    frankenstein for THESE cards, whose certified identity is hpg_sco, and the
+    card validator is what owns that.  This is the same assertion, relocated,
+    not a dropped one.
+    """
+    card = build_lock_exchange_zco_card()
+    cfg = card.recipe.model_config._replace(pgf_scheme="adcroft")
+    mutated = card._replace(recipe=card.recipe._replace(model_config=cfg))
+    with pytest.raises(ValueError, match="hpg_sco pressure gradient"):
+        validate_nemo_testcase_card(mutated)
 
 
 def test_testcase_cards_construct_the_shared_canonical_model():

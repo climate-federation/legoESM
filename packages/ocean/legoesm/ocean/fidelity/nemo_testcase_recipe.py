@@ -184,8 +184,12 @@ def _model_config(
             surface_stress_implicit=True,
             bbl_adv_option=bbl_adv_option,
             bbl_gamma_s=bbl_gamma_s,
+            # NEMO's e3w(Kmm) implicit-solve divisor (trazdf.F90:219-221,
+            # dynzdf.F90:200-203) comes WITH this identity -- it is not a
+            # separate flag, because NEMO has no such switch.  Same removal as
+            # the shared _model_config above; the GYRE card runs the same
+            # routine, so it takes the same fix.
             zdf_implicit_solver_evaluation="nemo_literal",
-            implicit_vmix_e3t_now_divisor=True,
             use_conservation_fixer=False,
             fix_eta_drift=False,
             barotropic=config.barotropic._replace(
@@ -217,7 +221,10 @@ def _model_config(
         # stages from Kbb with dt/3, dt/2, and dt.
         tracer_time_integrator="rk3_ws",
         momentum_advection="flux_form",
-        momentum_flux_scheme="upwind3",
+        # dynadv_up3.F90:166,169-170 -- the NEMO-referenced UP3 arm (the
+        # T-point fluxes select the upwind curvature by the advected-
+        # velocity pair).  See UP3_REFERENCE_SELECTOR.
+        momentum_flux_scheme="nemo_up3",
         momentum_time_integrator="rk3_ws",
         # key_RK3 is a single scheme identity: Kmm transports + two-step FCT
         # + per-stage external-mode correction + distinct un_adv/hu transport.
@@ -254,8 +261,10 @@ def _model_config(
         bbl_gamma_s=bbl_gamma_s,
         adaptive_implicit_vertadv=True,
         implicit_vertical_mixing=True,
+        # NEMO's e3w(Kmm) implicit-solve divisor (trazdf.F90:219-221,
+        # dynzdf.F90:200-203) comes WITH this identity — it is not a
+        # separate flag, because NEMO has no such switch.
         zdf_implicit_solver_evaluation="nemo_literal",
-        implicit_vmix_e3t_now_divisor=True,
         A_h=0.0,
         B_h=0.0,
         C_smag=0.0,
@@ -817,10 +826,20 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
     if cfg.barotropic.barotropic_diffusion_alpha != 0.0:
         raise ValueError(
             f"{card.case} forbids unmatched live eta diffusion")
-    if (cfg.zdf_implicit_solver_evaluation != "nemo_literal"
-            or not cfg.implicit_vmix_e3t_now_divisor):
+    # All three testcase cards run NEMO's hpg_sco (dynhpg.F90:305-393) with its
+    # e3w(Kmm) trapezoid.  The MODEL-level guard can no longer carry this: the
+    # trapezoid allow-list was widened to {"nemo_sco", "adcroft"} because
+    # hpg_zco (dynhpg.F90:270-296) accumulates the same recurrence, so a card
+    # silently swapped to "adcroft" now builds.  Pin it here, on the card,
+    # which is what owns the certified identity.
+    if cfg.pgf_scheme != "nemo_sco":
         raise ValueError(
-            f"{card.case} requires the NEMO literal implicit-ZDF program")
+            f"{card.case} requires NEMO's hpg_sco pressure gradient "
+            f"(pgf_scheme='nemo_sco'), got {cfg.pgf_scheme!r}")
+    if cfg.zdf_implicit_solver_evaluation != "nemo_literal":
+        raise ValueError(
+            f"{card.case} requires the NEMO literal implicit-ZDF program "
+            "(which carries NEMO's e3w(Kmm) gradient divisor)")
     if not cfg.tracer_wall_neumann_fill:
         raise ValueError(
             f"{card.case} requires NEMO's closed-wall tracer halo fill")

@@ -317,11 +317,40 @@ def apply_bbl_adv_step(state, geom: BBLGeometry, dt: float, *,
     transports from the CURRENT bottom T/S and integrate one forward-Euler
     exchange step ``pt += dt * d(pt)/dt``.
 
-    Operator-split with the dynamics exactly like NEMO applies trabbl within
-    its sequential tracer trends.  Stability: the exchange is a bounded
-    relaxation between cells; with NEMO's gamma=20 s and 1-deg cells the
-    per-step exchange fraction ``|tr|*dt/V`` is << 1 at any ocean dt (see the
-    unit test's magnitude check).
+    COMPOSITION, stated honestly (branch-isomorphism audit S-42): this is NOT
+    NEMO's composition.  NEMO adds ``tra_bbl``'s exchange into the tracer
+    right-hand side of the step itself (``stprk3_stg.F90:468,498,588`` on the
+    RK3 lane, ``stpmlf.F90`` on the MLF lane), reading the BEFORE-level
+    tracers; this wrapper applies the SAME operator as a separate forward-
+    Euler update after the step, on the updated tracers and the reference
+    thicknesses.  The arithmetic is shared: ``bbl_transports`` and
+    ``apply_bbl_adv_tendency`` below are the single transcription of
+    ``trabbl.F90:243-284``, and this function adds no arithmetic of its own
+    beyond one forward-Euler update.  It does feed them DIFFERENT operands
+    though: the reference ladder ``geom.h_ref`` / ``geom.dep_bot``, where the
+    in-model site passes the live stage thickness and a recomputed live bottom
+    depth (``ocean_model_latlon_cgrid.py:1290-1298``) -- an O(eta/H) ~ 3e-4
+    difference.  So the placement is a host operator split with no NEMO arm,
+    and its operands are the reference ones.  It exists
+    because the only in-model BBL site lives in the WS-RK3 tracer lane
+    (``ocean_model_latlon_cgrid.py``, ``tracer_time_integrator="rk3_ws"``)
+    and the OMIP driver runs the forward-Euler tracer lane, which itself has
+    no NEMO arm.  Collapsing the two onto one site is an OPEN item.
+
+    Stability -- the criterion, not one example.  ``e3_bbl`` cancels between
+    transport and volume (``tr`` ~ ``width*e3_bbl``, ``V`` ~ ``area*e3_bot``,
+    and ``e3_bbl`` is the min of the two bottom thicknesses), so the per-step
+    exchange fraction reduces to
+
+        |tr|*dt/V  =  g * gamma_s * (drho/rho_0) * dt / e1t
+
+    which is thickness-INDEPENDENT.  The deleted ``0.25`` cap could therefore
+    bind only for ``drho/rho_0 > e1t / (4*g*gamma_s*dt)``.  MEASURED on ORCA1's
+    own metrics at 60N, dt=3600 s, with a Denmark-Strait-exceeding contrast
+    (dT=13.5 degC, dS=2.5 PSU): max fraction 0.048, transports up to 4.1 Sv; at
+    an absurd drho/rho_0 = 1e-2 with dt=5400 s it is 0.19.  The cap never bound
+    in any production configuration.  NEMO clamps neither ``utr_bbl`` nor
+    ``vtr_bbl`` (``trabbl.F90:243-284``), so neither does this.
 
     Parameters
     ----------
@@ -343,18 +372,11 @@ def apply_bbl_adv_step(state, geom: BBLGeometry, dt: float, *,
     utr, vtr = bbl_transports(
         T, S, geom, dy_u_faces, dx_v_faces,
         gamma_s=gamma_s, rho_0=rho_0)
-    # Face-local exchange cap (codex MED): the host-split Euler exchange
-    # fraction |tr|*dt/V must stay << 1 for every touched cell.  Cap |tr|
-    # at 0.25*V_min/dt with V_min = min bottom-cell volume of the two
-    # columns — inactive at ORCA1 scales (fraction ~1e-2), engages only on
-    # pathological tiny-area/extreme-drho faces. Sign/zero pattern kept.
-    area = jnp.asarray(area_2d, dtype=jnp.float64)
-    e3_bot = jnp.take_along_axis(h_k, geom.bot_k[..., None], axis=-1)[..., 0]
-    V_bot = area * jnp.maximum(e3_bot, 1.0e-3)  # coeff-ok: bottom-cell thickness floor [m]
-    cap_u = 0.25 * jnp.minimum(V_bot[:, :-1], V_bot[:, 1:]) / dt
-    cap_v = 0.25 * jnp.minimum(V_bot[:-1, :], V_bot[1:, :]) / dt
-    utr = jnp.sign(utr) * jnp.minimum(jnp.abs(utr), cap_u)
-    vtr = jnp.sign(vtr) * jnp.minimum(jnp.abs(vtr), cap_v)
+    # No transport cap.  NEMO's tra_bbl_adv (trabbl.F90:243-284) clamps
+    # neither utr_bbl nor vtr_bbl, and no non-NEMO recipe selects a capped
+    # arm (recipes.py never mentions BBL), so a cap here would be a
+    # stabilizer the oracle lacks — removed 2026-09-02 under the
+    # branch-isomorphism audit (S-42).
     zero = jnp.zeros_like(T)
     dT, dS = apply_bbl_adv_tendency(
         zero, jnp.zeros_like(S), T, S, h_k, jnp.asarray(area_2d), geom,
