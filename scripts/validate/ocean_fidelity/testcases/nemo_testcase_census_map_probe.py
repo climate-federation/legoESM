@@ -503,8 +503,8 @@ def command_budget(args) -> None:
             disable_tracer_vertical_transport=True),
         "fct_two_step_predictor": _NEMOWSRK3TestHooks(
             two_step_fct_predictor=False),
-        "nemo_bbl_reference_geometry": _NEMOWSRK3TestHooks(
-            nemo_bbl_reference_geometry=True),
+        "legacy_bbl_partial_geometry": _NEMOWSRK3TestHooks(
+            legacy_bbl_partial_geometry=True),
     }
     registered = set(term_hooks)
     measured = set(term_hooks)
@@ -629,9 +629,7 @@ def command_run_arm(args) -> None:
             "JAX x64/precision mismatch")
     card = STATS.build_nemo_testcase_card(CASE)
     model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
-        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
-            nemo_bbl_reference_geometry=True))
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
     state = card.recipe.initial_state
     samples = set(STATS.sample_completed_steps(CASE))
     captured = {}

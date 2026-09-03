@@ -1014,12 +1014,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     kmm_tracer_transports: bool = True
     two_step_fct_predictor: bool = True
     disable_bbl: bool = False
-    # One-variable census arm: feed the existing Campin--Goosse kernel the
-    # exact tra_bbl_init reference geometry (gdept_0 bottom-level slope mask,
-    # unmasked e3u_0/e3v_0 bottom thicknesses, Kmm-stretched gdept).  False is
-    # the pre-arm partial-centroid construction until the arm is adjudicated;
-    # this is private harness state, never a constructible model selector.
-    nemo_bbl_reference_geometry: bool = False
+    # Private faithful-but-worse control: restore the pre-census continuous
+    # partial-centroid BBL geometry.  Public NEMO WS-RK3 configurations use
+    # tra_bbl_init's reference-depth mask and raw face e3*_0 unconditionally;
+    # NEMO has no switch between these geometries (trabbl.F90:507-533).
+    legacy_bbl_partial_geometry: bool = False
     # Private ablation of dynspg_ts's flux-form primary transport average.
     # Public NEMO RK3 configurations always keep this true.
     primary_transport_average: bool = True
@@ -6295,8 +6294,8 @@ class LatLonCGridOceanModel:
                     _h_ref = jnp.asarray(_zc.h_partial)
                     if _h_ref.ndim == 1:
                         _h_ref = jnp.broadcast_to(_h_ref, h_k_old.shape)
-                    _nemo_bbl_geometry = (
-                        self._nemo_ws_test_hooks.nemo_bbl_reference_geometry)
+                    _nemo_bbl_geometry = not (
+                        self._nemo_ws_test_hooks.legacy_bbl_partial_geometry)
                     if _nemo_bbl_geometry:
                         _gdept0 = getattr(_zc, "nemo_gdept_0", None)
                         _e3u0 = getattr(_zc, "nemo_bbl_e3u_0", None)
