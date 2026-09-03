@@ -204,13 +204,21 @@ interpreted.
    masks with the 2-D `u_mask` (`omlc` `u_mask_3d = state.u_mask.data[...,
    None]`) rather than the 3-D live face mask; and the reseeded arms, which
    zero it, differ from the free run by 1.6% from kt=4, so it is NOT inert.
-   PLAUSIBLE mechanism (read, unmeasured): the bottom wet cell couples to the
-   phantom through a vertical operator whose mask is the same 2-D one
-   (implicit ZDF interface k=24/25 or the vertical UP3).  Discriminating test:
-   zero `u` below the live seabed after every stage (NEMO's `*umask(jk)` at
-   `stprk3_stg.F90:444`, `dynzdf.F90:121`) as a one-variable arm and re-read
-   the injection table.  ASK before landing: it changes carried state on
-   masked cells.
+   Mechanism CONFIRMED by reading (review round, both reviewers + author):
+   NOT the vertical operators (the implicit ZDF zeroes the below-seabed
+   interfaces through `_act_u3`, the vertical UP3 is `face_active`-masked,
+   every thickness-weighted sum sees `h_partial = 0`) but the HORIZONTAL UP3
+   stencil -- `_bc_horizontal_momentum_advection_flux_form` reconstructs the
+   T-point face value from `u_core = u[:, :-1, :]` UNMASKED, so the wet bottom
+   level of the shelf-break faces reads the dry front face's phantom as a
+   stencil neighbour with a nonzero transport from its wet side, where NEMO's
+   `uu(Kaa)` is `umask`'d at `stprk3_stg.F90:367,375,444`.  Discriminating
+   one-variable arm: mask the stage velocities with the 3-D live face mask
+   (equivalently zero `u` below the live seabed after every stage) and re-read
+   the injection table (predicted: the kt>=3 injection at faces 22-24 k=24/25
+   collapses; faces 19-21 unchanged).  UNMEASURED; needs its own
+   preregistration.  ASK before landing: it changes carried state on masked
+   cells.
 2. Remaining kt=2 `R` `7.06e-12` at face 20 k=24 and the exact-entry `slow_u`
    `1.5e-11` (kt=3) / `5.9e-10` (kt=4) at face 22: same bottom-level family as
    item 1 (the kt=4 replay left exactly `5.9e-10` off the front).
@@ -237,9 +245,80 @@ interpreted.
 
 ## Reviews
 
-Two independent reviewer subagents (diff contract; mechanism) were run on the
-full `032bedd3a..bd0861319` range after the arm; their verdicts and the
-disposition of every finding are appended in the follow-up commit.
+Codex CLI and the GLM tool are unavailable on this account, so the dual
+review ran as two independent reviewer subagents on the full
+`032bedd3a..bd0861319` range (one on the diff contract, one on the
+mechanism), after the arm.  Both verdicts and the disposition of every
+finding:
+
+**Reviewer A (diff): REQUEST CHANGES -> addressed.**
+1. (Important) `F_slow` still depth-means with the min-rule `h_u_pre` while
+   the advection now divides by `e3u(Kbb)`; claimed a `4e-4`/level weighting
+   error.  **REFUTED by measurement** (the per-face stretch factor cancels in
+   a normalised mean; only a partial-cell face whose min switches columns
+   between levels can differ): on NEMO's exact kt=2/3/4 entries
+   `max|F_slow[h_u_pre] - F_slow[e3u_0]|` = `8.7e-19 / 2.4e-16 / 8.7e-14`
+   (face 23; identical against `e3u(Kbb)` weights), while the remaining
+   exact-entry `slow_u` residual is `8.1e-15 / 1.5e-11 / 5.9e-10` at face
+   22 -- four to seven orders apart and on a different face.  Not changed;
+   unifying the weights onto the kernel's pair for isomorphism's sake is a
+   choice, listed under ASK.
+2. (Important) the kwarg is consumed only under `momentum_advection ==
+   "flux_form"`, so a vector-invariant `rk3_ws` card would silently get no
+   effect.  **REFUTED**: the constructor refuses `rk3_ws` without the coupled
+   `flux_form/upwind3/nemo_up3` program (`ocean_model_latlon_cgrid.py`
+   `_validate_config`, "NEMO rk3_ws requires the coupled flux_form/upwind3/
+   nemo_up3 momentum program"), so the path is fail-closed already.
+3. (Minor) with `adaptive_implicit_vertadv=False` (a legal namelist) the
+   kernel's explicit vertical advection still divides by the min-rule `h_u`
+   while the horizontal uses `e3u(Kmm)`.  CONFIRMED by reading, dormant on
+   every certified card (`nemo_testcase_recipe.py` sets Aimp true); recorded
+   as debt, not changed (an unmeasurable path; ASK).
+4. (Minor) `_stage_face_thickness` read the pair off the stage transport's
+   `geom[4]`, which the OLDER `legacy_stage_min_face_thickness` transport arm
+   also flips, so that arm had silently become two-variable.  **FIXED** in
+   this receipt's commit: the pair is now built from the stage ssh through
+   `_nemo_ws_qco_stage_faces` at every site; the faithful kt=2 rows on both
+   cards reproduce the after-gate numbers bit-for-bit (OVERFLOW `u`
+   `7.064251961175216e-12`, `T` `7.815970093361103e-15`, `ssh`
+   `1.050548537051554e-14`; LOCK `2.276824562219559e-17 / 0 / 0`), 7 WS unit
+   tests pass, and the older transport arm now reads kt=2 `u` `8.557e-11`,
+   `T` `1.274e-08` (one variable again).  Also noted: the S1 selector
+   predicate's frozen `2.598798e-07` is now measured on top of the new
+   thickness (`2.598859e-07`, inside its 1% band) -- MET by tolerance, stated.
+5. (Note) the "rest identical" assertion of the unit test is a smoke control
+   (at eta=0 the two rules coincide by construction), not evidence; the live
+   tilted-entry assertion is the non-vacuous half.  Agreed.
+
+**Reviewer B (mechanism): SHIP-WITH-NOTES.**
+1. NEMO reading CONFIRMED line by line (`dynadv_up3.F90:160,207`;
+   `stprk3_stg.F90:273`; `stp2d.F90:172`; `domzgr_substitute.h90:46,127`;
+   `domqco.F90:219-220` is the compiled branch, `:227` the `#else`), including
+   the `*umask` factor (`vertical.py:190`).
+2. Time levels CONFIRMED at all four sites; NEMO blends `r3u`
+   (`stprk3_stg.F90:166-168`) where legoESM blends `eta` and then forms
+   `r3u` -- algebraically identical, `~1e-21` measured.
+3. `h_u_pre` (live min-rule) vs NEMO's `e3u_0/r1_hu_0` weights for `Ue_rhs`:
+   same hypothesis as A-1, same discriminator -- **REFUTED by the
+   measurement above** (`<= 8.7e-14`, face 23, vs `5.9e-10` at face 22).
+4. Rule 8 reading agreed: the per-step injection is NOT worse after the fix
+   (kt=6 `8.938e-7 -> 8.939e-7`, kt=10 `4.41e-7 -> 2.86e-7`), so the worse
+   free rows compound a separately-owned term, not a wrong site.
+5. Open item 1's mechanism corrected: the implicit ZDF path is CLOSED to the
+   below-seabed phantom (`A_v_u = A_v_u * _act_u3[..., 1:]` zeroes the
+   interfaces; every thickness-weighted sum sees `h_partial = 0`), and the
+   vertical UP3 is masked by `face_active`.  The LIVE path is HORIZONTAL:
+   `_bc_horizontal_momentum_advection_flux_form` feeds `u_core = u[:, :-1, :]`
+   into `_up3_reconstruct` UNMASKED, so the T-point flux at a wet bottom level
+   next to the dry front face reads its `-7.9e-3 m/s` phantom as a stencil
+   neighbour (NEMO's `uu` is `umask`'d at `stprk3_stg.F90:367,375,444`), with
+   a nonzero transport from the wet side -- exactly faces 22/23 at the bottom
+   level, the observed injection.  CONFIRMED by reading (both reviewers and
+   the author traced it independently); the discriminating arm is the 3-D
+   live face mask on the stage velocities.  Open item 1 is rewritten below.
+
+Reviewer disagreement (A-1/B-3 vs the receipt) was settled by the
+measurement, not averaged.
 
 ## Artifacts (`/data/abyssal/dbalwada/nemo-testcases-l1/`)
 
@@ -272,4 +351,5 @@ disposition of every finding are appended in the follow-up commit.
 
 legoESM commits on `fidelity/overflow-stage3-remainder`: `8e75304ea`,
 `fcd0d6057` (probe), `f8247f9a3` (preregistration), `60d0c5420` (fix),
-`bd0861319` (map/registry), plus this receipt.
+`bd0861319` (map/registry), `e0910abee` (receipt), plus the review-round
+commit (one-variable hygiene of the stage pair; this section).

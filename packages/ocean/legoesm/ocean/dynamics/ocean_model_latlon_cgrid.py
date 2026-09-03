@@ -5069,22 +5069,28 @@ class LatLonCGridOceanModel:
             # rest).
             _du1_rhs, _dv1_rhs = du_dt_pert, dv_dt_pert
             # The stage's NEMO e3u/e3v(Kmm) pair for the flux-form momentum
-            # advection (one kernel, _nemo_ws_qco_stage_faces, inside
-            # _nemo_ws_stage_transport); the private hook hands None so
-            # tendencies() falls back to its own min-rule thickness.
+            # advection, from the ONE kernel (_nemo_ws_qco_stage_faces) keyed
+            # on the stage ssh -- NOT read off the stage transport's geom[4],
+            # so the older ``legacy_stage_min_face_thickness`` transport arm
+            # stays one-variable (review finding).  The private hook hands
+            # None so tendencies() falls back to its own min-rule thickness.
             _legacy_hadv_h = (
                 self._nemo_ws_test_hooks.legacy_hadv_min_face_thickness)
 
-            def _stage_face_thickness(geom):
-                return None if _legacy_hadv_h else (geom[4], geom[5])
+            def _stage_face_thickness(eta_stage):
+                if _legacy_hadv_h:
+                    return None
+                return _nemo_ws_qco_stage_faces(
+                    eta_stage, _h_ref_ws, _u_live_mask, _v_live_mask, _grid)[:2]
 
+            _face_thickness_kbb = _stage_face_thickness(state.eta.data)
             if _transport_target is not None:
                 _p0_with_zub = _mom_pert_ws(
                     u0, v0, False, _transport_target,
-                    stage_face_thickness=_stage_face_thickness(_g0))
+                    stage_face_thickness=_face_thickness_kbb)
                 _p0_no_zub = _mom_pert_ws(
                     u0, v0, False, None,
-                    stage_face_thickness=_stage_face_thickness(_g0))
+                    stage_face_thickness=_face_thickness_kbb)
                 _du1_rhs = _du1_rhs + (_p0_with_zub[0] - _p0_no_zub[0])
                 _dv1_rhs = _dv1_rhs + (_p0_with_zub[1] - _p0_no_zub[1])
             # Stage 1: Kmm = Kbb, so the RHS carries (1 + r3u(Kbb)).
@@ -5108,7 +5114,7 @@ class LatLonCGridOceanModel:
                 u1_corr, v1_corr, True, _transport_target,
                 _stage_hpg_operands(_T_stage1, _S_stage1, _eta_live_one_third),
                 _stage_vertical_up3(u1_corr, v1_corr, _g1),
-                stage_face_thickness=_stage_face_thickness(_g1))
+                stage_face_thickness=_stage_face_thickness(_eta_live_one_third))
             u2_raw = (_qu_b * u0 + (dt_mom / 2.0) * _qu_13 * p1u_corr) / _qu_12
             v2_raw = (_qv_b * v0 + (dt_mom / 2.0) * _qv_13 * p1v_corr) / _qv_12
             u2_corr, v2_corr = _replace_stage_mean(
@@ -5127,7 +5133,7 @@ class LatLonCGridOceanModel:
                 u2_corr, v2_corr, False, _transport_target,
                 _stage_hpg_operands(_T_stage2, _S_stage2, _eta_live_one_half),
                 _stage_vertical_up3(u2_corr, v2_corr, _g2),
-                stage_face_thickness=_stage_face_thickness(_g2))
+                stage_face_thickness=_stage_face_thickness(_eta_live_one_half))
             u3_raw = (_qu_b * u0 + dt_mom * _qu_12 * p2u_corr) / _qu_aa
             v3_raw = (_qv_b * v0 + dt_mom * _qv_12 * p2v_corr) / _qv_aa
             u3_corr, v3_corr = _replace_stage_mean(
