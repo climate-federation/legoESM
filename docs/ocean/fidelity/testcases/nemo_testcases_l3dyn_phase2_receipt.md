@@ -1,4 +1,4 @@
-# SI3 lane 3 — phase-2 receipt (rungs 3.1, 3.2, and rung-3.3 design)
+# SI3 lane 3 — phase-2 receipt (rungs 3.1, 3.2, and rung-3.3 partial implementation)
 
 Issue: climate-federation/legoESM #1699
 
@@ -14,12 +14,17 @@ Phase-2 commit ledger:
 * round-2b disclosure correction: `43658998cc9`;
 * rung-3.2 written-order replay preregistration and final classification:
   `146199c9b3e` and `aa6dc122b43`;
-* rung-3.3 design preregistration: `af53e78bd33`.
+* rung-3.3 initial design preregistration: `af53e78bd33`;
+* rung-3.3 independent-review design revision: `9b369d9d082`;
+* rung-3.3 C-grid aEVP implementation boundary: `54d0d5dad96c38b194ec56addd6dc051439a52e5`.
 
 Oracle roots: `/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv1d/final`,
 `/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv2d/final`, and
 `/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv2d_rhg/final`.
-Gate artifacts are the corresponding `phase2/nemo_si3_phase2_gate.json` files.
+Rung-3.1/3.2 gate artifacts are the corresponding
+`phase2/nemo_si3_phase2_gate.json` files.  The rung-3.3 partial artifact is
+`ice_adv2d_rhg/legoesm/rung33_partial_gate.json` and its A-grid preservation
+control is `ice_adv2d_rhg/legoesm/rung33_agrid_guard.json`.
 
 ## Rung 3.1 verdict
 
@@ -417,26 +422,103 @@ owner is inferred from that scaling.
 The planted cross-moment control changes `v_i` by 5,913,692 ULP, proving the
 replay comparison is live.  The focused replay suite passes 2/2.
 
-## Rung 3.3 — committed design boundary only
+## Rung 3.3 — C-grid aEVP partial implementation boundary
 
-The C-grid adaptive-EVP design was preregistered in
-`nemo_testcases_l3dyn_phase2_rung33_preregister.md` at commit `af53e78bd33`,
-before any rung-3.3 candidate code or score.  It resolves the sole permitted
-card composition, enumerates the `ice_stp -> ice_dyn -> ice_dyn_rhg ->
-ice_dyn_rhg_evp` call graph, assigns every operand to T/U/V/F, records the
-odd-U/V then even-V/U ordering of all 100 subcycles, and makes the three
-T/T/F stresses restart-carried prognostics.  It also maps the existing A-grid
-kernels to KEEP/REUSE/NEW dispositions: only H79 `ice_strength`, geometry,
-control-flow mechanics, and the already-selectable Prather arm are reusable;
-the strain, transformed-stress, divergence, drag, and sequential momentum
-formulas require the C-grid selector arm.
+### Review revision before code
 
-This is intentionally a clean stop after the mandatory design-first step.
-Rung-3.3 implementation, geometry/card tests, first-step comparison,
-485-frame sweep, restart continuation, and JIT/gradient measurements are all
-**UNMEASURED**.  No rung-3.3 field is called AT-BAR, matched, or faithful.
-The preregistration document SHA256 is
-`5f147db1b5c446b95a7bd1fbe4dc2af0b4533dad786cb3903841becf2e244f21`.
+The C-grid adaptive-EVP design was first preregistered at `af53e78bd33`.
+Independent line review required six changes; all were folded into the design
+alone at `9b369d9d082`, before candidate code.  The revised design:
+
+* moves the selectable C-grid solver beside the existing A-grid `evp_solver`
+  in `dynamics.py`, not `rheology.py`;
+* records exact one-based NEMO and zero-based Python extents for every shear,
+  deformation, stress, divergence, component-update, and final-diagnostic loop;
+* preserves `zmsk` on `stress1/2` but not `stress12`, and leaves the H79
+  `at_i>epsi10` guard outside shared `ice_strength`;
+* enumerates the static-friction arms and `rn_lf_relax=1e-5`, then waives them
+  dead because landfast OFF makes basal stress zero and reduces the branch to
+  the impossible `zRHS<0 AND zRHS>=0`;
+* identifies the fast mask as a file field read by `icedyn.F90:113-118`, not a
+  consequence of the landfast selector; and
+* retracts parity reversal and simultaneous U/V as controls on this zero-
+  Coriolis, one-rank periodic card.  With `zmf=0`, precomputed cross velocities,
+  and stresses fixed before the pair, they share no live updated operand; the
+  full halo exchange removes the remaining loop-extent distinction.  The
+  replacement stress-divergence-weight plant binds on the actual card.
+
+The revision also distinguishes the ORCA1 reference deck's `jpl=5`,
+`nlay_i/nlay_s=10/5` from its checked EXPREF overlay's explicit `1/3/3`
+override.  ORCA1 selects `ln_dynALL` and landfast; this rung explicitly selects
+the shipped case's `ln_dynRHGADV`, landfast OFF, `jpl=1`, and `3/3`.  It imports
+only the cited ORCA1 H79/aEVP/drag choices.  The revised design SHA256 is
+`f70d7b4d7cebcf22645e69df89d6294172319e3b6ff59cd3e5b1d991dd8bae7c`.
+
+### Implemented boundary and measured result
+
+The existing A-grid arm and defaults are untouched.  The same dynamics module
+now contains a separately selected same-index C-grid state/config/forcing
+contract (`dynamics.py:103-176`) and the SI3 solver at `:920`.  Its helpers
+transcribe F shear (`:747`), T deformation (`:776`), and transformed-stress
+divergence (`:829`); the H79 presence guard remains in the caller at `:965`.
+All T/U/V/F leaves retain NEMO's common `(103,103)` two-halo allocation.  The
+card in `nemo_adv2d_rhg_testcase_recipe.py:131-319` rejects every selector
+cross-product outside the resolved one-category, landfast-off card, performs
+dynamics before reusing the sole Prather implementation, then reuses the same
+Hbig/Hsnow/zapsmall corrections.
+
+SI3 uses unfloored square roots in both the deformation and drag paths.  A
+primal floor would change the oracle.  The implementation therefore defines an
+exact `sqrt(x)` primal and an explicit finite zero subgradient only at the
+mathematically undefined `x=0` cusp (`dynamics.py:179-204`).  The complete 100-
+subcycle kernel compiles under `jax.jit`; reverse mode on an active perturbed
+ice state returns finite, nonzero fp64 gradients.
+
+The partial fail-closed gate records exactly 68 rows: 22 geometry rows plus 23
+registered fields at cold entry and after completed step 1.  It red-flags a
+missing or duplicate row.  All 22 geometry rows, all cold-entry rows, both
+velocities, and all 16 transported tracer rows after dynamics plus Prather are
+AT-BAR at the immutable normalized pointwise `1e-15` class.  The three stress
+carries are **DEBT**:
+
+| first completed step row | normalized maximum absolute error | result |
+|---|---:|---|
+| `stress1_i` (T) | `2.677729266548652e-14` | DEBT |
+| `stress2_i` (T) | `1.8877857221034826e-14` | DEBT |
+| `stress12_i` (F) | `1.7983397985341945e-14` | DEBT |
+| `u_ice` (U) | `4.996003610813204e-16` | AT-BAR |
+| `v_ice` (V) | `2.632442874794805e-16` | AT-BAR |
+
+These are measured gate labels, not trajectory claims.  A source-ordered
+stress replay has not yet been completed, so the stress owner is
+**UNMEASURED**.  Per the preregistration, no re-association label is assigned
+without that replay and the two-ULP discriminator.  The 485-frame sweep stops
+at this clean boundary and remains **UNMEASURED**; no later frame was scored.
+
+The production stress-divergence weight plant changes its registered force by
+`5.270939248713802e-05` normalized and is red as required.  Selector/Coriolis,
+geometry, row-omission, T/F stress-mask, and stress-DEBT controls are also
+covered.  The existing A-grid card was executed from the preregistration commit
+and from the implementation commit in one committed guard: both full-state
+SHA256s are
+`e4ecb3561c33b7d246ef8122807dcb7c9f690dc96c20dd6d9e5a024d0b9351d1`
+and every array is byte-identical.
+
+Focused rung-3.3 tests: **8 passed in 13.50 s**.  They cover fp64 selectors,
+Frankenstein rejection, the binding force plant, the deliberate missing F-
+stress `zmsk`, full-100 JIT/gradient, the loud first-step stress debt, exact
+tripwire rows, geometry plant, and the A-grid before/after guard.  Ruff
+`F,E501,I` is clean on all seven changed Python files.
+
+Both repository ratchets were run over 3,748 rostered checks: **3,739 passed,
+2 skipped, 7 failed**.  Every touched-file row passed.  The failures are the
+same unrelated branch debt, disclosed with exact current locations:
+`gm_redi_latlon_cgrid.py:1443`; `tke.py:1454,2235,2237` (plus its other
+reported bit-mask/table sites); `fv3_native_physics_coupling.py:113`;
+`test_fv3_physics_coupling.py:145,176`;
+`test_dino_vertex_area_nemo.py:89`;
+`test_dino_vface_zonal_width_nemo.py:210`; and
+`test_dino_wall_balance.py:115`.  None is modified here.
 
 ## Artifact hashes
 
@@ -468,13 +550,31 @@ Rung-3.2 artifacts (gate provenance parent
 | written-order replay source | `dd396635f9e3f98842d74704a9888ee96926d87856164d31b8a95b526f022db1` |
 | written-order replay controls | `7573ed5250a113c5f4389ca3c6a5f49e2a87497511d5ebd6ce59d8797db7cb28` |
 
+Rung-3.3 partial-boundary artifacts (implementation commit
+`54d0d5dad96c38b194ec56addd6dc051439a52e5`):
+
+| artifact | SHA256 |
+|---|---|
+| revised preregistration | `f70d7b4d7cebcf22645e69df89d6294172319e3b6ff59cd3e5b1d991dd8bae7c` |
+| partial gate JSON | `ac95f2deffb3dfd4d4401fb25d3b73a65379b165b34aaac0ba13b0836b066fcf` |
+| A-grid before/after guard JSON | `21652495f9028e7a2243bc7dcff2c3928adbe3014f316198c27d812e3396fa58` |
+| `dynamics.py` | `67631aafbfbb2b839c3d53cc2fb431048b04be01e3f20f80fe2625945584e250` |
+| rung-3.3 card | `9d86f060c11a43e65e6b27fdbdada5b2233dab70ca90e9d0a2eed2768dba8b26` |
+| partial gate source | `0941aa928a6d9c174a83bde25230e850a5b7e5483326b32b3436a4217fb6d74f` |
+| A-grid guard source | `d571f4ac213a88349b39afa7e4cd9ad5a4b4ed2d8eb6f090836005ceff96ec08` |
+| kernel controls | `e17f85ae4de91eae0789615f1be4f04b15df3facdc8c0693b094af9d12971fa1` |
+| gate controls | `2ace7a40e4983ef62aa1d39dc6bae6cc8da7972d623e11bc4e59cfd3ee69f188` |
+
 ## Loudly UNMEASURED / deferred
 
-Rung-3.3 implementation and trajectory; within-step x/y split states; ORCA1
+Rung-3.3 source-ordered stress replay/owner, frames 3--485, first-divergence
+sweep, all-80-moment plus three-stress restart gate and split continuation;
+within-step x/y split states; ORCA1
 option-2 salinity (the rung-3.2 oracle resolves option 4); candidate alignment
 of nonzero `snwice_mass` and its
 before level; separation of `zapsmall` from `zapneg`; thermodynamics;
-rheology; ridging/rafting; general production run-restart integration of the opt-in
+rung-3.3 stress trajectory beyond the first completed step; ridging/rafting;
+general production run-restart integration of the opt-in
 card state; coupled ice--ocean comparison; and landfast L16 (OFF here,
 **UNVERIFIED-deferred to lane 4**).  No legoESM claim is made for any item in
 this paragraph.
@@ -486,13 +586,17 @@ rungs 3.1 and 3.2 against the pinned shipped cases; fp64/CPU only and `jpl=1`;
 Prather as a selectable arm of the existing transport module; prognostic,
 restart-carried moments; geometry, `kt=1`, first-divergence and restart gates;
 planted controls; preserve production defaults; explicit-pathspec commits;
-classify rung-3.2 DEBT with a written-order replay; preregister the rung-3.3
-C-grid aEVP design before code; branch bundle; no push and no shipped-NEMO
-modification.
+classify rung-3.2 DEBT with a written-order replay; preregister and independently
+revise the rung-3.3 design before code; place the selectable C-grid arm beside
+the existing A-grid solver; preserve the A-grid result byte-for-byte; implement
+the fp64 card, geometry/cold-entry/first-step gate, binding controls, tripwire
+rows, and JIT/gradient test; stop at an honest committed boundary if the sweep
+is not reached; branch bundle; no push and no shipped-NEMO modification.
 
 **UNASKED choices:** no default change to existing ice transport; no ocean-SOM
-replacement or arithmetic-changing common refactor; no rung-3.3 dynamics
-implementation or trajectory, thermodynamics, ridging/rafting, landfast, coupled-ocean,
-multi-category, or general production-restart claim at this design-only stop;
+replacement or arithmetic-changing common refactor; no rung-3.3 claim beyond
+the measured first-step rows; no stress-owner or trajectory classification;
+no thermodynamics, ridging/rafting, landfast, coupled-ocean,
+multi-category, or general production-restart claim at this partial boundary;
 no analytic oracle; no tolerance relaxation; no claim that a DEBT or
 UNMEASURED row is matched or faithful.
