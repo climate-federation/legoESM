@@ -1019,6 +1019,10 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # tra_bbl_init's reference-depth mask and raw face e3*_0 unconditionally;
     # NEMO has no switch between these geometries (trabbl.F90:507-533).
     legacy_bbl_partial_geometry: bool = False
+    # Preregistered census Arm 2: replace the partial-cell midpoint W metric
+    # in wAimp_RK3_t by OVERFLOW's raw 20 m e3w_0 ladder times (1+r3t(Kmm)).
+    # Private until its full-duration causal arm is adjudicated.
+    nemo_aimp_reference_w_metric: bool = False
     # Private ablation of dynspg_ts's flux-form primary transport average.
     # Public NEMO RK3 configurations always keep this true.
     primary_transport_average: bool = True
@@ -1158,7 +1162,7 @@ def _nemo_ws_stage_transport(
     stage_velocity, h_stage, stage_index, *, eta_stage, h_ref, Hu_avg, Hv_avg,
     u_mask_3d, v_mask_3d, grid, z_coord, config, dt,
     legacy_min_face_thickness=False, eta_before=None, eta_after=None,
-    literal_wzv=False,
+    literal_wzv=False, nemo_aimp_reference_w_metric=False,
 ):
     """NEMO ``stprk3_stg.F90:257-304`` Kmm stage transport triplet.
 
@@ -1220,9 +1224,22 @@ def _nemo_ws_stage_transport(
     wi_stage = jnp.zeros_like(w_stage)
     if (stage_index == 2
             and getattr(config, "adaptive_implicit_vertadv", False)):
-        e3w_int = 0.5 * (h_stage[..., :-1] + h_stage[..., 1:])
-        e3w = jnp.concatenate(
-            [h_stage[..., :1], e3w_int, h_stage[..., -1:]], axis=-1)
+        if nemo_aimp_reference_w_metric:
+            from legoesm.ocean.physics.vertical_mixing import nemo_e3w_kmm
+
+            # domzgr_substitute.h90:131: e3w(Kmm)=e3w_0*(1+r3t(Kmm));
+            # domqco.F90:209: r3t=ssh/ht_0.  The canonical helper returns
+            # NEMO jk=2..jpk interior interfaces; boundary entries are unused
+            # by wAimp_RK3_t and are padded only to the local nlev+1 layout.
+            stretch = 1.0 + eta_stage / jnp.maximum(
+                jnp.sum(h_ref, axis=-1), 1.0e-10)
+            e3w_int = nemo_e3w_kmm(z_coord, h_stage, stretch)
+            e3w = jnp.concatenate(
+                [e3w_int[..., :1], e3w_int, e3w_int[..., -1:]], axis=-1)
+        else:
+            e3w_int = 0.5 * (h_stage[..., :-1] + h_stage[..., 1:])
+            e3w = jnp.concatenate(
+                [h_stage[..., :1], e3w_int, h_stage[..., -1:]], axis=-1)
         split = nemo_wicker_aimp_partition_transport(
             mf_u, mf_v, w_stage, h_stage, e3w,
             grid.area_T, grid.dy_u, grid.dx_v, dt)
@@ -5132,7 +5149,9 @@ class LatLonCGridOceanModel:
                 # passes at stprk3_stg.F90:297.
                 eta_before=state.eta.data,
                 eta_after=state_new.eta.data,
-                literal_wzv=self._nemo_ws_test_hooks.literal_stage_wzv)
+                literal_wzv=self._nemo_ws_test_hooks.literal_stage_wzv,
+                nemo_aimp_reference_w_metric=(
+                    self._nemo_ws_test_hooks.nemo_aimp_reference_w_metric))
             # stprk3_stg.F90:373-378 (and dynzdf.F90's key_qco branch at
             # stage 3) weight EVERY stage velocity update by
             # (1+r3u(Kbb)) / (1+r3u(Kmm)) / (1+r3u(Kaa)).  legoESM's tracer
@@ -5689,7 +5708,10 @@ class LatLonCGridOceanModel:
                         z_coord=_zc, config=_cfg_b, dt=dt,
                         legacy_min_face_thickness=(
                             self._nemo_ws_test_hooks
-                            .legacy_stage_min_face_thickness))
+                            .legacy_stage_min_face_thickness),
+                        nemo_aimp_reference_w_metric=(
+                            self._nemo_ws_test_hooks
+                            .nemo_aimp_reference_w_metric))
                     for stage_index, (velocity, h_stage, eta_stage)
                     in enumerate(zip(
                         _nemo_ws_velocity_stages, stage_h_k, stage_eta,

@@ -171,6 +171,9 @@ def test_overflow_card_carries_source_exact_unmasked_bbl_mesh_operands():
     )
     assert np.asarray(z.nemo_bbl_e3u_0).shape == (3, 201, 100)
     assert np.asarray(z.nemo_bbl_e3v_0).shape == (2, 202, 100)
+    assert z.nemo_e3w_mesh_reference is True
+    np.testing.assert_array_equal(
+        np.asarray(z.nemo_e3w_0), np.full((100,), 20.0))
     geom = nemo_bbl_static_geometry(
         z.h_partial,
         recipe.land_mask,

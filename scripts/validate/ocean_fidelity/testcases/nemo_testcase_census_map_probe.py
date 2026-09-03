@@ -614,7 +614,7 @@ def command_budget(args) -> None:
 
 
 def command_run_arm(args) -> None:
-    """Full-duration private BBL-reference arm in scorer-compatible format."""
+    """Full-duration private owner arm in scorer-compatible format."""
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -628,8 +628,13 @@ def command_run_arm(args) -> None:
     require(bool(jax.config.jax_enable_x64) == (args.precision == "fp64"),
             "JAX x64/precision mismatch")
     card = STATS.build_nemo_testcase_card(CASE)
+    hooks = (
+        _NEMOWSRK3TestHooks(nemo_aimp_reference_w_metric=True)
+        if args.arm == "aimp-e3w" else _NEMOWSRK3TestHooks()
+    )
     model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=hooks)
     state = card.recipe.initial_state
     samples = set(STATS.sample_completed_steps(CASE))
     captured = {}
@@ -674,7 +679,7 @@ def command_run_arm(args) -> None:
         "jax_enable_x64": bool(jax.config.jax_enable_x64),
         "backend": jax.default_backend(),
         "devices": [str(device) for device in jax.devices()],
-        "arm": "nemo_bbl_reference_geometry",
+        "arm": args.arm,
         "completed_steps": sorted(samples),
         "physical_times_s": [value * card.dt_s for value in sorted(samples)],
         "wall_time_s": time.perf_counter() - started,
@@ -1273,6 +1278,9 @@ def main() -> None:
     p_arm = sub.add_parser(
         "run-arm", help="run the private NEMO-reference BBL geometry arm")
     p_arm.add_argument("--precision", choices=("fp64", "fp32"), required=True)
+    p_arm.add_argument(
+        "--arm", choices=("bbl-reference", "aimp-e3w"),
+        default="bbl-reference")
     p_arm.add_argument("--output-dir", type=Path, required=True)
     p_arm.set_defaults(func=command_run_arm)
 
