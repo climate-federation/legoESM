@@ -37,6 +37,7 @@ def _minimal_run(root: Path, *, nx: int = 59, ny: int = 59, nz: int = 2) -> None
         "&nampar\n nlay_i = 3\n nlay_s = 3\n/\n"
         "&namthd_sal\n nn_icesal = 4\n/\n"
         "&namthd_pnd\n ln_pnd = .true.\n/\n"
+        "&namdia\n ln_icediachk = .true.\n/\n"
     )
     (root / "ocean.output").write_text("run complete\n")
 
@@ -104,6 +105,17 @@ def test_restart_contract_disposes_active_and_inactive_appendix_a_fields() -> No
     assert rhg["sxvl"]["status"] == "VERIFIED"
     assert rhg["cnd_ice"]["status"] == "WAIVED"
     assert rhg["t_s_l03"]["status"] == "WAIVED"
+
+
+def test_rung34_contract_includes_layers_ponds_and_ephemeral_ridging_state() -> None:
+    contract = gate.restart_contract("3.4", 10, 5, 4, True)
+    assert contract["stress12_i"]["status"] == "VERIFIED"
+    assert contract["sxe_l10"]["status"] == "VERIFIED"
+    assert contract["sxc0_l05"]["status"] == "VERIFIED"
+    assert contract["sxap"]["status"] == "VERIFIED"
+    assert contract["closing_net"]["status"] == "WAIVED"
+    assert "ephemeral" in contract["closing_net"]["reason"]
+    assert contract["araft"]["status"] == "WAIVED"
 
 
 def test_planted_unaccounted_mesh_array_goes_red(tmp_path: Path) -> None:
@@ -260,6 +272,29 @@ def test_free_drift_identity_control_goes_red() -> None:
     assert any("free-drift identity" in row for row in verdict["refuted_predicates"])
 
 
+def test_rung34_readme_phenomenology_cannot_be_promoted_without_a_band() -> None:
+    initial = {
+        "a_i": np.ones((9, 9, 1)),
+        "v_i": np.ones((9, 9, 1)),
+        "u_ice": np.zeros((9, 9)),
+    }
+    final = {
+        "a_i": np.ones((5, 5, 1)),
+        "v_i": np.full((5, 5, 1), 2.0),
+        "u_ice": np.full((5, 5), 0.1),
+        "v_ice": np.zeros((5, 5)),
+    }
+    shear = {
+        "maximum_s-1": 1.0e-4,
+        "classification": "MEASURED-UNCLASSIFIED: no numeric README band",
+    }
+    verdict = gate.phenomenology("3.4", initial, final, rung34_shear=shear)
+    assert verdict["status"] == "MEASURED-UNCLASSIFIED"
+    assert verdict["shear"] == shear
+    assert verdict["refuted_predicates"] == []
+    assert str(verdict["eap_angle_contrast"]).startswith("OUT-OF-SCOPE")
+
+
 def test_native_conservation_violation_is_refuted(tmp_path: Path) -> None:
     _minimal_run(tmp_path)
     assert gate.conservation_diagnostics(tmp_path)["status"] == "CONFIRM"
@@ -267,6 +302,19 @@ def test_native_conservation_violation_is_refuted(tmp_path: Path) -> None:
     verdict = gate.conservation_diagnostics(tmp_path)
     assert verdict["status"] == "REFUTE"
     assert verdict["violation_count"] == 1
+
+
+def test_disabled_native_conservation_check_is_not_called_clean(tmp_path: Path) -> None:
+    _minimal_run(tmp_path)
+    ice_namelist = tmp_path / "output.namelist.ice"
+    ice_namelist.write_text(
+        ice_namelist.read_text().replace(
+            "ln_icediachk = .true.", "ln_icediachk = .false."
+        )
+    )
+    verdict = gate.conservation_diagnostics(tmp_path)
+    assert verdict["status"] == "WAIVED-INACTIVE"
+    assert verdict["enabled"] is False
 
 
 RUN_ROOTS = {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed oracle-only gate for SI3 lane-3 dynamics rungs 3.1--3.3.
+"""Fail-closed oracle-only gate for SI3 lane-3 dynamics rungs 3.1--3.4.
 
 The gate inventories the files NEMO actually wrote.  Every mesh/restart/
 resolved-namelist item must have exactly one VERIFIED, WAIVED, or UNMEASURED
@@ -126,9 +126,48 @@ FRAME_REGISTRY = (
 # `jpk = MAX( 2, jpkglo )` (src/OCE/LBC/mppini.F90:80,375), which the run's own
 # ocean.output confirms ("jpk : 2   jpkglo : 1").
 RUNGS = {
-    "3.1": {"steps": 40, "nx": 59, "ny": 59, "nz": 2, "dx": 4.0, "dt": 2.0},
-    "3.2": {"steps": 485, "nx": 99, "ny": 99, "nz": 2, "dx": 3000.0, "dt": 1200.0},
-    "3.3": {"steps": 485, "nx": 99, "ny": 99, "nz": 2, "dx": 3000.0, "dt": 1200.0},
+    "3.1": {
+        "steps": 40,
+        "nx": 59,
+        "ny": 59,
+        "nz": 2,
+        "dx": 4.0,
+        "dt": 2.0,
+        "nlay_i": 3,
+        "nlay_s": 3,
+    },
+    "3.2": {
+        "steps": 485,
+        "nx": 99,
+        "ny": 99,
+        "nz": 2,
+        "dx": 3000.0,
+        "dt": 1200.0,
+        "nlay_i": 3,
+        "nlay_s": 3,
+    },
+    "3.3": {
+        "steps": 485,
+        "nx": 99,
+        "ny": 99,
+        "nz": 2,
+        "dx": 3000.0,
+        "dt": 1200.0,
+        "nlay_i": 3,
+        "nlay_s": 3,
+    },
+    # tests/ICE_RHEO/MY_SRC/usrdef_nam.F90:73-84; namelist_cfg:19-20,29-37;
+    # ORCA1 namelist_ice_ref:25-26 supplies the requested layer counts.
+    "3.4": {
+        "steps": 720,
+        "nx": 1000,
+        "ny": 1000,
+        "nz": 2,
+        "dx": 2000.0,
+        "dt": 30.0,
+        "nlay_i": 10,
+        "nlay_s": 5,
+    },
 }
 
 TARGET_ICE_NML = {
@@ -163,6 +202,33 @@ TARGET_RHG_NML = {
     "namdyn_rhg.nn_rhg_chkcvg",
 }
 
+TARGET_RDGRFT_NML = {
+    "namdyn_rdgrft.ln_distf_lin",
+    "namdyn_rdgrft.ln_distf_exp",
+    "namdyn_rdgrft.rn_murdg",
+    "namdyn_rdgrft.rn_csrdg",
+    "namdyn_rdgrft.ln_partf_lin",
+    "namdyn_rdgrft.rn_gstar",
+    "namdyn_rdgrft.ln_partf_exp",
+    "namdyn_rdgrft.rn_astar",
+    "namdyn_rdgrft.ln_ridging",
+    "namdyn_rdgrft.rn_hstar",
+    "namdyn_rdgrft.rn_porordg",
+    "namdyn_rdgrft.rn_fsnwrdg",
+    "namdyn_rdgrft.rn_fpndrdg",
+    "namdyn_rdgrft.ln_rafting",
+    "namdyn_rdgrft.rn_hraft",
+    "namdyn_rdgrft.rn_craft",
+    "namdyn_rdgrft.rn_fsnwrft",
+    "namdyn_rdgrft.rn_fpndrft",
+}
+
+TARGET_RUNG34_STATE_NML = {
+    "namthd_sal.nn_icesal",
+    "namthd_pnd.ln_pnd",
+    "namini.ln_iceini",
+}
+
 TARGET_DYN_NML = {
     "namrun.cn_exp",
     "namrun.nn_itend",
@@ -177,7 +243,12 @@ TARGET_DYN_NML = {
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 CONFIG_DIR = Path(__file__).with_name("configs")
-CONFIG_STEM = {"3.1": "ice_adv1d_l3", "3.2": "ice_adv2d_l3", "3.3": "ice_adv2d_rhg_l3"}
+CONFIG_STEM = {
+    "3.1": "ice_adv1d_l3",
+    "3.2": "ice_adv2d_l3",
+    "3.3": "ice_adv2d_rhg_l3",
+    "3.4": "ice_rheo_l3_clean",
+}
 
 # Ice-ocean drag is quadratic and both stress terms carry the same U-point ice
 # fraction `zaU`, so it cancels and free drift is a closed-form identity:
@@ -259,7 +330,7 @@ def _contract_item(status: str, reason: str) -> dict[str, str]:
 
 
 def restart_contract(rung: str, nlay_i: int, nlay_s: int, nn_icesal: int, ponds: bool) -> dict:
-    rhg = rung == "3.3"
+    rhg = rung in {"3.3", "3.4"}
     result: dict[str, dict[str, str]] = {}
 
     def add(name: str, active: bool, reason: str) -> None:
@@ -342,6 +413,41 @@ def restart_contract(rung: str, nlay_i: int, nlay_s: int, nn_icesal: int, ponds:
                 if ponds
                 else "WAIVED-INACTIVE: both pond schemes are off",
             )
+    if rung == "3.4":
+        # icedyn_rdgrft.F90:46-75 declares these SAVE work/diagnostic arrays,
+        # but the module has no restart writer.  The redistribution is carried
+        # only by the already-VERIFIED a/v/e/salt/pond prognostics above
+        # (icedyn_rdgrft.F90:779-888).  Enumerating the ephemeral arrays here
+        # prevents "ridging state" from disappearing behind a generic waiver.
+        for name in (
+            "closing_net",
+            "opning",
+            "closing_gross",
+            "apartf",
+            "hrmin",
+            "hrmax",
+            "hrexp",
+            "hraft",
+            "hi_hrdg",
+            "aridge",
+            "araft",
+            "airdg1",
+            "airft1",
+            "airdg2",
+            "airft2",
+            "opning_2d",
+            "dairdg1dt",
+            "dairft1dt",
+            "dairdg2dt",
+            "dairft2dt",
+        ):
+            add(
+                name,
+                False,
+                "WAIVED-NOT-RESTARTED: icedyn_rdgrft.F90:46-75 ephemeral "
+                "work/diagnostic array; carried redistribution is in the active "
+                "Appendix-A prognostics (icedyn_rdgrft.F90:779-888)",
+            )
     return result
 
 
@@ -388,11 +494,14 @@ def disposition_template(root: Path, rung: str) -> dict:
                 else:
                     reason = "file-loaded final SI3 restart state in fp64"
             else:
-                targets = (
-                    TARGET_DYN_NML
-                    if namespace == "namelist_dyn"
-                    else TARGET_ICE_NML | (TARGET_RHG_NML if rung == "3.3" else set())
-                )
+                if namespace == "namelist_dyn":
+                    targets = TARGET_DYN_NML
+                else:
+                    targets = TARGET_ICE_NML
+                    if rung in {"3.3", "3.4"}:
+                        targets = targets | TARGET_RHG_NML
+                    if rung == "3.4":
+                        targets = targets | TARGET_RDGRFT_NML | TARGET_RUNG34_STATE_NML
                 waived = key not in targets
                 reason = (
                     "resolved NEMO default outside the rung claim; full file hash pinned"
@@ -509,14 +618,14 @@ def resolved_selectors(root: Path, rung: str) -> dict:
     _number(dyn, "namsbc.nn_ice", 2)
     _logical(dyn, "namdom.ln_meshmask", True)
     _logical(dyn, "namsbc_sas.l_sasread", False)
-    _number(ice, "nampar.nlay_i", 3)
-    _number(ice, "nampar.nlay_s", 3)
+    _number(ice, "nampar.nlay_i", spec["nlay_i"])
+    _number(ice, "nampar.nlay_s", spec["nlay_s"])
     _number(ice, "nampar.jpl", 1)
     _logical(ice, "nampar.ln_icedyn", True)
     _logical(ice, "nampar.ln_icethd", False)
     _logical(ice, "namdyn_adv.ln_adv_pra", True)
     _logical(ice, "namdyn_adv.ln_adv_umx", False)
-    _logical(ice, "namdia.ln_icediachk", True)
+    _logical(ice, "namdia.ln_icediachk", rung != "3.4")
     for key in (
         "namdyn.ln_dynall",
         "namdyn.ln_dynrhgadv",
@@ -527,9 +636,10 @@ def resolved_selectors(root: Path, rung: str) -> dict:
             "3.1": "namdyn.ln_dynadv1d",
             "3.2": "namdyn.ln_dynadv2d",
             "3.3": "namdyn.ln_dynrhgadv",
+            "3.4": "namdyn.ln_dynall",
         }[rung]
         _logical(ice, key, key == expected)
-    if rung == "3.3":
+    if rung in {"3.3", "3.4"}:
         for key, expected in (
             ("namdyn.rn_ishlat", 2),
             ("namdyn_rdgrft.rn_pstar", 2.0e4),
@@ -550,10 +660,37 @@ def resolved_selectors(root: Path, rung: str) -> dict:
             ("namdyn_rhg.ln_aevp", True),
         ):
             _logical(ice, key, expected)
+    if rung == "3.4":
+        for key, expected in (
+            ("namdyn_rdgrft.rn_murdg", 3.0),
+            ("namdyn_rdgrft.rn_csrdg", 0.5),
+            ("namdyn_rdgrft.rn_gstar", 0.15),
+            ("namdyn_rdgrft.rn_astar", 0.03),
+            ("namdyn_rdgrft.rn_hstar", 25.0),
+            ("namdyn_rdgrft.rn_porordg", 0.0),
+            ("namdyn_rdgrft.rn_fsnwrdg", 0.5),
+            ("namdyn_rdgrft.rn_fpndrdg", 0.5),
+            ("namdyn_rdgrft.rn_hraft", 0.75),
+            ("namdyn_rdgrft.rn_craft", 5.0),
+            ("namdyn_rdgrft.rn_fsnwrft", 0.5),
+            ("namdyn_rdgrft.rn_fpndrft", 0.5),
+        ):
+            _number(ice, key, expected)
+        for key, expected in (
+            ("namdyn_rdgrft.ln_distf_lin", False),
+            ("namdyn_rdgrft.ln_distf_exp", True),
+            ("namdyn_rdgrft.ln_partf_lin", False),
+            ("namdyn_rdgrft.ln_partf_exp", True),
+            ("namdyn_rdgrft.ln_ridging", True),
+            ("namdyn_rdgrft.ln_rafting", True),
+            ("namini.ln_iceini", True),
+        ):
+            _logical(ice, key, expected)
     expected_exp = {
         "3.1": "ICE_ADV1D_OMIP_L3",
         "3.2": "ICE_ADV2D_OMIP_L3",
         "3.3": "ICE_ADV2D_RHG_OMIP_L3",
+        "3.4": "ICE_RHEO_OMIP_L3",
     }[rung]
     # NEMO writes cn_exp back as a quoted, blank-padded CHARACTER(lc) field.
     resolved_exp = dyn.get("namrun.cn_exp", "").strip().strip("'\"").strip()
@@ -751,15 +888,54 @@ def conservation_diagnostics(root: Path) -> dict:
             value = float(found.group(1).replace("D", "E").replace("d", "e"))
             heat.append(value)
             events.append({"kt": step, "violation_j": value})
+    ice_values = namelist_values(files["namelist_ice"])
+    require("namdia.ln_icediachk" in ice_values, "missing resolved ln_icediachk")
+    enabled = parse_logical(ice_values["namdia.ln_icediachk"], "namdia.ln_icediachk")
+    require(enabled or not hits, "SI3 printed conservation violations while its check was disabled")
     return {
-        "status": "CONFIRM" if not hits else "REFUTE",
-        "criterion": "zero SI3 native-threshold conservation violations",
+        "status": ("CONFIRM" if not hits else "REFUTE") if enabled else "WAIVED-INACTIVE",
+        "criterion": (
+            "zero SI3 native-threshold conservation violations"
+            if enabled
+            else "WAIVED-INACTIVE: resolved ln_icediachk=F; absence of lines is not a check"
+        ),
+        "enabled": enabled,
         "source": "icectl.F90:67-78,166-190,232-236; namelist_ice_ref:318-319",
         "violation_count": len(hits),
         "violations": [hit.strip() for hit in hits],
         "violation_heat_j": heat,
         "violation_heat_j_total": float(sum(heat)),
         "violation_heat_events": events,
+    }
+
+
+def rung34_shear_diagnostic(root: Path, window: tuple[slice, slice]) -> dict[str, object]:
+    """Read NEMO's own final maximum-shear field without inventing a README band."""
+
+    path = find_one(root, ("*_6h_*_gr_0000.nc",))
+    with netCDF4.Dataset(path) as dataset:
+        require("sishea" in dataset.variables, f"documented shear field absent: {path}")
+        variable = dataset.variables["sishea"]
+        require(variable.shape[0] > 0, f"documented shear field has no time record: {path}")
+        raw = np.ma.asarray(variable[-1])
+    shear = np.asarray(np.ma.filled(raw, np.nan), dtype=np.float64).T[window]
+    require(np.all(np.isfinite(shear)), "final NEMO sishea contains non-finite wet cells")
+    p95, p99 = np.percentile(shear, (95.0, 99.0))
+    return {
+        "source": "tests/ICE_RHEO/EXPREF/README:51-53; icedyn.F90:172-193",
+        "field": "sishea (NEMO maximum shear of sea-ice velocity, final 6-hour record)",
+        "output_path": str(path),
+        "output_sha256": sha256(path),
+        "dtype_on_disk": str(raw.dtype),
+        "minimum_s-1": float(np.min(shear)),
+        "maximum_s-1": float(np.max(shear)),
+        "p95_s-1": float(p95),
+        "p99_s-1": float(p99),
+        "cells_above_p99": int(np.count_nonzero(shear > p99)),
+        "classification": (
+            "MEASURED-UNCLASSIFIED: README says EVP maxima are less defined but supplies "
+            "neither a numeric sharpness threshold nor an EAP comparator for this aEVP run"
+        ),
     }
 
 
@@ -770,6 +946,7 @@ def phenomenology(
     window: tuple[slice, slice] = (slice(None), slice(None)),
     free_drift: dict[str, float] | None = None,
     maximum_trajectory: dict[str, float | str | bool] | None = None,
+    rung34_shear: dict[str, object] | None = None,
 ) -> dict:
     a0, a1 = _interior(first["a_i"])[window], final["a_i"][window]
     v0, v1 = _interior(first["v_i"])[window], final["v_i"][window]
@@ -861,7 +1038,7 @@ def phenomenology(
             h_i_overshoot=overshoot,
             upper_side_lobe_cell_count=int(np.count_nonzero(h1 > np.max(h0))),
         )
-    else:
+    elif rung == "3.3":
         response = float(np.max(final["u_ice"][window]))
         state_change = float(np.max(np.abs(v1 - v0)))
         predicate(response > 0.0, "constant positive x-stress produced no positive ice velocity")
@@ -883,6 +1060,27 @@ def phenomenology(
             u_free_drift_predicted_m_s=predicted,
             u_free_drift_relative_miss=miss,
             u_free_drift_source="icedyn_rhg_evp.F90:310,580-590; usrdef_sbc.F90:93",
+        )
+    else:
+        require(rung == "3.4", f"unhandled phenomenology rung {rung}")
+        require(rung34_shear is not None, "rung 3.4 needs NEMO's final sishea field")
+        velocity_response = max(
+            float(np.max(np.abs(final["u_ice"][window]))),
+            float(np.max(np.abs(final["v_ice"][window]))),
+        )
+        state_change = float(np.max(np.abs(v1 - v0)))
+        require(velocity_response > 0.0, "ICE_RHEO wind produced no velocity response")
+        require(state_change > 0.0, "ICE_RHEO dynamics did not change ice volume")
+        report.update(
+            status="MEASURED-UNCLASSIFIED",
+            readme_source="tests/ICE_RHEO/EXPREF/README:51-53",
+            final_max_abs_ice_velocity_m_s=velocity_response,
+            ice_volume_max_abs_change=state_change,
+            shear=rung34_shear,
+            eap_angle_contrast=(
+                "OUT-OF-SCOPE: default-duration requested arm is aEVP; README reserves "
+                "the EAP intersection-angle contrast for a longer paired run"
+            ),
         )
     report["refuted_predicates"] = refuted
     if refuted:
@@ -940,7 +1138,11 @@ def trajectory(root: Path, rung: str) -> dict:
         require(header["kt"] == step, f"frame sequence mismatch at {path.name}: kt={header['kt']}")
         require(header["jpi"] == RUNGS[rung]["nx"] + 4, f"local jpi={header['jpi']}")
         require(header["jpj"] == RUNGS[rung]["ny"] + 4, f"local jpj={header['jpj']}")
-        require(header["nlay_i"] == 3 and header["nlay_s"] == 3, "frame ice-layer count")
+        require(
+            header["nlay_i"] == RUNGS[rung]["nlay_i"]
+            and header["nlay_s"] == RUNGS[rung]["nlay_s"],
+            "frame ice-layer count",
+        )
         if header0 is None:
             header0 = header
             first_arrays = arrays
@@ -991,6 +1193,7 @@ def trajectory(root: Path, rung: str) -> dict:
             }
         )
         maximum_diagnostic = maximum_trajectory_diagnostic(maximum_samples)
+    shear_diagnostic = rung34_shear_diagnostic(root, window) if rung == "3.4" else None
     return {
         "frame_count": len(paths),
         "first_sha256": frame_hashes[0],
@@ -1035,6 +1238,7 @@ def trajectory(root: Path, rung: str) -> dict:
             window,
             free_drift,
             maximum_diagnostic,
+            shear_diagnostic,
         ),
     }
 
@@ -1093,12 +1297,27 @@ def main() -> int:
                 "within_step_prather_split_states",
             ]
         )
+    if args.rung == "3.4":
+        unmeasured.extend(
+            [
+                "README_EVP_less_defined_numeric_conformance_no_threshold",
+                "README_long_run_EVP_vs_EAP_intersection_angle_out_of_scope",
+                "SI3_native_conservation_check_resolved_off",
+            ]
+        )
+    if args.rung == "3.4":
+        overall_status = str(traj["phenomenology"]["status"])
+    else:
+        overall_status = (
+            "VERIFIED"
+            if conservation["status"] == traj["phenomenology"]["status"] == "CONFIRM"
+            else "DEBT"
+        )
     print(
         json.dumps(
             {
-                "status": "VERIFIED"
-                if conservation["status"] == traj["phenomenology"]["status"] == "CONFIRM"
-                else "DEBT",
+                "status": overall_status,
+                "coverage_status": "VERIFIED",
                 "scope": "NEMO_ORACLE_ONLY",
                 "git_sha": git_sha(),
                 "rung": args.rung,
