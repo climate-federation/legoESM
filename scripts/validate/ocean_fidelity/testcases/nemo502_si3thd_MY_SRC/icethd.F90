@@ -56,6 +56,8 @@ MODULE icethd
    LOGICAL, SAVE          ::   ll_l3thd_opened = .FALSE.    ! NEWUNIT values may be negative
    INTEGER, SAVE          ::   num_l3zin = -1               ! exact ZDF-entry forcing stream
    LOGICAL, SAVE          ::   ll_l3zin_opened = .FALSE.
+   INTEGER, SAVE          ::   num_l3rea = -1               ! kt3 arithmetic-replay operands
+   LOGICAL, SAVE          ::   ll_l3rea_opened = .FALSE.
 
    !! * Substitutions
 #  include "do_loop_substitute.h90"
@@ -152,6 +154,7 @@ CONTAINS
             dh_snowice(1:npti) = 0._wp ; dh_s_sum(1:npti) = 0._wp ; dh_s_itm(1:npti) = 0._wp
             !
                               CALL ice_thd_zdf                      ! --- Ice-Snow temperature --- !
+                              IF( kt == 3 ) CALL l3rea_dump( kt, jl )
                               CALL l3thd_dump_1d( kt, 1 )
             !
             IF( ln_icedH )    CALL ice_thd_dh                       ! --- Growing/Melting --- !
@@ -289,6 +292,26 @@ CONTAINS
          & qcn_ice_1d(1:npti), qsb_ice_bot_1d(1:npti), fhld_1d(1:npti), qml_ice_1d(1:npti)
       FLUSH(num_l3zin)
    END SUBROUTINE l3zin_dump
+
+
+   SUBROUTINE l3rea_dump( kt, kl )
+      INTEGER, INTENT(in) :: kt, kl
+      INTEGER :: ios
+      CHARACTER(LEN=16), PARAMETER :: cmagic = 'NEMO_L3REA_001'
+      IF( .NOT. ll_l3rea_opened ) THEN
+         OPEN( NEWUNIT=num_l3rea, FILE='oracle_si3_reassoc_operands.bin', STATUS='REPLACE', &
+            & ACCESS='STREAM', FORM='UNFORMATTED', ACTION='WRITE', IOSTAT=ios )
+         IF( ios /= 0 ) CALL ctl_stop( 'l3rea_dump: cannot open arithmetic-replay stream' )
+         ll_l3rea_opened = .TRUE.
+      ENDIF
+      WRITE(num_l3rea) cmagic
+      WRITE(num_l3rea) 1, kt, kl, npti, nlay_i, nlay_s, STORAGE_SIZE(1._wp), 18 * npti
+      WRITE(num_l3rea) t_su_1d(1:npti), t_i_1d(1:npti,1:nlay_i), &
+         & t_s_1d(1:npti,1:nlay_s), sz_i_1d(1:npti,1:nlay_i), &
+         & e_i_1d(1:npti,1:nlay_i), e_s_1d(1:npti,1:nlay_s), &
+         & qns_ice_1d(1:npti), dqns_ice_1d(1:npti)
+      FLUSH(num_l3rea)
+   END SUBROUTINE l3rea_dump
 
 
    SUBROUTINE ice_thd_temp
