@@ -381,20 +381,30 @@ def _periodic_halo(value: jnp.ndarray, halo: int) -> jnp.ndarray:
     return jnp.pad(interior, padding, mode="wrap")
 
 
-def apply_ice_adv2d_source_corrections(
-    card: ICEAdv2DCard,
+def apply_si3_prather_source_corrections(
     entry_contents: jnp.ndarray,
     transported_contents: jnp.ndarray,
+    *,
+    tracer_names: tuple[str, ...],
+    nlay_i: int,
+    nlay_s: int,
+    cell_area_m2: float,
+    halo_width: int,
 ) -> jnp.ndarray:
-    """Apply the active Hbig/Hsnow/zapneg arms of the pinned oracle.
+    """Apply SI3's active Hbig/Hsnow/zapneg Prather corrections.
 
-    This is the single-category, option-4-salinity, level-pond composition in
-    ``icedyn_adv_pra.F90:156-180,405-421,946-1142``.  Residual ocean flux
-    ledgers are deliberately outside this uncoupled transport card.
+    This shared implementation is the single-category, option-4-salinity,
+    level-pond composition in
+    ``icedyn_adv_pra.F90:156-180,405-421,946-1142``.  Rung-specific wrappers
+    supply only their resolved layer roster, area, and halo.  Residual ocean
+    flux ledgers are deliberately outside the uncoupled fidelity cards.
     """
 
-    area = card.dx_m * card.dy_m
-    index = ICE_ADV2D_TRACERS.index
+    area = cell_area_m2
+    index = tracer_names.index
+    snow_layers = tuple(f"e_s_l{level:02d}" for level in range(1, nlay_s + 1))
+    ice_layers = tuple(f"e_i_l{level:02d}" for level in range(1, nlay_i + 1))
+    salt_layers = tuple(f"szv_i_l{level:02d}" for level in range(1, nlay_i + 1))
 
     def intensive(contents: jnp.ndarray, name: str) -> jnp.ndarray:
         return contents[..., index(name)] / area
@@ -444,13 +454,13 @@ def apply_ice_adv2d_source_corrections(
     snow_fraction = jnp.where(snow_correct, ratio(h_s_max, h_s, snow_correct), 1.0)
     v_s = jnp.where(snow_correct, a_i * h_s_max, v_s)
     contents = contents.at[..., index("v_s")].set(v_s * area)
-    for name in ("e_s_l01", "e_s_l02", "e_s_l03"):
+    for name in snow_layers:
         value = intensive(contents, name) * snow_fraction
         contents = contents.at[..., index(name)].set(value * area)
 
     # Option-4 layer salt and all layer enthalpy maxima (:1020-1069).
     low_concentration = a_i < _ICE_ADV2D_HBIG_CONCENTRATION
-    for name in ("szv_i_l01", "szv_i_l02", "szv_i_l03"):
+    for name in salt_layers:
         entry_specific = ratio(
             intensive(entry_contents, name), entry_v_i, entry_v_i >= _ICE_ADV2D_SMALL
         )
@@ -460,7 +470,7 @@ def apply_ice_adv2d_source_corrections(
         correct = (v_i > 0.0) & (a_i > 0.0) & (specific > cap) & low_concentration
         value = jnp.where(correct, ratio(value * cap, specific, correct), value)
         contents = contents.at[..., index(name)].set(value * area)
-    for name in ("e_i_l01", "e_i_l02", "e_i_l03"):
+    for name in ice_layers:
         entry_specific = ratio(
             intensive(entry_contents, name), entry_v_i, entry_v_i >= _ICE_ADV2D_SMALL
         )
@@ -470,7 +480,7 @@ def apply_ice_adv2d_source_corrections(
         correct = (v_i > 0.0) & (a_i > 0.0) & (specific > cap) & low_concentration
         value = jnp.where(correct, ratio(value * cap, specific, correct), value)
         contents = contents.at[..., index(name)].set(value * area)
-    for name in ("e_s_l01", "e_s_l02", "e_s_l03"):
+    for name in snow_layers:
         entry_specific = ratio(
             intensive(entry_contents, name), entry_v_s, entry_v_s >= _ICE_ADV2D_SMALL
         )
@@ -487,7 +497,7 @@ def apply_ice_adv2d_source_corrections(
     fraction = jnp.where(v_s > 0.0, ratio(v_s - excess, v_s, v_s > 0.0), 1.0)
     v_s = v_s - excess
     contents = contents.at[..., index("v_s")].set(v_s * area)
-    for name in ("e_s_l01", "e_s_l02", "e_s_l03"):
+    for name in snow_layers:
         value = intensive(contents, name) * fraction
         contents = contents.at[..., index(name)].set(value * area)
     a_ip = jnp.minimum(intensive(contents, "a_ip"), a_i)
@@ -500,12 +510,12 @@ def apply_ice_adv2d_source_corrections(
     a_i = jnp.where(v_i <= 0.0, 0.0, a_i)
     invalid_ice = (v_i <= 0.0) | (a_i <= 0.0)
     contents = contents.at[..., index("a_i")].set(a_i * area)
-    for name in ("szv_i_l01", "szv_i_l02", "szv_i_l03", "e_i_l01", "e_i_l02", "e_i_l03"):
+    for name in salt_layers + ice_layers:
         value = intensive(contents, name)
         contents = contents.at[..., index(name)].set(
             jnp.where((value < 0.0) | invalid_ice, 0.0, value) * area
         )
-    for name in ("e_s_l01", "e_s_l02", "e_s_l03"):
+    for name in snow_layers:
         value = intensive(contents, name)
         contents = contents.at[..., index(name)].set(
             jnp.where((value < 0.0) | (a_i <= 0.0) | (v_s <= 0.0), 0.0, value) * area
@@ -531,7 +541,25 @@ def apply_ice_adv2d_source_corrections(
     # NEMO corrects physical cells, then lbc_lnk refreshes the bi-periodic
     # halos (`icedyn_adv_pra.F90:405-479`).  Never feed independently corrected
     # halo values into the next split step.
-    return _periodic_halo(contents, card.halo_width)
+    return _periodic_halo(contents, halo_width)
+
+
+def apply_ice_adv2d_source_corrections(
+    card: ICEAdv2DCard,
+    entry_contents: jnp.ndarray,
+    transported_contents: jnp.ndarray,
+) -> jnp.ndarray:
+    """Rung-3.2 wrapper over the shared SI3 Prather correction ledger."""
+
+    return apply_si3_prather_source_corrections(
+        entry_contents,
+        transported_contents,
+        tracer_names=ICE_ADV2D_TRACERS,
+        nlay_i=card.nlay_i,
+        nlay_s=card.nlay_s,
+        cell_area_m2=card.dx_m * card.dy_m,
+        halo_width=card.halo_width,
+    )
 
 
 def step_ice_adv2d_card(
@@ -640,6 +668,7 @@ __all__ = (
     "ICEAdv2DState",
     "build_ice_adv2d_card",
     "apply_ice_adv2d_source_corrections",
+    "apply_si3_prather_source_corrections",
     "ice_adv2d_card_contract_sha256",
     "load_ice_adv2d_restart",
     "save_ice_adv2d_restart",

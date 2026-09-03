@@ -94,10 +94,13 @@ _SI3_JPL1_MU_RIDGING = 3.0
 _SI3_JPL1_HRAFT_M = 0.75
 _SI3_JPL1_CRAFT = 5.0
 _SI3_JPL1_POROSITY = 0.0
-_SI3_JPL1_SNOW_RIDGE_RETENTION = 0.5
-_SI3_JPL1_SNOW_RAFT_RETENTION = 0.5
-_SI3_JPL1_POND_RIDGE_RETENTION = 0.5
-_SI3_JPL1_POND_RAFT_RETENTION = 0.5
+# The deck supplies 0.5, but this rung resolves ln_icethd=F.  SI3 therefore
+# overwrites all four factors to one at icedyn_rdgrft.F90:1244-1247 before the
+# first call.  These constants name the executed selector state.
+_SI3_JPL1_SNOW_RIDGE_RETENTION = 1.0
+_SI3_JPL1_SNOW_RAFT_RETENTION = 1.0
+_SI3_JPL1_POND_RIDGE_RETENTION = 1.0
+_SI3_JPL1_POND_RAFT_RETENTION = 1.0
 _SI3_JPL1_RIDGE_MIN_MULTIPLIER = 1.1
 _SI3_JPL1_RAFT_AREA_MULTIPLIER = 0.5
 _SI3_JPL1_MAX_ITERATIONS = 19
@@ -563,8 +566,9 @@ def apply_si3_jpl1_ridging(
     conservation fallback (``:857-870``).  The layer axes are trailing and
     are carried with their parent ice/snow inventory.  ORCA1's zero ridge
     porosity makes ice volume, ice enthalpy, and option-4 layer salt invariant
-    under this redistribution, while half of donated snow and pond inventory
-    is returned to the ocean.
+    under this redistribution.  Because this rung has ``ln_icethd=F``, SI3's
+    initialization also forces the snow/pond retention factors to one
+    (``icedyn_rdgrft.F90:1244-1247``), so those inventories remain carried.
     """
 
     _validate_si3_jpl1_ridging_config(config)
@@ -629,12 +633,13 @@ def apply_si3_jpl1_ridging(
             _SI3_JPL1_ZERO,
         )
         g_open = open_water * inverse_total
+        inverse_astar = _SI3_JPL1_ONE / config.astar
         exponential_scale = _SI3_JPL1_ONE / (
-            _SI3_JPL1_ONE - jnp.exp(-_SI3_JPL1_ONE / config.astar)
+            _SI3_JPL1_ONE - jnp.exp(-inverse_astar)
         )
         g_minus_one = exponential_scale
-        g_zero = jnp.exp(-g_open / config.astar) * exponential_scale
-        g_one = jnp.exp(-_SI3_JPL1_ONE / config.astar) * exponential_scale
+        g_zero = jnp.exp(-g_open * inverse_astar) * exponential_scale
+        g_one = jnp.exp(-inverse_astar) * exponential_scale
         participation_open = g_minus_one - g_zero
         participation_ice = g_zero - g_one
 
@@ -718,81 +723,141 @@ def apply_si3_jpl1_ridging(
         )
         ridged_fraction = ridge_area_removed * inverse_area
         rafted_fraction = raft_area_removed * inverse_area
-        retained_fraction = (
-            _SI3_JPL1_ONE - ridged_fraction - rafted_fraction
+        retained_fraction = jax.lax.optimization_barrier(
+            (_SI3_JPL1_ONE - ridged_fraction) - rafted_fraction
         )
         new_ridge_area = ridge_area_removed * ridge_area_ratio
         new_raft_area = (
             raft_area_removed * _SI3_JPL1_RAFT_AREA_MULTIPLIER
         )
 
-        new_area = (
-            area - ridge_area_removed - raft_area_removed
-            + new_ridge_area + new_raft_area
+        area_after_donation = jax.lax.optimization_barrier(
+            (area - ridge_area_removed) - raft_area_removed
+        )
+        new_area = area_after_donation + jax.lax.optimization_barrier(
+            new_ridge_area + new_raft_area
         )
         # rn_porordg=0 on this arm: SI3's donor volume/ice-energy/salt removed
         # at :779-793 returns in full through the last-category receiver at
         # :843-852,874-890.  Keep the written expressions (rather than simply
         # copying) so a future selector cannot silently reuse this arm.
-        new_ice_volume = (
+        ridge_ice_volume = jax.lax.optimization_barrier(
+            ice_volume * ridged_fraction
+        )
+        raft_ice_volume = jax.lax.optimization_barrier(
+            ice_volume * rafted_fraction
+        )
+        ice_volume_after_donation = jax.lax.optimization_barrier(
             ice_volume * retained_fraction
-            + ice_volume * ridged_fraction
-            + ice_volume * rafted_fraction
         )
-        new_age = (
+        new_ice_volume = ice_volume_after_donation + jax.lax.optimization_barrier(
+            ridge_ice_volume + raft_ice_volume
+        )
+        ridge_age = jax.lax.optimization_barrier(
+            age * ridged_fraction * ridge_area_ratio
+        )
+        raft_age = jax.lax.optimization_barrier(
+            age * rafted_fraction * _SI3_JPL1_RAFT_AREA_MULTIPLIER
+        )
+        age_after_donation = jax.lax.optimization_barrier(
             age * retained_fraction
-            + age * ridged_fraction * ridge_area_ratio
-            + age
-            * rafted_fraction
-            * _SI3_JPL1_RAFT_AREA_MULTIPLIER
         )
-        new_snow_volume = (
+        new_age = age_after_donation + jax.lax.optimization_barrier(
+            ridge_age + raft_age
+        )
+        ridge_snow_volume = jax.lax.optimization_barrier(
+            snow_volume * ridged_fraction
+        )
+        raft_snow_volume = jax.lax.optimization_barrier(
+            snow_volume * rafted_fraction
+        )
+        snow_volume_after_donation = jax.lax.optimization_barrier(
             snow_volume * retained_fraction
-            + snow_volume * ridged_fraction * config.snow_ridge_retention
-            + snow_volume * rafted_fraction * config.snow_raft_retention
         )
-        new_pond_area = (
-            pond_area * retained_fraction
-            + pond_area
-            * ridged_fraction
-            * ridge_area_ratio
-            * config.pond_ridge_retention
-            + pond_area
+        new_snow_volume = snow_volume_after_donation + jax.lax.optimization_barrier(
+            ridge_snow_volume * config.snow_ridge_retention
+            + raft_snow_volume * config.snow_raft_retention
+        )
+        ridge_pond_area = jax.lax.optimization_barrier(
+            pond_area * ridged_fraction * ridge_area_ratio
+        )
+        raft_pond_area = jax.lax.optimization_barrier(
+            pond_area
             * rafted_fraction
             * _SI3_JPL1_RAFT_AREA_MULTIPLIER
-            * config.pond_raft_retention
         )
-        new_pond_volume = (
+        pond_area_after_donation = jax.lax.optimization_barrier(
+            pond_area * retained_fraction
+        )
+        new_pond_area = pond_area_after_donation + jax.lax.optimization_barrier(
+            ridge_pond_area * config.pond_ridge_retention
+            + raft_pond_area * config.pond_raft_retention
+        )
+        ridge_pond_volume = jax.lax.optimization_barrier(
+            pond_volume * ridged_fraction
+        )
+        raft_pond_volume = jax.lax.optimization_barrier(
+            pond_volume * rafted_fraction
+        )
+        pond_volume_after_donation = jax.lax.optimization_barrier(
             pond_volume * retained_fraction
-            + pond_volume * ridged_fraction * config.pond_ridge_retention
-            + pond_volume * rafted_fraction * config.pond_raft_retention
         )
-        new_pond_lid_volume = (
+        new_pond_volume = pond_volume_after_donation + jax.lax.optimization_barrier(
+            ridge_pond_volume * config.pond_ridge_retention
+            + raft_pond_volume * config.pond_raft_retention
+        )
+        ridge_lid_volume = jax.lax.optimization_barrier(
+            pond_lid_volume * ridged_fraction
+        )
+        raft_lid_volume = jax.lax.optimization_barrier(
+            pond_lid_volume * rafted_fraction
+        )
+        lid_volume_after_donation = jax.lax.optimization_barrier(
             pond_lid_volume * retained_fraction
-            + pond_lid_volume * ridged_fraction * config.pond_ridge_retention
-            + pond_lid_volume * rafted_fraction * config.pond_raft_retention
+        )
+        new_pond_lid_volume = lid_volume_after_donation + jax.lax.optimization_barrier(
+            ridge_lid_volume * config.pond_ridge_retention
+            + raft_lid_volume * config.pond_raft_retention
         )
         layer_fraction = retained_fraction[..., None]
         ridge_layer_fraction = ridged_fraction[..., None]
         raft_layer_fraction = rafted_fraction[..., None]
-        new_snow_enthalpy = (
+        ridge_snow_enthalpy = jax.lax.optimization_barrier(
+            snow_enthalpy * ridge_layer_fraction
+        )
+        raft_snow_enthalpy = jax.lax.optimization_barrier(
+            snow_enthalpy * raft_layer_fraction
+        )
+        snow_enthalpy_after_donation = jax.lax.optimization_barrier(
             snow_enthalpy * layer_fraction
-            + snow_enthalpy
-            * ridge_layer_fraction
-            * config.snow_ridge_retention
-            + snow_enthalpy
-            * raft_layer_fraction
-            * config.snow_raft_retention
         )
-        new_ice_enthalpy = (
+        new_snow_enthalpy = snow_enthalpy_after_donation + jax.lax.optimization_barrier(
+            ridge_snow_enthalpy * config.snow_ridge_retention
+            + raft_snow_enthalpy * config.snow_raft_retention
+        )
+        ridge_ice_enthalpy = jax.lax.optimization_barrier(
+            ice_enthalpy * ridge_layer_fraction
+        )
+        raft_ice_enthalpy = jax.lax.optimization_barrier(
+            ice_enthalpy * raft_layer_fraction
+        )
+        ice_enthalpy_after_donation = jax.lax.optimization_barrier(
             ice_enthalpy * layer_fraction
-            + ice_enthalpy * ridge_layer_fraction
-            + ice_enthalpy * raft_layer_fraction
         )
-        new_salt_content = (
+        new_ice_enthalpy = ice_enthalpy_after_donation + jax.lax.optimization_barrier(
+            ridge_ice_enthalpy + raft_ice_enthalpy
+        )
+        ridge_salt = jax.lax.optimization_barrier(
+            salt_content * ridge_layer_fraction
+        )
+        raft_salt = jax.lax.optimization_barrier(
+            salt_content * raft_layer_fraction
+        )
+        salt_after_donation = jax.lax.optimization_barrier(
             salt_content * layer_fraction
-            + salt_content * ridge_layer_fraction
-            + salt_content * raft_layer_fraction
+        )
+        new_salt_content = salt_after_donation + jax.lax.optimization_barrier(
+            ridge_salt + raft_salt
         )
 
         lost_snow_fraction = (

@@ -20,9 +20,22 @@ from legoesm.ice.dynamics import (
     SI3CGridAEVPForcing,
     SI3CGridAEVPState,
     SI3CGridMetrics,
+    si3_cgrid_aevp_solver,
+    si3_cgrid_deformation,
 )
-from legoesm.ice.ridging import SI3JPL1RidgingConfig
-from legoesm.ice.transport import SI3PratherMoments, zero_si3_prather_moments
+from legoesm.ice.fidelity.nemo_adv2d_testcase_recipe import (
+    apply_si3_prather_source_corrections,
+)
+from legoesm.ice.ridging import (
+    SI3JPL1RidgingConfig,
+    SI3JPL1RidgingState,
+    apply_si3_jpl1_ridging,
+)
+from legoesm.ice.transport import (
+    SI3PratherMoments,
+    advect_si3_prather_2d,
+    zero_si3_prather_moments,
+)
 
 from legoesm import constants
 
@@ -67,6 +80,13 @@ _ICE_RHEO_STRENGTH_PA = 2.0e4
 _ICE_RHEO_STRENGTH_DECAY = 20.0
 _ICE_RHEO_DRAG_IO = 5.0e-3
 _ICE_RHEO_RN_ISHLAT = 2.0
+_ICE_RHEO_MINIMUM_THICKNESS_M = 0.1
+_ICE_RHEO_MAXIMUM_CONCENTRATION = 0.997
+_ICE_RHEO_MINIMUM_SALINITY_G_KG = 0.1
+_ICE_RHEO_NEW_ICE_SALINITY_FRACTION = 0.75
+_ICE_RHEO_OCEAN_SALINITY_G_KG = 35.0
+_ICE_RHEO_EPSI10 = 1.0e-10
+_ICE_RHEO_EPSI20 = 1.0e-20
 
 # Exact shipped usrdef_sbc.F90:111-127.  The source spells the radial power as
 # ``**(1/4)`` with integer operands, so Fortran evaluates the exponent as zero;
@@ -106,6 +126,7 @@ class ICERheoCard(NamedTuple):
     transport_scheme: str
     ridging_scheme: str
     metrics: SI3CGridMetrics
+    empty_surface_temperature: jnp.ndarray
     forcing_template: SI3CGridAEVPForcing
     dynamics_config: SI3CGridAEVPConfig
     ridging_config: SI3JPL1RidgingConfig
@@ -173,6 +194,7 @@ def _mesh_xy(mesh: Mapping[str, np.ndarray], name: str) -> np.ndarray:
 def build_ice_rheo_card(
     entry_frame: Mapping[str, np.ndarray],
     mesh: Mapping[str, np.ndarray],
+    ocean_surface_temperature_k: np.ndarray,
 ) -> ICERheoCard:
     """Build the pinned fp64 card from oracle arrays, never analytic stand-ins."""
 
@@ -197,6 +219,13 @@ def build_ice_rheo_card(
     umask = _periodic_halo(_mesh_xy(mesh, "umask").astype(np.float64))
     vmask = _periodic_halo(_mesh_xy(mesh, "vmask").astype(np.float64))
     zero = jnp.zeros(contents.shape[:2], dtype=jnp.float64)
+    ocean_temperature = np.asarray(ocean_surface_temperature_k, dtype=np.float64)
+    expected_surface = (_ICE_RHEO_GRID_SIZE, _ICE_RHEO_GRID_SIZE)
+    if ocean_temperature.shape != expected_surface:
+        raise ValueError(
+            "ICE_RHEO ocean temperature shape "
+            f"{ocean_temperature.shape} != {expected_surface}"
+        )
     metrics = SI3CGridMetrics(
         e1t=_periodic_halo(_mesh_xy(mesh, "e1t")),
         e2t=_periodic_halo(_mesh_xy(mesh, "e2t")),
@@ -273,6 +302,7 @@ def build_ice_rheo_card(
         transport_scheme=_ICE_RHEO_TRANSPORT,
         ridging_scheme=_ICE_RHEO_RIDGING,
         metrics=metrics,
+        empty_surface_temperature=_periodic_halo(ocean_temperature.T),
         forcing_template=forcing,
         dynamics_config=config,
         ridging_config=SI3JPL1RidgingConfig(),
@@ -345,6 +375,7 @@ def validate_ice_rheo_card(
         *state.dynamics,
         state.t_surface,
         state.open_water_area,
+        card.empty_surface_temperature,
         *card.metrics,
         *card.forcing_template,
     )
@@ -362,7 +393,7 @@ def _replace_periodic_halo(value: jnp.ndarray) -> jnp.ndarray:
     padding = (
         (_ICE_RHEO_HALO_WIDTH, _ICE_RHEO_HALO_WIDTH),
         (_ICE_RHEO_HALO_WIDTH, _ICE_RHEO_HALO_WIDTH),
-    )
+    ) + ((0, 0),) * (value.ndim - 2)
     return jnp.pad(interior, padding, mode="wrap")
 
 
@@ -426,11 +457,265 @@ def ice_rheo_air_stress(
     return _replace_periodic_halo(stress_u), _replace_periodic_halo(stress_v)
 
 
+def _intensive(contents: jnp.ndarray, name: str) -> jnp.ndarray:
+    return contents[..., ICE_RHEO_TRACERS.index(name)] / _ICE_RHEO_CELL_AREA_M2
+
+
+def _forcing_for_state(
+    card: ICERheoCard, state: ICERheoState, ice_step_index: int
+) -> SI3CGridAEVPForcing:
+    stress_u, stress_v = ice_rheo_air_stress(state, ice_step_index)
+    return card.forcing_template._replace(
+        concentration_t=_intensive(state.contents, "a_i"),
+        ice_volume_t=_intensive(state.contents, "v_i"),
+        snow_volume_t=_intensive(state.contents, "v_s"),
+        pond_volume_t=_intensive(state.contents, "v_ip"),
+        lid_volume_t=_intensive(state.contents, "v_il"),
+        air_stress_u_t=stress_u,
+        air_stress_v_t=stress_v,
+    )
+
+
+def _ridging_state(contents: jnp.ndarray, open_water: jnp.ndarray) -> SI3JPL1RidgingState:
+    snow_enthalpy = jnp.stack(
+        [_intensive(contents, f"e_s_l{level:02d}") for level in range(1, 6)],
+        axis=-1,
+    )
+    ice_enthalpy = jnp.stack(
+        [_intensive(contents, f"e_i_l{level:02d}") for level in range(1, 11)],
+        axis=-1,
+    )
+    salt_content = jnp.stack(
+        [_intensive(contents, f"szv_i_l{level:02d}") for level in range(1, 11)],
+        axis=-1,
+    )
+    return SI3JPL1RidgingState(
+        ice_area=_intensive(contents, "a_i"),
+        open_water_area=open_water,
+        ice_volume=_intensive(contents, "v_i"),
+        snow_volume=_intensive(contents, "v_s"),
+        age_content=_intensive(contents, "oa_i"),
+        pond_area=_intensive(contents, "a_ip"),
+        pond_volume=_intensive(contents, "v_ip"),
+        pond_lid_volume=_intensive(contents, "v_il"),
+        snow_enthalpy=snow_enthalpy,
+        ice_enthalpy=ice_enthalpy,
+        ice_salt_content=salt_content,
+    )
+
+
+def _contents_after_ridging(
+    contents: jnp.ndarray, state: SI3JPL1RidgingState
+) -> jnp.ndarray:
+    fields = {
+        "a_i": state.ice_area,
+        "v_i": state.ice_volume,
+        "v_s": state.snow_volume,
+        "oa_i": state.age_content,
+        "a_ip": state.pond_area,
+        "v_ip": state.pond_volume,
+        "v_il": state.pond_lid_volume,
+    }
+    fields.update(
+        {
+            f"e_s_l{level:02d}": state.snow_enthalpy[..., level - 1]
+            for level in range(1, 6)
+        }
+    )
+    fields.update(
+        {
+            f"e_i_l{level:02d}": state.ice_enthalpy[..., level - 1]
+            for level in range(1, 11)
+        }
+    )
+    fields.update(
+        {
+            f"szv_i_l{level:02d}": state.ice_salt_content[..., level - 1]
+            for level in range(1, 11)
+        }
+    )
+    for name, value in fields.items():
+        contents = contents.at[..., ICE_RHEO_TRACERS.index(name)].set(
+            value * _ICE_RHEO_CELL_AREA_M2
+        )
+    return contents
+
+
+def _ice_cor(
+    card: ICERheoCard,
+    contents: jnp.ndarray,
+    t_surface: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """The resolved ``ice_cor(kn=1)`` arm at icecor.F90:64-116."""
+
+    index = ICE_RHEO_TRACERS.index
+
+    def field(name: str) -> jnp.ndarray:
+        return contents[..., index(name)] / _ICE_RHEO_CELL_AREA_M2
+
+    ice_area = field("a_i")
+    ice_volume = field("v_i")
+    pond_area = field("a_ip")
+    has_area = ice_area >= _ICE_RHEO_EPSI20
+    safe_area = jnp.where(has_area, ice_area, _ICE_RHEO_ONE)
+    thickness = jnp.where(
+        has_area, ice_volume / safe_area, _ICE_RHEO_ZERO
+    )
+    thin = thickness < _ICE_RHEO_MINIMUM_THICKNESS_M
+    thin_factor = thickness / _ICE_RHEO_MINIMUM_THICKNESS_M
+    pond_area = jnp.where(thin, pond_area * thin_factor, pond_area)
+    ice_area = jnp.where(thin, ice_area * thin_factor, ice_area)
+    overfilled = ice_area > _ICE_RHEO_MAXIMUM_CONCENTRATION
+    safe_overfilled_area = jnp.where(overfilled, ice_area, _ICE_RHEO_ONE)
+    ice_area = jnp.where(
+        overfilled,
+        ice_area
+        * _ICE_RHEO_MAXIMUM_CONCENTRATION
+        / safe_overfilled_area,
+        ice_area,
+    )
+    contents = contents.at[..., index("a_ip")].set(
+        pond_area * _ICE_RHEO_CELL_AREA_M2
+    )
+    contents = contents.at[..., index("a_i")].set(
+        ice_area * _ICE_RHEO_CELL_AREA_M2
+    )
+
+    salinity_minimum = (
+        _ICE_RHEO_MINIMUM_SALINITY_G_KG
+        * ice_volume
+        / _ICE_RHEO_NLAY_I
+    )
+    salinity_maximum = (
+        _ICE_RHEO_NEW_ICE_SALINITY_FRACTION
+        * _ICE_RHEO_OCEAN_SALINITY_G_KG
+        * ice_volume
+        / _ICE_RHEO_NLAY_I
+    )
+    for level in range(1, _ICE_RHEO_NLAY_I + 1):
+        name = f"szv_i_l{level:02d}"
+        value = jnp.minimum(
+            jnp.maximum(field(name), salinity_minimum), salinity_maximum
+        )
+        contents = contents.at[..., index(name)].set(
+            value * _ICE_RHEO_CELL_AREA_M2
+        )
+
+    has_ice = ice_area > _ICE_RHEO_EPSI10
+    safe_ice_area = jnp.where(has_ice, ice_area, _ICE_RHEO_ONE)
+    thickness = jnp.where(
+        has_ice, ice_volume / safe_ice_area, _ICE_RHEO_ZERO
+    )
+    small = jnp.minimum(jnp.minimum(ice_area, ice_volume), thickness) < (
+        _ICE_RHEO_EPSI10
+    )
+    contents = jnp.where(small[..., None], _ICE_RHEO_ZERO, contents)
+    t_surface = jnp.where(small, card.empty_surface_temperature, t_surface)
+    return _replace_periodic_halo(contents), _replace_periodic_halo(t_surface)
+
+
+def step_ice_rheo_card(
+    card: ICERheoCard,
+    state: ICERheoState | None = None,
+    *,
+    completed_steps: int,
+) -> ICERheoState:
+    """Advance the resolved ``rhg -> adv -> rdgrft -> cor`` outer step.
+
+    The order is the shipped dynALL dispatcher at ``icedyn.F90:130-135``.
+    Thermodynamics, landfast, multi-category redistribution, and every other
+    scheme cross-product are rejected by :func:`validate_ice_rheo_card`.
+    """
+
+    state = card.initial_state if state is None else state
+    validate_ice_rheo_card(card, state)
+    if not 0 <= completed_steps < card.n_steps:
+        raise ValueError("ICE_RHEO completed_steps out of range")
+    ice_step_index = completed_steps + 1
+    forcing = _forcing_for_state(card, state, ice_step_index)
+    dynamics = si3_cgrid_aevp_solver(
+        state.dynamics, forcing, card.metrics, card.dynamics_config
+    )
+    divergence, deformation = si3_cgrid_deformation(
+        dynamics, forcing, card.metrics, card.dynamics_config
+    )
+    cell_area = jnp.full_like(
+        dynamics.u_ice_u, _ICE_RHEO_CELL_AREA_M2, dtype=jnp.float64
+    )
+    wet = card.forcing_template.tmask_t.astype(bool)
+    contents, moments, ignored_subcycles = advect_si3_prather_2d(
+        state.contents,
+        state.moments,
+        dynamics.u_ice_u,
+        dynamics.v_ice_v,
+        cell_area,
+        wet,
+        card.dt_s,
+        dx=_ICE_RHEO_SPACING_M,
+        dy=_ICE_RHEO_SPACING_M,
+        ice_step_index=ice_step_index,
+        nn_fsbc=card.nn_fsbc,
+        halo_width=card.halo_width,
+        ice_volume_index=ICE_RHEO_TRACERS.index("v_i"),
+        concentration_index=ICE_RHEO_TRACERS.index("a_i"),
+        subcycles=card.subcycles,
+    )
+    del ignored_subcycles
+    contents = apply_si3_prather_source_corrections(
+        state.contents,
+        contents,
+        tracer_names=ICE_RHEO_TRACERS,
+        nlay_i=card.nlay_i,
+        nlay_s=card.nlay_s,
+        cell_area_m2=_ICE_RHEO_CELL_AREA_M2,
+        halo_width=card.halo_width,
+    )
+
+    entry_area = _intensive(state.contents, "a_i")
+    transported_area = _intensive(contents, "a_i")
+    u_transport = dynamics.u_ice_u * card.metrics.e2u
+    v_transport = dynamics.v_ice_v * card.metrics.e1v
+    flux_divergence = (
+        (u_transport - jnp.roll(u_transport, 1, axis=0))
+        + (v_transport - jnp.roll(v_transport, 1, axis=1))
+    ) / card.metrics.area_t
+    open_water = jnp.maximum(
+        _ICE_RHEO_ZERO,
+        state.open_water_area
+        - (transported_area - entry_area)
+        - flux_divergence * card.dt_s,
+    )
+    redistributed, ignored_losses = apply_si3_jpl1_ridging(
+        _ridging_state(contents, open_water),
+        divergence,
+        deformation,
+        card.dt_s,
+        config=card.ridging_config,
+    )
+    del ignored_losses
+    contents = _contents_after_ridging(contents, redistributed)
+    contents, t_surface = _ice_cor(card, contents, state.t_surface)
+    final_area = _intensive(contents, "a_i")
+    return ICERheoState(
+        contents=contents,
+        bulk_salt_diagnostic=_replace_periodic_halo(
+            state.bulk_salt_diagnostic
+        ),
+        moments=moments,
+        dynamics=dynamics,
+        t_surface=t_surface,
+        # icestp.F90:182-184 calls ice_var_agg after ice_dyn, so the next
+        # entry's open-water state is exactly one minus the corrected area.
+        open_water_area=_ICE_RHEO_ONE - final_area,
+    )
+
+
 __all__ = (
     "ICE_RHEO_TRACERS",
     "ICERheoCard",
     "ICERheoState",
     "build_ice_rheo_card",
     "ice_rheo_air_stress",
+    "step_ice_rheo_card",
     "validate_ice_rheo_card",
 )

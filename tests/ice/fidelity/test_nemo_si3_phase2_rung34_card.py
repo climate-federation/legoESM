@@ -14,13 +14,17 @@ from legoesm.ice.fidelity.nemo_rheo_testcase_recipe import (
     ICE_RHEO_TRACERS,
     build_ice_rheo_card,
     ice_rheo_air_stress,
+    step_ice_rheo_card,
     validate_ice_rheo_card,
 )
+
+from legoesm import constants
 
 _ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/final")
 _ORACLE_GATE = Path(__file__).parents[3] / (
     "scripts/validate/ocean_fidelity/testcases/nemo_si3_oracle_gate.py"
 )
+_POINTWISE_BAR = 1.0e-15
 
 
 def _oracle_gate_module():
@@ -50,7 +54,9 @@ def oracle_card():
     )
     with netCDF4.Dataset(_ROOT / "mesh_mask.nc") as dataset:
         mesh = {name: np.asarray(dataset[name][:]) for name in names}
-    return build_ice_rheo_card(frame, mesh), frame, mesh
+    with netCDF4.Dataset(_ROOT / "output.init_ice.nc") as dataset:
+        ocean_temperature_k = np.asarray(dataset["sst"][0]) + constants.T_freeze
+    return build_ice_rheo_card(frame, mesh, ocean_temperature_k), frame, mesh
 
 
 def _mesh_xy(value: np.ndarray) -> np.ndarray:
@@ -120,3 +126,46 @@ def test_rung34_card_rejects_frankenstein_selector(oracle_card) -> None:
     card, _, _ = oracle_card
     with pytest.raises(ValueError, match="selector composition"):
         validate_ice_rheo_card(card._replace(ridging_scheme="lipscomb2007"))
+
+
+def test_rung34_kt1_full_dynall_gate(oracle_card) -> None:
+    card, _, _ = oracle_card
+    gate = _oracle_gate_module()
+    _, oracle = gate.read_frame(
+        _ROOT / "oracle_ice_step_entry_kt00000002.bin"
+    )
+    candidate = step_ice_rheo_card(card, completed_steps=0)
+    index = ICE_RHEO_TRACERS.index
+    area = 2000.0 * 2000.0
+    fields = {
+        name: np.asarray(candidate.contents[..., index(name)]) / area
+        for name in ICE_RHEO_TRACERS
+    }
+    fields.update(
+        {
+            "t_su": np.asarray(candidate.t_surface),
+            "sv_i": np.asarray(candidate.bulk_salt_diagnostic),
+            "u_ice": np.asarray(candidate.dynamics.u_ice_u),
+            "v_ice": np.asarray(candidate.dynamics.v_ice_v),
+            "stress1_i": np.asarray(candidate.dynamics.stress1_t),
+            "stress2_i": np.asarray(candidate.dynamics.stress2_t),
+            "stress12_i": np.asarray(candidate.dynamics.stress12_f),
+        }
+    )
+
+    def oracle_field(name: str) -> np.ndarray:
+        if name.startswith("e_s_l"):
+            return oracle["e_s"][..., int(name[-2:]) - 1, 0]
+        if name.startswith("e_i_l"):
+            return oracle["e_i"][..., int(name[-2:]) - 1, 0]
+        if name.startswith("szv_i_l"):
+            return oracle["szv_i"][..., int(name[-2:]) - 1, 0]
+        value = oracle[name]
+        return value if value.ndim == 2 else value[..., 0]
+
+    for name, value in fields.items():
+        value = value[2:-2, 2:-2]
+        expected = oracle_field(name)[2:-2, 2:-2]
+        scale = max(float(np.max(np.abs(expected))), 1.0)
+        error = float(np.max(np.abs(value - expected))) / scale
+        assert error <= _POINTWISE_BAR, f"{name}: {error} > {_POINTWISE_BAR}"

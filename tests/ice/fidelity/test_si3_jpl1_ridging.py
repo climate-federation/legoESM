@@ -89,11 +89,12 @@ def test_si3_jpl1_matches_independent_written_order_one_shift() -> None:
     np.testing.assert_allclose(result.open_water_area, [expected["open"]], rtol=0.0, atol=2e-16)
     assert int(losses.iterations[0]) == 1
 
-    lost_fraction = 0.5 * (expected["ridge_fraction"] + expected["raft_fraction"])
-    np.testing.assert_allclose(result.snow_volume, [0.08 * (1.0 - lost_fraction)])
-    np.testing.assert_allclose(losses.snow_volume, [0.08 * lost_fraction])
-    np.testing.assert_allclose(result.pond_volume, [0.016 * (1.0 - lost_fraction)])
-    np.testing.assert_allclose(losses.pond_volume, [0.016 * lost_fraction])
+    # ln_icethd=F forces all snow/pond retention factors to one at
+    # icedyn_rdgrft.F90:1244-1247, overriding the deck's 0.5 values.
+    np.testing.assert_allclose(result.snow_volume, state.snow_volume)
+    np.testing.assert_array_equal(losses.snow_volume, 0.0)
+    np.testing.assert_allclose(result.pond_volume, state.pond_volume)
+    np.testing.assert_array_equal(losses.pond_volume, 0.0)
     np.testing.assert_allclose(result.ice_volume, state.ice_volume, rtol=0.0, atol=2e-16)
     np.testing.assert_allclose(result.ice_enthalpy, state.ice_enthalpy, rtol=0.0, atol=2e-15)
     np.testing.assert_allclose(
