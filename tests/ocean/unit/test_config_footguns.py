@@ -327,3 +327,46 @@ def test_validate_config_accepts_flux_form_with_valid_scheme():
             momentum_advection="flux_form", momentum_flux_scheme=scheme,
         )
         LatLonCGridOceanModel._validate_config(cfg)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Footgun 5 — S-42 BBL: in-model hook is rk3_ws-only, not lane-agnostic
+# ---------------------------------------------------------------------------
+
+
+def test_validate_config_rejects_bbl_in_stage_off_the_rk3_ws_lane():
+    """bbl_adv_option=2 (NEMO's in-stage Campin-Goosse BBL, nn_bbl_adv=2) is
+    honoured ONLY on tracer_time_integrator='rk3_ws' -- the ``elif _tti ==
+    "rk3_ws":`` branch is the sole site that builds the BBL context and folds
+    bbl_transports/apply_bbl_adv_tendency into the stage-3 tracer RHS. On the
+    default euler lane (and ab2/rk3) the field resolves but is never read, so
+    a user setting it gets NO boundary layer with no warning
+    (docs/ocean/fidelity/nemo_branch_isomorphism_map.md, S-42). Must raise at
+    construction instead."""
+    bad = LatLonCGridOceanConfig.from_flat(
+        tracer_time_integrator="euler", bbl_adv_option=2, bbl_gamma_s=20.0,
+    )
+    with pytest.raises(ValueError, match="bbl_adv_option=2 is not honoured"):
+        LatLonCGridOceanModel._validate_config(bad)
+
+
+def test_validate_config_accepts_bbl_in_stage_on_the_rk3_ws_lane():
+    """The one lane that DOES honour bbl_adv_option=2 (rk3_ws, the certified
+    OVERFLOW-zps composition) must still construct cleanly."""
+    ok = LatLonCGridOceanConfig.from_flat(
+        tracer_time_integrator="rk3_ws", momentum_time_integrator="rk3_ws",
+        tracer_advection="fct2", momentum_advection="flux_form",
+        momentum_flux_scheme="upwind3", vertical_momentum_scheme="nemo_up3",
+        bbl_adv_option=2, bbl_gamma_s=20.0,
+    )
+    LatLonCGridOceanModel._validate_config(ok)  # must not raise
+
+
+def test_validate_config_accepts_bbl_off_on_any_lane():
+    """bbl_adv_option=0 (the default, off) is lane-agnostic -- the new guard
+    must not false-reject a config that simply never asked for in-model BBL."""
+    for lane in ("euler", "ab2", "rk3"):
+        cfg = LatLonCGridOceanConfig.from_flat(
+            tracer_time_integrator=lane, bbl_adv_option=0,
+        )
+        LatLonCGridOceanModel._validate_config(cfg)  # must not raise

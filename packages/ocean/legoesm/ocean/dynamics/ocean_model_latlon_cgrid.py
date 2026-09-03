@@ -3339,6 +3339,26 @@ class LatLonCGridOceanModel:
             raise ValueError("bbl_adv_option must be 0 or 2")
         if config.bbl_adv_option == 2 and config.bbl_gamma_s <= 0.0:
             raise ValueError("bbl_adv_option=2 requires bbl_gamma_s > 0")
+        if (config.bbl_adv_option == 2
+                and config.tracer_time_integrator != "rk3_ws"):
+            # S-42 (docs/ocean/fidelity/nemo_branch_isomorphism_map.md): the
+            # in-stage BBL hook is built ONLY inside the rk3_ws tracer lane
+            # (elif _tti == "rk3_ws": ... bbl_transports/
+            # apply_bbl_adv_tendency folded into the stage-3 tracer RHS).
+            # euler/ab2/rk3 never build that hook, so bbl_adv_option=2 there
+            # resolves and is silently never read -- no boundary layer, no
+            # warning. Fail fast instead.
+            raise ValueError(
+                f"bbl_adv_option=2 is not honoured by "
+                f"tracer_time_integrator={config.tracer_time_integrator!r}: "
+                "the in-model BBL hook is built only on "
+                "tracer_time_integrator='rk3_ws'; on every other tracer lane "
+                "this option resolves but is never read, silently dropping "
+                "the boundary layer. Either select tracer_time_integrator="
+                "'rk3_ws', or leave bbl_adv_option=0 and apply BBL outside "
+                "the model via legoesm.ocean.physics.bbl_adv."
+                "apply_bbl_adv_step (the driver-side path run_omip_core2.py "
+                "uses via --bbl-adv).")
         if getattr(config, "store_salt_flux", False):
             # Refuse-not-ignore: the capture stores "the flux the model
             # applied", which is only well-defined per step on the euler

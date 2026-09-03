@@ -1039,11 +1039,18 @@ ARTIFICIAL_BRANCH_BASELINE: dict[str, BaselineEntry] = {
             'branch, and it is not config-flippable: the in-model BBL hook exists only in the '
             'WS-RK3 tracer lane (ocean_model_latlon_cgrid.py:6007), while ORCA1 runs the '
             'forward-Euler tracer lane (the config default, state.py:2071) -- which itself '
-            'has no NEMO arm. Setting bbl_adv_option=2 on ORCA1 would SILENTLY run NO BBL, '
-            'and nothing cross-checks the pair at construction '
-            '(ocean_model_latlon_cgrid.py:3324-3327 validates only the value and gamma) -- an '
-            'OPEN ASK, since making it raise turns a tolerated condition into a hard error. '
-            'Collapsing the placement is a second ASK, not a flip.'
+            'has no NEMO arm. Setting bbl_adv_option=2 on ORCA1 would have SILENTLY run NO '
+            'BBL. 2026-09-02 USER DECISION: the pair is now cross-checked at construction -- '
+            'LatLonCGridOceanModel._validate_config (ocean_model_latlon_cgrid.py:3342-3361) '
+            'raises ValueError naming the field and the mismatched lane whenever '
+            'bbl_adv_option=2 is paired with a tracer_time_integrator other than rk3_ws, and '
+            'points at the driver-side apply_bbl_adv_step (run_omip_core2.py, --bbl-adv) as '
+            'the alternative. Verified inert on production: run_omip_core2.py and every '
+            'committed sbatch never set bbl_adv_option (grep, zero hits), so ORCA1 stays at '
+            'the config default (0) and never trips the new guard. Non-vacuity: '
+            'tests/ocean/unit/test_config_footguns.py::'
+            'test_validate_config_rejects_bbl_in_stage_off_the_rk3_ws_lane. Collapsing the '
+            'placement itself remains a separate, second ASK, not a flip.'
         ),
         kind='unclassified',
     ),

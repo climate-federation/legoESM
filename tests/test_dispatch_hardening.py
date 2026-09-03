@@ -307,6 +307,12 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ocean/legoesm/ocean/dynamics/latlon_cgrid_operators.py", "pv_flux_al81_partial_cell"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model.py", "__init__"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_compute_advection_flux_div"),
+        # bbl_adv_option=2 (in-stage Campin-Goosse BBL) x tracer_time_integrator
+        # lane guard (S-42, docs/ocean/fidelity/nemo_branch_isomorphism_map.md):
+        # the in-stage BBL hook is built ONLY on the rk3_ws tracer lane, so a
+        # typo/mismatch on euler/ab2/rk3 used to resolve bbl_adv_option=2 and
+        # silently run NO boundary layer. Lock the guard so it can't be
+        # silently deleted; test_config_footguns.py exercises it directly.
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_validate_config"),
         # outer_integrator dispatch (nemo_mlf P2, docs/ocean/fidelity/
         # nemo_mlf_step_transcription_spec.md §4/§7): a typo here would

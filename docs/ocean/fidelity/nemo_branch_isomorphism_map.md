@@ -1145,6 +1145,15 @@ post-step split (today), or does the OMIP lane move to a NEMO tracer lane
 (RK3-stage or MLF) that has NEMO's own `tra_bbl` site? That changes ORCA1's
 answers and is not a default to move silently.
 
+**2026-09-02 follow-up (this pass): the silent-drop hazard is now a hard
+error.** `bbl_adv_option=2` paired with any `tracer_time_integrator` other
+than `rk3_ws` now raises `ValueError` at `LatLonCGridOceanModel._validate_config`
+(`ocean_model_latlon_cgrid.py:3342-3361`), naming the mismatched lane and
+pointing at the driver-side `apply_bbl_adv_step` (`run_omip_core2.py`'s
+`--bbl-adv`) as the alternative. Verified inert on ORCA1 (never sets
+`bbl_adv_option`, stays at the default 0). This closes the "SILENTLY run NO
+BBL" hazard; the placement-collapse ASK above is unchanged and still open.
+
 **Gates.** LOCK_EXCHANGE-zco and OVERFLOW-zps never call `apply_bbl_adv_step`
 (their BBL, where on at all, is the in-stage site), so both cards' stage-sweep
 and kt=1..10 trajectory gates are bit-identical across this change — measured,
