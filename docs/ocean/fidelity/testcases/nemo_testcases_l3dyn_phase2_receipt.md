@@ -366,6 +366,52 @@ finite, nonzero fp64 gradients.  All oracle and candidate numerical arrays
 recorded by the gate are `float64`; masks are boolean.  The source-effect ocean
 residual ledgers are not modeled by this uncoupled card and are not compared.
 
+### Rung-3.2 DEBT classification — not re-association
+
+The round-2 replay was preregistered at commit `146199c9b3e`.  It advanced the
+pinned candidate through 15 steps, then executed even step 16 (y then x) with
+the production JAX arm and with the same source-ordered operation graph under
+NumPy scalar ufuncs.  The latter preserves the NEMO statement sequence for the
+y limiter/sweep (`icedyn_adv_pra.F90:757-943`), x limiter/sweep (`:534-717`),
+and post-split corrections (`:405-479,946-1142`).
+
+The production and written-order results are byte-identical: the complete
+contents-plus-80-moment SHA256 is
+`9f8586e8c84df4c004aeea015b06643de7f02bfc8732fd59bcbac561df709ac5`
+for both, every production/replay moment distance is zero ULP, and there is no
+within-step differing assignment to name.  Against oracle entry `kt=17`, both
+give the same first-gate-DEBT `szv_i_l01`: normalized maximum
+`1.1095589247903137e-15`; at the maximum-absolute-error cell `(50,51)` the
+oracle is `2.604251475454491`, both candidates are `2.604251475454495`, and
+the distance is 9 ULP.  The two-ULP discriminator therefore **REFUTES
+re-association** for this step.
+
+The first available differing operand is inherited at step entry.  At
+`kt=16`, `szv_i_l01` is already 13 ULP at its worst cell and 7 ULP at the
+maximum-absolute-error cell, while remaining numerically AT-BAR
+(`8.541871855375954e-16`).  The two-ULP history first differs at cold entry
+`kt=1` (maximum 3 ULP).  `iceistate.F90:357-360` computes salt as
+`(sz_i*v_i)*r1_nlay_i`, with a stored reciprocal.  The card instead formed
+`sv_i/nlay_i`.  Replaying the source multiplication at the `kt=1`
+maximum-error cell reduces the discrepancy from 2 ULP to 1 ULP and halves the
+normalized maximum from `2.349678350102868e-16` to
+`1.174839175051434e-16`; its domain-wide maximum remains 3 ULP.  Thus the
+measured classification is **INHERITED STEP-ENTRY DEBT**, with the first owned
+operand being initial layer-salt arithmetic order.  The unseen oracle Prather
+moments remain a stated blind spot, so this one-step measurement does not
+attribute every later base-field or final-moment residual.
+
+For roster clarity, the fixed gate has 7 of its 20 boundary fields AT-BAR over
+all 486 boundaries: the transported `oa_i`, `v_ip`, `v_il`, plus carried
+`sv_i`, surface temperature, U, and V.  Counting only the 16 transported
+channels gives 3/16, not 7/16; the layer-resolved energy and salt channels are
+separate registered fields.  The other transported fields and 70/80 final
+moment rows remain DEBT, with smooth growth into the `1e-14` class.  No broader
+owner is inferred from that scaling.
+
+The planted cross-moment control changes `v_i` by 5,913,692 ULP, proving the
+replay comparison is live.  The focused replay suite passes 2/2.
+
 ## Artifact hashes
 
 | artifact | SHA256 |
@@ -392,6 +438,9 @@ Rung-3.2 artifacts (gate provenance parent
 | rung-3.2 card | `4c044afac5128009db1015063b82c795970b24385b4330859d752e05c8d959f8` |
 | rung-3.2 gate source | `2e6176fb8e81e44e65d4a69787967608c99718b261698fbfb54a8d25df09eaca` |
 | rung-3.2 unit controls | `a0308bff7200a6e739c1c764777db8d3c62dd64f98c87472d2b7942c8a9774b8` |
+| written-order replay JSON | `670fd440fcd678130cc0ab5492502d996e35c36a93f49bd041eac9df73dba0ac` |
+| written-order replay source | `dd396635f9e3f98842d74704a9888ee96926d87856164d31b8a95b526f022db1` |
+| written-order replay controls | `7573ed5250a113c5f4389ca3c6a5f49e2a87497511d5ebd6ce59d8797db7cb28` |
 
 ## Loudly UNMEASURED / deferred
 
