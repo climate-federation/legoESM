@@ -25,6 +25,7 @@ DEBT_STEP = 16
 ORACLE_ENTRY_KT = 17
 ULP_LIMIT = 2
 TARGET_TRACER = "szv_i_l01"
+PLANT_RELATIVE = 1.0e-6  # instrument control only; intentionally above fp64 roundoff
 
 
 class ReplayError(RuntimeError):
@@ -166,9 +167,10 @@ def _numpy_transport_step(card, state, *, plant: bool = False):
     entry = np.asarray(state.contents).copy()
     moments = tuple(np.asarray(value).copy() for value in state.moments)
     if plant:
-        moments[4][card.halo_width + 10, card.halo_width + 11, 0] = np.nextafter(
-            moments[4][card.halo_width + 10, card.halo_width + 11, 0], np.inf
-        )
+        plane = moments[4][..., 0]
+        location = np.unravel_index(int(np.argmax(np.abs(plane))), plane.shape)
+        require(plane[location] != 0.0, "planted cross-moment operand is zero")
+        moments[4][location + (0,)] *= 1.0 + PLANT_RELATIVE
     area_value = card.dx_m * card.dy_m
     area = np.full(entry.shape[:2], area_value, dtype=np.float64)
     wet = np.ones(entry.shape[:2], dtype=bool)
