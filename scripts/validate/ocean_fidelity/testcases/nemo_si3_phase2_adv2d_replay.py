@@ -309,7 +309,23 @@ def run_replay(root: Path) -> dict:
     card = build_ice_adv2d_card(gate.oracle_surface_temperature_c(root))
     require(get_policy() == PrecisionPolicy.fp64(), "fp64 policy required")
     state = card.initial_state
+    target_input_history = []
     for completed in range(PREPARE_STEPS):
+        kt = completed + 1
+        history_frame = gate._read_oracle_frame(root, kt=kt, card=card)
+        history_oracle = np.asarray(
+            gate._entry_tracer(history_frame, TARGET_TRACER), dtype=np.float64
+        )
+        history_candidate = np.asarray(
+            gate.state_field(card, state, TARGET_TRACER), dtype=np.float64
+        )
+        history_row = _field_row(
+            TARGET_TRACER,
+            history_oracle,
+            history_candidate,
+            history_candidate,
+        )
+        target_input_history.append({"kt": kt, **history_row})
         state = step_ice_adv2d_card(card, state, completed_steps=completed)
 
     production = step_ice_adv2d_card(card, state, completed_steps=PREPARE_STEPS)
@@ -372,6 +388,15 @@ def run_replay(root: Path) -> dict:
 
     target = next(row for row in rows if row["name"] == TARGET_TRACER)
     input_target = next(row for row in input_rows if row["name"] == TARGET_TRACER)
+    target_input_history.append({"kt": ORACLE_INPUT_KT, **input_target})
+    first_input_over_two_ulp = next(
+        (
+            row
+            for row in target_input_history
+            if row["production_max_ulp"] > ULP_LIMIT
+        ),
+        None,
+    )
     if (
         target["replay_ulp_at_production_max"] <= ULP_LIMIT
         and target["production_max_ulp"] > ULP_LIMIT
@@ -426,6 +451,8 @@ def run_replay(root: Path) -> dict:
         "sweep_order": "y_then_x",
         "target": target,
         "target_input": input_target,
+        "target_input_history": target_input_history,
+        "first_target_input_over_two_ulp": first_input_over_two_ulp,
         "first_production_replay_stage_difference": _first_stage_difference(
             production_stages, replay_stages
         ),
