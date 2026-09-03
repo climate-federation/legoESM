@@ -880,6 +880,20 @@ ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
                        "stage pair from _nemo_ws_qco_stage_faces via momentum_flux_face_thickness "
                        "(tests/ocean/unit/test_nemo_ws_hadv_face_thickness.py)")),
     )),
+    RoutineRow("S-48", "stprk3_stg stage velocity umask rank", "SHARED",
+               "none (one array; RK3 identity)", (
+        Impl(_OMLC, "_replace_stage_mean",
+             Reference("nemo", "stprk3_stg_stage_umask",
+                       "stprk3_stg.F90:367,375,382 (stage-1/2 velocity update) and "
+                       ":444 (barotropic correction) carry umask(ji,jj,jk); "
+                       "dynadv_up3.F90:142-143,160,166-176 read those zeros "
+                       "(tests/ocean/unit/test_nemo_ws_stage_face_mask_rank.py)")),
+        Impl(_OMLC, "_mom_pert_ws",
+             Reference("nemo", "stprk3_stg_transport_umask",
+                       "stprk3_stg.F90:273-274: the SAME barotropic correction is "
+                       "masked inside the advective transport dyn_adv_up3 consumes, "
+                       "zFu = e2u*e3u(Kmm)*( uu(Kmm) + zub*umask(ji,jj,jk) )")),
+    )),
     RoutineRow("M-01", "stp_MLF whole-step composition", "ARTIFICIAL_BRANCH", "absence of key_RK3 (nemo_mlf selected by no card)", (
         Impl(_OMLC, "_leapfrog_step",
              Reference("nemo", "stp_MLF", "stpmlf.F90:108-473 (two _step_impl passes)")),
