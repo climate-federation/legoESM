@@ -259,7 +259,7 @@ def _field_row(name: str, oracle: np.ndarray, production: np.ndarray, replay: np
         "replay_max_abs": float(np.max(replay_abs)),
         "replay_normalized_max_abs": float(np.max(replay_abs)) / scale,
         "replay_max_ulp": int(np.max(_ulp_distance(replay, oracle))),
-        "production_max_abs_index_xy": list(prod_index),
+        "production_max_abs_index_xy": [int(value) for value in prod_index],
         "oracle_at_production_max": float(oracle[prod_index]),
         "production_at_max": float(production[prod_index]),
         "replay_at_production_max": float(replay[prod_index]),
@@ -288,7 +288,7 @@ def _first_stage_difference(production_stages: dict, replay_stages: dict) -> dic
                 return {
                     "stage": stage,
                     "operand": label,
-                    "index": list(index),
+                    "index": [int(value) for value in index],
                     "production": float(prod_array[index]),
                     "replay": float(replay_array[index]),
                     "ulp_distance": int(distance[index]),
