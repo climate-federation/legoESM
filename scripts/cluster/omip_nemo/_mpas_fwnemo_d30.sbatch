@@ -18,7 +18,7 @@
 # needs matched 180-day trajectories.
 #
 # NEMO-FAITHFUL FRESHWATER ARM (30 d).  Identical to _mpas_unified_180d
-# except for the two freshwater flags, so this is a controlled pair against
+# except for ONE freshwater flag, so this is a controlled pair against
 # that run's OWN day-15/30 snapshots (same code, same forcing, same IC).
 #
 # WHY: the unified 180 d run drives 16 Amazon-mouth cells to salinity
@@ -36,7 +36,13 @@
 # constant-S_ref term and required measurement before any default flip.
 #
 # PRE-REGISTERED, day 15 and day 30 vs the unified arm's matched snapshots:
-#   CONFIRM (both flags adopted for production): zero clamped cells at day
+# SCOPE: only --freshwater-salinity local is exercised here.  The
+# real_freshwater closure is REFUSED by the driver alongside --sss-restore
+# (the restoring is a direct salinity tendency that the closure's absent
+# virtual-salt term would contradict); routing restoring as water_flux to
+# satisfy it is a separate config choice and is NOT taken unasked.
+#
+#   CONFIRM (local-salinity adopted for production): zero clamped cells at day
 #     30, tropical SSS rmse no worse than the unified arm's 0.540 at day 30,
 #     and global SST rmse within 0.05 C of its 0.496.
 #   REFUTE (defect owner is elsewhere -- regridding or mesh concentration):
@@ -73,7 +79,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid mpas \
   --isf --isf-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/runoff-icb_DaiTrenberth_Depoorter.nc \
   --iwm --iwm-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/zdfiwm_forcing_TRA.nc \
   --bbl-adv --years 0.0822 --snapshot-every-days 15 \
-  --freshwater-closure real_freshwater --freshwater-salinity local \
+  --freshwater-salinity local \
   --diag-every-days 5 --tracer-advection superbee --runoff-depth-nemo-ini \
   --river-mouth-restoring-gate --bottom-drag-scheme nemo_quadratic \
   --ice-ocean-heat-coeff 70 \
@@ -100,7 +106,7 @@ for pair in "0030 5" "0060 11" "0090 17"; do
   echo "### day $1 vs GATEWAY rec $2 ###"
   $PY scripts/validate/compare_omip_nemo.py --legoesm-snapshot "$SNAP" \
     --nemo-gridt "$GW_T" --nemo-time-idx "$2" --freeze-clamp-C -1.8 \
-    --sss-faithful --grid-label mpas_unified180_d$1 \
+    --sss-faithful --grid-label mpas_fwnemo30_d$1 \
     --output-dir $ROOT/results/omip_nemo/compare_mpasfwnemo30_d$1 2>&1 | tail -38
 done
 
