@@ -1614,6 +1614,7 @@ def _run_substep_loop(
                 F_slow_u_i, F_slow_v_i,
                 U_bar_new, V_bar_new,
                 flux_u, flux_v,
+                _drag_u, _drag_v,
             )
             return new_carry, trace
         return new_carry

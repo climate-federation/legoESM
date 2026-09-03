@@ -116,6 +116,8 @@ def test_gyre_card_selects_complete_resolved_operator_program():
     assert cfg.physics.shortwave_penetration.water_type == "I"
     assert cfg.barotropic.barotropic_coriolis == "ene_metric"
     assert cfg.barotropic.barotropic_een_coefficient_evaluation == "nemo_literal"
+    assert cfg.zdf_drag_in_matrix is True
+    assert cfg.barotropic_drag_substep is True
 
 
 def test_gyre_whole_step_identity_rejects_hybrid_and_staged_gm():

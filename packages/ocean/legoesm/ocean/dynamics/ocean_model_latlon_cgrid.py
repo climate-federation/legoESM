@@ -1009,6 +1009,42 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # slots after the full step has run.  Private fidelity instrumentation only;
     # zero leaves the returned state untouched.
     expose_momentum_stage: int = 0
+    # Select the pre-barotropic-correction stage value for the same private
+    # exposure seam.  False preserves the established post-correction dump
+    # comparison; this flag never changes a state consumed by a later stage.
+    expose_momentum_stage_raw: bool = False
+    # Return one tracer Kaa stage in the prognostic T/S slots after the normal
+    # step completes.  This is the tracer sibling of expose_momentum_stage.
+    expose_tracer_stage: int = 0
+    # Return the T/S pair actually handed to the WS tracer-stage helper.  This
+    # WRITE-only diagnostic distinguishes Kbb from a pre-applied Euler state.
+    expose_tracer_stage_input: bool = False
+    # One-variable causal arm: replace only that WS helper input pair.
+    tracer_stage_base_override: object = None
+    # One-variable causal arm: add stage-local tracer rates to the QCO content
+    # combine.  Tuple of three ``(dT_dt, dS_dt)`` pairs; production passes None.
+    tracer_stage_source_override: object = None
+    # Return one stage's tracer transport triplet in u/v/T storage slots.
+    expose_tracer_transport_stage: int = 0
+    # Replace selected stage-local cross-level transports; tuple entries may
+    # be None.  Private causal arm for the QCO ``wzv`` operand walk.
+    tracer_stage_vertical_transport_override: object = None
+    # Replace selected complete stage transport bundles (zFu,zFv,zFw); tuple
+    # entries may be None.  Private discriminator for divergence amplification
+    # after face transports have already cleared their scale-normalized bar.
+    tracer_stage_transport_override: object = None
+    # Replace selected post-advection Krhs pairs; tuple entries may be None.
+    # Private first-divergence seam downstream of the transport bundle.
+    tracer_stage_rhs_override: object = None
+    # Replace the three stage-local tracer advection identities.  This is a
+    # private causal arm for traadv.F90's RK3 CEN/CEN/FCT schedule.
+    tracer_stage_advection_schedule_override: object = None
+    # One-variable causal arm: replace only the T/S state consumed by the
+    # stage-2 EOS/HPG evaluation.  Never used by a production configuration.
+    stage2_tracer_override: object = None
+    # Geometry/full-bundle sibling of the T/S-only arm above.  Tuple is
+    # (T, S, eta); the stage-local EOS/HPG alone consumes it.
+    stage2_thermodynamic_override: object = None
 
 
 class _NEMOWSBarotropicTrace(NamedTuple):
@@ -1038,6 +1074,11 @@ def _nemo_ws_rk3_tracer_pair_step(
     stage_transport_geometry=None,
     fct_low_order_predictor: str = "nemo_rk3_two_step",
     bbl_context=None,
+    stage_source_rates=None,
+    stage_advection_schedule=None,
+    stage_qco_ratios=None,
+    stage_rhs_override=None,
+    return_stages: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """NEMO key_RK3 tracer stage program (Wicker--Skamarock form).
 
@@ -1045,9 +1086,9 @@ def _nemo_ws_rk3_tracer_pair_step(
     applies the previous stage RHS with ``dt/3``, ``dt/2``, then ``dt``.
     Under key_qco the stage result is thickness weighted; the one-third and
     one-half thicknesses below are the corresponding linear r3t stages.
-    The flux reconstruction receives the live stage interval so FCT uses the
-    same stage Courant factor.  This selector changes no existing ``rk3``
-    (SSP) user.
+    NEMO's fixed key_RK3 identity uses centered order-2 advection at stages 1
+    and 2 and the configured FCT identity only at stage 3 (traadv.F90:
+    280-283,355-365).  This selector changes no existing ``rk3`` (SSP) user.
     """
     if stage_transport_geometry is None:
         stage_transport_geometry = (
@@ -1055,12 +1096,71 @@ def _nemo_ws_rk3_tracer_pair_step(
         ) * 3
     if len(stage_transport_geometry) != 3:
         raise ValueError("stage_transport_geometry must contain exactly 3 stages")
+    if stage_source_rates is None:
+        zero_a = jnp.zeros_like(tr_a)
+        zero_b = jnp.zeros_like(tr_b)
+        stage_source_rates = ((zero_a, zero_b),) * 3
+    if len(stage_source_rates) != 3:
+        raise ValueError("stage_source_rates must contain exactly 3 stages")
+    if stage_advection_schedule is None:
+        stage_advection_schedule = (
+            ("nemo_cen2", "nemo_cen2", tracer_advection)
+            if stage_qco_ratios is not None
+            else (tracer_advection,) * 3
+        )
+    if len(stage_advection_schedule) != 3:
+        raise ValueError("stage_advection_schedule must contain exactly 3 stages")
+    if stage_qco_ratios is not None and len(stage_qco_ratios) != 3:
+        raise ValueError("stage_qco_ratios must contain exactly 3 stages")
+    if stage_rhs_override is not None and len(stage_rhs_override) != 3:
+        raise ValueError("stage_rhs_override must contain exactly 3 stages")
 
     def _flux_pair(a_val, b_val, stage_dt, stage_index, h_after):
-        mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage = (
-            stage_transport_geometry[stage_index])
+        geometry = stage_transport_geometry[stage_index]
+        mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage = geometry[:6]
+        stage_scheme = stage_advection_schedule[stage_index]
+        if stage_scheme == "nemo_cen2":
+            # Literal traadv_cen.F90:137-149,189-217 recurrence.  NEMO's pU,
+            # pV and pW already carry e2u/e1v/e1e2t; form fluxes in that
+            # metric space, divide horizontal and vertical divergences in
+            # sequence, and hand the resulting Krhs directly to the QCO
+            # combine.  Reordering these operations leaves face transports at
+            # their scale-normalized bar but amplifies to O(1e-12) in Krhs.
+            if len(geometry) >= 9:
+                p_u, p_v, p_w = geometry[6:9]
+            else:
+                p_u = mf_u * jnp.asarray(grid.dy_u)[..., None]
+                p_v = mf_v * jnp.asarray(grid.dx_v)[..., None]
+                p_w = w_stage * jnp.asarray(grid.area)[..., None]
+
+            def _cen2_rhs(tracer):
+                tr_u_sum = 2.0 * centered_cell_to_uface(tracer)
+                tr_v_sum = 2.0 * interp_to_v_points(tracer, grid)
+                flux_u = (0.5 * p_u) * tr_u_sum
+                flux_v = (0.5 * p_v) * tr_v_sum
+                h_num = (
+                    (flux_u[:, 1:, :] - flux_u[:, :-1, :])
+                    + (flux_v[1:, :, :] - flux_v[:-1, :, :])
+                )
+                inv_area = 1.0 / jnp.asarray(grid.area)[..., None]
+                inv_h = 1.0 / jnp.maximum(h_stage, 1.0e-10)
+                rhs = -(h_num * inv_area) * inv_h
+
+                tr_w_sum = tracer[..., :-1] + tracer[..., 1:]
+                flux_w_inner = (0.5 * p_w[..., 1:-1]) * tr_w_sum
+                pad = ((0, 0),) * (flux_w_inner.ndim - 1) + ((1, 1),)
+                flux_w = jnp.pad(flux_w_inner, pad)
+                v_num = flux_w[..., :-1] - flux_w[..., 1:]
+                return rhs - (v_num * inv_area) * inv_h
+
+            rhs_a, rhs_b = _cen2_rhs(a_val), _cen2_rhs(b_val)
+            fd_a, fd_b = -h_stage * rhs_a, -h_stage * rhs_b
+            if (stage_rhs_override is not None
+                    and stage_rhs_override[stage_index] is not None):
+                rhs_a, rhs_b = stage_rhs_override[stage_index]
+            return fd_a, fd_b, (rhs_a, rhs_b)
         (dh_a, dv_a), (dh_b, dv_b) = compute_advection_flux_div_pair(
-            a_val, b_val, tracer_advection, mf_u, mf_v,
+            a_val, b_val, stage_scheme, mf_u, mf_v,
             w_stage, h_stage, hu_stage, hv_stage, grid, stage_dt,
             recon_fill_mask=recon_fill_mask,
             linssh_top_flux=linssh_top_flux,
@@ -1096,28 +1196,80 @@ def _nemo_ws_rk3_tracer_pair_step(
             # flux divergence before the final dt update.
             fd_a = fd_a - h_stage * bbl_a
             fd_b = fd_b - h_stage * bbl_b
-        return fd_a, fd_b
+        direct = (
+            None
+            if stage_rhs_override is None
+            else stage_rhs_override[stage_index]
+        )
+        return fd_a, fd_b, direct
 
-    def _stage(base, flux_div, stage_dt, h_stage):
-        out = (h_k_old * base - stage_dt * flux_div) / jnp.maximum(
-            h_stage, 1.0e-10)
+    def _stage(
+        base, flux_div, source_rate, stage_dt, h_stage, stage_index,
+        direct_rhs=None,
+    ):
+        if stage_qco_ratios is None:
+            out = (
+                h_k_old * base
+                - stage_dt * flux_div
+                + stage_dt * h_stage * source_rate
+            ) / jnp.maximum(h_stage, 1.0e-10)
+        else:
+            # Literal key_qco combine, preserving NEMO's operation order
+            # (stprk3_stg.F90:540-559).  The advection helper returns content
+            # divergence, so divide by Kmm thickness to recover Krhs before
+            # applying NEMO's (1+r3t(Kmm)) multiplier.
+            r3_bb, r3_mm, r3_aa = stage_qco_ratios[stage_index]
+            rhs = (
+                -flux_div / jnp.maximum(h_stage, 1.0e-10)
+                if direct_rhs is None else direct_rhs
+            ) + source_rate
+            out = (
+                (1.0 + r3_bb[..., None]) * base
+                + stage_dt * (1.0 + r3_mm[..., None])
+                * rhs * active_3d
+            ) / (1.0 + r3_aa[..., None])
         return jnp.where(active_3d > 0.5, out, base)
 
     h_one_third = h_k_old + (h_k_new - h_k_old) / 3.0
     h_one_half = 0.5 * (h_k_old + h_k_new)
-    fd0_a, fd0_b = _flux_pair(
+    direct0 = (
+        None if stage_rhs_override is None else stage_rhs_override[0])
+    direct1 = (
+        None if stage_rhs_override is None else stage_rhs_override[1])
+    direct2 = (
+        None if stage_rhs_override is None else stage_rhs_override[2])
+    fd0_a, fd0_b, computed0 = _flux_pair(
         tr_a, tr_b, dt / 3.0, 0, h_one_third)
-    a1 = _stage(tr_a, fd0_a, dt / 3.0, h_one_third)
-    b1 = _stage(tr_b, fd0_b, dt / 3.0, h_one_third)
-    fd1_a, fd1_b = _flux_pair(
+    a1 = _stage(
+        tr_a, fd0_a, stage_source_rates[0][0], dt / 3.0,
+        h_one_third, 0,
+        None if computed0 is None else computed0[0])
+    b1 = _stage(
+        tr_b, fd0_b, stage_source_rates[0][1], dt / 3.0,
+        h_one_third, 0,
+        None if computed0 is None else computed0[1])
+    fd1_a, fd1_b, computed1 = _flux_pair(
         a1, b1, dt / 2.0, 1, h_one_half)
-    a2 = _stage(tr_a, fd1_a, dt / 2.0, h_one_half)
-    b2 = _stage(tr_b, fd1_b, dt / 2.0, h_one_half)
-    fd2_a, fd2_b = _flux_pair(a2, b2, dt, 2, h_k_new)
-    return (
-        _stage(tr_a, fd2_a, dt, h_k_new),
-        _stage(tr_b, fd2_b, dt, h_k_new),
-    )
+    a2 = _stage(
+        tr_a, fd1_a, stage_source_rates[1][0], dt / 2.0,
+        h_one_half, 1,
+        None if computed1 is None else computed1[0])
+    b2 = _stage(
+        tr_b, fd1_b, stage_source_rates[1][1], dt / 2.0,
+        h_one_half, 1,
+        None if computed1 is None else computed1[1])
+    fd2_a, fd2_b, computed2 = _flux_pair(a2, b2, dt, 2, h_k_new)
+    a3 = _stage(
+        tr_a, fd2_a, stage_source_rates[2][0], dt,
+        h_k_new, 2,
+        None if computed2 is None else computed2[0])
+    b3 = _stage(
+        tr_b, fd2_b, stage_source_rates[2][1], dt,
+        h_k_new, 2,
+        None if computed2 is None else computed2[1])
+    if return_stages:
+        return (a3, b3), ((a1, b1), (a2, b2), (a3, b3))
+    return a3, b3
 
 
 def _forward_backward_coriolis_3d(
@@ -1531,6 +1683,12 @@ class LatLonCGridOceanModel:
         if self._nemo_ws_test_hooks.expose_momentum_stage not in (0, 1, 2, 3):
             raise ValueError(
                 "expose_momentum_stage must be one of 0, 1, 2, or 3")
+        if self._nemo_ws_test_hooks.expose_tracer_stage not in (0, 1, 2, 3):
+            raise ValueError(
+                "expose_tracer_stage must be one of 0, 1, 2, or 3")
+        if self._nemo_ws_test_hooks.expose_tracer_transport_stage not in (0, 1, 2, 3):
+            raise ValueError(
+                "expose_tracer_transport_stage must be one of 0, 1, 2, or 3")
         self.config = self._validate_config(
             config or LatLonCGridOceanConfig.from_flat())
         # Convert LatLonGrid -> LatLonCGridGeometry once at construction.
@@ -4106,6 +4264,9 @@ class LatLonCGridOceanModel:
         # dt_mom == dt ⇒ bit-identical for all existing configs.
         _nemo_ws_velocity_stages = None
         _nemo_ws_exposed_momentum_stage = None
+        _nemo_ws_exposed_tracer_stage = None
+        _nemo_ws_exposed_tracer_input = None
+        _nemo_ws_exposed_tracer_transport = None
         if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3":
             u0 = state.u.data
             v0 = state.v.data
@@ -4160,11 +4321,21 @@ class LatLonCGridOceanModel:
 
             def _mom_pert_ws(
                 u_in, v_in, skip_ldf, transport_mean=None,
+                tracer_override=None,
             ):
                 st = state._replace(
                     u=state.u.replace(data=u_in * u_mask_3d),
                     v=state.v.replace(data=v_in * v_mask_3d),
                 )
+                if tracer_override is not None:
+                    st = st._replace(
+                        T=state.T.replace(data=tracer_override[0]),
+                        S=state.S.replace(data=tracer_override[1]),
+                    )
+                    if len(tracer_override) == 3:
+                        st = st._replace(
+                            eta=state.eta.replace(data=tracer_override[2])
+                        )
                 transport_velocity = None
                 if transport_mean is not None:
                     transport_u_mean, transport_v_mean = transport_mean
@@ -4180,9 +4351,13 @@ class LatLonCGridOceanModel:
                         (v_in + (transport_v_mean - current_v_mean)[..., None])
                         * v_mask_3d,
                     )
+                stage_geom_density = (
+                    compute_frozen_geom_density(st, _grid, _zc, _cfg_b)
+                    if tracer_override is not None else _geom_density
+                )
                 td = self.tendencies(st, surface_forcing, sponge=sponge, dt=dt,
                                      momentum_only=True,
-                                     precomputed_geom_density=_geom_density,
+                                     precomputed_geom_density=stage_geom_density,
                                      grid=_grid, vertex_mask=_vmask,
                                      skip_lateral_viscosity=skip_ldf,
                                      z_coord=z_coord, config=config,
@@ -4626,14 +4801,157 @@ class LatLonCGridOceanModel:
             _transport_target = (
                 (transport_target_u, transport_target_v)
                 if _use_transport_reconcile else None)
+
+            def _transport_stage(u_in, v_in):
+                mean_u = (jnp.sum(u_in * h_u_pre, axis=-1) / H_u_pre
+                          * state.u_mask.data)
+                mean_v = (jnp.sum(v_in * h_v_pre, axis=-1) / H_v_pre
+                          * state.v_mask.data)
+                return (
+                    (u_in + (transport_target_u - mean_u)[..., None])
+                    * u_mask_3d,
+                    (v_in + (transport_target_v - mean_v)[..., None])
+                    * v_mask_3d,
+                )
+
+            # NEMO interleaves DYN and TRA at every WS stage.  Therefore the
+            # stage-2 momentum EOS/HPG reads stage-1 T/S/SSH, and stage 3 reads
+            # stage 2 (stprk3_stg.F90:242-527).  The historical collapsed
+            # implementation completed all momentum stages before any tracer
+            # stage, leaving stage-2 HPG identically zero in GYRE.  Materialize
+            # the first two tracer Kaa states here from the same transport and
+            # SBC identities used by the final tracer program.
+            _auto_stage_thermo = None
+            if (
+                self._nemo_ws_test_hooks.stage2_thermodynamic_override is None
+                and self._nemo_ws_test_hooks.stage2_tracer_override is None
+            ):
+                _h_final_early = compute_layer_thickness(
+                    state_new.eta.data, state_new.H_bathy.data, _zc,
+                    min_water_column_m=_cfg_b.min_water_column_m,
+                )
+                _h_one_third_early = (
+                    h_k_pre + (_h_final_early - h_k_pre) / 3.0)
+                _h_one_half_early = 0.5 * (h_k_pre + _h_final_early)
+                _qco_ref_h_early = jnp.asarray(_zc.h_partial)
+                _qco_H0_early = jnp.sum(_qco_ref_h_early, axis=-1)
+                _r3_bb_early = state.eta.data / jnp.maximum(
+                    _qco_H0_early, 1.0e-10)
+                _r3_final_early = state_new.eta.data / jnp.maximum(
+                    _qco_H0_early, 1.0e-10)
+                _r3_one_third = _r3_bb_early + (
+                    _r3_final_early - _r3_bb_early) / 3.0
+                _r3_one_half = 0.5 * (
+                    _r3_bb_early + _r3_final_early)
+                _qco_ratios_early = (
+                    (_r3_bb_early, _r3_bb_early, _r3_one_third),
+                    (_r3_bb_early, _r3_one_third, _r3_one_half),
+                    (_r3_bb_early, _r3_one_half, _r3_final_early),
+                )
+                _active_early = (
+                    jnp.asarray(_zc.is_active, dtype=state.T.data.dtype)
+                    * state.land_mask.data[..., None])
+
+                def _early_transport(velocity, h_stage, r3_after, stage_dt):
+                    us, vs = velocity
+                    hus = min_cell_to_uface(h_stage)
+                    hvs = min_cell_to_vface(h_stage, _grid)
+                    mfu = hus * us * u_mask_3d
+                    mfv = hvs * vs * v_mask_3d
+                    pu = ((jnp.asarray(_grid.dy_u)[..., None] * hus)
+                          * us * u_mask_3d)
+                    pv = ((jnp.asarray(_grid.dx_v)[..., None] * hvs)
+                          * vs * v_mask_3d)
+                    div = (
+                        (pu[:, 1:, :] - pu[:, :-1, :])
+                        + (pv[1:, :, :] - pv[:-1, :, :])
+                    ) / jnp.asarray(_grid.area)[..., None]
+                    ws = diagnose_w_from_flux_div(
+                        div + _qco_ref_h_early * (
+                            r3_after - _r3_bb_early)[..., None] / stage_dt,
+                        None, thickness_weighted=True,
+                    )
+                    pw = jnp.asarray(_grid.area)[..., None] * ws
+                    return mfu, mfv, ws, h_stage, hus, hvs, pu, pv, pw
+
+                from legoesm.ocean.freshwater import net_freshwater_flux
+                _fw_net_early = (
+                    net_freshwater_flux(freshwater)
+                    if freshwater is not None
+                    else jnp.zeros_like(state.eta.data))
+                _top_active_early = _active_early[..., 0]
+
+                def _early_top_rate(content, htop, template):
+                    return jnp.zeros_like(template).at[..., 0].set(
+                        jnp.asarray(content, dtype=template.dtype)
+                        / jnp.maximum(htop, 1.0e-10) * _top_active_early)
+
+                _emp_T_early = (
+                    _fw_net_early * state.T.data[..., 0] / _cfg_b.rho_0)
+                _emp_S_early = (
+                    _fw_net_early * state.S.data[..., 0] / _cfg_b.rho_0)
+                _zero_early = jnp.zeros_like(state.T.data)
+                _source_early = (
+                    (_early_top_rate(_emp_T_early, h_k_pre[..., 0], state.T.data),
+                     _early_top_rate(_emp_S_early, h_k_pre[..., 0], state.S.data)),
+                    (_early_top_rate(_emp_T_early, _h_one_third_early[..., 0], state.T.data),
+                     _early_top_rate(_emp_S_early, _h_one_third_early[..., 0], state.S.data)),
+                    (_zero_early, _zero_early),
+                )
+                _geom1_early = _early_transport(
+                    _transport_stage(u0, v0), h_k_pre,
+                    _r3_one_third, dt / 3.0)
+                _, _stages_early = _nemo_ws_rk3_tracer_pair_step(
+                    state.T.data, state.S.data, _cfg_b.tracer_advection,
+                    _geom1_early[0], _geom1_early[1], _geom1_early[2],
+                    h_k_pre, _h_final_early,
+                    _geom1_early[4], _geom1_early[5],
+                    _grid, dt, _active_early,
+                    stage_transport_geometry=(
+                        _geom1_early, _geom1_early, _geom1_early),
+                    stage_source_rates=_source_early,
+                    stage_qco_ratios=_qco_ratios_early,
+                    return_stages=True,
+                )
+                _T1_early, _S1_early = _stages_early[0]
+                _auto_stage_thermo = (
+                    _T1_early, _S1_early,
+                    _r3_one_third * _qco_H0_early)
             p1u_corr, p1v_corr = _mom_pert_ws(
-                u1_corr, v1_corr, True, _transport_target)
+                u1_corr, v1_corr, True, _transport_target,
+                (
+                    self._nemo_ws_test_hooks.stage2_thermodynamic_override
+                    or self._nemo_ws_test_hooks.stage2_tracer_override
+                    or _auto_stage_thermo
+                ))
             u2_raw = u0 + (dt_mom / 2.0) * p1u_corr
             v2_raw = v0 + (dt_mom / 2.0) * p1v_corr
             u2_corr, v2_corr = _replace_stage_mean(
                 u2_raw, v2_raw, target_u, target_v)
+            if _auto_stage_thermo is not None:
+                _geom2_early = _early_transport(
+                    _transport_stage(u1_corr, v1_corr),
+                    _h_one_third_early, _r3_one_half, dt / 2.0)
+                _, _stages_early = _nemo_ws_rk3_tracer_pair_step(
+                    state.T.data, state.S.data, _cfg_b.tracer_advection,
+                    _geom1_early[0], _geom1_early[1], _geom1_early[2],
+                    h_k_pre, _h_final_early,
+                    _geom1_early[4], _geom1_early[5],
+                    _grid, dt, _active_early,
+                    stage_transport_geometry=(
+                        _geom1_early, _geom2_early, _geom2_early),
+                    stage_source_rates=_source_early,
+                    stage_qco_ratios=_qco_ratios_early,
+                    return_stages=True,
+                )
+                _T2_early, _S2_early = _stages_early[1]
+                _stage3_thermo = (
+                    _T2_early, _S2_early,
+                    _r3_one_half * _qco_H0_early)
+            else:
+                _stage3_thermo = None
             p2u_corr, p2v_corr = _mom_pert_ws(
-                u2_corr, v2_corr, False, _transport_target)
+                u2_corr, v2_corr, False, _transport_target, _stage3_thermo)
             u3_raw = u0 + dt_mom * p2u_corr
             v3_raw = v0 + dt_mom * p2v_corr
             u3_corr, v3_corr = _replace_stage_mean(
@@ -4644,21 +4962,18 @@ class LatLonCGridOceanModel:
                 v=state_new.v.replace(data=v3_corr),
             )
             if self._nemo_ws_test_hooks.expose_momentum_stage == 1:
-                _nemo_ws_exposed_momentum_stage = (u1_corr, v1_corr)
+                _nemo_ws_exposed_momentum_stage = (
+                    (u1_raw, v1_raw)
+                    if self._nemo_ws_test_hooks.expose_momentum_stage_raw
+                    else (u1_corr, v1_corr)
+                )
             elif self._nemo_ws_test_hooks.expose_momentum_stage == 2:
-                _nemo_ws_exposed_momentum_stage = (u2_corr, v2_corr)
+                _nemo_ws_exposed_momentum_stage = (
+                    (u2_raw, v2_raw)
+                    if self._nemo_ws_test_hooks.expose_momentum_stage_raw
+                    else (u2_corr, v2_corr)
+                )
             if _use_transport_reconcile:
-                def _transport_stage(u_in, v_in):
-                    mean_u = (jnp.sum(u_in * h_u_pre, axis=-1) / H_u_pre
-                              * state.u_mask.data)
-                    mean_v = (jnp.sum(v_in * h_v_pre, axis=-1) / H_v_pre
-                              * state.v_mask.data)
-                    return (
-                        (u_in + (transport_target_u - mean_u)[..., None])
-                        * u_mask_3d,
-                        (v_in + (transport_target_v - mean_v)[..., None])
-                        * v_mask_3d,
-                    )
                 _nemo_ws_velocity_stages = (
                     _transport_stage(u0, v0),
                     _transport_stage(u1_corr, v1_corr),
@@ -4998,8 +5313,21 @@ class LatLonCGridOceanModel:
             h_k_one_third = h_k_old + (h_k_new - h_k_old) / 3.0
             h_k_one_half = 0.5 * (h_k_old + h_k_new)
             stage_h_k = (h_k_old, h_k_one_third, h_k_one_half)
+            _qco_ref_h = jnp.asarray(_zc.h_partial)
+            _qco_H0 = jnp.sum(_qco_ref_h, axis=-1)
+            _qco_r3_bb = (
+                state.eta.data / jnp.maximum(_qco_H0, 1.0e-10))
+            _qco_r3_final = (
+                state_new.eta.data / jnp.maximum(_qco_H0, 1.0e-10))
+            stage_r3_after = (
+                _qco_r3_bb + (_qco_r3_final - _qco_r3_bb) / 3.0,
+                0.5 * (_qco_r3_bb + _qco_r3_final),
+                _qco_r3_final,
+            )
 
-            def _stage_transport(stage_velocity, h_stage):
+            def _stage_transport(
+                stage_velocity, h_stage, h_after, stage_dt, r3_after,
+            ):
                 u_stage, v_stage = stage_velocity
                 hu_stage = _min_uface_op(h_stage)
                 hv_stage = _min_vface_op(h_stage)
@@ -5015,15 +5343,96 @@ class LatLonCGridOceanModel:
                     / jnp.maximum(Hv_stage_depth, 1.0e-10))[..., jnp.newaxis]
                 mf_u = hu_stage * u_stage_corr * u_mask_3d_tracer
                 mf_v = hv_stage * v_stage_corr * v_mask_3d_tracer
-                stage_div = divergence_cgrid(mf_u, mf_v, _grid)
+                # Metric transports are the literal operands consumed by
+                # wzv/traadv_cen/FCT.  Preserve NEMO's multiply order:
+                # (e2u*e3u)*u and (e1v*e3v)*v, not (e3u*u)*e2u.
+                p_u = (
+                    (jnp.asarray(_grid.dy_u)[..., None] * hu_stage)
+                    * u_stage_corr * u_mask_3d_tracer
+                )
+                p_v = (
+                    (jnp.asarray(_grid.dx_v)[..., None] * hv_stage)
+                    * v_stage_corr * v_mask_3d_tracer
+                )
+                # sshwzv.F90 div_hor(np_transport): difference the already
+                # metric-bearing transports, sum the two directions, then
+                # multiply by r1_e1e2t.  The generic divergence reverses that
+                # arithmetic order and was causal at O(1e-12) in stage Kaa.
+                stage_div = (
+                    (p_u[:, 1:, :] - p_u[:, :-1, :])
+                    + (p_v[1:, :, :] - p_v[:-1, :, :])
+                ) / jnp.asarray(_grid.area)[..., None]
+                # key_qco wzv (sshwzv.F90:330-336): integrate the horizontal
+                # transport divergence plus the literal Kaa-Kbb thickness
+                # change.  The stage interval is rn_Dt/3, /2, and rn_Dt
+                # (stprk3_stg.F90:118-124,174-178,218-222).  No public arm:
+                # every NEMO key_RK3 QCO stage uses this recurrence.
                 w_stage = diagnose_w_from_flux_div(
-                    stage_div, _zc, thickness_weighted=True)
-                return mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage
+                    stage_div + _qco_ref_h * (
+                        r3_after - _qco_r3_bb)[..., None] / stage_dt,
+                    None, thickness_weighted=True)
+                p_w = jnp.asarray(_grid.area)[..., None] * w_stage
+                return (
+                    mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage,
+                    p_u, p_v, p_w,
+                )
 
             _nemo_ws_stage_transport_geometry = tuple(
-                _stage_transport(velocity, h_stage)
-                for velocity, h_stage in zip(
-                    _nemo_ws_velocity_stages, stage_h_k, strict=True))
+                _stage_transport(
+                    velocity, h_stage, h_after, stage_dt, r3_after)
+                for velocity, h_stage, h_after, stage_dt, r3_after in zip(
+                    _nemo_ws_velocity_stages,
+                    stage_h_k,
+                    (h_k_one_third, h_k_one_half, h_k_new),
+                    (dt / 3.0, dt / 2.0, dt),
+                    stage_r3_after,
+                    strict=True))
+            if self._nemo_ws_test_hooks.tracer_stage_vertical_transport_override is not None:
+                overrides = self._nemo_ws_test_hooks.tracer_stage_vertical_transport_override
+                if len(overrides) != 3:
+                    raise ValueError(
+                        "tracer_stage_vertical_transport_override must contain three entries")
+                _nemo_ws_stage_transport_geometry = tuple(
+                    item if override is None else (
+                        (
+                            item[0], item[1], override,
+                            *item[3:8],
+                            jnp.asarray(_grid.area)[..., None] * override,
+                        )
+                        if len(item) >= 9 else
+                        (item[0], item[1], override, *item[3:])
+                    )
+                    for item, override in zip(
+                        _nemo_ws_stage_transport_geometry, overrides, strict=True
+                    )
+                )
+            if self._nemo_ws_test_hooks.tracer_stage_transport_override is not None:
+                overrides = self._nemo_ws_test_hooks.tracer_stage_transport_override
+                if len(overrides) != 3:
+                    raise ValueError(
+                        "tracer_stage_transport_override must contain three entries")
+                _nemo_ws_stage_transport_geometry = tuple(
+                    item if override is None else (
+                        (
+                            override[0], override[1], override[2],
+                            *item[3:6],
+                            override[0] * jnp.asarray(_grid.dy_u)[..., None],
+                            override[1] * jnp.asarray(_grid.dx_v)[..., None],
+                            override[2] * jnp.asarray(_grid.area)[..., None],
+                        )
+                        if len(item) >= 9 else
+                        (override[0], override[1], override[2], *item[3:])
+                    )
+                    for item, override in zip(
+                        _nemo_ws_stage_transport_geometry, overrides, strict=True
+                    )
+                )
+            if self._nemo_ws_test_hooks.expose_tracer_transport_stage:
+                _nemo_ws_exposed_tracer_transport = (
+                    _nemo_ws_stage_transport_geometry[
+                        self._nemo_ws_test_hooks.expose_tracer_transport_stage - 1
+                    ][:3]
+                )
 
         # Advecting mass fluxes for the TRACER scheme.  Default = the base
         # (momentum/continuity) mass flux; when GM runs with
@@ -5604,8 +6013,95 @@ class LatLonCGridOceanModel:
                         _cfg_b.bbl_gamma_s,
                         _cfg_b.rho_0,
                     )
-                T_corrected, S_corrected = _nemo_ws_rk3_tracer_pair_step(
-                    T_mid, S_mid, _adv,
+                _return_tracer_stages = (
+                    self._nemo_ws_test_hooks.expose_tracer_stage != 0
+                )
+                # stprk3_stg.F90:510-527 zeroes Krhs and then evaluates the
+                # stage program from Kmm; stage 1 has Kmm=Kbb=N.  Pre-applying
+                # the Euler tracer bundle here shifts that operand before RK3
+                # begins and is therefore outside the NEMO scheme identity.
+                _tracer_stage_T = state.T.data
+                _tracer_stage_S = state.S.data
+                if self._nemo_ws_test_hooks.tracer_stage_base_override is not None:
+                    _tracer_stage_T, _tracer_stage_S = (
+                        self._nemo_ws_test_hooks.tracer_stage_base_override
+                    )
+                if self._nemo_ws_test_hooks.expose_tracer_stage_input:
+                    _nemo_ws_exposed_tracer_input = (
+                        _tracer_stage_T, _tracer_stage_S
+                    )
+                _ws_stage_sources = (
+                    self._nemo_ws_test_hooks.tracer_stage_source_override)
+                if _ws_stage_sources is None:
+                    # tra_sbc_RK3 is itself stage selective.  In QCO stages
+                    # 1/2 carry only the EMP tracer content exchanged with the
+                    # moving surface (trasbc.F90:282-292); non-solar heat and
+                    # explicit salt flux land only at stage 3 (:294-314).
+                    # Build concentration rates because the WS helper converts
+                    # them back to content with its live Kmm thickness.
+                    from legoesm.ocean.eos import c_sw as _c_sw
+                    from legoesm.ocean.freshwater import net_freshwater_flux
+
+                    _zero_T = jnp.zeros_like(_tracer_stage_T)
+                    _zero_S = jnp.zeros_like(_tracer_stage_S)
+                    _fw_net = (
+                        net_freshwater_flux(freshwater)
+                        if freshwater is not None
+                        else jnp.zeros_like(state.eta.data)
+                    )
+                    _top_active = active_3d[..., 0]
+
+                    def _top_rate(content_flux, h_top, template):
+                        rate = (
+                            jnp.asarray(content_flux, dtype=template.dtype)
+                            / jnp.maximum(h_top, 1.0e-10)
+                            * _top_active
+                        )
+                        return jnp.zeros_like(template).at[..., 0].set(rate)
+
+                    _emp_T_content = (
+                        _fw_net * state.T.data[..., 0] / _cfg_b.rho_0)
+                    _emp_S_content = (
+                        _fw_net * state.S.data[..., 0] / _cfg_b.rho_0)
+                    _ws_h_one_third = (
+                        h_k_old + (h_k_new - h_k_old) / 3.0)
+                    _ws_h_one_half = 0.5 * (h_k_old + h_k_new)
+                    _s1_T = _top_rate(
+                        _emp_T_content, h_k_old[..., 0], _tracer_stage_T)
+                    _s1_S = _top_rate(
+                        _emp_S_content, h_k_old[..., 0], _tracer_stage_S)
+                    _s2_T = _top_rate(
+                        _emp_T_content, _ws_h_one_third[..., 0], _tracer_stage_T)
+                    _s2_S = _top_rate(
+                        _emp_S_content, _ws_h_one_third[..., 0], _tracer_stage_S)
+
+                    _qns = jnp.zeros_like(state.eta.data)
+                    _sfx = jnp.zeros_like(state.eta.data)
+                    if surface_forcing is not None:
+                        _qnet = getattr(surface_forcing, "q_net", None)
+                        _qsr = getattr(surface_forcing, "sw_down", None)
+                        if _qnet is not None:
+                            _qns = jnp.asarray(_qnet, dtype=_tracer_stage_T.dtype)
+                            if _qsr is not None:
+                                _qns = _qns - jnp.asarray(
+                                    _qsr, dtype=_tracer_stage_T.dtype)
+                        _salt = getattr(surface_forcing, "salt_flux", None)
+                        if _salt is not None:
+                            _sfx = jnp.asarray(
+                                _salt, dtype=_tracer_stage_S.dtype)
+                    _s3_T = _top_rate(
+                        _qns / (_cfg_b.rho_0 * _c_sw),
+                        _ws_h_one_half[..., 0], _tracer_stage_T)
+                    _s3_S = _top_rate(
+                        _sfx / _cfg_b.rho_0,
+                        _ws_h_one_half[..., 0], _tracer_stage_S)
+                    _ws_stage_sources = (
+                        (_s1_T, _s1_S),
+                        (_s2_T, _s2_S),
+                        (_s3_T, _s3_S),
+                    )
+                _tracer_result = _nemo_ws_rk3_tracer_pair_step(
+                    _tracer_stage_T, _tracer_stage_S, _adv,
                     mass_flux_u_tr, mass_flux_v_tr, w_baro_tr,
                     h_k_old, h_k_new, h_u_old, h_v_old,
                     _grid, dt, active_3d, recon_fill_mask=_wall_fill_mask,
@@ -5616,7 +6112,40 @@ class LatLonCGridOceanModel:
                         if self._nemo_ws_test_hooks.two_step_fct_predictor
                         else "one_step"),
                     bbl_context=_bbl_context,
+                    stage_source_rates=_ws_stage_sources,
+                    stage_advection_schedule=(
+                        self._nemo_ws_test_hooks.tracer_stage_advection_schedule_override
+                    ),
+                    stage_qco_ratios=(
+                        lambda r3_bb, r3_aa: (
+                            (r3_bb, r3_bb,
+                             r3_bb + (r3_aa - r3_bb) / 3.0),
+                            (r3_bb,
+                             r3_bb + (r3_aa - r3_bb) / 3.0,
+                             0.5 * (r3_bb + r3_aa)),
+                            (r3_bb, 0.5 * (r3_bb + r3_aa), r3_aa),
+                        )
+                    )(
+                        state.eta.data
+                        / jnp.maximum(
+                            jnp.sum(jnp.asarray(_zc.h_partial), axis=-1),
+                            1.0e-10),
+                        state_new.eta.data
+                        / jnp.maximum(
+                            jnp.sum(jnp.asarray(_zc.h_partial), axis=-1),
+                            1.0e-10),
+                    ),
+                    stage_rhs_override=(
+                        self._nemo_ws_test_hooks.tracer_stage_rhs_override),
+                    return_stages=_return_tracer_stages,
                 )
+                if _return_tracer_stages:
+                    (T_corrected, S_corrected), _tracer_stages = _tracer_result
+                    _nemo_ws_exposed_tracer_stage = _tracer_stages[
+                        self._nemo_ws_test_hooks.expose_tracer_stage - 1
+                    ]
+                else:
+                    T_corrected, S_corrected = _tracer_result
                 _pair_divs = (None, None)
             else:
                 # store_salt_flux capture (static config bool): ask the pair
@@ -6094,6 +6623,25 @@ class LatLonCGridOceanModel:
             state_new = state_new._replace(
                 u=state_new.u.replace(data=_stage_u),
                 v=state_new.v.replace(data=_stage_v),
+            )
+        if _nemo_ws_exposed_tracer_stage is not None:
+            _stage_T, _stage_S = _nemo_ws_exposed_tracer_stage
+            state_new = state_new._replace(
+                T=state_new.T.replace(data=_stage_T),
+                S=state_new.S.replace(data=_stage_S),
+            )
+        if _nemo_ws_exposed_tracer_input is not None:
+            _input_T, _input_S = _nemo_ws_exposed_tracer_input
+            state_new = state_new._replace(
+                T=state_new.T.replace(data=_input_T),
+                S=state_new.S.replace(data=_input_S),
+            )
+        if _nemo_ws_exposed_tracer_transport is not None:
+            _mf_u, _mf_v, _w = _nemo_ws_exposed_tracer_transport
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=_mf_u),
+                v=state_new.v.replace(data=_mf_v),
+                T=state_new.T.replace(data=_w),
             )
 
         state_new = cast_pytree(state_new, None, "storage", allow_downcast=True)

@@ -1900,17 +1900,111 @@ def _bc_ke_and_pressure_gradients(
             # faces never read those cells, dry faces are masked downstream.
             rho_m = jnp.where(z_coord.is_active, rho_prime,
                               jnp.zeros_like(rho_prime))
-            p_hat = p_prime_filled * stretch
-            dp_dx_sco = (
-                gradient_x_cgrid(p_hat, grid)
-                - g_val * interp_cell_to_uface(rho_m)
-                * gradient_x_cgrid(gdept_z0, grid)
+            # Preserve dynhpg.F90:340-390's vertical recurrence literally.
+            # Building p_hat first is algebraically equivalent, but it takes a
+            # column cumulative sum before the face gradient; NEMO instead
+            # differences each level contribution and accumulates ``zhpi`` at
+            # the face.  GYRE stage coupling amplifies that reordering by the
+            # dt/2 WS combine even though the isolated HPG clears its absolute
+            # tendency bar.
+            e3w_ref = getattr(z_coord, "nemo_e3w_0", None)
+            if e3w_ref is None:
+                # Analytic/test coordinates may carry only the exact gdept
+                # ladder.  NEMO's trapezoid identity is e3w(1)=2*gdept(1),
+                # e3w(k)=gdept(k)-gdept(k-1); reconstruct that same operand.
+                e3w_1d = jnp.concatenate((
+                    (2.0 * t_depth[0])[None],
+                    t_depth[1:] - t_depth[:-1],
+                ))
+                e3w_ref = jnp.broadcast_to(e3w_1d, rho_m.shape)
+            e3w = jnp.asarray(e3w_ref) * stretch
+            # Preserve hpg_sco's horizontal scalar association as well as its
+            # vertical recurrence.  The shared gradient/interpolation helpers
+            # divide and average before the final products; NEMO evaluates
+            # ``zcoef0*r1_metric*delta`` and the four slope factors in source
+            # order (dynhpg.F90:340-390).  Their 6.8e-17 tendency difference
+            # is amplified by GYRE's 7200-s stage-2 combine into 4.9e-13 of
+            # state-space debt.
+            def _x_pair(value):
+                padded = jnp.concatenate(
+                    (value[:, -1:], value, value[:, :1]), axis=1)
+                return padded[:, 1:] - padded[:, :-1], \
+                    padded[:, 1:] + padded[:, :-1]
+
+            def _y_pair(value):
+                padded = jnp.concatenate(
+                    (value[:1], value, value[-1:]), axis=0)
+                return padded[1:] - padded[:-1], \
+                    padded[1:] + padded[:-1]
+
+            if hasattr(grid, "dx_u"):
+                r1_e1u = 1.0 / jnp.asarray(grid.dx_u)
+            else:
+                r1_e1u = 1.0 / (
+                    grid.radius * grid.dlon * grid.cos_lat[:, None])
+            if hasattr(grid, "dy_v"):
+                r1_e2v = 1.0 / jnp.asarray(grid.dy_v)
+            else:
+                dy_h = jnp.pad(
+                    jnp.asarray(grid.dy) * 0.5, (1, 1), mode="edge")
+                r1_e2v = 1.0 / (
+                    0.5 * (dy_h[1:] + dy_h[:-1]))[:, None]
+
+            zcoef0 = -g_val * 0.5
+            product0 = e3w[..., 0] * rho_m[..., 0]
+            product0_dx, _ = _x_pair(product0)
+            product0_dy, _ = _y_pair(product0)
+            zhpi_u = -zcoef0 * r1_e1u * product0_dx
+            zhpi_v = -zcoef0 * r1_e2v * product0_dy
+            gdept0_dx, _ = _x_pair(gdept_z0[..., 0])
+            gdept0_dy, _ = _y_pair(gdept_z0[..., 0])
+            _, rho0_u = _x_pair(rho_m[..., 0])
+            _, rho0_v = _y_pair(rho_m[..., 0])
+            dp_u0 = (
+                zhpi_u
+                + zcoef0 * rho0_u * gdept0_dx * r1_e1u
             )
-            dp_dy_sco = (
-                gradient_y_cgrid(p_hat, grid)
-                - g_val * interp_cell_to_vface(rho_m, grid)
-                * gradient_y_cgrid(gdept_z0, grid)
+            dp_v0 = (
+                zhpi_v
+                + zcoef0 * rho0_v * gdept0_dy * r1_e2v
             )
+
+            def _hpg_level(carry, level):
+                zh_u, zh_v = carry
+                e3w_k, rho_k, rho_prev, gdept_k = level
+                weighted = e3w_k * (rho_k + rho_prev)
+                weighted_dx, _ = _x_pair(weighted)
+                weighted_dy, _ = _y_pair(weighted)
+                zh_u = zh_u + (-zcoef0 * r1_e1u * weighted_dx)
+                zh_v = zh_v + (-zcoef0 * r1_e2v * weighted_dy)
+                gdept_dx, _ = _x_pair(gdept_k)
+                gdept_dy, _ = _y_pair(gdept_k)
+                _, rho_u = _x_pair(rho_k)
+                _, rho_v = _y_pair(rho_k)
+                dp_u = (
+                    zh_u
+                    + zcoef0 * rho_u * gdept_dx * r1_e1u
+                )
+                dp_v = (
+                    zh_v
+                    + zcoef0 * rho_v * gdept_dy * r1_e2v
+                )
+                return (zh_u, zh_v), (dp_u, dp_v)
+
+            _, (dp_u_tail, dp_v_tail) = jax.lax.scan(
+                _hpg_level,
+                (zhpi_u, zhpi_v),
+                (
+                    jnp.moveaxis(e3w[..., 1:], -1, 0),
+                    jnp.moveaxis(rho_m[..., 1:], -1, 0),
+                    jnp.moveaxis(rho_m[..., :-1], -1, 0),
+                    jnp.moveaxis(gdept_z0[..., 1:], -1, 0),
+                ),
+            )
+            dp_dx_sco = jnp.concatenate(
+                (dp_u0[..., None], jnp.moveaxis(dp_u_tail, 0, -1)), axis=-1)
+            dp_dy_sco = jnp.concatenate(
+                (dp_v0[..., None], jnp.moveaxis(dp_v_tail, 0, -1)), axis=-1)
             dp_dx = dp_dx_sco.astype(dp_dx.dtype)
             dp_dy = dp_dy_sco.astype(dp_dy.dtype)
         else:
@@ -4293,6 +4387,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     zad_continuity_dt=None,
     zad_freshwater_eta_tendency=None,
     momentum_flux_transport_velocity=None,
+    return_nemo_operator_components: bool = False,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -5020,4 +5115,22 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         total_u=Field(data=diag_du_total, name="total_u", dims=dims_u, units="m/s^2"),
         total_v=Field(data=diag_dv_total, name="total_v", dims=dims_v, units="m/s^2"),
     )
+    if return_nemo_operator_components:
+        # Private fidelity seam for NEMO's vector-invariant call order:
+        # dyn_hpg -> dyn_vor -> dyn_adv.  Reuse the arrays computed above;
+        # the static False default preserves the historical return exactly.
+        return tendencies, diagnostics, {
+            "hpg_u": _mu(-dp_dx / rho_0),
+            "hpg_v": _mv(-dp_dy / rho_0),
+            "vorticity_u": _mu(diag_vortcor_u),
+            "vorticity_v": _mv(diag_vortcor_v),
+            # NEMO dyn_adv owns KEG + ZAD.  Dterm is zero for GYRE's vector-
+            # invariant arm but remains in the diagnostic sum fail-closed.
+            "advection_u": _mu(
+                -dKE_dx + diag_Dterm_u + diag_vertadv_u
+            ),
+            "advection_v": _mv(
+                -dKE_dy + diag_Dterm_v + diag_vertadv_v
+            ),
+        }
     return tendencies, diagnostics

@@ -186,6 +186,12 @@ def _model_config(
             bbl_gamma_s=bbl_gamma_s,
             zdf_implicit_solver_evaluation="nemo_literal",
             implicit_vmix_e3t_now_divisor=True,
+            # Resolved GYRE ln_drgimp + ln_dynspg_ts is one collapsed drag
+            # identity: implicit 3-D bottom drag plus the frozen explicit
+            # barotropic substep owner.  nemo_stage_mean_imposition below is
+            # the RK3 baroclinic-only composition required by this pair.
+            zdf_drag_in_matrix=True,
+            barotropic_drag_substep=True,
             use_conservation_fixer=False,
             fix_eta_drift=False,
             barotropic=config.barotropic._replace(
@@ -688,7 +694,14 @@ def build_gyre_zco_card() -> NEMOTestcaseCard:
     )
     bottom = jnp.where(wet > 0.0, 29, -1)
     z_coord = create_full_step_coordinate(z_ref, bottom)
-    bathymetry = wet * _GYRE_GDEPW_1D[30]
+    # Preserve the oracle's fp64 ht_0 operand.  ``wet`` originates in the
+    # generic mask constructor and may be float32 even under an fp64 card;
+    # multiplying it directly rounded 4300.710017215397 to 4300.7099609375,
+    # which first appears in key_qco's r3 and wzv stage operands.
+    bathymetry = (
+        jnp.asarray(wet, dtype=jnp.float64)
+        * jnp.asarray(_GYRE_GDEPW_1D[30], dtype=jnp.float64)
+    )
     state = rest_state_latlon_cgrid_ocean(
         grid,
         z_coord,

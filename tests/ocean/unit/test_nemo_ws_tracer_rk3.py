@@ -27,6 +27,17 @@ def test_nemo_ws_microselectors_are_not_public_config():
     assert "rk3_ws_stage_barotropic_correction" not in fields
     assert "rk3_ws_momentum_transport_reconcile" not in fields
     assert "primary_transport_average" not in fields
+    assert "expose_tracer_stage" not in fields
+    assert "expose_tracer_stage_input" not in fields
+    assert "tracer_stage_base_override" not in fields
+    assert "tracer_stage_source_override" not in fields
+    assert "expose_tracer_transport_stage" not in fields
+    assert "tracer_stage_vertical_transport_override" not in fields
+    assert "tracer_stage_transport_override" not in fields
+    assert "tracer_stage_rhs_override" not in fields
+    assert "tracer_stage_advection_schedule_override" not in fields
+    assert "stage2_tracer_override" not in fields
+    assert "stage2_thermodynamic_override" not in fields
 
 
 def test_nemo_ws_private_stage_velocity_exposure_is_diagnostic_only():
@@ -47,11 +58,52 @@ def test_nemo_ws_private_stage_velocity_exposure_is_diagnostic_only():
     # its structural post-step placement is the stage-noninterference guarantee.
     np.testing.assert_array_equal(
         np.asarray(stage1.T.data), np.asarray(normal.T.data))
+    stage1_raw = model_module.LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=model_module._NEMOWSRK3TestHooks(
+            expose_momentum_stage=1,
+            expose_momentum_stage_raw=True,
+        )).step(card.recipe.initial_state, dt=card.dt_s)
+    assert np.max(np.abs(
+        np.asarray(stage1_raw.u.data) - np.asarray(stage1.u.data))) > 0.0
+    np.testing.assert_array_equal(
+        np.asarray(stage1_raw.T.data), np.asarray(normal.T.data))
     with pytest.raises(ValueError, match="expose_momentum_stage"):
         model_module.LatLonCGridOceanModel(
             card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
             _nemo_ws_test_hooks=model_module._NEMOWSRK3TestHooks(
                 expose_momentum_stage=4))
+
+
+def test_nemo_ws_private_tracer_stage_exposure_is_diagnostic_only():
+    set_policy(PrecisionPolicy.fp64())
+    card = build_lock_exchange_zco_card()
+    normal = model_module.LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config
+    ).step(card.recipe.initial_state, dt=card.dt_s)
+    stage1 = model_module.LatLonCGridOceanModel(
+        card.recipe.grid,
+        card.recipe.z_coord,
+        card.recipe.model_config,
+        _nemo_ws_test_hooks=model_module._NEMOWSRK3TestHooks(
+            expose_tracer_stage=1
+        ),
+    ).step(card.recipe.initial_state, dt=card.dt_s)
+    assert np.max(np.abs(
+        np.asarray(stage1.T.data) - np.asarray(normal.T.data)
+    )) > 0.0
+    np.testing.assert_array_equal(
+        np.asarray(stage1.u.data), np.asarray(normal.u.data)
+    )
+    with pytest.raises(ValueError, match="expose_tracer_stage"):
+        model_module.LatLonCGridOceanModel(
+            card.recipe.grid,
+            card.recipe.z_coord,
+            card.recipe.model_config,
+            _nemo_ws_test_hooks=model_module._NEMOWSRK3TestHooks(
+                expose_tracer_stage=4
+            ),
+        )
 
 
 def test_nemo_overflow_primary_transport_average_is_source_bound_and_live():
@@ -193,4 +245,9 @@ def test_overflow_bbl_is_live_inside_real_rk3_stage3():
         area * h * (np.asarray(on.T.data) - np.asarray(off.T.data)))
     content_scale = np.sum(
         np.abs(area * h * np.asarray(initial.T.data)))
-    assert abs(content_delta) <= 1024.0 * np.finfo(np.float64).eps * content_scale
+    # The literal QCO CEN/CEN/FCT recurrence performs its metric-space
+    # horizontal and vertical updates sequentially, matching NEMO rather than
+    # the former single content-divergence sum.  The closed exchange remains
+    # roundoff-conservative; allow two fp64 reduction envelopes for those two
+    # source-ordered updates.
+    assert abs(content_delta) <= 2048.0 * np.finfo(np.float64).eps * content_scale
