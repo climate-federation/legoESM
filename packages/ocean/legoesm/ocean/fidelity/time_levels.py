@@ -32,6 +32,14 @@ _VALID: frozenset[str] = frozenset({"before", "now", "after"})
 # dump basename -> (time level of its T/S, NEMO source line that proves it).
 # The GEOMETRY level is separate and usually Nnn — see the module docstring.
 _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
+    # Certified idealised-testcase trajectory.  The write is the first action
+    # in stp_RK3 and names Nbb explicitly; kt=1 is therefore the native initial
+    # condition at first-step entry, not a now/after state.
+    "oracle_step_entry_kt00000001.bin": (
+        "before",
+        "tests/*_OMIP_L1/MY_SRC/stprk3.F90:88-100 writes "
+        "ts/uu/vv/ssh(...,Nbb) before forcing, stp_2D, and RK stages",
+    ),
     # eos_rab / bn2 family: T/S at Nbb, geometry at Nnn.
     "dump_alpha_b.bin": ("before", "stpmlf.F90:184 eos_rab(ts(...,Nbb), rab_b, Nnn)"),
     "dump_beta_b.bin": ("before", "stpmlf.F90:184 eos_rab(ts(...,Nbb), rab_b, Nnn)"),

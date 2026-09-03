@@ -2344,8 +2344,11 @@ class TestNemoCentredBarotropic:
         n = nemo_auto_substeps(dt, H, inv, float(_c.g), cmax=0.8)
         zcu = math.sqrt(float(_c.g) * H * inv)
         assert n == math.ceil(dt / 0.8 * zcu)
-        with pytest.raises(ValueError, match="n="):
-            nemo_auto_substeps(1e-6, H, inv, float(_c.g), cmax=0.8)
+        assert nemo_auto_substeps(
+            1e-6, H, inv, float(_c.g), cmax=0.8
+        ) == 1
+        with pytest.raises(ValueError, match="positive"):
+            nemo_auto_substeps(dt, H, inv, float(_c.g), cmax=0.0)
 
     def test_mpas_builder_rejects_centred_barotropic(self):
         import dataclasses

@@ -28,8 +28,7 @@ import pytest
 
 from legoesm import constants
 from legoesm.ocean.eos import (
-    haline_contraction_coeff,
-    thermal_expansion_coeff,
+    nemo_roquet_alpha_beta,
     wright_eos,
 )
 from legoesm.ocean.physics.bbl_adv import (
@@ -67,16 +66,10 @@ def test_dense_shelf_transport_matches_closed_form():
                               gamma_s=GAMMA, rho_0=RHO0)
     # closed form: the EXACT NEMO eos_rab gating — alpha/beta per column at
     # ITS OWN bottom pressure, averaged across the face
-    p_sh = RHO0 * constants.g * 150.0     # shelf bottom mid-depth
-    p_dp = RHO0 * constants.g * 550.0     # deep bottom mid-depth
-    a_sh = float(thermal_expansion_coeff(jnp.asarray(4.0), jnp.asarray(36.0),
-                                         jnp.asarray(p_sh)))
-    b_sh = float(haline_contraction_coeff(jnp.asarray(4.0), jnp.asarray(36.0),
-                                          jnp.asarray(p_sh)))
-    a_dp = float(thermal_expansion_coeff(jnp.asarray(10.0), jnp.asarray(35.0),
-                                         jnp.asarray(p_dp)))
-    b_dp = float(haline_contraction_coeff(jnp.asarray(10.0), jnp.asarray(35.0),
-                                          jnp.asarray(p_dp)))
+    a_sh, b_sh = nemo_roquet_alpha_beta(
+        jnp.asarray(4.0), jnp.asarray(36.0), jnp.asarray(150.0), rho0=RHO0)
+    a_dp, b_dp = nemo_roquet_alpha_beta(
+        jnp.asarray(10.0), jnp.asarray(35.0), jnp.asarray(550.0), rho0=RHO0)
     zgdrho = max(0.0, 0.5 * (a_sh + a_dp) * (10.0 - 4.0)
                  - 0.5 * (b_sh + b_dp) * (35.0 - 36.0))
     expect = 5.0e4 * 100.0 * constants.g * GAMMA * zgdrho * 1.0
@@ -105,12 +98,12 @@ def test_thermobaric_gating_uses_own_pressure_rab():
                             jnp.zeros((0, 2)), gamma_s=GAMMA, rho_0=RHO0)
     # NEMO-form expectation
     dep_sh, dep_dp = 75.0, float(np.sum(h[0, 1]) - 0.5 * 350.0)
-    p_sh = RHO0 * constants.g * dep_sh
-    p_dp = RHO0 * constants.g * dep_dp
-    a_bar = 0.5 * (float(thermal_expansion_coeff(jnp.asarray(1.0), jnp.asarray(34.75), jnp.asarray(p_sh)))
-                   + float(thermal_expansion_coeff(jnp.asarray(2.0), jnp.asarray(34.7), jnp.asarray(p_dp))))
-    b_bar = 0.5 * (float(haline_contraction_coeff(jnp.asarray(1.0), jnp.asarray(34.75), jnp.asarray(p_sh)))
-                   + float(haline_contraction_coeff(jnp.asarray(2.0), jnp.asarray(34.7), jnp.asarray(p_dp))))
+    a_sh, b_sh = nemo_roquet_alpha_beta(
+        jnp.asarray(1.0), jnp.asarray(34.75), jnp.asarray(dep_sh), rho0=RHO0)
+    a_dp, b_dp = nemo_roquet_alpha_beta(
+        jnp.asarray(2.0), jnp.asarray(34.7), jnp.asarray(dep_dp), rho0=RHO0)
+    a_bar = 0.5 * (float(a_sh) + float(a_dp))
+    b_bar = 0.5 * (float(b_sh) + float(b_dp))
     zg_nemo = max(0.0, a_bar * (2.0 - 1.0) - b_bar * (34.7 - 34.75))
     expect = 5.0e4 * 150.0 * constants.g * GAMMA * zg_nemo
     assert float(utr[0, 0]) == pytest.approx(expect, rel=1e-10)

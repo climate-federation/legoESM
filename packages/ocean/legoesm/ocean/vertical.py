@@ -39,6 +39,93 @@ _AIMP_CU_MAX = 0.30
 _H_FLOOR = 1.0e-10
 
 
+class NemoAdaptiveImplicitPartition(NamedTuple):
+    """NEMO RK3 ``wAimp`` transport split on T-point interfaces."""
+
+    w_explicit: jnp.ndarray
+    w_implicit: jnp.ndarray
+    fraction: jnp.ndarray
+    courant_horizontal: jnp.ndarray
+    courant_vertical: jnp.ndarray
+
+
+def nemo_wicker_aimp_partition_transport(
+    mass_flux_u: jnp.ndarray,
+    mass_flux_v: jnp.ndarray,
+    w: jnp.ndarray,
+    h_t_kmm: jnp.ndarray,
+    e3w_kmm: jnp.ndarray,
+    area_t: jnp.ndarray,
+    dy_u: jnp.ndarray,
+    dx_v: jnp.ndarray,
+    dt: float,
+) -> NemoAdaptiveImplicitPartition:
+    """Literal NEMO 5.0.2 RK3 transport-form adaptive partition.
+
+    This transcribes ``sshwzv.F90:wAimp_RK3_t``'s live
+    ``np_transport`` arm (lines 773--843).  ``mass_flux_u/v`` are legoESM's
+    thickness transports [m2/s] on redundant west/east and south/north C-grid
+    faces; multiplication by the face width reconstructs NEMO's ``zFu/zFv``
+    volume transports [m3/s].  ``w`` is the T-point vertical velocity [m/s]
+    with surface and bottom interfaces included.
+
+    NEMO stores a bottom-up maximum vertical Courant number for diagnostics,
+    but that value does not enter the split coefficient: every coefficient
+    branch overwrites ``zcff`` from the current interface ``zCu_v``.  This
+    routine therefore has no artificial cross-interface recurrence.
+    """
+    dtype = w.dtype
+    dt_a = jnp.asarray(dt, dtype=dtype)
+    area = jnp.asarray(area_t, dtype=dtype)
+    hu_transport = mass_flux_u * jnp.asarray(dy_u, dtype=dtype)[..., None]
+    hv_transport = mass_flux_v * jnp.asarray(dx_v, dtype=dtype)[..., None]
+    inflow = (
+        jnp.maximum(hu_transport[:, 1:, :], 0.0)
+        - jnp.minimum(hu_transport[:, :-1, :], 0.0)
+        + jnp.maximum(hv_transport[1:, :, :], 0.0)
+        - jnp.minimum(hv_transport[:-1, :, :], 0.0)
+    )
+    cu_h = dt_a * inflow / jnp.maximum(
+        area[..., None] * h_t_kmm, jnp.asarray(_H_FLOOR, dtype=dtype))
+
+    nlev = h_t_kmm.shape[-1]
+    if w.shape[-1] != nlev + 1 or e3w_kmm.shape[-1] != nlev + 1:
+        raise ValueError("w and e3w_kmm must contain nlev+1 interfaces")
+    w_int = w[..., 1:nlev]
+    cu_v_int = dt_a * jnp.abs(w_int) / jnp.maximum(
+        e3w_kmm[..., 1:nlev], jnp.asarray(_H_FLOOR, dtype=dtype))
+    # Positive (upward) w takes the horizontal Courant number from the lower
+    # T cell; non-positive w takes it from the upper cell (sshwzv:816--820).
+    cu_h_int = jnp.where(w_int > 0.0, cu_h[..., 1:], cu_h[..., :-1])
+    one = jnp.asarray(1.0, dtype=dtype)
+    cu_min = jnp.asarray(0.8, dtype=dtype) * (one - cu_h_int / 1.1)
+    cu_max = jnp.asarray(1.1, dtype=dtype) * (one - cu_h_int / 1.1)
+    cu_cut = 2.0 * cu_max - cu_min
+    delta = cu_v_int - cu_min
+    tiny = jnp.asarray(jnp.finfo(dtype).tiny, dtype=dtype)
+    mid = one / (
+        one + 4.0 * cu_max * (cu_max - cu_min)
+        / jnp.maximum(delta * delta, tiny))
+    high = (cu_v_int - cu_max) / jnp.maximum(
+        cu_v_int, tiny)
+    frac_int = jnp.where(
+        cu_v_int <= cu_min,
+        jnp.zeros_like(cu_v_int),
+        jnp.where(cu_v_int < cu_cut, mid, high),
+    )
+    frac_int = jnp.clip(frac_int, 0.0, 1.0)
+    pad = ((0, 0),) * (frac_int.ndim - 1) + ((1, 1),)
+    fraction = jnp.pad(frac_int, pad)
+    cu_v = jnp.pad(cu_v_int, pad)
+    return NemoAdaptiveImplicitPartition(
+        (1.0 - fraction) * w,
+        fraction * w,
+        fraction,
+        cu_h,
+        cu_v,
+    )
+
+
 class NemoQCOLiveFaceGeometry(NamedTuple):
     """Executed DINO-QCO face thickness and reciprocal operands."""
 
@@ -107,6 +194,95 @@ def nemo_qco_live_face_geometry_from_operands(
     return NemoQCOLiveFaceGeometry(e3u, e3v, r1_hu, r1_hv, r3u, r3v)
 
 
+def nemo_qco_mesh_operands(z_coord, dtype):
+    """The raw NEMO ``hu_0/hv_0`` and ``e1e2t/e1e2u/e1e2v`` QCO operands.
+
+    ``dom_qco_r3c`` needs exactly these five fields; the cards that carry
+    NEMO's own ``mesh_mask`` expose them on the z-coordinate.  Extracted so
+    the lookup (and its fail-closed error) is written once.
+    """
+    refs = tuple(getattr(z_coord, name, None) for name in (
+        "nemo_hu_0", "nemo_hv_0", "nemo_e1e2t", "nemo_e1e2u",
+        "nemo_e1e2v",
+    ))
+    if any(value is None for value in refs):
+        missing = [name for name, value in zip((
+            "nemo_hu_0", "nemo_hv_0", "nemo_e1e2t", "nemo_e1e2u",
+            "nemo_e1e2v"), refs, strict=True) if value is None]
+        raise ValueError(
+            "NEMO qco face thicknesses need the raw NEMO mesh operands on "
+            f"the z-coordinate; missing: {', '.join(missing)}")
+    return tuple(jnp.asarray(value, dtype=dtype) for value in refs)
+
+
+def nemo_qco_live_face_geometry_cgrid(
+    eta,
+    e3u_0,
+    e3v_0,
+    umask3,
+    vmask3,
+    hu_0,
+    hv_0,
+    area_t,
+    area_u,
+    area_v,
+):
+    """NEMO ``e3u/e3v(Kmm)`` on legoESM's redundant west/south C-grid faces.
+
+    THE single face-thickness rule for BOTH time-stepping lanes.  NEMO's
+    Modified-Leap-Frog entry ``dom_qco_r3c`` (``domqco.F90:166-169``) and its
+    RK3 entry ``dom_qco_r3c_RK3`` (``domqco.F90:219-222``) carry the
+    CHARACTER-IDENTICAL ``pr3u``/``pr3v`` statement --
+
+        pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)
+           &                    + e1e2t(ji+1,jj) * pssh(ji+1,jj)  )
+           &                  * r1_hu_0(ji,jj) * r1_e1e2u(ji,jj)
+
+    -- differing only in loop extent (``DO_2D(nn_hls, nn_hls-1, ...)`` versus
+    ``DO_2D(0,0,0,0)``) and in the ``key_qcoTest_FluxForm`` alternative
+    (``domqco.F90:227``) that is not compiled in either configuration here.
+    ``domzgr_substitute.h90:127`` then gives
+    ``e3u(i,j,k,t) = e3u_0(i,j,k)*(1 + r3u(i,j,t)*umask(i,j,k))``.  Because
+    NEMO shares the routine, a second legoESM implementation would be an
+    artificial branch point, so both lanes call this one:
+
+    * WS-RK3 stage transport -- ``stprk3_stg.F90:273-274`` consumes
+      ``e3u(Kmm)``/``e3v(Kmm)`` in the single ``zFu``/``zFv`` pair that feeds
+      both ``dyn_adv`` and ``tra_adv`` (``zFw`` is built separately at
+      ``:301`` and carries no ``e3``);
+    * MLF tracer transport -- ``traadv.F90:329-330``, inside the
+      ``#if ! defined key_RK3`` branch opened at ``:313``, builds
+      ``zuu = e2u*e3u(ji,jj,jk,Kmm)*zptu`` from the same ``e3u(Kmm)``.
+
+    Note what this is NOT: the ``min`` of the two STRETCHED T-cell
+    thicknesses, which is first order wrong in the ssh difference across the
+    face, and not the mean of the two ``r3t`` (each of those divides by its
+    own column's ``ht_0``, not by ``hu_0``).
+
+    ``eta``/``e3u_0``/``e3v_0``/the masks and the ``hu_0``..``area_v``
+    operands arrive on NEMO's native A2D extent (U/V store the EAST/NORTH
+    face of each T cell); the returned fields carry legoESM's redundant
+    west/south face layout, so that native->redundant map is written once
+    here instead of at each call site.
+
+    Returns ``(e3u, e3v, one_plus_r3u, one_plus_r3v)`` with the thicknesses
+    3-D on ``(n_lat, n_lon+1, nlev)`` / ``(n_lat+1, n_lon, nlev)`` and the
+    ratios 2-D on the matching face shapes.
+    """
+    geom = nemo_qco_live_face_geometry_from_operands(
+        eta, e3u_0, e3v_0, umask3, vmask3,
+        hu_0, hv_0, area_t, area_u, area_v,
+    )
+    one = jnp.asarray(1.0, dtype=geom.e3u.dtype)
+    return (
+        jnp.concatenate([geom.e3u[:, -1:, :], geom.e3u], axis=1),
+        jnp.concatenate([jnp.zeros_like(geom.e3v[:1]), geom.e3v], axis=0),
+        jnp.concatenate([one + geom.r3u[:, -1:], one + geom.r3u], axis=1),
+        jnp.concatenate(
+            [jnp.ones_like(geom.r3v[:1]), one + geom.r3v], axis=0),
+    )
+
+
 def nemo_qco_live_face_thicknesses(
     eta,
     z_coord,
@@ -123,18 +299,10 @@ def nemo_qco_live_face_thicknesses(
     face layout when required.  The explicit barriers preserve the executed
     source association measured by the DINO fidelity instruments.
     """
-    refs = tuple(getattr(z_coord, name, None) for name in (
-        "nemo_hu_0", "nemo_hv_0", "nemo_e1e2t", "nemo_e1e2u",
-        "nemo_e1e2v",
-    ))
-    if any(value is None for value in refs):
-        raise ValueError(
-            "nemo_qco_live_face_thicknesses requires raw NEMO hu_0/hv_0 "
-            "and e1e2t/e1e2u/e1e2v fields")
     dtype = jnp.asarray(e3u_0).dtype
     geom = nemo_qco_live_face_geometry_from_operands(
         eta, e3u_0, e3v_0, umask3, vmask3,
-        *(jnp.asarray(value, dtype=dtype) for value in refs),
+        *nemo_qco_mesh_operands(z_coord, dtype),
     )
     return geom.e3u, geom.e3v
 
@@ -720,6 +888,8 @@ class OceanPartialCellCoordinate(NamedTuple):
 def create_partial_cell_coordinate(
     z_coord: OceanZStarCoordinate,
     H_bathy: jnp.ndarray,
+    *,
+    bottom_index_rule: str = "interface",
 ) -> OceanPartialCellCoordinate:
     """Build an ``OceanPartialCellCoordinate`` from a z* coord + bathymetry.
 
@@ -732,6 +902,16 @@ def create_partial_cell_coordinate(
         Per-column bathymetry depth [m], positive downward.  Land
         cells should have H_bathy <= 0; they're flagged as
         ``bottom_level = -1`` and ``is_active = False`` everywhere.
+    bottom_index_rule : {"interface", "nemo_tpoint"}
+        ``"interface"`` is the legacy Adcroft rule: the deepest active cell
+        is the one whose top interface is shallower than the supplied depth.
+        ``"nemo_tpoint"`` reproduces NEMO ``zgr_zps`` user domains that set
+        ``k_bot`` from ``pdept_1d(k) < H <= pdept_1d(k+1)`` and then clip the
+        bottom thickness at the reference bottom interface.  The latter also
+        retains near-full last-bit thicknesses instead of applying legoESM's
+        legacy near-full snap.  It requires an explicit ``z_coord.t_depth_ref``;
+        no arithmetic-midpoint fallback is allowed because that changes
+        ``k_bot`` on stretched external grids.
 
     Returns
     -------
@@ -750,12 +930,30 @@ def create_partial_cell_coordinate(
     nlev = z_coord.n_levels
     abs_z_half = jnp.abs(z_coord.z_half_ref)        # (nlev+1,) positive depths
 
-    # Number of half-interfaces strictly shallower than H_bathy.
-    # E.g. abs_z_half = [0, 10, 300, 1500, 4000], H=2350 → count=4 → bottom_level=3.
+    if bottom_index_rule not in {"interface", "nemo_tpoint"}:
+        raise ValueError(
+            "bottom_index_rule must be 'interface' or 'nemo_tpoint', got "
+            f"{bottom_index_rule!r}"
+        )
+
+    # Number of reference points strictly shallower than H_bathy.  The legacy
+    # rule counts W interfaces.  NEMO's zps user-domain rule counts T points;
+    # on a uniform grid this guarantees a half-cell minimum before k_bot moves
+    # down, exactly as usrdef_zgr.F90:140-143/157-160 executes.
     n_lead = H.ndim
     H_exp = H[..., jnp.newaxis]                     # (..., 1)
+    if bottom_index_rule == "nemo_tpoint":
+        if z_coord.t_depth_ref is None:
+            raise ValueError(
+                'bottom_index_rule="nemo_tpoint" requires an explicit '
+                "t_depth_ref; an arithmetic-midpoint fallback can select "
+                "the wrong NEMO bottom level on a stretched grid"
+            )
+        index_depths = jnp.abs(z_coord.t_depth_ref)
+    else:
+        index_depths = abs_z_half
     interfaces_above = jnp.sum(
-        abs_z_half[(jnp.newaxis,) * n_lead + (slice(None),)] < H_exp,
+        index_depths[(jnp.newaxis,) * n_lead + (slice(None),)] < H_exp,
         axis=-1,
     )                                                # (...) integer
     bottom_level = interfaces_above.astype(jnp.int32) - 1
@@ -798,8 +996,11 @@ def create_partial_cell_coordinate(
     dz_at_bottom = z_coord.dz_ref[safe_bottom]      # (...)
     raw_partial = H - abs_z_at_bottom
     capped = jnp.minimum(raw_partial, dz_at_bottom)
-    near_full = jnp.abs(capped - dz_at_bottom) < dz_at_bottom * 1e-5
-    partial_thickness = jnp.where(near_full, dz_at_bottom, capped)
+    if bottom_index_rule == "nemo_tpoint":
+        partial_thickness = capped
+    else:
+        near_full = jnp.abs(capped - dz_at_bottom) < dz_at_bottom * 1e-5
+        partial_thickness = jnp.where(near_full, dz_at_bottom, capped)
 
     is_bottom = (k_view == bottom_view) & (bottom_view >= 0)
     h_partial = jnp.where(is_bottom, partial_thickness[..., jnp.newaxis], h_full)
@@ -1433,6 +1634,60 @@ def flux_form_vertical_momentum_advection_centered(
     return -vert_flux_div / h_u_safe
 
 
+def nemo_up3_vertical_momentum_advection(
+    velocity: jnp.ndarray,
+    w_half_at_face: jnp.ndarray,
+    h_face: jnp.ndarray,
+    face_active: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """NEMO ``dynadv_up3`` vertical momentum-flux transcription.
+
+    This is the vertical part of the live flux-form ``ln_dynadv_up3`` arm,
+    not ``dynzad`` (which ``dynadv.F90:79-91`` calls only for vector form).
+    It transcribes NEMO 5.0.2 ``dynadv_up3.F90:239-365`` with
+    ``gamma1=1/3``: second differences come from the before/stage-base
+    velocity, their upwind choice uses the sign of the vertical transport,
+    and the transported value is the centered pair minus the UP3 correction.
+
+    ``w_half_at_face`` is the arithmetic T-to-u/v-face average.  NEMO writes
+    ``0.25*(zFw_left+zFw_right)*(u_below+u_above-gamma1*lap)``; because the
+    supplied average is half that sum, the coefficient below is ``0.5``.
+    Surface and bottom fluxes are exactly zero.  Final tendencies are masked
+    at their own wet velocity cell, matching NEMO's subsequent time update.
+    """
+    nlev = velocity.shape[-1]
+    if nlev < 2:
+        return jnp.zeros_like(velocity)
+    gamma1 = 1.0 / 3.0
+    if face_active is None:
+        active = jnp.ones_like(velocity)
+    else:
+        active = jnp.broadcast_to(face_active, velocity.shape)
+    interface_active = active[..., :-1] * active[..., 1:]
+    first_difference = (
+        (velocity[..., :-1] - velocity[..., 1:]) * interface_active
+    )
+    pad_axes = ((0, 0),) * (velocity.ndim - 1)
+    next_difference = jnp.pad(
+        first_difference[..., 1:], (*pad_axes, (0, 1))
+    )
+    second_difference = first_difference - next_difference
+    previous_second = jnp.pad(
+        second_difference[..., :-1], (*pad_axes, (1, 0))
+    )
+    w_interior = w_half_at_face[..., 1:nlev]
+    up3_correction = jnp.where(
+        w_interior > 0.0, second_difference, previous_second
+    )
+    interior_flux = 0.5 * w_interior * (
+        velocity[..., :-1] + velocity[..., 1:]
+        - gamma1 * up3_correction
+    )
+    flux = jnp.pad(interior_flux, (*pad_axes, (1, 1)))
+    divergence = flux[..., :-1] - flux[..., 1:]
+    return -divergence / jnp.maximum(h_face, _H_FLOOR) * active
+
+
 #: ``bottom_face_mask_mode`` literals for
 #: :func:`nemo_advective_vertical_momentum_advection` (#1226 level-29-onset
 #: finding, ``zad_level29_onset_walk.py``, commit ``b6d0d9877``):
@@ -1747,6 +2002,7 @@ def adaptive_implicit_vertical_momentum_advection(
     cu_min: float = _AIMP_CU_MIN,
     cu_max: float = _AIMP_CU_MAX,
     face_active: jnp.ndarray | None = None,
+    explicit_scheme: str = "upwind",
 ) -> jnp.ndarray:
     """Adaptive-implicit vertical momentum advection (Shchepetkin 2015).
 
@@ -1805,10 +2061,20 @@ def adaptive_implicit_vertical_momentum_advection(
     w_imp = zcff * w_half
     w_exp = (1.0 - zcff) * w_half
 
-    # Explicit (Courant-capped) part through the existing flux-form scheme.
-    tend_exp = flux_form_vertical_momentum_advection(
-        u, w_exp, h, face_active=face_active,
-    )
+    # Explicit (Courant-capped) part.  ``nemo_up3`` selects the live
+    # ln_dynadv_up3 vertical flux; the default is unchanged.
+    if explicit_scheme == "upwind":
+        tend_exp = flux_form_vertical_momentum_advection(
+            u, w_exp, h, face_active=face_active,
+        )
+    elif explicit_scheme == "nemo_up3":
+        tend_exp = nemo_up3_vertical_momentum_advection(
+            u, w_exp, h, face_active=face_active,
+        )
+    else:
+        raise ValueError(
+            "explicit_scheme must be 'upwind' or 'nemo_up3', got "
+            f"{explicit_scheme!r}")
     u_exp = u + dt * tend_exp
 
     # Implicit part: unconditionally-stable backward-Euler upwind solve.
