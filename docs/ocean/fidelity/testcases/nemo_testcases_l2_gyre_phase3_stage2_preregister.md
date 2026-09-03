@@ -199,3 +199,22 @@ violation must pass; ordinary stage, kt=2, and restart hashes must remain
 bit-identical.  The first operand over `1e-15` owns the next boundary.  Only
 after that direct comparison may a one-variable arm be constructed, with
 movement printed relative to the faithful residual before any label.
+
+### Post-ENE HPG operand continuation
+
+The native `ff_f` landing makes the stage-2 ENE and raw advection increments
+AT-BAR; the surviving raw-RHS maxima, `9.69e-17` U and `1.10e-16` V, are now
+identical to the HPG increment errors and amplify through `rDt/2` into the
+stage-2 Kaa/transport debt. Before changing HPG arithmetic, a config-local
+WRITE-only `dynhpg.F90` record will dump the executing stage-2 `rhd`,
+`e3w(Kmm)`, and `gdept_z0(Kmm)` operands. Existing stage, kt=2, and restart
+hashes must remain bit-identical, and a planted nonzero `rhd` violation must
+fail closed.
+
+The gate will compare those operands before the source recurrence. If they
+are AT-BAR, the next arm may select a literal `hpg_sco` recurrence in the
+collapsed GYRE identity; it is causal only if HPG becomes exact enough that
+the stage-2 Kaa clears `1e-15`, while a private algebraic-reassociation
+ablation restores at least 99% of the former Kaa residual. Otherwise the
+first differing operand remains the owner and no recurrence change is
+authorized.
