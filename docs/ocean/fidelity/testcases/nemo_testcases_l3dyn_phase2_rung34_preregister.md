@@ -31,6 +31,35 @@ the released solver SHA-256 is
 The stale EAP override is retained in both arms and is dead because
 `ln_rhg_EAP=.false.`; it is not another controlled difference.
 
+## Post-preregistration amendments (preserved history)
+
+The paragraph above records the preregistered experiment and is intentionally
+not rewritten after measurement.  The first build showed that the supposedly
+selector-dead `MY_SRC/icedyn_rhg_eap.F90` is still compiled and itself fails
+against the 5.0.2 module API.  The copied-case construction was therefore
+amended as follows, without changing any shipped file:
+
+* `ICE_RHEO_OMIP_L3` excludes **both** stale overrides and builds the shipped
+  case against the released `src/ICE` implementations.
+* `ICE_RHEO_OMIP_L3_SHIPPED` retains the stale EVP override as a build control;
+  it is **UNBUILDABLE**, with 21 compiler errors recorded in the phase-1
+  receipt.  Failed copies retaining the EAP override are also preserved.
+* both overrides remain **FLAGGED FOR FUTURE DELETION** from the upstream test
+  case; nothing in the shipped tree was modified or deleted.
+
+On 2026-09-03 the user classified this incompatibility as an upstream NEMO
+defect and explicitly selected the override-excluded copy as the only buildable
+form of the shipped case and therefore the oracle for this rung.  This decision
+supersedes the original stop condition below; it does not turn the unbuildable
+control into a numerical comparison or manufacture an analytic substitute.
+
+One more runtime-resolution detail was discovered only after executing the
+clean copy.  With the shipped case's `ln_icethd=.false.`, SI3 overwrites
+`rn_porordg` to zero and the snow/pond ridge and raft retention factors to one
+at `icedyn_rdgrft.F90:1244-1247`.  The card reproduces those **executed**
+values.  The ORCA1 deck's configured `0.5` values remain disclosed above; they
+do not survive SI3's own thermodynamics-off resolution on this rung.
+
 ## Shipped-case dossier and resolved input
 
 The case is a closed 2000 km by 2000 km box: `usrdef_nam.F90:73-84`; at the

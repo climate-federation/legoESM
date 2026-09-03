@@ -764,13 +764,90 @@ CLI/derived-exit control is at lines 80--92.  Ruff is clean.
 |---|---|
 | direct full-trajectory-gate pytest | `1eea43ce06a884c1237ce7c47396bca539ad0a5b91693c642122a38e9de2d664` |
 
+## Rung 3.4 implementation boundary: ICE_RHEO dynALL
+
+Status: **KT1-VERIFIED; DEBT-FIRST-DIVERGENCE at completed step 2**.  This is
+an honestly stopped first-divergence boundary, not a completed 720-step
+legoESM trajectory or restart claim.
+
+The pre-implementation search found the existing Lipscomb-2007 path in
+`packages/ice/legoesm/ice/ridging.py` and no rafting implementation.  Its
+per-category weight is proportional to `a*exp(-h/e*)`.  SI3 instead constructs
+the normalized cumulative-area distribution `G`, applies the exponential
+difference at `icedyn_rdgrft.F90:433-470`, partitions that participation into
+ridge and raft fractions at `:474-503`, and iterates its ordered redistribution
+at `:287-341,598-624,667-903`.  The two participation/update algebras are not
+identical, so factoring either into a nominally shared helper would change an
+existing scheme.  The new `apply_si3_jpl1_ridging` is consequently a selectable
+sibling **inside the existing ridging module**; `apply_ridging` and its default
+remain unchanged.  H79 strength is not reimplemented there: the existing
+C-grid rheology arm supplies `rn_pstar=2e4` and `rn_crhg=20` before
+redistribution.
+
+The new arm is deliberately closed over the measured selector composition:
+`jpl=1`, exponential participation and ridge distribution, ridge plus raft,
+`rn_astar=.03`, `rn_murdg=3`, `rn_csrdg=.5`, `rn_hstar=25`,
+`rn_hraft=.75`, `rn_craft=5`, and zero ridge porosity.  Its participation,
+partition, normalization, donor/receiver carry, and 19-iteration ceiling cite
+`icedyn_rdgrft.F90:209-341,398-624,667-903`.  Because the case resolves
+`ln_icethd=F`, SI3 itself overwrites the deck's four `0.5` snow/pond retention
+values to `1` at `:1244-1247`; honoring the unevaluated deck value produced a
+`v_s` debt of `9.37e-14`, while reproducing the executed value closed kt=1.
+
+The oracle-pinned card consumes the entry frame and every geometry array rather
+than synthesizing the 1000 by 1000 grid.  It validates fp64 throughout,
+retains 32 transported fields and five Prather moments per field (160 moment
+leaves), uses the existing C-grid aEVP and Prather arms, and rejects every
+selector cross-product outside this case.  Its outer step is exactly
+`rhg -> adv -> rdgrft -> cor`, the shipped dynALL dispatcher at
+`icedyn.F90:130-135`.  Existing A-grid EVP/mEVP and existing Lipscomb cards are
+untouched.
+
+The full kt=1 gate scores eleven geometry/mask arrays plus all 32 transported
+fields, surface temperature, bulk salt diagnostic, U/V, and three stresses:
+50 rows are AT-BAR.  The worst row is `stress1_i`, normalized maximum
+`6.869504964868156e-16`; the candidate leaf dtype registry is only `float64`.
+The binding internal trajectory plant changes `v_s` by `1e-10` and is caught
+as DEBT (`9.999999439624929e-11` normalized), proving that the scored trajectory
+path—not a helper self-comparison—goes red.
+
+The committed first-divergence sweep advances the full dynALL card and stops at
+the first over-bar entry boundary.  Completed step 1 remains at bar.  At
+completed step 2 / oracle entry kt=3, `stress1_i` first exceeds the bar:
+normalized and relative error `4.383271722679783e-15`, absolute error
+`5.856426454897701e-15`, oracle scale `1.3360856514086425`, at `(20,59)`.
+At that boundary `stress2_i=1.8943180357666733e-15` normalized and
+`stress12_i=1.27675647831893e-15`; velocities and every advected/redistributed
+field are still AT-BAR.  This first owner is the carried nonlinear C-grid aEVP
+stress trajectory.  Per the preregistered stopping rule, boundaries after kt=3,
+the candidate final step/restart, and all 160 candidate restart moments remain
+**UNMEASURED**; the existence of a completed NEMO restart does not measure a
+legoESM restart.
+
+Focused verification is **9 passed** for card/geometry/wind/selector/kt=1 and
+ridging controls, **13 passed** for the rung-3.2 transport regression, and
+**8 passed** for the unchanged rung-3.3 C-grid kernel.  The inline-physics
+ratchet is **3 passed** and the hardcoded-constant ratchet is **5 passed** on
+all touched production/gate/test paths; Ruff is clean.
+
+| rung-3.4 artifact | SHA256 |
+|---|---|
+| kt=1 gate JSON | `5da50c8dca4c3fba55ff3baccdf4bf95495fdb2e0fe567e576425330ac891e6a` |
+| binding planted gate JSON | `e3597b7338d5d302a57e6a3f0932051768289ab4526e5f7ccfd0d97181cd6b2c` |
+| first-divergence JSON | `8ff7ff42bde1d4e18481a2f1d084b775313275f2b17ae9f288122eee12be9972` |
+| existing-module SI3 ridging source | `192f49c35f0222323f1f5517c0dd9de306d871fb9fb879cc939ccb632a2eb384` |
+| oracle-pinned card source | `a841e486981ee98efaf5ce40d1c298178454d24e39f28c16ca96f2a7d9ac5c0c` |
+| kt=1 gate source | `b3bc5657686a7c7cc595f103090fcd5cb7ac7b182237a146ed73cd87f79740a5` |
+| first-divergence source | `ab3166934623a0573abfa173b1e6168be245761a2816bf3248bd34fde6b45572` |
+| direct card/control pytest | `dcf4fc024dc8a678a0f81d1c98ed3a1d7a2029e897b5ac97bbf96f9113053f67` |
+
 ## Loudly UNMEASURED / deferred
 
 Within-step x/y Prather split states; ORCA1
 option-2 salinity (the rung-3.2 oracle resolves option 4); candidate alignment
 of nonzero `snwice_mass` and its
 before level; separation of `zapsmall` from `zapneg`; thermodynamics;
-ridging/rafting; general production run-restart integration outside the
+general production run-restart integration outside the
 opt-in card's now-verified restart path; coupled ice--ocean comparison; and
 landfast L16 (OFF here,
 **UNVERIFIED-deferred to lane 4**).  No legoESM claim is made for any item in
@@ -800,7 +877,14 @@ immutable gate metric; and place SI3 tests under `tests/ice/fidelity/`.
 Then preregister rung 3.4, create production and shipped-override copies of
 ICE_RHEO, apply only the cited ORCA1 aEVP/ridging deck with landfast off,
 measure the stale override, and proceed to the existing-module jpl=1
-ridging/rafting arm only if the shipped oracle can run.
+ridging/rafting arm only if the shipped oracle can run; then accept the
+21-error shipped-control failure as an upstream NEMO defect, use the sole
+buildable override-excluded copy as the oracle, run its documented 720 steps,
+extend Appendix-A coverage to ridging/rafting state, implement the selectable
+jpl=1 SI3 redistribution arm, wire the existing arms in dynALL order, and gate
+geometry, kt=1, and first divergence.  Also add direct pytest coverage for the
+rung-3.3 trajectory gate and name its measured 3.3015375767554644%/step window
+as nonlinear rheology sensitivity.
 
 **UNASKED choices:** no default change to existing ice transport; no ocean-SOM
 replacement or arithmetic-changing common refactor; no rung-3.3 claim beyond
@@ -811,7 +895,9 @@ classification of the README's qualitative maximum/side-lobe sentence; no
 claim that a DEBT or UNMEASURED row is matched or faithful; no relabeling of
 the pinned oracle's `rn_ishlat=2` as zero merely because the two branches are
 inert on this all-wet periodic card.
-No repair or modernization of the shipped ICE_RHEO overrides; no legoESM rung
-3.4 trajectory claim without a runnable shipped-case control. Rung 3.4 stopped
-at that exact boundary; its build evidence and loud UNMEASURED rows are in the
-phase-1 receipt section 12.
+No repair or modernization of either shipped ICE_RHEO override; no deletion or
+modification in the shipped NEMO tree; no numerical stale-source trajectory
+comparison fabricated from an unbuildable control; no multi-category,
+thermodynamic, landfast, alternate-rheology, or alternate-ridging selector arm;
+no claim past the measured rung-3.4 first-divergence boundary; no tolerance
+relaxation, GPU, MPI, or push.
