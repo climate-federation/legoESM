@@ -125,6 +125,17 @@ def check_resolved(root: Path) -> dict[str, str]:
         "namthd_zdf.ln_cndi_p07": True, "namthd_zdf.ln_cndi_u64": False,
         "namthd_sal.ln_flushing": True, "namthd_sal.ln_drainage": True,
         "namthd_pnd.ln_pnd": False,
+        "namdyn.ln_landfast_l16": False,
+        "namdyn_rdgrft.ln_str_h79": True,
+        "namdyn_rdgrft.ln_str_smooth": False,
+        "namdyn_rdgrft.ln_distf_lin": False,
+        "namdyn_rdgrft.ln_distf_exp": True,
+        "namdyn_rdgrft.ln_partf_exp": True,
+        "namdyn_rdgrft.ln_ridging": True,
+        "namdyn_rdgrft.ln_rafting": True,
+        "namdyn_rhg.ln_rhg_evp": True, "namdyn_rhg.ln_rhg_eap": False,
+        "namdyn_rhg.ln_aevp": True,
+        "namdyn_adv.ln_adv_pra": True, "namdyn_adv.ln_adv_umx": False,
     }
     merged = ocean | ice
     for key, wanted in expected_bool.items():
@@ -138,6 +149,9 @@ def check_resolved(root: Path) -> dict[str, str]:
         "nampar.nlay_s": 3, "namitd.rn_himin": .05, "namitd.rn_himax": 99,
         "namthd_zdf.rn_cnd_s": .5, "namthd_do.rn_hinew": .05,
         "namthd_sal.nn_icesal": 2, "namthd_sal.rn_sinew": .75,
+        "namdyn_rdgrft.rn_pstar": 2e4, "namdyn_rdgrft.rn_crhg": 20,
+        "namdyn_rdgrft.rn_fpndrdg": .5, "namdyn_rdgrft.rn_fpndrft": .5,
+        "namdyn_rdgrft.rn_porordg": 0, "namdyn_rhg.nn_nevp": 100,
     }
     for key, wanted in expected_num.items():
         require(key in merged, f"resolved value missing: {key}")

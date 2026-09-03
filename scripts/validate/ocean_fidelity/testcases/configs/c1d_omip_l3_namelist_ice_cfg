@@ -46,14 +46,32 @@
 !------------------------------------------------------------------------------
 &namdyn_rdgrft  !   Ice ridging/rafting
 !------------------------------------------------------------------------------
+   ln_str_H79       = .true.     ! ORCA1 ice cfg:52
+   rn_pstar         = 2.0e4      ! ORCA1 ice cfg:53
+   rn_crhg          = 20.0       ! ORCA1 ice cfg:54
+   ln_str_smooth    = .false.    ! ORCA1 ice cfg:55
+   ln_distf_lin     = .false.    ! ORCA1 ice cfg:57
+   ln_distf_exp     = .true.     ! ORCA1 ice cfg:58
+   ln_partf_exp     = .true.     ! ORCA1 ice cfg:60
+   ln_ridging       = .true.     ! ORCA1 ice cfg:61
+   ln_rafting       = .true.     ! ORCA1 ice cfg:62
+   rn_fpndrdg       = 0.5        ! ORCA1 ice cfg:63
+   rn_fpndrft       = 0.5        ! ORCA1 ice cfg:64
+   rn_porordg       = 0.0        ! ORCA1 ice cfg:65
 /
 !------------------------------------------------------------------------------
 &namdyn_rhg     !   Ice rheology
 !------------------------------------------------------------------------------
+   ln_rhg_EVP       = .true.     ! ORCA1 ice cfg:70
+   ln_rhg_EAP       = .false.    ! ice ref:109; exclusive with EVP
+   ln_aEVP          = .true.     ! ice ref:110; resolved ORCA1 EVP selection
+   nn_nevp          = 100        ! ice ref:113; resolved ORCA1 EVP selection
 /
 !------------------------------------------------------------------------------
 &namdyn_adv     !   Ice advection
 !------------------------------------------------------------------------------
+   ln_adv_Pra       = .true.     ! ORCA1 ice cfg:75
+   ln_adv_UMx       = .false.    ! ORCA1 ice cfg:76
 /
 !------------------------------------------------------------------------------
 &namsbc         !   Ice surface boundary conditions

@@ -15,7 +15,7 @@ fidelity claim.
 | target ice deck | `/data/abyssal/dbalwada/ORCA1-omip/EXPREF/namelist_ice_cfg`; SHA256 `9be4731d1835ebd042e590421fb43cec6d984f114f049728acf1a150edc90470` |
 | target ocean deck | `/data/abyssal/dbalwada/ORCA1-omip/EXPREF/namelist_cfg`; its final SHA256 is recorded by the receipt |
 | arithmetic | NEMO `REAL(wp)`; every binary frame must report `STORAGE_SIZE(1._wp)=64` |
-| execution | one CPU process, direct `./nemo.exe`, no GPU, no `mpirun`; run root `/data/abyssal/dbalwada/nemo-testcases-l3/c1d_sasice_omip_l3` |
+| execution | one CPU process, direct `./nemo.exe`, no GPU, no `mpirun`; final scope-resolved run root `/data/abyssal/dbalwada/nemo-testcases-l3/c1d_omip_l3_sasice_scope_gate` |
 
 The only input file the resolved run may open is the pinned ERA5 member.  The
 shipped C1D initialization remains `ln_iceini=.true., nn_iceini_file=0`, which
@@ -41,8 +41,8 @@ Resolution is `namelist_ice_cfg` over `namelist_ice_ref`
 (`icestp.F90:259-260`, with the per-block read pairs beginning at
 `icestp.F90:345-346`).  Every changed row below is either the ORCA1 target or a
 shipped C1D value retained explicitly.  The executable retains `key_si3`,
-`key_RK3`, `key_linssh`, `key_vco_1d3d`, and `key_top`; `key_xios` is omitted
-because this CPU oracle build has no XIOS library.
+`key_linssh`, and `key_vco_1d3d`; `key_xios`, `key_RK3`, and `key_top` are
+excluded from the copied configuration and listed in the receipt.
 
 | block | required resolved value | source |
 |---|---|---|
@@ -51,6 +51,9 @@ because this CPU oracle build has no XIOS library.
 | ocean `nameos` | TEOS-10 on, EOS-80 off | ORCA1 `EXPREF/namelist_cfg:305-308` |
 | ice `nampar` | `jpl=1`, `nlay_i=nlay_s=3`, `ln_icethd=T`, `rn_amax_n=rn_amax_s=0.99999`; `ln_icedyn` retains the resolved true value but is inert | ORCA1 ice cfg `:24-32`; dynamics is skipped by `ln_c1d` at `icestp.F90:167-168` |
 | ice `namitd` | HFN on, user categories off, `rn_himean=2`, `rn_himin=0.05`, `rn_himax=99` | ORCA1 ice cfg `:37-39` over ice ref `:41-46` |
+| ice `namdyn_rdgrft` | H79 strength, no strength smoothing, exponential redistribution and participation, ridging and rafting on, `rn_pstar=2e4`, `rn_crhg=20`, `rn_fpndrdg=rn_fpndrft=.5`, `rn_porordg=0` | ORCA1 ice cfg `:52-65`, one line per resolved deviation |
+| ice `namdyn_rhg` | EVP and adaptive EVP on, EAP off, `nn_nevp=100` | ORCA1 ice cfg `:70` plus resolved ice ref `:108-113` |
+| ice `namdyn_adv` | Prather on, Ultimate-Macho off | ORCA1 ice cfg `:75-76` |
 | ice `namsbc` | `rn_Cd_io=5e-3`, `nn_snwfra=2`, `rn_snwblow=.66`, `nn_flxdist=-1`, conduction flux/emulation off, `nn_qtrice=0` | ORCA1 ice cfg `:79-82` over ice ref `:134-152` |
 | ice `namthd` | thickness change on, lateral melt off, open-water growth on, lead heat on | ORCA1 ice cfg `:85-87` over ice ref `:155-160` |
 | ice `namthd_zdf` | BL99 on; P07 on; U64 off; `rn_cnd_s=.5`, `rn_kappa_i=1`, `rn_kappa_s=10`, convergence check off | ORCA1 ice cfg `:90-94` over ice ref `:163-174` |
@@ -141,9 +144,17 @@ registered exchange digest/invariant.  Unit tests invoke both failure paths.
    invented.
 4. **CONFIRM coverage/instrument** iff restart, namelist, frame, and exchange
    inventories pass and both planted controls fail for the registered reason.
-5. `ice.output` must print every resolved selector above.  The receipt may use
-   those instantiated values, not deck comments, and must re-read NEMO
+5. The SAS executable's `ocean.output` (and generated `output.namelist.ice`)
+   must print every resolved selector above; SAS does not create a separate
+   `ice.output`.  The receipt may use those instantiated values, not deck
+   comments, and must re-read NEMO
    `phycst.F90:39,48,57-66` for the Appendix-B constants table.
+
+Scope: only the target deck's resolved `jpl=1`, BL99 3+3/P07,
+`nn_icesal=2`, aEVP, Prather, ridging/rafting, and `ln_pnd=F` selection is
+registered.  The dynamic selectors are resolution checks only: `ln_c1d`
+skips their execution.  Landfast L16 remains the shipped-reference false
+value and no additional-option rung or test is permitted in phase 1.
 
 Blind spots: phase 1 validates oracle construction and trajectory completeness,
 not legoESM equivalence; the column deliberately cannot exercise rheology,
