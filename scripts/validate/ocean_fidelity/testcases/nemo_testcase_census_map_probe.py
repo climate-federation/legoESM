@@ -546,6 +546,95 @@ def command_aimp_scaling(args) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
+def _model_state_from_saved(card, raw: dict):
+    """Restore one native legoESM snapshot without changing its grid frame."""
+    state = card.recipe.initial_state
+    return state._replace(
+        T=state.T.replace(data=jnp.asarray(raw["T"])),
+        S=state.S.replace(data=jnp.asarray(raw["S"])),
+        u=state.u.replace(data=jnp.asarray(raw["u"])),
+        v=state.v.replace(data=jnp.asarray(raw["v"])),
+        eta=state.eta.replace(data=jnp.asarray(raw["ssh"])),
+    )
+
+
+def command_zdf_scaling(args) -> None:
+    """One-step source-exact ZDF W-divisor movement on saved live states."""
+    import jax
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSRK3TestHooks,
+        _nemo_aimp_reference_e3w_int,
+    )
+    from legoesm.ocean.physics.vertical_mixing import nemo_e3w_kmm
+    from legoesm.ocean.vertical import compute_layer_thickness
+
+    set_policy(PrecisionPolicy.fp64())
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    card = STATS.build_nemo_testcase_card(CASE)
+    states = STATS.load_legoesm_states(CASE, "fp64", args.lego_root)[0]
+    baseline = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    arm = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            nemo_zdf_reference_w_metric=True))
+    active = np.asarray(card.recipe.z_coord.is_active)
+    slope = np.asarray(card.recipe.initial_state.H_bathy.data)
+    slope = active & ((slope > 500.0) & (slope < 2000.0))[..., None]
+    rows = []
+    for time_s, raw in states.items():
+        entering = _model_state_from_saved(card, raw)
+        base_after = baseline.step(entering, dt=card.dt_s)
+        arm_after = arm.step(entering, dt=card.dt_s)
+        delta = {
+            name: np.asarray(getattr(arm_after, attr).data)
+            - np.asarray(getattr(base_after, attr).data)
+            for name, attr in (("T", "T"), ("S", "S"), ("u", "u"),
+                               ("v", "v"), ("ssh", "eta"))
+        }
+        eta = jnp.asarray(raw["ssh"])
+        h = compute_layer_thickness(
+            eta, entering.H_bathy.data, card.recipe.z_coord,
+            min_water_column_m=card.recipe.model_config.min_water_column_m)
+        stretch = 1.0 + eta / jnp.maximum(
+            jnp.sum(card.recipe.z_coord.h_partial, axis=-1), 1.0e-10)
+        legacy_e3w = nemo_e3w_kmm(card.recipe.z_coord, h, stretch)
+        reference_e3w = _nemo_aimp_reference_e3w_int(
+            card.recipe.z_coord, h, stretch)
+        wet_int = np.asarray(active[..., :-1] & active[..., 1:])
+        rows.append({
+            "physical_time_s": int(time_s),
+            "wet_cell_e3w_difference_linf_m": float(np.max(np.abs(
+                np.asarray(reference_e3w)[wet_int]
+                - np.asarray(legacy_e3w)[wet_int]))),
+            "T_after_difference_linf_K": float(np.max(np.abs(delta["T"][active]))),
+            "T_slope_difference_linf_K": float(np.max(np.abs(delta["T"][slope]))),
+            "u_after_difference_linf_m_s": float(np.max(np.abs(delta["u"]))),
+            "v_after_difference_linf_m_s": float(np.max(np.abs(delta["v"]))),
+            "ssh_after_difference_linf_m": float(np.max(np.abs(delta["ssh"]))),
+        })
+    payload = {
+        "format": "nemo-testcase-census-zdf-scaling-v1",
+        "case": CASE,
+        "git_sha": git_sha(),
+        "preregistration_commit": W_METRIC_PREREG_COMMIT,
+        "precision": "fp64",
+        "backend": jax.default_backend(),
+        "reference": (
+            "dynzdf.F90:180-195; domzgr_substitute.h90:131-133; "
+            "usrdef_zgr.F90:157-168"),
+        "one_variable": "nemo_zdf_reference_w_metric",
+        "states_npz": str(args.lego_root / "overflow_zps/fp64/states.npz"),
+        "states_sha256": sha256(args.lego_root / "overflow_zps/fp64/states.npz"),
+        "rows": rows,
+    }
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
 def _effect_row(card, entering, full_after, alternate_after, term: str) -> dict:
     full = arm_state("L64", _state_fields(full_after))
     T_delta = np.asarray(full_after.T.data) - np.asarray(alternate_after.T.data)
@@ -1375,6 +1464,13 @@ def main() -> None:
     p_aimp_scale.add_argument(
         "--out", type=Path, default=DEFAULT_OUT / "aimp_scaling.json")
     p_aimp_scale.set_defaults(func=command_aimp_scaling)
+
+    p_zdf_scale = sub.add_parser(
+        "zdf-scaling", help="literal versus midpoint ZDF W divisor")
+    p_zdf_scale.add_argument("--lego-root", type=Path, default=DEFAULT_LEGO_ROOT)
+    p_zdf_scale.add_argument(
+        "--out", type=Path, default=DEFAULT_OUT / "zdf_scaling.json")
+    p_zdf_scale.set_defaults(func=command_zdf_scaling)
 
     p_budget = sub.add_parser(
         "budget", help="cadenced slope census plus local term ablations")
