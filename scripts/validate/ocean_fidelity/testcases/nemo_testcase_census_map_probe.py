@@ -51,6 +51,7 @@ DEFAULT_LEGO_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l1/stage_mean_weights/stats/legoesm"
 )
 OWNER_PREREG_COMMIT = "11d98a704"
+W_METRIC_PREREG_COMMIT = "1b72ea5660"
 
 
 class ProbeError(RuntimeError):
@@ -530,7 +531,7 @@ def command_aimp_scaling(args) -> None:
         "format": "nemo-testcase-census-aimp-scaling-v1",
         "case": CASE,
         "git_sha": git_sha(),
-        "preregistration_commit": OWNER_PREREG_COMMIT,
+        "preregistration_commit": W_METRIC_PREREG_COMMIT,
         "precision": "fp64",
         "backend": jax.default_backend(),
         "reference": (
@@ -770,7 +771,9 @@ def command_run_arm(args) -> None:
             f"geometry dtypes {geometry_dtypes}")
     metadata = {
         "format": "nemo-testcase-l1-full-state-v1",
-        "preregistration_commit": OWNER_PREREG_COMMIT,
+        "preregistration_commit": (
+            OWNER_PREREG_COMMIT if args.arm == "bbl-reference"
+            else W_METRIC_PREREG_COMMIT),
         "git_sha": git_sha(),
         "case": CASE,
         "precision": args.precision,
