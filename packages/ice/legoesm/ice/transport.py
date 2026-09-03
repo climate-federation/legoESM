@@ -41,17 +41,17 @@ from legoesm import constants
 # MIRROR ``SeaIceConfig.T_ice_min`` / ``SeaIceConfig.T_melt_surface`` (both
 # documented in config.py as numerics-only bounds, NOT physical conservation
 # limits) so the signature defaults reference a Name, not a bare literal.
-_T_ICE_MIN_DEFAULT: float = 180.0   # == SeaIceConfig.T_ice_min [K]
+_T_ICE_MIN_DEFAULT: float = 180.0  # == SeaIceConfig.T_ice_min [K]
 # Concentration floor used when recovering an intensive tracer ratio
 # (h = vol/conc).  Floors the DENOMINATOR so the h = vol/conc spike is bounded.
-_CONC_FLOOR: float = 1e-12          # [dimensionless area fraction]
+_CONC_FLOOR: float = 1e-12  # [dimensionless area fraction]
 # Volume floor [m of ice per m^2 of grid cell] deciding whether a cell still
 # holds ice for the recovery branch.  Distinct from ``_CONC_FLOOR`` (a
 # concentration) — they share the 1e-12 numeric value (the same threshold the
 # thermo/lead-freeze recovery in sea_ice.py uses, ``V_after > 1e-12``) but
 # carry DIFFERENT units, so name them separately.  A cell with 0 < vol <= this
 # carries <1e-9 kg/m^2 of ice and is treated as ice-free.
-_VOL_FLOOR: float = 1e-12           # [m of ice per m^2 grid cell]
+_VOL_FLOOR: float = 1e-12  # [m of ice per m^2 grid cell]
 # Wide, NON-BINDING numerical-safety clamp for the recovered temperature.
 # Rationale (identical to the salinity channel in sea_ice.py): a monotone-PPM
 # ratio can overshoot the donor min/max by a hair at CFL<=1, and under CFL>1
@@ -63,15 +63,13 @@ _VOL_FLOOR: float = 1e-12           # [m of ice per m^2 grid cell]
 # conservative thermodynamics.  At the supported CFL<=1 (enforce with
 # SeaIceConfig.transport_subcycles>1) this clamp is non-binding and energy is
 # conserved exactly.
-_T_SAFETY_MARGIN_K: float = 50.0    # widen [T_ice_min, T_max] by this on each side
+_T_SAFETY_MARGIN_K: float = 50.0  # widen [T_ice_min, T_max] by this on each side
 
 # SI3's Prather program carries these five 2-D polynomial moments for every
 # transported extensive tracer.  The order is the restart order used by
 # icedyn_adv_pra.F90:1397-1497.  Keeping one packed array per moment makes the
 # carry a five-array pytree regardless of the number of transported tracers.
-SI3PratherMoments = tuple[
-    jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray
-]
+SI3PratherMoments = tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]
 SI3_PRATHER_MOMENT_NAMES = ("sx", "sy", "sxx", "syy", "sxy")
 
 # Fixed coefficients in the shipped SI3 Prather program.  These are named
@@ -95,6 +93,7 @@ def _is_voronoi_mesh(grid) -> bool:
 
 def _is_latlon_cgrid(grid) -> bool:
     from legoesm.grids.latlon import LatLonCGridGeometry
+
     return isinstance(grid, LatLonCGridGeometry)
 
 
@@ -241,10 +240,12 @@ def fv_flux_divergence_latlon_cgrid(
         upwind_cell_to_uface,
         upwind_cell_to_vface,
     )
-    u_face = (interp_cell_to_uface(u) * grid.cos_alpha_u
-              + interp_cell_to_uface(v) * grid.sin_alpha_u)
-    v_face = (-interp_cell_to_vface(u, grid) * grid.sin_alpha_v
-              + interp_cell_to_vface(v, grid) * grid.cos_alpha_v)
+
+    u_face = interp_cell_to_uface(u) * grid.cos_alpha_u + interp_cell_to_uface(v) * grid.sin_alpha_u
+    v_face = (
+        -interp_cell_to_vface(u, grid) * grid.sin_alpha_v
+        + interp_cell_to_vface(v, grid) * grid.cos_alpha_v
+    )
     q_u = upwind_cell_to_uface(q, u_face)
     q_v = upwind_cell_to_vface(q, v_face, grid)
     flux_u = u_face * q_u
@@ -320,9 +321,7 @@ def _ppm_tendency_2d(
         return fv_flux_divergence_latlon_cgrid(q, u, v, grid)
     if isinstance(grid, CubedSphereGrid):
         return fv_flux_divergence(q, u, v, grid, limiter=True)
-    raise TypeError(
-        f"unsupported grid {type(grid).__name__} for _ppm_tendency_2d"
-    )
+    raise TypeError(f"unsupported grid {type(grid).__name__} for _ppm_tendency_2d")
 
 
 def _ppm_tendency_per_category(
@@ -339,22 +338,25 @@ def _ppm_tendency_per_category(
     ``fv_flux_divergence_voronoi`` similarly.
     """
     if _is_latlon_grid(grid):
+
         def _kernel(qk):
             return fv_flux_divergence_latlon(qk, u, v, grid, limiter=True)
+
         return jax.vmap(_kernel, in_axes=-1, out_axes=-1)(q_cat)
     if _is_voronoi_mesh(grid):
+
         def _kernel_v(qk):
             return fv_flux_divergence_voronoi(qk, u, v, grid)
+
         return jax.vmap(_kernel_v, in_axes=-1, out_axes=-1)(q_cat)
     if _is_latlon_cgrid(grid):
+
         def _kernel_c(qk):
             return fv_flux_divergence_latlon_cgrid(qk, u, v, grid)
+
         return jax.vmap(_kernel_c, in_axes=-1, out_axes=-1)(q_cat)
     if not isinstance(grid, CubedSphereGrid):
-        raise TypeError(
-            f"unsupported grid {type(grid).__name__} for "
-            f"_ppm_tendency_per_category"
-        )
+        raise TypeError(f"unsupported grid {type(grid).__name__} for _ppm_tendency_per_category")
     u_3d = jnp.broadcast_to(u[..., None], q_cat.shape)
     v_3d = jnp.broadcast_to(v[..., None], q_cat.shape)
     return fv_flux_divergence_3d(q_cat, u_3d, v_3d, grid, limiter=True)
@@ -442,8 +444,8 @@ def advect_ice_tracers(
     n_subcycles = int(max(n_subcycles, 1))
 
     # Conservation-form auxiliary fields.
-    vol = h_ice * concentration                  # m of ice per m² of grid
-    enth = T_ice * vol                           # K · m
+    vol = h_ice * concentration  # m of ice per m² of grid
+    enth = T_ice * vol  # K · m
     conc = concentration
 
     # Multi-category detection: base ndim depends on grid layout.
@@ -461,16 +463,35 @@ def advect_ice_tracers(
 
     if n_subcycles == 1:
         vol_new, conc_new, enth_new = _ppm_one_substep(
-            vol, conc, enth, u_ice, v_ice, grid, dt_sub, is_multicat,
+            vol,
+            conc,
+            enth,
+            u_ice,
+            v_ice,
+            grid,
+            dt_sub,
+            is_multicat,
         )
     else:
+
         def _body(carry, _):
             v, c, e = carry
             return _ppm_one_substep(
-                v, c, e, u_ice, v_ice, grid, dt_sub, is_multicat,
+                v,
+                c,
+                e,
+                u_ice,
+                v_ice,
+                grid,
+                dt_sub,
+                is_multicat,
             ), None
+
         (vol_new, conc_new, enth_new), _ = lax.scan(
-            _body, (vol, conc, enth), xs=None, length=n_subcycles,
+            _body,
+            (vol, conc, enth),
+            xs=None,
+            length=n_subcycles,
         )
 
     # --- Recover thickness from the CONSERVED volume (finding #3) ----------
@@ -539,7 +560,7 @@ def zero_si3_prather_moments(contents: jnp.ndarray) -> SI3PratherMoments:
     return zero, zero, zero, zero, zero
 
 
-def _si3_prather_limit(
+def _si3_prather_limit_x(
     content: jnp.ndarray,
     moments: SI3PratherMoments,
     wet: jnp.ndarray,
@@ -553,6 +574,31 @@ def _si3_prather_limit(
     sxx = jnp.minimum(
         2.0 * content - (1.0 / 3.0) * jnp.abs(sx),
         jnp.maximum(jnp.abs(sx) - content, sxx),
+    )
+    active3 = wet[..., None] & (content > 0.0)
+    return content, (
+        jnp.where(active3, sx, 0.0),
+        jnp.where(active3, sy, 0.0),
+        jnp.where(active3, sxx, 0.0),
+        jnp.where(active3, syy, 0.0),
+        jnp.where(active3, jnp.clip(sxy, -content, content), 0.0),
+    )
+
+
+def _si3_prather_limit_y(
+    content: jnp.ndarray,
+    moments: SI3PratherMoments,
+    wet: jnp.ndarray,
+) -> tuple[jnp.ndarray, SI3PratherMoments]:
+    """SI3 y-sweep limiter, ``icedyn_adv_pra.F90:757-791``."""
+
+    sx, sy, sxx, syy, sxy = moments
+    content = jnp.maximum(content, 0.0)
+    slope_cap = _SI3_PRA_SLOPE_CAP_FACTOR * content
+    sy = jnp.clip(sy, -slope_cap, slope_cap)
+    syy = jnp.minimum(
+        2.0 * content - (1.0 / 3.0) * jnp.abs(sy),
+        jnp.maximum(jnp.abs(sy) - content, syy),
     )
     active3 = wet[..., None] & (content > 0.0)
     return content, (
@@ -588,10 +634,7 @@ def _si3_prather_merge_from_left(
         alpha2[..., None] * fxx
         + one2[..., None] * sxx
         + _SI3_PRA_SECOND_MOMENT_MERGE_FACTOR
-        * (
-            alpha[..., None] * one[..., None] * (sx - fx)
-            - (one - alpha)[..., None] * displacement
-        )
+        * (alpha[..., None] * one[..., None] * (sx - fx) - (one - alpha)[..., None] * displacement)
     )
     sxy = (
         alpha[..., None] * fxy
@@ -627,10 +670,7 @@ def _si3_prather_merge_from_right(
         alpha2[..., None] * fxx
         + one2[..., None] * sxx
         + _SI3_PRA_SECOND_MOMENT_MERGE_FACTOR
-        * (
-            alpha[..., None] * one[..., None] * (-sx + fx)
-            + (one - alpha)[..., None] * displacement
-        )
+        * (alpha[..., None] * one[..., None] * (-sx + fx) + (one - alpha)[..., None] * displacement)
     )
     sxy = (
         alpha[..., None] * fxy
@@ -642,6 +682,78 @@ def _si3_prather_merge_from_right(
     return area, content, (sx, sy, sxx, syy, sxy)
 
 
+def _si3_prather_merge_from_below(
+    area: jnp.ndarray,
+    content: jnp.ndarray,
+    moments: SI3PratherMoments,
+    flux_area: jnp.ndarray,
+    flux_content: jnp.ndarray,
+    flux_moments: SI3PratherMoments,
+) -> tuple[jnp.ndarray, jnp.ndarray, SI3PratherMoments]:
+    """Apply SI3's positive-V receiver program (Fortran lines 891-910)."""
+
+    sx, sy, sxx, syy, sxy = moments
+    fx, fy, fxx, fyy, fxy = flux_moments
+    area = area + flux_area
+    alpha = flux_area / area
+    one = 1.0 - alpha
+    alpha2 = alpha * alpha
+    one2 = one * one
+    content = content + flux_content
+    displacement = alpha[..., None] * content - one[..., None] * flux_content
+    sy = alpha[..., None] * fy + one[..., None] * sy + 3.0 * displacement
+    syy = (
+        alpha2[..., None] * fyy
+        + one2[..., None] * syy
+        + _SI3_PRA_SECOND_MOMENT_MERGE_FACTOR
+        * (alpha[..., None] * one[..., None] * (sy - fy) - (one - alpha)[..., None] * displacement)
+    )
+    sxy = (
+        alpha[..., None] * fxy
+        + one[..., None] * sxy
+        + 3.0 * (-one[..., None] * fx + alpha[..., None] * sx)
+    )
+    sx = sx + fx
+    sxx = sxx + fxx
+    return area, content, (sx, sy, sxx, syy, sxy)
+
+
+def _si3_prather_merge_from_above(
+    area: jnp.ndarray,
+    content: jnp.ndarray,
+    moments: SI3PratherMoments,
+    flux_area: jnp.ndarray,
+    flux_content: jnp.ndarray,
+    flux_moments: SI3PratherMoments,
+) -> tuple[jnp.ndarray, jnp.ndarray, SI3PratherMoments]:
+    """Apply SI3's negative-V receiver program (Fortran lines 912-930)."""
+
+    sx, sy, sxx, syy, sxy = moments
+    fx, fy, fxx, fyy, fxy = flux_moments
+    area = area + flux_area
+    alpha = flux_area / area
+    one = 1.0 - alpha
+    alpha2 = alpha * alpha
+    one2 = one * one
+    content = content + flux_content
+    displacement = -alpha[..., None] * content + one[..., None] * flux_content
+    sy = alpha[..., None] * fy + one[..., None] * sy + 3.0 * displacement
+    syy = (
+        alpha2[..., None] * fyy
+        + one2[..., None] * syy
+        + _SI3_PRA_SECOND_MOMENT_MERGE_FACTOR
+        * (alpha[..., None] * one[..., None] * (-sy + fy) + (one - alpha)[..., None] * displacement)
+    )
+    sxy = (
+        alpha[..., None] * fxy
+        + one[..., None] * sxy
+        + 3.0 * (one[..., None] * fx - alpha[..., None] * sx)
+    )
+    sx = sx + fx
+    sxx = sxx + fxx
+    return area, content, (sx, sy, sxx, syy, sxy)
+
+
 def _si3_prather_x_substep(
     contents: jnp.ndarray,
     moments: SI3PratherMoments,
@@ -650,94 +762,78 @@ def _si3_prather_x_substep(
     wet: jnp.ndarray,
     dt: float,
     *,
+    initial_area: jnp.ndarray,
+    first_sweep: bool,
     halo_width: int,
     subcycle_index: int,
     subcycles: int,
-) -> tuple[jnp.ndarray, SI3PratherMoments]:
+) -> tuple[jnp.ndarray, SI3PratherMoments, jnp.ndarray]:
     """One closed-box x sweep of SI3 ``adv_x`` (Fortran lines 499-719)."""
 
     n_x = contents.shape[0]
     ihls = 0 if subcycles == 1 else max(0, halo_width - subcycle_index)
     ji0 = 1 + ihls
+    jj0 = (1 if first_sweep else 0) + ihls
     index = jnp.arange(n_x)
-    limit_mask = (index >= halo_width - ji0) & (
-        index < n_x - halo_width + ji0
-    )
+    index_y = jnp.arange(contents.shape[1])
+    limit_mask = (index >= halo_width - ji0) & (index < n_x - halo_width + ji0)
+    cross_mask = (index_y >= halo_width - jj0) & (index_y < contents.shape[1] - halo_width + jj0)
     receiver_width = ji0 - 1
     receiver_mask = (index >= halo_width - receiver_width) & (
         index < n_x - halo_width + receiver_width
     )
-    face_mask = (index >= halo_width - ji0) & (
-        index < n_x - halo_width + receiver_width
-    )
+    face_mask = (index >= halo_width - ji0) & (index < n_x - halo_width + receiver_width)
+    limit_mask_xy = limit_mask[:, None] & cross_mask[None, :]
+    receiver_mask_xy = receiver_mask[:, None] & cross_mask[None, :]
+    face_mask_xy = face_mask[:, None] & cross_mask[None, :]
+    sweep_area = cell_area if first_sweep else initial_area
 
-    limited_content, limited_moments = _si3_prather_limit(contents, moments, wet)
-    content = jnp.where(limit_mask[:, None, None], limited_content, contents)
+    limited_content, limited_moments = _si3_prather_limit_x(contents, moments, wet)
+    content = jnp.where(limit_mask_xy[..., None], limited_content, contents)
     moments = cast(
         SI3PratherMoments,
         tuple(
-            jnp.where(limit_mask[:, None, None], new, old)
+            jnp.where(limit_mask_xy[..., None], new, old)
             for new, old in zip(limited_moments, moments, strict=True)
         ),
     )
     sx, sy, sxx, syy, sxy = moments
 
-    positive = (u_transport >= 0.0) & face_mask[:, None]
-    negative = (u_transport < 0.0) & face_mask[:, None]
+    positive = (u_transport >= 0.0) & face_mask_xy
+    negative = (u_transport < 0.0) & face_mask_xy
 
     # NEMO first computes and removes every right-going slab
     # (icedyn_adv_pra.F90:570-616).  The negative-face flux loop then reads
     # those already-updated donor boxes at i+1 (:618-637).  Preserving that
     # ordering matters when one cell exports through both faces.
-    positive_alpha = jnp.where(
-        positive, jnp.abs(u_transport) * dt / cell_area, 0.0
-    )
+    positive_alpha = jnp.where(positive, jnp.abs(u_transport) * dt / sweep_area, 0.0)
     positive_one = 1.0 - positive_alpha
     positive_alpha2 = positive_alpha * positive_alpha
     positive_alpha3 = positive_alpha2 * positive_alpha
     positive_flux_area = jnp.where(positive, jnp.abs(u_transport) * dt, 0.0)
     positive_flux_content = positive_alpha[..., None] * (
-        content
-        + positive_one[..., None]
-        * (
-            sx
-            + (positive_one - positive_alpha)[..., None] * sxx
-        )
+        content + positive_one[..., None] * (sx + (positive_one - positive_alpha)[..., None] * sxx)
     )
-    positive_flux_content = jnp.where(
-        positive[..., None], positive_flux_content, 0.0
-    )
+    positive_flux_content = jnp.where(positive[..., None], positive_flux_content, 0.0)
     positive_flux_x = jnp.where(
         positive[..., None],
-        positive_alpha2[..., None]
-        * (sx + 3.0 * positive_one[..., None] * sxx),
+        positive_alpha2[..., None] * (sx + 3.0 * positive_one[..., None] * sxx),
         0.0,
     )
-    positive_flux_xx = jnp.where(
-        positive[..., None], positive_alpha3[..., None] * sxx, 0.0
-    )
+    positive_flux_xx = jnp.where(positive[..., None], positive_alpha3[..., None] * sxx, 0.0)
     positive_flux_y = jnp.where(
         positive[..., None],
-        positive_alpha[..., None]
-        * (sy + positive_one[..., None] * sxy),
+        positive_alpha[..., None] * (sy + positive_one[..., None] * sxy),
         0.0,
     )
-    positive_flux_yy = jnp.where(
-        positive[..., None], positive_alpha[..., None] * syy, 0.0
-    )
-    positive_flux_xy = jnp.where(
-        positive[..., None], positive_alpha2[..., None] * sxy, 0.0
-    )
+    positive_flux_yy = jnp.where(positive[..., None], positive_alpha[..., None] * syy, 0.0)
+    positive_flux_xy = jnp.where(positive[..., None], positive_alpha2[..., None] * sxy, 0.0)
 
     positive_one2 = positive_one * positive_one
-    area_after_right = cell_area - positive_flux_area
+    area_after_right = sweep_area - positive_flux_area
     content_after_right = content - positive_flux_content
-    sx_after_right = positive_one2[..., None] * (
-        sx - 3.0 * positive_alpha[..., None] * sxx
-    )
-    sxx_after_right = (
-        positive_one2 * positive_one
-    )[..., None] * sxx
+    sx_after_right = positive_one2[..., None] * (sx - 3.0 * positive_alpha[..., None] * sxx)
+    sxx_after_right = (positive_one2 * positive_one)[..., None] * sxx
     sy_after_right = sy - positive_flux_y
     syy_after_right = syy - positive_flux_yy
     sxy_after_right = positive_one2[..., None] * sxy
@@ -764,14 +860,9 @@ def _si3_prather_x_substep(
     negative_flux_content = negative_alpha[..., None] * (
         negative_donor_content
         - negative_one[..., None]
-        * (
-            negative_donor_sx
-            - (negative_one - negative_alpha)[..., None] * negative_donor_sxx
-        )
+        * (negative_donor_sx - (negative_one - negative_alpha)[..., None] * negative_donor_sxx)
     )
-    negative_flux_content = jnp.where(
-        negative[..., None], negative_flux_content, 0.0
-    )
+    negative_flux_content = jnp.where(negative[..., None], negative_flux_content, 0.0)
     negative_flux_x = jnp.zeros_like(negative_flux_content)
     negative_flux_xx = jnp.where(
         negative[..., None],
@@ -799,21 +890,15 @@ def _si3_prather_x_substep(
     left_alpha = jnp.where(out_left, jnp.roll(negative_alpha, 1, axis=0), 0.0)
     left_one = 1.0 - left_alpha
     left_one2 = left_one * left_one
-    left_flux_area = jnp.where(
-        out_left, jnp.roll(negative_flux_area, 1, axis=0), 0.0
-    )
+    left_flux_area = jnp.where(out_left, jnp.roll(negative_flux_area, 1, axis=0), 0.0)
     left_flux_content = jnp.where(
         out_left[..., None], jnp.roll(negative_flux_content, 1, axis=0), 0.0
     )
     area = area_after_right - left_flux_area
     content = content_after_right - left_flux_content
-    sx = left_one2[..., None] * (
-        sx_after_right + 3.0 * left_alpha[..., None] * sxx_after_right
-    )
+    sx = left_one2[..., None] * (sx_after_right + 3.0 * left_alpha[..., None] * sxx_after_right)
     sxx = (left_one2 * left_one)[..., None] * sxx_after_right
-    sy = sy_after_right - jnp.where(
-        out_left[..., None], jnp.roll(negative_flux_y, 1, axis=0), 0.0
-    )
+    sy = sy_after_right - jnp.where(out_left[..., None], jnp.roll(negative_flux_y, 1, axis=0), 0.0)
     syy = syy_after_right - jnp.where(
         out_left[..., None], jnp.roll(negative_flux_yy, 1, axis=0), 0.0
     )
@@ -830,11 +915,9 @@ def _si3_prather_x_substep(
         positive_flux_xy + negative_flux_xy,
     )
 
-    incoming_left = receiver_mask[:, None] & jnp.roll(positive, 1, axis=0)
+    incoming_left = receiver_mask_xy & jnp.roll(positive, 1, axis=0)
     left_area = jnp.where(incoming_left, jnp.roll(flux_area, 1, axis=0), 0.0)
-    left_content = jnp.where(
-        incoming_left[..., None], jnp.roll(flux_content, 1, axis=0), 0.0
-    )
+    left_content = jnp.where(incoming_left[..., None], jnp.roll(flux_content, 1, axis=0), 0.0)
     left_moments = cast(
         SI3PratherMoments,
         tuple(
@@ -855,15 +938,12 @@ def _si3_prather_x_substep(
         ),
     )
 
-    incoming_right = receiver_mask[:, None] & negative
+    incoming_right = receiver_mask_xy & negative
     right_area = jnp.where(incoming_right, flux_area, 0.0)
     right_content = jnp.where(incoming_right[..., None], flux_content, 0.0)
     right_moments = cast(
         SI3PratherMoments,
-        tuple(
-            jnp.where(incoming_right[..., None], value, 0.0)
-            for value in flux_moments
-        ),
+        tuple(jnp.where(incoming_right[..., None], value, 0.0) for value in flux_moments),
     )
     merged_area, merged_content, merged_moments = _si3_prather_merge_from_right(
         area, content, moments, right_area, right_content, right_moments
@@ -876,7 +956,205 @@ def _si3_prather_x_substep(
             for new, old in zip(merged_moments, moments, strict=True)
         ),
     )
-    return content, moments  # area is scratch, as in each SI3 tracer call
+    return content, moments, area
+
+
+def _si3_prather_y_substep(
+    contents: jnp.ndarray,
+    moments: SI3PratherMoments,
+    v_transport: jnp.ndarray,
+    cell_area: jnp.ndarray,
+    wet: jnp.ndarray,
+    dt: float,
+    *,
+    initial_area: jnp.ndarray,
+    first_sweep: bool,
+    halo_width: int,
+    subcycle_index: int,
+    subcycles: int,
+) -> tuple[jnp.ndarray, SI3PratherMoments, jnp.ndarray]:
+    """One y sweep of SI3 ``adv_y`` (``icedyn_adv_pra.F90:722-943``)."""
+
+    ihls = 0 if subcycles == 1 else max(0, halo_width - subcycle_index)
+    ji0 = (1 if first_sweep else 0) + ihls
+    jj0 = 1 + ihls
+    index_x = jnp.arange(contents.shape[0])
+    index_y = jnp.arange(contents.shape[1])
+    cross_mask = (index_x >= halo_width - ji0) & (index_x < contents.shape[0] - halo_width + ji0)
+    limit_mask = (index_y >= halo_width - jj0) & (index_y < contents.shape[1] - halo_width + jj0)
+    receiver_width = jj0 - 1
+    receiver_mask = (index_y >= halo_width - receiver_width) & (
+        index_y < contents.shape[1] - halo_width + receiver_width
+    )
+    face_mask = (index_y >= halo_width - jj0) & (
+        index_y < contents.shape[1] - halo_width + receiver_width
+    )
+    limit_mask_xy = cross_mask[:, None] & limit_mask[None, :]
+    receiver_mask_xy = cross_mask[:, None] & receiver_mask[None, :]
+    face_mask_xy = cross_mask[:, None] & face_mask[None, :]
+    sweep_area = cell_area if first_sweep else initial_area
+
+    limited_content, limited_moments = _si3_prather_limit_y(contents, moments, wet)
+    content = jnp.where(limit_mask_xy[..., None], limited_content, contents)
+    moments = cast(
+        SI3PratherMoments,
+        tuple(
+            jnp.where(limit_mask_xy[..., None], new, old)
+            for new, old in zip(limited_moments, moments, strict=True)
+        ),
+    )
+    sx, sy, sxx, syy, sxy = moments
+    positive = (v_transport >= 0.0) & face_mask_xy
+    negative = (v_transport < 0.0) & face_mask_xy
+
+    positive_alpha = jnp.where(positive, jnp.abs(v_transport) * dt / sweep_area, 0.0)
+    positive_one = 1.0 - positive_alpha
+    positive_alpha2 = positive_alpha * positive_alpha
+    positive_alpha3 = positive_alpha2 * positive_alpha
+    positive_flux_area = jnp.where(positive, jnp.abs(v_transport) * dt, 0.0)
+    positive_flux_content = positive_alpha[..., None] * (
+        content + positive_one[..., None] * (sy + (positive_one - positive_alpha)[..., None] * syy)
+    )
+    positive_flux_content = jnp.where(positive[..., None], positive_flux_content, 0.0)
+    positive_flux_y = jnp.where(
+        positive[..., None],
+        positive_alpha2[..., None] * (sy + 3.0 * positive_one[..., None] * syy),
+        0.0,
+    )
+    positive_flux_yy = jnp.where(positive[..., None], positive_alpha3[..., None] * syy, 0.0)
+    positive_flux_x = jnp.where(
+        positive[..., None],
+        positive_alpha[..., None] * (sx + positive_one[..., None] * sxy),
+        0.0,
+    )
+    positive_flux_xx = jnp.where(positive[..., None], positive_alpha[..., None] * sxx, 0.0)
+    positive_flux_xy = jnp.where(positive[..., None], positive_alpha2[..., None] * sxy, 0.0)
+
+    positive_one2 = positive_one * positive_one
+    area_after_up = sweep_area - positive_flux_area
+    content_after_up = content - positive_flux_content
+    sy_after_up = positive_one2[..., None] * (sy - 3.0 * positive_alpha[..., None] * syy)
+    syy_after_up = (positive_one2 * positive_one)[..., None] * syy
+    sx_after_up = sx - positive_flux_x
+    sxx_after_up = sxx - positive_flux_xx
+    sxy_after_up = positive_one2[..., None] * sxy
+
+    negative_donor_area = jnp.roll(area_after_up, -1, axis=1)
+    negative_donor_content = jnp.roll(content_after_up, -1, axis=1)
+    negative_donor_sx = jnp.roll(sx_after_up, -1, axis=1)
+    negative_donor_sy = jnp.roll(sy_after_up, -1, axis=1)
+    negative_donor_sxx = jnp.roll(sxx_after_up, -1, axis=1)
+    negative_donor_syy = jnp.roll(syy_after_up, -1, axis=1)
+    negative_donor_sxy = jnp.roll(sxy_after_up, -1, axis=1)
+    negative_alpha = jnp.where(negative, jnp.abs(v_transport) * dt / negative_donor_area, 0.0)
+    negative_one = 1.0 - negative_alpha
+    negative_alpha2 = negative_alpha * negative_alpha
+    negative_alpha3 = negative_alpha2 * negative_alpha
+    negative_flux_area = jnp.where(negative, jnp.abs(v_transport) * dt, 0.0)
+    negative_flux_content = negative_alpha[..., None] * (
+        negative_donor_content
+        - negative_one[..., None]
+        * (negative_donor_sy - (negative_one - negative_alpha)[..., None] * negative_donor_syy)
+    )
+    negative_flux_content = jnp.where(negative[..., None], negative_flux_content, 0.0)
+    negative_flux_y = jnp.where(
+        negative[..., None],
+        negative_alpha2[..., None]
+        * (negative_donor_sy - 3.0 * negative_one[..., None] * negative_donor_syy),
+        0.0,
+    )
+    negative_flux_yy = jnp.where(
+        negative[..., None], negative_alpha3[..., None] * negative_donor_syy, 0.0
+    )
+    negative_flux_x = jnp.where(
+        negative[..., None],
+        negative_alpha[..., None]
+        * (negative_donor_sx - negative_one[..., None] * negative_donor_sxy),
+        0.0,
+    )
+    negative_flux_xx = jnp.where(
+        negative[..., None], negative_alpha[..., None] * negative_donor_sxx, 0.0
+    )
+    negative_flux_xy = jnp.where(
+        negative[..., None], negative_alpha2[..., None] * negative_donor_sxy, 0.0
+    )
+
+    out_down = jnp.roll(negative, 1, axis=1)
+    down_alpha = jnp.where(out_down, jnp.roll(negative_alpha, 1, axis=1), 0.0)
+    down_one = 1.0 - down_alpha
+    down_one2 = down_one * down_one
+    down_flux_area = jnp.where(out_down, jnp.roll(negative_flux_area, 1, axis=1), 0.0)
+    down_flux_content = jnp.where(
+        out_down[..., None], jnp.roll(negative_flux_content, 1, axis=1), 0.0
+    )
+    area = area_after_up - down_flux_area
+    content = content_after_up - down_flux_content
+    sy = down_one2[..., None] * (sy_after_up + 3.0 * down_alpha[..., None] * syy_after_up)
+    syy = (down_one2 * down_one)[..., None] * syy_after_up
+    sx = sx_after_up - jnp.where(out_down[..., None], jnp.roll(negative_flux_x, 1, axis=1), 0.0)
+    sxx = sxx_after_up - jnp.where(out_down[..., None], jnp.roll(negative_flux_xx, 1, axis=1), 0.0)
+    sxy = down_one2[..., None] * sxy_after_up
+    moments = sx, sy, sxx, syy, sxy
+
+    flux_area = positive_flux_area + negative_flux_area
+    flux_content = positive_flux_content + negative_flux_content
+    flux_moments = (
+        positive_flux_x + negative_flux_x,
+        positive_flux_y + negative_flux_y,
+        positive_flux_xx + negative_flux_xx,
+        positive_flux_yy + negative_flux_yy,
+        positive_flux_xy + negative_flux_xy,
+    )
+    incoming_below = receiver_mask_xy & jnp.roll(positive, 1, axis=1)
+    below_area = jnp.where(incoming_below, jnp.roll(flux_area, 1, axis=1), 0.0)
+    below_content = jnp.where(incoming_below[..., None], jnp.roll(flux_content, 1, axis=1), 0.0)
+    below_moments = cast(
+        SI3PratherMoments,
+        tuple(
+            jnp.where(incoming_below[..., None], jnp.roll(value, 1, axis=1), 0.0)
+            for value in flux_moments
+        ),
+    )
+    merged_area, merged_content, merged_moments = _si3_prather_merge_from_below(
+        area, content, moments, below_area, below_content, below_moments
+    )
+    area = jnp.where(incoming_below, merged_area, area)
+    content = jnp.where(incoming_below[..., None], merged_content, content)
+    moments = cast(
+        SI3PratherMoments,
+        tuple(
+            jnp.where(incoming_below[..., None], new, old)
+            for new, old in zip(merged_moments, moments, strict=True)
+        ),
+    )
+    incoming_above = receiver_mask_xy & negative
+    above_area = jnp.where(incoming_above, flux_area, 0.0)
+    above_content = jnp.where(incoming_above[..., None], flux_content, 0.0)
+    above_moments = cast(
+        SI3PratherMoments,
+        tuple(jnp.where(incoming_above[..., None], value, 0.0) for value in flux_moments),
+    )
+    merged_area, merged_content, merged_moments = _si3_prather_merge_from_above(
+        area, content, moments, above_area, above_content, above_moments
+    )
+    area = jnp.where(incoming_above, merged_area, area)
+    content = jnp.where(incoming_above[..., None], merged_content, content)
+    moments = cast(
+        SI3PratherMoments,
+        tuple(
+            jnp.where(incoming_above[..., None], new, old)
+            for new, old in zip(merged_moments, moments, strict=True)
+        ),
+    )
+    return content, moments, area
+
+
+def _si3_periodic_halo_xy(value: jnp.ndarray, halo_width: int) -> jnp.ndarray:
+    """Apply ICE_ADV2D's bi-periodic T-point halo (`usrdef_nam.F90:99`)."""
+
+    interior = value[halo_width:-halo_width, halo_width:-halo_width, ...]
+    padding = ((halo_width, halo_width), (halo_width, halo_width)) + ((0, 0),) * (value.ndim - 2)
+    return jnp.pad(interior, padding, mode="wrap")
 
 
 def advect_si3_prather_1d(
@@ -914,13 +1192,9 @@ def advect_si3_prather_1d(
     if cell_area.shape != u_ice.shape or wet.shape != u_ice.shape:
         raise ValueError("si3_prather metric/mask shapes disagree")
     if ice_volume_index is None and concentration_index is None:
-        raise ValueError(
-            "si3_prather requires volume and concentration indices for Hbig"
-        )
+        raise ValueError("si3_prather requires volume and concentration indices for Hbig")
     if ice_volume_index is None or concentration_index is None:
-        raise ValueError(
-            "si3_prather Hbig requires both volume and concentration indices"
-        )
+        raise ValueError("si3_prather Hbig requires both volume and concentration indices")
     if subcycles is None:
         cfl = float(jnp.max(jnp.abs(u_ice)) * dt / dx)
         subcycles = (
@@ -952,13 +1226,15 @@ def advect_si3_prather_1d(
     h_max_all = jnp.maximum(1.0e-20, jnp.max(jnp.stack(neighbors), axis=0))
     for subcycle_index in range(1, subcycles + 1):
         ihls = 0 if subcycles == 1 else max(0, halo_width - subcycle_index)
-        out, out_moments = _si3_prather_x_substep(
+        out, out_moments, _ = _si3_prather_x_substep(
             out,
             out_moments,
             u_transport,
             cell_area,
             wet,
             dt / subcycles,
+            initial_area=cell_area,
+            first_sweep=True,
             halo_width=halo_width,
             subcycle_index=subcycle_index,
             subcycles=subcycles,
@@ -972,9 +1248,7 @@ def advect_si3_prather_1d(
         safe_concentration = jnp.where(has_ice, concentration, 1.0)
         thickness = jnp.where(has_ice, volume / safe_concentration, 0.0)
         active = jnp.arange(out.shape[0])
-        active = (active >= halo_width - ihls) & (
-            active < out.shape[0] - halo_width + ihls
-        )
+        active = (active >= halo_width - ihls) & (active < out.shape[0] - halo_width + ihls)
         correct = (
             active[:, None]
             & (volume > 0.0)
@@ -988,4 +1262,165 @@ def advect_si3_prather_1d(
             concentration,
         )
         out = out.at[..., concentration_index].set(concentration * cell_area)
+    return out, out_moments, subcycles
+
+
+def advect_si3_prather_2d(
+    contents: jnp.ndarray,
+    moments: SI3PratherMoments,
+    u_ice: jnp.ndarray,
+    v_ice: jnp.ndarray,
+    cell_area: jnp.ndarray,
+    wet: jnp.ndarray,
+    dt: float,
+    *,
+    dx: float,
+    dy: float,
+    ice_step_index: int,
+    nn_fsbc: int = 1,
+    halo_width: int = 2,
+    ice_volume_index: int | None = None,
+    concentration_index: int | None = None,
+    subcycles: int | None = None,
+) -> tuple[jnp.ndarray, SI3PratherMoments, int]:
+    """SI3 Prather x/y split for the shipped single-category ICE_ADV2D card.
+
+    Odd ice steps start with x and even ice steps start with y; when CFL
+    subcycling is active, the first direction alternates again with ``jt``.
+    This is the exact selector at ``icedyn_adv_pra.F90:253-351``.
+    """
+
+    if contents.ndim != 3:
+        raise ValueError("si3_prather requires (x, y, tracer) packed contents")
+    if any(moment.shape != contents.shape for moment in moments):
+        raise ValueError("si3_prather moment shapes must match packed contents")
+    if u_ice.shape != contents.shape[:2] or v_ice.shape != u_ice.shape:
+        raise ValueError("si3_prather velocity/contents shapes disagree")
+    if cell_area.shape != u_ice.shape or wet.shape != u_ice.shape:
+        raise ValueError("si3_prather metric/mask shapes disagree")
+    if ice_volume_index is None or concentration_index is None:
+        raise ValueError("si3_prather requires volume and concentration indices for Hbig")
+    if ice_step_index < 1 or nn_fsbc < 1:
+        raise ValueError("si3_prather requires positive ice_step_index and nn_fsbc")
+    if subcycles is None:
+        cfl = max(
+            float(jnp.max(jnp.abs(u_ice)) * dt / dx),
+            float(jnp.max(jnp.abs(v_ice)) * dt / dy),
+        )
+        subcycles = (
+            3
+            if cfl > _SI3_PRA_CFL_THREE_CYCLE_THRESHOLD
+            else 2
+            if cfl > _SI3_PRA_CFL_TWO_CYCLE_THRESHOLD
+            else 1
+        )
+    if subcycles not in (1, 2, 3):
+        raise ValueError(f"si3_prather subcycles must be 1, 2, or 3; got {subcycles}")
+
+    out = contents
+    out_moments = moments
+    u_transport = u_ice * dy
+    v_transport = v_ice * dx
+    volume = out[..., ice_volume_index] / cell_area
+    concentration = out[..., concentration_index] / cell_area
+    has_ice = concentration > 1.0e-10
+    safe_concentration = jnp.where(has_ice, concentration, 1.0)
+    thickness = jnp.where(has_ice, volume / safe_concentration, 0.0)
+    neighbors = [
+        jnp.roll(jnp.roll(thickness, di, axis=0), dj, axis=1)
+        for di in (-1, 0, 1)
+        for dj in (-1, 0, 1)
+    ]
+    h_max_all = jnp.maximum(1.0e-20, jnp.max(jnp.stack(neighbors), axis=0))
+
+    for subcycle_index in range(1, subcycles + 1):
+        area = cell_area
+        x_first = ((ice_step_index - 1) // nn_fsbc) % 2 == ((subcycle_index - 1) % 2)
+        if x_first:
+            out, out_moments, area = _si3_prather_x_substep(
+                out,
+                out_moments,
+                u_transport,
+                cell_area,
+                wet,
+                dt / subcycles,
+                initial_area=area,
+                first_sweep=True,
+                halo_width=halo_width,
+                subcycle_index=subcycle_index,
+                subcycles=subcycles,
+            )
+            out, out_moments, area = _si3_prather_y_substep(
+                out,
+                out_moments,
+                v_transport,
+                cell_area,
+                wet,
+                dt / subcycles,
+                initial_area=area,
+                first_sweep=False,
+                halo_width=halo_width,
+                subcycle_index=subcycle_index,
+                subcycles=subcycles,
+            )
+        else:
+            out, out_moments, area = _si3_prather_y_substep(
+                out,
+                out_moments,
+                v_transport,
+                cell_area,
+                wet,
+                dt / subcycles,
+                initial_area=area,
+                first_sweep=True,
+                halo_width=halo_width,
+                subcycle_index=subcycle_index,
+                subcycles=subcycles,
+            )
+            out, out_moments, area = _si3_prather_x_substep(
+                out,
+                out_moments,
+                u_transport,
+                cell_area,
+                wet,
+                dt / subcycles,
+                initial_area=area,
+                first_sweep=False,
+                halo_width=halo_width,
+                subcycle_index=subcycle_index,
+                subcycles=subcycles,
+            )
+
+        volume = out[..., ice_volume_index] / cell_area
+        concentration = out[..., concentration_index] / cell_area
+        has_ice = concentration > 0.0
+        safe_concentration = jnp.where(has_ice, concentration, 1.0)
+        thickness = jnp.where(has_ice, volume / safe_concentration, 0.0)
+        ihls = 0 if subcycles == 1 else max(0, halo_width - subcycle_index)
+        active_x = jnp.arange(out.shape[0])
+        active_x = (active_x >= halo_width - ihls) & (active_x < out.shape[0] - halo_width + ihls)
+        active_y = jnp.arange(out.shape[1])
+        active_y = (active_y >= halo_width - ihls) & (active_y < out.shape[1] - halo_width + ihls)
+        correct = (
+            active_x[:, None]
+            & active_y[None, :]
+            & (volume > 0.0)
+            & (concentration > 0.0)
+            & (thickness > h_max_all)
+            & (concentration < _SI3_PRA_HBIG_CONCENTRATION_THRESHOLD)
+        )
+        concentration = jnp.where(
+            correct,
+            volume / jnp.minimum(h_max_all, _SI3_PRA_HBIG_MAX_THICKNESS_M),
+            concentration,
+        )
+        out = out.at[..., concentration_index].set(concentration * cell_area)
+        # The shipped root ICE_ADV2D domain is bi-periodic.  NEMO refreshes
+        # contents and all five moments after every `jt` at
+        # icedyn_adv_pra.F90:432-479.
+        out = _si3_periodic_halo_xy(out, halo_width)
+        out_moments = cast(
+            SI3PratherMoments,
+            tuple(_si3_periodic_halo_xy(value, halo_width) for value in out_moments),
+        )
     return out, out_moments, subcycles

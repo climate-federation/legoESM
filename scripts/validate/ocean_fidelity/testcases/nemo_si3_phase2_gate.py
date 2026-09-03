@@ -547,13 +547,15 @@ def inactive_source_arm_gate(card) -> dict[str, dict]:
         return float(jnp.max(jnp.abs(jnp.stack(candidates))))
 
     for _ in range(card.n_steps):
-        after_first, _ = _si3_prather_x_substep(
+        after_first, _, _ = _si3_prather_x_substep(
             state.contents,
             state.moments,
             card.prescribed_u_ice * card.dy_m,
             area,
             wet,
             card.dt_s / 2,
+            initial_area=area,
+            first_sweep=True,
             halo_width=card.halo_width,
             subcycle_index=1,
             subcycles=2,

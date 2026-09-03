@@ -1,14 +1,14 @@
-# SI3 lane 3 — phase-2 receipt (rung 3.1 only)
+# SI3 lane 3 — phase-2 receipt (rungs 3.1 and 3.2)
 
 Issue: climate-federation/legoESM #1699
 
 Branch: `fidelity/nemo-testcases-l3-si3dyn-codex`
 
-Oracle root: `/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv1d/final`
-Gate artifact:
-`/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv1d/phase2/nemo_si3_phase2_gate.json`
+Oracle roots: `/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv1d/final` and
+`/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv2d/final`.
+Gate artifacts are the corresponding `phase2/nemo_si3_phase2_gate.json` files.
 
-## Verdict
+## Rung 3.1 verdict
 
 **Overall: DEBT.**  The source-built geometry, cold-start entry, and every
 registered ordinary prognostic at all 40 available step boundaries are
@@ -93,7 +93,7 @@ profile values appeared as anonymous arithmetic literals.
 
 They now live in sourced module-level provenance blocks:
 
-* `transport.py:77-85` names the limiter/merge coefficients, the two CFL
+* `transport.py:75-83` names the limiter/merge coefficients, the two CFL
   thresholds, the `0.15` `Hbig` threshold, and `rn_himax=99 m`, citing
   `icedyn_adv_pra.F90:124-126,553,681,702,1000` and
   `cfgs/SHARED/namelist_ice_ref:46` (not overridden by ORCA1);
@@ -193,12 +193,25 @@ plants above.
 
 ## Verification record
 
-* `pytest` over the phase-1/phase-2 fidelity gates and ice transport/state
-  units: **68 passed, 1 skipped**.
+* `pytest` over the phase-1 oracle gate and both phase-2 rung gates:
+  **48 passed**.  The independent ice state/transport regression set is
+  **33 passed, 1 skipped**.
 * Focused phase-2 suite: **14 passed**; this includes complete-card JIT, reverse-mode,
   source-essential `Hbig`, restart carry, geometry/state plants, coverage
   plant, general dual-outflow ordering, mandatory Hbig indices, full
   trajectory, and loud endpoint DEBT.
+* Focused rung-3.2 suite: **13 passed**; this includes complete-card JIT/grad,
+  all-tracer `kt=1` and first-step exactness, y-limiter orientation,
+  alternating-order plant, source-correction plant, all-80-moment restart
+  carry, geometry/inventory plants, ordered frame/header provenance, exact row
+  registration, selector/velocity/clock/extra-restart-key rejection, and the
+  complete 485-step gate.
+* The coefficient and hardcoded-constant ratchets were run together:
+  **3,734 passed, 2 skipped, 7 failed**.  All seven selected checks covering
+  every ratchet-rostered touched file pass.  The seven full-suite failures are
+  pre-existing, unrelated paths: `gm_redi_latlon_cgrid.py`, `tke.py`, FV3
+  coupling and its test, and three DINO ocean tests.  No such failure is
+  hidden or attributed to this lane.
 * The earlier two adversarial approvals predated this independent-review HOLD;
   this section supersedes the earlier review status rather than concealing it.
 * Ruff (`F,E501,I`): clean for every changed Python file.
@@ -213,23 +226,150 @@ plants above.
   `tke_avt`, and `tke_dissl` are unclassified.  This dispatch changes neither
   ocean state nor ocean restart code.
 
+## Rung 3.2 — ICE_ADV2D
+
+### Verdict and fixed gate
+
+**Overall: UNMEASURED; numeric fidelity: DEBT.**  The unresolved candidate
+`snwice_mass` and before-level contract prevents a green exit independently of
+the numeric score.  The 99 x 99 oracle geometry and all 20 cold-start boundary
+fields are **AT-BAR**.  The trajectory remains at the immutable pointwise
+`1e-15` class through 15 completed steps; the first measured divergence is
+`trajectory.post_step_00000016.szv_i_l01`.  Later accumulated errors and the
+final moment endpoint remain DEBT.  These labels report the gate; no tolerance
+was relaxed and no equivalence claim is made.
+
+| registered group | rows | AT-BAR / DEBT | maximum normalized error |
+|---|---:|---:|---:|
+| geometry | 22 | 22 / 0 | `1.9334496211159188e-16` |
+| `kt=1` entry | 20 | 20 / 0 | `2.7671398542734975e-16` |
+| post-step trajectory | 9,700 | 4,322 / 5,378 | `1.130489336137675e-14` (`post_step_474.v_i`) |
+| all active restart moments | 80 | 10 / 70 | `7.703351410561056e-14` (`sxyap`) |
+| **numeric total** | **9,822** | **4,374 / 5,448** | **DEBT** |
+
+The corrected gate has 9,822 unique rows: 22 geometry rows; 20 fields at each of 486
+boundaries (entry `kt=1`, 484 later entry frames, and the step-485 restart);
+and all 80 active oracle moment arrays discovered in the restart.  It requires
+exact set equality, not only the count, and fails closed unless the phase-1
+mesh/frame inventories are exact.  The 20 boundary fields are the
+16 transported tracers, the option-4 carried-but-not-transported `sv_i`
+diagnostic, surface temperature, and prescribed U/V.
+
+The committed preregistration said 6,391 rows, `nn_icesal=2`, ponds off, and 50
+moments.  That was a wrong pre-implementation assumption.  The already pinned
+oracle did not take those ORCA1 overlays: the phase-1 receipt and resolved
+namelist show shared-reference `nn_icesal=4` and level ponds on.  Silently
+keeping the smaller roster would violate the user's all-moments requirement.
+The preregistration is preserved as evidence of the correction; this receipt
+and the gate carry the corrected fixed count.  No result obtained under the
+incorrect roster is cited.
+
+### Source program and state
+
+The existing `legoesm.ice.transport` module now includes the 2-D extension of
+the same selectable Prather program.  It ports:
+
+* alternating odd x-then-y / even y-then-x dispatch from
+  `icedyn_adv_pra.F90:253-351`;
+* the x sweep from `:499-719` and y sweep from `:722-943`, including the
+  y-oriented `sy/syy` limiter at `:757-791` and all `sxy` flux/merge terms;
+* Hbig, Hsnow, and nonnegative cleanup from `:946-1142` and
+  `icevar.F90:726-839`; and
+* the bi-periodic boundary refresh after correction from
+  `icedyn_adv_pra.F90:432-479` and shipped `usrdef_nam.F90:99`.
+
+The first implementation accidentally reused the x-oriented limiter in the y
+sweep.  The full trajectory gate exposed a step-4 concentration jump.  After
+using the actual `sy/syy` limiter, steps 1--15 are at bar.  A second full-gate
+run exposed a pond error when the patch crossed the periodic boundary: source
+corrections had been applied independently to halo cells.  Refreshing halos
+from corrected physical cells, as the source orders it, removed that error.
+Neither failed run is represented as a result.
+
+The card is fp64, CPU-only, `jpl=1`, `nlay_i=nlay_s=3`, 485 steps of 1,200 s on
+the pinned 3 km geometry, CFL 0.2 / one Prather cycle, with prescribed
+`u_ice=v_ice=0.5 m/s`.  Thermodynamics and landfast are off.  To reproduce the
+actual oracle restart, its packed prognostic state has 16 independently
+advected tracers: ice/snow volume, ice/pond area, age, six energy layers, three
+option-4 salt layers, pond volume, and pond-lid volume.  The five Prather
+moments are restart-carried for every tracer (80 arrays).  The option-4
+`sv_i` array is a separate carried diagnostic because the executed source
+transports `pszv_i`, not `psv_i` (`icedyn_adv_pra.F90:232-240,368-375`).
+Deriving `sv_i` from the layers would disagree with the oracle after step 1.
+All fixed testcase/namelist coefficients are named in the module provenance
+block at `nemo_adv2d_testcase_recipe.py:43-75`; the Prather arithmetic
+coefficients remain at `transport.py:75-83`.  These exact paths pass both
+ratchet scans where rostered; no `# coeff-ok` escape was added.
+
+The restart contains ten state arrays (packed contents, carried bulk salt,
+U/V, surface temperature, and five moment packs), its completed-step clock,
+and the complete card-contract hash, including the ordered tracer and moment
+registries.  Round-trip and split continuation are bitwise exact.  Perturbing,
+dropping, retyping, or adding a key goes red; selector, prescribed-velocity,
+and clock changes are also rejected.
+
+The independent physics review found two shipped-case-inactive defects before
+closure.  The neighborhood maximum now includes SI3's `epsi20` floor
+(`icedyn_adv_pra.F90:1519-1534,1561-1571`); pond entry thickness and Hbig use
+the source's `a_ip>epsi20`, outer surviving-ice guard, and
+`v_ip/MAX(epsi20,a_ip)` (`icevar.F90:306-316` and
+`icedyn_adv_pra.F90:985-995`).  An isolated-pond control has finite reverse-mode
+gradient, a zero-area transported pond is rescued, and isolated snow retains
+the nonzero `a_i*epsi20` floor.  The `zapneg` port also updates concentration
+before testing snow volume, preserving the statement order in
+`icevar.F90:759-760,807-816`.  The reviewer reran the discriminating controls
+and approved these corrections.
+
+### Non-vacuous controls and scope
+
+The shipped Gaussian and equal x/y velocities are symmetric enough that the
+two split orders nearly cancel.  The order control therefore plants an
+asymmetric cross moment; flipping the parity then exceeds the same bar.  A
+separate synthetic y-sweep test proves `sy/syy`, not `sx/sxx`, are limited.
+The Hsnow snow-load and pond-area caps are exercised on a non-binding-to-binding
+synthetic transition.  Geometry, state, unaccounted mesh-array, unaccounted
+frame-array, active-moment perturbation, dropped-moment, and retyped-moment
+controls all go red.  The gate validates every one of the 485 ordered frame
+names and headers and stamps their ordered SHA256 aggregate; a wrong `kt`
+header and a duplicate comparison row each go red.  Both independent reviews
+approve the final physics and gate code after their HOLD items were closed.
+
+The complete card step passes `jax.jit` and reverse-mode differentiation with
+finite, nonzero fp64 gradients.  All oracle and candidate numerical arrays
+recorded by the gate are `float64`; masks are boolean.  The source-effect ocean
+residual ledgers are not modeled by this uncoupled card and are not compared.
+
 ## Artifact hashes
 
 | artifact | SHA256 |
 |---|---|
-| phase-2 gate JSON | `c658fbc39272ff6848310dd707067e1518ff85856b39f444eb03cebf66b84a78` |
+| phase-2 gate JSON | `9224796a51edd63dcdbabe8365ce270d28d0ff78b25c03854e78eb3dfba7e853` |
 | oracle `mesh_mask.nc` | `ba0e884eab64dd4ef659b21e6369d5999bda20e1e243c5c541ae5b93008148ad` |
 | oracle `output.init_ice.nc` | `7b9affc6f958cec9be7d193fbd021da11dd95fa2b115dd76c48ef8788492cb3f` |
 | oracle final ice restart | `bc49d8dd9633210a1c8f759b60c27919d48a789637dffae7ef7ee66682488dca` |
-| changed `transport.py` | `48111ec1c0058c22b966ffb127173f18414e8f50ef848a486726d19613679fd5` |
+| changed `transport.py` | `8a90dede63faa5937077c7e15e756b5a49943db2fa21d6bad5e444bc63b9ea05` |
 | card recipe | `df689ceeb0747a334bebce2683d92d4161b7ba3e12e4c678d214a80f02d86323` |
-| phase-2 gate source | `9fa55f6876378842b60cd3d975850355f64934f92995f97bbe5f4d4425a95927` |
+| phase-2 gate source | `e70306dcc8302a16877cb93894f9309e612240d915c54b061c1da78b35ee5c65` |
+
+Rung-3.2 artifacts (gate provenance parent
+`690fbdd8ee0281398fba9bf54073d5db2502478f`):
+
+| artifact | SHA256 |
+|---|---|
+| phase-2 gate JSON | `ffdf6474e3c5c39b273eb571039662be850614d9b7eeb8ca0328b33ff458fbc5` |
+| oracle `mesh_mask.nc` | `a74a6cd55b11084715b0e4e964f820ea9c2e222a73bd02f960edf73b58970503` |
+| oracle `output.init_ice.nc` | `477b4a1c7c4907dca49323824c5af300448cdab1e3800c5b8f4b5c4b9865b389` |
+| oracle final ice restart | `bbbecb7eae63ebc014f4b868cf11bde319b6b3716e5e38a92d5ff88da71f33cf` |
+| ordered 485-frame SHA256 aggregate | `8f6fa12be7ca329a3520b31317b97dea60d7cdf4fed728e47f574b20f9480122` |
+| `transport.py` | `8a90dede63faa5937077c7e15e756b5a49943db2fa21d6bad5e444bc63b9ea05` |
+| rung-3.2 card | `4c044afac5128009db1015063b82c795970b24385b4330859d752e05c8d959f8` |
+| rung-3.2 gate source | `2e6176fb8e81e44e65d4a69787967608c99718b261698fbfb54a8d25df09eaca` |
+| rung-3.2 unit controls | `a0308bff7200a6e739c1c764777db8d3c62dd64f98c87472d2b7942c8a9774b8` |
 
 ## Loudly UNMEASURED / deferred
 
-Rungs 3.2 and 3.3; within-step x/y split states; ORCA1 option-2 salinity
-against the phase-1 option-4 oracle; option-4 layer-salinity moments; pond
-fields and moments; candidate alignment of nonzero `snwice_mass` and its
+Rung 3.3; within-step x/y split states; ORCA1 option-2 salinity (the rung-3.2
+oracle resolves option 4); candidate alignment of nonzero `snwice_mass` and its
 before level; separation of `zapsmall` from `zapneg`; thermodynamics;
 rheology; ridging/rafting; general production run-restart integration of the opt-in
 card state; coupled ice--ocean comparison; and landfast L16 (OFF here,
