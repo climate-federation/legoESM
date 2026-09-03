@@ -3301,11 +3301,17 @@ class LatLonCGridOceanModel:
             if getattr(config, "barotropic_coriolis_split", "frozen") == "live":
                 # The live pre-step subtraction (NEMO dynspg_ts:296-300) must use
                 # the SAME barotropic-Coriolis stencil as the in-substep dyn_cor_2D
-                # so they cancel at the pre-step state. Under vorticity_scheme=
-                # "{ene,een}_total" the planetary term is the vertex-f TRANSPORT-
-                # form EEN flux, so the subtraction must ALSO be EEN
-                # (barotropic.barotropic_coriolis="een"); the legacy 4-pt-avg
-                # face-f "avg" stencil would leave an O(1) residual Coriolis.
+                # so they cancel at the pre-step state. dyn_cor_2D_init switches
+                # its coefficient build on the SAME nvor_scheme the 3-D vorticity
+                # operator uses (dynspg_ts.F90:1326, fed by ln_dynvor_ene/een in
+                # dynvor.F90:871-875): np_EEN builds 3-point triads
+                # (dynspg_ts.F90:1327-1381), np_ENE builds 2-point Sadourny
+                # coefficients (:1383-1410), and dyn_cor_2D (:1483-1506) applies
+                # whichever set was built. So vorticity_scheme="ene_total"
+                # requires barotropic_coriolis="ene"/"ene_metric" and
+                # "een_total" requires "een"/"een_metric" -- the legacy 4-pt-avg
+                # face-f "avg" stencil matches neither and would leave an O(1)
+                # residual Coriolis.
                 _required_bt = (("ene", "ene_metric") if _vs == "ene_total"
                                 else ("een", "een_metric"))
                 if getattr(config.barotropic, "barotropic_coriolis",
@@ -3356,8 +3362,17 @@ class LatLonCGridOceanModel:
                     "residual planetary Coriolis in the forcing.")
             # nn_bt_flt=3 deliberately applies live Coriolis to the AB3
             # mid-step velocity after subtracting the plain Kmm value from the
-            # frozen forcing (GYRE dynspg_ts.F90:359,689).  Their non-cancellation
-            # is the intended AB3 evolution, not an incompatibility.
+            # frozen forcing (GYRE's key_RK3 branch: dynspg_ts.F90:296,689 —
+            # NOT the MLF branch's :359, which this build never compiles;
+            # see provenance/cpp_GYRE_OMIP_L2_P3.fcm: key_RK3).  Their
+            # non-cancellation is the intended AB3 evolution, not an
+            # incompatibility; at a cold start (LN_RSTART=F) ll_init=.TRUE.
+            # at kt==nit000, so jn=1's extrapolation coefficients are za1=1,
+            # za2=za3=0 (dynspg_ts.F90:535-538) and un_e is seeded from
+            # puu_b(:,:,Kmm) under LN_BT_FW=T (:487) — substep 1 DOES cancel
+            # bit-exactly; substep>=2 and every later kt do not, which is the
+            # AB3 evolution NEMO always runs (the za1/za2/za3 block is not
+            # gated on nn_bt_flt).
         _valid_time_int = {"euler", "ab2", "rk3", "rk3_ws"}
         if config.tracer_time_integrator not in _valid_time_int:
             raise ValueError(

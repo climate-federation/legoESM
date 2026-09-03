@@ -186,3 +186,111 @@ def test_geometric_eos_depth_guard_still_bites_on_uncertified_eos():
     model_config, _physics = dino_lat_lon_model_config(grid, cfg)
     with pytest.raises(ValueError, match="certified only with"):
         LatLonCGridOceanModel(grid, z_coord, model_config)
+
+
+# ---------------------------------------------------------------------------
+# Guards RELAXED by the lane-1/lane-2 merge (c9526e585).  Each was an
+# iso-side/merge-base guard that the GYRE lane deleted or narrowed; each is
+# justified below from NEMO's own source, and each of these tests FAILS (the
+# card stops constructing) if its guard is restored.  The oracle namelist that
+# selects all three is
+# /data/abyssal/dbalwada/nemo-testcases-l2/phase3/gyre_kt1_10/output.namelist.dyn.
+# ---------------------------------------------------------------------------
+
+def _gyre_card_and_model():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_gyre_zco_card
+
+    card = build_gyre_zco_card()
+    return card, LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+
+
+def test_live_coriolis_split_runs_with_the_ab3am4_filter():
+    """DELETED guard: live split "incompatible with" nemo_ab3am4.
+
+    NEMO runs exactly this pair.  `nn_bt_flt=3` selects the Demange AB3-AM4
+    filter (dynspg_ts.F90:199-200 `ll_bt_av=.FALSE.`; :1270 "Demange time
+    filter"), and in the SAME run the barotropic Coriolis is subcycled live.
+    GYRE's cpp keys (provenance/cpp_GYRE_OMIP_L2_P3.fcm) select `key_RK3`, so
+    the EXECUTED branch is dynspg_ts.F90's RK3 Phase-1 (:270-302), not its
+    MLF twin (:303-452) -- the pre-step subtraction there takes the Kmm
+    depth-mean velocity (:296 `CALL dyn_cor_2D(puu_b(:,:,Kmm), ...)`, :299
+    `zu_frc = zu_frc - zu_trd*ssumask`) while the in-substep call (shared by
+    both branches, unconditional on nn_bt_flt) takes the AB3-EXTRAPOLATED
+    velocity (:550,552-553 `ua_e/va_e = za1*un_e + za2*ub_e + za3*ubb_e`,
+    then :689 `CALL dyn_cor_2D(ua_e, va_e, ...)`).  The deleted guard
+    asserted that substep-0 "would not cancel bit-exactly" and told the
+    caller to use the boxcar filter instead; NEMO neither requires that
+    cancellation nor offers that choice -- the za1/za2/za3 coefficient block
+    (:535-543) is not conditioned on nn_bt_flt at all, so no filter choice
+    ever avoids it. What IS true: at kt==nit000 with LN_RSTART=F (confirmed
+    in this GYRE run: ocean.output:226 `ln_rstart = F`), NEMO's init block
+    sets ll_init=.TRUE. (dynspg_ts.F90:223, the `ELSE ! init bb fields with
+    0` arm), so jn=1 gets za1=1,za2=za3=0 (:536-538) and un_e is seeded from
+    puu_b(:,:,Kmm) under LN_BT_FW=T (:487, confirmed via output.namelist.dyn
+    LN_BT_FW=T) -- so substep 1's operand IS bit-identical to the pre-step
+    one and the two calls cancel exactly. Substep>=2 (un_e has already been
+    dynamically updated by then) and every later kt (ll_init reverts to
+    ll_bt_av=.FALSE. once kt!=nit000) do NOT cancel -- that residual is the
+    intended AB3 evolution NEMO always carries in the barotropic mode, not
+    an incompatibility the guard could route around. The guard was wrong,
+    and GYRE could not be built with it.
+
+    The oracle run selects NN_BT_FLT=3, LN_BT_FW=T (output.namelist.dyn).
+    """
+    card, model = _gyre_card_and_model()
+    assert model.config.barotropic_coriolis_split == "live"
+    assert model.config.barotropic.barotropic_time_filter == "nemo_ab3am4"
+
+
+def test_ene_vorticity_requires_the_ene_barotropic_coriolis_not_een():
+    """WIDENED guard: the barotropic stencil was hard-wired to een/een_metric.
+
+    NEMO derives the barotropic Coriolis stencil from the SAME `nvor_scheme`
+    as the 3-D vorticity operator: `dyn_cor_2D_init` switches on it at
+    dynspg_ts.F90:1326, and its `np_ENE` arm (:1383-1400) builds FOUR 2-point
+    Sadourny coefficients (`r1_4 * ... * ff_f(ji,jj)` for the north pair,
+    `ff_f(ji,jj-1)` for the south pair), whereas the `np_EEN` arm
+    (:1327-1340) builds 3-point triads (`zpvo_nw = ff_f(i-1,j)+ff_f(i,j)+
+    ff_f(i,j-1)`).  `dyn_cor_2D` (:1483-1506) then applies whichever set was
+    built.  So under `ln_dynvor_ene=T` the subtraction stencil must be ENE;
+    demanding EEN triads there would be a stencil NEMO never runs.
+
+    The oracle run selects LN_DYNVOR_ENE=T, LN_DYNVOR_EEN=F.
+    """
+    card, model = _gyre_card_and_model()
+    assert model.config.vorticity_scheme == "ene_total"
+    assert model.config.barotropic.barotropic_coriolis == "ene_metric"
+
+
+def test_rk3_ws_admits_pure_redi_but_still_refuses_a_staged_gm_bolus():
+    """NARROWED guard: rk3_ws refused ANY gm_redi; now only a live bolus.
+
+    The guard's subject is the staged GM BOLUS transport, and NEMO gates that
+    separately from isoneutral diffusion: the eddy-induced transport is added
+    only under `ln_ldfeiv` (traadv.F90:208 `IF( ln_ldfeiv .AND. .NOT.
+    ln_traldf_triad ) THEN ! Add the eiv transport`; ldftra.F90:536 `IF( .NOT.
+    ln_ldfeiv ) THEN !== Parametrization not used ==!`), while `ln_traldf_iso`
+    runs the Redi diffusion regardless.  In this model the bolus is linear in
+    kappa_GM (gm_redi.py:11-13, psi = kappa_GM * S), so kappa_GM=0 removes it
+    exactly and leaves pure Redi -- which is what the oracle runs.  Refusing
+    every gm_redi would refuse NEMO's own GYRE.  The narrowed guard still
+    raises on a non-zero bolus; the second half of this test proves that.
+
+    The oracle run selects LN_TRALDF_ISO=T with LN_LDFEIV=F.
+    """
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    card, model = _gyre_card_and_model()
+    assert model.config.gm_redi.kappa_GM == 0.0
+    assert model.config.gm_redi.kappa_Redi > 0.0
+    cfg = card.recipe.model_config
+    with pytest.raises(ValueError, match="staged GM bolus"):
+        LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord,
+            cfg._replace(gm_redi=cfg.gm_redi._replace(kappa_GM=1.0)))
