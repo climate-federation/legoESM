@@ -2,9 +2,9 @@
 
 Frozen before any arm.  The instrument (`nemo_testcase_census_map_probe.py`)
 was committed before its own numbers, at `7e2ff4e91` (the `map` command) and
-`45dd9ea` -> see the receipt for the exact SHAs (the `faces` and `variance`
-commands); the probe refuses to write a map until it has reproduced the
-committed scorer's candidate / floor / spread for this row to the last digit.
+`fec9c5929` (the `faces` and `variance` commands); the probe refuses to write a
+map until it has reproduced the committed scorer's candidate / floor / spread
+for this row to the last digit.
 Every number is fp64 (`PrecisionPolicy.fp64()` set BEFORE the card is built,
 plus `JAX_ENABLE_X64=1`), CPU.
 
