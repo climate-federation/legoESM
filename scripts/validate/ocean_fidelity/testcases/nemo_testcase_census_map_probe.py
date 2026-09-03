@@ -721,10 +721,16 @@ def command_run_arm(args) -> None:
     require(bool(jax.config.jax_enable_x64) == (args.precision == "fp64"),
             "JAX x64/precision mismatch")
     card = STATS.build_nemo_testcase_card(CASE)
-    hooks = (
-        _NEMOWSRK3TestHooks(nemo_aimp_reference_w_metric=True)
-        if args.arm == "aimp-e3w" else _NEMOWSRK3TestHooks()
-    )
+    hooks = {
+        "bbl-reference": _NEMOWSRK3TestHooks(),
+        "aimp-e3w": _NEMOWSRK3TestHooks(
+            nemo_aimp_reference_w_metric=True),
+        "zdf-e3w": _NEMOWSRK3TestHooks(
+            nemo_zdf_reference_w_metric=True),
+        "combined-e3w": _NEMOWSRK3TestHooks(
+            nemo_aimp_reference_w_metric=True,
+            nemo_zdf_reference_w_metric=True),
+    }[args.arm]
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=hooks)
@@ -1379,7 +1385,8 @@ def main() -> None:
         "run-arm", help="run the private NEMO-reference BBL geometry arm")
     p_arm.add_argument("--precision", choices=("fp64", "fp32"), required=True)
     p_arm.add_argument(
-        "--arm", choices=("bbl-reference", "aimp-e3w"),
+        "--arm", choices=(
+            "bbl-reference", "aimp-e3w", "zdf-e3w", "combined-e3w"),
         default="bbl-reference")
     p_arm.add_argument("--output-dir", type=Path, required=True)
     p_arm.set_defaults(func=command_run_arm)
