@@ -27,7 +27,7 @@ MODULE icethd_zdf_BL99
 
    INTEGER, SAVE ::   num_l3zdf = -1
    LOGICAL, SAVE ::   ll_l3zdf_opened = .FALSE.
-   LOGICAL, SAVE ::   ll_l3zdf_done = .FALSE.
+   INTEGER, SAVE ::   kn_l3zdf_call = 0
 
    !!----------------------------------------------------------------------
    !! NEMO/ICE 5.0, NEMO Consortium (2024)
@@ -136,7 +136,11 @@ CONTAINS
       REAL(wp) ::   zepsilon   ! determines thres. above which computation of G(h) is done
       REAL(wp) ::   zhe        ! dummy factor
       REAL(wp) ::   zcnd_i     ! mean sea ice thermal conductivity
+      LOGICAL  ::   ll_l3zdf_capture
       !!------------------------------------------------------------------
+
+      kn_l3zdf_call = kn_l3zdf_call + 1
+      ll_l3zdf_capture = kn_l3zdf_call == 1 .OR. kn_l3zdf_call == 3
 
       ! --- diag error on heat diffusion - PART 1 --- !
       DO ji = 1, npti
@@ -232,7 +236,7 @@ CONTAINS
       DO ji = 1, npti
          qtr_ice_bot_1d(ji) = zradtr_i(ji,nlay_i)   ! record radiation transmitted below the ice
       END DO
-      IF( .NOT. ll_l3zdf_done ) THEN
+      IF( ll_l3zdf_capture ) THEN
          CALL l3zdf_header( 0, 0, 25 )
          WRITE(num_l3zdf) t_su_1d(1), t_i_1d(1,1:nlay_i), t_s_1d(1,1:nlay_s), &
             & sz_i_1d(1,1:nlay_i), h_i_1d(1), h_s_1d(1), ztsub(1), &
@@ -345,7 +349,7 @@ CONTAINS
             !
          END DO
 
-         IF( .NOT. ll_l3zdf_done ) THEN
+         IF( ll_l3zdf_capture ) THEN
             CALL l3zdf_header( 1, iconv, 20 )
             WRITE(num_l3zdf) t_su_1d(1), t_i_1d(1,1:nlay_i), t_s_1d(1,1:nlay_s), &
                & ztcond_i(1,0:nlay_i), zkappa_i(1,0:nlay_i), &
@@ -396,7 +400,7 @@ CONTAINS
                   !
                   zfnet = qsr_ice_1d(ji) - qtr_ice_top_1d(ji) + qns_ice_1d(ji) ! net heat flux = net - transmitted solar + non solar
 
-                  IF( .NOT. ll_l3zdf_done .AND. ji == 1 ) THEN
+                  IF( ll_l3zdf_capture .AND. ji == 1 ) THEN
                      CALL l3zdf_header( 2, iconv, 8 )
                      WRITE(num_l3zdf) zeta_i(1,1:nlay_i), zeta_s(1,1:nlay_s), qns_ice_1d(1), zfnet
                   ENDIF
@@ -536,7 +540,7 @@ CONTAINS
                      ENDIF
                   ENDIF
 
-                  IF( .NOT. ll_l3zdf_done .AND. ji == 1 ) THEN
+                  IF( ll_l3zdf_capture .AND. ji == 1 ) THEN
                      CALL l3zdf_header( 3, iconv, 28 )
                      WRITE(num_l3zdf) ztrid(:,1), ztrid(:,2), ztrid(:,3), zindterm(:)
                   ENDIF
@@ -556,7 +560,7 @@ CONTAINS
                      zindtbis(jm) = zindterm(jm  ) - ztrid(jm,1) * zindtbis(jm-1  ) / zdiagbis(jm-1)
                   END DO
 
-                  IF( .NOT. ll_l3zdf_done .AND. ji == 1 ) THEN
+                  IF( ll_l3zdf_capture .AND. ji == 1 ) THEN
                      CALL l3zdf_header( 4, iconv, 14 )
                      WRITE(num_l3zdf) zdiagbis(:), zindtbis(:)
                   ENDIF
@@ -589,7 +593,7 @@ CONTAINS
                      t_su_1d(ji) = ( zindtbis(jm_min) - ztrid(jm_min,3) *  &
                         &          ( isnow(ji) * t_s_1d(ji,1) + ( 1._wp - isnow(ji) ) * t_i_1d(ji,1) ) ) / zdiagbis(jm_min)
                   ENDIF
-                  IF( .NOT. ll_l3zdf_done .AND. ji == 1 ) THEN
+                  IF( ll_l3zdf_capture .AND. ji == 1 ) THEN
                      CALL l3zdf_header( 5, iconv, 9 )
                      WRITE(num_l3zdf) t_su_1d(1), t_s_1d(1,1:nlay_s), &
                         & t_i_1d(1,1:nlay_i), ztsub(1), qns_ice_1d(1)
@@ -626,7 +630,7 @@ CONTAINS
 
                   IF( zdti_max < zdti_bnd )   l_T_converged(ji) = .TRUE.
 
-                  IF( .NOT. ll_l3zdf_done .AND. ji == 1 ) THEN
+                  IF( ll_l3zdf_capture .AND. ji == 1 ) THEN
                      CALL l3zdf_header( 6, iconv, 10 )
                      WRITE(num_l3zdf) t_su_1d(1), t_s_1d(1,1:nlay_s), &
                         & t_i_1d(1,1:nlay_i), zdti_max, &
@@ -912,9 +916,8 @@ CONTAINS
             t_si_1d(ji) = t_su_1d(ji)
          ENDIF
       END DO
-      IF( .NOT. ll_l3zdf_done ) THEN
+      IF( ll_l3zdf_capture ) THEN
          FLUSH(num_l3zdf)
-         ll_l3zdf_done = .TRUE.
       ENDIF
       !
    END SUBROUTINE ice_thd_zdf_BL99
@@ -931,7 +934,7 @@ CONTAINS
          ll_l3zdf_opened = .TRUE.
       ENDIF
       WRITE(num_l3zdf) cmagic
-      WRITE(num_l3zdf) 1, 1, kframe, kiter, npti, nlay_i, nlay_s, STORAGE_SIZE(1._wp), knval
+      WRITE(num_l3zdf) 1, kn_l3zdf_call, kframe, kiter, npti, nlay_i, nlay_s, STORAGE_SIZE(1._wp), knval
    END SUBROUTINE l3zdf_header
 
 #else
