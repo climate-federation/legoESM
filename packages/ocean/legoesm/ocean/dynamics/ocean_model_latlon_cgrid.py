@@ -1031,6 +1031,12 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # slots after the full step has run.  Private fidelity instrumentation only;
     # zero leaves the returned state untouched.
     expose_momentum_stage: int = 0
+    # Restores the pre-fix LIVE-weighted stage depth mean.  NEMO removes a
+    # REFERENCE-weighted one -- ``zub = uu_b(Kaa) - SUM(e3u_0*uu(:,Kaa))
+    # * r1_hu_0`` (stprk3_stg.F90:440) with ``hu_0 = SUM(e3u_0*umask)``
+    # (domain.F90:145) -- and NEMO has no switch for it; this is a
+    # one-variable gate ablation only.
+    legacy_live_stage_mean_weights: bool = False
     # Harness-only Arm A: restore the pre-fix Kbb EOS/HPG operands in stages
     # 2/3. Public NEMO WS-RK3 always uses live Kmm T/S/ssh.
     freeze_stage_hpg_operands: bool = False
@@ -4963,13 +4969,41 @@ class LatLonCGridOceanModel:
         # REPLACEMENT (below) for causal tests; it no longer selects between two
         # recurrences, because there is only one.  Public rk3_ws has no arm.
         if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws":
+            # WEIGHTS of the stage depth-mean operator.  NEMO's is REFERENCE
+            # weighted and fixed for the whole run:
+            #     zub = uu_b(Kaa) - SUM( e3u_0(:)*uu(:,Kaa) ) * r1_hu_0
+            #                                         stprk3_stg.F90:440
+            #     hu_0 = SUM( e3u_0 * umask )          domain.F90:145
+            # so M_ref(x) = SUM(e3u_0*x)/hu_0 and M_ref(umask) == 1 exactly.
+            # Using the LIVE ``h_u_pre``/``H_u_pre`` instead is NOT the same
+            # operator: ``h_u_pre`` is a MIN over two columns whose free-surface
+            # Jacobians differ, so its per-level argmin can switch sides and the
+            # live weights are not a uniform rescale of the reference ones.  On
+            # a column whose two neighbours have equal depth the two coincide
+            # (measured: one ULP), which is why this has no leverage on the flat
+            # shelf and all of it on the staircase.
+            # ``_ws_h_ref`` is the ssh=0 thickness, so ``min_cell_to_uface`` of
+            # it, masked by the live 3-D face mask, IS ``e3u_0``, and its column
+            # sum IS ``hu_0`` (both measured equal to NEMO's mesh_mask to 0.0
+            # over every wet face).
+            _ws_h_u_ref = min_cell_to_uface(_ws_h_ref) * _ws_u_live_mask
+            _ws_h_v_ref = min_cell_to_vface(_ws_h_ref, _grid) * _ws_v_live_mask
+            _ws_H_u_ref = jnp.maximum(jnp.sum(_ws_h_u_ref, axis=-1), 1e-10)
+            _ws_H_v_ref = jnp.maximum(jnp.sum(_ws_h_v_ref, axis=-1), 1e-10)
+            if self._nemo_ws_test_hooks.legacy_live_stage_mean_weights:
+                _mean_h_u, _mean_H_u = h_u_pre, H_u_pre
+                _mean_h_v, _mean_H_v = h_v_pre, H_v_pre
+            else:
+                _mean_h_u, _mean_H_u = _ws_h_u_ref, _ws_H_u_ref
+                _mean_h_v, _mean_H_v = _ws_h_v_ref, _ws_H_v_ref
+
             def _replace_stage_mean(u_in, v_in, target_u, target_v):
                 if not self._nemo_ws_test_hooks.stage_barotropic_correction:
                     # Private causal arm: keep the stage's own depth mean.
                     return u_in * _ws_stage_u_mask, v_in * _ws_stage_v_mask
-                mean_u = (jnp.sum(u_in * h_u_pre, axis=-1) / H_u_pre
+                mean_u = (jnp.sum(u_in * _mean_h_u, axis=-1) / _mean_H_u
                           * state.u_mask.data)
-                mean_v = (jnp.sum(v_in * h_v_pre, axis=-1) / H_v_pre
+                mean_v = (jnp.sum(v_in * _mean_h_v, axis=-1) / _mean_H_v
                           * state.v_mask.data)
                 return (
                     (u_in + (target_u - mean_u)[..., jnp.newaxis])
@@ -4978,10 +5012,14 @@ class LatLonCGridOceanModel:
                     * _ws_stage_v_mask,
                 )
 
-            target_u = (jnp.sum(state_new.u.data * h_u_pre, axis=-1)
-                        / H_u_pre * state.u_mask.data)
-            target_v = (jnp.sum(state_new.v.data * h_v_pre, axis=-1)
-                        / H_v_pre * state.v_mask.data)
+            # The TARGET is the same operator M applied to the post-solve
+            # velocity -- legoESM's stand-in for NEMO's ``uu_b(Kaa)`` -- so it
+            # carries the same weights.  Mixing the two weightings would leave
+            # the installed mean satisfying neither.
+            target_u = (jnp.sum(state_new.u.data * _mean_h_u, axis=-1)
+                        / _mean_H_u * state.u_mask.data)
+            target_v = (jnp.sum(state_new.v.data * _mean_h_v, axis=-1)
+                        / _mean_H_v * state.v_mask.data)
             transport_target_u = (
                 Hu_avg / H_u_pre * state.u_mask.data)
             transport_target_v = (

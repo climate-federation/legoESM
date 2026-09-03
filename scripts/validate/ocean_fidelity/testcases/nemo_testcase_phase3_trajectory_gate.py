@@ -221,6 +221,7 @@ def run(
     owner_controls=False, allow_dirty=False, arm_literal_stage_wzv=False,
     arm_legacy_seed_faces=False, arm_legacy_hadv_min_face_thickness=False,
     arm_legacy_2d_stage_face_mask=False,
+    arm_legacy_live_stage_mean_weights=False,
 ) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -245,7 +246,8 @@ def run(
             literal_stage_wzv=arm_literal_stage_wzv,
             legacy_seed_min_rule_faces=arm_legacy_seed_faces,
             legacy_hadv_min_face_thickness=arm_legacy_hadv_min_face_thickness,
-            legacy_2d_stage_face_mask=arm_legacy_2d_stage_face_mask))
+            legacy_2d_stage_face_mask=arm_legacy_2d_stage_face_mask,
+            legacy_live_stage_mean_weights=arm_legacy_live_stage_mean_weights))
     state = card.recipe.initial_state
     masks = expected_masks(card)
     nlev = card.recipe.z_coord.n_levels
@@ -518,6 +520,12 @@ def main() -> int:
               "_NEMOWSRK3TestHooks control; NEMO has no such switch): "
               "restore the 2-D state.u_mask broadcast over levels instead of "
               "NEMO's 3-D umask(ji,jj,jk) (stprk3_stg.F90:367,375,382,444,273)"))
+    parser.add_argument(
+        "--arm-legacy-live-stage-mean-weights", action="store_true",
+        help=("one-variable ablation of the stage depth-mean WEIGHTS (private "
+              "_NEMOWSRK3TestHooks control; NEMO has no such switch): restore "
+              "the live h_u_pre/H_u_pre weighting instead of NEMO's reference "
+              "SUM(e3u_0*uu)*r1_hu_0 (stprk3_stg.F90:440, domain.F90:145)"))
     parser.add_argument("--allow-dirty", action="store_true",
                         help="stamp '<sha>-dirty' instead of refusing a dirty tree")
     from legoesm.ocean.fidelity.ulp_move_gate import (
@@ -535,7 +543,8 @@ def main() -> int:
         arm_literal_stage_wzv=args.arm_literal_stage_wzv,
         arm_legacy_seed_faces=args.arm_legacy_seed_faces,
         arm_legacy_hadv_min_face_thickness=args.arm_legacy_hadv_min_face_thickness,
-        arm_legacy_2d_stage_face_mask=args.arm_legacy_2d_stage_face_mask)
+        arm_legacy_2d_stage_face_mask=args.arm_legacy_2d_stage_face_mask,
+        arm_legacy_live_stage_mean_weights=args.arm_legacy_live_stage_mean_weights)
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.write_text(text)
