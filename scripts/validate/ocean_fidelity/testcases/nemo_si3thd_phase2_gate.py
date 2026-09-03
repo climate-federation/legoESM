@@ -245,14 +245,22 @@ def _global_from_arrays(state) -> dict[str, np.ndarray]:
     a = np.asarray(state.concentration)
     h = np.asarray(state.h_ice)
     hs = np.asarray(state.h_snow)
-    vi, vs = a * h, a * hs
+    # Mirror `ice_thd_1d2d`'s written multiplication order
+    # (`icethd.F90:440-456`).  The former volume-first reassociation alone can
+    # cross the 1e-15 oracle bar at a global boundary.
+    vi, vs = h * a, hs * a
+    inverse_ice_layers = np.float64(1.0 / 3.0)
+    inverse_snow_layers = np.float64(1.0 / 3.0)
     z = np.zeros_like(a)
     return {"a_i": a, "v_i": vi, "v_s": vs, "sv_i": np.asarray(state.S_bulk) * vi,
             "oa_i": np.asarray(state.age_volume), "t_su": np.asarray(state.T_surface),
             "a_ip": z, "v_ip": z, "v_il": z,
-            "e_i": np.asarray(state.e_ice) * vi[..., None] / 3.0,
-            "e_s": np.asarray(state.e_snow) * vs[..., None] / 3.0,
-            "szv_i": np.asarray(state.S_layers) * vi[..., None] / 3.0}
+            "e_i": (np.asarray(state.e_ice) * h[..., None]
+                    * a[..., None] * inverse_ice_layers),
+            "e_s": (np.asarray(state.e_snow) * hs[..., None]
+                    * a[..., None] * inverse_snow_layers),
+            "szv_i": (np.asarray(state.S_layers) * vi[..., None]
+                       * inverse_ice_layers)}
 
 
 def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):

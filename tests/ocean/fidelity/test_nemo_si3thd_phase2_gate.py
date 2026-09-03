@@ -167,9 +167,9 @@ def test_gate_owns_qns_time_level_and_advances_first_divergence(gate_module) -> 
     assert result["status"] == "DEBT"
     assert result["backend"] == "cpu"
     assert result["dtypes"] == ["float64"]
-    assert result["sweep_steps_examined"] == 3
+    assert result["sweep_steps_examined"] == 5
     assert result["preregistered_hypothesis"] == "SUPERSEDED_BY_OWNER_FIX"
-    assert result["first_divergence"]["name"] == "kt3.POST_ZDF.e_i"
+    assert result["first_divergence"]["name"] == "kt5.POST_DO.e_s"
     assert result["first_divergence"]["normalized_max_abs"] > 1.0e-15
     assert result["owner_arm"]["variable"] == "qns_ice_entry"
     assert result["owner_arm"]["verdict"] == "CONFIRMED"
