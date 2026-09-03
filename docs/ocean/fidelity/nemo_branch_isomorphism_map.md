@@ -1495,12 +1495,20 @@ columns differ in depth.
 **Disposition.**  CLOSED at the `k=24` injection faces (gate 20/21/22 have
 equal bathymetry on both sides, so the min picks one uniform Jacobian and the
 difference is one ULP at every step) -- which is what the `k=24` ownership
-question needed.  **OPEN, and now the ranked next arm, on every staircase
-face**, where `8.6e-6` by kt=9 is the same order as the `k=24` injections
-(`7.06e-12` at kt=2, `4.18e-9` at kt=3) that the OVERFLOW trajectory rows are
-made of.  Landing it means using NEMO's reference weights in
-`_replace_stage_mean`; that changes carried state, so it needs its own
-preregistration and an ASK.
+question needed.  **RESOLVED the same day, on the staircase faces too: the arm ran and NEMO's
+reference weights are now the default** (`9a23ea2c3`, receipt
+`testcases/nemo_testcases_l1_stage_mean_weights_receipt.md`), with the live
+weighting behind a private `legacy_live_stage_mean_weights` hook that
+reproduces the pre-fix OVERFLOW kt=1..10 rows on 50 of 50 rows bit for bit.
+
+MEASURED INERT: every OVERFLOW trajectory row through kt=60 is unchanged beyond
+the fifth significant digit, and all six 6120-step statistics move by EXACTLY
+zero.  The preregistration's scaling estimate -- which predicted a `1.5x`
+improvement at kt=10 from `shear x dw` -- is RETRACTED: it used a mature slope
+shear the first ten steps do not have.  The change stays landed on Rule 0
+alone.  Third consumer, named and UNMEASURED: `build_nemo_gyre_recipe`
+(`nemo_recipe.py:970`) also selects `rk3_ws`, and its four tests fail at the
+BASE tree on an unrelated `pgf_quadrature` validation error.
 
 **Not a finding about the census.**  The same round instrumented the one
 OVERFLOW statistic still outside the NEMO scheme spread
