@@ -1,4 +1,4 @@
-# SI3 lane 3 — phase-2 receipt (rungs 3.1, 3.2, and rung-3.3 partial implementation)
+# SI3 lane 3 — phase-2 receipt (rungs 3.1, 3.2, and 3.3)
 
 Issue: climate-federation/legoESM #1699
 
@@ -16,15 +16,19 @@ Phase-2 commit ledger:
   `146199c9b3e` and `aa6dc122b43`;
 * rung-3.3 initial design preregistration: `af53e78bd33`;
 * rung-3.3 independent-review design revision: `9b369d9d082`;
-* rung-3.3 C-grid aEVP implementation boundary: `54d0d5dad96c38b194ec56addd6dc051439a52e5`.
+* rung-3.3 C-grid aEVP implementation boundary: `54d0d5dad96c38b194ec56addd6dc051439a52e5`;
+* rung-3.3 trajectory/restart preregistration: `535e1b83c5e`;
+* rung-3.3 replay, full trajectory, and restart gate: `ba07bc7b202`.
 
 Oracle roots: `/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv1d/final`,
 `/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv2d/final`, and
 `/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv2d_rhg/final`.
 Rung-3.1/3.2 gate artifacts are the corresponding
-`phase2/nemo_si3_phase2_gate.json` files.  The rung-3.3 partial artifact is
-`ice_adv2d_rhg/legoesm/rung33_partial_gate.json` and its A-grid preservation
-control is `ice_adv2d_rhg/legoesm/rung33_agrid_guard.json`.
+`phase2/nemo_si3_phase2_gate.json` files.  The rung-3.3 full artifact is
+`ice_adv2d_rhg/phase2/nemo_si3_phase2_rung33_trajectory.json`; its earlier
+partial artifact remains at `ice_adv2d_rhg/legoesm/rung33_partial_gate.json`
+and its A-grid preservation control is
+`ice_adv2d_rhg/legoesm/rung33_agrid_guard.json`.
 
 ## Rung 3.1 verdict
 
@@ -520,6 +524,101 @@ reported bit-mask/table sites); `fv3_native_physics_coupling.py:113`;
 `test_dino_vface_zonal_width_nemo.py:210`; and
 `test_dino_wall_balance.py:115`.  None is modified here.
 
+### Round-4 stress replay and full trajectory closure
+
+**Overall rung-3.3 result: DEBT.**  The exact bar remains normalized pointwise
+`1e-15`.  The completed gate advances all 485 outer ice steps on CPU in fp64,
+consumes entry frames `kt=2..485`, switches to the final ice restart for step
+485, and registers 11,235 trajectory/restart rows: 2,811 AT-BAR and 8,424
+DEBT.  The fixed registry order is U, V, stress1, stress2, stress12, then all
+16 transported tracers, `sv_i`, and surface temperature.  Its first over-bar
+row is therefore `post_step_00000001.stress1_i` at
+`2.677729266548652e-14`; this is the same reviewed step-1 measurement, not a
+new execution-mode result.
+
+The stress replay starts from the exact bytes in oracle entry `kt=1`, including
+the three restart-carried zero stresses.  Subcycle 1 is explicitly recorded as
+vacuous for stress: zero velocity and zero stress make all three updates zero.
+The gate therefore also replays subcycle 2, the first active stress update,
+from byte-identical subcycle-1 carries.  An independent NumPy transcription of
+`icedyn_rhg_evp.F90:189-741` and the same production statements executed as a
+Python-written-order loop are byte-identical for U, V, and all three stresses:
+**0 ULP for every carry**, satisfying the preregistered two-ULP discriminator.
+Lowering the same subcycle through `jax.lax.fori_loop` changes the
+maximum-error stress cells by 2, 3, and 3 ULP for stress1, stress2, and
+stress12.  After 100 NumPy-written-order subcycles, the oracle residuals are
+`1.2668826637434482e-14`, `2.960067032769315e-14`, and
+`1.477542204264423e-14`.  Thus the measured classification is
+**RE-ASSOCIATION in the compiled loop**, not a changed strain, delta/viscosity,
+mask, or alpha/beta formula.  The production gate remains DEBT; this
+classification does not relax its bar.
+
+The different step-1 labels for stresses and velocities are also measured,
+not inferred from relative magnitudes.  The stress absolute residuals are
+`6.343725544866174e-11`, `2.2566837287740782e-11`, and
+`1.0913936421275139e-11`.  Applying the exact transformed-stress divergence
+weights from `icedyn_rhg_evp.F90:495-510` gives maximum force residuals
+`1.0061285138363018e-14` (U) and `1.199396137963049e-14` (V).  Dividing cell by
+cell by only the mandatory `m/dt*(beta+1)` term, with `beta>=50`, bounds the
+velocity response by `1.6216806403927668e-16` and
+`1.6743699418381982e-16`; omitting the nonnegative drag makes these conservative
+bounds.  The observed U/V errors are `4.996003610813204e-16` and
+`2.632442874794805e-16`, both AT-BAR.  Spatial differencing plus the large
+active momentum denominator therefore explains how a normalized stress DEBT
+can coexist with AT-BAR velocity at that boundary.
+
+Requested normalized growth table:
+
+| step | U | V | stress1 | stress2 | stress12 | `a_i` | `v_i` | `v_s` |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | `4.996e-16` | `2.632e-16` | `2.678e-14` | `1.888e-14` | `1.798e-14` | `3.331e-16` | `2.484e-16` | `8.327e-17` |
+| 10 | `1.110e-15` | `6.251e-16` | `4.761e-13` | `3.649e-11` | `4.489e-11` | `1.332e-15` | `8.755e-16` | `2.359e-16` |
+| 50 | `1.110e-15` | `9.845e-16` | `5.461e-12` | `8.875e-10` | `4.525e-10` | `4.885e-15` | `2.433e-15` | `4.441e-16` |
+| 100 | `1.110e-15` | `9.823e-16` | `4.711e-12` | `7.228e-10` | `3.529e-10` | `5.329e-15` | `4.495e-15` | `6.106e-16` |
+| 200 | `3.442e-15` | `2.558e-15` | `7.252e-9` | `5.835e-9` | `1.194e-9` | `1.499e-14` | `1.126e-14` | `2.054e-15` |
+| 485 | `7.105e-15` | `5.513e-15` | `9.387e-9` | `8.959e-9` | `1.562e-9` | `1.066e-13` | `6.753e-14` | `1.008e-14` |
+
+The per-boundary rows show smooth accumulated floating-point separation; no
+single threshold/mask/parity branch event like the rung-3.1 column event is
+observed.  The full artifact retains every boundary and maximizing cell rather
+than only this requested sample.
+
+At the final restart, all 23 ordinary registered fields are loaded and scored:
+four are AT-BAR (`oa_i`, `v_il`, carried `sv_i`, and surface temperature) and
+19 are DEBT.  All 80 discovered Prather moments are loaded and scored: 10 are
+AT-BAR (the five age and five pond-lid moments) and 70 are DEBT; the maximum is
+`syye_l03` at `4.3579848610592794e-11`.  The card restart now persists packed
+contents, carried salt, surface temperature, U/V, all three stresses, all five
+16-family moment packs, the exact clock, and a selector/parameter contract
+hash.  Save/load is byte-identical and a step-7 split continuation is
+byte-identical.  Missing, retyped, and perturbed stress and moment controls all
+go red.  Derived `snwice_mass` and `snwice_mass_b` remain loudly UNMEASURED as
+candidate prognostics; they have not been silently dropped from coverage.
+
+The shipped README phenomenology is checked separately on both models.  It
+describes the square concentration/Gaussian volume, Prather maximum/side-lobe
+behavior, rheology-generated velocity, and the below-1-kg-m-2 zero-ocean-
+velocity switch (`tests/ICE_ADV2D/EXPREF/README:48-55,64-66`).  Both models
+produce nonzero rheology velocities over the run (oracle U range
+`[0,0.5043842101574245]`, V range
+`[-0.023923408982296886,0.023923408982296886]`; legoESM differs only beyond
+the displayed digits).  Across all 485 boundaries, every face satisfying the
+source low-mass/low-concentration predicate is exactly at the zero ocean
+velocity in both models; at least 6,495 U and 6,495 V faces bind per boundary.
+These two predicates are VERIFIED.  Maximum series and negative/local-extrema
+censuses are recorded for both models; maximum conservation and “side lobes”
+remain **MEASURED-UNCLASSIFIED** because the README supplies neither a numeric
+tolerance nor a side-lobe predicate.  No endpoint-equality substitute is used.
+
+Round-4 verification: the focused rung-3.3 kernel/gate/replay/restart suite is
+**10 passed**.  Targeted ratchets are **1 passed** for the touched card under
+`test_no_inline_physics_coeffs.py` and **3 passed** for the touched card/gate
+paths under `test_no_hardcoded_constants.py`.  The complete two-ratchet run is
+**3,749 passed, 2 skipped, 7 failed**; the seven failures are the same unrelated
+paths and exact sites disclosed above.  Ruff `F,E501,I` is clean on all four
+round-4 Python files.  Mypy with skipped imports reports no issues in the card,
+replay, or full gate.
+
 ## Artifact hashes
 
 | artifact | SHA256 |
@@ -565,17 +664,27 @@ Rung-3.3 partial-boundary artifacts (implementation commit
 | kernel controls | `e17f85ae4de91eae0789615f1be4f04b15df3facdc8c0693b094af9d12971fa1` |
 | gate controls | `2ace7a40e4983ef62aa1d39dc6bae6cc8da7972d623e11bc4e59cfd3ee69f188` |
 
+Rung-3.3 round-4 artifacts (implementation commit `ba07bc7b202`):
+
+| artifact | SHA256 |
+|---|---|
+| trajectory/restart preregistration | `7da368cbb30fe6ae46cd1632223874ef2c9a0514d1b1aebd1b62dfcb29710f12` |
+| independent written-order replay JSON | `04267dbc77d229c2a752e3210574eb3331547a1f84860b4d8f3d17e4086116e6` |
+| full 485-step trajectory/restart JSON | `5895312d316819b68723f0ee6cef43a09e77978779c745d38e689ed8e0ed6684` |
+| rung-3.3 card/restart source | `b92ca8cf64667ac137cbf48d1e9b033fe12b81e2d1c57b86b78671522f6d2056` |
+| written-order replay source | `ce078169135bc2003af63c3f4752db4e3c55899fd88faffb9443282435ee97a5` |
+| trajectory/restart gate source | `a605af06726e1be62f009ba7acdc0bcc3773c7ebd28c6ac4b66d82583a1d93cd` |
+| rung-3.3 controls | `e681a258acf0fcc9fc3c020ff09a282ba7c54a3009e433227282cdc8adfc09c7` |
+
 ## Loudly UNMEASURED / deferred
 
-Rung-3.3 source-ordered stress replay/owner, frames 3--485, first-divergence
-sweep, all-80-moment plus three-stress restart gate and split continuation;
-within-step x/y split states; ORCA1
+Within-step x/y Prather split states; ORCA1
 option-2 salinity (the rung-3.2 oracle resolves option 4); candidate alignment
 of nonzero `snwice_mass` and its
 before level; separation of `zapsmall` from `zapneg`; thermodynamics;
-rung-3.3 stress trajectory beyond the first completed step; ridging/rafting;
-general production run-restart integration of the opt-in
-card state; coupled ice--ocean comparison; and landfast L16 (OFF here,
+ridging/rafting; general production run-restart integration outside the
+opt-in card's now-verified restart path; coupled ice--ocean comparison; and
+landfast L16 (OFF here,
 **UNVERIFIED-deferred to lane 4**).  No legoESM claim is made for any item in
 this paragraph.
 
@@ -591,12 +700,16 @@ revise the rung-3.3 design before code; place the selectable C-grid arm beside
 the existing A-grid solver; preserve the A-grid result byte-for-byte; implement
 the fp64 card, geometry/cold-entry/first-step gate, binding controls, tripwire
 rows, and JIT/gradient test; stop at an honest committed boundary if the sweep
-is not reached; branch bundle; no push and no shipped-NEMO modification.
+is not reached; then classify the stress debt with a source-written-order
+subcycle replay, show the stress-divergence/velocity arithmetic, sweep all 485
+boundaries, validate all prognostics/three stresses/80 moments at restart, and
+measure the shipped README phenomenology on both models; branch bundle; no
+push and no shipped-NEMO modification.
 
 **UNASKED choices:** no default change to existing ice transport; no ocean-SOM
 replacement or arithmetic-changing common refactor; no rung-3.3 claim beyond
-the measured first-step rows; no stress-owner or trajectory classification;
-no thermodynamics, ridging/rafting, landfast, coupled-ocean,
-multi-category, or general production-restart claim at this partial boundary;
-no analytic oracle; no tolerance relaxation; no claim that a DEBT or
-UNMEASURED row is matched or faithful.
+the measured gate rows; no thermodynamics, ridging/rafting, landfast,
+coupled-ocean, multi-category, or general production-restart claim outside the
+new card contract; no analytic oracle; no tolerance relaxation; no numerical
+classification of the README's qualitative maximum/side-lobe sentence; no
+claim that a DEBT or UNMEASURED row is matched or faithful.
