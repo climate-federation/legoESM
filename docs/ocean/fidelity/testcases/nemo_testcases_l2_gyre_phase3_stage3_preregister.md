@@ -100,3 +100,21 @@ retaining the candidate matrix.
 - If the direct row is DEBT but the arm leaves a residual, ownership is shared
   or later; report the next operand honestly.  The immutable bar remains
   `1e-15`, and a planted wet-cell content perturbation must fire.
+
+## Stage-3 advection-content continuation
+
+The direct content row is DEBT (`3.0946e-10` T and `2.7285e-11` S absolute),
+but replacing it moves only 5.39% of the faithful normalized T residual and
+does not improve the final maximum.  The maxima occur at interior levels where
+SBC and QSR are zero, and the oracle LDF increment is exactly zero.  The next
+ordered discriminator is therefore the advection-only content before the
+stage-3 physical source is added.
+
+The shared RK3 helper will expose, WRITE-only, its already-computed
+`e3t(Kbb)*T(Kbb) - rDt*div(F_T)` value.  The gate compares it against the
+oracle's `e3t(Kbb)*T(Kbb) + rDt*e3t(Kmm)*Krhs_after_advection`.
+**CONFIRM** the advection boundary iff this row is DEBT at the direct-content
+scale; **REFUTE** iff it is AT-BAR.  A later one-variable correction must move
+the final residual at its scale before any owner label.  No alternate FCT
+implementation may be added: any correction belongs inside the canonical
+S-37 NEMO FCT identity and its isomorphism registration.
