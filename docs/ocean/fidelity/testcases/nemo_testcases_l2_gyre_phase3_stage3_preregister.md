@@ -77,3 +77,26 @@ this discriminator as follows:
 The exploratory source-order arithmetic used to select this arm is post-hoc
 and is not citable campaign evidence; only the committed gate reruns below may
 support the receipt.
+
+## Direct content-RHS continuation
+
+The committed Kmm-level rerun improves final T from `4.5273e-9` to
+`3.1935e-11` absolute and S from `3.4163e-10` to `8.1002e-13`, but neither
+clears the bar.  The next source-order operand is therefore the actual
+thickness-form content RHS passed to `tra_zdf`, not its concentration view.
+The earlier private arm changed only the view while the production path kept a
+separate content array, so it had no discriminating power and cannot support
+an owner label.
+
+A WRITE-only hook will expose that exact content array after the ordinary step;
+the gate will compare it with `e3t(Kbb)*T(Kbb) + rDt*e3t(Kmm)*Krhs` from the
+oracle record.  A separate one-variable arm will replace only this array while
+retaining the candidate matrix.
+
+- **CONFIRM content-RHS ownership** iff the direct row is DEBT at the measured
+  final-residual scale and the oracle-content arm clears or materially reduces
+  final T/S with movement at that scale.
+- **REFUTE** if the direct row is AT-BAR or the arm is near-null.
+- If the direct row is DEBT but the arm leaves a residual, ownership is shared
+  or later; report the next operand honestly.  The immutable bar remains
+  `1e-15`, and a planted wet-cell content perturbation must fire.
