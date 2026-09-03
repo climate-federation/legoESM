@@ -4,6 +4,14 @@ Issue: climate-federation/legoESM #1699
 
 Branch: `fidelity/nemo-testcases-l3-si3dyn-codex`
 
+Phase-2 commit ledger:
+
+* rung-3.1 independent-review HOLD closure:
+  `fd2dd6c24e6cc70ada3f1c156b631c3da64d5091`;
+* rung-3.2 preregistration: `690fbdd8ee0281398fba9bf54073d5db2502478f`;
+* rung-3.2 implementation and fixed gate:
+  `9f9c4a4a1681f7cb88bb381e369dbbf378dec2a7`.
+
 Oracle roots: `/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv1d/final` and
 `/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv2d/final`.
 Gate artifacts are the corresponding `phase2/nemo_si3_phase2_gate.json` files.
