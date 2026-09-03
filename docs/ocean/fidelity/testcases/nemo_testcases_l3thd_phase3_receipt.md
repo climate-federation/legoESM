@@ -7,12 +7,20 @@ Implementation commit: `80b07f39afa` (recovery git at
 
 ## Verdict
 
-**DEBT, with two confirmed owners repaired.**  The step-74 discontinuity is
-the unconditional negative-evaporation snow-deposition sequence in
-`icethd_dh.F90:179-202`.  The summer deficit is the missing `qml_ice`
-snow-first surface-melt sequence at `icethd_dh.F90:107-120,204-315`.
-Both are now unbranched parts of the sole selectable ORCA1-resolved SI3
-identity.  The private disabled arms exist only for the gate; no public
+**DEBT, with four active physics corrections and one active arithmetic-order
+transcription in the implementation commit.**  The original version of this
+receipt disclosed only two: the step-74 negative-evaporation snow-deposition
+sequence (`icethd_dh.F90:179-202`) and the `qml_ice` snow-first surface-melt
+sequence (`icethd_dh.F90:107-120,204-315`).  Review found that the same commit
+also carried the ZDF no-snow/melting-surface row ranges
+(`icethd_zdf_bl99.F90:433-513`), the bottom-up basal-melt layer loop
+(`icethd_dh.F90:309-315,366-424`), a snow-ice salinity term
+(`icethd_dh.F90:441-485,509-519`), and three NEMO-order EOS conversions
+(`icevar.F90:938-946`; `icethd.F90:233-243`; `icethd_dh.F90:498-503`).
+The later preregistered Phase-5 ablations show that the first two extra physics
+changes and the EOS ordering are active; the snow-ice salinity term is inert
+in this one-year column.  Thus “two confirmed owners” was an incomplete scope
+claim and is retracted.  All disabled arms are private gate hooks; no public
 selector can construct the non-NEMO combinations.
 
 The first row above the fixed `1e-15` bar moves from kt3 `POST_ZDF.e_i`
@@ -39,6 +47,23 @@ does not add a second ice model or duplicate that freeboard formula.  The
 shared bulk snow-consumption helpers cannot preserve NEMO's four ordered
 enthalpy segments, so the already-existing SI3 segment carrier is retained
 for `snw_ent`-order remapping (`icethd_dh.F90:494-507,535-613`).
+
+## Corrected per-change scope table
+
+This table is the post-review disposition of every change bundled in
+`80b07f39afa`.  Counts come from the committed Phase-5 artifact's 621,960
+exact-entry field rows and 61,320 continuous field-step rows.  “Active” means
+the private one-variable arm changed measured outputs; it does not imply that
+all remaining column debt is owned by that change.
+
+| bundled change | NEMO transcription | one-variable result | disposition |
+|---|---|---|---|
+| negative-evaporation deposition | `icethd_dh.F90:166-202` | kt74 `POST_DH.h_s` improves by `8.18e9`; planted arm exits red | **CONFIRMED owner** |
+| snow-first surface melt | `icethd_dh.F90:107-120,204-315` | no-surface arm moves minimum `0.55518→1.78596 m` and growth day `251→261` | **CONFIRMED owner** |
+| ZDF no-snow/melting row ranges | `icethd_zdf_bl99.F90:433-513` | 39,505 exact rows change; disabled has 54,551 over-bar rows versus 36,852 enabled; minimum becomes `0.382871 m`, growth day 252 | **ACTIVE correction; omission from the original scope account retracted** |
+| bottom-up basal layer loop | `icethd_dh.F90:309-315,366-424` | 11,190 exact rows change; disabled has 36,944 over-bar rows versus 36,852 enabled; the legacy-loop continuous minimum differs by `6.16e-13 m` | **ACTIVE correction**; basal melt existed only as a simplified bottom-layer calculation, so “already present” was incomplete |
+| snow-ice contribution to bulk salinity | `icethd_dh.F90:441-485,509-519` | 0/621,960 exact rows and 0/61,320 continuous field-step rows change | **INERT for this C1D year**; retained because it is unconditional in the selected source identity |
+| three EOS operation orders | `icevar.F90:938-946`; `icethd.F90:233-243`; `icethd_dh.F90:498-503` | 24,293 exact rows change; enabled/disabled over-bar counts are 36,852/38,233; zero ZDF surface-branch splits | **ACTIVE arithmetic-order transcription**, not a phenomenology owner |
 
 ## Step 74: first branch owner
 
@@ -122,7 +147,7 @@ trajectory.
 |---|---:|---:|---:|---|
 | `qml` surface ice melt | kt4238 | `0.8635115099 m` | `0.70356` | missing |
 | snow-melt-first shield | kt3836 | `0.5500534667 m` snow = `0.1979472672 m` ice-equivalent | `0.16128` | missing with `qml` path |
-| basal-melt sensitivity | kt2776 | `1.0371414870 m` | `0.84503` | already present; not the first missing branch |
+| basal-melt sensitivity | kt2776 | `1.0371414870 m` | `0.84503` | a simplified bottom-layer path existed, but the source bottom-up layer loop was also rewritten in this commit |
 | `qtr` transmission sensitivity | kt4242 | signed `0.4777193222 m` ice | `0.38923` | already supplied by pinned NEMO input |
 
 The decisive trajectory arm changes only `_surface_melt`: disabled gives a
@@ -177,12 +202,14 @@ The forcing remains the official ERA5 member; no synthetic input is involved.
 | Phase-2b baseline year JSON | `6c21d14f3c85d0fa99be7e31770a4a4dcad548d98f857ea78455bd6344622160` |
 | post-fix Phase-3 year JSON | `77c78a816b254484afe06632d77378336ddac1153ef9190d17c555f41c45a6e1` |
 
-The owner, branch-census, arithmetic, and cursor plants all exit nonzero.  The
-direct suite reports `18 passed`; with the three exact touched-file constant
+The owner, branch-census, arithmetic, and cursor plants all exit nonzero.  A
+clean checkout of the originally reported direct suite collects and reports
+`19 passed` (the prior `18 passed` count omitted one collected test); with the
+three exact touched-file constant
 ratchets it reports:
 
 ```text
-============================= 22 passed in 33.24s ==============================
+============================= 23 passed ========================================
 ```
 
 That ratchet run includes the collected line
