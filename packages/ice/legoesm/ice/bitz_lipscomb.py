@@ -354,47 +354,6 @@ def _radiation(h_i, h_s, qtr_top, T_surface):
     return ab_s, ab_i, tr_i[..., -1]
 
 
-def _nemo_thomas_solve(a, b, c, d):
-    """SI3's written Gauss-elimination order (`icethd_zdf_bl99.F90:516-558`).
-
-    The shared core solver stores normalised diagonals.  That is an equivalent
-    algorithm, but its reassociation was measured at one ULP in the Phase-2b
-    operand replay.  SI3 instead updates its unnormalised diagonal and RHS in
-    place, so this private helper makes that unbranched oracle identity execute
-    literally while leaving the shared solver and every other model untouched.
-    """
-
-    n = b.shape[-1]
-    diagonal = b
-    rhs = d
-
-    def forward(k, carry):
-        diagonal_k, rhs_k = carry
-        previous = diagonal_k[..., k - 1]
-        diagonal_k = diagonal_k.at[..., k].set(
-            diagonal_k[..., k]
-            - (a[..., k] * c[..., k - 1]) / previous
-        )
-        rhs_k = rhs_k.at[..., k].set(
-            rhs_k[..., k]
-            - (a[..., k] * rhs_k[..., k - 1]) / previous
-        )
-        return diagonal_k, rhs_k
-
-    diagonal, rhs = jax.lax.fori_loop(1, n, forward, (diagonal, rhs))
-    solution = jnp.zeros_like(rhs)
-    solution = solution.at[..., -1].set(rhs[..., -1] / diagonal[..., -1])
-
-    def backward(reverse_k, current):
-        k = n - 2 - reverse_k
-        return current.at[..., k].set(
-            (rhs[..., k] - c[..., k] * current[..., k + 1])
-            / diagonal[..., k]
-        )
-
-    return jax.lax.fori_loop(0, n - 1, backward, solution)
-
-
 def _si3_zdf_bl99_step(
     e_ice,
     e_snow,
@@ -573,7 +532,7 @@ def _si3_zdf_bl99_step(
             d[..., 4],
         ))
 
-        solution = _nemo_thomas_solve(a, b, c, d)
+        solution = thomas_solve(a, b, c, d, "nemo_unnormalised")
         solved_surface = jnp.where(
             branch_snow_present, solution[..., 0], solution[..., 3]
         )

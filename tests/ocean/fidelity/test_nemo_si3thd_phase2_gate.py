@@ -152,10 +152,8 @@ def test_zdf_is_eager_jit_and_reverse_mode_safe() -> None:
     assert bool(jnp.isfinite(gradient))
 
 
-def test_shared_nemo_thomas_mode_is_bit_exact_with_private_solver() -> None:
-    """Pre-deletion proof that the central solver preserves SI3's operation order."""
-
-    from legoesm.ice.bitz_lipscomb import _nemo_thomas_solve
+def test_shared_nemo_thomas_mode_is_bit_exact_with_written_order() -> None:
+    """The central solver preserves `icethd_zdf_bl99.F90:516-558` exactly."""
 
     rng = np.random.default_rng(1699)
     a = jnp.asarray(rng.uniform(-0.2, 0.0, (4, 7)), dtype=jnp.float64)
@@ -164,9 +162,21 @@ def test_shared_nemo_thomas_mode_is_bit_exact_with_private_solver() -> None:
     d = jnp.asarray(rng.uniform(250.0, 275.0, (4, 7)), dtype=jnp.float64)
     a = a.at[..., 0].set(0.0)
     c = c.at[..., -1].set(0.0)
-    private = _nemo_thomas_solve(a, b, c, d)
     shared = thomas_solve(a, b, c, d, "nemo_unnormalised")
-    np.testing.assert_array_equal(np.asarray(shared), np.asarray(private))
+    written = []
+    for ai, bi, ci, di in zip(
+        np.asarray(a), np.asarray(b), np.asarray(c), np.asarray(d), strict=True
+    ):
+        diagonal, rhs = bi.copy(), di.copy()
+        for k in range(1, 7):
+            diagonal[k] = diagonal[k] - (ai[k] * ci[k - 1]) / diagonal[k - 1]
+            rhs[k] = rhs[k] - (ai[k] * rhs[k - 1]) / diagonal[k - 1]
+        solution = np.empty_like(rhs)
+        solution[-1] = rhs[-1] / diagonal[-1]
+        for k in range(5, -1, -1):
+            solution[k] = (rhs[k] - ci[k] * solution[k + 1]) / diagonal[k]
+        written.append(solution)
+    np.testing.assert_array_equal(np.asarray(shared), np.asarray(written))
 
 
 def test_existing_column_driver_dispatches_selected_si3() -> None:
