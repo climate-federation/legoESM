@@ -5000,12 +5000,30 @@ class LatLonCGridOceanModel:
                 (u0, v0), h_k_old, 0, eta_stage=state.eta.data,
                 **_stage_transport_kw)
             _vert0 = _stage_vertical_up3(u0, v0, _g0)
+            # NEMO hands stage 1 the SAME Kmm transport it hands stages 2-3:
+            # ``zFu = e2u*e3u(Kmm)*(uu(Kmm) + zub)`` with ``zub = un_adv/
+            # hu(Kmm) - uu_b(Kmm)`` (stprk3_stg.F90:265-275), consumed by
+            # stage 1's dyn_adv at :315 exactly as by :333.  The step-entry
+            # ``tendencies()`` above ran BEFORE the external solve produced
+            # ``un_adv``, so its horizontal UP3 flux advected with zub = 0.
+            # Add the transport's contribution as the difference of the
+            # stage helper evaluated with and without it on the SAME entry
+            # state: every term the helper carries cancels exactly, only
+            # the zub advection survives (isomorphism row S-21; measured
+            # 3.136e-07 m/s^2 at the OVERFLOW kt=2 entry, exactly zero from
+            # rest).
+            _du1_rhs, _dv1_rhs = du_dt_pert, dv_dt_pert
+            if _transport_target is not None:
+                _p0_with_zub = _mom_pert_ws(u0, v0, False, _transport_target)
+                _p0_no_zub = _mom_pert_ws(u0, v0, False, None)
+                _du1_rhs = _du1_rhs + (_p0_with_zub[0] - _p0_no_zub[0])
+                _dv1_rhs = _dv1_rhs + (_p0_with_zub[1] - _p0_no_zub[1])
             # Stage 1: Kmm = Kbb, so the RHS carries (1 + r3u(Kbb)).
             u1_raw = (_qu_b * u0 + (dt_mom / 3.0) * _qu_b * (
-                du_dt_pert if _vert0 is None else du_dt_pert + _vert0[0])
+                _du1_rhs if _vert0 is None else _du1_rhs + _vert0[0])
             ) / _qu_13
             v1_raw = (_qv_b * v0 + (dt_mom / 3.0) * _qv_b * (
-                dv_dt_pert if _vert0 is None else dv_dt_pert + _vert0[1])
+                _dv1_rhs if _vert0 is None else _dv1_rhs + _vert0[1])
             ) / _qv_13
             u1_corr, v1_corr = _replace_stage_mean(
                 u1_raw, v1_raw, target_u, target_v)

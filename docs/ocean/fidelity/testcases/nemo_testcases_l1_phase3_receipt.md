@@ -1947,3 +1947,44 @@ UP3 round's `plume_descent_m` OUTSIDE verdict should be read as uninformative
 rather than as a physical degradation.  NOT FIXED: any robust reducer (volume
 weighting, a percentile, denser registered times) is a new scientific choice
 that changes this row and needs its own preregistration — ASK.
+
+## S-21 stage-1 transport LANDED: the measured-inert, NEMO-faithful fix
+
+`stprk3_stg.F90:265-275,315`: stage 1 receives the same Kmm transport
+`zFu = e2u*e3u(Kmm)*(uu(Kmm) + zub)` as stages 2-3.  Landed at
+`ocean_model_latlon_cgrid.py` stage 1 as the difference of the stage helper
+evaluated with and without the `zub` transport on the same entry state, added
+to the stage-1 RHS (every other term cancels exactly; the private
+`momentum_transport_reconcile` hook is the one-variable control).  Direct
+test: `tests/ocean/unit/test_nemo_ws_stage1_transport.py` (live from a moving
+LOCK entry with a vanishing `e3u_0` column mean, inert from rest; both fail on
+the reverted code).  Before = clean `59d1fcbb8` (`/tmp/wt-branch-iso`), after
+= the same tree plus this patch; fp64, CPU, same oracle dumps:
+
+| card | kt | `T` | `u` | SSH |
+|---|---:|---|---|---|
+| OVERFLOW | 2 | `1.119105e-14` -> same | `4.551736e-10` -> same | `1.050549e-14` -> same |
+| OVERFLOW | 3 | `7.788969e-12 -> 6.851053e-12` | `9.079022e-09 -> 9.105049e-09` | `3.774823e-09` -> same |
+| OVERFLOW | 10 | `4.046684e-08 -> 4.046700e-08` | `2.644302e-05` -> same (7 digits) | `9.237444e-05` -> same |
+| OVERFLOW | 60 | `1.184430e-05` -> same | `2.507516e-04` -> same | `7.751811e-05` -> same |
+| LOCK | 2 | `0.0` -> same | `2.276825e-17` -> same (AT BAR) | `0.0` -> same |
+| LOCK | 3 | `1.184238e-16` -> same | `7.233653e-15 -> 7.267792e-15` | `1.355253e-18` -> same |
+| LOCK | 10 | `1.681618e-14 -> 1.693460e-14` | `1.314126e-11 -> 1.314215e-11` | `3.574534e-13` -> same |
+| LOCK | 60 | `8.755528e-10 -> 8.755466e-10` | `7.496602e-08 -> 7.496604e-08` | `1.609001e-08` -> same |
+
+These reproduce the S-21 round's arm rows exactly (kt=2 bit-identical on both
+cards; OVERFLOW kt=3 `u` `+0.29%`; kt=10/60 unchanged to seven digits; SSH
+untouched at every kt).  Stage sweep kt=2: OVERFLOW 96/96 rows and LOCK 54/54 rows bit-identical before -> after (`ssh_walk/s21_{before,after}/*_stage_sweep_kt2.json`; the LOCK after-sweep process started after the seed fix of the next section was already on disk, which P7/P8 of that round predict inert at kt=2 -- and it was)  Its
+6120-step statistics ride with the SSH-walk seed round (the next section):
+one statistics pair covers both landings, disclosed as such.
+
+| artifact | sha256 |
+|---|---|
+| `ssh_walk/s21_after/lock_trajectory_kt10.json` | `0e689f39e804d6bd115ce8324afd96bd3f03adf8e0d18618076848c9d20a1cd3` |
+| `ssh_walk/s21_after/lock_trajectory_kt60.json` | `d79dcf32b7c4edb9fb000e886d4577eff65c1884d25a398e6cdcd15b29b91893` |
+| `ssh_walk/s21_after/overflow_trajectory_kt10.json` | `07685d8a1e12a4a2141be2649a380ca70805d3514f2824ceaf63a1a4d771eb12` |
+| `ssh_walk/s21_after/overflow_trajectory_kt60.json` | `1bc3be88fa858f7bb8f1adf249f39f0bcd71c55711ce35bc591854d84db65410` |
+| `ssh_walk/s21_before/lock_trajectory_kt10.json` | `7a67e604747dd7a569fdc53fa82eaeb3ab6242cf9102eb5a0aa62298a451c7f9` |
+| `ssh_walk/s21_before/lock_trajectory_kt60.json` | `7a04859e03414676549ce5a8c84e0314363d5f2ef0c01096a6e70fe025dce8d4` |
+| `ssh_walk/s21_before/overflow_trajectory_kt10.json` | `dbf487fa82e8177afbac6f544dc1040566c7f34c908f26693542925a289e295f` |
+| `ssh_walk/s21_before/overflow_trajectory_kt60.json` | `4bc184fd1fdf4254a29fbcb017152a1856ab26445aac932dca9aca5012569d28` |
