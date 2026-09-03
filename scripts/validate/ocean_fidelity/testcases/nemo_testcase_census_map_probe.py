@@ -34,8 +34,10 @@ import hashlib
 import importlib.util
 import json
 import subprocess
+import time
 from pathlib import Path
 
+import jax.numpy as jnp
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -519,6 +521,148 @@ def command_variance(args) -> None:
                   f"ratio {entry['variance_ratio']:.12f}")
 
 
+# ------------------------------------------------------------ chaos null ----
+def command_chaos_null(args) -> None:
+    """Seed one wet face at kt=0 and score the full run against the committed run.
+
+    The precision arm is not a null for the census row: it saturates at a
+    normalized temperature L-infinity of 0.054 while every operator pair in the
+    scorer sits at 0.32-0.36, and its perturbation is RANDOM.  This runs the
+    certified card unchanged except for one number -- the initial ``u`` at the
+    ``k=24`` injection face itself -- so the seed carries the same field, cell
+    and provenance as the injection whose ownership is in question and differs
+    from it only in amplitude.  Scored against the COMMITTED unperturbed fp64
+    states with the first round's reductions plus the scorer's own normalized
+    L-infinity (scaled by ``N2``, exactly as ``_field_linf`` does), so every
+    number is directly comparable to a scorer row.
+    """
+    import jax
+
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSRK3TestHooks,
+    )
+
+    set_policy(PrecisionPolicy.fp64())
+    require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    card = STATS.build_nemo_testcase_card(CASE)
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks())
+    base = card.recipe.initial_state
+    masks = STATS.expected_masks(card)
+    row, face, level = args.row, args.face, args.level
+
+    # CONTROLS, before the run: the seeded face must be WET at that level and
+    # the seed must be the ONLY difference from the certified initial state.
+    require(bool(masks["u"][row, face - 1, level]), "seeded face is dry at that level")
+    u0 = np.asarray(base.u.data, dtype=np.float64)
+    seeded = u0.copy()
+    seeded[row, face, level] += args.amplitude
+    difference = seeded - u0
+    require(int(np.count_nonzero(difference)) == 1, "seed touched more than one face")
+    require(
+        float(np.max(np.abs(difference))) == float(args.amplitude),
+        "seed amplitude did not land",
+    )
+    state = base._replace(u=base.u._replace(data=jnp.asarray(seeded)))
+
+    samples = set(STATS.sample_completed_steps(CASE))
+    n_steps = int(STATS.CASES[CASE]["n_steps"])
+    captured: dict[int, dict] = {}
+    started = time.perf_counter()
+    for completed in range(n_steps + 1):
+        if completed in samples:
+            captured[completed] = {
+                name: np.array(values, copy=True)
+                for name, values in STATS._state_arrays(state).items()
+            }
+        if completed == n_steps:
+            break
+        state = model.step(state, dt=card.dt_s)
+    require(set(captured) == samples, "milestone capture incomplete")
+    wall_s = time.perf_counter() - started
+
+    dt_s = float(STATS.CASES[CASE]["dt_s"])
+    arm = {int(completed * dt_s): fields for completed, fields in captured.items()}
+    reference = STATS.load_legoesm_states(CASE, "fp64", args.lego_root)[0]
+    nemo = STATS.load_nemo_states(CASE, Path(STATS.CASES[CASE]["baseline"]), baseline=True)
+    require(sorted(arm) == sorted(reference) == sorted(nemo), "registered times differ")
+    times = sorted(arm)
+
+    states = {}
+    for name, source in (("seed", arm), ("L64", reference)):
+        states[name] = {}
+        for time_s in times:
+            fields = STATS.mapped_fields(source[int(time_s)], "L64")
+            states[name][int(time_s)] = arm_state("L64", fields)
+
+    final = int(times[-1])
+    census = float(np.max(np.abs(
+        np.asarray(states["seed"][final]["census"])
+        - np.asarray(states["L64"][final]["census"]))))
+    # the scorer's normalized L-infinity, N2 as the common scale, last two times
+    linf = {}
+    for field in ("T", "u"):
+        mask = masks[field]
+        values = []
+        for time_s in times[1:]:
+            left = STATS.mapped_fields(arm[int(time_s)], "L64")[field]
+            right = STATS.mapped_fields(reference[int(time_s)], "L64")[field]
+            scale = max(float(np.max(np.abs(
+                STATS.mapped_fields(nemo[int(time_s)], "N2")[field][mask]))), 1.0)
+            values.append(float(np.max(np.abs(left[mask] - right[mask]))) / scale)
+        linf[field] = max(values)
+
+    payload = {
+        "case": CASE,
+        "git_sha": git_sha(),
+        "precision": "fp64",
+        "backend": jax.default_backend(),
+        "seed": {
+            "field": "u", "row": row, "model_face": face, "level": level,
+            "amplitude_m_s": float(args.amplitude),
+            "seeded_faces": 1,
+        },
+        "wall_time_s": wall_s,
+        "reference": str(args.lego_root),
+        "census_max_abs_distance": census,
+        "temperature_linf_normalized": linf["T"],
+        "u_linf_normalized": linf["u"],
+        "variance_ratio_seed_over_L64": (
+            states["seed"][final]["domain_T_variance_K2"]
+            / states["L64"][final]["domain_T_variance_K2"]),
+        "anomaly_effective_volume_ratio": (
+            states["seed"][final]["anomaly_effective_volume_m3"]
+            / states["L64"][final]["anomaly_effective_volume_m3"]),
+        "anomaly_deficit_relative_delta": (
+            states["seed"][final]["anomaly_deficit_K_m3"]
+            / states["L64"][final]["anomaly_deficit_K_m3"] - 1.0),
+        "census_by_time": {
+            str(t): float(np.max(np.abs(
+                np.asarray(states["seed"][t]["census"])
+                - np.asarray(states["L64"][t]["census"])))) for t in times},
+        "seed_census": states["seed"][final]["census"],
+        "reference_census": states["L64"][final]["census"],
+    }
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(payload, indent=1, sort_keys=True))
+    np.savez_compressed(
+        args.out.with_suffix(".states.npz"),
+        **{f"step_{completed}_{name}": values
+           for completed, fields in captured.items() for name, values in fields.items()})
+    print(f"wrote {args.out}")
+    for key in (
+        "census_max_abs_distance", "temperature_linf_normalized", "u_linf_normalized",
+        "variance_ratio_seed_over_L64", "anomaly_effective_volume_ratio",
+        "anomaly_deficit_relative_delta",
+    ):
+        print(f"  {key:38s} {payload[key]!r}")
+    print(f"  census_by_time                          {payload['census_by_time']}")
+
+
 def command_map(args) -> None:
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 
@@ -640,6 +784,15 @@ def main() -> None:
     p_var.add_argument("--max-step", type=int, default=60)
     p_var.add_argument("--out", type=Path, default=DEFAULT_OUT / "variance.json")
     p_var.set_defaults(func=command_variance)
+
+    p_null = sub.add_parser("chaos-null", help="seed one face at kt=0, full duration")
+    p_null.add_argument("--amplitude", type=float, required=True)
+    p_null.add_argument("--row", type=int, default=1)
+    p_null.add_argument("--face", type=int, default=21, help="MODEL u-face index")
+    p_null.add_argument("--level", type=int, default=24)
+    p_null.add_argument("--lego-root", type=Path, default=DEFAULT_LEGO_ROOT)
+    p_null.add_argument("--out", type=Path, required=True)
+    p_null.set_defaults(func=command_chaos_null)
 
     args = parser.parse_args()
     args.func(args)
