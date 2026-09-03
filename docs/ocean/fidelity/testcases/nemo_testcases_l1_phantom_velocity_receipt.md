@@ -34,8 +34,10 @@ the barotropic depth-mean increment at EVERY level below its own seabed --
 neighbour's wet bottom level read it as an UP3 stencil neighbour.
 
 With NEMO's rule enforced, the OVERFLOW `u` walk drops **4.9x at kt=10**
-(`2.632503e-05 -> 5.422602e-06`) and **5-21x at kt=4..9**, and the SSH walk
-drops **2.6x at kt=10** (`1.624474e-06 -> 6.266335e-07`).  46 of 50 kt<=10
+(`2.632503e-05 -> 5.422602e-06`), **7.7x at kt=60** (`2.506199e-04 ->
+3.238532e-05`) and 5-21x at kt=4..9; the SSH walk drops **2.6x at kt=10** and
+2.75x at kt=60.  At 6120 steps five of the six registered statistics move into
+`WITHIN-SCHEME-SPREAD` (section 7).  46 of 50 kt<=10
 rows improve or are unchanged; the four that worsen are disclosed below.
 LOCK_EXCHANGE is BIT-IDENTICAL on every row, by construction: its 3-D live
 u-face mask EQUALS the 2-D broadcast (measured, 0 of its points differ).
