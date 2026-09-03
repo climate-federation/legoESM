@@ -122,3 +122,22 @@ oracle-RHS arm clears the downstream stage-2 and transport boundary with
 movement at the faithful residual scale; otherwise the first surviving row
 remains the boundary.  Dtype, header, registry, and planted controls remain
 fail-closed.
+
+### ENE Kmm face-thickness continuation
+
+The raw-RHS arm clears corrected stage-2 u/v to `3.25e-19`/`2.71e-19` and
+improves the downstream triplet by about two million-fold, confirming the raw
+stage-2 RHS as causal.  Its first direct divergence is the raw vorticity
+component (`5.03e-10` u, `5.93e-10` v); the reference-depth projection is
+AT-BAR, which explains the much smaller corrected-state residual.
+
+Source inspection identifies the next operand: NEMO `vor_ene` forms face mass
+fluxes with `e3u/e3v(Kmm)` (`dynvor.F90`, ENE transport products), whereas the
+candidate's vector branch did not consume the stage's canonical QCO face
+thickness supplied to the momentum kernel.  The faithful arm will thread that
+already-built `e3u_0*(1+r3u(Kmm))` / v-face pair into the single ENE routine;
+a private legacy arm will restore the min-of-stretched-T face pair.  **CONFIRM**
+iff raw stage-2 RHS and corrected Kaa clear `1e-15`, and the legacy arm restores
+the prior residual at its scale.  Otherwise no ENE-thickness owner label is
+allowed.  This is folded into the existing vector/ENE WS-RK3 identity and the
+isomorphism register, not exposed as a public selector.
