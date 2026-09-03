@@ -145,6 +145,20 @@ def test_operator_per_step_and_outlier_controls_exit_red(gate) -> None:
         gate._validate_operator_trajectory(operator, plant_outlier=True)
 
 
+def test_scope_ablation_accounting_plant_exits_red(gate) -> None:
+    scope = {
+        name: {
+            "field_rows_compared": 7,
+            "changed_field_rows": 2,
+            "unchanged_field_rows": 5,
+        }
+        for name in gate.SCOPE_ARM_KWARGS
+    }
+    gate._validate_scope_ablation_accounting(scope)
+    with pytest.raises(gate.phase2.GateError, match="scope-arm row accounting"):
+        gate._validate_scope_ablation_accounting(scope, plant=True)
+
+
 def test_phase3_branch_census_plant_exits_red(gate) -> None:
     operator = {
         "full_state_snapshots": {
@@ -200,6 +214,35 @@ def test_phase4_artifact_retains_per_step_operator_and_outlier_attribution() -> 
     )
     assert historical["normalisation_denominator"] == 1.0
     assert historical["absolute_numerator"] == historical["normalised_quotient"]
+
+
+def test_phase5_artifact_dispositions_all_bundled_changes() -> None:
+    artifact = json.loads(Path(
+        "docs/ocean/fidelity/testcases/nemo_testcases_l3thd_phase5_year_gate.json"
+    ).read_text())
+    arms = artifact["round4_bundled_change_ablations"]
+    exact = arms["exact_entry"]
+    assert set(exact) == {
+        "zdf_no_snow_melting_row_ranges", "basal_layer_loop",
+        "snow_ice_salinity", "eos_operation_order",
+    }
+    assert exact["zdf_no_snow_melting_row_ranges"]["changed_field_rows"] == 39_505
+    assert exact["basal_layer_loop"]["changed_field_rows"] == 11_190
+    assert exact["snow_ice_salinity"]["changed_field_rows"] == 0
+    assert exact["eos_operation_order"]["zdf_surface_branch_splits"] == 0
+    assert arms["continuous"]["snow_ice_salinity"]["changed_field_steps"] == 0
+
+    histogram = artifact["oracle_entry_over_bar_histogram"]
+    assert histogram["all_over_bar_rows"] == 36_852
+    assert histogram["denominator_one_oracle_exactly_zero_rows"] == 0
+    assert histogram["genuine_relative_rows"] == 36_852
+    largest = histogram["largest_genuine_relative_row"]
+    assert (largest["step"], largest["sub_call"], largest["variable"]) == (
+        5734, "POST_DH", "e_s",
+    )
+    assert artifact["continuous_jump_attribution"][
+        "initial_threshold_amplification_from_2e-15_class_steps"
+    ] is True
 
 
 def test_truncated_thermodynamics_frame_fails_closed(gate, tmp_path: Path) -> None:

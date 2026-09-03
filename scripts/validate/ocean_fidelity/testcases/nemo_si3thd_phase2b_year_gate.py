@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import struct
+from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -552,7 +553,9 @@ def _operator_sweep(thd_path: Path, zin_path: Path, card, step_function, *,
                                 "sub_call": phase2.STAGES[stage_index][1],
                                 "variable": name,
                                 "absolute_max": absolute,
+                                "normalisation_denominator": scale,
                                 "normalised_max_abs": normalised,
+                                "oracle_exactly_zero": bool(np.all(wanted == 0.0)),
                                 "branch": _branch_label(
                                     stage_index, frames, exact_input,
                                     card.config.ice_constants.T0,
@@ -580,6 +583,334 @@ def _operator_sweep(thd_path: Path, zin_path: Path, card, step_function, *,
         phase2.require(thd.read(1) == b"", "trailing thermodynamics frame")
         phase2.require(zin.read(1) == b"", "trailing ZDF input frame")
     return summary
+
+
+SCOPE_ARM_KWARGS = {
+    "zdf_no_snow_melting_row_ranges": {"_zdf_branch_ranges": False},
+    "basal_layer_loop": {"_nemo_basal_layer_loop": False},
+    "snow_ice_salinity": {"_snow_ice_salinity": False},
+    "eos_operation_order": {"_nemo_eos_order": False},
+}
+
+
+def _array_max_ulp(left: np.ndarray, right: np.ndarray) -> int | None:
+    """Return maximum same-sign finite binary64 ULP distance, else ``None``."""
+
+    left = np.asarray(left, dtype=np.float64).reshape(-1)
+    right = np.asarray(right, dtype=np.float64).reshape(-1)
+    if (not np.all(np.isfinite(left)) or not np.all(np.isfinite(right))
+            or np.any(np.signbit(left) != np.signbit(right))):
+        return None
+    return int(np.max(np.abs(
+        left.view(np.int64).astype(object) - right.view(np.int64).astype(object)
+    )))
+
+
+def _scope_ablation_sweep(thd_path: Path, zin_path: Path, card) -> dict[str, object]:
+    """Measure each formerly bundled operation as a private one-variable arm."""
+
+    from legoesm.ice.bitz_lipscomb import SI3SurfaceForcing, si3_column_step_arrays
+
+    summaries = {
+        name: {
+            "private_hook": next(iter(kwargs)),
+            "field_rows_compared": 0,
+            "changed_field_rows": 0,
+            "unchanged_field_rows": 0,
+            "disabled_over_bar_field_rows": 0,
+            "enabled_over_bar_field_rows": 0,
+            "disabled_maximum_normalised_error": 0.0,
+            "first_changed_row": None,
+            "largest_disabled_outlier": None,
+            "changed_by_sub_call": Counter(),
+            "changed_by_variable": Counter(),
+            "changed_by_step": Counter(),
+            "maximum_enabled_disabled_ulp": 0,
+            "non_ulp_comparable_rows": 0,
+            "zdf_surface_branch_splits": 0,
+            "enabled_closer_rows": 0,
+            "disabled_closer_rows": 0,
+            "equal_oracle_error_rows": 0,
+            "largest_enabled_improvement": None,
+        }
+        for name, kwargs in SCOPE_ARM_KWARGS.items()
+    }
+    chunk_size = 1000
+    with thd_path.open("rb") as thd, zin_path.open("rb") as zin:
+        for first_step in range(1, card.nsteps + 1, chunk_size):
+            last_step = min(card.nsteps, first_step + chunk_size - 1)
+            chunk_frames, entries, exact_inputs = [], [], []
+            for kt in range(first_step, last_step + 1):
+                chunk_frames.append(phase2._read_thd_step(thd, kt))
+                exact_inputs.append(phase2._read_zdf_input_step(zin, kt))
+                entries.append(phase2._entry_arrays(chunk_frames[-1][0]))
+            batch_entry = jax.tree.map(
+                lambda *values: jnp.asarray(np.concatenate(values, axis=0),
+                                            dtype=jnp.float64),
+                *entries,
+            )
+            batch_forcing = SI3SurfaceForcing(*(
+                jnp.asarray(
+                    np.concatenate([values[name] for values in exact_inputs]),
+                    dtype=jnp.float64,
+                )
+                for name in phase2.ZDF_INPUT_NAMES
+            ))
+            enabled_maps = _stage_maps(jax.device_get(si3_column_step_arrays(
+                batch_entry, batch_forcing, card.dt_seconds,
+                card.config.ice_constants,
+            )))
+            disabled_maps = {
+                arm_name: _stage_maps(jax.device_get(si3_column_step_arrays(
+                    batch_entry, batch_forcing, card.dt_seconds,
+                    card.config.ice_constants, **kwargs,
+                )))
+                for arm_name, kwargs in SCOPE_ARM_KWARGS.items()
+            }
+            for offset, frames in enumerate(chunk_frames):
+                kt = first_step + offset
+                exact_input = exact_inputs[offset]
+                for stage_index, (oracle_frame, enabled) in enumerate(
+                    zip(frames, enabled_maps, strict=True)
+                ):
+                    oracle = (oracle_frame if 1 <= stage_index <= 5
+                              else phase2._center_global(oracle_frame))
+                    names = (phase2.SELECTED_NAMES if 1 <= stage_index <= 5
+                             else phase2.GLOBAL_NAMES)
+                    for field_name in names:
+                        wanted = np.asarray(oracle[field_name])
+                        enabled_value = np.asarray(
+                            enabled[field_name][offset:offset + 1]
+                        )
+                        if enabled_value.ndim == 2 and wanted.ndim == 1:
+                            wanted = wanted[None, :]
+                        if wanted.shape != enabled_value.shape:
+                            phase2.require(
+                                wanted.size == enabled_value.size,
+                                "scope oracle/enabled element count",
+                            )
+                            wanted = wanted.reshape(enabled_value.shape)
+                        for arm_name, maps in disabled_maps.items():
+                            result = summaries[arm_name]
+                            disabled_value = np.asarray(
+                                maps[stage_index][field_name][offset:offset + 1]
+                            )
+                            phase2.require(
+                                wanted.shape == disabled_value.shape,
+                                f"scope metric shape {arm_name} kt{kt} "
+                                f"{phase2.STAGES[stage_index][1]}.{field_name}: "
+                                f"{wanted.shape} != {disabled_value.shape}",
+                            )
+                            result["field_rows_compared"] += 1
+                            absolute, normalised = _normalised_error(
+                                wanted, disabled_value
+                            )
+                            enabled_abs, enabled_norm = _normalised_error(
+                                wanted, enabled_value
+                            )
+                            if normalised > BAR:
+                                result["disabled_over_bar_field_rows"] += 1
+                            if enabled_norm > BAR:
+                                result["enabled_over_bar_field_rows"] += 1
+                            if enabled_norm < normalised:
+                                result["enabled_closer_rows"] += 1
+                            elif normalised < enabled_norm:
+                                result["disabled_closer_rows"] += 1
+                            else:
+                                result["equal_oracle_error_rows"] += 1
+                            result["disabled_maximum_normalised_error"] = max(
+                                result["disabled_maximum_normalised_error"],
+                                normalised,
+                            )
+                            disabled_outlier = {
+                                "step": kt,
+                                "sub_call": phase2.STAGES[stage_index][1],
+                                "variable": field_name,
+                                "absolute_numerator": absolute,
+                                "normalisation_denominator": max(
+                                    1.0, float(np.max(np.abs(wanted)))
+                                ),
+                                "normalised_quotient": normalised,
+                                "branch": _branch_label(
+                                    stage_index, frames, exact_input,
+                                    card.config.ice_constants.T0,
+                                ),
+                            }
+                            largest = result["largest_disabled_outlier"]
+                            if (largest is None or normalised
+                                    > largest["normalised_quotient"]):
+                                result["largest_disabled_outlier"] = disabled_outlier
+                            changed = not np.array_equal(
+                                enabled_value, disabled_value
+                            )
+                            if changed:
+                                result["changed_field_rows"] += 1
+                                stage_name = phase2.STAGES[stage_index][1]
+                                result["changed_by_sub_call"][stage_name] += 1
+                                result["changed_by_variable"][field_name] += 1
+                                result["changed_by_step"][str(kt)] += 1
+                                delta = float(np.max(np.abs(
+                                    disabled_value - enabled_value
+                                )))
+                                improvement = normalised - enabled_norm
+                                best = result["largest_enabled_improvement"]
+                                if best is None or improvement > best["normalised_gain"]:
+                                    result["largest_enabled_improvement"] = {
+                                        **disabled_outlier,
+                                        "enabled_normalised_max_abs": enabled_norm,
+                                        "normalised_gain": improvement,
+                                    }
+                                if result["first_changed_row"] is None:
+                                    result["first_changed_row"] = {
+                                        **disabled_outlier,
+                                        "enabled_absolute_max": enabled_abs,
+                                        "enabled_normalised_max_abs": enabled_norm,
+                                        "enabled_disabled_absolute_max": delta,
+                                        "disabled_enabled_improvement_factor": (
+                                            absolute / max(
+                                                enabled_abs,
+                                                np.finfo(np.float64).eps,
+                                            )
+                                        ),
+                                    }
+                                ulp = _array_max_ulp(enabled_value, disabled_value)
+                                if ulp is None:
+                                    result["non_ulp_comparable_rows"] += 1
+                                else:
+                                    result["maximum_enabled_disabled_ulp"] = max(
+                                        result["maximum_enabled_disabled_ulp"], ulp
+                                    )
+                            else:
+                                result["unchanged_field_rows"] += 1
+                    if stage_index == 1:
+                        enabled_melt = bool(
+                            np.asarray(enabled["t_su"])[offset] >=
+                            card.config.ice_constants.T0
+                        )
+                        for arm_name, maps in disabled_maps.items():
+                            disabled_melt = bool(
+                                np.asarray(maps[stage_index]["t_su"])[offset] >=
+                                card.config.ice_constants.T0
+                            )
+                            summaries[arm_name]["zdf_surface_branch_splits"] += int(
+                                enabled_melt != disabled_melt
+                            )
+        phase2.require(thd.read(1) == b"", "scope sweep thermo cursor")
+        phase2.require(zin.read(1) == b"", "scope sweep input cursor")
+
+    for result in summaries.values():
+        for key in ("changed_by_sub_call", "changed_by_variable", "changed_by_step"):
+            result[key] = dict(sorted(result[key].items(), key=lambda item: item[0]))
+    return summaries
+
+
+def _validate_scope_ablation_accounting(scope, *, plant=False) -> None:
+    """Plantable completeness check for all four preregistered scope arms."""
+
+    expected_names = set(SCOPE_ARM_KWARGS)
+    phase2.require(set(scope) == expected_names, "scope-arm register")
+    expected_rows = next(iter(scope.values()))["field_rows_compared"]
+    phase2.require(expected_rows > 0, "scope-arm empty sweep")
+    for index, result in enumerate(scope.values()):
+        changed = result["changed_field_rows"] - int(plant and index == 0)
+        phase2.require(
+            result["field_rows_compared"] == expected_rows
+            and changed + result["unchanged_field_rows"] == expected_rows,
+            "scope-arm row accounting",
+        )
+
+
+def _operator_debt_histogram(operator) -> dict[str, object]:
+    """Partition exact-entry debt, including the denominator-one zero class."""
+
+    rows = [
+        {"step": int(step), **row}
+        for step, step_rows in operator["over_bar_by_step"].items()
+        for row in step_rows
+    ]
+    zero_rows, genuine = [], []
+    for row in rows:
+        target = (zero_rows if row["normalisation_denominator"] == 1.0
+                  and row["oracle_exactly_zero"] else genuine)
+        target.append(row)
+    largest_genuine = max(genuine, key=lambda row: row["normalised_max_abs"])
+    by_step = Counter(str(row["step"]) for row in rows)
+    frequency = Counter(str(count) for count in by_step.values())
+    return {
+        "all_over_bar_rows": len(rows),
+        "by_sub_call": dict(sorted(Counter(
+            row["sub_call"] for row in rows
+        ).items())),
+        "by_variable": dict(sorted(Counter(
+            row["variable"] for row in rows
+        ).items())),
+        "by_step": dict(sorted(by_step.items(), key=lambda item: int(item[0]))),
+        "rows_per_step_frequency": dict(sorted(
+            frequency.items(), key=lambda item: int(item[0])
+        )),
+        "steps_with_over_bar_rows": len(by_step),
+        "denominator_one_oracle_exactly_zero_rows": len(zero_rows),
+        "genuine_relative_rows": len(genuine),
+        "largest_genuine_relative_row": largest_genuine,
+    }
+
+
+def _continuous_jump_attribution(continuous, operator) -> dict[str, object]:
+    """Relate the conspicuous continuous jumps to same-step exact-entry debt."""
+
+    # These rows are post-hoc diagnostics selected from the committed complete
+    # trajectory; they are not promoted to preregistered owners.
+    selected = ((4239, "e_i"), (4239, "h_i"), (4943, "h_s"),
+                (5045, "t_su"), (5238, "t_su"))
+    rows = []
+    for step, variable in selected:
+        previous = continuous[step - 2]["fields"][variable]["normalised_linf"]
+        current = continuous[step - 1]["fields"][variable]["normalised_linf"]
+        exact_step = operator["per_step"][step - 1]
+        same_variable = [
+            row for row in operator["over_bar_by_step"].get(str(step), [])
+            if row["variable"] == variable
+        ]
+        rows.append({
+            "step": step,
+            "variable": variable,
+            "continuous_previous_normalised_linf": previous,
+            "continuous_current_normalised_linf": current,
+            "exact_entry_step_maximum_normalised_error": (
+                exact_step["maximum_normalised_error"]
+            ),
+            "exact_entry_step_owner": exact_step["owner"],
+            "same_variable_over_bar_rows": same_variable,
+            "exact_entry_step_is_2e-15_class": (
+                exact_step["maximum_normalised_error"] <= 2.0e-15
+            ),
+        })
+    initial_noise_steps = [4239, 5045]
+    noise_result = all(
+        operator["per_step"][step - 1]["maximum_normalised_error"] <= 2.0e-15
+        for step in initial_noise_steps
+    )
+    material = {
+        "first_above_1e-12": operator["first_above_1e-12"],
+        "first_above_1e-3": operator["first_above_1e-3"],
+    }
+    return {
+        "selection_status": "POST-HOC from the complete retained trajectory",
+        "rows": rows,
+        "initial_threshold_amplification_from_2e-15_class_steps": noise_result,
+        "terminal_classification": (
+            "MIXED DEBT: the kt4239 and kt5045 continuous jumps amplify "
+            "2e-15-class exact-entry differences, but later exact-entry "
+            "injections exceed 1e-12 and 1e-3; the whole remaining trajectory "
+            "cannot be classified as summation-order noise"
+        ),
+        "material_exact_entry_debt": material,
+        "next_discriminator": (
+            "bit-exact whole-step NEMO summation order is required to remove "
+            "the threshold-amplified component; operand-level DH dumps at the "
+            "first material rows are required before assigning the later debt"
+        ),
+    }
 
 
 def _validate_operator_trajectory(operator, *, plant=False,
@@ -1037,7 +1368,8 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
         plant_deposition=False, plant_surface=False,
         plant_snow_temperature=False,
         plant_operator_trajectory=False,
-        plant_outlier_attribution=False) -> dict[str, object]:
+        plant_outlier_attribution=False,
+        plant_scope_accounting=False) -> dict[str, object]:
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ice.bitz_lipscomb import si3_column_step_arrays
     from legoesm.ice.c1d_omip_l3 import (
@@ -1079,6 +1411,16 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
         state, forcing, card.dt_seconds, card.config.ice_constants,
         _basal_melt=False,
     ))
+    scope_steps = {
+        arm_name: jax.jit(
+            lambda state, forcing, arm_kwargs=arm_kwargs:
+            si3_column_step_arrays(
+                state, forcing, card.dt_seconds, card.config.ice_constants,
+                **arm_kwargs,
+            )
+        )
+        for arm_name, arm_kwargs in SCOPE_ARM_KWARGS.items()
+    }
     operator = _operator_sweep(
         thd_path, zin_path, card, eager_step, retain_over_bar_rows=True,
         snapshot_steps=(73, 74, 75, 76, 4239, 5285),
@@ -1088,11 +1430,28 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
         operator, plant=plant_operator_trajectory,
         plant_outlier=plant_outlier_attribution,
     )
+    scope_ablations = _scope_ablation_sweep(thd_path, zin_path, card)
+    _validate_scope_ablation_accounting(
+        scope_ablations, plant=plant_scope_accounting
+    )
     continuous_per_step = []
     sample_table: dict[str, object] = {}
     h_nemo, h_fp64, h_fp32 = [], [], []
     h_no_surface, h_no_basal = [], []
+    h_scope = {arm_name: [] for arm_name in SCOPE_ARM_KWARGS}
+    scope_continuous = {
+        arm_name: {
+            "changed_field_steps": 0,
+            "unchanged_field_steps": 0,
+            "first_changed": None,
+            "maximum_enabled_disabled_absolute": 0.0,
+            "changed_by_variable": Counter(),
+            "sample_steps": {},
+        }
+        for arm_name in SCOPE_ARM_KWARGS
+    }
     state64 = state32 = state_no_surface = state_no_basal = None
+    state_scope = {}
 
     with thd_path.open("rb") as thd, zin_path.open("rb") as zin:
         for kt in range(1, card.nsteps + 1):
@@ -1112,15 +1471,28 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
                 )
                 state_no_surface = state64
                 state_no_basal = state64
+                state_scope = {arm_name: state64 for arm_name in SCOPE_ARM_KWARGS}
             trace64 = step(state64, forcing64)
             trace32 = step(state32, _forcing(exact_input, jnp.float32))
             trace_no_surface = no_surface_step(state_no_surface, forcing64)
             trace_no_basal = no_basal_step(state_no_basal, forcing64)
+            trace_scope = {
+                arm_name: arm_step(state_scope[arm_name], forcing64)
+                for arm_name, arm_step in scope_steps.items()
+            }
             state64, state32 = trace64.exit, trace32.exit
             state_no_surface = trace_no_surface.exit
             state_no_basal = trace_no_basal.exit
+            state_scope = {
+                arm_name: arm_trace.exit
+                for arm_name, arm_trace in trace_scope.items()
+            }
             exit64 = phase2._global_from_arrays(jax.device_get(state64))
             exit32 = phase2._global_from_arrays(jax.device_get(state32))
+            exit_scope = {
+                arm_name: phase2._global_from_arrays(jax.device_get(arm_state))
+                for arm_name, arm_state in state_scope.items()
+            }
             oracle_exit = phase2._center_global(frames[7])
             oracle_metrics = _metric_fields(oracle_exit)
             fp64_metrics = _metric_fields(exit64)
@@ -1141,6 +1513,39 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
             h_fp32.append(float(fp32_metrics["h_i"][0]))
             h_no_surface.append(float(state_no_surface.h_ice[0]))
             h_no_basal.append(float(state_no_basal.h_ice[0]))
+            for arm_name, arm_exit in exit_scope.items():
+                arm_metrics = _metric_fields(arm_exit)
+                h_scope[arm_name].append(float(arm_metrics["h_i"][0]))
+                arm_summary = scope_continuous[arm_name]
+                sample = {}
+                for field_name in CONTINUOUS_FIELDS:
+                    delta = float(np.max(np.abs(
+                        arm_metrics[field_name] - fp64_metrics[field_name]
+                    )))
+                    if delta == 0.0:
+                        arm_summary["unchanged_field_steps"] += 1
+                    else:
+                        arm_summary["changed_field_steps"] += 1
+                        arm_summary["changed_by_variable"][field_name] += 1
+                        arm_summary["maximum_enabled_disabled_absolute"] = max(
+                            arm_summary["maximum_enabled_disabled_absolute"], delta
+                        )
+                        if arm_summary["first_changed"] is None:
+                            arm_summary["first_changed"] = {
+                                "step": kt, "variable": field_name,
+                                "enabled_disabled_absolute": delta,
+                            }
+                    if kt in REPORT_STEPS:
+                        absolute, normalised = _normalised_error(
+                            oracle_metrics[field_name], arm_metrics[field_name]
+                        )
+                        sample[field_name] = {
+                            "absolute_max": absolute,
+                            "normalised_linf": normalised,
+                            "enabled_disabled_absolute": delta,
+                        }
+                if kt in REPORT_STEPS:
+                    arm_summary["sample_steps"][str(kt)] = sample
         phase2.require(thd.read(1) == b"", "trailing thermodynamics frame")
         phase2.require(zin.read(1) == b"", "trailing ZDF input frame")
 
@@ -1154,6 +1559,13 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
     fp32_phen = _phenology(np.asarray(h_fp32))
     no_surface_phen = _phenology(np.asarray(h_no_surface))
     no_basal_phen = _phenology(np.asarray(h_no_basal))
+    for arm_name, arm_summary in scope_continuous.items():
+        arm_summary["changed_by_variable"] = dict(sorted(
+            arm_summary["changed_by_variable"].items()
+        ))
+        arm_summary["phenomenology"] = _phenology(
+            np.asarray(h_scope[arm_name])
+        )
     phase2.require(phase2.sha256(BASELINE_JSON) == BASELINE_JSON_SHA256,
                    "Phase-2b baseline JSON SHA256")
     phase2.require(
@@ -1228,8 +1640,17 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
         },
         "arithmetic_replay": arithmetic,
         "owner_arms": owner_arms,
+        "round4_bundled_change_ablations": {
+            "exact_entry": scope_ablations,
+            "continuous": scope_continuous,
+            "preregister": (
+                "docs/ocean/fidelity/testcases/"
+                "nemo_testcases_l3thd_phase5_scope_preregister.md"
+            ),
+        },
         "melt_candidate_scaling": _melt_scaling(root, card),
         "oracle_entry_operator_sweep": operator,
+        "oracle_entry_over_bar_histogram": _operator_debt_histogram(operator),
         "oracle_entry_operator_sweep_before": {
             "artifact": str(PHASE3_JSON.relative_to(
                 PHASE3_JSON.parents[3]
@@ -1249,6 +1670,9 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
             "sample_steps": sample_table,
             "per_step": continuous_per_step,
         },
+        "continuous_jump_attribution": _continuous_jump_attribution(
+            continuous_per_step, operator
+        ),
         "continuous_growth_table_before_after": before_after,
         "phenomenology": {
             "definition": (
@@ -1282,6 +1706,7 @@ def main() -> None:
     parser.add_argument("--plant-snow-temperature", action="store_true")
     parser.add_argument("--plant-operator-trajectory", action="store_true")
     parser.add_argument("--plant-outlier-attribution", action="store_true")
+    parser.add_argument("--plant-scope-accounting", action="store_true")
     args = parser.parse_args()
     result = run(root=args.root, plant_arithmetic=args.plant_arithmetic,
                  plant_truncate=args.plant_truncate,
@@ -1290,7 +1715,8 @@ def main() -> None:
                  plant_surface=args.plant_surface,
                  plant_snow_temperature=args.plant_snow_temperature,
                  plant_operator_trajectory=args.plant_operator_trajectory,
-                 plant_outlier_attribution=args.plant_outlier_attribution)
+                 plant_outlier_attribution=args.plant_outlier_attribution,
+                 plant_scope_accounting=args.plant_scope_accounting)
     rendered = json.dumps(result, indent=2, sort_keys=True)
     if args.json:
         args.json.write_text(rendered + "\n")
