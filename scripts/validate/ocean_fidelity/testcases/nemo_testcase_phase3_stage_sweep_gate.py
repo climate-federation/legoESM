@@ -558,6 +558,34 @@ def preregistered_prediction_check(
                                  and abs(l2 - 9.433404e-11) < 9.5e-13)
                        else "NOT-MET"),
         }
+    if "legacy_2d_stage_face_mask" in arms and case == "OVERFLOW-zps":
+        # nemo_testcases_l1_phantom_velocity_preregister.md P3/P10: NEMO
+        # masks every stage velocity with the 3-D umask
+        # (stprk3_stg.F90:367,377) and the barotropic correction with the
+        # same array (:444), so uu is EXACTLY zero below the seabed and
+        # dyn_adv_up3's k-slab stencil reads that zero.  The 2-D arm IS the
+        # pre-fix code and must reproduce 7.064252e-12 / 1.566344e-12
+        # within 1%.
+        def _bc4(stage, arm):
+            return _row(baroclinic_rows,
+                        f"{case}.kt1.stage{stage}.{arm}.baroclinic_u")["absolute_max"]
+        legacy_m = "legacy_2d_stage_face_mask"
+        m2, m3 = _bc4(2, "faithful"), _bc4(3, "faithful")
+        n2, n3 = _bc4(2, legacy_m), _bc4(3, legacy_m)
+        check["S4_stage_velocity_carries_NEMOs_3d_umask"] = {
+            "predicate": (
+                "the 2-D-mask arm reproduces the pre-fix stage-3 / stage-2 "
+                "baroclinic u 7.064252e-12 / 1.566344e-12 within 1%, and the "
+                "faithful arm differs from it (the mask rank is live)"),
+            "faithful_stage2_baroclinic_u_m_s": m2,
+            "faithful_stage3_baroclinic_u_m_s": m3,
+            "legacy_2d_mask_stage2_baroclinic_u_m_s": n2,
+            "legacy_2d_mask_stage3_baroclinic_u_m_s": n3,
+            "status": ("MET" if (abs(n3 - 7.064252e-12) < 7.1e-14
+                                 and abs(n2 - 1.566344e-12) < 1.6e-14
+                                 and m3 != n3)
+                       else "NOT-MET"),
+        }
     return check
 
 
@@ -639,6 +667,13 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
             "legacy_hadv_min_face_thickness": _NEMOWSRK3TestHooks(
                 legacy_hadv_min_face_thickness=True
             ),
+            # Phantom-velocity round (preregistered in
+            # nemo_testcases_l1_phantom_velocity_preregister.md): ablate
+            # NEMO's 3-D umask on the stage velocity update
+            # (stprk3_stg.F90:367,377,444).
+            "legacy_2d_stage_face_mask": _NEMOWSRK3TestHooks(
+                legacy_2d_stage_face_mask=True
+            ),
         }
     else:
         arms = {
@@ -660,6 +695,13 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
             ),
             "legacy_hadv_min_face_thickness": _NEMOWSRK3TestHooks(
                 legacy_hadv_min_face_thickness=True
+            ),
+            # Phantom-velocity round (preregistered in
+            # nemo_testcases_l1_phantom_velocity_preregister.md): ablate
+            # NEMO's 3-D umask on the stage velocity update
+            # (stprk3_stg.F90:367,377,444).
+            "legacy_2d_stage_face_mask": _NEMOWSRK3TestHooks(
+                legacy_2d_stage_face_mask=True
             ),
         }
 
@@ -791,7 +833,8 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
                            "freeze_stage_hpg_eta", "omit_stage_vertical_up3",
                            "omit_stage_qco_factor",
                            "legacy_up3_transport_sign_selector",
-                           "legacy_hadv_min_face_thickness")
+                           "legacy_hadv_min_face_thickness",
+                           "legacy_2d_stage_face_mask")
             else "T" if case == "OVERFLOW-zps" else "u"
         )
         faithful_row = faithful_T if target == "T" else faithful_u
@@ -812,7 +855,8 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
         arm_results[arm]["target"] = target
         if arm in ("legacy_stage_min_face_thickness", "omit_stage_qco_factor",
                    "legacy_up3_transport_sign_selector",
-                   "legacy_hadv_min_face_thickness"):
+                   "legacy_hadv_min_face_thickness",
+                   "legacy_2d_stage_face_mask"):
             # These arms ABLATE a landed fix, so classify_arm's "does the
             # arm improve the residual" question is inverted: the meaningful
             # statement is whether REMOVING the NEMO rule makes the target
@@ -862,6 +906,13 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
                 "NEMO e3u(Kmm) = e3u_0*(1+r3u(Kmm)) (dynadv_up3.F90:160,"
                 "205-207; domzgr_substitute.h90:127) vs tendencies()' min of "
                 "the two stretched T cells")
+        elif arm == "legacy_2d_stage_face_mask":
+            one_variable = (
+                "rank of the mask applied to the WS-RK3 stage velocity "
+                "update and to the stage velocities the tracer transports "
+                "consume: NEMO's 3-D umask(ji,jj,jk) "
+                "(stprk3_stg.F90:367,377,444) vs the 2-D state.u_mask "
+                "broadcast over every level")
         elif arm == "legacy_velocity_primary_average":
             one_variable = "flux_form_primary_transport_average"
         elif "primary" in arm:

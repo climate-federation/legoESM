@@ -220,6 +220,7 @@ def run(
     continue_after_first=False, diagnostic_disable_bbl=False,
     owner_controls=False, allow_dirty=False, arm_literal_stage_wzv=False,
     arm_legacy_seed_faces=False, arm_legacy_hadv_min_face_thickness=False,
+    arm_legacy_2d_stage_face_mask=False,
 ) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -243,7 +244,8 @@ def run(
             disable_bbl=diagnostic_disable_bbl,
             literal_stage_wzv=arm_literal_stage_wzv,
             legacy_seed_min_rule_faces=arm_legacy_seed_faces,
-            legacy_hadv_min_face_thickness=arm_legacy_hadv_min_face_thickness))
+            legacy_hadv_min_face_thickness=arm_legacy_hadv_min_face_thickness,
+            legacy_2d_stage_face_mask=arm_legacy_2d_stage_face_mask))
     state = card.recipe.initial_state
     masks = expected_masks(card)
     nlev = card.recipe.z_coord.n_levels
@@ -463,6 +465,7 @@ def run(
             "arm_literal_stage_wzv_test_hook": arm_literal_stage_wzv,
             "arm_legacy_seed_faces_test_hook": arm_legacy_seed_faces,
             "arm_legacy_hadv_min_face_thickness_test_hook": arm_legacy_hadv_min_face_thickness,
+            "arm_legacy_2d_stage_face_mask_test_hook": arm_legacy_2d_stage_face_mask,
         },
         "first_over_bar": first_over_bar,
         "bbl_attribution": bbl_attribution,
@@ -509,6 +512,12 @@ def main() -> int:
               "thickness (private _NEMOWSRK3TestHooks control; NEMO has no "
               "such switch): restore tendencies()' min-of-stretched-T rule "
               "instead of NEMO's e3u(Kmm) = e3u_0*(1+r3u)"))
+    parser.add_argument(
+        "--arm-legacy-2d-stage-face-mask", action="store_true",
+        help=("one-variable ablation of the stage face-mask rank (private "
+              "_NEMOWSRK3TestHooks control; NEMO has no such switch): "
+              "restore the 2-D state.u_mask broadcast over levels instead of "
+              "NEMO's 3-D umask(ji,jj,jk) (stprk3_stg.F90:367,377,444)"))
     parser.add_argument("--allow-dirty", action="store_true",
                         help="stamp '<sha>-dirty' instead of refusing a dirty tree")
     from legoesm.ocean.fidelity.ulp_move_gate import (
@@ -525,7 +534,8 @@ def main() -> int:
         owner_controls=args.owner_controls, allow_dirty=args.allow_dirty,
         arm_literal_stage_wzv=args.arm_literal_stage_wzv,
         arm_legacy_seed_faces=args.arm_legacy_seed_faces,
-        arm_legacy_hadv_min_face_thickness=args.arm_legacy_hadv_min_face_thickness)
+        arm_legacy_hadv_min_face_thickness=args.arm_legacy_hadv_min_face_thickness,
+        arm_legacy_2d_stage_face_mask=args.arm_legacy_2d_stage_face_mask)
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.write_text(text)

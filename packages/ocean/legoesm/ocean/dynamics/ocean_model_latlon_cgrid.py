@@ -1083,6 +1083,17 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # (domzgr_substitute.h90:127; dynadv_up3.F90:160,205-207).  NEMO has no
     # such switch -- e3u is a macro -- so public cards never select this.
     legacy_hadv_min_face_thickness: bool = False
+    # One-variable ablation of the stage face-mask rank: restore the 2-D
+    # ``state.u_mask`` broadcast over every level in the WS-RK3 stage
+    # velocity update and in the stage velocities the tracer transports
+    # consume, instead of NEMO's 3-D ``umask(ji,jj,jk)``
+    # (``stprk3_stg.F90:367,377`` on every stage and ``:444`` on the
+    # barotropic correction).  With the 2-D rule a face that is wet at ANY
+    # level keeps the depth-mean increment at EVERY level BELOW its own
+    # seabed, and ``dynadv_up3``'s k-slab stencil reads that value where
+    # NEMO reads an exact zero.  NEMO has no such switch -- ``umask`` is the
+    # 3-D array -- so public cards never select this.
+    legacy_2d_stage_face_mask: bool = False
 
 
 def _nemo_ws_qco_stage_faces(eta, h_ref, u_mask_3d, v_mask_3d, grid):
@@ -4890,19 +4901,41 @@ class LatLonCGridOceanModel:
         # REPLACEMENT (below) for causal tests; it no longer selects between two
         # recurrences, because there is only one.  Public rk3_ws has no arm.
         if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws":
+            # stprk3_stg.F90:367 (vec/linssh) and :377 (the compiled key_qco
+            # branch) multiply EVERY stage velocity by ``umask(ji,jj,jk)``,
+            # and :444 adds the barotropic correction as
+            # ``zub(ji,jj)*umask(ji,jj,jk)`` -- the 3-D mask in both places.
+            # NEMO's ``uu`` is therefore EXACTLY zero below the seabed, which
+            # is what dyn_adv_up3's k-slab stencil reads when it reaches a dry
+            # face (dynadv_up3.F90:142-143 ``zlu_uu``, :160 ``zFu``, :166-176
+            # ``zFu_t``): it does not skip a dry neighbour, it reads its zero.
+            # Masking with the 2-D face mask broadcast over levels left the
+            # depth-mean increment standing at every level below a staircase
+            # face's own seabed, where the deeper neighbour's wet bottom level
+            # then read it as a stencil neighbour.  Same 3-D live face mask
+            # the stage face-thickness kernel already uses (:4097-4104).
+            _ws_stage_u_mask = (
+                u_mask_3d
+                if self._nemo_ws_test_hooks.legacy_2d_stage_face_mask
+                else _ws_u_live_mask)
+            _ws_stage_v_mask = (
+                v_mask_3d
+                if self._nemo_ws_test_hooks.legacy_2d_stage_face_mask
+                else _ws_v_live_mask)
+
             def _replace_stage_mean(u_in, v_in, target_u, target_v):
                 if not self._nemo_ws_test_hooks.stage_barotropic_correction:
                     # Private causal arm: keep the stage's own depth mean.
-                    return u_in * u_mask_3d, v_in * v_mask_3d
+                    return u_in * _ws_stage_u_mask, v_in * _ws_stage_v_mask
                 mean_u = (jnp.sum(u_in * h_u_pre, axis=-1) / H_u_pre
                           * state.u_mask.data)
                 mean_v = (jnp.sum(v_in * h_v_pre, axis=-1) / H_v_pre
                           * state.v_mask.data)
                 return (
                     (u_in + (target_u - mean_u)[..., jnp.newaxis])
-                    * u_mask_3d,
+                    * _ws_stage_u_mask,
                     (v_in + (target_v - mean_v)[..., jnp.newaxis])
-                    * v_mask_3d,
+                    * _ws_stage_v_mask,
                 )
 
             target_u = (jnp.sum(state_new.u.data * h_u_pre, axis=-1)
@@ -5156,9 +5189,9 @@ class LatLonCGridOceanModel:
                               * state.v_mask.data)
                     return (
                         (u_in + (transport_target_u - mean_u)[..., None])
-                        * u_mask_3d,
+                        * _ws_stage_u_mask,
                         (v_in + (transport_target_v - mean_v)[..., None])
-                        * v_mask_3d,
+                        * _ws_stage_v_mask,
                     )
                 _nemo_ws_velocity_stages = (
                     _transport_stage(u0, v0),
