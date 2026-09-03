@@ -92,3 +92,49 @@ Rungs 3.3 and above; rheology, ridging/rafting, thermodynamics, ponds,
 landfast L16, coupled ice--ocean behavior, option-4 salinity evolution and
 layer-salinity moments, and production integration of this fidelity-card
 restart state are UNMEASURED.  No result from this rung classifies them.
+
+## Round-2 disclosure correction — existing ocean SOM
+
+This preregistration originally omitted
+`packages/ocean/legoesm/ocean/advection_som.py` from the pre-implementation
+search.  That omission is disclosed after implementation; it is not being
+represented as preregistered knowledge.  The ocean module is a three-dimensional
+Prather-family scheme with a cell mean plus nine moments (`sx,sy,sz,sxx,syy,
+szz,sxy,sxz,syz`; `advection_som.py:35-40,92-159`).  SI3 carries one content
+plus five two-dimensional moments (`sx,sy,sxx,syy,sxy`) for each ice tracer
+(`icedyn_adv_pra.F90:218-240,1383-1497`).
+
+No limiter implementation is identical.  Ocean SOM uniformly rescales all
+nine moments from `max_d (|s_d|+|s_dd|)/|content|`
+(`advection_som.py:47-85`).  SI3 clips only the active-direction first moment
+to `1.5*content`, applies
+`min(2*content-|s|/3,max(|s|-content,sdd))`, clips the active cross moment,
+and leaves transverse moments unchanged (`icedyn_adv_pra.F90:534-568`; y
+analogue `:757-791`).
+
+The complete moment-update program is also not identical and must not be
+shared as one helper.  Ocean SOM extracts both face losses from the same donor
+and applies a simultaneous two-face update (`advection_som.py:200-245`), while
+SI3 removes positive-flow slabs first and computes negative-flow slabs from
+the updated donor (`icedyn_adv_pra.F90:570-664`).  SI3 receiver second moments
+then read the just-updated first moment because of Fortran statement order
+(`:678-704`); ocean `_receiver_merge` retains the pre-merge `sx_cell`
+(`advection_som.py:286-314`).  The outgoing-slab polynomials overlap
+mathematically on the five common moments, but ocean spells powers with `**`
+and packs nine moments, whereas SI3 uses explicit multiplication and five
+separate restart-carried arrays.  Therefore no limiter or complete update
+helper is byte-order-identical or reusable as-is; factoring the overlapping
+identity would change the oracle-written arithmetic being measured.
+
+## End-of-task ASKED / UNASKED choice list
+
+**ASKED choices:** fp64 and CPU only; `jpl=1`; use the pinned shipped
+ICE_ADV2D oracle; Prather as a selector in the existing ice transport module;
+five moments as restart-carried prognostic state; preserve all existing
+defaults; enforce geometry, `kt=1`, first-divergence, restart, JIT/gradient,
+and planted-violation gates; no shipped-NEMO edits; no push.
+
+**UNASKED choices:** no production-default switch to Prather; no replacement
+of ocean SOM; no cross-package SOM refactor that changes arithmetic order; no
+thermodynamics, rheology, ridging/rafting, landfast, coupling, multi-category,
+or general production-restart claim; no tolerance relaxation.

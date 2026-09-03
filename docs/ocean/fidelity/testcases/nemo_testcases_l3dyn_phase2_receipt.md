@@ -73,6 +73,25 @@ ports the five-moment 1-D program from the shipped oracle source:
 * zero cold-start moments: `:1361-1370`;
 * five-moment restart enumeration: `:1383-1497`.
 
+The pre-implementation search failed to name the existing ocean-tracer SOM at
+`packages/ocean/legoesm/ocean/advection_som.py`; this is a disclosure defect,
+now recorded in both phase-2 documents.  It does not supply an identical
+kernel to reuse.  Ocean SOM is 3-D with nine moments beyond the mean
+(`advection_som.py:35-40,92-159`); SI3 is 2-D with five moments beyond the
+content.  Its limiter uniformly rescales all moments from
+`|s_d|+|s_dd|<=content` (`advection_som.py:47-85`), unlike SI3's directional
+clip/curvature/cross-moment program (`icedyn_adv_pra.F90:534-568,757-791`).
+Its donor update removes two face fluxes simultaneously from one donor state
+(`advection_som.py:200-245`), unlike SI3's positive-loss then updated-donor
+negative-loss order (`icedyn_adv_pra.F90:570-664`).  Its receiver keeps the
+pre-merge `sx_cell` in the second-moment expression
+(`advection_som.py:286-314`), whereas SI3's statements use the just-updated
+first moment (`icedyn_adv_pra.F90:678-704`).  The five common outgoing-slab
+polynomials are mathematically related but not written-order identical
+(`**`/nine-field packing versus explicit products/five arrays), so extracting
+them would perturb the exact arithmetic under test.  No limiter or complete
+moment-update helper should be shared; ocean SOM remains unchanged.
+
 The kernel accepts a packed `(x-with-halo, y-with-halo, tracer)` extensive
 state and five equally shaped prognostic moment arrays.  Its x sweep now
 preserves NEMO's general donor ordering: positive slabs are computed and
@@ -383,3 +402,18 @@ rheology; ridging/rafting; general production run-restart integration of the opt
 card state; coupled ice--ocean comparison; and landfast L16 (OFF here,
 **UNVERIFIED-deferred to lane 4**).  No legoESM claim is made for any item in
 this paragraph.
+
+## End-of-task ASKED / UNASKED choice list
+
+**ASKED choices:** resolve the rung-3.1 review HOLD in its own commit; implement
+rungs 3.1 and 3.2 against the pinned shipped cases; fp64/CPU only and `jpl=1`;
+Prather as a selectable arm of the existing transport module; prognostic,
+restart-carried moments; geometry, `kt=1`, first-divergence and restart gates;
+planted controls; preserve production defaults; explicit-pathspec commits;
+branch bundle; no push and no shipped-NEMO modification.
+
+**UNASKED choices:** no default change to existing ice transport; no ocean-SOM
+replacement or arithmetic-changing common refactor; no rung-3.3 dynamics,
+thermodynamics, ridging/rafting, landfast, coupled-ocean, multi-category, or
+general production-restart claim; no analytic oracle; no tolerance relaxation;
+no claim that a DEBT or UNMEASURED row is matched or faithful.
