@@ -799,6 +799,45 @@ def candidates(*, out_dir: Path, allow_dirty: bool) -> dict:
     record("X1t_transcription_h_min", np.where(act, adv_h_min_tr - adv_h_n, 0.0),
            "dynadv_up3.F90:137-214 with zFu=e2u*h_min*(u+zub_lego) and /h_min (horizontal only)")
 
+    # X1 at STAGE 2 (Kmm = stage-1 Kaa, ssh = ssha/3, dt/2): same one-variable
+    # replay on NEMO's u1 against the measured stage-2 residual.
+    ssh1 = row(s1["ssh"])
+    r3u_13 = r3u_row(ssh1, mesh)
+    qfac2 = ((1.0 + r3u_13) / (1.0 + r3u_m))[:, None]
+    u1n_lego = jnp.asarray(to_lego_u(u1n))
+    eta1_lego = jnp.asarray(np.pad(ssh1[None], ((1, lat - 2), (0, 0))))
+    h_k_s1 = compute_layer_thickness(eta1_lego, init.H_bathy.data, z,
+                                     min_water_column_m=cfg.min_water_column_m)
+    h_u_min1, h_v_min1 = min_cell_to_uface(h_k_s1), min_cell_to_vface(h_k_s1, grid)
+    h_u_nemo1, h_v_nemo1, _, _ = _nemo_ws_qco_stage_faces(eta1_lego, h_ref, u_mask3, v_mask3, grid)
+    zub1 = jnp.where(
+        H_u_pre > 0.0,
+        jnp.asarray(np.pad(un_adv[None], ((1, lat - 2), (1, 0)))) / H_u_safe
+        - jnp.sum(u1n_lego * h_u_pre, axis=-1) / H_u_safe, 0.0) * init.u_mask.data
+    tv1 = ((u1n_lego + zub1[..., None]) * u_mask3, v_zero)
+
+    def lego_adv1(h_u, h_v):
+        du, _, _, _ = _bc_horizontal_momentum_advection_flux_form(
+            zeros_u, zeros_v, u1n_lego, v_zero, h_u, h_v, u_mask3, v_mask3,
+            init.land_mask.data, grid, cfg, transport_velocity=tv1, up3_upwind_selector="velocity")
+        return pad(np.asarray(du)[1, 1:, :])
+
+    R2 = bc_row(np.where(act, u2l - u2n, 0.0), act, mesh)[0]
+    E1_s2 = bc_row(0.5 * dt * qfac2 * np.where(act, lego_adv1(h_u_min1, h_v_min1) - lego_adv1(h_u_nemo1, h_v_nemo1), 0.0),
+                   act, mesh)[0]
+    rows["X1_stage2_hadv_thickness"] = {
+        "source": "same as X1 at stage 2 (Kmm ssh = stage-1 Kaa, rDt = dt/2) on NEMO's u1",
+        "target_stage2_R_max_abs": float(np.abs(R2).max()),
+        "max_abs_prediction_m_s": float(np.abs(E1_s2).max()),
+        "faces": {int(i): float(np.abs(E1_s2[i]).max()) for i in (18, 19, 20, 21, 22)},
+        "fit_R2_on_E": fit_pattern(R2, E1_s2, act),
+        "max_abs_R2_minus_E": float(np.abs(R2 - E1_s2).max())}
+    print(f"[cand X1_stage2] R2 max {rows['X1_stage2_hadv_thickness']['target_stage2_R_max_abs']:.3e}  max|E| "
+          f"{rows['X1_stage2_hadv_thickness']['max_abs_prediction_m_s']:.3e}  corr "
+          f"{rows['X1_stage2_hadv_thickness']['fit_R2_on_E']['corr']:+.5f} slope "
+          f"{rows['X1_stage2_hadv_thickness']['fit_R2_on_E']['slope']:+.4f}  max|R2-E| "
+          f"{rows['X1_stage2_hadv_thickness']['max_abs_R2_minus_E']:.3e}", flush=True)
+
     # X3: vertical UP3 implementation on NEMO's operands (u2, zFw) vs the transcription
     w_T = np.zeros((lat, ni, nlev + 1))
     w_T[1] = (Fw3[:, :nlev + 1] / mesh["e1e2t"][:, None])
@@ -883,9 +922,98 @@ def candidates(*, out_dir: Path, allow_dirty: bool) -> dict:
     return report
 
 
+# ---------------------------------------------------------------------------
+# (B2) the barotropic slow forcing: the X1 mechanism at the step entry
+# ---------------------------------------------------------------------------
+def slow(*, out_dir: Path, allow_dirty: bool, kts=(2, 3, 4)) -> dict:
+    """``slow_u`` (NEMO ``zu_frc`` = ``Ue_rhs``) residual at substep 1 from an
+    EXACT NEMO kt-entry, against the X1 prediction: the h_u_pre-weighted
+    depth mean of legoESM's flux-form advection with the min-rule Kbb
+    thickness minus the same operator with NEMO's ``e3u(Kbb)``."""
+    SWEEP, TRAJ, BARO = gates()
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _nemo_ws_qco_stage_faces
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        _bc_horizontal_momentum_advection_flux_form)
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        compute_face_masks_3d, min_cell_to_uface, min_cell_to_vface)
+    from legoesm.ocean.vertical import compute_layer_thickness
+
+    legoesm_git_sha = git_sha(allow_dirty)
+    set_fp64()
+    card = build_nemo_testcase_card(CASE)
+    cfg, z, grid, init = card.recipe.model_config, card.recipe.z_coord, card.recipe.grid, card.recipe.initial_state
+    dtypes = dtype_report(card, init)
+    masks = TRAJ.expected_masks(card)
+    nlev = z.n_levels
+    mesh = read_row_mesh_full(ROOT, SWEEP)
+    h_ref = compute_layer_thickness(jnp.zeros_like(init.eta.data), init.H_bathy.data, z,
+                                    min_water_column_m=cfg.min_water_column_m)
+    u_mask3, v_mask3 = compute_face_masks_3d(z.is_active, grid)
+    u_mask3, v_mask3 = u_mask3.astype(h_ref.dtype), v_mask3.astype(h_ref.dtype)
+    zeros_u, zeros_v = jnp.zeros_like(init.u.data), jnp.zeros_like(init.v.data)
+    wet_u = np.asarray(init.u_mask.data)[1, 1:] > 0.5
+    artifacts, rows = {}, {}
+    for kt in kts:
+        entry_path = ROOT / f"oracle_step_entry_kt{kt:08d}.bin"
+        trace_path = BTWALK_ROOT / f"oracle_overflow_bt_substeps_kt{kt:08d}_call1.bin"
+        artifacts[entry_path.name] = sha256(entry_path)
+        artifacts[trace_path.name] = sha256(trace_path)
+        entry = TRAJ.read_entry(entry_path, CASE)
+        oracle = BARO.read_oracle_trace(trace_path, expected_kt=kt)
+        cand = BARO.capture_legoesm_trace(flux_form_override=None, kt=kt, reseed_entry=entry)
+        res = np.where(wet_u, cand["substeps"][0]["slow_u"][1] - oracle["substeps"][0]["slow_u"][1], 0.0)
+        # X1 prediction on the exact entry (NEMO's u(kt), ssh(kt)); no separate transport at the step entry
+        st = BARO.state_from_oracle_entry(init, entry, masks)
+        u_l = jnp.asarray(st.u.data)
+        h_k = compute_layer_thickness(st.eta.data, init.H_bathy.data, z, min_water_column_m=cfg.min_water_column_m)
+        h_u_min, h_v_min = min_cell_to_uface(h_k), min_cell_to_vface(h_k, grid)
+        h_u_nemo, h_v_nemo, _, _ = _nemo_ws_qco_stage_faces(st.eta.data, h_ref, u_mask3, v_mask3, grid)
+
+        def adv(h_u, h_v):
+            du, _, _, _ = _bc_horizontal_momentum_advection_flux_form(
+                zeros_u, zeros_v, u_l, jnp.asarray(st.v.data), h_u, h_v, u_mask3, v_mask3,
+                init.land_mask.data, grid, cfg, transport_velocity=None, up3_upwind_selector="velocity")
+            return np.asarray(du)
+
+        d_adv = adv(h_u_min, h_v_min) - adv(h_u_nemo, h_v_nemo)
+        hpre = np.asarray(h_u_min)
+        E = (np.sum(d_adv * hpre, axis=-1) / np.maximum(np.sum(hpre, axis=-1), 1e-10))[1, 1:]
+        E = np.where(wet_u, E, 0.0)
+        rel = np.where(wet_u, (np.asarray(h_u_min)[1, 1:, 0] - np.asarray(h_u_nemo)[1, 1:, 0])
+                       / np.where(np.asarray(h_u_nemo)[1, 1:, 0] > 0, np.asarray(h_u_nemo)[1, 1:, 0], 1.0), 0.0)
+        fit = fit_pattern(res[None, :], E[None, :], wet_u[None, :])
+        rows[kt] = {
+            "slow_u_residual_max_abs": float(np.abs(res).max()),
+            "slow_u_residual_faces": {int(i): float(res[i]) for i in FRONT_FACES},
+            "prediction_E_max_abs": float(np.abs(E).max()),
+            "prediction_E_faces": {int(i): float(E[i]) for i in FRONT_FACES},
+            "rel_delta_h_u_k0_faces": {int(i): float(rel[i]) for i in FRONT_FACES},
+            "fit_residual_on_E": fit,
+            "max_abs_residual_minus_E": float(np.abs(res - E).max()),
+            "reseeded_from_oracle_entry": cand["reseeded_from_oracle_entry"],
+        }
+        print(f"[slow kt={kt}] slow_u residual {rows[kt]['slow_u_residual_max_abs']:.3e} "
+              f"faces19/20/21 {res[19]:+.2e}/{res[20]:+.2e}/{res[21]:+.2e}; E {rows[kt]['prediction_E_max_abs']:.3e} "
+              f"faces {E[19]:+.2e}/{E[20]:+.2e}/{E[21]:+.2e}; corr {fit['corr']:+.5f} slope {fit['slope']:+.4f} "
+              f"max|res-E| {rows[kt]['max_abs_residual_minus_E']:.3e}", flush=True)
+        jax.clear_caches()
+    report = {"format": "nemo-testcase-l1-stage3-remainder-slow-v1", "case": CASE,
+              "legoesm_git_sha": legoesm_git_sha, "backend": jax.default_backend(), "dtypes": dtypes,
+              "artifacts": artifacts, "rows": rows,
+              "prediction_convention": "E = h_u_pre-weighted depth mean of adv_lego(h_min(Kbb)) - adv_lego(e3u(Kbb)) on the exact NEMO entry"}
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / "slow.json"
+    out.write_text(json.dumps(report, indent=1, sort_keys=True, default=float))
+    print("wrote", out)
+    return report
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("mode", choices=("growth", "candidates"))
+    parser.add_argument("mode", choices=("growth", "candidates", "slow"))
     parser.add_argument("--max-kt", type=int, default=10)
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--no-frames", action="store_true",
@@ -895,8 +1023,10 @@ def main(argv=None) -> int:
     if args.mode == "growth":
         growth(max_kt=args.max_kt, out_dir=args.out_dir, allow_dirty=args.allow_dirty,
                frames=not args.no_frames)
-    else:
+    elif args.mode == "candidates":
         candidates(out_dir=args.out_dir, allow_dirty=args.allow_dirty)
+    else:
+        slow(out_dir=args.out_dir, allow_dirty=args.allow_dirty)
     return 0
 
 
