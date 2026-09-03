@@ -18,6 +18,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 jax.config.update("jax_enable_x64", True)
 
@@ -26,6 +27,11 @@ from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     _bc_horizontal_momentum_advection_flux_form,
 )
 from legoesm.ocean.state import LatLonCGridOceanConfig
+
+# The two 3rd-order upwind-biased arms; identical kappa=1/3 arithmetic, they
+# differ ONLY in which pair sign picks the T-point upwind branch (see
+# UP3_REFERENCE_SELECTOR).
+_UP3_ARMS = ("nemo_up3", "oceananigans_up3")
 
 _NLAT, _NLON, _NLEV = 8, 16, 3
 _H = 100.0   # flat-bottom uniform layer thickness [m]
@@ -133,26 +139,30 @@ def test_F5_momentum_conservation_upwind():
     assert abs(rv) < 1e-12, f"v-momentum not conserved (upwind): {rv:.2e}"
 
 
-def test_F5_momentum_conservation_upwind3():
-    """UP3 (3rd-order upwind-biased flux-form, Silvestri UP3 baseline) conserves
-    too — telescoping is independent of the 4-point reconstruction."""
-    ru, rv = _conservation_residual("upwind3")
-    assert abs(ru) < 1e-12, f"u-momentum not conserved (upwind3): {ru:.2e}"
-    assert abs(rv) < 1e-12, f"v-momentum not conserved (upwind3): {rv:.2e}"
+@pytest.mark.parametrize("scheme", _UP3_ARMS)
+def test_F5_momentum_conservation_upwind3(scheme):
+    """UP3 (3rd-order upwind-biased flux-form) conserves too — telescoping is
+    independent of the 4-point reconstruction, and of which reference arm
+    picks the upwind branch."""
+    ru, rv = _conservation_residual(scheme)
+    assert abs(ru) < 1e-12, f"u-momentum not conserved ({scheme}): {ru:.2e}"
+    assert abs(rv) < 1e-12, f"v-momentum not conserved ({scheme}): {rv:.2e}"
 
 
-def test_F4_uniform_flow_zero_tendency_upwind3():
+@pytest.mark.parametrize("scheme", _UP3_ARMS)
+def test_F4_uniform_flow_zero_tendency_upwind3(scheme):
     """Uniform u=const, v=0 -> UP3 advection of a constant is zero (UP3
     reconstructs constants exactly)."""
     u = np.full((_NLAT, _NLON + 1, _NLEV), 0.7)
     v = np.zeros((_NLAT + 1, _NLON, _NLEV))
-    args = _setup(u, v, scheme="upwind3")
+    args = _setup(u, v, scheme=scheme)
     du, dv, hu, hv = _call(*args)
     assert float(jnp.max(jnp.abs(hu))) < 1e-12, float(jnp.max(jnp.abs(hu)))
     assert float(jnp.max(jnp.abs(hv))) < 1e-12, float(jnp.max(jnp.abs(hv)))
 
 
-def test_F8_upwind3_differs_from_upwind():
+@pytest.mark.parametrize("scheme", _UP3_ARMS)
+def test_F8_upwind3_differs_from_upwind(scheme):
     """UP3 yields a different tendency than 1st-order upwind on a structured
     field (the higher-order reconstruction changes the advected face values)."""
     rng = np.random.default_rng(7)
@@ -161,7 +171,7 @@ def test_F8_upwind3_differs_from_upwind():
     v[:2] = 0.0
     v[-2:] = 0.0
     _, _, hu1, _ = _call(*_setup(u, v, scheme="upwind"))
-    _, _, hu3, _ = _call(*_setup(u, v, scheme="upwind3"))
+    _, _, hu3, _ = _call(*_setup(u, v, scheme=scheme))
     # Difference is the same order as the (weak-flow, coarse-grid) tendency
     # itself → a genuine scheme difference, not round-off.
     assert float(jnp.max(jnp.abs(hu3 - hu1))) > 1e-9, "UP3 == 1st-order upwind?"
@@ -287,8 +297,8 @@ def _zonal_selector_case():
     return u, v, u_t
 
 
-def _hadv(u, v, tv, **kw):
-    args = _setup(u, v, scheme="upwind3")
+def _hadv(u, v, tv, scheme="nemo_up3", **kw):
+    args = _setup(u, v, scheme=scheme)
     du0, dv0, uj, vj, h_u, h_v, u_mask_3d, v_mask_3d, mask, grid, cfg = args
     _, _, hadv_u, hadv_v = _bc_horizontal_momentum_advection_flux_form(
         du0, dv0, uj, vj, h_u, h_v, u_mask_3d, v_mask_3d, mask, grid, cfg,
@@ -297,13 +307,11 @@ def _hadv(u, v, tv, **kw):
     return np.asarray(hadv_u), np.asarray(hadv_v), args
 
 
-def test_F9_up3_velocity_selector_is_nemo_dynadv_up3_and_default_stays_legacy():
+def test_F9_up3_velocity_selector_is_nemo_dynadv_up3():
     """NEMO dynadv_up3.F90:166-170: the T-point UP3 branch is chosen by the
     sign of the advected-velocity pair ``uu_i + uu_{i+1}``, not by the
     transport pair (which under WS-RK3 carries ``zub``).  ``up3_upwind_selector
-    ="velocity"`` must reproduce an independent assembly of that rule, and the
-    ``None`` default must stay the historical transport-sign selector
-    bit-for-bit.
+    ="velocity"`` must reproduce an independent assembly of that rule.
 
     Non-vacuous: if the same-direction reconstruction ignored the selector
     (transport sign always), the ``velocity`` result would miss the NEMO
@@ -312,7 +320,7 @@ def test_F9_up3_velocity_selector_is_nemo_dynadv_up3_and_default_stays_legacy():
     from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _up3_reconstruct
 
     u, v, u_t = _zonal_selector_case()
-    hadv_default, _, args = _hadv(u, v, (u_t, v))
+    _, _, args = _hadv(u, v, (u_t, v))
     hadv_transport, _, _ = _hadv(u, v, (u_t, v), up3_upwind_selector="transport")
     hadv_velocity, _, _ = _hadv(u, v, (u_t, v), up3_upwind_selector="velocity")
     _, _, _, _, h_u, _, u_mask_3d, _, _, grid, _ = args
@@ -345,11 +353,58 @@ def test_F9_up3_velocity_selector_is_nemo_dynadv_up3_and_default_stays_legacy():
     assert scale > 0.0
     assert float(np.max(np.abs(hadv_velocity - ref))) <= 1e-13 * scale, (
         float(np.max(np.abs(hadv_velocity - ref))), scale)
-    assert np.array_equal(hadv_default, hadv_transport), (
-        "the None default must stay the legacy transport-sign selector")
     # The two rules differ by a first-order amount at the disagreeing faces
     # (the UP3 third-difference term): the selector is a live variable.
     assert float(np.max(np.abs(hadv_velocity - hadv_transport))) > 1e-3 * scale
+
+
+def test_F11_up3_t_point_selector_follows_the_scheme_s_reference_arm():
+    """The T-point upwind selector is keyed by the REFERENCE the scheme names,
+    not by the time integrator.
+
+    ``momentum_flux_scheme="nemo_up3"`` (NEMO dynadv_up3.F90:166,169-170)
+    must pick the branch by the advected-VELOCITY pair;
+    ``"oceananigans_up3"`` (Oceananigans
+    ``upwind_biased_advective_fluxes.jl:18-24``, which upwind-biases by the
+    sign of the interpolated TRANSPORT) must pick it by the transport pair.
+    Both are exercised with NO explicit ``up3_upwind_selector`` — the arm has
+    to come from the scheme name alone.  The case is built so the two pair
+    signs genuinely disagree on part of the row, so the two arms cannot
+    coincide by construction.
+
+    Non-vacuous: reverting the selector to the old integrator gate (``None ->
+    "transport"`` for every caller) makes the NEMO assertion fail; routing
+    both names to ``"velocity"`` makes the Oceananigans assertion fail.
+    """
+    u, v, u_t = _zonal_selector_case()
+    pair_vel = u[:, :-1, :] + u[:, 1:, :]
+    pair_tr = u_t[:, :-1, :] + u_t[:, 1:, :]
+    assert bool(np.any((pair_vel > 0) != (pair_tr > 0))), "selector never disagrees"
+
+    nemo, _, _ = _hadv(u, v, (u_t, v), scheme="nemo_up3")
+    ocng, _, _ = _hadv(u, v, (u_t, v), scheme="oceananigans_up3")
+    by_velocity, _, _ = _hadv(u, v, (u_t, v), up3_upwind_selector="velocity")
+    by_transport, _, _ = _hadv(u, v, (u_t, v), up3_upwind_selector="transport")
+
+    scale = float(np.max(np.abs(by_velocity)))
+    assert scale > 0.0
+    assert float(np.max(np.abs(by_velocity - by_transport))) > 1e-3 * scale, (
+        "the two selector rules coincide on this case — it cannot discriminate")
+    assert np.array_equal(nemo, by_velocity), (
+        "nemo_up3 must select the T-point branch by the advected-velocity pair")
+    assert np.array_equal(ocng, by_transport), (
+        "oceananigans_up3 must select the T-point branch by the transport pair")
+
+
+def test_F12_bare_upwind3_is_refused():
+    """The unqualified ``"upwind3"`` no longer names a reference, so it must
+    raise rather than silently fall through to 1st-order upwind."""
+    u = np.zeros((_NLAT, _NLON + 1, _NLEV))
+    v = np.zeros((_NLAT + 1, _NLON, _NLEV))
+    args = _setup(u, v, scheme="centered")
+    cfg = args[-1]._replace(momentum_flux_scheme="upwind3")
+    with pytest.raises(ValueError, match="momentum_flux_scheme must be one of"):
+        _call(*args[:-1], cfg)
 
 
 def test_F10_up3_cross_fluxes_keep_the_transport_selector():

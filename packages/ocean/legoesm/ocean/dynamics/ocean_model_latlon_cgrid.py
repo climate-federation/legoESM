@@ -2592,11 +2592,12 @@ class LatLonCGridOceanModel:
             )
         if (_vert_mom_scheme == "nemo_up3"
                 and (config.momentum_advection != "flux_form"
-                     or config.momentum_flux_scheme != "upwind3")):
+                     or config.momentum_flux_scheme != "nemo_up3")):
             raise ValueError(
                 "vertical_momentum_scheme='nemo_up3' is one dynadv_up3 "
                 "program and requires momentum_advection='flux_form' with "
-                "momentum_flux_scheme='upwind3'")
+                "momentum_flux_scheme='nemo_up3' (the NEMO-referenced "
+                "horizontal arm; 'oceananigans_up3' is a different reference)")
         # #1226 level-29-onset fix: bottom/straddling-face mask convention for
         # nemo_advective_vertical_momentum_advection (only consumed under
         # vertical_momentum_scheme="nemo_advective"; validated unconditionally
@@ -3321,12 +3322,12 @@ class LatLonCGridOceanModel:
                     "the certified NEMO rk3_ws scheme identity requires "
                     "tracer_advection='fct2'; FCT4/PPM is not certified")
             if (config.momentum_advection != "flux_form"
-                    or config.momentum_flux_scheme != "upwind3"
+                    or config.momentum_flux_scheme != "nemo_up3"
                     or getattr(config, "vertical_momentum_scheme",
                                "upwind_perturbation") != "nemo_up3"):
                 raise ValueError(
-                    "NEMO rk3_ws requires the coupled flux_form/upwind3/"
-                    "nemo_up3 momentum program")
+                    "NEMO rk3_ws requires the coupled flux_form/nemo_up3 "
+                    "horizontal + nemo_up3 vertical momentum program")
             if getattr(config, "outer_integrator", "forward_euler") != "forward_euler":
                 raise ValueError(
                     "NEMO rk3_ws does not compose with a second outer "
@@ -4067,26 +4068,25 @@ class LatLonCGridOceanModel:
         # 1-3 derivation on the same frozen state; pinned by the parity gate).
         _geom_density = compute_frozen_geom_density(
             state, _grid, _zc, _cfg_b)
-        # NEMO WS-RK3 scheme identity: dynadv_up3.F90:166-170 selects the
-        # T-point UP3 branch by the advected-velocity pair at EVERY stage
-        # (stage 1 here, stages 2-3 in _mom_pert_ws).  ``None`` (every other
-        # integrator) keeps the historical transport-sign selector; the
-        # private hook restores it for the stage-sweep gate's one-variable
-        # arm only.
-        if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws":
-            _ws_up3_selector = (
-                "transport"
-                if self._nemo_ws_test_hooks.legacy_up3_transport_sign_selector
-                else "velocity")
-        else:
-            _ws_up3_selector = None
+        # The UP3 T-point upwind selector is keyed by the REFERENCE the config's
+        # ``momentum_flux_scheme`` names ("nemo_up3" -> the advected-velocity
+        # pair per dynadv_up3.F90:166-170; "oceananigans_up3" -> the transport
+        # pair), NOT by the time integrator -- see UP3_REFERENCE_SELECTOR.
+        # ``None`` therefore means "use the scheme's own reference rule" at
+        # every stage (stage 1 here, stages 2-3 in _mom_pert_ws).  The private
+        # hook forces the legacy transport sign for the stage-sweep gate's
+        # one-variable ablation arm only; no card sets it.
+        _up3_selector_override = (
+            "transport"
+            if self._nemo_ws_test_hooks.legacy_up3_transport_sign_selector
+            else None)
         tend = self.tendencies(state, surface_forcing, sponge=sponge, dt=dt,
                                precomputed_geom_density=_geom_density,
                                grid=_grid, vertex_mask=_vmask,
                                ab2_scope_override=_ab2_scope_override,
                                ldf_state=_ldf_state, z_coord=z_coord, config=config,
                                zad_continuity_dt=dt,
-                               up3_upwind_selector=_ws_up3_selector)
+                               up3_upwind_selector=_up3_selector_override)
         # #1492 DINO surface_tendency_placement="leapfrog_rhs": fold the
         # externally-supplied surface tracer RATE into the SAME explicit RHS
         # every other tendency uses -- BEFORE the diss-withholding split and
@@ -4441,14 +4441,14 @@ class LatLonCGridOceanModel:
                                      z_coord=z_coord, config=config,
                                      momentum_flux_transport_velocity=(
                                          transport_velocity),
-                                     # dynadv_up3.F90:166-170: the WS-RK3
-                                     # stage RHS selects the UP3 branch by the
-                                     # advected-velocity pair whether or not a
+                                     # dynadv_up3.F90:166-170: the stage RHS
+                                     # selects the UP3 branch by the scheme's
+                                     # own reference rule whether or not a
                                      # separate transport is supplied (so the
                                      # gate's transport-reconcile arm stays
                                      # one-variable); the private hook
                                      # restores the legacy transport sign.
-                                     up3_upwind_selector=_ws_up3_selector)
+                                     up3_upwind_selector=_up3_selector_override)
                 _du = td.du_dt.data
                 _dv = td.dv_dt.data
                 if extra_rhs is not None:

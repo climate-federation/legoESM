@@ -841,6 +841,38 @@ ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
              Reference("nemo", "e3w_kmm_divisor_multi_arm", "trazdf.F90 (always; see S-33_34)")),
     )),
     RoutineRow("S-45", "tra_npc", "ABSENT", "ln_zdfnpc", ()),
+    # 2026-09-02 SCOPE FIX (see the map doc's "S-46" section): ONE legoESM
+    # implementation of the UP3 T-point upwind selector, reached by TWO
+    # reference arms that are named by the public
+    # ``momentum_flux_scheme`` value -- so the arm follows the reference the
+    # caller CLAIMS, not the time integrator it happens to use.  The bare
+    # "upwind3" (which served both references and resolved by
+    # ``momentum_time_integrator``) is removed from
+    # VALID_MOMENTUM_FLUX_SCHEME, so a caller that names no reference fails
+    # validation.  Both Impl rows point at the SAME symbol on purpose: that
+    # sharing IS the isomorphism result for this row.
+    RoutineRow("S-46", "dyn_adv_up3 T-point upwind selector", "SHARED", (
+        "none (one NEMO routine); the two Impl rows are two REFERENCE arms of "
+        "ONE legoESM implementation, selected by momentum_flux_scheme "
+        "('nemo_up3' / 'oceananigans_up3'). Private ablation hook only: "
+        "_NEMOWSRK3TestHooks.legacy_up3_transport_sign_selector"
+    ), (
+        Impl(_OPL, "_up3_reconstruct",
+             Reference("nemo", "ln_dynadv_up3",
+                        "dynadv_up3.F90:166,169-170 (zui = puu(ji)+puu(ji+1): the "
+                        "T-point along-flow fluxes select the upwind curvature by "
+                        "the ADVECTED-VELOCITY pair; magnitude by the transport "
+                        "pair :176; F-point :179-187 and vertical :294-295 by the "
+                        "transport pair)",
+                        selected_by=("LOCK", "OVERFLOW"))),
+        Impl(_OPL, "_up3_reconstruct",
+             Reference("oceananigans", "oceananigans_up3",
+                        "Oceananigans upwind_biased_advective_fluxes.jl:18-24 "
+                        "(u~ = symmetric_interpolate(Ax_q, U) -- the TRANSPORT -- "
+                        "then upwind_biased_product, so every flux family selects "
+                        "by the transport pair); Silvestri et al. 2024 'UP3'",
+                        selected_by=("oceananigans_v1",))),
+    )),
     RoutineRow("M-01", "stp_MLF whole-step composition", "ARTIFICIAL_BRANCH", "absence of key_RK3 (nemo_mlf selected by no card)", (
         Impl(_OMLC, "_leapfrog_step",
              Reference("nemo", "stp_MLF", "stpmlf.F90:108-473 (two _step_impl passes)")),

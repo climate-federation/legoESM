@@ -67,7 +67,7 @@ def test_nemo_testcase_cards_are_fp64_source_pinned(
     assert cfg.eos_depth == "geometric"
     assert cfg.tracer_advection == "fct2"
     assert cfg.momentum_advection == "flux_form"
-    assert cfg.momentum_flux_scheme == "upwind3"
+    assert cfg.momentum_flux_scheme == "nemo_up3"
     assert cfg.momentum_time_integrator == "rk3_ws"
     assert cfg.tracer_time_integrator == "rk3_ws"
     assert "tracer_fct_low_order_predictor" not in cfg._fields
