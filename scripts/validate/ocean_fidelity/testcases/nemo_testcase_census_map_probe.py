@@ -461,8 +461,8 @@ def command_aimp_scaling(args) -> None:
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         _nemo_ws_qco_stage_faces,
         _nemo_ws_stage_transport,
-        _nemo_aimp_reference_e3w_int,
     )
+    from legoesm.ocean.physics.vertical_mixing import nemo_e3w_kmm
     from legoesm.ocean.vertical import compute_layer_thickness
 
     set_policy(PrecisionPolicy.fp64())
@@ -499,11 +499,11 @@ def command_aimp_scaling(args) -> None:
             u_mask_3d=u_mask, v_mask_3d=v_mask, grid=grid, z_coord=z,
             config=card.recipe.model_config, dt=card.dt_s)
         legacy = _nemo_ws_stage_transport(
-            (u, v), h, 2, nemo_aimp_reference_w_metric=False, **common)
+            (u, v), h, 2, legacy_aimp_midpoint_w_metric=True, **common)
         reference = _nemo_ws_stage_transport(
-            (u, v), h, 2, nemo_aimp_reference_w_metric=True, **common)
+            (u, v), h, 2, legacy_aimp_midpoint_w_metric=False, **common)
         stretch = 1.0 + eta / jnp.maximum(jnp.sum(h_ref, axis=-1), 1.0e-10)
-        ref_int = _nemo_aimp_reference_e3w_int(z, h, stretch)
+        ref_int = nemo_e3w_kmm(z, h, stretch)
         midpoint_int = 0.5 * (h[..., :-1] + h[..., 1:])
         wet_int = np.asarray(z.is_active[..., :-1] & z.is_active[..., 1:])
         old_wi = np.asarray(legacy[6])
@@ -565,9 +565,8 @@ def command_zdf_scaling(args) -> None:
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
         _NEMOWSRK3TestHooks,
-        _nemo_aimp_reference_e3w_int,
     )
-    from legoesm.ocean.physics.vertical_mixing import nemo_e3w_kmm
+    from legoesm.ocean.physics.vertical_mixing import build_dz_half, nemo_e3w_kmm
     from legoesm.ocean.vertical import compute_layer_thickness
 
     set_policy(PrecisionPolicy.fp64())
@@ -575,11 +574,11 @@ def command_zdf_scaling(args) -> None:
     card = STATS.build_nemo_testcase_card(CASE)
     states = STATS.load_legoesm_states(CASE, "fp64", args.lego_root)[0]
     baseline = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
-    arm = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
-            nemo_zdf_reference_w_metric=True))
+            legacy_zdf_midpoint_w_metric=True))
+    arm = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
     active = np.asarray(card.recipe.z_coord.is_active)
     slope = np.asarray(card.recipe.initial_state.H_bathy.data)
     slope = active & ((slope > 500.0) & (slope < 2000.0))[..., None]
@@ -600,9 +599,8 @@ def command_zdf_scaling(args) -> None:
             min_water_column_m=card.recipe.model_config.min_water_column_m)
         stretch = 1.0 + eta / jnp.maximum(
             jnp.sum(card.recipe.z_coord.h_partial, axis=-1), 1.0e-10)
-        legacy_e3w = nemo_e3w_kmm(card.recipe.z_coord, h, stretch)
-        reference_e3w = _nemo_aimp_reference_e3w_int(
-            card.recipe.z_coord, h, stretch)
+        legacy_e3w = build_dz_half(h)
+        reference_e3w = nemo_e3w_kmm(card.recipe.z_coord, h, stretch)
         wet_int = np.asarray(active[..., :-1] & active[..., 1:])
         rows.append({
             "physical_time_s": int(time_s),
@@ -625,7 +623,7 @@ def command_zdf_scaling(args) -> None:
         "reference": (
             "dynzdf.F90:180-195; domzgr_substitute.h90:131-133; "
             "usrdef_zgr.F90:157-168"),
-        "one_variable": "nemo_zdf_reference_w_metric",
+        "one_variable": "legacy_zdf_midpoint_w_metric=False",
         "states_npz": str(args.lego_root / "overflow_zps/fp64/states.npz"),
         "states_sha256": sha256(args.lego_root / "overflow_zps/fp64/states.npz"),
         "rows": rows,
@@ -814,12 +812,10 @@ def command_run_arm(args) -> None:
     hooks = {
         "bbl-reference": _NEMOWSRK3TestHooks(),
         "aimp-e3w": _NEMOWSRK3TestHooks(
-            nemo_aimp_reference_w_metric=True),
+            legacy_zdf_midpoint_w_metric=True),
         "zdf-e3w": _NEMOWSRK3TestHooks(
-            nemo_zdf_reference_w_metric=True),
-        "combined-e3w": _NEMOWSRK3TestHooks(
-            nemo_aimp_reference_w_metric=True,
-            nemo_zdf_reference_w_metric=True),
+            legacy_aimp_midpoint_w_metric=True),
+        "combined-e3w": _NEMOWSRK3TestHooks(),
     }[args.arm]
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
