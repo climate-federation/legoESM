@@ -10,19 +10,47 @@ row, every gate and all six statistics are unchanged from the phantom round.
 
 ## Verdict
 
-**The `k=24` family does NOT own the census row: REFUTED, by both frozen
-refute conditions.**  The row is not a trajectory-seed effect at all.  It is a
-systematic **tracer-transport statistic**: over 17 hours legoESM destroys
-**13.16% less** volume-weighted temperature variance than NEMO-FCT2, while two
-NEMO runs that differ only in FCT order -- and that are pointwise MORE
-decorrelated from each other than legoESM is from NEMO -- differ by 0.58%, and
-the fp32 precision arm differs by 0.13%.  The gap is invisible in the first
-minute of model time (the per-step variance-destruction rates agree to
-**1.05e-9** relative through kt=60, while the destruction itself is 1.2e-2 over
-that window) and is already 8.3% by the halfway point.
+*(Rewritten after dual adversarial review.  The first draft's verdict claimed
+the census row IS a mixing statistic and that the `k=24` family was REFUTED as
+its owner.  Both reviewers attacked it; five of their points were checked
+against this round's own JSON and CONFIRMED, so the verdict below is weaker
+than the draft's.  The retractions are in section 6.)*
 
-Two open items are CLOSED at exactly zero by measurement (section 4), and no
-arm was run, because none of the enumerated candidates is scale-compatible.
+**What is established.**  The census row is a temperature-classification
+difference in the descending plume on the slope -- not thickness (the
+same-class volume channel is 280x below the row), not heat content (the domain
+mean agrees to `4.1e-13 K` and the cold anomaly's heat deficit to `1.4e-12`
+relative), not bin-edge chatter (the reclassified volume carries a median
+`0.78 K` difference at a `0.21 K` edge gap).  It sits at the deep slope at the
+seabed at 17 h and mid-slope at 8.5 h, peaking in the SAME cells as NEMO's own
+FCT4-vs-FCT2 difference.  Separately, legoESM's cold anomaly is diluted into
+**10.1% less volume** than NEMO-FCT2's at the scored time, where NEMO's own
+tracer-order change moves that by 0.5%.
+
+**What is NOT established, and was claimed in the first draft.**  That the
+census row is a readout of mixing.  It is not monotone in dilution: NEMO-FCT4
+holds `0.00336` LESS mixed water than FCT2 while being MORE diluted
+(effective anomaly volume `+0.50%`), and legoESM holds `0.00944` less while
+being LESS diluted (`-10.1%`).  **The row demonstrably moves `0.0034` through a
+channel that is not bulk dilution**, so mixing can at most be a term on top of
+that.  RETRACTED.
+
+**The `k=24` family is REFUTED as the owner of this row -- by direct
+measurement (section 5b), not by the two frozen bounds.**  Review showed both
+of those bounds were weaker than the preregistration assumed, so a second
+preregistration was frozen and run: a full-duration run seeded at the `k=24`
+face itself, at `1e-9 m/s` (the size of the measured kt=3 injection), moves the
+census by `2.9e-14` against a `9.4e-3` gap -- eleven orders short.
+
+That measurement also corrects a premise underneath both bounds: **the OVERFLOW
+solution is not chaotic on this window.**  A thousandfold larger seed gives only
+a `22x` larger response.  So no observed statistic can be manufactured by
+trajectory divergence, and the census separation, the FCT4-vs-FCT2 separation
+and the fp32 floor are all SYSTEMATIC differences.
+
+Open item 3 is CLOSED at the injection faces and REOPENED elsewhere, where it
+is a newly measured, scale-compatible candidate (section 4).  No model code
+changed in this round.
 
 ## 1. Census anatomy -- what, where, when (`census_map/census_map.json`)
 
@@ -31,10 +59,15 @@ committed scorer's three numbers for this row to the last digit --
 candidate `0.009437984095819751`, floor `0.0005206303447481894`, spread
 `0.003362090947063974`.
 
-**WHAT.**  The `cold [10,12)` class is **EXACTLY 0.0 in all four arms** at the
-scored time: no water below 12 C survives anywhere in the domain by 61200 s.
-So the row is a two-class split, and its max-abs reduction is just the mixed
-fraction:
+**WHAT.**  The `cold [10,12)` class is **EXACTLY 0.0 in all four arms ON THE
+SLOPE** at the scored time, so the row is a two-class split and its max-abs
+reduction is just the mixed fraction.  CORRECTED after review: this is a
+statement about the slope region only.  In the DOMAIN, `N4` still holds
+`2.00e7 m3` below 12 C and its coldest cell is `11.892 C`; `N2`, `L64` and
+`L32` hold none, with coldest cells `13.621`, `13.220` and `13.234 C`.  The
+cold bin therefore sits at its floor in every arm while the calibration arm is
+`0.11 K` from populating it -- the row reads a two-sided distribution
+difference one-sidedly, which is a limitation of the statistic.
 
 | arm | `cold_10_12` | `mixed_12_18` | `ambient_18_20` | delta vs N2 |
 |---|---:|---:|---:|---:|
@@ -112,11 +145,24 @@ And over the first 60 steps, against NEMO's own step entries
 | 30 | `2.841780007389422` | `2.841780007282376` | `0.999999999962` |
 | 60 | `2.820483075012570` | `2.820483077978081` | `1.000000001051` |
 
-NEMO destroys `3.52e-2 K2` of variance over those 59 steps and legoESM
-destroys the same amount to **1.05e-9 relative**.  There is no resolvable
-per-step mixing-operator gap in the first ten minutes; the 13% gap opens later.
+CORRECTED after review, twice.  (a) `1.05e-9` is the residual on the variance
+RATIO; the DESTRUCTION agrees to **`8.43e-8`** relative (NEMO
+`3.516595756e-02`, legoESM `3.516595459e-02`), and the destruction is
+`1.2315e-2` OF THE INITIAL VARIANCE, not `3.52e-2` -- the first draft paired
+one normalization with the other.  The operators still agree about five orders
+of magnitude better than the effect they produce.  (b) The delta is NOT flat
+across the window: it holds near `-1.0e-10` to kt=43, CHANGES SIGN at kt=49,
+and then grows `1.62x` per step to `+2.97e-9` at kt=60 -- a factor 119 in the
+last ten steps.  So "a per-step replay at kt<=60 would measure nothing" is
+FALSE from about kt=50; the signal is emerging exactly where the window ends,
+and extending the walk is a real next step (blocked only by NEMO step entries
+existing to kt=60 and no further).
 
 ## 2b. The DIRECTION, reconciled: legoESM's plume core stays COLDER
+
+POST-HOC, and labelled as such: the anomaly moments were added to the probe
+AFTER the census numbers existed, to reconcile a sign the first draft could not
+explain.  They are not covered by the preregistration banner at the top.
 
 Higher variance at a common mean is ambiguous on its own, so state it in plume
 units.  Write the cold anomaly's first and second moments about the ambient
@@ -169,10 +215,30 @@ and the experiment name; no momentum-operator difference of any kind):
 | `L64` vs `N2` | `0.319981` | `0.657229` | `1.131620` | `0.009438` |
 | `L32` vs `L64` | `0.053768` | `0.086588` | `1.001302` | `0.000521` |
 
-legoESM is pointwise CLOSER to NEMO than NEMO-FCT4 is (both fields), yet its
-bulk mixing statistic is **22x further away**.  Decorrelation of the observed
-magnitude produces a `0.6%` variance difference and a `0.0034` census
-difference; the observed gap is `13.2%` and `0.0094`.  R1 MET.
+On L-infinity legoESM is pointwise CLOSER to NEMO than NEMO-FCT4 is, in both
+fields, yet its dilution statistic is 20-23x further away.  THREE corrections
+from review, all checked against this round's JSON:
+
+* **The "22x" is time-sampled.**  At the registered MIDPOINT the same
+  ratio-of-ratios is `3.31x` on variance and `3.00x` on effective anomaly
+  volume (`L64/N2` `1.0827` / `0.9286`; `N4/N2` `0.9750` / `1.0238`); at the
+  scored time it is `22.60x` and `20.21x`.  `N4-N2`'s own mixing difference is
+  non-monotone and passes near a minimum at the scored time, so the headline
+  number depends on WHEN it is read.  Both are reported; neither alone.
+* **The L-infinity framing inverts under RMS.**  On the slope, the
+  root-mean-square temperature difference is `0.4088 K` for `L64-N2` against
+  `0.3922 K` for `N4-N2` -- legoESM is MORE decorrelated by that measure, less
+  by L-infinity.  "Pointwise closer" is metric-dependent and is not load
+  bearing.
+* **R1 is structurally weak for a mixing-sensitive row.**  FCT's numerical
+  mixing is limiter-dominated, and `nn_fct_h`/`nn_fct_v` change only the
+  antidiffusive flux where the limiter does not clip, so `N4`-vs-`N2` is close
+  to a null for mixing BY CONSTRUCTION.  It remains a fair decorrelation-only
+  control for the SEED question -- the two share every momentum operator -- but
+  it is a poor null for the census row itself.
+
+R1 MET as a bound on the seed channel; NOT sufficient to establish that the row
+is a mixing statistic.
 
 **(R2) the per-step perturbation bound.**  The `L32` arm injects a relative
 perturbation of order `eps(f32) = 1.19e-7` into every wet cell at every one of
@@ -181,12 +247,22 @@ normalized, at one or two of 16900 u points -- `1.7e4x` and `28x` SMALLER per
 step, and localized.  The fp32 perturbation moves the census by `0.000521`,
 5.5% of the gap, and the variance by `0.13%`, 1% of the gap.  Under any
 monotone response to seed amplitude the `k=24` family's chaotic channel is
-bounded far below the gap.  R2 MET.
+bounded far below the gap.  R2 MET **as written, and it is not enough**:
+fp32 rounding is UNBIASED noise while the `k=24` injection is a systematic,
+always-same-sign operator difference, and a systematic per-step forcing can
+bias a statistic where random noise cannot.  The preregistration's R2 does not
+bound that channel.  Review also noted the fp32 arm never enters the regime the
+row lives in -- it saturates at a normalized temperature L-infinity of `0.054`
+while every operator pair in the scorer sits at `0.32`-`0.36`.
 
-CONFIRMED, therefore: the census row is a systematic difference in the tracer
-transport's mixing statistics, not a trajectory seed.  The `k=24` family is
-REFUTED as its owner.  What remains PLAUSIBLE and unmeasured is *which*
-operator: see section 5.
+A caution recorded rather than buried: over kt=3..60 the variance delta grows
+at `1.164x` per step and the `k=24` `u` row at `1.170x` per step -- the same
+e-folding to 0.5%, which is the signature of ONE growing mode rather than two
+independent channels.  PLAUSIBLE only; the variance delta changes sign near
+kt=45, which contaminates the fit.
+
+Because R2 does not bound a systematic seed, a second preregistration was
+frozen and the direct measurement run: section 5b.
 
 ## 4. The k=24 family, enumerated (`census_map/faces.json`)
 
@@ -216,24 +292,62 @@ By contrast the already-owned `k=25` family at gate face 23 is wet on a
 `10.04 m` partial cell whose SHOREWARD stencil neighbour (gate 22) is dry
 (`up3_neighbour_umask = [0, 1, 1]`) -- the phantom's entry point.
 
-**Two open items CLOSED at exactly zero.**  The phantom round's open item 3
-asked whether legoESM's stage depth mean, which uses LIVE weights
-(`_replace_stage_mean`: `sum(u*h_u_pre)/H_u_pre`), differs from NEMO's, which
-uses REFERENCE weights (`stprk3_stg.F90:440`
+**Open item 3: CLOSED at the injection faces, REOPENED everywhere else.**
+The phantom round's open item 3 asks whether legoESM's stage depth mean, which
+uses LIVE weights (`_replace_stage_mean`: `sum(u*h_u_pre)/H_u_pre`, with
+`h_u_pre = min_cell_to_uface(h_k_pre)` at
+`ocean_model_latlon_cgrid.py:4264`), differs from NEMO's, which uses REFERENCE
+weights (`stprk3_stg.F90:440`
 `zub = uu_b(Kaa) - SUM(e3u_0(:)*uu(:,Kaa)) * r1_hu_0`, with
-`hu_0 = SUM(e3u_0*umask)` at `domain.F90:145`).  Measured over EVERY wet u
-face:
+`hu_0 = SUM(e3u_0*umask)` at `domain.F90:145`).
+
+RETRACTED, from the first draft: it claimed the two weightings are identically
+the same weights, because under z*/qco every level of a column carries one
+`1+r3u`.  **That is true of NEMO's construction and FALSE of legoESM's**, which
+takes a MIN over two columns whose free-surface Jacobians differ, so the
+per-level argmin can switch sides and the live weights are not a uniform
+rescale of the reference ones.  The first draft measured
+reference-against-reference and called the item closed.
+
+Reference against reference, over every wet u face -- still exact, and still
+worth having, because it certifies the GEOMETRY:
 
 ```
-max | e3u_0            - legoESM reference h_u |  = 0.0
-max | hu_0             - legoESM H_u           |  = 0.0
-max | e3u_0/hu_0       - h_u/H_u               |  = 0.0
+max | e3u_0      - legoESM reference h_u |  = 0.0
+max | hu_0       - legoESM H_u           |  = 0.0
+max | e3u_0/hu_0 - h_u_ref/H_u_ref       |  = 0.0
 ```
 
-Under z*/qco every level of a column carries the same `1 + r3u`, so the two
-weightings are the SAME weights; the difference is identically zero, not small.
-Open item 3 is closed with no arm.  (Open item 2, the UP3 curvature `umask` at
-`dynadv_up3.F90:142-143`, is untouched by this round and stays open.)
+LIVE against reference, the question that was actually open, per step of a free
+run (`faces.json`, `live_vs_reference_stage_mean_weights`):
+
+| kt | max `|live - ref|` weight | wet levels differing `> 1e-12` | at injection faces 20/21/22 |
+|---:|---:|---:|---:|
+| 1 | `0.0` | 0 | `0.0` |
+| 2 | `2.323655e-09` | 26 | `6.94e-18` |
+| 4 | `1.252540e-06` | 79 | `6.94e-18` |
+| 5 | `3.761720e-06` | 105 | `6.94e-18` |
+| 6 | `6.080607e-06` | 134 | `0.0` |
+| 9 | `8.609751e-06` | 167 | `6.94e-18` |
+| 10 | `7.570658e-06` | 173 | `6.94e-18` |
+
+So: at the `k=24` INJECTION faces the difference is at most **one ULP**
+(`6.94e-18`) at every step, because gate faces 20/21/22 have EQUAL bathymetry
+on both sides and the min-rule therefore picks a single uniform Jacobian --
+the item is closed THERE, which is what the `k=24` question needed.  Everywhere
+else it is up to `8.6e-6` on 167 wet levels by kt=9, the SAME ORDER as the
+`k=24` injections quoted above (`7.06e-12`, `4.18e-9`), on exactly the
+staircase faces where the two neighbouring columns differ in depth.  **That is
+a newly measured, scale-compatible candidate for the downslope trajectory
+rows** and it is now the ranked next arm.
+
+This table was produced independently twice: the diff reviewer built its own
+probe and reported `2.323655e-09`, `1.252540e-06` and `3.761720e-06`, every one
+of which appears in this walk to the last digit (the two label steps
+differently).  Two converging probes, per Rule 1e, is what establishes it.
+
+(Open item 2, the UP3 curvature `umask` at `dynadv_up3.F90:142-143`, is
+untouched by this round and stays open.)
 
 No new operator replay was built: the stage3-remainder round's candidate table
 (X1..X7, replayed on NEMO's own stage operands at kt=2) already ranked this
@@ -258,7 +372,7 @@ Read from the namelist and from NEMO's own output, not inferred:
   either.
 * What remains: the FCT tracer advection (`nn_fct_h=2, nn_fct_v=2,
   nn_fct_imp=1`), the ADVECTIVE BBL (`ln_trabbl = .true.`, `nn_bbl_adv = 2`,
-  `rn_gambbl = 20`, `trabbl.F90:415-434`) which is a slope-specific tracer
+  `rn_gambbl = 20`, `trabbl.F90:415-435`) which is a slope-specific tracer
   transport, and the `ln_zad_Aimp` partition of `w`.
 * Aimp status, PLAUSIBLE not confirmed: prior rounds measured it INERT at kt=1
   (NEMO's stage-3 transport dump gives `max Cu_v = 1.66e-3` against
@@ -268,6 +382,50 @@ Read from the namelist and from NEMO's own output, not inferred:
   threshold -- a WEAK bound, because a time mean underestimates the
   instantaneous peak.  Whether Aimp ever activates during the descent is
   UNMEASURED and is the ranked next step.
+
+## 5b. The chaos null at the `k=24` site (second preregistration)
+
+Two full-duration fp64 runs, each differing from the certified run by ONE
+number: the initial `u` at the `k=24` injection face itself (section row `j=1`,
+model u-face 21, level 24), raised by `1e-12` and by `1e-9 m/s`.  Controls
+before each run: the seeded face is wet at that level, EXACTLY one face differs
+from the certified initial state, and the amplitude landed.  Scored against the
+COMMITTED unperturbed fp64 states with this round's reductions plus the
+scorer's own normalized L-infinity, `N2` as the common scale.
+
+| quantity | ARM-A `1e-12 m/s` | ARM-B `1e-9 m/s` | for scale |
+|---|---:|---:|---|
+| census max-abs distance | `1.311e-15` | `2.934e-14` | gap `9.438e-03`, fp32 floor `5.206e-04` |
+| `temperature_linf` normalized | `4.406e-09` | `6.279e-08` | candidate `0.320`, floor `0.0538` |
+| `u_linf` normalized | `4.139e-09` | `4.907e-08` | candidate `0.657`, floor `0.0866` |
+| tracer-variance ratio | `1.000000000000075` | `1.0000000016` | `L64/N2` `1.1316` |
+| anomaly effective-volume ratio | `0.99999999999923` | `0.99999999857` | `L64/N2` `0.8989` |
+| anomaly deficit, relative | `-4.07e-13` | `-2.57e-13` | conservation control |
+| census by time (0 / mid / final) | `0.0` / `2.2e-16` / `1.3e-15` | `0.0` / `1.6e-15` / `2.9e-14` | |
+
+**This settles it.**  A seed at the `k=24` face at `1e-9 m/s` -- the size of
+the measured kt=3 injection -- moves the census row by `2.9e-14` after the full
+6120 steps.  That is **eleven orders of magnitude** below the `9.4e-3` gap and
+**ten** below the fp32 floor.  The `k=24` family is REFUTED as the owner of
+this row by direct measurement, not by a bound.
+
+It also settles something larger, and corrects a premise both refute conditions
+rested on: **the OVERFLOW solution is NOT chaotic on this window.**  A
+thousandfold larger seed produces only a `22x` larger census response
+(`2.93e-14 / 1.31e-15`) and a `14x` larger temperature response -- monotone in
+amplitude, nowhere near saturation, and tiny in absolute terms.  Trajectory
+divergence therefore cannot manufacture ANY of the observed statistics, which
+means the `0.0094` census separation, the `0.00336` FCT4-vs-FCT2 separation and
+the `0.00052` fp32 floor are all SYSTEMATIC operator or arithmetic differences.
+That strengthens the surviving half of the verdict and removes the chaos
+reading entirely.
+
+Predictions: **N1 CONFIRMED** (`1.3e-15 << 3.36e-3`), **N2 CONFIRMED**
+(`4.4e-9 << 0.32`), **N3 NEITHER ARM OF THE DISJUNCTION** -- the ratio is
+`22x` for a `1000x` seed, so the response is sub-linear but far from saturated;
+recorded as written rather than reinterpreted, **N4 CONFIRMED** (both ratios
+within `1.5e-9` of 1, against the `0.5%` bar), **N5 CONFIRMED** (deficit
+conserved to `4e-13`).
 
 ## 6. Predictions vs outcomes
 
@@ -339,13 +497,61 @@ that is not a statement about 61200 steps.
   map;
 - salinity is MEASURED (reported, not asserted) constant to `7e-13` about 35
   in every fp64 arm, so no census class can be moved by a salinity difference;
-- `tests/ocean/fidelity/test_nemo_testcase_census_map_probe.py`: 3 tests, each
+- `tests/ocean/fidelity/test_nemo_testcase_census_map_probe.py`: 4 tests, each
   shown to FAIL under a synthetic violation (shifting one bin edge fails the
   classification test; swapping the reclassified/same-class split fails both
-  channel-separation tests), and passing at HEAD.
+  channel-separation tests; the fourth PLANTS an inconsistent census so the
+  decomposition-closure guard is shown to fire, which the honest fixtures never
+  exercise), and passing at HEAD.  DISCLOSED: the tests cover the probe's pure
+  helpers; `arm_state` itself is exercised only by the runs, where its
+  instrument control against the committed scorer is the guard.
+- every artifact in this round was regenerated at a CLEAN tree after review
+  found an earlier `census_map.json` stamped with a commit that did not contain
+  four of its fields; the stamp now carries a `-dirty+N` suffix when the tree
+  is not clean.
 
 ## 10. Reviews
 
 Codex CLI and the GLM tool are unavailable on this account, so the DUAL review
-runs as two independent reviewer subagents (one on the diff, one on the
-mechanism) -- see the session's review record.
+ran as two independent reviewer subagents, one on the diff and one on the
+mechanism, both on the `fd4a798c7..241652095` range.  **Both returned
+REQUEST-CHANGES, and both were right.**
+
+**Reviewer A (diff).**  (1) BLOCKING: the anomaly-moments commit broke this
+probe's own tests and I had not re-run them -- CONFIRMED, fixed, and the
+fixture now carries the new keys.  (2) IMPORTANT: open item 3 was closed on a
+reference-against-reference measurement and the stated z*/qco basis is false
+for legoESM's min-rule -- CONFIRMED at the source
+(`ocean_model_latlon_cgrid.py:4264`), measured, and section 4 is rewritten;
+their independent values reproduce mine to the last digit.  (3) IMPORTANT: the
+`1.05e-9` was a mismatched normalization -- CONFIRMED, corrected to `8.43e-8`.
+(4) IMPORTANT: `census_map.json` stamped a commit that lacked four of its
+fields -- CONFIRMED, the stamp now reports dirtiness and every artifact was
+regenerated clean.  (5) IMPORTANT: section 2b is post-hoc -- ADOPTED and
+labelled.  (6) MINOR: `arm_state` untested and the closure guard unexercised --
+a fourth test now plants a violation; the `arm_state` gap is disclosed.
+(7) `trabbl.F90:415-434` ends one line early -- corrected to `:415-435`.  They
+also independently re-derived every receipt table from the JSON and verified
+all seven NEMO citations.
+
+**Reviewer B (mechanism).**  (1) BLOCKING: the calibration pair moves the
+census the same way while moving the mixing measure the opposite way, so "the
+row is a mixing statistic" is not established -- CHECKED against this round's
+JSON and CONFIRMED; the verdict is rewritten and the claim RETRACTED.
+(2) BLOCKING: the `22x` is time-sampling -- CONFIRMED (`3.31x` at the
+midpoint); both are now reported.  (3) BLOCKING: "no water below 12 C in the
+domain" is false for `N4` -- CONFIRMED (`11.892 C`), corrected.  (4-5)
+IMPORTANT: R2 does not bound a systematic forcing, and the kt<=60 window is
+over-read because the delta changes sign at kt=49 then grows `1.62x`/step --
+both CONFIRMED from `variance.json`, both corrected.  (6) IMPORTANT: R1 is
+question-begging for a mixing-sensitive row, and the L-infinity framing inverts
+under slope RMS (`0.4088` vs `0.3922`) -- CONFIRMED, disclosed, and R1 is
+demoted to a seed-channel bound.  (7) MINOR: promote the uncensored dilution
+measure to a scored row -- NOT taken here; adding a registered metric changes
+the scorer and is an ASK item, recorded as such.  Their proposed highest-value
+measurement -- a single-cell seed run to full duration -- was ADOPTED, frozen
+in a second preregistration, and run: section 5b.
+
+Where the two reviewers overlapped (open item 3, and the strength of R1/R2)
+they agreed.  Nothing was averaged; every finding above was re-measured against
+this round's own artifacts before it was adopted.
