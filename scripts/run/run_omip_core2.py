@@ -2015,6 +2015,9 @@ _FESOM_WIRED_DESTS = frozenset({
     # B4 — Dai-Trenberth runoff (node-adjacency coastal spread from
     # mesh.edges via FesomOceanGrid.cellsOnCell):
     "runoff", "runoff_spread_passes", "river_mouth_restoring_gate",
+    # NEMO zdfiwm (ln_zdfiwm=T in ORCA1): spliced additively onto the legoESM
+    # closure by the FESOM TKE bridge, exactly as MPASOceanModel does.
+    "iwm", "iwm_forcing_file",
     # B4 — NEMO-monthly / WOA initial condition:
     "nemo_monthly_init", "nemo_init_month", "woa_init", "woa_t", "woa_s",
 })
@@ -2032,6 +2035,9 @@ _FESOM_FORCED_ONLY_DESTS = (
     "sss_restore_bound_mmday", "sss_restore_file",
     "sss_restore_normalization", "sss_ice_gate_nemo",
     "runoff", "runoff_spread_passes", "river_mouth_restoring_gate",
+    # NEMO zdfiwm (ln_zdfiwm=T in ORCA1): spliced additively onto the legoESM
+    # closure by the FESOM TKE bridge, exactly as MPASOceanModel does.
+    "iwm", "iwm_forcing_file",
     # codex B4 MAJOR (partially adopted): the UNFORCED smoke never loads
     # forcing, so a forcing SOURCE selector there is a silent drop.  The
     # P-E opt-OUT (--no-emp) stays legal — disabling a channel that does
@@ -2108,7 +2114,8 @@ def validate_fesom_stage(args, parser) -> None:
 def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None, *,
                       nemo_monthly_init=None, nemo_init_month: int = 1,
                       woa_init: bool = False, woa_t=None, woa_s=None,
-                      vertical_mixing: str = "fesom", vmix_config=None):
+                      vertical_mixing: str = "fesom", vmix_config=None,
+                      iwm_forcing_file: str | None = None):
     """FESOM core in the OMIP driver (three-grid unification B1; IC B4).
 
     Loads the REAL-bathymetry fesom_jax mesh (NOT the idealized
@@ -2149,7 +2156,23 @@ def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None, *,
     config = FesomOceanConfig(dt=float(dt), vertical_coordinate="zstar",
                               constants="legoesm",
                               vertical_mixing=str(vertical_mixing))
-    model = FesomOceanModel(mesh, z_coord, config, vmix_config=vmix_config)
+    # zdfiwm maps on the node cloud (paired lat/lon, the MPAS pattern): the
+    # atlas is remapped here, K_iwm is recomputed from FESOM's own N2 inside
+    # the closure bridge.
+    _iwm_maps = None
+    if iwm_forcing_file and vmix_config is not None \
+            and getattr(vmix_config, "iwm", None) is not None \
+            and vmix_config.iwm.enabled:
+        from legoesm.ocean.iwm_forcing import load_iwm_forcing
+        _iwm_maps = load_iwm_forcing(
+            iwm_forcing_file,
+            np.degrees(np.asarray(mesh.geo_coord_nod2D[:, 1])),
+            np.degrees(np.asarray(mesh.geo_coord_nod2D[:, 0])),
+            land_mask=np.asarray(mesh.node_layer_mask[:, 0], dtype=np.float64),
+            paired_cells=True)
+        print(f"[setup] fesom zdfiwm ENABLED (maps={iwm_forcing_file})")
+    model = FesomOceanModel(mesh, z_coord, config, vmix_config=vmix_config,
+                            iwm_forcing=_iwm_maps)
     if ic_dir:
         from fesom_jax.phc_ic import cold_start_state
         # seed_sea_ice=False: the PHC cold start would seed a static
@@ -6854,8 +6877,9 @@ def main() -> int:
             # ONE closure across the three grids: the SAME zdftke card
             # builder + knobs the tripole/MPAS lanes use.
             vertical_mixing=args.fesom_vmix,
+            iwm_forcing_file=args.iwm_forcing_file,
             vmix_config=(build_tripole_vmix_config(
-                "tke", iwm=None,
+                "tke", iwm=_iwm_cfg,
                 tke_eice=args.tke_eice,
                 tke_surface_bc=args.tke_surface_bc,
                 tke_mxl_choice=args.tke_mxl_choice,

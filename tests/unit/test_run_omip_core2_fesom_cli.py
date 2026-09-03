@@ -37,7 +37,7 @@ def test_clean_args_pass():
 
 
 @pytest.mark.parametrize("extra", [
-    ["--iwm"], ["--mle"], ["--isf"],
+    ["--mle"], ["--isf"],
     ["--bbl-adv"],
     ["--momentum-rk3"], ["--geothermal"],
     ["--gateway-transports"], ["--partial-cell"],
@@ -158,6 +158,15 @@ def test_grid_choice_registered():
     p = _build_arg_parser()
     args = p.parse_args(BASE)
     assert args.grid == "fesom"
+
+
+def test_iwm_accepted_on_fesom():
+    """NEMO ORCA1 runs ln_zdfiwm=T; the FESOM closure bridge now splices
+    zdfiwm additively (same single-owner kernel as the other two lanes), so
+    the stage gate must accept it instead of rejecting it as unwired."""
+    args, p = _parse(["--iwm", "--iwm-forcing-file", "/iwm.nc"])
+    validate_fesom_stage(args, p)  # no raise
+    assert args.iwm and args.iwm_forcing_file == "/iwm.nc"
 
 
 def test_river_mouth_gate_accepted_on_fesom():

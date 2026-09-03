@@ -157,3 +157,26 @@ def test_eice_card_runs_unforced_and_fails_fast_forced_without_ice(flat_mesh, z_
         ice_concentration=jnp.zeros((n,))), dt_tke=DT)
     # 90% ice attenuates the wind-driven surface mixing (eice=3: 1-4A -> 0)
     assert float(jnp.median(Kv_ice[:, 1])) <= float(jnp.median(Kv_open[:, 1]))
+
+
+def test_iwm_splices_additively_and_only_when_enabled(flat_mesh, z_shim):
+    """NEMO zdfiwm (ln_zdfiwm=T on ORCA1) is ADDITIVE on top of the closure,
+    the same single-owner kernel the other two lanes call. Enabling it must
+    raise K everywhere it is active and change nothing when disabled."""
+    from legoesm.ocean.physics.vertical_mixing.config import IWMConfig
+    state = create_rest_state(flat_mesh, z_shim, stratified=True,
+                              vertical_coordinate="zstar")
+    zg = fesom_zgeom(flat_mesh)
+    base = _vmix()
+    off = make_tke_profiles_fesom(base)
+    on = make_tke_profiles_fesom(
+        base._replace(iwm=IWMConfig(enabled=True)))
+    Kv0, Av0, _ = off(state, flat_mesh, zg, _wind(flat_mesh), dt_tke=DT)
+    Kv1, Av1, _ = on(state, flat_mesh, zg, _wind(flat_mesh), dt_tke=DT)
+    d = np.asarray(Kv1 - Kv0)
+    assert np.all(d >= -1e-15)                       # additive, never removes
+    assert float(d.max()) > 0.0                      # and it actually fires
+    assert float(np.abs(np.asarray(Kv1[:, 0])).max()) == 0.0   # surface stays 0
+    assert np.isfinite(np.asarray(Av1)).all()
+    # the momentum viscosity gets the same addition (NEMO adds to avm and avt)
+    assert float(np.asarray(Av1 - Av0).max()) > 0.0

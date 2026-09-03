@@ -69,7 +69,7 @@ def fesom_zgeom(mesh) -> SimpleNamespace:
 
 def make_tke_profiles_fesom(config: VerticalMixingConfig, eos_fn=None,
                             constants_config: ConstantsConfig = ConstantsConfig(),
-                            ) -> Callable:
+                            iwm_fields=None) -> Callable:
     """Build ``profiles_fn(state, mesh, zgeom, surface_forcing, dt_tke)``
     returning ``(Kv_nod, Av_elem, tke_new_nl)`` for ``fesom_jax.step``.
 
@@ -106,11 +106,8 @@ def make_tke_profiles_fesom(config: VerticalMixingConfig, eos_fn=None,
         raise NotImplementedError(
             "vertical_mixing.tke.advection_scheme != 'none' is not wired on "
             "FESOM (no node-cloud TKE advection operator).")
-    if getattr(config, "iwm", None) is not None and config.iwm.enabled:
-        raise NotImplementedError(
-            "VerticalMixingConfig.iwm.enabled=True: zdfiwm is not applied on "
-            "the FESOM lane yet (stage B6); run FESOM without --iwm or wire "
-            "the additive K splice as MPASOceanModel does.")
+    _iwm_cfg = (config.iwm if (getattr(config, "iwm", None) is not None
+                               and config.iwm.enabled) else None)
     _eice = int(getattr(cfg, "eice", 0))
     if _eice not in (0, 1, 3):
         raise ValueError(f"Unknown TKEConfig.eice={_eice!r}; expected 0, 1 or 3.")
@@ -177,8 +174,31 @@ def make_tke_profiles_fesom(config: VerticalMixingConfig, eos_fn=None,
             jacobian=J,
             **bn2_ladder_kwargs(cfg, zgeom, eta_state),
         )
-        K_M = jnp.where(half_mask, out.K_M, 0.0)
-        K_H = jnp.where(half_mask, out.K_H, 0.0)
+        K_M = out.K_M
+        K_H = out.K_H
+        if _iwm_cfg is not None:
+            # NEMO zdfiwm: internal-wave-driven mixing, ADDITIVE on top of the
+            # closure (zdfphy order: closure first, zdf_iwm adds onto avt/avm)
+            # — the SAME single-owner kernel the lat-lon and MPAS lanes call,
+            # fed this grid's own live geometry and N2 (no re-derivation).
+            from legoesm.ocean.physics.vertical_mixing._shared import compute_N2
+            from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
+                compute_iwm_diffusivity, uniform_iwm_forcing,
+            )
+            depth_cell = jnp.cumsum(h_live, axis=-1) - 0.5 * h_live   # gdept
+            H_col = jnp.sum(h_live, axis=-1)                          # ht
+            N2_iwm = compute_N2(rho, dz_half, constants_config.rho_0,
+                                g=constants_config.g)
+            _fields = (iwm_fields if iwm_fields is not None
+                       else uniform_iwm_forcing(_iwm_cfg, H_col.shape,
+                                                dtype=K_H.dtype))
+            K_iwm, _ = compute_iwm_diffusivity(
+                _fields, depth_cell, dz_half, H_col, N2_iwm,
+                cfg=_iwm_cfg, rho_0=constants_config.rho_0)
+            K_H = K_H + K_iwm
+            K_M = K_M + K_iwm
+        K_M = jnp.where(half_mask, K_M, 0.0)
+        K_H = jnp.where(half_mask, K_H, 0.0)
         tke_h = jnp.where(half_mask, out.tke_new, 0.0)
         nod2D = K_H.shape[0]
         zeros1 = jnp.zeros((nod2D, 1), dtype=K_H.dtype)

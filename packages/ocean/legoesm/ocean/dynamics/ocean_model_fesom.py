@@ -1448,7 +1448,7 @@ class FesomOceanModel:
     """
 
     def __init__(self, mesh: "Mesh", z_coord: Any, config: FesomOceanConfig,
-                 *, vmix_config=None):
+                 *, vmix_config=None, iwm_forcing=None):
         _require_fesom_jax()
         from fesom_jax import config as fconfig
         from fesom_jax import ssh as fssh
@@ -1529,8 +1529,14 @@ class FesomOceanModel:
             from legoesm.ocean.physics.vertical_mixing.fesom_integration import (
                 fesom_zgeom, make_tke_profiles_fesom,
             )
-            self._tke_profiles_fn = make_tke_profiles_fesom(vmix_config)
+            self._tke_profiles_fn = make_tke_profiles_fesom(
+                vmix_config, iwm_fields=iwm_forcing)
             self._zgeom = fesom_zgeom(mesh)
+        elif iwm_forcing is not None:
+            raise ValueError(
+                "iwm_forcing was supplied but the FESOM lane is not running "
+                "the legoESM closure (vertical_mixing='legoesm_tke'), which is "
+                "where zdfiwm is spliced — the maps would be silently ignored.")
         elif _vmix_mode != "fesom":
             raise ValueError(
                 f"FesomOceanConfig.vertical_mixing={_vmix_mode!r}; expected "
