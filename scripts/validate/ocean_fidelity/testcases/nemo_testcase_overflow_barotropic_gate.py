@@ -261,7 +261,8 @@ def state_from_oracle_entry(state, entry: dict, active_masks: dict):
 
 def capture_legoesm_trace(*, flux_form_override, kt: int = 1,
                           reseed_entry: dict | None = None,
-                          legacy_seed_faces: bool = False) -> dict:
+                          legacy_seed_faces: bool = False,
+                          start_state=None) -> dict:
     """Capture the ``kt``-th solve without changing the two-value production
     return.
 
@@ -276,7 +277,9 @@ def capture_legoesm_trace(*, flux_form_override, kt: int = 1,
     (a NEMO ``oracle_step_entry_kt{kt}`` record) replaces legoESM's own
     kt-entry prognostic state by NEMO's, so the captured solve starts from
     an EXACT entry and its first over-bar frame names the operand rather
-    than an inherited residual.
+    than an inherited residual.  ``start_state`` hands the kt-entry state in
+    directly (a caller-built trajectory, e.g. the stage-3 remainder probe's
+    perturbed arm); it is mutually exclusive with ``reseed_entry``.
     """
     import jax
     import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as ocean_model
@@ -327,7 +330,11 @@ def capture_legoesm_trace(*, flux_form_override, kt: int = 1,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             legacy_seed_min_rule_faces=legacy_seed_faces))
     state = card.recipe.initial_state
-    if reseed_entry is not None:
+    require(reseed_entry is None or start_state is None,
+            "reseed_entry and start_state are mutually exclusive")
+    if start_state is not None:
+        state = start_state
+    elif reseed_entry is not None:
         require(int(reseed_entry["step"]) == kt,
                 f"re-seed record is kt={reseed_entry['step']}, wanted {kt}")
         active = _trajectory_gate().expected_masks(card)
@@ -380,6 +387,7 @@ def capture_legoesm_trace(*, flux_form_override, kt: int = 1,
         "production_flux_form_update_active": production_resolution,
         "kt": kt,
         "reseeded_from_oracle_entry": reseed_entry is not None,
+        "started_from_caller_state": start_state is not None,
         "legacy_seed_faces_test_hook": legacy_seed_faces,
     }
 
