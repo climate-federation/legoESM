@@ -43,6 +43,11 @@ BASELINE_OPERATOR_JSON = (
 BASELINE_OPERATOR_JSON_SHA256 = (
     "d642f532ed92910b49f29919dd5e4ae3fe84381ecd1536b7886a2c1f4b36f95f"
 )
+PHASE3_JSON = (
+    Path(__file__).resolve().parents[4]
+    / "docs/ocean/fidelity/testcases/nemo_testcases_l3thd_phase3_year_gate.json"
+)
+PHASE3_JSON_SHA256 = "77c78a816b254484afe06632d77378336ddac1153ef9190d17c555f41c45a6e1"
 
 
 def _ulp_distance(left: float, right: float) -> int:
@@ -577,7 +582,8 @@ def _operator_sweep(thd_path: Path, zin_path: Path, card, step_function, *,
     return summary
 
 
-def _validate_operator_trajectory(operator, *, plant=False) -> None:
+def _validate_operator_trajectory(operator, *, plant=False,
+                                  plant_outlier=False) -> None:
     """Fail closed on the complete exact-entry trajectory and max attribution."""
 
     rows = list(operator["per_step"])
@@ -587,7 +593,9 @@ def _validate_operator_trajectory(operator, *, plant=False) -> None:
     phase2.require([row["step"] for row in rows] == list(range(1, 8761)),
                    "oracle-entry per-step sequence")
     recomputed = max(rows, key=lambda row: row["maximum_normalised_error"])
-    largest = operator["largest_outlier"]
+    largest = dict(operator["largest_outlier"])
+    if plant_outlier:
+        largest["normalisation_denominator"] *= 2.0
     phase2.require(
         largest is not None
         and largest["step"] == recomputed["step"]
@@ -625,6 +633,44 @@ def _read_exact_steps(root: Path, wanted: tuple[int, ...]):
                 selected[step] = (frames, exact)
     phase2.require(set(selected) == set(wanted), "owner-arm exact steps")
     return selected
+
+
+def _historical_largest_outlier(root: Path, baseline_operator) -> dict[str, object]:
+    """Attribute the retained pre-Phase-3 1.1e8 exact-entry row."""
+
+    candidates = [
+        (row["normalised_max_abs"], int(step), row)
+        for step, rows in baseline_operator["over_bar_by_step"].items()
+        for row in rows
+    ]
+    normalised, step, row = max(candidates, key=lambda item: item[0])
+    frames, _ = _read_exact_steps(root, (step,))[step]
+    stage_index = next(
+        index for index, (_, name, _, _) in enumerate(phase2.STAGES)
+        if name == row["sub_call"]
+    )
+    oracle = np.asarray(frames[stage_index][row["variable"]])
+    denominator = max(1.0, float(np.max(np.abs(oracle))))
+    phase2.require(row["absolute_max"] / denominator == normalised,
+                   "historical largest-outlier denominator")
+    return {
+        "artifact": str(BASELINE_OPERATOR_JSON.relative_to(
+            BASELINE_OPERATOR_JSON.parents[3]
+        )),
+        "artifact_sha256": phase2.sha256(BASELINE_OPERATOR_JSON),
+        "step": step,
+        "sub_call": row["sub_call"],
+        "variable": row["variable"],
+        "absolute_numerator": row["absolute_max"],
+        "normalisation_denominator": denominator,
+        "normalised_quotient": normalised,
+        "oracle_value": oracle.reshape(-1).tolist(),
+        "owner": (
+            "pre-Phase-3 missing DH snow-first surface melt left snow "
+            "enthalpy where NEMO had removed all snow"
+        ),
+        "source": "icethd_dh.F90:107-120,204-315",
+    }
 
 
 def _arm_row(oracle, disabled, enabled, name: str) -> dict[str, object]:
@@ -990,7 +1036,8 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
         plant_truncate=False, plant_branch_census=False,
         plant_deposition=False, plant_surface=False,
         plant_snow_temperature=False,
-        plant_operator_trajectory=False) -> dict[str, object]:
+        plant_operator_trajectory=False,
+        plant_outlier_attribution=False) -> dict[str, object]:
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ice.bitz_lipscomb import si3_column_step_arrays
     from legoesm.ice.c1d_omip_l3 import (
@@ -1037,7 +1084,10 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
         snapshot_steps=(73, 74, 75, 76, 4239, 5285),
     )
     _validate_step74_branch_snapshot(operator, plant=plant_branch_census)
-    _validate_operator_trajectory(operator, plant=plant_operator_trajectory)
+    _validate_operator_trajectory(
+        operator, plant=plant_operator_trajectory,
+        plant_outlier=plant_outlier_attribution,
+    )
     continuous_per_step = []
     sample_table: dict[str, object] = {}
     h_nemo, h_fp64, h_fp32 = [], [], []
@@ -1110,8 +1160,11 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
         phase2.sha256(BASELINE_OPERATOR_JSON) == BASELINE_OPERATOR_JSON_SHA256,
         "Phase-2b retained operator JSON SHA256",
     )
+    phase2.require(phase2.sha256(PHASE3_JSON) == PHASE3_JSON_SHA256,
+                   "Phase-3 year JSON SHA256")
     baseline = json.loads(BASELINE_JSON.read_text())
     baseline_operator = json.loads(BASELINE_OPERATOR_JSON.read_text())
+    phase3 = json.loads(PHASE3_JSON.read_text())
     baseline_first = baseline_operator["first_over_bar_frame"]
     phase2.require(
         operator["first_over_bar_frame"]["step"] > baseline_first["step"],
@@ -1131,10 +1184,14 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
     before_after = {}
     for report_step in REPORT_STEPS:
         key = str(report_step)
+        baseline_fields = phase3["continuous_trajectory"]["sample_steps"].get(key)
+        if baseline_fields is None:
+            baseline_fields = phase3["continuous_trajectory"]["per_step"][
+                report_step - 1
+            ]["fields"]
         before_after[key] = {
             field: {
-                "before_normalised_linf": baseline["continuous_trajectory"]
-                ["sample_steps"][key][field]["normalised_linf"],
+                "before_normalised_linf": baseline_fields[field]["normalised_linf"],
                 "after_normalised_linf": sample_table[key][field]["normalised_linf"],
             }
             for field in CONTINUOUS_FIELDS
@@ -1167,21 +1224,26 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
             "phase2b_retained_operator_json": phase2.sha256(
                 BASELINE_OPERATOR_JSON
             ),
+            "phase3_year_json": phase2.sha256(PHASE3_JSON),
         },
         "arithmetic_replay": arithmetic,
         "owner_arms": owner_arms,
         "melt_candidate_scaling": _melt_scaling(root, card),
         "oracle_entry_operator_sweep": operator,
         "oracle_entry_operator_sweep_before": {
-            "artifact": str(BASELINE_OPERATOR_JSON.relative_to(
-                BASELINE_OPERATOR_JSON.parents[3]
+            "artifact": str(PHASE3_JSON.relative_to(
+                PHASE3_JSON.parents[3]
             )),
-            "artifact_sha256": phase2.sha256(BASELINE_OPERATOR_JSON),
+            "artifact_sha256": phase2.sha256(PHASE3_JSON),
             **{
-                key: value for key, value in baseline_operator.items()
+                key: value
+                for key, value in phase3["oracle_entry_operator_sweep"].items()
                 if key not in ("over_bar_by_step", "full_state_snapshots")
             },
         },
+        "historical_1p1e8_outlier": _historical_largest_outlier(
+            root, baseline_operator
+        ),
         "continuous_trajectory": {
             "metric": "max(abs(legoesm-NEMO))/max(1,max(abs(NEMO)))",
             "sample_steps": sample_table,
@@ -1197,7 +1259,7 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
             "legoesm_fp32": fp32_phen,
             "private_arm_no_surface_melt": no_surface_phen,
             "private_arm_no_basal_melt": no_basal_phen,
-            "before_legoesm_fp64": old_phen,
+            "before_legoesm_fp64": phase3["phenomenology"]["legoesm_fp64"],
             "classification_rows": _phenomenology_rows(nemo_phen, fp64_phen, fp32_phen),
             "floor_scope": "legoesm fp32-vs-fp64, not a NEMO scheme spread",
         },
@@ -1219,6 +1281,7 @@ def main() -> None:
     parser.add_argument("--plant-surface", action="store_true")
     parser.add_argument("--plant-snow-temperature", action="store_true")
     parser.add_argument("--plant-operator-trajectory", action="store_true")
+    parser.add_argument("--plant-outlier-attribution", action="store_true")
     args = parser.parse_args()
     result = run(root=args.root, plant_arithmetic=args.plant_arithmetic,
                  plant_truncate=args.plant_truncate,
@@ -1226,7 +1289,8 @@ def main() -> None:
                  plant_deposition=args.plant_deposition,
                  plant_surface=args.plant_surface,
                  plant_snow_temperature=args.plant_snow_temperature,
-                 plant_operator_trajectory=args.plant_operator_trajectory)
+                 plant_operator_trajectory=args.plant_operator_trajectory,
+                 plant_outlier_attribution=args.plant_outlier_attribution)
     rendered = json.dumps(result, indent=2, sort_keys=True)
     if args.json:
         args.json.write_text(rendered + "\n")

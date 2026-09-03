@@ -141,9 +141,8 @@ def test_operator_per_step_and_outlier_controls_exit_red(gate) -> None:
     gate._validate_operator_trajectory(operator)
     with pytest.raises(gate.phase2.GateError, match="per-step count"):
         gate._validate_operator_trajectory(operator, plant=True)
-    operator["largest_outlier"]["normalisation_denominator"] = 2.0
     with pytest.raises(gate.phase2.GateError, match="largest-outlier"):
-        gate._validate_operator_trajectory(operator)
+        gate._validate_operator_trajectory(operator, plant_outlier=True)
 
 
 def test_phase3_branch_census_plant_exits_red(gate) -> None:
@@ -178,6 +177,29 @@ def test_phase3_committed_censuses_retain_rows_and_branch_predicates(gate) -> No
     assert sum(len(rows) for rows in after["over_bar_by_step"].values()) == 37_659
     assert all(len(after["full_state_snapshots"][str(step)]["frames"]) == 8
                for step in (73, 74, 75, 76))
+
+
+def test_phase4_artifact_retains_per_step_operator_and_outlier_attribution() -> None:
+    artifact = json.loads(Path(
+        "docs/ocean/fidelity/testcases/nemo_testcases_l3thd_phase4_year_gate.json"
+    ).read_text())
+    operator = artifact["oracle_entry_operator_sweep"]
+    assert len(operator["per_step"]) == 8760
+    assert [row["step"] for row in operator["per_step"]] == list(range(1, 8761))
+    assert sum(row["over_bar_field_rows"] for row in operator["per_step"]) == 36_852
+    largest = operator["largest_outlier"]
+    assert (largest["step"], largest["sub_call"], largest["variable"]) == (
+        5734, "POST_DH", "e_s",
+    )
+    assert (largest["absolute_numerator"]
+            / largest["normalisation_denominator"]
+            == largest["normalised_quotient"])
+    historical = artifact["historical_1p1e8_outlier"]
+    assert (historical["step"], historical["sub_call"], historical["variable"]) == (
+        5406, "POST_DH", "e_s",
+    )
+    assert historical["normalisation_denominator"] == 1.0
+    assert historical["absolute_numerator"] == historical["normalised_quotient"]
 
 
 def test_truncated_thermodynamics_frame_fails_closed(gate, tmp_path: Path) -> None:
