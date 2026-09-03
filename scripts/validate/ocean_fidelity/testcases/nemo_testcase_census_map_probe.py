@@ -87,10 +87,21 @@ def sha256(path: Path) -> str:
 
 
 def git_sha() -> str:
-    return subprocess.run(
+    """HEAD, with a loud ``-dirty+<n>`` suffix when the tree is not clean.
+
+    A stamp that names a commit the artifact cannot be reproduced from is
+    worse than no stamp: an earlier run of this probe carried four fields that
+    did not exist at the commit it named.
+    """
+    head = subprocess.run(
         ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
         capture_output=True, text=True, check=True,
     ).stdout.strip()
+    dirty = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True, text=True, check=True,
+    ).stdout.split()
+    return head if not dirty else f"{head}-dirty+{len(dirty) // 2}"
 
 
 def _classify(values: np.ndarray) -> np.ndarray:
@@ -402,6 +413,18 @@ def command_faces(args) -> None:
             }
         faces.append(entry)
 
+    # The ACTUAL open item 3: NEMO's stage depth mean is REFERENCE-weighted
+    # (stprk3_stg.F90:440, e3u_0 / r1_hu_0) while legoESM's is LIVE-weighted
+    # (_replace_stage_mean, h_u_pre / H_u_pre with
+    # h_u_pre = min_cell_to_uface(h_k_pre)).  Because that min is taken over
+    # two columns whose free-surface Jacobians differ, the live weights are NOT
+    # a uniform rescale of the reference ones and the difference is not
+    # algebraically zero -- measure it on real states rather than assert it.
+    live = _live_stage_mean_weights(card, lego_u, args.live_steps)
+    reference_weight = np.divide(
+        e3u_0, hu_0_nemo[..., None],
+        out=np.zeros_like(e3u_0), where=hu_0_nemo[..., None] > 0)
+
     payload = {
         "case": CASE,
         "git_sha": git_sha(),
@@ -415,19 +438,40 @@ def command_faces(args) -> None:
             "max_abs_e3u_0_minus_h_u_over_wet_faces": float(
                 np.max(np.abs((e3u_0 - h_u_lego)[lego_u]))),
             "max_abs_hu_0_minus_H_u": float(np.max(np.abs(hu_0_nemo - H_u_lego))),
-            "max_abs_weight_ratio_difference": float(np.max(np.abs(
+            "max_abs_reference_weight_ratio_difference": float(np.max(np.abs(
                 np.divide(e3u_0, hu_0_nemo[..., None],
                           out=np.zeros_like(e3u_0), where=hu_0_nemo[..., None] > 0)
                 - np.divide(h_u_lego, H_u_lego[..., None],
                             out=np.zeros_like(h_u_lego), where=H_u_lego[..., None] > 0)
             )[lego_u])),
         },
+        "live_vs_reference_stage_mean_weights": [
+            {
+                "kt": entry["kt"],
+                "max_abs_weight_difference": float(np.max(
+                    np.abs(entry["weight"] - reference_weight)[lego_u])),
+                "wet_faces_differing": int(np.count_nonzero(
+                    (np.abs(entry["weight"] - reference_weight) > 0.0) & lego_u)),
+                "max_abs_at_injection_faces_20_21_22": float(np.max(
+                    np.abs(entry["weight"] - reference_weight)[
+                        row, args.face_lo:args.face_hi + 1][
+                        np.asarray([f in (20, 21, 22)
+                                    for f in range(args.face_lo, args.face_hi + 1)])])),
+            }
+            for entry in live
+        ],
         "faces": faces,
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(payload, indent=1, sort_keys=True))
     print(f"wrote {args.out}")
     print("controls:", json.dumps(payload["controls"], indent=1))
+    print("live vs reference stage-mean weights (the real open item 3):")
+    for entry in payload["live_vs_reference_stage_mean_weights"]:
+        print(f"  kt={entry['kt']:3d}  max |live-ref| {entry['max_abs_weight_difference']:.6e}"
+              f"  faces differing {entry['wet_faces_differing']:5d}"
+              f"  at injection faces 20/21/22 "
+              f"{entry['max_abs_at_injection_faces_20_21_22']:.6e}")
     for entry in faces:
         marks = "".join(
             "W" if entry["levels"][str(k)]["lego_u_active"] else "."
@@ -437,6 +481,39 @@ def command_faces(args) -> None:
               f"{entry['left_T_bottom_k']:3d}/{entry['right_T_bottom_k']:3d}  "
               f"bathy {entry['left_bathy_m']:7.1f}/{entry['right_bathy_m']:7.1f}  "
               f"hu_0 {entry['hu_0_nemo_m']:9.3f}  k{args.k_lo}..{args.k_hi}=[{marks}]")
+
+
+def _live_stage_mean_weights(card, lego_u: np.ndarray, steps: int) -> list[dict]:
+    """legoESM's per-level stage depth-mean weight ``h_u_pre / H_u_pre``.
+
+    Built exactly as ``ocean_model_latlon_cgrid.py:4255-4271`` does: the live
+    layer thickness from the step-entry ssh, ``min_cell_to_uface``, and the
+    column sum of the same array.  Returned in the gate's u frame.
+    """
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import min_cell_to_uface
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSRK3TestHooks,
+    )
+    from legoesm.ocean.vertical import compute_layer_thickness
+
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks())
+    state = card.recipe.initial_state
+    out = []
+    for kt in range(1, steps + 1):
+        h_k = compute_layer_thickness(
+            state.eta.data, state.H_bathy.data, card.recipe.z_coord,
+            min_water_column_m=card.recipe.model_config.min_water_column_m)
+        h_u = np.asarray(min_cell_to_uface(h_k), dtype=np.float64)[:, 1:, :]
+        h_u = h_u * lego_u
+        H_u = np.sum(h_u, axis=-1)
+        weight = np.divide(
+            h_u, H_u[..., None], out=np.zeros_like(h_u), where=H_u[..., None] > 0)
+        out.append({"kt": kt, "weight": weight})
+        state = model.step(state, dt=card.dt_s)
+    return out
 
 
 # ------------------------------------------------------------- variance ----
@@ -567,7 +644,7 @@ def command_chaos_null(args) -> None:
         float(np.max(np.abs(difference))) == float(args.amplitude),
         "seed amplitude did not land",
     )
-    state = base._replace(u=base.u._replace(data=jnp.asarray(seeded)))
+    state = base._replace(u=base.u.replace(data=jnp.asarray(seeded)))
 
     samples = set(STATS.sample_completed_steps(CASE))
     n_steps = int(STATS.CASES[CASE]["n_steps"])
@@ -776,6 +853,7 @@ def main() -> None:
     p_faces.add_argument("--face-hi", type=int, default=30)
     p_faces.add_argument("--k-lo", type=int, default=22)
     p_faces.add_argument("--k-hi", type=int, default=27)
+    p_faces.add_argument("--live-steps", type=int, default=10)
     p_faces.add_argument("--out", type=Path, default=DEFAULT_OUT / "faces.json")
     p_faces.set_defaults(func=command_faces)
 

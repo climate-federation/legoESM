@@ -46,6 +46,14 @@ def _arm(temperature: np.ndarray, volume: np.ndarray) -> dict:
         "domain_class_volume_m3": [0.0, 0.0, 0.0],
         "domain_mean_T_C": 0.0,
         "domain_T_variance_K2": 1.0,
+        "anomaly_deficit_K_m3": float(np.sum(volume * (20.0 - temperature))),
+        "anomaly_second_moment_K2_m3": float(np.sum(volume * (20.0 - temperature) ** 2)),
+        "anomaly_effective_volume_m3": float(
+            np.sum(volume * (20.0 - temperature)) ** 2
+            / np.sum(volume * (20.0 - temperature) ** 2)),
+        "anomaly_mean_amplitude_K": float(
+            np.sum(volume * (20.0 - temperature) ** 2)
+            / np.sum(volume * (20.0 - temperature))),
         "_select": active,
         "_active": active,
         "_volume": volume,
@@ -89,3 +97,19 @@ def test_a_pure_thickness_move_is_reshuffle_only_and_reclassifies_nothing():
     assert result["same_class_volume_reshuffle_fraction"] > 0.0
     # every cell is ambient in both arms, so the FRACTIONS cannot move at all
     assert max(abs(value) for value in result["census_delta"]) < 1e-15
+
+
+def test_the_decomposition_closure_guard_can_actually_fire():
+    """The `require` that the per-cell contributions sum to the census delta.
+
+    In the honest fixtures both sides come from one `_classify` call, so the
+    guard is never exercised; plant an inconsistent census and it must raise.
+    """
+    import pytest
+
+    temperature, volume = _pair()
+    right = _arm(temperature, volume)
+    left = _arm(temperature, volume)
+    left["census"] = [0.0, 0.5, 0.5]          # inconsistent with `_klass_full`
+    with pytest.raises(probe.ProbeError, match="does not close"):
+        probe.difference_map(left, right, "planted")
