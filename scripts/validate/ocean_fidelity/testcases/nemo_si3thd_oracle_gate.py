@@ -263,18 +263,41 @@ def check_restart(path: Path, plant: bool = False) -> dict:
             "waived_metadata": sorted(actual & META_RESTART)}
 
 
+def check_completion_logs(root: Path) -> dict:
+    ocean = (root / "ocean.output").read_text(errors="replace")
+    stdout = (root / "run.stdout").read_text(errors="replace")
+    stderr = (root / "run.stderr").read_text(errors="replace")
+    combined = "\n".join((ocean, stdout, stderr))
+    require("E R R O R" not in ocean, "NEMO error block in ocean.output")
+    require(re.search(r"ice_rst_write : write ice restart file\s+kt =\s+8760", ocean) is not None,
+            "step-8760 ice restart absent from ocean.output")
+    require("Y/M/D = 2018/12/31" in ocean, "final documented forcing date absent")
+    require(re.search(r"\b(?:nan|infinity|infinite)\b", combined, re.IGNORECASE) is None,
+            "non-finite token in model logs")
+    fatal_ieee = ("IEEE_INVALID_FLAG", "IEEE_DIVIDE_BY_ZERO", "IEEE_OVERFLOW_FLAG")
+    require(not any(flag in combined for flag in fatal_ieee), "fatal IEEE flag in model logs")
+    require(stderr.rstrip().endswith("STOP 0"), "direct executable did not report STOP 0")
+    nonfatal = [flag for flag in ("IEEE_UNDERFLOW_FLAG", "IEEE_DENORMAL") if flag in stderr]
+    return {"final_step": 8760, "final_forcing_date": "2018-12-31",
+            "stop": "STOP 0", "nonfatal_ieee_flags": nonfatal}
+
+
 def run(root: Path, forcing: Path, archive: Path, plant_restart: bool = False,
         plant_exchange: bool = False, plant_thickness: bool = False) -> dict:
     require(sha256(archive) == "54a2ceefd9126e180676e68eaa28ded85cc3b93ea3f0dda0fb964a035a4fc382",
             "forcing archive SHA256")
     require(sha256(forcing) == "e5ec49445d2569019c45dec24255b9c7daf050079444b0e6e6d86a5b82317afe",
             "forcing file SHA256")
+    staged_forcing = root / "SAS" / "ERA5_NorthGreenland_surface_84N_-36E_1h_y2018.nc"
+    require(staged_forcing.is_file(), "staged forcing file missing")
+    require(sha256(staged_forcing) == sha256(forcing), "staged forcing SHA256")
     resolved = check_resolved(root)
     restarts = sorted(root.glob("*restart_ice*.nc"))
     require(len(restarts) == 1, f"expected one final ice restart, got {len(restarts)}")
     result = {
         "status": "VERIFIED",
         "forcing_sha256": sha256(forcing),
+        "staged_forcing_sha256": sha256(staged_forcing),
         "archive_sha256": sha256(archive),
         "resolved_sha256": {"ocean": sha256(root / "output.namelist.dyn"),
                             "ice": sha256(root / "output.namelist.ice")},
@@ -285,6 +308,7 @@ def run(root: Path, forcing: Path, archive: Path, plant_restart: bool = False,
         "thermodynamics": read_thd_frames(root / "oracle_si3_thd_frames.bin", plant_thickness)[1],
         "exchange": read_exchange_frames(root / "oracle_si3_exchange_frames.bin", plant_exchange),
         "restart": check_restart(restarts[0], plant_restart),
+        "completion_log": check_completion_logs(root),
         "resolved_count": len(resolved),
     }
     return result

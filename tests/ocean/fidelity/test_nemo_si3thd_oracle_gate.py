@@ -95,6 +95,23 @@ def test_restart_missing_required_fails(tmp_path: Path) -> None:
         gate.check_restart(path)
 
 
+def test_completion_log_requires_documented_end_and_rejects_error(tmp_path: Path) -> None:
+    (tmp_path / "ocean.output").write_text(
+        "fld_read: Y/M/D = 2018/12/31\n"
+        "ice_rst_write : write ice restart file  kt =        8760\n"
+    )
+    (tmp_path / "run.stdout").write_text("")
+    (tmp_path / "run.stderr").write_text(
+        "Note: The following floating-point exceptions are signalling: "
+        "IEEE_UNDERFLOW_FLAG IEEE_DENORMAL\nSTOP 0\n"
+    )
+    result = gate.check_completion_logs(tmp_path)
+    assert result["nonfatal_ieee_flags"] == ["IEEE_UNDERFLOW_FLAG", "IEEE_DENORMAL"]
+    (tmp_path / "ocean.output").write_text("E R R O R\n")
+    with pytest.raises(gate.GateError, match="NEMO error block"):
+        gate.check_completion_logs(tmp_path)
+
+
 def test_oracle_streams_are_not_closed_and_replaced_at_nitend() -> None:
     """A repeated terminal call must append, not replace the full-year stream."""
     for source in (MY_SRC / "icethd.F90", MY_SRC / "icestp.F90"):
