@@ -42,7 +42,7 @@ from legoesm.land.canopy.stability import (
     compute_aerodynamics, sat_specific_humidity,
 )
 from legoesm.land.canopy.solver import (
-    CanopyForcingBundle, solve_canopy_closure, canopy_forward,
+    CanopyForcingBundle, solve_canopy_closure_diag, canopy_forward,
 )
 from legoesm.land.canopy.energy_balance import soil_surface_evap_resistance
 from legoesm.land.surface_scheme.base import SurfaceFluxOutput
@@ -454,7 +454,11 @@ def compute_two_leaf_canopy_fluxes(
         )
 
     def _solve_one_col(x0, bun):
-        return solve_canopy_closure(x0, bun, cc)
+        # Diagnostic entry point: identical solve, plus the terminal residual /
+        # damping / cap-exit flag the caller needs to tell a stalled column from
+        # a nearly-solved one.  Gradients are unchanged (zero cotangent on every
+        # diagnostic output).
+        return solve_canopy_closure_diag(x0, bun, cc)
 
     def _fwd_one_col(xf, bun):
         return canopy_forward(xf, bun, cc.LE_module, cc.stomatal_model,
@@ -484,8 +488,8 @@ def compute_two_leaf_canopy_fluxes(
         bundles_k = _build_bundle(Ts_bc_k)
         _seed_k = jnp.where(jnp.all(jnp.isfinite(x_conv), axis=-1, keepdims=True),
                             jnp.nan_to_num(x_conv), initial_state)
-        x_final, n_iters, converged = jax.vmap(_solve_one_col)(
-            _seed_k, bundles_k)
+        (x_final, n_iters, converged, resid_sq, resid_rel, lam_f,
+         hit_cap) = jax.vmap(_solve_one_col)(_seed_k, bundles_k)
         x_conv = jnp.where(converged[:, None], x_final, x_conv)
         fluxes_per_col = jax.vmap(_fwd_one_col)(x_final, bundles_k)
 
@@ -635,6 +639,9 @@ def compute_two_leaf_canopy_fluxes(
         # consumer reads as "cold start").  A numerical cache only — see the
         # ``canopy_seed`` note above.
         canopy_x=x_conv,
+        canopy_resid_sq=resid_sq,
+        canopy_resid_rel=resid_rel,
+        canopy_hit_cap=hit_cap,
         Tf_Sun=Tf_Sun,
         Tf_Sh=Tf_Sh,
         T_canopy_air=Tc_cvg,

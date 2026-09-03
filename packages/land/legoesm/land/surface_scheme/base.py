@@ -68,6 +68,15 @@ class SurfaceFluxOutput(NamedTuple):
     # seed, and the solve's adjoint returns a zero cotangent for it); None for
     # every scheme that does not run the canopy closure.
     canopy_x: jax.Array | None = None
+    # Canopy solver TERMINAL DIAGNOSTICS (None for every other scheme).  The
+    # solver's own squared residual at exit, that value relative to the seed's
+    # (the ratio the relative convergence gate tests), and 1.0 where the loop
+    # left by the ITERATION CAP rather than the damping ceiling.  These exist
+    # because ``converged`` alone cannot distinguish a stalled column from a
+    # nearly-solved one; non-differentiable, no feedback into the land state.
+    canopy_resid_sq: jax.Array | None = None
+    canopy_resid_rel: jax.Array | None = None
+    canopy_hit_cap: jax.Array | None = None
 
     # ---- Canopy-specific diagnostics (None for SimpleSEB) ----
     Tf_Sun: jax.Array | None = None        # sunlit leaf T [K]
