@@ -131,3 +131,23 @@ row is DEBT and a one-variable oracle-transport arm moves the advection-content
 or final residual at the same scale; **REFUTE** if all informative rows are
 AT-BAR.  The stage-1 structural-zero `zFw` exception does not apply to this
 stage-3 record.  A planted owned-cell perturbation must fail closed.
+
+### Source-boundary correction (preregistered before the replacement run)
+
+The preceding paragraph misidentified the existing record as the transport
+consumed by `tra_adv`. Source inspection shows that record is emitted before
+`tra_adv_trp`, while the live vector-invariant branch recomputes `zFw` inside
+`tra_adv_trp` (`TRA/traadv.F90:138,220-227`) before `stprk3_stg.F90` passes
+the triplet to `tra_adv`. The pre-call `zFw` comparison and its injection arm
+are therefore **UNINFORMATIVE / INVALID FOR OWNERSHIP**; their numerical
+movement will not be cited as campaign evidence.
+
+A distinct WRITE-only MY_SRC record will now capture `zFu/zFv/zFw` after the
+common `tra_adv_trp` boundary and immediately before passive or active tracer
+advection. The ordinary stage, kt=2 state, and restart hashes must remain
+bit-identical. Only this post-call triplet may drive the one-variable
+transport arm. **CONFIRM transport ownership** iff an informative post-call
+row is DEBT and replacement moves the advection-content or final residual at
+the same scale; otherwise report the first surviving operand without an owner
+label. Header, fp64 dtype, registry, finite-mask, and planted-violation checks
+remain mandatory.
