@@ -53,8 +53,9 @@ Which of the three possible mechanisms it is, measured:
   relative, and the same-class volume reshuffle contributes `3.4e-5` of
   fraction -- 280x below the row.  The row is 100% temperature classification.
 * NOT a heat-content or dense-water bias.  The domain volume-weighted mean
-  temperature is identical to `4.1e-13 K`: heat is conserved to roundoff in
-  both models, and there is no cold water left to be deficient in.
+  temperature is identical to `4.1e-13 K` and the cold anomaly's heat deficit
+  `int w (20-T)` to `1.4e-12` relative: heat is conserved to roundoff in both
+  models, and there is no cold water left to be deficient in.
 * NOT bin-edge chatter.  `1.062e10 m3` (3.95% of the slope volume, 532 cells)
   changes class between `L64` and `N2`, with median `|dT| = 0.778 K`, p90
   `2.17 K`, max `6.06 K`, against a median distance to the nearest bin edge of
@@ -114,6 +115,47 @@ And over the first 60 steps, against NEMO's own step entries
 NEMO destroys `3.52e-2 K2` of variance over those 59 steps and legoESM
 destroys the same amount to **1.05e-9 relative**.  There is no resolvable
 per-step mixing-operator gap in the first ten minutes; the 13% gap opens later.
+
+## 2b. The DIRECTION, reconciled: legoESM's plume core stays COLDER
+
+Higher variance at a common mean is ambiguous on its own, so state it in plume
+units.  Write the cold anomaly's first and second moments about the ambient
+20 C, `D = int w (20-T)` and `M2 = int w (20-T)^2`.  `D` is the heat deficit and
+is conserved by advection; at fixed `D`, `D^2 / M2` is the volume the anomaly
+effectively occupies and `M2 / D` its mean amplitude.
+
+| arm | `D` (K m3) | `M2` (K2 m3) | effective volume (1e9 m3) | mean amplitude (K) |
+|---|---:|---:|---:|---:|
+| `N2` | `1.000000000e+11` | `2.026841794e+11` | `49.3378` | `2.026842` |
+| `N4` | `1.000000000e+11` | `2.016751076e+11` | `49.5847` | `2.016751` |
+| `L64` | `1.000000000e+11` | `2.254889254e+11` | `44.3481` | `2.254889` |
+
+CONTROL: `D` agrees between `L64` and `N2` to `1.4e-12` relative (and `N4` to
+`4.6e-13`) -- the anomaly's heat content is identical, so the moments are
+comparable.  **legoESM spreads the SAME cold anomaly over 10.1% LESS volume at
+11.3% LARGER amplitude.**  It dilutes the plume LESS, and `N4` sits on the same
+side of `N2` (0.5%) as `L64` does, 20x nearer.
+
+Where, by temperature band (from the probe's committed 0.05 K domain histogram;
+bin-centre quadrature, so read the STRUCTURE here and the exact moments above):
+
+| band (C) | `N2` volume (1e9 m3) | `L64` volume | `d`volume | `d`M2 (1e9) |
+|---|---:|---:|---:|---:|
+| 12-14 | `0.140` | `0.640` | `+0.500` | `+20.5` |
+| 14-16 | `1.759` | `2.649` | `+0.890` | `+22.0` |
+| 16-18 | `14.578` | `10.670` | `-3.908` | `-23.1` |
+| 18-19 | `21.868` | `19.836` | `-2.032` | `+0.5` |
+| 19-19.5 | `17.209` | `21.860` | `+4.651` | `+2.9` |
+| 19.5-19.9 | `34.521` | `32.322` | `-2.199` | `-0.1` |
+| 19.9-20 | `249.805` | `251.903` | `+2.098` | `+0.0` |
+
+legoESM keeps **4.6x more** water in the coldest band that survives (12-14 C)
+and 1.5x more in 14-16 C, while holding 27% less in the diluted 16-18 C shell
+and `2.1e9 m3` more at near-ambient.  The census's `mixed_12_18` bin LUMPS the
+enlarged cold core with the shrunken diluted shell, and the shell dominates --
+which is why a model that dilutes LESS reads as a DEFICIT on that row.  The
+apparent contradiction between "higher variance" and "less 12-18 C water" is
+this lumping, and it is resolved: both say legoESM's plume is less mixed.
 
 ## 3. Scaling -- the two frozen refute conditions, both MET
 

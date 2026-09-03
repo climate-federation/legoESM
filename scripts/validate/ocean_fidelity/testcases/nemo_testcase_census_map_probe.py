@@ -141,6 +141,15 @@ def arm_state(source: str, fields: dict) -> dict:
     # roundoff (heat is conserved), so the variance is directly comparable.
     domain_mean = float(np.sum(all_w * all_T) / np.sum(all_w))
     domain_variance = float(np.sum(all_w * (all_T - domain_mean) ** 2) / np.sum(all_w))
+    # The cold ANOMALY's first and second moments about the ambient 20 C.
+    # The first (the heat deficit) is conserved by advection and must agree
+    # across arms; at fixed deficit the second says how CONCENTRATED the
+    # anomaly is, and D**2 / M2 is the volume it effectively occupies.  This
+    # is the same information as the variance -- the mean is common -- but in
+    # units a plume argument can be made in.
+    deficit = 20.0 - all_T
+    anomaly_deficit = float(np.sum(all_w * deficit))
+    anomaly_second_moment = float(np.sum(all_w * deficit * deficit))
     fine_bins = np.linspace(10.0, 20.0, 201)
     fine = np.histogram(np.clip(all_T, 10.0, 20.0), bins=fine_bins, weights=all_w)[0]
     row = STATS._section_row(active)
@@ -149,6 +158,14 @@ def arm_state(source: str, fields: dict) -> dict:
         "source": source,
         "census": (absolute / total).tolist(),
         "domain_T_variance_K2": domain_variance,
+        "anomaly_deficit_K_m3": anomaly_deficit,
+        "anomaly_second_moment_K2_m3": anomaly_second_moment,
+        "anomaly_effective_volume_m3": (
+            anomaly_deficit ** 2 / anomaly_second_moment
+            if anomaly_second_moment > 0.0 else 0.0),
+        "anomaly_mean_amplitude_K": (
+            anomaly_second_moment / anomaly_deficit
+            if anomaly_deficit > 0.0 else 0.0),
         "domain_T_fine_histogram_m3": fine.tolist(),
         "domain_T_fine_bins_C": fine_bins.tolist(),
         "bottom_temperature_C": bottom.tolist(),
@@ -237,6 +254,11 @@ def difference_map(left: dict, right: dict, label: str) -> dict:
             left["domain_T_variance_K2"] - right["domain_T_variance_K2"]),
         "domain_T_variance_ratio": (
             left["domain_T_variance_K2"] / right["domain_T_variance_K2"]),
+        "anomaly_deficit_relative_delta": (
+            left["anomaly_deficit_K_m3"] / right["anomaly_deficit_K_m3"] - 1.0),
+        "anomaly_effective_volume_ratio": (
+            left["anomaly_effective_volume_m3"]
+            / right["anomaly_effective_volume_m3"]),
         "domain_class_volume_delta_m3": (
             np.asarray(left["domain_class_volume_m3"])
             - np.asarray(right["domain_class_volume_m3"])
