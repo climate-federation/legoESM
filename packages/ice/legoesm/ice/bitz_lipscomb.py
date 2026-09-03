@@ -342,12 +342,15 @@ def _si3_zdf_bl99_step(
     forcing: SI3SurfaceForcing,
     dt: float,
     constants: IceConstantsConfig,
+    *,
+    _maximum_iterations: int = _MAX_ITERATIONS,
 ) -> SI3ZDFResult:
     """Iterative 3+3-layer BL99/P07 solve for the resolved ORCA1 arm.
 
     The fixed 200-iteration `fori_loop` freezes each column after the same
     ``1e-4 K`` convergence test as NEMO.  A static loop keeps reverse-mode AD
-    available, unlike a data-dependent ``while_loop``.
+    available, unlike a data-dependent ``while_loop``.  The private iteration
+    bound exists only to expose a single Picard iterate to the oracle gate.
     """
 
     e_ice = jnp.asarray(e_ice)
@@ -469,10 +472,10 @@ def _si3_zdf_bl99_step(
         T_s_old,
         qns_initial,
         jnp.zeros_like(h_ice, dtype=bool),
-        jnp.full_like(h_ice, _MAX_ITERATIONS, dtype=jnp.int32),
+        jnp.full_like(h_ice, _maximum_iterations, dtype=jnp.int32),
     )
     Tsu, _, Ti, Ts, qns, _, iterations = jax.lax.fori_loop(
-        0, _MAX_ITERATIONS, body, init
+        0, _maximum_iterations, body, init
     )
     e_i = ice_enthalpy_from_temperature(Ti, S_layers, constants)
     e_s = snow_enthalpy_from_temperature(Ts, constants)

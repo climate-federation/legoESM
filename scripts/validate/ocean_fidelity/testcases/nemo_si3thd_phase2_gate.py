@@ -10,7 +10,6 @@ import struct
 from pathlib import Path
 
 import jax
-import netCDF4
 import numpy as np
 
 BAR = 1.0e-15
@@ -29,6 +28,20 @@ GLOBAL_NAMES = (
     "a_i", "v_i", "v_s", "sv_i", "oa_i", "t_su", "a_ip", "v_ip",
     "v_il", "e_i", "e_s", "szv_i",
 )
+ZDF_INPUT_NAMES = (
+    "qns_ice", "qsr_ice", "dqns_ice", "qtr_ice_top", "t_bottom", "sss",
+    "evaporation", "snow_precipitation", "qprec_ice", "qcn_ice_bottom",
+    "qsb_ice_bottom", "fhld", "qlead",
+)
+ZDF_OPERAND_REGISTRY = {
+    0: ("INIT", 25, "icethd_zdf_bl99.F90:159-230"),
+    1: ("ITER_P07_KAPPA", 20, "icethd_zdf_bl99.F90:261-335"),
+    2: ("ITER_CAP_FLUX", 8, "icethd_zdf_bl99.F90:338-379"),
+    3: ("ITER_MATRIX", 28, "icethd_zdf_bl99.F90:393-514"),
+    4: ("ITER_FORWARD", 14, "icethd_zdf_bl99.F90:516-529"),
+    5: ("ITER_SOLUTION", 9, "icethd_zdf_bl99.F90:531-558"),
+    6: ("ITER_CONVERGENCE", 10, "icethd_zdf_bl99.F90:563-589"),
+}
 
 
 class GateError(RuntimeError):
@@ -114,6 +127,50 @@ def _read_exchange_step(stream, wanted_step: int) -> dict[str, np.ndarray]:
     return out
 
 
+def _read_zdf_input_step(stream, wanted_step: int) -> dict[str, np.ndarray]:
+    require(stream.read(16) == b"NEMO_L3ZIN_001  ", "ZDF-input magic")
+    version, step, category, npti, bits, nval = struct.unpack("=6i", stream.read(24))
+    require(
+        (version, step, category, npti, bits, nval)
+        == (1, wanted_step, 1, 1, 64, len(ZDF_INPUT_NAMES)),
+        "ZDF-input header",
+    )
+    values = np.fromfile(stream, np.float64, nval)
+    require(values.size == nval and np.all(np.isfinite(values)), "bad ZDF-input payload")
+    return {name: values[i:i + 1] for i, name in enumerate(ZDF_INPUT_NAMES)}
+
+
+def _read_zdf_operands(path: Path) -> list[dict[str, object]]:
+    frames: list[dict[str, object]] = []
+    with path.open("rb") as stream:
+        while magic := stream.read(16):
+            require(magic == b"NEMO_L3ZDF_001  ", "ZDF-operand magic")
+            header = struct.unpack("=9i", stream.read(36))
+            version, step, frame, iteration, npti, ni, ns, bits, nval = header
+            require((version, step, npti, ni, ns, bits) == (1, 1, 1, 3, 3, 64),
+                    f"ZDF-operand header {header}")
+            require(frame in ZDF_OPERAND_REGISTRY, f"unregistered ZDF frame {frame}")
+            name, expected_nval, source = ZDF_OPERAND_REGISTRY[frame]
+            require(nval == expected_nval, f"ZDF-operand payload count {header}")
+            values = np.fromfile(stream, np.float64, nval)
+            require(values.size == nval and np.all(np.isfinite(values)),
+                    "bad ZDF-operand payload")
+            frames.append({"frame": frame, "name": name, "iteration": iteration,
+                           "source": source, "values": values})
+    require(len(frames) >= 7 and (len(frames) - 1) % 6 == 0,
+            "incomplete ZDF-operand iteration registry")
+    niter = (len(frames) - 1) // 6
+    expected = [(0, 0)] + [(frame, iteration) for iteration in range(1, niter + 1)
+                           for frame in range(1, 7)]
+    require([(f["frame"], f["iteration"]) for f in frames] == expected,
+            "ZDF-operand frame order/iteration count")
+    convergence = [np.asarray(f["values"]) for f in frames if f["frame"] == 6]
+    require(all(values[8] == 0.0 for values in convergence[:-1])
+            and convergence[-1][8] == 1.0,
+            "ZDF-operand convergence flags")
+    return frames
+
+
 def _center_global(frame: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     nx, ny = map(int, frame["_shape"])
     idx = nx // 2 + nx * (ny // 2)
@@ -133,31 +190,23 @@ def _entry_arrays(frame):
     )
 
 
-def _teos10_freezing_temperature(sss):
-    z = np.sqrt(np.abs(sss) / 35.16504)
-    return (((((1.46873e-3 * z - 9.64972e-3) * z + 2.28348e-2) * z
-               - 3.12775e-2) * z + 2.07679e-2) * z - 5.87701e-2) * sss + 273.15
-
-
-def _forcing(exchange, entry, post_zdf, sf, sss):
+def _forcing(exact):
     import jax.numpy as jnp
     from legoesm.ice.bitz_lipscomb import SI3SurfaceForcing
 
-    # qns_ice is dumped after ZDF.  The Picard update telescopes exactly from
-    # entry to POST_ZDF (`icethd_zdf_bl99.F90:189-194,372-377`).
-    qns_entry = exchange["qns_ice"] - exchange["dqns_ice"] * (
-        post_zdf["t_su"] - entry.T_surface
-    )
     def val(x):
         return jnp.asarray(x, dtype=jnp.float64)
 
-    zeros = np.zeros((1,), np.float64)
-    return SI3SurfaceForcing(
-        val(qns_entry), val(exchange["qsr_ice"]), val(exchange["dqns_ice"]),
-        val(exchange["qtr_ice_top"]), val(_teos10_freezing_temperature(sss)),
-        val(sss), val(exchange["evap_ice"]), val(sf),
-        val(exchange["qprec_ice"]), val(zeros), val(zeros), val(zeros), val(zeros),
+    return SI3SurfaceForcing(*(val(exact[name]) for name in ZDF_INPUT_NAMES))
+
+
+def _reconstructed_forcing(exchange, entry, post_zdf, exact):
+    """Reviewed pre-fix bridge, retained only for the registered owner arm."""
+
+    qns_entry = exchange["qns_ice"] - exchange["dqns_ice"] * (
+        post_zdf["t_su"] - entry.T_surface
     )
+    return _forcing(exact)._replace(qns_ice=qns_entry)
 
 
 def _score(rows, name, oracle, lego, *, plant=False, exact=False):
@@ -209,6 +258,8 @@ def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
         EXCHANGE_STREAM_SHA256,
         FORCING_SHA256,
         THERMO_STREAM_SHA256,
+        ZDF_INPUT_STREAM_SHA256,
+        ZDF_OPERAND_STREAM_SHA256,
         build_c1d_omip_l3_card,
     )
     from legoesm.ice.config import SI3ThermoConfig, validate_si3_thermo_config
@@ -224,19 +275,23 @@ def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
     root = card.oracle_root
     thd_path = root / "oracle_si3_thd_frames.bin"
     xchg_path = root / "oracle_si3_exchange_frames.bin"
+    zin_path = root / "oracle_si3_zdf_inputs.bin"
+    zdf_path = root / "oracle_si3_zdf_operands.bin"
     require(sha256(card.forcing_path) == FORCING_SHA256, "forcing SHA256")
     require(sha256(thd_path) == THERMO_STREAM_SHA256, "thermo stream SHA256")
     require(sha256(xchg_path) == EXCHANGE_STREAM_SHA256, "exchange stream SHA256")
+    require(sha256(zin_path) == ZDF_INPUT_STREAM_SHA256, "ZDF-input stream SHA256")
+    require(sha256(zdf_path) == ZDF_OPERAND_STREAM_SHA256, "ZDF-operand stream SHA256")
+    operand_frames = _read_zdf_operands(zdf_path)
 
     with (
         thd_path.open("rb") as thd,
         xchg_path.open("rb") as xchg,
-        netCDF4.Dataset(card.forcing_path) as era5,
+        zin_path.open("rb") as zin,
     ):
         frames = _read_thd_step(thd, 1)
         exchange = _read_exchange_step(xchg, 1)
-        sf = np.asarray(era5["sf"][0]).reshape(1).astype(np.float64)
-        sss = np.asarray(era5["sss"][0]).reshape(1).astype(np.float64)
+        zdf_input = _read_zdf_input_step(zin, 1)
 
     entry = _entry_arrays(frames[0])
     rows = []
@@ -254,7 +309,7 @@ def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
                plant=plant_geometry and name == "hti", exact=True)
     require(all(r["status"] == "AT-BAR" for r in rows), "geometry/IC gate")
 
-    def compare_step(kt, step_frames, step_exchange, step_sf, step_sss, *, plant):
+    def compare_step(kt, step_frames, step_input, *, plant):
         """Compare one isolated oracle-entry step in registry/write order."""
 
         step_entry = _entry_arrays(step_frames[0])
@@ -286,13 +341,7 @@ def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
         step_entry_jax = jax.tree.map(
             lambda x: jnp.asarray(x, dtype=jnp.float64), step_entry
         )
-        step_forcing = _forcing(
-            step_exchange,
-            step_entry_jax,
-            step_frames[1],
-            step_sf,
-            step_sss,
-        )
+        step_forcing = _forcing(step_input)
         trace = si3_column_step_arrays(
             step_entry_jax,
             step_forcing,
@@ -338,8 +387,9 @@ def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
         return first_step_debt, step_entry_jax, step_forcing
 
     first, entry_jax, forcing = compare_step(
-        1, frames, exchange, sf, sss, plant=plant_stage
+        1, frames, zdf_input, plant=plant_stage
     )
+    owner_entry_jax = entry_jax
     steps_examined = 1
 
     # Continue in time only when the preceding isolated step is entirely at
@@ -349,21 +399,19 @@ def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
         with (
             thd_path.open("rb") as thd,
             xchg_path.open("rb") as xchg,
-            netCDF4.Dataset(card.forcing_path) as era5,
+            zin_path.open("rb") as zin,
         ):
             _read_thd_step(thd, 1)
             _read_exchange_step(xchg, 1)
+            _read_zdf_input_step(zin, 1)
             for kt in range(2, card.nsteps + 1):
                 step_frames = _read_thd_step(thd, kt)
-                step_exchange = _read_exchange_step(xchg, kt)
-                step_sf = np.asarray(era5["sf"][kt - 1]).reshape(1).astype(np.float64)
-                step_sss = np.asarray(era5["sss"][kt - 1]).reshape(1).astype(np.float64)
+                _read_exchange_step(xchg, kt)
+                step_input = _read_zdf_input_step(zin, kt)
                 candidate, candidate_entry, candidate_forcing = compare_step(
                     kt,
                     step_frames,
-                    step_exchange,
-                    step_sf,
-                    step_sss,
+                    step_input,
                     plant=False,
                 )
                 steps_examined = kt
@@ -373,11 +421,56 @@ def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
                     forcing = candidate_forcing
                     break
 
-    hypothesis = (
-        "CONFIRMED"
-        if first is not None and first["name"].startswith("kt1.POST_ZDF.")
-        else "REFUTED"
+    hypothesis = "SUPERSEDED_BY_OWNER_FIX"
+
+    # The first registered operand mismatch in the reviewed bridge is the
+    # entry-time qns scalar.  NEMO updates qns before its final Picard surface
+    # temperature (`icethd_zdf_bl99.F90:372-379,553-558`), so reconstructing
+    # qns from the final POST_ZDF temperature is a time-level error.
+    legacy_forcing = _reconstructed_forcing(
+        exchange, owner_entry_jax, frames[1], zdf_input
     )
+    oracle_qns = np.asarray(operand_frames[0]["values"])[13:14]
+    require(np.array_equal(oracle_qns, zdf_input["qns_ice"]),
+            "INIT qns disagrees with exact ZDF-input stream")
+    legacy_result = _si3_zdf_bl99_step(
+        owner_entry_jax.e_ice, owner_entry_jax.e_snow, owner_entry_jax.S_layers,
+        owner_entry_jax.h_ice, owner_entry_jax.h_snow, owner_entry_jax.T_surface,
+        legacy_forcing, card.dt_seconds, card.config.ice_constants,
+    )
+    arm_forcing = legacy_forcing._replace(qns_ice=jnp.asarray(oracle_qns))
+    arm_result = _si3_zdf_bl99_step(
+        owner_entry_jax.e_ice, owner_entry_jax.e_snow, owner_entry_jax.S_layers,
+        owner_entry_jax.h_ice, owner_entry_jax.h_snow, owner_entry_jax.T_surface,
+        arm_forcing, card.dt_seconds, card.config.ice_constants,
+    )
+    oracle_tsu = np.asarray(frames[1]["t_su"])
+    legacy_tsu_error = float(np.max(np.abs(np.asarray(legacy_result.T_surface) - oracle_tsu)))
+    arm_tsu_error = float(np.max(np.abs(np.asarray(arm_result.T_surface) - oracle_tsu)))
+    owner_factor = legacy_tsu_error / max(arm_tsu_error, np.finfo(np.float64).tiny)
+    require(owner_factor >= 100.0, "qns entry-time owner arm did not confirm")
+
+    oracle_iterations = max(int(frame["iteration"]) for frame in operand_frames)
+    iteration_rows = []
+    for iteration in range(1, oracle_iterations + 1):
+        partial = _si3_zdf_bl99_step(
+            owner_entry_jax.e_ice, owner_entry_jax.e_snow,
+            owner_entry_jax.S_layers, owner_entry_jax.h_ice,
+            owner_entry_jax.h_snow, owner_entry_jax.T_surface,
+            arm_forcing, card.dt_seconds, card.config.ice_constants,
+            _maximum_iterations=iteration,
+        )
+        oracle_solution = np.asarray(next(
+            frame["values"] for frame in operand_frames
+            if frame["frame"] == 5 and frame["iteration"] == iteration
+        ))
+        for name, oracle, lego in (
+            ("t_su", oracle_solution[0:1], partial.T_surface),
+            ("t_s", oracle_solution[1:4][None, :], partial.T_snow),
+            ("t_i", oracle_solution[4:7][None, :], partial.T_ice),
+            ("qns_ice", oracle_solution[8:9], partial.qns_ice),
+        ):
+            _score(iteration_rows, f"iteration{iteration}.{name}", oracle, lego)
 
     # Scale-first one-variable arms through the private stage hook.  Each arm
     # perturbs exactly one input by 1e-6 of its dimensional scale and reports
@@ -444,7 +537,9 @@ def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
         "card": {"name": card.name, "dt_seconds": card.dt_seconds, "nsteps": card.nsteps,
                  "selectors": dict(card.selector_sources)},
         "hashes": {"forcing": sha256(card.forcing_path), "thermo_stream": sha256(thd_path),
-                   "exchange_stream": sha256(xchg_path)},
+                   "exchange_stream": sha256(xchg_path),
+                   "zdf_input_stream": sha256(zin_path),
+                   "zdf_operand_stream": sha256(zdf_path)},
         "frame_registry": {str(i): {"name": n, "time_level": t, "source": s}
                            for i, n, t, s in STAGES},
         "sweep_steps_examined": steps_examined,
@@ -453,16 +548,43 @@ def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
         ),
         "first_divergence": first,
         "preregistered_hypothesis": hypothesis,
-        "owner": (
-            "BL99 snow/surface tridiagonal solve "
-            "(icethd_zdf_bl99.F90:307-590); physical selectors and inputs "
-            "are pinned, but the remaining operation-order discriminator is unresolved"
-        ),
+        "zdf_operand_registry": {
+            str(frame): {"name": name, "time_level": "current selected-category 1D",
+                         "source": source}
+            for frame, (name, _, source) in ZDF_OPERAND_REGISTRY.items()
+        },
+        "zdf_iterations": {
+            "oracle": oracle_iterations,
+            "legoesm": int(np.asarray(arm_result.iterations)[0]),
+            "maximum": 200,
+            "tolerance_K": 1.0e-4,
+            "all_registered_iterate_fields_at_bar": all(
+                row["status"] == "AT-BAR" for row in iteration_rows
+            ),
+            "all_registered_iterate_fields_bit_exact": all(
+                row["absolute_max"] == 0.0 for row in iteration_rows
+            ),
+            "rows": iteration_rows,
+        },
+        "owner": "qns_ice entry time level in the column bridge, before the BL99 solve",
+        "owner_arm": {
+            "variable": "qns_ice_entry",
+            "oracle_scale_W_m-2": max(1.0, float(np.max(np.abs(oracle_qns)))),
+            "input_absolute_error_W_m-2": float(np.max(np.abs(
+                np.asarray(legacy_forcing.qns_ice) - oracle_qns))),
+            "input_normalized_error": float(np.max(np.abs(
+                np.asarray(legacy_forcing.qns_ice) - oracle_qns)))
+                / max(1.0, float(np.max(np.abs(oracle_qns)))),
+            "legacy_POST_ZDF_t_su_absolute_error_K": legacy_tsu_error,
+            "oracle_scalar_arm_POST_ZDF_t_su_absolute_error_K": arm_tsu_error,
+            "improvement_factor": owner_factor,
+            "verdict": "CONFIRMED",
+        },
         "one_variable_arms": arms,
         "rows": rows,
         "unmeasured_beyond_first_divergence": (
-            "No kt>1 trajectory ownership or claim is made after kt=1 "
-            "POST_ZDF debt."
+            "The sweep stops at the first post-fix over-bar registry row; no "
+            "later-step trajectory ownership is claimed."
         ),
     }
 

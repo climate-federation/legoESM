@@ -162,20 +162,24 @@ def gate_module():
     return module
 
 
-def test_gate_finds_preregistered_first_divergence(gate_module) -> None:
+def test_gate_owns_qns_time_level_and_advances_first_divergence(gate_module) -> None:
     result = gate_module.run()
     assert result["status"] == "DEBT"
     assert result["backend"] == "cpu"
     assert result["dtypes"] == ["float64"]
-    assert result["sweep_steps_examined"] == 1
-    assert result["preregistered_hypothesis"] == "CONFIRMED"
-    assert result["first_divergence"]["name"] == "kt1.POST_ZDF.t_su"
+    assert result["sweep_steps_examined"] == 3
+    assert result["preregistered_hypothesis"] == "SUPERSEDED_BY_OWNER_FIX"
+    assert result["first_divergence"]["name"] == "kt3.POST_ZDF.e_i"
     assert result["first_divergence"]["normalized_max_abs"] > 1.0e-15
+    assert result["owner_arm"]["variable"] == "qns_ice_entry"
+    assert result["owner_arm"]["verdict"] == "CONFIRMED"
+    assert result["owner_arm"]["improvement_factor"] >= 100.0
+    assert result["zdf_iterations"]["oracle"] == 2
+    assert result["zdf_iterations"]["legoesm"] == 2
     assert all(
         row["status"] == "AT-BAR"
         for row in result["rows"]
-        if row["name"].startswith("geometry_ic.")
-        or row["name"].startswith("kt1.ENTRY.")
+        if row["name"].startswith(("geometry_ic.", "kt1.", "kt2."))
     )
 
 
@@ -192,6 +196,24 @@ def test_gate_binary_cursor_advances_to_second_step(gate_module) -> None:
             exchange = gate_module._read_exchange_step(xchg, kt)
             assert len(frames) == 8
             assert exchange["qns_ice"].dtype == np.float64
+
+
+def test_zdf_operand_reader_is_complete_and_fails_closed(
+    gate_module, tmp_path: Path
+) -> None:
+    card = build_c1d_omip_l3_card()
+    path = card.oracle_root / "oracle_si3_zdf_operands.bin"
+    frames = gate_module._read_zdf_operands(path)
+    assert [(frame["frame"], frame["iteration"]) for frame in frames] == (
+        [(0, 0)]
+        + [(frame, iteration) for iteration in (1, 2) for frame in range(1, 7)]
+    )
+    planted = tmp_path / "planted_zdf_operands.bin"
+    payload = bytearray(path.read_bytes())
+    payload[0] ^= 1
+    planted.write_bytes(payload)
+    with pytest.raises(gate_module.GateError, match="ZDF-operand magic"):
+        gate_module._read_zdf_operands(planted)
 
 
 @pytest.mark.parametrize(

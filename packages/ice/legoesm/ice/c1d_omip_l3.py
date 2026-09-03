@@ -10,7 +10,9 @@ from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
 
 FORCING_SHA256 = "e5ec49445d2569019c45dec24255b9c7daf050079444b0e6e6d86a5b82317afe"
 THERMO_STREAM_SHA256 = "7fc9df2707a85581075e3c69b26784155151a55640a5693eb32c34fb710ea49b"
-EXCHANGE_STREAM_SHA256 = "998f4790a8c832962ed8437b9b48fc514555d55c8770108889b30636fb968f51"
+EXCHANGE_STREAM_SHA256 = "7f22ca914bc25890c7ccda810553eefae97625e437974c2208399e9afc5b2c50"
+ZDF_INPUT_STREAM_SHA256 = "5522eadce595408b00065fa30d8b41fccb3815bee76d6fbf5ba3adbb2656cb27"
+ZDF_OPERAND_STREAM_SHA256 = "587454974cb07590454d2bb63d745dc73488c220e84785175c9c110d26954632"
 _DOCUMENTED_DURATION_STEPS = 8760  # C1D EXP_SASICE README; 365 days hourly
 
 
@@ -32,7 +34,7 @@ def build_c1d_omip_l3_card(
     ),
     oracle_root: Path = Path(
         "/data/abyssal/dbalwada/nemo-testcases-l3/"
-        "c1d_omip_l3_sasice_scope_gate2"
+        "c1d_omip_l3_sasice_phase2_inputs"
     ),
 ) -> C1DOMIPL3Card:
     """Return the scope-exact 1-hour, one-category SI3 column card."""
@@ -72,5 +74,7 @@ __all__ = (
     "FORCING_SHA256",
     "THERMO_STREAM_SHA256",
     "EXCHANGE_STREAM_SHA256",
+    "ZDF_INPUT_STREAM_SHA256",
+    "ZDF_OPERAND_STREAM_SHA256",
     "build_c1d_omip_l3_card",
 )
