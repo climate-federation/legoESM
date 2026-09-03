@@ -88,7 +88,10 @@ def test_validate_config_accepts_every_valid_eos():
     """Each valid eos literal must pass construction validation — locking the
     validator's set to make_eos_fn's set (no fail-fast/lazy disagreement)."""
     for scheme in VALID_EOS_SCHEMES:
-        cfg = LatLonCGridOceanConfig.from_flat(eos=scheme)
+        cfg = LatLonCGridOceanConfig.from_flat(
+            eos=scheme,
+            eos_depth="geometric" if scheme == "nemo_teos10" else "insitu",
+        )
         LatLonCGridOceanModel._validate_config(cfg)  # must not raise
 
 

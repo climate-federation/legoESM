@@ -6,6 +6,9 @@ independent NumPy transcription of NEMO's ``eos_insitu`` Horner form, the
 independent UNESCO surface anchor, T/S monotonicity, an at-depth regression
 pin, and finite AD gradients.
 """
+import hashlib
+import struct
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -15,6 +18,7 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm.ocean.eos import (
     _ROQUET_EOS80,
+    _ROQUET_TEOS10,
     make_eos_fn,
     nemo_roquet_eos,
     rho_0,
@@ -125,3 +129,38 @@ def test_make_eos_fn_dispatch():
     assert 1015.0 < rho < 1055.0
     with pytest.raises(ValueError):
         make_eos_fn(eos="nemo_eos80_typo")
+
+
+def test_nemo_teos10_dispatch_is_the_canonical_roquet_polynomial():
+    """The selectable phase-3 option must not route through Veros GSW."""
+    rho_ref = 1026.0
+    T = jnp.asarray([-1.0, 10.0, 25.0], dtype=jnp.float64)
+    S = jnp.asarray([34.0, 35.0, 37.0], dtype=jnp.float64)
+    depth = jnp.asarray([0.0, 500.0, 4000.0], dtype=jnp.float64)
+    pressure = rho_ref * constants.g * depth
+    got = make_eos_fn("nemo_teos10", rho0=rho_ref)(T, S, pressure)
+    expected = nemo_roquet_eos(
+        T, S, pressure, coeffs=_ROQUET_TEOS10, rho0=rho_ref
+    )
+    np.testing.assert_array_equal(np.asarray(got), np.asarray(expected))
+
+
+def test_nemo_teos10_density_coefficient_table_has_ci_pin():
+    """Pin all 52 EOS### values without requiring a local NEMO checkout."""
+    density = {k: float(v) for k, v in _ROQUET_TEOS10.items()
+               if k.startswith("EOS")}
+    assert len(density) == 52
+
+    def digest(values):
+        hashed = hashlib.sha256()
+        for name, value in sorted(values.items()):
+            hashed.update(name.encode("ascii"))
+            hashed.update(b"\0")
+            hashed.update(struct.pack(">d", value))
+        return hashed.hexdigest()
+
+    expected = "dfb7fe0df632023d5f7dec65221cd2f0733cf4d80312494120384ae94e756239"
+    assert digest(density) == expected
+    planted = dict(density)
+    planted["EOS000"] += 1.0e-11
+    assert digest(planted) != expected

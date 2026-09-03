@@ -131,6 +131,7 @@ from legoesm.ocean.vertical import (
     flux_form_vertical_momentum_advection as _flux_form_vertical_momentum_advection,
     flux_form_vertical_momentum_advection_centered as _flux_form_vertical_momentum_advection_centered,
     nemo_advective_vertical_momentum_advection as _nemo_advective_vertical_momentum_advection,
+    nemo_up3_vertical_momentum_advection as _nemo_up3_vertical_momentum_advection,
     compute_centroid_depth,
 )
 
@@ -179,10 +180,12 @@ VALID_MOMENTUM_FLUX_SCHEME = frozenset({"upwind", "centered", "upwind3"})
 #     every interior level — the #1226 stage-chain audit measured this as
 #     the WHOLE dyn_zad mismatch (predicted-vs-observed residual corr
 #     -0.9992, ratio 0.998).  See nemo_advective_vertical_momentum_advection.
+#   "nemo_up3" — the live flux-form ln_dynadv_up3 vertical flux from
+#     dynadv_up3.F90:239-365; UP3 correction on full velocity.
 # The WENO momentum paths (momentum_advection in {weno5,weno7}) own their own
 # vertical reconstruction and ignore this field.
 VALID_VERTICAL_MOMENTUM_SCHEME = frozenset(
-    {"upwind_perturbation", "centered_full", "nemo_advective"}
+    {"upwind_perturbation", "centered_full", "nemo_advective", "nemo_up3"}
 )
 # Lateral (harmonic) momentum-viscosity operator form (config.lateral_viscosity_operator):
 # the default VECTOR Laplacian grad(div)−k×grad(curl), or Veros's component-wise
@@ -1848,8 +1851,9 @@ def _bc_ke_and_pressure_gradients(
             dp_dx = dp_dx_smc.astype(dp_dx.dtype)
             dp_dy = dp_dy_smc.astype(dp_dy.dtype)
         elif pgf_scheme == "nemo_sco":
-            # NEMO ``hpg_sco`` (dynhpg.F90 5.0.1:340-390, the DINO namdyn_hpg
-            # selection) transcribed for the full-step staircase under qco.
+            # NEMO ``hpg_sco`` (NEMO 5.0.2 dynhpg.F90:340-390; selected by
+            # ln_hpg_sco through dynhpg.F90:117-123, distinct from hpg_djc)
+            # transcribed for the full-step staircase under qco.
             # Conventions: depth positive DOWN, ``p' = +g·∫ρ' dz``; the u-trend
             # applied downstream is ``-(1/ρ0)·dp_dx`` (KE_PGF assembly), so
             # NEMO's trend = zhpi + zuap maps to
@@ -1883,11 +1887,13 @@ def _bc_ke_and_pressure_gradients(
                     "O(gdept−z_mid) spurious rest-η PGF at steps.")
             # Same ladder selection as the p' quadrature in
             # _bc_geometry_and_density (exact NEMO gdept_1d when carried).
-            t_depth = (
-                jnp.abs(z_coord.z_full_ref)
-                if getattr(z_coord, "t_depth_ref", None) is None
-                else jnp.asarray(z_coord.t_depth_ref)
-            )
+            if getattr(z_coord, "t_depth_ref", None) is None:
+                raise ValueError(
+                    'pgf_scheme="nemo_sco" requires an explicit '
+                    "t_depth_ref; an arithmetic-midpoint fallback does not "
+                    "reproduce NEMO gdept on a stretched external grid"
+                )
+            t_depth = jnp.asarray(z_coord.t_depth_ref)
             # r3t = ssh/ht_0 with ht_0 = Σ_k e3t_0·tmask (the staircase
             # depth).  Land columns (ht_0 = 0): eta_safe is already masked
             # to 0 there; the floor only guards the division (faces touching
@@ -2815,6 +2821,20 @@ def _bc_vertical_momentum_advection(
                 diag_vertadv_u = _flux_form_vertical_momentum_advection_centered(
                     u_full, w_u, h_u_old, face_active=u_face_active)
                 diag_vertadv_v = _flux_form_vertical_momentum_advection_centered(
+                    v_full, w_v, h_v_old, face_active=v_face_active)
+            elif _vert_mom_scheme == "nemo_up3":
+                # Live NEMO flux-form arm: dynadv.F90:87-89 dispatches
+                # ln_dynadv_up3 to dynadv_up3; its vertical UP3 flux is
+                # dynadv_up3.F90:239-365. It advects FULL velocity.
+                if u_full is None or v_full is None:
+                    raise ValueError(
+                        "vertical_momentum_scheme='nemo_up3' requires "
+                        "u_full and v_full")
+                u_face_active = jnp.broadcast_to(u_mask_3d, u_full.shape)
+                v_face_active = jnp.broadcast_to(v_mask_3d, v_full.shape)
+                diag_vertadv_u = _nemo_up3_vertical_momentum_advection(
+                    u_full, w_u, h_u_old, face_active=u_face_active)
+                diag_vertadv_v = _nemo_up3_vertical_momentum_advection(
                     v_full, w_v, h_v_old, face_active=v_face_active)
             elif _vert_mom_scheme == "nemo_advective":
                 # NEMO-faithful (#1226): dynzad.F90's ADVECTIVE form w*du/dz
@@ -4122,6 +4142,7 @@ def _up3_reconstruct(far_pos, adv_pos, adv_neg, far_neg, transport):
 
 def _bc_horizontal_momentum_advection_flux_form(
     du_dt, dv_dt, u, v, h_u, h_v, u_mask_3d, v_mask_3d, mask, grid, config,
+    transport_velocity=None,
 ):
     """Flux-form horizontal momentum advection (alternative to the
     vector-invariant PV flux, `_bc_pv_flux`) — the Veros/MOM6/MITgcm form
@@ -4157,7 +4178,9 @@ def _bc_horizontal_momentum_advection_flux_form(
         if scheme == "centered":
             return 0.5 * (adv_pos + adv_neg)
         if scheme == "upwind3":
-            # 3rd-order upwind-biased (NEMO/ROMS UP3); see _up3_reconstruct.
+            # NEMO stprk3_stg.F90:316,326-331 passes Kmm as BOTH dyn_adv
+            # velocity levels, so dynadv_up3.F90:141-191 evaluates the face
+            # value and curvature from the same live WS-stage velocity.
             return _up3_reconstruct(far_pos, adv_pos, adv_neg, far_neg, transport)
         # 1st-order upwind (default).
         return jnp.where(transport > 0.0, adv_pos, adv_neg)
@@ -4170,9 +4193,15 @@ def _bc_horizontal_momentum_advection_flux_form(
     face_dx_v = flux_form_vface_zonal_length(grid)[:, jnp.newaxis, jnp.newaxis]  # (n_lat+1,1,1)
     area = grid.area[..., jnp.newaxis]                            # (n_lat,n_lon,1)
 
-    # Volume transports through faces [m^3/s] (h-weighted velocity x face length).
-    Q_u = h_u * u * u_mask_3d * dy_u            # (n_lat, n_lon+1, nlev)
-    Q_v = h_v * v * v_mask_3d * face_dx_v       # (n_lat+1, n_lon, nlev)
+    # Volume transports through faces [m^3/s] (h-weighted velocity x face
+    # length).  NEMO WS-RK3 supplies zFu/zFv separately: stprk3_stg.F90:
+    # 257-274 replaces the Kmm velocity's barotropic mean by un_adv/hu before
+    # dynadv_up3 consumes the transport at :326-331.  The advected face value
+    # remains the unmodified Kmm ``u``/``v`` argument.
+    transport_u, transport_v = (
+        (u, v) if transport_velocity is None else transport_velocity)
+    Q_u = h_u * transport_u * u_mask_3d * dy_u   # (n_lat, n_lon+1, nlev)
+    Q_v = h_v * transport_v * v_mask_3d * face_dx_v  # (n_lat+1,n_lon,nlev)
 
     def _upwind(adv_pos, adv_neg, transport):
         # Upstream value: take adv_pos where transport > 0 (flow from that side).
@@ -4187,9 +4216,10 @@ def _bc_horizontal_momentum_advection_flux_form(
     # the far cells from the DISTINCT core u[:, :-1] (faces 0..n_lon-1) via
     # rolls so the reconstruction does not depend on the periodic wrap column
     # u[:, n_lon] (matches the wrap-robust style of the v-momentum x-part).
-    u_c = _recon(u[:, :-1, :], u[:, 1:, :], Qx_c,
-                 far_pos=jnp.roll(u[:, :-1, :], 1, axis=1),       # face c-1
-                 far_neg=jnp.roll(u[:, :-1, :], -2, axis=1))      # face c+2; west when Qx>0
+    u_core = u[:, :-1, :]
+    u_c = _recon(u_core, u[:, 1:, :], Qx_c,
+                 far_pos=jnp.roll(u_core, 1, axis=1),       # face c-1
+                 far_neg=jnp.roll(u_core, -2, axis=1))      # face c+2; west when Qx>0
     Fx_uu = Qx_c * u_c                                           # (n_lat,n_lon,nlev)
     # divergence to u-points (periodic in lon): flux[centre J] - flux[centre J-1].
     _dx = Fx_uu - jnp.roll(Fx_uu, 1, axis=1)
@@ -4288,6 +4318,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     ldf_state=None,
     zad_continuity_dt=None,
     zad_freshwater_eta_tendency=None,
+    momentum_flux_transport_velocity=None,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -4483,6 +4514,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v = (
             _bc_horizontal_momentum_advection_flux_form(
                 du_dt, dv_dt, u, v, h_u, h_v, u_mask_3d, v_mask_3d, mask, grid, config,
+                transport_velocity=momentum_flux_transport_velocity,
             )
         )
     else:

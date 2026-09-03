@@ -162,6 +162,41 @@ def compute_nemo_boxcar_centred_weights(
     )
 
 
+def compute_nemo_boxcar_forward_weights(
+    n_substeps: int,
+    dtype: jnp.dtype,
+):
+    """NEMO forward ``nn_bt_flt=1`` primary/secondary weights.
+
+    This is the live OVERFLOW testcase arm: ``ln_bt_fw=T`` makes
+    ``jic=nn_e`` and ``ts_wgt`` CASE(1) selects exactly those one-based
+    substeps satisfying ``abs(jn-jic)/nn_e < 1/2``
+    (NEMO 5.0.2 ``dynspg_ts.F90:1058-1080``).  The final in-window index is
+    also NEMO's loop bound.  Tail-sum transport weights implement
+    ``ts_wgt:1097-1102`` and are normalized by their sum.
+    """
+    import numpy as _np
+    if n_substeps < 2:
+        raise ValueError(
+            f"nemo_boxcar_forward needs n_substeps >= 2, got {n_substeps!r}")
+    jn = _np.arange(1, 3 * n_substeps + 1, dtype=_np.float64)
+    primary = (
+        _np.abs(jn - n_substeps) / n_substeps < 0.5
+    ).astype(_np.float64)
+    n_loop = int(_np.max(_np.where(primary > 0.0)[0]) + 1)
+    primary = primary[:n_loop]
+    total = primary.sum(dtype=_np.float64)
+    averaged = primary / total
+    secondary = _np.cumsum(primary[::-1], dtype=_np.float64)[::-1]
+    secondary = secondary / secondary.sum(dtype=_np.float64)
+    return (
+        jnp.asarray(averaged, dtype=dtype),
+        jnp.asarray(1.0, dtype=dtype),
+        jnp.asarray(secondary, dtype=dtype),
+        n_loop,
+    )
+
+
 def compute_nemo_boxcar_raw_transport_weights(
     n_substeps: int,
     dtype: jnp.dtype,
@@ -204,6 +239,31 @@ def compute_nemo_boxcar_raw_transport_weights(
     )
 
 
+def compute_nemo_forward_raw_transport_weights(
+    n_substeps: int, dtype: jnp.dtype,
+):
+    """Raw ``wgtbtp2`` for ln_bt_fw=T, nn_bt_flt=1.
+
+    Literal transcription of ``ts_wgt`` primary CASE(1), its tail sum at
+    dynspg_ts.F90:1097-1102, and the single post-accumulation divisor at
+    :999-1000.
+    """
+    import numpy as _np
+    if n_substeps < 2:
+        raise ValueError(
+            f"nemo_boxcar_forward needs n_substeps >= 2, got {n_substeps!r}")
+    jn = _np.arange(1, 3 * n_substeps + 1, dtype=_np.float64)
+    primary = (
+        _np.abs(jn - n_substeps) / n_substeps < 0.5
+    ).astype(_np.float64)
+    n_loop = int(_np.max(_np.where(primary > 0.0)[0]) + 1)
+    secondary = _np.cumsum(
+        primary[:n_loop][::-1], dtype=_np.float64)[::-1]
+    return (jnp.asarray(secondary, dtype=dtype),
+            jnp.asarray(secondary.sum(dtype=_np.float64), dtype=dtype),
+            n_loop)
+
+
 def nemo_auto_substeps(
     dt: float,
     H_max_wet: float,
@@ -222,10 +282,21 @@ def nemo_auto_substeps(
     can only increase the substep count).
     """
     import math as _math
-    zcmax = _math.sqrt(g * max(H_max_wet, 0.0)
-                       * inv_e1_sq_plus_inv_e2_sq_max)
+    if not all(_math.isfinite(value) for value in (
+        dt, H_max_wet, inv_e1_sq_plus_inv_e2_sq_max, g, cmax
+    )):
+        raise ValueError("nemo_auto_substeps inputs must all be finite.")
+    if dt <= 0.0 or g <= 0.0 or cmax <= 0.0:
+        raise ValueError(
+            "nemo_auto_substeps requires dt, g, and cmax to be positive."
+        )
+    if H_max_wet < 0.0 or inv_e1_sq_plus_inv_e2_sq_max < 0.0:
+        raise ValueError(
+            "nemo_auto_substeps requires non-negative depth and metric inputs."
+        )
+    zcmax = _math.sqrt(g * H_max_wet * inv_e1_sq_plus_inv_e2_sq_max)
     n = int(_math.ceil(dt / cmax * zcmax))
-    if n < 2:
+    if n < 1:
         raise ValueError(
             f"nemo_auto_substeps computed n={n!r} (dt={dt}, cmax={cmax}) — "
             "check the metric/H inputs.")

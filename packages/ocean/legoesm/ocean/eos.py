@@ -940,8 +940,9 @@ def nemo_bn2_live_ladders(
 # above, and from ``veros_gsw`` (a DIFFERENT TEOS-10 fit, the GSW 48-term
 # rational polynomial).  Transcribed verbatim from NEMO 5.0.2
 # ``src/OCE/TRA/eosbn2.F90``: normalization :2117-2120, coefficients :2122-2173,
-# Horner evaluation :260-288.  The TEOS-10 coefficient set (eosbn2.F90:1926-...,
-# Conservative Temperature + Absolute Salinity) is a separate follow-up.
+# Horner evaluation :260-288.  The selectable ``nemo_teos10`` branch below uses
+# the companion TEOS-10 coefficient set (eosbn2.F90:1920-2108, Conservative
+# Temperature + Absolute Salinity) with this same evaluator.
 # ==============================================================================
 _ROQUET_EOS80 = {
     # normalization
@@ -1060,7 +1061,7 @@ def nemo_roquet_eos(
 # ``ln_eos80`` commented out, and NEMO then sets ``l_useCT = .TRUE.``
 # ("model temperature is Conservative temperature", eosbn2.F90:1924).
 #
-# Transcribed MECHANICALLY from NEMO 5.0.1 ``src/OCE/TRA/eosbn2.F90`` lines
+# Transcribed MECHANICALLY from NEMO 5.0.2 ``src/OCE/TRA/eosbn2.F90`` lines
 # 1926-2110, not by eye: a parser read the Fortran assignments and emitted this
 # dict, and the SAME parser was first run over the EOS-80 block (:2111-2300)
 # and required to reproduce every one of the 52 coefficients in
@@ -2405,7 +2406,7 @@ def veros_gsw_int_drhodTS_dynamic_enthalpy(
 # by both make_eos_fn (unknown-scheme ValueError) and config validators
 # (fail-fast at construction) so the valid set is never duplicated.
 VALID_EOS_SCHEMES = frozenset(
-    {"wright", "linear", "nemo_seos", "nemo_eos80", "unesco80",
+    {"wright", "linear", "nemo_seos", "nemo_eos80", "nemo_teos10", "unesco80",
      "veros_nonlin2", "veros_nonlin3", "veros_gsw"}
 )
 
@@ -2442,7 +2443,8 @@ def make_eos_fn(eos="wright", eos_linear=None,
         ``"wright"`` (default, Wright 1997), ``"linear"``,
         ``"nemo_seos"`` (NEMO simplified EOS, Roquet et al. 2015 —
         the DINO oracle EOS, defaults to the Kamm et al. 2025
-        coefficients), or
+        coefficients), ``"nemo_eos80"`` or ``"nemo_teos10"`` (NEMO's full
+        Roquet polynomial with the corresponding source coefficient set), or
         ``"unesco80"`` (UNESCO 1980 polynomial — close approximation
         to Veros's ``eq_of_state_type=3`` JM95 form, within ~0.001 kg/m³
         at typical ocean T/S; bit-exact Veros parity requires reading
@@ -2458,7 +2460,8 @@ def make_eos_fn(eos="wright", eos_linear=None,
         is ``"nemo_seos"``.  If ``None``, the DINO defaults are used.
     rho0 : float
         Boussinesq reference density [kg/m^3] for the depth reconstruction
-        ``zh = (p/(rho0*g))*r1_Z0`` in the ``"nemo_eos80"`` polynomial.
+        ``zh = (p/(rho0*g))*r1_Z0`` in the ``"nemo_eos80"`` and
+        ``"nemo_teos10"`` polynomials.
         Defaults to the module ``rho_0`` (1025) so the default call is
         BYTE-IDENTICAL; pass the config ``rho_0`` (e.g. NEMO's 1026) so it
         stays consistent with the pressure fed to the EOS — required for the
@@ -2501,6 +2504,12 @@ def make_eos_fn(eos="wright", eos_linear=None,
         def _nemo_eos80(T, S, p):
             return nemo_roquet_eos(T, S, p, coeffs=_ROQUET_EOS80, rho0=rho0)
         return _eos_compute_dtype_adapter(_nemo_eos80)
+    elif eos == "nemo_teos10":
+        # NEMO 5.0.2 eosbn2.F90:1920-2108 coefficient selection and :260-288
+        # Horner association. Fixed source coefficients; no bespoke config.
+        def _nemo_teos10(T, S, p):
+            return nemo_roquet_eos(T, S, p, coeffs=_ROQUET_TEOS10, rho0=rho0)
+        return _eos_compute_dtype_adapter(_nemo_teos10)
     elif eos == "unesco80":
         return _eos_compute_dtype_adapter(unesco80_eos)
     elif eos == "veros_nonlin2":
