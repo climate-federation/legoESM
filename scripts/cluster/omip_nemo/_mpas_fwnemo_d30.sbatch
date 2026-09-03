@@ -36,11 +36,18 @@
 # constant-S_ref term and required measurement before any default flip.
 #
 # PRE-REGISTERED, day 15 and day 30 vs the unified arm's matched snapshots:
-# SCOPE: only --freshwater-salinity local is exercised here.  The
-# real_freshwater closure is REFUSED by the driver alongside --sss-restore
-# (the restoring is a direct salinity tendency that the closure's absent
-# virtual-salt term would contradict); routing restoring as water_flux to
-# satisfy it is a separate config choice and is NOT taken unasked.
+# SCOPE (user-approved 2026-09-03, "full NEMO stack"): the three flags the
+# driver requires TOGETHER -- real_freshwater closure, restoring routed as a
+# WATER flux, live_s normalization.  Read off the oracle, not inferred:
+# ORCA1 namelist_cfg nn_sssr=2 is documented in sbcssr.F90:127 as a "volume
+# flux (emp) and associated heat flux", i.e. NEMO restores with water, not
+# with a direct salinity tendency as our default does.
+# NOT changed: global freshwater normalization stays ON.  ORCA1 runs
+# nn_fwb=1, so a global budget correction is what the oracle does too;
+# --no-normalize-freshwater would be a deviation, not a fix.
+# NOT passed: --freshwater-salinity local is moot here -- real_freshwater
+# drops the virtual-salt term entirely, so dilution is by local salinity
+# through the volume channel by construction.
 #
 #   CONFIRM (local-salinity adopted for production): zero clamped cells at day
 #     30, tropical SSS rmse no worse than the unified arm's 0.540 at day 30,
@@ -79,7 +86,8 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid mpas \
   --isf --isf-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/runoff-icb_DaiTrenberth_Depoorter.nc \
   --iwm --iwm-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/zdfiwm_forcing_TRA.nc \
   --bbl-adv --years 0.0822 --snapshot-every-days 15 \
-  --freshwater-salinity local \
+  --freshwater-closure real_freshwater --sss-restore-channel water_flux \
+  --sss-restore-normalization live_s \
   --diag-every-days 5 --tracer-advection superbee --runoff-depth-nemo-ini \
   --river-mouth-restoring-gate --bottom-drag-scheme nemo_quadratic \
   --ice-ocean-heat-coeff 70 \
