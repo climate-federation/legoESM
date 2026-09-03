@@ -20,18 +20,21 @@ References
 
 from __future__ import annotations
 
+from functools import partial
+
 import jax
 import jax.numpy as jnp
 
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
 
 
-@jax.custom_vjp
+@partial(jax.custom_vjp, nondiff_argnums=(4,))
 def thomas_solve(
     a: jax.Array,
     b: jax.Array,
     c: jax.Array,
     d: jax.Array,
+    operation_order: str = "normalised",
 ) -> jax.Array:
     """Solve a tridiagonal system via the Thomas algorithm.
 
@@ -78,7 +81,7 @@ def thomas_solve(
       * Higher-order reverse mode recurses through this same rule (the bwd's
         ``λ`` solve uses the wrapper), so grad-of-grad stays clamp-protected too.
     """
-    return _thomas_solve_impl(a, b, c, d)
+    return _thomas_solve_impl(a, b, c, d, operation_order)
 
 
 def _thomas_solve_impl(
@@ -86,6 +89,7 @@ def _thomas_solve_impl(
     b: jax.Array,
     c: jax.Array,
     d: jax.Array,
+    operation_order: str = "normalised",
 ) -> jax.Array:
     """Raw Thomas forward sweep (the primal computation; see ``thomas_solve``)."""
     n = b.shape[-1]
@@ -104,6 +108,46 @@ def _thomas_solve_impl(
     b = jnp.asarray(b, work_dtype)
     c = jnp.asarray(c, work_dtype)
     d = jnp.asarray(d, work_dtype)
+
+    if operation_order == "nemo_unnormalised":
+        diagonal = b
+        rhs = d
+
+        def unnormalised_forward(k, carry):
+            diagonal_k, rhs_k = carry
+            previous = diagonal_k[..., k - 1]
+            diagonal_k = diagonal_k.at[..., k].set(
+                diagonal_k[..., k]
+                - (a[..., k] * c[..., k - 1]) / previous
+            )
+            rhs_k = rhs_k.at[..., k].set(
+                rhs_k[..., k]
+                - (a[..., k] * rhs_k[..., k - 1]) / previous
+            )
+            return diagonal_k, rhs_k
+
+        diagonal, rhs = jax.lax.fori_loop(
+            1, n, unnormalised_forward, (diagonal, rhs)
+        )
+        solution = jnp.zeros_like(rhs)
+        solution = solution.at[..., -1].set(
+            rhs[..., -1] / diagonal[..., -1]
+        )
+
+        def unnormalised_backward(reverse_k, current):
+            k = n - 2 - reverse_k
+            return current.at[..., k].set(
+                (rhs[..., k] - c[..., k] * current[..., k + 1])
+                / diagonal[..., k]
+            )
+
+        solution = jax.lax.fori_loop(
+            0, n - 1, unnormalised_backward, solution
+        )
+        return jax.lax.convert_element_type(solution, out_dtype)
+
+    if operation_order != "normalised":
+        raise ValueError(f"unknown Thomas operation order {operation_order!r}")
 
     # Initialize: for k=0, c_star = c[0]/b[0], d_star = d[0]/b[0]
     c0_star = c[..., 0] / (b[..., 0] + _TINY)
@@ -161,12 +205,12 @@ def _thomas_solve_impl(
     return jax.lax.convert_element_type(x, out_dtype)
 
 
-def _thomas_solve_fwd(a, b, c, d):
-    x = _thomas_solve_impl(a, b, c, d)
+def _thomas_solve_fwd(a, b, c, d, operation_order):
+    x = _thomas_solve_impl(a, b, c, d, operation_order)
     return x, (a, b, c, x)
 
 
-def _thomas_solve_bwd(res, x_bar):
+def _thomas_solve_bwd(operation_order, res, x_bar):
     """Adjoint of ``A x = d`` (A tridiagonal): d̄ = A⁻ᵀ x̄ =: λ, and the band
     cotangents from ``x = A⁻¹ d`` ⇒ Ā = -λ xᵀ restricted to the three bands:
     ā[k] = -λ[k] x[k-1], b̄[k] = -λ[k] x[k], c̄[k] = -λ[k] x[k+1]."""
@@ -181,7 +225,7 @@ def _thomas_solve_bwd(res, x_bar):
     zc = jnp.zeros_like(cw[..., :1])
     aT = jnp.concatenate([zc, cw[..., :-1]], axis=-1)
     cT = jnp.concatenate([aw[..., 1:], jnp.zeros_like(aw[..., :1])], axis=-1)
-    lam = thomas_solve(aT, bw, cT, xbar)
+    lam = thomas_solve(aT, bw, cT, xbar, operation_order)
 
     x_km1 = jnp.concatenate([jnp.zeros_like(xw[..., :1]), xw[..., :-1]], axis=-1)
     x_kp1 = jnp.concatenate([xw[..., 1:], jnp.zeros_like(xw[..., :1])], axis=-1)

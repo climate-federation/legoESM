@@ -27,6 +27,7 @@ from legoesm.ice.constants_config import (
 )
 from legoesm.ice.scm import IceColumnModel
 from legoesm.ice.snow import snow_ice_flooding
+from legoesm.timestepping.tridiagonal import thomas_solve
 
 set_policy(PrecisionPolicy.fp64())
 
@@ -149,6 +150,23 @@ def test_zdf_is_eager_jit_and_reverse_mode_safe() -> None:
     assert eager.dtype == jnp.float64
     assert bool(jnp.all(jnp.isfinite(eager)))
     assert bool(jnp.isfinite(gradient))
+
+
+def test_shared_nemo_thomas_mode_is_bit_exact_with_private_solver() -> None:
+    """Pre-deletion proof that the central solver preserves SI3's operation order."""
+
+    from legoesm.ice.bitz_lipscomb import _nemo_thomas_solve
+
+    rng = np.random.default_rng(1699)
+    a = jnp.asarray(rng.uniform(-0.2, 0.0, (4, 7)), dtype=jnp.float64)
+    b = jnp.asarray(rng.uniform(2.0, 3.0, (4, 7)), dtype=jnp.float64)
+    c = jnp.asarray(rng.uniform(-0.2, 0.0, (4, 7)), dtype=jnp.float64)
+    d = jnp.asarray(rng.uniform(250.0, 275.0, (4, 7)), dtype=jnp.float64)
+    a = a.at[..., 0].set(0.0)
+    c = c.at[..., -1].set(0.0)
+    private = _nemo_thomas_solve(a, b, c, d)
+    shared = thomas_solve(a, b, c, d, "nemo_unnormalised")
+    np.testing.assert_array_equal(np.asarray(shared), np.asarray(private))
 
 
 def test_existing_column_driver_dispatches_selected_si3() -> None:
