@@ -19,6 +19,12 @@ scale `279433808.11424434 J m-3`, normalized error
 accepted claim.  The ordinary CLI therefore exits 1 after writing its complete
 JSON result; a scientific debt is not a green gate.
 
+### Coupled-rung coverage debt
+
+| coupled component | status | reason |
+|---|---|---|
+| NEMO bulk-flux computation (`sbcblk`) | **DEBT / NOT CERTIFIED BY THIS RUNG** | The isolated legoESM column consumes NEMO's dumped entry `qns_ice` and `dqns_ice`.  It therefore tests SI3 thermodynamics downstream of the bulk-flux boundary, but does not independently recompute or certify NEMO's bulk fluxes.  The upstream path is `sbcblk.F90:1273,1480-1491` to `icestp.F90:201,206`. |
+
 All comparisons ran on CPU after `set_policy(PrecisionPolicy.fp64())`.
 Storage, compute, accumulation, and control policy dtypes printed `float64`;
 every compared legoESM array printed `float64`.
@@ -334,5 +340,10 @@ module remains as a compatibility shim so existing imports are not broken.
   owner; here the confirmed owner is instead the card's time-level bridge.
 - ASKED — stop the post-fix sweep at the next over-bar frame and make no later
   trajectory claim.
+- ASKED — move the accepted oracle root from `c1d_omip_l3_sasice_scope_gate2`
+  to `c1d_omip_l3_sasice_phase2_inputs`; `namelist_cfg` and
+  `namelist_ice_cfg` are byte-identical across the two roots (respectively
+  SHA-256 `6151c0fdd2431d07c7897d5852846a620edd58c55255f11b7fb3569803b5342c`
+  and `da7b4fc5865edf6a6a912d6316a51f6b845aaf7e8b87e9da121c6f0a46278033`).
 - ASKED — do not push.
 - UNASKED — none.
