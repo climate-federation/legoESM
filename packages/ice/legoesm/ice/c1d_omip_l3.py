@@ -1,0 +1,76 @@
+"""Immutable legoESM column card for the NEMO C1D_OMIP_L3 oracle."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import NamedTuple
+
+from legoesm.ice.config import SeaIceConfig, validate_si3_thermo_config
+from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
+
+FORCING_SHA256 = "e5ec49445d2569019c45dec24255b9c7daf050079444b0e6e6d86a5b82317afe"
+THERMO_STREAM_SHA256 = "7fc9df2707a85581075e3c69b26784155151a55640a5693eb32c34fb710ea49b"
+EXCHANGE_STREAM_SHA256 = "998f4790a8c832962ed8437b9b48fc514555d55c8770108889b30636fb968f51"
+_DOCUMENTED_DURATION_STEPS = 8760  # C1D EXP_SASICE README; 365 days hourly
+
+
+class C1DOMIPL3Card(NamedTuple):
+    name: str
+    dt_seconds: float
+    nsteps: int
+    forcing_path: Path
+    oracle_root: Path
+    config: SeaIceConfig
+    selector_sources: tuple[tuple[str, str], ...]
+
+
+def build_c1d_omip_l3_card(
+    *,
+    forcing_path: Path = Path(
+        "/data/abyssal/dbalwada/nemo-inputs/C1D_v5.0.0/C1D_v5.0.0/"
+        "ERA5_NorthGreenland_surface_84N_-36E_1h_y2018.nc"
+    ),
+    oracle_root: Path = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l3/"
+        "c1d_omip_l3_sasice_scope_gate2"
+    ),
+) -> C1DOMIPL3Card:
+    """Return the scope-exact 1-hour, one-category SI3 column card."""
+
+    config = SeaIceConfig(
+        dynamics="none",
+        transport="none",
+        n_categories=1,
+        thermo_scheme="si3_bl99",
+        ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+    )
+    validate_si3_thermo_config(config)
+    return C1DOMIPL3Card(
+        name="C1D_OMIP_L3/EXP_SASICE",
+        dt_seconds=3600.0,
+        nsteps=_DOCUMENTED_DURATION_STEPS,
+        forcing_path=forcing_path,
+        oracle_root=oracle_root,
+        config=config,
+        selector_sources=(
+            ("jpl=1 HFN", "iceitd.F90:129-180; accepted output.namelist.ice"),
+            ("BL99", "icethd.F90:148; icethd_zdf_bl99.F90:34-590"),
+            ("nlay_i=nlay_s=3", "par_ice.F90; accepted ocean.output:615-627"),
+            ("P07", "icethd_zdf_bl99.F90:261-275"),
+            ("nn_icesal=2, rn_sinew=.75", "icethd_sal.F90:204-249; icethd_dh.F90:328-362"),
+            ("ln_pnd=.false.", "icethd.F90:176-177; accepted output.namelist.ice"),
+            ("ln_icedA=.false.", "icethd.F90:161; accepted output.namelist.ice"),
+            ("aEVP (C1D-inert)", "icestp.F90:167-171; accepted ocean.output:843-846"),
+            ("Prather (C1D-inert)", "icestp.F90:167-171; accepted ocean.output:861-862"),
+            ("ridging/rafting (C1D-inert)", "icestp.F90:167-171; accepted ocean.output:820-837"),
+        ),
+    )
+
+
+__all__ = (
+    "C1DOMIPL3Card",
+    "FORCING_SHA256",
+    "THERMO_STREAM_SHA256",
+    "EXCHANGE_STREAM_SHA256",
+    "build_c1d_omip_l3_card",
+)

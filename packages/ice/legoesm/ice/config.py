@@ -6,8 +6,19 @@ from typing import NamedTuple
 
 from legoesm import constants
 from legoesm.surface_albedo import IceAlbedoConfig
+from legoesm.ice.constants_config import (
+    NEMO_SI3_CONSTANTS_CONFIG,
+    IceConstantsConfig,
+)
 
 __param_spec__ = {
+    "SI3ThermoConfig": {
+        "scheme_key": "ice.si3_thermo",
+        "excluded": {
+            "new_ice_salinity_fraction": "oracle identity: rn_sinew=0.75 is fixed by the ORCA1 deck",
+        },
+        "params": {},
+    },
     "SnowConfig": {
         "scheme_key": "ice.snow",
         "excluded": {
@@ -273,6 +284,56 @@ class MeltPondConfig(NamedTuple):
     snow_block_threshold: float = 5.0e-3
 
 
+class SI3ThermoConfig(NamedTuple):
+    """The only supported SI3 thermodynamic identity in this campaign.
+
+    Selector provenance: BL99/P07 is ``icethd_zdf_bl99.F90:248-275``;
+    option-2 salinity is ``icethd_sal.F90:204-249``; the top-level ordering is
+    ``icethd.F90:148-183``.  Values are exposed for receipts and validation,
+    but :func:`validate_si3_thermo_config` rejects every other combination.
+    """
+
+    n_ice_layers: int = 3
+    n_snow_layers: int = 3
+    conductivity: str = "p07"
+    salinity_scheme: int = 2
+    new_ice_salinity_fraction: float = 0.75
+    drainage: bool = True
+    flushing: bool = True
+    ponds: bool = False
+    lateral_melt: bool = False
+
+
+def validate_si3_thermo_config(config: "SeaIceConfig") -> None:
+    """Reject unsupported SI3 selector mixtures before any tendency runs."""
+
+    if config.thermo_scheme != "si3_bl99":
+        return
+    wanted = SI3ThermoConfig()
+    if config.si3 != wanted:
+        raise ValueError(
+            "thermo_scheme='si3_bl99' supports only the ORCA1-resolved "
+            f"identity {wanted!r}; got {config.si3!r}"
+        )
+    if config.ice_constants != NEMO_SI3_CONSTANTS_CONFIG:
+        raise ValueError(
+            "thermo_scheme='si3_bl99' requires the NEMO 5.0.2 phycst/EOS "
+            "constant set; mixing canonical legoESM constants into this "
+            "oracle identity is unsupported"
+        )
+    conflicts = []
+    if config.n_categories != 1:
+        conflicts.append("n_categories must be 1 (HFN single category; namitd)")
+    if config.ponds.enabled:
+        conflicts.append("ponds.enabled must be False (ln_pnd=.false.)")
+    if config.ridging.enabled:
+        conflicts.append("ridging is inert in the C1D thermodynamic column")
+    if config.dynamics != "none" or config.transport != "none":
+        conflicts.append("dynamics and transport must both be 'none' in C1D")
+    if conflicts:
+        raise ValueError("invalid SI3 C1D identity: " + "; ".join(conflicts))
+
+
 class SeaIceConfig(NamedTuple):
     """Thermodynamic slab + optional dynamics sea ice configuration.
 
@@ -399,3 +460,8 @@ class SeaIceConfig(NamedTuple):
     # APPENDED at the tail (after every pre-existing field) so positional
     # SeaIceConfig(...) constructors keep their meaning (codex L1-r1 #3).
     sw_transmittance_const: float = 0.0
+    # Layered SI3 is an option inside this existing model.  Appended at the
+    # tail to preserve all positional SeaIceConfig constructors.
+    thermo_scheme: str = "zero_layer"
+    si3: SI3ThermoConfig = SI3ThermoConfig()
+    ice_constants: IceConstantsConfig = IceConstantsConfig()

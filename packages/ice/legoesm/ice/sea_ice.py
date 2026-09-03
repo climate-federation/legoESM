@@ -57,13 +57,19 @@ from legoesm.ice.ridging import apply_ridging
 from legoesm.ice.shortwave import compute_ice_sw
 from legoesm.ice.ponds import step_ponds
 from legoesm.core.surface_energy import surface_radiation_fluxes
-from legoesm.ice.config import SeaIceConfig
+from legoesm.ice.config import SeaIceConfig, validate_si3_thermo_config
 from legoesm.ice.rheology import strain_rates
 from legoesm.ice.state import (
     SeaIceState,
     DynamicSeaIceState,
+    SI3ColumnState,
     dynamic_to_slab,
     slab_to_dynamic,
+)
+from legoesm.ice.bitz_lipscomb import (
+    SI3ColumnArrays,
+    SI3SurfaceForcing,
+    si3_column_step_arrays,
 )
 from legoesm.surface_albedo import ice_albedo as compute_ice_albedo
 
@@ -226,6 +232,26 @@ def step_sea_ice(
     new_state : SeaIceState or DynamicSeaIceState
     response : TileResponse
     """
+    if config.thermo_scheme not in ("zero_layer", "si3_bl99"):
+        raise ValueError(
+            f"Unknown sea-ice thermo_scheme {config.thermo_scheme!r}; expected "
+            "'zero_layer' or 'si3_bl99' (icethd.F90:148-183)."
+        )
+    validate_si3_thermo_config(config)
+    if config.thermo_scheme == "si3_bl99":
+        if not isinstance(state, SI3ColumnState):
+            raise ValueError(
+                "thermo_scheme='si3_bl99' requires SI3ColumnState with 3+3 "
+                "layer enthalpies; a bulk SeaIceState cannot silently invent them"
+            )
+        if not isinstance(forcing, SI3SurfaceForcing):
+            raise ValueError(
+                "thermo_scheme='si3_bl99' requires SI3SurfaceForcing at the "
+                "ice_thd entry boundary (ice1D.F90:393-421)"
+            )
+        new_state, response, _ = _si3_step_with_trace(state, forcing, config, dt)
+        return new_state, response
+
     # Validate: dynamics literal + grid requirement
     if config.dynamics not in ("none", "free_drift", "evp", "mevp"):
         raise ValueError(
@@ -396,6 +422,64 @@ def step_sea_ice(
             _validate_dynamic_state_shape(state.h_ice.data.shape, config, grid)
         return _step_dynamic(state, forcing, ocean_sst, ocean_u, ocean_v,
                              config, U_min, dt, grid)
+
+
+def _si3_step_with_trace(state: SI3ColumnState,
+                         forcing: SI3SurfaceForcing,
+                         config: SeaIceConfig,
+                         dt: float):
+    """Private fidelity hook returning registered SI3 sub-call boundaries."""
+
+    arrays = SI3ColumnArrays(
+        state.concentration.data,
+        state.h_ice.data,
+        state.h_snow.data,
+        state.T_surface.data,
+        state.e_ice.data,
+        state.e_snow.data,
+        state.S_bulk.data,
+        state.S_layers.data,
+        state.age_volume.data,
+    )
+    trace = si3_column_step_arrays(arrays, forcing, dt, config.ice_constants)
+    out = trace.exit
+    new_state = SI3ColumnState(
+        concentration=state.concentration.replace(data=out.concentration),
+        h_ice=state.h_ice.replace(data=out.h_ice),
+        h_snow=state.h_snow.replace(data=out.h_snow),
+        T_surface=state.T_surface.replace(data=out.T_surface),
+        e_ice=state.e_ice.replace(data=out.e_ice),
+        e_snow=state.e_snow.replace(data=out.e_snow),
+        S_bulk=state.S_bulk.replace(data=out.S_bulk),
+        S_layers=state.S_layers.replace(data=out.S_layers),
+        age_volume=state.age_volume.replace(data=out.age_volume),
+    )
+    z = jnp.zeros_like(out.h_ice)
+    one = jnp.ones_like(out.h_ice)
+    response = TileResponse(
+        T_sfc=out.T_surface,
+        albedo=one * config.albedo_ice,
+        emissivity=one * config.emissivity_ice,
+        z0=one * config.z0_ice,
+        q_surface=z,
+        shflx=z,
+        lhflx=forcing.evaporation * config.ice_constants.latent_sublimation,
+        tau_x=z,
+        tau_y=z,
+        lw_up=z,
+        u_ocean_sfc=z,
+        v_ocean_sfc=z,
+        co2_flux=z,
+        freshwater_flux=z,
+        ocean_heat_extraction=z,
+        ocean_stress_x=z,
+        ocean_stress_y=z,
+        surface_mass_flux=forcing.evaporation * out.concentration,
+        salt_flux=z,
+        T_rad=out.T_surface,
+        ice_concentration_thermo=arrays.concentration,
+    )
+    return new_state, response, trace
 
 
 # ==============================================================================
