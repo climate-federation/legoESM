@@ -452,6 +452,99 @@ def command_bbl_scaling(args) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
+def command_aimp_scaling(args) -> None:
+    """Scale Arm 2 on saved live states before any full-duration run."""
+    import jax
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks_3d
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        _nemo_ws_qco_stage_faces,
+        _nemo_ws_stage_transport,
+    )
+    from legoesm.ocean.physics.vertical_mixing import nemo_e3w_kmm
+    from legoesm.ocean.vertical import compute_layer_thickness
+
+    set_policy(PrecisionPolicy.fp64())
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    card = STATS.build_nemo_testcase_card(CASE)
+    z = card.recipe.z_coord
+    require(z.nemo_e3w_0 is not None and z.nemo_e3w_mesh_reference,
+            "OVERFLOW card lacks raw NEMO e3w_0")
+    states = STATS.load_legoesm_states(CASE, "fp64", args.lego_root)[0]
+    grid = card.recipe.grid
+    u_mask, v_mask = compute_face_masks_3d(z.is_active, grid)
+    u_mask = u_mask.astype(jnp.float64)
+    v_mask = v_mask.astype(jnp.float64)
+    rows = []
+    for time_s, raw in states.items():
+        # The saved legoESM state retains its redundant periodic U face; the
+        # scorer's mapped frame intentionally removes it.  This replay calls
+        # the executing transport helper, so it must use the native state.
+        eta = jnp.asarray(raw["ssh"])
+        h = compute_layer_thickness(
+            eta, card.recipe.initial_state.H_bathy.data, z,
+            min_water_column_m=card.recipe.model_config.min_water_column_m)
+        h_ref = compute_layer_thickness(
+            jnp.zeros_like(eta), card.recipe.initial_state.H_bathy.data, z,
+            min_water_column_m=card.recipe.model_config.min_water_column_m)
+        hu, hv, _, _ = _nemo_ws_qco_stage_faces(
+            eta, h_ref, u_mask, v_mask, grid)
+        u = jnp.asarray(raw["u"])
+        v = jnp.asarray(raw["v"])
+        Hu = jnp.sum(hu * u * u_mask, axis=-1)
+        Hv = jnp.sum(hv * v * v_mask, axis=-1)
+        common = dict(
+            eta_stage=eta, h_ref=h_ref, Hu_avg=Hu, Hv_avg=Hv,
+            u_mask_3d=u_mask, v_mask_3d=v_mask, grid=grid, z_coord=z,
+            config=card.recipe.model_config, dt=card.dt_s)
+        legacy = _nemo_ws_stage_transport(
+            (u, v), h, 2, nemo_aimp_reference_w_metric=False, **common)
+        reference = _nemo_ws_stage_transport(
+            (u, v), h, 2, nemo_aimp_reference_w_metric=True, **common)
+        stretch = 1.0 + eta / jnp.maximum(jnp.sum(h_ref, axis=-1), 1.0e-10)
+        ref_int = nemo_e3w_kmm(z, h, stretch)
+        midpoint_int = 0.5 * (h[..., :-1] + h[..., 1:])
+        wet_int = np.asarray(z.is_active[..., :-1] & z.is_active[..., 1:])
+        old_wi = np.asarray(legacy[6])
+        new_wi = np.asarray(reference[6])
+        total_w = np.asarray(reference[2] + reference[6])
+        fraction = np.divide(
+            new_wi, total_w, out=np.zeros_like(new_wi), where=total_w != 0.0)
+        rows.append({
+            "physical_time_s": int(time_s),
+            "wet_interface_e3w_difference_linf_m": float(np.max(np.abs(
+                np.asarray(ref_int)[wet_int] - np.asarray(midpoint_int)[wet_int]))),
+            "wet_interface_reference_to_midpoint_ratio_range": [
+                float(np.min(np.asarray(ref_int)[wet_int] /
+                             np.asarray(midpoint_int)[wet_int])),
+                float(np.max(np.asarray(ref_int)[wet_int] /
+                             np.asarray(midpoint_int)[wet_int])),
+            ],
+            "legacy_implicit_w_linf_m_s": float(np.max(np.abs(old_wi))),
+            "nemo_metric_implicit_w_linf_m_s": float(np.max(np.abs(new_wi))),
+            "implicit_w_difference_linf_m_s": float(np.max(np.abs(new_wi - old_wi))),
+            "nemo_metric_implicit_fraction_linf": float(np.max(np.abs(fraction))),
+            "implicit_w_changed_points": int(np.count_nonzero(new_wi != old_wi)),
+        })
+    payload = {
+        "format": "nemo-testcase-census-aimp-scaling-v1",
+        "case": CASE,
+        "git_sha": git_sha(),
+        "preregistration_commit": OWNER_PREREG_COMMIT,
+        "precision": "fp64",
+        "backend": jax.default_backend(),
+        "reference": (
+            "usrdef_zgr.F90:157-168; domzgr_substitute.h90:131; "
+            "sshwzv.F90:812-843"),
+        "states_npz": str(args.lego_root / "overflow_zps/fp64/states.npz"),
+        "states_sha256": sha256(args.lego_root / "overflow_zps/fp64/states.npz"),
+        "rows": rows,
+    }
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
 def _effect_row(card, entering, full_after, alternate_after, term: str) -> dict:
     full = arm_state("L64", _state_fields(full_after))
     T_delta = np.asarray(full_after.T.data) - np.asarray(alternate_after.T.data)
@@ -1266,6 +1359,13 @@ def main() -> None:
     p_scale.add_argument("--lego-root", type=Path, default=DEFAULT_LEGO_ROOT)
     p_scale.add_argument("--out", type=Path, default=DEFAULT_OUT / "bbl_scaling.json")
     p_scale.set_defaults(func=command_bbl_scaling)
+
+    p_aimp_scale = sub.add_parser(
+        "aimp-scaling", help="NEMO e3w_0 versus midpoint adaptive-split metric")
+    p_aimp_scale.add_argument("--lego-root", type=Path, default=DEFAULT_LEGO_ROOT)
+    p_aimp_scale.add_argument(
+        "--out", type=Path, default=DEFAULT_OUT / "aimp_scaling.json")
+    p_aimp_scale.set_defaults(func=command_aimp_scaling)
 
     p_budget = sub.add_parser(
         "budget", help="cadenced slope census plus local term ablations")
