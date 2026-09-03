@@ -388,6 +388,21 @@ def run_replay(root: Path) -> dict:
 
     target = next(row for row in rows if row["name"] == TARGET_TRACER)
     input_target = next(row for row in input_rows if row["name"] == TARGET_TRACER)
+    initial_frame = gate._read_oracle_frame(root, kt=1, card=card)
+    initial_oracle_salt = np.asarray(
+        gate._entry_tracer(initial_frame, TARGET_TRACER), dtype=np.float64
+    )
+    initial_bulk_salt = np.asarray(card.initial_state.bulk_salt_diagnostic)[
+        halo:-halo, halo:-halo
+    ]
+    reciprocal_nlay_i = np.float64(1.0) / np.float64(card.nlay_i)
+    nemo_written_initial_salt = initial_bulk_salt * reciprocal_nlay_i
+    initialization_order = _field_row(
+        TARGET_TRACER,
+        initial_oracle_salt,
+        np.asarray(gate.state_field(card, card.initial_state, TARGET_TRACER)),
+        nemo_written_initial_salt,
+    )
     target_input_history.append({"kt": ORACLE_INPUT_KT, **input_target})
     first_input_over_two_ulp = next(
         (
@@ -453,6 +468,10 @@ def run_replay(root: Path) -> dict:
         "target_input": input_target,
         "target_input_history": target_input_history,
         "first_target_input_over_two_ulp": first_input_over_two_ulp,
+        "initial_salt_reciprocal_order": {
+            "source": "iceistate.F90:357-360; r1_nlay_i is a stored reciprocal",
+            **initialization_order,
+        },
         "first_production_replay_stage_difference": _first_stage_difference(
             production_stages, replay_stages
         ),

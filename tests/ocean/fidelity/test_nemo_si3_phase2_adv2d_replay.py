@@ -35,6 +35,7 @@ def test_written_order_replay_classifies_and_plant_changes_output():
     assert len(report["input_tracer_rows"]) == 16
     assert len(report["target_input_history"]) == replay.ORACLE_INPUT_KT
     assert report["first_target_input_over_two_ulp"] is not None
+    assert report["initial_salt_reciprocal_order"]["name"] == replay.TARGET_TRACER
     assert len(report["moment_rows"]) == 80
     assert report["planted_control"]["status"] == "RED"
     assert report["planted_control"]["changed_v_i_max_ulp"] > 0
