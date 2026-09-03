@@ -47,7 +47,7 @@ excluded from the copied configuration and listed in the receipt.
 | block | required resolved value | source |
 |---|---|---|
 | ocean `namrun`, `namdom`, `namsbc` | `nn_it000=1`, `nn_itend=8760`, `nn_stock=8760`, `rn_Dt=3600`, `ln_c1d=T`, `nn_fsbc=1`, `nn_ice=2` | shipped `cfgs/C1D/EXP_SASICE/namelist_cfg:23-40,83-91` |
-| ocean `namsbc_blk` | NCAR on; ECMWF/COARE/MFS/ANDREAS off; constant ice-air coefficients on with `Cd=Ce=Ch=1e-3` | ORCA1 `EXPREF/namelist_cfg:129-142`; C1D's forcing descriptors and humidity interpretation remain from `cfgs/C1D/EXP_SASICE/namelist_cfg:93-135` |
+| ocean `namsbc_blk` | NCAR on; ECMWF/COARE/MFS/ANDREAS off; constant ice-air coefficients on with `Cd=Ce=Ch=1e-3` | ORCA1 `EXPREF/namelist_cfg:129-142` sets NCAR and constant ice coefficients but does not set `ln_ECMWF`; its false value is `SHARED/namelist_ref:236`. C1D forcing descriptors and humidity interpretation remain from `cfgs/C1D/EXP_SASICE/namelist_cfg:93-135` |
 | ocean `nameos` | TEOS-10 on, EOS-80 off | ORCA1 `EXPREF/namelist_cfg:305-308` |
 | ice `nampar` | `jpl=1`, `nlay_i=nlay_s=3`, `ln_icethd=T`, `rn_amax_n=rn_amax_s=0.99999`; `ln_icedyn` retains the resolved true value but is inert | ORCA1 ice cfg `:24-32`; dynamics is skipped by `ln_c1d` at `icestp.F90:167-168` |
 | ice `namitd` | HFN on, user categories off, `rn_himean=2`, `rn_himin=0.05`, `rn_himax=99` | ORCA1 ice cfg `:37-39` over ice ref `:41-46` |

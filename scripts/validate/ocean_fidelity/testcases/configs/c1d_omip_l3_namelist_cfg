@@ -96,7 +96,7 @@
    ln_NCAR      = .true.     ! ORCA1 EXPREF/namelist_cfg:132
    ln_COARE_3p0 = .false.    ! "COARE 3.0" algorithm   (Fairall et al. 2003)
    ln_COARE_3p6 = .false.    ! "COARE 3.6" algorithm   (Edson et al. 2013)
-   ln_ECMWF     = .false.    ! ORCA1 EXPREF/namelist_cfg:135; exclusive with NCAR
+   ln_ECMWF     = .false.    ! SHARED/namelist_ref:236; ORCA1 does not set this selector explicitly
    ln_MFS       = .false.    ! "MFS"       algorithm   (MFS/BS Copernicus, Petenuzzo et al 2010)
    ln_ANDREAS   = .false.    ! "ANDREAS"   algorithm   (Andreas et al. 2015)
       rn_zqt       =  2.     !  Air temperature & humidity reference height (m)

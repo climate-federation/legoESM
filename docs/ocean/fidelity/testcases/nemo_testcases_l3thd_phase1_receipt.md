@@ -93,7 +93,7 @@ is only an index to those one-line citations.
 | block | resolved selection | source |
 |---|---|---|
 | `namrun`, `namdom`, `namsbc`, `namsbc_sas` | steps 1–8760, `rn_Dt=3600`, `ln_c1d=T`, `nn_fsbc=1`, `nn_ice=2`, official ERA5 descriptors | shipped `cfgs/C1D/EXP_SASICE/namelist_cfg:23-55,83-91,145-163` |
-| `namsbc_blk` | NCAR on; ECMWF/COARE/MFS/ANDREAS off; constant ice-air `Cd=Ce=Ch=1e-3` | ORCA1 `EXPREF/namelist_cfg:129-142`; forcing/humidity remains shipped C1D `:93-135` |
+| `namsbc_blk` | NCAR on; ECMWF/COARE/MFS/ANDREAS off; constant ice-air `Cd=Ce=Ch=1e-3` | ORCA1 `EXPREF/namelist_cfg:129-142` sets NCAR and constant ice coefficients but never sets `ln_ECMWF`; false comes from `SHARED/namelist_ref:236`. Forcing/humidity remains shipped C1D `:93-135` |
 | `nameos` | TEOS-10 on, EOS-80 off | ORCA1 `EXPREF/namelist_cfg:305-309` |
 | `nampar` | `jpl=1`, `nlay_i=3`, `nlay_s=3`, `rn_amax_n/s=.99999`, thermodynamics on | ORCA1 ice deck `:24-32`; `jpl=1` is also the shipped C1D value |
 | `namitd` | single-category HFN, `rn_himean=2`, `rn_himin=.05`, `rn_himax=99` | ORCA1 ice deck `:37-39`; exclusive/user choice and upper bound from ice ref `:42-46` |

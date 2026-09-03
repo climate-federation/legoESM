@@ -32,7 +32,7 @@
 &namitd         !   Ice discretization
 !------------------------------------------------------------------------------
    ln_cat_hfn       = .true.     ! ORCA1 ice cfg:37
-   ln_cat_usr       = .false.    ! ice ref:42; exclusive with HFN
+   ln_cat_usr       = .false.    ! ice ref:43; exclusive with HFN
    rn_himean        = 2.0        ! ORCA1 ice cfg:38
    rn_himin         = 0.05       ! ORCA1 ice cfg:39
    rn_himax         = 99.0       ! ice ref:46; HFN upper bound
@@ -78,8 +78,8 @@
 !------------------------------------------------------------------------------
    rn_Cd_io         = 5.0e-3    ! ice ref:136; inherited by ORCA1
    nn_snwfra        = 2          ! ice ref:137; inherited by ORCA1
-   rn_snwblow       = 0.66       ! ice ref:138; inherited by ORCA1
-   nn_flxdist       = -1         ! ice ref:141; inherited by ORCA1
+   rn_snwblow       = 0.66       ! ice ref:141; inherited by ORCA1
+   nn_flxdist       = -1         ! ice ref:143; inherited by ORCA1
    ln_cndflx        = .false.    ! ORCA1 ice cfg:81
    ln_cndemulate    = .false.    ! ORCA1 ice cfg:82
    nn_qtrice        = 0          ! ice ref:150; inherited by ORCA1
@@ -111,7 +111,7 @@
 &namthd_do      !   Ice growth in open water
 !------------------------------------------------------------------------------
    rn_hinew         = 0.05       ! ORCA1 ice cfg:103
-   ln_frazil         = .false.    ! ice ref:194; inherited by ORCA1
+   ln_frazil         = .false.    ! ice ref:191; inherited by ORCA1
 /
 !------------------------------------------------------------------------------
 &namthd_sal     !   Ice salinity
