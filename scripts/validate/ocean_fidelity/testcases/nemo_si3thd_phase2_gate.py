@@ -182,10 +182,18 @@ def _entry_arrays(frame):
 
     g = _center_global(frame)
     a, vi, vs = g["a_i"], g["v_i"], g["v_s"]
+    # Mirror ice_thd_1d2d's zero-volume convention exactly
+    # (`icethd.F90:416-434`): zero volumetric enthalpy replaces division by a
+    # physically meaningless <= epsi20 category volume.  This becomes active
+    # when the C1D seasonal cycle loses all snow.
+    e_i = np.zeros_like(g["e_i"])
+    e_s = np.zeros_like(g["e_s"])
+    np.divide(g["e_i"] * 3.0, vi, out=e_i, where=vi > 1.0e-20)
+    np.divide(g["e_s"] * 3.0, vs, out=e_s, where=vs > 1.0e-20)
     return SI3ColumnArrays(
         np.atleast_1d(a), np.atleast_1d(vi / a), np.atleast_1d(vs / a),
-        np.atleast_1d(g["t_su"]), np.atleast_2d(g["e_i"] * 3.0 / vi),
-        np.atleast_2d(g["e_s"] * 3.0 / vs), np.atleast_1d(g["sv_i"] / vi),
+        np.atleast_1d(g["t_su"]), np.atleast_2d(e_i),
+        np.atleast_2d(e_s), np.atleast_1d(g["sv_i"] / vi),
         np.atleast_2d(g["szv_i"] * 3.0 / vi), np.atleast_1d(g["oa_i"]),
     )
 
