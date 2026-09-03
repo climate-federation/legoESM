@@ -421,8 +421,11 @@ def command_faces(args) -> None:
     # a uniform rescale of the reference ones and the difference is not
     # algebraically zero -- measure it on real states rather than assert it.
     live = _live_stage_mean_weights(card, lego_u, args.live_steps)
+    # mesh_mask stores e3u_0 at DRY levels too, so mask before forming the
+    # weight -- an unmasked reference weight makes every dry level read as a
+    # 1/nlev difference and swamps the number this measures.
     reference_weight = np.divide(
-        e3u_0, hu_0_nemo[..., None],
+        e3u_0 * lego_u, hu_0_nemo[..., None],
         out=np.zeros_like(e3u_0), where=hu_0_nemo[..., None] > 0)
 
     payload = {
@@ -450,13 +453,13 @@ def command_faces(args) -> None:
                 "kt": entry["kt"],
                 "max_abs_weight_difference": float(np.max(
                     np.abs(entry["weight"] - reference_weight)[lego_u])),
-                "wet_faces_differing": int(np.count_nonzero(
+                "wet_levels_differing_above_1e_12": int(np.count_nonzero(
+                    (np.abs(entry["weight"] - reference_weight) > 1.0e-12) & lego_u)),
+                "wet_levels_differing_at_all": int(np.count_nonzero(
                     (np.abs(entry["weight"] - reference_weight) > 0.0) & lego_u)),
-                "max_abs_at_injection_faces_20_21_22": float(np.max(
-                    np.abs(entry["weight"] - reference_weight)[
-                        row, args.face_lo:args.face_hi + 1][
-                        np.asarray([f in (20, 21, 22)
-                                    for f in range(args.face_lo, args.face_hi + 1)])])),
+                "max_abs_at_injection_faces_20_21_22": float(np.max([
+                    np.max(np.abs(entry["weight"] - reference_weight)[row, f][
+                        lego_u[row, f]]) for f in (20, 21, 22)])),
             }
             for entry in live
         ],
@@ -469,7 +472,8 @@ def command_faces(args) -> None:
     print("live vs reference stage-mean weights (the real open item 3):")
     for entry in payload["live_vs_reference_stage_mean_weights"]:
         print(f"  kt={entry['kt']:3d}  max |live-ref| {entry['max_abs_weight_difference']:.6e}"
-              f"  faces differing {entry['wet_faces_differing']:5d}"
+              f"  wet levels differing >1e-12 "
+              f"{entry['wet_levels_differing_above_1e_12']:5d}"
               f"  at injection faces 20/21/22 "
               f"{entry['max_abs_at_injection_faces_20_21_22']:.6e}")
     for entry in faces:
