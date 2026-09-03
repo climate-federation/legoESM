@@ -613,5 +613,64 @@ Prather split states also appear in the root `unmeasured` inventory.
 
 ## 11. FLAGGED FOR FUTURE DELETION
 
-*(empty — nothing in the repo or the shipped NEMO tree is proposed for deletion
-by this phase.)*
+The phase-1 rungs 3.1--3.3 proposed no deletion. Rung 3.4 adds two shipped-case
+files to this list; neither was modified or deleted:
+
+* `tests/ICE_RHEO/MY_SRC/icedyn_rhg_evp.F90`, SHA-256
+  `7efffd18b5a452d403e1a3e4e813f389a9c18a1a4f5a08e280b92272a2ed22ee`:
+  it shadows the released 5.0.2 solver but does not compile with the 5.0.2
+  module API. The production copy excludes it; the mandatory shipped control
+  retains it and fails to build.
+* `tests/ICE_RHEO/MY_SRC/icedyn_rhg_eap.F90`, SHA-256
+  `56bcddf22a533b3ce688a66051de91eab78397a260948cdd0d9de7417cbc1bf0`:
+  it is selector-dead after the requested EAP-to-aEVP overlay, but Fortran
+  compilation still sees it and fails against the 5.0.2 module API. Both final
+  copies therefore exclude it. The original failed copies are preserved under
+  names ending `_FAILED_STALE_EAP` in the writable clone.
+
+## 12. Rung 3.4 ICE_RHEO oracle boundary (2026-09-03)
+
+Status: **STOPPED-BUILD-BLOCKED**. This is not a trajectory verdict.
+
+The experiment was preregistered in
+`nemo_testcases_l3dyn_phase2_rung34_preregister.md` at commit `b49ede50860`
+before either build. A shared local clone of the unmodified shipped commit was
+created at
+`/data/abyssal/dbalwada/nemo-testcases-l3/nemo502_si3dyn_rung34_src`.
+The two required final copied-case paths are `tests/ICE_RHEO_OMIP_L3` and
+`tests/ICE_RHEO_OMIP_L3_SHIPPED`; the latter retains the shipped EVP override.
+
+The first build demonstrated that the shipped EAP override also cannot compile
+against 5.0.2, despite `ln_rhg_EAP=F`. That forced post-preregistration amendment
+is disclosed, not hidden: the failed copies are preserved, then both arms were
+recopied with EAP excluded. This leaves the EVP override as the sole source
+difference. The production arm, using `src/ICE` EVP and EAP, builds successfully
+with `key_si3 key_linssh key_vco_1d`. Its executable SHA-256 is
+`0f4f97d58467581326c59c130368e4883489f5bd51ceb4d33f91ded590703173`.
+
+The required shipped-EVP control does not build. The repeatable build exits 1;
+`control_build.stderr:6-106` reports 21 compiler errors, including undefined
+`epsi06`, `ln_aEVP`, `nn_nevp`, `rDt_ice`, and `rn_ishlat`, plus the `ht`
+rank mismatch. This is direct evidence that the shipped override predates the
+released module interfaces, not evidence about its numerical trajectory.
+Per the dispatch rule that a rung must stop when it cannot be built from its
+shipped case, no production integration was started and no source repair was
+invented.
+
+| artifact | SHA-256 |
+|---|---|
+| production incremental build stdout | `4f983818b9a4c11a4e0551f780486fee3140f7ddb576503cb219dea93b62e3ea` |
+| production incremental build stderr | `5fe5de0d0aa73b10241a5c1058abcaf07942bce2b49d3c056be7a4623c63d75b` |
+| shipped-control build stdout | `6080c0bff2f916ca99530cae57a01d937e2010156f27626755f81ab80a8b5346` |
+| shipped-control build stderr | `baef2fede631b7868aef20a5fe88605bd073812f46f634e9559d9089634a41cc` |
+| production `nemo.exe` | `0f4f97d58467581326c59c130368e4883489f5bd51ceb4d33f91ded590703173` |
+| resolved conda architecture | `629fafc5887eaf3011f6e1c8634eaba9e16250bfffc00296ae163b3c70477ea6` |
+| resolved cpp deck, both arms | `58c1f115e87c6177f282da0affbd67657a2d1a5ce4d6276dc752d4a19c4d29de` |
+
+Run roots would have been under
+`/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/`; only the two build logs
+exist there. Entry frames, mesh-mask geometry comparison, restart, stale-source
+trajectory difference, and README phenomenology are all **UNMEASURED**.
+The legoESM ICE_RHEO card, jpl=1 SI3 ridging/rafting implementation, geometry
+gate, kt=1 comparison, and trajectory sweep are all **UNMEASURED-NOT-STARTED**
+because an oracle trajectory cannot be created under the shipped-case rule.

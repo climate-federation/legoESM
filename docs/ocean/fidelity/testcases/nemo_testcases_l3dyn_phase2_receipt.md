@@ -769,6 +769,10 @@ and cover EVP plus mEVP; route the stress-divergence plant through a scored
 trajectory row; derive gate status/exit from rows; close the `rn_ishlat` and
 2-D `drag_io` generalization gaps; publish field-relative errors beside the
 immutable gate metric; and place SI3 tests under `tests/ice/fidelity/`.
+Then preregister rung 3.4, create production and shipped-override copies of
+ICE_RHEO, apply only the cited ORCA1 aEVP/ridging deck with landfast off,
+measure the stale override, and proceed to the existing-module jpl=1
+ridging/rafting arm only if the shipped oracle can run.
 
 **UNASKED choices:** no default change to existing ice transport; no ocean-SOM
 replacement or arithmetic-changing common refactor; no rung-3.3 claim beyond
@@ -779,3 +783,7 @@ classification of the README's qualitative maximum/side-lobe sentence; no
 claim that a DEBT or UNMEASURED row is matched or faithful; no relabeling of
 the pinned oracle's `rn_ishlat=2` as zero merely because the two branches are
 inert on this all-wet periodic card.
+No repair or modernization of the shipped ICE_RHEO overrides; no legoESM rung
+3.4 trajectory claim without a runnable shipped-case control. Rung 3.4 stopped
+at that exact boundary; its build evidence and loud UNMEASURED rows are in the
+phase-1 receipt section 12.
