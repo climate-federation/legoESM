@@ -353,10 +353,15 @@ def main() -> int:
     tgt_lat = np.arange(-89.5, 90.0, r)
     tgt_lon = np.arange(0.5, 360.0, r)
 
-    n_below, sst_min = 0, float(np.nanmin(L["sst"]))
+    # WET CELLS ONLY: dry cells carry fill values (measured -1.83 to 31.81 on
+    # the MPAS snapshot), so an unmasked count reported 1810 supercooled cells
+    # where the ocean has 109 — the same land-contamination trap that bit the
+    # IC regridder and three probes this session.
+    _wet = np.asarray(L["mask"]) > 0.5
+    _sst_wet = np.asarray(L["sst"])[_wet]
+    n_below, sst_min = 0, float(np.nanmin(_sst_wet))
     if args.freeze_clamp_C is not None:
-        n_below = int((L["sst"] < args.freeze_clamp_C).sum())
-        sst_min = float(np.nanmin(L["sst"]))
+        n_below = int((_sst_wet < args.freeze_clamp_C).sum())
         L["sst"] = np.maximum(L["sst"], args.freeze_clamp_C)
         print(f"[freeze-clamp] floored legoESM SST at {args.freeze_clamp_C} C "
               f"({n_below} cells were below)")
