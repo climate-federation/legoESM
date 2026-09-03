@@ -253,12 +253,39 @@ def build_overflow_zps_card() -> NEMOTestcaseCard:
     )
     depth = jnp.broadcast_to(jnp.asarray(depth_1d)[None, :], (3, 202))
     bathymetry = jnp.where(wet > 0.0, depth, 0.0)
+    _gdept_1d = 10.0 + 20.0 * np.arange(100, dtype=np.float64)
     z_ref = create_z_star_from_thicknesses(
         jnp.full((100,), 20.0),
-        t_depth_ref_m=10.0 + 20.0 * np.arange(100, dtype=np.float64),
+        t_depth_ref_m=_gdept_1d,
+        # tests/OVERFLOW/MY_SRC/usrdef_zgr.F90:157-168 leaves gdept/e3w
+        # on the uniform reference ladder under ld_zps.  Carry the source
+        # operands rather than reconstructing W spacing from partial e3t.
+        nemo_gdept_0_m=_gdept_1d,
     )
     z_coord = create_partial_cell_coordinate(
         z_ref, bathymetry, bottom_index_rule="nemo_tpoint"
+    )
+    # Exact unmasked BBL face scale factors from this test case's source.
+    # usrdef_zgr.F90:171-186 starts every e3t at 20 m, replaces the bottom
+    # and first-below-bottom records by the partial thickness, then (the
+    # bathymetry increases monotonically in i and is identical in j) assigns
+    # e3u=e3v=e3t at the west/south source column.  trabbl.F90:529-531 later
+    # gathers these arrays at BOTH adjacent bottom indices, including a level
+    # below the shallower wet column; masked h_partial cannot reconstruct it.
+    _h_partial = np.asarray(z_coord.h_partial, dtype=np.float64)
+    _bottom = np.asarray(z_coord.bottom_level, dtype=np.int32)
+    _raw_e3t = np.broadcast_to(
+        np.asarray(z_coord.dz_ref, dtype=np.float64), _h_partial.shape
+    ).copy()
+    for _j, _i in np.argwhere(_bottom >= 0):
+        _k = int(_bottom[_j, _i])
+        _raw_e3t[_j, _i, _k] = _h_partial[_j, _i, _k]
+        if _k + 1 < _raw_e3t.shape[-1]:
+            _raw_e3t[_j, _i, _k + 1] = _h_partial[_j, _i, _k]
+    z_coord = z_coord._replace(
+        nemo_e3t_0=jnp.asarray(_raw_e3t),
+        nemo_bbl_e3u_0=jnp.asarray(_raw_e3t[:, :-1, :]),
+        nemo_bbl_e3v_0=jnp.asarray(_raw_e3t[:-1, :, :]),
     )
     # NEMO clips the analytic input depth onto its zps bottom-cell geometry;
     # the model water-column depth is therefore the sum of the executed cells.

@@ -1014,6 +1014,12 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     kmm_tracer_transports: bool = True
     two_step_fct_predictor: bool = True
     disable_bbl: bool = False
+    # One-variable census arm: feed the existing Campin--Goosse kernel the
+    # exact tra_bbl_init reference geometry (gdept_0 bottom-level slope mask,
+    # unmasked e3u_0/e3v_0 bottom thicknesses, Kmm-stretched gdept).  False is
+    # the pre-arm partial-centroid construction until the arm is adjudicated;
+    # this is private harness state, never a constructible model selector.
+    nemo_bbl_reference_geometry: bool = False
     # Private ablation of dynspg_ts's flux-form primary transport average.
     # Public NEMO RK3 configurations always keep this true.
     primary_transport_average: bool = True
@@ -1324,10 +1330,20 @@ def _nemo_ws_rk3_tracer_pair_step(
                 apply_bbl_adv_tendency,
                 bbl_transports,
             )
-            geom, area, dy_u, dx_v, gamma_s, rho0 = bbl_context
-            live_depth = jnp.cumsum(h_stage, axis=-1) - 0.5 * h_stage
-            live_bottom_depth = jnp.take_along_axis(
-                live_depth, geom.bot_k[..., None], axis=-1)[..., 0]
+            (geom, area, dy_u, dx_v, gamma_s, rho0,
+             nemo_reference_geometry) = bbl_context
+            if nemo_reference_geometry:
+                # trabbl.F90:348 reads gdept(bottom,Kmm).  Under key_qco that
+                # is gdept_0(bottom)*(1+r3t(Kmm)); the stage thickness sum is
+                # H*(1+r3t), so this ratio is the identical stage stretch.
+                reference_depth = jnp.sum(geom.h_ref, axis=-1)
+                stage_stretch = jnp.sum(h_stage, axis=-1) / jnp.maximum(
+                    reference_depth, jnp.asarray(1.0e-10, h_stage.dtype))
+                live_bottom_depth = geom.dep_bot * stage_stretch
+            else:
+                live_depth = jnp.cumsum(h_stage, axis=-1) - 0.5 * h_stage
+                live_bottom_depth = jnp.take_along_axis(
+                    live_depth, geom.bot_k[..., None], axis=-1)[..., 0]
             utr, vtr = bbl_transports(
                 tr_a, tr_b, geom, dy_u, dx_v,
                 gamma_s=gamma_s, rho_0=rho0,
@@ -6274,12 +6290,28 @@ class LatLonCGridOceanModel:
                         and not self._nemo_ws_test_hooks.disable_bbl):
                     from legoesm.ocean.physics.bbl_adv import (
                         bbl_static_geometry,
+                        nemo_bbl_static_geometry,
                     )
                     _h_ref = jnp.asarray(_zc.h_partial)
                     if _h_ref.ndim == 1:
                         _h_ref = jnp.broadcast_to(_h_ref, h_k_old.shape)
-                    _bbl_geom = bbl_static_geometry(
-                        _h_ref, state.land_mask.data)
+                    _nemo_bbl_geometry = (
+                        self._nemo_ws_test_hooks.nemo_bbl_reference_geometry)
+                    if _nemo_bbl_geometry:
+                        _gdept0 = getattr(_zc, "nemo_gdept_0", None)
+                        _e3u0 = getattr(_zc, "nemo_bbl_e3u_0", None)
+                        _e3v0 = getattr(_zc, "nemo_bbl_e3v_0", None)
+                        if _gdept0 is None or _e3u0 is None or _e3v0 is None:
+                            raise ValueError(
+                                "NEMO BBL reference geometry requires "
+                                "nemo_gdept_0 and exact unmasked "
+                                "nemo_bbl_e3u_0/nemo_bbl_e3v_0 operands")
+                        _bbl_geom = nemo_bbl_static_geometry(
+                            _h_ref, state.land_mask.data,
+                            _gdept0, _e3u0, _e3v0)
+                    else:
+                        _bbl_geom = bbl_static_geometry(
+                            _h_ref, state.land_mask.data)
                     _bbl_context = (
                         _bbl_geom,
                         jnp.asarray(_grid.area_T),
@@ -6287,6 +6319,7 @@ class LatLonCGridOceanModel:
                         jnp.asarray(_grid.dx_v)[1:-1, :],
                         _cfg_b.bbl_gamma_s,
                         _cfg_b.rho_0,
+                        _nemo_bbl_geometry,
                     )
                 T_corrected, S_corrected = _nemo_ws_rk3_tracer_pair_step(
                     T_mid, S_mid, _adv,

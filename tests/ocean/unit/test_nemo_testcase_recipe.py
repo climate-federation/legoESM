@@ -159,6 +159,35 @@ def test_testcase_cards_pin_the_certified_bbl_selectors():
     assert overflow.bbl_gamma_s == 20.0
 
 
+def test_overflow_card_carries_source_exact_unmasked_bbl_mesh_operands():
+    """usrdef_zgr.F90:157-186 + trabbl.F90:517-533, without mesh I/O."""
+    from legoesm.ocean.physics.bbl_adv import nemo_bbl_static_geometry
+
+    recipe = build_overflow_zps_card().recipe
+    z = recipe.z_coord
+    assert np.array_equal(
+        np.asarray(z.nemo_gdept_0),
+        10.0 + 20.0 * np.arange(100, dtype=np.float64),
+    )
+    assert np.asarray(z.nemo_bbl_e3u_0).shape == (3, 201, 100)
+    assert np.asarray(z.nemo_bbl_e3v_0).shape == (2, 202, 100)
+    geom = nemo_bbl_static_geometry(
+        z.h_partial,
+        recipe.land_mask,
+        z.nemo_gdept_0,
+        z.nemo_bbl_e3u_0,
+        z.nemo_bbl_e3v_0,
+    )
+    # One wet physical row; exactly 29 reference-bottom transitions in x.
+    assert int(np.sum(np.asarray(geom.u_active)[1])) == 29
+    assert int(np.sum(np.asarray(geom.u_active)[0])) == 0
+    assert int(np.sum(np.asarray(geom.u_active)[2])) == 0
+    # Same-bottom partial-depth faces are exactly off in NEMO geometry.
+    bottom = np.asarray(z.bottom_level)[1]
+    same_bottom = bottom[:-1] == bottom[1:]
+    assert not np.any(np.asarray(geom.u_active)[1][same_bottom])
+
+
 def test_overflow_card_uses_partial_cells_and_minimum_face_rule():
     recipe = build_overflow_zps_card().recipe
     hp = np.asarray(recipe.z_coord.h_partial)
