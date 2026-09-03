@@ -4,6 +4,13 @@ Tracker: `climate-federation/legoESM#1699`
 
 ## Verdict
 
+**Phase-2b continuation:** the former first-divergence stopping scope below is
+superseded by the committed full-year measurement in
+`nemo_testcases_l3thd_phase2b_receipt.md`.  That continuation reads all 70,080
+frames, retains the kt3 first operator divergence, and reports later rows as
+measured debt.  The statements below describe the earlier Phase-2 gate and are
+not a claim that later frames remain unmeasured.
+
 **DEBT.**  The reviewed `kt1.POST_ZDF.t_su` discrepancy is owned and fixed:
 the former card reconstructed a ZDF-entry heat flux from a post-ZDF value at
 the wrong Picard time level.  Replacing only that scalar with NEMO's directly
@@ -12,12 +19,14 @@ dumped entry value reduces the `t_su` error from `6.51945413210342e-08 K` to
 error `5.562656545875019e-16`).  Every registered boundary at `kt=1` and
 `kt=2` is now at the `1e-15` bar.
 
-The post-fix sweep stops at the next measured debt,
+The Phase-2 post-fix sweep stopped at the next measured debt,
 `kt3.POST_ZDF.e_i`: absolute error `7.152557373046875e-07 J m-3`, oracle
 scale `279433808.11424434 J m-3`, normalized error
-`2.559660701514903e-15`.  No boundary after that row and no later step is an
-accepted claim.  The ordinary CLI therefore exits 1 after writing its complete
-JSON result; a scientific debt is not a green gate.
+`2.559660701514903e-15`.  At that dispatch, no boundary after that row and no
+later step was an accepted claim.  Phase 2b has since measured them under its
+separately preregistered operator and continuous protocols.  The ordinary
+Phase-2 CLI exits 1 after writing its complete JSON result; a scientific debt
+is not a green gate.
 
 ### Coupled-rung coverage debt
 
@@ -345,5 +354,8 @@ module remains as a compatibility shim so existing imports are not broken.
   `namelist_ice_cfg` are byte-identical across the two roots (respectively
   SHA-256 `6151c0fdd2431d07c7897d5852846a620edd58c55255f11b7fb3569803b5342c`
   and `da7b4fc5865edf6a6a912d6316a51f6b845aaf7e8b87e9da121c6f0a46278033`).
+- ASKED — continue in Phase 2b with NEMO-order ULP replays, all 8,760 steps,
+  all 70,080 frames, and the measured legoESM fp32/fp64 phenomenology floor;
+  see `nemo_testcases_l3thd_phase2b_receipt.md`.
 - ASKED — do not push.
 - UNASKED — none.
