@@ -22,7 +22,11 @@ echo "host: $(hostname)"
 echo "PINNED sha: $(git rev-parse HEAD)"
 echo "dirty: $(git status --porcelain | wc -l)"
 
-export JAX_PLATFORMS=cpu
+# Without this the interpreter picks up the legoesm installed from ANOTHER
+# worktree, where dynamics.gcm does not exist -- job 9611171 died on
+# "No module named 'legoesm.atmosphere.dynamics.gcm'" for exactly that reason.
+export PYTHONPATH="$REPO/packages/core:$REPO/packages/atmosphere:$REPO/packages/coupler:$REPO/packages/ice:$REPO/packages/land:$REPO/packages/ocean:$REPO/packages/ml:$REPO/packages/tools:$REPO/src"
+export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=8
 
 # The perturbation ladder's largest measured reach (job 9610385).  The probe
