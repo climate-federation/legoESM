@@ -98,3 +98,20 @@ subject named.  Rungs 3.2/3.3, within-step x/y split states, Prather pond and
 option-4 salinity moments, `zapsmall`/`zapneg` separation, thermodynamics,
 rheology, ridging, landfast, and legoESM--NEMO coupled matching remain loudly
 **UNMEASURED**.
+
+## Recorded implementation amendment
+
+The preregistration's search correctly identified the production
+`DynamicSeaIceState`, but its phrase "run-restart slot policy ... must classify"
+was too broad for this card-only dispatch.  Implementing that phrase would
+change the default production state/restart layout outside the new card.  The
+implemented boundary instead gives the card an explicit `ICEAdv1DState`
+prognostic pytree: packed ordinary fields, U/V, surface temperature, and all
+five moment arrays.  A card-specific restart persists every state leaf plus
+the clock and selector contract; the gate reloads solely from that NPZ and
+requires bitwise split-continuation.  A dropped, retyped, or perturbed moment
+leaf goes red.
+The production 12-field sea-ice state remains unchanged, and integration of
+this opt-in card state with the general production run-restart writer is
+**UNMEASURED**.  This amendment changes no registered numerical bar or
+CONFIRM/REFUTE rule.
