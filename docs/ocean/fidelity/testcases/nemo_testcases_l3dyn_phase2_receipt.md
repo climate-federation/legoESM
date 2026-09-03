@@ -1,4 +1,4 @@
-# SI3 lane 3 — phase-2 receipt (rungs 3.1 and 3.2)
+# SI3 lane 3 — phase-2 receipt (rungs 3.1, 3.2, and rung-3.3 design)
 
 Issue: climate-federation/legoESM #1699
 
@@ -10,10 +10,15 @@ Phase-2 commit ledger:
   `fd2dd6c24e6cc70ada3f1c156b631c3da64d5091`;
 * rung-3.2 preregistration: `690fbdd8ee0281398fba9bf54073d5db2502478f`;
 * rung-3.2 implementation and fixed gate:
-  `9f9c4a4a1681f7cb88bb381e369dbbf378dec2a7`.
+  `9f9c4a4a1681f7cb88bb381e369dbbf378dec2a7`;
+* round-2b disclosure correction: `43658998cc9`;
+* rung-3.2 written-order replay preregistration and final classification:
+  `146199c9b3e` and `aa6dc122b43`;
+* rung-3.3 design preregistration: `af53e78bd33`.
 
-Oracle roots: `/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv1d/final` and
-`/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv2d/final`.
+Oracle roots: `/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv1d/final`,
+`/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv2d/final`, and
+`/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv2d_rhg/final`.
 Gate artifacts are the corresponding `phase2/nemo_si3_phase2_gate.json` files.
 
 ## Rung 3.1 verdict
@@ -412,6 +417,27 @@ owner is inferred from that scaling.
 The planted cross-moment control changes `v_i` by 5,913,692 ULP, proving the
 replay comparison is live.  The focused replay suite passes 2/2.
 
+## Rung 3.3 — committed design boundary only
+
+The C-grid adaptive-EVP design was preregistered in
+`nemo_testcases_l3dyn_phase2_rung33_preregister.md` at commit `af53e78bd33`,
+before any rung-3.3 candidate code or score.  It resolves the sole permitted
+card composition, enumerates the `ice_stp -> ice_dyn -> ice_dyn_rhg ->
+ice_dyn_rhg_evp` call graph, assigns every operand to T/U/V/F, records the
+odd-U/V then even-V/U ordering of all 100 subcycles, and makes the three
+T/T/F stresses restart-carried prognostics.  It also maps the existing A-grid
+kernels to KEEP/REUSE/NEW dispositions: only H79 `ice_strength`, geometry,
+control-flow mechanics, and the already-selectable Prather arm are reusable;
+the strain, transformed-stress, divergence, drag, and sequential momentum
+formulas require the C-grid selector arm.
+
+This is intentionally a clean stop after the mandatory design-first step.
+Rung-3.3 implementation, geometry/card tests, first-step comparison,
+485-frame sweep, restart continuation, and JIT/gradient measurements are all
+**UNMEASURED**.  No rung-3.3 field is called AT-BAR, matched, or faithful.
+The preregistration document SHA256 is
+`5f147db1b5c446b95a7bd1fbe4dc2af0b4533dad786cb3903841becf2e244f21`.
+
 ## Artifact hashes
 
 | artifact | SHA256 |
@@ -444,8 +470,9 @@ Rung-3.2 artifacts (gate provenance parent
 
 ## Loudly UNMEASURED / deferred
 
-Rung 3.3; within-step x/y split states; ORCA1 option-2 salinity (the rung-3.2
-oracle resolves option 4); candidate alignment of nonzero `snwice_mass` and its
+Rung-3.3 implementation and trajectory; within-step x/y split states; ORCA1
+option-2 salinity (the rung-3.2 oracle resolves option 4); candidate alignment
+of nonzero `snwice_mass` and its
 before level; separation of `zapsmall` from `zapneg`; thermodynamics;
 rheology; ridging/rafting; general production run-restart integration of the opt-in
 card state; coupled ice--ocean comparison; and landfast L16 (OFF here,
@@ -459,10 +486,13 @@ rungs 3.1 and 3.2 against the pinned shipped cases; fp64/CPU only and `jpl=1`;
 Prather as a selectable arm of the existing transport module; prognostic,
 restart-carried moments; geometry, `kt=1`, first-divergence and restart gates;
 planted controls; preserve production defaults; explicit-pathspec commits;
-branch bundle; no push and no shipped-NEMO modification.
+classify rung-3.2 DEBT with a written-order replay; preregister the rung-3.3
+C-grid aEVP design before code; branch bundle; no push and no shipped-NEMO
+modification.
 
 **UNASKED choices:** no default change to existing ice transport; no ocean-SOM
-replacement or arithmetic-changing common refactor; no rung-3.3 dynamics,
-thermodynamics, ridging/rafting, landfast, coupled-ocean, multi-category, or
-general production-restart claim; no analytic oracle; no tolerance relaxation;
-no claim that a DEBT or UNMEASURED row is matched or faithful.
+replacement or arithmetic-changing common refactor; no rung-3.3 dynamics
+implementation or trajectory, thermodynamics, ridging/rafting, landfast, coupled-ocean,
+multi-category, or general production-restart claim at this design-only stop;
+no analytic oracle; no tolerance relaxation; no claim that a DEBT or
+UNMEASURED row is matched or faithful.
