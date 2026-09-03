@@ -627,7 +627,9 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
              constants: IceConstantsConfig, *,
              _snow_deposition: bool = True,
              _surface_melt: bool = True,
-             _basal_melt: bool = True) -> SI3ColumnArrays:
+             _basal_melt: bool = True,
+             _nemo_basal_layer_loop: bool = True,
+             ) -> SI3ColumnArrays:
     """Resolved no-lateral-melt thickness sequence (`icethd_dh.F90:91-533`)."""
 
     a = state.concentration
@@ -769,44 +771,66 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
     # Warm-ocean basal melt, limited to the available column; surface-melt and
     # internal-melt arms remain zero until their actual flux becomes positive.
     basal_energy = dt * jnp.maximum(zf, 0.0)
-    for k in (2, 1, 0):
-        internal_melt = (zf > 0.0) & (
-            zdf.T_ice[..., k] >= melt_temperature[..., k]
-        )
-        ice_specific = -zdf.e_ice[..., k] / constants.rho_ice
-        water_specific = constants.c_ocean * (
-            -constants.liquidus_slope * state.S_layers[..., k]
-        )
-        energy_difference = ice_specific - water_specific
-        basal_remove = jnp.where(
-            _basal_melt,
-            jnp.where(
-                internal_melt,
-                old_h[..., k],
-                jnp.minimum(
-                    jnp.maximum(
-                        basal_energy
-                        / jnp.maximum(
-                            -energy_difference * constants.rho_ice, 1.0e-20
-                        ),
-                        0.0,
-                    ),
+    if _nemo_basal_layer_loop:
+        for k in (2, 1, 0):
+            internal_melt = (zf > 0.0) & (
+                zdf.T_ice[..., k] >= melt_temperature[..., k]
+            )
+            ice_specific = -zdf.e_ice[..., k] / constants.rho_ice
+            water_specific = constants.c_ocean * (
+                -constants.liquidus_slope * state.S_layers[..., k]
+            )
+            energy_difference = ice_specific - water_specific
+            basal_remove = jnp.where(
+                _basal_melt,
+                jnp.where(
+                    internal_melt,
                     old_h[..., k],
+                    jnp.minimum(
+                        jnp.maximum(
+                            basal_energy
+                            / jnp.maximum(
+                                -energy_difference * constants.rho_ice, 1.0e-20
+                            ),
+                            0.0,
+                        ),
+                        old_h[..., k],
+                    ),
                 ),
+                0.0,
+            )
+            old_h = old_h.at[..., k].add(-basal_remove)
+            basal_energy = jnp.where(
+                internal_melt,
+                basal_energy,
+                jnp.maximum(
+                    basal_energy
+                    - basal_remove * (-energy_difference * constants.rho_ice),
+                    0.0,
+                ),
+            )
+        h_i_pre_flood = jnp.sum(old_h, axis=-1) + dh_growth
+    else:
+        bottom_specific = -zdf.e_ice[..., -1] / constants.rho_ice
+        bottom_water = constants.c_ocean * (
+            -constants.liquidus_slope * state.S_layers[..., -1]
+        )
+        bottom_difference = bottom_specific - bottom_water
+        legacy_remove = jnp.where(
+            _basal_melt,
+            jnp.minimum(
+                jnp.maximum(
+                    -basal_energy / (bottom_difference * constants.rho_ice),
+                    0.0,
+                ),
+                jnp.sum(old_h, axis=-1),
             ),
             0.0,
         )
-        old_h = old_h.at[..., k].add(-basal_remove)
-        basal_energy = jnp.where(
-            internal_melt,
-            basal_energy,
-            jnp.maximum(
-                basal_energy
-                - basal_remove * (-energy_difference * constants.rho_ice),
-                0.0,
-            ),
+        h_i_pre_flood = jnp.sum(old_h, axis=-1) + dh_growth - legacy_remove
+        old_h = old_h.at[..., -1].set(
+            jnp.maximum(old_h[..., -1] - legacy_remove, 0.0)
         )
-    h_i_pre_flood = jnp.sum(old_h, axis=-1) + dh_growth
 
     # Remap old layer energy plus bottom new ice.  The first zero-thickness
     # segment is the top snow-ice slot in NEMO's `zh_i_old(0:nlay_i+1)`.
@@ -871,7 +895,9 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
                            _surface_melt: bool = True,
                            _zdf_branch_ranges: bool = True,
                            _basal_melt: bool = True,
-                           _nemo_snow_temperature_bounds: bool = True) -> SI3StepTrace:
+                           _nemo_snow_temperature_bounds: bool = True,
+                           _nemo_basal_layer_loop: bool = True,
+                           ) -> SI3StepTrace:
     """Execute the selected `ice_thd` chain and retain every oracle boundary."""
 
     zdf = _si3_zdf_bl99_step(
@@ -887,6 +913,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         _snow_deposition=_snow_deposition,
         _surface_melt=_surface_melt,
         _basal_melt=_basal_melt,
+        _nemo_basal_layer_loop=_nemo_basal_layer_loop,
     )
     # `ice_thd_temp` is diagnostic because enthalpy is prognostic (:221-247).
     post_temp1 = post_dh
