@@ -103,3 +103,17 @@ a registered stage value, and an unregistered/invalid SI3 selector.  Direct
 tests cover eager, `jax.jit`, and finite reverse-mode gradients of the promoted
 kernel.  Any later fix remains inside the declared SI3 identity and is
 accepted only when the relevant planted control remains red.
+
+## End-of-task choice register
+
+- ASKED — use only the ORCA1-resolved single-category HFN, BL99 3+3/P07,
+  salinity option 2 (`rn_sinew=0.75`), no ponds, and no lateral melt identity.
+- ASKED — reuse the existing ice model, parked BL99 work, shared Thomas solver,
+  and shared snow-ice flooding implementation; do not construct a second model.
+- ASKED — use the pinned ERA5/exchange inputs, one-hour step, CPU, and fp64.
+- ASKED — use the `1e-15` DINO bar, required time-level registry, first-
+  divergence stopping rule, one-variable private arms, and planted controls.
+- ASKED — keep all shipped NEMO files read-only; use copy-only instrumentation.
+- ASKED — correct the three review findings before continuing ZDF ownership.
+- ASKED — do not push.
+- UNASKED — none.

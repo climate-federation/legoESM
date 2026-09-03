@@ -14,6 +14,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 from legoesm.ice.constants_config import IceConstantsConfig
+from legoesm.ice.snow import snow_ice_flooding
 from legoesm.timestepping.tridiagonal import thomas_solve
 
 from legoesm import constants as canonical_constants
@@ -594,14 +595,13 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
 
     # Snow-ice flooding (:441-519).  Convert basal snow into ice at equal
     # thickness and include its seawater+snow energy as the top remap segment.
-    flood = jnp.maximum(
-        0.0,
-        (constants.rho_snow * h_s + (constants.rho_ice - constants.rho_ocean) * h_i_pre_flood)
-        / (constants.rho_snow + constants.rho_ocean - constants.rho_ice),
+    h_i, h_s_final, flood = snow_ice_flooding(
+        h_i_pre_flood,
+        h_s,
+        constants.rho_ice,
+        constants.rho_snow,
+        constants.rho_ocean,
     )
-    flood = jnp.minimum(flood, h_s)
-    h_i = h_i_pre_flood + flood
-    h_s_final = h_s - flood
     hseg_i = hseg_i.at[..., 0].set(flood)
     # Basal snow energy is approximated by the bottom remapped snow layer;
     # exact boundary ownership is measured before this stage in Phase 2.

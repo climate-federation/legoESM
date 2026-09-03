@@ -25,8 +25,24 @@ from legoesm.ice.constants_config import (
     IceConstantsConfig,
 )
 from legoesm.ice.scm import IceColumnModel
+from legoesm.ice.snow import snow_ice_flooding
 
 set_policy(PrecisionPolicy.fp64())
+
+
+def _former_inline_snow_ice_flooding(h_ice, h_snow, c):
+    """Exact expression formerly embedded in ``_dh_step``."""
+
+    delta = jnp.maximum(
+        0.0,
+        (
+            c.rho_snow * h_snow
+            + (c.rho_ice - c.rho_ocean) * h_ice
+        )
+        / (c.rho_snow + c.rho_ocean - c.rho_ice),
+    )
+    delta = jnp.minimum(delta, h_snow)
+    return h_ice + delta, h_snow - delta, delta
 
 
 def _forcing() -> SI3SurfaceForcing:
@@ -69,6 +85,21 @@ def test_nemo_constants_and_enthalpy_roundtrip_are_fp64() -> None:
     assert (c.c_ice, c.latent_fusion, c.k_ice, c.k_snow, c.lead_albedo) == (
         2096.7, 333360.1, 2.034396, 0.5, 0.066,
     )
+
+
+def test_shared_flooding_is_bit_exact_with_former_inline_path() -> None:
+    """Prove the shared replacement preserves the scoped C1D arithmetic."""
+
+    c = NEMO_SI3_CONSTANTS_CONFIG
+    h_ice = jnp.asarray([0.1, 2.0, 10.0], dtype=jnp.float64)
+    h_snow = jnp.asarray([0.2, 0.2, 0.0], dtype=jnp.float64)
+    former = _former_inline_snow_ice_flooding(h_ice, h_snow, c)
+    shared = snow_ice_flooding(
+        h_ice, h_snow, c.rho_ice, c.rho_snow, c.rho_ocean
+    )
+    assert float(former[2][0]) > 0.0  # exercise the active flooding arm
+    for old, new in zip(former, shared, strict=True):
+        np.testing.assert_array_equal(np.asarray(new), np.asarray(old))
 
 
 def test_selector_rejects_frankenstein_identity() -> None:

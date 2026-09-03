@@ -198,21 +198,44 @@ hashes/geometry, first-divergence order, and all three red controls.  A further
 41 configuration/complexity tests passed.  `compileall`, `git diff --check`,
 and Ruff E/F/I checks on all new files passed.
 
-The lane-owned inline-coefficient ratchet nodes pass after moving every fixed
-SI3 value to a source-cited module-level oracle block.  The broader five-ratchet
-run still has seven pre-existing failures in atmosphere/core/coupler/ocean
-files and the `grid_type` baseline, none touched by this lane; they are not
-silently reported as a green repository-wide run.
+The original receipt's statement that all seven ratchet failures were
+pre-existing was wrong: the hardcoded-constants ratchet correctly failed on
+the lane-owned `constants_config.py` literal `273.15`.  The review correction
+uses `constants.T_freeze`, `constants.rho_ocean_nemo`, and
+`constants.L_fus_nemo`.  The exact per-file ratchet nodes for every changed
+Python file, followed by the Phase-2 test file, report:
+
+```text
+============================= 13 passed in 18.20s ==============================
+```
+
+The new flooding regression exercises an active-flooding column and proves
+bit-for-bit equality between the former `_dh_step` expression and the shared
+`snow_ice_flooding` function before the duplicate production expression is
+removed.
 
 ## Review and tree integrity
 
-The required Claude review was attempted read-only twice after the implementation
-and tests; its API endpoint failed DNS (`ENOTFOUND`) both times.  The required GLM-5.2
-review tool is not available in this environment.  Therefore the Phase-2 diff
-is **UNREVIEWED by the mandated external pair**; test/gate results do not waive
-that status.
+An independent Claude review confirmed the dispatch, gate, planted controls,
+first-divergence value, and non-vacuity, then placed the work on HOLD for the
+three corrections recorded above.  This commit resolves those findings; no
+second external review tool is available in this environment.
 
 No file in `/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2` or any shipped NEMO
 configuration was modified or deleted.  No stale item was removed.  There is
 nothing newly identified for `FLAGGED FOR FUTURE DELETION`; the `_future`
 module remains as a compatibility shim so existing imports are not broken.
+
+## End-of-task choice register
+
+- ASKED — use only the ORCA1-resolved single-category HFN, BL99 3+3/P07,
+  salinity option 2 (`rn_sinew=0.75`), no ponds, and no lateral melt identity.
+- ASKED — reuse the existing ice model, parked BL99 work, shared Thomas solver,
+  and shared snow-ice flooding implementation; do not construct a second model.
+- ASKED — use the pinned ERA5/exchange inputs, one-hour step, CPU, and fp64.
+- ASKED — use the `1e-15` DINO bar, required time-level registry, first-
+  divergence stopping rule, one-variable private arms, and planted controls.
+- ASKED — keep all shipped NEMO files read-only; use copy-only instrumentation.
+- ASKED — correct the three review findings before continuing ZDF ownership.
+- ASKED — do not push.
+- UNASKED — none.

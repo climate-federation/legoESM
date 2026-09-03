@@ -56,15 +56,16 @@ class IceConstantsConfig(NamedTuple):
 
 # NEMO 5.0.2 values printed by the accepted C1D_OMIP_L3 run and defined at
 # src/OCE/DOM/phycst.F90:39,57-66; rho0/rcp are the live TEOS-10 values from
-# src/OCE/TRA/eosbn2.F90:1898-1899.  Literals are deliberate oracle constants.
+# src/OCE/TRA/eosbn2.F90:1898-1899.  Values already represented by canonical
+# constants are referenced directly; the remaining literals are SI3-specific.
 NEMO_SI3_CONSTANTS_CONFIG = IceConstantsConfig(
-    T0=273.15,
+    T0=constants.T_freeze,
     rho_ice=917.0,
     rho_snow=330.0,
-    rho_ocean=1026.0,
+    rho_ocean=constants.rho_ocean_nemo,
     c_ice=2096.7,
     c_ocean=3991.86795711963,
-    latent_fusion=0.3333601e6,
+    latent_fusion=constants.L_fus_nemo,
     latent_sublimation=2.8344e6,
     k_ice=2.034396,
     k_snow=0.5,
