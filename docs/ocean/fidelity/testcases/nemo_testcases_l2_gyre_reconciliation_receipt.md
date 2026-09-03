@@ -36,5 +36,65 @@ widening (true only for the `een_total` arm) — corrected to state both arms.
 
 ## Item 2 — gate script provenance and before/after
 
-See below (this section is appended after the gate-script fix and the
-before/after regeneration).
+### The bug and the fix
+
+`nemo_testcase_l2_gyre_phase3_gate.py` read `trace.substeps` (the barotropic
+solver's substep record) by fixed position (`BT_SUBSTEP_NAMES.index(name)`).
+The merge unified the two branches' rival `return_trace` mechanisms
+(receipt Item 1 / hunks B2-B6) into ONE name-keyed dict carrying iso's 19
+names plus l2's `trd_u`/`trd_v`. A positional-only reader raises `KeyError: 0`
+against that dict (an int key on a dict of string keys) on the merged tree.
+
+Fix (already drafted, completed and verified here): `bt_frame(substeps, name)`
+dispatches on `isinstance(substeps, dict)` — dict path keys by name (via
+`BT_TRACE_KEY` for the two renamed fields), tuple/list path indexes by
+`BT_PRE_MERGE_ORDER.index(name)` (b2f7c298's own `BT_SUBSTEP_NAMES` order,
+verbatim). Both the pre-merge tree (`b2f7c298411f`, whose own
+`ocean_model_latlon_cgrid.py` returns a positional tuple from
+`_return_barotropic_substeps=True`) and the merged tree (name-keyed dict) are
+read by the SAME committed script — no separate normalisation step needed,
+because the public trace-request kwarg name (`_return_barotropic_substeps`)
+is identical on both trees (only its internal plumbing differs: b2f7c298
+seeds `_return_substep_trace`, the merge seeds iso's
+`_nemo_substep_trace_test_hook` — receipt Item 1's B4/B5/B6 row). Also fixed:
+`read_bt_substeps` now accepts the oracle dump's actual on-disk format
+(`NEMO_L2_BTSUB_1`, 18 fields, no `cor_u`/`cor_v`) in addition to the planned
+but never-generated format 2; a `--without-oracle-ene-coefficients` flag
+WAIVES the ENE-coefficient arm (recorded `UNMEASURED`, not silently skipped)
+since `oracle_bt_ene_coeff_kt00000001.bin` does not exist on disk (confirmed:
+absent from `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gyre_kt1_10/`).
+
+### Runs
+
+| | commit | worktree | command | report sha256 |
+|---|---|---|---|---|
+| BEFORE | `b2f7c298411f` (`fidelity/nemo-testcases-l2-gyre-codex`) | `/tmp/wt-gyre-before` (temporary, removed after) | `cd /tmp/wt-gyre-before && PYTHONPATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_phase3_gate.py --without-oracle-ene-coefficients --output /data/abyssal/dbalwada/nemo-testcases-l2/reconcile/before/legoesm_phase3_gate.json` | `a4f8683ab8c2fad15d54cb082054ad38bafd10ff51c6ca28ace51ec461dd49b8` |
+| AFTER | `196a65f5df` (this branch, `c9526e585` + Item 1 commit) | `/tmp/wt-gyre` | same command, `cd /tmp/wt-gyre`, `--output .../reconcile/after/legoesm_phase3_gate.json` | `f467f08979ee0215d3ca5ed18ff8a6bb92bebbb8923f38be0e36b8fe274ddb99` |
+
+Both runs exit 1 (`status: DEBT`) — expected per the skill's own framing: DEBT
+is a scientific finding, not a harness failure. `--without-oracle-ene-coefficients`
+is required on both because the instrumented run never emitted the ENE dump
+(true on both trees, not a merge artifact).
+
+### Reproduced before/after table (kt=1..10, eval protocol identical on both)
+
+| check | BEFORE | AFTER | verdict |
+|---|---|---|---|
+| kt=1 T/S/u/v/ssh | all `exact=True`, absolute_max=0.0 | all `exact=True`, absolute_max=0.0 | EXACT, both sides, UNCHANGED |
+| first_over_bar | kt=2, fields `[T,S,u,v,ssh]` | kt=2, fields `[T,S,u,v,ssh]` | UNCHANGED |
+| exact_prefix_entering (kt=1..10) | `[T,T,F,F,F,F,F,F,F,F]` | `[T,T,F,F,F,F,F,F,F,F]` | UNCHANGED |
+| kt=2..10 rows (45 = 9 kt x 5 fields) | — | 23 better / 22 worse / 0 identical | median\|ratio-1\|=8.584e-4, max=1.212e-1 (`ssh` kt=8, `0.5246e-3`->`0.5881e-3`) |
+| barotropic substep rows (800 = 50 substeps x 16 names) | 126 AT-BAR / 674 DEBT | 126 AT-BAR / 674 DEBT | tally UNCHANGED; 382 identical / 214 better / 204 worse; median\|ratio-1\|=7.289e-14 (both sides fp64-close); the single max-ratio pair (`u_entry` jn=1, ~1e-24 vs 0.0) is float noise between two AT-BAR values, not a regression |
+| overall `status` | DEBT | DEBT | UNCHANGED |
+
+This reproduces the merge commit message's own before/after table (which used
+a third common-revision script, `efdef59b2`, because neither endpoint's own
+script ran standalone at the time) to the same precision: 23/22,
+8.6e-4/1.2e-1, 382/214/204, 7.4e-14, and 126/674 all match. The movement in
+the kt=2..10 and barotropic rows is EXPECTED (Rule 8, oracle-fidelity skill):
+the RK3 ladder-collapse re-association the iso side landed was proven for
+`f=0` only, and GYRE rotates, so its `O(dt^2 f)` Matsuno channel changed.
+Nothing here is claimed MATCHED; the case remains DEBT, unchanged from
+before the merge.
+
+Raw reports: `/data/abyssal/dbalwada/nemo-testcases-l2/reconcile/{before,after}/legoesm_phase3_gate.json`.

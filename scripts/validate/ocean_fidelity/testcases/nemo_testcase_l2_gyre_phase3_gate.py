@@ -291,6 +291,49 @@ BT_TRACE_KEY = {
     "transport_metric_v": "transport_v",
 }
 
+# The solver's barotropic substep frame is NAME-KEYED at and after the
+# lane-1/lane-2 merge (c9526e585, which unified the two branches' rival
+# positional layouts) and POSITIONAL before it.  This is the exact reach of
+# that merge hunk, so the gate must read both: a before/after comparison runs
+# ONE instrument against TWO trees, and a positional-only reader raises
+# KeyError on the merged tree while a keyed-only reader raises TypeError on
+# the pre-merge tree.  Order below is b2f7c298's BT_SUBSTEP_NAMES verbatim.
+BT_PRE_MERGE_ORDER = (
+    "eta_entry", "u_entry", "v_entry",
+    "eta_mid", "u_mid", "v_mid",
+    "eta_exit", "eta_pgf",
+    "pgf_u", "pgf_v", "trd_u", "trd_v", "slow_u", "slow_v",
+    "u_exit", "v_exit", "transport_metric_u", "transport_metric_v",
+)
+
+
+# The isomorphism branch's UP3 selector split (9bbf9f7bd) renamed the public
+# "upwind3" to "nemo_up3"/"oceananigans_up3".  Pre-split, "upwind3" resolved
+# NEMO's advected-velocity-pair rule (dynadv_up3.F90:166,169-172) whenever
+# momentum_time_integrator == "rk3_ws" -- which this arm's base card is -- and
+# Oceananigans' transport rule otherwise.  So the two names select the SAME
+# NEMO arm on their respective trees, and reading the tree's own accepted set
+# lets one committed gate score both.
+def _nemo_up3_name() -> str:
+    try:
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            VALID_MOMENTUM_FLUX_SCHEME,
+        )
+    except ImportError:          # pre-split tree: no exported valid set
+        return "upwind3"
+    return ("nemo_up3" if "nemo_up3" in VALID_MOMENTUM_FLUX_SCHEME
+            else "upwind3")
+
+
+_NEMO_UP3_NAME = _nemo_up3_name()
+
+
+def bt_frame(substeps, name):
+    """One barotropic substep frame by name, keyed or positional."""
+    if isinstance(substeps, dict):
+        return substeps[BT_TRACE_KEY.get(name, name)]
+    return substeps[BT_PRE_MERGE_ORDER.index(name)]
+
 ORACLE_BT_SUBSTEP_NAMES = (
     "eta_entry", "u_entry", "v_entry",
     "eta_mid", "u_mid", "v_mid",
@@ -306,19 +349,31 @@ def read_bt_substeps(path: Path) -> dict:
         magic = handle.read(16).decode("ascii").rstrip()
         header = struct.unpack("=6i", handle.read(24))
         version, kt, ncycle, nx, ny, bits = header
-        require(magic == "NEMO_L2_BTSUB_2", f"{path}: bad magic")
+        # The instrumented GYRE run on disk emits format 1 (18 fields); the
+        # re-instrumented run that would emit format 2 (adds cor_u/cor_v, the
+        # separated barotropic Coriolis) was never made -- the lane's credits
+        # ran out first.  Read BOTH, so one committed instrument can score the
+        # oracle set that exists as well as the one that was planned.  Under
+        # format 1 the cor_u/cor_v rows are simply absent, which is why
+        # --without-oracle-ene-coefficients (the arm that consumes them) is
+        # required with it.
+        require(magic in ("NEMO_L2_BTSUB_1", "NEMO_L2_BTSUB_2"),
+                f"{path}: bad magic {magic!r}")
+        _fields = (BT_PRE_MERGE_ORDER if version == 1
+                   else ORACLE_BT_SUBSTEP_NAMES)
         require(
-            (version, kt, ncycle, nx, ny, bits) == (2, 1, 50, DIMS[0], DIMS[1], 64),
+            (version, kt, ncycle, nx, ny, bits) == (version, 1, 50, DIMS[0], DIMS[1], 64)
+            and version in (1, 2),
             f"{path}: bad header",
         )
-        records = {name: [] for name in ORACLE_BT_SUBSTEP_NAMES}
+        records = {name: [] for name in _fields}
         count = nx * ny
         for expected in range(1, ncycle + 1):
             raw_jn = handle.read(4)
             require(len(raw_jn) == 4, f"{path}: truncated at substep {expected}")
             (jn,) = struct.unpack("=i", raw_jn)
             require(jn == expected, f"{path}: substep sequence {jn} != {expected}")
-            for name in ORACLE_BT_SUBSTEP_NAMES:
+            for name in _fields:
                 # zu_frc/zv_frc are A2D interior arrays; the other recurrence
                 # operands retain their full two-halo allocation.
                 if name in {"slow_u", "slow_v"}:
@@ -577,6 +632,7 @@ def run(
     plant_coverage=False,
     plant_barotropic=False,
     plant_ene_coefficient=False,
+    without_oracle_ene_coefficients=False,
 ) -> dict:
     import jax
     import jax.numpy as jnp
@@ -673,13 +729,31 @@ def run(
     qsr_path = root / "oracle_qsr_stage3_kt00000001.bin"
     bt_substep_path = root / "oracle_bt_substeps_kt00000001.bin"
     ene_coefficient_path = root / "oracle_bt_ene_coeff_kt00000001.bin"
-    for path in (zdf_path, qsr_path, bt_substep_path, ene_coefficient_path):
+    for path in (zdf_path, qsr_path, bt_substep_path):
         require(path.is_file(), f"missing causal artifact {path}")
         artifacts[path.name] = sha256(path)
+    # Rule 1 disposition, not a relaxed bar: the ENE-coefficient arm scores
+    # against an oracle dump the instrumented GYRE run never emitted, so with
+    # --without-oracle-ene-coefficients the arm is WAIVED and listed loudly in
+    # "unmeasured" rather than aborting the whole gate.  Without the flag the
+    # dump is still required.  Every other row, and the DEBT verdict, is
+    # unaffected; this is what lets ONE instrument score two trees when the
+    # oracle side is missing on both.
+    if without_oracle_ene_coefficients:
+        require(not plant_ene_coefficient,
+                "--plant-ene-coefficient needs the oracle ENE dump")
+    else:
+        require(ene_coefficient_path.is_file(),
+                f"missing causal artifact {ene_coefficient_path}")
+    ene_available = ene_coefficient_path.is_file() and not (
+        without_oracle_ene_coefficients)
+    if ene_available:
+        artifacts[ene_coefficient_path.name] = sha256(ene_coefficient_path)
     zdf_entry = read_zdf_entry(zdf_path)
     qsr_stage3 = read_qsr_stage3(qsr_path)
     bt_substeps = read_bt_substeps(bt_substep_path)
-    oracle_ene_coefficients = read_ene_coefficients(ene_coefficient_path)
+    oracle_ene_coefficients = (
+        read_ene_coefficients(ene_coefficient_path) if ene_available else None)
     stages = {}
     transports = {}
     for stage in (1, 2, 3):
@@ -866,7 +940,7 @@ def run(
                 f"{CASE}.kt1.bt.jn02.{component}_mid_from_jn01_exit",
                 bt_substeps[f"{component}_exit"][0],
                 _trace_native(
-                    trace.substeps[f"{component}_mid"], f"{component}_mid",
+                    bt_frame(trace.substeps, f"{component}_mid"), f"{component}_mid",
                 )[1],
                 masks[component][..., 0],
             )
@@ -881,151 +955,170 @@ def run(
             scheme="ene",
         ).items()
     }
-    coefficient_rows = []
-    oracle_coeff_dict = {
-        name: oracle_ene_coefficients[name] for name in ENE_COEFFICIENT_NAMES
-    }
-    for name in ENE_COEFFICIENT_NAMES:
-        component = "u" if name.startswith("ffu") else "v"
-        candidate = literal_coefficients[name]
-        if plant_ene_coefficient and name == "ffu_nw":
-            candidate = candidate.copy()
-            first = tuple(np.argwhere(masks["u"][..., 0])[0])
-            candidate[first] += 1.0
-        coefficient_rows.append(
-            score(
-                f"{CASE}.kt1.bt.ene_coefficient.{name}",
-                oracle_coeff_dict[name],
-                candidate,
-                masks[component][..., 0],
+    if ene_available:
+        coefficient_rows = []
+        oracle_coeff_dict = {
+            name: oracle_ene_coefficients[name] for name in ENE_COEFFICIENT_NAMES
+        }
+        for name in ENE_COEFFICIENT_NAMES:
+            component = "u" if name.startswith("ffu") else "v"
+            candidate = literal_coefficients[name]
+            if plant_ene_coefficient and name == "ffu_nw":
+                candidate = candidate.copy()
+                first = tuple(np.argwhere(masks["u"][..., 0])[0])
+                candidate[first] += 1.0
+            coefficient_rows.append(
+                score(
+                    f"{CASE}.kt1.bt.ene_coefficient.{name}",
+                    oracle_coeff_dict[name],
+                    candidate,
+                    masks[component][..., 0],
+                )
             )
-        )
-    ene_coefficient_control = {
-        "name": "control.planted_ene_coefficient",
-        "status": "NOT_REQUESTED",
-    }
-    if plant_ene_coefficient:
-        planted_row = coefficient_rows[0]
-        require(
-            planted_row["status"] == "DEBT" and planted_row["absolute_max"] >= 1.0,
-            "planted ENE coefficient did not fire at its registered magnitude",
-        )
         ene_coefficient_control = {
             "name": "control.planted_ene_coefficient",
-            "status": "VERIFIED",
-            "observed_absolute_max": planted_row["absolute_max"],
-            "expected_minimum": 1.0,
+            "status": "NOT_REQUESTED",
+        }
+        if plant_ene_coefficient:
+            planted_row = coefficient_rows[0]
+            require(
+                planted_row["status"] == "DEBT" and planted_row["absolute_max"] >= 1.0,
+                "planted ENE coefficient did not fire at its registered magnitude",
+            )
+            ene_coefficient_control = {
+                "name": "control.planted_ene_coefficient",
+                "status": "VERIFIED",
+                "observed_absolute_max": planted_row["absolute_max"],
+                "expected_minimum": 1.0,
+            }
+
+        def full_faces(u_native, v_native):
+            return (
+                jnp.asarray(np.concatenate([u_native[:, -1:], u_native], axis=1)),
+                jnp.asarray(np.concatenate([np.zeros_like(v_native[:1]), v_native], axis=0)),
+            )
+
+        oracle_u_mid, oracle_v_mid = full_faces(
+            bt_substeps["u_mid"][1], bt_substeps["v_mid"][1]
+        )
+        candidate_u_mid = bt_frame(trace.substeps, "u_mid")[1]
+        candidate_v_mid = bt_frame(trace.substeps, "v_mid")[1]
+        oracle_cor_u, oracle_cor_v, oracle_terms = _nemo_literal_barotropic_coriolis(
+            oracle_u_mid,
+            oracle_v_mid,
+            {name: jnp.asarray(value) for name, value in oracle_coeff_dict.items()},
+            return_terms=True,
+        )
+        literal_cor_u, literal_cor_v, literal_terms = _nemo_literal_barotropic_coriolis(
+            candidate_u_mid,
+            candidate_v_mid,
+            {name: jnp.asarray(value) for name, value in literal_coefficients.items()},
+            return_terms=True,
+        )
+        product_rows = []
+        for name in oracle_terms:
+            component = name[0]
+            product_rows.append(
+                score(
+                    f"{CASE}.kt1.bt.jn02.ene_product.{name}",
+                    np.asarray(oracle_terms[name]),
+                    np.asarray(literal_terms[name]),
+                    masks[component][..., 0],
+                )
+            )
+        reconstructed_term_rows = [
+            score(
+                f"{CASE}.kt1.bt.jn02.oracle_coefficient_reconstruction.trd_u",
+                bt_substeps["cor_u"][1],
+                np.asarray(oracle_cor_u)[:, 1:],
+                masks["u"][..., 0],
+            ),
+            score(
+                f"{CASE}.kt1.bt.jn02.oracle_coefficient_reconstruction.trd_v",
+                bt_substeps["cor_v"][1],
+                np.asarray(oracle_cor_v)[1:, :],
+                masks["v"][..., 0],
+            ),
+            score(
+                f"{CASE}.kt1.bt.jn02.literal_coefficient_arm.trd_u",
+                bt_substeps["cor_u"][1],
+                np.asarray(literal_cor_u)[:, 1:],
+                masks["u"][..., 0],
+            ),
+            score(
+                f"{CASE}.kt1.bt.jn02.literal_coefficient_arm.trd_v",
+                bt_substeps["cor_v"][1],
+                np.asarray(literal_cor_v)[1:, :],
+                masks["v"][..., 0],
+            ),
+        ]
+        causal_rows = []
+        for component in ("u", "v"):
+            native_literal = _trace_native(
+                bt_frame(literal_trace.substeps, f"trd_{component}"),
+                f"trd_{component}",
+            )[1]
+            causal_rows.append(
+                score(
+                    f"{CASE}.kt1.bt.jn02.literal_selector_causal_arm.trd_{component}",
+                    bt_substeps[f"trd_{component}"][1],
+                    native_literal,
+                    masks[component][..., 0],
+                )
+            )
+        generic_native_u = _trace_native(
+            bt_frame(generic_trace.substeps, "trd_u"), "trd_u"
+        )[1]
+        literal_native_u = _trace_native(
+            bt_frame(literal_trace.substeps, "trd_u"), "trd_u"
+        )[1]
+        active_u = masks["u"][..., 0]
+        generic_residual = float(
+            np.max(np.abs(generic_native_u[active_u] - bt_substeps["trd_u"][1][active_u]))
+        )
+        causal_movement = float(
+            np.max(np.abs(literal_native_u[active_u] - generic_native_u[active_u]))
+        )
+        ene_causal_scaling = {
+            "historical_generic_residual": generic_residual,
+            "causal_movement": causal_movement,
+            "movement_over_historical_generic_residual": (
+                causal_movement / generic_residual if generic_residual else None
+            ),
+            "arm_residual": max(row["absolute_max"] for row in causal_rows),
+            "ene_component_owner_label": (
+                "CONFIRMED_CAUSAL_OWNER_OF_ENE_COMPONENT"
+                if all(row["status"] == "AT-BAR" for row in coefficient_rows)
+                and all(row["status"] == "AT-BAR" for row in product_rows)
+                and all(row["status"] == "AT-BAR" for row in reconstructed_term_rows)
+                else "UNMEASURED_ENE_COMPONENT"
+            ),
+            "combined_trd_owner_label": (
+                "CONFIRMED_OWNER"
+                if all(row["status"] == "AT-BAR" for row in causal_rows)
+                else "CAUSAL_CONTRIBUTOR_NOT_SOLE_OWNER"
+            ),
+            "scaling_check_before_owner_label": True,
+            "rows": causal_rows,
+        }
+    else:
+        # WAIVED, not passed: the oracle ENE-coefficient dump is absent, so
+        # every row in this arm is UNMEASURED.  Named in "unmeasured" below.
+        coefficient_rows = []
+        product_rows = []
+        reconstructed_term_rows = []
+        ene_coefficient_control = {
+            "name": "control.planted_ene_coefficient",
+            "status": "WAIVED_NO_ORACLE_ENE_COEFFICIENT_DUMP",
+        }
+        ene_causal_scaling = {
+            "ene_component_owner_label":
+                "WAIVED_NO_ORACLE_ENE_COEFFICIENT_DUMP",
+            "combined_trd_owner_label":
+                "WAIVED_NO_ORACLE_ENE_COEFFICIENT_DUMP",
+            "rows": [],
         }
 
-    def full_faces(u_native, v_native):
-        return (
-            jnp.asarray(np.concatenate([u_native[:, -1:], u_native], axis=1)),
-            jnp.asarray(np.concatenate([np.zeros_like(v_native[:1]), v_native], axis=0)),
-        )
-
-    oracle_u_mid, oracle_v_mid = full_faces(
-        bt_substeps["u_mid"][1], bt_substeps["v_mid"][1]
-    )
-    candidate_u_mid = trace.substeps["u_mid"][1]
-    candidate_v_mid = trace.substeps["v_mid"][1]
-    oracle_cor_u, oracle_cor_v, oracle_terms = _nemo_literal_barotropic_coriolis(
-        oracle_u_mid,
-        oracle_v_mid,
-        {name: jnp.asarray(value) for name, value in oracle_coeff_dict.items()},
-        return_terms=True,
-    )
-    literal_cor_u, literal_cor_v, literal_terms = _nemo_literal_barotropic_coriolis(
-        candidate_u_mid,
-        candidate_v_mid,
-        {name: jnp.asarray(value) for name, value in literal_coefficients.items()},
-        return_terms=True,
-    )
-    product_rows = []
-    for name in oracle_terms:
-        component = name[0]
-        product_rows.append(
-            score(
-                f"{CASE}.kt1.bt.jn02.ene_product.{name}",
-                np.asarray(oracle_terms[name]),
-                np.asarray(literal_terms[name]),
-                masks[component][..., 0],
-            )
-        )
-    reconstructed_term_rows = [
-        score(
-            f"{CASE}.kt1.bt.jn02.oracle_coefficient_reconstruction.trd_u",
-            bt_substeps["cor_u"][1],
-            np.asarray(oracle_cor_u)[:, 1:],
-            masks["u"][..., 0],
-        ),
-        score(
-            f"{CASE}.kt1.bt.jn02.oracle_coefficient_reconstruction.trd_v",
-            bt_substeps["cor_v"][1],
-            np.asarray(oracle_cor_v)[1:, :],
-            masks["v"][..., 0],
-        ),
-        score(
-            f"{CASE}.kt1.bt.jn02.literal_coefficient_arm.trd_u",
-            bt_substeps["cor_u"][1],
-            np.asarray(literal_cor_u)[:, 1:],
-            masks["u"][..., 0],
-        ),
-        score(
-            f"{CASE}.kt1.bt.jn02.literal_coefficient_arm.trd_v",
-            bt_substeps["cor_v"][1],
-            np.asarray(literal_cor_v)[1:, :],
-            masks["v"][..., 0],
-        ),
-    ]
-    causal_rows = []
-    for component in ("u", "v"):
-        native_literal = _trace_native(
-            literal_trace.substeps[f"trd_{component}"],
-            f"trd_{component}",
-        )[1]
-        causal_rows.append(
-            score(
-                f"{CASE}.kt1.bt.jn02.literal_selector_causal_arm.trd_{component}",
-                bt_substeps[f"trd_{component}"][1],
-                native_literal,
-                masks[component][..., 0],
-            )
-        )
-    generic_native_u = _trace_native(
-        generic_trace.substeps["trd_u"], "trd_u"
-    )[1]
-    literal_native_u = _trace_native(
-        literal_trace.substeps["trd_u"], "trd_u"
-    )[1]
-    active_u = masks["u"][..., 0]
-    generic_residual = float(
-        np.max(np.abs(generic_native_u[active_u] - bt_substeps["trd_u"][1][active_u]))
-    )
-    causal_movement = float(
-        np.max(np.abs(literal_native_u[active_u] - generic_native_u[active_u]))
-    )
-    ene_causal_scaling = {
-        "historical_generic_residual": generic_residual,
-        "causal_movement": causal_movement,
-        "movement_over_historical_generic_residual": (
-            causal_movement / generic_residual if generic_residual else None
-        ),
-        "arm_residual": max(row["absolute_max"] for row in causal_rows),
-        "ene_component_owner_label": (
-            "CONFIRMED_CAUSAL_OWNER_OF_ENE_COMPONENT"
-            if all(row["status"] == "AT-BAR" for row in coefficient_rows)
-            and all(row["status"] == "AT-BAR" for row in product_rows)
-            and all(row["status"] == "AT-BAR" for row in reconstructed_term_rows)
-            else "UNMEASURED_ENE_COMPONENT"
-        ),
-        "combined_trd_owner_label": (
-            "CONFIRMED_OWNER"
-            if all(row["status"] == "AT-BAR" for row in causal_rows)
-            else "CAUSAL_CONTRIBUTOR_NOT_SOLE_OWNER"
-        ),
-        "scaling_check_before_owner_label": True,
-        "rows": causal_rows,
-    }
     trace_order = (
         "eta_entry", "u_entry", "v_entry",
         "eta_mid", "u_mid", "v_mid",
@@ -1042,7 +1135,7 @@ def run(
     for substep in range(50):
         for name in trace_order:
             candidate = _trace_native(
-                trace.substeps[BT_TRACE_KEY.get(name, name)], name)[substep]
+                bt_frame(trace.substeps, name), name)[substep]
             stagger = "u" if name.startswith("u_") or name.endswith("_u") else (
                 "v" if name.startswith("v_") or name.endswith("_v") else "eta"
             )
@@ -1261,14 +1354,7 @@ def run(
         operator_arm_configs = {
             "momentum_scheme_identity": cfg._replace(
                 momentum_advection="flux_form",
-                # Renamed by the isomorphism branch's UP3 selector split
-                # (9bbf9f7bd): the public "upwind3" resolved NEMO's
-                # advected-velocity-pair rule (dynadv_up3.F90:166,169-172)
-                # whenever momentum_time_integrator == "rk3_ws", which this
-                # arm's base card is, and Oceananigans' transport rule
-                # otherwise.  "nemo_up3" names that same NEMO rule, so this
-                # control arm is unchanged in behaviour.
-                momentum_flux_scheme="nemo_up3",
+                momentum_flux_scheme=_NEMO_UP3_NAME,
                 vertical_momentum_scheme="nemo_up3",
                 vorticity_scheme="al81",
                 ke_gradient_scheme="centered",
@@ -1449,7 +1535,12 @@ def run(
         "growth_characterization": _trajectory_growth(steps),
         "steps": steps,
         "artifacts": artifacts,
-        "unmeasured": [
+        "unmeasured": ([] if ene_available else [
+            "ENE-coefficient arm (coefficients, products, term "
+            "reconstruction and the ENE causal-owner labels): WAIVED -- the "
+            "instrumented GYRE run never emitted "
+            "oracle_bt_ene_coeff_kt00000001.bin",
+        ]) + [
             "numerical T/S agreement at internal Kaa stages",
             "metric-weighted zhU/zhV transport comparison (metrics not dumped in this round)",
             "a two-sided source-isolated owner for the first over-bar whole-step row",
@@ -1469,6 +1560,13 @@ def main(argv=None) -> int:
     parser.add_argument("--plant-coverage", action="store_true")
     parser.add_argument("--plant-barotropic", action="store_true")
     parser.add_argument("--plant-ene-coefficient", action="store_true")
+    parser.add_argument(
+        "--without-oracle-ene-coefficients", action="store_true",
+        help=("WAIVE the ENE-coefficient arm because the instrumented GYRE "
+              "run never emitted oracle_bt_ene_coeff_kt00000001.bin. The arm "
+              "is recorded as UNMEASURED; every other row and the DEBT "
+              "verdict are unchanged. Required to score a tree against the "
+              "oracle set that exists."))
     args = parser.parse_args(argv)
     try:
         report = run(
@@ -1480,6 +1578,8 @@ def main(argv=None) -> int:
             plant_coverage=args.plant_coverage,
             plant_barotropic=args.plant_barotropic,
             plant_ene_coefficient=args.plant_ene_coefficient,
+            without_oracle_ene_coefficients=(
+                args.without_oracle_ene_coefficients),
         )
     except (GateError, OSError, ValueError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
