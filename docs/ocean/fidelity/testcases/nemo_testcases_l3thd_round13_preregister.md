@@ -137,3 +137,11 @@ one-refresh delayed value.  One-variable private arm: force an immediate
 current reduction; it must reproduce the `kt=5` failure.  Prediction for the
 selected delayed arm: all three `emp_corr`, `emp`, and `qns` rows return within
 the bar without changing any upstream row.
+
+The delayed arm confirms that prediction.  The next registered boundary is
+the top-cell T/S RHS immediately before and after each `tra_sbc_RK3` call.
+For the executing nonlinear-SSH arm, stages 1/2 select
+`trasbc.F90:284-292`; stage 3 selects `:294-315`.  Prediction: source-ordered
+replay of the mass-carried tracer terms and the stage-3 `qns`/`sfx` terms is
+within the bar for all 26,280 stage rows.  Private arm `trasbc_heat` perturbs
+only its registered `qns` operand and must make the temperature row red.
