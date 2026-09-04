@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import math
 import struct
 from pathlib import Path
 
@@ -18,9 +19,10 @@ EXPECTED_STEPS = 8760
 MAGIC = b"NEMO_L3BULK_001 "
 EXPECTED_BULK_SHA256 = "57868f3212646bdf6b0c4add0f48701c0082718331bc76a153050c6d1d44dfe9"
 EXPECTED_EXCHANGE_SHA256 = "091395cf604e83d88fbf458c4ef76ac3df2d5a65dac9cdc502e224cc1d1af2e4"
+ORACLE_VERSION = "V2_SCALAR_MATH"
 DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l3/"
-    "c1d_omip_l3_sasice_bulk_phase1"
+    "c1d_omip_l3_sasice_scalarmath_v2_a"
 )
 
 STAGE_NAMES = {0: "POST_BLK_ICE_1", 1: "POST_BLK_ICE_2", 2: "POST_ICE_FLX_OTHER"}
@@ -102,6 +104,20 @@ COVERAGE = {
 }
 EXPECTED_EXCHANGE_FIELDS = tuple(COVERAGE)
 
+BIT_OWNER = {
+    (stage, name): (
+        "jax_exp_ice_alb"
+        if stage == 1 and name in {"albedo", "qsr_ice", "qsr_tot"}
+        else "binary64_operation_order"
+    )
+    for stage, names in (
+        (0, ("wndm_ice", "utau_ice", "vtau_ice")),
+        (1, STAGE1_NAMES[25:45]),
+        (2, ("qsb_ice_bot", "fhld", "qlead")),
+    )
+    for name in names
+}
+
 
 class GateError(RuntimeError):
     pass
@@ -173,6 +189,112 @@ def _as_dict(values: np.ndarray, names: tuple[str, ...]) -> dict[str, np.ndarray
     return {name: values[:, index] for index, name in enumerate(names)}
 
 
+def _scalar_glibc_albedo_replay(stage1: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Gate-only scalar-libm replay of the active no-pond SI3 albedo path."""
+    from legoesm import constants
+
+    inv_log_interval = 1.0 / (
+        math.log(constants.albedo_ice_pivot_orca1)
+        - math.log(constants.albedo_ice_thin_break_nemo)
+    )
+    log_pivot = math.log(constants.albedo_ice_pivot_orca1)
+    albedo = []
+    for surface, h_ice, h_snow, cloud in zip(
+        stage1["T_surface"], stage1["h_ice"], stage1["h_snow"],
+        stage1["cloud_fraction"], strict=True,
+    ):
+        snow_fraction = h_snow / (h_snow + constants.snow_cover_depth_nemo)
+        bare_thick = (
+            constants.albedo_ice_melt_orca1
+            if h_snow == 0.0 and surface >= constants.T_freeze
+            else constants.albedo_ice_dry_orca1
+        )
+        bare_mid = bare_thick + (
+            constants.albedo_ice_thin_nemo - bare_thick
+        ) * inv_log_interval * (log_pivot - math.log(h_ice))
+        bare_thin = constants.albedo_ocean_nemo + (
+            constants.albedo_ice_thin_nemo - constants.albedo_ocean_nemo
+        ) * (1.0 / constants.albedo_ice_thin_break_nemo) * h_ice
+        bare = (
+            bare_thin if h_ice <= constants.albedo_ice_thin_break_nemo
+            else bare_mid if h_ice <= constants.albedo_ice_pivot_orca1
+            else bare_thick
+        )
+        if surface < constants.T_freeze:
+            snow = constants.albedo_snow_dry_orca1 - (
+                constants.albedo_snow_dry_orca1 - bare
+            ) * math.exp(
+                -h_snow * (1.0 / constants.albedo_snow_decay_dry_nemo)
+            )
+        else:
+            snow = constants.albedo_snow_melt_orca1 - (
+                constants.albedo_snow_melt_orca1 - bare
+            ) * math.exp(
+                -h_snow * (1.0 / constants.albedo_snow_decay_melt_nemo)
+            )
+        overcast = snow_fraction * snow + (1.0 - snow_fraction) * bare
+        clear = overcast - (
+            constants.albedo_cloud_quad_nemo * overcast * overcast
+            + constants.albedo_cloud_linear_nemo * overcast
+            + constants.albedo_cloud_offset_nemo
+        )
+        albedo.append((1.0 - cloud) * clear + cloud * overcast)
+    albedo = np.asarray(albedo, dtype=np.float64)
+    qsr_ice = np.asarray([
+        (1.0 / (1.0 - constants.albedo_ocean_nemo)) * (1.0 - alb) * qsr
+        for alb, qsr in zip(albedo, stage1["qsr"], strict=True)
+    ], dtype=np.float64)
+    qsr_total = np.asarray([
+        (1.0 - fraction) * ocean + category * ice
+        for fraction, ocean, category, ice in zip(
+            stage1["ice_fraction_before"], stage1["qsr_ocean"],
+            stage1["category_fraction_before"], qsr_ice, strict=True,
+        )
+    ], dtype=np.float64)
+    return {"albedo": albedo, "qsr_ice": qsr_ice, "qsr_tot": qsr_total}
+
+
+def _bit_owner_groups(rows: list[dict[str, object]], *, plant: bool = False) -> dict[str, object]:
+    owners = dict(BIT_OWNER)
+    if plant:
+        owners.pop((1, "albedo"))
+    require(set(owners) == set(BIT_OWNER), "bit-owner register is incomplete")
+    grouped: dict[str, dict[str, object]] = {}
+    for row in rows:
+        key = next(
+            key for key in owners
+            if STAGE_NAMES[key[0]] == row["stage"] and key[1] == row["variable"]
+        )
+        count = int(row["non_bit_identical_count"])
+        if not count:
+            continue
+        owner = owners[key]
+        group = grouped.setdefault(owner, {
+            "non_bit_identical_rows": 0,
+            "max_relative_error_nonzero_oracle": 0.0,
+            "exact_zero_oracle_non_bit_rows": 0,
+            "variables": [],
+            "largest_relative_row": None,
+            "status": (
+                "AWAITING_LIBM_POLICY" if owner == "jax_exp_ice_alb"
+                else "DISCLOSED_AT_BAR_REASSOCIATION"
+            ),
+        })
+        group["non_bit_identical_rows"] += count
+        row_relative = float(row["max_relative_error_nonzero_oracle"])
+        if row_relative > float(group["max_relative_error_nonzero_oracle"]):
+            group["max_relative_error_nonzero_oracle"] = row_relative
+            group["largest_relative_row"] = {
+                "stage": row["stage"], "variable": row["variable"],
+                "step": row["max_relative_error_step"],
+            }
+        group["exact_zero_oracle_non_bit_rows"] += int(
+            row["exact_zero_oracle_non_bit_count"]
+        )
+        group["variables"].append(f'{row["stage"]}.{row["variable"]}')
+    return grouped
+
+
 def validate_selector(stage0: dict[str, np.ndarray], stage2: dict[str, np.ndarray]) -> None:
     from legoesm import constants
 
@@ -193,6 +315,17 @@ def _score(predicted, oracle, stage: str, variable: str) -> dict[str, object]:
     normalized = error / np.maximum(np.abs(oracle), 1.0)
     index = int(np.argmax(normalized))
     over = np.flatnonzero(normalized > BAR)
+    predicted_bits = predicted.view(np.uint64)
+    oracle_bits = oracle.view(np.uint64)
+    nonbit = np.flatnonzero(predicted_bits != oracle_bits)
+    nonzero_oracle = oracle != 0.0
+    nonbit_nonzero = (predicted_bits != oracle_bits) & nonzero_oracle
+    relative = np.zeros_like(error)
+    relative[nonzero_oracle] = (
+        error[nonzero_oracle] / np.abs(oracle[nonzero_oracle])
+    )
+    relative_nonbit = relative * (predicted_bits != oracle_bits)
+    relative_index = int(np.argmax(relative_nonbit))
     return {
         "stage": stage,
         "variable": variable,
@@ -201,6 +334,19 @@ def _score(predicted, oracle, stage: str, variable: str) -> dict[str, object]:
         "max_step": index + 1,
         "over_bar_count": int(over.size),
         "first_over_step": int(over[0]) + 1 if over.size else None,
+        "bit_identical_count": int(predicted.size - nonbit.size),
+        "non_bit_identical_count": int(nonbit.size),
+        "first_non_bit_step": int(nonbit[0]) + 1 if nonbit.size else None,
+        "max_relative_error_nonzero_oracle": (
+            float(np.max(relative[nonbit_nonzero]))
+            if np.any(nonbit_nonzero) else 0.0
+        ),
+        "max_relative_error_step": (
+            relative_index + 1 if np.any(nonbit_nonzero) else None
+        ),
+        "exact_zero_oracle_non_bit_count": int(np.sum(
+            (predicted_bits != oracle_bits) & ~nonzero_oracle
+        )),
     }
 
 
@@ -333,6 +479,8 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         bad = dict(s0_np)
         bad["Cd"] = np.asarray(bad["Cd"]) * 2.0
         validate_selector(bad, s2_np)
+    elif plant == "bit_owner":
+        pass
     elif plant is not None:
         raise GateError(f"unknown plant {plant}")
 
@@ -340,6 +488,16 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         _score(predictions[key], oracle[key], STAGE_NAMES[key[0]], key[1])
         for key in predictions
     ]
+    scalar_outputs = _scalar_glibc_albedo_replay(s1_np)
+    scalar_rows = [
+        _score(values, s1_np[name], "SCALAR_GLIBC_REPLAY", name)
+        for name, values in scalar_outputs.items()
+    ]
+    require(
+        all(int(row["non_bit_identical_count"]) == 0 for row in scalar_rows),
+        f"scalar-glibc albedo replay drift: {scalar_rows}",
+    )
+    bit_groups = _bit_owner_groups(rows, plant=plant == "bit_owner")
     exchange_rows = [
         _score(value, exchange[name], "EXCHANGE_END_STABLE", name)
         for name, value in exchange_links.items()
@@ -347,15 +505,30 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
     exchange_debt = [row for row in exchange_rows if row["over_bar_count"]]
     require(not exchange_debt, f"bulk/exchange time-level linkage violated: {exchange_debt}")
     total_over = sum(int(row["over_bar_count"]) for row in rows)
+    total_nonbit = sum(int(row["non_bit_identical_count"]) for row in rows)
     largest = max(rows, key=lambda row: float(row["max_normalized"]))
     debt_rows = [row for row in rows if int(row["over_bar_count"])]
     require(total_over == 0, f"bulk fidelity bar violated: {total_over} rows; {debt_rows}")
     return {
         "verdict": "AT-BAR",
+        "oracle_version": ORACLE_VERSION,
         "bar": BAR,
         "steps": EXPECTED_STEPS,
         "comparisons": len(rows) * EXPECTED_STEPS,
         "over_bar_rows": total_over,
+        "bit_comparisons": len(rows) * EXPECTED_STEPS,
+        "non_bit_identical_rows": total_nonbit,
+        "bit_identical_rows": len(rows) * EXPECTED_STEPS - total_nonbit,
+        "bit_owner_groups": bit_groups,
+        "scalar_glibc_owner_probe": {
+            "source": "icealb.F90:124-185; Python math.exp/log call scalar glibc libm",
+            "rows": scalar_rows,
+            "interpretation": (
+                "The scalar-libm replay is bit-identical for the three exp-owned "
+                "outputs; the corresponding JAX differences await the shared "
+                "library-exact exp precision policy."
+            ),
+        },
         "largest_row": largest,
         "dtypes": {"numpy": str(stages[0].dtype), "jax_x64": True, "backend": "cpu"},
         "streams": {
@@ -395,7 +568,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant", choices=(
         "blk_ice_1", "ice_alb", "blk_ice_2", "ice_flx_other",
-        "stream_hash", "coverage", "selector",
+        "stream_hash", "coverage", "selector", "bit_owner",
     ))
     args = parser.parse_args()
     result = evaluate(args.root, plant=args.plant)

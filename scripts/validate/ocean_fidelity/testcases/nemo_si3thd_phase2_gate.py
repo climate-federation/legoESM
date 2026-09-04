@@ -292,11 +292,12 @@ def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
         si3_column_step_arrays,
     )
     from legoesm.ice.c1d_omip_l3 import (
-        EXCHANGE_STREAM_SHA256,
         FORCING_SHA256,
+        ORACLE_V1_EXCHANGE_STREAM_SHA256,
+        ORACLE_V1_ROOT,
+        ORACLE_V1_ZDF_INPUT_STREAM_SHA256,
+        ORACLE_V1_ZDF_OPERAND_STREAM_SHA256,
         THERMO_STREAM_SHA256,
-        ZDF_INPUT_STREAM_SHA256,
-        ZDF_OPERAND_STREAM_SHA256,
         build_c1d_omip_l3_card,
     )
     from legoesm.ice.config import SI3ThermoConfig, validate_si3_thermo_config
@@ -304,7 +305,10 @@ def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
     set_policy(PrecisionPolicy.fp64())
     require(get_policy() == PrecisionPolicy.fp64(), "precision policy")
     require(jax.default_backend() == "cpu", f"backend {jax.default_backend()} is not CPU")
-    card = build_c1d_omip_l3_card()
+    # This is the retained Phase-2 boundary gate and its original compact ZDF
+    # operand schema.  Pin it explicitly to V1 while the canonical card points
+    # new certification at scalar-math V2.
+    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V1_ROOT)
     if plant_selector:
         bad = card.config._replace(si3=SI3ThermoConfig(n_ice_layers=2))
         validate_si3_thermo_config(bad)  # must raise
@@ -316,9 +320,12 @@ def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
     zdf_path = root / "oracle_si3_zdf_operands.bin"
     require(sha256(card.forcing_path) == FORCING_SHA256, "forcing SHA256")
     require(sha256(thd_path) == THERMO_STREAM_SHA256, "thermo stream SHA256")
-    require(sha256(xchg_path) == EXCHANGE_STREAM_SHA256, "exchange stream SHA256")
-    require(sha256(zin_path) == ZDF_INPUT_STREAM_SHA256, "ZDF-input stream SHA256")
-    require(sha256(zdf_path) == ZDF_OPERAND_STREAM_SHA256, "ZDF-operand stream SHA256")
+    require(sha256(xchg_path) == ORACLE_V1_EXCHANGE_STREAM_SHA256,
+            "V1 exchange stream SHA256")
+    require(sha256(zin_path) == ORACLE_V1_ZDF_INPUT_STREAM_SHA256,
+            "V1 ZDF-input stream SHA256")
+    require(sha256(zdf_path) == ORACLE_V1_ZDF_OPERAND_STREAM_SHA256,
+            "V1 ZDF-operand stream SHA256")
     operand_frames = _read_zdf_operands(zdf_path)
 
     with (

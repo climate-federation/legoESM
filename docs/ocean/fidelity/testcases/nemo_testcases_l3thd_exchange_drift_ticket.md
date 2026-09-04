@@ -87,6 +87,28 @@ scientific products above are identical.  The exact stability result is in
 - The column card's old `7f22...` pin is superseded by deterministic
   `091395cf...`; rung 3.5b uses the latter.
 
+## Scalar-math oracle V2 update (2026-09-04)
+
+User Decision 4 required a fresh oracle built with
+`arch-conda-scalarmath.fcm`, SHA-256
+`132f7a0500c4f0e86d8d3bf7864974a82e1dea5d83166dcfdfaf409e2ca04561`,
+whose production flags append `-fno-tree-vectorize`.  Independent copied source
+trees/configurations and run roots `c1d_omip_l3_sasice_scalarmath_v2_a` and
+`c1d_omip_l3_sasice_scalarmath_v2_b` each completed all 8,760 steps directly
+on CPU without an MPI launcher.  `nm -D` reports zero `_ZGV*` symbols in both
+executables.
+
+The V2 exchange stream is byte-identical between rebuilds and to the retained
+stable V1 stream: SHA-256
+`091395cf604e83d88fbf458c4ef76ac3df2d5a65dac9cdc502e224cc1d1af2e4`,
+18,571,200 bytes, 8,760 records.  Thus the exchange drift ticket remains
+**CONFIRMED / REPRODUCIBLE** under scalar math.  The bulk, thermodynamics, ZDF,
+DH, remap, and reassociation streams and both restarts are likewise A/B and
+V1/V2 byte-identical.  The three annual model-output NetCDF payloads are
+bit-identical but their global `TimeStamp` attributes differ; that metadata is
+not part of the exchange stream.  Full hashes and the byte inventory are in
+`nemo_testcases_l3thd_scalarmath_v2_gate.json`.
+
 ## Controls and tests
 
 The exact identity gate compares all bytes, not just active fields.  Plants in
@@ -102,6 +124,7 @@ classification cannot silently excuse a future active-center change.
 | Preserve all retained roots | ASKED | Complete; none deleted. |
 | Normalize only serialized data | ASKED | Complete; model state untouched. |
 | Use two independent rebuilds and reruns | ASKED | Exact stream identity confirmed. |
+| Recheck exchange reproducibility under scalar-math oracle V2 | ASKED | Two fresh builds/runs retain the same `091395cf...` hash. |
 | Reuse an old drifting hash for rung 3.5b | UNASKED | Rejected. |
 | Treat ZDF schema revisions as content drift | UNASKED | Rejected and disclosed. |
 | Modify shipped NEMO | UNASKED | Forbidden and not done. |

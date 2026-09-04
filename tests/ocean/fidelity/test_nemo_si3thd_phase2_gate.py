@@ -19,7 +19,7 @@ from legoesm.ice.bitz_lipscomb import (
     snow_enthalpy_from_temperature,
     snow_temperature_from_enthalpy,
 )
-from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_card
+from legoesm.ice.c1d_omip_l3 import ORACLE_V1_ROOT, build_c1d_omip_l3_card
 from legoesm.ice.config import SI3ThermoConfig, validate_si3_thermo_config
 from legoesm.ice.constants_config import (
     NEMO_SI3_CONSTANTS_CONFIG,
@@ -118,7 +118,7 @@ def test_shared_flooding_is_bit_exact_with_former_inline_path() -> None:
 
 
 def test_selector_rejects_frankenstein_identity() -> None:
-    card = build_c1d_omip_l3_card()
+    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V1_ROOT)
     validate_si3_thermo_config(card.config)
     with pytest.raises(ValueError, match="ORCA1-resolved"):
         validate_si3_thermo_config(
@@ -180,7 +180,7 @@ def test_shared_nemo_thomas_mode_is_bit_exact_with_written_order() -> None:
 
 
 def test_existing_column_driver_dispatches_selected_si3() -> None:
-    card = build_c1d_omip_l3_card()
+    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V1_ROOT)
     model = IceColumnModel.create(
         forcing=_forcing(), config=card.config, ncol=1, dt=card.dt_seconds,
         h_ice_init=2.0, h_snow_init=0.2, concentration_init=0.9,
@@ -228,7 +228,7 @@ def test_gate_owns_qns_time_level_and_reports_current_first_divergence(gate_modu
 def test_gate_binary_cursor_advances_to_second_step(gate_module) -> None:
     """The kt=1 stop does not hide a broken later-step stream cursor."""
 
-    card = build_c1d_omip_l3_card()
+    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V1_ROOT)
     with (
         (card.oracle_root / "oracle_si3_thd_frames.bin").open("rb") as thd,
         (card.oracle_root / "oracle_si3_exchange_frames.bin").open("rb") as xchg,
@@ -243,7 +243,7 @@ def test_gate_binary_cursor_advances_to_second_step(gate_module) -> None:
 def test_zdf_operand_reader_is_complete_and_fails_closed(
     gate_module, tmp_path: Path
 ) -> None:
-    card = build_c1d_omip_l3_card()
+    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V1_ROOT)
     path = card.oracle_root / "oracle_si3_zdf_operands.bin"
     frames = gate_module._read_zdf_operands(path)
     assert [(frame["frame"], frame["iteration"]) for frame in frames] == (

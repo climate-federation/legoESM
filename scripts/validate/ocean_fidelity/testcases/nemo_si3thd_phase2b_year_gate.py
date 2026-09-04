@@ -1770,7 +1770,7 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ice.bitz_lipscomb import si3_column_step_arrays
     from legoesm.ice.c1d_omip_l3 import (
-        FORCING_SHA256, THERMO_STREAM_SHA256,
+        FORCING_SHA256, ORACLE_VERSION, THERMO_STREAM_SHA256,
         build_c1d_omip_l3_card,
     )
 
@@ -2017,7 +2017,9 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
         "compute_dtypes": {"oracle": "float64", "legoesm_fp64": str(state64.e_ice.dtype),
                            "legoesm_floor_run": str(state32.e_ice.dtype)},
         "card": {"name": card.name, "dt_seconds": card.dt_seconds,
-                 "nsteps": card.nsteps, "scope": "ORCA1-resolved identity only"},
+                 "nsteps": card.nsteps, "scope": "ORCA1-resolved identity only",
+                 "oracle_version": ORACLE_VERSION,
+                 "oracle_root": str(card.oracle_root)},
         "frame_registry": {
             "thermodynamics": {
                 str(stage): {"name": name, "time_level": time_level,

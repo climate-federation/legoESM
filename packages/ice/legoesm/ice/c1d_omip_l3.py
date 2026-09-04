@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import NamedTuple
 
-from legoesm import constants
 from legoesm.ice.config import (
     SeaIceConfig,
     validate_si3_bulk_config,
@@ -13,16 +12,34 @@ from legoesm.ice.config import (
 )
 from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
 
+from legoesm import constants
+
 FORCING_SHA256 = "e5ec49445d2569019c45dec24255b9c7daf050079444b0e6e6d86a5b82317afe"
 THERMO_STREAM_SHA256 = "7fc9df2707a85581075e3c69b26784155151a55640a5693eb32c34fb710ea49b"
-# Closed column rung's retained input root and the stabilized bulk-rung root
-# are distinct immutable artifacts; keep both pins rather than silently moving
-# an older card underneath its gate.
-EXCHANGE_STREAM_SHA256 = "7f22ca914bc25890c7ccda810553eefae97625e437974c2208399e9afc5b2c50"
+ORACLE_VERSION = "V2_SCALAR_MATH"
+ORACLE_V1_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l3/c1d_omip_l3_sasice_phase2_inputs"
+)
+ORACLE_V2_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l3/"
+    "c1d_omip_l3_sasice_scalarmath_v2_a"
+)
+# Retain the superseded V1 pins explicitly; V2 happens to be byte-identical,
+# but its separate build/root provenance is part of the oracle identity.
+ORACLE_V1_EXCHANGE_STREAM_SHA256 = (
+    "7f22ca914bc25890c7ccda810553eefae97625e437974c2208399e9afc5b2c50"
+)
+ORACLE_V1_ZDF_INPUT_STREAM_SHA256 = (
+    "5522eadce595408b00065fa30d8b41fccb3815bee76d6fbf5ba3adbb2656cb27"
+)
+ORACLE_V1_ZDF_OPERAND_STREAM_SHA256 = (
+    "587454974cb07590454d2bb63d745dc73488c220e84785175c9c110d26954632"
+)
+EXCHANGE_STREAM_SHA256 = "091395cf604e83d88fbf458c4ef76ac3df2d5a65dac9cdc502e224cc1d1af2e4"
 STABLE_EXCHANGE_STREAM_SHA256 = "091395cf604e83d88fbf458c4ef76ac3df2d5a65dac9cdc502e224cc1d1af2e4"
 BULK_STREAM_SHA256 = "57868f3212646bdf6b0c4add0f48701c0082718331bc76a153050c6d1d44dfe9"
-ZDF_INPUT_STREAM_SHA256 = "5522eadce595408b00065fa30d8b41fccb3815bee76d6fbf5ba3adbb2656cb27"
-ZDF_OPERAND_STREAM_SHA256 = "587454974cb07590454d2bb63d745dc73488c220e84785175c9c110d26954632"
+ZDF_INPUT_STREAM_SHA256 = "cd1b15c821f19442a840e99c067c640e5146b754fc137a2c81e88856d6ea7efd"
+ZDF_OPERAND_STREAM_SHA256 = "aad46579fb2d2cc19299d7a25992802525603bb9858adf1e892ff5d85bf40442"
 _DOCUMENTED_DURATION_STEPS = 8760  # C1D EXP_SASICE README; 365 days hourly
 
 
@@ -42,10 +59,7 @@ def build_c1d_omip_l3_card(
         "/data/abyssal/dbalwada/nemo-inputs/C1D_v5.0.0/C1D_v5.0.0/"
         "ERA5_NorthGreenland_surface_84N_-36E_1h_y2018.nc"
     ),
-    oracle_root: Path = Path(
-        "/data/abyssal/dbalwada/nemo-testcases-l3/"
-        "c1d_omip_l3_sasice_phase2_inputs"
-    ),
+    oracle_root: Path = ORACLE_V2_ROOT,
 ) -> C1DOMIPL3Card:
     """Return the scope-exact 1-hour, one-category SI3 column card."""
 
@@ -88,6 +102,12 @@ def build_c1d_omip_l3_card(
 __all__ = (
     "C1DOMIPL3Card",
     "FORCING_SHA256",
+    "ORACLE_VERSION",
+    "ORACLE_V1_ROOT",
+    "ORACLE_V2_ROOT",
+    "ORACLE_V1_EXCHANGE_STREAM_SHA256",
+    "ORACLE_V1_ZDF_INPUT_STREAM_SHA256",
+    "ORACLE_V1_ZDF_OPERAND_STREAM_SHA256",
     "THERMO_STREAM_SHA256",
     "EXCHANGE_STREAM_SHA256",
     "STABLE_EXCHANGE_STREAM_SHA256",

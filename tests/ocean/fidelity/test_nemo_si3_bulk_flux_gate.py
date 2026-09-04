@@ -46,6 +46,16 @@ def test_score_control_detects_pointwise_plant() -> None:
     assert row["first_over_step"] == 2
 
 
+def test_score_distinguishes_bar_from_bit_identity() -> None:
+    oracle = np.asarray([1.0], dtype=np.float64)
+    predicted = np.nextafter(oracle, np.asarray([2.0], dtype=np.float64))
+    row = gate._score(predicted, oracle, "X", "one_ulp")
+    assert row["over_bar_count"] == 0
+    assert row["non_bit_identical_count"] == 1
+    assert row["bit_identical_count"] == 0
+    assert row["max_relative_error_step"] == 1
+
+
 def test_selector_is_single_orca1_identity() -> None:
     from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_card
     from legoesm.ice.config import validate_si3_bulk_config
@@ -103,9 +113,22 @@ def test_full_year_gate_and_all_plants() -> None:
     assert result["verdict"] == "AT-BAR"
     assert result["over_bar_rows"] == 0
     assert result["steps"] == 8760
+    assert result["oracle_version"] == "V2_SCALAR_MATH"
+    assert result["bit_comparisons"] == result["comparisons"]
+    assert result["non_bit_identical_rows"] > 0
+    assert set(result["bit_owner_groups"]) == {
+        "jax_exp_ice_alb", "binary64_operation_order",
+    }
+    assert result["bit_owner_groups"]["jax_exp_ice_alb"]["status"] == (
+        "AWAITING_LIBM_POLICY"
+    )
+    assert all(
+        row["non_bit_identical_count"] == 0
+        for row in result["scalar_glibc_owner_probe"]["rows"]
+    )
     for plant in (
         "blk_ice_1", "ice_alb", "blk_ice_2", "ice_flx_other",
-        "stream_hash", "coverage", "selector",
+        "stream_hash", "coverage", "selector", "bit_owner",
     ):
         with pytest.raises(gate.GateError):
             gate.evaluate(plant=plant)
