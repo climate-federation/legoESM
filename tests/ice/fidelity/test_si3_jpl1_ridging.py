@@ -14,6 +14,9 @@ from legoesm.ice.ridging import (
     apply_si3_jpl1_ridging,
 )
 
+_ORCA1_CATEGORY_COUNT = 5  # ORCA1 namelist_ice_cfg:15; outside this jpl=1 arm
+_CASE_DT_S = 30.0  # tests/ICE_RHEO/EXPREF/namelist_cfg:35
+
 
 def _state(*, area: float = 0.8, open_water: float = 0.203) -> SI3JPL1RidgingState:
     scalar = lambda value: jnp.asarray([value], dtype=jnp.float64)
@@ -144,6 +147,25 @@ def test_si3_jpl1_rejects_unmeasured_selector() -> None:
             30.0,
             config=SI3JPL1RidgingConfig(rafting=False),
         )
+
+
+def test_si3_jpl1_rejects_a_state_category_axis() -> None:
+    state = _state()
+    scalar = tuple(
+        jnp.broadcast_to(value.reshape(1, 1, 1), (1, 1, _ORCA1_CATEGORY_COUNT))
+        for value in state[:8]
+    )
+    layered = tuple(
+        jnp.broadcast_to(
+            value.reshape(1, 1, 1, value.shape[-1]),
+            (1, 1, _ORCA1_CATEGORY_COUNT, value.shape[-1]),
+        )
+        for value in state[8:]
+    )
+    multicategory = SI3JPL1RidgingState(*scalar, *layered)
+    zero = jnp.zeros((1, 1, _ORCA1_CATEGORY_COUNT), dtype=jnp.float64)
+    with pytest.raises(ValueError, match="category-collapsed state"):
+        apply_si3_jpl1_ridging(multicategory, zero, zero, _CASE_DT_S)
 
 
 def test_si3_jpl1_jit_and_gradient_are_finite() -> None:

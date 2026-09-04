@@ -575,6 +575,11 @@ def apply_si3_jpl1_ridging(
     if not math.isfinite(dt) or dt <= _SI3_JPL1_ZERO:
         raise ValueError("SI3 jpl=1 ridging requires finite positive dt")
     base_shape = state.ice_area.shape
+    if len(base_shape) > 2:
+        raise ValueError(
+            "SI3 jpl=1 ridging requires category-collapsed state; "
+            "a trailing category axis is outside this measured arm"
+        )
     scalar_fields = state[:8]
     if any(value.shape != base_shape for value in scalar_fields):
         raise ValueError("SI3 jpl=1 scalar state leaves must share one T-grid shape")
