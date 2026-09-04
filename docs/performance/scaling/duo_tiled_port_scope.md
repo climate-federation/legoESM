@@ -398,8 +398,31 @@ THE LAYOUT (`packages/core/legoesm/grids/fv3_duo_windows.py`)
   96 — the price of zero kernel edits; per-firing communication is the
   ring only.
 
-STATUS: single-device "windows as views" form (M4a) — the correctness
-gate and the layout the SPMD arm shards.  Owed before landing: negative
-controls (pad 5/6/7 must DIFFER), NH arms, kt=3, C96 kt=2/4, codex+GLM.
-M4b = the same layout sharded one window per device with the M1/M2 split
-machinery re-targeted at window origins plus a seam-refresh collective.
+THE PAD (measured 2026-09-04, jobs 9631742-45, 9631824-26, 9631935)
+* Bitwise gate at TRUE interior tiles (kt=3 at C48, kt=4 at C96; kt=2 is
+  not a test — its edge windows sit flush with the face and carry 13
+  cells on the seam side):
+    hydro  pad 6 DIFFERS (C96 kt=4) | pad 8 BITWISE (C48 kt=3, C96 kt=4)
+    NH     pad 8, 9 DIFFER (C48 kt=3, C96 kt=4; diffs on the seam-adjacent
+           owned row of u/v/gz/pkc within one substep) | pad 10 BITWISE
+  Negative controls (pad 5 at kt=2: 1e-6 rel on winds) prove the gate can
+  fail.  Hydro at n_split=6 pad 9 bitwise.
+* Static certification on the WINDOW program (`tiled_m4_static_reach.py
+  --window KT:PAD[:BAND]`): seed = the outer ``band`` (= ng) cells on all
+  four sides of EVERY window (non-owned cells only) for the state and the
+  NH carry, refresh disabled, all firings on, taint through one substep,
+  read on an interior tile's owned cells: pad 10 → overshoot 1, pad 11 →
+  0 (hydro and NH, C48 kt=3 and C96 kt=4).  Widening the band by one
+  raises the requirement by exactly one (band 4 → 12), i.e. the band
+  models the corruption depth one-for-one.  **Certified pad = 11**, the
+  empirical minimum being 10 (NH) / 7-8 (hydro).
+* The pad is an explicit layout argument, never a default.  Halo area
+  at pad 11: (nl+22)²/nl² = 3.7× (nl 24), 2.1× (48), 1.5× (96).
+
+STATUS: single-device "windows as views" form (M4a) LANDED — the
+correctness gate and the layout the SPMD arm shards.  codex round 2:
+items 1-5 CLOSED; item 6 (seed completeness) answered by the full seed
+model above.  GLM: agrees with pad 11; requires the sharded arm to be
+re-certified (reach across pack/unpack).  M4b = the same layout sharded
+one window per device with the M1/M2 split machinery re-targeted at
+window origins plus a seam-refresh collective.

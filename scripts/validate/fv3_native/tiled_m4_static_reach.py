@@ -995,7 +995,9 @@ def _window_mode(args, model, ctx, state, nh, dp0, fields, order):
         attach_window_comm, gather_windows, _owner_mask, horizontal_axes)
     from legoesm.grids.fv3_native_gridstruct import FV3_CP_AIR, FV3_KAPPA
 
-    kt, pad = (int(v) for v in args.window.split(":"))
+    parts = [int(v) for v in args.window.split(":")]
+    kt, pad = parts[0], parts[1]
+    band = parts[2] if len(parts) > 2 else ctx.ng   # seeded band depth
     wctx, comm = attach_window_comm(ctx, kt, pad)
     lay = comm.lay
     comm.refresh = lambda bundle: bundle      # keep the seeded pad
@@ -1006,9 +1008,10 @@ def _window_mode(args, model, ctx, state, nh, dp0, fields, order):
     ti = 1 if kt >= 3 else 0
     tj = 1 if kt >= 2 else 0
     w0 = ti * kt + tj
-    print(f"[static:window] {lay}; seeded window {w0} = (face 0, ti={ti}, "
-          f"tj={tj}), origin {lay.origins[w0][1:]}; seeded kernel-halo band "
-          f"= local i < {ng} (owned starts at {pad}); refresh DISABLED, "
+    print(f"[static:window] {lay}; scored window {w0} = (face 0, ti={ti}, "
+          f"tj={tj}), origin {lay.origins[w0][1:]}; seeded: the outer "
+          f"{band}-cell band on ALL four sides of EVERY window, state AND "
+          f"NH carry (owned starts at {pad}); refresh DISABLED, "
           f"exchanges ON")
 
     wstate = {k: gather_windows(lay, v) for k, v in state.items()}
@@ -1018,41 +1021,74 @@ def _window_mode(args, model, ctx, state, nh, dp0, fields, order):
                    if hasattr(v, "ndim") and v.ndim >= 3 and v.shape[0] == 6
                    else v) for k, v in nh.items()}
 
+    nh_keys = [k for k in (wnh or {}) if hasattr(wnh[k], "ndim")
+               and wnh[k].ndim >= 3 and wnh[k].shape[0] == lay.nb]
+    nh_const = {k: v for k, v in (wnh or {}).items() if k not in nh_keys}
+
     def fn(*vals):
-        st = dict(zip(order, vals))
+        st = dict(zip(order, vals[:len(order)]))
+        nhd = None
+        if wnh is not None:
+            nhd = dict(nh_const)
+            nhd.update(zip(nh_keys, vals[len(order):]))
         return acoustic_substep_3d(
             wctx, st, args.dt / 3.0, args.km, first_substep=True,
             ptop=float(model._ptop), akap=FV3_KAPPA, cp_air=FV3_CP_AIR,
-            exchange=True, hydrostatic=not args.nh, nh=wnh, dp0=dp0,
+            exchange=True, hydrostatic=not args.nh, nh=nhd, dp0=dp0,
             remap_step=False, remap_follows=True, batched=True)
 
     try:
-        closed = jax.make_jaxpr(fn)(*[wstate[k] for k in order])
+        closed = jax.make_jaxpr(fn)(*[wstate[k] for k in order],
+                                    *[wnh[k] for k in nh_keys])
     finally:
         ctx.tab.window_comm = None
     print(f"[static:window] jaxpr: {len(closed.jaxpr.eqns)} equations")
 
+    # THE SEED (codex round 2, item 6): at entry every window cell is a
+    # correct copy of the flat state.  What goes wrong inside a substep is
+    # confined to each window's outer band: the kernel never updates its
+    # halo (only exchanges do, and at a seam none fires), so it goes
+    # STALE, and the cube-edge/corner treatments rewrite the boundary as
+    # if it were a face edge.  So the seed is the outer ``band`` cells on
+    # ALL FOUR sides of EVERY window (not one side of one window: a
+    # corrupted band elsewhere reaches this window through the write-set
+    # gathers), for the state AND the NH carry (gz/zh/pk3/zs ride the
+    # substep with their own stale halos).  ``band`` defaults to ng; a
+    # fake-edge treatment that writes compute cells deeper than the halo
+    # is covered by raising it (--window KT:PAD:BAND) -- the reported
+    # requirement then grows one-for-one, which is the check that the
+    # band models the corruption depth.  (Seeding the whole pad answers a
+    # different question -- "garbage pad" -- and reads pad + reach for
+    # every pad, job 9631834.)
+    def _band_seed(a):
+        t = np.zeros(a.shape, bool)
+        axes = horizontal_axes(lay, a.shape, lay.nb)
+        if axes != (1, 2):
+            return t
+        e1, e2 = a.shape[1], a.shape[2]
+        t[:, :band, :, ...] = True
+        t[:, e1 - band:, :, ...] = True
+        t[:, :, :band, ...] = True
+        t[:, :, e2 - band:, ...] = True
+        # an edge window OWNS its real ring: that ring is stale between
+        # firings in the flat program too, so it is not a window-induced
+        # error and is not seeded (only NON-owned band cells are)
+        for w in range(lay.nb):
+            own = _owner_mask(lay, w, e1 + (lay.m_a - lay.W),
+                              e2 + (lay.m_a - lay.W))
+            t[w] &= ~own.reshape(own.shape + (1,) * (a.ndim - 3))
+        return t
+
     taints = []
     for k in order:
         a = np.asarray(wstate[k])
-        t = np.zeros(a.shape, bool)
-        if k in fields and a.ndim >= 3:
-            # Seed the window's KERNEL-HALO band (local i < ng), middle
-            # half in j (the window's j-edges touch the halo tables, see
-            # the flat mode's note).  At entry every window cell is a
-            # correct copy of the flat state; what goes wrong inside the
-            # substep is confined to this band -- the kernel never
-            # updates its halo (only exchanges do, and at a seam none
-            # fires), so it goes STALE, and the cube-edge/corner
-            # treatments rewrite it as if it were a face edge.  The pad
-            # cells beyond the band start correct and are computed like
-            # interior cells; they degrade only by propagation from the
-            # band, which is what the taint measures.  (Seeding the whole
-            # pad instead answers a different question -- "garbage pad"
-            # -- and reads pad + reach for every pad, job 9631834.)
-            jm = max(ng + 1, a.shape[2] // 4)
-            t[w0, :ng, jm:a.shape[2] - jm, ...] = True
-        taints.append(jnp.asarray(t))
+        taints.append(jnp.asarray(_band_seed(a) if k in fields
+                                  else np.zeros(a.shape, bool)))
+
+    for k in nh_keys:                     # the NH carry's bands too
+        taints.append(jnp.asarray(_band_seed(np.asarray(wnh[k]))))
+    print(f"[static:window] seeded {len(fields)} state fields + "
+          f"{len(nh_keys)} NH-carry arrays {nh_keys}")
 
     del _SCATTER_FALLBACKS[:], _CONTROL_TAINTS[:]
     del _WHILE_LOOPS[:], _LONG_SCANS[:]
@@ -1084,12 +1120,16 @@ def _window_mode(args, model, ctx, state, nh, dp0, fields, order):
             b2 = b2.T
         hit = b2 & own
         if hit.any():
-            ii = np.nonzero(hit.any(axis=1))[0]
-            deepest = max(deepest, int(ii.max()))
-            first_owned = int(np.nonzero(own.any(axis=1))[0].min())
-            print(f"[static:window]   output {np.shape(o)}: taint in OWNED "
-                  f"cells, local i {int(ii.min())}..{int(ii.max())} "
-                  f"(owned starts at local {first_owned})")
+            pi, pj = np.nonzero(hit)
+            wi, wj = hit.shape
+            # depth of the deepest tainted owned cell measured from the
+            # NEAREST window boundary on either axis
+            d = int(np.max(np.minimum(np.minimum(pi, wi - 1 - pi),
+                                      np.minimum(pj, wj - 1 - pj))))
+            deepest = max(deepest, d)
+            print(f"[static:window]   output {np.shape(o)}: {int(hit.sum())} "
+                  f"tainted OWNED cells, deepest {d} from a window boundary "
+                  f"(owned starts at {pad})")
     over = 0 if deepest < 0 else deepest - pad + 1
     for w in (_SCATTER_FALLBACKS, _CONTROL_TAINTS, _WHILE_LOOPS, _LONG_SCANS):
         if w:
