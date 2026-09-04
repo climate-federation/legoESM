@@ -1574,4 +1574,17 @@ The GYRE stage-2 WRITE-only operand record made `rhd`, `e3w(Kmm)`, and
 NEMO's multiply-before-subtract density anomaly and the exact bottom-up
 trapezoid/face-gradient statement order.  Private freeze/legacy hooks only
 form preregistered causal arms; they cannot select a card and do not create a
-second `hpg_sco` implementation.
+second `hpg_sco` implementation.  It also includes NEMO's final `* tmask`
+(`eosbn2.F90:288`), which round 9 restored after the density anomaly had been
+left unmasked.
+
+The 2026-09-03 round-9 audit disclosed a shared reassociation as well: the one
+Roquet implementation now uses NEMO's literal `zn3/zn2/zn1/zn0` nesting for
+both EOS-80 and TEOS-10.  Direct old-versus-literal probes moved density by at
+most `4.55e-13 kg m-3` and `prd` by `4.43e-16`; this is a source-association
+correction within S-50, not a GYRE-only identity arm.  OVERFLOW and
+LOCK_EXCHANGE were assigned phase-3 2-ulp and tracer-bit-identity guards.  The
+first current-tip guard (OVERFLOW faithful stage sweep) failed by
+`3.0510308459954375e12` gate ulps after the literal `* tmask` was restored, so
+the round stopped before LOCK_EXCHANGE or trajectory comparisons.  This is an
+open cross-card compatibility decision, not a passed isomorphism exception.

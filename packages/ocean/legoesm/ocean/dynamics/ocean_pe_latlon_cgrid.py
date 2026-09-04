@@ -1314,6 +1314,11 @@ def _bc_geometry_and_density(
          else nemo_bn2_live_ladders(z_coord, eta_safe, H_bathy)[0])
         if _eos_depth == "geometric" else None
     )
+    _nemo_tmask3 = (
+        jnp.asarray(z_coord.is_active, dtype=T.dtype)
+        if isinstance(z_coord, OceanPartialCellCoordinate)
+        else jnp.broadcast_to(jnp.asarray(mask, dtype=T.dtype)[..., None], T.shape)
+    )
     rho, rho_prime, p_prime = iterate_eos_and_pressure_anomaly(
         T, S, mask,
         lambda field: neumann_fill_cgrid(field, mask, grid=grid),
@@ -1354,7 +1359,7 @@ def _bc_geometry_and_density(
         density_anomaly_ratio_fn=(
             (lambda t, s, p, **_kw: nemo_teos10_density_anomaly_ratio(
                 t, s, p, rho0=rho_0,
-                geometric_depth_m=_eos_geometric_depth))
+                geometric_depth_m=_eos_geometric_depth, tmask=_nemo_tmask3))
             if (config.eos == "nemo_teos10" and _eos_depth == "geometric")
             else None
         ),

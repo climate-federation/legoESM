@@ -38,3 +38,10 @@ f966dd60d0a8d45b92c362a7a628ae4fbbce6d4b5061f301370b943b3a011bce  /data/abyssal/
 # round-9 like-for-like production-JIT Rule-8 comparison
 c77bca9cf568c08423004944d0dca0dbb2a77973b26bc982e8353754387f0219  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_jit/baseline_57429ecf_jit_sweep.json
 17b1d103bd6e6871ddeecbfe59d9ccc9b7a5551041c4dd13e2c1f1699cc66489  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_jit/current_jit_sweep.json
+# round-9 shared-EOS STOP boundary (baseline artifacts are not passed comparisons)
+5c8b3c76d29f375eda27475968e31c16d2819bbfc11fc991285e180b0d6cccfd  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_eos/baseline_57429ecf/lock_stage_sweep.json
+119ef0284ea7196fefe8eb4231b82ac49e4ce6ff0f974dd37b940167ba3700ac  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_eos/baseline_57429ecf/lock_trajectory_kt10.json
+d81195895c76b449a498de857e0bcdc2e4ea967d4acf81d479730ba4651740f3  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_eos/baseline_57429ecf/overflow_stage_sweep.json
+3de3e1743caf8f1250ccaf098289a71df79c7a4db982a34e1fc98c7dc9197369  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_eos/baseline_57429ecf/overflow_trajectory_kt10.json
+773b56e93c52c78d06b7af0d194f25cd7b514c62f800d022e173dd956996c31c  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_eos/current/overflow_stage_sweep.json
+b25d276743380ca0724d57764af293cc80f9e9303fd976201ac3a041e66410d4  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_eos/current/overflow_stage_sweep_compare.log

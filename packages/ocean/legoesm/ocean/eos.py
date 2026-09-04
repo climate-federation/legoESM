@@ -1104,8 +1104,9 @@ def nemo_roquet_density_anomaly_ratio(
     coeffs: dict | None = None,
     rho0: float = rho_0,
     geometric_depth_m: jnp.ndarray | None = None,
+    tmask: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
-    """Return NEMO's literal ``prd = zn * r1_rho0 - 1``.
+    """Return NEMO's literal ``prd = (zn * r1_rho0 - 1) * tmask``.
 
     ``prd`` is the dimensionless density anomaly consumed by ``dynhpg``.
     Dividing before subtracting reproduces NEMO 5.0.2
@@ -1115,14 +1116,17 @@ def nemo_roquet_density_anomaly_ratio(
     """
     # eosbn2.F90:288 has two source-level rounded operations.  Preserve that
     # boundary in the compiled path instead of permitting contraction across
-    # the multiply and subtract.
+    # the multiply and subtract.  ``tmask`` is optional only for standalone
+    # EOS evaluation; every NEMO dynamics caller supplies the real 3-D mask.
     zn_rho = lax.optimization_barrier(
         nemo_roquet_eos(
             T, S, p, coeffs=coeffs, rho0=rho0,
             geometric_depth_m=geometric_depth_m)
         * (1.0 / rho0)
     )
-    return lax.optimization_barrier(zn_rho - 1.0)
+    prd = lax.optimization_barrier(zn_rho - 1.0)
+    ztm = jnp.asarray(1.0 if tmask is None else tmask, dtype=prd.dtype)
+    return lax.optimization_barrier(prd * ztm)
 
 
 # ==============================================================================
@@ -1204,11 +1208,12 @@ def nemo_teos10_density_anomaly_ratio(
     *,
     rho0: float = rho_0,
     geometric_depth_m: jnp.ndarray | None = None,
+    tmask: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """TEOS-10 specialization of NEMO's source-associated ``rhd`` value."""
     return nemo_roquet_density_anomaly_ratio(
         T, S, p, coeffs=_ROQUET_TEOS10, rho0=rho0,
-        geometric_depth_m=geometric_depth_m)
+        geometric_depth_m=geometric_depth_m, tmask=tmask)
 
 
 _NEMO_RHO0 = 1026.0   # NEMO rho0 (eosbn2.F90:1898); legoESM's

@@ -188,6 +188,40 @@ POLYNOMIAL_FIT_PREFERRED (exponents `0.60445` and `0.95631`) and SSH
 BOUNDED_OR_DECAYING_NO_AMPLIFYING_MODE.  These are characterization labels,
 not acceptance evidence.
 
+## Round-9 D stop boundary: shared EOS association
+
+The shared Roquet EOS remains one implementation.  Its NEMO-literal
+`zn3/zn2/zn1/zn0` nesting is used unconditionally for EOS-80 and TEOS-10; no
+GYRE identity guard was added.  The omitted final mask is now literal too:
+`prd = (zn*r1_rho0 - 1)*ztm` at NEMO `src/OCE/TRA/eosbn2.F90:288`.
+The focused fp64 unit operand leaves wet `prd` unchanged and makes every dry
+value exactly zero.
+
+The required other-card compatibility gate then **FAILED**, invoking the
+review's mandatory STOP rule.  A fresh production-JIT baseline was produced
+at exact `57429ecf5f377ce2bf220f36bc05313cd29e0dfd`.  The current run was
+stamped `a0c22c52f2708ca9f970b75cbddff6043b123093` and used the stage gate's
+`--faithful-only` compatibility mode: the public production step was run, but
+private causal arms were not compiled; the ULP comparison selected the four
+`faithful.instantaneous` stage/entry rows.  Its literal verdict is
+`status=FAIL, n_certified_rows_compared=4, largest_move_ulps=3051030845995.4375`.
+
+| OVERFLOW row (production JIT, fp64) | `57429ecf5f3` | current | move in gate ulps |
+|---|---:|---:|---:|
+| kt1 stage 1 faithful u | `6.522560269672795e-15` | `2.3025702257223896e-4` | `1.0369854410264e12` |
+| kt1 stage 2 faithful u | `1.5663442765045943e-12` | `3.420596203998477e-4` | `1.54049957191706e12` |
+| kt1 stage 3 faithful u | `7.064251961175216e-12` | `6.774649458773929e-4` | `3.0510308459954375e12` |
+| kt2 faithful u | `7.064251961175216e-12` | `6.774649458773929e-4` | `3.0510308459954375e12` |
+
+This exceeds the two-ulp limit by twelve orders of magnitude, so it is not
+certified as a reassociation.  Per the dispatch, LOCK_EXCHANGE current-tip
+comparisons, the two trajectory comparisons, findings E--G, the remaining H
+closure suite, and all tuning are intentionally **NOT RUN / BLOCKED ON USER
+DECISION**.  Fresh baseline
+artifacts for both cards and both gate types do exist, but are not presented
+as passed comparisons.  Tracer bit identity and first-over-bar preservation
+are therefore **UNMEASURED**, not inferred.
+
 ## Provenance, controls, and review
 
 The oracle executable was rebuilt only from config-local `MY_SRC`; no shipped

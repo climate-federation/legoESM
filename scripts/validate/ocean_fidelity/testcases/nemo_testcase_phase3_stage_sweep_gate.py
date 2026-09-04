@@ -610,7 +610,7 @@ def preregistered_prediction_check(
 
 
 def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
-        plant_prediction=False, allow_dirty=False) -> dict:
+        plant_prediction=False, allow_dirty=False, faithful_only=False) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -724,6 +724,10 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
                 legacy_2d_stage_face_mask=True
             ),
         }
+    if faithful_only:
+        require(not (plant_operand or plant_prediction),
+                "--faithful-only cannot run arm-dependent planted controls")
+        arms = {"faithful": arms["faithful"]}
 
     states = {}
     stage_states = {}
@@ -941,7 +945,13 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
             one_variable = "momentum_transport_reconcile"
         arm_results[arm]["one_variable"] = one_variable
 
-    if case == "LOCK_EXCHANGE-zco" and not any(
+    if faithful_only:
+        ownership = {
+            "classification": "COMPATIBILITY_GUARD_ONLY",
+            "reason": "private ablation arms intentionally not compiled",
+            "arms": {},
+        }
+    elif case == "LOCK_EXCHANGE-zco" and not any(
         result["clears_bar"] for result in arm_results.values()
     ):
         ownership = {
@@ -981,7 +991,7 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
     stage_operand_ownership = None
     operand_rows = []
     replay = None
-    if case == "OVERFLOW-zps":
+    if case == "OVERFLOW-zps" and not faithful_only:
         def _bc_row(stage, arm):
             suffix = f".stage{stage}.{arm}.baroclinic_u"
             return next(row for row in baroclinic_rows if suffix in row["name"])
@@ -1212,8 +1222,8 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
                 "domqco.F90:160; eos at live gdept (eosbn2.F90:1166)"),
         }
 
-    scaling = face_thickness_and_qco_scaling(
-        card, masks, nlev, oracle_stages, entry1_for_scaling, hu0)
+    scaling = (None if faithful_only else face_thickness_and_qco_scaling(
+        card, masks, nlev, oracle_stages, entry1_for_scaling, hu0))
     if plant_prediction:
         # Planted control for the prediction block: inflate the frozen H2
         # predictions by 1000x.  Every stage predicate must then read NOT-MET;
@@ -1221,13 +1231,15 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
         # the gate exits 2.
         for row in scaling["h2_qco_stage_factor"]:
             row["predicted_baroclinic_u_movement_m_s"] *= 1000.0
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-        compute_face_masks_3d as _face_masks_3d)
-    prediction_check = preregistered_prediction_check(
-        case, scaling, rows, baroclinic_rows, stage_states, masks, arms,
-        plant_selector=plant_prediction,
-        live_u_face_mask=np.asarray(_face_masks_3d(
-            card.recipe.z_coord.is_active, card.recipe.grid)[0]).astype(float))
+    prediction_check = None
+    if not faithful_only:
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            compute_face_masks_3d as _face_masks_3d)
+        prediction_check = preregistered_prediction_check(
+            case, scaling, rows, baroclinic_rows, stage_states, masks, arms,
+            plant_selector=plant_prediction,
+            live_u_face_mask=np.asarray(_face_masks_3d(
+                card.recipe.z_coord.is_active, card.recipe.grid)[0]).astype(float))
     if plant_prediction:
         # The gated predicate is the live round's owner claim (S1); the
         # older P3 reads NOT-MET by construction since the selector round
@@ -1288,7 +1300,8 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
         "ownership": ownership,
         "stage_operand_ownership": stage_operand_ownership,
         "controls": {"plant_stage": plant_stage, "plant_operand": plant_operand,
-                     "plant_prediction": plant_prediction},
+                     "plant_prediction": plant_prediction,
+                     "faithful_only": faithful_only},
         "legoesm_git_sha": legoesm_git_sha,
         "artifacts": artifacts,
     }
@@ -1302,6 +1315,10 @@ def main(argv=None) -> int:
     parser.add_argument("--plant-stage", action="store_true")
     parser.add_argument("--plant-operand", action="store_true")
     parser.add_argument("--plant-prediction", action="store_true")
+    parser.add_argument(
+        "--faithful-only", action="store_true",
+        help=("compile only the public faithful stage path for a compatibility "
+              "comparison; private causal arms and their owner labels are omitted"))
     parser.add_argument("--allow-dirty", action="store_true",
                         help="stamp '<sha>-dirty' instead of refusing a dirty tree")
     from legoesm.ocean.fidelity.ulp_move_gate import (
@@ -1315,7 +1332,7 @@ def main(argv=None) -> int:
         report = run(args.case, args.oracle_root or ROOTS[args.case],
                      plant_stage=args.plant_stage, plant_operand=args.plant_operand,
                      plant_prediction=args.plant_prediction,
-                     allow_dirty=args.allow_dirty)
+                     allow_dirty=args.allow_dirty, faithful_only=args.faithful_only)
     except (GateError, OSError, ValueError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 2

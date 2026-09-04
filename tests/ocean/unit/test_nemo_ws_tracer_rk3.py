@@ -53,9 +53,10 @@ def test_nemo_ws_eos_hpg_transport_are_bitwise_equal_eager_and_jit(monkeypatch):
         temperature = jnp.asarray([-2.0, -2.0], dtype=dtype)
         salinity = jnp.asarray([34.0, 35.0], dtype=dtype)
         depth = jnp.asarray([0.0, 1000.0], dtype=dtype)
+        tmask = jnp.asarray([1.0, 0.0], dtype=dtype)
         density = nemo_roquet_density_anomaly_ratio(
             temperature, salinity, jnp.zeros_like(depth), rho0=1.0,
-            geometric_depth_m=depth)
+            geometric_depth_m=depth, tmask=tmask)
 
         # HPG: exercise the complete top-down recurrence on two levels.
         rhd = jnp.arange(24, dtype=dtype).reshape(3, 4, 2) / 8.0
@@ -79,6 +80,7 @@ def test_nemo_ws_eos_hpg_transport_are_bitwise_equal_eager_and_jit(monkeypatch):
         eager = tuple(np.asarray(value) for value in operand_chain())
     compiled = tuple(np.asarray(value) for value in jax.jit(operand_chain)())
     assert all(np.array_equal(a, b) for a, b in zip(eager, compiled, strict=True))
+    assert compiled[0][1] == 0.0
 
     # Planted mutation: removing the literal-path barriers changes live r3u/r3v
     # bits.  Consequently this test fails at the equality assertion if those
