@@ -2689,7 +2689,7 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
                      ddm=None,
                      vertical_mixing=None, ew_cyclic_overlap=False,
-                     no_gm_redi=False):
+                     no_gm_redi=False, K_zeta_bih=None):
     """Build an MPAS (icosahedral Voronoi) ocean for the faithful CORE-II NEMO
     comparison — the 4th grid.  Reuses ``run_omip._create_setup('mpas', ...)``
     (the wired MPASOceanModel: KPP + GM/Redi + smc03 PGF + implicit-CN
@@ -2765,6 +2765,7 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
             "--double-diffusion is not wired on the MPAS vertical-mixing "
             "bridge yet (lat-lon / tripole only)")
     _ovr = {k: v for k, v in (("A_h", A_h), ("B_h", B_h), ("K_bih", K_bih),
+                              ("K_zeta_bih", K_zeta_bih),
                               ("C_smag_lap", C_smag_lap), ("pgf_scheme", pgf_scheme),
                               ("tracer_advection", tracer_advection),
                               ("bottom_drag_r", bottom_drag_r),
@@ -5352,6 +5353,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "dst3, superbee). Validated per-scheme by the ocean "
                         "matrix; smoke before production.")
     p.add_argument("--B-h", type=float, default=None, help="Override biharmonic viscosity [m4/s].")
+    p.add_argument("--K-zeta-bih", type=float, default=None,
+                   help="Override the MPAS biharmonic vorticity filter K_zeta_bih "
+                        "[m4/s] (NEMO-match recipe: 1e14, sized for the ~58 km "
+                        "level-7 mesh; EXPLICIT, so it must shrink ~dx^3 on finer "
+                        "meshes -- 1e14 sign-flips at level 8, job 9631490).")
     p.add_argument("--K-bih", type=float, default=None,
                    help="Biharmonic tracer hyperdiffusion [m4/s] -- scale-selectively "
                         "damp a grid-scale baroclinic T/S mode (preserves large-scale gradients).")
@@ -6835,7 +6841,7 @@ def main() -> int:
             # Same silent-drop class as pgf/tracer above: the builder accepts
             # these overrides but the call never passed them.
             A_h=args.A_h, B_h=args.B_h, K_bih=args.K_bih,
-            C_smag_lap=args.C_smag_lap,
+            C_smag_lap=args.C_smag_lap, K_zeta_bih=args.K_zeta_bih,
             bottom_drag_scheme=args.bottom_drag_scheme,
             bottom_drag_cd0=args.bottom_drag_cd0,
             bottom_drag_cdmax=args.bottom_drag_cdmax,

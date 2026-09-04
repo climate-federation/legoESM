@@ -55,15 +55,16 @@ run_arm () {  # name, extra flags
   echo "--- $name per-step max|u| (step,max_abs_u,lat,lon,lev):"
   cut -d, -f1,5,7,8,9 $OUT/diag_timeseries.csv 2>/dev/null | sed -n '2,32p' | tr '\n' ' ' ; echo
 }
-# LADDER 7. Ladder 6: viscosity off / TVD do not change the growth; adcroft
-# PGF arm bit-identical (flag inert). Reading ocean_pe_mpas: BOTTOM DRAG is
-# applied EXPLICITLY (its depth-mean must enter the barotropic forcing) and the
-# nemo_quadratic law makes r_eff = Cd*|u| GROW with |u| => an explicit
-# sign-flip instability once Cd|u|dt/h > 2, per-step growth ~ dt and ~|u|
-# (super-exponential: measured factors 5.1, 5.3, 5.4, 5.7, 6.2). Level-8
-# partial bottom cells are thinner at these sites. ONE VARIABLE each:
-# legacy linear drag (r=1e-3, no |u| feedback) and drag OFF.
+# LADDER 8 -- THE OPERATOR. Per-term dump on the step-6 state (probe 9635536):
+# visc = -0.31 m/s^2 at the max edge (x75 s = -23 m/s per step on u=+3.7 =>
+# the observed -19.6), every other term <= 1e-3. A_h/Smag-off still blew, so
+# the offender is the third viscous component: K_zeta_bih = 1e14 m4/s, the
+# EXPLICIT biharmonic vorticity filter of the NEMO-match recipe, sized for the
+# 58 km level-7 mesh and NOT scaled with dx. Explicit biharmonic stability
+# number K dt (6/dv^2)^2: level 7 (dv 29 km, dt 150) ~0.8 stable; level 8
+# (dv 14 km, dt 75) ~6 => sign flip, growth |1-6| ~ 5/step = MEASURED.
+# ONE VARIABLE: K_zeta_bih scaled by (dx8/dx7)^3 = 1/8 -> 1.25e13.
 CTL="--dt 75 --partial-cell --mle --mle-ce 0.06 $TKE $ISF $IWM --bbl-adv $WOA $NEMOIC $ICE"
-run_arm drag_lin   $CTL --bottom-drag-scheme legacy
-run_arm drag_off   $CTL --bottom-drag-scheme legacy --bottom-drag-r 0
+run_arm kzeta_dx3  $CTL --K-zeta-bih 1.25e13
+run_arm kzeta_0    $CTL --K-zeta-bih 0
 echo DONE
