@@ -79,8 +79,12 @@ DATA="${AMIP_DATA:-${REPO}/data/amip}"
 # mountain over the open ocean, measured at -0.29 Pa of spurious zonal drag
 # over 40-60S, which removes the eddy-driven westerly belt.  The Levante twin
 # has wired this since #1514; this launcher did NOT, so every AMIP run started
-# here reproduced the pseudo-mountain climate.  Opt out (deliberately only)
-# with AMIP_SSO="".
+# here reproduced the pseudo-mountain climate.
+# NB the `:=` below matches the Levante twin, and `:=` substitutes on EMPTY as
+# well as unset -- so `AMIP_SSO=""` does NOT opt out, it re-selects the default
+# (codex review).  Opting out needs `AMIP_SSO=/dev/null`-style explicitness or
+# a `-` in place of `:-`; both launchers share this, and it is left as-is here
+# rather than silently changing one of them.
 : "${AMIP_SSO:=/burg-archive/glab/users/pg2328/legoESM_chunk/data_pg/amip/sso_stdh_2deg.nc}"
 
 # --- machine-specific PATH flags (everything else is in the YAML) -------------
