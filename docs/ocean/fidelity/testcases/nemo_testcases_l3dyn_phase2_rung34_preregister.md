@@ -164,3 +164,48 @@ UNASKED / not authorized: modify or delete the shipped NEMO tree; use MPI,
 GPU, fp32, a synthetic oracle, landfast, `jpl>1`, thermodynamics, change an
 existing card default, claim README phenomenology numerically without a
 preregistered predicate, push, or claim a trajectory result before measuring.
+
+## Round-8 active-ridging amendment (preregistered before measurement)
+
+The kt=1 result does not certify finite-amplitude redistribution.  Round 8
+therefore withdraws that interpretation and selects an active frame using
+SI3's own operational scale rather than a post-hoc threshold.  For completed
+step `k`, the `u_ice` and `v_ice` stored at entry frame `k+1` are the velocities
+produced by the preceding rheology call; advection, redistribution, and
+`ice_cor` do not subsequently change them (`icedyn.F90:130-135`).  The gate
+will evaluate SI3's EVP closing equations exactly as written at
+`icedyn_rdgrft.F90:243-252` and select the first `k` for which
+`max(closing_net * rDt_ice) > epsi10`.  Here `epsi10=1e-10` is SI3's existing
+source cutoff used by redistribution (`:594-595,623-624`), not a new fit.
+
+For every step through the selected step, plus the following five steps, the
+committed report will publish `max|delta_i|`, `max(opning)`,
+`max(closing_net)`, and `max(closing_net*rDt_ice)`.  At the selected step it
+will additionally publish the actual maximum changes made by the SI3 jpl=1
+redistribution arm and the populations of its one-through-19-shift cells.
+The oracle's four identically-zero fields (`oa_i`, `a_ip`, `v_ip`, `v_il`)
+are preregistered **UNINFORMATIVE**: exact zero agreement cannot certify their
+age or pond update channels and must never be printed as AT-BAR.
+
+The active-frame completed-step comparison will be initialized from that
+oracle entry state.  Its Prather moments must come from NEMO restarts on both
+sides of the single-step window; the entry frames do not contain moments, so
+zero-filled or legoESM-carried substitutes are forbidden.  The run protocol
+and every selector remain byte-identical to the production oracle except for
+the shorter end/restart-write clock needed to expose those two time levels.
+The same 50 state rows (with the four zero rows UNINFORMATIVE) and every
+available Prather moment are scored.  Missing aligned restarts makes the
+active-window result UNMEASURED rather than permitting a substitute.
+
+Prediction, frozen before the scan: the first source-significant step is
+completed step **9**, and the first informative over-bar row in its completed
+step is **`stress1_i`**, following the already measured stress-first boundary
+at completed step 2.  A different step or owner refutes the corresponding
+prediction; no owner is claimed until the gate measures it.
+
+Round-8 choice ledger at preregistration: **ASKED** -- scan the 720 oracle
+entries, bind the redistribution arm in the first source-significant regime,
+score the aligned completed step including moments, and classify the four
+zero oracle channels UNINFORMATIVE.  **UNASKED** -- no new physical threshold,
+forcing, scheme, state substitute, tolerance, default change, or shipped-NEMO
+edit; none is introduced here.
