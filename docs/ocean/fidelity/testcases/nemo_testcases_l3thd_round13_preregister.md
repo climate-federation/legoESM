@@ -145,3 +145,12 @@ For the executing nonlinear-SSH arm, stages 1/2 select
 replay of the mass-carried tracer terms and the stage-3 `qns`/`sfx` terms is
 within the bar for all 26,280 stage rows.  Private arm `trasbc_heat` perturbs
 only its registered `qns` operand and must make the temperature row red.
+
+The RK3 surface boundary confirms that prediction.  The next stage-3 boundary
+is `qsr_RGBc` (`traqsr.F90:300-415`).  Because `jpk=2` has one wet T layer and
+its lower W face is dry, `wmask(:,:,2)=0`: every IR/R/G/B remainder is
+deposited in the same layer and `fraqsr_1lev=1`.  Preregistered prediction:
+the source-associated one-layer RHS update is within the bar for 8,760 rows;
+the generated-weight `sf_chl` value and lookup index are still dumped and
+hash-bound as coverage inputs but cannot alter this degenerate identity.
+Private arm `qsr_flux` changes only `qsr` and must make the RHS row red.
