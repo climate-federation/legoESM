@@ -295,6 +295,50 @@ def test_rung34_readme_phenomenology_cannot_be_promoted_without_a_band() -> None
     assert str(verdict["eap_angle_contrast"]).startswith("OUT-OF-SCOPE")
 
 
+def test_rung34_missing_documented_shear_field_is_loudly_unmeasured(tmp_path: Path) -> None:
+    path = tmp_path / "CASE_6h_00010101_00010101_gr_0000.nc"
+    with netCDF4.Dataset(path, "w") as dataset:
+        dataset.createDimension("time", 1)
+        dataset.createDimension("x", 2)
+        dataset.createDimension("y", 2)
+        dataset.createVariable("ssv_m", "f8", ("time", "y", "x"))[:] = 0.0
+    diagnostic = gate.rung34_shear_diagnostic(
+        tmp_path, (slice(None), slice(None))
+    )
+    assert diagnostic["classification"].startswith("UNMEASURED")
+    assert diagnostic["field"].startswith("sishea")
+    initial = {
+        "a_i": np.ones((9, 9, 1)),
+        "v_i": np.ones((9, 9, 1)),
+        "u_ice": np.zeros((9, 9)),
+    }
+    final = {
+        "a_i": np.ones((5, 5, 1)),
+        "v_i": np.full((5, 5, 1), 2.0),
+        "u_ice": np.full((5, 5), 0.1),
+        "v_ice": np.zeros((5, 5)),
+    }
+    verdict = gate.phenomenology("3.4", initial, final, rung34_shear=diagnostic)
+    assert verdict["status"] == "UNMEASURED"
+
+
+def test_rung34_documented_shear_field_is_measured_when_present(tmp_path: Path) -> None:
+    path = tmp_path / "CASE_6h_00010101_00010101_icemod.nc"
+    with netCDF4.Dataset(path, "w") as dataset:
+        dataset.createDimension("time", 1)
+        dataset.createDimension("x", 2)
+        dataset.createDimension("y", 2)
+        dataset.createVariable("sishea", "f8", ("time", "y", "x"))[:] = (
+            (1.0, 2.0),
+            (3.0, 4.0),
+        )
+    diagnostic = gate.rung34_shear_diagnostic(
+        tmp_path, (slice(None), slice(None))
+    )
+    assert diagnostic["classification"].startswith("MEASURED-UNCLASSIFIED")
+    assert diagnostic["maximum_s-1"] == 4.0
+
+
 def test_native_conservation_violation_is_refuted(tmp_path: Path) -> None:
     _minimal_run(tmp_path)
     assert gate.conservation_diagnostics(tmp_path)["status"] == "CONFIRM"
@@ -389,6 +433,16 @@ def test_cli_rejects_a_run_whose_input_deck_is_not_the_committed_one() -> None:
     assert gate.input_namelists(run_dir, "3.1")
     with pytest.raises(gate.GateError, match="differs from committed ice_adv2d_l3_namelist_cfg"):
         gate.input_namelists(run_dir, "3.2")
+
+
+def test_rung34_binds_its_deliberately_different_deck_stems() -> None:
+    run_dir = Path("/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/final")
+    if not run_dir.is_dir():
+        pytest.skip(f"oracle run root absent: {run_dir}")
+    digests = gate.input_namelists(run_dir, "3.4")
+    assert set(digests) == {"namelist_cfg", "namelist_ice_cfg"}
+    assert gate.CONFIG_STEM_OVERRIDE[("3.4", "namelist_ice_cfg")] == "ice_rheo_l3"
+    assert gate.final_restart_names("3.4") == ("a_i", "v_i", "u_ice", "v_ice")
 
 
 def test_cli_clean_rung_is_green_and_refuted_rungs_are_red() -> None:

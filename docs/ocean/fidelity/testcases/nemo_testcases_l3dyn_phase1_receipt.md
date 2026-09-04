@@ -630,7 +630,8 @@ files to this list; neither was modified or deleted:
 
 ## 12. Rung 3.4 ICE_RHEO oracle boundary (2026-09-03)
 
-Status: **STOPPED-BUILD-BLOCKED**. This is not a trajectory verdict.
+Status: **ORACLE COMPLETE; COVERAGE VERIFIED; README PHENOMENOLOGY
+UNMEASURED**.  This is not a legoESM trajectory verdict.
 
 The experiment was preregistered in
 `nemo_testcases_l3dyn_phase2_rung34_preregister.md` at commit `b49ede50860`
@@ -645,32 +646,101 @@ against 5.0.2, despite `ln_rhg_EAP=F`. That forced post-preregistration amendmen
 is disclosed, not hidden: the failed copies are preserved, then both arms were
 recopied with EAP excluded. This leaves the EVP override as the sole source
 difference. The production arm, using `src/ICE` EVP and EAP, builds successfully
-with `key_si3 key_linssh key_vco_1d`. Its executable SHA-256 is
-`0f4f97d58467581326c59c130368e4883489f5bd51ceb4d33f91ded590703173`.
+with `key_si3 key_linssh key_vco_1d`. The initial default-flag executable's
+SHA-256 is `0f4f97d58467581326c59c130368e4883489f5bd51ceb4d33f91ded590703173`;
+its runtime disposition and the successful production binary are distinguished
+below.
 
 The required shipped-EVP control does not build. The repeatable build exits 1;
 `control_build.stderr:6-106` reports 21 compiler errors, including undefined
 `epsi06`, `ln_aEVP`, `nn_nevp`, `rDt_ice`, and `rn_ishlat`, plus the `ht`
 rank mismatch. This is direct evidence that the shipped override predates the
 released module interfaces, not evidence about its numerical trajectory.
-Per the dispatch rule that a rung must stop when it cannot be built from its
-shipped case, no production integration was started and no source repair was
-invented.
+The user subsequently classified this as an **UPSTREAM NEMO DEFECT** and
+explicitly selected the override-excluded copy as the only buildable form of
+the shipped case and therefore the oracle.  The control remains
+**UNBUILDABLE**, not silently skipped; no source repair or analytic substitute
+was invented, and neither shipped override was modified or deleted.
+
+The source-identical default O3 plus function-loop-unroll executable built but
+segfaulted in `usr_def_hgr` before the trajectory.  That binary is preserved as
+`ice_rheo/nemo.o3_funroll.segfront` (SHA-256 below).  An O3 build without the
+function-loop-unroll flag completed the one-step bootstrap.  The production
+oracle uses the same NEMO source at fp64 with the conservative CPU-only
+O2/`-fno-tree-vectorize` architecture; it was invoked directly, with
+`OMP_NUM_THREADS=1`, no `mpirun`, and no GPU.  This compiler provenance is a
+disclosed harness choice, not a change to the NEMO case or physics source.
+
+The oracle ran all documented 720 30-second steps and exited 0.  It wrote 720
+fp64 step-entry frames, the final ocean and ice restarts, and the mesh under
+`/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/final`.  The ordered frame
+hash aggregate is
+`3e347b438776c077a75c8c02ab3e43ac9158037d164ef48a2e5017dd152ddd27`.
+The frame registry remains the 19-array `icestp.F90:154-171` registry; every
+frame has `(jpi,jpj,jpl,nlay_i,nlay_s)=(1004,1004,1,10,5)` and storage width
+64 bits.
+
+The regenerated manifest accounts for all 35 mesh arrays, 208 restart
+variables, 325 resolved ocean-namelist entries, and 281 resolved ice-namelist
+entries.  Its Appendix-A contract has 203 VERIFIED-loaded active fields,
+including all three EVP stresses and all 160 active Prather moments.  The 32
+WAIVED rows are individually reasoned: reconstructed/inactive Appendix-A state
+plus 20 named ephemeral ridging work/diagnostic arrays from
+`icedyn_rdgrft.F90:46-75`; the carried redistribution lives in the VERIFIED
+area/volume/energy/salt/pond prognostics at `:779-888`.  Both full planted
+controls bind: an unaccounted mesh array exits 1 with a coverage mismatch and
+an `e1t` perturbation exits 1 on the geometry row.
+
+The resolved gate confirms `jpl=1`, `nlay_i/nlay_s=10/5`, `ln_dynALL=T`,
+Prather, H79 `rn_pstar=2e4` / `rn_crhg=20`, exponential participation and
+redistribution, ridging plus rafting, aEVP with 100 subcycles, landfast off,
+and the exact 1000 by 1000, 2-km, zero-Coriolis geometry.  The ORCA1-deck
+retention inputs remain `0.5`, while SI3's executed thermodynamics-off branch
+forces porosity to zero and all snow/pond retention factors to one at
+`icedyn_rdgrft.F90:1244-1247`.
+
+The README check is deliberately **UNMEASURED**, not passed: its only result
+claim is qualitative (`tests/ICE_RHEO/EXPREF/README:51-53`), and this non-XIOS
+run wrote only `ssv_m` in the final six-hour file, not the requested `sishea`
+field.  The gate refuses to synthesize shear from another field.  It does
+measure a nonzero final maximum ice speed of `0.3576987760534231 m s-1` and a
+maximum ice-volume change of `1.2818995636818311`; these establish a dynamic
+response but do not score the documented shear shape.  The longer paired
+EVP/EAP intersection-angle claim is OUT-OF-SCOPE.  SI3's native conservation
+check resolves off; zero printed violations are therefore WAIVED-INACTIVE,
+not called conservation confirmation.  Reported, unclassified endpoint drifts
+are `1.8631458995434149e-3` for concentration sum and
+`3.199507647832436e-14` for ice-volume sum.
+
+Focused gate controls are **5 passed, 22 deselected**; the final combined
+CPU/fp64 ridging, card, and rung-3.4 oracle selection is **21 passed,
+15 deselected in 107.98 s**.  Ruff is clean on the gate and its tests.
 
 | artifact | SHA-256 |
 |---|---|
-| production incremental build stdout | `4f983818b9a4c11a4e0551f780486fee3140f7ddb576503cb219dea93b62e3ea` |
-| production incremental build stderr | `5fe5de0d0aa73b10241a5c1058abcaf07942bce2b49d3c056be7a4623c63d75b` |
+| production safe build stdout | `58ca109387789e6de60aaff83cfcde8bf88be203c54836dc43165b83df9fe5d6` |
+| production safe build stderr | `9dca52b86c211bcc0ec1e8d19af9d296ccbb2da21516e65c6d38858a7a7a183d` |
 | shipped-control build stdout | `6080c0bff2f916ca99530cae57a01d937e2010156f27626755f81ab80a8b5346` |
 | shipped-control build stderr | `baef2fede631b7868aef20a5fe88605bd073812f46f634e9559d9089634a41cc` |
-| production `nemo.exe` | `0f4f97d58467581326c59c130368e4883489f5bd51ceb4d33f91ded590703173` |
-| resolved conda architecture | `629fafc5887eaf3011f6e1c8634eaba9e16250bfffc00296ae163b3c70477ea6` |
+| failed O3+funroll executable | `0f4f97d58467581326c59c130368e4883489f5bd51ceb4d33f91ded590703173` |
+| production safe executable | `84d32b9c78da328af19340fb394923e80847005bcf17424bc383c169029284eb` |
+| production safe architecture | `311a9ab58bb264a294dc1c70fdfb17352cba0121596b11d00f93c63c2746f4d7` |
 | resolved cpp deck, both arms | `58c1f115e87c6177f282da0affbd67657a2d1a5ce4d6276dc752d4a19c4d29de` |
+| used `namelist_cfg` | `b79b0da851a617b7a09fafd670e0bcab3d738d6175904423e68f12a5d9da8a93` |
+| used `namelist_ice_cfg` | `6e66ccd0eb895c35f6423bf7c09e8f6d293494f531f81ae78fd2b01dc56f7d98` |
+| `mesh_mask.nc` | `cf4c4f41cba49d790a9be7aebc7eae68c79493442ed9b0020022f268b3b27146` |
+| `output.init_ice.nc` | `5feba84566f0d847cbd75e89b1ad2652e60b2054fe10a6a9b78420d7f7631ca6` |
+| final ice restart | `e5161e64a5c8e4d9180420dca58f99a43088952d0e9826c802d94ac1693b4bf6` |
+| first / last entry frames | `1097a76b1ddff7fcb54ae6b77537e9d061f250de1257ca6e5ca946da355a75a6` / `2e957065bfa3d7b28f38679b6a3a31128c3c571aaa4c2c234bc2cb7ab2d845b5` |
+| ordered 720-frame SHA-256 aggregate | `3e347b438776c077a75c8c02ab3e43ac9158037d164ef48a2e5017dd152ddd27` |
+| coverage manifest | `2e004e1a662931f488f3a7669c98310f896ac63a551f178e97f64023497befa7` |
+| oracle gate JSON | `5e70bf27ef2bb1d570a1e32fc82e199d0dbb2f175a8d893d882331a2df347bd6` |
+| oracle gate source | `9833752c228e1726c43d7999bb97b7b9efdc444bc64493324a5781c18325452b` |
+| oracle gate tests | `9f8124f291bf369b7f89be9fabe01b12b52b725e3d55c852f0aa778a06924184` |
+| unaccounted-array plant stderr | `1700153282cd779d281edf0ca7365579fd72c3053621ae31c4f738566d413904` |
+| perturbed-geometry plant stderr | `868cbcbf82d4de702c4f7b8f9abaf65feff3e3604723627349880dae2c7fc258` |
 
-Run roots would have been under
-`/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/`; only the two build logs
-exist there. Entry frames, mesh-mask geometry comparison, restart, stale-source
-trajectory difference, and README phenomenology are all **UNMEASURED**.
-The legoESM ICE_RHEO card, jpl=1 SI3 ridging/rafting implementation, geometry
-gate, kt=1 comparison, and trajectory sweep are all **UNMEASURED-NOT-STARTED**
-because an oracle trajectory cannot be created under the shipped-case rule.
+The stale-source trajectory difference is **UNMEASURED-IMPOSSIBLE FROM THIS
+CONTROL** because the retained override is unbuildable.  Landfast remains OFF
+and **UNVERIFIED-deferred**.  The legoESM result and its louder unmeasured tail
+are recorded separately in the phase-2 receipt.

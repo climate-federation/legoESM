@@ -842,6 +842,30 @@ all touched production/gate/test paths; Ruff is clean.
 | first-divergence source | `ab3166934623a0573abfa173b1e6168be245761a2816bf3248bd34fde6b45572` |
 | direct card/control pytest | `dcf4fc024dc8a678a0f81d1c98ed3a1d7a2029e897b5ac97bbf96f9113053f67` |
 
+The oracle dependency subsequently completed all 720 steps at
+`/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/final`; its exhaustive
+coverage status is VERIFIED and its ordered-frame aggregate is
+`3e347b438776c077a75c8c02ab3e43ac9158037d164ef48a2e5017dd152ddd27`.
+The oracle gate's top status remains **UNMEASURED** because the copied
+non-XIOS run did not emit the README's `sishea` field and the native SI3
+conservation check resolves off.  This does not change the independent
+legoESM kt=1 or first-divergence rows above.  The oracle gate JSON SHA-256 is
+`5e70bf27ef2bb1d570a1e32fc82e199d0dbb2f175a8d893d882331a2df347bd6`;
+the full inventory and build provenance are in phase-1 receipt section 12.
+
+Two post-run harness gaps failed closed before that artifact was accepted and
+are disclosed here: the two committed rung-3.4 decks intentionally have
+different filename stems, and the endpoint velocity-response loader initially
+omitted `v_ice`.  The gate now carries explicit contracts for both.  The
+documented-shear path also has binding missing-field and present-field tests;
+it reports UNMEASURED when `sishea` is absent rather than deriving a substitute.
+The focused rung-3.4 oracle-gate tests are **5 passed, 22 deselected** and Ruff
+is clean.  The final combined CPU/fp64 ridging, full-size card, and selected
+rung-3.4 oracle-gate run is **21 passed, 15 deselected in 107.98 s**.  The
+inline-physics ratchet is **2 passed** on both touched production modules and
+the hardcoded-constant ratchet is **5 passed** on those modules plus all three
+touched rung-3.4 test files.
+
 ## Loudly UNMEASURED / deferred
 
 Within-step x/y Prather split states; ORCA1

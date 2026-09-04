@@ -249,6 +249,10 @@ CONFIG_STEM = {
     "3.3": "ice_adv2d_rhg_l3",
     "3.4": "ice_rheo_l3_clean",
 }
+# The copied dynamic deck names the clean/excluded source arm, while the ice
+# deck is the one ORCA1 overlay shared by that arm.  Keep the deliberate names
+# explicit rather than duplicating a byte-identical config file.
+CONFIG_STEM_OVERRIDE = {("3.4", "namelist_ice_cfg"): "ice_rheo_l3"}
 
 # Ice-ocean drag is quadratic and both stress terms carry the same U-point ice
 # fraction `zaU`, so it cancels and free drift is a closed-form identity:
@@ -281,7 +285,8 @@ def input_namelists(root: Path, rung: str) -> dict[str, str]:
     digests: dict[str, str] = {}
     for name in ("namelist_cfg", "namelist_ice_cfg"):
         used = root / name
-        committed = CONFIG_DIR / f"{CONFIG_STEM[rung]}_{name}"
+        stem = CONFIG_STEM_OVERRIDE.get((rung, name), CONFIG_STEM[rung])
+        committed = CONFIG_DIR / f"{stem}_{name}"
         require(used.is_file(), f"run input deck absent: {used}")
         require(committed.is_file(), f"committed input deck absent: {committed}")
         digest = sha256(used)
@@ -804,6 +809,13 @@ def _restart_array(path: Path, name: str) -> np.ndarray:
     return np.transpose(data, order)
 
 
+def final_restart_names(rung: str) -> tuple[str, ...]:
+    """Fields consumed by the endpoint phenomenology for each rung."""
+
+    names = ("a_i", "v_i", "u_ice")
+    return names + (("v_ice",) if rung == "3.4" else ())
+
+
 def wet_window(root: Path) -> tuple[slice, slice]:
     """Surface-tmask bounding box, in the frames' (x, y) order.
 
@@ -912,12 +924,35 @@ def conservation_diagnostics(root: Path) -> dict:
 def rung34_shear_diagnostic(root: Path, window: tuple[slice, slice]) -> dict[str, object]:
     """Read NEMO's own final maximum-shear field without inventing a README band."""
 
-    path = find_one(root, ("*_6h_*_gr_0000.nc",))
-    with netCDF4.Dataset(path) as dataset:
-        require("sishea" in dataset.variables, f"documented shear field absent: {path}")
-        variable = dataset.variables["sishea"]
-        require(variable.shape[0] > 0, f"documented shear field has no time record: {path}")
-        raw = np.ma.asarray(variable[-1])
+    paths = sorted(root.glob("*_6h_*.nc"))
+    require(paths, "rung 3.4 has no final six-hour output file")
+    path: Path | None = None
+    raw: np.ma.MaskedArray | None = None
+    for candidate in paths:
+        with netCDF4.Dataset(candidate) as dataset:
+            if "sishea" not in dataset.variables:
+                continue
+            variable = dataset.variables["sishea"]
+            require(
+                variable.shape[0] > 0,
+                f"documented shear field has no time record: {candidate}",
+            )
+            raw = np.ma.asarray(variable[-1])
+            path = candidate
+            break
+    if path is None or raw is None:
+        return {
+            "source": "tests/ICE_RHEO/EXPREF/README:51-53; icedyn.F90:172-193",
+            "field": "sishea (NEMO maximum shear of sea-ice velocity)",
+            "available_six_hour_outputs": [
+                {"path": str(candidate), "sha256": sha256(candidate)}
+                for candidate in paths
+            ],
+            "classification": (
+                "UNMEASURED: the non-XIOS copied-case run wrote no sishea variable; "
+                "the README shear-shape claim cannot be scored from another field"
+            ),
+        }
     shear = np.asarray(np.ma.filled(raw, np.nan), dtype=np.float64).T[window]
     require(np.all(np.isfinite(shear)), "final NEMO sishea contains non-finite wet cells")
     p95, p99 = np.percentile(shear, (95.0, 99.0))
@@ -1072,7 +1107,11 @@ def phenomenology(
         require(velocity_response > 0.0, "ICE_RHEO wind produced no velocity response")
         require(state_change > 0.0, "ICE_RHEO dynamics did not change ice volume")
         report.update(
-            status="MEASURED-UNCLASSIFIED",
+            status=(
+                "UNMEASURED"
+                if str(rung34_shear["classification"]).startswith("UNMEASURED")
+                else "MEASURED-UNCLASSIFIED"
+            ),
             readme_source="tests/ICE_RHEO/EXPREF/README:51-53",
             final_max_abs_ice_velocity_m_s=velocity_response,
             ice_volume_max_abs_change=state_change,
@@ -1177,7 +1216,7 @@ def trajectory(root: Path, rung: str) -> dict:
     free_drift = free_drift_speed(root) if rung == "3.3" else None
     final_restart = {
         name: _restart_array(run_files(root)["restart"], name)
-        for name in ("a_i", "v_i", "u_ice")
+        for name in final_restart_names(rung)
     }
     maximum_diagnostic = None
     if rung == "3.2":
