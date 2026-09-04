@@ -1787,6 +1787,13 @@ def _run_substep_loop(
             # nemo_testcases_l2_gyre_phase3_barotropic_preregister.md; keying
             # by name rather than by position is what lets both pins hold at
             # once (the two preregisters fixed incompatible orders).
+            metric_transport_u, metric_transport_v = (
+                nemo_literal_metric_transports(
+                    H_u_flux, H_v_flux, U_mid, V_mid,
+                    u_mask, v_mask, grid)
+                if _transport_evaluation == "nemo_literal"
+                else (flux_u, flux_v)
+            )
             trace = {
                 "eta_entry": eta_c,
                 "u_entry": U_bar_c,
@@ -1796,6 +1803,17 @@ def _run_substep_loop(
                 "v_mid": V_mid,
                 "transport_u": flux_u,
                 "transport_v": flux_v,
+                "transport_metric_u": metric_transport_u,
+                "transport_metric_v": metric_transport_v,
+                "transport_face_depth_u": H_u_flux,
+                "transport_face_depth_v": H_v_flux,
+                "transport_velocity_u": U_mid,
+                "transport_velocity_v": V_mid,
+                "transport_weight": w_tr_i,
+                "transport_sum_u_entry": Hu_sum_c,
+                "transport_sum_v_entry": Hv_sum_c,
+                "transport_sum_u_exit": Hu_sum_new,
+                "transport_sum_v_exit": Hv_sum_new,
                 "eta_continuity": eta_new,
                 "eta_pgf": eta_pgf,
                 "pgf_u": _pgf_u,

@@ -939,6 +939,13 @@ _DUMP_TIME_LEVEL["oracle_rkstage1_transport_operands_kt00000001.bin"] = (
     "e2u/e3u/uu/zub/umask/zFu and e1v/e3v/vv/zvb/vmask/zFv operands "
     "immediately after stprk3_stg.F90:265-278 materializes zFu/zFv",
 )
+_DUMP_TIME_LEVEL["oracle_bt_advmean_operands_kt00000001.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3/MY_SRC/dynspg_ts.F90:695-698,928-939 writes "
+    "the kt=1 substep transport accumulator and its normalized NOW-level "
+    "un_adv/vn_adv handoff",
+)
 _DUMP_TIME_LEVEL["oracle_tracer_transport_kt00000001_s3.bin"] = (
     "now",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"

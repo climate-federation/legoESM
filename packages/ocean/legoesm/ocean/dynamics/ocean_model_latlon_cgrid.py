@@ -1398,6 +1398,7 @@ class _NEMOWSBarotropicTrace(NamedTuple):
     state_after_barotropic: object
     substeps: object
     slow_forcing: object
+    transport_average: object
 
 
 def _nemo_qsr_stage3_rate(
@@ -5444,6 +5445,7 @@ class LatLonCGridOceanModel:
                 return _NEMOWSBarotropicTrace(
                     state_new, _substep_trace,
                     (F_slow_eta, F_slow_u, F_slow_v),
+                    (Hu_avg, Hv_avg),
                 )
             state_new, (Hu_avg, Hv_avg) = _baro_result
 
