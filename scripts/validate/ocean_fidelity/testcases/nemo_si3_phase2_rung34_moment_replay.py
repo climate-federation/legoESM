@@ -13,11 +13,12 @@ from typing import cast
 import jax
 import netCDF4
 import numpy as np
-from legoesm import constants
 from legoesm.core.precision import PrecisionPolicy, get_policy
 from legoesm.ice.dynamics import si3_cgrid_aevp_solver
 from legoesm.ice.fidelity import nemo_rheo_testcase_recipe as recipe
 from legoesm.ice.transport import SI3_PRATHER_MOMENT_NAMES
+
+from legoesm import constants
 
 ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/final")
 RESTART_ROOT = ROOT.parent / "round8" / "oracle_active_restarts"

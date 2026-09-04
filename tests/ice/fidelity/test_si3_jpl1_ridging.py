@@ -19,7 +19,9 @@ _CASE_DT_S = 30.0  # tests/ICE_RHEO/EXPREF/namelist_cfg:35
 
 
 def _state(*, area: float = 0.8, open_water: float = 0.203) -> SI3JPL1RidgingState:
-    scalar = lambda value: jnp.asarray([value], dtype=jnp.float64)
+    def scalar(value):
+        return jnp.asarray([value], dtype=jnp.float64)
+
     return SI3JPL1RidgingState(
         ice_area=scalar(area),
         open_water_area=scalar(open_water),

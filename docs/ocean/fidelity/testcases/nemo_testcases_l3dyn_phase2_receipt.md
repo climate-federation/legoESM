@@ -859,10 +859,11 @@ At that boundary `stress2_i=1.8943180357666733e-15` normalized and
 field are still AT-BAR.  **CONFIRMED:** this first owner is a carried stress row
 produced by the C-grid aEVP arm.  Its causal growth mechanism remains
 **UNMEASURED**; the word "nonlinear" names the executed equations, not a
-measured attribution.  Per the preregistered stopping rule, boundaries after kt=3,
-the candidate final step/restart, and all 160 candidate restart moments remain
-**UNMEASURED**; the existence of a completed NEMO restart does not measure a
-legoESM restart.
+measured attribution.  At the round-7 stopping boundary, boundaries after
+kt=3, the candidate final step/restart, and all 160 candidate restart moments
+were **UNMEASURED**.  The round-9 production-JIT walk below supersedes that
+historical status with measured DEBT rows; the completed NEMO restart alone
+was never treated as a legoESM measurement.
 
 ### Round-8 active-redistribution measurement
 
@@ -1017,6 +1018,144 @@ hardcoded-constant debt in `fv3_native_physics_coupling.py` and four existing
 grid/ocean tests.  No receipt claims a green repository-wide ratchet, and no
 unrelated file was edited to conceal it.
 
+### Round-9 Prather-moment owner and 9--720 walk
+
+The source census is **CONFIRMED** and refutes the proposed legoESM-only
+moment-consistency adjustment.  Across `src/ICE`, the saved Prather families
+occur only in `icedyn_adv_pra.F90`: the outer routine dispatches the ordered
+`adv_x`/`adv_y` writes at `:253-350`, exchanges their halos at `:432-479`, and
+calls restart output at `:487`; `adv_pra_init` allocates them at `:1145-1200`;
+and `adv_pra_rst` reads, zero-initializes, or writes them at `:1203-1503`
+(including zero initialization at `:1365-1379` and output at `:1397-1497`).
+No rheology, redistribution, correction, or thermodynamics routine writes a
+moment.  legoESM likewise carries the moment tuple unchanged between calls to
+its existing Prather transport arm (`nemo_rheo_testcase_recipe.py:646-704`).
+
+The first replay artifact reproduces the production-input endpoint: 60/160
+moment rows are **DEBT**, led by `sxxe_l01` at
+`3.492459543785742e-9` normalized and `2.095149123314519e-8`
+field-relative.  Replacing both transport velocities with the oracle values
+still leaves 60 DEBT rows before the written-order correction, so the broad
+"velocity-only" prediction is **REFUTED**.  Its operand trace first differs
+after the y limiter in `v_i.sx`, at interior `(16,2)`, by 136 ULP; the limiter
+itself has no velocity operand (`icedyn_adv_pra.F90:757-791`).
+
+The narrower preregistered arm changes only the four face transported-area
+expressions from `abs(velocity)*dt` to NEMO's constructed
+`alpha*donor_area` ordering (`icedyn_adv_pra.F90:582,628,805,851`).  It does
+not move the production-input owner or its 60-row count, so the predicted
+order-of-magnitude production move is **REFUTED**.  It does, however, change
+the discriminating oracle-input arms: oracle V removes the 30 y-owned rows,
+oracle U removes the 30 x-owned rows, and oracle U+V changes 60 DEBT rows to
+**160/160 byte-exact** endpoint moments (zero rows over two ULP).  Therefore
+the literal transport correction is retained and **CONFIRMED necessary**;
+the remaining production moment debt is owned by the already-measured U/V
+input differences being amplified by Prather cancellation, not by a
+between-advection rescale or by remaining endpoint transport algebra.  This
+is an eager replay result.  The production-JIT walk separately records seven
+JIT/eager step-9 DEBT leaves: four moment leaves at
+`1.7461744827862447e-9`--`5.819814907770393e-9` normalized and three stress
+leaves at `3.2306858985948695e-15`--`9.864812791606474e-15`; no compiler
+mechanism beyond this measured execution association is claimed.
+
+The full production-JIT walk completed every candidate step from 9 through
+720 on CPU under `PrecisionPolicy.fp64()` and scored the final NEMO restart.
+The classificatory bar remains `max_abs / max(max_abs(oracle),1) <= 1e-15`;
+the field-relative column is diagnostic and is not the bar.  The complete
+ordinary-field first-crossing register is:
+
+| first completed step | fields | first normalized / field-relative range |
+|---:|---|---|
+| 9 | `e_s_l01..l05` | `1.4674225963469599e-15` / same |
+| 9 | `stress1_i`, `stress2_i`, `stress12_i` | `4.7141934749322356e-15`--`1.2793429089114667e-14` / same |
+| 9 | `szv_i_l01..l10` | `1.2460415037437435e-15` / same |
+| 10 | `a_i` | `1.1102230246251565e-15` / `1.1214373875723981e-15` |
+| 10 | `e_i_l01..l10` | `1.3471512235101867e-15` / same |
+| 11 | `v_i` | `1.233581125301565e-15` / same |
+| 19 | `u_ice`, `v_ice` | `1.3189768620446002e-15`--`1.8401947480194917e-15` / `4.0854902331162955e-10`--`5.6533027936468151e-10` |
+| 25 | `v_s` | `2.8588242884097781e-15` / `2.8877012059595306e-14` |
+| never through 720 | `t_su`, `sv_i` | exactly zero error at the restart |
+| UNINFORMATIVE | `oa_i`, `a_ip`, `v_ip`, `v_il` | oracle and candidate identically zero |
+
+The requested growth rows below are measured from that same uninterrupted
+JIT walk; each entry is `normalized / field-relative`:
+
+| step | `u_ice` | `v_ice` | `stress1_i` | `stress2_i` | `stress12_i` | `a_i` | `v_i` | `v_s` |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 9 | `8.656e-21 / 1.106e-14` | `6.965e-21 / 1.475e-14` | `5.141e-15 / 5.141e-15` | `4.714e-15 / 4.714e-15` | `1.279e-14 / 1.279e-14` | `6.661e-16 / 6.729e-16` | `4.486e-16 / 4.486e-16` | `5.551e-17 / 5.607e-16` |
+| 10 | `2.377e-20 / 2.356e-14` | `1.186e-20 / 1.989e-14` | `1.704e-14 / 1.704e-14` | `1.229e-14 / 1.229e-14` | `1.613e-14 / 1.613e-14` | `1.110e-15 / 1.121e-15` | `7.850e-16 / 7.850e-16` | `9.714e-17 / 9.813e-16` |
+| 50 | `7.901e-7 / 2.199e-2` | `4.286e-7 / 2.611e-2` | `4.431e-2 / 4.431e-2` | `3.568e-2 / 3.568e-2` | `4.306e-2 / 4.306e-2` | `5.040e-8 / 5.091e-8` | `6.358e-8 / 6.358e-8` | `6.295e-9 / 6.358e-8` |
+| 100 | `1.628e-8 / 9.383e-5` | `8.699e-9 / 1.177e-4` | `2.508e-4 / 2.508e-4` | `3.097e-4 / 3.097e-4` | `3.555e-4 / 3.555e-4` | `9.390e-8 / 9.485e-8` | `1.330e-7 / 1.330e-7` | `1.317e-8 / 1.330e-7` |
+| 200 | `7.290e-6 / 5.292e-3` | `1.387e-5 / 2.401e-2` | `2.197e-2 / 2.197e-2` | `1.116e-1 / 1.116e-1` | `6.813e-2 / 6.813e-2` | `1.548e-6 / 1.563e-6` | `1.597e-6 / 1.597e-6` | `1.581e-7 / 1.597e-6` |
+| 485 | `3.423e-3 / 2.276e-2` | `4.772e-3 / 4.543e-2` | `6.985e-2 / 6.985e-2` | `2.793e-1 / 2.793e-1` | `3.224e-1 / 3.224e-1` | `4.548e-3 / 4.562e-3` | `4.319e-3 / 4.319e-3` | `4.573e-4 / 4.319e-3` |
+| 720 | `8.720e-2 / 2.438e-1` | `7.649e-2 / 2.358e-1` | `1.444e-1 / 1.444e-1` | `2.390e-1 / 2.390e-1` | `7.659e-1 / 7.659e-1` | `5.123e-2 / 5.138e-2` | `3.638e-2 / 3.638e-2` | `4.843e-3 / 3.638e-2` |
+
+**CONFIRMED endpoint:** of 39 ordinary restart rows, 33 are DEBT, `t_su` and
+`sv_i` are AT-BAR, and the four zero age/pond receivers are UNINFORMATIVE.
+Of 160 restart-moment rows, all 140 informative rows are DEBT; the remaining
+20 are the exact-zero moment packs belonging to the four UNINFORMATIVE
+age/pond receivers and are not promoted as evidence.  The largest endpoint
+moment is `sxya`, normalized and relative `1.6259034728302497`; the largest
+ordinary endpoint row is `stress12_i`, `0.76592339279538857`.  This is a
+completed restart validation and a loud trajectory **DEBT**, not a fidelity
+claim.  The trajectory growth is measured; its nonlinear owner is
+**UNMEASURED**.
+
+The literal excessive-removal scan evaluates
+`apartf*closing_gross*rDt_ice > a_i` from
+`icedyn_rdgrft.F90:600-612`.  It finds zero firing cells and zero open-water
+corrections in every one of the 719 transitions supplied by entry frames
+1--720.  At completed step 719 the maxima are `|delta|=2.2216755820843106e-4
+s^-1`, `opning=1.8418422419436972e-4 s^-1`, `closing_net=5.447690481734209e-5
+s^-1`, and redistributed-area demand `1.6343071445202627e-3`.  Thus the
+clamp is **CONFIRMED unexercised through the available frame-to-frame scan**;
+completed step 720 has no kt=721 entry frame and remains UNMEASURED by this
+instrument.  The age/pond receivers likewise remain UNINFORMATIVE:
+this rung executes `ln_icethd=F`, while the production ORCA1 deck itself sets
+`ln_pnd=.false.` (`/data/abyssal/dbalwada/ORCA1-omip/EXPREF/namelist_ice_cfg:151`).
+The copied ICE_RHEO oracle resolves `LN_PND=T` in `output.namelist.ice:78`, but
+without thermodynamics no nonzero pond receiver is produced; no pond or age
+production claim is made.
+
+The active-window planted control remains bound at row level after the
+transport correction: `active.step8.v_s` moves from AT-BAR
+`2.7755575615628914e-17` to DEBT `9.999999439624929e-11` normalized.  The
+moment replay's velocity plant changes 140 scored moment rows, with
+`sxice` moving from exact to `1.4445620896407168e-26`; both controls are
+independent of an already-red overall exit code.
+
+| round-9 artifact | SHA-256 |
+|---|---|
+| initial eager walk target (interrupted; zero bytes; REJECTED) | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| production-JIT full walk + final restart score | `d5436efe847704c1fa77ef85e8c94db1cc652fbba063ccfc7ebca15c117153e8` |
+| excessive-removal scan | `829f122cdac6484d379f79067b9c66d52eb5c03dbd1ff7b5f418231d717be8af` |
+| first four-arm moment replay | `2fa4a60fcbca5d1e91f3eebbc3501b0b1418ba1f26c8195fd0cf3427ea039b52` |
+| written-order transported-area replay | `761317721545db3afe98c28ba94c551c8a0db1bb5b1f680a23cb2dd7c9d0a415` |
+| corrected active-window gate / row plant | `ebf355b1c8c1410c70f1ebbdc1bb09f5c682f03c89c17741310f8073e0bf48fa` / `933b8aa90b04c374f20d85dffa6127b4a459f770f3010c09d9ce107acaeb0420` |
+| final NEMO restart scored by the walk | `e5161e64a5c8e4d9180420dca58f99a43088952d0e9826c802d94ac1693b4bf6` |
+
+The measurement implementation spans commits `125032b53d9` through
+`cb0b1a3688c`; the source-order transport change is `8af0852eeb4`.  The
+accepted full-walk artifact records `execution_path=JIT (CPU, fp64)` and
+`walk_completed_steps=[9,720]`.  The empty `full_walk.json` and the initially
+empty `full_walk_jit.json` were inspected before the latter was rerun in one
+attached foreground process; no background Python process was left behind.
+Focused CPU/fp64 verification is **39 passed in 198.58 s**, followed after the
+import-only/style cleanup by **9 passed in 22.34 s** for the affected replay
+and ridging tests.  The non-vacuous source-order test is
+`test_nemo_si3_phase2_adv2d_gate.py:152-177`; replay and arm derivation tests
+are `test_nemo_si3_phase2_rung34_moment_replay.py:28-57`; per-field register,
+JIT/eager, and row-plant tests are
+`test_nemo_si3_phase2_rung34_trajectory_gate.py:76-134`; and the real
+clamp/category guards are `test_si3_jpl1_ridging.py:137-185`.  Direct
+application of the inline-coefficient and hardcoded-constant detectors reports
+`inline=[]` and `hardcoded=[]` for each of the nine touched Python paths.
+The implemented ordering is visible at `transport.py:813-865`, branch
+instrumentation at `ridging.py:637-714,899`, the row-level plant at
+`nemo_si3_phase2_rung34_trajectory_gate.py:323-342`, and the full walk at
+`:414-545`.  Ruff is clean on the same set with only the repository's
+Fortran-name `N803/N806` exceptions.
+
 ## Loudly UNMEASURED / deferred
 
 Within-step x/y Prather split states; ORCA1
@@ -1031,7 +1170,7 @@ this paragraph.
 
 ## End-of-task ASKED / UNASKED choice list
 
-The mandatory round-7/8 choice record is tabular so scope decisions cannot be
+The mandatory round-7--9 choice record is tabular so scope decisions cannot be
 lost inside narrative:
 
 | round | choice | disposition | evidence/disposition |
@@ -1046,6 +1185,11 @@ lost inside narrative:
 | 8 | Add relative diagnostics without replacing the normalized bar | ASKED | Both columns emitted; normalized max-one metric remains classificatory |
 | 8 | Remove non-oracle final clamps, reject category-axis input, and calculate `sishea` from NEMO's formula | ASKED | Implemented, tested, and measured |
 | 8 | Add thresholds, physical arms, moment families, default changes, or any shipped-NEMO edit beyond these choices | UNASKED | None performed |
+| 9 | Bind the active plant by a scored-row transition and headline the dominant moment debt | ASKED | `active.step8.v_s` AT-BAR to DEBT; `sxxe_l01` headlines the active window |
+| 9 | Census moment writers and run U-only, V-only, U/V, and written-order transported-area arms | ASKED | No between-call moment mutation; U and V each own 30 endpoint rows; exact U/V plus written order is 160/160 byte-exact |
+| 9 | Walk completed steps 9--720 with production JIT/fp64/CPU, score the restart, and scan the excessive-removal branch | ASKED | Completed; 173 informative final DEBT rows; no clamp firing in 719 available frame transitions |
+| 9 | Treat zero age/pond receivers as trajectory evidence | UNASKED | Four state rows and their 20 zero moment rows remain UNINFORMATIVE; ORCA1 `ln_pnd=F` disclosed |
+| 9 | Change schemes/defaults, relax the bar, infer a nonlinear owner, edit shipped NEMO, use GPU/MPI, push, or delete artifacts | UNASKED | None performed; the interrupted zero-byte artifact is retained and flagged REJECTED |
 
 **ASKED choices:** resolve the rung-3.1 review HOLD in its own commit; implement
 rungs 3.1 and 3.2 against the pinned shipped cases; fp64/CPU only and `jpl=1`;
@@ -1093,5 +1237,6 @@ No repair or modernization of either shipped ICE_RHEO override; no deletion or
 modification in the shipped NEMO tree; no numerical stale-source trajectory
 comparison fabricated from an unbuildable control; no multi-category,
 thermodynamic, landfast, alternate-rheology, or alternate-ridging selector arm;
-no claim past the measured rung-3.4 first-divergence boundary; no tolerance
-relaxation, GPU, MPI, or push.
+no AT-BAR or causal-owner claim past the rung-3.4 first-divergence boundary
+(round 9 measures the continuation as DEBT); no tolerance relaxation, GPU,
+MPI, or push.
