@@ -770,6 +770,23 @@ Status: **KT1-VERIFIED; DEBT-FIRST-DIVERGENCE at completed step 2**.  This is
 an honestly stopped first-divergence boundary, not a completed 720-step
 legoESM trajectory or restart claim.
 
+### Round-8 `ato_i` review disposition
+
+**CONFIRMED -- reviewer premise retracted.**  The review requested changing
+`ato_i` into the first Prather tracer, deleting its nonnegative clamp, and
+adding five restart moments.  That would depart from the executed NEMO 5.0.2
+oracle.  `icedyn_adv.F90:88-91` passes `ato_i` into the Prather routine, but
+the routine's transported-field list and calls at
+`icedyn_adv_pra.F90:218-300,306-350` contain no open-water content or moments.
+Instead, after all category tracers are advected and `ice_var_zapneg` runs,
+SI3 reconstructs `pato_i` with the explicit `MAX(0, ...)` balance at
+`icedyn_adv_pra.F90:418-430`.  The module's complete saved-moment declarations
+at `:34-46` likewise contain no `ato_i` family, and the measured ICE_RHEO
+restart roster has 160 moment arrays for the existing 32 tracers and no open-
+water moment.  The card's current balance and clamp are therefore retained;
+`ato_i` is not added to `ICE_RHEO_TRACERS`, and no synthetic oracle moment is
+created.  The direct card registry test now locks that exclusion.
+
 The pre-implementation search found the existing Lipscomb-2007 path in
 `packages/ice/legoesm/ice/ridging.py` and no rafting implementation.  Its
 per-category weight is proportional to `a*exp(-h/e*)`.  SI3 instead constructs

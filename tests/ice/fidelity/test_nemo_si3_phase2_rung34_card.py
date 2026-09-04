@@ -25,6 +25,17 @@ _ORACLE_GATE = Path(__file__).parents[3] / (
     "scripts/validate/ocean_fidelity/testcases/nemo_si3_oracle_gate.py"
 )
 _POINTWISE_BAR = 1.0e-15
+# Shipped ICE_RHEO namelist_cfg:19-20,35 and usrdef_sbc.F90:112-117,122-127.
+_TRACER_COUNT = 32
+_SPACING_M = 2000.0
+_STEP_DT_S = 30.0
+_WIND_SPINUP_S = 21600.0
+_WIND_MAX_M_S = 15.0
+_DOMAIN_KM = 2000.0
+_KM_TO_M = 1000.0
+_WIND_RATIO = -0.8
+_AIR_DENSITY_KG_M3 = 1.22
+_AIR_DRAG = 1.4e-3
 
 
 def _oracle_gate_module():
@@ -75,7 +86,10 @@ def test_rung34_card_geometry_and_dtype_gate(oracle_card) -> None:
     assert card.jpl == 1 and card.nlay_i == 10 and card.nlay_s == 5
     assert card.thermodynamics is False and card.landfast is False
     assert tuple(ICE_RHEO_TRACERS[:4]) == ("v_i", "v_s", "a_i", "oa_i")
-    assert len(ICE_RHEO_TRACERS) == 32
+    assert len(ICE_RHEO_TRACERS) == _TRACER_COUNT
+    # ato_i is reconstructed after each category-advection loop and owns no
+    # Prather moments (icedyn_adv_pra.F90:423-429; module arrays :34-46).
+    assert "ato_i" not in ICE_RHEO_TRACERS
 
     for name in ("e1t", "e2t", "e1u", "e2u", "e1v", "e2v", "e1f", "e2f"):
         candidate = np.asarray(getattr(card.metrics, name))[2:-2, 2:-2]
@@ -97,7 +111,7 @@ def test_rung34_card_geometry_and_dtype_gate(oracle_card) -> None:
 def test_rung34_initial_state_is_the_oracle_entry_frame(oracle_card) -> None:
     card, frame, _ = oracle_card
     index = ICE_RHEO_TRACERS.index
-    area = 2000.0 * 2000.0
+    area = _SPACING_M * _SPACING_M
     for name in ("v_i", "v_s", "a_i", "oa_i", "a_ip", "v_ip", "v_il"):
         candidate = np.asarray(card.initial_state.contents[..., index(name)]) / area
         np.testing.assert_array_equal(candidate, frame[name][..., 0])
@@ -111,13 +125,19 @@ def test_rung34_shipped_wind_integer_exponent_branch(oracle_card) -> None:
     stress_u, stress_v = ice_rheo_air_stress(card.initial_state, 1)
     global_i = 3.0
     global_j = 3.0
-    spinup = 30.0 / 21600.0
-    normalization = 15.0 / math.sqrt(2000.0 * 1000.0)
-    wind_u = normalization * (2000.0 - 2.0 * global_i * 2.0) * spinup
-    wind_v = normalization * (2000.0 - 2.0 * global_j * 2.0) * -0.8 * spinup
+    spinup = _STEP_DT_S / _WIND_SPINUP_S
+    normalization = _WIND_MAX_M_S / math.sqrt(_DOMAIN_KM * _KM_TO_M)
+    wind_u = normalization * (_DOMAIN_KM - 2.0 * global_i * 2.0) * spinup
+    wind_v = (
+        normalization * (_DOMAIN_KM - 2.0 * global_j * 2.0) * _WIND_RATIO * spinup
+    )
     magnitude = math.sqrt(wind_u * wind_u + wind_v * wind_v)
-    np.testing.assert_allclose(stress_u[2, 2], 1.22 * 1.4e-3 * magnitude * wind_u)
-    np.testing.assert_allclose(stress_v[2, 2], 1.22 * 1.4e-3 * magnitude * wind_v)
+    np.testing.assert_allclose(
+        stress_u[2, 2], _AIR_DENSITY_KG_M3 * _AIR_DRAG * magnitude * wind_u
+    )
+    np.testing.assert_allclose(
+        stress_v[2, 2], _AIR_DENSITY_KG_M3 * _AIR_DRAG * magnitude * wind_v
+    )
     with pytest.raises(ValueError, match="must be positive"):
         ice_rheo_air_stress(card.initial_state, 0)
 
@@ -136,7 +156,7 @@ def test_rung34_kt1_full_dynall_gate(oracle_card) -> None:
     )
     candidate = step_ice_rheo_card(card, completed_steps=0)
     index = ICE_RHEO_TRACERS.index
-    area = 2000.0 * 2000.0
+    area = _SPACING_M * _SPACING_M
     fields = {
         name: np.asarray(candidate.contents[..., index(name)]) / area
         for name in ICE_RHEO_TRACERS
