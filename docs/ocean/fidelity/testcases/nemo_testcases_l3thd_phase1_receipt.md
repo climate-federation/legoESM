@@ -245,6 +245,14 @@ snwice_mass,snwice_mass_b,snwice_fmass`, followed by
 `utau,vtau,taum,qsr,qns,emp,sfx,fr_i`.  CICE-only exchange arrays
 (`topmelt,botmelt,ss_iou,ss_iov,...`) are WAIVED because CICE is not built.
 
+**Round-8 correction (2026-09-04):** the list above is a writer inventory,
+not a pointwise value certification.  This phase-1 gate checked the payload was
+finite and measured only `fr_i`; finite uninitialized `rCdU_ice` storage and
+first-step `utau/vtau/emp` halos therefore passed.  The drift ticket
+`nemo_testcases_l3thd_exchange_drift_ticket.md` accounts for every changed
+byte, fixes the config-local writer, and supersedes this stream hash.  No phase-1
+thermodynamics or restart result depended on those inactive bytes.
+
 ## Appendix-B constants drift recheck
 
 NEMO values were re-read at `src/OCE/DOM/phycst.F90:48,57-66`, ocean

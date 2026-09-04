@@ -50,6 +50,7 @@ MODULE icestp
    USE sbc_oce        ! Surface boundary condition: ocean fields
    USE sbc_ice        ! Surface boundary condition: ice   fields
    USE sbcblk ,  ONLY : ln_Cx_ice_frm, rn_Cd_ia
+   USE zdfdrg ,  ONLY : ln_drgice_imp
    !
    USE icesbc         ! sea-ice: Surface boundary conditions
    USE icedyn         ! sea-ice: dynamics
@@ -246,6 +247,8 @@ CONTAINS
       INTEGER, INTENT(in) :: kt
       INTEGER :: ios
       CHARACTER(LEN=16), PARAMETER :: cmagic = 'NEMO_L3XCHG_001'
+      REAL(wp), DIMENSION(jpi,jpj) :: zl3_utau, zl3_vtau, zl3_emp
+      REAL(wp), DIMENSION(A2D(1)) :: zl3_rCdU_ice
       IF( .NOT. ll_l3xchg_opened ) THEN
          OPEN( NEWUNIT=num_l3xchg, FILE='oracle_si3_exchange_frames.bin', STATUS='REPLACE', &
             &  ACCESS='STREAM', FORM='UNFORMATTED', ACTION='WRITE', IOSTAT=ios )
@@ -254,14 +257,33 @@ CONTAINS
       ENDIF
       WRITE(num_l3xchg) cmagic
       WRITE(num_l3xchg) 1, kt, jpi, jpj, jpl, STORAGE_SIZE(1._wp)
+      ! sbcmod.F90:481-482 says utau/vtau/emp halos are not valid yet when
+      ! ice_stp returns.  At nit000 serialize a zeroed payload with only the
+      ! registered A2D(0) column copied; subsequent records have linked halos.
+      zl3_utau(:,:) = utau(:,:)
+      zl3_vtau(:,:) = vtau(:,:)
+      zl3_emp (:,:) = emp (:,:)
+      IF( kt == nit000 ) THEN
+         zl3_utau(:,:) = 0._wp
+         zl3_vtau(:,:) = 0._wp
+         zl3_emp (:,:) = 0._wp
+         zl3_utau(A2D(0)) = utau(A2D(0))
+         zl3_vtau(A2D(0)) = vtau(A2D(0))
+         zl3_emp (A2D(0)) = emp (A2D(0))
+      ENDIF
+      ! zdfdrg.F90:52 leaves this entire allocation undefined in SAS, where
+      ! zdf_phy_init is not called.  Preserve it only when the assigning arm
+      ! in iceupdate.F90:388-392 is active.
+      zl3_rCdU_ice(:,:) = 0._wp
+      IF( ln_drgice_imp )   zl3_rCdU_ice(:,:) = rCdU_ice(:,:)
       WRITE(num_l3xchg) qns_ice, qsr_ice, qla_ice, dqla_ice, dqns_ice, tn_ice, alb_ice
       WRITE(num_l3xchg) qml_ice, qcn_ice, qtr_ice_top
       WRITE(num_l3xchg) utau_ice, vtau_ice, emp_ice
       WRITE(num_l3xchg) evap_ice, devap_ice
       WRITE(num_l3xchg) qns_oce, qsr_oce, qemp_oce, qemp_ice, qevap_ice, qprec_ice
-      WRITE(num_l3xchg) emp_oce, wndm_ice, sstfrz, rCdU_ice
+      WRITE(num_l3xchg) emp_oce, wndm_ice, sstfrz, zl3_rCdU_ice
       WRITE(num_l3xchg) snwice_mass, snwice_mass_b, snwice_fmass
-      WRITE(num_l3xchg) utau, vtau, taum, qsr, qns, emp, sfx, fr_i
+      WRITE(num_l3xchg) zl3_utau, zl3_vtau, taum, qsr, qns, zl3_emp, sfx, fr_i
       ! The terminal step may be revisited; process teardown owns CLOSE so a
       ! second nitend call cannot reopen this STATUS='REPLACE' stream.
       FLUSH(num_l3xchg)
