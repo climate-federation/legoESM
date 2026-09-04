@@ -4493,9 +4493,28 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         def scalar_fn(s):
             u_c = 0.5 * (s.u[:, :-1, :] + s.u[:, 1:, :])
             v_c = 0.5 * (s.v[:-1, :, :] + s.v[1:, :, :])
+            # #1029: log WHERE the wind maximum sits, not only how big it
+            # is.  The lat-lon held_suarez_topo case runs a jet away to
+            # NaN and the series recorded only the magnitude, so the two
+            # live suspects -- a pressure-gradient error over the DCMIP
+            # mountain vs a polar/lid problem -- were indistinguishable
+            # from the record.  Same localisation the NH cubed-sphere
+            # scalar_fn already carries (face/i/j/k there); reported here
+            # in DEGREES because a lat-lon index means nothing on its own.
+            # ``scalars_at_blowup`` in _run_timeloop captures this at the
+            # trip step itself, so the burst location is on the record.
+            # Cell-centre fields are (n_lat, n_lon, nlev) on this core
+            # (primitive_eq_latlon_cgrid module docstring), and grid.lat /
+            # grid.lon are the 1-D centre axes -- so axis 0 indexes LAT.
+            _spd = jnp.sqrt(u_c ** 2 + v_c ** 2)
+            _at = jnp.unravel_index(jnp.argmax(_spd), _spd.shape)
+            _ilat, _ilon, _k = int(_at[0]), int(_at[1]), int(_at[2])
             return {
                 "mass": mass_fn(s),
-                "max_wind": float(jnp.max(jnp.sqrt(u_c ** 2 + v_c ** 2))),
+                "max_wind": float(jnp.max(_spd)),
+                "max_wind_lat_deg": float(lat_deg[_ilat]),
+                "max_wind_lon_deg": float(lon_deg[_ilon]),
+                "max_wind_k": float(_k),
                 "mean_T": _area_weighted_mean(s.T, grid.area),
             }
 
