@@ -217,3 +217,67 @@ Round-8 choice ledger at preregistration:
 | 8 | Publish field-relative errors beside, but do not replace, the immutable max-one normalized gate metric | ASKED | Round-8 finding 4 |
 | 8 | Remove the two non-oracle final clamps, reject category-axis state, and evaluate `sishea` with NEMO's own formula | ASKED | Round-8 findings 5--7 |
 | 8 | Invent a new threshold, forcing, scheme, moment family, state substitute, tolerance, default change, or shipped-NEMO edit | UNASKED | No such expansion was authorized |
+
+## Round-9 moment-debt discrimination (preregistered before replay)
+
+The headline active-window discrepancy is the 60/160 Prather-moment DEBT,
+owned in magnitude by `sxxe_l01` at `3.492459543785742e-9` normalized and
+`2.095149123314519e-8` field-relative.  This is not classified as roundoff.
+The experiment starts from the same oracle entry frame 8 plus NEMO step-7
+restart moments and scores the NEMO step-8 restart.  Geometry, fields, clock,
+fp64 policy, and every selector remain unchanged.
+
+Source census before running:
+
+* a symbol search for the distinctive saved families (`sxice`, `sxxice`,
+  `sxc0`, `sxxe`, `sxsi`, `sxvl`, and their y/cross partners) across all of
+  `src/ICE/*.F90` finds exactly one file: `icedyn_adv_pra.F90`;
+* that file changes moments only in `adv_x`/`adv_y` calls
+  (`icedyn_adv_pra.F90:253-350`), halo exchange (`:432-479`), initialization or
+  restart input (`:1226-1380`), and restart output (`:1383-1497`).  No
+  `rdgrft`, `cor`, rheology, or thermodynamics routine writes them;
+* legoESM passes moments only through `advect_si3_prather_2d`
+  (`nemo_rheo_testcase_recipe.py:646-662`) and returns that tuple unchanged
+  after source corrections, ridge/raft, and `ice_cor` (`:664-704`).  Therefore
+  a legoESM-only rescale/re-derive/zero operation is **REFUTED by source
+  census**; the one-variable comparison moves only the U/V input supplied to
+  the existing transport implementation.
+
+Preregistered arms and decisions:
+
+| arm | only change | CONFIRM | REFUTE |
+|---|---|---|---|
+| baseline | recomputed legoESM aEVP U/V | reproduces the recorded 60 moment debts | recorded artifact cannot be reproduced |
+| oracle-V | replace only V with oracle entry-frame-9 V | first y-sweep moment discrepancy collapses to at most 2 ULP | it remains above 2 ULP |
+| oracle-U | replace only U with oracle entry-frame-9 U | x-sweep-only remainder is at most 2 ULP after y agrees | y-stage discrepancy changes materially |
+| oracle-U/V | replace both velocity components | every endpoint moment closes to at most 2 ULP | any endpoint moment remains above 2 ULP |
+
+Prediction: because completed step 8 is even, NEMO executes y then x
+(`icedyn_adv_pra.F90:253,303-350`).  The two arms are identical before and
+immediately after the y limiter, which has no velocity operand
+(`icedyn_adv_pra.F90:757-791`).  The first baseline-versus-oracle-input moment
+difference is predicted after that limiter in the y loss/merge program
+(`:793-943`), with `sxxe_l01` remaining the largest endpoint row.  Whether the
+first differing family is `sx`, `sy`, `sxx`, `syy`, or `sxy` is deliberately
+left to the committed operand scan rather than inferred from the endpoint.
+If the oracle-U/V arm does not close, the replay must descend through limiter,
+loss, and receiver-merge operands and no velocity attribution is permitted.
+
+The subsequent walk starts from the corrected/aligned step-8 state and runs
+through step 720.  It records the first over-bar step independently for every
+ordinary field and both normalized and field-relative errors at steps 9, 10,
+50, 100, 200, 485, and 720.  Separately, the oracle closing replay evaluates
+the excessive-category-removal predicate literally:
+`apartf * closing_gross * rDt_ice > a_i` at
+`icedyn_rdgrft.F90:600-607`.  Prediction: the first firing, if any, is after
+step 13; no claim of absence is allowed until all 720 oracle entries are read.
+The open-water correction at `:611-621` is reported separately and is not
+silently called the category clamp.
+
+| round | choice | disposition | basis |
+|---|---|---|---|
+| 9 | Bind the plant by its row transition and headline the dominant moment debt | ASKED | Review findings 1--2 |
+| 9 | Census all NEMO moment writers; inspect legoESM between-advection handling; run U-only, V-only, and U/V one-variable arms | ASKED | Review finding 3 |
+| 9 | Change transport before the source census and replay identify an operand | UNASKED | Violates preregistration and one-variable discipline |
+| 9 | Walk ordinary fields through step 720 and scan the oracle excessive-removal predicate | ASKED | Review finding 4 |
+| 9 | Promote zero age/pond receiver rows or infer ORCA1 coverage from them | UNASKED | This thermodynamics-off card cannot exercise those channels |
