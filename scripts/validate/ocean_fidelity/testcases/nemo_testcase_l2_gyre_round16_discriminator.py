@@ -420,24 +420,51 @@ def run(oracle_root: Path, mesh_path: Path) -> dict[str, object]:
 
     current_arg0, current_arg1, current_exp0, current_exp1 = _current_qsr_sites(card, r3t)
     interfaces = slice(0, 18)
+    ir_executed = np.zeros(literal_qsr_sites["arg_si0"].shape, dtype=bool)
+    ir_executed[..., :3] = True
     site_rows = [
-        _compare("qsr.arg_si0", literal_qsr_sites["arg_si0"], current_arg0[..., interfaces]),
+        _compare(
+            "qsr.arg_si0",
+            literal_qsr_sites["arg_si0"],
+            current_arg0[..., interfaces],
+            ir_executed,
+        ),
         _compare("qsr.arg_si1", literal_qsr_sites["arg_si1"], current_arg1[..., interfaces]),
-        _compare("qsr.exp_si0", literal_qsr_sites["exp_si0"], current_exp0[..., interfaces]),
+        _compare(
+            "qsr.exp_si0",
+            literal_qsr_sites["exp_si0"],
+            current_exp0[..., interfaces],
+            ir_executed,
+        ),
         _compare("qsr.exp_si1", literal_qsr_sites["exp_si1"], current_exp1[..., interfaces]),
     ]
+    active = np.transpose(tmask[:30] > 0.5, (1, 2, 0))
+    before_qsr = np.asarray(tracer_record["after_sbc_T"])[..., :30]
+    after_qsr = np.asarray(tracer_record["after_qsr_T"])[..., :30]
+    literal_replay = np.asarray(
+        before_qsr + literal_qsr[..., :30], dtype=np.float64
+    )
+    current_replay = np.asarray(
+        before_qsr + np.asarray(current["qsr_increment"]), dtype=np.float64
+    )
     qsr_rows = [
         _compare(
-            "qsr.literal_vs_oracle",
-            qsr_record["dT_dt"][..., :30],
-            literal_qsr[..., :30],
-            np.transpose(tmask[:30] > 0.5, (1, 2, 0)),
+            "qsr.literal_accumulation_replay_vs_oracle_after",
+            after_qsr,
+            literal_replay,
+            active,
         ),
         _compare(
-            "qsr.current_vs_oracle",
+            "qsr.current_accumulation_replay_vs_oracle_after",
+            after_qsr,
+            current_replay,
+            active,
+        ),
+        _compare(
+            "qsr.recovered_delta_dump_vs_literal_increment",
             qsr_record["dT_dt"][..., :30],
-            current["qsr_increment"],
-            np.transpose(tmask[:30] > 0.5, (1, 2, 0)),
+            literal_qsr[..., :30],
+            active,
         ),
     ]
     sbc_rows = []
@@ -451,8 +478,9 @@ def run(oracle_root: Path, mesh_path: Path) -> dict[str, object]:
 
     routing = _routing_control(qsr_record, tracer_record)
     literal_qsr_exact = qsr_rows[0]["status"] == "BIT-EXACT"
+    current_qsr_exact = qsr_rows[1]["status"] == "BIT-EXACT"
     literal_sbc_exact = all(row["status"] == "BIT-EXACT" for row in sbc_rows[::2])
-    h1 = literal_qsr_exact and any(row["differing"] for row in site_rows)
+    h1 = literal_qsr_exact and not current_qsr_exact
     h2_exp = not routing["exp_route_pass"]
     h2_sin_cos = not routing["sin_cos_route_pass"]
     return {
@@ -461,6 +489,11 @@ def run(oracle_root: Path, mesh_path: Path) -> dict[str, object]:
         "regime": "production-jit/cpu/fp64/scalar-libm",
         "oracle_root": str(oracle_root),
         "mesh": str(mesh_path),
+        "qsr_dump_semantics": (
+            "oracle_qsr_stage3 stores Krhs_after-Krhs_before; direct tendency "
+            "certification therefore uses the independently dumped after_sbc_T "
+            "and after_qsr_T accumulator replay"
+        ),
         "qsr_rows": qsr_rows,
         "qsr_statement_rows": site_rows,
         "sbc_rows": sbc_rows,
