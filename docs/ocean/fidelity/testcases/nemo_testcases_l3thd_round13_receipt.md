@@ -201,5 +201,7 @@ the six missing oracle/consumer frames, not silently treated as complete.
 
 Implementation commit: `c53e40cebda3`; honest-scope correction:
 `3b62ef0d851c`; post-review preregistration: `176e428b8a28`; corrected bridge,
-schema, clock, and chlorophyll replay: `ee56aef34f81`.  This receipt's final
-commit and bundle hashes are filled by the end-of-round handoff.
+schema, clock, and chlorophyll replay: `ee56aef34f81`; exact Rule-1d and
+producer-bridge gate: `31b6ea0a8720`; first evidence-pinned receipt revision:
+`5d6ed72d3bab`.  The final tip and bundle hash are reported in the handoff to
+avoid a self-referential receipt hash.
