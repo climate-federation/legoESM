@@ -1067,49 +1067,34 @@ def _nemo_roquet_eos_impl(
         jnp.sqrt(jnp.abs(S + c["rdeltaS"]) * c["r1_S0"]))
     # Horner form (NEMO eosbn2.F90:265-286): each zn_k is the coefficient of
     # zh^k, itself a Horner-in-zt whose zt-coefficients are Horner-in-zs.
-    # Carry the source-ordered Horner recurrence through ``lax.scan``.  A
-    # Python-unrolled expression leaves all multiply/add nodes in one XLA
-    # fusion, where an outer compilation can reassociate them despite a single
-    # barrier around the completed polynomial.  The scan carry is the actual
-    # NEMO statement boundary and is identical in direct and whole-step JIT.
-    def _horner(x, coefficients):
-        values = jnp.stack([
-            jnp.broadcast_to(jnp.asarray(value, dtype=x.dtype), x.shape)
-            for value in coefficients
-        ])
-
-        def _step(carry, coefficient):
-            product = lax.optimization_barrier(carry * x)
-            return lax.optimization_barrier(product + coefficient), None
-
-        return lax.scan(_step, values[0], values[1:])[0]
-
+    # Keep NEMO's four scalar assignments explicit.  Putting each completed
+    # znN behind a barrier retains the Fortran statement boundaries without a
+    # nested scan in every EOS call of the full WS-RK3 compilation.
     zn3 = lax.optimization_barrier(
         c["EOS013"] * zt + c["EOS103"] * zs + c["EOS003"])
     zn2 = lax.optimization_barrier(
         (c["EOS022"] * zt + c["EOS112"] * zs + c["EOS012"]) * zt
         + (c["EOS202"] * zs + c["EOS102"]) * zs + c["EOS002"])
-    zn1 = _horner(zt, (
-        c["EOS041"],
-        _horner(zs, (c["EOS131"], c["EOS031"])),
-        _horner(zs, (c["EOS221"], c["EOS121"], c["EOS021"])),
-        _horner(zs, (c["EOS311"], c["EOS211"], c["EOS111"], c["EOS011"])),
-        _horner(zs, (c["EOS401"], c["EOS301"], c["EOS201"], c["EOS101"],
-                     c["EOS001"])),
-    ))
-    zn0 = _horner(zt, (
-        c["EOS060"],
-        _horner(zs, (c["EOS150"], c["EOS050"])),
-        _horner(zs, (c["EOS240"], c["EOS140"], c["EOS040"])),
-        _horner(zs, (c["EOS330"], c["EOS230"], c["EOS130"], c["EOS030"])),
-        _horner(zs, (c["EOS420"], c["EOS320"], c["EOS220"], c["EOS120"],
-                     c["EOS020"])),
-        _horner(zs, (c["EOS510"], c["EOS410"], c["EOS310"], c["EOS210"],
-                     c["EOS110"], c["EOS010"])),
-        _horner(zs, (c["EOS600"], c["EOS500"], c["EOS400"], c["EOS300"],
-                     c["EOS200"], c["EOS100"], c["EOS000"])),
-    ))
-    zn = lax.optimization_barrier(_horner(zh, (zn3, zn2, zn1, zn0)))
+    zn1 = lax.optimization_barrier(
+        (((c["EOS041"] * zt + c["EOS131"] * zs + c["EOS031"]) * zt
+          + (c["EOS221"] * zs + c["EOS121"]) * zs + c["EOS021"]) * zt
+         + ((c["EOS311"] * zs + c["EOS211"]) * zs + c["EOS111"]) * zs
+         + c["EOS011"]) * zt
+        + (((c["EOS401"] * zs + c["EOS301"]) * zs + c["EOS201"]) * zs
+           + c["EOS101"]) * zs + c["EOS001"])
+    zn0 = lax.optimization_barrier(
+        (((((c["EOS060"] * zt + c["EOS150"] * zs + c["EOS050"]) * zt
+            + (c["EOS240"] * zs + c["EOS140"]) * zs + c["EOS040"]) * zt
+           + ((c["EOS330"] * zs + c["EOS230"]) * zs + c["EOS130"]) * zs
+           + c["EOS030"]) * zt
+          + (((c["EOS420"] * zs + c["EOS320"]) * zs + c["EOS220"]) * zs
+             + c["EOS120"]) * zs + c["EOS020"]) * zt
+         + ((((c["EOS510"] * zs + c["EOS410"]) * zs + c["EOS310"]) * zs
+             + c["EOS210"]) * zs + c["EOS110"]) * zs + c["EOS010"]) * zt
+        + (((((c["EOS600"] * zs + c["EOS500"]) * zs + c["EOS400"]) * zs
+              + c["EOS300"]) * zs + c["EOS200"]) * zs + c["EOS100"]) * zs
+        + c["EOS000"])
+    zn = lax.optimization_barrier(((zn3 * zh + zn2) * zh + zn1) * zh + zn0)
     return zn   # in-situ density [kg/m³]
 
 
