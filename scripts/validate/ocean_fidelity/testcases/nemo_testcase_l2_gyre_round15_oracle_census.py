@@ -57,8 +57,8 @@ def _layouts(name: str, data: bytes) -> list[tuple[str, int, int]]:
     if name.startswith("oracle_rhs_"):
         return _fixed(44, (("Krhs_u", N3), ("Krhs_v", N3)))
     if name.startswith("oracle_bt_frames_"):
-        return _fixed(40, (("ssh_before", N2), ("u_before", N2),
-                           ("v_before", N2), ("ssh_after", N2)))
+        return _fixed(40, (("uu_b", N2), ("vv_b", N2),
+                           ("un_adv", N2), ("vn_adv", N2)))
     if name.startswith("oracle_zdf_entry_"):
         return _fixed(44, (("avm", N3), ("avt", NI2 * NZ)))
     if name.startswith("oracle_qsr_stage3_"):
