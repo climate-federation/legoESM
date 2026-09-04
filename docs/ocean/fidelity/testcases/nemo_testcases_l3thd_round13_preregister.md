@@ -77,3 +77,23 @@ bits.  Each plant must change the targeted row and exit nonzero.
 | treat 10 m as an ORCA1 quantity | UNASKED | forbidden; it is not |
 | extrapolate the one-column equality to multiple columns | UNASKED | forbidden |
 | change initial SSH/ice, generate another input, duplicate a shared routine, modify shipped NEMO, push, GPU, or `mpirun` | UNASKED | none authorized |
+
+## Pre-run construction correction (recorded before retry B)
+
+The first 10 m attempt exposed a geometry-composition error before the claimed
+rung: although `rn_bathy=10`, copied C1D's L75 reference grid places its second
+W level at about 1.024 m.  Its bottom partial-step assignment
+`usrdef_zgr.F90:167-169` therefore evaluates
+`MIN(rn_bathy,pdepw_1d(2))-pdepw_1d(1)` to about 1.024 m.  After the ice-load
+adjustment that attempt still had negative `e3t` and was stopped/retained; it
+does not implement Decision 6.
+
+Retry B is preregistered to make the config-local `jpk=2` geometry actually be
+one 10 m wet layer: before the shared `depth_to_e3` call, its W depths are
+`[0, rn_bathy]` and its T depths `[rn_bathy/2, 3*rn_bathy/2]`.  NEMO's shared
+`depth_to_e3_1d` definition (`src/OCE/DOM/depth_e3.F90:44-75`) then derives
+both scale factors as `rn_bathy`, and the existing bottom partial-step line
+retains that value.  This is a copied-configuration geometry correction that
+executes the already asked 10 m slab; it changes no ocean or SI3 physics and
+introduces no new free parameter.  Retry B must satisfy the original
+`e3t≈8.333 m` prediction before any downstream row is scored.
