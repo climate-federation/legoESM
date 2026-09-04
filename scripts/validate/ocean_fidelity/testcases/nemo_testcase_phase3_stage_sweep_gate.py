@@ -312,6 +312,8 @@ def score(name: str, oracle, candidate, mask, *, plant=False, quantity="u") -> d
         candidate = candidate.copy()
         candidate[tuple(np.argwhere(active)[0])] += 1.0
     require(np.all(np.isfinite(candidate[active])), f"{name}: non-finite")
+    from legoesm.ocean.fidelity.ulp_move_gate import record_residual_field
+    record_residual_field(name, oracle, candidate, active)
     absolute = float(np.max(np.abs(candidate[active] - oracle[active])))
     reference = float(np.max(np.abs(oracle[active])))
     normalized = absolute / max(reference, 1.0)
@@ -743,12 +745,22 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
     )
     hu0 = np.asarray(min_cell_to_uface(h0))[:, 1:, :]
     for arm, hooks in arms.items():
-        states[arm] = LatLonCGridOceanModel(
+        final_state = LatLonCGridOceanModel(
             card.recipe.grid,
             card.recipe.z_coord,
             card.recipe.model_config,
             _nemo_ws_test_hooks=hooks,
         ).step(card.recipe.initial_state, dt=card.dt_s)
+        # Materialize before compiling either exposed-stage executable.  A
+        # GYRE/OVERFLOW production step is small, but retaining three XLA
+        # executables at once is not; the comparison harness must not turn a
+        # 30x20-class card into a host-memory exhaustion.
+        states[arm] = final_state._replace(
+            u=final_state.u.replace(data=np.asarray(final_state.u.data)),
+            T=final_state.T.replace(data=np.asarray(final_state.T.data)),
+            eta=final_state.eta.replace(data=np.asarray(final_state.eta.data)),
+        )
+        jax.clear_caches()
         stage_states[arm] = {}
         for stage in (1, 2, 3):
             if stage == 3:
@@ -780,19 +792,14 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
                     masks["u"]),
                 masks["u"],
             ))
+            if stage != 3:
+                stage_states[arm][stage] = stage_state._replace(
+                    u=stage_state.u.replace(data=np.asarray(stage_state.u.data)))
+                jax.clear_caches()
         # Each arm compiles three fresh executables; with 9 arms the process
         # exhausts vm.max_map_count (LLVM "Unable to allocate section memory")
         # long before host RAM.  Materialize the arm's fields as numpy, then
         # drop the compilation cache.  Pure resource hygiene: no arithmetic.
-        states[arm] = states[arm]._replace(
-            u=states[arm].u.replace(data=np.asarray(states[arm].u.data)),
-            T=states[arm].T.replace(data=np.asarray(states[arm].T.data)),
-            eta=states[arm].eta.replace(data=np.asarray(states[arm].eta.data)),
-        )
-        for stage in (1, 2):
-            stage_states[arm][stage] = stage_states[arm][stage]._replace(
-                u=stage_states[arm][stage].u.replace(
-                    data=np.asarray(stage_states[arm][stage].u.data)))
         stage_states[arm][3] = states[arm]
         jax.clear_caches()
 
@@ -1322,37 +1329,45 @@ def main(argv=None) -> int:
     parser.add_argument("--allow-dirty", action="store_true",
                         help="stamp '<sha>-dirty' instead of refusing a dirty tree")
     from legoesm.ocean.fidelity.ulp_move_gate import (
-        add_ulp_compare_arguments, comparison_exit_code, run_ulp_comparison,
+        add_ulp_compare_arguments, capture_residual_fields,
+        comparison_exit_code, persist_ulp_comparison, run_ulp_comparison,
+        write_residual_artifact,
     )
     add_ulp_compare_arguments(parser)
     args = parser.parse_args(argv)
     # Exit codes: 0 AT-BAR, 1 DEBT (measured), 2 gate failure (a planted
     # control that did not land, a dirty tree, a bad oracle record).
     try:
-        report = run(args.case, args.oracle_root or ROOTS[args.case],
-                     plant_stage=args.plant_stage, plant_operand=args.plant_operand,
-                     plant_prediction=args.plant_prediction,
-                     allow_dirty=args.allow_dirty, faithful_only=args.faithful_only)
+        with capture_residual_fields() as residuals:
+            report = run(args.case, args.oracle_root or ROOTS[args.case],
+                         plant_stage=args.plant_stage, plant_operand=args.plant_operand,
+                         plant_prediction=args.plant_prediction,
+                         allow_dirty=args.allow_dirty, faithful_only=args.faithful_only)
     except (GateError, OSError, ValueError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
+        return 2
+    if args.output:
+        write_residual_artifact(report, args.output, residuals)
+    elif args.compare_to:
+        print("FAIL: --compare-to requires --output for the residual sidecar", file=sys.stderr)
         return 2
     encoded = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.write_text(encoded)
     print(encoded, end="")
     if args.compare_to:
-        # Exit status then reports the ULP COMPARISON against a committed
-        # reference, not this gate's own AT-BAR/DEBT verdict.  Every arm here
+        # Exit status then reports the oracle-relative cellwise comparison
+        # against a committed before report. Every arm here
         # other than "faithful" is a private ablation whose meaning a refactor
         # may legitimately redefine, so a comparison of this gate normally
         # passes --compare-rows-matching .faithful. and says so in the receipt.
         comparison = run_ulp_comparison(args, report)
         print(json.dumps(comparison, indent=2, sort_keys=True))
+        print(persist_ulp_comparison(args, comparison))
         code = comparison_exit_code(comparison)
         if code == 2:
-            print("PLANTED CONTROL DID NOT LAND: a planted "
-                  f"{comparison['planted_ulp_move']}-ulp move left the "
-                  "comparison green, so the comparison is inspecting nothing",
+            print("PLANTED CONTROL DID NOT PRODUCE ITS REQUIRED VERDICT: "
+                  f"{comparison['plant']}",
                   file=sys.stderr)
         return code
     return 0 if report["status"] == "AT-BAR" else 1

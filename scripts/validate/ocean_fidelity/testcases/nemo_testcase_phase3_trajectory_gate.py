@@ -118,6 +118,8 @@ def score(
         candidate = candidate.copy()
         candidate[tuple(np.argwhere(use)[0])] += 1.0
     require(np.all(np.isfinite(candidate[use])), f"{name}: candidate nonfinite")
+    from legoesm.ocean.fidelity.ulp_move_gate import record_residual_field
+    record_residual_field(name, oracle, candidate, use)
     exact = bool(np.array_equal(oracle[use], candidate[use]))
     scale = max(float(np.max(np.abs(oracle[use]))), 1.0)
     error = float(np.max(np.abs(candidate[use] - oracle[use]))) / scale
@@ -529,38 +531,43 @@ def main() -> int:
     parser.add_argument("--allow-dirty", action="store_true",
                         help="stamp '<sha>-dirty' instead of refusing a dirty tree")
     from legoesm.ocean.fidelity.ulp_move_gate import (
-        add_ulp_compare_arguments, comparison_exit_code, run_ulp_comparison,
+        add_ulp_compare_arguments, capture_residual_fields,
+        comparison_exit_code, persist_ulp_comparison, run_ulp_comparison,
+        write_residual_artifact,
     )
     add_ulp_compare_arguments(parser)
     args = parser.parse_args()
     require(args.max_step >= 1, "max-step must be positive")
-    report = run(
-        args.case, args.oracle_dir or DEFAULT_ORACLE_ROOTS[args.case],
-        args.max_step, plant=args.plant,
-        continue_after_first=args.continue_after_first,
-        diagnostic_disable_bbl=args.diagnostic_disable_bbl,
-        owner_controls=args.owner_controls, allow_dirty=args.allow_dirty,
-        arm_literal_stage_wzv=args.arm_literal_stage_wzv,
-        arm_legacy_seed_faces=args.arm_legacy_seed_faces,
-        arm_legacy_hadv_min_face_thickness=args.arm_legacy_hadv_min_face_thickness,
-        arm_legacy_2d_stage_face_mask=args.arm_legacy_2d_stage_face_mask,
-        arm_legacy_live_stage_mean_weights=args.arm_legacy_live_stage_mean_weights)
+    with capture_residual_fields() as residuals:
+        report = run(
+            args.case, args.oracle_dir or DEFAULT_ORACLE_ROOTS[args.case],
+            args.max_step, plant=args.plant,
+            continue_after_first=args.continue_after_first,
+            diagnostic_disable_bbl=args.diagnostic_disable_bbl,
+            owner_controls=args.owner_controls, allow_dirty=args.allow_dirty,
+            arm_literal_stage_wzv=args.arm_literal_stage_wzv,
+            arm_legacy_seed_faces=args.arm_legacy_seed_faces,
+            arm_legacy_hadv_min_face_thickness=args.arm_legacy_hadv_min_face_thickness,
+            arm_legacy_2d_stage_face_mask=args.arm_legacy_2d_stage_face_mask,
+            arm_legacy_live_stage_mean_weights=args.arm_legacy_live_stage_mean_weights)
+    if args.output:
+        write_residual_artifact(report, args.output, residuals)
+    elif args.compare_to:
+        raise GateError("--compare-to requires --output for the residual sidecar")
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.write_text(text)
     print(text, end="")
     if args.compare_to:
-        # The exit status now reports the ULP COMPARISON, not this gate's own
-        # AT-BAR/DEBT verdict: a re-association is being checked against a
-        # committed reference, and the DEBT status itself is one of the fields
-        # the comparison requires to be unchanged.
+        # The exit status now reports the oracle-relative cellwise comparison,
+        # not this run's own AT-BAR/DEBT verdict.
         comparison = run_ulp_comparison(args, report)
         print(json.dumps(comparison, indent=2, sort_keys=True))
+        print(persist_ulp_comparison(args, comparison))
         code = comparison_exit_code(comparison)
         if code == 2:
-            print("PLANTED CONTROL DID NOT LAND: a planted "
-                  f"{comparison['planted_ulp_move']}-ulp move left the "
-                  "comparison green, so the comparison is inspecting nothing",
+            print("PLANTED CONTROL DID NOT PRODUCE ITS REQUIRED VERDICT: "
+                  f"{comparison['plant']}",
                   file=sys.stderr)
         return code
     return 0 if report["status"] == "AT-BAR" else 1

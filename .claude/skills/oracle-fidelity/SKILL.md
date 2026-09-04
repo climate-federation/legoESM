@@ -323,6 +323,14 @@ finding it replaces. Retracted attributions get re-discovered by the next
 session otherwise. A campaign that produced five retractions and one confirmed
 bug is not a failure — but only if the five are written down.
 
+## Rule 12 — A faithful fix may expose a compensating error; keep walking
+
+A change is eligible to land only if the changed operator is shown bit-exact
+given NEMO's own inputs on every card it touches. If such a change makes a card
+worse against NEMO, that is a second error exposed: the fix stays, the worsened
+row enters that card's register as debt naming the boundary, and the next round
+walks it. Never reverted, never waived silently, never a per-card switch.
+
 ## Working order
 
 1. Read the oracle's source for the subsystem. Build an ordered
