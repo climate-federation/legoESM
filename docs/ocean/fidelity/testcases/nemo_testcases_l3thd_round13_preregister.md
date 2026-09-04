@@ -127,3 +127,13 @@ volume-type-1 operands and outputs at `sbcfwb.F90:224-239,292-295`.
 Prediction for the one-wet-column domain: the literal area multiply/global
 sum/divide replay, snow-plus-ice mass correction, `emp`, and compensating
 `qns` update remain within the bar.  A row outside it becomes the next owner.
+
+That synchronous prediction is **REFUTED** at `kt=5`: NEMO names the global
+sum `cdelay='fwb1'` at `sbcfwb.F90:238`.  The measured sequence shows the first
+call consumes its current reduction, while each later four-step refresh
+consumes the preceding refresh's reduction.  Before rescoring, the registered
+domain-sum time level is therefore changed from current to this measured
+one-refresh delayed value.  One-variable private arm: force an immediate
+current reduction; it must reproduce the `kt=5` failure.  Prediction for the
+selected delayed arm: all three `emp_corr`, `emp`, and `qns` rows return within
+the bar without changing any upstream row.
