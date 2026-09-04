@@ -1,14 +1,12 @@
-# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–14 boundary receipt
+# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–15 boundary receipt
 
-**Verdict: STOP / DEBT at the stage-1 barotropic slow-forcing handoff.
-Round 14 implements the user's oracle-relative cross-card decision, exposes
-cellwise compensating errors in both earlier cards, and exhausts the
-`un_adv/vn_adv` averaging boundary.  The 50 weights, every source-associated
-partial sum, final divisor, and LBC handoff are exact.  The first live
-transport input is the substep-2 velocity, inherited from a substep-1 slow-
-forcing mismatch; substituting only NEMO's slow forcing reduces that boundary
-to one ulp.  No physics fix lands, stage-2 Kaa therefore remains
-`2.00e-14`, and stage-3 transport/ZDF remain unentered.**
+**Verdict: STOP / DEBT at Round 15's scalar-math eligibility gate.  The asked
+scalar-libm precision policy is implemented and verified against `libm.so.6`,
+but it does not make the GYRE two-band QSR increment or every analytic SBC
+field bit-exact against the rebuilt scalar-math NEMO oracle.  Per the user's
+explicit falsifier, the Round-13 source-rounding follow-up, slow-forcing walk,
+stage-3 transport, and ZDF matrix walk were not entered.  Round 14's stage-1
+barotropic slow-forcing handoff remains the last physical boundary.**
 
 Date: 2026-09-04
 
@@ -44,6 +42,16 @@ Round-14 oracle-relative criterion commit: `6cde4f2d7451d87aa862a41931c3a1aa9225
 Round-14 EOS follow-up commit: `d1ec2eb3b9823e37497a7bd17148cf4f5ca39532`
 
 Round-14 transport-boundary commit: `165ada6d5073309532bee50ec54b426168143c24`
+
+Round-15 starting tip: `2b322c42f1c5c6d82ad6b930436b6f74295c486c`
+
+Round-15 preregistration commit: `ca613d0d366b089f61ee03e4a34d2e3daec5161b`
+
+Round-15 oracle-V2/census commit: `72020136f`
+
+Round-15 scalar-libm implementation commit: `61180a677`
+
+Round-15 eligibility-gate commit: `ed62a96ce`
 
 ## Round-14 oracle-relative cross-card criterion
 
@@ -1002,3 +1010,231 @@ config-local oracle record/source/deck, and faithful/planted walk reports.
 Round-13 independent review is running in parallel; every Round-14 result is
 a new Codex-internal measurement.  Independent review remains outstanding and
 no dual-review claim is made.
+
+## Round 15 — scalar-math oracle and eligibility STOP
+
+User Decision 4 is **ASKED (2026-09-04)**.  NEMO's `-O3` executable called
+glibc's vector-math entry points, whose EXP/TANH last bits are not the scalar
+library's last bits.  This round therefore rebuilt GYRE without tree
+vectorization and added one shared precision-policy implementation for scalar
+system-libm EXP/TANH.  It did not change the oracle-relative cross-card gate,
+merge a branch, or add a GYRE/card-specific physics arm.
+
+### Oracle V2 build and corrected preregistration result
+
+`GYRE_OMIP_L2_P3_SM` was created from shipped `GYRE_PISCES` with
+`arch-conda-scalarmath.fcm`, then received SHA-verified copies of the existing
+instrumented configuration's `EXP00`, `MY_SRC`, and CPP deck.  The deck remains
+`key_qco key_vco_1d3d key_RK3`.  The arch SHA-256 is
+`132f7a0500c4f0e86d8d3bf7864974a82e1dea5d83166dcfdfaf409e2ca04561`
+and its flags are `-fdefault-real-8 -O3 -funroll-all-loops -fcray-pointer
+-ffree-line-length-none -fallow-argument-mismatch -fno-tree-vectorize`.
+The pre-instrument V2 executable is `e1b16b90…`; `nm -D` reports zero `_ZGV*`
+symbols.  The exact vector-control executable is `16cd9192…` and retains five
+such linked symbols.  Both completed ten CPU steps.
+
+The old oracle is retained at
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round15_oracle_v1_vectorized_exact`.
+V2 is retained at
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round15_oracle_v2_scalarmath`;
+the SBC-instrumented V2 is separately retained with suffix `_sbc`.  V1 is
+flagged non-certifying rather than deleted.
+
+The preregistration correctly predicted that `kt=1` entry, EOS/HPG, and
+constant ENE coefficients need no changed transcendental.  It incorrectly
+predicted that other pre-QSR records and the analytic qsr field would remain
+identical.  Disabling tree vectorization changes ordinary loops and reductions
+as well as math dispatch: only 5 of 46 records are byte-identical.  This is a
+compiler-wide V2 change, so none of the 41 moves is attributed solely to libm.
+The briefing also suspected the `zdftke` EXP selected by `nn_etau=1`; the
+resolved GYRE namelist actually has `nn_etau=0`
+(`EXP00/namelist_cfg:220`, `output.namelist.dyn:311`), so that arm is dead.
+
+The committed byte census names the first changed source-stream payload:
+
+| record | V1→V2 | first differing field |
+|---|---|---|
+| `oracle_bt_advmean_operands_kt00000001.bin` | DIFFERENT | `substep[2].metric_u` |
+| `oracle_bt_drag_operands_kt00000001.bin` | DIFFERENT | `substep[2].un_e` |
+| `oracle_bt_ene_coeff_kt00000001.bin` | IDENTICAL | — |
+| `oracle_bt_frames_kt00000001.bin` | DIFFERENT | `ssh_before` |
+| `oracle_bt_frames_kt00000002.bin` | DIFFERENT | `ssh_before` |
+| `oracle_bt_frames_kt00000003.bin` | DIFFERENT | `ssh_before` |
+| `oracle_bt_frames_kt00000004.bin` | DIFFERENT | `ssh_before` |
+| `oracle_bt_frames_kt00000005.bin` | DIFFERENT | `ssh_before` |
+| `oracle_bt_frames_kt00000006.bin` | DIFFERENT | `ssh_before` |
+| `oracle_bt_frames_kt00000007.bin` | DIFFERENT | `ssh_before` |
+| `oracle_bt_frames_kt00000008.bin` | DIFFERENT | `ssh_before` |
+| `oracle_bt_frames_kt00000009.bin` | DIFFERENT | `ssh_before` |
+| `oracle_bt_frames_kt00000010.bin` | DIFFERENT | `ssh_before` |
+| `oracle_bt_substeps_kt00000001.bin` | DIFFERENT | `substep[1].slow_u` |
+| `oracle_qsr_stage3_kt00000001.bin` | DIFFERENT | `qsr` |
+| `oracle_rhs_kt00000001.bin` | IDENTICAL | — |
+| `oracle_rkstage1_transport_operands_kt00000001.bin` | DIFFERENT | `zub` |
+| `oracle_rkstage2_ene_operands_kt00000001.bin` | DIFFERENT | `zwx[k=1]` |
+| `oracle_rkstage2_eos_operands_kt00000001.bin` | DIFFERENT | `T` |
+| `oracle_rkstage2_hpg_literal_kt00000001.bin` | IDENTICAL | — |
+| `oracle_rkstage2_hpg_operands_kt00000001.bin` | IDENTICAL | — |
+| `oracle_rkstage2_operands_kt00000001.bin` | DIFFERENT | `Kmm_u` |
+| `oracle_rkstage2_preupdate_kt00000001.bin` | DIFFERENT | `Krhs_u` |
+| `oracle_rkstage2_terms_kt00000001.bin` | DIFFERENT | `after_vorticity_u` |
+| `oracle_rkstage3_wzv_kt00000001.bin` | DIFFERENT | `ww_pre_aimp` |
+| `oracle_rktracer_operands_kt00000001_s1.bin` | DIFFERENT | `zFu` |
+| `oracle_rktracer_operands_kt00000001_s2.bin` | DIFFERENT | `zFu` |
+| `oracle_rktracer_stage3_kt00000001.bin` | DIFFERENT | `after_advection_T` |
+| `oracle_stage_kt00000001_s1.bin` | DIFFERENT | `T` |
+| `oracle_stage_kt00000001_s2.bin` | DIFFERENT | `T` |
+| `oracle_stage_kt00000001_s3.bin` | DIFFERENT | `T` |
+| `oracle_step_entry_kt00000001.bin` | IDENTICAL | — |
+| `oracle_step_entry_kt00000002.bin` | DIFFERENT | `T` |
+| `oracle_step_entry_kt00000003.bin` | DIFFERENT | `T` |
+| `oracle_step_entry_kt00000004.bin` | DIFFERENT | `T` |
+| `oracle_step_entry_kt00000005.bin` | DIFFERENT | `T` |
+| `oracle_step_entry_kt00000006.bin` | DIFFERENT | `T` |
+| `oracle_step_entry_kt00000007.bin` | DIFFERENT | `T` |
+| `oracle_step_entry_kt00000008.bin` | DIFFERENT | `T` |
+| `oracle_step_entry_kt00000009.bin` | DIFFERENT | `T` |
+| `oracle_step_entry_kt00000010.bin` | DIFFERENT | `T` |
+| `oracle_tracer_transport_kt00000001_s3.bin` | DIFFERENT | `zFu` |
+| `oracle_transport_kt00000001_s1.bin` | DIFFERENT | `zFu` |
+| `oracle_transport_kt00000001_s2.bin` | DIFFERENT | `zFu` |
+| `oracle_transport_kt00000001_s3.bin` | DIFFERENT | `zFu` |
+| `oracle_zdf_entry_kt00000001.bin` | DIFFERENT | `avm` |
+
+The census plant changes one payload byte and exits `1`.  The legacy
+momentum-side zFw record is written before vector-invariant `tra_adv_trp`
+initializes zFw (`MY_SRC/stprk3_stg.F90:312-345,616-624`).  The gate formerly
+labelled that row UNINFORMATIVE only after first trying to score its accidental
+contents.  It now finite-checks and scores zFu/zFv while recording the raw zFw
+sentinel count and never treating it as science.
+
+### Production-JIT register against V2
+
+The current model at `72020136f`, before selecting scalar libm, was rerun in
+production JIT on CPU/fp64 against V2.  `kt=1` T/S remain bit-exact; at-rest
+u/v/SSH remain UNINFORMATIVE.  `first_over_bar` remains `kt=2` for all five
+fields.  The re-pinned normalized maximum residuals are:
+
+| kt | T | S | u | v | SSH |
+|---:|---:|---:|---:|---:|---:|
+| 1 | `0` | `0` | `0` | `0` | `0` |
+| 2 | `1.3614736849003888e-12` | `2.2181101297999213e-14` | `9.4840899545731204e-7` | `8.9879925923354873e-7` | `2.3733185555707692e-15` |
+| 3 | `3.7223422534148244e-4` | `3.683246743167771e-5` | `9.3116789131404247e-3` | `4.7190775913080185e-3` | `7.0746696494725179e-7` |
+| 4 | `1.0594736858280278e-3` | `8.2257404918755151e-5` | `1.4182404011401410e-2` | `1.5947842533309442e-2` | `5.0601188622632215e-7` |
+| 5 | `3.0537433514018029e-3` | `8.611826496841798e-5` | `2.0733890538957842e-2` | `4.3797666154583352e-2` | `6.7018566281600023e-5` |
+| 6 | `3.8176772033418527e-3` | `1.2875362101381311e-4` | `3.1134730338654347e-2` | `6.0219593254000642e-2` | `1.6310220843274655e-4` |
+| 7 | `4.5466683327810668e-3` | `1.2244044313748583e-4` | `4.0041405602208285e-2` | `6.6315774741028066e-2` | `2.0871415929327739e-4` |
+| 8 | `5.0983786157443181e-3` | `1.3609844417961678e-4` | `4.7180060361300936e-2` | `2.4527162798603175e-2` | `2.5108257580629123e-4` |
+| 9 | `5.4450653406584275e-3` | `1.4711821963103337e-4` | `5.2560399634331935e-2` | `1.4533611363184411e-2` | `2.1202997678594127e-4` |
+| 10 | `5.6366385875687508e-3` | `1.5483121735342806e-4` | `5.6249872588641961e-2` | `1.1173366024903889e-2` | `2.125547585165961e-4` |
+
+V1→V2 changes 20 maximum-residual rows for the worse, 23 for the better, and
+leaves seven identical.  This is oracle-toolchain movement; it is still Rule-8
+disclosure, not a new operator owner.  All worsened rows are:
+
+| field | kt | V1 absolute max | V2 absolute max | ratio |
+|---|---:|---:|---:|---:|
+| u | 2 | `9.4840899545725783e-7` | `9.4840899545731204e-7` | `1.00000000000006` |
+| SSH | 2 | `2.3724511938327808e-15` | `2.3733185555707692e-15` | `1.00036559729458` |
+| T | 3 | `8.7413117393815298e-3` | `8.7413117395023221e-3` | `1.00000000001382` |
+| SSH | 3 | `7.0746696485140832e-7` | `7.0746696494725179e-7` | `1.00000000013547` |
+| SSH | 4 | `5.0601188203002606e-7` | `5.0601188622632215e-7` | `1.00000000829288` |
+| T | 5 | `7.1740734435106646e-2` | `7.1740734435113751e-2` | `1.00000000000010` |
+| u | 5 | `2.0733890538956697e-2` | `2.0733890538957842e-2` | `1.00000000000006` |
+| v | 5 | `4.3797666154580465e-2` | `4.3797666154583352e-2` | `1.00000000000007` |
+| SSH | 5 | `6.7018566280471585e-5` | `6.7018566281600023e-5` | `1.00000000001684` |
+| SSH | 6 | `1.6310220830087775e-4` | `1.6310220843274655e-4` | `1.00000000080850` |
+| S | 7 | `4.5104093018011326e-3` | `4.5104093128500722e-3` | `1.00000000244965` |
+| u | 7 | `4.0041405602201319e-2` | `4.0041405602208285e-2` | `1.00000000000017` |
+| v | 7 | `6.6315774741020544e-2` | `6.6315774741028066e-2` | `1.00000000000011` |
+| T | 8 | `1.1973658446773072e-1` | `1.1973658446773427e-1` | `1.00000000000003` |
+| S | 8 | `5.0135224231979691e-3` | `5.01352242321218e-3` | `1.00000000000283` |
+| S | 9 | `5.4194104725056036e-3` | `5.419410472512709e-3` | `1.00000000000131` |
+| u | 9 | `5.2560399634324524e-2` | `5.2560399634331935e-2` | `1.00000000000014` |
+| S | 10 | `5.7034808159812656e-3` | `5.7034808159954764e-3` | `1.00000000000249` |
+| v | 10 | `1.1173366024871394e-2` | `1.1173366024903889e-2` | `1.00000000000291` |
+| SSH | 10 | `2.1255475816557047e-4` | `2.125547585165961e-4` | `1.00000000165146` |
+
+### One shared scalar-libm policy
+
+Pre-implementation search found no `pure_callback`, `ctypes`, or `CDLL` under
+`packages/` or `src/`.  `PrecisionPolicy` now has one `native|libm`
+transcendental selector, default `native`; every NEMO testcase card explicitly
+requires `libm`.  `legoesm.core.transcendentals` loads the same `libm.so.6`
+soname as NEMO (`/lib64/libm.so.6`, glibc 2.34), calls scalar C `exp`/`tanh`
+once per array element via `jax.pure_callback`, rejects non-CPU execution, and
+defines custom JVPs whose reverse rules are obtained by JAX transposition.
+The two-band NEMO path uses the shared EXP.  The reusable GYRE profile helper
+uses the shared TANH; the actual testcase card already constructs its static
+IC through scalar Python `math.tanh`.  Executed GYRE SIN/COS remain JAX-native
+because the machine discriminator found them bit-identical; the resolved TKE
+EXP is inactive (`nn_etau=0`).
+
+For each of EXP and TANH, the 100,000-input test requires scalar-libm output
+bits to equal an independent ctypes call and requires the native JIT path to
+differ somewhere.  Separate tests require libm eager/JIT bit identity and
+finite-difference-consistent forward plus reverse AD.  The core precision,
+transcendental, and testcase-card run is `94 passed` in `22.02 s`, CPU/x64.
+The final focused rerun, extended with the one-routine-per-reference
+isomorphism tripwire, is `129 passed` in `24.78 s`, CPU/x64.
+Rule 1c in the oracle-fidelity skill now permits a platform/precision selector
+only with compiler/library/binary provenance, one shared implementation, no
+per-card guard, and preserved JIT/AD.
+
+### Eligibility measurement and mandatory STOP
+
+The config-local `usrdef_sbc.F90` instrument writes qsr, qns, emp, utau, and
+vtau only after their source assignments
+(`src/OCE/USR/usrdef_sbc.F90:109-145,161-184`).  Its final executable still has
+zero `_ZGV*`.  Both production restart/history NetCDF files have bit-identical
+data variables before and after instrumentation.  Forty of 46 raw diagnostic
+streams are also byte-identical; the six raw differences are retained and
+listed by the committed gate as uninitialized/halo diagnostic records rather
+than being hidden or used as physics evidence.
+
+The eligibility gate evaluates the same stage-3 Kmm stretch carried in NEMO's
+tracer record and compares binary64 bits over wet/active cells.  Counts are
+production-JIT CPU/fp64.  “Land-only” is separately disclosed and never used
+to erase a wet mismatch.
+
+| boundary / field | native differing wet cells | scalar-libm differing wet cells | scalar-libm max abs | verdict |
+|---|---:|---:|---:|---|
+| `qsr_2BD` increment | 16,082 | 15,891 | `1.9058241313221758e-21` | DEBT |
+| `usrdef_sbc.qsr` | 0 | 0 | 0 | BIT-EXACT |
+| `usrdef_sbc.qns` | 115 (+104 land-only) | 115 (+104 land-only) | `1.1368683772161603e-13` | DEBT |
+| `usrdef_sbc.emp` | 490 | 490 | `6.776263578034403e-21` | DEBT |
+| `usrdef_sbc.utau` | 0 | 0 | 0 | BIT-EXACT |
+| `usrdef_sbc.vtau` | 0 | 0 | 0 | BIT-EXACT |
+
+Scalar libm removes 191 wet QSR bit mismatches but leaves 15,891; qns and EMP
+do not traverse EXP/TANH and do not move.  This refutes eligibility.  The gate
+prints `ROUND15_ELIGIBILITY DEBT stop_required=True` and exits `1`.  Its clean
+oracle-copy control has zero mismatches; a one-ulp qsr plant changes one cell
+and exits `1`.
+
+No association was tuned after seeing this result.  In particular,
+`_nemo_source_round` was **not** renamed or applied to corrected-velocity/zub,
+the `2.799952110443815e-17` operand was not remeasured, the slow-forcing dump
+was not added, and no kt sweep was run under the ineligible scalar-libm policy.
+Those are conditional work, not silently completed work.
+
+### Round-15 ASKED / UNASKED register
+
+| choice or action | origin | disposition |
+|---|---|---|
+| rebuild GYRE oracle with math-call vectorization off | ASKED Decision 4 | complete; V2 retained, zero `_ZGV*` |
+| preserve and flag V1 | ASKED | complete; exact vector control retained |
+| scalar `libm.so.6` EXP/TANH precision policy | ASKED | landed shared, default native, NEMO cards explicit |
+| custom AD, production JIT, CPU-only enforcement | ASKED | complete; focused tests pass |
+| V1/V2 byte census and V2 kt=1…10 register | ASKED | complete; 46 rows and production-JIT sweep retained |
+| config-local SBC WRITE-only dump | UNASKED enabling measurement | retained only in oracle config; production fields bit-identical |
+| pre-consumer zFw UNINFORMATIVE gate correction | UNASKED gate correctness | landed; no uninitialized value is scored |
+| scalar-libm eligibility | ASKED | REFUTED; fail-closed STOP |
+| public `nemo_source_round` and corrected-velocity application | conditional ASKED | NOT ENTERED after STOP |
+| slow-forcing boundary walk/fix | conditional ASKED | NOT ENTERED after STOP |
+| stage-3 transport and ZDF walks | conditional ASKED | NOT ENTERED |
+| GYRE-only association, card guard, tuning after eligibility | forbidden | none added |
+
+Round-14 independent review was still running when this dispatch began.
+Every Round-15 result is a Codex-internal measurement; independent review is
+outstanding and no dual-review claim is made.
