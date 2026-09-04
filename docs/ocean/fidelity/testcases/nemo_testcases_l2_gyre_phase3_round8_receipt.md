@@ -63,7 +63,9 @@ Round-16 discriminator/implementation commits: `f3dc65745` through
 
 Round-16 attribution/ULP commits: `0ab248075`, `ae1a21357`
 
-Round-16 slow-forcing implementation tip: `ea6ac7f0a`
+Round-16 slow-forcing implementation commit: `ea6ac7f0a`
+
+Round-16 shared source-round implementation tip: `97d40d24e`
 
 ## Round-14 oracle-relative cross-card criterion
 
@@ -1245,4 +1247,230 @@ Those are conditional work, not silently completed work.
 
 Round-14 independent review was still running when this dispatch began.
 Every Round-15 result is a Codex-internal measurement; independent review is
+outstanding and no dual-review claim is made.
+
+## Round 16 — scalar-math discriminator and ordered slow-forcing walk
+
+Round 16 started at `b9311e65de2`.  The discriminator was preregistered at
+`1e4a8fe97` before any implementation change.  Every measurement in this
+section is production JIT on CPU with x64/fp64 and the explicit scalar-libm
+policy unless a row says otherwise.  Oracle V1 remains retained and flagged;
+nothing was deleted or overwritten.  The config-local `MY_SRC` extensions are
+WRITE-only, and no shipped NEMO source was modified.
+
+### Discriminator: H1 confirmed, H2 refuted
+
+The pre-fix NumPy transcription preserves NEMO's statement boundaries for the
+two-band constants, exponential arguments, cutoff, and accumulation
+(`traqsr.F90:621,629-630,642` in the executed compilation listing; the same
+statements are `src/OCE/TRA/traqsr.F90:665-683`).  The nine seasonal
+trigonometric sites and the qsr/qns/emp/stress assemblies follow
+`cfgs/GYRE_OMIP_L2_P3_SM/MY_SRC/usrdef_sbc.F90:86-146,163-187`.
+
+The QSR diagnostic is an accumulated delta, not a bare tendency.  The probe
+therefore replays the candidate increment into the dumped pre-QSR `Krhs` and
+compares that result with NEMO's dumped post-QSR `Krhs`.  Before the fix,
+NEMO-literal replay was bit-exact in all 18,000 active cells while the then-
+current shared path differed in 5,324.  The exponential arguments and scalar-
+libm results themselves were bit-exact in all 2,112 first-band and 12,672
+second-band sites.  NEMO-literal SBC replay was bit-exact for all five 600-cell
+fields, while the current path differed in 115 wet qns cells and 490 emp
+cells.  This **CONFIRMS H1** (statement association) and **REFUTES H2** for
+EXP (callback delivery).
+
+The route plant advances every scalar-libm return by one binary64 step.  Before
+the fix it counted 43,648 EXP calls and changed the QSR result.  After extending
+the same policy to the executed SIN/COS sites, it counted 43,648 EXP, 2,112
+SIN, and 1,412 COS calls, and changed qsr, qns, emp, utau, vtau, and the QSR
+increment.  Thus the card demonstrably traverses each callback; the plant is
+behavioral and not a source-string assertion.
+
+The shared fix at `7da8b5169` applies `nemo_source_round` at the NEMO statement
+boundaries, uses the same precomputed reciprocals and multiplication forms,
+and sends the seasonal SIN/COS sites through the same scalar-library policy.
+This is shared NEMO identity code, not a GYRE switch.  The post-fix eligibility
+measurement is:
+
+| boundary / field | pre-fix scalar-libm wet mismatches | post-fix scalar-libm wet mismatches | post-fix max abs | verdict |
+|---|---:|---:|---:|---|
+| `qsr_2BD` accumulated increment | 15,891 | 0 / 18,000 | `0` | BIT-EXACT |
+| `usrdef_sbc.qsr` | 0 | 0 / 600 | `0` | BIT-EXACT |
+| `usrdef_sbc.qns` | 115 | 0 / 600 | `0` | BIT-EXACT |
+| `usrdef_sbc.emp` | 490 | 0 / 600 | `0` | BIT-EXACT |
+| `usrdef_sbc.utau` | 0 | 0 / 600 | `0` | BIT-EXACT |
+| `usrdef_sbc.vtau` | 0 | 0 / 600 | `0` | BIT-EXACT |
+
+The remaining native-policy QSR difference is 1,363 active cells with maximum
+`1.6940658945086007e-21` (128 ulp); native is not the certification policy.
+The clean scalar-libm eligibility gate is `PASS`.  A one-ulp QSR plant changes
+one certified cell, prints DEBT, and exits `1`.  This satisfies the Round-15
+eligibility falsifier and releases the ordered walk.
+
+The Oracle V1/V2 compiler-wide claim is retracted.  The exhaustive committed
+ancestry probe reports `different=41 controls=5 unattributed=0`: all 41 changed
+records have an executed seasonal SIN/COS or two-band EXP ancestor, while ENE
+coefficients, kt=1 RHS, HPG literal/operands, and kt=1 step entry are byte-
+identical controls.  Its unregistered-record plant exits `1`.  This attribution
+is causal ancestry, not an assertion that every descendant's first differing
+field is itself transcendental.
+
+### Row-scale cross-card correction
+
+Commit `ae1a21357` corrects the shared cellwise ULP definition to
+`spacing(max(max(abs(oracle_row)), 1.0))`.  The in-place 32-row Rule-12 table
+above is the rescore under that definition: OVERFLOW stage FAIL (5/9 rows),
+LOCK stage PASS (0/9), OVERFLOW trajectory FAIL (23/50), and LOCK trajectory
+FAIL (4/50).  The LOCK stage result is intentionally reported as measured,
+not forced to match an expectation.  DINO remains only a consistency probe,
+not a match claim.
+
+### Public source-round helper and corrected-velocity composition
+
+Commit `97d40d24e` promotes `_nemo_source_round` to the single public
+`nemo_source_round` spelling with no compatibility alias.  It applies the
+helper at each operation of the stage corrected-velocity/zub/zvb composition,
+where a bare XLA optimization barrier was insufficient.  The stage-1 U
+corrected-velocity maximum moves from `2.799952110443815e-17` to
+`2.7985968577282083e-17`, a reduction of `1.3552527156067e-20` (0.0484%).
+The V maximum remains `1.2766480581016815e-17`.  The downstream zF residuals
+remain DEBT (`8.917595550883561e-10` U and `4.069988790433854e-10` V), so this
+is a measured recurrence correction, not an owner claim.
+
+The oracle-relative cross-card gates for this shared correction all pass:
+
+```text
+OVERFLOW stage: ORACLE_RELATIVE_COMPARE PASS: rows=9 max_worsening_ulps=0 first_over_bar='<absent>'->'<absent>'
+LOCK stage: ORACLE_RELATIVE_COMPARE PASS: rows=9 max_worsening_ulps=0 first_over_bar='<absent>'->'<absent>'
+OVERFLOW trajectory: ORACLE_RELATIVE_COMPARE PASS: rows=50 max_worsening_ulps=0 first_over_bar={'fields':['T','u'],'kt':2}->{'fields':['T','u'],'kt':2}
+LOCK trajectory: ORACLE_RELATIVE_COMPARE PASS: rows=50 max_worsening_ulps=0 first_over_bar={'fields':['u'],'kt':4}->{'fields':['u'],'kt':4}
+```
+
+Each gate persisted and hashed its cellwise residual NPZ.  Movement versus the
+previous legoESM output remains disclosed; it does not determine eligibility.
+
+### Ordered slow-forcing operand walk
+
+The second preregistration landed at `3dee9024a`.  The new V2 oracle root is
+`round16_oracle_v2_slow_v2`; an earlier size-incomplete diagnostic root remains
+retained and flagged.  Its ten-step history and restart data variables are
+bit-identical to the Round-15 V2 oracle.  The scalar-math executable contains
+zero `_ZGV*` symbols.  The config-local record dumps `Krhs`, e3 face thickness,
+mask, inverse resting depth, the depth mean, post-drag forcing, and post-wind
+forcing at kt=1/stage 1.
+
+NEMO accumulates the three-dimensional RHS in routine call order at
+`stp2d.F90:126-171`, forms its depth mean at `stp2d.F90:177-181`, applies the
+implicit-drag term at `stp2d.F90:196`, and adds surface stress at
+`stp2d.F90:198-202`.  `dynspg_ts.F90:280-300` copies the slow forcing into the
+external mode and removes the separately treated Coriolis term.  The ordered
+comparison is:
+
+| boundary / arm | U max abs | V max abs | differing U / V | disposition |
+|---|---:|---:|---:|---|
+| initial-rest oracle `Krhs` | `0` | `0` | `0 / 0` | BIT-EXACT control |
+| legoESM `Krhs` vs oracle | `1.3869160759180077e-20` | `1.3869160759180077e-20` | `17,400 / 17,100` | first non-bit-exact primitive |
+| e3, mask, inverse depth | `0` | `0` | `0 / 0` | BIT-EXACT inputs |
+| production depth mean | `5.9922313054079714e-21` | `5.9922313054079714e-21` | `580 / 570` | DEBT |
+| NEMO-literal reduction arm | `5.022485483447278e-21` | `5.022485483447278e-21` | `580 / 570` | 16.18% causal reduction |
+| oracle `Krhs` substituted alone | `0` | `0` | `0 / 0` | owner discriminator |
+| post wind / slow forcing | `5.998713802234557e-21` | `5.998713802234557e-21` | `580 / 570` | DEBT |
+
+Scaling precedes the owner label: changing only reduction association moves
+`9.697458219606931e-22`, just 16.18% of the production depth-mean residual.
+It is therefore **CONFIRMED_CAUSAL_CONTRIBUTOR_NOT_OWNER**.  Substituting only
+NEMO's `Krhs` makes the replay bit-exact, so the first boundary is honestly
+**CONFIRMED_UPSTREAM_KRHS**.  The resulting external-mode slow-forcing residual
+is about `2.98e-13` relative and remains AT-BAR.  No compensating depth-mean or
+slow-forcing physics change landed.  The plant forces e3 to become the first
+boundary and exits `1`.
+
+### Final production-JIT GYRE sweep
+
+The post-fix, post-source-round V2 sweep remains DEBT.  kt=1 T/S are bit-exact;
+the at-rest kt=1 u/v/SSH rows are UNINFORMATIVE.  `first_over_bar=kt=2` for all
+five live fields.
+
+| kt | T | S | u | v | SSH |
+|---:|---:|---:|---:|---:|---:|
+| 1 | `0` | `0` | `0` | `0` | `0` |
+| 2 | `1.3614736849003888e-12` | `2.2181101297999213e-14` | `9.484089954573663e-7` | `8.987992592337385e-7` | `2.372668034267278e-15` |
+| 3 | `3.7223441372679294e-4` | `3.683246743167771e-5` | `9.311678913140426e-3` | `4.7190775913080185e-3` | `7.074669649582022e-7` |
+| 4 | `1.059473805182152e-3` | `8.225740462674584e-5` | `1.418240401195741e-2` | `1.594784230453221e-2` | `5.060423358578536e-7` |
+| 5 | `3.0537424781430155e-3` | `8.611826431262424e-5` | `2.0733890435774838e-2` | `4.3797665645115294e-2` | `6.701851023208603e-5` |
+| 6 | `3.817675809918862e-3` | `1.2875362386037564e-4` | `3.113472973279577e-2` | `6.021959208697472e-2` | `1.6310239042308892e-4` |
+| 7 | `4.546666553978738e-3` | `1.2244044900930025e-4` | `4.004140471797118e-2` | `6.631577323125762e-2` | `2.08714182109976e-4` |
+| 8 | `5.098376094806285e-3` | `1.3609844305104157e-4` | `4.718005909062654e-2` | `2.4527161865936703e-2` | `2.5108247682647427e-4` |
+| 9 | `5.445062142555661e-3` | `1.471182174585388e-4` | `5.2560397604513136e-2` | `1.4533612266675985e-2` | `2.1203002216882037e-4` |
+| 10 | `5.636634494144881e-3` | `1.548312135446306e-4` | `5.6249869570834554e-2` | `1.1173365767158869e-2` | `2.1255435596181406e-4` |
+
+Against the Round-15 pre-libm model evaluated on the same V2 oracle, 27 of 50
+maximum rows improve, nine are unchanged, and 14 worsen.  Rule 8 requires each
+worsened row in place:
+
+| field | kt | Round-15 value | Round-16 value | ratio |
+|---|---:|---:|---:|---:|
+| u | 2 | `9.48408995457312e-7` | `9.484089954573663e-7` | `1.000000000000057` |
+| v | 2 | `8.987992592335487e-7` | `8.987992592337385e-7` | `1.0000000000002112` |
+| T | 3 | `3.7223422534148244e-4` | `3.7223441372679294e-4` | `1.0000005060934694` |
+| u | 3 | `9.311678913140425e-3` | `9.311678913140426e-3` | `1.0000000000000002` |
+| SSH | 3 | `7.074669649472518e-7` | `7.074669649582022e-7` | `1.0000000000154783` |
+| T | 4 | `1.0594736858280278e-3` | `1.059473805182152e-3` | `1.0000001126541658` |
+| u | 4 | `1.418240401140141e-2` | `1.418240401195741e-2` | `1.0000000000392035` |
+| SSH | 4 | `5.060118862263221e-7` | `5.060423358578536e-7` | `1.000060175723852` |
+| S | 6 | `1.287536210138131e-4` | `1.2875362386037564e-4` | `1.0000000221086018` |
+| SSH | 6 | `1.6310220843274655e-4` | `1.6310239042308892e-4` | `1.0000011158055069` |
+| S | 7 | `1.2244044313748583e-4` | `1.2244044900930025e-4` | `1.0000000479564943` |
+| SSH | 7 | `2.087141592932774e-4` | `2.08714182109976e-4` | `1.0000001093203197` |
+| v | 9 | `1.4533611363184411e-2` | `1.4533612266675985e-2` | `1.0000000621656622` |
+| SSH | 9 | `2.1202997678594127e-4` | `2.1203002216882037e-4` | `1.0000002140399191` |
+
+The shared source-round correction has no measurable effect on this full sweep:
+the before/after JSON artifacts are byte-identical.  The changes above are the
+disclosed scalar-forcing/libm move against the same oracle, not evidence that
+the slow-forcing reduction owns trajectory debt.
+
+### Round-16 artifact and verification manifest
+
+The committed manifest is
+`scripts/validate/ocean_fidelity/testcases/manifests/nemo_testcase_l2_gyre_round16.json`.
+Key artifact hashes are:
+
+| artifact | SHA-256 |
+|---|---|
+| pre-fix discriminator | `3c44294d3dd5051958931baa42a16d670bc6226723f7061522201b88bf163405` |
+| post-fix discriminator | `106a778e18d3899982c7acf1e547b98858cf954ca7c53071f0aab1f58a89ba83` |
+| eligibility | `336cd2026e4d51bec48de7ada71c449bdb0ecffbc0b1bac2867f3f226e4c5978` |
+| V1/V2 attribution | `ee29acca0b381abacb68d24642590b4f9cbcfaaddd5e522aafe7776b23177cac` |
+| row-scale cross-card rescore | `c6157e655c0757e5715dd3966326b648f89b7437231e7562eabdf894ad8550c6` |
+| corrected velocity | `dd675a15d0b7b0cd756a8f6c383c73209fb6a402707dfbf4fa5979092d080bf3` |
+| slow-forcing walk | `8b418d220147a604d9ca4a32796979c033c3ad2d40352b40767ad03ecbf5b02c` |
+| final production-JIT sweep | `83f411ca736e6870c6b62a3a3c8e73e6751931c7eae8f4a1ef4ee685d4c76b4c` |
+
+The final focused scalar-forcing/transcendental/gate suite is `60 passed` in
+`8.13 s`.  The source-round follow-up run of the WS-RK3 tracer and GYRE phase-3
+tests is `42 passed` in `648.56 s`.  A broader recipe invocation encountered
+five existing paired-integrator validation failures and is not claimed as a
+pass.
+
+### Round-16 ASKED / UNASKED register
+
+| choice or action | origin | disposition |
+|---|---|---|
+| V2 literal NumPy discriminator before code change | ASKED | complete; H1 confirmed, EXP-route H2 refuted |
+| callback route plant for EXP/SIN/COS | ASKED | complete; every executed route counted and poisoned |
+| shared NEMO-literal QSR/SBC fix after H1 | conditional ASKED | landed; all six eligibility boundaries bit-exact |
+| extend scalar-libm policy to executed SIN/COS | UNASKED required mechanism | landed shared; no card guard |
+| attribute all 41 V1/V2 changed records | ASKED | complete; zero unattributed, compiler-wide claim retracted |
+| row-scale oracle ULP correction | ASKED | landed; 32 Rule-12 rows rewritten in place |
+| DINO correlation wording | ASKED | relabelled consistency probe, not a match |
+| public `nemo_source_round`, no alias | carried ASKED from Round 15 | complete |
+| source-round corrected velocity composition | carried ASKED from Round 15 | landed shared; cross-card gates pass |
+| slow-forcing operand walk after eligibility | conditional ASKED | complete; upstream `Krhs` is first boundary |
+| literal depth-reduction change | UNASKED candidate arm | measured 16.18%; not landed because it is not owner |
+| stage-3 transport continuation | conditional ASKED | not entered; upstream `Krhs` register is open |
+| ZDF matrix walk | explicitly deferred | not entered |
+| GYRE-only guard, tuning, or shipped NEMO edit | forbidden | none |
+
+Round-15 independent review was still running during this dispatch.  Every
+Round-16 result is a Codex-internal measurement; independent review remains
 outstanding and no dual-review claim is made.
