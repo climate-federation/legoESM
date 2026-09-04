@@ -3805,6 +3805,9 @@ def nemo_hpg_sco_literal_cgrid(
     g: float,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Run NEMO's SCO recurrence identically inside and outside outer JIT."""
+    if isinstance(rhd, jax.core.Tracer):
+        return _nemo_hpg_sco_literal_cgrid_impl(
+            rhd, e3w, gdept_z0, grid, g)
     with jax.disable_jit(False):
         return _nemo_hpg_sco_literal_cgrid_compiled(
             rhd, e3w, gdept_z0, grid, g)
