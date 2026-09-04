@@ -1,15 +1,24 @@
-# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–10 boundary receipt
+# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–11 boundary receipt
 
-**Verdict: STOP / DEBT.  Round 10 fixes the JIT/eager code-path defect and all
-11 same-input operator-parity rows now pass, but the mandatory shared-card
-guard does not: OVERFLOW's stage sweep moves by 28.062 ulp and its trajectory
-by 513504.875 ulp; LOCK_EXCHANGE's trajectory also loses tracer bit identity
-and reaches 2.743 ulp.  No waiver, card guard, or GYRE-only arm was added.
-GYRE's production-JIT kt=2 remains DEBT.**
+**Verdict: STOP / DEBT at the round-11 stage-2 boundary.  Independent review
+shipped round 10 and adjudicated its D gate as an open user decision: the gate
+measures movement from an older legoESM output even though the new result is
+closer to NEMO.  Round 11 leaves that gate and EOS untouched.  The new exact
+pre-update record proves the RK3 update and mean replacement are not owners;
+the first effective-scale departure is the shared EOS `rhd` operand feeding
+HPG.  Because EOS changes are forbidden this round, stage 2 does not clear and
+the stage-3 transport/ZDF walks are not entered.**
 
-Date: 2026-09-03  
-Implementation commit: `7a38ef6e4efd7bd94b1743cae1525c59802f7511`
-Starting reconciled tip: `57429ecf5f377ce2bf220f36bc05313cd29e0dfd`  
+Date: 2026-09-04
+
+Round-11 implementation commit: `f446d1820`
+
+Round-11 starting tip: `d124c77c94c9307cec8a74b564b0ad2c0829b990`
+
+Round-10 implementation commit: `7a38ef6e4efd7bd94b1743cae1525c59802f7511`
+
+Original reconciled tip: `57429ecf5f377ce2bf220f36bc05313cd29e0dfd`
+
 Session: `01a05cb9-7625-7f40-9e83-b3fa767b1945`
 
 ## Round-10 preregistration (before diagnosis)
@@ -136,18 +145,76 @@ passes an unmasked array expression to `glob_2Dsum`.
 
 ### Stage-2 momentum does not close under production JIT
 
-The round-8 values in this subsection were produced with `JAX_DISABLE_JIT=1`
-and are withdrawn as certification evidence.  The production-JIT completed
-stage-2 Kaa state is DEBT at `4.674608410863007e-13` u and
-`5.187571089381761e-13` v.  Replacing the stage-1 thermodynamic bundle moves
-only `7.93e-17` (`1.53e-4` of the residual), so that arm is
-**NEAR-NULL_NO_DISCRIMINATING_POWER**, not exoneration.  The ordered JIT source
-terms themselves remain AT-BAR: HPG `1.07e-16`/`1.22e-16`, vorticity
-`2.46e-21`/`2.45e-21`, and advection `1.65e-24`/`1.63e-24` (u/v).  The
-composition/update between those terms and Kaa is therefore the first
-observed JIT boundary; no owner is assigned.
+The round-8 eager values remain withdrawn.  Round 11 records the actual
+stage-2 accumulator before the update: `Krhs == Kaa == 2`, so the older
+post-update operand stream had aliased and overwritten the quantity it called
+`Krhs`.  The new config-local `MY_SRC/stprk3_stg.F90:404-416` stream is emitted
+before that overwrite.  Its ordinary stage-2 state and restart remain
+bit-identical (`55e780b8…`, `3271da17…`).
+
+The source execution order is literal and resolved.  `stprk3_stg.F90:321-334`
+sets `Krhs` with EOS/HPG first, then accumulates `dyn_vor`, then `dyn_adv`;
+vector `dyn_adv.F90:78-89` executes C2 `dyn_keg` then `dyn_zad`.  Stage 1 was
+seeded earlier by `stp2d.F90:126-165`, where HPG precedes LDF, vorticity, KEG,
+and ZAD, and its depth mean is passed to the external solver.
+`stprk3.F90:183-207` runs that `stp_2D`/`dyn_spg_ts` solve once before all
+three stages, so
+`dyn_spg` supplies `uu_b/vv_b(Kaa)` rather than silently adding another stage-2
+3-D `Krhs` term.  Stage 3 alone appends `dyn_ldf` at
+`stprk3_stg.F90:395-409`.  Thus no live stage-2 source was omitted from the
+record.
+
+GYRE's resolved `ln_dynadv_vec=.true.` selects the direct velocity update
+`Kaa = (Kbb + rDt*Krhs)*mask` at `stprk3_stg.F90:365-369`, with
+`rDt=rn_Dt/2=7200 s`; the QCO e3-weighted alternative at `:370-387` is dead
+for this configuration.  Reference-depth mean replacement then computes and
+adds `zub/zvb` at `:433-446`.
+
+| production-JIT fp64 boundary/arm | u max | v max | scaling-first disposition |
+|---|---:|---:|---|
+| complete pre-update `Krhs` | `1.0739067765248428e-16` | `1.2178020157343528e-16` | AT-BAR as tendency, but above effective `1e-15/7200` bar |
+| raw `Kaa`, before mean replacement | `7.732128807125434e-13` | `8.768174513816736e-13` | DEBT; respectively `1.0000000021` and `1.0000000001` times `rDt*|δKrhs|` |
+| corrected `Kaa` | `4.674608410863007e-13` | `5.187571089381761e-13` | DEBT |
+| exact-oracle `Krhs` → raw `Kaa` | `0` | `0` | bit-identical; update formula CONFIRMED |
+| exact-oracle `Krhs` → corrected `Kaa` | `3.469446951953614e-18` | `4.4994390158148434e-18` | AT-BAR; mean replacement CONFIRMED |
+| NEMO-order/barrier accumulation arm → raw `Kaa` | `7.732128807125434e-13` | `8.768174513816736e-13` | zero move; REFUTED as owner |
+| dead QCO/e3 update arm → corrected `Kaa` | `4.674557317835629e-13` | `5.182320501548321e-13` | max move `5.25e-16`; NEAR-NULL, no discriminating power |
+| live-thickness mean arm → corrected `Kaa` | `4.674608410863007e-13` | `5.187571089381761e-13` | zero move; REFUTED as owner |
+
+The exact-RHS arm moves corrected Kaa by `4.674573716393488e-13` u and
+`5.187526094991603e-13` v—one residual each—before the owner label.  It proves
+the complete entering RHS is causal, while the zero-move association arm
+refutes the preregistered composition-order prediction.
+
+The follow-on WRITE-only `MY_SRC/dynhpg.F90:343-419` record separates the
+cumulative `zhpi`, local terrain correction `zuap`, stored sum, and metric
+reciprocals.  `dynhpg.F90:340-390` is the cited production recurrence.  The
+effective tendency bar is `1.388888888888889e-19`:
+
+| HPG operand/term | u max | v max | disposition |
+|---|---:|---:|---|
+| `r1_e1u/r1_e2v` | `0` | `0` | bit-identical |
+| production `rhd` input | `9.378348791999613e-16` | same 3-D operand | first upstream departure; AT-BAR only under the unscaled tendency bar |
+| production `e3w` input | `0` | same | bit-identical |
+| production `gdept_z0` input | `5.684341886080802e-14` absolute, `1.3696280475343366e-17` normalized | same | below its normalized bar; not the residual-scale owner |
+| `zhpi` from production operands | `1.0750480746694731e-16` | `1.2202333356727058e-16` | DEBT at effective bar |
+| `zuap` from production operands | `2.550418053222173e-21` | `2.550594455142355e-21` | AT effective bar |
+| full HPG from exact oracle operands | `2.3959792121371355e-20` | `2.3959792929164922e-20` | AT effective bar |
+
+This is **CONFIRMED_UPSTREAM_OPERAND_OWNER**: exact oracle operands make the
+shared HPG literal arithmetic sufficiently accurate, while production `rhd`
+already differs and the error accumulates in `zhpi`.  `rhd` is the shared EOS
+output.  Round 11 was explicitly forbidden to alter EOS, the compare-to gate,
+or add card guards; therefore no numerical fix is made and stage 2 honestly
+remains DEBT.  Both the composition and literal-HPG planted controls inject
+`1.0` at a wet point and exit `1`.
 
 ### Stage-3 transport and WZV
+
+Round 11 does **not** remeasure this boundary because the ordered stage-2 gate
+above remains DEBT.  The values below are retained round-10 production-JIT
+context, not promoted round-11 evidence.  Stage-3 `zFu/zFv/zFw/zub/zvb`
+instrumentation and the e3u/e3v(Kmm) walk remain the next gated boundary.
 
 NEMO forms `zFu/zFv` from the retained Kmm stage velocity and barotropic mean
 at `stprk3_stg.F90:257-278`, then passes those already materialized arrays to
@@ -190,6 +257,9 @@ not assigned a sole-owner label.
 
 ### First unmeasured boundary: implicit ZDF
 
+Round 11 does not enter this matrix walk: its prerequisite stage-2 and
+stage-3-transport boundaries have not cleared.
+
 The eager-only claim that the explicit stage-3 accumulator cleared is
 withdrawn.  Its production-JIT rerun is DEBT before ZDF: T
 `7.325244772979124e-14`, S `5.786348021897527e-15`.  Injecting the oracle
@@ -201,7 +271,9 @@ start their matrix walk.
 
 ## Re-pinned kt=1 and kt=2…10 sweep
 
-At kt=1 T/S are bit-exact.  At-rest u/v/SSH are still **UNINFORMATIVE** because
+Round 11 reruns this entire sweep from `f446d1820` under production JIT on CPU;
+the artifact is byte-identical to round 10 at SHA-256 `17b1d103…`.  At kt=1
+T/S are bit-exact.  At-rest u/v/SSH are still **UNINFORMATIVE** because
 their oracle and candidate values are identically zero.  The first whole-step
 DEBT remains kt=2:
 
@@ -241,6 +313,14 @@ BOUNDED_OR_DECAYING_NO_AMPLIFYING_MODE.  These are characterization labels,
 not acceptance evidence.
 
 ## Round-10 D stop boundary: mask exact, shared lane-1 guard still fails
+
+Independent re-review returned **SHIP** for round 10 and clarified that this
+gate compares against the previous legoESM output, not directly against NEMO.
+The retained D verdict is therefore an **OPEN USER DECISION**, not evidence
+that the NEMO match regressed: against the oracle, OVERFLOW stage-1 u improves
+from `6.52e-15` to `2.91e-16`, kt=2 SSH improves from `1.05e-14` to
+`3.33e-16`, and no oracle row worsens.  Round 11 does not change the gate,
+criterion, or EOS.
 
 The shared Roquet EOS remains one implementation.  Its NEMO-literal
 `zn3/zn2/zn1/zn0` nesting is unconditional for EOS-80 and TEOS-10, and the
@@ -362,7 +442,11 @@ was upgraded merely because its documentation omitted a regime stamp.
 | source-named `nemo_qsr_2bd`/`nemo_qsr_rgb` selector | ASKED G | landed in existing selector; private boolean removed |
 | six GYRE card choices in the earlier table | UNASKED round 8, ASKED round 9 audit | independently ablated and retained from resolved namelist |
 | nested `lax.scan` Horner experiment | UNASKED diagnostic | reverted after compile stall; absent from final tree |
-| GYRE tra_zdf/dyn_zdf matrix walk or further owner tuning | explicitly out of scope | NOT STARTED after STOP |
+| immediate pre-update `Krhs`, raw/corrected `Kaa`, and HPG literal WRITE-only streams | ASKED round 11 | config-local only; ordinary outputs bit-identical |
+| NEMO-order RHS, update/e3, and mean-replacement one-variable arms | ASKED round 11 | accumulation and mean arms zero-move; update arm NEAR-NULL; exact RHS clears |
+| shared EOS `rhd` correction | explicitly forbidden round 11 | CONFIRMED upstream owner, NOT MODIFIED |
+| stage-3 transport remeasurement | ASKED only if stage 2 clears | NOT ENTERED; stage 2 remains DEBT |
+| GYRE tra_zdf/dyn_zdf matrix walk | ASKED only if stages 2 and 3 clear | NOT ENTERED |
 
 ### Test and artifact closure
 
@@ -375,7 +459,15 @@ and is not claimed green.  Larger combined pytest invocations and the
 monolithic stage gate hit the documented compiler/resource wall; the
 scientific gates above ran as separate CPU processes.
 
-This is a Codex-internal measurement round.  Independent Claude and GLM review
-of these new findings remains outstanding; no dual-review claim is made.  Per
-the accepted process note, the earlier EMP reversal returned through review
-with both source and runtime evidence before it landed.
+Round 11 additionally passes all 20 WS-RK3 tests plus all 35
+single-implementation tripwires (`55 passed`).  Its three planted controls
+each exit `1`.  The config-local oracle executable is `ec6efff…`; the
+pre-update record is `1e3b309b…`; the HPG literal record is `49e86b5b…`; and
+the complete manifest is
+`nemo_testcases_l2_gyre_phase3_round11_artifacts.sha256`.
+
+Independent Claude re-review shipped round 10 and retracted its JIT blocker.
+This round-11 result is a new Codex-internal measurement; independent review
+of it remains outstanding and no dual-review claim is made.  Per the accepted
+process note, the earlier EMP reversal returned through review with both source
+and runtime evidence before it landed.
