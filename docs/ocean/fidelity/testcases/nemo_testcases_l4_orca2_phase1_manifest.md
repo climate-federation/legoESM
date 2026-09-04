@@ -6,9 +6,10 @@ Every digest is SHA-256 unless explicitly identified as MD5. The authoritative
 per-file inventories remain beside the data and are themselves hash-pinned
 here.
 
-Independent-review status: the prior accepted artifacts remain immutable, but
-the corrected replacement binary and prepared run below supersede them for the
-next record-generation attempt. No replacement records exist at this stop.
+Independent-review status: the corrected replacement binary and executed run
+below are the accepted Phase-1 oracle. The prior accepted artifacts remain
+immutable and hash-pinned, but are superseded; no record from them is mixed
+into this oracle.
 
 ## Source, input archive, compiler, and executables
 
@@ -103,39 +104,40 @@ f4279899be77119fda4f9e20b3d5e3a70e4e478fe5ead0dc661656a1bba296c2  zdfiwm_forcing
 
 | artifact | digest |
 |---|---|
-| final ten-step `run.sh` | `59e794abc299cc34897eddd905e492edf8fe41dde456977283abf0161fc767ea` |
+| accepted replacement ten-step `run.sh` | `756d6ac26e851ecba33b0ef8a6061238e4b8ca289d9e2011b4b0e8747c3d7415` |
 | final ten-step `run.user.stdout.log` | `e527622f8470458702f16b74c81c4d7c36f2cfdc6e95ac948a9e289dfe9634e5` |
-| final ten-step `run.user.time.log` | `fb31ae0fdafe84a8daa6bcaea4200ea1f93f8fa6ab7673a1911260ff79745f29` |
+| final ten-step `run.user.time.log` | `54e003c1c35a06be5efc832816353a825ff346230e45408f6e9459188cfd07c4` |
 | final ten-step `run.launcher.log` | `06d9fdaa12f428f078ea8d292daa5ba429a6c6679b136879c77f073ca15174cb` |
 | final ten-step `ocean.output` | `06c41ebf47b42e248879c32a2c47bc6acd9b3c06766378ebd0ea7267e730a534` |
 | final ten-step `time.step` | `83e4e460507d78e2bd843e9a6961b3b204c2b5229499b5e2f10f11b3a7d5bb78` |
-| final 190-file census | `9b864476ed832e4bec662ae3f1a67f681f548def4e24e205682845daf49e3511` |
-| final 90-record census | `6e80229737d5a456c5e114dc3421589344a7d5fa188ce1401657d3d212dea904` |
-| gate JSON with controls | `22866e967457e0e05eb112f0179a58578c50e483b48cd1f8d9624421c46d276f` |
+| accepted replacement 190-file census | `329de5e238356664eb31371042c49ebcf2e7d2d2039f35fc157710318d628f7b` |
+| accepted replacement 90-record census | `70c3779bc11e4b3df41ebf756abf25362dab82d9622c87829012618412cf273a` |
+| accepted replacement gate JSON with controls | `dc42802b3f925c4197b75003431e3ba1762bfa18a39a038f8a864f10cc553577` |
 | committed gate script | `3d0b61762a4dbe0acbdaa3b52791696346a73afc84a78bb7388a167999aa00ce` |
-| `manifests/independent_review_gate_on_prior_accepted.json`, all nine plants | `22866e967457e0e05eb112f0179a58578c50e483b48cd1f8d9624421c46d276f` |
-| committed prior-accepted launcher | `59e794abc299cc34897eddd905e492edf8fe41dde456977283abf0161fc767ea` |
+| historical gate on superseded prior run, all nine plants | `22866e967457e0e05eb112f0179a58578c50e483b48cd1f8d9624421c46d276f` |
+| committed superseded prior-run launcher | `59e794abc299cc34897eddd905e492edf8fe41dde456977283abf0161fc767ea` |
 | committed uninstrumented identity-control launcher | `2753bbc0233cc4926062053a638f7aa347c4461ab5c072edbd3f1cfb3a9eff67` |
-| prepared review-correction launcher | `756d6ac26e851ecba33b0ef8a6061238e4b8ca289d9e2011b4b0e8747c3d7415` |
-| prepared review-correction 63-file census | `20c7d059bab0b50e11b60ba6c237ef8ab136e6b961f98b375f260769257b30a9` |
+| historical prepared review-correction 63-file census | `20c7d059bab0b50e11b60ba6c237ef8ab136e6b961f98b375f260769257b30a9` |
 | uninstrumented ten-step 97-file census | `924867d6e066d450715a0997ecfd1264005b02abe8f4d05228cf29870fff03a7` |
 | uninstrumented 30-day 97-file census | `efe02aa764feb07ba045ee25c0bd304240b7780e39c01376dec741b4520413f9` |
 | retained first, incomplete 63-record run census | `b633486295afca2c8f6930258cdcb4a9dc86d0cf0bc0eb0bcda372814505a4b6` |
 
-The other two retracted instrumented runs are preserved in
-`runs/instrumented_full_10step_np2` and
-`runs/instrumented_rank0_10step_np2`; they are deliberately excluded from the
-oracle manifest because their streams are malformed. Their exact prepared
-decks remain hash-pinned by the corresponding `*_prepared_all_files.sha256`
-files.
+All historical instrumented runs are preserved. The first three
+(`instrumented_10step_np2`, `instrumented_full_10step_np2`, and
+`instrumented_rank0_10step_np2`) are retracted because their record sets are
+incomplete, concurrently written, or carry the malformed reassociation
+header. `instrumented_rank0_schema_10step_np2` passed its contemporary gate
+but is superseded by the independent-review replacement. All four are
+deliberately excluded from the accepted oracle inventories, and their exact
+prepared decks remain hash-pinned by the corresponding preparation censuses.
 
 ## Committed evidence documents
 
 | artifact | digest |
 |---|---|
-| `nemo_testcases_l4_orca2_phase1_receipt.md` | `9d9edbba0420a135b737e9d3d4d4439a36a9ee1cc7f23ab8de60d6491354cbe9` |
+| `nemo_testcases_l4_orca2_phase1_receipt.md` | `7619dfa1ce041053671da3517cbd60dc3d2a2ee4671255cfa3765e5245ff1668` |
 | `nemo_testcases_l4_orca2_phase1_preregister.md` | `2a51809a6277310a2441faa7be0d1588f17294ef151d979438ccc0645e1fac6b` |
-| `nemo_testcases_l4_orca2_phase1_run_recipes.md` | `6bbdce26e216e806e712a06e5454ab5b1bc6c443be5db24cd7fd0db2372cd28e` |
+| `nemo_testcases_l4_orca2_phase1_run_recipes.md` | `544e4da05de4469cd851139606cf91d2357377cff9362d4d4567b20bafe93ae3` |
 | `nemo_testcases_l4_orca2_phase1_instrument_rebuild_preregister.md` | `0548b565ec7804ee45ca2c96f65344fdc94e9783a8bba71c2cfb5ca48271e5ba` |
 | `nemo_testcases_l4_orca2_phase1_mpi_writer_correction_preregister.md` | `802bdaff23cc6bbccc6f69c4fbcdb445886af0b8838a8c81fea92dec71bfe0c9` |
 | `nemo_testcases_l4_orca2_phase1_payload_count_correction_preregister.md` | `493c9833e385341a0e21fd89c07b04b2d43272620deb30119f1430aa8b5569b8` |

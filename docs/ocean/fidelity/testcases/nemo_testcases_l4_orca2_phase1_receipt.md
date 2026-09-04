@@ -1,21 +1,20 @@
 # NEMO testcase Lane 4 — ORCA2 oracle Phase-1 receipt
 
-Original closure: 2026-09-04 (America/New_York; supplied archive provenance
-is dated 2026-09-05)
+Re-closed after independent review: 2026-09-04 (America/New_York; supplied
+archive provenance is dated 2026-09-05)
 
 Session: `01a06d99-f562-7b11-bc63-e9b112877f54`
 
-Independent-review status: **FIXED; CORRECTIVE RECORD REGENERATION PENDING**
+Independent-review status: **FIXED AND VERIFIED**
 
-Verdict at this stop: **PHASE 1 REOPENED ONLY FOR THE PREREGISTERED
-INSTRUMENTATION REVIEW RERUN**
+Verdict: **CONFIRMED — PHASE 1 CLOSED**
 
 Scope: NEMO 5.0.2 oracle only. No legoESM card or legoESM numerical result was
 created.
 
-The previously accepted evidence set is the single scalar-math binary
-`nemo_ORCA2_OMIP_L4_instrumented_rank0_schema.exe` and its ten-step run at
-`/data/abyssal/dbalwada/nemo-testcases-l4/runs/instrumented_rank0_schema_10step_np2`.
+The accepted oracle is the single scalar-math binary
+`nemo_ORCA2_OMIP_L4_instrumented_reviewfix.exe` and its ten-step run at
+`/data/abyssal/dbalwada/nemo-testcases-l4/runs/instrumented_reviewfix_10step_np2`.
 All 90 registered record files pass the frozen schema and manifest gate; the
 six restart shards are byte-identical to the uninstrumented control. This is
 one binary, one compiler-wide arithmetic policy, and one run: no field was
@@ -24,9 +23,9 @@ substituted from another build or precision (the no-Frankenstein rule).
 Independent review found no scientific-output or provenance defect, but did
 require two WRITE-only writer-source corrections: derived SI3 payload-count
 metadata and armed-only EOS diagnostic scratch allocation. The replacement
-scalar-math binary and exact user-shell run directory are frozen below; they
-have not been executed. Therefore the old records remain review evidence but
-are not silently mixed with, or substituted into, the replacement arm.
+run executed those corrections and passed the complete gate. The former
+`instrumented_rank0_schema_10step_np2` arm remains preserved but is
+superseded; no record from it is mixed into this oracle.
 
 The companion artifact index is
 `nemo_testcases_l4_orca2_phase1_manifest.md`. The executable data remain below
@@ -114,17 +113,18 @@ neither linked nor deleted.
 Conda environment `nemo-build` supplied `mpif90`. The arch is the established
 `arch-conda.fcm` plus compiler-wide `-fno-tree-vectorize`; its SHA-256 is
 `132f7a0500c4f0e86d8d3bf7864974a82e1dea5d83166dcfdfaf409e2ca04561`.
-Both retained binaries have zero `_ZGV*` dynamic symbols: both census files
-are empty with SHA-256 `e3b0c442...b855`.
+All retained scalar-math binaries have zero `_ZGV*` dynamic symbols: their
+census files are empty with SHA-256 `e3b0c442...b855`.
 
 | binary | SHA-256 | build-log SHA-256 |
 |---|---|---|
 | uninstrumented | `c4907e476cf3969052b44c5c7fa966f3dac493e8cfb563f6554c8f3a27186343` | `b4622a7fb64cabd0fd7f8133b4a61d08c7d67947ba9d50aa87d622bb875360c8` |
-| accepted WRITE-only | `07cec34c5683e6a3e37fa432ac5796ab43c747ab6f468fd131a8be796996dbb8` | `42614a4b1c2b62129acdfa93569f2d172c51bbd09a0c8616422ca9aae854d028` |
+| superseded WRITE-only | `07cec34c5683e6a3e37fa432ac5796ab43c747ab6f468fd131a8be796996dbb8` | `42614a4b1c2b62129acdfa93569f2d172c51bbd09a0c8616422ca9aae854d028` |
+| accepted review-fixed WRITE-only | `ca2355aa777adc47825c4b777c5fa4e89cc60dc2c509a0e2f379e439acefd025` | `96a38f0415970a5d3987d67374d1583ad30a19725d1b199465a60b46857526a7` |
 
-The accepted binary is 54,904,016 bytes. Its 14 config-local `MY_SRC`
+The accepted binary is 54,899,920 bytes. Its 14 config-local `MY_SRC`
 overrides are pinned by manifest SHA-256
-`84861aaab9aaa7a2ea35cb5a749cfb0350595c485d10e9b288db6f5e9a0e62c6`.
+`78e1465fe7d9cea4d3adf24fb369b6a458c7bb7a912cc75f85d7ca6177e59152`.
 They only open/write diagnostic streams or copy values into writer-local
 temporaries. The final seven `IF (.NOT.lwp) RETURN` guards select rank-zero
 file ownership and do not assign a model field.
@@ -153,7 +153,8 @@ and input hashes and teed stdout.
 | run | run controls | result | bash time wall/user/sys (s) |
 |---|---|---|---|
 | uninstrumented identity | `nn_itend=10, nn_stock=10, nn_istate=1` | step 10, RC 0, `RUN DONE` | 14.138 / 21.205 / 4.557 |
-| accepted instrumented | same | step 10, RC 0, `RUN DONE` | 13.050 / 19.126 / 4.561 |
+| superseded instrumented | same | step 10, RC 0, `RUN DONE` | 13.050 / 19.126 / 4.561 |
+| accepted review-fixed instrumented | same | step 10, RC 0, `RUN DONE` | 12.280 / 17.597 / 4.499 |
 | uninstrumented statistics reference | `nn_itend=240, nn_stock=240`; shipped `nn_istate=0` | step 240, RC 0, `RUN DONE` | 188.768 / 363.542 / 10.378 |
 
 At shipped `rn_Dt=10800 s`, 240 steps are exactly 30 days. The only scientific
@@ -166,10 +167,10 @@ The prepared launchers initially used `/usr/bin/time`. That executable is not
 installed, so the first attempt in each of the first two prepared directories
 exited 127 before MPI. The user removed only the three empty launcher-owned
 files and substituted Bash `time` with
-`TIMEFORMAT='wall_seconds %R\nuser_seconds %U\nsys_seconds %S'`. The final
-instrumented launcher already contained that substitution and ran unchanged;
-its hash is
-`59e794abc299cc34897eddd905e492edf8fe41dde456977283abf0161fc767ea`.
+`TIMEFORMAT='wall_seconds %R\nuser_seconds %U\nsys_seconds %S'`. The
+superseded and accepted final instrumented launchers already contained that
+substitution and ran unchanged. The accepted launcher's hash is
+`756d6ac26e851ecba33b0ef8a6061238e4b8ca289d9e2011b4b0e8747c3d7415`.
 The complete retained launcher census is:
 
 | run directory | `run.sh` SHA-256 | status |
@@ -177,17 +178,18 @@ The complete retained launcher census is:
 | `instrumented_10step_np2` | `9ef46f677c98cae57f8686151ba79a9aafd7f135a7d3a358dbf250a239fc7027` | Bash-time substitution; retracted record set |
 | `instrumented_full_10step_np2` | `c88d5bc7fad7974960bcdef838b6ab4250bb35abf98adef88304d155ef39c512` | executed unchanged; retracted record set |
 | `instrumented_rank0_10step_np2` | `91ad44b8d12703ecc8f91eb032a3dcce5067a9190b3fe6f54bd2300a9842f7d4` | executed unchanged; retracted record set |
-| `instrumented_rank0_schema_10step_np2` | `59e794abc299cc34897eddd905e492edf8fe41dde456977283abf0161fc767ea` | executed unchanged; accepted oracle |
+| `instrumented_rank0_schema_10step_np2` | `59e794abc299cc34897eddd905e492edf8fe41dde456977283abf0161fc767ea` | executed unchanged; preserved superseded run |
+| `instrumented_reviewfix_10step_np2` | `756d6ac26e851ecba33b0ef8a6061238e4b8ca289d9e2011b4b0e8747c3d7415` | executed unchanged; accepted oracle |
 | `uninstrumented_30day_np2` | `24137b7e8471667361320458a910b940cad799d6f5f689e863640eb0cbae78b1` | Bash-time substitution; accepted statistics reference |
 
 ## 4. Full record-schema gate
 
 The committed fail-closed gate is
 `scripts/validate/ocean_fidelity/testcases/nemo_testcase_l4_orca2_phase1_gate.py`
-(SHA-256 `ada787f30fa43a6215824f1ebad52afcd6e3921fe8e2e5f3b2db736256efb7ad`).
+(SHA-256 `3d0b61762a4dbe0acbdaa3b52791696346a73afc84a78bb7388a167999aa00ce`).
 The final invocation used the frozen 90-file record manifest and
 `--plant-controls`. Result: `PASS`; JSON SHA-256
-`22866e967457e0e05eb112f0179a58578c50e483b48cd1f8d9624421c46d276f`.
+`dc42802b3f925c4197b75003431e3ba1762bfa18a39a038f8a864f10cc553577`.
 
 For every frame the gate consumes exactly 16 ASCII bytes of magic, exact-width
 32-bit header integers, then the declared native binary64 values. It checks
@@ -221,11 +223,11 @@ blocks. Thus a size match alone cannot pass.
 | SI3 bulk append | 1/15 | `NEMO_L3BULK_001` | odd kt monotonic; stages 0/1/2; payloads 17/50/39; 4,780 B |
 | SI3 exchange append | 1/10 | `NEMO_L3XCHG_001` | kt 1..10 monotonic; 1,181,352 f64/frame; 94,508,560 B |
 | SI3 thermo append | 1/140 | `NEMO_L3THD_001` | five odd kt, 28 frames/ice step; category/stage order and compressed npti checked; 345,301,800 B |
-| SI3 ZDF inputs append | 1/25 | `NEMO_L3ZIN_002` | odd kt x categories 1..5; count=`18*npti`; 6,681,880 B |
-| SI3 reassociation append | 1/5 | `NEMO_L3REA_001` | kt=3, categories 1..5; count=`43*npti`; 3,156,440 B |
+| SI3 ZDF inputs append | 1/25 | `NEMO_L3ZIN_002` | odd kt x categories 1..5; count=`(13+nlay_s)*npti`; 6,681,880 B |
+| SI3 reassociation append | 1/5 | `NEMO_L3REA_001` | kt=3, categories 1..5; count=`(3+3*nlay_i+2*nlay_s)*npti`; 3,156,440 B |
 
 The record census SHA-256 is
-`6e80229737d5a456c5e114dc3421589344a7d5fa188ce1401657d3d212dea904`.
+`70c3779bc11e4b3df41ebf756abf25362dab82d9622c87829012618412cf273a`.
 All five append streams reached exact EOF after the listed frames: there is no
 concurrent-write interleaving, truncation, or trailing payload.
 
@@ -233,6 +235,12 @@ All nine independent planted violations exit nonzero and are recorded
 `PASS_NONZERO`: extra file, missing file, malformed magic, wrong time level,
 truncated payload, trailing byte, binary64 NaN, one-ulp active SI3 mutation,
 and one-byte restart identity mismatch.
+
+The binding identity plant materialized the instrumented ocean restart,
+changed one byte at offset 128, and called `validate_identity` itself. The
+standalone child reported
+`identity mismatch: ORCA2_00000010_restart_0000.nc` and exited `1`; the
+aggregate planted-control gate records `restart_identity_byte=PASS_NONZERO`.
 
 ## 5. WRITE-only byte-identity control, per ordinary file
 
@@ -260,7 +268,7 @@ Exact-byte files:
 | `mesh_mask_0000.nc` | `0f373c6609d287bc818b1f6ef96bafdcc0b620c730219018de9728369d01ec5f` | EXACT |
 | `mesh_mask_0001.nc` | `0b6903ce4e508bbd3f3c05dfbd8290548549ed52b13f081810e717071e977933` | EXACT |
 | `output.init_0000.nc` | `376b6f3170b7231056215d62e38ebf1619704e76289e5a87c4e0c0c678033a32` | EXACT |
-| `output.init_0001.nc` | `7dec10870109c6c2bc9c6ae01fec905c4f4b406a268f0cb154d1a902fd04b` | EXACT |
+| `output.init_0001.nc` | `7dec10870109c6c2bc9c6ae01fec905c4ce4f4b406a268f0cb154d1a902fd04b` | EXACT |
 | `output.init_ice_0000.nc` | `dbe61bd953c2acacf6410af5addb79bef186d40be06fb9afe7a8caad2f2a1dfb` | EXACT |
 | `output.init_ice_0001.nc` | `01555e31709cd398ab48fea133a5f6072cfa454b63c79309476fe04cf2f5ee25` | EXACT |
 | `output.namelist.dyn` | `31ceebedb15a0e427d9fc530029cc98e18db6749545ddc354ca749d2192e4148` | EXACT |
@@ -273,14 +281,14 @@ Native-IOM files, each exact except global `TimeStamp`:
 
 | file | control SHA-256 | instrumented SHA-256 | result |
 |---|---|---|---|
-| `...grid_T_0000.nc` | `f042130de9608c38b5e9f6691d70dea490a01b7e625024938a0e3f096946a3f7` | `25f63b6f985b9dd25b0bd78274c6b56485284d47b16f8d972b711183f797be22` | EXACT DATA/METADATA |
-| `...grid_T_0001.nc` | `f15fb7f02132d7eb037a368f464d8eeee1f497593baca5a1a80d6b1faf7f1a72` | `8a6f32fd01e9f163e94d4d704550dcf477257b6644f567efb45a10ba3edddabf` | EXACT DATA/METADATA |
-| `...grid_U_0000.nc` | `bd8bdded908746eaf10e699307fb3f58a51179b5a6169de162673118f4dba3be` | `71f48b741821550c22fbf06eb135400b4493a3c88d07406e49ac3f22858e5ce5` | EXACT DATA/METADATA |
-| `...grid_U_0001.nc` | `c496f4af2e35a2951cb20341b9f4d9599416d2c0c10fecac342986cec371d6f1` | `9ff49804f3e687154b842be45fc57d674fa920ab16a68ec70bd432b1dd9b0678` | EXACT DATA/METADATA |
-| `...grid_V_0000.nc` | `266b32c0a5509d7c50907e99690422d35808cf97920f9ca66376f149c36c6e50` | `2d8d743732a36138be0bffb1903eb6e8d4f15fbf6d2fa3da172c7429aae0f342` | EXACT DATA/METADATA |
-| `...grid_V_0001.nc` | `3538dc2a1b75b46c245c4f376824dc9a7609bc3078a0e7b04ddcafef10906ba9` | `1868f313929571da4ffe229350505cf67ddaeb9de86e78b010a8262ee9136a7c` | EXACT DATA/METADATA |
-| `...grid_W_0000.nc` | `34f31b75eddf5a87ad0c76fa29faf29d81b66f8813d23e0d28a4462547f6e692` | `6ef9da77a987a98ede9d2301e0396caf4532ff83dc8129ce19a165bc0a6ad72b` | EXACT DATA/METADATA |
-| `...grid_W_0001.nc` | `18ba9179726757bead40cb24286f295bbdcc8ee0f693e18c41a2ca9c5bf96e71` | `346e8ecd81a786a082aa8275bdc0f2c09f36c37c0d60622de86e912481627ea8` | EXACT DATA/METADATA |
+| `...grid_T_0000.nc` | `f042130de9608c38b5e9f6691d70dea490a01b7e625024938a0e3f096946a3f7` | `131362bfd6e19473f7c9dc5df895e95c69e5aad1bf475e56822892d456cdbe3c` | EXACT DATA/METADATA |
+| `...grid_T_0001.nc` | `f15fb7f02132d7eb037a368f464d8eeee1f497593baca5a1a80d6b1faf7f1a72` | `2bb7b10e61923e72419348b9b473f81df16574167a6f05f304b4a576c1ffe51d` | EXACT DATA/METADATA |
+| `...grid_U_0000.nc` | `bd8bdded908746eaf10e699307fb3f58a51179b5a6169de162673118f4dba3be` | `1b82db7139536c594529899b123834adf6fa7478879144629b498ba95d0a13fe` | EXACT DATA/METADATA |
+| `...grid_U_0001.nc` | `c496f4af2e35a2951cb20341b9f4d9599416d2c0c10fecac342986cec371d6f1` | `242abf429be62f46616dbc6cb78d765cab023307d9d547e4babb22d48cf197d4` | EXACT DATA/METADATA |
+| `...grid_V_0000.nc` | `266b32c0a5509d7c50907e99690422d35808cf97920f9ca66376f149c36c6e50` | `eb00d78d103db9cde78fab0744a018b4f7b07eb251a8c1ad4f282e30d0e99eba` | EXACT DATA/METADATA |
+| `...grid_V_0001.nc` | `3538dc2a1b75b46c245c4f376824dc9a7609bc3078a0e7b04ddcafef10906ba9` | `09adfd661275a7a16b3b898373c02759183a722ee98c2e4fcfc83df2c9e5d416` | EXACT DATA/METADATA |
+| `...grid_W_0000.nc` | `34f31b75eddf5a87ad0c76fa29faf29d81b66f8813d23e0d28a4462547f6e692` | `2635bbf387e1f3f1abc2c63db73a06b1d2c71300c4534d65df63cbb471b45473` | EXACT DATA/METADATA |
+| `...grid_W_0001.nc` | `18ba9179726757bead40cb24286f295bbdcc8ee0f693e18c41a2ca9c5bf96e71` | `c6d16063d56fa5a17cee4aa5e44ad136faa1d35b66a5b9d47421d347a5262558` | EXACT DATA/METADATA |
 
 `ocean.output` is exact after dropping only writer notices (control
 `644c5223...10fea`, instrumented `06c41ebf...a534`). Per the frozen rule, the
@@ -289,6 +297,10 @@ excluded files are `communication_report.txt`, `timing.output`,
 `timing_tsum_allmpi_t1_t10.nc`, `run.user.stdout.log`, `run.user.time.log`, and
 `run.launcher.log`. This proves the instruments are WRITE-only for ordinary
 model results.
+
+`validate_identity` increments its counters inside the successful comparison
+loops rather than reporting constants. For this run it reports
+`restart_shards_exact=6` and `history_payloads_exact=8`.
 
 ## 6. Executed-arm audit in NEMO order
 
@@ -425,6 +437,11 @@ Rule 11 history is preserved; none of these directories was deleted:
 3. `instrumented_rank0_10step_np2` (90 names) is retracted because
    `l3rea_dump` declared `18*npti` but wrote `43*npti`. The old gate now rejects
    it as `oracle_si3_reassoc_operands.bin: bad payload size header`.
+4. `instrumented_rank0_schema_10step_np2` passed its contemporary gate and has
+   no scientific-output defect, but independent review required the writer to
+   derive that count from `nlay_i/nlay_s` and required EOS scratch allocation
+   only while armed. It is preserved as a superseded arm, not used as a source
+   of replacement records.
 
 The accepted correction changes only config-local writer ownership guards and
 derived truthful header metadata. No model array or arithmetic expression is
@@ -440,7 +457,7 @@ and are allocated only while `l2_dump_armed` is true; after the record is
 closed they are deallocated at `:353-354,646-647`.  Their initialization,
 population, order, type, dimensions, and record schema are unchanged.  This is
 a WRITE-only instrumentation-lifetime change and is included in the corrective
-instrumented rebuild and replacement ten-step run preregistered separately.
+instrumented rebuild and the accepted replacement ten-step run.
 
 ### Independent-review correction: history payload identity
 
@@ -500,7 +517,7 @@ malformed metadata even when their payload bytes are intact.
 | commit accepted/control launchers | ASKED independent-review correction |
 | allocate EOS dump scratch only while armed | ASKED independent-review WRITE-only correction |
 | compare native-IOM stored-value bytes with masks disabled | ASKED independent-review correction |
-| replacement user-shell execution | ASKED; prepared but not executed at this stop |
+| replacement user-shell execution | ASKED; executed unchanged, RC 0 |
 | final gate and planted mutations | ASKED mechanical acceptance |
 | legoESM code, card, score, or physics change | UNASKED and forbidden in Phase 1; none performed |
 
@@ -542,7 +559,7 @@ numerics or fork an operator. In particular it needs:
    VERIFIED or explicitly WAIVED; comparisons run fp64 under one shared
    compiler/arithmetic provenance policy and cannot mix oracle binaries.
 
-This independent-review stop leaves exactly one corrective MPI execution to
-the user's shell. Phase 1 may re-close only after that one binary's complete
-record set and ordinary outputs pass the updated gate. No legoESM
-configuration, numerical score, or implementation follows this receipt.
+The independent-review replacement run has passed its complete record,
+identity, coverage, time-level, and planted-control gates. Phase 1 closes here.
+No legoESM configuration, numerical score, or implementation follows this
+receipt.

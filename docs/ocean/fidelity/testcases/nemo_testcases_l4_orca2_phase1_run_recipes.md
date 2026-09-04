@@ -290,7 +290,7 @@ MY_SRC  84861aaab9aaa7a2ea35cb5a749cfb0350595c485d10e9b288db6f5e9a0e62c6
 _ZGV*   zero; empty census SHA256 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 ```
 
-The only directory awaiting execution is:
+The rank-zero schema-correction run was executed from:
 
 ```text
 /data/abyssal/dbalwada/nemo-testcases-l4/runs/instrumented_rank0_schema_10step_np2
@@ -336,7 +336,7 @@ MY_SRC  78e1465fe7d9cea4d3adf24fb369b6a458c7bb7a912cc75f85d7ca6177e59152
 _ZGV*   zero; empty census SHA256 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 ```
 
-The only directory awaiting execution is:
+The independent-review replacement was executed from:
 
 ```text
 /data/abyssal/dbalwada/nemo-testcases-l4/runs/instrumented_reviewfix_10step_np2
@@ -344,8 +344,8 @@ The only directory awaiting execution is:
 
 It contains regular copies of the accepted 19-file deck, absolute symlinks to
 the same 40 immutable input payloads, and an absolute symlink to the exact
-replacement binary. It has no model output, restart, timing, or oracle record
-yet. Its self-contained Bash-time launcher checks all inputs and executes:
+replacement binary. Its self-contained Bash-time launcher checked all inputs
+and executed:
 
 ```text
 mpirun -np 2 --oversubscribe ./nemo
@@ -361,7 +361,16 @@ input manifest     3dfe251754fa76c8b5053cda90a51ee10589d0fffc01a4e799c49cc36bbd1
 prepared census    20c7d059bab0b50e11b60ba6c237ef8ab136e6b961f98b375f260769257b30a9
 ```
 
-This is the sole run requested at this stop. It must be launched from the
-user shell with `./run.sh`; Phase 1 remains reopened until its records and
-ordinary outputs pass the updated gate against the frozen uninstrumented
-control.
+The user's shell launched `./run.sh` unchanged. It reached `time.step = 10`,
+`MPIRUN_RC=0`, `LAUNCHER_RC=0`, and `RUN DONE`; Bash reported 12.280 s wall,
+17.597 s user, and 4.499 s system time. The run produced 90 oracle records and
+six restart shards. The complete 190-file census is
+`329de5e238356664eb31371042c49ebcf2e7d2d2039f35fc157710318d628f7b`;
+the 90-record census is
+`70c3779bc11e4b3df41ebf756abf25362dab82d9622c87829012618412cf273a`.
+The fail-closed gate plus all nine binding planted controls passed; its JSON
+digest is
+`dc42802b3f925c4197b75003431e3ba1762bfa18a39a038f8a864f10cc553577`.
+The accepted replacement is byte-identical to the frozen uninstrumented
+control for every ordinary output under the preregistered timestamp/timing
+exclusions. Phase 1 is closed; no further run is requested here.
