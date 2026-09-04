@@ -1,0 +1,35 @@
+--- sbc_phy.F90
++++ sbc_phy.F90
+@@ -194,6 +194,22 @@
+    !! Software governed by the CeCILL license (see ./LICENSE)
+    !!---------------------------------------------------------------------
+ CONTAINS
++
++   SUBROUTINE l3bulk_dump_folded_constants
++      !! WRITE-only lane-3b oracle instrument.  These are compiler-folded
++      !! binary64 operands on the active SI3 bulk path; no model state is read
++      !! or changed.  Called once from sbc_blk_init.
++      INTEGER ::   inum
++      REAL(wp), DIMENSION(4) ::   zvalues
++      zvalues(1) = reps0
++      zvalues(2) = rgamma_dry
++      zvalues(3) = rDg_i
++      zvalues(4) = LOG(10._wp)
++      OPEN( NEWUNIT=inum, FILE='oracle_si3_folded_constants.bin', &
++         &  ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE', ACTION='WRITE' )
++      WRITE(inum) zvalues
++      CLOSE(inum)
++   END SUBROUTINE l3bulk_dump_folded_constants
+ 
+ 
+    ELEMENTAL FUNCTION virt_temp_sclr( pta, pwa )
+--- sbcblk.F90
++++ sbcblk.F90
+@@ -261,6 +261,7 @@
+ #if defined key_si3
+       IF( sbc_blk_ice_alloc() /= 0 )   CALL ctl_stop( 'STOP', 'sbc_blk : unable to allocate standard ice arrays' )
+ #endif
++      CALL l3bulk_dump_folded_constants   ! WRITE-only lane-3b operand dump, once
+       !
+       !                             !** read bulk namelist
+       READ_NML_REF(numnam,namsbc_blk)

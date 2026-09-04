@@ -648,10 +648,7 @@ def _nemo_si3_blk_ice_2(
     q_sat, dq_sat = nemo_si3_saturation_over_ice(
         T_surface, p_surface, _source_round=_source_round,
     )
-    poisson = source_round(
-        constants.R_gas_molar
-        / source_round(constants.M_dry_air * constants.c_p_dry_air_nemo)
-    )
+    poisson = constants.poisson_dry_air_nemo
     theta_surface = source_round(
         T_surface * source_round(
             source_round(constants.p_ref / p_surface) ** poisson

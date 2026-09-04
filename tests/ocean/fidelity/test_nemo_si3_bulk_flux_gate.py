@@ -127,6 +127,26 @@ def test_selected_dispatch_is_jittable_and_differentiable() -> None:
     not (gate.DEFAULT_ROOT / "oracle_si3_bulk_operands.bin").exists(),
     reason="retained C1D oracle is not mounted",
 )
+def test_compiler_folded_constants_are_bit_pinned() -> None:
+    result = gate.validate_folded_constants()
+    assert result["bytes"] == 32
+    assert [row["ieee754_hex"] for row in result["rows"]] == [
+        "3fe3e76d0b3af3e8",
+        "3fd247bcd3cd320c",
+        "3fe9258f81f79246",
+        "40026bb1bbb55516",
+    ]
+
+
+def test_planted_folded_constant_violation_fires() -> None:
+    with pytest.raises(gate.GateError):
+        gate.validate_folded_constants(plant=True)
+
+
+@pytest.mark.skipif(
+    not (gate.DEFAULT_ROOT / "oracle_si3_bulk_operands.bin").exists(),
+    reason="retained C1D oracle is not mounted",
+)
 def test_full_year_gate_and_all_plants() -> None:
     result = gate.evaluate()
     assert result["verdict"] == "AWAITING_LIBM_POLICY"
@@ -164,6 +184,7 @@ def test_full_year_gate_and_all_plants() -> None:
         "stream_hash", "coverage", "selector", "bit_owner",
         "runtime",
         "source_round",
+        "folded_constant",
     ):
         with pytest.raises(gate.GateError):
             gate.evaluate(plant=plant)

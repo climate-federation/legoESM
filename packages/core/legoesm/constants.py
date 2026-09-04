@@ -187,6 +187,15 @@ goff_ice_C_nemo = 0.876793
 goff_ice_D_pressure_hpa_nemo = 6.1071
 T_goff_floor_nemo = 180.0       # [K]
 
+# Compiler-folded binary64 operands on NEMO's active SI3 bulk path.  These
+# values were written once from a config-local copy of sbc_phy.F90 and were
+# byte-identical in two independent scalar-math rebuilds (lane 3b Round 10).
+# The hexadecimal payloads are the big-endian IEEE-754 binary64 words.
+epsilon_air_nemo = 0.6220002383557786       # 3fe3e76d0b3af3e8; sbc_phy.F90:33-35
+poisson_dry_air_nemo = 0.2856285160421812   # 3fd247bcd3cd320c; sbc_phy.F90:39-43
+goff_ice_D_nemo = 0.7858350313586662        # 3fe9258f81f79246; sbc_phy.F90:74-79
+ln10_nemo = 2.302585092994046               # 40026bb1bbb55516; sbc_phy.F90:709-711
+
 # ORCA1-resolved SI3 surface/bulk selections used by C1D_OMIP_L3.
 bulk_transfer_ice_default = 1.5e-3
 bulk_transfer_ice_orca1 = 1.0e-3

@@ -1578,10 +1578,7 @@ def nemo_si3_constant_fluxes(
         tau_x = stress_scale * u_air
         tau_y = stress_scale * v_air
     # sbc_phy.F90:335 and sbcblk.F90:1254-1264.
-    poisson = source_round(
-        constants.R_gas_molar
-        / source_round(constants.M_dry_air * constants.c_p_dry_air_nemo)
-    )
+    poisson = constants.poisson_dry_air_nemo
     theta_ice = source_round(
         T_ice * source_round(
             source_round(constants.p_ref / p_surface) ** poisson

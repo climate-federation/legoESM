@@ -387,11 +387,11 @@ def nemo_si3_saturation_over_ice(
     )
     zle = source_round(
         source_round(source_round(term_a + term_b) + term_c)
-        + jnp.log10(constants.goff_ice_D_pressure_hpa_nemo)
+        + constants.goff_ice_D_nemo
     )
     e_sat = source_round(100.0 * source_round(10.0 ** zle))
     # sbc_phy.F90:749,783-788 and 707-711.
-    eps = constants.R_d / constants.R_v_nemo
+    eps = constants.epsilon_air_nemo
     denom = source_round(
         source_round(source_round(eps - 1.0) * e_sat) + p
     )
@@ -402,14 +402,14 @@ def nemo_si3_saturation_over_ice(
     )
     zde_b = source_round(
         constants.goff_ice_B_nemo
-        / source_round(zta * jnp.log(10.0))
+        / source_round(zta * constants.ln10_nemo)
     )
     zde_c = source_round(
         constants.goff_ice_C_nemo / constants.T_triple_nemo
     )
     zde = source_round(source_round(zde_a - zde_b) - zde_c)
     de_sat_dT = source_round(
-        source_round(jnp.log(10.0) * zde) * e_sat
+        source_round(constants.ln10_nemo * zde) * e_sat
     )
     dq_sat_dT = source_round(
         source_round(source_round(eps * p) * de_sat_dT)

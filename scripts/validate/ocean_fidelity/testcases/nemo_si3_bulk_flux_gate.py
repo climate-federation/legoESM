@@ -32,6 +32,19 @@ DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l3/"
     "c1d_omip_l3_sasice_scalarmath_v2_a"
 )
+FOLDED_CONSTANTS_PATH = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l3/"
+    "c1d_omip_l3_sasice_folded_a/oracle_si3_folded_constants.bin"
+)
+EXPECTED_FOLDED_CONSTANTS_SHA256 = (
+    "2e7fe35234848a0978fcd3ded8327c1f3478191a7f787e36f4bf79f1451fe4ad"
+)
+FOLDED_CONSTANTS = (
+    ("epsilon_air_nemo", 0x3FE3E76D0B3AF3E8, "sbc_phy.F90:33-35"),
+    ("poisson_dry_air_nemo", 0x3FD247BCD3CD320C, "sbc_phy.F90:39-43"),
+    ("goff_ice_D_nemo", 0x3FE9258F81F79246, "sbc_phy.F90:74-79"),
+    ("ln10_nemo", 0x40026BB1BBB55516, "sbc_phy.F90:709-711"),
+)
 
 STAGE_NAMES = {0: "POST_BLK_ICE_1", 1: "POST_BLK_ICE_2", 2: "POST_ICE_FLX_OTHER"}
 STAGE_COUNTS = {0: 17, 1: 50, 2: 39}
@@ -390,6 +403,42 @@ def validate_selector(stage0: dict[str, np.ndarray], stage2: dict[str, np.ndarra
         require(np.all(stage2[name] == 1.0), f"{name} branch drift")
 
 
+def validate_folded_constants(*, plant: bool = False) -> dict[str, object]:
+    """Bind pinned Python constants to the config-local gfortran dump."""
+    from legoesm import constants
+
+    require(FOLDED_CONSTANTS_PATH.stat().st_size == 32, "folded-constant dump size")
+    require(
+        sha256(FOLDED_CONSTANTS_PATH) == EXPECTED_FOLDED_CONSTANTS_SHA256,
+        "folded-constant dump hash drift",
+    )
+    dumped = np.fromfile(FOLDED_CONSTANTS_PATH, dtype=np.float64)
+    if plant:
+        dumped = dumped.copy()
+        dumped[2] = np.nextafter(dumped[2], np.inf)
+    rows = []
+    for value, (name, expected_bits, source) in zip(dumped, FOLDED_CONSTANTS):
+        pinned = np.float64(getattr(constants, name))
+        value_bits = int(value.view(np.uint64))
+        pinned_bits = int(pinned.view(np.uint64))
+        require(value_bits == expected_bits, f"oracle folded {name} bits drift")
+        require(pinned_bits == expected_bits, f"pinned folded {name} bits drift")
+        rows.append({
+            "name": name,
+            "value": float(value),
+            "float_hex": float(value).hex(),
+            "ieee754_hex": f"{value_bits:016x}",
+            "source": source,
+        })
+    return {
+        "path": str(FOLDED_CONSTANTS_PATH),
+        "sha256": sha256(FOLDED_CONSTANTS_PATH),
+        "bytes": FOLDED_CONSTANTS_PATH.stat().st_size,
+        "rows": rows,
+        "rebuild_b_sha256": EXPECTED_FOLDED_CONSTANTS_SHA256,
+    }
+
+
 def _score(predicted, oracle, stage: str, variable: str) -> dict[str, object]:
     predicted = np.asarray(predicted, dtype=np.float64)
     oracle = np.asarray(oracle, dtype=np.float64)
@@ -443,6 +492,7 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
     if plant == "runtime":
         runtime = {**runtime, "jax": "0.0.0-planted"}
     validate_runtime(runtime)
+    folded_constants = validate_folded_constants(plant=plant == "folded_constant")
     set_policy(PrecisionPolicy.fp64())
     require(jax.config.read("jax_enable_x64"), "JAX x64 disabled")
     require(jax.default_backend() == "cpu", "bulk gate is CPU-only")
@@ -636,6 +686,8 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         pass
     elif plant == "source_round":
         predictions = unrounded_predictions
+    elif plant == "folded_constant":
+        pass
     elif plant is not None:
         raise GateError(f"unknown plant {plant}")
 
@@ -693,6 +745,7 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
             ),
         },
         "nemo_order_numpy_probe": order_probe,
+        "compiler_folded_constants": folded_constants,
         "largest_row": largest,
         "dtypes": {"numpy": str(stages[0].dtype), "jax_x64": True, "backend": "cpu"},
         "streams": {
@@ -747,6 +800,7 @@ def main() -> int:
         "stream_hash", "coverage", "selector", "bit_owner",
         "runtime",
         "source_round",
+        "folded_constant",
     ))
     args = parser.parse_args()
     result = evaluate(args.root, plant=args.plant)
