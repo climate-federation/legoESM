@@ -112,3 +112,11 @@ WRITE-only input frame and replay only that resolved branch.  Prediction: the
 order-one first-step `qt_atm_oi`, `qt_oce_ai`, `qns`, and `emp` residuals will
 disappear; any remaining first over-bar row will then be reported in NEMO
 execution order without expanding the selected identity.
+
+The corrected retry-E flux rows satisfy the bar, and the next ordered replay
+showed that `taum` needs its true entry value: `ice_update_tau` overwrites the
+atmospheric `taum` only on the four-step refresh (`iceupdate.F90:372-383`), so
+the preceding POST value is not a legitimate exact-entry substitute.  Retry F
+will add the pre-call `taum` scalar to the WRITE-only tau frame.  Prediction:
+the current refresh-only `taum` residual disappears; the already bit-identical
+`tmod_io`, `rCdU_ice`, `utau`, and `vtau` rows do not move.
