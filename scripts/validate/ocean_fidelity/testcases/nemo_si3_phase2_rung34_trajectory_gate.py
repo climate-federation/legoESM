@@ -298,6 +298,28 @@ def _active_ridging_projection(card, frame: dict[str, np.ndarray], next_frame):
     }
 
 
+def _plant_row_evidence(
+    clean_row: dict[str, object], planted_row: dict[str, object]
+) -> dict[str, object]:
+    """Require the plant to move its scored row, independent of gate exit."""
+
+    require(clean_row["name"] == planted_row["name"], "plant row name changed")
+    require(clean_row["status"] == "AT-BAR", "plant baseline row is not AT-BAR")
+    require(planted_row["status"] == "DEBT", "plant did not make its row DEBT")
+    require(
+        float(planted_row["normalized_max_abs"])
+        > float(clean_row["normalized_max_abs"]),
+        "plant did not increase its scored-row error",
+    )
+    return {
+        "name": clean_row["name"],
+        "clean_status": clean_row["status"],
+        "clean_normalized_max_abs": clean_row["normalized_max_abs"],
+        "planted_status": planted_row["status"],
+        "planted_normalized_max_abs": planted_row["normalized_max_abs"],
+    }
+
+
 def run_active_window(
     root: Path,
     restart_root: Path = _ACTIVE_RESTART_ROOT,
@@ -330,6 +352,7 @@ def run_active_window(
     state = card.initial_state._replace(moments=_restart_moments(entry_restart, card))
     candidate = step_ice_rheo_card(card, state, completed_steps=_ACTIVE_ENTRY_RESTART_STEP)
     fields = gate._candidate_fields(card, candidate)
+    clean_v_s = fields["v_s"].copy()
     if plant_field:
         fields["v_s"] = fields["v_s"].copy()
         fields["v_s"][gate._HALO_WIDTH + 10, gate._HALO_WIDTH + 10] += gate._PLANT_MAGNITUDE
@@ -407,6 +430,23 @@ def run_active_window(
     informative = [row for row in rows if row["status"] != "UNINFORMATIVE"]
     owner = max(informative, key=lambda row: float(row["normalized_max_abs"]))
     first_over_bar = debts[0] if debts else None
+    plant_evidence: dict[str, object] | None = None
+    if plant_field:
+        planted_row = next(
+            row for row in rows if row["name"] == f"active.step{_ACTIVE_COMPLETED_STEP}.v_s"
+        )
+        clean_row = gate._score(
+            f"active.step{_ACTIVE_COMPLETED_STEP}.v_s",
+            gate._oracle_field(target, "v_s")[
+                gate._HALO_WIDTH : -gate._HALO_WIDTH,
+                gate._HALO_WIDTH : -gate._HALO_WIDTH,
+            ],
+            clean_v_s[
+                gate._HALO_WIDTH : -gate._HALO_WIDTH,
+                gate._HALO_WIDTH : -gate._HALO_WIDTH,
+            ],
+        )
+        plant_evidence = _plant_row_evidence(clean_row, planted_row)
     return {
         "gate": "nemo-si3-phase2-rung34-active-window-v1",
         "status": "AT-BAR" if not debts else "DEBT",
@@ -440,7 +480,11 @@ def run_active_window(
             str(entry_restart): gate._sha256(entry_restart),
             str(target_restart): gate._sha256(target_restart),
         },
-        "plant": {"field": plant_field, "magnitude": gate._PLANT_MAGNITUDE},
+        "plant": {
+            "enabled": plant_field,
+            "magnitude": gate._PLANT_MAGNITUDE,
+            "row_transition": plant_evidence,
+        },
     }
 
 

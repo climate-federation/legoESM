@@ -866,6 +866,12 @@ legoESM restart.
 
 ### Round-8 active-redistribution measurement
 
+The dominant active-window debt is **`active_moment.sxxe_l01`**, normalized
+`3.492459543785742e-9` and field-relative `2.095149123314519e-8`.  It is about
+six orders of magnitude above the `stress1_i` field-ordering row
+(`3.69646870789917e-15`); the moment row, not the ordering convention, is the
+headline debt.
+
 **CONFIRMED:** kt=1 exercised only a near-rest redistribution.  The committed
 scan uses SI3's own closing equations at `icedyn_rdgrft.F90:243-252` and its
 `epsi10=1e-10` redistribution cutoff at `:594-595,623-624`.  It selects the
@@ -922,10 +928,13 @@ retain non-oracle stabilizers.  The replacement follows SI3 literally:
 raises on any state with a category axis; its five-category ORCA1 control is a
 passing test of the loud `jpl>1` boundary.
 
-The active scored-row plant adds `1e-10` to `v_s`, exits 1, and reports
-`9.999999439624929e-11` normalized plus `1.0101009284553422e-9`
-field-relative.  It therefore binds on a trajectory row independently of the
-pre-existing scientific debts.
+The active scored-row plant binds independently of the already-red gate:
+`active.step8.v_s` moves from **AT-BAR** at
+`2.7755575615628914e-17` normalized to **DEBT** at
+`9.999999439624929e-11` normalized (`1.0101009284553422e-9`
+field-relative).  The gate now asserts this exact row transition and fails if
+the scoring path stops seeing the plant; its overall exit code is not used as
+the plant proof.
 
 | round-8 artifact | SHA-256 |
 |---|---|

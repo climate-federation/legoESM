@@ -75,6 +75,25 @@ def test_normalized_bar_and_field_relative_diagnostic_are_distinct() -> None:
     assert row["relative_is_diagnostic"] is True
 
 
+def test_plant_self_check_requires_the_scored_row_to_move() -> None:
+    clean = {
+        "name": "active.step8.v_s",
+        "status": "AT-BAR",
+        "normalized_max_abs": 2.8e-17,
+    }
+    planted = {
+        "name": "active.step8.v_s",
+        "status": "DEBT",
+        "normalized_max_abs": 1.0e-10,
+    }
+    evidence = gate._plant_row_evidence(clean, planted)
+    assert evidence["clean_status"] == "AT-BAR"
+    assert evidence["planted_status"] == "DEBT"
+
+    with pytest.raises(gate.Rung34TrajectoryError, match="did not make its row DEBT"):
+        gate._plant_row_evidence(clean, clean)
+
+
 @pytest.mark.parametrize(
     ("divergence", "deformation", "message"),
     (
