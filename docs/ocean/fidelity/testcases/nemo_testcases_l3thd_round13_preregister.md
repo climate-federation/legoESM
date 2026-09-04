@@ -120,3 +120,10 @@ the preceding POST value is not a legitimate exact-entry substitute.  Retry F
 will add the pre-call `taum` scalar to the WRITE-only tau frame.  Prediction:
 the current refresh-only `taum` residual disappears; the already bit-identical
 `tmod_io`, `rCdU_ice`, `utau`, and `vtau` rows do not move.
+
+Retry F confirms that prediction and leaves no tau row over the bar.  Before
+the next build, the ordered walk now registers the active `sbc_fwb` case-1,
+volume-type-1 operands and outputs at `sbcfwb.F90:224-239,292-295`.
+Prediction for the one-wet-column domain: the literal area multiply/global
+sum/divide replay, snow-plus-ice mass correction, `emp`, and compensating
+`qns` update remain within the bar.  A row outside it becomes the next owner.
