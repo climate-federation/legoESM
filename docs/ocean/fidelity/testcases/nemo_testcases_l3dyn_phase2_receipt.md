@@ -1432,6 +1432,116 @@ The interrupted zero-byte `round11_moment_replay_jit.json` is retained and
 **REJECTED**; it is not cited as evidence.  No background process remains.
 No shipped NEMO source or testcase was modified, and no artifact was deleted.
 
+### Round-12 Prather source exactness and measured stop
+
+The primary production-JIT discriminator **CONFIRMS** the registered Prather
+prediction: with the oracle step-8 U/V inputs, all **160 / 160** restart-moment
+rows are byte-exact and zero rows exceed two ULP.  Every row reports
+`0 / 1000000` non-bit-exact cells.  Replacing only
+`transport.nemo_source_round` by identity in the private ablation leaves just
+20/160 rows exact, makes 140/160 non-bit-exact and over two ULP, and puts
+60/160 rows in DEBT.  Its owner is `sxxe_l01`, `3.4020464778627968e-9`
+normalized / `2.0409097388836545e-8` relative.  This is a one-variable
+**CONFIRMED** compiled-association owner, not an inference from endpoint
+growth.
+
+The one shared Prather program now materializes every executed NEMO-written
+operation in `icedyn_adv_pra.F90`: entry extensive contents at `:218-245`;
+the x/y limiters and their ordered `MIN`/`MAX`/`ABS` operands at
+`:534-568,757-791`; positive flux and donor recurrences at
+`:570-597,793-820`; negative flux and donor recurrences at
+`:618-664,841-888`; receiver merges at `:666-707,890-931`; parity/sweep
+recursion at `:253-350`; halos at `:432-480`; and intensive recovery at
+`:355-381`.  Products, quotients, sums, and differences are consumed in that
+source order through the canonical, unchanged
+`core.source_rounding.nemo_source_round`.  The implementation remains the
+existing `packages/ice/legoesm/ice/transport.py` arm; there is no second model,
+card selector, or default change.  The public H79 keyword is now the documented
+`source_exact` (default false); only the already-selected C-grid caller enables
+it.
+
+The completed rung-3.3 step 1 is also byte-exact end to end under CPU/fp64/
+scalar-libm production JIT: all 23 scored trajectory fields, including every
+transported field, U/V, and the three stresses, report `0 / 9801`.  Preserving
+the already-packed bit pattern when NEMO's Hbig, Hsnow, or `ice_var_zapneg`
+predicate is false removes the former artificial content/area/content no-op
+round trips (`icedyn_adv_pra.F90:946-1133`; `icevar.F90:759-837`).  This is
+source branch semantics, not a stabilizer.
+
+The independent-oracle-entry sweep measures the next boundary as follows; all
+rows remain below the immutable normalized bar through step 8:
+
+| completed step | first/nonzero row | nonzero / cells | normalized max | relative max |
+|---:|---|---:|---:|---:|
+| 1 | none | `0 / 9801` for all 23 | 0 | 0 |
+| 2 | `a_ip` | `2 / 9801` | `2.7755575615628914e-17` | `1.5322831957764684e-16` |
+| 3 | `a_ip` | `2 / 9801` | `2.7755575615628914e-17` | `1.5239174778496237e-16` |
+| 4 | `a_ip` | `2 / 9801` | `2.7755575615628914e-17` | `1.5228419408782595e-16` |
+| 5 | `a_ip` | `4 / 9801` | `2.7755575615628914e-17` | `1.5224112534471245e-16` |
+| 6 | `a_ip` | `6 / 9801` | `2.7755575615628914e-17` | `1.516088615795205e-16` |
+| 7 | `a_ip` | `10 / 9801` | `2.7755575615628914e-17` | `1.5098624118666638e-16` |
+| 8 | `a_ip` | `6 / 9801` | `5.551115123125783e-17` | `3.0191683285628125e-16` |
+
+Thus the first rung-3.3 departure from bit exactness is completed step 2,
+`a_ip`, at one ULP and below bar.  The existing 485-entry sweep first leaves
+the normalized bar at completed step 338, `e_i_l01`,
+`1.069607625239799e-15`; its final restart has 34 DEBT moment rows.  Those are
+rung-3.3 results and are not substituted for the conditional ICE_RHEO
+720-step walk.
+
+The full-size active-ridging window does not satisfy the registered exactness
+condition.  Its dominant debt is again
+`active_moment.sxxe_l01`, `3.492459543785742e-9` normalized /
+`2.095149123314519e-8` relative; 63/210 rows are DEBT.  The first DEBT row in
+field registry order is `stress1_i` at `3.0033808251680753e-15`; stress2 and
+stress12 are `2.8422262044713913e-15` and
+`8.864931383506739e-15`.  U/V remain AT-BAR but are non-bit-exact in
+`901299 / 1000000` and `938096 / 1000000` cells, with relative diagnostics
+`7.751535113774344e-15` and `7.687361842728817e-15`.  Because the oracle-U/V
+Prather arm is 160/160 exact, the named next owner is the full-size
+ICE_RHEO C-grid aEVP velocity/stress chain at this input state, before
+transport.  The moment amplification is **CONFIRMED**; a narrower aEVP source
+operand is **UNMEASURED**.
+
+Consequently the preregistered requirement that steps 2--8 and the active
+window remain byte-exact is **REFUTED**, so no new ICE_RHEO 9--720 walk or
+restart score was run.  The old step-720 U/V/stress separation cannot be called
+pure amplification of eliminated roundoff: a remaining operator defect is
+already measured at the active oracle-entry state.  How much that specific
+operand contributes to the historical 24% `u_ice` / 77% `stress12_i` endpoint
+is **UNMEASURED**; the next action is a per-subcycle first-operand descent in
+the full-size aEVP arm.
+
+Both plants bind at row level.  The Prather velocity plant makes
+`plant_delta.syye_l01` DEBT at `6.656046011101788e-7` normalized,
+`3 / 1000000` cells, and `49112950923852` maximum ULP; `--plant` asserts that
+exact row and returns 1.  Independently, the active field plant moves
+`active.step8.v_s` from `1.3877787807814457e-17` normalized (AT-BAR) to
+`9.999999439624929e-11` (DEBT) and returns 1.
+
+| round-12 artifact/file | SHA-256 |
+|---|---|
+| production-JIT exact-input discriminator + private ablation + binding plant | `bb8a26cda75cb782c1cff99bd636f452e4062ae5f6095b182db2302c16f9c746` |
+| rung-3.3 completed-step-1 gate | `883db2d0aaaf3ecec39da1787de0ec2ccabec9c35fc8222c23e8fb9e668162fe` |
+| rung-3.3 independent-entry 485-step/restart sweep | `43aa822f971728421e4ac2605c0cee87e1985e0737f3107cdabdb6679f26f693` |
+| ICE_RHEO active step-8 gate / row plant | `8d06bc76b7ed3b6350b0180a51ddf1ac2a9d9507b50b692750b67eeb2c158edc` / `d6bd5840502763e996959a4082d970571981d8b898719ca8619decf074f5465f` |
+| shared ice transport / source-correction recipe | `ac26cca22c0ba3c4d8aaa0b60553d914af7e0a875f1f3aba5d64be0eb387f710` / `ce50898330c07db5794abd14a785e515af46c4add64e1ca57ed29f1cdec96678` |
+| H79 API / C-grid caller | `dacc1528d5660d8bc1c18b1fad7ade48ff2c5fbcd85e27d7697bb4ab04984174` / `aedfc926c3017c469d42402f4d2ff2406985784526feeab8f19a9dcec7f253c2` |
+| exact discriminator gate / association test | `f3a943dd03f44304035a48cef00ea475bd810ed2d6371da8ee51829111cd3982` / `bf430a12141411ca85b82546cff4158dfe470af15a4ad34d54c4247930d013e4` |
+
+The preregistration and implementation commits are
+`a1859b95d3b3` and `02dc6f312671`.  Focused CPU/fp64 verification is
+**63 passed in 654.33 s**, plus the new compiled-association tripwire
+**1 passed in 4.06 s**.  Every touched-file coefficient/constant ratchet node
+passes (**10 selected nodes**: nine in the implementation commit and the new
+test node).  The repository-wide ratchet remains honestly red at
+**3,751 passed, 2 skipped, 7 failed**; the same seven unrelated paths are
+listed in the Round-10/11 receipt and no failure names a Round-12 file.  Ruff
+passes every Round-12 Python path with the established `N803`, `N806`, `I001`
+exceptions.  No background process remains, no shipped NEMO source/testcase
+was modified, no artifact was deleted, and the canonical core files are
+unchanged.
+
 ## Loudly UNMEASURED / deferred
 
 Within-step x/y Prather split states; ORCA1
@@ -1476,6 +1586,12 @@ lost inside narrative:
 | 11 | Rerun the oracle-U/V discriminator under production JIT and bind the moment plant on exit | ASKED | Prior exclusive velocity ownership REFUTED; clean JIT has 60 DEBT/140 over-two-ULP rows; planted mode asserts the count and exits 1 |
 | 11 | Run steps 9--720 only if completed step 1 is bit-exact end to end | ASKED | Condition REFUTED by 14 nonzero transported rows; no new 720-step/restart run |
 | 11 | Modify the canonical core helper, relax bars, change defaults/schemes, edit shipped NEMO, delete artifacts, use GPU/MPI, commit large dumps, or push | UNASKED | None performed; external zero-byte interrupted artifact retained and rejected |
+| 12 | Source-round the single shared SI3 Prather program in NEMO operand order and retain the old association only as a private arm | ASKED | Clean production JIT is 160/160 byte-exact; private identity arm is 20/160 exact, 140/160 nonexact, 60 DEBT |
+| 12 | Require byte-exact transported fields at completed step 1, then measure steps 2--8 and the active-ridging window | ASKED | Step 1 is 23/23 exact; first nonexact is step-2 `a_ip`; active window is 63/210 DEBT |
+| 12 | Bind plants to named scored rows and report `0 / n` denominators | ASKED | `plant_delta.syye_l01` and `active.step8.v_s` are asserted row transitions; exact discriminator rows are `0 / 1000000` |
+| 12 | Continue ICE_RHEO steps 9--720 only if steps 2--8 and the active window remain byte-exact | ASKED | Preregistered condition REFUTED; no new long walk or restart claim |
+| 12 | Rename/document the public H79 source-rounding keyword without changing its default | ASKED | `source_exact=False`; only the existing C-grid caller selects true |
+| 12 | Modify canonical core files, relax the bar, add a card switch/model, change defaults, edit shipped NEMO, use GPU/MPI, delete artifacts, commit large dumps, or push | UNASKED | None performed |
 
 **ASKED choices:** resolve the rung-3.1 review HOLD in its own commit; implement
 rungs 3.1 and 3.2 against the pinned shipped cases; fp64/CPU only and `jpl=1`;
