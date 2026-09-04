@@ -223,6 +223,8 @@ def run(mode: str, output_npz: Path, faithful_npz: Path | None,
     set_policy(PrecisionPolicy.fp64())
     require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    require(not bool(jax.config.jax_disable_jit),
+            "certification requires production JIT; JAX_DISABLE_JIT is forbidden")
     card = build_nemo_testcase_card(CASE)
     cfg = card.recipe.model_config._replace(
         freshwater_closure="real_freshwater", fix_eta_drift=True)
@@ -620,6 +622,7 @@ def run(mode: str, output_npz: Path, faithful_npz: Path | None,
         "bar": BAR,
         "precision_policy": "fp64",
         "jax_backend": jax.default_backend(),
+        "execution_regime": "production_jit",
         "rows": rows,
         "status": "AT-BAR" if all(row["status"] == "AT-BAR" for row in rows) else "DEBT",
         "oracle_record": str(

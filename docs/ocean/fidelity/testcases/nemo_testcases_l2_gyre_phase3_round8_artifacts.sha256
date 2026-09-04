@@ -21,3 +21,16 @@ f91d8399f9c777d69d81cee82090f843529bf1b613306b142a32e3a7a1ea5f7f  /data/abyssal/
 31fd57529f08737deb53528721a0246291d58660a66bbfc0896ba2e8a6bbd166  /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/GYRE_OMIP_L2_P3/BLD/bin/nemo.exe
 4807fa59ce15237ac04ef8e84f39c77b3da4080aa9ad1effa517fb79e1a6968d  /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/GYRE_OMIP_L2_P3/MY_SRC/traadv.F90
 17bd9eef4aa1dcd33450e64cfb2c0b97b50ac9f7d015ce7d6b6e8fc1dacdd1cf  /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/GYRE_OMIP_L2_P3/MY_SRC/stprk3_stg.F90
+# round-9 production-JIT recertification (supersedes eager-only result rows above)
+9567f31c4840440a185b0b0cce56c35a07e9c81ce04236d8097caf197e1eedf1  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_jit/gyre_r9_jit_full.json
+2303feee92f28b53000ed2b887cc2db70d7bb11a9635f7df0dc0552db2c7ec54  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_jit/gyre_r9_jit_register.json
+e1a5897478cdafc978d5fa96021ecf13290fc6f218a1b401b2cd185dd8c4e675  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_jit/stage2_hpg.json
+c91742305aead9834df7a273fc27b72a06fa243e93b83105e3229fc6e57278bf  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_jit/stage2_vorticity.json
+509617f4f1e4aa05ed64bb4800b0c0798eb99ab6d5c7fbfca33548afa73be3b9  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_jit/stage2_advection.json
+2d21416da8b0c98e2fd969efe9dd65fef6338a923775cfd00368ce2eb5168162  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_jit/transport.json
+448e2687f6157a9d3fb5d98af9e1569b07b55bdc667cb0d63229f4dbbd35f30e  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_jit/transport_zub_arm.json
+cac4b912e617436b6d6925f560d4cf7ca7b8e66b7c9079b98218df04a030840f  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_jit/transport_wzv_legacy.json
+78ab39d09cd1ba9b19320db72f05be05b0a318116c0782671eedf8189a73d50d  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_jit/stage3_wzv.json
+d13173cb9afeb66047bc5eb6f5b102903f9b71a7a9a5c2402df5d5ceacf367f8  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_jit/stage3_wzv_nemo_e3w.json
+6d6ca398a04df2da74c57226a05fff2db3a8bfe8aac0f9ffb414f3703cbad711  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_jit/stage3_wzv_oracle_transport_arm.json
+f966dd60d0a8d45b92c362a7a628ae4fbbce6d4b5061f301370b943b3a011bce  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_jit/stage3_wzv_oracle_eta_arm.json

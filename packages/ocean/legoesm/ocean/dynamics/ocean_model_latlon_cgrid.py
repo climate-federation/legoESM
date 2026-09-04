@@ -1010,6 +1010,12 @@ def _ssp_rk3_tracer_pair_step(
 class _NEMOWSRK3TestHooks(NamedTuple):
     """Private causal controls; never part of a constructible model config."""
 
+    # Return the 50-substep dynspg_ts trace from the production-jitted step.
+    # This is deliberately a static private hook: fidelity gates must not call
+    # ``_step_impl`` eagerly to obtain internals, because eager execution does
+    # not certify the compiled production arithmetic.
+    expose_barotropic_substeps: bool = False
+
     # Ablates the per-stage external-mode REPLACEMENT inside the one WS stage
     # ladder (stprk3_stg.F90:433-446): each stage then keeps its own depth
     # mean.  It does not select a second ladder -- there is only one.
@@ -9885,6 +9891,16 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"config.outer_integrator must be one of {_valid_oi_jitted}, "
                 f"got {_oi!r}")
+        if self._nemo_ws_test_hooks.expose_barotropic_substeps:
+            if _oi != "forward_euler":
+                raise ValueError(
+                    "expose_barotropic_substeps is a private forward_euler "
+                    "WS-RK3 fidelity hook")
+            return self._step_impl(
+                state, dt, freshwater=freshwater,
+                surface_forcing=surface_forcing, sponge=sponge,
+                grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
+                _return_barotropic_substeps=True)
         if self.config.barotropic.barotropic_solver == "implicit_unsplit":
             # MITgcm-faithful UNSPLIT implicit free surface (no barotropic/baroclinic
             # mode split). One AB2 predictor on the FULL 3D velocity + one implicit

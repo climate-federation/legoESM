@@ -1113,13 +1113,16 @@ def nemo_roquet_density_anomaly_ratio(
     loses different fp64 bits.  The Roquet polynomial remains implemented
     once, in :func:`nemo_roquet_eos`.
     """
-    return (
+    # eosbn2.F90:288 has two source-level rounded operations.  Preserve that
+    # boundary in the compiled path instead of permitting contraction across
+    # the multiply and subtract.
+    zn_rho = lax.optimization_barrier(
         nemo_roquet_eos(
             T, S, p, coeffs=coeffs, rho0=rho0,
             geometric_depth_m=geometric_depth_m)
         * (1.0 / rho0)
-        - 1.0
     )
+    return lax.optimization_barrier(zn_rho - 1.0)
 
 
 # ==============================================================================

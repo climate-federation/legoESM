@@ -1,10 +1,10 @@
 # NEMO testcase lane 2 GYRE — Phase 3 round-8 boundary receipt
 
-**Verdict: DEBT — bottom drag, every external-mode frame, stage-2 momentum,
-and the complete explicit stage-3 tracer accumulator are AT-BAR.  The first
-remaining observed transition is the implicit ZDF solve; its internal matrix
-and solution operands were not dumped, so the ordered register is exhausted
-there as UNMEASURED.  Whole-step kt=2 does not certify.**
+**Verdict: DEBT — round-9 production-JIT recertification retracts round 8's
+eager-only stage-2 and explicit-stage-3 AT-BAR claims.  Bottom drag and all
+800 external-mode frames remain AT-BAR under JIT, but stage-2 momentum is
+already DEBT (`4.67e-13` u, `5.19e-13` v), so the first production-regime
+owner remains open.  Whole-step kt=2 does not certify.**
 
 Date: 2026-09-03  
 Implementation commit: `0da38492ea930789d0e7209897fff48bd434c19c`  
@@ -15,7 +15,7 @@ Before measurement I reread the GYRE reconciliation receipt, the requested
 lane-1 stage/SSH/phantom/census/face-thickness receipts, and the branch-
 isomorphism map.  The unmerged round-7 WIP was not trusted: every live result
 below was rederived from NEMO 5.0.2 source and a newly built config-local
-instrument.  The run remained CPU-only, fp64, and used the lane-1 binary
+instrument.  The run remained CPU-only, production-JIT fp64, and used the lane-1 binary
 record format, central time-level registry, immutable pointwise `1e-15` bar,
 one-variable arms, planted controls, and shared log-log growth instrument.
 
@@ -33,8 +33,8 @@ uses the same coefficient in the bottom-cell implicit diagonal at
 
 The canonical DINO bottom-drag implementation is now consumed as one
 inseparable WS-RK3 identity; no GYRE-only operator was added.  At substep 2
-the direct drag operands agree to `3.79e-29` absolute and combined
-`trd_u/trd_v` agree to `2.07e-25`.  Omitting only in-substep drag produces
+the direct drag operands agree to `4.08e-27` absolute and combined
+`trd_u/trd_v` agree to `3.83e-23`.  Omitting only in-substep drag produces
 `6.73e-14` and `6.76e-14`, the exact residual scale, so the boundary label is
 **CONFIRMED_CAUSAL_OWNER_AT_SUBSTEP2**.  All 800 external-mode rows (50
 substeps × 16 boundaries) are AT-BAR.
@@ -54,22 +54,18 @@ source- and runtime-backed.  NEMO's first SSH increment selects the
 Thus the masked numerator is faithful even though `usrdef_sbc.F90:122-140`
 passes an unmasked array expression to `glob_2Dsum`.
 
-### Stage-2 momentum closes to the bar
+### Stage-2 momentum does not close under production JIT
 
-The WRITE-only HPG operands identify NEMO's live stage state.  The production
-path now preserves `eosbn2.F90:265-288`'s `prd=zn*r1_rho0-1` association and
-the `dynhpg.F90:340-390` `hpg_sco` recurrence.  Projected HPG errors are
-`8.08e-28` (u) and `3.23e-27` (v); vorticity is `1.32e-23` and advection is
-`1.28e-26`/`4.59e-26`.  The latter two terms are themselves near-null at this
-state, so their AT-BAR absolute results are consistency evidence, not strong
-exoneration.
-
-The completed stage-2 Kaa state is AT-BAR at `2.71e-19` u and `3.25e-19` v.
-The legacy pre-projection arm moves `8.13e-20`; both sides remain AT-BAR, so it
-has no remaining owner claim.  The shared raw-`e3w_0` resolver preserves the
-GYRE oracle mesh and its validated midpoint fallback keeps all lane-1 WS-RK3
-cards operational; the no-scheme-duplication tripwire covers this single
-implementation.
+The round-8 values in this subsection were produced with `JAX_DISABLE_JIT=1`
+and are withdrawn as certification evidence.  The production-JIT completed
+stage-2 Kaa state is DEBT at `4.674608410863007e-13` u and
+`5.187571089381761e-13` v.  Replacing the stage-1 thermodynamic bundle moves
+only `7.93e-17` (`1.53e-4` of the residual), so that arm is
+**NEAR-NULL_NO_DISCRIMINATING_POWER**, not exoneration.  The ordered JIT source
+terms themselves remain AT-BAR: HPG `1.07e-16`/`1.22e-16`, vorticity
+`2.46e-21`/`2.45e-21`, and advection `1.65e-24`/`1.63e-24` (u/v).  The
+composition/update between those terms and Kaa is therefore the first
+observed JIT boundary; no owner is assigned.
 
 ### Stage-3 transport and WZV
 
@@ -80,48 +76,48 @@ same pair rather than recomputing an algebraically equivalent transport.
 
 | boundary | normalized max | disposition |
 |---|---:|---|
-| `zFu` | `8.736385768894321e-16` | AT-BAR |
-| `zFv` | `1.0966867098887257e-15` | DEBT; first transport row |
-| `zFw` / shared-transport production | `2.3530283179984255e-13` | DEBT |
-| `zFw` / legacy rederived transport | `2.4980249777374853e-13` | DEBT |
+| `zFu` | `2.268967008217296e-9` | DEBT; production-JIT |
+| `zFv` | `2.4393178638950564e-9` | DEBT; production-JIT |
+| `zFw` / shared-transport production | `4.367606308796769e-7` | DEBT; production-JIT |
+| `zFw` / legacy rederived transport | `4.367606359827147e-7` | DEBT; production-JIT |
 
-The private stored-`zvb` association arm worsens `zFv` to
-`1.2388498019113382e-15`; it is **NOT_SOLE_OWNER** and production retains the
-reduction-based value.  Sharing the materialized transport moves
-`1.0741014697174985e-13` and improves `zFw`, but does not clear it, so that
-landing is **CONFIRMED_CAUSAL_CONTRIBUTOR_NOT_SOLE_OWNER**.
+The private stored-barotropic-mean association arm moves only
+`2.1235675846249628e-13` against the JIT `4.367606308796769e-7` residual; it is
+**NOT_SOLE_OWNER**.  Sharing the materialized transport moves only
+`1.6533842413934496e-13`, also **NOT_SOLE_OWNER** under JIT.  The eager owner
+labels in the previous version of this receipt are withdrawn.
 
 A new config-local WRITE-only `MY_SRC/traadv.F90` records `ww` after WZV,
 after the adaptive partition, and final `pFw`.  GYRE resolves
 `ln_zad_Aimp=.false.`, so `wi` is a zero-extent NEMO array and the parser
-records that logical boundary as exact zero.  The WZV velocity differs by
-only `8.44e-21` absolute—AT-BAR—but that is `2.3487e-13` relative to the
-`3.59e-8` oracle magnitude; multiplying by cell area yields the visible
-`pFw=2.3488e-13` normalized residual.
+records that logical boundary as exact zero.  Under production JIT the WZV
+velocity is already DEBT at `1.569607877847196e-14`; `pFw` is
+`4.3676062860970496e-7`.  The eager-only `8.44e-21`/`2.3488e-13` statement is
+withdrawn.
 
 Scaling-first arms assign no false sole owner:
 
-- replacing only `pFu/pFv` moves `2.3045e-13` and leaves `1.0118e-14`;
-- replacing only the `Kbb/Kmm/Kaa` SSH operand triplet moves `1.0127e-14`
-  and leaves `2.3038e-13`;
+- replacing only `pFu/pFv` moves `4.367606243337112e-7` and leaves
+  `9.221013305395866e-13`;
+- replacing only the `Kbb/Kmm/Kaa` SSH operand triplet moves
+  `9.221013305395866e-13` and leaves `4.367606243337112e-7`;
 - the planted SSH-arm control writes exactly `1.0` into a wet `ww` cell and
   fails closed.
 
-The horizontal transport is the dominant upstream contributor; SSH is a
-smaller contributor.  The literal WZV recurrence itself is not assigned an
-owner label beyond those measured operands.
+The horizontal transport is the dominant upstream contributor but does not
+clear the bar; SSH is near-null at this scale.  The literal WZV recurrence is
+not assigned a sole-owner label.
 
 ### First unmeasured boundary: implicit ZDF
 
-The source-ordered explicit stage-3 accumulator now clears completely:
-immediately before `tra_zdf`, T is `6.053921299982747e-16` and S is
-`5.786348021897527e-16`, both AT-BAR.  Immediately after the production
-literal solve, T is `1.3614736849003888e-12` and S is
-`2.198822215627748e-14`; these are exactly the whole-step kt=2 tracer rows.
-The transition therefore occurs inside the `tra_zdf` matrix construction or
-ordered solve.  The analogous `dyn_zdf` internal boundary remains unavailable
-for the stage-3 momentum jump.  No matrix/solution oracle record exists, so
-both are honestly **UNMEASURED** and the ordered register is exhausted here.
+The eager-only claim that the explicit stage-3 accumulator cleared is
+withdrawn.  Its production-JIT rerun is DEBT before ZDF: T
+`7.325244772979124e-14`, S `5.786348021897527e-15`.  Injecting the oracle
+pre-ZDF tracer does not move the compiled final state, so the honest label is
+**PRE_ZDF_ACCUMULATOR_DEBT_NO_ZDF_OWNER**.  The JIT whole-step kt=2 tracer rows
+are T `1.3608682491316726e-12` and S `2.2181101297999213e-14`.
+`tra_zdf`/`dyn_zdf` internals remain **UNMEASURED** and this round does not
+start their matrix walk.
 
 ## Re-pinned kt=1 and kt=2…10 sweep
 
@@ -131,18 +127,19 @@ DEBT remains kt=2:
 
 | field | kt=2 normalized max | status |
 |---|---:|---|
-| T | `1.3614736849003888e-12` | DEBT |
-| S | `2.198822215627748e-14` | DEBT |
-| u | `9.484089938412545e-7` | DEBT |
-| v | `8.987992610401006e-7` | DEBT |
-| SSH | `5.204170427930421e-18` | AT-BAR |
+| T | `1.3608682491316726e-12` | DEBT |
+| S | `2.2181101297999213e-14` | DEBT |
+| u | `9.484089544036715e-7` | DEBT |
+| v | `8.987995890362757e-7` | DEBT |
+| SSH | `4.77048955893622e-16` | AT-BAR |
 
 Against the resumed `57429d7` baseline sweep, 29 of 50 whole-step rows
 improve, five are identical, and 16 worsen.  The kt=2 T residual improves
 about 142× (`1.93e-10` to `1.36e-12`); the momentum debt is essentially
-unchanged.  At kt=10 the normalized maxima are T `5.636638587568597e-3`, S
-`1.5483121735284942e-4`, u `5.624987258866925e-2`, v
-`1.1173366025086486e-2`, and SSH `2.1255475813273736e-4`.
+unchanged.  At kt=10 the production-JIT normalized maxima are T
+`5.6366385875689e-3`, S `1.5483121735304233e-4`, u
+`5.624987258844358e-2`, v `1.1173366024295098e-2`, and SSH
+`2.12554757616743e-4`.
 
 The lane-1 log-log instrument labels the short tail for T and u
 POLYNOMIAL_FIT_PREFERRED (exponents `0.60445` and `0.95631`) and SSH
@@ -160,12 +157,22 @@ unowned/halo bytes uninitialized.  The WZV record, executable, MY_SRC sources,
 all gates, and implementation Git SHA are pinned in
 `nemo_testcases_l2_gyre_phase3_round8_artifacts.sha256`.
 
-Normal JIT and a constrained LLVM retry both exhausted host memory.  The
-authoritative reruns therefore set `JAX_DISABLE_JIT=1` while retaining CPU,
-JAX x64, and the explicit fp64 policy; no arithmetic selector or acceptance
-bar changed.  Verification is 79 focused gate/registry tests plus 25 lane-1
-WS-RK3 tests, all passing; an additional 148-test broad run first exposed the
-shared-`e3w_0` regression, after which the complete failed WS set passed.
+Round 8's host exhaustion was caused by retaining more than a dozen full GYRE
+executables, one per static private hook, in a single process—not by the
+30×20×31 production step or the 50-substep `lax.scan`.  A lone compiled gate
+completed in 34 seconds.  The gate now obtains internal frames through
+`_NEMOWSRK3TestHooks.expose_barotropic_substeps` on `.step()`, materializes
+each diagnostic result to host, and clears that obsolete executable before
+the next static variant.  The complete kt=1…10 run then completed CPU-only
+with `execution_regime=production_jit`; `JAX_DISABLE_JIT` is now a hard gate
+failure.  Artifact `/tmp/gyre_r9_jit_full.json` has SHA-256
+`9567f31c4840440a185b0b0cce56c35a07e9c81ce04236d8097caf197e1eedf1`.
+
+The fp64 regression executes the new EOS, literal SCO HPG, and QCO transport
+geometry paths both eagerly and under `jax.jit`, then requires
+`np.array_equal` for every returned array.  Removing the live optimization
+barriers changes `r3u/r3v` bits and triggers the planted inequality control;
+the focused run passed (`1 passed`).
 
 This is a Codex-internal measurement round.  Independent Claude and GLM
 review of these new findings remains outstanding; no dual-review claim is

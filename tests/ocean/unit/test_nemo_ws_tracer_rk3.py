@@ -7,16 +7,90 @@ import pytest
 from types import SimpleNamespace
 
 import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as model_module
+import legoesm.ocean.vertical as vertical_module
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     _nemo_flux_form_external_velocity_update,
 )
+from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+    nemo_hpg_sco_literal_cgrid,
+)
+from legoesm.ocean.eos import nemo_roquet_density_anomaly_ratio
 from legoesm.core.precision import PrecisionPolicy, set_policy
-from legoesm.grids.latlon import create_latlon_grid
+from legoesm.grids.latlon import create_beta_plane_cgrid_geometry, create_latlon_grid
 from legoesm.ocean.fidelity.nemo_testcase_recipe import build_lock_exchange_zco_card
 from legoesm.ocean.fidelity.nemo_testcase_recipe import build_overflow_zps_card
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.vertical import create_ocean_z_star
+
+
+def test_nemo_ws_eos_hpg_transport_are_bitwise_equal_eager_and_jit(monkeypatch):
+    """The new literal operand chain has one fp64 result in both regimes."""
+    set_policy(PrecisionPolicy.fp64())
+    dtype = jnp.float64
+    grid = create_beta_plane_cgrid_geometry(
+        3, 4, dx_m=8.0, dy_m=8.0, f0=0.0, beta=0.0,
+        cartesian_pseudo_lat=True)
+    rng = np.random.default_rng(4)
+
+    def fixed(shape, lower, upper):
+        return jnp.asarray(rng.uniform(lower, upper, shape), dtype=dtype)
+
+    eta_transport = fixed((3, 4), -0.7, 0.7)
+    e3u_transport = fixed((3, 4, 2), 0.1, 100.0)
+    e3v_transport = fixed((3, 4, 2), 0.1, 100.0)
+    hu_transport = fixed((3, 4), 1.0, 300.0)
+    hv_transport = fixed((3, 4), 1.0, 300.0)
+    area_t = fixed((3, 4), 0.1, 1000.0)
+    area_u = fixed((3, 4), 0.1, 1000.0)
+    area_v = fixed((3, 4), 0.1, 1000.0)
+
+    def operand_chain():
+        # EOS: nonuniform Roquet inputs, with an exact synthetic rho0 so this
+        # test isolates source association rather than the campaign's separate
+        # 1/1026 final-scaling audit.
+        temperature = jnp.asarray([-2.0, -2.0], dtype=dtype)
+        salinity = jnp.asarray([34.0, 35.0], dtype=dtype)
+        depth = jnp.asarray([0.0, 1000.0], dtype=dtype)
+        density = nemo_roquet_density_anomaly_ratio(
+            temperature, salinity, jnp.zeros_like(depth), rho0=1.0,
+            geometric_depth_m=depth)
+
+        # HPG: exercise the complete top-down recurrence on two levels.
+        rhd = jnp.arange(24, dtype=dtype).reshape(3, 4, 2) / 8.0
+        e3w = jnp.full_like(rhd, 2.0)
+        gdept = jnp.broadcast_to(jnp.asarray([1.0, 3.0], dtype=dtype), rhd.shape)
+        hpg_u, hpg_v = nemo_hpg_sco_literal_cgrid(
+            rhd, e3w, gdept, grid, 8.0)
+
+        # Transport geometry: awkward fp64 literals make the association live
+        # while remaining deterministic and small.
+        shape3 = (3, 4, 2)
+        mask3 = jnp.ones(shape3, dtype=dtype)
+        face = vertical_module.nemo_qco_live_face_geometry_from_operands(
+            eta_transport, e3u_transport, e3v_transport,
+            mask3, mask3,
+            hu_transport, hv_transport, area_t, area_u, area_v,
+        )
+        return (density, hpg_u, hpg_v, *face)
+
+    with jax.disable_jit():
+        eager = tuple(np.asarray(value) for value in operand_chain())
+    compiled = tuple(np.asarray(value) for value in jax.jit(operand_chain)())
+    assert all(np.array_equal(a, b) for a, b in zip(eager, compiled, strict=True))
+
+    # Planted mutation: removing the literal-path barriers changes live r3u/r3v
+    # bits.  Consequently this test fails at the equality assertion if those
+    # barriers disappear instead of merely exercising a numerically inert arm.
+    jax.clear_caches()
+    with monkeypatch.context() as patch:
+        patch.setattr(vertical_module.lax, "optimization_barrier", lambda x: x)
+        unbarriered = tuple(
+            np.asarray(value) for value in jax.jit(operand_chain)())
+    assert any(
+        not np.array_equal(a, b)
+        for a, b in zip(compiled, unbarriered, strict=True)
+    )
 
 
 def test_nemo_ws_microselectors_are_not_public_config():

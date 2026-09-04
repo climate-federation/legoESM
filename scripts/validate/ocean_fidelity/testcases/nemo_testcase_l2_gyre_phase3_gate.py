@@ -755,6 +755,8 @@ def run(
     set_policy(PrecisionPolicy.fp64())
     require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    require(not bool(jax.config.jax_disable_jit),
+            "certification requires production JIT; JAX_DISABLE_JIT is forbidden")
     require(1 <= max_step <= 10, "max_step must be in 1..10")
     require(
         stage2_term_limit in ("hpg", "vorticity", "advection"),
@@ -764,6 +766,21 @@ def run(
         stage2_term_only in (None, "none", "hpg", "vorticity", "advection"),
         "stage2_term_only must be none, hpg, vorticity, advection, or None",
     )
+
+    def host_result_and_release_compilation(value):
+        """Materialize one diagnostic executable, then release its JIT cache.
+
+        Each private hook changes static ``self`` and therefore creates a full
+        GYRE executable.  Keeping a dozen such executables resident was the
+        round-8 host OOM; scoring needs host values, not compiled programs.
+        """
+        host = jax.tree_util.tree_map(
+            lambda leaf: np.asarray(leaf)
+            if isinstance(leaf, (jax.Array, np.ndarray)) else leaf,
+            value,
+        )
+        jax.clear_caches()
+        return host
 
     card = build_nemo_testcase_card(CASE)
     # NEMO QCO represents E-P through changing volume, with sfx=0
@@ -1010,9 +1027,12 @@ def run(
 
     # C1: direct stage-entry TKE/EVD coefficients.  NEMO W levels 2..30
     # correspond to legoESM's 29 interior interfaces.
-    lego_avt, lego_avm = model.diagnose_vertical_K(
-        seeded_entry, card.dt_s, surface0
-    )
+    lego_avt, lego_avm = jax.jit(
+        lambda entry, forcing: model.diagnose_vertical_K(
+            entry, card.dt_s, forcing)
+    )(seeded_entry, surface0)
+    lego_avt, lego_avm = host_result_and_release_compilation(
+        (lego_avt, lego_avm))
     interface_mask = (
         np.asarray(card.recipe.z_coord.is_active)[..., 1:]
         & (np.asarray(seeded_entry.land_mask.data) > 0.5)[..., None]
@@ -1039,10 +1059,16 @@ def run(
     no_qsr_model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, cfg_without_qsr
     )
-    full_tendency = model.tendencies(seeded_entry, surface0, dt=card.dt_s)
-    no_qsr_tendency = no_qsr_model.tendencies(
-        seeded_entry, surface0, dt=card.dt_s
-    )
+    full_tendency = jax.jit(
+        lambda entry, forcing: model.tendencies(
+            entry, forcing, dt=card.dt_s)
+    )(seeded_entry, surface0)
+    full_tendency = host_result_and_release_compilation(full_tendency)
+    no_qsr_tendency = jax.jit(
+        lambda entry, forcing: no_qsr_model.tendencies(
+            entry, forcing, dt=card.dt_s)
+    )(seeded_entry, surface0)
+    no_qsr_tendency = host_result_and_release_compilation(no_qsr_tendency)
     lego_qsr_tendency = np.asarray(
         full_tendency.dT_dt.data - no_qsr_tendency.dT_dt.data
     )
@@ -1065,45 +1091,49 @@ def run(
     )
 
     # B1: stop at the external-mode boundary and score every recurrence frame.
-    trace = model._step_impl(
-        seeded_entry,
-        card.dt_s,
-        freshwater=freshwater0,
-        surface_forcing=surface0,
-        _return_barotropic_substeps=True,
+    # The trajectory compile is no longer needed.  Drop it before compiling
+    # the three private trace variants: retaining all four static ``self``
+    # executables was the round-8 host-memory exhaustion root cause.
+    jax.clear_caches()
+    trace_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_barotropic_substeps=True),
     )
+    trace = trace_model.step(
+        seeded_entry, card.dt_s, freshwater=freshwater0,
+        surface_forcing=surface0)
+    trace = host_result_and_release_compilation(trace)
+    del trace_model
     generic_cfg = cfg._replace(
         barotropic=cfg.barotropic._replace(
             barotropic_een_coefficient_evaluation="generic"
         )
     )
     generic_model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, generic_cfg
+        card.recipe.grid, card.recipe.z_coord, generic_cfg,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_barotropic_substeps=True),
     )
-    generic_model.prime_step_caches(seeded_entry)
-    generic_trace = generic_model._step_impl(
-        seeded_entry,
-        card.dt_s,
-        freshwater=freshwater0,
-        surface_forcing=surface0,
-        _return_barotropic_substeps=True,
-    )
+    generic_trace = generic_model.step(
+        seeded_entry, card.dt_s, freshwater=freshwater0,
+        surface_forcing=surface0)
+    generic_trace = host_result_and_release_compilation(generic_trace)
+    del generic_model
     literal_trace = trace
     drag_omit_model = LatLonCGridOceanModel(
         card.recipe.grid,
         card.recipe.z_coord,
         cfg,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_barotropic_substeps=True,
             omit_barotropic_substep_drag=True),
     )
-    drag_omit_model.prime_step_caches(seeded_entry)
-    drag_omit_trace = drag_omit_model._step_impl(
-        seeded_entry,
-        card.dt_s,
-        freshwater=freshwater0,
-        surface_forcing=surface0,
-        _return_barotropic_substeps=True,
-    )
+    drag_omit_trace = drag_omit_model.step(
+        seeded_entry, card.dt_s, freshwater=freshwater0,
+        surface_forcing=surface0)
+    drag_omit_trace = host_result_and_release_compilation(drag_omit_trace)
+    del drag_omit_model
 
     # D1: reconstruct NEMO's nonlinear bottom-drag operand directly from the
     # resolved kt=1 program.  The entering 3-D velocity is at rest, hence
@@ -1531,6 +1561,7 @@ def run(
                     freshwater=freshwater0,
                     surface_forcing=surface0,
                 )
+                stage_state = host_result_and_release_compilation(stage_state)
             candidate_stage_states[stage] = stage_state
             fields = lego_fields(stage_state)
             for velocity in ("u", "v"):
@@ -1566,6 +1597,8 @@ def run(
             freshwater=freshwater0,
             surface_forcing=surface0,
         )
+        tracer_stage1_state = host_result_and_release_compilation(
+            tracer_stage1_state)
         tracer_stage1_fields = lego_fields(tracer_stage1_state)
         for name in ("T", "S", "ssh"):
             candidate = tracer_stage1_fields[name]
@@ -1596,6 +1629,8 @@ def run(
                 freshwater=freshwater0,
                 surface_forcing=surface0,
             )
+            tracer_stage2_state = host_result_and_release_compilation(
+                tracer_stage2_state)
             tracer_stage2_fields = lego_fields(tracer_stage2_state)
             for name in ("T", "S", "ssh"):
                 stage2_tracer_rows.append(score(
@@ -1619,6 +1654,7 @@ def run(
                 freshwater=freshwater0,
                 surface_forcing=surface0,
             )
+            pre_zdf_state = host_result_and_release_compilation(pre_zdf_state)
             pre_fields = lego_fields(pre_zdf_state)
             surf = full_tendency.surface_tracer_forcing
             surf_T = (np.zeros_like(pre_fields["T"]) if surf is None
@@ -1667,6 +1703,7 @@ def run(
                 freshwater=freshwater0,
                 surface_forcing=surface0,
             )
+            injected = host_result_and_release_compilation(injected)
             injected_fields = lego_fields(injected)
             final_rows = []
             movements = []
@@ -1744,6 +1781,8 @@ def run(
             freshwater=freshwater0,
             surface_forcing=surface0,
         )
+        transport_stage1_state = host_result_and_release_compilation(
+            transport_stage1_state)
         transport_stage1_fields = lego_fields(transport_stage1_state)
         for name, candidate_name, mask_name in (
             ("zFu", "u", "u"), ("zFv", "v", "v"), ("zFw", "T", "T")
@@ -1798,6 +1837,7 @@ def run(
             freshwater=freshwater0,
             surface_forcing=surface0,
         )
+        injected_stage2 = host_result_and_release_compilation(injected_stage2)
         injected_fields = lego_fields(injected_stage2)
         faithful_stage2 = {
             row["name"].rsplit(".", 1)[-1]: row
@@ -1895,6 +1935,7 @@ def run(
                 freshwater=freshwater0,
                 surface_forcing=surface0,
             )
+            exposed = host_result_and_release_compilation(exposed)
             exposed_fields = lego_fields(exposed)
             for component in ("u", "v"):
                 name = f"{operator}_{component}"
@@ -1990,6 +2031,7 @@ def run(
                 freshwater=freshwater0,
                 surface_forcing=surface0,
             )
+            legacy_stage2 = host_result_and_release_compilation(legacy_stage2)
             legacy_fields = lego_fields(legacy_stage2)
             legacy_rows = []
             movements = []
@@ -2080,6 +2122,7 @@ def run(
             surface_forcing=surface0,
             _vertical_K_test_override=(oracle_avt, oracle_avm),
         )
+        vertical_control = host_result_and_release_compilation(vertical_control)
         qsr_delta = jnp.asarray(oracle_qsr_tendency - lego_qsr_tendency)
         qsr_control = model.step(
             card.recipe.initial_state,
@@ -2088,6 +2131,7 @@ def run(
             surface_forcing=surface0,
             _shortwave_tendency_test_delta=qsr_delta,
         )
+        qsr_control = host_result_and_release_compilation(qsr_control)
         causal_arms["oracle_stage_entry_avm_avt"] = score_causal_arm(
             "oracle_stage_entry_avm_avt",
             vertical_control,
@@ -2128,6 +2172,7 @@ def run(
                     freshwater=freshwater0,
                     surface_forcing=surface0,
                 )
+            control = host_result_and_release_compilation(control)
             control_fields = lego_fields(control)
             field_rows = {}
             movements = []
@@ -2208,6 +2253,7 @@ def run(
                 freshwater=freshwater0,
                 surface_forcing=surface0,
             )
+            control = host_result_and_release_compilation(control)
             control_fields = lego_fields(control)
             for field in ("T", "S", "u", "v", "ssh"):
                 reference = (
@@ -2292,6 +2338,7 @@ def run(
         "bar": BAR,
         "precision_policy": "fp64",
         "jax_backend": jax.default_backend(),
+        "execution_regime": "production_jit",
         "oracle_root": str(root),
         "max_step": max_step,
         "continue_after_first": True,
