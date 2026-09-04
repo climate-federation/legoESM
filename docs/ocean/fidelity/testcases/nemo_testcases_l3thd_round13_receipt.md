@@ -10,7 +10,7 @@ The accepted retained oracle prefix is
 `/data/abyssal/dbalwada/nemo-testcases-l3/c1d_omip_l3_coupled10m_r13_oracle_i`.
 It completed 8,760 hourly CPU steps (`STOP 0`) with a scalar-math executable
 containing zero dynamic `_ZGV*` symbols.  Geometry, all ten stream schemas,
-and 330,690 pointwise operator/input rows pass.  Of those rows, 330,689
+and 448,950 pointwise operator/input/bridge rows pass.  Of those rows, 448,949
 are bit-identical; the sole non-bit row is one `POST_FZP.t_bo` value with
 normalised error `2.0955593187140483e-16`, below the fixed `1e-15` bar.
 
@@ -64,7 +64,7 @@ but numerically inert in this geometry.
 
 A post-hoc review check independently replays both parts of the NEMO input
 path.  It applies the four generated weights in the exact assignment order of
-`fld_interp` (`fldread.F90:1460-1472`), constructs the monthly record centres
+`fld_interp` (`fldread.F90:1475-1484`; accumulation at `:1482`), constructs the monthly record centres
 as in `fldread.F90:890-917`, and applies the hourly before/after interpolation
 at `fldread.F90:181-186,225-228`.  All 8,760 dumped `CHLA` operands are
 bit-identical to that replay.  This closes the sanctioned-WEIGHTS value check;
@@ -88,6 +88,7 @@ clock is not reused as the coupled ice cadence.
 | two `POST_TRA_QSR` fields | 17,520 | 17,520 | 0 | AT_BAR |
 | independently replayed `fld_read` chlorophyll | 8,760 | 8,760 | 0 | AT_BAR |
 | eight exchange-card mappings | 70,080 | 70,080 | 0 | AT_BAR |
+| 15 producer-to-exchange bridges | 118,260 | 118,260 | 0 | AT_BAR |
 
 The executing `ice_update_flx` branch is ORCA1's explicit
 `ln_cndflx=.false.` (`namelist_ice_cfg:81`), selecting
@@ -106,6 +107,24 @@ the largest pre/post-FWB differences are `3.32124e-4 kg m-2 s-1` (`emp`) and
 `1.58647 W m-2` (`qns`).  A stale-bridge plant is red while the corrected
 post-FWB card mappings are bit-identical.
 
+Rule 1d is enforced rather than merely recorded.  `sbc_ssm` must have two
+frames per `kt`, with `Kbb=Kmm=1` on odd steps and `3` on even steps; ZDF must
+occur at `kt=1,5,9,...,8757`; `tra_sbc` must follow the exact alternating
+three-stage `(Kbb,Kmm,Krhs)` cycle; and `tra_qsr` must use `Kmm=2`, alternate
+`Krhs=3/1`, and cross-link exactly to the stage-3 tracer record.  The compact
+first/last values and formulas are retained in the gate JSON.  A unit test
+proves that positive but wrong SSM time levels fail.
+
+The exchange register is now producer-bound explicitly.  Every-step
+`rCdU_ice/utau/vtau/taum`, four-step-carried
+`tn_ice/alb_ice/snwice_mass/snwice_mass_b/snwice_fmass/sfx/fr_i`, the
+FWB-mutated `qns/emp` cadence, and refresh-time `qml_ice/qcn_ice` all compare
+bit-for-bit from their registered producer frames to the exchange stream.
+Thirty-five fields are VERIFIED.  `sstfrz` is WAIVED: it remains its allocated
+zero in this in-process C1D run; only the inactive external-coupler send path
+sets it (`sbccpl.F90:2724-2726`), while the active ice-base `eos_fzp` row is
+scored separately.  A corrupted nonzero `utau` bridge plant is red.
+
 The 36-field exchange-stream coverage register is one-to-one and all fields
 are `VERIFIED` by the combined bulk, thermodynamic, update, tau, FWB, and card
 rows.  This statement certifies field registration/producer-to-card flow; it
@@ -118,19 +137,19 @@ already-produced `fhld/qlead` ledger.  The overlap remains flagged for merge.
 
 ## Controls and tests
 
-All ten row-level plants exit nonzero and turn their named row red:
+All eleven row-level plants exit nonzero and turn their named row red:
 `ssm_sample`, `fzp_operand`, `update_heat`, `fwb_mass`, `fwb_immediate`,
-`trasbc_heat`, `chl_input`, `qsr_flux`, `fwb_bridge`, and
+`trasbc_heat`, `chl_input`, `qsr_flux`, `producer_bridge`, `fwb_bridge`, and
 `freshwater_sign`.
 
-Focused tests: **11 passed**.  The hard-coded-constant ratchet invoked on every
+Focused tests: **12 passed**.  The hard-coded-constant ratchet invoked on every
 touched Python file reports **7 passed, 1 skipped** (the skipped item is the
 ratchet's constants-module exemption).  A repository-wide invocation reports
 3,395 passed, 2 skipped, and five pre-existing failures in untouched
 FV3/DINO-radius sites; none is attributed to this lane.
 
-Key retained hashes: `exchange_gate_chl_bridge_corrected.json`
-`8e49d7009e18be894ad290ce60d697b0e22b9391aaaf38ff9b1ca699f3da2f52`,
+Key retained hashes: `exchange_gate_rule1d_bridges_v2.json`
+`41d9a3b575f61d53380d8974d1a78edcc68ec2e4e31e9ba3fc8ef25f8951c142`,
 `header_validity_bridge_corrected.json`
 `e51a8a5597ed4f49cf798d127758fe2fa6c78ad32b4b1d7cc2de63d1efe6d6cc`,
 executable `decf2144977b20bd0f8aeddc7adeb588d9a6fefbb909033049cfab48a2e77cfb`,
@@ -138,6 +157,9 @@ ocean log `53bc133cb27f3391cf8813b5b39ec5534ab258b3e02a7d0f878e480d8fb27018`.
 Restart hashes are `45aecc2778fdf786d082363fcc869d63a99f810a801939c7c47903ce72b7b16c`
 (ocean) and `c756f3e2117ad84ba73fa17a8b00470aba1b6824f504f86f8159a23777288b79`
 (ice).
+The retained eleven-plant manifest digest (SHA-256 over the sorted per-file
+SHA-256 lines under `plants_rule1d_bridges/`) is
+`94b458417c9d0e90a5920a525cc892e06f38b792d9fc64885a5db0177e2b066c`.
 
 ## Retained attempts / flagged for future deletion
 
@@ -153,8 +175,8 @@ The shipped NEMO tree and all immutable ORCA1/C1D inputs were not modified.
 No external review artifact is claimed.  Two codex-internal adversarial
 passes returned HOLD on the first prefix.  The wrong pre-FWB bridge, missing
 runtime-index validation, unit chlorophyll placeholder, optional stream
-schemas, and ambiguous 3,600/14,400 s clocks are corrected and remeasured
-above.  The reviewers' production-driver/top-drag construction finding is
+schemas, ambiguous 3,600/14,400 s clocks, and metadata-only exchange promotions
+are corrected and remeasured above.  The reviewers' production-driver/top-drag construction finding is
 confirmed and remains explicitly UNVERIFIED; it is the same scope boundary as
 the six missing oracle/consumer frames, not silently treated as complete.
 
