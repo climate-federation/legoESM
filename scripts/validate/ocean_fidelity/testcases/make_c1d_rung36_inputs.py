@@ -8,6 +8,7 @@ slot makes that inactive storage deterministic.  Horizontal interpolation of
 the real REG05 chlorophyll is deliberately *not* implemented here: the rung
 uses NEMO's shipped ``tools/WEIGHTS`` workflow for that operation.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -15,7 +16,6 @@ from pathlib import Path
 
 import numpy as np
 from netCDF4 import Dataset
-
 
 SOURCE_TO_TARGET = {
     "sst": "votemper",
