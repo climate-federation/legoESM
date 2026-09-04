@@ -55,13 +55,13 @@ run_arm () {  # name, extra flags
   echo "--- $name per-step max|u| (step,max_abs_u,lat,lon,lev):"
   cut -d, -f1,5,7,8,9 $OUT/diag_timeseries.csv 2>/dev/null | sed -n '2,32p' | tr '\n' ' ' ; echo
 }
-# LADDER 4. The step-6 snapshot shows the mode: eta +0.18/-0.19 m between the
-# two cells of the max edge (a 2dx checkerboard), u nearly barotropic through
-# the column, T/S smooth across the edge => the FREE-SURFACE solve is the
-# unstable operator (implicit_cn, theta 0.55, PCG). ONE VARIABLE: NEMO's
-# split-explicit forward-backward barotropic instead. Stable => the implicit
-# Helmholtz solve is defective at level 8 (checkerboard null space / stencil
-# inconsistency); blows => the mode is in the baroclinic/PGF coupling.
-run_arm splitexp   --dt 75 --partial-cell --mle --mle-ce 0.06 $TKE $ISF $IWM --bbl-adv $WOA $NEMOIC $ICE --barotropic-solver explicit_substep
-run_arm splitexp_f --dt 75 --partial-cell --mle --mle-ce 0.06 $TKE $ISF $IWM --bbl-adv $WOA $NEMOIC $ICE --barotropic-solver explicit_substep --barotropic-time-filter cosine
+# LADDER 5. Ladder 4: split-explicit barotropic grows IDENTICALLY => barotropic
+# solver exonerated. Re-reading the dt arms: halving dt HALVES the per-step
+# growth (5.1 -> 2.5), i.e. an explicit operator with |lambda| dt ~ 5,
+# |lambda| ~ 0.07/s = K/dz^2 -> a vertical explicit term with K ~ 0.07 m2/s
+# at 1 m (surface) or ~60 m2/s at 30 m (depth), OR the rotated (Redi/GM)
+# diffusion whose vertical part scales with slope^2 (slopes double at L8).
+# ONE VARIABLE: GM/Redi off. Stable => rotated diffusion; then check the
+# slope taper (dm95, slope_max) on the MPAS lane.
+run_arm no_gmredi  --dt 75 --partial-cell --mle --mle-ce 0.06 $TKE $ISF $IWM --bbl-adv $WOA $NEMOIC $ICE --no-gm-redi
 echo DONE
