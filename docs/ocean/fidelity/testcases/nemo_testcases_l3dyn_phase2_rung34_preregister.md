@@ -381,3 +381,23 @@ defect; no amplification label is assigned in advance.
 | Enumerate Rule-8/12 rows, bind a row-level plant, and use `0 / n` for exact rows | ASKED | Queued review items |
 | Continue steps 2--720 before step 1 is byte-exact | UNASKED | Explicit dispatch stop condition |
 | Change the helper implementation, A-grid defaults, schemes, bar, precision, backend, shipped NEMO, or commit artifacts | UNASKED | Outside the authorized lane |
+
+### Round-10 secondary discriminator: H79 exponential (registered before production edit)
+
+The WRITE-only step-8 ICE_RHEO probe made `zds` and `zdelta` byte-exact but
+first separated at `zp_delt` (`icedyn_rhg_evp.F90:423-424`).  A post-hoc
+one-variable host replay of H79 strength (`icedyn_rdgrft.F90:1048-1055`) found
+that vector `np.exp` left 94,986 physical `zp_delt` cells nonzero with maximum
+`0.00390625`, while scalar glibc `libm.exp` made every `zp_delt` cell
+byte-exact.  This is a measured discriminator, not a preregistered result.
+
+Before the production edit, the next prediction is registered: import the
+existing shared scalar-libm precision policy and transcendental wrapper from
+GYRE commit `61180a6776c4`, select it only in the two NEMO ice-testcase cards,
+and route the one shared H79 `ice_strength` exponential through that policy.
+With source-rounded subtraction, exponent product, prefactor products and the
+existing `zp_delt` closure, the ICE_RHEO step-8 first two subcycles and all 100
+subcycles will be byte-exact.  CONFIRM is zero ULP for `zp_delt`, `zbeta`, all
+three stresses and both velocities; REFUTE is any nonzero row, followed by the
+same first-operand descent.  Native transcendental policy remains the default
+for every existing A-grid/user card, so this is not a global default change.
