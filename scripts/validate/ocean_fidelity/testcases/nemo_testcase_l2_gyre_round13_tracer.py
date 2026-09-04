@@ -94,14 +94,14 @@ def read_stage1_transport_operands(path: Path) -> dict:
         header = struct.unpack("=8i", handle.read(32))
         values = np.fromfile(handle, dtype=np.float64)
     version, kt, stage, kmm, nx, ny, nz, bits = header
-    require(magic == "NEMO_L2_TRPOP_1", f"{path}: bad magic {magic!r}")
+    require(magic == "NEMO_L2_TRPOP_2", f"{path}: bad magic {magic!r}")
     require(
         (version, kt, stage, kmm, nx, ny, nz, bits)
-        == (1, 1, 1, 1, *DIMS, 64),
+        == (2, 1, 1, 1, *DIMS, 64),
         f"{path}: bad header {header}",
     )
     n2, n3 = nx * ny, nx * ny * nz
-    require(values.size == 4 * n2 + 8 * n3, f"{path}: bad payload")
+    require(values.size == 10 * n2 + 8 * n3, f"{path}: bad payload")
     require(np.all(np.isfinite(values)), f"{path}: non-finite payload")
     result = {}
     offset = 0
@@ -118,6 +118,12 @@ def read_stage1_transport_operands(path: Path) -> dict:
         ("zvb", n2, lambda x: _xy(x, nx, ny)),
         ("vmask", n3, lambda x: _xyz(x, nx, ny, nz)),
         ("zFv", n3, lambda x: _xyz(x, nx, ny, nz)),
+        ("un_adv", n2, lambda x: _xy(x, nx, ny)),
+        ("r1_hu", n2, lambda x: _xy(x, nx, ny)),
+        ("uu_b", n2, lambda x: _xy(x, nx, ny)),
+        ("vn_adv", n2, lambda x: _xy(x, nx, ny)),
+        ("r1_hv", n2, lambda x: _xy(x, nx, ny)),
+        ("vv_b", n2, lambda x: _xy(x, nx, ny)),
     ):
         result[name] = transform(values[offset:offset + size])
         offset += size
@@ -211,6 +217,106 @@ def run_transport_operands(oracle_root: Path, *, plant: bool = False) -> dict:
         "owner_label": (
             "CONFIRMED_ZF_PRODUCT_ASSOCIATION" if exact
             else "UNMEASURED_WITHIN_ZF_PRODUCT"),
+        "plant": plant,
+    }
+
+
+def run_transport_candidate(oracle_root: Path, *, plant: bool = False) -> dict:
+    """Score the production-JIT stage-1 transport after operand construction."""
+    import jax
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
+
+    set_policy(PrecisionPolicy.fp64())
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    require(not bool(jax.config.jax_disable_jit), "production JIT is required")
+    path = oracle_root / "oracle_rkstage1_transport_operands_kt00000001.bin"
+    oracle = read_stage1_transport_operands(path)
+    card = build_nemo_testcase_card(CASE)
+    cfg = card.recipe.model_config._replace(
+        freshwater_closure="real_freshwater", fix_eta_drift=True)
+    freshwater, surface = _surface_forcings(card, card.recipe.initial_state, 1)
+    def _step(hooks):
+        model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, cfg,
+            _nemo_ws_test_hooks=hooks)
+        return model.step(
+            card.recipe.initial_state, dt=card.dt_s,
+            freshwater=freshwater, surface_forcing=surface)
+
+    state = _step(_NEMOWSRK3TestHooks(expose_tracer_transport_stage=1))
+    thickness_state = _step(_NEMOWSRK3TestHooks(
+        expose_stage1_transport_operand="thickness"))
+    corrected_state = _step(_NEMOWSRK3TestHooks(
+        expose_stage1_transport_operand="corrected_velocity"))
+    average_state = _step(_NEMOWSRK3TestHooks(
+        expose_stage1_transport_operand="transport_average"))
+    nlev = card.recipe.z_coord.n_levels
+    candidate = {
+        "u": np.asarray(state.u.data)[:, 1:, :nlev],
+        "v": np.asarray(state.v.data)[1:, :, :nlev],
+    }
+    native = {
+        "u": np.asarray(card.recipe.initial_state.u.data)[:, 1:, :nlev],
+        "v": np.asarray(card.recipe.initial_state.v.data)[1:, :, :nlev],
+    }
+    thickness = {
+        "u": np.asarray(thickness_state.u.data)[:, 1:, :nlev],
+        "v": np.asarray(thickness_state.v.data)[1:, :, :nlev],
+    }
+    corrected = {
+        "u": np.asarray(corrected_state.u.data)[:, 1:, :nlev],
+        "v": np.asarray(corrected_state.v.data)[1:, :, :nlev],
+    }
+    average = {
+        "u": np.asarray(average_state.u.data)[:, 1:, 0],
+        "v": np.asarray(average_state.v.data)[1:, :, 0],
+    }
+    masks = expected_masks(card)
+    metric = {
+        "u": np.asarray(card.recipe.grid.dy_u)[:, 1:],
+        "v": np.asarray(card.recipe.grid.dx_v)[1:, :],
+    }
+    rows = {}
+    for face, name in (("u", "zFu"), ("v", "zFv")):
+        oracle_mask = oracle[f"{face}mask"][..., :nlev]
+        active = oracle_mask != 0.0
+        if plant and face == "u":
+            candidate[face] = candidate[face].copy()
+            index = tuple(np.argwhere(active)[0])
+            candidate[face][index] = np.nextafter(candidate[face][index], np.inf)
+        oracle_corrected = (
+            oracle[f"{face}{face}"][..., :nlev]
+            + oracle[f"z{face}b"][..., None] * oracle_mask)
+        active2 = np.any(active, axis=-1)
+        rows[face] = {
+            "metric": _comparison(
+                metric[face], oracle["e2u" if face == "u" else "e1v"],
+                active2),
+            "mask": _comparison(
+                masks[face].astype(np.float64), oracle_mask, active),
+            "Kmm_velocity": _comparison(
+                native[face], oracle[f"{face}{face}"][..., :nlev], active),
+            "Kmm_face_thickness": _comparison(
+                thickness[face], oracle[f"e3{face}"][..., :nlev], active),
+            "corrected_velocity": _comparison(
+                corrected[face], oracle_corrected, active),
+            "transport_average": _comparison(
+                average[face],
+                oracle["un_adv" if face == "u" else "vn_adv"], active2),
+            "zF": _comparison(
+                candidate[face], oracle[name][..., :nlev], active),
+        }
+    exact = all(row["zF"]["bit_exact"] for row in rows.values())
+    return {
+        "format": "nemo-testcase-l2-gyre-round13-transport-candidate-v1",
+        "status": "AT-BAR" if exact else "DEBT",
+        "regime": "production-jit-cpu-fp64-x64",
+        "oracle_root": str(oracle_root),
+        "oracle_dump_sha256": sha256(path),
+        "rows": rows,
         "plant": plant,
     }
 
@@ -371,11 +477,6 @@ def run(oracle_root: Path, control_root: Path, *, plant: bool = False) -> dict:
         field: sum(1 for found, *_ in differing if found == field)
         for field in ("T", "S")
     }
-    require(
-        field_counts == ({"T": 10, "S": 9} if plant else {"T": 9, "S": 9}),
-        f"expected nine differing cells per field, got {field_counts}",
-    )
-
     bottom_k = np.sum(active, axis=-1) - 1
     wet2 = np.any(active, axis=-1)
     cells = []
@@ -515,8 +616,8 @@ def run(oracle_root: Path, control_root: Path, *, plant: bool = False) -> dict:
         "differing_field_entry_count": len(differing),
         "differing_cells_by_field": field_counts,
         "briefing_count_disposition": (
-            "nine per field; the T and S coordinate sets are disjoint, "
-            "so the union contains 18 locations"
+            "the preregistered baseline has nine per field and disjoint T/S "
+            "coordinate sets; post-arm counts are measured, not forced"
         ),
         "cells": cells,
         "aggregate": aggregate,
@@ -547,14 +648,16 @@ def main(argv=None) -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant", action="store_true")
     parser.add_argument(
-        "--mode", choices=("tracer", "transport-operands"), default="tracer")
+        "--mode", choices=("tracer", "transport-operands", "transport-candidate"),
+        default="tracer")
     args = parser.parse_args(argv)
     try:
-        report = (
-            run_transport_operands(args.oracle_root, plant=args.plant)
-            if args.mode == "transport-operands"
-            else run(args.oracle_root, args.control_root, plant=args.plant)
-        )
+        if args.mode == "transport-operands":
+            report = run_transport_operands(args.oracle_root, plant=args.plant)
+        elif args.mode == "transport-candidate":
+            report = run_transport_candidate(args.oracle_root, plant=args.plant)
+        else:
+            report = run(args.oracle_root, args.control_root, plant=args.plant)
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 2

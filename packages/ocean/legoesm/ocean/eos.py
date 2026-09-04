@@ -1021,6 +1021,11 @@ def _nemo_source_round(value: jnp.ndarray) -> jnp.ndarray:
         jnp.copysign(jnp.abs(value), value))
 
 
+def nemo_source_round(value: jnp.ndarray) -> jnp.ndarray:
+    """Public shared spelling of one materialized NEMO source operation."""
+    return _nemo_source_round(value)
+
+
 def _nemo_roquet_eos_impl(
     T: jnp.ndarray,
     S: jnp.ndarray,

@@ -101,6 +101,7 @@ from legoesm.ocean.freshwater import (
     net_freshwater_flux,
     virtual_salt_flux,
 )
+from legoesm.ocean.eos import nemo_source_round
 from legoesm.ocean.physics.combined import make_ocean_physics
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     compute_eke_step_kappa,
@@ -1158,6 +1159,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # A nonzero stage stores NEMO's metric zFu/zFv/zFw triplet in u/v/T after
     # the ordinary step; it cannot affect a later stage or public execution.
     expose_tracer_transport_stage: int = 0
+    # WRITE-only stage-1 horizontal-transport operand exposure. ``thickness``
+    # returns e3u/e3v(Kmm); ``corrected_velocity`` returns uu+zub*umask and
+    # vv+zvb*vmask; ``transport_average`` broadcasts un_adv/vn_adv.  The
+    # arrays replace returned u/v only after the full step.
+    expose_stage1_transport_operand: str = ""
     # One-variable stage-1 tracer-transport operand arm.  The gate supplies
     # NEMO's native metric zFu/zFv/zFw triplet; momentum and later stages keep
     # the production transport.  Private diagnostic only.
@@ -1270,6 +1276,13 @@ def _nemo_ws_qco_stage_faces(eta, h_ref, u_mask_3d, v_mask_3d, grid):
     )
 
 
+def _nemo_metric_stage_transport(metric, face_thickness, corrected_velocity):
+    """NEMO ``metric*e3*(velocity+barotropic correction)`` association."""
+    return nemo_source_round(
+        nemo_source_round(metric[..., None] * face_thickness)
+        * corrected_velocity)
+
+
 def _nemo_ws_stage_transport(
     stage_velocity, h_stage, stage_index, *, eta_stage, h_ref, Hu_avg, Hv_avg,
     u_mask_3d, v_mask_3d, grid, z_coord, config, dt,
@@ -1291,7 +1304,10 @@ def _nemo_ws_stage_transport(
     share and the implicit ``wi`` (``wAimp``, :298-302); stages 1-2 carry
     ``wi = 0`` (:287).  ONE triplet per stage feeds both ``dyn_adv``
     (:315,331-334) and ``tra_adv`` (:456-519).  Returns
-    ``(mf_u, mf_v, w_explicit, h_stage, hu_stage, hv_stage, wi_stage)``.
+    ``(mf_u, mf_v, w_explicit, h_stage, hu_stage, hv_stage, wi_stage, zFu,
+    zFv, corrected_u, corrected_v)``.  The native pair retains NEMO's product association;
+    dividing it back to a metric-free flux and multiplying again is not
+    bitwise equivalent on the rotated GYRE grid.
     """
     u_stage, v_stage = stage_velocity
     if legacy_min_face_thickness:
@@ -1329,6 +1345,10 @@ def _nemo_ws_stage_transport(
             v_stage + zvb[..., jnp.newaxis] * v_mask_3d)
     mf_u = hu_stage * u_stage_corr * u_mask_3d
     mf_v = hv_stage * v_stage_corr * v_mask_3d
+    zfu_stage = _nemo_metric_stage_transport(
+        jnp.asarray(grid.dy_u), hu_stage, u_stage_corr)
+    zfv_stage = _nemo_metric_stage_transport(
+        jnp.asarray(grid.dx_v), hv_stage, v_stage_corr)
     stage_div = divergence_cgrid(mf_u, mf_v, grid)
     if literal_wzv:
         # sshwzv.F90:331-336 (qco arm), entered from stprk3_stg.F90:297 as
@@ -1351,8 +1371,8 @@ def _nemo_ws_stage_transport(
                 barotropic_velocity if legacy_wzv_rederived_transport else None),
             volume_transport_override=(
                 None if legacy_wzv_rederived_transport else (
-                    mf_u * jnp.asarray(grid.dy_u)[..., None],
-                    mf_v * jnp.asarray(grid.dx_v)[..., None],
+                    zfu_stage,
+                    zfv_stage,
                 )))
     else:
         w_stage = diagnose_w_from_flux_div(
@@ -1367,7 +1387,9 @@ def _nemo_ws_stage_transport(
             mf_u, mf_v, w_stage, h_stage, e3w,
             grid.area_T, grid.dy_u, grid.dx_v, dt)
         w_stage, wi_stage = split.w_explicit, split.w_implicit
-    return (mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage, wi_stage)
+    return (
+        mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage, wi_stage,
+        zfu_stage, zfv_stage, u_stage_corr, v_stage_corr)
 
 
 class _NEMOWSBarotropicTrace(NamedTuple):
@@ -1459,11 +1481,20 @@ def _nemo_ws_rk3_tracer_pair_step(
         if len(stage_geom) == 6:
             mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage = stage_geom
             wi_stage = None
+            zfu_stage = zfv_stage = None
         elif len(stage_geom) == 7:
             (mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage,
              wi_stage) = stage_geom
+            zfu_stage = zfv_stage = None
+        elif len(stage_geom) == 9:
+            (mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage,
+             wi_stage, zfu_stage, zfv_stage) = stage_geom
+        elif len(stage_geom) == 11:
+            (mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage,
+             wi_stage, zfu_stage, zfv_stage, _, _) = stage_geom
         else:
-            raise ValueError("each stage transport geometry needs 6 or 7 arrays")
+            raise ValueError(
+                "each stage transport geometry needs 6, 7, 9, or 11 arrays")
         # NEMO key_RK3 runs the FCT limiter at stage 3 ONLY: traadv.F90:281-282
         # forces ``ll_dofct = .FALSE.`` for ``kstg /= 3`` and :361-364 then
         # dispatches ``np_FCT`` to ``tra_adv_cen(nn_fct_h, nn_fct_v)``, the
@@ -1483,8 +1514,12 @@ def _nemo_ws_rk3_tracer_pair_step(
             # content-divergence helper algebraically cancels that last
             # divide/multiply and moves GYRE's tracer Kaa by O(1e-11), so keep
             # this source association inside the single NEMO WS identity.
-            p_u = mf_u * jnp.asarray(grid.dy_u)[..., None]
-            p_v = mf_v * jnp.asarray(grid.dx_v)[..., None]
+            p_u = (
+                zfu_stage if zfu_stage is not None
+                else mf_u * jnp.asarray(grid.dy_u)[..., None])
+            p_v = (
+                zfv_stage if zfv_stage is not None
+                else mf_v * jnp.asarray(grid.dx_v)[..., None])
             p_w = w_stage * jnp.asarray(grid.area_T)[..., None]
             inv_area = 1.0 / jnp.asarray(grid.area_T)[..., None]
             inv_h = 1.0 / jnp.maximum(h_stage, 1.0e-10)
@@ -4837,6 +4872,7 @@ class LatLonCGridOceanModel:
         _nemo_ws_exposed_tracer_stage = None
         _nemo_ws_exposed_tracer_boundary = None
         _nemo_ws_exposed_tracer_transport = None
+        _nemo_ws_exposed_stage1_transport_operand = None
         _nemo_ws_exposed_momentum_operator = None
         _nemo_ws_exposed_stage2_rhs = None
         _nemo_ws_stage_tracers = None
@@ -5770,6 +5806,21 @@ class LatLonCGridOceanModel:
                     jnp.zeros_like(target_u), jnp.zeros_like(target_v))
                 if _source_transport_mean_arm else None,
                 **_stage_transport_kw)
+            _operand_name = (
+                self._nemo_ws_test_hooks.expose_stage1_transport_operand)
+            if _operand_name == "thickness":
+                _nemo_ws_exposed_stage1_transport_operand = (_g0[4], _g0[5])
+            elif _operand_name == "corrected_velocity":
+                _nemo_ws_exposed_stage1_transport_operand = (_g0[9], _g0[10])
+            elif _operand_name == "transport_average":
+                _nemo_ws_exposed_stage1_transport_operand = (
+                    jnp.broadcast_to(Hu_avg[..., None], _g0[9].shape),
+                    jnp.broadcast_to(Hv_avg[..., None], _g0[10].shape))
+            elif _operand_name:
+                raise ValueError(
+                    "expose_stage1_transport_operand must be empty, "
+                    "'thickness', 'corrected_velocity', or "
+                    "'transport_average'")
             _vert0 = _stage_vertical_up3(u0, v0, _g0)
             # NEMO hands stage 1 the SAME Kmm transport it hands stages 2-3:
             # ``zFu = e2u*e3u(Kmm)*(uu(Kmm) + zub)`` with ``zub = un_adv/
@@ -5834,6 +5885,7 @@ class LatLonCGridOceanModel:
                     _zfv_faces / jnp.asarray(_grid.dx_v)[..., None],
                     _zfw_o / jnp.asarray(_grid.area_T)[..., None],
                     _g0[3], _g0[4], _g0[5], _g0[6],
+                    _zfu_faces, _zfv_faces, _g0[9], _g0[10],
                 )
             _stage1_tracer_result = _stage_tracers(
                 1, (_g0_tracer, _g0, _g0))
@@ -5910,6 +5962,7 @@ class LatLonCGridOceanModel:
                     _zfv_faces / jnp.asarray(_grid.dx_v)[..., None],
                     _zfw_o / jnp.asarray(_grid.area_T)[..., None],
                     _g2[3], _g2[4], _g2[5], jnp.zeros_like(_g2[6]),
+                    _zfu_faces, _zfv_faces, _g2[9], _g2[10],
                 )
             p2u_corr, p2v_corr = _mom_pert_ws(
                 u2_corr, v2_corr, False, _transport_target,
@@ -5930,8 +5983,8 @@ class LatLonCGridOceanModel:
                         "expose_tracer_transport_stage must be 0, 1, 2, or 3")
                 _exposed_geom = _nemo_ws_live_stage_geometry[_stage_index]
                 _nemo_ws_exposed_tracer_transport = (
-                    _exposed_geom[0] * jnp.asarray(_grid.dy_u)[..., None],
-                    _exposed_geom[1] * jnp.asarray(_grid.dx_v)[..., None],
+                    _exposed_geom[7],
+                    _exposed_geom[8],
                     _exposed_geom[2] * jnp.asarray(_grid.area_T)[..., None],
                 )
             u3_corr = u3_corr.at[:, -1].set(u3_corr[:, 0])
@@ -6959,9 +7012,11 @@ class LatLonCGridOceanModel:
                     stage_transport_geometry=(
                         tuple(
                             (mf_u, mf_v, jnp.zeros_like(w_stage), h_stage,
-                             hu_stage, hv_stage, jnp.zeros_like(wi_stage))
+                             hu_stage, hv_stage, jnp.zeros_like(wi_stage),
+                             zfu_stage, zfv_stage, corrected_u, corrected_v)
                             for (mf_u, mf_v, w_stage, h_stage, hu_stage,
-                                 hv_stage, wi_stage)
+                                 hv_stage, wi_stage, zfu_stage, zfv_stage,
+                                 corrected_u, corrected_v)
                             in _nemo_ws_stage_transport_geometry
                         )
                         if self._nemo_ws_test_hooks.disable_tracer_vertical_transport
@@ -7546,6 +7601,12 @@ class LatLonCGridOceanModel:
                 u=state_new.u.replace(data=_zfu),
                 v=state_new.v.replace(data=_zfv),
                 T=state_new.T.replace(data=_zfw[..., :state_new.T.data.shape[-1]]),
+            )
+        if _nemo_ws_exposed_stage1_transport_operand is not None:
+            _operand_u, _operand_v = _nemo_ws_exposed_stage1_transport_operand
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=_operand_u),
+                v=state_new.v.replace(data=_operand_v),
             )
         if _nemo_ws_exposed_momentum_operator is not None:
             _op_u, _op_v = _nemo_ws_exposed_momentum_operator

@@ -26,6 +26,28 @@ from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.vertical import create_ocean_z_star
 
 
+def test_nemo_ws_stage_transport_preserves_fortran_product_association():
+    """The metric-bearing zF is materialized in NEMO source order."""
+    set_policy(PrecisionPolicy.fp64())
+    rng = np.random.default_rng(1301)
+    metric = jnp.asarray(rng.uniform(1000.0, 9000.0, (2, 3)))
+    thickness = jnp.asarray(rng.uniform(1.0, 250.0, (2, 3, 7)))
+    velocity = jnp.asarray(rng.uniform(-0.25, 0.25, (2, 3, 7)))
+    expected = np.asarray(
+        (np.asarray(metric)[..., None] * np.asarray(thickness))
+        * np.asarray(velocity))
+    actual = np.asarray(jax.jit(model_module._nemo_metric_stage_transport)(
+        metric, thickness, velocity))
+    assert np.array_equal(actual, expected)
+
+    # Non-vacuity: the pre-round-13 regrouping first formed e3*velocity and
+    # only then multiplied by the horizontal metric; these inputs move bits.
+    reassociated = (
+        np.asarray(metric)[..., None]
+        * (np.asarray(thickness) * np.asarray(velocity)))
+    assert not np.array_equal(reassociated, expected)
+
+
 def test_nemo_ws_eos_hpg_transport_are_bitwise_equal_eager_and_jit(monkeypatch):
     """The new literal operand chain has one fp64 result in both regimes."""
     set_policy(PrecisionPolicy.fp64())
