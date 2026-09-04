@@ -3,6 +3,7 @@
 #SBATCH --account=glab
 #SBATCH --partition=glab1
 #SBATCH --gres=gpu:1
+#SBATCH --constraint="a40|rtx8000"
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=128G
 #SBATCH --time=2:00:00
