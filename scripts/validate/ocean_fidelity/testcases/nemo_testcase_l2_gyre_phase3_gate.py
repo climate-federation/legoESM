@@ -816,7 +816,7 @@ def run(
         ),
         "namtra_eiv": cfg.gm_redi is not None and cfg.gm_redi.kappa_GM == 0.0,
         "namtra_qsr": (
-            cfg.physics.shortwave_penetration.scheme == "jerlov_2band"
+            cfg.physics.shortwave_penetration.scheme == "nemo_qsr_2bd"
             and cfg.physics.shortwave_penetration.water_type == "I"
         ),
         "namtra_dmp": getattr(cfg, "tracer_damping", None) is None,
