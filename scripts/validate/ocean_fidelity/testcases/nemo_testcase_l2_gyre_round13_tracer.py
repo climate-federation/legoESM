@@ -206,7 +206,12 @@ def run(oracle_root: Path, control_root: Path, *, plant: bool = False) -> dict:
         ci = candidate["after_update"][field_index[field]]
         for j, i, k in np.argwhere((oi != ci) & active):
             differing.append((field, int(j), int(i), int(k)))
-    require(len(differing) == (10 if plant else 9), f"expected {'10 planted' if plant else 'nine'} differing cells, got {len(differing)}")
+    distinct_locations = sorted({(j, i, k) for _, j, i, k in differing})
+    require(
+        len(distinct_locations) == (10 if plant else 9),
+        f"expected {'10 planted' if plant else 'nine'} differing locations, "
+        f"got {len(distinct_locations)} ({len(differing)} field entries)",
+    )
 
     bottom_k = np.sum(active, axis=-1) - 1
     wet2 = np.any(active, axis=-1)
@@ -217,31 +222,38 @@ def run(oracle_root: Path, control_root: Path, *, plant: bool = False) -> dict:
         ("after_sbc", "after_sbc"),
         ("after_update", "Kaa"),
     )
-    for field, j, i, k in sorted(differing, key=lambda x: (x[1], x[2], x[3], x[0])):
+    for j, i, k in distinct_locations:
         idx = (j, i, k)
-        fi = field_index[field]
-        values = {}
-        first = None
-        for boundary, oracle_prefix in boundaries:
-            if boundary == "zero_rhs":
-                ov = oracle[f"zero_{field}"][..., :nlev]
-                cv = np.zeros_like(ov)
-            elif boundary == "after_update":
-                ov = oracle[f"Kaa_{field}"][..., :nlev]
-                cv = candidate[boundary][fi]
-            else:
-                ov = oracle[f"{oracle_prefix}_{field}"][..., :nlev]
-                cv = candidate[boundary][fi]
-            values[boundary] = _cell_value(ov, cv, idx)
-            if first is None and not values[boundary]["bit_exact"]:
-                first = boundary
+        field_values = {}
+        for field in ("T", "S"):
+            fi = field_index[field]
+            if (field, j, i, k) not in differing:
+                continue
+            values = {}
+            first = None
+            for boundary, oracle_prefix in boundaries:
+                if boundary == "zero_rhs":
+                    ov = oracle[f"zero_{field}"][..., :nlev]
+                    cv = np.zeros_like(ov)
+                elif boundary == "after_update":
+                    ov = oracle[f"Kaa_{field}"][..., :nlev]
+                    cv = candidate[boundary][fi]
+                else:
+                    ov = oracle[f"{oracle_prefix}_{field}"][..., :nlev]
+                    cv = candidate[boundary][fi]
+                values[boundary] = _cell_value(ov, cv, idx)
+                if first is None and not values[boundary]["bit_exact"]:
+                    first = boundary
+            field_values[field] = {
+                "first_differing_boundary": first,
+                "values": values,
+            }
         coast = any(
             not wet2[jj, ii]
             for jj, ii in ((j - 1, i), (j + 1, i), (j, i - 1), (j, i + 1))
             if 0 <= jj < wet2.shape[0] and 0 <= ii < wet2.shape[1]
         )
         cells.append({
-            "field": field,
             "nemo_ijk_1based": [i + 3, j + 3, k + 1],
             "legoesm_jik_0based": [j, i, k],
             "level": k + 1,
@@ -249,8 +261,7 @@ def run(oracle_root: Path, control_root: Path, *, plant: bool = False) -> dict:
             "bottom": k == int(bottom_k[j, i]),
             "coast_adjacent_at_T_level": coast,
             "differs_at_kt1_entry": False,
-            "first_differing_boundary": first,
-            "values": values,
+            "fields": field_values,
         })
 
     aggregate = {}
@@ -268,7 +279,10 @@ def run(oracle_root: Path, control_root: Path, *, plant: bool = False) -> dict:
                 "differing_wet_cells": int(np.count_nonzero(use_c != use_o)),
             }
 
-    first_boundaries = sorted({cell["first_differing_boundary"] for cell in cells})
+    first_boundaries = sorted({
+        values["first_differing_boundary"]
+        for cell in cells for values in cell["fields"].values()
+    })
     report = {
         "format": "nemo-testcase-l2-gyre-round13-tracer-v1",
         "status": "AT-BAR" if not differing else "DEBT",
@@ -278,7 +292,8 @@ def run(oracle_root: Path, control_root: Path, *, plant: bool = False) -> dict:
         "oracle_header": oracle["header"],
         "instrument_bit_identity": bit_identity,
         "initial_entry": initial_rows,
-        "differing_cell_count": len(differing),
+        "differing_location_count": len(distinct_locations),
+        "differing_field_entry_count": len(differing),
         "cells": cells,
         "aggregate": aggregate,
         "first_differing_boundaries": first_boundaries,
