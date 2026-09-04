@@ -1,22 +1,32 @@
 # NEMO testcase Lane 4 — ORCA2 oracle Phase-1 receipt
 
-Date closed: 2026-09-04 (America/New_York; supplied archive provenance is
-dated 2026-09-05)
+Original closure: 2026-09-04 (America/New_York; supplied archive provenance
+is dated 2026-09-05)
 
 Session: `01a06d99-f562-7b11-bc63-e9b112877f54`
 
-Verdict: **CONFIRMED — PHASE 1 CLOSED**
+Independent-review status: **FIXED; CORRECTIVE RECORD REGENERATION PENDING**
+
+Verdict at this stop: **PHASE 1 REOPENED ONLY FOR THE PREREGISTERED
+INSTRUMENTATION REVIEW RERUN**
 
 Scope: NEMO 5.0.2 oracle only. No legoESM card or legoESM numerical result was
 created.
 
-The accepted oracle is the single scalar-math binary
+The previously accepted evidence set is the single scalar-math binary
 `nemo_ORCA2_OMIP_L4_instrumented_rank0_schema.exe` and its ten-step run at
 `/data/abyssal/dbalwada/nemo-testcases-l4/runs/instrumented_rank0_schema_10step_np2`.
 All 90 registered record files pass the frozen schema and manifest gate; the
 six restart shards are byte-identical to the uninstrumented control. This is
 one binary, one compiler-wide arithmetic policy, and one run: no field was
 substituted from another build or precision (the no-Frankenstein rule).
+
+Independent review found no scientific-output or provenance defect, but did
+require two WRITE-only writer-source corrections: derived SI3 payload-count
+metadata and armed-only EOS diagnostic scratch allocation. The replacement
+scalar-math binary and exact user-shell run directory are frozen below; they
+have not been executed. Therefore the old records remain review evidence but
+are not silently mixed with, or substituted into, the replacement arm.
 
 The companion artifact index is
 `nemo_testcases_l4_orca2_phase1_manifest.md`. The executable data remain below
@@ -229,7 +239,8 @@ and one-byte restart identity mismatch.
 The comparison rule was frozen before inspection. Deterministic ordinary files
 must be exact bytes. Native-IOM history files may differ only in their global
 wall-clock `TimeStamp`; the gate compares every dimension, variable, variable
-attribute, global attribute other than `TimeStamp`, and every data value.
+attribute, global attribute other than `TimeStamp`, and the raw stored-value
+bytes of every data variable with automatic masking/scaling disabled.
 `ocean.output` may differ only by registered `LANE*`/`L2_*` writer notices.
 Launcher and timing products are excluded because instrumentation necessarily
 changes runtime and stdout. No scientific field is excluded.
@@ -416,8 +427,9 @@ Rule 11 history is preserved; none of these directories was deleted:
    it as `oracle_si3_reassoc_operands.bin: bad payload size header`.
 
 The accepted correction changes only config-local writer ownership guards and
-the truthful header count. No model array or arithmetic expression is changed;
-the ordinary-output identity result above proves that claim observationally.
+derived truthful header metadata. No model array or arithmetic expression is
+changed; the ordinary-output identity result above proves that claim
+observationally.
 
 ### Independent-review correction: armed-only EOS scratch
 
@@ -481,7 +493,14 @@ malformed metadata even when their payload bytes are intact.
 | port Lane-2/3 writers; add RGB, TKE, and Prather frames | ASKED coverage, exact |
 | rebuild after stale FCM objects | UNASKED enabling correction; first run preserved/retracted |
 | add seven `lwp` ownership guards | UNASKED enabling WRITE-only correction; second run preserved/retracted |
-| correct `l3rea_dump` header `18*npti -> 43*npti` | UNASKED enabling metadata correction; third run preserved/retracted |
+| derive `l3rea_dump` count as `(3+3*nlay_i+2*nlay_s)*npti` | ASKED independent-review correction; third run preserved/retracted |
+| move adaptive implicit vertical advection to inactive and re-check every audit row | ASKED independent-review correction |
+| route the restart-byte plant through `validate_identity` | ASKED independent-review correction; plant exits nonzero |
+| report identity counts from the actual loops | ASKED independent-review correction |
+| commit accepted/control launchers | ASKED independent-review correction |
+| allocate EOS dump scratch only while armed | ASKED independent-review WRITE-only correction |
+| compare native-IOM stored-value bytes with masks disabled | ASKED independent-review correction |
+| replacement user-shell execution | ASKED; prepared but not executed at this stop |
 | final gate and planted mutations | ASKED mechanical acceptance |
 | legoESM code, card, score, or physics change | UNASKED and forbidden in Phase 1; none performed |
 
@@ -523,6 +542,7 @@ numerics or fork an operator. In particular it needs:
    VERIFIED or explicitly WAIVED; comparisons run fp64 under one shared
    compiler/arithmetic provenance policy and cannot mix oracle binaries.
 
-Phase 1 stops here with the oracle and independent-review evidence. No
-legoESM configuration, numerical score, or implementation follows this
-receipt.
+This independent-review stop leaves exactly one corrective MPI execution to
+the user's shell. Phase 1 may re-close only after that one binary's complete
+record set and ordinary outputs pass the updated gate. No legoESM
+configuration, numerical score, or implementation follows this receipt.

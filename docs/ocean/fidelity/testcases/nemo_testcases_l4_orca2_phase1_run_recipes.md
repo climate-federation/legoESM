@@ -306,3 +306,62 @@ deck manifest      e1974d9db5974f54d451fe1112b8f22a404516adcc7cbcf0b035fbe1cccba
 input manifest     3dfe251754fa76c8b5053cda90a51ee10589d0fffc01a4e799c49cc36bbd17e5
 prepared census    7be99aee79b73ef4d3b92e49441932733cfdab4fec7478995549ace0e1ce3c9c
 ```
+
+## Independent-review corrective hand-off
+
+The Opus FIX-THEN-SHIP review corrections are committed independently. The
+record gate passes the retained prior accepted arm and all nine planted
+violations, including the restart-byte mutation routed through
+`validate_identity`. Because the review also changed two writer sources, no
+old record is promoted as the corrected oracle: a replacement run is required
+under the no-Frankenstein rule.
+
+The incremental build used the existing `ORCA2_OMIP_L4` configuration and
+`conda-scalarmath` architecture:
+
+```text
+./makenemo -n ORCA2_OMIP_L4 -m conda-scalarmath -j 8
+```
+
+It completed successfully with `-fno-tree-vectorize`. The replacement build
+artifacts are:
+
+```text
+binary  /data/abyssal/dbalwada/nemo-testcases-l4/build/nemo_ORCA2_OMIP_L4_instrumented_reviewfix.exe
+bytes   54899920
+SHA256  ca2355aa777adc47825c4b777c5fa4e89cc60dc2c509a0e2f379e439acefd025
+build   /data/abyssal/dbalwada/nemo-testcases-l4/build/build_ORCA2_OMIP_L4_instrumented_reviewfix.log
+SHA256  96a38f0415970a5d3987d67374d1583ad30a19725d1b199465a60b46857526a7
+MY_SRC  78e1465fe7d9cea4d3adf24fb369b6a458c7bb7a912cc75f85d7ca6177e59152
+_ZGV*   zero; empty census SHA256 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+```
+
+The only directory awaiting execution is:
+
+```text
+/data/abyssal/dbalwada/nemo-testcases-l4/runs/instrumented_reviewfix_10step_np2
+```
+
+It contains regular copies of the accepted 19-file deck, absolute symlinks to
+the same 40 immutable input payloads, and an absolute symlink to the exact
+replacement binary. It has no model output, restart, timing, or oracle record
+yet. Its self-contained Bash-time launcher checks all inputs and executes:
+
+```text
+mpirun -np 2 --oversubscribe ./nemo
+```
+
+The frozen preparation hashes are:
+
+```text
+run.sh             756d6ac26e851ecba33b0ef8a6061238e4b8ca289d9e2011b4b0e8747c3d7415
+namelist_cfg       62f4746cf3846254c18af73bcde53e42f7d4cb9ebcdaf5f63cc9ed5316a9f8f4
+deck manifest      e1974d9db5974f54d451fe1112b8f22a404516adcc7cbcf0b035fbe1cccba70b
+input manifest     3dfe251754fa76c8b5053cda90a51ee10589d0fffc01a4e799c49cc36bbd17e5
+prepared census    20c7d059bab0b50e11b60ba6c237ef8ab136e6b961f98b375f260769257b30a9
+```
+
+This is the sole run requested at this stop. It must be launched from the
+user shell with `./run.sh`; Phase 1 remains reopened until its records and
+ordinary outputs pass the updated gate against the frozen uninstrumented
+control.

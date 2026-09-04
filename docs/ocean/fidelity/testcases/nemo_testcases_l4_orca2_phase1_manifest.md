@@ -6,6 +6,10 @@ Every digest is SHA-256 unless explicitly identified as MD5. The authoritative
 per-file inventories remain beside the data and are themselves hash-pinned
 here.
 
+Independent-review status: the prior accepted artifacts remain immutable, but
+the corrected replacement binary and prepared run below supersede them for the
+next record-generation attempt. No replacement records exist at this stop.
+
 ## Source, input archive, compiler, and executables
 
 | artifact | bytes | digest |
@@ -21,6 +25,10 @@ here.
 | `build/build_ORCA2_OMIP_L4_instrumented_rank0_schema.log` | - | `42614a4b1c2b62129acdfa93569f2d172c51bbd09a0c8616422ca9aae854d028` |
 | `build/instrumented_rank0_schema_MY_SRC.sha256` | - | `84861aaab9aaa7a2ea35cb5a749cfb0350595c485d10e9b288db6f5e9a0e62c6` |
 | `build/instrumented_rank0_schema_ZGV.txt` (empty) | 0 | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| `build/nemo_ORCA2_OMIP_L4_instrumented_reviewfix.exe` | 54,899,920 | `ca2355aa777adc47825c4b777c5fa4e89cc60dc2c509a0e2f379e439acefd025` |
+| `build/build_ORCA2_OMIP_L4_instrumented_reviewfix.log` | 105,973 | `96a38f0415970a5d3987d67374d1583ad30a19725d1b199465a60b46857526a7` |
+| `build/instrumented_reviewfix_MY_SRC.sha256` (14 files) | 2,100 | `78e1465fe7d9cea4d3adf24fb369b6a458c7bb7a912cc75f85d7ca6177e59152` |
+| `build/instrumented_reviewfix_ZGV.txt` (empty) | 0 | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
 
 Archive provenance: fetched by the user's shell on 2026-09-05 from
 `https://gws-access.jasmin.ac.uk/public/nemo-vol1/sette_inputs/r5.0.0/ORCA2_ICE_v5.0.0.tar.gz`;
@@ -104,7 +112,12 @@ f4279899be77119fda4f9e20b3d5e3a70e4e478fe5ead0dc661656a1bba296c2  zdfiwm_forcing
 | final 190-file census | `9b864476ed832e4bec662ae3f1a67f681f548def4e24e205682845daf49e3511` |
 | final 90-record census | `6e80229737d5a456c5e114dc3421589344a7d5fa188ce1401657d3d212dea904` |
 | gate JSON with controls | `22866e967457e0e05eb112f0179a58578c50e483b48cd1f8d9624421c46d276f` |
-| committed gate script | `ada787f30fa43a6215824f1ebad52afcd6e3921fe8e2e5f3b2db736256efb7ad` |
+| committed gate script | `3d0b61762a4dbe0acbdaa3b52791696346a73afc84a78bb7388a167999aa00ce` |
+| `manifests/independent_review_gate_on_prior_accepted.json`, all nine plants | `22866e967457e0e05eb112f0179a58578c50e483b48cd1f8d9624421c46d276f` |
+| committed prior-accepted launcher | `59e794abc299cc34897eddd905e492edf8fe41dde456977283abf0161fc767ea` |
+| committed uninstrumented identity-control launcher | `2753bbc0233cc4926062053a638f7aa347c4461ab5c072edbd3f1cfb3a9eff67` |
+| prepared review-correction launcher | `756d6ac26e851ecba33b0ef8a6061238e4b8ca289d9e2011b4b0e8747c3d7415` |
+| prepared review-correction 63-file census | `20c7d059bab0b50e11b60ba6c237ef8ab136e6b961f98b375f260769257b30a9` |
 | uninstrumented ten-step 97-file census | `924867d6e066d450715a0997ecfd1264005b02abe8f4d05228cf29870fff03a7` |
 | uninstrumented 30-day 97-file census | `efe02aa764feb07ba045ee25c0bd304240b7780e39c01376dec741b4520413f9` |
 | retained first, incomplete 63-record run census | `b633486295afca2c8f6930258cdcb4a9dc86d0cf0bc0eb0bcda372814505a4b6` |
@@ -120,12 +133,13 @@ files.
 
 | artifact | digest |
 |---|---|
-| `nemo_testcases_l4_orca2_phase1_receipt.md` | `ed686cabd81b9e24a9734f22e2e18e4f42060d6eaabf2917d8845bb91c0d3d32` |
+| `nemo_testcases_l4_orca2_phase1_receipt.md` | `9d9edbba0420a135b737e9d3d4d4439a36a9ee1cc7f23ab8de60d6491354cbe9` |
 | `nemo_testcases_l4_orca2_phase1_preregister.md` | `2a51809a6277310a2441faa7be0d1588f17294ef151d979438ccc0645e1fac6b` |
-| `nemo_testcases_l4_orca2_phase1_run_recipes.md` | `6021c01fea33d3b5702630b66034d11552b8fe1847be63b31d32c22af1a9d87f` |
+| `nemo_testcases_l4_orca2_phase1_run_recipes.md` | `6bbdce26e216e806e712a06e5454ab5b1bc6c443be5db24cd7fd0db2372cd28e` |
 | `nemo_testcases_l4_orca2_phase1_instrument_rebuild_preregister.md` | `0548b565ec7804ee45ca2c96f65344fdc94e9783a8bba71c2cfb5ca48271e5ba` |
 | `nemo_testcases_l4_orca2_phase1_mpi_writer_correction_preregister.md` | `802bdaff23cc6bbccc6f69c4fbcdb445886af0b8838a8c81fea92dec71bfe0c9` |
 | `nemo_testcases_l4_orca2_phase1_payload_count_correction_preregister.md` | `493c9833e385341a0e21fd89c07b04b2d43272620deb30119f1430aa8b5569b8` |
+| `nemo_testcases_l4_orca2_phase1_review_rerun_preregister.md` | `2a47e2a33f89f2ad4f4db6fe5d283eb5455efd5755601b37e203d53c6f0cf1cc` |
 
 ## Terminal restart hashes
 
