@@ -41,9 +41,15 @@ declared geometry composition, not an SI3 physics overlay.
 Initialization is deterministic and consumes, rather than merely documents,
 the first record of the same official ERA5 member that C1D SAS reads at
 `cfgs/C1D/EXP_SASICE/namelist_cfg:153-157`.  A config-local extraction creates
-`C1D_OMIP_L3_COUPLED_init.nc` containing one wet level of `votemper`,
-`vosaline`, `u_current`, and `v_current`, bit-copied from `sst`, `sss`, `ssu`,
-and `ssv`.  The corresponding `namtsd` uses `ln_tsd_init=T` and `sn_tem/sn_sal`
+`C1D_OMIP_L3_COUPLED_init.nc` containing a depth dimension of exactly `jpk=2`
+for `votemper`, `vosaline`, `u_current`, and `v_current`.  Level 1 is bit-copied
+from `sst`, `sss`, `ssu`, and `ssv`; the masked terminal level deterministically
+repeats those same source bits and is registered as mask-inactive rather than
+left missing or uninitialized.  This two-level schema is mandatory because
+`dta_tsd` allocates/copies all `jpk` levels
+(`src/OCE/DOM/dtatsd.F90:105-108,196-199`) and C1D U/V likewise copies the complete field
+(`src/OCE/C1D/c1d.F90:146-149,195-198`).  The corresponding `namtsd` uses
+`ln_tsd_init=T` and `sn_tem/sn_sal`
 (`EXP_PAPA/namelist_cfg:48-58`), while `namc1d` uses `ln_uvd_init=T` and
 `sn_ucur/sn_vcur` (`:65-79`); NEMO actually reads those arrays at
 `src/OCE/DOM/istate.F90:114-123`.  Because non-restart user configurations
@@ -56,7 +62,8 @@ source record is float32 (`sst=-1.690032958984375 degC`, `sss=34`, `ssu=0`,
 `ssv=0`, `ssh=0`); conversion to NEMO `wp` is registered, not described as
 added precision.  Ice initialization remains the phase-1 resolved
 C1D_OMIP_L3 state and must be hash-identical at the first ice-thermodynamics
-entry.
+entry.  Initial SSH is registered at all three initialized time slots: NEMO
+copies `Kbb` into `Kaa` and `Kmm` at `restart.F90:466,481`.
 
 Why this oracle, rather than ICE_ADV2D purpose 2:
 
@@ -90,7 +97,7 @@ selector may be mixed with it.
 | one-layer domain | `ln_c1d=T`, `rn_bathy=1 m`, `rn_lat1d=84`, `rn_lon1d=324`, `jpk=2` | phase-1 C1D_OMIP_L3 case value `scripts/validate/ocean_fidelity/testcases/configs/c1d_omip_l3_namelist_cfg:19`, EXP_SASICE `:40,49-50`, and declared copied-source `jpk` edit above |
 | initial T/S/U/V | `ln_tsd_init=T`, `ln_uvd_init=T`, no dynamical restoring; exact four-variable derived file | C1D EXP_PAPA ingestion schema `:48-79`; first EXP_SASICE ERA5 record |
 | initial SSH | config-local `usr_def_istate_ssh`, `rn_ssh_init` from exact first ERA5 record | active user-domain call `restart.F90:452-462`; no implicit zero fallback |
-| `nn_fsbc` | `4` | ORCA1 `EXPREF/namelist_cfg:106`; means four hourly ocean samples and calls SI3 at `MOD(kt-1,4)=0` |
+| `nn_fsbc` | `4` | ORCA1 `EXPREF/namelist_cfg:106`; means four hourly ocean samples and the cadence-guarded SI3 thermodynamic/update body executes at `MOD(kt-1,4)=0` |
 | `nn_ice` | `2` | ORCA1 `namelist_cfg:111` |
 | `ln_ice_embd` | `.false.` | ORCA1 `namelist_cfg:115`; levitating identity |
 | atmosphere schema | EXP_SASICE ERA5 variables and `ln_humi_sph=F`, `ln_humi_dpt=T`, `ln_humi_rlh=F`, `ln_tair_pot=F` | C1D EXP_SASICE `namelist_cfg:96-111,126-134`; `d2m` is dew-point temperature, so ORCA1's inherited specific-humidity default is intentionally not selected |
@@ -106,7 +113,7 @@ selector may be mixed with it.
 | drag | `ln_drgimp=T`, `ln_drgice_imp=T` | ORCA1 `namelist_cfg:258-261` |
 | bottom drag | `ln_non_lin=T`, `rn_Cd0=1e-3`, `rn_Cdmax=0.1`, `rn_ke0=2.5e-3`, `rn_z0=3e-3` | ORCA1 `namelist_cfg:258,264-269`; no coefficient is inherited from the PAPA deck by omission |
 | vertical coordinate | `ln_vvl_zstar=T` | ORCA1 `namelist_cfg:368`; required prognostic-SSH coordinate identity |
-| external mode | `ln_dynspg_ts=T`, `ln_bt_auto=T`, `rn_bt_cmax=0.8`; inherited `ln_bt_fw=T` | ORCA1 `namelist_cfg:388-399`; shared ref `:1091` for forward mode |
+| external mode | `ln_dynspg_ts=T`, `ln_bt_auto=T`, `rn_bt_cmax=0.8`; inherited `ln_bt_fw=T`, `nn_bt_flt=1` | ORCA1 `namelist_cfg:388-399`; shared ref `:1091-1101` for forward integration and the active boxcar filter |
 | tracer horizontal operators | `ln_traadv_OFF=T`, `ln_traldf_OFF=T` | retained C1D EXP_PAPA scaffold `namelist_cfg:286-295`; a 1x1 column has no resolved horizontal-transport claim |
 | momentum horizontal operators | `ln_dynadv_OFF=T`, `ln_dynvor_ene=T`, `ln_hpg_sco=T`, `ln_dynldf_OFF=T` | retained C1D EXP_PAPA scaffold `namelist_cfg:326-349`; only executed surface-stress/drag increments are claimed |
 | vertical closure | `ln_zdfgls=T`, all competing ZDF closures false | retained C1D EXP_PAPA scaffold `namelist_cfg:367-370`; GLS is required for a runnable prognostic column but is outside this exchange rung |
@@ -231,9 +238,47 @@ ORCA1 identity.  No existing `rCdU_ice`/implicit **top**-drag path was found;
 the existing matrix plumbing is for bottom `rCdU_bot` (for example
 `packages/ocean/legoesm/ocean/state.py:2678-2697`).  The implementation must
 extend the shared vertical/momentum solve for a top coefficient rather than
-copying a solver or relabeling bottom drag.  This is a preregistered **new
-extension of the existing shared solve**, not claimed reuse of an already
-present top-drag feature.
+copying a solver or relabeling bottom drag.  If the C1D coordinate does not
+satisfy the existing partial-cell-only bottom helper, that helper is generalized
+in place for the registered flat one-layer geometry; it is not copied.  This is
+a preregistered **new extension of the existing shared solve**, not claimed
+reuse of an already present top-drag feature.
+
+The ocean card must explicitly set
+`LatLonCGridOceanConfig.freshwater_closure="real_freshwater"` and
+`normalize_freshwater=False`.  The class otherwise defaults to
+`"virtual_salt_flux"` (`packages/ocean/legoesm/ocean/state.py:1879-1886`).
+The selected real-volume arm preserves salt content during z-star dilution and
+skips the extra virtual-salt source
+(`ocean_model_latlon_cgrid.py:5896-5912`).  Normalization is off because NEMO's
+registered `sbc_fwb` output already includes `emp_corr`; applying legoESM's
+generic mean removal would be a second freshwater-budget correction.  The
+construction gate and continuous-run gate must reject either other value.
+
+The future legoESM column card must resolve the following existing execution
+knobs explicitly; defaults are not accepted as evidence:
+
+| legoESM row | selected value | status / source |
+|---|---|---|
+| free surface | `barotropic_solver="explicit_substep"` | existing solver, `state.py:1397-1403` |
+| NEMO filter | `barotropic_time_filter="nemo_boxcar1_ab3"` | existing forward `nn_bt_flt=1` identity, `state.py:1082-1088` |
+| substeps | exact NEMO `icycle` and `rDt_e` | source-replayed for exact-entry gates; continuous card must reproduce `ln_bt_auto=T,rn_bt_cmax=0.8` and hard-stop if its per-step values differ |
+| coupled time step | `tracer_time_integrator="rk3_ws"`, `momentum_time_integrator="rk3_ws"`, `outer_integrator="forward_euler"` | existing coupled validator, `state.py:2071-2077,2332`; `ocean_model_latlon_cgrid.py:3070-3100` |
+| stage mean | `nemo_stage_mean_imposition=True` | existing NEMO RK3 reconciliation, `state.py:1256-1265` |
+| freshwater | `freshwater_closure="real_freshwater"`, `normalize_freshwater=False`, `fix_eta_drift=True`, `use_conservation_fixer=False` | existing real-volume path and safety checks, `ocean_model_latlon_cgrid.py:2105-2182,5896-5912` |
+| implicit bottom drag | `bottom_drag_scheme="nemo_quadratic"`, `zdf_drag_in_matrix=True`, `zdf_baroclinic_only=True`, `barotropic_drag_substep=True` | existing shared NEMO composition, `state.py:2671-2758` |
+| implicit top drag | raw `rCdU_top` plus a new top-coefficient extension of those same shared paths | **NEW prerequisite**, source identity registered above; no private or duplicate solver |
+
+There is one explicit construction gap.  The existing `rk3_ws` validator
+requires its previously certified FCT2/flux-form horizontal companions, while
+this oracle deliberately retains C1D's `ln_traadv_OFF` and `ln_dynadv_OFF` on a
+1x1 periodic column.  Those are both structural-zero operators but they are not
+interchangeable selectors.  Before any run, the existing RK3-WS implementation
+must be extended to admit the exact `off` operator pair only for the registered
+1x1 geometry, with a hard geometry guard and planted off-manifold failure; the
+implementation may not silently select FCT2/upwind3 or claim ORCA1 horizontal
+transport coverage.  Until that prerequisite and the top-drag extension are
+reviewed, rung 3.6 remains **UNMEASURED and not constructible**.
 
 Rung 3.6 will add a selectable `nemo_si3` card inside that machinery.  It will
 accept NEMO-equivalent, already grid-cell-aggregated SI3 exchange fields and
@@ -252,13 +297,21 @@ harness must print every participating dtype and the CPU backend.
 | `emp` | kg m-2 s-1, positive ocean mass loss; positive lowers SSH | physical freshwater `F_fw=-emp`, positive into ocean |
 | `sfx` | PSS kg m-2 s-1, positive salinity source in `tra_sbc_RK3` | real salt mass `salt_flux=1e-3*sfx` kg m-2 s-1; the existing ocean consumer converts kg salt back to salinity tendency |
 | `utau`, `vtau` | Pa, positive force on the ocean in NEMO momentum | legoESM stored atmosphere-convention `tau_x=-utau`, `tau_y=-vtau`; its ocean sign flip restores the NEMO force |
-| `rCdU_ice` | m s-1-like implicit top-drag coefficient, non-positive by `-tmod_io*at_i/rho0` | dedicated implicit top-drag input with the same sign; never folded into explicit `tau` |
+| `rCdU_ice` | m s-1-like implicit top-drag coefficient, non-positive by `-tmod_io*at_i/rho0` | retain the signed raw operand through the card, then form `r_eff_top=-rCdU_top >= 0` exactly once at the shared positive-rate solver boundary; never route the raw sign into the matrix or fold it into explicit `tau` |
 | `snwice_fmass` | kg m-2 s-1, positive increase in ice+snow mass | budget-only term; subtract from NEMO-style `emp` before the global/one-cell FWB correction |
 
 The separate `qsr` and `qns` paths prevent double application.  Likewise,
 `F_fw` updates real mass/SSH once; a virtual-salt or KPP diagnostic must not
 apply it a second time.  These are preregistered interface requirements, not
 measured agreements.
+
+The sign conversion mirrors the existing bottom-drag convention: NEMO's raw
+`rCdU_bot<=0` becomes legoESM's positive `r_eff=-rCdU_bot` before the diagonal
+gain (`state.py:2678-2686`; executing use
+`ocean_model_latlon_cgrid.py:7979-7990,8075-8098`).  The new top extension must
+call the same conversion/assembly owner.  A separate implementation or direct
+use of the negative raw value would create anti-drag and is a construction
+error.
 
 ## Frame and time-level registry (Rule 1d)
 
@@ -269,7 +322,7 @@ indices, rather than inferred labels such as “now,” are authoritative.
 
 | frame | cadence | registered time level and fields |
 |---|---|---|
-| `INITIAL_STATE` | once, before `nit000` | source-file float32 values and post-ingestion `wp` T/S/U/V at `Kbb/Kmm`; `rn_ssh_init` and SSH at `Kbb/Kaa`; exact phase-1 ice state; `e3t/u/v`, masks, top/bottom indices, and all input/source hashes |
+| `INITIAL_STATE` | once, before `nit000` | source-file float32 values and post-ingestion `wp` T/S/U/V at `Kbb/Kmm`, including deterministic masked terminal level; `rn_ssh_init` and SSH at `Kbb/Kaa/Kmm`; exact phase-1 ice state; `e3t/u/v`, masks, top/bottom indices, and all input/source hashes |
 | `PRE_SSM` | every ocean step | `uu,vv(:,:,1,Kbb)`; `ts(:,:,1,jp_tem/jp_sal,Kmm)`; `ssh(:,:,Kmm)`; `e3t(:,:,1,Kmm)`; `fraqsr_1lev`; carried seven accumulators before `sbc_ssm` |
 | `POST_SSM` | every ocean step | seven accumulators after add/divide; division flag `MOD(kt-1,4)==0` |
 | `POST_FZP` | each ice step | `sss_m` at completed four-sample mean; `t_bo` after zero-pressure TEOS-10 conversion and Kelvin offset |
@@ -278,18 +331,23 @@ indices, rather than inferred labels such as “now,” are authoritative.
 | `POST_UPDATE_TAU` | every ocean step | instantaneous `pu_oce,pv_oce=uu,vv(:,:,1,Kbb)`; carried `tmod_io` and ice-step refresh flag; `at_i,u_ice,v_ice,drag_io,utau_oce,vtau_oce,rCdU_ice,utau,vtau,taum` |
 | `POST_FWB` | every ocean step | incoming and outgoing `emp` **and `qns`**, `snwice_fmass`, area/mask, `emp_ext`, `emp_corr`, `rcp`, `sst_m`; active-cadence flag |
 | `POST_SBC_STAGGER` | every ocean step | post-`lbc_lnk` T-point `utau/vtau` including halos; neighbor indices and `umask/vmask/tmask`; resulting `utauU/vtauV` consumed by `stp_2D` |
-| `POST_ZDF_DRG` | every ocean step | `rCdU_ice`, resulting `rCdU_top`, independent `rCdU_bot`, `miku/mikv/mbku/mbkv`, face averages, and separate/combined top and bottom matrix/RHS contributions |
+| `POST_ZDF_DRG_COEFF` | every ocean step, after `zdf_phy` and before `stp_2D` | `Kbb`; signed raw `rCdU_ice`, resulting raw `rCdU_top`, independent raw `rCdU_bot`, their positive legoESM `r_eff_top/r_eff_bot` conversions, masks, and `miku/mikv/mbku/mbkv`; this is coefficient assembly only (`stprk3.F90:163-186`) |
 | `POST_TRA_SBC_RK3` | every RK3 stage | `Kbb,Kmm,Krhs,kstg`; before/after top-level T/S RHS; `emp,qns,sfx,e3t,rho0,rcp`, and top-level T/S at `Kbb` |
 | `POST_TRA_QSR` | every ocean step, RK3 stage 3 only (8,760 frames) | `qsr`, exact interpolated `chl`, RGB selectors/lookup and per-level attenuation operands, `fraqsr_1lev`, and before/after temperature RHS at every wet level; the call is inside `SELECT CASE(kstg)`, `CASE(3)` at `stprk3_stg.F90:540-585` |
-| `PRE_STP2D` | every ocean step | `Kbb,Kaa`; `emp`, `rnf/isf` inactive flags, `sshe_rhs`, `Ue_rhs`, `Ve_rhs`, external-mode selectors, `icycle`, `rDt_e`, and initial external state |
-| `SSH_SUBSTEP` | every `jn=1..icycle` | `jn/icycle`, `rDt_e`, `ssh_frc`, extrapolation coefficients, `sshn_e/sshb_e/sshbb_e`, `zsshp2_e`, `zhU/zhV`, `zhdiv`, `ssha_e`, `wgtbtp1/2`, and running SSH/U/V sums |
+| `PRE_DYN_SPG_TS` | every ocean step, after complete `stp_2D` RHS assembly | `Kbb,Kaa`; `emp`, `rnf/isf` inactive flags, complete `sshe_rhs`, `Ue_rhs`, `Ve_rhs`; separate top/bottom face coefficients and baroclinic RHS from `dyn_drg_init`; external-mode selectors, `icycle`, `rDt_e`, and initial external state (`stp2d.F90:112,195-202,243-281`) |
+| `SSH_SUBSTEP` | every `jn=1..icycle` | `jn/icycle`, `rDt_e`, `ssh_frc`, extrapolation coefficients, separate top/bottom `pCdU_u/v` and drag tendencies, `sshn_e/sshb_e/sshbb_e`, `zsshp2_e`, `zhU/zhV`, `zhdiv`, `ssha_e`, `wgtbtp1/2`, and running SSH/U/V sums |
 | `POST_STP2D` | every ocean step | final weight sums; divided `ssh(:,:,Kaa)`, `uu_b/vv_b(:,:,Kaa)`, `un_adv/vn_adv`; isolated surface-mass contribution replayed with every other RHS operand held fixed |
+| `PRE_DYN_ZDF_SOLVE` | every ocean step, RK3 stage 3 only | `Kbb,Kmm,Krhs,Kaa,kstg=3`; top/bottom indices and coefficients, pre-drag diagonal and RHS, separate top/bottom diagonal additions, and complete tridiagonal matrix/RHS immediately before the shared solve (`stprk3_stg.F90:430`; `dynzdf.F90:293-309,466-481`) |
 
 The first `POST_SSM` mean is deliberately tested against NEMO's three seeded
 copies plus the ordinary fourth accumulation; it is not assumed to be a
 one-sample mean.  Restarts must cover the seven mean accumulators, the last
 ice-step `tmod_io`, `utau_oce/vtau_oce`, `rCdU_ice`, `snwice_mass(_b)`, FWB
-state (`emp_corr` and any active accumulator), and the ocean/ice prognostics.
+state (`emp_corr` and any active accumulator), active solar carry
+`fraqsr_1lev`, and the ocean/ice prognostics.  `fraqsr_1lev` is written to the
+ocean restart at `traqsr.F90:238-244` and read or explicitly defaulted at
+`:1433-1437`; the restart split/rejoin gate must compare it before its next
+`sbc_ssm` use.
 
 ## Coverage register seed
 
@@ -334,8 +392,9 @@ and duplicate names are fatal.
 8. **State/restart:** all `INITIAL_STATE` source and ingested values; every
    prognostic in Appendix A of the lane-3 dossier,
    the seven `sbc_ssm` carries, stress carries, FWB carries, and the one-layer
-   ocean T/S/SSH/U/V state.  Inactive pond, option-4 salinity, and dynamics
-   moments may be WAIVED only with their resolved selector and call-site skip.
+   ocean T/S/SSH/U/V state; `fraqsr_1lev` is a mandatory VERIFIED solar carry.
+   Inactive pond, option-4 salinity, and dynamics moments may be WAIVED only
+   with their resolved selector and call-site skip.
 
 Interior pointwise values are the scientific gate.  Halos are separately
 registered and either verified after their defining `lbc_lnk` or waived with a
@@ -360,7 +419,8 @@ Mandatory sub-gates are:
 
 - exact geometry and T/S/U/V/SSH/ice initialization, including the derived
   input hash and post-conversion `wp` values;
-- four-sample `sbc_ssm` recurrence and restart split/rejoin;
+- four-sample `sbc_ssm` recurrence and restart split/rejoin, including the
+  restored `fraqsr_1lev` input;
 - surface `eos_fzp` against the TEOS-10 source order;
 - `ice_update_flx` heat, freshwater, salt, and mass ledger, component rows and
   totals;
@@ -374,6 +434,11 @@ Mandatory sub-gates are:
   including an isolated `sshe_rhs` surface-mass replay, before continuous
   composition;
 - complete coverage and exact input hashes.
+
+Both exact-entry and continuous gates must print and assert
+`freshwater_closure="real_freshwater"` and `normalize_freshwater=False` before
+integration; either another closure or a second normalization is a hard
+configuration failure, not an alternate measured arm.
 
 ### Preregistered ownership hypotheses and private arms
 
@@ -422,7 +487,12 @@ non-vacuous:
     substep;
 15. perturb one nonzero `utauU/vtauV` after staggering while leaving its
     T-point input unchanged;
-16. alter one stream byte/hash and remove one coverage-register name.
+16. perturb the nonzero `fraqsr_1lev` restart carry before split/rejoin;
+17. remove the required terminal level from the derived initialization file;
+18. select `virtual_salt_flux` or enable a second freshwater normalization;
+19. feed one negative raw `rCdU_top` directly to the positive-rate matrix
+    interface;
+20. alter one stream byte/hash and remove one coverage-register name.
 
 Self-comparisons, perturbations of zero, and tautological bounds are forbidden.
 
