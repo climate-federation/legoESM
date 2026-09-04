@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-readonly EXPECTED_DIR=/data/abyssal/dbalwada/nemo-testcases-l4/runs/instrumented_10step_np2
-readonly EXPECTED_BINARY_SHA256=fc4b48a425f2064209e5a683f0e14f06bc561795cacae243941b5da8d90baa31
+readonly EXPECTED_DIR=/data/abyssal/dbalwada/nemo-testcases-l4/runs/instrumented_full_10step_np2
+readonly EXPECTED_BINARY_SHA256=40e9ac050297b02443e0b897403eb5cf767efc197b2ab046de5b17ec4d6571ee
 readonly EXPECTED_DECK_MANIFEST_SHA256=e1974d9db5974f54d451fe1112b8f22a404516adcc7cbcf0b035fbe1cccba70b
 readonly EXPECTED_INPUT_MANIFEST_SHA256=3dfe251754fa76c8b5053cda90a51ee10589d0fffc01a4e799c49cc36bbd17e5
 
@@ -36,7 +36,6 @@ export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 
 printf 'RUN_STARTED_UTC=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >run.user.time.log
-# GNU time is not installed on this host; bash's time keyword writes the same three fields.
 TIMEFORMAT='wall_seconds %R\nuser_seconds %U\nsys_seconds %S'
 { time mpirun -np 2 --oversubscribe ./nemo 2>&1 | tee run.user.stdout.log ; } 2>>run.user.time.log
 pipe_rc=("${PIPESTATUS[@]}")

@@ -36,9 +36,9 @@ export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 
 printf 'RUN_STARTED_UTC=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >run.user.time.log
-/usr/bin/time -a -o run.user.time.log \
-  -f 'wall_seconds %e\nuser_seconds %U\nsys_seconds %S' \
-  mpirun -np 2 --oversubscribe ./nemo 2>&1 | tee run.user.stdout.log
+# GNU time is not installed on this host; bash's time keyword writes the same three fields.
+TIMEFORMAT='wall_seconds %R\nuser_seconds %U\nsys_seconds %S'
+{ time mpirun -np 2 --oversubscribe ./nemo 2>&1 | tee run.user.stdout.log ; } 2>>run.user.time.log
 pipe_rc=("${PIPESTATUS[@]}")
 mpi_rc=${pipe_rc[0]}
 tee_rc=${pipe_rc[1]:-0}

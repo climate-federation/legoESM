@@ -1,9 +1,16 @@
 # NEMO testcase Lane 4 ORCA2 — Phase-1 run recipes
 
-Status at this stop: the uninstrumented ten-step control is complete and
-verified; the instrumented ten-step and uninstrumented 30-day executions are
-prepared but **not executed**. This is an intermediate Phase-1 hand-off, not
-the oracle receipt and not a Phase-2 fidelity claim.
+Status at the corrective stop: all three originally prepared executions have
+run.  The uninstrumented ten-step control and 30-day reference are valid, but
+the first instrumented build is **retracted as the record oracle**.  Preserved
+source timestamps caused FCM to reuse stale preprocessed sources for 11 of 14
+config-local overrides, so that run emitted only 63 of the preregistered
+records.  The run is retained as evidence; it is not silently replaced.  A
+corrected full instrumented build and a fresh ten-step directory are registered
+in `nemo_testcases_l4_orca2_phase1_instrument_rebuild_preregister.md`.
+
+This remains an intermediate Phase-1 hand-off, not the oracle receipt and not
+a Phase-2 fidelity claim.
 
 ## Verified two-rank constraint and control
 
@@ -71,9 +78,9 @@ compile-guarded at `src/OCE/nemogcm.F90:496-499` and
 execution witness. Thus the superficially true value in the early namelist
 echo is not an executed TOP selector and does not refute the oracle definition.
 
-## Instrumented build
+## Retracted first instrumented build
 
-The instrumented binary is the same copied configuration, key set, conda
+The first instrumented binary used the same copied configuration, key set, conda
 `nemo-build` compiler/link environment, and `conda-scalarmath` arch as the
 control. Only config-local `MY_SRC` writers differ. The final executable is:
 
@@ -93,7 +100,7 @@ operands `gdepw_1d` and `r3t(:,:,Kmm)`; it performs no model assignment or
 replacement arithmetic. The final build log SHA-256 is
 `55232c9d145aaeacc3c636cb29a688ed32691c4a4042a49130ceb2e6d934d826`.
 
-The Lane-2 overrides are `dynhpg`, `dynspg_ts`, `dynvor`, `eosbn2`, `stp2d`,
+The intended Lane-2 overrides are `dynhpg`, `dynspg_ts`, `dynvor`, `eosbn2`, `stp2d`,
 `stprk3`, `stprk3_stg`, and `traadv`. The Lane-3 overrides are `sbcblk`,
 `icesbc`, `icestp`, and `icethd`. Lane 4 adds frames in `traqsr` for the RGB
 chlorophyll read and in `icedyn_adv_pra` for every selected Prather moment,
@@ -110,7 +117,15 @@ Phase 2 must strip the registered halos before comparing interior cells. This
 layout-note option was explicitly requested; changing decomposition makes the
 detailed record set incommensurate.
 
-## Prepared execution 1: instrumented ten steps
+The later record census proved that this binary contains writer strings only
+for `stprk3`, `traqsr`, and `icedyn_adv_pra`.  Its 63 files comprise ten step
+entries, ten barotropic frames, 30 stage frames, one stage-1 RHS, one RGB
+chlorophyll frame, one ZDF entry, and ten Prather entry/exit frames.  The
+registered Lane-2 detailed operands and Lane-3 SI3 exchange/thermodynamic/bulk
+frames are absent.  Therefore the following preparation record is historical,
+not an executable Phase-1 hand-off.
+
+## Executed but coverage-refuted instrumented ten steps
 
 Directory:
 
@@ -128,11 +143,11 @@ and `nn_istate=1`. The hashes are:
 namelist_cfg       62f4746cf3846254c18af73bcde53e42f7d4cb9ebcdaf5f63cc9ed5316a9f8f4
 deck manifest      e1974d9db5974f54d451fe1112b8f22a404516adcc7cbcf0b035fbe1cccba70b
 input manifest     3dfe251754fa76c8b5053cda90a51ee10589d0fffc01a4e799c49cc36bbd17e5
-run.sh             f74b55fb0adf991e24bf0339caf761f216a19478e992210fac63d406fe1b487d
+original run.sh    f74b55fb0adf991e24bf0339caf761f216a19478e992210fac63d406fe1b487d
 63-file census     4b320ee3847d1553d0f0098d721a44014c9c9f7d7c2ea639a9ec5d0873d8a958
 ```
 
-`run.sh` refuses an unexpected directory, stale output, binary/deck/input
+`run.sh` refused an unexpected directory, stale output, binary/deck/input
 hash mismatch, or missing archive member. It fixes one thread per math/runtime
 library and executes exactly:
 
@@ -140,11 +155,17 @@ library and executes exactly:
 mpirun -np 2 --oversubscribe ./nemo
 ```
 
-It tees combined MPI output to `run.user.stdout.log`, appends wall/user/sys
-timing and `MPIRUN_RC` to `run.user.time.log`, and propagates a nonzero MPI or
-`tee` status.
+The user's first launch found that `/usr/bin/time` was not installed and exited
+127 before MPI started.  The user removed only that failed launcher's empty
+`run.user.stdout.log`, `run.user.time.log`, and `run.launcher.log`, then changed
+the launcher to Bash `time` and reran it.  The retained launcher SHA-256 is
+`9ef46f677c98cae57f8686151ba79a9aafd7f135a7d3a358dbf250a239fc7027`.
+It records `MPIRUN_RC=0`, `RUN DONE`, step 10, and wall/user/sys
+`11.724/16.918/4.115 s`.  The complete 163-file census is
+`manifests/instrumented_10step_np2_all_files.sha256`, whose SHA-256 is
+`b633486295afca2c8f6930258cdcb4a9dc86d0cf0bc0eb0bcda372814505a4b6`.
 
-## Prepared execution 2: uninstrumented 30 days
+## Executed uninstrumented 30 days
 
 Directory:
 
@@ -152,7 +173,7 @@ Directory:
 /data/abyssal/dbalwada/nemo-testcases-l4/runs/uninstrumented_30day_np2
 ```
 
-The copy/symlink policy and guarded launcher are identical. At the shipped
+The copy/symlink policy and guarded launcher were identical. At the shipped
 `rn_Dt=10800 s`, 30 days is exactly 240 steps. Only `nn_itend=240` and
 `nn_stock=240` differ from the shipped scientific deck; `nn_istate` remains
 the shipped zero. The hashes are:
@@ -162,9 +183,18 @@ binary             c4907e476cf3969052b44c5c7fa966f3dac493e8cfb563f6554c8f3a27186
 namelist_cfg       483ee5196fc880a09929fa59d9fcdd2f32871c4dd4a01db94839875f6d7efd65
 deck manifest      4f8c480d03061ddd44218b0913dabc901fcaa2741b59bcc7d169730ded54d4db
 input manifest     3dfe251754fa76c8b5053cda90a51ee10589d0fffc01a4e799c49cc36bbd17e5
-run.sh             788c7b209965cb5541045e945a531eaedab5b21a49be44e220a0ec9c8f0c5a65
+original run.sh    788c7b209965cb5541045e945a531eaedab5b21a49be44e220a0ec9c8f0c5a65
 63-file census     76133cd32cb980eecbe2ca0d243e8d1e3c2e2da0c8d09d00a334103e83d24ad1
 ```
+
+The same failed-first-launch and Bash-`time` substitution occurred here before
+MPI started.  The retained launcher SHA-256 is
+`24137b7e8471667361320458a910b940cad799d6f5f689e863640eb0cbae78b1`.
+It records `MPIRUN_RC=0`, `RUN DONE`, step 240, and wall/user/sys
+`188.768/363.542/10.378 s`; `ocean.output` has no `E R R O R`.  The complete
+97-file census is `manifests/uninstrumented_30day_np2_all_files.sha256`, whose
+SHA-256 is
+`efe02aa764feb07ba045ee25c0bd304240b7780e39c01376dec741b4520413f9`.
 
 ## Choice disposition at this stop
 
@@ -175,10 +205,13 @@ run.sh             788c7b209965cb5541045e945a531eaedab5b21a49be44e220a0ec9c8f0c5
 | rank-0 `lwp` detailed writers plus layout note | ASKED choice among the two permitted record layouts |
 | regular deck copies and absolute input/binary symlinks | UNASKED operational packaging, disclosed and hash-guarded |
 | 240-step endpoint | ASKED 30 days, mechanically derived from shipped `rn_Dt` |
-| any MPI execution by the agent after this stop rule | FORBIDDEN; neither prepared directory has been launched |
+| user-shell execution | ASKED; all MPI launches remain outside the agent sandbox |
+| Bash `time` substitution | ASKED after `/usr/bin/time` exit 127; exact retained launchers are re-hashed above |
+| deletion of three empty failed-launch files in each directory | ASKED user action; only launcher-owned empty files, before successful relaunch |
+| corrective rebuild/rerun | UNASKED enabling correction; required by the frozen record inventory, with no physics or deck change |
 
-After both user-shell runs return, Phase 1 still requires record parsing and
-planted controls, byte-identity comparison against the completed control,
-the active-input/coverage/time-level registers, final manifest, executed-arm
-audit, and the independent-review receipt. No Phase-2 legoESM work is allowed
-before that receipt.
+After the corrective user-shell run returns, Phase 1 still requires record
+parsing and planted controls, the final byte-identity comparison against the
+completed control, the active-input/coverage/time-level registers, final
+manifest, executed-arm audit, and independent-review receipt. No Phase-2
+legoESM work is allowed before that receipt.
