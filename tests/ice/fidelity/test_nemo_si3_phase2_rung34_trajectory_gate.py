@@ -19,6 +19,7 @@ assert _SPEC and _SPEC.loader
 gate = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(gate)
 _CASE_DT_S = 30.0  # tests/ICE_RHEO/EXPREF/namelist_cfg:35
+_EXPECTED_RESTART_MOMENTS = 160  # 32 tracers times five Prather moments
 
 
 def test_closing_row_replays_si3_evp_equations_and_binds() -> None:
@@ -49,6 +50,16 @@ def test_oracle_zero_fields_are_uninformative_not_at_bar() -> None:
             np.asarray([[1.0]], dtype=np.float64),
             uninformative_zero=True,
         )
+
+
+def test_active_window_registers_exactly_160_unique_prather_moments() -> None:
+    names = {
+        gate._moment_restart_name(moment, tracer)
+        for moment in gate.SI3_PRATHER_MOMENT_NAMES
+        for tracer in gate.gate.ICE_RHEO_TRACERS
+    }
+    assert len(names) == _EXPECTED_RESTART_MOMENTS
+    assert {"sxice", "sxyice", "sxc0_l05", "sxye_l10", "sxysi_l10", "sxyvl"} <= names
 
 
 @pytest.mark.parametrize(

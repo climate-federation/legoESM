@@ -8,6 +8,7 @@ import importlib.util
 import json
 from pathlib import Path
 
+import jax.numpy as jnp
 import netCDF4
 import numpy as np
 from legoesm.ice.dynamics import si3_cgrid_deformation
@@ -15,6 +16,8 @@ from legoesm.ice.fidelity.nemo_rheo_testcase_recipe import (
     build_ice_rheo_card,
     step_ice_rheo_card,
 )
+from legoesm.ice.ridging import SI3JPL1RidgingState, apply_si3_jpl1_ridging
+from legoesm.ice.transport import SI3_PRATHER_MOMENT_NAMES, SI3PratherMoments
 
 from legoesm import constants
 
@@ -24,6 +27,12 @@ KT1_GATE = HERE / "nemo_si3_phase2_rung34_gate.py"
 LAST_ENTRY_FRAME = 720
 _RIDGING_EPSI10 = 1.0e-10  # icedyn_rdgrft.F90:594-595,623-624
 _RIDGING_TRAILING_STEPS = 5
+_ACTIVE_COMPLETED_STEP = 8
+_ACTIVE_ENTRY_RESTART_STEP = 7
+_ACTIVE_ORDINARY_AND_GEOMETRY_ROWS = 50
+_ACTIVE_RESTART_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/round8/oracle_active_restarts"
+)
 
 
 class Rung34TrajectoryError(RuntimeError):
@@ -158,6 +167,267 @@ def run_ridging_regime_scan(
     }
 
 
+def _moment_restart_name(moment: str, tracer: str) -> str:
+    """Map the card registry to SI3 restart names (icerst.F90:137-180)."""
+
+    if tracer.startswith("e_s_l"):
+        base = "c0_l" + tracer[-2:]
+    elif tracer.startswith("e_i_l"):
+        base = "e_l" + tracer[-2:]
+    elif tracer.startswith("szv_i_l"):
+        base = "si_l" + tracer[-2:]
+    else:
+        base = {
+            "v_i": "ice",
+            "v_s": "sn",
+            "a_i": "a",
+            "oa_i": "age",
+            "a_ip": "ap",
+            "v_ip": "vp",
+            "v_il": "vl",
+        }.get(tracer)
+    require(base is not None, f"unregistered ICE_RHEO moment tracer {tracer}")
+    return moment + base
+
+
+def _restart_xy(dataset: netCDF4.Dataset, name: str) -> np.ndarray:
+    require(name in dataset.variables, f"active restart lacks {name}")
+    variable = dataset[name]
+    require(variable.dimensions[-2:] == ("y", "x"), f"{name}: restart x/y layout changed")
+    leading = (0,) * (variable.ndim - 2)
+    value = np.asarray(variable[leading]).T
+    require(value.dtype == np.float64, f"{name}: active restart is not fp64")
+    require(bool(np.all(np.isfinite(value))), f"{name}: active restart is non-finite")
+    return value
+
+
+def _restart_moments(path: Path, card) -> SI3PratherMoments:
+    expected = {
+        _moment_restart_name(moment, tracer)
+        for moment in SI3_PRATHER_MOMENT_NAMES
+        for tracer in gate.ICE_RHEO_TRACERS
+    }
+    with netCDF4.Dataset(path) as dataset:
+        discovered = {
+            name for name in dataset.variables if name.startswith(("sx", "sy"))
+        }
+        require(
+            discovered == expected,
+            "active restart moment roster changed: "
+            f"missing={sorted(expected - discovered)}, extra={sorted(discovered - expected)}",
+        )
+        leaves = []
+        for moment in SI3_PRATHER_MOMENT_NAMES:
+            physical = np.stack(
+                [
+                    _restart_xy(dataset, _moment_restart_name(moment, tracer))
+                    for tracer in gate.ICE_RHEO_TRACERS
+                ],
+                axis=-1,
+            )
+            leaves.append(
+                jnp.pad(
+                    jnp.asarray(physical),
+                    (
+                        (gate._HALO_WIDTH, gate._HALO_WIDTH),
+                        (gate._HALO_WIDTH, gate._HALO_WIDTH),
+                        (0, 0),
+                    ),
+                    mode="wrap",
+                )
+            )
+    return tuple(leaves)  # type: ignore[return-value]
+
+
+def _active_ridging_projection(card, frame: dict[str, np.ndarray], next_frame):
+    """Isolate redistribution on the selected oracle entry state."""
+
+    dynamics = card.initial_state.dynamics._replace(
+        u_ice_u=next_frame["u_ice"], v_ice_v=next_frame["v_ice"]
+    )
+    forcing = card.forcing_template._replace(concentration_t=frame["a_i"][..., 0])
+    divergence, deformation = si3_cgrid_deformation(
+        dynamics, forcing, card.metrics, card.dynamics_config
+    )
+    state = SI3JPL1RidgingState(
+        ice_area=jnp.asarray(frame["a_i"][..., 0]),
+        open_water_area=1.0 - jnp.asarray(frame["a_i"][..., 0]),
+        ice_volume=jnp.asarray(frame["v_i"][..., 0]),
+        snow_volume=jnp.asarray(frame["v_s"][..., 0]),
+        age_content=jnp.asarray(frame["oa_i"][..., 0]),
+        pond_area=jnp.asarray(frame["a_ip"][..., 0]),
+        pond_volume=jnp.asarray(frame["v_ip"][..., 0]),
+        pond_lid_volume=jnp.asarray(frame["v_il"][..., 0]),
+        snow_enthalpy=jnp.asarray(frame["e_s"][..., :, 0]),
+        ice_enthalpy=jnp.asarray(frame["e_i"][..., :, 0]),
+        ice_salt_content=jnp.asarray(frame["szv_i"][..., :, 0]),
+    )
+    result, losses = apply_si3_jpl1_ridging(
+        state, divergence, deformation, card.dt_s, config=card.ridging_config
+    )
+    halo = gate._HALO_WIDTH
+    interior = (slice(halo, -halo), slice(halo, -halo))
+    iterations = np.asarray(losses.iterations)[interior]
+    unique, counts = np.unique(iterations, return_counts=True)
+    return {
+        "scope": "isolated arm on oracle entry state before Prather advection",
+        "max_abs_ice_area_change": float(
+            np.max(np.abs(np.asarray(result.ice_area - state.ice_area)[interior]))
+        ),
+        "max_abs_open_water_change": float(
+            np.max(
+                np.abs(np.asarray(result.open_water_area - state.open_water_area)[interior])
+            )
+        ),
+        "iteration_population": {
+            str(int(value)): int(count) for value, count in zip(unique, counts, strict=True)
+        },
+        "max_iterations": int(np.max(iterations)),
+    }
+
+
+def run_active_window(
+    root: Path,
+    restart_root: Path = _ACTIVE_RESTART_ROOT,
+    *,
+    plant_field: bool = False,
+) -> dict[str, object]:
+    """Score completed step 8 from oracle state plus restart-carried moments."""
+
+    entry_number = _ACTIVE_COMPLETED_STEP
+    target_number = entry_number + 1
+    _, entry = gate.oracle_gate.read_frame(
+        root / f"oracle_ice_step_entry_kt{entry_number:08d}.bin"
+    )
+    _, target = gate.oracle_gate.read_frame(
+        root / f"oracle_ice_step_entry_kt{target_number:08d}.bin"
+    )
+    with netCDF4.Dataset(root / "mesh_mask.nc") as dataset:
+        mesh = {name: np.asarray(dataset[name][:]) for name in gate.MESH_FIELDS}
+    with netCDF4.Dataset(root / "output.init_ice.nc") as dataset:
+        ocean_temperature_k = np.asarray(dataset["sst"][0]) + constants.T_freeze
+    card = build_ice_rheo_card(entry, mesh, ocean_temperature_k)
+    entry_restart = restart_root / (
+        f"ICE_RHEO_OMIP_L3_{_ACTIVE_ENTRY_RESTART_STEP:08d}_restart_ice.nc"
+    )
+    target_restart = restart_root / (
+        f"ICE_RHEO_OMIP_L3_{_ACTIVE_COMPLETED_STEP:08d}_restart_ice.nc"
+    )
+    require(entry_restart.is_file(), f"missing active entry restart: {entry_restart}")
+    require(target_restart.is_file(), f"missing active target restart: {target_restart}")
+    state = card.initial_state._replace(moments=_restart_moments(entry_restart, card))
+    candidate = step_ice_rheo_card(card, state, completed_steps=_ACTIVE_ENTRY_RESTART_STEP)
+    fields = gate._candidate_fields(card, candidate)
+    if plant_field:
+        fields["v_s"] = fields["v_s"].copy()
+        fields["v_s"][gate._HALO_WIDTH + 10, gate._HALO_WIDTH + 10] += gate._PLANT_MAGNITUDE
+
+    rows: list[dict[str, object]] = []
+    for name, value in zip(
+        ("e1t", "e2t", "e1u", "e2u", "e1v", "e2v", "e1f", "e2f"),
+        card.metrics[:8],
+        strict=True,
+    ):
+        rows.append(
+            gate._score(
+                f"geometry.{name}",
+                gate._mesh_xy(mesh[name]),
+                np.asarray(value)[
+                    gate._HALO_WIDTH : -gate._HALO_WIDTH,
+                    gate._HALO_WIDTH : -gate._HALO_WIDTH,
+                ],
+            )
+        )
+    for name, value in (
+        ("tmask", card.forcing_template.tmask_t),
+        ("umask", card.forcing_template.umask_u),
+        ("vmask", card.forcing_template.vmask_v),
+    ):
+        rows.append(
+            gate._score(
+                f"geometry.{name}",
+                gate._mesh_xy(mesh[name]).astype(bool),
+                np.asarray(value)[
+                    gate._HALO_WIDTH : -gate._HALO_WIDTH,
+                    gate._HALO_WIDTH : -gate._HALO_WIDTH,
+                ].astype(bool),
+                exact=True,
+            )
+        )
+    for name, value in fields.items():
+        rows.append(
+            gate._score(
+                f"active.step{_ACTIVE_COMPLETED_STEP}.{name}",
+                gate._oracle_field(target, name)[
+                    gate._HALO_WIDTH : -gate._HALO_WIDTH,
+                    gate._HALO_WIDTH : -gate._HALO_WIDTH,
+                ],
+                value[
+                    gate._HALO_WIDTH : -gate._HALO_WIDTH,
+                    gate._HALO_WIDTH : -gate._HALO_WIDTH,
+                ],
+                uninformative_zero=name in gate.UNINFORMATIVE_ZERO_FIELDS,
+            )
+        )
+    with netCDF4.Dataset(target_restart) as dataset:
+        for moment_index, moment in enumerate(SI3_PRATHER_MOMENT_NAMES):
+            for tracer_index, tracer in enumerate(gate.ICE_RHEO_TRACERS):
+                rows.append(
+                    gate._score(
+                        "active_moment."
+                        + _moment_restart_name(moment, tracer),
+                        _restart_xy(
+                            dataset, _moment_restart_name(moment, tracer)
+                        ),
+                        np.asarray(candidate.moments[moment_index])[
+                            gate._HALO_WIDTH : -gate._HALO_WIDTH,
+                            gate._HALO_WIDTH : -gate._HALO_WIDTH,
+                            tracer_index,
+                        ],
+                        uninformative_zero=(
+                            tracer in gate.UNINFORMATIVE_ZERO_FIELDS
+                        ),
+                    )
+                )
+    require(
+        len(rows)
+        == _ACTIVE_ORDINARY_AND_GEOMETRY_ROWS + 5 * len(gate.ICE_RHEO_TRACERS),
+        "active row loss",
+    )
+    debts = [row for row in rows if row["status"] == "DEBT"]
+    informative = [row for row in rows if row["status"] != "UNINFORMATIVE"]
+    owner = max(informative, key=lambda row: float(row["normalized_max_abs"]))
+    return {
+        "gate": "nemo-si3-phase2-rung34-active-window-v1",
+        "status": "AT-BAR" if not debts else "DEBT",
+        "exit_code": 0 if not debts else 1,
+        "bar": gate.POINTWISE_BAR,
+        "cpu_only": True,
+        "precision_policy": "fp64",
+        "selected_completed_step": _ACTIVE_COMPLETED_STEP,
+        "prediction": {
+            "first_over_bar_row": "stress1_i",
+            "status": (
+                "CONFIRMED" if str(owner["name"]).endswith("stress1_i") else "REFUTED"
+            ),
+        },
+        "owner": owner,
+        "debt_rows": debts,
+        "rows": rows,
+        "ridging_projection": _active_ridging_projection(card, entry, target),
+        "coverage": {
+            "ordinary_and_geometry_rows": _ACTIVE_ORDINARY_AND_GEOMETRY_ROWS,
+            "moment_rows": 5 * len(gate.ICE_RHEO_TRACERS),
+            "uninformative_zero_fields": sorted(gate.UNINFORMATIVE_ZERO_FIELDS),
+        },
+        "artifacts": {
+            str(entry_restart): gate._sha256(entry_restart),
+            str(target_restart): gate._sha256(target_restart),
+        },
+        "plant": {"field": plant_field, "magnitude": gate._PLANT_MAGNITUDE},
+    }
+
+
 def run_sweep(root: Path, *, last_frame: int = LAST_ENTRY_FRAME) -> dict[str, object]:
     require(2 <= last_frame <= LAST_ENTRY_FRAME, "last frame outside 2..720")
     frame1_path = root / "oracle_ice_step_entry_kt00000001.bin"
@@ -242,8 +512,19 @@ def main() -> int:
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--last-frame", type=int, default=LAST_ENTRY_FRAME)
     parser.add_argument("--ridging-regime", action="store_true")
+    parser.add_argument("--active-window", action="store_true")
+    parser.add_argument("--plant-field", action="store_true")
+    parser.add_argument("--restart-root", type=Path, default=_ACTIVE_RESTART_ROOT)
     args = parser.parse_args()
-    if args.ridging_regime:
+    require(
+        not (args.ridging_regime and args.active_window),
+        "choose at most one specialized rung-3.4 gate",
+    )
+    if args.active_window:
+        report = run_active_window(
+            args.root, args.restart_root, plant_field=args.plant_field
+        )
+    elif args.ridging_regime:
         report = run_ridging_regime_scan(
             args.root, last_completed_step=args.last_frame - 1
         )
