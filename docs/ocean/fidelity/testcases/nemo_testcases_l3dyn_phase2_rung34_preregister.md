@@ -401,3 +401,28 @@ subcycles will be byte-exact.  CONFIRM is zero ULP for `zp_delt`, `zbeta`, all
 three stresses and both velocities; REFUTE is any nonzero row, followed by the
 same first-operand descent.  Native transcendental policy remains the default
 for every existing A-grid/user card, so this is not a global default change.
+
+### Round-10 outcome (recorded after the arms)
+
+The exact-input aEVP prediction is **CONFIRMED**: CPU production JIT, the
+independent written-order replay, and the NEMO endpoint are byte-exact for U,
+V, and all three stress carries after 100 subcycles (`0 / 9801` each).  The
+private unrounded arm makes all five rows nonzero.  The final one-ULP operand
+was the F-stress update: NEMO computes `1/(alpha_f+1)` and then multiplies at
+`icedyn_rhg_evp.F90:476-489`; replacing that with a direct numerator division
+was not source-equivalent.
+
+The broader completed-step prediction is **REFUTED**.  Before the solver, the
+testcase card's extensive `field*area/area` bridge changes `v_i` in
+`164 / 10609` cells and `v_s` in `172 / 10609`, by one ULP each.  The complete
+step retains three stress DEBT rows (`1.1989e-14`--`2.5963e-14` normalized).
+Accordingly, the preregistered stop fired: steps 2--8 and a new 9--720 walk
+were not acceptance-scored.
+
+The H79 scalar-libm operand prediction is **CONFIRMED at `P/delta`** on the
+WRITE-only ICE_RHEO step-8 subcycle dump: vector NumPy exponential is nonzero
+in `94,986 / 1,008,016` cells with maximum `0.00390625`, while scalar glibc
+libm is `0 / 1,008,016`.  Its broader active-window trajectory prediction is
+UNMEASURED because the primary completed-step stop condition was false.  The
+full measurements, controls, hashes, and ASKED/UNASKED dispositions are in the
+phase-2 receipt.

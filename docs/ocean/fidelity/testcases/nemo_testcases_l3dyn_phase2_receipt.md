@@ -1,4 +1,4 @@
-# SI3 lane 3 — phase-2 receipt (rungs 3.1, 3.2, and 3.3)
+# SI3 lane 3 — phase-2 receipt (rungs 3.1 through 3.4)
 
 Issue: climate-federation/legoESM #1699
 
@@ -28,6 +28,10 @@ Phase-2 commit ledger:
   `3489594617c`;
 * 720-frame SI3 shear replay and active-window hardening: `c5722694454`,
   `d53bcb2ace1`, `72b17eba2d1`, and `5739462e852`.
+* round-10 aEVP source-rounding preregistrations: `968524ca6b9f` and
+  `c61371946e79`;
+* shared scalar-libm policy import: `f8b46e31e065`;
+* source-exact C-grid aEVP implementation and gates: `0458d8d4a8ee`.
 
 Oracle roots: `/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv1d/final`,
 `/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv2d/final`, and
@@ -1156,6 +1160,150 @@ instrumentation at `ridging.py:637-714,899`, the row-level plant at
 `:414-545`.  Ruff is clean on the same set with only the repository's
 Fortran-name `N803/N806` exceptions.
 
+### Round-10 aEVP source materialization: exact operator, full-card DEBT
+
+**Headline result: the C-grid aEVP operator is BIT-EXACT from exact oracle
+intensive inputs, but rung 3.3 remains DEBT end to end.**  The completed-step
+condition for continuing through steps 2--720 is therefore REFUTED, and no new
+long walk was run.  This section supersedes the Round-4 statement that the
+compiled association itself was unavoidable debt; it does not rewrite the
+historical measurements that exposed it.
+
+The one shared rounding implementation was brought from SI3-thermodynamics
+commit `86a8eb21d189`; the direct identity/JIT/gradient test is byte-for-byte
+the GYRE test from `2a7b1f7ae258`.  The implementation of
+`nemo_source_round` was not changed.  Its docstring alone now states the
+measured contract correctly: `optimization_barrier` by itself does not force
+the required materialization; the finite-classification `select` plus
+`copysign` identity is the operative compiled guard.  The shared scalar-libm
+transcendental module and its test are byte-for-byte from GYRE commit
+`61180a6776c4`; the compatible `PrecisionPolicy.transcendentals` field was
+ported onto this branch.  Native transcendental evaluation remains the global
+default.  Only the two NEMO C-grid testcase cards select `fp64/libm`.
+
+The production C-grid arm uses the shared helper after each written operation
+registered in the Round-10 preregistration: F shear
+(`icedyn_rhg_evp.F90:392-399`), T shear/divergence/tension/delta (`:401-424`),
+the delta floor and `P/delta` halo (`:423-427`), the separately recomputed wide
+T operands (`:430-440`), adaptive alpha/beta (`:442-477`), T/F stress updates
+(`:457-489`), stress divergence (`:493-510`), cross velocities (`:512-514`),
+drag/Coriolis/RHS/mass velocity updates (`:530-737`), and the full periodic
+halo exchange (`:634,741`).  In particular, `stress12` now literally computes
+`1/(alpha_f+1)` and then multiplies the numerator, matching `:476-489`; direct
+division was the final one-ULP subcycle-2 discrepancy.  This is one shared
+C-grid implementation with no card switch.  The old association exists only
+as a private one-variable replay ablation.
+
+The final CPU/fp64 production-JIT replay starts with the exact bytes in oracle
+entry `kt=1`.  After subcycle 1, the first active stress update at subcycle 2,
+and all 100 subcycles, every registered carry is byte-exact:
+
+| registered aEVP row after 100 subcycles | nonzero / cells | max ULP | status |
+|---|---:|---:|---|
+| `u_ice` | `0 / 9801` | 0 | BIT-EXACT |
+| `v_ice` | `0 / 9801` | 0 | BIT-EXACT |
+| `stress1_i` | `0 / 9801` | 0 | BIT-EXACT |
+| `stress2_i` | `0 / 9801` | 0 | BIT-EXACT |
+| `stress12_i` | `0 / 9801` | 0 | BIT-EXACT |
+
+There is consequently no first non-bit-exact internal aEVP operand for exact
+oracle inputs.  The independent NumPy written-order replay, production JIT,
+and NEMO endpoint agree on all five carries.  The private ablation binds:
+removing only `nemo_source_round` makes all five rows nonzero; the three stress
+maxima are `3.1377567211166024e-11`, `2.4726887204451486e-11`, and
+`7.474909580196254e-12` for stress1, stress2, and stress12.  The existing A-grid
+preservation guard remains byte-identical for both pre-existing paths: EVP
+SHA256 `e4ecb3561c33b7d246ef8122807dcb7c9f690dc96c20dd6d9e5a024d0b9351d1`
+and mEVP SHA256
+`83b4727c5d1d35698368a1697f21b87a537dd424678bb4aa431c96190b840282`.
+
+The full card exposes an earlier representation boundary.  Its prognostic
+transport state stores extensive `field*cell_area`, then the dynamics forcing
+recovers intensives by division.  Against the original oracle intensives that
+round trip is exact for `a_i`, `v_ip`, and `v_il`, but changes `v_i` in
+`164 / 10609` cells by at most one ULP (`1.1102230246251565e-16`) and `v_s` in
+`172 / 10609` cells by at most one ULP (`1.3877787807814457e-17`).  Feeding
+only those bridged inputs through the now-exact aEVP operator is sufficient to
+produce stress maxima `3.2741809263825417e-11`,
+`4.5361048250924796e-11`, and `6.30961949354969e-12` after 100 subcycles.
+The actual completed-step gate remains DEBT in exactly the stress family:
+
+| full-card completed-step row | max absolute | normalized / relative | status |
+|---|---:|---:|---|
+| `stress1_i` | `6.02540239924565e-11` | `2.543362923424347e-14 / 2.543362923424347e-14` | DEBT |
+| `stress2_i` | `3.1036506698001176e-11` | `2.5962997588627242e-14 / 2.5962997588627242e-14` | DEBT |
+| `stress12_i` | `7.275957614183426e-12` | `1.1988931990227963e-14 / 1.1988931990227963e-14` | DEBT |
+
+Thus the old 2/3/3-ULP compiled-stress association is **CONFIRMED fixed**.
+The first full-model discrepancy is instead a **CONFIRMED remaining
+representation defect** before rheology.  The Round-9 720-step separation
+therefore includes amplification downstream of a real nonexact input, not an
+unavoidable source-association floor.  Whether this bridge exclusively owns
+the entire old step-720 state is UNMEASURED; no exclusive nonlinear mechanism
+claim is made.
+
+The preregistered transport/moment consequence is not promoted.  Round 9
+already measured 160/160 endpoint moments byte-exact when the oracle U/V inputs
+are supplied, but the ordinary card does not supply bit-exact dynamics inputs.
+Because completed step 1 is not byte-exact, the explicit stop condition barred
+the step-2--8 active-window rescore and a new step-9--720/restart walk.  The
+external `round10_active_window.json`, produced during operand descent before
+the stop disposition was finalized, is retained but REJECTED as acceptance
+evidence.  The accepted Round-9 full walk/restart remains the only 9--720
+trajectory evidence and remains loudly DEBT.
+
+The secondary H79 arm is also measured from a WRITE-only copied-oracle dump.
+NEMO forms H79 strength at `icedyn_rdgrft.F90:1048-1056`, and consumes it as
+`P/(delta+rn_creepl)*zmsk` at `icedyn_rhg_evp.F90:420-427`.  On ICE_RHEO entry
+frame 8, vector `np.exp` leaves `94,986 / 1,008,016` `P/delta` cells nonzero,
+with maximum `0.00390625`; scalar glibc `libm.exp` gives
+`0 / 1,008,016`, max zero.  This confirms the scalar-libm operand and refutes
+vector math as an oracle substitute.  The broader secondary prediction of a
+byte-exact ordinary active-window step is UNMEASURED under the primary stop
+condition.
+
+The copied NEMO instrumentation was confined to
+`/tmp/si3-round10-nemo/BLD_clean` and
+`/tmp/si3-r34-round10-BLD`; run products are under the external Round-10 roots.
+No file in the shipped NEMO source or shipped testcase was modified.  The
+ICE_RHEO copied-probe `kt=8` entry hash
+`3ace5cd197d80c22e93a3ac84c5beebc5c2e43489dfdb57993adde2196a25dc9`
+is byte-identical to the accepted `final/` frame, so the local dump did not
+change the model trajectory.
+
+Requested Rule-8/Rule-12 and control rows are explicit rather than folded into
+an overall exit.  Source materialization moves five exact-input aEVP rows from
+nonzero in the private arm to `0 / 9801`; it also exposes, rather than masks or
+reverts for, the two nonexact extensive-bridge input rows and three full-card
+stress DEBT rows.  The scored solver plant moves
+`trajectory.post_step_00000001.u_ice` from clean
+`3.3306690738754696e-16` normalized (AT-BAR) to
+`3.896295744987288e-6` (DEBT); its self-check keys on that row transition, not
+the already-red gate exit.  The Round-9 active plant remains independently
+bound at row level: `active.step8.v_s` moves from AT-BAR
+`2.7755575615628914e-17` to DEBT `9.999999439624929e-11`.  Exact rows print
+their numerator and denominator as `0 / n`; there is no zero-denominator
+division or hidden field count.
+
+| round-10 artifact | SHA-256 |
+|---|---|
+| exact-input 100-subcycle replay + private ablation + bridge arm | `63923aa77f09cb00a68509168bfa773d208415b3f7956263b073fdc9e8f70bea` |
+| full rung-3.3 step-1 card gate (expected nonzero exit) | `876b89129aee21b9412b6ea82a7dddb378b18e701881c13db2f906ad3a49d0dc` |
+| ICE_RHEO H79 scalar-libm discriminator | `24b8279e7c4603689095e2577a576f12b475eb6af2343cca27b17e32414fc2b0` |
+| rung-3.3 copied-oracle subcycle 1 / subcycle 2 dumps | `c0a5f06865cacd6940d5c53c7f0fce0f7b8e5179bda139761b5a810830b9ad15` / `d218b65e18e03a30a9d2b610e0a0ae0bf76591b781ad66078b49ccddda547641` |
+| ICE_RHEO copied-oracle subcycle-1 dump | `367a8fb7fab87825d425eec32250427517681c713fbc5e33164e8e8433edecd4` |
+| shared source-rounding module / exact imported test | `2c064668a804e572970229e8360929106d7b75722fea13c7c866024691fc8d42` / `e797dfaeb2762d4297f5c9f4759d03fdbb3547c5e1dc703934d43f25d9db6302` |
+| exact imported transcendental module / test | `bb324d5245160c4115094d198fd8d3ae2f58694c6cd29c2f67c94049dc572724` / `524bd716f96feb65a05eb2a345aa65334d49d2d8c523b55df53a3316d3604f9f` |
+
+Focused CPU/fp64 verification is **103 passed in 144.05 s**.  The explicit
+touched-file coefficient/constant selection is **18 passed in 1.18 s**.
+The required repository-wide ratchet was also run and is honestly red:
+**3,751 passed, 2 skipped, 7 failed**.  All seven failures are outside this
+lane's diff: the same two inline-coefficient and five hardcoded-constant rows
+already listed above.  Ruff passes every Round-10 path with the repository's
+legacy Fortran-name and exact-import ordering exceptions (`N803`, `N806`,
+`I001`).
+
 ## Loudly UNMEASURED / deferred
 
 Within-step x/y Prather split states; ORCA1
@@ -1170,7 +1318,7 @@ this paragraph.
 
 ## End-of-task ASKED / UNASKED choice list
 
-The mandatory round-7--9 choice record is tabular so scope decisions cannot be
+The mandatory round-7--10 choice record is tabular so scope decisions cannot be
 lost inside narrative:
 
 | round | choice | disposition | evidence/disposition |
@@ -1190,6 +1338,11 @@ lost inside narrative:
 | 9 | Walk completed steps 9--720 with production JIT/fp64/CPU, score the restart, and scan the excessive-removal branch | ASKED | Completed; 173 informative final DEBT rows; no clamp firing in 719 available frame transitions |
 | 9 | Treat zero age/pond receivers as trajectory evidence | UNASKED | Four state rows and their 20 zero moment rows remain UNINFORMATIVE; ORCA1 `ln_pnd=F` disclosed |
 | 9 | Change schemes/defaults, relax the bar, infer a nonlinear owner, edit shipped NEMO, use GPU/MPI, push, or delete artifacts | UNASKED | None performed; the interrupted zero-byte artifact is retained and flagged REJECTED |
+| 10 | Import the shared rounding helper and direct test at their source commits; source-round every executed C-grid aEVP statement without a card switch | ASKED | Imported from `86a8eb21d189`/`2a7b1f7ae258`; exact-input aEVP is `0 / 9801` for all five carries |
+| 10 | Import the shared scalar-libm path and select it only for the two NEMO C-grid cards | ASKED | Module/test from `61180a6776c4`; global and A-grid defaults remain native |
+| 10 | Bind row-level controls, enumerate exact numerators as `0 / n`, and classify the first remaining operand | ASKED | Private ablation and scored U plant bind; `v_i`/`v_s` extensive bridge is the first full-card nonexact input |
+| 10 | Continue the active window and steps 9--720 if and only if completed step 1 is byte-exact | ASKED | Condition REFUTED by three stress DEBT rows; no new conditional walk or restart claim |
+| 10 | Change the shared helper implementation, relax the bar, change A-grid/default schemes, edit shipped NEMO, use GPU/MPI, commit large dumps, delete artifacts, push | UNASKED | None performed; copied-build WRITE-only dumps stay external |
 
 **ASKED choices:** resolve the rung-3.1 review HOLD in its own commit; implement
 rungs 3.1 and 3.2 against the pinned shipped cases; fp64/CPU only and `jpl=1`;
