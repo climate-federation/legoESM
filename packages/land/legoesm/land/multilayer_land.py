@@ -608,6 +608,9 @@ def _step_multilayer_land_impl(
             TgC_override=TgC_override,
             LAI_override=LAI_override,
             fwet=_fwet_pre,
+            # Warm start: the previous step's last converged canopy solution
+            # (None on a state that does not carry the cache -> cold start).
+            canopy_seed=state.canopy_x,
             # Bare-soil evaporation efficiency = TWO complementary top-layer
             # limiters, applied as a beta conductance efficiency in the canopy
             # soil energy balance (both tie evaporation to the fast-drying
@@ -1109,6 +1112,14 @@ def _step_multilayer_land_impl(
         # store (no ``None`` -> array carry-structure change under a scan).
         W_canopy=(_match(W_canopy_new, state.W_canopy)
                   if state.W_canopy is not None else None),
+        # Canopy warm-start cache.  Carried ONLY when the incoming state already
+        # carries it, so the pytree structure is invariant under a ``lax.scan``
+        # (a None -> array transition mid-scan would be a carry-structure
+        # change).  ``surface_out.canopy_x`` is None for every non-canopy
+        # surface scheme, in which case the cache is dropped.
+        canopy_x=(_match(surface_out.canopy_x, state.canopy_x)
+                  if (state.canopy_x is not None
+                      and surface_out.canopy_x is not None) else None),
     )
 
     # --- Post-step surface state for coupler ---
@@ -1559,6 +1570,16 @@ def init_multilayer_land_state(
         canopy_state=canopy_state,
         # Dry canopy at start; carried only when interception is configured.
         W_canopy=(jnp.zeros(ncol) if config.interception is not None else None),
+        # Canopy warm-start cache, allocated (as "no converged solution yet")
+        # only for the scheme that has a Newton closure to seed.  It must be
+        # ALLOCATED here rather than left None and filled on the first step: a
+        # ``lax.scan`` carry cannot change pytree structure mid-scan.  All-NaN
+        # is the honest sentinel — the canopy tests it with ``isfinite`` and
+        # cold-starts every column on the first step, exactly as before.
+        canopy_x=(jnp.full((ncol, 6), jnp.nan, dtype=T_soil.dtype)
+                  if (isinstance(config.surface_scheme, TwoLeafCanopyConfig)
+                      and not isinstance(config.surface_scheme,
+                                         CLMMLCanopyConfig)) else None),
     )
 
 
