@@ -72,7 +72,13 @@ GRID_RESOLUTIONS: dict[str, str] = {
 
 GRID_TYPES = list(GRID_RESOLUTIONS.keys())
 
-DEFAULT_NLEV = 40
+# Vertical level count for the matrix cases.  ``LEGOESM_MATRIX_NLEV`` overrides
+# it for a one-variable level-count arm (#1029: is the terrain pressure-gradient
+# truncation error, which falls with vertical resolution, what seeds the
+# held_suarez_topo runaway?).  Unset -> 40, exactly as before, so no committed
+# configuration moves; the override exists so an arm need not edit this file
+# while a run is reading it.
+DEFAULT_NLEV = int(os.environ.get("LEGOESM_MATRIX_NLEV", "40"))
 
 
 def _mpas_integrator() -> str:
