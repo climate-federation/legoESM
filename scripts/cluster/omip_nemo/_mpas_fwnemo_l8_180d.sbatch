@@ -70,6 +70,10 @@ LEG=${2:-1}
 # sensitivity if |dnino3| > 0.2 C at d30; otherwise the early transient is
 # not resolution-limited on this grid.
 RESTART_FROM=""
+# Level 8 OOMed a 21.8 GiB allocation under JAX's default 75% preallocation
+# cap (job 9631427); let XLA use the whole card.
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.98
 
 ROOT=/burg-archive/glab/users/pg2328/legoESM; cd $ROOT || exit 1
 HEAD=$(git rev-parse HEAD)
