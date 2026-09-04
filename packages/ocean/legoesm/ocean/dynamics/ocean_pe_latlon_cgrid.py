@@ -4023,7 +4023,17 @@ def surface_stress_faces(surface_forcing, u_dtype, z_coord, J, grid):
     return tau_i_u, tau_j_v, dz_0_u, dz_0_v
 
 
-def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S, h_k, z_coord, J, grid, rho_0, mask, mask_3d, *, route_heat_to_implicit=False, withhold_stress=False, nemo_two_band_full_shortwave=False, c_sw=None):
+def _shortwave_surface_composition(sw_down, scheme, dtype):
+    """Flux handed to the selected penetrative kernel before qns removal."""
+    fraction = 1.0 if scheme == "nemo_qsr_2bd" else 0.94
+    return sw_down * jnp.asarray(fraction, dtype=dtype)
+
+
+def _bc_external_surface_forcing(
+    du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S, h_k,
+    z_coord, J, grid, rho_0, mask, mask_3d, *, route_heat_to_implicit=False,
+    withhold_stress=False, shortwave_scheme=None, c_sw=None,
+):
     """Stage 10b': external surface forcing (wind stress tau_x/tau_y, net heat
     q_net, penetrating shortwave) from a coupled / OMIP OceanSurfaceForcing,
     with tripolar east-north -> grid-aligned rotation. Pure verbatim extraction
@@ -4125,7 +4135,9 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
                 # denominator guard inside the RGB kernel.
                 wet_cell = jnp.asarray(h_k > 0.0, dtype=T.dtype)
                 sw_tend = apply_shortwave_penetration(
-                    ShortwavePenetrationConfig(scheme="rgb_chl"),
+                    ShortwavePenetrationConfig(
+                        scheme=("nemo_qsr_rgb" if shortwave_scheme
+                                == "nemo_qsr_rgb" else "rgb_chl")),
                     sw_T,
                     chl=jnp.asarray(_sf_chl, dtype=T.dtype),
                     dz_live=h_k,
@@ -4140,14 +4152,14 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
                 # instead retains a 6% skin component.  This is one kernel
                 # with a reference-arm selector, not a second implementation.
                 sw_T = jnp.asarray(_sf_sw, dtype=T.dtype)
-                sw_absorbed = (
-                    sw_T if nemo_two_band_full_shortwave else
-                    sw_T * jnp.asarray(0.94, dtype=T.dtype))
+                _nemo_qsr_2bd = shortwave_scheme == "nemo_qsr_2bd"
+                sw_absorbed = _shortwave_surface_composition(
+                    sw_T, shortwave_scheme, T.dtype)
                 q_nonsolar = q_net_T - sw_absorbed
                 dT_target = dT_target.at[..., 0].add(
                     q_nonsolar * inv_rho_csw_dz * mask
                 )
-                if not nemo_two_band_full_shortwave:
+                if not _nemo_qsr_2bd:
                     from legoesm.ocean.physics.shortwave_penetration import (
                         shortwave_penetration_tendency,
                     )
@@ -5030,8 +5042,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             h_k, z_coord, J, grid, rho_0, mask, mask_3d,
             route_heat_to_implicit=_sf_implicit,
             withhold_stress=_stress_implicit,
-            nemo_two_band_full_shortwave=bool(getattr(
-                config, "nemo_two_band_full_shortwave", False)),
+            shortwave_scheme=getattr(
+                getattr(getattr(config, "physics", None),
+                        "shortwave_penetration", None),
+                "scheme", None),
             c_sw=getattr(
                 getattr(getattr(config, "physics", None), "constants", None),
                 "c_sw", None),

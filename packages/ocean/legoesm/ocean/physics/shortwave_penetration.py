@@ -2,11 +2,11 @@
 
 Two selectable schemes (``ShortwavePenetrationConfig.scheme``):
 
-``"jerlov_2band"`` (default)
+``"jerlov_2band"`` (default) / ``"nemo_qsr_2bd"``
     Spatially-uniform two-band exponential absorption (Paulson & Simpson
     1977, Jerlov water types).  Cheap, no chlorophyll input.
 
-``"rgb_chl"``
+``"rgb_chl"`` / ``"nemo_qsr_rgb"``
     Faithful port of NEMO 5.0.1 ``tra_qsr`` RGB scheme (``ln_qsr_rgb``):
     an infrared band plus three visible (red/green/blue) bands whose
     extinction lengths are chlorophyll-dependent via the Morel & Maritorena
@@ -90,7 +90,11 @@ __physics_contract__ = {
 __param_spec__ = {
     "ShortwavePenetrationConfig": {
         "scheme_key": "ocean.sw_penetration",
-        "excluded": {},
+        "excluded": {
+            "scheme": "discrete NEMO/reference algorithm selector",
+            "water_type": "discrete Jerlov optical class",
+            "rgb_chl_profile": "discrete NEMO chlorophyll-profile selector",
+        },
         "params": {
             "rgb_ir_fraction": {
                 "units": "1", "bounds": (0.4, 0.7), "tunable_tier": 2,
@@ -138,7 +142,10 @@ class ShortwavePenetrationConfig(NamedTuple):
     Parameters
     ----------
     scheme : str
-        ``"jerlov_2band"`` (default) or ``"rgb_chl"``.  See module docstring.
+        ``"jerlov_2band"`` (default), ``"rgb_chl"``, or the source-named
+        NEMO identities ``"nemo_qsr_2bd"`` / ``"nemo_qsr_rgb"``.  The NEMO
+        names select the same physical kernels while preserving NEMO's full-
+        qsr surface composition.
     water_type : str
         Jerlov water type ("I", "IA", "IB", "II", "III") for the two-band
         scheme.  Type I = clearest open ocean, Type III = coastal/turbid.
@@ -160,6 +167,14 @@ class ShortwavePenetrationConfig(NamedTuple):
     rgb_ir_fraction: float = 0.58       # NEMO rn_abs
     rgb_ir_extinction_m: float = 0.35   # NEMO rn_si0 [m]
     rgb_chl_profile: str = "morel_berthon"
+
+
+SHORTWAVE_PENETRATION_SCHEMES = (
+    "jerlov_2band",
+    "rgb_chl",
+    "nemo_qsr_2bd",
+    "nemo_qsr_rgb",
+)
 
 
 # ==============================================================================
@@ -378,11 +393,11 @@ def shortwave_penetration_rgb_tendency(
     array, shape (..., nlev)
         Temperature tendency dT/dt [K/s] from RGB SW absorption.
     """
-    if config.scheme != "rgb_chl":
+    if config.scheme not in ("rgb_chl", "nemo_qsr_rgb"):
         raise ValueError(
             "shortwave_penetration_rgb_tendency is the RGB kernel but got "
             f"scheme={config.scheme!r}; use apply_shortwave_penetration(...) or "
-            "pass ShortwavePenetrationConfig(scheme='rgb_chl')."
+            "pass ShortwavePenetrationConfig(scheme='nemo_qsr_rgb')."
         )
     table = jnp.asarray(_RGB_ATTENUATION_BGR, dtype=sw_down.dtype)  # (61, 3) = (B,G,R)
     wet = wet_cell.astype(dz_live.dtype)
@@ -460,7 +475,7 @@ def apply_shortwave_penetration(
     for the selected scheme raise ``ValueError`` (fail-early, never a silent
     fallback to the other scheme).
     """
-    if config.scheme == "jerlov_2band":
+    if config.scheme in ("jerlov_2band", "nemo_qsr_2bd"):
         if dz_ref is None or z_half_ref is None or jacobian is None:
             raise ValueError(
                 "jerlov_2band SW penetration requires dz_ref, z_half_ref, jacobian"
@@ -468,7 +483,7 @@ def apply_shortwave_penetration(
         return shortwave_penetration_tendency(
             sw_down, dz_ref, z_half_ref, jacobian, config, rho_0, c_sw
         )
-    if config.scheme == "rgb_chl":
+    if config.scheme in ("rgb_chl", "nemo_qsr_rgb"):
         if chl is None:
             raise ValueError("rgb_chl SW penetration requires a chlorophyll field (chl=)")
         if dz_live is None or wet_cell is None:
@@ -478,7 +493,7 @@ def apply_shortwave_penetration(
         )
     raise ValueError(
         f"unknown shortwave penetration scheme {config.scheme!r} "
-        "(expected 'jerlov_2band' or 'rgb_chl')"
+        f"(expected one of {SHORTWAVE_PENETRATION_SCHEMES})"
     )
 
 
@@ -529,7 +544,7 @@ def shortwave_penetration_tendency(
     array, shape (..., nlev)
         Temperature tendency dT/dt [K/s] from SW absorption.
     """
-    if config.scheme != "jerlov_2band":
+    if config.scheme not in ("jerlov_2band", "nemo_qsr_2bd"):
         raise ValueError(
             "shortwave_penetration_tendency is the two-band Jerlov kernel but got "
             f"scheme={config.scheme!r}; call apply_shortwave_penetration(...) to "

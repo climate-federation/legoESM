@@ -207,6 +207,12 @@ def test_jerlov_kernel_rejects_non_jerlov_scheme():
     raise AssertionError("expected ValueError for scheme='rgb_chl'")
 
 
+def test_nemo_qsr_2bd_selector_reuses_two_band_kernel_exactly():
+    generic = _tend(_SW, _DZ, _Z_HALF, 1.0, _cfg(scheme="jerlov_2band"))
+    nemo = _tend(_SW, _DZ, _Z_HALF, 1.0, _cfg(scheme="nemo_qsr_2bd"))
+    np.testing.assert_array_equal(np.asarray(nemo), np.asarray(generic))
+
+
 def test_water_type_plumbing_changes_profile():
     # Type I (clear, zeta2=23) penetrates deeper than type III (turbid, zeta2=7.9)
     # -> less heating in the top layer for type I.

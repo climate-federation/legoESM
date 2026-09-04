@@ -227,6 +227,19 @@ def test_dispatch_unknown_scheme_raises():
                                     jacobian=np.array(1.0))
 
 
+def test_nemo_qsr_rgb_selector_reuses_rgb_kernel_exactly():
+    sw = np.array([[120.0]])
+    chl = np.array([[0.2]])
+    dz = np.array([[[2.0, 8.0]]])
+    wet = np.ones_like(dz)
+    common = dict(sw_down=sw, chl=chl, dz_live=dz, wet_cell=wet)
+    generic = apply_shortwave_penetration(
+        ShortwavePenetrationConfig(scheme="rgb_chl"), **common)
+    nemo = apply_shortwave_penetration(
+        ShortwavePenetrationConfig(scheme="nemo_qsr_rgb"), **common)
+    np.testing.assert_array_equal(np.asarray(nemo), np.asarray(generic))
+
+
 def test_dispatch_rgb_requires_chl():
     cfg = ShortwavePenetrationConfig(scheme="rgb_chl")
     with pytest.raises(ValueError, match="requires a chlorophyll field"):

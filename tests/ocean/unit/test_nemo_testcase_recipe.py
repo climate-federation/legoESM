@@ -132,7 +132,7 @@ def test_gyre_card_selects_complete_resolved_operator_program():
         cfg.physics.convection.enhanced_diffusion.evd_n2_time_level
         == "nemo_now_before"
     )
-    assert cfg.physics.shortwave_penetration.scheme == "jerlov_2band"
+    assert cfg.physics.shortwave_penetration.scheme == "nemo_qsr_2bd"
     assert cfg.physics.shortwave_penetration.water_type == "I"
     assert cfg.barotropic.barotropic_coriolis == "ene_metric"
     assert cfg.barotropic.barotropic_een_coefficient_evaluation == "nemo_literal"
@@ -360,7 +360,7 @@ def test_nemo_testcase_dispatch_does_not_hide_builder_keyerror(monkeypatch):
 
 
 def test_gyre_teos_surface_operand_and_full_two_band_identity():
-    """Pin eosbn2.F90:1500 and the GYRE-only complete-qsr selector."""
+    """Pin eosbn2.F90:1500 and the source-named qsr selector."""
     set_policy(PrecisionPolicy.fp64())
     pt = nemo_potential_temperature_from_conservative(
         jnp.asarray(20.0, dtype=jnp.float64),
@@ -369,8 +369,9 @@ def test_gyre_teos_surface_operand_and_full_two_band_identity():
     assert float(pt) == pytest.approx(20.02391895, abs=5.0e-7)
     gyre = build_gyre_zco_card().recipe.model_config
     lane1 = build_lock_exchange_zco_card().recipe.model_config
-    assert gyre.nemo_two_band_full_shortwave is True
-    assert lane1.nemo_two_band_full_shortwave is False
+    assert gyre.physics.shortwave_penetration.scheme == "nemo_qsr_2bd"
+    assert lane1.physics is None
+    assert "nemo_two_band_full_shortwave" not in gyre._fields
 
 
 def test_nemo_tpoint_bottom_rule_is_selectable_and_unsnapped():

@@ -57,8 +57,11 @@ def run(*, plant: bool = False, only: str | None = None) -> dict:
         "een_e3f_scheme": faithful._replace(een_e3f_scheme="min"),
         "een_metric_weighting": faithful._replace(een_metric_weighting="off"),
         "een_q_boundary": faithful._replace(een_q_boundary="neumann_fill"),
-        "nemo_two_band_full_shortwave": faithful._replace(
-            nemo_two_band_full_shortwave=False),
+        "shortwave_penetration_scheme": faithful._replace(
+            physics=faithful.physics._replace(
+                shortwave_penetration=(
+                    faithful.physics.shortwave_penetration._replace(
+                        scheme="jerlov_2band")))),
     }
     if only is not None:
         require(only in arm_configs, f"unknown selector arm {only!r}")
@@ -76,7 +79,8 @@ def run(*, plant: bool = False, only: str | None = None) -> dict:
             "een_e3f_scheme": cfg.een_e3f_scheme,
             "een_metric_weighting": cfg.een_metric_weighting,
             "een_q_boundary": cfg.een_q_boundary,
-            "nemo_two_band_full_shortwave": cfg.nemo_two_band_full_shortwave,
+            "shortwave_penetration_scheme": (
+                cfg.physics.shortwave_penetration.scheme),
         }
 
     selected = selections(faithful)
@@ -169,7 +173,7 @@ def run(*, plant: bool = False, only: str | None = None) -> dict:
                 "EXP00/namelist_cfg:163-165; dynvor.F90:518-531"),
             "een_q_boundary": (
                 "EXPREF/namelist_ref:1069; dynvor.F90:450-490"),
-            "nemo_two_band_full_shortwave": (
+            "shortwave_penetration_scheme": (
                 "EXP00/namelist_cfg:73,76-79; traqsr.F90:665-712,1274-1276"),
         },
         "arms": reports,
@@ -185,7 +189,7 @@ def main(argv=None) -> int:
         "--only", choices=(
             "tke_n2_time_level", "evd_n2_time_level", "een_e3f_scheme",
             "een_metric_weighting", "een_q_boundary",
-            "nemo_two_band_full_shortwave"))
+            "shortwave_penetration_scheme"))
     args = parser.parse_args(argv)
     try:
         report = run(plant=args.plant, only=args.only)

@@ -1359,6 +1359,17 @@ class _NEMOWSBarotropicTrace(NamedTuple):
     slow_forcing: object
 
 
+def _nemo_qsr_stage3_rate(
+    tendency_kbb, qsr_kbb, qsr_kmm, thickness_kbb, thickness_kmm,
+):
+    """Replace the Kbb qsr component with NEMO's live Kmm stage-3 qsr."""
+    return (
+        (tendency_kbb - qsr_kbb) * thickness_kbb
+        / jnp.maximum(thickness_kmm, 1.0e-10)
+        + qsr_kmm
+    )
+
+
 def _nemo_ws_rk3_tracer_pair_step(
     tr_a: jnp.ndarray,
     tr_b: jnp.ndarray,
@@ -2428,6 +2439,16 @@ class LatLonCGridOceanModel:
                 "and propagates them to physics) instead of the raw "
                 "constructor, or pass matching ConstantsConfig values."
             )
+        if _phys is not None and _phys.shortwave_penetration is not None:
+            from legoesm.ocean.physics.shortwave_penetration import (
+                SHORTWAVE_PENETRATION_SCHEMES,
+            )
+            _shortwave_scheme = _phys.shortwave_penetration.scheme
+            if _shortwave_scheme not in SHORTWAVE_PENETRATION_SCHEMES:
+                raise ValueError(
+                    "physics.shortwave_penetration.scheme must be one of "
+                    f"{SHORTWAVE_PENETRATION_SCHEMES}, got "
+                    f"{_shortwave_scheme!r}")
 
         # #1226: T/u-face metric convention dispatch -- raise on an unknown
         # value rather than silently falling through to create_latlon_geometry's
@@ -5561,10 +5582,11 @@ class LatLonCGridOceanModel:
                 tend.dT_dt.data * h_k_old
                 / jnp.maximum(_h_live_one_half, 1.0e-10))
             if (
-                getattr(_cfg_b, "nemo_two_band_full_shortwave", False)
-                and getattr(
-                    getattr(_cfg_b, "physics", None),
-                    "shortwave_penetration", None) is not None
+                getattr(
+                    getattr(
+                        getattr(_cfg_b, "physics", None),
+                        "shortwave_penetration", None),
+                    "scheme", None) == "nemo_qsr_2bd"
                 and surface_forcing is not None
                 and getattr(surface_forcing, "sw_down", None) is not None
             ):
@@ -5596,10 +5618,9 @@ class LatLonCGridOceanModel:
                     c_sw=_cfg_b.physics.constants.c_sw,
                     z_half_stretch=_r3t_m,
                 )
-                _stage3_T_rate = (
-                    (tend.dT_dt.data - _qsr_b) * h_k_old
-                    / jnp.maximum(_h_live_one_half, 1.0e-10)
-                    + _qsr_m)
+                _stage3_T_rate = _nemo_qsr_stage3_rate(
+                    tend.dT_dt.data, _qsr_b, _qsr_m,
+                    h_k_old, _h_live_one_half)
 
             _stage_source_rates = (
                 (

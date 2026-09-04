@@ -2801,13 +2801,6 @@ class LatLonCGridOceanConfig(NamedTuple):
     # matrices and their three separate ordered recurrences.  Appended to keep
     # every positional constructor byte-compatible.
     zdf_implicit_solver_evaluation: str = "shared_thomas"
-    # NEMO tra_qsr two-band convention: qsr is removed in full from qns by
-    # sbcmod, then all of qsr enters qsr_2BD (traqsr.F90:665-712).  The legacy
-    # legoESM two-band path pre-splits 6% into the skin cell and penetrates
-    # 94%; both conserve the same column heat but differ vertically.  Select
-    # the NEMO convention on certified NEMO cards.  Appended to preserve
-    # positional construction; default False preserves non-NEMO recipes.
-    nemo_two_band_full_shortwave: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

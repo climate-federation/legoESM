@@ -170,7 +170,7 @@ def _model_config(
                 ),
             ),
             shortwave_penetration=ShortwavePenetrationConfig(
-                scheme="jerlov_2band", water_type="I"
+                scheme="nemo_qsr_2bd", water_type="I"
             ),
             mle=None,
         )
@@ -204,7 +204,6 @@ def _model_config(
             lateral_viscosity_operator="nemo_div_curl",
             lateral_viscosity_e3_weighting="nemo_e3",
             surface_stress_implicit=True,
-            nemo_two_band_full_shortwave=True,
             bbl_adv_option=bbl_adv_option,
             bbl_gamma_s=bbl_gamma_s,
             # NEMO's e3w(Kmm) implicit-solve divisor (trazdf.F90:219-221,
