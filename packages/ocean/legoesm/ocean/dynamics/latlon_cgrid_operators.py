@@ -29,6 +29,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.latlon import LatLonGrid  # noqa: F401 — kept for type compat
 from legoesm.grids.operators_latlon_cgrid import (
     pad_ns_zero,
@@ -3737,6 +3738,7 @@ def _nemo_hpg_sco_literal_cgrid_impl(
     g: float,
     *,
     return_components: bool = False,
+    _source_round: bool = True,
 ) -> tuple[jnp.ndarray, ...]:
     """Literal NEMO ``hpg_sco`` recurrence on native east/north faces.
 
@@ -3749,9 +3751,22 @@ def _nemo_hpg_sco_literal_cgrid_impl(
     rhd = jnp.asarray(rhd)
     e3w = jnp.asarray(e3w, dtype=rhd.dtype)
     gdept_z0 = jnp.asarray(gdept_z0, dtype=rhd.dtype)
-    r1_e1u = 1.0 / jnp.asarray(grid.dx_u[:, 1:], dtype=rhd.dtype)
-    r1_e2v = 1.0 / jnp.asarray(grid.dy_v[1:, :], dtype=rhd.dtype)
-    zcoef0 = -jnp.asarray(g, dtype=rhd.dtype) * 0.5
+    sr = nemo_source_round if _source_round else lambda value: value
+
+    def add(left, right):
+        return sr(left + right)
+
+    def subtract(left, right):
+        return sr(left - right)
+
+    def multiply(left, right):
+        return sr(left * right)
+
+    one = jnp.asarray(1.0, dtype=rhd.dtype)
+    half = jnp.asarray(0.5, dtype=rhd.dtype)
+    r1_e1u = sr(one / jnp.asarray(grid.dx_u[:, 1:], dtype=rhd.dtype))
+    r1_e2v = sr(one / jnp.asarray(grid.dy_v[1:, :], dtype=rhd.dtype))
+    zcoef0 = multiply(-jnp.asarray(g, dtype=rhd.dtype), half)
 
     rhd_i1 = jnp.roll(rhd, -1, axis=1)
     rhd_j1 = jnp.roll(rhd, -1, axis=0)
@@ -3760,12 +3775,20 @@ def _nemo_hpg_sco_literal_cgrid_impl(
     dep_i1 = jnp.roll(gdept_z0, -1, axis=1)
     dep_j1 = jnp.roll(gdept_z0, -1, axis=0)
 
-    zhpi = zcoef0 * r1_e1u * (
-        e3w_i1[..., 0] * rhd_i1[..., 0]
-        - e3w[..., 0] * rhd[..., 0])
-    zhpj = zcoef0 * r1_e2v * (
-        e3w_j1[..., 0] * rhd_j1[..., 0]
-        - e3w[..., 0] * rhd[..., 0])
+    zhpi = multiply(
+        multiply(zcoef0, r1_e1u),
+        subtract(
+            multiply(e3w_i1[..., 0], rhd_i1[..., 0]),
+            multiply(e3w[..., 0], rhd[..., 0]),
+        ),
+    )
+    zhpj = multiply(
+        multiply(zcoef0, r1_e2v),
+        subtract(
+            multiply(e3w_j1[..., 0], rhd_j1[..., 0]),
+            multiply(e3w[..., 0], rhd[..., 0]),
+        ),
+    )
     u_levels = []
     v_levels = []
     u_zhpi_levels = []
@@ -3774,22 +3797,54 @@ def _nemo_hpg_sco_literal_cgrid_impl(
     v_zvap_levels = []
     for jk in range(rhd.shape[-1]):
         if jk > 0:
-            zhpi = zhpi + zcoef0 * r1_e1u * (
-                e3w_i1[..., jk]
-                * (rhd_i1[..., jk] + rhd_i1[..., jk - 1])
-                - e3w[..., jk]
-                * (rhd[..., jk] + rhd[..., jk - 1]))
-            zhpj = zhpj + zcoef0 * r1_e2v * (
-                e3w_j1[..., jk]
-                * (rhd_j1[..., jk] + rhd_j1[..., jk - 1])
-                - e3w[..., jk]
-                * (rhd[..., jk] + rhd[..., jk - 1]))
-        zuap = -zcoef0 * (rhd_i1[..., jk] + rhd[..., jk]) * (
-            dep_i1[..., jk] - gdept_z0[..., jk]) * r1_e1u
-        zvap = -zcoef0 * (rhd_j1[..., jk] + rhd[..., jk]) * (
-            dep_j1[..., jk] - gdept_z0[..., jk]) * r1_e2v
-        u_levels.append(zhpi + zuap)
-        v_levels.append(zhpj + zvap)
+            zhpi = add(
+                zhpi,
+                multiply(
+                    multiply(zcoef0, r1_e1u),
+                    subtract(
+                        multiply(
+                            e3w_i1[..., jk],
+                            add(rhd_i1[..., jk], rhd_i1[..., jk - 1]),
+                        ),
+                        multiply(
+                            e3w[..., jk],
+                            add(rhd[..., jk], rhd[..., jk - 1]),
+                        ),
+                    ),
+                ),
+            )
+            zhpj = add(
+                zhpj,
+                multiply(
+                    multiply(zcoef0, r1_e2v),
+                    subtract(
+                        multiply(
+                            e3w_j1[..., jk],
+                            add(rhd_j1[..., jk], rhd_j1[..., jk - 1]),
+                        ),
+                        multiply(
+                            e3w[..., jk],
+                            add(rhd[..., jk], rhd[..., jk - 1]),
+                        ),
+                    ),
+                ),
+            )
+        zuap = multiply(
+            multiply(
+                multiply(-zcoef0, add(rhd_i1[..., jk], rhd[..., jk])),
+                subtract(dep_i1[..., jk], gdept_z0[..., jk]),
+            ),
+            r1_e1u,
+        )
+        zvap = multiply(
+            multiply(
+                multiply(-zcoef0, add(rhd_j1[..., jk], rhd[..., jk])),
+                subtract(dep_j1[..., jk], gdept_z0[..., jk]),
+            ),
+            r1_e2v,
+        )
+        u_levels.append(add(zhpi, zuap))
+        v_levels.append(add(zhpj, zvap))
         u_zhpi_levels.append(zhpi)
         v_zhpj_levels.append(zhpj)
         u_zuap_levels.append(zuap)
@@ -3820,7 +3875,7 @@ def _nemo_hpg_sco_literal_cgrid_impl(
 
 _nemo_hpg_sco_literal_cgrid_compiled = jax.jit(
     _nemo_hpg_sco_literal_cgrid_impl,
-    static_argnames=("return_components",))
+    static_argnames=("return_components", "_source_round"))
 
 
 def nemo_hpg_sco_literal_cgrid(
@@ -3831,16 +3886,17 @@ def nemo_hpg_sco_literal_cgrid(
     g: float,
     *,
     return_components: bool = False,
+    _source_round: bool = True,
 ) -> tuple[jnp.ndarray, ...]:
     """Run NEMO's SCO recurrence identically inside and outside outer JIT."""
     if isinstance(rhd, jax.core.Tracer):
         return _nemo_hpg_sco_literal_cgrid_impl(
             rhd, e3w, gdept_z0, grid, g,
-            return_components=return_components)
+            return_components=return_components, _source_round=_source_round)
     with jax.disable_jit(False):
         return _nemo_hpg_sco_literal_cgrid_compiled(
             rhd, e3w, gdept_z0, grid, g,
-            return_components=return_components)
+            return_components=return_components, _source_round=_source_round)
 
 
 def partial_cell_pgf_correction_x(

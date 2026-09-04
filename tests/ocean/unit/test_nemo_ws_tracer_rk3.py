@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from types import SimpleNamespace
 
+from legoesm import constants
 import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as model_module
 import legoesm.ocean.vertical as vertical_module
 import legoesm.ocean.eos as eos_module
@@ -199,6 +200,30 @@ def test_nemo_hpg_literal_component_exposure_is_the_production_sum():
         np.asarray(value) for value in values)
     np.testing.assert_array_equal(sum_u, zhpi_u + zuap_u)
     np.testing.assert_array_equal(sum_v, zhpj_v + zvap_v)
+
+
+def test_nemo_hpg_source_rounding_arm_is_non_vacuous():
+    """The private pre-fix association changes live HPG bits."""
+    set_policy(PrecisionPolicy.fp64())
+    grid = create_beta_plane_cgrid_geometry(
+        3, 4, dx_m=7.123456789, dy_m=11.987654321,
+        f0=0.0, beta=0.0, cartesian_pseudo_lat=True,
+    )
+    rng = np.random.default_rng(0)
+    rhd = jnp.asarray(rng.normal(0.0, 1.0e-3, (3, 4, 5)), dtype=jnp.float64)
+    e3w = jnp.asarray(rng.uniform(0.1, 100.0, (3, 4, 5)), dtype=jnp.float64)
+    gdept = jnp.cumsum(e3w, axis=-1) + jnp.asarray(
+        rng.normal(0.0, 0.1, (3, 4, 5)), dtype=jnp.float64)
+
+    rounded = jax.jit(lambda r, e, d: nemo_hpg_sco_literal_cgrid(
+        r, e, d, grid, constants.g))(rhd, e3w, gdept)
+    pre_fix = jax.jit(lambda r, e, d: nemo_hpg_sco_literal_cgrid(
+        r, e, d, grid, constants.g, _source_round=False))(rhd, e3w, gdept)
+
+    assert any(
+        not np.array_equal(np.asarray(actual), np.asarray(control))
+        for actual, control in zip(rounded, pre_fix, strict=True)
+    )
 
 
 def test_nemo_ws_public_step_is_same_production_kernel_under_outer_disable_jit():

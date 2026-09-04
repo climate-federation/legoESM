@@ -271,9 +271,21 @@ def run(root: Path, *, plant: bool) -> dict[str, object]:
             "production_depth_mean": compare(
                 candidate[f"depth_{face}"], oracle[f"depth_{face}"], active2
             ),
-            "post_drag": compare(candidate[f"depth_{face}"], oracle[f"post_drag_{face}"], active2),
+            # NEMO applies drag before wind. legoESM's trace applies the
+            # identically-zero rest-state drag after wind, so its depth mean
+            # is the source-equivalent post-drag value and its post-drag value
+            # is the source-equivalent post-wind value.
+            "post_drag": compare(
+                candidate[f"depth_{face}"], oracle[f"post_drag_{face}"], active2
+            ),
             "post_wind": compare(
                 candidate[f"post_drag_{face}"], oracle[f"post_wind_{face}"], active2
+            ),
+            # At kt=1 from rest dynspg_ts.F90:280-300 removes an identically
+            # zero 2-D Coriolis term, so NEMO's post-wind field is also the
+            # pre-external-mode slow forcing.
+            "pre_external": compare(
+                candidate[f"pre_external_{face}"], oracle[f"post_wind_{face}"], active2
             ),
         }
         faithful = boundary_rows[face]["production_depth_mean"]
@@ -306,9 +318,13 @@ def run(root: Path, *, plant: bool) -> dict[str, object]:
                     "absolute_max"
                 ],
                 "label": (
-                    "CONFIRMED_UPSTREAM_OWNER"
-                    if source_replays[face]["oracle_Krhs_only_vs_oracle_depth_mean"]["bit_exact"]
-                    else "CAUSAL_CONTRIBUTOR"
+                    "BIT_EXACT_NO_ARM_NEEDED"
+                    if operand_rows[face]["Krhs"]["bit_exact"]
+                    else (
+                        "CONFIRMED_UPSTREAM_OWNER"
+                        if source_replays[face]["oracle_Krhs_only_vs_oracle_depth_mean"]["bit_exact"]
+                        else "CAUSAL_CONTRIBUTOR"
+                    )
                 ),
             },
         }
@@ -320,18 +336,28 @@ def run(root: Path, *, plant: bool) -> dict[str, object]:
             row = operand_rows[face][boundary]
             if first is None and not row["bit_exact"]:
                 first = {"boundary": boundary, "face": face, **row}
-    require(first is not None, "walk unexpectedly found every primitive operand bit-exact")
+    if first is None:
+        for boundary in (
+            "production_depth_mean", "post_drag", "post_wind", "pre_external"
+        ):
+            for face in ("u", "v"):
+                row = boundary_rows[face][boundary]
+                if first is None and not row["bit_exact"]:
+                    first = {"boundary": boundary, "face": face, **row}
+    all_exact = first is None
     plant_control = {
         "requested": plant,
-        "first_boundary": first["boundary"],
-        "fires": (not plant) or first["boundary"] == "e3",
+        "first_boundary": None if first is None else first["boundary"],
+        "fires": (not plant) or (
+            first is not None and first["boundary"] == "e3"
+        ),
     }
     if not plant_control["fires"]:
         raise AssertionError("planted e3 operand did not become the first mismatch")
 
     return {
         "format": "nemo-testcase-l2-gyre-round16-slow-forcing-v1",
-        "status": "DEBT",
+        "status": "AT-BAR" if all_exact else "DEBT",
         "regime": "production-jit/cpu/fp64/libm",
         "plant": plant,
         "oracle_root": str(root),
@@ -353,7 +379,10 @@ def run(root: Path, *, plant: bool) -> dict[str, object]:
         "source_replays": source_replays,
         "boundary_rows": boundary_rows,
         "one_variable_association_arms": arms,
-        "owner_label": "CONFIRMED_UPSTREAM_KRHS",
+        "owner_label": (
+            "CONFIRMED_STAGE1_SLOW_FORCING_CHAIN"
+            if all_exact else "UNMEASURED_AFTER_FIRST_NONEXACT_BOUNDARY"
+        ),
         "scaling_before_owner": True,
         "plant_control": plant_control,
     }
@@ -373,7 +402,7 @@ def main() -> int:
         f"first={report['first_non_bit_exact_primitive']} plant={args.plant}",
         file=sys.stderr,
     )
-    return 1
+    return 0 if report["status"] == "AT-BAR" else 1
 
 
 if __name__ == "__main__":
