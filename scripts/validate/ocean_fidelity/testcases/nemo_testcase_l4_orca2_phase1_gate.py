@@ -534,15 +534,19 @@ def planted_controls(root: Path, manifest: Path, control: Path, instrumented: Pa
     expect("si3_one_ulp", lambda tmp: _one_ulp(materialize(tmp,pra), 60))
 
     with tempfile.TemporaryDirectory(prefix="orca2-l4-identity-") as td:
-        altered = Path(td)/"time.step"
-        shutil.copyfile(instrumented/"time.step", altered)
-        _patch(altered, 0, b"9")
+        altered_root = Path(td)
+        for name in GENERATED_EXACT + HISTORY + ["ocean.output"]:
+            os.symlink(instrumented/name, altered_root/name)
+        target = "ORCA2_00000010_restart_0000.nc"
+        (altered_root/target).unlink()
+        shutil.copyfile(instrumented/target, altered_root/target)
+        _patch(altered_root/target, 128, b"X")
         try:
-            require((control/"time.step").read_bytes() == altered.read_bytes(), "planted identity mismatch")
+            validate_identity(control, altered_root)
         except GateError:
             results["restart_identity_byte"] = "PASS_NONZERO"
         else:
-            raise GateError("identity planted control did not fail")
+            raise GateError("validate_identity accepted planted restart byte")
     return results
 
 
