@@ -126,3 +126,38 @@ def test_ext_vector_matches_flat_impl(setup, grid):
         r = np.asarray(gather_windows(lay, r))
         bad = (o != r) & ~(np.isnan(o) & np.isnan(r))
         assert not bad.any(), f"{nm}: {bad.sum()} cells differ"
+
+
+def test_sabotaged_arms_fail(setup):
+    """Non-vacuity (codex 2026-09-04): with the pad exchange replaced by
+    an identity the refresh test's poison SURVIVES, and with the exchange
+    body replaced by an identity the scalar firing DIFFERS from the flat
+    impl -- so the two tests above cannot pass on a no-op."""
+    from legoesm.grids.fv3_duo_halos import ext_scalar_sixface_allk
+    from legoesm.grids.fv3_duo_windows import gather_windows
+    ctx, lay, comm = setup
+    M = N + 2 * NG
+    x6 = _rand((6, M, M, KM), 7)
+    xw = np.asarray(gather_windows(lay, x6))
+    poisoned = xw.copy()
+    poisoned[:, 0, :, :] = np.nan            # a pad row of every window
+    orig = comm._pad_exchange
+    comm._pad_exchange = lambda arrs: arrs
+    try:
+        out = np.asarray(jax.jit(lambda a: comm.refresh({"x": a})["x"])(
+            jax.device_put(jnp.asarray(poisoned), comm.sharding)))
+    finally:
+        comm._pad_exchange = orig
+    assert np.isnan(out).any(), "identity pad exchange still cleared the poison"
+
+    ref = np.asarray(gather_windows(lay, ext_scalar_sixface_allk(
+        x6, ctx.tab, "A")))
+    body = comm._bodies["A"]
+    comm._bodies["A"] = lambda blk: blk
+    try:
+        out = np.asarray(jax.jit(lambda a: comm.ext_scalar_allk(a, "A"))(
+            _windows(lay, comm, x6)))
+    finally:
+        comm._bodies["A"] = body
+    bad = (out != ref) & ~(np.isnan(out) & np.isnan(ref))
+    assert bad.any(), "identity exchange body still matched the flat impl"

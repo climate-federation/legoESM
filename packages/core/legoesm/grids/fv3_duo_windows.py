@@ -77,9 +77,11 @@ class WindowLayout:
                        -- the M1-M3 tiled exchange's BLOCKED layout
                        (fv3_duo_spmd.to_blocked), so the SPMD arm can hand
                        its blocks to that certified exchange unchanged.  A
-                       shared node (``e = 1``) is stored by both tiles
-                       and kept coherent by the exchange; for a single
-                       owner the WEST/SOUTH tile is canonical.
+                       shared node (``e = 1``, padded index ``t*nl``) is
+                       stored by both tiles and kept coherent by the
+                       exchange; for a single owner the EAST/NORTH tile
+                       (``t = f // nl``, the block that starts on it) is
+                       canonical, as in the compute partition.
         """
         m_a = n + 2 * ng
         if partition == "compute":
@@ -130,8 +132,8 @@ class WindowLayout:
         """Tile index owning padded flat index ``f`` along one axis.
         compute: a node shared by two tiles belongs to the EAST/NORTH
         one, the last node and the rings to the edge tiles; padded: the
-        blocked layout's WEST/SOUTH tile is canonical for a shared
-        node."""
+        block that STARTS on a shared node (east/north, ``f // nl``) is
+        canonical, the last node goes to the last tile."""
         if self.partition == "compute":
             return int(min(max((f_padded - self.ng) // self.nl, 0),
                            self.kt - 1))
@@ -386,9 +388,20 @@ class DuoWindowComm:
 
     handles_barriers = True
 
-    def __init__(self, lay: WindowLayout, tab):
+    def __init__(self, lay: WindowLayout, tab, sharding=None):
         self.lay, self.tab = lay, tab
         self._writeset = {}
+        # optional: pin every result to a window sharding, so that under
+        # jit the kernels stay PARTITIONED across the exchange even though
+        # the exchange itself goes through the flat state -- the
+        # same-shape no-comm CONTROL arm of the SPMD gate (GLM 2026-09-04)
+        self.sharding = sharding
+
+    def _pin(self, x):
+        import jax
+        if self.sharding is not None and isinstance(x, jax.core.Tracer):
+            return jax.lax.with_sharding_constraint(x, self.sharding)
+        return x
 
     # -- write-set census --------------------------------------------------
     def _census(self, name, fn, shapes, dtypes, n_out):
@@ -431,7 +444,7 @@ class DuoWindowComm:
                              [f.dtype for f in flats], n_out)
         outs = fn(*flats)
         outs = outs if isinstance(outs, (tuple, list)) else (outs,)
-        res = [gather_masked(self.lay, a, o, m, jnp)
+        res = [self._pin(gather_masked(self.lay, a, o, m, jnp))
                for a, o, m in zip(arrays, outs, masks)]
         return res[0] if len(res) == 1 else tuple(res)
 
@@ -525,7 +538,8 @@ class DuoWindowComm:
         for k, v in bundle.items():
             if (hasattr(v, "ndim")
                     and horizontal_axes(lay, v.shape, lay.nb) is not None):
-                out[k] = gather_windows(lay, scatter_owned(lay, v, jnp), jnp)
+                out[k] = self._pin(
+                    gather_windows(lay, scatter_owned(lay, v, jnp), jnp))
             else:
                 out[k] = v
         return out

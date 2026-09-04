@@ -82,13 +82,20 @@ def main(argv=None):
     ap.add_argument("--flat-arm", choices=("loop", "batched", "both"),
                     default="both",
                     help="which flat reference(s) to run")
-    ap.add_argument("--comm", choices=("spmd", "flat"), default="spmd",
+    ap.add_argument("--comm", choices=("spmd", "flat", "flat-pinned"),
+                    default="spmd",
                     help="spmd: fv3_duo_window_spmd (tiled bodies + pad "
                          "ppermutes); flat: the single-device window bundle "
                          "(scatter/gather through the flat state) with the "
                          "SAME window sharding -- the ATTRIBUTION arm: a "
                          "deviation it shares with spmd is the partitioned-"
                          "kernel lowering, not the exchange")
+    ap.add_argument("--control", action="store_true",
+                    help="also run the same-shape no-comm CONTROL (window "
+                         "layout, kernels partitioned identically, exchange "
+                         "through the flat state, results pinned) and compare "
+                         "the two window arms directly, bitwise: the exchange "
+                         "is exact iff they agree (GLM 2026-09-04)")
     ap.add_argument("--gspmd-face-arm", action="store_true",
                     help="also run the flat batched step GSPMD-sharded "
                          "P('face') on 6 devices and report its deviation "
@@ -197,6 +204,12 @@ def main(argv=None):
             from legoesm.grids.fv3_duo_window_spmd import window_sharding
             wctx, comm = attach_window_comm(ctx, args.kt, args.pad, "padded")
             sharding = window_sharding(mesh)
+            if args.comm == "flat-pinned":
+                # GLM's same-shape no-comm control: the exchange goes
+                # through the flat state (direct global indexing) but every
+                # result is pinned back to the window sharding, so the
+                # kernels keep the SPMD arm's per-device shapes
+                comm.sharding = sharding
     except ValueError as e:
         print(f"[gate] REFUSED: {e}")
         return 2
@@ -224,7 +237,6 @@ def main(argv=None):
            wout["state"].items() if hasattr(v, "sharding")}
     print(f"[gate] window arm done; output shardings: "
           f"{sorted(set(shs.values()))}")
-
     def block_coherence(bundle_w, group):
         """Every window's copy of every cell inside its BLOCK (the owned
         cells plus, for a node axis, the shared row the neighbour also
@@ -290,6 +302,51 @@ def main(argv=None):
             else:
                 out[k] = None if hasattr(v, "ndim") else v
         return out
+
+    ctrl_rc = None
+    if args.control and args.comm == "spmd":
+        from legoesm.grids.fv3_duo_windows import attach_window_comm
+        cctx, ccomm = attach_window_comm(ctx, args.kt, args.pad, "padded")
+        ccomm.sharding = sharding
+        try:
+            cout = jax.jit(lambda st, nh: acoustic_loop_3d(
+                cctx, st, args.dt, args.km, nh=nh, batched=True, **kw))(
+                    wstate, wnh)
+        finally:
+            ctx.tab.window_comm = None
+        cs = {str(getattr(v, "sharding", None)) for v in
+              cout["state"].values() if hasattr(v, "sharding")}
+        print(f"[gate] CONTROL arm (flat exchange, pinned) done; output "
+              f"shardings: {sorted(cs)}")
+        print("===== window-SPMD vs same-shape no-comm CONTROL (OWNED cells; "
+              "the two arms refresh their pad zones differently -- once per "
+              "substep vs every firing -- so pads are not compared) =====")
+        ctrl_rc = 0
+        for group in ("state", "nh", "press"):
+            if wout.get(group) is None or cout.get(group) is None:
+                continue
+            wf, cf = to_flat(wout[group]), to_flat(cout[group])
+            for k in sorted(wout[group]):
+                a, b = wf.get(k), cf.get(k)
+                if a is None or b is None or not hasattr(a, "ndim"):
+                    continue
+                a, b = np.asarray(a), np.asarray(b)
+                if a.shape != b.shape:
+                    print(f"  {group}.{k:8s} SHAPE {a.shape} vs {b.shape}")
+                    ctrl_rc = 1
+                    continue
+                bad = int(((a != b) & ~(np.isnan(a) & np.isnan(b))).sum())
+                if bad:
+                    ctrl_rc = 1
+                    d = np.abs(a - b)
+                    fin = np.isfinite(d)
+                    print(f"  {group}.{k:8s} DIFF {bad}/{a.size} max|d|="
+                          f"{np.nanmax(d[fin]) if fin.any() else float('nan'):.3e}")
+                else:
+                    print(f"  {group}.{k:8s} BITWISE ({a.size} cells)")
+        print(f"[gate] CONTROL VERDICT: window-SPMD "
+              f"{'==' if ctrl_rc == 0 else '!='} no-comm control "
+              f"({'exchange exact' if ctrl_rc == 0 else 'exchange DIFFERS'})")
 
     rc = 0
     verdict_by_arm = {}
@@ -359,13 +416,15 @@ def main(argv=None):
     # arm (batched-vs-loop differ by lowering even with FMA off, job
     # 9631684) and is reported, never folded into the verdict.
     rc = verdict_by_arm.get("batched", verdict_by_arm.get("loop", 0))
+    if ctrl_rc is not None:
+        rc = ctrl_rc
     if "gspmd_face" in verdict_by_arm:
         # the window SPMD arm's own reference is the PARTITIONED flat
         # step: bitwise against it means the exchange/pads changed nothing
         # and every deviation from the unsharded step is the lowering class
         print(f"[gate] window-SPMD vs GSPMD-face-sharded flat: "
               f"{'BITWISE' if verdict_by_arm['gspmd_face'] == 0 else 'DIFFERS'}")
-        rc = verdict_by_arm["gspmd_face"]
+        rc = verdict_by_arm["gspmd_face"] if ctrl_rc is None else ctrl_rc
     if "loop" in refs and "batched" in refs:
         print("===== flat batched vs flat loop (attribution arm) =====")
         for group in ("state", "press"):

@@ -426,3 +426,42 @@ model above.  GLM: agrees with pad 11; requires the sharded arm to be
 re-certified (reach across pack/unpack).  M4b = the same layout sharded
 one window per device with the M1/M2 split machinery re-targeted at
 window origins plus a seam-refresh collective.
+
+## M4b-A (2026-09-04): the window layout SHARDED — one window per device
+
+`packages/core/legoesm/grids/fv3_duo_window_spmd.py`.  Window stacks placed
+`P(('face','tile_i','tile_j'))` on the M1-M3 tile mesh (window order ==
+device order); kernels = the whole-face kernels vmapped over the window
+axis (GSPMD, zero comm).  Each firing = ONE shard_map: cut this device's
+BLOCK out of its window (padded partition, `kt | m_a`, flush edge windows
+→ dynamic offset), run the certified M1-M3 exchange BODY
+(`fv3_duo_spmd.tiled_split_body` / `tiled_vector_body`, factored out of the
+M3 runtime unchanged), write the block back, refresh every seam pad with
+two ppermute rounds (2·pad rows each way, node axes skip the shared row,
+corners via the second round).  Barriers: flat fallback (O(state)),
+OPEN.  Requires `2·pad ≤ nl`.
+
+RECEIPTS (24/54 virtual CPU devices, FMA off)
+* per-firing unit tests: refresh fills every pad from NaN (5 extents),
+  scalar A/B, vector D/C bitwise vs the certified impl; planted sabotage
+  (identity pad exchange, identity body) FAILS them (job 9632167, 6 passed).
+* full acoustic loop, n_split=3: window-SPMD == the flat step
+  GSPMD-sharded `P('face')` on 6 devices BITWISE on every state/press
+  field, block coherence 0 — hydro C48 kt=2 (9632146), NH C48 kt=2
+  (9632147), hydro C96 kt=3 on 54 devices (9632148).  Both partitioned
+  programs differ from the UNSHARDED flat step by the same 1e-13 rel on
+  the same cells (the partitioned-kernel lowering class, identical
+  counts, job 9632138); the unsharded flat step == the single-device
+  window arm bitwise (M4a).  GLM's same-shape "no-comm control" (flat
+  gather exchange, results pinned to the window sharding) is NOT
+  codegen-invariant (fusion around the exchange sites) and differs at the
+  same ulp level; retired as a discriminator.
+* codex (9632151): items 1-4 CLEAN (offsets/clamps/corners, normalisation,
+  block placement, M3 refactor byte-identical), 2 MINOR fixed (owner
+  docstring; sabotage non-vacuity).  GLM: exchange-exactness established
+  for the tested geometries; open = other kt/n_split/FMA-on, and the
+  barriers.
+
+NEXT (M4b-B): tiled barriers (a "blend" op kind in the split runtime on
+padded-embedded compute arrays), write-set-restricted pad refresh, then
+multi-process ranks on the CPU+mpi venue.
