@@ -89,3 +89,14 @@ Arctic (N of 45N) SST bias on the unified arms: three-way (common mask, no clamp
   Hidden-sink hypothesis REFUTED (our ice is 20% BELOW NEMO, not above). Pre-fix freezing
   deficit = 267 km3 ice-equivalent vs measured +365 km3 (unified - pre-fix): bookkeeping closes
   to order. OPEN LEVER: winter NH ice growth deficit (-2.2e6 km2 area at 1 April).
+
+## 2026-09-04 afternoon: two root causes found (both reviewed by codex + GLM)
+1. LEVEL-8 (29 km MPAS) blowup = the explicit vorticity biharmonic K_zeta_bih=1e14 (NEMO-match recipe,
+   fixed, not dx-scaled) past its stability limit (number ~1.4 at level 7, ~11 at level 8). Arms with
+   1.25e13 (dx^3) or 0 are stable. Nine other operators exonerated by one-variable arms. Also fixed
+   silent MPAS flag drops (--no-gm-redi, --A-h/--B-h/--K-bih/--C-smag-lap); --pgf-scheme still inert.
+2. REAL-FRESHWATER closure never dilutes the surface: tracer w is diagnosed from horizontal divergence
+   only, so freshwater stretches the column uniformly (O(F/H)); brine alone acts at the poles. Day-15
+   real-minus-virtual: Amazon +2.2 PSU, Weddell +0.43, Kara -0.53 (surface-trapped). Tripole has the
+   NEMO-literal w (wzv_call2_evaluation) but OMIP cards run 'generic'; MPAS lacks it. Exact 2-layer
+   test spec recorded. Twin divergence at d30: 0.001 C.
