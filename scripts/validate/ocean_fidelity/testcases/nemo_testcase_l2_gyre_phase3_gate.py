@@ -36,20 +36,20 @@ BIT_IDENTITY_EXPECTED = {
         "9def5f4986853f497a5e0507bea185fe1ec4348715e2aeca0b14507df8e24fa0"
     ),
     "oracle_step_entry_kt00000002.bin": (
-        "887f3bbb51e047ee7c072ae74b77a8e5b461525341b1ab228ae7d800fa757777"
+        "ba96e02e6f06f50604bc5920e0ec023f9d07662a536f51a7319e8515673f86d1"
     ),
     "oracle_stage_kt00000001_s1.bin": (
-        "35e6892b799aeaf8d06d4affcd71b5ba0c71dc41bc0e8970c033459c46cd1402"
+        "ce25b004e7e8289b6e803263f895576981ce22516ccddfbd85d7be5ce5bcaedc"
     ),
     "oracle_stage_kt00000001_s2.bin": (
-        "55e780b8d56eb249e5387123b20aeae8f735325200714c02a816ef719d6b3351"
+        "e29972359b9fe9929d38dfc58ca0d5f0f84c9a0a7ce65905481349a8a52ef875"
     ),
     "oracle_stage_kt00000001_s3.bin": (
-        "3703a9f2e369f8f05cc439564729e36801227b54eb8afb7df2552a5120a45f2e"
+        "810d4ae83d5827d67cb7a09fe436a5d3f2d4201e89727fb86c891c349bb1c714"
     ),
     "oracle_rhs_kt00000001.bin": "a09426f638de0ce384b739621d08cf7ae27d41339cadcc2f16f8bbd3de215c45",
     "oracle_bt_frames_kt00000001.bin": (
-        "b8f474af46b665773152bd2f152d20f29f658b51a052422dcb35dc406fdf2fa9"
+        "7489d1edebacb71298ca5e65d3c9b54777f745642c01a4c4a696e9d6b5e913d8"
     ),
 }
 
@@ -208,19 +208,23 @@ def read_transport(path: Path, expected_stage: int) -> dict:
         f"{path}: wrong Kmm",
     )
     require(values.size == 3 * nx * ny * nz, f"{path}: bad payload")
-    # NEMO does not own or initialize the four-cell transport halo.  Validate
-    # every owned A2D cell while recording (not laundering) any halo sentinel.
+    # NEMO does not own or initialize the four-cell transport halo.  In the
+    # vector-invariant arm this legacy momentum-side record also precedes the
+    # tra_adv_trp call that initializes zFw.  Validate every owned horizontal
+    # transport cell; retain the raw zFw sentinel count for the explicitly
+    # UNINFORMATIVE row below instead of laundering it into a comparison.
     owned_finite = True
-    for block in np.split(values, 3):
+    for block in np.split(values, 3)[:2]:
         full = block.reshape((nx, ny, nz), order="F")
         owned_finite &= bool(np.all(np.isfinite(full[2:-2, 2:-2])))
-    require(owned_finite, f"{path}: non-finite owned payload")
+    require(owned_finite, f"{path}: non-finite owned horizontal payload")
     count = nx * ny * nz
     return {
         "stage": stage,
         "Kmm": kmm,
         "registry_level": level,
         "nonowned_nonfinite_count": int(np.count_nonzero(~np.isfinite(values))),
+        "zFw_nonfinite_count": int(np.count_nonzero(~np.isfinite(values[2 * count :]))),
         "zFu": _xyz(values[:count], nx, ny, nz),
         "zFv": _xyz(values[count : 2 * count], nx, ny, nz),
         "zFw": _xyz(values[2 * count :], nx, ny, nz),
@@ -927,7 +931,7 @@ def run(
     stage2_term_sha = sha256(stage2_term_path)
     require(
         stage2_term_sha
-        == "824c58a8a1ed15fdda80cc938dc79047eaf503967546637b230b3b7436720589",
+        == "99c335f9b0ea5a3aebe807943768bee66d0a1acb1b6c88ddddfb00915c8b68b6",
         f"{stage2_term_path}: unregistered content hash",
     )
     stage2_terms = read_stage2_terms(stage2_term_path)
@@ -1787,22 +1791,27 @@ def run(
         for name, candidate_name, mask_name in (
             ("zFu", "u", "u"), ("zFv", "v", "v"), ("zFw", "T", "T")
         ):
-            transport_row = score(
-                f"{CASE}.kt1.stage1.transport.{name}",
-                transports[1][name][..., :nlev],
-                transport_stage1_fields[candidate_name],
-                masks[mask_name],
-            )
             if name == "zFw":
                 # stprk3_stg.F90:286-304 leaves zFw for the vector-invariant
                 # branch to tra_adv_trp, but the legacy transport instrument is
                 # positioned earlier at :309-320.  Its structural zero is not
                 # the tracer-consumed vertical transport and cannot adjudicate
                 # the WZV arm.
-                transport_row["status"] = "UNINFORMATIVE"
-                transport_row["reason"] = (
+                transport_row = {
+                    "name": f"{CASE}.kt1.stage1.transport.{name}",
+                    "status": "UNINFORMATIVE",
+                    "oracle_nonfinite_count": transports[1]["zFw_nonfinite_count"],
+                    "reason": (
                     "oracle zFw was dumped before tra_adv_trp fills it in the "
-                    "vector-invariant branch")
+                    "vector-invariant branch"),
+                }
+            else:
+                transport_row = score(
+                    f"{CASE}.kt1.stage1.transport.{name}",
+                    transports[1][name][..., :nlev],
+                    transport_stage1_fields[candidate_name],
+                    masks[mask_name],
+                )
             stage1_transport_rows.append(transport_row)
 
         if plant_stage2_thermodynamics:
