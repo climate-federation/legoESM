@@ -1,7 +1,8 @@
 # NEMO testcase lane 2 GYRE — Phase 3 rounds 8–12 boundary receipt
 
 **Verdict: STOP / DEBT at the round-12 stage-2 boundary.  Independent review
-shipped round 11.  The pending D gate remains an open user decision and its
+shipped round 10; round-11 review is running in parallel and round-12 review
+is outstanding.  The pending D gate remains an open user decision and its
 criterion is unchanged.  Round 12 makes NEMO's literal EOS source-operation
 association exact for oracle inputs and improves the live stage-2 Kaa residual
 about 23×, but the propagated stage state still leaves a two-cell `prd`
@@ -386,8 +387,9 @@ not acceptance evidence.
 
 ## Pending D boundary and round-12 cross-card oracle scoring
 
-Independent re-review returned **SHIP** for rounds 10 and 11 and clarified that this
+Independent re-review returned **SHIP** for round 10 and clarified that this
 gate compares against the previous legoESM output, not directly against NEMO.
+Round-11 independent review was still running when round 12 was dispatched.
 The retained D criterion is therefore an **OPEN USER DECISION**.  Round 12
 does not modify that gate or criterion; it reports both its direction-blind
 compare-to result and direct oracle-relative residuals.
@@ -593,8 +595,9 @@ plant exits `1`; restoring the old barrier-only operation makes the expanded
 intermediate parity test fail.  The GYRE sweep gate exits `1` for scientific
 DEBT, not a harness error; kt=1 is exact and its full artifact is retained.
 
-Independent Claude re-review shipped round 11 and retracted the older JIT
-blocker.  This round-12 result is a new Codex-internal measurement;
-independent review of it remains outstanding and no dual-review claim is made.
+Independent Claude re-review shipped round 10 and retracted the older JIT
+blocker.  Round-11 review was in progress at this dispatch.  This round-12
+result is a new Codex-internal measurement; independent review of it remains
+outstanding and no dual-review claim is made.
 Per the accepted process note, the earlier EMP reversal returned through
 review with both source and runtime evidence before it landed.
