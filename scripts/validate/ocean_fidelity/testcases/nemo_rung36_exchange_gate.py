@@ -26,6 +26,7 @@ from legoesm.coupler.ocean_forcing import (
 from legoesm.ocean.eos import nemo_eos_fzp
 from legoesm.ocean.physics.shortwave_penetration import nemo_rgb_one_layer_rhs
 from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
+from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_coupled_card
 from legoesm.ice.sea_ice import (
     _nemo_si3_ice_update_flux,
     _nemo_si3_ice_update_tau,
@@ -91,24 +92,31 @@ bulk = importlib.util.module_from_spec(_BULK_SPEC)
 _BULK_SPEC.loader.exec_module(bulk)
 
 
-def _ssm(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    instant, before, after, steps, stages = [], [], [], [], []
+def _ssm(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, object]]:
+    instant, before, after, registry = [], [], [], []
     with path.open("rb") as stream:
         while magic := stream.read(16):
             if magic != SSM_MAGIC:
                 raise ValueError("bad SSM magic")
-            version, kt, _kbb, _kmm, stage, count, bits = struct.unpack(
+            version, kt, kbb, kmm, stage, count, bits = struct.unpack(
                 "=7i", stream.read(28))
             if (version, count, bits) != (1, 15, 64):
                 raise ValueError("bad SSM header")
             z = np.fromfile(stream, np.float64, count)
-            steps.append(kt); stages.append(stage); instant.append(z[:7]);
+            registry.append((kt, kbb, kmm, stage)); instant.append(z[:7]);
             (before if stage == 0 else after).append(z[7:14])
-    if stages != [value for _ in range(len(stages)//2) for value in (0, 1)]:
-        raise ValueError("SSM frame order")
-    if steps != [kt for kt in range(1, len(steps)//2 + 1) for _ in (0, 1)]:
-        raise ValueError("SSM kt registry")
-    return (np.asarray(instant[::2]), np.asarray(before), np.asarray(after))
+    expected = []
+    for kt in range(1, len(registry) // 2 + 1):
+        level = 1 if kt % 2 else 3
+        expected.extend(((kt, level, level, 0), (kt, level, level, 1)))
+    if registry != expected:
+        raise ValueError("SSM kt/Kbb/Kmm/stage registry")
+    info = {
+        "records": len(registry),
+        "rule": "two stages per kt; odd Kbb=Kmm=1, even Kbb=Kmm=3",
+        "first": list(registry[0]), "last": list(registry[-1]),
+    }
+    return (np.asarray(instant[::2]), np.asarray(before), np.asarray(after), info)
 
 
 def _zdf_inputs(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -122,6 +130,9 @@ def _zdf_inputs(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
                 raise ValueError("bad ZDF-input header")
             z = np.fromfile(stream, np.float64, count)
             steps.append(kt); t_bo.append(z[4]); salinity.append(z[5])
+    expected = list(range(1, 4 * len(steps), 4))
+    if steps != expected:
+        raise ValueError("ZDF-input kt cadence registry")
     return np.asarray(steps), np.asarray(salinity), np.asarray(t_bo)
 
 
@@ -233,15 +244,20 @@ def _trasbc(path: Path) -> dict[str, np.ndarray]:
             registry.append((kt, stage, kbb, kmm, krhs))
             rows.append(np.fromfile(stream, np.float64, count))
     values = np.asarray(rows)
-    if [(kt, stage) for kt, stage, *_ in registry] != [
-        (kt, stage) for kt in range(1, len(registry) // 3 + 1)
-        for stage in (1, 2, 3)
-    ]:
-        raise ValueError("tra_sbc kt/stage registry")
-    if any(min(kbb, kmm, krhs) < 1 for _, _, kbb, kmm, krhs in registry):
-        raise ValueError("tra_sbc runtime time-level registry")
+    expected = []
+    for kt in range(1, len(registry) // 3 + 1):
+        kbb = 1 if kt % 2 else 3
+        krhs = 3 if kt % 2 else 1
+        expected.extend((
+            (kt, 1, kbb, kbb, krhs),
+            (kt, 2, kbb, krhs, 2),
+            (kt, 3, kbb, 2, krhs),
+        ))
+    if registry != expected:
+        raise ValueError("tra_sbc exact kt/stage/Kbb/Kmm/Krhs registry")
     result = {name: values[:, index] for index, name in enumerate(TRASBC_FIELDS)}
     result["stage"] = np.asarray(stages)
+    result["registry"] = np.asarray(registry, dtype=np.int64)
     return result
 
 
@@ -257,18 +273,21 @@ def _qsr(path: Path) -> dict[str, np.ndarray]:
                 raise ValueError("bad QSR header")
             rows.append(np.fromfile(stream, np.float64, count))
             registry.append((kt, kmm, krhs))
-    if [item[0] for item in registry] != list(range(1, len(registry) + 1)):
-        raise ValueError("QSR kt registry")
-    if any(min(kmm, krhs) < 1 for _, kmm, krhs in registry):
-        raise ValueError("QSR runtime time-level registry")
+    expected = [
+        (kt, 2, 3 if kt % 2 else 1) for kt in range(1, len(registry) + 1)
+    ]
+    if registry != expected:
+        raise ValueError("QSR exact kt/Kmm/Krhs registry")
     values = np.asarray(rows)
-    return {name: values[:, index] for index, name in enumerate(QSR_FIELDS)}
+    result = {name: values[:, index] for index, name in enumerate(QSR_FIELDS)}
+    result["registry"] = np.asarray(registry, dtype=np.int64)
+    return result
 
 
 def _nemo_bilinear_months(
     chlorophyll: np.ndarray, source_indices: list[int], weights: list[np.float64]
 ) -> np.ndarray:
-    """Replay fld_interp.F90:1460-1472's four ordered assignments."""
+    """Replay fldread.F90:1475-1484's four ordered assignments."""
     months = []
     nx = chlorophyll.shape[2]
     for month in range(chlorophyll.shape[0]):
@@ -349,8 +368,13 @@ def _summary(name: str, got, wanted) -> dict[str, object]:
 
 def evaluate(root: Path, plant: str | None = None) -> dict[str, object]:
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
-    config = NemoSI3ExchangeConfig()
-    instant, before, after = _ssm(root / "oracle_rung36_ssm_frames.bin")
+    card = build_c1d_omip_l3_coupled_card(oracle_root=root)
+    config = card.exchange
+    if (card.ice_cadence != config.nn_fsbc
+            or card.ice_dt_seconds != card.ocean_dt_seconds * card.ice_cadence):
+        raise ValueError("coupled card ocean/ice clock relation is inconsistent")
+    instant, before, after, ssm_registry = _ssm(
+        root / "oracle_rung36_ssm_frames.bin")
     steps = np.arange(1, after.shape[0] + 1, dtype=np.int64)
     if plant == "ssm_sample":
         instant[4, 2] += 1.0e-8
@@ -364,6 +388,8 @@ def evaluate(root: Path, plant: str | None = None) -> dict[str, object]:
             for k, name in enumerate(SSM_FIELDS)]
 
     ice_steps, salinity, t_bo = _zdf_inputs(root / "oracle_si3_zdf_inputs.bin")
+    if not np.array_equal(ice_steps, steps[::card.ice_cadence]):
+        raise ValueError("ZDF cadence does not cross-link to ocean steps")
     if plant == "fzp_operand":
         salinity[0] += 1.0e-8
     got_tbo = np.asarray(nemo_eos_fzp(jax.numpy.asarray(salinity))) + constants.T_freeze
@@ -377,7 +403,7 @@ def evaluate(root: Path, plant: str | None = None) -> dict[str, object]:
             update_pre["hfx_sum"][0] += 1.0e-8
         got_update = _nemo_si3_ice_update_flux(
             {name: jax.numpy.asarray(value) for name, value in update_pre.items()},
-            ice_constants=NEMO_SI3_CONSTANTS_CONFIG, dt=14400.0)
+            ice_constants=NEMO_SI3_CONSTANTS_CONFIG, dt=card.ice_dt_seconds)
         for name in (
             "qsr", "qns", "emp", "sfx", "qt_atm_oi", "qt_oce_ai",
             "fwfice", "snwice_mass_b", "snwice_mass", "snwice_fmass",
@@ -492,6 +518,12 @@ def evaluate(root: Path, plant: str | None = None) -> dict[str, object]:
     qsr_path = root / "oracle_rung36_qsr_frames.bin"
     if qsr_path.exists():
         qsr = _qsr(qsr_path)
+        if trasbc_path.exists():
+            stage3_registry = trasbc["registry"][trasbc["stage"] == 3]
+            if (not np.array_equal(qsr["registry"][:, 0], stage3_registry[:, 0])
+                    or not np.array_equal(qsr["registry"][:, 1:],
+                                          stage3_registry[:, (3, 4)])):
+                raise ValueError("QSR does not cross-link to TRA stage-3 Kmm/Krhs")
         expected_chl = _expected_chlorophyll(root, len(qsr["chl"]))
         if plant == "chl_input":
             expected_chl = np.ones_like(expected_chl)
@@ -511,6 +543,13 @@ def evaluate(root: Path, plant: str | None = None) -> dict[str, object]:
             qsr["fraqsr_1lev"]))
 
     fields = _exchange(root / "oracle_si3_exchange_frames.bin")
+    bridge_diagnostics = None
+    if fwb_path.exists():
+        bridge_diagnostics = {
+            "source": "pre-FWB icestp exchange versus POST_FWB operands",
+            "max_abs_emp": float(np.max(np.abs(fields["emp"] - fwb["emp"]))),
+            "max_abs_qns": float(np.max(np.abs(fields["qns"] - fwb["qns"]))),
+        }
     card_emp = fwb["emp"].copy() if fwb_path.exists() else fields["emp"].copy()
     card_qns = fwb["qns"].copy() if fwb_path.exists() else fields["qns"].copy()
     if plant == "fwb_bridge":
@@ -547,27 +586,71 @@ def evaluate(root: Path, plant: str | None = None) -> dict[str, object]:
     }
     rows.extend(_summary(f"EXCHANGE_CARD.{name}", mapped[name], expected[name])
                 for name in mapped)
+
+    # Explicit producer-to-exchange bridges.  Ice-flux values refresh at
+    # kt=1,5,... and are carried for four ocean steps; qns/emp are the sole
+    # exception because sbc_fwb mutates them after each exchange record.
+    def carry_four(values: np.ndarray) -> np.ndarray:
+        return np.repeat(np.asarray(values), card.ice_cadence)[:len(steps)]
+
+    bridge_expected = {
+        name: np.asarray(update_tau[name])
+        for name in ("rCdU_ice", "utau", "vtau", "taum")
+    }
+    bridge_expected.update({
+        name: carry_four(update_post[name])
+        for name in (
+            "tn_ice", "alb_ice", "snwice_mass", "snwice_mass_b",
+            "snwice_fmass", "sfx", "fr_i",
+        )
+    })
+    for name in ("qns", "emp"):
+        value = np.empty_like(fields[name])
+        for index in range(len(value)):
+            if index % card.ice_cadence == 0:
+                value[index] = update_post[name][index // card.ice_cadence]
+            else:
+                value[index] = fwb[name][index - 1]
+        bridge_expected[name] = value
+    if plant == "producer_bridge":
+        bridge_expected["utau"] = bridge_expected["utau"].copy()
+        bridge_expected["utau"][0] += 1.0e-8
+    for name, wanted in bridge_expected.items():
+        rows.append(_summary(f"BRIDGE_EXCHANGE.{name}", fields[name], wanted))
+    for name in ("qml_ice", "qcn_ice"):
+        rows.append(_summary(
+            f"BRIDGE_EXCHANGE.{name}", fields[name][::card.ice_cadence],
+            update_pre[name]))
     first = next((row for row in rows if row["status"] == "DEBT"), None)
     promoted = {
-        "tn_ice": "POST_UPDATE_FLX registered output",
-        "qml_ice": "PRE_UPDATE_FLX exact-entry operand from ice_thd",
-        "qcn_ice": "PRE_UPDATE_FLX exact-entry operand from ice_thd",
-        "sstfrz": "POST_FZP scored output",
-        "rCdU_ice": "POST_UPDATE_TAU scored output",
-        "snwice_mass": "POST_UPDATE_FLX scored output",
-        "snwice_mass_b": "POST_UPDATE_FLX scored output",
-        "snwice_fmass": "POST_UPDATE_FLX scored output and FWB input",
-        "utau": "POST_UPDATE_TAU scored output",
-        "vtau": "POST_UPDATE_TAU scored output",
-        "taum": "POST_UPDATE_TAU scored output",
-        "qns": "POST_UPDATE_FLX and POST_FWB scored output",
-        "sfx": "POST_UPDATE_FLX scored output",
+        "tn_ice": "POST_UPDATE_FLX producer and four-step exchange carry scored",
+        "alb_ice": "POST_UPDATE_FLX producer and four-step exchange carry scored",
+        "qml_ice": "PRE_UPDATE_FLX ice_thd operand bridged at each refresh",
+        "qcn_ice": "PRE_UPDATE_FLX ZDF operand bridged at each refresh",
+        "rCdU_ice": "POST_UPDATE_TAU producer-to-exchange bridge scored every step",
+        "snwice_mass": "POST_UPDATE_FLX producer and four-step exchange carry scored",
+        "snwice_mass_b": "POST_UPDATE_FLX producer and four-step exchange carry scored",
+        "snwice_fmass": "POST_UPDATE_FLX producer and four-step exchange carry scored",
+        "utau": "POST_UPDATE_TAU producer-to-exchange bridge scored every step",
+        "vtau": "POST_UPDATE_TAU producer-to-exchange bridge scored every step",
+        "taum": "POST_UPDATE_TAU producer-to-exchange bridge scored every step",
+        "qns": "POST_UPDATE_FLX/FWB cadence bridge and post-FWB card input scored",
+        "emp": "POST_UPDATE_FLX/FWB cadence bridge and post-FWB card input scored",
+        "sfx": "POST_UPDATE_FLX producer and four-step exchange carry scored",
+        "fr_i": "POST_UPDATE_FLX producer and four-step exchange carry scored",
     }
     coverage = []
     for name in bulk.EXPECTED_EXCHANGE_FIELDS:
         status, reason = bulk.COVERAGE[name]
         if name in promoted:
             status, reason = "VERIFIED", promoted[name]
+        if name == "sstfrz":
+            status = "WAIVED"
+            reason = (
+                "allocated zero in this in-process C1D run; only the inactive "
+                "external-coupler send path sets it (sbccpl.F90:2724-2726); "
+                "the active ice-base eos_fzp operand is scored separately"
+            )
         coverage.append({"name": name, "status": status, "reason": reason})
     if len(coverage) != 36 or len({row["name"] for row in coverage}) != 36:
         raise ValueError("exchange coverage register is not one-to-one")
@@ -578,6 +661,7 @@ def evaluate(root: Path, plant: str | None = None) -> dict[str, object]:
         "trasbc_heat": "POST_TRA_SBC_RK3.temperature",
         "chl_input": "POST_FLD_READ_CHL.chl",
         "qsr_flux": "POST_TRA_QSR.temperature",
+        "producer_bridge": "BRIDGE_EXCHANGE.utau",
         "fwb_bridge": "EXCHANGE_CARD.freshwater",
         "freshwater_sign": "EXCHANGE_CARD.freshwater",
     }.get(plant)
@@ -593,8 +677,37 @@ def evaluate(root: Path, plant: str | None = None) -> dict[str, object]:
         "backend": jax.default_backend(),
         "dtype": str(got_ssm.dtype),
         "precision_policy": {"mode": "fp64", "transcendentals": "libm"},
+        "clock": {
+            "ocean_dt_seconds": card.ocean_dt_seconds,
+            "ice_dt_seconds": card.ice_dt_seconds,
+            "ice_cadence": card.ice_cadence,
+        },
+        "time_level_registry": {
+            "SSM": ssm_registry,
+            "ZDF": {
+                "records": int(ice_steps.size),
+                "rule": "kt=1,5,9,... (nn_fsbc=4)",
+                "first": int(ice_steps[0]), "last": int(ice_steps[-1]),
+            },
+            "UPDATE": {
+                "rule": "FLX stages 0/1 at kt=1,5,...; TAU stage 2 every kt",
+            },
+            "TRA_SBC": {
+                "records": int(trasbc["registry"].shape[0]),
+                "rule": "exact alternating Kbb/Kmm/Krhs three-stage cycle",
+                "first": trasbc["registry"][0].tolist(),
+                "last": trasbc["registry"][-1].tolist(),
+            },
+            "QSR": {
+                "records": int(qsr["registry"].shape[0]),
+                "rule": "Kmm=2; Krhs=3 odd kt, 1 even kt; equals TRA stage 3",
+                "first": qsr["registry"][0].tolist(),
+                "last": qsr["registry"][-1].tolist(),
+            },
+        },
         "oracle_steps": int(after.shape[0]), "ice_steps": int(ice_steps.size),
         "rows": rows, "first_over_bar": first, "coverage": coverage,
+        "bridge_diagnostics": bridge_diagnostics,
         "plant": plant,
         "plant_binding": None if plant is None else {
             "target": plant_target,
@@ -612,6 +725,7 @@ def main() -> int:
         "trasbc_heat",
         "chl_input",
         "qsr_flux",
+        "producer_bridge",
         "fwb_bridge",
         "freshwater_sign"))
     parser.add_argument("--output", type=Path)

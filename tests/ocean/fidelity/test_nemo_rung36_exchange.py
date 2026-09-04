@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import struct
+
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from legoesm.coupler.ocean_forcing import (
     NemoSI3ExchangeConfig,
@@ -18,6 +21,7 @@ from legoesm.ocean.physics.shortwave_penetration import nemo_rgb_one_layer_rhs
 from scripts.validate.ocean_fidelity.testcases.nemo_rung36_exchange_gate import (
     _nemo_bilinear_months,
     _nemo_monthly_interp,
+    _ssm,
 )
 
 
@@ -93,3 +97,14 @@ def test_chlorophyll_replay_preserves_weight_and_time_association() -> None:
     hourly = _nemo_monthly_interp(monthly, 2)
     assert hourly.shape == (2,)
     assert hourly[1] != hourly[0]
+
+
+def test_ssm_registry_rejects_positive_but_wrong_time_level(tmp_path) -> None:
+    path = tmp_path / "ssm.bin"
+    with path.open("wb") as stream:
+        for stage in (0, 1):
+            stream.write(b"NEMO_L3SSM__001 ")
+            stream.write(struct.pack("=7i", 1, 1, 2, 2, stage, 15, 64))
+            stream.write(np.zeros(15, dtype=np.float64).tobytes())
+    with pytest.raises(ValueError, match="Kbb/Kmm"):
+        _ssm(path)
