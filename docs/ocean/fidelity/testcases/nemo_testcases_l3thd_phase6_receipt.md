@@ -277,9 +277,12 @@ threshold-amplified component.
   hash correction was also applied; final gate re-review returned **SHIP** and
   found the production source order consistent and the owner plant non-vacuous.
 
-The committed evidence artifact is
-`nemo_testcases_l3thd_phase6_year_gate.json`, SHA-256
+The evidence artifact is retained outside git at
+`/data/abyssal/dbalwada/nemo-testcases-l3/historical_si3_year_gate_artifacts/nemo_testcases_l3thd_phase6_year_gate.json`,
+SHA-256
 `9571996d72875a3c312fb5b84170d5383bedc7d41fff8ebd9a75f38d3b2a0f9f`.
+Only the hash and summary remain in the repository; no runtime output is
+committed.
 
 ## Forcing and coupled-rung debt
 

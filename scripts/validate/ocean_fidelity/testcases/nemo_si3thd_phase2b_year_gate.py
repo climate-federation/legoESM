@@ -34,26 +34,30 @@ DH_OPERAND_SHA256 = "9efbcb9113c2748f9085c519092848596daf0f573ba8a4625d02ee3c08b
 DH_REMAP_SHA256 = "8fbeb7df70b3c66b4e7acdd7ab0df3ed8fc01bfaa6150dbc47e3b444638b40a5"
 REPORT_STEPS = (1, 10, 100, 1000, 3000, 5000, 8760)
 CONTINUOUS_FIELDS = ("t_su", "e_i", "e_s", "h_i", "h_s", "a_i", "sv_i")
-BASELINE_JSON = (
-    Path(__file__).resolve().parents[4]
-    / "docs/ocean/fidelity/testcases/nemo_testcases_l3thd_phase2b_year_gate.json"
+HISTORICAL_ARTIFACT_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l3/"
+    "historical_si3_year_gate_artifacts"
+)
+BASELINE_JSON = HISTORICAL_ARTIFACT_ROOT / (
+    "nemo_testcases_l3thd_phase2b_year_gate.json"
 )
 BASELINE_JSON_SHA256 = "6c21d14f3c85d0fa99be7e31770a4a4dcad548d98f857ea78455bd6344622160"
-BASELINE_OPERATOR_JSON = (
-    Path(__file__).resolve().parents[4]
-    / "docs/ocean/fidelity/testcases/nemo_testcases_l3thd_phase3_baseline_operator.json"
+BASELINE_OPERATOR_JSON = HISTORICAL_ARTIFACT_ROOT / (
+    "nemo_testcases_l3thd_phase3_baseline_operator.json"
 )
 BASELINE_OPERATOR_JSON_SHA256 = (
     "d642f532ed92910b49f29919dd5e4ae3fe84381ecd1536b7886a2c1f4b36f95f"
 )
-PHASE3_JSON = (
-    Path(__file__).resolve().parents[4]
-    / "docs/ocean/fidelity/testcases/nemo_testcases_l3thd_phase3_year_gate.json"
+PHASE3_JSON = HISTORICAL_ARTIFACT_ROOT / (
+    "nemo_testcases_l3thd_phase3_year_gate.json"
 )
 PHASE3_JSON_SHA256 = "77c78a816b254484afe06632d77378336ddac1153ef9190d17c555f41c45a6e1"
-PHASE5_JSON = (
-    Path(__file__).resolve().parents[4]
-    / "docs/ocean/fidelity/testcases/nemo_testcases_l3thd_phase5_year_gate.json"
+PHASE4_JSON = HISTORICAL_ARTIFACT_ROOT / (
+    "nemo_testcases_l3thd_phase4_year_gate.json"
+)
+PHASE4_JSON_SHA256 = "f81fe9312fb9ade51ae87a8d73970c5281a7ed036d5f7bcaa5c39644ec75c925"
+PHASE5_JSON = HISTORICAL_ARTIFACT_ROOT / (
+    "nemo_testcases_l3thd_phase5_year_gate.json"
 )
 PHASE5_JSON_SHA256 = "d5cd3dc274687b56370075ea51b9df82cc01bf912727e25f2078b6c26fe95cc7"
 

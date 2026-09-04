@@ -288,14 +288,12 @@ def test_phase3_branch_census_plant_exits_red(gate) -> None:
 
 
 def test_phase3_committed_censuses_retain_rows_and_branch_predicates(gate) -> None:
-    directory = Path("docs/ocean/fidelity/testcases")
-    before = json.loads(
-        (directory / "nemo_testcases_l3thd_phase3_baseline_operator.json")
-        .read_text()
+    assert gate.phase2.sha256(gate.BASELINE_OPERATOR_JSON) == (
+        gate.BASELINE_OPERATOR_JSON_SHA256
     )
-    after = json.loads(
-        (directory / "nemo_testcases_l3thd_phase3_year_gate.json").read_text()
-    )["oracle_entry_operator_sweep"]
+    assert gate.phase2.sha256(gate.PHASE3_JSON) == gate.PHASE3_JSON_SHA256
+    before = json.loads(gate.BASELINE_OPERATOR_JSON.read_text())
+    after = json.loads(gate.PHASE3_JSON.read_text())["oracle_entry_operator_sweep"]
     assert before["over_bar_field_rows"] == 116_274
     assert before["first_above_1e-12"]["step"] == 74
     assert before["first_above_1e-3"]["step"] == 3837
@@ -308,10 +306,9 @@ def test_phase3_committed_censuses_retain_rows_and_branch_predicates(gate) -> No
                for step in (73, 74, 75, 76))
 
 
-def test_phase4_artifact_retains_per_step_operator_and_outlier_attribution() -> None:
-    artifact = json.loads(Path(
-        "docs/ocean/fidelity/testcases/nemo_testcases_l3thd_phase4_year_gate.json"
-    ).read_text())
+def test_phase4_artifact_retains_per_step_operator_and_outlier_attribution(gate) -> None:
+    assert gate.phase2.sha256(gate.PHASE4_JSON) == gate.PHASE4_JSON_SHA256
+    artifact = json.loads(gate.PHASE4_JSON.read_text())
     operator = artifact["oracle_entry_operator_sweep"]
     assert len(operator["per_step"]) == 8760
     assert [row["step"] for row in operator["per_step"]] == list(range(1, 8761))
@@ -331,10 +328,9 @@ def test_phase4_artifact_retains_per_step_operator_and_outlier_attribution() -> 
     assert historical["absolute_numerator"] == historical["normalised_quotient"]
 
 
-def test_phase5_artifact_dispositions_all_bundled_changes() -> None:
-    artifact = json.loads(Path(
-        "docs/ocean/fidelity/testcases/nemo_testcases_l3thd_phase5_year_gate.json"
-    ).read_text())
+def test_phase5_artifact_dispositions_all_bundled_changes(gate) -> None:
+    assert gate.phase2.sha256(gate.PHASE5_JSON) == gate.PHASE5_JSON_SHA256
+    artifact = json.loads(gate.PHASE5_JSON.read_text())
     arms = artifact["round4_bundled_change_ablations"]
     exact = arms["exact_entry"]
     assert set(exact) == {
