@@ -64,7 +64,7 @@ def test_identical_field_reports_pass():
     assert result["largest_oracle_residual_worsening_ulps"] == 0.0
 
 
-def test_three_local_oracle_ulp_cell_worsening_fails():
+def test_three_row_scale_oracle_ulp_cell_worsening_fails():
     """Required control: one cell worsened by 3 ulp exits red."""
     before = _payload()
     after = plant_cellwise_comparison(before, "worsen-3ulp")
@@ -74,10 +74,11 @@ def test_three_local_oracle_ulp_cell_worsening_fails():
     assert any("cell 0 worsened" in item for item in result["violations"])
 
 
-def test_two_local_oracle_ulp_cell_worsening_passes():
+def test_two_row_scale_oracle_ulp_cell_worsening_passes():
     oracle = np.array([1.0, 1.5, 2.0])
     candidate = oracle.copy()
-    candidate[0] = _step(candidate[0], MAX_ULP_MOVE)
+    row_ulp = np.spacing(np.float64(2.0))
+    candidate[0] += MAX_ULP_MOVE * row_ulp
     result = _compare(_report(), _report(), _payload(), _payload(candidate=candidate))
     assert result["status"] == "PASS", result["violations"]
 
@@ -153,7 +154,19 @@ def test_previous_legoesm_movement_is_disclosed_but_does_not_fail_improvement():
     result = _compare(
         _report(), _report(), _payload(candidate=old), _payload(candidate=oracle))
     assert result["status"] == "PASS", result["violations"]
-    assert result["largest_previous_legoesm_field_move_in_local_oracle_ulps"] == 8.0
+    assert result["largest_previous_legoesm_field_move_in_row_scale_oracle_ulps"] == 4.0
+
+
+def test_denormal_cell_uses_floored_row_scale_not_local_spacing():
+    oracle = np.array([0.0, np.nextafter(0.0, np.inf), 0.5])
+    candidate = oracle.copy()
+    candidate[0] = np.nextafter(0.0, np.inf)
+    result = _compare(
+        _report(), _report(), _payload(oracle=oracle),
+        _payload(oracle=oracle, candidate=candidate),
+    )
+    assert result["status"] == "PASS", result["violations"]
+    assert result["field_moves"][0]["row_scale_ulp"] == np.spacing(1.0)
 
 
 def test_changed_nemo_oracle_fails_closed():

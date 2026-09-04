@@ -5,10 +5,12 @@ writes, for each scored boundary, the active-cell oracle values, candidate
 values, and ``abs(candidate - oracle)`` residuals to a compressed NPZ sidecar.
 ``--compare-to`` compares those residuals cell by cell.
 
-For a cell whose oracle value is ``o``, one ulp means
-``numpy.spacing(abs(float64(o)))`` (including the float64 subnormal spacing at
-zero). A change fails when
-``residual_after - residual_before > MAX_ULP_MOVE * ulp(o)`` at any cell.
+For every cell in a scored row, one ulp means
+``numpy.spacing(max(max(abs(float64(oracle_row))), 1.0))``.  This is one
+binary64 spacing at the row's campaign-normalization magnitude, floored at
+one; it deliberately does not turn zeros or denormal oracle cells into an
+unattainable subnormal-scale gate. A change fails when
+``residual_after - residual_before > MAX_ULP_MOVE * row_scale_ulp`` at any cell.
 Moves toward NEMO are free. It also fails when an AT-BAR row becomes DEBT or
 when ``first_over_bar`` moves to an earlier time step. Movement from the old
 legoesm field to the new legoESM field is still computed and disclosed, but is
@@ -55,7 +57,7 @@ __all__ = [
 
 MAX_ULP_MOVE = 2
 ARTIFACT_FORMAT = "legoesm-ocean-oracle-residual-fields-v1"
-COMPARISON_FORMAT = "legoesm-ocean-oracle-relative-move-gate-v2"
+COMPARISON_FORMAT = "legoesm-ocean-oracle-relative-move-gate-v3"
 
 
 def _sha256(path: Path) -> str:
@@ -226,9 +228,10 @@ def _first_over_bar_kt(value) -> int | None:
     raise ValueError(f"malformed first_over_bar value: {value!r}")
 
 
-def _local_ulps(oracle: np.ndarray) -> np.ndarray:
-    """One float64 ulp of each cell's absolute oracle magnitude."""
-    return np.spacing(np.abs(np.asarray(oracle, dtype=np.float64)))
+def _row_scale_ulp(oracle: np.ndarray) -> np.float64:
+    """One float64 spacing at ``max(max(abs(oracle)), 1)`` for the row."""
+    magnitude = float(np.max(np.abs(np.asarray(oracle, dtype=np.float64)), initial=0.0))
+    return np.spacing(np.float64(max(magnitude, 1.0)))
 
 
 def compare_gate_reports(
@@ -267,7 +270,7 @@ def compare_gate_reports(
             violations.append(f"{name}: NEMO oracle field changed between before and after")
             continue
 
-        ulp = _local_ulps(new["oracle"])
+        ulp = _row_scale_ulp(new["oracle"])
         degradation = new["residual"] - old["residual"]
         tolerance = max_ulp * ulp
         bad = degradation > tolerance
@@ -276,7 +279,8 @@ def compare_gate_reports(
             model_move_ulps = np.abs(new["candidate"] - old["candidate"]) / ulp
         move = {
             "row": name,
-            "n_cells": int(ulp.size),
+            "n_cells": int(new["oracle"].size),
+            "row_scale_ulp": float(ulp),
             "n_worsened_cells": int(np.count_nonzero(degradation > 0.0)),
             "n_improved_cells": int(np.count_nonzero(degradation < 0.0)),
             "n_cells_worse_than_bar": int(np.count_nonzero(bad)),
@@ -285,7 +289,7 @@ def compare_gate_reports(
                 np.max(degradation_ulps, initial=0.0)),
             "max_previous_legoesm_field_move": float(
                 np.max(np.abs(new["candidate"] - old["candidate"]), initial=0.0)),
-            "max_previous_legoesm_field_move_in_local_oracle_ulps": float(
+            "max_previous_legoesm_field_move_in_row_scale_oracle_ulps": float(
                 np.max(model_move_ulps, initial=0.0)),
         }
         field_moves.append(move)
@@ -293,7 +297,8 @@ def compare_gate_reports(
             index = int(np.flatnonzero(bad)[0])
             violations.append(
                 f"{name}: cell {index} worsened against NEMO by "
-                f"{degradation[index]:.17e} = {degradation_ulps[index]:.3f} local oracle ulp; "
+                f"{degradation[index]:.17e} = {degradation_ulps[index]:.3f} "
+                "row-scale oracle ulp; "
                 f"bar is {max_ulp} ulp")
 
         old_status, new_status = before.get("status"), after.get("status")
@@ -352,7 +357,9 @@ def compare_gate_reports(
         "status": "PASS" if not violations else "FAIL",
         "criterion": "cellwise_oracle_relative",
         "max_ulp_worsening": max_ulp,
-        "local_ulp_definition": "numpy.spacing(abs(float64(NEMO_value_at_cell)))",
+        "row_scale_ulp_definition": (
+            "numpy.spacing(max(max(abs(float64(NEMO_row))), 1.0))"
+        ),
         "n_certified_rows_compared": len(common),
         "row_filter_applied": row_filter is not None,
         "report_keys_checked": checked_report_keys,
@@ -361,8 +368,8 @@ def compare_gate_reports(
         "first_over_bar_candidate": after_fob,
         "largest_oracle_residual_worsening_ulps": max(
             (item["max_oracle_residual_worsening_ulps"] for item in field_moves), default=0.0),
-        "largest_previous_legoesm_field_move_in_local_oracle_ulps": max(
-            (item["max_previous_legoesm_field_move_in_local_oracle_ulps"]
+        "largest_previous_legoesm_field_move_in_row_scale_oracle_ulps": max(
+            (item["max_previous_legoesm_field_move_in_row_scale_oracle_ulps"]
              for item in field_moves), default=0.0),
         "field_moves": field_moves,
         "row_status_changes": row_changes,
@@ -395,13 +402,12 @@ def plant_cellwise_comparison(
         else:
             indices = np.flatnonzero(
                 (payload["residual"] == 0.0)
-                & np.isfinite(payload["oracle"])
-                & (_local_ulps(payload["oracle"]) > 0.0))
+                & np.isfinite(payload["oracle"]))
             if indices.size:
                 index = int(indices[0])
-                value = payload["oracle"][index]
-                for _ in range(MAX_ULP_MOVE + 1):
-                    value = np.nextafter(value, np.inf)
+                value = payload["oracle"][index] + (
+                    (MAX_ULP_MOVE + 1) * _row_scale_ulp(payload["oracle"])
+                )
                 payload["candidate"][index] = value
                 payload["residual"][index] = abs(value - payload["oracle"][index])
                 return planted
@@ -424,7 +430,7 @@ def add_ulp_compare_arguments(parser) -> None:
     parser.add_argument(
         "--compare-to", type=Path, metavar="BEFORE.json",
         help=("compare per-cell absolute residuals against the common NEMO oracle; "
-              f"no cell may worsen by more than {MAX_ULP_MOVE} local float64 ulps, "
+              f"no cell may worsen by more than {MAX_ULP_MOVE} row-scale float64 ulps, "
               "no AT-BAR row may become DEBT, and first_over_bar may not move earlier"))
     parser.add_argument(
         "--compare-rows-matching", metavar="SUBSTRING",
