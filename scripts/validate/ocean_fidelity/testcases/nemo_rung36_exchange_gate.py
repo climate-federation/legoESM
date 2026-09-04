@@ -478,8 +478,14 @@ def evaluate(root: Path, plant: str | None = None) -> dict[str, object]:
         "qsr_flux": "POST_TRA_QSR.temperature",
         "freshwater_sign": "EXCHANGE_CARD.freshwater",
     }.get(plant)
+    unmeasured_boundaries = (
+        "POST_SBC_STAGGER", "POST_ZDF_DRG_COEFF", "PRE_DYN_SPG_TS",
+        "SSH_SUBSTEP", "POST_STP2D", "PRE_DYN_ZDF_SOLVE",
+    )
     return {
-        "verdict": "AT_BAR" if first is None else "DEBT",
+        "verdict": "MEASURED_PREFIX_AT_BAR" if first is None else "DEBT",
+        "scope_complete": False,
+        "unmeasured_boundaries": unmeasured_boundaries,
         "bar": BAR,
         "backend": jax.default_backend(),
         "dtype": str(got_ssm.dtype),
@@ -511,7 +517,7 @@ def main() -> int:
     print(json.dumps(report, indent=2))
     if args.plant is not None:
         return 1 if report["plant_binding"]["red"] else 2
-    return 0 if report["verdict"] == "AT_BAR" else 1
+    return 0 if report["verdict"] == "MEASURED_PREFIX_AT_BAR" else 1
 
 
 if __name__ == "__main__":
