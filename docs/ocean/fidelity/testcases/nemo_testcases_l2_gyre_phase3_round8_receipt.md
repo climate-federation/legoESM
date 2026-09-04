@@ -1,13 +1,11 @@
-# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–16 boundary receipt
+# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–17 boundary receipt
 
-**Verdict: DEBT.  Round 16 discriminated and fixed the scalar-math eligibility
-failure: the NEMO-literal two-band QSR increment and all five requested analytic
-SBC fields are now bit-exact against Oracle V2 under production JIT/CPU/fp64/
-scalar-libm.  The ordered slow-forcing walk then found its first non-bit-exact
-primitive at stage-1 `Krhs`, before the depth reduction.  A literal reduction
-arm removes only 16.18% of the downstream residual, so no compensating
-slow-forcing change landed.  The production-JIT sweep remains first-over-bar at
-kt=2 for T/S/u/v/SSH; stage-3 transport and ZDF were not entered.**
+**Verdict: DEBT.  Round 17 converged per-statement rounding to one core owner
+and made stage-1 HPG/Krhs, the depth reduction, and post-drag slow forcing
+bit-exact against Oracle V2 under production JIT/CPU/fp64/scalar-libm.  The
+first remaining boundary is the surface-wind assembly (`6.62e-24`, 3 ULP U / 4
+ULP V), so the conditional trajectory, cross-card, stage-2, and stage-3 work
+was not entered.**
 
 Date: 2026-09-04
 
@@ -1054,16 +1052,16 @@ The committed byte census names the first changed source-stream payload:
 | `oracle_bt_advmean_operands_kt00000001.bin` | DIFFERENT | `substep[2].metric_u` |
 | `oracle_bt_drag_operands_kt00000001.bin` | DIFFERENT | `substep[2].un_e` |
 | `oracle_bt_ene_coeff_kt00000001.bin` | IDENTICAL | — |
-| `oracle_bt_frames_kt00000001.bin` | DIFFERENT | `ssh_before` |
-| `oracle_bt_frames_kt00000002.bin` | DIFFERENT | `ssh_before` |
-| `oracle_bt_frames_kt00000003.bin` | DIFFERENT | `ssh_before` |
-| `oracle_bt_frames_kt00000004.bin` | DIFFERENT | `ssh_before` |
-| `oracle_bt_frames_kt00000005.bin` | DIFFERENT | `ssh_before` |
-| `oracle_bt_frames_kt00000006.bin` | DIFFERENT | `ssh_before` |
-| `oracle_bt_frames_kt00000007.bin` | DIFFERENT | `ssh_before` |
-| `oracle_bt_frames_kt00000008.bin` | DIFFERENT | `ssh_before` |
-| `oracle_bt_frames_kt00000009.bin` | DIFFERENT | `ssh_before` |
-| `oracle_bt_frames_kt00000010.bin` | DIFFERENT | `ssh_before` |
+| `oracle_bt_frames_kt00000001.bin` | DIFFERENT | `uu_b[111]` |
+| `oracle_bt_frames_kt00000002.bin` | DIFFERENT | `uu_b[111]` |
+| `oracle_bt_frames_kt00000003.bin` | DIFFERENT | `uu_b[111]` |
+| `oracle_bt_frames_kt00000004.bin` | DIFFERENT | `uu_b[111]` |
+| `oracle_bt_frames_kt00000005.bin` | DIFFERENT | `uu_b[111]` |
+| `oracle_bt_frames_kt00000006.bin` | DIFFERENT | `uu_b[111]` |
+| `oracle_bt_frames_kt00000007.bin` | DIFFERENT | `uu_b[111]` |
+| `oracle_bt_frames_kt00000008.bin` | DIFFERENT | `uu_b[111]` |
+| `oracle_bt_frames_kt00000009.bin` | DIFFERENT | `uu_b[111]` |
+| `oracle_bt_frames_kt00000010.bin` | DIFFERENT | `uu_b[111]` |
 | `oracle_bt_substeps_kt00000001.bin` | DIFFERENT | `substep[1].slow_u` |
 | `oracle_qsr_stage3_kt00000001.bin` | DIFFERENT | `qsr` |
 | `oracle_rhs_kt00000001.bin` | IDENTICAL | — |
@@ -1473,4 +1471,137 @@ pass.
 
 Round-15 independent review was still running during this dispatch.  Every
 Round-16 result is a Codex-internal measurement; independent review remains
+outstanding and no dual-review claim is made.
+
+## Round 17 — shared rounding convergence and stage-1 HPG owner
+
+Round 17 started at `8b6ec4efe31e08d0f8db9c1e1378f7049ffc2409`.
+The HPG prediction was committed before measurement at `f7409dddb`; all rows
+below use Oracle V2 with production JIT, CPU, x64/fp64, and the card's explicit
+`transcendentals="libm"` policy.
+
+### One shared per-statement rounding owner
+
+The user corrected the source reference during the convergence check.  The
+canonical core module was introduced by ice-lane commit `86a8eb21d18`, not the
+earlier `e2ad2c30629` scalar-libm import commit.  Commit `2a7b1f7ae` checks out
+`packages/core/legoesm/core/source_rounding.py` verbatim from `86a8eb21d18`,
+removes the ocean definition, and imports
+`legoesm.core.source_rounding.nemo_source_round` everywhere.  There is one
+executable implementation.  The former ocean and canonical core bodies were
+computationally identical; only annotations, import spelling, formatting, and
+the docstring differed.
+
+The new direct core test covers normal values, both signed zeros, positive and
+negative binary64 subnormals, infinities, production JIT parity, and the
+identity gradient on finite inputs.  The hermetic GYRE prd bit-pattern pin is
+unchanged.  The production EOS parity gate reports:
+
+```text
+jacobian          0 ulp  BIT-EXACT
+thickness         0 ulp  BIT-EXACT
+prd               0 ulp  BIT-EXACT
+pressure_anomaly  0 ulp  BIT-EXACT
+```
+
+The convergence/unit subset is `4 passed` (`2` direct core tests, prd pin, and
+EOS/HPG/transport parity).  No scientific choice or card switch changed.
+
+### Stage-1 source order and zero terms
+
+At kt=1 from rest, NEMO calls EOS and HPG first
+(`stp2d.F90:126-128`), then lateral diffusion (`:130-131`), vorticity/Coriolis
+(`:144-146`), WZV (`:155`), and vector-invariant KE-gradient plus vertical
+advection (`:159-165`).  The dumped `uu/vv(:,:,:,Krhs)` entry velocity is
+identically zero.  Consequently LDF, planetary/relative-vorticity, KE-gradient,
+and vertical-advection contributions are identically zero: the complete
+stage-1 3-D `Krhs` is HPG alone.
+
+The shared operator now preserves each written NEMO operation in
+`dynhpg.F90:340-390`: `zcoef0=-grav*0.5`; surface `zhpi/zhpj`; surface
+`zuap/zvap`; `Krhs=zhpi+zuap`; the top-down `zhpi/zhpj` recurrence; each
+level-local terrain correction; and the final sum.  It uses NEMO's multiply-
+by-reciprocal metric forms and materializes each add, subtraction, and
+multiplication with the shared helper.  The operator remains the single
+registered implementation of `hpg_sco`; `_source_round=False` is a private
+test-only ablation, not a card or scheme choice.
+
+The one-variable result is decisive at the predicted boundary:
+
+| boundary | pre-fix max abs | source-literal max abs | source-literal differing cells | disposition |
+|---|---:|---:|---:|---|
+| stage-1 U/V `Krhs` | `1.3869160759180077e-20` | `0` | `0 / 0` | CONFIRMED HPG association owner |
+| e3, mask, reciprocal depth | `0` | `0` | `0 / 0` | BIT-EXACT inputs |
+| reference-depth reduction | `5.9922313054079714e-21` | `0` | `0 / 0` | BIT-EXACT after HPG fix |
+| post-drag forcing | `5.9922313054079714e-21` | `0` | `0 / 0` | BIT-EXACT |
+| post-wind U | `5.998713802234557e-21` | `6.617444900424222e-24` | `415` | DEBT, 3 ULP |
+| post-wind V | `5.998713802234557e-21` | `6.617444900424222e-24` | `409` | DEBT, 4 ULP |
+
+The pre-fix recurrence arm is non-vacuous on deterministic fp64 inputs and
+reproduces bit movement; removing the source materialization makes its unit
+test fail.  HPG eager/JIT parity is bit-exact for both U and V (0 ulp).  The
+planted live e3 operand becomes the first failing boundary and exits `1`.
+
+The already proposed literal depth reduction is now a zero-movement arm: both
+the production and independent NEMO-order replay are bit-exact.  It was not
+landed.  The first remaining boundary is therefore honestly
+**CONFIRMED_POST_WIND_FIRST_DIVERGENCE**; its owner is **UNMEASURED**.  Since the
+complete stage-1 chain is not bit-exact, the brief's condition for a new
+kt=1…10 sweep, OVERFLOW/LOCK Rule-12 gates, stage-2 Kaa, and stage-3 transport
+was not met.  Those current-tip results are explicitly UNMEASURED, not carried
+forward from Round 16.
+
+The HPG/isomorphism subset is `41 passed` in `9.46 s`; the corrected census
+schema has `4 passed` in `0.05 s`.  A broader 62-test invocation produced
+`57 passed, 5 failed`: all five failures occur before this operator because
+synthetic `nemo_sco` fixtures omit the now-required oracle `e3w_0`.  They are
+not claimed as HPG regressions or as a passing suite.  The final combined
+focused rerun is `45 passed` in `10.94 s`.
+
+### V1/V2 record-schema correction
+
+The compiler-wide V2 claim was already retracted in Round 16 and DINO was
+already labelled a consistency probe, not a match.  The remaining schema bug
+is fixed by `c89f6b65c`: `oracle_bt_frames` contains, in order, `uu_b`, `vv_b`,
+`un_adv`, and `vn_adv`—not SSH fields.  All ten records first differ at byte
+928, `40 + 111*8`, hence `uu_b[111]`; the earlier table above is rewritten in
+place.  A four-field behavioral test plants byte 111 in each payload and
+requires the correct field name.  The corrected census and attribution retain
+the substantive result: 41 different records, five identical controls, zero
+unattributed.  Both census and unregistered-record plants exit `1`.
+
+### Round-17 artifacts
+
+| artifact | SHA-256 |
+|---|---|
+| EOS source-rounding parity | `559c427944358a82715a087ecbf6e5c68bc12deb3185905db7f66c395ad8421b` |
+| HPG JIT parity | `bcfacdae524861242c9a42b63281612d5ab31e67016bf1f058a64b8b8bae1898` |
+| HPG/slow-forcing walk | `1ebdbade910d1620f1078735f90ea12c950aebedb62c448c1e31c10f5804ad0b` |
+| HPG/slow-forcing plant | `8d37b6e98a69c9ebee33291cf427d1c5fc9771b39f13ae10cd0d1b0d92bb36db` |
+| corrected V1/V2 census | `21f8416f51c87fefc2e48fe89dbaa1f143ce8e6d785f6f2154d48a739b904694` |
+| corrected attribution | `774aace672c4c136284e6e758e3ab59ad4e44be59a55cf9661660733536c270e` |
+
+The complete machine-readable register is
+`scripts/validate/ocean_fidelity/testcases/manifests/nemo_testcase_l2_gyre_round17.json`.
+
+### Round-17 ASKED / UNASKED register
+
+| choice or action | origin | disposition |
+|---|---|---|
+| canonical helper from `86a8eb21d18` | ASKED correction | copied verbatim and recorded |
+| one shared core owner; remove ocean definition | ASKED | complete; prd/EOS parity 0 ulp |
+| direct core module test | ASKED | complete |
+| shared source-literal `hpg_sco` | ASKED | landed; stage-1 Krhs bit-exact |
+| private pre-fix association arm | ASKED one-variable control | test-only; non-vacuous |
+| literal depth-reduction arm | conditional ASKED | not landed; production already bit-exact |
+| kt=1…10 sweep and OVERFLOW/LOCK gates | conditional ASKED | NOT RUN; stage-1 post-wind remains DEBT |
+| stage-2 Kaa and stage-3 transports | conditional ASKED | NOT ENTERED |
+| compiler-wide retraction | ASKED if open | already complete; retained |
+| `oracle_bt_frames` schema correction | ASKED | complete; first difference `uu_b[111]` |
+| DINO relabel | ASKED if open | already complete; consistency only |
+| post-wind owner/fix | UNASKED | none selected; owner remains UNMEASURED |
+| per-card HPG guard or shipped NEMO edit | forbidden | none |
+
+All controls above are Codex-internal measurements.  Round-16 independent
+review was still running during this dispatch; Round-17 independent review is
 outstanding and no dual-review claim is made.
