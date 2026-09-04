@@ -39,12 +39,11 @@ BASE="--grid mpas --mpas-level 8 --mpas-lloyd 20 --nemo-vertical
   --diag-every-days 0.0009 --tracer-advection superbee --runoff-depth-nemo-ini
   --river-mouth-restoring-gate --bottom-drag-scheme nemo_quadratic
   --ice-ocean-heat-coeff 70 --woa-init
-  --nemo-monthly-init $NEMOIN/orca1_inputs/data_repository/initial_conditions/woce_temp_monthly_init_4p2.nc
-    $NEMOIN/orca1_inputs/data_repository/initial_conditions/woce_salt_monthly_init_4p2.nc
   --woa-t /burg/glab/users/pg2328/legoESM/data/woce_gouretski/woce_t_woa57_annual.nc
   --woa-s /burg/glab/users/pg2328/legoESM/data/woce_gouretski/woce_s_woa57_annual.nc
   --sss-restore-file $NEMOIN/orca1_inputs/data_repository/input_fields/sss_climatology_for_restoring.nc
   --ice-init $NEMOIN/Ice_initialization.nc"
+NEMOIC="--nemo-monthly-init $NEMOIN/orca1_inputs/data_repository/initial_conditions/woce_temp_monthly_init_4p2.nc $NEMOIN/orca1_inputs/data_repository/initial_conditions/woce_salt_monthly_init_4p2.nc"
 TKE="--mpas-vmix tke --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic --tke-kappa-convention veros_sqrte"
 ISF="--isf --isf-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/runoff-icb_DaiTrenberth_Depoorter.nc"
 IWM="--iwm --iwm-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/zdfiwm_forcing_TRA.nc"
@@ -56,12 +55,12 @@ run_arm () {  # name, extra flags
   echo "--- $name per-step max|u| (step,max_abs_u,lat,lon,lev):"
   cut -d, -f1,5,7,8,9 $OUT/diag_timeseries.csv 2>/dev/null | sed -n '2,32p' | tr '\n' ' ' ; echo
 }
-# control = the failing card (dt 75, all operators)
-run_arm ctl        --dt 75 --partial-cell --mle --mle-ce 0.06 $TKE $ISF $IWM --bbl-adv
-run_arm no_bbl     --dt 75 --partial-cell --mle --mle-ce 0.06 $TKE $ISF $IWM
-run_arm no_isfiwm  --dt 75 --partial-cell --mle --mle-ce 0.06 $TKE --bbl-adv
-run_arm no_mle     --dt 75 --partial-cell $TKE $ISF $IWM --bbl-adv
-run_arm kpp        --dt 75 --partial-cell --mle --mle-ce 0.06 $ISF --bbl-adv   # (iwm needs tke)
-run_arm dt37       --dt 37.5 --partial-cell --mle --mle-ce 0.06 $TKE $ISF $IWM --bbl-adv
-run_arm no_partial --dt 75 --mle --mle-ce 0.06 $TKE $ISF $IWM --bbl-adv
+# LADDER 2 (ladder 1: bbl, isf+iwm, mle, tke->kpp all IDENTICAL growth; dt 37.5
+# keeps the SAME growth per unit time => not an explicit-CFL failure; no_partial
+# was invalid with --bbl-adv). Remaining suspects: partial-cell PGF on steep
+# slopes, and the deep IC in marginal seas (nearest-wet regrid from a handful of
+# NEMO columns at Black Sea / Alboran depths).
+run_arm no_partial --dt 75 --mle --mle-ce 0.06 $TKE $ISF $IWM $NEMOIC
+run_arm flat       --dt 75 --flat-bottom --mle --mle-ce 0.06 $TKE $ISF $IWM $NEMOIC
+run_arm woa_only   --dt 75 --partial-cell --mle --mle-ce 0.06 $TKE $ISF $IWM --bbl-adv
 echo DONE
