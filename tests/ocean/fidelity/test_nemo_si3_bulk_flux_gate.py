@@ -54,6 +54,8 @@ def test_score_distinguishes_bar_from_bit_identity() -> None:
     assert row["non_bit_identical_count"] == 1
     assert row["bit_identical_count"] == 0
     assert row["max_relative_error_step"] == 1
+    assert row["row_scale_ulp"] == np.spacing(1.0)
+    assert row["max_row_scale_ulp_error"] == 1.0
 
 
 def test_nemo_source_round_is_identity_jittable_and_differentiable() -> None:
@@ -80,6 +82,13 @@ def test_selector_is_single_orca1_identity() -> None:
     from legoesm.ice.config import validate_si3_bulk_config
 
     card = build_c1d_omip_l3_card()
+    assert (
+        card.config.Cd_ice, card.config.Ce_ice, card.config.Ch_ice,
+        card.config.drag_ocean, card.config.snow_blow_exponent,
+        card.config.albedo_snow_dry, card.config.albedo_snow_melt,
+        card.config.albedo_ice_dry, card.config.albedo_ice_melt,
+        card.config.albedo_ice_pivot,
+    ) == (1.0e-3, 1.0e-3, 1.0e-3, 5.0e-3, 0.66, 0.85, 0.75, 0.64, 0.53, 1.0)
     validate_si3_bulk_config(card.config)
     with pytest.raises(ValueError, match="Cd_ice=Ch_ice=Ce_ice"):
         validate_si3_bulk_config(card.config._replace(Cd_ice=card.config.Cd_ice * 2.0))
@@ -88,11 +97,15 @@ def test_selector_is_single_orca1_identity() -> None:
 def test_positive_subnormal_snow_uses_nemo_nonzero_branch() -> None:
     from legoesm import constants
     from legoesm.ice.sea_ice import _nemo_si3_ice_albedo
+    from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_card
 
     tiny = jnp.asarray(np.nextafter(np.float64(0.0), np.float64(1.0)))
     args = (jnp.asarray(constants.T_freeze), jnp.asarray(0.586), tiny, jnp.asarray(0.81))
-    faithful = _nemo_si3_ice_albedo(*args)
-    ablated = _nemo_si3_ice_albedo(*args, _preserve_subnormal_snow=False)
+    config = build_c1d_omip_l3_card().config
+    faithful = _nemo_si3_ice_albedo(*args, bulk_config=config)
+    ablated = _nemo_si3_ice_albedo(
+        *args, bulk_config=config, _preserve_subnormal_snow=False,
+    )
     assert np.asarray(faithful) != np.asarray(ablated)
 
 
@@ -158,6 +171,9 @@ def test_full_year_gate_and_all_plants() -> None:
     assert result["non_bit_identical_rows"] > 0
     assert result["non_bit_identical_rows"] == 18
     assert set(result["bit_owner_groups"]) == {"jax_exp_ice_alb"}
+    assert all("max_relative_error_nonzero_oracle" in row for row in result["rows"])
+    assert all("row_scale_ulp" in row for row in result["rows"])
+    assert all("max_row_scale_ulp_error" in row for row in result["rows"])
     assert result["bit_owner_groups"]["jax_exp_ice_alb"]["status"] == (
         "AWAITING_LIBM_POLICY"
     )

@@ -119,6 +119,12 @@ __param_spec__ = {
             "beta_mevp": "numerics: mEVP velocity relaxation (stability-coupled to N_mevp)",
             "T_evp": "numerics: EVP damping ratio coupled to the N_evp subcycle count (E_factor = 1/(2*T_evp*N_evp))",
             "sw_transmittance_const": "constant-scheme SW transmittance, default 0.0 (off — delta_eddington computes its own) = the physical floor; not a well-posed sigmoid tunable (default on the bound)",
+            "snow_blow_exponent": "C1D resolved selection: nampar rn_snwblow",
+            "albedo_snow_dry": "C1D resolved selection: namalb rn_alb_sdry",
+            "albedo_snow_melt": "C1D resolved selection: namalb rn_alb_smlt",
+            "albedo_ice_dry": "C1D resolved selection: namalb rn_alb_idry",
+            "albedo_ice_melt": "C1D resolved selection: namalb rn_alb_imlt",
+            "albedo_ice_pivot": "C1D resolved selection: namalb rn_alb_hpiv",
         },
         "params": {
             "albedo_ice": {
@@ -151,6 +157,11 @@ __param_spec__ = {
                 "units": "1", "bounds": (5.0e-4, 5.0e-3), "tunable_tier": 2,
                 "transform": "sigmoid", "category": "surface",
                 "reference": "ice-atmosphere heat transfer coefficient", "shape": None,
+            },
+            "Ce_ice": {
+                "units": "1", "bounds": (5.0e-4, 5.0e-3), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "surface",
+                "reference": "ice-atmosphere moisture transfer coefficient", "shape": None,
             },
             "drag_ocean": {
                 "units": "1", "bounds": (1.0e-3, 1.0e-2), "tunable_tier": 2,
@@ -343,14 +354,25 @@ def validate_si3_bulk_config(config: "SeaIceConfig") -> None:
     """
     if config.bulk_scheme != "nemo_si3_constant":
         return
-    expected = constants.bulk_transfer_ice_orca1
     conflicts = []
     if (config.Cd_ice, config.Ch_ice, config.Ce_ice) != (
-        expected, expected, expected,
+        1.0e-3, 1.0e-3, 1.0e-3,  # const-ok: ORCA1 run selection
     ):
         conflicts.append("Cd_ice=Ch_ice=Ce_ice must be ORCA1's 1e-3")
     if config.emissivity_ice != constants.emissivity_ice_nemo:
         conflicts.append("emissivity_ice must be NEMO sbc_phy emiss_i")
+    if (
+        config.drag_ocean,
+        config.snow_blow_exponent,
+        config.albedo_snow_dry,
+        config.albedo_snow_melt,
+        config.albedo_ice_dry,
+        config.albedo_ice_melt,
+        config.albedo_ice_pivot,
+    ) != (
+        5.0e-3, 0.66, 0.85, 0.75, 0.64, 0.53, 1.0,  # const-ok: resolved C1D run deck
+    ):
+        conflicts.append("ice drag/snow/albedo selections must equal the resolved C1D deck")
     if config.ice_constants != NEMO_SI3_CONSTANTS_CONFIG:
         conflicts.append("NEMO SI3 physical-constant set is required")
     if config.n_categories != 1 or config.ponds.enabled:
@@ -493,3 +515,11 @@ class SeaIceConfig(NamedTuple):
     # Appended to preserve positional constructors.  NEMO distinguishes the
     # Dalton (Ce) and Stanton (Ch) coefficients even when ORCA1 makes them equal.
     Ce_ice: float = constants.bulk_transfer_ice_default
+    # Run selections, not universal physical constants.  The C1D card names
+    # every ORCA1 value explicitly; defaults retain legacy behavior.
+    snow_blow_exponent: float = 0.66  # const-ok: run-configuration default
+    albedo_snow_dry: float = 0.85  # const-ok: run-configuration default
+    albedo_snow_melt: float = 0.75  # const-ok: run-configuration default
+    albedo_ice_dry: float = 0.64  # const-ok: run-configuration default
+    albedo_ice_melt: float = 0.53  # const-ok: run-configuration default
+    albedo_ice_pivot: float = 1.0  # const-ok: run-configuration default [m]

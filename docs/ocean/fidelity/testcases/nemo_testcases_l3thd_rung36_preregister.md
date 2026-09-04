@@ -2,7 +2,7 @@
 
 Date: 2026-09-04  
 Tracker: `climate-federation/legoESM#1699`  
-State: **DESIGN ONLY — UNMEASURED; independent review required before code**
+State: **DESIGN ONLY — UNMEASURED**
 
 This document fixes the oracle, interfaces, time levels, coverage register,
 gate, hypotheses, and controls for rung 3.6.  It does not implement the rung
@@ -288,7 +288,7 @@ must be extended to admit the exact `off` operator pair only for the registered
 1x1 geometry, with a hard geometry guard and planted off-manifold failure; the
 implementation may not silently select FCT2/upwind3 or claim ORCA1 horizontal
 transport coverage.  Until that prerequisite and the top-drag extension are
-reviewed, rung 3.6 remains **UNMEASURED and not constructible**.
+implemented and measured, rung 3.6 remains **UNMEASURED and not constructible**.
 
 Rung 3.6 will add a selectable `nemo_si3` card inside that machinery.  It will
 accept NEMO-equivalent, already grid-cell-aggregated SI3 exchange fields and
@@ -533,7 +533,7 @@ instrument, legoESM card, gate, or test is created here.
 | cover `sbc_ssm`, `eos_fzp`, `ice_update_flx`, RK3/SSH, every-step stress, and FWB volume type 1 | ASKED | source and future frames/gates specified |
 | write signs, coverage, private arms, and failing controls | ASKED | specified above |
 | preserve ORCA1-resolved identity, real forcing, CPU/fp64, copied NEMO sources | ASKED | binding design constraints |
-| implement or run rung 3.6 in this dispatch | UNASKED | deliberately not done; independent review comes first |
+| implement or run rung 3.6 in this dispatch | UNASKED | deliberately not done; this is a design-only dispatch |
 | certify ICE_ADV2D, alternate thermodynamics/dynamics, ponds, or option-4 salinity | UNASKED | outside ORCA1 scope |
 | alter a production default or add a second exchange implementation | UNASKED | forbidden by design |
 | modify/delete shipped NEMO or push the branch | UNASKED | not done |

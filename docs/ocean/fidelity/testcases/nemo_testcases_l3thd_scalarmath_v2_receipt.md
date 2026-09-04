@@ -251,14 +251,6 @@ artifact is mutated.
   pre-existing style findings, not suppressed or relabeled as a clean full
   Ruff run.
 
-Two independent adversarial reviews returned **SHIP** after their HOLD items
-were corrected.  The provenance reviewer independently reproduced the scalar
-JSON hash and all seven red controls, inspected both builds/runs and their
-executed inputs, and confirmed the metadata-only NetCDF classification.  The
-gate reviewer independently reproduced the 227,760-row bulk census, its
-bit-owner split, runtime fail-closure, the V2 column identity, and the 44 core
-plus 7 exchange tests.  Neither review found rung-3.6 implementation.
-
 ## Decisions
 
 | choice | state | disposition |

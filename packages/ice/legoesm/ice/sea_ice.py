@@ -501,6 +501,7 @@ def _nemo_si3_ice_albedo(
     h_snow: jnp.ndarray,
     cloud_fraction: jnp.ndarray,
     *,
+    bulk_config: SeaIceConfig,
     _preserve_subnormal_snow: bool = True,
     _source_round: bool = True,
 ) -> jnp.ndarray:
@@ -525,10 +526,10 @@ def _nemo_si3_ice_albedo(
     )
     bare_thick = jnp.where(
         snow_is_zero & (T_surface >= constants.T_freeze),
-        constants.albedo_ice_melt_orca1,
-        constants.albedo_ice_dry_orca1,
+        bulk_config.albedo_ice_melt,
+        bulk_config.albedo_ice_dry,
     )
-    pivot_log = source_round(jnp.log(constants.albedo_ice_pivot_orca1))
+    pivot_log = source_round(jnp.log(bulk_config.albedo_ice_pivot))
     inv_log_interval = source_round(
         1.0 / source_round(
             pivot_log - jnp.log(constants.albedo_ice_thin_break_nemo)
@@ -558,7 +559,7 @@ def _nemo_si3_ice_albedo(
     bare = jnp.where(
         h_ice <= constants.albedo_ice_thin_break_nemo,
         bare_thin,
-        jnp.where(h_ice <= constants.albedo_ice_pivot_orca1, bare_mid, bare_thick),
+        jnp.where(h_ice <= bulk_config.albedo_ice_pivot, bare_mid, bare_thick),
     )
     dry_decay = source_round(
         jnp.exp(source_round(
@@ -573,15 +574,15 @@ def _nemo_si3_ice_albedo(
         ))
     )
     snow_dry = source_round(
-        constants.albedo_snow_dry_orca1
+        bulk_config.albedo_snow_dry
         - source_round(
-            source_round(constants.albedo_snow_dry_orca1 - bare) * dry_decay
+            source_round(bulk_config.albedo_snow_dry - bare) * dry_decay
         )
     )
     snow_melt = source_round(
-        constants.albedo_snow_melt_orca1
+        bulk_config.albedo_snow_melt
         - source_round(
-            source_round(constants.albedo_snow_melt_orca1 - bare) * melt_decay
+            source_round(bulk_config.albedo_snow_melt - bare) * melt_decay
         )
     )
     snow = jnp.where(T_surface < constants.T_freeze, snow_dry, snow_melt)
@@ -630,6 +631,7 @@ def _nemo_si3_blk_ice_2(
     qsr_ocean,
     emp_ocean_raw,
     ice_constants,
+    bulk_config: SeaIceConfig,
     _preserve_subnormal_snow: bool = True,
     _source_round: bool = True,
 ):
@@ -642,6 +644,7 @@ def _nemo_si3_blk_ice_2(
     source_round = nemo_source_round if _source_round else lambda value: value
     albedo = _nemo_si3_ice_albedo(
         T_surface, h_ice, h_snow, cloud_fraction,
+        bulk_config=bulk_config,
         _preserve_subnormal_snow=_preserve_subnormal_snow,
         _source_round=_source_round,
     )
@@ -704,7 +707,7 @@ def _nemo_si3_blk_ice_2(
     snow_on_ice_fraction = source_round(
         1.0 - source_round(
             source_round(1.0 - ice_fraction_before)
-            ** constants.snow_blow_exponent_orca1
+            ** bulk_config.snow_blow_exponent
         )
     )
     open_fraction = source_round(1.0 - ice_fraction_before)
@@ -991,10 +994,7 @@ def _bulk_flux_dispatch(
         validate_si3_bulk_config(config)
         theta_air = forcing.T_lowest * (
             constants.p_ref / forcing.p_lowest
-        ) ** (
-            constants.R_gas_molar
-            / (constants.M_dry_air * constants.c_p_dry_air_nemo)
-        )
+        ) ** constants.poisson_dry_air_nemo
         raw = nemo_si3_constant_fluxes(
             forcing.u_lowest, forcing.v_lowest, theta_air, forcing.q_lowest,
             T_ice, forcing.p_surface, rho,

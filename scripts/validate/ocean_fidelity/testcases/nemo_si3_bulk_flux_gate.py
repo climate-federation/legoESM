@@ -237,15 +237,17 @@ def _as_dict(values: np.ndarray, names: tuple[str, ...]) -> dict[str, np.ndarray
     return {name: values[:, index] for index, name in enumerate(names)}
 
 
-def _scalar_glibc_albedo_replay(stage1: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+def _scalar_glibc_albedo_replay(
+    stage1: dict[str, np.ndarray], bulk_config,
+) -> dict[str, np.ndarray]:
     """Gate-only scalar-libm replay of the active no-pond SI3 albedo path."""
     from legoesm import constants
 
     inv_log_interval = 1.0 / (
-        math.log(constants.albedo_ice_pivot_orca1)
+        math.log(bulk_config.albedo_ice_pivot)
         - math.log(constants.albedo_ice_thin_break_nemo)
     )
-    log_pivot = math.log(constants.albedo_ice_pivot_orca1)
+    log_pivot = math.log(bulk_config.albedo_ice_pivot)
     albedo = []
     for surface, h_ice, h_snow, cloud in zip(
         stage1["T_surface"], stage1["h_ice"], stage1["h_snow"],
@@ -253,9 +255,9 @@ def _scalar_glibc_albedo_replay(stage1: dict[str, np.ndarray]) -> dict[str, np.n
     ):
         snow_fraction = h_snow / (h_snow + constants.snow_cover_depth_nemo)
         bare_thick = (
-            constants.albedo_ice_melt_orca1
+            bulk_config.albedo_ice_melt
             if h_snow == 0.0 and surface >= constants.T_freeze
-            else constants.albedo_ice_dry_orca1
+            else bulk_config.albedo_ice_dry
         )
         bare_mid = bare_thick + (
             constants.albedo_ice_thin_nemo - bare_thick
@@ -265,18 +267,18 @@ def _scalar_glibc_albedo_replay(stage1: dict[str, np.ndarray]) -> dict[str, np.n
         ) * (1.0 / constants.albedo_ice_thin_break_nemo) * h_ice
         bare = (
             bare_thin if h_ice <= constants.albedo_ice_thin_break_nemo
-            else bare_mid if h_ice <= constants.albedo_ice_pivot_orca1
+            else bare_mid if h_ice <= bulk_config.albedo_ice_pivot
             else bare_thick
         )
         if surface < constants.T_freeze:
-            snow = constants.albedo_snow_dry_orca1 - (
-                constants.albedo_snow_dry_orca1 - bare
+            snow = bulk_config.albedo_snow_dry - (
+                bulk_config.albedo_snow_dry - bare
             ) * math.exp(
                 -h_snow * (1.0 / constants.albedo_snow_decay_dry_nemo)
             )
         else:
-            snow = constants.albedo_snow_melt_orca1 - (
-                constants.albedo_snow_melt_orca1 - bare
+            snow = bulk_config.albedo_snow_melt - (
+                bulk_config.albedo_snow_melt - bare
             ) * math.exp(
                 -h_snow * (1.0 / constants.albedo_snow_decay_melt_nemo)
             )
@@ -305,6 +307,7 @@ def _scalar_glibc_albedo_replay(stage1: dict[str, np.ndarray]) -> dict[str, np.n
 def _numpy_emp_ice_order_probe(
     stage1: dict[str, np.ndarray],
     unrounded_emp_ice: np.ndarray,
+    bulk_config,
     *,
     step: int = 6236,
 ) -> dict[str, object]:
@@ -322,7 +325,9 @@ def _numpy_emp_ice_order_probe(
         np.float64(1.0) - np.float64(stage1["ice_fraction_before"][index])
     )
     snow_on_ice = np.float64(
-        np.float64(1.0) - np.float64(open_fraction ** np.float64(0.66))
+        np.float64(1.0) - np.float64(
+            open_fraction ** np.float64(bulk_config.snow_blow_exponent)
+        )
     )
     snow_term = np.float64(np.float64(stage1["sprecip"][index]) * snow_on_ice)
     replay = np.float64(weighted - snow_term)
@@ -367,6 +372,7 @@ def _bit_owner_groups(rows: list[dict[str, object]], *, plant: bool = False) -> 
         group = grouped.setdefault(owner, {
             "non_bit_identical_rows": 0,
             "max_relative_error_nonzero_oracle": 0.0,
+            "max_row_scale_ulp_error": 0.0,
             "exact_zero_oracle_non_bit_rows": 0,
             "variables": [],
             "largest_relative_row": None,
@@ -376,6 +382,10 @@ def _bit_owner_groups(rows: list[dict[str, object]], *, plant: bool = False) -> 
             ),
         })
         group["non_bit_identical_rows"] += count
+        group["max_row_scale_ulp_error"] = max(
+            float(group["max_row_scale_ulp_error"]),
+            float(row["max_row_scale_ulp_error"]),
+        )
         row_relative = float(row["max_relative_error_nonzero_oracle"])
         if row_relative > float(group["max_relative_error_nonzero_oracle"]):
             group["max_relative_error_nonzero_oracle"] = row_relative
@@ -390,12 +400,11 @@ def _bit_owner_groups(rows: list[dict[str, object]], *, plant: bool = False) -> 
     return grouped
 
 
-def validate_selector(stage0: dict[str, np.ndarray], stage2: dict[str, np.ndarray]) -> None:
-    from legoesm import constants
-
-    expected = constants.bulk_transfer_ice_orca1
+def validate_selector(
+    stage0: dict[str, np.ndarray], stage2: dict[str, np.ndarray], bulk_config,
+) -> None:
     for name in ("Cd", "Ch", "Ce"):
-        require(np.all(stage0[name] == expected), f"non-ORCA1 {name}")
+        require(np.all(stage0[name] == getattr(bulk_config, f"{name}_ice")), f"non-ORCA1 {name}")
     require(np.all(stage2["ln_icedyn"] == 1.0), "ln_icedyn branch drift")
     require(np.all(stage2["ln_form_drag"] == 0.0), "form-drag branch drift")
     require(np.all(stage2["nn_form_drag"] == 2.0), "nn_frm drift")
@@ -457,6 +466,9 @@ def _score(predicted, oracle, stage: str, variable: str) -> dict[str, object]:
     )
     relative_nonbit = relative * (predicted_bits != oracle_bits)
     relative_index = int(np.argmax(relative_nonbit))
+    row_scale_ulp = float(np.spacing(max(float(np.max(np.abs(oracle))), 1.0)))
+    ulp_error = error / row_scale_ulp
+    ulp_index = int(np.argmax(ulp_error))
     return {
         "stage": stage,
         "variable": variable,
@@ -475,6 +487,9 @@ def _score(predicted, oracle, stage: str, variable: str) -> dict[str, object]:
         "max_relative_error_step": (
             relative_index + 1 if np.any(nonbit_nonzero) else None
         ),
+        "row_scale_ulp": row_scale_ulp,
+        "max_row_scale_ulp_error": float(ulp_error[ulp_index]),
+        "max_row_scale_ulp_step": ulp_index + 1,
         "exact_zero_oracle_non_bit_count": int(np.sum(
             (predicted_bits != oracle_bits) & ~nonzero_oracle
         )),
@@ -486,6 +501,7 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
     from legoesm.core.bulk_flux import nemo_si3_constant_fluxes
     from legoesm.core.precision import PrecisionPolicy, set_policy
     from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
+    from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_card
     from legoesm.ice.sea_ice import _nemo_si3_blk_ice_2, _nemo_si3_ice_flx_other
 
     runtime = runtime_versions()
@@ -506,7 +522,8 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
     s1_np = _as_dict(stages[1], STAGE1_NAMES)
     s2_np = _as_dict(stages[2], STAGE2_NAMES)
     validate_coverage()
-    validate_selector(s0_np, s2_np)
+    bulk_config = build_c1d_omip_l3_card(oracle_root=root).config
+    validate_selector(s0_np, s2_np, bulk_config)
     # Force the executing comparison through JAX, rather than allowing NumPy
     # arrays to evaluate a prefix of an expression before its first jnp call.
     s0 = jax.tree.map(jax.numpy.asarray, s0_np)
@@ -516,9 +533,7 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
     raw = nemo_si3_constant_fluxes(
         s0["u_air"], s0["v_air"], s0["theta_air"], s0["q_air"],
         s0["T_surface"], s0["p_surface"], s0["rho_air"],
-        constants.bulk_transfer_ice_orca1,
-        constants.bulk_transfer_ice_orca1,
-        constants.bulk_transfer_ice_orca1,
+        bulk_config.Cd_ice, bulk_config.Ch_ice, bulk_config.Ce_ice,
     )
     predictions = {
         (0, "wndm_ice"): raw[2],
@@ -541,6 +556,7 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         sst_celsius=s1["sst_celsius"], qns_ocean=s1["qns_ocean"],
         qsr_ocean=s1["qsr_ocean"], emp_ocean_raw=s1["emp_ocean_raw"],
         ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+        bulk_config=bulk_config,
     )
     for name in STAGE1_NAMES[25:45]:
         predictions[(1, name)] = flux2[name]
@@ -570,9 +586,7 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
     unrounded_raw = nemo_si3_constant_fluxes(
         s0["u_air"], s0["v_air"], s0["theta_air"], s0["q_air"],
         s0["T_surface"], s0["p_surface"], s0["rho_air"],
-        constants.bulk_transfer_ice_orca1,
-        constants.bulk_transfer_ice_orca1,
-        constants.bulk_transfer_ice_orca1,
+        bulk_config.Cd_ice, bulk_config.Ch_ice, bulk_config.Ce_ice,
         _source_round=False,
     )
     unrounded_flux2 = _nemo_si3_blk_ice_2(
@@ -586,6 +600,7 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         sst_celsius=s1["sst_celsius"], qns_ocean=s1["qns_ocean"],
         qsr_ocean=s1["qsr_ocean"], emp_ocean_raw=s1["emp_ocean_raw"],
         ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+        bulk_config=bulk_config,
         _source_round=False,
     )
     unrounded_other = _nemo_si3_ice_flx_other(
@@ -626,7 +641,7 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         f"source-round private arm no longer reproduces Round 9: {unrounded_counts}",
     )
     order_probe = _numpy_emp_ice_order_probe(
-        s1_np, np.asarray(unrounded_flux2["emp_ice"]),
+        s1_np, np.asarray(unrounded_flux2["emp_ice"]), bulk_config,
     )
 
     # Fields not subsequently mutated by ice thermodynamics must retain their
@@ -655,6 +670,7 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         sst_celsius=s1["sst_celsius"], qns_ocean=s1["qns_ocean"],
         qsr_ocean=s1["qsr_ocean"], emp_ocean_raw=s1["emp_ocean_raw"],
         ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+        bulk_config=bulk_config,
         _preserve_subnormal_snow=False,
     )
     ablation_rows = [
@@ -681,7 +697,7 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
     elif plant == "selector":
         bad = dict(s0_np)
         bad["Cd"] = np.asarray(bad["Cd"]) * 2.0
-        validate_selector(bad, s2_np)
+        validate_selector(bad, s2_np, bulk_config)
     elif plant == "bit_owner":
         pass
     elif plant == "source_round":
@@ -695,7 +711,7 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         _score(predictions[key], oracle[key], STAGE_NAMES[key[0]], key[1])
         for key in predictions
     ]
-    scalar_outputs = _scalar_glibc_albedo_replay(s1_np)
+    scalar_outputs = _scalar_glibc_albedo_replay(s1_np, bulk_config)
     scalar_rows = [
         _score(values, s1_np[name], "SCALAR_GLIBC_REPLAY", name)
         for name, values in scalar_outputs.items()

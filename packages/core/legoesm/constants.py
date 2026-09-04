@@ -198,10 +198,7 @@ ln10_nemo = 2.302585092994046               # 40026bb1bbb55516; sbc_phy.F90:709-
 
 # ORCA1-resolved SI3 surface/bulk selections used by C1D_OMIP_L3.
 bulk_transfer_ice_default = 1.5e-3
-bulk_transfer_ice_orca1 = 1.0e-3
-ice_ocean_drag_orca1 = 5.0e-3
 snow_cover_depth_nemo = 0.02    # [m] icevar.F90:1583
-snow_blow_exponent_orca1 = 0.66
 ice_sw_clear_nemo = 0.18
 ice_sw_cloudy_nemo = 0.35
 ice_sw_thin_threshold_nemo = 0.1  # [m]
@@ -213,12 +210,7 @@ ice_full_cover_margin_nemo = 1.0e-3
 ice_growth_thickness_stop_nemo = 3.0  # [m]
 
 # Active no-pond ice_alb identity, icealb.F90:124-185 and accepted namalb.
-albedo_snow_dry_orca1 = 0.85
-albedo_snow_melt_orca1 = 0.75
-albedo_ice_dry_orca1 = 0.64
-albedo_ice_melt_orca1 = 0.53
 albedo_ice_thin_nemo = 0.18
-albedo_ice_pivot_orca1 = 1.0    # [m]
 albedo_ice_thin_break_nemo = 0.05  # [m]
 albedo_snow_decay_dry_nemo = 0.02  # [m]
 albedo_snow_decay_melt_nemo = 0.03  # [m]
