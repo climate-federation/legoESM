@@ -52,11 +52,18 @@ mpirun -np 2 --oversubscribe ./nemo
 
 ## Frozen acceptance
 
+**Pre-run erratum:** the first committed version incorrectly wrote 35 for the
+thermodynamic-frame count by collapsing each category's five internal stages
+to one. `icethd.F90:116,138-174,196,231` gives, on each of the five odd ice
+steps, one entry + five stages for each of five categories + one post-remap +
+one exit = 28 frames, hence **140**. This correction is frozen before the
+replacement run and does not use a measured replacement result.
+
 The replacement run is accepted only if it reaches step 10 with launcher
 status zero; emits exactly the same 90 filenames; every stream parses
 sequentially against its writer schema with no trailing bytes and finite
 defined-domain payloads; the SI3 counts are rank-0 counts (bulk 15 frames,
-exchange 10, thermodynamics 35, ZDF inputs 25, reassociation 5); and every
+exchange 10, thermodynamics 140, ZDF inputs 25, reassociation 5); and every
 ordinary model output passes the preregistered identity comparison against the
 uninstrumented ten-step control. The planted-control set is unchanged.
 

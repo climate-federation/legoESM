@@ -215,3 +215,51 @@ parsing and planted controls, the final byte-identity comparison against the
 completed control, the active-input/coverage/time-level registers, final
 manifest, executed-arm audit, and independent-review receipt. No Phase-2
 legoESM work is allowed before that receipt.
+
+## Second corrective hand-off: MPI writer ownership
+
+The 90-file `instrumented_full_10step_np2` inventory is also **retracted as an
+oracle record set**. A sequential schema walk found that the SI3 append helpers
+in `icesbc`, `icestp`, and `icethd` lacked their intended `lwp` guard. Both
+ranks therefore opened the same filename. The malformed run remains intact;
+the failure and frozen correction are recorded in
+`nemo_testcases_l4_orca2_phase1_mpi_writer_correction_preregister.md`.
+
+Seven helper-entry `IF( .NOT.lwp ) RETURN` guards were added in config-local
+MY_SRC only. They govern file ownership and perform no model assignment. The
+incremental scalar-math rebuild compiled the three edited units plus dependent
+units and completed successfully:
+
+```text
+binary  /data/abyssal/dbalwada/nemo-testcases-l4/build/nemo_ORCA2_OMIP_L4_instrumented_rank0.exe
+bytes   54904016
+SHA256  0fe25c9f0da3d77e0011e9243d8eb24b038e4f0253273056174acc3b57fc8f7c
+build   /data/abyssal/dbalwada/nemo-testcases-l4/build/build_ORCA2_OMIP_L4_instrumented_rank0.log
+SHA256  75e519481a0dfe61eb46519522bbf05357b53e6f50d1e90d160b3386e3574169
+MY_SRC  7b49f7fc256a25a11a3b48cc39c897921f5b3bf627c009ac5fe3688e30413b2d
+_ZGV*   zero; empty census SHA256 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+```
+
+The one remaining external execution is prepared at:
+
+```text
+/data/abyssal/dbalwada/nemo-testcases-l4/runs/instrumented_rank0_10step_np2
+```
+
+It uses regular copies of the same 19-file deck, absolute symlinks to the same
+40 archive inputs, and an absolute symlink to the exact binary above. The
+namelist and manifests are unchanged from the earlier ten-step runs. Its
+self-contained launcher already uses Bash `time`, checks every immutable
+input, and executes `mpirun -np 2 --oversubscribe ./nemo`.
+
+```text
+run.sh             91ad44b8d12703ecc8f91eb032a3dcce5067a9190b3fe6f54bd2300a9842f7d4
+namelist_cfg       62f4746cf3846254c18af73bcde53e42f7d4cb9ebcdaf5f63cc9ed5316a9f8f4
+deck manifest      e1974d9db5974f54d451fe1112b8f22a404516adcc7cbcf0b035fbe1cccba70b
+input manifest     3dfe251754fa76c8b5053cda90a51ee10589d0fffc01a4e799c49cc36bbd17e5
+prepared census    471bd2f9a6482a2ebd5c55669fe2dd3984543af9d0ec180145f0f480ff8c849b
+```
+
+Phase 1 cannot be closed until that user-shell run is executed and passes the
+unchanged record and ordinary-output gates. It is the only directory awaiting
+execution.
