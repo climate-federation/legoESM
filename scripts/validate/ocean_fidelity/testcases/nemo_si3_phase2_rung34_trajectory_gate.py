@@ -279,6 +279,18 @@ def _active_ridging_projection(card, frame: dict[str, np.ndarray], next_frame):
                 np.abs(np.asarray(result.open_water_area - state.open_water_area)[interior])
             )
         ),
+        "minimum_open_water_before": float(
+            np.min(np.asarray(state.open_water_area)[interior])
+        ),
+        "minimum_open_water_after": float(
+            np.min(np.asarray(result.open_water_area)[interior])
+        ),
+        "minimum_pond_lid_before": float(
+            np.min(np.asarray(state.pond_lid_volume)[interior])
+        ),
+        "minimum_pond_lid_after": float(
+            np.min(np.asarray(result.pond_lid_volume)[interior])
+        ),
         "iteration_population": {
             str(int(value)): int(count) for value, count in zip(unique, counts, strict=True)
         },
