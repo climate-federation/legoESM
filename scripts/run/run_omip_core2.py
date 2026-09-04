@@ -4728,6 +4728,25 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None,
                    io_proc: bool = True, ice_state=None, grid=None,
                    step: int | None = None, day: float | None = None,
                    extra: dict | None = None):
+    # Geographic cell/node-centred velocity for the unstructured grids, so
+    # the equatorial-undercurrent probe can read all three grids alike:
+    # MPAS stores edge-normal u (Perot reconstruction, same helper as the
+    # ice coupling), FESOM a rotated-frame node vector (exact inverse
+    # rotation, per level).  Structured grids already carry u/v faces.
+    _u_geo = {}
+    if grid is not None and hasattr(grid, "edgesOnCell") and hasattr(grid, "angleEdge"):
+        from legoesm.ocean.init_mpas import reconstruct_cell_velocity
+        _ue, _vn = reconstruct_cell_velocity(state.u.data, grid)
+        _u_geo = {"u_east": np.asarray(_ue), "v_north": np.asarray(_vn)}
+    elif getattr(state, "uv_node", None) is not None and hasattr(grid, "mesh"):
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            rotated_to_geographic_node_vector,
+        )
+        _uv = np.asarray(state.uv_node)                     # (nod2D, nlev, 2)
+        _cols = [rotated_to_geographic_node_vector(grid.mesh, _uv[:, k, 0], _uv[:, k, 1])
+                 for k in range(_uv.shape[1])]
+        _u_geo = {"u_east": np.stack([np.asarray(c[0]) for c in _cols], axis=1),
+                  "v_north": np.stack([np.asarray(c[1]) for c in _cols], axis=1)}
     # io_proc=False (non-process-0 under --distributed): the state is replicated
     # and the host pull below is pure NumPy (no collective), but only process 0
     # writes the file — N processes would otherwise clobber the same .npz.  Still
@@ -4738,6 +4757,7 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None,
         u=np.asarray(state.u.data),
         land_mask=np.asarray(state.land_mask.data),
         lat_T=np.asarray(lat2d), lon_T=np.asarray(lon2d),
+        **_u_geo,
     )
     # WHEN, inside the payload.  Until now the simulated time lived only in the
     # FILE NAME, so a reader had to trust a convention -- and `snapshot_final`

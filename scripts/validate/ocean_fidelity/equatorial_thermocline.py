@@ -359,12 +359,22 @@ def _euc_merid_block(a, L, zc):
                 print(f"{lat0:6d} {o:8.3f} {n:8.3f}")
 
     if a.nemo_ufile:
-        u_o = np.asarray(snap["u"], dtype=np.float64)
-        if u_o.shape[1] == lat_o.shape[1] + 1:
-            # C-grid u faces (ny, nx+1, nz): average the two faces of each
-            # T cell so the box selection below can use T coordinates.
-            u_o = 0.5 * (u_o[:, :-1, :] + u_o[:, 1:, :])
-        if u_o.shape[:2] != lat_o.shape:
+        if lat_o.ndim == 1:
+            # Unstructured grids (MPAS cells / FESOM nodes): the snapshot
+            # carries the GEOGRAPHIC cell-centred zonal velocity written by
+            # the runner (Perot / inverse-rotation); the raw ``u`` there is
+            # edge-normal (MPAS) or absent (FESOM) and cannot be boxed.
+            if "u_east" not in snap.files:
+                raise SystemExit("unstructured snapshot without u_east -- "
+                                 "rerun with a runner that writes it.")
+            u_o = np.asarray(snap["u_east"], dtype=np.float64)
+        else:
+            u_o = np.asarray(snap["u"], dtype=np.float64)
+            if u_o.shape[1] == lat_o.shape[1] + 1:
+                # C-grid u faces (ny, nx+1, nz): average the two faces of each
+                # T cell so the box selection below can use T coordinates.
+                u_o = 0.5 * (u_o[:, :-1, :] + u_o[:, 1:, :])
+        if u_o.shape[:lat_o.ndim] != lat_o.shape:
             raise SystemExit(f"u {u_o.shape} does not align with T coords "
                              f"{lat_o.shape} -- refusing to index.")
         ds = nc.Dataset(a.nemo_ufile)
