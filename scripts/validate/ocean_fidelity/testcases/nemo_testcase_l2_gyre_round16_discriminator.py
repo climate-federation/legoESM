@@ -431,13 +431,13 @@ def run(oracle_root: Path, mesh_path: Path) -> dict[str, object]:
             "qsr.literal_vs_oracle",
             qsr_record["dT_dt"],
             literal_qsr,
-            tmask > 0.5,
+            np.transpose(tmask > 0.5, (1, 2, 0)),
         ),
         _compare(
             "qsr.current_vs_oracle",
             qsr_record["dT_dt"],
             current["qsr_increment"],
-            tmask > 0.5,
+            np.transpose(tmask > 0.5, (1, 2, 0)),
         ),
     ]
     sbc_rows = []
