@@ -156,8 +156,21 @@ READERS = {
         p, b"NEMO_L3QSR__001 ", 6, 4, 5),
 }
 
+RUNG36_REQUIRED = {
+    "oracle_si3_zdf_operands.bin", "oracle_si3_thd_frames.bin",
+    "oracle_si3_exchange_frames.bin", "oracle_si3_zdf_inputs.bin",
+    "oracle_si3_bulk_operands.bin", "oracle_rung36_ssm_frames.bin",
+    "oracle_rung36_update_frames.bin", "oracle_rung36_fwb_frames.bin",
+    "oracle_rung36_trasbc_frames.bin", "oracle_rung36_qsr_frames.bin",
+}
+
 
 def validate_root(root: Path) -> dict[str, object]:
+    present = {name for name in READERS if (root / name).exists()}
+    if any(name.startswith("oracle_rung36_") for name in present):
+        missing = sorted(RUNG36_REQUIRED - present)
+        if missing:
+            raise HeaderError(f"{root}: missing required rung-3.6 streams {missing}")
     rows = []
     for name, reader in READERS.items():
         path = root / name

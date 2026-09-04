@@ -15,11 +15,18 @@ from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_coupled_card
 from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
 from legoesm.ice.sea_ice import _nemo_si3_ice_update_tau
 from legoesm.ocean.physics.shortwave_penetration import nemo_rgb_one_layer_rhs
+from scripts.validate.ocean_fidelity.testcases.nemo_rung36_exchange_gate import (
+    _nemo_bilinear_months,
+    _nemo_monthly_interp,
+)
 
 
 def test_coupled_card_binds_decision_six_and_libm() -> None:
     card = build_c1d_omip_l3_coupled_card()
     assert card.slab_depth_m == 10.0
+    assert card.ocean_dt_seconds == 3600.0
+    assert card.ice_dt_seconds == 14400.0
+    assert card.ice_cadence == 4
     assert card.exchange == NemoSI3ExchangeConfig()
     assert card.ice.precision_policy.transcendentals == "libm"
 
@@ -73,3 +80,16 @@ def test_rk3_and_one_layer_rgb_source_rows() -> None:
     assert float(s) == 3.25
     rhs = nemo_rgb_one_layer_rhs(1.0, 8.0, 2.0, 0.25)
     assert float(rhs) == 2.0
+
+
+def test_chlorophyll_replay_preserves_weight_and_time_association() -> None:
+    source = np.arange(24, dtype=np.float32).reshape(12, 1, 2)
+    monthly = _nemo_bilinear_months(
+        source, [1, 2, 1, 2],
+        [np.float64(0.0), np.float64(0.25),
+         np.float64(0.0), np.float64(0.75)],
+    )
+    np.testing.assert_array_equal(monthly, source[:, 0, 1].astype(np.float64))
+    hourly = _nemo_monthly_interp(monthly, 2)
+    assert hourly.shape == (2,)
+    assert hourly[1] != hourly[0]

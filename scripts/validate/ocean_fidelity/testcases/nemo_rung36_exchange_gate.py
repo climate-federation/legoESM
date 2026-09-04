@@ -11,6 +11,7 @@ from pathlib import Path
 
 import jax
 import numpy as np
+from netCDF4 import Dataset
 
 from legoesm import constants
 from legoesm.core.precision import PrecisionPolicy, set_policy
@@ -105,6 +106,8 @@ def _ssm(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
             (before if stage == 0 else after).append(z[7:14])
     if stages != [value for _ in range(len(stages)//2) for value in (0, 1)]:
         raise ValueError("SSM frame order")
+    if steps != [kt for kt in range(1, len(steps)//2 + 1) for _ in (0, 1)]:
+        raise ValueError("SSM kt registry")
     return (np.asarray(instant[::2]), np.asarray(before), np.asarray(after))
 
 
@@ -141,15 +144,16 @@ def _exchange(path: Path) -> dict[str, np.ndarray]:
 def _update(path: Path) -> tuple[
     dict[str, np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray]
 ]:
-    pre, post, tau = [], [], []
+    pre, post, tau, sequence = [], [], [], []
     with path.open("rb") as stream:
         while magic := stream.read(16):
             if magic != UPDATE_MAGIC:
                 raise ValueError("bad update-frame magic")
-            version, _kt, stage, count, bits = struct.unpack("=5i", stream.read(20))
+            version, kt, stage, count, bits = struct.unpack("=5i", stream.read(20))
             if version != 1 or bits != 64:
                 raise ValueError("bad update-frame header")
             z = np.fromfile(stream, np.float64, count)
+            sequence.append((kt, stage))
             if stage == 0:
                 if count != len(UPDATE_PRE_FIELDS):
                     raise ValueError("bad PRE_UPDATE_FLX count")
@@ -162,6 +166,13 @@ def _update(path: Path) -> tuple[
                 tau.append(z)
             else:
                 raise ValueError("bad POST_UPDATE_TAU count")
+    expected = []
+    for kt in range(1, len(tau) + 1):
+        if (kt - 1) % 4 == 0:
+            expected.extend(((kt, 0), (kt, 1)))
+        expected.append((kt, 2))
+    if sequence != expected:
+        raise ValueError("update-frame kt/stage registry")
     return (
         {name: np.asarray(pre)[:, index] for index, name in enumerate(UPDATE_PRE_FIELDS)},
         {name: np.asarray(post)[:, index] for index, name in enumerate(UPDATE_POST_FIELDS)},
@@ -209,36 +220,114 @@ def _fwb(path: Path) -> dict[str, np.ndarray]:
 
 
 def _trasbc(path: Path) -> dict[str, np.ndarray]:
-    rows, stages = [], []
+    rows, stages, registry = [], [], []
     with path.open("rb") as stream:
         while magic := stream.read(16):
             if magic != TRASBC_MAGIC:
                 raise ValueError("bad tra_sbc magic")
             h = struct.unpack("=8i", stream.read(32))
-            version, _kt, stage, _kbb, _kmm, _krhs, count, bits = h
+            version, kt, stage, kbb, kmm, krhs, count, bits = h
             if (version, count, bits) != (1, len(TRASBC_FIELDS), 64):
                 raise ValueError("bad tra_sbc header")
             stages.append(stage)
+            registry.append((kt, stage, kbb, kmm, krhs))
             rows.append(np.fromfile(stream, np.float64, count))
     values = np.asarray(rows)
+    if [(kt, stage) for kt, stage, *_ in registry] != [
+        (kt, stage) for kt in range(1, len(registry) // 3 + 1)
+        for stage in (1, 2, 3)
+    ]:
+        raise ValueError("tra_sbc kt/stage registry")
+    if any(min(kbb, kmm, krhs) < 1 for _, _, kbb, kmm, krhs in registry):
+        raise ValueError("tra_sbc runtime time-level registry")
     result = {name: values[:, index] for index, name in enumerate(TRASBC_FIELDS)}
     result["stage"] = np.asarray(stages)
     return result
 
 
 def _qsr(path: Path) -> dict[str, np.ndarray]:
-    rows = []
+    rows, registry = [], []
     with path.open("rb") as stream:
         while magic := stream.read(16):
             if magic != QSR_MAGIC:
                 raise ValueError("bad QSR magic")
-            version, _kt, _kmm, _krhs, count, bits = struct.unpack(
+            version, kt, kmm, krhs, count, bits = struct.unpack(
                 "=6i", stream.read(24))
             if (version, count, bits) != (1, len(QSR_FIELDS), 64):
                 raise ValueError("bad QSR header")
             rows.append(np.fromfile(stream, np.float64, count))
+            registry.append((kt, kmm, krhs))
+    if [item[0] for item in registry] != list(range(1, len(registry) + 1)):
+        raise ValueError("QSR kt registry")
+    if any(min(kmm, krhs) < 1 for _, kmm, krhs in registry):
+        raise ValueError("QSR runtime time-level registry")
     values = np.asarray(rows)
     return {name: values[:, index] for index, name in enumerate(QSR_FIELDS)}
+
+
+def _nemo_bilinear_months(
+    chlorophyll: np.ndarray, source_indices: list[int], weights: list[np.float64]
+) -> np.ndarray:
+    """Replay fld_interp.F90:1460-1472's four ordered assignments."""
+    months = []
+    nx = chlorophyll.shape[2]
+    for month in range(chlorophyll.shape[0]):
+        value = np.float64(0.0)
+        for source_index, weight in zip(source_indices, weights, strict=True):
+            y, x = divmod(source_index - 1, nx)
+            value = np.float64(
+                value + np.float64(weight * np.float64(chlorophyll[month, y, x])))
+        months.append(value)
+    return np.asarray(months)
+
+
+def _nemo_monthly_interp(months: np.ndarray, steps: int) -> np.ndarray:
+    """Replay fldread.F90:181-186,225-228,890-917 for a 2018 hourly run."""
+    month_beg_days = np.asarray(
+        (0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365),
+        dtype=np.int64,
+    )
+    month_beg = month_beg_days * 86400
+    anchors = (
+        month_beg[:-1] // 2 + month_beg[1:] // 2
+        + np.maximum(month_beg[:-1] % 2, month_beg[1:] % 2)
+    )
+    times = np.concatenate((
+        np.asarray((-31 * 86400 // 2,), dtype=np.int64),
+        anchors,
+        np.asarray((365 * 86400 + 31 * 86400 // 2,), dtype=np.int64),
+    ))
+    values = np.concatenate((months[-1:], months, months[:1]))
+    result = []
+    for kt in range(1, steps + 1):
+        isecsbc = np.int64((2 * kt - 1) * 1800)
+        iaa = int(np.searchsorted(times, isecsbc, side="left"))
+        ibb = iaa - 1
+        ztinta = np.float64(
+            np.float64(isecsbc - times[ibb])
+            / np.float64(times[iaa] - times[ibb]))
+        ztintb = np.float64(1.0 - ztinta)
+        result.append(np.float64(
+            np.float64(ztintb * values[ibb])
+            + np.float64(ztinta * values[iaa])))
+    return np.asarray(result)
+
+
+def _expected_chlorophyll(root: Path, steps: int) -> np.ndarray:
+    """Read immutable source plus NEMO-WEIGHTS output and replay fld_read."""
+    with Dataset(root / "merged_ESACCI_BIOMER4V1R1_CHL_REG05.nc") as dataset:
+        chlorophyll = np.asarray(dataset.variables["CHLA"][:])
+    with Dataset(root / "weights_reg05_C1D_OMIP_L3_bilinear.nc") as dataset:
+        source_indices = [
+            int(np.asarray(dataset.variables[f"src{index:02d}"][:]).item())
+            for index in range(1, 5)
+        ]
+        weights = [
+            np.float64(np.asarray(dataset.variables[f"wgt{index:02d}"][:]).item())
+            for index in range(1, 5)
+        ]
+    return _nemo_monthly_interp(
+        _nemo_bilinear_months(chlorophyll, source_indices, weights), steps)
 
 
 def _summary(name: str, got, wanted) -> dict[str, object]:
@@ -403,6 +492,11 @@ def evaluate(root: Path, plant: str | None = None) -> dict[str, object]:
     qsr_path = root / "oracle_rung36_qsr_frames.bin"
     if qsr_path.exists():
         qsr = _qsr(qsr_path)
+        expected_chl = _expected_chlorophyll(root, len(qsr["chl"]))
+        if plant == "chl_input":
+            expected_chl = np.ones_like(expected_chl)
+        rows.append(_summary(
+            "POST_FLD_READ_CHL.chl", expected_chl, qsr["chl"]))
         if plant == "qsr_flux":
             qsr["qsr"][0] += 1.0e-4
         got_rhs = nemo_rgb_one_layer_rhs(
@@ -417,16 +511,21 @@ def evaluate(root: Path, plant: str | None = None) -> dict[str, object]:
             qsr["fraqsr_1lev"]))
 
     fields = _exchange(root / "oracle_si3_exchange_frames.bin")
-    emp = fields["emp"].copy()
+    card_emp = fwb["emp"].copy() if fwb_path.exists() else fields["emp"].copy()
+    card_qns = fwb["qns"].copy() if fwb_path.exists() else fields["qns"].copy()
+    if plant == "fwb_bridge":
+        card_emp = fields["emp"].copy()
+        card_qns = fields["qns"].copy()
     if plant == "freshwater_sign":
-        emp = -emp
+        card_emp = -card_emp
     freshwater, surface = nemo_si3_exchange_forcing(
         qsr=jax.numpy.asarray(fields["qsr"]),
-        qns=jax.numpy.asarray(fields["qns"]),
-        emp=jax.numpy.asarray(emp), sfx=jax.numpy.asarray(fields["sfx"]),
+        qns=jax.numpy.asarray(card_qns),
+        emp=jax.numpy.asarray(card_emp), sfx=jax.numpy.asarray(fields["sfx"]),
         utau=jax.numpy.asarray(fields["utau"]),
         vtau=jax.numpy.asarray(fields["vtau"]),
-        chl=jax.numpy.ones_like(jax.numpy.asarray(fields["qsr"])),
+        chl=jax.numpy.asarray(qsr["chl"]) if qsr_path.exists()
+        else jax.numpy.ones_like(jax.numpy.asarray(fields["qsr"])),
         rCdU_ice=jax.numpy.asarray(fields["rCdU_ice"]),
         snwice_fmass=jax.numpy.asarray(fields["snwice_fmass"]), config=config)
     mapped = {
@@ -438,7 +537,9 @@ def evaluate(root: Path, plant: str | None = None) -> dict[str, object]:
         "snwice_fmass": np.asarray(surface.snwice_fmass),
     }
     expected = {
-        "freshwater": -fields["emp"], "q_net": fields["qsr"] + fields["qns"],
+        "freshwater": -fwb["emp"] if fwb_path.exists() else -fields["emp"],
+        "q_net": fields["qsr"] + (fwb["qns"] if fwb_path.exists()
+                                      else fields["qns"]),
         "sw_down": fields["qsr"], "tau_x": -fields["utau"],
         "tau_y": -fields["vtau"],
         "salt_flux": fields["sfx"] * constants.pss_to_mass_fraction,
@@ -475,7 +576,9 @@ def evaluate(root: Path, plant: str | None = None) -> dict[str, object]:
         "update_heat": "POST_UPDATE_FLX.qns", "fwb_mass": "POST_FWB.emp",
         "fwb_immediate": "POST_FWB.emp",
         "trasbc_heat": "POST_TRA_SBC_RK3.temperature",
+        "chl_input": "POST_FLD_READ_CHL.chl",
         "qsr_flux": "POST_TRA_QSR.temperature",
+        "fwb_bridge": "EXCHANGE_CARD.freshwater",
         "freshwater_sign": "EXCHANGE_CARD.freshwater",
     }.get(plant)
     unmeasured_boundaries = (
@@ -507,7 +610,9 @@ def main() -> int:
         "ssm_sample", "fzp_operand", "update_heat", "fwb_mass",
         "fwb_immediate",
         "trasbc_heat",
+        "chl_input",
         "qsr_flux",
+        "fwb_bridge",
         "freshwater_sign"))
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()

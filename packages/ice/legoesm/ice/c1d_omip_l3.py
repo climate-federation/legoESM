@@ -60,6 +60,9 @@ class C1DOMIPL3CoupledCard(NamedTuple):
 
     ice: C1DOMIPL3Card
     slab_depth_m: float
+    ocean_dt_seconds: float
+    ice_dt_seconds: float
+    ice_cadence: int
     exchange: NemoSI3ExchangeConfig
     chlorophyll_path: Path
     chlorophyll_sha256: str
@@ -141,6 +144,9 @@ def build_c1d_omip_l3_coupled_card(
     return C1DOMIPL3CoupledCard(
         ice=build_c1d_omip_l3_card(oracle_root=oracle_root),
         slab_depth_m=10.0,  # const-ok: user Decision 6 free construction parameter
+        ocean_dt_seconds=3600.0,  # C1D hourly ocean step
+        ice_dt_seconds=14400.0,  # ORCA1 nn_fsbc=4 times hourly ocean step
+        ice_cadence=4,
         exchange=NemoSI3ExchangeConfig(),
         chlorophyll_path=chlorophyll_path,
         chlorophyll_sha256=(
