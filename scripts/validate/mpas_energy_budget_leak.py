@@ -75,6 +75,13 @@ mean of insolation but NOT of a land-dominated, asymmetric-diurnal field like
 sensible heat.  Until the tracker is fed interval means, the number here is an
 upper bound contaminated by aliasing, not a leak.
 
+THE FIX, for whoever picks this up: feed the tracker from
+``ModelDriver._mpas_sfc_accum.mean(slot)`` -- the ``_MPASSfcFluxAccum``
+interval means CMOR already receives.  It covers slots 2-7 (rlut, rsut, rsdt,
+hfss, hfls) but NOT slots 0 and 1 (``sw_net_sfc``, ``lw_net_sfc``), which are
+the largest term in the leak sum, so extending it to those two is the real
+work -- and it touches that class's checkpoint save/restore contract.
+
 Prints numbers only.
 """
 from __future__ import annotations
