@@ -1,4 +1,12 @@
-"""M4 window gate: the acoustic loop on sub-face WINDOWS vs the flat step.
+"""M4b SPMD window gate: windows sharded one per device vs the flat step.
+
+Runs ``acoustic_loop_3d`` on window stacks placed one window per device on
+the ``(6, kt, kt)`` tile mesh (``fv3_duo_window_spmd``: certified tiled
+exchange bodies + 2-round pad refresh; barriers on the flat fallback),
+scatters the owned cells back and compares against the flat BATCHED arm
+bitwise.  Needs ``6*kt*kt`` devices (CPU: XLA_FLAGS
+--xla_force_host_platform_device_count).  Derived from
+tiled_m4_window_gate.py; same verdict rules.
 
 The tiled port's M4 design runs the certified whole-face kernels
 unchanged on padded windows (``fv3_duo_windows``): seam pads ``pad``
@@ -74,10 +82,17 @@ def main(argv=None):
     ap.add_argument("--flat-arm", choices=("loop", "batched", "both"),
                     default="both",
                     help="which flat reference(s) to run")
-    ap.add_argument("--partition", choices=("compute", "padded"),
-                    default="compute",
-                    help="tile ownership: compute-domain split (kt | n) or "
-                         "the blocked layout's padded split (kt | m_a)")
+    ap.add_argument("--comm", choices=("spmd", "flat"), default="spmd",
+                    help="spmd: fv3_duo_window_spmd (tiled bodies + pad "
+                         "ppermutes); flat: the single-device window bundle "
+                         "(scatter/gather through the flat state) with the "
+                         "SAME window sharding -- the ATTRIBUTION arm: a "
+                         "deviation it shares with spmd is the partitioned-"
+                         "kernel lowering, not the exchange")
+    ap.add_argument("--gspmd-face-arm", action="store_true",
+                    help="also run the flat batched step GSPMD-sharded "
+                         "P('face') on 6 devices and report its deviation "
+                         "from the unsharded flat step (the lowering class)")
     ap.add_argument("--diff-map", action="store_true",
                     help="for every differing field: per-tile count of "
                          "differing OWNED cells and their minimum distance "
@@ -94,8 +109,9 @@ def main(argv=None):
     from legoesm.core.fv3_acoustic_3d import acoustic_loop_3d
     from legoesm.grids.factory import create_fv3_duo_grid
     from legoesm.grids.fv3_native_gridstruct import FV3_CP_AIR, FV3_KAPPA
-    from legoesm.grids.fv3_duo_windows import (
-        attach_window_comm, gather_windows, scatter_owned)
+    from jax.sharding import Mesh
+    from legoesm.grids.fv3_duo_windows import gather_windows, scatter_owned
+    from legoesm.grids.fv3_duo_window_spmd import attach_window_spmd_comm
 
     sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
                          text=True).stdout.strip()
@@ -125,6 +141,38 @@ def main(argv=None):
                 state0, nh0)
 
     refs = {}
+    if args.gspmd_face_arm:
+        # ATTRIBUTION ARM (the M3 triage rule): the flat batched step with
+        # its state sharded P('face') over 6 devices -- the kernels
+        # partitioned by GSPMD, NO window comm.  Its deviation from the
+        # unsharded flat step is the partitioned-kernel lowering class;
+        # the window SPMD arm may not exceed it by more than a few ulps.
+        from jax.sharding import NamedSharding, PartitionSpec as P
+        mesh6 = Mesh(np.array(jax.devices()[:6]), ("face",))
+        sh6 = NamedSharding(mesh6, P("face"))
+        st6 = {k: jax.device_put(v, sh6) for k, v in state0.items()}
+        nh6 = None if nh0 is None else {
+            k: (jax.device_put(v, sh6) if hasattr(v, "ndim") and v.ndim >= 3
+                and v.shape[0] == 6 else v) for k, v in nh0.items()}
+        g = jax.jit(lambda st, nh: acoustic_loop_3d(
+            ctx, st, args.dt, args.km, nh=nh, batched=True, **kw))(st6, nh6)
+        b = flat_arm(True)
+        print("===== ATTRIBUTION: flat batched sharded P('face') x6 vs "
+              "unsharded =====")
+        for group in ("state", "press"):
+            for k in sorted(b[group]):
+                r, w = b[group][k], g[group][k]
+                if not hasattr(r, "ndim"):
+                    continue
+                r, w = np.asarray(r), np.asarray(w)
+                bad = int(((w != r) & ~(np.isnan(w) & np.isnan(r))).sum())
+                d = np.abs(w - r)
+                fin = np.isfinite(d)
+                rel = (np.nanmax(d[fin] / (np.abs(r[fin]) + 1e-300))
+                       if fin.any() and bad else 0.0)
+                print(f"  {group}.{k:8s} {'BITWISE' if bad == 0 else f'DIFF {bad}/{r.size} max rel={rel:.3e}'}")
+        print(f"  gspmd-face output sharding: {g['state']['delp'].sharding}")
+        refs["gspmd_face"] = g
     if args.flat_arm in ("loop", "both"):
         refs["loop"] = flat_arm(False)
         print("[gate] flat loop arm done")
@@ -132,20 +180,36 @@ def main(argv=None):
         refs["batched"] = flat_arm(True)
         print("[gate] flat batched arm done")
 
-    # -- the window arm ------------------------------------------------------
+    # -- the SPMD window arm -------------------------------------------------
+    ndev = 6 * args.kt * args.kt
+    if jax.device_count() < ndev:
+        print(f"[gate] REFUSED: {jax.device_count()} devices < {ndev} "
+              f"(set XLA_FLAGS=--xla_force_host_platform_device_count)")
+        return 2
+    mesh = Mesh(np.array(jax.devices()[:ndev]).reshape(6, args.kt, args.kt),
+                ("face", "tile_i", "tile_j"))
     try:
-        wctx, comm = attach_window_comm(ctx, args.kt, args.pad,
-                                        args.partition)
+        if args.comm == "spmd":
+            wctx, comm = attach_window_spmd_comm(ctx, mesh, args.pad)
+            sharding = comm.sharding
+        else:
+            from legoesm.grids.fv3_duo_windows import attach_window_comm
+            from legoesm.grids.fv3_duo_window_spmd import window_sharding
+            wctx, comm = attach_window_comm(ctx, args.kt, args.pad, "padded")
+            sharding = window_sharding(mesh)
     except ValueError as e:
         print(f"[gate] REFUSED: {e}")
         return 2
     lay = comm.lay
     print(f"[gate] {lay}: window face n_w={lay.n_w}, origins "
-          f"{sorted(set(o[1] for o in lay.origins))}")
-    wstate = {k: gather_windows(lay, v) for k, v in state0.items()}
+          f"{sorted(set(o[1] for o in lay.origins))}; {ndev} devices, "
+          f"comm={args.comm}, barriers "
+          f"{getattr(comm, 'barrier_mode', 'flat')}")
+    put = lambda v: jax.device_put(gather_windows(lay, v), sharding)
+    wstate = {k: put(v) for k, v in state0.items()}
     wnh = None
     if nh0 is not None:
-        wnh = {k: (gather_windows(lay, v)
+        wnh = {k: (put(v)
                    if hasattr(v, "ndim") and v.ndim >= 3 and v.shape[0] == 6
                    else v) for k, v in nh0.items()}
     try:
@@ -154,7 +218,12 @@ def main(argv=None):
                 wstate, wnh)
     finally:
         ctx.tab.window_comm = None
-    print("[gate] window arm done")
+    # the output sharding is part of the receipt: a replicated output
+    # would mean GSPMD gathered the state somewhere in the step
+    shs = {k: str(getattr(v, "sharding", None)) for k, v in
+           wout["state"].items() if hasattr(v, "sharding")}
+    print(f"[gate] window arm done; output shardings: "
+          f"{sorted(set(shs.values()))}")
 
     def block_coherence(bundle_w, group):
         """Every window's copy of every cell inside its BLOCK (the owned
@@ -290,6 +359,13 @@ def main(argv=None):
     # arm (batched-vs-loop differ by lowering even with FMA off, job
     # 9631684) and is reported, never folded into the verdict.
     rc = verdict_by_arm.get("batched", verdict_by_arm.get("loop", 0))
+    if "gspmd_face" in verdict_by_arm:
+        # the window SPMD arm's own reference is the PARTITIONED flat
+        # step: bitwise against it means the exchange/pads changed nothing
+        # and every deviation from the unsharded step is the lowering class
+        print(f"[gate] window-SPMD vs GSPMD-face-sharded flat: "
+              f"{'BITWISE' if verdict_by_arm['gspmd_face'] == 0 else 'DIFFERS'}")
+        rc = verdict_by_arm["gspmd_face"]
     if "loop" in refs and "batched" in refs:
         print("===== flat batched vs flat loop (attribution arm) =====")
         for group in ("state", "press"):
@@ -300,7 +376,7 @@ def main(argv=None):
                 a, b = np.asarray(a), np.asarray(b)
                 bad = int(((a != b) & ~(np.isnan(a) & np.isnan(b))).sum())
                 print(f"  {group}.{k:8s} {'BITWISE' if bad == 0 else f'DIFF {bad}'}")
-    print(f"[gate] VERDICT kt={args.kt} pad={args.pad}: "
+    print(f"[gate] SPMD VERDICT kt={args.kt} pad={args.pad}: "
           f"{'BITWISE' if rc == 0 else 'DIFFERS'} vs flat batched "
           f"(per arm: {verdict_by_arm})")
     return rc

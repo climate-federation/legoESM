@@ -22,14 +22,16 @@ def _rand(shape, seed=0):
     return jnp.asarray(np.random.default_rng(seed).standard_normal(shape))
 
 
-@pytest.mark.parametrize("kt,pad", [(1, 3), (2, 5), (2, 8), (3, 5)])
+@pytest.mark.parametrize("partition,kt,pad", [
+    ("compute", 1, 3), ("compute", 2, 5), ("compute", 2, 8),
+    ("compute", 3, 5), ("padded", 2, 5), ("padded", 3, 5), ("padded", 5, 4)])
 @pytest.mark.parametrize("extents", [(N + 2 * NG, N + 2 * NG),
                                      (N + 2 * NG + 1, N + 2 * NG),
                                      (N + 2 * NG, N + 2 * NG + 1),
                                      (N + 2 * NG + 1, N + 2 * NG + 1),
                                      (N, N), (N + 1, N), (N + 2, N + 2)])
-def test_scatter_of_gather_is_identity(kt, pad, extents):
-    lay = build_window_layout(N, NG, kt, pad)
+def test_scatter_of_gather_is_identity(partition, kt, pad, extents):
+    lay = build_window_layout(N, NG, kt, pad, partition)
     x = _rand((6,) + extents + (4,))
     xw = gather_windows(lay, x)
     assert xw.shape == (lay.nb, window_axis_extent(lay, extents[0]),
@@ -38,9 +40,11 @@ def test_scatter_of_gather_is_identity(kt, pad, extents):
     assert np.array_equal(np.asarray(back), np.asarray(x))   # bitwise
 
 
-def test_every_flat_cell_has_exactly_one_owner():
+@pytest.mark.parametrize("partition,kt", [("compute", 3), ("padded", 3),
+                                          ("padded", 5)])
+def test_every_flat_cell_has_exactly_one_owner(partition, kt):
     from legoesm.grids.fv3_duo_windows import _owner_mask, _index
-    lay = build_window_layout(N, NG, 3, 5)
+    lay = build_window_layout(N, NG, kt, 5, partition)
     for extents in [(N + 2 * NG, N + 2 * NG + 1), (N + 1, N), (N + 2, N)]:
         count = np.zeros((6,) + extents, int)
         for w in range(lay.nb):
@@ -84,3 +88,24 @@ def test_ikj_layout_round_trip():
 def test_window_too_wide_refused():
     with pytest.raises(ValueError, match="exceeds the padded face"):
         build_window_layout(N, NG, 2, 12)            # 12 + 24 > 30
+
+
+def test_padded_partition_blocks_match_the_blocked_layout():
+    """padded partition: block t = padded rows [t*nl, t*nl+nl+e) -- the
+    fv3_duo_spmd.to_blocked layout; edge windows sit flush."""
+    from legoesm.grids.fv3_duo_spmd import to_blocked
+    lay = build_window_layout(N, NG, 3, 4, "padded")
+    assert lay.nl == (N + 2 * NG) // 3 and lay.block_start(1) == lay.nl
+    assert lay.origins[0][1] == 0 and lay.origins[-1][1] == lay.m_a - lay.W
+    x = np.random.default_rng(1).standard_normal((6, N + 2 * NG + 1,
+                                                  N + 2 * NG, 2))
+    xb = to_blocked(x, 3, lay.nl)                     # (6, 3*(nl+1), 3*nl, 2)
+    xw = np.asarray(gather_windows(lay, jnp.asarray(x)))
+    for w, (face, oi, oj) in enumerate(lay.origins):
+        ti, tj = (w % 9) // 3, w % 3
+        blk = xb[face, ti * (lay.nl + 1):(ti + 1) * (lay.nl + 1),
+                 tj * lay.nl:(tj + 1) * lay.nl]
+        li, lj = ti * lay.nl - oi, tj * lay.nl - oj
+        assert np.array_equal(xw[w, li:li + lay.nl + 1, lj:lj + lay.nl], blk)
+    with pytest.raises(ValueError, match="not divisible"):
+        build_window_layout(N, NG, 4, 4, "padded")   # 30 % 4

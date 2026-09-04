@@ -64,13 +64,36 @@ class WindowLayout:
     """
 
     __slots__ = ("n", "ng", "kt", "pad", "nl", "W", "n_w", "m_a",
-                 "origins", "nb")
+                 "origins", "nb", "partition")
 
-    def __init__(self, n, ng, kt, pad):
-        if n % kt:
-            raise ValueError(f"face size n={n} is not divisible by kt={kt}")
-        nl = n // kt
+    def __init__(self, n, ng, kt, pad, partition="compute"):
+        """``partition`` -- which cells a tile OWNS along one axis:
+
+        ``"compute"``  the compute domain split kt ways (``kt | n``); the
+                       rings go to the edge tiles, a shared node to the
+                       east/north tile.  The single-device gate's layout.
+        ``"padded"``   the PADDED array split kt ways (``kt | m_a``),
+                       block ``t`` = padded rows ``[t*nl, t*nl + nl + e)``
+                       -- the M1-M3 tiled exchange's BLOCKED layout
+                       (fv3_duo_spmd.to_blocked), so the SPMD arm can hand
+                       its blocks to that certified exchange unchanged.  A
+                       shared node (``e = 1``) is stored by both tiles
+                       and kept coherent by the exchange; for a single
+                       owner the WEST/SOUTH tile is canonical.
+        """
         m_a = n + 2 * ng
+        if partition == "compute":
+            if n % kt:
+                raise ValueError(f"face size n={n} is not divisible by "
+                                 f"kt={kt}")
+            nl = n // kt
+        elif partition == "padded":
+            if m_a % kt:
+                raise ValueError(f"padded extent m_a={m_a} is not divisible "
+                                 f"by kt={kt} (the blocked layout's rule)")
+            nl = m_a // kt
+        else:
+            raise ValueError(f"partition {partition!r}: 'compute' or 'padded'")
         if kt == 1:
             pad = ng                       # the whole face, exactly
         if pad < ng:
@@ -83,6 +106,7 @@ class WindowLayout:
                 f"m_a={m_a}: kt={kt} cannot tile C{n} at this pad")
         self.n, self.ng, self.kt, self.pad, self.nl = n, ng, kt, pad, nl
         self.W, self.n_w, self.m_a = W, W - 2 * ng, m_a
+        self.partition = partition
         origins = []
         for face in range(6):
             for ti in range(kt):
@@ -92,23 +116,36 @@ class WindowLayout:
         self.origins = tuple(origins)
         self.nb = len(origins)
 
+    def block_start(self, t):
+        """Padded index of the first cell tile ``t`` owns along one axis."""
+        if self.partition == "compute":
+            return self.ng + t * self.nl
+        return t * self.nl
+
     def _origin(self, t):
-        o = self.ng + t * self.nl - self.pad
+        o = self.block_start(t) - self.pad
         return int(min(max(o, 0), self.m_a - self.W))
 
     def owner(self, f_padded):
-        """Tile index owning padded flat index ``f`` along one axis (a
-        node shared by two tiles belongs to the EAST/NORTH one; the last
-        node and the rings to the edge tiles)."""
-        return int(min(max((f_padded - self.ng) // self.nl, 0), self.kt - 1))
+        """Tile index owning padded flat index ``f`` along one axis.
+        compute: a node shared by two tiles belongs to the EAST/NORTH
+        one, the last node and the rings to the edge tiles; padded: the
+        blocked layout's WEST/SOUTH tile is canonical for a shared
+        node."""
+        if self.partition == "compute":
+            return int(min(max((f_padded - self.ng) // self.nl, 0),
+                           self.kt - 1))
+        return int(min(f_padded // self.nl, self.kt - 1))
 
     def __repr__(self):                                  # pragma: no cover
         return (f"WindowLayout(n={self.n}, ng={self.ng}, kt={self.kt}, "
-                f"pad={self.pad}, W={self.W}, nb={self.nb})")
+                f"pad={self.pad}, W={self.W}, nb={self.nb}, "
+                f"partition={self.partition!r})")
 
 
-def build_window_layout(n: int, ng: int, kt: int, pad: int) -> WindowLayout:
-    return WindowLayout(n, ng, kt, pad)
+def build_window_layout(n: int, ng: int, kt: int, pad: int,
+                        partition: str = "compute") -> WindowLayout:
+    return WindowLayout(n, ng, kt, pad, partition)
 
 
 def window_axis_extent(lay: WindowLayout, e_flat: int):
@@ -245,7 +282,13 @@ def scatter_owned(lay: WindowLayout, xw, xp=None):
         idx = _index(lay, w, fshape, axes)
         m = _expand(_owner_mask(lay, w, fshape[axes[0]], fshape[axes[1]]),
                     xw.ndim, axes)
-        out = out.at[idx].set(xp.where(m, xw[w], out[idx]))
+        if xp is np:
+            # host path (a gate reading SHARDED windows back: every
+            # eager .at[].set on a sharded array is a 24-device
+            # collective, job 9632092 timed out in exactly that)
+            out[idx] = np.where(m, xw[w], out[idx])
+        else:
+            out = out.at[idx].set(xp.where(m, xw[w], out[idx]))
     return out
 
 
@@ -488,12 +531,12 @@ class DuoWindowComm:
         return out
 
 
-def attach_window_comm(ctx, kt: int, pad: int):
+def attach_window_comm(ctx, kt: int, pad: int, partition: str = "compute"):
     """Build the window layout for ``ctx`` (a whole-face
     :class:`DuoStepperContext`), attach a :class:`DuoWindowComm` to its
     tables and return ``(window_ctx, comm)``.  The flat ``ctx.tab`` is
     shared; the window ctx is what the phases run on."""
-    lay = build_window_layout(ctx.n, ctx.ng, kt, pad)
+    lay = build_window_layout(ctx.n, ctx.ng, kt, pad, partition)
     comm = DuoWindowComm(lay, ctx.tab)
     ctx.tab.window_comm = comm
     return build_window_ctx(ctx, lay), comm
