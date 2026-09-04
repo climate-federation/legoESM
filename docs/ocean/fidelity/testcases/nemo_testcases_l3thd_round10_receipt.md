@@ -188,6 +188,12 @@ the final re-review artifacts are the only basis for any final review verdict
 stated for this round.  These are codex-internal reviews, not independent
 external Claude/Opus reviews.
 
+The final codex-internal source-fidelity and config/hygiene re-reviews of
+`6b33449fc758e0afa19fdff79813cee9e5857973` both returned **SHIP**.  Their
+verbatim records are
+`nemo_testcases_l3thd_round10_source_review.md` and
+`nemo_testcases_l3thd_round10_hygiene_review.md`.
+
 ## Decisions
 
 | choice | status | disposition |
