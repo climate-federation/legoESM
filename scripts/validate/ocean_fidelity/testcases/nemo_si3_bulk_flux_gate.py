@@ -517,12 +517,14 @@ def evaluate(
     plant: str | None = None,
     require_bit_identity: bool = False,
 ) -> dict[str, object]:
-    from legoesm import constants
     from legoesm.core.bulk_flux import nemo_si3_constant_fluxes
     from legoesm.core.precision import PrecisionPolicy, set_policy
-    from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
     from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_card
-    from legoesm.ice.sea_ice import _nemo_si3_blk_ice_2, _nemo_si3_ice_flx_other
+    from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
+    from legoesm.ice.sea_ice import (
+        _nemo_si3_blk_ice_2,
+        _nemo_si3_ice_flx_other,
+    )
 
     runtime = runtime_versions()
     if plant == "runtime":

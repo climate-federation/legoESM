@@ -114,8 +114,8 @@ def test_selector_is_single_orca1_identity() -> None:
 
 def test_positive_subnormal_snow_uses_nemo_nonzero_branch() -> None:
     from legoesm import constants
-    from legoesm.ice.sea_ice import _nemo_si3_ice_albedo
     from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_card
+    from legoesm.ice.sea_ice import _nemo_si3_ice_albedo
 
     tiny = jnp.asarray(np.nextafter(np.float64(0.0), np.float64(1.0)))
     args = (jnp.asarray(constants.T_freeze), jnp.asarray(0.586), tiny, jnp.asarray(0.81))

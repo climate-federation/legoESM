@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import importlib
 import hashlib
+import importlib
 import json
 import sys
 from pathlib import Path
