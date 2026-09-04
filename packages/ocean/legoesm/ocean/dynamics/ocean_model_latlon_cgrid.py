@@ -1398,6 +1398,7 @@ class _NEMOWSBarotropicTrace(NamedTuple):
     state_after_barotropic: object
     substeps: object
     slow_forcing: object
+    slow_forcing_operands: object
     transport_average: object
 
 
@@ -4697,6 +4698,8 @@ class LatLonCGridOceanModel:
         _v_pair = jnp.sum(jnp.stack([h_v_pre, dv_dt * h_v_pre], axis=-1), axis=-2)
         H_v_pre = jnp.maximum(_v_pair[..., 0], 1e-10)
         F_slow_v = _v_pair[..., 1] / H_v_pre * state.v_mask.data
+        _F_slow_depth_u = F_slow_u
+        _F_slow_depth_v = F_slow_v
 
         if getattr(_cfg_b, "surface_stress_implicit", False):
             # NEMO stp2d explicit barotropic wind term: with the stress
@@ -4723,6 +4726,8 @@ class LatLonCGridOceanModel:
                     * state.u_mask.data
                 F_slow_v = F_slow_v + _tau_j_v / (_r0 * H_v_pre) \
                     * state.v_mask.data
+        _F_slow_wind_u = F_slow_u
+        _F_slow_wind_v = F_slow_v
 
         # Perturbation tendency (depth-mean removed) → applied to 3D.
         # MUST be computed from the *baroclinic-only* F_slow (before A2 is
@@ -4776,6 +4781,8 @@ class LatLonCGridOceanModel:
             F_slow_v = (F_slow_v
                         - _r_v_bt.astype(F_slow_v.dtype) / H_v_pre
                         * (_v_bot - _V_bar_now)) * state.v_mask.data
+        _F_slow_drag_u = F_slow_u
+        _F_slow_drag_v = F_slow_v
 
         # A2 — depth-mean biharmonic hyperviscosity on (U_bar, V_bar).
         # Damps the barotropic standing mode at deep cells next to steep
@@ -5445,6 +5452,22 @@ class LatLonCGridOceanModel:
                 return _NEMOWSBarotropicTrace(
                     state_new, _substep_trace,
                     (F_slow_eta, F_slow_u, F_slow_v),
+                    {
+                        "du_dt": du_dt,
+                        "dv_dt": dv_dt,
+                        "h_u": h_u_pre,
+                        "h_v": h_v_pre,
+                        "H_u": H_u_pre,
+                        "H_v": H_v_pre,
+                        "depth_u": _F_slow_depth_u,
+                        "depth_v": _F_slow_depth_v,
+                        "post_wind_u": _F_slow_wind_u,
+                        "post_wind_v": _F_slow_wind_v,
+                        "post_drag_u": _F_slow_drag_u,
+                        "post_drag_v": _F_slow_drag_v,
+                        "pre_external_u": F_slow_u,
+                        "pre_external_v": F_slow_v,
+                    },
                     (Hu_avg, Hv_avg),
                 )
             state_new, (Hu_avg, Hv_avg) = _baro_result
