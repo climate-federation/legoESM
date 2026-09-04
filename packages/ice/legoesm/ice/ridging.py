@@ -912,17 +912,23 @@ def apply_si3_jpl1_ridging(
             work, jnp.maximum(_SI3_JPL1_ZERO, divergence), opening
         )
 
-    # icedyn_rdgrft.F90:900-903 calls ice_var_roundoff.  Only tiny negatives
-    # are expected; SI3 clips these carried fields, not the diagnosed losses.
+    # icedyn_rdgrft.F90:900-903 calls ice_var_roundoff.  Open water is absent
+    # from that call, and icevar.F90:871 clips lid volume only in the narrow
+    # -epsi10 < v_il < 0 roundoff interval.  Preserve those exact exclusions.
+    lid_roundoff = (pond_lid_volume < _SI3_JPL1_ZERO) & (
+        pond_lid_volume > -_SI3_JPL1_EPSI10
+    )
     result = SI3JPL1RidgingState(
         ice_area=jnp.maximum(area, _SI3_JPL1_ZERO),
-        open_water_area=jnp.maximum(open_water, _SI3_JPL1_ZERO),
+        open_water_area=open_water,
         ice_volume=jnp.maximum(ice_volume, _SI3_JPL1_ZERO),
         snow_volume=jnp.maximum(snow_volume, _SI3_JPL1_ZERO),
         age_content=jnp.maximum(age, _SI3_JPL1_ZERO),
         pond_area=jnp.maximum(pond_area, _SI3_JPL1_ZERO),
         pond_volume=jnp.maximum(pond_volume, _SI3_JPL1_ZERO),
-        pond_lid_volume=jnp.maximum(pond_lid_volume, _SI3_JPL1_ZERO),
+        pond_lid_volume=jnp.where(
+            lid_roundoff, _SI3_JPL1_ZERO, pond_lid_volume
+        ),
         snow_enthalpy=jnp.maximum(snow_enthalpy, _SI3_JPL1_ZERO),
         ice_enthalpy=jnp.maximum(ice_enthalpy, _SI3_JPL1_ZERO),
         ice_salt_content=jnp.maximum(salt_content, _SI3_JPL1_ZERO),

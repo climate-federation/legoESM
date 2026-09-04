@@ -115,6 +115,26 @@ def test_si3_jpl1_divergence_without_shear_is_noop() -> None:
     assert int(losses.iterations[0]) == 0
 
 
+def test_si3_jpl1_preserves_nemo_open_water_and_lid_roundoff_exclusions() -> None:
+    # Open water is not passed to ice_var_roundoff; icevar.F90:871 clips only
+    # lid values in -epsi10 < v_il < 0, leaving larger negatives diagnostic.
+    zero = jnp.asarray([0.0], dtype=jnp.float64)
+    negative_open = _state(area=0.0, open_water=-2.0e-10)
+    negative_open = negative_open._replace(
+        ice_volume=zero, pond_lid_volume=jnp.asarray([-2.0e-10], dtype=jnp.float64)
+    )
+    result, _ = apply_si3_jpl1_ridging(negative_open, zero, zero, 30.0)
+    np.testing.assert_array_equal(result.open_water_area, negative_open.open_water_area)
+    np.testing.assert_array_equal(result.pond_lid_volume, negative_open.pond_lid_volume)
+
+    tiny_lid = negative_open._replace(
+        open_water_area=jnp.asarray([1.0], dtype=jnp.float64),
+        pond_lid_volume=jnp.asarray([-0.5e-10], dtype=jnp.float64),
+    )
+    rounded, _ = apply_si3_jpl1_ridging(tiny_lid, zero, zero, 30.0)
+    np.testing.assert_array_equal(rounded.pond_lid_volume, zero)
+
+
 def test_si3_jpl1_rejects_unmeasured_selector() -> None:
     with pytest.raises(ValueError, match="no Frankenstein fallback"):
         apply_si3_jpl1_ridging(
