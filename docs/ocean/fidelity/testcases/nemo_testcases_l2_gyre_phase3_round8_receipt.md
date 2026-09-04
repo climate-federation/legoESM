@@ -1605,3 +1605,36 @@ The complete machine-readable register is
 All controls above are Codex-internal measurements.  Round-16 independent
 review was still running during this dispatch; Round-17 independent review is
 outstanding and no dual-review claim is made.
+
+## Round 18 — surface-wind boundary (preregistered)
+
+Round 18 starts from `dfc6eed322c`; the independent Round-17 review is still
+running.  Before measuring or changing the wind path, the predicted owner is
+the source association of the barotropic wind increment, ranked as follows:
+
+1. `r1_rho0 * utauU * r1_hu(Kbb)` (and V) plus its left-to-right addition to
+   the already exact slow RHS;
+2. the upstream T-to-U/V face-stress interpolation;
+3. accumulation order into `Ue_rhs` / `Ve_rhs`.
+
+The source contract is explicit.  `sbcmod.F90:539-547` forms `utauU` as
+`0.5*(utau(i,j)+utau(i+1,j))*(2-umask)*MAX(tmask,tmask_east)` and analogously
+forms `vtauV`.  `domain.F90:159` forms resting `r1_hu_0` by masked division;
+under QCO, `domzgr_substitute.h90:51,125-138` expands live `r1_hu(Kbb)` to
+`r1_hu_0/(1+r3u(Kbb))`.  Finally, `stp2d.F90:198-202` performs the wind update
+as `(r1_rho0*utauU)*r1_hu` followed by addition.  The retained config-local
+V2 slow-forcing record is already the requested WRITE-only operand dump: it
+contains `r1_rho0`, `utauU/vtauV`, live `r1_hu/r1_hv`, the pre-wind RHS, and
+the post-wind RHS.
+
+The preregistered discriminator is: operand bit identity plus a bit-exact
+NEMO-literal replay confirms candidate 1; substituting oracle face stress alone
+confirms candidate 2; exact operands and exact increment with only the final
+sum non-exact confirms candidate 3.  Any residual not removed by the selected
+one-variable replay refutes that candidate.  A planted one-ulp wind operand
+must become the first boundary and exit nonzero.  If post-wind clears, the walk
+continues in source order through atmospheric pressure (expected dead because
+resolved `ln_apr_dyn=.false.` from `namelist_ref:211`), external substeps,
+`un_adv/vn_adv`, and stage-1 Kaa; the first non-bit-exact boundary stops the
+walk.  The kt=1…10 and cross-card gates remain conditional on that entire
+stage-1 chain becoming bit-exact.
