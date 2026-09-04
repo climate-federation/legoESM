@@ -1583,8 +1583,14 @@ Roquet implementation now uses NEMO's literal `zn3/zn2/zn1/zn0` nesting for
 both EOS-80 and TEOS-10.  Direct old-versus-literal probes moved density by at
 most `4.55e-13 kg m-3` and `prd` by `4.43e-16`; this is a source-association
 correction within S-50, not a GYRE-only identity arm.  OVERFLOW and
-LOCK_EXCHANGE were assigned phase-3 2-ulp and tracer-bit-identity guards.  The
-first current-tip guard (OVERFLOW faithful stage sweep) failed by
-`3.0510308459954375e12` gate ulps after the literal `* tmask` was restored, so
-the round stopped before LOCK_EXCHANGE or trajectory comparisons.  This is an
-open cross-card compatibility decision, not a passed isomorphism exception.
+LOCK_EXCHANGE were assigned phase-3 2-ulp and tracer-bit-identity guards.
+Round 10 proved the exact OVERFLOW EOS mask equals oracle `tmask` (zero
+differing cells and zero NEMO-wet cells zeroed); the earlier `3.051e12`-ulp
+result was primarily missing raw W-grid geometry.  With every card supplying
+oracle `e3w_0`, LOCK_EXCHANGE's stage sweep passes at `0.017648` ulp, but
+OVERFLOW's stage sweep still fails at `28.062` ulp and the kt=1…10 trajectory
+guards fail at `513504.875` ulp (OVERFLOW) and `2.743` ulp plus lost tracer bit
+identity (LOCK_EXCHANGE).  Direct-`prd` and prior-wet-evaluator one-variable
+diagnostics did not remove the trajectory amplification.  The shared
+EOS/HPG-association boundary therefore remains open and fail-closed; it is not
+a passed isomorphism exception and no card guard exists.

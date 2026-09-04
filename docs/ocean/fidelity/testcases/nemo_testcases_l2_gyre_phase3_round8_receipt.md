@@ -1,13 +1,14 @@
-# NEMO testcase lane 2 GYRE — Phase 3 round-8 boundary receipt
+# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–10 boundary receipt
 
-**Verdict: DEBT — round-9 production-JIT recertification retracts round 8's
-eager-only stage-2 and explicit-stage-3 AT-BAR claims.  Bottom drag and all
-800 external-mode frames remain AT-BAR under JIT, but stage-2 momentum is
-already DEBT (`4.67e-13` u, `5.19e-13` v), so the first production-regime
-owner remains open.  Whole-step kt=2 does not certify.**
+**Verdict: STOP / DEBT.  Round 10 fixes the JIT/eager code-path defect and all
+11 same-input operator-parity rows now pass, but the mandatory shared-card
+guard does not: OVERFLOW's stage sweep moves by 28.062 ulp and its trajectory
+by 513504.875 ulp; LOCK_EXCHANGE's trajectory also loses tracer bit identity
+and reaches 2.743 ulp.  No waiver, card guard, or GYRE-only arm was added.
+GYRE's production-JIT kt=2 remains DEBT.**
 
 Date: 2026-09-03  
-Implementation commit: `0da38492ea930789d0e7209897fff48bd434c19c`  
+Implementation commit: `7a38ef6e4efd7bd94b1743cae1525c59802f7511`
 Starting reconciled tip: `57429ecf5f377ce2bf220f36bc05313cd29e0dfd`  
 Session: `01a05cb9-7625-7f40-9e83-b3fa767b1945`
 
@@ -22,9 +23,9 @@ The ordered parity output is fixed before measurement: EOS/prd, HPG,
 vorticity, momentum advection, stage composition to Kaa, tracer advection,
 tracer ZDF, momentum ZDF, stage transports, WZV, external-mode/drag, and final
 state.  Each row compares arrays returned by the same callable with identical
-entry state and fp64 operands.  At most four ulps is PARITY; the first row over
-four ulps is the owner boundary.  A planted one-bit output mutation must exit
-nonzero.
+entry state and fp64 operands.  Four ulps is the preregistered diagnostic owner
+threshold; certification remains the campaign's stricter bit-equality/2-ulp
+rule.  A planted one-bit output mutation must exit nonzero.
 
 The independent mask discriminator compares the exact 3-D array handed to the
 Roquet anomaly function with `tmask(1,:,:,:)` from OVERFLOW's `mesh_mask.nc`,
@@ -43,6 +44,33 @@ instrument.  The run remained CPU-only, production-JIT fp64, and used the lane-1
 record format, central time-level registry, immutable pointwise `1e-15` bar,
 one-variable arms, planted controls, and shared log-log growth instrument.
 
+## Round-10 JIT/eager diagnosis
+
+The defect was a route split.  Calling the public step inside
+`jax.disable_jit()` bypassed its cached `_step_jitted` production kernel, so
+the supposed eager comparison was not evaluating the production route.
+The shared wrapper now enters `_step_jitted` under an explicit
+`jax.disable_jit(False)` boundary; the direct EOS and HPG diagnostic wrappers
+likewise compare the same callable.  This is a shared execution-path fix, not
+a numerical tuning or card-specific branch.  An attempted nested `lax.scan`
+Horner evaluator was discarded because it made the full GYRE compile stall;
+the final code retains NEMO's explicit parenthesized source statements.
+
+On `f8295e426c3`, the preregistered ladder failed first at EOS/prd: `prd`
+`8.436584764126565e-13` (256833 ulp) and pressure anomaly
+`5.558831617236137e-9` (135018 ulp).  It then exposed stage-2 Kaa u/v gaps of
+`4.674608275337735e-13`/`5.187571292669668e-13` and raw stage-transport gaps
+`zFu=1.4172543842505547e-5`, `zFv=1.3654937902174424e-5`,
+`zFw=1.7636114772301426e-4`.  The strengthened test therefore demonstrably
+fails on the reviewed tip (`2 failed`).
+
+At `7a38ef6e4`, all eleven production-fp64 rows—EOS/prd, HPG, vorticity,
+advection, stage-2 Kaa, tra_adv, tra_zdf, dyn_zdf, stage transport,
+external-mode/drag, and final update—report `verdict=PASS`.  The planted EOS
+mutation reports `verdict=FAIL` and exits nonzero.  The focused eager/JIT
+regression passes both the direct EOS/HPG/transport path and an outer
+`disable_jit` call around the public production step (`2 passed`).
+
 ## Round-8 card-choice disclosure and one-variable audit
 
 Round 9 searched the existing DINO/lane-1 option surface before changing the
@@ -59,7 +87,7 @@ for both.
 | `een_e3f_scheme=nemo_avg4` | `EXPREF/namelist_ref:1072-1073`; `dynvor.F90:918-950` | `1.51e-16/1.93e-16/5.12e-9/2.07e-9/0` | `1.20e-2` | UNASKED addition; ASKED audit, retained |
 | `een_metric_weighting=nemo` | `EXP00/namelist_cfg:163-165`; `dynvor.F90:518-531` | `1.51e-16/1.93e-16/6.94e-18/6.94e-18/0` | `3.97e-11` | UNASKED addition; ASKED audit, retained |
 | `een_q_boundary=nemo_live` | `EXPREF/namelist_ref:1069`; `dynvor.F90:450-490` | `0/0/0/0/0` | `0` | UNASKED addition; ASKED audit, retained (uninformative through kt=10) |
-| `nemo_two_band_full_shortwave=true` | `EXP00/namelist_cfg:73,76-79`; `traqsr.F90:665-712,1274-1276` | `2.20e-3/1.97e-14/0/0/0` | `9.01e-2` | UNASKED addition; ASKED audit, retained pending selector consolidation |
+| `shortwave_penetration.scheme=nemo_qsr_2bd` | `EXP00/namelist_cfg:73,76-79`; `traqsr.F90:55-56,627-712,1239,1266-1276` | `2.20e-3/1.97e-14/0/0/0` | `9.01e-2` | UNASKED addition; ASKED audit, retained under NEMO's public selector name |
 
 The earlier “142× kt=2 T improvement” is attributed to this named selector
 set, not to “round 8”: the direct ablations show the two live tracer-scale
@@ -212,69 +240,142 @@ POLYNOMIAL_FIT_PREFERRED (exponents `0.60445` and `0.95631`) and SSH
 BOUNDED_OR_DECAYING_NO_AMPLIFYING_MODE.  These are characterization labels,
 not acceptance evidence.
 
-## Round-9 D stop boundary: shared EOS association
+## Round-10 D stop boundary: mask exact, shared lane-1 guard still fails
 
 The shared Roquet EOS remains one implementation.  Its NEMO-literal
-`zn3/zn2/zn1/zn0` nesting is used unconditionally for EOS-80 and TEOS-10; no
-GYRE identity guard was added.  The omitted final mask is now literal too:
-`prd = (zn*r1_rho0 - 1)*ztm` at NEMO `src/OCE/TRA/eosbn2.F90:288`.
-The focused fp64 unit operand leaves wet `prd` unchanged and makes every dry
-value exactly zero.
+`zn3/zn2/zn1/zn0` nesting is unconditional for EOS-80 and TEOS-10, and the
+literal terminal mask remains
+`prd = (zn*r1_rho0 - 1)*ztm` (`src/OCE/TRA/eosbn2.F90:288`).  No EOS identity
+guard was added.
 
-The required other-card compatibility gate then **FAILED**, invoking the
-review's mandatory STOP rule.  A fresh production-JIT baseline was produced
-at exact `57429ecf5f377ce2bf220f36bc05313cd29e0dfd`.  The current run was
-stamped `a0c22c52f2708ca9f970b75cbddff6043b123093` and used the stage gate's
-`--faithful-only` compatibility mode: the public production step was run, but
-private causal arms were not compiled; the ULP comparison selected the four
-`faithful.instantaneous` stage/entry rows.  Its literal verdict is
-`status=FAIL, n_certified_rows_compared=4, largest_move_ulps=3051030845995.4375`.
+The required discriminator found that the mask is not the owner.  The exact
+3-D array applied by OVERFLOW has shape `(3,202,100)`, 17000 wet cells, and is
+bit-identical to `tmask(1,:,:,:)` from its `mesh_mask.nc`: differing cells `0`,
+NEMO-wet cells zeroed `0`, and therefore no first differing `(i,j,k)`.  The
+planted flip at `(0,0,0)` exits nonzero.  This agrees with the HPG source:
+`dynhpg.F90:340-390` pairs same-level T points and masks the resulting U/V
+trend.
 
-| OVERFLOW row (production JIT, fp64) | `57429ecf5f3` | current | move in gate ulps |
-|---|---:|---:|---:|
-| kt1 stage 1 faithful u | `6.522560269672795e-15` | `2.3025702257223896e-4` | `1.0369854410264e12` |
-| kt1 stage 2 faithful u | `1.5663442765045943e-12` | `3.420596203998477e-4` | `1.54049957191706e12` |
-| kt1 stage 3 faithful u | `7.064251961175216e-12` | `6.774649458773929e-4` | `3.0510308459954375e12` |
-| kt2 faithful u | `7.064251961175216e-12` | `6.774649458773929e-4` | `3.0510308459954375e12` |
+The round-9 `3.051e12`-ulp result was primarily an invalid comparison with
+missing raw W-grid geometry.  The shared PE path now raises when `e3w0` is
+absent, like its sibling, and every reachable lane-1 card passes its real
+oracle `e3w_0`; midpoint reconstruction was removed.  That reduces the stage
+move to ulps, but not to the required two ulps:
 
-This exceeds the two-ulp limit by twelve orders of magnitude, so it is not
-certified as a reassociation.  Per the dispatch, LOCK_EXCHANGE current-tip
-comparisons, the two trajectory comparisons, findings E--G, the remaining H
-closure suite, and all tuning are intentionally **NOT RUN / BLOCKED ON USER
-DECISION**.  Fresh baseline
-artifacts for both cards and both gate types do exist, but are not presented
-as passed comparisons.  Tracer bit identity and first-over-bar preservation
-are therefore **UNMEASURED**, not inferred.
+| production-JIT compare-to gate | certified rows | largest move | verdict |
+|---|---:|---:|---|
+| OVERFLOW stage sweep | 9 | 28.062 ulp | FAIL |
+| LOCK_EXCHANGE stage sweep | 9 | 0.017648 ulp | PASS |
+| OVERFLOW kt=1…10 trajectory | 50 | 513504.875 ulp | FAIL |
+| LOCK_EXCHANGE kt=1…10 trajectory | 50 | 2.743 ulp | FAIL |
+
+OVERFLOW's first stage already moves: baroclinic u by
+`1.700029e-15` (7.656 ulp) and instantaneous u by `6.231127e-15`
+(28.062 ulp).  Its kt=2 u moves `4.052314e-15` (18.250 ulp), kt=2 SSH moves
+`1.017242e-14` (45.812 ulp), kt=10 u reaches `1.140210e-10`
+(513504.875 ulp), tracers cease to be bit-identical, and `first_over_bar`
+changes from kt=2 `{T,u,ssh}` to kt=2 `{T,u}`.  LOCK_EXCHANGE is exact enough
+at the stage boundary, but its trajectory loses tracer bit identity and kt=10
+u moves `5.756707e-16` (2.593 ulp); its largest listed tracer move is 2.743
+ulp.  The final comparison runs were CPU fp64 production-JIT.  They emitted a
+JAX persistent-cache host-feature warning; an earlier no-cache OVERFLOW
+trajectory reproduced the same amplification, so the failure is not inferred
+from the warned cache run alone.
+
+Two one-variable diagnostics—direct source-native `prd` handoff and the prior
+wet-cell evaluator with only the terminal tmask retained—both leave the
+OVERFLOW kt=3 trajectory near 17 ulp.  Thus the EOS wet-cell association alone
+is refuted as sole owner; the remaining shared EOS/HPG association boundary is
+not yet localized.  The two-ulp rule therefore invokes the mandatory **STOP**.
+No further physics tuning, card guard, GYRE-only arm, or tra_zdf/dyn_zdf matrix
+walk was started.
 
 ## Provenance, controls, and review
 
 The oracle executable was rebuilt only from config-local `MY_SRC`; no shipped
 NEMO source was modified.  Stage-3 state (`3703a9f…`), kt=2 entry
-(`887f3bb…`), and restart (`3271da1…`) reproduce the registered hashes.
-The post-transport record's owned payload is bit-identical to the prior run;
-its whole-file hash is intentionally not used as a control because NEMO leaves
-unowned/halo bytes uninitialized.  The WZV record, executable, MY_SRC sources,
-all gates, and implementation Git SHA are pinned in
+(`887f3bb…`), and restart (`3271da1…`) reproduce the registered hashes.  The
+WZV record, executable, config-local sources, baseline sweep, final gates, and
+implementation Git SHA are pinned in
 `nemo_testcases_l2_gyre_phase3_round8_artifacts.sha256`.
 
-Round 8's host exhaustion was caused by retaining more than a dozen full GYRE
-executables, one per static private hook, in a single process—not by the
-30×20×31 production step or the 50-substep `lax.scan`.  A lone compiled gate
-completed in 34 seconds.  The gate now obtains internal frames through
-`_NEMOWSRK3TestHooks.expose_barotropic_substeps` on `.step()`, materializes
-each diagnostic result to host, and clears that obsolete executable before
-the next static variant.  The complete kt=1…10 run then completed CPU-only
-with `execution_regime=production_jit`; `JAX_DISABLE_JIT` is now a hard gate
-failure.  Artifact `/tmp/gyre_r9_jit_full.json` has SHA-256
-`9567f31c4840440a185b0b0cce56c35a07e9c81ce04236d8097caf197e1eedf1`.
+The monolithic GYRE completion process still retained too many static-hook
+executables and was stopped after three 5–6 minute no-output attempts.  The
+fail-closed low-memory route runs the production kt=1…10 sweep once, then each
+private hook in a fresh process.  The sweep completed CPU-only in 69 seconds;
+its SHA-256 is
+`17b1d103bd6e6871ddeecbfe59d9ccc9b7a5551041c4dd13e2c1f1699cc66489`
+and is byte-identical to the round-9 production-JIT sweep.  Every certification
+gate rejects `JAX_DISABLE_JIT`; no eager result is promoted.
 
-The fp64 regression executes the new EOS, literal SCO HPG, and QCO transport
-geometry paths both eagerly and under `jax.jit`, then requires
-`np.array_equal` for every returned array.  Removing the live optimization
-barriers changes `r3u/r3v` bits and triggers the planted inequality control;
-the focused run passed (`1 passed`).
+### Round-9 E/F/G safeguards
 
-This is a Codex-internal measurement round.  Independent Claude and GLM
-review of these new findings remains outstanding; no dual-review claim is
-made.  Per the accepted process note, the earlier EMP reversal returned
-through review with both source and runtime evidence before it landed.
+The three source-string assertions were replaced with four behavioral tests:
+the returned stage-3 content is the array actually advanced; stage-3 QSR
+removes Kbb and adds Kmm; `nemo_qsr_2bd` deposits the full QSR; and the live
+Kmm optical ladder changes the vertical profile.  Each was mutated once and
+observed to fail; the corrected live-ladder mutation disabled both interface
+depth and thickness and failed at
+`test_two_band_live_kmm_ladder_changes_the_stage3_profile` before restoration.
+The restored 18-test file passes.
+
+The PE dynamics path no longer synthesizes midpoint `e3w` when `e3w0` is
+missing.  A caller census found the lane-1 recipes could reach it; those cards
+now pass the real oracle `e3w_0` and missing geometry raises in both PE and its
+sibling path.  The no-scheme-duplication census still treats these as shared
+RoutineRows S-49/S-50, not exceptions.
+
+The required shortwave search (`qsr|shortwave|rgb|two_band|penetrat`) found the
+existing `ShortwavePenetrationConfig.scheme`.  It was extended with NEMO-named
+values `nemo_qsr_2bd` and `nemo_qsr_rgb`; the temporary public boolean was
+removed.  `OceanExperimentConfig.validate_strict`, its membership coverage,
+and a bogus-value footgun test cover the one selector.  NEMO's corresponding
+switches and branches are `ln_qsr_2bd`/`ln_qsr_rgb` at
+`traqsr.F90:55-56,627-712,1239,1266-1276`.
+
+These E/F/G safeguard commits landed before the final D adjudication, contrary
+to the requested ordering; this receipt flags that process error rather than
+hiding it.  They do not tune a trajectory.  After D failed, no further physics
+work was performed.
+
+### Lane-1 certification-regime audit
+
+Search of every testcase gate and the requested lane-1 receipts found two
+explicit eager-only instruments.  All numbers produced by
+`nemo_testcase_overflow_barotropic_gate.py`'s traced 19-frame/reseeded route
+(`jax.disable_jit`, lines 276/350) are **UNVERIFIED as production-JIT
+certification**.  Phantom-velocity derivative/census numbers produced through
+`nemo_testcase_phantom_velocity_probe.py:202` are likewise **UNVERIFIED**.
+The phase-3 stage-sweep and trajectory gates call the public `.step()` whose
+production kernel is JIT; their numbers are production-JIT.  No receipt number
+was upgraded merely because its documentation omitted a regime stamp.
+
+### ASKED / UNASKED register
+
+| choice or action | origin | disposition |
+|---|---|---|
+| same-input 11-operator JIT/eager ladder and public-step route fix | ASKED round 10 | landed shared; all rows PASS, planted row FAIL |
+| NEMO terminal `tmask` and OVERFLOW discriminator | ASKED round 10 | retained; exact mask, zero differing/zero wet-zeroed |
+| literal shared EOS/HPG association | UNASKED round 9 correction, ASKED round 10 diagnosis | one implementation retained; cross-card gate FAIL, STOP |
+| raw oracle `e3w_0`, no midpoint fallback | ASKED F | landed shared fail-close; no synthetic domain geometry |
+| four behavioral replacements | ASKED E | landed; each path shown non-vacuous |
+| source-named `nemo_qsr_2bd`/`nemo_qsr_rgb` selector | ASKED G | landed in existing selector; private boolean removed |
+| six GYRE card choices in the earlier table | UNASKED round 8, ASKED round 9 audit | independently ablated and retained from resolved namelist |
+| nested `lax.scan` Horner experiment | UNASKED diagnostic | reverted after compile stall; absent from final tree |
+| GYRE tra_zdf/dyn_zdf matrix walk or further owner tuning | explicitly out of scope | NOT STARTED after STOP |
+
+### Test and artifact closure
+
+Focused results are: JIT parity `11 PASS` plus planted `FAIL`; public-step/EOS
+parity `2 passed`; and the consolidated GYRE behavioral, recipe, config,
+shortwave, and no-scheme-duplication suite `152 passed`.  The broad
+strict-coverage file's new shortwave validation/footgun checks pass, but the
+full file retains a pre-existing `grid_type` AST-classification inconsistency
+and is not claimed green.  Larger combined pytest invocations and the
+monolithic stage gate hit the documented compiler/resource wall; the
+scientific gates above ran as separate CPU processes.
+
+This is a Codex-internal measurement round.  Independent Claude and GLM review
+of these new findings remains outstanding; no dual-review claim is made.  Per
+the accepted process note, the earlier EMP reversal returned through review
+with both source and runtime evidence before it landed.
