@@ -370,7 +370,12 @@ def _numpy_emp_ice_order_probe(
     }
 
 
-def _friction_association_probe(flux_other, *, plant: bool = False) -> dict[str, object]:
+def _friction_association_probe(
+    flux_other,
+    *,
+    bit_claim_valid: bool,
+    plant: bool = False,
+) -> dict[str, object]:
     """Non-vacuous replay of icesbc.F90:328-340 with a non-unit mask."""
     kwargs = dict(
         ice_fraction=np.float64(0.8), ice_fraction_before=np.float64(0.8),
@@ -402,14 +407,16 @@ def _friction_association_probe(flux_other, *, plant: bool = False) -> dict[str,
     )
     expected_bits = int(expected.view(np.uint64))
     actual_bits = int(faithful.view(np.uint64))
-    require(actual_bits == expected_bits, "planted friction association/mask drift")
+    if bit_claim_valid or plant:
+        require(actual_bits == expected_bits, "planted friction association/mask drift")
     return {
         "source": "icesbc.F90:328-340",
         "inputs": {"nonzero_velocity_differences": True, "mask": 0.25},
         "value": float(faithful),
         "ieee754_hex": f"{actual_bits:016x}",
         "nemo_order_ieee754_hex": f"{expected_bits:016x}",
-        "bit_identical": True,
+        "bit_identical": actual_bits == expected_bits if bit_claim_valid else None,
+        "bit_identity_status": "VALID" if bit_claim_valid else "WITHHELD_RUNTIME",
     }
 
 
@@ -584,6 +591,7 @@ def evaluate(
     require(jax.default_backend() == "cpu", "bulk gate is CPU-only")
     friction_probe = _friction_association_probe(
         _nemo_si3_ice_flx_other,
+        bit_claim_valid=bit_claim_valid,
         plant=plant == "friction_association",
     )
     bulk_path = root / "oracle_si3_bulk_operands.bin"

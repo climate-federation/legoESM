@@ -104,6 +104,10 @@ def test_unregistered_stack_runs_science_gate_with_bit_claim_withheld(monkeypatc
         group["status"] == "WITHHELD_RUNTIME"
         for group in result["bit_owner_groups"].values()
     )
+    assert result["friction_association_probe"]["bit_identical"] is None
+    assert result["friction_association_probe"]["bit_identity_status"] == (
+        "WITHHELD_RUNTIME"
+    )
     with pytest.raises(gate.GateError, match="unregistered numeric runtime"):
         gate.evaluate(require_bit_identity=True)
 
@@ -204,6 +208,7 @@ def test_full_year_gate_and_all_plants() -> None:
     assert result["non_bit_identical_rows"] > 0
     assert result["non_bit_identical_rows"] == 18
     assert result["friction_association_probe"]["bit_identical"] is True
+    assert result["friction_association_probe"]["bit_identity_status"] == "VALID"
     assert result["friction_association_probe"]["inputs"]["mask"] == 0.25
     assert set(result["bit_owner_groups"]) == {"jax_exp_ice_alb"}
     assert all("max_relative_error_nonzero_oracle" in row for row in result["rows"])
