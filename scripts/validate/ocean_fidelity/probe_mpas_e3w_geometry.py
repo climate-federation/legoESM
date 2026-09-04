@@ -180,6 +180,26 @@ def main() -> int:
         # vertical column max profile: where in the column does |u| live
         col = np.abs(u[ie]); print(f"  |u| edge profile max at level {int(np.argmax(col))}, "
                                    f"top {col[0]:.3g}, mid {col[len(col)//2]:.3g}, bottom-active {col[np.flatnonzero(col)[-1]] if col.any() else 0:.3g}")
+        # Per-term momentum tendency on this state (no physics: dynamics only).
+        import jax.numpy as jnp
+        from legoesm.ocean.dynamics.ocean_pe_mpas import mpas_ocean_baroclinic_tendencies
+        st = state._replace(
+            u=state.u.replace(data=jnp.asarray(u)), T=state.T.replace(data=jnp.asarray(Ts)),
+            S=state.S.replace(data=jnp.asarray(Ss)),
+            eta=state.eta.replace(data=jnp.asarray(eta if eta is not None else np.zeros(H.size))))
+        _, terms = mpas_ocean_baroclinic_tendencies(
+            st, model.mesh, z_coord, model.config, physics_fn=None, term_diagnostics=True)
+        names = ("grad_B", "pv_flux", "visc", "vert_adv_u", "du_dt_full")
+        print("  per-term tendency at the max edge [m/s^2] (x dt=75 -> m/s per step):")
+        print("  level " + " ".join(f"{n:>11s}" for n in names) + "        w_e")
+        we = np.asarray(terms["w_e"])
+        for kk in ks:
+            print(f"  {kk:5d} " + " ".join(f"{float(np.asarray(terms[n])[ie, kk]):+11.3e}" for n in names)
+                  + f" {float(we[ie, kk]):+11.3e}")
+        print("  global max |term| and location:")
+        for n in names:
+            t = np.abs(np.asarray(terms[n])); j, kk = np.unravel_index(int(np.nanargmax(t)), t.shape)
+            print(f"    {n:11s} {t[j, kk]:.3e} at edge {j} ({lat_e[j]:.2f}N {lon_e[j]:.2f}E) level {kk}")
     return 1 if bad.any() else 0
 
 
