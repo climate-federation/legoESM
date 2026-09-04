@@ -493,3 +493,29 @@ C96 kt=3 (54 devices, 9632472/9632473).  codex round: 2 CLEAN, 1 MAJOR
 horizontal extent: barriers now pass explicit axes), 1 MINOR fixed
 (sabotage arm).  GLM: identity holds for the stated operands; argument,
 not sampling, closes the cancellation corner (recorded in the docstring).
+
+## M6 (2026-09-05): the model steps on windows
+
+`FV3DuoDynamicsModel(grid, cfg, step_windows=(kt, pad), step_spmd_mesh=mesh)`
+builds a fresh stepper context, attaches the window comm (SPMD on the
+(6,kt,kt) mesh, or the single-device window bundle without a mesh), forces
+the batched arm and defaults the output sharding to the window sharding.
+The IC is built on faces (p_var, NH carry from the flat hs6) and
+`to_windows()`-ed; `to_flat()` scatters each window's owned cells on the
+host.  The full outer step (acoustic loop, tracer transport with its
+sub-cycle count from a GSPMD all-reduced Courant max, vertical remap) runs
+with the leading batch axis `batch_size(ctx)` (fv3_dynamics.py,
+fv3_tracer2d.py incl. the batched tracer arm); `alloc_flux_capacitors`
+takes `nb`.  A km+1 inside the horizontal extent range is refused at
+construction (the axis classifier would be ambiguous — toy grids only).
+RECEIPTS (`tiled_m6_model_gate.py`, every leaf of the bundle — state,
+press, tracers, omga, NH carry — window arm vs the same model on faces
+GSPMD-sharded P('face'), FMA off, 2 outer steps): hydro C48 kt=2 12/12
+leaves BITWISE (9634735); NH C48 kt=2 22/22 BITWISE (9634875); hydro C96
+kt=3 on 54 devices BITWISE (9634364).  No window output comes back
+replicated.  codex (9634369): 3 MAJORs fixed (step_out_shardings recorded
+after the window default; km/horizontal ambiguity refused at construction;
+gate vacuity — every leaf scored, steps>=1, replication detected via
+`sharding.is_fully_replicated`), 2 CLEAN (the nb sweep; the Courant
+all-reduce replicates nsplt).  GLM: the first real-rank measurement is the
+per-rank nsplt read and its latency (barrier cost of the host guard).

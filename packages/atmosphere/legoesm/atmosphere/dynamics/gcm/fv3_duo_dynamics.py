@@ -105,7 +105,19 @@ class FV3DuoDynamicsModel:
 
     def __init__(self, grid, config: FV3DuoConfig | None = None, *,
                  step_out_shardings=None, step_spmd_mesh=None,
-                 step_face_batched: bool = False):
+                 step_face_batched: bool = False,
+                 step_windows=None):
+        # step_windows: ENGINEERING knob (M6, the tiled port) -- (kt, pad)
+        # runs the step on 6*kt*kt sub-face WINDOWS (fv3_duo_windows,
+        # padded partition, kt | m_a) instead of six faces: with
+        # step_spmd_mesh a (6, kt, kt) tile mesh, one window per device
+        # (fv3_duo_window_spmd); without a mesh, the single-device window
+        # arm (every exchange through the flat impl).  The kernels are
+        # the certified ones vmapped over the windows (batched arm
+        # forced); the state bundle is WINDOW-stacked (to_windows /
+        # to_flat convert).  Selects no scientific configuration: bitwise
+        # against the face-sharded flat step (jobs 9632470-3).  None keeps
+        # the certified six-face path byte-identical.
         # step_face_batched: ENGINEERING knob (face-batching ladder) --
         # routes the 3-D phases' per-face loops through their vmapped
         # arms (batched==loop gated at rtol 1e-13 per phase). Selects no
@@ -195,7 +207,6 @@ class FV3DuoDynamicsModel:
         # object the compiled step uses, instead of an independently
         # rebuilt "similar" one that could drift in mesh/device order
         # (codex MAJOR, mp-driver-io design review 2026-08-27).
-        self.step_out_shardings = step_out_shardings
         self.step_spmd_mesh = step_spmd_mesh
         # The grid bundle's ctx_jax was built WITHOUT a mesh; a ring-
         # enabled context is rebuilt here from ctx_np rather than
@@ -211,7 +222,53 @@ class FV3DuoDynamicsModel:
         # (spmd_mesh) run already rebuilds; it now also carries the dtype.
         _fp32 = self._storage_dtype == np.float32
         _ctx_dtype = jnp.float32 if _fp32 else None   # None = uncast f64
-        if step_spmd_mesh is None and not _fp32:
+        self.window_layout = None
+        self._window_comm = None
+        self._window_sharding = None
+        if step_windows is not None:
+            from legoesm.core.fv3_duo_stepper import (
+                build_jax_duo_stepper_context,
+            )
+            if _fp32:
+                raise NotImplementedError(
+                    "step_windows with storage_dtype float32: the tiled "
+                    "lane is fp64-only (scope: fp32 on the tiled lane is "
+                    "out of scope)")
+            kt, pad = (int(v) for v in step_windows)
+            # a FRESH context: the window comm rides on its tables, and
+            # the shared grid bundle's tables must not be mutated
+            flat_ctx = build_jax_duo_stepper_context(grid.ctx_np)
+            if step_spmd_mesh is not None:
+                from legoesm.grids.fv3_duo_window_spmd import (
+                    attach_window_spmd_comm)
+                if tuple(step_spmd_mesh.devices.shape) != (6, kt, kt):
+                    raise ValueError(
+                        f"step_windows kt={kt} needs a (6, {kt}, {kt}) "
+                        f"mesh, got {tuple(step_spmd_mesh.devices.shape)}")
+                self._ctx_jax, self._window_comm = attach_window_spmd_comm(
+                    flat_ctx, step_spmd_mesh, pad)
+                self._window_sharding = self._window_comm.sharding
+                if step_out_shardings is None:
+                    step_out_shardings = self._window_sharding
+            else:
+                from legoesm.grids.fv3_duo_windows import attach_window_comm
+                self._ctx_jax, self._window_comm = attach_window_comm(
+                    flat_ctx, kt, pad, "padded")
+            self._flat_ctx_jax = flat_ctx
+            self.window_layout = self._window_comm.lay
+            step_face_batched = True
+            # the window ctx's n_w and the vertical extent must not
+            # collide: to_windows/to_flat classify horizontal axes by
+            # extent (fv3_duo_windows.horizontal_axes) and a km+1 inside
+            # [n, m_a+1] would be ambiguous -- refuse HERE, not deep in
+            # the IC (codex 2026-09-05; only toy grids can trigger it)
+            if grid.n <= config.km + 1 <= grid.n + 2 * grid.ng + 1:
+                raise NotImplementedError(
+                    f"step_windows: km+1 = {config.km + 1} lies inside the "
+                    f"horizontal extent range [{grid.n}, "
+                    f"{grid.n + 2 * grid.ng + 1}] of C{grid.n}; the window "
+                    f"layout cannot tell levels from a horizontal axis")
+        elif step_spmd_mesh is None and not _fp32:
             self._ctx_jax = grid.ctx_jax
         else:
             from legoesm.core.fv3_duo_stepper import (
@@ -219,6 +276,9 @@ class FV3DuoDynamicsModel:
             )
             self._ctx_jax = build_jax_duo_stepper_context(
                 grid.ctx_np, spmd_mesh=step_spmd_mesh, dtype=_ctx_dtype)
+        # recorded AFTER the window default so a caller (the multiprocess
+        # driver) reads the sharding the step was actually built with
+        self.step_out_shardings = step_out_shardings
         # ak/bk (eta coefficients) enter p_var alongside delp -> they must
         # be the storage dtype too. fp64 default is byte-identical.
         self._ak = np.asarray(ak, dtype=self._storage_dtype)
@@ -323,6 +383,8 @@ class FV3DuoDynamicsModel:
             hydrostatic=cfg.hydrostatic, do_pert=do_pert)
         jstate = state_3d_to_jax(st6)
         n, ng = self.grid.n, self.grid.ng
+        flat_ctx = (self._flat_ctx_jax if self.window_layout is not None
+                    else self._ctx_jax)
         if cfg.hydrostatic:
             press = p_var_hydrostatic(
                 jstate["delp"], ptop=self._ptop, akap=FV3_KAPPA,
@@ -332,8 +394,7 @@ class FV3DuoDynamicsModel:
             press = p_var_nonhydrostatic(
                 jstate["delp"], jstate["delz"], jstate["pt"],
                 ptop=self._ptop, akap=FV3_KAPPA, n=n, ng=ng, km=cfg.km)
-            nh = build_nh_carry(self._ctx_jax, cfg.km,
-                                self._ctx_jax.hs6)
+            nh = build_nh_carry(flat_ctx, cfg.km, flat_ctx.hs6)
         q = [jnp.asarray(np.stack(sphum6))]
         omga = jnp.zeros(
             (6,) + tuple(field_shape("delp", n, ng, cfg.km)),
@@ -348,8 +409,53 @@ class FV3DuoDynamicsModel:
         # run it is the one place the IC is downcast; every OTHER
         # provenance (restart reads, external ICs) is caught by step()'s
         # boundary guard instead.
-        return jax.tree_util.tree_map(
+        bundle = jax.tree_util.tree_map(
             lambda a: (a.astype(self._storage_dtype)
                        if jnp.issubdtype(getattr(a, "dtype", np.int64),
                                          jnp.inexact) else a),
             bundle)
+        return self.to_windows(bundle) if self.window_layout else bundle
+
+    # ------------------------------------------------------------------
+    # window layout conversions (M6)
+    # ------------------------------------------------------------------
+
+    def to_windows(self, bundle):
+        """Six-face bundle -> window-stacked bundle (every horizontal array
+        gathered into its 6*kt*kt windows, placed on the window sharding
+        when the step is SPMD).  Identity when the model runs on faces."""
+        if self.window_layout is None:
+            return bundle
+        if self.window_layout.kt == 1 and self._window_sharding is None:
+            return bundle                      # W == m_a: the flat layout
+        from legoesm.grids.fv3_duo_windows import (gather_windows,
+                                                   horizontal_axes)
+        lay, sh = self.window_layout, self._window_sharding
+
+        def conv(a):
+            if (hasattr(a, "ndim")
+                    and horizontal_axes(lay, a.shape, 6) is not None):
+                w = gather_windows(lay, a)
+                return jax.device_put(w, sh) if sh is not None else w
+            return a
+        return jax.tree_util.tree_map(conv, bundle)
+
+    def to_flat(self, bundle):
+        """Window-stacked bundle -> six-face bundle: each window's OWNED
+        cells (host-side scatter, no device collective).  Identity when
+        the model runs on faces."""
+        if self.window_layout is None:
+            return bundle
+        if self.window_layout.kt == 1:
+            return jax.tree_util.tree_map(
+                lambda a: np.asarray(a) if hasattr(a, "ndim") else a, bundle)
+        from legoesm.grids.fv3_duo_windows import (scatter_owned,
+                                                   horizontal_axes)
+        lay = self.window_layout
+
+        def conv(a):
+            if (hasattr(a, "ndim")
+                    and horizontal_axes(lay, a.shape, lay.nb) is not None):
+                return scatter_owned(lay, np.asarray(a), np)
+            return a
+        return jax.tree_util.tree_map(conv, bundle)

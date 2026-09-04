@@ -98,9 +98,11 @@ PER_FACE_FLAG_FIELDS = ("da_min", "da_min_c")
 
 def batch_size(ctx) -> int:
     """Length of the leading batch axis this ctx steps: 6 for the cube's
-    faces, ``6*kt*kt`` for a window ctx (fv3_duo_windows).  Read off the
-    ctx, never assumed."""
-    return len(ctx.gs6)
+    faces, ``6*kt*kt`` for a window ctx (fv3_duo_windows).  Read off
+    ``ctx.gs6``; a context without gridstructs (the shape-validator tests'
+    stubs) is the cube."""
+    gs6 = getattr(ctx, "gs6", None)
+    return 6 if gs6 is None else len(gs6)
 
 
 def build_batched_gs(ctx) -> dict:
