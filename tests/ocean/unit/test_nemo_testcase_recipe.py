@@ -17,6 +17,8 @@ from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     gyre_vertical_ladder,
     validate_nemo_testcase_card,
 )
+from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+from legoesm.ocean.eos import nemo_potential_temperature_from_conservative
 
 
 @pytest.fixture(autouse=True)
@@ -109,13 +111,35 @@ def test_gyre_card_selects_complete_resolved_operator_program():
     assert cfg.physics.vertical_mixing.tke.kappaM_min == 1.2e-4
     assert cfg.physics.vertical_mixing.tke.kappaH_min == 1.2e-5
     assert cfg.physics.vertical_mixing.tke.n2_eos_form == "teos10"
+    assert cfg.physics.vertical_mixing.tke.tke_n2_time_level == "nemo_before"
     assert cfg.physics.convection.scheme == "enhanced_diffusion"
     assert cfg.physics.convection.enhanced_diffusion.K_conv == 100.0
     assert cfg.physics.convection.enhanced_diffusion.nu_conv == 100.0
+    assert (
+        cfg.physics.convection.enhanced_diffusion.evd_n2_time_level
+        == "nemo_now_before"
+    )
     assert cfg.physics.shortwave_penetration.scheme == "jerlov_2band"
     assert cfg.physics.shortwave_penetration.water_type == "I"
     assert cfg.barotropic.barotropic_coriolis == "ene_metric"
     assert cfg.barotropic.barotropic_een_coefficient_evaluation == "nemo_literal"
+    assert cfg.bottom_drag.bottom_drag_scheme == "nemo_quadratic"
+    assert cfg.bottom_drag.bottom_drag_cd0 == 1.0e-3
+    assert cfg.bottom_drag.bottom_drag_ke0 == 2.5e-3
+    assert cfg.zdf_drag_in_matrix is True
+    assert cfg.zdf_baroclinic_only is True
+    assert cfg.barotropic_drag_substep is True
+
+
+def test_gyre_rk3_evd_uses_step_entry_for_both_n2_arms():
+    set_policy(PrecisionPolicy.fp64())
+    card = build_gyre_zco_card()
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    T_before, S_before = model._n2_nemo_before_tracers(
+        card.recipe.initial_state)
+    assert T_before is card.recipe.initial_state.T.data
+    assert S_before is card.recipe.initial_state.S.data
 
 
 def test_gyre_whole_step_identity_rejects_hybrid_and_staged_gm():
@@ -320,6 +344,20 @@ def test_nemo_testcase_dispatch_does_not_hide_builder_keyerror(monkeypatch):
     monkeypatch.setattr(testcase_recipe, "build_overflow_zps_card", broken_builder)
     with pytest.raises(KeyError, match="internal-card-defect"):
         testcase_recipe.build_nemo_testcase_card("OVERFLOW-zps")
+
+
+def test_gyre_teos_surface_operand_and_full_two_band_identity():
+    """Pin eosbn2.F90:1500 and the GYRE-only complete-qsr selector."""
+    set_policy(PrecisionPolicy.fp64())
+    pt = nemo_potential_temperature_from_conservative(
+        jnp.asarray(20.0, dtype=jnp.float64),
+        jnp.asarray(35.7, dtype=jnp.float64),
+    )
+    assert float(pt) == pytest.approx(20.02391895, abs=5.0e-7)
+    gyre = build_gyre_zco_card().recipe.model_config
+    lane1 = build_lock_exchange_zco_card().recipe.model_config
+    assert gyre.nemo_two_band_full_shortwave is True
+    assert lane1.nemo_two_band_full_shortwave is False
 
 
 def test_nemo_tpoint_bottom_rule_is_selectable_and_unsnapped():

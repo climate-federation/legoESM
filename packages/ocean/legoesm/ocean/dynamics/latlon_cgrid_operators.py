@@ -3729,6 +3729,70 @@ def compute_face_masks_3d(
     return u_mask, v_mask
 
 
+def nemo_hpg_sco_literal_cgrid(
+    rhd: jnp.ndarray,
+    e3w: jnp.ndarray,
+    gdept_z0: jnp.ndarray,
+    grid: LatLonGrid,
+    g: float,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Literal NEMO ``hpg_sco`` recurrence on native east/north faces.
+
+    ``rhd`` is NEMO's dimensionless density anomaly and ``e3w`` /
+    ``gdept_z0`` are the live ``Kmm`` operands.  The operation order follows
+    NEMO 5.0.2 ``dynhpg.F90:340-390``: a surface seed, a top-down cumulative
+    along-level pressure term, and the level-local terrain correction.  The
+    returned arrays use legoESM's redundant west/south face layout.
+    """
+    rhd = jnp.asarray(rhd)
+    e3w = jnp.asarray(e3w, dtype=rhd.dtype)
+    gdept_z0 = jnp.asarray(gdept_z0, dtype=rhd.dtype)
+    r1_e1u = 1.0 / jnp.asarray(grid.dx_u[:, 1:], dtype=rhd.dtype)
+    r1_e2v = 1.0 / jnp.asarray(grid.dy_v[1:, :], dtype=rhd.dtype)
+    zcoef0 = -jnp.asarray(g, dtype=rhd.dtype) * 0.5
+
+    rhd_i1 = jnp.roll(rhd, -1, axis=1)
+    rhd_j1 = jnp.roll(rhd, -1, axis=0)
+    e3w_i1 = jnp.roll(e3w, -1, axis=1)
+    e3w_j1 = jnp.roll(e3w, -1, axis=0)
+    dep_i1 = jnp.roll(gdept_z0, -1, axis=1)
+    dep_j1 = jnp.roll(gdept_z0, -1, axis=0)
+
+    zhpi = zcoef0 * r1_e1u * (
+        e3w_i1[..., 0] * rhd_i1[..., 0]
+        - e3w[..., 0] * rhd[..., 0])
+    zhpj = zcoef0 * r1_e2v * (
+        e3w_j1[..., 0] * rhd_j1[..., 0]
+        - e3w[..., 0] * rhd[..., 0])
+    u_levels = []
+    v_levels = []
+    for jk in range(rhd.shape[-1]):
+        if jk > 0:
+            zhpi = zhpi + zcoef0 * r1_e1u * (
+                e3w_i1[..., jk]
+                * (rhd_i1[..., jk] + rhd_i1[..., jk - 1])
+                - e3w[..., jk]
+                * (rhd[..., jk] + rhd[..., jk - 1]))
+            zhpj = zhpj + zcoef0 * r1_e2v * (
+                e3w_j1[..., jk]
+                * (rhd_j1[..., jk] + rhd_j1[..., jk - 1])
+                - e3w[..., jk]
+                * (rhd[..., jk] + rhd[..., jk - 1]))
+        zuap = -zcoef0 * (rhd_i1[..., jk] + rhd[..., jk]) * (
+            dep_i1[..., jk] - gdept_z0[..., jk]) * r1_e1u
+        zvap = -zcoef0 * (rhd_j1[..., jk] + rhd[..., jk]) * (
+            dep_j1[..., jk] - gdept_z0[..., jk]) * r1_e2v
+        u_levels.append(zhpi + zuap)
+        v_levels.append(zhpj + zvap)
+
+    native_u = jnp.stack(u_levels, axis=-1)
+    native_v = jnp.stack(v_levels, axis=-1)
+    return (
+        jnp.concatenate([native_u[:, -1:, :], native_u], axis=1),
+        jnp.concatenate([jnp.zeros_like(native_v[:1]), native_v], axis=0),
+    )
+
+
 def partial_cell_pgf_correction_x(
     centroid_depth: jnp.ndarray,
     rho_prime: jnp.ndarray,
@@ -4103,7 +4167,12 @@ def pv_flux_ene(
     vtx_mask: jnp.ndarray,
     f_vtx: jnp.ndarray | None = None,
     eps_h: float = 1.0e-10,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+    q_boundary: str = "neumann_fill",
+    return_operands: bool = False,
+    metric_widths: tuple | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray] | tuple[
+    jnp.ndarray, jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
+]:
     """NEMO ``vor_ene`` — Sadourny (1975) ENERGY-conserving 2-point PV flux.
 
     Transcription of NEMO ``dynvor.F90::vor_ene`` (the GYRE default
@@ -4166,11 +4235,21 @@ def pv_flux_ene(
     # Neumann-fill only the RELATIVE part's discontinuity at the coast; the
     # planetary f is smooth everywhere, so fill the whole q (idempotent at
     # interior wet vertices).
-    q = neumann_fill_vertex(q, vtx_mask)
+    if q_boundary == "neumann_fill":
+        q = neumann_fill_vertex(q, vtx_mask)
+    elif q_boundary != "nemo_live":
+        raise ValueError(
+            "pv_flux_ene: q_boundary must be 'neumann_fill' or 'nemo_live'; "
+            f"got {q_boundary!r}")
 
     # --- 2. Mass fluxes at u/v faces (h·u, h·v), closed faces → 0 ---
     F_u = h_u * u * u_mask_3d            # (n_lat, n_lon+1, nlev)
     F_v = h_v * v * v_mask_3d            # (n_lat+1, n_lon, nlev)
+    if metric_widths is not None:
+        e1u, e1v, e2u, e2v = metric_widths
+        # dynvor.F90:518-522 materializes these metric-complete operands.
+        F_u = jnp.asarray(e2u)[..., jnp.newaxis] * F_u
+        F_v = jnp.asarray(e1v)[..., jnp.newaxis] * F_v
 
 
     # --- 3. u-face flux: ¼ ( q_S·(F_v_SW+F_v_SE) + q_N·(F_v_NW+F_v_NE) ) ---
@@ -4222,6 +4301,15 @@ def pv_flux_ene(
         q_W_v * (F_u_S_W + F_u_N_W) + q_E_v * (F_u_S_E + F_u_N_E)
     )
 
+    if metric_widths is not None:
+        diag_vortcor_u = diag_vortcor_u / jnp.asarray(e1u)[..., jnp.newaxis]
+        diag_vortcor_v = diag_vortcor_v / jnp.asarray(e2v)[..., jnp.newaxis]
+
+    if return_operands:
+        # WRITE-only oracle-fidelity seam.  Return the exact intermediates
+        # consumed above rather than rebuilding their formulas in a probe;
+        # production callers retain the historical two-array return.
+        return diag_vortcor_u, diag_vortcor_v, (q, F_u, F_v)
     return diag_vortcor_u, diag_vortcor_v
 
 

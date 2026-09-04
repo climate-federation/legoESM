@@ -912,6 +912,45 @@ _DUMP_TIME_LEVEL["oracle_rhs_kt00000001.bin"] = (
     "stprk3.F90:205-206,377-389 writes the explicitly passed Nrhs=3 "
     "momentum state after stp_2D and before the three RK stages",
 )
+_DUMP_TIME_LEVEL["oracle_rkstage2_terms_kt00000001.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3/MY_SRC/stprk3_stg.F90:339-367 writes the stage-2 "
+    "Krhs accumulator before and after dyn_hpg/dyn_vor/dyn_adv",
+)
+_DUMP_TIME_LEVEL["oracle_rktracer_stage3_kt00000001.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3/MY_SRC/stprk3_stg.F90:565-713 writes the stage-3 "
+    "Krhs accumulator in source order, with explicit Kbb/Kmm/Kaa headers",
+)
+_DUMP_TIME_LEVEL["oracle_tracer_transport_kt00000001_s3.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3/MY_SRC/stprk3_stg.F90:550-565 writes stage-3 "
+    "zFu/zFv/zFw after tra_adv_trp and immediately before tra_adv",
+)
+_DUMP_TIME_LEVEL["oracle_rkstage2_ene_operands_kt00000001.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3/MY_SRC/dynvor.F90:448-535 writes the stage-2 "
+    "Kmm=3 post-division zwz and e3u/e3v(Kmm) transport operands inside "
+    "the executing np_CRV vor_ene call",
+)
+_DUMP_TIME_LEVEL["oracle_rkstage2_hpg_operands_kt00000001.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3/MY_SRC/stprk3_stg.F90:348-366 writes the stage-2 "
+    "Kmm=3 rhd, e3w(Kmm), and gdept_z0(Kmm) immediately after eos and "
+    "before the executing dyn_hpg call",
+)
+_DUMP_TIME_LEVEL["oracle_rkstage3_wzv_kt00000001.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3/MY_SRC/traadv.F90 writes the stage-3 Kmm vertical "
+    "transport at the live wzv -> wAimp -> e1e2t*ww boundaries cited by "
+    "src/OCE/TRA/traadv.F90:220-226",
+)
 del _kt, _step, _stage, _kaa, _kmm
 
 

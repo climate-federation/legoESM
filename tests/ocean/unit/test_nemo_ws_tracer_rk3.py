@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from types import SimpleNamespace
 
 import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as model_module
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
@@ -240,17 +241,29 @@ def test_nemo_ws_fct_limits_stage3_only_and_centres_stages_1_2(monkeypatch):
 
     monkeypatch.setattr(
         model_module, "compute_advection_flux_div_pair", recording_flux_pair)
-    tracer = jnp.array([[[1.0, 2.0]]], dtype=jnp.float64)
-    h = jnp.ones_like(tracer)
-    model_module._nemo_ws_rk3_tracer_pair_step(
-        tracer, tracer, "fct2", h, h, jnp.ones((1, 1, 3)),
-        h, h, h, h, object(), 2.0, h,
+    base_grid = create_latlon_grid(2, 2, dtype=jnp.float64)
+    grid = SimpleNamespace(
+        **base_grid._asdict(),
+        dy_u=jnp.ones((2, 3), dtype=jnp.float64),
+        dx_v=jnp.ones((3, 2), dtype=jnp.float64),
+        area_T=jnp.asarray(base_grid.area),
     )
-    assert seen == [("centered", False), ("centered", False), ("fct2", True)]
+    tracer = jnp.arange(8, dtype=jnp.float64).reshape(2, 2, 2) + 1.0
+    h = jnp.ones_like(tracer)
+    mf_u = jnp.ones((2, 3, 2), dtype=jnp.float64)
+    mf_v = jnp.ones((3, 2, 2), dtype=jnp.float64)
+    w = jnp.ones((2, 2, 3), dtype=jnp.float64)
+    model_module._nemo_ws_rk3_tracer_pair_step(
+        tracer, tracer, "fct2", mf_u, mf_v, w,
+        h, h, mf_u, mf_v, grid, 2.0, h,
+    )
+    # Stages 1-2 execute the literal inline CEN2 accumulator; only stage 3
+    # reaches the shared FCT dispatcher.
+    assert seen == [("fct2", True)]
     seen.clear()
     model_module._nemo_ws_rk3_tracer_pair_step(
-        tracer, tracer, "centered", h, h, jnp.ones((1, 1, 3)),
-        h, h, h, h, object(), 2.0, h,
+        tracer, tracer, "centered", mf_u, mf_v, w,
+        h, h, mf_u, mf_v, grid, 2.0, h,
     )
     # Non-FCT NEMO schemes run the same operator at every stage.
     assert [scheme for scheme, _ in seen] == ["centered"] * 3

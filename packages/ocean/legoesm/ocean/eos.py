@@ -52,6 +52,38 @@ from legoesm.core.precision import resolve_dtype
 # source of truth.
 rho_0 = constants.rho_ocean         # Reference seawater density [kg/m^3]
 c_sw = constants.c_sw               # Specific heat of seawater [J/(kg*K)]
+
+
+def nemo_potential_temperature_from_conservative(ct, salinity):
+    """NEMO TEOS-10 surface CT-to-potential-temperature approximation.
+
+    Literal 5/3 rational recurrence from NEMO 5.0.2
+    ``eosbn2.F90:eos_pt_from_ct_t`` (lines 1519-1542).  NEMO's ``sbc_ssm``
+    applies this conversion to ``sst_m`` when ``ln_teos10`` is true; GYRE's
+    freshwater heat-content correction then consumes that potential
+    temperature even though its Haney restoring term consumes ``ts(Kbb)``.
+    """
+    ct = jnp.asarray(ct)
+    salinity = jnp.asarray(salinity, dtype=ct.dtype)
+    zt = ct * jnp.asarray(1.0 / 40.0, dtype=ct.dtype)
+    zs = jnp.sqrt(
+        jnp.abs(salinity + jnp.asarray(5.0, dtype=ct.dtype))
+        * jnp.asarray(0.875 / 35.16504, dtype=ct.dtype))
+    zn = -2.1385727895e-01 * zt - 2.7674419971e-01 * zs + 1.0728094330
+    zn = zn * zt + (2.6366564313 * zs + 3.3546960647) * zs - 7.8012209473
+    zn = (zn * zt + ((1.8835586562 * zs + 7.3949191679) * zs
+                     - 3.3937395875) * zs - 5.6414948432)
+    zn = (zn * zt + (((3.5737370589 * zs - 1.5512427389e+01) * zs
+                      + 2.4625741105e+01) * zs
+                     + 1.9912291000e+01) * zs - 3.2191146312e+01)
+    zn = (zn * zt + ((((5.7153204649e-01 * zs - 3.0943149543) * zs
+                       + 9.3052495181) * zs - 9.4528934807) * zs
+                     + 3.1066408996) * zs - 4.3504021262e-01)
+    zd = ((2.0035003456 * zt - 3.4570358592e-01 * zs
+           + 5.6471810638) * zt
+          + (1.5393993508 * zs - 6.9394762624) * zs
+          + 1.2750522650e+01)
+    return ct + zn / zd
 T_freeze_ocean = constants.T_freeze_ocean  # Freezing point of seawater [K]
 scale_depth = 1000.0     # Reference e-folding depth for stratification [m]
 
@@ -981,6 +1013,7 @@ def nemo_roquet_eos(
     *,
     coeffs: dict | None = None,
     rho0: float = rho_0,
+    geometric_depth_m: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """In-situ density [kg/m³] from the NEMO Roquet-55 polynomial EOS (EOS-80).
 
@@ -1020,38 +1053,73 @@ def nemo_roquet_eos(
     array : In-situ density [kg/m³].
     """
     c = _ROQUET_EOS80 if coeffs is None else coeffs
-    zh = (p / (rho0 * constants.g)) * c["r1_Z0"]
-    zt = T * c["r1_T0"]
+    depth_m = (
+        p / (rho0 * constants.g)
+        if geometric_depth_m is None
+        else jnp.asarray(geometric_depth_m, dtype=T.dtype)
+    )
+    zh = lax.optimization_barrier(depth_m * c["r1_Z0"])
+    zt = lax.optimization_barrier(T * c["r1_T0"])
     # S + rdeltaS > 0 for all physical S (rdeltaS = 20), so abs() never kinks
     # and sqrt of a strictly-positive argument keeps the gradient finite.
-    zs = jnp.sqrt(jnp.abs(S + c["rdeltaS"]) * c["r1_S0"])
+    zs = lax.optimization_barrier(
+        jnp.sqrt(jnp.abs(S + c["rdeltaS"]) * c["r1_S0"]))
     # Horner form (NEMO eosbn2.F90:265-286): each zn_k is the coefficient of
     # zh^k, itself a Horner-in-zt whose zt-coefficients are Horner-in-zs.
     # Explicit intermediates (a_i = zt^i coeff of zn0; b_i = zt^i coeff of zn1)
     # keep the nesting balanced and reviewable.
-    zn3 = c["EOS013"] * zt + c["EOS103"] * zs + c["EOS003"]
-    zn2 = ((c["EOS022"] * zt + c["EOS112"] * zs + c["EOS012"]) * zt
-           + (c["EOS202"] * zs + c["EOS102"]) * zs + c["EOS002"])
-    b4 = c["EOS041"]
-    b3 = c["EOS131"] * zs + c["EOS031"]
-    b2 = (c["EOS221"] * zs + c["EOS121"]) * zs + c["EOS021"]
-    b1 = ((c["EOS311"] * zs + c["EOS211"]) * zs + c["EOS111"]) * zs + c["EOS011"]
-    b0 = ((((c["EOS401"] * zs + c["EOS301"]) * zs + c["EOS201"]) * zs
+    zn3 = lax.optimization_barrier(
+        c["EOS013"] * zt + c["EOS103"] * zs + c["EOS003"])
+    zn2 = lax.optimization_barrier(
+        (c["EOS022"] * zt + c["EOS112"] * zs + c["EOS012"]) * zt
+        + (c["EOS202"] * zs + c["EOS102"]) * zs + c["EOS002"])
+    zn1 = lax.optimization_barrier(
+        (((c["EOS041"] * zt + c["EOS131"] * zs + c["EOS031"]) * zt
+          + (c["EOS221"] * zs + c["EOS121"]) * zs + c["EOS021"]) * zt
+         + ((c["EOS311"] * zs + c["EOS211"]) * zs + c["EOS111"]) * zs
+         + c["EOS011"]) * zt
+        + (((c["EOS401"] * zs + c["EOS301"]) * zs + c["EOS201"]) * zs
            + c["EOS101"]) * zs + c["EOS001"])
-    zn1 = (((b4 * zt + b3) * zt + b2) * zt + b1) * zt + b0
-    a6 = c["EOS060"]
-    a5 = c["EOS150"] * zs + c["EOS050"]
-    a4 = (c["EOS240"] * zs + c["EOS140"]) * zs + c["EOS040"]
-    a3 = ((c["EOS330"] * zs + c["EOS230"]) * zs + c["EOS130"]) * zs + c["EOS030"]
-    a2 = ((((c["EOS420"] * zs + c["EOS320"]) * zs + c["EOS220"]) * zs
-           + c["EOS120"]) * zs + c["EOS020"])
-    a1 = (((((c["EOS510"] * zs + c["EOS410"]) * zs + c["EOS310"]) * zs
-            + c["EOS210"]) * zs + c["EOS110"]) * zs + c["EOS010"])
-    a0 = ((((((c["EOS600"] * zs + c["EOS500"]) * zs + c["EOS400"]) * zs
-             + c["EOS300"]) * zs + c["EOS200"]) * zs + c["EOS100"]) * zs + c["EOS000"])
-    zn0 = ((((((a6 * zt + a5) * zt + a4) * zt + a3) * zt + a2) * zt + a1) * zt + a0)
-    zn = ((zn3 * zh + zn2) * zh + zn1) * zh + zn0
+    zn0 = lax.optimization_barrier(
+        (((((c["EOS060"] * zt + c["EOS150"] * zs + c["EOS050"]) * zt
+            + (c["EOS240"] * zs + c["EOS140"]) * zs + c["EOS040"]) * zt
+           + ((c["EOS330"] * zs + c["EOS230"]) * zs + c["EOS130"]) * zs
+           + c["EOS030"]) * zt
+          + (((c["EOS420"] * zs + c["EOS320"]) * zs + c["EOS220"]) * zs
+             + c["EOS120"]) * zs + c["EOS020"]) * zt
+         + ((((c["EOS510"] * zs + c["EOS410"]) * zs + c["EOS310"]) * zs
+             + c["EOS210"]) * zs + c["EOS110"]) * zs + c["EOS010"]) * zt
+        + (((((c["EOS600"] * zs + c["EOS500"]) * zs + c["EOS400"]) * zs
+              + c["EOS300"]) * zs + c["EOS200"]) * zs + c["EOS100"]) * zs
+        + c["EOS000"])
+    zn = lax.optimization_barrier(((zn3 * zh + zn2) * zh + zn1) * zh + zn0)
     return zn   # in-situ density [kg/m³]
+
+
+def nemo_roquet_density_anomaly_ratio(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    p: jnp.ndarray,
+    *,
+    coeffs: dict | None = None,
+    rho0: float = rho_0,
+    geometric_depth_m: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Return NEMO's literal ``prd = zn * r1_rho0 - 1``.
+
+    ``prd`` is the dimensionless density anomaly consumed by ``dynhpg``.
+    Dividing before subtracting reproduces NEMO 5.0.2
+    ``eosbn2.F90:288``; ``(zn-rho0)/rho0`` is algebraically equivalent but
+    loses different fp64 bits.  The Roquet polynomial remains implemented
+    once, in :func:`nemo_roquet_eos`.
+    """
+    return (
+        nemo_roquet_eos(
+            T, S, p, coeffs=coeffs, rho0=rho0,
+            geometric_depth_m=geometric_depth_m)
+        * (1.0 / rho0)
+        - 1.0
+    )
 
 
 # ==============================================================================
@@ -1124,6 +1192,20 @@ _ROQUET_TEOS10 = {
     "BET031": -0.006852326006, "BET002": -0.061618945251, "BET102": 0.062255521644,
     "BET012": -0.0026514181169, "BET003": -0.00023025968587,
 }
+
+
+def nemo_teos10_density_anomaly_ratio(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    p: jnp.ndarray,
+    *,
+    rho0: float = rho_0,
+    geometric_depth_m: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """TEOS-10 specialization of NEMO's source-associated ``rhd`` value."""
+    return nemo_roquet_density_anomaly_ratio(
+        T, S, p, coeffs=_ROQUET_TEOS10, rho0=rho0,
+        geometric_depth_m=geometric_depth_m)
 
 
 _NEMO_RHO0 = 1026.0   # NEMO rho0 (eosbn2.F90:1898); legoESM's

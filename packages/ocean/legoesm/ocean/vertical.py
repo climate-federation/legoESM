@@ -194,6 +194,79 @@ def nemo_qco_live_face_geometry_from_operands(
     return NemoQCOLiveFaceGeometry(e3u, e3v, r1_hu, r1_hv, r3u, r3v)
 
 
+def nemo_qco_live_vorticity_e3f_cgrid(eta, z_coord, dtype, nn_e3f_typ=0):
+    """Build literal NEMO ``e3f_vor(Kmm)`` on legoESM's vertex layout.
+
+    ``dyn_vor_init`` freezes ``e3f_0vor`` from masked reference T-cell
+    thicknesses (``dynvor.F90:918-950``); ``dom_qco_r3c_RK3`` builds live
+    ``r3f`` (``domqco.F90:233-246``); and
+    ``domzgr_substitute.h90:130`` applies it through ``fe3mask``.
+    """
+    if nn_e3f_typ not in (0, 1):
+        raise ValueError("nn_e3f_typ must be 0 or 1")
+    raw = getattr(z_coord, "nemo_een_barotropic", None)
+    e3t0 = getattr(z_coord, "nemo_e3t_0", None)
+    active = getattr(z_coord, "is_active", None)
+    if raw is None or e3t0 is None or active is None:
+        raise ValueError(
+            "literal NEMO e3f_vor requires bridge-carried e3t_0, masks, "
+            "and NEMO ENE metric operands")
+    b = lax.optimization_barrier
+    one = jnp.asarray(1.0, dtype=dtype)
+    quarter = jnp.asarray(0.25, dtype=dtype)
+    eta = jnp.asarray(eta, dtype=dtype)
+    e3t0 = jnp.asarray(e3t0, dtype=dtype)
+    tmask = jnp.asarray(active, dtype=dtype)
+
+    def east(value):
+        return jnp.roll(value, -1, axis=1)
+
+    def north(value):
+        # The certified GYRE use is a closed beta-plane box.
+        return jnp.concatenate([value[1:], jnp.zeros_like(value[:1])], axis=0)
+
+    masked = b(e3t0 * tmask)
+    masked_n = north(masked)
+    ref_sum = b(b(masked + east(masked)) + b(masked_n + east(masked_n)))
+    tmask_n = north(tmask)
+    wet_sum = b(b(tmask + east(tmask)) + b(tmask_n + east(tmask_n)))
+    divisor = (jnp.asarray(4.0, dtype=dtype) if nn_e3f_typ == 0
+               else jnp.maximum(wet_sum, one))
+    e3f0vor = b(ref_sum / divisor)
+    e3f0vor = jnp.where(
+        e3f0vor == 0.0, jnp.asarray(raw.e3f_0, dtype=dtype), e3f0vor)
+
+    area_eta = b(
+        b(jnp.asarray(raw.e1t, dtype=dtype)
+          * jnp.asarray(raw.e2t, dtype=dtype)) * eta)
+    area_eta_n = north(area_eta)
+    quad = b(b(area_eta + east(area_eta))
+             + b(area_eta_n + east(area_eta_n)))
+    hf0 = jnp.asarray(raw.hf_0, dtype=dtype)
+    wet_f = (hf0 > 0.0).astype(dtype)
+    r1_hf0 = b(wet_f / b(hf0 + one - wet_f))
+    area_f = b(jnp.asarray(raw.e1f, dtype=dtype)
+               * jnp.asarray(raw.e2f, dtype=dtype))
+    r3f = b(b(quarter * quad) * r1_hf0 / area_f)
+    e3f_native = b(e3f0vor * b(
+        one + r3f[..., None] * jnp.asarray(raw.fmask, dtype=dtype)))
+
+    # NEMO native F(i,j) maps to legoESM vertex [j+1,i+1].  The added
+    # south/west rows are inert walls for this closed-box identity.
+    with_south = jnp.concatenate([e3f_native[:1], e3f_native], axis=0)
+    return jnp.concatenate([with_south[:, -1:], with_south], axis=1)
+
+
+def nemo_qco_vorticity_f_cgrid(z_coord, dtype):
+    """Map bridge-carried NEMO ``ff_f(i,j)`` to lego's vertex storage."""
+    raw = getattr(z_coord, "nemo_een_barotropic", None)
+    if raw is None:
+        raise ValueError("literal NEMO F-point Coriolis requires raw ff_f")
+    native = jnp.asarray(raw.ff_f, dtype=dtype)
+    with_south = jnp.concatenate([native[:1], native], axis=0)
+    return jnp.concatenate([with_south[:, -1:], with_south], axis=1)
+
+
 def nemo_qco_mesh_operands(z_coord, dtype):
     """The raw NEMO ``hu_0/hv_0`` and ``e1e2t/e1e2u/e1e2v`` QCO operands.
 

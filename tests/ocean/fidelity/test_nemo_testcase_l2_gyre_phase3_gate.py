@@ -44,7 +44,7 @@ def test_gate_reuses_registry_and_lane1_growth_instrument():
     assert "time_level_for_dump" in source
     assert 'with_name("nemo_testcase_phase3_trajectory_gate.py")' in source
     assert '"continue_after_first": True' in source
-    assert '"ENE_COMPONENT_CONFIRMED; COMBINED_TRD_REMAINDER_UNMEASURED"' in source
+    assert '"BOTTOM_DRAG_CONFIRMED_AT_SUBSTEP2; NEXT_BOUNDARY_FROM_REGISTER"' in source
 
 
 def test_full_rk3_inventory_and_scaling_precede_owner_labels():
@@ -74,6 +74,8 @@ def test_resolved_program_coverage_parses_runtime_namelist(tmp_path):
         "namtra_mle",
         "namzdf",
         "namzdf_tke",
+        "namdrg",
+        "namdrg_bot",
     )
     resolved = tmp_path / "output.namelist.dyn"
     resolved.write_text("".join(f"&{block.upper()}\n /\n" for block in blocks))
@@ -83,7 +85,7 @@ def test_resolved_program_coverage_parses_runtime_namelist(tmp_path):
     )
     assert all(row["status"] == "VERIFIED" for row in rows)
 
-    # A future fourteenth group is discovered from the runtime artifact and
+    # A future dynamics/tracer/drag group is discovered from the runtime artifact and
     # fails because the static card-disposition map has no row for it.
     resolved.write_text(
         resolved.read_text() + "&NAMTRA_FUTURE\n /\n"
@@ -165,6 +167,21 @@ def test_ene_coefficient_reader_layout_and_planted_violation(tmp_path):
     assert "planted ENE coefficient did not fire" in source
 
 
+def test_bottom_drag_boundary_is_source_reconstructed_and_fail_closed():
+    source = PATH.read_text()
+    for token in (
+        '"bottom_drag_operand_walk"',
+        '"coefficient_time_level": "Kmm_once_per_whole_step"',
+        '"substep_velocity_time_level": "entry_un_e_vn_e"',
+        '"omit_barotropic_substep_drag"',
+        '"--plant-drag"',
+        "planted drag violation did not fire",
+    ):
+        assert token in source
+    assert source.index('"scaling_check_before_owner_label": True') < source.index(
+        '"owner_label": drag_owner_label')
+
+
 def test_bt_trace_native_stagger_mapping():
     eta = np.zeros((2, 3, 4), dtype=np.float64)
     u = np.zeros((2, 3, 5), dtype=np.float64)
@@ -178,3 +195,28 @@ def test_causal_arm_near_null_is_not_an_owner_claim():
     source = PATH.read_text()
     assert '"CAUSAL_NEAR_NULL_AFTER_DIRECT_MATCH"' in source
     assert "EXONERATED" not in source
+
+
+def test_stage3_source_and_content_boundaries_are_literal_and_gated():
+    model_path = PATH.parents[4] / (
+        "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py")
+    pe_path = PATH.parents[4] / (
+        "packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py")
+    model_source = model_path.read_text()
+    pe_source = pe_path.read_text()
+    for token in (
+        "return_final_content",
+        "_nemo_ws_tracer_content_rhs",
+        "pre_implicit_tracer_content_override",
+        "expose_pre_implicit_content",
+        "expose_stage3_advection_content",
+        "stage3_transport_override",
+        "_nemo_ws_tracer_content_rhs = _pre_zdf_content_override",
+        "legacy_zdf_entry_kmm_eta",
+        "_nemo_ws_zdf_eta_kmm",
+        "tend.dT_dt.data - _qsr_b",
+        "z_half_stretch=_r3t_m",
+    ):
+        assert token in model_source
+    assert "nemo_two_band_full_shortwave" in pe_source
+    assert "if not nemo_two_band_full_shortwave" in pe_source

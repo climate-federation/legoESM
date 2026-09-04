@@ -1040,10 +1040,11 @@ def _build_een_barotropic_inputs(h_k, grid, mask, u_mask, v_mask, dtype,
     # nemo_avg divisor is exactly the duplication that let a mutated guard
     # pass undetected in #1226 item 10.  Thickness-only call -> Fu/u=None.
     from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import een_e3f_h_vtx
-    if een_e3f_scheme not in ("min", "nemo_avg"):
+    if een_e3f_scheme not in ("min", "nemo_avg", "nemo_avg4"):
         raise ValueError(
             f"_build_een_barotropic_inputs: unknown een_e3f_scheme "
-            f"{een_e3f_scheme!r}; expected 'min' or 'nemo_avg'.")
+            f"{een_e3f_scheme!r}; expected 'min', 'nemo_avg', or "
+            "'nemo_avg4'.")
     if een_q_boundary not in ("neumann_fill", "nemo_live"):
         raise ValueError(
             f"_build_een_barotropic_inputs: unknown een_q_boundary "

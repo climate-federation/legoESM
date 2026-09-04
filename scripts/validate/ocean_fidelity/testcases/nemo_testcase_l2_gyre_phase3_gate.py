@@ -23,6 +23,12 @@ import numpy as np
 BAR = 1.0e-15
 CASE = "GYRE-zco"
 ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gyre_kt1_10")
+STAGE2_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+    "gyre_kt1_10_stage2_terms")
+STAGE3_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+    "gyre_kt1_10_stage3_walk")
 DIMS = (36, 26, 31)
 LEVELS = {1: {"Kaa": 3, "Kmm": 1}, 2: {"Kaa": 2, "Kmm": 3}, 3: {"Kaa": 3, "Kmm": 2}}
 BIT_IDENTITY_EXPECTED = {
@@ -66,7 +72,7 @@ def sha256(path: Path) -> str:
 
 
 def resolved_namelist_blocks(path: Path) -> set[str]:
-    """Enumerate the live NAMDYN/NAMZDF/NAMTRA groups from NEMO output.
+    """Enumerate the live dynamics/tracer/drag groups from NEMO output.
 
     This is deliberately driven by the resolved runtime namelist rather than
     by this gate's disposition dictionary: a newly emitted fourteenth group
@@ -79,9 +85,9 @@ def resolved_namelist_blocks(path: Path) -> set[str]:
             if not token.startswith("&"):
                 continue
             name = token[1:].split(None, 1)[0].upper()
-            if name.startswith(("NAMDYN", "NAMZDF", "NAMTRA")):
+            if name.startswith(("NAMDYN", "NAMZDF", "NAMTRA", "NAMDRG")):
                 blocks.add(name.lower())
-    require(bool(blocks), f"{path}: no resolved NAMDYN/NAMZDF/NAMTRA blocks")
+    require(bool(blocks), f"{path}: no resolved dynamics/tracer/drag blocks")
     return blocks
 
 
@@ -173,6 +179,7 @@ def read_stage(path: Path, expected_stage: int) -> dict:
         "S": _xyz(values[count : 2 * count], nx, ny, nz),
         "u": _xyz(values[2 * count : 3 * count], nx, ny, nz),
         "v": _xyz(values[3 * count : 4 * count], nx, ny, nz),
+        "ssh": _xy(values[4 * count :], nx, ny),
     }
 
 
@@ -180,10 +187,21 @@ def read_transport(path: Path, expected_stage: int) -> dict:
     level = _registered(path, "now")
     with path.open("rb") as handle:
         magic = handle.read(16).decode("ascii").rstrip()
-        header = struct.unpack("=8i", handle.read(32))
+        if magic == "NEMO_L1_TRANSP_1":
+            header = struct.unpack("=8i", handle.read(32))
+        elif magic == "NEMO_L2_TRTRP_1":
+            header = struct.unpack("=11i", handle.read(44))
+        else:
+            raise AssertionError(f"{path}: bad magic {magic!r}")
         values = np.fromfile(handle, dtype=np.float64)
-    version, kt, stage, kmm, nx, ny, nz, bits = header
-    require(magic == "NEMO_L1_TRANSP_1", f"{path}: bad magic")
+    if magic == "NEMO_L1_TRANSP_1":
+        version, kt, stage, kmm, nx, ny, nz, bits = header
+    else:
+        version, kt, stage, kbb, kmm, kaa, krhs, nx, ny, nz, bits = header
+        require(
+            (kbb, kaa, krhs) == (1, LEVELS[expected_stage]["Kaa"], 3),
+            f"{path}: wrong stage indices",
+        )
     require((version, nx, ny, nz, bits) == (1, *DIMS, 64), f"{path}: bad header")
     require(
         (kt, stage, kmm) == (1, expected_stage, LEVELS[expected_stage]["Kmm"]),
@@ -197,12 +215,47 @@ def read_transport(path: Path, expected_stage: int) -> dict:
         full = block.reshape((nx, ny, nz), order="F")
         owned_finite &= bool(np.all(np.isfinite(full[2:-2, 2:-2])))
     require(owned_finite, f"{path}: non-finite owned payload")
+    count = nx * ny * nz
     return {
         "stage": stage,
         "Kmm": kmm,
         "registry_level": level,
         "nonowned_nonfinite_count": int(np.count_nonzero(~np.isfinite(values))),
+        "zFu": _xyz(values[:count], nx, ny, nz),
+        "zFv": _xyz(values[count : 2 * count], nx, ny, nz),
+        "zFw": _xyz(values[2 * count :], nx, ny, nz),
     }
+
+
+def read_stage2_terms(path: Path) -> dict:
+    """Read source-ordered stage-2 Krhs snapshots from WRITE-only MY_SRC."""
+    level = _registered(path, "now")
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii").rstrip()
+        header = struct.unpack("=9i", handle.read(36))
+        values = np.fromfile(handle, dtype=np.float64)
+    version, kt, stage, kmm, krhs, nx, ny, nz, bits = header
+    require(magic == "NEMO_L2_RKTRM_1", f"{path}: bad magic")
+    require(
+        (version, kt, stage, kmm, krhs, nx, ny, nz, bits)
+        == (1, 1, 2, 3, 2, *DIMS, 64),
+        f"{path}: bad header",
+    )
+    count = nx * ny * nz
+    require(values.size == 8 * count, f"{path}: bad payload")
+    require(np.all(np.isfinite(values)), f"{path}: non-finite payload")
+    names = (
+        "before_u", "before_v", "after_hpg_u", "after_hpg_v",
+        "after_vorticity_u", "after_vorticity_v",
+        "after_advection_u", "after_advection_v",
+    )
+    result = {
+        name: _xyz(values[index * count : (index + 1) * count], nx, ny, nz)
+        for index, name in enumerate(names)
+    }
+    result.update({"stage": stage, "Kmm": kmm, "Krhs": krhs,
+                   "registry_level": level})
+    return result
 
 
 def read_rhs(path: Path) -> dict:
@@ -279,6 +332,42 @@ def read_qsr_stage3(path: Path) -> dict:
         "qsr": values[:count2].reshape((nx - 4, ny - 4), order="F").T,
         "dT_dt": _xyz(values[count2:], nx, ny, nz),
     }
+
+
+def read_tracer_stage3(path: Path) -> dict:
+    """Read the source-ordered stage-3 tracer completion record."""
+    level = _registered(path, "now")
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii").rstrip()
+        header = struct.unpack("=11i", handle.read(44))
+        values = np.fromfile(handle, dtype=np.float64)
+    version, kt, stage, kbb, kmm, krhs, kaa, nx, ny, nz, bits = header
+    require(magic == "NEMO_L2_RKTR3_1", f"{path}: bad magic")
+    require(
+        (version, kt, stage, kbb, kmm, krhs, kaa, nx, ny, nz, bits)
+        == (1, 1, 3, 1, 2, 3, 3, *DIMS, 64),
+        f"{path}: bad header",
+    )
+    count = nx * ny * nz
+    require(values.size == 16 * count + 3 * nx * ny, f"{path}: bad payload")
+    require(np.all(np.isfinite(values)), f"{path}: non-finite payload")
+    names = (
+        "zero_T", "zero_S", "after_advection_T", "after_advection_S",
+        "after_sbc_T", "after_sbc_S", "after_qsr_T", "after_qsr_S",
+        "after_ldf_T", "after_ldf_S", "Kbb_T", "Kbb_S", "Kmm_T",
+        "Kmm_S", "Kaa_T", "Kaa_S",
+    )
+    result = {
+        name: _xyz(values[index * count:(index + 1) * count], nx, ny, nz)
+        for index, name in enumerate(names)
+    }
+    offset = 16 * count
+    for index, name in enumerate(("r3t_Kbb", "r3t_Kmm", "r3t_Kaa")):
+        begin = offset + index * nx * ny
+        result[name] = _xy(values[begin:begin + nx * ny], nx, ny)
+    result.update({"registry_level": level, "Kbb": kbb, "Kmm": kmm,
+                   "Krhs": krhs, "Kaa": kaa})
+    return result
 
 
 # The solver returns ONE keyed barotropic substep frame (see
@@ -498,15 +587,21 @@ def _mark_kt1_uninformative(row: dict, field: str, kt: int) -> dict:
 def _surface_forcings(card, state, kt: int):
     import jax.numpy as jnp
     from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
+    from legoesm.ocean.eos import nemo_potential_temperature_from_conservative
     from legoesm.ocean.fidelity.nemo_testcase_recipe import gyre_surface_boundary_condition
     from legoesm.ocean.freshwater import FreshwaterForcing
     from legoesm.ocean.state import OceanSurfaceForcing
 
     sbc = gyre_surface_boundary_condition(card, kt * card.dt_s)
     sst = state.T.data[..., 0]
+    sst_m = nemo_potential_temperature_from_conservative(
+        sst, state.S.data[..., 0])
     # usrdef_sbc.F90:109-120,138-145: qns+qsr is the Haney term plus EMP
     # heat content, evaluated once from the entering Kbb/Nbb SST.
-    q_total = -40.0 * (sst - sbc.t_star_c) - sbc.emp_kg_m2_s * sst * NEMO_CONSTANTS_CONFIG.c_sw
+    q_total = (
+        -40.0 * (sst - sbc.t_star_c)
+        - sbc.emp_kg_m2_s * sst_m * NEMO_CONSTANTS_CONFIG.c_sw
+    )
     surface = OceanSurfaceForcing(
         sw_down=sbc.qsr_w_m2,
         q_net=q_total,
@@ -625,6 +720,8 @@ def score_causal_arm(name, control, faithful, oracle, masks, nlev) -> dict:
 def run(
     root: Path,
     *,
+    stage2_root: Path = STAGE2_ROOT,
+    stage3_root: Path = STAGE3_ROOT,
     max_step=10,
     plant_state=False,
     plant_registry=False,
@@ -632,6 +729,14 @@ def run(
     plant_coverage=False,
     plant_barotropic=False,
     plant_ene_coefficient=False,
+    plant_drag=False,
+    plant_stage2_thermodynamics=False,
+    plant_stage2_term=False,
+    stage2_term_limit="hpg",
+    stage2_term_only=None,
+    measure_stage2_update_arm=False,
+    measure_stage2_tracers=False,
+    measure_stage3_completion=False,
     without_oracle_ene_coefficients=False,
 ) -> dict:
     import jax
@@ -651,6 +756,14 @@ def run(
     require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     require(1 <= max_step <= 10, "max_step must be in 1..10")
+    require(
+        stage2_term_limit in ("hpg", "vorticity", "advection"),
+        "stage2_term_limit must be hpg, vorticity, or advection",
+    )
+    require(
+        stage2_term_only in (None, "none", "hpg", "vorticity", "advection"),
+        "stage2_term_only must be none, hpg, vorticity, advection, or None",
+    )
 
     card = build_nemo_testcase_card(CASE)
     # NEMO QCO represents E-P through changing volume, with sfx=0
@@ -699,6 +812,7 @@ def run(
             and cfg.physics.convection.scheme == "enhanced_diffusion"
             and evd_cfg.K_conv == 100.0
             and evd_cfg.nu_conv == 100.0
+            and evd_cfg.evd_n2_time_level == "nemo_now_before"
         ),
         "namzdf_tke": (
             tke_cfg.prognostic
@@ -709,6 +823,18 @@ def run(
             and tke_cfg.kappaM_min == 1.2e-4
             and tke_cfg.kappaH_min == 1.2e-5
             and tke_cfg.n2_eos_form == "teos10"
+        ),
+        "namdrg": (
+            cfg.bottom_drag.bottom_drag_scheme == "nemo_quadratic"
+            and cfg.zdf_drag_in_matrix
+            and cfg.zdf_baroclinic_only
+            and cfg.barotropic_drag_substep
+        ),
+        "namdrg_bot": (
+            cfg.bottom_drag.bottom_drag_cd0 == 1.0e-3
+            and cfg.bottom_drag.bottom_drag_cdmax == 0.1
+            and cfg.bottom_drag.bottom_drag_ke0 == 2.5e-3
+            and cfg.bottom_drag.bottom_drag_z0 == 3.0e-3
         ),
     }
     if plant_coverage:
@@ -728,8 +854,9 @@ def run(
     zdf_path = root / "oracle_zdf_entry_kt00000001.bin"
     qsr_path = root / "oracle_qsr_stage3_kt00000001.bin"
     bt_substep_path = root / "oracle_bt_substeps_kt00000001.bin"
+    tracer_stage3_path = stage3_root / "oracle_rktracer_stage3_kt00000001.bin"
     ene_coefficient_path = root / "oracle_bt_ene_coeff_kt00000001.bin"
-    for path in (zdf_path, qsr_path, bt_substep_path):
+    for path in (zdf_path, qsr_path, bt_substep_path, tracer_stage3_path):
         require(path.is_file(), f"missing causal artifact {path}")
         artifacts[path.name] = sha256(path)
     # Rule 1 disposition, not a relaxed bar: the ENE-coefficient arm scores
@@ -751,6 +878,7 @@ def run(
         artifacts[ene_coefficient_path.name] = sha256(ene_coefficient_path)
     zdf_entry = read_zdf_entry(zdf_path)
     qsr_stage3 = read_qsr_stage3(qsr_path)
+    tracer_stage3 = read_tracer_stage3(tracer_stage3_path)
     bt_substeps = read_bt_substeps(bt_substep_path)
     oracle_ene_coefficients = (
         read_ene_coefficients(ene_coefficient_path) if ene_available else None)
@@ -764,6 +892,46 @@ def run(
         transports[stage] = read_transport(transport_path, stage)
         artifacts[stage_path.name] = sha256(stage_path)
         artifacts[transport_path.name] = sha256(transport_path)
+
+    # The source-order dump came from a WRITE-only extension of this same
+    # executable.  Admit it only if its ordinary stage-1 state is byte-for-byte
+    # the already pinned oracle record; the source-order file then gets its own
+    # fixed digest and strict header/payload checks below.
+    stage2_identity_path = stage2_root / "oracle_stage_kt00000001_s1.bin"
+    stage2_term_path = stage2_root / "oracle_rkstage2_terms_kt00000001.bin"
+    require(stage2_identity_path.is_file(), f"missing {stage2_identity_path}")
+    require(stage2_term_path.is_file(), f"missing {stage2_term_path}")
+    stage2_identity_sha = sha256(stage2_identity_path)
+    require(
+        stage2_identity_sha == BIT_IDENTITY_EXPECTED[
+            "oracle_stage_kt00000001_s1.bin"],
+        f"{stage2_identity_path}: instrumentation changed ordinary state",
+    )
+    stage2_term_sha = sha256(stage2_term_path)
+    require(
+        stage2_term_sha
+        == "824c58a8a1ed15fdda80cc938dc79047eaf503967546637b230b3b7436720589",
+        f"{stage2_term_path}: unregistered content hash",
+    )
+    stage2_terms = read_stage2_terms(stage2_term_path)
+    artifacts[f"stage2_terms/{stage2_identity_path.name}"] = stage2_identity_sha
+    artifacts[f"stage2_terms/{stage2_term_path.name}"] = stage2_term_sha
+    stage3_identity_rows = []
+    for name in ("oracle_stage_kt00000001_s3.bin",
+                 "oracle_step_entry_kt00000002.bin"):
+        identity_path = stage3_root / name
+        require(identity_path.is_file(), f"missing {identity_path}")
+        observed = sha256(identity_path)
+        expected = BIT_IDENTITY_EXPECTED[name]
+        require(observed == expected,
+                f"{identity_path}: instrumentation changed ordinary state")
+        stage3_identity_rows.append({
+            "name": f"stage3_instrumentation_bit_identity.{name}",
+            "status": "VERIFIED",
+            "expected_sha256": expected,
+            "observed_sha256": observed,
+        })
+        artifacts[f"stage3/{name}"] = observed
     rhs_path = root / "oracle_rhs_kt00000001.bin"
     rhs = read_rhs(rhs_path)
     artifacts[rhs_path.name] = sha256(rhs_path)
@@ -921,6 +1089,157 @@ def run(
         _return_barotropic_substeps=True,
     )
     literal_trace = trace
+    drag_omit_model = LatLonCGridOceanModel(
+        card.recipe.grid,
+        card.recipe.z_coord,
+        cfg,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            omit_barotropic_substep_drag=True),
+    )
+    drag_omit_model.prime_step_caches(seeded_entry)
+    drag_omit_trace = drag_omit_model._step_impl(
+        seeded_entry,
+        card.dt_s,
+        freshwater=freshwater0,
+        surface_forcing=surface0,
+        _return_barotropic_substeps=True,
+    )
+
+    # D1: reconstruct NEMO's nonlinear bottom-drag operand directly from the
+    # resolved kt=1 program.  The entering 3-D velocity is at rest, hence
+    # zdfdrg.F90:184-190 gives one frozen wet-T rate Cd0*sqrt(ke0)=5e-5.
+    # dyn_drg_init.F90:1614-1618 averages that rate to native U/V faces;
+    # dynspg_ts.F90:699-705 multiplies the SUBSTEP-ENTRY velocity by the rate
+    # and current inverse depth.  No absent ENE-coefficient dump participates.
+    wet = np.asarray(card.recipe.initial_state.land_mask.data) > 0.5
+    drag_rate_t = np.where(
+        wet,
+        cfg.bottom_drag.bottom_drag_cd0
+        * np.sqrt(cfg.bottom_drag.bottom_drag_ke0),
+        0.0,
+    )
+    drag_rate_u = 0.5 * (drag_rate_t + np.roll(drag_rate_t, -1, axis=1))
+    drag_rate_v = 0.5 * (drag_rate_t + np.roll(drag_rate_t, -1, axis=0))
+    area_t = np.asarray(card.recipe.z_coord.nemo_e1e2t)
+    area_u = np.asarray(card.recipe.z_coord.nemo_e1e2u)
+    area_v = np.asarray(card.recipe.z_coord.nemo_e1e2v)
+    hu0 = np.asarray(card.recipe.z_coord.nemo_hu_0)
+    hv0 = np.asarray(card.recipe.z_coord.nemo_hv_0)
+    drag_operand_rows = []
+    for substep in (0, 1):
+        eta_entry = bt_substeps["eta_entry"][substep]
+        weighted_eta = area_t * eta_entry
+        hu = hu0 + 0.5 * (
+            weighted_eta + np.roll(weighted_eta, -1, axis=1)
+        ) / area_u
+        hv = hv0 + 0.5 * (
+            weighted_eta + np.roll(weighted_eta, -1, axis=0)
+        ) / area_v
+        oracle_drag_u = np.where(
+            masks["u"][..., 0],
+            -drag_rate_u * bt_substeps["u_entry"][substep]
+            / np.maximum(hu, cfg.min_water_column_m),
+            0.0,
+        )
+        oracle_drag_v = np.where(
+            masks["v"][..., 0],
+            -drag_rate_v * bt_substeps["v_entry"][substep]
+            / np.maximum(hv, cfg.min_water_column_m),
+            0.0,
+        )
+        for component, reference in (
+            ("u", oracle_drag_u), ("v", oracle_drag_v)
+        ):
+            candidate = _trace_native(
+                bt_frame(trace.substeps, f"drag_{component}"),
+                f"drag_{component}",
+            )[substep]
+            drag_operand_rows.append(score(
+                f"{CASE}.kt1.bt.jn{substep + 1:02d}.drag_{component}",
+                reference,
+                candidate,
+                masks[component][..., 0],
+                plant=(plant_drag and substep == 1 and component == "u"),
+            ))
+
+    if plant_drag:
+        planted_drag = next(
+            row for row in drag_operand_rows
+            if row["name"].endswith("jn02.drag_u"))
+        require(
+            planted_drag["status"] == "DEBT"
+            and planted_drag["absolute_max"] >= 1.0,
+            "planted drag violation did not fire at its registered magnitude",
+        )
+    drag_control = {
+        "name": "control.planted_drag_operand",
+        "status": "VERIFIED" if plant_drag else "NOT_REQUESTED",
+    }
+
+    drag_causal_rows = []
+    drag_omission_rows = []
+    drag_movements = []
+    for component in ("u", "v"):
+        reference = bt_substeps[f"trd_{component}"][1]
+        active = masks[component][..., 0]
+        production = _trace_native(
+            bt_frame(trace.substeps, f"trd_{component}"),
+            f"trd_{component}",
+        )[1]
+        omitted = _trace_native(
+            bt_frame(drag_omit_trace.substeps, f"trd_{component}"),
+            f"trd_{component}",
+        )[1]
+        drag_causal_rows.append(score(
+            f"{CASE}.kt1.bt.jn02.drag_composition.trd_{component}",
+            reference, production, active))
+        drag_omission_rows.append(score(
+            f"{CASE}.kt1.bt.jn02.omit_drag.trd_{component}",
+            reference, omitted, active))
+        drag_movements.append(float(np.max(
+            np.abs(production[active] - omitted[active]))))
+    drag_residual = max(row["absolute_max"] for row in drag_causal_rows)
+    drag_omitted_residual = max(
+        row["absolute_max"] for row in drag_omission_rows)
+    drag_movement = max(drag_movements)
+    drag_owner_label = (
+        "CONFIRMED_CAUSAL_OWNER_AT_SUBSTEP2"
+        if all(row["status"] == "AT-BAR" for row in drag_causal_rows)
+        and all(row["status"] == "DEBT" for row in drag_omission_rows)
+        and all(row["status"] == "AT-BAR" for row in drag_operand_rows)
+        else (
+            "NEAR_NULL_NO_DISCRIMINATING_POWER"
+            if drag_movement < 0.1 * drag_omitted_residual
+            else "CAUSAL_CONTRIBUTOR_NOT_SOLE_OWNER"
+        )
+    )
+    drag_operand_walk = {
+        "resolved": {
+            "nn_drg": "np_non_lin",
+            "ln_drgimp": True,
+            "rn_Cd0": cfg.bottom_drag.bottom_drag_cd0,
+            "rn_Cdmax": cfg.bottom_drag.bottom_drag_cdmax,
+            "rn_ke0": cfg.bottom_drag.bottom_drag_ke0,
+            "rn_z0": cfg.bottom_drag.bottom_drag_z0,
+            "frozen_wet_t_rate_m_s": float(
+                cfg.bottom_drag.bottom_drag_cd0
+                * np.sqrt(cfg.bottom_drag.bottom_drag_ke0)),
+            "coefficient_time_level": "Kmm_once_per_whole_step",
+            "substep_velocity_time_level": "entry_un_e_vn_e",
+        },
+        "operand_rows": drag_operand_rows,
+        "production_combined_tendency_rows": drag_causal_rows,
+        "private_omission_rows": drag_omission_rows,
+        "scaling_check_before_owner_label": True,
+        "production_residual": drag_residual,
+        "omission_residual": drag_omitted_residual,
+        "production_over_omission_residual": (
+            drag_residual / drag_omitted_residual
+            if drag_omitted_residual else None),
+        "arm_movement": drag_movement,
+        "owner_label": drag_owner_label,
+        "planted_control": drag_control,
+    }
 
     # E1: coefficient/state/product walk at the first live-ENE divergence.
     # At cold start jn=2 still has (za1,za2,za3)=(1,0,0), so its u_mid/v_mid
@@ -1172,7 +1491,31 @@ def run(
     ]
 
     stage_rows = []
+    stage1_thermodynamic_rows = []
+    stage1_transport_rows = []
+    stage2_thermodynamic_arm_rows = []
+    stage2_thermodynamic_scaling = None
+    stage2_thermodynamic_control = {
+        "name": "control.planted_stage1_thermodynamic_operand",
+        "status": "NOT_REQUESTED",
+    }
+    stage2_term_rows = []
+    stage2_term_first_over_bar = None
+    stage2_term_control = {
+        "name": "control.planted_stage2_source_term",
+        "status": "NOT_REQUESTED",
+    }
+    stage2_update_arm = {
+        "status": "UNMEASURED",
+        "reason": "run with --measure-stage2-update-arm",
+    }
+    stage2_tracer_rows = []
+    stage3_completion = {
+        "status": "UNMEASURED",
+        "reason": "run with --measure-stage3-completion",
+    }
     if max_step >= 2:
+        candidate_stage_states = {}
         for stage in (1, 2, 3):
             if stage == 3:
                 stage_state = faithful_kt2
@@ -1188,6 +1531,7 @@ def run(
                     freshwater=freshwater0,
                     surface_forcing=surface0,
                 )
+            candidate_stage_states[stage] = stage_state
             fields = lego_fields(stage_state)
             for velocity in ("u", "v"):
                 row = score(
@@ -1198,18 +1542,494 @@ def run(
                 )
                 row["frame"] = "instantaneous_prognostic_Kaa"
                 stage_rows.append(row)
-            for tracer in ("T", "S"):
-                stage_rows.append(
-                    {
-                        "name": f"{CASE}.kt1.stage{stage}.{tracer}",
-                        "status": "UNMEASURED",
-                        "reason": (
-                            "NEMO Kaa tracer artifact is present and registered, "
-                            "but production legoESM exposes only momentum stage "
-                            "states; no private tracer-stage surrogate is scored"
-                        ),
-                    }
+            if stage != 1:
+                for tracer in ("T", "S"):
+                    stage_rows.append(
+                        {
+                            "name": f"{CASE}.kt1.stage{stage}.{tracer}",
+                            "status": "UNMEASURED",
+                            "reason": "ordered walk has not yet reached this tracer Kaa stage",
+                        }
+                    )
+
+        # stprk3_stg.F90:452-565 advances stage-1 tracers before stage-2
+        # eos+dyn_hpg.  Expose that exact legoESM operand only after the normal
+        # step has completed, so this is a WRITE-only diagnostic seam.
+        tracer_stage1_state = LatLonCGridOceanModel(
+            card.recipe.grid,
+            card.recipe.z_coord,
+            cfg,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_tracer_stage=1),
+        ).step(
+            card.recipe.initial_state,
+            dt=card.dt_s,
+            freshwater=freshwater0,
+            surface_forcing=surface0,
+        )
+        tracer_stage1_fields = lego_fields(tracer_stage1_state)
+        for name in ("T", "S", "ssh"):
+            candidate = tracer_stage1_fields[name]
+            if plant_stage2_thermodynamics and name == "T":
+                candidate = np.asarray(candidate).copy()
+                first = tuple(np.argwhere(masks[name])[0])
+                candidate[first] += 1.0
+            stage1_thermodynamic_rows.append(score(
+                f"{CASE}.kt1.stage1.thermodynamic_operand.{name}",
+                stages[1][name][..., :nlev] if name != "ssh" else stages[1][name],
+                candidate,
+                masks[name],
+            ))
+
+        if measure_stage2_tracers:
+            # Keep this optional: each static diagnostic hook compiles a full
+            # GYRE executable.  It exposes exactly the T/S Kaa written after
+            # the stage-2 QCO combine (stprk3_stg.F90:537-565).
+            tracer_stage2_state = LatLonCGridOceanModel(
+                card.recipe.grid,
+                card.recipe.z_coord,
+                cfg,
+                _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                    expose_tracer_stage=2),
+            ).step(
+                card.recipe.initial_state,
+                dt=card.dt_s,
+                freshwater=freshwater0,
+                surface_forcing=surface0,
+            )
+            tracer_stage2_fields = lego_fields(tracer_stage2_state)
+            for name in ("T", "S", "ssh"):
+                stage2_tracer_rows.append(score(
+                    f"{CASE}.kt1.stage2.thermodynamic_operand.{name}",
+                    (stages[2][name][..., :nlev]
+                     if name != "ssh" else stages[2][name]),
+                    tracer_stage2_fields[name],
+                    masks[name],
+                ))
+
+        if measure_stage3_completion:
+            pre_zdf_state = LatLonCGridOceanModel(
+                card.recipe.grid,
+                card.recipe.z_coord,
+                cfg,
+                _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                    expose_pre_implicit_state=True),
+            ).step(
+                card.recipe.initial_state,
+                dt=card.dt_s,
+                freshwater=freshwater0,
+                surface_forcing=surface0,
+            )
+            pre_fields = lego_fields(pre_zdf_state)
+            surf = full_tendency.surface_tracer_forcing
+            surf_T = (np.zeros_like(pre_fields["T"]) if surf is None
+                      else np.asarray(surf.dT_dt.data))
+            surf_S = (np.zeros_like(pre_fields["S"]) if surf is None
+                      else np.asarray(surf.dS_dt.data))
+            candidate_pre = {
+                "T": pre_fields["T"] + card.dt_s * surf_T,
+                "S": pre_fields["S"] + card.dt_s * surf_S,
+            }
+            r3bb = tracer_stage3["r3t_Kbb"][..., None]
+            r3mm = tracer_stage3["r3t_Kmm"][..., None]
+            r3aa = tracer_stage3["r3t_Kaa"][..., None]
+            oracle_pre = {}
+            pre_rows = []
+            for name in ("T", "S"):
+                oracle_pre[name] = (
+                    (1.0 + r3bb) * tracer_stage3[f"Kbb_{name}"]
+                    + card.dt_s * (1.0 + r3mm)
+                    * tracer_stage3[f"after_ldf_{name}"]
+                ) / (1.0 + r3aa)
+                pre_rows.append(score(
+                    f"{CASE}.kt1.stage3.pre_zdf.{name}",
+                    oracle_pre[name][..., :nlev],
+                    candidate_pre[name],
+                    masks[name],
+                ))
+
+            # Supply the oracle's effective solve input while retaining the
+            # normal surface-source addition inside _apply_implicit... .
+            oracle_override = (
+                jnp.asarray(oracle_pre["T"][..., :nlev])
+                - card.dt_s * jnp.asarray(surf_T),
+                jnp.asarray(oracle_pre["S"][..., :nlev])
+                - card.dt_s * jnp.asarray(surf_S),
+            )
+            injected = LatLonCGridOceanModel(
+                card.recipe.grid,
+                card.recipe.z_coord,
+                cfg,
+                _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                    pre_implicit_tracer_override=oracle_override),
+            ).step(
+                card.recipe.initial_state,
+                dt=card.dt_s,
+                freshwater=freshwater0,
+                surface_forcing=surface0,
+            )
+            injected_fields = lego_fields(injected)
+            final_rows = []
+            movements = []
+            residuals = []
+            for name in ("T", "S"):
+                final_rows.append(score(
+                    f"{CASE}.kt1.stage3.oracle_pre_zdf.{name}",
+                    stages[3][name][..., :nlev],
+                    injected_fields[name],
+                    masks[name],
+                ))
+                active = masks[name]
+                reference = stages[3][name][..., :nlev]
+                scale = max(float(np.max(np.abs(reference[active]))), 1.0)
+                movements.append(float(np.max(np.abs(
+                    injected_fields[name][active]
+                    - lego_fields(faithful_kt2)[name][active]))) / scale)
+                residuals.append(float(np.max(np.abs(
+                    lego_fields(faithful_kt2)[name][active]
+                    - reference[active]))) / scale)
+            movement = max(movements)
+            residual = max(residuals)
+            pre_clears = all(row["status"] == "AT-BAR" for row in pre_rows)
+            final_clears = all(row["status"] == "AT-BAR" for row in final_rows)
+            stage3_completion = {
+                "status": "MEASURED",
+                "source_order": ["advection", "sbc", "qsr", "ldf", "zdf"],
+                "oracle_accumulator_term_max_abs": {
+                    "advection_T": float(np.max(np.abs(
+                        tracer_stage3["after_advection_T"]))),
+                    "advection_S": float(np.max(np.abs(
+                        tracer_stage3["after_advection_S"]))),
+                    "sbc_T": float(np.max(np.abs(
+                        tracer_stage3["after_sbc_T"]
+                        - tracer_stage3["after_advection_T"]))),
+                    "sbc_S": float(np.max(np.abs(
+                        tracer_stage3["after_sbc_S"]
+                        - tracer_stage3["after_advection_S"]))),
+                    "qsr_T": float(np.max(np.abs(
+                        tracer_stage3["after_qsr_T"]
+                        - tracer_stage3["after_sbc_T"]))),
+                    "qsr_S": float(np.max(np.abs(
+                        tracer_stage3["after_qsr_S"]
+                        - tracer_stage3["after_sbc_S"]))),
+                    "ldf_T": float(np.max(np.abs(
+                        tracer_stage3["after_ldf_T"]
+                        - tracer_stage3["after_qsr_T"]))),
+                    "ldf_S": float(np.max(np.abs(
+                        tracer_stage3["after_ldf_S"]
+                        - tracer_stage3["after_qsr_S"]))),
+                },
+                "pre_zdf_rows": pre_rows,
+                "oracle_pre_zdf_causal_rows": final_rows,
+                "scaling_check_before_owner_label": True,
+                "causal_movement": movement,
+                "faithful_residual": residual,
+                "movement_over_faithful_residual": (
+                    movement / residual if residual else None),
+                "owner_label": (
+                    "PRE_ZDF_INPUT_CONFIRMED_CAUSAL_OWNER" if final_clears else
+                    "ZDF_SOLVER_FIRST_OWNER_CAPABLE_BOUNDARY"
+                    if pre_clears else
+                    "PRE_ZDF_ACCUMULATOR_DEBT_NO_ZDF_OWNER"),
+            }
+
+        transport_stage1_state = LatLonCGridOceanModel(
+            card.recipe.grid,
+            card.recipe.z_coord,
+            cfg,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                expose_tracer_transport_stage=1),
+        ).step(
+            card.recipe.initial_state,
+            dt=card.dt_s,
+            freshwater=freshwater0,
+            surface_forcing=surface0,
+        )
+        transport_stage1_fields = lego_fields(transport_stage1_state)
+        for name, candidate_name, mask_name in (
+            ("zFu", "u", "u"), ("zFv", "v", "v"), ("zFw", "T", "T")
+        ):
+            transport_row = score(
+                f"{CASE}.kt1.stage1.transport.{name}",
+                transports[1][name][..., :nlev],
+                transport_stage1_fields[candidate_name],
+                masks[mask_name],
+            )
+            if name == "zFw":
+                # stprk3_stg.F90:286-304 leaves zFw for the vector-invariant
+                # branch to tra_adv_trp, but the legacy transport instrument is
+                # positioned earlier at :309-320.  Its structural zero is not
+                # the tracer-consumed vertical transport and cannot adjudicate
+                # the WZV arm.
+                transport_row["status"] = "UNINFORMATIVE"
+                transport_row["reason"] = (
+                    "oracle zFw was dumped before tra_adv_trp fills it in the "
+                    "vector-invariant branch")
+            stage1_transport_rows.append(transport_row)
+
+        if plant_stage2_thermodynamics:
+            planted = stage1_thermodynamic_rows[0]
+            require(
+                planted["status"] == "DEBT" and planted["absolute_max"] >= 1.0,
+                "planted stage-1 thermodynamic operand did not fire",
+            )
+            stage2_thermodynamic_control = {
+                "name": "control.planted_stage1_thermodynamic_operand",
+                "status": "VERIFIED",
+                "observed_absolute_max": planted["absolute_max"],
+                "expected_minimum": 1.0,
+            }
+
+        oracle_bundle = (
+            jnp.asarray(stages[1]["T"][..., :nlev]),
+            jnp.asarray(stages[1]["S"][..., :nlev]),
+            jnp.asarray(stages[1]["ssh"]),
+        )
+        injected_stage2 = LatLonCGridOceanModel(
+            card.recipe.grid,
+            card.recipe.z_coord,
+            cfg,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                expose_momentum_stage=2,
+                stage2_thermodynamic_override=oracle_bundle,
+            ),
+        ).step(
+            card.recipe.initial_state,
+            dt=card.dt_s,
+            freshwater=freshwater0,
+            surface_forcing=surface0,
+        )
+        injected_fields = lego_fields(injected_stage2)
+        faithful_stage2 = {
+            row["name"].rsplit(".", 1)[-1]: row
+            for row in stage_rows
+            if row["name"] in {
+                f"{CASE}.kt1.stage2.u", f"{CASE}.kt1.stage2.v"
+            }
+        }
+        faithful_stage2_fields = lego_fields(candidate_stage_states[2])
+        movements = []
+        faithful_residuals = []
+        for component in ("u", "v"):
+            reference = stages[2][component][..., :nlev]
+            row = score(
+                f"{CASE}.kt1.stage2.oracle_stage1_thermodynamic_bundle.{component}",
+                reference,
+                injected_fields[component],
+                masks[component],
+            )
+            stage2_thermodynamic_arm_rows.append(row)
+            faithful_residuals.append(
+                faithful_stage2[component]["absolute_max"])
+            faithful_candidate = faithful_stage2_fields[component]
+            movements.append(float(np.max(np.abs(
+                np.asarray(injected_fields[component])[masks[component]]
+                - np.asarray(faithful_candidate)[masks[component]]))))
+        residual = max(faithful_residuals)
+        movement = max(movements)
+        clears = all(
+            row["status"] == "AT-BAR"
+            for row in stage2_thermodynamic_arm_rows)
+        stage2_thermodynamic_scaling = {
+            "faithful_stage2_residual": residual,
+            "causal_movement": movement,
+            "movement_over_faithful_residual": movement / residual if residual else None,
+            "arm_residual": max(
+                row["absolute_max"] for row in stage2_thermodynamic_arm_rows),
+            "scaling_check_before_owner_label": True,
+            "owner_label": (
+                "CONFIRMED_CAUSAL_OWNER" if clears else
+                "CAUSAL_CONTRIBUTOR_NOT_SOLE_OWNER"
+                if movement >= 0.9 * residual else
+                "NEAR_NULL_NO_DISCRIMINATING_POWER"
+                if movement < 0.1 * residual else
+                "PLAUSIBLE_CONTRIBUTOR_NOT_OWNER"
+            ),
+        }
+
+        oracle_stage2_components = {
+            "hpg_u": stage2_terms["after_hpg_u"] - stage2_terms["before_u"],
+            "hpg_v": stage2_terms["after_hpg_v"] - stage2_terms["before_v"],
+            "vorticity_u": (
+                stage2_terms["after_vorticity_u"]
+                - stage2_terms["after_hpg_u"]),
+            "vorticity_v": (
+                stage2_terms["after_vorticity_v"]
+                - stage2_terms["after_hpg_v"]),
+            "advection_u": (
+                stage2_terms["after_advection_u"]
+                - stage2_terms["after_vorticity_u"]),
+            "advection_v": (
+                stage2_terms["after_advection_v"]
+                - stage2_terms["after_vorticity_v"]),
+        }
+        _bt_ops = card.recipe.z_coord.nemo_een_barotropic
+        reference_face_thickness = {
+            "u": np.asarray(_bt_ops.e3u_0)[..., :nlev],
+            "v": np.asarray(_bt_ops.e3v_0)[..., :nlev],
+        }
+
+        def _reference_baroclinic(array, component):
+            active = np.asarray(masks[component], dtype=np.float64)
+            weights = reference_face_thickness[component] * active
+            depth = np.sum(weights, axis=-1)
+            mean = np.sum(np.asarray(array) * weights, axis=-1) / np.maximum(
+                depth, 1.0e-30)
+            return (np.asarray(array) - mean[..., None]) * active
+
+        ordered_operators = ("hpg", "vorticity", "advection")
+        limit_index = ordered_operators.index(stage2_term_limit)
+        operators_to_measure = (
+            () if stage2_term_only == "none"
+            else (stage2_term_only,) if stage2_term_only is not None
+            else ordered_operators[:limit_index + 1])
+        for operator in operators_to_measure:
+            exposed = LatLonCGridOceanModel(
+                card.recipe.grid,
+                card.recipe.z_coord,
+                cfg,
+                _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                    expose_momentum_operator=operator),
+            ).step(
+                card.recipe.initial_state,
+                dt=card.dt_s,
+                freshwater=freshwater0,
+                surface_forcing=surface0,
+            )
+            exposed_fields = lego_fields(exposed)
+            for component in ("u", "v"):
+                name = f"{operator}_{component}"
+                candidate = exposed_fields[component]
+                if plant_stage2_term and name == "hpg_u":
+                    candidate = np.asarray(candidate).copy()
+                    first = tuple(np.argwhere(masks[component])[0])
+                    candidate[first] += 2.0
+                oracle_component = oracle_stage2_components[name][..., :nlev]
+                raw_row = score(
+                    f"{CASE}.kt1.stage2.source_term.raw.{name}",
+                    oracle_component,
+                    candidate,
+                    masks[component],
                 )
+                raw_row["status"] = "UNINFORMATIVE"
+                raw_row["reason"] = (
+                    "raw source term contains a depth-mean gauge that the "
+                    "stage Kaa barotropic replacement removes")
+                raw_row["source_order"] = (
+                    "dyn_hpg -> dyn_vor -> dyn_adv; stprk3_stg.F90:321-367")
+                stage2_term_rows.append(raw_row)
+                row = score(
+                    f"{CASE}.kt1.stage2.source_term.baroclinic.{name}",
+                    _reference_baroclinic(oracle_component, component),
+                    _reference_baroclinic(candidate, component),
+                    masks[component],
+                )
+                row["source_order"] = raw_row["source_order"]
+                row["projection"] = (
+                    "reference e3u_0/hu_0 or e3v_0/hv_0 depth mean; "
+                    "stprk3_stg.F90:433-446")
+                stage2_term_rows.append(row)
+                if row["status"] == "DEBT" and stage2_term_first_over_bar is None:
+                    stage2_term_first_over_bar = {
+                        "operator": operator,
+                        "component": component,
+                        "absolute_max": row["absolute_max"],
+                        "reference_max_abs": row["reference_max_abs"],
+                    }
+            if stage2_term_first_over_bar is not None:
+                break
+        measured_operators = {
+            row["name"].rsplit(".", 1)[-1].rsplit("_", 1)[0]
+            for row in stage2_term_rows
+            if ".baroclinic." in row["name"]
+        }
+        for operator in ordered_operators:
+            if operator in measured_operators:
+                continue
+            for component in ("u", "v"):
+                stage2_term_rows.append({
+                    "name": (
+                        f"{CASE}.kt1.stage2.source_term.baroclinic."
+                        f"{operator}_{component}"),
+                    "status": "UNMEASURED",
+                    "reason": (
+                        "ordered walk stopped at the preceding first-over-bar "
+                        "boundary" if stage2_term_first_over_bar is not None
+                        else (
+                            f"isolated probe selected {stage2_term_only}"
+                            if stage2_term_only is not None
+                            else f"probe limit is {stage2_term_limit}")),
+                })
+        if plant_stage2_term:
+            planted_term = next(
+                row for row in stage2_term_rows
+                if row["name"].endswith("baroclinic.hpg_u"))
+            require(
+                planted_term["status"] == "DEBT"
+                and planted_term["absolute_max"] >= 1.0,
+                "planted stage-2 source-term violation did not fire",
+            )
+            stage2_term_control = {
+                "name": "control.planted_stage2_source_term",
+                "status": "VERIFIED",
+                "observed_absolute_max": planted_term["absolute_max"],
+                "expected_minimum": 1.0,
+            }
+
+        if measure_stage2_update_arm:
+            legacy_stage2 = LatLonCGridOceanModel(
+                card.recipe.grid,
+                card.recipe.z_coord,
+                cfg,
+                _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                    expose_momentum_stage=2,
+                    legacy_preproject_stage_rhs=True,
+                ),
+            ).step(
+                card.recipe.initial_state,
+                dt=card.dt_s,
+                freshwater=freshwater0,
+                surface_forcing=surface0,
+            )
+            legacy_fields = lego_fields(legacy_stage2)
+            legacy_rows = []
+            movements = []
+            for component in ("u", "v"):
+                legacy_rows.append(score(
+                    f"{CASE}.kt1.stage2.legacy_preproject_rhs.{component}",
+                    stages[2][component][..., :nlev],
+                    legacy_fields[component],
+                    masks[component],
+                ))
+                movements.append(float(np.max(np.abs(
+                    np.asarray(legacy_fields[component])[masks[component]]
+                    - np.asarray(faithful_stage2_fields[component])[
+                        masks[component]]))))
+            production_rows = [
+                faithful_stage2[component] for component in ("u", "v")]
+            production_residual = max(
+                row["absolute_max"] for row in production_rows)
+            legacy_residual = max(row["absolute_max"] for row in legacy_rows)
+            movement = max(movements)
+            stage2_update_arm = {
+                "status": "MEASURED",
+                "classification": "DIAGNOSTIC_ONE_VARIABLE_CAUSAL_ARM",
+                "production_rows": production_rows,
+                "legacy_preproject_rows": legacy_rows,
+                "production_residual": production_residual,
+                "legacy_residual": legacy_residual,
+                "causal_movement": movement,
+                "movement_over_legacy_residual": (
+                    movement / legacy_residual if legacy_residual else None),
+                "scaling_check_before_owner_label": True,
+                "owner_label": (
+                    "CONFIRMED_CAUSAL_OWNER_OF_STAGE2_ASSOCIATION"
+                    if all(row["status"] == "AT-BAR" for row in production_rows)
+                    and all(row["status"] == "DEBT" for row in legacy_rows)
+                    else "NEAR_NULL_NO_DISCRIMINATING_POWER"
+                    if movement < 0.1 * legacy_residual
+                    else "CAUSAL_CONTRIBUTOR_NOT_SOLE_OWNER"),
+                "source": "stprk3_stg.F90:396-446",
+            }
 
     arm_manifest = {
         "omit_stage_barotropic_correction": {
@@ -1227,6 +2047,11 @@ def run(
         "omit_freshwater_forcing": {
             "changed_operands": ["freshwater"],
             "hooks": _NEMOWSRK3TestHooks(),
+        },
+        "omit_barotropic_substep_drag": {
+            "changed_operands": ["barotropic_substep_drag"],
+            "hooks": _NEMOWSRK3TestHooks(
+                omit_barotropic_substep_drag=True),
         },
     }
     arm_rows = validate_one_variable_arms(arm_manifest, plant=plant_arm)
@@ -1430,7 +2255,7 @@ def run(
                     }
                 )
 
-    instrumentation_identity_rows = []
+    instrumentation_identity_rows = list(stage3_identity_rows)
     for name, expected in BIT_IDENTITY_EXPECTED.items():
         path = root / name
         require(path.is_file(), f"missing bit-identity control {path}")
@@ -1485,6 +2310,10 @@ def run(
             "barotropic_ene_coefficient_evaluation": (
                 cfg.barotropic.barotropic_een_coefficient_evaluation
             ),
+            "bottom_drag_scheme": cfg.bottom_drag.bottom_drag_scheme,
+            "zdf_drag_in_matrix": cfg.zdf_drag_in_matrix,
+            "zdf_baroclinic_only": cfg.zdf_baroclinic_only,
+            "barotropic_drag_substep": cfg.barotropic_drag_substep,
             "freshwater_closure": cfg.freshwater_closure,
         },
         "full_stage_program": {
@@ -1498,9 +2327,39 @@ def run(
             "rhs": rhs,
             "barotropic_frames": bt,
             "momentum_rows": stage_rows,
-            "tracer_stage_numerics": "UNMEASURED",
+            "tracer_stage_numerics": (
+                "STAGES1_2_MEASURED; STAGE3_IS_WHOLE_STEP"
+                if measure_stage2_tracers else
+                "STAGE1_MEASURED; LATER_STAGES_UNMEASURED"),
             "barotropic_frame_numerics": "MEASURED_WITHIN_SUBSTEP_LOOP",
         },
+        "rk_stage2_thermodynamic_boundary": {
+            "source_order": [
+                "stage1_tracer_Kaa", "stage2_eos_hpg", "stage2_vorticity",
+                "stage2_advection", "stage2_corrected_Kaa",
+            ],
+            "stage1_operand_rows": stage1_thermodynamic_rows,
+            "stage1_transport_rows": stage1_transport_rows,
+            "stage2_operand_rows": stage2_tracer_rows,
+            "oracle_bundle_causal_rows": stage2_thermodynamic_arm_rows,
+            "causal_scaling": stage2_thermodynamic_scaling,
+            "planted_control": stage2_thermodynamic_control,
+        },
+        "rk_stage2_source_order_walk": {
+            "oracle_artifact": str(stage2_term_path),
+            "instrumentation_state_bit_identity": stage2_identity_sha,
+            "source_order": ["hpg", "vorticity", "advection"],
+            "rows": stage2_term_rows,
+            "first_over_bar": stage2_term_first_over_bar,
+            "scaling_check_before_owner_label": True,
+            "owner_label": (
+                "OPERAND_FIRST_DIVERGENCE_ONLY_NO_CAUSAL_OWNER"
+                if stage2_term_first_over_bar is not None
+                else "ALL_DIRECT_SOURCE_TERMS_AT_BAR"),
+            "planted_control": stage2_term_control,
+        },
+        "rk_stage2_update_association_arm": stage2_update_arm,
+        "rk_stage3_completion_walk": stage3_completion,
         "direct_oracle_operands": direct_operand_rows,
         "barotropic_substep_boundary": {
             "resolved": {
@@ -1522,6 +2381,7 @@ def run(
             "causal_scaling": ene_causal_scaling,
             "planted_control": ene_coefficient_control,
         },
+        "bottom_drag_operand_walk": drag_operand_walk,
         "instrumentation_bit_identity": instrumentation_identity_rows,
         "registry_rows": registry_rows,
         "resolved_program_coverage": coverage_rows,
@@ -1530,7 +2390,9 @@ def run(
         "causal_oracle_injection_arms": causal_arms,
         "operator_scaling_before_owner": operator_scaling,
         "owner_verdict": (
-            "ENE_COMPONENT_CONFIRMED; COMBINED_TRD_REMAINDER_UNMEASURED"
+            "BOTTOM_DRAG_CONFIRMED_AT_SUBSTEP2; NEXT_BOUNDARY_FROM_REGISTER"
+            if drag_owner_label == "CONFIRMED_CAUSAL_OWNER_AT_SUBSTEP2"
+            else "BOTTOM_DRAG_NOT_SOLE_OWNER_AT_SUBSTEP2"
         ),
         "growth_characterization": _trajectory_growth(steps),
         "steps": steps,
@@ -1540,11 +2402,13 @@ def run(
             "reconstruction and the ENE causal-owner labels): WAIVED -- the "
             "instrumented GYRE run never emitted "
             "oracle_bt_ene_coeff_kt00000001.bin",
+        ]) + ([] if measure_stage2_tracers else [
+            "numerical T/S agreement at internal stage-2 Kaa",
+        ]) + ([] if measure_stage3_completion else [
+            "source-ordered stage-3 pre-ZDF tracer completion",
         ]) + [
-            "numerical T/S agreement at internal Kaa stages",
             "metric-weighted zhU/zhV transport comparison (metrics not dumped in this round)",
             "a two-sided source-isolated owner for the first over-bar whole-step row",
-            "the bottom-drag operand owner of the post-ENE combined trd remainder",
         ],
     }
 
@@ -1552,6 +2416,8 @@ def run(
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--oracle-root", type=Path, default=ROOT)
+    parser.add_argument("--stage2-oracle-root", type=Path, default=STAGE2_ROOT)
+    parser.add_argument("--stage3-oracle-root", type=Path, default=STAGE3_ROOT)
     parser.add_argument("--max-step", type=int, default=10)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant-state", action="store_true")
@@ -1560,6 +2426,23 @@ def main(argv=None) -> int:
     parser.add_argument("--plant-coverage", action="store_true")
     parser.add_argument("--plant-barotropic", action="store_true")
     parser.add_argument("--plant-ene-coefficient", action="store_true")
+    parser.add_argument("--plant-drag", action="store_true")
+    parser.add_argument("--plant-stage2-thermodynamics", action="store_true")
+    parser.add_argument("--plant-stage2-term", action="store_true")
+    parser.add_argument(
+        "--stage2-term-limit",
+        choices=("hpg", "vorticity", "advection"),
+        default="hpg",
+        help="last source-order operator eligible for measurement",
+    )
+    parser.add_argument(
+        "--stage2-term-only",
+        choices=("none", "hpg", "vorticity", "advection"),
+        help="measure one operator in an isolated low-memory process",
+    )
+    parser.add_argument("--measure-stage2-update-arm", action="store_true")
+    parser.add_argument("--measure-stage2-tracers", action="store_true")
+    parser.add_argument("--measure-stage3-completion", action="store_true")
     parser.add_argument(
         "--without-oracle-ene-coefficients", action="store_true",
         help=("WAIVE the ENE-coefficient arm because the instrumented GYRE "
@@ -1571,6 +2454,8 @@ def main(argv=None) -> int:
     try:
         report = run(
             args.oracle_root,
+            stage2_root=args.stage2_oracle_root,
+            stage3_root=args.stage3_oracle_root,
             max_step=args.max_step,
             plant_state=args.plant_state,
             plant_registry=args.plant_registry,
@@ -1578,6 +2463,14 @@ def main(argv=None) -> int:
             plant_coverage=args.plant_coverage,
             plant_barotropic=args.plant_barotropic,
             plant_ene_coefficient=args.plant_ene_coefficient,
+            plant_drag=args.plant_drag,
+            plant_stage2_thermodynamics=args.plant_stage2_thermodynamics,
+            plant_stage2_term=args.plant_stage2_term,
+            stage2_term_limit=args.stage2_term_limit,
+            stage2_term_only=args.stage2_term_only,
+            measure_stage2_update_arm=args.measure_stage2_update_arm,
+            measure_stage2_tracers=args.measure_stage2_tracers,
+            measure_stage3_completion=args.measure_stage3_completion,
             without_oracle_ene_coefficients=(
                 args.without_oracle_ene_coefficients),
         )

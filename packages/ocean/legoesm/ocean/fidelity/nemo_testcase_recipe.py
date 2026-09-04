@@ -141,6 +141,10 @@ def _model_config(
             # reconstructed at the current stage from the same raw ladder.
             tke_shear_metric_source="tpoint_jacobian",
             tke_n2_evaluation_stage="step_entry",
+            # stprk3.F90:154-181 evaluates the closure N2 at Nbb before any
+            # stage.  On RK3 the canonical nemo_before operand is the same
+            # whole-step entry tracer used by the EVD twin below.
+            tke_n2_time_level="nemo_before",
         )
         physics = config.physics._replace(
             vertical_mixing=config.physics.vertical_mixing._replace(
@@ -158,6 +162,11 @@ def _model_config(
                     n2_eos_form="teos10",
                     n2_threshold=-1.0e-12,
                     two_level_trigger=True,
+                    # RK3 stprk3.F90:154-181 computes rn2b on Nbb, copies
+                    # rn2=rn2b, and calls zdf_phy(Nbb,Nbb) before any stage.
+                    # The canonical NEMO time-level option therefore samples
+                    # the whole-step entry tracer for both EVD trigger arms.
+                    evd_n2_time_level="nemo_now_before",
                 ),
             ),
             shortwave_penetration=ShortwavePenetrationConfig(
@@ -174,6 +183,19 @@ def _model_config(
             zad_qco_evaluation="nemo_literal",
             wzv_call2_evaluation="nemo_literal",
             vorticity_scheme="ene_total",
+            # key_qco e3f_vor = e3f_0vor*(1+r3f); dom_qco_r3c_RK3 builds
+            # r3f from the four-cell surface-weighted SSH average
+            # (domqco.F90:233-246), not the generic vertex minimum.
+            # Resolved nn_e3f_typ=0: e3f_0vor is the masked four-cell
+            # reference sum divided by four, with live r3f applied only at
+            # fully wet F points (dynvor.F90:918-950).
+            een_e3f_scheme="nemo_avg4",
+            # dynvor.F90:518-535 carries e2u/e1v into the transport operands
+            # and divides the final U/V terms by e1u/e2v.
+            een_metric_weighting="nemo",
+            # Resolved ln_dynvor_msk=.false.: keep coastal relative
+            # vorticity live instead of Neumann-filling the F-point q field.
+            een_q_boundary="nemo_live",
             coriolis_scheme="explicit_ab2",
             # GYRE's np_ENE dyn_cor_2D is subcycled live: subtract the Kmm
             # ENE Coriolis from zu_frc, then reapply it to every AB3 mid-step
@@ -182,6 +204,7 @@ def _model_config(
             lateral_viscosity_operator="nemo_div_curl",
             lateral_viscosity_e3_weighting="nemo_e3",
             surface_stress_implicit=True,
+            nemo_two_band_full_shortwave=True,
             bbl_adv_option=bbl_adv_option,
             bbl_gamma_s=bbl_gamma_s,
             # NEMO's e3w(Kmm) implicit-solve divisor (trazdf.F90:219-221,
@@ -190,6 +213,17 @@ def _model_config(
             # the shared _model_config above; the GYRE card runs the same
             # routine, so it takes the same fix.
             zdf_implicit_solver_evaluation="nemo_literal",
+            # GYRE resolves ln_non_lin=T + ln_drgimp=T together with
+            # ln_dynspg_ts=T.  NEMO owns this as one composition: frozen Kmm
+            # rCdU_bot in the explicit external-mode substeps, the baroclinic
+            # residual correction, and the bottom-cell implicit dynzdf
+            # diagonal (zdfdrg.F90:138-190; dynspg_ts.F90:699-705,1584-1643;
+            # dynzdf.F90:148-160,293-305).  These are the already-canonical
+            # DINO options, selected as a bundle rather than a GYRE-only
+            # reimplementation.
+            zdf_drag_in_matrix=True,
+            zdf_baroclinic_only=True,
+            barotropic_drag_substep=True,
             use_conservation_fixer=False,
             fix_eta_drift=False,
             barotropic=config.barotropic._replace(
