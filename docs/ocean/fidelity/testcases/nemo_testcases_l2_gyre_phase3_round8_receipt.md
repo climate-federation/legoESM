@@ -743,12 +743,11 @@ Per the accepted process note, the earlier EMP reversal returned through
 review with both source and runtime evidence before it landed.
 
 Round 13 additionally passes 26 time-level tests, all 35 no-scheme-duplication
-tripwires, and the four selected new tracer-hook/product tests.  The complete
-23-test tracer file first ran `22 passed, 1 failed`: the failure was the
+tripwires, and the complete WS-RK3 tracer file (`23 passed` in `571.85 s`).
+That file's failing-first run was `22 passed, 1 failed`: the failure was the
 legacy six-array test geometry leaving a newly optional native-product local
-uninitialized.  After setting that legacy local to `None`, the failed test and
-the new product test pass together.  The broader private-cross-import suite
-reports three pre-existing unrelated violations and no Round-13 import; it is
-not claimed green.  Round-12 independent review is running in parallel;
-Round-13 measurements have no independent review yet and make no dual-review
-claim.
+uninitialized.  After setting that legacy local to `None`, the full rerun is
+green.  The broader private-cross-import suite reports three pre-existing
+unrelated violations and no Round-13 import; it is not claimed green.
+Round-12 independent review is running in parallel; Round-13 measurements
+have no independent review yet and make no dual-review claim.
