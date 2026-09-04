@@ -199,6 +199,55 @@ def test_load_or_equilibrate_forwards_every_physics_switch(tmp_path, monkeypatch
     assert {k: calls["flags"][k] for k in switches} == switches
 
 
+def test_cached_spinup_batch_memoises_per_group(tmp_path, monkeypatch):
+    """The per-GROUP memo computes a group once, reloads it byte-for-byte on
+    the next call, and keys on the group's archetype indices (a different
+    group is a miss)."""
+    import jax.numpy as jnp
+    from legoesm.land.carbon import global_init
+    from legoesm.land.carbon.config import CarbonState
+    calls = {"n": 0}
+
+    def fake_spinup(batch, *, n_spinup, n_verify, dt):
+        calls["n"] += 1
+        n = batch.g_idx.shape[0]
+        pools = {p: jnp.full((n,), float(i + 1) + 0.5 * calls["n"])
+                 for i, p in enumerate(CarbonState._fields)}
+        annual = {"gpp": np.full((n_verify, n), 2.0 * calls["n"]),
+                  "npp": np.full((n_verify, n), 1.0)}
+        return CarbonState(**pools), annual
+
+    monkeypatch.setattr(global_init, "_spinup_batch", fake_spinup)
+    spin = bgc._make_cached_spinup_batch(str(tmp_path / "eq"), "basekey")
+    batch = global_init.ArchetypeBatch(
+        config=None, land_params=None, forcing_fn=None,
+        g_idx=np.array([3, 5, 7]), steps_per_year=12, t_init=None,
+        soil_frozen_fraction=None)
+    eq1, an1 = spin(batch, n_spinup=2, n_verify=3, dt=3600.0)
+    eq2, an2 = spin(batch, n_spinup=2, n_verify=3, dt=3600.0)
+    assert calls["n"] == 1                      # second call = cache hit
+    for p in CarbonState._fields:
+        npt.assert_array_equal(np.asarray(getattr(eq1, p)),
+                               np.asarray(getattr(eq2, p)))
+    npt.assert_array_equal(an1["gpp"], an2["gpp"])
+    other = batch._replace(g_idx=np.array([3, 5, 8]))
+    spin(other, n_spinup=2, n_verify=3, dt=3600.0)
+    assert calls["n"] == 2                      # different group = miss
+
+
+def test_only_groups_is_forwarded_and_writes_no_whole_table_cache(tmp_path, monkeypatch):
+    calls = {"n": 0}
+    _patch_equilibrate(monkeypatch, calls)
+    cache_dir = str(tmp_path / "eq")
+    bgc._load_or_equilibrate(
+        _tiny_archetype_table(), _SPIN, cache_dir=cache_dir, rebuild=False,
+        only_groups=(0, 2))
+    assert calls["flags"]["only_groups"] == (0, 2)
+    assert calls["flags"]["spinup_batch_fn"] is not None
+    key = bgc._equilibrium_cache_key(_tiny_archetype_table(), _SPIN)
+    assert not os.path.exists(_cache_path(cache_dir, key))
+
+
 def test_load_or_equilibrate_rebuild_bypasses_cache(tmp_path, monkeypatch):
     """rebuild=True (--rebuild-equilibrium) recomputes + overwrites even on a hit."""
     calls = {"n": 0}

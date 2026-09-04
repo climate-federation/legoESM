@@ -652,8 +652,16 @@ def equilibrate_archetypes(
     stomatal_model: str = "ball_berry",
     capacity_scheme: str = "prescribed",
     g1_source: str = "table",
+    spinup_batch_fn=None,
+    only_groups=None,
 ):
     """Spin every climate archetype to a verified soil-carbon equilibrium.
+
+    ``spinup_batch_fn`` (same signature as :func:`_spinup_batch`) lets the
+    driver wrap the per-group spin-up in a disk memo; this function itself
+    stays pure.  ``only_groups`` (indices into the batch order) spins that
+    subset and leaves the other archetypes at zero -- for running the groups
+    as parallel jobs that each fill the driver's per-group cache.
 
     Runs the shared semi-analytic spin-up
     (:func:`legoesm.land.carbon.spinup.run_semi_analytic_spinup`) once per
@@ -723,10 +731,13 @@ def equilibrate_archetypes(
     qc = {k: np.zeros(n_arch)
           for k in ("gpp", "npp", "som_kgC", "biomass_kgC", "drift_frac_per_yr")}
 
+    spinup = _spinup_batch if spinup_batch_fn is None else spinup_batch_fn
     for i_batch, batch in enumerate(batches):
+        if only_groups is not None and i_batch not in only_groups:
+            continue
         g_idx = batch.g_idx
         t0 = time.time()
-        final_carbon, annual = _spinup_batch(
+        final_carbon, annual = spinup(
             batch, n_spinup=n_spinup, n_verify=n_verify, dt=dt)
         print(f"[global_carbon_ic] group {i_batch} ({g_idx.shape[0]} archetypes) "
               f"equilibrated in {time.time() - t0:.0f} s", flush=True)

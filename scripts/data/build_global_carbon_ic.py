@@ -788,7 +788,82 @@ def _equilibrium_cache_key(table, spin: dict) -> str:
     return h.hexdigest()
 
 
-def _load_or_equilibrate(table, spin: dict, *, cache_dir: str, rebuild: bool):
+def _atomic_savez(path: Path, **arrays) -> None:
+    """np.savez via an exclusively-created temp file + os.replace (atomic within
+    the directory) so a concurrent reader never sees a truncated npz."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f"{path.stem}.", suffix=".tmp.npz")
+    os.close(fd)  # np.savez reopens by name
+    tmp = Path(tmp_name)
+    try:
+        np.savez(tmp, **arrays)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def _make_cached_spinup_batch(cache_dir: str, base_key: str):
+    """Disk memo around the per-GROUP spin-up (``global_init._spinup_batch``).
+
+    The whole-table cache in :func:`_load_or_equilibrate` only pays off once a
+    run has COMPLETED; with the two-leaf canopy a group takes ~4 h and 21
+    groups do not fit one job, so each group's ``(final_carbon, annual)`` is
+    also memoised under ``<cache_dir>/<backend>/groups/<base_key>_<g>.npz``
+    (``g`` = sha256 of the group's archetype indices).  Any later run with the
+    same table + spin config -- a relaunch after a timeout, or the assembling
+    run after a ``--only-groups`` array -- reloads finished groups in seconds.
+    """
+    import jax
+
+    from legoesm.land.carbon.config import CarbonState
+    from legoesm.land.carbon.global_init import _spinup_batch
+
+    root = Path(cache_dir) / jax.default_backend() / "groups"
+
+    def spinup(batch, *, n_spinup, n_verify, dt):
+        g = hashlib.sha256(np.ascontiguousarray(batch.g_idx, dtype=np.int64)
+                           .tobytes()).hexdigest()[:16]
+        path = root / f"{base_key}_{g}.npz"
+        ncol = int(batch.g_idx.shape[0])
+        if path.exists():
+            try:
+                with np.load(path) as z:
+                    pools = {p: _check_cached_array(z[f"eq_{p}"], f"eq_{p}", ncol)
+                             for p in CarbonState._fields}
+                    annual = {k[len("annual_"):]: np.asarray(z[k])
+                              for k in z.files if k.startswith("annual_")}
+                for k, v in annual.items():
+                    if v.ndim != 2 or v.shape[1] != ncol:
+                        raise ValueError(f"annual_{k} shape {v.shape}")
+                if not annual:
+                    raise KeyError("annual_*")
+            except (OSError, ValueError, KeyError, EOFError, TypeError,
+                    zipfile.BadZipFile) as exc:
+                print(f"[global_carbon_ic] group cache {g} unreadable "
+                      f"({type(exc).__name__}); recomputing", flush=True)
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            else:
+                print(f"[global_carbon_ic] group CACHE HIT ({g}, {ncol} archetypes)",
+                      flush=True)
+                return CarbonState(**pools), annual
+        final_carbon, annual = _spinup_batch(
+            batch, n_spinup=n_spinup, n_verify=n_verify, dt=dt)
+        arrays = {f"eq_{p}": np.asarray(getattr(final_carbon, p))
+                  for p in CarbonState._fields}
+        arrays.update({f"annual_{k}": np.asarray(v) for k, v in annual.items()})
+        _atomic_savez(path, **arrays)
+        return final_carbon, annual
+
+    return spinup
+
+
+def _load_or_equilibrate(table, spin: dict, *, cache_dir: str, rebuild: bool,
+                         only_groups=None):
     """Deterministic RESULT cache around :func:`equilibrate_archetypes`.
 
     ``equilibrate_archetypes`` cold-compiles + spins ONE coupled-land-model graph
@@ -875,31 +950,22 @@ def _load_or_equilibrate(table, spin: dict, *, cache_dir: str, rebuild: bool):
         leaf_c_resorption_frac=spin.get("leaf_c_resorption_frac", 0.0),
         stomatal_model=spin.get("stomatal_model", "ball_berry"),
         capacity_scheme=spin.get("capacity_scheme", "prescribed"),
-        g1_source=spin.get("g1_source", "table"))
+        g1_source=spin.get("g1_source", "table"),
+        spinup_batch_fn=(_make_cached_spinup_batch(cache_dir, key)
+                         if cache_dir else None),
+        only_groups=only_groups)
     elapsed = time.time() - t0
-    if path is not None:
-        path.parent.mkdir(parents=True, exist_ok=True)
+    if only_groups is not None:
+        print(f"[global_carbon_ic] equilibrated groups {sorted(only_groups)} in "
+              f"{elapsed:.1f}s (partial run: whole-table cache NOT written)",
+              flush=True)
+    elif path is not None:
         # Save the eight equilibrium pools (eq_<field>) + the five QC members
         # (qc_<key>, canonical order); reading qc[k] for the fixed _QC_KEYS keeps
         # save + load symmetric and fails LOUD if the compute ever drops a member.
         arrays = {f"eq_{p}": np.asarray(getattr(eq, p)) for p in eq._fields}
         arrays.update({f"qc_{k}": np.asarray(qc[k]) for k in _QC_KEYS})
-        # Write to an EXCLUSIVELY-created unique temp file in the same directory,
-        # then os.replace (ATOMIC within a dir) onto the final path.  tempfile
-        # guarantees the temp name is unique even across nodes/containers sharing a
-        # PID on the advertised SHARED filesystem (os.getpid() alone is not), so
-        # concurrent writers own distinct complete files and a reader only ever
-        # sees a complete file or none -- never a truncated npz.
-        fd, tmp_name = tempfile.mkstemp(
-            dir=str(path.parent), prefix=f"{path.stem}.", suffix=".tmp.npz")
-        os.close(fd)  # np.savez reopens by name
-        tmp = Path(tmp_name)
-        try:
-            np.savez(tmp, **arrays)
-            os.replace(tmp, path)
-        finally:
-            if tmp.exists():
-                tmp.unlink()
+        _atomic_savez(path, **arrays)
         print(f"[global_carbon_ic] equilibrated {elapsed:.1f}s (saved cache {key8})",
               flush=True)
     else:
@@ -959,6 +1025,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    choices=("table", "p_model"),
                    help="Stomatal slope source: per-PFT table or the P-model "
                         "least-cost Medlyn slope.")
+    p.add_argument("--only-groups", type=str, default=None,
+                   help="Comma-separated archetype-group indices to spin (fills "
+                        "the per-group equilibrium cache, writes NO outputs); "
+                        "run the groups as parallel jobs, then a plain run "
+                        "assembles them from the cache.")
     p.add_argument("--seed", type=int, default=0, help="base k-means RNG seed")
     p.add_argument("--output", type=str, default="results/global_carbon_ic",
                    help="output DIRECTORY for the two .npz files")
@@ -1111,9 +1182,17 @@ def main(argv=None):
           f"stomatal_model={args.stomatal_model} "
           f"capacity_scheme={args.capacity_scheme} g1_source={args.g1_source} "
           "(big-leaf StomataConfig mirrors the same three switches)", flush=True)
+    only_groups = (tuple(int(g) for g in args.only_groups.split(","))
+                   if args.only_groups else None)
+    if only_groups is not None and not args.equilibrium_cache_dir:
+        raise SystemExit("--only-groups needs --equilibrium-cache-dir (the "
+                         "per-group results are its only output)")
     eq, qc = _load_or_equilibrate(
         table, spin, cache_dir=args.equilibrium_cache_dir,
-        rebuild=args.rebuild_equilibrium)
+        rebuild=args.rebuild_equilibrium, only_groups=only_groups)
+    if only_groups is not None:
+        print("[global_carbon_ic] --only-groups run complete; no finidat written")
+        return None, None
 
     # Stage C: cover-weighted map of archetype equilibria onto the grid.
     grid_state = map_to_grid(cell_id, cell_w, eq)
