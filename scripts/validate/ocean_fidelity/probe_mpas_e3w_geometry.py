@@ -120,6 +120,20 @@ def main() -> int:
             print(f"  IC cell {c:7d} lat {lat[c]:7.2f} lon {lon[c]:7.2f} H={H[c]:.1f} "
                   f"bad levels {k[:6].tolist()} of {int(active[c].sum())}")
         bad = bad | badT.any(axis=1) | badS.any(axis=1)
+        # Deep-IC horizontal spread at the level-8 blowup sites: adjacent cells
+        # filled from different NEMO source columns show up as a T/S jump.
+        zc = np.abs(np.asarray(z_coord.z_full_ref))
+        for name, (la, lo) in {"Alboran 35.9N 358.9E": (35.93, 358.92),
+                               "BlackSea 44.5N 34.5E": (44.5, 34.5)}.items():
+            near = (np.hypot(lat - la, (lon % 360 - lo + 180) % 360 - 180) < 0.6) & wet
+            print(f"deep IC spread at {name} ({int(near.sum())} wet cells): level  depth  nact  T min/max  S min/max")
+            for k in range(30, int(z_coord.n_levels), 4):
+                act = near & active[:, k]
+                if act.sum() < 2:
+                    continue
+                print(f"   k={k:2d} {zc[k]:7.0f} m  n={int(act.sum()):2d}  "
+                      f"T {T_ic[act, k].min():6.2f}/{T_ic[act, k].max():6.2f}  "
+                      f"S {S_ic[act, k].min():6.2f}/{S_ic[act, k].max():6.2f}")
     return 1 if bad.any() else 0
 
 
