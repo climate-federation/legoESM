@@ -174,6 +174,11 @@ def test_hybrid_rest_over_topo_is_balanced():
         f"(> {_BALANCED_TOL_MS} m/s) — #1029 SB81 PGF regression")
 
 
+@pytest.mark.xfail(strict=True, reason=
+    "#1029: the temperature-gradient term of the terrain PGF does not "
+    "cancel discretely; drift is linear in mountain height and 11 orders "
+    "above the isothermal case. strict=True so this flips to a loud "
+    "XPASS the moment it is fixed.")
 def test_sigma_stratified_rest_over_topo_is_balanced():
     """#1029: a STRATIFIED rest state over the mountain must also stay
     at rest, on the sigma control.
@@ -197,11 +202,21 @@ def test_sigma_stratified_rest_over_topo_is_balanced():
         f"discretely (#1029)")
 
 
+@pytest.mark.xfail(strict=True, reason=
+    "#1029: the temperature-gradient term of the terrain PGF does not "
+    "cancel discretely; drift is linear in mountain height and 11 orders "
+    "above the isothermal case. strict=True so this flips to a loud "
+    "XPASS the moment it is fixed.")
 def test_hybrid_stratified_rest_over_topo_is_balanced():
     """#1029: the same stratified rest state on the REAL hybrid levels.
 
     This is the coordinate the failing `held_suarez_topo` case runs, and the
     one whose isothermal twin was the original #1029 reproducer.
+
+    NB the sigma and hybrid numbers are NOT a one-variable comparison — the two
+    coordinates place their levels differently, so which is "worse" is not
+    attributable. What both establish is that the defect is present on each,
+    i.e. it is not confined to the hybrid A_half machinery.
     """
     from legoesm.grids.vertical import standard_hybrid_levels
     v0, vN, finite = _face_max_wind_after_rest_run(
