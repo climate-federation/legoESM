@@ -18,6 +18,7 @@ from legoesm.ocean.eos import nemo_roquet_density_anomaly_ratio
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.grids.latlon import create_beta_plane_cgrid_geometry, create_latlon_grid
 from legoesm.ocean.fidelity.nemo_testcase_recipe import build_lock_exchange_zco_card
+from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
 from legoesm.ocean.fidelity.nemo_testcase_recipe import build_overflow_zps_card
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import LatLonCGridOceanConfig
@@ -91,6 +92,28 @@ def test_nemo_ws_eos_hpg_transport_are_bitwise_equal_eager_and_jit(monkeypatch):
         not np.array_equal(a, b)
         for a, b in zip(compiled, unbarriered, strict=True)
     )
+
+
+def test_rk3_tke_nbb_mapping_is_independent_of_evd_selector():
+    """stprk3 Nbb is the entry tracer for each independent N2 consumer."""
+    card = build_nemo_testcase_card("GYRE-zco")
+    cfg = card.recipe.model_config
+    tke = cfg.physics.vertical_mixing.tke._replace(
+        tke_n2_time_level="nemo_before")
+    evd = cfg.physics.convection.enhanced_diffusion._replace(
+        evd_n2_time_level="solver_state")
+    cfg = cfg._replace(
+        momentum_time_integrator="rk3_ws",
+        physics=cfg.physics._replace(
+            vertical_mixing=cfg.physics.vertical_mixing._replace(tke=tke),
+            convection=cfg.physics.convection._replace(
+                enhanced_diffusion=evd)))
+    model = model_module.LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg)
+    T_nbb, S_nbb = model._n2_nemo_before_tracers(
+        card.recipe.initial_state)
+    np.testing.assert_array_equal(T_nbb, card.recipe.initial_state.T.data)
+    np.testing.assert_array_equal(S_nbb, card.recipe.initial_state.S.data)
 
 
 def test_nemo_ws_microselectors_are_not_public_config():

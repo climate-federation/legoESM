@@ -305,6 +305,13 @@ def compute_vertical_K_profiles(
 
     tke_new = None
     if vmix.scheme != "none":
+        _conv_for_shared_n2 = physics_config.convection
+        _evd_uses_before = (
+            _conv_for_shared_n2.scheme == "enhanced_diffusion"
+            and getattr(
+                _conv_for_shared_n2.enhanced_diffusion,
+                "evd_n2_time_level", "solver_state") == "nemo_now_before"
+        )
         K_vmix, A_vmix, tke_new = _vmix_K_profiles(
             state, z_coord, surface_forcing, vmix, physics_config.constants,
             eos_fn=eos_fn,
@@ -313,6 +320,7 @@ def compute_vertical_K_profiles(
             tke_bottom_dirichlet=tke_bottom_dirichlet,
             tke_bottom_level=tke_bottom_level,
             n2_tracers_before=n2_tracers_before,
+            n2_before_used_by_evd=_evd_uses_before,
             tke_p_sh2=tke_p_sh2,
             tke_n2_bundle=tke_n2_bundle)
         if _nemo_floor:
@@ -536,7 +544,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                      *, tke_old=None, dt_tke=None, tke_source=None,
                      lat_deg=None, n2_tracers=None,
                      tke_bottom_dirichlet=None, tke_bottom_level=None,
-                     n2_tracers_before=None, tke_p_sh2=None,
+                     n2_tracers_before=None, n2_before_used_by_evd=False,
+                     tke_p_sh2=None,
                      tke_n2_bundle=None):
     """Re-compute K_v, A_v at interfaces for the chosen vmix scheme.
 
@@ -787,11 +796,15 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 "tke_set_diffusivities does not accept T_n2b/S_n2b and "
                 "would silently keep step_entry. Disable tke_n2_time_level "
                 "or use the standard pre_mixing path.")
-        if _n2_tl == "step_entry" and n2_tracers_before is not None:
+        # The Nbb pair is shared with EVD's two-level MIN(rn2,rn2b) trigger.
+        # It is only unused when neither TKE nor EVD selects that operand.
+        if (_n2_tl == "step_entry" and n2_tracers_before is not None
+                and not n2_before_used_by_evd):
             raise ValueError(
                 "n2_tracers_before was passed but TKEConfig.tke_n2_time_level"
-                "='step_entry' — set 'nemo_before' to actually use it "
-                "(silent-no-op guard, mirrors bottom_level/u_before_cell).")
+                "='step_entry' and EVD does not select it — set "
+                "'nemo_before' to actually use it (silent-no-op guard, "
+                "mirrors bottom_level/u_before_cell).")
         T_n2b, S_n2b = (n2_tracers_before if _n2_tl == "nemo_before"
                        else (None, None))
         dz_half = jnp.broadcast_to(

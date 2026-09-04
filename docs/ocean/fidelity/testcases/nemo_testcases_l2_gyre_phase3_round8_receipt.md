@@ -19,6 +19,34 @@ instrument.  The run remained CPU-only, production-JIT fp64, and used the lane-1
 record format, central time-level registry, immutable pointwise `1e-15` bar,
 one-variable arms, planted controls, and shared log-log growth instrument.
 
+## Round-8 card-choice disclosure and one-variable audit
+
+Round 9 searched the existing DINO/lane-1 option surface before changing the
+card.  All six round-8 additions already existed as canonical shared options;
+none is a GYRE implementation.  Each is selected by the resolved GYRE program,
+so no flip is reverted.  The TKE/EVD selectors share an Nbb input but retain
+independent consumers; `stprk3.F90:154-165` makes the RK3 whole-step entry Nbb
+for both.
+
+| choice | resolved namelist and selecting source | one-variable JIT move at kt=2 (T/S/u/v/SSH) | worst JIT move at kt=10 | round-8 / round-9 disposition |
+|---|---|---|---:|---|
+| `tke_n2_time_level=nemo_before` | `EXP00/namelist_cfg:204,215-217`; `stprk3.F90:154-165` | `0/0/0/0/0` | `0` | UNASKED addition; ASKED audit, retained (RK3-equivalent timing) |
+| `evd_n2_time_level=nemo_now_before` | `EXP00/namelist_cfg:205-207`; `stprk3.F90:154-165` | `1.77e-3/9.34e-5/2.53e-2/2.53e-2/0` | `8.26e-3` | UNASKED addition; ASKED audit, retained |
+| `een_e3f_scheme=nemo_avg4` | `EXPREF/namelist_ref:1072-1073`; `dynvor.F90:918-950` | `1.51e-16/1.93e-16/5.12e-9/2.07e-9/0` | `1.20e-2` | UNASKED addition; ASKED audit, retained |
+| `een_metric_weighting=nemo` | `EXP00/namelist_cfg:163-165`; `dynvor.F90:518-531` | `1.51e-16/1.93e-16/6.94e-18/6.94e-18/0` | `3.97e-11` | UNASKED addition; ASKED audit, retained |
+| `een_q_boundary=nemo_live` | `EXPREF/namelist_ref:1069`; `dynvor.F90:450-490` | `0/0/0/0/0` | `0` | UNASKED addition; ASKED audit, retained (uninformative through kt=10) |
+| `nemo_two_band_full_shortwave=true` | `EXP00/namelist_cfg:73,76-79`; `traqsr.F90:665-712,1274-1276` | `2.20e-3/1.97e-14/0/0/0` | `9.01e-2` | UNASKED addition; ASKED audit, retained pending selector consolidation |
+
+The earlier “142× kt=2 T improvement” is attributed to this named selector
+set, not to “round 8”: the direct ablations show the two live tracer-scale
+members are full two-band shortwave and EVD N2 timing, while `nemo_avg4`
+becomes trajectory-scale by kt=10.  Their effects are nonlinear and partly
+cancelling, so the audit does not invent an additive per-arm share.  The
+production-JIT arm artifact is `selector_arms.json`, SHA-256
+`487879f62bb95fa4f5f22d8eab9edd4fc70eb27ab632e9eab07a24d4b41aee3f`.
+The `--plant` two-choice mutation exits 2, proving the one-variable manifest
+fails closed.
+
 ## Ordered walk
 
 ### Bottom drag closes the external-mode register

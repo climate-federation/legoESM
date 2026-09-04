@@ -7620,16 +7620,22 @@ class LatLonCGridOceanModel:
         _evd = (getattr(_conv, "enhanced_diffusion", None)
                 if getattr(_conv, "scheme", "none") == "enhanced_diffusion"
                 else None)
-        if (getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws"
-                and _evd is not None
+        if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws":
+            # NEMO RK3 has no carried leap-frog BEFORE array.  Its whole-step
+            # entry is Nbb for BOTH independent consumers: TKE when
+            # tke_n2_time_level=nemo_before, and EVD when its two-level trigger
+            # asks for rn2b (stprk3.F90:154-165).  Do not tie this mapping to
+            # EVD's selector: the one-variable EVD ablation must not make the
+            # still-live TKE consumer invent state.T_before/S_before.
+            _tke_uses_entry_as_nbb = (
+                getattr(vmix.tke, "tke_n2_time_level", "step_entry")
+                == "nemo_before")
+            _evd_uses_entry_as_nbb = (
+                _evd is not None
                 and getattr(_evd, "evd_n2_time_level", "solver_state")
-                == "nemo_now_before"):
-            # NEMO RK3 has no separate Nnow EVD arm: stprk3.F90:154-181
-            # evaluates rn2b on Nbb, assigns rn2=rn2b, then calls
-            # zdf_phy(Nbb,Nbb) before the RK stages.  The entry tracer is Nbb
-            # for both operands; requiring leap-frog T_before here would invent
-            # a time level absent from the resolved RK3 program.
-            return (entry_state.T.data, entry_state.S.data)
+                == "nemo_now_before")
+            if _tke_uses_entry_as_nbb or _evd_uses_entry_as_nbb:
+                return (entry_state.T.data, entry_state.S.data)
         if getattr(vmix.tke, "tke_n2_time_level", "step_entry") != "nemo_before":
             return None
         if entry_state.T_before is None or entry_state.S_before is None:
