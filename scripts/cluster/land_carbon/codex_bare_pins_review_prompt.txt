@@ -1,0 +1,38 @@
+ADVERSARIAL REVIEW of the UNCOMMITTED diff (`git diff`): packages/land/legoesm/land/canopy/solver.py
++ tests/land/unit/test_canopy_low_leaf_area.py. Do not edit files.
+
+The change: in the two-leaf canopy closure residual, when the column's LAI == 0.0 EXACTLY the four
+leaf rows (Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh) are replaced by pins to the canopy air temperature and the
+ambient CO2; the Tc and q_c rows are unchanged. Measured on 33,696 column-solves (same node, both
+arms): non-converged 10.66% -> 1.99%; bare-soil bin 17.5% -> 0.0%, the other LAI bins unchanged
+(0<LAI<0.5: 2.79->2.80%, 0.5-2: 1.83->1.79%, >=2: 10.2->10.1%); mean iterations 8.78 -> 3.07; FD
+gradient gate on the calibration loss -0.21 -> 1.14. A never-fire control (same jnp.where, trigger
+LAI == -1) reproduces the vegetated-column differences exactly, so those are rounding chaos from the
+inserted branch (87 column-steps flip convergence), not the pins. Mechanism measured: at LAI == 0
+the leaf temperature sits a median 96 K (max 157 K) from the canopy air; the saturation humidity
+there makes the q_c row non-smooth and LM steps get rejected.
+
+Find, with file:line and a concrete failing input:
+1. DIFFERENTIABILITY: jnp.where on (b.LAI == 0.0) inside a residual differentiated by jacfwd in
+   the forward and by jax.vjp w.r.t. the bundle in the implicit adjoint. Does the untaken branch
+   ever produce NaN/inf that leaks through 0*NaN (the classic where-gradient footgun)? Check each
+   term of `pinned` and of `diff` at LAI==0 AND at LAI>0. Is d(residual)/d(bundle.Ca) and
+   d/d(bundle.LAI) finite in both regimes?
+2. CONSUMERS of the pinned leaf state: after the solve, canopy_forward / two_leaf_canopy compute
+   GPP, LE_canopy, SIF, leaf fluxes from Tf and Ci. With Tf = Tc and Ci = Ca at LAI == 0, are any
+   of those nonzero (a phantom flux from a leaf that does not exist)? Photosynthesis at Ci = Ca
+   with APAR = 0 -- is An exactly 0 or a dark-respiration term that now feeds GPP/NEE on bare
+   ground? Say what the shipped code produced there before (with Tf 96 K off) for comparison.
+3. The two-leaf split anchor (tanh on fSun) still runs at LAI == 0; any interaction with the pins
+   (e.g. the where picks `pinned` so the anchor is dead code there -- confirm).
+4. Warm start: the cached converged x for a bare column now carries Tf = Tc. When LAI becomes > 0
+   next timestep (leaf-out), is that seed worse or better than before? Any assertion on the cache?
+5. The test file: the new tests' assertions -- can either pass with the pins reverted? (I ran the
+   non-vacuity probe: test_bare_ground_pins_the_empty_leaf_state FAILS with trigger LAI == -1.)
+   Is the tolerance 1e-6 on Tf - Tc meaningful given _LM_RTOL/_LM_ATOL?
+6. The pre-existing failure tests/land/unit/test_canopy_solver_grad.py::
+   test_two_leaf_public_export_gpp_is_gross (TypeError: canopy_shortwave_rt() takes 13 positional
+   arguments but 14 were given) fails identically WITHOUT this diff -- confirm it is stale and
+   name the argument that was removed; do not fix it.
+
+Under 400 words, ranked; NONE for a clean category.

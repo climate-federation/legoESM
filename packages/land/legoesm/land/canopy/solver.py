@@ -53,6 +53,7 @@ from legoesm.land.canopy.energy_balance import (
 from legoesm.land.canopy.photosynthesis import photosynthesis
 from legoesm.land.canopy.radiative_transfer import canopy_longwave_rt
 from legoesm.land.canopy.stability import (
+    LEAF_AREA_FLOOR,
     compute_below_canopy_resistance,
     compute_boundary_layer_resistance,
     monin_obukhov_stability,
@@ -332,7 +333,31 @@ def _canopy_residual(
         Tc     - Tc_new,
         q_c   - q_c_new,
     ])
-    return diff
+
+    # ---- Bare ground: no leaves, so no leaf equations ----
+    # At LAI == 0 the leaf rows above still get solved, through boundary-layer
+    # resistances of ~1e7 s/m.  Nothing then holds the leaf temperature: it
+    # drifts ~100 K from the canopy air (measured median 96 K on the failing
+    # columns) and the saturation humidity evaluated there makes the q_c row
+    # non-smooth, so the damped Newton steps are rejected and the solve stalls
+    # at the iteration cap.  Those columns were 90% of all non-converged solves
+    # (10.7% -> 2.0% with the pins; gradient gate -0.21 -> 1.14).  Pin the empty
+    # leaf state to the canopy air and ambient CO2; the Tc and q_c rows keep
+    # their full balance, in which the leaf terms are already ~0 at LAI == 0.
+    # The trigger is the leaf-area floor of the boundary-layer resistance: at
+    # or below it both leaf classes are bit-identical to bare ground, so a
+    # column with LAI = 1e-7 is pinned too, and no column with distinct leaf
+    # physics is.
+    bare = b.LAI <= LEAF_AREA_FLOOR
+    pinned = jnp.array([
+        Tf_Sun - Tc,
+        Tf_Sh  - Tc,
+        Ci_Sun - b.Ca,
+        Ci_Sh  - b.Ca,
+        diff[4],
+        diff[5],
+    ])
+    return jnp.where(bare, pinned, diff)
 
 
 # ---------------------------------------------------------------------------
