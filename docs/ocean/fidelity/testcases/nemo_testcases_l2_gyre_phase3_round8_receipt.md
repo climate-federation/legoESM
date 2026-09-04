@@ -1,14 +1,13 @@
-# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–12 boundary receipt
+# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–13 boundary receipt
 
-**Verdict: STOP / DEBT at the round-12 stage-2 boundary.  Independent review
-shipped round 10; round-11 review is running in parallel and round-12 review
-is outstanding.  The pending D gate remains an open user decision and its
-criterion is unchanged.  Round 12 makes NEMO's literal EOS source-operation
-association exact for oracle inputs and improves the live stage-2 Kaa residual
-about 23×, but the propagated stage state still leaves a two-cell `prd`
-departure and corrected Kaa remains `2.00e-14`, above the immutable `1e-15`
-bar.  The GYRE kt=2 SSH row also crosses from AT-BAR to DEBT.  Therefore the
-stage-3 transport and ZDF walks are not entered.**
+**Verdict: STOP / DEBT at the external transport-average input to stage-1
+tracer advection.  Round 13 finds the first propagated tracer departure after
+`tra_adv`, confirms the complete stage-1 transport as causal, and then finds
+`un_adv/vn_adv` already non-bit-exact before `zFu/zFv` are formed.  The shared
+literal metric-product association is corrected, but does not clear the
+boundary: stage-2 corrected Kaa remains `2.00e-14`, above the immutable
+`1e-15` bar.  The pending D-gate criterion remains an open user decision and
+is unchanged.  The stage-3 transport and ZDF walks are not entered.**
 
 Date: 2026-09-04
 
@@ -27,6 +26,140 @@ Round-10 implementation commit: `7a38ef6e4efd7bd94b1743cae1525c59802f7511`
 Original reconciled tip: `57429ecf5f377ce2bf220f36bc05313cd29e0dfd`
 
 Session: `01a05cb9-7625-7f40-9e83-b3fa767b1945`
+
+Round-13 starting tip: `4f10d623923453f1bf985cced9693c5d5eb86167`
+
+Round-13 preregistration/redirect commits: `8988ef294`, `c26b49cce`,
+`fc26db757`
+
+Round-13 literal-product implementation commit: `09bef32cb`
+
+## Round-13 propagated tracer input walk
+
+### Executed stage-1 sequence and cell census
+
+The kt=1 entry is bit-exact for both T and S.  The executing RK3 source zeros
+Krhs at `stprk3_stg.F90:510-513`, calls
+`tra_adv(kstp,Kbb,Kmm,Kaa,ts,Krhs,zFu,zFv,zFw,kstg)` at `:519`, then calls
+`tra_sbc_RK3` at `:521`.  With `rDt=rn_Dt/3=4800 s` (`:118-123`), the QCO
+update at `:540-554` evaluates
+`((1+r3t(Kbb))*T(Kbb)+rDt*(1+r3t(Kmm))*Krhs*tmask)/(1+r3t(Kaa))`.
+`tra_qsr`, `tra_ldf`, `tra_bbc`, and `tra_zdf` are stage-3-only at `:556-600`;
+`tra_atf` belongs to MLF, not `stprk3_stg`.  FCT is also absent here:
+`traadv.F90:280-283` disables it before stage 3 and `:359-365` dispatches the
+resolved `nn_fct_h=nn_fct_v=2` to CEN2.  Thus the preregistered transcendental
+and limiter candidates are **REFUTED_BY_EXECUTED_SOURCE**, not numerically
+exonerated for stage 3.
+
+The briefing's “nine wet cells” resolves to nine T cells and nine S cells at
+disjoint coordinates: 18 locations total.  None differs at the kt=1 entry;
+all first differ after `tra_adv`.  Three T cells are at the surface, no cell is
+a bottom cell, and five locations are coast-adjacent.  These are the baseline
+production-JIT fp64 bits before the round-13 product correction:
+
+| NEMO (i,j,k) | field | oracle bits | legoESM bits | surface | bottom | coast-adjacent |
+|---|---|---|---|---:|---:|---:|
+| (18,4,1) | T | `0x403776004ca041ef` | `0x403776004ca041f0` | yes | no | yes |
+| (4,7,4) | S | `0x4042683fb2c45753` | `0x4042683fb2c45752` | no | no | yes |
+| (20,8,1) | T | `0x40377600509b85aa` | `0x40377600509b85a9` | yes | no | no |
+| (12,12,12) | S | `0x4042450cc12a23ae` | `0x4042450cc12a23ad` | no | no | no |
+| (23,14,24) | S | `0x40418f655f17d9c8` | `0x40418f655f17d9c9` | no | no | no |
+| (33,14,11) | T | `0x40333ba91a6880dc` | `0x40333ba91a6880dd` | no | no | yes |
+| (22,15,15) | S | `0x4042021ca033fa34` | `0x4042021ca033fa35` | no | no | no |
+| (13,16,4) | S | `0x4042683fb2ba947d` | `0x4042683fb2ba947c` | no | no | no |
+| (12,18,3) | T | `0x403702145123a02c` | `0x403702145123a02b` | no | no | no |
+| (14,18,16) | T | `0x402ad90432576abd` | `0x402ad90432576abc` | no | no | no |
+| (32,18,16) | S | `0x4041df371eeb6530` | `0x4041df371eeb6531` | no | no | no |
+| (5,19,12) | S | `0x4042450cc12a23ab` | `0x4042450cc12a23aa` | no | no | no |
+| (7,19,20) | S | `0x404193150212bac8` | `0x404193150212bac7` | no | no | no |
+| (12,22,1) | T | `0x4037760058e7171d` | `0x4037760058e7171c` | yes | no | no |
+| (13,22,17) | S | `0x4041bd6716945702` | `0x4041bd6716945701` | no | no | no |
+| (31,22,5) | T | `0x403675fc485de71f` | `0x403675fc485de720` | no | no | no |
+| (33,22,14) | T | `0x403056d60958a27e` | `0x403056d60958a27f` | no | no | yes |
+| (32,23,17) | T | `0x4026771c23458c03` | `0x4026771c23458c04` | no | no | yes |
+
+At all wet cells, the post-advection maximum tendency gaps are
+`1.7835203078773822e-20` T and `2.812308100164311e-20` S.  Substituting only
+the oracle `zFu/zFv/zFw` moves each final stage-state residual by exactly 1.0×
+and makes both T and S bit-identical.  That is a **CONFIRMED** complete-
+transport causal arm.  The stored-barotropic-mean arm leaves the T residual
+unchanged and merely relocates an S mismatch, so it is **REFUTED as sole
+owner**.
+
+### Operand split and owner
+
+The config-local WRITE-only record is taken immediately after NEMO forms
+`zub/zvb` and `zFu/zFv` at `stprk3_stg.F90:265-280`.  On every live face:
+
+| operand/output | U max abs / differing | V max abs / differing | label |
+|---|---:|---:|---|
+| horizontal metric | `0 / 0` | `0 / 0` | bit-exact |
+| Kmm face thickness | `0 / 0` | `0 / 0` | bit-exact |
+| Kmm velocity | `0 / 0` | `0 / 0` | bit-exact |
+| mask | `0 / 0` | `0 / 0` | bit-exact |
+| corrected velocity | `2.799952110443815e-17 / 17400` | `1.2766480581016815e-17 / 17100` | first non-bit-exact compound operand |
+| `un_adv` / `vn_adv` | `1.2045919817182948e-13 / 580` | `5.495603971894525e-14 / 570` | **CONFIRMED upstream owner** |
+| native `zF` | `8.922143024392426e-10 / 17400` | `4.069988790433854e-10 / 17092` | propagated DEBT |
+
+With the exact NEMO operands, NumPy and production JIT both reproduce
+`(e2u*e3u)*(uu+zub*umask)` and its V counterpart bit-for-bit.  The prior
+`e2u*(e3u*corrected_u)` regrouping differs on 5,937 U and 5,870 V cells, by at
+most two ulp.  The shared S-21 identity now retains the native metric-bearing
+product and feeds it directly to CEN2 and WZV.  Its behavioural test failed
+first with `AttributeError` because the source-order materializer was absent;
+after landing it passes and proves the old regrouping differs on its awkward
+fp64 input.  The operand gate's planted one-bit live-U mutation exits `1`.
+
+This literal correction is not over-credited.  On the actual post-fix path,
+upstream `un_adv/vn_adv` remains the first bad input.  The final stage-1 update
+has nine one-ulp T cells and ten one-ulp S cells; the added S location is
+NEMO `(7,21,1)`, oracle bits `0x40426b4578b1f897`, candidate bits
+`0x40426b4578b1f896`.  Corrected stage-2 Kaa is unchanged at
+`2.0033670902752654e-14` U and `2.0003665607629117e-14` V.  Hence the owner is
+**CONFIRMED_EXTERNAL_TRANSPORT_AVERAGE_INPUT**, while its first divergence
+inside the external-mode integration is **UNMEASURED** this round.
+
+### Re-pinned trajectory and Rule-8 disclosure
+
+The post-fix production-JIT sweep keeps kt=1 exact (u/v/SSH remain the same
+at-rest **UNINFORMATIVE** rows).  At kt=2 the normalized maxima are T
+`1.3614736849003888e-12`, S `2.2181101297999213e-14`, u
+`9.484089954572578e-7`, v `8.987992592336029e-7`, and SSH
+`2.3724511938327808e-15`; first-over-bar remains kt=2.  At kt=10 they are T
+`5.636638587568748e-3`, S `1.5483121735304233e-4`, u
+`5.624987258870561e-2`, v `1.1173366024871394e-2`, and SSH
+`2.1255475816557047e-4`.
+
+Against the Round-12 sweep there are 27 identical, 6 improved, and 17
+worsened rows.  Every worsened row is enumerated here; ratios are current /
+Round-12 normalized maxima:
+
+| field | kt | Round 12 | Round 13 | ratio |
+|---|---:|---:|---:|---:|
+| u | 4 | `1.4182404011403506e-2` | `1.418240401140368e-2` | `1.0000000000000122` |
+| v | 4 | `1.594784253330965e-2` | `1.5947842533309664e-2` | `1.0000000000000009` |
+| u | 5 | `2.073389053895669e-2` | `2.0733890538956697e-2` | `1.0000000000000004` |
+| SSH | 5 | `6.701856627955131e-5` | `6.701856628047159e-5` | `1.0000000000137317` |
+| u | 6 | `3.113473033866225e-2` | `3.11347303386626e-2` | `1.0000000000000113` |
+| v | 6 | `6.0219593254002834e-2` | `6.021959325400314e-2` | `1.000000000000005` |
+| S | 7 | `1.224404428342701e-4` | `1.2244044283754916e-4` | `1.0000000000267808` |
+| u | 7 | `4.004140560219323e-2` | `4.004140560220132e-2` | `1.000000000000202` |
+| v | 7 | `6.631577474100295e-2` | `6.631577474102054e-2` | `1.0000000000002653` |
+| u | 8 | `4.71800603612995e-2` | `4.7180060361312434e-2` | `1.0000000000002742` |
+| v | 8 | `2.452716279874642e-2` | `2.452716279882225e-2` | `1.0000000000030915` |
+| SSH | 8 | `2.510825763594551e-4` | `2.510825764118834e-4` | `1.0000000002088092` |
+| u | 9 | `5.256039963431678e-2` | `5.2560399634324524e-2` | `1.0000000000001474` |
+| SSH | 9 | `2.1202997652220953e-4` | `2.1202997711175444e-4` | `1.000000002780479` |
+| T | 10 | `5.636638587568597e-3` | `5.636638587568748e-3` | `1.0000000000000269` |
+| u | 10 | `5.624987258870016e-2` | `5.624987258870561e-2` | `1.000000000000097` |
+| SSH | 10 | `2.1255475784966258e-4` | `2.1255475816557047e-4` | `1.0000000014862425` |
+
+The lane-1 oracle-relative compatibility runs have zero changed normalized
+rows versus Round 12.  OVERFLOW stage/trajectory stay DEBT with
+`first_over_bar=kt2 {T,u}`; LOCK_EXCHANGE stage remains AT-BAR and its
+trajectory remains DEBT with `first_over_bar=kt4 {u}`.  Tracer rows are
+bit-identical to their Round-12 candidate outputs, so no row moves away from
+the oracle by more than two ulp and no status crosses downward.
 
 ## Round-12 preregistration and EOS operand walk
 
@@ -575,6 +708,13 @@ was upgraded merely because its documentation omitted a regime stamp.
 | compare-to gate or criterion change | explicitly forbidden round 12 | NOT MODIFIED; open user decision retained |
 | stage-3 transport remeasurement | ASKED only if EOS and stage 2 clear | NOT ENTERED; corrected Kaa remains DEBT |
 | GYRE tra_zdf/dyn_zdf matrix walk | ASKED only if stages 2 and 3 clear | NOT ENTERED |
+| source-ordered stage-1 tracer routine checkpoints and 9-T/9-S cell census | ASKED round 13 | config-local WRITE-only; all first differ after `tra_adv` |
+| transcendental and FCT candidates | ASKED round 13 | REFUTED_BY_EXECUTED_SOURCE at stage 1; no transcendental remedy proposed |
+| complete oracle stage-1 transport arm | ASKED round 13 | CONFIRMED causal; makes T/S stage update bit-exact |
+| native metric-bearing zF product association | ASKED round 13 after operand split | landed shared S-21 identity; literal statement confirmed at 0 ulp, but not the complete owner |
+| stage-1 transport metric/e3/velocity/mask/corrected-velocity split | ASKED owner walk | first bad compound operand is corrected velocity; `un_adv/vn_adv` first bad primitive input |
+| new public selector/card guard/GYRE-only physics arm | UNASKED and forbidden | none added |
+| stage-3 transport and ZDF matrix walks | conditional on stage-2 clearing | NOT ENTERED; stage-2 corrected Kaa remains DEBT |
 
 ### Test and artifact closure
 
@@ -601,3 +741,14 @@ result is a new Codex-internal measurement; independent review of it remains
 outstanding and no dual-review claim is made.
 Per the accepted process note, the earlier EMP reversal returned through
 review with both source and runtime evidence before it landed.
+
+Round 13 additionally passes 26 time-level tests, all 35 no-scheme-duplication
+tripwires, and the four selected new tracer-hook/product tests.  The complete
+23-test tracer file first ran `22 passed, 1 failed`: the failure was the
+legacy six-array test geometry leaving a newly optional native-product local
+uninitialized.  After setting that legacy local to `None`, the failed test and
+the new product test pass together.  The broader private-cross-import suite
+reports three pre-existing unrelated violations and no Round-13 import; it is
+not claimed green.  Round-12 independent review is running in parallel;
+Round-13 measurements have no independent review yet and make no dual-review
+claim.
