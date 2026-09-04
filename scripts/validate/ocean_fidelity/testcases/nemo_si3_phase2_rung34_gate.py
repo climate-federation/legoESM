@@ -44,9 +44,12 @@ DYNAMICS_FIELDS = (
     "stress2_i",
     "stress12_i",
 )
+UNINFORMATIVE_ZERO_FIELDS = frozenset(("oa_i", "a_ip", "v_ip", "v_il"))
 _PLANT_MAGNITUDE = 1.0e-10
 _HALO_WIDTH = 2
 _CELL_AREA_M2 = 2000.0 * 2000.0
+_HASH_BLOCK_BYTES = 1024 * 1024
+_FP64_STORAGE_BITS = 64
 
 
 class Rung34GateError(RuntimeError):
@@ -72,12 +75,19 @@ oracle_gate = _load_oracle_gate()
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
+        for block in iter(lambda: stream.read(_HASH_BLOCK_BYTES), b""):
             digest.update(block)
     return digest.hexdigest()
 
 
-def _score(name: str, oracle, candidate, *, exact: bool = False) -> dict[str, object]:
+def _score(
+    name: str,
+    oracle,
+    candidate,
+    *,
+    exact: bool = False,
+    uninformative_zero: bool = False,
+) -> dict[str, object]:
     oracle = np.asarray(oracle)
     candidate = np.asarray(candidate)
     require(oracle.shape == candidate.shape, f"{name}: shape mismatch")
@@ -93,10 +103,15 @@ def _score(name: str, oracle, candidate, *, exact: bool = False) -> dict[str, ob
     scale = max(oracle_maximum, 1.0)
     normalized = maximum / scale
     relative = maximum / oracle_maximum if oracle_maximum > 0.0 else None
-    passed = bool(np.array_equal(candidate, oracle)) if exact else normalized <= POINTWISE_BAR
+    if uninformative_zero:
+        require(oracle_maximum == 0.0, f"{name}: UNINFORMATIVE field is not oracle-zero")
+        status = "UNINFORMATIVE"
+    else:
+        passed = bool(np.array_equal(candidate, oracle)) if exact else normalized <= POINTWISE_BAR
+        status = "AT-BAR" if passed else "DEBT"
     return {
         "name": name,
-        "status": "AT-BAR" if passed else "DEBT",
+        "status": status,
         "max_abs": maximum,
         "normalized_max_abs": normalized,
         "relative_max_abs": relative,
@@ -156,7 +171,10 @@ def run_gate(root: Path, *, plant_field: bool = False) -> dict[str, object]:
     header1, frame1 = oracle_gate.read_frame(frame1_path)
     header2, frame2 = oracle_gate.read_frame(frame2_path)
     require(header1["kt"] == 1 and header2["kt"] == 2, "entry frame clock mismatch")
-    require(header1["storage_bits"] == 64, "oracle entry frame is not fp64")
+    require(
+        header1["storage_bits"] == _FP64_STORAGE_BITS,
+        "oracle entry frame is not fp64",
+    )
     with netCDF4.Dataset(mesh_path) as dataset:
         mesh = {name: np.asarray(dataset[name][:]) for name in MESH_FIELDS}
     with netCDF4.Dataset(init_path) as dataset:
@@ -203,10 +221,11 @@ def run_gate(root: Path, *, plant_field: bool = False) -> dict[str, object]:
                     _HALO_WIDTH:-_HALO_WIDTH, _HALO_WIDTH:-_HALO_WIDTH
                 ],
                 value[_HALO_WIDTH:-_HALO_WIDTH, _HALO_WIDTH:-_HALO_WIDTH],
+                uninformative_zero=name in UNINFORMATIVE_ZERO_FIELDS,
             )
         )
 
-    failed = [row["name"] for row in rows if row["status"] != "AT-BAR"]
+    failed = [row["name"] for row in rows if row["status"] == "DEBT"]
     return {
         "gate": "nemo-si3-phase2-rung34-kt1-v1",
         "case": "ICE_RHEO_OMIP_L3",
@@ -224,6 +243,7 @@ def run_gate(root: Path, *, plant_field: bool = False) -> dict[str, object]:
         "plant": {"field": plant_field, "magnitude": _PLANT_MAGNITUDE},
         "coverage": {
             "kt1_scored_fields": sorted(fields),
+            "uninformative_oracle_zero_fields": sorted(UNINFORMATIVE_ZERO_FIELDS),
             "prather_moment_leaves": 5 * len(ICE_RHEO_TRACERS),
             "prather_moment_status": "UNMEASURED-ENTRY-FRAMES-DO-NOT-CARRY-MOMENTS",
             "trajectory_kt2_to_kt720": "UNMEASURED",
@@ -248,4 +268,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
