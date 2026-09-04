@@ -465,3 +465,31 @@ RECEIPTS (24/54 virtual CPU devices, FMA off)
 NEXT (M4b-B): tiled barriers (a "blend" op kind in the split runtime on
 padded-embedded compute arrays), write-set-restricted pad refresh, then
 multi-process ranks on the CPU+mpi venue.
+
+## M4b-B (2026-09-04): the barriers tiled — every exchange is now O(halo)
+
+A duo barrier blend ``out[dst] = 0.5*(in[dst] + s*in[src])`` (s = ±1) is
+the two-source stencil row ``0.5*in[dst] + (0.5*s)*in[src]`` EXACTLY for
+normal doubles (halving is exact, rounding commutes with a power-of-two
+scaling; the cancellation corner gives +0 both ways; FMA off) —
+`fv3_duo_spmd.blend_as_stencil`, pinned by
+`test_barrier_blend_as_stencil_is_bitwise` on the real tables and by the
+24-device parity tests.  Barrier 1 (`avg_c`, C-flux pair), barrier 2
+(`avg_b`, B pair) and the allflux barrier (`avg_c` batched over the
+selected slots) become splits on PADDED twins of their compute layouts
+(`build_tiled_barrier_split`); the window arm embeds the compute operands
+(`_normalize`, explicit axes) and fires them through the same
+block/body/pad path.  `DuoWindowSpmdComm.barrier_mode == "tiled"`; the
+flat fallback is gone.
+Precondition (codex MAJOR, accepted as a documented contract): the
+identity excludes subnormal-producing halving and overflow; barrier
+operands are O(1e-1..1e5) winds/fluxes, and a traced program cannot
+refuse on values.
+RECEIPTS: unit 11/11 incl. planted sabotage (jobs 9632468/9632498);
+full-step window-SPMD == GSPMD-face-sharded flat BITWISE, block
+coherence 0: hydro+NH C48 kt=2 (24 devices, 9632470/9632471), hydro+NH
+C96 kt=3 (54 devices, 9632472/9632473).  codex round: 2 CLEAN, 1 MAJOR
+(domain contract, documented), 1 MAJOR fixed (slot count could alias a
+horizontal extent: barriers now pass explicit axes), 1 MINOR fixed
+(sabotage arm).  GLM: identity holds for the stated operands; argument,
+not sampling, closes the cancellation corner (recorded in the docstring).

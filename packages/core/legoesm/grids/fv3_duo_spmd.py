@@ -23,6 +23,11 @@ from __future__ import annotations
 import numpy as np
 
 __all__ = [
+    "blend_as_stencil",
+    "build_tiled_barrier_split",
+    "tiled_split_body",
+    "tiled_vector_body",
+    "tiled_me",
     "census_cross_face_depth",
     "assert_ring_width_covers",
     "build_ring_comm",
@@ -1663,6 +1668,92 @@ def build_tiled_ext_scalar_b_split(tab, kt) -> DuoTiledSplit:
         tab, tab.lay_b,
         [[tab.ex_b_strip], [tab.k2e_b], [st_dir, st_dia]],
         kt, "tiled_ext_scalar_sixface[B]")
+
+
+class _StencilRec:
+    """A stencil table record built HERE (dst / src / w / name), the same
+    duck-typed surface ``_op_kind`` classifies as ``"stencil"``."""
+
+    __slots__ = ("dst", "src", "w", "name")
+
+    def __init__(self, dst, src, w, name):
+        self.dst = np.asarray(dst, dtype=np.int32)
+        self.src = np.asarray(src, dtype=np.int32)
+        self.w = np.asarray(w, dtype=np.float64)
+        self.name = name
+
+
+def _remap_flat(lay_from, lay_to, flat, off):
+    """Flat indices of ``lay_from`` -> the same (k, face, i+off, j+off)
+    cells in ``lay_to`` (vectorised ``_FlatLayout.idx``)."""
+    k, f, i, j = _decode_fij(lay_from, np.asarray(flat, dtype=np.int64))
+    out = np.empty_like(k)
+    for kk, (m0, m1) in enumerate(lay_to.shapes):
+        m = k == kk
+        ii, jj = i[m] + off, j[m] + off
+        if m.any() and (ii.min() < 0 or ii.max() >= m0 or jj.min() < 0
+                        or jj.max() >= m1):
+            raise IndexError(f"padded remap: subscript outside array {kk} "
+                             f"of shape (6, {m0}, {m1})")
+        out[m] = lay_to.bases[kk] + (f[m] * m0 + ii) * m1 + jj
+    return out.reshape(np.shape(flat))
+
+
+def blend_as_stencil(bl, lay_from, lay_to, off, name):
+    """A duo barrier blend ``out[dst] = 0.5*(in[dst] + sign*in[src])`` as
+    a two-source STENCIL row ``0.5*in[dst] + (0.5*sign)*in[src]`` on the
+    padded layout ``lay_to`` (indices shifted by ``off``).
+
+    EXACT, not approximate: multiplying by 0.5 is exact for every
+    NORMAL double (halving never overflows; it only rounds when the result
+    is subnormal, i.e. |x| < 2^-1021), and rounding-to-nearest commutes
+    with a power-of-two scaling as long as no operand or result is
+    subnormal, so ``fl(0.5*fl(a + s*b)) == fl(fl(0.5*a) + fl(0.5*s*b))``
+    for s = +-1.  The cancellation corner a == s*b gives +0 on both sides
+    (RNE); any other pair of operands >= 1e-1 differs by at least one
+    ulp, ~2^-56, far above the subnormal range -- the barrier operands
+    are O(1e-1..1e5) winds and fluxes, and the argument, not the random
+    sampling, closes that corner (GLM 2026-09-04).  FMA must be off (it
+    is pinned on the tiled lane).  The tiled stencil runtime forms exactly
+    the right-hand side (ordered left-to-right).  Pinned by
+    ``test_barrier_blend_as_stencil_is_bitwise`` on the real tables.  The
+    0.5*sign weights are formed here from the certified ``sign`` record
+    (exact for +-1)."""
+    dst = _remap_flat(lay_from, lay_to, bl.dst, off)
+    src = _remap_flat(lay_from, lay_to, bl.src, off)
+    sign = np.asarray(bl.sign, dtype=np.float64)
+    if not np.all(np.abs(sign) == 1.0):
+        raise ValueError(f"{name}: blend sign record is not +-1 "
+                         f"(0.5*sign would round)")
+    w = np.stack([np.full(dst.shape, 0.5), 0.5 * sign], axis=1)
+    return _StencilRec(dst, np.stack([dst, src], axis=1), w, name)
+
+
+def build_tiled_barrier_split(tab, kt, kind: str) -> DuoTiledSplit:
+    """M4b-B: the edge-blend BARRIERS on the blocked layout.
+
+    ``kind``: ``"bgrid"`` (barrier 2, ``tab.avg_b`` on the (npx, npx) B
+    pair) or ``"cgrid"`` (barrier 1, ``tab.avg_c`` on the (npx, n)/(n, npx)
+    flux pair; the allflux barrier is the same table batched over the
+    selected slots).  The barrier operands are COMPUTE-domain arrays,
+    which the blocked layout (``kt*nl + e`` extents) cannot hold, so the
+    split is built on their PADDED twins (compute index + ng) and the
+    window arm embeds the operands before firing.  The blend becomes an
+    exact two-source stencil (:func:`blend_as_stencil`)."""
+    from legoesm.grids.fv3_duo_halos import FlatLayout
+
+    n, ng = int(tab.n), int(tab.ng)
+    ma, mb = n + 2 * ng, n + 2 * ng + 1
+    if kind == "bgrid":
+        lay_from, lay_to, bl = tab.lay_bb, FlatLayout((mb, mb), (mb, mb)), tab.avg_b
+    elif kind == "cgrid":
+        lay_from, lay_to, bl = tab.lay_fx, FlatLayout((mb, ma), (ma, mb)), tab.avg_c
+    else:
+        raise ValueError(f"build_tiled_barrier_split: kind {kind!r} "
+                         f"(expected 'bgrid' or 'cgrid' -- fail closed)")
+    st = blend_as_stencil(bl, lay_from, lay_to, ng, f"barrier_{kind}")
+    return _build_tiled_split(tab, lay_to, [[st]], kt,
+                              f"tiled_barrier_{kind}")
 
 
 def build_tiled_fill_corners_agrid_split(tab, kt, axis: str) -> DuoTiledSplit:

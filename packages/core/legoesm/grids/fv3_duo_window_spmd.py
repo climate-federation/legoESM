@@ -25,18 +25,20 @@ The pad refresh after EVERY firing is the correctness-first form (fresher
 pads than the single-device arm's once-per-substep refresh, hence equally
 bitwise against the flat step); restricting it to each firing's write-set
 is a later optimisation with its own gate.  The three edge-blend BARRIERS
-are not yet tiled: they run on the flat state through the single-device
-bundle's scatter/gather (O(state) communication) -- correct, slow, and
-named as such (``barrier_mode``).  Requires ``2*pad <= nl + e`` (each
-tile sends only its own block rows) and ``kt | m_a``.
+are tiled too (M4b-B): each blend is an exact two-source stencil on the
+padded twin of its compute-domain layout
+(:func:`fv3_duo_spmd.build_tiled_barrier_split`), fired through the same
+block/body/pad path -- the compute operands are embedded into the padded
+geometry by ``_normalize`` -- and the allflux barrier is the cgrid one
+batched over the selected slots.  Requires ``2*pad <= nl + e`` (each tile
+sends only its own block rows) and ``kt | m_a``.
 """
 from __future__ import annotations
 
 import numpy as np
 
 from legoesm.grids.fv3_duo_windows import (
-    DuoWindowComm, WindowLayout, build_window_ctx, build_window_layout,
-    horizontal_axes, window_axis_extent)
+    WindowLayout, build_window_ctx, build_window_layout, horizontal_axes)
 
 __all__ = ["DuoWindowSpmdComm", "attach_window_spmd_comm", "window_sharding"]
 
@@ -57,11 +59,12 @@ class DuoWindowSpmdComm:
     """``tab.window_comm`` for window stacks sharded on the tile mesh."""
 
     handles_barriers = True
-    barrier_mode = "flat-fallback"
+    barrier_mode = "tiled"
 
     def __init__(self, lay: WindowLayout, tab, mesh):
         import jax
         from legoesm.grids.fv3_duo_spmd import (
+            build_tiled_barrier_split,
             build_tiled_ext_scalar_a_split, build_tiled_ext_scalar_b_split,
             build_tiled_ext_vector_splits, tiled_split_body,
             tiled_vector_body)
@@ -88,8 +91,11 @@ class DuoWindowSpmdComm:
             "B": tiled_split_body(build_tiled_ext_scalar_b_split(tab, kt)),
             "D": tiled_vector_body(build_tiled_ext_vector_splits(tab, kt, "D")),
             "C": tiled_vector_body(build_tiled_ext_vector_splits(tab, kt, "C")),
+            "avg_b": tiled_split_body(build_tiled_barrier_split(tab, kt,
+                                                                "bgrid")),
+            "avg_c": tiled_split_body(build_tiled_barrier_split(tab, kt,
+                                                                "cgrid")),
         }
-        self._flat = DuoWindowComm(lay, tab)     # the barriers' fallback
         self._jax = jax
 
     # ------------------------------------------------------------------
@@ -150,15 +156,20 @@ class DuoWindowSpmdComm:
             out.append(a)
         return out
 
-    def _normalize(self, a):
+    def _normalize(self, a, axes=None):
         """Window array -> ``(padded-extent (W+e0, W+e1, ...) form,
         restore)``: an (i, k, j) array is transposed to (i, j, k), and a
         compute-domain array is embedded in the padded extent (its
         window compute index 0 sits ``ng`` into the window), so every
-        firing sees the one blocked geometry.  ``restore`` undoes both."""
+        firing sees the one blocked geometry.  ``restore`` undoes both.
+        ``axes`` (leading-axis-inclusive, e.g. ``(1, 2)``) overrides the
+        extent heuristic where the caller KNOWS the layout -- the
+        barriers' slot axis can equal a horizontal extent (nq+2 == n_w,
+        codex 2026-09-04) and must not be guessed."""
         import jax.numpy as jnp
         lay = self.lay
-        axes = horizontal_axes(lay, (lay.nb,) + tuple(a.shape), lay.nb)
+        if axes is None:
+            axes = horizontal_axes(lay, (lay.nb,) + tuple(a.shape), lay.nb)
         if axes is None:
             raise ValueError(f"window array of shape {a.shape} has no "
                              f"horizontal axes on {lay}")
@@ -181,9 +192,11 @@ class DuoWindowSpmdComm:
             return jnp.swapaxes(b, 1, 2) if swap else b
         return a, restore
 
-    def _firing(self, name, kind, arrays, body=None):
+    def _firing(self, name, kind, arrays, body=None, axes=None):
         """ONE shard_map: blocks out of the windows, the certified body,
-        blocks back, pads refreshed.  ``body`` None = refresh only."""
+        blocks back, pads refreshed.  ``body`` None = refresh only;
+        ``axes`` = explicit horizontal axes for every array (see
+        ``_normalize``)."""
         import jax
         from jax.experimental.shard_map import shard_map
         lay = self.lay
@@ -191,7 +204,7 @@ class DuoWindowSpmdComm:
 
         def _run(*locs):
             locs = [l[0] for l in locs]                     # (W0, W1, ...)
-            norm = [self._normalize(a) for a in locs]
+            norm = [self._normalize(a, axes) for a in locs]
             locs = [a for a, _ in norm]
             ti = jax.lax.axis_index("tile_i")
             tj = jax.lax.axis_index("tile_j")
@@ -252,15 +265,35 @@ class DuoWindowSpmdComm:
         return self._firing("ext_vector_cgrid_allk", "C", [ucwk, vcwk],
                             self._bodies["C"])
 
-    # barriers: flat fallback (O(state) gather) until the blend op is tiled
+    # barriers (M4b-B): exact stencil twins of the blends, tiled
+    # The blend-as-stencil identity is exact for NORMAL operands (no
+    # subnormal result of halving, no overflow: |x| in [2^-1021, 2^1023));
+    # winds and fluxes are O(1e-1..1e5).  The tiled arm does not check
+    # the data (a traced program cannot refuse on values); the SPMD gate
+    # reports the operand range so the precondition is on the record.
     def average_shared_edge_bgrid(self, xbw, ybw):
-        return self._flat.average_shared_edge_bgrid(xbw, ybw)
+        return self._firing("avg_bgrid", "avg_b", [xbw, ybw],
+                            self._bodies["avg_b"], axes=(1, 2))
 
     def average_shared_edge_cgrid(self, fxw, fyw):
-        return self._flat.average_shared_edge_cgrid(fxw, fyw)
+        return self._firing("avg_cgrid", "avg_c", [fxw, fyw],
+                            self._bodies["avg_c"], axes=(1, 2))
 
     def average_allflux_shared_edges(self, afxw, afyw):
-        return self._flat.average_allflux_shared_edges(afxw, afyw)
+        """The cgrid blend over the SELECTED slots only (``tab.allflux_slots``:
+        delp, temp, tracers -- w and q_con are not averaged), batched as
+        the trailing axis; unselected slots come back byte-identical."""
+        import jax.numpy as jnp
+        sel = np.asarray(self.tab.allflux_slots)
+        nslot = 4 + int(self.tab.nq)
+        if afxw.shape[-1] != nslot or afyw.shape[-1] != nslot:
+            raise ValueError(
+                f"average_allflux_shared_edges: slot axis {afxw.shape[-1]}/"
+                f"{afyw.shape[-1]} != 4+nq = {nslot}")
+        ax, ay = self._firing("avg_allflux", "avg_c",
+                              [afxw[..., sel], afyw[..., sel]],
+                              self._bodies["avg_c"], axes=(1, 2))
+        return (afxw.at[..., sel].set(ax), afyw.at[..., sel].set(ay))
 
     def refresh(self, bundle: dict) -> dict:
         """Seam pads of every window-stacked padded array rebuilt from the

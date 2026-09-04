@@ -369,6 +369,11 @@ class _FlatLayout:
         return self.bases[k] + (face * m0 + i0) * m1 + j0
 
 
+#: public name of the flat index layout (the tiled split builds padded
+#: twins of the barrier layouts with it; no private cross-module import)
+FlatLayout = _FlatLayout
+
+
 # ---------------------------------------------------------------------------
 # build-time independence checks (the batching licence, machine-enforced)
 # ---------------------------------------------------------------------------

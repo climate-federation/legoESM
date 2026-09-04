@@ -161,3 +161,74 @@ def test_sabotaged_arms_fail(setup):
         comm._bodies["A"] = body
     bad = (out != ref) & ~(np.isnan(out) & np.isnan(ref))
     assert bad.any(), "identity exchange body still matched the flat impl"
+
+
+def test_barrier_blend_as_stencil_is_bitwise(setup):
+    """The exact-arithmetic claim behind the tiled barriers, on the REAL
+    tables: 0.5*(a + s*b) == 0.5*a + (0.5*s)*b bitwise (random fields,
+    both blends), evaluated the way the two runtimes evaluate them."""
+    from legoesm.grids.fv3_duo_halos import FlatLayout
+    from legoesm.grids.fv3_duo_spmd import blend_as_stencil
+    ctx, lay, comm = setup
+    tab = ctx.tab
+    rng = np.random.default_rng(11)
+    for bl, lay_from in ((tab.avg_b, tab.lay_bb), (tab.avg_c, tab.lay_fx)):
+        flat = rng.standard_normal(lay_from.total)
+        st = blend_as_stencil(bl, lay_from, lay_from, 0, "t")   # no shift
+        ref = flat.copy()
+        ref[bl.dst] = 0.5 * (flat[bl.dst] + bl.sign * flat[bl.src])
+        got = flat.copy()
+        v = flat[st.src]                                     # (n, 2)
+        got[st.dst] = st.w[:, 0] * v[:, 0] + st.w[:, 1] * v[:, 1]
+        assert np.array_equal(got, ref)
+
+
+@pytest.mark.parametrize("kind", ["bgrid", "cgrid", "allflux"])
+def test_barriers_match_flat_impl(setup, kind):
+    from legoesm.grids.fv3_duo_halos import (
+        average_shared_edge_bgrid, average_shared_edge_cgrid,
+        average_allflux_shared_edges)
+    from legoesm.grids.fv3_duo_windows import gather_windows
+    ctx, lay, comm = setup
+    assert ctx.tab.window_comm is None
+    npx = N + 1
+    # the flat barriers are per-level 2-D (the 3-D phases loop k)
+    if kind == "bgrid":
+        a6, b6 = _rand((6, npx, npx), 8), _rand((6, npx, npx), 9)
+        ra, rb = average_shared_edge_bgrid(a6, b6, ctx.tab)
+        fn = comm.average_shared_edge_bgrid
+    elif kind == "cgrid":
+        a6, b6 = _rand((6, npx, N), 10), _rand((6, N, npx), 12)
+        ra, rb = average_shared_edge_cgrid(a6, b6, ctx.tab)
+        fn = comm.average_shared_edge_cgrid
+    else:
+        ns = 4 + int(ctx.tab.nq)
+        a6, b6 = _rand((6, npx, N, ns), 13), _rand((6, N, npx, ns), 14)
+        ra, rb = average_allflux_shared_edges(a6, b6, ctx.tab)
+        fn = comm.average_allflux_shared_edges
+    oa, ob = jax.jit(fn)(_windows(lay, comm, a6), _windows(lay, comm, b6))
+    for o, r, nm in ((oa, ra, "x"), (ob, rb, "y")):
+        o = np.asarray(o)
+        r = np.asarray(gather_windows(lay, r))
+        bad = (o != r) & ~(np.isnan(o) & np.isnan(r))
+        assert not bad.any(), f"{kind} {nm}: {bad.sum()} cells differ"
+
+
+def test_sabotaged_barrier_fails(setup):
+    """Non-vacuity for the barrier parity test: a body that drops the
+    sign (weights 0.5, 0.5 instead of 0.5, 0.5*sign) must DIFFER."""
+    from legoesm.grids.fv3_duo_halos import average_shared_edge_bgrid
+    from legoesm.grids.fv3_duo_windows import gather_windows
+    ctx, lay, comm = setup
+    npx = N + 1
+    a6, b6 = _rand((6, npx, npx), 21), _rand((6, npx, npx), 22)
+    ra, rb = average_shared_edge_bgrid(a6, b6, ctx.tab)
+    body = comm._bodies["avg_b"]
+    comm._bodies["avg_b"] = lambda x, y: (x, y)          # no blend at all
+    try:
+        oa, ob = jax.jit(comm.average_shared_edge_bgrid)(
+            _windows(lay, comm, a6), _windows(lay, comm, b6))
+    finally:
+        comm._bodies["avg_b"] = body
+    ra = np.asarray(gather_windows(lay, ra))
+    assert (np.asarray(oa) != ra).any(), "identity barrier still matched"
