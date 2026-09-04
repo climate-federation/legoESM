@@ -303,3 +303,81 @@ two ULP is **not** predicted because other compiler associations may remain.
 No limiter, flux-content, donor-loss, receiver-merge, velocity, state, or
 selector expression changes in this arm.  A failure to move either registered
 quantity refutes transported-area ordering as an owner.
+
+## Round-10 C-grid aEVP source-rounding arm (preregistered before solver edits)
+
+### Shared tool provenance and immutable contract
+
+The one shared implementation is
+`packages/core/legoesm/core/source_rounding.py::nemo_source_round`, imported
+from SI3-thermodynamics commit `86a8eb21d189`.  Its direct identity/JIT/gradient
+test is imported from GYRE commit `2a7b1f7ae258`.  The helper implementation is
+not changed in this lane.  Its stale sentence claiming that
+`optimization_barrier` survives to HLO will be corrected as documentation
+only, as explicitly requested: the operative materialization guard is the
+finite-classification `select` plus `copysign` chain.
+
+The production C-grid arm will call this helper after each NEMO written source
+statement, with no card selector or default change.  A private boolean-free
+ablation helper may retain the old association only so the one-variable gate
+can prove the measured move.  The A-grid EVP and mEVP arms are untouched.
+
+### Written-operation registry for one aEVP subcycle
+
+Each row names the NEMO assignment whose result is materialized before its next
+consumer.  Parentheses and reciprocal forms remain those written by NEMO.
+
+| stage | NEMO statements | guarded result and grid |
+|---|---|---|
+| fixed operands | `icedyn_rhg_evp.F90:231-247,270-317` | `ecc2`, `1/ecc2`, `1/zdtevp`; T mass/Coriolis/dt-over-mass; U/V area, mass, cross-ocean velocity, mass/dt, air/ocean drag and slope |
+| F strain | `:395-397` | each U and V reciprocal-scaled difference, squared-metric product, their sum, area reciprocal product, then `fimask` product → `zds(F)` |
+| T strain | `:404-421` | four weighted F-shear squares and their prescribed pair sums → `zds2`; paired U/V flux differences → `zdiv`, then `zdiv2`; paired reciprocal-metric differences → `zdt`, then `zdt2`; inner `(zdt2+zds2)`, eccentricity product, addition to `zdiv2`, square root and `zmsk` → `zdelta(T)` |
+| delta floor/viscosity closure | `:423-424,427` | `zdelta+rn_creepl`, `strength/(...)`, `zmsk` product → `zp_delt(T)`, followed by periodic T halo materialization |
+| wide T recomputation | `:432-440` | separately materialized duplicate `zdiv` and `zdt`, because NEMO recomputes rather than reuses them |
+| adaptive alpha/beta | `:443-449,465-477` | ordered `0.5*zp_delt`, reciprocal area, `zdt_m`, square root, `pi` product, floor; `1/(alpha+1)`; separately repeated `zbeta`; four-point max → `alpha_f`; `1/(alpha_f+1)` |
+| T stresses | `:458-461` | old-stress×alpha; divergence/delta branches and tension/eccentricity branch; `zp_delt` products; prescribed sums; reciprocal-alpha product; final `zmsk` on `zs1/zs2` only |
+| F stress | `:483-489` | two pair sums and quarter product for `zp_delf`; shear/eccentricity product, half weight, old-stress branch, sum and reciprocal-alpha product → `zs12` (no `zmsk`) |
+| stress divergence | `:495-510` | every squared-metric stress product, prescribed difference and pair sum, reciprocal metric product, cross-stress branch, outer half and reciprocal-area products → `zfU(U)`/`zfV(V)` |
+| cross velocity | `:512-514` | the two parenthesized pair sums, quarter product and mask → `v_iceU(U)`/`u_iceV(V)` |
+| ocean drag per component | `:534-544,585-595,640-650,692-702` | component differences, squares, pair sum, square root and drag product → `zTauO`; ocean-velocity difference and product → ocean stress; dead landfast bottom terms remain zero on this card |
+| Coriolis | `:547-549,598-600,653-655,705-707` | each metric×velocity product, prescribed local pair, mass-Coriolis product, remote pair/product, outer sum, reciprocal-metric and quarter products; numerically zero here because the case sets Coriolis off, but still registered |
+| velocity RHS | `:551-562,602-613,657-668,709-720` | source-ordered additions `force + air + Coriolis + slope + ocean`; beta×current plus before velocity; mass/dt product; RHS and implicit-drag additions; beta+1, mass/dt product, drag addition, denominator floor; final quotient |
+| velocity masks | `:575-579,626-630,681-685,733-737` | active/low-mass branches and products, then fast-mask factor/product |
+| parity and halo | `:530-634,636-741` | even subcycles write V halo-1 then U interior; odd write U halo-1 then V interior; each component result is materialized before the sequential partner and full one-rank periodic U/V halos are rebuilt after each pair, matching `lbc_lnk(...,ldfull=.true.)` |
+
+### Prediction and discriminator
+
+Primary prediction: under CPU production JIT and fp64, source-rounding the
+registered statements makes `stress1_i`, `stress2_i`, `stress12_i`, `u_ice`,
+and `v_ice` byte-exact after all 100 subcycles of completed step 1.  Because
+the Round-9 oracle-U/V arm already makes every endpoint Prather moment
+byte-exact, the full completed-step state and all 160 transported moments are
+also predicted byte-exact.
+
+CONFIRM means zero ULP for all five rheology outputs and every scored
+completed-step field/moment.  REFUTE means any row is nonzero.  On REFUTE, the
+gate records every subcycle and descends in the registry above to the first
+nonzero operand; no later-stage explanation is accepted as ownership.  The
+private old-association arm must reproduce a nonzero scored row, and a planted
+post-solver perturbation must move a named clean scored row from bit-exact to
+nonzero independently of the overall gate exit.
+
+Only if completed step 1 is byte-exact does the experiment proceed through
+steps 2--8 and the active redistribution window.  Only if that endpoint is
+also byte-exact does the production-JIT trajectory rerun steps 9--720.  That
+walk registers, for every field, the first step at which its numerator becomes
+nonzero and prints `0 / n` for bit-exact rows rather than dividing or replacing
+the denominator.  Growth checkpoints remain 9, 10, 50, 100, 200, 485 and 720.
+The measured first non-bit-exact statement, if any, decides whether the old
+step-720 divergence was amplification of residual arithmetic or a remaining
+defect; no amplification label is assigned in advance.
+
+### Round-10 ASKED / UNASKED choices
+
+| choice | disposition | reason |
+|---|---|---|
+| Import the single shared rounding helper/test at their exact commits and record provenance | ASKED | Cross-lane one-implementation rule |
+| Guard every executed written aEVP operation without a card switch; retain old association privately for ablation | ASKED | One-variable discriminator |
+| Enumerate Rule-8/12 rows, bind a row-level plant, and use `0 / n` for exact rows | ASKED | Queued review items |
+| Continue steps 2--720 before step 1 is byte-exact | UNASKED | Explicit dispatch stop condition |
+| Change the helper implementation, A-grid defaults, schemes, bar, precision, backend, shipped NEMO, or commit artifacts | UNASKED | Outside the authorized lane |
