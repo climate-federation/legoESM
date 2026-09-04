@@ -6,7 +6,16 @@ import importlib.util
 import struct
 from pathlib import Path
 
+import jax.numpy as jnp
 import numpy as np
+
+import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as model_module
+import legoesm.ocean.dynamics.ocean_pe_latlon_cgrid as pe_module
+from legoesm.grids.latlon import create_beta_plane_cgrid_geometry
+from legoesm.ocean.physics.shortwave_penetration import (
+    ShortwavePenetrationConfig,
+    shortwave_penetration_tendency,
+)
 
 PATH = (
     Path(__file__).parents[3] / "scripts/validate/ocean_fidelity/testcases/"
@@ -197,26 +206,64 @@ def test_causal_arm_near_null_is_not_an_owner_claim():
     assert "EXONERATED" not in source
 
 
-def test_stage3_source_and_content_boundaries_are_literal_and_gated():
-    model_path = PATH.parents[4] / (
-        "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py")
-    pe_path = PATH.parents[4] / (
-        "packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py")
-    model_source = model_path.read_text()
-    pe_source = pe_path.read_text()
-    for token in (
-        "return_final_content",
-        "_nemo_ws_tracer_content_rhs",
-        "pre_implicit_tracer_content_override",
-        "expose_pre_implicit_content",
-        "expose_stage3_advection_content",
-        "stage3_transport_override",
-        "_nemo_ws_tracer_content_rhs = _pre_zdf_content_override",
-        "legacy_zdf_entry_kmm_eta",
-        "_nemo_ws_zdf_eta_kmm",
-        "tend.dT_dt.data - _qsr_b",
-        "z_half_stretch=_r3t_m",
-    ):
-        assert token in model_source
-    assert "nemo_two_band_full_shortwave" in pe_source
-    assert "if not nemo_two_band_full_shortwave" in pe_source
+def test_stage3_tracer_helper_returns_the_content_it_actually_advanced():
+    grid = create_beta_plane_cgrid_geometry(
+        2, 3, dx_m=8.0, dy_m=8.0, f0=0.0, beta=0.0,
+        cartesian_pseudo_lat=True)
+    shape = (2, 3, 2)
+    tracer = jnp.arange(12, dtype=jnp.float64).reshape(shape)
+    salt = tracer + 30.0
+    h = jnp.ones(shape, dtype=jnp.float64)
+    zero = jnp.zeros(shape, dtype=jnp.float64)
+    source = jnp.full(shape, 3.0, dtype=jnp.float64)
+    result = model_module._nemo_ws_rk3_tracer_pair_step(
+        tracer, salt, "centered",
+        jnp.zeros((2, 4, 2), dtype=jnp.float64),
+        jnp.zeros((3, 3, 2), dtype=jnp.float64),
+        jnp.zeros((2, 3, 3), dtype=jnp.float64),
+        h, h, jnp.ones((2, 4, 2), dtype=jnp.float64),
+        jnp.ones((3, 3, 2), dtype=jnp.float64), grid, 2.0,
+        jnp.ones(shape, dtype=jnp.float64),
+        stage_source_rates=((zero, zero), (zero, zero), (source, zero)),
+        return_final_content=True,
+    )
+    out_t, out_s, content_t, content_s, adv_t, adv_s = result
+    np.testing.assert_array_equal(np.asarray(adv_t), np.asarray(tracer))
+    np.testing.assert_array_equal(np.asarray(adv_s), np.asarray(salt))
+    np.testing.assert_array_equal(np.asarray(content_t), np.asarray(tracer + 6.0))
+    np.testing.assert_array_equal(np.asarray(content_s), np.asarray(salt))
+    np.testing.assert_array_equal(np.asarray(out_t), np.asarray(content_t))
+    np.testing.assert_array_equal(np.asarray(out_s), np.asarray(content_s))
+
+
+def test_stage3_qsr_replacement_removes_kbb_and_adds_kmm():
+    tendency = jnp.asarray([[[11.0]]], dtype=jnp.float64)
+    qsr_kbb = jnp.asarray([[[3.0]]], dtype=jnp.float64)
+    qsr_kmm = jnp.asarray([[[5.0]]], dtype=jnp.float64)
+    result = model_module._nemo_qsr_stage3_rate(
+        tendency, qsr_kbb, qsr_kmm,
+        jnp.asarray([[[2.0]]]), jnp.asarray([[[4.0]]]))
+    np.testing.assert_array_equal(np.asarray(result), np.asarray([[[9.0]]]))
+
+
+def test_source_named_two_band_selector_owns_full_qsr_composition():
+    sw = jnp.asarray([100.0], dtype=jnp.float64)
+    nemo = pe_module._shortwave_surface_composition(
+        sw, "nemo_qsr_2bd", jnp.float64)
+    generic = pe_module._shortwave_surface_composition(
+        sw, "jerlov_2band", jnp.float64)
+    np.testing.assert_array_equal(np.asarray(nemo), np.asarray([100.0]))
+    np.testing.assert_array_equal(np.asarray(generic), np.asarray([94.0]))
+
+
+def test_two_band_live_kmm_ladder_changes_the_stage3_profile():
+    sw = jnp.asarray([[100.0]], dtype=jnp.float64)
+    dz = jnp.asarray([10.0, 20.0], dtype=jnp.float64)
+    z_half = jnp.asarray([0.0, -10.0, -30.0], dtype=jnp.float64)
+    cfg = ShortwavePenetrationConfig(scheme="nemo_qsr_2bd", water_type="I")
+    base = shortwave_penetration_tendency(
+        sw, dz, z_half, jnp.ones((1, 1)), cfg)
+    live = shortwave_penetration_tendency(
+        sw, dz, z_half, jnp.ones((1, 1)), cfg,
+        z_half_stretch=jnp.asarray([[[1.1]]]))
+    assert not np.array_equal(np.asarray(base), np.asarray(live))
