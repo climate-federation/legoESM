@@ -35,6 +35,7 @@ from legoesm.ocean.physics.bbl_adv import (
     apply_bbl_adv_tendency,
     bbl_static_geometry,
     bbl_transports,
+    nemo_bbl_static_geometry,
 )
 
 RHO0 = 1025.0
@@ -138,6 +139,59 @@ def test_land_adjacent_faces_inactive():
     mask = mask.at[0, 0].set(0.0)
     geom = bbl_static_geometry(h, mask)
     assert float(jnp.sum(geom.u_active)) == 0.0
+
+
+def test_nemo_reference_slope_mask_ignores_partial_centroid_with_same_bottom_level():
+    """trabbl.F90:517-533 keys mgrhu to gdept_0(mbkt), not bathymetry.
+
+    Two adjacent partial cells can have different thickness/centroid while
+    sharing one bottom index.  The legacy continuous-depth builder activates
+    that face; NEMO's reference-depth builder must leave it exactly inactive.
+    This is the planted synthetic violation behind the OVERFLOW census arm.
+    """
+    h = np.zeros((1, 2, 4), dtype=np.float64)
+    h[0, 0, :3] = (20.0, 20.0, 5.0)
+    h[0, 1, :3] = (20.0, 20.0, 15.0)
+    mask = np.ones((1, 2), dtype=np.float64)
+    gdept = np.asarray([10.0, 30.0, 50.0, 70.0])
+    e3u = np.full((1, 1, 4), 20.0)
+    e3v = np.empty((0, 2, 4))
+
+    legacy = bbl_static_geometry(jnp.asarray(h), jnp.asarray(mask))
+    nemo = nemo_bbl_static_geometry(
+        jnp.asarray(h), jnp.asarray(mask), jnp.asarray(gdept),
+        jnp.asarray(e3u), jnp.asarray(e3v))
+
+    assert float(legacy.u_active[0, 0]) == 1.0
+    assert float(nemo.mgrhu[0, 0]) == 0.0
+    assert float(nemo.u_active[0, 0]) == 0.0
+
+
+def test_nemo_reference_bbl_thickness_gathers_unmasked_face_metric():
+    """The deeper bottom index may be dry in the shelf T column.
+
+    trabbl.F90:529-531 nevertheless gathers the unmasked e3u_0 at both
+    bottom indices.  A min of masked T-cell thicknesses would return zero (or
+    the wrong partial thickness) and is therefore not an equivalent operand.
+    """
+    h = np.zeros((1, 2, 4), dtype=np.float64)
+    h[0, 0, :2] = (20.0, 7.0)
+    h[0, 1, :3] = (20.0, 20.0, 13.0)
+    mask = np.ones((1, 2), dtype=np.float64)
+    gdept = np.asarray([10.0, 30.0, 50.0, 70.0])
+    # Exact unmasked U-face metric at the shelf and deep bottom indices.
+    e3u = np.asarray([[[20.0, 7.0, 7.0, 20.0]]])
+    e3v = np.empty((0, 2, 4))
+    geom = nemo_bbl_static_geometry(
+        jnp.asarray(h), jnp.asarray(mask), jnp.asarray(gdept),
+        jnp.asarray(e3u), jnp.asarray(e3v))
+
+    assert int(geom.ku_s[0, 0]) == 1
+    assert int(geom.ku_d[0, 0]) == 2
+    assert float(geom.dep_bot[0, 0]) == 30.0
+    assert float(geom.dep_bot[0, 1]) == 50.0
+    assert float(geom.e3u_bbl[0, 0]) == 7.0
+    assert float(geom.u_active[0, 0]) == 1.0
 
 
 def test_exact_tracer_conservation_and_direction():

@@ -1025,6 +1025,16 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     kmm_tracer_transports: bool = True
     two_step_fct_predictor: bool = True
     disable_bbl: bool = False
+    # Private faithful-but-worse control: restore the pre-census continuous
+    # partial-centroid BBL geometry.  Public NEMO WS-RK3 configurations use
+    # tra_bbl_init's reference-depth mask and raw face e3*_0 unconditionally;
+    # NEMO has no switch between these geometries (trabbl.F90:507-533).
+    legacy_bbl_partial_geometry: bool = False
+    # Private post-adjudication controls.  The NEMO WS-RK3 identity consumes
+    # one raw e3w_0 ladder in both wAimp and ZDF; these restore the former
+    # partial-cell midpoint at one consumer for causal/reproduction tests.
+    legacy_aimp_midpoint_w_metric: bool = False
+    legacy_zdf_midpoint_w_metric: bool = False
     # Private ablation of dynspg_ts's flux-form primary transport average.
     # Public NEMO RK3 configurations always keep this true.
     primary_transport_average: bool = True
@@ -1301,6 +1311,7 @@ def _nemo_ws_stage_transport(
     legacy_min_face_thickness=False, eta_before=None, eta_after=None,
     literal_wzv=False, barotropic_velocity=None,
     legacy_wzv_rederived_transport=False,
+    legacy_aimp_midpoint_w_metric=False,
 ):
     """NEMO ``stprk3_stg.F90:257-304`` Kmm stage transport triplet.
 
@@ -1397,9 +1408,22 @@ def _nemo_ws_stage_transport(
     wi_stage = jnp.zeros_like(w_stage)
     if (stage_index == 2
             and getattr(config, "adaptive_implicit_vertadv", False)):
-        e3w_int = 0.5 * (h_stage[..., :-1] + h_stage[..., 1:])
-        e3w = jnp.concatenate(
-            [h_stage[..., :1], e3w_int, h_stage[..., -1:]], axis=-1)
+        if not legacy_aimp_midpoint_w_metric:
+            from legoesm.ocean.physics.vertical_mixing import nemo_e3w_kmm
+
+            # domzgr_substitute.h90:131: e3w(Kmm)=e3w_0*(1+r3t(Kmm));
+            # domqco.F90:209: r3t=ssh/ht_0.  The canonical helper returns
+            # NEMO jk=2..jpk interior interfaces; boundary entries are unused
+            # by wAimp_RK3_t and are padded only to the local nlev+1 layout.
+            stretch = 1.0 + eta_stage / jnp.maximum(
+                jnp.sum(h_ref, axis=-1), 1.0e-10)
+            e3w_int = nemo_e3w_kmm(z_coord, h_stage, stretch)
+            e3w = jnp.concatenate(
+                [e3w_int[..., :1], e3w_int, e3w_int[..., -1:]], axis=-1)
+        else:
+            e3w_int = 0.5 * (h_stage[..., :-1] + h_stage[..., 1:])
+            e3w = jnp.concatenate(
+                [h_stage[..., :1], e3w_int, h_stage[..., -1:]], axis=-1)
         split = nemo_wicker_aimp_partition_transport(
             mf_u, mf_v, w_stage, h_stage, e3w,
             grid.area_T, grid.dy_u, grid.dx_v, dt)
@@ -1584,10 +1608,20 @@ def _nemo_ws_rk3_tracer_pair_step(
                 apply_bbl_adv_tendency,
                 bbl_transports,
             )
-            geom, area, dy_u, dx_v, gamma_s, rho0 = bbl_context
-            live_depth = jnp.cumsum(h_stage, axis=-1) - 0.5 * h_stage
-            live_bottom_depth = jnp.take_along_axis(
-                live_depth, geom.bot_k[..., None], axis=-1)[..., 0]
+            (geom, area, dy_u, dx_v, gamma_s, rho0,
+             nemo_reference_geometry) = bbl_context
+            if nemo_reference_geometry:
+                # trabbl.F90:348 reads gdept(bottom,Kmm).  Under key_qco that
+                # is gdept_0(bottom)*(1+r3t(Kmm)); the stage thickness sum is
+                # H*(1+r3t), so this ratio is the identical stage stretch.
+                reference_depth = jnp.sum(geom.h_ref, axis=-1)
+                stage_stretch = jnp.sum(h_stage, axis=-1) / jnp.maximum(
+                    reference_depth, jnp.asarray(1.0e-10, h_stage.dtype))
+                live_bottom_depth = geom.dep_bot * stage_stretch
+            else:
+                live_depth = jnp.cumsum(h_stage, axis=-1) - 0.5 * h_stage
+                live_bottom_depth = jnp.take_along_axis(
+                    live_depth, geom.bot_k[..., None], axis=-1)[..., 0]
             utr, vtr = bbl_transports(
                 tr_a, tr_b, geom, dy_u, dx_v,
                 gamma_s=gamma_s, rho_0=rho0,
@@ -5684,7 +5718,9 @@ class LatLonCGridOceanModel:
                     or self._nemo_ws_test_hooks.literal_stage_wzv),
                 legacy_wzv_rederived_transport=(
                     self._nemo_ws_test_hooks
-                    .legacy_wzv_rederived_transport))
+                    .legacy_wzv_rederived_transport),
+                legacy_aimp_midpoint_w_metric=(
+                    self._nemo_ws_test_hooks.legacy_aimp_midpoint_w_metric))
             # stprk3_stg.F90:365-386 has two live scheme arms.  The resolved
             # vector-invariant GYRE program advances stages 1/2 directly on
             # velocity (:365-369); only the flux-form arm uses the key_qco
@@ -6470,7 +6506,10 @@ class LatLonCGridOceanModel:
                         z_coord=_zc, config=_cfg_b, dt=dt,
                         legacy_min_face_thickness=(
                             self._nemo_ws_test_hooks
-                            .legacy_stage_min_face_thickness))
+                            .legacy_stage_min_face_thickness),
+                        legacy_aimp_midpoint_w_metric=(
+                            self._nemo_ws_test_hooks
+                            .legacy_aimp_midpoint_w_metric))
                     for stage_index, (velocity, h_stage, eta_stage)
                     in enumerate(zip(
                         _nemo_ws_velocity_stages, stage_h_k, stage_eta,
@@ -7070,12 +7109,28 @@ class LatLonCGridOceanModel:
                         and not self._nemo_ws_test_hooks.disable_bbl):
                     from legoesm.ocean.physics.bbl_adv import (
                         bbl_static_geometry,
+                        nemo_bbl_static_geometry,
                     )
                     _h_ref = jnp.asarray(_zc.h_partial)
                     if _h_ref.ndim == 1:
                         _h_ref = jnp.broadcast_to(_h_ref, h_k_old.shape)
-                    _bbl_geom = bbl_static_geometry(
-                        _h_ref, state.land_mask.data)
+                    _nemo_bbl_geometry = not (
+                        self._nemo_ws_test_hooks.legacy_bbl_partial_geometry)
+                    if _nemo_bbl_geometry:
+                        _gdept0 = getattr(_zc, "nemo_gdept_0", None)
+                        _e3u0 = getattr(_zc, "nemo_bbl_e3u_0", None)
+                        _e3v0 = getattr(_zc, "nemo_bbl_e3v_0", None)
+                        if _gdept0 is None or _e3u0 is None or _e3v0 is None:
+                            raise ValueError(
+                                "NEMO BBL reference geometry requires "
+                                "nemo_gdept_0 and exact unmasked "
+                                "nemo_bbl_e3u_0/nemo_bbl_e3v_0 operands")
+                        _bbl_geom = nemo_bbl_static_geometry(
+                            _h_ref, state.land_mask.data,
+                            _gdept0, _e3u0, _e3v0)
+                    else:
+                        _bbl_geom = bbl_static_geometry(
+                            _h_ref, state.land_mask.data)
                     _bbl_context = (
                         _bbl_geom,
                         jnp.asarray(_grid.area_T),
@@ -7083,6 +7138,7 @@ class LatLonCGridOceanModel:
                         jnp.asarray(_grid.dx_v)[1:-1, :],
                         _cfg_b.bbl_gamma_s,
                         _cfg_b.rho_0,
+                        _nemo_bbl_geometry,
                     )
                 (T_corrected, S_corrected,
                  _nemo_ws_content_T, _nemo_ws_content_S,
@@ -9310,6 +9366,8 @@ class LatLonCGridOceanModel:
         _zdf_literal = (getattr(
             _cfg_b, "zdf_implicit_solver_evaluation", "shared_thomas")
             == "nemo_literal")
+        _zdf_legacy_w = bool(
+            self._nemo_ws_test_hooks.legacy_zdf_midpoint_w_metric)
         # Cell-centered NOW thickness and NOW (1+r3t) (only computed / used
         # under the NEMO identity; both feed the u/v-face divisor below so the
         # tracer and momentum solves share one NOW-eta evaluation).
@@ -9325,8 +9383,11 @@ class LatLonCGridOceanModel:
                 min_water_column_m=_cfg_b.min_water_column_m)
             _stretch_now = nemo_r3t_stretch(
                 _zc, _eta_now, state.H_bathy.data)
-            dz_half_cell = nemo_e3w_kmm(
-                _zc, e3t_now, _stretch_now).astype(dz_cell.dtype)
+            if _zdf_legacy_w:
+                dz_half_cell = build_dz_half(e3t_now).astype(dz_cell.dtype)
+            else:
+                dz_half_cell = nemo_e3w_kmm(
+                    _zc, e3t_now, _stretch_now).astype(dz_cell.dtype)
         else:
             dz_half_cell = build_dz_half(dz_cell)
 
@@ -9511,13 +9572,32 @@ class LatLonCGridOceanModel:
                 # AREA-WEIGHTED ssh average over the two T cells divided by
                 # hu_0 (domqco.F90:164-167) — while this face map averages the
                 # already-stretched T-point field.  That is a separate row.
-                dz_half_u = nemo_e3w_kmm(
-                    _zc, e3t_now, _stretch_now,
-                    to_point=interp_cell_to_uface).astype(dz_u.dtype)
-                dz_half_v = nemo_e3w_kmm(
-                    _zc, e3t_now, _stretch_now,
-                    to_point=lambda f: interp_to_v_points(f, _grid),
-                ).astype(dz_v.dtype)
+                _raw_e3w0 = getattr(_zc, "nemo_e3w_0", None)
+                if (not _zdf_legacy_w and _raw_e3w0 is not None
+                        and jnp.asarray(_raw_e3w0).ndim == 1):
+                    # OVERFLOW usrdef_zgr.F90:166-168 leaves e3uw_0/e3vw_0
+                    # on the same 20 m ladder as e3w_0; qco then stretches
+                    # them with r3u/r3v (domzgr_substitute.h90:132-133).
+                    _h_ref_zdf = compute_layer_thickness(
+                        jnp.zeros_like(_eta_now), state.H_bathy.data, _zc,
+                        min_water_column_m=_cfg_b.min_water_column_m)
+                    _um3, _vm3 = compute_face_masks_3d(_zc.is_active, _grid)
+                    _, _, _r3u1, _r3v1 = _nemo_ws_qco_stage_faces(
+                        _eta_now, _h_ref_zdf, _um3, _vm3, _grid)
+                    _raw1 = jnp.asarray(_raw_e3w0)[1:]
+                    dz_half_u = (_r3u1[..., None] * _raw1).astype(dz_u.dtype)
+                    dz_half_v = (_r3v1[..., None] * _raw1).astype(dz_v.dtype)
+                elif _zdf_legacy_w:
+                    dz_half_u = build_dz_half(dz_u_open)
+                    dz_half_v = build_dz_half(dz_v_open)
+                else:
+                    dz_half_u = nemo_e3w_kmm(
+                        _zc, e3t_now, _stretch_now,
+                        to_point=interp_cell_to_uface).astype(dz_u.dtype)
+                    dz_half_v = nemo_e3w_kmm(
+                        _zc, e3t_now, _stretch_now,
+                        to_point=lambda f: interp_to_v_points(f, _grid),
+                    ).astype(dz_v.dtype)
             else:
                 dz_half_u = build_dz_half(dz_u_open)
                 dz_half_v = build_dz_half(dz_v_open)
