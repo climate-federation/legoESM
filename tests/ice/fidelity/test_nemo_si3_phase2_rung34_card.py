@@ -113,9 +113,8 @@ def test_rung34_card_geometry_and_dtype_gate(oracle_card) -> None:
 def test_rung34_initial_state_is_the_oracle_entry_frame(oracle_card) -> None:
     card, frame, _ = oracle_card
     index = ICE_RHEO_TRACERS.index
-    area = _SPACING_M * _SPACING_M
     for name in ("v_i", "v_s", "a_i", "oa_i", "a_ip", "v_ip", "v_il"):
-        candidate = np.asarray(card.initial_state.contents[..., index(name)]) / area
+        candidate = np.asarray(card.initial_state.contents[..., index(name)])
         np.testing.assert_array_equal(candidate, frame[name][..., 0])
     np.testing.assert_array_equal(card.initial_state.dynamics.u_ice_u, frame["u_ice"])
     np.testing.assert_array_equal(card.initial_state.dynamics.v_ice_v, frame["v_ice"])
@@ -158,9 +157,8 @@ def test_rung34_kt1_full_dynall_gate(oracle_card) -> None:
     )
     candidate = step_ice_rheo_card(card, completed_steps=0)
     index = ICE_RHEO_TRACERS.index
-    area = _SPACING_M * _SPACING_M
     fields = {
-        name: np.asarray(candidate.contents[..., index(name)]) / area
+        name: np.asarray(candidate.contents[..., index(name)])
         for name in ICE_RHEO_TRACERS
     }
     fields.update(

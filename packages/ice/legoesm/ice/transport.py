@@ -28,6 +28,7 @@ from jax import lax
 from legoesm.core.operators_3d import fv_flux_divergence_3d
 from legoesm.core.operators_fv import fv_flux_divergence
 from legoesm.core.operators_fv_latlon import fv_flux_divergence_latlon
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.core.operators_voronoi import (
     divergence_cell,
 )
@@ -78,6 +79,43 @@ SI3_PRATHER_MOMENT_NAMES = ("sx", "sy", "sxx", "syy", "sxy")
 _SI3_PRA_SLOPE_CAP_FACTOR = 1.5  # icedyn_adv_pra.F90:553
 _SI3_PRA_SECOND_MOMENT_MERGE_FACTOR = 5.0  # icedyn_adv_pra.F90:681,702
 _SI3_PRA_CFL_TWO_CYCLE_THRESHOLD = 0.5  # icedyn_adv_pra.F90:124-126
+
+
+def si3_prather_pack_intensives(
+    intensives: jnp.ndarray,
+    cell_area: jnp.ndarray,
+) -> jnp.ndarray:
+    """Form SI3's extensive Prather work arrays in NEMO statement order.
+
+    NEMO holds category fields as intensives between outer steps and evaluates
+    each ``z0* = p* * e1e2t`` assignment at
+    ``icedyn_adv_pra.F90:218-245`` only on entry to Prather advection.
+    """
+
+    if intensives.ndim != 3 or cell_area.shape != intensives.shape[:2]:
+        raise ValueError("SI3 Prather intensive/area shapes disagree")
+    return nemo_source_round(intensives * cell_area[..., None])
+
+
+def si3_prather_unpack_intensives(
+    contents: jnp.ndarray,
+    cell_area: jnp.ndarray,
+    wet: jnp.ndarray,
+) -> jnp.ndarray:
+    """Recover SI3 intensives as ``z0 * r1_e1e2t * tmask``.
+
+    The reciprocal and the two left-to-right products reproduce
+    ``icedyn_adv_pra.F90:355-381``.  Source rounding prevents XLA from
+    contracting the written operations into a different bridge.
+    """
+
+    if contents.ndim != 3 or cell_area.shape != contents.shape[:2]:
+        raise ValueError("SI3 Prather content/area shapes disagree")
+    if wet.shape != contents.shape[:2]:
+        raise ValueError("SI3 Prather content/mask shapes disagree")
+    reciprocal_area = nemo_source_round(jnp.reciprocal(cell_area))
+    intensives = nemo_source_round(contents * reciprocal_area[..., None])
+    return nemo_source_round(intensives * wet[..., None])
 _SI3_PRA_CFL_THREE_CYCLE_THRESHOLD = 1.5  # icedyn_adv_pra.F90:124-126
 _SI3_PRA_HBIG_CONCENTRATION_THRESHOLD = 0.15  # icedyn_adv_pra.F90:1000
 _SI3_PRA_HBIG_MAX_THICKNESS_M = 99.0  # namelist_ice_ref:46; ORCA1 does not override

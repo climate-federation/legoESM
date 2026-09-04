@@ -22,6 +22,10 @@ from legoesm.ice.fidelity.nemo_adv2d_rhg_testcase_recipe import (
     step_ice_adv2d_rhg_card,
     validate_ice_adv2d_rhg_card,
 )
+from legoesm.ice.transport import (
+    si3_prather_pack_intensives,
+    si3_prather_unpack_intensives,
+)
 
 _ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv2d_rhg/final")
 _ORACLE_GATE = Path(__file__).parents[3] / (
@@ -43,7 +47,11 @@ def _oracle_gate_module():
 def _card():
     with netCDF4.Dataset(_ROOT / "output.init_ice.nc") as dataset:
         sst = np.asarray(dataset["sst"][0]).T
-    return build_ice_adv2d_rhg_card(sst)
+    oracle_gate = _oracle_gate_module()
+    _, entry = oracle_gate.read_frame(
+        _ROOT / "oracle_ice_step_entry_kt00000001.bin"
+    )
+    return build_ice_adv2d_rhg_card(sst, entry)
 
 
 def _normalized(oracle: np.ndarray, candidate: np.ndarray) -> float:
@@ -76,6 +84,25 @@ def test_rung33_card_is_fp64_and_fail_closed():
                 )
             )
         )
+
+
+def test_prather_bridge_is_the_jitted_nemo_pack_then_reciprocal_products():
+    card = _card()
+    area = card.metrics.area_t
+    wet = card.forcing_template.tmask_t.astype(bool)
+
+    @jax.jit
+    def bridge(value):
+        packed = si3_prather_pack_intensives(value, area)
+        return packed, si3_prather_unpack_intensives(packed, area, wet)
+
+    packed, recovered = bridge(card.initial_state.contents)
+    expected_packed = np.asarray(card.initial_state.contents) * np.asarray(area)[..., None]
+    reciprocal = np.reciprocal(np.asarray(area))
+    expected_recovered = expected_packed * reciprocal[..., None]
+    expected_recovered *= np.asarray(wet)[..., None]
+    np.testing.assert_array_equal(packed, expected_packed)
+    np.testing.assert_array_equal(recovered, expected_recovered)
 
 
 def test_stress_divergence_weight_plant_reaches_scored_card_trajectory():
@@ -211,8 +238,8 @@ def test_full_hundred_subcycle_kernel_jits_and_differentiates():
     assert float(jnp.max(jnp.abs(gradient))) > 0.0
 
 
-def test_kt1_full_dynamics_measurement_is_loud_about_stress_debt():
-    """Pin the current measured boundary; this is not an exactness claim."""
+def test_kt1_full_dynamics_is_bit_exact_from_pinned_intensive_entry():
+    """Pin the Round-11 bridge result for all five aEVP carries."""
 
     card = _card()
     candidate = step_ice_adv2d_rhg_card(card, completed_steps=0).dynamics
@@ -232,8 +259,10 @@ def test_kt1_full_dynamics_measurement_is_loud_about_stress_debt():
             gate._interior(frame[name]),
             np.asarray(value)[2:-2, 2:-2],
         )
-    assert rows["u_ice"] <= _POINTWISE_BAR
-    assert rows["v_ice"] <= _POINTWISE_BAR
-    assert rows["stress1_i"] > _POINTWISE_BAR
-    assert rows["stress2_i"] > _POINTWISE_BAR
-    assert rows["stress12_i"] > _POINTWISE_BAR
+    assert rows == {
+        "u_ice": 0.0,
+        "v_ice": 0.0,
+        "stress1_i": 0.0,
+        "stress2_i": 0.0,
+        "stress12_i": 0.0,
+    }

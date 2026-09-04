@@ -47,7 +47,6 @@ DYNAMICS_FIELDS = (
 UNINFORMATIVE_ZERO_FIELDS = frozenset(("oa_i", "a_ip", "v_ip", "v_il"))
 _PLANT_MAGNITUDE = 1.0e-10
 _HALO_WIDTH = 2
-_CELL_AREA_M2 = 2000.0 * 2000.0
 _HASH_BLOCK_BYTES = 1024 * 1024
 _FP64_STORAGE_BITS = 64
 
@@ -148,7 +147,7 @@ def _oracle_field(frame: dict[str, np.ndarray], name: str) -> np.ndarray:
 def _candidate_fields(card, state) -> dict[str, np.ndarray]:
     index = ICE_RHEO_TRACERS.index
     fields = {
-        name: np.asarray(state.contents[..., index(name)]) / _CELL_AREA_M2
+        name: np.asarray(state.contents[..., index(name)])
         for name in ICE_RHEO_TRACERS
     }
     fields.update(

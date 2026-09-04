@@ -11,12 +11,17 @@ from pathlib import Path
 from typing import cast
 
 import jax
+import jax.numpy as jnp
 import netCDF4
 import numpy as np
 from legoesm.core.precision import PrecisionPolicy, get_policy
 from legoesm.ice.dynamics import si3_cgrid_aevp_solver
 from legoesm.ice.fidelity import nemo_rheo_testcase_recipe as recipe
-from legoesm.ice.transport import SI3_PRATHER_MOMENT_NAMES
+from legoesm.ice.transport import (
+    SI3_PRATHER_MOMENT_NAMES,
+    advect_si3_prather_2d,
+    si3_prather_pack_intensives,
+)
 
 from legoesm import constants
 
@@ -34,6 +39,7 @@ TARGET_RESTART = 8
 HALO = 2
 PLANT_VELOCITY_M_S = 1.0e-10
 _HASH_BLOCK_BYTES = 1024 * 1024
+_MOMENT_ROW_COUNT = len(SI3_PRATHER_MOMENT_NAMES) * len(recipe.ICE_RHEO_TRACERS)
 
 
 class MomentReplayError(RuntimeError):
@@ -84,7 +90,9 @@ def _run_written_order_arm(card, state, u_ice: np.ndarray, v_ice: np.ndarray):
     """Even-step y-then-x program at icedyn_adv_pra.F90:303-350."""
 
     x_step, y_step = adv2d_replay._numpy_prather_functions()
-    contents = np.asarray(state.contents).copy()
+    # icedyn_adv_pra.F90:218-245 forms the extensive z0* work arrays only
+    # after rheology, from the intensive category fields carried by NEMO.
+    contents = np.asarray(state.contents).copy() * np.asarray(card.metrics.area_t)[..., None]
     moments = tuple(np.asarray(value).copy() for value in state.moments)
     area = np.asarray(card.metrics.area_t)
     wet = np.asarray(card.forcing_template.tmask_t, dtype=bool)
@@ -120,6 +128,51 @@ def _run_written_order_arm(card, state, u_ice: np.ndarray, v_ice: np.ndarray):
     }
 
 
+def _make_jit_stepper(card):
+    area = card.metrics.area_t
+    wet = card.forcing_template.tmask_t.astype(bool)
+
+    def advance(packed, moments, u_ice, v_ice):
+        return advect_si3_prather_2d(
+            packed,
+            moments,
+            u_ice,
+            v_ice,
+            area,
+            wet,
+            card.dt_s,
+            dx=card.metrics.e1t,
+            dy=card.metrics.e2t,
+            ice_step_index=TARGET_RESTART,
+            nn_fsbc=card.nn_fsbc,
+            halo_width=card.halo_width,
+            ice_volume_index=recipe.ICE_RHEO_TRACERS.index("v_i"),
+            concentration_index=recipe.ICE_RHEO_TRACERS.index("a_i"),
+            subcycles=card.subcycles,
+        )
+
+    return jax.jit(advance)
+
+
+def _run_jit_arm(card, state, u_ice: np.ndarray, v_ice: np.ndarray, stepper):
+    """Production-JIT even-step transport with prescribed U/V inputs."""
+
+    contents = si3_prather_pack_intensives(state.contents, card.metrics.area_t)
+    after_x, moments_x, _ = stepper(
+        contents,
+        state.moments,
+        jnp.asarray(u_ice),
+        jnp.asarray(v_ice),
+    )
+    jax.block_until_ready(moments_x)
+    return {
+        "after_x": (
+            np.asarray(after_x),
+            tuple(np.asarray(value) for value in moments_x),
+        )
+    }
+
+
 def _moment_row(name: str, oracle: np.ndarray, candidate: np.ndarray) -> dict[str, object]:
     require(oracle.shape == candidate.shape, f"{name}: shape mismatch")
     require(oracle.dtype == candidate.dtype == np.float64, f"{name}: fp64 required")
@@ -151,7 +204,23 @@ def _score_arm(stages, target_restart: Path) -> list[dict[str, object]]:
                 oracle = trajectory._restart_xy(dataset, restart_name)
                 candidate = moments[moment_index][HALO:-HALO, HALO:-HALO, tracer_index]
                 rows.append(_moment_row(restart_name, oracle, candidate))
-    require(len(rows) == 160, "step-8 replay lost a moment row")
+    require(len(rows) == _MOMENT_ROW_COUNT, "step-8 replay lost a moment row")
+    return rows
+
+
+def _score_plant_delta(clean_stages, planted_stages) -> list[dict[str, object]]:
+    """Score the plant against its clean JIT twin, independent of oracle debt."""
+
+    rows: list[dict[str, object]] = []
+    clean = clean_stages["after_x"][1]
+    planted = planted_stages["after_x"][1]
+    for moment_index, moment in enumerate(SI3_PRATHER_MOMENT_NAMES):
+        for tracer_index, tracer_name in enumerate(recipe.ICE_RHEO_TRACERS):
+            name = "plant_delta." + trajectory._moment_restart_name(moment, tracer_name)
+            clean_value = clean[moment_index][HALO:-HALO, HALO:-HALO, tracer_index]
+            planted_value = planted[moment_index][HALO:-HALO, HALO:-HALO, tracer_index]
+            rows.append(_moment_row(name, clean_value, planted_value))
+    require(len(rows) == _MOMENT_ROW_COUNT, "JIT plant delta lost a moment row")
     return rows
 
 
@@ -202,7 +271,12 @@ def _arm_summary(rows: list[dict[str, object]]) -> dict[str, object]:
     }
 
 
-def run_replay(root: Path, restart_root: Path) -> dict[str, object]:
+def run_replay(
+    root: Path,
+    restart_root: Path,
+    *,
+    jit_only: bool = False,
+) -> dict[str, object]:
     require(jax.default_backend() == "cpu", "CPU backend required")
     _, entry = gate.oracle_gate.read_frame(
         root / f"oracle_ice_step_entry_kt{ENTRY_FRAME:08d}.bin"
@@ -215,7 +289,10 @@ def run_replay(root: Path, restart_root: Path) -> dict[str, object]:
     with netCDF4.Dataset(root / "output.init_ice.nc") as dataset:
         ocean_temperature_k = np.asarray(dataset["sst"][0]) + constants.T_freeze
     card = recipe.build_ice_rheo_card(entry, mesh, ocean_temperature_k)
-    require(get_policy() == PrecisionPolicy.fp64(), "fp64 policy required")
+    require(
+        get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+        "fp64/scalar-libm policy required",
+    )
     entry_restart = restart_root / (
         f"ICE_RHEO_OMIP_L3_{ENTRY_RESTART:08d}_restart_ice.nc"
     )
@@ -225,14 +302,44 @@ def run_replay(root: Path, restart_root: Path) -> dict[str, object]:
     state = card.initial_state._replace(
         moments=trajectory._restart_moments(entry_restart, card)
     )
+    oracle_u = np.asarray(target["u_ice"])
+    oracle_v = np.asarray(target["v_ice"])
+    planted_v = oracle_v.copy()
+    planted_v[HALO + 10, HALO + 10] += PLANT_VELOCITY_M_S
+    jit_stepper = _make_jit_stepper(card)
+    jit_clean_stages = _run_jit_arm(card, state, oracle_u, oracle_v, jit_stepper)
+    jit_planted_stages = _run_jit_arm(card, state, oracle_u, planted_v, jit_stepper)
+    jit_oracle_uv = _arm_summary(_score_arm(jit_clean_stages, target_restart))
+    jit_plant_delta = _arm_summary(
+        _score_plant_delta(jit_clean_stages, jit_planted_stages)
+    )
+    require(
+        int(jit_plant_delta["over_two_ulp_count"]) > 0,
+        "JIT velocity plant did not move any moment row over two ULP",
+    )
+    if jit_only:
+        return {
+            "gate": "nemo-si3-phase2-rung34-step8-moment-replay-jit-v1",
+            "status": jit_oracle_uv["status"],
+            "exit_code": 0 if jit_oracle_uv["over_two_ulp_count"] == 0 else 1,
+            "backend": jax.default_backend(),
+            "precision_policy": str(get_policy()),
+            "execution_path": "production JIT (CPU, fp64, scalar-libm)",
+            "jit_oracle_uv": jit_oracle_uv,
+            "plant": {
+                "velocity_delta_m_s": PLANT_VELOCITY_M_S,
+                "jit_over_two_ulp_count": jit_plant_delta["over_two_ulp_count"],
+                "delta_owner": jit_plant_delta["owner"],
+                "exit_code": 1,
+            },
+        }
+
     forcing = recipe._forcing_for_state(card, state, TARGET_RESTART)
     dynamics = si3_cgrid_aevp_solver(
         state.dynamics, forcing, card.metrics, card.dynamics_config
     )
     lego_u = np.asarray(dynamics.u_ice_u)
     lego_v = np.asarray(dynamics.v_ice_v)
-    oracle_u = np.asarray(target["u_ice"])
-    oracle_v = np.asarray(target["v_ice"])
 
     velocity_rows = {
         "u_ice": gate._score(
@@ -258,8 +365,6 @@ def run_replay(root: Path, restart_root: Path) -> dict[str, object]:
     }
     first_difference = _first_arm_difference(arms["baseline"], arms["oracle_uv"])
 
-    planted_v = oracle_v.copy()
-    planted_v[HALO + 10, HALO + 10] += PLANT_VELOCITY_M_S
     planted = _run_written_order_arm(card, state, oracle_u, planted_v)
     planted_rows = _score_arm(planted, target_restart)
     clean_rows = summaries["oracle_uv"]["rows"]
@@ -288,6 +393,7 @@ def run_replay(root: Path, restart_root: Path) -> dict[str, object]:
         "sweep_order": "even step 8: y then x",
         "velocity_rows": velocity_rows,
         "arms": summaries,
+        "jit_oracle_uv": jit_oracle_uv,
         "first_baseline_vs_oracle_velocity_moment_difference": first_difference,
         "limiter_input_identity": {
             "status": "EXACT",
@@ -307,6 +413,9 @@ def run_replay(root: Path, restart_root: Path) -> dict[str, object]:
             "velocity_delta_m_s": PLANT_VELOCITY_M_S,
             "changed_scored_moment_rows": len(changed),
             "first_changed_row": changed[0],
+            "jit_over_two_ulp_count": jit_plant_delta["over_two_ulp_count"],
+            "delta_owner": jit_plant_delta["owner"],
+            "exit_code": 1,
         },
         "artifacts": {
             str(entry_restart): _sha256(entry_restart),
@@ -321,14 +430,29 @@ def run_replay(root: Path, restart_root: Path) -> dict[str, object]:
     }
 
 
+def _selected_exit_code(report: dict[str, object], *, plant: bool) -> int:
+    if plant:
+        plant_report = cast(dict[str, object], report["plant"])
+        require(
+            int(plant_report["jit_over_two_ulp_count"]) > 0,
+            "plant exit requested without a JIT over-two-ULP row",
+        )
+        return int(plant_report["exit_code"])
+    return int(report["exit_code"])
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--restart-root", type=Path, default=RESTART_ROOT)
+    parser.add_argument("--plant", action="store_true")
+    parser.add_argument("--jit-only", action="store_true")
     args = parser.parse_args()
-    report = run_replay(args.root.resolve(), args.restart_root.resolve())
+    report = run_replay(
+        args.root.resolve(), args.restart_root.resolve(), jit_only=args.jit_only
+    )
     print(json.dumps(report, indent=2, sort_keys=True))
-    return int(report["exit_code"])
+    return _selected_exit_code(report, plant=args.plant)
 
 
 if __name__ == "__main__":

@@ -34,6 +34,8 @@ from legoesm.ice.ridging import (
 from legoesm.ice.transport import (
     SI3PratherMoments,
     advect_si3_prather_2d,
+    si3_prather_pack_intensives,
+    si3_prather_unpack_intensives,
     zero_si3_prather_moments,
 )
 
@@ -205,10 +207,7 @@ def build_ice_rheo_card(
     fields.update(_layer_fields(entry_frame, "e_i", _ICE_RHEO_NLAY_I))
     fields.update(_layer_fields(entry_frame, "szv_i", _ICE_RHEO_NLAY_I))
     contents = jnp.asarray(
-        np.stack(
-            [fields[name] * _ICE_RHEO_CELL_AREA_M2 for name in ICE_RHEO_TRACERS],
-            axis=-1,
-        ),
+        np.stack([fields[name] for name in ICE_RHEO_TRACERS], axis=-1),
         dtype=jnp.float64,
     )
     tmask = _periodic_halo(_mesh_xy(mesh, "tmask").astype(np.float64))
@@ -445,7 +444,7 @@ def _ice_rheo_air_stress_impl(
 
 
 def _intensive(contents: jnp.ndarray, name: str) -> jnp.ndarray:
-    return contents[..., ICE_RHEO_TRACERS.index(name)] / _ICE_RHEO_CELL_AREA_M2
+    return contents[..., ICE_RHEO_TRACERS.index(name)]
 
 
 def _forcing_for_state(
@@ -511,9 +510,7 @@ def _contents_after_ridging(contents: jnp.ndarray, state: SI3JPL1RidgingState) -
         {f"szv_i_l{level:02d}": state.ice_salt_content[..., level - 1] for level in range(1, 11)}
     )
     for name, value in fields.items():
-        contents = contents.at[..., ICE_RHEO_TRACERS.index(name)].set(
-            value * _ICE_RHEO_CELL_AREA_M2
-        )
+        contents = contents.at[..., ICE_RHEO_TRACERS.index(name)].set(value)
     return contents
 
 
@@ -527,7 +524,7 @@ def _ice_cor(
     index = ICE_RHEO_TRACERS.index
 
     def field(name: str) -> jnp.ndarray:
-        return contents[..., index(name)] / _ICE_RHEO_CELL_AREA_M2
+        return contents[..., index(name)]
 
     ice_area = field("a_i")
     ice_volume = field("v_i")
@@ -546,8 +543,8 @@ def _ice_cor(
         ice_area * _ICE_RHEO_MAXIMUM_CONCENTRATION / safe_overfilled_area,
         ice_area,
     )
-    contents = contents.at[..., index("a_ip")].set(pond_area * _ICE_RHEO_CELL_AREA_M2)
-    contents = contents.at[..., index("a_i")].set(ice_area * _ICE_RHEO_CELL_AREA_M2)
+    contents = contents.at[..., index("a_ip")].set(pond_area)
+    contents = contents.at[..., index("a_i")].set(ice_area)
 
     salinity_minimum = _ICE_RHEO_MINIMUM_SALINITY_G_KG * ice_volume / _ICE_RHEO_NLAY_I
     salinity_maximum = (
@@ -559,7 +556,7 @@ def _ice_cor(
     for level in range(1, _ICE_RHEO_NLAY_I + 1):
         name = f"szv_i_l{level:02d}"
         value = jnp.minimum(jnp.maximum(field(name), salinity_minimum), salinity_maximum)
-        contents = contents.at[..., index(name)].set(value * _ICE_RHEO_CELL_AREA_M2)
+        contents = contents.at[..., index(name)].set(value)
 
     has_ice = ice_area > _ICE_RHEO_EPSI10
     safe_ice_area = jnp.where(has_ice, ice_area, _ICE_RHEO_ONE)
@@ -612,8 +609,9 @@ def _step_ice_rheo_card_impl(
     )
     cell_area = jnp.full_like(dynamics.u_ice_u, _ICE_RHEO_CELL_AREA_M2, dtype=jnp.float64)
     wet = card.forcing_template.tmask_t.astype(bool)
+    entry_contents = si3_prather_pack_intensives(state.contents, cell_area)
     contents, moments, ignored_subcycles = advect_si3_prather_2d(
-        state.contents,
+        entry_contents,
         state.moments,
         dynamics.u_ice_u,
         dynamics.v_ice_v,
@@ -631,7 +629,7 @@ def _step_ice_rheo_card_impl(
     )
     del ignored_subcycles
     contents = apply_si3_prather_source_corrections(
-        state.contents,
+        entry_contents,
         contents,
         tracer_names=ICE_RHEO_TRACERS,
         nlay_i=card.nlay_i,
@@ -639,6 +637,7 @@ def _step_ice_rheo_card_impl(
         cell_area_m2=_ICE_RHEO_CELL_AREA_M2,
         halo_width=card.halo_width,
     )
+    contents = si3_prather_unpack_intensives(contents, cell_area, wet)
 
     entry_area = _intensive(state.contents, "a_i")
     transported_area = _intensive(contents, "a_i")

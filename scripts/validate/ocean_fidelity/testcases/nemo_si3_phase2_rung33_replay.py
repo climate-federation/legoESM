@@ -557,9 +557,11 @@ def run_replay(root: Path = ROOT) -> tuple[dict[str, object], int]:
     from legoesm.ice.fidelity.nemo_adv2d_rhg_testcase_recipe import build_ice_adv2d_rhg_card
 
     set_policy(PrecisionPolicy.fp64())
-    card = build_ice_adv2d_rhg_card(rung33_gate.oracle_surface_temperature_c(root))
     header1, frame1 = oracle_gate.read_frame(root / "oracle_ice_step_entry_kt00000001.bin")
     header2, frame2 = oracle_gate.read_frame(root / "oracle_ice_step_entry_kt00000002.bin")
+    card = build_ice_adv2d_rhg_card(
+        rung33_gate.oracle_surface_temperature_c(root), frame1
+    )
     require(header1["storage_bits"] == header2["storage_bits"] == 64, "oracle frames are not fp64")
     initial = _oracle_state(frame1)
     forcing = _oracle_forcing(card, frame1)

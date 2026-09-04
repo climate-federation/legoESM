@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 from typing import cast
 
+import jax
 import netCDF4
 import numpy as np
 
@@ -66,8 +67,7 @@ def _candidate_field(card, state, name: str) -> np.ndarray:
     from legoesm.ice.fidelity.nemo_adv2d_testcase_recipe import ICE_ADV2D_TRACERS
 
     if name in ICE_ADV2D_TRACERS:
-        area = card.base.dx_m * card.base.dy_m
-        value = state.contents[..., ICE_ADV2D_TRACERS.index(name)] / area
+        value = state.contents[..., ICE_ADV2D_TRACERS.index(name)]
     elif name == "sv_i":
         value = state.bulk_salt_diagnostic
     elif name == "t_surface":
@@ -184,15 +184,18 @@ def run_gate(root: Path = ROOT, *, plant_geometry: bool = False) -> tuple[dict, 
     )
 
     set_policy(PrecisionPolicy.fp64())
-    card = build_ice_adv2d_rhg_card(oracle_surface_temperature_c(root))
+    _, first = oracle_gate.read_frame(root / "oracle_ice_step_entry_kt00000001.bin")
+    _, second = oracle_gate.read_frame(root / "oracle_ice_step_entry_kt00000002.bin")
+    card = build_ice_adv2d_rhg_card(oracle_surface_temperature_c(root), first)
     manifest = json.loads(MANIFEST.read_text())
     coverage = oracle_gate.check_manifest(root, "3.3", manifest)
     rows: list[dict] = []
     dtypes: dict[str, str] = {}
     rung32_gate.geometry_gate(root, card.base, rows, dtypes, plant=plant_geometry)
-    _, first = oracle_gate.read_frame(root / "oracle_ice_step_entry_kt00000001.bin")
-    _, second = oracle_gate.read_frame(root / "oracle_ice_step_entry_kt00000002.bin")
-    completed = step_ice_adv2d_rhg_card(card, completed_steps=0)
+    completed = jax.jit(
+        lambda state: step_ice_adv2d_rhg_card(card, state, completed_steps=0)
+    )(card.initial_state)
+    jax.block_until_ready(completed)
     from legoesm.ice.fidelity.nemo_adv2d_testcase_recipe import ICE_ADV2D_TRACERS
 
     fields = (
@@ -226,6 +229,7 @@ def run_gate(root: Path = ROOT, *, plant_geometry: bool = False) -> tuple[dict, 
         "status": overall_status,
         "numeric_status": numeric_status,
         "bar": POINTWISE_BAR,
+        "execution_path": "JIT (CPU, fp64, scalar-libm)",
         "root": str(root),
         "oracle_hashes": {
             "mesh_mask.nc": _sha256(root / "mesh_mask.nc"),

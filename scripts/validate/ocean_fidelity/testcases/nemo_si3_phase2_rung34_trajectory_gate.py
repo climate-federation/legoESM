@@ -569,7 +569,12 @@ def run_active_window(
     require(entry_restart.is_file(), f"missing active entry restart: {entry_restart}")
     require(target_restart.is_file(), f"missing active target restart: {target_restart}")
     state = card.initial_state._replace(moments=_restart_moments(entry_restart, card))
-    candidate = step_ice_rheo_card(card, state, completed_steps=_ACTIVE_ENTRY_RESTART_STEP)
+    candidate = jax.jit(
+        lambda current: step_ice_rheo_card(
+            card, current, completed_steps=_ACTIVE_ENTRY_RESTART_STEP
+        )
+    )(state)
+    jax.block_until_ready(candidate)
     fields = gate._candidate_fields(card, candidate)
     clean_v_s = fields["v_s"].copy()
     if plant_field:
@@ -671,6 +676,7 @@ def run_active_window(
         "relative_column": "max_abs / oracle_max_abs; diagnostic only",
         "cpu_only": True,
         "precision_policy": "fp64",
+        "execution_path": "JIT (CPU, fp64, scalar-libm)",
         "selected_completed_step": _ACTIVE_COMPLETED_STEP,
         "prediction": {
             "first_over_bar_row": "stress1_i",

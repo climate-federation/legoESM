@@ -40,16 +40,20 @@ def test_status_and_exit_inputs_are_derived_from_rows_and_coverage():
     assert gate._status_from_rows(debt, {"later": "UNMEASURED"}) == "DEBT"
 
 
-def test_partial_gate_has_exact_registry_and_loud_debt_boundary():
+def test_partial_gate_has_exact_registry_and_loud_unmeasured_boundary():
     report, code = gate.run_gate()
     assert code == 1
-    assert report["status"] == "DEBT"
-    assert report["numeric_status"] == "DEBT"
+    assert report["status"] == "UNMEASURED"
+    assert report["numeric_status"] == "AT-BAR"
     assert len(report["rows"]) == 68
-    names = {row["name"] for row in report["debt"]}
-    assert "trajectory.post_step_00000001.stress1_i" in names
-    assert "trajectory.post_step_00000001.stress2_i" in names
-    assert "trajectory.post_step_00000001.stress12_i" in names
+    assert report["debt"] == []
+    for name in ("u_ice", "v_ice", "stress1_i", "stress2_i", "stress12_i"):
+        row = next(
+            item
+            for item in report["rows"]
+            if item["name"] == f"trajectory.post_step_00000001.{name}"
+        )
+        assert row["bitwise_nonzero_over_n"] == "0 / 9801"
     assert report["binding_control"]["status"] == "RED_AS_REQUIRED"
     assert report["binding_control"]["scored_row"]["status"] == "DEBT"
     assert report["unmeasured"]
@@ -107,7 +111,12 @@ def test_rung33_restart_requires_stresses_and_moments_with_fp64_dtype():
         save_ice_adv2d_rhg_restart,
     )
 
-    card = build_ice_adv2d_rhg_card(gate.oracle_surface_temperature_c(gate.ROOT))
+    _, entry = gate.oracle_gate.read_frame(
+        gate.ROOT / "oracle_ice_step_entry_kt00000001.bin"
+    )
+    card = build_ice_adv2d_rhg_card(
+        gate.oracle_surface_temperature_c(gate.ROOT), entry
+    )
     with tempfile.TemporaryDirectory(prefix="rung33-test-") as directory:
         path = Path(directory) / "state.npz"
         save_ice_adv2d_rhg_restart(path, card, card.initial_state, completed_steps=0)

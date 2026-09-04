@@ -131,8 +131,9 @@ def _face_threshold_census(contents: np.ndarray, dynamics, card) -> dict[str, ob
 
     from legoesm import constants
 
-    area = card.base.dx_m * card.base.dy_m
-    field = lambda name: contents[..., ICE_ADV2D_TRACERS.index(name)] / area
+    def field(name: str) -> np.ndarray:
+        return contents[..., ICE_ADV2D_TRACERS.index(name)]
+
     concentration = field("a_i")
     mass = (
         constants.rho_snow * field("v_s")
@@ -352,8 +353,16 @@ def run_gate(root: Path = ROOT) -> tuple[dict[str, object], int]:
 
     require(jax.default_backend() == "cpu", "rung-3.3 trajectory requires CPU")
     set_policy(PrecisionPolicy.fp64())
-    card = build_ice_adv2d_rhg_card(rung33_gate.oracle_surface_temperature_c(root))
-    require(get_policy() == PrecisionPolicy.fp64(), "rung-3.3 policy is not fp64")
+    _, entry_frame = oracle_gate.read_frame(
+        root / "oracle_ice_step_entry_kt00000001.bin"
+    )
+    card = build_ice_adv2d_rhg_card(
+        rung33_gate.oracle_surface_temperature_c(root), entry_frame
+    )
+    require(
+        get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+        "rung-3.3 policy is not fp64/scalar-libm",
+    )
     frame_paths = sorted(root.glob("oracle_ice_step_entry_kt*.bin"))
     require(len(frame_paths) == card.base.n_steps, "oracle frame count changed")
     fields = (*DYNAMICS_FIELDS, *ICE_ADV2D_TRACERS, "sv_i", "t_surface")
@@ -374,10 +383,20 @@ def run_gate(root: Path = ROOT) -> tuple[dict[str, object], int]:
     split_state = None
     stress_velocity_arithmetic = None
     previous_frame = _frame(root, 1, card)
+    odd_step = jax.jit(
+        lambda current: step_ice_adv2d_rhg_card(
+            card, current, completed_steps=0
+        )
+    )
+    even_step = jax.jit(
+        lambda current: step_ice_adv2d_rhg_card(
+            card, current, completed_steps=1
+        )
+    )
 
     for completed in range(1, card.base.n_steps + 1):
         entry_state = state
-        state = step_ice_adv2d_rhg_card(card, state, completed_steps=completed - 1)
+        state = (odd_step if completed % 2 else even_step)(state)
         jax.block_until_ready(state)
         if completed == 7:
             split_state = state
@@ -516,6 +535,8 @@ def run_gate(root: Path = ROOT) -> tuple[dict[str, object], int]:
         "bar": POINTWISE_BAR,
         "backend": jax.default_backend(),
         "precision_policy": "fp64",
+        "transcendentals": "libm",
+        "execution_path": "whole-step production JIT",
         "dtypes": sorted(
             {str(np.asarray(leaf).dtype) for leaf in jax.tree_util.tree_leaves(state)}
         ),

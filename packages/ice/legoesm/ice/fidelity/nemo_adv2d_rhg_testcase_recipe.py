@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import NamedTuple, cast
 
@@ -34,6 +35,8 @@ from legoesm.ice.fidelity.nemo_adv2d_testcase_recipe import (
 from legoesm.ice.transport import (
     SI3PratherMoments,
     advect_si3_prather_2d,
+    si3_prather_pack_intensives,
+    si3_prather_unpack_intensives,
 )
 
 from legoesm import constants
@@ -57,11 +60,11 @@ _RHG_REQUIRED_SHAPE = (103, 103)  # ocean.output:64-65, two-cell halo
 _RHG_REQUIRED_JPL = 1
 _RHG_REQUIRED_NLAY_I = 3
 _RHG_REQUIRED_NLAY_S = 3
-ICE_ADV2D_RHG_RESTART_FORMAT = "legoesm-ice-adv2d-rhg-state-v1"
+ICE_ADV2D_RHG_RESTART_FORMAT = "legoesm-ice-adv2d-rhg-state-v2"
 
 
 class ICEAdv2DRHGState(NamedTuple):
-    """Rung-3.3 transported and rheology prognostic state."""
+    """Rung-3.3 intensive tracers, moments, and rheology prognostics."""
 
     contents: jnp.ndarray
     bulk_salt_diagnostic: jnp.ndarray
@@ -117,8 +120,8 @@ def _build_metrics(base: ICEAdv2DCard) -> SI3CGridMetrics:
 
 
 def _intensive(state: ICEAdv2DRHGState, base: ICEAdv2DCard, name: str) -> jnp.ndarray:
-    area = base.dx_m * base.dy_m
-    return state.contents[..., ICE_ADV2D_TRACERS.index(name)] / area
+    del base
+    return state.contents[..., ICE_ADV2D_TRACERS.index(name)]
 
 
 def _forcing_for_state(
@@ -137,6 +140,7 @@ def _forcing_for_state(
 
 def build_ice_adv2d_rhg_card(
     ocean_surface_temperature_c: np.ndarray,
+    entry_frame: Mapping[str, np.ndarray],
 ) -> ICEAdv2DRHGCard:
     """Construct the source-pinned, fp64, CPU-compatible rung-3.3 card."""
 
@@ -148,7 +152,31 @@ def build_ice_adv2d_rhg_card(
     shape = base.initial_state.u_ice.shape
     zero = jnp.zeros(shape, dtype=jnp.float64)
     one = jnp.ones(shape, dtype=jnp.float64)
-    dynamics = SI3CGridAEVPState(zero, zero, zero, zero, zero)
+
+    def entry_field(name: str) -> jnp.ndarray:
+        value = np.asarray(entry_frame[name], dtype=np.float64)
+        if value.ndim == 3:
+            value = value[..., 0]
+        return jnp.asarray(value, dtype=jnp.float64)
+
+    packed: list[jnp.ndarray] = []
+    for name in ICE_ADV2D_TRACERS:
+        if name.startswith(("e_s_l", "e_i_l", "szv_i_l")):
+            family, level_text = name.rsplit("_l", 1)
+            value = np.asarray(entry_frame[family], dtype=np.float64)[
+                ..., int(level_text) - 1, 0
+            ]
+            packed.append(jnp.asarray(value, dtype=jnp.float64))
+        else:
+            packed.append(entry_field(name))
+    entry_intensives = jnp.stack(packed, axis=-1)
+    bulk_salt = entry_field("sv_i")
+    t_surface = entry_field("t_su")
+    dynamics = SI3CGridAEVPState(
+        *(entry_field(name) for name in (
+            "u_ice", "v_ice", "stress1_i", "stress2_i", "stress12_i"
+        ))
+    )
     forcing = SI3CGridAEVPForcing(
         concentration_t=zero,
         ice_volume_t=zero,
@@ -172,11 +200,11 @@ def build_ice_adv2d_rhg_card(
         fast_tmask=zero,
     )
     initial = ICEAdv2DRHGState(
-        contents=base.initial_state.contents,
-        bulk_salt_diagnostic=base.initial_state.bulk_salt_diagnostic,
+        contents=entry_intensives,
+        bulk_salt_diagnostic=bulk_salt,
         moments=base.initial_state.moments,
         dynamics=dynamics,
-        t_surface=base.initial_state.t_surface,
+        t_surface=t_surface,
     )
     config = SI3CGridAEVPConfig(
         scheme=_RHG_SCHEME,
@@ -292,8 +320,9 @@ def step_ice_adv2d_rhg_card(
     area = card.base.dx_m * card.base.dy_m
     cell_area = jnp.full(dynamics.u_ice_u.shape, area, dtype=jnp.float64)
     wet = jnp.ones(dynamics.u_ice_u.shape, dtype=bool)
+    entry_contents = si3_prather_pack_intensives(state.contents, cell_area)
     contents, moments, ignored = advect_si3_prather_2d(
-        state.contents,
+        entry_contents,
         state.moments,
         dynamics.u_ice_u,
         dynamics.v_ice_v,
@@ -312,11 +341,11 @@ def step_ice_adv2d_rhg_card(
     del ignored
     contents = apply_ice_adv2d_source_corrections(
         card.base,
-        state.contents,
+        entry_contents,
         contents,
     )
     base_state = card.base.initial_state._replace(
-        contents=state.contents,
+        contents=entry_contents,
         bulk_salt_diagnostic=state.bulk_salt_diagnostic,
         moments=state.moments,
         u_ice=state.dynamics.u_ice_u,
@@ -324,8 +353,13 @@ def step_ice_adv2d_rhg_card(
         t_surface=state.t_surface,
     )
     corrected = apply_ice_adv2d_zapsmall(card.base, base_state, contents, moments)
+    intensives = si3_prather_unpack_intensives(
+        corrected.contents,
+        cell_area,
+        wet,
+    )
     return ICEAdv2DRHGState(
-        contents=corrected.contents,
+        contents=intensives,
         bulk_salt_diagnostic=corrected.bulk_salt_diagnostic,
         moments=corrected.moments,
         dynamics=dynamics,

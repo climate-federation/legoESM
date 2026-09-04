@@ -6,6 +6,7 @@ import importlib.util
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 _GATE_PATH = Path(__file__).parents[3] / (
     "scripts/validate/ocean_fidelity/testcases/"
@@ -50,3 +51,15 @@ def test_arm_summary_and_row_bar_are_derived() -> None:
     assert summary["status"] == "DEBT"
     assert summary["debt_count"] == 1
     assert summary["owner"]["name"] == "sxxe_l01"
+
+
+def test_plant_exit_requires_a_jit_over_two_ulp_row() -> None:
+    report = {
+        "exit_code": 0,
+        "plant": {"jit_over_two_ulp_count": 4, "exit_code": 1},
+    }
+    assert gate._selected_exit_code(report, plant=False) == 0
+    assert gate._selected_exit_code(report, plant=True) == 1
+    report["plant"]["jit_over_two_ulp_count"] = 0
+    with pytest.raises(gate.MomentReplayError, match="over-two-ULP"):
+        gate._selected_exit_code(report, plant=True)
