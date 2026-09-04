@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -111,6 +112,15 @@ def test_full_walk_records_each_fields_first_debt_only() -> None:
     )
     assert register["stress1_i"]["completed_step"] == 9
     assert register["u_ice"]["completed_step"] == 10
+
+
+def test_full_walk_jit_guard_rejects_a_changed_state_leaf() -> None:
+    state = (jnp.asarray([1.0], dtype=jnp.float64),)
+    gate._require_jit_eager_exact(state, state)
+    with pytest.raises(gate.Rung34TrajectoryError, match="leaf 0"):
+        gate._require_jit_eager_exact(
+            state, (jnp.asarray([2.0], dtype=jnp.float64),)
+        )
 
 
 @pytest.mark.parametrize(

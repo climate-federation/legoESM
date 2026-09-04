@@ -404,6 +404,14 @@ def ice_rheo_air_stress(
 
     if ice_step_index < 1:
         raise ValueError("ICE_RHEO ice_step_index must be positive")
+    return _ice_rheo_air_stress_impl(state, ice_step_index)
+
+
+def _ice_rheo_air_stress_impl(
+    state: ICERheoState, ice_step_index: int | jnp.ndarray
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Traceable air-stress body after the public clock validation."""
+
     physical_indices = jnp.arange(
         _ICE_RHEO_HALO_WIDTH + 1,
         _ICE_RHEO_HALO_WIDTH + _ICE_RHEO_GRID_SIZE + 1,
@@ -462,9 +470,9 @@ def _intensive(contents: jnp.ndarray, name: str) -> jnp.ndarray:
 
 
 def _forcing_for_state(
-    card: ICERheoCard, state: ICERheoState, ice_step_index: int
+    card: ICERheoCard, state: ICERheoState, ice_step_index: int | jnp.ndarray
 ) -> SI3CGridAEVPForcing:
-    stress_u, stress_v = ice_rheo_air_stress(state, ice_step_index)
+    stress_u, stress_v = _ice_rheo_air_stress_impl(state, ice_step_index)
     return card.forcing_template._replace(
         concentration_t=_intensive(state.contents, "a_i"),
         ice_volume_t=_intensive(state.contents, "v_i"),
@@ -632,6 +640,23 @@ def step_ice_rheo_card(
     if not 0 <= completed_steps < card.n_steps:
         raise ValueError("ICE_RHEO completed_steps out of range")
     ice_step_index = completed_steps + 1
+    return _step_ice_rheo_card_impl(
+        card,
+        state,
+        ice_step_index=ice_step_index,
+        transport_step_index=ice_step_index,
+    )
+
+
+def _step_ice_rheo_card_impl(
+    card: ICERheoCard,
+    state: ICERheoState,
+    *,
+    ice_step_index: int | jnp.ndarray,
+    transport_step_index: int,
+) -> ICERheoState:
+    """Traceable step body with a static NEMO sweep-parity selector."""
+
     forcing = _forcing_for_state(card, state, ice_step_index)
     dynamics = si3_cgrid_aevp_solver(
         state.dynamics, forcing, card.metrics, card.dynamics_config
@@ -653,7 +678,7 @@ def step_ice_rheo_card(
         card.dt_s,
         dx=_ICE_RHEO_SPACING_M,
         dy=_ICE_RHEO_SPACING_M,
-        ice_step_index=ice_step_index,
+        ice_step_index=transport_step_index,
         nn_fsbc=card.nn_fsbc,
         halo_width=card.halo_width,
         ice_volume_index=ICE_RHEO_TRACERS.index("v_i"),

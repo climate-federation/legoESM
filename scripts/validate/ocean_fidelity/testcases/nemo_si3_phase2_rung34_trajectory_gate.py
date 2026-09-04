@@ -6,8 +6,8 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -15,6 +15,7 @@ import netCDF4
 import numpy as np
 from legoesm.ice.dynamics import si3_cgrid_deformation
 from legoesm.ice.fidelity.nemo_rheo_testcase_recipe import (
+    _step_ice_rheo_card_impl,
     build_ice_rheo_card,
     step_ice_rheo_card,
 )
@@ -392,6 +393,19 @@ def _ordinary_rows_from_restart(card, state, dataset, completed_step):
     ]
 
 
+def _require_jit_eager_exact(eager_state, compiled_state) -> None:
+    eager_leaves = jax.tree_util.tree_leaves(eager_state)
+    compiled_leaves = jax.tree_util.tree_leaves(compiled_state)
+    require(len(eager_leaves) == len(compiled_leaves), "JIT state tree changed")
+    for leaf_index, (eager, compiled) in enumerate(
+        zip(eager_leaves, compiled_leaves, strict=True)
+    ):
+        require(
+            np.array_equal(np.asarray(eager), np.asarray(compiled)),
+            f"JIT/eager state differs at leaf {leaf_index}",
+        )
+
+
 def run_full_walk(
     root: Path,
     restart_root: Path = _ACTIVE_RESTART_ROOT,
@@ -413,12 +427,37 @@ def run_full_walk(
     require(entry_restart.is_file(), f"missing full-walk entry restart: {entry_restart}")
     state = card.initial_state._replace(moments=_restart_moments(entry_restart, card))
     state = step_ice_rheo_card(card, state, completed_steps=_ACTIVE_ENTRY_RESTART_STEP)
+    odd_step = jax.jit(
+        lambda current, ice_index: _step_ice_rheo_card_impl(
+            card,
+            current,
+            ice_step_index=ice_index,
+            transport_step_index=1,
+        )
+    )
+    even_step = jax.jit(
+        lambda current, ice_index: _step_ice_rheo_card_impl(
+            card,
+            current,
+            ice_step_index=ice_index,
+            transport_step_index=2,
+        )
+    )
 
     first_over_bar: dict[str, dict[str, object]] = {}
     growth: list[dict[str, object]] = []
     last_rows: list[dict[str, object]] = []
     for completed_step in range(_FULL_WALK_FIRST_STEP, _FULL_WALK_LAST_STEP):
-        state = step_ice_rheo_card(card, state, completed_steps=completed_step - 1)
+        stepper = odd_step if completed_step % 2 else even_step
+        compiled_state = stepper(
+            state, jnp.asarray(completed_step, dtype=jnp.int32)
+        )
+        if completed_step == _FULL_WALK_FIRST_STEP:
+            eager_state = step_ice_rheo_card(
+                card, state, completed_steps=completed_step - 1
+            )
+            _require_jit_eager_exact(eager_state, compiled_state)
+        state = compiled_state
         frame_number = completed_step + 1
         frame_path = root / f"oracle_ice_step_entry_kt{frame_number:08d}.bin"
         require(frame_path.is_file(), f"missing full-walk frame {frame_number}")
@@ -432,7 +471,9 @@ def run_full_walk(
 
     final_restart = root / "ICE_RHEO_OMIP_L3_00000720_restart_ice.nc"
     require(final_restart.is_file(), f"missing final restart: {final_restart}")
-    state = step_ice_rheo_card(card, state, completed_steps=_FULL_WALK_LAST_STEP - 1)
+    state = even_step(
+        state, jnp.asarray(_FULL_WALK_LAST_STEP, dtype=jnp.int32)
+    )
     moment_rows: list[dict[str, object]] = []
     with netCDF4.Dataset(final_restart) as dataset:
         last_rows = _ordinary_rows_from_restart(card, state, dataset, _FULL_WALK_LAST_STEP)
@@ -463,6 +504,7 @@ def run_full_walk(
         "relative_column": "max_abs / oracle_max_abs; diagnostic only",
         "cpu_only": True,
         "precision_policy": "fp64",
+        "jit_eager_step9": "BYTE-EXACT",
         "walk_completed_steps": [_FULL_WALK_FIRST_STEP, _FULL_WALK_LAST_STEP],
         "first_over_bar_by_field": first_over_bar,
         "growth": growth,
