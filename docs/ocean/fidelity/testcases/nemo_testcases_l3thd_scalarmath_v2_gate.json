@@ -293,6 +293,10 @@
         "namelist_ice_ref": "055ab5e6839c12dbae61bf1c3bcdda46a8f95cf275b7f294d68d7f8e73179307",
         "namelist_ref": "b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd"
       },
+      "forcing": {
+        "path": "/data/abyssal/dbalwada/nemo-testcases-l3/c1d_omip_l3_sasice_scalarmath_v2_a/SAS/ERA5_NorthGreenland_surface_84N_-36E_1h_y2018.nc",
+        "sha256": "e5ec49445d2569019c45dec24255b9c7daf050079444b0e6e6d86a5b82317afe"
+      },
       "my_src": {
         "icesbc.F90": "75cdaaeec423f27c79983730828cb6a9978f1d0dbbfac9a671a7e083a95ea74e",
         "icestp.F90": "c2384d4d4ff96c4aa9c880ca7de07b7180355e361e2c8584f59fba84e53ec982",
@@ -303,6 +307,21 @@
         "usrdef_hgr.F90": "cea3157451d468bf3c425f5c42c5cc9fddd5fed9ce49b409d951cf0fa6245eb1",
         "usrdef_nam.F90": "fcb90b410b3c0697ad36e394b976d22be62659b3609fa85c49de51824083948d",
         "usrdef_zgr.F90": "e4d9b93fea99479980224452cc78bf514de2d7ab2b70a069c223a5fee8a81940"
+      },
+      "run_root_exp": {
+        "axis_def_nemo.xml": "067bf12ec39bb08e439e941c392d1df9d57c8bc7c327bd66d44eea9634e8d1d0",
+        "context_nemo.xml": "430536d83f9fd7230b18b0a8a4e6b5f041777d8dae86c9945e79b59450c6a1b7",
+        "domain_def_nemo.xml": "0ef3725496b43fb465d460b38c440f0cabdc67d3d7ec53c4dc5890f47d30e5c4",
+        "field_def_nemo-ice.xml": "87572bf7c3120d606ec847c09c69f75378b0216c0289c5f2f73048daa93b3b2c",
+        "field_def_nemo-oce.xml": "81dc9ac00231e7a2751b443d4057b871dbb728fc3f3dd9662ff823896d97d05a",
+        "file_def_nemo-ice.xml": "f702edd804a0d94867e184feb9055597c0c437400f8fe63013c70266cb82cc8a",
+        "file_def_nemo-oce.xml": "def824001d74014d7a25c0cea16a4f6b18f0cb1a9d9e0b0b4475f1656a8731fa",
+        "grid_def_nemo.xml": "01cc18b998a01cf9e0d06732966c62cef1e4ba4218e62f3f2ebec10b441631fd",
+        "iodef.xml": "84bbd92343b9e457057838619cdca956b4961459273ad2a21b17bc28d2a540da",
+        "namelist_cfg": "6151c0fdd2431d07c7897d5852846a620edd58c55255f11b7fb3569803b5342c",
+        "namelist_ice_cfg": "da7b4fc5865edf6a6a912d6316a51f6b845aaf7e8b87e9da121c6f0a46278033",
+        "namelist_ice_ref": "055ab5e6839c12dbae61bf1c3bcdda46a8f95cf275b7f294d68d7f8e73179307",
+        "namelist_ref": "b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd"
       }
     },
     "B": {
@@ -322,6 +341,10 @@
         "namelist_ice_ref": "055ab5e6839c12dbae61bf1c3bcdda46a8f95cf275b7f294d68d7f8e73179307",
         "namelist_ref": "b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd"
       },
+      "forcing": {
+        "path": "/data/abyssal/dbalwada/nemo-testcases-l3/c1d_omip_l3_sasice_scalarmath_v2_b/SAS/ERA5_NorthGreenland_surface_84N_-36E_1h_y2018.nc",
+        "sha256": "e5ec49445d2569019c45dec24255b9c7daf050079444b0e6e6d86a5b82317afe"
+      },
       "my_src": {
         "icesbc.F90": "75cdaaeec423f27c79983730828cb6a9978f1d0dbbfac9a671a7e083a95ea74e",
         "icestp.F90": "c2384d4d4ff96c4aa9c880ca7de07b7180355e361e2c8584f59fba84e53ec982",
@@ -332,6 +355,21 @@
         "usrdef_hgr.F90": "cea3157451d468bf3c425f5c42c5cc9fddd5fed9ce49b409d951cf0fa6245eb1",
         "usrdef_nam.F90": "fcb90b410b3c0697ad36e394b976d22be62659b3609fa85c49de51824083948d",
         "usrdef_zgr.F90": "e4d9b93fea99479980224452cc78bf514de2d7ab2b70a069c223a5fee8a81940"
+      },
+      "run_root_exp": {
+        "axis_def_nemo.xml": "067bf12ec39bb08e439e941c392d1df9d57c8bc7c327bd66d44eea9634e8d1d0",
+        "context_nemo.xml": "430536d83f9fd7230b18b0a8a4e6b5f041777d8dae86c9945e79b59450c6a1b7",
+        "domain_def_nemo.xml": "0ef3725496b43fb465d460b38c440f0cabdc67d3d7ec53c4dc5890f47d30e5c4",
+        "field_def_nemo-ice.xml": "87572bf7c3120d606ec847c09c69f75378b0216c0289c5f2f73048daa93b3b2c",
+        "field_def_nemo-oce.xml": "81dc9ac00231e7a2751b443d4057b871dbb728fc3f3dd9662ff823896d97d05a",
+        "file_def_nemo-ice.xml": "f702edd804a0d94867e184feb9055597c0c437400f8fe63013c70266cb82cc8a",
+        "file_def_nemo-oce.xml": "def824001d74014d7a25c0cea16a4f6b18f0cb1a9d9e0b0b4475f1656a8731fa",
+        "grid_def_nemo.xml": "01cc18b998a01cf9e0d06732966c62cef1e4ba4218e62f3f2ebec10b441631fd",
+        "iodef.xml": "84bbd92343b9e457057838619cdca956b4961459273ad2a21b17bc28d2a540da",
+        "namelist_cfg": "6151c0fdd2431d07c7897d5852846a620edd58c55255f11b7fb3569803b5342c",
+        "namelist_ice_cfg": "da7b4fc5865edf6a6a912d6316a51f6b845aaf7e8b87e9da121c6f0a46278033",
+        "namelist_ice_ref": "055ab5e6839c12dbae61bf1c3bcdda46a8f95cf275b7f294d68d7f8e73179307",
+        "namelist_ref": "b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd"
       }
     }
   }

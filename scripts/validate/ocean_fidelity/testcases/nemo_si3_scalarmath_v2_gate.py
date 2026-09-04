@@ -18,6 +18,10 @@ ARCH_FLAGS = (
     "-fdefault-real-8 -O3 -funroll-all-loops -fcray-pointer "
     "-ffree-line-length-none -fallow-argument-mismatch -fno-tree-vectorize"
 )
+FORCING_SHA256 = "e5ec49445d2569019c45dec24255b9c7daf050079444b0e6e6d86a5b82317afe"
+FORCING_RELATIVE = Path(
+    "SAS/ERA5_NorthGreenland_surface_84N_-36E_1h_y2018.nc"
+)
 BASE = Path("/data/abyssal/dbalwada/nemo-testcases-l3")
 V1_ROOT = BASE / "c1d_omip_l3_sasice_bulk_phase1"
 V2_A_ROOT = BASE / "c1d_omip_l3_sasice_scalarmath_v2_a"
@@ -245,7 +249,10 @@ def evaluate(*, plant: str | None = None) -> dict[str, object]:
 
     source_rows = {}
     v1_my_src = V1_SOURCE / f"cfgs/{CONFIG_V1}/MY_SRC"
-    for lane, source in (("A", V2_A_SOURCE), ("B", V2_B_SOURCE)):
+    for lane, source, run_root in (
+        ("A", V2_A_SOURCE, v2_a_root),
+        ("B", V2_B_SOURCE, V2_B_ROOT),
+    ):
         v2_config = source / f"cfgs/{CONFIG_V2}"
         my_src = _manifest(v2_config / "MY_SRC", MY_SRC_FILES)
         expected_my_src = _manifest(v1_my_src, MY_SRC_FILES)
@@ -255,11 +262,26 @@ def evaluate(*, plant: str | None = None) -> dict[str, object]:
         exp = _manifest(v2_config / "EXP00", EXP_FILES)
         expected_exp = _manifest(V1_ROOT, EXP_FILES)
         require(exp == expected_exp, f"{lane} executed EXP deck is not verbatim")
+        run_exp = _manifest(run_root, EXP_FILES)
+        if plant == "run_deck" and lane == "A":
+            run_exp[EXP_FILES[0]] = "0" * 64
+        require(run_exp == exp, f"{lane} run-root EXP deck drift")
+        forcing_hash = sha256(run_root / FORCING_RELATIVE)
+        if plant == "forcing" and lane == "A":
+            forcing_hash = "0" * 64
+        require(forcing_hash == FORCING_SHA256, f"{lane} forcing hash drift")
         cpp = v2_config / f"cpp_{CONFIG_V2}.fcm"
         cpp_v1 = V1_SOURCE / f"cfgs/{CONFIG_V1}/cpp_{CONFIG_V1}.fcm"
         require(cpp.read_bytes() == cpp_v1.read_bytes(), f"{lane} cpp keys drift")
         source_rows[lane] = {
-            "my_src": my_src, "exp00": exp, "cpp_sha256": sha256(cpp),
+            "my_src": my_src,
+            "exp00": exp,
+            "run_root_exp": run_exp,
+            "forcing": {
+                "path": str(run_root / FORCING_RELATIVE),
+                "sha256": forcing_hash,
+            },
+            "cpp_sha256": sha256(cpp),
         }
 
     comparisons = {}
@@ -365,6 +387,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant", choices=(
         "stream_bit", "inventory", "binary_zgv", "source_drift", "v1_as_v2",
+        "run_deck", "forcing",
     ))
     args = parser.parse_args()
     result = evaluate(plant=args.plant)

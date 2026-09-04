@@ -25,7 +25,7 @@ import nemo_si3thd_phase2_gate as phase2
 BAR = phase2.BAR
 REPLAY_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l3/"
-    "c1d_omip_l3_sasice_phase6_dh_operands_writeonly"
+    "c1d_omip_l3_sasice_scalarmath_v2_a"
 )
 EXPANDED_ZDF_SHA256 = "aad46579fb2d2cc19299d7a25992802525603bb9858adf1e892ff5d85bf40442"
 REASSOC_SHA256 = "4b832b0c274d6aab032f16958224ebfb6fea603af22e1a1f1d474ff71b1e4589"

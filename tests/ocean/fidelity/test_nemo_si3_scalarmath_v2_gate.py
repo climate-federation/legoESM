@@ -70,6 +70,7 @@ def test_full_v2_gate_and_plants() -> None:
     )
     for plant in (
         "stream_bit", "inventory", "binary_zgv", "source_drift", "v1_as_v2",
+        "run_deck", "forcing",
     ):
         with pytest.raises(gate.GateError):
             gate.evaluate(plant=plant)

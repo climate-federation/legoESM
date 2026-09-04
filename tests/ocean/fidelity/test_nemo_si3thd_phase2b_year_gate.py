@@ -40,6 +40,18 @@ def test_nemo_operation_order_replay_is_exact_and_normalised_order_differs(gate)
                for row in result["thomas_rows"])
 
 
+def test_round9_year_artifact_and_default_root_are_scalar_math_v2(gate) -> None:
+    from legoesm.ice.c1d_omip_l3 import ORACLE_V2_ROOT, ORACLE_VERSION
+
+    artifact = json.loads(Path(
+        "docs/ocean/fidelity/testcases/"
+        "nemo_testcases_l3thd_scalarmath_v2_year_gate.json"
+    ).read_text())
+    assert gate.REPLAY_ROOT == ORACLE_V2_ROOT
+    assert artifact["card"]["oracle_root"] == str(ORACLE_V2_ROOT)
+    assert artifact["card"]["oracle_version"] == ORACLE_VERSION == "V2_SCALAR_MATH"
+
+
 def test_arithmetic_plant_exits_red(gate) -> None:
     card = build_c1d_omip_l3_card(oracle_root=gate.REPLAY_ROOT)
     with pytest.raises(gate.phase2.GateError, match="exceeds 2 ULP"):
