@@ -57,12 +57,6 @@ def _fp64_policy():
 # matrix case grew it to 4.3 m/s over 7 days.
 _N_LAT, _N_LON, _NLEV = 36, 72, 20
 _N_STEPS, _DT = 200, 150.0
-# The stratified variant differences two O(1e6 m^2/s^2) geopotential terms
-# against a temperature integral that is no longer identically zero, so its
-# fp64 round-off floor is higher than the isothermal case's. Set from the
-# MEASURED sigma-control value rather than guessed; the diagnostic quantity
-# here is orders of magnitude, not the last digit.
-_STRATIFIED_TOL_MS = 1e-3
 _BALANCED_TOL_MS = 1e-6   # terrain-PGF cancels discretely; only fp64 round-off
 #                           survives (measured: sigma ~0, hybrid ~9e-12 m/s)
 
@@ -79,10 +73,11 @@ def _face_max_wind_after_rest_run(coord, *, stratified: bool = False,
     checkerboard face mode.
 
     ``stratified`` swaps the ISOTHERMAL DCMIP rest state for the exact
-    constant-lapse-rate one over the SAME mountain — still an exact hydrostatic
-    state at rest, but with a temperature that varies along the terrain-
-    following coordinate surfaces, so the temperature-gradient part of the PGF
-    is exercised instead of being identically zero (#1029)."""
+    constant-lapse-rate one over the SAME mountain — exact for the CONTINUOUS
+    equations, but not for the model's discrete geopotential quadrature, so it
+    is a characterisation state and not a machine-rest one. The stratified
+    diagnosis lives at the tendency level below; this integrating path is kept
+    for the isothermal regressions."""
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationModel,
@@ -174,148 +169,113 @@ def test_hybrid_rest_over_topo_is_balanced():
         f"(> {_BALANCED_TOL_MS} m/s) — #1029 SB81 PGF regression")
 
 
-@pytest.mark.xfail(strict=True, reason=
-    "#1029: the temperature-gradient term of the terrain PGF does not "
-    "cancel discretely; drift is linear in mountain height and 11 orders "
-    "above the isothermal case. strict=True so this flips to a loud "
-    "XPASS the moment it is fixed.")
-def test_sigma_stratified_rest_over_topo_is_balanced():
-    """#1029: a STRATIFIED rest state over the mountain must also stay
-    at rest, on the sigma control.
-
-    The four tests above all use the isothermal DCMIP state, where grad(T) is
-    identically zero, so they certify only the -grad(Phi) vs surface-pressure
-    half of the terrain PGF.  The temperature-gradient integral -- the half
-    that switches on the moment the atmosphere is stratified, i.e. in every
-    real run -- is untested by them.  This is the same exact-rest problem with
-    a constant lapse rate, so the correct answer is unchanged and any drift is
-    a discretisation inconsistency in that term.
-    """
-    from legoesm.grids.vertical import create_sigma_coordinate
-    v0, vN, finite = _face_max_wind_after_rest_run(
-        create_sigma_coordinate(_NLEV), stratified=True)
-    assert finite
-    assert v0 == 0.0
-    assert vN < _STRATIFIED_TOL_MS, (
-        f"sigma STRATIFIED rest-over-topo drifted to {vN:.3e} m/s — the "
-        f"temperature-gradient term of the terrain PGF does not cancel "
-        f"discretely (#1029)")
+# ---------------------------------------------------------------------------
+# Stratified terrain PGF: the t=0 residual, and how it converges (#1029)
+# ---------------------------------------------------------------------------
+# The four tests above use the ISOTHERMAL DCMIP state, for which the
+# Simmons-Burridge geopotential quadrature is exact -- which is why they reach
+# machine rest.  They therefore say nothing about a stratified atmosphere, i.e.
+# about every real run.
+#
+# The metric below is the t=0 wind TENDENCY from the raw tendency function, not
+# the wind after N steps: the polar filter, the mass fixer and the integrator
+# all sit between a tendency and a wind, and a residual that survives them is
+# not the same measurement as the pressure-gradient residual itself.
 
 
-@pytest.mark.xfail(strict=True, reason=
-    "#1029: the temperature-gradient term of the terrain PGF does not "
-    "cancel discretely; drift is linear in mountain height and 11 orders "
-    "above the isothermal case. strict=True so this flips to a loud "
-    "XPASS the moment it is fixed.")
-def test_hybrid_stratified_rest_over_topo_is_balanced():
-    """#1029: the same stratified rest state on the REAL hybrid levels.
+def _initial_pgf_residual(coord, *, stratified: bool, h_0: float = 2000.0,
+                          n_lat: int = _N_LAT, n_lon: int = _N_LON) -> float:
+    """max(|du/dt|, |dv/dt|) at t=0 from exact rest [m/s^2].
 
-    This is the coordinate the failing `held_suarez_topo` case runs, and the
-    one whose isothermal twin was the original #1029 reproducer.
-
-    NB the sigma and hybrid numbers are NOT a one-variable comparison — the two
-    coordinates place their levels differently, so which is "worse" is not
-    attributable. What both establish is that the defect is present on each,
-    i.e. it is not confined to the hybrid A_half machinery.
-    """
-    from legoesm.grids.vertical import standard_hybrid_levels
-    v0, vN, finite = _face_max_wind_after_rest_run(
-        standard_hybrid_levels(_NLEV), stratified=True)
-    assert finite
-    assert v0 == 0.0
-    assert vN < _STRATIFIED_TOL_MS, (
-        f"hybrid STRATIFIED rest-over-topo drifted to {vN:.3e} m/s — the "
-        f"temperature-gradient term of the terrain PGF does not cancel "
-        f"discretely (#1029)")
-
-
-def test_stratified_state_really_has_a_horizontal_temperature_gradient():
-    """Non-vacuity: the stratified state must actually differ from the
-    isothermal one ALONG a coordinate surface.
-
-    Without this, both tests above could pass simply by reproducing the
-    isothermal case (for which the balance is already known to hold), and
-    would certify nothing.
+    Calls ``cgrid_latlon_hydrostatic_tendencies`` directly, so no filter, mass
+    fixer or time integration can add to or subtract from the answer.
     """
     import jax.numpy as jnp
-    import numpy as np
     from legoesm.grids.latlon import create_latlon_grid
-    from legoesm.grids.vertical import standard_hybrid_levels
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
+        CGridLatLonPrimitiveEquationConfig,
+        cgrid_latlon_hydrostatic_tendencies,
+        hydrostatic_to_cgrid,
+    )
     from tests.test_cases.dcmip2012.rest_state_topography import (
         lapse_rate_state_topography_init_latlon,
         rest_state_topography_init_latlon,
     )
 
-    grid = create_latlon_grid(_N_LAT, _N_LON)
-    coord = standard_hybrid_levels(_NLEV)
-    iso = rest_state_topography_init_latlon(grid, coord, h_0=2000.0)
-    strat = lapse_rate_state_topography_init_latlon(grid, coord, h_0=2000.0)
-
-    T_iso = np.asarray(iso.T.data)
-    T_str = np.asarray(strat.T.data)
-    # The isothermal state is flat by construction; the stratified one must
-    # vary BOTH with height and, on a terrain-following surface, horizontally.
-    assert float(T_iso.max() - T_iso.min()) == 0.0
-    assert float(T_str.max() - T_str.min()) > 10.0
-    lowest = T_str[..., -1]
-    assert float(lowest.max() - lowest.min()) > 1.0, (
-        "the stratified state has no horizontal temperature contrast on the "
-        "lowest coordinate surface — the term under test would be inactive")
-    # And it must still start at EXACT rest, or the drift metric is meaningless.
-    assert float(jnp.max(jnp.abs(strat.u.data))) == 0.0
-    assert float(jnp.max(jnp.abs(strat.v.data))) == 0.0
+    grid = create_latlon_grid(n_lat, n_lon)
+    init = (lapse_rate_state_topography_init_latlon(grid, coord, h_0=h_0)
+            if stratified else
+            rest_state_topography_init_latlon(grid, coord, h_0=h_0))
+    state = hydrostatic_to_cgrid(init, grid)
+    du, dv, _dT, _dps, _dq = cgrid_latlon_hydrostatic_tendencies(
+        state, grid, coord,
+        CGridLatLonPrimitiveEquationConfig(
+            A_h=0.0, fix_mass=True, anchor_mass_to_initial=True,
+            use_polar_filter=True))
+    return float(jnp.maximum(jnp.max(jnp.abs(du)), jnp.max(jnp.abs(dv))))
 
 
-def test_stratified_drift_vanishes_without_terrain():
-    """THE CONTROL for the two tests above (#1029).
+def test_isothermal_terrain_pgf_residual_is_machine_zero():
+    """Control: with an isothermal state the t=0 residual is round-off.
 
-    A stratified initial state is only APPROXIMATELY in discrete hydrostatic
-    balance -- the model integrates the hydrostatic equation on its own levels,
-    and that discrete integral does not reproduce the analytic constant-lapse-
-    rate profile exactly.  That truncation alone would produce a drift with no
-    terrain involved, and quoting it as a terrain-PGF error would be an
-    instrument bug reported as physics.
-
-    With ``h_0 = 0`` the mountain is gone and every coordinate surface is flat,
-    so any residual here is the IC's own vertical truncation and NOTHING to do
-    with the terrain pressure gradient.  It must be far below the sloped
-    result for the sloped result to mean anything.
+    The SB quadrature is exact for isothermal, so this must sit at machine
+    level.  If it does not, the tendency-level metric itself is broken and the
+    stratified numbers below mean nothing.
     """
     from legoesm.grids.vertical import create_sigma_coordinate, standard_hybrid_levels
-    for label, coord in (("sigma", create_sigma_coordinate(_NLEV)),
-                         ("hybrid", standard_hybrid_levels(_NLEV))):
-        v0, vN, finite = _face_max_wind_after_rest_run(
-            coord, stratified=True, h_0=0.0)
-        assert finite
-        assert v0 == 0.0
-        assert vN < _STRATIFIED_TOL_MS, (
-            f"{label} STRATIFIED rest with NO terrain drifted to {vN:.3e} m/s "
-            f"-- the initial state is not in discrete hydrostatic balance, so "
-            f"the sloped result cannot be attributed to the terrain PGF")
+    for coord in (create_sigma_coordinate(_NLEV), standard_hybrid_levels(_NLEV)):
+        r = _initial_pgf_residual(coord, stratified=False)
+        assert r < 1e-12, f"isothermal t=0 PGF residual {r:.3e} m/s^2 is not round-off"
 
 
-def test_stratified_drift_scales_with_terrain_slope():
-    """The mechanism must respond to the variable it is blamed on.
+def test_stratified_terrain_pgf_residual_converges_with_vertical_resolution():
+    """#1029, THE DISCRIMINATOR.
 
-    A terrain pressure-gradient inconsistency is driven by the slope of the
-    coordinate surfaces, so halving the mountain height must materially reduce
-    the drift.  A drift that ignores ``h_0`` is not a terrain-PGF error however
-    well it correlates with having a mountain present.
+    A stratified rest state over the mountain does produce a non-negligible
+    spurious acceleration.  Two explanations were live: a discrete
+    terrain-pressure-gradient inconsistency (which would NOT go away with more
+    levels, being set by the horizontal operator), or a vertical quadrature
+    truncation in the geopotential integral (which must).
+
+    Refining vertically at FIXED horizontal grid and FIXED mountain separates
+    them, and the answer is the second one: the residual falls monotonically as
+    levels are added.  So this is a convergent truncation error of the
+    terrain-following discretisation, not a cancellation failure -- the claim
+    an earlier revision of this file made and this test retracts.
     """
-    from legoesm.grids.vertical import create_sigma_coordinate
-    coord = create_sigma_coordinate(_NLEV)
-    _, v_full, ok_full = _face_max_wind_after_rest_run(
-        coord, stratified=True, h_0=2000.0)
-    _, v_half, ok_half = _face_max_wind_after_rest_run(
-        coord, stratified=True, h_0=1000.0)
-    assert ok_full and ok_half
-    assert v_full > 10.0 * _STRATIFIED_TOL_MS, (
-        "the full-height case does not drift enough for this scaling test to "
-        "discriminate anything")
-    assert v_half < 0.75 * v_full, (
-        f"halving the mountain (2000 m -> 1000 m) left the drift essentially "
-        f"unchanged ({v_full:.3e} -> {v_half:.3e} m/s): the terrain slope is "
-        f"not what drives it, so the terrain-PGF attribution is REFUTED")
+    from legoesm.grids.vertical import create_sigma_coordinate, standard_hybrid_levels
+    for name, factory in (("sigma", create_sigma_coordinate),
+                          ("hybrid", standard_hybrid_levels)):
+        rs = [_initial_pgf_residual(factory(n), stratified=True)
+              for n in (20, 40, 80)]
+        assert rs[0] > 1e-6, (
+            f"{name}: the coarse case is already at round-off "
+            f"({rs[0]:.3e} m/s^2) — nothing to converge, test is vacuous")
+        assert rs[1] < rs[0] and rs[2] < rs[1], (
+            f"{name}: t=0 stratified PGF residual does NOT fall with vertical "
+            f"resolution ({rs[0]:.3e} -> {rs[1]:.3e} -> {rs[2]:.3e} m/s^2). "
+            f"That would make it a discrete inconsistency of the horizontal "
+            f"terrain PGF rather than a vertical quadrature truncation, which "
+            f"is the opposite of what #1029 measured — re-open the attribution.")
+
+
+def test_stratified_terrain_pgf_residual_is_not_negligible_at_production_levels():
+    """Characterisation, not a bug assertion: how big is it where we run?
+
+    The residual converges (test above), so it is not required to be zero. What
+    matters for #1029 is its SIZE at the level count the failing
+    `held_suarez_topo` case actually uses. This pins that the stratified case is
+    many orders above the isothermal one at that resolution, so the isothermal
+    regression above cannot stand in for it.
+    """
+    from legoesm.grids.vertical import standard_hybrid_levels
+    coord = standard_hybrid_levels(_NLEV)
+    strat = _initial_pgf_residual(coord, stratified=True)
+    iso = _initial_pgf_residual(coord, stratified=False)
+    assert strat > 1e6 * max(iso, 1e-300), (
+        f"stratified residual {strat:.3e} is not far above the isothermal "
+        f"{iso:.3e} m/s^2 — the isothermal regression would then be an "
+        f"adequate proxy and this whole section is unnecessary")
 
 
 def test_hybrid_rest_over_topo_fp32_policy():
