@@ -462,3 +462,82 @@ moment plant must produce `over_two_ulp_count > 0` and a nonzero process exit;
 zero is a fail-closed harness error.  If the conditional long walk runs, the
 first non-bit-exact row and step are the next owner boundary; no later growth
 is assigned a mechanism without a one-variable measurement.
+
+## Round-12 Prather source-exactness (registered before transport edits)
+
+### Search and source registry
+
+The pre-implementation search found one shared SI3 Prather implementation in
+`packages/ice/legoesm/ice/transport.py` and the separate three-dimensional
+ocean-tracer SOM implementation in
+`packages/ocean/legoesm/ocean/advection_som.py`.  The latter has nine moments,
+different dimensional recurrences, and no SI3 limiter, so no arithmetic block
+is shared.  Round 12 extends the existing ice implementation; it adds no model,
+scheme, selector, or duplicate kernel.  The canonical
+`packages/core/legoesm/core/{precision,transcendentals,source_rounding}.py`
+blobs remain untouched.
+
+The source-rounding registry follows the actual `adv_x` and `adv_y` programs:
+
+| stage | NEMO statements | result materialized before its next consumer |
+|---|---|---|
+| extensive entry | `icedyn_adv_pra.F90:218-245` | each intensive-times-`e1e2t` `ps0`; `psm=e1e2t` |
+| limiter | `:534-568,757-791` | `1/3`, nonnegative `ps0`, `1.5*ps0`, nested `MIN(MAX())` first- and second-moment bounds in written `ABS` order, mask products, cross-moment bound |
+| positive-face Courant powers | `:570-588,793-811` | velocity-times-`pdt`, reciprocal-area product, `1-alpha`, alpha/remaining powers, then `zfm`, `zf0`, and all five flux moments in source operand order |
+| positive donor remainder | `:590-597,813-820` | area/content and transverse-moment subtractions; source-ordered longitudinal moment update and powers |
+| negative-face flux | `:618-634,841-858` | negative velocity-times-`pdt`, reciprocal post-positive donor area, alpha powers, additive `zfm`/`zf0`/moment flux formation |
+| negative donor remainder | `:639-664,863-888` | the second face's Courant fraction, remaining powers, area/content and moment losses using the post-positive donor state |
+| positive receiver merge | `:666-686,890-910` | area add, reciprocal-area fraction, powers, content add, then first/second/cross moment recurrences in the declared dependency order (`zpsx`/`zpsy` updates before their second moments; cross update before transverse add) |
+| negative receiver merge | `:688-707,912-931` | the symmetric area/content adds and ordered first/second/cross moment recurrences |
+| split recursion | `:253-350` | odd outer step/subcycle parity runs x then y; even parity runs y then x; the second sweep consumes the first sweep's `psm`, `ps0`, and five updated moments |
+| halo refresh | `:432-480` | copied T-point periodic halos after every subcycle; moment families retain NEMO's T-grid sign contract for this one-rank bi-periodic case |
+| intensive recovery | `:355-381` | reciprocal `e1e2t`, then the two left-to-right content/reciprocal/mask products |
+
+Every arithmetic assignment in those executed paths will use the shared
+`nemo_source_round` result before its next source consumer.  Division is
+written as NEMO's reciprocal followed by its multiplication where the oracle
+uses a reciprocal metric; direct `/` statements retain numerator/denominator
+order.  `MIN`, `MAX`, and `ABS` are kept as separate ordered operands before
+the outer selection.  The old unguarded association is available only by the
+existing private monkeypatch ablation of `transport.nemo_source_round`; there
+is no public switch and no card-specific second implementation.
+
+### Prediction, stop conditions, and controls
+
+Primary prediction: with exact oracle U/V, CPU production JIT, fp64, and the
+card's scalar-libm policy, the source-exact shared transport makes all
+**160 / 160** step-8 Prather moment rows byte-exact and every transported-field
+row byte-exact after one step.  CONFIRM requires `0 / n` non-bit-exact cells in
+every one of those rows.  REFUTE is any nonzero numerator.  On REFUTE, a
+WRITE-only first-step/first-sweep NEMO intermediate dump is required and the
+first differing limiter, flux, donor, or receiver operand becomes the owner;
+no endpoint mechanism claim is permitted.
+
+The private unrounded arm is predicted to reproduce the Round-11 production-
+JIT result: 60/160 moment rows DEBT and 140/160 over two ULP.  A planted velocity
+perturbation must move a named clean moment row from exact to nonzero and its
+row assertion must fail if the scoring path stops observing the plant; exit
+status alone is not evidence.
+
+Only if rung 3.3 completed step 1 is byte-exact end to end do steps 2--8 run.
+Only if those and the active-ridging completed-step-8 window remain byte-exact
+does ICE_RHEO run steps 9--720 and score its restart.  The long walk records
+the first non-bit-exact step/row plus normalized and relative growth at 9, 10,
+50, 100, 200, 485, and 720.  That condition discriminates amplification of a
+remaining rounded operand from a remaining operator defect; the label is not
+assigned in advance.
+
+The public H79 `ice_strength` keyword `_source_round` is also renamed to the
+documented `source_exact` spelling.  Its default remains false and only the
+already-selected SI3 C-grid caller passes true; this is API disclosure, not a
+new scheme choice.
+
+### Round-12 ASKED / UNASKED choices
+
+| choice | disposition | reason |
+|---|---|---|
+| Source-round the one shared SI3 Prather program in NEMO statement order and retain the old association only as a private ablation | ASKED | Round-12 dispatch |
+| Require 160/160 exact moments plus exact transported fields under production JIT with oracle U/V | ASKED | Primary acceptance gate |
+| Continue step 1, steps 2--8, active redistribution, and conditionally steps 9--720/restart | ASKED | Ordered dispatch gates |
+| Rename/document the public H79 source-exact keyword without changing its default | ASKED | Queued API disclosure |
+| Change canonical core blobs, transport/rheology defaults, scheme selection, bar, precision/backend, shipped NEMO, or commit large dumps | UNASKED | Outside authorized scope |
