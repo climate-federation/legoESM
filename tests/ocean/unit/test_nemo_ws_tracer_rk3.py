@@ -330,6 +330,43 @@ def test_nemo_ws_tracer_zero_flux_is_exact_identity(monkeypatch):
     np.testing.assert_array_equal(np.asarray(got_b), np.asarray(tracer))
 
 
+def test_nemo_ws_stage1_trace_exposes_live_rhs_boundaries(monkeypatch):
+    """The WRITE-only trace returns post-adv and post-SBC Krhs, not copies."""
+    rate = 0.125
+
+    def linear_flux_pair(a, b, *args, **kwargs):
+        zeros = jnp.zeros_like(a)
+        return (rate * a, zeros), (rate * b, zeros)
+
+    monkeypatch.setattr(
+        model_module, "compute_advection_flux_div_pair", linear_flux_pair)
+    a0 = jnp.array([[[2.0]]], dtype=jnp.float64)
+    b0 = jnp.array([[[3.0]]], dtype=jnp.float64)
+    ones = jnp.ones_like(a0)
+    source_a = jnp.full_like(a0, 0.75)
+    source_b = jnp.full_like(b0, -0.5)
+    result = model_module._nemo_ws_rk3_tracer_pair_step(
+        a0, b0, "centered", ones, ones, jnp.ones((1, 1, 2)),
+        ones, ones, ones, ones, object(), 0.5, ones,
+        stage_source_rates=((source_a, source_b),) * 3,
+        stop_after_stage=1, return_stage1_trace=True,
+    )
+    a1, b1, adv_a, adv_b, sbc_a, sbc_b = (
+        np.asarray(value) for value in result)
+    np.testing.assert_array_equal(adv_a, -rate * np.asarray(a0))
+    np.testing.assert_array_equal(adv_b, -rate * np.asarray(b0))
+    np.testing.assert_array_equal(sbc_a, adv_a + np.asarray(source_a))
+    np.testing.assert_array_equal(sbc_b, adv_b + np.asarray(source_b))
+    assert not np.array_equal(a1, adv_a)
+    assert not np.array_equal(b1, adv_b)
+
+
+def test_nemo_ws_stage1_boundary_hook_is_private_and_validated():
+    with pytest.raises(ValueError, match="expose_tracer_stage1_boundary"):
+        _lock_model(model_module._NEMOWSRK3TestHooks(
+            expose_tracer_stage1_boundary="not-a-boundary"))
+
+
 def test_nemo_ws_real_fct_flux_changes_on_wrong_transport_time_level():
     """Exercise real FCT geometry; a frozen final velocity must fail this pin."""
     set_policy(PrecisionPolicy.fp64())

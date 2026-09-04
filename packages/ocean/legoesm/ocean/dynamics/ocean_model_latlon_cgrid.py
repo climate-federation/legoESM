@@ -1067,6 +1067,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # Private operand diagnostic: return the stage-advanced tracer carried by
     # Kmm after stage 1 or 2. Zero leaves the returned tracer untouched.
     expose_tracer_stage: int = 0
+    # WRITE-only source-order diagnostic for the stage-1 tracer accumulator.
+    # ``after_advection`` returns ts(Krhs) after tra_adv; ``after_sbc`` returns
+    # it after tra_sbc_RK3.  The ordinary compiled step still completes before
+    # T/S are substituted in the returned state.  No card can select this.
+    expose_tracer_stage1_boundary: str = ""
     # Harness-only ablation of NEMO's qco stage face thickness: restore the
     # pre-fix min-of-stretched-T-thicknesses rule in the stage transport.
     # NEMO has no such switch (e3u(Kmm) is a macro), so public WS-RK3 cards
@@ -1404,6 +1409,7 @@ def _nemo_ws_rk3_tracer_pair_step(
     stop_after_stage: int = 3,
     resume=None,
     return_final_content: bool = False,
+    return_stage1_trace: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """NEMO key_RK3 tracer stage program (Wicker--Skamarock form).
 
@@ -1567,6 +1573,17 @@ def _nemo_ws_rk3_tracer_pair_step(
     else:
         fd0_a, fd0_b, rhs0_a, rhs0_b = _flux_pair(
             tr_a, tr_b, dt / 3.0, 0, h_one_third)
+        # WRITE-only source-order values.  The CEN2 RK stage already returns
+        # its concentration RHS directly; for another private diagnostic
+        # configuration, undo the helper's content convention exactly once.
+        trace_adv_a = (
+            rhs0_a if rhs0_a is not None
+            else -fd0_a / jnp.maximum(h_k_old, 1.0e-10))
+        trace_adv_b = (
+            rhs0_b if rhs0_b is not None
+            else -fd0_b / jnp.maximum(h_k_old, 1.0e-10))
+        trace_sbc_a = trace_adv_a + stage_source_rates[0][0]
+        trace_sbc_b = trace_adv_b + stage_source_rates[0][1]
         a1 = _stage(
             tr_a, fd0_a, rhs0_a, stage_source_rates[0][0], dt / 3.0,
             h_one_third, h_k_old, 0)
@@ -1574,6 +1591,11 @@ def _nemo_ws_rk3_tracer_pair_step(
             tr_b, fd0_b, rhs0_b, stage_source_rates[0][1], dt / 3.0,
             h_one_third, h_k_old, 0)
     if stop_after_stage == 1:
+        if return_stage1_trace:
+            return (
+                a1, b1, trace_adv_a, trace_adv_b,
+                trace_sbc_a, trace_sbc_b,
+            )
         return a1, b1
     if resume_stage >= 2:
         a2, b2 = a_resume, b_resume
@@ -2020,6 +2042,11 @@ class LatLonCGridOceanModel:
         if self._nemo_ws_test_hooks.expose_momentum_stage not in (0, 1, 2, 3):
             raise ValueError(
                 "expose_momentum_stage must be one of 0, 1, 2, or 3")
+        if self._nemo_ws_test_hooks.expose_tracer_stage1_boundary not in (
+                "", "after_advection", "after_sbc"):
+            raise ValueError(
+                "expose_tracer_stage1_boundary must be '', "
+                "'after_advection', or 'after_sbc'")
         self.config = self._validate_config(
             config or LatLonCGridOceanConfig.from_flat())
         # Convert LatLonGrid -> LatLonCGridGeometry once at construction.
@@ -4804,6 +4831,7 @@ class LatLonCGridOceanModel:
         _nemo_ws_exposed_momentum_stage = None
         _nemo_ws_exposed_stage2_raw = None
         _nemo_ws_exposed_tracer_stage = None
+        _nemo_ws_exposed_tracer_boundary = None
         _nemo_ws_exposed_tracer_transport = None
         _nemo_ws_exposed_momentum_operator = None
         _nemo_ws_exposed_stage2_rhs = None
@@ -5706,6 +5734,10 @@ class LatLonCGridOceanModel:
                     stage_qco_weights=_tracer_qco_weights,
                     stop_after_stage=stop_after_stage,
                     resume=resume,
+                    return_stage1_trace=(
+                        stop_after_stage == 1
+                        and bool(self._nemo_ws_test_hooks
+                                 .expose_tracer_stage1_boundary)),
                 )
 
             def _stage_hpg_operands(T_stage, S_stage, eta_stage):
@@ -5784,7 +5816,22 @@ class LatLonCGridOceanModel:
                 v1_raw = (_qv_b * v0 + (dt_mom / 3.0) * _qv_b * _v1_rhs) / _qv_13
             u1_corr, v1_corr = _replace_stage_mean(
                 u1_raw, v1_raw, target_u, target_v)
-            _T_stage1, _S_stage1 = _stage_tracers(1, (_g0, _g0, _g0))
+            _stage1_tracer_result = _stage_tracers(1, (_g0, _g0, _g0))
+            if self._nemo_ws_test_hooks.expose_tracer_stage1_boundary:
+                (
+                    _T_stage1, _S_stage1,
+                    _T_stage1_after_adv, _S_stage1_after_adv,
+                    _T_stage1_after_sbc, _S_stage1_after_sbc,
+                ) = _stage1_tracer_result
+                if (self._nemo_ws_test_hooks.expose_tracer_stage1_boundary
+                        == "after_advection"):
+                    _nemo_ws_exposed_tracer_boundary = (
+                        _T_stage1_after_adv, _S_stage1_after_adv)
+                else:
+                    _nemo_ws_exposed_tracer_boundary = (
+                        _T_stage1_after_sbc, _S_stage1_after_sbc)
+            else:
+                _T_stage1, _S_stage1 = _stage1_tracer_result
             if self._nemo_ws_test_hooks.expose_tracer_stage == 1:
                 _nemo_ws_exposed_tracer_stage = (
                     _T_stage1, _S_stage1, _eta_live_one_third)
@@ -7464,6 +7511,14 @@ class LatLonCGridOceanModel:
                 T=state_new.T.replace(data=_stage_T),
                 S=state_new.S.replace(data=_stage_S),
                 eta=state_new.eta.replace(data=_stage_eta),
+            )
+        if _nemo_ws_exposed_tracer_boundary is not None:
+            # Substitute only after the production-JIT step has completed.
+            # The exposed arrays are source-order ts(Krhs), not prognostics.
+            _rhs_T, _rhs_S = _nemo_ws_exposed_tracer_boundary
+            state_new = state_new._replace(
+                T=state_new.T.replace(data=_rhs_T),
+                S=state_new.S.replace(data=_rhs_S),
             )
         if _nemo_ws_exposed_tracer_transport is not None:
             _zfu, _zfv, _zfw = _nemo_ws_exposed_tracer_transport

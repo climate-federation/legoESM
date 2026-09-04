@@ -924,6 +924,14 @@ _DUMP_TIME_LEVEL["oracle_rktracer_stage3_kt00000001.bin"] = (
     "GYRE_OMIP_L2_P3/MY_SRC/stprk3_stg.F90:565-713 writes the stage-3 "
     "Krhs accumulator in source order, with explicit Kbb/Kmm/Kaa headers",
 )
+for _stage, _kmm in ((1, 1), (2, 3)):
+    _DUMP_TIME_LEVEL[f"oracle_rktracer_operands_kt00000001_s{_stage}.bin"] = (
+        "now",
+        "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+        "GYRE_OMIP_L2_P3/MY_SRC/stprk3_stg.F90:606-716 writes the "
+        f"stage-{_stage} Kmm={_kmm} tracer Krhs checkpoints and the "
+        "Kbb/Kmm/Kaa update operands",
+    )
 _DUMP_TIME_LEVEL["oracle_tracer_transport_kt00000001_s3.bin"] = (
     "now",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
