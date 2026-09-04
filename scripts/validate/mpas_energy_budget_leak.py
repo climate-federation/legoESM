@@ -65,6 +65,16 @@ short-circuits the unified collector), so there are no incremental
 their absence as "the tracker did not fire" is wrong, and this script reads the
 right artifact.
 
+DO NOT QUOTE A NUMBER FROM THIS WITHOUT RUNNING THE CROSS-CHECK.
+``scripts/validate/mpas_energy_sampling_crosscheck.py`` compares these SAMPLED
+channels against the run's own CMOR time-accumulated means.  On the first real
+run (job 9632045) the sampled sensible heat flux was 8.0 W/m^2 against an
+accumulated 20.5 -- 2.5x too small, and 12.4 of an apparent 34.7 W/m^2 "leak".
+The lane samples at a fixed model clock time (#1353), which recovers the global
+mean of insolation but NOT of a land-dominated, asymmetric-diurnal field like
+sensible heat.  Until the tracker is fed interval means, the number here is an
+upper bound contaminated by aliasing, not a leak.
+
 Prints numbers only.
 """
 from __future__ import annotations
