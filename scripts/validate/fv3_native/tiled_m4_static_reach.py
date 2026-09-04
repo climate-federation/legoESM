@@ -154,19 +154,100 @@ def _rule_dot(eqn, invals, jnp):
         jnp.zeros((), bool) | jnp.any(a2) | jnp.any(b2), out_shape)]
 
 
+def _index_tainted(invals, first):
+    """True if any INDEX operand (positions ``first:``) carries taint: the
+    read/write POSITION then depends on seam data, so every output cell
+    does -- a concrete index value does not remove that dependence
+    (codex 2026-09-04)."""
+    return any(hasattr(v, "shape") and bool(np.asarray(v, bool).any())
+               for v in invals[first:])
+
+
 def _rule_gather(eqn, invals, jnp):
-    """Conservative and SOUND: a gather with traced indices can read
-    anywhere along the gathered axes, so taint the whole output if any
-    input element is tainted."""
-    x = jnp.asarray(invals[0], bool)
-    out_shape = eqn.outvars[0].aval.shape
-    return [jnp.broadcast_to(jnp.any(x), out_shape)]
+    """SOUND and axis-aware: a gather with traced indices can read
+    anywhere along the axes its start indices move (``start_index_map``),
+    the collapsed and batching axes, and any axis whose slice is
+    narrower than the operand.  Along every OTHER axis the slice starts
+    at 0 and spans the operand, so output position == operand position
+    (``x[:, :, k]`` with traced ``k`` keeps its horizontal footprint).
+    Unknown axes are reduced with ``any`` and broadcast; nothing is
+    dropped, so this over-reports along the moving axes only."""
+    x = np.asarray(invals[0], bool)
+    out_shape = tuple(eqn.outvars[0].aval.shape)
+    if _index_tainted(invals, 1):
+        return [np.ones(out_shape, bool)]
+    dn = eqn.params["dimension_numbers"]
+    sizes = tuple(eqn.params["slice_sizes"])
+    collapsed = set(dn.collapsed_slice_dims)
+    obatch = set(getattr(dn, "operand_batching_dims", ()))
+    odims = [d for d in range(x.ndim) if d not in collapsed and d not in obatch]
+    offs = list(dn.offset_dims)
+    if len(odims) != len(offs):
+        return [np.broadcast_to(np.any(x), out_shape)]
+    unknown = set(dn.start_index_map) | collapsed | obatch
+    unknown |= {d for d in range(x.ndim) if sizes[d] != x.shape[d]}
+    kept = [(d, o) for d, o in zip(odims, offs) if d not in unknown]
+    red = tuple(d for d in range(x.ndim) if d not in {d for d, _ in kept})
+    reduced = np.any(x, axis=red) if red else x
+    shape = [1] * len(out_shape)
+    for d, o in kept:
+        shape[o] = x.shape[d]
+    return [np.broadcast_to(reduced.reshape(shape), out_shape)]
 
 
 def _rule_dynamic_slice(eqn, invals, jnp):
-    x = jnp.asarray(invals[0], bool)
-    out_shape = eqn.outvars[0].aval.shape
-    return [jnp.broadcast_to(jnp.any(x), out_shape)]
+    """Same axis rule as gather: a start index is clamped so a full-extent
+    slice always starts at 0 -- those axes keep position; the rest are
+    reduced with ``any`` and broadcast over the slice."""
+    x = np.asarray(invals[0], bool)
+    out_shape = tuple(eqn.outvars[0].aval.shape)
+    if _index_tainted(invals, 1):
+        return [np.ones(out_shape, bool)]
+    sizes = tuple(eqn.params["slice_sizes"])
+    unknown = tuple(d for d in range(x.ndim) if sizes[d] != x.shape[d])
+    reduced = np.any(x, axis=unknown, keepdims=True) if unknown else x
+    return [np.broadcast_to(reduced, out_shape)]
+
+
+def _rule_dynamic_update_slice(eqn, invals, jnp):
+    """operand with ``update`` written at a traced offset: full-extent
+    axes keep position (offset clamps to 0), narrower axes are unknown
+    and take the update's ``any`` along them."""
+    x = np.asarray(invals[0], bool)
+    u = np.asarray(invals[1], bool)
+    if _index_tainted(invals, 2):
+        return [np.ones(x.shape, bool)]
+    unknown = tuple(d for d in range(x.ndim) if u.shape[d] != x.shape[d])
+    reduced = np.any(u, axis=unknown, keepdims=True) if unknown else u
+    return [x | np.broadcast_to(reduced, x.shape)]
+
+
+_INDEXED = ("gather", "dynamic_slice", "dynamic_update_slice")
+
+
+def _rule_indexed_exact(eqn, invals, inv_vals):
+    """gather / dynamic_slice / dynamic_update_slice with CONCRETE index
+    operands: run the primitive itself on the taint (as int8) with those
+    indices, which is exact -- the very positions the program reads or
+    writes.  Falls back to the axis-aware rule on any binding failure."""
+    import jax
+
+    first = 2 if eqn.primitive.name == "dynamic_update_slice" else 1
+    if _index_tainted(invals, first):
+        return [np.ones(tuple(eqn.outvars[0].aval.shape), bool)]
+    try:
+        if eqn.primitive.name == "dynamic_update_slice":
+            op = np.asarray(invals[0], bool).astype(np.int8)
+            up = np.asarray(invals[1], bool).astype(np.int8)
+            idx = [np.asarray(v) for v in inv_vals[2:]]
+            out = jax.lax.dynamic_update_slice(op, up, idx)
+        else:
+            op = np.asarray(invals[0], bool).astype(np.int8)
+            idx = [np.asarray(v) for v in inv_vals[1:]]
+            out = eqn.primitive.bind(op, *idx, **eqn.params)
+        return [np.asarray(out).astype(bool)]
+    except Exception:
+        return _RULES[eqn.primitive.name](eqn, invals, np)
 
 
 def _rule_convert(eqn, invals, jnp):
@@ -191,29 +272,84 @@ def _rule_scatter(eqn, invals, jnp, idx=None):
     a real reach."""
     op_t = np.asarray(invals[0], bool)
     upd_t = np.asarray(invals[2], bool) if len(invals) > 2 else None
+    if len(invals) > 1 and _index_tainted(invals[:2], 1):
+        return [np.ones(op_t.shape, bool)]     # write POSITION is tainted
     if upd_t is None or not upd_t.any():
         return [op_t]
+    dn = eqn.params["dimension_numbers"]
     if idx is None:
         _SCATTER_FALLBACKS.append(eqn.primitive.name)
-        return [np.ones(op_t.shape, bool) if op_t.any() or upd_t.any()
-                else op_t]
-    out = op_t.copy()
-    dn = eqn.params["dimension_numbers"]
+        return [_scatter_unknown_index(op_t, upd_t, dn)]
+    # Concrete indices: let the scatter itself place the update taint.
+    # A replace-scatter of int8 taint is EXACT at every written position;
+    # for scatter-add/mul/min/max only the written SET is taken from it
+    # (mul/min/max of int8 could zero a tainted operand cell, so the
+    # operand taint is kept by OR).  The earlier rule OR-ed ``upd.any()``
+    # over the whole index ROW, which for ``x.at[:, k].set(u)`` tainted
+    # all of column k from one tainted cell -- a smear that read 20 on
+    # the fori selftest (job 9630872) and 15/27 on the FV3 substep.
+    import jax
+
     try:
-        ii = np.asarray(idx).reshape(-1, np.asarray(idx).shape[-1])
-        odims = list(dn.scatter_dims_to_operand_dims)
-        for row in ii:
-            sl = [slice(None)] * out.ndim
-            for d, v in zip(odims, row):
-                sl[d] = int(v)
-            out[tuple(sl)] |= bool(upd_t.any())
-        return [out]
+        kw = dict(indices_are_sorted=bool(eqn.params.get(
+                      "indices_are_sorted", False)),
+                  unique_indices=bool(eqn.params.get("unique_indices",
+                                                     False)),
+                  mode=eqn.params.get("mode"))
+        i8 = np.asarray(upd_t, np.int8)
+        zeros = np.zeros(op_t.shape, np.int8)
+        # scatter_ADD so duplicate indices union instead of last-wins
+        written = np.asarray(jax.lax.scatter_add(zeros, np.asarray(idx),
+                                                 i8, dn, **kw)) > 0
+        if eqn.primitive.name == "scatter" and kw["unique_indices"]:
+            # replace with unique targets: written cells take the
+            # update's taint exactly, everything else keeps the operand's
+            mask = np.asarray(jax.lax.scatter_add(
+                zeros, np.asarray(idx), np.ones_like(i8), dn, **kw)) > 0
+            return [np.where(mask, written, op_t)]
+        return [op_t | written]
     except Exception:
         _SCATTER_FALLBACKS.append(eqn.primitive.name)
-        return [np.ones(op_t.shape, bool)]
+        return [_scatter_unknown_index(op_t, upd_t, dn)]
 
 
 _SCATTER_FALLBACKS = []
+
+
+def _scatter_unknown_index(op_t, upd_t, dn):
+    """Scatter with UNKNOWN write positions: taint only the operand axes
+    the index can move along.  XLA's start index for operand dim ``d`` is
+    the index value if ``d`` is in ``scatter_dims_to_operand_dims`` and 0
+    otherwise, so a window dim whose update extent equals the operand
+    extent maps position-to-position -- e.g. ``x.at[:, :, k].set(u)``
+    with a traced ``k`` (a level recurrence) writes ``u[i, j]`` at
+    ``(i, j)`` for SOME k.  Tainting every (i, j, k) for that case (the
+    previous fallback) smeared a vertical write across the whole face and
+    made the horizontal bound grow with the face size (15 at C24, 27 at
+    C48 in job 9621158).  Axes the index CAN move along, inserted dims,
+    batching dims and partial windows are still tainted end to end, so
+    the result over-reports along those axes and never under-reports."""
+    nd = op_t.ndim
+    inserted = set(dn.inserted_window_dims)
+    obatch = set(getattr(dn, "operand_batching_dims", ()))
+    wdims = [d for d in range(nd) if d not in inserted and d not in obatch]
+    uwin = list(dn.update_window_dims)
+    if len(wdims) != len(uwin):
+        return np.ones(op_t.shape, bool)
+    unknown = set(dn.scatter_dims_to_operand_dims) | inserted | obatch
+    for ud, wd in zip(uwin, wdims):
+        if upd_t.shape[ud] != op_t.shape[wd]:
+            unknown.add(wd)
+    keep_ud = [ud for ud, wd in zip(uwin, wdims) if wd not in unknown]
+    red_axes = tuple(a for a in range(upd_t.ndim) if a not in keep_ud)
+    reduced = np.any(upd_t, axis=red_axes) if red_axes else upd_t
+    # ``reduced`` axes are the kept window dims in operand order
+    # (update_window_dims is sorted, and the pairing preserves order).
+    shape = [1] * nd
+    for ud, wd in zip(uwin, wdims):
+        if wd not in unknown:
+            shape[wd] = op_t.shape[wd]
+    return op_t | np.broadcast_to(reduced.reshape(shape), op_t.shape)
 
 
 _ELEMENTWISE = (
@@ -247,6 +383,7 @@ _RULES = {
     "dot_general": _rule_dot,
     "gather": _rule_gather,
     "dynamic_slice": _rule_dynamic_slice,
+    "dynamic_update_slice": _rule_dynamic_update_slice,
     "convert_element_type": _rule_convert,
     "stop_gradient": _rule_identity,
     "copy": _rule_identity,
@@ -282,7 +419,8 @@ def _concrete(eqn, vals):
 
 
 def _interp(jaxpr, consts, args, jnp, depth=0, stats=None,
-            const_taints=None):
+            const_taints=None, arg_vals=None, const_vals=None,
+            out_vals=None):
     """Taint-interpret one jaxpr.  ``stats`` accumulates, per primitive,
     the largest horizontal reach its output achieved -- so the reported
     number arrives with the operation that produced it.
@@ -290,7 +428,15 @@ def _interp(jaxpr, consts, args, jnp, depth=0, stats=None,
     ``const_taints`` covers the case where a caller hoisted the
     sub-jaxpr's constants into leading operands (see ``_bind_call``):
     the constvars then carry the CALLER'S taint rather than being clean
-    literals, and zeroing them would under-report."""
+    literals, and zeroing them would under-report.
+
+    ``arg_vals`` / ``const_vals`` carry the caller's CONCRETE integer
+    values (None = unknown) into this sub-jaxpr, and ``out_vals`` (a
+    list, filled in place) hands the outvars' concrete values back.  This
+    is what lets a scan's level counter stay concrete inside its body, so
+    a level-indexed scatter/gather writes and reads ONE level instead of
+    being smeared over all of them (the smear chained across iterations
+    and made the C24/C48 bound read 15/27, job 9630774)."""
     env = {}
     env_val = {}          # concrete values for INTEGER subgraphs only
 
@@ -320,12 +466,10 @@ def _interp(jaxpr, consts, args, jnp, depth=0, stats=None,
             raise UnknownPrimitive(
                 f"const_taints arity {len(const_taints)} != "
                 f"{len(jaxpr.constvars)} constvars")
-        for cv, t in zip(jaxpr.constvars, const_taints):
-            # No VALUES available on this path, so the integer
-            # side-channel goes dark inside this sub-jaxpr: a scatter in
-            # here falls back to whole-output taint, which OVER-reports
-            # (announced by _SCATTER_FALLBACKS) and never under-reports.
+        for i, (cv, t) in enumerate(zip(jaxpr.constvars, const_taints)):
             write(cv, np.asarray(t, bool))
+            if const_vals is not None and const_vals[i] is not None:
+                env_val[cv] = np.asarray(const_vals[i])
     else:
         if len(consts) != len(jaxpr.constvars):
             raise UnknownPrimitive(
@@ -339,17 +483,27 @@ def _interp(jaxpr, consts, args, jnp, depth=0, stats=None,
         raise UnknownPrimitive(
             f"operand arity {len(args)} != {len(jaxpr.invars)} invars -- "
             f"refusing to zip-truncate, which would silently drop inputs")
-    for iv, a in zip(jaxpr.invars, args):
+    for i, (iv, a) in enumerate(zip(jaxpr.invars, args)):
         write(iv, a)
+        if arg_vals is not None and arg_vals[i] is not None:
+            env_val[iv] = np.asarray(arg_vals[i])
 
     for eqn in jaxpr.eqns:
         name = eqn.primitive.name
         invals = [read(v) for v in eqn.invars]
+        inv_vals = [read_val(v) for v in eqn.invars]
+        ho_vals = None
         if name in _HIGHER_ORDER:
-            outs = _interp_higher_order(eqn, invals, jnp, depth, stats)
+            ho_vals = []
+            outs = _interp_higher_order(eqn, invals, jnp, depth, stats,
+                                        inv_vals, ho_vals)
         elif name in _SCATTER_PRIMS:
             idx = read_val(eqn.invars[1]) if len(eqn.invars) > 1 else None
             outs = _rule_scatter(eqn, invals, jnp, idx)
+        elif name in _INDEXED and all(v is not None for v in inv_vals[1:]) \
+                and (name != "dynamic_update_slice"
+                     or all(v is not None for v in inv_vals[2:])):
+            outs = _rule_indexed_exact(eqn, invals, inv_vals)
         else:
             rule = _RULES.get(name)
             if rule is None:
@@ -359,16 +513,98 @@ def _interp(jaxpr, consts, args, jnp, depth=0, stats=None,
                     f"data dependence and UNDER-reports the reach, which is "
                     f"the exact failure this analyser exists to remove")
             outs = rule(eqn, invals, jnp)
-        cval = _concrete(eqn, [read_val(v) for v in eqn.invars])
+        cval = _concrete(eqn, inv_vals)
+        if cval is None and ho_vals:
+            cval = ho_vals
         for i, (v, o) in enumerate(zip(eqn.outvars, outs)):
             write(v, o)
-            if cval is not None and i < len(cval):
+            if cval is not None and i < len(cval) and cval[i] is not None:
                 env_val[v] = np.asarray(cval[i])
         if stats is not None:
+            ext = stats.get("extent")
+
+            m_a = max(ext) - 1 if ext else None
+
+            def _seam_axis(x):
+                # (axis, seam) for the array's layout: face-stacked
+                # (6, i, j, ...) -> axis 1; per-face (i, j, ...) -> axis
+                # 0.  A symmetric sub-window of extent e (interior n,
+                # is-1:ie+1, ...) has its seam shifted by (m_a - e) // 2.
+                # Anything else (flattened, transposed) has no seam to
+                # measure and would read saturation by construction.
+                if not hasattr(x, "ndim") or ext is None:
+                    return (stats["axis"], stats["seam"]) if hasattr(
+                        x, "ndim") else None
+                lo, hi = m_a - 2 * ng_stats, m_a + 1
+                if x.ndim >= 3 and x.shape[0] == 6 and lo <= x.shape[1] <= hi:
+                    return 1, stats["seam"] - (m_a - x.shape[1]) // 2
+                if x.ndim >= 2 and lo <= x.shape[0] <= hi \
+                        and lo <= x.shape[1] <= hi:
+                    return 0, stats["seam"] - (m_a - x.shape[0]) // 2
+                return None
+            ng_stats = stats.get("ng", 3)
+            rin = max((_reach_of(x, *_seam_axis(x))
+                       for x in invals if _seam_axis(x) is not None),
+                      default=-1)
             for o in outs:
-                r = _reach_of(o, stats["axis"], stats["seam"])
+                ax = _seam_axis(o)
+                if ax is None:
+                    continue
+                r = _reach_of(o, *ax)
                 if r > stats["per_prim"].get(name, -1):
                     stats["per_prim"][name] = r
+                # a reach that grows by more than a stencil width in ONE
+                # operation is where a bound saturates; name it
+                # rin == -1: NO input had a seam layout, yet the output
+                # carries reach -- taint arrived through a reduced /
+                # flattened / transposed intermediate (the reduce ->
+                # broadcast signature of a nonlocal operator)
+                layout = name in ("reshape", "transpose", "squeeze",
+                                  "concatenate", "slice", "broadcast_in_dim",
+                                  "convert_element_type", "copy", "copy_p")
+                if "jumps" in stats and ((rin >= 0 and r - rin > 2) or
+                                         (rin < 0 and r >= 3
+                                          and not layout)):
+                    stats["jumps"].append((r - rin, rin, r, name, depth,
+                                           tuple(np.shape(o)),
+                                           [tuple(np.shape(x)) for x in
+                                            invals if hasattr(x, "shape")],
+                                           list(stats.get("hist", []))))
+            if "leak" in stats:
+                # taint on faces 1-5 at ANY point (not only at the end --
+                # it could leave face 0, return, and be overwritten later,
+                # codex 2026-09-04): a nonzero maximum means the measured
+                # reach may include an out-and-back path through the
+                # halo tables and is then CONFOUNDED
+                for o in outs:
+                    # face-stacked AND padded on both horizontal axes: a
+                    # level-major per-face array (km+1 = 6, i, j) also has
+                    # shape[0] == 6 at km=5 and false-alarmed job 9631126
+                    if (hasattr(o, "ndim") and o.ndim >= 3
+                            and o.shape[0] == 6 and ext is not None
+                            and o.shape[1] in ext and o.shape[2] in ext):
+                        c = int(np.asarray(o[1:], bool).sum())
+                        if c and stats.get("leak_first") is None:
+                            stats["leak_first"] = (
+                                c, name, depth, tuple(np.shape(o)),
+                                [tuple(np.shape(x)) for x in invals
+                                 if hasattr(x, "shape")],
+                                list(stats.get("hist", [])))
+                        if c > stats["leak"][0]:
+                            stats["leak"] = (c, name, tuple(np.shape(o)))
+            if "hist" in stats:
+                # short trail of the eqns that fed a jump: name, depth,
+                # output shape, and how many output cells are tainted
+                stats["hist"].append((name, depth, tuple(np.shape(outs[0]))
+                                      if outs and hasattr(outs[0], "shape")
+                                      else None,
+                                      int(np.asarray(outs[0], bool).sum())
+                                      if outs and hasattr(outs[0], "shape")
+                                      else -1))
+                del stats["hist"][:-8]
+    if out_vals is not None:
+        del out_vals[:]
+        out_vals.extend(read_val(v) for v in jaxpr.outvars)
     return [read(v) for v in jaxpr.outvars]
 
 
@@ -441,9 +677,18 @@ def _bind_call(name, sub, invals):
         f"mis-binding silently corrupts the taint")
 
 
-def _call_sub(name, sub, invals, jnp, depth, stats):
+def _call_sub(name, sub, invals, jnp, depth, stats, invals_v=None,
+              out_vals=None):
     body, consts, ctaints, args = _bind_call(name, sub, invals)
+    cvals = avals = None
+    if invals_v is not None:
+        n_cv = len(body.constvars)
+        if ctaints is None:
+            avals = list(invals_v)
+        else:
+            cvals, avals = list(invals_v[:n_cv]), list(invals_v[n_cv:])
     return _interp(body, consts, args, jnp, depth + 1, stats,
+                   arg_vals=avals, const_vals=cvals, out_vals=out_vals,
                    const_taints=ctaints)
 
 
@@ -469,7 +714,8 @@ _LONG_SCANS = []
 _MAX_UNROLL = 512
 
 
-def _interp_higher_order(eqn, invals, jnp, depth, stats):
+def _interp_higher_order(eqn, invals, jnp, depth, stats, invals_v=None,
+                         out_vals=None):
     """Recurse into a nested call's sub-jaxpr rather than treating it as
     opaque.  ``scan`` and ``while`` iterate their carry to a FIXPOINT
     (taint only ever grows, so this terminates); a single pass would
@@ -494,10 +740,14 @@ def _interp_higher_order(eqn, invals, jnp, depth, stats):
         # useless, so every occurrence is counted and reported.
         _WHILE_LOOPS.append(depth)
         for _ in range(64):                 # fixpoint; taint only grows
+            nc = len(carry)
+            cv = (list(invals_v[:cn]) + [None] * nc) if invals_v else None
+            bv = (list(invals_v[cn:cn + bn]) + [None] * nc) if invals_v \
+                else None
             pred = _call_sub("while.cond", p["cond_jaxpr"],
-                             cconst + carry, jnp, depth, stats)[0]
+                             cconst + carry, jnp, depth, stats, cv)[0]
             new = _call_sub("while.body", p["body_jaxpr"],
-                            bconst + carry, jnp, depth, stats)
+                            bconst + carry, jnp, depth, stats, bv)
             if all(bool(np.array_equal(a, b)) for a, b in zip(new, carry)):
                 break
             carry = [np.asarray(a, bool) | np.asarray(b, bool)
@@ -517,14 +767,16 @@ def _interp_higher_order(eqn, invals, jnp, depth, stats):
         # -- jax/_src/lax/control_flow/conditionals.py:317
         outs = None
         for br in sub:
-            o = _call_sub(f"{name}.branch", br, invals[1:], jnp, depth, stats)
+            o = _call_sub(f"{name}.branch", br, invals[1:], jnp, depth, stats,
+                          list(invals_v[1:]) if invals_v else None)
             outs = o if outs is None else [
                 np.asarray(x, bool) | np.asarray(y, bool)
                 for x, y in zip(outs, o)]
         return _ctrl_or(outs, invals[0], jnp)
 
     if name != "scan":
-        return _call_sub(name, sub, invals, jnp, depth, stats)
+        return _call_sub(name, sub, invals, jnp, depth, stats, invals_v,
+                         out_vals)
 
     # scan_p.bind(*consts, *args_flat, num_consts=, num_carry=, length=,
     #             jaxpr=)  -- jax/_src/lax/control_flow/loops.py:323
@@ -542,12 +794,26 @@ def _interp_higher_order(eqn, invals, jnp, depth, stats):
     # case reported 20 on a 41-cell line whose true reach is 5.
     length = int(p["length"])
     ys = None
+    # Concrete values ride the carry (a fori_loop's counter is a carry),
+    # so an indexed write in the body lands on ONE level per iteration.
+    # With values in play the body is NOT iteration-invariant, so the old
+    # "taint stopped growing -> break" shortcut is unsound (iteration k+1
+    # may write a level k never touched); run the full static length.
+    cs_v = list(invals_v[:n_consts]) if invals_v else [None] * n_consts
+    carry_v = (list(invals_v[n_consts:n_consts + n_carry]) if invals_v
+               else [None] * n_carry)
+    xs_v = [None] * len(xs)
+    have_vals = any(v is not None for v in cs_v + carry_v)
     for _ in range(min(length, _MAX_UNROLL)):
-        outs = _call_sub(name, sub, cs + carry + xs_slices, jnp, depth, stats)
+        body_out_v = []
+        outs = _call_sub(name, sub, cs + carry + xs_slices, jnp, depth, stats,
+                         cs_v + carry_v + xs_v, body_out_v)
         new_carry = outs[:n_carry]
         ys = outs[n_carry:]
-        if all(bool(jnp.array_equal(a, b))
-               for a, b in zip(new_carry, carry)):
+        if body_out_v:
+            carry_v = list(body_out_v[:n_carry])
+        if not have_vals and all(bool(jnp.array_equal(a, b))
+                                 for a, b in zip(new_carry, carry)):
             break                            # taint stopped growing early
         carry = [a | b for a, b in zip(new_carry, carry)]
     else:
@@ -635,6 +901,41 @@ def _selftest():
                                   lambda y: k_stencils(y, 2), x),
         max(seam, n - 1 - seam))
 
+    # A level recurrence: fori_loop over a TRACED k writing column k of a
+    # 2-D array with a 3-point stencil along axis 0.  The index is not
+    # concrete inside the loop body, so the scatter rule cannot know k;
+    # the axis-aware fallback must still report the stencil's reach (3),
+    # not saturate axis 0 (which the whole-output fallback did).  Under
+    # the whole-output rule this case reads max(seam, n-1-seam).
+    def level_recurrence(x, f):
+        x2 = jnp.broadcast_to(x[:, None], (n, 4))
+
+        def body(k, a):
+            return a.at[:, k].set(k_stencils(a[:, k], 3))
+        return jax.lax.fori_loop(0, 4, body, x2)
+    cases["fori scatter at traced k (axis-aware)"] = (level_recurrence, 3)
+
+    # Same recurrence with k arriving as a scanned xs value, which the
+    # analyser does NOT track: the axis-aware fallback cannot tell level
+    # k from level k+1, so every iteration may read the previous write
+    # and the chain composes to 4 x 3 = 12.  Over-report, never under.
+    def level_recurrence_xs(x, f):
+        x2 = jnp.broadcast_to(x[:, None], (n, 4))
+
+        def body(a, k):
+            return a.at[:, k].set(k_stencils(a[:, k], 3)), 0.0
+        return jax.lax.scan(body, x2, jnp.arange(4))[0]
+    cases["scan scatter at xs k (fallback chains)"] = (level_recurrence_xs,
+                                                      12)
+
+    # An INDEX computed from seam data: the read position depends on the
+    # seam, so every output cell does (codex 2026-09-04) -- must saturate,
+    # even though the table itself is clean and the index is one scalar.
+    cases["gather on tainted index (saturates)"] = (
+        lambda x, f: jnp.arange(n, dtype=jnp.float64)[
+            (x.sum() > 0.0).astype(jnp.int32)] * jnp.ones(n),
+        max(seam, n - 1 - seam))
+
     x0 = np.zeros(n)
     bad = []
     for label, (fn, expect) in cases.items():
@@ -684,6 +985,10 @@ def main(argv=None):
                     help="analyse toy programs of KNOWN reach and exit")
     ap.add_argument("--n", type=int, default=24)
     ap.add_argument("--km", type=int, default=5, choices=(5, 10))
+    ap.add_argument("--seed-point", action="store_true",
+                    help="seed ONE cell (i=seam, j=centre) instead of the "
+                         "mid-line: an isotropy check -- the tainted box "
+                         "must be roughly square")
     ap.add_argument("--dt", type=float, default=120.0)
     ap.add_argument("--nh", action="store_true")
     ap.add_argument("--compare", type=int, default=None, metavar="R",
@@ -736,19 +1041,37 @@ def main(argv=None):
     print(f"[static] jaxpr: {n_eqns} equations at top level")
 
     seam = ng + args.n // 2
+    # Seed ONE face, and only the middle of the seam line.  A full line
+    # touches the face's j-edges, where the entry/barrier halo TABLES (which
+    # ``exchange=False`` does not remove -- job 9630988 traced the taint
+    # into the (1800,) A-table and the (72,) corner table) copy it into the
+    # neighbouring faces' halos at EVERY i, from where it floods back and
+    # saturates the compute domain at every face size (12/24/48 at
+    # C24/48/96).  With a margin of ``m`` cells to each j-edge, taint can
+    # only reach a table entry after travelling >= m cells, so any reach
+    # below m is certified intra-face; a reach >= m is reported as
+    # CONFOUNDED, never as a bound.
+    margin = max(ng + 1, args.n // 4)
     taints = []
     for k in order:
         a = np.asarray(state[k])
         t = np.zeros(a.shape, bool)
         if k in fields and a.ndim >= 3:
-            t[:, seam, ...] = True
+            if args.seed_point:
+                t[0, seam, ng + args.n // 2, ...] = True   # one cell
+            else:
+                t[0, seam, ng + margin:a.shape[2] - ng - margin, ...] = True
         taints.append(jnp.asarray(t))
+    print(f"[static] seed: face 0, i={seam}, j in [{ng + margin}, "
+          f"{args.n + ng - margin}) (margin {margin} to each j-edge)")
 
     # NUMPY, not jnp: the traced substep is ~80k equations (C48) and ~115k
     # (NH), and per-op JAX dispatch would dominate. The taint abstraction is
     # boolean arrays of the state's own shape, so numpy is a drop-in and
     # keeps the analysis off the device entirely.
-    stats = {"axis": 1, "seam": seam, "per_prim": {}}
+    stats = {"axis": 1, "seam": seam, "per_prim": {}, "jumps": [], "ng": ng,
+             "hist": [], "leak": (0, None, None),
+             "extent": (args.n + 2 * ng, args.n + 2 * ng + 1)}
     try:
         outs = _interp(closed.jaxpr, closed.consts,
                        [np.asarray(t) for t in taints], np, 0, stats)
@@ -756,10 +1079,35 @@ def main(argv=None):
         print(f"[static] REFUSED: {e}")
         return 4
 
-    flat_out = [o for o in outs if hasattr(o, "ndim") and o.ndim >= 3]
+    # Only arrays that still carry the face-stacked layout (6, i, j, ...)
+    # have their seam on axis 1; a per-face (i, j, k) array would be
+    # measured along j -- the seam LINE itself -- and read n/2+ng, i.e.
+    # saturation by construction (job 9630893 traced the 15/27 numbers to
+    # exactly this).  Refuse to fold any other layout into the answer.
+    ext = (args.n + 2 * ng, args.n + 2 * ng + 1)
     worst = -1
-    for o in flat_out:
-        worst = max(worst, _reach_of(o, 1, seam))
+    n_used = n_skipped = 0
+    for o in outs:
+        if not (hasattr(o, "ndim") and o.ndim >= 3 and o.shape[0] == 6
+                and o.shape[1] in ext):
+            n_skipped += 1
+            print(f"[static] output of shape {np.shape(o)} is not "
+                  f"face-stacked (6, i, j, ...); NOT folded into the bound")
+            continue
+        n_used += 1
+        r = _reach_of(o[0], 0, seam)            # face 0 only, along i
+        others = int(np.asarray(o[1:], bool).sum())
+        b0 = np.asarray(o[0], bool)
+        ii = np.nonzero(np.any(b0, axis=tuple(range(1, b0.ndim))))[0]
+        jj = np.nonzero(np.any(b0, axis=tuple(a for a in range(b0.ndim)
+                                              if a != 1)))[0]
+        box = (f"i [{ii.min()},{ii.max()}] j [{jj.min()},{jj.max()}]"
+               if ii.size else "empty")
+        print(f"[static]   output {np.shape(o)}: reach {r} along i on "
+              f"face 0; box {box}; {others} tainted cells on the other "
+              f"five faces")
+        worst = max(worst, r)
+    flat_out = [o for o in outs if hasattr(o, "ndim") and o.ndim >= 3]
     if _SCATTER_FALLBACKS:
         print(f"[static] WARNING: {len(_SCATTER_FALLBACKS)} scatter(s) had "
               f"no concrete indices and were tainted WHOLE-OUTPUT -- the "
@@ -778,9 +1126,49 @@ def main(argv=None):
               f"the {_MAX_UNROLL}-step unroll cap without reaching a "
               f"fixpoint, so their carry was saturated rather than "
               f"under-reported -- over-estimate, not reach")
+    leak = stats["leak"]
+    print(f"[static] other-face taint, maximum over EVERY equation: "
+          f"{leak[0]} cells" + (f" (first peak at {leak[1]} {leak[2]})"
+                               if leak[0] else ""))
+    lf = stats.get("leak_first")
+    if lf:
+        print(f"[static] FIRST other-face taint: {lf[0]} cells at {lf[1]} "
+              f"depth {lf[2]} out {lf[3]} in {lf[4][:4]}")
+        for h in lf[5]:
+            print(f"[static]     <- {h[0]} depth {h[1]} out {h[2]} "
+                  f"tainted_cells {h[3]}")
+    # reach along j on face 0 too: an operator that is nonlocal along the
+    # seam line (cumsum, contraction, saturated gather axis) shows up here
+    # long before it reaches a face edge
+    closest_j = None                       # closest approach to a j-edge
+    for o in outs:
+        if (hasattr(o, "ndim") and o.ndim >= 3 and o.shape[0] == 6
+                and o.shape[1] in ext):
+            b = np.asarray(o[0], bool)
+            js = np.nonzero(np.any(b, axis=tuple(a for a in range(b.ndim)
+                                                 if a != 1)))[0]
+            if js.size:
+                d = min(int(js.min()), int(b.shape[1] - 1 - js.max()))
+                closest_j = d if closest_j is None else min(closest_j, d)
+    print(f"[static] along j on face 0: seeded j in [{ng + margin}, "
+          f"{args.n + ng - margin}); tainted j comes within "
+          f"{closest_j} of an array edge (seed was {ng + margin} away)")
+    if worst >= margin or leak[0]:
+        print(f"[static] CONFOUNDED: reach {worst} vs margin {margin}, "
+              f"other-face taint max {leak[0]} -- the taint crossed (or may "
+              f"have crossed) a face edge through the halo tables; this "
+              f"number is NOT an intra-face bound")
     print(f"[static] STATIC REACH (exact, cannot be swallowed by a "
           f"limiter): {worst} cells from the seam, over {len(flat_out)} "
           f"output arrays")
+    # WHERE the reach grows by more than a stencil width in one op: the
+    # operation that saturates a bound, named with depth and shapes
+    for j in sorted(stats["jumps"], key=lambda t: -t[0])[:3]:
+        print(f"[static] REACH JUMP +{j[0]} ({j[1]} -> {j[2]}) at {j[3]} "
+              f"depth {j[4]} out {j[5]} in {j[6][:4]}")
+        for h in j[7]:
+            print(f"[static]     <- {h[0]} depth {h[1]} out {h[2]} "
+                  f"tainted_cells {h[3]}")
     top = sorted(stats["per_prim"].items(), key=lambda kv: -kv[1])[:6]
     print(f"[static] operations contributing the largest reach: "
           + ", ".join(f"{k}={v}" for k, v in top))
