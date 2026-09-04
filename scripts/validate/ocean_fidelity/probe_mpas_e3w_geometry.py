@@ -52,6 +52,11 @@ def main() -> int:
     print(f"level {a.level}: nCells={H.size} wet={int(wet.sum())} "
           f"H range wet [{H[wet].min():.2f}, {H[wet].max():.2f}] "
           f"H<=0 on wet: {int((H[wet] <= 0).sum())}  eta finite: {np.isfinite(eta).all()}")
+    dc = np.asarray(grid.dcEdge); dv = np.asarray(grid.dvEdge); ar = np.asarray(grid.areaCell)
+    print(f"mesh quality: dcEdge min/median/max {dc.min():.0f}/{np.median(dc):.0f}/{dc.max():.0f} m, "
+          f"dvEdge min/median {dv.min():.0f}/{np.median(dv):.0f} m, "
+          f"areaCell min/median/max ratio {ar.min()/np.median(ar):.3f}/{ar.max()/np.median(ar):.3f}; "
+          f"n(dcEdge<0.2*median)={int((dc < 0.2*np.median(dc)).sum())}, n(dvEdge<0.05*median)={int((dv < 0.05*np.median(dv)).sum())}")
     raw = getattr(z_coord, "nemo_e3w_0", None)
     print(f"z_coord.nemo_e3w_0: {None if raw is None else (np.asarray(raw).shape, float(np.asarray(raw).min()))}  "
           f"mesh_reference={getattr(z_coord, 'nemo_e3w_mesh_reference', None)}")
