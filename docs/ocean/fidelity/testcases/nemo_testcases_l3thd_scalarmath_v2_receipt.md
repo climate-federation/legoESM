@@ -37,10 +37,11 @@ disclosed at bar.
 
 Those bit counts are runtime-specific evidence, not a version-independent JAX
 claim.  The accepting runtime is Python `3.13.0`, JAX `0.10.0`, jaxlib
-`0.10.0`, and NumPy `2.4.4`; the committed gate stamps all four versions and
-fails closed on any different tuple.  An independent review found different
-bar/bit results under a newer JAX runtime, which is why an unstamped runtime is
-not accepted or silently compared here.
+`0.10.0`, and NumPy `2.4.4`; the committed gate stamps all four versions.
+**Bit-exactness claims are valid only under that registered stack.**  A
+different stack may still execute the normalized science gate in CI, with its
+bit verdict explicitly `WITHHELD_RUNTIME`; only an explicit
+`--require-bit-identity` request fails closed.
 
 The closed C1D thermodynamic column remains **CLOSED AS MIXED DEBT**.  Its V2
 scientific gate payload is exactly equal to phase 6 after removing only the new
@@ -263,7 +264,7 @@ artifact is mutated.
 | Wait for the shared library-exact exp/tanh policy | ASKED | 18 exp-owned rows labeled AWAITING_LIBM_POLICY. |
 | Re-score and re-pin the closed column | ASKED | Scientific result unchanged; MIXED DEBT retained. |
 | Update the exchange drift ticket for V2/two builds | ASKED | Hash remains reproducible `091395cf...`. |
-| Bind bulk bit counts to the exact measured JAX runtime | UNASKED | Post-review provenance guard only; fails closed rather than changing physics. |
+| Bind bulk bit counts to the exact measured JAX runtime | ASKED | Always stamp provenance; fail closed only for an explicit bit-identity claim. |
 | Implement rung 3.6 | UNASKED | Explicitly forbidden this round; no rung-3.6 code changed. |
 | Add a lane-local exp/tanh implementation | UNASKED | Forbidden; no implementation added. |
 | Change the ORCA1-resolved physics scope | UNASKED | No selector or physics identity changed. |

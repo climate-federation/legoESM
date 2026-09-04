@@ -70,11 +70,29 @@ def test_nemo_source_round_is_identity_jittable_and_differentiable() -> None:
     np.testing.assert_array_equal(np.asarray(gradient), np.ones(3))
 
 
-def test_bitwise_evidence_runtime_is_stamped_and_fails_closed() -> None:
+def test_runtime_is_stamped_and_only_explicit_bit_claim_fails_closed() -> None:
     assert gate.runtime_versions() == gate.ACCEPTED_RUNTIME
     bad = {**gate.ACCEPTED_RUNTIME, "jax": "0.11.1"}
+    stamp = gate.validate_runtime(bad)
+    assert stamp["bit_identity_claim_valid"] is False
+    assert "bit-exactness claims valid only under" in stamp["statement"]
     with pytest.raises(gate.GateError, match="unregistered numeric runtime"):
-        gate.validate_runtime(bad)
+        gate.validate_runtime(bad, require_bit_identity=True)
+
+
+@pytest.mark.skipif(
+    not (gate.DEFAULT_ROOT / "oracle_si3_bulk_operands.bin").exists(),
+    reason="retained C1D oracle is not mounted",
+)
+def test_unregistered_stack_runs_science_gate_with_bit_claim_withheld(monkeypatch) -> None:
+    bad = {**gate.ACCEPTED_RUNTIME, "jax": "0.11.1"}
+    monkeypatch.setattr(gate, "runtime_versions", lambda: bad)
+    result = gate.evaluate()
+    assert result["normalized_verdict"] == "AT-BAR"
+    assert result["bit_verdict"] == "WITHHELD_RUNTIME"
+    assert result["numeric_runtime"]["observed"] == bad
+    with pytest.raises(gate.GateError, match="unregistered numeric runtime"):
+        gate.evaluate(require_bit_identity=True)
 
 
 def test_selector_is_single_orca1_identity() -> None:
@@ -167,6 +185,7 @@ def test_full_year_gate_and_all_plants() -> None:
     assert result["over_bar_rows"] == 0
     assert result["steps"] == 8760
     assert result["oracle_version"] == "V2_SCALAR_MATH"
+    assert result["numeric_runtime"]["bit_identity_claim_valid"] is True
     assert result["bit_comparisons"] == result["comparisons"]
     assert result["non_bit_identical_rows"] > 0
     assert result["non_bit_identical_rows"] == 18

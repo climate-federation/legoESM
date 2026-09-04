@@ -168,12 +168,25 @@ def runtime_versions() -> dict[str, str]:
     }
 
 
-def validate_runtime(runtime: dict[str, str]) -> None:
-    """Fail closed when asked to reproduce version-sensitive bitwise evidence."""
-    require(
-        runtime == ACCEPTED_RUNTIME,
-        f"unregistered numeric runtime: {runtime}; expected {ACCEPTED_RUNTIME}",
-    )
+def validate_runtime(
+    runtime: dict[str, str], *, require_bit_identity: bool = False,
+) -> dict[str, object]:
+    """Stamp any runtime; fail only for an explicit bit-identity claim."""
+    registered = runtime == ACCEPTED_RUNTIME
+    if require_bit_identity:
+        require(
+            registered,
+            f"unregistered numeric runtime: {runtime}; expected {ACCEPTED_RUNTIME}",
+        )
+    return {
+        "observed": runtime,
+        "bit_identity_reference": ACCEPTED_RUNTIME,
+        "bit_identity_claim_valid": registered,
+        "statement": (
+            "bit-exactness claims valid only under the registered Python/JAX/"
+            "jaxlib/NumPy stack"
+        ),
+    }
 
 
 def sha256(path: Path) -> str:
@@ -310,6 +323,7 @@ def _numpy_emp_ice_order_probe(
     bulk_config,
     *,
     step: int = 6236,
+    enforce: bool = True,
 ) -> dict[str, object]:
     """Replay sbcblk.F90:1279,1288,1298 as separate binary64 operations."""
     from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
@@ -337,8 +351,9 @@ def _numpy_emp_ice_order_probe(
     def bits(value: np.float64) -> str:
         return struct.pack(">d", value).hex()
 
-    require(bits(replay) == bits(oracle), "NEMO-order NumPy replay is not bit exact")
-    require(bits(unrounded) != bits(oracle), "unrounded order-control is vacuous")
+    if enforce:
+        require(bits(replay) == bits(oracle), "NEMO-order NumPy replay is not bit exact")
+        require(bits(unrounded) != bits(oracle), "unrounded order-control is vacuous")
     return {
         "step": step,
         "source": "sbcblk.F90:1279,1288,1298",
@@ -496,7 +511,12 @@ def _score(predicted, oracle, stage: str, variable: str) -> dict[str, object]:
     }
 
 
-def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str, object]:
+def evaluate(
+    root: Path = DEFAULT_ROOT,
+    *,
+    plant: str | None = None,
+    require_bit_identity: bool = False,
+) -> dict[str, object]:
     from legoesm import constants
     from legoesm.core.bulk_flux import nemo_si3_constant_fluxes
     from legoesm.core.precision import PrecisionPolicy, set_policy
@@ -507,7 +527,11 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
     runtime = runtime_versions()
     if plant == "runtime":
         runtime = {**runtime, "jax": "0.0.0-planted"}
-    validate_runtime(runtime)
+    runtime_provenance = validate_runtime(
+        runtime,
+        require_bit_identity=require_bit_identity or plant == "runtime",
+    )
+    bit_claim_valid = bool(runtime_provenance["bit_identity_claim_valid"])
     folded_constants = validate_folded_constants(plant=plant == "folded_constant")
     set_policy(PrecisionPolicy.fp64())
     require(jax.config.read("jax_enable_x64"), "JAX x64 disabled")
@@ -636,12 +660,14 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         ))
         for key in ROUND9_OPERATION_ORDER_COUNTS
     }
-    require(
-        unrounded_counts == ROUND9_OPERATION_ORDER_COUNTS,
-        f"source-round private arm no longer reproduces Round 9: {unrounded_counts}",
-    )
+    if bit_claim_valid:
+        require(
+            unrounded_counts == ROUND9_OPERATION_ORDER_COUNTS,
+            f"source-round private arm no longer reproduces Round 9: {unrounded_counts}",
+        )
     order_probe = _numpy_emp_ice_order_probe(
         s1_np, np.asarray(unrounded_flux2["emp_ice"]), bulk_config,
+        enforce=bit_claim_valid,
     )
 
     # Fields not subsequently mutated by ice thermodynamics must retain their
@@ -716,10 +742,11 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         _score(values, s1_np[name], "SCALAR_GLIBC_REPLAY", name)
         for name, values in scalar_outputs.items()
     ]
-    require(
-        all(int(row["non_bit_identical_count"]) == 0 for row in scalar_rows),
-        f"scalar-glibc albedo replay drift: {scalar_rows}",
-    )
+    if bit_claim_valid:
+        require(
+            all(int(row["non_bit_identical_count"]) == 0 for row in scalar_rows),
+            f"scalar-glibc albedo replay drift: {scalar_rows}",
+        )
     bit_groups = _bit_owner_groups(rows, plant=plant == "bit_owner")
     exchange_rows = [
         _score(value, exchange[name], "EXCHANGE_END_STABLE", name)
@@ -732,15 +759,17 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
     largest = max(rows, key=lambda row: float(row["max_normalized"]))
     debt_rows = [row for row in rows if int(row["over_bar_count"])]
     require(total_over == 0, f"bulk fidelity bar violated: {total_over} rows; {debt_rows}")
-    require(
-        total_nonbit == 18
-        and set(bit_groups) == {"jax_exp_ice_alb"},
-        f"unexpected non-transcendental bit debt: {total_nonbit}, {bit_groups}",
-    )
+    if bit_claim_valid:
+        require(
+            total_nonbit == 18
+            and set(bit_groups) == {"jax_exp_ice_alb"},
+            f"unexpected non-transcendental bit debt: {total_nonbit}, {bit_groups}",
+        )
+    bit_verdict = "AWAITING_LIBM_POLICY" if bit_claim_valid else "WITHHELD_RUNTIME"
     return {
-        "verdict": "AWAITING_LIBM_POLICY",
+        "verdict": bit_verdict,
         "normalized_verdict": "AT-BAR",
-        "bit_verdict": "AWAITING_LIBM_POLICY",
+        "bit_verdict": bit_verdict,
         "oracle_version": ORACLE_VERSION,
         "bar": BAR,
         "steps": EXPECTED_STEPS,
@@ -749,7 +778,7 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         "bit_comparisons": len(rows) * EXPECTED_STEPS,
         "non_bit_identical_rows": total_nonbit,
         "bit_identical_rows": len(rows) * EXPECTED_STEPS - total_nonbit,
-        "numeric_runtime": runtime,
+        "numeric_runtime": runtime_provenance,
         "bit_owner_groups": bit_groups,
         "scalar_glibc_owner_probe": {
             "source": "icealb.F90:124-185; Python math.exp/log call scalar glibc libm",
@@ -811,6 +840,10 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--require-bit-identity", action="store_true",
+        help="fail closed unless the registered numeric stack is executing",
+    )
     parser.add_argument("--plant", choices=(
         "blk_ice_1", "ice_alb", "blk_ice_2", "ice_flx_other",
         "stream_hash", "coverage", "selector", "bit_owner",
@@ -819,7 +852,11 @@ def main() -> int:
         "folded_constant",
     ))
     args = parser.parse_args()
-    result = evaluate(args.root, plant=args.plant)
+    result = evaluate(
+        args.root,
+        plant=args.plant,
+        require_bit_identity=args.require_bit_identity,
+    )
     rendered = json.dumps(result, indent=2, sort_keys=True)
     if args.output:
         args.output.write_text(rendered + "\n", encoding="utf-8")
