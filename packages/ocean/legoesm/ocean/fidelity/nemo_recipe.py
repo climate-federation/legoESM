@@ -677,7 +677,7 @@ def nemo_gyre_seasonal_cosines(t_seconds: float = 0.0):
     target (T*) uses ``zcos_sais2``.
     """
     import jax.numpy as jnp
-    from legoesm.ocean.eos import nemo_source_round as sr
+    from legoesm.core.source_rounding import nemo_source_round as sr
 
     value = jnp.asarray(t_seconds, dtype=jnp.float64)
     rpi = jnp.asarray(np.pi, dtype=value.dtype)
@@ -700,7 +700,7 @@ def nemo_gyre_seasonal_cosines(t_seconds: float = 0.0):
 def nemo_gyre_qsr(lat_deg, t_seconds: float = 0.0):
     """NEMO GYRE analytic penetrative solar ``qsr(lat)`` [W/m^2] (usrdef_sbc)."""
     import jax.numpy as jnp
-    from legoesm.ocean.eos import nemo_source_round as sr
+    from legoesm.core.source_rounding import nemo_source_round as sr
 
     lat = jnp.asarray(lat_deg, dtype=jnp.float64)
     zcos_sais1, _ = nemo_gyre_seasonal_cosines(t_seconds)
@@ -712,7 +712,7 @@ def nemo_gyre_qsr(lat_deg, t_seconds: float = 0.0):
 def nemo_gyre_t_star(lat_deg, t_seconds: float = 0.0):
     """NEMO GYRE analytic restoring target SST ``T*(lat)`` [degC] (usrdef_sbc)."""
     import jax.numpy as jnp
-    from legoesm.ocean.eos import nemo_source_round as sr
+    from legoesm.core.source_rounding import nemo_source_round as sr
 
     lat = jnp.asarray(lat_deg, dtype=jnp.float64)
     _, zcos_sais2 = nemo_gyre_seasonal_cosines(t_seconds)
@@ -731,7 +731,7 @@ def nemo_gyre_emp(lat_deg, t_seconds: float = 0.0):
     domain mean so the flux is net-zero, then applies it as a virtual salt flux.
     """
     import jax.numpy as jnp
-    from legoesm.ocean.eos import nemo_source_round as sr
+    from legoesm.core.source_rounding import nemo_source_round as sr
 
     lat = jnp.asarray(lat_deg, dtype=jnp.float64)
     zcos_sais1, _ = nemo_gyre_seasonal_cosines(t_seconds)
@@ -765,7 +765,7 @@ def nemo_gyre_wind(lat_deg, t_seconds: float = 0.0):
     v-point latitudes for vtau.
     """
     import jax.numpy as jnp
-    from legoesm.ocean.eos import nemo_source_round as sr
+    from legoesm.core.source_rounding import nemo_source_round as sr
 
     lat = jnp.asarray(lat_deg, dtype=jnp.float64)
     zcos_sais1, _ = nemo_gyre_seasonal_cosines(t_seconds)
@@ -780,7 +780,7 @@ def _nemo_ddpdd_sum_2d(values, mask):
     """NEMO reproducible masked sum in Fortran ``ji``-inner order."""
     import jax
     import jax.numpy as jnp
-    from legoesm.ocean.eos import nemo_source_round as sr
+    from legoesm.core.source_rounding import nemo_source_round as sr
 
     terms = sr(jnp.ravel(values) * jnp.ravel(mask).astype(values.dtype))
     zero = jnp.asarray(0.0, dtype=values.dtype)
@@ -800,7 +800,7 @@ def _nemo_ddpdd_sum_2d(values, mask):
 def nemo_gyre_zero_mean_emp(emp_raw, wet):
     """Apply GYRE's masked DDPDD ``glob_2Dsum`` mean subtraction literally."""
     import jax.numpy as jnp
-    from legoesm.ocean.eos import nemo_source_round as sr
+    from legoesm.core.source_rounding import nemo_source_round as sr
 
     values = jnp.asarray(emp_raw, dtype=jnp.float64)
     mask = jnp.asarray(wet, dtype=values.dtype)
@@ -811,7 +811,7 @@ def nemo_gyre_zero_mean_emp(emp_raw, wet):
 def nemo_gyre_qns(surface_ct, surface_pt, t_star, qsr, emp):
     """Literal GYRE non-solar flux, ``usrdef_sbc.F90:120,144``."""
     import jax.numpy as jnp
-    from legoesm.ocean.eos import nemo_source_round as sr
+    from legoesm.core.source_rounding import nemo_source_round as sr
 
     ct = jnp.asarray(surface_ct, dtype=jnp.float64)
     pt = jnp.asarray(surface_pt, dtype=jnp.float64)

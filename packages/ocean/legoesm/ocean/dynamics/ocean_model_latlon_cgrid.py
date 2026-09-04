@@ -101,7 +101,7 @@ from legoesm.ocean.freshwater import (
     net_freshwater_flux,
     virtual_salt_flux,
 )
-from legoesm.ocean.eos import nemo_source_round
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.ocean.physics.combined import make_ocean_physics
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     compute_eke_step_kappa,

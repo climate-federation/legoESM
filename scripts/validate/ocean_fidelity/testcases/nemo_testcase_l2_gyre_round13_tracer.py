@@ -154,7 +154,7 @@ def run_transport_operands(oracle_root: Path, *, plant: bool = False) -> dict:
     import jax
     import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
-    from legoesm.ocean.eos import nemo_source_round
+    from legoesm.core.source_rounding import nemo_source_round
 
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")

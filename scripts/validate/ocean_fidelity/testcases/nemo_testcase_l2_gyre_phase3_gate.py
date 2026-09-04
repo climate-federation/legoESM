@@ -611,7 +611,7 @@ def _surface_forcings(card, state, kt: int):
     )
     # NEMO carries qns/qsr separately; the shared forcing object carries their
     # materialized sum.
-    from legoesm.ocean.eos import nemo_source_round
+    from legoesm.core.source_rounding import nemo_source_round
 
     q_total = nemo_source_round(qns + sbc.qsr_w_m2)
     surface = OceanSurfaceForcing(

@@ -40,6 +40,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core.precision import resolve_dtype
+from legoesm.core.source_rounding import nemo_source_round
 
 # ==============================================================================
 # Ocean constants
@@ -1007,20 +1008,6 @@ _ROQUET_EOS80 = {
 }
 
 
-def nemo_source_round(value: jnp.ndarray) -> jnp.ndarray:
-    """Materialize one NEMO source operation before its next consumer.
-
-    The round-12 optimized-HLO census found that the 105 explicit
-    ``optimization_barrier`` nodes are all eliminated (105 -> 0).  It is the
-    surviving ``isfinite``/``select``/``copysign`` IEEE identity below—not the
-    barrier—that prevents the CPU LLVM pass from contracting a producer into
-    its consumer.  The identity preserves signed infinities and NaNs and keeps
-    the path differentiable for finite physical EOS inputs.
-    """
-    value = lax.optimization_barrier(value)
-    return jnp.where(
-        jnp.isfinite(value), value,
-        jnp.copysign(jnp.abs(value), value))
 def _nemo_roquet_eos_impl(
     T: jnp.ndarray,
     S: jnp.ndarray,

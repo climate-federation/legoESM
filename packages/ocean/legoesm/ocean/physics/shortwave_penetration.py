@@ -41,7 +41,7 @@ from typing import NamedTuple
 import jax.numpy as jnp
 from legoesm.core.transcendentals import exp as precision_exp
 from legoesm.ocean.eos import c_sw as _C_SW_DEFAULT
-from legoesm.ocean.eos import nemo_source_round
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.ocean.eos import rho_0 as _RHO_0_DEFAULT
 
 __physics_contract__ = {
