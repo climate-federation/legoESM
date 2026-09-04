@@ -31,6 +31,7 @@ def main() -> int:
     p.add_argument("--level", type=int, required=True)
     p.add_argument("--lloyd", type=int, default=20)
     p.add_argument("--no-partial-cell", action="store_true")
+    p.add_argument("--dt", type=float, default=75.0)
     p.add_argument("--nemo-monthly-init", nargs=2, default=None,
                    help="T S NEMO monthly IC files: also count non-finite wet "
                         "cells the IC regrid leaves on this mesh")
@@ -52,11 +53,32 @@ def main() -> int:
     print(f"level {a.level}: nCells={H.size} wet={int(wet.sum())} "
           f"H range wet [{H[wet].min():.2f}, {H[wet].max():.2f}] "
           f"H<=0 on wet: {int((H[wet] <= 0).sum())}  eta finite: {np.isfinite(eta).all()}")
+    lat = np.degrees(np.asarray(grid.latCell)); lon = np.degrees(np.asarray(grid.lonCell))
+    from legoesm import constants
     dc = np.asarray(grid.dcEdge); dv = np.asarray(grid.dvEdge); ar = np.asarray(grid.areaCell)
     print(f"mesh quality: dcEdge min/median/max {dc.min():.0f}/{np.median(dc):.0f}/{dc.max():.0f} m, "
           f"dvEdge min/median {dv.min():.0f}/{np.median(dv):.0f} m, "
           f"areaCell min/median/max ratio {ar.min()/np.median(ar):.3f}/{ar.max()/np.median(ar):.3f}; "
           f"n(dcEdge<0.2*median)={int((dc < 0.2*np.median(dc)).sum())}, n(dvEdge<0.05*median)={int((dv < 0.05*np.median(dv)).sum())}")
+    # Time-stepping CFL at the card's dt: barotropic gravity wave c=sqrt(gH)
+    # per edge (deeper of the two cells) and the explicit Laplacian number.
+    coe = np.asarray(grid.cellsOnEdge)
+    coe = coe if coe.shape[0] == 2 else coe.T
+    He = np.maximum(H[coe[0]], H[coe[1]])
+    c_bt = np.sqrt(constants.g * He)
+    cfl = c_bt * a.dt / dc
+    ie = int(np.argmax(cfl))
+    lat_e = np.degrees(np.asarray(grid.latEdge)); lon_e = np.degrees(np.asarray(grid.lonEdge)) % 360
+    print(f"CFL(dt={a.dt}s): barotropic c*dt/dcEdge max {cfl.max():.3f} at edge {ie} "
+          f"({lat_e[ie]:.2f}N, {lon_e[ie]:.2f}E, H={He[ie]:.0f} m, dc={dc[ie]:.0f} m); "
+          f"n(cfl>0.5)={int((cfl > 0.5).sum())}, n(cfl>1)={int((cfl > 1).sum())}; "
+          f"Laplacian A_h=1e5 dt/dc^2 max {1e5 * a.dt / dc.min() ** 2:.4f}")
+    for name, (la, lo) in {"Gibraltar 36N 354.4E": (36.0, 354.4), "Alboran 35.9N 358.9E": (35.93, 358.92),
+                           "BlackSea 44.5N 34.5E": (44.5, 34.5), "Bosporus 41.1N 29E": (41.1, 29.0)}.items():
+        d = np.hypot(lat - la, (lon % 360 - lo + 180) % 360 - 180)
+        near = d < 0.6
+        print(f"  {name:22s} cells<0.6deg {int(near.sum()):3d} wet {int((near & wet).sum()):3d} "
+              f"H wet max {H[near & wet].max() if (near & wet).any() else 0:.0f} m")
     raw = getattr(z_coord, "nemo_e3w_0", None)
     print(f"z_coord.nemo_e3w_0: {None if raw is None else (np.asarray(raw).shape, float(np.asarray(raw).min()))}  "
           f"mesh_reference={getattr(z_coord, 'nemo_e3w_mesh_reference', None)}")
@@ -68,7 +90,6 @@ def main() -> int:
     bad = ~(np.isfinite(e3w) & (e3w > 0)).all(axis=-1)
     print(f"e3w_int shape {e3w.shape}; bad columns {int(bad.sum())} "
           f"(wet {int((bad & wet).sum())}, land {int((bad & ~wet).sum())})")
-    lat = np.degrees(np.asarray(grid.latCell)); lon = np.degrees(np.asarray(grid.lonCell))
     for c in np.flatnonzero(bad)[:20]:
         col = e3w[c]
         k = np.flatnonzero(~(np.isfinite(col) & (col > 0)))
