@@ -1,13 +1,14 @@
-# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–13 boundary receipt
+# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–14 boundary receipt
 
-**Verdict: STOP / DEBT at the external transport-average input to stage-1
-tracer advection.  Round 13 finds the first propagated tracer departure after
-`tra_adv`, confirms the complete stage-1 transport as causal, and then finds
-`un_adv/vn_adv` already non-bit-exact before `zFu/zFv` are formed.  The shared
-literal metric-product association is corrected, but does not clear the
-boundary: stage-2 corrected Kaa remains `2.00e-14`, above the immutable
-`1e-15` bar.  The pending D-gate criterion remains an open user decision and
-is unchanged.  The stage-3 transport and ZDF walks are not entered.**
+**Verdict: STOP / DEBT at the stage-1 barotropic slow-forcing handoff.
+Round 14 implements the user's oracle-relative cross-card decision, exposes
+cellwise compensating errors in both earlier cards, and exhausts the
+`un_adv/vn_adv` averaging boundary.  The 50 weights, every source-associated
+partial sum, final divisor, and LBC handoff are exact.  The first live
+transport input is the substep-2 velocity, inherited from a substep-1 slow-
+forcing mismatch; substituting only NEMO's slow forcing reduces that boundary
+to one ulp.  No physics fix lands, stage-2 Kaa therefore remains
+`2.00e-14`, and stage-3 transport/ZDF remain unentered.**
 
 Date: 2026-09-04
 
@@ -33,6 +34,216 @@ Round-13 preregistration/redirect commits: `8988ef294`, `c26b49cce`,
 `fc26db757`
 
 Round-13 literal-product implementation commit: `09bef32cb`
+
+Round-14 starting tip: `b947a570e3abb01252e57eed7c34db882dec49b3`
+
+Round-14 preregistration commit: `4802e424a00cb2701c8a659ba98f7d936d470818`
+
+Round-14 oracle-relative criterion commit: `6cde4f2d7451d87aa862a41931c3a1aa9225ef68`
+
+Round-14 EOS follow-up commit: `d1ec2eb3b9823e37497a7bd17148cf4f5ca39532`
+
+Round-14 transport-boundary commit: `165ada6d5073309532bee50ec54b426168143c24`
+
+## Round-14 oracle-relative cross-card criterion
+
+The user made this an **ASKED decision on 2026-09-04**.  The one shared
+`--compare-to` implementation now records, for every scored row, the NEMO
+field, the candidate field, and `abs(candidate-NEMO)` in a compressed NPZ
+sidecar.  It compares cells, not row reductions.  At a cell, one local ulp is
+defined as `numpy.spacing(abs(float64(NEMO_value_at_cell)))`; thus an exact
+zero oracle has the smallest positive float64 spacing.  The gate fails if any
+cell's absolute residual grows by more than two such ulps, an AT-BAR row
+becomes DEBT, or `first_over_bar` moves earlier.  Movement toward NEMO is free.
+Movement against the previous legoESM output is retained in every
+`field_moves` row for Rule 8, but is no longer itself a failure criterion.
+
+The gate docstring and oracle-fidelity skill now carry Rule 12, the
+compensating-error clause: a change is eligible to land only when the changed
+operator is bit-exact for NEMO's own inputs on every card it touches.  If that
+change makes a card worse against NEMO, it has exposed a second error: the fix
+stays, the worsened row enters that card's register naming the boundary, and a
+later round walks it.  It is never silently waived, reverted, or hidden behind
+a per-card switch.
+
+The three synthetic controls are behavioral and fail closed:
+`test_three_local_oracle_ulp_cell_worsening_fails`,
+`test_one_cell_improvement_passes`, and
+`test_at_bar_to_debt_flip_fails_without_field_movement`; the explicit exit-
+contract test proves the 3-ulp and status plants return `1`, while the
+improvement plant returns `0`.  All 15 shared-gate tests pass.
+
+The baseline reports were generated from model commit
+`57429ecf5f377ce2bf220f36bc05313cd29e0dfd` in a clean temporary worktree.
+They stamp `be7f3ea1338cb69f0aed9707f6d922246c5968a9`, which adds only the new
+gate plus a faithful-only harness needed to emit the cell fields; it changes
+no model routine.  The current reports stamp
+`165ada6d5073309532bee50ec54b426168143c24`, run production JIT on CPU with
+fp64/x64, and retain all eight residual NPZs and their SHA-256 values.
+
+The exact verdict lines are:
+
+```text
+ORACLE_RELATIVE_COMPARE FAIL: rows=9 max_worsening_ulps=4.2860344287450693e+301 first_over_bar='<absent>'->'<absent>' plant=None
+ORACLE_RELATIVE_COMPARE FAIL: rows=9 max_worsening_ulps=64 first_over_bar='<absent>'->'<absent>' plant=None
+ORACLE_RELATIVE_COMPARE FAIL: rows=50 max_worsening_ulps=1.252578717956996e+278 first_over_bar={'fields': ['T', 'u', 'ssh'], 'kt': 2}->{'kt': 2, 'fields': ['T', 'u']} plant=None
+ORACLE_RELATIVE_COMPARE FAIL: rows=50 max_worsening_ulps=2.9326237612518355e+250 first_over_bar={'fields': ['u'], 'kt': 4}->{'kt': 4, 'fields': ['u']} plant=None
+```
+
+These are, respectively, OVERFLOW stage, LOCK_EXCHANGE stage, OVERFLOW
+trajectory, and LOCK_EXCHANGE trajectory.  No AT-BAR row crosses to DEBT and
+neither `first_over_bar` moves earlier; OVERFLOW instead drops SSH from its
+kt=2 first-over set.  The failures are individual worsened cells hidden by
+the earlier maximum-residual comparisons.  Huge local-ulp counts occur where
+the NEMO value is zero or subnormal; they are a direct consequence of the
+asked cell-local definition, not a rescaled reduction.
+
+### Cross-card Rule-8 and compensating-error rows
+
+The four comparisons contain 83 rows whose legoESM field changed: OVERFLOW
+stage 9, LOCK stage 8, OVERFLOW trajectory 35, and LOCK trajectory 31.  The
+complete prior-output movement, including improved-only rows, is persisted in
+the four hashed comparison JSONs.  Below are all 52 rows with at least one
+cell that worsens by more than two local oracle ulps.  “Before/after” is the
+row's maximum normalized residual against NEMO; “prior-output move” is the
+maximum absolute change between the two legoESM fields.  This is the full
+Rule-8 adverse-row enumeration, not a reduction-only verdict.
+
+| row | before residual | after residual | prior-output move | max worsening (local ulp) | worsened / improved cells |
+|---|---:|---:|---:|---:|---:|
+| `OVERFLOW-zps.kt1.stage1.faithful.baroclinic_u` | `1.8041124150158794e-15` | `6.9388939039072284e-18` | `1.8041124150158794e-15` | `4.2860344e301` | 126 / 25 |
+| `OVERFLOW-zps.kt1.stage2.faithful.baroclinic_u` | `1.5711251744043864e-12` | `1.5711182355104825e-12` | `2.7751238806938971e-15` | `1.9657523e8` | 26 / 176 |
+| `OVERFLOW-zps.kt1.stage2.faithful.instantaneous_u` | `1.5663442765045943e-12` | `1.5711182355104825e-12` | `4.9855952699573436e-15` | `11144` | 44 / 158 |
+| `OVERFLOW-zps.kt1.stage3.faithful.baroclinic_u` | `7.0690120423932967e-12` | `7.0691924536347983e-12` | `5.3371613769129245e-15` | `1.2553756e278` | 73 / 180 |
+| `OVERFLOW-zps.kt1.stage3.faithful.instantaneous_u` | `7.0642380833874086e-12` | `7.0692063314226061e-12` | `5.4262150328554526e-15` | `1.2525787e278` | 88 / 165 |
+| `OVERFLOW-zps.kt2.faithful.baroclinic_u` | `7.0690120423932967e-12` | `7.0691924536347983e-12` | `5.3371613769129245e-15` | `1.2553756e278` | 73 / 180 |
+| `OVERFLOW-zps.kt2.faithful.instantaneous_u` | `7.0642380833874086e-12` | `7.0692063314226061e-12` | `5.4262150328554526e-15` | `1.2525787e278` | 88 / 165 |
+| `LOCK_EXCHANGE-zco.kt1.stage1.faithful.baroclinic_u` | `6.3967928176644762e-18` | `4.3368086899420177e-19` | `6.7220534694101275e-18` | `64` | 1 / 18 |
+| `OVERFLOW-zps.kt2.before.u` | `7.0642380833874086e-12` | `7.0692063314226061e-12` | `5.4262150328554526e-15` | `1.2525787e278` | 88 / 165 |
+| `OVERFLOW-zps.kt3.before.ssh` | `1.5094609590038388e-13` | `1.4924173008523667e-13` | `2.9309887850104133e-14` | `61` | 1 / 16 |
+| `OVERFLOW-zps.kt3.before.u` | `4.1814441492649124e-9` | `4.1814448813182192e-9` | `1.8868478827982482e-14` | `1.4760934e253` | 123 / 363 |
+| `OVERFLOW-zps.kt4.before.T` | `4.110800588819074e-11` | `4.1108272341716646e-11` | `7.1054273576010019e-15` | `3` | 21 / 48 |
+| `OVERFLOW-zps.kt4.before.ssh` | `2.8970131155103829e-10` | `2.8970011112239291e-10` | `2.8532731732866523e-14` | `2.8995086e240` | 6 / 20 |
+| `OVERFLOW-zps.kt4.before.u` | `2.3323162998134528e-8` | `2.3323169319466874e-8` | `1.405629085349247e-13` | `5.8195874e238` | 168 / 639 |
+| `OVERFLOW-zps.kt5.before.T` | `1.1836380764407291e-10` | `1.1836380764407291e-10` | `1.4210854715202004e-14` | `5` | 122 / 71 |
+| `OVERFLOW-zps.kt5.before.ssh` | `1.1794364568329385e-8` | `1.1794364623840536e-8` | `3.1488700535931002e-14` | `1.1032495e235` | 10 / 27 |
+| `OVERFLOW-zps.kt5.before.u` | `4.6243873862150675e-8` | `4.6243887726060695e-8` | `2.5911547213430808e-12` | `2.2143258e233` | 306 / 792 |
+| `OVERFLOW-zps.kt6.before.T` | `2.3705934992790382e-10` | `2.3705917229221987e-10` | `2.8421709430404007e-14` | `8` | 145 / 51 |
+| `OVERFLOW-zps.kt6.before.ssh` | `1.0532438149413181e-7` | `1.0532434394083801e-7` | `3.755329380794592e-14` | `1.3541374e9` | 7 / 36 |
+| `OVERFLOW-zps.kt6.before.u` | `3.1842418704922104e-7` | `3.1843605377210316e-7` | `1.1866722882114544e-11` | `1.625596e12` | 252 / 1141 |
+| `OVERFLOW-zps.kt7.before.T` | `3.7253355955613167e-10` | `3.7253382600965757e-10` | `4.9737991503207013e-14` | `19` | 146 / 79 |
+| `OVERFLOW-zps.kt7.before.ssh` | `3.896382488877137e-7` | `3.8963810283787481e-7` | `1.4604983888943934e-13` | `9.7863958e9` | 13 / 34 |
+| `OVERFLOW-zps.kt7.before.u` | `1.2626023464037961e-6` | `1.2626311811717028e-6` | `2.8834767906715797e-11` | `1.194332e11` | 336 / 1398 |
+| `OVERFLOW-zps.kt8.before.T` | `5.4841393648530332e-10` | `5.4841313712472557e-10` | `8.8817841970012523e-14` | `36` | 215 / 157 |
+| `OVERFLOW-zps.kt8.before.ssh` | `7.518272159279249e-7` | `7.5182693237696441e-7` | `2.8355096048926498e-13` | `1.0354969e11` | 15 / 36 |
+| `OVERFLOW-zps.kt8.before.u` | `2.837811956979408e-6` | `2.8378625590505524e-6` | `5.0602071144378868e-11` | `1.1785129e160` | 564 / 1547 |
+| `OVERFLOW-zps.kt9.before.T` | `9.6323580223156515e-10` | `9.6323633513861705e-10` | `1.2789769243681803e-13` | `61` | 311 / 216 |
+| `OVERFLOW-zps.kt9.before.ssh` | `8.2611369578433624e-7` | `8.2611334123461333e-7` | `3.7431169275237153e-13` | `1.1182112e11` | 23 / 32 |
+| `OVERFLOW-zps.kt9.before.u` | `4.344013583547357e-6` | `4.3440913892744959e-6` | `7.7805727138891001e-11` | `7.3597378e11` | 777 / 1726 |
+| `OVERFLOW-zps.kt10.before.S` | `8.1204884086868561e-16` | `8.1204884086868561e-16` | `2.1316282072803006e-14` | `3` | 292 / 85 |
+| `OVERFLOW-zps.kt10.before.T` | `1.5225941396579389e-9` | `1.5225922744832577e-9` | `1.2434497875801753e-13` | `66` | 370 / 192 |
+| `OVERFLOW-zps.kt10.before.ssh` | `6.2650166018918263e-7` | `6.2650183441093077e-7` | `4.4175774149834979e-13` | `9.9681195e10` | 25 / 34 |
+| `OVERFLOW-zps.kt10.before.u` | `5.4225817119127329e-6` | `5.4226957114725249e-6` | `1.1399955979207732e-10` | `1.0341617e12` | 952 / 1948 |
+| `LOCK_EXCHANGE-zco.kt3.before.u` | `4.4235448637408581e-17` | `1.3010426069826053e-18` | `4.4235448637408581e-17` | `5.1747599e9` | 44 / 176 |
+| `LOCK_EXCHANGE-zco.kt4.before.ssh` | `2.574980159653073e-18` | `2.7105054312137611e-20` | `2.5478751053409354e-18` | `2.9326238e250` | 3 / 9 |
+| `LOCK_EXCHANGE-zco.kt4.before.u` | `2.5762043763717397e-14` | `2.5789380058024135e-14` | `5.3559587320783919e-17` | `3.1123463e13` | 91 / 169 |
+| `LOCK_EXCHANGE-zco.kt5.before.ssh` | `4.391018798566293e-18` | `5.4210108624275222e-20` | `4.391018798566293e-18` | `1.5603266e26` | 3 / 12 |
+| `LOCK_EXCHANGE-zco.kt5.before.u` | `1.4695977589148854e-13` | `1.4690369892224851e-13` | `1.2835734954313837e-16` | `1.3478823e26` | 108 / 212 |
+| `LOCK_EXCHANGE-zco.kt6.before.ssh` | `6.7220534694101275e-18` | `1.0842021724855044e-19` | `6.613633252161577e-18` | `1.5364607e26` | 3 / 14 |
+| `LOCK_EXCHANGE-zco.kt6.before.u` | `5.1003294740826349e-13` | `5.099759963010219e-13` | `1.5789647379758064e-16` | `1.3272658e26` | 107 / 253 |
+| `LOCK_EXCHANGE-zco.kt7.before.ssh` | `9.7578195523695399e-18` | `1.0842021724855044e-19` | `9.6493993351209895e-18` | `1.5129598e26` | 5 / 14 |
+| `LOCK_EXCHANGE-zco.kt7.before.u` | `1.3628027132890456e-12` | `1.3626691734627133e-12` | `2.7714368124489482e-16` | `1.3069646e26` | 102 / 298 |
+| `LOCK_EXCHANGE-zco.kt8.before.S` | `2.0301221021717145e-16` | `6.0903663065151435e-16` | `2.1316282072803006e-14` | `3` | 80 / 20 |
+| `LOCK_EXCHANGE-zco.kt8.before.T` | `3.5527136788005005e-15` | `3.5527136788005005e-15` | `1.0658141036401503e-14` | `3` | 19 / 7 |
+| `LOCK_EXCHANGE-zco.kt8.before.ssh` | `1.3444106938820255e-17` | `4.3368086899420177e-19` | `1.3010426069826053e-17` | `1.4898184e26` | 5 / 16 |
+| `LOCK_EXCHANGE-zco.kt8.before.u` | `3.0794721766623685e-12` | `3.0792796291327987e-12` | `3.9441062161447949e-16` | `1.286974e26` | 135 / 305 |
+| `LOCK_EXCHANGE-zco.kt9.before.S` | `0` | `6.0903663065151435e-16` | `2.1316282072803006e-14` | `3` | 100 / 0 |
+| `LOCK_EXCHANGE-zco.kt9.before.ssh` | `1.6913553890773869e-17` | `1.3552527156068805e-17` | `1.9081958235744878e-17` | `1.4670309e26` | 8 / 15 |
+| `LOCK_EXCHANGE-zco.kt9.before.u` | `6.1840288342581221e-12` | `6.1836913356743545e-12` | `6.1526098949322104e-16` | `3.2138761e60` | 204 / 296 |
+| `LOCK_EXCHANGE-zco.kt10.before.S` | `2.0301221021717145e-16` | `6.0903663065151435e-16` | `2.1316282072803006e-14` | `3` | 100 / 0 |
+| `LOCK_EXCHANGE-zco.kt10.before.ssh` | `2.2334564753201391e-17` | `3.2873348682939396e-17` | `3.8899141069706489e-17` | `1.2855504e59` | 10 / 16 |
+| `LOCK_EXCHANGE-zco.kt10.before.u` | `1.1371946109393558e-11` | `1.1371472936460431e-11` | `8.5603743687920559e-16` | `1.7351842e57` | 232 / 308 |
+
+The DINO developed-state single-step HPG consumer exists and ran in 21 s,
+well below the 20-minute limit.  At the exact halo alignment both U
+(`n=335145`) and V (`n=340271`) report correlation `1.000000000` and
+`rms(lego)/rms(NEMO)=1.000000000`; its transcript is retained and hashed.
+
+## Round-14 EOS follow-ups
+
+The new hermetic CI test fixes five TEOS-10 `prd` uint64 patterns from the
+accepted oracle record and uses only embedded T/S/depth literals—no `/data`
+or oracle executable.  It passes under production CPU JIT/x64 and will fail if
+a future XLA peephole changes those bits.  The EOS docstring now says exactly
+what the saved optimized-HLO census showed: 105 source barriers become zero
+optimized `optimization_barrier` operations; the finite/select IEEE identity,
+not the barrier, is what survives.  The isomorphism map adds a **PLAUSIBLE**
+debt list, without changing physics, for barrier-only QCO/e3f recurrences in
+`vertical.py`, `barotropic_common.py`, `barotropic_latlon_cgrid.py`, the PE HPG
+literal, `implicit_solver.py`, and `gm_redi_latlon_cgrid.py`.
+
+## Round-14 `un_adv/vn_adv` boundary walk
+
+NEMO calls `stp_2D(kstp,Nbb,Nbb,Naa,Nrhs)` before RK stage 1
+(`stprk3.F90:186`); that dispatches `dyn_spg_ts` with `Kbb` for both before
+and now (`stp2d.F90:281`).  The RK3 arm seeds external SSH, U, V, and live
+depths from `Kmm=Kbb` (`dynspg_ts.F90:485-493`), zeros `un_adv/vn_adv` at
+`:506-510`, forms the resolved vector-invariant slow forcing from the
+reference-depth mean of `Krhs` at `:310-345`, and applies the 2-D Coriolis,
+drag, and surface terms at `:355-401`.  The resolved card has
+`ln_dynadv_vec=.true.` (`round14_oracle_advmean_v1/namelist_cfg:161`).
+
+Inside each of 50 substeps, NEMO forms the metric transport at
+`dynspg_ts.F90:605-611`, then uses `za2=wgtbtp2(jn)` and accumulates
+`za2*zhU*r1_e2u` / `za2*zhV*r1_e1v` in that written association at `:639-642`.
+It divides by `SUM(wgtbtp2)` at `:843-844` and applies LBC at `:852-854`.
+Stage 1 consumes those NOW-level means in `zub/zvb` and then the native
+transports at `stprk3_stg.F90:262-274`.  The time-level registry names the new
+record `now`; no literal `Nbb/before` label is emitted.
+
+The config-local `MY_SRC/dynspg_ts.F90` extension wrote the divisor, every
+weight, reciprocal face metric, and for each substep the accumulator entry,
+midpoint velocity, face depth, metric transport, and accumulator exit, plus
+pre/post-LBC means.  It changed no shipped NEMO source.  A serial diagnostic
+build temporarily needed `key_mpi_off` because the sandbox denied MPI socket
+creation; the config was restored to `key_qco key_vco_1d3d key_RK3` after the
+run.  The ordinary stage-1 record hash is
+`35e6892b799aeaf8d06d4affcd71b5ba0c71dc41bc0e8970c033459c46cd1402`,
+exactly the Round-13 control, so the WRITE-only instrumentation is bit-
+identity preserving.
+
+| ordered boundary | U result | V result | disposition |
+|---|---:|---:|---|
+| 50 weights and divisor 50 | 0 ulp | 0 ulp | exact |
+| substep 1 sum entry/velocity/depth/transport/sum exit | all exact | all exact | averaging path exact |
+| substep 2 face depth | exact | exact | earlier `eta_exit` difference is not live here |
+| substep 2 midpoint velocity | `1.728794245346027e-18`, 580 cells | `1.7296412782932813e-18`, 570 cells | **first live non-bit-exact operand** |
+| substep 2 metric transport | `7.885319064371288e-10` | `7.885319064371288e-10` | propagated at the expected metric scale |
+| final mean before/after LBC | `1.2045919817182948e-13`, 580 cells | `5.495603971894525e-14`, 570 cells | LBC zero-move; original boundary reproduced |
+| literal accumulation fed NEMO operands | exact | exact | association/order/weights/division exonerated |
+
+The external frame census sees an earlier numerical difference at substep-1
+`eta_exit` (`3.3881317890172014e-21`, 600 cells), but substep-2 face depth is
+bit-exact, so that departure does not enter this transport boundary.  At the
+live velocity update, the slow-forcing operand differs by
+`6.002022524684769e-21`; over the 288-second substep that scales to
+`1.7286e-18`, matching the observed `1.7288e-18` velocity residual.
+
+The one-variable arm reconstructs the production vector-form update exactly,
+then substitutes only NEMO's dumped slow forcing.  The faithful reconstruction
+is bit-identical to production.  The U residual moves by 1.0× and falls from
+`1.728794245346027e-18` to `1.0587911840678754e-22` (1 ulp); V moves by
+0.999510× and falls from `1.7296412782932813e-18` to
+`8.470329472543003e-22` (1 ulp).  This is
+**CONFIRMED_FIRST_DIVERGENCE_UPSTREAM_SLOW_FORCING**.  It is not a claim that
+slow forcing is the sole substep error, and it does not exonerate the later
+external-mode operands.  The averaging hypothesis and weight hypothesis are
+**REFUTED**; the mean-to-stage handoff is exact.  No shared physics change is
+made, so the Round-13 GYRE kt=1…10 register remains numerically current and no
+post-landing sweep is claimed.  The diagnostic exits `1` for honest DEBT; its
+one-bit planted accumulator mutation also exits `1` and moves the first
+reported boundary to substep-1 U `sum_exit`.
+
 
 ## Round-13 propagated tracer input walk
 
@@ -160,6 +371,11 @@ rows versus Round 12.  OVERFLOW stage/trajectory stay DEBT with
 trajectory remains DEBT with `first_over_bar=kt4 {u}`.  Tracer rows are
 bit-identical to their Round-12 candidate outputs, so no row moves away from
 the oracle by more than two ulp and no status crosses downward.
+
+That was the Round-13 **reduction-level** statement under the then-current
+gate.  It is retained as historical provenance but is superseded for landing
+decisions by Round 14's cellwise oracle-relative result above, which exposes
+worsened cells inside rows whose maximum residual improved.
 
 ## Round-12 preregistration and EOS operand walk
 
@@ -518,7 +734,7 @@ POLYNOMIAL_FIT_PREFERRED (exponents `0.60445` and `0.95631`) and SSH
 BOUNDED_OR_DECAYING_NO_AMPLIFYING_MODE.  These are characterization labels,
 not acceptance evidence.
 
-## Pending D boundary and round-12 cross-card oracle scoring
+## Historical pending D boundary and round-12 cross-card oracle scoring
 
 Independent re-review returned **SHIP** for round 10 and clarified that this
 gate compares against the previous legoESM output, not directly against NEMO.
@@ -526,6 +742,10 @@ Round-11 independent review was still running when round 12 was dispatched.
 The retained D criterion is therefore an **OPEN USER DECISION**.  Round 12
 does not modify that gate or criterion; it reports both its direction-blind
 compare-to result and direct oracle-relative residuals.
+
+This describes the Round-12 state only.  The user resolved the decision on
+2026-09-04; the Round-14 criterion and results at the start of this receipt
+are authoritative.
 
 The shared Roquet EOS remains one implementation.  Its NEMO-literal
 `zn3/zn2/zn1/zn0` nesting is unconditional for EOS-80 and TEOS-10, and the
@@ -705,7 +925,15 @@ was upgraded merely because its documentation omitted a regime stamp.
 | ranked QCO-depth / salinity / constants / EOS-choice arms | ASKED round 12 | first two refuted; constants and selection exact; no card choice changed |
 | shared EOS source-operation association | forbidden round 11, explicitly ASKED round 12 | one shared implementation landed; oracle-input chain bit-exact; propagated stage `prd` still two-cell DEBT |
 | finite IEEE identity between source operations | UNASKED implementation mechanism | retained only after NumPy/NEMO exact and XLA discriminator; shared, differentiable, no callback |
-| compare-to gate or criterion change | explicitly forbidden round 12 | NOT MODIFIED; open user decision retained |
+| compare-to gate or criterion change | forbidden round 12; explicitly ASKED round 14 | changed once, shared, to cellwise oracle-relative; prior-output motion disclosed only |
+| compressed per-cell NEMO/candidate/residual sidecars | ASKED round 14 | landed for shared stage and trajectory gates; all eight before/after NPZs hashed |
+| 3-ulp-worse / improve / AT-BAR-to-DEBT controls | ASKED round 14 | behavioral exit contracts pass: FAIL / PASS / FAIL |
+| compensating-error clause in gate and oracle-fidelity skill | ASKED round 14 | landed as Rule 12; no per-card waiver or switch |
+| OVERFLOW and LOCK stage plus kt=1…10 cellwise comparisons | ASKED round 14 | all four run; FAIL on exposed cells, no downward status crossing or earlier first-over |
+| DINO developed-state single-step HPG third consumer | ASKED if under 20 minutes | RUN in 21 s wall, far below 20 minutes; U/V corr and ratio both 1.000000000 |
+| hermetic five-sample `prd` hex test | ASKED round-12 follow-up | landed and passes without `/data`; pins production-JIT XLA bits |
+| optimized-HLO EOS docstring correction | ASKED round-12 follow-up | corrected: barriers disappear, finite/select identity survives |
+| barrier-only recurrence debt census | ASKED round-12 follow-up | six requested shared surfaces listed PLAUSIBLE; no recurrence changed |
 | stage-3 transport remeasurement | ASKED only if EOS and stage 2 clear | NOT ENTERED; corrected Kaa remains DEBT |
 | GYRE tra_zdf/dyn_zdf matrix walk | ASKED only if stages 2 and 3 clear | NOT ENTERED |
 | source-ordered stage-1 tracer routine checkpoints and 9-T/9-S cell census | ASKED round 13 | config-local WRITE-only; all first differ after `tra_adv` |
@@ -713,6 +941,11 @@ was upgraded merely because its documentation omitted a regime stamp.
 | complete oracle stage-1 transport arm | ASKED round 13 | CONFIRMED causal; makes T/S stage update bit-exact |
 | native metric-bearing zF product association | ASKED round 13 after operand split | landed shared S-21 identity; literal statement confirmed at 0 ulp, but not the complete owner |
 | stage-1 transport metric/e3/velocity/mask/corrected-velocity split | ASKED owner walk | first bad compound operand is corrected velocity; `un_adv/vn_adv` first bad primitive input |
+| config-local per-substep `un_adv/vn_adv` accumulator dump | ASKED round 14 | WRITE-only, ordinary stage hash unchanged; weights/association/division/LBC exact |
+| weighted-mean association and weight hypotheses | ASKED round 14 | REFUTED by exact operands, literal partial sums, and final oracle-input replay |
+| one-variable oracle slow-forcing arm | ASKED round 14 boundary bisection | CONFIRMED causal first divergence; U/V velocity residuals fall to 1 ulp |
+| shared slow-forcing physics fix | conditional on literal owner | NOT LANDED; exact source operand inside the slow-forcing construction remains the next boundary |
+| temporary serial `key_mpi_off` diagnostic build | UNASKED operational necessity | used only because sandbox MPI sockets failed; config restored; ordinary output identity checked |
 | new public selector/card guard/GYRE-only physics arm | UNASKED and forbidden | none added |
 | stage-3 transport and ZDF matrix walks | conditional on stage-2 clearing | NOT ENTERED; stage-2 corrected Kaa remains DEBT |
 
@@ -751,3 +984,21 @@ green.  The broader private-cross-import suite reports three pre-existing
 unrelated violations and no Round-13 import; it is not claimed green.
 Round-12 independent review is running in parallel; Round-13 measurements
 have no independent review yet and make no dual-review claim.
+
+Round 14 passes all 15 oracle-relative move-gate tests, including the three
+asked plants, and the hermetic five-sample `prd` bit-pattern test.  The full
+barotropic-continuity/drag plus WS-RK3 tracer run passes `50 passed` in
+`742.73 s` on CPU; the time-level and single-implementation guards add
+`61 passed` in `4.39 s`.  The faithful GYRE advective-mean diagnostic exits `1`
+because the scientific boundary remains DEBT, and its planted run also exits
+`1` after moving the first failure to one deliberately changed cell.  Fresh
+OVERFLOW/LOCK stage and trajectory gates likewise exit `1` for the disclosed
+cellwise compensating-error debts, not a harness failure.  The DINO probe
+exits `0`.
+
+The Round-14 artifact manifest hashes the baseline sweep artifacts, all eight
+cell-residual sidecars, four comparison reports, the DINO transcript, the
+config-local oracle record/source/deck, and faithful/planted walk reports.
+Round-13 independent review is running in parallel; every Round-14 result is
+a new Codex-internal measurement.  Independent review remains outstanding and
+no dual-review claim is made.
