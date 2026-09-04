@@ -143,3 +143,36 @@ if __name__ == "__main__":
         test_land_ml_survives_carry_aux_npz_roundtrip(Path(d))
     test_restore_is_noop_for_slab_land()
     print("ok")
+
+
+def test_canopy_warm_start_cache_is_not_a_checkpoint_field(tmp_path):
+    """``canopy_x`` is a numerical cache: never written, never required.
+
+    A checkpoint written before the field existed must still restart a
+    two-leaf run whose template allocates the cache (it simply cold-starts),
+    and a checkpoint from this code must not carry a key an older reader would
+    refuse as unknown."""
+    cache = np.full((4, 6), np.nan, dtype=np.float32)
+    saved = _state(1.0)._replace(canopy_x=cache)
+    src = SimpleNamespace(
+        _carry_aux={}, _land_ml_state=saved,
+        _double_moment_step_inputs=lambda: {},
+        config=SimpleNamespace(convection="none"))
+    aux = ModelDriver._checkpoint_carry_aux(src)
+    assert "land_ml_canopy_x" not in aux
+
+    np.savez(tmp_path / "c.npz", **aux)
+    loaded = dict(np.load(tmp_path / "c.npz"))
+    dst = SimpleNamespace(_check_land_soil_dz=lambda dz: None,
+                          _carry_aux=loaded,
+                          _land_ml_state=_state(99.0)._replace(canopy_x=cache))
+    ModelDriver._restore_land_ml_from_carry_aux(dst)   # must not raise
+    for f in MultiLayerLandState._fields:
+        if f == "canopy_x":
+            assert np.isnan(dst._land_ml_state.canopy_x).all()  # template kept
+            continue
+        want = getattr(saved, f)
+        if want is None:
+            assert getattr(dst._land_ml_state, f) is None
+            continue
+        np.testing.assert_allclose(getattr(dst._land_ml_state, f), want)
