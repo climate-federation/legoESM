@@ -11,6 +11,30 @@ Implementation commit: `0da38492ea930789d0e7209897fff48bd434c19c`
 Starting reconciled tip: `57429ecf5f377ce2bf220f36bc05313cd29e0dfd`  
 Session: `01a05cb9-7625-7f40-9e83-b3fa767b1945`
 
+## Round-10 preregistration (before diagnosis)
+
+Round 10 reuses the existing phase-3 readers, card, private WRITE-only hooks,
+fp64 policy, masks, and scoring code.  Repository search found no unified
+same-input eager/JIT operator ladder, so the existing GYRE completion gate is
+extended rather than creating parallel operator implementations.
+
+The ordered parity output is fixed before measurement: EOS/prd, HPG,
+vorticity, momentum advection, stage composition to Kaa, tracer advection,
+tracer ZDF, momentum ZDF, stage transports, WZV, external-mode/drag, and final
+state.  Each row compares arrays returned by the same callable with identical
+entry state and fp64 operands.  At most four ulps is PARITY; the first row over
+four ulps is the owner boundary.  A planted one-bit output mutation must exit
+nonzero.
+
+The independent mask discriminator compares the exact 3-D array handed to the
+Roquet anomaly function with `tmask(1,:,:,:)` from OVERFLOW's `mesh_mask.nc`,
+after the bridge's documented halo/axis transform.  Exact equality requires
+zero differing cells and zero NEMO-wet cells zeroed by the applied mask.  Any
+nonzero count confirms a bridge/mask owner and records the first `(i,j,k)`;
+exact masks with a changed wet HPG trend instead send ownership to the shared
+HPG consumer.  Success remains the predeclared two-ulp lane-1 comparison bar,
+bit-identical T/S, unchanged first-over-bar, and no card guard.
+
 Before measurement I reread the GYRE reconciliation receipt, the requested
 lane-1 stage/SSH/phantom/census/face-thickness receipts, and the branch-
 isomorphism map.  The unmerged round-7 WIP was not trusted: every live result
