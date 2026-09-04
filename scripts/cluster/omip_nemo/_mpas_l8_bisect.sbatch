@@ -55,12 +55,15 @@ run_arm () {  # name, extra flags
   echo "--- $name per-step max|u| (step,max_abs_u,lat,lon,lev):"
   cut -d, -f1,5,7,8,9 $OUT/diag_timeseries.csv 2>/dev/null | sed -n '2,32p' | tr '\n' ' ' ; echo
 }
-# LADDER 6. GM/Redi off (now wired) changes the numbers in the 4th digit and
-# NOT the growth => exonerated. All physics gone; the seed is in the base
-# dynamics. Explicit-operator signature (|lambda| dt ~ 5). ONE VARIABLE each:
-# lateral viscosity off, Adcroft PGF, TVD tracer advection.
+# LADDER 7. Ladder 6: viscosity off / TVD do not change the growth; adcroft
+# PGF arm bit-identical (flag inert). Reading ocean_pe_mpas: BOTTOM DRAG is
+# applied EXPLICITLY (its depth-mean must enter the barotropic forcing) and the
+# nemo_quadratic law makes r_eff = Cd*|u| GROW with |u| => an explicit
+# sign-flip instability once Cd|u|dt/h > 2, per-step growth ~ dt and ~|u|
+# (super-exponential: measured factors 5.1, 5.3, 5.4, 5.7, 6.2). Level-8
+# partial bottom cells are thinner at these sites. ONE VARIABLE each:
+# legacy linear drag (r=1e-3, no |u| feedback) and drag OFF.
 CTL="--dt 75 --partial-cell --mle --mle-ce 0.06 $TKE $ISF $IWM --bbl-adv $WOA $NEMOIC $ICE"
-run_arm visc0      $CTL --A-h 0 --C-smag-lap 0
-run_arm pgf_adcr   $CTL --pgf-scheme adcroft
-run_arm tvd        $CTL --tracer-advection tvd
+run_arm drag_lin   $CTL --bottom-drag-scheme legacy
+run_arm drag_off   $CTL --bottom-drag-scheme legacy --bottom-drag-r 0
 echo DONE
