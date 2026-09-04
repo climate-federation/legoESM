@@ -55,13 +55,12 @@ run_arm () {  # name, extra flags
   echo "--- $name per-step max|u| (step,max_abs_u,lat,lon,lev):"
   cut -d, -f1,5,7,8,9 $OUT/diag_timeseries.csv 2>/dev/null | sed -n '2,32p' | tr '\n' ' ' ; echo
 }
-# LADDER 5. Ladder 4: split-explicit barotropic grows IDENTICALLY => barotropic
-# solver exonerated. Re-reading the dt arms: halving dt HALVES the per-step
-# growth (5.1 -> 2.5), i.e. an explicit operator with |lambda| dt ~ 5,
-# |lambda| ~ 0.07/s = K/dz^2 -> a vertical explicit term with K ~ 0.07 m2/s
-# at 1 m (surface) or ~60 m2/s at 30 m (depth), OR the rotated (Redi/GM)
-# diffusion whose vertical part scales with slope^2 (slopes double at L8).
-# ONE VARIABLE: GM/Redi off. Stable => rotated diffusion; then check the
-# slope taper (dm95, slope_max) on the MPAS lane.
-run_arm no_gmredi  --dt 75 --partial-cell --mle --mle-ce 0.06 $TKE $ISF $IWM --bbl-adv $WOA $NEMOIC $ICE --no-gm-redi
+# LADDER 6. GM/Redi off (now wired) changes the numbers in the 4th digit and
+# NOT the growth => exonerated. All physics gone; the seed is in the base
+# dynamics. Explicit-operator signature (|lambda| dt ~ 5). ONE VARIABLE each:
+# lateral viscosity off, Adcroft PGF, TVD tracer advection.
+CTL="--dt 75 --partial-cell --mle --mle-ce 0.06 $TKE $ISF $IWM --bbl-adv $WOA $NEMOIC $ICE"
+run_arm visc0      $CTL --A-h 0 --C-smag-lap 0
+run_arm pgf_adcr   $CTL --pgf-scheme adcroft
+run_arm tvd        $CTL --tracer-advection tvd
 echo DONE

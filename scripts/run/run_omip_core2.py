@@ -6832,6 +6832,10 @@ def main() -> int:
             # dispatch incl. superbee; ocean_pe_mpas smc03 branch).
             pgf_scheme=args.pgf_scheme,
             tracer_advection=args.tracer_advection,
+            # Same silent-drop class as pgf/tracer above: the builder accepts
+            # these overrides but the call never passed them.
+            A_h=args.A_h, B_h=args.B_h, K_bih=args.K_bih,
+            C_smag_lap=args.C_smag_lap,
             bottom_drag_scheme=args.bottom_drag_scheme,
             bottom_drag_cd0=args.bottom_drag_cd0,
             bottom_drag_cdmax=args.bottom_drag_cdmax,
