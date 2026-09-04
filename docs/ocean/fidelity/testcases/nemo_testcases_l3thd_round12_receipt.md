@@ -4,6 +4,7 @@ Date: 2026-09-05
 Tracker: `climate-federation/legoESM#1699`  
 Prerequisite commit: `1eeb4f1c8c40`  
 Construction gate/code commit: `2d319abb1842`  
+Owner-binding review-fix commit: `746ded3a783e`
 State: **CONSTRUCTION DEBT — USER DECISION REQUIRED**
 
 This round followed the independently reviewed rung-3.6 design until its first
@@ -159,6 +160,12 @@ reported `3388 passed, 2 skipped, 5 failed`; all five failures are pre-existing
 files untouched by this lane
 (`fv3_native_physics_coupling.py`, `test_fv3_physics_coupling.py`, and three
 DINO geometry tests).  Neither Round-12 script is named in a failure.
+
+Two read-only Codex-internal reviewers independently rechecked fix commit
+`746ded3a783e16a8f6506ba580be97a95c6ad936` and returned SHIP.  Their named
+identities, original HOLD findings, disposition, commands, and limitations are
+retained in `nemo_testcases_l3thd_round12_internal_reviews.md`.  These are not
+represented as external reviews.
 
 ## Coverage and stopping disposition
 
