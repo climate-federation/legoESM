@@ -93,6 +93,24 @@ def load(path: pathlib.Path) -> dict[str, np.ndarray]:
     for k in _OPTIONAL:
         if k in d:
             out[k] = np.asarray(d[k], dtype=float)
+
+    # ALIGNMENT GUARD.  In the MPAS lane `days` is appended unconditionally at
+    # each diagnostic step, while the energy channels are appended inside a
+    # further `if` (the energy-budget inputs must all be present).  If that
+    # condition is ever false on a diagnostic step, `days` grows and the energy
+    # channels do not -- and every subsequent sample is paired with the WRONG
+    # day, silently.  A leak computed across a shift is meaningless, so refuse
+    # rather than report.
+    lengths = {k: len(v) for k, v in out.items()}
+    n = lengths[_NEEDED[0]]
+    ragged = {k: L for k, L in lengths.items() if L != n}
+    if ragged:
+        raise SystemExit(
+            f"channel lengths disagree in {path}: {lengths}. The energy "
+            "channels are appended under a condition that `days` is not, so a "
+            "mismatch means the samples are SHIFTED relative to each other and "
+            "any leak computed from them pairs the wrong day's fluxes. Refusing "
+            "to report a number.")
     return out
 
 

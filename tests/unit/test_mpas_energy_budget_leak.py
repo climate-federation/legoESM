@@ -158,6 +158,23 @@ def test_missing_energy_channels_fail_loudly(tmp_path):
         mod.load(path)
 
 
+def test_ragged_channels_are_refused_not_reported(tmp_path):
+    """Misaligned channels must raise, because a shifted leak looks plausible.
+
+    The MPAS lane appends `days` unconditionally at each diagnostic step but
+    the energy channels under a further condition, so a mismatch means every
+    sample is paired with the wrong day's fluxes.  That produces a number, not
+    an error -- which is exactly why it has to be refused explicitly.
+    """
+    mod = _load()
+    path = _series(tmp_path, leak=20.0, n=6)
+    d = dict(np.load(path))
+    d["days"] = np.arange(7, dtype=float)          # one more day than samples
+    np.savez(path, **d)
+    with pytest.raises(SystemExit, match="SHIFTED|lengths disagree"):
+        mod.load(path)
+
+
 def test_runs_end_to_end(tmp_path):
     mod = _load()
     assert mod.main([str(_series(tmp_path, leak=12.0)), "--skip-days", "1"]) == 0
