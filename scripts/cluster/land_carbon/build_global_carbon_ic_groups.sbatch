@@ -5,7 +5,7 @@
 # One two-leaf group takes ~4 h on 16 CPU cores; 21 groups serially would not
 # fit a 72 h job and a timeout used to lose everything.
 #
-#   CIC_OUTDIR=... CIC_EXTRA_ARGS="--stomatal-model medlyn ..." \
+#   CIC_OUTDIR=... CIC_EXTRA_ARGS="--stomatal-model medlyn" \
 #     sbatch --array=0-20 scripts/cluster/land_carbon/build_global_carbon_ic_groups.sbatch
 #   then: sbatch --dependency=afterok:<array job id> scripts/cluster/land_carbon/build_global_carbon_ic.sbatch
 #SBATCH --account=glab

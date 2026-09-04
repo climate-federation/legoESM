@@ -243,7 +243,6 @@ def assess_ic_map(archetypes_npz_path, *, n_years, dt=None, n_layers=None,
     # model).
     physics = {k: (z[k].item() if k in z.files else d) for k, d in
                (("stomatal_model", "ball_berry"),
-                ("capacity_scheme", "prescribed"), ("g1_source", "table"),
                 ("nsc_gated_respiration", False),
                 ("cold_deciduous_dormancy", False),
                 ("leaf_c_resorption_frac", 0.0))}

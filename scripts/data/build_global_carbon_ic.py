@@ -164,10 +164,9 @@ _CACHE_MIN_COMPILE_SECS_DEFAULT = 1.0   # only cache XLA compiles slower than th
 # Physics switches the equilibria are spun with.  Written into BOTH output npz
 # files so the drift validator rebuilds the SAME model (defaults would silently
 # re-integrate a different one); all are hashed into the equilibrium cache key.
-PHYSICS_PROVENANCE_KEYS = ("stomatal_model", "capacity_scheme", "g1_source",
-                           "nsc_gated_respiration", "cold_deciduous_dormancy",
-                           "leaf_c_resorption_frac")
-_EQUILIBRIUM_CACHE_VERSION = "v7"  # v7: the archetype step's carbon diagnostics now use the SURFACE SCHEME's GPP (two-leaf canopy, the land default since 2026-08-20) instead of a big-leaf re-derivation, so every equilibrium under a canopy scheme changes; canopy switches (stomatal_model / capacity_scheme / g1_source) are hashed into the key. v6: + opt-in leaf-carbon resorption (leaf_c_resorption_frac hashed into the key) refills the labile reserve at leaf-fall, raising cold-deciduous equilibria. v5: + opt-in NSC-gated R_maint / cold-deciduous freeze-dormancy gates change the high-latitude equilibria when enabled (the cache key ALSO hashes both flags, so on/off never alias). v4: + perennial-frost/anaerobic SOM protection (f_perma on the SOM modifier, keyed on the annual frozen fraction) -- coupled-spin-up equilibrium rises for perennially-frozen high-latitude archetypes (permafrost carbon; v3 was the r_maint_* CUE recalibration)
+PHYSICS_PROVENANCE_KEYS = ("stomatal_model", "nsc_gated_respiration",
+                           "cold_deciduous_dormancy", "leaf_c_resorption_frac")
+_EQUILIBRIUM_CACHE_VERSION = "v7"  # v7: the archetype step's carbon diagnostics now use the SURFACE SCHEME's GPP (two-leaf canopy, the land default since 2026-08-20) instead of a big-leaf re-derivation, so every equilibrium under a canopy scheme changes; the canopy stomatal model is hashed into the key. v6: + opt-in leaf-carbon resorption (leaf_c_resorption_frac hashed into the key) refills the labile reserve at leaf-fall, raising cold-deciduous equilibria. v5: + opt-in NSC-gated R_maint / cold-deciduous freeze-dormancy gates change the high-latitude equilibria when enabled (the cache key ALSO hashes both flags, so on/off never alias). v4: + perennial-frost/anaerobic SOM protection (f_perma on the SOM modifier, keyed on the annual frozen fraction) -- coupled-spin-up equilibrium rises for perennially-frozen high-latitude archetypes (permafrost carbon; v3 was the r_maint_* CUE recalibration)
 # COUPLED-RUN MAINTENANCE (now wired): this map is built WITH the perennial-
 # frost/anaerobic SOM protection (annual_frozen_fraction -> soil_frozen_fraction
 # threaded into the archetype spin-up), and the drift validator applies the SAME
@@ -758,8 +757,7 @@ def _equilibrium_cache_key(table, spin: dict) -> str:
          texture keys; ``|`` is not a soil-class token).
       4. the spin config ``(n_spinup, n_verify, dt, n_layers, soil_depth)``
          (``repr`` on the floats keeps full precision stable), the three
-         opt-in carbon flags, and the canopy switches
-         ``(stomatal_model, capacity_scheme, g1_source)``.
+         opt-in carbon flags, and the canopy ``stomatal_model``.
 
     Mirrors ``train_carbon_params._precompute_cache_key``; the only differences
     are the domain-separation prefix and the version constant, because the two
@@ -781,9 +779,7 @@ def _equilibrium_cache_key(table, spin: dict) -> str:
                 f"nsc{int(spin.get('nsc_gated_respiration', False))}|"
                 f"cd{int(spin.get('cold_deciduous_dormancy', False))}|"
                 f"rsrp{spin.get('leaf_c_resorption_frac', 0.0)!r}|"
-                f"sm{spin.get('stomatal_model', 'ball_berry')}|"
-                f"cap{spin.get('capacity_scheme', 'prescribed')}|"
-                f"g1{spin.get('g1_source', 'table')}|")
+                f"sm{spin.get('stomatal_model', 'ball_berry')}|")
     h.update(spin_key.encode("utf-8"))
     return h.hexdigest()
 
@@ -949,8 +945,6 @@ def _load_or_equilibrate(table, spin: dict, *, cache_dir: str, rebuild: bool,
         cold_deciduous_dormancy=spin.get("cold_deciduous_dormancy", False),
         leaf_c_resorption_frac=spin.get("leaf_c_resorption_frac", 0.0),
         stomatal_model=spin.get("stomatal_model", "ball_berry"),
-        capacity_scheme=spin.get("capacity_scheme", "prescribed"),
-        g1_source=spin.get("g1_source", "table"),
         spinup_batch_fn=(_make_cached_spinup_batch(cache_dir, key)
                          if cache_dir else None),
         only_groups=only_groups)
@@ -1009,22 +1003,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "reserve at leaf-fall (deciduous leaf-C recovery; refills "
                         "the reserve behind the cold leaf-out lock); changes the "
                         "high-latitude equilibria (cache key includes it).")
-    # Canopy switches for the archetype spin-up (two-leaf canopy = the land
+    # Canopy switch for the archetype spin-up (two-leaf canopy = the land
     # default surface scheme).  Named explicitly so the resolved physics is in
-    # the run record; all three are hashed into the equilibrium cache key and
-    # written into the finidat.
+    # the run record; hashed into the equilibrium cache key and written into
+    # the finidat.
     p.add_argument("--stomatal-model", type=str, default="ball_berry",
-                   choices=("ball_berry", "medlyn", "leuning"),
-                   help="Two-leaf canopy stomatal model (g1_source=p_model "
-                        "requires medlyn).")
-    p.add_argument("--capacity-scheme", type=str, default="prescribed",
-                   choices=("prescribed", "p_model"),
-                   help="Vcmax25 source: CLM5 per-PFT table or the P-model "
-                        "acclimated optimum.")
-    p.add_argument("--g1-source", type=str, default="table",
-                   choices=("table", "p_model"),
-                   help="Stomatal slope source: per-PFT table or the P-model "
-                        "least-cost Medlyn slope.")
+                   choices=("ball_berry", "medlyn"),
+                   help="Two-leaf canopy stomatal model.")
     p.add_argument("--only-groups", type=str, default=None,
                    help="Comma-separated archetype-group indices to spin (fills "
                         "the per-group equilibrium cache, writes NO outputs); "
@@ -1175,13 +1160,10 @@ def main(argv=None):
         "cold_deciduous_dormancy": args.cold_deciduous_dormancy,
         "leaf_c_resorption_frac": args.leaf_c_resorption_frac,
         "stomatal_model": args.stomatal_model,
-        "capacity_scheme": args.capacity_scheme,
-        "g1_source": args.g1_source,
     }
     print("[global_carbon_ic] RESOLVED canopy: surface_scheme=two_leaf_canopy "
           f"stomatal_model={args.stomatal_model} "
-          f"capacity_scheme={args.capacity_scheme} g1_source={args.g1_source} "
-          "(big-leaf StomataConfig mirrors the same three switches)", flush=True)
+          "(big-leaf StomataConfig mirrors the same stomatal model)", flush=True)
     only_groups = (tuple(int(g) for g in args.only_groups.split(","))
                    if args.only_groups else None)
     if only_groups is not None and not args.equilibrium_cache_dir:

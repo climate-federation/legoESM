@@ -300,9 +300,7 @@ class ArchetypeBatch(NamedTuple):
     soil_frozen_fraction: object  # (ncol_g,) annual frozen fraction [-] (perennial-frost index)
 
 
-_CANOPY_STOMATAL_MODELS = ("ball_berry", "medlyn", "leuning")
-_CANOPY_CAPACITY_SCHEMES = ("prescribed", "p_model")
-_CANOPY_G1_SOURCES = ("table", "p_model")
+_CANOPY_STOMATAL_MODELS = ("ball_berry", "medlyn")
 
 
 def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt,
@@ -310,9 +308,7 @@ def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt,
                            nsc_gated_respiration=False,
                            cold_deciduous_dormancy=False,
                            leaf_c_resorption_frac=0.0,
-                           stomatal_model="ball_berry",
-                           capacity_scheme="prescribed",
-                           g1_source="table"):
+                           stomatal_model="ball_berry"):
     """Build the per-``(is_woody, is_evergreen, soil_class)`` GROUP construction
     shared by the archetype equilibration (:func:`equilibrate_archetypes`) and
     the drift validator (``scripts/validate/global_carbon_ic_map.py``).
@@ -378,32 +374,14 @@ def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt,
     from legoesm.land.surface_scheme import TwoLeafCanopyConfig
     from legoesm.land.climate_forcing import make_climatological_forcing
 
-    # Canopy switches: the surface scheme is the two-leaf canopy (the land
-    # default), and the big-leaf StomataConfig MIRRORS the same three switches
-    # so the P-model gate (`pmodel_switches_active`, which reads both) and any
-    # big-leaf re-derivation agree with the canopy -- no hidden choice.
+    # Canopy switch: the surface scheme is the two-leaf canopy (the land
+    # default), and the big-leaf StomataConfig MIRRORS the same stomatal model
+    # so any big-leaf re-derivation agrees with the canopy -- no hidden choice.
     if stomatal_model not in _CANOPY_STOMATAL_MODELS:
         raise ValueError(f"unknown stomatal_model {stomatal_model!r}; "
                          f"expected one of {_CANOPY_STOMATAL_MODELS}")
-    if capacity_scheme not in _CANOPY_CAPACITY_SCHEMES:
-        raise ValueError(f"unknown capacity_scheme {capacity_scheme!r}; "
-                         f"expected one of {_CANOPY_CAPACITY_SCHEMES}")
-    if g1_source not in _CANOPY_G1_SOURCES:
-        raise ValueError(f"unknown g1_source {g1_source!r}; "
-                         f"expected one of {_CANOPY_G1_SOURCES}")
-    if g1_source == "p_model" and stomatal_model != "medlyn":
-        # The canopy validator tolerates this pair pending a P-hydro slope
-        # mapping; this spin-up path has no P-hydro, so the predicted Medlyn
-        # slope would be silently unused under any other stomatal model.
-        raise ValueError(
-            "g1_source='p_model' predicts a MEDLYN slope; the archetype "
-            f"spin-up has no P-hydro mapping for stomatal_model={stomatal_model!r}")
-    surface_scheme = TwoLeafCanopyConfig(
-        stomatal_model=stomatal_model, capacity_scheme=capacity_scheme,
-        g1_source=g1_source).validate()
-    stomata_cfg = StomataConfig(
-        enabled=True, stomata_model=stomatal_model,
-        capacity_scheme=capacity_scheme, g1_source=g1_source)
+    surface_scheme = TwoLeafCanopyConfig(stomatal_model=stomatal_model).validate()
+    stomata_cfg = StomataConfig(enabled=True, stomata_model=stomatal_model)
 
     pft_id = np.asarray(table.pft_id, int)
     # Bare ground is inert (no carbon) and must never be equilibrated; a bare
@@ -650,8 +628,6 @@ def equilibrate_archetypes(
     cold_deciduous_dormancy: bool = False,
     leaf_c_resorption_frac: float = 0.0,
     stomatal_model: str = "ball_berry",
-    capacity_scheme: str = "prescribed",
-    g1_source: str = "table",
     spinup_batch_fn=None,
     only_groups=None,
 ):
@@ -723,8 +699,7 @@ def equilibrate_archetypes(
         nsc_gated_respiration=nsc_gated_respiration,
         cold_deciduous_dormancy=cold_deciduous_dormancy,
         leaf_c_resorption_frac=leaf_c_resorption_frac,
-        stomatal_model=stomatal_model, capacity_scheme=capacity_scheme,
-        g1_source=g1_source)
+        stomatal_model=stomatal_model)
 
     # Archetype-ordered output accumulators (scattered per group via g_idx).
     pools_out = {p: np.zeros(n_arch) for p in pool_fields}

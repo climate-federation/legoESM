@@ -189,8 +189,7 @@ def test_load_or_equilibrate_forwards_every_physics_switch(tmp_path, monkeypatch
     the cache key and the npz provenance claimed otherwise)."""
     calls = {"n": 0}
     _patch_equilibrate(monkeypatch, calls)
-    switches = {"stomatal_model": "medlyn", "capacity_scheme": "p_model",
-                "g1_source": "p_model", "nsc_gated_respiration": True,
+    switches = {"stomatal_model": "medlyn", "nsc_gated_respiration": True,
                 "cold_deciduous_dormancy": True, "leaf_c_resorption_frac": 0.5}
     assert set(switches) == set(bgc.PHYSICS_PROVENANCE_KEYS)
     bgc._load_or_equilibrate(
@@ -352,8 +351,7 @@ def test_equilibrium_cache_key_deterministic_and_input_sensitive():
     # every spin-config field is in the key
     for f, v in [("n_spinup", 21), ("n_verify", 5), ("dt", 3600.0),
                  ("n_layers", 6), ("soil_depth", 2.0),
-                 ("stomatal_model", "medlyn"), ("capacity_scheme", "p_model"),
-                 ("g1_source", "p_model"), ("nsc_gated_respiration", True),
+                 ("stomatal_model", "medlyn"), ("nsc_gated_respiration", True),
                  ("cold_deciduous_dormancy", True),
                  ("leaf_c_resorption_frac", 0.5)]:
         assert bgc._equilibrium_cache_key(t, dict(_SPIN, **{f: v})) != k, f

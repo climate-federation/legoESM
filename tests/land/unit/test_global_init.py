@@ -462,8 +462,7 @@ def test_geometry_round_trips_through_archetypes_npz(tmp_path):
     qc = {k: np.zeros(n_arch)
           for k in ("gpp", "npp", "som_kgC", "biomass_kgC", "drift_frac_per_yr")}
     path = tmp_path / "archetypes.npz"
-    physics = {"stomatal_model": "medlyn", "capacity_scheme": "p_model",
-               "g1_source": "p_model", "nsc_gated_respiration": True,
+    physics = {"stomatal_model": "medlyn", "nsc_gated_respiration": True,
                "cold_deciduous_dormancy": False, "leaf_c_resorption_frac": 0.5}
     assert set(physics) == set(drv.PHYSICS_PROVENANCE_KEYS)
     drv._write_archetypes_npz(
@@ -832,41 +831,31 @@ def _one_archetype_table():
     )
 
 
-def test_iter_archetype_batches_canopy_switches_reach_config():
-    """The three canopy switches must land on BOTH the two-leaf surface scheme
-    and the mirrored big-leaf StomataConfig (the P-model gate reads both), and
-    the surface scheme must be the two-leaf canopy, not SimpleSEB."""
+def test_iter_archetype_batches_canopy_switch_reaches_config():
+    """The stomatal model must land on BOTH the two-leaf surface scheme and the
+    mirrored big-leaf StomataConfig, and the surface scheme must be the
+    two-leaf canopy, not SimpleSEB."""
     from legoesm.land.carbon.global_init import iter_archetype_batches
     from legoesm.land.surface_scheme import TwoLeafCanopyConfig
     (b,) = iter_archetype_batches(
         _one_archetype_table(), n_layers=6, soil_depth=2.0, dt=7200.0,
-        stomatal_model="medlyn", capacity_scheme="p_model", g1_source="p_model")
+        stomatal_model="medlyn")
     cc = b.config.surface_scheme
     assert isinstance(cc, TwoLeafCanopyConfig)
-    assert (cc.stomatal_model, cc.capacity_scheme, cc.g1_source) == (
-        "medlyn", "p_model", "p_model")
+    assert cc.stomatal_model == "medlyn"
     st = b.config.stomata
     assert st.enabled is True
-    assert (st.stomata_model, st.capacity_scheme, st.g1_source) == (
-        "medlyn", "p_model", "p_model")
-    # Defaults = the prescribed-table arm on the SAME scheme (one variable).
+    assert st.stomata_model == "medlyn"
     (a,) = iter_archetype_batches(
-        _one_archetype_table(), n_layers=6, soil_depth=2.0, dt=7200.0,
-        stomatal_model="medlyn")
-    assert (a.config.surface_scheme.capacity_scheme,
-            a.config.surface_scheme.g1_source) == ("prescribed", "table")
-    assert a.config.surface_scheme.stomatal_model == "medlyn"
+        _one_archetype_table(), n_layers=6, soil_depth=2.0, dt=7200.0)
+    assert a.config.surface_scheme.stomatal_model == "ball_berry"
 
 
 @pytest.mark.parametrize("bad", [
     dict(stomatal_model="jarvis"),
-    dict(capacity_scheme="pmodel"),
-    dict(g1_source="predicted"),
-    # g1_source=p_model predicts a Medlyn slope: the canopy validate() refuses
-    # it under ball_berry (dispatch must raise, never silently fall back).
-    dict(capacity_scheme="p_model", g1_source="p_model"),
+    dict(stomatal_model="leuning"),
 ])
-def test_iter_archetype_batches_rejects_unknown_or_inconsistent_switches(bad):
+def test_iter_archetype_batches_rejects_unknown_switches(bad):
     from legoesm.land.carbon.global_init import iter_archetype_batches
     with pytest.raises(ValueError):
         iter_archetype_batches(

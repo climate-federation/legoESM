@@ -61,8 +61,7 @@ echo "provenance: $WORKDIR @ $(git rev-parse --short HEAD 2>/dev/null || echo NO
 test -f "$SURF" || { echo "MISSING surfdata $SURF"; exit 2; }
 test -f "$CLIM" || { echo "MISSING Stage-1 climatology $CLIM (run build_land_forcing_climatology.sbatch first)"; exit 2; }
 
-# CIC_EXTRA_ARGS: extra builder flags (e.g. the canopy switches
-#   "--stomatal-model medlyn --capacity-scheme p_model --g1-source p_model").
+# CIC_EXTRA_ARGS: extra builder flags (e.g. "--stomatal-model medlyn").
 # clm5_surfdata preset -> native 1.9x2.5 grid (no cover regrid); the ERA5
 # climatology is conservatively regridded onto that grid by the driver.
 # Default --clim-*-var (tas/pr/rsds/netrad) match the Stage-1 output exactly.
