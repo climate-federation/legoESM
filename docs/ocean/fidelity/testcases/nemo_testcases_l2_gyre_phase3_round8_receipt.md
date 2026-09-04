@@ -1,12 +1,13 @@
-# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–15 boundary receipt
+# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–16 boundary receipt
 
-**Verdict: STOP / DEBT at Round 15's scalar-math eligibility gate.  The asked
-scalar-libm precision policy is implemented and verified against `libm.so.6`,
-but it does not make the GYRE two-band QSR increment or every analytic SBC
-field bit-exact against the rebuilt scalar-math NEMO oracle.  Per the user's
-explicit falsifier, the Round-13 source-rounding follow-up, slow-forcing walk,
-stage-3 transport, and ZDF matrix walk were not entered.  Round 14's stage-1
-barotropic slow-forcing handoff remains the last physical boundary.**
+**Verdict: DEBT.  Round 16 discriminated and fixed the scalar-math eligibility
+failure: the NEMO-literal two-band QSR increment and all five requested analytic
+SBC fields are now bit-exact against Oracle V2 under production JIT/CPU/fp64/
+scalar-libm.  The ordered slow-forcing walk then found its first non-bit-exact
+primitive at stage-1 `Krhs`, before the depth reduction.  A literal reduction
+arm removes only 16.18% of the downstream residual, so no compensating
+slow-forcing change landed.  The production-JIT sweep remains first-over-bar at
+kt=2 for T/S/u/v/SSH; stage-3 transport and ZDF were not entered.**
 
 Date: 2026-09-04
 
@@ -53,15 +54,27 @@ Round-15 scalar-libm implementation commit: `61180a677`
 
 Round-15 eligibility-gate commit: `ed62a96ce`
 
+Round-16 starting tip: `b9311e65de2`
+
+Round-16 preregistration commits: `1e4a8fe97`, `3dee9024a`
+
+Round-16 discriminator/implementation commits: `f3dc65745` through
+`7da8b5169`
+
+Round-16 attribution/ULP commits: `0ab248075`, `ae1a21357`
+
+Round-16 slow-forcing implementation tip: `ea6ac7f0a`
+
 ## Round-14 oracle-relative cross-card criterion
 
 The user made this an **ASKED decision on 2026-09-04**.  The one shared
 `--compare-to` implementation now records, for every scored row, the NEMO
 field, the candidate field, and `abs(candidate-NEMO)` in a compressed NPZ
-sidecar.  It compares cells, not row reductions.  At a cell, one local ulp is
-defined as `numpy.spacing(abs(float64(NEMO_value_at_cell)))`; thus an exact
-zero oracle has the smallest positive float64 spacing.  The gate fails if any
-cell's absolute residual grows by more than two such ulps, an AT-BAR row
+sidecar.  It compares cells, not row reductions.  One ulp for every cell in a
+row is the row-scale value
+`numpy.spacing(max(max(abs(float64(NEMO_row))), 1.0))`, the same floor used by
+the campaign normalization.  The gate fails if any cell's absolute residual
+grows by more than two such ulps, an AT-BAR row
 becomes DEBT, or `first_over_bar` moves earlier.  Movement toward NEMO is free.
 Movement against the previous legoESM output is retained in every
 `field_moves` row for Rule 8, but is no longer itself a failure criterion.
@@ -75,7 +88,7 @@ later round walks it.  It is never silently waived, reverted, or hidden behind
 a per-card switch.
 
 The three synthetic controls are behavioral and fail closed:
-`test_three_local_oracle_ulp_cell_worsening_fails`,
+`test_three_row_scale_oracle_ulp_cell_worsening_fails`,
 `test_one_cell_improvement_passes`, and
 `test_at_bar_to_debt_flip_fails_without_field_movement`; the explicit exit-
 contract test proves the 3-ulp and status plants return `1`, while the
@@ -89,91 +102,71 @@ no model routine.  The current reports stamp
 `165ada6d5073309532bee50ec54b426168143c24`, run production JIT on CPU with
 fp64/x64, and retain all eight residual NPZs and their SHA-256 values.
 
-The exact verdict lines are:
+Round 16 corrected the unfloored cell-local ulp used in the initial Round-14
+implementation.  Re-scoring the unchanged residual sidecars gives these exact
+verdicts:
 
 ```text
-ORACLE_RELATIVE_COMPARE FAIL: rows=9 max_worsening_ulps=4.2860344287450693e+301 first_over_bar='<absent>'->'<absent>' plant=None
-ORACLE_RELATIVE_COMPARE FAIL: rows=9 max_worsening_ulps=64 first_over_bar='<absent>'->'<absent>' plant=None
-ORACLE_RELATIVE_COMPARE FAIL: rows=50 max_worsening_ulps=1.252578717956996e+278 first_over_bar={'fields': ['T', 'u', 'ssh'], 'kt': 2}->{'kt': 2, 'fields': ['T', 'u']} plant=None
-ORACLE_RELATIVE_COMPARE FAIL: rows=50 max_worsening_ulps=2.9326237612518355e+250 first_over_bar={'fields': ['u'], 'kt': 4}->{'kt': 4, 'fields': ['u']} plant=None
+ORACLE_RELATIVE_COMPARE FAIL: rows=9 max_worsening_ulps=24.4375 first_over_bar='<absent>'->'<absent>' plant=None
+ORACLE_RELATIVE_COMPARE PASS: rows=9 max_worsening_ulps=0.0009765625 first_over_bar='<absent>'->'<absent>' plant=None
+ORACLE_RELATIVE_COMPARE FAIL: rows=50 max_worsening_ulps=513408.375 first_over_bar={'fields': ['T', 'u', 'ssh'], 'kt': 2}->{'kt': 2, 'fields': ['T', 'u']} plant=None
+ORACLE_RELATIVE_COMPARE FAIL: rows=50 max_worsening_ulps=3.0 first_over_bar={'fields': ['u'], 'kt': 4}->{'kt': 4, 'fields': ['u']} plant=None
 ```
 
 These are, respectively, OVERFLOW stage, LOCK_EXCHANGE stage, OVERFLOW
-trajectory, and LOCK_EXCHANGE trajectory.  No AT-BAR row crosses to DEBT and
-neither `first_over_bar` moves earlier; OVERFLOW instead drops SSH from its
-kt=2 first-over set.  The failures are individual worsened cells hidden by
-the earlier maximum-residual comparisons.  Huge local-ulp counts occur where
-the NEMO value is zero or subnormal; they are a direct consequence of the
-asked cell-local definition, not a rescaled reduction.
+trajectory, and LOCK_EXCHANGE trajectory.  The initially reported four FAIL
+verdicts do **not** all survive the requested row-scale formula: LOCK stage is
+PASS because its largest absolute worsening, `2.168404344971009e-19`, is only
+`0.0009765625` row ulp.  This is a correction, not a waiver.  No AT-BAR row
+crosses to DEBT and neither `first_over_bar` moves earlier; OVERFLOW instead
+drops SSH from its kt=2 first-over set.
 
 ### Cross-card Rule-8 and compensating-error rows
 
-The four comparisons contain 83 rows whose legoESM field changed: OVERFLOW
-stage 9, LOCK stage 8, OVERFLOW trajectory 35, and LOCK trajectory 31.  The
-complete prior-output movement, including improved-only rows, is persisted in
-the four hashed comparison JSONs.  Below are all 52 rows with at least one
-cell that worsens by more than two local oracle ulps.  “Before/after” is the
-row's maximum normalized residual against NEMO; “prior-output move” is the
-maximum absolute change between the two legoESM fields.  This is the full
-Rule-8 adverse-row enumeration, not a reduction-only verdict.
+The four comparisons still contain 83 rows whose legoESM field changed.  The
+complete prior-output movement, including improved-only rows, remains in the
+four hashed comparison JSONs.  With the corrected row-scale definition, 32
+rows have at least one cell whose NEMO residual worsens by more than two ulps.
+This is the complete Rule-8/Rule-12 adverse-row enumeration.
 
-| row | before residual | after residual | prior-output move | max worsening (local ulp) | worsened / improved cells |
-|---|---:|---:|---:|---:|---:|
-| `OVERFLOW-zps.kt1.stage1.faithful.baroclinic_u` | `1.8041124150158794e-15` | `6.9388939039072284e-18` | `1.8041124150158794e-15` | `4.2860344e301` | 126 / 25 |
-| `OVERFLOW-zps.kt1.stage2.faithful.baroclinic_u` | `1.5711251744043864e-12` | `1.5711182355104825e-12` | `2.7751238806938971e-15` | `1.9657523e8` | 26 / 176 |
-| `OVERFLOW-zps.kt1.stage2.faithful.instantaneous_u` | `1.5663442765045943e-12` | `1.5711182355104825e-12` | `4.9855952699573436e-15` | `11144` | 44 / 158 |
-| `OVERFLOW-zps.kt1.stage3.faithful.baroclinic_u` | `7.0690120423932967e-12` | `7.0691924536347983e-12` | `5.3371613769129245e-15` | `1.2553756e278` | 73 / 180 |
-| `OVERFLOW-zps.kt1.stage3.faithful.instantaneous_u` | `7.0642380833874086e-12` | `7.0692063314226061e-12` | `5.4262150328554526e-15` | `1.2525787e278` | 88 / 165 |
-| `OVERFLOW-zps.kt2.faithful.baroclinic_u` | `7.0690120423932967e-12` | `7.0691924536347983e-12` | `5.3371613769129245e-15` | `1.2553756e278` | 73 / 180 |
-| `OVERFLOW-zps.kt2.faithful.instantaneous_u` | `7.0642380833874086e-12` | `7.0692063314226061e-12` | `5.4262150328554526e-15` | `1.2525787e278` | 88 / 165 |
-| `LOCK_EXCHANGE-zco.kt1.stage1.faithful.baroclinic_u` | `6.3967928176644762e-18` | `4.3368086899420177e-19` | `6.7220534694101275e-18` | `64` | 1 / 18 |
-| `OVERFLOW-zps.kt2.before.u` | `7.0642380833874086e-12` | `7.0692063314226061e-12` | `5.4262150328554526e-15` | `1.2525787e278` | 88 / 165 |
-| `OVERFLOW-zps.kt3.before.ssh` | `1.5094609590038388e-13` | `1.4924173008523667e-13` | `2.9309887850104133e-14` | `61` | 1 / 16 |
-| `OVERFLOW-zps.kt3.before.u` | `4.1814441492649124e-9` | `4.1814448813182192e-9` | `1.8868478827982482e-14` | `1.4760934e253` | 123 / 363 |
-| `OVERFLOW-zps.kt4.before.T` | `4.110800588819074e-11` | `4.1108272341716646e-11` | `7.1054273576010019e-15` | `3` | 21 / 48 |
-| `OVERFLOW-zps.kt4.before.ssh` | `2.8970131155103829e-10` | `2.8970011112239291e-10` | `2.8532731732866523e-14` | `2.8995086e240` | 6 / 20 |
-| `OVERFLOW-zps.kt4.before.u` | `2.3323162998134528e-8` | `2.3323169319466874e-8` | `1.405629085349247e-13` | `5.8195874e238` | 168 / 639 |
-| `OVERFLOW-zps.kt5.before.T` | `1.1836380764407291e-10` | `1.1836380764407291e-10` | `1.4210854715202004e-14` | `5` | 122 / 71 |
-| `OVERFLOW-zps.kt5.before.ssh` | `1.1794364568329385e-8` | `1.1794364623840536e-8` | `3.1488700535931002e-14` | `1.1032495e235` | 10 / 27 |
-| `OVERFLOW-zps.kt5.before.u` | `4.6243873862150675e-8` | `4.6243887726060695e-8` | `2.5911547213430808e-12` | `2.2143258e233` | 306 / 792 |
-| `OVERFLOW-zps.kt6.before.T` | `2.3705934992790382e-10` | `2.3705917229221987e-10` | `2.8421709430404007e-14` | `8` | 145 / 51 |
-| `OVERFLOW-zps.kt6.before.ssh` | `1.0532438149413181e-7` | `1.0532434394083801e-7` | `3.755329380794592e-14` | `1.3541374e9` | 7 / 36 |
-| `OVERFLOW-zps.kt6.before.u` | `3.1842418704922104e-7` | `3.1843605377210316e-7` | `1.1866722882114544e-11` | `1.625596e12` | 252 / 1141 |
-| `OVERFLOW-zps.kt7.before.T` | `3.7253355955613167e-10` | `3.7253382600965757e-10` | `4.9737991503207013e-14` | `19` | 146 / 79 |
-| `OVERFLOW-zps.kt7.before.ssh` | `3.896382488877137e-7` | `3.8963810283787481e-7` | `1.4604983888943934e-13` | `9.7863958e9` | 13 / 34 |
-| `OVERFLOW-zps.kt7.before.u` | `1.2626023464037961e-6` | `1.2626311811717028e-6` | `2.8834767906715797e-11` | `1.194332e11` | 336 / 1398 |
-| `OVERFLOW-zps.kt8.before.T` | `5.4841393648530332e-10` | `5.4841313712472557e-10` | `8.8817841970012523e-14` | `36` | 215 / 157 |
-| `OVERFLOW-zps.kt8.before.ssh` | `7.518272159279249e-7` | `7.5182693237696441e-7` | `2.8355096048926498e-13` | `1.0354969e11` | 15 / 36 |
-| `OVERFLOW-zps.kt8.before.u` | `2.837811956979408e-6` | `2.8378625590505524e-6` | `5.0602071144378868e-11` | `1.1785129e160` | 564 / 1547 |
-| `OVERFLOW-zps.kt9.before.T` | `9.6323580223156515e-10` | `9.6323633513861705e-10` | `1.2789769243681803e-13` | `61` | 311 / 216 |
-| `OVERFLOW-zps.kt9.before.ssh` | `8.2611369578433624e-7` | `8.2611334123461333e-7` | `3.7431169275237153e-13` | `1.1182112e11` | 23 / 32 |
-| `OVERFLOW-zps.kt9.before.u` | `4.344013583547357e-6` | `4.3440913892744959e-6` | `7.7805727138891001e-11` | `7.3597378e11` | 777 / 1726 |
-| `OVERFLOW-zps.kt10.before.S` | `8.1204884086868561e-16` | `8.1204884086868561e-16` | `2.1316282072803006e-14` | `3` | 292 / 85 |
-| `OVERFLOW-zps.kt10.before.T` | `1.5225941396579389e-9` | `1.5225922744832577e-9` | `1.2434497875801753e-13` | `66` | 370 / 192 |
-| `OVERFLOW-zps.kt10.before.ssh` | `6.2650166018918263e-7` | `6.2650183441093077e-7` | `4.4175774149834979e-13` | `9.9681195e10` | 25 / 34 |
-| `OVERFLOW-zps.kt10.before.u` | `5.4225817119127329e-6` | `5.4226957114725249e-6` | `1.1399955979207732e-10` | `1.0341617e12` | 952 / 1948 |
-| `LOCK_EXCHANGE-zco.kt3.before.u` | `4.4235448637408581e-17` | `1.3010426069826053e-18` | `4.4235448637408581e-17` | `5.1747599e9` | 44 / 176 |
-| `LOCK_EXCHANGE-zco.kt4.before.ssh` | `2.574980159653073e-18` | `2.7105054312137611e-20` | `2.5478751053409354e-18` | `2.9326238e250` | 3 / 9 |
-| `LOCK_EXCHANGE-zco.kt4.before.u` | `2.5762043763717397e-14` | `2.5789380058024135e-14` | `5.3559587320783919e-17` | `3.1123463e13` | 91 / 169 |
-| `LOCK_EXCHANGE-zco.kt5.before.ssh` | `4.391018798566293e-18` | `5.4210108624275222e-20` | `4.391018798566293e-18` | `1.5603266e26` | 3 / 12 |
-| `LOCK_EXCHANGE-zco.kt5.before.u` | `1.4695977589148854e-13` | `1.4690369892224851e-13` | `1.2835734954313837e-16` | `1.3478823e26` | 108 / 212 |
-| `LOCK_EXCHANGE-zco.kt6.before.ssh` | `6.7220534694101275e-18` | `1.0842021724855044e-19` | `6.613633252161577e-18` | `1.5364607e26` | 3 / 14 |
-| `LOCK_EXCHANGE-zco.kt6.before.u` | `5.1003294740826349e-13` | `5.099759963010219e-13` | `1.5789647379758064e-16` | `1.3272658e26` | 107 / 253 |
-| `LOCK_EXCHANGE-zco.kt7.before.ssh` | `9.7578195523695399e-18` | `1.0842021724855044e-19` | `9.6493993351209895e-18` | `1.5129598e26` | 5 / 14 |
-| `LOCK_EXCHANGE-zco.kt7.before.u` | `1.3628027132890456e-12` | `1.3626691734627133e-12` | `2.7714368124489482e-16` | `1.3069646e26` | 102 / 298 |
-| `LOCK_EXCHANGE-zco.kt8.before.S` | `2.0301221021717145e-16` | `6.0903663065151435e-16` | `2.1316282072803006e-14` | `3` | 80 / 20 |
-| `LOCK_EXCHANGE-zco.kt8.before.T` | `3.5527136788005005e-15` | `3.5527136788005005e-15` | `1.0658141036401503e-14` | `3` | 19 / 7 |
-| `LOCK_EXCHANGE-zco.kt8.before.ssh` | `1.3444106938820255e-17` | `4.3368086899420177e-19` | `1.3010426069826053e-17` | `1.4898184e26` | 5 / 16 |
-| `LOCK_EXCHANGE-zco.kt8.before.u` | `3.0794721766623685e-12` | `3.0792796291327987e-12` | `3.9441062161447949e-16` | `1.286974e26` | 135 / 305 |
-| `LOCK_EXCHANGE-zco.kt9.before.S` | `0` | `6.0903663065151435e-16` | `2.1316282072803006e-14` | `3` | 100 / 0 |
-| `LOCK_EXCHANGE-zco.kt9.before.ssh` | `1.6913553890773869e-17` | `1.3552527156068805e-17` | `1.9081958235744878e-17` | `1.4670309e26` | 8 / 15 |
-| `LOCK_EXCHANGE-zco.kt9.before.u` | `6.1840288342581221e-12` | `6.1836913356743545e-12` | `6.1526098949322104e-16` | `3.2138761e60` | 204 / 296 |
-| `LOCK_EXCHANGE-zco.kt10.before.S` | `2.0301221021717145e-16` | `6.0903663065151435e-16` | `2.1316282072803006e-14` | `3` | 100 / 0 |
-| `LOCK_EXCHANGE-zco.kt10.before.ssh` | `2.2334564753201391e-17` | `3.2873348682939396e-17` | `3.8899141069706489e-17` | `1.2855504e59` | 10 / 16 |
-| `LOCK_EXCHANGE-zco.kt10.before.u` | `1.1371946109393558e-11` | `1.1371472936460431e-11` | `8.5603743687920559e-16` | `1.7351842e57` | 232 / 308 |
+| row | max worsening (absolute) | row ulp | max worsening (row ulp) | worsened / improved cells |
+|---|---:|---:|---:|---:|
+| `LOCK_EXCHANGE-zco.kt10.before.S` | `2.1316282072803006e-14` | `7.105427357601002e-15` | `3` | 100 / 0 |
+| `LOCK_EXCHANGE-zco.kt8.before.S` | `2.1316282072803006e-14` | `7.105427357601002e-15` | `3` | 80 / 20 |
+| `LOCK_EXCHANGE-zco.kt8.before.T` | `1.0658141036401503e-14` | `3.552713678800501e-15` | `3` | 19 / 7 |
+| `LOCK_EXCHANGE-zco.kt9.before.S` | `2.1316282072803006e-14` | `7.105427357601002e-15` | `3` | 100 / 0 |
+| `OVERFLOW-zps.kt1.stage2.faithful.instantaneous_u` | `4.829470157119431e-15` | `2.220446049250313e-16` | `21.75` | 44 / 158 |
+| `OVERFLOW-zps.kt1.stage3.faithful.baroclinic_u` | `1.8218933306446417e-15` | `2.220446049250313e-16` | `8.205078125` | 73 / 180 |
+| `OVERFLOW-zps.kt1.stage3.faithful.instantaneous_u` | `5.426215032855453e-15` | `2.220446049250313e-16` | `24.4375` | 88 / 165 |
+| `OVERFLOW-zps.kt2.faithful.baroclinic_u` | `1.8218933306446417e-15` | `2.220446049250313e-16` | `8.205078125` | 73 / 180 |
+| `OVERFLOW-zps.kt2.faithful.instantaneous_u` | `5.426215032855453e-15` | `2.220446049250313e-16` | `24.4375` | 88 / 165 |
+| `OVERFLOW-zps.kt10.before.S` | `2.1316282072803006e-14` | `7.105427357601002e-15` | `3` | 292 / 85 |
+| `OVERFLOW-zps.kt10.before.T` | `1.2434497875801753e-13` | `3.552713678800501e-15` | `35` | 370 / 192 |
+| `OVERFLOW-zps.kt10.before.ssh` | `4.417577414983498e-13` | `2.220446049250313e-16` | `1989.5` | 25 / 34 |
+| `OVERFLOW-zps.kt10.before.u` | `1.1399955979207732e-10` | `2.220446049250313e-16` | `513408.375` | 952 / 1948 |
+| `OVERFLOW-zps.kt2.before.u` | `5.426215032855453e-15` | `2.220446049250313e-16` | `24.4375` | 88 / 165 |
+| `OVERFLOW-zps.kt3.before.u` | `1.4510094514808003e-14` | `2.220446049250313e-16` | `65.34765625` | 123 / 363 |
+| `OVERFLOW-zps.kt4.before.ssh` | `2.853273173286652e-14` | `2.220446049250313e-16` | `128.5` | 6 / 20 |
+| `OVERFLOW-zps.kt4.before.u` | `1.405629085349247e-13` | `2.220446049250313e-16` | `633.0390625` | 168 / 639 |
+| `OVERFLOW-zps.kt5.before.T` | `1.0658141036401503e-14` | `3.552713678800501e-15` | `3` | 122 / 71 |
+| `OVERFLOW-zps.kt5.before.ssh` | `2.758904216193514e-14` | `2.220446049250313e-16` | `124.25` | 10 / 27 |
+| `OVERFLOW-zps.kt5.before.u` | `2.591154721343081e-12` | `2.220446049250313e-16` | `11669.5234375` | 306 / 792 |
+| `OVERFLOW-zps.kt6.before.T` | `2.842170943040401e-14` | `3.552713678800501e-15` | `8` | 145 / 51 |
+| `OVERFLOW-zps.kt6.before.ssh` | `2.425837308805967e-14` | `2.220446049250313e-16` | `109.25` | 7 / 36 |
+| `OVERFLOW-zps.kt6.before.u` | `1.1866722882114544e-11` | `2.220446049250313e-16` | `53442.96875` | 252 / 1141 |
+| `OVERFLOW-zps.kt7.before.T` | `3.552713678800501e-14` | `3.552713678800501e-15` | `10` | 146 / 79 |
+| `OVERFLOW-zps.kt7.before.ssh` | `1.2112533198660458e-13` | `2.220446049250313e-16` | `545.5` | 13 / 34 |
+| `OVERFLOW-zps.kt7.before.u` | `2.8834767906715797e-11` | `2.220446049250313e-16` | `129860.25` | 336 / 1398 |
+| `OVERFLOW-zps.kt8.before.T` | `6.394884621840902e-14` | `3.552713678800501e-15` | `18` | 215 / 157 |
+| `OVERFLOW-zps.kt8.before.ssh` | `2.7161606297454455e-13` | `2.220446049250313e-16` | `1223.25` | 15 / 36 |
+| `OVERFLOW-zps.kt8.before.u` | `5.060207114437887e-11` | `2.220446049250313e-16` | `227891.46875` | 564 / 1547 |
+| `OVERFLOW-zps.kt9.before.T` | `1.0835776720341528e-13` | `3.552713678800501e-15` | `30.5` | 311 / 216 |
+| `OVERFLOW-zps.kt9.before.ssh` | `3.743116927523715e-13` | `2.220446049250313e-16` | `1685.75` | 23 / 32 |
+| `OVERFLOW-zps.kt9.before.u` | `7.7805727138891e-11` | `2.220446049250313e-16` | `350405.84375` | 777 / 1726 |
 
 The DINO developed-state single-step HPG consumer exists and ran in 21 s,
-well below the 20-minute limit.  At the exact halo alignment both U
+well below the 20-minute limit.  It is a **consistency probe, not a match**.
+At the exact halo alignment both U
 (`n=335145`) and V (`n=340271`) report correlation `1.000000000` and
 `rms(lego)/rms(NEMO)=1.000000000`; its transcript is retained and hashed.
 
@@ -938,7 +931,7 @@ was upgraded merely because its documentation omitted a regime stamp.
 | 3-ulp-worse / improve / AT-BAR-to-DEBT controls | ASKED round 14 | behavioral exit contracts pass: FAIL / PASS / FAIL |
 | compensating-error clause in gate and oracle-fidelity skill | ASKED round 14 | landed as Rule 12; no per-card waiver or switch |
 | OVERFLOW and LOCK stage plus kt=1…10 cellwise comparisons | ASKED round 14 | all four run; FAIL on exposed cells, no downward status crossing or earlier first-over |
-| DINO developed-state single-step HPG third consumer | ASKED if under 20 minutes | RUN in 21 s wall, far below 20 minutes; U/V corr and ratio both 1.000000000 |
+| DINO developed-state single-step HPG third consumer | ASKED if under 20 minutes | CONSISTENCY PROBE, not a match; RUN in 21 s wall, U/V corr and ratio both 1.000000000 |
 | hermetic five-sample `prd` hex test | ASKED round-12 follow-up | landed and passes without `/data`; pins production-JIT XLA bits |
 | optimized-HLO EOS docstring correction | ASKED round-12 follow-up | corrected: barriers disappear, finite/select identity survives |
 | barrier-only recurrence debt census | ASKED round-12 follow-up | six requested shared surfaces listed PLAUSIBLE; no recurrence changed |
@@ -1041,11 +1034,13 @@ the SBC-instrumented V2 is separately retained with suffix `_sbc`.  V1 is
 flagged non-certifying rather than deleted.
 
 The preregistration correctly predicted that `kt=1` entry, EOS/HPG, and
-constant ENE coefficients need no changed transcendental.  It incorrectly
-predicted that other pre-QSR records and the analytic qsr field would remain
-identical.  Disabling tree vectorization changes ordinary loops and reductions
-as well as math dispatch: only 5 of 46 records are byte-identical.  This is a
-compiler-wide V2 change, so none of the 41 moves is attributed solely to libm.
+constant ENE coefficients need no changed transcendental.  Round 16 retracts
+the inference that disabling tree vectorization changed ordinary loops and
+reductions.  The committed source-ancestry discriminator assigns every one of
+the 41 DIFFERENT records to an executed per-step transcendental ancestor and
+finds zero unattributed records.  The five pre-forcing/source-invariant controls
+(`ENE coefficients`, `rhs`, both HPG records, and `kt=1` step entry) are
+byte-identical.  The change is therefore not described as compiler-wide.
 The briefing also suspected the `zdftke` EXP selected by `nn_etau=1`; the
 resolved GYRE namelist actually has `nn_etau=0`
 (`EXP00/namelist_cfg:220`, `output.namelist.dyn:311`), so that arm is dead.
@@ -1100,6 +1095,19 @@ The committed byte census names the first changed source-stream payload:
 | `oracle_transport_kt00000001_s2.bin` | DIFFERENT | `zFu` |
 | `oracle_transport_kt00000001_s3.bin` | DIFFERENT | `zFu` |
 | `oracle_zdf_entry_kt00000001.bin` | DIFFERENT | `avm` |
+
+The exhaustive ancestry register partitions those 41 table rows as follows.
+The 27 `usrdef_sbc`-only rows are both advmean/drag records, all ten
+`oracle_bt_frames`, the barotropic-substep record, stage-1 transport operands,
+stage-2 ENE/EOS/general/preupdate/terms records, stage-3 WZV, both tracer
+operand records, all four transport records, and the ZDF-entry record.  Their
+first transcendental ancestor is seasonal SIN/COS, through stress to slow
+forcing/external mode (or, for ZDF, through stress magnitude to TKE).  The one
+QSR record has `usrdef_sbc` COS and `traqsr` 2BD EXP as ancestors.  The other
+13 are tracer-stage3, all three stage records, and step-entry records kt=2…10;
+their ancestors are seasonal SBC SIN/COS plus 2BD EXP through the propagated
+tracer state.  Thus each DIFFERENT row above has a named ancestor; none lacks
+one.  The discriminator's unregistered-record plant exits `1`.
 
 The census plant changes one payload byte and exits `1`.  The legacy
 momentum-side zFw record is written before vector-invariant `tra_adv_trp`
