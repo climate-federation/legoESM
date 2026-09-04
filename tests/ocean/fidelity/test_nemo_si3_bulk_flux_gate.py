@@ -91,6 +91,19 @@ def test_unregistered_stack_runs_science_gate_with_bit_claim_withheld(monkeypatc
     assert result["normalized_verdict"] == "AT-BAR"
     assert result["bit_verdict"] == "WITHHELD_RUNTIME"
     assert result["numeric_runtime"]["observed"] == bad
+    assert result["nemo_order_numpy_probe"]["bit_identity_status"] == (
+        "WITHHELD_RUNTIME"
+    )
+    assert result["nemo_order_numpy_probe"]["nemo_order_numpy"][
+        "bit_identical"
+    ] is None
+    assert "withheld" in result["scalar_glibc_owner_probe"][
+        "interpretation"
+    ].lower()
+    assert all(
+        group["status"] == "WITHHELD_RUNTIME"
+        for group in result["bit_owner_groups"].values()
+    )
     with pytest.raises(gate.GateError, match="unregistered numeric runtime"):
         gate.evaluate(require_bit_identity=True)
 
@@ -187,8 +200,11 @@ def test_full_year_gate_and_all_plants() -> None:
     assert result["oracle_version"] == "V2_SCALAR_MATH"
     assert result["numeric_runtime"]["bit_identity_claim_valid"] is True
     assert result["bit_comparisons"] == result["comparisons"]
+    assert result["comparisons"] == 271_560
     assert result["non_bit_identical_rows"] > 0
     assert result["non_bit_identical_rows"] == 18
+    assert result["friction_association_probe"]["bit_identical"] is True
+    assert result["friction_association_probe"]["inputs"]["mask"] == 0.25
     assert set(result["bit_owner_groups"]) == {"jax_exp_ice_alb"}
     assert all("max_relative_error_nonzero_oracle" in row for row in result["rows"])
     assert all("row_scale_ulp" in row for row in result["rows"])
@@ -220,6 +236,7 @@ def test_full_year_gate_and_all_plants() -> None:
         "runtime",
         "source_round",
         "folded_constant",
+        "friction_association",
     ):
         with pytest.raises(gate.GateError):
             gate.evaluate(plant=plant)

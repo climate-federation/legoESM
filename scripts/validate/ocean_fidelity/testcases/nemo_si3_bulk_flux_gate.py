@@ -133,7 +133,7 @@ BIT_OWNER = {
     )
     for stage, names in (
         (0, ("wndm_ice", "utau_ice", "vtau_ice")),
-        (1, STAGE1_NAMES[25:45]),
+        (1, STAGE1_NAMES[25:]),
         (2, ("qsb_ice_bot", "fhld", "qlead")),
     )
     for name in names
@@ -360,12 +360,56 @@ def _numpy_emp_ice_order_probe(
         "oracle": {"value": float(oracle), "binary64_hex": bits(oracle)},
         "unrounded_legoesm": {
             "value": float(unrounded), "binary64_hex": bits(unrounded),
-            "bit_identical": False,
+            "bit_identical": False if enforce else None,
         },
         "nemo_order_numpy": {
             "value": float(replay), "binary64_hex": bits(replay),
-            "bit_identical": True,
+            "bit_identical": True if enforce else None,
         },
+        "bit_identity_status": "VALID" if enforce else "WITHHELD_RUNTIME",
+    }
+
+
+def _friction_association_probe(flux_other, *, plant: bool = False) -> dict[str, object]:
+    """Non-vacuous replay of icesbc.F90:328-340 with a non-unit mask."""
+    kwargs = dict(
+        ice_fraction=np.float64(0.8), ice_fraction_before=np.float64(0.8),
+        ice_volume=np.float64(1.0), u_ice=np.float64(1.25),
+        u_ice_west=np.float64(0.5), v_ice=np.float64(2.0),
+        v_ice_south=np.float64(-1.0), u_ocean=np.float64(0.25),
+        u_ocean_west=np.float64(-0.5), v_ocean=np.float64(1.0),
+        v_ocean_south=np.float64(-2.0), drag_io=np.float64(0.005),
+        frq=np.float64(0.1), qsr_ocean=np.float64(10.0),
+        qns_ocean=np.float64(-2.0), qemp_ocean=np.float64(0.1),
+        ocean_layer_thickness=np.float64(1.0), sst_celsius=np.float64(-1.5),
+        T_bottom=np.float64(271.5), dt=np.float64(3600.0),
+        inverse_dt=np.float64(1.0 / 3600.0), rho_ocean=np.float64(1026.0),
+        c_ocean=np.float64(3991.86795711963), T0=np.float64(273.15),
+        ice_epsilon=np.float64(1.0e-10), max_ice_fraction=np.float64(0.999),
+        mask=np.float64(0.25),
+    )
+    faithful = np.float64(flux_other(**kwargs, _source_round=not plant)["friction"])
+    du = np.float64(kwargs["u_ice"] - kwargs["u_ocean"])
+    du_west = np.float64(kwargs["u_ice_west"] - kwargs["u_ocean_west"])
+    dv = np.float64(kwargs["v_ice"] - kwargs["v_ocean"])
+    dv_south = np.float64(kwargs["v_ice_south"] - kwargs["v_ocean_south"])
+    u_squares = np.float64(np.float64(du * du) + np.float64(du_west * du_west))
+    v_squares = np.float64(np.float64(dv * dv) + np.float64(dv_south * dv_south))
+    velocity_squares = np.float64(u_squares + v_squares)
+    half_velocity_squares = np.float64(np.float64(0.5) * velocity_squares)
+    expected = np.float64(
+        np.float64(kwargs["drag_io"] * half_velocity_squares) * kwargs["mask"]
+    )
+    expected_bits = int(expected.view(np.uint64))
+    actual_bits = int(faithful.view(np.uint64))
+    require(actual_bits == expected_bits, "planted friction association/mask drift")
+    return {
+        "source": "icesbc.F90:328-340",
+        "inputs": {"nonzero_velocity_differences": True, "mask": 0.25},
+        "value": float(faithful),
+        "ieee754_hex": f"{actual_bits:016x}",
+        "nemo_order_ieee754_hex": f"{expected_bits:016x}",
+        "bit_identical": True,
     }
 
 
@@ -538,6 +582,10 @@ def evaluate(
     set_policy(PrecisionPolicy.fp64())
     require(jax.config.read("jax_enable_x64"), "JAX x64 disabled")
     require(jax.default_backend() == "cpu", "bulk gate is CPU-only")
+    friction_probe = _friction_association_probe(
+        _nemo_si3_ice_flx_other,
+        plant=plant == "friction_association",
+    )
     bulk_path = root / "oracle_si3_bulk_operands.bin"
     exchange_path = root / "oracle_si3_exchange_frames.bin"
     require(sha256(bulk_path) == EXPECTED_BULK_SHA256, "bulk stream hash drift")
@@ -584,7 +632,7 @@ def evaluate(
         ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
         bulk_config=bulk_config,
     )
-    for name in STAGE1_NAMES[25:45]:
+    for name in STAGE1_NAMES[25:]:
         predictions[(1, name)] = flux2[name]
         oracle[(1, name)] = s1[name]
     other = _nemo_si3_ice_flx_other(
@@ -600,6 +648,7 @@ def evaluate(
         inverse_dt=s2["inverse_dt"],
         rho_ocean=s2["rho_ocean"], c_ocean=s2["c_ocean"], T0=s2["T0"],
         ice_epsilon=s2["ice_epsilon"], max_ice_fraction=s2["max_ice_fraction"],
+        mask=s2["mask"],
     )
     for name in ("qsb_ice_bot", "fhld", "qlead"):
         predictions[(2, name)] = other[name]
@@ -641,13 +690,14 @@ def evaluate(
         sst_celsius=s2["sst_celsius"], T_bottom=s2["T_bottom"], dt=s2["dt"],
         inverse_dt=s2["inverse_dt"], rho_ocean=s2["rho_ocean"],
         c_ocean=s2["c_ocean"], T0=s2["T0"], ice_epsilon=s2["ice_epsilon"],
-        max_ice_fraction=s2["max_ice_fraction"], _source_round=False,
+        max_ice_fraction=s2["max_ice_fraction"], mask=s2["mask"],
+        _source_round=False,
     )
     unrounded_predictions = {
         (0, "wndm_ice"): unrounded_raw[2],
         (0, "utau_ice"): unrounded_raw[0],
         (0, "vtau_ice"): unrounded_raw[1],
-        **{(1, name): unrounded_flux2[name] for name in STAGE1_NAMES[25:45]},
+        **{(1, name): unrounded_flux2[name] for name in STAGE1_NAMES[25:]},
         **{(2, name): unrounded_other[name]
            for name in ("qsb_ice_bot", "fhld", "qlead")},
     }
@@ -732,6 +782,8 @@ def evaluate(
         predictions = unrounded_predictions
     elif plant == "folded_constant":
         pass
+    elif plant == "friction_association":
+        pass
     elif plant is not None:
         raise GateError(f"unknown plant {plant}")
 
@@ -750,6 +802,9 @@ def evaluate(
             f"scalar-glibc albedo replay drift: {scalar_rows}",
         )
     bit_groups = _bit_owner_groups(rows, plant=plant == "bit_owner")
+    if not bit_claim_valid:
+        for group in bit_groups.values():
+            group["status"] = "WITHHELD_RUNTIME"
     exchange_rows = [
         _score(value, exchange[name], "EXCHANGE_END_STABLE", name)
         for name, value in exchange_links.items()
@@ -789,10 +844,13 @@ def evaluate(
                 "The scalar-libm replay is bit-identical for the three exp-owned "
                 "outputs; the corresponding JAX differences await the shared "
                 "library-exact exp precision policy."
+                if bit_claim_valid
+                else "Bit-identity interpretation withheld under this runtime."
             ),
         },
         "nemo_order_numpy_probe": order_probe,
         "compiler_folded_constants": folded_constants,
+        "friction_association_probe": friction_probe,
         "largest_row": largest,
         "dtypes": {"numpy": str(stages[0].dtype), "jax_x64": True, "backend": "cpu"},
         "streams": {
@@ -832,7 +890,10 @@ def evaluate(
                     for (stage, name), count in unrounded_counts.items()
                 },
                 "non_bit_rows": sum(unrounded_counts.values()),
-                "status": "CONFIRMED one-variable private arm",
+                "status": (
+                    "CONFIRMED one-variable private arm"
+                    if bit_claim_valid else "WITHHELD_RUNTIME"
+                ),
             },
         },
     }
@@ -852,6 +913,7 @@ def main() -> int:
         "runtime",
         "source_round",
         "folded_constant",
+        "friction_association",
     ))
     args = parser.parse_args()
     result = evaluate(

@@ -822,6 +822,11 @@ def _nemo_si3_blk_ice_2(
         "qprec_ice": qprecip_ice,
         "qevap_ice": jnp.zeros_like(T_surface),
         "qtr_ice_top": qtr_ice_top,
+        "qsat_ice": q_sat,
+        "theta_ice": theta_surface,
+        "qlw_ice": q_lw,
+        "qsb_ice": sensible,
+        "dqlw_ice": dq_lw,
     }
 
 
@@ -853,6 +858,7 @@ def _nemo_si3_ice_flx_other(
     T0,
     ice_epsilon,
     max_ice_fraction,
+    mask,
     _source_round: bool = True,
 ):
     """Active C1D ``ice_flx_other`` branch, ``icesbc.F90:322-437``.
@@ -872,10 +878,14 @@ def _nemo_si3_ice_flx_other(
     v_square_sum = source_round(
         source_round(dv * dv) + source_round(dv_south * dv_south)
     )
-    friction = source_round(
-        source_round(drag_io * 0.5)
-        * source_round(u_square_sum + v_square_sum)
-    )
+    if _source_round:
+        velocity_square_sum = source_round(u_square_sum + v_square_sum)
+        half_velocity_square = source_round(0.5 * velocity_square_sum)
+        friction = source_round(
+            source_round(drag_io * half_velocity_square) * mask
+        )
+    else:  # private Round-10 literal-association/mask ablation
+        friction = (drag_io * 0.5) * (u_square_sum + v_square_sum)
     u_sum = source_round(u_ice_west + u_ice)
     v_sum = source_round(v_ice_south + v_ice)
     ice_speed = source_round(
@@ -959,7 +969,12 @@ def _nemo_si3_ice_flx_other(
         & (ice_volume >= constants.ice_growth_thickness_stop_nemo)
     )
     qlead = jnp.where(landfast_stop | full_cover_stop, 0.0, qlead)
-    return {"qsb_ice_bot": qsb, "fhld": fhld, "qlead": qlead}
+    return {
+        "friction": friction,
+        "qsb_ice_bot": qsb,
+        "fhld": fhld,
+        "qlead": qlead,
+    }
 
 def _bulk_flux_dispatch(
     T_ice: jnp.ndarray,
