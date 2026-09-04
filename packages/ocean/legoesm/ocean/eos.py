@@ -2986,12 +2986,23 @@ def nemo_eos_fzp(S_psu, depth_m=None):
     ``T_f(S, z) = S · P(√(S/S0)) − 7.53e-4 · z`` with the eosbn2.F90
     polynomial ``P``; ``depth_m`` positive down (``None`` = surface).
     """
-    zs = jnp.sqrt(jnp.abs(jnp.asarray(S_psu)) / _NEMO_FZP_S0)
-    poly = ((((_NEMO_FZP_C5 * zs + _NEMO_FZP_C4) * zs + _NEMO_FZP_C3) * zs
-             + _NEMO_FZP_C2) * zs + _NEMO_FZP_C1) * zs + _NEMO_FZP_C0
-    tf = poly * jnp.asarray(S_psu)
+    from legoesm.core.source_rounding import nemo_source_round as sr
+
+    salinity = jnp.asarray(S_psu)
+    one = jnp.asarray(1.0, dtype=salinity.dtype)
+    s0 = jnp.asarray(_NEMO_FZP_S0, dtype=salinity.dtype)
+    # eosbn2.F90:1676-1682.  Preserve the three executing Fortran assignment
+    # boundaries: z1_S0, zs, then the Horner statement followed by its separate
+    # salinity multiplication.  The EOS-80 and optional-depth arms are distinct
+    # source branches and are not part of the C1D/ORCA1 TEOS-10 identity.
+    z1_s0 = sr(one / s0)
+    zs = sr(jnp.sqrt(sr(jnp.abs(salinity) * z1_s0)))
+    poly = sr(((((_NEMO_FZP_C5 * zs + _NEMO_FZP_C4) * zs
+                  + _NEMO_FZP_C3) * zs + _NEMO_FZP_C2) * zs
+                + _NEMO_FZP_C1) * zs + _NEMO_FZP_C0)
+    tf = sr(poly * salinity)
     if depth_m is not None:
-        tf = tf + _NEMO_FZP_DEP * jnp.asarray(depth_m)
+        tf = sr(tf + _NEMO_FZP_DEP * jnp.asarray(depth_m))
     return tf
 
 

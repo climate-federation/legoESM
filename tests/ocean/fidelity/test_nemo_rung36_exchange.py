@@ -17,6 +17,7 @@ from legoesm.coupler.ocean_forcing import (
 from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_coupled_card
 from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
 from legoesm.ice.sea_ice import _nemo_si3_ice_update_tau
+from legoesm.ocean.eos import nemo_eos_fzp
 from legoesm.ocean.physics.shortwave_penetration import nemo_rgb_one_layer_rhs
 from scripts.validate.ocean_fidelity.testcases.nemo_rung36_exchange_gate import (
     _nemo_bilinear_months,
@@ -41,6 +42,18 @@ def test_ssm_first_step_has_three_seeded_copies() -> None:
     # U/V and non-temperature members are unchanged by the four-copy mean.
     for index in (0, 1, 3, 4, 5, 6):
         np.testing.assert_array_equal(np.asarray(got[index]), np.asarray(values[index]))
+
+
+def test_fzp_keeps_nemo_source_statement_boundaries() -> None:
+    """TEOS-10 arm follows eosbn2.F90:1676-1682 assignment order."""
+    salinity = np.asarray([34.0, 34.125, 35.0], dtype=np.float64)
+    inv_s0 = np.float64(1.0) / np.float64(35.16504)
+    zs = np.sqrt(np.abs(salinity) * inv_s0)
+    poly = (((((np.float64(1.46873e-3) * zs - np.float64(9.64972e-3)) * zs
+               + np.float64(2.28348e-2)) * zs - np.float64(3.12775e-2)) * zs
+             + np.float64(2.07679e-2)) * zs - np.float64(5.87701e-2))
+    expected = poly * salinity
+    np.testing.assert_array_equal(np.asarray(nemo_eos_fzp(salinity)), expected)
 
 
 def test_fwb_uses_registered_delayed_domain_sum() -> None:
