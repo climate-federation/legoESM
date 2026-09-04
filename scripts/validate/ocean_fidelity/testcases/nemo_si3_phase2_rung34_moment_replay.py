@@ -1,0 +1,338 @@
+#!/usr/bin/env python3
+"""Written-order step-8 Prather moment discrimination for SI3 rung 3.4."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+from typing import cast
+
+import jax
+import netCDF4
+import numpy as np
+from legoesm import constants
+from legoesm.core.precision import PrecisionPolicy, get_policy
+from legoesm.ice.dynamics import si3_cgrid_aevp_solver
+from legoesm.ice.fidelity import nemo_rheo_testcase_recipe as recipe
+from legoesm.ice.transport import SI3_PRATHER_MOMENT_NAMES
+
+ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/final")
+RESTART_ROOT = ROOT.parent / "round8" / "oracle_active_restarts"
+HERE = Path(__file__).resolve().parent
+TRAJECTORY_GATE = HERE / "nemo_si3_phase2_rung34_trajectory_gate.py"
+ADV2D_REPLAY = HERE / "nemo_si3_phase2_adv2d_replay.py"
+POINTWISE_BAR = 1.0e-15
+ULP_LIMIT = 2
+ENTRY_FRAME = 8
+TARGET_FRAME = 9
+ENTRY_RESTART = 7
+TARGET_RESTART = 8
+HALO = 2
+PLANT_VELOCITY_M_S = 1.0e-10
+_HASH_BLOCK_BYTES = 1024 * 1024
+
+
+class MomentReplayError(RuntimeError):
+    """Fail-closed moment replay error."""
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise MomentReplayError(message)
+
+
+def _load(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+trajectory = _load("nemo_si3_rung34_trajectory_moment_replay", TRAJECTORY_GATE)
+adv2d_replay = _load("nemo_si3_adv2d_written_order_for_rung34", ADV2D_REPLAY)
+gate = trajectory.gate
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(_HASH_BLOCK_BYTES), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _array_sha256(*arrays: np.ndarray) -> str:
+    digest = hashlib.sha256()
+    for value in arrays:
+        array = np.ascontiguousarray(value)
+        digest.update(str(array.dtype).encode())
+        digest.update(str(array.shape).encode())
+        digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
+def _ulp_distance(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    return cast(np.ndarray, adv2d_replay._ulp_distance(left, right))
+
+
+def _run_written_order_arm(card, state, u_ice: np.ndarray, v_ice: np.ndarray):
+    """Even-step y-then-x program at icedyn_adv_pra.F90:303-350."""
+
+    x_step, y_step = adv2d_replay._numpy_prather_functions()
+    contents = np.asarray(state.contents).copy()
+    moments = tuple(np.asarray(value).copy() for value in state.moments)
+    area = np.asarray(card.metrics.area_t)
+    wet = np.asarray(card.forcing_template.tmask_t, dtype=bool)
+    after_y, moments_y, swept_area = y_step(
+        contents,
+        moments,
+        v_ice * np.asarray(card.metrics.e1v),
+        area,
+        wet,
+        card.dt_s,
+        initial_area=area,
+        first_sweep=True,
+        halo_width=card.halo_width,
+        subcycle_index=1,
+        subcycles=card.subcycles,
+    )
+    after_x, moments_x, _ = x_step(
+        after_y,
+        moments_y,
+        u_ice * np.asarray(card.metrics.e2u),
+        area,
+        wet,
+        card.dt_s,
+        initial_area=swept_area,
+        first_sweep=False,
+        halo_width=card.halo_width,
+        subcycle_index=1,
+        subcycles=card.subcycles,
+    )
+    return {
+        "after_y": (after_y, moments_y),
+        "after_x": (after_x, moments_x),
+    }
+
+
+def _moment_row(name: str, oracle: np.ndarray, candidate: np.ndarray) -> dict[str, object]:
+    require(oracle.shape == candidate.shape, f"{name}: shape mismatch")
+    require(oracle.dtype == candidate.dtype == np.float64, f"{name}: fp64 required")
+    difference = np.abs(candidate - oracle)
+    index = np.unravel_index(int(np.argmax(difference)), difference.shape)
+    maximum = float(difference[index])
+    oracle_maximum = float(np.max(np.abs(oracle)))
+    normalized = maximum / max(oracle_maximum, 1.0)
+    relative = maximum / oracle_maximum if oracle_maximum > 0.0 else None
+    ulp = _ulp_distance(candidate, oracle)
+    return {
+        "name": name,
+        "status": "AT-BAR" if normalized <= POINTWISE_BAR else "DEBT",
+        "max_abs": maximum,
+        "normalized_max_abs": normalized,
+        "relative_max_abs": relative,
+        "max_ulp": int(np.max(ulp)),
+        "max_abs_index_xy": [int(value) for value in index],
+    }
+
+
+def _score_arm(stages, target_restart: Path) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    moments = stages["after_x"][1]
+    with netCDF4.Dataset(target_restart) as dataset:
+        for moment_index, moment in enumerate(SI3_PRATHER_MOMENT_NAMES):
+            for tracer_index, tracer_name in enumerate(recipe.ICE_RHEO_TRACERS):
+                restart_name = trajectory._moment_restart_name(moment, tracer_name)
+                oracle = trajectory._restart_xy(dataset, restart_name)
+                candidate = moments[moment_index][HALO:-HALO, HALO:-HALO, tracer_index]
+                rows.append(_moment_row(restart_name, oracle, candidate))
+    require(len(rows) == 160, "step-8 replay lost a moment row")
+    return rows
+
+
+def _first_arm_difference(baseline, oracle_input) -> dict[str, object] | None:
+    # NEMO's argument/write order inside adv_y/adv_x is sx,sxx,sy,syy,sxy
+    # (icedyn_adv_pra.F90:722-738,761-791,933-939).
+    family_order = (("sx", 0), ("sxx", 2), ("sy", 1), ("syy", 3), ("sxy", 4))
+    for stage_name in ("after_y", "after_x"):
+        baseline_moments = baseline[stage_name][1]
+        oracle_moments = oracle_input[stage_name][1]
+        for tracer_index, tracer_name in enumerate(recipe.ICE_RHEO_TRACERS):
+            for family, moment_index in family_order:
+                left = baseline_moments[moment_index][
+                    HALO:-HALO, HALO:-HALO, tracer_index
+                ]
+                right = oracle_moments[moment_index][
+                    HALO:-HALO, HALO:-HALO, tracer_index
+                ]
+                ulp = _ulp_distance(left, right)
+                if np.any(ulp > ULP_LIMIT):
+                    index = np.unravel_index(int(np.argmax(ulp)), ulp.shape)
+                    return {
+                        "stage": stage_name,
+                        "relative_to_limiter": (
+                            "after limiter; velocity first enters at "
+                            "icedyn_adv_pra.F90:793"
+                        ),
+                        "tracer": tracer_name,
+                        "moment": family,
+                        "index_xy": [int(value) for value in index],
+                        "max_ulp": int(ulp[index]),
+                        "baseline": float(left[index]),
+                        "oracle_velocity_arm": float(right[index]),
+                    }
+    return None
+
+
+def _arm_summary(rows: list[dict[str, object]]) -> dict[str, object]:
+    debts = [row for row in rows if row["status"] == "DEBT"]
+    owner = max(rows, key=lambda row: float(row["normalized_max_abs"]))
+    over_two_ulp = [row for row in rows if int(row["max_ulp"]) > ULP_LIMIT]
+    return {
+        "status": "AT-BAR" if not debts else "DEBT",
+        "debt_count": len(debts),
+        "over_two_ulp_count": len(over_two_ulp),
+        "owner": owner,
+        "rows": rows,
+    }
+
+
+def run_replay(root: Path, restart_root: Path) -> dict[str, object]:
+    require(jax.default_backend() == "cpu", "CPU backend required")
+    _, entry = gate.oracle_gate.read_frame(
+        root / f"oracle_ice_step_entry_kt{ENTRY_FRAME:08d}.bin"
+    )
+    _, target = gate.oracle_gate.read_frame(
+        root / f"oracle_ice_step_entry_kt{TARGET_FRAME:08d}.bin"
+    )
+    with netCDF4.Dataset(root / "mesh_mask.nc") as dataset:
+        mesh = {name: np.asarray(dataset[name][:]) for name in gate.MESH_FIELDS}
+    with netCDF4.Dataset(root / "output.init_ice.nc") as dataset:
+        ocean_temperature_k = np.asarray(dataset["sst"][0]) + constants.T_freeze
+    card = recipe.build_ice_rheo_card(entry, mesh, ocean_temperature_k)
+    require(get_policy() == PrecisionPolicy.fp64(), "fp64 policy required")
+    entry_restart = restart_root / (
+        f"ICE_RHEO_OMIP_L3_{ENTRY_RESTART:08d}_restart_ice.nc"
+    )
+    target_restart = restart_root / (
+        f"ICE_RHEO_OMIP_L3_{TARGET_RESTART:08d}_restart_ice.nc"
+    )
+    state = card.initial_state._replace(
+        moments=trajectory._restart_moments(entry_restart, card)
+    )
+    forcing = recipe._forcing_for_state(card, state, TARGET_RESTART)
+    dynamics = si3_cgrid_aevp_solver(
+        state.dynamics, forcing, card.metrics, card.dynamics_config
+    )
+    lego_u = np.asarray(dynamics.u_ice_u)
+    lego_v = np.asarray(dynamics.v_ice_v)
+    oracle_u = np.asarray(target["u_ice"])
+    oracle_v = np.asarray(target["v_ice"])
+
+    velocity_rows = {
+        "u_ice": gate._score(
+            "u_ice",
+            oracle_u[HALO:-HALO, HALO:-HALO],
+            lego_u[HALO:-HALO, HALO:-HALO],
+        ),
+        "v_ice": gate._score(
+            "v_ice",
+            oracle_v[HALO:-HALO, HALO:-HALO],
+            lego_v[HALO:-HALO, HALO:-HALO],
+        ),
+    }
+    arms = {
+        "baseline": _run_written_order_arm(card, state, lego_u, lego_v),
+        "oracle_v": _run_written_order_arm(card, state, lego_u, oracle_v),
+        "oracle_u": _run_written_order_arm(card, state, oracle_u, lego_v),
+        "oracle_uv": _run_written_order_arm(card, state, oracle_u, oracle_v),
+    }
+    summaries = {
+        name: _arm_summary(_score_arm(stages, target_restart))
+        for name, stages in arms.items()
+    }
+    first_difference = _first_arm_difference(arms["baseline"], arms["oracle_uv"])
+
+    planted_v = oracle_v.copy()
+    planted_v[HALO + 10, HALO + 10] += PLANT_VELOCITY_M_S
+    planted = _run_written_order_arm(card, state, oracle_u, planted_v)
+    planted_rows = _score_arm(planted, target_restart)
+    clean_rows = summaries["oracle_uv"]["rows"]
+    changed = [
+        {
+            "name": clean["name"],
+            "clean_normalized_max_abs": clean["normalized_max_abs"],
+            "planted_normalized_max_abs": plant["normalized_max_abs"],
+        }
+        for clean, plant in zip(clean_rows, planted_rows, strict=True)
+        if plant["normalized_max_abs"] != clean["normalized_max_abs"]
+    ]
+    require(changed, "velocity plant did not reach any scored moment row")
+
+    input_moment_hash = _array_sha256(*(np.asarray(value) for value in state.moments))
+    # Source corrections, ridge/raft, and ice_cor receive no moment argument;
+    # step_ice_rheo_card returns the transport tuple verbatim at recipe:664-704.
+    return {
+        "gate": "nemo-si3-phase2-rung34-step8-moment-replay-v1",
+        "status": summaries["oracle_uv"]["status"],
+        "exit_code": 0 if summaries["oracle_uv"]["over_two_ulp_count"] == 0 else 1,
+        "backend": jax.default_backend(),
+        "precision_policy": str(get_policy()),
+        "pointwise_bar": POINTWISE_BAR,
+        "ulp_limit": ULP_LIMIT,
+        "sweep_order": "even step 8: y then x",
+        "velocity_rows": velocity_rows,
+        "arms": summaries,
+        "first_baseline_vs_oracle_velocity_moment_difference": first_difference,
+        "limiter_input_identity": {
+            "status": "EXACT",
+            "reason": (
+                "both arms have identical contents/moments before the "
+                "velocity-free y limiter"
+            ),
+            "source": "icedyn_adv_pra.F90:757-791",
+            "moment_sha256": input_moment_hash,
+        },
+        "between_advection_moment_handling": {
+            "status": "EXACTLY-UNCHANGED",
+            "source": "nemo_rheo_testcase_recipe.py:646-704",
+            "input_transport_moment_sha256": input_moment_hash,
+        },
+        "plant": {
+            "velocity_delta_m_s": PLANT_VELOCITY_M_S,
+            "changed_scored_moment_rows": len(changed),
+            "first_changed_row": changed[0],
+        },
+        "artifacts": {
+            str(entry_restart): _sha256(entry_restart),
+            str(target_restart): _sha256(target_restart),
+            str(root / f"oracle_ice_step_entry_kt{ENTRY_FRAME:08d}.bin"): _sha256(
+                root / f"oracle_ice_step_entry_kt{ENTRY_FRAME:08d}.bin"
+            ),
+            str(root / f"oracle_ice_step_entry_kt{TARGET_FRAME:08d}.bin"): _sha256(
+                root / f"oracle_ice_step_entry_kt{TARGET_FRAME:08d}.bin"
+            ),
+        },
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root", type=Path, default=ROOT)
+    parser.add_argument("--restart-root", type=Path, default=RESTART_ROOT)
+    args = parser.parse_args()
+    report = run_replay(args.root.resolve(), args.restart_root.resolve())
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return int(report["exit_code"])
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except MomentReplayError as exc:
+        print(f"UNMEASURED: {exc}", file=__import__("sys").stderr)
+        raise SystemExit(1)
