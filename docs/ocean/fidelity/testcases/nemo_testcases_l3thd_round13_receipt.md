@@ -10,7 +10,7 @@ The accepted retained oracle prefix is
 `/data/abyssal/dbalwada/nemo-testcases-l3/c1d_omip_l3_coupled10m_r13_oracle_i`.
 It completed 8,760 hourly CPU steps (`STOP 0`) with a scalar-math executable
 containing zero dynamic `_ZGV*` symbols.  Geometry, all ten stream schemas,
-and 321,930 pointwise operator rows pass.  Of those numerical rows, 321,929
+and 330,690 pointwise operator/input rows pass.  Of those rows, 330,689
 are bit-identical; the sole non-bit row is one `POST_FZP.t_bo` value with
 normalised error `2.0955593187140483e-16`, below the fixed `1e-15` bar.
 
@@ -21,6 +21,12 @@ after `POST_TRA_QSR`.  `POST_SBC_STAGGER`, `POST_ZDF_DRG_COEFF`,
 measured first over-bar row in the completed prefix, and no claim is made about
 the unmeasured coupled dynamics.  The gate's honest label is
 `MEASURED_PREFIX_AT_BAR`, never `matched` or `faithful`.
+
+The production integration is also incomplete: the new source-ordered
+operators are invoked by the card gate but the general coupled driver does not
+yet construct this exact one-layer RK3-WS/off-horizontal-operator ocean or
+route `rCdU_top` through its shared implicit top-drag consumer.  This is a
+construction debt, not an at-bar result for a production trajectory.
 
 ## Construction and provenance
 
@@ -56,6 +62,19 @@ lookup index.  In this single wet layer the bottom `wmask` is zero, so
 `traqsr.F90:390-415` deposits every band in that layer; chlorophyll is covered
 but numerically inert in this geometry.
 
+A post-hoc review check independently replays both parts of the NEMO input
+path.  It applies the four generated weights in the exact assignment order of
+`fld_interp` (`fldread.F90:1460-1472`), constructs the monthly record centres
+as in `fldread.F90:890-917`, and applies the hourly before/after interpolation
+at `fldread.F90:181-186,225-228`.  All 8,760 dumped `CHLA` operands are
+bit-identical to that replay.  This closes the sanctioned-WEIGHTS value check;
+it is labelled post-hoc because the independent replay was added after the
+first measured-prefix review.
+
+The card now binds both clocks explicitly: the ocean step is 3,600 s and
+`nn_fsbc=4` makes the SI3 step 14,400 s.  The nested 3,600 s phase-1 column
+clock is not reused as the coupled ice cadence.
+
 ## Ordered measurements
 
 | boundary | rows | bit-identical | maximum normalised error | status |
@@ -67,6 +86,7 @@ but numerically inert in this geometry.
 | three `POST_FWB` fields | 26,280 | 26,280 | 0 | AT_BAR |
 | two `POST_TRA_SBC_RK3` fields | 52,560 | 52,560 | 0 | AT_BAR |
 | two `POST_TRA_QSR` fields | 17,520 | 17,520 | 0 | AT_BAR |
+| independently replayed `fld_read` chlorophyll | 8,760 | 8,760 | 0 | AT_BAR |
 | eight exchange-card mappings | 70,080 | 70,080 | 0 | AT_BAR |
 
 The executing `ice_update_flx` branch is ORCA1's explicit
@@ -80,6 +100,12 @@ behind thereafter.  The synchronous private arm fails first at `kt=5`.
 RK3 T/S uses `trasbc.F90:282-315`; the one-layer RGB row uses
 `traqsr.F90:371-415`.
 
+The card boundary consumes `POST_FWB.emp/qns`, not the earlier `icestp`
+exchange record.  This distinction is non-vacuous: across the retained year,
+the largest pre/post-FWB differences are `3.32124e-4 kg m-2 s-1` (`emp`) and
+`1.58647 W m-2` (`qns`).  A stale-bridge plant is red while the corrected
+post-FWB card mappings are bit-identical.
+
 The 36-field exchange-stream coverage register is one-to-one and all fields
 are `VERIFIED` by the combined bulk, thermodynamic, update, tau, FWB, and card
 rows.  This statement certifies field registration/producer-to-card flow; it
@@ -92,19 +118,20 @@ already-produced `fhld/qlead` ledger.  The overlap remains flagged for merge.
 
 ## Controls and tests
 
-All eight row-level plants exit nonzero and turn their named row red:
+All ten row-level plants exit nonzero and turn their named row red:
 `ssm_sample`, `fzp_operand`, `update_heat`, `fwb_mass`, `fwb_immediate`,
-`trasbc_heat`, `qsr_flux`, and `freshwater_sign`.
+`trasbc_heat`, `chl_input`, `qsr_flux`, `fwb_bridge`, and
+`freshwater_sign`.
 
-Focused tests: **10 passed**.  The hard-coded-constant ratchet invoked on every
+Focused tests: **11 passed**.  The hard-coded-constant ratchet invoked on every
 touched Python file reports **7 passed, 1 skipped** (the skipped item is the
 ratchet's constants-module exemption).  A repository-wide invocation reports
 3,395 passed, 2 skipped, and five pre-existing failures in untouched
 FV3/DINO-radius sites; none is attributed to this lane.
 
-Key retained hashes: `exchange_gate.json`
-`17f8f8bfa67775f57a534071681d3c1883b5913b6749219fe310c323a20133fb`,
-`header_validity.json`
+Key retained hashes: `exchange_gate_chl_bridge_corrected.json`
+`8e49d7009e18be894ad290ce60d697b0e22b9391aaaf38ff9b1ca699f3da2f52`,
+`header_validity_bridge_corrected.json`
 `e51a8a5597ed4f49cf798d127758fe2fa6c78ad32b4b1d7cc2de63d1efe6d6cc`,
 executable `decf2144977b20bd0f8aeddc7adeb588d9a6fefbb909033049cfab48a2e77cfb`,
 ocean log `53bc133cb27f3391cf8813b5b39ec5534ab258b3e02a7d0f878e480d8fb27018`.
@@ -121,6 +148,16 @@ resolved-branch operands; later roots are valid staged instrumentation but
 superseded by `_i`.  They are **FLAGGED FOR FUTURE DELETION**, not removed.
 The shipped NEMO tree and all immutable ORCA1/C1D inputs were not modified.
 
+## Codex-internal review disposition
+
+No external review artifact is claimed.  Two codex-internal adversarial
+passes returned HOLD on the first prefix.  The wrong pre-FWB bridge, missing
+runtime-index validation, unit chlorophyll placeholder, optional stream
+schemas, and ambiguous 3,600/14,400 s clocks are corrected and remeasured
+above.  The reviewers' production-driver/top-drag construction finding is
+confirmed and remains explicitly UNVERIFIED; it is the same scope boundary as
+the six missing oracle/consumer frames, not silently treated as complete.
+
 ## ASKED / UNASKED
 
 | choice | state | disposition |
@@ -131,12 +168,16 @@ The shipped NEMO tree and all immutable ORCA1/C1D inputs were not modified.
 | fp64 plus `transcendentals="libm"` explicitly | ASKED | coupled card binds it |
 | resolved ORCA1 `ln_cndflx=.false.` identity | ASKED by scope | implemented; true arm is not constructible |
 | delayed FWB collective time level | UNASKED discovery | preregistered before correction; synchronous arm retained as red control |
+| post-FWB exchange-card bridge and stale-bridge plant | UNASKED review correction | preregistered before rescore; corrected arm bit-identical |
+| independent chlorophyll WEIGHTS/time replay | ASKED | 8,760/8,760 bit-identical; formal replay labelled post-hoc |
 | certify full split-explicit SSH and implicit drag consumers | ASKED | **not completed; UNMEASURED debt** |
+| wire the exact card through the production coupled driver | ASKED | **not completed; UNVERIFIED construction debt** |
 | modify shipped NEMO, modify immutable inputs, delete attempts, GPU, `mpirun`, push | UNASKED | not done |
 | claim a completed rung or trajectory equivalence | UNASKED | explicitly withheld |
 
 ## Commit identity
 
 Implementation commit: `c53e40cebda3`; honest-scope correction:
-`3b62ef0d851c`.  This receipt's final commit and bundle hashes are filled by
-the end-of-round handoff.
+`3b62ef0d851c`; post-review preregistration: `176e428b8a28`; corrected bridge,
+schema, clock, and chlorophyll replay: `ee56aef34f81`.  This receipt's final
+commit and bundle hashes are filled by the end-of-round handoff.
