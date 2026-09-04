@@ -520,6 +520,36 @@ Otherwise the receipt reports the first owner and DEBT/UNMEASURED rows without
 relaxing the bar.  Any physics repair must transcribe an active NEMO identity
 with `file:line`, be preregistered, and have a one-variable private ablation.
 
+### Round-13 codex-internal review addendum (preregistered before rescore)
+
+A codex-internal adversarial review of the first measured-prefix gate found
+that its exchange-card replay consumed the `icestp` exchange record written
+before `sbc_fwb`, while the card boundary being claimed is after the volume-1
+freshwater correction.  The retained oracle shows the distinction is
+non-vacuous: the maximum absolute pre/post difference is
+`3.32124e-4 kg m-2 s-1` for `emp` and `1.58647 W m-2` for `qns`.
+
+Before the corrective rescore, the following outcomes are preregistered:
+
+- bridge the card from the registered `POST_FWB.emp` and `POST_FWB.qns`
+  operands; the corrected exchange-card rows are expected to remain bit
+  identical to that post-FWB oracle boundary;
+- a private `fwb_bridge` plant using the earlier `icestp` values must make the
+  scored freshwater row red and exit nonzero;
+- enforce the registered `kt`/stage order for `sbc_ssm`, `ice_update_flx`,
+  `ice_update_tau`, `tra_sbc_RK3`, and `tra_qsr`; malformed order must fail
+  before scoring;
+- consume the registered `fld_read` chlorophyll operand rather than a unit
+  placeholder, and fail if any required rung-3.6 stream is absent;
+- bind the card to the distinct clocks: `rn_Dt=3600 s`, `nn_fsbc=4`, hence
+  `14400 s` SI3 calls and cadence four.
+
+These checks correct provenance and boundary selection; they do not expand
+the measured prefix.  `POST_SBC_STAGGER`, `POST_ZDF_DRG_COEFF`,
+`PRE_DYN_SPG_TS`, `SSH_SUBSTEP`, `POST_STP2D`, and
+`PRE_DYN_ZDF_SOLVE` remain preregistered but UNMEASURED until their oracle
+frames and executing legoESM consumers exist.
+
 This dispatch stops at this design.  No oracle work configuration, NEMO
 instrument, legoESM card, gate, or test is created here.
 
