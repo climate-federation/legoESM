@@ -41,6 +41,7 @@ An experiment is fully described by a YAML file with this schema::
 
     restart:
       from: <path to a .npz or "">     # "" -> cold start
+      carbon_ic: <path to a global_carbon_ic.npz or "">   # "" -> cold pools
 
     land_frac_min: float                # surfdata land threshold (default 0.0 = any land)
     land_mask_file: <optional CMIP6 sftlf path>
@@ -286,6 +287,28 @@ def validate_config(data: dict) -> LMIPConfig:
                 raise ValueError(
                     f"per-PFT theta_wp={_w} / theta_fc={_f} must satisfy "
                     "0 < wp < fc < 1")
+    # --- Prognostic carbon (opt-in) ------------------------------------------
+    # Default false = the pools stay PRESCRIBED: a fixed leaf carbon, re-derived
+    # and discarded every step, which is what the baked conductance was fitted
+    # under.  True makes them evolve, which changes LAI and therefore the
+    # conductance -- so it is a different experiment, never a silent upgrade.
+    physics.setdefault("carbon_prognostic", False)
+    _cp = physics["carbon_prognostic"]
+    if not isinstance(_cp, bool):
+        raise ValueError(
+            f"physics.carbon_prognostic must be a bool (got {_cp!r})")
+    if _cp and data.get("physics", {}).get("land_mode", "multilayer") != "multilayer":
+        raise ValueError(
+            "physics.carbon_prognostic requires land_mode 'multilayer' (the slab "
+            "land has no carbon pools).")
+    # The pools only exist on the interactive-stomata path (the Farquhar branch
+    # needs both the differland scheme and a carbon state).  Catch it HERE, at
+    # config load, instead of letting the driver die after staging forcing.
+    if _cp and not physics.get("stomata_enabled", False):
+        raise ValueError(
+            "physics.carbon_prognostic requires stomata_enabled=true: the carbon "
+            "pools are only stepped on the interactive-stomata path, so with "
+            "stomata off there is nothing to evolve.")
     physics.setdefault("soil_growth_factor", _SOIL_GROWTH_FACTOR_DEFAULT)
     _gf = physics["soil_growth_factor"]
     if not isinstance(_gf, (int, float)) or isinstance(_gf, bool) or not (1.0 <= _gf <= 4.0):  # coeff-ok: schema sanity bound on a layer-thickness RATIO
@@ -358,6 +381,21 @@ def validate_config(data: dict) -> LMIPConfig:
 
     restart = data.get("restart") or {}
     restart.setdefault("from", "")
+    # Seed the carbon pools from a global finidat instead of cold-starting them.
+    # STRICT whole-grid match (the pools are per-area stocks pinned to the
+    # finidat's own cells), so the finidat must be built on the run's grid --
+    # see docs/land/global_carbon_ic_spinup.md.  Only meaningful when the pools
+    # actually evolve, so it requires physics.carbon_prognostic.
+    restart.setdefault("carbon_ic", "")
+    _cic = restart["carbon_ic"]
+    if not isinstance(_cic, str):
+        raise ValueError(f"restart.carbon_ic must be a path string (got {_cic!r})")
+    if _cic and not physics.get("carbon_prognostic", False):
+        raise ValueError(
+            "restart.carbon_ic is set but physics.carbon_prognostic is false: the "
+            "seeded pools would be overwritten by the prescribed leaf carbon every "
+            "step, so the seed would do nothing.  Enable carbon_prognostic or drop "
+            "the seed.")
 
     output = data.get("output") or {}
     if "tapes" not in output or not output["tapes"]:

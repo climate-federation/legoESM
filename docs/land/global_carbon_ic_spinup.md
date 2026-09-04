@@ -71,7 +71,11 @@ permafrost-`phi` restart round-trip. Exits non-zero on any mismatch.
 | `scripts/run/run_coupled.py` (coupled ESM) | yes | `--carbon-ic <finidat>` → `CoupledConfig.carbon_ic_path`; STRICT whole-grid match, needs multilayer land |
 | `scripts/run/run_lmip.py` (single-point LMIP) | yes | `--carbon-ic <finidat>` with `--carbon-scheme differland`, or the shipped `config/lmip/lmip_carbon_ic.yaml`; seeds the one column from the **nearest land cell** |
 | `scripts/run/run_amip.py` (AMIP) | no, by design | AMIP prescribes carbon and discards evolved pools |
-| `scripts/run/run_lmip_biophys.py` (global LMIP biophysics) | not yet | that driver pins `carbon="none"` — energy/water/snow/soil only, with GPP taped as a diagnostic. There are no pools to seed until its carbon cycle lands |
+| `scripts/run/run_lmip_biophys.py` (global LMIP biophysics) | yes, opt-in | `physics.carbon_prognostic: true` (needs `stomata_enabled`) makes the pools evolve instead of being re-derived and discarded each step; `restart.carbon_ic` then seeds them, STRICT whole-grid match. Off by default — see below |
+
+> **The biophysics lane is opt-in for a reason.** Its pools are PRESCRIBED by default: a fixed leaf carbon, re-derived and discarded every step, because the baked stomatal conductance was calibrated at that leaf area. Letting them evolve changes LAI and therefore the conductance — a different experiment, not a free upgrade. With the flag on, the pools ride in the time-integration carry, the permafrost `phi` is threaded, and `NBP` / `C_total` / `C_soil` / `C_veg` become tapeable.
+>
+> **That lane needs its own finidat.** The seed is a strict whole-grid match and the published IC is 96 x 144 (1.9 x 2.5), so it will NOT seed the default 2° biophysics grid — the loader rejects it rather than scrambling cells. Build one at your resolution with `--surfdata-preset legoesm_surfdata --resolution-deg <deg>` (§2).
 
 For the single-point LMIP the whole-grid contract cannot be met (one column at an
 arbitrary site), but the column can still be *initialised* from the nearest cell:
