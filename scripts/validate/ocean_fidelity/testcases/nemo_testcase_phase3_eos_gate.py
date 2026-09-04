@@ -69,7 +69,9 @@ def parse_teos10_density_coefficients(path: Path = NEMO_EOS) -> dict[str, float]
     return found
 
 
-def nemo_literal_density(T, S, depth_m, c: dict[str, float]) -> np.ndarray:
+def nemo_literal_density(
+    T, S, depth_m, c: dict[str, float], *, return_intermediates: bool = False,
+) -> np.ndarray | tuple[np.ndarray, ...]:
     """NumPy transliteration of ``eosbn2.F90:260-288`` association."""
     T = np.asarray(T, dtype=np.float64)
     S = np.asarray(S, dtype=np.float64)
@@ -97,7 +99,10 @@ def nemo_literal_density(T, S, depth_m, c: dict[str, float]) -> np.ndarray:
         + (((((c["EOS600"] * zs + c["EOS500"]) * zs + c["EOS400"]) * zs
              + c["EOS300"]) * zs + c["EOS200"]) * zs + c["EOS100"]) * zs \
         + c["EOS000"]
-    return ((zn3 * zh + zn2) * zh + zn1) * zh + zn0
+    zn = ((zn3 * zh + zn2) * zh + zn1) * zh + zn0
+    if return_intermediates:
+        return depth_m, zh, zt, zs, zn0, zn1, zn2, zn3, zn
+    return zn
 
 
 def read_entry(path: Path, case: str) -> dict[str, np.ndarray | int]:

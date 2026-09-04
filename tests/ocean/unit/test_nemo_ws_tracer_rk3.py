@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as model_module
 import legoesm.ocean.vertical as vertical_module
+import legoesm.ocean.eos as eos_module
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     _nemo_flux_form_external_velocity_update,
 )
@@ -56,7 +57,8 @@ def test_nemo_ws_eos_hpg_transport_are_bitwise_equal_eager_and_jit(monkeypatch):
         tmask = jnp.asarray([1.0, 1.0, 0.0], dtype=dtype)
         density = nemo_roquet_density_anomaly_ratio(
             temperature, salinity, jnp.zeros_like(depth), rho0=1026.0,
-            geometric_depth_m=depth, tmask=tmask)
+            geometric_depth_m=depth, tmask=tmask,
+            return_intermediates=True)
 
         # HPG: exercise the complete top-down recurrence on two levels.
         rhd = jnp.arange(24, dtype=dtype).reshape(3, 4, 2) / 8.0
@@ -74,13 +76,26 @@ def test_nemo_ws_eos_hpg_transport_are_bitwise_equal_eager_and_jit(monkeypatch):
             mask3, mask3,
             hu_transport, hv_transport, area_t, area_u, area_v,
         )
-        return (density, hpg_u, hpg_v, *face)
+        return (*density, hpg_u, hpg_v, *face)
 
     with jax.disable_jit():
         eager = tuple(np.asarray(value) for value in operand_chain())
     compiled = tuple(np.asarray(value) for value in jax.jit(operand_chain)())
     assert all(np.array_equal(a, b) for a, b in zip(eager, compiled, strict=True))
-    assert compiled[0][2] == 0.0
+    assert compiled[12][2] == 0.0
+
+    # EOS non-vacuity: replacing the source-operation materialization with
+    # the HLO-only barrier reproduces the contraction/reassociation defect.
+    jax.clear_caches()
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            eos_module, "_nemo_source_round", jax.lax.optimization_barrier)
+        reassociated = tuple(
+            np.asarray(value) for value in jax.jit(operand_chain)())
+    assert any(
+        not np.array_equal(a, b)
+        for a, b in zip(compiled[:13], reassociated[:13], strict=True)
+    )
 
     # Planted mutation: removing the literal-path barriers changes live r3u/r3v
     # bits.  Consequently this test fails at the equality assertion if those

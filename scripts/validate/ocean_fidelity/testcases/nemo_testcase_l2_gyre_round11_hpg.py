@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GYRE stage-2 HPG literal-operand discriminator (production JIT, fp64)."""
+"""GYRE stage-2 EOS/HPG literal-operand discriminators (JIT, fp64)."""
 
 from __future__ import annotations
 
@@ -21,6 +21,11 @@ from nemo_testcase_l2_gyre_phase3_gate import (
 from nemo_testcase_l2_gyre_stage3_completion_gate import (
     read_stage2_hpg_operands,
 )
+from nemo_testcase_phase3_eos_gate import (
+    nemo_literal_density,
+    parse_teos10_density_coefficients,
+)
+from nemo_testcase_state_ulp_probe import ulp_distance
 
 ORACLE_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
@@ -29,6 +34,25 @@ ORACLE_ROOT = Path(
 OPERAND_NPZ = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
     "round11_composition_v4/hpg_operands.npz"
+)
+EOS_ORACLE_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+    "round12_oracle_eos_v2"
+)
+
+EOS_COEFFICIENT_NAMES = (
+    "EOS000", "EOS100", "EOS200", "EOS300", "EOS400", "EOS500", "EOS600",
+    "EOS010", "EOS110", "EOS210", "EOS310", "EOS410", "EOS510",
+    "EOS020", "EOS120", "EOS220", "EOS320", "EOS420",
+    "EOS030", "EOS130", "EOS230", "EOS330", "EOS040", "EOS140", "EOS240",
+    "EOS050", "EOS150", "EOS060", "EOS001", "EOS101", "EOS201", "EOS301",
+    "EOS401", "EOS011", "EOS111", "EOS211", "EOS311", "EOS021", "EOS121",
+    "EOS221", "EOS031", "EOS131", "EOS041", "EOS002", "EOS102", "EOS202",
+    "EOS012", "EOS112", "EOS022", "EOS003", "EOS103", "EOS013",
+)
+EOS_ARRAY_NAMES = (
+    "T", "S", "pdep", "zh", "zt", "zs", "ztm",
+    "zn0", "zn1", "zn2", "zn3", "zn", "prd",
 )
 
 
@@ -64,6 +88,231 @@ def read_hpg_literal(path: Path) -> dict[str, np.ndarray]:
     result["r1_e1u"] = _xy(values[offset:offset + n2], nx, ny)
     result["r1_e2v"] = _xy(values[offset + n2:], nx, ny)
     return result
+
+
+def read_eos_operands(path: Path) -> dict:
+    """Read the config-local eos_insitu source-order stream."""
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii").rstrip()
+        header = struct.unpack("=11i", handle.read(44))
+        values = np.fromfile(handle, dtype=np.float64)
+    version, kt, stage, knn, kmm, krhs, nx, ny, nz, bits, neos = header
+    require(magic == "NEMO_L2_EOSOP_1", f"{path}: bad magic")
+    require(
+        (version, kt, stage, knn, kmm, krhs, nx, ny, nz, bits, neos)
+        == (1, 1, 2, 3, 3, 2, *DIMS, 64, -1),
+        f"{path}: bad header {header}",
+    )
+    n3 = nx * ny * nz
+    nscalar = 6 + len(EOS_COEFFICIENT_NAMES)
+    require(
+        values.size == nscalar + len(EOS_ARRAY_NAMES) * n3,
+        f"{path}: bad payload {values.size}",
+    )
+    scalars = dict(zip(
+        ("rdeltaS", "r1_S0", "r1_T0", "r1_Z0", "rho0", "r1_rho0"),
+        values[:6], strict=True))
+    coefficients = dict(zip(
+        EOS_COEFFICIENT_NAMES,
+        values[6:nscalar], strict=True))
+    arrays = {}
+    for index, name in enumerate(EOS_ARRAY_NAMES):
+        start = nscalar + index * n3
+        arrays[name] = _xyz(values[start:start + n3], nx, ny, nz)
+    return {
+        "header": {
+            "version": version, "kt": kt, "stage": stage, "Knn": knn,
+            "Kmm": kmm, "Krhs": krhs, "neos": neos,
+        },
+        "scalars": scalars,
+        "coefficients": coefficients,
+        "arrays": arrays,
+    }
+
+
+def _operand_row(name: str, oracle, candidate, mask) -> dict:
+    oracle = np.asarray(oracle, dtype=np.float64)
+    candidate = np.asarray(candidate, dtype=np.float64)
+    use = np.asarray(mask, dtype=bool)
+    require(oracle.shape == candidate.shape == use.shape, f"{name}: shape mismatch")
+    require(bool(use.any()), f"{name}: empty mask")
+    require(np.all(np.isfinite(candidate[use])), f"{name}: nonfinite candidate")
+    different = oracle[use] != candidate[use]
+    absolute = np.abs(candidate[use] - oracle[use])
+    return {
+        "name": name,
+        "status": "BIT-EXACT" if not bool(different.any()) else "DEBT",
+        "absolute_max": float(absolute.max(initial=0.0)),
+        "ulp_max": int(ulp_distance(candidate[use], oracle[use]).max(initial=0)),
+        "differing_cells": int(different.sum()),
+        "n": int(use.sum()),
+        "oracle_dtype": str(oracle.dtype),
+        "candidate_dtype": str(candidate.dtype),
+    }
+
+
+def run_eos(oracle_root: Path, operand_npz: Path, plant: bool = False) -> dict:
+    """Walk every wet-cell stage-2 eos_insitu operand in source order."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import neumann_fill_cgrid
+    from legoesm.ocean.eos import (
+        _ROQUET_TEOS10,
+        nemo_bn2_live_ladders,
+        nemo_teos10_density_anomaly_ratio,
+    )
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
+    from legoesm.ocean.fidelity.time_levels import time_level_for_dump
+
+    set_policy(PrecisionPolicy.fp64())
+    require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    require(not bool(jax.config.jax_disable_jit), "production JIT is required")
+
+    path = oracle_root / "oracle_rkstage2_eos_operands_kt00000001.bin"
+    require(time_level_for_dump(path.name) == "now", "EOS dump is not Kmm/now")
+    oracle_record = read_eos_operands(path)
+    oracle = oracle_record["arrays"]
+    hpg_operand_path = oracle_root / "oracle_rkstage2_hpg_operands_kt00000001.bin"
+    hpg_operands = read_stage2_hpg_operands(hpg_operand_path)
+    require(
+        np.array_equal(oracle["prd"], hpg_operands["rhd"]),
+        "EOS recorder did not capture the prd consumed by stage-2 dyn_hpg",
+    )
+    with np.load(operand_npz) as loaded:
+        T_stage = np.asarray(loaded["candidate_stage1_T"])
+        S_stage = np.asarray(loaded["candidate_stage1_S"])
+        ssh_stage = np.asarray(loaded["candidate_stage1_ssh"])
+
+    card = build_nemo_testcase_card(CASE)
+    cfg = card.recipe.model_config
+    active = np.asarray(card.recipe.z_coord.is_active, dtype=bool)
+    nlev = card.recipe.z_coord.n_levels
+    land = card.recipe.initial_state.land_mask.data
+    T = neumann_fill_cgrid(jnp.asarray(T_stage), land, grid=card.recipe.grid)
+    S = neumann_fill_cgrid(jnp.asarray(S_stage), land, grid=card.recipe.grid)
+    eta = jnp.asarray(ssh_stage)
+    H = card.recipe.initial_state.H_bathy.data
+
+    def evaluate(t_value, s_value, depth):
+        return jax.jit(lambda t, s, d, m: nemo_teos10_density_anomaly_ratio(
+            t, s, jnp.zeros_like(d), rho0=cfg.rho_0,
+            geometric_depth_m=d, tmask=m,
+            return_intermediates=True))(
+                t_value, s_value, depth, jnp.asarray(active))
+
+    quotient_depth = nemo_bn2_live_ladders(
+        card.recipe.z_coord, eta, H, r3t_evaluation="quotient")[0]
+    reciprocal_depth = nemo_bn2_live_ladders(
+        card.recipe.z_coord, eta, H, r3t_evaluation="nemo_reciprocal")[0]
+    candidate_sets = {
+        "production_quotient": tuple(
+            np.asarray(x) for x in evaluate(T, S, quotient_depth)),
+        "reciprocal_arm": tuple(
+            np.asarray(x) for x in evaluate(T, S, reciprocal_depth)),
+    }
+    source_coefficients = parse_teos10_density_coefficients()
+    numpy_values = nemo_literal_density(
+        np.asarray(T), np.asarray(S), np.asarray(reciprocal_depth),
+        source_coefficients, return_intermediates=True)
+    np_depth, np_zh, np_zt, np_zs, np_zn0, np_zn1, np_zn2, np_zn3, np_zn = numpy_values
+    np_ztm = active.astype(np.float64)
+    np_prd = (np_zn * oracle_record["scalars"]["r1_rho0"] - 1.0) * np_ztm
+    candidate_sets["numpy_reciprocal"] = (
+        np.asarray(T), np.asarray(S), np_depth, np_zh, np_zt, np_zs, np_ztm,
+        np_zn0, np_zn1, np_zn2, np_zn3, np_zn, np_prd,
+    )
+    oracle_T = jnp.asarray(oracle["T"][..., :nlev])
+    oracle_S = jnp.asarray(oracle["S"][..., :nlev])
+    oracle_depth = jnp.asarray(oracle["pdep"][..., :nlev])
+    candidate_sets["oracle_input_jit"] = tuple(
+        np.asarray(x) for x in evaluate(oracle_T, oracle_S, oracle_depth))
+    oracle_numpy_values = nemo_literal_density(
+        np.asarray(oracle_T), np.asarray(oracle_S), np.asarray(oracle_depth),
+        source_coefficients, return_intermediates=True)
+    (on_depth, on_zh, on_zt, on_zs, on_zn0, on_zn1, on_zn2, on_zn3,
+     on_zn) = oracle_numpy_values
+    on_ztm = active.astype(np.float64)
+    on_prd = (on_zn * oracle_record["scalars"]["r1_rho0"] - 1.0) * on_ztm
+    candidate_sets["oracle_input_numpy"] = (
+        np.asarray(oracle_T), np.asarray(oracle_S), on_depth, on_zh, on_zt,
+        on_zs, on_ztm, on_zn0, on_zn1, on_zn2, on_zn3, on_zn, on_prd,
+    )
+
+    rows = []
+    mask = active[..., :nlev]
+    first_departure = {}
+    for set_name, values in candidate_sets.items():
+        for index, (name, candidate) in enumerate(zip(EOS_ARRAY_NAMES, values, strict=True)):
+            trial = np.asarray(candidate)[..., :nlev]
+            if plant and set_name == "production_quotient" and index == 0:
+                trial = trial.copy()
+                trial[tuple(np.argwhere(mask)[0])] += 1.0
+            row = _operand_row(
+                f"{CASE}.kt1.stage2.eos.{set_name}.{name}",
+                oracle[name][..., :nlev], trial, mask)
+            rows.append(row)
+            if row["status"] != "BIT-EXACT" and set_name not in first_departure:
+                first_departure[set_name] = name
+
+    scalar_expected = {
+        "rdeltaS": _ROQUET_TEOS10["rdeltaS"],
+        "r1_S0": _ROQUET_TEOS10["r1_S0"],
+        "r1_T0": _ROQUET_TEOS10["r1_T0"],
+        "r1_Z0": _ROQUET_TEOS10["r1_Z0"],
+        "rho0": cfg.rho_0,
+        "r1_rho0": 1.0 / cfg.rho_0,
+    }
+    scalar_rows = []
+    for name, expected in scalar_expected.items():
+        observed = oracle_record["scalars"][name]
+        scalar_rows.append(_operand_row(
+            f"scalar.{name}", np.asarray([observed]), np.asarray([expected]),
+            np.asarray([True])))
+    for name in EOS_COEFFICIENT_NAMES:
+        scalar_rows.append(_operand_row(
+            f"coefficient.{name}",
+            np.asarray([oracle_record["coefficients"][name]]),
+            np.asarray([_ROQUET_TEOS10[name]]), np.asarray([True])))
+
+    production_prd = next(
+        row for row in rows if row["name"].endswith("production_quotient.prd"))
+    oracle_input_prd = next(
+        row for row in rows if row["name"].endswith("oracle_input_jit.prd"))
+    if oracle_input_prd["status"] == "BIT-EXACT":
+        owner_label = "CONFIRMED_XLA_SOURCE_ASSOCIATION_OWNER_FIXED"
+    else:
+        owner_label = "EOS_LITERAL_ASSOCIATION_REMAINS_OPEN"
+
+    if plant:
+        planted = next(row for row in rows if row["name"].endswith("production_quotient.T"))
+        require(planted["status"] == "DEBT" and planted["absolute_max"] >= 1.0,
+                "planted EOS operand violation did not fire")
+    return {
+        "format": "nemo-testcase-l2-gyre-round12-eos-v1",
+        "case": CASE,
+        "status": (
+            "BIT-EXACT-OUTPUT"
+            if production_prd["status"] == "BIT-EXACT" else "DEBT"),
+        "owner_label": owner_label,
+        "production_prd_bit_exact": production_prd["status"] == "BIT-EXACT",
+        "execution_regime": "production_jit",
+        "precision_policy": "fp64",
+        "jax_backend": jax.default_backend(),
+        "oracle_dump": str(path),
+        "oracle_dump_sha256": sha256(path),
+        "hpg_operand_dump": str(hpg_operand_path),
+        "hpg_operand_dump_sha256": sha256(hpg_operand_path),
+        "eos_prd_equals_hpg_rhd_bits": True,
+        "candidate_stage_artifact": str(operand_npz),
+        "candidate_stage_artifact_sha256": sha256(operand_npz),
+        "header": oracle_record["header"],
+        "first_non_bit_exact_operand": first_departure,
+        "rows": rows,
+        "scalar_and_coefficient_rows": scalar_rows,
+        "planted_control": plant,
+    }
 
 
 def run(oracle_root: Path, operand_npz: Path, plant: bool = False) -> dict:
@@ -194,12 +443,22 @@ def run(oracle_root: Path, operand_npz: Path, plant: bool = False) -> dict:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=("hpg", "eos"), default="hpg")
     parser.add_argument("--oracle-root", type=Path, default=ORACLE_ROOT)
     parser.add_argument("--operand-npz", type=Path, default=OPERAND_NPZ)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--plant", action="store_true")
     args = parser.parse_args(argv)
-    report = run(args.oracle_root, args.operand_npz, args.plant)
+    oracle_root = (
+        EOS_ORACLE_ROOT
+        if args.mode == "eos" and args.oracle_root == ORACLE_ROOT
+        else args.oracle_root
+    )
+    report = (
+        run_eos(oracle_root, args.operand_npz, args.plant)
+        if args.mode == "eos"
+        else run(oracle_root, args.operand_npz, args.plant)
+    )
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     print(json.dumps(report, indent=2, sort_keys=True))
     return 1 if args.plant else 0

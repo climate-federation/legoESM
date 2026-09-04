@@ -288,3 +288,8 @@ def test_post_tendency_stage_state_dumps_are_registered_at_the_after_level():
     # at a kt outside the two instrumented windows must still raise.
     with pytest.raises(ValueError):
         time_level_for_dump("stp_dump_08_dynzdf_kt00009999_u.bin")
+
+
+def test_gyre_stage2_eos_operand_dump_is_registered_at_live_kmm_level():
+    assert time_level_for_dump(
+        "oracle_rkstage2_eos_operands_kt00000001.bin") == "now"

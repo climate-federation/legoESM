@@ -944,6 +944,13 @@ _DUMP_TIME_LEVEL["oracle_rkstage2_hpg_operands_kt00000001.bin"] = (
     "Kmm=3 rhd, e3w(Kmm), and gdept_z0(Kmm) immediately after eos and "
     "before the executing dyn_hpg call",
 )
+_DUMP_TIME_LEVEL["oracle_rkstage2_eos_operands_kt00000001.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3/MY_SRC/eosbn2.F90:260-348 writes the stage-2 "
+    "Knn=Kmm=3 pts/gdept inputs and each local EOS intermediate from the "
+    "executing eos_insitu call immediately before dyn_hpg",
+)
 _DUMP_TIME_LEVEL["oracle_rkstage3_wzv_kt00000001.bin"] = (
     "now",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
