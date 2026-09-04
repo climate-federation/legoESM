@@ -97,3 +97,18 @@ retains that value.  This is a copied-configuration geometry correction that
 executes the already asked 10 m slab; it changes no ocean or SI3 physics and
 introduces no new free parameter.  Retry B must satisfy the original
 `e3t≈8.333 m` prediction before any downstream row is scored.
+
+## Pre-rescore branch correction (recorded before retry E)
+
+The first complete 58-field `PRE_UPDATE_FLX` replay exposed a registry defect,
+before any rung-3.6 result was accepted: the card transcribed the
+`ln_cndflx=.true.` arm, but the resolved ORCA1 overlay explicitly has
+`ln_cndflx=.false.` (`ORCA1-omip/EXPREF/namelist_ice_cfg:81`, confirmed in
+`output.namelist.ice`).  The executed arms are therefore
+`iceupdate.F90:109-113` for `qt_atm_oi` and `:132-134` for `zqsr`; the mass row
+at `:178` also requires `emp_oce`, not the heat-of-freshwater operand
+`qemp_oce`.  A new retained run will add `qsr_ice` and `emp_oce` to the
+WRITE-only input frame and replay only that resolved branch.  Prediction: the
+order-one first-step `qt_atm_oi`, `qt_oce_ai`, `qns`, and `emp` residuals will
+disappear; any remaining first over-bar row will then be reported in NEMO
+execution order without expanding the selected identity.
