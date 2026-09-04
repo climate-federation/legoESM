@@ -267,8 +267,33 @@ generations, so reproduce the *scorecard* (§3, to the tolerances
 `verify_carbon_ic_release.sbatch` applies), not the bytes. Bit-identity is only
 guaranteed by downloading the published artifact.
 
+## 5. The other half: the soil-state IC
+
+This recipe spins up **carbon pools**. The soil *physical* state — moisture and
+temperature profiles plus snow — has its own published spin-up and its own
+release: `docs/land/lmip_biophys_soil_ic_spinup.md` (#1624), a 10-year CRU-JRA
+spin-up of the calibrated 2° biophysics LMIP, ingested through `restart.from`.
+
+**The two compose**: both are on a 10-layer / 3.0 m soil column, so a run can
+take its soil state from the soil IC and its carbon pools from this one, and
+neither is a cold start. They are independent files with independent provenance —
+seeding one does not seed the other, and the carbon IC carries no soil state.
+
+Note that the global biophysics driver (`run_lmip_biophys.py`) still runs
+`carbon="none"`: under `physics.calibrated_land_physics` the pools are re-derived
+and discarded every step, on purpose, so the fitted conductance acts on the leaf
+area it was fitted with. So the carbon IC has no consumer *there* yet — its
+consumers are the coupled driver and the single-point `run_lmip.py` (§1). Wiring
+carbon into the global biophysics lane is the open piece.
+
+`scripts/validate/compare_lmip_biophys_clm.py` (#1624) scores that lane against
+CLM, which is the natural place to judge whether a seeded carbon cycle helps once
+it is wired.
+
 ## Related
 
 - `docs/land/arctic_carbon_residual_audit.md` — why the high latitudes are low.
 - `docs/land/carbon_equilibrium_audit.md` — the equilibrium method.
+- `docs/land/lmip_biophys_soil_ic_spinup.md` — the soil-state IC (the other half).
+- `scripts/validate/compare_lmip_biophys_clm.py` — LMIP biophysics vs CLM.
 - `scripts/plot/plot_global_carbon_ic.py` — regenerates `carbon_ic_maps.png`.
