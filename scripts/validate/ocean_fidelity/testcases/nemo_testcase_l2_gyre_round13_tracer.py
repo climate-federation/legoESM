@@ -84,6 +84,127 @@ def read_stage1_tracer(path: Path) -> dict:
     return result
 
 
+def read_stage1_transport_operands(path: Path) -> dict:
+    """Read the WRITE-only stage-1 horizontal-transport operands."""
+    from legoesm.ocean.fidelity.time_levels import time_level_for_dump
+
+    require(time_level_for_dump(path.name) == "now", f"{path}: wrong registry level")
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii").rstrip()
+        header = struct.unpack("=8i", handle.read(32))
+        values = np.fromfile(handle, dtype=np.float64)
+    version, kt, stage, kmm, nx, ny, nz, bits = header
+    require(magic == "NEMO_L2_TRPOP_1", f"{path}: bad magic {magic!r}")
+    require(
+        (version, kt, stage, kmm, nx, ny, nz, bits)
+        == (1, 1, 1, 1, *DIMS, 64),
+        f"{path}: bad header {header}",
+    )
+    n2, n3 = nx * ny, nx * ny * nz
+    require(values.size == 4 * n2 + 8 * n3, f"{path}: bad payload")
+    require(np.all(np.isfinite(values)), f"{path}: non-finite payload")
+    result = {}
+    offset = 0
+    for name, size, transform in (
+        ("e2u", n2, lambda x: _xy(x, nx, ny)),
+        ("e3u", n3, lambda x: _xyz(x, nx, ny, nz)),
+        ("uu", n3, lambda x: _xyz(x, nx, ny, nz)),
+        ("zub", n2, lambda x: _xy(x, nx, ny)),
+        ("umask", n3, lambda x: _xyz(x, nx, ny, nz)),
+        ("zFu", n3, lambda x: _xyz(x, nx, ny, nz)),
+        ("e1v", n2, lambda x: _xy(x, nx, ny)),
+        ("e3v", n3, lambda x: _xyz(x, nx, ny, nz)),
+        ("vv", n3, lambda x: _xyz(x, nx, ny, nz)),
+        ("zvb", n2, lambda x: _xy(x, nx, ny)),
+        ("vmask", n3, lambda x: _xyz(x, nx, ny, nz)),
+        ("zFv", n3, lambda x: _xyz(x, nx, ny, nz)),
+    ):
+        result[name] = transform(values[offset:offset + size])
+        offset += size
+    result["header"] = {
+        "version": version, "kt": kt, "stage": stage, "Kmm": kmm,
+        "bits": bits, "registry_level": "now",
+    }
+    return result
+
+
+def _comparison(candidate: np.ndarray, oracle: np.ndarray) -> dict:
+    delta = np.asarray(candidate) - np.asarray(oracle)
+    ulps = ulp_distance(np.asarray(candidate), np.asarray(oracle))
+    return {
+        "bit_exact": bool(np.array_equal(candidate, oracle)),
+        "absolute_max": float(np.max(np.abs(delta), initial=0.0)),
+        "ulp_max": int(np.max(ulps, initial=0)),
+        "differing_cells": int(np.count_nonzero(candidate != oracle)),
+    }
+
+
+def run_transport_operands(oracle_root: Path, *, plant: bool = False) -> dict:
+    """Discriminate the literal zFu/zFv product association from its inputs."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.ocean.eos import _nemo_source_round
+
+    set_policy(PrecisionPolicy.fp64())
+    require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    require(not bool(jax.config.jax_disable_jit), "production JIT is required")
+    path = oracle_root / "oracle_rkstage1_transport_operands_kt00000001.bin"
+    require(path.is_file(), f"missing {path}")
+    oracle = read_stage1_transport_operands(path)
+
+    def _literal(e_metric, e3, vel, mean, mask):
+        b = _nemo_source_round
+        corrected = b(vel + b(mean[..., None] * mask))
+        metric_thickness = b(e_metric[..., None] * e3)
+        return b(metric_thickness * corrected)
+
+    literal_jit = jax.jit(_literal)
+    rows = {}
+    for face, names in {
+        "u": ("e2u", "e3u", "uu", "zub", "umask", "zFu"),
+        "v": ("e1v", "e3v", "vv", "zvb", "vmask", "zFv"),
+    }.items():
+        metric, e3, vel, mean, mask, result = (oracle[name] for name in names)
+        numpy_corrected = vel + mean[..., None] * mask
+        numpy_literal = (metric[..., None] * e3) * numpy_corrected
+        numpy_reassociated = metric[..., None] * (e3 * numpy_corrected)
+        jax_literal = np.asarray(literal_jit(
+            jnp.asarray(metric), jnp.asarray(e3), jnp.asarray(vel),
+            jnp.asarray(mean), jnp.asarray(mask)))
+        if plant and face == "u":
+            jax_literal = jax_literal.copy()
+            index = tuple(np.argwhere(mask != 0.0)[0])
+            jax_literal[index] = np.nextafter(jax_literal[index], np.inf)
+        rows[face] = {
+            "numpy_fortran_association_vs_oracle": _comparison(
+                numpy_literal, result),
+            "numpy_reassociated_vs_oracle": _comparison(
+                numpy_reassociated, result),
+            "jax_jit_fortran_association_vs_oracle": _comparison(
+                jax_literal, result),
+            "jax_jit_vs_numpy_fortran_association": _comparison(
+                jax_literal, numpy_literal),
+        }
+    exact = all(
+        row["jax_jit_fortran_association_vs_oracle"]["bit_exact"]
+        for row in rows.values())
+    return {
+        "format": "nemo-testcase-l2-gyre-round13-transport-operands-v1",
+        "status": "AT-BAR" if exact else "DEBT",
+        "regime": "production-jit-cpu-fp64-x64",
+        "oracle_root": str(oracle_root),
+        "oracle_dump_sha256": sha256(path),
+        "oracle_header": oracle["header"],
+        "rows": rows,
+        "owner_label": (
+            "CONFIRMED_ZF_PRODUCT_ASSOCIATION" if exact
+            else "UNMEASURED_WITHIN_ZF_PRODUCT"),
+        "plant": plant,
+    }
+
+
 def _bits(value: np.float64) -> str:
     return f"0x{int(np.asarray(value, dtype=np.float64).view(np.uint64)):016x}"
 
@@ -415,9 +536,15 @@ def main(argv=None) -> int:
     parser.add_argument("--control-root", type=Path, default=CONTROL_ROOT)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant", action="store_true")
+    parser.add_argument(
+        "--mode", choices=("tracer", "transport-operands"), default="tracer")
     args = parser.parse_args(argv)
     try:
-        report = run(args.oracle_root, args.control_root, plant=args.plant)
+        report = (
+            run_transport_operands(args.oracle_root, plant=args.plant)
+            if args.mode == "transport-operands"
+            else run(args.oracle_root, args.control_root, plant=args.plant)
+        )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 2

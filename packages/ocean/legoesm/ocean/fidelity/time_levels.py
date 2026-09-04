@@ -932,6 +932,13 @@ for _stage, _kmm in ((1, 1), (2, 3)):
         f"stage-{_stage} Kmm={_kmm} tracer Krhs checkpoints and the "
         "Kbb/Kmm/Kaa update operands",
     )
+_DUMP_TIME_LEVEL["oracle_rkstage1_transport_operands_kt00000001.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3/MY_SRC/stprk3_stg.F90 writes the stage-1 "
+    "e2u/e3u/uu/zub/umask/zFu and e1v/e3v/vv/zvb/vmask/zFv operands "
+    "immediately after stprk3_stg.F90:265-278 materializes zFu/zFv",
+)
 _DUMP_TIME_LEVEL["oracle_tracer_transport_kt00000001_s3.bin"] = (
     "now",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
