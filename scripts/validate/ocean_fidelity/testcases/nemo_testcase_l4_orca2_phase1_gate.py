@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 
 NX, NY, NZ, NTR = 94, 152, 31, 2
+NLAY_I, NLAY_S = 10, 5
 N2 = NX * NY
 N3 = N2 * NZ
 NI = (NX - 4) * (NY - 4)
@@ -200,7 +201,9 @@ def _parse_zdf(path: Path) -> dict:
                 version, got_kt, got_category, npti, bits, count = h
                 require((version, got_kt, got_category, bits) == (2, kt, category, 64),
                         f"{path.name}: bad header {h}")
-                require(npti > 0 and count == 18 * npti, f"{path.name}: bad payload size header {h}")
+                expected_count = (13 + NLAY_S) * npti
+                require(npti > 0 and count == expected_count,
+                        f"{path.name}: bad payload size header {h}")
                 _read_finite(handle, count, path.name)
                 rows.append(list(h))
         require(handle.read(1) == b"", f"{path.name}: trailing/interleaved payload")
@@ -216,7 +219,9 @@ def _parse_reassoc(path: Path) -> dict:
             version, kt, got_category, npti, nli, nls, bits, count = h
             require((version, kt, got_category, nli, nls, bits)
                     == (1, 3, category, 10, 5, 64), f"{path.name}: bad header {h}")
-            require(npti > 0 and count == 43 * npti, f"{path.name}: bad payload size header {h}")
+            expected_count = (3 + 3 * nli + 2 * nls) * npti
+            require(npti > 0 and count == expected_count,
+                    f"{path.name}: bad payload size header {h}")
             _read_finite(handle, count, path.name)
             rows.append(list(h))
         require(handle.read(1) == b"", f"{path.name}: trailing/interleaved payload")

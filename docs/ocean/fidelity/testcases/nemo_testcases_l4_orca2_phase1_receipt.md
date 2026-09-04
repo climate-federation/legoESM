@@ -432,10 +432,13 @@ The Lane-3 source writes, per active category, `t_su` (1), `t_i` (10), `t_s`
 (5), `sz_i` (10), `e_i` (10), `e_s` (5), `qns_ice` (1), and `dqns_ice` (1):
 `43*npti` binary64 values, while its inherited header says `18*npti`.
 
-Lane 3 must add a sequential header-validity check for every
+Lane 3 must derive the payload count from the write-list dimensions, not
+replace `18` with another literal: `(3 + 3*nlay_i + 2*nlay_s)*npti`, which
+resolves to `43*npti` for `nlay_i=10,nlay_s=5`. It must add a sequential
+header-validity check for every
 `NEMO_L3REA_001` frame that verifies: exact 16-byte magic; version; monotonic
 kt/category; `nlay_i=10`, `nlay_s=5`, `wp=64`; positive `npti`; declared
-`count == 43*npti`; exactly that many finite binary64 payload values; and exact
+`count == (3 + 3*nlay_i + 2*nlay_s)*npti`; exactly that many finite binary64 payload values; and exact
 EOF after the expected category frames. A mere whole-file byte count is
 insufficient. The C1D Lane-3 oracle streams may otherwise carry the same
 malformed metadata even when their payload bytes are intact.
