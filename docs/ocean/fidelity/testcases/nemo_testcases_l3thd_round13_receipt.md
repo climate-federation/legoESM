@@ -125,10 +125,11 @@ zero in this in-process C1D run; only the inactive external-coupler send path
 sets it (`sbccpl.F90:2724-2726`), while the active ice-base `eos_fzp` row is
 scored separately.  A corrupted nonzero `utau` bridge plant is red.
 
-The 36-field exchange-stream coverage register is one-to-one and all fields
-are `VERIFIED` by the combined bulk, thermodynamic, update, tau, FWB, and card
-rows.  This statement certifies field registration/producer-to-card flow; it
-does not certify the six unmeasured ocean-dynamics consumers listed above.
+The 36-field exchange-stream coverage register is one-to-one: 35 fields are
+`VERIFIED` by the combined bulk, thermodynamic, update, tau, FWB, bridge, and
+card rows, and the one source-backed `sstfrz` waiver is stated above.  This
+limited statement certifies registered producer/card flow; it does not certify
+the six unmeasured ocean-dynamics consumers listed above.
 
 Pierre's unmerged `lead_freeze_source` change overlaps the earlier shared
 `_nemo_si3_ice_flx_other` transcription of `icesbc.F90:357-405`.  Round 13 did
