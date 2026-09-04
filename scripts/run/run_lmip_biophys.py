@@ -845,24 +845,6 @@ def run(args) -> int:
             "soil_evap": soil_evap,
             "Rnet": rnet,
         }
-        # Carbon diagnostics.  NBP is the column-carbon TENDENCY, differenced
-        # across the same step the physics took, so it closes against the pools
-        # by construction rather than being re-derived from fluxes.  Zero (not
-        # NaN) when the pools are prescribed, so a tape spec is valid on both
-        # lanes.
-        if _carbon_prognostic:
-            _c_tot_new = _column_carbon(carbon_new)
-            values["C_total"] = _c_tot_new
-            values["C_soil"] = (carbon_new.C_som_active + carbon_new.C_som_slow
-                                + carbon_new.C_som_passive)
-            values["C_veg"] = (carbon_new.C_lab + carbon_new.C_fol
-                               + carbon_new.C_root + carbon_new.C_wood)
-            values["NBP"] = (_c_tot_new - _column_carbon(carbon)) / dt * _SEC_PER_DAY
-        else:
-            values["C_total"] = _ZEROS
-            values["C_soil"] = _ZEROS
-            values["C_veg"] = _ZEROS
-            values["NBP"] = _ZEROS
         if is_multilayer:
             values["T_soil_top"] = new_state.T_soil[:, 0]
             values["theta_soil_top"] = new_state.theta_soil[:, 0]
@@ -879,24 +861,59 @@ def run(args) -> int:
         # PASS/FAIL.  The reverted step's diagnostics are untrustworthy, so mask
         # them to NaN; ``reverted`` (0/1) is tape-able as a per-cell failure-rate
         # map and ``revert_count`` accumulates a per-cell total for the summary.
+        # TWO masks, because the dependency is one-way.  Carbon consumes the
+        # physics (C_fol -> LAI -> conductance), the physics does not consume a
+        # pool within the step, so a diverging litter pool must NOT freeze that
+        # column's soil temperature and moisture as well.  Carbon reverts when
+        # EITHER it or the physics it ate went bad; physics reverts only on its
+        # own.  Within carbon the revert stays all-or-nothing per column —
+        # reverting one pool and not another would break mass closure.
         reverted = _nonfinite_per_col(new_state, ncol)          # (ncol,) bool
-        if _carbon_prognostic:
-            # Prognostic pools are part of the state that must stay finite: a
-            # NaN pool feeds LAI on the NEXT step, so a column whose CARBON
-            # diverged has to revert too, and by the same mask as its physics
-            # (reverting one but not the other would desync the pair).
-            reverted = reverted | _nonfinite_per_col(carbon_new, ncol)
-        def _revert(n, o):
-            if getattr(n, "ndim", 0) < 1 or n.shape[0] != ncol:
-                return n
-            m = reverted.reshape((ncol,) + (1,) * (n.ndim - 1))
-            return jnp.where(m, o, n)
+        reverted_carbon = (reverted | _nonfinite_per_col(carbon_new, ncol)
+                           if _carbon_prognostic else reverted)
+        def _revert_with(mask):
+            def _f(n, o):
+                if getattr(n, "ndim", 0) < 1 or n.shape[0] != ncol:
+                    return n
+                m = mask.reshape((ncol,) + (1,) * (n.ndim - 1))
+                return jnp.where(m, o, n)
+            return _f
+        _revert = _revert_with(reverted)
         new_state = jax.tree_util.tree_map(_revert, new_state, state)
-        carbon_next = (jax.tree_util.tree_map(_revert, carbon_new, carbon)
+        carbon_next = (jax.tree_util.tree_map(
+                           _revert_with(reverted_carbon), carbon_new, carbon)
                        if _carbon_prognostic else carbon)
         revert_count = revert_count + reverted.astype(revert_count.dtype)
         values = {k: jnp.where(reverted, jnp.nan, v) for k, v in values.items()}
         values["reverted"] = reverted.astype(jnp.float64)
+        # Carbon diagnostics come from the POST-revert carry, and are deliberately
+        # NOT NaN-masked like the fluxes above.  Two reasons.  (1) After a revert
+        # the trajectory this run actually reports has dC = 0 for that column, so
+        # NBP = 0 is the CONSISTENT tendency -- it reconciles with the monthly
+        # change in C_total, where NaN would assert "unknown" about a state that
+        # is known.  (2) accumulate_tape_step sums with a plain `.at[].add()`, so
+        # it is NOT NaN-aware: one reverted step would turn that column's whole
+        # averaging window -- and any global mean taken from it -- into NaN.
+        # The `reverted` tape above carries the fraction of the window that was
+        # reverted, which is the honest flag; a zero without that flag would be
+        # the misleading combination, and it is available on every tape.
+        # Differencing is exact for whatever the pools hold (it cannot miss a
+        # sink the way NPP - Rh can), and this driver runs float64, so the
+        # large-stock cancellation that would swamp a float32 difference does
+        # not bite here.
+        if _carbon_prognostic:
+            _c_tot = _column_carbon(carbon_next)
+            values["C_total"] = _c_tot
+            values["C_soil"] = (carbon_next.C_som_active + carbon_next.C_som_slow
+                                + carbon_next.C_som_passive)
+            values["C_veg"] = (carbon_next.C_lab + carbon_next.C_fol
+                               + carbon_next.C_root + carbon_next.C_wood)
+            values["NBP"] = (_c_tot - _column_carbon(carbon)) / dt * _SEC_PER_DAY
+        else:
+            values["C_total"] = _ZEROS
+            values["C_soil"] = _ZEROS
+            values["C_veg"] = _ZEROS
+            values["NBP"] = _ZEROS
         new_accums = {}
         for tape in tape_specs:                    # unrolled at trace time
             new_accums[tape.name] = accumulate_tape_step(
