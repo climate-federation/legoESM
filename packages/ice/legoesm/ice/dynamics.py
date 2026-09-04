@@ -1104,7 +1104,7 @@ def si3_cgrid_aevp_solver(
         at_i,
         config.strength_parameter_pa,
         config.strength_decay,
-        _source_round=True,
+        source_exact=True,
     )
     strength_t = nemo_source_round(jnp.where(at_i > _SI3_ICE_PRESENCE, strength_formula, _SI3_ZERO))
 

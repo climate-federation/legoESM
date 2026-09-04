@@ -441,8 +441,14 @@ def apply_si3_prather_source_corrections(
     pond_correct = (
         has_ice & (h_ip > h_ip_max) & (a_ip < _ICE_ADV2D_HBIG_CONCENTRATION)
     )
-    a_ip = jnp.where(pond_correct, ratio(v_ip, h_ip_max, pond_correct), a_ip)
-    contents = contents.at[..., index("a_ip")].set(a_ip * area)
+    corrected_a_ip = ratio(v_ip, h_ip_max, pond_correct)
+    contents = contents.at[..., index("a_ip")].set(
+        jnp.where(
+            pond_correct,
+            corrected_a_ip * area,
+            contents[..., index("a_ip")],
+        )
+    )
 
     # The ice-thickness part of Hbig_pra (:997-1002) is already applied by
     # advect_si3_prather_2d because its two indices are dispatch-mandatory.
@@ -452,11 +458,20 @@ def apply_si3_prather_source_corrections(
     h_s = ratio(v_s, a_i, a_i > 0.0)
     snow_correct = (v_s > 0.0) & (h_s > h_s_max) & (a_i < _ICE_ADV2D_HBIG_CONCENTRATION)
     snow_fraction = jnp.where(snow_correct, ratio(h_s_max, h_s, snow_correct), 1.0)
-    v_s = jnp.where(snow_correct, a_i * h_s_max, v_s)
-    contents = contents.at[..., index("v_s")].set(v_s * area)
+    corrected_v_s = a_i * h_s_max
+    contents = contents.at[..., index("v_s")].set(
+        jnp.where(
+            snow_correct,
+            corrected_v_s * area,
+            contents[..., index("v_s")],
+        )
+    )
+    v_s = intensive(contents, "v_s")
     for name in snow_layers:
         value = intensive(contents, name) * snow_fraction
-        contents = contents.at[..., index(name)].set(value * area)
+        contents = contents.at[..., index(name)].set(
+            jnp.where(snow_correct, value * area, contents[..., index(name)])
+        )
 
     # Option-4 layer salt and all layer enthalpy maxima (:1020-1069).
     low_concentration = a_i < _ICE_ADV2D_HBIG_CONCENTRATION
@@ -468,8 +483,10 @@ def apply_si3_prather_source_corrections(
         specific = ratio(value, v_i, v_i > 0.0)
         cap = _max9(entry_specific)
         correct = (v_i > 0.0) & (a_i > 0.0) & (specific > cap) & low_concentration
-        value = jnp.where(correct, ratio(value * cap, specific, correct), value)
-        contents = contents.at[..., index(name)].set(value * area)
+        corrected = ratio(value * cap, specific, correct)
+        contents = contents.at[..., index(name)].set(
+            jnp.where(correct, corrected * area, contents[..., index(name)])
+        )
     for name in ice_layers:
         entry_specific = ratio(
             intensive(entry_contents, name), entry_v_i, entry_v_i >= _ICE_ADV2D_SMALL
@@ -478,8 +495,10 @@ def apply_si3_prather_source_corrections(
         specific = ratio(value, v_i, v_i > 0.0)
         cap = _max9(entry_specific)
         correct = (v_i > 0.0) & (a_i > 0.0) & (specific > cap) & low_concentration
-        value = jnp.where(correct, ratio(value * cap, specific, correct), value)
-        contents = contents.at[..., index(name)].set(value * area)
+        corrected = ratio(value * cap, specific, correct)
+        contents = contents.at[..., index(name)].set(
+            jnp.where(correct, corrected * area, contents[..., index(name)])
+        )
     for name in snow_layers:
         entry_specific = ratio(
             intensive(entry_contents, name), entry_v_s, entry_v_s >= _ICE_ADV2D_SMALL
@@ -488,56 +507,82 @@ def apply_si3_prather_source_corrections(
         specific = ratio(value, v_s, v_s > 0.0)
         cap = _max9(entry_specific)
         correct = (v_s > 0.0) & (a_i > 0.0) & (specific > cap) & low_concentration
-        value = jnp.where(correct, ratio(value * cap, specific, correct), value)
-        contents = contents.at[..., index(name)].set(value * area)
+        corrected = ratio(value * cap, specific, correct)
+        contents = contents.at[..., index(name)].set(
+            jnp.where(correct, corrected * area, contents[..., index(name)])
+        )
 
     # Hsnow_pra (:1115-1133): bound snow loading and pond area.
     snow_capacity = v_i * (constants.rho_ocean_nemo - constants.rho_ice) / constants.rho_snow
     excess = jnp.where(v_i > 0.0, jnp.maximum(0.0, v_s - snow_capacity), 0.0)
+    has_excess = excess > 0.0
     fraction = jnp.where(v_s > 0.0, ratio(v_s - excess, v_s, v_s > 0.0), 1.0)
-    v_s = v_s - excess
-    contents = contents.at[..., index("v_s")].set(v_s * area)
+    corrected_v_s = v_s - excess
+    contents = contents.at[..., index("v_s")].set(
+        jnp.where(
+            has_excess,
+            corrected_v_s * area,
+            contents[..., index("v_s")],
+        )
+    )
+    v_s = intensive(contents, "v_s")
     for name in snow_layers:
         value = intensive(contents, name) * fraction
-        contents = contents.at[..., index(name)].set(value * area)
-    a_ip = jnp.minimum(intensive(contents, "a_ip"), a_i)
-    contents = contents.at[..., index("a_ip")].set(a_ip * area)
+        contents = contents.at[..., index(name)].set(
+            jnp.where(has_excess, value * area, contents[..., index(name)])
+        )
+    old_a_ip = intensive(contents, "a_ip")
+    cap_pond = old_a_ip > a_i
+    contents = contents.at[..., index("a_ip")].set(
+        jnp.where(
+            cap_pond,
+            contents[..., index("a_i")],
+            contents[..., index("a_ip")],
+        )
+    )
 
     # ice_var_zapneg (:759-837).  The positive-flow testcase normally makes
     # this a no-op, but retaining it makes the selector composition explicit.
     # `ice_var_zapneg` first updates pa_i (:759-760); every later test sees
     # that updated value, notably the snow-volume removal at :807-816.
-    a_i = jnp.where(v_i <= 0.0, 0.0, a_i)
+    invalid_area = v_i <= 0.0
+    a_i = jnp.where(invalid_area, 0.0, a_i)
     invalid_ice = (v_i <= 0.0) | (a_i <= 0.0)
-    contents = contents.at[..., index("a_i")].set(a_i * area)
+    contents = contents.at[..., index("a_i")].set(
+        jnp.where(invalid_area, 0.0, contents[..., index("a_i")])
+    )
     for name in salt_layers + ice_layers:
         value = intensive(contents, name)
+        invalid = (value < 0.0) | invalid_ice
         contents = contents.at[..., index(name)].set(
-            jnp.where((value < 0.0) | invalid_ice, 0.0, value) * area
+            jnp.where(invalid, 0.0, contents[..., index(name)])
         )
     for name in snow_layers:
         value = intensive(contents, name)
+        invalid = (value < 0.0) | (a_i <= 0.0) | (v_s <= 0.0)
         contents = contents.at[..., index(name)].set(
-            jnp.where((value < 0.0) | (a_i <= 0.0) | (v_s <= 0.0), 0.0, value) * area
+            jnp.where(invalid, 0.0, contents[..., index(name)])
         )
-    v_i = jnp.where((v_i < 0.0) | (a_i <= 0.0), 0.0, v_i)
-    v_s = jnp.where((v_s < 0.0) | (a_i <= 0.0), 0.0, v_s)
-    oa_i = jnp.maximum(intensive(contents, "oa_i"), 0.0)
-    a_ip = jnp.maximum(intensive(contents, "a_ip"), 0.0)
+    invalid_v_i = (v_i < 0.0) | (a_i <= 0.0)
+    invalid_v_s = (v_s < 0.0) | (a_i <= 0.0)
+    oa_i = intensive(contents, "oa_i")
+    invalid_oa_i = oa_i < 0.0
+    a_ip = intensive(contents, "a_ip")
+    invalid_a_ip = a_ip < 0.0
     v_ip = intensive(contents, "v_ip")
     v_il = intensive(contents, "v_il")
     invalid_pond = (v_ip < 0.0) | (a_ip <= 0.0)
-    v_il = jnp.where(invalid_pond | (v_il < 0.0), 0.0, v_il)
-    v_ip = jnp.where(invalid_pond, 0.0, v_ip)
-    for name, value in (
-        ("v_i", v_i),
-        ("v_s", v_s),
-        ("oa_i", oa_i),
-        ("a_ip", a_ip),
-        ("v_ip", v_ip),
-        ("v_il", v_il),
+    for name, invalid in (
+        ("v_i", invalid_v_i),
+        ("v_s", invalid_v_s),
+        ("oa_i", invalid_oa_i),
+        ("a_ip", invalid_a_ip),
+        ("v_ip", invalid_pond),
+        ("v_il", invalid_pond | (v_il < 0.0)),
     ):
-        contents = contents.at[..., index(name)].set(value * area)
+        contents = contents.at[..., index(name)].set(
+            jnp.where(invalid, 0.0, contents[..., index(name)])
+        )
     # NEMO corrects physical cells, then lbc_lnk refreshes the bi-periodic
     # halos (`icedyn_adv_pra.F90:405-479`).  Never feed independently corrected
     # halo values into the next split step.

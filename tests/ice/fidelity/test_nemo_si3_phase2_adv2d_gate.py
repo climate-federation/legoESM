@@ -32,6 +32,13 @@ SPEC.loader.exec_module(gate)
 _ORDER_TEST_AREA = 3743035203.7156296
 _ORDER_TEST_TRANSPORT = 378.6794450766214
 _ORDER_TEST_DT = 44097.24518081014
+_SOURCE_EXACT_SHAPE = (11, 11, 3)
+_SOURCE_EXACT_AREA_M2 = 3.7e9
+_SOURCE_EXACT_AREA_INCREMENT_M2 = 12345.6789
+_SOURCE_EXACT_U_SCALE_M_S = 317.123456
+_SOURCE_EXACT_V_SCALE_M_S = 173.98765
+_SOURCE_EXACT_DT_S = 1800.0
+_SOURCE_EXACT_SPACING_M = 3000.0
 
 
 def _build_card():
@@ -175,6 +182,69 @@ def test_flux_area_preserves_nemo_courant_then_area_operation_order():
     simplified_flux_area = _ORDER_TEST_TRANSPORT * _ORDER_TEST_DT
     assert written_flux_area != simplified_flux_area
     assert float(area_after[3, 3]) == _ORDER_TEST_AREA - written_flux_area
+
+
+def test_source_rounding_changes_compiled_prather_association() -> None:
+    """The private identity ablation must change a scored Prather leaf."""
+
+    import legoesm.ice.transport as transport
+
+    shape = _SOURCE_EXACT_SHAPE
+    index = np.arange(np.prod(shape), dtype=np.float64).reshape(shape)
+    content = jnp.asarray(1.0 + (index % 37) / 53.0)
+    area = jnp.asarray(
+        _SOURCE_EXACT_AREA_M2
+        + (index[..., 0] % 13) * _SOURCE_EXACT_AREA_INCREMENT_M2
+    )
+    u_ice = jnp.asarray(
+        ((index[..., 0] % 7) - 3) * _SOURCE_EXACT_U_SCALE_M_S
+    )
+    v_ice = jnp.asarray(
+        ((index[..., 0] % 5) - 2) * _SOURCE_EXACT_V_SCALE_M_S
+    )
+    wet = jnp.ones(shape[:2], dtype=bool)
+    moments = tuple(
+        jnp.asarray(content * (0.01 * (moment + 1)) + index % (11 + moment) / 1.0e6)
+        for moment in range(5)
+    )
+
+    def make_stepper():
+        def step(packed, carried_moments):
+            return transport.advect_si3_prather_2d(
+                packed,
+                carried_moments,
+                u_ice,
+                v_ice,
+                area,
+                wet,
+                _SOURCE_EXACT_DT_S,
+                dx=_SOURCE_EXACT_SPACING_M,
+                dy=_SOURCE_EXACT_SPACING_M,
+                ice_step_index=8,
+                halo_width=2,
+                ice_volume_index=0,
+                concentration_index=1,
+                subcycles=1,
+            )
+
+        return jax.jit(step)
+
+    guarded = make_stepper()(content, moments)
+    jax.block_until_ready(guarded)
+    source_round = transport.nemo_source_round
+    try:
+        transport.nemo_source_round = lambda value: value
+        unrounded = make_stepper()(content, moments)
+        jax.block_until_ready(unrounded)
+    finally:
+        transport.nemo_source_round = source_round
+
+    guarded_leaves = jax.tree.leaves((guarded[0], guarded[1]))
+    unrounded_leaves = jax.tree.leaves((unrounded[0], unrounded[1]))
+    assert any(
+        np.asarray(left).tobytes() != np.asarray(right).tobytes()
+        for left, right in zip(guarded_leaves, unrounded_leaves, strict=True)
+    )
 
 
 def test_hsnow_and_pond_caps_are_non_vacuous():

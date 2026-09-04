@@ -51,15 +51,38 @@ def test_arm_summary_and_row_bar_are_derived() -> None:
     assert summary["status"] == "DEBT"
     assert summary["debt_count"] == 1
     assert summary["owner"]["name"] == "sxxe_l01"
+    assert summary["byte_exact_count"] == 0
+    assert summary["non_bit_exact_count"] == 2
+
+
+def test_arm_summary_records_zero_over_n_for_byte_exact_row() -> None:
+    oracle = np.asarray([[0.5, -0.25]], dtype=np.float64)
+    row = gate._moment_row("sxa", oracle, oracle.copy())
+    summary = gate._arm_summary([row])
+    assert row["bitwise_nonzero_over_n"] == "0 / 2"
+    assert summary["byte_exact_count"] == 1
+    assert summary["non_bit_exact_count"] == 0
 
 
 def test_plant_exit_requires_a_jit_over_two_ulp_row() -> None:
     report = {
         "exit_code": 0,
-        "plant": {"jit_over_two_ulp_count": 4, "exit_code": 1},
+        "plant": {
+            "jit_over_two_ulp_count": 4,
+            "binding_row": {
+                "name": gate.PLANT_BINDING_ROW,
+                "status": "DEBT",
+                "max_ulp": 3,
+            },
+            "exit_code": 1,
+        },
     }
     assert gate._selected_exit_code(report, plant=False) == 0
     assert gate._selected_exit_code(report, plant=True) == 1
-    report["plant"]["jit_over_two_ulp_count"] = 0
-    with pytest.raises(gate.MomentReplayError, match="over-two-ULP"):
+    report["plant"]["binding_row"]["max_ulp"] = 0
+    with pytest.raises(gate.MomentReplayError, match=gate.PLANT_BINDING_ROW):
         gate._selected_exit_code(report, plant=True)
+
+
+def test_named_plant_binding_row_is_stable() -> None:
+    assert gate.PLANT_BINDING_ROW == "plant_delta.syye_l01"

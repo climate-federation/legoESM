@@ -186,7 +186,7 @@ def ice_strength(
     P_star: float = _RHEO_DEFAULTS.P_star,
     C_strength: float = _RHEO_DEFAULTS.C_strength,
     *,
-    _source_round: bool = False,
+    source_exact: bool = False,
 ) -> jnp.ndarray:
     """Compute ice strength following Hibler (1979).
 
@@ -202,13 +202,17 @@ def ice_strength(
         Ice strength parameter [N/m^2].
     C_strength : float
         Exponential decay constant.
+    source_exact : bool
+        Materialize the four H79 operations in NEMO source order.  The default
+        remains the native JAX association; SI3's C-grid oracle card selects
+        this arm together with scalar-libm transcendental evaluation.
 
     Returns
     -------
     P : array
         Ice strength [N/m].
     """
-    source_round = nemo_source_round if _source_round else lambda value: value
+    source_round = nemo_source_round if source_exact else lambda value: value
     concentration_deficit = source_round(1.0 - A)
     exponent = source_round(-C_strength * concentration_deficit)
     prefactor = source_round(P_star * h)

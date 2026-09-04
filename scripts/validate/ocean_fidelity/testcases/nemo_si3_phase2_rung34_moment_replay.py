@@ -14,6 +14,7 @@ import jax
 import jax.numpy as jnp
 import netCDF4
 import numpy as np
+import legoesm.ice.transport as ice_transport
 from legoesm.core.precision import PrecisionPolicy, get_policy
 from legoesm.ice.dynamics import si3_cgrid_aevp_solver
 from legoesm.ice.fidelity import nemo_rheo_testcase_recipe as recipe
@@ -38,6 +39,7 @@ ENTRY_RESTART = 7
 TARGET_RESTART = 8
 HALO = 2
 PLANT_VELOCITY_M_S = 1.0e-10
+PLANT_BINDING_ROW = "plant_delta.syye_l01"
 _HASH_BLOCK_BYTES = 1024 * 1024
 _MOMENT_ROW_COUNT = len(SI3_PRATHER_MOMENT_NAMES) * len(recipe.ICE_RHEO_TRACERS)
 
@@ -183,6 +185,7 @@ def _moment_row(name: str, oracle: np.ndarray, candidate: np.ndarray) -> dict[st
     normalized = maximum / max(oracle_maximum, 1.0)
     relative = maximum / oracle_maximum if oracle_maximum > 0.0 else None
     ulp = _ulp_distance(candidate, oracle)
+    nonzero = int(np.count_nonzero(candidate.view(np.uint64) != oracle.view(np.uint64)))
     return {
         "name": name,
         "status": "AT-BAR" if normalized <= POINTWISE_BAR else "DEBT",
@@ -190,6 +193,8 @@ def _moment_row(name: str, oracle: np.ndarray, candidate: np.ndarray) -> dict[st
         "normalized_max_abs": normalized,
         "relative_max_abs": relative,
         "max_ulp": int(np.max(ulp)),
+        "bitwise_nonzero_over_n": f"{nonzero} / {oracle.size}",
+        "bitwise_nonzero_count": nonzero,
         "max_abs_index_xy": [int(value) for value in index],
     }
 
@@ -262,10 +267,13 @@ def _arm_summary(rows: list[dict[str, object]]) -> dict[str, object]:
     debts = [row for row in rows if row["status"] == "DEBT"]
     owner = max(rows, key=lambda row: float(row["normalized_max_abs"]))
     over_two_ulp = [row for row in rows if int(row["max_ulp"]) > ULP_LIMIT]
+    non_bit_exact = [row for row in rows if int(row["bitwise_nonzero_count"]) > 0]
     return {
         "status": "AT-BAR" if not debts else "DEBT",
         "debt_count": len(debts),
         "over_two_ulp_count": len(over_two_ulp),
+        "byte_exact_count": len(rows) - len(non_bit_exact),
+        "non_bit_exact_count": len(non_bit_exact),
         "owner": owner,
         "rows": rows,
     }
@@ -313,23 +321,44 @@ def run_replay(
     jit_plant_delta = _arm_summary(
         _score_plant_delta(jit_clean_stages, jit_planted_stages)
     )
-    require(
-        int(jit_plant_delta["over_two_ulp_count"]) > 0,
-        "JIT velocity plant did not move any moment row over two ULP",
+    plant_binding_row = next(
+        row
+        for row in jit_plant_delta["rows"]
+        if row["name"] == PLANT_BINDING_ROW
     )
+    require(
+        plant_binding_row["status"] == "DEBT"
+        and int(plant_binding_row["max_ulp"]) > ULP_LIMIT,
+        f"JIT velocity plant did not move {PLANT_BINDING_ROW} over two ULP",
+    )
+    # Private one-variable ablation: trace the same production JIT program with
+    # the source-statement guard replaced by identity.  This is evidence only;
+    # it is not a card selector or public transport option.
+    source_round = ice_transport.nemo_source_round
+    try:
+        ice_transport.nemo_source_round = lambda value: value
+        unrounded_stepper = _make_jit_stepper(card)
+        jit_unrounded_stages = _run_jit_arm(
+            card, state, oracle_u, oracle_v, unrounded_stepper
+        )
+    finally:
+        ice_transport.nemo_source_round = source_round
+    jit_unrounded = _arm_summary(_score_arm(jit_unrounded_stages, target_restart))
     if jit_only:
         return {
             "gate": "nemo-si3-phase2-rung34-step8-moment-replay-jit-v1",
             "status": jit_oracle_uv["status"],
-            "exit_code": 0 if jit_oracle_uv["over_two_ulp_count"] == 0 else 1,
+            "exit_code": 0 if jit_oracle_uv["non_bit_exact_count"] == 0 else 1,
             "backend": jax.default_backend(),
             "precision_policy": str(get_policy()),
             "execution_path": "production JIT (CPU, fp64, scalar-libm)",
             "jit_oracle_uv": jit_oracle_uv,
+            "private_unrounded_ablation": jit_unrounded,
             "plant": {
                 "velocity_delta_m_s": PLANT_VELOCITY_M_S,
                 "jit_over_two_ulp_count": jit_plant_delta["over_two_ulp_count"],
                 "delta_owner": jit_plant_delta["owner"],
+                "binding_row": plant_binding_row,
                 "exit_code": 1,
             },
         }
@@ -385,7 +414,7 @@ def run_replay(
     return {
         "gate": "nemo-si3-phase2-rung34-step8-moment-replay-v1",
         "status": summaries["oracle_uv"]["status"],
-        "exit_code": 0 if summaries["oracle_uv"]["over_two_ulp_count"] == 0 else 1,
+        "exit_code": 0 if jit_oracle_uv["non_bit_exact_count"] == 0 else 1,
         "backend": jax.default_backend(),
         "precision_policy": str(get_policy()),
         "pointwise_bar": POINTWISE_BAR,
@@ -394,6 +423,7 @@ def run_replay(
         "velocity_rows": velocity_rows,
         "arms": summaries,
         "jit_oracle_uv": jit_oracle_uv,
+        "private_unrounded_ablation": jit_unrounded,
         "first_baseline_vs_oracle_velocity_moment_difference": first_difference,
         "limiter_input_identity": {
             "status": "EXACT",
@@ -415,6 +445,7 @@ def run_replay(
             "first_changed_row": changed[0],
             "jit_over_two_ulp_count": jit_plant_delta["over_two_ulp_count"],
             "delta_owner": jit_plant_delta["owner"],
+            "binding_row": plant_binding_row,
             "exit_code": 1,
         },
         "artifacts": {
@@ -433,9 +464,12 @@ def run_replay(
 def _selected_exit_code(report: dict[str, object], *, plant: bool) -> int:
     if plant:
         plant_report = cast(dict[str, object], report["plant"])
+        binding_row = cast(dict[str, object], plant_report["binding_row"])
         require(
-            int(plant_report["jit_over_two_ulp_count"]) > 0,
-            "plant exit requested without a JIT over-two-ULP row",
+            binding_row["name"] == PLANT_BINDING_ROW
+            and binding_row["status"] == "DEBT"
+            and int(binding_row["max_ulp"]) > ULP_LIMIT,
+            f"plant exit requested without binding {PLANT_BINDING_ROW}",
         )
         return int(plant_report["exit_code"])
     return int(report["exit_code"])
