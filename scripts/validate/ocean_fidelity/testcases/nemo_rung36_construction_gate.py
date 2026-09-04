@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import re
 import struct
@@ -19,6 +20,14 @@ import subprocess
 from pathlib import Path
 
 import numpy as np
+
+_EXCHANGE_GATE_PATH = Path(__file__).with_name("nemo_si3_exchange_drift_gate.py")
+_EXCHANGE_SPEC = importlib.util.spec_from_file_location(
+    "nemo_si3_exchange_drift_gate_for_rung36", _EXCHANGE_GATE_PATH
+)
+assert _EXCHANGE_SPEC and _EXCHANGE_SPEC.loader
+exchange_gate = importlib.util.module_from_spec(_EXCHANGE_SPEC)
+_EXCHANGE_SPEC.loader.exec_module(exchange_gate)
 
 MAGIC = b"NEMO_L3SSM__001 "
 HEADER = struct.Struct("=7i")
@@ -98,10 +107,33 @@ def evaluate(run_root: Path, *, plant: str | None = None) -> dict[str, object]:
     elif plant is not None:
         raise ValueError(f"unknown plant {plant!r}")
 
+    output = (run_root / "ocean.output").read_text(encoding="utf-8", errors="replace")
+    namelist_path = run_root / "namelist_cfg"
+    namelist = namelist_path.read_text(encoding="utf-8")
+    rho_match = re.search(r"volumic mass of reference\s+rho0\s+=\s+([0-9.E+-]+)", output)
+    r1_rho_match = re.search(r"1\. / rho0\s+r1_rho0\s+=\s+([0-9.E+-]+)", output)
+    ssh_match = re.search(r"rn_ssh_init\s*=\s*([0-9.E+-]+)", namelist)
+    bathy_match = re.search(r"rn_bathy\s*=\s*([0-9.E+-]+)", namelist)
+    if not (rho_match and r1_rho_match and ssh_match and bathy_match):
+        raise ValueError("missing resolved rho0/r1_rho0, rn_ssh_init, or rn_bathy")
+    rho0 = float(rho_match.group(1))
+    r1_rho0 = float(r1_rho_match.group(1))
+    ssh_initial = float(ssh_match.group(1))
+    bathy = float(bathy_match.group(1))
+    exchange_stream = run_root / "oracle_si3_exchange_frames.bin"
+    ice_mass = exchange_gate.read_active_value(exchange_stream, 1, "snwice_mass_b")
+
     rows = [_row(name, values[name], expected) for name, expected in SOURCE.items()]
-    # usrdef_zgr gives one metre at rest. iceistate.F90:400-426 then lowers
-    # global SSH by the snow+ice mass displacement; dom_qco_zgr updates e3t.
-    rows.append(_row("e3t_equals_bathy_plus_ssh", values["e3t_Kmm"], 1.0 + values["ssh_Kmm"]))
+    rows.append(
+        _row(
+            "ssh_from_initial_ice_mass",
+            values["ssh_Kmm"],
+            ssh_initial - ice_mass * r1_rho0,
+        )
+    )
+    # The active key_qco expansion is domzgr_substitute.h90:126. For this
+    # single full-step wet level E3t_0 is the configured bathymetry.
+    rows.append(_row("e3t_source_expansion", values["e3t_Kmm"], bathy + values["ssh_Kmm"]))
     rows.append(
         {
             "name": "positive_wet_layer_thickness",
@@ -115,7 +147,6 @@ def evaluate(run_root: Path, *, plant: str | None = None) -> dict[str, object]:
         }
     )
 
-    output = (run_root / "ocean.output").read_text(encoding="utf-8", errors="replace")
     abort = re.search(
         r"kt\s+(\d+) \|ssh\| max\s+([0-9.E+-]+).*?"
         r"kt\s+\1 \|U\|\s+max\s+([0-9.E+-]+).*?"
@@ -149,11 +180,19 @@ def evaluate(run_root: Path, *, plant: str | None = None) -> dict[str, object]:
             "initial_mass": "iceistate.F90:400-401",
             "levitating_global_adjustment": "iceistate.F90:408-426",
             "qco_thickness_refresh": "iceistate.F90:431-433",
+            "e3t_expansion": "domzgr_substitute.h90:126",
             "one_metre_depth": "C1D_OMIP_L3_COUPLED_SM/EXP00/namelist_cfg:19",
         },
         "registry": registry,
         "rows": rows,
-        "initial_displacement_m": -values["ssh_Kmm"],
+        "initial_mass_operands": {
+            "rn_ssh_init_m": ssh_initial,
+            "snwice_mass_b_kg_m2": ice_mass,
+            "rho0_kg_m3": rho0,
+            "r1_rho0_m3_kg": r1_rho0,
+            "displacement_m": ice_mass * r1_rho0,
+            "rn_bathy_m": bathy,
+        },
         "run_abort": (
             {
                 "step": int(abort.group(1)),
@@ -166,11 +205,18 @@ def evaluate(run_root: Path, *, plant: str | None = None) -> dict[str, object]:
         ),
         "provenance": {
             "ssm_stream_sha256": sha256(stream),
+            "exchange_stream_sha256": sha256(exchange_stream),
+            "namelist_cfg_sha256": sha256(namelist_path),
+            "initial_input_sha256": sha256(run_root / "C1D_OMIP_L3_COUPLED_init_v2.nc"),
             "nemo_exe_sha256": sha256(exe),
             "dynamic_ZGV_symbols": nm.count("_ZGV"),
         },
         "coverage": {
-            "INITIAL_STATE": "VERIFIED through PRE_SSM; positive-thickness invariant DEBT",
+            "INITIAL_STATE_subset": (
+                "VERIFIED T/S/U/V ingestion, namelist SSH, first exchange "
+                "snwice_mass_b, rho0, and load-adjusted SSH/e3; exact complete "
+                "ice state and pre-adjustment runtime slots UNMEASURED"
+            ),
             "PRE_SSM": "VERIFIED at kt=1",
             "POST_SSM_and_later": "UNMEASURED: ordered walk stopped at INITIAL_STATE",
         },

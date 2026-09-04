@@ -25,6 +25,13 @@ extensions were not implemented after this stop: doing so could not certify
 an invalid oracle and would violate the design's explicit instruction to stop
 at the first boundary requiring a scientific choice.
 
+Positive wet-layer thickness is a **post-preregistration construction
+invariant**, not a row that the design document named literally.  It is the
+necessary validity condition of the preregistered exact-geometry row: a
+negative value cannot represent the design's “one wet level.”  The finding is
+therefore disclosed as post-preregistered, while the source values that expose
+it were registered before the run.
+
 ## Rule 0 — owner from executing NEMO source
 
 The observed value is the literal execution of the selected identity:
@@ -39,10 +46,13 @@ The observed value is the literal execution of the selected identity:
   displacement at `iceistate.F90:408-411`, prints it at `:421-422`, and
   subtracts it from both ocean levels at `:424-426`;
 - the QCO call immediately refreshes the vertical geometry at
-  `iceistate.F90:431-433`.  `domqco.F90:125-128,160` maps that SSH into the
-  active z-star scale factor.
+  `iceistate.F90:431-433`; `domqco.F90:125-128,160` maps SSH into the active
+  z-star scale factor, and the actually executing thickness expansion is
+  `src/OCE/DOM/domzgr_substitute.h90:126`.
 
-The first exchange frame gives `snwice_mass_b=1710.0000000000002 kg m-2`.
+The gate now reads the mass through the existing canonical exchange-stream
+layout rather than duplicating it.  The first exchange frame gives
+`snwice_mass_b=1710.0000000000002 kg m-2`.
 With the resolved `rho0=1026 kg m-3`, its displacement is the observed
 `1.666666666666667 m`.  This is not an instrumentation artifact: PRE_SSM's
 independent `ssh` and `e3t` operands obey `e3t = 1 m + ssh` bit-for-bit.
@@ -72,7 +82,7 @@ Its `ocean.output` SHA-256 is
 `7e7f3b0e90d894c1afb87997e9cac0cb1313b060de57611d1baa091df2cad145`.
 The machine-readable construction result remains outside git as
 `construction_gate.json` (SHA-256
-`a897b837e9dac2e2d9ddc685161c03febc8c7d575be85cd13065bbff435fedef`).
+`c518a5b8bdbec8945f45874f7ba2ed8eb9d102490a8149f1c6d5ffdb888eaa5f`).
 The PRE/POST_SSM stream SHA-256 is
 `7eeaf4da3baf99eefb60aa7043619ed75832580fa24d8d9ebc7e721f533fa1ab`.
 Its registry stores `kt`, runtime `Kbb/Kmm`, stage, count, and fp64 width;
@@ -137,14 +147,15 @@ but P-WEIGHT remains **UNMEASURED**: the ordered stop precedes the registered
 
 `nemo_rung36_construction_gate.py` reports the normalized `1e-15` row and bit
 identity for T/S/U/V and the source-defined geometry identity.  T, S, U, V,
-and `e3t = bathy + ssh` are bit-identical.  The positivity invariant is DEBT.
+`ssh_post = rn_ssh_init - snwice_mass_b/rho0`, and
+`e3t = bathy + ssh` are bit-identical.  The positivity invariant is DEBT.
 The unplanted command exits 1.  Three row-binding plants—temperature,
 salinity, and geometry—each change the target's fp64 bits, make that named row
 red (geometry makes its defining identity red), and exit 1.  The focused unit
 suite reports `3 passed`.
 
-The repository-wide hardcoded-constant ratchet ran over all 3,398 cases.  It
-reported `3391 passed, 2 skipped, 5 failed`; all five failures are pre-existing
+The repository-wide hardcoded-constant ratchet ran over all 3,395 cases.  It
+reported `3388 passed, 2 skipped, 5 failed`; all five failures are pre-existing
 files untouched by this lane
 (`fv3_native_physics_coupling.py`, `test_fv3_physics_coupling.py`, and three
 DINO geometry tests).  Neither Round-12 script is named in a failure.
@@ -153,8 +164,9 @@ DINO geometry tests).  Neither Round-12 script is named in a failure.
 
 | boundary/register group | disposition |
 |---|---|
-| exact T/S/U/V ingestion and runtime indices | VERIFIED, bit-identical |
-| SI3 load-adjusted SSH and QCO e3 relation | VERIFIED as source execution |
+| exact T/S/U/V ingestion and runtime indices | VERIFIED subset, bit-identical |
+| SI3 mass/rho0 operands, load-adjusted SSH, and QCO e3 relation | VERIFIED as source execution, bit-identical |
+| complete initial ice state and pre-adjustment runtime SSH slots | UNMEASURED; not serialized before the construction stop |
 | positive wet-layer geometry | DEBT: `-0.6666666666666667 m` |
 | `POST_SSM`, `POST_FZP`, update-flux/tau/FWB, RGB, RK3, SSH substeps, top drag | UNMEASURED: after the ordered construction stop |
 | complete exchange-field and restart coverage | UNMEASURED: no valid full-year oracle exists |

@@ -9,15 +9,23 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-GATE_PATH = Path(__file__).parents[3] / "scripts/validate/ocean_fidelity/testcases/nemo_si3_exchange_drift_gate.py"
+GATE_PATH = (
+    Path(__file__).parents[3]
+    / "scripts/validate/ocean_fidelity/testcases/nemo_si3_exchange_drift_gate.py"
+)
 SPEC = importlib.util.spec_from_file_location("nemo_si3_exchange_drift_gate", GATE_PATH)
 assert SPEC and SPEC.loader
 gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
 
 
-def _write(path: Path, *, active_plant: bool = False,
-           inactive_plant: bool = False, active_rcdu_plant: bool = False) -> None:
+def _write(
+    path: Path,
+    *,
+    active_plant: bool = False,
+    inactive_plant: bool = False,
+    active_rcdu_plant: bool = False,
+) -> None:
     layout, record_bytes = gate._layout(5, 5, 1)
     assert record_bytes == 2120
     with path.open("wb") as stream:
@@ -54,9 +62,12 @@ def test_planted_bit_change_exits_red(tmp_path: Path, plant: str) -> None:
     reference = tmp_path / "reference.bin"
     candidate = tmp_path / "candidate.bin"
     _write(reference)
-    _write(candidate, active_plant=plant == "active",
-           inactive_plant=plant == "inactive",
-           active_rcdu_plant=plant == "active_rcdu")
+    _write(
+        candidate,
+        active_plant=plant == "active",
+        inactive_plant=plant == "inactive",
+        active_rcdu_plant=plant == "active_rcdu",
+    )
     with pytest.raises(gate.GateError, match="not byte-identical"):
         gate.require_identical(reference, candidate)
 
@@ -80,3 +91,10 @@ def test_active_rcdu_change_is_real_field(tmp_path: Path) -> None:
     result = gate.compare_streams(reference, candidate)
     assert result["classification"] == "real field"
     assert result["active_differences"] == 1
+
+
+def test_read_active_value_uses_canonical_layout(tmp_path: Path) -> None:
+    stream = tmp_path / "stream.bin"
+    _write(stream, active_rcdu_plant=True)
+    assert gate.read_active_value(stream, 2, "rCdU_ice") == 1.0
+    assert gate.read_active_value(stream, 1, "rCdU_ice") == 0.0
