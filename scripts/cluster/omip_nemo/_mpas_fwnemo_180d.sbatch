@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
-#SBATCH --time=48:00:00
+#SBATCH --time=72:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/mpasfwnemo_%j.out
 #
 # THE HARMONIZED MPAS CARD, EXTENDED TO 180 DAYS (matched pair with the
