@@ -231,7 +231,8 @@ class OceanSurfaceForcing(NamedTuple):
         ``freshwater`` (virtual-salt dilution) channel.
     chl : array or None
         Surface chlorophyll [mg/m³] for the RGB shortwave-penetration scheme
-        (``ShortwavePenetrationConfig.scheme == "rgb_chl"``).  2D horizontal
+        (``ShortwavePenetrationConfig.scheme`` is ``"rgb_chl"`` or the
+        source-named ``"nemo_qsr_rgb"``).  2D horizontal
         field; ``None`` when the two-band Jerlov scheme is in use.
     q_prescribed : array or None
         Prescribed part of the surface heat flux [W/m², positive into ocean]
