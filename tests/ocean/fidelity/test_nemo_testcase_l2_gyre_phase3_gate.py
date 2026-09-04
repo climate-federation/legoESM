@@ -7,10 +7,9 @@ import struct
 from pathlib import Path
 
 import jax.numpy as jnp
-import numpy as np
-
 import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as model_module
 import legoesm.ocean.dynamics.ocean_pe_latlon_cgrid as pe_module
+import numpy as np
 from legoesm.grids.latlon import create_beta_plane_cgrid_geometry
 from legoesm.ocean.physics.shortwave_penetration import (
     ShortwavePenetrationConfig,
@@ -260,7 +259,9 @@ def test_two_band_live_kmm_ladder_changes_the_stage3_profile():
     sw = jnp.asarray([[100.0]], dtype=jnp.float64)
     dz = jnp.asarray([10.0, 20.0], dtype=jnp.float64)
     z_half = jnp.asarray([0.0, -10.0, -30.0], dtype=jnp.float64)
-    cfg = ShortwavePenetrationConfig(scheme="nemo_qsr_2bd", water_type="I")
+    cfg = ShortwavePenetrationConfig(
+        scheme="nemo_qsr_2bd", water_type="I", nemo_time_step_s=14400.0
+    )
     base = shortwave_penetration_tendency(
         sw, dz, z_half, jnp.ones((1, 1)), cfg)
     live = shortwave_penetration_tendency(

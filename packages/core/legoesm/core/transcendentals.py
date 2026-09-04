@@ -1,7 +1,8 @@
 """Precision-policy transcendental functions.
 
 ``native`` delegates to JAX/XLA.  ``libm`` calls the scalar ``exp`` and
-``tanh`` entry points from ``libm.so.6`` through :func:`jax.pure_callback`.
+``tanh``, ``sin``, and ``cos`` entry points from ``libm.so.6`` through
+:func:`jax.pure_callback`.
 That is the soname linked by the NEMO certification executables on the
 campaign host (glibc 2.34).  The callback deliberately invokes the scalar C
 function once per element: NumPy ufuncs may dispatch their own vector math
@@ -80,6 +81,30 @@ def _libm_tanh_jvp(primals, tangents):
     return result, (1.0 - result * result) * value_dot
 
 
+@jax.custom_jvp
+def _libm_sin(value: jax.Array) -> jax.Array:
+    return _callback("sin", value)
+
+
+@_libm_sin.defjvp
+def _libm_sin_jvp(primals, tangents):
+    (value,), (value_dot,) = primals, tangents
+    result = _libm_sin(value)
+    return result, _libm_cos(value) * value_dot
+
+
+@jax.custom_jvp
+def _libm_cos(value: jax.Array) -> jax.Array:
+    return _callback("cos", value)
+
+
+@_libm_cos.defjvp
+def _libm_cos_jvp(primals, tangents):
+    (value,), (value_dot,) = primals, tangents
+    result = _libm_cos(value)
+    return result, -_libm_sin(value) * value_dot
+
+
 def exp(value) -> jax.Array:
     """Evaluate exponential under the active precision policy."""
     array = jnp.asarray(value)
@@ -96,4 +121,20 @@ def tanh(value) -> jax.Array:
     return _libm_tanh(array)
 
 
-__all__ = ("exp", "tanh")
+def sin(value) -> jax.Array:
+    """Evaluate sine under the active precision policy."""
+    array = jnp.asarray(value)
+    if get_policy().transcendentals == "native":
+        return jnp.sin(array)
+    return _libm_sin(array)
+
+
+def cos(value) -> jax.Array:
+    """Evaluate cosine under the active precision policy."""
+    array = jnp.asarray(value)
+    if get_policy().transcendentals == "native":
+        return jnp.cos(array)
+    return _libm_cos(array)
+
+
+__all__ = ("cos", "exp", "sin", "tanh")

@@ -590,8 +590,8 @@ def _mark_kt1_uninformative(row: dict, field: str, kt: int) -> dict:
 
 def _surface_forcings(card, state, kt: int):
     import jax.numpy as jnp
-    from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
     from legoesm.ocean.eos import nemo_potential_temperature_from_conservative
+    from legoesm.ocean.fidelity.nemo_recipe import nemo_gyre_qns
     from legoesm.ocean.fidelity.nemo_testcase_recipe import gyre_surface_boundary_condition
     from legoesm.ocean.freshwater import FreshwaterForcing
     from legoesm.ocean.state import OceanSurfaceForcing
@@ -602,10 +602,18 @@ def _surface_forcings(card, state, kt: int):
         sst, state.S.data[..., 0])
     # usrdef_sbc.F90:109-120,138-145: qns+qsr is the Haney term plus EMP
     # heat content, evaluated once from the entering Kbb/Nbb SST.
-    q_total = (
-        -40.0 * (sst - sbc.t_star_c)
-        - sbc.emp_kg_m2_s * sst_m * NEMO_CONSTANTS_CONFIG.c_sw
+    qns = nemo_gyre_qns(
+        sst,
+        sst_m,
+        sbc.t_star_c,
+        sbc.qsr_w_m2,
+        sbc.emp_kg_m2_s,
     )
+    # NEMO carries qns/qsr separately; the shared forcing object carries their
+    # materialized sum.
+    from legoesm.ocean.eos import nemo_source_round
+
+    q_total = nemo_source_round(qns + sbc.qsr_w_m2)
     surface = OceanSurfaceForcing(
         sw_down=sbc.qsr_w_m2,
         q_net=q_total,
@@ -746,18 +754,21 @@ def run(
     import jax
     import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        LatLonCGridOceanModel,
-        _NEMOWSRK3TestHooks,
-    )
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
         _nemo_literal_barotropic_coriolis,
         _nemo_literal_een_coefficients,
     )
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSRK3TestHooks,
+    )
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
 
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
-    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")
+    require(
+        get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+        "precision policy is not fp64",
+    )
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     require(not bool(jax.config.jax_disable_jit),
             "certification requires production JIT; JAX_DISABLE_JIT is forbidden")

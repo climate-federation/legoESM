@@ -18,18 +18,19 @@ from legoesm.ocean.dynamics.barotropic_common import nemo_auto_substeps
 from legoesm.ocean.fidelity.nemo_recipe import (
     NEMOModelRecipeConfig,
     NEMORecipe,
-    nemo_lat_lon_model_config,
     nemo_gyre_emp,
     nemo_gyre_qsr,
     nemo_gyre_t_star,
     nemo_gyre_wind,
+    nemo_gyre_zero_mean_emp,
+    nemo_lat_lon_model_config,
 )
+from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.physics.convection.config import (
     EnhancedDiffusionConfig,
     OceanConvectionConfig,
 )
 from legoesm.ocean.physics.shortwave_penetration import ShortwavePenetrationConfig
-from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.vertical import (
     NemoEENBarotropicOperands,
@@ -171,7 +172,7 @@ def _model_config(
                 ),
             ),
             shortwave_penetration=ShortwavePenetrationConfig(
-                scheme="nemo_qsr_2bd", water_type="I"
+                scheme="nemo_qsr_2bd", water_type="I", nemo_time_step_s=14400.0
             ),
             mle=None,
         )
@@ -815,8 +816,7 @@ def gyre_surface_boundary_condition(
     # 104 non-owned boundary-ring cells.  Those are the same cells represented
     # by ``wet=False`` in this cropped 22x32 card.  The oracle kt=1 eta update
     # pins the resulting 600-owned-cell numerator exactly.
-    emp_mean = jnp.sum(emp_raw * wet) / jnp.sum(wet)
-    emp = emp_raw - emp_mean * wet
+    emp = nemo_gyre_zero_mean_emp(emp_raw, wet)
     utau, vtau = nemo_gyre_wind(lat, t_seconds)
     taum = jnp.sqrt(utau * utau + vtau * vtau)
     wndm = jnp.sqrt(taum / (1.22 * 1.5e-3))

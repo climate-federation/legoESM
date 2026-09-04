@@ -39,10 +39,10 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import jax.numpy as jnp
-
 from legoesm.core.transcendentals import exp as precision_exp
-from legoesm.ocean.eos import rho_0 as _RHO_0_DEFAULT, c_sw as _C_SW_DEFAULT
-
+from legoesm.ocean.eos import c_sw as _C_SW_DEFAULT
+from legoesm.ocean.eos import nemo_source_round
+from legoesm.ocean.eos import rho_0 as _RHO_0_DEFAULT
 
 __physics_contract__ = {
     "summary": (
@@ -95,6 +95,7 @@ __param_spec__ = {
             "scheme": "discrete NEMO/reference algorithm selector",
             "water_type": "discrete Jerlov optical class",
             "rgb_chl_profile": "discrete NEMO chlorophyll-profile selector",
+            "nemo_time_step_s": "NEMO qsr_ext_lev discrete initialization input",
         },
         "params": {
             "rgb_ir_fraction": {
@@ -162,12 +163,16 @@ class ShortwavePenetrationConfig(NamedTuple):
         ``rgb_chl`` only.  ``"morel_berthon"`` (NEMO ``nn_chlprfl=1``,
         analytical vertical Chl profile with deep-Chl maximum) or
         ``"surface"`` (``nn_chlprfl=0``, surface Chl extended downward).
+    nemo_time_step_s : float or None
+        Whole-step ``rDt`` used by NEMO's ``qsr_ext_lev`` initialization.
+        Required by ``nemo_qsr_2bd``; absent for the generic Jerlov scheme.
     """
     scheme: str = "jerlov_2band"
     water_type: str = "II"
     rgb_ir_fraction: float = 0.58       # NEMO rn_abs
     rgb_ir_extinction_m: float = 0.35   # NEMO rn_si0 [m]
     rgb_chl_profile: str = "morel_berthon"
+    nemo_time_step_s: float | None = None
 
 
 SHORTWAVE_PENETRATION_SCHEMES = (
@@ -498,6 +503,108 @@ def apply_shortwave_penetration(
     )
 
 
+def _nemo_qsr_extinction_level(
+    z_half_ref: jnp.ndarray,
+    dz_ref: jnp.ndarray,
+    *,
+    attenuation_m: jnp.ndarray,
+    fraction: jnp.ndarray,
+    rho0_csw: jnp.ndarray,
+    time_step_s: float,
+) -> jnp.ndarray:
+    """NEMO ``qsr_ext_lev`` for a 1-D reference ladder.
+
+    This is the executed ``key_vco_1d3d`` branch at ``traqsr.F90:1182-1192``.
+    The LOG is initialization-only; on the scalar-math GYRE grid its cutoff is
+    levels 2/17 for the IR/visible bands, far from a branch tie.
+    """
+    sr = nemo_source_round
+    dtype = dz_ref.dtype
+    zprec = jnp.asarray(10.0e-15, dtype=dtype)
+    qmax = jnp.asarray(1000.0, dtype=dtype)
+    dt = jnp.asarray(time_step_s, dtype=dtype)
+    denominator = sr(sr(dt * qmax) * fraction)
+    zcoef = sr(sr(zprec * rho0_csw) / denominator)
+    zhext = sr((-attenuation_m) * jnp.log(sr(zcoef * dz_ref)))
+    depth_next = -z_half_ref[1:]
+    indices = jnp.arange(1, dz_ref.shape[-1] + 1, dtype=jnp.int32)
+    return jnp.min(jnp.where(depth_next >= zhext, indices, dz_ref.shape[-1]))
+
+
+def _nemo_qsr_2bd_tendency(
+    sw_down: jnp.ndarray,
+    z_half_ref: jnp.ndarray,
+    dz_ref: jnp.ndarray,
+    stretch: jnp.ndarray,
+    config: ShortwavePenetrationConfig,
+    rho_0: float,
+    c_sw: float,
+) -> jnp.ndarray:
+    """Literal NEMO RK3 ``qsr_2BD`` source statements.
+
+    Associations follow executed ``traqsr.f90:615-645``.  Every source
+    operation is materialized with the same shared IEEE identity used by the
+    EOS literal chain.  Unlike the generic Jerlov kernel, NEMO stops at the
+    ``qsr_ext_lev`` cutoff rather than depositing the negligible remainder in
+    the physical bottom cell.
+    """
+    if config.nemo_time_step_s is None:
+        raise ValueError("nemo_qsr_2bd requires nemo_time_step_s for qsr_ext_lev")
+    sr = nemo_source_round
+    dtype = sw_down.dtype
+    one = jnp.asarray(1.0, dtype=dtype)
+    zero = jnp.asarray(0.0, dtype=dtype)
+    params = JERLOV_TYPES[config.water_type]
+    rn_abs = jnp.asarray(params.R, dtype=dtype)
+    rn_si0 = jnp.asarray(params.zeta1, dtype=dtype)
+    rn_si1 = jnp.asarray(params.zeta2, dtype=dtype)
+    rho0_csw = sr(jnp.asarray(rho_0, dtype=dtype) * jnp.asarray(c_sw, dtype=dtype))
+    r1_rho0_csw = sr(one / rho0_csw)
+    r1_si0 = sr(one / rn_si0)
+    r1_si1 = sr(one / rn_si1)
+    visible_fraction = sr(one - rn_abs)
+    zz0 = sr(rn_abs * r1_rho0_csw)
+    zz1 = sr(visible_fraction * r1_rho0_csw)
+
+    # gdepw(Kmm) = gdepw_1d * (1+r3t), then the source forms
+    # ``-gdepw*r1_si*``.  ``z_half_ref`` is the signed legoESM spelling.
+    depth = sr((-z_half_ref) * stretch[..., jnp.newaxis])
+    arg0 = sr((-depth) * r1_si0)
+    arg1 = sr((-depth) * r1_si1)
+    exp0 = precision_exp(arg0)
+    exp1 = precision_exp(arg1)
+    both = sr(sr(zz0 * exp0) + sr(zz1 * exp1))
+    visible = sr(zz1 * exp1)
+    nk0 = _nemo_qsr_extinction_level(
+        z_half_ref,
+        dz_ref,
+        attenuation_m=rn_si0,
+        fraction=rn_abs,
+        rho0_csw=rho0_csw,
+        time_step_s=config.nemo_time_step_s,
+    )
+    nkv = _nemo_qsr_extinction_level(
+        z_half_ref,
+        dz_ref,
+        attenuation_m=rn_si1,
+        fraction=visible_fraction,
+        rho0_csw=rho0_csw,
+        time_step_s=config.nemo_time_step_s,
+    )
+    interface = jnp.arange(z_half_ref.shape[-1], dtype=jnp.int32)
+    attenuation = jnp.where(
+        interface == 0,
+        r1_rho0_csw,
+        jnp.where(interface <= nk0, both, jnp.where(interface <= nkv, visible, zero)),
+    )
+    absorbed = sr(attenuation[..., :-1] - attenuation[..., 1:])
+    dz_live = sr(dz_ref * stretch[..., jnp.newaxis])
+    numerator = sr(sw_down[..., jnp.newaxis] * absorbed)
+    tendency = sr(numerator / jnp.where(dz_live > zero, dz_live, one))
+    level = jnp.arange(dz_ref.shape[-1], dtype=jnp.int32)
+    return jnp.where((level < nkv) & (dz_live > zero), tendency, zero)
+
+
 def shortwave_penetration_tendency(
     sw_down: jnp.ndarray,
     z_coord_dz_ref: jnp.ndarray,
@@ -550,6 +657,21 @@ def shortwave_penetration_tendency(
             "shortwave_penetration_tendency is the two-band Jerlov kernel but got "
             f"scheme={config.scheme!r}; call apply_shortwave_penetration(...) to "
             "dispatch the rgb_chl scheme (needs chl/dz_live/wet_cell)."
+        )
+    if config.scheme == "nemo_qsr_2bd":
+        stretch = (
+            jnp.ones_like(jacobian)
+            if z_half_stretch is None
+            else z_half_stretch
+        )
+        return _nemo_qsr_2bd_tendency(
+            sw_down,
+            z_coord_z_half_ref,
+            z_coord_dz_ref,
+            stretch,
+            config,
+            rho_0,
+            c_sw,
         )
     params = JERLOV_TYPES[config.water_type]
     R = params.R

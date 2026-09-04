@@ -39,6 +39,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from legoesm.ocean.eos import c_sw, rho_0
 from legoesm.ocean.physics.shortwave_penetration import (
     JERLOV_TYPES,
@@ -207,10 +208,22 @@ def test_jerlov_kernel_rejects_non_jerlov_scheme():
     raise AssertionError("expected ValueError for scheme='rgb_chl'")
 
 
-def test_nemo_qsr_2bd_selector_reuses_two_band_kernel_exactly():
+def test_nemo_qsr_2bd_selector_requires_extinction_initialization_timestep():
     generic = _tend(_SW, _DZ, _Z_HALF, 1.0, _cfg(scheme="jerlov_2band"))
-    nemo = _tend(_SW, _DZ, _Z_HALF, 1.0, _cfg(scheme="nemo_qsr_2bd"))
-    np.testing.assert_array_equal(np.asarray(nemo), np.asarray(generic))
+    with pytest.raises(ValueError, match="nemo_time_step_s"):
+        _tend(_SW, _DZ, _Z_HALF, 1.0, _cfg(scheme="nemo_qsr_2bd"))
+    nemo = _tend(
+        _SW,
+        _DZ,
+        _Z_HALF,
+        1.0,
+        ShortwavePenetrationConfig(
+            scheme="nemo_qsr_2bd", water_type="II", nemo_time_step_s=14400.0
+        ),
+    )
+    # NEMO terminates at qsr_ext_lev rather than depositing the remaining
+    # irradiance at the physical bottom like the generic conserving kernel.
+    assert not np.array_equal(np.asarray(nemo), np.asarray(generic))
 
 
 def test_water_type_plumbing_changes_profile():

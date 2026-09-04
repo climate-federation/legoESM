@@ -85,8 +85,11 @@ def _row(name: str, oracle, candidate, mask) -> dict[str, object]:
 
 def _candidate(policy_name: str, qsr_record: dict, tracer_record: dict) -> dict:
     from legoesm.core.precision import PrecisionPolicy, set_policy
-    from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
-    from legoesm.ocean.eos import nemo_potential_temperature_from_conservative
+    from legoesm.ocean.eos import (
+        nemo_potential_temperature_from_conservative,
+        nemo_source_round,
+    )
+    from legoesm.ocean.fidelity.nemo_recipe import nemo_gyre_qns
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         build_gyre_zco_card,
         gyre_surface_boundary_condition,
@@ -122,17 +125,27 @@ def _candidate(policy_name: str, qsr_record: dict, tracer_record: dict) -> dict:
         sst = card.recipe.initial_state.T.data[..., 0]
         sst_m = nemo_potential_temperature_from_conservative(
             sst, card.recipe.initial_state.S.data[..., 0])
-        q_total = (
-            -40.0 * (sst - sbc.t_star_c)
-            - sbc.emp_kg_m2_s * sst_m * NEMO_CONSTANTS_CONFIG.c_sw
+        qns = nemo_gyre_qns(
+            sst,
+            sst_m,
+            sbc.t_star_c,
+            sbc.qsr_w_m2,
+            sbc.emp_kg_m2_s,
         )
-        # legoESM carries qns+qsr as q_net; this is its implied qns field.
-        return (sbc.qsr_w_m2, q_total - sbc.qsr_w_m2,
+        return (sbc.qsr_w_m2, qns,
                 sbc.emp_kg_m2_s, sbc.utau_pa, sbc.vtau_pa)
 
     qsr, qns, emp, utau, vtau = jax.jit(forcing_fields)()
     return {
         "qsr_increment": np.asarray(qsr_increment),
+        "qsr_after": np.asarray(
+            jax.jit(
+                lambda before, increment: nemo_source_round(before + increment)
+            )(
+                jnp.asarray(tracer_record["after_sbc_T"][..., :30]),
+                qsr_increment,
+            )
+        ),
         "qsr": np.asarray(qsr),
         "qns": np.asarray(qns),
         "emp": np.asarray(emp),
@@ -247,8 +260,12 @@ def run(
     rows = {}
     for policy_name, candidate in candidates.items():
         rows[policy_name] = [
-            _row("qsr_2BD_increment", qsr_record["dT_dt"][..., :30],
-                 candidate["qsr_increment"], active),
+            _row(
+                "qsr_2BD_accumulation",
+                tracer_record["after_qsr_T"][..., :30],
+                candidate["qsr_after"],
+                active,
+            ),
             *[
                 _row(f"usrdef_sbc.{field}", sbc_record[field], candidate[field],
                      wet)
@@ -268,7 +285,7 @@ def run(
 
     eligible = all(row["status"] == "BIT-EXACT" for row in rows["libm"])
     result = {
-        "format": "nemo-testcase-l2-gyre-round15-eligibility-v1",
+        "format": "nemo-testcase-l2-gyre-round16-eligibility-v2",
         "execution_regime": "production-jit/cpu/fp64",
         "oracle_root": str(oracle_root),
         "plant": plant,
