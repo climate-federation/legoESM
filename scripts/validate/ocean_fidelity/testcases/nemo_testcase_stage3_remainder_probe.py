@@ -322,8 +322,8 @@ def set_fp64():
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 
-    set_policy(PrecisionPolicy.fp64())
-    require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
 
 
@@ -332,7 +332,7 @@ def fp64_model(card, hooks=None):
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
 
-    require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")
     return LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=hooks if hooks is not None else _NEMOWSRK3TestHooks())

@@ -69,7 +69,7 @@ def _run(mode: str, eager: bool):
         build_nemo_testcase_card,
     )
 
-    set_policy(PrecisionPolicy.fp64())
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     card = build_nemo_testcase_card(CASE)
     cfg = card.recipe.model_config._replace(
         freshwater_closure="real_freshwater", fix_eta_drift=True)

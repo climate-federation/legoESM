@@ -26,7 +26,7 @@ def run(mesh: Path, output: Path, plant: bool = False) -> dict:
     from legoesm.core.precision import PrecisionPolicy, set_policy
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_overflow_zps_card
 
-    set_policy(PrecisionPolicy.fp64())
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     card = build_overflow_zps_card()
     applied = np.asarray(card.recipe.z_coord.is_active, dtype=bool)
     oracle = _oracle_tmask(mesh, applied.shape[-1])

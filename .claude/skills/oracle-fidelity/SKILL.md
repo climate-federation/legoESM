@@ -125,6 +125,13 @@ Corollary for the gate: record the precision every measurement was taken at,
 next to the number. A figure measured at a different precision than the current
 default is STALE, exactly like a figure measured at a different commit.
 
+**No-Frankenstein precision rule.** A selectable platform/precision policy is
+allowed only with explicit oracle and toolchain provenance (compiler flags,
+linked math library, and binary identity). It must be one shared implementation,
+never a per-card guard, and it must preserve both JIT execution and autodiff.
+The selector describes the oracle's arithmetic environment; it is not a physics
+arm and cannot be used to conceal a card-specific residual.
+
 ## Rule 1d — Pin the oracle's TIME LEVEL per dump, in a registry that raises
 
 A leapfrog oracle carries three time levels, and a routine is routinely called

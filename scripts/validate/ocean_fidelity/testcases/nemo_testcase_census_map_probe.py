@@ -342,7 +342,7 @@ def command_faces(args) -> None:
 
     from legoesm.core.precision import PrecisionPolicy, set_policy
 
-    set_policy(PrecisionPolicy.fp64())
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     card = STATS.build_nemo_testcase_card(CASE)
     masks = STATS.expected_masks(card)
     nlev = card.recipe.z_coord.n_levels
@@ -536,7 +536,7 @@ def command_variance(args) -> None:
         _NEMOWSRK3TestHooks,
     )
 
-    set_policy(PrecisionPolicy.fp64())
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     card = STATS.build_nemo_testcase_card(CASE)
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
@@ -625,8 +625,8 @@ def command_chaos_null(args) -> None:
         _NEMOWSRK3TestHooks,
     )
 
-    set_policy(PrecisionPolicy.fp64())
-    require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     card = STATS.build_nemo_testcase_card(CASE)
     model = LatLonCGridOceanModel(
@@ -747,8 +747,8 @@ def command_chaos_null(args) -> None:
 def command_map(args) -> None:
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 
-    set_policy(PrecisionPolicy.fp64())
-    require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")
 
     spec = STATS.CASES[CASE]
     arms_raw = {

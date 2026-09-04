@@ -157,9 +157,9 @@ def run(case: str, *, plant: bool = False) -> dict:
     from legoesm.ocean.eos import _ROQUET_TEOS10, make_eos_fn, nemo_roquet_eos
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
 
-    set_policy(PrecisionPolicy.fp64())
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     card = build_nemo_testcase_card(case)
-    require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")
     cfg = card.recipe.model_config
     zc = card.recipe.z_coord
     require(zc.t_depth_ref is not None, "card lacks explicit NEMO T-depth ladder")

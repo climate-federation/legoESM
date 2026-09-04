@@ -48,6 +48,7 @@ def test_nemo_testcase_cards_are_fp64_source_pinned(
     assert (recipe.grid.n_lat, recipe.grid.n_lon) == shape
     assert recipe.z_coord.n_levels == nlev
     assert card.dt_s == dt
+    assert card.transcendentals == "libm"
     assert card.dummy_bottom_records == 1
     for array in (
         recipe.grid.dx_T,
@@ -205,6 +206,7 @@ def test_gyre_card_pins_rotated_grid_mi96_ic_and_seasonal_sbc():
     assert card.dt_s == 14400.0
     assert card.n_steps == 4320
     assert card.surface_boundary_condition == "gyre_usrdef_sbc"
+    assert card.transcendentals == "libm"
     assert testcase_recipe._resolved_auto_substeps(
         recipe.grid, recipe.initial_state.H_bathy.data, card.dt_s
     ) == 50

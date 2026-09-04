@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import NamedTuple
 
 import numpy as np
+from legoesm.core.transcendentals import tanh as precision_tanh
 from legoesm.ocean.constants_config import ConstantsConfig
 from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 from legoesm.ocean.physics.combined import OceanPhysicsConfig
@@ -653,17 +654,17 @@ def nemo_gyre_initial_T_S(depth_pos_m):
 
     d = jnp.asarray(depth_pos_m)
     # NEMO's two-piece blend weights (deep w1, shallow w2; each 0.5 at d=500 m).
-    w1 = (-jnp.tanh((500.0 - d) / 150.0) + 1.0) / 2.0
-    w2 = (-jnp.tanh((d - 500.0) / 150.0) + 1.0) / 2.0
-    T = ((16.0 - 12.0 * jnp.tanh((d - 400.0) / 700.0)) * w1
-         + (15.0 * (1.0 - jnp.tanh((d - 50.0) / 1500.0))
-            - 1.4 * jnp.tanh((d - 100.0) / 100.0)
+    w1 = (-precision_tanh((500.0 - d) / 150.0) + 1.0) / 2.0
+    w2 = (-precision_tanh((d - 500.0) / 150.0) + 1.0) / 2.0
+    T = ((16.0 - 12.0 * precision_tanh((d - 400.0) / 700.0)) * w1
+         + (15.0 * (1.0 - precision_tanh((d - 50.0) / 1500.0))
+            - 1.4 * precision_tanh((d - 100.0) / 100.0)
             + 7.0 * (1500.0 - d) / 1500.0) * w2)
-    S = ((36.25 - 1.13 * jnp.tanh((d - 305.0) / 460.0)) * w1
+    S = ((36.25 - 1.13 * precision_tanh((d - 305.0) / 460.0)) * w1
          + (35.55 + 1.25 * (5000.0 - d) / 5000.0
-            - 1.62 * jnp.tanh((d - 60.0) / 650.0)
-            + 0.2 * jnp.tanh((d - 35.0) / 100.0)
-            + 0.2 * jnp.tanh((d - 1000.0) / 5000.0)) * w2)
+            - 1.62 * precision_tanh((d - 60.0) / 650.0)
+            + 0.2 * precision_tanh((d - 35.0) / 100.0)
+            + 0.2 * precision_tanh((d - 1000.0) / 5000.0)) * w2)
     return T, S
 
 

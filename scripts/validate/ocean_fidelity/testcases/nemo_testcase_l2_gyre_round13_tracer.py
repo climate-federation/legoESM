@@ -156,8 +156,8 @@ def run_transport_operands(oracle_root: Path, *, plant: bool = False) -> dict:
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.eos import _nemo_source_round
 
-    set_policy(PrecisionPolicy.fp64())
-    require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     require(not bool(jax.config.jax_disable_jit), "production JIT is required")
     path = oracle_root / "oracle_rkstage1_transport_operands_kt00000001.bin"
@@ -229,7 +229,7 @@ def run_transport_candidate(oracle_root: Path, *, plant: bool = False) -> dict:
         LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
 
-    set_policy(PrecisionPolicy.fp64())
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     require(not bool(jax.config.jax_disable_jit), "production JIT is required")
     path = oracle_root / "oracle_rkstage1_transport_operands_kt00000001.bin"
@@ -381,8 +381,8 @@ def run(oracle_root: Path, control_root: Path, *, plant: bool = False) -> dict:
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
 
-    set_policy(PrecisionPolicy.fp64())
-    require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     require(not bool(jax.config.jax_disable_jit), "production JIT is required")
 

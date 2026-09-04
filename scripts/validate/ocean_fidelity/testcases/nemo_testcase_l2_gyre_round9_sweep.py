@@ -33,8 +33,8 @@ def run(*, support_gate: Path | None = None) -> dict:
         build_nemo_testcase_card,
     )
 
-    set_policy(PrecisionPolicy.fp64())
-    require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     require(not bool(jax.config.jax_disable_jit),
             "trajectory sweep requires production JIT")

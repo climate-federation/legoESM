@@ -136,9 +136,9 @@ def _card(case: str):
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
 
-    set_policy(PrecisionPolicy.fp64())
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     card = build_nemo_testcase_card(case)
-    require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")
     return card
 
 

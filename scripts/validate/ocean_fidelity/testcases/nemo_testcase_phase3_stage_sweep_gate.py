@@ -625,8 +625,8 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
 
     # Stamp FIRST so a dirty tree refuses before any compute (fail closed).
     legoesm_git_sha = git_sha(allow_dirty=allow_dirty)
-    set_policy(PrecisionPolicy.fp64())
-    require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     card = build_nemo_testcase_card(case)
     masks = expected_masks(card)

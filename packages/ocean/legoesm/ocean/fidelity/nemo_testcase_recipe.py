@@ -52,6 +52,7 @@ class NEMOTestcaseCard(NamedTuple):
     bbl_aht_m2_s: float
     bbl_gamma_s: float
     surface_boundary_condition: str = "none"
+    transcendentals: str = "libm"
 
 
 class GYRESurfaceBoundaryCondition(NamedTuple):
@@ -832,6 +833,11 @@ def gyre_surface_boundary_condition(
 
 def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
     """Reject any card composition not exercised by its named oracle run."""
+    if card.transcendentals != "libm":
+        raise ValueError(
+            f"{card.case} requires scalar-libm certification transcendentals, "
+            f"got {card.transcendentals!r}"
+        )
     expected = {
         "LOCK_EXCHANGE-zco": ("nemo_ab3am4", 1, 0, 0.0),
         "OVERFLOW-zps": ("nemo_boxcar1_ab3", 3, 2, 20.0),

@@ -1254,7 +1254,7 @@ def main() -> int:
         report = run_fp32_temperature_trace(
             args.output, git_sha(allow_dirty=args.allow_dirty))
     else:
-        set_policy(PrecisionPolicy.fp64())
+        set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
         require(bool(jax.config.jax_enable_x64), "scoring requires JAX x64")
         report = score_case(
             args.case,

@@ -40,6 +40,7 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
+from legoesm.core.transcendentals import exp as precision_exp
 from legoesm.ocean.eos import rho_0 as _RHO_0_DEFAULT, c_sw as _C_SW_DEFAULT
 
 
@@ -568,7 +569,8 @@ def shortwave_penetration_tendency(
 
     # SW flux at each interface: I(z) = Q_sw * [R*exp(z/zeta1) + (1-R)*exp(z/zeta2)]
     # z_half[..., 0] = 0 (surface), z_half[..., -1] = -H_max (bottom)
-    I_half = R * jnp.exp(z_half / zeta1) + (1.0 - R) * jnp.exp(z_half / zeta2)
+    I_half = (R * precision_exp(z_half / zeta1)
+              + (1.0 - R) * precision_exp(z_half / zeta2))
     # Shape: (nlev+1,) static, or (..., nlev+1) once per-column stretched.
 
     # Fraction absorbed in each layer = I_half[k] - I_half[k+1] (last axis:
