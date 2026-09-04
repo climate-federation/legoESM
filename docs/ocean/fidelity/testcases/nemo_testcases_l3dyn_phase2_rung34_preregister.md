@@ -541,3 +541,23 @@ new scheme choice.
 | Continue step 1, steps 2--8, active redistribution, and conditionally steps 9--720/restart | ASKED | Ordered dispatch gates |
 | Rename/document the public H79 source-exact keyword without changing its default | ASKED | Queued API disclosure |
 | Change canonical core blobs, transport/rheology defaults, scheme selection, bar, precision/backend, shipped NEMO, or commit large dumps | UNASKED | Outside authorized scope |
+
+### Round-12 long-walk condition correction (registered before the run)
+
+The preceding paragraph over-constrained the dispatch by requiring steps 2--8
+and the active window to be byte-exact before the 9--720 walk.  The user's
+standing Round-11 condition, repeated by the Round-12 ordering, is instead:
+run the long walk if completed step 1 is byte-exact end to end, after measuring
+steps 2--8 and the active window.  Completed step 1 is now `0 / 9801` for all
+23 trajectory rows, so the long walk is required.  The stricter self-imposed
+condition is **WITHDRAWN before this run**; its measured active-window debt is
+still retained and disclosed.
+
+The preregistered long-walk prediction uses the superseded Round-9 trajectory
+only as a forecast: completed step 9 will already contain DEBT, led in
+normalized magnitude by `stress12_i`; CONFIRM is that row and step, REFUTE is
+any other first owner.  The gate will record the first over-bar step per field,
+normalized and relative growth at 9, 10, 50, 100, 200, 485, and 720, every
+final ordinary row, and all 160 final moment rows.  The first non-bit-exact
+boundary for the campaign remains the separately measured active completed
+step 8; the long walk begins at step 9 and cannot retroactively move it.
