@@ -419,6 +419,17 @@ The accepted correction changes only config-local writer ownership guards and
 the truthful header count. No model array or arithmetic expression is changed;
 the ordinary-output identity result above proves that claim observationally.
 
+### Independent-review correction: armed-only EOS scratch
+
+The config-local EOS operand writer no longer creates thirteen unconditional
+`(jpi,jpj,jpk)` automatic arrays on every EOS call.  In both instrumented EOS
+entry points, `MY_SRC/eosbn2.F90:268-280,492-508`, those arrays are allocatable
+and are allocated only while `l2_dump_armed` is true; after the record is
+closed they are deallocated at `:353-354,646-647`.  Their initialization,
+population, order, type, dimensions, and record schema are unchanged.  This is
+a WRITE-only instrumentation-lifetime change and is included in the corrective
+instrumented rebuild and replacement ten-step run preregistered separately.
+
 ### Cross-lane ticket: Lane-3 reassociation header
 
 The defect originated in the Lane-3/C1D writer
