@@ -369,6 +369,81 @@ TIMING_EXCLUDED = ["communication_report.txt", "timing.output", "timing_gnuplot.
                    "timing_tsum_allmpi_t1_t10.nc", "run.user.stdout.log",
                    "run.user.time.log", "run.launcher.log"]
 
+# Rule-1 fail-closed coverage inventory. These are the variables provided by
+# each accepted kt=10 restart shard, including coordinates/control metadata.
+RESTART_VARIABLES = {
+    "ocean": """nav_lon nav_lat nav_lev time_counter kt ndastp adatrj ntime nn_fsbc
+        ssu_m ssv_m sst_m sss_m ssh_m e3t_m frq_m a_fwb a_fwb_b emp_corr en
+        avt_k avm_k dissl sshbb_e ubb_e vbb_e sshb_e ub_e vb_e fraqsr_1lev rdt
+        DELAY__r8_cflice DELAY_re8_fwb2 DELAY_im8_fwb2 sshn un vn tn sn uu_n
+        vv_n ssha""".split(),
+    "ice": """nav_lon nav_lat numcat time_counter stress1_i stress2_i stress12_i
+        sxice syice sxxice syyice sxyice sxsn sysn sxxsn syysn sxysn sxa sya
+        sxxa syya sxya sxage syage sxxage syyage sxyage
+        sxc0_l01 syc0_l01 sxxc0_l01 syyc0_l01 sxyc0_l01
+        sxc0_l02 syc0_l02 sxxc0_l02 syyc0_l02 sxyc0_l02
+        sxc0_l03 syc0_l03 sxxc0_l03 syyc0_l03 sxyc0_l03
+        sxc0_l04 syc0_l04 sxxc0_l04 syyc0_l04 sxyc0_l04
+        sxc0_l05 syc0_l05 sxxc0_l05 syyc0_l05 sxyc0_l05
+        sxe_l01 sye_l01 sxxe_l01 syye_l01 sxye_l01
+        sxe_l02 sye_l02 sxxe_l02 syye_l02 sxye_l02
+        sxe_l03 sye_l03 sxxe_l03 syye_l03 sxye_l03
+        sxe_l04 sye_l04 sxxe_l04 syye_l04 sxye_l04
+        sxe_l05 sye_l05 sxxe_l05 syye_l05 sxye_l05
+        sxe_l06 sye_l06 sxxe_l06 syye_l06 sxye_l06
+        sxe_l07 sye_l07 sxxe_l07 syye_l07 sxye_l07
+        sxe_l08 sye_l08 sxxe_l08 syye_l08 sxye_l08
+        sxe_l09 sye_l09 sxxe_l09 syye_l09 sxye_l09
+        sxe_l10 sye_l10 sxxe_l10 syye_l10 sxye_l10
+        sxsi_l01 sysi_l01 sxxsi_l01 syysi_l01 sxysi_l01
+        sxsi_l02 sysi_l02 sxxsi_l02 syysi_l02 sxysi_l02
+        sxsi_l03 sysi_l03 sxxsi_l03 syysi_l03 sxysi_l03
+        sxsi_l04 sysi_l04 sxxsi_l04 syysi_l04 sxysi_l04
+        sxsi_l05 sysi_l05 sxxsi_l05 syysi_l05 sxysi_l05
+        sxsi_l06 sysi_l06 sxxsi_l06 syysi_l06 sxysi_l06
+        sxsi_l07 sysi_l07 sxxsi_l07 syysi_l07 sxysi_l07
+        sxsi_l08 sysi_l08 sxxsi_l08 syysi_l08 sxysi_l08
+        sxsi_l09 sysi_l09 sxxsi_l09 syysi_l09 sxysi_l09
+        sxsi_l10 sysi_l10 sxxsi_l10 syysi_l10 sxysi_l10
+        sxap syap sxxap syyap sxyap sxvp syvp sxxvp syyvp sxyvp sxvl syvl
+        sxxvl syyvl sxyvl snwice_mass snwice_mass_b nn_fsbc kt_ice
+        DELAY__r8_cflice DELAY_re8_fwb2 DELAY_im8_fwb2 v_i v_s a_i t_su u_ice
+        v_ice oa_i a_ip v_ip v_il e_s_l01 e_s_l02 e_s_l03 e_s_l04 e_s_l05
+        e_i_l01 e_i_l02 e_i_l03 e_i_l04 e_i_l05 e_i_l06 e_i_l07 e_i_l08
+        e_i_l09 e_i_l10 sv_i szv_i_l01 szv_i_l02 szv_i_l03 szv_i_l04
+        szv_i_l05 szv_i_l06 szv_i_l07 szv_i_l08 szv_i_l09 szv_i_l10""".split(),
+    "iceberg": """kount calving calving_hflx stored_ice stored_heat lon lat xi yj
+        uvel vvel mass thickness width length number year day mass_scaling
+        mass_of_bits heat_density""".split(),
+}
+
+
+def _restart_inventory(root: Path) -> dict:
+    from netCDF4 import Dataset
+    patterns = {
+        "ocean": "ORCA2_00000010_restart_{rank:04d}.nc",
+        "ice": "ORCA2_00000010_restart_ice_{rank:04d}.nc",
+        "iceberg": "ORCA2_00000010_restart_icb_{rank:04d}.nc",
+    }
+    result = {}
+    for family, pattern in patterns.items():
+        wanted = RESTART_VARIABLES[family]
+        shards = []
+        for rank in (0, 1):
+            path = root / pattern.format(rank=rank)
+            # Rank 1 owns no iceberg particles in this endpoint, so NEMO
+            # writes only the five gridded/counter variables there.
+            rank_wanted = wanted[:5] if family == "iceberg" and rank == 1 else wanted
+            with Dataset(path) as dataset:
+                found = list(dataset.variables)
+            require(found == rank_wanted,
+                    f"{path.name}: restart variable inventory differs "
+                    f"missing={sorted(set(rank_wanted)-set(found))} "
+                    f"extra={sorted(set(found)-set(rank_wanted))}")
+            shards.append({"file": path.name, "variables": len(found)})
+        result[family] = {"count": len(wanted), "names": wanted, "shards": shards}
+    return result
+
 
 def _netcdf_equal_except_timestamp(a: Path, b: Path) -> None:
     from netCDF4 import Dataset
@@ -416,7 +491,8 @@ def validate_identity(control: Path, instrumented: Path) -> dict:
     rows.extend({"file": name, "status": "EXCLUDED_TIMING_OR_LAUNCH_PROVENANCE"}
                 for name in TIMING_EXCLUDED)
     return {"status": "PASS", "rows": rows, "restart_shards_exact": 6,
-            "history_payloads_exact": 8}
+            "history_payloads_exact": 8,
+            "restart_variable_inventory": _restart_inventory(instrumented)}
 
 
 def planted_controls(root: Path, manifest: Path, control: Path, instrumented: Path) -> dict:
