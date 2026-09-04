@@ -1769,3 +1769,58 @@ fails `6 == 7` with exit `1` when one of its four source sites is reverted.
 All Round-18 measurements are Codex-internal.  Round-17 independent review was
 still running during this dispatch; Round-18 independent review is outstanding
 and no dual-review claim is made.
+
+## Round 19 — external-mode substep 1→2 preregistration
+
+Round 19 starts from `a07338be5bed45a615b41bc491db5369372ce867`; review
+minor commit `2f395a91e0539e8c51f831fe13c2c9a381c6de0e` precedes this
+measurement.  Round-17 independent review returned SHIP; Round-18 independent
+review is still running.  The shipped NEMO source read before this
+preregistration is `dynspg_ts.F90` SHA-256
+`49f367fe8dc7a47771cdabc39a4eea7b8c36001f623f57f132beb909b835ea60`.
+
+The predicted owner is the source association of the substep-1 velocity
+update, with the ordered candidates below.  The ranking follows the first
+reported live residual: substep-2 midpoint U/V differ by
+`1.728794245346027e-18` / `1.7296412782932813e-18` in 580 / 570 wet faces,
+whereas the substep-2 `eta_exit` residual is only
+`1.3552527156068805e-20` in 114 wet T cells.
+
+1. The vector update at `dynspg_ts.F90:719-731`: NEMO forms
+   `spg + trd + frc`, multiplies once by `rDt_e`, adds `un_e/vn_e`, then
+   masks.  Exact inputs with a non-exact result confirm association/order;
+   substituting the literal replay alone must clear the exit and next
+   midpoint or this candidate is refuted.
+2. The continuity chain at `:603-609,627-630`: NEMO forms
+   `(e2u*ua_e)*zhup2_e`, the two face differences, their sum, the
+   `r1_e1e2t` product, then `sshn_e-rDt_e*(ssh_frc+zhdiv)`.  Its first
+   non-exact intermediate confirms this candidate only for the SSH branch;
+   it owns the velocity branch only if replacing that one operand clears the
+   later PGF and velocity result.
+3. The startup midpoint and SSH blends at `:535-562`: the first two substeps
+   set `(za1,za2,za3)=(1,0,0)` before the three-term expressions.  A mismatch
+   before continuity confirms this association; exact replay refutes it.
+4. The exit face depths and reciprocals at `:653-667,771-778`: the QCO build
+   uses the surface-weighted two-point SSH average, adds `hu_0/hv_0`, then
+   divides the mask by `depth + 1 - mask`.  These operands must be exact before
+   any drag attribution.
+5. The half-step-back SSH blend and pressure gradient at `:671-685`, followed
+   by the same-time ENE Coriolis at `:688-689`, explicit drag at `:699-705`,
+   and forcing add at `:719-731`.  This candidate is downstream and cannot be
+   labelled until all earlier operands are exact.
+
+The config-local WRITE-only extension will record, for substeps 1 and 2, every
+term above immediately before and after its source statement: history fields
+and interpolation weights; metric transports and their two differences;
+`zhdiv`, `ssh_frc`, and SSH entry/exit; face-depth sum operands, depth, and
+reciprocal; backward-interpolation weights/terms/result; PGF difference,
+metric reciprocal, and result; Coriolis, drag, and slow forcing; velocity-sum
+partials and exit.  Its control is the ordinary stage record hash, which must
+remain unchanged.  The committed diagnostic must exit nonzero for a planted
+one-ulp mutation of the first exact nonzero operand.
+
+Each arm changes one replay boundary only and is evaluated on identical V2
+operands under production JIT/CPU/fp64/libm.  A boundary is an owner only when
+its magnitude scales to the child residual and its substitution clears that
+child; otherwise it is labelled a contributor or refuted.  No shared
+external-mode arithmetic changes before this discriminator reports.
