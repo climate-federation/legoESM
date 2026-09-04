@@ -1,7 +1,7 @@
 # Round 10 codex-internal config/hygiene review
 
-Reviewer identity: `codex-internal/config-hygiene`  
-Reviewed commit: `6b33449fc758e0afa19fdff79813cee9e5857973`  
+Reviewer identity: `codex-internal/config-hygiene`
+Reviewed commit: `6b33449fc758e0afa19fdff79813cee9e5857973`
 Verdict: **SHIP**
 
 ## Checks

@@ -1,7 +1,7 @@
 # Lane 3b round-10 preregistration — SI3 bulk bit identity and review debt
 
-Date: 2026-09-04  
-Tracker: `climate-federation/legoESM#1699`  
+Date: 2026-09-04
+Tracker: `climate-federation/legoESM#1699`
 Starting commit: `4e29046372739009e473f8ebe053844ee63819a9`
 
 ## Scope and fixed protocol

@@ -2,7 +2,7 @@
 +++ sbc_phy.F90
 @@ -194,6 +194,22 @@
     !! Software governed by the CeCILL license (see ./LICENSE)
-    !!---------------------------------------------------------------------
+    !!----------------------------------------------------------------------
  CONTAINS
 +
 +   SUBROUTINE l3bulk_dump_folded_constants
@@ -20,9 +20,11 @@
 +      WRITE(inum) zvalues
 +      CLOSE(inum)
 +   END SUBROUTINE l3bulk_dump_folded_constants
- 
- 
-    ELEMENTAL FUNCTION virt_temp_sclr( pta, pwa )
+-
+-
++
++
+    ELEMENTAL FUNCTION virt_temp_sclr( pta, pqa )
 --- sbcblk.F90
 +++ sbcblk.F90
 @@ -261,6 +261,7 @@

@@ -1,8 +1,8 @@
 # Lane 3b round-10 receipt — SI3 bulk bit closure
 
-Date: 2026-09-04  
-Tracker: `climate-federation/legoESM#1699`  
-Starting commit: `4e29046372739009e473f8ebe053844ee63819a9`  
+Date: 2026-09-04
+Tracker: `climate-federation/legoESM#1699`
+Starting commit: `4e29046372739009e473f8ebe053844ee63819a9`
 Recovery git: `/tmp/codex-si3thd-localgit`
 
 ## Outcome
@@ -95,8 +95,9 @@ Copy-only provenance:
 - run roots: `c1d_omip_l3_sasice_folded_a` and `_b` under that root;
 - executables: SHA-256 `b5ebd6c2a4ff98801d3962a6d0515f8399c80ef8a003a8c2357b5418d5a34cbf`
   and `911859a1018389838670b15f74df36137d9c51a7a10adda773d959c6135426ad`;
-- committed instrumentation patch: SHA-256
-  `6bbc16233e5e6d13d6d9d3aa8decce63a7fb05e3aba8fe648ab2f17ca6d3d644`.
+- committed instrumentation replay patch (blank context canonicalized without
+  changing the resulting Fortran): SHA-256
+  `bd2fe0b51e7516ac1df7736e374e793eed47e1ccc04541a0b0a3b598dd66635e`.
 
 The shipped NEMO tree and every retained oracle root remained unmodified.
 
