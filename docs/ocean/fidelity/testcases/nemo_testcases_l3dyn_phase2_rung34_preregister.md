@@ -426,3 +426,39 @@ libm is `0 / 1,008,016`.  Its broader active-window trajectory prediction is
 UNMEASURED because the primary completed-step stop condition was false.  The
 full measurements, controls, hashes, and ASKED/UNASKED dispositions are in the
 phase-2 receipt.
+
+### Round-11 intensive-state bridge (registered before implementation)
+
+Executed NEMO keeps `a_i`, `v_i`, `v_s`, `v_ip`, and `v_il` as intensive
+category fields across outer steps.  The one-category aggregates supplied to
+rheology are direct `SUM` assignments at `icevar.F90:123-132`; dynALL then
+calls rheology before advection at `icedyn.F90:130-135`.  Only inside Prather
+does NEMO form the extensive work arrays as `field * e1e2t` at
+`icedyn_adv_pra.F90:218-245`, and it recovers the intensive fields in the
+written order `z0 * r1_e1e2t * tmask` at `:355-381`.
+
+The preregistered repair is therefore one shared transport-boundary pair:
+outer-step/card state remains intensive; immediately before the existing
+Prather kernel it is packed with the literal NEMO multiplication statements;
+immediately after advection and its executed source corrections it is
+unpacked with NEMO's reciprocal and left-to-right products.  Each written
+floating operation is passed through the canonical `nemo_source_round`.
+Rheology consumes the intensive carry directly, so the initial state never
+takes a fictitious `field * area / area` trip.  The existing rung-3.1/3.2
+transport API and all non-testcase ice defaults remain unchanged.
+
+Prediction: on CPU, fp64, production JIT and scalar-libm policy, the completed
+rung-3.3 step 1 will make `u_ice`, `v_ice`, `stress1_i`, `stress2_i`, and
+`stress12_i` byte-exact (`0 / 9801` nonzero cells each).  CONFIRM is all five
+rows zero and no newly nonzero transported-field row; REFUTE is any nonzero
+stress/velocity row, followed by a first-operand descent and an explicit next
+owner.  Only if that endpoint is bit-exact will steps 2--8, the active
+ICE_RHEO step-8 window, and the production-JIT 9--720/restart walk run.
+
+Two review discriminators are also registered.  First, repeating the Round-9
+oracle-U/V moment replay under JIT will leave all 160 moment rows byte-exact;
+any nonzero row refutes the prior upstream-owner statement.  Second, the
+moment plant must produce `over_two_ulp_count > 0` and a nonzero process exit;
+zero is a fail-closed harness error.  If the conditional long walk runs, the
+first non-bit-exact row and step are the next owner boundary; no later growth
+is assigned a mechanism without a one-variable measurement.
