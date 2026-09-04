@@ -92,34 +92,40 @@ class PrecisionPolicy(NamedTuple):
     control : jnp.dtype
         Dtype for solvers, implicit systems, and diagnostics that
         require tight tolerances (semi-implicit, barotropic, EOS).
+    transcendentals : str
+        ``"native"`` uses JAX/XLA math intrinsics. ``"libm"`` selects the
+        CPU-only scalar system-libm callbacks used by NEMO certification.
     """
     storage: jnp.dtype = jnp.float32
     compute: jnp.dtype = jnp.float32
     accumulate: jnp.dtype = jnp.float32
     control: jnp.dtype = jnp.float32
+    transcendentals: str = "native"
 
     @staticmethod
-    def fp32() -> PrecisionPolicy:
+    def fp32(*, transcendentals: str = "native") -> PrecisionPolicy:
         """All-float32 mode. Fastest, GPU-optimal."""
         return PrecisionPolicy(
             storage=jnp.float32,
             compute=jnp.float32,
             accumulate=jnp.float32,
             control=jnp.float32,
+            transcendentals=transcendentals,
         )
 
     @staticmethod
-    def fp64() -> PrecisionPolicy:
+    def fp64(*, transcendentals: str = "native") -> PrecisionPolicy:
         """All-float64 mode. Full scientific reference."""
         return PrecisionPolicy(
             storage=jnp.float64,
             compute=jnp.float64,
             accumulate=jnp.float64,
             control=jnp.float64,
+            transcendentals=transcendentals,
         )
 
     @staticmethod
-    def mixed() -> PrecisionPolicy:
+    def mixed(*, transcendentals: str = "native") -> PrecisionPolicy:
         """Mixed-precision mode.
 
         Storage and compute in float32 for GPU bandwidth.
@@ -130,10 +136,11 @@ class PrecisionPolicy(NamedTuple):
             compute=jnp.float32,
             accumulate=jnp.float64,
             control=jnp.float64,
+            transcendentals=transcendentals,
         )
 
     @staticmethod
-    def mixed_fp64_storage() -> PrecisionPolicy:
+    def mixed_fp64_storage(*, transcendentals: str = "native") -> PrecisionPolicy:
         """Mixed mode with float64 storage, float32 compute.
 
         State arrays are stored in float64 for maximum precision in
@@ -146,6 +153,7 @@ class PrecisionPolicy(NamedTuple):
             compute=jnp.float32,
             accumulate=jnp.float64,
             control=jnp.float64,
+            transcendentals=transcendentals,
         )
 
 
@@ -171,6 +179,11 @@ def set_policy(policy: PrecisionPolicy) -> None:
     there.  ``resolve_dtype`` handles clamping float64 → float32 for
     non-spectral code that runs on the default (Metal) device.
     """
+    if policy.transcendentals not in {"native", "libm"}:
+        raise ValueError(
+            "PrecisionPolicy.transcendentals must be 'native' or 'libm', got "
+            f"{policy.transcendentals!r}"
+        )
     _ACTIVE_POLICY[0] = policy
     if jnp.float64 in (policy.storage, policy.compute,
                         policy.accumulate, policy.control):
@@ -181,23 +194,6 @@ def set_policy(policy: PrecisionPolicy) -> None:
 def get_policy() -> PrecisionPolicy:
     """Return the active global precision policy."""
     return _ACTIVE_POLICY[0]
-
-
-def nemo_source_round(value: jax.Array) -> jax.Array:
-    """Materialize one NEMO source operation before its next consumer.
-
-    ``optimization_barrier`` alone survives to HLO but does not prevent the
-    CPU LLVM pass from contracting a producer into its consumer.  The
-    classification/copy is an IEEE identity, including signed infinities and
-    NaNs, and remains differentiable for finite physical inputs.  This is the
-    shared form promoted from the GYRE EOS fidelity implementation.
-    """
-    value = jax.lax.optimization_barrier(value)
-    return jnp.where(
-        jnp.isfinite(value),
-        value,
-        jnp.copysign(jnp.abs(value), value),
-    )
 
 
 def validate_policy(policy: PrecisionPolicy | None = None) -> None:
@@ -215,6 +211,11 @@ def validate_policy(policy: PrecisionPolicy | None = None) -> None:
     """
     if policy is None:
         policy = get_policy()
+    if policy.transcendentals not in {"native", "libm"}:
+        raise ValueError(
+            "PrecisionPolicy.transcendentals must be 'native' or 'libm', got "
+            f"{policy.transcendentals!r}"
+        )
     needs_x64 = jnp.float64 in (
         policy.storage, policy.compute, policy.accumulate, policy.control,
     )
