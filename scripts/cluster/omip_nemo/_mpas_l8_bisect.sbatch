@@ -55,12 +55,13 @@ run_arm () {  # name, extra flags
   echo "--- $name per-step max|u| (step,max_abs_u,lat,lon,lev):"
   cut -d, -f1,5,7,8,9 $OUT/diag_timeseries.csv 2>/dev/null | sed -n '2,32p' | tr '\n' ' ' ; echo
 }
-# LADDER 3. Level 7 carries the SAME deep IC fronts (probe 9632489) and is
-# stable, so the fronts are necessary but not sufficient. uniform_ic = the
-# builder's analytic stratified rest state with NO ice (the ice gate demands
-# --woa-init) - stable => the level-8 dynamics are fine on a smooth state and
-# the front is the trigger. ctl_snap = control with a snapshot EVERY step for
-# 7 steps, to see the growing mode's structure at the Alboran cell.
-run_arm uniform_ic --dt 75 --partial-cell --mle --mle-ce 0.06 $TKE $ISF $IWM --bbl-adv
-run_arm ctl_snap   --dt 75 --partial-cell --mle --mle-ce 0.06 $TKE $ISF $IWM --bbl-adv $WOA $NEMOIC $ICE --years 0.0000165 --snapshot-every-days 0.0009
+# LADDER 4. The step-6 snapshot shows the mode: eta +0.18/-0.19 m between the
+# two cells of the max edge (a 2dx checkerboard), u nearly barotropic through
+# the column, T/S smooth across the edge => the FREE-SURFACE solve is the
+# unstable operator (implicit_cn, theta 0.55, PCG). ONE VARIABLE: NEMO's
+# split-explicit forward-backward barotropic instead. Stable => the implicit
+# Helmholtz solve is defective at level 8 (checkerboard null space / stencil
+# inconsistency); blows => the mode is in the baroclinic/PGF coupling.
+run_arm splitexp   --dt 75 --partial-cell --mle --mle-ce 0.06 $TKE $ISF $IWM --bbl-adv $WOA $NEMOIC $ICE --barotropic-solver explicit_substep
+run_arm splitexp_f --dt 75 --partial-cell --mle --mle-ce 0.06 $TKE $ISF $IWM --bbl-adv $WOA $NEMOIC $ICE --barotropic-solver explicit_substep --barotropic-time-filter cosine
 echo DONE
