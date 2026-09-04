@@ -32,6 +32,7 @@ def test_land_ml_survives_carry_aux_npz_roundtrip(tmp_path):
     src = SimpleNamespace(
         _carry_aux={}, _land_ml_state=saved,
         _double_moment_step_inputs=lambda: {},
+        _land_soil_dz=lambda: np.zeros(6, dtype=np.float64),
         config=SimpleNamespace(convection="none"),
     )
 
@@ -66,6 +67,7 @@ def test_none_optional_fields_survive_roundtrip(tmp_path):
     src = SimpleNamespace(
         _carry_aux={}, _land_ml_state=saved,
         _double_moment_step_inputs=lambda: {},
+        _land_soil_dz=lambda: np.zeros(6, dtype=np.float64),
         config=SimpleNamespace(convection="none"),
     )
     aux = ModelDriver._checkpoint_carry_aux(src)
@@ -100,6 +102,7 @@ def test_partial_checkpoint_raises(tmp_path):
     src = SimpleNamespace(
         _carry_aux={}, _land_ml_state=saved,
         _double_moment_step_inputs=lambda: {},
+        _land_soil_dz=lambda: np.zeros(6, dtype=np.float64),
         config=SimpleNamespace(convection="none"),
     )
     aux = ModelDriver._checkpoint_carry_aux(src)
@@ -157,6 +160,7 @@ def test_canopy_warm_start_cache_is_not_a_checkpoint_field(tmp_path):
     src = SimpleNamespace(
         _carry_aux={}, _land_ml_state=saved,
         _double_moment_step_inputs=lambda: {},
+        _land_soil_dz=lambda: np.zeros(6, dtype=np.float64),
         config=SimpleNamespace(convection="none"))
     aux = ModelDriver._checkpoint_carry_aux(src)
     assert "land_ml_canopy_x" not in aux
