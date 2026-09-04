@@ -630,6 +630,12 @@ def _surface_forcings(card, state, kt: int):
             card.recipe.grid.sin_alpha_u[:, 1:] * sbc.utau_pa
             + card.recipe.grid.cos_alpha_u[:, 1:] * sbc.vtau_pa
         ),
+        # NEMO's usrdef_sbc fields are already in the native ocean
+        # referential.  Preserve those source operands through the shared
+        # forcing interface; reconstructing them after the inverse geographic
+        # rotation loses 1--3 ulp before sbcmod.F90's face interpolation.
+        tau_i_native=sbc.utau_pa,
+        tau_j_native=sbc.vtau_pa,
     )
     zeros = jnp.zeros_like(sbc.emp_kg_m2_s)
     freshwater = FreshwaterForcing(

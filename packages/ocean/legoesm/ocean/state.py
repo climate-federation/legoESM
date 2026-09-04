@@ -221,7 +221,12 @@ class OceanSurfaceForcing(NamedTuple):
     q_net : array or None
         Net surface heat flux (positive into ocean) [W/m²].
     tau_x, tau_y : array or None
-        Surface wind stress components [Pa].
+        Geographic east/north atmospheric surface wind stress components [Pa].
+    tau_i_native, tau_j_native : array or None
+        Optional grid-native, on-ocean stress at T points [Pa].  This pair is
+        for source-defined ocean forcing that already lives in the model
+        referential (for example NEMO ``usrdef_sbc``); when present it avoids a
+        lossy native→geographic→native round trip.  Both must be supplied.
     freshwater : array or None
         Net freshwater flux into ocean (P - E + R + M) [kg/m²/s].
     salt_flux : array or None
@@ -322,6 +327,8 @@ class OceanSurfaceForcing(NamedTuple):
                                        # attenuation of the lc/etau wave-TKE
                                        # sources (TKEConfig.eice=1; NEMO
                                        # nn_eice).  None ⇒ no attenuation.
+    tau_i_native: object = None        # jnp.ndarray | None [Pa], on-ocean i
+    tau_j_native: object = None        # jnp.ndarray | None [Pa], on-ocean j
 
 
 class OceanConfig(NamedTuple):

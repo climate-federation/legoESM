@@ -1106,6 +1106,13 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # dynhpg recurrence; this restores the former collapsed p'-gradient
     # association without exposing a constructible scheme selector.
     legacy_hpg_algebraic_association: bool = False
+    # Private one-variable ablations for the Round-18 wind walk.  Production
+    # preserves a supplied native T-point stress through sbcmod.F90:543-546
+    # and materializes stp2d.F90:200-201's written product/add association.
+    # These restore the lossy geographic round trip and collapsed division;
+    # no constructible model configuration can select either arm.
+    legacy_geographic_surface_stress_arm: bool = False
+    legacy_barotropic_wind_association: bool = False
     # Private source-association probe for stprk3_stg.F90:265-278.  It hands
     # the separately carried stage barotropic value to zub/zvb instead of the
     # production reduction of the 3-D Kmm field.  The GYRE arm did not clear
@@ -4706,6 +4713,14 @@ class LatLonCGridOceanModel:
         _F_slow_depth_u = F_slow_u
         _F_slow_depth_v = F_slow_v
 
+        _wind_tau_i_u = jnp.zeros_like(F_slow_u)
+        _wind_tau_j_v = jnp.zeros_like(F_slow_v)
+        _wind_r1_rho0 = jnp.asarray(0.0, dtype=du_dt.dtype)
+        _wind_r1_hu = jnp.zeros_like(F_slow_u)
+        _wind_r1_hv = jnp.zeros_like(F_slow_v)
+        _wind_increment_u = jnp.zeros_like(F_slow_u)
+        _wind_increment_v = jnp.zeros_like(F_slow_v)
+
         if getattr(_cfg_b, "surface_stress_implicit", False):
             # NEMO stp2d explicit barotropic wind term: with the stress
             # WITHHELD from du_dt (surface_stress_implicit; deposited inside
@@ -4721,16 +4736,40 @@ class LatLonCGridOceanModel:
                 state.eta.data, state.H_bathy.data, _zc)
             _sfx = (surface_stress_faces(
                         surface_forcing, du_dt.dtype, _zc, _J_fs,
-                        _grid)
+                        _grid,
+                        use_native=not (
+                            self._nemo_ws_test_hooks
+                            .legacy_geographic_surface_stress_arm))
                     if surface_forcing is not None else None)
             if _sfx is not None:
                 _tau_i_u, _tau_j_v, _, _ = _sfx
                 _r0 = jnp.asarray(_cfg_b.constants.rho_0,
                                   dtype=du_dt.dtype)
-                F_slow_u = F_slow_u + _tau_i_u / (_r0 * H_u_pre) \
-                    * state.u_mask.data
-                F_slow_v = F_slow_v + _tau_j_v / (_r0 * H_v_pre) \
-                    * state.v_mask.data
+                _wind_tau_i_u = _tau_i_u
+                _wind_tau_j_v = _tau_j_v
+                _wind_r1_rho0 = nemo_source_round(1.0 / _r0)
+                _wind_r1_hu = nemo_source_round(1.0 / H_u_pre)
+                _wind_r1_hv = nemo_source_round(1.0 / H_v_pre)
+                if not self._nemo_ws_test_hooks.legacy_barotropic_wind_association:
+                    # stp2d.F90:200-201, preserving Fortran's written
+                    # ``(r1_rho0*tau)*r1_h`` product before the addition.
+                    _wind_increment_u = nemo_source_round(
+                        nemo_source_round(_wind_r1_rho0 * _tau_i_u)
+                        * _wind_r1_hu)
+                    _wind_increment_v = nemo_source_round(
+                        nemo_source_round(_wind_r1_rho0 * _tau_j_v)
+                        * _wind_r1_hv)
+                    F_slow_u = nemo_source_round(
+                        F_slow_u + _wind_increment_u) * state.u_mask.data
+                    F_slow_v = nemo_source_round(
+                        F_slow_v + _wind_increment_v) * state.v_mask.data
+                else:
+                    _wind_increment_u = _tau_i_u / (_r0 * H_u_pre) \
+                        * state.u_mask.data
+                    _wind_increment_v = _tau_j_v / (_r0 * H_v_pre) \
+                        * state.v_mask.data
+                    F_slow_u = F_slow_u + _wind_increment_u
+                    F_slow_v = F_slow_v + _wind_increment_v
         _F_slow_wind_u = F_slow_u
         _F_slow_wind_v = F_slow_v
 
@@ -5468,6 +5507,13 @@ class LatLonCGridOceanModel:
                         "depth_v": _F_slow_depth_v,
                         "post_wind_u": _F_slow_wind_u,
                         "post_wind_v": _F_slow_wind_v,
+                        "wind_tau_u": _wind_tau_i_u,
+                        "wind_tau_v": _wind_tau_j_v,
+                        "wind_r1_rho0": _wind_r1_rho0,
+                        "wind_r1_hu": _wind_r1_hu,
+                        "wind_r1_hv": _wind_r1_hv,
+                        "wind_increment_u": _wind_increment_u,
+                        "wind_increment_v": _wind_increment_v,
                         "post_drag_u": _F_slow_drag_u,
                         "post_drag_v": _F_slow_drag_v,
                         "pre_external_u": F_slow_u,

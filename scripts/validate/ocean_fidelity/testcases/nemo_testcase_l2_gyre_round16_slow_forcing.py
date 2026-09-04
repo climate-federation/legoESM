@@ -156,12 +156,21 @@ def _native_v2(values) -> np.ndarray:
     return np.asarray(values)[1:, :]
 
 
-def run(root: Path, *, plant: bool) -> dict[str, object]:
+def run(
+    root: Path, *, plant: bool, legacy_wind_arm: bool,
+    legacy_stress_arm: bool,
+) -> dict[str, object]:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
         _NEMOWSRK3TestHooks,
+    )
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        interp_cell_to_uface,
+    )
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        interp_to_v_points,
     )
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
 
@@ -180,11 +189,22 @@ def run(root: Path, *, plant: bool) -> dict[str, object]:
     seed_model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, config)
     state = seed_model._seed_tke_preclosure_carry(card.recipe.initial_state)
     freshwater, surface = _surface_forcings(card, card.recipe.initial_state, 1)
+    raw_tau_u = interp_cell_to_uface(
+        -np.asarray(surface.tau_x, dtype=np.float64),
+        source_round=False,
+    )
+    raw_tau_v = interp_to_v_points(
+        -np.asarray(surface.tau_y, dtype=np.float64), grid=card.recipe.grid,
+    )
     model = LatLonCGridOceanModel(
         card.recipe.grid,
         card.recipe.z_coord,
         config,
-        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_barotropic_substeps=True),
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_barotropic_substeps=True,
+            legacy_barotropic_wind_association=legacy_wind_arm,
+            legacy_geographic_surface_stress_arm=legacy_stress_arm,
+        ),
     )
     model.prime_step_caches(state)
     trace = model.step(state, card.dt_s, freshwater=freshwater, surface_forcing=surface)
@@ -216,6 +236,15 @@ def run(root: Path, *, plant: bool) -> dict[str, object]:
         "post_drag_v": _native_v2(operands["post_drag_v"]),
         "pre_external_u": _native_u2(operands["pre_external_u"]),
         "pre_external_v": _native_v2(operands["pre_external_v"]),
+        "tau_u": _native_u2(operands["wind_tau_u"]),
+        "tau_v": _native_v2(operands["wind_tau_v"]),
+        "r1_rho0": float(operands["wind_r1_rho0"]),
+        "r1_hu": _native_u2(operands["wind_r1_hu"]),
+        "r1_hv": _native_v2(operands["wind_r1_hv"]),
+        "wind_increment_u": _native_u2(operands["wind_increment_u"]),
+        "wind_increment_v": _native_v2(operands["wind_increment_v"]),
+        "raw_tau_u": _native_u2(raw_tau_u),
+        "raw_tau_v": _native_v2(raw_tau_v),
     }
     if plant:
         candidate["e3u"] = np.array(candidate["e3u"], copy=True)
@@ -232,7 +261,21 @@ def run(root: Path, *, plant: bool) -> dict[str, object]:
             "Krhs": compare(candidate[f"krhs_{face}"], oracle[f"krhs_{face}"], active3),
             "mask": compare(candidate[f"{face}mask"], oracle[f"{face}mask"], active3),
             "r1_h0": compare(candidate[f"r1_h{face}0"], oracle[f"r1_h{face}0"], active2),
+            "wind_tau": compare(candidate[f"tau_{face}"], oracle[f"{face}tau"], active2),
+            "raw_wind_tau": compare(
+                candidate[f"raw_tau_{face}"], oracle[f"{face}tau"], active2
+            ),
+            "wind_r1_h": compare(candidate[f"r1_h{face}"], oracle[f"r1_h{face}"], active2),
         }
+
+    scalar_rows = {
+        "r1_rho0": {
+            "bit_exact": candidate["r1_rho0"] == oracle["r1_rho0"],
+            "candidate_hex": candidate["r1_rho0"].hex(),
+            "oracle_hex": oracle["r1_rho0"].hex(),
+            "absolute_delta": abs(candidate["r1_rho0"] - oracle["r1_rho0"]),
+        }
+    }
 
     source_replays = {}
     boundary_rows = {}
@@ -327,10 +370,20 @@ def run(root: Path, *, plant: bool) -> dict[str, object]:
                     )
                 ),
             },
+            "wind_product_association": {
+                "legacy_selected": legacy_wind_arm,
+                "changed_operands": [
+                    "wind product/add association and statement materialization"
+                ],
+                "post_wind_residual": boundary_rows[face]["post_wind"]["absolute_max"],
+                "post_wind_ulp": boundary_rows[face]["post_wind"]["ulp_max"],
+            },
         }
 
     first = None
-    order = ("e3", "Krhs", "mask", "r1_h0")
+    order = (
+        "e3", "Krhs", "mask", "r1_h0", "wind_tau", "wind_r1_h",
+    )
     for boundary in order:
         for face in ("u", "v"):
             row = operand_rows[face][boundary]
@@ -360,12 +413,16 @@ def run(root: Path, *, plant: bool) -> dict[str, object]:
         "status": "AT-BAR" if all_exact else "DEBT",
         "regime": "production-jit/cpu/fp64/libm",
         "plant": plant,
+        "legacy_wind_arm": legacy_wind_arm,
+        "legacy_stress_arm": legacy_stress_arm,
         "oracle_root": str(root),
         "source_citations": {
             "three_dimensional_rhs": "stp2d.F90:126-171",
             "depth_mean": "stp2d.F90:177-181",
             "drag": "stp2d.F90:196",
             "wind": "stp2d.F90:198-202",
+            "wind_face_interpolation": "sbcmod.F90:539-547",
+            "live_inverse_depth": "domain.F90:159; domzgr_substitute.h90:51,125-138",
             "external_copy_and_coriolis_removal": "dynspg_ts.F90:280-300",
         },
         "artifacts": {
@@ -376,6 +433,7 @@ def run(root: Path, *, plant: bool) -> dict[str, object]:
         "oracle_header": oracle["header"],
         "first_non_bit_exact_primitive": first,
         "primitive_operands": operand_rows,
+        "scalar_operands": scalar_rows,
         "source_replays": source_replays,
         "boundary_rows": boundary_rows,
         "one_variable_association_arms": arms,
@@ -393,8 +451,15 @@ def main() -> int:
     parser.add_argument("--oracle-root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--plant", action="store_true")
+    parser.add_argument("--legacy-wind-arm", action="store_true")
+    parser.add_argument("--legacy-stress-arm", action="store_true")
     args = parser.parse_args()
-    report = run(args.oracle_root, plant=args.plant)
+    report = run(
+        args.oracle_root,
+        plant=args.plant,
+        legacy_wind_arm=args.legacy_wind_arm,
+        legacy_stress_arm=args.legacy_stress_arm,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     print(

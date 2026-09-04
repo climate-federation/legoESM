@@ -40,6 +40,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.latlon import LatLonGrid
 # Donor-cell upwind face reconstructions: PROMOTED to the core substrate so
 # the sea-ice C-grid transport can share them without an ice->ocean layering
@@ -298,11 +299,15 @@ def interp_to_v_points(f: jnp.ndarray, grid=None) -> jnp.ndarray:
 
 
 def _finish_interp_to_v(
-    f: jnp.ndarray, f_padded: jnp.ndarray, grid,
+    f: jnp.ndarray, f_padded: jnp.ndarray, grid, *, source_round=False,
 ) -> jnp.ndarray:
     """Midpoint + pole/fold post-processing shared by the single and
     batched ``interp_to_v_points`` variants (one numeric source)."""
-    f_v = 0.5 * (f_padded[:-1] + f_padded[1:])
+    if source_round:
+        neighbour_sum = nemo_source_round(f_padded[:-1] + f_padded[1:])
+        f_v = nemo_source_round(0.5 * neighbour_sum)
+    else:
+        f_v = 0.5 * (f_padded[:-1] + f_padded[1:])
     from legoesm.grids.halo_latlon import zero_polar_lat_ends
     f_v = zero_polar_lat_ends(f_v)
     fold = getattr(grid, "fold", None) if grid is not None else None
@@ -320,7 +325,9 @@ def _finish_interp_to_v(
     return f_v
 
 
-def interp_to_v_points_multi(fields, grid=None) -> tuple:
+def interp_to_v_points_multi(
+    fields, grid=None, *, source_round=False,
+) -> tuple:
     """Batched :func:`interp_to_v_points` for independent cell fields.
 
     Value-identical to ``tuple(interp_to_v_points(f, grid) for f in
@@ -331,7 +338,7 @@ def interp_to_v_points_multi(fields, grid=None) -> tuple:
     fields = tuple(fields)
     padded = pad_with_pole_bc_lat_multi(fields, halo=1)
     return tuple(
-        _finish_interp_to_v(f, f_p, grid)
+        _finish_interp_to_v(f, f_p, grid, source_round=source_round)
         for f, f_p in zip(fields, padded)
     )
 
@@ -3984,7 +3991,10 @@ def _bc_physics_tendencies(du_dt, dv_dt, dT_dt, dS_dt, physics_fn, state, grid, 
     return du_dt, dv_dt, dT_dt, dS_dt, phys_K_v, phys_A_v, diag_phys_u, diag_phys_v
 
 
-def surface_stress_faces(surface_forcing, u_dtype, z_coord, J, grid):
+def surface_stress_faces(
+    surface_forcing, u_dtype, z_coord, J, grid, *,
+    nemo_literal_association=False, use_native=True,
+):
     """Wind stress at u/v faces + the top-cell thicknesses (single owner of
     the tau sign/interp/rotation chain — used by the explicit stage-10b'
     deposition, the implicit surface-stress BC, and the F_slow barotropic
@@ -3994,15 +4004,32 @@ def surface_stress_faces(surface_forcing, u_dtype, z_coord, J, grid):
     grid-aligned) or ``None`` when the forcing carries no stress."""
     _sf_tau_x = getattr(surface_forcing, "tau_x", None)
     _sf_tau_y = getattr(surface_forcing, "tau_y", None)
+    _native_i = getattr(surface_forcing, "tau_i_native", None)
+    _native_j = getattr(surface_forcing, "tau_j_native", None)
+    if (_native_i is None) != (_native_j is None):
+        raise ValueError("tau_i_native and tau_j_native must be supplied together")
+    if _native_i is not None and use_native:
+        tau_i_T = jnp.asarray(_native_i, dtype=u_dtype)
+        tau_j_T = jnp.asarray(_native_j, dtype=u_dtype)
+        tau_i_u = interp_cell_to_uface(tau_i_T, source_round=True)
+        tau_j_v, dz_0_v = interp_to_v_points_multi(
+            (tau_j_T, jnp.asarray(z_coord.dz_ref[0], dtype=u_dtype) * J),
+            grid=grid, source_round=True)
+        dz_0_u = interp_cell_to_uface(
+            jnp.asarray(z_coord.dz_ref[0], dtype=u_dtype) * J)
+        return tau_i_u, tau_j_v, dz_0_u, dz_0_v
     if surface_forcing is None or _sf_tau_x is None or _sf_tau_y is None:
         return None
     tau_e_T = -jnp.asarray(_sf_tau_x, dtype=u_dtype)
     tau_n_T = -jnp.asarray(_sf_tau_y, dtype=u_dtype)
-    tau_e_u_face = interp_cell_to_uface(tau_e_T)
-    tau_n_u_face = interp_cell_to_uface(tau_n_T)
+    tau_e_u_face = interp_cell_to_uface(
+        tau_e_T, source_round=nemo_literal_association)
+    tau_n_u_face = interp_cell_to_uface(
+        tau_n_T, source_round=nemo_literal_association)
     dz_0_T = jnp.asarray(z_coord.dz_ref[0], dtype=u_dtype) * J
     tau_e_v_face, tau_n_v_face, dz_0_v = interp_to_v_points_multi(
-        (tau_e_T, tau_n_T, dz_0_T), grid=grid)
+        (tau_e_T, tau_n_T, dz_0_T), grid=grid,
+        source_round=nemo_literal_association)
     cos_a_u = getattr(grid, "cos_alpha_u", None)
     sin_a_u = getattr(grid, "sin_alpha_u", None)
     cos_a_v = getattr(grid, "cos_alpha_v", None)
@@ -4019,6 +4046,9 @@ def surface_stress_faces(surface_forcing, u_dtype, z_coord, J, grid):
         tau_j_v = -tau_e_v_face * sa_v + tau_n_v_face * ca_v
     else:
         tau_j_v = tau_n_v_face
+    if nemo_literal_association:
+        tau_i_u = nemo_source_round(tau_i_u)
+        tau_j_v = nemo_source_round(tau_j_v)
     dz_0_u = interp_cell_to_uface(dz_0_T)
     return tau_i_u, tau_j_v, dz_0_u, dz_0_v
 
