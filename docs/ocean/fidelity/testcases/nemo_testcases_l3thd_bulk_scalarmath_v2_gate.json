@@ -500,6 +500,12 @@
     "variable": "utau_ice"
   },
   "non_bit_identical_rows": 16512,
+  "numeric_runtime": {
+    "jax": "0.10.0",
+    "jaxlib": "0.10.0",
+    "numpy": "2.4.4",
+    "python": "3.13.0"
+  },
   "oracle_version": "V2_SCALAR_MATH",
   "over_bar_rows": 0,
   "private_arms": {

@@ -8,10 +8,12 @@ import hashlib
 import importlib.util
 import json
 import math
+import platform
 import struct
 from pathlib import Path
 
 import jax
+import jaxlib
 import numpy as np
 
 BAR = 1.0e-15
@@ -20,6 +22,12 @@ MAGIC = b"NEMO_L3BULK_001 "
 EXPECTED_BULK_SHA256 = "57868f3212646bdf6b0c4add0f48701c0082718331bc76a153050c6d1d44dfe9"
 EXPECTED_EXCHANGE_SHA256 = "091395cf604e83d88fbf458c4ef76ac3df2d5a65dac9cdc502e224cc1d1af2e4"
 ORACLE_VERSION = "V2_SCALAR_MATH"
+ACCEPTED_RUNTIME = {
+    "python": "3.13.0",
+    "jax": "0.10.0",
+    "jaxlib": "0.10.0",
+    "numpy": "2.4.4",
+}
 DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l3/"
     "c1d_omip_l3_sasice_scalarmath_v2_a"
@@ -126,6 +134,24 @@ class GateError(RuntimeError):
 def require(ok: bool, message: str) -> None:
     if not ok:
         raise GateError(message)
+
+
+def runtime_versions() -> dict[str, str]:
+    """Return the exact numeric runtime used to certify the bitwise counts."""
+    return {
+        "python": platform.python_version(),
+        "jax": jax.__version__,
+        "jaxlib": jaxlib.__version__,
+        "numpy": np.__version__,
+    }
+
+
+def validate_runtime(runtime: dict[str, str]) -> None:
+    """Fail closed when asked to reproduce version-sensitive bitwise evidence."""
+    require(
+        runtime == ACCEPTED_RUNTIME,
+        f"unregistered numeric runtime: {runtime}; expected {ACCEPTED_RUNTIME}",
+    )
 
 
 def sha256(path: Path) -> str:
@@ -357,6 +383,10 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
     from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
     from legoesm.ice.sea_ice import _nemo_si3_blk_ice_2, _nemo_si3_ice_flx_other
 
+    runtime = runtime_versions()
+    if plant == "runtime":
+        runtime = {**runtime, "jax": "0.0.0-planted"}
+    validate_runtime(runtime)
     set_policy(PrecisionPolicy.fp64())
     require(jax.config.read("jax_enable_x64"), "JAX x64 disabled")
     require(jax.default_backend() == "cpu", "bulk gate is CPU-only")
@@ -519,6 +549,7 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         "bit_comparisons": len(rows) * EXPECTED_STEPS,
         "non_bit_identical_rows": total_nonbit,
         "bit_identical_rows": len(rows) * EXPECTED_STEPS - total_nonbit,
+        "numeric_runtime": runtime,
         "bit_owner_groups": bit_groups,
         "scalar_glibc_owner_probe": {
             "source": "icealb.F90:124-185; Python math.exp/log call scalar glibc libm",
@@ -569,6 +600,7 @@ def main() -> int:
     parser.add_argument("--plant", choices=(
         "blk_ice_1", "ice_alb", "blk_ice_2", "ice_flx_other",
         "stream_hash", "coverage", "selector", "bit_owner",
+        "runtime",
     ))
     args = parser.parse_args()
     result = evaluate(args.root, plant=args.plant)

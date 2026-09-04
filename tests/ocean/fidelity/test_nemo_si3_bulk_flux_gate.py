@@ -56,6 +56,13 @@ def test_score_distinguishes_bar_from_bit_identity() -> None:
     assert row["max_relative_error_step"] == 1
 
 
+def test_bitwise_evidence_runtime_is_stamped_and_fails_closed() -> None:
+    assert gate.runtime_versions() == gate.ACCEPTED_RUNTIME
+    bad = {**gate.ACCEPTED_RUNTIME, "jax": "0.11.1"}
+    with pytest.raises(gate.GateError, match="unregistered numeric runtime"):
+        gate.validate_runtime(bad)
+
+
 def test_selector_is_single_orca1_identity() -> None:
     from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_card
     from legoesm.ice.config import validate_si3_bulk_config
@@ -129,6 +136,7 @@ def test_full_year_gate_and_all_plants() -> None:
     for plant in (
         "blk_ice_1", "ice_alb", "blk_ice_2", "ice_flx_other",
         "stream_hash", "coverage", "selector", "bit_owner",
+        "runtime",
     ):
         with pytest.raises(gate.GateError):
             gate.evaluate(plant=plant)

@@ -228,9 +228,9 @@ def evaluate(*, plant: str | None = None) -> dict[str, object]:
     binaries = {}
     for lane, source in (("A", V2_A_SOURCE), ("B", V2_B_SOURCE)):
         path = source / f"cfgs/{CONFIG_V2}/BLD/bin/nemo.exe"
-        symbols = _nm_zgv(path)
         if plant == "binary_zgv" and lane == "A":
-            symbols.append("_ZGV_PLANTED")
+            path = V1_ROOT / "nemo.exe"
+        symbols = _nm_zgv(path)
         require(not symbols, f"{lane} executable retains _ZGV symbols: {symbols}")
         binaries[lane] = {"path": str(path), "sha256": sha256(path),
                           "zgv_symbols": symbols}

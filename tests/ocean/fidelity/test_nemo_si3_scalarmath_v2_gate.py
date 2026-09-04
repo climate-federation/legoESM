@@ -49,6 +49,12 @@ def test_column_card_defaults_to_scalar_math_v2() -> None:
     assert card.oracle_root == ORACLE_V2_ROOT == gate.V2_A_ROOT
 
 
+def test_binary_zgv_control_uses_retained_vectorized_executable() -> None:
+    symbols = gate._nm_zgv(gate.V1_ROOT / "nemo.exe")
+    assert symbols
+    assert all(symbol.startswith("_ZGV") for symbol in symbols)
+
+
 @pytest.mark.skipif(
     not (gate.V2_A_ROOT / "oracle_si3_exchange_frames.bin").exists(),
     reason="retained scalar-math V2 oracle is not mounted",
