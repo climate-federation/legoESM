@@ -300,7 +300,7 @@ SCO HPG (`:1356`), split-explicit surface (`:1367`), and runtime stages 1/2/3
 | 9 | stage-one slow momentum RHS: vector invariant, implicit linear bottom drag, wind | `stp2d.F90:175-230`; drag selectors output `:1094-1097` | complete ordered slow-forcing operands VERIFIED |
 | 10 | QCO split-explicit barotropic solver, 65 substeps, EEN | `dynspg.F90:179-181,230-250`; output `:1367`; `dynspg_ts.F90` substep loop | recurrence, drag, EEN, ordered first two steps and `un_adv/vn_adv` VERIFIED |
 | 11 | WS-RK3 stages 1,2,3 | `stprk3.F90:192-207`; stage selector `stprk3_stg.F90:116-218` | every stage Kaa state VERIFIED |
-| 12 | QCO geometry and WZV transports; adaptive implicit vertical advection at stage 3 | `stprk3_stg.F90:151-167,281-301` | QCO states, transports, stage-3 WZV operands VERIFIED |
+| 12 | QCO geometry and WZV transports | `stprk3_stg.F90:151-167,281-301`; `ln_dynadv_vec=T` at `ocean.output:1315` selects the WZV calls | QCO states, transports, stage-3 WZV operands VERIFIED |
 | 13 | stages 2/3 EOS-80, SCO HPG, total-vorticity EEN, vector invariant momentum advection | `stprk3_stg.F90:309-334`; HPG dispatch `dynhpg.F90:170-204`; runtime `:1854-1856` | literal EOS/HPG/EEN/RHS operands VERIFIED |
 | 14 | stage-3 iso-level Laplacian momentum mixing then implicit momentum ZDF | `stprk3_stg.F90:395-430`; output `:1162-1182,1864` | boundary states/RHS VERIFIED; operator scratch WAIVED |
 | 15 | transport construction including EIV and Fox-Kemper mixed-layer eddy transport, FCT tracer advection, surface tracer flux each stage | `stprk3_stg.F90:456-521`; EIV/MLE insertion `traadv.F90:343-346`; FCT dispatch `traadv.F90:355-370`; `ln_mle=T` output `:1288` | `zFu,zFv,zFw` and tracer operands VERIFIED |
@@ -310,11 +310,31 @@ SCO HPG (`:1356`), split-explicit surface (`:1367`), and runtime stages 1/2/3
 Inactive high-leverage calls are explicitly disposed: TOP is compile-excluded;
 MLF, TEOS-10, flux-form momentum, explicit free surface, CICE, user-defined
 SBC, OSMOSIS, NPC, MFC, ice shelves, open boundaries, tides, AGRIF, and
-atmospheric coupling do not execute. The iceberg model is active with test
+atmospheric coupling do not execute. Adaptive implicit vertical advection is
+also inactive: `ln_zad_Aimp=F` at `ocean.output:968`, and all `wAimp` calls
+are guarded by it at `src/OCE/stprk3_stg.F90:283-299`. The iceberg model is active with test
 icebergs (`nn_test_icebergs=10`); `calving.nc` is present and hash-pinned, but
 the executed `ln_use_calving=F` selector (`ocean.output:1444-1446`) means its
 calving field does not seed this short run. Phase 2 must preserve that exact
 distinction.
+
+### Independent-review selector re-verification
+
+After the row-12 correction, every other audit row was re-checked against the
+accepted run's resolved selector and its source dispatch. Re-verified without
+further correction: rows 1 (`ln_blk=T`, `ln_NCAR=T`, output `:517,:594`), 2
+(`nn_ice=2`, `nn_fsbc=2`, `:513,:526`), 3 (`ln_icedyn=T`, Prather, `:706,:930`),
+4 (`ln_icethd=T`, `nn_flxdist=-1`, `:707,:812`), 5 (`ln_rnf=T` plus the
+executed iceberg banner, `:534,:1383`), 6 (EOS-80, `:163-164`), 7 (TKE/EVD/DDM/IWM,
+`:972,:977,:983,:988`), 8 (Laplacian/isoneutral/EIV and file viscosity,
+`:1116,:1121,:1144,:1182`), 9 (linear implicit drag, `:1094,:1097`), 10
+(split-explicit, `:1363-1367`), 11 (three runtime stage banners,
+`:1783,:1802,:1843`), 13 (vector/EEN/SCO, `:1315,:1329,:1351`), 14
+(Laplacian/level momentum diffusion and TKE ZDF, `:1162,:1165,:972`), 15
+(FCT/MLE, `:1273,:1288`), 16 (RGB/geothermal/BBL/restoring,
+`:1192,:1227,:1247,:1256`), and 17 (`key_qco`, split-explicit, native-IOM and
+restart call sites cited above). Row 12 was the sole executed/inactive
+misclassification found by this full pass.
 
 ## 7. Coverage register
 
