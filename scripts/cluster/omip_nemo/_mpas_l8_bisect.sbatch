@@ -33,7 +33,7 @@ BASE="--grid mpas --mpas-level 8 --mpas-lloyd 20 --nemo-vertical
   --dm2dc --sw-rgb-chl --geothermal --runoff --sss-restore --sss-restore-tau-days 45.5
   --sss-restore-bound-mmday 4 --sss-ice-gate-nemo --prognostic-sea-ice
   --prognostic-ice-dynamics free_drift --ice-lead-freeze-source nemo_qlead
-  --years 0.0000685 --snapshot-every-days 0
+  --years 0.0000685 --snapshot-every-days 1
   --freshwater-closure real_freshwater --sss-restore-channel water_flux
   --sss-restore-normalization live_s
   --diag-every-days 0.0009 --tracer-advection superbee --runoff-depth-nemo-ini
@@ -61,7 +61,7 @@ run_arm ctl        --dt 75 --partial-cell --mle --mle-ce 0.06 $TKE $ISF $IWM --b
 run_arm no_bbl     --dt 75 --partial-cell --mle --mle-ce 0.06 $TKE $ISF $IWM
 run_arm no_isfiwm  --dt 75 --partial-cell --mle --mle-ce 0.06 $TKE --bbl-adv
 run_arm no_mle     --dt 75 --partial-cell $TKE $ISF $IWM --bbl-adv
-run_arm kpp        --dt 75 --partial-cell --mle --mle-ce 0.06 $ISF $IWM --bbl-adv
+run_arm kpp        --dt 75 --partial-cell --mle --mle-ce 0.06 $ISF --bbl-adv   # (iwm needs tke)
 run_arm dt37       --dt 37.5 --partial-cell --mle --mle-ce 0.06 $TKE $ISF $IWM --bbl-adv
 run_arm no_partial --dt 75 --mle --mle-ce 0.06 $TKE $ISF $IWM --bbl-adv
 echo DONE
