@@ -38,12 +38,13 @@ BASE="--grid mpas --mpas-level 8 --mpas-lloyd 20 --nemo-vertical
   --sss-restore-normalization live_s
   --diag-every-days 0.0009 --tracer-advection superbee --runoff-depth-nemo-ini
   --river-mouth-restoring-gate --bottom-drag-scheme nemo_quadratic
-  --ice-ocean-heat-coeff 70 --woa-init
+  --ice-ocean-heat-coeff 70
   --woa-t /burg/glab/users/pg2328/legoESM/data/woce_gouretski/woce_t_woa57_annual.nc
   --woa-s /burg/glab/users/pg2328/legoESM/data/woce_gouretski/woce_s_woa57_annual.nc
   --sss-restore-file $NEMOIN/orca1_inputs/data_repository/input_fields/sss_climatology_for_restoring.nc
   --ice-init $NEMOIN/Ice_initialization.nc"
 NEMOIC="--nemo-monthly-init $NEMOIN/orca1_inputs/data_repository/initial_conditions/woce_temp_monthly_init_4p2.nc $NEMOIN/orca1_inputs/data_repository/initial_conditions/woce_salt_monthly_init_4p2.nc"
+WOA="--woa-init"
 TKE="--mpas-vmix tke --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic --tke-kappa-convention veros_sqrte"
 ISF="--isf --isf-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/runoff-icb_DaiTrenberth_Depoorter.nc"
 IWM="--iwm --iwm-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/zdfiwm_forcing_TRA.nc"
@@ -55,12 +56,13 @@ run_arm () {  # name, extra flags
   echo "--- $name per-step max|u| (step,max_abs_u,lat,lon,lev):"
   cut -d, -f1,5,7,8,9 $OUT/diag_timeseries.csv 2>/dev/null | sed -n '2,32p' | tr '\n' ' ' ; echo
 }
-# LADDER 2 (ladder 1: bbl, isf+iwm, mle, tke->kpp all IDENTICAL growth; dt 37.5
-# keeps the SAME growth per unit time => not an explicit-CFL failure; no_partial
-# was invalid with --bbl-adv). Remaining suspects: partial-cell PGF on steep
-# slopes, and the deep IC in marginal seas (nearest-wet regrid from a handful of
-# NEMO columns at Black Sea / Alboran depths).
-run_arm no_partial --dt 75 --mle --mle-ce 0.06 $TKE $ISF $IWM $NEMOIC
-run_arm flat       --dt 75 --flat-bottom --mle --mle-ce 0.06 $TKE $ISF $IWM $NEMOIC
-run_arm woa_only   --dt 75 --partial-cell --mle --mle-ce 0.06 $TKE $ISF $IWM --bbl-adv
+# LADDER 3. Ladder 2: no_partial, flat-bottom and WOA-only IC ALL blow up, each
+# in a marginal sea (Black Sea / Alboran / Aegean / Korea Strait). The deep-IC
+# probe shows the per-level nearest-wet regrid places Mediterranean water
+# (S 35) inside the Black Sea at 458 m and Atlantic water at 1500 m in the
+# Alboran, next to the basin's own water: 2-13 PSU jumps between neighbours.
+# ARM uniform_ic: the builder's analytic stratified rest state (no WOA, no
+# NEMO monthly) - stable => the IC fronts trigger the blowup and the fix is
+# the IC regrid (column-wise, own-column vertical extension), not dynamics.
+run_arm uniform_ic --dt 75 --partial-cell --mle --mle-ce 0.06 $TKE $ISF $IWM --bbl-adv
 echo DONE
