@@ -87,14 +87,14 @@ The production transcription covers:
   `icevar.F90:1564-1601`);
 - radiative, sensible, latent, sensitivity, precipitation/sublimation, heat
   content, and shortwave-transmission formulas (`sbcblk.F90:1218-1346`);
-- the active no-dynamics lead/basal exchange branch
+- the active ice-relative-velocity lead/basal exchange branch
   (`icesbc.F90:310-437`).
 
 The initial hypothesis is **CONFIRMED** only if every registered active output
 is at bar.  An over-bar row is **DEBT** and is reported by first owner.  Private
 one-variable arms are preregistered for (i) NEMO Goff-ice saturation/derivative,
 (ii) NEMO constants and operation order, (iii) SI3 albedo/snow fraction, and
-(iv) the active no-dynamics `ice_flx_other` branch.  Each arm changes one
+(iv) the active ice-relative-velocity `ice_flx_other` branch.  Each arm changes one
 default-true private hook; no mixed public physics is exposed.
 
 ## Exchange coverage and controls
@@ -131,3 +131,15 @@ ice dispatcher must remain finite.
 
 Nothing is deleted.  Historical drifting streams and copied run roots remain
 retained and are flagged rather than removed.
+
+## Pre-implementation correction
+
+Source/config resolution after the initial preregistration found that the C1D
+driver suppresses the dynamics *timestep* with `ln_c1d`
+(`icestp.F90:139-140`), while the accepted namelist still resolves
+`ln_icedyn=.true.` (`ocean.output:610`).  Consequently `ice_flx_other`
+executes its ice-relative-velocity branch (`icesbc.F90:322-341`), not the
+fallback atmospheric-stress branch at `:342-346`.  The original
+"active no-dynamics branch" statement is retracted before legoESM
+implementation.  The operand registry includes `u_ice/v_ice`, `ssu_m/ssv_m`,
+`drag_io`, and the resolved branch flags.

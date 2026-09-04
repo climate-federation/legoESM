@@ -19,6 +19,7 @@ from legoesm.ice.config import (
     RidgingConfig,
     MeltPondConfig,
     SI3ThermoConfig,
+    validate_si3_bulk_config,
     validate_si3_thermo_config,
 )
 from legoesm.ice.constants_config import (
@@ -131,6 +132,7 @@ __all__ = [
     "RidgingConfig",
     "MeltPondConfig",
     "SI3ThermoConfig",
+    "validate_si3_bulk_config",
     "validate_si3_thermo_config",
     "IceConstantsConfig",
     "NEMO_SI3_CONSTANTS_CONFIG",

@@ -334,6 +334,31 @@ def validate_si3_thermo_config(config: "SeaIceConfig") -> None:
         raise ValueError("invalid SI3 C1D identity: " + "; ".join(conflicts))
 
 
+def validate_si3_bulk_config(config: "SeaIceConfig") -> None:
+    """Reject mixtures outside the ORCA1 constant-coefficient ice identity.
+
+    Selector provenance is ``sbcblk.F90:335-350,1085-1168`` and the ORCA1
+    overlay ``namelist_cfg:129-142``.  The shipped C1D ECMWF arm is not this
+    selector and remains uncertified.
+    """
+    if config.bulk_scheme != "nemo_si3_constant":
+        return
+    expected = constants.bulk_transfer_ice_orca1
+    conflicts = []
+    if (config.Cd_ice, config.Ch_ice, config.Ce_ice) != (
+        expected, expected, expected,
+    ):
+        conflicts.append("Cd_ice=Ch_ice=Ce_ice must be ORCA1's 1e-3")
+    if config.emissivity_ice != constants.emissivity_ice_nemo:
+        conflicts.append("emissivity_ice must be NEMO sbc_phy emiss_i")
+    if config.ice_constants != NEMO_SI3_CONSTANTS_CONFIG:
+        conflicts.append("NEMO SI3 physical-constant set is required")
+    if config.n_categories != 1 or config.ponds.enabled:
+        conflicts.append("only jpl=1 with ln_pnd=.false. is certified")
+    if conflicts:
+        raise ValueError("invalid NEMO SI3 bulk identity: " + "; ".join(conflicts))
+
+
 class SeaIceConfig(NamedTuple):
     """Thermodynamic slab + optional dynamics sea ice configuration.
 
@@ -363,10 +388,10 @@ class SeaIceConfig(NamedTuple):
     h_ice_min: float = 0.01         # Min ice thickness for smooth ops [m]
     albedo_ice: float = 0.65        # Fallback constant albedo
     albedo_ocean: float = 0.06      # Ocean albedo for open-water freezing calc
-    emissivity_ice: float = 0.97
+    emissivity_ice: float = constants.emissivity_ice
     z0_ice: float = 5e-4            # Ice roughness length [m]
-    Cd_ice: float = 1.5e-3          # Ice-atmosphere drag coefficient (constant)
-    Ch_ice: float = 1.5e-3          # Ice-atmosphere heat transfer coeff (constant)
+    Cd_ice: float = constants.bulk_transfer_ice_default  # Ice-atmosphere drag coefficient
+    Ch_ice: float = constants.bulk_transfer_ice_default  # Ice-atmosphere heat transfer coefficient
     # Transport
     drag_ocean: float = 5.5e-3      # Ocean-ice drag coefficient
     drag_atm: float = 1.3e-3        # Air-ice drag coefficient
@@ -465,3 +490,6 @@ class SeaIceConfig(NamedTuple):
     thermo_scheme: str = "zero_layer"
     si3: SI3ThermoConfig = SI3ThermoConfig()
     ice_constants: IceConstantsConfig = IceConstantsConfig()
+    # Appended to preserve positional constructors.  NEMO distinguishes the
+    # Dalton (Ce) and Stanton (Ch) coefficients even when ORCA1 makes them equal.
+    Ce_ice: float = constants.bulk_transfer_ice_default

@@ -5,12 +5,22 @@ from __future__ import annotations
 from pathlib import Path
 from typing import NamedTuple
 
-from legoesm.ice.config import SeaIceConfig, validate_si3_thermo_config
+from legoesm import constants
+from legoesm.ice.config import (
+    SeaIceConfig,
+    validate_si3_bulk_config,
+    validate_si3_thermo_config,
+)
 from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
 
 FORCING_SHA256 = "e5ec49445d2569019c45dec24255b9c7daf050079444b0e6e6d86a5b82317afe"
 THERMO_STREAM_SHA256 = "7fc9df2707a85581075e3c69b26784155151a55640a5693eb32c34fb710ea49b"
+# Closed column rung's retained input root and the stabilized bulk-rung root
+# are distinct immutable artifacts; keep both pins rather than silently moving
+# an older card underneath its gate.
 EXCHANGE_STREAM_SHA256 = "7f22ca914bc25890c7ccda810553eefae97625e437974c2208399e9afc5b2c50"
+STABLE_EXCHANGE_STREAM_SHA256 = "091395cf604e83d88fbf458c4ef76ac3df2d5a65dac9cdc502e224cc1d1af2e4"
+BULK_STREAM_SHA256 = "57868f3212646bdf6b0c4add0f48701c0082718331bc76a153050c6d1d44dfe9"
 ZDF_INPUT_STREAM_SHA256 = "5522eadce595408b00065fa30d8b41fccb3815bee76d6fbf5ba3adbb2656cb27"
 ZDF_OPERAND_STREAM_SHA256 = "587454974cb07590454d2bb63d745dc73488c220e84785175c9c110d26954632"
 _DOCUMENTED_DURATION_STEPS = 8760  # C1D EXP_SASICE README; 365 days hourly
@@ -43,10 +53,16 @@ def build_c1d_omip_l3_card(
         dynamics="none",
         transport="none",
         n_categories=1,
+        bulk_scheme="nemo_si3_constant",
+        Cd_ice=constants.bulk_transfer_ice_orca1,
+        Ch_ice=constants.bulk_transfer_ice_orca1,
+        Ce_ice=constants.bulk_transfer_ice_orca1,
+        emissivity_ice=constants.emissivity_ice_nemo,
         thermo_scheme="si3_bl99",
         ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
     )
     validate_si3_thermo_config(config)
+    validate_si3_bulk_config(config)
     return C1DOMIPL3Card(
         name="C1D_OMIP_L3/EXP_SASICE",
         dt_seconds=3600.0,
@@ -74,6 +90,8 @@ __all__ = (
     "FORCING_SHA256",
     "THERMO_STREAM_SHA256",
     "EXCHANGE_STREAM_SHA256",
+    "STABLE_EXCHANGE_STREAM_SHA256",
+    "BULK_STREAM_SHA256",
     "ZDF_INPUT_STREAM_SHA256",
     "ZDF_OPERAND_STREAM_SHA256",
     "build_c1d_omip_l3_card",
