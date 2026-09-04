@@ -8506,7 +8506,7 @@ def main() -> int:
         rate = (n_steps - start_step) / (time.time() - t_wall)
         print(f"[done] {n_steps - start_step} steps this leg "
               f"(absolute step {n_steps}) @ {rate:.2f} steps/s (scan); "
-              f"final: {_diag(state, lat2d, lon2d)}")
+              f"final: {_diag(state, lat2d, lon2d, edge_latlon=_edge_ll)}")
         if args.smoke:
             yr_est = steps_per_year / rate / 3600.0
             print(f"[smoke] projected wall-time: {yr_est:.2f} h/yr  "
@@ -9401,7 +9401,7 @@ def main() -> int:
             _pers_res.count_leaf_slice(pulls=3)
             _pers_res.count_leaf_full(
                 gathers=1 + int(getattr(state, "v", None) is not None))
-            d = _diag(state, lat2d, lon2d)
+            d = _diag(state, lat2d, lon2d, edge_latlon=_edge_ll)
             # Throughput of THIS leg: a resumed run has done (step-start_step)
             # steps in (now - t_wall), not `step` of them.
             rate = (step - start_step) / (time.time() - t_wall)
@@ -9516,7 +9516,7 @@ def main() -> int:
               f"uploads={_pers_res.leaf_full_uploads} (WOA nudge / spin-up "
               f"drag while active + diag-cadence u,v).", flush=True)
     print(f"[done] {n_steps - start_step} steps this leg (absolute step "
-          f"{n_steps}) @ {rate:.2f} steps/s; final: {_diag(state, lat2d, lon2d)}")
+          f"{n_steps}) @ {rate:.2f} steps/s; final: {_diag(state, lat2d, lon2d, edge_latlon=_edge_ll)}")
     if args.smoke:
         yr_est = steps_per_year / rate / 3600.0
         print(f"[smoke] projected wall-time: {yr_est:.2f} h/yr  "
