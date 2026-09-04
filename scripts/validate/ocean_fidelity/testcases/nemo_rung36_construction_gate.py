@@ -175,13 +175,14 @@ def evaluate(run_root: Path, *, plant: str | None = None) -> dict[str, object]:
     return {
         "verdict": "CONSTRUCTION_DEBT" if failures else "AT_BAR",
         "ordered_stop": "INITIAL_STATE.positive_wet_layer_thickness" if failures else None,
-        "owner": "NEMO SI3 initial snow+ice mass sea-level adjustment on a one-metre column",
+        "owner": "NEMO SI3 initial snow+ice mass sea-level adjustment on the user-selected column",
         "source_identity": {
             "initial_mass": "iceistate.F90:400-401",
             "levitating_global_adjustment": "iceistate.F90:408-426",
             "qco_thickness_refresh": "iceistate.F90:431-433",
             "e3t_expansion": "domzgr_substitute.h90:126",
-            "one_metre_depth": "C1D_OMIP_L3_COUPLED_SM/EXP00/namelist_cfg:19",
+            "column_depth": "C1D_OMIP_L3_COUPLED10M_R13B_SM/EXP00/namelist_cfg (rn_bathy=10 m; free construction parameter)",
+            "levitating_ice_adjustment": "iceistate.F90:410-411,424-427 (global area-weighted mean; equals local only for this one-column domain)",
         },
         "registry": registry,
         "rows": rows,

@@ -42,8 +42,12 @@ Sign conventions (verified against ``tests/unit/test_ice_ocean_two_way.py``):
 """
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import jax.numpy as jnp
 
+from legoesm import constants
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.core.coupling_fields import TileResponse
 from legoesm.coupler.tile_fractions import TileFractions
 from legoesm.ocean.freshwater import FreshwaterForcing
@@ -53,6 +57,186 @@ from legoesm.ocean.state import OceanSurfaceForcing
 #     fr_sw-under-ice order of magnitude; same default as
 #     ocean.coupler.omip2_applicator._ice_surface_heat / --ice-thermo-sw-trans) ---
 _SW_TRANSMITTANCE_ICE = 0.03    # [-] fraction of SW penetrating ice+snow to ocean
+
+__param_spec__ = {
+    "NemoSI3ExchangeConfig": {
+        "scheme_key": "coupler.ice_ocean_exchange",
+        "excluded": {
+            "scheme": "selector: NEMO SI3 ice/ocean exchange identity",
+            "nn_fsbc": "discrete cadence: ORCA1 namelist_cfg:106",
+            "freshwater_closure": "structural convention: NEMO real volume",
+            "normalize_freshwater": "structural convention: sbc_fwb owns correction",
+            "nn_fwb_voltype": "discrete selector: namelist_ref:666",
+        },
+        "params": {},
+    },
+}
+
+
+class NemoSI3ExchangeConfig(NamedTuple):
+    """Non-combinable NEMO SI3 exchange identity for rung 3.6.
+
+    References are the executing NEMO 5.0.2 statements: ``iceupdate.F90:
+    128-194,361-407``, ``icesbc.F90:149-183``, ``trasbc.F90:278-315``, and
+    ``sbcfwb.F90:224-239,292-295``.  These fields are grid-cell aggregates;
+    this card never applies another ice-concentration weight.
+    """
+
+    scheme: str = "nemo_si3"
+    nn_fsbc: int = 4
+    freshwater_closure: str = "real_freshwater"
+    normalize_freshwater: bool = False
+    nn_fwb_voltype: int = 1
+
+
+def validate_nemo_si3_exchange_config(config: NemoSI3ExchangeConfig) -> None:
+    """Reject Frankenstein combinations absent from the reviewed ORCA1 arm."""
+
+    expected = NemoSI3ExchangeConfig()
+    if config != expected:
+        raise ValueError(
+            "rung-3.6 requires the indivisible NEMO SI3 exchange identity "
+            f"{expected!r}; got {config!r}")
+
+
+def nemo_si3_ssm_step(carry, instantaneous, *, kt: int,
+                      config: NemoSI3ExchangeConfig):
+    """One source-ordered ``sbc_ssm`` recurrence (sbcssm.F90:100-173).
+
+    ``carry`` and ``instantaneous`` are seven-tuples ordered U, V, SST, SSS,
+    SSH, E3T, and first-level absorbed-solar fraction.  Every source statement
+    is materialized because XLA may otherwise reassociate the four-sample sum.
+    """
+
+    validate_nemo_si3_exchange_config(config)
+    values = list(jnp.asarray(value) for value in instantaneous)
+    if len(carry) != 7 or len(values) != 7:
+        raise ValueError("NEMO sbc_ssm requires seven carried/instantaneous fields")
+    # ORCA1's TEOS-10 state stores Conservative Temperature. sbc_ssm calls
+    # eos_pt_from_ct before both its seed and accumulation (sbcssm.F90:108-113,
+    # 143-148); only this SST operand is converted.
+    from legoesm.ocean.eos import nemo_eos_pt_from_ct
+    values[2] = nemo_eos_pt_from_ct(values[2], values[3])
+    values = tuple(values)
+    kt_value = jnp.asarray(kt)
+    seed = kt_value == 1
+    reset = jnp.mod(kt_value - 2, config.nn_fsbc) == 0
+    zcoef = jnp.asarray(config.nn_fsbc - 1, dtype=values[0].dtype)
+    work = tuple(jnp.where(
+        seed,
+        nemo_source_round(zcoef * value),
+        jnp.where(reset, jnp.zeros_like(value), jnp.asarray(old)),
+    ) for old, value in zip(carry, values))
+    work = tuple(nemo_source_round(old + new) for old, new in zip(work, values))
+    # NEMO spells this as 1./REAL(nn_fsbc,wp), then seven multiplications.
+    zcoef = nemo_source_round(
+        jnp.asarray(1.0, dtype=values[0].dtype)
+        / jnp.asarray(config.nn_fsbc, dtype=values[0].dtype))
+    emit_mean = jnp.mod(kt_value - 1, config.nn_fsbc) == 0
+    work = tuple(jnp.where(
+        emit_mean, nemo_source_round(value * zcoef), value) for value in work)
+    return work
+
+
+def nemo_si3_exchange_forcing(
+    *, qsr, qns, emp, sfx, utau, vtau, chl, rCdU_ice, snwice_fmass,
+    config: NemoSI3ExchangeConfig,
+):
+    """Map NEMO SI3's completed exchange fields into existing ocean forcing.
+
+    Signs are the reviewed rung-3.6 map: NEMO ``qsr/qns`` are positive into
+    ocean; ``emp`` is positive mass loss; stored legoESM stress uses the
+    atmosphere convention; and ``sfx`` is PSS kg m-2 s-1 and becomes real salt
+    mass through the PSS g/kg conversion.  The signed drag and FWB mass carry
+    stay separate for their existing ocean/budget consumers.
+    """
+
+    validate_nemo_si3_exchange_config(config)
+    qsr = jnp.asarray(qsr)
+    zero = jnp.zeros_like(qsr)
+    freshwater_into_ocean = nemo_source_round(-jnp.asarray(emp))
+    freshwater = FreshwaterForcing(
+        precip=zero, evap=zero, runoff=zero,
+        ice_fw=freshwater_into_ocean, restoring=zero)
+    surface = OceanSurfaceForcing(
+        sw_down=qsr,
+        q_net=nemo_source_round(qsr + jnp.asarray(qns)),
+        tau_x=nemo_source_round(-jnp.asarray(utau)),
+        tau_y=nemo_source_round(-jnp.asarray(vtau)),
+        freshwater=freshwater_into_ocean,
+        salt_flux=nemo_source_round(
+            jnp.asarray(sfx) * jnp.asarray(
+                constants.pss_to_mass_fraction, dtype=qsr.dtype)),
+        chl=jnp.asarray(chl),
+        rCdU_top=jnp.asarray(rCdU_ice),
+        snwice_fmass=jnp.asarray(snwice_fmass),
+    )
+    return freshwater, surface
+
+
+def nemo_si3_fwb_step(
+    *, emp, qns, snwice_fmass, area, mask, emp_ext, emp_corr, domain_sum,
+    heat_capacity, sst, active, config: NemoSI3ExchangeConfig,
+):
+    """One-column ``sbc_fwb`` case-1/volume-type-1 source identity.
+
+    ``domain_sum`` is the registered output of NEMO's delayed global reduction.
+    The division remains explicit even though area cancels algebraically in
+    this one-wet-column oracle; NEMO executes it at ``sbcfwb.F90:233-239``
+    before the updates at ``:292-295``.
+    """
+    validate_nemo_si3_exchange_config(config)
+    sr = nemo_source_round
+    # ``domain_sum`` is a registered coupling time level: cdelay='fwb1'
+    # (sbcfwb.F90:238) supplies the current value initially and the preceding
+    # four-step refresh thereafter.  The producer still forms zemp from the
+    # ``emp-snwice_fmass`` identity above the delayed collective boundary.
+    refreshed_corr = sr(
+        jnp.asarray(emp_ext)
+        - sr(jnp.asarray(domain_sum) / jnp.asarray(area))
+    )
+    corr = jnp.where(active, refreshed_corr, jnp.asarray(emp_corr))
+    emp_out = jnp.where(
+        active, sr(jnp.asarray(emp) + sr(corr * jnp.asarray(mask))), emp)
+    heat_adjustment = sr(
+        sr(sr(corr * jnp.asarray(heat_capacity)) * jnp.asarray(sst))
+        * jnp.asarray(mask)
+    )
+    qns_out = jnp.where(active, sr(jnp.asarray(qns) - heat_adjustment), qns)
+    return emp_out, qns_out, corr
+
+
+def nemo_si3_tra_sbc_rk3(
+    *, tendency_t, tendency_s, emp, qns, salt_flux_pss, layer_thickness,
+    inverse_density, inverse_heat_capacity, temperature, salinity, stage,
+    config: NemoSI3ExchangeConfig,
+):
+    """Surface T/S RHS update for the selected nonlinear-SSH RK3 arm.
+
+    This transcribes ``trasbc.F90:282-315``.  Stages one and two apply only
+    the mass-carried tracer term; stage three applies non-solar heat and real
+    salt flux.  Penetrative solar radiation is a later, separate boundary.
+    """
+    validate_nemo_si3_exchange_config(config)
+    sr = nemo_source_round
+    scale = sr(jnp.asarray(inverse_density) / jnp.asarray(layer_thickness))
+    early = jnp.asarray(stage) != 3
+    t_early = sr(
+        jnp.asarray(tendency_t)
+        - sr(sr(jnp.asarray(emp) * jnp.asarray(temperature)) * scale)
+    )
+    s_early = sr(
+        jnp.asarray(tendency_s)
+        - sr(sr(jnp.asarray(emp) * jnp.asarray(salinity)) * scale)
+    )
+    t_late = sr(
+        jnp.asarray(tendency_t)
+        + sr(sr(jnp.asarray(inverse_heat_capacity) * jnp.asarray(qns)) * scale)
+    )
+    s_late = sr(
+        jnp.asarray(tendency_s) + sr(jnp.asarray(salt_flux_pss) * scale)
+    )
+    return jnp.where(early, t_early, t_late), jnp.where(early, s_early, s_late)
 
 
 def ice_ocean_forcing_from_ice_response(
@@ -394,7 +578,11 @@ def omip_sea_ice_surface_forcing(
 
 
 __all__ = [
+    "NemoSI3ExchangeConfig",
     "blend_ice_ocean_forcing",
     "ice_ocean_forcing_from_ice_response",
+    "nemo_si3_exchange_forcing",
+    "nemo_si3_ssm_step",
     "omip_sea_ice_surface_forcing",
+    "validate_nemo_si3_exchange_config",
 ]

@@ -981,6 +981,111 @@ def _nemo_si3_ice_flx_other(
         "qlead": qlead,
     }
 
+
+def _nemo_si3_ice_update_flux(pre, *, ice_constants, dt):
+    """Single-category ``ice_update_flx`` source transcription.
+
+    ``pre`` is the WRITE-only operand registry in
+    ``iceupdate.F90:105-193``.  The selected ORCA1 identity has
+    ``ln_cndflx=.false.``, enabled thermodynamics, one HFN category, and no ponds.
+    This private
+    operator exists to certify the shared SI3 exchange boundary; it does not
+    introduce a second sea-ice model or a selectable alternate formula.
+    """
+    sr = nemo_source_round
+    one_minus_at_b = sr(1.0 - pre["at_i_b"])
+    # ORCA1 namelist_ice_cfg:81 selects the ELSE arms at
+    # iceupdate.F90:109-113 and :132-134.
+    qt_atm = sr(pre["qns_tot"] + pre["qsr_tot"])
+    zqsr = sr(pre["qsr_tot"] - sr(
+        pre["a_i_b"] * sr(pre["qsr_ice"] - pre["qtr_ice_bot"])
+    ))
+    qt_oce = sr(sr(sr(sr(sr(sr(qt_atm - pre["hfx_sum"])
+                                  - pre["hfx_bom"]) - pre["hfx_bog"])
+                            - pre["hfx_dif"]) - pre["hfx_opw"])
+                      - pre["hfx_snw"])
+    qt_oce = sr(sr(sr(sr(qt_oce + pre["hfx_thd"]) + pre["hfx_dyn"])
+                       + pre["hfx_res"]) + pre["hfx_sub"])
+    qt_oce = sr(sr(qt_oce - sr(pre["qevap_ice"] * pre["a_i_b"]))
+                + pre["hfx_spr"])
+    qsr_melt = sr(sr(sr(one_minus_at_b * pre["qsr_oce"])
+                      * sr(1.0 - pre["frq_m"]))
+                  + sr(sr(pre["a_i_b"] * pre["qtr_ice_bot"])
+                       * sr(1.0 - pre["frq_m"])))
+    qsr = jnp.where((pre["fhld"] > 0.0) & (pre["at_i"] > 0.0),
+                    qsr_melt, zqsr)
+    qns = sr(qt_oce - qsr)
+
+    wfx_ice = sr(sr(sr(sr(pre["wfx_bog"] + pre["wfx_bom"])
+                            + pre["wfx_sum"]) + pre["wfx_sni"])
+                       + pre["wfx_opw"])
+    wfx_ice = sr(sr(sr(wfx_ice + pre["wfx_dyn"]) + pre["wfx_res"])
+                   + pre["wfx_lam"])
+    wfx_snw = sr(sr(pre["wfx_snw_sni"] + pre["wfx_snw_dyn"])
+                  + pre["wfx_snw_sum"])
+    fwfice = sr(sr(sr(wfx_ice + wfx_snw) + pre["wfx_pnd"])
+                   + pre["wfx_err_sub"])
+    emp = sr(sr(sr(sr(pre["emp_oce"] - wfx_ice) - wfx_snw)
+                    - pre["wfx_pnd"]) - pre["wfx_err_sub"])
+    sfx = sr(sr(sr(sr(sr(pre["sfx_bog"] + pre["sfx_bom"])
+                           + pre["sfx_sum"]) + pre["sfx_sni"])
+                      + pre["sfx_opw"]) + pre["sfx_res"])
+    sfx = sr(sr(sr(sr(sfx + pre["sfx_dyn"]) + pre["sfx_bri"])
+                   + pre["sfx_sub"]) + pre["sfx_lam"])
+    mass = sr(sr(ice_constants.rho_snow * pre["vt_s"])
+              + sr(ice_constants.rho_ice * pre["vt_i"])
+              + sr(ice_constants.rho_ocean * sr(pre["vt_ip"] + pre["vt_il"])))
+    fmass = sr(sr(mass - pre["snwice_mass"]) * sr(1.0 / dt))
+    return {
+        "qsr": qsr, "qns": qns, "emp": emp, "sfx": sfx,
+        "qt_atm_oi": qt_atm, "qt_oce_ai": qt_oce, "fwfice": fwfice,
+        "snwice_mass_b": pre["snwice_mass"], "snwice_mass": mass,
+        "snwice_fmass": fmass, "fr_i": pre["at_i"],
+        "wfx_ice": wfx_ice, "wfx_snw": wfx_snw,
+        "wfx_sub": sr(pre["wfx_snw_sub"] + pre["wfx_ice_sub"]),
+    }
+
+
+def _nemo_si3_ice_update_tau(
+    *, u_ocean, v_ocean, u_ice, u_ice_west, v_ice, v_ice_south,
+    drag_io, ice_fraction, tmod_before, taum_before, utau_ocean,
+    vtau_ocean, refresh, rho_ocean,
+):
+    """Selected one-column ``ice_update_tau`` identity.
+
+    This is the source-ordered ORCA1 ``ln_drgice_imp=.true.`` arm from
+    ``iceupdate.F90:361-407``.  The caller owns cadence and supplies the
+    registered carried values.  In the one-column periodic oracle the west
+    and south ocean velocities equal the local values; that geometry identity
+    is deliberately explicit at the call site rather than generalized here.
+    """
+    sr = nemo_source_round
+    zu_t = sr(sr(u_ice + u_ice_west) - sr(u_ocean + u_ocean))
+    zv_t = sr(sr(v_ice + v_ice_south) - sr(v_ocean + v_ocean))
+    zmodt = sr(0.25 * sr(sr(zu_t * zu_t) + sr(zv_t * zv_t)))
+    refreshed_tmod = sr(sr(rho_ocean * drag_io) * jnp.sqrt(zmodt))
+    tmod = jnp.where(refresh, refreshed_tmod, tmod_before)
+    refreshed_taum = sr(
+        sr(sr(1.0 - ice_fraction) * taum_before)
+        + sr(sr(sr(ice_fraction * rho_ocean) * drag_io) * zmodt)
+    )
+    taum = jnp.where(refresh, refreshed_taum, taum_before)
+    rCdU_ice = sr(sr(sr(-1.0 / rho_ocean) * tmod) * ice_fraction)
+    zutau_ice = sr(sr(0.5 * tmod) * sr(u_ice + u_ice_west))
+    zvtau_ice = sr(sr(0.5 * tmod) * sr(v_ice + v_ice_south))
+    utau = sr(
+        sr(sr(1.0 - ice_fraction) * utau_ocean)
+        + sr(ice_fraction * zutau_ice)
+    )
+    vtau = sr(
+        sr(sr(1.0 - ice_fraction) * vtau_ocean)
+        + sr(ice_fraction * zvtau_ice)
+    )
+    return {
+        "tmod_io": tmod, "taum": taum, "rCdU_ice": rCdU_ice,
+        "utau": utau, "vtau": vtau,
+    }
+
 def _bulk_flux_dispatch(
     T_ice: jnp.ndarray,
     forcing: AtmToSurface,

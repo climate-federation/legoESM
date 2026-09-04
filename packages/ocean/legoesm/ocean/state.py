@@ -321,6 +321,12 @@ class OceanSurfaceForcing(NamedTuple):
                                        # attenuation of the lc/etau wave-TKE
                                        # sources (TKEConfig.eice=1; NEMO
                                        # nn_eice).  None ⇒ no attenuation.
+    rCdU_top: object = None       # jnp.ndarray | None; signed NEMO top-drag
+                                  # coefficient [m/s], iceupdate.F90:387-396.
+                                  # The shared implicit solver converts its
+                                  # negative raw sign exactly once.
+    snwice_fmass: object = None   # jnp.ndarray | None; ice+snow mass change
+                                  # [kg/m2/s], budget input to NEMO sbcfwb.
 
 
 class OceanConfig(NamedTuple):

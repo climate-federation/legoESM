@@ -2942,6 +2942,44 @@ _NEMO_FZP_C5 = 1.46873e-3
 _NEMO_FZP_DEP = -7.53e-4         # [degC/m] freezing-point pressure lowering
 
 
+def nemo_eos_pt_from_ct(conservative_temperature, salinity):
+    """Potential temperature from CT, NEMO ``eos_pt_from_ct`` association.
+
+    This is the executing TEOS-10 conversion used by ``sbc_ssm`` before it
+    accumulates ``sst_m`` (NEMO 5.0.2 ``eosbn2.F90:1493-1543``).  The explicit
+    nested operations retain the Fortran source association.
+    """
+    from legoesm.core.source_rounding import nemo_source_round as sr
+
+    ct = jnp.asarray(conservative_temperature)
+    sa = jnp.asarray(salinity)
+    zt = sr(ct * jnp.asarray(1.0 / 40.0, dtype=ct.dtype))
+    zs = jnp.sqrt(sr(jnp.abs(sr(sa + jnp.asarray(5.0, dtype=sa.dtype)))
+                     * jnp.asarray(0.875 / 35.16504, dtype=sa.dtype)))
+
+    zn = sr(sr(-2.1385727895e-1 * zt) - sr(2.7674419971e-1 * zs)
+            + 1.0728094330)
+    zn = sr(sr(zn * zt) + sr(sr(2.6366564313 * zs + 3.3546960647) * zs)
+            - 7.8012209473)
+    zn = sr(sr(zn * zt)
+            + sr(sr(sr(1.8835586562 * zs + 7.3949191679) * zs
+                    - 3.3937395875) * zs) - 5.6414948432)
+    zn = sr(sr(zn * zt)
+            + sr(sr(sr(sr(3.5737370589 * zs - 15.512427389) * zs
+                       + 24.625741105) * zs + 19.912291000) * zs)
+            - 32.191146312)
+    zn = sr(sr(zn * zt)
+            + sr(sr(sr(sr(sr(0.57153204649 * zs - 3.0943149543) * zs
+                          + 9.3052495181) * zs - 9.4528934807) * zs
+                    + 3.1066408996) * zs) - 0.43504021262)
+
+    zd = sr(sr(sr(2.0035003456 * zt - sr(0.34570358592 * zs)
+                       + 5.6471810638) * zt)
+            + sr(sr(1.5393993508 * zs - 6.9394762624) * zs)
+            + 12.750522650)
+    return sr(sr(zt / jnp.asarray(1.0 / 40.0, dtype=ct.dtype) + sr(zn / zd)))
+
+
 def nemo_eos_fzp(S_psu, depth_m=None):
     """Seawater freezing point [°C] — NEMO ``eos_fzp`` (TEOS-10 branch).
 

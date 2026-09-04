@@ -146,6 +146,14 @@ READERS = {
         p, b"NEMO_L3BULK_001 ", 5, 3, 4),
     "oracle_rung36_ssm_frames.bin": lambda p: _counted(
         p, b"NEMO_L3SSM__001 ", 7, 5, 6),
+    "oracle_rung36_update_frames.bin": lambda p: _counted(
+        p, b"NEMO_L3UPD__001 ", 5, 3, 4),
+    "oracle_rung36_fwb_frames.bin": lambda p: _counted(
+        p, b"NEMO_L3FWB__001 ", 4, 2, 3),
+    "oracle_rung36_trasbc_frames.bin": lambda p: _counted(
+        p, b"NEMO_L3TSB__001 ", 8, 6, 7),
+    "oracle_rung36_qsr_frames.bin": lambda p: _counted(
+        p, b"NEMO_L3QSR__001 ", 6, 4, 5),
 }
 
 

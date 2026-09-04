@@ -47,6 +47,7 @@ rho_snow = 330.0                # Density of dry snow on sea ice [kg/m^3] (CICE 
 rho_air = 1.225                 # Reference dry-air density at sea level [kg/m^3]
 rho_ocean = 1025.0              # Reference seawater density [kg/m^3] (= ocean.eos.rho_0)
 rho_ocean_nemo = 1026.0         # NEMO rau0 [kg/m^3] (phycst.F90; GYRE/DINO/ORCA all use 1026)
+pss_to_mass_fraction = 1.0e-3   # PSS-78 g/kg -> kg/kg (NEMO trasbc.F90 salt-flux convention)
 rho_soil_particle = 2700.0      # Mineral soil particle (quartz) density [kg/m^3] (de Vries 1963)
 c_sw = 3994.0                   # Specific heat of seawater [J/(kg*K)] (Gill 1982)
 c_snow = 2090.0                 # Specific heat of snow [J/(kg*K)] (≈ c_pi, CICE default)

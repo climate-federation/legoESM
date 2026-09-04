@@ -13,6 +13,7 @@ from legoesm.ice.config import (
     validate_si3_thermo_config,
 )
 from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
+from legoesm.coupler.ocean_forcing import NemoSI3ExchangeConfig
 
 FORCING_SHA256 = "e5ec49445d2569019c45dec24255b9c7daf050079444b0e6e6d86a5b82317afe"
 THERMO_STREAM_SHA256 = "7fc9df2707a85581075e3c69b26784155151a55640a5693eb32c34fb710ea49b"
@@ -52,6 +53,18 @@ class C1DOMIPL3Card(NamedTuple):
     precision_policy: PrecisionPolicy
     config: SeaIceConfig
     selector_sources: tuple[tuple[str, str], ...]
+
+
+class C1DOMIPL3CoupledCard(NamedTuple):
+    """Reviewed rung-3.6 construction layered on the existing SI3 card."""
+
+    ice: C1DOMIPL3Card
+    slab_depth_m: float
+    exchange: NemoSI3ExchangeConfig
+    chlorophyll_path: Path
+    chlorophyll_sha256: str
+    weights_path: Path
+    weights_sha256: str
 
 
 def build_c1d_omip_l3_card(
@@ -108,8 +121,41 @@ def build_c1d_omip_l3_card(
     )
 
 
+def build_c1d_omip_l3_coupled_card(
+    *, oracle_root: Path = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l3/"
+        "c1d_omip_l3_coupled10m_r13_oracle_i"
+    ),
+    chlorophyll_path: Path = Path(
+        "/data/abyssal/dbalwada/ORCA1-omip/INPUTS/orca1_inputs/"
+        "data_repository/input_fields/merged_ESACCI_BIOMER4V1R1_CHL_REG05.nc"
+    ),
+    weights_path: Path = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l3/"
+        "c1d_omip_l3_coupled10m_r13_oracle_i/"
+        "weights_reg05_C1D_OMIP_L3_bilinear.nc"
+    ),
+) -> C1DOMIPL3CoupledCard:
+    """Return the indivisible 10 m, real-freshwater rung-3.6 card."""
+
+    return C1DOMIPL3CoupledCard(
+        ice=build_c1d_omip_l3_card(oracle_root=oracle_root),
+        slab_depth_m=10.0,  # const-ok: user Decision 6 free construction parameter
+        exchange=NemoSI3ExchangeConfig(),
+        chlorophyll_path=chlorophyll_path,
+        chlorophyll_sha256=(
+            "f43c5a1e8ce75e52bfc8edfa4318e68215c76c4b252cb0fb70fa00b39a40d6fe"
+        ),
+        weights_path=weights_path,
+        weights_sha256=(
+            "715c51c4528feb7cb1f1d409584e5257d1b680f350682e2444b478217ec3b4dc"
+        ),
+    )
+
+
 __all__ = (
     "C1DOMIPL3Card",
+    "C1DOMIPL3CoupledCard",
     "FORCING_SHA256",
     "ORACLE_VERSION",
     "ORACLE_V1_ROOT",
@@ -124,4 +170,5 @@ __all__ = (
     "ZDF_INPUT_STREAM_SHA256",
     "ZDF_OPERAND_STREAM_SHA256",
     "build_c1d_omip_l3_card",
+    "build_c1d_omip_l3_coupled_card",
 )

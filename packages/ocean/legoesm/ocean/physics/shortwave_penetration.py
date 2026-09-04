@@ -40,6 +40,8 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
+from legoesm.core.source_rounding import nemo_source_round
+
 from legoesm.ocean.eos import rho_0 as _RHO_0_DEFAULT, c_sw as _C_SW_DEFAULT
 
 
@@ -335,6 +337,25 @@ def _morel_berthon_chl_column(
         * jnp.exp(-(((zpsi - zpsimax[..., jnp.newaxis]) * inv_delpsi[..., jnp.newaxis]) ** 2))
     )
     return jnp.clip(chl_z, _CHL_MIN, _CHL_MAX)
+
+
+def nemo_rgb_one_layer_rhs(
+    tendency, shortwave, layer_thickness, inverse_density_heat_capacity
+):
+    """NEMO RGB RK3 update for one wet layer over a dry bottom interface.
+
+    This is the degenerate, but executing, `qsr_RGBc` identity at
+    ``traqsr.F90:371-415``: ``wmask`` is zero at the only layer's lower face,
+    so every spectral band is deposited in that layer and the registered
+    chlorophyll/table lookup cannot affect the numerical RHS.  It does not
+    claim the multi-layer RGB path.
+    """
+    sr = nemo_source_round
+    increment = sr(
+        sr(jnp.asarray(inverse_density_heat_capacity) * jnp.asarray(shortwave))
+        / jnp.asarray(layer_thickness)
+    )
+    return sr(jnp.asarray(tendency) + increment)
 
 
 def shortwave_penetration_rgb_tendency(
