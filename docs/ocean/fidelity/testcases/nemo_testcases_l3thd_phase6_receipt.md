@@ -36,6 +36,19 @@ the kt4242 `2.8315499258551526e-11` normalised ice-thickness injection is an
 independent unresolved debt.  The annual gate remains **DEBT**, and this
 receipt makes no whole-column fidelity claim.
 
+## Rung 3.5 closure — user decision, 2026-09-04
+
+**CLOSED AS MIXED DEBT.**  The retained debt rows are kt4242
+`POST_DH.h_i`, an independent exact-entry injection of
+`2.8315499258551526e-11`; positive-subnormal-snow rows led by kt5860
+`POST_ZDF.e_s`, normalised `0.02510099530281747`; and year-end continuous
+errors `t_su=4.654045553508542e-6`, `e_i=1.1466756156615379e-4`, and
+`h_i=1.045384260731163e-4`.  **Phenomenology: MATCHED by the user's closure
+decision** on the six measured rows; the retained measurement labels below
+remain AT-FLOOR for five rows and UNMEASURED-floor for growth onset.  These
+debts remain documented below; no further C1D-column work is authorized in
+this lane.
+
 ## Rule 0: active NEMO source and executing legoESM
 
 The shipped source was read before assigning the owner:
