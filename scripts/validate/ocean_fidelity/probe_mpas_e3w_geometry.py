@@ -32,6 +32,10 @@ def main() -> int:
     p.add_argument("--lloyd", type=int, default=20)
     p.add_argument("--no-partial-cell", action="store_true")
     p.add_argument("--dt", type=float, default=75.0)
+    p.add_argument("--snapshot", default=None,
+                   help="snapshot npz of a blowing-up run: print the structure "
+                        "of the max-|u| mode (edge profile, both cells' columns, "
+                        "the cells' other edges)")
     p.add_argument("--nemo-monthly-init", nargs=2, default=None,
                    help="T S NEMO monthly IC files: also count non-finite wet "
                         "cells the IC regrid leaves on this mesh")
@@ -134,6 +138,26 @@ def main() -> int:
                 print(f"   k={k:2d} {zc[k]:7.0f} m  n={int(act.sum()):2d}  "
                       f"T {T_ic[act, k].min():6.2f}/{T_ic[act, k].max():6.2f}  "
                       f"S {S_ic[act, k].min():6.2f}/{S_ic[act, k].max():6.2f}")
+    if a.snapshot:
+        zs = np.load(a.snapshot)
+        u = np.asarray(zs["u"]); eta = np.asarray(zs["eta"]) if "eta" in zs.files else None
+        Ts = np.asarray(zs["T"]); Ss = np.asarray(zs["S"])
+        ie, k = np.unravel_index(int(np.nanargmax(np.abs(u))), u.shape)
+        c0, c1 = int(coe[0, ie]), int(coe[1, ie])
+        eoc = np.asarray(grid.edgesOnCell); eoc = eoc if eoc.shape[0] == H.size else eoc.T
+        print(f"SNAPSHOT {a.snapshot}: max|u| {abs(u[ie, k]):.3g} at edge {ie} level {k} "
+              f"({lat_e[ie]:.2f}N {lon_e[ie]:.2f}E), cells {c0},{c1} H={H[c0]:.0f}/{H[c1]:.0f} m "
+              f"wet={wet[c0]}/{wet[c1]} eta={None if eta is None else (round(float(eta[c0]),4), round(float(eta[c1]),4))}")
+        ks = range(max(0, k - 6), min(u.shape[1], k + 7))
+        print("  level   u_edge      T c0     T c1     S c0     S c1")
+        for kk in ks:
+            print(f"  {kk:5d} {u[ie, kk]:+10.3g} {Ts[c0, kk]:8.3f} {Ts[c1, kk]:8.3f} {Ss[c0, kk]:8.3f} {Ss[c1, kk]:8.3f}")
+        for c in (c0, c1):
+            es = [int(e) for e in eoc[c] if 0 <= int(e) < u.shape[0]]
+            print(f"  cell {c} edges at level {k}: " + " ".join(f"{u[e, k]:+.3g}" for e in es))
+        # vertical column max profile: where in the column does |u| live
+        col = np.abs(u[ie]); print(f"  |u| edge profile max at level {int(np.argmax(col))}, "
+                                   f"top {col[0]:.3g}, mid {col[len(col)//2]:.3g}, bottom-active {col[np.flatnonzero(col)[-1]] if col.any() else 0:.3g}")
     return 1 if bad.any() else 0
 
 
