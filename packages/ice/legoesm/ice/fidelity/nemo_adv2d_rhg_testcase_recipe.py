@@ -140,10 +140,11 @@ def build_ice_adv2d_rhg_card(
 ) -> ICEAdv2DRHGCard:
     """Construct the source-pinned, fp64, CPU-compatible rung-3.3 card."""
 
-    set_policy(PrecisionPolicy.fp64())
-    if get_policy() != PrecisionPolicy.fp64():
-        raise RuntimeError("ICE_ADV2D_RHG card requires PrecisionPolicy.fp64()")
     base = build_ice_adv2d_card(ocean_surface_temperature_c)
+    oracle_policy = PrecisionPolicy.fp64(transcendentals="libm")
+    set_policy(oracle_policy)
+    if get_policy() != oracle_policy:
+        raise RuntimeError("ICE_ADV2D_RHG card requires fp64/scalar-libm policy")
     shape = base.initial_state.u_ice.shape
     zero = jnp.zeros(shape, dtype=jnp.float64)
     one = jnp.ones(shape, dtype=jnp.float64)

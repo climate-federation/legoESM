@@ -10,6 +10,7 @@ import jax
 import netCDF4
 import numpy as np
 import pytest
+from legoesm.core.precision import get_policy
 from legoesm.ice.fidelity.nemo_rheo_testcase_recipe import (
     ICE_RHEO_TRACERS,
     build_ice_rheo_card,
@@ -78,6 +79,7 @@ def _mesh_xy(value: np.ndarray) -> np.ndarray:
 
 def test_rung34_card_geometry_and_dtype_gate(oracle_card) -> None:
     card, _, mesh = oracle_card
+    assert get_policy().transcendentals == "libm"
     assert card.case == "ICE_RHEO_OMIP_L3"
     assert card.dynamics_scheme == "si3_aevp"
     assert card.rheology_staggering == "si3_c_grid"

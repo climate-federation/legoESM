@@ -103,6 +103,7 @@ def _score(reference: np.ndarray, candidate: np.ndarray) -> dict[str, object]:
     candidate = np.asarray(candidate, dtype=np.float64)
     require(reference.shape == candidate.shape, "replay score shape mismatch")
     difference = np.abs(candidate - reference)
+    nonzero = int(np.count_nonzero(difference))
     index = np.unravel_index(int(np.argmax(difference)), difference.shape)
     scale = max(1.0, float(np.max(np.abs(reference))))
     return {
@@ -110,6 +111,7 @@ def _score(reference: np.ndarray, candidate: np.ndarray) -> dict[str, object]:
         "normalized_max_abs": float(difference[index]) / scale,
         "max_abs_index_xy": [int(i) for i in index],
         "max_ulp": int(np.max(_ulp_distance(reference, candidate))),
+        "bitwise_nonzero_over_n": f"{nonzero} / {difference.size}",
         "ulp_at_max_abs": int(_ulp_distance(reference, candidate)[index]),
         "reference_at_max": float(reference[index]),
         "candidate_at_max": float(candidate[index]),
@@ -129,7 +131,10 @@ def _oracle_forcing(card, frame: dict[str, np.ndarray]):
     from legoesm.ice.dynamics import SI3CGridAEVPForcing
 
     template = card.forcing_template
-    scalar = lambda name: np.asarray(frame[name][..., 0], dtype=np.float64).copy()
+
+    def scalar(name: str) -> np.ndarray:
+        return np.asarray(frame[name][..., 0], dtype=np.float64).copy()
+
     return SI3CGridAEVPForcing(
         concentration_t=scalar("a_i"),
         ice_volume_t=scalar("v_i"),
@@ -368,10 +373,11 @@ def _subcycle(state: ReplayState, initial: ReplayState, q: dict, iteration: int)
         (p_over_delta + _roll(p_over_delta, -1, 0))
         + (_roll(p_over_delta, -1, 1) + _roll(_roll(p_over_delta, -1, 0), -1, 1))
     )
+    inverse_alpha_f = 1.0 / (alpha_f + 1.0)
     stress12_value = (
         stress12 * alpha_f
         + p_over_delta_f * (shear * q["inverse_eccentricity_square"] * (1.0 + 0.0)) * 0.5
-    ) / (alpha_f + 1.0)
+    ) * inverse_alpha_f
     stress12 = _write(stress12, slice(0, -1), stress12_value)
     force_u_value = (
         0.5
@@ -557,6 +563,20 @@ def run_replay(root: Path = ROOT) -> tuple[dict[str, object], int]:
     require(header1["storage_bits"] == header2["storage_bits"] == 64, "oracle frames are not fp64")
     initial = _oracle_state(frame1)
     forcing = _oracle_forcing(card, frame1)
+    area = card.base.dx_m * card.base.dy_m
+    bridge_forcing = type(forcing)(
+        *((np.asarray(value) * area) / area for value in forcing[:5]),
+        *(np.asarray(value) for value in forcing[5:]),
+    )
+    bridge_input_rows = {
+        name: _score(np.asarray(exact), np.asarray(bridged))
+        for name, exact, bridged in zip(
+            ("a_i", "v_i", "v_s", "v_ip", "v_il"),
+            forcing[:5],
+            bridge_forcing[:5],
+            strict=True,
+        )
+    }
     q = _setup(card, forcing)
     replay_one, checkpoints = _subcycle(initial, initial, q, 0)
     production_one = _production(card, forcing, initial, 1)
@@ -606,6 +626,36 @@ def run_replay(root: Path = ROOT) -> tuple[dict[str, object], int]:
         replay, _ = _subcycle(replay, initial, q, iteration)
     production = _production(card, forcing, initial, card.dynamics_config.n_subcycles)
     oracle_next = _oracle_state(frame2)
+    bridge_production = _production(card, bridge_forcing, initial, card.dynamics_config.n_subcycles)
+    bridge_output_rows = {
+        name: _score(
+            _physical(getattr(oracle_next, name)),
+            _physical(getattr(bridge_production, name)),
+        )
+        for name in ReplayState._fields
+    }
+
+    # Private one-variable ablation only: remove the shared materialization
+    # identity while leaving the card, formulas, operands, and precision fixed.
+    from legoesm.ice import dynamics as dynamics_module
+    from legoesm.ice import rheology as rheology_module
+
+    saved_dynamics_round = dynamics_module.nemo_source_round
+    saved_rheology_round = rheology_module.nemo_source_round
+    try:
+        dynamics_module.nemo_source_round = lambda value: value
+        rheology_module.nemo_source_round = lambda value: value
+        unrounded_production = _production(card, forcing, initial, card.dynamics_config.n_subcycles)
+    finally:
+        dynamics_module.nemo_source_round = saved_dynamics_round
+        rheology_module.nemo_source_round = saved_rheology_round
+    unrounded_rows = {
+        name: _score(
+            _physical(getattr(oracle_next, name)),
+            _physical(getattr(unrounded_production, name)),
+        )
+        for name in ReplayState._fields
+    }
     production_rows = {
         name: _score(_physical(getattr(oracle_next, name)), _physical(getattr(production, name)))
         for name in ReplayState._fields
@@ -630,9 +680,14 @@ def run_replay(root: Path = ROOT) -> tuple[dict[str, object], int]:
         POINTWISE_BAR < cast(float, replay_rows[name]["normalized_max_abs"]) < 1.0e-13
         for name in stress_names
     )
-    classification = (
-        "RE-ASSOCIATION" if within_two_ulp and replay_in_debt_class else "IMPLEMENTATION_OWNER"
-    )
+    production_is_bit_exact = all(row["max_ulp"] == 0 for row in production_rows.values())
+    replay_is_bit_exact = all(row["max_ulp"] == 0 for row in replay_rows.values())
+    if production_is_bit_exact and replay_is_bit_exact:
+        classification = "BIT-EXACT"
+    elif within_two_ulp and replay_in_debt_class:
+        classification = "RE-ASSOCIATION"
+    else:
+        classification = "IMPLEMENTATION_OWNER"
     report = {
         "format": "nemo-si3-phase2-rung33-written-order-replay-v1",
         "status": classification,
@@ -655,14 +710,21 @@ def run_replay(root: Path = ROOT) -> tuple[dict[str, object], int]:
         "compiled_loop_reassociation_localization": {
             "subcycle": 2,
             "source_span": "icedyn_rhg_evp.F90:392-741",
-            "isolated_first_operand": "F-point shear zds",
+            "isolated_first_operand": (
+                "none: all registered carries are byte-exact"
+                if production_is_bit_exact
+                else "F-point shear zds"
+            ),
             "isolated_first_operand_score": shear_row,
             "written_order_python_loop_is_byte_exact": all(
                 row["max_ulp"] == 0 for row in written_order_active_rows.values()
             ),
             "compiled_fori_loop_rows": active_rows,
             "classification": (
-                "RE-ASSOCIATION: source-order NumPy and the same production "
+                "BIT-EXACT: source-rounded compiled loop, written-order replay, "
+                "and oracle endpoint have identical carries"
+                if production_is_bit_exact
+                else "RE-ASSOCIATION: source-order NumPy and the same production "
                 "statements in a Python loop are byte-identical; only lowering "
                 "lax.fori_loop as one compiled graph changes the carry"
             ),
@@ -670,6 +732,21 @@ def run_replay(root: Path = ROOT) -> tuple[dict[str, object], int]:
         "hundred_subcycles_production_vs_oracle": production_rows,
         "hundred_subcycles_replay_vs_oracle": replay_rows,
         "hundred_subcycles_replay_vs_production": replay_vs_production,
+        "extensive_state_bridge": {
+            "source": "testcase card field * cell_area / cell_area",
+            "input_rows": bridge_input_rows,
+            "hundred_subcycles_vs_oracle": bridge_output_rows,
+            "classification": (
+                "FIRST-NONEXACT-INPUT"
+                if any(row["max_ulp"] != 0 for row in bridge_input_rows.values())
+                else "BIT-EXACT"
+            ),
+        },
+        "private_unrounded_ablation": {
+            "one_variable": "nemo_source_round identity removed",
+            "rows": unrounded_rows,
+            "binds": any(row["max_ulp"] != 0 for row in unrounded_rows.values()),
+        },
         "checkpoint_hashes": {
             name: hashlib.sha256(np.ascontiguousarray(value).tobytes()).hexdigest()
             for name, value in checkpoints.items()
@@ -678,9 +755,11 @@ def run_replay(root: Path = ROOT) -> tuple[dict[str, object], int]:
             "compiled_first_active_stress_subcycle_is_over_bar": active_over_bar,
             "all_written_order_active_stress_rows_at_most_two_ulp": within_two_ulp,
             "all_replayed_stress_rows_in_1e-14_oracle_debt_class_after_100": replay_in_debt_class,
+            "all_production_carries_bit_exact_after_100": production_is_bit_exact,
+            "all_replay_carries_bit_exact_after_100": replay_is_bit_exact,
         },
     }
-    return report, 0 if classification == "RE-ASSOCIATION" else 1
+    return report, 0 if classification in {"BIT-EXACT", "RE-ASSOCIATION"} else 1
 
 
 def main() -> int:

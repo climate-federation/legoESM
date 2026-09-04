@@ -97,6 +97,7 @@ def _score(
         f"{name}: non-finite input",
     )
     difference = np.abs(candidate.astype(np.float64) - oracle.astype(np.float64))
+    nonzero = int(np.count_nonzero(difference))
     index = np.unravel_index(int(np.argmax(difference)), difference.shape)
     maximum = float(difference[index])
     oracle_maximum = float(np.max(np.abs(oracle)))
@@ -122,6 +123,7 @@ def _score(
         "candidate_dtype": str(candidate.dtype),
         "oracle_dtype": str(oracle.dtype),
         "n": int(oracle.size),
+        "bitwise_nonzero_over_n": f"{nonzero} / {oracle.size}",
         "bar": 0.0 if exact else POINTWISE_BAR,
     }
 

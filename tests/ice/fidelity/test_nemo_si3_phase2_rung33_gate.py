@@ -84,15 +84,20 @@ def test_existing_a_grid_solver_is_byte_identical_to_preregister_boundary():
         assert result["before_sha256"] == result["after_sha256"]
 
 
-def test_written_order_replay_classifies_stress_debt_as_reassociation():
+def test_source_rounded_replay_is_bit_exact_from_oracle_entry():
     report, code = replay.run_replay()
     assert code == 0
-    assert report["status"] == "RE-ASSOCIATION"
+    assert report["status"] == "BIT-EXACT"
     predicates = report["classification_predicates"]
     assert predicates["all_written_order_active_stress_rows_at_most_two_ulp"] is True
-    assert predicates["all_replayed_stress_rows_in_1e-14_oracle_debt_class_after_100"] is True
+    assert predicates["all_production_carries_bit_exact_after_100"] is True
+    assert predicates["all_replay_carries_bit_exact_after_100"] is True
     written = report["first_active_stress_subcycle_2_replay_vs_written_order_production"]
     assert all(written[name]["max_ulp"] == 0 for name in ("stress1", "stress2", "stress12"))
+    assert all(
+        row["bitwise_nonzero_over_n"] == "0 / 9801"
+        for row in report["hundred_subcycles_production_vs_oracle"].values()
+    )
 
 
 def test_rung33_restart_requires_stresses_and_moments_with_fp64_dtype():

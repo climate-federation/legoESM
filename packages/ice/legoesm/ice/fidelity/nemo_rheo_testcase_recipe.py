@@ -163,9 +163,7 @@ def _frame_field(frame: Mapping[str, np.ndarray], name: str) -> np.ndarray:
     return cast(np.ndarray, value)
 
 
-def _layer_fields(
-    frame: Mapping[str, np.ndarray], name: str, levels: int
-) -> dict[str, np.ndarray]:
+def _layer_fields(frame: Mapping[str, np.ndarray], name: str, levels: int) -> dict[str, np.ndarray]:
     value = np.asarray(frame[name], dtype=np.float64)
     expected = (
         _ICE_RHEO_ALLOCATED_SIZE,
@@ -175,10 +173,7 @@ def _layer_fields(
     )
     if value.shape != expected:
         raise ValueError(f"ICE_RHEO frame {name} shape {value.shape} != {expected}")
-    return {
-        f"{name}_l{level + 1:02d}": value[..., level, 0]
-        for level in range(levels)
-    }
+    return {f"{name}_l{level + 1:02d}": value[..., level, 0] for level in range(levels)}
 
 
 def _mesh_xy(mesh: Mapping[str, np.ndarray], name: str) -> np.ndarray:
@@ -198,9 +193,10 @@ def build_ice_rheo_card(
 ) -> ICERheoCard:
     """Build the pinned fp64 card from oracle arrays, never analytic stand-ins."""
 
-    set_policy(PrecisionPolicy.fp64())
-    if get_policy() != PrecisionPolicy.fp64():
-        raise RuntimeError("ICE_RHEO card requires PrecisionPolicy.fp64()")
+    oracle_policy = PrecisionPolicy.fp64(transcendentals="libm")
+    set_policy(oracle_policy)
+    if get_policy() != oracle_policy:
+        raise RuntimeError("ICE_RHEO card requires fp64/scalar-libm policy")
     fields = {
         name: _frame_field(entry_frame, name)
         for name in ("v_i", "v_s", "a_i", "oa_i", "a_ip", "v_ip", "v_il")
@@ -223,8 +219,7 @@ def build_ice_rheo_card(
     expected_surface = (_ICE_RHEO_GRID_SIZE, _ICE_RHEO_GRID_SIZE)
     if ocean_temperature.shape != expected_surface:
         raise ValueError(
-            "ICE_RHEO ocean temperature shape "
-            f"{ocean_temperature.shape} != {expected_surface}"
+            f"ICE_RHEO ocean temperature shape {ocean_temperature.shape} != {expected_surface}"
         )
     metrics = SI3CGridMetrics(
         e1t=_periodic_halo(_mesh_xy(mesh, "e1t")),
@@ -324,9 +319,7 @@ def build_ice_rheo_card(
     return card
 
 
-def validate_ice_rheo_card(
-    card: ICERheoCard, state: ICERheoState | None = None
-) -> None:
+def validate_ice_rheo_card(card: ICERheoCard, state: ICERheoState | None = None) -> None:
     """Fail closed on every selector or layout outside the measured rung."""
 
     expected = (
@@ -387,8 +380,8 @@ def validate_ice_rheo_card(
 
 def _replace_periodic_halo(value: jnp.ndarray) -> jnp.ndarray:
     interior = value[
-        _ICE_RHEO_HALO_WIDTH : -_ICE_RHEO_HALO_WIDTH,
-        _ICE_RHEO_HALO_WIDTH : -_ICE_RHEO_HALO_WIDTH,
+        _ICE_RHEO_HALO_WIDTH:-_ICE_RHEO_HALO_WIDTH,
+        _ICE_RHEO_HALO_WIDTH:-_ICE_RHEO_HALO_WIDTH,
     ]
     padding = (
         (_ICE_RHEO_HALO_WIDTH, _ICE_RHEO_HALO_WIDTH),
@@ -417,9 +410,7 @@ def _ice_rheo_air_stress_impl(
         _ICE_RHEO_HALO_WIDTH + _ICE_RHEO_GRID_SIZE + 1,
         dtype=jnp.float64,
     )
-    x = _ICE_RHEO_DOMAIN_KM - (
-        _ICE_RHEO_TWO * physical_indices * _ICE_RHEO_RESOLUTION_KM
-    )
+    x = _ICE_RHEO_DOMAIN_KM - (_ICE_RHEO_TWO * physical_indices * _ICE_RHEO_RESOLUTION_KM)
     y = x
     spinup = jnp.minimum(
         ice_step_index * _ICE_RHEO_DT_S / _ICE_RHEO_SPINUP_S,
@@ -427,9 +418,7 @@ def _ice_rheo_air_stress_impl(
     )
     # usrdef_sbc.F90:124-127 executes integer (1/4)==0, making the radial
     # denominator exactly one.  The remaining normalization is retained.
-    normalization = _ICE_RHEO_WIND_MAX_M_S / jnp.sqrt(
-        _ICE_RHEO_DOMAIN_KM * _ICE_RHEO_KM_TO_M
-    )
+    normalization = _ICE_RHEO_WIND_MAX_M_S / jnp.sqrt(_ICE_RHEO_DOMAIN_KM * _ICE_RHEO_KM_TO_M)
     wind_u_physical = jnp.broadcast_to(
         normalization * x[:, None] * spinup,
         (_ICE_RHEO_GRID_SIZE, _ICE_RHEO_GRID_SIZE),
@@ -450,18 +439,8 @@ def _ice_rheo_air_stress_impl(
         jnp.roll(state.dynamics.v_ice_v, 1, axis=1) + state.dynamics.v_ice_v
     )
     magnitude = jnp.sqrt(relative_u * relative_u + relative_v * relative_v)
-    stress_u = (
-        _ICE_RHEO_AIR_DENSITY_KG_M3
-        * _ICE_RHEO_AIR_DRAG
-        * magnitude
-        * relative_u
-    )
-    stress_v = (
-        _ICE_RHEO_AIR_DENSITY_KG_M3
-        * _ICE_RHEO_AIR_DRAG
-        * magnitude
-        * relative_v
-    )
+    stress_u = _ICE_RHEO_AIR_DENSITY_KG_M3 * _ICE_RHEO_AIR_DRAG * magnitude * relative_u
+    stress_v = _ICE_RHEO_AIR_DENSITY_KG_M3 * _ICE_RHEO_AIR_DRAG * magnitude * relative_v
     return _replace_periodic_halo(stress_u), _replace_periodic_halo(stress_v)
 
 
@@ -512,9 +491,7 @@ def _ridging_state(contents: jnp.ndarray, open_water: jnp.ndarray) -> SI3JPL1Rid
     )
 
 
-def _contents_after_ridging(
-    contents: jnp.ndarray, state: SI3JPL1RidgingState
-) -> jnp.ndarray:
+def _contents_after_ridging(contents: jnp.ndarray, state: SI3JPL1RidgingState) -> jnp.ndarray:
     fields = {
         "a_i": state.ice_area,
         "v_i": state.ice_volume,
@@ -525,22 +502,13 @@ def _contents_after_ridging(
         "v_il": state.pond_lid_volume,
     }
     fields.update(
-        {
-            f"e_s_l{level:02d}": state.snow_enthalpy[..., level - 1]
-            for level in range(1, 6)
-        }
+        {f"e_s_l{level:02d}": state.snow_enthalpy[..., level - 1] for level in range(1, 6)}
     )
     fields.update(
-        {
-            f"e_i_l{level:02d}": state.ice_enthalpy[..., level - 1]
-            for level in range(1, 11)
-        }
+        {f"e_i_l{level:02d}": state.ice_enthalpy[..., level - 1] for level in range(1, 11)}
     )
     fields.update(
-        {
-            f"szv_i_l{level:02d}": state.ice_salt_content[..., level - 1]
-            for level in range(1, 11)
-        }
+        {f"szv_i_l{level:02d}": state.ice_salt_content[..., level - 1] for level in range(1, 11)}
     )
     for name, value in fields.items():
         contents = contents.at[..., ICE_RHEO_TRACERS.index(name)].set(
@@ -566,9 +534,7 @@ def _ice_cor(
     pond_area = field("a_ip")
     has_area = ice_area >= _ICE_RHEO_EPSI20
     safe_area = jnp.where(has_area, ice_area, _ICE_RHEO_ONE)
-    thickness = jnp.where(
-        has_area, ice_volume / safe_area, _ICE_RHEO_ZERO
-    )
+    thickness = jnp.where(has_area, ice_volume / safe_area, _ICE_RHEO_ZERO)
     thin = thickness < _ICE_RHEO_MINIMUM_THICKNESS_M
     thin_factor = thickness / _ICE_RHEO_MINIMUM_THICKNESS_M
     pond_area = jnp.where(thin, pond_area * thin_factor, pond_area)
@@ -577,23 +543,13 @@ def _ice_cor(
     safe_overfilled_area = jnp.where(overfilled, ice_area, _ICE_RHEO_ONE)
     ice_area = jnp.where(
         overfilled,
-        ice_area
-        * _ICE_RHEO_MAXIMUM_CONCENTRATION
-        / safe_overfilled_area,
+        ice_area * _ICE_RHEO_MAXIMUM_CONCENTRATION / safe_overfilled_area,
         ice_area,
     )
-    contents = contents.at[..., index("a_ip")].set(
-        pond_area * _ICE_RHEO_CELL_AREA_M2
-    )
-    contents = contents.at[..., index("a_i")].set(
-        ice_area * _ICE_RHEO_CELL_AREA_M2
-    )
+    contents = contents.at[..., index("a_ip")].set(pond_area * _ICE_RHEO_CELL_AREA_M2)
+    contents = contents.at[..., index("a_i")].set(ice_area * _ICE_RHEO_CELL_AREA_M2)
 
-    salinity_minimum = (
-        _ICE_RHEO_MINIMUM_SALINITY_G_KG
-        * ice_volume
-        / _ICE_RHEO_NLAY_I
-    )
+    salinity_minimum = _ICE_RHEO_MINIMUM_SALINITY_G_KG * ice_volume / _ICE_RHEO_NLAY_I
     salinity_maximum = (
         _ICE_RHEO_NEW_ICE_SALINITY_FRACTION
         * _ICE_RHEO_OCEAN_SALINITY_G_KG
@@ -602,21 +558,13 @@ def _ice_cor(
     )
     for level in range(1, _ICE_RHEO_NLAY_I + 1):
         name = f"szv_i_l{level:02d}"
-        value = jnp.minimum(
-            jnp.maximum(field(name), salinity_minimum), salinity_maximum
-        )
-        contents = contents.at[..., index(name)].set(
-            value * _ICE_RHEO_CELL_AREA_M2
-        )
+        value = jnp.minimum(jnp.maximum(field(name), salinity_minimum), salinity_maximum)
+        contents = contents.at[..., index(name)].set(value * _ICE_RHEO_CELL_AREA_M2)
 
     has_ice = ice_area > _ICE_RHEO_EPSI10
     safe_ice_area = jnp.where(has_ice, ice_area, _ICE_RHEO_ONE)
-    thickness = jnp.where(
-        has_ice, ice_volume / safe_ice_area, _ICE_RHEO_ZERO
-    )
-    small = jnp.minimum(jnp.minimum(ice_area, ice_volume), thickness) < (
-        _ICE_RHEO_EPSI10
-    )
+    thickness = jnp.where(has_ice, ice_volume / safe_ice_area, _ICE_RHEO_ZERO)
+    small = jnp.minimum(jnp.minimum(ice_area, ice_volume), thickness) < (_ICE_RHEO_EPSI10)
     contents = jnp.where(small[..., None], _ICE_RHEO_ZERO, contents)
     t_surface = jnp.where(small, card.empty_surface_temperature, t_surface)
     return _replace_periodic_halo(contents), _replace_periodic_halo(t_surface)
@@ -658,15 +606,11 @@ def _step_ice_rheo_card_impl(
     """Traceable step body with a static NEMO sweep-parity selector."""
 
     forcing = _forcing_for_state(card, state, ice_step_index)
-    dynamics = si3_cgrid_aevp_solver(
-        state.dynamics, forcing, card.metrics, card.dynamics_config
-    )
+    dynamics = si3_cgrid_aevp_solver(state.dynamics, forcing, card.metrics, card.dynamics_config)
     divergence, deformation = si3_cgrid_deformation(
         dynamics, forcing, card.metrics, card.dynamics_config
     )
-    cell_area = jnp.full_like(
-        dynamics.u_ice_u, _ICE_RHEO_CELL_AREA_M2, dtype=jnp.float64
-    )
+    cell_area = jnp.full_like(dynamics.u_ice_u, _ICE_RHEO_CELL_AREA_M2, dtype=jnp.float64)
     wet = card.forcing_template.tmask_t.astype(bool)
     contents, moments, ignored_subcycles = advect_si3_prather_2d(
         state.contents,
@@ -706,9 +650,7 @@ def _step_ice_rheo_card_impl(
     ) / card.metrics.area_t
     open_water = jnp.maximum(
         _ICE_RHEO_ZERO,
-        state.open_water_area
-        - (transported_area - entry_area)
-        - flux_divergence * card.dt_s,
+        state.open_water_area - (transported_area - entry_area) - flux_divergence * card.dt_s,
     )
     redistributed, ignored_losses = apply_si3_jpl1_ridging(
         _ridging_state(contents, open_water),
@@ -723,9 +665,7 @@ def _step_ice_rheo_card_impl(
     final_area = _intensive(contents, "a_i")
     return ICERheoState(
         contents=contents,
-        bulk_salt_diagnostic=_replace_periodic_halo(
-            state.bulk_salt_diagnostic
-        ),
+        bulk_salt_diagnostic=_replace_periodic_halo(state.bulk_salt_diagnostic),
         moments=moments,
         dynamics=dynamics,
         t_surface=t_surface,

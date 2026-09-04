@@ -10,6 +10,7 @@ import jax.numpy as jnp
 import netCDF4
 import numpy as np
 import pytest
+from legoesm.core.precision import get_policy
 from legoesm.ice.dynamics import (
     SI3CGridAEVPState,
     si3_cgrid_aevp_solver,
@@ -53,6 +54,7 @@ def _normalized(oracle: np.ndarray, candidate: np.ndarray) -> float:
 
 def test_rung33_card_is_fp64_and_fail_closed():
     card = _card()
+    assert get_policy().transcendentals == "libm"
     assert card.dynamics_scheme == "si3_aevp"
     assert card.rheology_staggering == "si3_c_grid"
     assert card.dynamics_config.n_subcycles == 100

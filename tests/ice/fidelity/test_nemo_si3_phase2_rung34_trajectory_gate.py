@@ -42,6 +42,7 @@ def test_oracle_zero_fields_are_uninformative_not_at_bar() -> None:
     zero = np.zeros((2, 2), dtype=np.float64)
     row = gate.gate._score("kt1.oa_i", zero, zero.copy(), uninformative_zero=True)
     assert row["status"] == "UNINFORMATIVE"
+    assert row["bitwise_nonzero_over_n"] == "0 / 4"
 
     with pytest.raises(gate.gate.Rung34GateError, match="not oracle-zero"):
         gate.gate._score(

@@ -80,6 +80,7 @@ def _score(
         absolute = np.abs(lego - oracle)
         oracle_magnitude = np.abs(oracle)
     max_abs = float(np.max(absolute, initial=0.0))
+    nonzero = int(np.count_nonzero(absolute))
     oracle_max_abs = float(np.max(oracle_magnitude, initial=0.0))
     relative_max_abs = (
         max_abs / oracle_max_abs
@@ -103,6 +104,7 @@ def _score(
         "relative_max_abs": relative_max_abs,
         "bar": bar,
         "n": int(oracle.size),
+        "bitwise_nonzero_over_n": f"{nonzero} / {oracle.size}",
     }
     rows.append(row)
     return row
