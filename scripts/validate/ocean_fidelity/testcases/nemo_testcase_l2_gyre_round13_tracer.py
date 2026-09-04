@@ -207,10 +207,13 @@ def run(oracle_root: Path, control_root: Path, *, plant: bool = False) -> dict:
         for j, i, k in np.argwhere((oi != ci) & active):
             differing.append((field, int(j), int(i), int(k)))
     distinct_locations = sorted({(j, i, k) for _, j, i, k in differing})
+    field_counts = {
+        field: sum(1 for found, *_ in differing if found == field)
+        for field in ("T", "S")
+    }
     require(
-        len(distinct_locations) == (10 if plant else 9),
-        f"expected {'10 planted' if plant else 'nine'} differing locations, "
-        f"got {len(distinct_locations)} ({len(differing)} field entries)",
+        field_counts == ({"T": 10, "S": 9} if plant else {"T": 9, "S": 9}),
+        f"expected nine differing cells per field, got {field_counts}",
     )
 
     bottom_k = np.sum(active, axis=-1) - 1
@@ -294,6 +297,11 @@ def run(oracle_root: Path, control_root: Path, *, plant: bool = False) -> dict:
         "initial_entry": initial_rows,
         "differing_location_count": len(distinct_locations),
         "differing_field_entry_count": len(differing),
+        "differing_cells_by_field": field_counts,
+        "briefing_count_disposition": (
+            "nine per field; the T and S coordinate sets are disjoint, "
+            "so the union contains 18 locations"
+        ),
         "cells": cells,
         "aggregate": aggregate,
         "first_differing_boundaries": first_boundaries,
