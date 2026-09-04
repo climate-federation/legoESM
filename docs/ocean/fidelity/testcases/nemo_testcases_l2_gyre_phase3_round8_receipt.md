@@ -1276,12 +1276,31 @@ fields, while the current path differed in 115 wet qns cells and 490 emp
 cells.  This **CONFIRMS H1** (statement association) and **REFUTES H2** for
 EXP (callback delivery).
 
+The preregistered recovered-delta row itself—`Krhs_after-Krhs_before` from the
+two dumps—is **NOT bit-exact**: 4,191 of 18,000 active cells differ, with
+maximum absolute difference `1.6940658945086007e-21`.  This is subtractive
+cancellation noise from recovering a small increment from two rounded
+accumulators, not an exact observation of the increment.  It is explicitly
+unscored; the bit-exact accumulation-boundary replay above replaces it as the
+certification quantity.
+
 The route plant advances every scalar-libm return by one binary64 step.  Before
 the fix it counted 43,648 EXP calls and changed the QSR result.  After extending
 the same policy to the executed SIN/COS sites, it counted 43,648 EXP, 2,112
 SIN, and 1,412 COS calls, and changed qsr, qns, emp, utau, vtau, and the QSR
 increment.  Thus the card demonstrably traverses each callback; the plant is
 behavioral and not a source-string assertion.
+
+The post-fix discriminator now labels H1 `SUPERSEDED_BY_FIX`, rather than
+misleadingly printing `NOT_CONFIRMED` after the two implementations converge.
+Its pre-fix evidence remains the retained `round16/discriminator.json`,
+SHA-256
+`3c44294d3dd5051958931baa42a16d670bc6226723f7061522201b88bf163405`.
+The four RGB-path EXP source sites in `_morel_berthon_chl_column` and
+`shortwave_penetration_rgb_tendency` also route through the precision-policy
+EXP, so ORCA1's RGB selection honours scalar libm.  The behavioral route test
+observes all seven executions (three profile sites plus four band calls);
+reverting one site reduces the count to six and fails with exit `1`.
 
 The shared fix at `7da8b5169` applies `nemo_source_round` at the NEMO statement
 boundaries, uses the same precomputed reciprocals and multiplication forms,
@@ -1638,3 +1657,115 @@ resolved `ln_apr_dyn=.false.` from `namelist_ref:211`), external substeps,
 `un_adv/vn_adv`, and stage-1 Kaa; the first non-bit-exact boundary stops the
 walk.  The kt=1…10 and cross-card gates remain conditional on that entire
 stage-1 chain becoming bit-exact.
+
+### Surface-stress and wind-product results
+
+The baseline discriminator overturned the preregistered ranking at the first
+operand.  `r1_rho0` and live `r1_hu/r1_hv(Kbb)` were bit-exact, but the face
+stress already differed: U had 414 cells and V 418 cells different, both with
+maximum absolute error `2.7755575615628914e-17` and maximum 3 ULP.  The raw
+geographic midpoint is intentionally not a NEMO quantity: the harness had
+inverse-rotated the already-native `usrdef_sbc` stress into the public
+east/north fields, and the shared face helper rotated it back.  That algebraic
+round trip is lossy on the 45-degree grid.
+
+The shared forcing container now optionally carries a paired
+`tau_i_native/tau_j_native` input, fail-closed if only one is present.  The
+single shared face helper consumes that pair directly and applies the
+source-associated midpoint; ordinary geographic coupling remains the default
+when the pair is absent.  This is a forcing-coordinate representation, not a
+GYRE physics switch.  Supplying GYRE's source-native T-point fields makes both
+`utauU` and `vtauV` bit-exact.  This is
+**CONFIRMED_NATIVE_STRESS_HANDOFF_OWNER**.  Its private legacy geographic arm
+restores 414/418 differing cells and exits `1`.
+
+With the face operands exact, the old collapsed `tau/(rho0*H)` expression left
+179 U cells and 156 V cells different after wind, maximum
+`3.308722450212111e-24` (1 ULP).  Materializing NEMO's written
+`(r1_rho0*tau)*r1_h` product and then the addition clears every cell.  This is
+**CONFIRMED_WIND_PRODUCT_ASSOCIATION_SECOND_OWNER**.  Its private legacy arm
+reproduces the 1-ULP residual and exits `1`; the independent e3 plant perturbs
+one nonzero cell, becomes the first boundary, and exits `1`.
+
+| ordered boundary | pre-fix U / V | final U / V | disposition |
+|---|---:|---:|---|
+| `Krhs`, depth mean, post-drag | `0 / 0` | `0 / 0` | retained BIT-EXACT |
+| face stress differing cells | `414 / 418` | `0 / 0` | BIT-EXACT |
+| post-wind max abs | `6.617444900424222e-24 / 6.617444900424222e-24` | `0 / 0` | BIT-EXACT |
+| pre-external max abs | `6.617444900424222e-24 / 6.617444900424222e-24` | `0 / 0` | BIT-EXACT |
+
+Atmospheric pressure is dead exactly as preregistered: resolved
+`ln_apr_dyn=.false.` (`namelist_ref:211`), so post-wind is the external-mode
+slow forcing.  The Round-12 compensating-error rule applies: the corrected
+operators are bit-exact on NEMO's own operands, so both fixes stay even though
+later external frames expose a second error.
+
+### Next ordered boundary and Rule 8/12 disclosure
+
+All 16 named external-mode frames at substep 1 are bit-exact.  At substep 2,
+`eta_entry`, `eta_mid`, `u/v_entry`, `u/v_mid`, and `slow_u/slow_v` remain
+bit-exact.  The first non-bit-exact source boundary is `eta_exit` at substep 2:
+114 cells differ, maximum absolute error `1.3552527156068805e-20`, maximum
+8 ULP.  The same substep's later `trd_u/trd_v` are NEAR-NULL (maximum 2 ULP and
+`2.0679515313825692e-25`) and have no owner-discriminating power.
+
+Movement versus the two-legacy-arm legoESM baseline is disclosed, but does not
+decide eligibility.  Among the 800 substep-frame maximum-residual rows, 449
+improve, 153 are unchanged, and 198 worsen after the exact wind fix.  The first
+debt moves later, from `slow_u` at substep 1 (`6.617444900424222e-24`, 3 ULP)
+to `eta_exit` at substep 2.  The 198 later maximum-residual movements are fully
+enumerated, cell counts included, by the paired `advmean_pre_wind.json` and
+`advmean_final.json` artifacts; they are downstream diagnostic frames, not a
+newly run whole-step or cross-card Rule-12 score.  The final weighted means are
+U `4.440892098500626e-16` and V `3.3306690738754696e-16` from their oracle
+values; they are downstream of the first debt and carry no owner label.
+
+Because the complete stage-1 chain is not bit-exact, the requested conditional
+work is honestly **UNMEASURED**: no new kt=1…10 sweep, OVERFLOW/LOCK stage or
+trajectory gate, stage-1 Kaa certification, stage-2 Kaa measurement, or
+stage-3 transport measurement was run.  There are therefore no new whole-step
+Rule-8 rows or cross-card Rule-12 rows to enumerate.  The newly exposed debt is
+registered as `external_mode.substep2.eta_exit`; it is never used to revert the
+bit-exact upstream corrections.  The nonzero advmean plant selects substep 2,
+U cell `(j=1,i=1)`, becomes the first accumulated-transport mismatch, and exits
+`1`.
+
+### Round-18 artifacts and verification
+
+| artifact | SHA-256 |
+|---|---|
+| pre-fix wind operand walk | `dbd0c0ef7bf77979d5cc4fba3b4b89d6be4766acfe830abc0e4227910639bcd9` |
+| final wind operand walk | `cd5c61c294de1524355e0710391c6934d0860cc74a9d86b163946f72d9698a92` |
+| legacy geographic-stress arm | `e2ab3a7dc0a0a4e1ac0783be35557d94633035d480b0cf4ba9329fa8e0cb029a` |
+| legacy wind-product arm | `b00fbd31ac9c98c27e81ccbc43174d008122fb7b2ba56b290c024ddacaa7529b` |
+| wind planted control | `aabc5b521f35f7028b2cefb1387a40e6ab630fecc392d5c1b3f6f597fdf68fa2` |
+| pre-fix external/advmean trace | `2f4f9874c1a52de88a76f38d20c62944418165e3984f5fe76754cf055d4921ba` |
+| final external/advmean trace | `69229ad6f6b0eee2d8ce1cf28e01c126bcd05ed72db5a836ce7b43d0133401aa` |
+| nonzero advmean plant | `cce7101f436b949df010fb9d8bbb20341e95ffe63f79c2e4c625ab77721bd087` |
+| superseded-H1 discriminator | `9febb8f3d28e7b34ae24f6eb6102eabc5fa744cf0d86439479f2678c67a33918` |
+
+The source-rounding, isomorphism, surface-forcing, RGB, GYRE gate, and full
+WS-RK3 focused invocation is `98 passed in 1826.42 s`.  The RGB routing control
+fails `6 == 7` with exit `1` when one of its four source sites is reverted.
+
+### Round-18 ASKED / UNASKED register
+
+| choice or action | origin | disposition |
+|---|---|---|
+| source-first surface-wind operand walk | ASKED | complete; two ordered owners confirmed |
+| paired native stress representation | UNASKED implementation mechanism | shared forcing interface; no card physics switch |
+| source-associated wind product/add | ASKED | landed in shared external-mode path |
+| geographic and product legacy arms | ASKED one-variable controls | private only; each exits `1` |
+| APR boundary | ASKED | VERIFIED-ABSENT, resolved `ln_apr_dyn=.false.` |
+| external substeps / advmean continuation | ASKED | stopped at substep-2 `eta_exit` |
+| QSR recovered-delta disclosure | ASKED review fix | corrected in place; unscored 4,191-cell row |
+| H1 post-fix wording and pre-fix hash | ASKED review fix | `SUPERSEDED_BY_FIX`; evidence retained |
+| RGB precision-policy EXP routing | ASKED review fix | all four sites routed; behavioral plant fails |
+| kt=1…10 and OVERFLOW/LOCK gates | conditional ASKED | UNMEASURED; complete stage-1 chain did not clear |
+| stage-1/2 Kaa and stage-3 transports | conditional ASKED | UNMEASURED / NOT ENTERED |
+| ZDF matrix walk | explicitly out of scope | not entered |
+| GYRE card guard, tuning, or shipped NEMO edit | forbidden | none |
+
+All Round-18 measurements are Codex-internal.  Round-17 independent review was
+still running during this dispatch; Round-18 independent review is outstanding
+and no dual-review claim is made.
