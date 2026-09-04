@@ -9,8 +9,7 @@ import numpy as np
 import pytest
 
 _GATE_PATH = Path(__file__).parents[3] / (
-    "scripts/validate/ocean_fidelity/testcases/"
-    "nemo_si3_phase2_rung34_trajectory_gate.py"
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_phase2_rung34_trajectory_gate.py"
 )
 _SPEC = importlib.util.spec_from_file_location(
     "nemo_si3_phase2_rung34_trajectory_gate_direct", _GATE_PATH
@@ -40,9 +39,7 @@ def test_closing_row_replays_si3_evp_equations_and_binds() -> None:
 
 def test_oracle_zero_fields_are_uninformative_not_at_bar() -> None:
     zero = np.zeros((2, 2), dtype=np.float64)
-    row = gate.gate._score(
-        "kt1.oa_i", zero, zero.copy(), uninformative_zero=True
-    )
+    row = gate.gate._score("kt1.oa_i", zero, zero.copy(), uninformative_zero=True)
     assert row["status"] == "UNINFORMATIVE"
 
     with pytest.raises(gate.gate.Rung34GateError, match="not oracle-zero"):
@@ -92,6 +89,28 @@ def test_plant_self_check_requires_the_scored_row_to_move() -> None:
 
     with pytest.raises(gate.Rung34TrajectoryError, match="did not make its row DEBT"):
         gate._plant_row_evidence(clean, clean)
+
+
+def test_full_walk_records_each_fields_first_debt_only() -> None:
+    register = {}
+    gate._update_first_over_bar(
+        register,
+        9,
+        [
+            {"name": "step9.u_ice", "status": "AT-BAR"},
+            {"name": "step9.stress1_i", "status": "DEBT"},
+        ],
+    )
+    gate._update_first_over_bar(
+        register,
+        10,
+        [
+            {"name": "step10.u_ice", "status": "DEBT"},
+            {"name": "step10.stress1_i", "status": "DEBT"},
+        ],
+    )
+    assert register["stress1_i"]["completed_step"] == 9
+    assert register["u_ice"]["completed_step"] == 10
 
 
 @pytest.mark.parametrize(

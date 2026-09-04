@@ -177,6 +177,8 @@ class SI3JPL1RidgingLosses(NamedTuple):
     pond_volume: jnp.ndarray
     pond_lid_volume: jnp.ndarray
     iterations: jnp.ndarray
+    excessive_removal_clamp: jnp.ndarray
+    open_water_correction: jnp.ndarray
 
 
 def participation_weights(
@@ -230,8 +232,9 @@ def _ridging_column_kernel(
     mu_rdg: float,
     H_star: float,
     snow_fraction_retained: float,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
-           jnp.ndarray, jnp.ndarray]:
+) -> tuple[
+    jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray
+]:
     """Per-column ridging kernel.
 
     Returns updated ``(a_cat, h_cat, V_snow_cat, S_ice_cat, V_pond_cat,
@@ -279,7 +282,9 @@ def _ridging_column_kernel(
     _has_participation = _w_sum > 1e-30
     _w_sum_safe = jnp.where(_has_participation, _w_sum, 1.0)
     h_part_est = jnp.where(
-        _has_participation, jnp.sum(weights * h_cat) / _w_sum_safe, 0.0,
+        _has_participation,
+        jnp.sum(weights * h_cat) / _w_sum_safe,
+        0.0,
     )
     H_min_est = 2.0 * h_part_est
     H_max_est = jnp.minimum(mu_rdg * jnp.sqrt(jnp.maximum(h_part_est, 1e-6)), H_star)
@@ -287,7 +292,9 @@ def _ridging_column_kernel(
     H_max_est = jnp.maximum(H_max_est, H_min_est + _MIN_RIDGE_WIDTH_M)
     H_mean_est = 0.5 * (jnp.minimum(H_min_est, hi[-1]) + jnp.minimum(H_max_est, hi[-1]))
     comp = jnp.clip(
-        1.0 - h_part_est / jnp.maximum(H_mean_est, 1e-6), 0.5, 1.0,
+        1.0 - h_part_est / jnp.maximum(H_mean_est, 1e-6),
+        0.5,
+        1.0,
     )
     da_ridged = jnp.minimum(da_ridged_request / comp, a_total)
 
@@ -297,7 +304,9 @@ def _ridging_column_kernel(
 
     # Volume + snow removed per donor cat.
     fraction_taken = jnp.where(
-        a_cat > 1e-30, da_per_cat / jnp.where(a_cat > 1e-30, a_cat, 1.0), 0.0,
+        a_cat > 1e-30,
+        da_per_cat / jnp.where(a_cat > 1e-30, a_cat, 1.0),
+        0.0,
     )
     dV_per_cat = V_cat * fraction_taken
     dVsnow_per_cat = V_snow_cat * fraction_taken
@@ -330,7 +339,7 @@ def _ridging_column_kernel(
     # the top category while preserving ``sum(dV_ridge_to_cat) == V_part_total``.
     H_min = 2.0 * h_part
     H_max = jnp.minimum(mu_rdg * jnp.sqrt(jnp.maximum(h_part, 1e-6)), H_star)
-    H_max = jnp.minimum(H_max, hi[-1])                       # ceiling at top bound
+    H_max = jnp.minimum(H_max, hi[-1])  # ceiling at top bound
     # NORMAL case (H_min + width <= hi[-1]): keep the original Lipscomb range,
     # flooring H_max above the physical H_min = 2*h_part.  This preserves the
     # ridge thickness distribution for ordinary thin/mixed/thick states (the
@@ -354,9 +363,7 @@ def _ridging_column_kernel(
     snow_to_ocean_m_snow_per_m2 = (1.0 - snow_fraction_retained) * Vsnow_donated
     # Convert snow-depth volume [m of snow per m²] to mass [kg/m²] via
     # rho_snow (caller divides by dt for a flux):
-    snow_to_ocean_kg_m2 = (
-        snow_to_ocean_m_snow_per_m2 * constants.rho_snow
-    )
+    snow_to_ocean_kg_m2 = snow_to_ocean_m_snow_per_m2 * constants.rho_snow
 
     # All ridged pond water drains to the ocean as fresh liquid water.
     pond_to_ocean_m_per_m2 = jnp.sum(dVpond_per_cat)
@@ -394,13 +401,16 @@ def _ridging_column_kernel(
         0.0,
     )
     # Salt mass goes with V (per-cat ridge salt = S_part_mean * dV_ridge_to_cat).
-    salt_donated_total = jnp.sum(
-        S_ice_cat * dV_per_cat,
-    ) * constants.rho_ice * _PSU_TO_FRACTION
+    salt_donated_total = (
+        jnp.sum(
+            S_ice_cat * dV_per_cat,
+        )
+        * constants.rho_ice
+        * _PSU_TO_FRACTION
+    )
     salt_to_cat = jnp.where(
         V_ridge_total > 1e-30,
-        salt_donated_total * dV_ridge_to_cat
-        / jnp.where(V_ridge_total > 1e-30, V_ridge_total, 1.0),
+        salt_donated_total * dV_ridge_to_cat / jnp.where(V_ridge_total > 1e-30, V_ridge_total, 1.0),
         0.0,
     )
 
@@ -434,8 +444,15 @@ def _ridging_column_kernel(
     # Clamp to physical ranges.
     a_new = jnp.clip(a_new, 0.0, 1.0)
 
-    return (a_new, h_new, Vsnow_new, S_new, Vpond_new,
-            snow_to_ocean_kg_m2 / dt, pond_to_ocean_kg_m2 / dt)
+    return (
+        a_new,
+        h_new,
+        Vsnow_new,
+        S_new,
+        Vpond_new,
+        snow_to_ocean_kg_m2 / dt,
+        pond_to_ocean_kg_m2 / dt,
+    )
 
 
 def apply_ridging(
@@ -514,11 +531,19 @@ def apply_ridging(
     )
 
     a_f, h_f, Vsnow_f, S_f, Vpond_f, snow_to_ocean_f, pond_to_ocean_f = vmapped(
-        _flat(a_cat), _flat(h_cat), _flat(V_snow_cat), _flat(S_ice_cat),
+        _flat(a_cat),
+        _flat(h_cat),
+        _flat(V_snow_cat),
+        _flat(S_ice_cat),
         _flat(V_pond_cat),
         closing_flat,
-        lo, hi, dt,
-        e_star, mu_rdg, H_star, snow_fraction_retained,
+        lo,
+        hi,
+        dt,
+        e_star,
+        mu_rdg,
+        H_star,
+        snow_fraction_retained,
     )
 
     full_shape = spatial_shape + (n_cat,)
@@ -609,13 +634,12 @@ def apply_si3_jpl1_ridging(
     pond_loss = jnp.zeros_like(pond_volume)
     pond_lid_loss = jnp.zeros_like(pond_lid_volume)
     iteration_count = jnp.zeros(base_shape, dtype=jnp.int32)
+    excessive_removal_clamp = jnp.zeros(base_shape, dtype=bool)
+    open_water_correction = jnp.zeros(base_shape, dtype=bool)
 
-    closing = (
-        config.cs_ridging
-        * _SI3_JPL1_RAFT_AREA_MULTIPLIER
-        * (deformation - jnp.abs(divergence))
-        - jnp.minimum(divergence, _SI3_JPL1_ZERO)
-    )
+    closing = config.cs_ridging * _SI3_JPL1_RAFT_AREA_MULTIPLIER * (
+        deformation - jnp.abs(divergence)
+    ) - jnp.minimum(divergence, _SI3_JPL1_ZERO)
     closing = jnp.where(
         divergence < _SI3_JPL1_ZERO,
         jnp.maximum(closing, -divergence),
@@ -629,9 +653,7 @@ def apply_si3_jpl1_ridging(
     # equivalent of its shrinking packed-cell list and remains JIT/grad safe.
     for _ in range(_SI3_JPL1_MAX_ITERATIONS):
         total_area = open_water + area
-        safe_total_area = jnp.where(
-            total_area > _SI3_JPL1_EPSI10, total_area, _SI3_JPL1_ONE
-        )
+        safe_total_area = jnp.where(total_area > _SI3_JPL1_EPSI10, total_area, _SI3_JPL1_ONE)
         inverse_total = jnp.where(
             total_area > _SI3_JPL1_EPSI10,
             _SI3_JPL1_ONE / safe_total_area,
@@ -639,9 +661,7 @@ def apply_si3_jpl1_ridging(
         )
         g_open = open_water * inverse_total
         inverse_astar = _SI3_JPL1_ONE / config.astar
-        exponential_scale = _SI3_JPL1_ONE / (
-            _SI3_JPL1_ONE - jnp.exp(-inverse_astar)
-        )
+        exponential_scale = _SI3_JPL1_ONE / (_SI3_JPL1_ONE - jnp.exp(-inverse_astar))
         g_minus_one = exponential_scale
         g_zero = jnp.exp(-g_open * inverse_astar) * exponential_scale
         g_one = jnp.exp(-inverse_astar) * exponential_scale
@@ -650,13 +670,12 @@ def apply_si3_jpl1_ridging(
 
         has_area = area > _SI3_JPL1_EPSI10
         safe_area = jnp.where(has_area, area, _SI3_JPL1_ONE)
-        thickness = jnp.where(
-            has_area, ice_volume / safe_area, _SI3_JPL1_ZERO
-        )
+        thickness = jnp.where(has_area, ice_volume / safe_area, _SI3_JPL1_ZERO)
         ridge_fraction = (
-            _SI3_JPL1_ONE
-            + jnp.tanh(config.craft * (thickness - config.hraft_m))
-        ) * _SI3_JPL1_RAFT_AREA_MULTIPLIER * participation_ice
+            (_SI3_JPL1_ONE + jnp.tanh(config.craft * (thickness - config.hraft_m)))
+            * _SI3_JPL1_RAFT_AREA_MULTIPLIER
+            * participation_ice
+        )
         raft_fraction = participation_ice - ridge_fraction
         mean_ridge_thickness = jnp.maximum(
             _si3_jpl1_sqrt(config.hstar_m * thickness),
@@ -664,8 +683,7 @@ def apply_si3_jpl1_ridging(
         )
         ridge_minimum = jnp.minimum(
             _SI3_JPL1_TWO * thickness,
-            _SI3_JPL1_RAFT_AREA_MULTIPLIER
-            * (mean_ridge_thickness + thickness),
+            _SI3_JPL1_RAFT_AREA_MULTIPLIER * (mean_ridge_thickness + thickness),
         )
         ridge_exponential = config.mu_ridging * _si3_jpl1_sqrt(thickness)
         ridge_area_ratio = thickness / jnp.maximum(
@@ -674,8 +692,7 @@ def apply_si3_jpl1_ridging(
         normalization = (
             participation_open
             + ridge_fraction * (_SI3_JPL1_ONE - ridge_area_ratio)
-            + raft_fraction
-            * (_SI3_JPL1_ONE - _SI3_JPL1_RAFT_AREA_MULTIPLIER)
+            + raft_fraction * (_SI3_JPL1_ONE - _SI3_JPL1_RAFT_AREA_MULTIPLIER)
         )
         safe_normalization = jnp.where(
             normalization > _SI3_JPL1_EPSI10,
@@ -693,14 +710,17 @@ def apply_si3_jpl1_ridging(
             participation_ice,
             _SI3_JPL1_ONE,
         )
+        excessive = work & (requested_area > area) & (participation_ice != _SI3_JPL1_ZERO)
+        excessive_removal_clamp = excessive_removal_clamp | excessive
         gross = jnp.where(
-            (requested_area > area) & (participation_ice != _SI3_JPL1_ZERO),
+            excessive,
             area / safe_participation / dt,
             gross,
         )
-        corrected_open = open_water + (
-            opening - participation_open * gross
-        ) * dt
+        corrected_open = open_water + (opening - participation_open * gross) * dt
+        open_water_correction = open_water_correction | (
+            work & ((corrected_open < _SI3_JPL1_ZERO) | (corrected_open > total_area))
+        )
         opening = jnp.where(
             corrected_open < _SI3_JPL1_ZERO,
             participation_open * gross - open_water / dt,
@@ -711,9 +731,7 @@ def apply_si3_jpl1_ridging(
             participation_open * gross + (total_area - open_water) / dt,
             opening,
         )
-        shift = work & (participation_ice > _SI3_JPL1_ZERO) & (
-            gross > _SI3_JPL1_ZERO
-        )
+        shift = work & (participation_ice > _SI3_JPL1_ZERO) & (gross > _SI3_JPL1_ZERO)
 
         new_open_water = jnp.maximum(
             _SI3_JPL1_ZERO,
@@ -732,9 +750,7 @@ def apply_si3_jpl1_ridging(
             (_SI3_JPL1_ONE - ridged_fraction) - rafted_fraction
         )
         new_ridge_area = ridge_area_removed * ridge_area_ratio
-        new_raft_area = (
-            raft_area_removed * _SI3_JPL1_RAFT_AREA_MULTIPLIER
-        )
+        new_raft_area = raft_area_removed * _SI3_JPL1_RAFT_AREA_MULTIPLIER
 
         area_after_donation = jax.lax.optimization_barrier(
             (area - ridge_area_removed) - raft_area_removed
@@ -746,39 +762,21 @@ def apply_si3_jpl1_ridging(
         # at :779-793 returns in full through the last-category receiver at
         # :843-852,874-890.  Keep the written expressions (rather than simply
         # copying) so a future selector cannot silently reuse this arm.
-        ridge_ice_volume = jax.lax.optimization_barrier(
-            ice_volume * ridged_fraction
-        )
-        raft_ice_volume = jax.lax.optimization_barrier(
-            ice_volume * rafted_fraction
-        )
-        ice_volume_after_donation = jax.lax.optimization_barrier(
-            ice_volume * retained_fraction
-        )
+        ridge_ice_volume = jax.lax.optimization_barrier(ice_volume * ridged_fraction)
+        raft_ice_volume = jax.lax.optimization_barrier(ice_volume * rafted_fraction)
+        ice_volume_after_donation = jax.lax.optimization_barrier(ice_volume * retained_fraction)
         new_ice_volume = ice_volume_after_donation + jax.lax.optimization_barrier(
             ridge_ice_volume + raft_ice_volume
         )
-        ridge_age = jax.lax.optimization_barrier(
-            age * ridged_fraction * ridge_area_ratio
-        )
+        ridge_age = jax.lax.optimization_barrier(age * ridged_fraction * ridge_area_ratio)
         raft_age = jax.lax.optimization_barrier(
             age * rafted_fraction * _SI3_JPL1_RAFT_AREA_MULTIPLIER
         )
-        age_after_donation = jax.lax.optimization_barrier(
-            age * retained_fraction
-        )
-        new_age = age_after_donation + jax.lax.optimization_barrier(
-            ridge_age + raft_age
-        )
-        ridge_snow_volume = jax.lax.optimization_barrier(
-            snow_volume * ridged_fraction
-        )
-        raft_snow_volume = jax.lax.optimization_barrier(
-            snow_volume * rafted_fraction
-        )
-        snow_volume_after_donation = jax.lax.optimization_barrier(
-            snow_volume * retained_fraction
-        )
+        age_after_donation = jax.lax.optimization_barrier(age * retained_fraction)
+        new_age = age_after_donation + jax.lax.optimization_barrier(ridge_age + raft_age)
+        ridge_snow_volume = jax.lax.optimization_barrier(snow_volume * ridged_fraction)
+        raft_snow_volume = jax.lax.optimization_barrier(snow_volume * rafted_fraction)
+        snow_volume_after_donation = jax.lax.optimization_barrier(snow_volume * retained_fraction)
         new_snow_volume = snow_volume_after_donation + jax.lax.optimization_barrier(
             ridge_snow_volume * config.snow_ridge_retention
             + raft_snow_volume * config.snow_raft_retention
@@ -787,36 +785,22 @@ def apply_si3_jpl1_ridging(
             pond_area * ridged_fraction * ridge_area_ratio
         )
         raft_pond_area = jax.lax.optimization_barrier(
-            pond_area
-            * rafted_fraction
-            * _SI3_JPL1_RAFT_AREA_MULTIPLIER
+            pond_area * rafted_fraction * _SI3_JPL1_RAFT_AREA_MULTIPLIER
         )
-        pond_area_after_donation = jax.lax.optimization_barrier(
-            pond_area * retained_fraction
-        )
+        pond_area_after_donation = jax.lax.optimization_barrier(pond_area * retained_fraction)
         new_pond_area = pond_area_after_donation + jax.lax.optimization_barrier(
             ridge_pond_area * config.pond_ridge_retention
             + raft_pond_area * config.pond_raft_retention
         )
-        ridge_pond_volume = jax.lax.optimization_barrier(
-            pond_volume * ridged_fraction
-        )
-        raft_pond_volume = jax.lax.optimization_barrier(
-            pond_volume * rafted_fraction
-        )
-        pond_volume_after_donation = jax.lax.optimization_barrier(
-            pond_volume * retained_fraction
-        )
+        ridge_pond_volume = jax.lax.optimization_barrier(pond_volume * ridged_fraction)
+        raft_pond_volume = jax.lax.optimization_barrier(pond_volume * rafted_fraction)
+        pond_volume_after_donation = jax.lax.optimization_barrier(pond_volume * retained_fraction)
         new_pond_volume = pond_volume_after_donation + jax.lax.optimization_barrier(
             ridge_pond_volume * config.pond_ridge_retention
             + raft_pond_volume * config.pond_raft_retention
         )
-        ridge_lid_volume = jax.lax.optimization_barrier(
-            pond_lid_volume * ridged_fraction
-        )
-        raft_lid_volume = jax.lax.optimization_barrier(
-            pond_lid_volume * rafted_fraction
-        )
+        ridge_lid_volume = jax.lax.optimization_barrier(pond_lid_volume * ridged_fraction)
+        raft_lid_volume = jax.lax.optimization_barrier(pond_lid_volume * rafted_fraction)
         lid_volume_after_donation = jax.lax.optimization_barrier(
             pond_lid_volume * retained_fraction
         )
@@ -827,63 +811,39 @@ def apply_si3_jpl1_ridging(
         layer_fraction = retained_fraction[..., None]
         ridge_layer_fraction = ridged_fraction[..., None]
         raft_layer_fraction = rafted_fraction[..., None]
-        ridge_snow_enthalpy = jax.lax.optimization_barrier(
-            snow_enthalpy * ridge_layer_fraction
-        )
-        raft_snow_enthalpy = jax.lax.optimization_barrier(
-            snow_enthalpy * raft_layer_fraction
-        )
-        snow_enthalpy_after_donation = jax.lax.optimization_barrier(
-            snow_enthalpy * layer_fraction
-        )
+        ridge_snow_enthalpy = jax.lax.optimization_barrier(snow_enthalpy * ridge_layer_fraction)
+        raft_snow_enthalpy = jax.lax.optimization_barrier(snow_enthalpy * raft_layer_fraction)
+        snow_enthalpy_after_donation = jax.lax.optimization_barrier(snow_enthalpy * layer_fraction)
         new_snow_enthalpy = snow_enthalpy_after_donation + jax.lax.optimization_barrier(
             ridge_snow_enthalpy * config.snow_ridge_retention
             + raft_snow_enthalpy * config.snow_raft_retention
         )
-        ridge_ice_enthalpy = jax.lax.optimization_barrier(
-            ice_enthalpy * ridge_layer_fraction
-        )
-        raft_ice_enthalpy = jax.lax.optimization_barrier(
-            ice_enthalpy * raft_layer_fraction
-        )
-        ice_enthalpy_after_donation = jax.lax.optimization_barrier(
-            ice_enthalpy * layer_fraction
-        )
+        ridge_ice_enthalpy = jax.lax.optimization_barrier(ice_enthalpy * ridge_layer_fraction)
+        raft_ice_enthalpy = jax.lax.optimization_barrier(ice_enthalpy * raft_layer_fraction)
+        ice_enthalpy_after_donation = jax.lax.optimization_barrier(ice_enthalpy * layer_fraction)
         new_ice_enthalpy = ice_enthalpy_after_donation + jax.lax.optimization_barrier(
             ridge_ice_enthalpy + raft_ice_enthalpy
         )
-        ridge_salt = jax.lax.optimization_barrier(
-            salt_content * ridge_layer_fraction
-        )
-        raft_salt = jax.lax.optimization_barrier(
-            salt_content * raft_layer_fraction
-        )
-        salt_after_donation = jax.lax.optimization_barrier(
-            salt_content * layer_fraction
-        )
+        ridge_salt = jax.lax.optimization_barrier(salt_content * ridge_layer_fraction)
+        raft_salt = jax.lax.optimization_barrier(salt_content * raft_layer_fraction)
+        salt_after_donation = jax.lax.optimization_barrier(salt_content * layer_fraction)
         new_salt_content = salt_after_donation + jax.lax.optimization_barrier(
             ridge_salt + raft_salt
         )
 
-        lost_snow_fraction = (
-            ridged_fraction * (_SI3_JPL1_ONE - config.snow_ridge_retention)
-            + rafted_fraction * (_SI3_JPL1_ONE - config.snow_raft_retention)
-        )
-        lost_pond_fraction = (
-            ridged_fraction * (_SI3_JPL1_ONE - config.pond_ridge_retention)
-            + rafted_fraction * (_SI3_JPL1_ONE - config.pond_raft_retention)
-        )
-        snow_loss = snow_loss + jnp.where(
-            shift, snow_volume * lost_snow_fraction, _SI3_JPL1_ZERO
-        )
+        lost_snow_fraction = ridged_fraction * (
+            _SI3_JPL1_ONE - config.snow_ridge_retention
+        ) + rafted_fraction * (_SI3_JPL1_ONE - config.snow_raft_retention)
+        lost_pond_fraction = ridged_fraction * (
+            _SI3_JPL1_ONE - config.pond_ridge_retention
+        ) + rafted_fraction * (_SI3_JPL1_ONE - config.pond_raft_retention)
+        snow_loss = snow_loss + jnp.where(shift, snow_volume * lost_snow_fraction, _SI3_JPL1_ZERO)
         snow_enthalpy_loss = snow_enthalpy_loss + jnp.where(
             shift[..., None],
             snow_enthalpy * lost_snow_fraction[..., None],
             _SI3_JPL1_ZERO,
         )
-        pond_loss = pond_loss + jnp.where(
-            shift, pond_volume * lost_pond_fraction, _SI3_JPL1_ZERO
-        )
+        pond_loss = pond_loss + jnp.where(shift, pond_volume * lost_pond_fraction, _SI3_JPL1_ZERO)
         pond_lid_loss = pond_lid_loss + jnp.where(
             shift, pond_lid_volume * lost_pond_fraction, _SI3_JPL1_ZERO
         )
@@ -910,19 +870,13 @@ def apply_si3_jpl1_ridging(
         )
         work = shift & ~converged
         divergence = jnp.where(work, residual / dt, divergence)
-        closing = jnp.where(
-            work, jnp.maximum(_SI3_JPL1_ZERO, -divergence), closing
-        )
-        opening = jnp.where(
-            work, jnp.maximum(_SI3_JPL1_ZERO, divergence), opening
-        )
+        closing = jnp.where(work, jnp.maximum(_SI3_JPL1_ZERO, -divergence), closing)
+        opening = jnp.where(work, jnp.maximum(_SI3_JPL1_ZERO, divergence), opening)
 
     # icedyn_rdgrft.F90:900-903 calls ice_var_roundoff.  Open water is absent
     # from that call, and icevar.F90:871 clips lid volume only in the narrow
     # -epsi10 < v_il < 0 roundoff interval.  Preserve those exact exclusions.
-    lid_roundoff = (pond_lid_volume < _SI3_JPL1_ZERO) & (
-        pond_lid_volume > -_SI3_JPL1_EPSI10
-    )
+    lid_roundoff = (pond_lid_volume < _SI3_JPL1_ZERO) & (pond_lid_volume > -_SI3_JPL1_EPSI10)
     result = SI3JPL1RidgingState(
         ice_area=jnp.maximum(area, _SI3_JPL1_ZERO),
         open_water_area=open_water,
@@ -931,9 +885,7 @@ def apply_si3_jpl1_ridging(
         age_content=jnp.maximum(age, _SI3_JPL1_ZERO),
         pond_area=jnp.maximum(pond_area, _SI3_JPL1_ZERO),
         pond_volume=jnp.maximum(pond_volume, _SI3_JPL1_ZERO),
-        pond_lid_volume=jnp.where(
-            lid_roundoff, _SI3_JPL1_ZERO, pond_lid_volume
-        ),
+        pond_lid_volume=jnp.where(lid_roundoff, _SI3_JPL1_ZERO, pond_lid_volume),
         snow_enthalpy=jnp.maximum(snow_enthalpy, _SI3_JPL1_ZERO),
         ice_enthalpy=jnp.maximum(ice_enthalpy, _SI3_JPL1_ZERO),
         ice_salt_content=jnp.maximum(salt_content, _SI3_JPL1_ZERO),
@@ -944,5 +896,7 @@ def apply_si3_jpl1_ridging(
         pond_volume=pond_loss,
         pond_lid_volume=pond_lid_loss,
         iterations=iteration_count,
+        excessive_removal_clamp=excessive_removal_clamp,
+        open_water_correction=open_water_correction,
     )
     return result, losses

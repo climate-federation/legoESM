@@ -118,6 +118,20 @@ def test_si3_jpl1_divergence_without_shear_is_noop() -> None:
     assert int(losses.iterations[0]) == 0
 
 
+def test_si3_jpl1_reports_excessive_removal_and_open_water_branches() -> None:
+    state = _state(area=0.8, open_water=0.2)
+    # This closing demand removes more than the available category area, so
+    # icedyn_rdgrft.F90:600-612 must take its excessive-removal correction.
+    _, losses = apply_si3_jpl1_ridging(
+        state,
+        jnp.asarray([-100.0], dtype=jnp.float64),
+        jnp.asarray([100.0], dtype=jnp.float64),
+        30.0,
+    )
+    assert bool(losses.excessive_removal_clamp[0])
+    assert losses.open_water_correction.dtype == jnp.bool_
+
+
 def test_si3_jpl1_preserves_nemo_open_water_and_lid_roundoff_exclusions() -> None:
     # Open water is not passed to ice_var_roundoff; icevar.F90:871 clips only
     # lid values in -epsi10 < v_il < 0, leaving larger negatives diagnostic.
