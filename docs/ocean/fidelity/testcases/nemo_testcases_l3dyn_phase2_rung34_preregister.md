@@ -203,9 +203,17 @@ step is **`stress1_i`**, following the already measured stress-first boundary
 at completed step 2.  A different step or owner refutes the corresponding
 prediction; no owner is claimed until the gate measures it.
 
-Round-8 choice ledger at preregistration: **ASKED** -- scan the 720 oracle
-entries, bind the redistribution arm in the first source-significant regime,
-score the aligned completed step including moments, and classify the four
-zero oracle channels UNINFORMATIVE.  **UNASKED** -- no new physical threshold,
-forcing, scheme, state substitute, tolerance, default change, or shipped-NEMO
-edit; none is introduced here.
+Round-8 choice ledger at preregistration:
+
+| round | choice | disposition | basis |
+|---|---|---|---|
+| 7 | Copy and run the buildable override-excluded ICE_RHEO oracle; retain the stale-source control as UNBUILDABLE; add the in-module `jpl=1` SI3 ridge/raft arm and stop at first divergence | ASKED | Round-6/7 dispatch |
+| 7 | Repair, modernize, delete, or numerically substitute for either stale shipped override | UNASKED | Explicit shipped-tree/no-substitute rules |
+| 7 | Change existing ice defaults; enable landfast, thermodynamics, another rheology/ridging selector, GPU, MPI, or `jpl>1` | UNASKED | Explicit scope and CPU-only rules |
+| 8 | Scan all available oracle entries, select the first source-significant closing regime, and score its aligned completed step including restart-carried moments | ASKED | Round-8 finding 1 |
+| 8 | Treat the four identically-zero oracle age/pond state rows as UNINFORMATIVE | ASKED | Round-8 finding 1(c) |
+| 8 | Change `ato_i` to a Prather tracer if and only if the executed NEMO source does so | ASKED | Round-8 finding 2; source inspection is controlling |
+| 8 | Relabel the unperturbed rung-3.3 mechanism as PLAUSIBLE instead of running the optional one-ULP experiment | ASKED | Round-8 finding 3 expressly offered either choice |
+| 8 | Publish field-relative errors beside, but do not replace, the immutable max-one normalized gate metric | ASKED | Round-8 finding 4 |
+| 8 | Remove the two non-oracle final clamps, reject category-axis state, and evaluate `sishea` with NEMO's own formula | ASKED | Round-8 findings 5--7 |
+| 8 | Invent a new threshold, forcing, scheme, moment family, state substitute, tolerance, default change, or shipped-NEMO edit | UNASKED | No such expansion was authorized |

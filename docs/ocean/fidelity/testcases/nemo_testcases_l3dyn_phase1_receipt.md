@@ -631,7 +631,7 @@ files to this list; neither was modified or deleted:
 ## 12. Rung 3.4 ICE_RHEO oracle boundary (2026-09-03)
 
 Status: **ORACLE COMPLETE; COVERAGE VERIFIED; README PHENOMENOLOGY
-UNMEASURED**.  This is not a legoESM trajectory verdict.
+MEASURED-UNCLASSIFIED**.  This is not a legoESM trajectory verdict.
 
 The experiment was preregistered in
 `nemo_testcases_l3dyn_phase2_rung34_preregister.md` at commit `b49ede50860`
@@ -699,22 +699,31 @@ retention inputs remain `0.5`, while SI3's executed thermodynamics-off branch
 forces porosity to zero and all snow/pond retention factors to one at
 `icedyn_rdgrft.F90:1244-1247`.
 
-The README check is deliberately **UNMEASURED**, not passed: its only result
-claim is qualitative (`tests/ICE_RHEO/EXPREF/README:51-53`), and this non-XIOS
-run wrote only `ssv_m` in the final six-hour file, not the requested `sishea`
-field.  The gate refuses to synthesize shear from another field.  It does
-measure a nonzero final maximum ice speed of `0.3576987760534231 m s-1` and a
-maximum ice-volume change of `1.2818995636818311`; these establish a dynamic
-response but do not score the documented shear shape.  The longer paired
-EVP/EAP intersection-angle claim is OUT-OF-SCOPE.  SI3's native conservation
-check resolves off; zero printed violations are therefore WAIVED-INACTIVE,
-not called conservation confirmation.  Reported, unclassified endpoint drifts
-are `1.8631458995434149e-3` for concentration sum and
-`3.199507647832436e-14` for ice-volume sum.
+The non-XIOS run wrote only `ssv_m`, not `sishea`, in its final six-hour file.
+Round 8 therefore evaluates NEMO's own diagnostic directly from every one of
+the 720 registered entry-frame `u_ice`/`v_ice` arrays and `mesh_mask.nc`: the
+F-point shear is `icedyn_rhg_evp.F90:793-796`, T-point tension is `:802-806`,
+four-F-point weighting is `:810-813`, and `sishea` is
+`SQRT(zdt**2+zds**2)*zmsk` at `:815-816`, with `zmsk` from `:190-191`.
+**CONFIRMED measurement:** frame 720 has maximum
+`1.778565218457925e-4 s^-1`, p95 `6.658604946931389e-7 s^-1`, and p99
+`1.6653117537818702e-5 s^-1`.  The README claim remains
+**MEASURED-UNCLASSIFIED**, not passed, because it supplies no numeric sharpness
+threshold and this aEVP run supplies no EAP comparator.  The longer paired
+EVP/EAP intersection-angle claim is OUT-OF-SCOPE.  The nonzero final maximum
+ice speed remains `0.3576987760534231 m s-1`, and maximum ice-volume change is
+`1.2818995636818311`; neither is substituted for shear.  SI3's native
+conservation check resolves off; zero printed violations are WAIVED-INACTIVE.
+Reported, unclassified endpoint drifts are `1.8631458995434149e-3` for
+concentration sum and `3.199507647832436e-14` for ice-volume sum.
 
 Focused gate controls are **5 passed, 22 deselected**; the final combined
 CPU/fp64 ridging, card, and rung-3.4 oracle selection is **21 passed,
 15 deselected in 107.98 s**.  Ruff is clean on the gate and its tests.
+Round 8's expanded oracle-gate file is **28 passed in 11.76 s** and includes a
+binding velocity/mask shear plant plus fail-closed selective-frame reads.  The
+full round-8 gate exits nonzero by design because the README result is
+MEASURED-UNCLASSIFIED, not because coverage or geometry failed.
 
 | artifact | SHA-256 |
 |---|---|
@@ -734,8 +743,10 @@ CPU/fp64 ridging, card, and rung-3.4 oracle selection is **21 passed,
 | first / last entry frames | `1097a76b1ddff7fcb54ae6b77537e9d061f250de1257ca6e5ca946da355a75a6` / `2e957065bfa3d7b28f38679b6a3a31128c3c571aaa4c2c234bc2cb7ab2d845b5` |
 | ordered 720-frame SHA-256 aggregate | `3e347b438776c077a75c8c02ab3e43ac9158037d164ef48a2e5017dd152ddd27` |
 | coverage manifest | `2e004e1a662931f488f3a7669c98310f896ac63a551f178e97f64023497befa7` |
-| oracle gate JSON | `5e70bf27ef2bb1d570a1e32fc82e199d0dbb2f175a8d893d882331a2df347bd6` |
-| oracle gate source | `9833752c228e1726c43d7999bb97b7b9efdc444bc64493324a5781c18325452b` |
+| round-7 oracle gate JSON | `5e70bf27ef2bb1d570a1e32fc82e199d0dbb2f175a8d893d882331a2df347bd6` |
+| round-8 full oracle gate with `sishea` | `34ac7cabe31d7ea742409b3552c14ec101437880cea4090bf2f59c2953e358da` |
+| round-8 720-frame `sishea` measurement | `3c741bf041896d2c6be354ce54338a0b050e7f36a9949bae3a390a766d1acf87` |
+| final oracle gate source | `01f226c15d2a17efaa91d698112e022d860a534f188546d4a0fefde6fc073226` |
 | oracle gate tests | `9f8124f291bf369b7f89be9fabe01b12b52b725e3d55c852f0aa778a06924184` |
 | unaccounted-array plant stderr | `1700153282cd779d281edf0ca7365579fd72c3053621ae31c4f738566d413904` |
 | perturbed-geometry plant stderr | `868cbcbf82d4de702c4f7b8f9abaf65feff3e3604723627349880dae2c7fc258` |

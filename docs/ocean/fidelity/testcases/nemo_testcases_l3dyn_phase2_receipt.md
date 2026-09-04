@@ -19,6 +19,15 @@ Phase-2 commit ledger:
 * rung-3.3 C-grid aEVP implementation boundary: `54d0d5dad96c38b194ec56addd6dc051439a52e5`;
 * rung-3.3 trajectory/restart preregistration: `535e1b83c5e`;
 * rung-3.3 replay, full trajectory, and restart gate: `ba07bc7b202`.
+* round-8 active-regime preregistration and gates: `bafb805f09a`,
+  `d9bc45316c6`, and `eb8e25bb94e`;
+* executed-source `ato_i` correction: `98e26f63578`;
+* rung-3.3 mechanism relabel and dual error columns: `cc72d174fd4` and
+  `e50934521ba`;
+* exact SI3 clamp exclusions and category-axis guard: `af79634728e` and
+  `3489594617c`;
+* 720-frame SI3 shear replay and active-window hardening: `c5722694454`,
+  `d53bcb2ace1`, `72b17eba2d1`, and `5739462e852`.
 
 Oracle roots: `/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv1d/final`,
 `/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv2d/final`, and
@@ -769,9 +778,10 @@ CLI/derived-exit control is at lines 80--92.  Ruff is clean.
 
 ## Rung 3.4 implementation boundary: ICE_RHEO dynALL
 
-Status: **KT1-VERIFIED; DEBT-FIRST-DIVERGENCE at completed step 2**.  This is
-an honestly stopped first-divergence boundary, not a completed 720-step
-legoESM trajectory or restart claim.
+Status: **KT1-VERIFIED; DEBT-FIRST-DIVERGENCE at completed step 2; ACTIVE
+RIDGING PROGNOSTICS AT-BAR at completed step 8, with stresses and 60/160
+Prather moments DEBT**.  This is not a completed 720-step legoESM trajectory
+or restart claim.
 
 ### Round-8 `ato_i` review disposition
 
@@ -846,11 +856,89 @@ normalized and relative error `4.383271722679783e-15`, absolute error
 `5.856426454897701e-15`, oracle scale `1.3360856514086425`, at `(20,59)`.
 At that boundary `stress2_i=1.8943180357666733e-15` normalized and
 `stress12_i=1.27675647831893e-15`; velocities and every advected/redistributed
-field are still AT-BAR.  This first owner is the carried nonlinear C-grid aEVP
-stress trajectory.  Per the preregistered stopping rule, boundaries after kt=3,
+field are still AT-BAR.  **CONFIRMED:** this first owner is a carried stress row
+produced by the C-grid aEVP arm.  Its causal growth mechanism remains
+**UNMEASURED**; the word "nonlinear" names the executed equations, not a
+measured attribution.  Per the preregistered stopping rule, boundaries after kt=3,
 the candidate final step/restart, and all 160 candidate restart moments remain
 **UNMEASURED**; the existence of a completed NEMO restart does not measure a
 legoESM restart.
+
+### Round-8 active-redistribution measurement
+
+**CONFIRMED:** kt=1 exercised only a near-rest redistribution.  The committed
+scan uses SI3's own closing equations at `icedyn_rdgrft.F90:243-252` and its
+`epsi10=1e-10` redistribution cutoff at `:594-595,623-624`.  It selects the
+first completed step for which `max(closing_net * rDt_ice) > epsi10`.  The
+preregistered step-9 prediction is **REFUTED**: completed step 8 is first.
+
+| completed step | max `|delta_i|` (s^-1) | max `opning` (s^-1) | max `closing_net` (s^-1) | max redistributed-area demand |
+|---:|---:|---:|---:|---:|
+| 1 | `3.0061855342332605e-13` | `2.7113227985048475e-13` | `7.198999503613095e-14` | `2.1596998510839286e-12` |
+| 2 | `1.2352371163148635e-12` | `1.1023968777106495e-12` | `4.4283150994362443e-13` | `1.3284945298308732e-11` |
+| 3 | `2.768515840614345e-12` | `2.4787076188339375e-12` | `1.005965253149349e-12` | `3.017895759448047e-11` |
+| 4 | `4.95129308062187e-12` | `4.434634687243251e-12` | `1.2503461933351708e-12` | `3.751038580005512e-11` |
+| 5 | `7.648365214050838e-12` | `6.868841495203859e-12` | `1.4074162153614428e-12` | `4.222248646084329e-11` |
+| 6 | `1.1046486778854914e-11` | `9.919305591468476e-12` | `1.6447005069310737e-12` | `4.934101520793221e-11` |
+| 7 | `1.4799919508798402e-11` | `1.3320082382328334e-11` | `2.806337228778459e-12` | `8.419011686335376e-11` |
+| **8** | `1.9342643933785387e-11` | `1.7409121169648706e-11` | `5.026618518018429e-12` | **`1.5079855554055287e-10`** |
+| 9 | `2.4304903870948512e-11` | `2.1871114286978893e-11` | `8.29273242782463e-12` | `2.487819728347389e-10` |
+| 10 | `2.9719096219813545e-11` | `2.676083258881891e-11` | `1.4387189385894725e-11` | `4.3161568157684173e-10` |
+| 11 | `3.577153008668886e-11` | `3.326794358626695e-11` | `2.265510692352959e-11` | `6.796532077058877e-10` |
+| 12 | `5.563712280414257e-11` | `5.37152630871105e-11` | `2.652089574912816e-11` | `7.956268724738448e-10` |
+| 13 | `7.357397885514287e-11` | `7.066946512312491e-11` | `3.024124582300152e-11` | `9.072373746900456e-10` |
+
+The aligned CPU/fp64 replay starts from oracle entry frame 8 and NEMO's
+step-7 restart-carried moments, then scores entry frame 9 and the NEMO step-8
+restart.  The only NEMO changes are `nn_itend=8` and `nn_stock=1`; the physics
+namelist is byte-identical to the 720-step oracle.  The isolated ridge/raft arm
+changes `a_i` and `ato_i` by `3.43068906616395e-10`; 944,617 wet cells take one
+redistribution shift and 51,387 take two (3,996 take none).  **CONFIRMED:** the
+finite-amplitude completed-step rows for `a_i`, `v_i`, and `v_s` remain AT-BAR
+with maximum absolute errors `2.220446049250313e-16`,
+`4.440892098500626e-16`, and `2.7755575615628914e-17`.  Thus this window binds
+the active area/volume redistribution, including repeat shifting, but it does
+not exercise the 19-shift ceiling or certify the zero age/pond channels.
+
+The four oracle-zero state rows `oa_i`, `a_ip`, `v_ip`, and `v_il` are
+**UNINFORMATIVE**, never AT-BAR.  Of the other 206 rows, 143 are AT-BAR and 63
+are DEBT.  The preregistered first-over-bar prediction is **CONFIRMED**:
+`stress1_i` is first, at normalized and relative
+`3.69646870789917e-15` (`1.4210854715202004e-13` absolute).  All three stresses
+are DEBT.  Restart-carried moment scoring is complete: 100/160 rows are AT-BAR
+and 60/160 are DEBT; the largest is `sxxe_l01`, normalized
+`3.492459543785742e-9`, field-relative `2.095149123314519e-8`.  Ridging does
+not update Prather moments, so this moment result is a transport/state-carry
+debt, not evidence that the active redistribution row failed.  No causal
+mechanism for that debt is claimed.
+
+The removed final open-water and broad pond-lid clamps are numerically inactive
+on this measured window: open water stays positive (`0.009999990410122006`
+before, `0.00999999040071575` after) and pond-lid volume is exactly zero before
+and after.  This is **CONFIRMED zero trajectory movement**, not permission to
+retain non-oracle stabilizers.  The replacement follows SI3 literally:
+`ato_i` is absent from `ice_var_roundoff`, while only
+`-epsi10 < v_il < 0` is clipped (`icevar.F90:871`).  The selected arm now also
+raises on any state with a category axis; its five-category ORCA1 control is a
+passing test of the loud `jpl>1` boundary.
+
+The active scored-row plant adds `1e-10` to `v_s`, exits 1, and reports
+`9.999999439624929e-11` normalized plus `1.0101009284553422e-9`
+field-relative.  It therefore binds on a trajectory row independently of the
+pre-existing scientific debts.
+
+| round-8 artifact | SHA-256 |
+|---|---|
+| source-significant regime scan | `c5501e3e3c7bdd3b55f5b647994dfabcdb5cb00b88a7d3a46ddb1c1f9bdcf279` |
+| aligned active-window gate | `700325d0b149245b9ce81629e628b3dd7b7993dedc5df23a062ba5f205496551` |
+| aligned active-window scored-row plant | `6887bbb76be599aaa37af0f232caf0fd5d59fb2da93c0464c91d4ae65a5f3c1a` |
+| refreshed kt=1 dual-column gate | `c5baa6177de981add5c371e21d013a72bbe038d47f681bf318113a4601bf6872` |
+| 720-frame NEMO `sishea` evaluation | `3c741bf041896d2c6be354ce54338a0b050e7f36a9949bae3a390a766d1acf87` |
+| full oracle gate with `sishea` (expected nonzero MEASURED-UNCLASSIFIED exit) | `34ac7cabe31d7ea742409b3552c14ec101437880cea4090bf2f59c2953e358da` |
+| NEMO step-7 / step-8 moment restarts | `34ab003e6564008bc7ecacac5500689cbbbaa23d9259ba146a3e2e6bbcaaf9d1` / `6b826fd00e13133abd293e447e2a16e4d781f5f993709946d515a5aa0a4e59d8` |
+| direct eight-step NEMO stdout / stderr | `dc666b95a6cdfd9cc674b3935555d72642597d13ef87617a935836745ad26a58` / `ee867a804e8f26013c5190b38ea5e4be17ed1a5c5fcfcdf8932a9f8cfbb3f36c` |
+| SI3 ridging implementation | `4bc4aad794490ef696b18405691df4f84029b937078428edc4f238a30a066145` |
+| final oracle / kt=1 / trajectory gate sources | `01f226c15d2a17efaa91d698112e022d860a534f188546d4a0fefde6fc073226` / `07dcdeeed71390fa84720de3cf2dff93d74cd74284449743145ee51e7ea69baf` / `e58ea2d7c2f4a2ff0a30647913e644578da9aa1d33ab1bf5c9cd94685eec488e` |
 
 Focused verification is **9 passed** for card/geometry/wind/selector/kt=1 and
 ridging controls, **13 passed** for the rung-3.2 transport regression, and
@@ -873,25 +961,52 @@ The oracle dependency subsequently completed all 720 steps at
 `/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/final`; its exhaustive
 coverage status is VERIFIED and its ordered-frame aggregate is
 `3e347b438776c077a75c8c02ab3e43ac9158037d164ef48a2e5017dd152ddd27`.
-The oracle gate's top status remains **UNMEASURED** because the copied
-non-XIOS run did not emit the README's `sishea` field and the native SI3
-conservation check resolves off.  This does not change the independent
-legoESM kt=1 or first-divergence rows above.  The oracle gate JSON SHA-256 is
-`5e70bf27ef2bb1d570a1e32fc82e199d0dbb2f175a8d893d882331a2df347bd6`;
-the full inventory and build provenance are in phase-1 receipt section 12.
+The copied non-XIOS run did not emit `sishea`, but round 8 closes that chosen
+measurement gap by evaluating NEMO's own formula on every one of the 720
+entry-frame velocity fields and the oracle mesh.  The replay follows F-point
+shear `icedyn_rhg_evp.F90:793-796`, T-point tension `:802-806`, four-F-point
+weighting `:810-813`, and `sishea=sqrt(zdt**2+zds**2)*zmsk` at `:815-816`;
+`zmsk` comes from `at_i>=epsi10` at `:190-191`.  **CONFIRMED measurement:**
+the final frame has maximum `1.778565218457925e-4 s^-1`, p95
+`6.658604946931389e-7 s^-1`, and p99 `1.6653117537818702e-5 s^-1`.
+The README gives no numeric sharpness band and this run has no EAP comparator,
+so the phenomenology remains **MEASURED-UNCLASSIFIED**, not passed.  The native
+SI3 conservation check still resolves off and is WAIVED-INACTIVE.
 
 Two post-run harness gaps failed closed before that artifact was accepted and
 are disclosed here: the two committed rung-3.4 decks intentionally have
 different filename stems, and the endpoint velocity-response loader initially
 omitted `v_ice`.  The gate now carries explicit contracts for both.  The
-documented-shear path also has binding missing-field and present-field tests;
-it reports UNMEASURED when `sishea` is absent rather than deriving a substitute.
-The focused rung-3.4 oracle-gate tests are **5 passed, 22 deselected** and Ruff
-is clean.  The final combined CPU/fp64 ridging, full-size card, and selected
-rung-3.4 oracle-gate run is **21 passed, 15 deselected in 107.98 s**.  The
-inline-physics ratchet is **2 passed** on both touched production modules and
-the hardcoded-constant ratchet is **5 passed** on those modules plus all three
-touched rung-3.4 test files.
+documented-shear path now has a selective frame reader plus a binding velocity
+perturbation/mask test and fails loudly if neither output nor the registered
+reconstruction inputs exist.  It is a replay of the executed oracle source,
+not an analytic substitute for the README.  Final focused-test and ratchet
+results are recorded in the round-8 verification paragraph below.
+
+### Round-8 verification and ratchet disclosure
+
+The combined CPU/fp64 oracle/card/trajectory/ridging selection is **45 passed
+in 123.79 s**; the post-refactor oracle-gate rerun is **28 passed in 11.76 s**,
+and Ruff is clean.  The relevant controls are visible at
+`test_nemo_si3_oracle_gate.py:97-122` (selective-reader failure plus binding
+shear/mask plant), `test_nemo_si3_phase2_rung34_trajectory_gate.py:27-75`
+(closing, zero-row, 160-moment, and dual-normalization controls), and
+`test_si3_jpl1_ridging.py:121-168` (literal SI3 roundoff exclusions and the
+five-category rejection).  Production guard/roundoff code is at
+`ridging.py:574-593,920-939`; the classifier and both reported columns are at
+`nemo_si3_phase2_rung34_gate.py:83-124`.  ORCA1/diagnostic numeric values are
+module-level, source-annotated declarations at
+`nemo_si3_oracle_gate.py:57-90`, not inline coefficients.
+
+The exact touched-file ratchet selection is **6 passed in 0.94 s**.  Applying
+the same AST detectors directly to all three touched gate scripts and
+`ridging.py` reports `inline=[]` and `hardcoded=[]` for each.  The mandatory
+repo-wide invocation was also run and is honestly red: **3,752 passed, 2
+skipped, 7 failed**.  All seven failures are outside this lane's diff:
+inline-coefficient debt in `gm_redi_latlon_cgrid.py` and `tke.py`, plus
+hardcoded-constant debt in `fv3_native_physics_coupling.py` and four existing
+grid/ocean tests.  No receipt claims a green repository-wide ratchet, and no
+unrelated file was edited to conceal it.
 
 ## Loudly UNMEASURED / deferred
 
@@ -906,6 +1021,22 @@ landfast L16 (OFF here,
 this paragraph.
 
 ## End-of-task ASKED / UNASKED choice list
+
+The mandatory round-7/8 choice record is tabular so scope decisions cannot be
+lost inside narrative:
+
+| round | choice | disposition | evidence/disposition |
+|---|---|---|---|
+| 7 | Treat the shipped-control 21-error build failure as an upstream NEMO defect; use the override-excluded copy as the oracle | ASKED | Preserved UNBUILDABLE control; no source repair |
+| 7 | Run 720 oracle steps, add the in-module `jpl=1` SI3 ridge/raft arm, dynALL card, geometry/kt=1/first-divergence gates, and direct rung-3.3 gate tests | ASKED | Completed through the first-divergence stop |
+| 7 | Modify/delete shipped files; fabricate a stale-control trajectory; enable landfast, thermodynamics, alternate schemes, MPI/GPU, or push | UNASKED | None performed |
+| 8 | Find the first source-significant redistribution frame and score its completed step with aligned NEMO moments | ASKED | First significant completed step 8; 210 scored rows |
+| 8 | Mark the four oracle-zero age/pond state rows UNINFORMATIVE | ASKED | Four state rows, and only those four, carry that label |
+| 8 | Make `ato_i` a Prather tracer if supported by executed NEMO | ASKED | Premise REFUTED by `icedyn_adv_pra.F90:218-350,418-430`; no synthetic moments added |
+| 8 | Measure the rung-3.3 one-ULP sensitivity or relabel its mechanism | ASKED | Chose the authorized PLAUSIBLE label with precision-floor caveat |
+| 8 | Add relative diagnostics without replacing the normalized bar | ASKED | Both columns emitted; normalized max-one metric remains classificatory |
+| 8 | Remove non-oracle final clamps, reject category-axis input, and calculate `sishea` from NEMO's formula | ASKED | Implemented, tested, and measured |
+| 8 | Add thresholds, physical arms, moment families, default changes, or any shipped-NEMO edit beyond these choices | UNASKED | None performed |
 
 **ASKED choices:** resolve the rung-3.1 review HOLD in its own commit; implement
 rungs 3.1 and 3.2 against the pinned shipped cases; fp64/CPU only and `jpl=1`;
