@@ -479,15 +479,20 @@ def _normalized_ocean(path: Path) -> list[str]:
 
 def validate_identity(control: Path, instrumented: Path) -> dict:
     rows = []
+    restart_shards_exact = 0
+    history_payloads_exact = 0
     for name in GENERATED_EXACT:
         require((control/name).read_bytes() == (instrumented/name).read_bytes(),
                 f"identity mismatch: {name}")
         rows.append({"file": name, "status": "EXACT_BYTES", "sha256": sha256(control/name)})
+        if "_restart" in name:
+            restart_shards_exact += 1
     for name in HISTORY:
         _netcdf_equal_except_timestamp(control/name, instrumented/name)
         rows.append({"file": name, "status": "EXACT_NETCDF_EXCEPT_GLOBAL_TIMESTAMP",
                      "control_sha256": sha256(control/name),
                      "instrumented_sha256": sha256(instrumented/name)})
+        history_payloads_exact += 1
     require(_normalized_ocean(control/"ocean.output") == _normalized_ocean(instrumented/"ocean.output"),
             "ocean.output differs after removing WRITE-only dump notices")
     rows.append({"file": "ocean.output", "status": "EXACT_TEXT_EXCEPT_DUMP_NOTICES",
@@ -495,8 +500,9 @@ def validate_identity(control: Path, instrumented: Path) -> dict:
                  "instrumented_sha256": sha256(instrumented/"ocean.output")})
     rows.extend({"file": name, "status": "EXCLUDED_TIMING_OR_LAUNCH_PROVENANCE"}
                 for name in TIMING_EXCLUDED)
-    return {"status": "PASS", "rows": rows, "restart_shards_exact": 6,
-            "history_payloads_exact": 8,
+    return {"status": "PASS", "rows": rows,
+            "restart_shards_exact": restart_shards_exact,
+            "history_payloads_exact": history_payloads_exact,
             "restart_variable_inventory": _restart_inventory(instrumented)}
 
 
