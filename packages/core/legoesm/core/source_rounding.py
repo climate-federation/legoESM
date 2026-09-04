@@ -14,11 +14,10 @@ import jax.numpy as jnp
 def nemo_source_round(value: jax.Array) -> jax.Array:
     """Materialize one NEMO source operation before its next consumer.
 
-    ``optimization_barrier`` alone does not provide the required compiled
-    materialization.  The finite-classification ``select`` and ``copysign``
-    copy are the operative guard.  They form an IEEE identity, including
-    signed infinities and NaNs, and remain differentiable for finite physical
-    inputs.
+    XLA strips ``optimization_barrier`` from optimized HLO.  The surviving
+    ``isfinite``/``select``/``copysign`` chain is the operative contraction
+    guard.  It is an IEEE identity, including signed infinities and NaNs, and
+    remains differentiable for finite physical inputs.
     """
     value = jax.lax.optimization_barrier(value)
     return jnp.where(

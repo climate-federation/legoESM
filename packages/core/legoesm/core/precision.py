@@ -33,7 +33,6 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
-
 # Deferred import to break cycle: runtime/__init__.py imports
 # runtime.precision, which re-exports from this module — so
 # importing runtime.backend at module load time would mid-init
@@ -41,7 +40,6 @@ import jax.numpy as jnp
 # bodies, so a lazy import is safe.
 def _backend():
     from legoesm.runtime import backend as _b
-
     return _b
 
 
@@ -50,17 +48,10 @@ def _backend():
 # ---------------------------------------------------------------------------
 
 _PRECISION_NAME_TO_DTYPE = {
-    "float16": jnp.float16,
-    "fp16": jnp.float16,
-    "half": jnp.float16,
-    "bfloat16": jnp.bfloat16,
-    "bf16": jnp.bfloat16,
-    "float32": jnp.float32,
-    "fp32": jnp.float32,
-    "single": jnp.float32,
-    "float64": jnp.float64,
-    "fp64": jnp.float64,
-    "double": jnp.float64,
+    "float16": jnp.float16, "fp16": jnp.float16, "half": jnp.float16,
+    "bfloat16": jnp.bfloat16, "bf16": jnp.bfloat16,
+    "float32": jnp.float32, "fp32": jnp.float32, "single": jnp.float32,
+    "float64": jnp.float64, "fp64": jnp.float64, "double": jnp.float64,
 }
 
 
@@ -86,7 +77,6 @@ def parse_dtype(value, *, field_name: str, allow_none: bool = False):
 # Precision roles
 # ---------------------------------------------------------------------------
 
-
 class PrecisionPolicy(NamedTuple):
     """Global precision configuration.
 
@@ -106,7 +96,6 @@ class PrecisionPolicy(NamedTuple):
         ``"native"`` uses JAX/XLA math intrinsics. ``"libm"`` selects the
         CPU-only scalar system-libm callbacks used by NEMO certification.
     """
-
     storage: jnp.dtype = jnp.float32
     compute: jnp.dtype = jnp.float32
     accumulate: jnp.dtype = jnp.float32
@@ -181,7 +170,6 @@ _ACTIVE_POLICY: list[PrecisionPolicy] = [PrecisionPolicy.fp32()]
 # Policy management
 # ---------------------------------------------------------------------------
 
-
 def set_policy(policy: PrecisionPolicy) -> None:
     """Set the active global precision policy.
 
@@ -197,7 +185,8 @@ def set_policy(policy: PrecisionPolicy) -> None:
             f"{policy.transcendentals!r}"
         )
     _ACTIVE_POLICY[0] = policy
-    if jnp.float64 in (policy.storage, policy.compute, policy.accumulate, policy.control):
+    if jnp.float64 in (policy.storage, policy.compute,
+                        policy.accumulate, policy.control):
         if not jax.config.jax_enable_x64:
             jax.config.update("jax_enable_x64", True)
 
@@ -228,10 +217,7 @@ def validate_policy(policy: PrecisionPolicy | None = None) -> None:
             f"{policy.transcendentals!r}"
         )
     needs_x64 = jnp.float64 in (
-        policy.storage,
-        policy.compute,
-        policy.accumulate,
-        policy.control,
+        policy.storage, policy.compute, policy.accumulate, policy.control,
     )
     if not needs_x64:
         return
@@ -266,7 +252,9 @@ def set_module_override(module: str, **role_overrides: str) -> None:
     valid_roles = {"storage", "compute", "accumulate", "control"}
     for role in role_overrides:
         if role not in valid_roles:
-            raise ValueError(f"Unknown role {role!r}. Valid: {sorted(valid_roles)}")
+            raise ValueError(
+                f"Unknown role {role!r}. Valid: {sorted(valid_roles)}"
+            )
 
     if module not in _MODULE_OVERRIDES:
         _MODULE_OVERRIDES[module] = {}
@@ -276,8 +264,7 @@ def set_module_override(module: str, **role_overrides: str) -> None:
             _MODULE_OVERRIDES[module].pop(role, None)
         else:
             _MODULE_OVERRIDES[module][role] = parse_dtype(
-                value,
-                field_name=f"{module}.{role}",
+                value, field_name=f"{module}.{role}",
             )
 
 
@@ -327,8 +314,8 @@ def resolve_dtype(module: str | None, role: str) -> jnp.dtype:
 # Casting helpers — the main API for kernels
 # ---------------------------------------------------------------------------
 
-
-def cast(x: jax.Array, module: str | None, role: str, *, allow_downcast: bool = False) -> jax.Array:
+def cast(x: jax.Array, module: str | None, role: str, *,
+         allow_downcast: bool = False) -> jax.Array:
     """Cast array to the effective dtype for (module, role).
 
     This is the primary entry point for precision-aware kernels.
@@ -385,7 +372,8 @@ def const(value: float, module: str | None, role: str) -> jax.Array:
     return jnp.array(value, dtype=target)
 
 
-def cast_pytree(pytree, module: str | None, role: str, *, allow_downcast: bool = False):
+def cast_pytree(pytree, module: str | None, role: str, *,
+                allow_downcast: bool = False):
     """Cast all float arrays in a pytree to the effective dtype.
 
     Non-float leaves (int, bool) and non-array leaves are left unchanged.
@@ -413,7 +401,6 @@ def cast_pytree(pytree, module: str | None, role: str, *, allow_downcast: bool =
 # ---------------------------------------------------------------------------
 # Reduction wrappers — accumulation-precision aware
 # ---------------------------------------------------------------------------
-
 
 def global_sum(x: jax.Array, module: str | None = None) -> jax.Array:
     """Sum with accumulation precision.
@@ -451,7 +438,7 @@ def norm(x: jax.Array, module: str | None = None, ord: int = 2) -> jax.Array:
     if ord == 1:
         return jnp.sum(jnp.abs(x_acc))
     elif ord == 2:
-        return jnp.sqrt(jnp.sum(x_acc**2))
+        return jnp.sqrt(jnp.sum(x_acc ** 2))
     else:
         return jnp.max(jnp.abs(x_acc))
 
@@ -496,7 +483,8 @@ def compensated_sum(x: jax.Array, axis: int = 0) -> jax.Array:
         c = (t - s) - y
         return (t, c), None
 
-    init = (jnp.zeros(rest_shape, dtype=x.dtype), jnp.zeros(rest_shape, dtype=x.dtype))
+    init = (jnp.zeros(rest_shape, dtype=x.dtype),
+            jnp.zeros(rest_shape, dtype=x.dtype))
     (result, _), _ = jax.lax.scan(_step, init, x)
     return result
 
@@ -504,7 +492,6 @@ def compensated_sum(x: jax.Array, axis: int = 0) -> jax.Array:
 # ---------------------------------------------------------------------------
 # Precision-aware kernel decorators
 # ---------------------------------------------------------------------------
-
 
 def with_precision(module: str):
     """Decorator that casts inputs to compute dtype and output to storage dtype.
@@ -518,7 +505,6 @@ def with_precision(module: str):
         return T + dt * dT
         # Output is automatically cast to storage dtype
     """
-
     def decorator(fn):
         def wrapper(*args, **kwargs):
             # Cast all array args to compute dtype.
@@ -526,7 +512,9 @@ def with_precision(module: str):
             storage_dtype = resolve_dtype(module, "storage")
 
             def _to_compute(leaf):
-                if isinstance(leaf, jax.Array) and jnp.issubdtype(leaf.dtype, jnp.floating):
+                if isinstance(leaf, jax.Array) and jnp.issubdtype(
+                    leaf.dtype, jnp.floating
+                ):
                     return leaf.astype(compute_dtype)
                 return leaf
 
@@ -537,7 +525,9 @@ def with_precision(module: str):
 
             # Cast output back to storage dtype.
             def _to_storage(leaf):
-                if isinstance(leaf, jax.Array) and jnp.issubdtype(leaf.dtype, jnp.floating):
+                if isinstance(leaf, jax.Array) and jnp.issubdtype(
+                    leaf.dtype, jnp.floating
+                ):
                     return leaf.astype(storage_dtype)
                 return leaf
 
@@ -546,7 +536,6 @@ def with_precision(module: str):
         wrapper.__name__ = fn.__name__
         wrapper.__doc__ = fn.__doc__
         return wrapper
-
     return decorator
 
 
@@ -581,10 +570,8 @@ _OCEAN_OVERRIDES = {
 _ATMOSPHERE_OVERRIDES = {
     # Spectral transforms: require fp64 (complex128 FFTs)
     "spectral_transform": {
-        "storage": jnp.float64,
-        "compute": jnp.float64,
-        "accumulate": jnp.float64,
-        "control": jnp.float64,
+        "storage": jnp.float64, "compute": jnp.float64,
+        "accumulate": jnp.float64, "control": jnp.float64,
     },
     # Pressure gradient: hydrostatic balance subtraction
     "atm_pressure_gradient": {"compute": jnp.float64},

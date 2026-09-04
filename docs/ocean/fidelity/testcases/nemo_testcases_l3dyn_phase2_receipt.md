@@ -1304,6 +1304,32 @@ already listed above.  Ruff passes every Round-10 path with the repository's
 legacy Fortran-name and exact-import ordering exceptions (`N803`, `N806`,
 `I001`).
 
+### Round-11 shared-core convergence
+
+The shared precision files and their direct tests are now the canonical blobs
+from GYRE commit `c83f73c23ff82cd7148a68bee020ec3568e5d1d8`, fetched from
+`origin/fidelity/nemo-testcases-l2-gyre-codex2`.  Before checkout, a
+whitespace-insensitive diff against the Round-10 tree classified
+`precision.py` as formatting-only and `source_rounding.py` as docstring-only.
+The canonical `transcendentals.py` is a functional superset: it adds the
+reviewed scalar-libm `sin`/`cos` paths and their custom JVPs to this lane's
+existing `exp`/`tanh` paths.  No SI3-local functional behavior was absent from
+the canonical files, so there is **no request back to the GYRE lane** and no
+local reapplication.
+
+The canonical file SHA-256 values are `c2eab4ae531621dce8f15ab5e8c80ff7989831feb1471ae69dbdea8a7964272a`
+(`precision.py`), `c5364ed24c14a2217e25426a485a6e498c593cabfa8c89b4a7e43cbf81a8cc12`
+(`transcendentals.py`), and
+`74c5cc38e212438bad89bef2b23856550a0f105291f430e0e058c05a53b98b17`
+(`source_rounding.py`).  Their direct CPU/fp64 suite is **80 passed**.  The
+post-swap production-JIT aEVP exact-input replay is unchanged: each of
+`u_ice`, `v_ice`, `stress1_i`, `stress2_i`, and `stress12_i` remains
+`0 / 9801` non-bit-exact cells after 100 subcycles.  The replay artifact is
+`round11_core_swap_replay.json`, SHA-256
+`63923aa77f09cb00a68509168bfa773d208415b3f7956263b073fdc9e8f70bea`.
+This **CONFIRMS** that converging the core blobs changes no aEVP output bit for
+exact oracle inputs.
+
 ## Loudly UNMEASURED / deferred
 
 Within-step x/y Prather split states; ORCA1
