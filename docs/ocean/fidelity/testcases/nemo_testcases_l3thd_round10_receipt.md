@@ -9,9 +9,9 @@ Recovery git: `/tmp/codex-si3thd-localgit`
 
 The 16,494 Round-9 ordinary-arithmetic non-bit rows were **CONFIRMED source
 association debt and FIXED**.  The accepted Python 3.13.0, JAX/jaxlib 0.10.0,
-NumPy 2.4.4 CPU/fp64 run now has 227,742/227,760 bit-identical rows and exactly
+NumPy 2.4.4 CPU/fp64 run now has 271,542/271,560 bit-identical rows and exactly
 18 non-bit rows: six each in `POST_BLK_ICE_2.albedo`, `qsr_ice`, and `qsr_tot`.
-All 227,760 rows remain at the pointwise `1e-15` normalized bar.  The residual
+All 271,560 rows remain at the pointwise `1e-15` normalized bar.  The residual
 18 are owned by JAX `exp` in `icealb.F90:167-169` and remain
 **AWAITING_LIBM_POLICY**; this lane did not create a math policy.
 
@@ -44,12 +44,22 @@ changes only that boundary and restores every baseline count.
 | `blk_ice_1` `vtau_ice` | `sbcblk.F90:1145-1147` | `core/bulk_flux.py:1571-1579` | 2,797 | 0 |
 | Goff ice saturation/derivative | `sbc_phy.F90:665-711,727-790` | `thermo.py:373-418` | 0 | 0 |
 | no-pond `ice_alb` | `icealb.F90:124-185` | `ice/sea_ice.py:498-607` | 6 `exp` rows per affected output | unchanged; 18 total `exp` rows |
-| `blk_ice_2` heat/moisture | `sbcblk.F90:1231-1273` | `ice/sea_ice.py:651-695` | 0 | 0 |
+| `blk_ice_2` heat/moisture | `sbcblk.F90:1231-1273` | `ice/sea_ice.py:610-695,804-830` | 0 | 0 |
 | `evap_ice` | `sbcblk.F90:1279,1288` | `ice/sea_ice.py:697-703` | 3,879 | 0 |
 | `devap_ice` | `sbcblk.F90:1279,1289` | `ice/sea_ice.py:697-703` | 3,852 | 0 |
-| `emp_ice` | `sbcblk.F90:1298` | `ice/sea_ice.py:707-729` | 1,900 | 0 |
-| `emp_tot` | `sbcblk.F90:1299` | `ice/sea_ice.py:729-731` | 1,232 | 0 |
-| `ice_flx_other` basal `fhld` | `icesbc.F90:358-366,391-405` | `ice/sea_ice.py:835-970` | 13 | 0 |
+| `emp_ice` | `sbcblk.F90:1298` | `ice/sea_ice.py:707-738` | 1,900 | 0 |
+| `emp_tot` | `sbcblk.F90:1299` | `ice/sea_ice.py:723-738` | 1,232 | 0 |
+| `ice_flx_other` friction/basal `fhld` | `icesbc.F90:328-340,358-366,391-405` | `ice/sea_ice.py:833-977` | 13 (`fhld`) | 0 |
+
+A codex-internal source review found that the first receipt/gate census stopped
+at Stage-1 field 44.  The corrected census also scores fields 45--49
+(`qsat_ice`, `theta_ice`, `qlw_ice`, `qsb_ice`, `dqlw_ice`) on all 8,760 steps:
+43,800 additional comparisons, all bit-identical.  The same review found that
+the friction diagnostic had the wrong association and omitted its mask; a
+non-vacuous `mask=0.25` replay now checks the literal
+`zdrag * (0.5 * (u-square + v-square)) * tmask` association from
+`icesbc.F90:328-340` bit-for-bit.  Friction is not an exchange-frame output, so
+this is a source-identity probe rather than an added oracle comparison row.
 
 The output/assembly statements also retain the NEMO multiply-by-reciprocal
 form where NEMO uses `r1_rdtice`; the dumped `inverse_dt` operand is consumed
@@ -116,19 +126,16 @@ normalized gate and receive `WITHHELD_RUNTIME`; only
 
 The final external gate artifact is
 `/data/abyssal/dbalwada/nemo-testcases-l3/round10_si3_bulk/bulk_round10_final_gate.json`,
-SHA-256 `51a1f8eabfba3a15ddec160c64b578dbc2336819ae4a26740f917e5465974264`.
-All eleven plants exit nonzero: `blk_ice_1`, `ice_alb`, `blk_ice_2`,
+SHA-256 `a05b4b90b0b2346995430183cf5162319d94b72fe53346d551b445235f03d4d4`.
+All twelve plants exit nonzero: `blk_ice_1`, `ice_alb`, `blk_ice_2`,
 `ice_flx_other`, stream hash, coverage, selector, bit-owner registry, explicit
-runtime claim, source rounding, and folded constant.
+runtime claim, source rounding, folded constant, and friction association.
 
-- Bulk gate tests: `13 passed in 20.66s`.
-- Bulk plus parameter-spec tests before runtime-policy edit: `82 passed in
-  21.62s`.
-- Constants ratchet on every touched Python implementation/config/card file:
-  `5 passed, 1 skipped in 0.65s` (the skip is `constants.py`, which the ratchet
-  intentionally does not scan).
-- Final combined bulk/year/parameter-spec/touched-file-ratchet run: `105
-  passed, 1 skipped in 64.50s`.
+- Final bulk gate tests: `13 passed in 23.24s`.
+- Historical external-artifact/year-gate tests: `17 passed in 41.91s`.
+- Final combined bulk/year/parameter-spec run: `100 passed in 67.33s`.
+- `tests/test_no_hardcoded_constants.py` selected for every touched bulk/ice
+  implementation, gate, and test file: `19 passed, 3372 deselected in 1.02s`.
 - Repository-wide constants ratchet: `3384 passed, 2 skipped, 5 failed`; all
   five failures are untouched pre-existing FV3/grid/DINO sites.  No touched
   file failed.
@@ -141,13 +148,45 @@ before removal from git.  Its SHA-256 remains
 `91956787dcabc1080e352b0a2920c13f33a0c8794dabb9cba3261d9e2f85e5e1`;
 the external-artifact test rechecks the hash.  No data artifact was deleted.
 
+Six earlier multi-megabyte year-gate artifacts were also copied byte-for-byte
+to
+`/data/abyssal/dbalwada/nemo-testcases-l3/historical_si3_year_gate_artifacts/`
+and removed from git.  Their retained hashes are:
+
+| artifact | SHA-256 |
+|---|---|
+| phase 2b year | `6c21d14f3c85d0fa99be7e31770a4a4dcad548d98f857ea78455bd6344622160` |
+| phase 3 baseline operator | `d642f532ed92910b49f29919dd5e4ae3fe84381ecd1536b7886a2c1f4b36f95f` |
+| phase 3 year | `77c78a816b254484afe06632d77378336ddac1153ef9190d17c555f41c45a6e1` |
+| phase 4 year | `f81fe9312fb9ade51ae87a8d73970c5281a7ed036d5f7bcaa5c39644ec75c925` |
+| phase 5 year | `d5cd3dc274687b56370075ea51b9df82cc01bf912727e25f2078b6c26fe95cc7` |
+| phase 6 year | `9571996d72875a3c312fb5b84170d5383bedc7d41fff8ebd9a75f38d3b2a0f9f` |
+
+Historical tests and the year-gate tool bind those external paths to the same
+hashes.  Only summary tables and hashes remain in the repository.
+
 Commits through the five requested fixes are:
 
 - `ea5117d1537` source-statement association;
 - `31d33ce4fca` folded constants;
 - `f0cb842eea4` config separation and ULP metrics;
 - `a27eb13955c` runtime-output removal from git; and
-- `892cbed5015` conditional runtime bit claims.
+- `892cbed5015` conditional runtime bit claims;
+- `9e2f4df878f` corrected Stage-1 census and friction association;
+- `56be30820f9` externalized six historical year artifacts; and
+- `2b7d0b108ba` withheld the friction probe's bit verdict off the registered
+  runtime.
+
+## Codex-internal review record
+
+Two codex-internal reviews of `6e30ff8d993` returned **HOLD**, not SHIP.  A
+source-fidelity re-review and a config/hygiene re-review of `56be30820f9` again
+returned **HOLD** on the remaining unconditional friction-probe bit label.
+Commit `2b7d0b108ba` fixes that last shared finding.  The review artifacts name
+the reviewer identity, exact commit reviewed, verdict, and unverified work;
+the final re-review artifacts are the only basis for any final review verdict
+stated for this round.  These are codex-internal reviews, not independent
+external Claude/Opus reviews.
 
 ## Decisions
 
