@@ -1,15 +1,21 @@
-# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–11 boundary receipt
+# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–12 boundary receipt
 
-**Verdict: STOP / DEBT at the round-11 stage-2 boundary.  Independent review
-shipped round 10 and adjudicated its D gate as an open user decision: the gate
-measures movement from an older legoESM output even though the new result is
-closer to NEMO.  Round 11 leaves that gate and EOS untouched.  The new exact
-pre-update record proves the RK3 update and mean replacement are not owners;
-the first effective-scale departure is the shared EOS `rhd` operand feeding
-HPG.  Because EOS changes are forbidden this round, stage 2 does not clear and
-the stage-3 transport/ZDF walks are not entered.**
+**Verdict: STOP / DEBT at the round-12 stage-2 boundary.  Independent review
+shipped round 11.  The pending D gate remains an open user decision and its
+criterion is unchanged.  Round 12 makes NEMO's literal EOS source-operation
+association exact for oracle inputs and improves the live stage-2 Kaa residual
+about 23×, but the propagated stage state still leaves a two-cell `prd`
+departure and corrected Kaa remains `2.00e-14`, above the immutable `1e-15`
+bar.  The GYRE kt=2 SSH row also crosses from AT-BAR to DEBT.  Therefore the
+stage-3 transport and ZDF walks are not entered.**
 
 Date: 2026-09-04
+
+Round-12 implementation commit: `afd6a2082047bbafcddf9ede4acf1ae44d0ec028`
+
+Round-12 preregistration commit: `9ff84260941160940954660c0ae5d347e34506c3`
+
+Round-12 starting tip: `bef8033900877e1e1eefb704a69bc05080c21064`
 
 Round-11 implementation commit: `f446d1820`
 
@@ -20,6 +26,53 @@ Round-10 implementation commit: `7a38ef6e4efd7bd94b1743cae1525c59802f7511`
 Original reconciled tip: `57429ecf5f377ce2bf220f36bc05313cd29e0dfd`
 
 Session: `01a05cb9-7625-7f40-9e83-b3fa767b1945`
+
+## Round-12 preregistration and EOS operand walk
+
+The committed preregistration ranked live QCO depth association first,
+salinity normalization second, constants third, EOS selection fourth, and
+compiled association fifth.  The config-local WRITE-only record was accepted
+only after tracing the executed overload: `stprk3_stg.F90:321-324` calls the
+four-argument `eos(ts,Kmm,rhd,rhop)`, which resolves to
+`eos_insitu_pot_New_t`.  The first attempted record had instrumented the
+three-argument overload and was rejected because its `prd` did not equal the
+HPG `rhd`; it is not science evidence.  The corrected record's `prd` equals
+the stage-2 HPG input bit-for-bit, and ordinary stage/restart outputs remain
+bit-identical.
+
+NEMO evaluates `zh`, `zt`, `zs`, `ztm`, `zn3`, `zn2`, `zn1`, `zn0`, `zn`,
+and `prd` in that written order at `eosbn2.F90:260-288`.  The normalizers are
+set at `:1926-1929`, the TEOS-10 coefficients begin at `:1931`, `rho0` is
+`1026._wp` at `:1898`, and `r1_rho0=1._wp/rho0` at `:2331-2334`.  The
+resolved deck selects `ln_TEOS10=.true.` and the other EOS flags false
+(`round12_oracle_eos_v2/namelist_cfg:124-129`), which `eos_init` maps to
+`np_teos10` at `eosbn2.F90:1911-1924`.  Under QCO, `domqco.F90:159-161`
+first forms `r3t=ssh*r1_ht_0`; `domzgr_substitute.h90:50,56,75,139` expands
+the used depth as `gdept_0*(1+r3t)`.
+
+| source-ordered discriminator (oracle inputs, fp64 production JIT) | before | after | disposition |
+|---|---:|---:|---|
+| `pts(T)`, `pts(S)`, `pdep`, `zh`, `zt`, `zs`, `ztm` | all bit-exact | all bit-exact | preregistered depth/salinity candidates REFUTED |
+| first departure: `zn0` | `9.094947017729282e-13`, 4 ulp, 12914 cells | `0`, 0 ulp | source-operation association owner CONFIRMED |
+| `zn` | `9.094947017729282e-13`, 4 ulp | `0`, 0 ulp | cleared |
+| `prd` | `9.378348791999613e-16`, 18000 cells | `0`, 0 ulp | cleared for identical oracle operands |
+| pure NumPy literal transcription | `0` through `prd` | `0` through `prd` | confirms source statements/constants, isolates compiled association |
+
+All 52 coefficients and the six scalar constants were bit-identical.  JIT and
+eager already agreed for the same shared callable, so this was not the
+round-10 route split.  NEMO's compiler flags include `-fdefault-real-8 -O3`
+and `-funroll-all-loops`, but no `-ffast-math`, `-march`, or `-mfma`; the
+Fortran source association is therefore the executable target.  The one
+shared EOS now places a finite, differentiable IEEE identity after each
+source-level operation as well as the existing optimization barrier.  That
+prevents CPU LLVM from contracting or reassociating adjacent operations;
+there is no card guard, GYRE arm, callback, or second EOS implementation.
+
+The diagnostic's planted wet-cell mutation exits `1`.  The strengthened
+parity test checks every EOS intermediate; restoring the pre-fix barrier-only
+helper makes it fail, while the fixed suite passes.  The accepted operand
+record is fp64, stage 2, `kt=1` (the state producing whole-step `kt=2`), with
+`Knn=Kmm=3`, `Krhs=2`, and `neos=-1` (TEOS-10).
 
 ## Round-10 preregistration (before diagnosis)
 
@@ -143,9 +196,9 @@ source- and runtime-backed.  NEMO's first SSH increment selects the
 Thus the masked numerator is faithful even though `usrdef_sbc.F90:122-140`
 passes an unmasked array expression to `glob_2Dsum`.
 
-### Stage-2 momentum does not close under production JIT
+### Stage-2 momentum improves but does not close under production JIT
 
-The round-8 eager values remain withdrawn.  Round 11 records the actual
+The round-8 eager values remain withdrawn.  Round 11 recorded the actual
 stage-2 accumulator before the update: `Krhs == Kaa == 2`, so the older
 post-update operand stream had aliased and overwritten the quantity it called
 `Krhs`.  The new config-local `MY_SRC/stprk3_stg.F90:404-416` stream is emitted
@@ -170,50 +223,53 @@ GYRE's resolved `ln_dynadv_vec=.true.` selects the direct velocity update
 for this configuration.  Reference-depth mean replacement then computes and
 adds `zub/zvb` at `:433-446`.
 
-| production-JIT fp64 boundary/arm | u max | v max | scaling-first disposition |
-|---|---:|---:|---|
-| complete pre-update `Krhs` | `1.0739067765248428e-16` | `1.2178020157343528e-16` | AT-BAR as tendency, but above effective `1e-15/7200` bar |
-| raw `Kaa`, before mean replacement | `7.732128807125434e-13` | `8.768174513816736e-13` | DEBT; respectively `1.0000000021` and `1.0000000001` times `rDt*|δKrhs|` |
-| corrected `Kaa` | `4.674608410863007e-13` | `5.187571089381761e-13` | DEBT |
-| exact-oracle `Krhs` → raw `Kaa` | `0` | `0` | bit-identical; update formula CONFIRMED |
-| exact-oracle `Krhs` → corrected `Kaa` | `3.469446951953614e-18` | `4.4994390158148434e-18` | AT-BAR; mean replacement CONFIRMED |
-| NEMO-order/barrier accumulation arm → raw `Kaa` | `7.732128807125434e-13` | `8.768174513816736e-13` | zero move; REFUTED as owner |
-| dead QCO/e3 update arm → corrected `Kaa` | `4.674557317835629e-13` | `5.182320501548321e-13` | max move `5.25e-16`; NEAR-NULL, no discriminating power |
-| live-thickness mean arm → corrected `Kaa` | `4.674608410863007e-13` | `5.187571089381761e-13` | zero move; REFUTED as owner |
+Round 12 changes only the shared EOS association.  The same production-JIT
+composition instruments give:
 
-The exact-RHS arm moves corrected Kaa by `4.674573716393488e-13` u and
-`5.187526094991603e-13` v—one residual each—before the owner label.  It proves
-the complete entering RHS is causal, while the zero-move association arm
-refutes the preregistered composition-order prediction.
+| production-JIT fp64 boundary | u max | v max | round-11 baseline | scaling-first disposition |
+|---|---:|---:|---|---|
+| complete pre-update `Krhs` | `3.460773136050383e-18` | `3.3977899498493705e-18` | `1.0739067765248428e-16` / `1.2178020157343528e-16` | improved 31×/36×, but DEBT against effective `1e-15/7200` bar |
+| raw `Kaa`, before mean replacement | `2.4917568008930857e-14` | `2.4464073345234483e-14` | `7.732128807125434e-13` / `8.768174513816736e-13` | improved 31×/36×; DEBT |
+| corrected `Kaa` | `2.0033670902752654e-14` | `2.0003665607629117e-14` | `4.674608410863007e-13` / `5.187571089381761e-13` | improved 23×/26×; DEBT |
+
+The round-11 one-variable composition arms remain valid controls: exact
+oracle `Krhs` made raw Kaa bit-identical and corrected Kaa AT-BAR; NEMO-order
+RHS accumulation and live-thickness mean replacement were zero-move, and the
+dead QCO/e3 update was NEAR-NULL.  Round 12 therefore does not relabel those
+operations as owners.  It removes almost exactly the entering-RHS scale, but
+the remaining `rDt*|δKrhs|` still predicts the raw-Kaa debt.
 
 The follow-on WRITE-only `MY_SRC/dynhpg.F90:343-419` record separates the
 cumulative `zhpi`, local terrain correction `zuap`, stored sum, and metric
 reciprocals.  `dynhpg.F90:340-390` is the cited production recurrence.  The
 effective tendency bar is `1.388888888888889e-19`:
 
-| HPG operand/term | u max | v max | disposition |
-|---|---:|---:|---|
-| `r1_e1u/r1_e2v` | `0` | `0` | bit-identical |
-| production `rhd` input | `9.378348791999613e-16` | same 3-D operand | first upstream departure; AT-BAR only under the unscaled tendency bar |
-| production `e3w` input | `0` | same | bit-identical |
-| production `gdept_z0` input | `5.684341886080802e-14` absolute, `1.3696280475343366e-17` normalized | same | below its normalized bar; not the residual-scale owner |
-| `zhpi` from production operands | `1.0750480746694731e-16` | `1.2202333356727058e-16` | DEBT at effective bar |
-| `zuap` from production operands | `2.550418053222173e-21` | `2.550594455142355e-21` | AT effective bar |
-| full HPG from exact oracle operands | `2.3959792121371355e-20` | `2.3959792929164922e-20` | AT effective bar |
+| HPG operand/term | u max | v max | round-11 baseline | disposition |
+|---|---:|---:|---|---|
+| `r1_e1u/r1_e2v` | `0` | `0` | `0` | bit-identical |
+| production `rhd` input | `2.220446049250313e-16` | same 3-D operand | `9.378348791999613e-16` | two cells remain after propagating the changed stage |
+| production `e3w` input | `0` | same | `0` | bit-identical |
+| production `gdept_z0` input | `4.547473508864641e-13` absolute, `1.0957024380274693e-16` normalized | same | `5.684341886080802e-14` absolute | AT normalized bar; not residual-scale ownership evidence |
+| `zhpi` from production operands | `3.3286426446217166e-18` | `3.3322417282676192e-18` | `1.0750480746694731e-16` / `1.2202333356727058e-16` | improved 32×/37×; DEBT at effective bar |
+| `zuap` from production operands | `7.18162964712906e-20` | `7.18162965722648e-20` | `2.550418053222173e-21` / `2.550594455142355e-21` | AT effective bar despite moving away |
+| full HPG from exact oracle operands | `2.3959792121371355e-20` | `2.3959792929164922e-20` | same | AT effective bar |
 
-This is **CONFIRMED_UPSTREAM_OPERAND_OWNER**: exact oracle operands make the
-shared HPG literal arithmetic sufficiently accurate, while production `rhd`
-already differs and the error accumulates in `zhpi`.  `rhd` is the shared EOS
-output.  Round 11 was explicitly forbidden to alter EOS, the compare-to gate,
-or add card guards; therefore no numerical fix is made and stage 2 honestly
-remains DEBT.  Both the composition and literal-HPG planted controls inject
-`1.0` at a wet point and exit `1`.
+The isolated EOS evaluator fed the oracle's recorded T/S/depth and reproduces
+every intermediate and `prd` bit-for-bit.  After that shared fix is propagated
+through the live RK3 step, however, stage-entry T and S differ from NEMO in
+nine wet cells by one ulp; the derived live `prd` differs in two cells by
+`2.220446049250313e-16`.  HPG integrates that to the remaining
+`3.33e-18` tendency and corrected Kaa remains DEBT.  The EOS source-association
+owner is **CONFIRMED_FIXED_FOR_IDENTICAL_OPERANDS**; the next upstream owner of
+the propagated tracer input is **UNMEASURED**.  It would violate the ordered
+gate to claim EOS itself fully closed or proceed downstream.  Both inherited
+composition/HPG plants and the new EOS plant exit nonzero.
 
 ### Stage-3 transport and WZV
 
-Round 11 does **not** remeasure this boundary because the ordered stage-2 gate
+Round 12 does **not** remeasure this boundary because the ordered stage-2 gate
 above remains DEBT.  The values below are retained round-10 production-JIT
-context, not promoted round-11 evidence.  Stage-3 `zFu/zFv/zFw/zub/zvb`
+context, not promoted round-12 evidence.  Stage-3 `zFu/zFv/zFw/zub/zvb`
 instrumentation and the e3u/e3v(Kmm) walk remain the next gated boundary.
 
 NEMO forms `zFu/zFv` from the retained Kmm stage velocity and barotropic mean
@@ -257,7 +313,7 @@ not assigned a sole-owner label.
 
 ### First unmeasured boundary: implicit ZDF
 
-Round 11 does not enter this matrix walk: its prerequisite stage-2 and
+Round 12 does not enter this matrix walk: its prerequisite stage-2 and
 stage-3-transport boundaries have not cleared.
 
 The eager-only claim that the explicit stage-3 accumulator cleared is
@@ -265,62 +321,76 @@ withdrawn.  Its production-JIT rerun is DEBT before ZDF: T
 `7.325244772979124e-14`, S `5.786348021897527e-15`.  Injecting the oracle
 pre-ZDF tracer does not move the compiled final state, so the honest label is
 **PRE_ZDF_ACCUMULATOR_DEBT_NO_ZDF_OWNER**.  The JIT whole-step kt=2 tracer rows
-are T `1.3608682491316726e-12` and S `2.2181101297999213e-14`.
+are T `1.3614736849003888e-12` and S `2.2181101297999213e-14`.
 `tra_zdf`/`dyn_zdf` internals remain **UNMEASURED** and this round does not
 start their matrix walk.
 
 ## Re-pinned kt=1 and kt=2…10 sweep
 
-Round 11 reruns this entire sweep from `f446d1820` under production JIT on CPU;
-the artifact is byte-identical to round 10 at SHA-256 `17b1d103…`.  At kt=1
-T/S are bit-exact.  At-rest u/v/SSH are still **UNINFORMATIVE** because
+Round 12 reruns the entire sweep from `afd6a2082` under production JIT on CPU.
+At kt=1 T/S are bit-exact.  At-rest u/v/SSH are still **UNINFORMATIVE** because
 their oracle and candidate values are identically zero.  The first whole-step
-DEBT remains kt=2:
+DEBT remains kt=2, but SSH now joins it:
 
 | field | kt=2 normalized max | status |
 |---|---:|---|
-| T | `1.3608682491316726e-12` | DEBT |
+| T | `1.3614736849003888e-12` | DEBT |
 | S | `2.2181101297999213e-14` | DEBT |
-| u | `9.484089544036715e-7` | DEBT |
-| v | `8.987995890362757e-7` | DEBT |
-| SSH | `4.77048955893622e-16` | AT-BAR |
+| u | `9.484089954572578e-7` | DEBT |
+| v | `8.987992592336029e-7` | DEBT |
+| SSH | `2.3724511938327808e-15` | DEBT; downward crossing from round-11 `4.77048955893622e-16` |
 
-The review requested enumeration of the receipt's 16 worsened rows, but that
-count was itself eager-only and is retracted rather than laundered into the
-certificate.  Like-for-like production-JIT sweeps at `57429ecf5f3` and this
-tip give 41 improved, five identical, and four worsened rows:
+Like-for-like production-JIT comparison against the immediate round-11
+baseline gives 20 improved, 23 worsened, and seven identical rows.  The seven
+identical rows include all five exact kt=1 rows.  Rule 8 requires every
+worsened row, even when it was already far over bar:
 
-| field | kt | `57429ecf5f3` normalized max (JIT) | current normalized max (JIT) | current / baseline |
+| field | kt | round-11 normalized max | round-12 normalized max | ratio |
 |---|---:|---:|---:|---:|
-| u | 5 | `1.7229656645948714e-2` | `2.0733890538774537e-2` | `1.203383849419297` |
-| u | 8 | `4.5264965475388851e-2` | `4.7180060361621853e-2` | `1.0423085462701671` |
-| u | 9 | `4.3327556604067334e-2` | `5.2560399634250458e-2` | `1.2130940157681636` |
-| u | 10 | `4.1745453128264214e-2` | `5.6249872588443578e-2` | `1.3474490842299418` |
+| T | 2 | `1.3608682491316726e-12` | `1.3614736849003888e-12` | `1.00044488933378` |
+| u | 2 | `9.484089544036715e-7` | `9.484089954572578e-7` | `1.0000000432868` |
+| SSH | 2 | `4.77048955893622e-16` | `2.3724511938327808e-15` | `4.97318181818182` |
+| T | 3 | `3.7223422533452327e-4` | `3.7223422533633866e-4` | `1.00000000000488` |
+| S | 3 | `3.683246743167771e-5` | `3.683246743187058e-5` | `1.00000000000524` |
+| u | 3 | `9.311678912623694e-3` | `9.311678913140425e-3` | `1.00000000005549` |
+| v | 3 | `4.719077591028548e-3` | `4.719077591308032e-3` | `1.00000000005922` |
+| SSH | 3 | `7.074668139339354e-7` | `7.074669648514083e-7` | `1.00000021332092` |
+| u | 4 | `1.418240401102859e-2` | `1.4182404011403506e-2` | `1.00000000002644` |
+| SSH | 4 | `5.060118542839914e-7` | `5.06011882079032e-7` | `1.00000005492962` |
+| u | 5 | `2.0733890538774537e-2` | `2.073389053895669e-2` | `1.00000000000879` |
+| v | 5 | `4.379766615426355e-2` | `4.3797666154580514e-2` | `1.00000000000724` |
+| SSH | 5 | `6.701856586948003e-5` | `6.701856627955131e-5` | `1.00000000611877` |
+| S | 6 | `1.287536211062039e-4` | `1.287536215345963e-4` | `1.00000000332723` |
+| u | 6 | `3.1134730338205307e-2` | `3.113473033866225e-2` | `1.00000000001468` |
+| v | 6 | `6.021959325392878e-2` | `6.0219593254002834e-2` | `1.00000000000123` |
+| T | 7 | `4.546668332780763e-3` | `4.546668332781217e-3` | `1.00000000000010` |
+| S | 7 | `1.2244044280379423e-4` | `1.224404428342701e-4` | `1.00000000024890` |
+| v | 7 | `6.631577474091133e-2` | `6.631577474100295e-2` | `1.00000000000138` |
+| u | 9 | `5.256039963425046e-2` | `5.256039963431678e-2` | `1.00000000000126` |
+| u | 10 | `5.624987258844358e-2` | `5.624987258870016e-2` | `1.00000000000456` |
+| v | 10 | `1.1173366024295098e-2` | `1.1173366024902619e-2` | `1.00000000005437` |
+| SSH | 10 | `2.12554757616743e-4` | `2.1255475784966258e-4` | `1.00000000109581` |
 
 The baseline and current production-JIT sweep artifacts have SHA-256
-`c77bca9cf568c08423004944d0dca0dbb2a77973b26bc982e8353754387f0219`
-and `17b1d103bd6e6871ddeecbfe59d9ccc9b7a5551041c4dd13e2c1f1699cc66489`,
-respectively.  The kt=2 T residual improves about 142× in this named selector
-set comparison; the one-variable attribution is in the preceding disclosure.
-At kt=10 the production-JIT normalized maxima are T
-`5.6366385875689e-3`, S `1.5483121735304233e-4`, u
-`5.624987258844358e-2`, v `1.1173366024295098e-2`, and SSH
-`2.12554757616743e-4`.
+`17b1d103bd6e6871ddeecbfe59d9ccc9b7a5551041c4dd13e2c1f1699cc66489`
+and `3979363314af89460dceb73c3544a3502040c406d133271dbea9181ffa02256f`,
+respectively.  At kt=10 the current normalized maxima are T
+`5.636638587568597e-3`, S `1.5483121735304233e-4`, u
+`5.624987258870016e-2`, v `1.1173366024902619e-2`, and SSH
+`2.1255475784966258e-4`.
 
 The lane-1 log-log instrument labels the short tail for T and u
 POLYNOMIAL_FIT_PREFERRED (exponents `0.60445` and `0.95631`) and SSH
 BOUNDED_OR_DECAYING_NO_AMPLIFYING_MODE.  These are characterization labels,
 not acceptance evidence.
 
-## Round-10 D stop boundary: mask exact, shared lane-1 guard still fails
+## Pending D boundary and round-12 cross-card oracle scoring
 
-Independent re-review returned **SHIP** for round 10 and clarified that this
+Independent re-review returned **SHIP** for rounds 10 and 11 and clarified that this
 gate compares against the previous legoESM output, not directly against NEMO.
-The retained D verdict is therefore an **OPEN USER DECISION**, not evidence
-that the NEMO match regressed: against the oracle, OVERFLOW stage-1 u improves
-from `6.52e-15` to `2.91e-16`, kt=2 SSH improves from `1.05e-14` to
-`3.33e-16`, and no oracle row worsens.  Round 11 does not change the gate,
-criterion, or EOS.
+The retained D criterion is therefore an **OPEN USER DECISION**.  Round 12
+does not modify that gate or criterion; it reports both its direction-blind
+compare-to result and direct oracle-relative residuals.
 
 The shared Roquet EOS remains one implementation.  Its NEMO-literal
 `zn3/zn2/zn1/zn0` nesting is unconditional for EOS-80 and TEOS-10, and the
@@ -342,51 +412,103 @@ absent, like its sibling, and every reachable lane-1 card passes its real
 oracle `e3w_0`; midpoint reconstruction was removed.  That reduces the stage
 move to ulps, but not to the required two ulps:
 
-| production-JIT compare-to gate | certified rows | largest move | verdict |
+| round-12 production-JIT compare-to gate | certified rows | largest move | verdict |
 |---|---:|---:|---|
-| OVERFLOW stage sweep | 9 | 28.062 ulp | FAIL |
-| LOCK_EXCHANGE stage sweep | 9 | 0.017648 ulp | PASS |
-| OVERFLOW kt=1…10 trajectory | 50 | 513504.875 ulp | FAIL |
-| LOCK_EXCHANGE kt=1…10 trajectory | 50 | 2.743 ulp | FAIL |
+| OVERFLOW stage sweep | 9 | `4.0625` ulp | FAIL |
+| LOCK_EXCHANGE stage sweep | 9 | `0.125` ulp | PASS |
+| OVERFLOW kt=1…10 trajectory | 50 | `146.9375` ulp | FAIL |
+| LOCK_EXCHANGE kt=1…10 trajectory | 50 | `4.72357177734375` ulp | FAIL |
 
-OVERFLOW's first stage already moves: baroclinic u by
-`1.700029e-15` (7.656 ulp) and instantaneous u by `6.231127e-15`
-(28.062 ulp).  Its kt=2 u moves `4.052314e-15` (18.250 ulp), kt=2 SSH moves
-`1.017242e-14` (45.812 ulp), kt=10 u reaches `1.140210e-10`
-(513504.875 ulp), tracers cease to be bit-identical, and `first_over_bar`
-changes from kt=2 `{T,u,ssh}` to kt=2 `{T,u}`.  LOCK_EXCHANGE is exact enough
-at the stage boundary, but its trajectory loses tracer bit identity and kt=10
-u moves `5.756707e-16` (2.593 ulp); its largest listed tracer move is 2.743
-ulp.  The final comparison runs were CPU fp64 production-JIT.  They emitted a
-JAX persistent-cache host-feature warning; an earlier no-cache OVERFLOW
-trajectory reproduced the same amplification, so the failure is not inferred
-from the warned cache run alone.
+The direct stage rows below are normalized maxima against NEMO, before
+(round-10/11 shared EOS) and after round 12.  They are the complete nine-row
+stage register for each card:
 
-Two one-variable diagnostics—direct source-native `prd` handoff and the prior
-wet-cell evaluator with only the terminal tmask retained—both leave the
-OVERFLOW kt=3 trajectory near 17 ulp.  Thus the EOS wet-cell association alone
-is refuted as sole owner; the remaining shared EOS/HPG association boundary is
-not yet localized.  The two-ulp rule therefore invokes the mandatory **STOP**.
-No further physics tuning, card guard, GYRE-only arm, or tra_zdf/dyn_zdf matrix
-walk was started.
+| card / row | before | after | status after |
+|---|---:|---:|---|
+| OVERFLOW instantaneous stage-1 u | `2.914335439641036e-16` | `1.3877787807814457e-17` | AT-BAR, better |
+| OVERFLOW instantaneous stage-2 u | `1.5709517020567887e-12` | `1.5711182355104825e-12` | DEBT, worse <2 ulp |
+| OVERFLOW instantaneous stage-3 u | `7.068304275215098e-12` | `7.069206331422606e-12` | DEBT, worse `4.0625` ulp |
+| OVERFLOW instantaneous kt=2 u | `7.068304275215098e-12` | `7.069206331422606e-12` | DEBT, worse `4.0625` ulp |
+| OVERFLOW kt=2 T | `7.815970093361103e-15` | same | DEBT, identical |
+| OVERFLOW baroclinic stage-1 u | `1.1102230246251565e-16` | `6.938893903907228e-18` | AT-BAR, better |
+| OVERFLOW baroclinic stage-2 u | `1.5711251744043864e-12` | `1.5711182355104825e-12` | DEBT, better |
+| OVERFLOW baroclinic stage-3 u | `7.068463869774888e-12` | `7.069192453634798e-12` | DEBT, worse `3.28125` ulp |
+| OVERFLOW baroclinic kt=2 u | `7.068463869774888e-12` | `7.069192453634798e-12` | DEBT, worse `3.28125` ulp |
+| LOCK instantaneous stage-1 u | `2.5153490401663703e-17` | `6.505213034913027e-19` | AT-BAR, better |
+| LOCK instantaneous stage-2 u | `2.8189256484623115e-17` | `4.336808689942018e-19` | AT-BAR, better |
+| LOCK instantaneous stage-3 u | `2.4015078120553923e-17` | `8.673617379884035e-19` | AT-BAR, better |
+| LOCK instantaneous kt=2 u | `2.4015078120553923e-17` | `8.673617379884035e-19` | AT-BAR, better |
+| LOCK kt=2 T | `0` | `0` | bit-identical |
+| LOCK baroclinic stage-1 u | `6.396792817664476e-18` | `4.336808689942018e-19` | AT-BAR, better |
+| LOCK baroclinic stage-2 u | `9.540979117872439e-18` | `2.168404344971009e-19` | AT-BAR, better |
+| LOCK baroclinic stage-3 u | `1.8955811279475375e-17` | `4.336808689942018e-19` | AT-BAR, better |
+| LOCK baroclinic kt=2 u | `1.8955811279475375e-17` | `4.336808689942018e-19` | AT-BAR, better |
+
+Every trajectory row is recorded below as `before → after`; all are
+production-JIT fp64 normalized maxima against NEMO.  `U` means
+UNINFORMATIVE and `M` means UNMEASURED, matching the gate rather than silently
+promoting a structural zero.
+
+| OVERFLOW kt | T | S | u | v | SSH |
+|---:|---:|---:|---:|---:|---:|
+| 1 | `0→0` | `0→0` | `0→0` | `0→0 M` | `0→0` |
+| 2 | `7.815970093361103e-15→same` | `2.0301221021717148e-16→same U` | `7.068304275215098e-12→7.069206331422606e-12` | `0→0 M` | `3.3306690738754696e-16→2.7755575615628914e-17` |
+| 3 | `5.725553364754887e-12→same` | `2.0301221021717145e-16→same` | `4.181440946965376e-9→4.181444881318219e-9` | `0→0 M` | `1.4938744685721872e-13→1.4924173008523667e-13` |
+| 4 | `4.110836115955862e-11→4.1108272341716646e-11` | `2.0301221021717145e-16→same` | `2.3323167099020825e-8→2.3323169319466874e-8` | `0→0 M` | `2.896962253418067e-10→2.897001111223929e-10` |
+| 5 | `1.1836380764407291e-10→same` | `4.060244204343429e-16→same` | `4.6243884971319815e-8→4.6243887726060695e-8` | `0→0 M` | `1.1794371007622928e-8→1.1794364623840536e-8` |
+| 6 | `2.3705917229221987e-10→same` | `6.090366306515144e-16→same` | `3.184360849589618e-7→3.1843605377210316e-7` | `0→0 M` | `1.0532435790189254e-7→1.05324343940838e-7` |
+| 7 | `3.725337371918156e-10→3.7253382600965757e-10` | `4.060244204343429e-16→same` | `1.262631212875509e-6→1.2626311811717028e-6` | `0→0 M` | `3.89638112441304e-7→3.896381028378748e-7` |
+| 8 | `5.484132259425675e-10→5.484131371247256e-10` | `4.060244204343428e-16→same` | `2.8378625916772315e-6→2.8378625590505524e-6` | `0→0 M` | `7.518269373174569e-7→7.518269323769644e-7` |
+| 9 | `9.63236068685091e-10→9.63236335138617e-10` | `6.090366306515141e-16→same` | `4.344091409307083e-6→4.344091389274496e-6` | `0→0 M` | `8.261133408460353e-7→8.261133412346133e-7` |
+| 10 | `1.5225928073903094e-9→1.5225922744832577e-9` | `8.120488408686856e-16→same` | `5.422695732899829e-6→5.422695711472525e-6` | `0→0 M` | `6.265018272777478e-7→6.265018344109308e-7` |
+
+| LOCK kt | T | S | u | v | SSH |
+|---:|---:|---:|---:|---:|---:|
+| 1 | `0→0` | `0→0` | `0→0` | `0→0 M` | `0→0` |
+| 2 | `0→0` | `0→0 U` | `2.4015078120553923e-17→8.673617379884035e-19` | `0→0 M` | `0→0 U` |
+| 3 | `1.1842378929335003e-16→same` | `2.0301221021717148e-16→same U` | `5.445828927782073e-17→1.3010426069826053e-18` | `0→0 M` | `1.3552527156068805e-18→2.710505431213761e-20` |
+| 4 | `3.552713678800501e-16→same` | `2.0301221021717148e-16→same` | `2.5781139274480298e-14→2.5789380058024135e-14` | `0→0 M` | `1.870248747537495e-18→2.710505431213761e-20` |
+| 5 | `2.368475785867e-16→same` | `2.0301221021717145e-16→same` | `1.4704223624296964e-13→1.4690369892224851e-13` | `0→0 M` | `3.686287386450715e-18→5.421010862427522e-20` |
+| 6 | `5.921189464667501e-16→same` | `4.060244204343429e-16→same` | `5.101191787504258e-13→5.099759963010219e-13` | `0→0 M` | `5.637851296924623e-18→1.0842021724855044e-19` |
+| 7 | `1.5395092608135503e-15→same` | `4.060244204343429e-16→same` | `1.362963215868155e-12→1.3626691734627133e-12` | `0→0 M` | `9.64939933512099e-18→1.0842021724855044e-19` |
+| 8 | `3.5527136788005005e-15→same` | `6.090366306515144e-16→same` | `3.0797251955681088e-12→3.0792796291327987e-12` | `0→0 M` | `1.3877787807814457e-17→4.336808689942018e-19` |
+| 9 | `8.171241461241152e-15→same` | `6.090366306515144e-16→same` | `6.184440329640162e-12→6.1836913356743545e-12` | `0→0 M` | `2.3418766925686896e-17→1.3552527156068805e-17` |
+| 10 | `1.68161780796557e-14→same` | `6.090366306515144e-16→same` | `1.1372521780089566e-11→1.137147293646043e-11` | `0→0 M` | `3.664603343001005e-17→3.2873348682939396e-17` |
+
+Direct oracle scoring exposes the required adverse moves instead of hiding
+them behind the direction-blind comparison.  OVERFLOW moves away by more than
+two ulps at instantaneous/baroclinic stage 3 and kt=2; in the trajectory, kt=2
+u, kt=3 u, kt=4 u/SSH, kt=5 u, and kt=10 SSH do so.  Its tracer bits also move
+at kt=4/7/8/9/10, although several moves are toward NEMO.  LOCK stage rows all
+improve or stay AT-BAR; its compare-to trajectory failures at kt=8–10 u are
+improvements versus NEMO, while kt=4 u moves away by less than two ulps.  No
+lane-1 row crosses the fixed `1e-15` bar in the adverse direction.  The
+`first_over_bar` registers are unchanged: OVERFLOW `kt=2 {T,u}` and LOCK
+`kt=4 {u}`.
+
+These mixed oracle-relative moves are findings, not tuning invitations.  The
+two-ulp comparison rule and its interpretation remain pending the user's
+decision.  Independently, the GYRE ordered gate already requires **STOP** at
+stage 2.  No card guard, GYRE-only arm, stage-3 transport rerun, or
+tra_zdf/dyn_zdf matrix walk was started.
 
 ## Provenance, controls, and review
 
 The oracle executable was rebuilt only from config-local `MY_SRC`; no shipped
-NEMO source was modified.  Stage-3 state (`3703a9f…`), kt=2 entry
-(`887f3bb…`), and restart (`3271da1…`) reproduce the registered hashes.  The
-WZV record, executable, config-local sources, baseline sweep, final gates, and
-implementation Git SHA are pinned in
-`nemo_testcases_l2_gyre_phase3_round8_artifacts.sha256`.
+NEMO source was modified.  The round-12 executable is `6c2d5862…`, the EOS
+operand record `f8ab6767…`, and the matching HPG input record `2c2c5eef…`.
+The config-local sources, pre/post/plant diagnostics, stage-2 measurements,
+immediate GYRE baseline, all four lane-1 baselines, current oracle-relative
+gates, and compare-to logs are pinned in
+`nemo_testcases_l2_gyre_phase3_round12_artifacts.sha256`.
 
-The monolithic GYRE completion process still retained too many static-hook
-executables and was stopped after three 5–6 minute no-output attempts.  The
-fail-closed low-memory route runs the production kt=1…10 sweep once, then each
-private hook in a fresh process.  The sweep completed CPU-only in 69 seconds;
-its SHA-256 is
-`17b1d103bd6e6871ddeecbfe59d9ccc9b7a5551041c4dd13e2c1f1699cc66489`
-and is byte-identical to the round-9 production-JIT sweep.  Every certification
-gate rejects `JAX_DISABLE_JIT`; no eager result is promoted.
+The monolithic GYRE completion process still retains too many static-hook
+executables, so the fail-closed low-memory route runs the production kt=1…10
+sweep once, then each private hook in a fresh process.  The round-12 sweep is
+CPU-only production JIT at SHA-256
+`3979363314af89460dceb73c3544a3502040c406d133271dbea9181ffa02256f`.
+Every certification gate rejects `JAX_DISABLE_JIT`; no eager result is
+promoted.
 
 ### Round-9 E/F/G safeguards
 
@@ -444,8 +566,12 @@ was upgraded merely because its documentation omitted a regime stamp.
 | nested `lax.scan` Horner experiment | UNASKED diagnostic | reverted after compile stall; absent from final tree |
 | immediate pre-update `Krhs`, raw/corrected `Kaa`, and HPG literal WRITE-only streams | ASKED round 11 | config-local only; ordinary outputs bit-identical |
 | NEMO-order RHS, update/e3, and mean-replacement one-variable arms | ASKED round 11 | accumulation and mean arms zero-move; update arm NEAR-NULL; exact RHS clears |
-| shared EOS `rhd` correction | explicitly forbidden round 11 | CONFIRMED upstream owner, NOT MODIFIED |
-| stage-3 transport remeasurement | ASKED only if stage 2 clears | NOT ENTERED; stage 2 remains DEBT |
+| source-ordered EOS operand/intermediate dump | ASKED round 12 | config-local WRITE-only; executed overload identified; invalid first routing rejected |
+| ranked QCO-depth / salinity / constants / EOS-choice arms | ASKED round 12 | first two refuted; constants and selection exact; no card choice changed |
+| shared EOS source-operation association | forbidden round 11, explicitly ASKED round 12 | one shared implementation landed; oracle-input chain bit-exact; propagated stage `prd` still two-cell DEBT |
+| finite IEEE identity between source operations | UNASKED implementation mechanism | retained only after NumPy/NEMO exact and XLA discriminator; shared, differentiable, no callback |
+| compare-to gate or criterion change | explicitly forbidden round 12 | NOT MODIFIED; open user decision retained |
+| stage-3 transport remeasurement | ASKED only if EOS and stage 2 clear | NOT ENTERED; corrected Kaa remains DEBT |
 | GYRE tra_zdf/dyn_zdf matrix walk | ASKED only if stages 2 and 3 clear | NOT ENTERED |
 
 ### Test and artifact closure
@@ -459,15 +585,16 @@ and is not claimed green.  Larger combined pytest invocations and the
 monolithic stage gate hit the documented compiler/resource wall; the
 scientific gates above ran as separate CPU processes.
 
-Round 11 additionally passes all 20 WS-RK3 tests plus all 35
-single-implementation tripwires (`55 passed`).  Its three planted controls
-each exit `1`.  The config-local oracle executable is `ec6efff…`; the
-pre-update record is `1e3b309b…`; the HPG literal record is `49e86b5b…`; and
-the complete manifest is
-`nemo_testcases_l2_gyre_phase3_round11_artifacts.sha256`.
+Round 11 additionally passed all 20 WS-RK3 tests plus all 35
+single-implementation tripwires (`55 passed`).  Round 12 passes the expanded
+WS-RK3, Roquet EOS, TEOS-10 RAB/BN2, time-level-registry, and
+single-implementation suite: `108 passed` in `645.85 s`, CPU fp64.  The new EOS
+plant exits `1`; restoring the old barrier-only operation makes the expanded
+intermediate parity test fail.  The GYRE sweep gate exits `1` for scientific
+DEBT, not a harness error; kt=1 is exact and its full artifact is retained.
 
-Independent Claude re-review shipped round 10 and retracted its JIT blocker.
-This round-11 result is a new Codex-internal measurement; independent review
-of it remains outstanding and no dual-review claim is made.  Per the accepted
-process note, the earlier EMP reversal returned through review with both source
-and runtime evidence before it landed.
+Independent Claude re-review shipped round 11 and retracted the older JIT
+blocker.  This round-12 result is a new Codex-internal measurement;
+independent review of it remains outstanding and no dual-review claim is made.
+Per the accepted process note, the earlier EMP reversal returned through
+review with both source and runtime evidence before it landed.

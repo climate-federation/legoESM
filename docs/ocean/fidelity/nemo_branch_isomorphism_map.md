@@ -1594,3 +1594,30 @@ identity (LOCK_EXCHANGE).  Direct-`prd` and prior-wet-evaluator one-variable
 diagnostics did not remove the trajectory amplification.  The shared
 EOS/HPG-association boundary therefore remains open and fail-closed; it is not
 a passed isomorphism exception and no card guard exists.
+
+Round 12 resolves the remaining source-operation association inside this same
+S-50 implementation.  A stage-2 config-local WRITE-only record of the
+executed four-argument `eos_insitu_pot_New_t` overload follows
+`eosbn2.F90:260-288` through `zh/zt/zs/ztm`, `zn3/zn2/zn1/zn0`, `zn`, and
+`prd`; all 52 coefficients and the normalizers/reference density at
+`:1898,1926-1982,2331-2334` are also recorded.  QCO's depth operand is the
+literal `r3t=ssh*r1_ht_0` then `gdept_0*(1+r3t)` path
+(`domqco.F90:159-161`; `domzgr_substitute.h90:50,56,75,139`).  That input and
+every normalized coordinate are bit-identical; the first departure was the
+compiled `zn0` evaluation (4 ulp), while a pure NumPy transcription of the
+Fortran statements was bit-identical through `prd`.  The shared JAX evaluator
+now preserves a rounding boundary after each source operation, with no new
+selector, card guard, callback, or duplicate routine.  On identical oracle
+inputs every intermediate and `prd` is bit-identical under production JIT.
+
+This does not close GYRE stage 2.  Propagating the shared change produces nine
+one-ulp T/S cells at the live EOS entry and two differing `prd` cells
+(`2.220446049250313e-16`); HPG improves about 32–37×, while corrected Kaa
+improves about 23–26× to `2.0033670902752654e-14` u and
+`2.0003665607629117e-14` v, still DEBT.  The next upstream tracer-state owner
+is UNMEASURED, so the stage-3 transport walk remains gated.  Cross-card oracle
+scoring is mixed: LOCK_EXCHANGE stage rows improve and remain AT-BAR;
+OVERFLOW stage-3 u moves away by 3.281–4.0625 ulp, while its stage-1 u
+improves.  The existing compare-to criterion remains unchanged and pending a
+user decision; this row records the literal shared implementation, not a
+comparison-policy exception.
