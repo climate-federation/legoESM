@@ -810,7 +810,12 @@ def _si3_prather_x_substep(
     positive_one = 1.0 - positive_alpha
     positive_alpha2 = positive_alpha * positive_alpha
     positive_alpha3 = positive_alpha2 * positive_alpha
-    positive_flux_area = jnp.where(positive, jnp.abs(u_transport) * dt, 0.0)
+    # Keep SI3's written operation order: zalf is formed first and zfm is
+    # reconstructed as zalf*zpsm (icedyn_adv_pra.F90:570-582).  Cancelling
+    # this product algebraically changes receiver fractions at fp64.
+    positive_flux_area = jnp.where(
+        positive, positive_alpha * sweep_area, 0.0
+    )
     positive_flux_content = positive_alpha[..., None] * (
         content + positive_one[..., None] * (sx + (positive_one - positive_alpha)[..., None] * sxx)
     )
@@ -856,7 +861,9 @@ def _si3_prather_x_substep(
     negative_one = 1.0 - negative_alpha
     negative_alpha2 = negative_alpha * negative_alpha
     negative_alpha3 = negative_alpha2 * negative_alpha
-    negative_flux_area = jnp.where(negative, jnp.abs(u_transport) * dt, 0.0)
+    negative_flux_area = jnp.where(
+        negative, negative_alpha * negative_donor_area, 0.0
+    )
     negative_flux_content = negative_alpha[..., None] * (
         negative_donor_content
         - negative_one[..., None]
@@ -1011,7 +1018,10 @@ def _si3_prather_y_substep(
     positive_one = 1.0 - positive_alpha
     positive_alpha2 = positive_alpha * positive_alpha
     positive_alpha3 = positive_alpha2 * positive_alpha
-    positive_flux_area = jnp.where(positive, jnp.abs(v_transport) * dt, 0.0)
+    # Preserve zalf*zpsm exactly as written at icedyn_adv_pra.F90:793-805.
+    positive_flux_area = jnp.where(
+        positive, positive_alpha * sweep_area, 0.0
+    )
     positive_flux_content = positive_alpha[..., None] * (
         content + positive_one[..., None] * (sy + (positive_one - positive_alpha)[..., None] * syy)
     )
@@ -1050,7 +1060,9 @@ def _si3_prather_y_substep(
     negative_one = 1.0 - negative_alpha
     negative_alpha2 = negative_alpha * negative_alpha
     negative_alpha3 = negative_alpha2 * negative_alpha
-    negative_flux_area = jnp.where(negative, jnp.abs(v_transport) * dt, 0.0)
+    negative_flux_area = jnp.where(
+        negative, negative_alpha * negative_donor_area, 0.0
+    )
     negative_flux_content = negative_alpha[..., None] * (
         negative_donor_content
         - negative_one[..., None]

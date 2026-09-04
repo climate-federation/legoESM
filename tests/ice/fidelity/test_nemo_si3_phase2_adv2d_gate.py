@@ -27,6 +27,12 @@ assert SPEC and SPEC.loader
 gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
 
+# A deliberately ill-conditioned fp64 triplet for the source-order check at
+# icedyn_adv_pra.F90:570-582.  These are numerics operands, not card physics.
+_ORDER_TEST_AREA = 3743035203.7156296
+_ORDER_TEST_TRANSPORT = 378.6794450766214
+_ORDER_TEST_DT = 44097.24518081014
+
 
 def _build_card():
     return build_ice_adv2d_card(gate.oracle_surface_temperature_c(gate.ROOT))
@@ -141,6 +147,34 @@ def test_y_sweep_limiter_limits_y_moments_not_x_moments():
     assert float(moments[0][3, 3, 0]) == pytest.approx(0.25)
     assert float(moments[1][3, 3, 0]) == pytest.approx(1.5)
     assert float(moments[2][3, 3, 0]) == pytest.approx(0.125)
+
+
+def test_flux_area_preserves_nemo_courant_then_area_operation_order():
+    import legoesm.ice.transport as transport
+
+    shape = (7, 7, 1)
+    area = jnp.full(shape[:2], _ORDER_TEST_AREA, dtype=jnp.float64)
+    u_transport = jnp.zeros(shape[:2], dtype=jnp.float64)
+    u_transport = u_transport.at[3, 3].set(_ORDER_TEST_TRANSPORT)
+    zero = jnp.zeros(shape, dtype=jnp.float64)
+    _, _, area_after = transport._si3_prather_x_substep(
+        jnp.ones(shape, dtype=jnp.float64),
+        (zero, zero, zero, zero, zero),
+        u_transport,
+        area,
+        jnp.ones(shape[:2], dtype=bool),
+        _ORDER_TEST_DT,
+        initial_area=area,
+        first_sweep=True,
+        halo_width=2,
+        subcycle_index=1,
+        subcycles=1,
+    )
+    alpha = _ORDER_TEST_TRANSPORT * _ORDER_TEST_DT / _ORDER_TEST_AREA
+    written_flux_area = alpha * _ORDER_TEST_AREA
+    simplified_flux_area = _ORDER_TEST_TRANSPORT * _ORDER_TEST_DT
+    assert written_flux_area != simplified_flux_area
+    assert float(area_after[3, 3]) == _ORDER_TEST_AREA - written_flux_area
 
 
 def test_hsnow_and_pond_caps_are_non_vacuous():
