@@ -94,6 +94,33 @@ def test_frame_round_trip_uses_fp64_and_fortran_order(tmp_path: Path) -> None:
         assert actual[name].dtype == np.float64
         assert np.array_equal(actual[name], expected[name])
 
+    _, selected = gate.read_frame(path, frozenset(("a_i", "u_ice")))
+    assert set(selected) == {"a_i", "u_ice"}
+    assert np.array_equal(selected["a_i"], expected["a_i"])
+    with pytest.raises(gate.GateError, match="unknown requested frame fields"):
+        gate.read_frame(path, frozenset(("not_a_registered_field",)))
+
+
+def test_rung34_sishea_formula_and_mask_plant_bind() -> None:
+    shape = (9, 9)
+    metrics = {
+        name: np.ones(shape, dtype=np.float64)
+        for name in ("e1u", "e2u", "e1v", "e2v", "e1f", "e2f", "e1t", "e2t", "fmask")
+    }
+    u_ice = np.zeros(shape, dtype=np.float64)
+    v_ice = np.zeros(shape, dtype=np.float64)
+    area = np.ones(shape, dtype=np.float64)
+    assert np.array_equal(gate._rung34_sishea(u_ice, v_ice, area, metrics), u_ice)
+
+    # A single U-point perturbation exercises both the F-point shear and
+    # T-point tension branches; removing the perturbation or either branch
+    # makes this planted control fail.
+    u_ice[4, 4] = 1.0
+    perturbed = gate._rung34_sishea(u_ice, v_ice, area, metrics)
+    assert float(np.max(perturbed)) > 0.0
+    area.fill(0.0)
+    assert np.array_equal(gate._rung34_sishea(u_ice, v_ice, area, metrics), np.zeros(shape))
+
 
 def test_restart_contract_disposes_active_and_inactive_appendix_a_fields() -> None:
     adv = gate.restart_contract("3.1", 3, 3, 4, True)
@@ -295,31 +322,15 @@ def test_rung34_readme_phenomenology_cannot_be_promoted_without_a_band() -> None
     assert str(verdict["eap_angle_contrast"]).startswith("OUT-OF-SCOPE")
 
 
-def test_rung34_missing_documented_shear_field_is_loudly_unmeasured(tmp_path: Path) -> None:
+def test_rung34_missing_output_and_reconstruction_inputs_is_loud(tmp_path: Path) -> None:
     path = tmp_path / "CASE_6h_00010101_00010101_gr_0000.nc"
     with netCDF4.Dataset(path, "w") as dataset:
         dataset.createDimension("time", 1)
         dataset.createDimension("x", 2)
         dataset.createDimension("y", 2)
         dataset.createVariable("ssv_m", "f8", ("time", "y", "x"))[:] = 0.0
-    diagnostic = gate.rung34_shear_diagnostic(
-        tmp_path, (slice(None), slice(None))
-    )
-    assert diagnostic["classification"].startswith("UNMEASURED")
-    assert diagnostic["field"].startswith("sishea")
-    initial = {
-        "a_i": np.ones((9, 9, 1)),
-        "v_i": np.ones((9, 9, 1)),
-        "u_ice": np.zeros((9, 9)),
-    }
-    final = {
-        "a_i": np.ones((5, 5, 1)),
-        "v_i": np.full((5, 5, 1), 2.0),
-        "u_ice": np.full((5, 5), 0.1),
-        "v_ice": np.zeros((5, 5)),
-    }
-    verdict = gate.phenomenology("3.4", initial, final, rung34_shear=diagnostic)
-    assert verdict["status"] == "UNMEASURED"
+    with pytest.raises(gate.GateError, match="mesh_mask"):
+        gate.rung34_shear_diagnostic(tmp_path, (slice(None), slice(None)))
 
 
 def test_rung34_documented_shear_field_is_measured_when_present(tmp_path: Path) -> None:

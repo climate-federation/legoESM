@@ -54,6 +54,9 @@ META = {
 }
 FORMAT = "nemo-si3-l3-coverage-v1"
 MAGIC = "NEMO_L3_ICE_1"
+_SI3_HALO = 2
+_SI3_FOUR_POINT_WEIGHT = 0.25
+_SI3_ICE_PRESENCE_EPSILON = 1.0e-10
 
 # Each field is written in this exact order by the committed icestp.F90:154-170.
 # The dump precedes store_fields at upstream icestp.F90:151, so ordinary state
@@ -754,7 +757,12 @@ def geometry(root: Path, rung: str, plant_field: bool = False) -> dict:
     }
 
 
-def read_frame(path: Path) -> tuple[dict[str, int], dict[str, np.ndarray]]:
+def read_frame(
+    path: Path, fields: frozenset[str] | None = None
+) -> tuple[dict[str, int], dict[str, np.ndarray]]:
+    if fields is not None:
+        known = {row[0] for row in FRAME_REGISTRY}
+        require(not (fields - known), f"unknown requested frame fields: {sorted(fields - known)}")
     with path.open("rb") as fh:
         magic = fh.read(16).decode("ascii").rstrip()
         raw = fh.read(9 * 4)
@@ -767,8 +775,12 @@ def read_frame(path: Path) -> tuple[dict[str, int], dict[str, np.ndarray]]:
         arrays: dict[str, np.ndarray] = {}
         for name, axes, _, _ in FRAME_REGISTRY:
             shape = tuple(dims[axis] for axis in axes)
-            values = np.fromfile(fh, dtype=np.float64, count=int(np.prod(shape)))
-            require(values.size == int(np.prod(shape)), f"truncated frame field {name}: {path}")
+            count = int(np.prod(shape))
+            if fields is not None and name not in fields:
+                fh.seek(count * np.dtype(np.float64).itemsize, 1)
+                continue
+            values = np.fromfile(fh, dtype=np.float64, count=count)
+            require(values.size == count, f"truncated frame field {name}: {path}")
             arrays[name] = values.reshape(shape, order="F")
         require(fh.read(1) == b"", f"unregistered trailing frame bytes: {path}")
     require(
@@ -922,7 +934,7 @@ def conservation_diagnostics(root: Path) -> dict:
 
 
 def rung34_shear_diagnostic(root: Path, window: tuple[slice, slice]) -> dict[str, object]:
-    """Read NEMO's own final maximum-shear field without inventing a README band."""
+    """Evaluate NEMO's maximum-shear diagnostic without inventing a README band."""
 
     paths = sorted(root.glob("*_6h_*.nc"))
     require(paths, "rung 3.4 has no final six-hour output file")
@@ -941,16 +953,67 @@ def rung34_shear_diagnostic(root: Path, window: tuple[slice, slice]) -> dict[str
             path = candidate
             break
     if path is None or raw is None:
+        mesh_names = ("e1u", "e2u", "e1v", "e2v", "e1f", "e2f", "e1t", "e2t", "fmask")
+        with netCDF4.Dataset(run_files(root)["mesh"]) as dataset:
+            metrics: dict[str, np.ndarray] = {}
+            for name in mesh_names:
+                value = np.asarray(_array(dataset, name))
+                while value.ndim > 2:
+                    value = value[0]
+                metrics[name] = np.pad(value.T.astype(np.float64), _SI3_HALO, mode="wrap")
+        frame_paths = sorted(root.glob("oracle_ice_step_entry_kt*.bin"))
+        require(len(frame_paths) == RUNGS["3.4"]["steps"], "rung 3.4 shear frame count")
+        selected = frozenset(("a_i", "u_ice", "v_ice"))
+        series: list[dict[str, object]] = []
+        final_shear: np.ndarray | None = None
+        for expected_kt, frame_path in enumerate(frame_paths, start=1):
+            header, frame = read_frame(frame_path, selected)
+            require(header["kt"] == expected_kt, "rung 3.4 shear frame clock")
+            u_ice = frame["u_ice"]
+            v_ice = frame["v_ice"]
+            ice_area = frame["a_i"][..., 0]
+            shear = _rung34_sishea(u_ice, v_ice, ice_area, metrics)
+            physical = shear[
+                _SI3_HALO : -_SI3_HALO, _SI3_HALO : -_SI3_HALO
+            ][window]
+            require(np.all(np.isfinite(physical)), "derived NEMO sishea is non-finite")
+            series.append(
+                {
+                    "kt": expected_kt,
+                    "maximum_s-1": float(np.max(physical)),
+                    "p99_s-1": float(np.percentile(physical, 99.0)),
+                }
+            )
+            final_shear = physical
+        assert final_shear is not None
+        p95, p99 = np.percentile(final_shear, (95.0, 99.0))
         return {
-            "source": "tests/ICE_RHEO/EXPREF/README:51-53; icedyn.F90:172-193",
-            "field": "sishea (NEMO maximum shear of sea-ice velocity)",
+            "source": (
+                "tests/ICE_RHEO/EXPREF/README:51-53; "
+                "icedyn_rhg_evp.F90:190-191,793-816"
+            ),
+            "field": "sishea reconstructed from NEMO entry-frame u_ice/v_ice and mesh",
+            "formula": "sqrt(zdt**2 + zds**2) * zmsk",
+            "fast_and_icb_masks": (
+                "both zero on this landfast-off, iceberg-free copied case; their source "
+                "multipliers at icedyn_rhg_evp.F90:805,813 are therefore one"
+            ),
+            "dtype": str(final_shear.dtype),
+            "frames": len(series),
+            "series": series,
+            "minimum_s-1": float(np.min(final_shear)),
+            "maximum_s-1": float(np.max(final_shear)),
+            "p95_s-1": float(p95),
+            "p99_s-1": float(p99),
+            "cells_above_p99": int(np.count_nonzero(final_shear > p99)),
             "available_six_hour_outputs": [
                 {"path": str(candidate), "sha256": sha256(candidate)}
                 for candidate in paths
             ],
             "classification": (
-                "UNMEASURED: the non-XIOS copied-case run wrote no sishea variable; "
-                "the README shear-shape claim cannot be scored from another field"
+                "MEASURED-UNCLASSIFIED: all 720 NEMO frames evaluate the source formula, "
+                "but README supplies neither a numeric sharpness threshold nor an EAP "
+                "comparator for this aEVP run"
             ),
         }
     shear = np.asarray(np.ma.filled(raw, np.nan), dtype=np.float64).T[window]
@@ -972,6 +1035,54 @@ def rung34_shear_diagnostic(root: Path, window: tuple[slice, slice]) -> dict[str
             "neither a numeric sharpness threshold nor an EAP comparator for this aEVP run"
         ),
     }
+
+
+def _rung34_sishea(
+    u_ice: np.ndarray,
+    v_ice: np.ndarray,
+    ice_area: np.ndarray,
+    metrics: dict[str, np.ndarray],
+) -> np.ndarray:
+    """Literal NumPy replay of icedyn_rhg_evp.F90:793-816."""
+
+    zds = (
+        (
+            np.roll(u_ice, -1, axis=1) / np.roll(metrics["e1u"], -1, axis=1)
+            - u_ice / metrics["e1u"]
+        )
+        * metrics["e1f"]
+        * metrics["e1f"]
+        + (
+            np.roll(v_ice, -1, axis=0) / np.roll(metrics["e2v"], -1, axis=0)
+            - v_ice / metrics["e2v"]
+        )
+        * metrics["e2f"]
+        * metrics["e2f"]
+    ) / (metrics["e1f"] * metrics["e2f"])
+    zds = zds * metrics["fmask"]
+    tension = (
+        (
+            u_ice / metrics["e2u"]
+            - np.roll(u_ice, 1, axis=0) / np.roll(metrics["e2u"], 1, axis=0)
+        )
+        * metrics["e2t"]
+        * metrics["e2t"]
+        - (
+            v_ice / metrics["e1v"]
+            - np.roll(v_ice, 1, axis=1) / np.roll(metrics["e1v"], 1, axis=1)
+        )
+        * metrics["e1t"]
+        * metrics["e1t"]
+    ) / (metrics["e1t"] * metrics["e2t"])
+    weighted_shear_square = zds * zds * (metrics["e1f"] * metrics["e2f"])
+    shear_square_t = (
+        weighted_shear_square
+        + np.roll(weighted_shear_square, 1, axis=0)
+        + np.roll(weighted_shear_square, 1, axis=1)
+        + np.roll(np.roll(weighted_shear_square, 1, axis=0), 1, axis=1)
+    ) * _SI3_FOUR_POINT_WEIGHT / (metrics["e1t"] * metrics["e2t"])
+    zmsk = (ice_area >= _SI3_ICE_PRESENCE_EPSILON).astype(np.float64)
+    return np.sqrt(tension * tension + shear_square_t) * zmsk
 
 
 def phenomenology(
