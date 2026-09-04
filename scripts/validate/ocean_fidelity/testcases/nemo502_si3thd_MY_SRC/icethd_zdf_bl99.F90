@@ -237,7 +237,7 @@ CONTAINS
          qtr_ice_bot_1d(ji) = zradtr_i(ji,nlay_i)   ! record radiation transmitted below the ice
       END DO
       IF( ll_l3zdf_capture ) THEN
-         CALL l3zdf_header( 0, 0, 25 )
+         CALL l3zdf_header( 0, 0, 10 + 3 * nlay_i + 2 * nlay_s )
          WRITE(num_l3zdf) t_su_1d(1), t_i_1d(1,1:nlay_i), t_s_1d(1,1:nlay_s), &
             & sz_i_1d(1,1:nlay_i), h_i_1d(1), h_s_1d(1), ztsub(1), &
             & qns_ice_1d(1), zdqns_ice_b(1), qsr_ice_1d(1), qtr_ice_top_1d(1), &
@@ -350,7 +350,7 @@ CONTAINS
          END DO
 
          IF( ll_l3zdf_capture ) THEN
-            CALL l3zdf_header( 1, iconv, 20 )
+            CALL l3zdf_header( 1, iconv, 5 + 3 * nlay_i + 2 * nlay_s )
             WRITE(num_l3zdf) t_su_1d(1), t_i_1d(1,1:nlay_i), t_s_1d(1,1:nlay_s), &
                & ztcond_i(1,0:nlay_i), zkappa_i(1,0:nlay_i), &
                & zkappa_s(1,0:nlay_s), isnow(1)
@@ -401,7 +401,7 @@ CONTAINS
                   zfnet = qsr_ice_1d(ji) - qtr_ice_top_1d(ji) + qns_ice_1d(ji) ! net heat flux = net - transmitted solar + non solar
 
                   IF( ll_l3zdf_capture .AND. ji == 1 ) THEN
-                     CALL l3zdf_header( 2, iconv, 8 )
+                     CALL l3zdf_header( 2, iconv, 2 + nlay_i + nlay_s )
                      WRITE(num_l3zdf) zeta_i(1,1:nlay_i), zeta_s(1,1:nlay_s), qns_ice_1d(1), zfnet
                   ENDIF
                   !
@@ -541,7 +541,7 @@ CONTAINS
                   ENDIF
 
                   IF( ll_l3zdf_capture .AND. ji == 1 ) THEN
-                     CALL l3zdf_header( 3, iconv, 28 )
+                     CALL l3zdf_header( 3, iconv, 4 * ( nlay_i + nlay_s + 1 ) )
                      WRITE(num_l3zdf) ztrid(:,1), ztrid(:,2), ztrid(:,3), zindterm(:)
                   ENDIF
                   !
@@ -561,7 +561,7 @@ CONTAINS
                   END DO
 
                   IF( ll_l3zdf_capture .AND. ji == 1 ) THEN
-                     CALL l3zdf_header( 4, iconv, 14 )
+                     CALL l3zdf_header( 4, iconv, 2 * ( nlay_i + nlay_s + 1 ) )
                      WRITE(num_l3zdf) zdiagbis(:), zindtbis(:)
                   ENDIF
 
@@ -594,7 +594,7 @@ CONTAINS
                         &          ( isnow(ji) * t_s_1d(ji,1) + ( 1._wp - isnow(ji) ) * t_i_1d(ji,1) ) ) / zdiagbis(jm_min)
                   ENDIF
                   IF( ll_l3zdf_capture .AND. ji == 1 ) THEN
-                     CALL l3zdf_header( 5, iconv, 9 )
+                     CALL l3zdf_header( 5, iconv, 3 + nlay_i + nlay_s )
                      WRITE(num_l3zdf) t_su_1d(1), t_s_1d(1,1:nlay_s), &
                         & t_i_1d(1,1:nlay_i), ztsub(1), qns_ice_1d(1)
                   ENDIF
@@ -631,7 +631,7 @@ CONTAINS
                   IF( zdti_max < zdti_bnd )   l_T_converged(ji) = .TRUE.
 
                   IF( ll_l3zdf_capture .AND. ji == 1 ) THEN
-                     CALL l3zdf_header( 6, iconv, 10 )
+                     CALL l3zdf_header( 6, iconv, 4 + nlay_i + nlay_s )
                      WRITE(num_l3zdf) t_su_1d(1), t_s_1d(1,1:nlay_s), &
                         & t_i_1d(1,1:nlay_i), zdti_max, &
                         & MERGE( 1._wp, 0._wp, l_T_converged(1) ), REAL( iconv, wp )

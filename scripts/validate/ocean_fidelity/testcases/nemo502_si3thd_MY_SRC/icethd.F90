@@ -306,7 +306,10 @@ CONTAINS
          ll_l3rea_opened = .TRUE.
       ENDIF
       WRITE(num_l3rea) cmagic
-      WRITE(num_l3rea) 1, kt, kl, npti, nlay_i, nlay_s, STORAGE_SIZE(1._wp), 18 * npti
+      ! Keep the payload declaration mechanically tied to the WRITE list:
+      ! 3 scalar fields, 3 ice-layer fields, and 2 snow-layer fields.
+      WRITE(num_l3rea) 1, kt, kl, npti, nlay_i, nlay_s, STORAGE_SIZE(1._wp), &
+         & ( 3 + 3 * nlay_i + 2 * nlay_s ) * npti
       WRITE(num_l3rea) t_su_1d(1:npti), t_i_1d(1:npti,1:nlay_i), &
          & t_s_1d(1:npti,1:nlay_s), sz_i_1d(1:npti,1:nlay_i), &
          & e_i_1d(1:npti,1:nlay_i), e_s_1d(1:npti,1:nlay_s), &
