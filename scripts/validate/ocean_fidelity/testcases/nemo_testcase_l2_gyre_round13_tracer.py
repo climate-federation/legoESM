@@ -102,18 +102,19 @@ def _cell_value(oracle, candidate, index) -> dict:
     }
 
 
-def _run_boundary(card, cfg, boundary: str):
+def _run_boundary(card, cfg, boundary: str, transport_override=None):
     import jax
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
         _NEMOWSRK3TestHooks,
     )
 
-    hooks = (
-        _NEMOWSRK3TestHooks(expose_tracer_stage=1)
-        if boundary == "after_update"
-        else _NEMOWSRK3TestHooks(expose_tracer_stage1_boundary=boundary)
-    )
+    hook_args = {"stage1_tracer_transport_override": transport_override}
+    if boundary == "after_update":
+        hook_args["expose_tracer_stage"] = 1
+    else:
+        hook_args["expose_tracer_stage1_boundary"] = boundary
+    hooks = _NEMOWSRK3TestHooks(**hook_args)
     freshwater, surface = _surface_forcings(card, card.recipe.initial_state, 1)
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, cfg,
@@ -160,6 +161,22 @@ def run(oracle_root: Path, control_root: Path, *, plant: bool = False) -> dict:
     candidate = {
         boundary: (np.asarray(pair[0])[..., :nlev], np.asarray(pair[1])[..., :nlev])
         for boundary, pair in candidate.items()
+    }
+    oracle_transport = tuple(
+        oracle[name][..., :nlev] if name != "zFw" else oracle[name]
+        for name in ("zFu", "zFv", "zFw")
+    )
+    transport_arm = {
+        boundary: _run_boundary(
+            card, cfg, boundary, transport_override=oracle_transport)
+        for boundary in ("after_advection", "after_update")
+    }
+    transport_arm = {
+        boundary: (
+            np.asarray(pair[0])[..., :nlev],
+            np.asarray(pair[1])[..., :nlev],
+        )
+        for boundary, pair in transport_arm.items()
     }
     if plant:
         planted = candidate["after_update"][0].copy()
@@ -282,6 +299,39 @@ def run(oracle_root: Path, control_root: Path, *, plant: bool = False) -> dict:
                 "differing_wet_cells": int(np.count_nonzero(use_c != use_o)),
             }
 
+    scaling = {}
+    for boundary, oracle_prefix in (
+            ("after_advection", "after_advection"), ("after_update", "Kaa")):
+        scaling[boundary] = {}
+        for field in ("T", "S"):
+            fi = field_index[field]
+            ov = oracle[f"{oracle_prefix}_{field}"][..., :nlev][active]
+            faithful = candidate[boundary][fi][active]
+            arm = transport_arm[boundary][fi][active]
+            residual = float(np.max(np.abs(faithful - ov)))
+            movement = float(np.max(np.abs(arm - faithful)))
+            arm_residual = float(np.max(np.abs(arm - ov)))
+            scaling[boundary][field] = {
+                "faithful_residual": residual,
+                "oracle_transport_arm_movement": movement,
+                "oracle_transport_arm_residual": arm_residual,
+                "movement_over_faithful_residual": (
+                    movement / residual if residual else None),
+                "arm_differing_wet_cells": int(np.count_nonzero(arm != ov)),
+            }
+
+    update_scaling = [scaling["after_update"][field] for field in ("T", "S")]
+    clears = all(row["oracle_transport_arm_residual"] == 0.0 for row in update_scaling)
+    residual_scale = all(
+        0.9 <= row["movement_over_faithful_residual"] <= 1.1
+        for row in update_scaling
+    )
+    owner_label = (
+        "CONFIRMED_STAGE1_TRACER_TRANSPORT_OPERAND"
+        if clears and residual_scale
+        else "REFUTED_STAGE1_TRACER_TRANSPORT_OPERAND"
+    )
+
     first_boundaries = sorted({
         values["first_differing_boundary"]
         for cell in cells for values in cell["fields"].values()
@@ -304,8 +354,9 @@ def run(oracle_root: Path, control_root: Path, *, plant: bool = False) -> dict:
         ),
         "cells": cells,
         "aggregate": aggregate,
+        "scaling_before_owner": scaling,
         "first_differing_boundaries": first_boundaries,
-        "owner_label": "UNMEASURED_SCALING_REQUIRED",
+        "owner_label": owner_label,
         "source_dispositions": {
             "stage1_transcendentals": "REFUTED_BY_EXECUTED_SOURCE",
             "stage1_fct_limiter": "REFUTED_BY_EXECUTED_SOURCE",

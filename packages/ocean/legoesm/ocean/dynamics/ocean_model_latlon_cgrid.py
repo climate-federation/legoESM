@@ -1158,6 +1158,10 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # A nonzero stage stores NEMO's metric zFu/zFv/zFw triplet in u/v/T after
     # the ordinary step; it cannot affect a later stage or public execution.
     expose_tracer_transport_stage: int = 0
+    # One-variable stage-1 tracer-transport operand arm.  The gate supplies
+    # NEMO's native metric zFu/zFv/zFw triplet; momentum and later stages keep
+    # the production transport.  Private diagnostic only.
+    stage1_tracer_transport_override: object = None
     # One-variable stage-3 transport operand injection.  The gate supplies the
     # oracle's native metric zFu/zFv/zFw triplet; conversion back to the shared
     # internal transport representation happens once at the construction
@@ -5816,7 +5820,23 @@ class LatLonCGridOceanModel:
                 v1_raw = (_qv_b * v0 + (dt_mom / 3.0) * _qv_b * _v1_rhs) / _qv_13
             u1_corr, v1_corr = _replace_stage_mean(
                 u1_raw, v1_raw, target_u, target_v)
-            _stage1_tracer_result = _stage_tracers(1, (_g0, _g0, _g0))
+            _g0_tracer = _g0
+            _g0_tracer_override = (
+                self._nemo_ws_test_hooks.stage1_tracer_transport_override)
+            if _g0_tracer_override is not None:
+                _zfu_o, _zfv_o, _zfw_o = _g0_tracer_override
+                _zfu_faces = jnp.concatenate(
+                    [_zfu_o[:, -1:, :], _zfu_o], axis=1)
+                _zfv_faces = jnp.concatenate(
+                    [_zfv_o[-1:, :, :], _zfv_o], axis=0)
+                _g0_tracer = (
+                    _zfu_faces / jnp.asarray(_grid.dy_u)[..., None],
+                    _zfv_faces / jnp.asarray(_grid.dx_v)[..., None],
+                    _zfw_o / jnp.asarray(_grid.area_T)[..., None],
+                    _g0[3], _g0[4], _g0[5], _g0[6],
+                )
+            _stage1_tracer_result = _stage_tracers(
+                1, (_g0_tracer, _g0, _g0))
             if self._nemo_ws_test_hooks.expose_tracer_stage1_boundary:
                 (
                     _T_stage1, _S_stage1,
