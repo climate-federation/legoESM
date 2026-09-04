@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=l8diag
 #SBATCH --account=glab
-#SBATCH --partition=glab1
+#SBATCH --partition=short
 #SBATCH --gres=gpu:1
 #SBATCH --constraint="a40|rtx8000"
 #SBATCH --cpus-per-task=4
