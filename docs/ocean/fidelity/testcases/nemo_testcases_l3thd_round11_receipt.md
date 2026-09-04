@@ -81,10 +81,16 @@ Accepted external artifact:
 | JSON bytes | 39,286 |
 
 The private `libm_return` plant changes only the selected policy exponential by
-`1e-6`.  Its CLI run exits **1**, changes 13,468 scored rows, and first fires on
-`POST_BLK_ICE_2.albedo` at step 1.  The affected outputs are albedo, ice
-shortwave, and total shortwave, demonstrating propagation into the score.
+`1e-6`.  Its CLI run exits **1**, places 13,468 scored rows over the bar (13,902
+rows are non-bit-identical), and first fires on `POST_BLK_ICE_2.albedo` at step
+1.  The affected outputs are albedo, ice shortwave, and total shortwave,
+demonstrating propagation into the score.
 All earlier bulk plants also exit nonzero in the focused gate test.
+
+| plant evidence | SHA-256 |
+|---|---|
+| `plant_libm_return.exit` (contains `1`) | `4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865` |
+| `plant_libm_return.stderr` | `1293c678c178290fdba0744fd4277b3a42d54bfab10f0095abd3a7b416b0e6c7` |
 
 Test receipts:
 
@@ -92,6 +98,7 @@ Test receipts:
 - constants ratchet selected for every touched package file: `7 passed in
   0.71s`;
 - bulk/thermodynamic regression selection: `21 passed in 18.53s`.
+- complete retained SI3 fidelity selection: `63 passed in 92.30s`.
 
 A repository-wide constants-ratchet probe was also attempted fail-fast.  It
 stopped after 45 passes and one skip on the untouched pre-existing
@@ -174,6 +181,16 @@ Source hashes at `86a8eb21d18`:
 | modify/delete shipped NEMO or retained data | UNASKED | not done |
 | describe codex-internal work as independent review | UNASKED | not done |
 | push | UNASKED | not done |
+
+## Codex-internal review record
+
+Two codex-internal adversarial reviews of `b135e32ac73` returned **SHIP**.  The
+source review independently reran the full bit gate and found one low-severity
+wording ambiguity: 13,468 plant rows are over-bar while 13,902 are non-bit.
+That wording is corrected above.  The scope review reproduced the input
+absence, local hashes, fetch failure, test selections, and correct preflight
+stop.  Neither review is described as an independent external review.  Their
+identity/commit/verdict records are committed beside this receipt.
 
 ## Flagged for future deletion
 
