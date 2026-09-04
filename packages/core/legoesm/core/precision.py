@@ -183,6 +183,23 @@ def get_policy() -> PrecisionPolicy:
     return _ACTIVE_POLICY[0]
 
 
+def nemo_source_round(value: jax.Array) -> jax.Array:
+    """Materialize one NEMO source operation before its next consumer.
+
+    ``optimization_barrier`` alone survives to HLO but does not prevent the
+    CPU LLVM pass from contracting a producer into its consumer.  The
+    classification/copy is an IEEE identity, including signed infinities and
+    NaNs, and remains differentiable for finite physical inputs.  This is the
+    shared form promoted from the GYRE EOS fidelity implementation.
+    """
+    value = jax.lax.optimization_barrier(value)
+    return jnp.where(
+        jnp.isfinite(value),
+        value,
+        jnp.copysign(jnp.abs(value), value),
+    )
+
+
 def validate_policy(policy: PrecisionPolicy | None = None) -> None:
     """Verify the active precision policy is actually achievable.
 

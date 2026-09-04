@@ -56,6 +56,18 @@ def test_score_distinguishes_bar_from_bit_identity() -> None:
     assert row["max_relative_error_step"] == 1
 
 
+def test_nemo_source_round_is_identity_jittable_and_differentiable() -> None:
+    from legoesm.core.precision import nemo_source_round
+
+    values = jnp.asarray([-2.0, -0.0, 3.0], dtype=jnp.float64)
+    np.testing.assert_array_equal(np.asarray(nemo_source_round(values)), values)
+    np.testing.assert_array_equal(
+        np.asarray(jax.jit(nemo_source_round)(values)), values,
+    )
+    gradient = jax.grad(lambda x: jnp.sum(nemo_source_round(x)))(values)
+    np.testing.assert_array_equal(np.asarray(gradient), np.ones(3))
+
+
 def test_bitwise_evidence_runtime_is_stamped_and_fails_closed() -> None:
     assert gate.runtime_versions() == gate.ACCEPTED_RUNTIME
     bad = {**gate.ACCEPTED_RUNTIME, "jax": "0.11.1"}
@@ -117,15 +129,15 @@ def test_selected_dispatch_is_jittable_and_differentiable() -> None:
 )
 def test_full_year_gate_and_all_plants() -> None:
     result = gate.evaluate()
-    assert result["verdict"] == "AT-BAR"
+    assert result["verdict"] == "AWAITING_LIBM_POLICY"
+    assert result["normalized_verdict"] == "AT-BAR"
     assert result["over_bar_rows"] == 0
     assert result["steps"] == 8760
     assert result["oracle_version"] == "V2_SCALAR_MATH"
     assert result["bit_comparisons"] == result["comparisons"]
     assert result["non_bit_identical_rows"] > 0
-    assert set(result["bit_owner_groups"]) == {
-        "jax_exp_ice_alb", "binary64_operation_order",
-    }
+    assert result["non_bit_identical_rows"] == 18
+    assert set(result["bit_owner_groups"]) == {"jax_exp_ice_alb"}
     assert result["bit_owner_groups"]["jax_exp_ice_alb"]["status"] == (
         "AWAITING_LIBM_POLICY"
     )
@@ -133,10 +145,25 @@ def test_full_year_gate_and_all_plants() -> None:
         row["non_bit_identical_count"] == 0
         for row in result["scalar_glibc_owner_probe"]["rows"]
     )
+    assert result["nemo_order_numpy_probe"]["nemo_order_numpy"][
+        "bit_identical"
+    ] is True
+    arm = result["private_arms"]["disable_source_statement_rounding"]
+    assert arm["non_bit_rows"] == 16_494
+    assert arm["per_formula_non_bit_rows"] == {
+        "POST_BLK_ICE_1.utau_ice": 2821,
+        "POST_BLK_ICE_1.vtau_ice": 2797,
+        "POST_BLK_ICE_2.evap_ice": 3879,
+        "POST_BLK_ICE_2.devap_ice": 3852,
+        "POST_BLK_ICE_2.emp_ice": 1900,
+        "POST_BLK_ICE_2.emp_tot": 1232,
+        "POST_ICE_FLX_OTHER.fhld": 13,
+    }
     for plant in (
         "blk_ice_1", "ice_alb", "blk_ice_2", "ice_flx_other",
         "stream_hash", "coverage", "selector", "bit_owner",
         "runtime",
+        "source_round",
     ):
         with pytest.raises(gate.GateError):
             gate.evaluate(plant=plant)

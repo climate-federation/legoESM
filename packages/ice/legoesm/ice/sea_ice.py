@@ -39,6 +39,7 @@ from legoesm.core.bulk_flux import (
     validate_bulk_scheme,
 )
 from legoesm.core.coupling_fields import AtmToSurface, TileResponse
+from legoesm.core.precision import nemo_source_round
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.latlon import LatLonCGridGeometry, LatLonGrid
 from legoesm.grids.voronoi import VoronoiMesh
@@ -501,12 +502,14 @@ def _nemo_si3_ice_albedo(
     cloud_fraction: jnp.ndarray,
     *,
     _preserve_subnormal_snow: bool = True,
+    _source_round: bool = True,
 ) -> jnp.ndarray:
     """Active no-pond SI3 albedo, ``icealb.F90:124-185``.
 
     The ORCA1 identity fixes ``nn_snwfra=2`` and ``ln_pnd_alb=.false.``;
     alternate snow-cover and pond branches are intentionally absent.
     """
+    source_round = nemo_source_round if _source_round else lambda value: value
     if _preserve_subnormal_snow:
         # XLA CPU flushes the smallest positive fp64 snow thickness to zero in
         # floating comparisons.  NEMO's scalar IEEE comparison does not.  A
@@ -516,44 +519,91 @@ def _nemo_si3_ice_albedo(
         snow_is_zero = (snow_bits << jnp.uint64(1)) == jnp.uint64(0)
     else:  # private one-variable ablation; never exposed in SeaIceConfig
         snow_is_zero = h_snow == 0.0
-    snow_fraction = h_snow / (h_snow + constants.snow_cover_depth_nemo)
+    # icevar.F90:1583; icealb.F90:124-130,155-185.
+    snow_fraction = source_round(
+        h_snow / source_round(h_snow + constants.snow_cover_depth_nemo)
+    )
     bare_thick = jnp.where(
         snow_is_zero & (T_surface >= constants.T_freeze),
         constants.albedo_ice_melt_orca1,
         constants.albedo_ice_dry_orca1,
     )
-    inv_log_interval = 1.0 / (
-        jnp.log(constants.albedo_ice_pivot_orca1)
-        - jnp.log(constants.albedo_ice_thin_break_nemo)
+    pivot_log = source_round(jnp.log(constants.albedo_ice_pivot_orca1))
+    inv_log_interval = source_round(
+        1.0 / source_round(
+            pivot_log - jnp.log(constants.albedo_ice_thin_break_nemo)
+        )
     )
-    bare_mid = bare_thick + (
-        constants.albedo_ice_thin_nemo - bare_thick
-    ) * inv_log_interval * (
-        jnp.log(constants.albedo_ice_pivot_orca1) - jnp.log(h_ice)
+    bare_mid_increment = source_round(
+        source_round(
+            source_round(constants.albedo_ice_thin_nemo - bare_thick)
+            * inv_log_interval
+        )
+        * source_round(pivot_log - jnp.log(h_ice))
     )
-    inv_thin_break = 1.0 / constants.albedo_ice_thin_break_nemo
-    bare_thin = constants.albedo_ocean_nemo + (
-        constants.albedo_ice_thin_nemo - constants.albedo_ocean_nemo
-    ) * inv_thin_break * h_ice
+    bare_mid = source_round(bare_thick + bare_mid_increment)
+    inv_thin_break = source_round(
+        1.0 / constants.albedo_ice_thin_break_nemo
+    )
+    bare_thin_increment = source_round(
+        source_round(
+            constants.albedo_ice_thin_nemo - constants.albedo_ocean_nemo
+        )
+        * inv_thin_break
+    )
+    bare_thin = source_round(
+        constants.albedo_ocean_nemo
+        + source_round(bare_thin_increment * h_ice)
+    )
     bare = jnp.where(
         h_ice <= constants.albedo_ice_thin_break_nemo,
         bare_thin,
         jnp.where(h_ice <= constants.albedo_ice_pivot_orca1, bare_mid, bare_thick),
     )
-    snow_dry = constants.albedo_snow_dry_orca1 - (
-        constants.albedo_snow_dry_orca1 - bare
-    ) * jnp.exp(-h_snow * (1.0 / constants.albedo_snow_decay_dry_nemo))
-    snow_melt = constants.albedo_snow_melt_orca1 - (
-        constants.albedo_snow_melt_orca1 - bare
-    ) * jnp.exp(-h_snow * (1.0 / constants.albedo_snow_decay_melt_nemo))
+    dry_decay = source_round(
+        jnp.exp(source_round(
+            -h_snow
+            * source_round(1.0 / constants.albedo_snow_decay_dry_nemo)
+        ))
+    )
+    melt_decay = source_round(
+        jnp.exp(source_round(
+            -h_snow
+            * source_round(1.0 / constants.albedo_snow_decay_melt_nemo)
+        ))
+    )
+    snow_dry = source_round(
+        constants.albedo_snow_dry_orca1
+        - source_round(
+            source_round(constants.albedo_snow_dry_orca1 - bare) * dry_decay
+        )
+    )
+    snow_melt = source_round(
+        constants.albedo_snow_melt_orca1
+        - source_round(
+            source_round(constants.albedo_snow_melt_orca1 - bare) * melt_decay
+        )
+    )
     snow = jnp.where(T_surface < constants.T_freeze, snow_dry, snow_melt)
-    overcast = snow_fraction * snow + (1.0 - snow_fraction) * bare
-    clear = overcast - (
-        constants.albedo_cloud_quad_nemo * overcast * overcast
-        + constants.albedo_cloud_linear_nemo * overcast
+    overcast = source_round(
+        source_round(snow_fraction * snow)
+        + source_round(source_round(1.0 - snow_fraction) * bare)
+    )
+    cloud_poly = source_round(
+        source_round(
+            source_round(
+                source_round(constants.albedo_cloud_quad_nemo * overcast)
+                * overcast
+            )
+            + source_round(constants.albedo_cloud_linear_nemo * overcast)
+        )
         + constants.albedo_cloud_offset_nemo
     )
-    return (1.0 - cloud_fraction) * clear + cloud_fraction * overcast
+    clear = source_round(overcast - cloud_poly)
+    return source_round(
+        source_round(source_round(1.0 - cloud_fraction) * clear)
+        + source_round(cloud_fraction * overcast)
+    )
 
 
 def _nemo_si3_blk_ice_2(
@@ -581,6 +631,7 @@ def _nemo_si3_blk_ice_2(
     emp_ocean_raw,
     ice_constants,
     _preserve_subnormal_snow: bool = True,
+    _source_round: bool = True,
 ):
     """ORCA1-resolved ``ice_alb`` + ``blk_ice_2`` scalar identity.
 
@@ -588,92 +639,157 @@ def _nemo_si3_blk_ice_2(
     ``sbcblk.F90:1218-1346``.  It is private because partial combinations with
     another public bulk selector are outside the certified identity.
     """
+    source_round = nemo_source_round if _source_round else lambda value: value
     albedo = _nemo_si3_ice_albedo(
         T_surface, h_ice, h_snow, cloud_fraction,
         _preserve_subnormal_snow=_preserve_subnormal_snow,
+        _source_round=_source_round,
     )
-    q_sat, dq_sat = nemo_si3_saturation_over_ice(T_surface, p_surface)
-    theta_surface = T_surface * (
-        constants.p_ref / p_surface
-    ) ** (
+    q_sat, dq_sat = nemo_si3_saturation_over_ice(
+        T_surface, p_surface, _source_round=_source_round,
+    )
+    poisson = source_round(
         constants.R_gas_molar
-        / (constants.M_dry_air * constants.c_p_dry_air_nemo)
+        / source_round(constants.M_dry_air * constants.c_p_dry_air_nemo)
     )
-    qsr_ice = (
-        1.0 / (1.0 - constants.albedo_ocean_nemo)
-        * (1.0 - albedo) * qsr
+    theta_surface = source_round(
+        T_surface * source_round(
+            source_round(constants.p_ref / p_surface) ** poisson
+        )
     )
-    surface_t3 = T_surface * T_surface * T_surface
-    q_lw = constants.emissivity_ice_nemo * (
-        lw_down - constants.sigma_sb_nemo * T_surface * surface_t3
+    inv_ocean_absorption = source_round(
+        1.0 / source_round(1.0 - constants.albedo_ocean_nemo)
     )
-    dq_lw = (
-        4.0 * constants.emissivity_ice_nemo
-        * constants.sigma_sb_nemo * surface_t3
+    qsr_ice = source_round(
+        source_round(
+            inv_ocean_absorption * source_round(1.0 - albedo)
+        ) * qsr
     )
-    rho_wind = rho_air * wind
-    sensible_scale = rho_wind * constants.c_p_air_ice_nemo * Ch
-    sensible = sensible_scale * (theta_surface - theta_air)
-    latent_scale = rho_wind * ice_constants.latent_sublimation * Ce
-    latent = latent_scale * (q_sat - q_air)
-    dq_latent = latent_scale * dq_sat
-    qns_ice = q_lw - sensible - latent
-    dqns_ice = -(dq_lw + sensible_scale + dq_latent)
+    surface_t3 = source_round(source_round(T_surface * T_surface) * T_surface)
+    outgoing_lw = source_round(
+        source_round(constants.sigma_sb_nemo * T_surface) * surface_t3
+    )
+    q_lw = source_round(
+        constants.emissivity_ice_nemo * source_round(lw_down - outgoing_lw)
+    )
+    lw_coefficient = source_round(
+        source_round(4.0 * constants.emissivity_ice_nemo)
+        * constants.sigma_sb_nemo
+    )
+    dq_lw = source_round(lw_coefficient * surface_t3)
+    rho_wind = source_round(rho_air * wind)
+    sensible_scale = source_round(
+        source_round(rho_wind * constants.c_p_air_ice_nemo) * Ch
+    )
+    sensible = source_round(
+        sensible_scale * source_round(theta_surface - theta_air)
+    )
+    latent_scale = source_round(
+        source_round(rho_wind * ice_constants.latent_sublimation) * Ce
+    )
+    latent = source_round(latent_scale * source_round(q_sat - q_air))
+    dq_latent = source_round(latent_scale * dq_sat)
+    qns_ice = source_round(source_round(q_lw - sensible) - latent)
+    dqns_ice = source_round(
+        -source_round(source_round(dq_lw + sensible_scale) + dq_latent)
+    )
 
-    total_precip = precip
-    snow_precip = snow
-    ocean_evap = emp_ocean_raw + total_precip
-    evaporation_ice = latent / ice_constants.latent_sublimation
-    devaporation_ice = dq_latent / ice_constants.latent_sublimation
-    snow_on_ice_fraction = 1.0 - (
-        1.0 - ice_fraction_before
-    ) ** constants.snow_blow_exponent_orca1
-    emp_ocean = (
-        (1.0 - ice_fraction_before) * ocean_evap
-        - (total_precip - snow_precip)
-        - snow_precip * (1.0 - snow_on_ice_fraction)
+    total_precip = source_round(precip)
+    snow_precip = source_round(snow)
+    ocean_evap = source_round(emp_ocean_raw + total_precip)
+    inv_latent_sublimation = source_round(1.0 / ice_constants.latent_sublimation)
+    if _source_round:
+        evaporation_ice = source_round(latent * inv_latent_sublimation)
+        devaporation_ice = source_round(dq_latent * inv_latent_sublimation)
+    else:  # private pre-fix ablation: sbcblk assembly before source-order fix
+        evaporation_ice = latent / ice_constants.latent_sublimation
+        devaporation_ice = dq_latent / ice_constants.latent_sublimation
+    snow_on_ice_fraction = source_round(
+        1.0 - source_round(
+            source_round(1.0 - ice_fraction_before)
+            ** constants.snow_blow_exponent_orca1
+        )
     )
-    emp_ice = (
-        category_fraction_before * evaporation_ice
-        - snow_precip * snow_on_ice_fraction
+    open_fraction = source_round(1.0 - ice_fraction_before)
+    liquid_precip = source_round(total_precip - snow_precip)
+    snow_open_fraction = source_round(1.0 - snow_on_ice_fraction)
+    if _source_round:
+        emp_ocean = source_round(
+            source_round(
+                source_round(open_fraction * ocean_evap) - liquid_precip
+            )
+            - source_round(snow_precip * snow_open_fraction)
+        )
+        emp_ice = source_round(
+            source_round(category_fraction_before * evaporation_ice)
+            - source_round(snow_precip * snow_on_ice_fraction)
+        )
+        emp_total = source_round(emp_ocean + emp_ice)
+    else:  # private pre-fix ablation: identical expression tree from Round 9
+        emp_ocean = (
+            (1.0 - ice_fraction_before) * ocean_evap
+            - (total_precip - snow_precip)
+            - snow_precip * (1.0 - snow_on_ice_fraction)
+        )
+        emp_ice = (
+            category_fraction_before * evaporation_ice
+            - snow_precip * snow_on_ice_fraction
+        )
+        emp_total = emp_ocean + emp_ice
+    rain_heat = source_round(
+        source_round(theta_air - ice_constants.T0) * ice_constants.c_ocean
     )
-    emp_total = emp_ocean + emp_ice
-    rain_heat = (theta_air - ice_constants.T0) * ice_constants.c_ocean
-    snow_heat = (
-        (jnp.minimum(theta_air, ice_constants.T0) - ice_constants.T0)
+    snow_heat = source_round(
+        source_round(jnp.minimum(theta_air, ice_constants.T0) - ice_constants.T0)
         * ice_constants.c_ice
     )
-    ocean_heat = sst_celsius * ice_constants.c_ocean
-    qemp_ocean = (
-        -(1.0 - ice_fraction_before) * ocean_evap * ocean_heat
-        + (total_precip - snow_precip) * rain_heat
-        + snow_precip * (1.0 - snow_on_ice_fraction)
-        * (snow_heat - ice_constants.latent_fusion)
+    ocean_heat = source_round(sst_celsius * ice_constants.c_ocean)
+    qemp_ocean_evap = source_round(
+        source_round(source_round(-open_fraction * ocean_evap) * ocean_heat)
     )
-    qemp_ice = (
-        snow_precip * snow_on_ice_fraction
-        * (snow_heat - ice_constants.latent_fusion)
+    qemp_ocean_rain = source_round(liquid_precip * rain_heat)
+    snow_enthalpy = source_round(snow_heat - ice_constants.latent_fusion)
+    qemp_ocean_snow = source_round(
+        source_round(snow_precip * snow_open_fraction) * snow_enthalpy
     )
-    qns_total = (
-        (1.0 - ice_fraction_before) * qns_ocean
-        + category_fraction_before * qns_ice
-        + qemp_ice + qemp_ocean
+    qemp_ocean = source_round(
+        source_round(qemp_ocean_evap + qemp_ocean_rain) + qemp_ocean_snow
     )
-    qsr_total = (
-        (1.0 - ice_fraction_before) * qsr_ocean
-        + category_fraction_before * qsr_ice
+    qemp_ice = source_round(
+        source_round(snow_precip * snow_on_ice_fraction) * snow_enthalpy
     )
-    qprecip_ice = ice_constants.rho_snow * (
-        snow_heat - ice_constants.latent_fusion
+    qns_total = source_round(
+        source_round(
+            source_round(
+                source_round(open_fraction * qns_ocean)
+                + source_round(category_fraction_before * qns_ice)
+            )
+            + qemp_ice
+        )
+        + qemp_ocean
     )
-    transmission = (
-        constants.ice_sw_clear_nemo * (1.0 - cloud_fraction)
-        + constants.ice_sw_cloudy_nemo * cloud_fraction
+    qsr_total = source_round(
+        source_round(open_fraction * qsr_ocean)
+        + source_round(category_fraction_before * qsr_ice)
+    )
+    qprecip_ice = source_round(ice_constants.rho_snow * snow_enthalpy)
+    transmission = source_round(
+        source_round(
+            constants.ice_sw_clear_nemo * source_round(1.0 - cloud_fraction)
+        )
+        + source_round(constants.ice_sw_cloudy_nemo * cloud_fraction)
     )
     transmission = jnp.where(
         h_ice < constants.ice_sw_thin_threshold_nemo,
-        transmission + (1.0 - transmission) * (
-            1.0 - h_ice * constants.ice_sw_thin_inverse_nemo
+        source_round(
+            transmission
+            + source_round(
+                source_round(1.0 - transmission)
+                * source_round(
+                    1.0
+                    - source_round(h_ice * constants.ice_sw_thin_inverse_nemo)
+                )
+            )
         ),
         transmission,
     )
@@ -682,7 +798,9 @@ def _nemo_si3_blk_ice_2(
         snow_is_zero = (snow_bits << jnp.uint64(1)) == jnp.uint64(0)
     else:
         snow_is_zero = h_snow == 0.0
-    qtr_ice_top = jnp.where(snow_is_zero, qsr_ice * transmission, 0.0)
+    qtr_ice_top = jnp.where(
+        snow_is_zero, source_round(qsr_ice * transmission), 0.0,
+    )
     return {
         "albedo": albedo,
         "qsr_ice": qsr_ice,
@@ -729,68 +847,108 @@ def _nemo_si3_ice_flx_other(
     sst_celsius,
     T_bottom,
     dt,
+    inverse_dt,
     rho_ocean,
     c_ocean,
     T0,
     ice_epsilon,
     max_ice_fraction,
+    _source_round: bool = True,
 ):
     """Active C1D ``ice_flx_other`` branch, ``icesbc.F90:322-437``.
 
     The accepted run has ``ln_icedyn/ln_leadhfx/ln_icedO/ln_icedH=.true.``
     and form drag false.  No public flags expose the inactive alternatives.
     """
-    du = u_ice - u_ocean
-    du_west = u_ice_west - u_ocean_west
-    dv = v_ice - v_ocean
-    dv_south = v_ice_south - v_ocean_south
-    friction = drag_io * 0.5 * (
-        (du * du + du_west * du_west) + (dv * dv + dv_south * dv_south)
+    source_round = nemo_source_round if _source_round else lambda value: value
+    # icesbc.F90:328-340.  Each scalar assignment is retained in source order.
+    du = source_round(u_ice - u_ocean)
+    du_west = source_round(u_ice_west - u_ocean_west)
+    dv = source_round(v_ice - v_ocean)
+    dv_south = source_round(v_ice_south - v_ocean_south)
+    u_square_sum = source_round(
+        source_round(du * du) + source_round(du_west * du_west)
     )
-    ice_speed = 0.5 * jnp.sqrt(
-        (u_ice_west + u_ice) * (u_ice_west + u_ice)
-        + (v_ice_south + v_ice) * (v_ice_south + v_ice)
+    v_square_sum = source_round(
+        source_round(dv * dv) + source_round(dv_south * dv_south)
+    )
+    friction = source_round(
+        source_round(drag_io * 0.5)
+        * source_round(u_square_sum + v_square_sum)
+    )
+    u_sum = source_round(u_ice_west + u_ice)
+    v_sum = source_round(v_ice_south + v_ice)
+    ice_speed = source_round(
+        0.5 * jnp.sqrt(source_round(
+            source_round(u_sum * u_sum) + source_round(v_sum * v_sum)
+        ))
     )
     switch = jnp.where(ice_fraction >= ice_epsilon, 1.0, 0.0)
-    lead_energy = dt * (
-        (1.0 - ice_fraction_before) * qsr_ocean * frq
-        + (1.0 - ice_fraction_before) * qns_ocean
-        + qemp_ocean
+    open_fraction = source_round(1.0 - ice_fraction_before)
+    lead_energy = source_round(
+        dt * source_round(
+            source_round(
+                source_round(source_round(open_fraction * qsr_ocean) * frq)
+                + source_round(open_fraction * qns_ocean)
+            )
+            + qemp_ocean
+        )
     )
-    freeze_energy = (
-        rho_ocean * c_ocean * ocean_layer_thickness
-        * (T_bottom - (sst_celsius + T0))
+    absolute_sst = source_round(sst_celsius + T0)
+    freeze_energy = source_round(
+        source_round(
+            source_round(rho_ocean * c_ocean) * ocean_layer_thickness
+        )
+        * source_round(T_bottom - absolute_sst)
     )
     freeze_negative = jnp.minimum(freeze_energy, 0.0)
     freeze_positive = jnp.maximum(freeze_energy, 0.0)
-    friction_velocity = jnp.sqrt(friction)
-    qsb = (
-        switch * rho_ocean * c_ocean
-        * constants.ice_ocean_heat_transfer_nemo * friction_velocity
-        * ((sst_celsius + T0) - T_bottom)
+    friction_velocity = source_round(jnp.sqrt(friction))
+    qsb = source_round(
+        source_round(
+            source_round(
+                source_round(switch * rho_ocean) * c_ocean
+            )
+            * constants.ice_ocean_heat_transfer_nemo
+        )
+        * source_round(friction_velocity * source_round(absolute_sst - T_bottom))
     )
     qsb = switch * jnp.minimum(
         qsb,
-        -freeze_negative / dt / jnp.maximum(ice_fraction, ice_epsilon),
+        source_round(
+            source_round(-freeze_negative * inverse_dt)
+            / jnp.maximum(ice_fraction, ice_epsilon)
+        ),
     )
     stop_supercool = (
-        (T_bottom - (sst_celsius + T0) > 0.0)
+        (source_round(T_bottom - absolute_sst) > 0.0)
         & (ice_volume >= constants.ice_supercool_volume_stop_nemo)
     )
     freeze_energy = jnp.where(stop_supercool, 0.0, freeze_energy)
     freeze_positive = jnp.where(stop_supercool, 0.0, freeze_positive)
     qsb = jnp.where(stop_supercool, 0.0, qsb)
-    cooling = lead_energy - freeze_energy < 0.0
+    energy_difference = source_round(lead_energy - freeze_energy)
+    cooling = energy_difference < 0.0
+    fhld_source = source_round(
+        source_round(
+            source_round(lead_energy - freeze_positive) * inverse_dt
+        )
+        / jnp.maximum(ice_fraction, ice_epsilon)
+    )
+    if not _source_round:  # private pre-fix ablation: Round-9 divide chain
+        fhld_source = (
+            (lead_energy - freeze_positive) / dt
+            / jnp.maximum(ice_fraction, ice_epsilon)
+        )
     fhld = jnp.where(
         cooling,
         0.0,
-        switch * jnp.maximum(
+        source_round(switch * jnp.maximum(
             0.0,
-            (lead_energy - freeze_positive) / dt
-            / jnp.maximum(ice_fraction, ice_epsilon),
-        ),
+            fhld_source,
+        )),
     )
-    qlead = jnp.where(cooling, jnp.minimum(0.0, lead_energy - freeze_energy), 0.0)
+    qlead = jnp.where(cooling, jnp.minimum(0.0, energy_difference), 0.0)
     landfast_stop = (
         (ice_speed <= constants.ice_landfast_speed_stop_nemo)
         & (ice_fraction >= max_ice_fraction - constants.ice_full_cover_margin_nemo)

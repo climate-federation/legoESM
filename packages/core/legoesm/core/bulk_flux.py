@@ -59,6 +59,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.precision import nemo_source_round
 
 # Physical constants
 KAPPA = constants.kappa_vk  # von Kármán constant (0.4)
@@ -1544,6 +1545,8 @@ def nemo_si3_constant_fluxes(
     Cd: float,
     Ch: float,
     Ce: float,
+    *,
+    _source_round: bool = True,
 ) -> tuple[jnp.ndarray, ...]:
     """Executing constant-coefficient SI3 air--ice bulk core.
 
@@ -1558,21 +1561,46 @@ def nemo_si3_constant_fluxes(
     """
     from legoesm.thermo import nemo_si3_saturation_over_ice
 
-    wind = jnp.sqrt(u_air * u_air + v_air * v_air)
-    theta_ice = T_ice * (
-        constants.p_ref / p_surface
-    ) ** (constants.R_gas_molar / (constants.M_dry_air * constants.c_p_dry_air_nemo))
-    q_sat, dq_sat_dT = nemo_si3_saturation_over_ice(T_ice, p_surface)
-    rho_wind = rho_air * wind
-    stress_scale = rho_wind * Cd
-    tau_x = stress_scale * u_air
-    tau_y = stress_scale * v_air
-    sensible_scale = rho_wind * constants.c_p_air_ice_nemo * Ch
-    latent_scale = rho_wind * constants.L_sub_nemo * Ce
-    sensible = sensible_scale * (theta_ice - theta_air)
-    latent = latent_scale * (q_sat - q_air)
+    source_round = nemo_source_round if _source_round else lambda value: value
+    # sbcblk.F90:1090,1145-1147.  The two multiplications in zztmp are
+    # one left-associated Fortran statement; putaui/pvtaui are separate.
+    if _source_round:
+        wind = source_round(jnp.sqrt(source_round(
+            source_round(u_air * u_air) + source_round(v_air * v_air)
+        )))
+        stress_scale = source_round(source_round(rho_air * Cd) * wind)
+        tau_x = source_round(stress_scale * u_air)
+        tau_y = source_round(stress_scale * v_air)
+    else:  # private pre-fix ablation: identical to the Round-9 implementation
+        wind = jnp.sqrt(u_air * u_air + v_air * v_air)
+        rho_wind_legacy = rho_air * wind
+        stress_scale = rho_wind_legacy * Cd
+        tau_x = stress_scale * u_air
+        tau_y = stress_scale * v_air
+    # sbc_phy.F90:335 and sbcblk.F90:1254-1264.
+    poisson = source_round(
+        constants.R_gas_molar
+        / source_round(constants.M_dry_air * constants.c_p_dry_air_nemo)
+    )
+    theta_ice = source_round(
+        T_ice * source_round(
+            source_round(constants.p_ref / p_surface) ** poisson
+        )
+    )
+    q_sat, dq_sat_dT = nemo_si3_saturation_over_ice(
+        T_ice, p_surface, _source_round=_source_round,
+    )
+    rho_wind = source_round(rho_air * wind)
+    sensible_scale = source_round(
+        source_round(rho_wind * constants.c_p_air_ice_nemo) * Ch
+    )
+    latent_scale = source_round(
+        source_round(rho_wind * constants.L_sub_nemo) * Ce
+    )
+    sensible = source_round(sensible_scale * source_round(theta_ice - theta_air))
+    latent = source_round(latent_scale * source_round(q_sat - q_air))
     dq_sensible_dT = sensible_scale
-    dq_latent_dT = latent_scale * dq_sat_dT
+    dq_latent_dT = source_round(latent_scale * dq_sat_dT)
     return (
         tau_x, tau_y, wind, theta_ice, q_sat, dq_sat_dT,
         sensible, latent, dq_sensible_dT, dq_latent_dT,

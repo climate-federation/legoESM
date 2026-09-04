@@ -125,6 +125,15 @@ BIT_OWNER = {
     )
     for name in names
 }
+ROUND9_OPERATION_ORDER_COUNTS = {
+    (0, "utau_ice"): 2821,
+    (0, "vtau_ice"): 2797,
+    (1, "evap_ice"): 3879,
+    (1, "devap_ice"): 3852,
+    (1, "emp_ice"): 1900,
+    (1, "emp_tot"): 1232,
+    (2, "fhld"): 13,
+}
 
 
 class GateError(RuntimeError):
@@ -278,6 +287,53 @@ def _scalar_glibc_albedo_replay(stage1: dict[str, np.ndarray]) -> dict[str, np.n
         )
     ], dtype=np.float64)
     return {"albedo": albedo, "qsr_ice": qsr_ice, "qsr_tot": qsr_total}
+
+
+def _numpy_emp_ice_order_probe(
+    stage1: dict[str, np.ndarray],
+    unrounded_emp_ice: np.ndarray,
+    *,
+    step: int = 6236,
+) -> dict[str, object]:
+    """Replay sbcblk.F90:1279,1288,1298 as separate binary64 operations."""
+    from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
+
+    index = step - 1
+    c = NEMO_SI3_CONSTANTS_CONFIG
+    inverse_latent = np.float64(np.float64(1.0) / np.float64(c.latent_sublimation))
+    evaporation = np.float64(np.float64(stage1["qla_ice"][index]) * inverse_latent)
+    weighted = np.float64(
+        np.float64(stage1["category_fraction_before"][index]) * evaporation
+    )
+    open_fraction = np.float64(
+        np.float64(1.0) - np.float64(stage1["ice_fraction_before"][index])
+    )
+    snow_on_ice = np.float64(
+        np.float64(1.0) - np.float64(open_fraction ** np.float64(0.66))
+    )
+    snow_term = np.float64(np.float64(stage1["sprecip"][index]) * snow_on_ice)
+    replay = np.float64(weighted - snow_term)
+    oracle = np.float64(stage1["emp_ice"][index])
+    unrounded = np.float64(unrounded_emp_ice[index])
+
+    def bits(value: np.float64) -> str:
+        return struct.pack(">d", value).hex()
+
+    require(bits(replay) == bits(oracle), "NEMO-order NumPy replay is not bit exact")
+    require(bits(unrounded) != bits(oracle), "unrounded order-control is vacuous")
+    return {
+        "step": step,
+        "source": "sbcblk.F90:1279,1288,1298",
+        "oracle": {"value": float(oracle), "binary64_hex": bits(oracle)},
+        "unrounded_legoesm": {
+            "value": float(unrounded), "binary64_hex": bits(unrounded),
+            "bit_identical": False,
+        },
+        "nemo_order_numpy": {
+            "value": float(replay), "binary64_hex": bits(replay),
+            "bit_identical": True,
+        },
+    }
 
 
 def _bit_owner_groups(rows: list[dict[str, object]], *, plant: bool = False) -> dict[str, object]:
@@ -449,12 +505,79 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         frq=s2["frq"], qsr_ocean=s2["qsr_ocean"], qns_ocean=s2["qns_ocean"],
         qemp_ocean=s2["qemp_ocean"], ocean_layer_thickness=s2["ocean_layer_thickness"],
         sst_celsius=s2["sst_celsius"], T_bottom=s2["T_bottom"], dt=s2["dt"],
+        inverse_dt=s2["inverse_dt"],
         rho_ocean=s2["rho_ocean"], c_ocean=s2["c_ocean"], T0=s2["T0"],
         ice_epsilon=s2["ice_epsilon"], max_ice_fraction=s2["max_ice_fraction"],
     )
     for name in ("qsb_ice_bot", "fhld", "qlead"):
         predictions[(2, name)] = other[name]
         oracle[(2, name)] = s2[name]
+
+    # Private one-variable arm: the same formulas/inputs with only the source
+    # materialization boundary disabled.  This must reproduce the Round-9
+    # operation-order census, proving that the guard rather than a formula
+    # change closes those rows.
+    unrounded_raw = nemo_si3_constant_fluxes(
+        s0["u_air"], s0["v_air"], s0["theta_air"], s0["q_air"],
+        s0["T_surface"], s0["p_surface"], s0["rho_air"],
+        constants.bulk_transfer_ice_orca1,
+        constants.bulk_transfer_ice_orca1,
+        constants.bulk_transfer_ice_orca1,
+        _source_round=False,
+    )
+    unrounded_flux2 = _nemo_si3_blk_ice_2(
+        T_surface=s1["T_surface"], h_ice=s1["h_ice"], h_snow=s1["h_snow"],
+        cloud_fraction=s1["cloud_fraction"], theta_air=s1["theta_air"],
+        q_air=s1["q_air"], p_surface=s1["p_surface"], lw_down=s1["lw_down"],
+        precip=s1["precip"], snow=s1["snow"], qsr=s1["qsr"],
+        rho_air=s1["rho_air"], wind=s1["wind"], Ch=s1["Ch"], Ce=s1["Ce"],
+        ice_fraction_before=s1["ice_fraction_before"],
+        category_fraction_before=s1["category_fraction_before"],
+        sst_celsius=s1["sst_celsius"], qns_ocean=s1["qns_ocean"],
+        qsr_ocean=s1["qsr_ocean"], emp_ocean_raw=s1["emp_ocean_raw"],
+        ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+        _source_round=False,
+    )
+    unrounded_other = _nemo_si3_ice_flx_other(
+        ice_fraction=s2["ice_fraction"], ice_fraction_before=s2["ice_fraction_before"],
+        ice_volume=s2["ice_volume"], u_ice=s2["u_ice"],
+        u_ice_west=s2["u_ice_west"], v_ice=s2["v_ice"],
+        v_ice_south=s2["v_ice_south"], u_ocean=s2["u_ocean"],
+        u_ocean_west=s2["u_ocean_west"], v_ocean=s2["v_ocean"],
+        v_ocean_south=s2["v_ocean_south"], drag_io=s2["drag_io"],
+        frq=s2["frq"], qsr_ocean=s2["qsr_ocean"], qns_ocean=s2["qns_ocean"],
+        qemp_ocean=s2["qemp_ocean"], ocean_layer_thickness=s2["ocean_layer_thickness"],
+        sst_celsius=s2["sst_celsius"], T_bottom=s2["T_bottom"], dt=s2["dt"],
+        inverse_dt=s2["inverse_dt"], rho_ocean=s2["rho_ocean"],
+        c_ocean=s2["c_ocean"], T0=s2["T0"], ice_epsilon=s2["ice_epsilon"],
+        max_ice_fraction=s2["max_ice_fraction"], _source_round=False,
+    )
+    unrounded_predictions = {
+        (0, "wndm_ice"): unrounded_raw[2],
+        (0, "utau_ice"): unrounded_raw[0],
+        (0, "vtau_ice"): unrounded_raw[1],
+        **{(1, name): unrounded_flux2[name] for name in STAGE1_NAMES[25:45]},
+        **{(2, name): unrounded_other[name]
+           for name in ("qsb_ice_bot", "fhld", "qlead")},
+    }
+    unrounded_rows = [
+        _score(unrounded_predictions[key], oracle[key], STAGE_NAMES[key[0]], key[1])
+        for key in unrounded_predictions
+    ]
+    unrounded_counts = {
+        key: int(next(
+            row["non_bit_identical_count"] for row in unrounded_rows
+            if row["stage"] == STAGE_NAMES[key[0]] and row["variable"] == key[1]
+        ))
+        for key in ROUND9_OPERATION_ORDER_COUNTS
+    }
+    require(
+        unrounded_counts == ROUND9_OPERATION_ORDER_COUNTS,
+        f"source-round private arm no longer reproduces Round 9: {unrounded_counts}",
+    )
+    order_probe = _numpy_emp_ice_order_probe(
+        s1_np, np.asarray(unrounded_flux2["emp_ice"]),
+    )
 
     # Fields not subsequently mutated by ice thermodynamics must retain their
     # registered bulk-boundary value in the stable end-of-step exchange stream.
@@ -511,6 +634,8 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         validate_selector(bad, s2_np)
     elif plant == "bit_owner":
         pass
+    elif plant == "source_round":
+        predictions = unrounded_predictions
     elif plant is not None:
         raise GateError(f"unknown plant {plant}")
 
@@ -539,8 +664,15 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
     largest = max(rows, key=lambda row: float(row["max_normalized"]))
     debt_rows = [row for row in rows if int(row["over_bar_count"])]
     require(total_over == 0, f"bulk fidelity bar violated: {total_over} rows; {debt_rows}")
+    require(
+        total_nonbit == 18
+        and set(bit_groups) == {"jax_exp_ice_alb"},
+        f"unexpected non-transcendental bit debt: {total_nonbit}, {bit_groups}",
+    )
     return {
-        "verdict": "AT-BAR",
+        "verdict": "AWAITING_LIBM_POLICY",
+        "normalized_verdict": "AT-BAR",
+        "bit_verdict": "AWAITING_LIBM_POLICY",
         "oracle_version": ORACLE_VERSION,
         "bar": BAR,
         "steps": EXPECTED_STEPS,
@@ -560,6 +692,7 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
                 "library-exact exp precision policy."
             ),
         },
+        "nemo_order_numpy_probe": order_probe,
         "largest_row": largest,
         "dtypes": {"numpy": str(stages[0].dtype), "jax_x64": True, "backend": "cpu"},
         "streams": {
@@ -589,6 +722,18 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
                 ),
                 "status": "REFUTED identity arm",
             },
+            "disable_source_statement_rounding": {
+                "hypothesis": (
+                    "the Round-9 ordinary-arithmetic rows are caused by "
+                    "contraction/reassociation across NEMO source boundaries"
+                ),
+                "per_formula_non_bit_rows": {
+                    f"{STAGE_NAMES[stage]}.{name}": count
+                    for (stage, name), count in unrounded_counts.items()
+                },
+                "non_bit_rows": sum(unrounded_counts.values()),
+                "status": "CONFIRMED one-variable private arm",
+            },
         },
     }
 
@@ -601,6 +746,7 @@ def main() -> int:
         "blk_ice_1", "ice_alb", "blk_ice_2", "ice_flx_other",
         "stream_hash", "coverage", "selector", "bit_owner",
         "runtime",
+        "source_round",
     ))
     args = parser.parse_args()
     result = evaluate(args.root, plant=args.plant)

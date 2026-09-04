@@ -360,6 +360,8 @@ def saturation_mixing_ratio_ice(
 def nemo_si3_saturation_over_ice(
     T: jax.Array,
     p: jax.Array,
+    *,
+    _source_round: bool = True,
 ) -> tuple[jax.Array, jax.Array]:
     """NEMO 5.0.2 Goff-ice specific humidity and analytic ``dq/dT``.
 
@@ -368,25 +370,51 @@ def nemo_si3_saturation_over_ice(
     that would be a different formula at an oracle boundary.  Returns
     ``(q_sat, dq_sat_dT)`` and remains JIT/reverse-mode compatible.
     """
-    zta = jnp.maximum(jnp.asarray(T), constants.T_goff_floor_nemo)
-    ztmp = constants.T_triple_nemo / zta
-    zle = (
-        constants.goff_ice_A_nemo * (ztmp - 1.0)
-        + constants.goff_ice_B_nemo * jnp.log10(ztmp)
-        + constants.goff_ice_C_nemo * (1.0 - zta / constants.T_triple_nemo)
+    from legoesm.core.precision import nemo_source_round
+
+    source_round = nemo_source_round if _source_round else lambda value: value
+    # sbc_phy.F90:674-679.  Each named Fortran assignment is materialized and
+    # the long zle expression retains its left-associated additions.
+    zta = source_round(jnp.maximum(jnp.asarray(T), constants.T_goff_floor_nemo))
+    ztmp = source_round(constants.T_triple_nemo / zta)
+    term_a = source_round(
+        constants.goff_ice_A_nemo * source_round(ztmp - 1.0)
+    )
+    term_b = source_round(constants.goff_ice_B_nemo * jnp.log10(ztmp))
+    term_c = source_round(
+        constants.goff_ice_C_nemo
+        * source_round(1.0 - source_round(zta / constants.T_triple_nemo))
+    )
+    zle = source_round(
+        source_round(source_round(term_a + term_b) + term_c)
         + jnp.log10(constants.goff_ice_D_pressure_hpa_nemo)
     )
-    e_sat = 100.0 * 10.0 ** zle
+    e_sat = source_round(100.0 * source_round(10.0 ** zle))
+    # sbc_phy.F90:749,783-788 and 707-711.
     eps = constants.R_d / constants.R_v_nemo
-    denom = (eps - 1.0) * e_sat + p
-    q_sat = eps * e_sat / denom
-    zde = (
-        -(constants.goff_ice_A_nemo * constants.T_triple_nemo) / (zta * zta)
-        - constants.goff_ice_B_nemo / (zta * jnp.log(10.0))
-        - constants.goff_ice_C_nemo / constants.T_triple_nemo
+    denom = source_round(
+        source_round(source_round(eps - 1.0) * e_sat) + p
     )
-    de_sat_dT = jnp.log(10.0) * zde * e_sat
-    dq_sat_dT = eps * p * de_sat_dT / (denom * denom)
+    q_sat = source_round(source_round(eps * e_sat) / denom)
+    zde_a = source_round(
+        -source_round(constants.goff_ice_A_nemo * constants.T_triple_nemo)
+        / source_round(zta * zta)
+    )
+    zde_b = source_round(
+        constants.goff_ice_B_nemo
+        / source_round(zta * jnp.log(10.0))
+    )
+    zde_c = source_round(
+        constants.goff_ice_C_nemo / constants.T_triple_nemo
+    )
+    zde = source_round(source_round(zde_a - zde_b) - zde_c)
+    de_sat_dT = source_round(
+        source_round(jnp.log(10.0) * zde) * e_sat
+    )
+    dq_sat_dT = source_round(
+        source_round(source_round(eps * p) * de_sat_dT)
+        / source_round(denom * denom)
+    )
     return q_sat, dq_sat_dT
 
 
