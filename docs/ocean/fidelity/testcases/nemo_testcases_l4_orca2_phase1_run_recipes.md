@@ -263,3 +263,46 @@ prepared census    471bd2f9a6482a2ebd5c55669fe2dd3984543af9d0ec180145f0f480ff8c8
 Phase 1 cannot be closed until that user-shell run is executed and passes the
 unchanged record and ordinary-output gates. It is the only directory awaiting
 execution.
+
+## Third corrective hand-off: truthful reassociation payload count
+
+The rank-zero run passed the complete inventory, sequential payload, finite
+value, monotonicity, and ordinary-output identity walks except for one false
+metadata field: `l3rea_dump` declared `18*npti` values but wrote `43*npti`.
+That run is retained and retracted as the final record set. The committed gate
+now rejects it with:
+
+```text
+oracle_si3_reassoc_operands.bin: bad payload size header
+```
+
+The exact source write-list count and correction were frozen before execution
+in `nemo_testcases_l4_orca2_phase1_payload_count_correction_preregister.md`.
+Only the config-local header expression changed. The scalar-math rebuild is:
+
+```text
+binary  /data/abyssal/dbalwada/nemo-testcases-l4/build/nemo_ORCA2_OMIP_L4_instrumented_rank0_schema.exe
+bytes   54904016
+SHA256  07cec34c5683e6a3e37fa432ac5796ab43c747ab6f468fd131a8be796996dbb8
+build   /data/abyssal/dbalwada/nemo-testcases-l4/build/build_ORCA2_OMIP_L4_instrumented_rank0_schema.log
+SHA256  42614a4b1c2b62129acdfa93569f2d172c51bbd09a0c8616422ca9aae854d028
+MY_SRC  84861aaab9aaa7a2ea35cb5a749cfb0350595c485d10e9b288db6f5e9a0e62c6
+_ZGV*   zero; empty census SHA256 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+```
+
+The only directory awaiting execution is:
+
+```text
+/data/abyssal/dbalwada/nemo-testcases-l4/runs/instrumented_rank0_schema_10step_np2
+```
+
+It uses the same regular-copy deck and immutable input symlinks. Its guarded
+Bash-time launcher runs only `mpirun -np 2 --oversubscribe ./nemo`.
+
+```text
+run.sh             59e794abc299cc34897eddd905e492edf8fe41dde456977283abf0161fc767ea
+namelist_cfg       62f4746cf3846254c18af73bcde53e42f7d4cb9ebcdaf5f63cc9ed5316a9f8f4
+deck manifest      e1974d9db5974f54d451fe1112b8f22a404516adcc7cbcf0b035fbe1cccba70b
+input manifest     3dfe251754fa76c8b5053cda90a51ee10589d0fffc01a4e799c49cc36bbd17e5
+prepared census    7be99aee79b73ef4d3b92e49441932733cfdab4fec7478995549ace0e1ce3c9c
+```
