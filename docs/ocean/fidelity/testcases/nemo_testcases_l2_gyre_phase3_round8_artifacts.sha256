@@ -35,3 +35,6 @@ d13173cb9afeb66047bc5eb6f5b102903f9b71a7a9a5c2402df5d5ceacf367f8  /data/abyssal/
 6d6ca398a04df2da74c57226a05fff2db3a8bfe8aac0f9ffb414f3703cbad711  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_jit/stage3_wzv_oracle_transport_arm.json
 f966dd60d0a8d45b92c362a7a628ae4fbbce6d4b5061f301370b943b3a011bce  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_jit/stage3_wzv_oracle_eta_arm.json
 487879f62bb95fa4f5f22d8eab9edd4fc70eb27ab632e9eab07a24d4b41aee3f  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_jit/selector_arms.json
+# round-9 like-for-like production-JIT Rule-8 comparison
+c77bca9cf568c08423004944d0dca0dbb2a77973b26bc982e8353754387f0219  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_jit/baseline_57429ecf_jit_sweep.json
+17b1d103bd6e6871ddeecbfe59d9ccc9b7a5551041c4dd13e2c1f1699cc66489  /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round9_jit/current_jit_sweep.json

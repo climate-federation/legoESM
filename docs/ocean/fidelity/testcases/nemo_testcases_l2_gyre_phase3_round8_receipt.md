@@ -161,10 +161,24 @@ DEBT remains kt=2:
 | v | `8.987995890362757e-7` | DEBT |
 | SSH | `4.77048955893622e-16` | AT-BAR |
 
-Against the resumed `57429d7` baseline sweep, 29 of 50 whole-step rows
-improve, five are identical, and 16 worsen.  The kt=2 T residual improves
-about 142× (`1.93e-10` to `1.36e-12`); the momentum debt is essentially
-unchanged.  At kt=10 the production-JIT normalized maxima are T
+The review requested enumeration of the receipt's 16 worsened rows, but that
+count was itself eager-only and is retracted rather than laundered into the
+certificate.  Like-for-like production-JIT sweeps at `57429ecf5f3` and this
+tip give 41 improved, five identical, and four worsened rows:
+
+| field | kt | `57429ecf5f3` normalized max (JIT) | current normalized max (JIT) | current / baseline |
+|---|---:|---:|---:|---:|
+| u | 5 | `1.7229656645948714e-2` | `2.0733890538774537e-2` | `1.203383849419297` |
+| u | 8 | `4.5264965475388851e-2` | `4.7180060361621853e-2` | `1.0423085462701671` |
+| u | 9 | `4.3327556604067334e-2` | `5.2560399634250458e-2` | `1.2130940157681636` |
+| u | 10 | `4.1745453128264214e-2` | `5.6249872588443578e-2` | `1.3474490842299418` |
+
+The baseline and current production-JIT sweep artifacts have SHA-256
+`c77bca9cf568c08423004944d0dca0dbb2a77973b26bc982e8353754387f0219`
+and `17b1d103bd6e6871ddeecbfe59d9ccc9b7a5551041c4dd13e2c1f1699cc66489`,
+respectively.  The kt=2 T residual improves about 142× in this named selector
+set comparison; the one-variable attribution is in the preceding disclosure.
+At kt=10 the production-JIT normalized maxima are T
 `5.6366385875689e-3`, S `1.5483121735304233e-4`, u
 `5.624987258844358e-2`, v `1.1173366024295098e-2`, and SSH
 `2.12554757616743e-4`.
