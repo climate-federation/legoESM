@@ -37,6 +37,17 @@ _CONFIG = _REPO / "config" / "amip" / "amip_production.yaml"
 # listed, so a launcher added later cannot quietly escape the gate.
 _LAUNCHERS = sorted((_REPO / "config" / "amip").glob("amip_production*.sh"))
 
+# The subgrid-orography field is only defined once you fix the SCALE
+# DECOMPOSITION: `block_deg` sets the upper cutoff of the variance it captures
+# and `fine_res_deg` the lower.  Measured 2026-09-04 on one fixed source, the
+# block size swings the Southern-Ocean launch stress ~33x across plausible
+# choices (0.5/1/2/4 deg -> 0.06/0.31/1.00/1.99 relative drag; tau_0 ~ sgh^2)
+# and the source choice ~2.3x -- so two machines running different
+# constructions are running materially different drag, which is exactly what
+# happened until this was pinned.  A file with no `history` cannot be checked
+# at all, so that is a failure too.
+_EXPECTED_CONSTRUCTION = "--fine-res-deg 1.0 --block-deg 2.0"
+
 
 def _launcher_ids() -> list[str]:
     return [p.name for p in _LAUNCHERS]
@@ -109,6 +120,35 @@ def test_production_config_does_not_trip_the_1514_guard(launcher) -> None:
     # Non-vacuity control: the SAME scheme with the wiring reverted (empty
     # path) MUST trip the guard — otherwise this test could never fail.
     assert orographic_scalar_fallback_warning(gwd, "", True) is not None
+
+
+@pytest.mark.parametrize("launcher", _LAUNCHERS, ids=_launcher_ids())
+def test_staged_sso_file_records_the_expected_construction(launcher) -> None:
+    """Every machine must build its SSO field the SAME way (#1514).
+
+    The gate used to pin only that SOME `.nc` carrying `SSO_STDH` was wired,
+    which both launchers satisfied while building the field from different
+    source resolutions -- a 2.3x drag difference between machines, silently.
+    Pin the construction itself, from the file's own `history` attribute.
+    """
+    sso = _sso_flag_value(_resolved_path_flags(launcher))
+    assert sso, "--subgrid-orography-file missing from AMIP_PATH_FLAGS"
+    p = pathlib.Path(sso)
+    if not p.parent.exists():
+        pytest.skip(f"deployment data dir {p.parent} not present on this host")
+    assert p.exists(), f"{p} is wired but NOT staged"
+    nc = pytest.importorskip("netCDF4")
+    with nc.Dataset(p) as ds:
+        history = str(getattr(ds, "history", ""))
+    assert history, (
+        f"{p} records no `history` attribute, so its scale decomposition "
+        "cannot be checked at all — regenerate it with "
+        "scripts/data/prep_subgrid_orography.py, which stamps one.")
+    assert _EXPECTED_CONSTRUCTION in history, (
+        f"{launcher.name} wires an SSO field built as {history!r}, not "
+        f"{_EXPECTED_CONSTRUCTION!r}. Block size and source resolution ARE the "
+        "scale decomposition (block size alone swings the drag ~33x), so a "
+        "machine building it differently is running different physics.")
 
 
 @pytest.mark.parametrize("launcher", _LAUNCHERS, ids=_launcher_ids())

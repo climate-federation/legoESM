@@ -85,7 +85,19 @@ DATA="${AMIP_DATA:-${REPO}/data/amip}"
 # (codex review).  Opting out needs `AMIP_SSO=/dev/null`-style explicitness or
 # a `-` in place of `:-`; both launchers share this, and it is left as-is here
 # rather than silently changing one of them.
-: "${AMIP_SSO:=/burg-archive/glab/users/pg2328/legoESM_chunk/data_pg/amip/sso_stdh_2deg.nc}"
+# CONSTRUCTION MATCHES THE LEVANTE TWIN (--fine-res-deg 1.0 --block-deg 2.0),
+# deliberately, and NOT the finer 0.25-deg-source file that is also staged here.
+# Measured 2026-09-04: block size swings the Southern-Ocean launch stress ~33x
+# across plausible choices (0.5/1/2/4 deg -> 0.06/0.31/1.00/1.99 relative drag)
+# while the SOURCE choice swings it only 2.3x, and nothing in the loader ties
+# the block size to the model grid.  So the source is a small effect inside a
+# much larger unanchored knob; matching the twin removes a cross-machine
+# confound without pretending to have settled the decomposition.
+# Acceptance on regeneration: Southern Ocean 40-60S mean sgh 3.968 m against
+# the twin's recorded 3.6 m (the residual is the source, our ETOPO regridded to
+# 1 deg vs their etopo_1deg_clean), i.e. 1.21x in drag where the previous file
+# was 2.31x.
+: "${AMIP_SSO:=/burg-archive/glab/users/pg2328/legoESM_chunk/data_pg/amip/sso_stdh_2deg_from1deg.nc}"
 
 # --- machine-specific PATH flags (everything else is in the YAML) -------------
 AMIP_PATH_FLAGS=(
