@@ -281,3 +281,25 @@ silently called the category clamp.
 | 9 | Change transport before the source census and replay identify an operand | UNASKED | Violates preregistration and one-variable discipline |
 | 9 | Walk ordinary fields through step 720 and scan the oracle excessive-removal predicate | ASKED | Review finding 4 |
 | 9 | Promote zero age/pond receiver rows or infer ORCA1 coverage from them | UNASKED | This thermodynamics-off card cannot exercise those channels |
+
+### Round-9 written-order operand addendum (before the transport arm)
+
+The first four-arm measurement refuted a velocity-only owner: replacing both
+U and V still leaves 60/160 moment rows in DEBT, led by `sxxe_l01` at
+`2.328306381027545e-9` normalized.  Inspection of the first source operation
+not reproduced literally identifies a narrower one-variable arm.  NEMO first
+forms the Courant fraction and then reconstructs transported area as
+`zalf*zpsm` in both directions (`icedyn_adv_pra.F90:582,805`); its negative
+face pass likewise adds `zalf*psm(donor)` (`:628,851`).  legoESM instead uses
+the algebraically equal but floating-point-distinct `abs(velocity)*dt`.
+Because the receiver merge multiplies this area fraction by extensive
+enthalpy, this reassociation is an operand-level candidate for the observed
+small-moment cancellation.
+
+The next arm changes only those four transported-area expressions to NEMO's
+written ordering.  Prediction: `sxxe_l01` moves down by at least one order of
+magnitude and the count of DEBT moment rows falls below 60.  Full closure to
+two ULP is **not** predicted because other compiler associations may remain.
+No limiter, flux-content, donor-loss, receiver-merge, velocity, state, or
+selector expression changes in this arm.  A failure to move either registered
+quantity refutes transported-area ordering as an owner.
