@@ -27,6 +27,9 @@ V2_A_SOURCE = BASE / "nemo502_si3bulk_scalarmath_a_src"
 V2_B_SOURCE = BASE / "nemo502_si3bulk_scalarmath_b_src"
 CONFIG_V1 = "C1D_OMIP_L3"
 CONFIG_V2 = "C1D_OMIP_L3_SM"
+SHIPPED_ARCH = Path(
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/arch/arch-conda-scalarmath.fcm"
+)
 STREAMS = (
     "oracle_si3_bulk_operands.bin",
     "oracle_si3_dh_operands.bin",
@@ -206,9 +209,15 @@ def _compare_netcdf(left: Path, right: Path) -> dict[str, object]:
 
 def evaluate(*, plant: str | None = None) -> dict[str, object]:
     v2_a_root = V1_ROOT if plant == "v1_as_v2" else V2_A_ROOT
-    arch_path = V2_A_SOURCE / "arch/arch-conda-scalarmath.fcm"
-    require(sha256(arch_path) == ARCH_SHA256, "scalar-math arch hash drift")
-    require(f"%FCFLAGS             {ARCH_FLAGS}" in arch_path.read_text(),
+    arch_paths = {
+        "shipped": SHIPPED_ARCH,
+        "A": V2_A_SOURCE / "arch/arch-conda-scalarmath.fcm",
+        "B": V2_B_SOURCE / "arch/arch-conda-scalarmath.fcm",
+    }
+    arch_hashes = {name: sha256(path) for name, path in arch_paths.items()}
+    require(all(value == ARCH_SHA256 for value in arch_hashes.values()),
+            "scalar-math arch hash drift")
+    require(f"%FCFLAGS             {ARCH_FLAGS}" in SHIPPED_ARCH.read_text(),
             "scalar-math flags drift")
 
     found_streams = tuple(sorted(path.name for path in v2_a_root.glob("oracle_si3_*.bin")))
@@ -290,8 +299,15 @@ def evaluate(*, plant: str | None = None) -> dict[str, object]:
                 "IDENTICAL" if v1_offset is None else
                 "DIFFERENT_METADATA_ONLY" if model_netcdf else "DIFFERENT"
             ),
-            "first_difference": _location(name, v1, v1_offset),
-            "transcendental_owner": None if v1_offset is None else "UNRESOLVED",
+            "first_difference": (
+                {"field": "global:TimeStamp", "classification": "run metadata"}
+                if model_netcdf and v1_offset is not None
+                else _location(name, v1, v1_offset)
+            ),
+            "transcendental_owner": (
+                None if v1_offset is None else
+                "NONE_METADATA_ONLY" if model_netcdf else "UNRESOLVED"
+            ),
             "bytes": a.stat().st_size,
         }
         if model_netcdf:
@@ -315,8 +331,8 @@ def evaluate(*, plant: str | None = None) -> dict[str, object]:
             "are bit-identical with TimeStamp-only metadata drift; no first "
             "differing scientific frame, field, or transcendental owner exists"
         ),
-        "arch": {"path": str(arch_path), "sha256": sha256(arch_path),
-                 "fcflags": ARCH_FLAGS},
+        "arch": {"paths": {name: str(path) for name, path in arch_paths.items()},
+                 "sha256": arch_hashes, "fcflags": ARCH_FLAGS},
         "build": {
             "command": (
                 "makenemo -n C1D_OMIP_L3_SM -d 'OCE SAS ICE' "

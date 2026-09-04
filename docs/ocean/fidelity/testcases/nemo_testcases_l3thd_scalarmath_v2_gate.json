@@ -1,8 +1,16 @@
 {
   "arch": {
     "fcflags": "-fdefault-real-8 -O3 -funroll-all-loops -fcray-pointer -ffree-line-length-none -fallow-argument-mismatch -fno-tree-vectorize",
-    "path": "/data/abyssal/dbalwada/nemo-testcases-l3/nemo502_si3bulk_scalarmath_a_src/arch/arch-conda-scalarmath.fcm",
-    "sha256": "132f7a0500c4f0e86d8d3bf7864974a82e1dea5d83166dcfdfaf409e2ca04561"
+    "paths": {
+      "A": "/data/abyssal/dbalwada/nemo-testcases-l3/nemo502_si3bulk_scalarmath_a_src/arch/arch-conda-scalarmath.fcm",
+      "B": "/data/abyssal/dbalwada/nemo-testcases-l3/nemo502_si3bulk_scalarmath_b_src/arch/arch-conda-scalarmath.fcm",
+      "shipped": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/arch/arch-conda-scalarmath.fcm"
+    },
+    "sha256": {
+      "A": "132f7a0500c4f0e86d8d3bf7864974a82e1dea5d83166dcfdfaf409e2ca04561",
+      "B": "132f7a0500c4f0e86d8d3bf7864974a82e1dea5d83166dcfdfaf409e2ca04561",
+      "shipped": "132f7a0500c4f0e86d8d3bf7864974a82e1dea5d83166dcfdfaf409e2ca04561"
+    }
   },
   "build": {
     "binaries": {
@@ -46,12 +54,11 @@
     "C1D_SASICE_1y_20180101_20181231_grid_T_0000.nc": {
       "bytes": 5684,
       "first_difference": {
-        "byte_offset": 281,
-        "field": null,
-        "frame": "NOT_REACHED_IN_V2"
+        "classification": "run metadata",
+        "field": "global:TimeStamp"
       },
       "kind": "model_output",
-      "transcendental_owner": "UNRESOLVED",
+      "transcendental_owner": "NONE_METADATA_ONLY",
       "v1_sha256": "10793e03d91c63b011f497be347f307113eefb82885525a0355c2ea59581bd26",
       "v1_v2": "DIFFERENT_METADATA_ONLY",
       "v1_v2_netcdf": {
@@ -77,12 +84,11 @@
     "C1D_SASICE_1y_20180101_20181231_grid_U_0000.nc": {
       "bytes": 2476,
       "first_difference": {
-        "byte_offset": 281,
-        "field": null,
-        "frame": "NOT_REACHED_IN_V2"
+        "classification": "run metadata",
+        "field": "global:TimeStamp"
       },
       "kind": "model_output",
-      "transcendental_owner": "UNRESOLVED",
+      "transcendental_owner": "NONE_METADATA_ONLY",
       "v1_sha256": "dc254f3d39fa3dab96953bae22f6fdefab726bd7e4be3141ffe385036c9568b6",
       "v1_v2": "DIFFERENT_METADATA_ONLY",
       "v1_v2_netcdf": {
@@ -108,12 +114,11 @@
     "C1D_SASICE_1y_20180101_20181231_grid_V_0000.nc": {
       "bytes": 2476,
       "first_difference": {
-        "byte_offset": 281,
-        "field": null,
-        "frame": "NOT_REACHED_IN_V2"
+        "classification": "run metadata",
+        "field": "global:TimeStamp"
       },
       "kind": "model_output",
-      "transcendental_owner": "UNRESOLVED",
+      "transcendental_owner": "NONE_METADATA_ONLY",
       "v1_sha256": "1a34b6241203c61f3aa4eb58fd3b5518e08153ae7204064c28cf26db1e611324",
       "v1_v2": "DIFFERENT_METADATA_ONLY",
       "v1_v2_netcdf": {
