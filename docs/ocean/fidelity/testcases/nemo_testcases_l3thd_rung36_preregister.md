@@ -212,6 +212,13 @@ The following facts are **CONFIRMED** from NEMO 5.0.2 source.
     `:1646-1669`.  In a one-wet-layer column the top and bottom indices refer
     to the same cell, but the two coefficients remain distinct operands and
     neither may overwrite the other.
+11. RK3 deposits `utauU/vtauV` again as the surface boundary of the 3-D
+    implicit vertical solve, after the first Thomas recurrence and before the
+    remaining forward/back substitutions
+    (`src/OCE/DYN/dynzdf.F90:322-345,496-519`; the actual insertions are
+    `:328-330,501-504`).  This is distinct
+    from the same stress's split-explicit depth-mean consumer in `stp_2D`; both
+    must execute, while a separate explicit top-cell kick must not.
 
 ## legoESM reuse and exact exchange card
 
@@ -265,6 +272,9 @@ knobs explicitly; defaults are not accepted as evidence:
 | substeps | exact NEMO `icycle` and `rDt_e` | source-replayed for exact-entry gates; continuous card must reproduce `ln_bt_auto=T,rn_bt_cmax=0.8` and hard-stop if its per-step values differ |
 | coupled time step | `tracer_time_integrator="rk3_ws"`, `momentum_time_integrator="rk3_ws"`, `outer_integrator="forward_euler"` | existing coupled validator, `state.py:2071-2077,2332`; `ocean_model_latlon_cgrid.py:3070-3100` |
 | stage mean | `nemo_stage_mean_imposition=True` | existing NEMO RK3 reconciliation, `state.py:1256-1265` |
+| vertical solve | `implicit_vertical_mixing=True` | existing shared solve, `state.py:2158`; one wet layer has no interior interface, but the registered surface stress and top/bottom drag still alter its RHS/diagonal |
+| stress placement | `surface_stress_implicit=True` | existing NEMO `dynzdf` surface-BC path; withholds the ordinary explicit kick, adds its depth mean to split-explicit forcing, and inserts the top-cell implicit RHS (`state.py:2290-2300`; executing `ocean_pe_latlon_cgrid.py:3937-3960`, `ocean_model_latlon_cgrid.py:3936-3960,7842-7863`) |
+| forcing time level | `barotropic_forcing_centred=False` | NEMO inherits `ln_bt_fw=T`; existing selector and source map at `state.py:2759-2785` |
 | freshwater | `freshwater_closure="real_freshwater"`, `normalize_freshwater=False`, `fix_eta_drift=True`, `use_conservation_fixer=False` | existing real-volume path and safety checks, `ocean_model_latlon_cgrid.py:2105-2182,5896-5912` |
 | implicit bottom drag | `bottom_drag_scheme="nemo_quadratic"`, `zdf_drag_in_matrix=True`, `zdf_baroclinic_only=True`, `barotropic_drag_substep=True` | existing shared NEMO composition, `state.py:2671-2758` |
 | implicit top drag | raw `rCdU_top` plus a new top-coefficient extension of those same shared paths | **NEW prerequisite**, source identity registered above; no private or duplicate solver |
@@ -337,7 +347,7 @@ indices, rather than inferred labels such as “now,” are authoritative.
 | `PRE_DYN_SPG_TS` | every ocean step, after complete `stp_2D` RHS assembly | `Kbb,Kaa`; `emp`, `rnf/isf` inactive flags, complete `sshe_rhs`, `Ue_rhs`, `Ve_rhs`; separate top/bottom face coefficients and baroclinic RHS from `dyn_drg_init`; external-mode selectors, `icycle`, `rDt_e`, and initial external state (`stp2d.F90:112,195-202,243-281`) |
 | `SSH_SUBSTEP` | every `jn=1..icycle` | `jn/icycle`, `rDt_e`, `ssh_frc`, extrapolation coefficients, separate top/bottom `pCdU_u/v` and drag tendencies, `sshn_e/sshb_e/sshbb_e`, `zsshp2_e`, `zhU/zhV`, `zhdiv`, `ssha_e`, `wgtbtp1/2`, and running SSH/U/V sums |
 | `POST_STP2D` | every ocean step | final weight sums; divided `ssh(:,:,Kaa)`, `uu_b/vv_b(:,:,Kaa)`, `un_adv/vn_adv`; isolated surface-mass contribution replayed with every other RHS operand held fixed |
-| `PRE_DYN_ZDF_SOLVE` | every ocean step, RK3 stage 3 only | `Kbb,Kmm,Krhs,Kaa,kstg=3`; top/bottom indices and coefficients, pre-drag diagonal and RHS, separate top/bottom diagonal additions, and complete tridiagonal matrix/RHS immediately before the shared solve (`stprk3_stg.F90:430`; `dynzdf.F90:293-309,466-481`) |
+| `PRE_DYN_ZDF_SOLVE` | every ocean step, RK3 stage 3 only | `Kbb,Kmm,Krhs,Kaa,kstg=3`; top/bottom indices and coefficients, pre-drag diagonal and RHS, separate top/bottom diagonal additions; `utauU/vtauV`, `rho0`, `e3u/e3v(:,:,1,Kaa)`, masks, and top-cell RHS immediately before/after the stress insertion; complete tridiagonal matrix/RHS before the shared solve (`stprk3_stg.F90:430`; `dynzdf.F90:293-342,466-516`) |
 
 The first `POST_SSM` mean is deliberately tested against NEMO's three seeded
 copies plus the ordinary fourth accumulation; it is not assumed to be a
@@ -386,6 +396,9 @@ and duplicate names are fatal.
    and final division—not only `Kbb/Kaa` endpoints.  Implicit momentum includes
    separate `rCdU_top` and `rCdU_bot` face coefficients, coincident top/bottom
    level indices, each matrix/RHS contribution, and their combined operator.
+   The same registered `utauU/vtauV` must be VERIFIED independently in the
+   split-explicit RHS and in the stage-3 implicit top-cell RHS, including its
+   `rho0`, `e3u/e3v(Kaa)`, mask, and before/after operands.
 7. **FWB:** `snwice_mass`, `snwice_mass_b`, `snwice_fmass`, input/output
    `emp` and `qns`, `emp_ext`, `emp_corr`, `rcp`, `sst_m`, wet area/mask, and
    `nn_fwb_voltype`.
@@ -492,7 +505,9 @@ non-vacuous:
 18. select `virtual_salt_flux` or enable a second freshwater normalization;
 19. feed one negative raw `rCdU_top` directly to the positive-rate matrix
     interface;
-20. alter one stream byte/hash and remove one coverage-register name.
+20. omit or reposition only the stage-3 implicit top-cell stress insertion
+    while retaining the identical stress in `stp_2D`;
+21. alter one stream byte/hash and remove one coverage-register name.
 
 Self-comparisons, perturbations of zero, and tautological bounds are forbidden.
 
