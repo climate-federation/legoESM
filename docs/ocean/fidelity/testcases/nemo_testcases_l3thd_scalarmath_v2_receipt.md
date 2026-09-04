@@ -27,13 +27,11 @@ call to assign as a V1-to-V2 owner.  The V1 executable does import `_ZGV*`
 libmvec symbols, while V2 does not; for this forcing/case that binary change
 does not change any registered scientific bit.
 
-Rung 3.5b remains **AT-BAR, not bit-identical**.  All 227,760 registered bulk
-rows satisfy the pointwise `1e-15` normalized bar, while 16,512 rows differ in
-binary64 representation.  Eighteen are owned by JAX `exp` in the active
-`ice_alb` path and are **AWAITING_LIBM_POLICY**; a gate-only scalar-glibc replay
-is bit-identical to NEMO for all three affected outputs.  The other 16,494 are
-ordinary multiplication/division/summation-order differences and remain
-disclosed at bar.
+Round 9 measured rung 3.5b **AT-BAR, not bit-identical**: all 227,760 rows
+satisfied the pointwise `1e-15` normalized bar, while 16,512 differed in
+binary64 representation.  This historical result is superseded by the Round
+10 source-statement closure receipt.  Round 10 fixes the 16,494 ordinary
+association rows; the 18 JAX-`exp` rows remain **AWAITING_LIBM_POLICY**.
 
 Those bit counts are runtime-specific evidence, not a version-independent JAX
 claim.  The accepting runtime is Python `3.13.0`, JAX `0.10.0`, jaxlib
