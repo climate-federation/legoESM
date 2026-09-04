@@ -1,0 +1,34 @@
+ADVERSARIAL REVIEW of the UNCOMMITTED diff in this worktree (`git diff`). Do not edit files.
+
+What the diff does: the global land-carbon initial-condition builder (stage-2 archetype
+spin-up) gains three canopy switches (--stomatal-model / --capacity-scheme / --g1-source),
+builds the two-leaf canopy surface scheme per archetype group, feeds the surface scheme's own
+GPP into the per-step carbon diagnostics (gpp_override) instead of a big-leaf re-derivation,
+hashes the switches into the equilibrium cache key (v7), writes them into both output npz
+files, and the drift validator rebuilds the same canopy from that provenance. A per-group
+timing print was added to equilibrate_archetypes.
+
+Purpose: two arms (farquhar: capacity prescribed + g1 table; p_model: capacity p_model +
+g1 p_model, both medlyn) must produce LAI/biomass equilibria that differ ONLY in those
+switches. Two previous 24 h runs on this diff completed ZERO groups (no progress print
+existed); the relaunch will use the new print to measure per-group time.
+
+Find, with file:line and a concrete failure input:
+1. Any path where the two arms differ in something OTHER than the three switches
+   (a default that only one arm hits, a big-leaf re-derivation still used somewhere the
+   canopy GPP should be, a StomataConfig field not mirrored).
+2. Any way the semi-analytic slow-pool reset reads a GPP/NPP inconsistent with what
+   step_carbon received in the coupled step (units: diag.gpp is gC/m2/day, canopy gpp is
+   gC/m2/s -- check the conversion is applied exactly once).
+3. Cache-key aliasing: two runs with different physics sharing a cache entry, or the
+   validator re-integrating a different model than the one that produced the pools.
+4. Tests that cannot fail (assert on a value the code cannot change, mocks that bypass
+   the code under test).
+5. Performance: why could 24 h complete zero groups? Read make_archetype_step_fn and
+   _spinup_batch and say whether step_multilayer_land_with_diagnostics inside a 200-year
+   hourly scan of the two-leaf Newton solve is compile-bound or run-bound on CPU, and what
+   one cheap measurement would settle it. Do not run the spin-up.
+
+Run `JAX_ENABLE_X64=1 python -m pytest tests/land/unit/test_global_init.py
+tests/land/unit/test_build_global_carbon_ic.py -x -q` on this node and quote the pass line.
+Under 400 words. Rank findings by severity; say NONE for a category with nothing.

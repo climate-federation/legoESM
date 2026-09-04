@@ -112,8 +112,11 @@ def _stub_equilibrium_result(n_arch: int = 3):
 
 
 def _counting_stub(eq, qc, calls):
-    def stub(table, *, n_spinup, n_verify, dt, n_layers, soil_depth):
+    def stub(table, *, n_spinup, n_verify, dt, n_layers, soil_depth, **flags):
+        # ``flags`` = the opt-in carbon flags + canopy switches the driver
+        # forwards; recorded so a test can prove they were forwarded.
         calls["n"] += 1
+        calls["flags"] = flags
         return eq, qc
     return stub
 
@@ -178,6 +181,22 @@ def test_load_or_equilibrate_hit_miss_and_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(bgc, "_EQUILIBRIUM_CACHE_VERSION", "v2-test")
     bgc._load_or_equilibrate(table, _SPIN, cache_dir=cache_dir, rebuild=False)
     assert calls["n"] == 3
+
+
+def test_load_or_equilibrate_forwards_every_physics_switch(tmp_path, monkeypatch):
+    """Every provenance switch in the spin dict reaches equilibrate_archetypes
+    by name (a hard-coded or dropped switch would spin the WRONG physics while
+    the cache key and the npz provenance claimed otherwise)."""
+    calls = {"n": 0}
+    _patch_equilibrate(monkeypatch, calls)
+    switches = {"stomatal_model": "medlyn", "capacity_scheme": "p_model",
+                "g1_source": "p_model", "nsc_gated_respiration": True,
+                "cold_deciduous_dormancy": True, "leaf_c_resorption_frac": 0.5}
+    assert set(switches) == set(bgc.PHYSICS_PROVENANCE_KEYS)
+    bgc._load_or_equilibrate(
+        _tiny_archetype_table(), dict(_SPIN, **switches),
+        cache_dir=str(tmp_path / "eq"), rebuild=True)
+    assert {k: calls["flags"][k] for k in switches} == switches
 
 
 def test_load_or_equilibrate_rebuild_bypasses_cache(tmp_path, monkeypatch):
@@ -283,7 +302,11 @@ def test_equilibrium_cache_key_deterministic_and_input_sensitive():
         _SPIN) != k
     # every spin-config field is in the key
     for f, v in [("n_spinup", 21), ("n_verify", 5), ("dt", 3600.0),
-                 ("n_layers", 6), ("soil_depth", 2.0)]:
+                 ("n_layers", 6), ("soil_depth", 2.0),
+                 ("stomatal_model", "medlyn"), ("capacity_scheme", "p_model"),
+                 ("g1_source", "p_model"), ("nsc_gated_respiration", True),
+                 ("cold_deciduous_dormancy", True),
+                 ("leaf_c_resorption_frac", 0.5)]:
         assert bgc._equilibrium_cache_key(t, dict(_SPIN, **{f: v})) != k, f
 
 
