@@ -39,9 +39,9 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import jax.numpy as jnp
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.core.transcendentals import exp as precision_exp
 from legoesm.ocean.eos import c_sw as _C_SW_DEFAULT
-from legoesm.core.source_rounding import nemo_source_round
 from legoesm.ocean.eos import rho_0 as _RHO_0_DEFAULT
 
 __physics_contract__ = {
@@ -340,9 +340,9 @@ def _morel_berthon_chl_column(
     zc2 = _MB89_ZCTOT_C0 + _MB89_ZCTOT_C1 * zlogc          # log(zCtot)
     zc3 = _MB89_ZZE_C0 - _MB89_ZZE_C1 * zc2                 # log(zze)
     zc3 = jnp.where(zc3 > _MB89_ZZE_BRANCH, _MB89_ZZE_ALT_C0 - _MB89_ZZE_ALT_C1 * zc2, zc3)
-    zCze = jnp.exp(zc1)
+    zCze = precision_exp(zc1)
     inv_delpsi = 1.0 / (_MB89_DELPSI_C0 + zlogc * (_MB89_DELPSI_C1 + zlogc * _MB89_DELPSI_C2))
-    inv_zze = jnp.exp(-zc3)
+    inv_zze = precision_exp(-zc3)
     zCb = _MB89_ZCB_C0 + zlogc * (_MB89_ZCB_C1 - zlogc * (_MB89_ZCB_C2 + zlogc * _MB89_ZCB_C3))
     zCmax = _MB89_ZCMAX_C0 - zlogc * (_MB89_ZCMAX_C1 - zlogc * _MB89_ZCMAX_C2)
     zpsimax = _MB89_ZPSIMAX_C0 - zlogc * (
@@ -353,7 +353,10 @@ def _morel_berthon_chl_column(
     chl_z = zCze[..., jnp.newaxis] * (
         zCb[..., jnp.newaxis]
         + zCmax[..., jnp.newaxis]
-        * jnp.exp(-(((zpsi - zpsimax[..., jnp.newaxis]) * inv_delpsi[..., jnp.newaxis]) ** 2))
+        * precision_exp(
+            -(((zpsi - zpsimax[..., jnp.newaxis])
+               * inv_delpsi[..., jnp.newaxis]) ** 2)
+        )
     )
     return jnp.clip(chl_z, _CHL_MIN, _CHL_MAX)
 
@@ -438,7 +441,7 @@ def shortwave_penetration_rgb_tendency(
         tau = jnp.cumsum(incr, axis=-1)                         # (..., nlev)
         zeros = jnp.zeros(incr.shape[:-1] + (1,), dtype=incr.dtype)
         tau = jnp.concatenate([zeros, tau], axis=-1)            # (..., nlev+1)
-        return frac_band * jnp.exp(-tau)
+        return frac_band * precision_exp(-tau)
 
     I_ir = _interface_fraction(frac_ir, jnp.broadcast_to(k_ir, dz_live.shape))
     I_red = _interface_fraction(frac_rgb, k_red)

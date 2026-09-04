@@ -467,6 +467,17 @@ def run(oracle_root: Path, mesh_path: Path) -> dict[str, object]:
             active,
         ),
     ]
+    qsr_rows[2].update({
+        "scored": False,
+        "status_detail": "NOT_BIT_EXACT_CANCELLATION_NOISE",
+        "superseded_by": "qsr.literal_accumulation_replay_vs_oracle_after",
+        "reason": (
+            "The dump recovers Krhs_after-Krhs_before after both accumulators "
+            "have rounded.  Subtractive cancellation makes this derived delta "
+            "non-bit-exact even when the literal increment and accumulation "
+            "boundary are bit-exact."
+        ),
+    })
     sbc_rows = []
     for name in ("qsr", "qns", "emp", "utau", "vtau"):
         sbc_rows.append(
@@ -481,6 +492,11 @@ def run(oracle_root: Path, mesh_path: Path) -> dict[str, object]:
     current_qsr_exact = qsr_rows[1]["status"] == "BIT-EXACT"
     literal_sbc_exact = all(row["status"] == "BIT-EXACT" for row in sbc_rows[::2])
     h1 = literal_qsr_exact and not current_qsr_exact
+    h1_status = (
+        "CONFIRMED" if h1 else
+        "SUPERSEDED_BY_FIX" if literal_qsr_exact and current_qsr_exact else
+        "NOT_CONFIRMED"
+    )
     h2_exp = not routing["exp_route_pass"]
     h2_sin_cos = not routing["sin_cos_route_pass"]
     return {
@@ -507,7 +523,11 @@ def run(oracle_root: Path, mesh_path: Path) -> dict[str, object]:
         },
         "routing_control": routing,
         "hypotheses": {
-            "H1_literal_association": "CONFIRMED" if h1 else "NOT_CONFIRMED",
+            "H1_literal_association": h1_status,
+            "H1_pre_fix_evidence": {
+                "artifact": "round16/discriminator.json",
+                "sha256": "3c44294d3dd5051958931baa42a16d670bc6226723f7061522201b88bf163405",
+            },
             "H2_exp_callback_route": "CONFIRMED" if h2_exp else "REFUTED",
             "H2_sin_cos_callback_route": "CONFIRMED" if h2_sin_cos else "REFUTED",
             "literal_sbc_all_fields": "BIT-EXACT" if literal_sbc_exact else "DEBT",
