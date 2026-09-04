@@ -96,6 +96,24 @@ def test_nemo_ws_eos_hpg_transport_are_bitwise_equal_eager_and_jit(monkeypatch):
     )
 
 
+def test_nemo_hpg_literal_component_exposure_is_the_production_sum():
+    """The WRITE-only HPG seam exposes, but cannot re-evaluate, zhpi+zuap."""
+    set_policy(PrecisionPolicy.fp64())
+    grid = create_beta_plane_cgrid_geometry(
+        3, 4, dx_m=7.0, dy_m=11.0, f0=0.0, beta=0.0,
+        cartesian_pseudo_lat=True)
+    rhd = jnp.arange(36, dtype=jnp.float64).reshape(3, 4, 3) / 13.0
+    e3w = jnp.arange(36, dtype=jnp.float64).reshape(3, 4, 3) / 17.0 + 1.0
+    gdept = jnp.cumsum(e3w, axis=-1)
+
+    values = jax.jit(lambda: nemo_hpg_sco_literal_cgrid(
+        rhd, e3w, gdept, grid, 8.0, return_components=True))()
+    sum_u, sum_v, zhpi_u, zhpj_v, zuap_u, zvap_v = (
+        np.asarray(value) for value in values)
+    np.testing.assert_array_equal(sum_u, zhpi_u + zuap_u)
+    np.testing.assert_array_equal(sum_v, zhpj_v + zvap_v)
+
+
 def test_nemo_ws_public_step_is_same_production_kernel_under_outer_disable_jit():
     """A diagnostic outer context cannot bypass the production step JIT."""
     set_policy(PrecisionPolicy.fp64())
@@ -476,6 +494,21 @@ def test_nemo_ws_exposed_tracer_stage_carries_the_stage_ssh():
             expose_tracer_stage=stage)).step(entry, dt=card.dt_s)
         np.testing.assert_allclose(np.asarray(exposed.eta.data), expected, rtol=1e-14, atol=0)
         assert float(np.abs(np.asarray(exposed.eta.data) - eta_new).max()) > 1.0e-9
+
+
+def test_nemo_ws_stage2_raw_exposure_precedes_mean_replacement():
+    """The round-11 seam returns raw Kaa, while the ordinary step still runs."""
+    card, entry = _tilted_entry_after_one_step()
+    raw = _lock_model(model_module._NEMOWSRK3TestHooks(
+        expose_stage2_raw_momentum=True)).step(entry, dt=card.dt_s)
+    corrected = _lock_model(model_module._NEMOWSRK3TestHooks(
+        expose_momentum_stage=2)).step(entry, dt=card.dt_s)
+    assert float(np.max(np.abs(
+        np.asarray(raw.u.data) - np.asarray(corrected.u.data)))) > 1.0e-12
+    # LOCK_EXCHANGE is meridionally uniform, so its v correction is the
+    # expected structural zero; the live zonal correction proves the seam.
+    np.testing.assert_array_equal(
+        np.asarray(raw.v.data), np.asarray(corrected.v.data))
 
 
 def _lock_model(hooks=None):

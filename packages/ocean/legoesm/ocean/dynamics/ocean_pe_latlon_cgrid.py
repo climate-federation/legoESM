@@ -4498,6 +4498,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     momentum_flux_face_thickness=None,
     ene_generic_f_vtx=False,
     legacy_hpg_algebraic=False,
+    nemo_operator_association: bool = False,
     return_nemo_operator_components: bool = False,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
@@ -4659,8 +4660,18 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # both the integration and the optional diagnostics path.
     KE_PGF_u = -dKE_dx - dp_dx / rho_0
     KE_PGF_v = -dKE_dy - dp_dy / rho_0
-    du_dt = KE_PGF_u
-    dv_dt = KE_PGF_v
+    _nemo_vector_order = (
+        nemo_operator_association and _mom_adv != "flux_form")
+    if _nemo_vector_order:
+        # NEMO stprk3_stg calls dyn_hpg, dyn_vor, then dyn_adv; the vector
+        # dyn_adv calls dyn_keg before dyn_zad.  Keep those routine boundaries
+        # visible to XLA so the shared Krhs accumulator has NEMO's association.
+        # Diagnostics retain their historical combined KE_PGF bucket below.
+        du_dt = jax.lax.optimization_barrier(-dp_dx / rho_0)
+        dv_dt = jax.lax.optimization_barrier(-dp_dy / rho_0)
+    else:
+        du_dt = KE_PGF_u
+        dv_dt = KE_PGF_v
     # Diagnostics scaffolding: zero arrays for terms that may be
     # inactive in this config; overwritten below where active.
     _diag_zero_u = jnp.zeros_like(du_dt)
@@ -4786,6 +4797,13 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         diag_vortcor_u = diag_vortcor_u + cor_u
         diag_vortcor_v = diag_vortcor_v + cor_v
 
+    if _nemo_vector_order:
+        # End dyn_vor; then dyn_keg is the first subroutine of dyn_adv.
+        du_dt = jax.lax.optimization_barrier(du_dt)
+        dv_dt = jax.lax.optimization_barrier(dv_dt)
+        du_dt = jax.lax.optimization_barrier(du_dt + (-dKE_dx))
+        dv_dt = jax.lax.optimization_barrier(dv_dt + (-dKE_dy))
+
     # --- Stage 7c: WENO divergence (D-term) dissipation. ---
     du_dt, dv_dt, diag_Dterm_u, diag_Dterm_v = _bc_dterm(
         du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom_adv,
@@ -4802,6 +4820,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         grid, _mom_adv, _weno_order, config, diagnose_momentum,
         u_full=u, v_full=v,
     )
+    if _nemo_vector_order:
+        # End dyn_zad / dyn_adv before any following tendency routine.
+        du_dt = jax.lax.optimization_barrier(du_dt)
+        dv_dt = jax.lax.optimization_barrier(dv_dt)
 
     # --- Stage 8b: GH #480 N/S free-slip-wall grid-mode filter. ---
     # At a free-slip N/S wall the 2dx-in-lon, v-dominant, ROTATIONAL grid mode

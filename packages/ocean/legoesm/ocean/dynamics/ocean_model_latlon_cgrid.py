@@ -1041,6 +1041,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # slots after the full step has run.  Private fidelity instrumentation only;
     # zero leaves the returned state untouched.
     expose_momentum_stage: int = 0
+    # WRITE-only companion for the round-11 composition walk: expose stage-2
+    # Kaa immediately after the selected stprk3_stg update and before the
+    # reference-depth barotropic-mean replacement.  The ordinary step still
+    # completes before the diagnostic substitutes the returned u/v slots.
+    expose_stage2_raw_momentum: bool = False
     # Restores the pre-fix LIVE-weighted stage depth mean.  NEMO removes a
     # REFERENCE-weighted one -- ``zub = uu_b(Kaa) - SUM(e3u_0*uu(:,Kaa))
     # * r1_hu_0`` (stprk3_stg.F90:440) with ``hu_0 = SUM(e3u_0*umask)``
@@ -1139,6 +1144,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # only after the ordinary step has completed.
     stage2_momentum_rhs_override: object = None
     expose_stage2_momentum_rhs: bool = False
+    # One-variable diagnostic arm for the WS-RK3 vector-source association.
+    # It forces explicit compiler boundaries between dyn_hpg -> dyn_vor ->
+    # dyn_keg -> dyn_zad; production remains on the existing shared tendency
+    # accumulator because the arm was measured bit-identical at stage 2.
+    nemo_stage_rhs_accumulation_order_arm: bool = False
     # WRITE-only transport exposure for the ordered tracer boundary walk.
     # A nonzero stage stores NEMO's metric zFu/zFv/zFw triplet in u/v/T after
     # the ordinary step; it cannot affect a later stage or public execution.
@@ -4145,6 +4155,7 @@ class LatLonCGridOceanModel:
                    momentum_flux_face_thickness=None,
                    ene_generic_f_vtx=False,
                    legacy_hpg_algebraic=False,
+                   nemo_operator_association=False,
                    return_nemo_operator_components=False):
         """Compute baroclinic tendencies.
 
@@ -4199,6 +4210,7 @@ class LatLonCGridOceanModel:
             momentum_flux_face_thickness=momentum_flux_face_thickness,
             ene_generic_f_vtx=ene_generic_f_vtx,
             legacy_hpg_algebraic=legacy_hpg_algebraic,
+            nemo_operator_association=nemo_operator_association,
             diagnose_momentum=return_nemo_operator_components,
             return_nemo_operator_components=return_nemo_operator_components,
         )
@@ -4522,7 +4534,10 @@ class LatLonCGridOceanModel:
                                ldf_state=_ldf_state, z_coord=z_coord, config=config,
                                zad_continuity_dt=dt,
                                up3_upwind_selector=_up3_selector_override,
-                               momentum_flux_face_thickness=_ws_face_thickness_kbb)
+                               momentum_flux_face_thickness=_ws_face_thickness_kbb,
+                               nemo_operator_association=(
+                                   self._nemo_ws_test_hooks
+                                   .nemo_stage_rhs_accumulation_order_arm))
         # #1492 DINO surface_tendency_placement="leapfrog_rhs": fold the
         # externally-supplied surface tracer RATE into the SAME explicit RHS
         # every other tendency uses -- BEFORE the diss-withholding split and
@@ -4787,6 +4802,7 @@ class LatLonCGridOceanModel:
         _nemo_ws_velocity_stages = None
         _nemo_ws_live_stage_geometry = None
         _nemo_ws_exposed_momentum_stage = None
+        _nemo_ws_exposed_stage2_raw = None
         _nemo_ws_exposed_tracer_stage = None
         _nemo_ws_exposed_tracer_transport = None
         _nemo_ws_exposed_momentum_operator = None
@@ -4922,6 +4938,9 @@ class LatLonCGridOceanModel:
                                      legacy_hpg_algebraic=(
                                          self._nemo_ws_test_hooks
                                          .legacy_hpg_algebraic_association),
+                                     nemo_operator_association=(
+                                         self._nemo_ws_test_hooks
+                                         .nemo_stage_rhs_accumulation_order_arm),
                                      return_nemo_operator_components=(
                                          _expose_operator))
                 if _expose_operator:
@@ -5795,6 +5814,8 @@ class LatLonCGridOceanModel:
             else:
                 u2_raw = (_qu_b * u0 + (dt_mom / 2.0) * _qu_13 * p1u_corr) / _qu_12
                 v2_raw = (_qv_b * v0 + (dt_mom / 2.0) * _qv_13 * p1v_corr) / _qv_12
+            if self._nemo_ws_test_hooks.expose_stage2_raw_momentum:
+                _nemo_ws_exposed_stage2_raw = (u2_raw, v2_raw)
             u2_corr, v2_corr = _replace_stage_mean(
                 u2_raw, v2_raw, target_u, target_v)
             _T_stage2, _S_stage2 = _stage_tracers(
@@ -7429,6 +7450,12 @@ class LatLonCGridOceanModel:
             state_new = state_new._replace(
                 u=state_new.u.replace(data=_stage_u),
                 v=state_new.v.replace(data=_stage_v),
+            )
+        if _nemo_ws_exposed_stage2_raw is not None:
+            _raw_u, _raw_v = _nemo_ws_exposed_stage2_raw
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=_raw_u),
+                v=state_new.v.replace(data=_raw_v),
             )
         if _nemo_ws_exposed_tracer_stage is not None:
             # The stage T/S/eta exactly as handed to the stage eos+dyn_hpg.

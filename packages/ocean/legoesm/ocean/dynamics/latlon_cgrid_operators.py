@@ -3735,7 +3735,9 @@ def _nemo_hpg_sco_literal_cgrid_impl(
     gdept_z0: jnp.ndarray,
     grid: LatLonGrid,
     g: float,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+    *,
+    return_components: bool = False,
+) -> tuple[jnp.ndarray, ...]:
     """Literal NEMO ``hpg_sco`` recurrence on native east/north faces.
 
     ``rhd`` is NEMO's dimensionless density anomaly and ``e3w`` /
@@ -3766,6 +3768,10 @@ def _nemo_hpg_sco_literal_cgrid_impl(
         - e3w[..., 0] * rhd[..., 0])
     u_levels = []
     v_levels = []
+    u_zhpi_levels = []
+    v_zhpj_levels = []
+    u_zuap_levels = []
+    v_zvap_levels = []
     for jk in range(rhd.shape[-1]):
         if jk > 0:
             zhpi = zhpi + zcoef0 * r1_e1u * (
@@ -3784,17 +3790,37 @@ def _nemo_hpg_sco_literal_cgrid_impl(
             dep_j1[..., jk] - gdept_z0[..., jk]) * r1_e2v
         u_levels.append(zhpi + zuap)
         v_levels.append(zhpj + zvap)
+        u_zhpi_levels.append(zhpi)
+        v_zhpj_levels.append(zhpj)
+        u_zuap_levels.append(zuap)
+        v_zvap_levels.append(zvap)
 
     native_u = jnp.stack(u_levels, axis=-1)
     native_v = jnp.stack(v_levels, axis=-1)
-    return (
+    result = (
         jnp.concatenate([native_u[:, -1:, :], native_u], axis=1),
         jnp.concatenate([jnp.zeros_like(native_v[:1]), native_v], axis=0),
+    )
+    if not return_components:
+        return result
+
+    def _u_redundant(levels):
+        native = jnp.stack(levels, axis=-1)
+        return jnp.concatenate([native[:, -1:, :], native], axis=1)
+
+    def _v_redundant(levels):
+        native = jnp.stack(levels, axis=-1)
+        return jnp.concatenate([jnp.zeros_like(native[:1]), native], axis=0)
+
+    return result + (
+        _u_redundant(u_zhpi_levels), _v_redundant(v_zhpj_levels),
+        _u_redundant(u_zuap_levels), _v_redundant(v_zvap_levels),
     )
 
 
 _nemo_hpg_sco_literal_cgrid_compiled = jax.jit(
-    _nemo_hpg_sco_literal_cgrid_impl)
+    _nemo_hpg_sco_literal_cgrid_impl,
+    static_argnames=("return_components",))
 
 
 def nemo_hpg_sco_literal_cgrid(
@@ -3803,14 +3829,18 @@ def nemo_hpg_sco_literal_cgrid(
     gdept_z0: jnp.ndarray,
     grid: LatLonGrid,
     g: float,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+    *,
+    return_components: bool = False,
+) -> tuple[jnp.ndarray, ...]:
     """Run NEMO's SCO recurrence identically inside and outside outer JIT."""
     if isinstance(rhd, jax.core.Tracer):
         return _nemo_hpg_sco_literal_cgrid_impl(
-            rhd, e3w, gdept_z0, grid, g)
+            rhd, e3w, gdept_z0, grid, g,
+            return_components=return_components)
     with jax.disable_jit(False):
         return _nemo_hpg_sco_literal_cgrid_compiled(
-            rhd, e3w, gdept_z0, grid, g)
+            rhd, e3w, gdept_z0, grid, g,
+            return_components=return_components)
 
 
 def partial_cell_pgf_correction_x(
