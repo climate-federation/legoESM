@@ -102,14 +102,20 @@ def _cell_value(oracle, candidate, index) -> dict:
     }
 
 
-def _run_boundary(card, cfg, boundary: str, transport_override=None):
+def _run_boundary(
+    card, cfg, boundary: str, transport_override=None,
+    *, source_associated_mean: bool = False,
+):
     import jax
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
         _NEMOWSRK3TestHooks,
     )
 
-    hook_args = {"stage1_tracer_transport_override": transport_override}
+    hook_args = {
+        "stage1_tracer_transport_override": transport_override,
+        "source_associated_stage_transport_mean_arm": source_associated_mean,
+    }
     if boundary == "after_update":
         hook_args["expose_tracer_stage"] = 1
     else:
@@ -178,6 +184,12 @@ def run(oracle_root: Path, control_root: Path, *, plant: bool = False) -> dict:
         )
         for boundary, pair in transport_arm.items()
     }
+    source_mean_pair = _run_boundary(
+        card, cfg, "after_update", source_associated_mean=True)
+    source_mean_arm = (
+        np.asarray(source_mean_pair[0])[..., :nlev],
+        np.asarray(source_mean_pair[1])[..., :nlev],
+    )
     if plant:
         planted = candidate["after_update"][0].copy()
         oracle_update = oracle["Kaa_T"][..., :nlev]
@@ -331,6 +343,29 @@ def run(oracle_root: Path, control_root: Path, *, plant: bool = False) -> dict:
         if clears and residual_scale
         else "REFUTED_STAGE1_TRACER_TRANSPORT_OPERAND"
     )
+    mean_scaling = {}
+    for field in ("T", "S"):
+        fi = field_index[field]
+        ov = oracle[f"Kaa_{field}"][..., :nlev][active]
+        faithful = candidate["after_update"][fi][active]
+        arm = source_mean_arm[fi][active]
+        residual = float(np.max(np.abs(faithful - ov)))
+        movement = float(np.max(np.abs(arm - faithful)))
+        arm_residual = float(np.max(np.abs(arm - ov)))
+        mean_scaling[field] = {
+            "faithful_residual": residual,
+            "source_associated_mean_arm_movement": movement,
+            "source_associated_mean_arm_residual": arm_residual,
+            "movement_over_faithful_residual": (
+                movement / residual if residual else None),
+            "arm_differing_wet_cells": int(np.count_nonzero(arm != ov)),
+        }
+    mean_clears = all(
+        row["source_associated_mean_arm_residual"] == 0.0
+        for row in mean_scaling.values())
+    mean_scale = all(
+        0.9 <= row["movement_over_faithful_residual"] <= 1.1
+        for row in mean_scaling.values())
 
     first_boundaries = sorted({
         values["first_differing_boundary"]
@@ -355,8 +390,14 @@ def run(oracle_root: Path, control_root: Path, *, plant: bool = False) -> dict:
         "cells": cells,
         "aggregate": aggregate,
         "scaling_before_owner": scaling,
+        "stored_barotropic_mean_scaling_before_owner": mean_scaling,
         "first_differing_boundaries": first_boundaries,
         "owner_label": owner_label,
+        "transport_internal_owner_label": (
+            "CONFIRMED_STORED_BAROTROPIC_MEAN_ASSOCIATION"
+            if mean_clears and mean_scale
+            else "REFUTED_STORED_BAROTROPIC_MEAN_AS_SOLE_OWNER"
+        ),
         "source_dispositions": {
             "stage1_transcendentals": "REFUTED_BY_EXECUTED_SOURCE",
             "stage1_fct_limiter": "REFUTED_BY_EXECUTED_SOURCE",
