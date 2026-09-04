@@ -186,7 +186,7 @@ def _oracle_advection_content(
 
 
 def run(mode: str, output_npz: Path, faithful_npz: Path | None,
-        plant: bool = False) -> dict:
+        plant: bool = False, oracle_root: Path | None = None) -> dict:
     import jax
     import jax.numpy as jnp
 
@@ -230,16 +230,22 @@ def run(mode: str, output_npz: Path, faithful_npz: Path | None,
         freshwater_closure="real_freshwater", fix_eta_drift=True)
     masks = expected_masks(card)
     nlev = card.recipe.z_coord.n_levels
-    tracer_path = STAGE3_ROOT / "oracle_rktracer_stage3_kt00000001.bin"
-    stage_path = STAGE3_ROOT / "oracle_stage_kt00000001_s3.bin"
-    kt2_path = STAGE3_ROOT / "oracle_step_entry_kt00000002.bin"
+    stage3_root = oracle_root or STAGE3_ROOT
+    post_transport_root = oracle_root or POST_TRA_ADV_TRP_ROOT
+    stage2_ene_root = oracle_root or STAGE2_ENE_OPERAND_ROOT
+    stage2_hpg_root = oracle_root or STAGE2_HPG_OPERAND_ROOT
+    stage3_wzv_root = oracle_root or STAGE3_WZV_ROOT
+    stage2_root = oracle_root or STAGE2_ROOT
+    tracer_path = stage3_root / "oracle_rktracer_stage3_kt00000001.bin"
+    stage_path = stage3_root / "oracle_stage_kt00000001_s3.bin"
+    kt2_path = stage3_root / "oracle_step_entry_kt00000002.bin"
     transport_path = (
-        POST_TRA_ADV_TRP_ROOT / "oracle_tracer_transport_kt00000001_s3.bin")
+        post_transport_root / "oracle_tracer_transport_kt00000001_s3.bin")
     ene_operand_path = (
-        STAGE2_ENE_OPERAND_ROOT / "oracle_rkstage2_ene_operands_kt00000001.bin")
+        stage2_ene_root / "oracle_rkstage2_ene_operands_kt00000001.bin")
     hpg_operand_path = (
-        STAGE2_HPG_OPERAND_ROOT / "oracle_rkstage2_hpg_operands_kt00000001.bin")
-    wzv_path = STAGE3_WZV_ROOT / "oracle_rkstage3_wzv_kt00000001.bin"
+        stage2_hpg_root / "oracle_rkstage2_hpg_operands_kt00000001.bin")
+    wzv_path = stage3_wzv_root / "oracle_rkstage3_wzv_kt00000001.bin"
     for path in (
             tracer_path, stage_path, kt2_path, transport_path,
             ene_operand_path, hpg_operand_path, wzv_path):
@@ -254,9 +260,9 @@ def run(mode: str, output_npz: Path, faithful_npz: Path | None,
     stage3 = read_stage(stage_path, 3)
     transport3 = read_transport(transport_path, 3)
     stage2_terms = read_stage2_terms(
-        STAGE2_ROOT / "oracle_rkstage2_terms_kt00000001.bin")
+        stage2_root / "oracle_rkstage2_terms_kt00000001.bin")
     stage2 = read_stage(
-        STAGE3_ROOT / "oracle_stage_kt00000001_s2.bin", 2)
+        stage3_root / "oracle_stage_kt00000001_s2.bin", 2)
     ene_operands = read_stage2_ene_operands(ene_operand_path)
     hpg_operands = read_stage2_hpg_operands(hpg_operand_path)
     wzv_record = read_stage3_wzv(wzv_path)
@@ -623,6 +629,7 @@ def run(mode: str, output_npz: Path, faithful_npz: Path | None,
         "precision_policy": "fp64",
         "jax_backend": jax.default_backend(),
         "execution_regime": "production_jit",
+        "oracle_root": str(oracle_root) if oracle_root is not None else "legacy split roots",
         "rows": rows,
         "status": "AT-BAR" if all(row["status"] == "AT-BAR" for row in rows) else "DEBT",
         "oracle_record": str(
@@ -908,9 +915,14 @@ def main(argv=None) -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--output-npz", type=Path, required=True)
     parser.add_argument("--faithful-npz", type=Path)
+    parser.add_argument(
+        "--oracle-root", type=Path,
+        help="single complete oracle root (Round 19 uses scalar-math V2)")
     parser.add_argument("--plant", action="store_true")
     args = parser.parse_args(argv)
-    report = run(args.mode, args.output_npz, args.faithful_npz, args.plant)
+    report = run(
+        args.mode, args.output_npz, args.faithful_npz, args.plant,
+        args.oracle_root)
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     args.output.write_text(text)
     print(text, end="")

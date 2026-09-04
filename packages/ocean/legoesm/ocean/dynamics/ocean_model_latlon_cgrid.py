@@ -1113,6 +1113,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # no constructible model configuration can select either arm.
     legacy_geographic_surface_stress_arm: bool = False
     legacy_barotropic_wind_association: bool = False
+    # Private ablation of dynspg_ts.F90:629's written continuity association.
+    # Production NEMO identities materialize ssh_frc + zhdiv before the
+    # rDt_e product; this restores the formerly collapsed algebra only for a
+    # one-variable causal measurement.
+    legacy_barotropic_continuity_association: bool = False
     # Private source-association probe for stprk3_stg.F90:265-278.  It hands
     # the separately carried stage barotropic value to zub/zvb instead of the
     # production reduction of the 3-D Kmm field.  The GYRE arm did not clear
@@ -5472,6 +5477,13 @@ class LatLonCGridOceanModel:
                     _baro_seed = dict(
                         _baro_seed,
                         _nemo_legacy_seed_faces_test_override=True)
+                if (
+                    self._nemo_ws_test_hooks
+                    .legacy_barotropic_continuity_association
+                ):
+                    _baro_seed = dict(
+                        _baro_seed,
+                        _nemo_continuity_update_test_override=False)
             elif _return_barotropic_substeps:
                 raise NotImplementedError(
                     "GYRE substep trace requires the standard-halo barotropic path")

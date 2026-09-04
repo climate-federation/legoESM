@@ -176,6 +176,8 @@ def test_gyre_whole_step_rk3_dump_registry_is_complete_and_fail_closed():
         assert time_level_for_dump(
             f"oracle_transport_kt00000001_s{stage}.bin") == "now"
     assert time_level_for_dump("oracle_rhs_kt00000001.bin") == "now"
+    assert time_level_for_dump(
+        "oracle_bt_ordered_operands_kt00000001.bin") == "now"
     with pytest.raises(ValueError, match="no registered NEMO time level"):
         time_level_for_dump("oracle_stage_kt00000002_s1.bin")
 

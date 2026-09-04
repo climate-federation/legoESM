@@ -756,6 +756,7 @@ def run(
     measure_stage2_tracers=False,
     measure_stage3_completion=False,
     without_oracle_ene_coefficients=False,
+    trajectory_only=False,
 ) -> dict:
     import jax
     import jax.numpy as jnp
@@ -1041,6 +1042,28 @@ def run(
                 faithful_kt2 = state
 
     require(faithful_kt2 is not None or max_step == 1, "kt2 candidate was not produced")
+
+    # Low-memory certification route: the trajectory loop above is the same
+    # production-jitted model and the same score/registry machinery as the
+    # full gate.  Returning here prevents the private stage/term hooks below
+    # from compiling several additional whole GYRE programs in one process;
+    # those hooks are intentionally run as separate boundary probes.
+    if trajectory_only:
+        return {
+            "format": "nemo-testcase-l2-gyre-phase3-trajectory-only-v1",
+            "case": CASE,
+            "status": "AT-BAR" if first_over_bar is None else "DEBT",
+            "execution_regime": "production-jit-cpu-fp64-x64-libm",
+            "oracle_root": str(root),
+            "max_step": max_step,
+            "first_over_bar": first_over_bar,
+            "steps": steps,
+            "artifacts": artifacts,
+            "low_memory_route": {
+                "same_production_step": True,
+                "private_stage_hooks": "SEPARATE_PROBES",
+            },
+        }
 
     freshwater0, surface0 = _surface_forcings(card, card.recipe.initial_state, 1)
     seeded_entry = model._seed_tke_preclosure_carry(card.recipe.initial_state)
@@ -2517,6 +2540,11 @@ def main(argv=None) -> int:
     parser.add_argument("--measure-stage2-tracers", action="store_true")
     parser.add_argument("--measure-stage3-completion", action="store_true")
     parser.add_argument(
+        "--trajectory-only", action="store_true",
+        help=("score only the production-JIT kt trajectory and return before "
+              "compiling private stage/operator hooks"),
+    )
+    parser.add_argument(
         "--without-oracle-ene-coefficients", action="store_true",
         help=("WAIVE the ENE-coefficient arm because the instrumented GYRE "
               "run never emitted oracle_bt_ene_coeff_kt00000001.bin. The arm "
@@ -2546,6 +2574,7 @@ def main(argv=None) -> int:
             measure_stage3_completion=args.measure_stage3_completion,
             without_oracle_ene_coefficients=(
                 args.without_oracle_ene_coefficients),
+            trajectory_only=args.trajectory_only,
         )
     except (GateError, OSError, ValueError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)

@@ -1649,3 +1649,22 @@ of them.
 
 Each boundary remains on the ordered fidelity register and requires an
 operand-level oracle discriminator before any code change.
+
+## 2026-09-04 Round 19 — S-16/S-17 external-mode source recurrences
+
+Round 19 keeps the existing RoutineRows S-16 and S-17; these are refinements
+of their one registered implementations, not exceptions or new rows.  The
+S-16 `nemo_literal` arm now follows `dynspg_ts.F90:549-562,603-609,627-629,
+653-685,719-731,771-778` in written binary64 order for the AB3 midpoint,
+continuity update, surface-weighted face SSH and inverse depth, backward SSH
+blend, pressure-gradient handoff, and vector velocity update.  The private
+`legacy_barotropic_continuity_association` hook is a non-constructible
+one-variable test ablation of `dynspg_ts.F90:629`; it is not a selector.
+
+S-17's existing `ene_metric` arm now preserves the live ENE coefficient
+program at `dynspg_ts.F90:1383-1410`: it accumulates
+`e3u*e3v*mask/e3f_vor` vertically before applying `ff_f` in the post-loop
+coefficient statement.  The former algebraic folding of `ff_f/e3f_vor` into
+each level was not a NEMO branch.  Both S-16 and S-17 use the one shared
+`legoesm.core.source_rounding.nemo_source_round` helper; no GYRE guard or
+second NEMO routine implementation was introduced.

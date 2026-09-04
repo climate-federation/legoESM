@@ -57,6 +57,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.latlon import LatLonGrid, ensure_geometry
 from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
@@ -514,7 +515,8 @@ def _nemo_ssh_avg_prep(H_bathy, mask, grid, dtype, _nfold_mask=None):
 
 
 def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
-                        return_literal_inverse=False):
+                        return_literal_inverse=False,
+                        return_ssh_average=False):
     """Apply the NEMO ssh-average face-depth formula at one ``eta`` snapshot,
     given the loop-invariant ``prep = _nemo_ssh_avg_prep(...)`` tuple.  See
     :func:`nemo_ssh_avg_face_depth` for the full formula docstring."""
@@ -522,36 +524,46 @@ def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
 
     area_w = jnp.roll(area, 1, axis=1)
     eta_w = jnp.roll(eta_dyn, 1, axis=1)
-    ssh_avg_u = 0.5 * _r1_e1e2u[:, :-1] * (area_w * eta_w + area * eta_dyn)
+    # dynspg_ts.F90:663-666, in the written gfortran association.  These are
+    # source statements in the NEMO external-mode identity, so make every
+    # binary operation an observable IEEE result before XLA can reassociate it.
+    ssh_u_w = nemo_source_round(area_w * eta_w)
+    ssh_u_e = nemo_source_round(area * eta_dyn)
+    ssh_u_sum = nemo_source_round(ssh_u_w + ssh_u_e)
+    ssh_u_scale = nemo_source_round(0.5 * _r1_e1e2u[:, :-1])
+    ssh_avg_u = nemo_source_round(ssh_u_scale * ssh_u_sum)
+    ssh_avg_u = nemo_source_round(ssh_avg_u * u_mask[:, :-1])
     ssh_avg_u = jnp.concatenate([ssh_avg_u, ssh_avg_u[:, 0:1]], axis=1)
-    H_u = (H_u_ref + ssh_avg_u) * u_mask
-    # ``where(mask, 1/H, 0)`` still evaluates 1/H on masked zero-depth faces
-    # under JAX and can poison reverse-mode derivatives with inf/NaN.  Replace
-    # the dry denominator before division, then zero the result.
-    H_u_ref_safe = jnp.where(u_mask > 0.5, H_u_ref, 1.0)
-    r1_u_ref = jnp.where(u_mask > 0.5, 1.0 / H_u_ref_safe, 0.0)
-    r3_u = ssh_avg_u * r1_u_ref
-    r1_u = (r1_u_ref / (1.0 + r3_u)) * u_mask
+    H_u = nemo_source_round(H_u_ref + ssh_avg_u)
+    r1_u_denom = nemo_source_round(nemo_source_round(H_u + 1.0) - u_mask)
+    r1_u = nemo_source_round(u_mask / r1_u_denom)
 
     area_pad = pad_ns_zero(area)
     eta_pad = pad_ns_zero(eta_dyn)
-    ssh_avg_v = 0.5 * _r1_e1e2v * (
-        area_pad[:-1] * eta_pad[:-1] + area_pad[1:] * eta_pad[1:]
-    )
+    ssh_v_s = nemo_source_round(area_pad[:-1] * eta_pad[:-1])
+    ssh_v_n = nemo_source_round(area_pad[1:] * eta_pad[1:])
+    ssh_v_sum = nemo_source_round(ssh_v_s + ssh_v_n)
+    ssh_v_scale = nemo_source_round(0.5 * _r1_e1e2v)
+    ssh_avg_v = nemo_source_round(ssh_v_scale * ssh_v_sum)
+    ssh_avg_v = nemo_source_round(ssh_avg_v * v_mask)
     ssh_avg_v = _zero_polar_lat_ends(ssh_avg_v)
     if fold_is_local(grid) or _nfold_mask is not None:
         area_fold = fold_vface_row(area, grid)
         eta_fold = fold_vface_row(eta_dyn, grid)
-        ssh_avg_north = 0.5 * _r1_e1e2v[-1:] * (
-            area[-1:] * eta_dyn[-1:] + area_fold * eta_fold)
+        ssh_n_local = nemo_source_round(area[-1:] * eta_dyn[-1:])
+        ssh_n_fold = nemo_source_round(area_fold * eta_fold)
+        ssh_n_sum = nemo_source_round(ssh_n_local + ssh_n_fold)
+        ssh_n_scale = nemo_source_round(0.5 * _r1_e1e2v[-1:])
+        ssh_avg_north = nemo_source_round(ssh_n_scale * ssh_n_sum)
+        ssh_avg_north = nemo_source_round(ssh_avg_north * v_mask[-1:])
         ssh_avg_v = apply_north_fold(
             ssh_avg_v, ssh_avg_north, grid, north_mask=_nfold_mask)
-    H_v = (H_v_ref + ssh_avg_v) * v_mask
-    H_v_ref_safe = jnp.where(v_mask > 0.5, H_v_ref, 1.0)
-    r1_v_ref = jnp.where(v_mask > 0.5, 1.0 / H_v_ref_safe, 0.0)
-    r3_v = ssh_avg_v * r1_v_ref
-    r1_v = (r1_v_ref / (1.0 + r3_v)) * v_mask
+    H_v = nemo_source_round(H_v_ref + ssh_avg_v)
+    r1_v_denom = nemo_source_round(nemo_source_round(H_v + 1.0) - v_mask)
+    r1_v = nemo_source_round(v_mask / r1_v_denom)
     if return_literal_inverse:
+        if return_ssh_average:
+            return H_u, H_v, r1_u, r1_v, ssh_avg_u, ssh_avg_v
         return H_u, H_v, r1_u, r1_v
     return H_u, H_v
 
@@ -647,7 +659,11 @@ def nemo_literal_accumulate_transport(
     # into 0*Inf=NaN on lean-grid tests and at wall halos.
     r1_e2u = jnp.where(u_mask != 0, 1.0 / e2u, 0.0)
     r1_e1v = jnp.where(v_mask != 0, 1.0 / e1v, 0.0)
-    b = jax.lax.optimization_barrier
+    # Every ``b`` below is one written operation from dynspg_ts.F90's
+    # dyn_cor_2D_init recurrence.  ``optimization_barrier`` alone is stripped
+    # by XLA; use the shared IEEE identity that keeps each source result
+    # observable to the next statement.
+    b = nemo_source_round
     inc_u = b(b(raw_weight * b(zh_u)) * b(r1_e2u))
     inc_v = b(b(raw_weight * b(zh_v)) * b(r1_e1v))
     return b(Hu_sum + inc_u), b(Hv_sum + inc_v)
@@ -856,7 +872,10 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een"):
         raise ValueError(
             "literal NEMO EEN coefficients require eta at the native A2D "
             f"shape {raw.ff_f.shape}; got {None if eta is None else eta.shape}")
-    b = jax.lax.optimization_barrier
+    # This builder is the literal dynspg_ts coefficient program.  A bare
+    # optimization_barrier is stripped from optimized HLO; keep every written
+    # binary64 result observable with the shared NEMO source-round identity.
+    b = nemo_source_round
     one = jnp.asarray(1.0, dtype=dtype)
     half = jnp.asarray(0.5, dtype=dtype)
     quarter = jnp.asarray(0.25, dtype=dtype)
@@ -917,6 +936,27 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een"):
         return b(b(b(b(leading_scale * b(one / local_metric)) * r1_h)
                      * neighbor_metric) * acc)
 
+    def ene_coefficient(face, neighbor, neighbor_mask, e3f_divisor,
+                        f_factor, neighbor_metric, local_metric, r1_h):
+        """dynspg_ts.F90:1387-1409, without moving ``ff_f`` into q.
+
+        ENE accumulates ``e3u*e3v*mask/e3f`` first and multiplies the frozen
+        Coriolis value only after the vertical sum.  Folding ``ff_f/e3f``
+        into the per-level term is algebraically equivalent but not the NEMO
+        source program.
+        """
+        term = b(face * neighbor)
+        term = b(term * neighbor_mask)
+        term = b(term / e3f_divisor)
+        acc = jnp.zeros_like(r1_h)
+        for jk in range(term.shape[-1]):
+            acc = b(acc + term[..., jk])
+        scale = b(quarter * b(one / local_metric))
+        scale = b(scale * r1_h)
+        scale = b(scale * neighbor_metric)
+        scale = b(scale * f_factor)
+        return b(scale * acc)
+
     if scheme == "een":
         uq = {
             "nw": triad(shift(q, 1, 0), q, shift(q, 0, 1)),
@@ -931,7 +971,7 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een"):
             "nw": triad(q, shift(q, 1, 0), shift(q, 1, -1)),
         }
     else:
-        # dynspg_ts.F90 np_ENE:1418-1446.  The northern U pair shares
+        # dynspg_ts.F90 np_ENE:1383-1410.  The northern U pair shares
         # ff_f/e3f at F(i,j); the southern pair uses F(i,j-1).  The western V
         # pair uses F(i-1,j); the eastern pair uses F(i,j).
         uq = {
@@ -945,6 +985,18 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een"):
             "ne": q,
             "sw": shift(q, 1, 0),
             "se": q,
+        }
+        ene_u_f = {
+            "nw": (e3f, ff),
+            "ne": (e3f, ff),
+            "sw": (shift(e3f, 0, 1), shift(ff, 0, 1)),
+            "se": (shift(e3f, 0, 1), shift(ff, 0, 1)),
+        }
+        ene_v_f = {
+            "nw": (shift(e3f, 1, 0), shift(ff, 1, 0)),
+            "ne": (e3f, ff),
+            "sw": (shift(e3f, 1, 0), shift(ff, 1, 0)),
+            "se": (e3f, ff),
         }
     un = {
         "nw": (e3v, vmask, e1v),
@@ -963,11 +1015,23 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een"):
     out = {}
     for corner in ("nw", "ne", "sw", "se"):
         neighbor, neighbor_mask, metric = un[corner]
-        out[f"ffu_{corner}"] = coefficient(
-            e3u, neighbor, neighbor_mask, uq[corner], metric, e1u, r1_hu)
+        if scheme == "ene":
+            divisor, f_factor = ene_u_f[corner]
+            out[f"ffu_{corner}"] = ene_coefficient(
+                e3u, neighbor, neighbor_mask, divisor, f_factor,
+                metric, e1u, r1_hu)
+        else:
+            out[f"ffu_{corner}"] = coefficient(
+                e3u, neighbor, neighbor_mask, uq[corner], metric, e1u, r1_hu)
         neighbor, neighbor_mask, metric = vn[corner]
-        out[f"ffv_{corner}"] = coefficient(
-            e3v, neighbor, neighbor_mask, vq[corner], metric, e2v, r1_hv)
+        if scheme == "ene":
+            divisor, f_factor = ene_v_f[corner]
+            out[f"ffv_{corner}"] = ene_coefficient(
+                e3v, neighbor, neighbor_mask, divisor, f_factor,
+                metric, e2v, r1_hv)
+        else:
+            out[f"ffv_{corner}"] = coefficient(
+                e3v, neighbor, neighbor_mask, vq[corner], metric, e2v, r1_hv)
     return out
 
 
@@ -1082,16 +1146,6 @@ def _build_een_barotropic_inputs(h_k, grid, mask, u_mask, v_mask, dtype,
 def _nemo_literal_barotropic_coriolis(U_bar, V_bar, coefficients,
                                       *, return_terms=False):
     """Apply frozen NEMO ENE/EEN coefficients in source association order."""
-    b = jax.lax.optimization_barrier
-
-    def source_pair(first, second):
-        terms = jnp.stack((b(first), b(second)), axis=0)
-
-        def add_one(acc, term):
-            return b(acc + term), None
-
-        return jax.lax.scan(add_one, jnp.zeros_like(first), terms)[0]
-
     # Native NEMO arrays name the east/north face of T(i,j); legoESM stores
     # redundant west/south faces.  Apply first, map only afterward.
     ua = U_bar[:, 1:]
@@ -1103,23 +1157,27 @@ def _nemo_literal_barotropic_coriolis(U_bar, V_bar, coefficients,
     west_u = jnp.roll(ua, 1, axis=1)
     northwest_u = jnp.roll(north_u, 1, axis=1)
     products = {
-        "u_nw": b(coefficients["ffu_nw"] * va),
-        "u_ne": b(coefficients["ffu_ne"] * east_v),
-        "u_sw": b(coefficients["ffu_sw"] * south_v),
-        "u_se": b(coefficients["ffu_se"] * southeast_v),
-        "v_sw": b(coefficients["ffv_sw"] * west_u),
-        "v_se": b(coefficients["ffv_se"] * ua),
-        "v_nw": b(coefficients["ffv_nw"] * northwest_u),
-        "v_ne": b(coefficients["ffv_ne"] * north_u),
+        "u_nw": nemo_source_round(coefficients["ffu_nw"] * va),
+        "u_ne": nemo_source_round(coefficients["ffu_ne"] * east_v),
+        "u_sw": nemo_source_round(coefficients["ffu_sw"] * south_v),
+        "u_se": nemo_source_round(coefficients["ffu_se"] * southeast_v),
+        "v_sw": nemo_source_round(coefficients["ffv_sw"] * west_u),
+        "v_se": nemo_source_round(coefficients["ffv_se"] * ua),
+        "v_nw": nemo_source_round(coefficients["ffv_nw"] * northwest_u),
+        "v_ne": nemo_source_round(coefficients["ffv_ne"] * north_u),
     }
-    products["u_north_pair"] = source_pair(products["u_nw"], products["u_ne"])
-    products["u_south_pair"] = source_pair(products["u_sw"], products["u_se"])
-    products["u_total"] = source_pair(
-        products["u_north_pair"], products["u_south_pair"])
-    products["v_south_pair"] = source_pair(products["v_sw"], products["v_se"])
-    products["v_north_pair"] = source_pair(products["v_nw"], products["v_ne"])
-    products["v_total"] = -source_pair(
-        products["v_south_pair"], products["v_north_pair"])
+    products["u_north_pair"] = nemo_source_round(
+        products["u_nw"] + products["u_ne"])
+    products["u_south_pair"] = nemo_source_round(
+        products["u_sw"] + products["u_se"])
+    products["u_total"] = nemo_source_round(
+        products["u_north_pair"] + products["u_south_pair"])
+    products["v_south_pair"] = nemo_source_round(
+        products["v_sw"] + products["v_se"])
+    products["v_north_pair"] = nemo_source_round(
+        products["v_nw"] + products["v_ne"])
+    products["v_total"] = -nemo_source_round(
+        products["v_south_pair"] + products["v_north_pair"])
     cor_u = jnp.concatenate([products["u_total"][:, -1:], products["u_total"]], axis=1)
     cor_v = jnp.concatenate(
         [jnp.zeros_like(products["v_total"][:1]), products["v_total"]], axis=0)
@@ -1332,6 +1390,7 @@ def _run_substep_loop(
     primary_transport_average=False,
     return_trace=False,
     nemo_flux_form_update_test_override=None,
+    nemo_continuity_update_test_override=None,
 ):
     """The forward-backward substep loop (verbatim extraction).
 
@@ -1503,8 +1562,18 @@ def _run_substep_loop(
         if ab3_za is not None:
             # NEMO AB3 mid-step velocity extrapolation (dynspg_ts.F90:549-554)
             # u^{m+1/2} = za1*u^m + za2*u^{m-1} + za3*u^{m-2}
-            U_mid = za_i[0] * U_bar_c + za_i[1] * Ub_c + za_i[2] * Ubb_c
-            V_mid = za_i[0] * V_bar_c + za_i[1] * Vb_c + za_i[2] * Vbb_c
+            def _nemo_midpoint(now, before, before_before):
+                first = nemo_source_round(
+                    za_i[0] * nemo_source_round(now))
+                second = nemo_source_round(
+                    za_i[1] * nemo_source_round(before))
+                third = nemo_source_round(
+                    za_i[2] * nemo_source_round(before_before))
+                value = nemo_source_round(first + second)
+                return nemo_source_round(value + third)
+
+            U_mid = _nemo_midpoint(U_bar_c, Ub_c, Ubb_c)
+            V_mid = _nemo_midpoint(V_bar_c, Vb_c, Vbb_c)
         else:
             U_mid, V_mid = U_bar_c, V_bar_c
         eta_mid = eta_c
@@ -1525,7 +1594,7 @@ def _run_substep_loop(
             # extrapolation, hence the `not linear_free_surface` gate.  The
             # ll_init ramp rows have za=(1,0,0) ⇒ eta_mid == eta_c on the
             # first two substeps (NEMO-exact, :535-538).
-            eta_mid = za_i[0] * eta_c + za_i[1] * etab_c + za_i[2] * etabb_c
+            eta_mid = _nemo_midpoint(eta_c, etab_c, etabb_c)
             if _face_depth_mode == "nemo_ssh_avg":
                 H_u_flux, H_v_flux = _ssh_avg_face_depths(eta_mid)
             else:
@@ -1561,7 +1630,31 @@ def _run_substep_loop(
             div_flux = divergence_cgrid(
                 flux_u, flux_v, grid, u_mask=u_mask, v_mask=v_mask,
             ).astype(dtype)
-        eta_unfloored = (eta_c - dt_s * div_flux + dt_s * F_slow_eta * mask) * mask
+        _literal_continuity_update = _continuity_evaluation == "nemo_literal"
+        # Harness-only one-variable ablation.  NEMO has no association
+        # selector inside dynspg_ts:629; production always follows the source
+        # statement below when the collapsed NEMO identity is active.
+        if nemo_continuity_update_test_override is not None:
+            _literal_continuity_update = bool(
+                nemo_continuity_update_test_override)
+        if _literal_continuity_update:
+            # dynspg_ts.F90:628-629, preserving the statement's written
+            # ``ssh - dt * (ssh_frc + zhdiv)`` association.  legoESM stores
+            # positive freshwater convergence, hence ssh_frc = -F_slow_eta.
+            ssh_frc = nemo_source_round(-F_slow_eta * mask)
+            # Materialize both operands at this call boundary too: the same
+            # arrays are returned by the private trace, but XLA may otherwise
+            # inline their producing expressions independently into this use.
+            ssh_div = nemo_source_round(div_flux)
+            ssh_rhs = nemo_source_round(
+                nemo_source_round(ssh_frc) + ssh_div)
+            ssh_increment = nemo_source_round(dt_s * ssh_rhs)
+            eta_unfloored = nemo_source_round(eta_c - ssh_increment)
+            eta_unfloored = nemo_source_round(eta_unfloored * mask)
+        else:
+            ssh_frc = -F_slow_eta * mask
+            eta_unfloored = (
+                eta_c - dt_s * div_flux + dt_s * F_slow_eta * mask) * mask
         if local_subcycle_clamp:
             # SOTA-local (MOM6/MPAS-O): LOCAL clamp per substep — NO allreduce.
             # The global mass-conserving redistribute is deferred to ONCE per
@@ -1578,8 +1671,17 @@ def _run_substep_loop(
             # NEMO ts_bck_interp: ssh' = zb0*ssh^{m+1} + zb1*ssh^m
             #                          + zb2*ssh^{m-1} + zb3*ssh^{m-2}
             # (the Demange temporal dissipation; replaces the bebt blend).
-            eta_pgf = (zb_i[0] * eta_new + zb_i[1] * eta_c
-                       + zb_i[2] * etab_c + zb_i[3] * etabb_c)
+            _zb0_eta = nemo_source_round(
+                zb_i[0] * nemo_source_round(eta_new))
+            _zb1_eta = nemo_source_round(
+                zb_i[1] * nemo_source_round(eta_c))
+            _zb2_eta = nemo_source_round(
+                zb_i[2] * nemo_source_round(etab_c))
+            _zb3_eta = nemo_source_round(
+                zb_i[3] * nemo_source_round(etabb_c))
+            eta_pgf = nemo_source_round(_zb0_eta + _zb1_eta)
+            eta_pgf = nemo_source_round(eta_pgf + _zb2_eta)
+            eta_pgf = nemo_source_round(eta_pgf + _zb3_eta)
         else:
             eta_pgf = bebt_blend(eta_new, eta_c, bebt)
         _pgf_eval = config.barotropic.barotropic_pgf_evaluation
@@ -1658,9 +1760,21 @@ def _run_substep_loop(
                 _pgf_u, _cor_u + _drag_u, F_slow_u_i, dt_s, u_mask,
                 min_water_col)
         else:
-            U_bar_new = (U_bar_c + dt_s * (
-                _cor_u + _drag_u + _pgf_u + F_slow_u_i
-            )) * u_mask
+            if _continuity_evaluation == "nemo_literal":
+                _trd_u = nemo_source_round(
+                    nemo_source_round(_cor_u) + nemo_source_round(_drag_u))
+                _rhs_u = nemo_source_round(
+                    nemo_source_round(_pgf_u) + _trd_u)
+                _rhs_u = nemo_source_round(
+                    _rhs_u + nemo_source_round(F_slow_u_i))
+                _inc_u = nemo_source_round(dt_s * _rhs_u)
+                U_bar_new = nemo_source_round(
+                    nemo_source_round(U_bar_c) + _inc_u)
+                U_bar_new = nemo_source_round(U_bar_new * u_mask)
+            else:
+                U_bar_new = (U_bar_c + dt_s * (
+                    _cor_u + _drag_u + _pgf_u + F_slow_u_i
+                )) * u_mask
 
         # U averaged to v-points for the backward Coriolis half-step,
         # cell-pad-first (shared interp_u_to_vface_4pt): the partition-
@@ -1691,9 +1805,21 @@ def _run_substep_loop(
                 _pgf_v, _cor_v + _drag_v, F_slow_v_i, dt_s, v_mask,
                 min_water_col)
         else:
-            V_bar_new = (V_bar_c + dt_s * (
-                _cor_v + _drag_v + _pgf_v + F_slow_v_i
-            )) * v_mask
+            if _continuity_evaluation == "nemo_literal":
+                _trd_v = nemo_source_round(
+                    nemo_source_round(_cor_v) + nemo_source_round(_drag_v))
+                _rhs_v = nemo_source_round(
+                    nemo_source_round(_pgf_v) + _trd_v)
+                _rhs_v = nemo_source_round(
+                    _rhs_v + nemo_source_round(F_slow_v_i))
+                _inc_v = nemo_source_round(dt_s * _rhs_v)
+                V_bar_new = nemo_source_round(
+                    nemo_source_round(V_bar_c) + _inc_v)
+                V_bar_new = nemo_source_round(V_bar_new * v_mask)
+            else:
+                V_bar_new = (V_bar_c + dt_s * (
+                    _cor_v + _drag_v + _pgf_v + F_slow_v_i
+                )) * v_mask
 
         # Divergence damping: grad(div(u_bar)) (#205)
         if use_div_damp:
@@ -1794,10 +1920,57 @@ def _run_substep_loop(
                 if _transport_evaluation == "nemo_literal"
                 else (flux_u, flux_v)
             )
+            continuity_du = metric_transport_u[:, 1:] - metric_transport_u[:, :-1]
+            continuity_dv = metric_transport_v[1:] - metric_transport_v[:-1]
+            if _face_depth_mode == "nemo_ssh_avg":
+                (trace_depth_u_exit, trace_depth_v_exit,
+                 trace_r1_depth_u_exit, trace_r1_depth_v_exit,
+                 trace_face_ssh_u_exit,
+                 trace_face_ssh_v_exit) = _nemo_ssh_avg_apply(
+                    eta_new, u_mask, v_mask, grid, area, _ssh_avg_prep,
+                    return_literal_inverse=True, return_ssh_average=True)
+            else:
+                trace_depth_u_exit, trace_depth_v_exit = _face_depths(
+                    jnp.maximum(eta_new + H_bathy, min_water_col) * mask)
+                trace_r1_depth_u_exit = jnp.where(
+                    u_mask != 0, 1.0 / jnp.maximum(trace_depth_u_exit, min_water_col), 0.0)
+                trace_r1_depth_v_exit = jnp.where(
+                    v_mask != 0, 1.0 / jnp.maximum(trace_depth_v_exit, min_water_col), 0.0)
+                trace_face_ssh_u_exit = jnp.zeros_like(trace_depth_u_exit)
+                trace_face_ssh_v_exit = jnp.zeros_like(trace_depth_v_exit)
+            if ab3_za is not None:
+                trace_u_b, trace_u_bb = Ub_c, Ubb_c
+                trace_v_b, trace_v_bb = Vb_c, Vbb_c
+                trace_eta_b, trace_eta_bb = etab_c, etabb_c
+                trace_mid_weights = za_i
+                trace_back_weights = zb_i
+            else:
+                trace_u_b = trace_u_bb = U_bar_c
+                trace_v_b = trace_v_bb = V_bar_c
+                trace_eta_b = trace_eta_bb = eta_c
+                trace_mid_weights = jnp.asarray((1.0, 0.0, 0.0), dtype=dtype)
+                trace_back_weights = jnp.asarray((0.0, 1.0, 0.0, 0.0), dtype=dtype)
+            _literal_cor_coeff = (
+                een_pre.get("literal_coefficients")
+                if een_pre is not None else None)
+            _zero_cor_coeff = jnp.zeros_like(eta_c)
             trace = {
                 "eta_entry": eta_c,
                 "u_entry": U_bar_c,
                 "v_entry": V_bar_c,
+                "eta_history_b": trace_eta_b,
+                "eta_history_bb": trace_eta_bb,
+                "u_history_b": trace_u_b,
+                "u_history_bb": trace_u_bb,
+                "v_history_b": trace_v_b,
+                "v_history_bb": trace_v_bb,
+                "mid_weight_1": trace_mid_weights[0],
+                "mid_weight_2": trace_mid_weights[1],
+                "mid_weight_3": trace_mid_weights[2],
+                "back_weight_0": trace_back_weights[0],
+                "back_weight_1": trace_back_weights[1],
+                "back_weight_2": trace_back_weights[2],
+                "back_weight_3": trace_back_weights[3],
                 "eta_mid": eta_mid,
                 "u_mid": U_mid,
                 "v_mid": V_mid,
@@ -1809,15 +1982,58 @@ def _run_substep_loop(
                 "transport_face_depth_v": H_v_flux,
                 "transport_velocity_u": U_mid,
                 "transport_velocity_v": V_mid,
+                "continuity_du": continuity_du,
+                "continuity_dv": continuity_dv,
+                "continuity_divergence": div_flux,
+                "continuity_forcing": ssh_frc,
+                "continuity_rhs": (
+                    ssh_rhs if _literal_continuity_update
+                    else ssh_frc + div_flux),
+                "continuity_increment": (
+                    ssh_increment if _literal_continuity_update
+                    else dt_s * (ssh_frc + div_flux)),
+                "eta_unfloored": eta_unfloored,
                 "transport_weight": w_tr_i,
                 "transport_sum_u_entry": Hu_sum_c,
                 "transport_sum_v_entry": Hv_sum_c,
                 "transport_sum_u_exit": Hu_sum_new,
                 "transport_sum_v_exit": Hv_sum_new,
                 "eta_continuity": eta_new,
+                "face_depth_u_exit": trace_depth_u_exit,
+                "face_depth_v_exit": trace_depth_v_exit,
+                "r1_face_depth_u_exit": trace_r1_depth_u_exit,
+                "r1_face_depth_v_exit": trace_r1_depth_v_exit,
+                "face_ssh_u_exit": trace_face_ssh_u_exit,
+                "face_ssh_v_exit": trace_face_ssh_v_exit,
                 "eta_pgf": eta_pgf,
                 "pgf_u": _pgf_u,
                 "pgf_v": _pgf_v,
+                "ffu_nw": (_literal_cor_coeff["ffu_nw"]
+                           if _literal_cor_coeff is not None
+                           else _zero_cor_coeff),
+                "ffu_ne": (_literal_cor_coeff["ffu_ne"]
+                           if _literal_cor_coeff is not None
+                           else _zero_cor_coeff),
+                "ffu_sw": (_literal_cor_coeff["ffu_sw"]
+                           if _literal_cor_coeff is not None
+                           else _zero_cor_coeff),
+                "ffu_se": (_literal_cor_coeff["ffu_se"]
+                           if _literal_cor_coeff is not None
+                           else _zero_cor_coeff),
+                "ffv_sw": (_literal_cor_coeff["ffv_sw"]
+                           if _literal_cor_coeff is not None
+                           else _zero_cor_coeff),
+                "ffv_se": (_literal_cor_coeff["ffv_se"]
+                           if _literal_cor_coeff is not None
+                           else _zero_cor_coeff),
+                "ffv_nw": (_literal_cor_coeff["ffv_nw"]
+                           if _literal_cor_coeff is not None
+                           else _zero_cor_coeff),
+                "ffv_ne": (_literal_cor_coeff["ffv_ne"]
+                           if _literal_cor_coeff is not None
+                           else _zero_cor_coeff),
+                "cor_u": jnp.asarray(_cor_u) * jnp.ones_like(U_bar_c),
+                "cor_v": jnp.asarray(_cor_v) * jnp.ones_like(V_bar_c),
                 "slow_u": F_slow_u_i,
                 "slow_v": F_slow_v_i,
                 "drag_u": jnp.asarray(_drag_u) * jnp.ones_like(U_bar_c),
@@ -2118,6 +2334,7 @@ def barotropic_substeps_latlon_cgrid(
     _nemo_primary_transport_average_test_override=None,
     _nemo_substep_trace_test_hook=False,
     _nemo_flux_form_update_test_override=None,
+    _nemo_continuity_update_test_override=None,
     _nemo_legacy_seed_faces_test_override=None,
 ) -> LatLonCGridOceanState:
     """Run barotropic substeps on a C-grid lat-lon grid.
@@ -2534,6 +2751,8 @@ def barotropic_substeps_latlon_cgrid(
         return_trace=_nemo_substep_trace_test_hook,
         nemo_flux_form_update_test_override=(
             _nemo_flux_form_update_test_override),
+        nemo_continuity_update_test_override=(
+            _nemo_continuity_update_test_override),
     )
     if _nemo_substep_trace_test_hook:
         _finals, _substep_trace = _loop_result
