@@ -72,6 +72,17 @@ DATA="${AMIP_DATA:-${REPO}/data/amip}"
 # of the same block in config/amip/amip_production.sh.
 : "${AMIP_SURFDATA:=${REPO}/data/legoesm_surfdata_c260716.nc}"
 
+# --- subgrid orography for the orographic GWD launch (#1514) -----------------
+# amip_production.yaml runs gravity_wave_drag: mcfarlane+hines.  With
+# subgrid_orography_path empty the orographic member launches tau_0 ~ h_topo^2
+# from the SCALAR fallback h_topo = 500 m on EVERY column -- a fictional 500 m
+# mountain over the open ocean, measured at -0.29 Pa of spurious zonal drag
+# over 40-60S, which removes the eddy-driven westerly belt.  The Levante twin
+# has wired this since #1514; this launcher did NOT, so every AMIP run started
+# here reproduced the pseudo-mountain climate.  Opt out (deliberately only)
+# with AMIP_SSO="".
+: "${AMIP_SSO:=/burg-archive/glab/users/pg2328/legoESM_chunk/data_pg/amip/sso_stdh_2deg.nc}"
+
 # --- machine-specific PATH flags (everything else is in the YAML) -------------
 AMIP_PATH_FLAGS=(
   --ic-path "${ERA5_IC}"
@@ -86,9 +97,14 @@ AMIP_PATH_FLAGS=(
   --aerosol-file "${AEROSOL}"
   --volcanic-aerosol-file "${VOLCANIC}"
 )
+# Subgrid orography (see AMIP_SSO above, #1514).  Appended like the Levante
+# twin so an empty AMIP_SSO is an explicit opt-out rather than a silent drop.
+if [[ -n "${AMIP_SSO}" ]]; then
+  AMIP_PATH_FLAGS+=( --subgrid-orography-file "${AMIP_SSO}" )
+fi
 
 # Warn (don't fail) on a missing local input so a Stage-0 flat-topo smoke still works.
-for _f in "${ETOPO}" "${CLM_SURFDATA}" "${AMIP_SURFDATA}"; do
+for _f in "${ETOPO}" "${CLM_SURFDATA}" "${AMIP_SURFDATA}" ${AMIP_SSO:+"${AMIP_SSO}"}; do
   [ -e "${_f}" ] || echo "[ginsburg] NOTE: ${_f} not found — stage it (ETOPO: " \
     "scripts/data/prep_etopo_topography.py; CLM surfdata: data/clm/; harmonized " \
     "surfdata: scripts/data/build_legoesm_surfdata.py), or run a flat-topo " \

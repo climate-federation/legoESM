@@ -9,11 +9,18 @@ production mesh (issue #1514): -0.29 Pa column-integrated zonal drag over
 westerly belt within a week of the ERA5 initial condition and suppressed the
 storm tracks in both hemispheres.
 
-Paths are deliberately machine-specific, so the wiring lives in the launcher
-``config/amip/amip_production.sh`` (``AMIP_SSO`` -> ``--subgrid-orography-file``),
-not the machine-independent YAML.  These tests source the launcher exactly as a
-run would and drive the merged #1514 guard predicate with the RESOLVED
-production configuration: drop the wiring and they go red.
+Paths are deliberately machine-specific, so the wiring lives in the launchers
+(``AMIP_SSO`` -> ``--subgrid-orography-file``), not the machine-independent
+YAML.  These tests source each launcher exactly as a run would and drive the
+merged #1514 guard predicate with the RESOLVED production configuration: drop
+the wiring and they go red.
+
+EVERY committed AMIP launcher is covered, not just one.  The gate originally
+checked only the Levante script while the Ginsburg twin silently omitted the
+flag, so every AMIP run started on that machine reproduced the pseudo-mountain
+climate the guard exists to prevent -- a machine-specific hole in a
+machine-independent defect.  New launcher scripts are picked up automatically
+by the glob below; there is nothing to remember to add.
 """
 from __future__ import annotations
 
@@ -25,11 +32,24 @@ import pytest
 import yaml
 
 _REPO = pathlib.Path(__file__).resolve().parents[2]
-_LAUNCHER = _REPO / "config" / "amip" / "amip_production.sh"
 _CONFIG = _REPO / "config" / "amip" / "amip_production.yaml"
+# Every committed launcher for the production AMIP config.  Globbed, not
+# listed, so a launcher added later cannot quietly escape the gate.
+_LAUNCHERS = sorted((_REPO / "config" / "amip").glob("amip_production*.sh"))
 
 
-def _resolved_path_flags() -> list[str]:
+def _launcher_ids() -> list[str]:
+    return [p.name for p in _LAUNCHERS]
+
+
+def test_every_production_launcher_is_covered() -> None:
+    """Non-vacuity for the glob: at least the two known launchers are found."""
+    names = _launcher_ids()
+    assert "amip_production.sh" in names, names
+    assert "amip_production.ginsburg.sh" in names, names
+
+
+def _resolved_path_flags(_LAUNCHER) -> list[str]:
     """Source the launcher in a clean env and return AMIP_PATH_FLAGS.
 
     Clean env (no AMIP_* overrides inherited from the test session) so the
@@ -55,18 +75,20 @@ def _sso_flag_value(flags: list[str]) -> str | None:
     return flags[flags.index("--subgrid-orography-file") + 1]
 
 
-def test_launcher_wires_subgrid_orography_file() -> None:
-    flags = _resolved_path_flags()
+@pytest.mark.parametrize("launcher", _LAUNCHERS, ids=_launcher_ids())
+def test_launcher_wires_subgrid_orography_file(launcher) -> None:
+    flags = _resolved_path_flags(launcher)
     sso = _sso_flag_value(flags)
     assert sso, (
-        "amip_production.sh no longer passes --subgrid-orography-file: the "
+        f"{launcher.name} does not pass --subgrid-orography-file: the "
         "orographic GWD member (mcfarlane) will launch from the scalar "
         "h_topo=500 m fallback over every ocean column (#1514)."
     )
     assert sso.endswith(".nc")
 
 
-def test_production_config_does_not_trip_the_1514_guard() -> None:
+@pytest.mark.parametrize("launcher", _LAUNCHERS, ids=_launcher_ids())
+def test_production_config_does_not_trip_the_1514_guard(launcher) -> None:
     """The resolved production (scheme, sso_path) must satisfy the #1514 guard.
 
     This is the functional link, not a read-back: the SAME predicate the driver
@@ -79,7 +101,7 @@ def test_production_config_does_not_trip_the_1514_guard() -> None:
     )
 
     gwd = str(yaml.safe_load(_CONFIG.read_text())["gravity_wave_drag"])
-    sso = _sso_flag_value(_resolved_path_flags()) or ""
+    sso = _sso_flag_value(_resolved_path_flags(launcher)) or ""
     msg = orographic_scalar_fallback_warning(gwd, sso, True)
     assert msg is None, (
         f"production config would run the #1514 pseudo-mountain fallback: {msg}"
@@ -89,13 +111,16 @@ def test_production_config_does_not_trip_the_1514_guard() -> None:
     assert orographic_scalar_fallback_warning(gwd, "", True) is not None
 
 
-def test_staged_sso_file_exists_and_is_sane() -> None:
+@pytest.mark.parametrize("launcher", _LAUNCHERS, ids=_launcher_ids())
+def test_staged_sso_file_exists_and_is_sane(launcher) -> None:
     """On the deployment machine, the default SSO file must exist + be valid.
 
-    Skipped off-machine (the launcher defaults are Levante paths; CI checkouts
-    do not carry the 140 kB .nc — data/ is gitignored like every forcing file).
+    Skipped off-machine (each launcher's default is a path on ITS OWN machine;
+    CI checkouts do not carry the 140 kB .nc — data/ is gitignored like every
+    forcing file).  So on any given host exactly one launcher's file is
+    normally checkable, and the other skips.
     """
-    sso = _sso_flag_value(_resolved_path_flags())
+    sso = _sso_flag_value(_resolved_path_flags(launcher))
     assert sso, "--subgrid-orography-file missing from AMIP_PATH_FLAGS"
     p = pathlib.Path(sso)
     if not p.parent.exists():
