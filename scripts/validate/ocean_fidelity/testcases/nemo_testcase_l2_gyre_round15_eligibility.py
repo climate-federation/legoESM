@@ -12,13 +12,12 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import struct
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 from nemo_testcase_l2_gyre_phase3_gate import read_qsr_stage3, read_tracer_stage3
 
 
@@ -43,11 +42,14 @@ def _read_sbc(path: Path) -> dict[str, np.ndarray]:
         return block.reshape((nx, ny), order="F")[2:-2, 2:-2].T
 
     offset = 0
-    qsr = inner(values[offset:offset + interior]); offset += interior
-    qns = inner(values[offset:offset + interior]); offset += interior
+    qsr = inner(values[offset : offset + interior])
+    offset += interior
+    qns = inner(values[offset : offset + interior])
+    offset += interior
     result = {"qsr": qsr, "qns": qns}
     for name in ("emp", "utau", "vtau"):
-        result[name] = owned(values[offset:offset + full]); offset += full
+        result[name] = owned(values[offset : offset + full])
+        offset += full
     return result
 
 

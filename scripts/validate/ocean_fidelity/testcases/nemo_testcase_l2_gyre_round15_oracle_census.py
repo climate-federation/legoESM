@@ -13,9 +13,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from pathlib import Path
 import struct
-
+from pathlib import Path
 
 NX, NY, NZ = 36, 26, 31
 N2 = NX * NY
@@ -207,7 +206,13 @@ def run(v1_root: Path, v2_root: Path, *, plant: bool = False) -> dict[str, objec
     rows = [compare_record(v1_root / name, v2_root / name) for name in v1_names]
     if plant:
         planted = dict(rows[0])
-        planted.update({"status": "DIFFERENT", "first_field": "PLANTED_BYTE_FLIP", "first_byte": 64})
+        planted.update(
+            {
+                "status": "DIFFERENT",
+                "first_field": "PLANTED_BYTE_FLIP",
+                "first_byte": 64,
+            }
+        )
         rows[0] = planted
     counts = {status: sum(row["status"] == status for row in rows)
               for status in ("IDENTICAL", "DIFFERENT")}

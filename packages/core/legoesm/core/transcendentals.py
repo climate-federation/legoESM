@@ -22,9 +22,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 from legoesm.core.precision import get_policy
-
 
 _LIBM_SONAME = "libm.so.6"
 _LIBM = ctypes.CDLL(_LIBM_SONAME)
