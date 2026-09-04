@@ -128,13 +128,17 @@ def read_stage1_transport_operands(path: Path) -> dict:
     return result
 
 
-def _comparison(candidate: np.ndarray, oracle: np.ndarray) -> dict:
-    delta = np.asarray(candidate) - np.asarray(oracle)
-    ulps = ulp_distance(np.asarray(candidate), np.asarray(oracle))
+def _comparison(
+    candidate: np.ndarray, oracle: np.ndarray, active: np.ndarray | None = None,
+) -> dict:
+    candidate, oracle = np.asarray(candidate), np.asarray(oracle)
+    if active is not None:
+        candidate, oracle = candidate[active], oracle[active]
+    delta = candidate - oracle
     return {
         "bit_exact": bool(np.array_equal(candidate, oracle)),
         "absolute_max": float(np.max(np.abs(delta), initial=0.0)),
-        "ulp_max": int(np.max(ulps, initial=0)),
+        "ulp_max": int(np.max(ulp_distance(candidate, oracle), initial=0)),
         "differing_cells": int(np.count_nonzero(candidate != oracle)),
     }
 
@@ -167,6 +171,12 @@ def run_transport_operands(oracle_root: Path, *, plant: bool = False) -> dict:
         "v": ("e1v", "e3v", "vv", "zvb", "vmask", "zFv"),
     }.items():
         metric, e3, vel, mean, mask, result = (oracle[name] for name in names)
+        # NEMO's jpk is the all-zero extra level and the DO_3D statement writes
+        # only jpkm1.  Score the live wet faces, which are the operands consumed
+        # by tra_adv_cen; retain the full arrays in the artifact hash/header.
+        e3, vel, mask, result = (
+            value[..., :-1] for value in (e3, vel, mask, result))
+        active = mask != 0.0
         numpy_corrected = vel + mean[..., None] * mask
         numpy_literal = (metric[..., None] * e3) * numpy_corrected
         numpy_reassociated = metric[..., None] * (e3 * numpy_corrected)
@@ -179,13 +189,13 @@ def run_transport_operands(oracle_root: Path, *, plant: bool = False) -> dict:
             jax_literal[index] = np.nextafter(jax_literal[index], np.inf)
         rows[face] = {
             "numpy_fortran_association_vs_oracle": _comparison(
-                numpy_literal, result),
+                numpy_literal, result, active),
             "numpy_reassociated_vs_oracle": _comparison(
-                numpy_reassociated, result),
+                numpy_reassociated, result, active),
             "jax_jit_fortran_association_vs_oracle": _comparison(
-                jax_literal, result),
+                jax_literal, result, active),
             "jax_jit_vs_numpy_fortran_association": _comparison(
-                jax_literal, numpy_literal),
+                jax_literal, numpy_literal, active),
         }
     exact = all(
         row["jax_jit_fortran_association_vs_oracle"]["bit_exact"]
