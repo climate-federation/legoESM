@@ -228,7 +228,7 @@ the user's decision, with the listed MIXED DEBT retained.
 |---|---|
 | scalar-math V2 provenance/byte gate JSON | `9815ee9141d69b80c61cb54b07c9e6d031591914a5d696d3a99aec7326bee030` |
 | bulk V2 bit/bar gate JSON | `12784cbf13f77a993aa7f11c5dfab08cfbfe97d7db3236c7a544512a6e1178ed` |
-| column V2 year-gate JSON | `91956787dcabc1080e352b0a2920c13f33a0c8794dabb9cba3261d9e2f85e5e1` |
+| external column V2 year-gate JSON (`/data/abyssal/dbalwada/nemo-testcases-l3/round9_scalarmath_v2_artifacts/`) | `91956787dcabc1080e352b0a2920c13f33a0c8794dabb9cba3261d9e2f85e5e1` |
 | scalar-math V2 preregistration | `5b2d355a5cdd8de28a2498657c7a609837747597981328567874be4c2636da83` |
 
 All seven provenance plants exit 1: payload bit change, missing stream

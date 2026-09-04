@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -43,10 +44,16 @@ def test_nemo_operation_order_replay_is_exact_and_normalised_order_differs(gate)
 def test_round9_year_artifact_and_default_root_are_scalar_math_v2(gate) -> None:
     from legoesm.ice.c1d_omip_l3 import ORACLE_V2_ROOT, ORACLE_VERSION
 
-    artifact = json.loads(Path(
-        "docs/ocean/fidelity/testcases/"
+    path = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l3/round9_scalarmath_v2_artifacts/"
         "nemo_testcases_l3thd_scalarmath_v2_year_gate.json"
-    ).read_text())
+    )
+    if not path.exists():
+        pytest.skip("retained scalar-math V2 year artifact is not mounted")
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == (
+        "91956787dcabc1080e352b0a2920c13f33a0c8794dabb9cba3261d9e2f85e5e1"
+    )
+    artifact = json.loads(path.read_text())
     assert gate.REPLAY_ROOT == ORACLE_V2_ROOT
     assert artifact["card"]["oracle_root"] == str(ORACLE_V2_ROOT)
     assert artifact["card"]["oracle_version"] == ORACLE_VERSION == "V2_SCALAR_MATH"
