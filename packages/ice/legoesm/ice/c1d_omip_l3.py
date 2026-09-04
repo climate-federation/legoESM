@@ -5,14 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import NamedTuple
 
+from legoesm import constants
+from legoesm.core.precision import PrecisionPolicy
 from legoesm.ice.config import (
     SeaIceConfig,
     validate_si3_bulk_config,
     validate_si3_thermo_config,
 )
 from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
-
-from legoesm import constants
 
 FORCING_SHA256 = "e5ec49445d2569019c45dec24255b9c7daf050079444b0e6e6d86a5b82317afe"
 THERMO_STREAM_SHA256 = "7fc9df2707a85581075e3c69b26784155151a55640a5693eb32c34fb710ea49b"
@@ -49,6 +49,7 @@ class C1DOMIPL3Card(NamedTuple):
     nsteps: int
     forcing_path: Path
     oracle_root: Path
+    precision_policy: PrecisionPolicy
     config: SeaIceConfig
     selector_sources: tuple[tuple[str, str], ...]
 
@@ -90,6 +91,7 @@ def build_c1d_omip_l3_card(
         nsteps=_DOCUMENTED_DURATION_STEPS,
         forcing_path=forcing_path,
         oracle_root=oracle_root,
+        precision_policy=PrecisionPolicy.fp64(transcendentals="libm"),
         config=config,
         selector_sources=(
             ("jpl=1 HFN", "iceitd.F90:129-180; accepted output.namelist.ice"),

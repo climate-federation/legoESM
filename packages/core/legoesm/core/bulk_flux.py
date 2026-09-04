@@ -59,7 +59,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.core.precision import nemo_source_round
+from legoesm.core.source_rounding import nemo_source_round
 
 # Physical constants
 KAPPA = constants.kappa_vk  # von Kármán constant (0.4)

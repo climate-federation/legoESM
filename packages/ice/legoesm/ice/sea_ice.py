@@ -28,6 +28,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core import transcendentals
 from legoesm.thermo import (
     nemo_si3_saturation_over_ice,
     saturation_mixing_ratio_ice,
@@ -39,7 +40,7 @@ from legoesm.core.bulk_flux import (
     validate_bulk_scheme,
 )
 from legoesm.core.coupling_fields import AtmToSurface, TileResponse
-from legoesm.core.precision import nemo_source_round
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.latlon import LatLonCGridGeometry, LatLonGrid
 from legoesm.grids.voronoi import VoronoiMesh
@@ -504,6 +505,7 @@ def _nemo_si3_ice_albedo(
     bulk_config: SeaIceConfig,
     _preserve_subnormal_snow: bool = True,
     _source_round: bool = True,
+    _exp_fn=None,
 ) -> jnp.ndarray:
     """Active no-pond SI3 albedo, ``icealb.F90:124-185``.
 
@@ -511,6 +513,7 @@ def _nemo_si3_ice_albedo(
     alternate snow-cover and pond branches are intentionally absent.
     """
     source_round = nemo_source_round if _source_round else lambda value: value
+    exp_fn = transcendentals.exp if _exp_fn is None else _exp_fn
     if _preserve_subnormal_snow:
         # XLA CPU flushes the smallest positive fp64 snow thickness to zero in
         # floating comparisons.  NEMO's scalar IEEE comparison does not.  A
@@ -562,13 +565,13 @@ def _nemo_si3_ice_albedo(
         jnp.where(h_ice <= bulk_config.albedo_ice_pivot, bare_mid, bare_thick),
     )
     dry_decay = source_round(
-        jnp.exp(source_round(
+        exp_fn(source_round(
             -h_snow
             * source_round(1.0 / constants.albedo_snow_decay_dry_nemo)
         ))
     )
     melt_decay = source_round(
-        jnp.exp(source_round(
+        exp_fn(source_round(
             -h_snow
             * source_round(1.0 / constants.albedo_snow_decay_melt_nemo)
         ))
@@ -634,6 +637,7 @@ def _nemo_si3_blk_ice_2(
     bulk_config: SeaIceConfig,
     _preserve_subnormal_snow: bool = True,
     _source_round: bool = True,
+    _exp_fn=None,
 ):
     """ORCA1-resolved ``ice_alb`` + ``blk_ice_2`` scalar identity.
 
@@ -647,6 +651,7 @@ def _nemo_si3_blk_ice_2(
         bulk_config=bulk_config,
         _preserve_subnormal_snow=_preserve_subnormal_snow,
         _source_round=_source_round,
+        _exp_fn=_exp_fn,
     )
     q_sat, dq_sat = nemo_si3_saturation_over_ice(
         T_surface, p_surface, _source_round=_source_round,

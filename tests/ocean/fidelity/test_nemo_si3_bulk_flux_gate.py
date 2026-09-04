@@ -59,7 +59,7 @@ def test_score_distinguishes_bar_from_bit_identity() -> None:
 
 
 def test_nemo_source_round_is_identity_jittable_and_differentiable() -> None:
-    from legoesm.core.precision import nemo_source_round
+    from legoesm.core.source_rounding import nemo_source_round
 
     values = jnp.asarray([-2.0, -0.0, 3.0], dtype=jnp.float64)
     np.testing.assert_array_equal(np.asarray(nemo_source_round(values)), values)
@@ -117,6 +117,7 @@ def test_selector_is_single_orca1_identity() -> None:
     from legoesm.ice.config import validate_si3_bulk_config
 
     card = build_c1d_omip_l3_card()
+    assert card.precision_policy.transcendentals == "libm"
     assert (
         card.config.Cd_ice, card.config.Ce_ice, card.config.Ch_ice,
         card.config.drag_ocean, card.config.snow_blow_exponent,
@@ -197,7 +198,7 @@ def test_planted_folded_constant_violation_fires() -> None:
 )
 def test_full_year_gate_and_all_plants() -> None:
     result = gate.evaluate()
-    assert result["verdict"] == "AWAITING_LIBM_POLICY"
+    assert result["verdict"] == "AT-BIT"
     assert result["normalized_verdict"] == "AT-BAR"
     assert result["over_bar_rows"] == 0
     assert result["steps"] == 8760
@@ -205,18 +206,16 @@ def test_full_year_gate_and_all_plants() -> None:
     assert result["numeric_runtime"]["bit_identity_claim_valid"] is True
     assert result["bit_comparisons"] == result["comparisons"]
     assert result["comparisons"] == 271_560
-    assert result["non_bit_identical_rows"] > 0
-    assert result["non_bit_identical_rows"] == 18
+    assert result["non_bit_identical_rows"] == 0
+    assert result["bit_identical_rows"] == 271_560
     assert result["friction_association_probe"]["bit_identical"] is True
     assert result["friction_association_probe"]["bit_identity_status"] == "VALID"
     assert result["friction_association_probe"]["inputs"]["mask"] == 0.25
-    assert set(result["bit_owner_groups"]) == {"jax_exp_ice_alb"}
+    assert result["bit_owner_groups"] == {}
     assert all("max_relative_error_nonzero_oracle" in row for row in result["rows"])
     assert all("row_scale_ulp" in row for row in result["rows"])
     assert all("max_row_scale_ulp_error" in row for row in result["rows"])
-    assert result["bit_owner_groups"]["jax_exp_ice_alb"]["status"] == (
-        "AWAITING_LIBM_POLICY"
-    )
+    assert result["dtypes"]["transcendentals"] == "libm"
     assert all(
         row["non_bit_identical_count"] == 0
         for row in result["scalar_glibc_owner_probe"]["rows"]
@@ -242,6 +241,7 @@ def test_full_year_gate_and_all_plants() -> None:
         "source_round",
         "folded_constant",
         "friction_association",
+        "libm_return",
     ):
         with pytest.raises(gate.GateError):
             gate.evaluate(plant=plant)

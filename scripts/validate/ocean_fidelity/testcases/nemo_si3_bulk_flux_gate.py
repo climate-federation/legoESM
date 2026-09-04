@@ -568,8 +568,9 @@ def evaluate(
     plant: str | None = None,
     require_bit_identity: bool = False,
 ) -> dict[str, object]:
+    from legoesm.core import transcendentals
     from legoesm.core.bulk_flux import nemo_si3_constant_fluxes
-    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.core.precision import set_policy
     from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_card
     from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
     from legoesm.ice.sea_ice import (
@@ -586,7 +587,8 @@ def evaluate(
     )
     bit_claim_valid = bool(runtime_provenance["bit_identity_claim_valid"])
     folded_constants = validate_folded_constants(plant=plant == "folded_constant")
-    set_policy(PrecisionPolicy.fp64())
+    card = build_c1d_omip_l3_card(oracle_root=root)
+    set_policy(card.precision_policy)
     require(jax.config.read("jax_enable_x64"), "JAX x64 disabled")
     require(jax.default_backend() == "cpu", "bulk gate is CPU-only")
     friction_probe = _friction_association_probe(
@@ -604,13 +606,19 @@ def evaluate(
     s1_np = _as_dict(stages[1], STAGE1_NAMES)
     s2_np = _as_dict(stages[2], STAGE2_NAMES)
     validate_coverage()
-    bulk_config = build_c1d_omip_l3_card(oracle_root=root).config
+    bulk_config = card.config
     validate_selector(s0_np, s2_np, bulk_config)
     # Force the executing comparison through JAX, rather than allowing NumPy
     # arrays to evaluate a prefix of an expression before its first jnp call.
     s0 = jax.tree.map(jax.numpy.asarray, s0_np)
     s1 = jax.tree.map(jax.numpy.asarray, s1_np)
     s2 = jax.tree.map(jax.numpy.asarray, s2_np)
+
+    def poison_policy_exp(value):
+        """Private planted violation: corrupt only the selected libm result."""
+        return transcendentals.exp(value) + jax.numpy.asarray(
+            1.0e-6, dtype=value.dtype,
+        )
 
     raw = nemo_si3_constant_fluxes(
         s0["u_air"], s0["v_air"], s0["theta_air"], s0["q_air"],
@@ -639,6 +647,7 @@ def evaluate(
         qsr_ocean=s1["qsr_ocean"], emp_ocean_raw=s1["emp_ocean_raw"],
         ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
         bulk_config=bulk_config,
+        _exp_fn=poison_policy_exp if plant == "libm_return" else None,
     )
     for name in STAGE1_NAMES[25:]:
         predictions[(1, name)] = flux2[name]
@@ -792,6 +801,8 @@ def evaluate(
         pass
     elif plant == "friction_association":
         pass
+    elif plant == "libm_return":
+        pass
     elif plant is not None:
         raise GateError(f"unknown plant {plant}")
 
@@ -826,11 +837,10 @@ def evaluate(
     require(total_over == 0, f"bulk fidelity bar violated: {total_over} rows; {debt_rows}")
     if bit_claim_valid:
         require(
-            total_nonbit == 18
-            and set(bit_groups) == {"jax_exp_ice_alb"},
-            f"unexpected non-transcendental bit debt: {total_nonbit}, {bit_groups}",
+            total_nonbit == 0 and not bit_groups,
+            f"scalar-libm bit debt remains: {total_nonbit}, {bit_groups}",
         )
-    bit_verdict = "AWAITING_LIBM_POLICY" if bit_claim_valid else "WITHHELD_RUNTIME"
+    bit_verdict = "AT-BIT" if bit_claim_valid else "WITHHELD_RUNTIME"
     return {
         "verdict": bit_verdict,
         "normalized_verdict": "AT-BAR",
@@ -849,9 +859,9 @@ def evaluate(
             "source": "icealb.F90:124-185; Python math.exp/log call scalar glibc libm",
             "rows": scalar_rows,
             "interpretation": (
-                "The scalar-libm replay is bit-identical for the three exp-owned "
-                "outputs; the corresponding JAX differences await the shared "
-                "library-exact exp precision policy."
+                "The independent scalar-glibc replay and the executing shared "
+                "library-exact policy are bit-identical for all three exp-owned "
+                "outputs."
                 if bit_claim_valid
                 else "Bit-identity interpretation withheld under this runtime."
             ),
@@ -860,7 +870,11 @@ def evaluate(
         "compiler_folded_constants": folded_constants,
         "friction_association_probe": friction_probe,
         "largest_row": largest,
-        "dtypes": {"numpy": str(stages[0].dtype), "jax_x64": True, "backend": "cpu"},
+        "dtypes": {
+            "numpy": str(stages[0].dtype), "jax_x64": True,
+            "backend": "cpu",
+            "transcendentals": card.precision_policy.transcendentals,
+        },
         "streams": {
             "bulk": {"path": str(bulk_path), "sha256": sha256(bulk_path),
                      "bytes": bulk_path.stat().st_size, "frames": 3 * EXPECTED_STEPS},
@@ -922,6 +936,7 @@ def main() -> int:
         "source_round",
         "folded_constant",
         "friction_association",
+        "libm_return",
     ))
     args = parser.parse_args()
     result = evaluate(

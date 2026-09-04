@@ -370,7 +370,7 @@ def nemo_si3_saturation_over_ice(
     that would be a different formula at an oracle boundary.  Returns
     ``(q_sat, dq_sat_dT)`` and remains JIT/reverse-mode compatible.
     """
-    from legoesm.core.precision import nemo_source_round
+    from legoesm.core.source_rounding import nemo_source_round
 
     source_round = nemo_source_round if _source_round else lambda value: value
     # sbc_phy.F90:674-679.  Each named Fortran assignment is materialized and
