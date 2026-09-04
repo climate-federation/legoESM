@@ -117,3 +117,24 @@ with residual-scale movement.  REFUTE if any dumped input is first non-bit-
 exact or native materialization moves less than 0.1 of the tracer residual.
 The previously measured stored-barotropic-mean arm is retained as a separate
 near-null alternative, not silently folded into this association test.
+
+## Registered redirect after the horizontal-operand split
+
+The accepted split refutes the “all inputs match” part of that prediction.
+The horizontal metric, Kmm face thickness, Kmm velocity, and mask are each
+bit-exact on every live face.  NEMO's literal final product is also reproduced
+bit-exactly by production JIT when it receives NEMO's operands; the former
+regrouping differs by at most two ulp (5,937 U and 5,870 V cells).  But the
+corrected velocity is already the first non-bit-exact operand: maximum
+`2.799952110443815e-17` U and `1.2766480581016815e-17` V, propagating to
+`8.922143024392426e-10`/`4.069988790433854e-10` in native zF.
+
+The next record therefore splits `zub = un_adv*r1_hu(Kmm)-uu_b(Kmm)` and its
+V counterpart at `stprk3_stg.F90:265-278`.  The preregistered ranking is:
+(1) external-mode `un_adv/vn_adv`, because this is the only time-integrated
+input and the reconciled kt=2 register still carries barotropic debt;
+(2) `r1_hu/r1_hv(Kmm)` association; (3) stored `uu_b/vv_b(Kmm)`.  The first
+non-bit-exact input is the owner of the corrected-velocity boundary.  The
+native-product change remains a separately confirmed literal-association fix,
+but it will not be credited with clearing the tracer boundary unless the
+post-fix causal gate actually clears.
