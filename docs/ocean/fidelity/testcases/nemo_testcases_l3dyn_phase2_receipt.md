@@ -1050,14 +1050,16 @@ expressions from `abs(velocity)*dt` to NEMO's constructed
 not move the production-input owner or its 60-row count, so the predicted
 order-of-magnitude production move is **REFUTED**.  It does, however, change
 the discriminating oracle-input arms: oracle V removes the 30 y-owned rows,
-oracle U removes the 30 x-owned rows, and oracle U+V changes 60 DEBT rows to
-**160/160 byte-exact** endpoint moments (zero rows over two ULP).  Therefore
-the literal transport correction is retained and **CONFIRMED necessary**;
-the remaining production moment debt is owned by the already-measured U/V
-input differences being amplified by Prather cancellation, not by a
-between-advection rescale or by remaining endpoint transport algebra.  This
-is an eager replay result.  The production-JIT walk separately records seven
-JIT/eager step-9 DEBT leaves: four moment leaves at
+oracle U removes the 30 x-owned rows, and the eager written-order oracle-U+V
+arm changes 60 DEBT rows to **160/160 byte-exact** endpoint moments (zero rows
+over two ULP).  The literal transported-area correction is therefore retained
+and **CONFIRMED necessary in that eager replay**.  Round 11 repeats the
+oracle-U/V discriminator through production JIT and **REFUTES** the former
+exclusive velocity-owner conclusion: 60 moment rows remain DEBT and 140/160
+are over two ULP under JIT.  The claim that no endpoint transport algebra
+remained is withdrawn; compiled Prather statement association is the next
+owner.  The production-JIT walk separately records seven JIT/eager step-9
+DEBT leaves: four moment leaves at
 `1.7461744827862447e-9`--`5.819814907770393e-9` normalized and three stress
 leaves at `3.2306858985948695e-15`--`9.864812791606474e-15`; no compiler
 mechanism beyond this measured execution association is claimed.
@@ -1330,6 +1332,106 @@ post-swap production-JIT aEVP exact-input replay is unchanged: each of
 This **CONFIRMS** that converging the core blobs changes no aEVP output bit for
 exact oracle inputs.
 
+### Round-11 intensive bridge and conditional stop
+
+The bridge prediction is **CONFIRMED for dynamics and REFUTED end to end**.
+NEMO aggregates the category intensives directly at `icevar.F90:123-132`, and
+dynALL passes those values to rheology before transport at
+`icedyn.F90:130-135`.  Prather alone forms `z0* = field * e1e2t` at
+`icedyn_adv_pra.F90:218-245` and recovers fields in the written order
+`z0 * r1_e1e2t * tmask` at `:355-381`.  The two legoESM oracle cards now keep
+intensives at their outer-step boundary, use one shared source-rounded
+pack/unpack pair around the existing Prather kernel, and feed rheology the
+unmodified intensive carry.  The rung-3.3 gate now constructs its acceptance
+state from the pinned oracle entry bytes and the card constructor now requires
+that entry frame; there is no analytic acceptance fallback.  Rung-3.1/3.2
+transport APIs and all existing ice defaults are unchanged.
+
+The one-variable legacy arm remains the Round-10/11 replay's
+`field * 9,000,000 / 9,000,000` bridge: it moves `v_i` in `164 / 10609` cells
+and `v_s` in `172 / 10609`, then produces nonzero stresses.  Removing only
+that pre-rheology trip makes the production-JIT completed-step-1 dynamics
+rows byte-exact:
+
+| rung-3.3 completed-step-1 dynamics row | nonzero / cells | max absolute |
+|---|---:|---:|
+| `u_ice` | `0 / 9801` | 0 |
+| `v_ice` | `0 / 9801` | 0 |
+| `stress1_i` | `0 / 9801` | 0 |
+| `stress2_i` | `0 / 9801` | 0 |
+| `stress12_i` | `0 / 9801` | 0 |
+
+The result is not end-to-end bit-exact.  Fourteen transported-field rows are
+nonzero at step 1, all below the immutable normalized bar; representative
+counts are `v_i 357 / 9801`, `v_s 356 / 9801`, and `a_i 428 / 9801` under the
+whole-step JIT.  At completed step 2 those inputs reach the exact aEVP arm and
+`stress1_i` is the first DEBT row: max absolute
+`1.0129497240995988e-10`, normalized/relative
+`1.61972013779979e-13`.  The rung-3.3 production-JIT continuation completed
+through its 485-step restart; the requested early window has 0, 3, 4, 4, 3,
+7, 7, and 12 DEBT rows at steps 1--8 respectively.  At step 8 the dominant
+row is `stress12_i`, normalized/relative `1.8964858428467975e-11`.
+This **CONFIRMS** compiled Prather transport/field recovery as the next owner
+boundary after the now-exact dynamics operator; it does not assign a narrower
+source statement without a discriminator.
+
+The full-size active step-8 window remains **DEBT** under production JIT.  Its
+dominant row is `active_moment.sxxe_l01`, `4.072356563078472e-9` normalized
+and `2.443033104890113e-8` relative.  Sixty of 160 moment rows are DEBT.
+`stress1_i`, `stress2_i`, and `stress12_i` are also DEBT at
+`3.0033808251680753e-15`, `2.8422262044713913e-15`, and
+`8.864931383506739e-15` normalized, while both velocity rows remain AT-BAR.
+
+The queued JIT discriminator changes the ownership result.  With oracle U/V,
+the production JIT still reports **60/160 DEBT** moments and **140/160 over
+two ULP**, led by `syye_l01` at `2.402933046985467e-9` normalized and
+`3.739057008472341e-8` relative.  Thus the Round-9 eager `160/160` result does
+not transfer to the production execution path: aEVP U/V is not the exclusive
+moment owner, and XLA association inside Prather is the explicit next owner.
+The velocity plant's clean-vs-planted delta reports
+`over_two_ulp_count=140`; its owner `plant_delta.syye_l01` moves by
+`6.65614941427987e-7`, and `--plant` asserts the count then exits 1.  The
+active trajectory plant independently moves `active.step8.v_s` from AT-BAR
+`2.7755575615628914e-17` to DEBT `9.999999439624929e-11` and exits 1.  The
+rung-3.3 internal solver plant moves its scored U row to
+`3.896295745042799e-6` normalized.  These are row-level Rule-8/Rule-12 controls,
+not inferences from already-red clean exits.
+
+Because completed step 1 is not bit-exact end to end, the preregistered
+condition for a new ICE_RHEO steps 9--720/restart walk is **REFUTED**.  No new
+720-step trajectory was run and no claim is made that the old step-720
+`u_ice` 24% / `stress12_i` 77% relative separation is exclusively amplified
+roundoff.  The next required owner is the first compiled Prather operation
+that separates from the written-order replay; the historical Round-9 walk
+remains DEBT evidence only.
+
+| round-11 artifact | SHA-256 |
+|---|---|
+| canonical-core exact-input replay | `63923aa77f09cb00a68509168bfa773d208415b3f7956263b073fdc9e8f70bea` |
+| rung-3.3 step-1 whole-JIT gate | `13840218d73645130451b7a0d76033ccd4f2b1de9248ba4582b7a96d0b214ac7` |
+| rung-3.3 485-step whole-JIT trajectory/restart | `0569ef972f46301ff6b20ddd1e0dafc237dfab3815060c6a8501cbeb42388ff6` |
+| ICE_RHEO active step-8 whole-JIT gate | `9b3f412b99eb77a1e42e4be6f4e34679379878ebd61838057725f034372ba89b` |
+| ICE_RHEO active row plant | `1651f0d24172bfde7ef2ec1c37a2fc385090b88d677429c1aee1ffe338f02e38` |
+| JIT oracle-U/V moment discriminator / planted invocation | `9406a2e63b4d7f7a400ad4cbb1df18045cb21c117f688f29ffece72aa7a6635d` / same bytes; both clean debt and planted mode exit 1, while planted mode selects and asserts its independent clean-vs-planted delta rows |
+| A-grid EVP/mEVP preservation guard | `6f5fd71d159d7e0edc2219d7d76ef06f323662f4e5e557f147a8e193a8ecc317` |
+
+Focused CPU/fp64 verification is **119 passed in 142.93 s**.  The checkout-
+relative A-grid preservation guard passes for both EVP and mEVP; their state
+hashes remain
+`e4ecb3561c33b7d246ef8122807dcb7c9f690dc96c20dd6d9e5a024d0b9351d1`
+and `83b4727c5d1d35698368a1697f21b87a537dd424678bb4aa431c96190b840282`,
+respectively.  Ruff passes all Round-11 Python paths with the repository's
+established `N803`, `N806`, and
+`I001` exceptions.  The required repository-wide coefficient/constant ratchet
+remains honestly red at **3,751 passed, 2 skipped, 7 failed**: the same two
+inline-coefficient and five hardcoded-constant failures outside this round's
+diff that are enumerated above.  No ratchet failure names a Round-11 changed
+file.
+
+The interrupted zero-byte `round11_moment_replay_jit.json` is retained and
+**REJECTED**; it is not cited as evidence.  No background process remains.
+No shipped NEMO source or testcase was modified, and no artifact was deleted.
+
 ## Loudly UNMEASURED / deferred
 
 Within-step x/y Prather split states; ORCA1
@@ -1344,7 +1446,7 @@ this paragraph.
 
 ## End-of-task ASKED / UNASKED choice list
 
-The mandatory round-7--10 choice record is tabular so scope decisions cannot be
+The mandatory round-7--11 choice record is tabular so scope decisions cannot be
 lost inside narrative:
 
 | round | choice | disposition | evidence/disposition |
@@ -1360,7 +1462,7 @@ lost inside narrative:
 | 8 | Remove non-oracle final clamps, reject category-axis input, and calculate `sishea` from NEMO's formula | ASKED | Implemented, tested, and measured |
 | 8 | Add thresholds, physical arms, moment families, default changes, or any shipped-NEMO edit beyond these choices | UNASKED | None performed |
 | 9 | Bind the active plant by a scored-row transition and headline the dominant moment debt | ASKED | `active.step8.v_s` AT-BAR to DEBT; `sxxe_l01` headlines the active window |
-| 9 | Census moment writers and run U-only, V-only, U/V, and written-order transported-area arms | ASKED | No between-call moment mutation; U and V each own 30 endpoint rows; exact U/V plus written order is 160/160 byte-exact |
+| 9 | Census moment writers and run U-only, V-only, U/V, and written-order transported-area arms | ASKED | No between-call moment mutation; eager exact U/V plus written order is 160/160 byte-exact; the former exclusive ownership statement is superseded by the Round-11 JIT discriminator |
 | 9 | Walk completed steps 9--720 with production JIT/fp64/CPU, score the restart, and scan the excessive-removal branch | ASKED | Completed; 173 informative final DEBT rows; no clamp firing in 719 available frame transitions |
 | 9 | Treat zero age/pond receivers as trajectory evidence | UNASKED | Four state rows and their 20 zero moment rows remain UNINFORMATIVE; ORCA1 `ln_pnd=F` disclosed |
 | 9 | Change schemes/defaults, relax the bar, infer a nonlinear owner, edit shipped NEMO, use GPU/MPI, push, or delete artifacts | UNASKED | None performed; the interrupted zero-byte artifact is retained and flagged REJECTED |
@@ -1369,6 +1471,11 @@ lost inside narrative:
 | 10 | Bind row-level controls, enumerate exact numerators as `0 / n`, and classify the first remaining operand | ASKED | Private ablation and scored U plant bind; `v_i`/`v_s` extensive bridge is the first full-card nonexact input |
 | 10 | Continue the active window and steps 9--720 if and only if completed step 1 is byte-exact | ASKED | Condition REFUTED by three stress DEBT rows; no new conditional walk or restart claim |
 | 10 | Change the shared helper implementation, relax the bar, change A-grid/default schemes, edit shipped NEMO, use GPU/MPI, commit large dumps, delete artifacts, push | UNASKED | None performed; copied-build WRITE-only dumps stay external |
+| 11 | Converge three shared core files and direct tests to canonical GYRE commit `c83f73c23ff8`, without locally reapplying functional differences | ASKED | Completed; no SI3-only functional behavior required a request back; exact-input replay remains five times `0 / 9801` |
+| 11 | Replace the pre-rheology extensive round trip with NEMO's intensive outer-step carry and source-ordered Prather pack/unpack | ASKED | Step-1 U/V/stresses are byte-exact; transported fields remain non-bit-exact and first make stress1 DEBT at step 2 |
+| 11 | Rerun the oracle-U/V discriminator under production JIT and bind the moment plant on exit | ASKED | Prior exclusive velocity ownership REFUTED; clean JIT has 60 DEBT/140 over-two-ULP rows; planted mode asserts the count and exits 1 |
+| 11 | Run steps 9--720 only if completed step 1 is bit-exact end to end | ASKED | Condition REFUTED by 14 nonzero transported rows; no new 720-step/restart run |
+| 11 | Modify the canonical core helper, relax bars, change defaults/schemes, edit shipped NEMO, delete artifacts, use GPU/MPI, commit large dumps, or push | UNASKED | None performed; external zero-byte interrupted artifact retained and rejected |
 
 **ASKED choices:** resolve the rung-3.1 review HOLD in its own commit; implement
 rungs 3.1 and 3.2 against the pinned shipped cases; fp64/CPU only and `jpl=1`;
