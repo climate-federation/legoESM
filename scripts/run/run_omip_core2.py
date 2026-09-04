@@ -2688,7 +2688,8 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      bottom_drag_cdmax=None, bottom_drag_z0=None,
                      bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
                      ddm=None,
-                     vertical_mixing=None, ew_cyclic_overlap=False):
+                     vertical_mixing=None, ew_cyclic_overlap=False,
+                     no_gm_redi=False):
     """Build an MPAS (icosahedral Voronoi) ocean for the faithful CORE-II NEMO
     comparison — the 4th grid.  Reuses ``run_omip._create_setup('mpas', ...)``
     (the wired MPASOceanModel: KPP + GM/Redi + smc03 PGF + implicit-CN
@@ -2785,6 +2786,11 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
     if _ovr:
         config = config._replace(**_ovr)
         print(f"[setup] mpas config override: {_ovr}")
+    if no_gm_redi:
+        # Same contract as the tripole/latlon builders: gm_redi=None disables
+        # the GM/Redi block (ocean_model_mpas gates on `is not None`).
+        config = config._replace(gm_redi=None)
+        print("[setup] mpas GM/Redi DISABLED (--no-gm-redi)")
     if mle is not None:
         # Fox-Kemper MLE on the Voronoi mesh (NEMO nn_mle=1 bolus restratification).
         config = config._replace(mle=mle)
@@ -6833,6 +6839,7 @@ def main() -> int:
             bottom_drag_ke0=args.bottom_drag_ke0,
             iwm=_iwm_cfg, iwm_forcing_file=args.iwm_forcing_file,
             ddm=_ddm_cfg,
+            no_gm_redi=args.no_gm_redi,
             # --mpas-vmix: 'tke' runs the NEMO ORCA1 zdftke card through the
             # SAME builder the tripole uses (the "tripole_" prefix is
             # historical — pure grid-agnostic config construction; its
