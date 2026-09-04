@@ -1,3 +1,39 @@
+"""RETRACTED AS A MEASUREMENT OF THE PRODUCTION MPAS LANE (#1320).
+
+Codex review, 2026-09-04, four HIGH findings.  The numbers this script produced
+were quoted on #1320 and have been withdrawn there.  Do not cite them.
+
+WHAT IS WRONG, so it is fixed rather than re-run:
+
+1. The "blended" arm is a strawman.  When the interactive land supplies its
+   fluxes, the MPAS turbulence factory does NOT run one bulk scheme on a
+   blended skin temperature over land -- it area-weights the FLUXES,
+   ``(1 - f_land) * SH_ocean + f_land * SH_land`` and likewise for latent heat
+   (``turbulence/integration.py`` ~L770-812), fed by ``forcing["shflx_land"]``
+   / ``["lhflx_land"]``, wired at ``model_driver.py:10563``.  It also takes the
+   land's SOLVED boundary humidity ``forcing["q_sfc_land"]`` verbatim over
+   land, superseding the beta throttle reproduced below.  So for the land tile
+   the lane ALREADY does the flux-level aggregation the port would buy.
+2. Gustiness resolves to the native 600 m default here; production sets
+   ``surface_gustiness_zi: 300.0``.  The configuration must be RESOLVED, not
+   reconstructed as it is below.
+3. The ice tile is invented (MOST at z0=1e-3); the real tiled path uses
+   ``bulk_scheme="constant"`` (``physics_pipeline.py:1032``).
+4. The tests exercise only this file's own two arms, so the production path
+   could be fixed and every test would still pass.
+
+WHAT A CORRECT VERSION MUST DO: resolve the production ``ExperimentConfig`` and
+read the tile configs off it; drive ``_make_mpas_turbulence`` with the same
+forcing channels a run threads (including ``shflx_land``/``lhflx_land`` and
+``q_sfc_land``); and scope the comparison to what is genuinely untiled on that
+lane -- the SEA-ICE tile, momentum/stress, and the ocean tile's stability being
+evaluated against a partly land-influenced blended state.
+
+Kept in the tree rather than deleted because the correct version is a
+modification of this one and the four defects above are the specification for
+it.
+"""
+
 """How much does the MPAS blended surface cost, in W/m^2? (#1320)
 
 The MPAS lane runs an UNTILED surface: one blended ``T_sfc``/``q_sfc`` per cell
