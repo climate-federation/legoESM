@@ -3771,7 +3771,7 @@ def _revision_ambiguity(rev) -> str | None:
     return " ".join(reasons) if reasons else None
 
 
-def _diag(state, lat2d=None, lon2d=None) -> dict:
+def _diag(state, lat2d=None, lon2d=None, edge_latlon=None) -> dict:
     """Cheap scalar diagnostics over ocean cells (one device->host pull).
 
     ``umax_lat``/``umax_lon``/``umax_lev`` = location of the 3-D max|u| —
@@ -3808,6 +3808,12 @@ def _diag(state, lat2d=None, lon2d=None) -> dict:
         umax_lev = ku
         if lon2d is not None:
             umax_lon = round(float(np.asarray(lon2d)[fu, ju, iu]), 1)
+    elif edge_latlon is not None and has_u and u.ndim == 2:
+        # MPAS: u is edge-normal on (nEdges, nlev); locate the max edge.
+        ie, ku = (int(x) for x in np.unravel_index(np.nanargmax(au), au.shape))
+        umax_lat = round(float(edge_latlon[0][ie]), 2)
+        umax_lon = round(float(edge_latlon[1][ie]), 2)
+        umax_lev = ku
     elif lat2d is not None and has_u and u.ndim == 3:
         ju, iu, ku = (int(x) for x in
                       np.unravel_index(np.nanargmax(au), au.shape))
@@ -7925,7 +7931,10 @@ def main() -> int:
           f"(diag every {diag_every} steps"
           f"{f', snapshot every {snap_every} steps' if snap_every else ''}"
           f"{f', resuming at step {start_step}' if start_step else ''})")
-    d0 = _diag(state, lat2d, lon2d)
+    _edge_ll = ((np.degrees(np.asarray(grid.latEdge)),
+                 np.degrees(np.asarray(grid.lonEdge)))
+                if app_grid_type == "mpas" else None)
+    d0 = _diag(state, lat2d, lon2d, edge_latlon=_edge_ll)
     print(f"[diag] step {start_step}: {d0}", flush=True)
 
     # Progress time-series CSV, flushed each diag -> observable mid-run even when
@@ -8459,7 +8468,7 @@ def main() -> int:
             day = step * dt / _SEC_PER_DAY
             if step % diag_every == 0 or step == n_steps:
                 state = jax.block_until_ready(state)
-                d = _diag(state, lat2d, lon2d)
+                d = _diag(state, lat2d, lon2d, edge_latlon=_edge_ll)
                 # Throughput of THIS leg: a resumed run has done (step-start_step)
                 # steps in (now - t_wall), not `step` of them.
                 rate = (step - start_step) / (time.time() - t_wall)

@@ -76,7 +76,7 @@ RESTART_FROM=""
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.98
 
-ROOT=/burg-archive/glab/users/pg2328/legoESM; cd $ROOT || exit 1
+ROOT=/burg-archive/glab/users/pg2328/_omip_wt; cd $ROOT || exit 1
 HEAD=$(git rev-parse HEAD)
 [ "$HEAD" = "$PIN" ] || { echo "FATAL: HEAD $HEAD != pinned $PIN"; exit 1; }
 echo "HEAD: $(git log --oneline -1)"
@@ -87,7 +87,7 @@ OUT=$ROOT/results/omip_nemo/mpas_fwnemo_l8_diag1d
 [ "$LEG" -ge 2 ] && RESTART_FROM="--restart-from $OUT/restart.npz"
 
 echo "=== gate: corrected forcing is the default ==="
-JAX_PLATFORMS=cpu $PY -m pytest -q tests/ocean/unit/test_core2_corrected_cache_default.py 2>&1 | tail -2
+JAX_PLATFORMS=cpu $PY -m pytest -q tests/ocean/unit/test_core2_corrected_cache_default.py tests/unit/test_run_omip_core2_diag_mpas.py 2>&1 | tail -2
 rc=$?; [ $rc -eq 0 ] || { echo "FATAL: gate rc=$rc"; exit 1; }
 
 JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid mpas \
@@ -105,7 +105,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid mpas \
   --bbl-adv --years 0.00274 --snapshot-every-days 1 \
   --freshwater-closure real_freshwater --sss-restore-channel water_flux \
   --sss-restore-normalization live_s \
-  --diag-every-days 0.005 --tracer-advection superbee --runoff-depth-nemo-ini \
+  --diag-every-days 0.0009 --tracer-advection superbee --runoff-depth-nemo-ini \
   --river-mouth-restoring-gate --bottom-drag-scheme nemo_quadratic \
   --ice-ocean-heat-coeff 70 \
   --woa-init \
