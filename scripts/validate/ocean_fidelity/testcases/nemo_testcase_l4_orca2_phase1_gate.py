@@ -469,7 +469,15 @@ def _netcdf_equal_except_timestamp(a: Path, b: Path) -> None:
             for attr in lv.ncattrs():
                 require(np.array_equal(getattr(lv, attr), getattr(rv, attr)),
                         f"{a.name}: {name}:{attr} differs")
-            require(np.ma.allequal(lv[:], rv[:]), f"{a.name}: {name} payload differs")
+            # Compare the raw stored values, including fill values.  Automatic
+            # masking would otherwise make differing bytes at masked elements
+            # compare equal.
+            lv.set_auto_maskandscale(False)
+            rv.set_auto_maskandscale(False)
+            left_raw = np.ascontiguousarray(lv[:])
+            right_raw = np.ascontiguousarray(rv[:])
+            require(left_raw.tobytes(order="C") == right_raw.tobytes(order="C"),
+                    f"{a.name}: {name} raw payload differs")
 
 
 def _normalized_ocean(path: Path) -> list[str]:

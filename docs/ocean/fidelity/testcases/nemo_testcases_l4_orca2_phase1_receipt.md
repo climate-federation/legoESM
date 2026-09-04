@@ -430,6 +430,14 @@ population, order, type, dimensions, and record schema are unchanged.  This is
 a WRITE-only instrumentation-lifetime change and is included in the corrective
 instrumented rebuild and replacement ten-step run preregistered separately.
 
+### Independent-review correction: history payload identity
+
+The identity gate disables NetCDF automatic masking and scaling and compares
+the contiguous raw stored-value bytes of every data variable.  Consequently a
+difference underneath a mask, including a differing fill value in the payload,
+is now a failure; `np.ma.allequal` is no longer used.  Dimension, dtype,
+variable-attribute, and non-`TimeStamp` global-attribute checks remain in force.
+
 ### Cross-lane ticket: Lane-3 reassociation header
 
 The defect originated in the Lane-3/C1D writer
