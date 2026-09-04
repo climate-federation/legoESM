@@ -94,7 +94,7 @@ selector may be mixed with it.
 | run/calendar | `nn_it000=1`, `nn_itend=8760`, `nn_date0=20180101`, `nn_leapy=1`, no restart, final restart/output | C1D EXP_SASICE `namelist_cfg:25-33`; documented forcing year |
 | `rn_Dt` | `3600 s` | C1D EXP_SASICE `namelist_cfg:38`; ORCA1 `namelist_cfg:58` agrees |
 | RK3 averaging | `ln_shuman=T` | ORCA1 `namelist_cfg:60`; active RK3 convention |
-| one-layer domain | `ln_c1d=T`, `rn_bathy=1 m`, `rn_lat1d=84`, `rn_lon1d=324`, `jpk=2` | phase-1 C1D_OMIP_L3 case value `scripts/validate/ocean_fidelity/testcases/configs/c1d_omip_l3_namelist_cfg:19`, EXP_SASICE `:40,49-50`, and declared copied-source `jpk` edit above |
+| one-layer domain | `ln_c1d=T`, `rn_bathy=10 m`, `rn_lat1d=84`, `rn_lon1d=324`, `jpk=2` | `rn_bathy` is the user's 2026-09-06 free construction parameter (**not** an ORCA1 quantity); latitude/longitude are EXP_SASICE `namelist_cfg:40,49-50`, and `jpk` is the declared copied-source edit above |
 | initial T/S/U/V | `ln_tsd_init=T`, `ln_uvd_init=T`, no dynamical restoring; exact four-variable derived file | C1D EXP_PAPA ingestion schema `:48-79`; first EXP_SASICE ERA5 record |
 | initial SSH | config-local `usr_def_istate_ssh`, `rn_ssh_init` from exact first ERA5 record | active user-domain call `restart.F90:452-462`; no implicit zero fallback |
 | `nn_fsbc` | `4` | ORCA1 `EXPREF/namelist_cfg:106`; means four hourly ocean samples and the cadence-guarded SI3 thermodynamic/update body executes at `MOD(kt-1,4)=0` |
