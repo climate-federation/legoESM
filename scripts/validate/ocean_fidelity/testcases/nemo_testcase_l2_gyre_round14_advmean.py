@@ -130,7 +130,10 @@ def compare(candidate, oracle, active=None) -> dict:
     }
 
 
-def run(root: Path, *, plant: bool = False) -> dict:
+def run(
+    root: Path, *, plant: bool = False, legacy_wind_arm: bool = False,
+    legacy_stress_arm: bool = False,
+) -> dict:
     import jax
     import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -164,7 +167,10 @@ def run(root: Path, *, plant: bool = False) -> dict:
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, cfg,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
-            expose_barotropic_substeps=True),
+            expose_barotropic_substeps=True,
+            legacy_barotropic_wind_association=legacy_wind_arm,
+            legacy_geographic_surface_stress_arm=legacy_stress_arm,
+        ),
     )
     model.prime_step_caches(state)
     trace = model.step(
@@ -187,14 +193,18 @@ def run(root: Path, *, plant: bool = False) -> dict:
         stagger_name = "u_entry" if "_u" in name else "v_entry"
         native[name] = _trace_native(trace.substeps[name], stagger_name)
     native["transport_weight"] = np.asarray(trace.substeps["transport_weight"])
+    plant_location = None
     if plant:
         native["transport_sum_u_exit"] = native["transport_sum_u_exit"].copy()
-        live = active_u & np.isfinite(native["transport_sum_u_exit"][0]) \
-            & (native["transport_sum_u_exit"][0] != 0.0)
-        require(np.any(live), "plant requires a nonzero live substep-1 transport sum")
+        live = np.broadcast_to(active_u, native["transport_sum_u_exit"].shape) \
+            & np.isfinite(native["transport_sum_u_exit"]) \
+            & (native["transport_sum_u_exit"] != 0.0)
+        require(np.any(live), "plant requires a nonzero live transport sum")
         index = tuple(np.argwhere(live)[0])
-        native["transport_sum_u_exit"][(0, *index)] = np.nextafter(
-            native["transport_sum_u_exit"][(0, *index)], np.inf)
+        native["transport_sum_u_exit"][index] = np.nextafter(
+            native["transport_sum_u_exit"][index], np.inf)
+        plant_location = {"substep": int(index[0] + 1), "j": int(index[1]),
+                          "i": int(index[2]), "original_nonzero": True}
 
     weight_rows = {
         "header_weights": compare(oracle["weights"], oracle["weight"]),
@@ -349,6 +359,9 @@ def run(root: Path, *, plant: bool = False) -> dict:
         "status": "AT-BAR" if all_exact else "DEBT",
         "regime": "production-jit-cpu-fp64-x64",
         "plant": plant,
+        "legacy_wind_arm": legacy_wind_arm,
+        "legacy_stress_arm": legacy_stress_arm,
+        "plant_location": plant_location,
         "oracle_root": str(root),
         "artifacts": {
             path.name: sha256(path), identity.name: sha256(identity),
@@ -387,8 +400,15 @@ def main() -> int:
     parser.add_argument("--oracle-root", type=Path, default=ORACLE_ROOT)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant", action="store_true")
+    parser.add_argument("--legacy-wind-arm", action="store_true")
+    parser.add_argument("--legacy-stress-arm", action="store_true")
     args = parser.parse_args()
-    report = run(args.oracle_root, plant=args.plant)
+    report = run(
+        args.oracle_root,
+        plant=args.plant,
+        legacy_wind_arm=args.legacy_wind_arm,
+        legacy_stress_arm=args.legacy_stress_arm,
+    )
     payload = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.write_text(payload)
