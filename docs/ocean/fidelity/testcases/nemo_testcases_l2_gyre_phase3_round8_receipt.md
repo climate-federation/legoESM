@@ -305,10 +305,10 @@ The config-local WRITE-only record is taken immediately after NEMO forms
 
 | operand/output | U max abs / differing | V max abs / differing | label |
 |---|---:|---:|---|
-| horizontal metric | `0 / 0` | `0 / 0` | bit-exact |
-| Kmm face thickness | `0 / 0` | `0 / 0` | bit-exact |
-| Kmm velocity | `0 / 0` | `0 / 0` | bit-exact |
-| mask | `0 / 0` | `0 / 0` | bit-exact |
+| horizontal metric | `0 / 17,400` | `0 / 17,100` | bit-exact |
+| Kmm face thickness | `0 / 17,400` | `0 / 17,100` | bit-exact |
+| Kmm velocity | `0 / 17,400` | `0 / 17,100` | bit-exact |
+| mask | `0 / 17,400` | `0 / 17,100` | bit-exact |
 | corrected velocity | `2.799952110443815e-17 / 17400` | `1.2766480581016815e-17 / 17100` | first non-bit-exact compound operand |
 | `un_adv` / `vn_adv` | `1.2045919817182948e-13 / 580` | `5.495603971894525e-14 / 570` | **CONFIRMED upstream owner** |
 | native `zF` | `8.922143024392426e-10 / 17400` | `4.069988790433854e-10 / 17092` | propagated DEBT |
@@ -1549,10 +1549,10 @@ The one-variable result is decisive at the predicted boundary:
 
 | boundary | pre-fix max abs | source-literal max abs | source-literal differing cells | disposition |
 |---|---:|---:|---:|---|
-| stage-1 U/V `Krhs` | `1.3869160759180077e-20` | `0` | `0 / 0` | CONFIRMED HPG association owner |
-| e3, mask, reciprocal depth | `0` | `0` | `0 / 0` | BIT-EXACT inputs |
-| reference-depth reduction | `5.9922313054079714e-21` | `0` | `0 / 0` | BIT-EXACT after HPG fix |
-| post-drag forcing | `5.9922313054079714e-21` | `0` | `0 / 0` | BIT-EXACT |
+| stage-1 U/V `Krhs` | `1.3869160759180077e-20` | `0` | `0 / 17,400 U; 0 / 17,100 V` | CONFIRMED HPG association owner |
+| e3, mask, reciprocal depth | `0` | `0` | `0 / 17,400 U; 0 / 17,100 V` | BIT-EXACT inputs |
+| reference-depth reduction | `5.9922313054079714e-21` | `0` | `0 / 580 U; 0 / 570 V` | BIT-EXACT after HPG fix |
+| post-drag forcing | `5.9922313054079714e-21` | `0` | `0 / 580 U; 0 / 570 V` | BIT-EXACT |
 | post-wind U | `5.998713802234557e-21` | `6.617444900424222e-24` | `415` | DEBT, 3 ULP |
 | post-wind V | `5.998713802234557e-21` | `6.617444900424222e-24` | `409` | DEBT, 4 ULP |
 
@@ -1689,10 +1689,10 @@ one nonzero cell, becomes the first boundary, and exits `1`.
 
 | ordered boundary | pre-fix U / V | final U / V | disposition |
 |---|---:|---:|---|
-| `Krhs`, depth mean, post-drag | `0 / 0` | `0 / 0` | retained BIT-EXACT |
-| face stress differing cells | `414 / 418` | `0 / 0` | BIT-EXACT |
-| post-wind max abs | `6.617444900424222e-24 / 6.617444900424222e-24` | `0 / 0` | BIT-EXACT |
-| pre-external max abs | `6.617444900424222e-24 / 6.617444900424222e-24` | `0 / 0` | BIT-EXACT |
+| `Krhs`, depth mean, post-drag | `0 / 17,400 U; 0 / 17,100 V` | `0 / 17,400 U; 0 / 17,100 V` | retained BIT-EXACT; 2-D reductions are `0 / 580 U; 0 / 570 V` |
+| face stress differing cells | `414 / 580 U; 418 / 570 V` | `0 / 580 U; 0 / 570 V` | BIT-EXACT |
+| post-wind max abs | `6.617444900424222e-24 / 6.617444900424222e-24` | `0 / 580 U; 0 / 570 V` | BIT-EXACT |
+| pre-external max abs | `6.617444900424222e-24 / 6.617444900424222e-24` | `0 / 580 U; 0 / 570 V` | BIT-EXACT |
 
 Atmospheric pressure is dead exactly as preregistered: resolved
 `ln_apr_dyn=.false.` (`namelist_ref:211`), so post-wind is the external-mode

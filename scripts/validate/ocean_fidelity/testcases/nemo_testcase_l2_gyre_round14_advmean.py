@@ -127,6 +127,7 @@ def compare(candidate, oracle, active=None) -> dict:
         "absolute_max": float(np.max(np.abs(delta), initial=0.0)),
         "ulp_max": int(np.max(ulp_distance(candidate, oracle), initial=0)),
         "differing_cells": int(np.count_nonzero(candidate != oracle)),
+        "wet_cells": int(candidate.size),
     }
 
 
