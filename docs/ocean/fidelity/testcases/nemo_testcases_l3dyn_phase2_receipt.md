@@ -629,17 +629,20 @@ single threshold/mask/parity branch event like the rung-3.1 column event is
 observed.  The full artifact retains every boundary and maximizing cell rather
 than only this requested sample.
 
-The round-5 reviewer-requested compounding rate is now named explicitly.  The
+**CONFIRMED arithmetic:** the round-5 reviewer-requested compounding rate is
+named explicitly.  The
 clearest approximately three-percent window in the registered table is the
 `a_i` absolute residual from step 10 to step 50:
 `(4.884981308350689e-15 / 1.3322676295501878e-15)^(1/40) - 1 =
 3.3015375767554644%` per outer step.  This is a windowed rate, not a claimed
-constant exponent over all 485 steps.  Its source is the **nonlinear
-sensitivity of the rheology trajectory**: the compiled-loop stress
-re-association changes the carried C-grid velocity, and that velocity feeds the
-otherwise shared Prather arm on the following outer step.  The absence of a
-discrete predicate change in the per-boundary registry is why this is recorded
-as compounding nonlinear sensitivity rather than a branch event.
+constant exponent over all 485 steps.  Those two endpoints are only about six
+and twenty-two ULPs of a max-one field, respectively.  **PLAUSIBLE, not
+measured:** nonlinear rheology sensitivity could compound the carried
+stress/velocity re-association before Prather advection on the following outer
+step.  No one-ULP perturbation experiment was run, so neither the 3.3015% rate
+nor the absence of a registered discrete predicate change identifies that
+mechanism.  The source of the windowed growth remains UNMEASURED at the
+precision floor.
 
 At the final restart, all 23 ordinary registered fields are loaded and scored:
 four are AT-BAR (`oa_i`, `v_il`, carried `sv_i`, and surface temperature) and
@@ -925,8 +928,10 @@ buildable override-excluded copy as the oracle, run its documented 720 steps,
 extend Appendix-A coverage to ridging/rafting state, implement the selectable
 jpl=1 SI3 redistribution arm, wire the existing arms in dynALL order, and gate
 geometry, kt=1, and first divergence.  Also add direct pytest coverage for the
-rung-3.3 trajectory gate and name its measured 3.3015375767554644%/step window
-as nonlinear rheology sensitivity.
+rung-3.3 trajectory gate and name its measured 3.3015375767554644%/step window;
+round 8 explicitly authorized relabeling the unperturbed mechanism attribution
+as PLAUSIBLE with its precision-floor caveat instead of running the optional
+one-ULP sensitivity experiment.
 
 **UNASKED choices:** no default change to existing ice transport; no ocean-SOM
 replacement or arithmetic-changing common refactor; no rung-3.3 claim beyond
