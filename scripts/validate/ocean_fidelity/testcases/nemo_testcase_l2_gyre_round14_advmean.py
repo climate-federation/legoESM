@@ -38,7 +38,11 @@ ORACLE_ROOT = Path(
     "round14_oracle_advmean_v1"
 )
 IDENTITY_SHA256 = (
-    "35e6892b799aeaf8d06d4affcd71b5ba0c71dc41bc0e8970c033459c46cd1402"
+    "ce25b004e7e8289b6e803263f895576981ce22516ccddfbd85d7be5ce5bcaedc"
+)
+ORACLE_DYNSPG_SOURCE = Path(
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/"
+    "cfgs/GYRE_OMIP_L2_P3_SM/MY_SRC/dynspg_ts.F90"
 )
 
 
@@ -185,7 +189,10 @@ def run(root: Path, *, plant: bool = False) -> dict:
     native["transport_weight"] = np.asarray(trace.substeps["transport_weight"])
     if plant:
         native["transport_sum_u_exit"] = native["transport_sum_u_exit"].copy()
-        index = tuple(np.argwhere(active_u)[0])
+        live = active_u & np.isfinite(native["transport_sum_u_exit"][0]) \
+            & (native["transport_sum_u_exit"][0] != 0.0)
+        require(np.any(live), "plant requires a nonzero live substep-1 transport sum")
+        index = tuple(np.argwhere(live)[0])
         native["transport_sum_u_exit"][(0, *index)] = np.nextafter(
             native["transport_sum_u_exit"][(0, *index)], np.inf)
 
@@ -346,7 +353,7 @@ def run(root: Path, *, plant: bool = False) -> dict:
         "artifacts": {
             path.name: sha256(path), identity.name: sha256(identity),
             bt_path.name: sha256(bt_path),
-            "dynspg_ts.F90": sha256(root / "dynspg_ts.F90"),
+            "dynspg_ts.F90": sha256(ORACLE_DYNSPG_SOURCE),
             "namelist_cfg": sha256(root / "namelist_cfg"),
             "output.namelist.dyn": sha256(root / "output.namelist.dyn"),
         },
