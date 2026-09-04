@@ -384,9 +384,6 @@ def run_active_window(
                             gate._HALO_WIDTH : -gate._HALO_WIDTH,
                             tracer_index,
                         ],
-                        uninformative_zero=(
-                            tracer in gate.UNINFORMATIVE_ZERO_FIELDS
-                        ),
                     )
                 )
     require(
@@ -397,6 +394,7 @@ def run_active_window(
     debts = [row for row in rows if row["status"] == "DEBT"]
     informative = [row for row in rows if row["status"] != "UNINFORMATIVE"]
     owner = max(informative, key=lambda row: float(row["normalized_max_abs"]))
+    first_over_bar = debts[0] if debts else None
     return {
         "gate": "nemo-si3-phase2-rung34-active-window-v1",
         "status": "AT-BAR" if not debts else "DEBT",
@@ -410,9 +408,13 @@ def run_active_window(
         "prediction": {
             "first_over_bar_row": "stress1_i",
             "status": (
-                "CONFIRMED" if str(owner["name"]).endswith("stress1_i") else "REFUTED"
+                "CONFIRMED"
+                if first_over_bar is not None
+                and str(first_over_bar["name"]).endswith("stress1_i")
+                else "REFUTED"
             ),
         },
+        "first_over_bar": first_over_bar,
         "owner": owner,
         "debt_rows": debts,
         "rows": rows,
