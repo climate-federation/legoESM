@@ -1,0 +1,36 @@
+&grid_inputs
+    input_file = '/data/abyssal/dbalwada/ORCA1-omip/INPUTS/orca1_inputs/data_repository/input_fields/merged_ESACCI_BIOMER4V1R1_CHL_REG05.nc'
+    nemo_file = '/data/abyssal/dbalwada/nemo-testcases-l3/c1d_omip_l3_coupled_sm_round12_domain_bootstrap/domain_cfg.nc'
+    datagrid_file = 'remap_reg05_grid.nc'
+    nemogrid_file = 'remap_c1d_omip_l3_grid.nc'
+    method = 'regular'
+    input_lon = 'nav_lon'
+    input_lat = 'nav_lat'
+    nemo_lon = 'glamt'
+    nemo_lat = 'gphit'
+    nemo_mask = 'none'
+    nemo_mask_value = 10
+    input_mask = 'none'
+    input_mask_value = 10
+/
+&remap_inputs
+    num_maps = 1
+    grid1_file = 'remap_reg05_grid.nc'
+    grid2_file = 'remap_c1d_omip_l3_grid.nc'
+    interp_file1 = 'reg05_c1d_omip_l3_bilin_scrip.nc'
+    interp_file2 = 'c1d_omip_l3_reg05_bilin_scrip.nc'
+    map1_name = 'REG05 to C1D_OMIP_L3 bilinear Mapping'
+    map2_name = 'C1D_OMIP_L3 to REG05 bilinear Mapping'
+    map_method = 'bilinear'
+    normalize_opt = 'frac'
+    output_opt = 'scrip'
+    restrict_type = 'latitude'
+    num_srch_bins = 90
+    luse_grid1_area = .false.
+    luse_grid2_area = .false.
+/
+&shape_inputs
+    interp_file = 'reg05_c1d_omip_l3_bilin_scrip.nc'
+    output_file = 'weights_reg05_C1D_OMIP_L3_bilinear.nc'
+    ew_wrap = 1
+/
