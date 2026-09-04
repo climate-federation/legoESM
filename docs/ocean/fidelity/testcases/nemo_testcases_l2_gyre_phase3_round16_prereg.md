@@ -55,3 +55,34 @@ a finding.  Replace the cell-local ULP admission scale with
 stage/trajectory comparisons and their three planted controls, and relabel the
 DINO correlation-only third-consumer measurement as a consistency probe.
 
+## D4 — conditional stage-1 slow-forcing walk
+
+Entered only if D2 is bit-exact.  The executed RK3 path is `stp2d.F90`:
+`eos/dyn_hpg/dyn_ldf/dyn_vor/wzv/dyn_keg/dyn_zad` accumulate the 3-D `Krhs`
+at `:126-171`; the vector-invariant arm depth-means it with
+`SUM(e3u_0*Krhs*umask)*r1_hu_0` and the V analogue at `:177-181`, applies
+`dyn_drg_init` at `:196`, and adds wind stress at `:198-202`.  Only then does
+`dynspg_ts.F90:280-300` copy `Ue_rhs/Ve_rhs` to `zu_frc/zv_frc` and remove the
+barotropic Coriolis trend; the non-RK3 depth-mean block at
+`dynspg_ts.F90:310-346` is dead in this configuration.
+
+A config-local, WRITE-only `stp2d.F90` record will dump the level operands,
+the completed depth mean, post-drag value, stress increment, and post-wind
+value.  Ranked candidate owner, preregistered before that run:
+
+1. **CONFIRM candidate:** legoESM's fused `jnp.sum(stack(...))` reduction and
+   divide do not reproduce the source-ordered per-face Fortran `SUM` product,
+   while `e3*`, `Krhs`, masks, and reciprocal depth are bit-exact.  A shared
+   source-ordered reduction arm removes the existing `6.00e-21` slow-forcing
+   gap.
+2. **Second candidate:** the separately reconstructed face thickness/column
+   depth differs from NEMO's `e3u_0/r1_hu_0` or V counterpart.
+3. **Later candidates:** `dyn_drg_init`, then the association of
+   `r1_rho0*utauU*r1_hu(Kbb)` into the depth mean.  These are tested only if
+   the preceding boundary is exact.
+
+Scaling is evaluated before any owner label: each first operand residual is
+propagated through the remaining literal statements and compared with the
+post-wind `zu_frc/zv_frc` residual.  A one-variable arm substitutes exactly
+one oracle operand.  The plant flips one live dumped operand and must exit
+nonzero.
