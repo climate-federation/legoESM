@@ -13,7 +13,7 @@ REPO=/burg-archive/glab/users/pg2328/_omip_wt; cd $REPO || exit 1
 export PYTHONPATH="$(ls -d $REPO/packages/*/ | sed 's:/$::' | tr '\n' ':')$REPO"
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
-for L in 8; do
+for L in 8 7; do
   echo "########## level $L"
   $PY -u scripts/validate/ocean_fidelity/probe_mpas_e3w_geometry.py --level $L --snapshot $REPO/results/omip_nemo/l8bisect_ctl_snap/snapshot_final.npz 2>&1 | grep -vE "^\[|^\s*$" | tail -n 80
   echo "rc=$?"

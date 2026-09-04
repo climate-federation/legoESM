@@ -138,6 +138,28 @@ def main() -> int:
                 print(f"   k={k:2d} {zc[k]:7.0f} m  n={int(act.sum()):2d}  "
                       f"T {T_ic[act, k].min():6.2f}/{T_ic[act, k].max():6.2f}  "
                       f"S {S_ic[act, k].min():6.2f}/{S_ic[act, k].max():6.2f}")
+    # TRiSK tangential-velocity weights: reconstruct a uniform flow (exact on a
+    # perfect hex mesh, O(10%) on a Lloyd mesh); a weight blow-up shows as
+    # |error| >> 1 at specific edges and as a large sum|w|.
+    W = np.asarray(grid.weightsOnEdge); EoE = np.asarray(grid.edgesOnEdge)
+    if W.shape[0] != dc.size:
+        W, EoE = W.T, EoE.T                      # -> (nEdges, maxEdges2)
+    ang = np.asarray(grid.angleEdge)
+    nx_, ny_ = np.cos(ang), np.sin(ang); tx_, ty_ = -np.sin(ang), np.cos(ang)
+    valid = EoE >= 0
+    worst = 0.0
+    for name, (Ux, Uy) in (("east", (1.0, 0.0)), ("north", (0.0, 1.0))):
+        ue = Ux * nx_ + Uy * ny_
+        vt_true = Ux * tx_ + Uy * ty_
+        vt = np.where(valid, W * ue[np.where(valid, EoE, 0)], 0.0).sum(axis=1)
+        err = np.abs(vt - vt_true)
+        ie = int(np.argmax(err)); worst = max(worst, float(err.max()))
+        print(f"TRiSK weights, uniform {name} flow: |v_t err| max {err.max():.3g} at edge {ie} "
+              f"({lat_e[ie]:.2f}N {lon_e[ie]:.2f}E), p99 {np.percentile(err, 99):.3g}, "
+              f"n(err>0.5)={int((err > 0.5).sum())}")
+    sw = np.abs(np.where(valid, W, 0.0)).sum(axis=1)
+    print(f"sum|w| per edge: median {np.median(sw):.3f} max {sw.max():.3f} at edge {int(np.argmax(sw))} "
+          f"({lat_e[int(np.argmax(sw))]:.2f}N {lon_e[int(np.argmax(sw))]:.2f}E); n(sum|w|>3)={int((sw > 3).sum())}")
     if a.snapshot:
         zs = np.load(a.snapshot)
         u = np.asarray(zs["u"]); eta = np.asarray(zs["eta"]) if "eta" in zs.files else None
