@@ -61,3 +61,18 @@ Only if the corrected stage-2 Kaa clears will the walk proceed to stage-3
 `zFu/zFv/zFw`.  Only if both boundaries clear will any `tra_zdf/dyn_zdf`
 matrix work begin.  The round-10 compare-to gate and EOS are immutable in this
 round.  No external review has yet occurred.
+
+## Registered redirect after the composition arms
+
+The immediate pre-update dump refutes the original accumulation-association
+prediction: changing only that association produces zero move, while replacing
+the complete RHS with the oracle makes raw `Kaa` bit-identical.  The observed
+scale instead localizes the amplification to HPG: its u/v residuals multiplied
+by `rDt=7200 s` equal the raw-Kaa residuals.  Before opening that operator, the
+next prediction is that the first differing literal operand is the horizontal
+metric reciprocal or the `zhpi + zuap` association at the deepest wet level,
+where both maxima occur.  A WRITE-only `dynhpg` record will separate cumulative
+`zhpi`, local `zuap`, and their stored sum.  CONFIRM metric/association ownership
+only if one of those operands first exceeds the effective stage-output bar
+`1e-15/7200`; REFUTE it if all three meet that tighter bound or an earlier
+density/e3w/depth operand differs.  No diagnostic value may feed either model.
