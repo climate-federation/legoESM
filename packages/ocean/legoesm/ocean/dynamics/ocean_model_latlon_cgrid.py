@@ -9868,12 +9868,20 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "private GYRE causal-arm overrides are implemented only for "
                 "outer_integrator='forward_euler'.")
-        return self._step_jitted(
-            state, dt, freshwater, surface_forcing, sponge,
-            grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
-            external_tracer_rate=external_tracer_rate,
-            _shortwave_tendency_test_delta=_shortwave_tendency_test_delta,
-            _vertical_K_test_override=_vertical_K_test_override)
+        # ``step`` is the production-compiled entry point even when a caller
+        # has enabled JAX's process-wide diagnostic ``disable_jit`` context.
+        # Inheriting that context used to bypass this boundary and execute a
+        # different eager arithmetic graph (most visibly at the Roquet/HPG
+        # boundary), so an eager-vs-production comparison was not comparing
+        # the same program.  Re-enable only this explicitly jitted kernel;
+        # private hooks remain inside the identical compiled step.
+        with jax.disable_jit(False):
+            return self._step_jitted(
+                state, dt, freshwater, surface_forcing, sponge,
+                grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
+                external_tracer_rate=external_tracer_rate,
+                _shortwave_tendency_test_delta=_shortwave_tendency_test_delta,
+                _vertical_K_test_override=_vertical_K_test_override)
 
     @partial(jax.jit, static_argnums=(0,))
     def _step_jitted(self, state: LatLonCGridOceanState, dt: float,

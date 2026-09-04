@@ -47,15 +47,15 @@ def test_nemo_ws_eos_hpg_transport_are_bitwise_equal_eager_and_jit(monkeypatch):
     area_v = fixed((3, 4), 0.1, 1000.0)
 
     def operand_chain():
-        # EOS: nonuniform Roquet inputs, with an exact synthetic rho0 so this
-        # test isolates source association rather than the campaign's separate
-        # 1/1026 final-scaling audit.
-        temperature = jnp.asarray([-2.0, -2.0], dtype=dtype)
-        salinity = jnp.asarray([34.0, 35.0], dtype=dtype)
-        depth = jnp.asarray([0.0, 1000.0], dtype=dtype)
-        tmask = jnp.asarray([1.0, 0.0], dtype=dtype)
+        # EOS: live NEMO rho0 and nonzero geometric depths make the subtractive
+        # density-anomaly cancellation active.  The former rho0=1 smoke input
+        # could not see the production GYRE eager/JIT defect.
+        temperature = jnp.asarray([-2.0, 4.25, 11.0], dtype=dtype)
+        salinity = jnp.asarray([34.0, 35.0, 36.5], dtype=dtype)
+        depth = jnp.asarray([0.0, 1000.0, 4321.0], dtype=dtype)
+        tmask = jnp.asarray([1.0, 1.0, 0.0], dtype=dtype)
         density = nemo_roquet_density_anomaly_ratio(
-            temperature, salinity, jnp.zeros_like(depth), rho0=1.0,
+            temperature, salinity, jnp.zeros_like(depth), rho0=1026.0,
             geometric_depth_m=depth, tmask=tmask)
 
         # HPG: exercise the complete top-down recurrence on two levels.
@@ -80,7 +80,7 @@ def test_nemo_ws_eos_hpg_transport_are_bitwise_equal_eager_and_jit(monkeypatch):
         eager = tuple(np.asarray(value) for value in operand_chain())
     compiled = tuple(np.asarray(value) for value in jax.jit(operand_chain)())
     assert all(np.array_equal(a, b) for a, b in zip(eager, compiled, strict=True))
-    assert compiled[0][1] == 0.0
+    assert compiled[0][2] == 0.0
 
     # Planted mutation: removing the literal-path barriers changes live r3u/r3v
     # bits.  Consequently this test fails at the equality assertion if those
@@ -94,6 +94,27 @@ def test_nemo_ws_eos_hpg_transport_are_bitwise_equal_eager_and_jit(monkeypatch):
         not np.array_equal(a, b)
         for a, b in zip(compiled, unbarriered, strict=True)
     )
+
+
+def test_nemo_ws_public_step_is_same_production_kernel_under_outer_disable_jit():
+    """A diagnostic outer context cannot bypass the production step JIT."""
+    set_policy(PrecisionPolicy.fp64())
+    card = build_nemo_testcase_card("GYRE-zco")
+    cfg = card.recipe.model_config._replace(
+        freshwater_closure="real_freshwater", fix_eta_drift=True)
+    model = model_module.LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg)
+    model.prime_step_caches(card.recipe.initial_state)
+
+    with jax.disable_jit():
+        eager_context = model.step(card.recipe.initial_state, dt=card.dt_s)
+    production_context = model.step(card.recipe.initial_state, dt=card.dt_s)
+
+    for field in ("T", "S", "u", "v", "eta"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(eager_context, field).data),
+            np.asarray(getattr(production_context, field).data),
+        )
 
 
 def test_rk3_tke_nbb_mapping_is_independent_of_evd_selector():

@@ -3729,7 +3729,7 @@ def compute_face_masks_3d(
     return u_mask, v_mask
 
 
-def nemo_hpg_sco_literal_cgrid(
+def _nemo_hpg_sco_literal_cgrid_impl(
     rhd: jnp.ndarray,
     e3w: jnp.ndarray,
     gdept_z0: jnp.ndarray,
@@ -3791,6 +3791,23 @@ def nemo_hpg_sco_literal_cgrid(
         jnp.concatenate([native_u[:, -1:, :], native_u], axis=1),
         jnp.concatenate([jnp.zeros_like(native_v[:1]), native_v], axis=0),
     )
+
+
+_nemo_hpg_sco_literal_cgrid_compiled = jax.jit(
+    _nemo_hpg_sco_literal_cgrid_impl)
+
+
+def nemo_hpg_sco_literal_cgrid(
+    rhd: jnp.ndarray,
+    e3w: jnp.ndarray,
+    gdept_z0: jnp.ndarray,
+    grid: LatLonGrid,
+    g: float,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Run NEMO's SCO recurrence identically inside and outside outer JIT."""
+    with jax.disable_jit(False):
+        return _nemo_hpg_sco_literal_cgrid_compiled(
+            rhd, e3w, gdept_z0, grid, g)
 
 
 def partial_cell_pgf_correction_x(

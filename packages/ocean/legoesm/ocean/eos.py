@@ -34,6 +34,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import equinox as eqx
+import jax
 from jax import lax
 import jax.numpy as jnp
 
@@ -1006,7 +1007,7 @@ _ROQUET_EOS80 = {
 }
 
 
-def nemo_roquet_eos(
+def _nemo_roquet_eos_impl(
     T: jnp.ndarray,
     S: jnp.ndarray,
     p: jnp.ndarray,
@@ -1096,7 +1097,35 @@ def nemo_roquet_eos(
     return zn   # in-situ density [kg/m³]
 
 
-def nemo_roquet_density_anomaly_ratio(
+_nemo_roquet_eos_compiled = jax.jit(_nemo_roquet_eos_impl)
+
+
+def nemo_roquet_eos(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    p: jnp.ndarray,
+    *,
+    coeffs: dict | None = None,
+    rho0: float = rho_0,
+    geometric_depth_m: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Evaluate the shared NEMO Roquet polynomial with one arithmetic regime.
+
+    ``lax.optimization_barrier`` is intentionally a no-op under an outer
+    :func:`jax.disable_jit` context.  Running the literal polynomial eagerly
+    consequently changed its multiply/add contraction and, after hydrostatic
+    integration, produced a false 1e-9--1e-7 trajectory split.  Re-enable the
+    cached literal kernel locally so eager diagnostics and production JIT call
+    the same compiled arithmetic.  This remains a single differentiable JAX
+    implementation; it is neither a card selector nor a host callback.
+    """
+    with jax.disable_jit(False):
+        return _nemo_roquet_eos_compiled(
+            T, S, p, coeffs=coeffs, rho0=rho0,
+            geometric_depth_m=geometric_depth_m)
+
+
+def _nemo_roquet_density_anomaly_ratio_impl(
     T: jnp.ndarray,
     S: jnp.ndarray,
     p: jnp.ndarray,
@@ -1127,6 +1156,27 @@ def nemo_roquet_density_anomaly_ratio(
     prd = lax.optimization_barrier(zn_rho - 1.0)
     ztm = jnp.asarray(1.0 if tmask is None else tmask, dtype=prd.dtype)
     return lax.optimization_barrier(prd * ztm)
+
+
+_nemo_roquet_density_anomaly_ratio_compiled = jax.jit(
+    _nemo_roquet_density_anomaly_ratio_impl)
+
+
+def nemo_roquet_density_anomaly_ratio(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    p: jnp.ndarray,
+    *,
+    coeffs: dict | None = None,
+    rho0: float = rho_0,
+    geometric_depth_m: jnp.ndarray | None = None,
+    tmask: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Return NEMO's literal masked ``rho/rho0 - 1`` arithmetic."""
+    with jax.disable_jit(False):
+        return _nemo_roquet_density_anomaly_ratio_compiled(
+            T, S, p, coeffs=coeffs, rho0=rho0,
+            geometric_depth_m=geometric_depth_m, tmask=tmask)
 
 
 # ==============================================================================
