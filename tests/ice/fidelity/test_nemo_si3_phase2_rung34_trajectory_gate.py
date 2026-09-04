@@ -20,6 +20,8 @@ gate = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(gate)
 _CASE_DT_S = 30.0  # tests/ICE_RHEO/EXPREF/namelist_cfg:35
 _EXPECTED_RESTART_MOMENTS = 160  # 32 tracers times five Prather moments
+_SUBUNIT_ORACLE_VALUE = 0.29
+_SUBUNIT_ABSOLUTE_ERROR = 6.8e-16
 
 
 def test_closing_row_replays_si3_evp_equations_and_binds() -> None:
@@ -60,6 +62,17 @@ def test_active_window_registers_exactly_160_unique_prather_moments() -> None:
     }
     assert len(names) == _EXPECTED_RESTART_MOMENTS
     assert {"sxice", "sxyice", "sxc0_l05", "sxye_l10", "sxysi_l10", "sxyvl"} <= names
+
+
+def test_normalized_bar_and_field_relative_diagnostic_are_distinct() -> None:
+    oracle = np.asarray([_SUBUNIT_ORACLE_VALUE], dtype=np.float64)
+    candidate = oracle + _SUBUNIT_ABSOLUTE_ERROR
+    row = gate.gate._score("stress", oracle, candidate)
+    assert row["status"] == "AT-BAR"
+    assert row["normalized_max_abs"] <= gate.gate.POINTWISE_BAR
+    assert row["relative_max_abs"] > gate.gate.POINTWISE_BAR
+    assert row["classification_metric"] == "normalized_max_abs"
+    assert row["relative_is_diagnostic"] is True
 
 
 @pytest.mark.parametrize(

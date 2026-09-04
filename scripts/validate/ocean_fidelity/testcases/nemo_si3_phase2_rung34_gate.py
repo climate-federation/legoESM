@@ -115,6 +115,8 @@ def _score(
         "max_abs": maximum,
         "normalized_max_abs": normalized,
         "relative_max_abs": relative,
+        "classification_metric": "normalized_max_abs",
+        "relative_is_diagnostic": True,
         "oracle_max_abs": oracle_maximum,
         "max_abs_index_xy": [int(value) for value in index],
         "candidate_dtype": str(candidate.dtype),
@@ -232,6 +234,8 @@ def run_gate(root: Path, *, plant_field: bool = False) -> dict[str, object]:
         "status": "KT1-VERIFIED" if not failed else "DEBT",
         "exit_code": 0 if not failed else 1,
         "bar": POINTWISE_BAR,
+        "bar_definition": "max_abs / max(oracle_max_abs, 1.0)",
+        "relative_column": "max_abs / oracle_max_abs; diagnostic only",
         "cpu_only": True,
         "precision_policy": "fp64",
         "candidate_dtypes": sorted(

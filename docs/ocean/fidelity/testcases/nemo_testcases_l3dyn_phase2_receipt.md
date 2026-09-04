@@ -825,8 +825,15 @@ untouched.
 
 The full kt=1 gate scores eleven geometry/mask arrays plus all 32 transported
 fields, surface temperature, bulk salt diagnostic, U/V, and three stresses:
-50 rows are AT-BAR.  The worst row is `stress1_i`, normalized maximum
-`6.869504964868156e-16`; every numeric candidate row is `float64` and the three
+46 informative rows are AT-BAR and four oracle-zero age/pond rows are
+UNINFORMATIVE.  The worst informative row is `stress1_i`: normalized maximum
+`6.869504964868156e-16`, field-relative maximum
+`2.3534714128145477e-15`.  **CONFIRMED:** AT-BAR is classified only by
+`max_abs/max(max|oracle|,1) <= 1e-15`; the field-relative column is reported
+beside it as a diagnostic and is not the bar.  This preserves the campaign's
+immutable max-one normalization and avoids dividing the classification by
+zero-valued fields; it is an absolute `1e-15` bound for sub-unit fields, not a
+relative `1e-15` claim.  Every numeric candidate row is `float64` and the three
 mask rows are `bool`.
 The binding internal trajectory plant changes `v_s` by `1e-10` and is caught
 as DEBT (`9.999999439624929e-11` normalized), proving that the scored trajectory
