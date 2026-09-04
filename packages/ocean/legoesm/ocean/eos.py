@@ -1010,10 +1010,12 @@ _ROQUET_EOS80 = {
 def _nemo_source_round(value: jnp.ndarray) -> jnp.ndarray:
     """Materialize one NEMO source operation before its next consumer.
 
-    ``optimization_barrier`` alone survives to HLO but does not prevent the
-    CPU LLVM pass from contracting a producer into its consumer.  The
-    classification/copy is an IEEE identity (including signed infinities and
-    NaNs) and keeps the path differentiable for finite physical EOS inputs.
+    The round-12 optimized-HLO census found that the 105 explicit
+    ``optimization_barrier`` nodes are all eliminated (105 -> 0).  It is the
+    surviving ``isfinite``/``select``/``copysign`` IEEE identity below—not the
+    barrier—that prevents the CPU LLVM pass from contracting a producer into
+    its consumer.  The identity preserves signed infinities and NaNs and keeps
+    the path differentiable for finite physical EOS inputs.
     """
     value = lax.optimization_barrier(value)
     return jnp.where(

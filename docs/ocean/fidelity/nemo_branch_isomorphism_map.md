@@ -1618,6 +1618,34 @@ improves about 23–26× to `2.0033670902752654e-14` u and
 is UNMEASURED, so the stage-3 transport walk remains gated.  Cross-card oracle
 scoring is mixed: LOCK_EXCHANGE stage rows improve and remain AT-BAR;
 OVERFLOW stage-3 u moves away by 3.281–4.0625 ulp, while its stage-1 u
-improves.  The existing compare-to criterion remains unchanged and pending a
-user decision; this row records the literal shared implementation, not a
-comparison-policy exception.
+improves.
+
+The 2026-09-04 user decision replaces the prior-output compare-to criterion
+with the shared, oracle-relative cellwise criterion.  Every scored boundary
+now persists its compressed per-cell ``abs(legoESM - NEMO)`` field.  A shared
+change fails when any cell worsens by more than two ulp of that cell's oracle
+magnitude, when an AT-BAR row becomes DEBT, or when ``first_over_bar`` moves
+earlier.  Movement versus the preceding legoESM output remains disclosed but
+is not an acceptance criterion.  This policy is Rule 12 of the oracle-fidelity
+skill; it is not a card-specific S-50 exception.
+
+### PLAUSIBLE debt: barrier-only shared recurrences
+
+Round 12's optimized-HLO census showed that ``optimization_barrier`` alone is
+not a materialized rounding boundary.  The following shared NEMO-literal
+recurrences still rely on that barrier without the EOS path's surviving IEEE
+``isfinite``/``select`` identity.  They are therefore **PLAUSIBLE debt**, not
+measured defects and not implementation exceptions; this round changes none
+of them.
+
+| shared recurrence | implementation | reason for registration |
+|---|---|---|
+| QCO live face/e3f recurrences | `vertical.py` (`nemo_qco_live_face_geometry_from_operands`, `nemo_qco_e3f_from_faces`) | source-operation barriers may disappear before contraction/reassociation |
+| external-mode literal helpers | `dynamics/barotropic_common.py` | source-associated transport/update arithmetic uses barrier-only boundaries |
+| RK3 external-mode and transport accumulation | `dynamics/barotropic_latlon_cgrid.py` | substep, weighted-mean, and final-update recurrences use barrier-only boundaries |
+| PE HPG/QCO literal path | `dynamics/ocean_pe_latlon_cgrid.py` | HPG operands and the depth/transport recurrence use barrier-only boundaries |
+| Thomas recurrence | `physics/vertical_mixing/implicit_solver.py` | forward elimination and back-substitution are association-sensitive recurrences |
+| GM/Redi recurrence | `physics/lateral_mixing/gm_redi_latlon_cgrid.py` | slope/tensor accumulation carries barrier-only source order |
+
+Each boundary remains on the ordered fidelity register and requires an
+operand-level oracle discriminator before any code change.

@@ -287,6 +287,12 @@ def main() -> int:
     from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
         latlon_cgrid_ocean_baroclinic_tendencies,
     )
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+
+    # JAX_ENABLE_X64 controls dtype availability, not legoESM's precision
+    # policy.  This is an oracle comparison, so select fp64 before constructing
+    # the bridge, card, or model operands.
+    set_policy(PrecisionPolicy.fp64())
 
     # --- NEMO side -----------------------------------------------------
     g = read_nemo_mesh_mask(f"{args.run}/mesh_mask.nc", nn_hls=0)

@@ -15,7 +15,10 @@ from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     nemo_hpg_sco_literal_cgrid,
 )
-from legoesm.ocean.eos import nemo_roquet_density_anomaly_ratio
+from legoesm.ocean.eos import (
+    nemo_roquet_density_anomaly_ratio,
+    nemo_teos10_density_anomaly_ratio,
+)
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.grids.latlon import create_beta_plane_cgrid_geometry, create_latlon_grid
 from legoesm.ocean.fidelity.nemo_testcase_recipe import build_lock_exchange_zco_card
@@ -131,6 +134,53 @@ def test_nemo_ws_eos_hpg_transport_are_bitwise_equal_eager_and_jit(monkeypatch):
         not np.array_equal(a, b)
         for a, b in zip(compiled, unbarriered, strict=True)
     )
+
+
+def test_nemo_teos10_prd_oracle_bit_patterns_without_external_data():
+    """Pin production-JIT prd bits sampled from the GYRE oracle record.
+
+    The five tuples are literal wet-cell inputs from the config-local
+    round-12 stage-2 ``eos_insitu`` record.  Keeping the inputs and expected
+    IEEE-754 words here makes this a hermetic CI guard: it needs neither the
+    oracle executable nor ``/data`` and will catch a future XLA peephole that
+    sees through the source-rounding identity.
+    """
+    set_policy(PrecisionPolicy.fp64())
+    temperature = jnp.asarray([
+        23.460942698185985,
+        23.460942084268694,
+        22.130311366989037,
+        13.42386253495835,
+        4.000532963209061,
+    ], dtype=jnp.float64)
+    salinity = jnp.asarray([
+        36.83805761571642,
+        36.83805759257495,
+        36.79622408154826,
+        35.74386965269002,
+        35.12000012396704,
+    ], dtype=jnp.float64)
+    depth = jnp.asarray([
+        4.9752647763236375,
+        4.975265189781595,
+        60.73198233881616,
+        547.0295551893229,
+        4150.281785429398,
+    ], dtype=jnp.float64)
+    expected_words = np.asarray([
+        0xBF4E8AA111773000,
+        0xBF4E8AA0B9A4D800,
+        0xBF43E05B3BCB1400,
+        0x3F442E7694E65800,
+        0x3F5BF8D85E2A7400,
+    ], dtype=np.uint64)
+
+    prd = np.asarray(jax.jit(lambda t, s, z:
+        nemo_teos10_density_anomaly_ratio(
+            t, s, jnp.zeros_like(z), rho0=1026.0,
+            geometric_depth_m=z, tmask=jnp.ones_like(z))
+    )(temperature, salinity, depth))
+    np.testing.assert_array_equal(prd.view(np.uint64), expected_words)
 
 
 def test_nemo_hpg_literal_component_exposure_is_the_production_sum():
