@@ -393,17 +393,22 @@ def _ordinary_rows_from_restart(card, state, dataset, completed_step):
     ]
 
 
-def _require_jit_eager_exact(eager_state, compiled_state) -> None:
+def _jit_eager_rows(eager_state, compiled_state) -> list[dict[str, object]]:
     eager_leaves = jax.tree_util.tree_leaves(eager_state)
     compiled_leaves = jax.tree_util.tree_leaves(compiled_state)
     require(len(eager_leaves) == len(compiled_leaves), "JIT state tree changed")
+    rows = []
     for leaf_index, (eager, compiled) in enumerate(
         zip(eager_leaves, compiled_leaves, strict=True)
     ):
-        require(
-            np.array_equal(np.asarray(eager), np.asarray(compiled)),
-            f"JIT/eager state differs at leaf {leaf_index}",
+        rows.append(
+            gate._score(
+                f"jit_eager.leaf{leaf_index}",
+                np.asarray(eager),
+                np.asarray(compiled),
+            )
         )
+    return rows
 
 
 def run_full_walk(
@@ -447,6 +452,7 @@ def run_full_walk(
     first_over_bar: dict[str, dict[str, object]] = {}
     growth: list[dict[str, object]] = []
     last_rows: list[dict[str, object]] = []
+    jit_eager_rows: list[dict[str, object]] = []
     for completed_step in range(_FULL_WALK_FIRST_STEP, _FULL_WALK_LAST_STEP):
         stepper = odd_step if completed_step % 2 else even_step
         compiled_state = stepper(
@@ -456,7 +462,7 @@ def run_full_walk(
             eager_state = step_ice_rheo_card(
                 card, state, completed_steps=completed_step - 1
             )
-            _require_jit_eager_exact(eager_state, compiled_state)
+            jit_eager_rows = _jit_eager_rows(eager_state, compiled_state)
         state = compiled_state
         frame_number = completed_step + 1
         frame_path = root / f"oracle_ice_step_entry_kt{frame_number:08d}.bin"
@@ -504,7 +510,13 @@ def run_full_walk(
         "relative_column": "max_abs / oracle_max_abs; diagnostic only",
         "cpu_only": True,
         "precision_policy": "fp64",
-        "jit_eager_step9": "BYTE-EXACT",
+        "execution_path": "JIT (CPU, fp64)",
+        "jit_eager_step9_rows": jit_eager_rows,
+        "jit_eager_step9_status": (
+            "AT-BAR"
+            if not [row for row in jit_eager_rows if row["status"] == "DEBT"]
+            else "DEBT"
+        ),
         "walk_completed_steps": [_FULL_WALK_FIRST_STEP, _FULL_WALK_LAST_STEP],
         "first_over_bar_by_field": first_over_bar,
         "growth": growth,

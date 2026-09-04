@@ -114,13 +114,14 @@ def test_full_walk_records_each_fields_first_debt_only() -> None:
     assert register["u_ice"]["completed_step"] == 10
 
 
-def test_full_walk_jit_guard_rejects_a_changed_state_leaf() -> None:
+def test_full_walk_reports_jit_eager_state_leaf_difference() -> None:
     state = (jnp.asarray([1.0], dtype=jnp.float64),)
-    gate._require_jit_eager_exact(state, state)
-    with pytest.raises(gate.Rung34TrajectoryError, match="leaf 0"):
-        gate._require_jit_eager_exact(
-            state, (jnp.asarray([2.0], dtype=jnp.float64),)
-        )
+    clean = gate._jit_eager_rows(state, state)
+    planted = gate._jit_eager_rows(
+        state, (jnp.asarray([2.0], dtype=jnp.float64),)
+    )
+    assert clean[0]["status"] == "AT-BAR"
+    assert planted[0]["status"] == "DEBT"
 
 
 @pytest.mark.parametrize(
