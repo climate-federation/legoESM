@@ -57,6 +57,37 @@ MAGIC = "NEMO_L3_ICE_1"
 _SI3_HALO = 2
 _SI3_FOUR_POINT_WEIGHT = 0.25
 _SI3_ICE_PRESENCE_EPSILON = 1.0e-10
+_FRAME_STORAGE_BITS = 64  # lane-3 fp64 dump contract, icestp.F90:154-171
+_DIAGNOSTIC_P95 = 95.0  # receipt-requested descriptive percentile, not a gate
+_DIAGNOSTIC_P99 = 99.0  # receipt-requested descriptive percentile, not a gate
+
+# Executed ORCA1 overlay values. Sources: ORCA1 namelist_ice_ref:57,108-116
+# and namelist_ice_cfg:52-55; the rung-3.4 additions are ref:87-102 and
+# cfg:57-65. These are validation targets, not tunable gate thresholds.
+_ORCA1_RHEOLOGY_NUMERIC_VALUES = (
+    ("namdyn.rn_ishlat", 2),
+    ("namdyn_rdgrft.rn_pstar", 2.0e4),
+    ("namdyn_rdgrft.rn_crhg", 20),
+    ("namdyn_rhg.rn_creepl", 2.0e-9),
+    ("namdyn_rhg.rn_ecc", 2),
+    ("namdyn_rhg.nn_nevp", 100),
+    ("namdyn_rhg.rn_relast", 0.333),
+    ("namdyn_rhg.nn_rhg_chkcvg", 0),
+)
+_ORCA1_RIDGING_NUMERIC_VALUES = (
+    ("namdyn_rdgrft.rn_murdg", 3.0),
+    ("namdyn_rdgrft.rn_csrdg", 0.5),
+    ("namdyn_rdgrft.rn_gstar", 0.15),
+    ("namdyn_rdgrft.rn_astar", 0.03),
+    ("namdyn_rdgrft.rn_hstar", 25.0),
+    ("namdyn_rdgrft.rn_porordg", 0.0),
+    ("namdyn_rdgrft.rn_fsnwrdg", 0.5),
+    ("namdyn_rdgrft.rn_fpndrdg", 0.5),
+    ("namdyn_rdgrft.rn_hraft", 0.75),
+    ("namdyn_rdgrft.rn_craft", 5.0),
+    ("namdyn_rdgrft.rn_fsnwrft", 0.5),
+    ("namdyn_rdgrft.rn_fpndrft", 0.5),
+)
 
 # Each field is written in this exact order by the committed icestp.F90:154-170.
 # The dump precedes store_fields at upstream icestp.F90:151, so ordinary state
@@ -648,16 +679,7 @@ def resolved_selectors(root: Path, rung: str) -> dict:
         }[rung]
         _logical(ice, key, key == expected)
     if rung in {"3.3", "3.4"}:
-        for key, expected in (
-            ("namdyn.rn_ishlat", 2),
-            ("namdyn_rdgrft.rn_pstar", 2.0e4),
-            ("namdyn_rdgrft.rn_crhg", 20),
-            ("namdyn_rhg.rn_creepl", 2.0e-9),
-            ("namdyn_rhg.rn_ecc", 2),
-            ("namdyn_rhg.nn_nevp", 100),
-            ("namdyn_rhg.rn_relast", 0.333),
-            ("namdyn_rhg.nn_rhg_chkcvg", 0),
-        ):
+        for key, expected in _ORCA1_RHEOLOGY_NUMERIC_VALUES:
             _number(ice, key, expected)
         for key, expected in (
             ("namdyn.ln_landfast_l16", False),
@@ -669,20 +691,7 @@ def resolved_selectors(root: Path, rung: str) -> dict:
         ):
             _logical(ice, key, expected)
     if rung == "3.4":
-        for key, expected in (
-            ("namdyn_rdgrft.rn_murdg", 3.0),
-            ("namdyn_rdgrft.rn_csrdg", 0.5),
-            ("namdyn_rdgrft.rn_gstar", 0.15),
-            ("namdyn_rdgrft.rn_astar", 0.03),
-            ("namdyn_rdgrft.rn_hstar", 25.0),
-            ("namdyn_rdgrft.rn_porordg", 0.0),
-            ("namdyn_rdgrft.rn_fsnwrdg", 0.5),
-            ("namdyn_rdgrft.rn_fpndrdg", 0.5),
-            ("namdyn_rdgrft.rn_hraft", 0.75),
-            ("namdyn_rdgrft.rn_craft", 5.0),
-            ("namdyn_rdgrft.rn_fsnwrft", 0.5),
-            ("namdyn_rdgrft.rn_fpndrft", 0.5),
-        ):
+        for key, expected in _ORCA1_RIDGING_NUMERIC_VALUES:
             _number(ice, key, expected)
         for key, expected in (
             ("namdyn_rdgrft.ln_distf_lin", False),
@@ -769,7 +778,10 @@ def read_frame(
         require(len(raw) == 9 * 4, f"truncated frame header: {path}")
         version, kt, jpi, jpj, jpl, nlay_i, nlay_s, storage, nfields = struct.unpack("=9i", raw)
         require(magic == MAGIC, f"bad frame magic: {magic!r}")
-        require(version == 1 and storage == 64, f"bad frame version/storage: {version}/{storage}")
+        require(
+            version == 1 and storage == _FRAME_STORAGE_BITS,
+            f"bad frame version/storage: {version}/{storage}",
+        )
         require(nfields == len(FRAME_REGISTRY), f"frame registry count {nfields}")
         dims = {"jpi": jpi, "jpj": jpj, "jpl": jpl, "nlay_i": nlay_i, "nlay_s": nlay_s}
         arrays: dict[str, np.ndarray] = {}
@@ -981,12 +993,14 @@ def rung34_shear_diagnostic(root: Path, window: tuple[slice, slice]) -> dict[str
                 {
                     "kt": expected_kt,
                     "maximum_s-1": float(np.max(physical)),
-                    "p99_s-1": float(np.percentile(physical, 99.0)),
+                    "p99_s-1": float(np.percentile(physical, _DIAGNOSTIC_P99)),
                 }
             )
             final_shear = physical
         assert final_shear is not None
-        p95, p99 = np.percentile(final_shear, (95.0, 99.0))
+        p95, p99 = np.percentile(
+            final_shear, (_DIAGNOSTIC_P95, _DIAGNOSTIC_P99)
+        )
         return {
             "source": (
                 "tests/ICE_RHEO/EXPREF/README:51-53; "
@@ -1018,7 +1032,7 @@ def rung34_shear_diagnostic(root: Path, window: tuple[slice, slice]) -> dict[str
         }
     shear = np.asarray(np.ma.filled(raw, np.nan), dtype=np.float64).T[window]
     require(np.all(np.isfinite(shear)), "final NEMO sishea contains non-finite wet cells")
-    p95, p99 = np.percentile(shear, (95.0, 99.0))
+    p95, p99 = np.percentile(shear, (_DIAGNOSTIC_P95, _DIAGNOSTIC_P99))
     return {
         "source": "tests/ICE_RHEO/EXPREF/README:51-53; icedyn.F90:172-193",
         "field": "sishea (NEMO maximum shear of sea-ice velocity, final 6-hour record)",
