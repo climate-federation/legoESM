@@ -1334,15 +1334,20 @@ def _nemo_ws_stage_transport(
         # prognostics.  Preserve both the reciprocal and subtract boundaries;
         # re-reducing the 3-D field is algebraically equal after :433-446 but
         # changes the last bits on GYRE's stage-3 transport.
-        b = jax.lax.optimization_barrier
-        r1_hu = b(1.0 / jnp.maximum(Hu_stage_depth, 1.0e-10))
-        r1_hv = b(1.0 / jnp.maximum(Hv_stage_depth, 1.0e-10))
-        zub = b(b(Hu_avg * r1_hu) - barotropic_velocity[0])
-        zvb = b(b(Hv_avg * r1_hv) - barotropic_velocity[1])
-        u_stage_corr = b(
-            u_stage + zub[..., jnp.newaxis] * u_mask_3d)
-        v_stage_corr = b(
-            v_stage + zvb[..., jnp.newaxis] * v_mask_3d)
+        r1_hu = nemo_source_round(
+            1.0 / jnp.maximum(Hu_stage_depth, 1.0e-10))
+        r1_hv = nemo_source_round(
+            1.0 / jnp.maximum(Hv_stage_depth, 1.0e-10))
+        zub = nemo_source_round(
+            nemo_source_round(Hu_avg * r1_hu) - barotropic_velocity[0])
+        zvb = nemo_source_round(
+            nemo_source_round(Hv_avg * r1_hv) - barotropic_velocity[1])
+        u_stage_corr = nemo_source_round(
+            u_stage + nemo_source_round(
+                zub[..., jnp.newaxis] * u_mask_3d))
+        v_stage_corr = nemo_source_round(
+            v_stage + nemo_source_round(
+                zvb[..., jnp.newaxis] * v_mask_3d))
     mf_u = hu_stage * u_stage_corr * u_mask_3d
     mf_v = hv_stage * v_stage_corr * v_mask_3d
     zfu_stage = _nemo_metric_stage_transport(

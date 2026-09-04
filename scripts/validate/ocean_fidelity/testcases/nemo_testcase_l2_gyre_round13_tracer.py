@@ -154,7 +154,7 @@ def run_transport_operands(oracle_root: Path, *, plant: bool = False) -> dict:
     import jax
     import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
-    from legoesm.ocean.eos import _nemo_source_round
+    from legoesm.ocean.eos import nemo_source_round
 
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")
@@ -165,7 +165,7 @@ def run_transport_operands(oracle_root: Path, *, plant: bool = False) -> dict:
     oracle = read_stage1_transport_operands(path)
 
     def _literal(e_metric, e3, vel, mean, mask):
-        b = _nemo_source_round
+        b = nemo_source_round
         corrected = b(vel + b(mean[..., None] * mask))
         metric_thickness = b(e_metric[..., None] * e3)
         return b(metric_thickness * corrected)

@@ -114,7 +114,7 @@ def test_nemo_ws_eos_hpg_transport_are_bitwise_equal_eager_and_jit(monkeypatch):
     jax.clear_caches()
     with monkeypatch.context() as patch:
         patch.setattr(
-            eos_module, "_nemo_source_round", jax.lax.optimization_barrier)
+            eos_module, "nemo_source_round", jax.lax.optimization_barrier)
         reassociated = tuple(
             np.asarray(value) for value in jax.jit(operand_chain)())
     assert any(

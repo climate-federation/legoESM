@@ -1007,7 +1007,7 @@ _ROQUET_EOS80 = {
 }
 
 
-def _nemo_source_round(value: jnp.ndarray) -> jnp.ndarray:
+def nemo_source_round(value: jnp.ndarray) -> jnp.ndarray:
     """Materialize one NEMO source operation before its next consumer.
 
     The round-12 optimized-HLO census found that the 105 explicit
@@ -1021,13 +1021,6 @@ def _nemo_source_round(value: jnp.ndarray) -> jnp.ndarray:
     return jnp.where(
         jnp.isfinite(value), value,
         jnp.copysign(jnp.abs(value), value))
-
-
-def nemo_source_round(value: jnp.ndarray) -> jnp.ndarray:
-    """Public shared spelling of one materialized NEMO source operation."""
-    return _nemo_source_round(value)
-
-
 def _nemo_roquet_eos_impl(
     T: jnp.ndarray,
     S: jnp.ndarray,
@@ -1095,11 +1088,11 @@ def _nemo_roquet_eos_impl(
     def _fadd(first, *rest):
         value = first
         for term in rest:
-            value = _nemo_source_round(value + term)
+            value = nemo_source_round(value + term)
         return value
 
     def _fmul(left, right):
-        return _nemo_source_round(left * right)
+        return nemo_source_round(left * right)
 
     def _horner(variable, *coefficients):
         value = coefficients[0]
@@ -1238,10 +1231,10 @@ def _nemo_roquet_density_anomaly_ratio_impl(
         depth_m, zh, zt, zs, zn0, zn1, zn2, zn3, zn = eos_result
     else:
         zn = eos_result
-    zn_rho = _nemo_source_round(zn * (1.0 / rho0))
-    prd = _nemo_source_round(zn_rho - 1.0)
+    zn_rho = nemo_source_round(zn * (1.0 / rho0))
+    prd = nemo_source_round(zn_rho - 1.0)
     ztm = jnp.asarray(1.0 if tmask is None else tmask, dtype=prd.dtype)
-    prd = _nemo_source_round(prd * ztm)
+    prd = nemo_source_round(prd * ztm)
     if return_intermediates:
         return (T, S, depth_m, zh, zt, zs, ztm,
                 zn0, zn1, zn2, zn3, zn, prd)
