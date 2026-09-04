@@ -578,6 +578,9 @@ def build_lock_exchange_zco_card() -> NEMOTestcaseCard:
     z_ref = create_z_star_from_thicknesses(
         jnp.full((20,), 1.0),
         t_depth_ref_m=np.arange(20, dtype=np.float64) + 0.5,
+        # mesh_mask.nc:e3w_1d(1:20) is exactly 1 m on the shipped case.
+        nemo_e3w_0_m=np.broadcast_to(
+            np.ones(20, dtype=np.float64), (3, 130, 20)),
     )
     bottom = jnp.where(wet > 0.0, 19, -1)
     z_coord = create_full_step_coordinate(z_ref, bottom)
@@ -629,6 +632,11 @@ def build_overflow_zps_card() -> NEMOTestcaseCard:
     z_ref = create_z_star_from_thicknesses(
         jnp.full((100,), 20.0),
         t_depth_ref_m=10.0 + 20.0 * np.arange(100, dtype=np.float64),
+        # mesh_mask.nc:e3w_0(1:100,:,:) is exactly 20 m, including
+        # partial-bottom columns; dynhpg consumes this W-grid field, not a
+        # midpoint reconstruction from the clipped T-cell thickness.
+        nemo_e3w_0_m=np.broadcast_to(
+            np.full(100, 20.0, dtype=np.float64), (3, 202, 100)),
     )
     z_coord = create_partial_cell_coordinate(
         z_ref, bathymetry, bottom_index_rule="nemo_tpoint"

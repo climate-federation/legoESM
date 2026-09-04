@@ -91,6 +91,19 @@ def test_nemo_testcase_cards_are_fp64_source_pinned(
     assert cfg.barotropic.barotropic_reconcile_target == "velocity_avg"
 
 
+def test_lane1_cards_carry_oracle_w_grid_thicknesses():
+    """The NEMO SCO PGF consumes mesh ``e3w_0``; no midpoint fallback."""
+    set_policy(PrecisionPolicy.fp64())
+    lock = build_lock_exchange_zco_card().recipe.z_coord
+    overflow = build_overflow_zps_card().recipe.z_coord
+    assert lock.nemo_e3w_mesh_reference is True
+    assert overflow.nemo_e3w_mesh_reference is True
+    np.testing.assert_array_equal(
+        np.asarray(lock.nemo_e3w_0), np.ones((3, 130, 20)))
+    np.testing.assert_array_equal(
+        np.asarray(overflow.nemo_e3w_0), np.full((3, 202, 100), 20.0))
+
+
 def test_gyre_card_selects_complete_resolved_operator_program():
     set_policy(PrecisionPolicy.fp64())
     cfg = build_gyre_zco_card().recipe.model_config

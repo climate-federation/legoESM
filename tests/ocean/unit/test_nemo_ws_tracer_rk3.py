@@ -157,6 +157,19 @@ def test_nemo_ws_private_stage_velocity_exposure_is_diagnostic_only():
                 expose_momentum_stage=4))
 
 
+def test_nemo_sco_missing_raw_e3w_fails_closed():
+    """A NEMO SCO card may not reconstruct W geometry from T midpoints."""
+    set_policy(PrecisionPolicy.fp64())
+    card = build_lock_exchange_zco_card()
+    missing = card.recipe.z_coord._replace(
+        nemo_e3w_0=None, nemo_e3w_mesh_reference=False)
+    model = model_module.LatLonCGridOceanModel(
+        card.recipe.grid, missing, card.recipe.model_config)
+    with jax.disable_jit(), pytest.raises(
+            ValueError, match="requires the raw NEMO nemo_e3w_0"):
+        model.step(card.recipe.initial_state, dt=card.dt_s)
+
+
 def test_nemo_overflow_primary_transport_average_is_source_bound_and_live():
     """Flux-form RK3 uses NEMO's transport primary; only the test hook ablates."""
     set_policy(PrecisionPolicy.fp64())

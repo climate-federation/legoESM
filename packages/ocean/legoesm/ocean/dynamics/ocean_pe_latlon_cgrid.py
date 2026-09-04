@@ -1992,20 +1992,11 @@ def _bc_ke_and_pressure_gradients(
                 rhd = rho_m / config.rho_0
                 e3w0 = nemo_e3w0_reference(z_coord)
                 if e3w0 is None:
-                    # The lane-1 testcase coordinates carry midpoint T
-                    # ladders rather than a raw mesh e3w_0.  The shared
-                    # resolver has proved that fallback legal; on that arm
-                    # NEMO's W spacing is the surface cell thickness followed
-                    # by adjacent T-cell-centre distances.  GYRE retains its
-                    # byte-pinned raw e3w_0 path.
-                    h_live = compute_layer_thickness(
-                        eta_safe, H_bathy, z_coord)
-                    e3w_live = jnp.concatenate([
-                        h_live[..., :1],
-                        0.5 * (h_live[..., :-1] + h_live[..., 1:]),
-                    ], axis=-1)
-                else:
-                    e3w_live = jnp.asarray(e3w0) * stretch
+                    raise ValueError(
+                        'pgf_scheme="nemo_sco" requires the raw NEMO '
+                        "nemo_e3w_0 mesh field; midpoint reconstruction on "
+                        "domain geometry is forbidden")
+                e3w_live = jnp.asarray(e3w0) * stretch
                 hpg_u, hpg_v = nemo_hpg_sco_literal_cgrid(
                     rhd, e3w_live, gdept_z0, grid, g_val)
                 dp_dx_sco = -config.rho_0 * hpg_u
