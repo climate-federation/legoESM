@@ -32,9 +32,10 @@ def _load():
 def test_overcast_column_is_the_built_in_control():
     """At cf = 1 the two arms are the SAME inputs, so they must agree exactly.
 
-    This is the probe's own control: if it disagrees here the two arms differ
-    by something other than the cloud-fraction dilution and every other row is
-    uninterpretable.
+    Codex is right that this is close to tautological — it is a wiring check,
+    not a physics one: it catches an arm that accidentally differs by
+    something OTHER than the dilution (a stray config, a transposed argument).
+    The load-bearing controls are the sign test and the box bound below.
     """
     mod = _load()
     for qc, nc in ((3.0e-4, 100.0e6), (5.0e-4, 300.0e6)):
@@ -60,19 +61,46 @@ def test_broken_cloud_biases_the_radius_small_not_large():
         "to resolve anything")
 
 
-def test_bias_is_far_too_small_to_explain_the_issue_gap():
-    """The measured verdict, pinned: this is NOT the missing microns.
+def test_bias_cannot_close_the_issue_gap_on_its_own():
+    """The measured verdict, pinned: this cannot BE the deficit on its own.
 
-    #1521 reports 7.84 um against 11-14 um observed, a gap of 3-6 um.  If this
-    mechanism ever grew to that size the negative result below would be wrong
-    and the issue would need re-opening on this axis.
+    #1521 reports 7.84 um against 11-14 um observed, a gap of 3-6 um.
+
+    The bound is over the whole REACHABLE (q_c, N_c, cf) box, not over two
+    hand-picked columns: a bound from two invented states says nothing about
+    the states the model visits (codex review, HIGH -- and it was right, the
+    two-archetype bound of "under 1 um" was WRONG; the box reaches 1.80 um).
+
+    1.80 um is a third to a half of the low end of the deficit, at an extreme
+    corner (2.0 g/kg in-cloud water under 5% cover).  So this mechanism is not
+    negligible, and it is not the whole story either.  The threshold below is
+    set from the MEASURED worst case with headroom: it goes red if the effect
+    grows enough to be the deficit on its own, which would reverse the
+    conclusion.
+
+    It is still not the radiatively weighted bias in a run -- that needs the
+    model's own joint distribution of (q_c, N_c, cf), which only output can
+    supply.
     """
     mod = _load()
-    worst = max(b - a for cf in (0.9, 0.7, 0.5, 0.3, 0.1)
-                for a, b in [mod.arms(5.0e-4, 300.0e6, cf)])
-    assert worst < 1.0, (
-        f"the in-cloud/grid-mean shape-parameter bias reached {worst:.3g} um, "
-        "which is no longer negligible against the 3-6 um deficit in #1521")
+    worst, where = mod.worst_over_reachable_box()
+    assert worst < 2.5, (
+        f"the in-cloud/grid-mean shape-parameter bias reaches {worst:.3g} um "
+        f"at {where[:3]} — large enough to be the #1521 deficit on its own, "
+        "which reverses the conclusion recorded here")
+
+
+def test_the_reachable_box_sweep_is_not_trivially_flat():
+    """Non-vacuity for the bound: the box must contain a real bias somewhere.
+
+    A sweep that found ~0 everywhere would satisfy the bound above while
+    proving nothing.
+    """
+    mod = _load()
+    worst, _ = mod.worst_over_reachable_box()
+    assert worst > 0.2, (
+        f"the whole reachable box produced a worst bias of {worst:.3g} um — "
+        "too small for the bound above to be a meaningful statement")
 
 
 def test_probe_runs_end_to_end():

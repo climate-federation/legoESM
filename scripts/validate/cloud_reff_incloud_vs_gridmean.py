@@ -8,11 +8,14 @@ The effective radius comes from the Morrison/SAM gamma PSD,
     lamc  = ( cons26 * nc_permass * (pgam+1)(pgam+2)(pgam+3) / q_c ) ** (1/3) ,
     pgam  = f( nc_cm3 )        [Martin et al. fit]
 
-`lamc` depends on droplet number and cloud water only through the RATIO nc/q_c,
-so if both are grid-mean the ratio is the in-cloud one and that part is right.
-`pgam` is NOT a ratio: it is a function of the droplet CONCENTRATION alone, and
-the Martin fit is defined on the in-cloud concentration.  On the prognostic-Nc
-branch the code passes the grid-mean number straight in.
+`lamc` carries the droplet number TWICE: once through the factor
+`nc_permass / q_c`, where a common cloud-fraction dilution cancels so grid-mean
+inputs give the in-cloud ratio, and once inside `pgam(nc_cm3)`, where it does
+NOT -- `pgam` is a function of the CONCENTRATION alone, and the Martin fit is
+defined on the in-cloud concentration while the prognostic-Nc branch passes the
+grid-mean number straight in.  (An earlier revision of this file called `lamc`
+ratio-only. That was wrong and codex caught it; the conclusion is unchanged,
+since the dilution still reaches the radius only through `pgam`.)
 
 CONTROLLED COMPARISON, one variable = whether the number handed to pgam is
 diluted by cloud fraction.  The in-cloud state (q_c_in, N_c_in) is held FIXED;
@@ -63,6 +66,30 @@ def arms(q_c_in, n_c_in, cf):
     return reff(q_c_in * cf, n_c_in * cf, cf), reff(q_c_in, n_c_in, cf)
 
 
+def worst_over_reachable_box():
+    """Largest bias over the REACHABLE (q_c, N_c, cf) box, not two archetypes.
+
+    Quoting a bound from two hand-picked columns says nothing about the states
+    the model actually visits (codex review, HIGH).  This sweeps the range a
+    warm cloud can occupy -- in-cloud water 0.02 to 2.0 g/kg, in-cloud droplet
+    number 20 to 1000 cm^-3, cover 0.05 to 1 -- and returns the worst case
+    found, so the bound is over a space rather than over two points.
+
+    It is still NOT the radiatively weighted bias in a run: that needs the
+    model's own joint distribution of (q_c, N_c, cf), which only output can
+    supply.  What this bounds is how large the effect can get anywhere in the
+    box, which is the bound the negative result actually needs.
+    """
+    worst, where = 0.0, None
+    for q_c in (2.0e-5, 1.0e-4, 3.0e-4, 5.0e-4, 1.0e-3, 2.0e-3):
+        for n_c in (20.0e6, 50.0e6, 100.0e6, 300.0e6, 600.0e6, 1000.0e6):
+            for cf in (1.0, 0.9, 0.7, 0.5, 0.3, 0.15, 0.05):
+                a, b = arms(q_c, n_c, cf)
+                if abs(b - a) > worst:
+                    worst, where = abs(b - a), (q_c, n_c, cf, a, b)
+    return worst, where
+
+
 def main():
     print("in-cloud q_c = 0.30 g/kg, in-cloud N_c = 100 cm^-3 (marine stratocumulus)")
     print(f"{'cf':>5s} {'r_eff grid-mean [um]':>21s} {'r_eff in-cloud [um]':>20s} "
@@ -76,6 +103,16 @@ def main():
         for cf in (1.0, 0.9, 0.7, 0.5, 0.3, 0.1):
             a, b = arms(qc, nc, cf)
             print(f"{cf:5.2f} {a:21.3f} {b:20.3f} {a / b:7.4f} {a - b:10.3f}")
+    print()
+    worst, (q_c, n_c, cf, a, b) = worst_over_reachable_box()
+    print("worst bias over the reachable box "
+          "[q_c 0.02-2.0 g/kg, N_c 20-1000 cm^-3, cf 0.05-1]:")
+    print(f"  {worst:.3f} um at q_c={q_c * 1e3:.3f} g/kg, "
+          f"N_c={n_c / 1e6:.0f} cm^-3, cf={cf:.2f} "
+          f"(grid-mean {a:.3f} um vs in-cloud {b:.3f} um)")
+    print("NB the pgam clip binds at low diluted concentrations, so this is the "
+          "bias the MODEL carries -- smaller than the unclipped Martin-fit "
+          "bias would be, and it is the model's that matters here.")
     return 0
 
 
