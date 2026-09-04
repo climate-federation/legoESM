@@ -48,6 +48,7 @@ from legoesm.core.fv3_native_state_3d import field_shape
 __all__ = [
     "CSW_OUT_LIKE",
     "PER_FACE_FLAG_FIELDS",
+    "batch_size",
     "build_batched_gs",
     "require_f64_jax",
     "require_uniform_float_jax",
@@ -93,6 +94,13 @@ CSW_OUT_LIKE = {
 # of those differs across faces -- silently broadcasting face 1's value
 # to all six would be plausible wrong physics, not an error message.
 PER_FACE_FLAG_FIELDS = ("da_min", "da_min_c")
+
+
+def batch_size(ctx) -> int:
+    """Length of the leading batch axis this ctx steps: 6 for the cube's
+    faces, ``6*kt*kt`` for a window ctx (fv3_duo_windows).  Read off the
+    ctx, never assumed."""
+    return len(ctx.gs6)
 
 
 def build_batched_gs(ctx) -> dict:
@@ -145,14 +153,16 @@ def build_batched_gs(ctx) -> dict:
             return view
 
     gs6, flags6 = ctx.gs6, ctx.flags6
-    if len(gs6) != 6 or len(flags6) != 6:
+    # nb = the batch axis: the cube's six faces, or the tiled port's
+    # 6*kt*kt sub-face windows (fv3_duo_windows.build_window_ctx)
+    nb = batch_size(ctx)
+    if len(flags6) != nb:
         raise ValueError(
             f"build_batched_gs: ctx carries {len(gs6)} gridstructs and "
-            f"{len(flags6)} flag sets, not 6 of each -- the face batch "
-            f"axis is the cube's six faces")
+            f"{len(flags6)} flag sets -- one of each per batch member")
 
     keys0 = set(gs6[0])
-    for t in range(1, 6):
+    for t in range(1, nb):
         if set(gs6[t]) != keys0:
             missing = sorted(keys0 - set(gs6[t]))
             extra = sorted(set(gs6[t]) - keys0)
@@ -164,7 +174,7 @@ def build_batched_gs(ctx) -> dict:
 
     stacked, unstacked = {}, []
     for key in sorted(keys0):
-        shapes = {tuple(np.shape(gs6[t][key])) for t in range(6)}
+        shapes = {tuple(np.shape(gs6[t][key])) for t in range(nb)}
         if len(shapes) != 1:
             unstacked.append(key)
             continue
@@ -175,13 +185,13 @@ def build_batched_gs(ctx) -> dict:
         # call built the cache in-trace, job 9503200).  Host arrays are
         # constants in every trace that closes over them.
         stacked[key] = np.stack([np.asarray(gs6[t][key])
-                                 for t in range(6)], axis=0)
+                                 for t in range(nb)], axis=0)
 
     f0 = flags6[0]
     for name in f0._fields:
         if name in PER_FACE_FLAG_FIELDS:
             continue
-        vals = [getattr(flags6[t], name) for t in range(6)]
+        vals = [getattr(flags6[t], name) for t in range(nb)]
         if any(v != vals[0] for v in vals):
             raise ValueError(
                 f"build_batched_gs: GridFlags.{name} differs across "
@@ -341,7 +351,8 @@ def validate_stacked(fname: str, container: dict, ctx, km: int,
     n, ng = ctx.n, ctx.ng
     for name in required:
         a = jnp.asarray(container[name])
-        want = (6,) + field_shape(CSW_OUT_LIKE.get(name, name), n, ng, km)
+        want = (batch_size(ctx),) + field_shape(
+            CSW_OUT_LIKE.get(name, name), n, ng, km)
         if a.shape != want:
             raise ValueError(
                 f"{fname}: {what}[{name!r}] has shape {a.shape}, expected "
@@ -429,10 +440,11 @@ def stack_faces(fname: str, per_face: list) -> dict:
     per-face shape -- the FACE axis is stackable, the stagger axis is
     not, which is why this stacks per key and never across keys.
     """
-    if len(per_face) != 6:
+    if len(per_face) not in (6,) and (len(per_face) < 6
+                                      or len(per_face) % 6):
         raise ValueError(
-            f"{fname}: expected 6 per-face dicts (convention C1), got "
-            f"{len(per_face)}")
+            f"{fname}: expected 6 per-face dicts (convention C1) or "
+            f"6*kt*kt per-window dicts, got {len(per_face)}")
     keys = tuple(per_face[0])
     for t, d in enumerate(per_face):
         if tuple(d) != keys:

@@ -979,12 +979,144 @@ def _selftest():
     return 1 if bad else 0
 
 
+def _window_mode(args, model, ctx, state, nh, dp0, fields, order):
+    """Certify a window pad for one deck: with the seam pad of ONE
+    interior window seeded as garbage (every cell the tile does not own
+    on its west side, all levels), run the taint through one substep on
+    the real window program (window comm attached, refresh DISABLED so
+    the seed is not overwritten at entry, exchanges ON so the ~23
+    cross-face firings move their write-sets) and read how far the taint
+    enters the tile's owned cells.  Required pad = pad + overshoot."""
+    import jax
+    import jax.numpy as jnp
+
+    from legoesm.core.fv3_acoustic_3d import acoustic_substep_3d
+    from legoesm.grids.fv3_duo_windows import (
+        attach_window_comm, gather_windows, _owner_mask, horizontal_axes)
+    from legoesm.grids.fv3_native_gridstruct import FV3_CP_AIR, FV3_KAPPA
+
+    kt, pad = (int(v) for v in args.window.split(":"))
+    wctx, comm = attach_window_comm(ctx, kt, pad)
+    lay = comm.lay
+    comm.refresh = lambda bundle: bundle      # keep the seeded pad
+    ng = lay.ng
+    # the seeded window: an INTERIOR tile when kt >= 3 (both sides seams),
+    # else tile (0, 1) whose west side is the face edge but whose j-sides
+    # are seams; on face 0
+    ti = 1 if kt >= 3 else 0
+    tj = 1 if kt >= 2 else 0
+    w0 = ti * kt + tj
+    print(f"[static:window] {lay}; seeded window {w0} = (face 0, ti={ti}, "
+          f"tj={tj}), origin {lay.origins[w0][1:]}; seeded kernel-halo band "
+          f"= local i < {ng} (owned starts at {pad}); refresh DISABLED, "
+          f"exchanges ON")
+
+    wstate = {k: gather_windows(lay, v) for k, v in state.items()}
+    wnh = None
+    if nh is not None:
+        wnh = {k: (gather_windows(lay, v)
+                   if hasattr(v, "ndim") and v.ndim >= 3 and v.shape[0] == 6
+                   else v) for k, v in nh.items()}
+
+    def fn(*vals):
+        st = dict(zip(order, vals))
+        return acoustic_substep_3d(
+            wctx, st, args.dt / 3.0, args.km, first_substep=True,
+            ptop=float(model._ptop), akap=FV3_KAPPA, cp_air=FV3_CP_AIR,
+            exchange=True, hydrostatic=not args.nh, nh=wnh, dp0=dp0,
+            remap_step=False, remap_follows=True, batched=True)
+
+    try:
+        closed = jax.make_jaxpr(fn)(*[wstate[k] for k in order])
+    finally:
+        ctx.tab.window_comm = None
+    print(f"[static:window] jaxpr: {len(closed.jaxpr.eqns)} equations")
+
+    taints = []
+    for k in order:
+        a = np.asarray(wstate[k])
+        t = np.zeros(a.shape, bool)
+        if k in fields and a.ndim >= 3:
+            # Seed the window's KERNEL-HALO band (local i < ng), middle
+            # half in j (the window's j-edges touch the halo tables, see
+            # the flat mode's note).  At entry every window cell is a
+            # correct copy of the flat state; what goes wrong inside the
+            # substep is confined to this band -- the kernel never
+            # updates its halo (only exchanges do, and at a seam none
+            # fires), so it goes STALE, and the cube-edge/corner
+            # treatments rewrite it as if it were a face edge.  The pad
+            # cells beyond the band start correct and are computed like
+            # interior cells; they degrade only by propagation from the
+            # band, which is what the taint measures.  (Seeding the whole
+            # pad instead answers a different question -- "garbage pad"
+            # -- and reads pad + reach for every pad, job 9631834.)
+            jm = max(ng + 1, a.shape[2] // 4)
+            t[w0, :ng, jm:a.shape[2] - jm, ...] = True
+        taints.append(jnp.asarray(t))
+
+    del _SCATTER_FALLBACKS[:], _CONTROL_TAINTS[:]
+    del _WHILE_LOOPS[:], _LONG_SCANS[:]
+    stats = {"axis": 1, "seam": pad, "per_prim": {}}
+    try:
+        outs = _interp(closed.jaxpr, closed.consts,
+                       [np.asarray(t) for t in taints], np, 0, stats)
+    except UnknownPrimitive as e:
+        print(f"[static:window] REFUSED: {e}")
+        return 4
+
+    deepest = -1                     # deepest tainted OWNED local index
+    n_scored = 0
+    for o in outs:
+        if not hasattr(o, "ndim"):
+            continue
+        axes = horizontal_axes(lay, o.shape, lay.nb)
+        if axes is None:
+            continue
+        n_scored += 1
+        b = np.asarray(o[w0], bool)
+        e0 = o.shape[axes[0]] + (lay.m_a - lay.W)
+        e1 = o.shape[axes[1]] + (lay.m_a - lay.W)
+        own = _owner_mask(lay, w0, e0, e1)          # (wi, wj) owned cells
+        ai, aj = axes[0] - 1, axes[1] - 1           # axes within o[w0]
+        red = tuple(a for a in range(b.ndim) if a not in (ai, aj))
+        b2 = b.any(axis=red) if red else b
+        if ai > aj:
+            b2 = b2.T
+        hit = b2 & own
+        if hit.any():
+            ii = np.nonzero(hit.any(axis=1))[0]
+            deepest = max(deepest, int(ii.max()))
+            first_owned = int(np.nonzero(own.any(axis=1))[0].min())
+            print(f"[static:window]   output {np.shape(o)}: taint in OWNED "
+                  f"cells, local i {int(ii.min())}..{int(ii.max())} "
+                  f"(owned starts at local {first_owned})")
+    over = 0 if deepest < 0 else deepest - pad + 1
+    for w in (_SCATTER_FALLBACKS, _CONTROL_TAINTS, _WHILE_LOOPS, _LONG_SCANS):
+        if w:
+            print(f"[static:window] WARNING: over-approximating construct "
+                  f"count {len(w)} -- the number below is an over-estimate")
+    print(f"[static:window] {n_scored} outputs scored; deepest tainted owned "
+          f"local index {deepest}; overshoot into owned cells = {over}")
+    verdict = ("CERTIFIED" if over <= 0
+               else f"INSUFFICIENT, required >= {pad + over}")
+    print(f"[static:window] VERDICT C{args.n} km={args.km} "
+          f"{'NH' if args.nh else 'hydro'} kt={kt}: pad {pad} {verdict}")
+    return 0 if over <= 0 else 1
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--selftest", action="store_true",
                     help="analyse toy programs of KNOWN reach and exit")
     ap.add_argument("--n", type=int, default=24)
     ap.add_argument("--km", type=int, default=5, choices=(5, 10))
+    ap.add_argument("--window", type=str, default=None, metavar="KT:PAD",
+                    help="WINDOW mode: trace the substep on the tiled "
+                         "port's windows (fv3_duo_windows, kt tiles per "
+                         "face, pad cells), seed the whole west pad zone "
+                         "of one interior window as garbage, and report "
+                         "how deep the taint enters that tile's OWNED "
+                         "cells: 0 = this pad is certified for this deck")
     ap.add_argument("--seed-point", action="store_true",
                     help="seed ONE cell (i=seam, j=centre) instead of the "
                          "mid-line: an isotropy check -- the tainted box "
@@ -1025,6 +1157,9 @@ def main(argv=None):
 
     fields = [k for k in ("delp", "pt", "u", "v", "w") if k in state]
     order = list(state)
+
+    if args.window:
+        return _window_mode(args, model, ctx, state, nh, dp0, fields, order)
 
     def fn(*vals):
         st = dict(zip(order, vals))

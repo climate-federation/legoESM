@@ -83,6 +83,7 @@ from legoesm.core.fv3_native_state_3d import (
     require_no_remap_needed,
 )
 from legoesm.core.fv3_phase3d_common import (
+    batch_size,
     require_f64_jax,  # dtype-uniformity entry gate, reads only static dtypes
     require_km,
     validate_stacked,
@@ -256,6 +257,7 @@ def build_nh_carry(ctx, km: int, hs6) -> dict:
                     {f"hs6[{t}]": h for t, h in enumerate(hs6)})
     n, ng = ctx.n, ctx.ng
     m_a = n + 2 * ng
+    nb = batch_size(ctx)
     # The NH carry follows the run's STORAGE dtype (fp32/mixed increment
     # 2): it seeds from hs6 (the topography, already cast to storage dtype
     # by the context builder) and threads through the f32/f64 step, so its
@@ -266,15 +268,15 @@ def build_nh_carry(ctx, km: int, hs6) -> dict:
     _cdt = hs6.dtype
     return {
         "zs": hs6 / FV3_GRAV,
-        "gz": jnp.zeros((6, m_a, m_a, km + 1), dtype=_cdt),
-        "zh": jnp.zeros((6, m_a, m_a, km + 1), dtype=_cdt),
-        "ws3": jnp.zeros((6, m_a, m_a), dtype=_cdt),
-        "ws": jnp.zeros((6, n, n), dtype=_cdt),
-        "pk3": jnp.zeros((6, m_a, m_a, km + 1), dtype=_cdt),
-        "pe": jnp.zeros((6,) + tuple(field_shape("pe", n, ng, km)),
+        "gz": jnp.zeros((nb, m_a, m_a, km + 1), dtype=_cdt),
+        "zh": jnp.zeros((nb, m_a, m_a, km + 1), dtype=_cdt),
+        "ws3": jnp.zeros((nb, m_a, m_a), dtype=_cdt),
+        "ws": jnp.zeros((nb, n, n), dtype=_cdt),
+        "pk3": jnp.zeros((nb, m_a, m_a, km + 1), dtype=_cdt),
+        "pe": jnp.zeros((nb,) + tuple(field_shape("pe", n, ng, km)),
                         dtype=_cdt),
-        "pk": jnp.zeros((6, n, n, km + 1), dtype=_cdt),
-        "peln": jnp.zeros((6,) + tuple(field_shape("peln", n, ng, km)),
+        "pk": jnp.zeros((nb, n, n, km + 1), dtype=_cdt),
+        "peln": jnp.zeros((nb,) + tuple(field_shape("peln", n, ng, km)),
                           dtype=_cdt),
     }
 
@@ -368,6 +370,19 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
         require_f64_jax("acoustic_substep_3d[nh]", nh)
 
     tab = _duo_tables(ctx)
+    # Sub-face WINDOW lane (fv3_duo_windows): every horizontal array's seam
+    # pad is rebuilt from its owner ONCE here, at sub-step entry, and never
+    # again inside the sub-step -- the intra-face reach of one sub-step is
+    # 8 cells (static bound, job 9631177) and the window pad exceeds it.
+    # The cross-face firings below then move only their write-sets.
+    # Static branch: with no window bundle the traced program is unchanged.
+    wcomm = getattr(tab, "window_comm", None)
+    if wcomm is not None:
+        state = wcomm.refresh(state)
+        if nh is not None:
+            nh = wcomm.refresh(nh)
+        if flux_cap is not None:
+            flux_cap = wcomm.refresh(flux_cap)
     bd = ctx.bd
     i0 = bd.is_ - bd.isd
     j0 = bd.js - bd.jsd
@@ -665,7 +680,7 @@ def _check_substep_state(state, ctx, km, it, n_split, hydrostatic,
     ni, nj = bd.ie - bd.is_ + 1, bd.je - bd.js + 1
     fields = (("delp", "pt", "u", "v") if hydrostatic
               else ("delp", "pt", "u", "v", "w"))
-    for t in range(6):
+    for t in range(batch_size(ctx)):
         for name in fields:
             # Compute window only (C1: state[name] is (6, i, j, km)); the
             # corner-diagonal halo carries `sentinel` by construction, so
