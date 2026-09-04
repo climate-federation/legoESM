@@ -93,3 +93,27 @@ are rerun.  Any cross-card row moving away from its oracle by more than two ulp
 or crossing the bar downward is reported without tuning.  The compare-to gate
 and criterion remain unchanged.  No external review of this preregistration
 has occurred.
+
+## Registered redirect after the tracer-routine checkpoints
+
+The accepted production-JIT checkpoint run finds nine differing T cells and
+nine differing S cells; the coordinate sets are disjoint (18 unique wet
+locations), correcting the briefing's ambiguous “nine wet cells” wording.
+All 18 first differ after `tra_adv`.  Replacing only stage 1's complete
+`zFu/zFv/zFw` operand bundle with the oracle bundle moves the final T and S
+residuals by exactly 1.0× and makes both stage updates bit-identical.  This
+confirms the transport *bundle* as causal but does not yet identify its first
+bad operand.
+
+Before changing arithmetic, a second config-local WRITE-only record will dump
+stage-1 `e2u/e1v`, `e3u/e3v(Kmm)`, `uu/vv(Kmm)`, `zub/zvb`, `umask/vmask`, and
+the stored `zFu/zFv` immediately after `stprk3_stg.F90:257-278`.  The ranked
+prediction is: all inputs match, while the constructed metric transport first
+differs because legoESM presently stores `e3*(u+zub)` and later rematerializes
+`e2*transport`, whereas NEMO stores the source-associated
+`(e2*e3)*(u+zub*mask)` once.  CONFIRM only if a shared native-metric transport
+materialization makes `zFu/zFv`, the stage-1 T/S update, and stage-2 Kaa clear
+with residual-scale movement.  REFUTE if any dumped input is first non-bit-
+exact or native materialization moves less than 0.1 of the tracer residual.
+The previously measured stored-barotropic-mean arm is retained as a separate
+near-null alternative, not silently folded into this association test.
