@@ -60,7 +60,9 @@ def _restore_policy():
         ("log", log), ("log10", log10),
     ]
 )
-def test_libm_policy_is_scalar_library_bit_exact_and_native_is_not(name, function):
+def test_libm_policy_is_scalar_library_bit_exact_and_native_is_separate(
+    name, function,
+):
     # The non-power-of-two stride avoids repeatedly sampling easy reduction
     # points while keeping every EXP input in its ordinary finite range.
     values = np.linspace(-19.75, 19.25, 100_000, dtype=np.float64)
@@ -86,9 +88,8 @@ def test_libm_policy_is_scalar_library_bit_exact_and_native_is_not(name, functio
     if name in {"exp", "tanh", "log10"}:
         assert native_mismatches > 0
     else:
-        # On this certification host XLA sine/cosine already agree with scalar
-        # glibc.  They still route through the poisoned callback in the NEMO
-        # policy, which the GYRE discriminator tests behaviorally.
+        # On this certification host XLA log/sine/cosine already agree with
+        # scalar glibc.  The libm policy still routes each through its callback.
         assert native_mismatches == 0
 
 
