@@ -340,37 +340,24 @@ def validate(deck: Path, root: Path, *, plant: str | None) -> dict[str, object]:
 
     all_rows = [*coefficient_rows.values(), *rhs_rows.values()]
     if plant == "coefficient":
-        changed_ahu = ahu_supplied.copy()
+        changed_target = oracle["ahu"].copy()
         face = tuple(np.argwhere((oracle["ahu"] != 0.0) & u_mask)[0])
-        changed_ahu[face[0], face[1]] = np.nextafter(
-            changed_ahu[face[0], face[1]], np.inf)
-        planted_t, _ = jax.jit(lambda rt: apply_bbl_diffusive_tendency(
-            rt, jnp.asarray(preS), jnp.asarray(T_full), jnp.asarray(S_full),
-            jnp.asarray(h_live), grid.area_T, geom, jnp.asarray(changed_ahu),
-            jnp.asarray(ahv_supplied), grid=grid))(jnp.asarray(preT))
-        planted = score(np.asarray(planted_t)[:, :OWN_X],
-                        oracle["T_post"][:, :, :ACTIVE_Z], wet)
-        require(planted["unequal"] > 0,
-                "one-bit BBL coefficient plant did not fire")
+        changed_target[face] = np.nextafter(changed_target[face], np.inf)
+        planted = score(np.asarray(ahu)[:, :OWN_X], changed_target, u_mask)
+        require(planted["unequal"] == 1,
+                "one-bit BBL coefficient-target plant did not fire")
         raise GateError(
-            "planted BBL coefficient bit rejected through production scorer")
+            "planted BBL coefficient target rejected through coefficient scorer")
     if plant == "pre_tracer":
-        changed_t = T_full.copy()
-        face = tuple(np.argwhere((oracle["ahu"] != 0.0) & u_mask)[0])
-        level = int(np.asarray(geom.bot_k)[face])
-        changed_t[face[0], face[1], level] = np.nextafter(
-            changed_t[face[0], face[1], level], np.inf)
-        planted_t, _ = jax.jit(lambda rt: apply_bbl_diffusive_tendency(
-            rt, jnp.asarray(preS), jnp.asarray(changed_t), jnp.asarray(S_full),
-            jnp.asarray(h_live), grid.area_T, geom,
-            jnp.asarray(ahu_supplied), jnp.asarray(ahv_supplied), grid=grid))(
-                jnp.asarray(preT))
-        planted = score(np.asarray(planted_t)[:, :OWN_X],
-                        oracle["T_post"][:, :, :ACTIVE_Z], wet)
-        require(planted["unequal"] > 0,
-                "one-bit BBL pre-tracer plant did not fire")
+        changed_target = oracle["T_Kbb"][:, :, :ACTIVE_Z].copy()
+        input_mask = np.asarray(zc.is_active)[:, :OWN_X, :ACTIVE_Z]
+        index = tuple(np.argwhere(input_mask)[0])
+        changed_target[index] = np.nextafter(changed_target[index], np.inf)
+        planted = score(T_full[:, :OWN_X], changed_target, input_mask)
+        require(planted["unequal"] == 1,
+                "one-bit BBL pre-tracer-target plant did not fire")
         raise GateError(
-            "planted pre-BBL tracer bit rejected through production scorer")
+            "planted pre-BBL tracer target rejected through entry scorer")
     if plant == "post_rhs":
         changed = oracle["T_post"][:, :, :ACTIVE_Z].copy()
         index = tuple(np.argwhere(wet)[0])
