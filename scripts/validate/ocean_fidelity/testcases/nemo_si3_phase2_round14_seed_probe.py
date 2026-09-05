@@ -20,6 +20,7 @@ import jax.numpy as jnp
 import netCDF4
 import numpy as np
 from legoesm.core.source_rounding import nemo_source_round
+from legoesm.ice import ridging as ridging_module
 from legoesm.ice.dynamics import SI3CGridAEVPState, si3_cgrid_aevp_solver
 from legoesm.ice.fidelity import nemo_rheo_testcase_recipe as recipe
 from legoesm.ice.fidelity.nemo_rheo_testcase_recipe import (
@@ -234,7 +235,13 @@ def _source_stress_arm(card, state):
         recipe._ice_rheo_air_stress_impl = saved
 
 
-def _exact_dynamics_arm(card, state, target: dict[str, np.ndarray]):
+def _exact_dynamics_arm(
+    card,
+    state,
+    target: dict[str, np.ndarray],
+    *,
+    ablate_ledger_rounding: bool = False,
+):
     exact = SI3CGridAEVPState(
         *(jnp.asarray(target[name], dtype=jnp.float64) for name in (
             "u_ice",
@@ -245,11 +252,15 @@ def _exact_dynamics_arm(card, state, target: dict[str, np.ndarray]):
         ))
     )
     saved = recipe.si3_cgrid_aevp_solver
+    saved_round = ridging_module.nemo_source_round
     try:
         recipe.si3_cgrid_aevp_solver = lambda *_args, **_kwargs: exact
+        if ablate_ledger_rounding:
+            ridging_module.nemo_source_round = lambda value: value
         return _compiled_step(card, state)
     finally:
         recipe.si3_cgrid_aevp_solver = saved
+        ridging_module.nemo_source_round = saved_round
 
 
 def _dynamics_rows(card, state, target: dict[str, np.ndarray]) -> list[dict[str, object]]:
@@ -359,10 +370,28 @@ def run_probe(
     )
     candidate_setup_rows = _setup_rows(card, candidate, setup, "setup.candidate_entry")
 
-    snow_rows = [
-        _score(f"oracle_only.{name}", _physical(target[name]), np.zeros_like(_physical(target[name])))
-        for name in ("snwice_mass", "snwice_mass_b")
-    ]
+    exact_dynamics_unrounded_state = _exact_dynamics_arm(
+        card, state, target, ablate_ledger_rounding=True
+    )
+    exact_dynamics_unrounded_rows = _entry_rows(
+        card, exact_dynamics_unrounded_state, target
+    )
+
+    mass_rows = []
+    for name in ("snwice_mass", "snwice_mass_b"):
+        value = _physical(target[name])
+        mass_rows.append(
+            {
+                "name": f"missing_candidate_carry.{name}",
+                "status": "UNMEASURED",
+                "reason": (
+                    "NEMO carries this field through iceupdate.F90:190-193; "
+                    "the current legoESM card has no corresponding state leaf"
+                ),
+                "oracle_nonzero_over_n": f"{np.count_nonzero(value)} / {value.size}",
+                "oracle_max_abs": float(np.max(np.abs(value))),
+            }
+        )
 
     source_summary = _arm_summary(entry_rows, source_rows)
     exact_dynamics_summary = _arm_summary(entry_rows, exact_dynamics_rows)
@@ -371,17 +400,38 @@ def run_probe(
         for row in exact_dynamics_rows + exact_dynamics_moments
         if not str(row["name"]).endswith(("oa_i", "a_ip", "v_ip", "v_il"))
     )
-    source_confirmed = bool(source_summary["moved_toward_oracle"])
-    rheology_owned = exact_dynamics_all
-    if source_confirmed:
-        producer = "usrdef_sbc.F90:124-140 surface-stress statement association"
+    unrounded_summary = _arm_summary(
+        exact_dynamics_rows, exact_dynamics_unrounded_rows
+    )
+    ledger_fields = (
+        "v_i",
+        "v_s",
+        *(f"e_s_l{level:02d}" for level in range(1, 6)),
+        *(f"e_i_l{level:02d}" for level in range(1, 11)),
+        *(f"szv_i_l{level:02d}" for level in range(1, 11)),
+    )
+    rounded_by_name = {
+        str(row["name"]).split(".")[-1]: row for row in exact_dynamics_rows
+    }
+    unrounded_by_name = {
+        str(row["name"]).split(".")[-1]: row
+        for row in exact_dynamics_unrounded_rows
+    }
+    ledger_confirmed = (
+        all(rounded_by_name[name]["status"] == "BIT-EXACT" for name in ledger_fields)
+        and any(unrounded_by_name[name]["status"] != "BIT-EXACT" for name in ledger_fields)
+        and rounded_by_name["a_i"]["status"] == "BIT-EXACT"
+        and not any(_nonzero(row) for row in exact_dynamics_moments)
+    )
+    if ledger_confirmed:
+        producer = (
+            "icedyn_rdgrft.F90:715-720,734-741,779-792,874-890 "
+            "jpl=1 donor/survivor/receiver inventory statement association"
+        )
         classification = "PRODUCER-NAMED"
-    elif rheology_owned:
-        producer = "step-8 rheology/forcing chain; first internal statement requires a step-8 dump"
-        classification = "SUBSYSTEM-NAMED-STATEMENT-UNMEASURED"
     else:
-        producer = "first nonexact post-rheology transport/redistribution row"
-        classification = "DOWNSTREAM-OWNER"
+        producer = "first surviving post-Prather ridging ledger operand"
+        classification = "STATEMENT-OWNER-UNMEASURED"
 
     clean_plant_row = next(row for row in entry_rows if row["name"] == "entry.step9.a_i")
     plant_evidence = None
@@ -411,23 +461,27 @@ def run_probe(
         "stage8_rheology_rows": baseline_dyn_rows,
         "surface_stress_arm_rows": source_rows,
         "surface_stress_arm": source_summary,
+        "surface_stress_prediction": "REFUTED",
         "exact_dynamics_arm_rows": exact_dynamics_rows,
         "exact_dynamics_arm_moment_rows": exact_dynamics_moments,
         "exact_dynamics_arm": {
             **exact_dynamics_summary,
             "all_entry_and_moment_rows_exact": exact_dynamics_all,
         },
+        "private_unrounded_ridging_ledger_arm_rows": exact_dynamics_unrounded_rows,
+        "private_unrounded_ridging_ledger_arm": unrounded_summary,
         "exact_oracle_entry_setup_rows": exact_setup_rows,
         "candidate_entry_setup_rows": candidate_setup_rows,
-        "oracle_only_rows": snow_rows,
+        "missing_candidate_carry_rows": mass_rows,
         "producer": producer,
         "predicates": {
-            "surface_stress_prediction_confirmed": source_confirmed,
-            "exact_dynamics_closes_downstream": rheology_owned,
+            "surface_stress_prediction_confirmed": False,
+            "ridging_inventory_ledger_prediction_confirmed": ledger_confirmed,
+            "exact_dynamics_closes_downstream": exact_dynamics_all,
             "all_exact_oracle_setup_rows_exact": all(
                 row["status"] == "BIT-EXACT" for row in exact_setup_rows
             ),
-            "snwice_inputs_zero": all(row["status"] == "BIT-EXACT" for row in snow_rows),
+            "snwice_candidate_carry_present": False,
         },
         "plant": {
             "enabled": plant,

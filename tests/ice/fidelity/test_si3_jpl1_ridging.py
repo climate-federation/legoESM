@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from legoesm.ice import ridging as ridging_module
 from legoesm.ice.ridging import (
     SI3JPL1RidgingConfig,
     SI3JPL1RidgingState,
@@ -16,6 +17,8 @@ from legoesm.ice.ridging import (
 
 _ORCA1_CATEGORY_COUNT = 5  # ORCA1 namelist_ice_cfg:15; outside this jpl=1 arm
 _CASE_DT_S = 30.0  # tests/ICE_RHEO/EXPREF/namelist_cfg:35
+_ACTIVE_DIVERGENCE_S1 = -1.0e-4  # synthetic active one-shift control
+_ACTIVE_DEFORMATION_S1 = 3.0e-4  # synthetic active one-shift control
 
 
 def _state(*, area: float = 0.8, open_water: float = 0.203) -> SI3JPL1RidgingState:
@@ -105,6 +108,37 @@ def test_si3_jpl1_matches_independent_written_order_one_shift() -> None:
     np.testing.assert_allclose(
         result.ice_salt_content, state.ice_salt_content, rtol=0.0, atol=4e-15
     )
+
+
+def test_si3_jpl1_ledger_uses_source_rounding_under_jit(monkeypatch) -> None:
+    """The donor/receiver ledger must reach the canonical arithmetic guard."""
+
+    state = _state()
+
+    def advance(current):
+        return apply_si3_jpl1_ridging(
+            current,
+            jnp.asarray([_ACTIVE_DIVERGENCE_S1], dtype=jnp.float64),
+            jnp.asarray([_ACTIVE_DEFORMATION_S1], dtype=jnp.float64),
+            _CASE_DT_S,
+        )[0]
+
+    rounded = jax.jit(advance)(state)
+    jax.block_until_ready(rounded)
+    monkeypatch.setattr(ridging_module, "nemo_source_round", lambda value: value)
+
+    def advance_unrounded(current):
+        return apply_si3_jpl1_ridging(
+            current,
+            jnp.asarray([_ACTIVE_DIVERGENCE_S1], dtype=jnp.float64),
+            jnp.asarray([_ACTIVE_DEFORMATION_S1], dtype=jnp.float64),
+            _CASE_DT_S,
+        )[0]
+
+    unrounded = jax.jit(advance_unrounded)(state)
+    jax.block_until_ready(unrounded)
+
+    assert not np.array_equal(rounded.ice_enthalpy, unrounded.ice_enthalpy)
 
 
 def test_si3_jpl1_divergence_without_shear_is_noop() -> None:
