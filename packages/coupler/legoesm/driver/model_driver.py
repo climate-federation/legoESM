@@ -755,6 +755,11 @@ def _mpas_hard_saturation_poststep(T, q_v, q_c, p_s, sigma_full, dt,
 # ceiling loosens as 0.1/rho aloft — ~4x at 15 hPa, far more near the top).
 _ICE_SEED_RHO_FLOOR = 0.1        # [kg/m^3]
 
+# MultiLayerLandState fields that are numerical CACHES, not prognostic state:
+# never written to a checkpoint and never required by one, so a checkpoint
+# written before the field existed still restarts (the cache cold-starts).
+_LAND_ML_CACHE_FIELDS = ("canopy_x",)
+
 
 def _seed_nucleated_ice_number(N_i, dq_i, ice_nuc_mass, n_i_nuc_max, p_full, T):
     """Seed cloud-ice NUMBER [1/kg] for freshly deposited ice mass ``dq_i``.
@@ -1161,7 +1166,9 @@ class ModelDriver:
                 # Optional fields (TgC, surface_water) may be None — np.asarray
                 # would pickle a 0-d object array into the npz and crash the
                 # load-side jnp.asarray. Skip; restore only replaces saved keys.
-                if _v is not None:
+                # Cache fields (the canopy warm start) are skipped too: they
+                # carry no physics and an older reader would refuse the key.
+                if _v is not None and _f not in _LAND_ML_CACHE_FIELDS:
                     base[f"land_ml_{_f}"] = np.asarray(_v)
         return base if base else None
 
@@ -1296,8 +1303,9 @@ class ModelDriver:
                 f"land_ml checkpoint has unknown field(s) {sorted(unknown)}; "
                 f"current MultiLayerLandState fields are {sorted(valid)}")
         expected = {f for f in template._fields
-                    if getattr(template, f) is not None}
-        got = set(popped)
+                    if getattr(template, f) is not None
+                    and f not in _LAND_ML_CACHE_FIELDS}
+        got = set(popped) - set(_LAND_ML_CACHE_FIELDS)
         if got != expected:
             raise ValueError(
                 "land_ml checkpoint field set does not match the current "

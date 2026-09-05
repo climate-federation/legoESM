@@ -102,3 +102,38 @@ def test_a_normal_canopy_keeps_its_two_leaf_split():
     assert bool(converged)
     assert abs(float(x[0]) - float(x[1])) > 1e-3, (
         "sunlit and shaded leaves collapsed on a normal canopy")
+
+
+# --------------------------------------------------------------------------- #
+# bare ground: no leaves, no leaf equations                                    #
+# --------------------------------------------------------------------------- #
+
+def test_bare_ground_pins_the_empty_leaf_state():
+    """At LAI == 0 the four leaf unknowns are pinned to the canopy air and the
+    ambient CO2 instead of being solved through ~1e7 s/m resistances (where the
+    leaf temperature drifted ~100 K and 90% of non-converged solves lived)."""
+    b = _bundle(LAI=0.0, fSun=0.0)
+    x, _n, converged = solve_canopy_closure(_X0, b, CanopyConfig())
+    assert bool(converged)
+    # A leaf area below the leaf-resistance floor (1e-6) is bare ground for
+    # the closure too: bit-identical resistances, so the same pins.
+    x_dust, _n, conv_dust = solve_canopy_closure(
+        _X0, _bundle(LAI=1e-7, fSun=0.5), CanopyConfig())
+    assert bool(conv_dust)
+    np.testing.assert_allclose(np.asarray(x_dust[:2]), float(x_dust[4]),
+                               rtol=0, atol=1e-6)
+    Tc, q_c = float(x[4]), float(x[5])
+    np.testing.assert_allclose(np.asarray(x[:2]), Tc, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(np.asarray(x[2:4]), float(b.Ca), rtol=0, atol=1e-6)
+    # The canopy air still balances against the soil and the atmosphere.
+    assert 250.0 < Tc < 330.0 and 0.0 < q_c < 0.05
+
+
+def test_the_pins_stay_off_on_a_column_with_leaves():
+    """A tiny but nonzero leaf area is a canopy, not bare ground: the leaf
+    rows keep their own balance (the pin trigger is the resistance floor)."""
+    x, _n, converged = solve_canopy_closure(
+        _X0, _bundle(LAI=0.5, fSun=0.3), CanopyConfig())
+    assert bool(converged)
+    assert abs(float(x[0]) - float(x[4])) > 1e-3, "leaf pinned to canopy air"
+    assert abs(float(x[2]) - 400.0) > 1e-3, "leaf Ci pinned to ambient"
