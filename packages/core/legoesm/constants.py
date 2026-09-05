@@ -181,6 +181,52 @@ T_triple_nemo = 273.16          # [K] sbc_phy.F90:62 rtt0
 sigma_sb_nemo = 5.67e-8         # [W/(m2*K4)] phycst.F90 stefan
 L_sub_nemo = 2.8344e6           # [J/kg] phycst.F90 rLsub
 
+# NEMO 5.0.2 Large & Yeager NCAR open-ocean bulk identity.  These are
+# algorithm coefficients / guards, not selectable run parameters.  Keeping
+# them here makes the source-literal O1 path obey the no-inline-coefficients
+# ratchet while preserving the exact spellings in sbc_phy.F90:28,61,72 and
+# sbcblk_algo_ncar.F90:110-213,244-290,312-363.
+ncar_bulk_iterations_nemo = 5
+ncar_measurement_height_nemo = 10.0       # [m] ORCA2 rn_zqt=rn_zu
+ncar_wind_floor_nemo = 0.5                # [m/s]
+ncar_neutral_wind_floor_nemo = 0.25       # [m/s]
+ncar_transfer_coefficient_floor_nemo = 0.1e-3
+ncar_zeta_cap_nemo = 10.0
+ncar_inverse_obukhov_cap_nemo = 200.0     # [m-1]
+ncar_obukhov_denominator_floor_nemo = 1.0e-9
+ncar_qsat_salt_factor_nemo = 0.98
+ncar_cd_inverse_wind_nemo = 2.7
+ncar_cd_offset_nemo = 0.142
+ncar_cd_wind_divisor_nemo = 13.09
+ncar_cd_sixth_order_nemo = 3.14807e-10
+ncar_cd_cyclone_threshold_nemo = 33.0     # [m/s]
+ncar_cd_cyclone_plateau_nemo = 2.34
+ncar_ch_stable_nemo = 18.0
+ncar_ch_unstable_nemo = 32.7
+ncar_ce_nemo = 34.6
+ncar_psi_unstable_nemo = 16.0
+ncar_psi_stable_nemo = 5.0
+ncar_latent_heat_intercept_nemo = 2.501      # [MJ/kg]
+ncar_latent_heat_slope_nemo = 0.00237       # [MJ/(kg K)]
+ncar_latent_heat_scale_nemo = 1.0e6         # [J/MJ]
+ncar_humidity_floor_nemo = 1.0e-6
+
+# Retained, explicitly named pre-NCAR OMIP approximation parameters.
+large_yeager_legacy_ch_unstable = 1.46e-3
+large_yeager_legacy_ch_stable = 1.18e-3
+large_yeager_legacy_wind2_floor = 1.0e-12
+
+# Goff (1957) saturation-over-water coefficients as transcribed in
+# sbc_phy.F90:645-651.  The powers are deliberately evaluated at run time;
+# unlike rDg_i on the ice path, none of these is a compile-time LOG constant.
+goff_water_a_nemo = 10.79574
+goff_water_b_nemo = 5.028
+goff_water_c_nemo = 1.50475e-4
+goff_water_d_nemo = 8.2969
+goff_water_e_nemo = 0.42873e-3
+goff_water_f_nemo = 4.76955
+goff_water_g_nemo = 0.78614
+
 # Goff saturation over ice, sbc_phy.F90:74-79,665-711.
 goff_ice_A_nemo = -9.09718
 goff_ice_B_nemo = -3.56654
@@ -193,6 +239,7 @@ T_goff_floor_nemo = 180.0       # [K]
 # byte-identical in two independent scalar-math rebuilds (lane 3b Round 10).
 # The hexadecimal payloads are the big-endian IEEE-754 binary64 words.
 epsilon_air_nemo = 0.6220002383557786       # 3fe3e76d0b3af3e8; sbc_phy.F90:33-35
+rctv_air_nemo = 0.6077164257098067          # 3fe37269b7b54cde; sbc_phy.F90:33-36
 poisson_dry_air_nemo = 0.2856285160421812   # 3fd247bcd3cd320c; sbc_phy.F90:39-43
 goff_ice_D_nemo = 0.7858350313586662        # 3fe9258f81f79246; sbc_phy.F90:74-79
 ln10_nemo = 2.302585092994046               # 40026bb1bbb55516; sbc_phy.F90:709-711

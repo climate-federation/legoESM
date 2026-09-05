@@ -73,6 +73,7 @@ NU_AIR = constants.nu_air  # kinematic viscosity of air [m²/s]
 #   "large_yeager" — Large & Yeager 2009 (OMIP)
 _VALID_BULK_SCHEMES = (
     "constant", "most", "coare3", "large_yeager", "nemo_si3_constant",
+    "nemo_ncar",
 )
 
 
@@ -1602,6 +1603,512 @@ def nemo_si3_constant_fluxes(
         tau_x, tau_y, wind, theta_ice, q_sat, dq_sat_dT,
         sensible, latent, dq_sensible_dT, dq_latent_dT,
     )
+
+
+def _nemo_constant_like(value, constant):
+    """Keep a written division from becoming multiply-by-reciprocal in XLA."""
+    return nemo_source_round(jnp.ones_like(value) * constant)
+
+
+def _nemo_goff_water_saturation_pressure(temperature):
+    """NEMO Goff (1957) saturation pressure, source-literal binary64 path.
+
+    Mirrors ``sbc_phy.F90:645-651``.  Each assignment and each explicitly
+    parenthesised operand group is materialised so XLA cannot contract or
+    reassociate it across a Fortran source-statement boundary.
+    """
+    c = constants
+    t_air = nemo_source_round(jnp.maximum(
+        jnp.asarray(temperature, dtype=jnp.float64), c.T_goff_floor_nemo))
+    freeze = _nemo_constant_like(t_air, c.T_freeze)
+    ratio = nemo_source_round(freeze / t_air)
+    # Lines 649-651 are one continued assignment.  The nested guards preserve
+    # the scalar evaluation tree of that written expression; in particular the
+    # array-valued ``freeze`` above prevents XLA's divide-to-reciprocal rewrite.
+    log_ratio = nemo_source_round(jnp.log10(nemo_source_round(t_air / freeze)))
+    ratio_minus_one = nemo_source_round(
+        nemo_source_round(t_air / freeze) - 1.0)
+    power_c = nemo_source_round(10.0 ** nemo_source_round(
+        -c.goff_water_d_nemo * ratio_minus_one))
+    power_d = nemo_source_round(10.0 ** nemo_source_round(
+        c.goff_water_f_nemo * nemo_source_round(1.0 - ratio)))
+    term_a = nemo_source_round(c.goff_water_a_nemo * nemo_source_round(1.0 - ratio))
+    term_b = nemo_source_round(c.goff_water_b_nemo * log_ratio)
+    term_c = nemo_source_round(
+        c.goff_water_c_nemo * nemo_source_round(1.0 - power_c))
+    term_d = nemo_source_round(
+        c.goff_water_e_nemo * nemo_source_round(power_d - 1.0))
+    exponent = nemo_source_round(
+        nemo_source_round(nemo_source_round(term_a - term_b) + term_c)
+        + term_d + c.goff_water_g_nemo)
+    return nemo_source_round(100.0 * nemo_source_round(10.0 ** exponent))
+
+
+def _nemo_ncar_q_sat(temperature, pressure):
+    """NEMO ``q_sat`` over water (``sbc_phy.F90:727-751``)."""
+    vapour = _nemo_goff_water_saturation_pressure(temperature)
+    numerator = nemo_source_round(constants.epsilon_air_nemo * vapour)
+    complement = nemo_source_round(1.0 - constants.epsilon_air_nemo)
+    denominator = nemo_source_round(
+        pressure - nemo_source_round(complement * vapour))
+    return nemo_source_round(numerator / denominator)
+
+
+def nemo_ncar_pressure_at_height(
+    humidity, sea_level_pressure, height, *, absolute_temperature=None,
+    potential_temperature=None,
+):
+    """NEMO ``pres_temp`` three-iteration identity.
+
+    Exactly one of ``absolute_temperature`` and ``potential_temperature`` is
+    supplied.  The two modes reproduce ``sbc_phy.F90:256-280`` including the
+    otherwise algebraically redundant mask terms in the potential branch.
+    """
+    if (absolute_temperature is None) == (potential_temperature is None):
+        raise ValueError(
+            "provide exactly one of absolute_temperature or potential_temperature")
+    q = jnp.asarray(humidity, dtype=jnp.float64)
+    slp = jnp.asarray(sea_level_pressure, dtype=jnp.float64)
+    p = slp
+    if potential_temperature is None:
+        mask = 0.0
+        theta = jnp.zeros_like(slp)
+        absolute = jnp.asarray(absolute_temperature, dtype=jnp.float64)
+    else:
+        mask = 1.0
+        theta = jnp.asarray(potential_temperature, dtype=jnp.float64)
+        absolute = jnp.zeros_like(slp)
+    for _ in range(3):  # sbc_phy.F90:256,272-277
+        power = nemo_source_round(
+            nemo_source_round(
+                p / _nemo_constant_like(p, constants.p_ref))
+            ** constants.poisson_dry_air_nemo)
+        absolute = nemo_source_round(
+            nemo_source_round(theta * power) * mask
+            + nemo_source_round((1.0 - mask) * absolute))
+        q_sat = _nemo_ncar_q_sat(absolute, p)
+        ratio = nemo_source_round(q / q_sat)
+        molar_mass = nemo_source_round(
+            nemo_source_round(
+                nemo_source_round(1.0 - ratio) * constants.M_dry_air)
+            + nemo_source_round(ratio * constants.M_water))
+        numerator = nemo_source_round(
+            nemo_source_round(
+                nemo_source_round(-constants.g_nemo * molar_mass) * height))
+        denominator = nemo_source_round(constants.R_gas_molar * absolute)
+        exponent = nemo_source_round(numerator / denominator)
+        from legoesm.core.transcendentals import exp as policy_exp
+        p = nemo_source_round(slp * policy_exp(exponent))
+    return p, absolute
+
+
+def nemo_ncar_theta_exner(absolute_temperature, pressure):
+    """NEMO Exner statement (``sbc_phy.F90:321-337``)."""
+    ratio = nemo_source_round(
+        _nemo_constant_like(pressure, constants.p_ref) / pressure)
+    power = nemo_source_round(ratio ** constants.poisson_dry_air_nemo)
+    return nemo_source_round(absolute_temperature * power)
+
+
+def nemo_ncar_potential_air_temperature(temperature, humidity, pressure):
+    """Resolved ORCA2 absolute-to-potential preprocessing."""
+    p_height, _ = nemo_ncar_pressure_at_height(
+        humidity, pressure, constants.ncar_measurement_height_nemo,
+        absolute_temperature=temperature,
+    )
+    return nemo_ncar_theta_exner(temperature, p_height), p_height
+
+
+def nemo_ncar_seawater_q_sat(surface_temperature, pressure):
+    """Salt-reduced surface humidity (``sbcblk.F90:823-824``)."""
+    return nemo_source_round(
+        constants.ncar_qsat_salt_factor_nemo
+        * _nemo_ncar_q_sat(surface_temperature, pressure))
+
+
+def nemo_ncar_rho_air(absolute_temperature, humidity, pressure):
+    """Moist-air density, literal ``sbc_phy.F90:361-392`` statement."""
+    t_air = jnp.asarray(absolute_temperature, dtype=jnp.float64)
+    q_air = jnp.asarray(humidity, dtype=jnp.float64)
+    p_air = jnp.asarray(pressure, dtype=jnp.float64)
+    rt = nemo_source_round(constants.R_d * t_air)
+    q_product = nemo_source_round(constants.rctv_air_nemo * q_air)
+    q_factor = nemo_source_round(1.0 + q_product)
+    denominator = nemo_source_round(rt * q_factor)
+    return nemo_source_round(jnp.maximum(
+        nemo_source_round(p_air / denominator), 0.8))
+
+
+def _nemo_ncar_cd_n10(wind):
+    """Large & Yeager neutral drag, ``sbcblk_algo_ncar.F90:244-255``."""
+    c = constants
+    wind3 = nemo_source_round(nemo_source_round(wind * wind) * wind)
+    wind6 = nemo_source_round(wind3 * wind3)
+    gt33 = nemo_source_round(
+        0.5 + jnp.copysign(0.5, nemo_source_round(
+            wind - c.ncar_cd_cyclone_threshold_nemo)))
+    polynomial = nemo_source_round(
+        nemo_source_round(
+            nemo_source_round(
+                _nemo_constant_like(wind, c.ncar_cd_inverse_wind_nemo) / wind)
+            + c.ncar_cd_offset_nemo)
+        + nemo_source_round(
+            wind / _nemo_constant_like(wind, c.ncar_cd_wind_divisor_nemo))
+        - nemo_source_round(c.ncar_cd_sixth_order_nemo * wind6))
+    coefficient = nemo_source_round(
+        1.0e-3 * nemo_source_round(
+            nemo_source_round(nemo_source_round(1.0 - gt33) * polynomial)
+            + nemo_source_round(gt33 * c.ncar_cd_cyclone_plateau_nemo)))
+    return nemo_source_round(jnp.maximum(
+        coefficient, c.ncar_transfer_coefficient_floor_nemo))
+
+
+def _nemo_ncar_ch_n10(sqrt_cd, stability):
+    c = constants
+    blend = nemo_source_round(
+        nemo_source_round(c.ncar_ch_stable_nemo * stability)
+        + nemo_source_round(
+            c.ncar_ch_unstable_nemo * nemo_source_round(1.0 - stability)))
+    value = nemo_source_round(nemo_source_round(1.0e-3 * sqrt_cd) * blend)
+    return nemo_source_round(jnp.maximum(
+        value, c.ncar_transfer_coefficient_floor_nemo))
+
+
+def _nemo_ncar_ce_n10(sqrt_cd):
+    value = nemo_source_round(
+        1.0e-3 * nemo_source_round(constants.ncar_ce_nemo * sqrt_cd))
+    return nemo_source_round(jnp.maximum(
+        value, constants.ncar_transfer_coefficient_floor_nemo))
+
+
+def _nemo_ncar_psi_m(zeta):
+    """NCAR momentum stability function, source literal at :312-326."""
+    c = constants
+    x2 = nemo_source_round(jnp.sqrt(jnp.abs(nemo_source_round(
+        1.0 - nemo_source_round(c.ncar_psi_unstable_nemo * zeta)))))
+    x2 = nemo_source_round(jnp.maximum(x2, 1.0))
+    x = nemo_source_round(jnp.sqrt(x2))
+    log_x = nemo_source_round(jnp.log(nemo_source_round(
+        nemo_source_round(1.0 + x) * 0.5)))
+    log_x2 = nemo_source_round(jnp.log(nemo_source_round(
+        nemo_source_round(1.0 + x2) * 0.5)))
+    unstable = nemo_source_round(
+        nemo_source_round(nemo_source_round(2.0 * log_x) + log_x2)
+        - nemo_source_round(2.0 * jnp.arctan(x))
+        + nemo_source_round(jnp.pi * 0.5))
+    stable_value = nemo_source_round(-c.ncar_psi_stable_nemo * zeta)
+    stable = nemo_source_round(0.5 + jnp.copysign(0.5, zeta))
+    return nemo_source_round(
+        nemo_source_round(stable * stable_value)
+        + nemo_source_round(nemo_source_round(1.0 - stable) * unstable))
+
+
+def _nemo_ncar_psi_h(zeta):
+    """NCAR scalar stability function, source literal at :352-363."""
+    c = constants
+    x2 = nemo_source_round(jnp.sqrt(jnp.abs(nemo_source_round(
+        1.0 - nemo_source_round(c.ncar_psi_unstable_nemo * zeta)))))
+    x2 = nemo_source_round(jnp.maximum(x2, 1.0))
+    unstable = nemo_source_round(2.0 * jnp.log(nemo_source_round(
+        0.5 * nemo_source_round(1.0 + x2))))
+    stable_value = nemo_source_round(-c.ncar_psi_stable_nemo * zeta)
+    stable = nemo_source_round(0.5 + jnp.copysign(0.5, zeta))
+    return nemo_source_round(
+        nemo_source_round(stable * stable_value)
+        + nemo_source_round(nemo_source_round(1.0 - stable) * unstable))
+
+
+def _nemo_ncar_one_on_l(theta, humidity, u_star, theta_star, q_star):
+    """Inverse Obukhov length, ``sbc_phy.F90:552-564``."""
+    c = constants
+    q_product = nemo_source_round(c.rctv_air_nemo * humidity)
+    q_factor = nemo_source_round(1.0 + q_product)
+    theta_flux = nemo_source_round(theta_star * q_factor)
+    humidity_theta = nemo_source_round(c.rctv_air_nemo * theta)
+    humidity_flux = nemo_source_round(humidity_theta * q_star)
+    bracket = nemo_source_round(theta_flux + humidity_flux)
+    g_kappa = nemo_source_round(c.g_nemo * c.kappa_von_karman)
+    numerator = nemo_source_round(g_kappa * bracket)
+    u2 = nemo_source_round(u_star * u_star)
+    u2_theta = nemo_source_round(u2 * theta)
+    denominator_raw = nemo_source_round(u2_theta * q_factor)
+    denominator = nemo_source_round(jnp.maximum(
+        denominator_raw, c.ncar_obukhov_denominator_floor_nemo))
+    value = nemo_source_round(numerator / denominator)
+    return nemo_source_round(jnp.copysign(
+        jnp.minimum(jnp.abs(value), c.ncar_inverse_obukhov_cap_nemo), value))
+
+
+def _nemo_ncar_un10(height, bulk_wind, cd, psi):
+    """Literal ``z0_from_Cd`` then ``UN10_from_CD`` path (:1057-1063,1196)."""
+    from legoesm.core.transcendentals import exp as policy_exp
+    sqrt_cd = nemo_source_round(jnp.sqrt(cd))
+    kappa = _nemo_constant_like(sqrt_cd, constants.kappa_von_karman)
+    exponent = nemo_source_round(-nemo_source_round(
+        nemo_source_round(kappa / sqrt_cd) + psi))
+    z0 = nemo_source_round(height * policy_exp(exponent))
+    leading = nemo_source_round(
+        nemo_source_round(sqrt_cd * bulk_wind) / kappa)
+    logarithm = nemo_source_round(jnp.log(nemo_source_round(10.0 / z0)))
+    return nemo_source_round(leading * logarithm)
+
+
+def nemo_ncar_transfer_coefficients(
+    sea_theta, air_theta, sea_humidity, air_humidity, wind,
+    *, iterations: int | None = None, _return_operands: bool = False,
+):
+    """Resolved equal-height ``turb_ncar`` identity (:110-217)."""
+    c = constants
+    count = c.ncar_bulk_iterations_nemo if iterations is None else int(iterations)
+    bulk_wind = nemo_source_round(jnp.maximum(c.ncar_wind_floor_nemo, wind))
+    air_virtual = nemo_source_round(
+        air_theta * nemo_source_round(1.0 + c.rctv_air_nemo * air_humidity))
+    sea_virtual = nemo_source_round(
+        sea_theta * nemo_source_round(1.0 + c.rctv_air_nemo * sea_humidity))
+    delta_virtual = nemo_source_round(air_virtual - sea_virtual)
+    stability = nemo_source_round(0.5 + jnp.copysign(0.5, delta_virtual))
+    cd_n = _nemo_ncar_cd_n10(bulk_wind)
+    sqrt_cd_n = nemo_source_round(jnp.sqrt(cd_n))
+    cd = cd_n
+    ce = _nemo_ncar_ce_n10(sqrt_cd_n)
+    ch = _nemo_ncar_ch_n10(sqrt_cd_n, stability)
+    sqrt_cd = sqrt_cd_n
+    theta_zu = nemo_source_round(jnp.maximum(air_theta, 180.0))
+    q_zu = nemo_source_round(jnp.maximum(air_humidity, 1.0e-6))
+    operand_trace = []
+
+    for _ in range(count):
+        delta_theta = nemo_source_round(theta_zu - sea_theta)
+        delta_q = nemo_source_round(q_zu - sea_humidity)
+        u_star = nemo_source_round(sqrt_cd * bulk_wind)
+        theta_star = nemo_source_round(
+            nemo_source_round(ch / sqrt_cd) * delta_theta)
+        q_star = nemo_source_round(
+            nemo_source_round(ce / sqrt_cd) * delta_q)
+        inverse_l = _nemo_ncar_one_on_l(
+            theta_zu, q_zu, u_star, theta_star, q_star)
+        zeta = nemo_source_round(c.ncar_measurement_height_nemo * inverse_l)
+        zeta = nemo_source_round(jnp.copysign(
+            jnp.minimum(jnp.abs(zeta), c.ncar_zeta_cap_nemo), zeta))
+        psi_m_value = _nemo_ncar_psi_m(zeta)
+        neutral_wind = nemo_source_round(jnp.maximum(
+            c.ncar_neutral_wind_floor_nemo,
+            _nemo_ncar_un10(
+                c.ncar_measurement_height_nemo, bulk_wind, cd, psi_m_value)))
+        cd_n = _nemo_ncar_cd_n10(neutral_wind)
+        sqrt_cd_n = nemo_source_round(jnp.sqrt(cd_n))
+        log_height = nemo_source_round(jnp.log(
+            c.ncar_measurement_height_nemo / 10.0))
+        kappa = _nemo_constant_like(sqrt_cd_n, c.kappa_von_karman)
+        denominator = nemo_source_round(
+            1.0 + nemo_source_round(
+                nemo_source_round(sqrt_cd_n / kappa)
+                * nemo_source_round(log_height - psi_m_value)))
+        cd_square = nemo_source_round(denominator * denominator)
+        cd_quotient = nemo_source_round(cd_n / cd_square)
+        cd = nemo_source_round(jnp.maximum(
+            cd_quotient,
+            c.ncar_transfer_coefficient_floor_nemo))
+        sqrt_cd = nemo_source_round(jnp.sqrt(cd))
+        scalar_profile = nemo_source_round(
+            nemo_source_round(
+                nemo_source_round(
+                    log_height - _nemo_ncar_psi_h(zeta)) / kappa)
+            / sqrt_cd_n)
+        ratio = nemo_source_round(sqrt_cd / sqrt_cd_n)
+        stability = nemo_source_round(0.5 + jnp.copysign(0.5, zeta))
+        ch_n = _nemo_ncar_ch_n10(sqrt_cd_n, stability)
+        ce_n = _nemo_ncar_ce_n10(sqrt_cd_n)
+        ch = nemo_source_round(jnp.maximum(
+            nemo_source_round(
+                nemo_source_round(ch_n * ratio)
+                / nemo_source_round(1.0 + nemo_source_round(
+                    ch_n * scalar_profile))),
+            c.ncar_transfer_coefficient_floor_nemo))
+        ce = nemo_source_round(jnp.maximum(
+            nemo_source_round(
+                nemo_source_round(ce_n * ratio)
+                / nemo_source_round(1.0 + nemo_source_round(
+                    ce_n * scalar_profile))),
+            c.ncar_transfer_coefficient_floor_nemo))
+        if _return_operands:
+            operand_trace.append({
+                "delta_theta": delta_theta,
+                "delta_q": delta_q,
+                "u_star": u_star,
+                "theta_star": theta_star,
+                "q_star": q_star,
+                "inverse_l": inverse_l,
+                "zeta": zeta,
+                "psi_m": psi_m_value,
+                "neutral_wind": neutral_wind,
+                "cd_n": cd_n,
+                "sqrt_cd_n": sqrt_cd_n,
+                "cd_denominator": denominator,
+                "cd": cd,
+                "sqrt_cd": sqrt_cd,
+                "scalar_profile": scalar_profile,
+                "ratio": ratio,
+                "stability": stability,
+                "ch_n": ch_n,
+                "ce_n": ce_n,
+                "ch": ch,
+                "ce": ce,
+            })
+    result = (cd, ch, ce, theta_zu, q_zu, bulk_wind)
+    if _return_operands:
+        return result, tuple(operand_trace)
+    return result
+
+
+def nemo_ncar_ocean_bulk(
+    u_wind, v_wind, air_temperature, air_humidity, sea_temperature_c,
+    sea_level_pressure, down_shortwave, down_longwave, precipitation, snow,
+    *, surface_humidity=None, air_density=None, iterations: int | None = None,
+):
+    """Complete ORCA2 O1 ``blk_oce_1``/``blk_oce_2`` source identity.
+
+    Inputs are the oracle-supplied, already mapped rank-0 fields.  Returned
+    names are the eighteen source-owned O1 slots.  Sign convention is NEMO:
+    ``utau``/``vtau`` point with the wind and downward heat is positive.
+    """
+    c = constants
+    u = jnp.asarray(u_wind, dtype=jnp.float64)
+    v = jnp.asarray(v_wind, dtype=jnp.float64)
+    tair = jnp.asarray(air_temperature, dtype=jnp.float64)
+    qair = jnp.asarray(air_humidity, dtype=jnp.float64)
+    sst = jnp.asarray(sea_temperature_c, dtype=jnp.float64)
+    slp = jnp.asarray(sea_level_pressure, dtype=jnp.float64)
+    qsw_down = jnp.asarray(down_shortwave, dtype=jnp.float64)
+    qlw_down = jnp.asarray(down_longwave, dtype=jnp.float64)
+    precip = jnp.asarray(precipitation, dtype=jnp.float64)
+    snow = jnp.asarray(snow, dtype=jnp.float64)
+
+    theta_air, _ = nemo_ncar_potential_air_temperature(tair, qair, slp)
+    skin_k = nemo_source_round(sst + c.T_freeze)
+    sea_theta = nemo_ncar_theta_exner(skin_k, slp)
+    wind2 = nemo_source_round(
+        nemo_source_round(u * u) + nemo_source_round(v * v))
+    wind = nemo_source_round(jnp.sqrt(wind2))
+    q_surface = (
+        nemo_ncar_seawater_q_sat(skin_k, slp)
+        if surface_humidity is None
+        else jnp.asarray(surface_humidity, dtype=jnp.float64)
+    )
+    cd, ch, ce, theta_zu, q_zu, bulk_wind = nemo_ncar_transfer_coefficients(
+        sea_theta, theta_air, q_surface, qair, wind, iterations=iterations)
+
+    p_height, absolute_zu = nemo_ncar_pressure_at_height(
+        q_zu, slp, c.ncar_measurement_height_nemo,
+        potential_temperature=theta_zu,
+    )
+    # ``pres_temp`` is an elemental FUNCTION call in sbcblk.F90:913-914.
+    # Re-materialise its two returned operands at that call boundary before
+    # the independent ``rho_air`` statement is inlined into the same XLA graph.
+    p_height = nemo_source_round(p_height)
+    absolute_zu = nemo_source_round(absolute_zu)
+    q_zu = nemo_source_round(q_zu)
+    rho_air = (
+        nemo_ncar_rho_air(absolute_zu, q_zu, p_height)
+        if air_density is None
+        else jnp.asarray(air_density, dtype=jnp.float64)
+    )
+    u_rho = nemo_source_round(bulk_wind * jnp.maximum(rho_air, 1.0))
+    stress = nemo_source_round(nemo_source_round(u_rho * cd) * wind)
+    evap_signed = nemo_source_round(
+        nemo_source_round(u_rho * ce) * nemo_source_round(q_zu - q_surface))
+    cp_air = nemo_source_round(
+        c.c_p_dry_air_nemo + nemo_source_round(c.c_p_vapor_nemo * q_zu))
+    sensible = nemo_source_round(
+        nemo_source_round(
+            nemo_source_round(u_rho * ch)
+            * nemo_source_round(theta_zu - sea_theta)) * cp_air)
+    latent_heat = nemo_source_round(
+        nemo_source_round(
+            c.ncar_latent_heat_intercept_nemo
+            - nemo_source_round(
+                c.ncar_latent_heat_slope_nemo
+                * nemo_source_round(sea_theta - c.T_freeze)))
+        * c.ncar_latent_heat_scale_nemo)
+    latent = nemo_source_round(latent_heat * evap_signed)
+    evaporation = nemo_source_round(-evap_signed)
+    stress_scale = nemo_source_round(stress / wind)
+    utau = nemo_source_round(stress_scale * u)
+    vtau = nemo_source_round(stress_scale * v)
+
+    qsr = nemo_source_round(
+        nemo_source_round(1.0 - c.albedo_ocean_nemo) * qsw_down)
+    skin2 = nemo_source_round(skin_k * skin_k)
+    qlw = nemo_source_round(
+        c.emissivity_seawater_lw * nemo_source_round(
+            qlw_down - nemo_source_round(
+                nemo_source_round(c.sigma_sb_nemo * skin2) * skin2)))
+    rain_heat = nemo_source_round(
+        nemo_source_round(theta_air - c.T_freeze) * c.c_p_seawater)
+    snow_heat = nemo_source_round(
+        nemo_source_round(jnp.minimum(theta_air, c.T_freeze) - c.T_freeze)
+        * c.c_p_ice_nemo)
+    skin_c = nemo_source_round(skin_k - c.T_freeze)
+    sea_heat = nemo_source_round(skin_c * c.c_p_seawater)
+    emp = nemo_source_round(evaporation - precipitation)
+    # sbcblk.F90:1045-1049 is one continued, left-associated statement.  Keep
+    # its accumulator order literal; XLA otherwise balances this seven-term
+    # reduction and moves hundreds of O1 cells by one or two ulps.
+    snow_latent = nemo_source_round(snow * c.L_fus_nemo)
+    evaporation_heat = nemo_source_round(evaporation * sea_heat)
+    rain_heat_flux = nemo_source_round(
+        nemo_source_round(precipitation - snow) * rain_heat)
+    snow_heat_flux = nemo_source_round(snow * snow_heat)
+    qns_0 = nemo_source_round(qlw + sensible)
+    qns_1 = nemo_source_round(qns_0 + latent)
+    qns_2 = nemo_source_round(qns_1 - snow_latent)
+    qns_3 = nemo_source_round(qns_2 - evaporation_heat)
+    qns_4 = nemo_source_round(qns_3 + rain_heat_flux)
+    qns = nemo_source_round(qns_4 + snow_heat_flux)
+    zero = jnp.zeros_like(sst)
+    return {
+        # Operand-level audit outputs retain the NEMO elemental-function call
+        # boundaries in the production JIT and let the O1 gate name the first
+        # differing statement without a second implementation.
+        "_p_height": p_height,
+        "_absolute_zu": absolute_zu,
+        "_rho_air": rho_air,
+        "_u_rho": u_rho,
+        "_cd": cd,
+        "_ch": ch,
+        "_ce": ce,
+        "_qlw": qlw,
+        "_rain_heat": rain_heat,
+        "_snow_heat": snow_heat,
+        "_sea_heat": sea_heat,
+        "_snow_latent": snow_latent,
+        "_evaporation_heat": evaporation_heat,
+        "_rain_heat_flux": rain_heat_flux,
+        "_snow_heat_flux": snow_heat_flux,
+        "_qns_0": qns_0,
+        "_qns_1": qns_1,
+        "_qns_2": qns_2,
+        "_qns_3": qns_3,
+        "_qns_4": qns_4,
+        "theta_air": theta_air,
+        "q_air": qair,
+        "precip": precip,
+        "sst": sst,
+        "ssu": zero,
+        "ssv": zero,
+        "tsk": skin_c,
+        "ssq": q_surface,
+        "sensible": sensible,
+        "latent": latent,
+        "evap": evaporation,
+        "qsr": qsr,
+        "qns": qns,
+        "emp": emp,
+        "utau": utau,
+        "vtau": vtau,
+        "taum": stress,
+        "wndm": wind,
+    }
 
 
 def simple_bulk_fluxes(
