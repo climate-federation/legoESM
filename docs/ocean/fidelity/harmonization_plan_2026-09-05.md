@@ -87,3 +87,11 @@ aux3d linkage and the minimum-level policy, not just counts.
   FESOM on NEMO's ladder reproduces the tripole/MPAS early cold-tongue warm transient => the
   "FESOM Pacific advantage" was the coarse 47-level ladder, not viscosity (P1 premise weakened:
   the viscosity ladder is now a faithfulness question, not a cross-grid difference).
+- 05:30 P1 MEASURED PREMISE (job 9648737, day 30, unified tripole vs GATEWAY rec 5): Z20 gap
+  -5 m (tilt 102% of NEMO) = thermocline depth matched; undercurrent core HALF of NEMO's
+  (200E 0.289 vs 0.496; 220E 0.183 vs 0.546; 240E 0.201 vs 0.260 m/s); 10 m surface flow
+  matched (240E -0.80 vs -0.79). Real-freshwater arm identical => not a freshwater effect.
+  Unified card runs a flat 1e4 background (10x NEMO's equatorial 1000). RUNG 1 launched
+  (job 9648801, _trp_visc_r1_d30.sbatch, pin 152927318): ORCA1 file SHAPE at unchanged 1e4
+  mid-latitude background (~500 at 0N), Smag ramp/dt untouched, 30 d, pre-registered in the
+  card header (EUC 200E >= 0.40 confirm / < 0.32 refute; nino3 <= +1.05 vs ctl +1.30).
