@@ -119,15 +119,17 @@ def validate(deck_root: Path, oracle_root: Path, *, plant: bool) -> dict:
 
     rows = []
     for name in FIELDS:
-        trial = candidate[name].copy()
         mask = masks[name[2]]
+        # The control starts from an exact oracle/oracle arm, so its nonzero
+        # exit cannot be borrowed from the measured production debt below.
+        trial = (oracle[name] if plant else candidate[name]).copy()
         if plant and name == "ffu_nw":
             index = tuple(np.argwhere(mask)[0])
             trial[index] = np.nextafter(trial[index], np.inf)
         rows.append({"field": name, **score(trial, oracle[name], mask)})
     if plant:
         planted = rows[0]
-        require(planted["unequal"] > 0, "binding EEN plant did not fire")
+        require(planted["unequal"] == 1, "binding EEN plant did not fire once")
         raise GateError(
             "planted EEN coefficient cell rejected through scorer "
             f"({planted['unequal']}/{planted['count']})"
