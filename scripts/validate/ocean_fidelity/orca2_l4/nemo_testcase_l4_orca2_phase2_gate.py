@@ -159,8 +159,10 @@ def run_gate(
         "gphit_rad": (np.asarray(grid.lat_T), np.asarray(jnp.deg2rad(raw["gphit"]))),
         "e1t": (np.asarray(grid.dx_T), raw["e1t"]),
         "e2t": (np.asarray(grid.dy_T), raw["e2t"]),
-        "e1u": (np.asarray(grid.dx_u)[:, :180], raw["e1u"]),
-        "e2u": (np.asarray(grid.dy_u)[:, :180], raw["e2u"]),
+        # NEMO U(i) is the east face of T(i); legoESM's redundant U[0] is
+        # its periodic west image, so the complete native array maps to 1:.
+        "e1u": (np.asarray(grid.dx_u)[:, 1:], raw["e1u"]),
+        "e2u": (np.asarray(grid.dy_u)[:, 1:], raw["e2u"]),
         "e1v": (np.asarray(grid.dx_v)[1:], raw["e1v"]),
         "e2v": (np.asarray(grid.dy_v)[1:], raw["e2v"]),
         "ff_t": (np.asarray(grid.f_T), raw["ff_t"]),

@@ -590,6 +590,63 @@ class TestCreateTripoleGridFoldDefault:
                 geom = create_tripole_grid(path, fold_convention="n_lon-1-i")
         assert geom is not None
 
+    def test_native_u_fields_start_at_redundant_east_face(self):
+        """NEMO U(i) is T(i)'s east face; legoESM U[0] is the west image."""
+        from legoesm.grids.tripole import (
+            _compute_rotation_angles,
+            create_tripole_grid,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "mesh.nc")
+            n_lat, n_lon = 8, 16
+            _write_synthetic_mesh_mask(
+                path, n_lat=n_lat, n_lon=n_lon, curved_fold=True)
+            with netcdf4.Dataset(path, "a") as ds:
+                columns = np.arange(n_lon, dtype=np.float64)[None, :]
+                rows = np.arange(n_lat, dtype=np.float64)[:, None]
+                ds["e1u"][:] = 1000.0 + 10.0 * rows + columns
+                ds["e2u"][:] = 2000.0 + 10.0 * rows + columns
+                ds["e1v"][:] = 3000.0 + 10.0 * rows + columns
+                ds["e2v"][:] = 4000.0 + 10.0 * rows + columns
+                glamu = np.asarray(ds["glamu"][:])
+                gphiu = np.asarray(ds["gphiu"][:])
+                glamv = np.asarray(ds["glamv"][:])
+                gphiv = np.asarray(ds["gphiv"][:])
+                e1u = np.asarray(ds["e1u"][:])
+                e2u = np.asarray(ds["e2u"][:])
+                e1v = np.asarray(ds["e1v"][:])
+                e2v = np.asarray(ds["e2v"][:])
+                gphit = np.asarray(ds["gphit"][:])
+
+            grid = create_tripole_grid(
+                path, dtype=jnp.float64,
+                fold_convention="(n_lon-i)%n_lon")
+
+        np.testing.assert_array_equal(np.asarray(grid.dx_u)[:, 1:], e1u)
+        np.testing.assert_array_equal(np.asarray(grid.dy_u)[:, 1:], e2u)
+        np.testing.assert_array_equal(np.asarray(grid.dx_u)[:, 0], e1u[:, -1])
+        np.testing.assert_array_equal(np.asarray(grid.dy_u)[:, 0], e2u[:, -1])
+        np.testing.assert_array_equal(np.asarray(grid.dx_u)[:, -1], e1u[:, -1])
+        np.testing.assert_array_equal(np.asarray(grid.dy_u)[:, -1], e2u[:, -1])
+
+        # V metrics and generic V-face Coriolis retain their pre-change map.
+        np.testing.assert_array_equal(np.asarray(grid.dx_v)[1:], e1v)
+        np.testing.assert_array_equal(np.asarray(grid.dy_v)[1:], e2v)
+        f_t = grid.f_T
+        expected_f_v = jnp.concatenate(
+            [f_t[0:1], 0.5 * (f_t[:-1] + f_t[1:]), f_t[-1:]], axis=0)
+        np.testing.assert_array_equal(np.asarray(grid.f_v),
+                                      np.asarray(expected_f_v))
+
+        native_cos_u, native_sin_u, _, _ = _compute_rotation_angles(
+            jnp.asarray(glamu), jnp.asarray(gphiu),
+            jnp.asarray(glamv), jnp.asarray(gphiv), grid.fold.cap_j)
+        np.testing.assert_array_equal(
+            np.asarray(grid.cos_alpha_u)[:, 1:], np.asarray(native_cos_u))
+        np.testing.assert_array_equal(
+            np.asarray(grid.sin_alpha_u)[:, 1:], np.asarray(native_sin_u))
+
 
 class TestPadCoversEveryGeometryField:
     """The pad must grow EVERY array field per its stagger — the tripwire.

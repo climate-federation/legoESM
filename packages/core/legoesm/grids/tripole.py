@@ -405,15 +405,14 @@ def create_tripole_grid(
     area_T = dx_T * dy_T
     total_area = jnp.sum(area_T)
 
-    # u-point metrics.  NEMO e1u/e2u have shape (n_lat, n_lon) but on
-    # a C-grid u-points have shape (n_lat, n_lon+1).  For NEMO, the
-    # u-point at index i is between T-cell (i-1) and T-cell i in the
-    # zonal direction, and e1u[j, i] is the zonal spacing there.
-    # The wrap column (i = n_lon) equals i = 0 by periodicity.
+    # u-point metrics.  NEMO's native U(i) is the east face of T(i), while
+    # legoESM's redundant U index 0 is the west face of T(0).  Therefore the
+    # complete native array belongs at indices 1:, and index 0 is the periodic
+    # image of NEMO's last U face.  The two redundant endpoints are equal.
     e1u = raw["e1u"].astype(dtype)
     e2u = raw["e2u"].astype(dtype)
-    dx_u = jnp.concatenate([e1u, e1u[:, 0:1]], axis=1)  # (n_lat, n_lon+1)
-    dy_u = jnp.concatenate([e2u, e2u[:, 0:1]], axis=1)
+    dx_u = jnp.concatenate([e1u[:, -1:], e1u], axis=1)  # (n_lat, n_lon+1)
+    dy_u = jnp.concatenate([e2u[:, -1:], e2u], axis=1)
 
     # v-point metrics.  NEMO v-points have shape (n_lat, n_lon); the
     # extra row at the fold boundary needs special handling.
@@ -507,11 +506,13 @@ def create_tripole_grid(
     sin_alpha_v = sin_alpha_v.astype(dtype)
 
     # Pad rotation angles for staggered shapes
+    # Native U-point orientation follows the same east-face staggering as the
+    # U metrics above; preserve one layout for every native U operand.
     cos_alpha_u = jnp.concatenate(
-        [cos_alpha_u, cos_alpha_u[:, 0:1]], axis=1
+        [cos_alpha_u[:, -1:], cos_alpha_u], axis=1
     )
     sin_alpha_u = jnp.concatenate(
-        [sin_alpha_u, sin_alpha_u[:, 0:1]], axis=1
+        [sin_alpha_u[:, -1:], sin_alpha_u], axis=1
     )
     cos_alpha_v = jnp.concatenate(
         [cos_alpha_v[0:1], cos_alpha_v], axis=0

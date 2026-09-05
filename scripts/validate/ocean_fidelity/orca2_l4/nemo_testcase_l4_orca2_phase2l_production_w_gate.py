@@ -40,6 +40,7 @@ NLEV = NZ - 1
 WZV_RECORD = "oracle_stage1_wzv_operands_kt00000001.bin"
 STAGE3_RECORD = "oracle_stage_kt00000001_s3.bin"
 BT_RECORD = "oracle_bt_frames_kt00000001.bin"
+TRANSPORT_RECORD = "oracle_rkstage1_transport_operands_kt00000001.bin"
 
 
 class GateError(RuntimeError):
@@ -129,6 +130,22 @@ def read_external_transports(path: Path) -> tuple[np.ndarray, np.ndarray]:
     return _xy(values[2 * n2:3 * n2]), _xy(values[3 * n2:])
 
 
+def read_transport_metrics(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    """Read the two native face metrics from the frozen transport schema."""
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii").rstrip()
+        header = struct.unpack("=8i", handle.read(32))
+        values = np.fromfile(handle, np.float64)
+    require(magic == "NEMO_L2_TRPOP_2", f"bad transport magic {magic!r}")
+    require(header == (2, 1, 1, 1, NX, NY, NZ, 64), "bad transport header")
+    n2, n3 = NX * NY, NX * NY * NZ
+    require(values.size == 10 * n2 + 8 * n3, "bad transport payload")
+    e2u = _xy(values[:n2])
+    e1v_offset = 2 * n2 + 4 * n3
+    e1v = _xy(values[e1v_offset:e1v_offset + n2])
+    return e2u, e1v
+
+
 def score(candidate: np.ndarray, oracle: np.ndarray, mask: np.ndarray) -> dict[str, object]:
     actual = np.asarray(candidate, np.float64)[mask]
     expected = np.asarray(oracle, np.float64)[mask]
@@ -156,12 +173,14 @@ def validate(deck_root: Path, oracle_root: Path, *, plant: bool) -> dict[str, ob
     require(not jax.config.jax_disable_jit, "production JIT disabled")
     require(get_policy() == policy, "fp64 + scalar-libm policy not active")
 
-    paths = {name: oracle_root / name for name in (WZV_RECORD, STAGE3_RECORD, BT_RECORD)}
+    paths = {name: oracle_root / name for name in (
+        WZV_RECORD, STAGE3_RECORD, BT_RECORD, TRANSPORT_RECORD)}
     for path in paths.values():
         require(path.is_file(), f"missing {path}")
     wzv = read_wzv(paths[WZV_RECORD])
     final_ssh = read_final_ssh(paths[STAGE3_RECORD])
     un_adv, vn_adv = read_external_transports(paths[BT_RECORD])
+    e2u_oracle, e1v_oracle = read_transport_metrics(paths[TRANSPORT_RECORD])
 
     card = build_orca2_zps_card(deck_root)
     validate_nemo_testcase_card(card)
@@ -170,6 +189,14 @@ def validate(deck_root: Path, oracle_root: Path, *, plant: bool) -> dict[str, ob
             "ORCA2 card does not select vector momentum")
     require(cfg.ke_gradient_scheme == "c2",
             "ORCA2 card does not select nn_dynkeg=0/C2")
+    metric_rows = {
+        "e2u": score(
+            np.asarray(card.recipe.grid.dy_u)[:, 1:OWNED_NX + 1],
+            e2u_oracle, e2u_oracle != 0.0),
+        "e1v": score(
+            np.asarray(card.recipe.grid.dx_v)[1:OWNED_NY + 1, :OWNED_NX],
+            e1v_oracle, e1v_oracle != 0.0),
+    }
 
     # The card's selected EOS-80 TKE/EVD entry is itself a downstream
     # UNMEASURED shared boundary: the shared bn2 closure currently refuses
@@ -307,6 +334,7 @@ def validate(deck_root: Path, oracle_root: Path, *, plant: bool) -> dict[str, ob
         "result": row["status"],
         "row": row,
         "production_transport_rows": transport_rows,
+        "card_metric_rows": metric_rows,
         "clock_only_full_endpoint_row": clock_row,
         "owner": (
             "CONFIRMED_PRODUCTION_WZV_AT_BAR"
