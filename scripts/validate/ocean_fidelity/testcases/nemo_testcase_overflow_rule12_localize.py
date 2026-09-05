@@ -190,6 +190,16 @@ def localize(before_path: Path, after_path: Path, *, plant: bool) -> dict:
         },
         "retracted_finding": {
             "classification": "REFUTED_AND_ILL_POSED",
+            # Rule 11: the dead LABEL is kept next to what killed it, not
+            # deleted.  Round 25 removed it outright, which is how a retracted
+            # attribution gets rediscovered as if it were new.
+            "struck_label": "CONFIRMED_STRUCTURAL_BOUNDARY_NUMERIC_VALUE_UNMEASURED",
+            "struck_label_status": (
+                "STRUCK 2026-09-05 (round 25, restored struck-in-place in "
+                "round 26); it named stprk3_stg.F90:257-274 zub="
+                "un_adv*r1_hu(Kmm)-uu_b(Kmm) as the boundary for the stage-2 "
+                "and kt1 rows, which the source order below makes ill-posed"
+            ),
             "dead_claim": (
                 "persistent uu_b/vv_b(Kbb) was the first unavailable operand "
                 "for the stage-2 and kt1 rows"

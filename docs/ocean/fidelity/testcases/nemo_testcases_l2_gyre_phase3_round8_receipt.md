@@ -3741,7 +3741,7 @@ absolute maximum; parentheses are `unequal / n`.
 
 | stage-2 boundary | U max / unequal | V max / unequal | verdict |
 |---|---:|---:|---|
-| round-24 completed Kaa (before the fix) | `2.1986806906376666e-15`, `17400 / 17400` | `2.2380914396075147e-15`, `17100 / 17100` | DEBT |
+| round-24 completed Kaa (before the fix) | `2.1986806906376666e-15`, `17400 / 17400` | `2.2380914396075147e-15`, `17077 / 17100` | DEBT |
 | HPG given NEMO inputs (`oracle_input_hpg`) | `0.0`, `0 / 17400` | `0.0`, `0 / 17100` | bit-exact |
 | cumulative through vorticity | `9.926167350636332e-24`, `8699 / 17400` | `9.926167350636332e-24`, `8360 / 17100` | AT-BAR |
 | cumulative through advection | `0.0`, `0 / 17400` | `0.0`, `0 / 17100` | bit-exact |
@@ -4034,3 +4034,302 @@ Every artifact hash, oracle root, commit and test line quoted in this section
 is pinned in `manifests/nemo_testcase_l2_gyre_round25.json`; the reports
 themselves live under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round25/verify/`.
+
+## Round 26 — Rule-12 eligibility on the other cards, and three retired claims
+
+Round 26 starts from `991f9f95047d` on a clean tree and runs in the same
+regime: CPU production JIT, fp64/x64, `transcendentals="libm"`, oracle V2.
+The preregistration
+(`manifests/nemo_testcase_l2_gyre_round26_preregister.json`, committed at
+`2fcb991fa373`) precedes every measurement below except three that were taken
+before it was written; those three are named as such inside it and carry no
+prediction.  No NEMO executable was run from the sandbox.  `/tmp/codex-c1d-r24`
+and `/tmp/codex-orca2-r24` remain flagged and unread.
+
+Oracle roots are named explicitly for every figure: GYRE
+`round19_oracle_v2_external`, LOCK `nemo-testcases-l1/phase3/lock_kt1_10`,
+OVERFLOW `nemo-testcases-l1/phase3/overflow_kt1_10`, and the user-run LOCK
+external-mode acquisition
+`nemo-testcases-l2/phase3/round25_lock_external_oracle`.
+
+### Rule-11 record — the round-25 admission story is REFUTED
+
+**Dead claim.**  Round 25 reported that the three
+`oracle_transport_kt00000001_s{1,2,3}.bin` records in the LOCK acquisition
+"differ ONLY in the unconsumed pre-`tra_adv_trp` `zFw` workspace slot".
+
+**What killed it.**  A byte-range decomposition against `lock_kt1_10` puts
+almost none of the difference in `zFw`.  Of the 266 differing bytes in the
+stage-1 record, 266 are in `zFv`; the stage-2 and stage-3 records add 6 bytes
+in `zFw`.  Within `zFv`, 264 of the 265 differing elements are signed-zero bit
+flips that compare numerically equal, and the 265th is an uninitialised
+subnormal `2.7594e-320` where the baseline holds `0.0`.  The two `zFw`
+elements are likewise uninitialised subnormals near `6.9e-310`.
+
+**What replaces it, and why the records are still admitted.**  Every differing
+element lies in the HALO.  The admission gate reports
+`changed_in_parser_projection: 0` for all five changed fields across the three
+records: the owned `[2:-2, 2:-2, :]` interior that every reader consumes is
+BIT-identical, including `zFv`, which the gate marks `slot_consumed: True`.
+The admission is therefore stronger than the round-25 story claimed, and it
+rests on a different fact.
+
+### The LOCK external-mode acquisition is ADMITTED
+
+```text
+ROUND21_WRITE_ONLY_ADMISSION PASS: exact=24/27 changed=3 restart_equal=True plant=False
+ROUND21_WRITE_ONLY_ADMISSION FAIL: exact=24/27 changed=3 restart_equal=True plant=True
+```
+
+24 of the 27 pre-existing records and the final restart are byte-identical to
+`lock_kt1_10`; the three changed records are admitted by consumed-field
+identity above; the four new
+`oracle_overflow_bt_substeps_kt0000000{1,2,3,4}_call1.bin` are the requested
+addition, keeping the historical OVERFLOW filename on purpose.  The
+`--plant-consumed` control exits `1` on LOCK and on GYRE.
+
+| record | raw differing bytes | field | changed elements | in parser projection | consumed |
+|---|---:|---|---:|---:|---|
+| `oracle_transport_kt00000001_s1.bin` | 266 | `zFv` | 265 | 0 | yes |
+| `oracle_transport_kt00000001_s2.bin` | 272 | `zFv` | 265 | 0 | yes |
+| `oracle_transport_kt00000001_s2.bin` |  | `zFw` | 2 | 0 | no |
+| `oracle_transport_kt00000001_s3.bin` | 272 | `zFv` | 265 | 0 | yes |
+| `oracle_transport_kt00000001_s3.bin` |  | `zFw` | 2 | 0 | no |
+
+The consumed-field admission RULE is card-independent, so the round-21 GYRE
+probe was generalised (`--dims/--restart/--allowed-new/--writer`) rather than
+copied.  GYRE's default run is unchanged at `PASS exact=39/49`.
+
+**Its provenance check was vacuous and is now real.**  `run.sh` asserted that
+LOCK and OVERFLOW compile the same shipped `dynspg_ts` body by `cmp`-ing two
+`WORK/dynspg_ts.F90` entries.  Both are symlinks to
+`src/OCE/DYN/dynspg_ts.F90`, so it compared a file with itself.  The premise
+happens to be true, verified out of band on the already-run acquisition:
+neither `LOCK_EXCHANGE_OMIP_L1_P3` nor `OVERFLOW_OMIP_L1_P3` overrides
+`dynspg_ts.F90` in `MY_SRC`, and the transplanted instrument
+(`tests/OVERFLOW_OMIP_L1_BTWALK4/MY_SRC/dynspg_ts.F90`) is a PURE ADDITION
+over the shipped body — 53 added lines, **0** deleted or changed.  The script
+now checks exactly those three things and refuses otherwise.
+
+The substep reader also stopped being OVERFLOW-only: `--case`/`--expected`
+replace the hardcoded `CASE="OVERFLOW-zps"` and `EXPECTED=(206,7,4,19,64)`.
+LOCK's own record header, read off the file, is `(134, 7, 1, 19, 64)` — ONE
+barotropic substep against OVERFLOW's four.
+
+### Rule-12 eligibility, discharged on the two lane-1 tanks
+
+Round 25 landed two source associations inside NEMO's hydrostatic pressure
+gradient and showed the changed operator bit-exact given NEMO's inputs on GYRE
+only.  Rule 12 asks for that row on every card that executes it, and the
+testcase recipe pins `pgf_scheme="nemo_sco"` on all of them
+(`nemo_testcase_recipe.py:92,274,914`).
+
+The lane-1 tanks have no HPG-literal dump and do not need one.  NEMO
+accumulates `dyn_hpg`, `dyn_vor` and `dyn_adv` into a zeroed `puu(Krhs)`
+(`stprk3_stg.F90:309-334`); `dyn_vor` and `dyn_adv` are bilinear in the
+velocity; both tanks start from rest.  So the dumped `oracle_rhs_kt00000001`
+frame IS the hydrostatic pressure gradient alone.  All three preconditions are
+asserted rather than assumed.
+
+| card | equal inputs (T/S/u/ssh unequal) | NEMO entry rest check | changed functions called (`gdept_z0` / HPG interface) | U row | verdict |
+|---|---|---|---|---|---|
+| GYRE-zco (round 25) | `oracle_input_hpg` route | n/a | n/a | `0.0`, `0 / 17400` | bit-exact |
+| LOCK_EXCHANGE-zco | `0/2560`, `0/2560`, `0/2540`, `0/128` | max abs u and v both `0.0` | 1 / 2 | `0.0`, `0 / 2540` | **bit-exact** |
+| OVERFLOW-zps | `0/17000`, `0/17000`, `0/16900`, `0/200` | max abs u and v both `0.0` | 1 / 2 | `0.0`, `0 / 16900` | **bit-exact** |
+
+The preregistered prediction is **CONFIRMED** on both cards.  The planted
+control exits `1` on both.  The V component is WAIVED in writing with its
+measured count: both tanks are single-wet-row channels with **0** wet V faces,
+so a V row would compare masked zeros with masked zeros.
+
+Rule-12 eligibility for the round-25 change is therefore discharged on GYRE,
+LOCK and OVERFLOW.  ORCA2 is **UNMEASURED**, for the reason below.
+
+### ORCA2 as the fourth card — BLOCKED, in both directions
+
+ORCA2 could not be scored against this tip and the failure is a branch
+divergence, not a numerical one.
+
+| direction | blocker |
+|---|---|
+| ORCA2 gates against the round-25 model | `ImportError` on `build_orca2_zps_card`, `validate_nemo_testcase_card_for_execution`, `nemo_qco_wzv_recurrence`, `nemo_transport_wzv_divergence_level` — none exist at `991f9f95047d` |
+| ORCA2 gates on their own branch | that tip still carries the PRE-fix fused `gdept_z0` (`ocean_pe_latlon_cgrid.py:2005-2006` there), i.e. byte-for-byte round-25 ablation arm A; `d5a7f8169507` is not its ancestor |
+
+The two branches diverged at `03c6e8d96ff7` with 49 commits on this side and
+170 on the ORCA2 side, 263 changed lines in `ocean_pe_latlon_cgrid.py` and 550
+in `nemo_testcase_recipe.py`.  Closing this is a branch-integration decision,
+which is an OPEN QUESTION and not a choice made here.  The ORCA2 oracle data
+itself is intact (101 `.bin` records, WZV record present).  The ORCA2 HPG gate
+was deliberately NOT run: it calls `nemo_hpg_sco_literal_cgrid` on dumped
+operands rather than the model's own HPG path, so it is blind to exactly the
+interface round 25 changed.  Evidence
+`round26/orca2/orca2_fourth_card_blocked_round26.json`, SHA-256
+`35e80a445bed1f1c0cf8bfe4459acf261b517d05c044f2eac9a74a1dc876a3de`.
+
+### The stage-operand guard had a hole, and it is closed
+
+Round 25's fifth guard walked the AST of the routine that runs and required
+each `barotropic_velocity=` operand to be a selector call, unwrapping the
+`None if <legacy arm> else <selector>` conditional through `.orelse` ONLY.  A
+bypass placed in the BODY branch is live whenever the
+`legacy_reduced_stage_transport_mean_arm` hook is set, and the guard never
+looked at it.
+
+Planted exactly that at the stage-1 call site —
+`(u0, v0) if _legacy_reduced_stage_transport_mean_arm else
+_nemo_ws_stage_barotropic_velocity(1, ...)`:
+
+| guard | result on the planted `.body` bypass |
+|---|---|
+| round-25 form (`.orelse` only), run verbatim over the planted source | **PASSES** — the hole was real |
+| round-26 form | fails: `the guarded arm must disable the operand, not supply a second one: Tuple(elts=[Name(id='u0'...` |
+
+The plant was reverted with `git checkout --` and `git status --porcelain`
+confirmed empty.
+
+### The FMA fact, and one struck number restored
+
+Round 25 struck two throwaway-probe numbers.  One of them had a committed
+probe all along and is **restored**: the `0x404E5DBFCAF8A971` /
+`0x404E5DBFCAF8A972` pair is pinned by
+`test_nemo_qco_gdept_z0_oracle_bit_pattern`, landed in `d5a7f8169507`, which
+`git merge-base --is-ancestor` confirms is an ancestor of this tip.  It passes
+(`1 passed in 0.65s`).  The other, the "4,579 differing cells" census, has no
+probe and **stays struck** — and the code comment that still quoted it is
+rewritten.
+
+Why the two-statement association is the FAITHFUL one and not merely a
+different one is now cited at `_nemo_qco_gdept_z0` itself:
+
+| fact | evidence |
+|---|---|
+| the oracle's build enables no FMA | `arch/arch-conda-scalarmath.fcm` contains no `-march`, `-mfma`, `-mavx2` or `-ffast-math` (grep count 0) |
+| the oracle's binary contains none | `objdump -d` of the scalar-math GYRE `nemo.exe` (SHA-256 `207e701f740b2fc4ee5f234a22508d774c2f517646e8b9d2f1e0a2a2d58d7ea9`) finds **0** `vfmadd`/`vfmsub`/`vfnmadd`/`vfnmsub` in 1868261 disassembled instructions |
+| XLA does contract it | the committed bit-pattern probe's two outcomes differ in the last bit |
+
+### Rule-12 compensating-error register, with boundary and owner
+
+The round-24 comparison row for the completed stage-2 Kaa carried a
+mis-transcribed V unequal count.  Corrected in place from `17100 / 17100` to
+**`17077 / 17100`**, read off `round25/verify/stage2/ablationA_corrected.json`
+(`n_unequal: 17077`); the maximum `2.2380914396075147e-15` is unchanged.
+
+The 62 moved GYRE rows are re-emitted below with the two columns round 23 had.
+56 exceed the two-row-scale-ULP threshold and are the register; the other 6
+moved by less and are named but not registered.  Every registered row shares
+one boundary and one owner, because one ablation established both:
+
+- **B1** — the stage-2 `dyn_hpg` insertion into `Krhs`
+  (`stprk3_stg.F90:324`), whose QCO depth operand is
+  `domzgr_substitute.h90:139,145`.
+- **O1** — **CONFIRMED**.  Round-25 ablation A (fused `gdept_z0`, one
+  variable, file restored) reproduces round-24's DEBT to the digit on both
+  components and its report hashes to the round-24 manifest's `gyre_stage2`
+  artifact.
+
+| row | move ULP | worse ULP | cells >2 ULP / n | boundary | owner |
+|---|---:|---:|---:|---|---|
+| `GYRE-zco.kt10.after.uu_b` | 51.05078125 | 51.05078125 | 305 / 580 | B1 | O1 |
+| `GYRE-zco.kt10.after.vv_b` | 51.37939453 | 51.37939453 | 274 / 570 | B1 | O1 |
+| `GYRE-zco.kt10.before.S` | 32631 | 25813 | 4164 / 18000 | B1 | O1 |
+| `GYRE-zco.kt10.before.T` | 42227 | 42227 | 7242 / 18000 | B1 | O1 |
+| `GYRE-zco.kt10.before.ssh` | 15503.85156 | 15503.85156 | 292 / 600 | B1 | O1 |
+| `GYRE-zco.kt10.before.u` | 67625.80469 | 67625.80469 | 8688 / 17400 | B1 | O1 |
+| `GYRE-zco.kt10.before.v` | 185097.1641 | 185097.1641 | 8738 / 17100 | B1 | O1 |
+| `GYRE-zco.kt2.after.uu_b` | 0.1646118164 | 0.1646118164 | 0 / 580 | below 2 ULP | not registered |
+| `GYRE-zco.kt2.after.vv_b` | 0.1110839844 | 0.08937835693 | 0 / 570 | below 2 ULP | not registered |
+| `GYRE-zco.kt2.before.S` | 1 | 1 | 0 / 18000 | below 2 ULP | not registered |
+| `GYRE-zco.kt2.before.T` | 2 | 2 | 0 / 18000 | below 2 ULP | not registered |
+| `GYRE-zco.kt2.before.u` | 24.48193359 | 24.48193359 | 1955 / 17400 | B1 | O1 |
+| `GYRE-zco.kt2.before.v` | 26.78320312 | 26.78320312 | 1911 / 17100 | B1 | O1 |
+| `GYRE-zco.kt3.after.uu_b` | 1.295166016 | 1.295166016 | 0 / 580 | below 2 ULP | not registered |
+| `GYRE-zco.kt3.after.vv_b` | 1.135742188 | 1.040527344 | 0 / 570 | below 2 ULP | not registered |
+| `GYRE-zco.kt3.before.S` | 7 | 6 | 20 / 18000 | B1 | O1 |
+| `GYRE-zco.kt3.before.T` | 102 | 99.5 | 533 / 18000 | B1 | O1 |
+| `GYRE-zco.kt3.before.ssh` | 163.9160156 | 59.4765625 | 41 / 600 | B1 | O1 |
+| `GYRE-zco.kt3.before.u` | 946.7714844 | 564.234375 | 3687 / 17400 | B1 | O1 |
+| `GYRE-zco.kt3.before.v` | 551.7788086 | 532.5 | 3827 / 17100 | B1 | O1 |
+| `GYRE-zco.kt4.after.uu_b` | 4.360582352 | 4.360582352 | 30 / 580 | B1 | O1 |
+| `GYRE-zco.kt4.after.vv_b` | 2.551757812 | 2.551757812 | 5 / 570 | B1 | O1 |
+| `GYRE-zco.kt4.before.S` | 6085 | 5820 | 199 / 18000 | B1 | O1 |
+| `GYRE-zco.kt4.before.T` | 7622 | 7291 | 1796 / 18000 | B1 | O1 |
+| `GYRE-zco.kt4.before.ssh` | 771.0390625 | 771.0390625 | 197 / 600 | B1 | O1 |
+| `GYRE-zco.kt4.before.u` | 1109.068359 | 1106.624512 | 6493 / 17400 | B1 | O1 |
+| `GYRE-zco.kt4.before.v` | 1090.886597 | 1090.886597 | 6401 / 17100 | B1 | O1 |
+| `GYRE-zco.kt5.after.uu_b` | 7.946166992 | 7.946166992 | 151 / 580 | B1 | O1 |
+| `GYRE-zco.kt5.after.vv_b` | 7.804199219 | 7.804199219 | 151 / 570 | B1 | O1 |
+| `GYRE-zco.kt5.before.S` | 8493 | 5947 | 806 / 18000 | B1 | O1 |
+| `GYRE-zco.kt5.before.T` | 18347 | 14829 | 4124 / 18000 | B1 | O1 |
+| `GYRE-zco.kt5.before.ssh` | 3065.570312 | 3065.570312 | 289 / 600 | B1 | O1 |
+| `GYRE-zco.kt5.before.u` | 1993.760742 | 1993.760742 | 8351 / 17400 | B1 | O1 |
+| `GYRE-zco.kt5.before.v` | 2090.657104 | 2066.507812 | 8002 / 17100 | B1 | O1 |
+| `GYRE-zco.kt6.after.uu_b` | 14.02636719 | 12.88476562 | 169 / 580 | B1 | O1 |
+| `GYRE-zco.kt6.after.vv_b` | 15.80957031 | 15.80957031 | 246 / 570 | B1 | O1 |
+| `GYRE-zco.kt6.before.S` | 11738 | 11738 | 1683 / 18000 | B1 | O1 |
+| `GYRE-zco.kt6.before.T` | 19816 | 14635 | 5948 / 18000 | B1 | O1 |
+| `GYRE-zco.kt6.before.ssh` | 4380.75 | 4380.75 | 293 / 600 | B1 | O1 |
+| `GYRE-zco.kt6.before.u` | 3004.101562 | 2823.28064 | 8476 / 17400 | B1 | O1 |
+| `GYRE-zco.kt6.before.v` | 3072.5 | 2834.648438 | 8309 / 17100 | B1 | O1 |
+| `GYRE-zco.kt7.after.uu_b` | 22.859375 | 22.859375 | 198 / 580 | B1 | O1 |
+| `GYRE-zco.kt7.after.vv_b` | 22.35986328 | 18.99090576 | 268 / 570 | B1 | O1 |
+| `GYRE-zco.kt7.before.S` | 20364 | 20364 | 2529 / 18000 | B1 | O1 |
+| `GYRE-zco.kt7.before.T` | 25207 | 25207 | 6491 / 18000 | B1 | O1 |
+| `GYRE-zco.kt7.before.ssh` | 6386.53125 | 5995.265625 | 305 / 600 | B1 | O1 |
+| `GYRE-zco.kt7.before.u` | 6209.644531 | 4957.152344 | 8745 / 17400 | B1 | O1 |
+| `GYRE-zco.kt7.before.v` | 10752.48438 | 9629.609375 | 8556 / 17100 | B1 | O1 |
+| `GYRE-zco.kt8.after.uu_b` | 34.52539062 | 34.52539062 | 208 / 580 | B1 | O1 |
+| `GYRE-zco.kt8.after.vv_b` | 31.42382812 | 31.42382812 | 181 / 570 | B1 | O1 |
+| `GYRE-zco.kt8.before.S` | 28922 | 22662 | 3160 / 18000 | B1 | O1 |
+| `GYRE-zco.kt8.before.T` | 34704 | 34704 | 6890 / 18000 | B1 | O1 |
+| `GYRE-zco.kt8.before.ssh` | 11221.5459 | 9706.609375 | 295 / 600 | B1 | O1 |
+| `GYRE-zco.kt8.before.u` | 22170.09375 | 22170.09375 | 8694 / 17400 | B1 | O1 |
+| `GYRE-zco.kt8.before.v` | 71113.0625 | 71113.0625 | 8683 / 17100 | B1 | O1 |
+| `GYRE-zco.kt9.after.uu_b` | 30.40527344 | 30.40527344 | 297 / 580 | B1 | O1 |
+| `GYRE-zco.kt9.after.vv_b` | 30.94140625 | 30.94140625 | 298 / 570 | B1 | O1 |
+| `GYRE-zco.kt9.before.S` | 28565 | 28565 | 3801 / 18000 | B1 | O1 |
+| `GYRE-zco.kt9.before.T` | 38204 | 38204 | 7115 / 18000 | B1 | O1 |
+| `GYRE-zco.kt9.before.ssh` | 15552.16895 | 10692.75781 | 293 / 600 | B1 | O1 |
+| `GYRE-zco.kt9.before.u` | 16985.42969 | 12630.5 | 8824 / 17400 | B1 | O1 |
+| `GYRE-zco.kt9.before.v` | 97644.15625 | 97644.15625 | 8671 / 17100 | B1 | O1 |
+
+Legend: **B1** and **O1** as above; rows marked "below 2 ULP" moved but do not
+enter the register.
+
+**Named footgun on the `nemo_sco` arm.**  `_bc_ke_and_pressure_gradients`
+returns `dp_dx`/`dp_dy` as literal ZEROS when `pgf_scheme="nemo_sco"`
+(`ocean_pe_latlon_cgrid.py:2045-2046`); the acceleration is carried in
+`direct_hpg_u/v` instead, because `dynhpg.F90:359,383` writes acceleration
+straight into `Krhs` and leaving a synthetic `-rho0*hpg` in the graph lets XLA
+rediscover the algebraic pressure interface and lose the source bit.  Any
+probe or consumer that reads `dp_dx`/`dp_dy` on this arm reads zeros, not a
+pressure gradient.  Registered here so the next round does not measure them.
+
+### Decision 15A — the native demo GYRE card's tracer integrator
+
+NEMO's `key_RK3` advances momentum AND tracers inside ONE stage routine:
+`stp_RK3_stg` opens at `stprk3_stg.F90:65`, calls `dyn_hpg`/`dyn_vor`/
+`dyn_adv`/`dyn_zdf` at `:315-430` and `tra_adv`/`tra_sbc_RK3`/`tra_ldf`/
+`tra_zdf` at `:463-599`, and closes at `:655`.  The tracer integrator is
+therefore not a free choice beside `momentum_time_integrator="rk3_ws"`; it is
+the same program, which is what the coupled-integrator guard added in
+`36d4a2f72ffe` says.  Per user decision 15A the card now selects `rk3_ws` for
+both.
+
+The change advances the failure one guard deeper rather than clearing it, and
+that is the honest result:
+
+| guard | before decision 15A | after |
+|---|---|---|
+| coupled momentum/tracer integrator | RAISES | passes |
+| complete rk3_ws momentum program | not reached | RAISES |
+
+The card resolves `vertical_momentum_scheme="upwind_perturbation"` and
+`adaptive_implicit_vertadv=True`, both of which disagree with NEMO: the vector
+form is "keg + zad + vor" (`dynadv.F90:144`), i.e. the advective `dyn_zad`,
+and `ln_zad_Aimp` defaults to `.false.` (`namelist_ref:1177`) with no override
+in `GYRE_PISCES`'s `namelist_cfg`.  Both are reported as findings and left as
+an OPEN QUESTION; changing them is a second configuration choice this round
+was not given.  `test_surface_stress_implicit_wiring` reveals nothing new: it
+never reaches its own `nemo_stage_mean_imposition` assertion, because
+construction now raises the momentum-program message instead — it is masked
+one guard deeper, not unmasked.
