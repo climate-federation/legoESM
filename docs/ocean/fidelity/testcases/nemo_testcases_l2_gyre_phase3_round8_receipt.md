@@ -3697,6 +3697,13 @@ restoring the file (`git checkout --` plus `git status --porcelain` empty).
 | external mode is the only live dynamics writer | `test_identity_path_has_one_external_mode_writer_for_carried_pair` | added a second `dict(uu_b=..., vv_b=...)` call in `ocean_pe_latlon_cgrid.py` | inventory mismatch, 1 failed |
 | non-NEMO recipes keep `None` leaves | `test_non_nemo_state_has_no_depth_mean_array_leaves`, `test_generic_nemo_recipes_all_carry_pair_without_changing_base_eady` | `rest_state_latlon_cgrid_ocean` builds the pair unconditionally | 2 failed |
 | restart re-derives only on an ABSENT pair, never on a parse failure | `test_restart_malformed_depth_mean_does_not_use_missing_field_fallback` | `read_nemo_restart` swallows `TypeError/ValueError` and returns `None` | `DID NOT RAISE`, 1 failed |
+| every stage call site routes through that selector | `test_every_stage_barotropic_operand_routes_through_the_time_level_selector` | stage-1 call site passes `(target_u, target_v)` directly | selector bypass detected, 1 failed |
+
+The fifth row is added by this round.  The four landed guards test the
+selector helper in isolation, and that helper test keeps passing when a stage
+call site skips the helper entirely — which is the defect the review asked
+about.  The new guard walks the AST of the module that runs and requires all
+three stage operands to be selector calls carrying the literal stage number.
 
 ### Stage-2 ordered walk
 
