@@ -74,7 +74,8 @@ def _series(tmp_path, *, leak, n=6, dt_days=1.0):
              sw_net_sfc=sw, lw_net_sfc=lw, hfss=sh, hfls=lh,
              # Interval means unless a test says otherwise: the probe refuses
              # snapshot-sourced series outright.
-             energy_flux_interval_mean=np.ones(n))
+             energy_flux_interval_mean=np.ones(n),
+             precip=np.full(n, 3.0))
     return path
 
 
@@ -240,6 +241,24 @@ def test_the_driver_persists_every_channel_the_probe_requires():
     assert not missing, (
         f"the probe requires {missing} but no np.savez in model_driver.py "
         "writes them — a run would complete and then be refused")
+
+
+def test_the_frozen_precipitation_bound_is_the_predicted_size(tmp_path):
+    """L_f * precip, the pre-registered upper bound on the definitional gap.
+
+    E carries -L_f*q_frozen and the flux list has no precipitation term, so
+    frozen condensate leaving the column reads as a spurious energy SOURCE of
+    L_f times the frozen precipitation rate. Pin the conversion, because the
+    whole prediction is a magnitude: 3.337e5 J/kg over 86400 s is 3.86 W/m^2
+    per mm/day, so a 3 mm/day column bounds the gap at ~11.6 W/m^2 -- the size
+    of the residual left after the interval-mean correction.
+    """
+    from legoesm import constants
+    mod = _load()
+    t = mod.load(_series(tmp_path, leak=0.0, n=6))
+    bound = constants.L_f * t["precip"] / 86400.0
+    assert float(bound[0]) == pytest.approx(11.59, rel=1e-3), float(bound[0])
+    assert constants.L_f / 86400.0 == pytest.approx(3.862, rel=1e-3)
 
 
 def test_runs_end_to_end(tmp_path):

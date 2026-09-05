@@ -53,6 +53,29 @@ compensation; a latent tendency near zero means the energy arrived through a
 boundary flux.  #1354 reports CWV flat at 23-26 kg/m^2 while T rises, which
 predicts the SECOND -- so this is a real test of that report, not a formality.
 
+A PREDICTION, WRITTEN BEFORE THE INTERVAL-MEAN RUN LANDED (2026-09-05), so it
+cannot be fitted afterwards.  The column energy is
+
+    E = int (c_p*T + L_v*q_v - L_f*q_frozen + Phi + KE) dp/g
+
+and the flux list above contains NO precipitation term.  So when frozen
+condensate PRECIPITATES out, q_frozen falls, the ``-L_f*q_frozen`` term rises,
+and E rises with nothing on the flux side to match it.  That reads as a
+spurious energy SOURCE of
+
+    L_f * (frozen precipitation rate)  =  3.87 W/m^2 per mm/day
+
+(L_f = 3.34e5 J/kg; 1 mm/day = 1/86400 kg/m^2/s).  Sign: dE/dt too HIGH by X
+makes ``residual = toa_net - dE/dt`` too low by X, hence LEAK too HIGH by X --
+a POSITIVE apparent leak, which is the sign observed.
+
+The ``L_f*precip`` column below is the UPPER BOUND on that term (every
+millimetre frozen); the real value is that times the frozen fraction.  If the
+interval-mean leak lands near it, the residual is this definitional gap and not
+a physics bookkeeping bug -- the fix is then to add the frozen-precipitation
+energy flux to the budget, not to hunt the physics.  If the leak is much LARGER
+than the bound, the gap cannot explain it and the physics hunt is back on.
+
 AND WHAT THIS CANNOT SEE (also GLM): moist-static-energy closure is blind to a
 precipitation MASS-flux inconsistency that does not also mis-state the latent
 heating.  The water budget is a separate question, so the run's own
@@ -96,7 +119,12 @@ _NEEDED = ("energy_toa_net", "energy_dE_dt", "energy_residual",
 # Present on the MPAS lightweight series; used for the thermal/latent split and
 # the water budget. Absent -> those columns are simply not printed.
 _OPTIONAL = ("CWV", "moisture_residual", "T_atm", "days",
-             "energy_flux_interval_mean")
+             "energy_flux_interval_mean",
+             # `precip` feeds the frozen-precipitation energy bound. Omitting
+             # it here silently disabled that whole block -- the same
+             # collected-but-not-delivered failure codex found for the
+             # interval-mean flag, caught this time by its own test.
+             "precip")
 
 
 def load(path: pathlib.Path) -> dict[str, np.ndarray]:
@@ -217,6 +245,24 @@ def main(argv=None) -> int:
               f"{leak[i]:9.3f}")
     # Thermal / latent split of dE/dt (GLM): distinguishes "energy arrived
     # through a boundary flux" from "the column warmed while it dried".
+    # Frozen-precipitation energy bound (see the prediction in the docstring).
+    if "precip" in t and len(t["precip"]) == len(days):
+        from legoesm import constants
+        lf_precip = constants.L_f * t["precip"] / 86400.0   # mm/day -> W/m^2
+        print()
+        print("frozen-precipitation energy gap, UPPER BOUND (all precip "
+              "frozen): L_f * precip")
+        print(f"{'day':>7s} {'precip[mm/d]':>13s} {'L_f*precip':>11s} "
+              f"{'LEAK':>9s} {'LEAK - bound':>13s}")
+        for i in np.flatnonzero(keep):
+            print(f"{days[i]:7.2f} {t['precip'][i]:13.3f} {lf_precip[i]:11.3f} "
+                  f"{leak[i]:9.3f} {leak[i] - lf_precip[i]:13.3f}")
+        _b, _l = lf_precip[keep], leak[keep]
+        _f = np.isfinite(_b) & np.isfinite(_l)
+        if _f.any():
+            print(f"  means: bound {_b[_f].mean():.3f}  leak {_l[_f].mean():.3f}"
+                  f"  leak-bound {(_l[_f] - _b[_f]).mean():.3f} W/m^2")
+
     if "CWV" in t and len(t["CWV"]) == len(days):
         from legoesm import constants
         dt_s = np.gradient(days) * 86400.0
