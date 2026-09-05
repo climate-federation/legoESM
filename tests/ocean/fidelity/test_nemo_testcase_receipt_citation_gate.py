@@ -65,3 +65,47 @@ def test_check_classifies_the_real_source(citation, symbol, status):
     if not gate.FILES["stp2d.F90"].is_file():
         pytest.skip("NEMO oracle source tree not present")
     assert gate.check(citation, symbol)["status"] == status
+
+
+def test_a_range_pins_both_endpoints_not_just_some_line_inside_it():
+    """The gate's first draft joined the range and asked ``symbol in text``.
+
+    A 146-line range then passed whenever ANY line held the symbol, so a
+    wrong line number sailed through -- 36 of 78 mapped citations survived a
+    shift of up to six lines.  Both endpoints are pinned now.
+    """
+    if not gate.FILES["stprk3_stg.F90"].is_file():
+        pytest.skip("NEMO oracle source tree not present")
+    citation = "stprk3_stg.F90:453-598"
+    good = gate.CITATION_MAP[citation]
+    assert gate.check(citation, good)["status"] == "OK"
+    # a symbol that merely lives SOMEWHERE inside the range is now rejected
+    assert gate.check(citation, ["tra_zdf", "tra_zdf"])["status"] == (
+        "SYMBOL-NOT-AT-LINE")
+    # and the correct symbols do not survive a wrong line number
+    assert gate.check(citation, good, shift=2)["status"] != "OK"
+
+
+def test_every_map_entry_is_shift_sensitive():
+    """The gate's own non-vacuity control, asserted as a test as well.
+
+    An entry whose symbols cannot tell its line from a neighbour has stopped
+    checking anything; the audit must keep the map empty of those.
+    """
+    if not gate.FILES["stp2d.F90"].is_file():
+        pytest.skip("NEMO oracle source tree not present")
+    assert gate.audit_shift_sensitivity() == []
+
+
+def test_the_audit_itself_can_fail():
+    """Synthetic violation: a deliberately generic symbol must be caught."""
+    if not gate.FILES["stp2d.F90"].is_file():
+        pytest.skip("NEMO oracle source tree not present")
+    original = dict(gate.CITATION_MAP)
+    try:
+        gate.CITATION_MAP["stp2d.F90:128"] = "CALL"
+        blind = gate.audit_shift_sensitivity()
+        assert [row["citation"] for row in blind] == ["stp2d.F90:128"]
+    finally:
+        gate.CITATION_MAP.clear()
+        gate.CITATION_MAP.update(original)

@@ -83,85 +83,142 @@ FILES = {
 
 # citation -> the symbol the receipt's prose says lives there.
 CITATION_MAP = {
-    "stprk3.F90:186": "CALL stp_2D",
-    "stprk3.F90:195": "stp_RK3_stg( 1",
-    "stprk3.F90:197": "Nnn  = Naa",
-    "stprk3.F90:200": "stp_RK3_stg( 2",
-    "stprk3.F90:207": "stp_RK3_stg( 3",
-    "MY_SRC/stprk3.F90:204": "CALL stp_2D",
-    "MY_SRC/stprk3.F90:206": "l1_dump_rhs",
-    "MY_SRC/stprk3.F90:215": "stp_RK3_stg( 1",
-    "stp2d.F90:128": "CALL dyn_hpg",
-    "stp2d.F90:131": "CALL dyn_ldf",
-    "stp2d.F90:146": "CALL dyn_vor",
-    "stp2d.F90:172": "dyn_adv_up3",
-    "stp2d.F90:185": "Ue_rhs(ji,jj) + SUM",
-    "stp2d.F90:196": "dyn_drg_init",
-    "stp2d.F90:199-202": "utauU",
-    "stp2d.F90:200": "utauU",
-    "stp2d.F90:281": "CALL dyn_spg_ts",
-    "stprk3_stg.F90:65": "SUBROUTINE stp_RK3_stg",
-    "stprk3_stg.F90:262,267": "zub(ji,jj)",
-    "stprk3_stg.F90:309-334": "CASE ( 2 , 3 )",
-    "stprk3_stg.F90:315": "CALL dyn_adv",
-    "stprk3_stg.F90:315-430": "CALL dyn_zdf",
-    "stprk3_stg.F90:324": "dyn_hpg",
-    "stprk3_stg.F90:324-378": "dyn_hpg",
-    "stprk3_stg.F90:327": "dyn_vor",
-    "stprk3_stg.F90:331": "dyn_adv",
-    "stprk3_stg.F90:333": "zFu, zFv, zFw",
-    "stprk3_stg.F90:367-368": "uu(ji,jj,jk,Kaa) = ( uu(ji,jj,jk,Kbb)",
-    "stprk3_stg.F90:373-378": "1._wp + r3u(ji,jj,Kaa)",
-    "stprk3_stg.F90:437-446": "barotropic velocity correction",
-    "stprk3_stg.F90:453-601": "tra_zdf",
-    "stprk3_stg.F90:463-599": "tra_zdf",
+    # value: one symbol (checked on the FIRST and LAST cited line -- the same
+    # line for a single-line citation), or [first_symbol, last_symbol].
+    # Both endpoints are pinned so a shifted line number cannot pass; the
+    # audit below REFUSES any entry that survives a +/-1 or +/-2 shift, which
+    # is what forces a symbol specific enough to identify the line.
+    "stprk3.F90:186": "CALL stp_2D( kstp, Nbb, Nbb, Naa, Nrhs )",
+    "stprk3.F90:195": "stp_RK3_stg( 1, kstp, Nbb, Nbb, Nrhs, Naa )",
+    "stprk3.F90:197": "Nrhs = Nnn   ;   Nnn  = Naa   ;   Naa  = Nrhs",
+    "stprk3.F90:200": "stp_RK3_stg( 2, kstp, Nbb, Nnn, Nrhs, Naa )",
+    "stprk3.F90:207": "stp_RK3_stg( 3, kstp, Nbb, Nnn, Nrhs, Naa )",
+    "MY_SRC/stprk3.F90:204": "CALL stp_2D( kstp, Nbb, Nbb, Naa, Nrhs )",
+    "MY_SRC/stprk3.F90:206": "CALL l1_dump_rhs( kstp, Nrhs )",
+    "MY_SRC/stprk3.F90:215": "stp_RK3_stg( 1, kstp, Nbb, Nbb, Nrhs, Naa )",
+    "stp2d.F90:126": "hydrostatic pressure gradient (HPG))",
+    "stp2d.F90:128": "CALL dyn_hpg( kt, Kbb",
+    "stp2d.F90:131": "CALL dyn_ldf( kt, Kbb, Kbb, uu, vv, Krhs )",
+    "stp2d.F90:146": "CALL dyn_vor( kt,      Kbb, uu, vv, Krhs )",
+    "stp2d.F90:172": "CALL dyn_adv_up3 ( kt, Kbb, Kbb, uu, vv, Krhs, pUe=Ue_rhs",
+    "stp2d.F90:185": "Ue_rhs(ji,jj) + SUM( e3u_0(ji,jj,1:jpkm1)*uu(ji,jj,1:jpkm1,Krhs)",
+    "stp2d.F90:196": "CALL dyn_drg_init( Kbb, Kbb, uu, vv, uu_b, vv_b, Ue_rhs",
+    "stp2d.F90:199-202": ["DO_2D( 0, 0, 0, 0 )", "END_2D"],
+    "stp2d.F90:200": "r1_rho0 * utauU(ji,jj) * r1_hu(ji,jj,Kbb)",
+    "stp2d.F90:281": "CALL dyn_spg_ts( kt, Kbb, Kbb, Krhs, uu, vv, ssh, uu_b, vv_b, Kaa )",
+    "stprk3_stg.F90:65": "SUBROUTINE stp_RK3_stg( kstg, kstp, Kbb, Kmm, Krhs, Kaa )",
+    "stprk3_stg.F90:262,267": [
+        "zub(ji,jj) = r1_Dt * rn_Dt * un_adv(ji,jj)",
+        "zub(ji,jj) = un_adv(ji,jj)*r1_hu(ji,jj,Kmm) - uu_b(ji,jj,Kmm)"],
+    "stprk3_stg.F90:309-334": ["SELECT CASE( kstg )", "ENDIF"],
+    "stprk3_stg.F90:315": "IF( .NOT.ln_dynadv_vec )   CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs, zFu",
+    "stprk3_stg.F90:315-430": [
+        "IF( .NOT.ln_dynadv_vec )   CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs, zFu",
+        "IF( kstg == 3 )   CALL dyn_zdf( kstp, Kbb, Kmm, Krhs, uu, vv, Kaa  )"],
+    "stprk3_stg.F90:324": "CALL    dyn_hpg( kstp,      Kmm, uu, vv, Krhs )",
+    "stprk3_stg.F90:324-378": [
+        "CALL    dyn_hpg( kstp,      Kmm, uu, vv, Krhs )",
+        "/           ( 1._wp + r3v(ji,jj,Kaa) ) * vmask(ji,jj,jk)"],
+    "stprk3_stg.F90:327": "CALL    dyn_vor( kstp,      Kmm, uu, vv, Krhs )",
+    "stprk3_stg.F90:331": "CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs)",
+    "stprk3_stg.F90:333": "CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs, zFu, zFv, zFw )",
+    "stprk3_stg.F90:367-368": [
+        "uu(ji,jj,jk,Kaa) = ( uu(ji,jj,jk,Kbb) + rDt * uu(ji,jj,jk,Krhs) )",
+        "vv(ji,jj,jk,Kaa) = ( vv(ji,jj,jk,Kbb) + rDt * vv(ji,jj,jk,Krhs) )"],
+    "stprk3_stg.F90:373-378": [
+        "uu(ji,jj,jk,Kaa) = (         ( 1._wp + r3u(ji,jj,Kbb) )",
+        "/           ( 1._wp + r3v(ji,jj,Kaa) ) * vmask(ji,jj,jk)"],
+    "stprk3_stg.F90:437-446": ["#endif", "END_3D"],
+    "stprk3_stg.F90:453-598": [
+        "Tracers : RHS computation + time-stepping",
+        "CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )"],
+    "stprk3_stg.F90:453-601": [
+        "Tracers : RHS computation + time-stepping", "END DO"],
+    "stprk3_stg.F90:463-599": [
+        "CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )",
+        "IF( ln_zdfnpc  )   CALL tra_npc( kstp,      Kmm, Krhs, ts    , Kaa  )"],
     "stprk3_stg.F90:655": "END SUBROUTINE stp_RK3_stg",
+    "stprk3_stg.F90:168-243": [
+        "r3v(:,:,Kaa) = r2_3 * r3v(:,:,Kbb) + r1_3 * r3va(:,:)",
+        "Dynamic : RHS computation + time-stepping"],
     "dynspg_ts.F90:282": "zu_frc(:,:) =   Ue_rhs(:,:)",
-    "dynspg_ts.F90:296": "dyn_cor_2D",
+    "dynspg_ts.F90:296": "CALL dyn_cor_2D( puu_b(:,:,Kmm), pvv_b(:,:,Kmm), zu_trd, zv_trd )",
     "dynspg_ts.F90:303": "#else",
-    "dynspg_ts.F90:344-345": "puu(ji,jj,jk,Krhs) = ( puu(ji,jj,jk,Krhs) - zu_frc",
+    "dynspg_ts.F90:344-345": [
+        "DO_3D( 0, 0, 0, 0, 1, jpkm1 )",
+        "puu(ji,jj,jk,Krhs) = ( puu(ji,jj,jk,Krhs) - zu_frc(ji,jj) )"],
     "dynspg_ts.F90:487": "un_e  (:,:) =    puu_b(:,:,Kmm)",
-    "dynspg_ts.F90:735-761": "ua_e(ji,jj)",
-    "dynspg_ts.F90:750-753": "ua_e(ji,jj)",
-    "dynspg_ts.F90:752-761": "ua_e(ji,jj)",
-    "dynspg_ts.F90:825-847": "puu_b  (:,:,Kaa) + za1 * ua_e",
-    "dynspg_ts.F90:870-895": "puu_b(ji,jj,Kaa) = puu_b(ji,jj,Kaa) /",
+    "dynspg_ts.F90:735-761": ["DO_2D( 0, 0, 0, 0 )", "END_2D"],
+    "dynspg_ts.F90:750-753": [
+        "z1_hv = ssvmask(ji,jj) / ( hv_0(ji,jj) + zsshv_a(ji,jj)",
+        "rDt_e * (  zhu_bck        * zu_spg (ji,jj)"],
+    "dynspg_ts.F90:752-761": [
+        "ua_e(ji,jj) = (               hu_e  (ji,jj) *   un_e (ji,jj)", "END_2D"],
+    "dynspg_ts.F90:825-847": [
+        "ELSE                                       ! Sum transports",
+        "pssh   (:,:,Kaa) = pssh   (:,:,Kaa) / r1_wgt1s"],
+    "dynspg_ts.F90:870-895": [
+        "IF( (.NOT.(ln_dynadv_vec .OR. lk_linssh)) .AND. ll_bt_av ) THEN",
+        "CALL lbc_lnk( 'dynspg_ts', puu_b, 'U', -1._wp, pvv_b, 'V', -1._wp )"],
     "dynspg_ts.F90:910": "#else",
-    "dynspg_ts.F90:938-975": "puu(:,:,jk,Krhs) = puu(:,:,jk,Krhs)",
+    "dynspg_ts.F90:938-975": [
+        "IF( ln_dynadv_vec .OR. lk_linssh ) THEN",
+        "* ( pvv_b(:,:,Kaa) - pvv_b(:,:,Kbb) * hv(:,:,Kbb) ) * r1_Dt"],
     "dynhpg.F90:359": "puu(ji,jj,1,Krhs) = zhpi(ji,jj) + zuap",
-    "dynhpg.F90:359,383": "zhpi(ji,jj) + zuap",
     "dynhpg.F90:383": "puu(ji,jj,jk,Krhs) = zhpi(ji,jj) + zuap",
-    "dynadv.F90:144": "keg + zad + vor",
-    "domzgr_substitute.h90:139": "define  gdept(",
-    "domzgr_substitute.h90:145": "define  gdept_z0(",
-    "domzgr_substitute.h90:139,145": "gdept",
-    "oce.F90:39,99": "uu_b",
-    "DOM/istate.F90:149-155": "uu_b(ji,jj,Kbb) + e3u",
-    "usrdef_hgr.F90:103-104": "pff_f(:,:) = 0._wp",
-    "trabbl.F90:519-527": "mgrhu(ji,jj) = INT(  SIGN",
-    "namelist_cfg:85": "ln_dynadv_up3",
-    "namelist_cfg:105-106": "rn_bt_alpha",
-    "namelist_ref:1092": "nn_bt_flt",
-    "namelist_ref:1177": "ln_zad_Aimp",
-    "ocean.output:875": "nn_bt_flt",
-    "ocean_pe_latlon_cgrid.py:2005-2006": "gdept_z0",
-    "ocean_pe_latlon_cgrid.py:2045-2046": "dp_dx_sco",
-    "nemo_testcase_recipe.py:92,274,914": "nemo_sco",
-    # round 27
-    "lock_kt1_10/ocean.output:615": "ln_dynldf_OFF",
-    "overflow_kt1_10/ocean.output:727": "ln_dynldf_OFF",
-    "BLD/ppsrc/nemo/dynspg_ts.f90:1224": "INTENT(in",
-    "BLD/ppsrc/nemo/dynhpg.f90:393,412": "= zhpi(ji,jj) + zuap",
-    "BLD/ppsrc/nemo/dynadv_up3.f90:138-141": "pUe(ji,jj) = 0._wp",
-    "BLD/ppsrc/nemo/dynadv_up3.f90:211,317,355": "ELSE",
-    "BLD/ppsrc/nemo/dynadv_up3.f90:213,336,357": "puu(ji,jj",
-    "BLD/ppsrc/nemo/dynvor.f90:655-656": "zwx(ji,jj) = e2u(ji,jj)",
-    "BLD/ppsrc/nemo/dynvor.f90:665": "pu_rhs(ji,jj,jk) + zuav",
-    "stprk3_stg.F90:453-598": "tra_zdf",
-    "BLD/ppsrc/nemo/dynhpg.f90:378,397": "DO jk= 2, jpkm1",
-    "domain.F90:159": "r1_hu_0(:,:) = ssumask(:,:)",
-    "stp2d.F90:126": "hydrostatic pressure gradient",
-    "stprk3_stg.F90:168-243": "r3v(:,:,Kaa)",
+    "dynhpg.F90:359,383": [
+        "puu(ji,jj,1,Krhs) = zhpi(ji,jj) + zuap",
+        "puu(ji,jj,jk,Krhs) = zhpi(ji,jj) + zuap"],
+    "dynadv.F90:144": "vector form : keg + zad + vor is used",
+    "domzgr_substitute.h90:139": "define  gdept(i,j,k,t)",
+    "domzgr_substitute.h90:145": "gdept_z0(i,j,k,t) (gdept(i,j,k,t)-ssh(i,j,t))",
+    "domzgr_substitute.h90:139,145": [
+        "define  gdept(i,j,k,t)",
+        "gdept_z0(i,j,k,t) (gdept(i,j,k,t)-ssh(i,j,t))"],
+    "oce.F90:39,99": [
+        "ssh, uu_b,  vv_b", "ALLOCATE( ssh (jpi,jpj,jpt)  , uu_b(jpi,jpj,jpt)"],
+    "DOM/istate.F90:149-155": [
+        "uu_b(:,:,Kbb) = 0._wp   ;   vv_b(:,:,Kbb) = 0._wp",
+        "vv_b(:,:,Kbb) = vv_b(:,:,Kbb) * r1_hv(:,:,Kbb)"],
+    "usrdef_hgr.F90:103-104": [
+        "pff_f(:,:) = 0._wp            ! here No earth rotation: f=0",
+        "pff_t(:,:) = 0._wp"],
+    "trabbl.F90:519-527": ["DO_2D( 1, 0, 1, 0 )", "END_2D"],
+    "domain.F90:159": "r1_hu_0(:,:) = ssumask(:,:) / ( hu_0(:,:) + 1._wp",
+    "namelist_cfg:85": "ln_dynadv_up3 = .true.",
+    "namelist_cfg:105-106": [
+        "nn_bt_flt     = 3", "rn_bt_alpha   = 0.07"],
+    "namelist_ref:1092": "nn_bt_flt     = 1          ! Add dissipation",
+    "namelist_ref:1177": "ln_zad_Aimp = .false.",
+    "ocean.output:875": "Barotropic time filter => nn_bt_flt",
+    "lock_kt1_10/ocean.output:615": "no explicit diffusion                ln_dynldf_OFF",
+    "overflow_kt1_10/ocean.output:727": "no explicit diffusion                ln_dynldf_OFF",
+    "ocean_pe_latlon_cgrid.py:2005-2006": ["z_coord,", "eta_safe,"],
+    "ocean_pe_latlon_cgrid.py:2045-2046": [
+        "requires the raw NEMO", "nemo_e3w_0 mesh field; midpoint reconstruction on"],
+    "nemo_testcase_recipe.py:92,274,914": [
+        'pgf_scheme="nemo_sco",', 'if cfg.pgf_scheme != "nemo_sco":'],
+    "BLD/ppsrc/nemo/dynspg_ts.f90:1224": [
+        "REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv"],
+    "BLD/ppsrc/nemo/dynhpg.f90:378,397": [
+        "DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)              ! Surface value",
+        "DO jk= 2, jpkm1"],
+    "BLD/ppsrc/nemo/dynhpg.f90:393,412": [
+        "puu(ji,jj,1,Krhs) = zhpi(ji,jj) + zuap",
+        "puu(ji,jj,jk,Krhs) = zhpi(ji,jj) + zuap"],
+    "BLD/ppsrc/nemo/dynadv_up3.f90:138-141": [
+        "IF( PRESENT( pUe ) ) THEN     ! 3D RHS cumulation : set 2D RHS to zero",
+        "END DO   ;   END DO"],
+    "BLD/ppsrc/nemo/dynadv_up3.f90:211,317,355": [
+        "ELSE                           !-  added the 3D RHS  -!",
+        "ELSE                                !-  added the 3D RHS  -!"],
+    "BLD/ppsrc/nemo/dynadv_up3.f90:213,336,357": [
+        "puu(ji,jj,jk,Krhs) = puu(ji,jj,jk,Krhs) - 0.25_wp",
+        "puu(ji,jj,jk,Krhs) = puu(ji,jj,jk,Krhs) - zFu_t(ji,jj) * r1_e1e2u(ji,jj)"],
+    "BLD/ppsrc/nemo/dynvor.f90:655-656": [
+        "zwx(ji,jj) = e2u(ji,jj) * (e3t_1d(jk)",
+        "zwy(ji,jj) = e1v(ji,jj) * (e3t_1d(jk)"],
+    "BLD/ppsrc/nemo/dynvor.f90:665": "pu_rhs(ji,jj,jk) = pu_rhs(ji,jj,jk) + zuav * ( zwz(ji  ,jj-1) + zwz(ji,jj) )",
 }
 
 DEFAULT_RECEIPT = (
@@ -208,7 +265,16 @@ def line_numbers(spec: str) -> list[int]:
     return numbers
 
 
-def check(citation: str, symbol: str, shift: int = 0) -> dict:
+def check(citation: str, symbols, shift: int = 0) -> dict:
+    """Pin BOTH endpoints of the citation, so a shifted line number fails.
+
+    The first draft asked ``symbol in "\n".join(cited lines)``, which for a
+    range passes if ANY line holds the symbol.  36 of 78 mapped citations then
+    survived a wrong line number within +/-6 -- the gate could not catch the
+    defect class it exists for.  Now the FIRST and LAST cited line each carry
+    their own symbol, and :func:`audit_shift_sensitivity` refuses any entry
+    that still survives a shift.
+    """
     path_key, spec = citation.rsplit(":", 1)
     path = FILES.get(path_key)
     if path is None or not path.is_file():
@@ -219,11 +285,36 @@ def check(citation: str, symbol: str, shift: int = 0) -> dict:
     if any(n < 1 or n > len(body) for n in numbers):
         return {"citation": citation, "status": "OUT-OF-RANGE",
                 "detail": f"{path} has {len(body)} lines"}
-    text = "\n".join(body[n - 1] for n in numbers)
-    if symbol in text:
-        return {"citation": citation, "status": "OK", "symbol": symbol}
-    return {"citation": citation, "status": "SYMBOL-NOT-AT-LINE",
-            "symbol": symbol, "detail": text.strip()[:160]}
+    wanted = [symbols, symbols] if isinstance(symbols, str) else list(symbols)
+    if len(wanted) == 1:
+        wanted = wanted * 2
+    if len(wanted) != 2:
+        return {"citation": citation, "status": "BAD-MAP-ENTRY",
+                "detail": "expected a symbol or [first, last]"}
+    for symbol, line in zip(wanted, (numbers[0], numbers[-1])):
+        if symbol not in body[line - 1]:
+            return {"citation": citation, "status": "SYMBOL-NOT-AT-LINE",
+                    "symbol": symbol, "line": line,
+                    "detail": body[line - 1].strip()[:160]}
+    return {"citation": citation, "status": "OK", "symbols": wanted}
+
+
+def audit_shift_sensitivity(shifts=(-2, -1, 1, 2)) -> list[dict]:
+    """Every mapped citation must FAIL under a wrong line number.
+
+    This is the gate's own non-vacuity control, run on every invocation: an
+    entry whose symbols are too generic to identify the line is reported as
+    SHIFT-BLIND and fails the gate, which forces a better symbol rather than
+    letting the map quietly stop checking anything.
+    """
+    blind = []
+    for citation, symbols in CITATION_MAP.items():
+        survives = [s for s in shifts
+                    if check(citation, symbols, shift=s)["status"] == "OK"]
+        if survives:
+            blind.append({"citation": citation, "symbols": symbols,
+                          "passes_at_shifts": survives})
+    return blind
 
 
 def run(receipt: Path, heading: str, *, plant: str | None = None) -> dict:
@@ -235,6 +326,7 @@ def run(receipt: Path, heading: str, *, plant: str | None = None) -> dict:
     rows = [check(c, CITATION_MAP[c], shift=2 if c == plant else 0)
             for c in citations if c in CITATION_MAP]
     bad = [row for row in rows if row["status"] != "OK"]
+    blind = audit_shift_sensitivity()
     return {
         "format": "nemo-testcase-receipt-citation-gate-v1",
         "receipt": str(receipt),
@@ -242,8 +334,10 @@ def run(receipt: Path, heading: str, *, plant: str | None = None) -> dict:
         "citations_found": len(citations),
         "unmapped_citations": unmapped,
         "failures": bad,
+        "shift_blind_map_entries": blind,
         "planted_shift": plant,
-        "status": "PASS" if not unmapped and not bad else "FAIL",
+        "status": ("PASS" if not unmapped and not bad and not blind
+                   else "FAIL"),
     }
 
 

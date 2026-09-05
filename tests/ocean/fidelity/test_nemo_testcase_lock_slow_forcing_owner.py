@@ -36,7 +36,15 @@ class _FlatZCoord:
 
 
 def _statement(association, du, h_column):
-    """Call the probe's statement on a single wet column of unit area."""
+    """Call the probe's statement on a single wet column of unit area.
+
+    x64 is enabled HERE rather than left to the caller's environment: without
+    it the float64 request silently downcasts and this test compares f32
+    rounding, which is the exact failure mode Rule 1c is about.  It passed
+    standalone and failed inside a combined pytest run until this was fixed.
+    """
+    import jax
+    jax.config.update("jax_enable_x64", True)
     import jax.numpy as jnp
 
     du = jnp.asarray(du, dtype=jnp.float64)[None, None, :]

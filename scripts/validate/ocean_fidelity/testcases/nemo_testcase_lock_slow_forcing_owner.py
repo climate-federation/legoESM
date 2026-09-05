@@ -21,6 +21,13 @@ unconditional writers on this card:
   r1_hu_0``, the cumulated depth mean of the 3-D momentum RHS.
 * ``:196`` ``dyn_drg_init`` and ``:199-202`` wind, both exactly zero here
   (``ln_drg_OFF = .true.``; ``usrdef_sbc`` sets ``utau = 0``).
+* THREE more writers exist and the first draft of this docstring missed them:
+  ``:207`` under ``ln_apr_dyn``, ``:223`` under ``ln_ice_embd`` and ``:235``
+  under ``ln_bern_srfc``.  All three are ``.false.`` here, and the probe now
+  ASSERTS that from the run's own ``ocean.output`` and namelists rather than
+  from the phrase "four unconditional writers".  A sixth, ``:180``, is the
+  vector-form arm of the same ``SELECT CASE`` and is excluded by
+  ``ln_dynadv_up3 = .true.``.
 
 So the depth mean is the only statement left that can make a bit, and the
 question is whether legoESM's counterpart makes it from its OWN 3-D RHS or
@@ -66,6 +73,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import pathlib
+import re
 from pathlib import Path
 
 import numpy as np
@@ -170,6 +179,34 @@ def run(*, plant: bool = False, allow_dirty: bool = False) -> dict:
             f"NEMO's kt=1 entry is not at rest: {rest}; dyn_adv_up3's 2-D "
             "cumulation would then be nonzero and stp2d.F90:172 is back in "
             "contention")
+
+    # Precondition: no OTHER Ue_rhs writer is live.  stp2d.F90 has six
+    # assignments to it; :180 is the unselected vector-form arm and :207/:223/
+    # :235 are guarded by ln_apr_dyn / ln_ice_embd / ln_bern_srfc.
+    nemo_root = pathlib.Path(
+        "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2")
+    card_dir = nemo_root / "tests/LOCK_EXCHANGE_OMIP_L1_P3"
+    output = (RHS_ROOT / "ocean.output").read_text(errors="replace")
+    cfg_text = (card_dir / "EXP00/namelist_cfg").read_text()
+    ref_text = (nemo_root / "cfgs/SHARED/namelist_ref").read_text()
+    other_writers = {}
+    for flag in ("ln_apr_dyn", "ln_ice_embd", "ln_bern_srfc"):
+        printed = re.search(rf"{flag}\s*=\s*([TF])", output)
+        if printed is not None:
+            other_writers[flag] = (printed.group(1) == "T", "ocean.output")
+        else:
+            text = cfg_text if flag in cfg_text else ref_text
+            on = bool(re.search(rf"^\s*{flag}\s*=\s*\.true\.", text, re.M))
+            other_writers[flag] = (on, "namelist_cfg" if flag in cfg_text
+                                   else "namelist_ref")
+    live = {k: v for k, v in other_writers.items() if v[0]}
+    require(not live,
+            f"another stp2d.F90 Ue_rhs writer is live ({live}); the owner "
+            "walk's statement inventory is incomplete")
+    up3 = bool(re.search(r"^\s*ln_dynadv_up3\s*=\s*\.true\.", cfg_text,
+                         re.M))
+    require(up3, "ln_dynadv_up3 is not .true.; stp2d.F90:180's vector-form "
+                 "arm would then own Ue_rhs instead of :185")
 
     oracle = read_oracle_trace(trace_path)
     oracle_slow_u = oracle["substeps"][0]["slow_u"]
@@ -280,6 +317,10 @@ def run(*, plant: bool = False, allow_dirty: bool = False) -> dict:
         "artifacts": {path.name: sha256(path)
                       for path in (rhs_path, entry_path, trace_path)},
         "precondition_oracle_at_rest": rest,
+        "precondition_other_ue_rhs_writers_off": {
+            k: {"live": v[0], "read_from": v[1]}
+            for k, v in other_writers.items()},
+        "precondition_flux_form_up3_selected": up3,
         "nemo_source": [
             "dynspg_ts.F90:282 zu_frc(:,:) = Ue_rhs(:,:) under key_RK3",
             "dynspg_ts.F90:296 dyn_cor_2D, exactly zero (usrdef_hgr.F90:103-104"
@@ -290,6 +331,19 @@ def run(*, plant: bool = False, allow_dirty: bool = False) -> dict:
             "stp2d.F90:196 dyn_drg_init and :199-202 wind, both zero here",
         ],
         "instrument_reproduces_model_statement": reproduces,
+        "resolution_demonstration": {
+            "note": "the +1.0 plant proves the probe READS its operand, not "
+                    "that it resolves the 2.168e-19 effect it attributes -- "
+                    "one ULP on the largest operand moves the mean by ~2e-20, "
+                    "below one ULP of the mean. What demonstrates the "
+                    "resolution is the ARM SEPARATION: the divide and "
+                    "reciprocal arms differ from each other by exactly the "
+                    "bit under attribution.",
+            "divide_arm_unequal_vs_nemo": transplant["n_unequal"],
+            "reciprocal_arm_unequal_vs_nemo": reciprocal["n_unequal"],
+            "arms_differ_by": abs(transplant["absolute_max"]
+                                  - reciprocal["absolute_max"]),
+        },
         "transplant_equals_model_arm": transplant_equals_model,
         "nemo_minus_model_rhs_unequal_wet_faces": rhs_equal_on_wet_faces,
         "rows": rows,

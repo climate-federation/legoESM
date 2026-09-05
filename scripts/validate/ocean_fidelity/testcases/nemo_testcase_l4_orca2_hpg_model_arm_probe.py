@@ -224,34 +224,62 @@ def run(oracle_root: Path, model_root: Path, *, plant: bool = False) -> dict:
     #                                                             direct_hpg)
     # The last call is the half of the round-25 change that the ORCA2 gate's
     # direct helper call cannot see.
-    def model_arm(rhd, e3w, depth, legacy_round_trip):
-        hpg_u, hpg_v, *rest = nemo_hpg_sco_literal_cgrid(
-            rhd, e3w, depth, grid, gravity, return_components=True)
-        # NOMINAL reference density: on the landed arm the consumer returns
-        # the acceleration and rho_0 never touches the result, so this value
-        # cannot affect the scored row.  It is load-bearing only for the
-        # legacy ablation arm below, which is why that arm is labelled.
+    def production_pair(rhd, e3w, depth, legacy_round_trip):
+        """The model's nemo_sco arm, statement for statement.
+
+        ``ocean_pe_latlon_cgrid`` calls ``nemo_hpg_sco_literal_cgrid`` with NO
+        ``return_components``, assigns ``dp_dx_sco = zeros_like(hpg_u)``, casts
+        it (``dp_dx = dp_dx_sco.astype(dp_dx.dtype)``) and hands both to
+        ``_nemo_hpg_tendency_from_pressure_or_direct``.  This reproduces that
+        shape exactly; the components call below is a DIAGNOSTIC and is
+        checked against this pair rather than substituted for it.
+        """
+        hpg_u, hpg_v = nemo_hpg_sco_literal_cgrid(
+            rhd, e3w, depth, grid, gravity)
         rho_0 = jnp.asarray(rho_0_nominal, dtype=hpg_u.dtype)
         if legacy_round_trip:
             direct_u = direct_v = None
             dp_dx, dp_dy = -rho_0 * hpg_u, -rho_0 * hpg_v
         else:
             direct_u, direct_v = hpg_u, hpg_v
-            dp_dx, dp_dy = jnp.zeros_like(hpg_u), jnp.zeros_like(hpg_v)
+            dp_dx = jnp.zeros_like(hpg_u).astype(hpg_u.dtype)
+            dp_dy = jnp.zeros_like(hpg_v).astype(hpg_v.dtype)
         return (
             pe_module._nemo_hpg_tendency_from_pressure_or_direct(
                 dp_dx, rho_0, direct_u),
             pe_module._nemo_hpg_tendency_from_pressure_or_direct(
                 dp_dy, rho_0, direct_v),
-            *rest,
         )
 
-    compiled = jax.jit(model_arm, static_argnums=3)
+    def components(rhd, e3w, depth):
+        """Diagnostic split only.  Its first two elements MUST equal the
+        production pair, which is asserted rather than assumed."""
+        return nemo_hpg_sco_literal_cgrid(
+            rhd, e3w, depth, grid, gravity, return_components=True)
+
+    compiled_pair = jax.jit(production_pair, static_argnums=3)
+    compiled_components = jax.jit(components)
     inputs = (jnp.asarray(operands["rhd"]), jnp.asarray(operands["e3w"]),
               gdept_z0)
 
+    split = tuple(np.asarray(v) for v in compiled_components(*inputs))
+    landed_pair = tuple(np.asarray(v) for v in compiled_pair(*inputs, False))
+    # Instrument calibration, the equivalent of the LOCK walk's own check:
+    # the diagnostic split must reproduce the production pair BIT for BIT, or
+    # the four component rows describe a different computation than the two
+    # scored ones.
+    reproduces = all(
+        np.array_equal(np.asarray(a).view(np.uint64),
+                       np.asarray(b).view(np.uint64))
+        for a, b in zip(landed_pair, split[:2]))
+    require(reproduces,
+            "the return_components split does not reproduce the production "
+            "pair bit for bit; the component rows would describe a different "
+            "computation")
+
     def score_arm(legacy: bool) -> list[dict]:
-        values = tuple(np.asarray(v) for v in compiled(*inputs, legacy))
+        pair = tuple(np.asarray(v) for v in compiled_pair(*inputs, legacy))
+        values = pair + split[2:]
         candidates = dict(zip(COMPONENTS_IN_RETURN_ORDER, values, strict=True))
         out = []
         for name in COMPONENTS:
@@ -271,6 +299,13 @@ def run(oracle_root: Path, model_root: Path, *, plant: bool = False) -> dict:
     # inert here".
     legacy_rows = score_arm(True)
     round_trip_differs = any(row["status"] != "AT-BAR" for row in legacy_rows)
+    # REQUIRED, not merely reported: if restoring the round trip changed
+    # nothing, the change is inert on this card and the AT-BAR row proves
+    # nothing about it.  Reporting that without failing was the defect.
+    require(round_trip_differs or plant,
+            "restoring the -rho0 pressure round trip changed nothing on "
+            "ORCA2: the round-25 change is inert here, so this row is not "
+            "evidence for it")
 
     first = next((row["field"] for row in rows if row["status"] != "AT-BAR"),
                  None)
@@ -327,6 +362,7 @@ def run(oracle_root: Path, model_root: Path, *, plant: bool = False) -> dict:
             "2070 distinct nonzero values, so the association does not bite"),
         "artifacts": {operand_path.name: sha256(operand_path),
                       literal_path.name: sha256(literal_path)},
+        "instrument_reproduces_production_pair": reproduces,
         "planted_control": plant,
         "planted_cells": planted_cells,
     }

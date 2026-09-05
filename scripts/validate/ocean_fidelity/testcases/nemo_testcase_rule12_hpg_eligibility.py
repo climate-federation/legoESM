@@ -34,6 +34,10 @@ argued in prose:
   is built from ``zwx``/``zwy``, each a product with the entry velocity.  The
   gate asserts NEMO's dumped entry velocity is identically zero, so the added
   term is exactly ``0.0``.
+* ``stp2d.F90``'s ``SELECT CASE( n_dynadv )`` has three arms.  ``dyn_keg``
+  (``:161``) plus ``dyn_zad`` (``:163``) and ``dyn_adv_cen2`` (``:167``) DO
+  write the 3-D RHS; ``ln_dynadv_up3 = .true.`` is what selects neither, and
+  the gate now asserts that selection instead of leaving it unsaid.
 * ``dyn_adv_up3`` (``:172``) is called WITH ``pUe``/``pVe``.  In the ppsrc every
   ``puu``/``pvv(...,Krhs)`` write sits in the ELSE of ``IF( PRESENT( pUe ) )``,
   so on a flux-form card the 3-D advection is not in this frame at all.
@@ -109,9 +113,13 @@ def assert_ppsrc_isolation(case: str, nemo_root: Path = NEMO_ROOT,
     ``dyn_hpg`` alone once the rest-state and ``ln_dynldf_OFF`` preconditions
     hold.  Every fact below is a grep over ``BLD/ppsrc/nemo/``; none is prose.
 
-    All five facts are evaluated and reported together rather than
-    short-circuiting on the first, so the planted control (``--plant-ppsrc
-    cfgs/DINO``, an MLF build) exercises every one of them at once.
+    All facts are evaluated and reported together rather than short-circuiting
+    on the first.  MEASURED, not claimed: the planted control
+    (``--plant-ppsrc cfgs/DINO``, an MLF build) fires THREE of them at once --
+    the cpp keys, the ``dynspg_ts`` RHS writes, and the ``hpg_sco`` assignment
+    (on MLF it accumulates).  The ``dyn_drg_init`` INTENT and the
+    ``dyn_adv_up3`` guard pass on that build too, so those two have no
+    non-vacuity control here and are stated as unproven by plant.
     """
     # ``config`` overrides the card's own build ONLY for the planted control.
     config = nemo_root / (config or PPSRC_CONFIG[case])
@@ -119,7 +127,30 @@ def assert_ppsrc_isolation(case: str, nemo_root: Path = NEMO_ROOT,
     require(ppsrc.is_dir(), f"{case}: missing preprocessed source {ppsrc}")
     violations: list[str] = []
 
+    # WHICH routines run is a namelist selection, and asserting the ppsrc
+    # without it left "hpg_sco ASSIGNS" and "dyn_adv_up3 writes only 2-D"
+    # resting on unstated facts.  stp2d.F90's SELECT CASE( n_dynadv ) also
+    # offers dyn_keg (:161) + dyn_zad (:163) and dyn_adv_cen2 (:167), both of
+    # which WOULD write the 3-D RHS; ln_dynadv_up3 is what excludes them.
+    namelist = (config / "EXP00/namelist_cfg").read_text()
+    selections = {
+        name: bool(re.search(rf"^\s*{name}\s*=\s*\.true\.", namelist,
+                             re.M))
+        for name in ("ln_dynadv_up3", "ln_hpg_sco", "ln_dynldf_OFF",
+                     "ln_dynadv_vec", "ln_dynadv_cen2")
+    }
     keys = next(config.glob("cpp_*.fcm")).read_text().split()
+    if not selections["ln_hpg_sco"]:
+        violations.append(
+            "ln_hpg_sco is not .true., so dyn_hpg does not run hpg_sco and "
+            "the 'hpg_sco ASSIGNS' fact is about a routine this card may not "
+            "call")
+    if not selections["ln_dynadv_up3"] or selections["ln_dynadv_vec"] \
+            or selections["ln_dynadv_cen2"]:
+        violations.append(
+            f"momentum advection is not the flux-form UP3 arm ({selections}); "
+            "stp2d.F90's other SELECT CASE arms (dyn_keg + dyn_zad, "
+            "dyn_adv_cen2) write the 3-D RHS and would be in this frame")
     if "key_RK3" not in keys:
         violations.append(
             f"does not compile key_RK3 ({keys}); the MLF arm of dynspg_ts "
@@ -191,6 +222,7 @@ def assert_ppsrc_isolation(case: str, nemo_root: Path = NEMO_ROOT,
     return {
         "ppsrc": str(ppsrc),
         "cpp_keys": keys,
+        "namelist_selections": selections,
         "dynspg_ts_rhs_writes": spg_writes,
         "dyn_drg_init_intent": drg_intent,
         "hpg_sco_rhs_assignments": hpg_writes,
