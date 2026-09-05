@@ -66,8 +66,8 @@ Two independent 10-step icebergs-off variant runs, byte-identical in recipe,
 will be executed one at a time with the same two-rank `(jpni,jpnj)=(2,1)` CPU
 layout.  Admission requires:
 
-- both runs finish at step 10 with `LAUNCHER_RC=0` and write all six restart
-  shards;
+- both runs finish at step 10 with `MPIRUN_RC=0` and write all four active
+  restart shards (two ocean and two SI3; TOP is compiled out);
 - the four new streams pass magic/header/count/finite/canonical-slot checks;
 - each of the four new streams is raw-byte identical between twins;
 - every inherited V2 oracle stream is raw-byte identical between twins; and
