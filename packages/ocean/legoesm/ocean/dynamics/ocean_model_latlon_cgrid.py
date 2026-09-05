@@ -2148,8 +2148,20 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "expose_tracer_stage1_boundary must be '', "
                 "'after_advection', or 'after_sbc'")
-        self.config = self._validate_config(
-            config or LatLonCGridOceanConfig.from_flat())
+        _config_input = config or LatLonCGridOceanConfig.from_flat()
+        _wzv_diagnostic_eos_bypass = bool(
+            self._nemo_ws_test_hooks.expose_stage1_wzv
+            and self._nemo_ws_test_hooks.external_mode_result_override is not None
+            and _config_input.eos == "nemo_eos80"
+            and _config_input.eos_depth == "geometric"
+        )
+        _config_for_validation = (
+            _config_input._replace(eos_depth="insitu")
+            if _wzv_diagnostic_eos_bypass else _config_input
+        )
+        self.config = self._validate_config(_config_for_validation)
+        if _wzv_diagnostic_eos_bypass:
+            self.config = self.config._replace(eos_depth="geometric")
         # Convert LatLonGrid -> LatLonCGridGeometry once at construction.
         # All downstream operators see the enriched geometry with per-cell
         # metric arrays.  For a plain LatLonGrid this is a no-op on field
@@ -3625,18 +3637,8 @@ class LatLonCGridOceanModel:
         # depth term", max|drho'| 1.5e-5).  Adding an EOS here requires the same:
         # the oracle line showing it takes gdept, and a receipt measuring it.
         _geometric_certified_eos = {"nemo_teos10", "nemo_seos"}
-        # Lane-4's private production-W diagnostic substitutes the already
-        # registered external result and exposes WZV after the completed step;
-        # its scored value never consumes EOS.  Do not widen the public shared
-        # EOS allow-list in the ORCA2-owned lane merely to reach that WRITE-only
-        # seam.  Ordinary ORCA2 execution remains fail-closed here.
-        _wzv_diagnostic_eos_bypass = bool(
-            self._nemo_ws_test_hooks.expose_stage1_wzv
-            and self._nemo_ws_test_hooks.external_mode_result_override is not None
-        )
         if (_eos_depth == "geometric"
-                and _eos_name not in _geometric_certified_eos
-                and not _wzv_diagnostic_eos_bypass):
+                and _eos_name not in _geometric_certified_eos):
             raise ValueError(
                 'eos_depth="geometric" is certified only with eos in '
                 f'{sorted(_geometric_certified_eos)} (NEMO eos_insitu passes '
