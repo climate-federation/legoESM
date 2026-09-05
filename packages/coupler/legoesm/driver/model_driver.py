@@ -10967,11 +10967,23 @@ class ModelDriver:
                 # only, which is the #1354 L5 lane.
                 _ebd = getattr(self.diagnostics, "energy_tracker", None)
                 _sd = getattr(self.model, "_sfc_diag", None)
-                # `has_samples()` is the gate: an accumulator that never saw a
-                # step has nothing to offer and must not shadow the snapshot.
+                # GATE (codex review): `has_samples()` alone is not enough. A
+                # window can be SHORT -- the first interval after a
+                # feed-off->feed-on restart, or a checkpoint written before
+                # slots 0/1 existed -- and its mean is then over the wrong
+                # number of steps, or missing the surface-radiation pair
+                # entirely. Either way it would be stamped "interval mean" and
+                # sail past the probe, which is worse than the snapshot it
+                # replaced because it looks trustworthy. Require a COMPLETE
+                # window AND every slot the energy budget reads.
                 _facc_e = getattr(self, "_mpas_sfc_accum", None)
+                _ENERGY_SLOTS = (0, 1, 3, 4, 5, 6, 7)
                 _use_accum = bool(
-                    _facc_e is not None and _facc_e.has_samples())
+                    _facc_e is not None
+                    and _facc_e.has_samples()
+                    and _facc_e.is_complete()
+                    and all(_facc_e.mean(_i) is not None
+                            for _i in _ENERGY_SLOTS))
                 _qv_e = (self.state.tracers["q_v"].data
                          if (self.state.tracers is not None
                              and "q_v" in self.state.tracers) else None)
@@ -10989,6 +11001,12 @@ class ModelDriver:
                 def _slot(i):
                     # Interval mean first (the APPLIED quantity); the
                     # end-of-interval snapshot only when no accumulator ran.
+                    # `mean()` returns a host array, so this round-trips
+                    # device->host->device. That is 7 small transfers per
+                    # DIAGNOSTIC step (12 in a 12-day run at --diag-days 1),
+                    # not per model step, so it is not on the hot path
+                    # (codex review, accepted rather than restructured --
+                    # `mean()` is shared with the CMOR feed).
                     if _use_accum:
                         _m = _facc_e.mean(i)
                         if _m is not None:
@@ -12016,6 +12034,13 @@ class ModelDriver:
             energy_dE_dt=_arr("energy_dE_dt") if "energy_dE_dt" in ts else nan,
             hfss=_arr("hfss") if "hfss" in ts else nan,
             hfls=_arr("hfls") if "hfls" in ts else nan,
+            # Flux-timing provenance for the seven channels above. WITHOUT
+            # this the closure probe refuses every real series as "timing
+            # unknown" -- which is the correct refusal, and exactly what
+            # happens when a collected channel is never persisted.
+            energy_flux_interval_mean=(
+                _arr("energy_flux_interval_mean")
+                if "energy_flux_interval_mean" in ts else nan),
         )
         # Persist the run summary in the same place run_amip's main path
         # writes it, so `validate_amip_run.py` can read the status line.

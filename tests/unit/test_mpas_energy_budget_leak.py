@@ -213,6 +213,35 @@ def test_interval_mean_series_passes_and_says_so(tmp_path):
     assert "INTERVAL MEANS" in msg
 
 
+def test_the_driver_persists_every_channel_the_probe_requires():
+    """The probe's required channels must all be WRITTEN by the driver.
+
+    A channel can be collected into the in-memory series and never reach
+    `timeseries.npz`, and the failure is invisible until a multi-hour run
+    finishes and the probe refuses it (codex review caught exactly this for
+    `energy_flux_interval_mean`). Read the writer's keyword list from source
+    and check it covers what `load` demands.
+    """
+    import ast
+    import pathlib as _pl
+
+    driver = (_pl.Path(__file__).resolve().parents[2] / "packages" / "coupler"
+              / "legoesm" / "driver" / "model_driver.py")
+    tree = ast.parse(driver.read_text())
+    written: set[str] = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "savez"):
+            written.update(kw.arg for kw in node.keywords if kw.arg)
+    mod = _load()
+    required = set(mod._NEEDED) | {"energy_flux_interval_mean"}
+    missing = sorted(required - written)
+    assert not missing, (
+        f"the probe requires {missing} but no np.savez in model_driver.py "
+        "writes them — a run would complete and then be refused")
+
+
 def test_runs_end_to_end(tmp_path):
     mod = _load()
     assert mod.main([str(_series(tmp_path, leak=12.0)), "--skip-days", "1"]) == 0
