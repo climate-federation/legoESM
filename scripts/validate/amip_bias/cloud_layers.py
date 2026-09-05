@@ -212,8 +212,14 @@ def analyse_checkpoint(path, cloud_cfg, ncell):
         raise SystemExit("FATAL: non-monotone vertical grid in checkpoint")
     T, q_v = col("T"), col("trc_q_v")
     q_c = col("trc_q_c"); q_i = col("trc_q_i")
+    if cloud_cfg.scheme == "resolved" and (q_c is None or q_i is None):
+        raise SystemExit("FATAL: 'resolved' cloud scheme but the checkpoint "
+                         "carries no q_c/q_i tracers -- refusing to feed zeros")
     q_c = np.zeros_like(T) if q_c is None else q_c
     q_i = np.zeros_like(T) if q_i is None else q_i
+    # Number tracers go in RAW, exactly as physics_pipeline hands them to the
+    # radiation call (optics reads N_c per volume, N_i per mass; a zero N_c
+    # carry falls back to Nc_default inside compute_cloud_properties).
     conv = col("physstate_conv_precip") if cloud_cfg.convective_cloud else None
     props = compute_cloud_properties(T, p_full, q_v, dp, cloud_cfg,
                                      q_cloud=q_c, q_ice=q_i,

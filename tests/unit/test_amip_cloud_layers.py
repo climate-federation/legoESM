@@ -156,3 +156,14 @@ def test_cell_order_restores_global_order_and_refuses_partial(cl):
         cl.cell_order(_Npz(physstate_col_index=np.arange(4)), 6)
     with pytest.raises(SystemExit, match="col_index"):
         cl.cell_order(_Npz(), 6)
+
+
+def test_analyse_checkpoint_refuses_resolved_scheme_without_condensate(cl, tmp_path):
+    from legoesm.atmosphere.physics.clouds.config import CloudConfig
+    n, nlev = 4, 3
+    np.savez(tmp_path / "ck.npz", physstate_col_index=np.arange(n),
+             meta_vgrid=np.stack([np.zeros(nlev + 1), np.linspace(0.01, 1.0, nlev + 1)]),
+             p_s=np.full(n, 1.0e5), T=np.full((n, nlev), 250.0),
+             trc_q_v=np.full((n, nlev), 1e-3))
+    with pytest.raises(SystemExit, match="resolved"):
+        cl.analyse_checkpoint(tmp_path / "ck.npz", CloudConfig(scheme="resolved"), n)
