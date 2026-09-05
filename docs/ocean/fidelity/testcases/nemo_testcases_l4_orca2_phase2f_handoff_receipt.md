@@ -110,7 +110,7 @@ Both directories contain 19 copied deck files, 40 absolute immutable input
 symlinks, one absolute binary symlink, two manifests, and the launcher: 63
 prepared entries and no run output.  The resolved namelists are the same
 icebergs-off VARIANT (`ln_icebergs=.false.`), still with `nn_itend=10`,
-`nn_stock=10`, two ranks, `jpni=1`, `jpnj=2`, one thread per library, CPU, and
+`nn_stock=10`, two ranks, `jpni=2`, `jpnj=1`, one thread per library, CPU, and
 Bash timing.  The launchers check the binary, deck manifest, every deck file,
 the input manifest, and every input before `mpirun -np 2 --oversubscribe`.
 

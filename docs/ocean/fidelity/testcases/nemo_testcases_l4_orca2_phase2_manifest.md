@@ -285,3 +285,53 @@ One scalar-math executable is shared by two prepared 10-step runs.
 
 The handoff receipt and this self-excluding manifest are closed by the handoff
 commit and bundle digest.  The numerical ladder is not entered in this turn.
+
+## Phase-2g VARIANT V2, O1 map, and shared-bulk handoff
+
+Phase-2g descends from `d44ca7abaaf4461ffb57014bbff31d89216c9c26`.
+Preregistration is `f93e43a01`; the defined-field identity gate is
+`e46670bdd`; the shared `fld_read` implementation and numerical gate are
+`ee1bbfcc2`; the canonical O1 writer gate is `a49189b63`; the replacement
+launchers are `36f036ebe`; and the explicit card selector is `5260fa8ae`.
+
+The Phase-2f twin runs prove 91 / 91 inherited records raw-byte exact.  Run A
+is pinned as VARIANT oracle V2; its O1 remains provisional because two complete
+source-unowned fields differ between twin allocations.  Defined O1 storage is
+359,640 f64 exact and excludes exactly 26,640 f64 values (`pcd_du` and `qlwn`).
+
+| retained evidence under `phase2g/` | bytes | digest |
+|---|---:|---|
+| `variant_v2_all_91_records.sha256` | 9,095 | `9455cccb19ccbecd06f457fb6db71f8fdebc8bfebd2dc4d4909e5cb25de46668` |
+| `variant_v2_legacy_90_records.sha256` | 8,987 | `13b34464996a1967ce8f5c93cf59ff62ea77cbcea4de0880c8b19f8164b1d26c` |
+| `canonical_a_phase2b_gate.json` | 116,574 | `fe07a0dc8e6d3382c282fc647cecaa9cac46448f68603e98f7fe592b90d39d62` |
+| `canonical_b_phase2b_gate.json` | 116,574 | `c4420e784c780b7924ed79a375bcd56dd0e5d7d1ecd436022ec8fd23896c0d6c` |
+| `o1_defined_twin_gate.json` | 197,768 | `a2e841d22ced403946826e4a8b0b1bcbb8beb32d441943567148a521cc640718` |
+| `o1_numerical_gate.json` | 4,244 | `1055cccaebc49b8da1893ba74fa8981c33a56f8affac7c3e26a5af87dfff736d` |
+| `card_entry_gate.json` | 1,503 | `893f38dfa12c0ee7054e4ebfb2a23f23b16fbfe1f96c42f17137112210228d12` |
+
+O1-M is exact for all nine CORE fields, each 0 / 13,320.  O1-B is the first
+over-bar boundary: the oracle-input-substituted shared NCAR bulk leaf has debt
+in all seven compared outputs and is owned by `LANE3B_OWNER`.  Per the standing
+ownership rule, no Lane-4 shared-operator fix was made and later ocean stages
+were not entered.  SI3 remains oracle-supplied and unmeasured pending its
+branch merge.
+
+The O1 acquisition writer now emits zero for its two wholly unowned fields.
+The replacement scalar-math binary and twin-run handoff are:
+
+| artifact | bytes | digest |
+|---|---:|---|
+| `build/nemo_ORCA2_OMIP_L4_phase2g_o1canon.exe` | 55,129,776 | `a34c795bb273b338f5b9dd271843aa46f123d4af3dea7f8de8c028b515ddf31a` |
+| successful build log | 10,866 | `c0d73f008e64653e49d3c26536bab5af880f6fa07845dd853857349aeccf5a74` |
+| retained/retracted failed build log | 3,391 | `a07079631b4808d02c036b9c4a519c7228870e6b594e537f923ce875da3a9d10` |
+| `phase2g_o1canon_MY_SRC.sha256` | 2,270 | `ac8b80f6cdb2eda8c9cf5a5c2e102ce1d9785dc2f3ac1ffdc8dedb2f1dad04b1` |
+| `phase2g_o1canon_ZGV.txt` | 0 | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| arm-A prepared manifest | 5,343 | `828b6ad4802197576068e0b01332aca543ffc2984d468b16b97778e3c6404c81` |
+| arm-B prepared manifest | 5,343 | `9deb253ddf3a3a2de9d257105c543146c81e6ebfceb29d70ede39985ec63de75` |
+| committed arm-A launcher | 2,274 | `29a22e637398a1a4bab5d6927eb3f318cfa41da240c63edc1297360c57d15a95` |
+| committed arm-B launcher | 2,274 | `7d900db5693b030837953a681125cce114d1448b47f0e017dacd8ef69af89ea5` |
+
+The earlier Phase-2f receipt's layout label is corrected to the actually
+resolved `jpni=2`, `jpnj=1`.  No run bytes or namelist values are changed by
+that documentary correction.  This manifest deliberately excludes its own
+digest; the final handoff commit and bundle close the committed evidence set.
