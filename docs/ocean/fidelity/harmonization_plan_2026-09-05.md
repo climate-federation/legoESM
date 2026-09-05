@@ -82,3 +82,8 @@ aux3d linkage and the minimum-level policy, not just counts.
   BC, mxl 3, prognostic) -- the earlier "CVMix-TKE" row was wrong. Vertical closure is unified;
   a CVMix comparison is optional, not a harmonization gap.
 - P1: waits for the GPU decision (real-FW trio) and the ladder go.
+- 05:00 P3 RESULT (fesom_nemo75_d30 vs fesom_b5, day 30, GATEWAY rec 5): SST rmse 0.54 -> 0.65,
+  Nino-3 +0.41 -> +1.39, Nino-3.4 +0.53 -> +1.13, SH-mid/Antarctic SST +0.1 warmer; SSS unchanged.
+  FESOM on NEMO's ladder reproduces the tripole/MPAS early cold-tongue warm transient => the
+  "FESOM Pacific advantage" was the coarse 47-level ladder, not viscosity (P1 premise weakened:
+  the viscosity ladder is now a faithfulness question, not a cross-grid difference).
