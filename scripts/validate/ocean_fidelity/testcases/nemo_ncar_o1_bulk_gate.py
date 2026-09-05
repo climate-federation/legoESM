@@ -95,12 +95,18 @@ def validate_runtime(*, require_bit_identity: bool) -> dict[str, object]:
     observed = runtime_versions()
     registered = observed == ACCEPTED_RUNTIME
     if require_bit_identity:
-        require(registered, f"unregistered numeric runtime: {observed}; expected {ACCEPTED_RUNTIME}")
+        require(
+            registered,
+            f"unregistered numeric runtime: {observed}; expected {ACCEPTED_RUNTIME}",
+        )
     return {
         "observed": observed,
         "bit_identity_reference": ACCEPTED_RUNTIME,
         "bit_identity_claim_valid": registered,
-        "statement": "bit-exactness claims valid only under the registered Python/JAX/jaxlib/NumPy stack",
+        "statement": (
+            "bit-exactness claims valid only under the registered "
+            "Python/JAX/jaxlib/NumPy stack"
+        ),
     }
 
 
@@ -260,14 +266,22 @@ def evaluate(
         "bit_unequal_over_n": f"{non_bit} / {len(verified) * int(np.count_nonzero(wet))}",
         "over_bar_over_n": f"{over_bar} / {len(verified) * int(np.count_nonzero(wet))}",
         "first_over_bar": next((row for row in rows if row["over_bar_count"]), None),
-        "first_non_bit_operand": next((row for row in rows if row["non_bit_identical_count"]), None),
+        "first_non_bit_operand": next(
+            (row for row in rows if row["non_bit_identical_count"]), None
+        ),
         "rows": rows,
-        "coverage": {name: {"status": status, "reason": reason} for name, (status, reason) in COVERAGE.items()},
+        "coverage": {
+            name: {"status": status, "reason": reason}
+            for name, (status, reason) in COVERAGE.items()
+        },
         "plants": plants,
         "plant_field": plant_field,
         "plant_libm_log": plant_libm_log,
         "numeric_runtime": runtime,
-        "execution": {"backend": jax.default_backend(), "dtype": "float64", "jit": True, "transcendentals": "libm"},
+        "execution": {
+            "backend": jax.default_backend(), "dtype": "float64", "jit": True,
+            "transcendentals": "libm",
+        },
         "oracle": {
             "path": str(record), "sha256": sha256(record), "bytes": record.stat().st_size,
             "twin_path": str(twin), "twin_sha256": sha256(twin),
@@ -303,7 +317,10 @@ def main() -> int:
             require_bit_identity=not args.allow_unregistered_runtime,
         )
     except GateError as exc:
-        print(json.dumps({"gate": "ORCA2_O1_NCAR_BULK", "status": "ERROR", "error": str(exc)}, indent=2))
+        print(json.dumps(
+            {"gate": "ORCA2_O1_NCAR_BULK", "status": "ERROR", "error": str(exc)},
+            indent=2,
+        ))
         return 2
     payload = json.dumps(result, indent=2, sort_keys=True)
     if args.output:

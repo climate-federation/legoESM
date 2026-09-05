@@ -57,15 +57,13 @@ import numbers
 
 import jax
 import jax.numpy as jnp
+from legoesm.core.source_rounding import nemo_source_round
+from legoesm.core.transcendentals import exp as policy_exp
+from legoesm.core.transcendentals import log as policy_log
+from legoesm.core.transcendentals import log10 as policy_log10
+from legoesm.core.transcendentals import pow as policy_pow
 
 from legoesm import constants
-from legoesm.core.source_rounding import nemo_source_round
-from legoesm.core.transcendentals import (
-    exp as policy_exp,
-    log as policy_log,
-    log10 as policy_log10,
-    pow as policy_pow,
-)
 
 # Physical constants
 KAPPA = constants.kappa_vk  # von Kármán constant (0.4)
@@ -1365,8 +1363,7 @@ def ocean_surface_q_sat(
     array
         Surface saturation mixing ratio [kg/kg].
     """
-    from legoesm.thermo import (
-        saturation_mixing_ratio, saturation_mixing_ratio_goff)
+    from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_goff
 
     _use_goff = (thermo_convention == "aerobulk"
                  and bulk_scheme in ("most", "coare3", "large_yeager"))

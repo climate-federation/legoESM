@@ -8,16 +8,18 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from jax.test_util import check_grads
+from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.core.transcendentals import (
     cos,
     exp,
     log,
     log10,
-    pow as policy_pow,
     sin,
     tanh,
+)
+from legoesm.core.transcendentals import (
+    pow as policy_pow,
 )
 
 
@@ -150,6 +152,22 @@ def test_libm_log_log10_pow_have_pinned_system_bytes():
         np.asarray(jax.jit(policy_pow)(base, exponent)).view(np.uint64),
         _libm_pow_reference(np.asarray(base), np.asarray(exponent)).view(np.uint64),
     )
+
+
+def test_libm_pow_preserves_library_domain_results():
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    base = jnp.asarray([-2.0, 0.0], dtype=jnp.float64)
+    exponent = jnp.asarray([0.5, -1.0], dtype=jnp.float64)
+    observed = np.asarray(jax.jit(policy_pow)(base, exponent))
+    expected = _libm_pow_reference(np.asarray(base), np.asarray(exponent))
+    np.testing.assert_array_equal(observed.view(np.uint64), expected.view(np.uint64))
+    assert np.isnan(observed[0])
+    assert np.isposinf(observed[1])
+
+    _, tangent = jax.jvp(
+        policy_pow, (base, exponent), (jnp.ones_like(base), jnp.ones_like(exponent))
+    )
+    assert np.all(~np.isfinite(np.asarray(tangent)))
 
 
 @pytest.mark.parametrize("function", [log, log10])

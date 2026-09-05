@@ -8,7 +8,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-GATE_PATH = Path(__file__).parents[3] / "scripts/validate/ocean_fidelity/testcases/nemo_ncar_o1_bulk_gate.py"
+GATE_PATH = (
+    Path(__file__).parents[3]
+    / "scripts/validate/ocean_fidelity/testcases/nemo_ncar_o1_bulk_gate.py"
+)
 SPEC = importlib.util.spec_from_file_location("nemo_ncar_o1_bulk_gate", GATE_PATH)
 assert SPEC and SPEC.loader
 gate = importlib.util.module_from_spec(SPEC)
@@ -62,18 +65,21 @@ def test_full_o1_gate_and_row_plants() -> None:
     assert result["bit_status"] == "BIT_IDENTICAL"
     assert result["bit_unequal_over_n"] == "0 / 158292"
     assert len(result["plants"]) == 18
-    assert all(row == {"field": row["field"], "status": "PASS_NONZERO", "exit_code": 1} for row in result["plants"])
+    assert all(
+        row == {"field": row["field"], "status": "PASS_NONZERO", "exit_code": 1}
+        for row in result["plants"]
+    )
     planted = gate.evaluate(plant_field="qns")
     assert planted["bit_status"] == "NON_BIT_IDENTICAL"
-    assert next(row for row in planted["rows"] if row["field"] == "qns")["non_bit_identical_count"] == 1
+    qns = next(row for row in planted["rows"] if row["field"] == "qns")
+    assert qns["non_bit_identical_count"] == 1
     poisoned = gate.evaluate(plant_libm_log=True)
     assert poisoned["bit_status"] == "NON_BIT_IDENTICAL"
     assert any(row["non_bit_identical_count"] for row in poisoned["rows"])
 
 
 def test_ncar_selector_is_shared_and_jittable() -> None:
-    from legoesm.core.bulk_flux import nemo_ncar_ocean_bulk, validate_bulk_scheme
-    from legoesm.core.bulk_flux import air_sea_fluxes
+    from legoesm.core.bulk_flux import air_sea_fluxes, nemo_ncar_ocean_bulk, validate_bulk_scheme
 
     assert validate_bulk_scheme("nemo_ncar") is None
     assert callable(nemo_ncar_ocean_bulk)
