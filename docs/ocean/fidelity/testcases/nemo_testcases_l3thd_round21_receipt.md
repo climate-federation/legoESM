@@ -77,7 +77,7 @@ Final focused command: 95 passed in 21.63 s.  The exact log is
 `fb6f4beb2fef665b8def141b8fd763382a59d1e17c269d8a8320dbd34c68bae5`.
 The hardcoded-constant ratchet run against each of the five touched source/test
 files is **5 passed**; its log SHA-256 is
-`a1dd2bdcd8a4ad1dcc379822601bbe3422909ab45fc824c4d8f77635ad88e89d`.
+`b90dcccea88d1c09974be36ec5f75b9f009c521fd779ceccef414421ff6fddaf`.
 A repository-wide ratchet run collected 4,553 cases and reported six existing
 failures in files unchanged by this round; the five Round-21 paths are not
 among them.  This is not described as a green repository-wide ratchet.
