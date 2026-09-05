@@ -98,11 +98,17 @@ def _parse(path: Path) -> dict[str, object]:
         expected[:, 5] = [jpi, jpj, nlay_i, jpl]
         expected[:, 6] = [jpi, jpj, nlay_s, jpl]
         expected[:, 7] = [jpi, jpj, nlay_i, jpl]
-        expected[:, 8:12] = np.array([jpi, jpj, jpl, 1])[:, None]
-        expected[:, 12] = [jpi, jpj, 1, 1]
-        expected[:, 13:16] = np.array([jpi, jpj, jpl, 1])[:, None]
+        # SI3 ice-ocean flux arrays (qns_ice etc.) are allocated on A2D(0)
+        # (icesbc.F90:224 pqns_ice dummy shape), the no-halo interior, not the
+        # full rank-local domain.  The header's SHAPE expressions are
+        # authoritative; this table is only a cross-check.
+        expected[:, 8:12] = np.array([jpi - 4, jpj - 4, jpl, 1])[:, None]
+        expected[:, 12] = [jpi - 4, jpj - 4, 1, 1]
+        expected[:, 13:16] = np.array([jpi - 4, jpj - 4, jpl, 1])[:, None]
     elif magic == DYN_MAGIC:
         expected = np.tile(np.array([jpi, jpj, 1], dtype=np.int32)[:, None], (1, 34))
+        expected[:, 8] = [jpi - 4, jpj - 4, 1]  # tau_icebfr: A2D(0) (ice.F90:429)
+        expected[:, 11:21] = np.array([jpi - 2, jpj - 2, 1])[:, None]  # A2D(nn_hls-1)=A2D(1), e.g. zaU/zaV (icedyn_rhg_evp.F90:140)
         expected[:, 27] = [jpi, jpj, jpl]
         expected[:, 32:34] = np.array([jpi, jpj, jpl])[:, None]
     else:
@@ -135,20 +141,22 @@ def _parse(path: Path) -> dict[str, object]:
 
 
 def _synthetic(magic: bytes) -> bytes:
-    jpi, jpj, jpl, ni, ns = 3, 4, 1, 3, 3
+    jpi, jpj, jpl, ni, ns = 6, 7, 1, 3, 3
     if magic == THD_MAGIC:
         ext = np.empty((4, 16), dtype="<i4")
         ext[:, :5] = np.array([jpi, jpj, jpl, 1])[:, None]
         ext[:, 5] = [jpi, jpj, ni, jpl]
         ext[:, 6] = [jpi, jpj, ns, jpl]
         ext[:, 7] = [jpi, jpj, ni, jpl]
-        ext[:, 8:12] = np.array([jpi, jpj, jpl, 1])[:, None]
-        ext[:, 12] = [jpi, jpj, 1, 1]
-        ext[:, 13:] = np.array([jpi, jpj, jpl, 1])[:, None]
+        ext[:, 8:12] = np.array([jpi - 4, jpj - 4, jpl, 1])[:, None]
+        ext[:, 12] = [jpi - 4, jpj - 4, 1, 1]
+        ext[:, 13:] = np.array([jpi - 4, jpj - 4, jpl, 1])[:, None]
         payload = int(sum(np.prod(ext[:, k]) for k in range(16)))
         head = [1, 1, 0, jpi, jpj, jpl, ni, ns, 64, 16, payload]
     elif magic == DYN_MAGIC:
         ext = np.tile(np.array([jpi, jpj, 1], dtype="<i4")[:, None], (1, 34))
+        ext[:, 8] = [jpi - 4, jpj - 4, 1]
+        ext[:, 11:21] = np.array([jpi - 2, jpj - 2, 1])[:, None]
         ext[:, 27] = [jpi, jpj, jpl]
         ext[:, 32:34] = np.array([jpi, jpj, jpl])[:, None]
         payload = 5 + int(sum(np.prod(ext[:, k]) for k in range(34)))
