@@ -19,6 +19,15 @@ Every measurement was preregistered in
 `nemo_testcases_l4_orca2_phase2n_preregister.md`; BBL acquisition has its own
 pre-build preregistration.
 
+Claim labels for this receipt are explicit and exhaustive: record admission,
+hashes, schema checks, EEN/metric/runoff/tracer measurements, build facts,
+namelist selectors, and prepared-directory facts are **CONFIRMED** by the
+cited committed gates or retained artifacts.  Ownership assignments and
+source-path diagnoses are **CONFIRMED** where a named source statement and
+discriminator close them.  Forward-looking admission expectations and the
+TKE/EVD/IWM instrument-needs list are **PLAUSIBLE** until their user-shell
+runs exist.  No unlabeled numerical or causal claim is intended.
+
 ## 1. Phase-2m record admission and V2 pin
 
 Both user-shell runs report `MPIRUN_RC=0`, `RUN DONE`, and `time.step=10`.
@@ -89,13 +98,16 @@ controls remain byte-identical.  The ORCA fold-fixed arm gives:
 | V `zpvo` NW/NE | 10,249 / 10,279 of 231,368 | `(50,2,20)` / `(51,2,21)` | partial-cell bottom |
 | V `zpvo` SW/SE | 10,279 / 10,221 of 231,368 | `(1,1,1)` | coast/land loop cell |
 
-The first remaining primitive is therefore the live `e3f_vor` multiplication
-at the partial-cell bottom, not an ORCA2 fold or domcfg operand.  It is
-`GYRE_OWNER_SHARED_EXTERNAL_MODE`; Lane 4 lands no shared EEN arithmetic.  The
-GYRE handoff is the four files and hashes above, with the frame semantics from
-the Phase-2m receipt.  The Round-21 arm was reconstructed only from `git diff`
-of the explicitly flagged `/tmp/codex-orca2-r21`; no code, build, or result was
-taken from that worktree.  The production-path bit plant exits 1.
+The Phase-2n first remaining primitive was live `e3f_vor` at `(50,2,21)`.
+Review of `bottom_level` proves that point is a wet partial-cell bottom on the
+southernmost wet row; GYRE has full steps and cannot reproduce it.  Phase 2p
+therefore supersedes the original routing: this is
+`ORCA2_OWNER_PARTIAL_CELL_EEN`, not `GYRE_OWNER_SHARED_EXTERNAL_MODE`.  The
+Phase-2p discriminator localizes and walks it from `fe3mask` and the live QCO
+geometry before deciding whether any residual association belongs to GYRE.
+The Round-21 arm was reconstructed only from `git diff` of the explicitly
+flagged `/tmp/codex-orca2-r21`; no code, build, or result was taken from that
+worktree.  The production-path bit plant exits 1.
 
 ## 3. Phase-2l review dispositions
 
@@ -141,8 +153,8 @@ The reduced OVERFLOW result closes the resource-blocked third row.  With
 `runoff_mass_flux=None`, the pre-refactor inline statement and the one shared
 current helper are 0 ULP on four representative wet levels.  Its binding plant
 exits 1.  Together with zero-movement GYRE and LOCK results, the runoff claim is
-restored to **3 / 3 cross-card support**, with the reduced OVERFLOW scope
-spelled out rather than presented as a full-column run.
+**3/3 with the third at reduced scope (levels 1, 2, 13, 25 of 101)**.  The
+101-level retry remains on the backlog; no full-column result is inferred.
 
 ### Tracer localization and shared routing
 
@@ -154,9 +166,10 @@ The reporting-only extension leaves the Phase-2l score unchanged:
 | S | 190,802 / 228,641 | 7,015 | 183,787 | 0.552124–0.968318 |
 
 The JSON gives all 30 per-level counts and every row fraction.  A single-bit
-plant yields exactly 1 / 228,641 and exits 1.  The shared stage-1 tracer and
-transport reproducer gates are now being walked by the GYRE lane; Lane 4 does
-not repair either shared operator while ownership is adjudicated.
+plant yields exactly 1 / 228,641 and exits 1.  These two shared handoffs are
+now **CONFIRMED closed by the GYRE lane in Round 22**: its CEN2 precursor and
+stage transports score **0 / 228,641** on Lane 4's reproducer gates.  They are
+not open Lane-4 ownership rows.
 
 ## 4. Ordered continuation: diffusive BBL acquisition
 
@@ -207,7 +220,7 @@ then enter TKE/EVD/IWM.
 |---|---|---|
 | Phase-2m 97-stream extension | VERIFIED reproducible | inherited registry plus EEN `Kmm=1` |
 | `e3f_0vor` | VERIFIED AT-BAR after fold | reference/static |
-| live `e3f_vor`, `q`, eight `zpvo` | VERIFIED measured; shared debt | derived from `Kmm=1` |
+| live `e3f_vor`, `q`, eight `zpvo` | VERIFIED measured; Phase-2p partial-cell walk is Lane 4 | derived from `Kmm=1` |
 | stage-1 FCT T/S output | ORACLE_SUPPLIED; shared FCT debt routed to GYRE | stage-1 Krhs/result |
 | SI3 exchange | ORACLE_SUPPLIED | unchanged; `UNMEASURED_PENDING_ICE_MERGE` |
 | diffusive BBL input/output stream | PREREGISTERED, awaiting twins | stage 3: Kbb, Kmm, Krhs |
@@ -224,7 +237,7 @@ then enter TKE/EVD/IWM.
 | tripolar U provenance audit | ASKED | user-facing impact registered |
 | OVERFLOW retry/reduced arm | ASKED | full JIT resource-incomplete; reduced row exact |
 | tracer localization | ASKED | added without changing scorer |
-| route shared handoffs | ASKED | GYRE owns tracer/transport/live-EEN follow-up |
+| route shared handoffs | ASKED | tracer/transport closed in GYRE Round 22; partial-cell EEN re-routed to Lane 4 |
 | diffusive BBL acquisition | ASKED continuation | twins prepared; no arithmetic change |
 | user-shell MPI execution | ASKED | these two directories are the only requested runs |
 | sandbox MPI/NEMO execution | forbidden | none |
