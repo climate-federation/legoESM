@@ -21,9 +21,11 @@ import numpy as np
 
 NX, NY, NZ = 36, 26, 31
 N2, N3, NC = NX * NY, NX * NY * NZ, (NX - 4) * (NY - 4)
+WRITER_OVERRIDE: str | None = None
 BASE = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19_oracle_v2_external")
 CAND = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round21_oracle_v2_stage_ww")
 TWIN = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19_oracle_v2_external_coeff")
+RESTART = "GYRE_OMIP_L2_P3_00000010_restart.nc"
 
 
 def _sha(path: Path) -> str:
@@ -149,7 +151,7 @@ def _compare_layout(a_path: Path, b_path: Path, kind: str, plant: list[bool]) ->
         "raw_differing_bytes": int(np.count_nonzero(raw)),
         "first_differing_byte_1based": int(np.flatnonzero(raw)[0] + 1) if np.any(raw) else None,
         "changed_fields": changed,
-        "writer": SOURCES[kind][0],
+        "writer": WRITER_OVERRIDE or SOURCES[kind][0],
         "parser": SOURCES[kind][1],
     }
 
@@ -210,16 +212,34 @@ def _compare_bt(a: Path, b: Path) -> dict:
 
 
 def main() -> int:
+    global NX, NY, NZ, N2, N3, NC, WRITER_OVERRIDE
     parser = argparse.ArgumentParser()
     parser.add_argument("--baseline", type=Path, default=BASE)
     parser.add_argument("--candidate", type=Path, default=CAND)
     parser.add_argument("--twin", type=Path, default=TWIN)
     parser.add_argument("--plant-consumed", action="store_true")
+    # The consumed-field admission RULE is card-independent; only the record
+    # geometry and inventory are not.  Round 26 reuses it for the LOCK
+    # external-mode acquisition instead of writing a second copy.
+    parser.add_argument("--dims", type=int, nargs=3, metavar=("NX", "NY", "NZ"),
+                        default=(NX, NY, NZ),
+                        help="oracle array dims INCLUDING the 2-cell halo")
+    parser.add_argument("--restart", default=RESTART,
+                        help="restart file that must stay byte-identical")
+    parser.add_argument("--allowed-new", nargs="*", default=None,
+                        help="record names the candidate may add")
+    parser.add_argument("--writer",
+                        help="instrument file:line for this card's records")
     args = parser.parse_args()
+    NX, NY, NZ = args.dims
+    N2, N3, NC = NX * NY, NX * NY * NZ, (NX - 4) * (NY - 4)
+    WRITER_OVERRIDE = args.writer
     plant = [not args.plant_consumed]
     baseline_names = sorted(p.name for p in args.baseline.glob("oracle_*.bin"))
     candidate_names = sorted(p.name for p in args.candidate.glob("oracle_*.bin"))
-    allowed_new = {f"oracle_rkstage_ww_kt00000001_s{s}.bin" for s in (1, 2, 3)}
+    allowed_new = (
+        set(args.allowed_new) if args.allowed_new is not None
+        else {f"oracle_rkstage_ww_kt00000001_s{s}.bin" for s in (1, 2, 3)})
     violations, rows, exact = [], [], 0
     if set(candidate_names) - set(baseline_names) != allowed_new:
         violations.append("unexpected candidate oracle inventory")
@@ -245,7 +265,7 @@ def main() -> int:
         rows.append({"record": name, **result})
         if not result.get("consumed_equal", False):
             violations.append(name)
-    restart = "GYRE_OMIP_L2_P3_00000010_restart.nc"
+    restart = args.restart
     restart_equal = _sha(args.baseline / restart) == _sha(args.candidate / restart)
     if not restart_equal:
         violations.append(restart)
@@ -254,6 +274,7 @@ def main() -> int:
         "baseline_oracle_records": len(baseline_names), "byte_identical_records": exact,
         "classified_changed_records": rows, "restart_byte_identical": restart_equal,
         "plant_consumed": args.plant_consumed, "plant_applied": plant[0],
+        "dims_with_halo": [NX, NY, NZ], "restart": restart,
         "verdict": "PASS" if not violations else "FAIL", "violations": violations,
         "artifacts": {"baseline_restart_sha256": _sha(args.baseline / restart),
                       "candidate_restart_sha256": _sha(args.candidate / restart)},

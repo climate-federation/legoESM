@@ -22,10 +22,29 @@ if [[ -e "$target_cfg" || -e "$TARGET_RUN" ]]; then
   exit 64
 fi
 
-# OVERFLOW and LOCK compile the same shipped dynspg_ts body.  Refuse rather
-# than transplant the WRITE-only instrument across unlike physics sources.
-cmp "$NEMO_ROOT/tests/OVERFLOW_OMIP_L1_P3/WORK/dynspg_ts.F90" \
-    "$source_cfg/WORK/dynspg_ts.F90"
+# OVERFLOW and LOCK compile the same shipped dynspg_ts body, and the
+# transplanted instrument only ADDS to it.  The previous form here compared
+# two WORK entries that are both symlinks to src/OCE/DYN/dynspg_ts.F90 -- a
+# file with itself -- so it asserted nothing at all.
+readonly SHIPPED=$NEMO_ROOT/src/OCE/DYN/dynspg_ts.F90
+[[ -f "$SHIPPED" ]]
+for cfg in OVERFLOW_OMIP_L1_P3 "$SOURCE_CFG"; do
+  if [[ -e "$NEMO_ROOT/tests/$cfg/MY_SRC/dynspg_ts.F90" ]]; then
+    printf 'REFUSE: %s overrides dynspg_ts.F90 in MY_SRC; the shared-shipped-body premise is false\n' \
+      "$cfg" >&2
+    exit 66
+  fi
+  if [[ "$(readlink -f "$NEMO_ROOT/tests/$cfg/WORK/dynspg_ts.F90")" != "$SHIPPED" ]]; then
+    printf 'REFUSE: %s does not compile the shipped dynspg_ts body\n' "$cfg" >&2
+    exit 66
+  fi
+done
+# A WRITE-only instrument may add lines; it may not delete or change one.
+# diff prints '<' for every shipped line absent from the instrument.
+if diff "$SHIPPED" "$instrument" | grep -q '^<'; then
+  printf 'REFUSE: the instrument deletes or changes a shipped line; it must only ADD\n' >&2
+  exit 67
+fi
 
 work_manifest=$(mktemp -d /tmp/gyre-r25-lock-source.XXXXXX)
 printf 'temporary provenance directory (retained): %s\n' "$work_manifest"

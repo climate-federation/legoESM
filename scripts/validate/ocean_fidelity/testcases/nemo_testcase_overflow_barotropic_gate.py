@@ -19,8 +19,16 @@ from pathlib import Path
 import numpy as np
 
 BAR = 1.0e-15
+# Defaults are the OVERFLOW card this gate was written for.  Both are
+# overridable so the identical 19-frame NEMO_L1_OVBT_1 record produced for
+# another card can be read by this ONE reader instead of a second copy; LOCK's
+# own record carries (134, 7, 1, 19, 64), i.e. a single barotropic substep.
 CASE = "OVERFLOW-zps"
 EXPECTED = (206, 7, 4, 19, 64)
+CASE_EXPECTED = {
+    "OVERFLOW-zps": (206, 7, 4, 19, 64),
+    "LOCK_EXCHANGE-zco": (134, 7, 1, 19, 64),
+}
 DEFAULT_ORACLE = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l1/barotropic_walk/"
     "oracle_kt1_calls/oracle_overflow_bt_substeps_kt00000001_call1.bin"
@@ -845,6 +853,7 @@ def run_kt_walk(kt: int, oracle_root: Path, entry_root: Path, *,
 
 
 def main(argv=None) -> int:
+    global CASE, EXPECTED
     parser = argparse.ArgumentParser()
     parser.add_argument("--kt", type=int, default=1,
                         help="ocean step whose external solve is walked; "
@@ -867,6 +876,11 @@ def main(argv=None) -> int:
     parser.add_argument("--plant-entry", action="store_true")
     parser.add_argument("--plant-exit", action="store_true")
     parser.add_argument("--pytest-log", type=Path)
+    parser.add_argument("--case", choices=tuple(CASE_EXPECTED), default=CASE,
+                        help="testcase card the records belong to")
+    parser.add_argument("--expected", type=int, nargs=5,
+                        metavar=("NX", "NY", "NCYCLE", "NFIELDS", "BITS"),
+                        help="record header shape; defaults to the card's")
     parser.add_argument("--allow-dirty", action="store_true",
                         help="stamp '<sha>-dirty' instead of refusing a dirty tree")
     from legoesm.ocean.fidelity.ulp_move_gate import (
@@ -874,6 +888,8 @@ def main(argv=None) -> int:
     )
     add_ulp_compare_arguments(parser)
     args = parser.parse_args(argv)
+    CASE = args.case
+    EXPECTED = tuple(args.expected) if args.expected else CASE_EXPECTED[CASE]
     # Exit codes: 0 AT-BAR, 1 DEBT (measured), 2 gate failure (a planted
     # control that did not land, a dirty tree, a bad oracle record).
     try:
