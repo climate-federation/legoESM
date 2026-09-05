@@ -148,6 +148,15 @@ def subgrid_orography_residual_stddev(
     the classic construction, so ``load_subgrid_orography`` reads either.
     The smoothing is lon-periodic; in lat the running mean is truncated at
     the poles (renormalised, not padded).
+
+    COASTAL STEPS ARE KEPT, by design and by parity with the classic
+    construction (whose docstring says "coastal blocks keep their cliffs"):
+    with terrain clipped at 0 and no land mask, a coastal window mixes land
+    with sea zeros and the land-sea step contributes ~H^2 f(1-f) of variance
+    (GLM review).  A coastal cliff IS orographic forcing, so this is a
+    deliberate property, not an oversight -- but a masked variant (weight by
+    land fraction in the smooth AND the block moments) is the named follow-up
+    if coastal drag is ever tuned against this field.
     """
     import numpy as np
     import xarray as xr
@@ -195,15 +204,21 @@ def subgrid_orography_residual_stddev(
             np.concatenate([np.zeros_like(np.take(a, [0], axis=axis)), a],
                            axis=axis), axis=axis)
         L = a.shape[axis]
-        half = n // 2
-        idx_hi = np.clip(np.arange(L) + half + 1, 0, L)
-        idx_lo = np.clip(np.arange(L) - half, 0, L)
+        # EXACTLY n cells per window (codex P1: the earlier 2*(n//2)+1 form
+        # smoothed n+1 cells for even n, so a "4 deg" cutoff smoothed
+        # 4.25 deg while the metadata claimed 4).  For even n the window is
+        # off-centre by half a cell, which is a pure registration shift
+        # (GLM: num and den share it, the mean stays exact).
+        half_lo = n // 2
+        half_hi = n - half_lo
+        idx_hi = np.clip(np.arange(L) + half_hi, 0, L)
+        idx_lo = np.clip(np.arange(L) - half_lo, 0, L)
         hi = np.take(csum, idx_hi, axis=axis)
         lo = np.take(csum, idx_lo, axis=axis)
         out = hi - lo
         if periodic:
-            wrap_hi = np.arange(L) + half + 1 - L
-            wrap_lo = -(np.arange(L) - half)
+            wrap_hi = np.arange(L) + half_hi - L
+            wrap_lo = -(np.arange(L) - half_lo)
             add_hi = np.take(csum, np.clip(wrap_hi, 0, L), axis=axis)
             add_lo = (np.take(csum, [L], axis=axis)
                       - np.take(csum, np.clip(L - wrap_lo, 0, L), axis=axis))
