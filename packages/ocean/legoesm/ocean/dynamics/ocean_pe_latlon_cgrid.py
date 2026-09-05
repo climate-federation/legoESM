@@ -3994,14 +3994,45 @@ def _bc_physics_tendencies(du_dt, dv_dt, dT_dt, dS_dt, physics_fn, state, grid, 
 def surface_stress_faces(
     surface_forcing, u_dtype, z_coord, J, grid, *,
     nemo_literal_association=False, use_native=True,
+    cell_mask=None, u_mask=None, v_mask=None,
 ):
     """Wind stress at u/v faces + the top-cell thicknesses (single owner of
     the tau sign/interp/rotation chain — used by the explicit stage-10b'
     deposition, the implicit surface-stress BC, and the F_slow barotropic
     wind term; CLAUDE.md no-duplicate-numerics).
 
+    ``cell_mask``/``u_mask``/``v_mask`` are supplied together by the NEMO
+    identity.  They apply ``sbcmod.F90:543-546``'s coastal unmasking after
+    interpolation: ``(2-umask)*MAX(tmask_w,tmask_e)`` (and its V analogue).
+    Omitting all three retains the generic non-NEMO handoff.
+
     Returns ``(tau_i_u, tau_j_v, dz_0_u, dz_0_v)`` (ocean-reaction sign,
     grid-aligned) or ``None`` when the forcing carries no stress."""
+    masks = (cell_mask, u_mask, v_mask)
+    if any(value is None for value in masks) and not all(
+            value is None for value in masks):
+        raise ValueError("cell_mask, u_mask and v_mask must be supplied together")
+
+    def _apply_nemo_coastal_factors(tau_i_u, tau_j_v):
+        if cell_mask is None:
+            return tau_i_u, tau_j_v
+        from legoesm.grids.operators_latlon_cgrid import pad_lon_cgrid
+
+        tmask = jnp.asarray(cell_mask, dtype=u_dtype)
+        umask = jnp.asarray(u_mask, dtype=u_dtype)
+        vmask = jnp.asarray(v_mask, dtype=u_dtype)
+        t_lon = pad_lon_cgrid(tmask, halo=1)
+        tmask_u = jnp.maximum(t_lon[:, :-1], t_lon[:, 1:])
+        t_lat = pad_ns_zero(tmask)
+        tmask_v = jnp.maximum(t_lat[:-1], t_lat[1:])
+        two = jnp.asarray(2.0, dtype=u_dtype)
+        tau_i_u = nemo_source_round(
+            nemo_source_round(tau_i_u * nemo_source_round(two - umask))
+            * tmask_u)
+        tau_j_v = nemo_source_round(
+            nemo_source_round(tau_j_v * nemo_source_round(two - vmask))
+            * tmask_v)
+        return tau_i_u, tau_j_v
     _sf_tau_x = getattr(surface_forcing, "tau_x", None)
     _sf_tau_y = getattr(surface_forcing, "tau_y", None)
     _native_i = getattr(surface_forcing, "tau_i_native", None)
@@ -4017,6 +4048,7 @@ def surface_stress_faces(
             grid=grid, source_round=True)
         dz_0_u = interp_cell_to_uface(
             jnp.asarray(z_coord.dz_ref[0], dtype=u_dtype) * J)
+        tau_i_u, tau_j_v = _apply_nemo_coastal_factors(tau_i_u, tau_j_v)
         return tau_i_u, tau_j_v, dz_0_u, dz_0_v
     if surface_forcing is None or _sf_tau_x is None or _sf_tau_y is None:
         return None
@@ -4049,6 +4081,7 @@ def surface_stress_faces(
     if nemo_literal_association:
         tau_i_u = nemo_source_round(tau_i_u)
         tau_j_v = nemo_source_round(tau_j_v)
+    tau_i_u, tau_j_v = _apply_nemo_coastal_factors(tau_i_u, tau_j_v)
     dz_0_u = interp_cell_to_uface(dz_0_T)
     return tau_i_u, tau_j_v, dz_0_u, dz_0_v
 

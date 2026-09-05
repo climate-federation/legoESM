@@ -1668,3 +1668,18 @@ coefficient statement.  The former algebraic folding of `ff_f/e3f_vor` into
 each level was not a NEMO branch.  Both S-16 and S-17 use the one shared
 `legoesm.core.source_rounding.nemo_source_round` helper; no GYRE guard or
 second NEMO routine implementation was introduced.
+
+## 2026-09-04 S-51 — coastal surface-stress face factors
+
+| RoutineRow | NEMO routine / source | NEMO selector | cards | one legoESM implementation | selector / private seam | disposition |
+|---|---|---|---|---|---|---|
+| S-51 | U/V stress interpolation and coastal factors (`sbcmod.F90:539-546`) | none | D G A | `ocean_pe_latlon_cgrid.surface_stress_faces`, consumed by both the external-mode slow forcing and implicit momentum-ZDF surface boundary | no public selector; private `_NEMOWSRK3TestHooks.legacy_coastal_surface_stress_factors` is a gate-only ablation | SHARED |
+
+The NEMO identity applies the written `(2-umask)*MAX(tmask,tmask_east)`
+factor (and its meridional analogue) after the face average.  The generic
+non-NEMO caller may omit masks; every NEMO WS-RK3 consumer supplies the same
+cell and face masks.  GYRE's 580 active U and 570 active V faces are unchanged
+because their factor is one, while the source-written dry coastal inventory
+moves on 124 U and 102 V faces and becomes bit-identical to oracle V2.  The
+private legacy hook does not construct a model card and introduces no second
+physics implementation.

@@ -159,7 +159,7 @@ def _native_v2(values) -> np.ndarray:
 
 def run(
     root: Path, *, plant: bool, legacy_wind_arm: bool,
-    legacy_stress_arm: bool,
+    legacy_stress_arm: bool, legacy_coastal_stress_arm: bool,
 ) -> dict[str, object]:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -205,6 +205,7 @@ def run(
             expose_barotropic_substeps=True,
             legacy_barotropic_wind_association=legacy_wind_arm,
             legacy_geographic_surface_stress_arm=legacy_stress_arm,
+            legacy_coastal_surface_stress_factors=legacy_coastal_stress_arm,
         ),
     )
     model.prime_step_caches(state)
@@ -263,6 +264,14 @@ def run(
             "mask": compare(candidate[f"{face}mask"], oracle[f"{face}mask"], active3),
             "r1_h0": compare(candidate[f"r1_h{face}0"], oracle[f"r1_h{face}0"], active2),
             "wind_tau": compare(candidate[f"tau_{face}"], oracle[f"{face}tau"], active2),
+            # sbcmod.F90:543-546 deliberately writes coastal dry faces too.
+            # Score the complete face array as well as the dynamically active
+            # subset so the coastal-unmasking arm cannot disappear behind the
+            # momentum mask.
+            "wind_tau_all_faces": compare(
+                candidate[f"tau_{face}"], oracle[f"{face}tau"],
+                np.ones_like(active2, dtype=bool),
+            ),
             "raw_wind_tau": compare(
                 candidate[f"raw_tau_{face}"], oracle[f"{face}tau"], active2
             ),
@@ -416,6 +425,7 @@ def run(
         "plant": plant,
         "legacy_wind_arm": legacy_wind_arm,
         "legacy_stress_arm": legacy_stress_arm,
+        "legacy_coastal_stress_arm": legacy_coastal_stress_arm,
         "oracle_root": str(root),
         "source_citations": {
             "three_dimensional_rhs": "stp2d.F90:126-171",
@@ -454,12 +464,14 @@ def main() -> int:
     parser.add_argument("--plant", action="store_true")
     parser.add_argument("--legacy-wind-arm", action="store_true")
     parser.add_argument("--legacy-stress-arm", action="store_true")
+    parser.add_argument("--legacy-coastal-stress-arm", action="store_true")
     args = parser.parse_args()
     report = run(
         args.oracle_root,
         plant=args.plant,
         legacy_wind_arm=args.legacy_wind_arm,
         legacy_stress_arm=args.legacy_stress_arm,
+        legacy_coastal_stress_arm=args.legacy_coastal_stress_arm,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")

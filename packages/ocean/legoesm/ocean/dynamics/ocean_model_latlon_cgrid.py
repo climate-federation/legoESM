@@ -1128,6 +1128,10 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # no constructible model configuration can select either arm.
     legacy_geographic_surface_stress_arm: bool = False
     legacy_barotropic_wind_association: bool = False
+    # One-variable ablation of sbcmod.F90:543-546's coastal stress factors.
+    # Public NEMO identities always apply them; this private hook restores the
+    # former bare face interpolation for movement/scaling evidence only.
+    legacy_coastal_surface_stress_factors: bool = False
     # Private ablation of dynspg_ts.F90:629's written continuity association.
     # Production NEMO identities materialize ssh_frc + zhdiv before the
     # rDt_e product; this restores the formerly collapsed algebra only for a
@@ -4783,7 +4787,13 @@ class LatLonCGridOceanModel:
                         _grid,
                         use_native=not (
                             self._nemo_ws_test_hooks
-                            .legacy_geographic_surface_stress_arm))
+                            .legacy_geographic_surface_stress_arm),
+                        **({} if self._nemo_ws_test_hooks
+                            .legacy_coastal_surface_stress_factors else {
+                                "cell_mask": state.land_mask.data,
+                                "u_mask": state.u_mask.data,
+                                "v_mask": state.v_mask.data,
+                            }))
                     if surface_forcing is not None else None)
             if _sfx is not None:
                 _tau_i_u, _tau_j_v, _, _ = _sfx
@@ -9520,7 +9530,12 @@ class LatLonCGridOceanModel:
             )
             _sfx = surface_stress_faces(
                 surface_forcing, state.u.data.dtype, _zc, J_cell,
-                _grid)
+                _grid, **({} if self._nemo_ws_test_hooks
+                           .legacy_coastal_surface_stress_factors else {
+                               "cell_mask": state.land_mask.data,
+                               "u_mask": state.u_mask.data,
+                               "v_mask": state.v_mask.data,
+                           }))
             if _sfx is not None:
                 _tau_i_u, _tau_j_v, _dz0u, _dz0v = _sfx
                 _r0 = jnp.asarray(_cfg_b.constants.rho_0,

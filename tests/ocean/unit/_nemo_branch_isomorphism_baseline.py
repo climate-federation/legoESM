@@ -933,6 +933,15 @@ ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
                        "native U/V face-gradient recurrence",
                        selected_by=("DINO", "GYRE"))),
     )),
+    RoutineRow("S-51", "sbc U/V coastal surface-stress factors", "SHARED",
+               "none", (
+        Impl(_OPL, "surface_stress_faces",
+             Reference("nemo", "sbcmod_coastal_stress_factors",
+                       "sbcmod.F90:539-546: face average followed by "
+                       "(2-umask)*MAX(adjacent tmask); private legacy hook "
+                       "is a gate-only ablation",
+                       selected_by=("DINO", "GYRE", "ORCA1"))),
+    )),
     RoutineRow("M-01", "stp_MLF whole-step composition", "ARTIFICIAL_BRANCH", "absence of key_RK3 (nemo_mlf selected by no card)", (
         Impl(_OMLC, "_leapfrog_step",
              Reference("nemo", "stp_MLF", "stpmlf.F90:108-473 (two _step_impl passes)")),
