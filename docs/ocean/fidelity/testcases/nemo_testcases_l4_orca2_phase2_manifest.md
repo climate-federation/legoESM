@@ -162,3 +162,60 @@ all three input manifests are
 `3dfe251754fa76c8b5053cda90a51ee10589d0fffc01a4e799c49cc36bbd17e5`.
 The final handoff receipt and this self-excluding manifest are bound by the
 final Git commit and bundle digest.
+
+## Phase-2d accepted VARIANT and O1 acquisition handoff
+
+Phase-2d descends from `6e935823577b3a60056e96bfca429f43e84ecac3`.
+The ordered ladder preregistration is commit `9ebd3c91e`; the accepted-oracle
+gate is `b07d7107d`; the explicit icebergs-off card and entry gate are
+`3a3f12e03`; and the O1 acquisition addendum is `d433d2f48`.  The comparison
+oracle is the `ln_icebergs=.false.` `VARIANT`; shipped-deck records remain
+preserved but are superseded for comparison.
+
+### Accepted run and gate artifacts
+
+Root: `/data/abyssal/dbalwada/nemo-testcases-l4/phase2d`
+
+| artifact | bytes | digest |
+|---|---:|---|
+| `variant_oracle_gate_final.json` | 116,573 | `43c6d0d26503548ecec54f9c16d62ac60de1e3477cc82ee621ff6f7d2d9d71e3` |
+| `variant_oracle_gate_final.stdout.log` | 116,573 | `43c6d0d26503548ecec54f9c16d62ac60de1e3477cc82ee621ff6f7d2d9d71e3` |
+| `variant_legacy_90_records.sha256` | 8,987 | `790f7e0b46d9beaa11e62a4d0e8bef9091e40fd8a635b4c3db990288ed6c908a` |
+| `variant_all_91_records.sha256` | 9,095 | `d528c89cc82c9c5cc2ae8b203e40cd296ce1067f8742fc5f06daeda8c1588684` |
+| accepted post-`sbc` surface record | 4,101,508 | `42d1f9735a17652e6d00d4e1641cb513b67bcc221d11605d27a7971483ed16eb` |
+| `shipped_phase1_gate_regression_v2.json` | 82,458 | `cd34c630d67aa6d19bc9fdb163d581be0d347f674b474ddde8fb2414f7f5d93f` |
+| `shipped_phase1_gate_regression_v2.stdout.log` | 82,458 | `cd34c630d67aa6d19bc9fdb163d581be0d347f674b474ddde8fb2414f7f5d93f` |
+| `orca2_variant_entry_gate.json` | 1,555 | `aad0f9a637484f5f05debf54e5e58e1eeed966d8a71eda557770bf03d610a202` |
+| `orca2_variant_entry_gate.stdout.log` | 1,555 | `aad0f9a637484f5f05debf54e5e58e1eeed966d8a71eda557770bf03d610a202` |
+| instrumented ten-step complete manifest (187 files) | 17,481 | `a7c1a30836c4651a99f71ad748ce292c2f66a2f7d4d16b0d2e046150fd4fe081` |
+| uninstrumented ten-step complete manifest (96 files) | 8,386 | `f9edd367755fe8d67f1f7b123a38aafbb15b39bd4a99001ebdb34b6315155fb3` |
+| uninstrumented 30-day complete manifest (93 files) | 8,131 | `6f82643f2d15bf9084cfbc39b782ea141270465b2d211ae2d4ee19cea64bfdbf` |
+
+The accepted gate schema-walks 91 records, reports dynamic identity counts of
+four restart shards and eight history payloads, and passes ten inherited,
+six surface, and one cross-run planted controls.  The entry gate runs CPU,
+production JIT, fp64 and scalar-libm; all five entry fields are `0 / n`, and
+all eleven entry plants exit nonzero.
+
+### O1 operand acquisition
+
+The ordered ladder stops before arithmetic because the accepted records do
+not separate full post-`fld_read` mapped inputs from the pre-SI3 NCAR bulk
+leaf.  One rank-0, kt=1, WRITE-only record has therefore been prepared.
+
+| artifact | bytes | digest |
+|---|---:|---|
+| `build/nemo_ORCA2_OMIP_L4_phase2d_o1.exe` | 54,920,400 | `c9c25e1aeb17d88f8b41e6a3f263d0684678067d3aba2931913effe3da55503b` |
+| `build/build_ORCA2_OMIP_L4_phase2d_o1.log` | 10,867 | `c074be7470f1435c26f3475e17eeab75691ab8dd97429da63560ce347bb27cb3` |
+| `build/phase2d_o1_MY_SRC.sha256` | 1,092 | `7009f39fe854f89173bceba26fcf4bb8a8034cb228650e63a8586905a52d49a1` |
+| `build/phase2d_o1_ZGV.txt` | 0 | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| copied-config `MY_SRC/sbcblk.F90` | source | `75177950f32faa52bb3e59111b6adec6b4b07cf8f6044720a8873810671a0eed` |
+| prepared 63-item run census | 5,343 | `512ba04697f897991005542a5ae9115419f48b902639269cb065152219a3be16` |
+| committed acquisition launcher | 2,272 | `88590198b3222fc8c76eb5c68404f24c19cc3c98abf0978ecdc0f1bd3c6d768c` |
+| `phase2d/o1_synthetic_schema.log` | 1,261 | `3256b2a69675db6c1708aade22d7896ed6914709a2c9064b1df4286de541a3e9` |
+| failed missing-`.venv` synthetic command log, retained/retracted | 0 | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+
+The synthetic walk derives two headers with 9 and 20 fields and a total of
+3,090,336 bytes; both header-count and digest-bound one-ULP plants return
+`PASS_NONZERO`.  The final handoff receipt, acquisition gate, and this
+self-excluding manifest are bound by the handoff commit and bundle digest.
