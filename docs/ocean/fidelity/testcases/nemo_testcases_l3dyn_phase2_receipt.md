@@ -1432,7 +1432,7 @@ The interrupted zero-byte `round11_moment_replay_jit.json` is retained and
 **REJECTED**; it is not cited as evidence.  No background process remains.
 No shipped NEMO source or testcase was modified, and no artifact was deleted.
 
-### Round-12 Prather source exactness and measured stop
+### Round-12 Prather source exactness and pre-Round-13 measurements
 
 The primary production-JIT discriminator **CONFIRMS** the registered Prather
 prediction: with the oracle step-8 U/V inputs, all **160 / 160** restart-moment
@@ -1482,12 +1482,11 @@ rows remain below the immutable normalized bar through step 8:
 | 7 | `a_ip` | `10 / 9801` | `2.7755575615628914e-17` | `1.5098624118666638e-16` |
 | 8 | `a_ip` | `6 / 9801` | `5.551115123125783e-17` | `3.0191683285628125e-16` |
 
-Thus the first rung-3.3 departure from bit exactness is completed step 2,
-`a_ip`, at one ULP and below bar.  The existing 485-entry sweep first leaves
-the normalized bar at completed step 338, `e_i_l01`,
-`1.069607625239799e-15`; its final restart has 34 DEBT moment rows.  Those are
-rung-3.3 results and are not substituted for the conditional ICE_RHEO
-720-step walk.
+These are the historical pre-correction measurements.  Round 13 located the
+first `a_ip` loss at NEMO's intensive-recovery/correction ordering
+(`icedyn_adv_pra.F90:355-381,405-421`), corrected that ordering, and reran the
+whole gate.  The current result is 11,155/11,155 ordinary boundary rows
+bit-exact through 485 steps; the final restart retains 33/80 DEBT moment rows.
 
 The full-size active-ridging window does not satisfy the registered exactness
 condition.  Its dominant debt is again
@@ -1498,10 +1497,11 @@ stress12 are `2.8422262044713913e-15` and
 `8.864931383506739e-15`.  U/V remain AT-BAR but are non-bit-exact in
 `901299 / 1000000` and `938096 / 1000000` cells, with relative diagnostics
 `7.751535113774344e-15` and `7.687361842728817e-15`.  Because the oracle-U/V
-Prather arm is 160/160 exact, the named next owner is the full-size
-ICE_RHEO C-grid aEVP velocity/stress chain at this input state, before
-transport.  The moment amplification is **CONFIRMED**; a narrower aEVP source
-operand is **UNMEASURED**.
+Prather arm is 160/160 exact, Round 12 named the full-size ICE_RHEO C-grid
+aEVP velocity/stress chain as the next discriminator, not as a measured
+defect.  The Round-13 exact-input probe below **REFUTES** an aEVP operator
+defect at the strongly deforming step-9 state.  The moment amplification
+remains **CONFIRMED**.
 
 The earlier self-imposed condition that the active window also be byte-exact
 was stricter than the dispatch and is **WITHDRAWN before the long run** in the
@@ -1557,13 +1557,14 @@ The final moment owner is `restart_moment.sxya`, normalized and relative
 old endpoint scale is reproduced after removing the compiled Prather defect:
 `u_ice` is 23.427% relative and `stress12_i` 74.598% relative at step 720.
 
-This **CONFIRMS amplification of a remaining defect**, not amplification of
-only unavoidable roundoff: the isolated Prather operator is byte-exact with
-oracle U/V, but the full-size aEVP velocity/stress chain is already non-bit-
-exact/DEBT at the active step-8/long-walk step-9 boundary and grows into the
-reported endpoint.  The next owner is explicitly the first non-bit-exact
-full-size aEVP subcycle operand at the active oracle-entry state; its identity
-within strain/delta/viscosity/stress/divergence/velocity is **UNMEASURED**.
+This Round-12 mechanism sentence is **WITHDRAWN** by the Round-13
+discriminator.  The isolated Prather operator is byte-exact with oracle U/V,
+and the full C-grid aEVP operator is also byte-exact at every registered source
+boundary when supplied the exact strongly deforming oracle entry.  The
+endpoint is therefore measured amplification of an already-present fp64
+trajectory seed, not evidence of a remaining full-size aEVP algorithm defect.
+Whether such a seed is mathematically unavoidable is **UNMEASURED**; its
+measured starting magnitude is at the fp64 precision floor.
 
 Both plants bind at row level.  The Prather velocity plant makes
 `plant_delta.syye_l01` DEBT at `6.656046011101788e-7` normalized,
@@ -1596,6 +1597,122 @@ exceptions.  No background process remains, no shipped NEMO source/testcase
 was modified, no artifact was deleted, and the canonical core files are
 unchanged.
 
+### Round-13 active-regime discriminator and completed walk
+
+#### Crash recovery and artifact audit
+
+The 2026-09-05 `/tmp` exhaustion interrupted this round without a clean exit.
+The checkout's native worktree metadata still named `5401f02a7548`, while the
+lane's required `/tmp/codex-si3dyn-git` metadata named the three completed
+Round-13 commits through `dec3700da55a`; the latter is authoritative. Every
+Round-13 Python source was reread and AST-parsed, both edited campaign
+documents were reread, all surviving JSON was parsed end to end, and the copied
+`icedyn_rhg_evp.F90` instrument source reaches its normal module end. The setup
+dump, all 100 numbered subcycle dumps, and the step-9 entry frame are present;
+the subcycle dumps are uniformly 387,078,552 bytes. **No surviving file was
+truncated.** The interrupted
+`ice_rheo/round13/full_walk_intensive_order.json` was absent, so it was the
+only lost output and was rerun in the foreground through step 720 and the
+final restart. No `run.sh` was handed off, and no background process remains.
+
+#### Exact-input active aEVP discriminator
+
+The preregistered defect prediction is **REFUTED**. A WRITE-only instrument in
+a copy of the NEMO source (the shipped tree is unchanged) records the 48
+registered source-boundary families for every one of the 100 subcycles at the
+strongly deforming completed-step-9 state. The registry covers deformation,
+delta/floor, pressure and viscosities, and all three alpha/beta stress updates
+from `icedyn_rhg_evp.F90:392-489`; stress divergence and cross-grid velocity
+from `:493-514`; and the ordered force, mass/drag/Coriolis, raw velocity,
+pre-halo, and post-halo paths from the even and odd updates at `:532-634` and
+`:638-741`. With exact oracle U/V, stresses, extensive state, and forcing,
+CPU/fp64/scalar-libm production JIT is byte-exact for **4,800 / 4,800**
+operand-family/subcycle rows. Every family has zero nonexact subcycles and
+maximum ULP zero. The five production endpoints (`u`, `v`, `stress1`,
+`stress2`, `stress12`) are each `0 / 1,000,000`, and the instrumented and
+uninstrumented endpoints are likewise five times `0 / 1,000,000`.
+
+The control binds to a scored row independently of the overall exit status:
+`subcycle001.force_u` moves from `0 / 1,000,000`, BIT-EXACT, to
+`1 / 1,000,000`, DEBT, with one ULP (`5e-324` absolute). The plant asserts
+that exact row transition and exits 1.
+
+Therefore the former phrase "remaining full-size aEVP defect" is
+**WITHDRAWN**. The active C-grid aEVP implementation has no measured
+source-boundary defect when it receives exact inputs. The 720-step endpoint is
+**CONFIRMED amplification of a measured fp64-scale carried-state seed**, not
+evidence for a distinct aEVP algorithm error. Calling that seed
+mathematically unavoidable, or calling the trajectory chaotic, would exceed
+the measurement and remains **UNMEASURED**. The endpoint-effective,
+non-monotone stress12 growth from step 9 to 720 is 0.04462597985810006 per
+step, or a 4.56366975759781% factor per step (0.06438167983609172 bits/step);
+this is an endpoint exponent, not a Lyapunov exponent or a mechanism claim.
+
+#### Secondary transport-order result
+
+The historical rung-3.3 `a_ip` one-ULP row was not pond physics. The
+one-variable arm shows its extensive Prather result is exact and the bit is
+lost only when the card performs correction arithmetic before recovering the
+intensive field. NEMO first divides extensive contents back to intensive
+fields at `icedyn_adv_pra.F90:355-381`, then applies Hbig, Hsnow, and zapneg
+corrections at `:405-421`. The shared card path now preserves that literal
+order and avoids an extra extensive/intensive round trip. After the change,
+the rung-3.3 gate has **11,155 / 11,155** ordinary trajectory rows byte-exact
+through all 485 boundaries. The final restart remains honestly DEBT in 33/80
+moment rows; this change does not relabel those rows.
+
+#### ICE_RHEO steps 9--720 and restart
+
+The crash-replacement walk completed all 712 requested transitions from the
+aligned completed-step-8 state through step 720 under production JIT,
+CPU/fp64, and scalar libm. Within that long-walk register, the first
+non-bit-exact row at completed step 9 is `v_i`, `249816 / 1000000`, normalized
+and relative `1.1214373873213058e-16` (AT-BAR). All three stresses are already
+DEBT at step 9: stress1 `5.0023523591146394e-15`, stress2
+`3.92220897114362e-15`, and stress12 `1.2387066062187695e-14`. The exact-input
+discriminator above proves those full-card errors arrive through a carried
+input difference rather than being created by the isolated aEVP operator. The
+first full-card operation that creates that carried seed is the explicitly
+named next owner and is **UNMEASURED** at this stopping boundary.
+
+The per-field first-over-bar table and normalized/relative growth table above
+remain numerically unchanged in the crash-replacement artifact. At step 720,
+`u_ice` is 23.42708457% relative, `v_ice` 25.40449316%, and `stress12_i`
+74.59834626%. Final-restart coverage is 39/39 ordinary prognostic rows plus
+160/160 Prather moment rows: 33/39 ordinary and 140/160 moment rows are DEBT;
+`t_su` and `sv_i` are byte-exact; the four oracle-zero age/pond receiver rows
+remain UNINFORMATIVE. The restart owner is `restart_moment.sxya`, normalized
+and relative `1.1916055671330519`, with `994065 / 1000000` non-bit-exact cells.
+The scientific gate exits 1, as required for these DEBT rows.
+
+| Round-13 artifact/file | SHA-256 |
+|---|---|
+| exact-input active aEVP probe | `912087782bfa304aba21945938af90bb1192516cbcc073a5fd92d2c93e2e10a5` |
+| binding active aEVP row plant | `490aea91dedd53a6810ba6eed1fada2f88457ff5532a658002dbbd26692b1915` |
+| active completed-step-8 window | `8d06bc76b7ed3b6350b0180a51ddf1ac2a9d9507b50b692750b67eeb2c158edc` |
+| production-JIT steps 9--720 plus restart | `be085a8714b987116403df9a01b47631853059f5879e0b06665ef8d3d9c28fc9` |
+| corrected rung-3.3 485-boundary trajectory/restart | `e6d937b408d7000802db4fb0952ca0cd93c5b793d452c5f2293f2528cb411074` |
+| copied instrument source `icedyn_rhg_evp.F90` | `f1c92a8e815f28e9178acdd8e9e307f598b8057b329e8c2e2abece627271b3fa` |
+| copied NEMO executable | `6509d09e3997f9d0a3b936a1bdd96ec67c712277b70cd53e7726acdbd43efe3f` |
+| setup / subcycle 1 / subcycle 100 dumps | `308fc3cc490e2e7769f15e8e1b2c4ad6b06369d6b9d35ad846bba9f5909622a7` / `75374a29372213787d1c26e318348424be45606d82d81a77ca6813ef4a3a108a` / `2265774f3ad86808dea8a91426502b534d377f4d0208335d0dc4b679d6102380` |
+| copied step-9 oracle entry frame | `cdda1ab4322e869e5075a9b90a5005217dd2ed472c101b44170833b27fe6732a` |
+
+The preregistration, exact-input probe, and source-order commits are
+`59915bcf8949`, `918dcdfe74f3`, and `dec3700da55a`. The combined CPU/fp64
+science-and-ratchet run reports **2,697 passed, 2 skipped, 8 failed**; all
+science tests pass. The eight failures are the two discovery-sanity nodes
+caused by the intentionally restricted test invocation, the inline-ratchet
+budget roster, and pre-existing hardcoded-constant findings in unrelated
+FV3/core/grid/ocean files. Re-running the ratchets on every Round-13 touched
+Python file with the full package path gives **3/3 selected inline nodes** and
+**6/6 selected hardcoded-constant nodes** passing. The new active-probe unit
+tests pass 2/2 and the trajectory-gate tests pass 10/10. A crash-recovery
+focused rerun exposed and corrected one cross-rung test assertion: the
+rung-3.1 gate's `first_divergence` correctly names restart-moment DEBT rather
+than being null. The correction is commit `3d57b234c6a3`; the complete
+post-correction focused set is **26 passed in 119.78 s**. No canonical core
+file changed.
+
 ## Loudly UNMEASURED / deferred
 
 Within-step x/y Prather split states; ORCA1
@@ -1606,11 +1723,13 @@ general production run-restart integration outside the
 opt-in card's now-verified restart path; coupled ice--ocean comparison; and
 landfast L16 (OFF here,
 **UNVERIFIED-deferred to lane 4**).  No legoESM claim is made for any item in
-this paragraph.
+this paragraph. The first full-card operation that creates the fp64-scale
+carried seed before the exact-input step-9 aEVP replay, and whether that seed
+is mathematically unavoidable, are also **UNMEASURED**.
 
 ## End-of-task ASKED / UNASKED choice list
 
-The mandatory round-7--11 choice record is tabular so scope decisions cannot be
+The mandatory round-7--13 choice record is tabular so scope decisions cannot be
 lost inside narrative:
 
 | round | choice | disposition | evidence/disposition |
@@ -1646,6 +1765,12 @@ lost inside narrative:
 | 12 | Continue ICE_RHEO steps 9--720 after the ordered step-1/steps-2--8/active measurements | ASKED | Over-strict local condition withdrawn before run; completed through the step-720 restart, 33/39 ordinary and 140/160 moment rows DEBT |
 | 12 | Rename/document the public H79 source-rounding keyword without changing its default | ASKED | `source_exact=False`; only the existing C-grid caller selects true |
 | 12 | Modify canonical core files, relax the bar, add a card switch/model, change defaults, edit shipped NEMO, use GPU/MPI, delete artifacts, commit large dumps, or push | UNASKED | None performed |
+| 13 | Extend the copied NEMO instrument to active step 9 and discriminate all aEVP source operands for all 100 subcycles with exact oracle inputs | ASKED | 48/48 families and 4,800/4,800 family/subcycle rows byte-exact; preregistered defect arm REFUTED |
+| 13 | If the exact-input aEVP path is exact, classify the endpoint as amplification, report its measured exponent, and stop chasing a solver defect | ASKED, conditional | Condition CONFIRMED; endpoint-effective stress12 factor is 4.56366975759781%/step; mathematical inevitability and chaos remain UNMEASURED |
+| 13 | Locate and literally repair the secondary rung-3.3 `a_ip` one-ULP operand if cheap | ASKED | NEMO intensive recovery precedes corrections (`icedyn_adv_pra.F90:355-381,405-421`); corrected shared card order gives 11,155/11,155 ordinary boundary rows exact |
+| 13 | Rerun the ICE_RHEO steps 9--720 production-JIT walk and final restart after the discriminator | ASKED | Completed after crash recovery; first long-walk nonexact row is step-9 `v_i`, final debt is 33/39 ordinary plus 140/160 moments |
+| 13 | Correct the cross-rung test assertion exposed by the post-crash verification rerun | UNASKED, in-scope harness correction | Restored the rung-3.1 restart-moment first-divergence contract in `3d57b234c6a3`; post-fix focused set is 26/26 |
+| 13 | Modify canonical core files, change defaults/schemes, relax the bar, edit shipped NEMO, use GPU/MPI, commit multi-MB dumps, delete artifacts, or push | UNASKED | None performed; WRITE-only dumps and JSON stay external, shipped tree untouched |
 
 **ASKED choices:** resolve the rung-3.1 review HOLD in its own commit; implement
 rungs 3.1 and 3.2 against the pinned shipped cases; fp64/CPU only and `jpl=1`;
