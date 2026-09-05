@@ -34,7 +34,8 @@ NX, NY, NZ = 94, 152, 31
 NLEV = NZ - 1
 SX, SY = 91, 149
 OX, OY = NX - 4, NY - 4
-DT = 10800.0
+RN_DT = 10800.0
+STAGE_DT = RN_DT / 3.0
 
 
 class GateError(RuntimeError):
@@ -185,7 +186,7 @@ def validate(oracle_root: Path, *, plant: str | None) -> dict[str, object]:
         adjusted3 = jnp.stack(adjusted, axis=-1)
         ww = nemo_qco_wzv_recurrence(
             adjusted3, e30_[..., :NLEV], mb_, ma_, mask_[..., :NLEV],
-            jnp.asarray(DT, e3_.dtype))
+            jnp.asarray(STAGE_DT, e3_.dtype))
         return base3, adjusted3, ww
 
     base, adjusted, ww = (
@@ -241,10 +242,19 @@ def validate(oracle_root: Path, *, plant: str | None) -> dict[str, object]:
 
     no_runoff_ww = np.asarray(jax.jit(nemo_qco_wzv_recurrence)(
         jnp.asarray(base), jnp.asarray(e3t0[..., :NLEV]), jnp.asarray(r3bb),
-        jnp.asarray(r3aa), jnp.asarray(tmask[..., :NLEV]), jnp.asarray(DT)))
+        jnp.asarray(r3aa), jnp.asarray(tmask[..., :NLEV]),
+        jnp.asarray(STAGE_DT)))
     no_runoff_ablation = score(no_runoff_ww, ww_oracle, live)
-    first = next((name for name, row in rows.items()
-                  if row["status"] != "AT_BAR"), None)
+    full_step_dt_ww = np.asarray(jax.jit(nemo_qco_wzv_recurrence)(
+        jnp.asarray(adjusted), jnp.asarray(e3t0[..., :NLEV]),
+        jnp.asarray(r3bb), jnp.asarray(r3aa),
+        jnp.asarray(tmask[..., :NLEV]), jnp.asarray(RN_DT)))
+    full_step_dt_ablation = score(full_step_dt_ww, ww_oracle, live)
+    source_first = next((name for name, row in rows.items()
+                         if row["status"] != "AT_BAR"), None)
+    first = (source_first if source_first is not None
+             else ("wzv_stage_timestep"
+                   if full_step_dt_ablation["status"] != "AT_BAR" else None))
     return {
         "status": "PASS_MEASUREMENT_COMPLETE",
         "boundary": "O5-B/stage1-divhor-runoff-QCO-WZV-pFw",
@@ -253,9 +263,10 @@ def validate(oracle_root: Path, *, plant: str | None) -> dict[str, object]:
         "owner": (
             "CONFIRMED_ORCA2_RUNOFF_AND_SHARED_WZV_AT_BAR" if first is None
             else ("ORCA2_OWNER_RUNOFF" if first == "runoff"
-                  else "GYRE_OWNER_SHARED_WZV_OR_STAGE_TRANSPORT")),
+                  else "GYRE_OWNER_SHARED_WZV_STAGE_CLOCK")),
         "rows": rows,
         "runoff_omission_ablation": no_runoff_ablation,
+        "production_full_step_dt_ablation": full_step_dt_ablation,
         "record": {"path": str(path), "sha256": sha256(path),
                    "schema": record["header"]},
         "execution": {
@@ -271,6 +282,7 @@ def validate(oracle_root: Path, *, plant: str | None) -> dict[str, object]:
             "transport": "traadv.F90:221-250; divhor.F90:116-126,140-141",
             "runoff": "sbcrnf.F90:253-260 (ln_rnf_depth=F)",
             "recurrence": "sshwzv.F90:330-336",
+            "stage_clock": "stprk3_stg.F90:123-124 (rDt=rn_Dt/3)",
             "area_product": "traadv.F90:264-269",
         },
     }
