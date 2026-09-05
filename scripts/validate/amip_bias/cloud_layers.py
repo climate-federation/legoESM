@@ -217,9 +217,13 @@ def analyse_checkpoint(path, cloud_cfg, ncell):
                          "carries no q_c/q_i tracers -- refusing to feed zeros")
     q_c = np.zeros_like(T) if q_c is None else q_c
     q_i = np.zeros_like(T) if q_i is None else q_i
-    # Number tracers go in RAW, exactly as physics_pipeline hands them to the
-    # radiation call (optics reads N_c per volume, N_i per mass; a zero N_c
-    # carry falls back to Nc_default inside compute_cloud_properties).
+    # Number tracers go in RAW, exactly as physics_pipeline.compute_radiation_core
+    # hands them to compute_cloud_properties.  NB that live path passes the
+    # per-MASS N_c carry into optics that read N_c per VOLUME (the other
+    # radiation entry, integration._extract_tracer_columns, multiplies by air
+    # density first) -- a live inconsistency this probe deliberately mirrors
+    # rather than corrects, so its liquid r_eff matches the run's.  A zero N_c
+    # carry (specified-Nc runs) falls back to Nc_default inside the optics.
     conv = col("physstate_conv_precip") if cloud_cfg.convective_cloud else None
     props = compute_cloud_properties(T, p_full, q_v, dp, cloud_cfg,
                                      q_cloud=q_c, q_ice=q_i,
