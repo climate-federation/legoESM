@@ -990,7 +990,7 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
     composes; it is NOT an error.
 
     ``tke_eice`` (``--tke-eice``): None keeps the ORCA1 card default
-    (nn_eice=3); 0/1/3 override the under-ice lc/etau attenuation mode for
+    (nn_eice=3); 0/1/2/3 override the under-ice lc/etau attenuation mode for
     A/B runs (0 reproduces the pre-2026-07-18 no-attenuation behaviour).
 
     ``tke_surface_bc`` (``--tke-surface-bc``): None keeps the TKEConfig default
