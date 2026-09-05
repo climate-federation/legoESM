@@ -14,7 +14,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 from legoesm.ice.constants_config import IceConstantsConfig
-from legoesm.ice.snow import snow_ice_flooding
+from legoesm.ice.snow import nemo_si3_snowfall_fraction, snow_ice_flooding
 from legoesm.timestepping.tridiagonal import thomas_solve
 
 from legoesm import constants as canonical_constants
@@ -719,6 +719,7 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
              _snow_ice_salinity: bool = True,
              _nemo_snow_sublimation_order: bool = True,
              _nemo_snow_remap: bool = True,
+             _snow_partition_pow_fn=None,
              ) -> SI3ColumnArrays:
     """Resolved no-lateral-melt thickness sequence (`icethd_dh.F90:91-533`)."""
 
@@ -726,8 +727,9 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
     h_i0, h_s0 = state.h_ice, state.h_snow
     # Snowfall partition and snow-first sublimation (:97-202).  Four segments
     # are ordered new precipitation, then the three old snow layers.
-    snow_partition = 1.0 - jnp.power(
-        jnp.maximum(1.0 - a, 0.0), _SNOW_BLOW_FRACTION
+    snow_partition = nemo_si3_snowfall_fraction(
+        jnp.maximum(1.0 - a, 0.0), _SNOW_BLOW_FRACTION,
+        _pow_fn=_snow_partition_pow_fn,
     )
     inverse_snow_density = 1.0 / constants.rho_snow
     if _nemo_snow_sublimation_order:
@@ -1038,6 +1040,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
                            _nemo_eos_order: bool = True,
                            _nemo_snow_sublimation_order: bool = True,
                            _nemo_snow_remap: bool = True,
+                           _snow_partition_pow_fn=None,
                            ) -> SI3StepTrace:
     """Execute the selected `ice_thd` chain and retain every oracle boundary."""
 
@@ -1059,6 +1062,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         _snow_ice_salinity=_snow_ice_salinity,
         _nemo_snow_sublimation_order=_nemo_snow_sublimation_order,
         _nemo_snow_remap=_nemo_snow_remap,
+        _snow_partition_pow_fn=_snow_partition_pow_fn,
     )
     # `ice_thd_temp` is diagnostic because enthalpy is prognostic (:221-247).
     post_temp1 = post_dh

@@ -58,6 +58,23 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from legoesm.core.source_rounding import nemo_source_round
+from legoesm.core.transcendentals import pow as policy_pow
+
+
+def nemo_si3_snowfall_fraction(
+    open_water_fraction: jnp.ndarray,
+    exponent: float,
+    *,
+    _pow_fn=None,
+) -> jnp.ndarray:
+    """SI3 wind-blown snowfall fraction, ``icevar.F90:1619-1628``."""
+    pow_fn = policy_pow if _pow_fn is None else _pow_fn
+    open_fraction = nemo_source_round(open_water_fraction)
+    return nemo_source_round(
+        1.0 - nemo_source_round(pow_fn(open_fraction, exponent))
+    )
+
 
 # ==============================================================================
 # Combined snow + ice conductive flux

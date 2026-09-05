@@ -246,6 +246,7 @@ def test_full_year_gate_and_all_plants() -> None:
         "libm_si3_exner",
         "libm_si3_saturation_log10",
         "libm_si3_saturation_pow",
+        "libm_si3_snowfall_pow",
     ):
         with pytest.raises(gate.GateError):
             gate.evaluate(plant=plant)

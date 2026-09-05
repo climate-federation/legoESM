@@ -682,6 +682,10 @@ def evaluate(
             poison_policy_pow
             if plant == "libm_si3_saturation_pow" else None
         ),
+        _snow_partition_pow_fn=(
+            poison_policy_pow
+            if plant == "libm_si3_snowfall_pow" else None
+        ),
     )
     for name in STAGE1_NAMES[25:]:
         predictions[(1, name)] = flux2[name]
@@ -841,6 +845,7 @@ def evaluate(
         "libm_si3_exner",
         "libm_si3_saturation_log10",
         "libm_si3_saturation_pow",
+        "libm_si3_snowfall_pow",
     }:
         pass
     elif plant is not None:
@@ -980,6 +985,7 @@ def main() -> int:
         "libm_si3_exner",
         "libm_si3_saturation_log10",
         "libm_si3_saturation_pow",
+        "libm_si3_snowfall_pow",
     ))
     args = parser.parse_args()
     result = evaluate(

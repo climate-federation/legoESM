@@ -56,6 +56,7 @@ from legoesm.ice.snow import (
     combined_conductance,
     consume_from_snow_then_ice,
     consume_sublimation_from_snow_then_ice,
+    nemo_si3_snowfall_fraction,
     snow_ice_flooding,
 )
 from legoesm.ice.brine import update_salinity_and_salt_flux
@@ -644,6 +645,7 @@ def _nemo_si3_blk_ice_2(
     _exner_pow_fn=None,
     _saturation_log10_fn=None,
     _saturation_pow_fn=None,
+    _snow_partition_pow_fn=None,
 ):
     """ORCA1-resolved ``ice_alb`` + ``blk_ice_2`` scalar identity.
 
@@ -719,11 +721,10 @@ def _nemo_si3_blk_ice_2(
     else:  # private pre-fix ablation: sbcblk assembly before source-order fix
         evaporation_ice = latent / ice_constants.latent_sublimation
         devaporation_ice = dq_latent / ice_constants.latent_sublimation
-    snow_on_ice_fraction = source_round(
-        1.0 - source_round(
-            source_round(1.0 - ice_fraction_before)
-            ** bulk_config.snow_blow_exponent
-        )
+    snow_on_ice_fraction = nemo_si3_snowfall_fraction(
+        source_round(1.0 - ice_fraction_before),
+        bulk_config.snow_blow_exponent,
+        _pow_fn=_snow_partition_pow_fn,
     )
     open_fraction = source_round(1.0 - ice_fraction_before)
     liquid_precip = source_round(total_precip - snow_precip)
