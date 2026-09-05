@@ -272,8 +272,9 @@ def capture_legoesm_trace(*, flux_form_override, kt: int = 1,
     update (harness-only control arm).
 
     ``kt`` selects which step's external solve is captured: the first
-    ``kt - 1`` steps run as the production trajectory gate runs them, the
-    ``kt``-th under ``jax.disable_jit`` with the trace hook.  ``reseed_entry``
+    ``kt - 1`` steps run as the production trajectory gate runs them, and the
+    ``kt``-th returns the trace through the production-jitted pytree seam.
+    ``reseed_entry``
     (a NEMO ``oracle_step_entry_kt{kt}`` record) replaces legoESM's own
     kt-entry prognostic state by NEMO's, so the captured solve starts from
     an EXACT entry and its first over-bar frame names the operand rather
@@ -282,7 +283,6 @@ def capture_legoesm_trace(*, flux_form_override, kt: int = 1,
     perturbed arm); it is mutually exclusive with ``reseed_entry``.
     """
     import jax
-    import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as ocean_model
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
         nemo_flux_form_update_active,
@@ -308,26 +308,14 @@ def capture_legoesm_trace(*, flux_form_override, kt: int = 1,
     require(production_resolution,
             "production does not resolve to the literal flux-form update")
 
-    original = ocean_model.barotropic_substeps_latlon_cgrid
-    captured = []
-    armed = []
-
-    def wrapper(*args, **kwargs):
-        if armed and not captured:
-            kwargs = dict(kwargs)
-            kwargs["_nemo_substep_trace_test_hook"] = True
-            kwargs["_nemo_flux_form_update_test_override"] = flux_form_override
-            state_new, transports, trace = original(*args, **kwargs)
-            captured.append(trace)
-            return state_new, transports
-        return original(*args, **kwargs)
-
     require(kt >= 1, "kt must be positive")
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks
 
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, cfg,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_barotropic_substeps=True,
+            barotropic_flux_form_update_override=flux_form_override,
             legacy_seed_min_rule_faces=legacy_seed_faces))
     state = card.recipe.initial_state
     require(reseed_entry is None or start_state is None,
@@ -342,18 +330,13 @@ def capture_legoesm_trace(*, flux_form_override, kt: int = 1,
     else:
         for _ in range(kt - 1):
             state = model.step(state, dt=card.dt_s)
-    ocean_model.barotropic_substeps_latlon_cgrid = wrapper
-    try:
-        armed.append(True)
-        # The test hook must materialise its operand arrays on the host; a
-        # traced Python closure would retain DynamicJaxprTracers instead.
-        with jax.disable_jit():
-            model.step(state, dt=card.dt_s)
-    finally:
-        ocean_model.barotropic_substeps_latlon_cgrid = original
-    require(len(captured) == 1, f"captured {len(captured)} call-1 traces")
-
-    trace = captured[0]
+    # The WRITE-only trace is an ordinary leaf of the compiled return pytree.
+    # Materialise it only after ``step`` returns; capturing it in a Python
+    # closure during tracing retains DynamicJaxprTracers and makes the gate
+    # depend on an eager route that production never executes.
+    captured = model.step(state, dt=card.dt_s)
+    require(hasattr(captured, "substeps"), "compiled step did not return trace")
+    trace = captured.substeps
     # The solver returns ONE keyed frame shared with the L2-GYRE harness (see
     # barotropic_latlon_cgrid._run_substep_loop).  Bind by NAME: this registry
     # declares the subset THIS gate scores, and a name the solver stops

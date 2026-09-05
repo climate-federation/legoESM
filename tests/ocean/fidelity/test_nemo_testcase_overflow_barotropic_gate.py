@@ -157,10 +157,22 @@ def test_compare_to_is_wired_into_the_frame_gate(tmp_path, monkeypatch):
     }
     reference = tmp_path / "reference.json"
     reference.write_text(json.dumps(report))
+    output = tmp_path / "candidate.json"
     monkeypatch.setattr(gate, "run", lambda *args, **kwargs: report)
+    compared = []
+
+    def compare(args, candidate):
+        compared.append((args.compare_to, candidate))
+        return {"status": "PASS"}
+
+    import legoesm.ocean.fidelity.ulp_move_gate as ulp_move_gate
+
+    monkeypatch.setattr(ulp_move_gate, "run_ulp_comparison", compare)
     assert gate.main([
-        "--compare-to", str(reference), "--allow-dirty",
+        "--compare-to", str(reference), "--output", str(output),
+        "--allow-dirty",
     ]) == 0
+    assert compared == [(reference, report)]
 
 
 def _write_zero_trace_kt(path: Path, kt: int) -> None:

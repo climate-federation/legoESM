@@ -1016,6 +1016,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # ``_step_impl`` eagerly to obtain internals, because eager execution does
     # not certify the compiled production arithmetic.
     expose_barotropic_substeps: bool = False
+    # Private companion for the 19-frame OVERFLOW causal gate. ``None``
+    # preserves the production predicate; ``False`` restores the legacy
+    # velocity-form update while the trace still crosses the compiled return
+    # pytree. No public configuration can select this test-only arm.
+    barotropic_flux_form_update_override: object = None
 
     # Ablates the per-stage external-mode REPLACEMENT inside the one WS stage
     # ladder (stprk3_stg.F90:433-446): each stage then keeps its own depth
@@ -5507,6 +5512,14 @@ class LatLonCGridOceanModel:
                 if _return_barotropic_substeps:
                     _baro_seed = dict(
                         _baro_seed, _nemo_substep_trace_test_hook=True)
+                    _flux_update_override = (
+                        self._nemo_ws_test_hooks
+                        .barotropic_flux_form_update_override)
+                    if _flux_update_override is not None:
+                        _baro_seed = dict(
+                            _baro_seed,
+                            _nemo_flux_form_update_test_override=(
+                                _flux_update_override))
                 if self._nemo_ws_test_hooks.legacy_seed_min_rule_faces:
                     _baro_seed = dict(
                         _baro_seed,
