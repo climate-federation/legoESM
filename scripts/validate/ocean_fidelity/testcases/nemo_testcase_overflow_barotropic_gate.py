@@ -29,6 +29,17 @@ CASE_EXPECTED = {
     "OVERFLOW-zps": (206, 7, 4, 19, 64),
     "LOCK_EXCHANGE-zco": (134, 7, 1, 19, 64),
 }
+# The resolved barotropic program the candidate must carry, per card, read
+# from each card's namelist_cfg rather than assumed: (time filter, nn_e).
+CASE_BAROTROPIC = {
+    "OVERFLOW-zps": ("nemo_boxcar1_ab3", 3),
+    "LOCK_EXCHANGE-zco": ("nemo_ab3am4", 1),
+}
+# resolved_program, whole_step_kt2_causal_arm and ownership are OVERFLOW
+# CONCLUSIONS with OVERFLOW constants baked in.  Emitting them for another
+# card would publish a false record, so they are withheld by name.
+OVERFLOW_ONLY_REPORT_KEYS = (
+    "resolved_program", "whole_step_kt2_causal_arm", "ownership")
 DEFAULT_ORACLE = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l1/barotropic_walk/"
     "oracle_kt1_calls/oracle_overflow_bt_substeps_kt00000001_call1.bin"
@@ -307,8 +318,11 @@ def capture_legoesm_trace(*, flux_form_override, kt: int = 1,
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     card = build_nemo_testcase_card(CASE)
     cfg = card.recipe.model_config
-    require(cfg.barotropic.barotropic_time_filter == "nemo_boxcar1_ab3", "wrong filter")
-    require(cfg.barotropic.n_barotropic_substeps == 3, "wrong nn_e")
+    want_filter, want_nn_e = CASE_BAROTROPIC[CASE]
+    require(cfg.barotropic.barotropic_time_filter == want_filter,
+            f"wrong filter: {cfg.barotropic.barotropic_time_filter!r} != {want_filter!r}")
+    require(cfg.barotropic.n_barotropic_substeps == want_nn_e,
+            f"wrong nn_e: {cfg.barotropic.n_barotropic_substeps} != {want_nn_e}")
     require(cfg.momentum_time_integrator == "rk3_ws", "wrong momentum integrator")
     require(cfg.momentum_advection == "flux_form", "wrong momentum form")
     # Measured, not assumed: the production predicate the solver evaluates.
@@ -353,10 +367,11 @@ def capture_legoesm_trace(*, flux_form_override, kt: int = 1,
     # addition; keying is strictly the stronger guard.)
     missing = [name for name in FIELDS if name not in trace]
     require(not missing, f"candidate frame is missing {missing}")
-    require(int(np.asarray(trace["eta_entry"]).shape[0]) == 4,
+    icycle = EXPECTED[2]
+    require(int(np.asarray(trace["eta_entry"]).shape[0]) == icycle,
             "candidate icycle mismatch")
     substeps = []
-    for jn in range(4):
+    for jn in range(icycle):
         substeps.append(
             {
                 name: _candidate_frame(np.asarray(trace[name])[jn], STAGGER[name])
@@ -619,7 +634,7 @@ def run(
         require(pytest_log.is_file(), f"pytest log does not exist: {pytest_log}")
         artifacts["pytest_log"] = {"path": str(pytest_log), "sha256": sha256(pytest_log)}
 
-    return {
+    report = {
         "format": "nemo-testcase-l1-overflow-barotropic-gate-v1",
         "case": CASE,
         "status": status,
@@ -716,6 +731,18 @@ def run(
             "NEMO 5.0.2 src/OCE/DYN/dynspg_ts.F90:823-847",
         ],
     }
+    if CASE != "OVERFLOW-zps":
+        for key in OVERFLOW_ONLY_REPORT_KEYS:
+            report[key] = {
+                "status": "NOT_APPLICABLE_ON_THIS_CARD",
+                "reason": (
+                    f"{key} is an OVERFLOW-zps conclusion with OVERFLOW "
+                    "constants baked in (its resolved namelist, its kt=2 "
+                    "prior residuals, its owner labels).  Publishing it for "
+                    f"{CASE} would be a false record."
+                ),
+            }
+    return report
 
 
 def _score_substeps(arm_name: str, oracle: dict, candidate: dict) -> tuple[list, dict | None, list]:
