@@ -71,7 +71,11 @@ def _series(tmp_path, *, leak, n=6, dt_days=1.0):
     path = tmp_path / "timeseries.npz"
     np.savez(path, days=np.arange(n, dtype=float) * dt_days,
              energy_toa_net=toa, energy_dE_dt=dedt, energy_residual=residual,
-             sw_net_sfc=sw, lw_net_sfc=lw, hfss=sh, hfls=lh)
+             sw_net_sfc=sw, lw_net_sfc=lw, hfss=sh, hfls=lh,
+             # Interval means unless a test says otherwise: the probe refuses
+             # snapshot-sourced series outright.
+             energy_flux_interval_mean=np.ones(n),
+             precip=np.full(n, 3.0))
     return path
 
 
@@ -173,6 +177,88 @@ def test_ragged_channels_are_refused_not_reported(tmp_path):
     np.savez(path, **d)
     with pytest.raises(SystemExit, match="SHIFTED|lengths disagree"):
         mod.load(path)
+
+
+def test_snapshot_sourced_series_is_refused(tmp_path):
+    """A leak from snapshots must RAISE, not be reported with a caveat.
+
+    The contaminated number is plausible (+34.7 W/m^2 measured against a ~20
+    hypothesis), so a caveat would be dropped the moment it is quoted onward.
+    """
+    mod = _load()
+    path = _series(tmp_path, leak=20.0, n=6)
+    d = dict(np.load(path))
+    d["energy_flux_interval_mean"] = np.zeros(6)
+    np.savez(path, **d)
+    with pytest.raises(SystemExit, match="REFUSING"):
+        mod.assert_interval_means(mod.load(path))
+    # ...and the escape hatch still labels it rather than hiding it.
+    msg = mod.assert_interval_means(mod.load(path), allow_snapshots=True)
+    assert "CONTAMINATED" in msg
+
+
+def test_a_series_predating_the_flag_is_also_refused(tmp_path):
+    """Unknown timing is refused too — absence of the flag is not consent."""
+    mod = _load()
+    path = _series(tmp_path, leak=20.0, n=6)
+    d = dict(np.load(path))
+    del d["energy_flux_interval_mean"]
+    np.savez(path, **d)
+    with pytest.raises(SystemExit, match="REFUSING"):
+        mod.assert_interval_means(mod.load(path))
+
+
+def test_interval_mean_series_passes_and_says_so(tmp_path):
+    mod = _load()
+    msg = mod.assert_interval_means(mod.load(_series(tmp_path, leak=0.0)))
+    assert "INTERVAL MEANS" in msg
+
+
+def test_the_driver_persists_every_channel_the_probe_requires():
+    """The probe's required channels must all be WRITTEN by the driver.
+
+    A channel can be collected into the in-memory series and never reach
+    `timeseries.npz`, and the failure is invisible until a multi-hour run
+    finishes and the probe refuses it (codex review caught exactly this for
+    `energy_flux_interval_mean`). Read the writer's keyword list from source
+    and check it covers what `load` demands.
+    """
+    import ast
+    import pathlib as _pl
+
+    driver = (_pl.Path(__file__).resolve().parents[2] / "packages" / "coupler"
+              / "legoesm" / "driver" / "model_driver.py")
+    tree = ast.parse(driver.read_text())
+    written: set[str] = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "savez"):
+            written.update(kw.arg for kw in node.keywords if kw.arg)
+    mod = _load()
+    required = set(mod._NEEDED) | {"energy_flux_interval_mean"}
+    missing = sorted(required - written)
+    assert not missing, (
+        f"the probe requires {missing} but no np.savez in model_driver.py "
+        "writes them — a run would complete and then be refused")
+
+
+def test_the_frozen_precipitation_bound_is_the_predicted_size(tmp_path):
+    """L_f * precip, the pre-registered upper bound on the definitional gap.
+
+    E carries -L_f*q_frozen and the flux list has no precipitation term, so
+    frozen condensate leaving the column reads as a spurious energy SOURCE of
+    L_f times the frozen precipitation rate. Pin the conversion, because the
+    whole prediction is a magnitude: 3.337e5 J/kg over 86400 s is 3.86 W/m^2
+    per mm/day, so a 3 mm/day column bounds the gap at ~11.6 W/m^2 -- the size
+    of the residual left after the interval-mean correction.
+    """
+    from legoesm import constants
+    mod = _load()
+    t = mod.load(_series(tmp_path, leak=0.0, n=6))
+    bound = constants.L_f * t["precip"] / 86400.0
+    assert float(bound[0]) == pytest.approx(11.59, rel=1e-3), float(bound[0])
+    assert constants.L_f / 86400.0 == pytest.approx(3.862, rel=1e-3)
 
 
 def test_runs_end_to_end(tmp_path):
