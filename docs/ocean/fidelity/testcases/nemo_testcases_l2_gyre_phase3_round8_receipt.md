@@ -3927,8 +3927,11 @@ oracle-relative move gate.  Nothing moved.
 | OVERFLOW stage sweep (`--faithful-only`) | 9 | 0 | absent |
 | OVERFLOW trajectory (`--continue-after-first`) | 50 | 0 | unchanged, kt2 `T/u` |
 
-All eight stage-2 composition modes reproduce their reported values bit for
-bit, as do the three equal-input Kaa rows and the OVERFLOW 19-frame record.  The
+All eight stage-2 composition modes reproduce the LANDED values bit for bit,
+as do the three equal-input Kaa rows and the OVERFLOW 19-frame record.  The
+ending session left several same-mode reports under distinct names as it
+walked the arms (`*_literal`, `*_direct`, `*_gdept`, `*_ordered`); only the
+`*_gdept` set is the landed tree, and it is that set the re-run matches.  The
 cross-card Rule-12 verdicts against round 24 are:
 
 ```text
