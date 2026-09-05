@@ -335,3 +335,38 @@ The earlier Phase-2f receipt's layout label is corrected to the actually
 resolved `jpni=2`, `jpnj=1`.  No run bytes or namelist values are changed by
 that documentary correction.  This manifest deliberately excludes its own
 digest; the final handoff commit and bundle close the committed evidence set.
+
+## Phase-2h systematic writer audit and replacement-twin handoff
+
+Phase-2g's O1-canonical twins contain 92 records each.  The fail-closed raw
+gate reports 91 / 92 exact; only the stage-1 transport operand record differs,
+with 232 `zub` and 198 `zvb` f64 slots.  Accordingly, the former 91-record V2
+label is superseded by `CANONICAL_CANDIDATE_91`.  No complete VARIANT V2 set is
+pinned before the systematic twins return 92 / 92.
+
+| retained/prepared artifact | bytes | digest |
+|---|---:|---|
+| Phase-2g twin reproducibility JSON | 27,544 | `6f3f06182af0ba8330c3b1e66ff102683684dae156c697f3512dfa582a2fd69e` |
+| binding reproducibility plant JSON | 27,469 | `edfbc9786cc7b59cb6fa2a55f715e0a1c5a83786267fb55d4759aafca7275513` |
+| 92 / 92 A-versus-A polarity control JSON | 27,469 | `02c1e0fcbe03ec73b9370f2f0cbc08563ab44af3175d1ad17714974f47e5e84e` |
+| systematic scalar-math binary | 55,519,664 | `c47a1a6bd9b1873f28cf3eaa34a6264cd3ed65e24d16f8d145c1137e2671a308` |
+| successful build log | 77,616 | `7146ac801ee88981a4dac1115970588550eec3062200d436bf60e0ad50e198b3` |
+| preserved failed build log | 37,452 | `efd317c60b1abb9d66b6bd8cf59fadbeddf853aef1e7750b3cc682dbabe780d0` |
+| systematic MY_SRC manifest | 1,190 | `4ea891a7810f5818b6f3c6d15bb5dbcd49a44a4b8d808f6756fda6e9460106ff` |
+| zero-line `_ZGV*` result | 0 | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| arm-A prepared manifest | 313 | `3c3c437452df02a2dbbbd4ed3f6bd87c185857319acf6215136043f3dd3dc20e` |
+| arm-B prepared manifest | 313 | `f339aff29876373dddaac09d6149509964f9e2d5bc4c00a230c56073e3347570` |
+| arm-A launcher | 2,277 | `b0d479d2c9db7b66a25489d608e6dbe272cd9c4ca6c68733890414fa58f0a381` |
+| arm-B launcher | 2,277 | `137772b2c9c41691cc91c7a91fd73092e195e57aeeea688b5d5d206f821eaf45` |
+| repeated O1 numerical gate JSON | 4,244 | `7541f93a973d5bc1a2f6841689c1b49ac01d7cd01a9f5813de4111d281a398f5` |
+| post-bulk RGB gate JSON | 1,055 | `236e507cb354cef9aaf45e805c29f087ab803d37805d2b800d812104a11a8e76` |
+| RGB binding-plant stdout | 58 | `e5cffa2a0c66073742c9bbc0024ad0b106103a70d1e1b513b410ef3309df59bd` |
+
+The exact O1 handoff record is 3,090,336 bytes, SHA-256
+`751b2d9181778e81f01bc5872d47100afc0fc3ad02c4ffcccc9613a0af2ad045`.
+All nine CORE/fld_read fields remain exact at 0 / 13,320.  O1-B remains a
+`LANE3B_OWNER` debt and is handed to the ice-thermo lane against that record.
+Using oracle-supplied bulk and SI3 outputs, the continued ladder's first debt
+is O2-RGB at 149,647 / 233,341 wet T cells, owner `ORCA2_OWNER`.  Downstream
+boundaries were not entered.  The Phase-2h receipt and this self-excluding
+manifest are closed by the final handoff commit and bundle digest.
