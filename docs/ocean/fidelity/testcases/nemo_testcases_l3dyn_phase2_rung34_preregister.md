@@ -561,3 +561,80 @@ normalized and relative growth at 9, 10, 50, 100, 200, 485, and 720, every
 final ordinary row, and all 160 final moment rows.  The first non-bit-exact
 boundary for the campaign remains the separately measured active completed
 step 8; the long walk begins at step 9 and cannot retroactively move it.
+
+## Round-13 active-regime aEVP discriminator (registered before probe edits)
+
+### Clock, exact inputs, and source registry
+
+The discriminator targets **completed ICE_RHEO step 9**, the first long-walk
+boundary where all three stress rows are DEBT (about `1.2e-14` normalized).
+Its rheology input is the oracle `ice_stp` entry frame `kt=9`; the next entry
+frame, `kt=10`, is the completed-step boundary.  The WRITE-only NEMO probe is
+a copy-run of the already certified oracle and does not alter the shipped
+NEMO source or test.  It dumps all 100 inner iterations from that `kt=9`
+entry.  The legoESM arm starts from the oracle `u_ice`, `v_ice`, and
+restart-carried `stress1_i`, `stress2_i`, and `stress12_i` in that same frame;
+there is no trajectory-carried legoESM input in this discriminator.
+
+Every subcycle scores the following source-statement boundaries:
+
+| operand family | grid | executed NEMO statements |
+|---|---|---|
+| shear, squared shear, divergence, tension | F/T | `icedyn_rhg_evp.F90:392-418,430-440` |
+| ellipse invariant, `delta`, creep-floor denominator | T | `:420-424` |
+| pressure-over-delta, zeta/eta equivalents | T | `:423-424,457-461` |
+| T/F alpha and beta reciprocals | T/F | `:442-449,465-477` |
+| `stress1_i`, `stress2_i`, `stress12_i` aEVP updates | T/F | `:457-461,483-489` |
+| U/V stress divergence | U/V | `:493-510` |
+| cross-grid velocities | U/V | `:512-514` |
+| ocean drag, basal drag, Coriolis, mass/RHS and velocity update | V then U on even subcycles, U then V on odd subcycles | `:532-630,638-737` |
+| thin/fast masks and full periodic halo refresh | U/V | `:576-579,627-630,681-685,733-741` |
+
+The case has zero Coriolis and no landfast contribution, so those registered
+rows are expected exact structural zeros; they remain in the registry rather
+than being inferred away.  Boundary rows compare both the pre-halo and
+post-halo velocity fields so a correct interior with a wrong periodic refresh
+cannot pass.
+
+### Binary prediction and ownership rule
+
+The preregistered prediction is that at least one non-bit-exact registered
+operand appears with exact oracle inputs during the first active subcycle;
+the most specific prediction supported before this run is the nonlinear
+invariant/viscosity-to-stress chain, not a particular leaf expression.
+CONFIRM is any scored nonzero cell at its first source boundary.  That first
+boundary is the defect owner and must be repaired in the one shared C-grid
+aEVP arm with the literal source operation; after repair the exact-input
+step-9 replay and 9--720 production-JIT walk repeat.  REFUTE is **every
+registered operand bit-exact for all 100 subcycles**.  On REFUTE, the prior
+“full-size aEVP defect” inference is withdrawn: the measured trajectory is
+amplification of an upstream below-bar residual, and its exponent is computed
+from the recorded first nonzero and final values without assigning another
+mechanism.
+
+A planted one-bit perturbation to a named clean dumped stress-divergence row
+must move that row from `0 / n` to nonzero and make the discriminator exit
+nonzero.  The control asserts the row transition itself; the ordinary gate's
+status cannot substitute for binding evidence.  All comparisons use CPU,
+fp64, production JIT, and `transcendentals="libm"`; normalized and relative
+columns are both reported, with the campaign's max-one normalized metric as
+the gate bar.
+
+### Secondary pond-area residual
+
+Only after the active discriminator closes, the rung-3.3 independent-entry
+step-2 `a_ip` residual (one ULP in 2/9801 cells) is descended through the
+executed pond/roundoff arithmetic.  A source-literal correction is authorized
+only if a one-variable replay moves those cells to exact; otherwise it remains
+named DEBT.  No pond or thermodynamic scheme is added.
+
+### Round-13 ASKED / UNASKED choices
+
+| choice | disposition | reason |
+|---|---|---|
+| Extend the copy-run WRITE-only subcycle probe from the quiet boundary to completed step 9 and score every registered operand for iterations 1--100 | ASKED | Primary dispatch discriminator |
+| Use exact oracle entry state, CPU fp64 production JIT, and scalar libm | ASKED | Prevent trajectory carry or backend differences from confounding ownership |
+| Repair the first nonexact operand in the shared C-grid arm, then repeat step 9 and the 9--720 walk | ASKED, conditional | Required only if the exact-input replay finds a defect |
+| Classify all-exact subcycles as amplification and report the measured exponent | ASKED, conditional | Required only if the defect prediction is refuted |
+| Descend the rung-3.3 `a_ip` one-ULP pond residual after the primary discriminator | ASKED | Secondary dispatch item |
+| Modify canonical core files, shipped NEMO files/tests, model defaults, precision/bar, or add large binary artifacts to git | UNASKED | Outside authorized scope |
