@@ -100,3 +100,33 @@ canonical blocks are searched and extended before any helper is added.
 
 No unasked scientific option, threshold, cadence, state variable, or input
 source is selected.
+
+## O1 acquisition addendum (before measurement)
+
+The accepted 91-stream variant record set closes V0--V3 and C0--C1, but it
+cannot separate the two owners inside O1.  The final post-`sbc` record is
+written after `sbcblk`, SI3, runoff, freshwater-budget carry, and halo/stress
+assembly.  The inherited SI3 bulk stream contains only three selected column
+samples.  Neither records the complete `fld_read` result or the open-ocean
+`blk_oce_2` result on rank 0.  A disagreement against the final record would
+therefore be owner-ambiguous between `ORCA2_OWNER` input semantics and
+`LANE3B_OWNER` bulk arithmetic.
+
+Before implementing or scoring O1, one replacement instrumented variant run
+is registered.  A configuration-local, `lwp`-guarded WRITE-only extension of
+`MY_SRC/sbcblk.F90` will write exactly two kt=1 frames:
+
+1. immediately after `fld_read` (`sbcblk.F90:559`): the nine rotated/mapped
+   `sf%fnow` fields selected by `namsbc_blk`;
+2. immediately after `blk_oce_2` (`sbcblk.F90:623-634`): processed air state,
+   precipitation, ocean surface state, NCAR intermediates, and the open-ocean
+   stress/heat/freshwater outputs, before SI3 or runoff can change them.
+
+Both frames use the live `A2D(0)` allocation and carry their field count in
+the header; the validator will derive payload size from `(nx,ny,nfields)` and
+walk both headers.  The accepted icebergs-off scalar-math binary is rebuilt
+with no other source change.  The replacement run is ten steps at `np=2`,
+`jpni=2,jpnj=1`, and must remain byte-identical to the accepted variant
+uninstrumented ten-step control for all ordinary outputs.  A header-count
+plant and one-ULP payload plant must exit nonzero.  No O1 implementation or
+comparison is permitted until this record passes.
