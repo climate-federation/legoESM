@@ -59,6 +59,22 @@ def test_nemo_nn_eice1_is_scalar_libm_tanh_not_linear_fraction():
         set_policy(old)
 
 
+def test_nemo_nn_eice2_is_raw_fraction_and_dispatch_is_closed():
+    """zdftke.F90:256: mode 2 preserves raw ``fr_i``; unknowns raise."""
+    fr_i = jnp.asarray([0.0, 0.01, 0.25, 0.9], dtype=jnp.float64)
+    got = np.asarray(jax.jit(
+        lambda value: nemo_tke_effective_ice_fraction(value, 2))(fr_i))
+    np.testing.assert_array_equal(got.view(np.uint64),
+                                  np.asarray(fr_i).view(np.uint64))
+    tangent = jax.grad(lambda value: jnp.sum(
+        nemo_tke_effective_ice_fraction(value, 2)))(fr_i)
+    np.testing.assert_array_equal(np.asarray(tangent), np.ones(4))
+    for mode in (0, 1, 2, 3):
+        assert nemo_tke_effective_ice_fraction(fr_i, mode).shape == fr_i.shape
+    with pytest.raises(ValueError, match="0, 1, 2 or 3"):
+        nemo_tke_effective_ice_fraction(fr_i, 4)
+
+
 # ---------------------------------------------------------------------------
 # Langmuir source (Axell 2002 / NEMO ln_lc)
 # ---------------------------------------------------------------------------

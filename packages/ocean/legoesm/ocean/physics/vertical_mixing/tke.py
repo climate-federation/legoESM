@@ -2019,13 +2019,18 @@ def nemo_tke_effective_ice_fraction(
         argument = nemo_source_round(
             value * jnp.asarray(10.0, dtype=value.dtype))
         return nemo_source_round(precision_tanh(argument))
+    if mode == 2:
+        # NEMO zdftke.F90:256 assigns the resolved sea-ice fraction without
+        # transformation.  Keeping this as its own arm preserves NEMO's
+        # numbering: mode 1 is tanh(10*fi), while raw fi is mode 2.
+        return value
     if mode == 3:
         return jnp.minimum(
             jnp.asarray(4.0, dtype=value.dtype) * value,
             jnp.asarray(1.0, dtype=value.dtype),
         )
     raise ValueError(
-        f"Unknown TKEConfig.eice={mode!r}; expected NEMO nn_eice 0, 1 or 3.")
+        f"Unknown TKEConfig.eice={mode!r}; expected NEMO nn_eice 0, 1, 2 or 3.")
 
 
 def _nemo_literal_langmuir_operands(

@@ -70,6 +70,31 @@ not change it and did not walk EVD/IWM past the open TKE boundary.  Reproducer:
 pinned in the final manifest.  Target-bit plants for `taum_input`,
 `ice_fraction`, `zWlc2`, and `zpelc` each exited nonzero.
 
+## 3. User Decision 12 — NEMO `nn_eice=2`
+
+**CONFIRMED identity restoration:** the one shared
+`nemo_tke_effective_ice_fraction` dispatcher now implements all four NEMO
+numbers and raises otherwise: 0 is zero attenuation, 1 is
+`TANH(10*fr_i)`, 2 is raw `fr_i`, and 3 is `MIN(4*fr_i,1)`
+(`zdftke.F90:253-258,828-834`).  The raw-fraction behaviour that legoESM once
+called mode 1 remains selectable, now under NEMO's number 2; mode 1 keeps its
+restored NEMO meaning.  Defaults remain zero.  The ORCA2 identity card selects
+1 and the ORCA1 CORE2 driver selects 3.
+
+The mode-2 JIT/fp64 bit test is exact, its gradient is identically one, and the
+closed dispatcher test covers 0/1/2/3 plus a raising unknown-mode control.
+Targeted evidence: **93 / 93 tests passed** across the full TKE source-term,
+under-ice, and tripole-vmix files; the post-change focused run passed **29 / 29**.
+The ORCA1 mode-3 test plus C1D ice transport constructibility passed **9**, with
+one existing skip and no failures.
+
+**CONFIRMED Rule 12:** the GYRE, LOCK, and OVERFLOW actual NEMO kt=1 entry gate
+remains `0 / n` for every T/S/u/v/ssh row; its binding LOCK-T plant exits
+nonzero.  GYRE selects `eice=0`; LOCK and OVERFLOW have no TKE call path.  C1D
+likewise has no ocean-TKE call path, and its ice transport tests are unchanged.
+The ORCA1 CORE2 builder still resolves `eice=3`, whose established mode-3 bit
+test is unchanged.  Thus only the newly selected mode-2 branch moves.
+
 ## ASKED / UNASKED
 
 | action | classification | disposition |
@@ -79,6 +104,9 @@ pinned in the final manifest.  Target-bit plants for `taum_input`,
 | score `taum` before TKE arithmetic | ASKED | CONFIRMED ORACLE_SUPPLIED hand-off, 0/8,794 |
 | walk TKE to first non-bit statement | ASKED | CONFIRMED `zpelc`, GYRE owner; stopped fail-closed |
 | alter shared `zpelc` arithmetic | Lane-4-forbidden | not done; reproducer routed to GYRE |
+| keep NEMO selector numbering | ASKED, User Decision 12 | CONFIRMED 0/1/2/3 dispatcher; mode 2 is raw fraction |
+| meaning of mode 1 | ASKED semantic disclosure | old legoESM: raw `fr_i`; corrected: `tanh(10*fr_i)`; old behaviour selectable as mode 2 |
+| change a default or another card selector | UNASKED | not done; default remains 0, ORCA1 remains 3 |
 | retain twin B and prior roots | ASKED | CONFIRMED retained and labelled |
 | pin Phase-2u TKE records | forbidden | rejected records remain flagged, never scored |
 | change shared arithmetic during admission | UNASKED | none |

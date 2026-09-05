@@ -1028,9 +1028,9 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                                    shear_production=tke_shear_production,
                                    lc=tke_lc, etau_mode=tke_etau)
         if tke_eice is not None:
-            if int(tke_eice) not in (0, 1, 3):
+            if int(tke_eice) not in (0, 1, 2, 3):
                 raise ValueError(
-                    f"--tke-eice {tke_eice!r} invalid; expected 0, 1 or 3 "
+                    f"--tke-eice {tke_eice!r} invalid; expected 0, 1, 2 or 3 "
                     "(NEMO nn_eice modes).")
             _tke = _tke._replace(eice=int(tke_eice))
         vm = VerticalMixingConfig(scheme="tke", tke=_tke)
@@ -5200,12 +5200,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "top). Default 'none' is byte-identical. "
                         "STABILITY: TKE x superbee tracer advection blew up "
                         "on DINO in ~15 days — smoke-gate before long runs.")
-    p.add_argument("--tke-eice", type=int, default=None, choices=[0, 1, 3],
+    p.add_argument("--tke-eice", type=int, default=None, choices=[0, 1, 2, 3],
                    help="Under-ice attenuation of the TKE lc/etau wave "
                         "sources (NEMO nn_eice) for --tripole-vmix tke. "
                         "None (default) keeps the ORCA1 card value (3 = "
                         "max(0,1-4*fi), wave TKE killed at fi>=0.25); 1 = "
-                        "(1-fi); 0 = no attenuation (reproduces the "
+                        "1-tanh(10*fi); 2 = 1-fi; 0 = no attenuation (the "
                         "pre-2026-07-18 behaviour for A/B). The ice "
                         "concentration reaches the closure via "
                         "surface_forcing.ice_concentration under "

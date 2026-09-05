@@ -819,9 +819,9 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
         #    FAILS FAST (silent no-op forbidden — same contract as the MPAS
         #    KPP bridge).  lc/etau run fine without ice (fi=0 open water).
         _tke_eice = int(getattr(cfg, "eice", 0))
-        if _tke_eice not in (0, 1, 3):
+        if _tke_eice not in (0, 1, 2, 3):
             raise ValueError(
-                f"Unknown TKEConfig.eice={_tke_eice!r}; expected 0, 1 or 3.")
+                f"Unknown TKEConfig.eice={_tke_eice!r}; expected 0, 1, 2 or 3.")
         ice_frac = (getattr(surface_forcing, "ice_concentration", None)
                     if (_tke_eice != 0 and surface_forcing is not None)
                     else None)

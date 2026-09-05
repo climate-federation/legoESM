@@ -885,14 +885,16 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         # internally, so the mode maps onto an EFFECTIVE ice fraction:
         #   0 (default, bit-identical): no attenuation — ice_frac stays None;
         #   1: eff = tanh(10*fi)     -> factor 1-tanh(10*fi)        (nn_eice=1);
+        #   2: eff = fi              -> factor 1-fi                  (nn_eice=2);
         #   3: eff = min(4*fi, 1)    -> kernel factor max(0,1-4*fi) (nn_eice=3,
         #      the ORCA1 namelist choice — wave TKE fully killed at fi>=0.25).
         # Unknown values raise (dispatch hardening; static config value).
         _eice = int(getattr(tke_cfg, "eice", 0))
-        if _eice not in (0, 1, 3):
+        if _eice not in (0, 1, 2, 3):
             raise ValueError(
                 f"Unknown TKEConfig.eice={_eice!r}; expected 0 (no under-ice "
-                "attenuation), 1 ((1-fi)) or 3 (max(0,1-4*fi), NEMO nn_eice=3) "
+                "attenuation), 1 (1-tanh(10fi)), 2 (1-fi), or 3 "
+                "(max(0,1-4fi), NEMO nn_eice=3) "
                 "on the lc/etau TKE sources.")
         _tke_ice_fr = None
         if _eice != 0 and surface_forcing is not None:
