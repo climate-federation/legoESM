@@ -34,4 +34,3 @@ Any changed unpoisoned row refutes the prediction and will be reported as a
 finding.  This addendum is an ASKED-scope completion discovered by the required
 inventory, not multi-category work and not permission to convert any unmeasured
 operator.
-

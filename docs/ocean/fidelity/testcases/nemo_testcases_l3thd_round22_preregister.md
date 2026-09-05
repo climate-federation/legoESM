@@ -82,4 +82,3 @@ slab seed or prognostic `uu_b/vv_b` work is authorized.
 | remeasure the named SI3/C1D/cross-card registers | ASKED | predictions fixed above |
 | convert unmeasured native NEMO-identity sites | UNASKED | inventory only |
 | implement multi-category SI3 or prognostic `uu_b/vv_b` | UNASKED | explicitly excluded |
-
