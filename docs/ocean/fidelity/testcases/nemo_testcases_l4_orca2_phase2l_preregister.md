@@ -49,7 +49,7 @@ through the same scorer.
 ## P2L-B — resolved momentum program
 
 The ORCA2 card must resolve `momentum_advection="vector_invariant"` and
-`ke_gradient_scheme="centered"`, the legoESM spellings of
+`ke_gradient_scheme="c2"`, the legoESM spellings of
 `ln_dynadv_vec=.true.` and `nn_dynkeg=0`.  This is checked against the variant
 namelist and `ocean.output`, not inferred from the card name.  A selector plant
 changes only `ke_gradient_scheme` and must be rejected by card validation.

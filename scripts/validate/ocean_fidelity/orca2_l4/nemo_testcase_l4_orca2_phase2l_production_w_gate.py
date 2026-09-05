@@ -157,7 +157,7 @@ def validate(deck_root: Path, oracle_root: Path, *, plant: bool) -> dict[str, ob
     cfg = card.recipe.model_config
     require(cfg.momentum_advection == "vector_invariant",
             "ORCA2 card does not select vector momentum")
-    require(cfg.ke_gradient_scheme == "centered",
+    require(cfg.ke_gradient_scheme == "c2",
             "ORCA2 card does not select nn_dynkeg=0/C2")
 
     # The external mode is a registered upstream shared debt.  Substitute its
