@@ -29,6 +29,8 @@ NEW_STREAMS = {
     "oracle_een_q_kt00000001.bin": ("NEMO_L4_QEEN_1", 1),
     "oracle_een_zpvo_kt00000001.bin": ("NEMO_L4_ZPVO_1", 8),
 }
+TRANSPORT_S1 = "oracle_transport_kt00000001_s1.bin"
+TRANSPORT_HEADER_BYTES = 16 + 8 * 4
 
 
 class GateError(RuntimeError):
@@ -108,8 +110,15 @@ def read_stream(path: Path, magic_expected: str, nfields_expected: int,
         umask, vmask = _face_masks(mesh_path)
         for index, array in enumerate(arrays):
             live = umask if index < 4 else vmask
-            require(np.all(array[~live] == 0.0),
-                    f"{path.name}: field {index} inactive face/below-bottom slot nonzero")
+            # dyn_cor_2D_init evaluates the primitive for jk=1..mbku/mbkv,
+            # including jk=1 on dry columns (NEMO bottom indices are at
+            # least one).  The subsequent coefficient accumulation applies
+            # the neighbouring face mask.  Thus source-owned slots are the
+            # loop extent, not merely live face cells.
+            bottom = np.maximum(np.count_nonzero(live, axis=2), 1)
+            source_owned = np.arange(NZ)[None, None, :] < bottom[:, :, None]
+            require(np.all(array[~source_owned] == 0.0),
+                    f"{path.name}: field {index} below-loop slot nonzero")
     return {
         "sha256": sha256(path), "bytes": path.stat().st_size,
         "magic": magic, "header": list(header),
@@ -133,6 +142,56 @@ def _record_inventory(root: Path) -> set[str]:
     return {path.name for path in root.glob("oracle_*.bin")}
 
 
+def _owned_bytes(array: np.ndarray) -> bytes:
+    """Return rank-zero owned cells in a stable byte order."""
+    return np.ascontiguousarray(
+        array[HALO:-HALO, HALO:-HALO, :]
+    ).tobytes()
+
+
+def _transport_arrays(path: Path) -> tuple[bytes, list[np.ndarray]]:
+    raw = path.read_bytes()
+    n3 = NX * NY * NZ
+    require(len(raw) == TRANSPORT_HEADER_BYTES + 3 * n3 * 8,
+            f"{path.name}: unexpected transport byte size {len(raw)}")
+    values = np.frombuffer(raw, dtype=np.float64, offset=TRANSPORT_HEADER_BYTES)
+    return raw[:TRANSPORT_HEADER_BYTES], _arrays(values, 3)
+
+
+def compare_transport_consumed(reference: Path, candidate: Path) -> dict[str, object]:
+    """Admit only the pre-consumer zFw slot; zFu/zFv are consumed fields."""
+    ref_header, ref_arrays = _transport_arrays(reference)
+    got_header, got_arrays = _transport_arrays(candidate)
+    require(ref_header == got_header,
+            f"{candidate.name}: transport header differs")
+    rows = []
+    for index, field in enumerate(("zFu", "zFv")):
+        ref_owned = _owned_bytes(ref_arrays[index])
+        got_owned = _owned_bytes(got_arrays[index])
+        require(ref_owned == got_owned,
+                f"{candidate.name}: consumed {field} owned cells differ")
+        rows.append({
+            "field": field,
+            "status": "EXACT_BYTES_OWNED_CONSUMED",
+            "owned_cells": (NX - 2 * HALO) * (NY - 2 * HALO) * NZ,
+        })
+    ref_w, got_w = ref_arrays[2], got_arrays[2]
+    xor = np.frombuffer(_owned_bytes(ref_w), dtype=np.uint8) != np.frombuffer(
+        _owned_bytes(got_w), dtype=np.uint8)
+    return {
+        "status": "PASS_CONSUMED_FIELDS_EXACT",
+        "header": "EXACT_BYTES",
+        "consumed": rows,
+        "unconsumed": {
+            "field": "zFw",
+            "status": "UNINFORMATIVE_PRE_CONSUMER_WORKSPACE",
+            "owned_differing_bytes": int(np.count_nonzero(xor)),
+            "raw_differing_elements": int(np.count_nonzero(
+                ref_w.view(np.uint64) != got_w.view(np.uint64))),
+        },
+    }
+
+
 def validate_twins(a: Path, b: Path, inherited: Path | None) -> dict[str, object]:
     names_a, names_b = _record_inventory(a), _record_inventory(b)
     require(names_a == names_b,
@@ -154,15 +213,23 @@ def validate_twins(a: Path, b: Path, inherited: Path | None) -> dict[str, object
         require(inherited_names == names_a - set(NEW_STREAMS),
                 "inherited V2 inventory is not exactly candidate minus four new streams")
         inherited_rows = []
+        consumed_exceptions = []
         for name in sorted(inherited_names):
-            require((inherited / name).read_bytes() == (a / name).read_bytes(),
-                    f"inherited raw-identity mismatch: {name}")
-            inherited_rows.append({"file": name, "status": "EXACT_BYTES",
-                                   "sha256": sha256(a / name)})
+            if name == TRANSPORT_S1:
+                consumed_exceptions.append({
+                    "file": name,
+                    **compare_transport_consumed(inherited / name, a / name),
+                })
+            else:
+                require((inherited / name).read_bytes() == (a / name).read_bytes(),
+                        f"inherited raw-identity mismatch: {name}")
+                inherited_rows.append({"file": name, "status": "EXACT_BYTES",
+                                       "sha256": sha256(a / name)})
         result["inherited_raw_identity"] = {
             "status": "PASS", "raw_exact": len(inherited_rows),
-            "total": len(inherited_rows), "rows": inherited_rows,
-            "consumed_field_exceptions": [],
+            "consumed_exact": len(consumed_exceptions),
+            "total": len(inherited_names), "rows": inherited_rows,
+            "consumed_field_exceptions": consumed_exceptions,
         }
     return result
 
@@ -235,6 +302,26 @@ def planted_controls(root: Path) -> dict[str, str]:
     expect("canonical_zero_slot", lambda overlay: _patch(
         _materialize(overlay, root, first), HEADER_BYTES,
         struct.pack("=d", 1.0)))
+
+    # The exception itself must remain binding.  Change an owned zFu cell in a
+    # materialized copy and call the same consumed-field comparator used by
+    # baseline admission.
+    with tempfile.TemporaryDirectory(prefix="orca2-l4-transport-plant-") as td:
+        changed = Path(td) / TRANSPORT_S1
+        shutil.copyfile(root / TRANSPORT_S1, changed)
+        linear = HALO + NX * (HALO + NY * 0)
+        offset = TRANSPORT_HEADER_BYTES + 8 * linear
+        with changed.open("r+b") as handle:
+            handle.seek(offset)
+            value = struct.unpack("=d", handle.read(8))[0]
+            handle.seek(offset)
+            handle.write(struct.pack("=d", np.nextafter(value, np.inf)))
+        try:
+            compare_transport_consumed(root / TRANSPORT_S1, changed)
+        except GateError:
+            results["consumed_transport_bit"] = "PASS_NONZERO"
+        else:
+            raise GateError("consumed-transport plant passed production checker")
     return results
 
 
