@@ -11,7 +11,7 @@ readonly PATCH_FILE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)/traadv_round
 
 source_cfg=$NEMO_ROOT/cfgs/$SOURCE_CFG
 target_cfg=$NEMO_ROOT/cfgs/$TARGET_CFG
-[[ -d "$source_cfg/MY_SRC" && -d "$source_cfg/EXPREF" ]]
+[[ -d "$source_cfg/MY_SRC" && -d "$source_cfg/EXP00" ]]
 [[ -f "$PATCH_FILE" ]]
 if [[ -e "$target_cfg" || -e "$TARGET_RUN" ]]; then
   printf 'REFUSE: target already exists: %s or %s\n' "$target_cfg" "$TARGET_RUN" >&2
@@ -22,19 +22,19 @@ work_manifest=$(mktemp -d /tmp/gyre-r21-source.XXXXXX)
 printf 'temporary provenance directory (retained): %s\n' "$work_manifest"
 (
   cd "$source_cfg"
-  find EXPREF MY_SRC -type f -print0 | sort -z | xargs -0 sha256sum
+  find EXP00 MY_SRC -type f -print0 | sort -z | xargs -0 sha256sum
 ) >"$work_manifest/source_cfg.sha256"
 sha256sum "$NEMO_ROOT/arch/arch-conda-scalarmath.fcm" \
   "$source_cfg/cpp_${SOURCE_CFG}.fcm" >"$work_manifest/toolchain.sha256"
 
 cd "$NEMO_ROOT"
 ./makenemo -r GYRE_PISCES -n "$TARGET_CFG" -m conda-scalarmath
-cp -a "$source_cfg/EXPREF/." "$target_cfg/EXPREF/"
+cp -a "$source_cfg/EXP00/." "$target_cfg/EXP00/"
 cp -a "$source_cfg/MY_SRC/." "$target_cfg/MY_SRC/"
 cp "$source_cfg/cpp_${SOURCE_CFG}.fcm" "$target_cfg/cpp_${TARGET_CFG}.fcm"
 (
   cd "$target_cfg"
-  find EXPREF MY_SRC -type f -print0 | sort -z | xargs -0 sha256sum
+  find EXP00 MY_SRC -type f -print0 | sort -z | xargs -0 sha256sum
 ) >"$work_manifest/copied_cfg_before_patch.sha256"
 sed "s|$target_cfg|$source_cfg|g" "$work_manifest/copied_cfg_before_patch.sha256" \
   >/dev/null  # paths are relative; this documents that no path rewrite is needed
