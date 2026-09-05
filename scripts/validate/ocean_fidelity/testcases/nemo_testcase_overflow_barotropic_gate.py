@@ -399,6 +399,8 @@ def score_frame(name: str, oracle, candidate, mask, *, plant=False) -> dict:
     residual = candidate[active] - oracle[active]
     absolute = np.abs(residual)
     index_flat = int(np.argmax(absolute))
+    active_indices = np.argwhere(active)
+    unequal = candidate[active].view(np.uint64) != oracle[active].view(np.uint64)
     absolute_max = float(absolute[index_flat])
     scale = max(float(np.max(np.abs(oracle[active]))), 1.0)
     error = absolute_max / scale
@@ -412,6 +414,11 @@ def score_frame(name: str, oracle, candidate, mask, *, plant=False) -> dict:
         "signed_residual_at_max": float(residual[index_flat]),
         "bar": BAR,
         "n": int(active.sum()),
+        "n_unequal": int(np.count_nonzero(unequal)),
+        "first_unequal_index": (
+            active_indices[int(np.flatnonzero(unequal)[0])].tolist()
+            if np.any(unequal) else None),
+        "max_residual_index": active_indices[index_flat].tolist(),
         "oracle_dtype": str(oracle.dtype),
         "candidate_dtype": str(candidate.dtype),
     }
