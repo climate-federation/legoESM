@@ -283,6 +283,41 @@ def test_gyre_card_pins_rotated_grid_mi96_ic_and_seasonal_sbc():
     ) == 50
     assert np.array_equal(np.asarray(recipe.grid.native_lat_T_deg), source["gphit"])
     assert np.array_equal(np.asarray(recipe.grid.f_T), source["ff_t"])
+    expected_f_v = np.concatenate(
+        [
+            source["ff_f"][:1]
+            - (source["ff_f"][1:2] - source["ff_f"][:1]),
+            source["ff_f"],
+        ],
+        axis=0,
+    )
+    # Pin the certified GYRE generic f_v bytes while carrying native NEMO ff_f
+    # independently for the ENE arm.
+    np.testing.assert_array_equal(np.asarray(recipe.grid.f_v), expected_f_v)
+    np.testing.assert_array_equal(np.asarray(recipe.grid.ff_f), source["ff_f"])
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        nemo_een_ene_vertex_coriolis,
+        vertex_coriolis,
+    )
+    generic_vertex = np.concatenate(
+        [expected_f_v, expected_f_v[:, :1]], axis=1
+    )
+    native_with_south = np.concatenate(
+        [source["ff_f"][:1], source["ff_f"]], axis=0
+    )
+    nemo_vertex = np.concatenate(
+        [native_with_south[:, -1:], native_with_south], axis=1
+    )
+    np.testing.assert_array_equal(
+        np.asarray(vertex_coriolis(recipe.grid)), generic_vertex
+    )
+    np.testing.assert_array_equal(
+        np.asarray(nemo_een_ene_vertex_coriolis(recipe.grid)), nemo_vertex
+    )
+    planted = recipe.grid._replace(ff_f=recipe.grid.f_T)
+    assert not np.array_equal(
+        np.asarray(nemo_een_ene_vertex_coriolis(planted)), nemo_vertex
+    )
     assert np.array_equal(np.asarray(recipe.z_coord.dz_ref), ladder["e3t_1d"][:30])
     assert np.array_equal(
         np.asarray(recipe.z_coord.nemo_e3w_0)[1, 1], ladder["e3w_1d"][:30]

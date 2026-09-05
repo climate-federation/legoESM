@@ -547,6 +547,7 @@ def _gyre_grid():
         f_T=jnp.asarray(source["ff_t"], dtype=jnp.float64),
         f_u=jnp.asarray(f_u, dtype=jnp.float64),
         f_v=jnp.asarray(f_v, dtype=jnp.float64),
+        ff_f=jnp.asarray(source["ff_f"], dtype=jnp.float64),
         cos_alpha_u=jnp.full((22, 33), rotation, dtype=jnp.float64),
         sin_alpha_u=jnp.full((22, 33), rotation, dtype=jnp.float64),
         cos_alpha_v=jnp.full((23, 32), rotation, dtype=jnp.float64),
@@ -770,7 +771,7 @@ def build_gyre_zco_card() -> NEMOTestcaseCard:
     f_wet_native[-1, :] = 0.0
     fmask_3d = np.broadcast_to(f_wet_native[..., None], native_3d)
     literal_barotropic_operands = NemoEENBarotropicOperands(
-        ff_f=np.asarray(grid.f_v)[1:],
+        ff_f=np.asarray(grid.ff_f),
         e3u_0=zco_thickness,
         e3v_0=zco_thickness,
         e3f_0=zco_thickness,

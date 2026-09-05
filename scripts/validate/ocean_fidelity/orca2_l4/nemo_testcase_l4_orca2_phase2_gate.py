@@ -96,6 +96,7 @@ def run_gate(
     import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        NEMO_CONSTANTS_CONFIG,
         build_orca2_zps_card,
         validate_nemo_testcase_card_for_execution,
     )
@@ -155,17 +156,35 @@ def run_gate(
         "e1v": (np.asarray(grid.dx_v)[1:], raw["e1v"]),
         "e2v": (np.asarray(grid.dy_v)[1:], raw["e2v"]),
         "ff_t": (np.asarray(grid.f_T), raw["ff_t"]),
+        "ff_f_grid": (np.asarray(grid.ff_f), raw["ff_f"]),
         "ff_f": (np.asarray(operands.ff_f), raw["ff_f"]),
         "e3t_0": (np.asarray(z_coord.nemo_e3t_0), np.moveaxis(raw["e3t_0"][:30], 0, -1)),
         "e3u_0": (np.asarray(operands.e3u_0), np.moveaxis(raw["e3u_0"][:30], 0, -1)),
         "e3v_0": (np.asarray(operands.e3v_0), np.moveaxis(raw["e3v_0"][:30], 0, -1)),
         "e3f_0": (np.asarray(operands.e3f_0), np.moveaxis(raw["e3f_0"][:30], 0, -1)),
     }
+    # Pin the pre-Phase-2 tripole v-face Coriolis byte-for-byte.  Native NEMO
+    # ff_f is an F-point field and must never replace this generic V-point
+    # storage on the curvilinear ORCA2 mesh.
+    legacy_f_t = (
+        2.0 * float(NEMO_CONSTANTS_CONFIG.Omega) * jnp.sin(grid.lat_T)
+    ).astype(grid.f_v.dtype)
+    legacy_f_v = jnp.concatenate(
+        [
+            legacy_f_t[0:1],
+            0.5 * (legacy_f_t[:-1] + legacy_f_t[1:]),
+            legacy_f_t[-1:],
+        ],
+        axis=0,
+    )
+    geometry["f_v_legacy"] = (np.asarray(grid.f_v), np.asarray(legacy_f_v))
     if plant == "grid":
         actual, expected = geometry["e1t"]
         actual = actual.copy()
         actual[0, 0] = np.nextafter(actual[0, 0], np.inf)
         geometry["e1t"] = (actual, expected)
+    if plant == "coriolis_swap":
+        geometry["ff_f_grid"] = (np.asarray(grid.f_v)[1:], raw["ff_f"])
     for name, (actual, expected) in geometry.items():
         require(np.array_equal(actual, expected), f"geometry mismatch: {name}")
 
@@ -253,7 +272,7 @@ def main() -> int:
     parser.add_argument("--json-out", type=Path)
     parser.add_argument(
         "--plant",
-        choices=("grid", "fold", "dummy", "interp", "T", "S", "zero", "halo", "coverage"),
+        choices=("grid", "coriolis_swap", "fold", "dummy", "interp", "T", "S", "zero", "halo", "coverage"),
     )
     args = parser.parse_args()
     try:

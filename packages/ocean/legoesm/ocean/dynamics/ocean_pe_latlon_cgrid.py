@@ -2608,9 +2608,12 @@ def _bc_pv_flux(
             _f_vtx_al = None
             if vorticity_scheme == "een_total":
                 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-                    vertex_coriolis,
+                    nemo_een_ene_vertex_coriolis,
                 )
-                _f_vtx_al = vertex_coriolis(grid)
+                _f_vtx_al = (
+                    nemo_een_ene_vertex_coriolis(grid)
+                    if f_vtx_override is None else f_vtx_override
+                )
             # NEMO vor_een weights the transport by the neighbour face width
             # and normalises by the local one (dynvor.F90:791-792, :804-806).
             # The same weighting the barotropic EEN Coriolis already applies
@@ -2630,8 +2633,8 @@ def _bc_pv_flux(
             # (matsuno_split / explicit_ab2), matching the NEMO utrd_rvo /
             # utrd_pvo diagnostic split.
             from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                nemo_een_ene_vertex_coriolis,
                 pv_flux_ene,
-                vertex_coriolis,
             )
             # "ene_total" = NEMO np_CRV (dynvor.F90 vor_ene, kvor=total):
             # q = (f + zeta)/e3f at the F-point with VERTEX f (ff_f) — the
@@ -2640,7 +2643,7 @@ def _bc_pv_flux(
             # form). The separate face-f planetary add (stage 7b') is gated
             # off for this scheme. "ene" stays relative-only.
             _f_vtx = (
-                (vertex_coriolis(grid) if f_vtx_override is None
+                (nemo_een_ene_vertex_coriolis(grid) if f_vtx_override is None
                  else f_vtx_override)
                 if vorticity_scheme == "ene_total" else None)
             diag_vortcor_u, diag_vortcor_v = pv_flux_ene(
@@ -4765,15 +4768,17 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         _h_vtx_override = None
         _f_vtx_override = None
         if config.een_e3f_scheme == "nemo_avg4":
-            from legoesm.ocean.vertical import (
-                nemo_qco_live_vorticity_e3f_cgrid,
-                nemo_qco_vorticity_f_cgrid,
+            from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                nemo_een_ene_vertex_coriolis,
+                vertex_coriolis,
             )
+            from legoesm.ocean.vertical import nemo_qco_live_vorticity_e3f_cgrid
             _h_vtx_override = nemo_qco_live_vorticity_e3f_cgrid(
                 state.eta.data, z_coord, h_k.dtype, nn_e3f_typ=0)
-            if not ene_generic_f_vtx:
-                _f_vtx_override = nemo_qco_vorticity_f_cgrid(
-                    z_coord, h_k.dtype)
+            _f_vtx_override = (
+                vertex_coriolis(grid) if ene_generic_f_vtx
+                else nemo_een_ene_vertex_coriolis(grid)
+            )
         du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v = _bc_pv_flux(
             du_dt, dv_dt, u, v, _h_u_vor, _h_v_vor, h_k,
             u_mask_3d, v_mask_3d, mask, grid, _mom_adv,

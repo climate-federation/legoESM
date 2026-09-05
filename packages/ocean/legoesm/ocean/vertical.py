@@ -262,9 +262,8 @@ def nemo_qco_vorticity_f_cgrid(z_coord, dtype):
     raw = getattr(z_coord, "nemo_een_barotropic", None)
     if raw is None:
         raise ValueError("literal NEMO F-point Coriolis requires raw ff_f")
-    native = jnp.asarray(raw.ff_f, dtype=dtype)
-    with_south = jnp.concatenate([native[:1], native], axis=0)
-    return jnp.concatenate([with_south[:, -1:], with_south], axis=1)
+    from legoesm.grids.latlon import nemo_ff_f_to_vertex
+    return nemo_ff_f_to_vertex(jnp.asarray(raw.ff_f, dtype=dtype))
 
 
 def nemo_qco_mesh_operands(z_coord, dtype):

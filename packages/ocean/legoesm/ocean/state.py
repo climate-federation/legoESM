@@ -1831,14 +1831,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # construction, exactly like ``metric_convention`` above.
     #   "cell_average"  (default, BIT-IDENTICAL to every prior release)
     #                   f_v is the mean of the two adjacent tracer rows' f.
-    #   "face_latitude" f_v = 2*Omega*sin(phi_face), evaluated AT the v-face
-    #                   latitude -- NEMO's own ff_f convention, and what any
-    #                   C-grid model defining its Coriolis at the F-point does.
-    # f_v is the single array every C-grid Coriolis path reads, through one of
-    # two helpers: latlon_cgrid_operators.vertex_coriolis (barotropic EEN
-    # pre-block, 3-D EEN/ENE vorticity flux) and
-    # barotropic_common.coriolis_at_faces (semi-implicit / explicit_ab2
-    # face-f Coriolis).
+    #   "face_latitude" f_v = 2*Omega*sin(phi_face), evaluated AT the v-face;
+    #                   an analytic F-point fallback only where V and F share
+    #                   latitude.
+    # Generic paths read f_v. File-backed NEMO EEN/ENE arms carry and read a
+    # separate native grid.ff_f because V and F differ on a curvilinear grid.
     # NB a grid that ARRIVES as a pre-built LatLonCGridGeometry (the NEMO
     # bridge builds one) is passed through ensure_geometry unchanged, so the
     # convention must be selected where THAT geometry is built.  The model

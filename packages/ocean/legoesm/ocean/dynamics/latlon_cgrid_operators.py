@@ -472,9 +472,11 @@ def vertex_coriolis(grid: LatLonGrid) -> jnp.ndarray:
     ``(n_lat+1, n_lon+1)``.
 
     On a lat-lon grid ``f`` depends only on latitude, and the vertex latitude
-    equals the v-face latitude, so the vertex ``f`` is ``grid.f_v`` extended by
-    one periodic-wrap column.  This is the single shared ``f`` value that makes
-    the C-grid Coriolis energy-conserving on a β-plane (see
+    equals the v-face latitude, so the generic vertex ``f`` is ``grid.f_v``
+    extended by one periodic-wrap column.  Literal NEMO EEN/ENE arms instead
+    use :func:`nemo_een_ene_vertex_coriolis`, because a curvilinear V point is
+    not NEMO's F point.  This shared generic value makes the C-grid Coriolis
+    energy-conserving on a β-plane (see
     :func:`coriolis_cgrid_energy_conserving`).
     """
     if hasattr(grid, "f_v"):
@@ -484,6 +486,27 @@ def vertex_coriolis(grid: LatLonGrid) -> jnp.ndarray:
         f_v_int = 0.5 * (f_cell[:-1] + f_cell[1:])
         f_v = jnp.concatenate([f_cell[0:1], f_v_int, f_cell[-1:]], axis=0)
     return jnp.concatenate([f_v, f_v[:, 0:1]], axis=1)  # (n_lat+1, n_lon+1)
+
+
+def nemo_een_ene_vertex_coriolis(grid: LatLonGrid) -> jnp.ndarray:
+    """Literal NEMO F-point Coriolis for the NEMO EEN/ENE vorticity arms.
+
+    File-backed NEMO cards carry native ``ff_f`` separately from generic
+    ``f_v``.  Analytic/test grids without a literal field retain the historical
+    generic fallback; this keeps non-file-backed callers byte-identical.
+    NEMO ``dynvor.F90`` uses ``ff_f`` in ENE/ENS/EEN, while its T-point energy
+    arm uses ``ff_t``.
+    """
+    native = getattr(grid, "ff_f", None)
+    if native is None:
+        return vertex_coriolis(grid)
+    expected = (int(grid.n_lat), int(grid.n_lon))
+    if tuple(native.shape) != expected:
+        raise ValueError(
+            f"grid.ff_f shape {native.shape} != native NEMO shape {expected}"
+        )
+    from legoesm.grids.latlon import nemo_ff_f_to_vertex
+    return nemo_ff_f_to_vertex(native)
 
 
 # Back-compat internal alias (promoted to public for the ene_total consumer;

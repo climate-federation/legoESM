@@ -442,24 +442,25 @@ def create_tripole_grid(
         area_q = jnp.pad(area_T, ((0, 1), (0, 1)), mode="edge")
 
     # Coriolis.  NEMO domhgr.F90:202-226 reads ff_t/ff_f directly when the
-    # domain file supplies them.  Preserve those source values rather than
-    # silently regenerating ff_t from latitude with a different libm/order.
+    # domain file supplies them.  Preserve ff_t for its literal T-point
+    # consumers and carry ff_f separately for NEMO's EEN/ENE vorticity arms.
     f_T = raw.get("ff_t", 2.0 * omega * jnp.sin(lat_T)).astype(dtype)
 
     # f at u-points
     f_u_inner = 0.5 * (jnp.roll(f_T, 1, axis=1) + f_T)
     f_u = jnp.concatenate([f_u_inner, f_u_inner[:, 0:1]], axis=1)
 
-    # f at v-points
-    if "ff_f" in raw:
-        # The native NEMO F array is the EEN/barotropic vorticity operand.
-        # legoESM's redundant v-face layout prepends its south boundary row,
-        # matching the native mapping already used by the certified GYRE card
-        # (grid.f_v[1:] is the native A2D field).
-        f_v = jnp.concatenate([raw["ff_f"][0:1], raw["ff_f"]], axis=0).astype(dtype)
-    else:
-        f_v_inner = 0.5 * (f_T[:-1] + f_T[1:])
-        f_v = jnp.concatenate([f_T[0:1], f_v_inner, f_T[-1:]], axis=0)
+    # Generic v-face Coriolis retains the historical tripole construction
+    # exactly.  It must not be replaced by NEMO's F-point array: on a
+    # curvilinear grid V and F are different staggerings.  Use the same
+    # analytic T field the pre-ff_t loader used so adding literal ff_t does not
+    # perturb generic face-Coriolis consumers in the last bits.
+    f_T_for_v = (2.0 * omega * jnp.sin(lat_T)).astype(dtype)
+    f_v_inner = 0.5 * (f_T_for_v[:-1] + f_T_for_v[1:])
+    f_v = jnp.concatenate(
+        [f_T_for_v[0:1], f_v_inner, f_T_for_v[-1:]], axis=0
+    )
+    ff_f = raw["ff_f"].astype(dtype) if "ff_f" in raw else None
 
     # Fold descriptor. ``_detect_fold`` raises on a genuinely ambiguous
     # (near-constant) fold row under "auto" because BOTH seam origins fit, and a
@@ -574,6 +575,7 @@ def create_tripole_grid(
         dlon=0.0,   # sentinel: tripole grids have non-uniform spacing
         dlat=0.0,
         omega=float(omega),   # (#521) so grid.omega matches the f_T/f_u/f_v build
+        ff_f=ff_f,
     )
 
 
@@ -715,6 +717,13 @@ def pad_tripole_grid_south(grid: LatLonCGridGeometry,
             [jnp.degrees(lat_new).astype(jnp.asarray(native_lat_pad).dtype),
              jnp.asarray(native_lat_pad)], axis=0)
 
+    # Native NEMO F rows use T-like leading indexing.  The added rows are
+    # permanently land-masked; edge padding preserves every physical source
+    # value byte-for-byte without inventing an active F-point value.
+    ff_f_pad = grid.ff_f
+    if ff_f_pad is not None:
+        ff_f_pad = _edge_pad(ff_f_pad)
+
     return grid._replace(
         n_lat=n_lat + n_pad,
         lat_T=lat_T_pad,
@@ -743,6 +752,7 @@ def pad_tripole_grid_south(grid: LatLonCGridGeometry,
         lat=lat_1d_pad,
         seam_wall_rows=seam_pad,
         native_lat_T_deg=native_lat_pad,
+        ff_f=ff_f_pad,
         # lon (n_lon,) unchanged; dlon/dlat sentinels unchanged.
     )
 
