@@ -2591,5 +2591,24 @@ a **CONSISTENCY_PROBE**, not evidence for a shared production change.  No WZV
 clock fix lands and no cross-card physics gate is required for this refuted
 arm.
 
+### 21.6 EEN external-mode coefficient preregistration
+
+Search-before-build found the canonical shared source program
+`_nemo_literal_een_coefficients` and the existing
+`nemo_qco_live_vorticity_e3f_cgrid` implementation of
+`e3f_0vor*(1+r3f)`.  The former currently constructs EEN's `q` from raw
+`e3f_0`, bypassing the latter.  The imported ORCA2 production-JIT gate at
+`3e425e24d` reproduces its handoff exactly: all eight fields are DEBT, first
+`ffu_nw=8308 / 8568`, with maxima `6.983696920301593e-5` through
+`8.320420480597231e-5`.
+
+Preregistered one-variable arm: replace only EEN's divisor with NEMO's live
+`e3f_vor` program (`dynvor.F90:918-950`; `dynspg_ts.F90:1514-1569`), holding
+`ff_f`, face thicknesses, masks, metrics, association, and inputs fixed.  It is
+CONFIRMED only if the ORCA2 eight-field gate becomes AT-BAR while GYRE's ENE
+eight-field gate remains exact; otherwise it is refuted and no shared change
+lands.  The tripolar north-fold application is part of the same source
+operand, not a per-card physics switch.
+
 All Round-21 measurements and harness results are Codex-internal.  Independent
 Round-21 review remains outstanding; no dual-review claim is made.
