@@ -15,6 +15,8 @@ import jax.numpy as jnp
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 for package in (REPO_ROOT / "packages/core", REPO_ROOT / "packages/ocean"):
     if str(package) not in sys.path:
         sys.path.insert(0, str(package))
@@ -275,7 +277,6 @@ def _coefficient_complete_masks(u_source, v_source):
 def _rule12_rows():
     rows = {}
     gyre = build_gyre_zco_card()
-    eta = gyre.recipe.initial_state.eta.data
     # Cross-card means old and new *production* paths, not the diagnostic
     # source-rounding arm above.  The only old-path operand distinction is
     # that it consumed fmask where the new path consumes fe3mask.  GYRE's
@@ -286,19 +287,46 @@ def _rule12_rows():
             fe3mask=gyre.recipe.z_coord.nemo_een_barotropic.fmask
         )
     )
-    old = jax.jit(lambda value: nemo_qco_live_vorticity_e3f_cgrid(
+    old_fn = jax.jit(lambda value: nemo_qco_live_vorticity_e3f_cgrid(
         value, old_coord, jnp.float64, nn_e3f_typ=0,
-        grid=gyre.recipe.grid)[1:, 1:])(eta)
-    new = jax.jit(lambda value: nemo_qco_live_vorticity_e3f_cgrid(
+        grid=gyre.recipe.grid)[1:, 1:])
+    new_fn = jax.jit(lambda value: nemo_qco_live_vorticity_e3f_cgrid(
         value, gyre.recipe.z_coord, jnp.float64, nn_e3f_typ=0,
-        grid=gyre.recipe.grid)[1:, 1:])(eta)
-    old_np, new_np = np.asarray(old), np.asarray(new)
+        grid=gyre.recipe.grid)[1:, 1:])
+    # The original 0/21,120 row sampled only the card's cold-start eta.  Close
+    # the review request on actual oracle states: all ten GYRE kt=1..10 BEFORE
+    # frames, before any RK stage at that kt.  This remains an operand-builder
+    # row, not a ten-step legoESM trajectory score.
+    from scripts.validate.ocean_fidelity.testcases.nemo_testcase_l2_gyre_phase3_gate import (  # noqa: E501
+        read_entry,
+    )
+    gyre_root = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gyre_kt1_10")
+    old_frames, new_frames, entry_hashes = [], [], []
+    for kt in range(1, 11):
+        path = gyre_root / f"oracle_step_entry_kt{kt:08d}.bin"
+        require(path.is_file(), f"missing GYRE Rule-12 entry frame {path}")
+        entry = read_entry(path)
+        require(entry["kt"] == kt, f"wrong GYRE entry kt in {path}")
+        eta = jnp.asarray(entry["ssh"], dtype=jnp.float64)
+        old_frames.append(np.asarray(old_fn(eta)))
+        new_frames.append(np.asarray(new_fn(eta)))
+        entry_hashes.append({"kt": kt, "sha256": sha256(path)})
+    old_np = np.stack(old_frames)
+    new_np = np.stack(new_frames)
     rows[gyre.case] = {
         "selector": gyre.recipe.model_config.vorticity_scheme,
         "unequal": int(np.count_nonzero(old_np.view(np.uint64)
                                          != new_np.view(np.uint64))),
         "count": int(old_np.size),
         "status": "AT_BAR" if np.array_equal(old_np, new_np) else "DEBT",
+        "scope": (
+            "GYRE oracle kt=1..10 BEFORE entry eta; ten operand-builder "
+            "evaluations, before all RK stages at each kt"),
+        "scope_reason": (
+            "the Rule-12 arm compares static old/new e3f builders on ten "
+            "observed NEMO states; it does not execute a legoESM trajectory"),
+        "entry_records": entry_hashes,
     }
     for card in (build_lock_exchange_zco_card(), build_overflow_zps_card()):
         rows[card.case] = {
@@ -409,6 +437,11 @@ def validate(deck_root: Path, oracle_root: Path, plant: bool) -> dict[str, objec
             "q_and_zpvo": "dynspg_ts.F90:1520-1569",
             "production_builder": "barotropic_latlon_cgrid.py:_nemo_literal_een_coefficients",
             "round21_arm": "vertical.py:nemo_qco_live_vorticity_e3f_cgrid",
+            "ens_caveat": (
+                "NEMO ENS also consumes e3f_vor at dynvor.F90:623,719; "
+                "LOCK/OVERFLOW unreachable means only that legoESM's current "
+                "helper is dispatched by een_e3f_scheme='nemo_avg4'. Any "
+                "future ENS/QCO card must re-check fe3mask."),
         },
     }
 
