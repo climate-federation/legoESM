@@ -228,3 +228,25 @@ def test_nemo_tpoint_requires_explicit_t_depth_on_stretched_grid():
         pinned, depth, bottom_index_rule="nemo_tpoint"
     )
     assert int(nemo.bottom_level[0, 0]) == 0
+
+
+def test_flux_up3_closed_face_values_cannot_poison_next_live_stage():
+    """NEMO stores exact zero on masked stage faces before the next stencil."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSRK3TestHooks,
+    )
+
+    set_policy(PrecisionPolicy.fp64())
+    card = build_lock_exchange_zco_card()
+    state = LatLonCGridOceanModel(
+        card.recipe.grid,
+        card.recipe.z_coord,
+        card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_momentum_stage=2),
+    ).step(card.recipe.initial_state, dt=card.dt_s)
+    u = np.asarray(state.u.data)
+    wet = np.broadcast_to(
+        np.asarray(state.u_mask.data)[..., None] > 0.0, u.shape)
+    assert np.isfinite(u[wet]).all()
+    assert np.array_equal(u[~wet], np.zeros(np.count_nonzero(~wet)))

@@ -19,8 +19,12 @@ def test_stage_score_planted_control_goes_red():
     clean = GATE.score("clean", oracle, oracle.copy(), mask)
     planted = GATE.score("plant", oracle, oracle.copy(), mask, plant=True)
     assert clean["status"] == "AT-BAR"
+    assert clean["unequal"] == 0
+    assert clean["max_row_scale_ulp_error"] == 0.0
     assert planted["status"] == "DEBT"
     assert planted["absolute_max"] == 1.0
+    assert planted["unequal"] == 1
+    assert planted["row_scale_ulp"] == np.spacing(1.0)
 
 
 def test_owner_label_requires_scale_and_bar_clearance():

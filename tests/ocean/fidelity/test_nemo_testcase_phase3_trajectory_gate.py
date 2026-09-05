@@ -24,6 +24,8 @@ def test_score_exact_control_is_at_bar():
     row = gate.score("control", values, values.copy(), np.ones(2, bool))
     assert row["exact"] is True
     assert row["status"] == "AT-BAR"
+    assert row["unequal"] == 0
+    assert row["max_row_scale_ulp_error"] == 0.0
 
 
 def test_planted_wet_state_violation_turns_row_red():
@@ -33,6 +35,8 @@ def test_planted_wet_state_violation_turns_row_red():
     assert row["exact"] is False
     assert row["status"] == "DEBT"
     assert row["normalized_max_abs"] > gate.BAR
+    assert row["unequal"] == 1
+    assert row["row_scale_ulp"] == np.spacing(2.0)
 
 
 def test_empty_structural_face_is_loud_unmeasured_but_nonzero_still_red():

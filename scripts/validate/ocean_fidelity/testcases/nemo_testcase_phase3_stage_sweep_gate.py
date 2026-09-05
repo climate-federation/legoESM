@@ -116,6 +116,7 @@ def score(name: str, oracle, candidate, mask, *, plant=False, quantity="u") -> d
     absolute = float(np.max(np.abs(candidate[active] - oracle[active])))
     reference = float(np.max(np.abs(oracle[active])))
     normalized = absolute / max(reference, 1.0)
+    row_scale_ulp = float(np.spacing(max(reference, 1.0)))
     return {
         "name": name,
         "status": "AT-BAR" if normalized <= BAR else "DEBT",
@@ -123,6 +124,9 @@ def score(name: str, oracle, candidate, mask, *, plant=False, quantity="u") -> d
         "normalized_max_abs": normalized,
         "absolute_max": absolute,
         "reference_max_abs": reference,
+        "unequal": int(np.count_nonzero(candidate[active] != oracle[active])),
+        "row_scale_ulp": row_scale_ulp,
+        "max_row_scale_ulp_error": absolute / row_scale_ulp,
         "bar": BAR,
         "n": int(active.sum()),
         "frame": (

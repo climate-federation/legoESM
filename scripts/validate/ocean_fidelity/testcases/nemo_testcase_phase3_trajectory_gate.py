@@ -110,13 +110,19 @@ def score(
     require(np.all(np.isfinite(candidate[use])), f"{name}: candidate nonfinite")
     exact = bool(np.array_equal(oracle[use], candidate[use]))
     scale = max(float(np.max(np.abs(oracle[use]))), 1.0)
-    error = float(np.max(np.abs(candidate[use] - oracle[use]))) / scale
+    absolute = float(np.max(np.abs(candidate[use] - oracle[use])))
+    error = absolute / scale
+    row_scale_ulp = float(np.spacing(scale))
     status = "AT-BAR" if error <= BAR else "DEBT"
     row = {
         "name": name,
         "status": status,
         "exact": exact,
         "normalized_max_abs": error,
+        "absolute_max": absolute,
+        "unequal": int(np.count_nonzero(candidate[use] != oracle[use])),
+        "row_scale_ulp": row_scale_ulp,
+        "max_row_scale_ulp_error": absolute / row_scale_ulp,
         "bar": BAR,
         "n": int(use.sum()),
         "oracle_dtype": str(oracle.dtype),

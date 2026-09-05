@@ -4297,9 +4297,20 @@ class LatLonCGridOceanModel:
             def _mom_pert_ws(
                 u_in, v_in, skip_ldf, transport_mean=None,
             ):
+                # NEMO stprk3_stg.F90:367,375,382 materializes finite exact
+                # zero below closed 3-D velocity faces before the next
+                # dyn_adv_up3 stencil.  A multiplication cannot express that
+                # storage contract when a preceding dry work value is NaN:
+                # IEEE NaN*0 is still NaN and contaminates a live neighbour.
+                # Select the stored masked value once at this existing shared
+                # stage boundary; no wet value or operator is changed.
+                _u_stage = jnp.where(
+                    u_mask_3d > 0.0, u_in, jnp.zeros_like(u_in))
+                _v_stage = jnp.where(
+                    v_mask_3d > 0.0, v_in, jnp.zeros_like(v_in))
                 st = state._replace(
-                    u=state.u.replace(data=u_in * u_mask_3d),
-                    v=state.v.replace(data=v_in * v_mask_3d),
+                    u=state.u.replace(data=_u_stage),
+                    v=state.v.replace(data=_v_stage),
                 )
                 transport_velocity = None
                 if transport_mean is not None:
@@ -4311,10 +4322,14 @@ class LatLonCGridOceanModel:
                         jnp.sum(v_in * h_v_pre, axis=-1) / H_v_pre
                         * state.v_mask.data)
                     transport_velocity = (
-                        (u_in + (transport_u_mean - current_u_mean)[..., None])
-                        * u_mask_3d,
-                        (v_in + (transport_v_mean - current_v_mean)[..., None])
-                        * v_mask_3d,
+                        jnp.where(
+                            u_mask_3d > 0.0,
+                            u_in + (transport_u_mean - current_u_mean)[..., None],
+                            jnp.zeros_like(u_in)),
+                        jnp.where(
+                            v_mask_3d > 0.0,
+                            v_in + (transport_v_mean - current_v_mean)[..., None],
+                            jnp.zeros_like(v_in)),
                     )
                 td = self.tendencies(st, surface_forcing, sponge=sponge, dt=dt,
                                      momentum_only=True,
@@ -4785,10 +4800,14 @@ class LatLonCGridOceanModel:
                 mean_v = (jnp.sum(v_in * h_v_pre, axis=-1) / H_v_pre
                           * state.v_mask.data)
                 return (
-                    (u_in + (target_u - mean_u)[..., jnp.newaxis])
-                    * u_mask_3d,
-                    (v_in + (target_v - mean_v)[..., jnp.newaxis])
-                    * v_mask_3d,
+                    jnp.where(
+                        u_mask_3d > 0.0,
+                        u_in + (target_u - mean_u)[..., jnp.newaxis],
+                        jnp.zeros_like(u_in)),
+                    jnp.where(
+                        v_mask_3d > 0.0,
+                        v_in + (target_v - mean_v)[..., jnp.newaxis],
+                        jnp.zeros_like(v_in)),
                 )
 
             target_u = (jnp.sum(state_new.u.data * h_u_pre, axis=-1)
@@ -4843,10 +4862,14 @@ class LatLonCGridOceanModel:
                     mean_v = (jnp.sum(v_in * h_v_pre, axis=-1) / H_v_pre
                               * state.v_mask.data)
                     return (
-                        (u_in + (transport_target_u - mean_u)[..., None])
-                        * u_mask_3d,
-                        (v_in + (transport_target_v - mean_v)[..., None])
-                        * v_mask_3d,
+                        jnp.where(
+                            u_mask_3d > 0.0,
+                            u_in + (transport_target_u - mean_u)[..., None],
+                            jnp.zeros_like(u_in)),
+                        jnp.where(
+                            v_mask_3d > 0.0,
+                            v_in + (transport_target_v - mean_v)[..., None],
+                            jnp.zeros_like(v_in)),
                     )
                 _nemo_ws_velocity_stages = (
                     _transport_stage(u0, v0),
