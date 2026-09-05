@@ -62,6 +62,8 @@
 set -uo pipefail
 PIN=${1:?usage: sbatch _mpas_fwnemo_l8_180d.sbatch <pinned-sha> [leg]}
 LEG=${2:-1}
+# K_zeta_bih 0 (user 2026-09-05: match NEMO/tripole, which carry no vorticity
+# biharmonic; the recipe's 1e14 is explicit and sign-flips at 29 km).
 # LEVEL 8 = 655,362 cells (~29 km, 2x finer than the level-7 arm); dt halved
 # for CFL (150 -> 75 s) => ~8x the cost, so the 180 days run as a 72 h
 # restart-chained leg sequence (--restart-save every 15 d, --restart-from on
@@ -76,7 +78,7 @@ RESTART_FROM=""
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.98
 
-ROOT=/burg-archive/glab/users/pg2328/legoESM; cd $ROOT || exit 1
+ROOT=/burg-archive/glab/users/pg2328/_omip_wt; cd $ROOT || exit 1
 HEAD=$(git rev-parse HEAD)
 [ "$HEAD" = "$PIN" ] || { echo "FATAL: HEAD $HEAD != pinned $PIN"; exit 1; }
 echo "HEAD: $(git log --oneline -1)"
@@ -91,7 +93,7 @@ JAX_PLATFORMS=cpu $PY -m pytest -q tests/ocean/unit/test_core2_corrected_cache_d
 rc=$?; [ $rc -eq 0 ] || { echo "FATAL: gate rc=$rc"; exit 1; }
 
 JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid mpas \
-  --mpas-level 8 --mpas-lloyd 20 --mpas-vmix tke \
+  --mpas-level 8 --mpas-lloyd 20 --mpas-vmix tke --K-zeta-bih 0 \
   --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic \
   --tke-kappa-convention veros_sqrte \
   --dt 75 --nemo-vertical --partial-cell \
