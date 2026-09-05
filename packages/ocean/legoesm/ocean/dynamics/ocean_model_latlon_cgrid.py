@@ -1181,6 +1181,14 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # A nonzero stage stores NEMO's metric zFu/zFv/zFw triplet in u/v/T after
     # the ordinary step; it cannot affect a later stage or public execution.
     expose_tracer_transport_stage: int = 0
+    # WRITE-only adjudication seam for ORCA2 Phase 2l.  The optional external
+    # endpoint tuple is ``(eta_after, Hu_avg, Hv_avg)`` and replaces only the
+    # already-registered ORACLE_SUPPLIED external-mode result after the normal
+    # compiled solve.  ``expose_stage1_wzv`` then returns the actual ``ww``
+    # produced by the one production _g0 transport path, after the ordinary
+    # step completes.  Neither field is constructible from a public card.
+    external_mode_result_override: object = None
+    expose_stage1_wzv: bool = False
     # WRITE-only stage-1 horizontal-transport operand exposure. ``thickness``
     # returns e3u/e3v(Kmm); ``corrected_velocity`` returns uu+zub*umask and
     # vv+zvb*vmask; ``transport_average`` broadcasts un_adv/vn_adv.  The
@@ -4978,6 +4986,7 @@ class LatLonCGridOceanModel:
         _nemo_ws_exposed_tracer_stage = None
         _nemo_ws_exposed_tracer_boundary = None
         _nemo_ws_exposed_tracer_transport = None
+        _nemo_ws_exposed_stage1_wzv = None
         _nemo_ws_exposed_stage1_transport_operand = None
         _nemo_ws_exposed_momentum_operator = None
         _nemo_ws_exposed_stage2_rhs = None
@@ -5584,6 +5593,13 @@ class LatLonCGridOceanModel:
                 )
             state_new, (Hu_avg, Hv_avg) = _baro_result
 
+        _external_result_override = (
+            self._nemo_ws_test_hooks.external_mode_result_override)
+        if _external_result_override is not None:
+            _eta_external, Hu_avg, Hv_avg = _external_result_override
+            state_new = state_new._replace(
+                eta=state_new.eta.replace(data=_eta_external))
+
         # NEMO-RK3 scheme identity: HYB is the live stprk3_stg barotropic
         # update (module default at :44; stages at :143-144,206-207,225), so
         # every Kaa stage receives the final external-mode velocity.  This is
@@ -5950,6 +5966,8 @@ class LatLonCGridOceanModel:
                     jnp.zeros_like(target_u), jnp.zeros_like(target_v))
                 if _source_transport_mean_arm else None,
                 **_stage_transport_kw)
+            if self._nemo_ws_test_hooks.expose_stage1_wzv:
+                _nemo_ws_exposed_stage1_wzv = _g0[2]
             _operand_name = (
                 self._nemo_ws_test_hooks.expose_stage1_transport_operand)
             if _operand_name == "thickness":
@@ -7765,6 +7783,16 @@ class LatLonCGridOceanModel:
                 u=state_new.u.replace(data=_zfu),
                 v=state_new.v.replace(data=_zfv),
                 T=state_new.T.replace(data=_zfw[..., :state_new.T.data.shape[-1]]),
+            )
+        if _nemo_ws_exposed_stage1_wzv is not None:
+            # Diagnostic substitution happens only after the compiled step and
+            # all of its ordinary consumers have completed.
+            state_new = state_new._replace(
+                T=state_new.T.replace(
+                    data=_nemo_ws_exposed_stage1_wzv[
+                        ..., :state_new.T.data.shape[-1]
+                    ]
+                )
             )
         if _nemo_ws_exposed_stage1_transport_operand is not None:
             _operand_u, _operand_v = _nemo_ws_exposed_stage1_transport_operand

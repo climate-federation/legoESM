@@ -1256,6 +1256,13 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
             f"{card.case} requires NEMO's prognostic uu_b(Kaa) velocity frame")
     wet = np.asarray(card.recipe.land_mask) > 0.5
     if card.case in ("GYRE-zco", "ORCA2-zps"):
+        if (cfg.momentum_advection != "vector_invariant"
+                or cfg.ke_gradient_scheme != "centered"):
+            raise ValueError(
+                f"{card.case} requires ln_dynadv_vec=.true. with nn_dynkeg=0 "
+                "(momentum_advection='vector_invariant', "
+                f"ke_gradient_scheme='centered'); got "
+                f"{cfg.momentum_advection!r}, {cfg.ke_gradient_scheme!r}")
         expected_baro_coriolis = (
             "ene_metric" if card.case == "GYRE-zco" else "een_metric"
         )
