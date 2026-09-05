@@ -50,6 +50,11 @@ may be used only before the substituted external endpoint.  The public card
 selection remains `nemo_avg4`; the fold stays `UNMEASURED` and no proxy value
 may enter `_g0`.
 
+The selected spatial `nemo_div_curl` viscosity is also not implemented on a
+tripolar grid.  If reached before the same substitution, its coefficient may
+be zeroed in the discarded diagnostic tendency only.  This remains an
+`UNMEASURED` shared/ORCA2-grid boundary; the public card is unchanged.
+
 The discriminator is frozen:
 
 - **AT_BAR, 0 / n:** retract `GYRE_OWNER_SHARED_WZV_STAGE_CLOCK` under Rule

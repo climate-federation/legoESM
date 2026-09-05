@@ -175,6 +175,9 @@ def validate(deck_root: Path, oracle_root: Path, *, plant: bool) -> dict[str, ob
         # ORCA2 tripolar avg4 fold.  It is upstream of the substituted
         # external endpoint and cannot reach the exposed _g0 value.
         een_e3f_scheme="min",
+        # The selected spatial nemo_div_curl viscosity is another unmeasured
+        # upstream tripolar operator.  Zero it only in the discarded tendency.
+        lateral_viscosity=cfg.lateral_viscosity._replace(A_h=0.0),
         physics=cfg.physics._replace(
             vertical_mixing=vmix._replace(tke=tke),
             convection=convection))
@@ -255,7 +258,8 @@ def validate(deck_root: Path, oracle_root: Path, *, plant: bool) -> dict[str, ob
             "ignored_upstream_constructibility_proxy": (
                 "TEOS-10 bn2 replaces unsupported EOS-80 bn2 only before the "
                 "oracle external endpoint; EEN avg4 likewise uses the "
-                "constructible min fold upstream; no proxy value reaches _g0"
+                "constructible min fold and tripolar div-curl viscosity is "
+                "zeroed upstream; no proxy value reaches _g0"
             ),
         },
         "comparison_domain": {
