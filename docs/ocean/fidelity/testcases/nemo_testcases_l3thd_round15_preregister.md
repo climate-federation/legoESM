@@ -112,3 +112,28 @@ unchanged.
 executing NEMO order and branches cited above; and the instantiated card's two
 false selectors.  **PLAUSIBLE, UNMEASURED:** H15-A and H15-B.  They remain
 hypotheses until the new stream and one-variable arms discriminate them.
+
+## Addendum R15-C — preregistered operand discriminator
+
+Status at registration: the first fresh writer and private shared-path trace
+have **CONFIRMED** that selecting `nemo_stage_mean_imposition` removes the
+`1.0844585561836217e-4` owner, but leaves a sub-bar, non-bit `u` row.  They also
+showed, post-hoc for hypothesis design, that NEMO's stage-3 pre-strip value is
+`3.9043073711832223e-05` whereas the shared driver hands zero to its ZDF
+composition.  No Kbb/RHS operands have yet been dumped, so the cause of that
+input split remains unmeasured.
+
+H15-C predicts that the first operand split is the time level used by the
+stage-3 RHS construction at `dynzdf.F90:119-140`: either `puu(Kbb)` is nonzero
+and absent from legoESM's cold-start stage input, or `puu(Krhs)` is nonzero and
+absent from its stage tendency.  A fresh config-local writer will record both
+terms, `r3u(Kbb/Kmm/Kaa)`, the two rounded numerator terms, and their resolved
+sum before the existing `us0` boundary.  It is **CONFIRMED** only if replaying
+that first differing operand accounts for all of `us0`; otherwise it is
+**REFUTED**.  The accepted change must be a shared WS-RK3 time-level identity,
+not a one-layer or slab-specific shortcut.
+
+The primary target remains `kt=2 PRE_SSM.u` bit-identical.  Only after it is
+1/1 will the ordered walk stop at the already observed candidate next boundary,
+`kt=2 PRE_SSM.temperature`; that candidate is not promoted until the velocity
+chain closes.
