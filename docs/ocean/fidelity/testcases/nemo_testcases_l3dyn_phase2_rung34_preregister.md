@@ -727,3 +727,34 @@ the stopping deliverable.
 | Repair the immutable-JAX-array replay control and close the `a_ip` pond-operand disposition | ASKED | Queued Round-12 review items |
 | Produce an ORCA1-versus-certified-selector coverage table without implementing new arms | ASKED | Pending user scope decision |
 | Run NEMO from the sandbox, implement landfast/multi-category/thermodynamic arms, change canonical core/defaults/bar, edit shipped files, delete artifacts, use GPU/MPI, or push | UNASKED | Outside authorized scope |
+
+### Round-14 producer-arm correction (registered before the ledger arm)
+
+The first completed producer probe **REFUTED** the surface-stress prediction.
+The private source-written stress arm did not move `v_i`, `v_s`, energy, or
+salinity at all; it made both velocity maxima larger and happened to reduce
+only two already-nonexact stress maxima.  That is not the preregistered causal
+chain and cannot name the producer.  The probe's initial `PRODUCER-NAMED`
+decision rule ("any row improves") is therefore withdrawn and will be made
+fail-closed.
+
+The stronger arm replaced only the five completed rheology outputs with the
+oracle values.  It made all **160 / 160** Prather moments byte-exact, but left
+`v_i`, `v_s`, the five snow-energy layers, ten ice-energy layers, and ten
+option-4 salt layers non-bit-exact.  `a_i` stayed byte-exact.  This localizes
+the first mean-state producer after source-exact Prather and before the next
+entry, in the active jpl=1 ridging/rafting donor-and-receiver ledger.
+
+The revised binary prediction is the inventory reconstruction written at
+`icedyn_rdgrft.F90:715-720,734-741,779-792,874-890`: SI3 separately forms the
+ridge and raft donor inventories, multiplies the surviving inventory by
+`(1-afrdg-afrft)`, and then adds the two receiver contributions in the written
+order.  The existing JAX transcription puts `optimization_barrier` around
+that algebra; the canonical source-rounding campaign has already established
+that this primitive is not the operative HLO association guard.  **CONFIRM**
+requires a one-variable source-rounded ledger arm to make the first `v_i` row
+and every affected inventory row byte-exact while leaving the already-exact
+`a_i` and all 160 moments unchanged.  Its private identity-rounding ablation
+must restore the old row.  **REFUTE** is a surviving inventory row, in which
+case the first nonexact written ledger operand is the named next owner and no
+surface-stress attribution is permitted.
