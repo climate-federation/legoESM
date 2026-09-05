@@ -63,8 +63,8 @@ stream with `STATUS='REPLACE'`, writes, closes, and assigns no model array.
 Frozen stream name: `oracle_ocean_surface_input_kt00000001.bin`  
 Frozen magic: sixteen bytes, `NEMO_L4_SBCIN_1`  
 Frozen integer header (native four-byte integers):
-`version,kt,Kbb,jpi,jpj,jpts,nclasses,n2d,n3d,bits`  
-Frozen header values: `1,1,1,94,152,2,10,33,2,64`
+`version,kt,Kbb,jpi,jpj,jpts,nclasses,halo,nfull,nreduced2d,nhalo1,nreduced3d,bits`
+Frozen header values: `1,1,1,94,152,2,10,2,20,12,1,2,64`
 
 The binary64 payload is written in Fortran column-major order.  The 33 2-D
 fields, in order, are:
@@ -76,11 +76,15 @@ rCdU_ice, berg_grid%calving, berg_grid%calving_hflx,
 berg_grid%floating_melt, berg_grid%stored_heat`.
 
 The two 3-D families, in order, are `rnf_tsc,rnf_tsc_b`, each with `jpts=2`.
-The exact payload count is therefore
-`(n2d + 2*jpts) * jpi*jpj = (33 + 4)*94*152 = 528,656` binary64 values;
-the complete file size must be `16 + 10*4 + 528656*8 = 4,229,304` bytes.
-The count is derived from the write list and header dimensions in the gate;
-it is not accepted as an unexplained literal.
+The NEMO allocation classes are part of the schema: 20 arrays are explicit
+full `jpi*jpj`; 12 are `A2D(0)`; `rCdU_ice` alone is `A2D(1)`; and the two
+runoff families are `A2D(0),jpts`.  With the resolved two-cell halo, the exact
+payload count is therefore
+`20*94*152 + (12+2*2)*(94-4)*(152-4) + 1*(94-2)*(152-2) = 512,680`
+binary64 values.  The complete file size must be
+`16 + 13*4 + 512680*8 = 4,101,508` bytes.  The writer declares the four
+allocation-class counts from the actual write list; the gate mirrors this
+derivation and rejects an unexplained flat-field constant.
 
 This inventory contains the final fields actually consumed by ocean surface
 momentum/heat/freshwater/salt paths, their RK3 before carries initialized by
@@ -133,3 +137,13 @@ TKE/EVD/IWM in NEMO execution order, stopping at the first over-bar boundary.
 | include ocean before carries at kt=1 | UNASKED coverage choice | records exact RK3 surface forcing levels set by the same call |
 | include both `rnf_tsc` levels, omit later `sbc_tsc` tendency | UNASKED source fact | records initialized runoff operands without reading a future tracer-stage result |
 | rank-0 stream, no gather | ASKED inherited layout | `lwp` writer and documented halo removal |
+
+### Pre-execution schema correction
+
+The first committed draft classified all 33 2-D fields as `jpi*jpj` and
+therefore preregistered the wrong byte count.  A source-allocation walk before
+the build/run handoff found the distinction at
+`src/OCE/SBC/sbc_oce.F90:185-216`, `src/OCE/SBC/sbc_ice.F90:145-161`, and
+`src/OCE/SBC/sbcrnf.F90:84-89`.  The corrected header above declares full,
+`A2D(0)`, and `A2D(1)` counts separately.  No record was measured under the
+retracted draft schema.
