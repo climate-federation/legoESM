@@ -979,34 +979,55 @@ def test_nemo_literal_ene_coefficients_match_source_recurrence_and_red_scale():
         out = np.roll(value, di, axis=1) if di else value
         return np.roll(out, dj, axis=0) if dj else out
 
-    q = ff[..., None] / e3f
     r1_hu = 1.0 / e3u.sum(axis=-1)
     r1_hv = 1.0 / e3v.sum(axis=-1)
     u_neighbor = {
-        "nw": (e3v, q, e1v),
-        "ne": (shift(e3v, -1, 0), q, shift(e1v, -1, 0)),
-        "sw": (shift(e3v, 0, 1), shift(q, 0, 1), shift(e1v, 0, 1)),
-        "se": (shift(e3v, -1, 1), shift(q, 0, 1), shift(e1v, -1, 1)),
+        "nw": (e3v, e3f, ff, e1v),
+        "ne": (shift(e3v, -1, 0), e3f, ff, shift(e1v, -1, 0)),
+        "sw": (shift(e3v, 0, 1), shift(e3f, 0, 1),
+               shift(ff, 0, 1), shift(e1v, 0, 1)),
+        "se": (shift(e3v, -1, 1), shift(e3f, 0, 1),
+               shift(ff, 0, 1), shift(e1v, -1, 1)),
     }
     v_neighbor = {
-        "nw": (shift(e3u, 1, -1), shift(q, 1, 0), shift(e2u, 1, -1)),
-        "ne": (shift(e3u, 0, -1), q, shift(e2u, 0, -1)),
-        "sw": (shift(e3u, 1, 0), shift(q, 1, 0), shift(e2u, 1, 0)),
-        "se": (e3u, q, e2u),
+        "nw": (shift(e3u, 1, -1), shift(e3f, 1, 0),
+               shift(ff, 1, 0), shift(e2u, 1, -1)),
+        "ne": (shift(e3u, 0, -1), e3f, ff, shift(e2u, 0, -1)),
+        "sw": (shift(e3u, 1, 0), shift(e3f, 1, 0),
+               shift(ff, 1, 0), shift(e2u, 1, 0)),
+        "se": (e3u, e3f, ff, e2u),
     }
+
+    def literal_coefficient(face, neighbor, divisor, f_factor,
+                            local_metric, r1_h, neighbor_metric):
+        term = np.multiply(face, neighbor)
+        term = np.multiply(term, np.ones_like(term))
+        term = np.divide(term, divisor)
+        acc = np.zeros_like(r1_h)
+        for jk in range(nz):
+            acc = np.add(acc, term[..., jk])
+        scale = np.multiply(0.25, np.divide(1.0, local_metric))
+        scale = np.multiply(scale, r1_h)
+        scale = np.multiply(scale, neighbor_metric)
+        scale = np.multiply(scale, f_factor)
+        return np.multiply(scale, acc)
+
     expected = {}
-    for corner, (neighbor, q_factor, metric) in u_neighbor.items():
-        expected[f"ffu_{corner}"] = (
-            0.25 / e1u * r1_hu * metric
-            * np.sum(e3u * neighbor * q_factor, axis=-1)
-        )
-    for corner, (neighbor, q_factor, metric) in v_neighbor.items():
-        expected[f"ffv_{corner}"] = (
-            0.25 / e2v * r1_hv * metric
-            * np.sum(e3v * neighbor * q_factor, axis=-1)
-        )
+    for corner, (neighbor, divisor, f_factor, metric) in u_neighbor.items():
+        expected[f"ffu_{corner}"] = literal_coefficient(
+            e3u, neighbor, divisor, f_factor, e1u, r1_hu, metric)
+    for corner, (neighbor, divisor, f_factor, metric) in v_neighbor.items():
+        expected[f"ffv_{corner}"] = literal_coefficient(
+            e3v, neighbor, divisor, f_factor, e2v, r1_hv, metric)
     for name in expected:
-        np.testing.assert_allclose(actual[name], expected[name], rtol=2.0e-15, atol=0.0)
+        np.testing.assert_array_equal(actual[name], expected[name])
+
+    # The formerly folded ``ff/e3f`` form is numerically close but not the
+    # same binary64 program: this makes the source-association pin fail if the
+    # Round-19 owner is reintroduced.
+    folded = 0.25 / e1u * r1_hu * e1v * np.sum(
+        e3u * e3v * (ff[..., None] / e3f), axis=-1)
+    assert not np.array_equal(actual["ffu_nw"], folded)
 
     # Non-vacuity: the EEN scale is a material violation on this nonzero case.
     wrong_een_scale = expected["ffu_nw"] / 3.0

@@ -226,6 +226,45 @@ def test_nemo_hpg_source_rounding_arm_is_non_vacuous():
     )
 
 
+def test_nemo_hpg_literal_consumer_bit_patterns():
+    """Pin source-rounded HPG bits on a fixed, non-vacuous operand set."""
+    set_policy(PrecisionPolicy.fp64())
+    grid = create_beta_plane_cgrid_geometry(
+        3, 4, dx_m=7.123456789, dy_m=11.987654321,
+        f0=0.0, beta=0.0, cartesian_pseudo_lat=True,
+    )
+    rhd = jnp.asarray(
+        np.arange(1, 37, dtype=np.float64).reshape(3, 4, 3) * 1.0e-4)
+    e3w = jnp.asarray(np.asarray([
+        [[1, 2, 4], [3, 5, 7], [11, 13, 17], [19, 23, 29]],
+        [[31, 37, 41], [43, 47, 53], [59, 61, 67], [71, 73, 79]],
+        [[83, 89, 97], [101, 103, 107], [109, 113, 127], [131, 137, 139]],
+    ], dtype=np.float64) / 7.0)
+    gdept = jnp.cumsum(e3w, axis=-1) + jnp.asarray(
+        np.linspace(-0.03, 0.04, 36).reshape(3, 4, 3))
+    hpg_u, hpg_v = jax.jit(lambda r, e, d: nemo_hpg_sco_literal_cgrid(
+        r, e, d, grid, constants.g))(rhd, e3w, gdept)
+    selected = np.asarray([
+        hpg_u[0, 1, 0], hpg_u[1, 2, 1], hpg_u[2, 3, 2],
+        hpg_v[1, 0, 0], hpg_v[2, 2, 1], hpg_v[3, 3, 2],
+    ], dtype=np.float64)
+    expected_words = np.asarray([
+        0xBEE04A64EC095760, 0xBF581374E675D8B0, 0xBF84809308568370,
+        0x3F1F2C61EDE1BB80, 0xBF842AAC3393E35A, 0x3FA2D2A9AB3190BE,
+    ], dtype=np.uint64)
+    np.testing.assert_array_equal(selected.view(np.uint64), expected_words)
+
+    # The former unrounded association changes five of these six words, so
+    # this pin fails rather than silently accepting a removed helper.
+    raw_u, raw_v = jax.jit(lambda r, e, d: nemo_hpg_sco_literal_cgrid(
+        r, e, d, grid, constants.g, _source_round=False))(rhd, e3w, gdept)
+    raw_selected = np.asarray([
+        raw_u[0, 1, 0], raw_u[1, 2, 1], raw_u[2, 3, 2],
+        raw_v[1, 0, 0], raw_v[2, 2, 1], raw_v[3, 3, 2],
+    ], dtype=np.float64)
+    assert not np.array_equal(raw_selected.view(np.uint64), expected_words)
+
+
 def test_nemo_ws_public_step_is_same_production_kernel_under_outer_disable_jit():
     """A diagnostic outer context cannot bypass the production step JIT."""
     set_policy(PrecisionPolicy.fp64())

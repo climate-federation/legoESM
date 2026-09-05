@@ -879,6 +879,10 @@ def main(argv=None) -> int:
     parser.add_argument("--pytest-log", type=Path)
     parser.add_argument("--allow-dirty", action="store_true",
                         help="stamp '<sha>-dirty' instead of refusing a dirty tree")
+    from legoesm.ocean.fidelity.ulp_move_gate import (
+        add_ulp_compare_arguments, comparison_exit_code, run_ulp_comparison,
+    )
+    add_ulp_compare_arguments(parser)
     args = parser.parse_args(argv)
     # Exit codes: 0 AT-BAR, 1 DEBT (measured), 2 gate failure (a planted
     # control that did not land, a dirty tree, a bad oracle record).
@@ -897,6 +901,10 @@ def main(argv=None) -> int:
                 args.output.parent.mkdir(parents=True, exist_ok=True)
                 args.output.write_text(text)
             print(text, end="")
+            if args.compare_to:
+                comparison = run_ulp_comparison(args, report)
+                print(json.dumps(comparison, indent=2, sort_keys=True))
+                return comparison_exit_code(comparison)
             return 0 if report["status"] == "AT-BAR" else 1
         report = run(
             args.oracle,
@@ -916,6 +924,10 @@ def main(argv=None) -> int:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(text)
     print(text, end="")
+    if args.compare_to:
+        comparison = run_ulp_comparison(args, report)
+        print(json.dumps(comparison, indent=2, sort_keys=True))
+        return comparison_exit_code(comparison)
     return 0 if report["status"] == "AT-BAR" else 1
 
 

@@ -305,10 +305,10 @@ The config-local WRITE-only record is taken immediately after NEMO forms
 
 | operand/output | U max abs / differing | V max abs / differing | label |
 |---|---:|---:|---|
-| horizontal metric | `0 / 0` | `0 / 0` | bit-exact |
-| Kmm face thickness | `0 / 0` | `0 / 0` | bit-exact |
-| Kmm velocity | `0 / 0` | `0 / 0` | bit-exact |
-| mask | `0 / 0` | `0 / 0` | bit-exact |
+| horizontal metric | `0 / 17,400` | `0 / 17,100` | bit-exact |
+| Kmm face thickness | `0 / 17,400` | `0 / 17,100` | bit-exact |
+| Kmm velocity | `0 / 17,400` | `0 / 17,100` | bit-exact |
+| mask | `0 / 17,400` | `0 / 17,100` | bit-exact |
 | corrected velocity | `2.799952110443815e-17 / 17400` | `1.2766480581016815e-17 / 17100` | first non-bit-exact compound operand |
 | `un_adv` / `vn_adv` | `1.2045919817182948e-13 / 580` | `5.495603971894525e-14 / 570` | **CONFIRMED upstream owner** |
 | native `zF` | `8.922143024392426e-10 / 17400` | `4.069988790433854e-10 / 17092` | propagated DEBT |
@@ -1549,10 +1549,10 @@ The one-variable result is decisive at the predicted boundary:
 
 | boundary | pre-fix max abs | source-literal max abs | source-literal differing cells | disposition |
 |---|---:|---:|---:|---|
-| stage-1 U/V `Krhs` | `1.3869160759180077e-20` | `0` | `0 / 0` | CONFIRMED HPG association owner |
-| e3, mask, reciprocal depth | `0` | `0` | `0 / 0` | BIT-EXACT inputs |
-| reference-depth reduction | `5.9922313054079714e-21` | `0` | `0 / 0` | BIT-EXACT after HPG fix |
-| post-drag forcing | `5.9922313054079714e-21` | `0` | `0 / 0` | BIT-EXACT |
+| stage-1 U/V `Krhs` | `1.3869160759180077e-20` | `0` | `0 / 17,400 U; 0 / 17,100 V` | CONFIRMED HPG association owner |
+| e3, mask, reciprocal depth | `0` | `0` | `0 / 17,400 U; 0 / 17,100 V` | BIT-EXACT inputs |
+| reference-depth reduction | `5.9922313054079714e-21` | `0` | `0 / 580 U; 0 / 570 V` | BIT-EXACT after HPG fix |
+| post-drag forcing | `5.9922313054079714e-21` | `0` | `0 / 580 U; 0 / 570 V` | BIT-EXACT |
 | post-wind U | `5.998713802234557e-21` | `6.617444900424222e-24` | `415` | DEBT, 3 ULP |
 | post-wind V | `5.998713802234557e-21` | `6.617444900424222e-24` | `409` | DEBT, 4 ULP |
 
@@ -1689,10 +1689,10 @@ one nonzero cell, becomes the first boundary, and exits `1`.
 
 | ordered boundary | pre-fix U / V | final U / V | disposition |
 |---|---:|---:|---|
-| `Krhs`, depth mean, post-drag | `0 / 0` | `0 / 0` | retained BIT-EXACT |
-| face stress differing cells | `414 / 418` | `0 / 0` | BIT-EXACT |
-| post-wind max abs | `6.617444900424222e-24 / 6.617444900424222e-24` | `0 / 0` | BIT-EXACT |
-| pre-external max abs | `6.617444900424222e-24 / 6.617444900424222e-24` | `0 / 0` | BIT-EXACT |
+| `Krhs`, depth mean, post-drag | `0 / 17,400 U; 0 / 17,100 V` | `0 / 17,400 U; 0 / 17,100 V` | retained BIT-EXACT; 2-D reductions are `0 / 580 U; 0 / 570 V` |
+| face stress differing cells | `414 / 580 U; 418 / 570 V` | `0 / 580 U; 0 / 570 V` | BIT-EXACT |
+| post-wind max abs | `6.617444900424222e-24 / 6.617444900424222e-24` | `0 / 580 U; 0 / 570 V` | BIT-EXACT |
+| pre-external max abs | `6.617444900424222e-24 / 6.617444900424222e-24` | `0 / 580 U; 0 / 570 V` | BIT-EXACT |
 
 Atmospheric pressure is dead exactly as preregistered: resolved
 `ln_apr_dyn=.false.` (`namelist_ref:211`), so post-wind is the external-mode
@@ -1768,4 +1768,335 @@ fails `6 == 7` with exit `1` when one of its four source sites is reverted.
 
 All Round-18 measurements are Codex-internal.  Round-17 independent review was
 still running during this dispatch; Round-18 independent review is outstanding
+and no dual-review claim is made.
+
+## Round 19 — external-mode substep 1→2 preregistration
+
+Round 19 starts from `a07338be5bed45a615b41bc491db5369372ce867`; review
+minor commit `2f395a91e0539e8c51f831fe13c2c9a381c6de0e` precedes this
+measurement.  Round-17 independent review returned SHIP; Round-18 independent
+review is still running.  The shipped NEMO source read before this
+preregistration is `dynspg_ts.F90` SHA-256
+`49f367fe8dc7a47771cdabc39a4eea7b8c36001f623f57f132beb909b835ea60`.
+
+The predicted owner is the source association of the substep-1 velocity
+update, with the ordered candidates below.  The ranking follows the first
+reported live residual: substep-2 midpoint U/V differ by
+`1.728794245346027e-18` / `1.7296412782932813e-18` in 580 / 570 wet faces,
+whereas the substep-2 `eta_exit` residual is only
+`1.3552527156068805e-20` in 114 wet T cells.
+
+1. The vector update at `dynspg_ts.F90:719-731`: NEMO forms
+   `spg + trd + frc`, multiplies once by `rDt_e`, adds `un_e/vn_e`, then
+   masks.  Exact inputs with a non-exact result confirm association/order;
+   substituting the literal replay alone must clear the exit and next
+   midpoint or this candidate is refuted.
+2. The continuity chain at `:603-609,627-630`: NEMO forms
+   `(e2u*ua_e)*zhup2_e`, the two face differences, their sum, the
+   `r1_e1e2t` product, then `sshn_e-rDt_e*(ssh_frc+zhdiv)`.  Its first
+   non-exact intermediate confirms this candidate only for the SSH branch;
+   it owns the velocity branch only if replacing that one operand clears the
+   later PGF and velocity result.
+3. The startup midpoint and SSH blends at `:535-562`: the first two substeps
+   set `(za1,za2,za3)=(1,0,0)` before the three-term expressions.  A mismatch
+   before continuity confirms this association; exact replay refutes it.
+4. The exit face depths and reciprocals at `:653-667,771-778`: the QCO build
+   uses the surface-weighted two-point SSH average, adds `hu_0/hv_0`, then
+   divides the mask by `depth + 1 - mask`.  These operands must be exact before
+   any drag attribution.
+5. The half-step-back SSH blend and pressure gradient at `:671-685`, followed
+   by the same-time ENE Coriolis at `:688-689`, explicit drag at `:699-705`,
+   and forcing add at `:719-731`.  This candidate is downstream and cannot be
+   labelled until all earlier operands are exact.
+
+The config-local WRITE-only extension will record, for substeps 1 and 2, every
+term above immediately before and after its source statement: history fields
+and interpolation weights; metric transports and their two differences;
+`zhdiv`, `ssh_frc`, and SSH entry/exit; face-depth sum operands, depth, and
+reciprocal; backward-interpolation weights/terms/result; PGF difference,
+metric reciprocal, and result; Coriolis, drag, and slow forcing; velocity-sum
+partials and exit.  Its control is the ordinary stage record hash, which must
+remain unchanged.  The committed diagnostic must exit nonzero for a planted
+one-ulp mutation of the first exact nonzero operand.
+
+Each arm changes one replay boundary only and is evaluated on identical V2
+operands under production JIT/CPU/fp64/libm.  A boundary is an owner only when
+its magnitude scales to the child residual and its substitution clears that
+child; otherwise it is labelled a contributor or refuted.  No shared
+external-mode arithmetic changes before this discriminator reports.
+
+### Round-19 result — ordered external-mode recurrence
+
+The preregistered first-boundary premise was refuted before attribution.  The
+carried `1.7288e-18` midpoint value came from a superseded pre-wind artifact;
+on the Round-18 tip both substep-1 and substep-2 midpoint velocities are
+bit-exact.  A separate diagnostic bug had reconstructed face SSH by subtracting
+the roughly 4,450 m reference depth from live depth, losing low bits through
+catastrophic cancellation.  The production trace now returns the actual face
+SSH without changing the solver.  After that correction, the first real
+Round-18-tip boundary is substep-1 face SSH: U differs in `147 / 580` wet
+faces and V in `158 / 570`, each by at most `1.6940658945086007e-21`
+(2 ulp).
+
+The retained scalar-math executable and ordinary stage record establish the
+WRITE-only contract.  The executable SHA-256 is
+`207e701f740b2fc4ee5f234a22508d774c2f517646e8b9d2f1e0a2a2d58d7ea9`,
+contains zero `_ZGV*` symbols, and the stage-1 record remains
+`ce25b004e7e8289b6e803263f895576981ce22516ccddfbd85d7be5ce5bcaedc`.
+The config-local `MY_SRC/dynspg_ts.F90` extension is WRITE-only, SHA-256
+`62d51638def7a811264d5f0eb53c8ef1c27b34b601110e7b9993ff62dfa4b4e6`;
+its ordered record is
+`8aa0836c11824ffcaddaafca4aefd53f62692481fc8d10d74665ac508d1eb054`.
+No shipped NEMO source was edited.  The first diagnostic root without the ENE
+coefficient extension remains retained and flagged; the scored root is
+`round19_oracle_v2_external_coeff`.
+
+The source-order walk follows NEMO exactly: startup AB3 midpoints at
+`dynspg_ts.F90:535-562`; metric transports and continuity at `:603-629`;
+surface-weighted face SSH, the backward SSH blend, and pressure gradient at
+`:653-685`; ENE Coriolis, drag, and the vector update at `:688-731`; face
+depth and reciprocal refresh at `:771-778`; and history rotation at
+`:804-816`.  GYRE's live ENE coefficient recurrence is `:1383-1410`:
+NEMO first sums `e3u*e3v*mask/e3f_vor` over levels and only then multiplies
+by `ff_f` and the horizontal/depth metrics.
+
+Each row below is one source-local change.  The previous first boundary is
+shown before the change; the after column is the newly exposed boundary.
+This sequential replacement is the scaling check: every landed expression
+clears its child at the same residual scale before an owner label is assigned.
+
+| one-variable boundary | before | after / next boundary | disposition |
+|---|---|---|---|
+| surface-weighted face SSH and direct inverse depth (`:653-667,771-778`) | U `1.6941e-21`, 2 ulp, `147 / 580`; V `1.6941e-21`, 2 ulp, `158 / 570` | face values exact; substep-2 `eta_exit` exposed | **CONFIRMED_SOURCE_ASSOCIATION_OWNER** |
+| continuity update (`:627-629`) | `eta_exit=1.3552527156068805e-20`, 8 ulp, `114 / 600` | `eta_exit` exact; `eta_pgf` exposed | **CONFIRMED_CONTINUITY_ASSOCIATION_OWNER** |
+| four-term backward SSH blend (`:671-679`) | `eta_pgf=1.3552527156068805e-20`, 1 ulp, `173 / 600` | blend and PGF exact; ENE trend exposed | **CONFIRMED_BACKWARD_BLEND_OWNER** |
+| ENE coefficient recurrence (`:1383-1410`) | each of eight coefficients `6.776263578034403e-21`, at most 3 ulp, `222` cells | all coefficients and Coriolis exact | **CONFIRMED_ENE_COEFFICIENT_OWNER** |
+| vector velocity update (`:719-731`) | U `1.6940658945086007e-21`, 1 ulp, `126 / 580`; V same maximum, `111 / 570` | substep-2 exit exact; substep-3 midpoint exposed | **CONFIRMED_VECTOR_UPDATE_ASSOCIATION_OWNER** |
+| AB3 midpoint (`:549-562`) | first later midpoint residual `1.6940658945086007e-21` | all state frames exact through the next live trend boundary | **CONFIRMED_MIDPOINT_ASSOCIATION_OWNER** |
+
+The ENE discriminator is particularly direct: all eight dumped coefficients
+were three ulp off under the former algebraic `ff_f/e3f` folding, while a
+pure-NumPy statement transcription using NEMO's dumped inputs reproduced the
+oracle Coriolis term bit-for-bit.  The shared builder now uses the one core
+`nemo_source_round` helper and NEMO's post-sum `ff_f` order.  S-16/S-17 in the
+isomorphism map record these as refinements of the existing shared routines;
+the private legacy-continuity hook is not a card selector.  Its run recreates
+the 8-ulp, `114 / 600` substep-2 failure and exits `1`.  The independent
+one-ulp metric plant becomes the first ordered failure and also exits `1`.
+
+The final production-JIT trace is exact for all 110 explicitly dumped
+substep-1/2 operands.  Across the full 50-substep, 16-frame stream, `792 / 800`
+rows are bit-exact.  The first remaining non-bit-exact row is substep 7
+`trd_u`: one of 580 wet faces differs by `5.048709793414476e-29` (1 ulp),
+only `1.4695666785339487e-20` of the oracle term magnitude
+`3.435509165498437e-9`.  Seven later trend rows each contain one differing
+cell; the largest is 16 ulp but remains at most `2.45e-18` relative to its
+oracle term.  These are **NEAR_NULL_BIT_DEBT_NO_OWNER_POWER**, not
+exoneration.  The requested all-50 bit-exact condition therefore does not
+hold.  Nevertheless both final advective transports are exact (`0 / 580` U,
+`0 / 570` V), and stage-1 Kaa is exact (`0 / 17,400` U,
+`0 / 17,100` V).  The ordered register stops at the substep-7 trend boundary.
+
+### Stage-2 and stage-3 boundary measurements
+
+The condition for measuring the later stages was met at the stage-1 Kaa
+boundary, but the measurement refutes the expectation that stage 2 is now
+exact.  Corrected stage-2 Kaa remains DEBT: U
+`2.1986806906376666e-15` over `17,400` wet values and V
+`2.2380914396075147e-15` over `17,100`.  The directly measured stage-1 tracer
+operands remain AT-BAR but non-bit-exact (T `3.552713678800501e-15`, S
+`7.105427357601002e-15` absolute), so the honest first capable upstream
+boundary is still the tracer accumulation/propagation register, not the now
+exact external-mode chain.  The stage-2 plant changes U by approximately one
+and exits `1`.
+
+Stage-3 transports were measured, but no downstream owner is assigned while
+stage 2 is open.  Against Oracle V2, zFu has absolute/normalized residual
+`7.00832742950297e-8 / 1.122004923897255e-11`, zFv
+`7.133894541766495e-8 / 1.2743986985222504e-11`, and zFw
+`3.0141292484131554e-7 / 7.464529752188664e-10`; all are **DEBT,
+OWNER_UNMEASURED_UPSTREAM_STAGE2**.  Their dedicated plant exits `1`.  No ZDF
+matrix walk was entered.
+
+### Re-pinned GYRE whole-step sweep
+
+The low-memory trajectory-only route executes the same production-jitted step
+and returns before compiling unrelated private hooks.  Two full-hook attempts
+did not produce an artifact; this is harness resource containment, not an
+eager or alternate dynamics route.  CPU, x64/fp64, Oracle V2, and explicit
+`transcendentals="libm"` remain pinned.  `first_over_bar` is unchanged at
+kt=2 for T/S/u/v; SSH now remains AT-BAR at kt=2.
+
+| kt | T | S | u | v | SSH |
+|---:|---:|---:|---:|---:|---:|
+| 1 | `0` | `0` | `0` | `0` | `0` |
+| 2 | `1.3614736849003888e-12` | `2.2181101297999213e-14` | `9.484089954776408e-7` | `8.987992592542841e-7` | `4.336808689942018e-19` |
+| 3 | `3.7223441372709554e-4` | `3.683246743167771e-5` | `9.311678913140553e-3` | `4.719077591308102e-3` | `7.074669630242024e-7` |
+| 4 | `1.0594738051818496e-3` | `8.225740462674584e-5` | `1.4182404011957604e-2` | `1.5947842304474213e-2` | `5.0604233772311505e-7` |
+| 5 | `3.0537424781427133e-3` | `8.611826431262424e-5` | `2.0733890435953528e-2` | `4.379766564509835e-2` | `6.701851022690615e-5` |
+| 6 | `3.817675809918862e-3` | `1.287536238418589e-4` | `3.113472973295961e-2` | `6.021959208711861e-2` | `1.631023907114217e-4` |
+| 7 | `4.546666553978738e-3` | `1.2244044884708371e-4` | `4.004140471842379e-2` | `6.631577323114793e-2` | `2.087141815218642e-4` |
+| 8 | `5.098376094806436e-3` | `1.360984430508487e-4` | `4.718005909052282e-2` | `2.4527161866119307e-2` | `2.5108247588168423e-4` |
+| 9 | `5.445062142555964e-3` | `1.471182174583459e-4` | `5.256039760377703e-2` | `1.4533612267114887e-2` | `2.1203002269254564e-4` |
+| 10 | `5.636634494144276e-3` | `1.5483121354443772e-4` | `5.6249869570541774e-2` | `1.1173365766925972e-2` | `2.12554355858912e-4` |
+
+The final source-round hardening of the ENE recurrence is scientifically
+identical to the immediately preceding Round-19 sweep.  Against the clean
+Round-18 tip `a07338be5`, the full 50-row register has 15 improvements,
+21 unchanged rows, and the following 14 worsened maxima (Rule 8 disclosure):
+
+| field | kt | Round-18 tip | Round-19 | ratio |
+|---|---:|---:|---:|---:|
+| v | 2 | `8.9879925925417567e-07` | `8.987992592542841e-07` | `1.0000000000001206` |
+| u | 3 | `0.0093116789131405323` | `0.0093116789131405531` | `1.0000000000000022` |
+| SSH | 4 | `5.0604233771834456e-07` | `5.0604233772311505e-07` | `1.0000000000094271` |
+| u | 5 | `0.020733890435948865` | `0.020733890435953528` | `1.0000000000002249` |
+| v | 5 | `0.043797665645095019` | `0.043797665645098349` | `1.0000000000000759` |
+| u | 6 | `0.031134729732959374` | `0.03113472973295961` | `1.0000000000000075` |
+| v | 6 | `0.060219592087115387` | `0.060219592087118606` | `1.0000000000000535` |
+| u | 7 | `0.040041404718418105` | `0.040041404718423788` | `1.0000000000001419` |
+| v | 8 | `0.024527161866106789` | `0.024527161866119307` | `1.0000000000005103` |
+| u | 9 | `0.0525603976037241` | `0.05256039760377703` | `1.000000000001007` |
+| v | 9 | `0.014533612266942067` | `0.014533612267114887` | `1.0000000000118912` |
+| SSH | 9 | `0.0002120300216775443` | `0.00021203002269254564` | `1.0000000047870643` |
+| u | 10 | `0.056249869570499197` | `0.056249869570541774` | `1.000000000000757` |
+| SSH | 10 | `0.0002125543557739409` | `0.000212554355858912` | `1.0000000003997618` |
+
+### Oracle-relative cross-card result and Rule-12 register
+
+The four cellwise gates compare this round with clean baseline
+`a07338be5` against each card's NEMO oracle.  All eight compressed residual
+fields (before/after for each gate) are retained and hashed in the Round-19
+manifest.  The exact verdict lines are:
+
+```text
+ORACLE_RELATIVE_COMPARE PASS: rows=9 max_worsening_ulps=6.103515625e-05 first_over_bar='<absent>'->'<absent>' plant=None
+ORACLE_RELATIVE_COMPARE PASS: rows=9 max_worsening_ulps=0 first_over_bar='<absent>'->'<absent>' plant=None
+ORACLE_RELATIVE_COMPARE FAIL: rows=50 max_worsening_ulps=3.5625 first_over_bar={'fields': ['T', 'u'], 'kt': 2}->{'kt': 2, 'fields': ['T', 'u']} plant=None
+ORACLE_RELATIVE_COMPARE PASS: rows=50 max_worsening_ulps=0.0009765625 first_over_bar={'fields': ['u'], 'kt': 4}->{'kt': 4, 'fields': ['u']} plant=None
+```
+
+The order is OVERFLOW stage, LOCK stage, OVERFLOW trajectory, LOCK
+trajectory.  No AT-BAR row crosses to DEBT and neither first-over-bar moves
+earlier.  The OVERFLOW trajectory gate nevertheless fails correctly: U at
+kt=9 and kt=10 has cellwise worsening beyond two row-scale ulp (maximum
+`2.625` and `3.5625` ulp respectively; the gate's first printed violating
+cells are 2.5 and 3.5625 ulp).  Under the compensating-error clause the
+source-exact fixes stay, and this becomes new named debt:
+**OVERFLOW_TRAJECTORY_LATE_U_DOWNSTREAM_OF_S16, OWNER_UNMEASURED**.  It is
+neither waived nor hidden behind a card switch.
+
+Every Rule-12 row with at least one cell moving away from its oracle is
+enumerated below.  `worse` is the maximum increase in absolute residual;
+the ulp column uses the campaign row-scale definition, and the final column
+is worsened cells / scored cells.  Rows absent from this table have zero
+worsened cells.  Movement versus the prior legoESM output remains in each
+comparison artifact as required by Rule 8.
+
+| gate row | worse | row-scale ulp | cells |
+|---|---:|---:|---:|
+| OVERFLOW s2 baroclinic u | `1.3553e-20` | `6.1035e-5` | `39 / 16,900` |
+| OVERFLOW s2 instantaneous u | `1.3553e-20` | `6.1035e-5` | `38 / 16,900` |
+| OVERFLOW s3 baroclinic u | `1.3553e-20` | `6.1035e-5` | `20 / 16,900` |
+| OVERFLOW s3 instantaneous u | `1.3553e-20` | `6.1035e-5` | `20 / 16,900` |
+| OVERFLOW kt2 baroclinic u | `1.3553e-20` | `6.1035e-5` | `20 / 16,900` |
+| OVERFLOW kt2 instantaneous u | `1.3553e-20` | `6.1035e-5` | `20 / 16,900` |
+| OVERFLOW kt2 SSH | `1.3878e-17` | `0.0625` | `2 / 200` |
+| OVERFLOW kt2 u | `1.3553e-20` | `6.1035e-5` | `20 / 16,900` |
+| OVERFLOW kt3 SSH | `6.9389e-18` | `0.03125` | `6 / 200` |
+| OVERFLOW kt3 u | `3.4694e-18` | `0.015625` | `68 / 16,900` |
+| OVERFLOW kt4 SSH | `1.1102e-16` | `0.5` | `5 / 200` |
+| OVERFLOW kt4 u | `2.7756e-17` | `0.125` | `217 / 16,900` |
+| OVERFLOW kt5 SSH | `5.5511e-17` | `0.25` | `9 / 200` |
+| OVERFLOW kt5 u | `5.5511e-17` | `0.25` | `263 / 16,900` |
+| OVERFLOW kt6 SSH | `5.5511e-17` | `0.25` | `11 / 200` |
+| OVERFLOW kt6 u | `5.5511e-17` | `0.25` | `363 / 16,900` |
+| OVERFLOW kt7 T | `3.5527e-15` | `1` | `1 / 17,000` |
+| OVERFLOW kt7 SSH | `1.1102e-16` | `0.5` | `20 / 200` |
+| OVERFLOW kt7 u | `5.5511e-17` | `0.25` | `509 / 16,900` |
+| OVERFLOW kt8 S | `7.1054e-15` | `1` | `3 / 17,000` |
+| OVERFLOW kt8 T | `3.5527e-15` | `1` | `2 / 17,000` |
+| OVERFLOW kt8 SSH | `2.2204e-16` | `1` | `15 / 200` |
+| OVERFLOW kt8 u | `8.3267e-17` | `0.375` | `523 / 16,900` |
+| OVERFLOW kt9 T | `7.1054e-15` | `2` | `3 / 17,000` |
+| OVERFLOW kt9 SSH | `1.6653e-16` | `0.75` | `21 / 200` |
+| OVERFLOW kt9 u | `5.8287e-16` | `2.625` | `662 / 16,900` |
+| OVERFLOW kt10 S | `7.1054e-15` | `1` | `2 / 17,000` |
+| OVERFLOW kt10 T | `7.1054e-15` | `2` | `8 / 17,000` |
+| OVERFLOW kt10 SSH | `1.6653e-16` | `0.75` | `16 / 200` |
+| OVERFLOW kt10 u | `7.9103e-16` | `3.5625` | `471 / 16,900` |
+| LOCK kt4 SSH | `1.3235e-23` | `5.9605e-8` | `2 / 128` |
+| LOCK kt4 u | `2.0680e-25` | `9.3132e-10` | `38 / 2,540` |
+| LOCK kt5 SSH | `2.5849e-26` | `1.1642e-10` | `3 / 128` |
+| LOCK kt5 u | `8.2718e-25` | `3.7253e-9` | `62 / 2,540` |
+| LOCK kt6 SSH | `3.7865e-29` | `1.7053e-13` | `4 / 128` |
+| LOCK kt6 u | `3.3087e-24` | `1.4901e-8` | `106 / 2,540` |
+| LOCK kt7 SSH | `4.9304e-32` | `2.2204e-16` | `4 / 128` |
+| LOCK kt7 u | `1.3553e-20` | `6.1035e-5` | `133 / 2,540` |
+| LOCK kt8 SSH | `8.4703e-22` | `3.8147e-6` | `7 / 128` |
+| LOCK kt8 u | `2.7105e-20` | `0.00012207` | `137 / 2,540` |
+| LOCK kt9 SSH | `1.6544e-24` | `7.4506e-9` | `6 / 128` |
+| LOCK kt9 u | `1.3553e-20` | `6.1035e-5` | `116 / 2,540` |
+| LOCK kt10 SSH | `2.1684e-19` | `0.0009765625` | `7 / 128` |
+| LOCK kt10 u | `1.3553e-20` | `6.1035e-5` | `160 / 2,540` |
+
+The current cross-card reports were launched from the origin-visible checkout
+before the identical file content was committed through the required local
+Git directory, so their internal provenance field reads `a07338be5-dirty`.
+The local-Git content commit is `ec6af6c61`; its package/script diff against
+the measured tree is empty.  The artifact hashes, baseline SHA, and final
+branch SHA in the manifest remove the ambiguity rather than rewriting the
+reports.
+
+### Round-19 artifact manifest
+
+The complete machine-readable register, including all eight cellwise
+cross-card residual NPZ hashes, is
+`scripts/validate/ocean_fidelity/testcases/manifests/nemo_testcase_l2_gyre_round19.json`.
+Key hashes are:
+
+| artifact | SHA-256 |
+|---|---|
+| pre-fix ordered trace | `b6e017400e264114993cae126bfe5f79f20eb2ae33851265303162eb8a0e1623` |
+| final ordered trace | `a72055a7d97f008d8bbac25777ac3d651d8481eca319bf7028e0a720bd743472` |
+| legacy continuity arm | `815337c35adf87c2e7f5831212b73ad4a1af9933bf0f5211cce64d25a091e806` |
+| ordered metric plant | `d5b424ad9d159582594b316e9d7e2b441988a3edea171dbd626d601073c9c236` |
+| clean Round-18-tip whole-step baseline | `330aaf2625f45bcd7b596e2c943b8dc3eb1a3428bd1bda465748212a1f38bca6` |
+| final whole-step sweep | `9ad9b3fc36f07aa0bb38516f07ea366be20a9a1d23f0317244bd1f2c38cdf393` |
+| stage-2 Kaa | `a471c4d419d00706ce5ef4cac403be56f75bdb43345fc343c9d6ec4283c0a3d8` |
+| stage-3 transport | `b6a28c99ba79d811ed429a465dcec73041171b8555859352c56d3d7770dd9858` |
+| OVERFLOW stage comparison | `3b98c41ae26f66e17fd61934fe1904bdd8ebe1c916234931ccd21776c7e6858b` |
+| LOCK stage comparison | `9ec7319bf3e736460472a725fc49a6ba3d8e668e1269e87045a1a8fc256391b3` |
+| OVERFLOW trajectory comparison | `c0c41c862fa7f7868763ea7bcc2ccfd385f666e6889baf072be7102adbe0b242` |
+| LOCK trajectory comparison | `d8ee86328071f2d47b73817ed0fb298f6e5c01ea74bdd196550b4bdb7b7b622e` |
+
+Verification is `85 passed in 16.42 s` for the combined core helper, HPG
+consumer pin, ENE literal recurrence, time-level registry, scheme-isomorphism,
+and GYRE gate suite.  A separate barotropic behavioral selection is
+`29 passed in 29.31 s`.  The continuity, ordered-metric, stage-2, and stage-3
+plants each exit `1`.
+
+### Round-19 ASKED / UNASKED register
+
+| choice or action | origin | disposition |
+|---|---|---|
+| correct source-rounding docstring | ASKED review minor | complete; barriers are explicitly documented as stripped |
+| HPG consumer hex bit-pin | ASKED review minor | complete; direct production-JIT consumer pin added |
+| print exact rows as `0 / wet` | ASKED review minor | complete in ordered receipt rows |
+| substep-1→2 WRITE-only operand dump | ASKED | complete; ordinary stage hash unchanged |
+| return actual face SSH in the private trace | UNASKED measurement-integrity fix | removes catastrophic-cancellation reconstruction; production state untouched |
+| source-literal face SSH/inverse depth, continuity, backward blend, vector update, and midpoint | ASKED owner walk | landed in the shared S-16 identity |
+| live ENE vertical coefficient association | ASKED owner walk | landed in shared S-17; no per-card arm |
+| private legacy-continuity and one-ulp metric controls | ASKED one-variable arms | both exit `1` |
+| whole-step kt=1…10 repin | conditional ASKED | complete; first_over_bar remains kt=2 T/S/u/v |
+| trajectory-only low-memory return | UNASKED harness containment | same production step and scoring; private hooks run separately |
+| OVERFLOW/LOCK cellwise cross-card gates | conditional ASKED | complete; three PASS, OVERFLOW trajectory FAIL registered as second error |
+| stage-2 Kaa | conditional ASKED | measured DEBT; propagated tracer boundary remains open |
+| stage-3 transports | conditional ASKED | measured DEBT; no downstream owner label |
+| substep-7 near-null trend continuation | ordered stopping boundary | registered as bit debt; owner remains UNMEASURED |
+| tra_zdf/dyn_zdf matrix walk | explicitly deferred | not entered |
+| GYRE-only guard, tuning, gate change, shipped NEMO edit | forbidden | none |
+
+Round-17 independent review returned SHIP.  All Round-19 measurements are
+Codex-internal; Round-18 and Round-19 independent review remain outstanding,
 and no dual-review claim is made.

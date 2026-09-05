@@ -44,12 +44,14 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 CASE = "OVERFLOW-zps"
 DEFAULT_OUT = Path("/data/abyssal/dbalwada/nemo-testcases-l1/census_map")
 COMMITTED_SCORE = Path(
-    "/data/abyssal/dbalwada/nemo-testcases-l1/phantom_velocity/after/stats/"
+    "/data/abyssal/dbalwada/nemo-testcases-l1/stage_mean_weights/stats/"
     "overflow_statistics.json"
 )
 DEFAULT_LEGO_ROOT = Path(
-    "/data/abyssal/dbalwada/nemo-testcases-l1/phantom_velocity/after/stats/legoesm"
+    "/data/abyssal/dbalwada/nemo-testcases-l1/stage_mean_weights/stats/legoesm"
 )
+OWNER_PREREG_COMMIT = "11d98a704"
+W_METRIC_PREREG_COMMIT = "1b72ea5660"
 
 
 class ProbeError(RuntimeError):
@@ -306,6 +308,576 @@ def difference_map(left: dict, right: dict, label: str) -> dict:
         ).tolist(),
         "x_centres_km": x_km.tolist(),
     }
+
+
+# ------------------------------------------------------- census owner ----
+def _public_state(row: dict) -> dict:
+    return {key: value for key, value in row.items() if not key.startswith("_")}
+
+
+def _state_fields(state) -> dict:
+    return {
+        "T": np.asarray(state.T.data),
+        "S": np.asarray(state.S.data),
+        "u": np.asarray(state.u.data),
+        "v": np.asarray(state.v.data),
+        "ssh": np.asarray(state.eta.data),
+    }
+
+
+def _distance(left: dict, right: dict) -> float:
+    return float(np.max(np.abs(
+        np.asarray(left["census"]) - np.asarray(right["census"]))))
+
+
+def _bbl_geometries(card):
+    from legoesm.ocean.physics.bbl_adv import (
+        bbl_static_geometry,
+        nemo_bbl_static_geometry,
+    )
+
+    z = card.recipe.z_coord
+    legacy = bbl_static_geometry(z.h_partial, card.recipe.land_mask)
+    require(z.nemo_gdept_0 is not None, "card lacks NEMO gdept_0")
+    require(z.nemo_bbl_e3u_0 is not None, "card lacks NEMO BBL e3u_0")
+    require(z.nemo_bbl_e3v_0 is not None, "card lacks NEMO BBL e3v_0")
+    reference = nemo_bbl_static_geometry(
+        z.h_partial, card.recipe.land_mask, z.nemo_gdept_0,
+        z.nemo_bbl_e3u_0, z.nemo_bbl_e3v_0)
+    return legacy, reference
+
+
+def _bbl_scaling_at_state(card, fields: dict, label: str) -> dict:
+    from legoesm.ocean.physics.bbl_adv import (
+        apply_bbl_adv_tendency,
+        bbl_transports,
+    )
+    from legoesm.ocean.vertical import compute_layer_thickness
+
+    legacy, reference = _bbl_geometries(card)
+    grid = card.recipe.grid
+    T = jnp.asarray(fields["T"])
+    S = jnp.asarray(fields["S"])
+    ssh = jnp.asarray(fields["ssh"])
+    h = compute_layer_thickness(
+        ssh, card.recipe.initial_state.H_bathy.data, card.recipe.z_coord,
+        min_water_column_m=card.recipe.model_config.min_water_column_m)
+    legacy_depth_3d = jnp.cumsum(h, axis=-1) - 0.5 * h
+    legacy_depth = jnp.take_along_axis(
+        legacy_depth_3d, legacy.bot_k[..., None], axis=-1)[..., 0]
+    stretch = jnp.sum(h, axis=-1) / jnp.maximum(
+        jnp.sum(reference.h_ref, axis=-1), 1.0e-10)
+    reference_depth = reference.dep_bot * stretch
+    dy_u = jnp.asarray(grid.dy_u)[:, 1:-1]
+    dx_v = jnp.asarray(grid.dx_v)[1:-1, :]
+    kwargs = dict(gamma_s=card.bbl_gamma_s, rho_0=card.recipe.model_config.rho_0)
+    lu, lv = bbl_transports(
+        T, S, legacy, dy_u, dx_v, bottom_depth_m=legacy_depth, **kwargs)
+    nu, nv = bbl_transports(
+        T, S, reference, dy_u, dx_v, bottom_depth_m=reference_depth, **kwargs)
+    zero = jnp.zeros_like(T)
+    ldT, _ = apply_bbl_adv_tendency(
+        zero, jnp.zeros_like(S), T, S, h, jnp.asarray(grid.area_T), legacy,
+        lu, lv, nlev=T.shape[-1])
+    ndT, _ = apply_bbl_adv_tendency(
+        zero, jnp.zeros_like(S), T, S, h, jnp.asarray(grid.area_T), reference,
+        nu, nv, nlev=T.shape[-1])
+    active_l = np.asarray(legacy.u_active) > 0.5
+    active_n = np.asarray(reference.u_active) > 0.5
+    shared = active_l & active_n
+    lu_np, nu_np = np.asarray(lu), np.asarray(nu)
+    correlation = None
+    if np.count_nonzero(shared) > 1:
+        correlation = float(np.corrcoef(lu_np[shared], nu_np[shared])[0, 1])
+    dT = np.asarray(ndT - ldT)
+    active = np.asarray(card.recipe.z_coord.is_active)
+    return {
+        "label": label,
+        "legacy_active_u_faces": int(np.count_nonzero(active_l)),
+        "nemo_active_u_faces": int(np.count_nonzero(active_n)),
+        "legacy_only_u_faces": int(np.count_nonzero(active_l & ~active_n)),
+        "shared_u_faces": int(np.count_nonzero(shared)),
+        "legacy_u_transport_linf_m3_s": float(np.max(np.abs(lu_np))),
+        "nemo_u_transport_linf_m3_s": float(np.max(np.abs(nu_np))),
+        "u_transport_difference_linf_m3_s": float(np.max(np.abs(nu_np - lu_np))),
+        "shared_u_transport_correlation": correlation,
+        "legacy_abs_u_transport_sum_m3_s": float(np.sum(np.abs(lu_np))),
+        "nemo_abs_u_transport_sum_m3_s": float(np.sum(np.abs(nu_np))),
+        "T_tendency_difference_linf_K_s": float(np.max(np.abs(dT[active]))),
+        "T_tendency_difference_rms_K_s": float(np.sqrt(np.mean(dT[active] ** 2))),
+        "legacy_bottom_depth_range_m": [
+            float(np.min(np.asarray(legacy_depth)[active.any(axis=-1)])),
+            float(np.max(np.asarray(legacy_depth)[active.any(axis=-1)])),
+        ],
+        "nemo_bottom_depth_range_m": [
+            float(np.min(np.asarray(reference_depth)[active.any(axis=-1)])),
+            float(np.max(np.asarray(reference_depth)[active.any(axis=-1)])),
+        ],
+    }
+
+
+def command_bbl_scaling(args) -> None:
+    """Source-operand scaling on already-certified midpoint/final states."""
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+
+    set_policy(PrecisionPolicy.fp64())
+    card = STATS.build_nemo_testcase_card(CASE)
+    states = STATS.load_legoesm_states(CASE, "fp64", args.lego_root)[0]
+    rows = []
+    for time_s, raw in states.items():
+        fields = STATS.mapped_fields(raw, "L64")
+        rows.append(_bbl_scaling_at_state(card, fields, f"completed_time_{time_s}s"))
+    legacy, reference = _bbl_geometries(card)
+    bottom = np.asarray(card.recipe.z_coord.bottom_level)
+    same_bottom = bottom[:, :-1] == bottom[:, 1:]
+    payload = {
+        "case": CASE,
+        "git_sha": git_sha(),
+        "preregistration_commit": OWNER_PREREG_COMMIT,
+        "precision": "fp64",
+        "reference": "NEMO 5.0.2 trabbl.F90:507-533,342-353",
+        "geometry": {
+            "legacy_active_u_faces": int(np.count_nonzero(legacy.u_active)),
+            "nemo_active_u_faces": int(np.count_nonzero(reference.u_active)),
+            "legacy_active_on_nemo_same_bottom_level": int(np.count_nonzero(
+                (np.asarray(legacy.u_active) > 0.5) & same_bottom)),
+            "max_abs_e3u_bbl_difference_m": float(np.max(np.abs(
+                np.asarray(legacy.e3u_bbl) - np.asarray(reference.e3u_bbl)))),
+        },
+        "states_npz": str(args.lego_root / "overflow_zps/fp64/states.npz"),
+        "states_sha256": sha256(args.lego_root / "overflow_zps/fp64/states.npz"),
+        "rows": rows,
+    }
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def command_aimp_scaling(args) -> None:
+    """Scale Arm 2 on saved live states before any full-duration run."""
+    import jax
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks_3d
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        _nemo_ws_qco_stage_faces,
+        _nemo_ws_stage_transport,
+    )
+    from legoesm.ocean.physics.vertical_mixing import nemo_e3w_kmm
+    from legoesm.ocean.vertical import compute_layer_thickness
+
+    set_policy(PrecisionPolicy.fp64())
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    card = STATS.build_nemo_testcase_card(CASE)
+    z = card.recipe.z_coord
+    require(z.nemo_gdept_0 is not None,
+            "OVERFLOW card lacks the pinned NEMO gdept_0 ladder")
+    states = STATS.load_legoesm_states(CASE, "fp64", args.lego_root)[0]
+    grid = card.recipe.grid
+    u_mask, v_mask = compute_face_masks_3d(z.is_active, grid)
+    u_mask = u_mask.astype(jnp.float64)
+    v_mask = v_mask.astype(jnp.float64)
+    rows = []
+    for time_s, raw in states.items():
+        # The saved legoESM state retains its redundant periodic U face; the
+        # scorer's mapped frame intentionally removes it.  This replay calls
+        # the executing transport helper, so it must use the native state.
+        eta = jnp.asarray(raw["ssh"])
+        h = compute_layer_thickness(
+            eta, card.recipe.initial_state.H_bathy.data, z,
+            min_water_column_m=card.recipe.model_config.min_water_column_m)
+        h_ref = compute_layer_thickness(
+            jnp.zeros_like(eta), card.recipe.initial_state.H_bathy.data, z,
+            min_water_column_m=card.recipe.model_config.min_water_column_m)
+        hu, hv, _, _ = _nemo_ws_qco_stage_faces(
+            eta, h_ref, u_mask, v_mask, grid)
+        u = jnp.asarray(raw["u"])
+        v = jnp.asarray(raw["v"])
+        Hu = jnp.sum(hu * u * u_mask, axis=-1)
+        Hv = jnp.sum(hv * v * v_mask, axis=-1)
+        common = dict(
+            eta_stage=eta, h_ref=h_ref, Hu_avg=Hu, Hv_avg=Hv,
+            u_mask_3d=u_mask, v_mask_3d=v_mask, grid=grid, z_coord=z,
+            config=card.recipe.model_config, dt=card.dt_s)
+        legacy = _nemo_ws_stage_transport(
+            (u, v), h, 2, legacy_aimp_midpoint_w_metric=True, **common)
+        reference = _nemo_ws_stage_transport(
+            (u, v), h, 2, legacy_aimp_midpoint_w_metric=False, **common)
+        stretch = 1.0 + eta / jnp.maximum(jnp.sum(h_ref, axis=-1), 1.0e-10)
+        ref_int = nemo_e3w_kmm(z, h, stretch)
+        midpoint_int = 0.5 * (h[..., :-1] + h[..., 1:])
+        wet_int = np.asarray(z.is_active[..., :-1] & z.is_active[..., 1:])
+        old_wi = np.asarray(legacy[6])
+        new_wi = np.asarray(reference[6])
+        total_w = np.asarray(reference[2] + reference[6])
+        fraction = np.divide(
+            new_wi, total_w, out=np.zeros_like(new_wi), where=total_w != 0.0)
+        rows.append({
+            "physical_time_s": int(time_s),
+            "wet_interface_e3w_difference_linf_m": float(np.max(np.abs(
+                np.asarray(ref_int)[wet_int] - np.asarray(midpoint_int)[wet_int]))),
+            "wet_interface_reference_to_midpoint_ratio_range": [
+                float(np.min(np.asarray(ref_int)[wet_int] /
+                             np.asarray(midpoint_int)[wet_int])),
+                float(np.max(np.asarray(ref_int)[wet_int] /
+                             np.asarray(midpoint_int)[wet_int])),
+            ],
+            "legacy_implicit_w_linf_m_s": float(np.max(np.abs(old_wi))),
+            "nemo_metric_implicit_w_linf_m_s": float(np.max(np.abs(new_wi))),
+            "implicit_w_difference_linf_m_s": float(np.max(np.abs(new_wi - old_wi))),
+            "nemo_metric_implicit_fraction_linf": float(np.max(np.abs(fraction))),
+            "implicit_w_changed_points": int(np.count_nonzero(new_wi != old_wi)),
+        })
+    payload = {
+        "format": "nemo-testcase-census-aimp-scaling-v1",
+        "case": CASE,
+        "git_sha": git_sha(),
+        "preregistration_commit": W_METRIC_PREREG_COMMIT,
+        "precision": "fp64",
+        "backend": jax.default_backend(),
+        "reference": (
+            "usrdef_zgr.F90:157-168; domzgr_substitute.h90:131; "
+            "sshwzv.F90:812-843"),
+        "states_npz": str(args.lego_root / "overflow_zps/fp64/states.npz"),
+        "states_sha256": sha256(args.lego_root / "overflow_zps/fp64/states.npz"),
+        "rows": rows,
+    }
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _model_state_from_saved(card, raw: dict):
+    """Restore one native legoESM snapshot without changing its grid frame."""
+    state = card.recipe.initial_state
+    return state._replace(
+        T=state.T.replace(data=jnp.asarray(raw["T"])),
+        S=state.S.replace(data=jnp.asarray(raw["S"])),
+        u=state.u.replace(data=jnp.asarray(raw["u"])),
+        v=state.v.replace(data=jnp.asarray(raw["v"])),
+        eta=state.eta.replace(data=jnp.asarray(raw["ssh"])),
+    )
+
+
+def command_zdf_scaling(args) -> None:
+    """One-step source-exact ZDF W-divisor movement on saved live states."""
+    import jax
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSRK3TestHooks,
+    )
+    from legoesm.ocean.physics.vertical_mixing import build_dz_half, nemo_e3w_kmm
+    from legoesm.ocean.vertical import compute_layer_thickness
+
+    set_policy(PrecisionPolicy.fp64())
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    card = STATS.build_nemo_testcase_card(CASE)
+    states = STATS.load_legoesm_states(CASE, "fp64", args.lego_root)[0]
+    baseline = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            legacy_zdf_midpoint_w_metric=True))
+    arm = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    active = np.asarray(card.recipe.z_coord.is_active)
+    slope = np.asarray(card.recipe.initial_state.H_bathy.data)
+    slope = active & ((slope > 500.0) & (slope < 2000.0))[..., None]
+    rows = []
+    for time_s, raw in states.items():
+        entering = _model_state_from_saved(card, raw)
+        base_after = baseline.step(entering, dt=card.dt_s)
+        arm_after = arm.step(entering, dt=card.dt_s)
+        delta = {
+            name: np.asarray(getattr(arm_after, attr).data)
+            - np.asarray(getattr(base_after, attr).data)
+            for name, attr in (("T", "T"), ("S", "S"), ("u", "u"),
+                               ("v", "v"), ("ssh", "eta"))
+        }
+        eta = jnp.asarray(raw["ssh"])
+        h = compute_layer_thickness(
+            eta, entering.H_bathy.data, card.recipe.z_coord,
+            min_water_column_m=card.recipe.model_config.min_water_column_m)
+        stretch = 1.0 + eta / jnp.maximum(
+            jnp.sum(card.recipe.z_coord.h_partial, axis=-1), 1.0e-10)
+        legacy_e3w = build_dz_half(h)
+        reference_e3w = nemo_e3w_kmm(card.recipe.z_coord, h, stretch)
+        wet_int = np.asarray(active[..., :-1] & active[..., 1:])
+        rows.append({
+            "physical_time_s": int(time_s),
+            "wet_cell_e3w_difference_linf_m": float(np.max(np.abs(
+                np.asarray(reference_e3w)[wet_int]
+                - np.asarray(legacy_e3w)[wet_int]))),
+            "T_after_difference_linf_K": float(np.max(np.abs(delta["T"][active]))),
+            "T_slope_difference_linf_K": float(np.max(np.abs(delta["T"][slope]))),
+            "u_after_difference_linf_m_s": float(np.max(np.abs(delta["u"]))),
+            "v_after_difference_linf_m_s": float(np.max(np.abs(delta["v"]))),
+            "ssh_after_difference_linf_m": float(np.max(np.abs(delta["ssh"]))),
+        })
+    payload = {
+        "format": "nemo-testcase-census-zdf-scaling-v1",
+        "case": CASE,
+        "git_sha": git_sha(),
+        "preregistration_commit": W_METRIC_PREREG_COMMIT,
+        "precision": "fp64",
+        "backend": jax.default_backend(),
+        "reference": (
+            "dynzdf.F90:180-195; domzgr_substitute.h90:131-133; "
+            "usrdef_zgr.F90:157-168"),
+        "one_variable": "legacy_zdf_midpoint_w_metric=False",
+        "states_npz": str(args.lego_root / "overflow_zps/fp64/states.npz"),
+        "states_sha256": sha256(args.lego_root / "overflow_zps/fp64/states.npz"),
+        "rows": rows,
+    }
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _effect_row(card, entering, full_after, alternate_after, term: str) -> dict:
+    full = arm_state("L64", _state_fields(full_after))
+    T_delta = np.asarray(full_after.T.data) - np.asarray(alternate_after.T.data)
+    active = full["_active"]
+    select = full["_select"]
+    volume = full["_volume"]
+    census_distance = None
+    census_status = "MEASURED"
+    census_reason = None
+    try:
+        alternate = arm_state("L64", _state_fields(alternate_after))
+        census_distance = _distance(full, alternate)
+    except STATS.StatisticalError as error:
+        # A private diagnostic ablation is allowed to reveal why it is not a
+        # valid model arm.  Do not clip it into the scorer's temperature
+        # envelope and manufacture a census: retain its raw T/heat leverage,
+        # make the classification unavailable, and quote the hard-guard error.
+        census_status = "GROSS-EXCURSION"
+        census_reason = str(error)
+    return {
+        "term": term,
+        "census_status": census_status,
+        "census_reason": census_reason,
+        "census_distance_full_vs_ablation": census_distance,
+        "T_linf_K": float(np.max(np.abs(T_delta[active]))),
+        "T_rms_K": float(np.sqrt(np.mean(T_delta[active] ** 2))),
+        "slope_heat_difference_K_m3": float(np.sum(T_delta[select] * volume[select])),
+        "slope_abs_heat_difference_K_m3": float(np.sum(
+            np.abs(T_delta[select]) * volume[select])),
+    }
+
+
+def command_budget(args) -> None:
+    """Cadenced census trajectory plus same-entry one-step term ablations."""
+    import jax
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSRK3TestHooks,
+    )
+
+    set_policy(PrecisionPolicy.fp64())
+    require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    card = STATS.build_nemo_testcase_card(CASE)
+    term_hooks = {
+        "bbl": _NEMOWSRK3TestHooks(disable_bbl=True),
+        "vertical_transport": _NEMOWSRK3TestHooks(
+            disable_tracer_vertical_transport=True),
+        "fct_two_step_predictor": _NEMOWSRK3TestHooks(
+            two_step_fct_predictor=False),
+        "legacy_bbl_partial_geometry": _NEMOWSRK3TestHooks(
+            legacy_bbl_partial_geometry=True),
+    }
+    registered = set(term_hooks)
+    measured = set(term_hooks)
+    if args.plant_unregistered:
+        measured.add("PLANTED_UNREGISTERED_TERM")
+    require(measured == registered, f"unregistered budget terms: {sorted(measured-registered)}")
+    faithful = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks())
+    models = {
+        name: LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=hooks)
+        for name, hooks in term_hooks.items()
+    }
+    state = card.recipe.initial_state
+    if args.plant_census:
+        planted = _state_fields(state)
+        base = arm_state("L64", planted)
+        T = planted["T"].copy()
+        index = tuple(np.argwhere(base["_select"] & (T >= 18.0))[0])
+        T[index] = 17.0
+        planted["T"] = T
+        changed = arm_state("L64", planted)
+        require(
+            _distance(base, changed) <= 1.0e-14,
+            f"PLANTED census excursion fired at {index}: "
+            f"distance={_distance(base, changed):.6e}")
+
+    n_steps = int(STATS.CASES[CASE]["n_steps"])
+    samples = set(range(0, n_steps + 1, args.cadence)) | {3059, n_steps}
+    nemo = STATS.load_nemo_states(
+        CASE, Path(STATS.CASES[CASE]["baseline"]), baseline=True)
+    nemo_by_completed = {
+        int(time_s // card.dt_s): arm_state(
+            "N2", STATS.mapped_fields(fields, "N2"))
+        for time_s, fields in nemo.items()
+    }
+    rows = []
+    started = time.perf_counter()
+    for completed in range(n_steps + 1):
+        sampled = completed in samples
+        if sampled:
+            current = arm_state("L64", _state_fields(state))
+            row = {
+                "completed_step": completed,
+                "physical_time_s": completed * card.dt_s,
+                "legoesm": _public_state(current),
+                "nemo": None,
+                "legoesm_minus_nemo_census": None,
+                "one_step_effects": [],
+            }
+            if completed in nemo_by_completed:
+                oracle = nemo_by_completed[completed]
+                row["nemo"] = _public_state(oracle)
+                row["legoesm_minus_nemo_census"] = _distance(current, oracle)
+        if completed == n_steps:
+            if sampled:
+                rows.append(row)
+            break
+        next_state = faithful.step(state, dt=card.dt_s)
+        if sampled:
+            for term, model in models.items():
+                alternate = model.step(state, dt=card.dt_s)
+                row["one_step_effects"].append(
+                    _effect_row(card, state, next_state, alternate, term))
+            rows.append(row)
+        state = next_state
+    payload = {
+        "format": "nemo-testcase-l1-census-budget-v1",
+        "case": CASE,
+        "git_sha": git_sha(),
+        "preregistration_commit": OWNER_PREREG_COMMIT,
+        "precision": "fp64",
+        "backend": jax.default_backend(),
+        "cadence_steps": args.cadence,
+        "frame": (
+            "legoESM pre-step prognostic at completed_step; NEMO Nbb entry "
+            "at completed 0/3059 and tn restart at completed 6120; same-entry "
+            "one-step full-minus-private-ablation on scorer wet-mask/slope frame"),
+        "term_registry": sorted(registered),
+        "controls": {
+            "plant_census": args.plant_census,
+            "plant_unregistered": args.plant_unregistered,
+        },
+        "oracle_artifacts": {
+            str(path): sha256(path)
+            for path in (
+                Path(STATS.CASES[CASE]["baseline"]) / "oracle_step_entry_kt00000001.bin",
+                Path(STATS.CASES[CASE]["baseline"]) / "oracle_step_entry_kt00003060.bin",
+                Path(STATS.CASES[CASE]["baseline"]) / str(STATS.CASES[CASE]["restart"]),
+                Path(STATS.CASES[CASE]["baseline"]) / "namelist_cfg",
+            )
+        },
+        "wall_time_s": time.perf_counter() - started,
+        "rows": rows,
+    }
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    print(f"wrote {args.out}")
+    for row in rows:
+        if row["completed_step"] in (0, 600, 1200, 2400, 3059, 3600, 4800, 6000, 6120):
+            print(
+                f"  kt={row['completed_step']:4d} census="
+                f"{row['legoesm']['census']} N-distance="
+                f"{row['legoesm_minus_nemo_census']}")
+
+
+def command_run_arm(args) -> None:
+    """Full-duration private owner arm in scorer-compatible format."""
+    import jax
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSRK3TestHooks,
+    )
+
+    policy = PrecisionPolicy.fp64() if args.precision == "fp64" else PrecisionPolicy.fp32()
+    set_policy(policy)
+    require(get_policy() == policy, f"failed to set {args.precision}")
+    require(bool(jax.config.jax_enable_x64) == (args.precision == "fp64"),
+            "JAX x64/precision mismatch")
+    card = STATS.build_nemo_testcase_card(CASE)
+    hooks = {
+        "bbl-reference": _NEMOWSRK3TestHooks(),
+        "aimp-e3w": _NEMOWSRK3TestHooks(
+            legacy_zdf_midpoint_w_metric=True),
+        "zdf-e3w": _NEMOWSRK3TestHooks(
+            legacy_aimp_midpoint_w_metric=True),
+        "combined-e3w": _NEMOWSRK3TestHooks(),
+    }[args.arm]
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=hooks)
+    state = card.recipe.initial_state
+    samples = set(STATS.sample_completed_steps(CASE))
+    captured = {}
+    started = time.perf_counter()
+    for completed in range(int(STATS.CASES[CASE]["n_steps"]) + 1):
+        if completed in samples:
+            captured[completed] = {
+                name: np.array(value, copy=True)
+                for name, value in _state_fields(state).items()
+            }
+        if completed == int(STATS.CASES[CASE]["n_steps"]):
+            break
+        state = model.step(state, dt=card.dt_s)
+        require(all(np.all(np.isfinite(v)) for v in _state_fields(state).values()),
+                f"nonfinite arm state at completed step {completed+1}")
+        if (completed + 1) % 612 == 0:
+            print(f"  {args.precision}: completed {completed+1}/6120", flush=True)
+    arrays = {
+        f"step_{completed}_{name}": value
+        for completed, fields in captured.items()
+        for name, value in fields.items()
+    }
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    state_path = args.output_dir / "states.npz"
+    np.savez_compressed(state_path, **arrays)
+    expected_dtype = "float64" if args.precision == "fp64" else "float32"
+    state_dtypes = {name: str(value.dtype) for name, value in _state_fields(state).items()}
+    geometry_dtypes = {
+        name: str(np.asarray(getattr(card.recipe.z_coord, name)).dtype)
+        for name in ("t_depth_ref", "dz_ref", "z_full_ref", "z_half_ref", "h_partial")
+    }
+    require(set(state_dtypes.values()) == {expected_dtype}, f"state dtypes {state_dtypes}")
+    require(set(geometry_dtypes.values()) == {expected_dtype},
+            f"geometry dtypes {geometry_dtypes}")
+    metadata = {
+        "format": "nemo-testcase-l1-full-state-v1",
+        "preregistration_commit": (
+            OWNER_PREREG_COMMIT if args.arm == "bbl-reference"
+            else W_METRIC_PREREG_COMMIT),
+        "git_sha": git_sha(),
+        "case": CASE,
+        "precision": args.precision,
+        "precision_policy": repr(policy),
+        "jax_enable_x64": bool(jax.config.jax_enable_x64),
+        "backend": jax.default_backend(),
+        "devices": [str(device) for device in jax.devices()],
+        "arm": args.arm,
+        "completed_steps": sorted(samples),
+        "physical_times_s": [value * card.dt_s for value in sorted(samples)],
+        "wall_time_s": time.perf_counter() - started,
+        "state_dtypes": state_dtypes,
+        "geometry_dtypes": geometry_dtypes,
+        "states_sha256": sha256(state_path),
+        "diagnostic_check_every_step": True,
+    }
+    (args.output_dir / "metadata.json").write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+    print(json.dumps(metadata, indent=2, sort_keys=True))
 
 
 
@@ -876,7 +1448,47 @@ def main() -> None:
     p_null.add_argument("--out", type=Path, required=True)
     p_null.set_defaults(func=command_chaos_null)
 
+    p_scale = sub.add_parser(
+        "bbl-scaling", help="NEMO-reference versus partial-centroid BBL operands")
+    p_scale.add_argument("--lego-root", type=Path, default=DEFAULT_LEGO_ROOT)
+    p_scale.add_argument("--out", type=Path, default=DEFAULT_OUT / "bbl_scaling.json")
+    p_scale.set_defaults(func=command_bbl_scaling)
+
+    p_aimp_scale = sub.add_parser(
+        "aimp-scaling", help="NEMO e3w_0 versus midpoint adaptive-split metric")
+    p_aimp_scale.add_argument("--lego-root", type=Path, default=DEFAULT_LEGO_ROOT)
+    p_aimp_scale.add_argument(
+        "--out", type=Path, default=DEFAULT_OUT / "aimp_scaling.json")
+    p_aimp_scale.set_defaults(func=command_aimp_scaling)
+
+    p_zdf_scale = sub.add_parser(
+        "zdf-scaling", help="literal versus midpoint ZDF W divisor")
+    p_zdf_scale.add_argument("--lego-root", type=Path, default=DEFAULT_LEGO_ROOT)
+    p_zdf_scale.add_argument(
+        "--out", type=Path, default=DEFAULT_OUT / "zdf_scaling.json")
+    p_zdf_scale.set_defaults(func=command_zdf_scaling)
+
+    p_budget = sub.add_parser(
+        "budget", help="cadenced slope census plus local term ablations")
+    p_budget.add_argument("--cadence", type=int, default=60)
+    p_budget.add_argument("--out", type=Path, default=DEFAULT_OUT / "term_budget.json")
+    p_budget.add_argument("--plant-census", action="store_true")
+    p_budget.add_argument("--plant-unregistered", action="store_true")
+    p_budget.set_defaults(func=command_budget)
+
+    p_arm = sub.add_parser(
+        "run-arm", help="run the private NEMO-reference BBL geometry arm")
+    p_arm.add_argument("--precision", choices=("fp64", "fp32"), required=True)
+    p_arm.add_argument(
+        "--arm", choices=(
+            "bbl-reference", "aimp-e3w", "zdf-e3w", "combined-e3w"),
+        default="bbl-reference")
+    p_arm.add_argument("--output-dir", type=Path, required=True)
+    p_arm.set_defaults(func=command_run_arm)
+
     args = parser.parse_args()
+    if getattr(args, "cadence", 1) <= 0:
+        parser.error("--cadence must be positive")
     args.func(args)
 
 

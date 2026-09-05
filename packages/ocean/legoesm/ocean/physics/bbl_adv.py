@@ -166,6 +166,101 @@ def bbl_static_geometry(h_ref: jnp.ndarray, land_mask: jnp.ndarray
     )
 
 
+def nemo_bbl_static_geometry(
+    h_ref: jnp.ndarray,
+    land_mask: jnp.ndarray,
+    gdept_0: jnp.ndarray,
+    e3u_0: jnp.ndarray,
+    e3v_0: jnp.ndarray,
+) -> BBLGeometry:
+    """NEMO ``tra_bbl_init`` geometry from its reference mesh operands.
+
+    ``trabbl.F90:507-533`` does *not* infer slope from the continuous water
+    column or the partial-cell centroid.  It gathers ``gdept_0`` at each
+    column's ``mbkt`` and signs that reference-depth difference; its BBL
+    thickness is the minimum of the supplied U/V-face ``e3*_0`` evaluated at
+    the two adjacent bottom indices.  Those face fields remain defined below
+    the shallower column's wet mask and therefore cannot be reconstructed from
+    masked ``h_ref`` with a cell-to-face minimum.
+
+    This is an operand builder, not a second Campin--Goosse implementation:
+    :func:`bbl_transports` and :func:`apply_bbl_adv_tendency` remain the only
+    transport and three-leg exchange arithmetic.  ``gdept_0`` may be a 1-D
+    reference ladder or a T-cell field; ``e3u_0`` and ``e3v_0`` are the exact
+    interior-face reference arrays, shaped ``(ny,nx-1,nlev)`` and
+    ``(ny-1,nx,nlev)``.
+    """
+    h = jnp.asarray(h_ref)
+    mask = jnp.asarray(land_mask, dtype=h.dtype)
+    if h.ndim != 3 or mask.shape != h.shape[:2]:
+        raise ValueError("h_ref must be (ny,nx,nlev) and land_mask (ny,nx)")
+    ny, nx, nlev = h.shape
+    gu = jnp.asarray(e3u_0, dtype=h.dtype)
+    gv = jnp.asarray(e3v_0, dtype=h.dtype)
+    if gu.shape != (ny, nx - 1, nlev):
+        raise ValueError(
+            f"e3u_0 must be {(ny, nx - 1, nlev)}, got {gu.shape}")
+    if gv.shape != (ny - 1, nx, nlev):
+        raise ValueError(
+            f"e3v_0 must be {(ny - 1, nx, nlev)}, got {gv.shape}")
+    depth = jnp.asarray(gdept_0, dtype=h.dtype)
+    if depth.ndim == 1:
+        if depth.shape != (nlev,):
+            raise ValueError(f"1-D gdept_0 must have {nlev} levels")
+        depth = jnp.broadcast_to(depth, h.shape)
+    elif depth.shape != h.shape:
+        raise ValueError(f"gdept_0 must be {(nlev,)} or {h.shape}, got {depth.shape}")
+
+    wet3 = h > jnp.asarray(1.0e-3, dtype=h.dtype)
+    n_active = jnp.sum(wet3.astype(jnp.int32), axis=-1)
+    bot_k = jnp.maximum(n_active - 1, 0)
+    dep_bot = jnp.take_along_axis(depth, bot_k[..., None], axis=-1)[..., 0]
+
+    bot_l, bot_r = bot_k[:, :-1], bot_k[:, 1:]
+    dep_l, dep_r = dep_bot[:, :-1], dep_bot[:, 1:]
+    mgrhu = jnp.sign(dep_r - dep_l)
+    ku_s = jnp.where(mgrhu >= 0, bot_l, bot_r)
+    ku_d = jnp.maximum(bot_l, bot_r)
+    e3u_l = jnp.take_along_axis(gu, bot_l[..., None], axis=-1)[..., 0]
+    e3u_r = jnp.take_along_axis(gu, bot_r[..., None], axis=-1)[..., 0]
+    e3u_bbl = jnp.minimum(e3u_l, e3u_r)
+    u_active = (
+        (mask[:, :-1] > 0.5)
+        & (mask[:, 1:] > 0.5)
+        & (mgrhu != 0)
+    ).astype(h.dtype)
+
+    bot_s, bot_n = bot_k[:-1, :], bot_k[1:, :]
+    dep_s, dep_n = dep_bot[:-1, :], dep_bot[1:, :]
+    mgrhv = jnp.sign(dep_n - dep_s)
+    kv_s = jnp.where(mgrhv >= 0, bot_s, bot_n)
+    kv_d = jnp.maximum(bot_s, bot_n)
+    e3v_s = jnp.take_along_axis(gv, bot_s[..., None], axis=-1)[..., 0]
+    e3v_n = jnp.take_along_axis(gv, bot_n[..., None], axis=-1)[..., 0]
+    e3v_bbl = jnp.minimum(e3v_s, e3v_n)
+    v_active = (
+        (mask[:-1, :] > 0.5)
+        & (mask[1:, :] > 0.5)
+        & (mgrhv != 0)
+    ).astype(h.dtype)
+
+    return BBLGeometry(
+        mgrhu=mgrhu,
+        mgrhv=mgrhv,
+        ku_s=ku_s.astype(jnp.int32),
+        ku_d=ku_d.astype(jnp.int32),
+        kv_s=kv_s.astype(jnp.int32),
+        kv_d=kv_d.astype(jnp.int32),
+        e3u_bbl=e3u_bbl,
+        e3v_bbl=e3v_bbl,
+        dep_bot=dep_bot,
+        u_active=u_active,
+        v_active=v_active,
+        bot_k=bot_k.astype(jnp.int32),
+        h_ref=h,
+    )
+
+
 def _bottom_ts(T, S, bot_k):
     """Gather bottom-cell T, S per column."""
     Tb = jnp.take_along_axis(T, bot_k[..., None], axis=-1)[..., 0]
@@ -305,6 +400,7 @@ __all__ = [
     "apply_bbl_adv_step",
     "apply_bbl_adv_tendency",
     "bbl_static_geometry",
+    "nemo_bbl_static_geometry",
     "bbl_transports",
 ]
 

@@ -595,6 +595,12 @@ class OceanZStarCoordinate(NamedTuple):
     nemo_gdepw_0: jnp.ndarray | None = None
     nemo_e3t_0: jnp.ndarray | None = None
     nemo_e3w_0: jnp.ndarray | None = None
+    # Exact interior-face reference scale factors consumed by NEMO's BBL
+    # initializer.  They are intentionally distinct from masked live face
+    # thickness: trabbl.F90:529-531 gathers e3u_0/e3v_0 at both adjacent
+    # bottom indices, including an index below the shallower wet column.
+    nemo_bbl_e3u_0: jnp.ndarray | None = None
+    nemo_bbl_e3v_0: jnp.ndarray | None = None
     nemo_e3w_mesh_reference: bool = False
     nemo_hu_0: jnp.ndarray | None = None
     nemo_hv_0: jnp.ndarray | None = None
@@ -1089,6 +1095,8 @@ class OceanPartialCellCoordinate(NamedTuple):
     nemo_gdepw_0: jnp.ndarray | None = None
     nemo_e3t_0: jnp.ndarray | None = None
     nemo_e3w_0: jnp.ndarray | None = None
+    nemo_bbl_e3u_0: jnp.ndarray | None = None
+    nemo_bbl_e3v_0: jnp.ndarray | None = None
     nemo_e3w_mesh_reference: bool = False
     nemo_hu_0: jnp.ndarray | None = None
     nemo_hv_0: jnp.ndarray | None = None
@@ -1243,6 +1251,8 @@ def create_partial_cell_coordinate(
         nemo_gdepw_0=getattr(z_coord, "nemo_gdepw_0", None),
         nemo_e3t_0=getattr(z_coord, "nemo_e3t_0", None),
         nemo_e3w_0=getattr(z_coord, "nemo_e3w_0", None),
+        nemo_bbl_e3u_0=getattr(z_coord, "nemo_bbl_e3u_0", None),
+        nemo_bbl_e3v_0=getattr(z_coord, "nemo_bbl_e3v_0", None),
         nemo_e3w_mesh_reference=getattr(
             z_coord, "nemo_e3w_mesh_reference", False),
         nemo_hu_0=getattr(z_coord, "nemo_hu_0", None),
@@ -1323,6 +1333,8 @@ def create_full_step_coordinate(
         nemo_gdepw_0=getattr(z_coord, "nemo_gdepw_0", None),
         nemo_e3t_0=getattr(z_coord, "nemo_e3t_0", None),
         nemo_e3w_0=getattr(z_coord, "nemo_e3w_0", None),
+        nemo_bbl_e3u_0=getattr(z_coord, "nemo_bbl_e3u_0", None),
+        nemo_bbl_e3v_0=getattr(z_coord, "nemo_bbl_e3v_0", None),
         nemo_e3w_mesh_reference=getattr(
             z_coord, "nemo_e3w_mesh_reference", False),
         nemo_hu_0=getattr(z_coord, "nemo_hu_0", None),

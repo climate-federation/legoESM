@@ -101,8 +101,15 @@ def test_lane1_cards_carry_oracle_w_grid_thicknesses():
     assert overflow.nemo_e3w_mesh_reference is True
     np.testing.assert_array_equal(
         np.asarray(lock.nemo_e3w_0), np.ones((3, 130, 20)))
+    # OVERFLOW carries usrdef_zgr.F90:157-168's 1-D reference ladder (the
+    # same 20 m in every column, partial-bottom included), which is also the
+    # layout the raw-W ZDF/wAimp consumers read.  Broadcast-identical to the
+    # 3-D mesh_mask field the SCO pressure gradient needs.
     np.testing.assert_array_equal(
-        np.asarray(overflow.nemo_e3w_0), np.full((3, 202, 100), 20.0))
+        np.asarray(overflow.nemo_e3w_0), np.full((100,), 20.0))
+    np.testing.assert_array_equal(
+        np.broadcast_to(np.asarray(overflow.nemo_e3w_0), (3, 202, 100)),
+        np.full((3, 202, 100), 20.0))
 
 
 def test_gyre_card_selects_complete_resolved_operator_program():
@@ -336,6 +343,53 @@ def test_testcase_cards_pin_the_certified_bbl_selectors():
     assert (overflow.bbl_adv_option, overflow.bbl_diffusive_option) == (2, 0)
     assert overflow.bbl_aht_m2_s == 1000.0
     assert overflow.bbl_gamma_s == 20.0
+
+
+def test_overflow_card_carries_source_exact_unmasked_bbl_mesh_operands():
+    """usrdef_zgr.F90:157-186 + trabbl.F90:517-533, without mesh I/O."""
+    from legoesm.ocean.physics.bbl_adv import nemo_bbl_static_geometry
+
+    recipe = build_overflow_zps_card().recipe
+    z = recipe.z_coord
+    assert np.array_equal(
+        np.asarray(z.nemo_gdept_0),
+        10.0 + 20.0 * np.arange(100, dtype=np.float64),
+    )
+    assert np.asarray(z.nemo_bbl_e3u_0).shape == (3, 201, 100)
+    assert np.asarray(z.nemo_bbl_e3v_0).shape == (2, 202, 100)
+    geom = nemo_bbl_static_geometry(
+        z.h_partial,
+        recipe.land_mask,
+        z.nemo_gdept_0,
+        z.nemo_bbl_e3u_0,
+        z.nemo_bbl_e3v_0,
+    )
+    # One wet physical row; exactly 29 reference-bottom transitions in x.
+    assert int(np.sum(np.asarray(geom.u_active)[1])) == 29
+    assert int(np.sum(np.asarray(geom.u_active)[0])) == 0
+    assert int(np.sum(np.asarray(geom.u_active)[2])) == 0
+    # Same-bottom partial-depth faces are exactly off in NEMO geometry.
+    bottom = np.asarray(z.bottom_level)[1]
+    same_bottom = bottom[:-1] == bottom[1:]
+    assert not np.any(np.asarray(geom.u_active)[1][same_bottom])
+
+
+def test_overflow_nemo_w_consumers_use_the_raw_reference_ladder():
+    from legoesm.ocean.physics.vertical_mixing import nemo_e3w_kmm
+
+    card = build_overflow_zps_card()
+    z = card.recipe.z_coord
+    h = np.asarray(z.h_partial)
+    stretch = np.full(h.shape[:-1], 1.00025)
+    got = np.asarray(nemo_e3w_kmm(z, h, stretch))
+    expected = np.broadcast_to(20.0 * stretch[..., None], got.shape)
+    np.testing.assert_array_equal(got, expected)
+    midpoint = 0.5 * (h[..., :-1] + h[..., 1:]) * stretch[..., None]
+    wet = np.asarray(z.is_active[..., :-1] & z.is_active[..., 1:])
+    assert np.max(np.abs(got[wet] - midpoint[wet])) > 4.9
+    np.testing.assert_array_equal(
+        np.asarray(z.nemo_e3w_0), np.full((100,), 20.0))
+    assert z.nemo_e3w_mesh_reference is True
 
 
 def test_overflow_card_uses_partial_cells_and_minimum_face_rule():

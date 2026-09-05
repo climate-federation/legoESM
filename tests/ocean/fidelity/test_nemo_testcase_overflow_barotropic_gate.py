@@ -141,6 +141,28 @@ def test_dirty_tree_is_refused_unless_allowed(monkeypatch):
     assert gate.git_sha(allow_dirty=True).endswith("-dirty")
 
 
+def test_compare_to_is_wired_into_the_frame_gate(tmp_path, monkeypatch):
+    """The frame gate's advertised regression mode must execute, not parse and
+    then silently return the frame verdict."""
+    report = {
+        "status": "DEBT",
+        "rows": [{
+            "name": "frame.substep1.u_exit",
+            "normalized_max_abs": 2.0e-12,
+            "absolute_max": 2.0e-12,
+            "reference_max_abs": 1.0,
+            "status": "DEBT",
+            "exact": False,
+        }],
+    }
+    reference = tmp_path / "reference.json"
+    reference.write_text(json.dumps(report))
+    monkeypatch.setattr(gate, "run", lambda *args, **kwargs: report)
+    assert gate.main([
+        "--compare-to", str(reference), "--allow-dirty",
+    ]) == 0
+
+
 def _write_zero_trace_kt(path: Path, kt: int) -> None:
     """A kt>=2 record: RK3 rotates Nbb<->Naa at every step end (stprk3.F90:213)."""
     nx, ny, ncycle, nfields, bits = gate.EXPECTED

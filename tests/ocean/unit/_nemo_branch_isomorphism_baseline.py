@@ -622,7 +622,9 @@ ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
     )),
     RoutineRow("S-20", "wAimp", "SHARED", "ln_zad_Aimp", (
         Impl(_VERTICAL, "nemo_wicker_aimp_partition_transport",
-             Reference("nemo", "ln_zad_Aimp", "sshwzv.F90 (adaptive-implicit w split; Wicker & Skamarock partition)")),
+             Reference("nemo", "ln_zad_Aimp",
+                       "sshwzv.F90:773-843 (adaptive-implicit w split; OVERFLOW raw "
+                       "e3w_0 from usrdef_zgr.F90:157-168)")),
     )),
     RoutineRow("S-21", "stage transport triplet zFu/zFv/zFw", "SHARED", "none (RK3 identity)", (
         Impl(_OMLC, "_nemo_ws_stage_transport",
@@ -765,8 +767,10 @@ ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
     ), (
         Impl(_OMLC, "_apply_implicit_vertical_mixing",
              Reference("nemo", "zdf_implicit_program",
-                        "trazdf.F90:219-221 / dynzdf.F90:200-203 (S-34's divisor is now the "
-                        "single shared nemo_e3w_kmm; the remaining fork on this symbol is "
+                        "trazdf.F90:219-221 / dynzdf.F90:182-195 (S-34's divisor is now the "
+                        "single shared nemo_e3w_kmm; OVERFLOW supplies usrdef_zgr.F90:157-168's "
+                        "raw 20 m W ladder and domzgr_substitute.h90:131-133 T/U/V stretch; "
+                        "the remaining fork on this symbol is "
                         "S-33's shared_thomas/nemo_literal solver evaluation, omlc:7537, "
                         "not AST-distinct — see docstring)")),
     )),

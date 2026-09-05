@@ -25,6 +25,19 @@ ORACLE_ROOT = Path(
     "round11_oracle_stage2_v4"
 )
 
+ORACLE_IDENTITY_PAIRS = {
+    # Original vector-math oracle retained for reproducibility.
+    (
+        "55e780b8d56eb249e5387123b20aeae8f735325200714c02a816ef719d6b3351",
+        "3271da17716957c2c043f16af62b77d3aad3213bffd83ddce433d65edb6794ba",
+    ): "V1-vector-math",
+    # Round-15 scalar-math oracle V2 (-fno-tree-vectorize).
+    (
+        "e29972359b9fe9929d38dfc58ca0d5f0f84c9a0a7ce65905481349a8a52ef875",
+        "6245d06d9b9f477e08d4d0b7b77f42fdb0ef6d86188332811898880f96233a68",
+    ): "V2-scalar-math",
+}
+
 
 def _xyz(values: np.ndarray, nx: int, ny: int, nz: int) -> np.ndarray:
     return values.reshape((nx, ny, nz), order="F")[2:-2, 2:-2].transpose(1, 0, 2)
@@ -131,16 +144,10 @@ def run(mode: str, oracle_root: Path, plant: bool = False) -> dict:
     restart_path = oracle_root / "GYRE_OMIP_L2_P3_00000010_restart.nc"
     oracle = read_stage2_composition(oracle_path)
     preupdate = read_stage2_preupdate(preupdate_path)
-    require(
-        sha256(identity_path)
-        == "55e780b8d56eb249e5387123b20aeae8f735325200714c02a816ef719d6b3351",
-        "WRITE-only instrumentation changed the ordinary stage-2 state",
-    )
-    require(
-        sha256(restart_path)
-        == "3271da17716957c2c043f16af62b77d3aad3213bffd83ddce433d65edb6794ba",
-        "WRITE-only instrumentation changed the ordinary restart",
-    )
+    identity_pair = (sha256(identity_path), sha256(restart_path))
+    require(identity_pair in ORACLE_IDENTITY_PAIRS,
+            "WRITE-only instrumentation changed the stage-2/restart identity")
+    oracle_generation = ORACLE_IDENTITY_PAIRS[identity_pair]
 
     card = build_nemo_testcase_card(CASE)
     cfg = card.recipe.model_config._replace(
@@ -230,12 +237,16 @@ def run(mode: str, oracle_root: Path, plant: bool = False) -> dict:
         "instrumentation_identity": {
             "stage2_sha256": sha256(identity_path),
             "restart_sha256": sha256(restart_path),
+            "oracle_generation": oracle_generation,
         },
         "rows": rows,
         "planted_control": plant,
     }
     if plant:
-        require(status == "DEBT" and rows[0]["absolute_max"] >= 1.0,
+        # The selected live value is nonzero, so adding 1.0 can produce a
+        # residual infinitesimally below one.  Require the material DEBT, not
+        # an impossible exact lower bound on the subtraction result.
+        require(status == "DEBT" and rows[0]["absolute_max"] >= 0.9,
                 "planted stage-2 composition violation did not fire")
     return report
 

@@ -10,7 +10,10 @@ here, each with a case that must produce the opposite answer.
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -113,3 +116,39 @@ def test_the_decomposition_closure_guard_can_actually_fire():
     left["census"] = [0.0, 0.5, 0.5]          # inconsistent with `_klass_full`
     with pytest.raises(probe.ProbeError, match="does not close"):
         probe.difference_map(left, right, "planted")
+
+
+def _run_planted(tmp_path: Path, flag: str) -> subprocess.CompletedProcess:
+    env = os.environ.copy()
+    env.setdefault("JAX_PLATFORMS", "cpu")
+    env.setdefault("JAX_ENABLE_X64", "1")
+    return subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "budget",
+            flag,
+            "--out",
+            str(tmp_path / "must-not-exist.json"),
+        ],
+        cwd=SCRIPT.parents[4],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+        check=False,
+    )
+
+
+def test_budget_cli_planted_census_excursion_exits_nonzero(tmp_path):
+    result = _run_planted(tmp_path, "--plant-census")
+    assert result.returncode != 0
+    assert "PLANTED census excursion fired" in result.stderr
+    assert not (tmp_path / "must-not-exist.json").exists()
+
+
+def test_budget_cli_planted_unregistered_term_exits_nonzero(tmp_path):
+    result = _run_planted(tmp_path, "--plant-unregistered")
+    assert result.returncode != 0
+    assert "unregistered budget terms" in result.stderr
+    assert not (tmp_path / "must-not-exist.json").exists()

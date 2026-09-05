@@ -946,6 +946,13 @@ _DUMP_TIME_LEVEL["oracle_bt_advmean_operands_kt00000001.bin"] = (
     "the kt=1 substep transport accumulator and its normalized NOW-level "
     "un_adv/vn_adv handoff",
 )
+_DUMP_TIME_LEVEL["oracle_bt_ordered_operands_kt00000001.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3_SM/MY_SRC/dynspg_ts.F90:599-917 writes the kt=1 "
+    "substep-1/2 NOW-level external-mode histories, continuity, face-depth, "
+    "pressure-gradient, trend, forcing, and velocity-update operands",
+)
 _DUMP_TIME_LEVEL["oracle_tracer_transport_kt00000001_s3.bin"] = (
     "now",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
