@@ -58,7 +58,7 @@ RN_EMIN0 = 1.0e-4
 RN_EBB = 67.83
 
 ORDER = (
-    "ice_fraction", "zWlc2", "zpelc", "imlc", "zhlc", "zus3",
+    "taum_input", "ice_fraction", "zWlc2", "zpelc", "imlc", "zhlc", "zus3",
     "en_post_lc", "production_langmuir", "pdlr", "zdiag_pre_solve",
     "zd_lw_pre_solve", "zd_up_pre_solve", "en_rhs_pre_solve",
     "zdiag_after_forward", "zd_lw_after_forward", "en_post_solve",
@@ -279,6 +279,14 @@ def validate(deck: Path, run_a: Path, run_b: Path, baseline: Path,
         return np.asarray(_owned_tke2(raw, name), np.float64)
 
     taum, fr_i = _owned_zdf2(zdf, "taum"), _owned_zdf2(zdf, "fr_i")
+    # The NCAR bulk boundary remains owned by Lane 3b.  Downstream of that
+    # open boundary this walk follows the campaign's operand-substitution
+    # rule: the exact post-SBC NEMO taum is injected into the production TKE
+    # call.  JIT the hand-off itself so a future cast/reshape cannot hide in
+    # the harness; this row certifies the supplied operand boundary, not the
+    # unresolved NCAR operator that produced it.
+    production_taum = np.asarray(jax.jit(lambda value: value)(
+        jnp.asarray(taum, dtype=jnp.float64)))
     rn2, rn2b = z("rn2"), z("rn2b")
     gdepw, e3w, e3t = z("gdepw_Kmm"), z("e3w_Kmm"), z("e3t_Kmm")
     sh2, avm, avt = z("sh2"), z("avm_k_pre"), z("avt_k_pre")
@@ -386,22 +394,24 @@ def validate(deck: Path, run_a: Path, run_b: Path, baseline: Path,
       jnp.asarray(t("pdlr")[..., 1:-1]), jnp.asarray(avm[..., 1:-1])))
 
     rowspec = [
-        ("ice_fraction", ice, t2("zice_fra"), surface, "zdftke.F90:270"),
-        ("zWlc2", zwlc2, t2("zWlc2"), surface, "zdftke.F90:358"),
-        ("zpelc", zpelc, t("zpelc"), column_mask, "zdftke.F90:366-370"),
-        ("imlc", imlc.astype(np.float64), t2("imlc_real"), surface, "zdftke.F90:374-376"),
-        ("zhlc", zhlc, t2("zhlc"), surface, "zdftke.F90:380"),
-        ("zus3", zus3, t2("zus3"), surface, "zdftke.F90:384-385"),
-        ("en_post_lc", literal_lc, oracle_lc, column_mask, "zdftke.F90:393"),
+        ("taum_input", production_taum, taum, surface,
+         "ORACLE_SUPPLIED post-sbc taum -> zdftke.F90:265,332"),
+        ("ice_fraction", ice, t2("zice_fra"), surface, "zdftke.F90:253-258"),
+        ("zWlc2", zwlc2, t2("zWlc2"), surface, "zdftke.F90:326-333"),
+        ("zpelc", zpelc, t("zpelc"), column_mask, "zdftke.F90:339-345"),
+        ("imlc", imlc.astype(np.float64), t2("imlc_real"), surface, "zdftke.F90:347-351"),
+        ("zhlc", zhlc, t2("zhlc"), surface, "zdftke.F90:352-355"),
+        ("zus3", zus3, t2("zus3"), surface, "zdftke.F90:357-360"),
+        ("en_post_lc", literal_lc, oracle_lc, column_mask, "zdftke.F90:361-370"),
         ("production_langmuir", production_lc, oracle_lc, column_mask, "tke.py:nemo_langmuir_tke_source"),
-        ("pdlr", pdlr, t("pdlr"), matrix_mask, "zdftke.F90:423-438"),
-        ("zdiag_pre_solve", diag, t("zdiag_pre_solve"), matrix_mask, "zdftke.F90:453"),
-        ("zd_lw_pre_solve", lower, t("zd_lw_pre_solve"), matrix_mask, "zdftke.F90:448-452"),
-        ("zd_up_pre_solve", upper, t("zd_up_pre_solve"), matrix_mask, "zdftke.F90:446-451"),
-        ("en_rhs_pre_solve", rhs, t("en_rhs_pre_solve"), column_mask, "zdftke.F90:456-459"),
+        ("pdlr", pdlr, t("pdlr"), matrix_mask, "zdftke.F90:381-400"),
+        ("zdiag_pre_solve", diag, t("zdiag_pre_solve"), matrix_mask, "zdftke.F90:403-420"),
+        ("zd_lw_pre_solve", lower, t("zd_lw_pre_solve"), matrix_mask, "zdftke.F90:403-420"),
+        ("zd_up_pre_solve", upper, t("zd_up_pre_solve"), matrix_mask, "zdftke.F90:403-420"),
+        ("en_rhs_pre_solve", rhs, t("en_rhs_pre_solve"), column_mask, "zdftke.F90:416-420"),
         ("zdiag_after_forward", diag_fwd, t("zdiag_after_forward"), matrix_mask, "zdftke.F90:513"),
         ("zd_lw_after_forward", lower_fwd, t("zd_lw_after_forward"), matrix_mask, "zdftke.F90:529"),
-        ("en_post_solve", solved, oracle_solved, column_mask, "zdftke.F90:541-547"),
+        ("en_post_solve", solved, oracle_solved, column_mask, "zdftke.F90:451-469"),
         ("production_solve", production_solved, oracle_solved[..., 1:], wmask[..., 1:], "tke.py:_nemo_literal_tke_solve"),
         ("htau", literal_htau, t2("htau"), surface,
             "zdftke.F90:1057-1062"),

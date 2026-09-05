@@ -44,12 +44,41 @@ All eight binding plants exited nonzero: magic, extent, count, truncation,
 trailing byte, canonical unowned slot, undefined `jpk` workspace, and twin
 identity.  This is **CONFIRMED**, not inferred from the user's byte census.
 
+## 2. Ordered TKE walk: first boundary
+
+**CONFIRMED / production JIT, CPU, fp64 + scalar-libm:** the post-NCAR
+operand-substitution boundary hands the card the oracle's own post-SBC `taum`.
+The JIT hand-off is `0 / 8,794`, so no cast or reshape changes the forcing
+operand.  This row certifies the supplied-input boundary, not the open NCAR
+bulk operator.  The restored `nn_eice=1` attenuation is `0 / 8,794`, and the
+no-Stokes `zWlc2=zcsd*taum` statement is `0 / 8,794` (`zdftke.F90:253-258,
+326-333`).
+
+The first over-bar statement is the `zpelc` potential-energy accumulation at
+`zdftke.F90:339-345`: **39,290 / 242,135** defined rank-zero cells differ,
+maximum absolute error `1.7763568394002505e-15`, maximum four row-scale ULP.
+The first differing cell is zero-based rank-zero `[j=1,i=49,k=2]`, classified
+coast-or-bottom-adjacent.  The first two values are
+`0.00723748010384538` versus oracle `0.0072374801038453795`.
+
+This is **CONFIRMED `GYRE_OWNER_SHARED_TKE`**: the executed statement is a
+geometry-independent scalar recurrence in the one shared TKE implementation;
+the forcing operand and preceding ORCA2 selector rows are exact.  Lane 4 did
+not change it and did not walk EVD/IWM past the open TKE boundary.  Reproducer:
+`nemo_testcase_l4_orca2_phase2v_tke_walk_gate.py`; its data result is
+`/data/abyssal/dbalwada/nemo-testcases-l4/phase2w/tke_walk.json`, SHA-256 to be
+pinned in the final manifest.  Target-bit plants for `taum_input`,
+`ice_fraction`, `zWlc2`, and `zpelc` each exited nonzero.
+
 ## ASKED / UNASKED
 
 | action | classification | disposition |
 |---|---|---|
 | execute Phase-2v MPI twins | ASKED, user shell | CONFIRMED complete; launchers unchanged |
 | admit and pin twin A | ASKED | CONFIRMED 101/101 twin and 100/100 inherited raw identity |
+| score `taum` before TKE arithmetic | ASKED | CONFIRMED ORACLE_SUPPLIED hand-off, 0/8,794 |
+| walk TKE to first non-bit statement | ASKED | CONFIRMED `zpelc`, GYRE owner; stopped fail-closed |
+| alter shared `zpelc` arithmetic | Lane-4-forbidden | not done; reproducer routed to GYRE |
 | retain twin B and prior roots | ASKED | CONFIRMED retained and labelled |
 | pin Phase-2u TKE records | forbidden | rejected records remain flagged, never scored |
 | change shared arithmetic during admission | UNASKED | none |
