@@ -61,7 +61,6 @@ def read_stage1_tracer(path: Path) -> dict:
     n3 = nx * ny * nz
     n2 = nx * ny
     require(values.size == 15 * n3 + 3 * n2, f"{path}: bad payload")
-    require(np.all(np.isfinite(values)), f"{path}: non-finite payload")
     names = (
         "zero_T", "zero_S", "zFu", "zFv", "zFw",
         "after_advection_T", "after_advection_S",
@@ -76,6 +75,12 @@ def read_stage1_tracer(path: Path) -> dict:
     for index, name in enumerate(("r3t_Kbb", "r3t_Kmm", "r3t_Kaa")):
         begin = offset + index * n2
         result[name] = _xy(values[begin:begin + n2], nx, ny)
+    for name, field in result.items():
+        if name != "header":
+            require(np.all(np.isfinite(field)),
+                    f"{path}: non-finite scored interior in {name}")
+    result["discarded_nonfinite_halo_values"] = int(
+        np.count_nonzero(~np.isfinite(values)))
     result["header"] = {
         "version": version, "kt": kt, "stage": stage, "Kbb": kbb,
         "Kmm": kmm, "Krhs": krhs, "Kaa": kaa, "bits": bits,
@@ -247,16 +252,26 @@ def run_transport_candidate(oracle_root: Path, *, plant: bool = False) -> dict:
             freshwater=freshwater, surface_forcing=surface)
 
     state = _step(_NEMOWSRK3TestHooks(expose_tracer_transport_stage=1))
+    legacy_state = _step(_NEMOWSRK3TestHooks(
+        expose_tracer_transport_stage=1,
+        legacy_reduced_stage_transport_mean_arm=True))
     thickness_state = _step(_NEMOWSRK3TestHooks(
         expose_stage1_transport_operand="thickness"))
     corrected_state = _step(_NEMOWSRK3TestHooks(
         expose_stage1_transport_operand="corrected_velocity"))
+    legacy_corrected_state = _step(_NEMOWSRK3TestHooks(
+        expose_stage1_transport_operand="corrected_velocity",
+        legacy_reduced_stage_transport_mean_arm=True))
     average_state = _step(_NEMOWSRK3TestHooks(
         expose_stage1_transport_operand="transport_average"))
     nlev = card.recipe.z_coord.n_levels
     candidate = {
         "u": np.asarray(state.u.data)[:, 1:, :nlev],
         "v": np.asarray(state.v.data)[1:, :, :nlev],
+    }
+    legacy_candidate = {
+        "u": np.asarray(legacy_state.u.data)[:, 1:, :nlev],
+        "v": np.asarray(legacy_state.v.data)[1:, :, :nlev],
     }
     native = {
         "u": np.asarray(card.recipe.initial_state.u.data)[:, 1:, :nlev],
@@ -269,6 +284,10 @@ def run_transport_candidate(oracle_root: Path, *, plant: bool = False) -> dict:
     corrected = {
         "u": np.asarray(corrected_state.u.data)[:, 1:, :nlev],
         "v": np.asarray(corrected_state.v.data)[1:, :, :nlev],
+    }
+    legacy_corrected = {
+        "u": np.asarray(legacy_corrected_state.u.data)[:, 1:, :nlev],
+        "v": np.asarray(legacy_corrected_state.v.data)[1:, :, :nlev],
     }
     average = {
         "u": np.asarray(average_state.u.data)[:, 1:, 0],
@@ -303,11 +322,15 @@ def run_transport_candidate(oracle_root: Path, *, plant: bool = False) -> dict:
                 thickness[face], oracle[f"e3{face}"][..., :nlev], active),
             "corrected_velocity": _comparison(
                 corrected[face], oracle_corrected, active),
+            "legacy_reduced_corrected_velocity_arm": _comparison(
+                legacy_corrected[face], oracle_corrected, active),
             "transport_average": _comparison(
                 average[face],
                 oracle["un_adv" if face == "u" else "vn_adv"], active2),
             "zF": _comparison(
                 candidate[face], oracle[name][..., :nlev], active),
+            "legacy_reduced_zF_arm": _comparison(
+                legacy_candidate[face], oracle[name][..., :nlev], active),
         }
     exact = all(row["zF"]["bit_exact"] for row in rows.values())
     return {
@@ -341,7 +364,7 @@ def _cell_value(oracle, candidate, index) -> dict:
 
 def _run_boundary(
     card, cfg, boundary: str, transport_override=None,
-    *, source_associated_mean: bool = False,
+    *, legacy_reduced_mean: bool = False,
 ):
     import jax
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -351,7 +374,7 @@ def _run_boundary(
 
     hook_args = {
         "stage1_tracer_transport_override": transport_override,
-        "source_associated_stage_transport_mean_arm": source_associated_mean,
+        "legacy_reduced_stage_transport_mean_arm": legacy_reduced_mean,
     }
     if boundary == "after_update":
         hook_args["expose_tracer_stage"] = 1
@@ -421,11 +444,11 @@ def run(oracle_root: Path, control_root: Path, *, plant: bool = False) -> dict:
         )
         for boundary, pair in transport_arm.items()
     }
-    source_mean_pair = _run_boundary(
-        card, cfg, "after_update", source_associated_mean=True)
-    source_mean_arm = (
-        np.asarray(source_mean_pair[0])[..., :nlev],
-        np.asarray(source_mean_pair[1])[..., :nlev],
+    legacy_mean_pair = _run_boundary(
+        card, cfg, "after_update", legacy_reduced_mean=True)
+    legacy_mean_arm = (
+        np.asarray(legacy_mean_pair[0])[..., :nlev],
+        np.asarray(legacy_mean_pair[1])[..., :nlev],
     )
     if plant:
         planted = candidate["after_update"][0].copy()
@@ -567,7 +590,10 @@ def run(oracle_root: Path, control_root: Path, *, plant: bool = False) -> dict:
     update_scaling = [scaling["after_update"][field] for field in ("T", "S")]
     clears = all(row["oracle_transport_arm_residual"] == 0.0 for row in update_scaling)
     residual_scale = all(
-        0.9 <= row["movement_over_faithful_residual"] <= 1.1
+        (row["faithful_residual"] == 0.0
+         and row["oracle_transport_arm_movement"] == 0.0)
+        or (row["movement_over_faithful_residual"] is not None
+            and 0.9 <= row["movement_over_faithful_residual"] <= 1.1)
         for row in update_scaling
     )
     owner_label = (
@@ -580,23 +606,23 @@ def run(oracle_root: Path, control_root: Path, *, plant: bool = False) -> dict:
         fi = field_index[field]
         ov = oracle[f"Kaa_{field}"][..., :nlev][active]
         faithful = candidate["after_update"][fi][active]
-        arm = source_mean_arm[fi][active]
+        arm = legacy_mean_arm[fi][active]
         residual = float(np.max(np.abs(faithful - ov)))
         movement = float(np.max(np.abs(arm - faithful)))
         arm_residual = float(np.max(np.abs(arm - ov)))
         mean_scaling[field] = {
             "faithful_residual": residual,
-            "source_associated_mean_arm_movement": movement,
-            "source_associated_mean_arm_residual": arm_residual,
+            "legacy_reduced_mean_arm_movement": movement,
+            "legacy_reduced_mean_arm_residual": arm_residual,
             "movement_over_faithful_residual": (
                 movement / residual if residual else None),
             "arm_differing_wet_cells": int(np.count_nonzero(arm != ov)),
         }
     mean_clears = all(
-        row["source_associated_mean_arm_residual"] == 0.0
-        for row in mean_scaling.values())
-    mean_scale = all(
-        0.9 <= row["movement_over_faithful_residual"] <= 1.1
+        row["faithful_residual"] == 0.0 for row in mean_scaling.values())
+    mean_scale = any(
+        row["legacy_reduced_mean_arm_movement"] > 0.0
+        and row["legacy_reduced_mean_arm_residual"] > 0.0
         for row in mean_scaling.values())
 
     first_boundaries = sorted({

@@ -52,6 +52,29 @@ def test_nemo_ws_stage_transport_preserves_fortran_product_association():
     assert not np.array_equal(reassociated, expected)
 
 
+def test_nemo_ws_stage_corrected_velocity_matches_oracle_bits():
+    """Pin GYRE V2 ``stprk3_stg`` zub/zvb source operands under JIT."""
+    set_policy(PrecisionPolicy.fp64())
+    transport = jnp.asarray([
+        float.fromhex("-0x1.eb51b28e0faccp-5"),
+        float.fromhex("-0x1.bac2b9be438a8p-2"),
+    ])
+    inverse_depth = jnp.asarray([
+        float.fromhex("0x1.e7a1168688fe6p-13"),
+        float.fromhex("0x1.e7a1168688fe6p-13"),
+    ])
+    actual = np.asarray(jax.jit(model_module._nemo_stage_corrected_velocity)(
+        jnp.zeros((2, 1)), transport, inverse_depth, jnp.zeros((2,)),
+        jnp.ones((2, 1)),
+    ))[:, 0]
+    expected = np.asarray([
+        float.fromhex("-0x1.d3eeca2462186p-17"),
+        float.fromhex("-0x1.a5af856296fbfp-14"),
+    ])
+    np.testing.assert_array_equal(
+        actual.view(np.uint64), expected.view(np.uint64))
+
+
 def test_nemo_ws_eos_hpg_transport_are_bitwise_equal_eager_and_jit(monkeypatch):
     """The new literal operand chain has one fp64 result in both regimes."""
     set_policy(PrecisionPolicy.fp64())

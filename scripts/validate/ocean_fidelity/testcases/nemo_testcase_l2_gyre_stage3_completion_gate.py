@@ -285,7 +285,7 @@ def run(mode: str, output_npz: Path, faithful_npz: Path | None,
     elif mode == "transport_zub_arm":
         hooks = hooks._replace(
             expose_tracer_transport_stage=3,
-            source_associated_stage_transport_mean_arm=True)
+            legacy_reduced_stage_transport_mean_arm=True)
     elif mode == "transport_wzv_legacy":
         hooks = hooks._replace(
             expose_tracer_transport_stage=3,

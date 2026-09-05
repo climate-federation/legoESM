@@ -1137,11 +1137,10 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # rDt_e product; this restores the formerly collapsed algebra only for a
     # one-variable causal measurement.
     legacy_barotropic_continuity_association: bool = False
-    # Private source-association probe for stprk3_stg.F90:265-278.  It hands
-    # the separately carried stage barotropic value to zub/zvb instead of the
-    # production reduction of the 3-D Kmm field.  The GYRE arm did not clear
-    # zFv, so this remains diagnostic and no public card selects it.
-    source_associated_stage_transport_mean_arm: bool = False
+    # Private one-variable ablation of stprk3_stg.F90:265-278.  Production
+    # hands the separately carried uu_b/vv_b value to zub/zvb; this restores
+    # the former reduction of the 3-D Kmm field.  No public card selects it.
+    legacy_reduced_stage_transport_mean_arm: bool = False
     # Private ablation of traadv.F90:220-226: rederive pFu/pFv from velocity
     # inside WZV instead of consuming the stage transport just materialized.
     legacy_wzv_rederived_transport: bool = False
@@ -1314,6 +1313,21 @@ def _nemo_metric_stage_transport(metric, face_thickness, corrected_velocity):
         * corrected_velocity)
 
 
+def _nemo_stage_corrected_velocity(
+    velocity, transport_average, inverse_depth, barotropic_velocity, face_mask,
+):
+    """Literal ``stprk3_stg.F90:265-278`` zub/zvb composition.
+
+    NEMO uses its separately stored ``uu_b/vv_b(Kmm)`` operand here; reducing
+    the 3-D velocity again is algebraically equivalent but not bitwise so.
+    """
+    correction = nemo_source_round(
+        nemo_source_round(transport_average * inverse_depth)
+        - barotropic_velocity)
+    return nemo_source_round(
+        velocity + nemo_source_round(correction[..., None] * face_mask))
+
+
 def _nemo_ws_stage_transport(
     stage_velocity, h_stage, stage_index, *, eta_stage, h_ref, Hu_avg, Hv_avg,
     u_mask_3d, v_mask_3d, grid, z_coord, config, dt,
@@ -1370,16 +1384,10 @@ def _nemo_ws_stage_transport(
             1.0 / jnp.maximum(Hu_stage_depth, 1.0e-10))
         r1_hv = nemo_source_round(
             1.0 / jnp.maximum(Hv_stage_depth, 1.0e-10))
-        zub = nemo_source_round(
-            nemo_source_round(Hu_avg * r1_hu) - barotropic_velocity[0])
-        zvb = nemo_source_round(
-            nemo_source_round(Hv_avg * r1_hv) - barotropic_velocity[1])
-        u_stage_corr = nemo_source_round(
-            u_stage + nemo_source_round(
-                zub[..., jnp.newaxis] * u_mask_3d))
-        v_stage_corr = nemo_source_round(
-            v_stage + nemo_source_round(
-                zvb[..., jnp.newaxis] * v_mask_3d))
+        u_stage_corr = _nemo_stage_corrected_velocity(
+            u_stage, Hu_avg, r1_hu, barotropic_velocity[0], u_mask_3d)
+        v_stage_corr = _nemo_stage_corrected_velocity(
+            v_stage, Hv_avg, r1_hv, barotropic_velocity[1], v_mask_3d)
     mf_u = hu_stage * u_stage_corr * u_mask_3d
     mf_v = hv_stage * v_stage_corr * v_mask_3d
     zfu_stage = _nemo_metric_stage_transport(
@@ -5718,9 +5726,9 @@ class LatLonCGridOceanModel:
                 min_water_column_m=_cfg_b.min_water_column_m)
             _legacy_min_faces = (
                 self._nemo_ws_test_hooks.legacy_stage_min_face_thickness)
-            _source_transport_mean_arm = (
+            _legacy_reduced_transport_mean_arm = (
                 self._nemo_ws_test_hooks
-                .source_associated_stage_transport_mean_arm)
+                .legacy_reduced_stage_transport_mean_arm)
             _stage_transport_kw = dict(
                 h_ref=_h_ref_ws, Hu_avg=Hu_avg, Hv_avg=Hv_avg,
                 u_mask_3d=_u_live_mask,
@@ -5949,9 +5957,9 @@ class LatLonCGridOceanModel:
             # stage 1 (dt/3): Kmm = Kbb transport, full RHS incl. vertical UP3
             _g0 = _nemo_ws_stage_transport(
                 (u0, v0), h_k_old, 0, eta_stage=state.eta.data,
-                barotropic_velocity=(
-                    jnp.zeros_like(target_u), jnp.zeros_like(target_v))
-                if _source_transport_mean_arm else None,
+                barotropic_velocity=(None
+                    if _legacy_reduced_transport_mean_arm else (
+                        jnp.zeros_like(target_u), jnp.zeros_like(target_v))),
                 **_stage_transport_kw)
             _operand_name = (
                 self._nemo_ws_test_hooks.expose_stage1_transport_operand)
@@ -6058,8 +6066,9 @@ class LatLonCGridOceanModel:
             _g1 = _nemo_ws_stage_transport(
                 (u1_corr, v1_corr), _h_live_one_third, 1,
                 eta_stage=_eta_live_one_third,
-                barotropic_velocity=(target_u, target_v)
-                if _source_transport_mean_arm else None,
+                barotropic_velocity=(None
+                    if _legacy_reduced_transport_mean_arm
+                    else (target_u, target_v)),
                 **_stage_transport_kw)
             p1u_corr, p1v_corr = _mom_pert_ws(
                 u1_corr, v1_corr, True, _transport_target,
@@ -6094,8 +6103,9 @@ class LatLonCGridOceanModel:
             _g2 = _nemo_ws_stage_transport(
                 (u2_corr, v2_corr), _h_live_one_half, 2,
                 eta_stage=_eta_live_one_half,
-                barotropic_velocity=(target_u, target_v)
-                if _source_transport_mean_arm else None,
+                barotropic_velocity=(None
+                    if _legacy_reduced_transport_mean_arm
+                    else (target_u, target_v)),
                 **_stage_transport_kw)
             _g2_override = self._nemo_ws_test_hooks.stage3_transport_override
             if _g2_override is not None:
