@@ -245,28 +245,38 @@ def validate(oracle_root: Path, *, plant: str | None) -> dict[str, object]:
         jnp.asarray(r3aa), jnp.asarray(tmask[..., :NLEV]),
         jnp.asarray(STAGE_DT)))
     no_runoff_ablation = score(no_runoff_ww, ww_oracle, live)
-    full_step_dt_ww = np.asarray(jax.jit(nemo_qco_wzv_recurrence)(
+    # Retained only as a Rule-11 retraction witness.  This is not a production
+    # clock arm: it combines NEMO's explicitly rounded stage-1 HYB SSH level
+    # with the full-step denominator.  Production instead combines the
+    # full-step SSH endpoint with the full-step denominator, while NEMO pairs
+    # HYB with rn_Dt/3.  The mixed pair is formed by neither implementation.
+    invalid_mixed_state_dt_ww = np.asarray(jax.jit(nemo_qco_wzv_recurrence)(
         jnp.asarray(adjusted), jnp.asarray(e3t0[..., :NLEV]),
         jnp.asarray(r3bb), jnp.asarray(r3aa),
         jnp.asarray(tmask[..., :NLEV]), jnp.asarray(RN_DT)))
-    full_step_dt_ablation = score(full_step_dt_ww, ww_oracle, live)
+    invalid_mixed_state_dt_ablation = score(
+        invalid_mixed_state_dt_ww, ww_oracle, live)
     source_first = next((name for name, row in rows.items()
                          if row["status"] != "AT_BAR"), None)
-    first = (source_first if source_first is not None
-             else ("wzv_stage_timestep"
-                   if full_step_dt_ablation["status"] != "AT_BAR" else None))
+    first = source_first
     return {
         "status": "PASS_MEASUREMENT_COMPLETE",
         "boundary": "O5-B/stage1-divhor-runoff-QCO-WZV-pFw",
         "result": "AT_BAR" if first is None else "DEBT",
         "first_over_bar_subboundary": first,
-        "owner": (
-            "CONFIRMED_ORCA2_RUNOFF_AND_SHARED_WZV_AT_BAR" if first is None
-            else ("ORCA2_OWNER_RUNOFF" if first == "runoff"
-                  else "GYRE_OWNER_SHARED_WZV_STAGE_CLOCK")),
+        "owner": ("CONFIRMED_ORCA2_RUNOFF_AND_SHARED_WZV_SOURCE_PROGRAM_AT_BAR"
+                  if first is None else "ORCA2_OWNER_RUNOFF"),
         "rows": rows,
         "runoff_omission_ablation": no_runoff_ablation,
-        "production_full_step_dt_ablation": full_step_dt_ablation,
+        "retracted_invalid_mixed_state_full_dt_ablation": {
+            **invalid_mixed_state_dt_ablation,
+            "disposition": "RETRACTED_RULE_11_NOT_A_PRODUCTION_CONFIGURATION",
+            "reason": (
+                "pairs NEMO's materialized stage-1 HYB SSH delta with a "
+                "full-step denominator; neither NEMO nor legoESM production "
+                "forms that state/clock pair"
+            ),
+        },
         "record": {"path": str(path), "sha256": sha256(path),
                    "schema": record["header"]},
         "execution": {

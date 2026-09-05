@@ -4,15 +4,16 @@ Date: 2026-09-06
 
 Parent: `f54fa46926db03b6864aedfb54d80e9a9fcdf5c8`
 
-Status: **STOP AT `GYRE_OWNER_SHARED_WZV_STAGE_CLOCK`.**  The 93-stream
+Status: **SUPERSEDED / RULE-11 RETRACTION.**  The 93-stream
 icebergs-off record set is reproducible and twin A is pinned as the
 `VARIANT_ORACLE_V2` extension.  The stage-1 transport divergence, surface
 runoff decrement, QCO W recurrence and final `pFw` product are each exact at
-0 / 233,341 when evaluated on NEMO's resolved stage-1 clock.  The production
-card currently hands the full 10,800 s step to all three WZV calls; NEMO uses
-3,600 s at stage 1.  That one-variable arm is over bar in 233,341 / 233,341
-wet rank-zero cells.  It is shared WS-RK3 clock wiring and is handed to the
-GYRE lane without a Lane-4 repair.  FCT, BBL and TKE/EVD/IWM were not entered.
+0 / 233,341 when evaluated on NEMO's resolved stage-1 clock.  Section 4's
+claim that production hands a full-step denominator to a stage-interpolated
+SSH delta is retracted: the arm paired operands that production never pairs.
+The replacement compiled-production adjudication is recorded in the Phase-2l
+receipt.  This document remains as preserved provenance, but it is not a
+valid shared-clock handoff.
 
 SI3 exchanges remain `ORACLE_SUPPLIED`; SI3 dynamics and thermodynamics remain
 `UNMEASURED_PENDING_ICE_MERGE`.
@@ -136,7 +137,7 @@ gate; there is no ORCA2 fork.  This is the authorized `ORCA2_OWNER_RUNOFF`
 change.  Existing no-runoff WZV tests pass; the broader focused command found
 one unrelated pre-existing partial-mesh fixture failure before entering WZV.
 
-## 4. First over-bar boundary: shared stage clock
+## 4. RETRACTED: invalid mixed state/clock ablation
 
 NEMO sets stage 1 at `stprk3_stg.F90:118-124`:
 
@@ -146,36 +147,17 @@ The same file selects `rn_Dt/2` at stage 2 and `rn_Dt` at stage 3.  The live
 tracer WZV call consumes that module variable through
 `traadv.F90:222 -> sshwzv.F90:334-335`.
 
-legoESM currently creates one `_stage_transport_kw` with `dt=dt` at
-`ocean_model_latlon_cgrid.py:5716-5725` and reuses it for `_g0`, `_g1`, and
-`_g2` at `:5946-5951,:6054-6058,:6090-6093`.  The consumer at
-`:1392-1405` hands that value to `nemo_qco_wzv_operands`, whose shared
-recurrence uses `1/dt` at
-`ocean_pe_latlon_cgrid.py:1568-1585`.  Therefore stage 1 receives 10,800 s,
-not 3,600 s.
+The old gate combined NEMO's explicitly materialized stage-1 HYB SSH
+`2/3*ssh(Kbb)+1/3*ssha` with the full-step 10,800 s denominator.  NEMO pairs
+that HYB value with 3,600 s.  legoESM production pairs its full-step SSH
+endpoint with 10,800 s.  The mixed HYB/full-step pair, whose 233,341 / 233,341
+failure was previously mislabelled a production clock arm, is formed by
+neither model.  It is retained in the gate only under the key
+`retracted_invalid_mixed_state_full_dt_ablation`, cannot set the gate result or
+owner, and is labelled `RETRACTED_RULE_11_NOT_A_PRODUCTION_CONFIGURATION`.
 
-The binding one-variable arm changes only this denominator while holding the
-recorded transports, masks, geometry, runoff and QCO levels fixed.  The
-full-step candidate differs from NEMO in **233,341 / 233,341** wet cells,
-maximum absolute error `7.329623319094706e-05 m s-1`.  Using 3,600 s returns
-0 / 233,341 and exact `pFw`.
-
-This is **`GYRE_OWNER_SHARED_WZV_STAGE_CLOCK`**.  It is shared WS-RK3 stage
-wiring, not north-fold, forcing, runoff, or another ORCA2-specific operator.
-Lane 4 does not repair it.  The GYRE lane handoff is:
-
-- use the shared `_nemo_ws_stage_transport` path only;
-- supply its WZV recurrence the resolved per-stage clocks
-  `(rn_Dt/3,rn_Dt/2,rn_Dt)` without changing the external-mode clock or any
-  non-WS integrator;
-- retain the exact source association in
-  `nemo_transport_wzv_divergence_level` and `nemo_qco_wzv_recurrence`;
-- bind the arm against
-  `oracle_stage1_wzv_operands_kt00000001.bin`, SHA-256
-  `245be2ea348002b93358e5dd723f0b84198af47c3d38f0bc0bb1acb0fc3100fe`;
-  and
-- rerun the GYRE stage-1/stage-2 WS transport gates, because its earlier
-  WZV completion evidence exercised the stage-3 full-step clock.
+The compiled production result and the real shared boundaries are reported in
+the Phase-2l receipt.  There is no `GYRE_OWNER_SHARED_WZV_STAGE_CLOCK` debt.
 
 ## 5. Coverage at the stop
 
@@ -190,7 +172,7 @@ Lane 4 does not repair it.  The GYRE lane handoff is:
 | stage-1 `zFu/zFv` | VERIFIED exact |
 | `div_hor` and surface runoff | VERIFIED exact |
 | WZV source program at NEMO stage clock | VERIFIED exact |
-| WZV production stage-clock wiring | CONFIRMED DEBT; `GYRE_OWNER_SHARED_WZV_STAGE_CLOCK` |
+| WZV production stage-clock wiring | RETRACTED under Rule 11; invalid mixed operands |
 | FCT (`ln_traadv_fct=T`, `nn_fct_h=2`, `nn_fct_v=2`, `nn_fct_imp=1`) | NOT ENTERED; stopped earlier |
 | tripolar FCT north fold | NOT ENTERED |
 | census-round BBL | NOT ENTERED |
@@ -208,7 +190,7 @@ No downstream operator inherits a claim across the over-bar WZV clock.
 | rerun identity and plants | ASKED | 4 restart, 8 history; legacy/surface/O1/WZV plants green |
 | fix ORCA2 runoff in the shared NEMO identity | ASKED | one shared block, no card fork; exact |
 | continue in NEMO order | ASKED | stopped at first production debt |
-| repair shared WZV stage clock in Lane 4 | UNASKED and forbidden | handed to GYRE owner |
+| repair shared WZV stage clock in Lane 4 | UNASKED and forbidden | obsolete request; handoff retracted by Phase 2l |
 | infer FCT, fold, BBL, or TKE results past the debt | UNASKED | not entered |
 | execute another NEMO MPI run | UNASKED and unnecessary | current record separates the debt |
 | remove failed/retracted evidence | UNASKED and forbidden | dummy-level failure and full-step-clock misclassification retained and flagged |
@@ -216,12 +198,9 @@ No downstream operator inherits a claim across the over-bar WZV clock.
 
 ## 7. Next action after owner handoff
 
-The next admissible action is the GYRE-owned shared-clock repair and its
-cross-card regression.  After that commit is merged, Lane 4 should rerun this
-gate unchanged.  Only a 0 / 233,341 production stage-clock result permits the
-ordered ladder to enter stage-1 centered tracer advection/FCT support and the
-tripolar fold, followed by census-round BBL and TKE/EVD/IWM entry.  No new
-NEMO run is required for the clock repair.
+This stopping prescription is superseded.  Continue from the Phase-2l
+compiled-production adjudication; do not implement a stage-clock repair from
+this receipt.
 
 This is a Phase-2 stopping receipt, not a Phase-2 closure and not SI3 or
 legoESM-card completion evidence.
