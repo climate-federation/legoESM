@@ -602,7 +602,7 @@ class TestNemoDirichletSurfaceBC:
 
 
 def _nemo_z0_hand_solve(e_old, K_M, N2, l_eps, dz, e_sfc, dt, c_eps, alpha_tke,
-                        avm1=None, shear_sq=None):
+                        avm1=None, shear_sq=None, dz_face_sfc=None):
     """Independent NumPy Thomas solve of NEMO's (N+1)-row surface-Dirichlet
     tridiagonal (zdftke.F90:264-269,403-410), uniform dz, backward_euler
     dissipation, buoyancy sink split sign-aware (N2>=0 here so the whole
@@ -624,6 +624,11 @@ def _nemo_z0_hand_solve(e_old, K_M, N2, l_eps, dz, e_sfc, dt, c_eps, alpha_tke,
     dissipation/buoyancy terms, but must be threaded for a genuinely
     discriminating exact-avm comparison). ``P_s = K_M*shear_sq`` added to
     the RHS, matching the function-under-test's ``rhs = e_old + dt*P_s``.
+
+    ``dz_face_sfc`` (#1690): distance between the virtual z=0 W-point and
+    interior W-point 0 -- NEMO's ``e3t(1)`` in the ``zzd_lw(jk=2)``
+    denominator ``e3t(1)*e3w(2)``. ``None`` (default) => ``dz`` (uniform
+    column, where the two coincide). Only row 1's subdiagonal uses it.
     """
     N = len(e_old)
     Np1 = N + 1
@@ -639,7 +644,8 @@ def _nemo_z0_hand_solve(e_old, K_M, N2, l_eps, dz, e_sfc, dt, c_eps, alpha_tke,
         up_avm = alpha_tke * 0.5 * (Kw[row] + (Kw[row + 1] if row < N else Kw[row]))
         lo_avm = alpha_tke * 0.5 * (Kw[row] + Kw[row - 1])
         up = dt * up_avm / (dz * dz) if row < N else 0.0
-        lo = dt * lo_avm / (dz * dz)
+        _lo_face = dz if (row > 1 or dz_face_sfc is None) else dz_face_sfc
+        lo = dt * lo_avm / (_lo_face * dz)
         diss_rate = c_eps * np.sqrt(max(e_old[k], 0.0)) / l_eps[k]
         buoy_rate = K_M[k] * max(N2[k], 0.0) / max(e_old[k], 1e-12)
         P_s = K_M[k] * _shear_sq[k]
@@ -704,6 +710,8 @@ class TestNemoZ0SurfaceBCPlacement:
             l_eps=jnp.ones(shape), dz_half=jnp.ones(shape),
             surface_flux=jnp.zeros((1, 1)), dt=1.0, cfg=cfg,
             dz_surface=jnp.ones((1, 1)),
+            dz_face_surface=(jnp.ones((1, 1))
+                             if surface_bc_level == "nemo_z0" else None),
             surface_dirichlet=(None if surface_dirichlet is None else
                                jnp.full((1, 1), surface_dirichlet)),
             surface_bc_level=surface_bc_level,
@@ -749,6 +757,7 @@ class TestNemoZ0SurfaceBCPlacement:
                 P_s=zeros, N2=zeros, l_eps=jnp.ones(shape),
                 dz_half=jnp.ones(shape), surface_flux=jnp.zeros((1, 1)),
                 dt=1.0, cfg=cfg, dz_surface=jnp.ones((1, 1)),
+                dz_face_surface=jnp.ones((1, 1)),
                 surface_dirichlet=surface, surface_bc_level="nemo_z0",
                 K_M_surface=jnp.full((1, 1), 1.0e-3),
             ))
@@ -812,6 +821,65 @@ class TestNemoZ0SurfaceBCPlacement:
         expected = np.maximum(expected, cfg.tke_background)
         np.testing.assert_allclose(
             np.asarray(out.tke_new)[0, 0], expected, rtol=1e-10)
+
+    def test_nemo_z0_surface_face_is_full_e3t1_not_the_cell_midpoint(self):
+        """#1690: the virtual-surface face distance is NEMO's e3t(1)
+        (the LIVE top-cell thickness dz_ref[0]*J), NOT the top cell's midpoint
+        depth -z_full_ref[0]*J (= half e3t(1) on a midpoint grid, which is
+        what the production orchestrator used to hand the solver).
+
+        Non-vacuity: this column feeds the honest MIDPOINT value (5 m on a
+        10 m top cell) in the ``dz_surface`` slot exactly as ``k_profiles``
+        does, so the pre-fix wiring solves a DIFFERENT system.  The two
+        candidate metrics are asserted to disagree before the model is
+        compared to either, so the test cannot pass by both being equal.
+        """
+        (u, v, T, S, rho, dz_half, z_int, tx, ty, dz_ref, jacobian,
+         _dz_surface_full) = self._column()
+        # What k_profiles actually computes for the Veros injection volume:
+        # -z_full_ref[0]*J = half the 10 m top cell.
+        dz_surface_midpoint = jnp.full((1, 1), 5.0)
+        cfg = TKEConfig(
+            surface_bc="nemo_dirichlet", tke_surface_bc_level="nemo_z0")
+        tke_old = jnp.full((1, 1, 5), cfg.tke_background)
+        out = tke_vertical_mixing(
+            u, v, T, S, rho, dz_half, tke_old, tx, ty, dt=1800.0, cfg=cfg,
+            rho_0=_RHO0, n_iterations=1, dz_ref=dz_ref, jacobian=jacobian,
+            dz_surface=dz_surface_midpoint, z_interface=z_int)
+
+        from legoesm.ocean.physics.vertical_mixing.tke import (
+            _NEMO_TKE_EBB, _NEMO_TKE_EMIN0, _safe_stress_modulus,
+            compute_K_from_tke, compute_mixing_lengths,
+        )
+        from legoesm.ocean.physics.vertical_mixing._shared import (
+            compute_N2 as _compute_N2, vertical_shear_squared as _vsq,
+        )
+        from legoesm import constants as _constants
+        N2_arr = np.asarray(_compute_N2(rho, dz_half, _RHO0, _constants.g))
+        taum = float(np.asarray(_safe_stress_modulus(tx, ty))[0, 0])
+        e_sfc = max(_NEMO_TKE_EMIN0, _NEMO_TKE_EBB / _RHO0 * taum)
+        e_old_np = np.asarray(tke_old)[0, 0]
+        l_k, l_eps = compute_mixing_lengths(
+            tke_old, jnp.asarray(N2_arr), dz_half, cfg, signed_n2=False)
+        K_M, _ = compute_K_from_tke(tke_old, l_k, cfg)
+        shear_sq_np = np.asarray(_vsq(u, v, dz_half))[0, 0]
+
+        def _hand(face):
+            return np.maximum(_nemo_z0_hand_solve(
+                e_old_np, np.asarray(K_M)[0, 0], N2_arr[0, 0],
+                np.asarray(l_eps)[0, 0], 10.0, e_sfc, 1800.0, cfg.c_eps,
+                cfg.alpha_tke, shear_sq=shear_sq_np, dz_face_sfc=face),
+                cfg.tke_background)
+
+        expected_e3t1 = _hand(10.0)          # NEMO e3t(1)
+        pre_fix_midpoint = _hand(5.0)        # -z_full_ref[0]*J, the defect
+        # The discriminator is live: doubling the coupling moves row 0.
+        assert not np.allclose(
+            expected_e3t1[0], pre_fix_midpoint[0], rtol=1e-6), (
+            "metric candidates are degenerate on this column - the "
+            "assertion below would be vacuous")
+        np.testing.assert_allclose(
+            np.asarray(out.tke_new)[0, 0], expected_e3t1, rtol=1e-10)
 
     def test_nemo_z0_exact_surface_avm_matches_hand_derived_solve(self):
         """T3-EXACT: with ``tke_mxl_choice=3`` (which computes the ln_mxl0
@@ -974,9 +1042,12 @@ class TestNemoZ0SurfaceBCPlacement:
                 cfg=TKEConfig(tke_surface_bc_level="nemo_z0"), rho_0=_RHO0,
                 n_iterations=1, z_interface=z_int)
 
-    def test_nemo_z0_requires_dz_surface(self):
+    def test_nemo_z0_requires_the_cell_thickness_metric(self):
+        """#1690: nemo_z0 derives NEMO's e3t(1) from dz_ref/jacobian, so
+        those are what it demands -- it must NOT silently fall back to the
+        midpoint ``dz_surface`` slot."""
         u, v, T, S, rho, dz_half, z_int, tx, ty = _orchestrator_inputs()
-        with pytest.raises(ValueError, match="dz_surface"):
+        with pytest.raises(ValueError, match="dz_ref"):
             tke_vertical_mixing(
                 u, v, T, S, rho, dz_half, None, tx, ty, dt=3600.0,
                 cfg=TKEConfig(surface_bc="nemo_dirichlet",
@@ -1099,6 +1170,8 @@ class TestNemoBottomTkeDirichlet:
         out = tke_vertical_mixing(
             u, v, T, S, rho, dz_half, None, tx, ty, dt=3600.0, cfg=cfg,
             rho_0=_RHO0, n_iterations=3, z_interface=z_int,
+            dz_ref=jnp.full((u.shape[-1],), 25.0),
+            jacobian=jnp.ones(u.shape[:-1]),
             dz_surface=dz_surface, bottom_dirichlet=bottom_val)
         np.testing.assert_allclose(
             np.asarray(out.tke_new)[..., -1], 3e-4, rtol=0, atol=1e-12)
@@ -1186,6 +1259,8 @@ class TestNemoBottomTkeDirichlet:
         out = tke_vertical_mixing(
             u, v, T, S, rho, dz_half, None, tx, ty, dt=3600.0, cfg=cfg,
             rho_0=_RHO0, n_iterations=3, z_interface=z_int,
+            dz_ref=jnp.full((dz_half.shape[-1] + 1,), 25.0),
+            jacobian=jnp.ones((1, 1)),
             dz_surface=dz_surface, bottom_dirichlet=bottom_val,
             bottom_level=bl)
         assert float(out.tke_new[0, 0, 0]) == pytest.approx(3e-4, abs=1e-12)

@@ -1039,6 +1039,7 @@ def _solve_tke_backward_euler(
     literal_external_rhs: jnp.ndarray | None = None,
     dz_cell: jnp.ndarray | None = None,
     dz_surface: jnp.ndarray | None = None,
+    dz_face_surface: jnp.ndarray | None = None,
     surface_dirichlet: jnp.ndarray | None = None,
     surface_bc_level: str = "interior_pinned",
     bottom_dirichlet: jnp.ndarray | None = None,
@@ -1115,9 +1116,13 @@ def _solve_tke_backward_euler(
         ``N`` rows are returned (``e_new[..., 1:]``) — the state pytree
         shape is unchanged. Requires ``surface_dirichlet`` (raises
         otherwise: "nemo_z0" has no meaning without a held surface value)
-        and ``dz_surface`` (the z=0-to-first-cell-centre distance, the
-        surface row's control volume / face spacing — same slot
-        ``-z_full_ref[0]·J`` used elsewhere). The surface face is
+        and ``dz_face_surface`` (NEMO's ``e3t(1)``, the LIVE top-cell
+        thickness ``dz_ref[0]·J`` — the z=0-W-point-to-first-interior-
+        W-point distance, i.e. the ``e3t(1)`` factor in the quoted
+        ``zzd_lw(jk=2)`` denominator).  This is NOT ``dz_surface``
+        (``-z_full_ref[0]·J`` = the top cell's MIDPOINT depth, half of
+        ``e3t(1)`` on a midpoint grid); feeding the midpoint metric here
+        DOUBLES the virtual-surface coupling (#1690).  The surface face is
         ``0.5*(avm(jk=2)+avm(jk=1))`` (zdftke.F90:407-410): ``avm(jk=2)`` is
         ``K_M_old[..., 0]`` (the topmost carried interface's own carried
         diffusivity — exact, same quantity NEMO's ``p_avm(jk=2)`` is) and
@@ -1128,6 +1133,11 @@ def _solve_tke_backward_euler(
         APPROXIMATION ``avm(1) ~= avm(2) = K_M_old[..., 0]`` (i.e.
         ``avm(1)+avm(1)`` rather than the true ``avm(2)+avm(1)`` — exact only
         where the surface and first-interior viscosities coincide).
+    dz_face_surface : (...) or None — NEMO's ``e3t(1)``, the live top-cell
+        thickness ``dz_ref[0]·J``.  Required by (and used only by)
+        ``surface_bc_level="nemo_z0"`` as the virtual-surface-row face
+        distance; must be None otherwise.  Distinct from ``dz_surface``,
+        which stays the Veros ``0.5·dzw_top`` injection volume.
     K_M_surface : (...,) or None — NEMO's true surface-w-level viscosity
         ``avm(jk=1)`` (:func:`nemo_surface_avm`), consulted ONLY by the
         ``surface_bc_level="nemo_z0"`` face-coefficient assembly above. None
@@ -1176,11 +1186,18 @@ def _solve_tke_backward_euler(
             "_solve_tke_backward_euler: dz_cell requires dz_surface too "
             "(TKEConfig.veros_dz_slots); got dz_cell=set, dz_surface=None."
         )
-    # dz_surface MAY be passed alone (dz_cell=None) for
-    # surface_bc_level="nemo_z0" without veros_dz_slots — the virtual
-    # surface row only needs the z=0-to-interface-0 distance, not the full
-    # Veros metric-slot machinery dz_cell gates. veros_slots (the metric-
+    # dz_face_surface (NEMO's e3t(1)) is the nemo_z0 virtual-surface face
+    # distance and is INDEPENDENT of the Veros metric slots: it may be
+    # passed with dz_cell/dz_surface both None. veros_slots (the metric-
     # slot feature) is keyed off dz_cell alone, unaffected.
+    if dz_face_surface is not None and surface_bc_level != "nemo_z0":
+        # Silent-no-op guard, matching K_M_surface: the e3t(1) face slot is
+        # read ONLY by the nemo_z0 assembly, so accepting it under any other
+        # surface_bc_level would quietly discard a caller's metric.
+        raise ValueError(
+            "_solve_tke_backward_euler: dz_face_surface is consumed only by "
+            "surface_bc_level='nemo_z0'; got "
+            f"surface_bc_level={surface_bc_level!r}.")
     veros_slots = dz_cell is not None
     N = e_old.shape[-1]   # number of interfaces
     matrix_evaluation = getattr(cfg, "tke_matrix_evaluation", "factored")
@@ -1547,13 +1564,22 @@ def _solve_tke_backward_euler(
         # Prepend ONE virtual surface row (z=0, Dirichlet) so interior
         # interface 0 becomes a genuinely SOLVED row coupled to it — NEMO's
         # jk=2, not a pinned Dirichlet row. See the docstring above.
-        if dz_surface is None:
+        if dz_face_surface is None and not literal_matrix:
+            # literal_matrix forms zzd_lw(jk=2) from the nemo_e3t ladder
+            # itself (row0_coupling = -literal_lw[..., 0] below), so the
+            # analytic face slot is genuinely unused there -- demanding it
+            # would be a false requirement (codex review, #1690).
             raise ValueError(
                 "TKEConfig.tke_surface_bc_level='nemo_z0' requires "
-                "dz_surface (the z=0-to-first-cell-centre distance).")
+                "dz_face_surface = NEMO's e3t(1) (the live top-cell "
+                "thickness dz_ref[0]*J), the z=0-W-point-to-first-interior-"
+                "W-point distance in the zzd_lw(jk=2) denominator. It is "
+                "NOT dz_surface (-z_full_ref[0]*J), which is the top cell's "
+                "MIDPOINT depth = half e3t(1) on a midpoint grid and would "
+                "double the surface coupling (#1690).")
         e_sfc = jnp.asarray(surface_dirichlet, dtype=e_old.dtype)
-        dz_face_sfc = jnp.maximum(
-            jnp.asarray(dz_surface, dtype=e_old.dtype), _EPS)
+        dz_face_sfc = (None if dz_face_surface is None else jnp.maximum(
+            jnp.asarray(dz_face_surface, dtype=e_old.dtype), _EPS))
         # Row 0's OWN control volume: dz_half[...,0] in BOTH the legacy and
         # veros_slots assemblies (legacy: dz_int_eff[0] = dz_face[...,0] =
         # dz_half[...,0]; veros_slots: vol[0] = dz_half[...,0]) — the same
@@ -2590,12 +2616,40 @@ def tke_vertical_mixing(
         dz_cell = None
 
     _surf_bc_level = getattr(cfg, "tke_surface_bc_level", "interior_pinned")
-    if _surf_bc_level == "nemo_z0" and dz_surface is None:
-        raise ValueError(
-            "TKEConfig.tke_surface_bc_level='nemo_z0' requires dz_surface "
-            "(= -z_full_ref[0]·J, the z=0-to-first-cell-centre distance) to "
-            "be passed to tke_vertical_mixing."
-        )
+    # NEMO's virtual-surface face distance is e3t(1) -- the LIVE top-cell
+    # thickness -- because both the z=0 row and interior interface 0 are
+    # W-points and gdepw(2) - gdepw(1) = e3t(1) exactly (zdftke.F90:403-410,
+    # zzd_lw(jk=2) denominator e3t(1)*e3w(2)).  Derived HERE from the
+    # dz_ref/jacobian the caller already threads, so the metric has ONE
+    # owner.  It is deliberately NOT dz_surface (= -z_full_ref[0]*J), which
+    # is the top cell's MIDPOINT depth = half e3t(1) on a midpoint grid and
+    # doubled the surface coupling until #1690.
+    dz_face_surface = None
+    if _surf_bc_level == "nemo_z0":
+        _entry_stage = (
+            getattr(cfg, "tke_n2_evaluation_stage", "implicit_solve_state")
+            == "step_entry" and precomputed_n2_bundle is not None)
+        if _entry_stage:
+            # n2_evaluation_stage="step_entry" freezes the whole vertical
+            # metric at Kmm (the solve below takes dz_half from
+            # bundle.e3w_Kmm), so e3t(1) must come from the SAME frozen
+            # ladder -- mixing a current-state e3t against a frozen e3w
+            # would be a metric inconsistency (codex review, #1690).
+            dz_face_surface = precomputed_n2_bundle.e3t_Kmm[..., 0]
+        elif dz_ref is None or jacobian is None:
+            raise ValueError(
+                "TKEConfig.tke_surface_bc_level='nemo_z0' requires dz_ref "
+                "and jacobian (the live top-cell thickness e3t(1) = "
+                "dz_ref[0]*J is the virtual-surface face distance) to be "
+                "passed to tke_vertical_mixing."
+            )
+        else:
+            # Partial cells sit at the SEAFLOOR: h_partial[k] = dz_ref[k] for
+            # every k < bottom_level (vertical.py:833), so the top cell is a
+            # full cell on any column with more than one wet level.  The sole
+            # exception -- bottom_level == 0 -- is the degenerate column whose
+            # surface coupling the solver already zeroes outright.
+            dz_face_surface = dz_ref[0] * jacobian
 
     # NEMO nn_mxl=3 (tke_mxl_choice=3) needs the e3t cell thicknesses for the
     # lup/ldown |dl/dz|<=e3t mixing-length sweeps (zdftke.F90:690-704) even
@@ -3050,9 +3104,8 @@ def tke_vertical_mixing(
             external_source=external_source,
             literal_external_rhs=_literal_external_rhs,
             dz_cell=dz_cell,
-            dz_surface=(dz_surface if (veros_slots
-                                        or _surf_bc_level == "nemo_z0")
-                       else None),
+            dz_surface=(dz_surface if veros_slots else None),
+            dz_face_surface=dz_face_surface,
             surface_dirichlet=surface_dirichlet,
             surface_bc_level=_surf_bc_level,
             bottom_dirichlet=bottom_dirichlet,
