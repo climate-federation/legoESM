@@ -1120,15 +1120,19 @@ def run(
             baro_row = score(
                 f"{CASE}.kt{kt}.after.{component}",
                 bt[kt][component], candidate_b, masks[mask_name][..., 0])
-            # Decision 8 makes this an identity boundary, not merely another
-            # normalized state row: the changed operator must reproduce NEMO's
-            # own Kaa bits.  This also makes the preregistered three-ULP plant
-            # non-vacuous even though three spacing(1) is below the 1e-15
-            # whole-field normalized bar.
-            if not baro_row["exact"]:
+            # At kt=1 both models enter from the same rest state, so Decision
+            # 8 makes Kaa an equal-input identity boundary.  At later steps
+            # the already-diverged full prognostic state feeds the external
+            # mode; those rows are downstream trajectory consistency, not an
+            # equal-input operator-identity claim.  The kt=1 three-ULP plant
+            # remains non-vacuous even though it is below the 1e-15 bar.
+            if kt == 1 and not baro_row["exact"]:
                 baro_row["status"] = "DEBT"
                 baro_row["reason"] = (
                     "prognostic uu_b/vv_b identity boundary requires bit equality")
+            elif kt > 1:
+                baro_row["reason"] = (
+                    "downstream full-state consistency; inputs are not bit-identical")
             baro_rows.append(baro_row)
         barotropic_state_steps.append({"kt": kt, "rows": baro_rows})
         debt_components = [
