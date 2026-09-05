@@ -436,8 +436,6 @@ def run(case: str, root: Path, *, plant: bool = False,
     rows = [_relabel(score(f"{case}.kt1.stp2d.momentum_rhs.u",
                            rhs["u"][..., :nlev], candidate_u, masks["u"],
                            plant=plant))]
-    bits = bit_compare(rhs["u"][..., :nlev], candidate_u, masks["u"])
-
     # The V component: both tanks are single-wet-row channels, so the wet
     # V-face set is empty and a V row would compare masked zeros with masked
     # zeros.  WAIVED with the measured count rather than silently skipped.
@@ -454,8 +452,20 @@ def run(case: str, root: Path, *, plant: bool = False,
             "WAIVED_STRUCTURALLY_ABSENT: this card has one wet j row, so it "
             "has no wet V face; a V row would compare masked zeros")
 
-    status = "AT-BAR" if all(row["status"] == "AT-BAR" for row in rows) else "DEBT"
+    bits = bit_compare(rhs["u"][..., :nlev], candidate_u, masks["u"])
     exact = all(row["exact"] for row in rows)
+    # The bar is BITS, and until round 28 this gate published
+    # bit_exact_given_nemo_inputs: false while exiting 0 -- so a caller that
+    # only checked the exit status read a bit-DEBT row as at the bar.  The
+    # value-exact-but-bit-unequal case now gets its own status VALUE-AT-BAR,
+    # which main() maps to a NONZERO exit exactly like DEBT.  Only bit
+    # equality exits 0.
+    if not all(row["status"] == "AT-BAR" for row in rows):
+        status = "DEBT"
+    elif exact and not plant and bits["bit_unequal"] == 0:
+        status = "AT-BAR"
+    else:
+        status = "VALUE-AT-BAR"
     report = {
         "format": "nemo-testcase-rule12-hpg-eligibility-v1",
         "case": case,
