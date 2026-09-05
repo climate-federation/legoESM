@@ -716,6 +716,13 @@ def test_overflow_bbl_is_live_inside_real_rk3_stage3():
         h_ref, card.recipe.initial_state.land_mask.data,
         zc.nemo_gdept_0, zc.nemo_bbl_e3u_0, zc.nemo_bbl_e3v_0)
     active = np.asarray(geom.u_active) > 0.5
+    # Honest about what this assertion can and cannot fail on: NEMO signs a
+    # 3-D gdept_0, so on a real zps mesh two columns with equal mbkt but
+    # different partial-cell centroids WOULD be active.  This card feeds a 1-D
+    # ladder (nemo_testcase_recipe.py OVERFLOW card) and usrdef_zgr keeps
+    # pdept uniform, so here it cannot fail -- it is a theorem, kept as a
+    # regression pin against a future 3-D gdept and as documentation of the
+    # census.  It would bind on ORCA2.
     assert not (active & (np.asarray(geom.ku_s) == np.asarray(geom.ku_d))).any()
     active_faces = np.argwhere(active)
     assert active_faces.size

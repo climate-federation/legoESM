@@ -39,6 +39,27 @@ Reading the result: if the transplant still differs from NEMO's ``slow_u``,
 the reduction makes the bit given NEMO's own 3-D RHS, and ``:185``'s
 counterpart is the producer.  If the transplant is bit-exact, the reduction is
 exact and the bit came in with legoESM's own RHS instead.
+
+SCOPE OF THE ``nemo_reciprocal`` ARM -- read this before quoting it.  It is
+measured at kt=1 on LOCK, and TWO things that differ in general coincide there:
+
+* ``r1_hu_0`` is not ``1/hu_0``.  ``domain.F90:159`` builds it as
+  ``ssumask/(hu_0 + 1 - ssumask)``.  On a wet LOCK face that is
+  ``1/(20 + 1 - 1)``, and LOCK has exactly ONE distinct column depth,
+  ``20.0``, for which ``H + 1 - 1 == H`` and ``1/(H+1-1)`` is bit-identical to
+  ``1/H`` (both measured).  On a card with a depth where the ``+1-1`` shift
+  rounds, the arm as written is not NEMO's expression.
+* NEMO weights with the REFERENCE ``e3u_0`` and divides by the REFERENCE
+  ``hu_0``; legoESM weights with LIVE thicknesses from ``eta``.  LOCK's kt=1
+  entry ``ssh`` is exactly ``0.0`` on every cell (measured), so the two
+  coincide bitwise here and the arm isolates the association alone.  At
+  kt >= 2, ``eta != 0`` and reference-versus-live is a SEPARATE and much
+  larger difference, O(eta/H), which this probe does not measure.
+
+So "the association is the whole residual" is CONFIRMED for this frame and
+REFUTED as a general statement about the statement's fidelity.  The next check
+is named and not run: re-run these arms at kt=2, plus a fifth arm weighted by
+``e3u_0`` with ``r1_hu_0``, and expect the reciprocal arm to stop being 0/127.
 """
 
 from __future__ import annotations
@@ -233,10 +254,15 @@ def run(*, plant: bool = False, allow_dirty: bool = False) -> dict:
                  "stp2d.F90:172 REFUTED -- Ue_rhs after it is exactly 0.0 at "
                  "this rest entry")
         if reciprocal["exact"]:
-            owner += (". Walked one statement deeper: the divide-vs-"
-                      "precomputed-reciprocal association is the whole "
-                      "residual -- x*(1/H) reproduces NEMO exactly where x/H "
-                      "does not")
+            owner += (". Walked one statement deeper: at THIS frame the "
+                      "divide-vs-precomputed-reciprocal association is the "
+                      "whole residual -- x*(1/H) reproduces NEMO exactly "
+                      "where x/H does not. SCOPED, not general: LOCK's kt=1 "
+                      "eta is exactly 0.0 so live and reference thicknesses "
+                      "coincide, and its single column depth 20.0 makes "
+                      "NEMO's masked r1_hu_0 expression exactly 1/H. "
+                      "Reference-vs-live weighting is a separate, larger "
+                      "difference at kt>=2 that this probe does not measure")
         else:
             owner += (". The divide-vs-reciprocal association is NOT the whole "
                       f"residual (reciprocal arm still "

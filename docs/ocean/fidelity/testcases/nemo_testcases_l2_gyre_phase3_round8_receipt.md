@@ -4609,7 +4609,7 @@ correction, not a model change; nothing in the BBL path was touched.
    four symbols the ORCA2 gates need onto this branch, merge the two branches,
    or forward-port the round-25 HPG/QCO fix onto the ORCA2 branch and score
    there?  Until one is chosen, Rule-12 eligibility on ORCA2 stays UNMEASURED.
-2. **The native demo GYRE card's momentum program.**  It resolves
+3. **The native demo GYRE card's momentum program.**  It resolves
    `vertical_momentum_scheme="upwind_perturbation"` and
    `adaptive_implicit_vertadv=True`; NEMO's vector form is "keg + zad + vor"
    (`dynadv.F90:144`) and `ln_zad_Aimp` is `.false.`
@@ -4698,8 +4698,46 @@ CONFIRMED:
 
 | card | U row | verdict |
 |---|---|---|
-| LOCK_EXCHANGE-zco | `0.0`, `0 / 2540` | bit-exact, FULL isolation |
-| OVERFLOW-zps | `0.0`, `0 / 16900` | bit-exact, FULL isolation |
+| LOCK_EXCHANGE-zco | `0.0`, `0 / 2540` unequal | VALUE-exact |
+| OVERFLOW-zps | `0.0`, `0 / 16900` unequal | VALUE-exact |
+
+### Rule-11 record — this round's OWN un-retraction over-claimed, twice
+
+Independent review caught both, and both are measured, not argued.
+
+**Dead claim 1: "bit-exact".**  The shared scorer reports `exact` from
+`np.array_equal`, which is VALUE equality — `-0.0 == 0.0`.  At the bit level
+the row is NOT exact:
+
+| card | scored | bit-unequal | of which signed-zero only | after adding NEMO's zero vorticity term |
+|---|---:|---:|---:|---:|
+| LOCK_EXCHANGE-zco | 2540 | **1260** | 1260 | **0** |
+| OVERFLOW-zps | 16900 | **16400** | 16400 | **0** |
+
+**Dead claim 2: "dyn_hpg ALONE".**  The last column above is the mechanism,
+CONFIRMED by direct test rather than inferred: `dyn_vor` accumulates
+`pu_rhs + zuav*(zwz + zwz)` (`BLD/ppsrc/nemo/dynvor.f90:665`) and at a rest
+start that added term is exactly `0.0`.  IEEE 754 gives `-0.0 + 0.0 = +0.0`, so
+NEMO carries **0** negative zeros in this frame and legoESM carries 1260 /
+16400.  `dyn_vor` is therefore VALUE-invisible and BIT-VISIBLE, and the frame
+is `dyn_hpg` PLUS a zero-valued `dyn_vor` accumulation.  Round 26 was wrong
+that the depth-mean removal and the barotropic add-back are in this frame —
+they do not compile — and round 27's first wording was wrong in the other
+direction.
+
+The gate now publishes `value_exact_given_nemo_inputs` and
+`bit_exact_given_nemo_inputs` separately, with the full bit census, so the
+headline can no longer drift to the stronger of the two.  The signed-zero
+population is **DEBT with a CONFIRMED owner and a named minimal fix** (carry
+NEMO's zero-valued vorticity accumulation, or normalise the zero); it is NOT
+landed, because it is a numerics change that moves every card and was not
+asked for.
+
+One more scope correction: `hpg_sco` writes only `ntsi..ntei` and
+`jk = 1..jpkm1` (`BLD/ppsrc/nemo/dynhpg.f90:378,397`), not the whole array.
+That happens to be EXACTLY the scored set — `nn_hls = 2` on both cards, so the
+reader's `[2:-2]` trim is the owned interior, and it takes levels `:jpkm1` —
+so the number stands, but "ASSIGNS" no longer implies a whole-array overwrite.
 
 V stays WAIVED with its measured count (0 wet V faces on both one-wet-row
 tanks).  Controls: the numeric plant exits `1` on both cards, and
@@ -4763,6 +4801,14 @@ Non-vacuity, by planting and restoring: disabling BBL in the test's ON arm as
 well gives `assert np.float64(0.0) > 1e-12`, `1 failed in 381.78s`.  Restored
 with `git checkout --`; `git status --porcelain` empty.
 
+Recorded honestly rather than left to be re-discovered: the new
+"no active face is degenerate" assertion CANNOT FAIL on this card.  NEMO signs
+a 3-D `gdept_0`, so on a real zps mesh two columns with equal `mbkt` but
+different partial-cell centroids WOULD be active; this card feeds a 1-D ladder
+and `usrdef_zgr` keeps `pdept` uniform.  The assertion is a theorem here, kept
+as a regression pin against a future 3-D `gdept` and as documentation of the
+census.  It would bind on ORCA2.
+
 ### LOCK's external-mode bit, walked to the producing operation
 
 Round 26 left the owner PLAUSIBLE between `stp2d.F90:172` and `:185` and said
@@ -4795,12 +4841,29 @@ statement equals the production frame bit for bit, and NEMO's dumped
 transplant changes nothing — the reduction makes the bit from NEMO's OWN 3-D
 RHS.
 
-**And it walks one operation deeper, where it lands.**  NEMO ends
-`stp2d.F90:185` with a multiply by `r1_hu_0`, a PRECOMPUTED reciprocal; legoESM divides by
-the live column sum.  `x*(1/H)` reproduces NEMO EXACTLY; `x/H` is the whole
-1-ULP residual.  That is reported as a **CONFIRMED** finding and NOT landed:
-adopting the association is a numerics change that moves every card's rows, so
-it is open question 1 below.
+**And it walks one operation deeper.**  NEMO ends `stp2d.F90:185` with a
+multiply by `r1_hu_0`, a PRECOMPUTED reciprocal; legoESM divides by the live
+column sum.  `x*(1/H)` reproduces NEMO EXACTLY; `x/H` is the whole 1-ULP
+residual of THIS frame.
+
+**Scoped, after review, and the general form is REFUTED.**  Two things that
+differ in general coincide at this frame, and both were measured:
+
+- `r1_hu_0` is not `1/hu_0`.  `domain.F90:159` builds it as
+  `ssumask/(hu_0 + 1 - ssumask)`.  LOCK has exactly ONE distinct wet column
+  depth, `20.0`, for which `H + 1 - 1 == H` and `1/(H+1-1)` is bit-identical
+  to `1/H`.  On a depth where that shift rounds, the arm as written is not
+  NEMO's expression.
+- NEMO weights with the REFERENCE `e3u_0` and divides by the REFERENCE
+  `hu_0`; legoESM weights with LIVE thicknesses.  LOCK's kt=1 entry `ssh` is
+  exactly `0.0` on every cell (measured), so they coincide bitwise here.  At
+  kt >= 2 reference-versus-live is a SEPARATE and much larger difference,
+  O(eta/H), which this probe does not measure.
+
+So the association is CONFIRMED as the whole residual OF THIS FRAME and
+REFUTED as a general statement about the statement's fidelity.  Nothing is
+landed; the named next check is to re-run these arms at kt=2 with a fifth arm
+weighted by `e3u_0` and `r1_hu_0`.
 
 Controls: the plant adds `1.0` to the largest wet operand and the reciprocal
 arm goes from bit-exact to `1 / 127` (exit `1`).  Two weaker plants were tried
@@ -4846,9 +4909,16 @@ ancestry cannot be tested; the probe checks the two changed functions BEHAVE
 instead — the pinned `gdept_z0` bit pattern and the acceleration pass-through —
 which a reverted or half-applied pick would fail.
 
-Declared scope limit, stated up front rather than discovered later: NEMO
-supplies `gdept_z0`, so this row exercises the CONSUMER and the operator given
-NEMO's own inputs, not the `_nemo_qco_gdept_z0` builder.  That builder is
+Three scope limits, two of them raised by review and now recorded next to the
+row.  (i) NEMO supplies `gdept_z0`, so this row exercises the CONSUMER and the
+operator, not the `_nemo_qco_gdept_z0` builder.  (ii) The records are rank 0 of
+a two-rank run and the window is `[3:-3, 3:-3, :30]`, so the ORCA2 NORTH FOLD,
+the cyclic seam and level 31 are all OUTSIDE it — the scored interior is, in
+that sense, a larger GYRE, and the topology ORCA2 alone could test is not in
+this number.  (iii) The horizontal metric is RECONSTRUCTED, `1/r1_e1u`, which
+the operator then inverts back — the same association hazard the LOCK walk
+turned on, so it was measured rather than assumed: the round trip is bit-exact
+on all 2035 and 2070 distinct nonzero values, so it does not bite here.  That builder is
 card-independent arithmetic pinned by `test_nemo_qco_gdept_z0_oracle_bit_pattern`,
 and no ORCA2 record carries the `(gdept_0, 1+r3t, ssh)` triple at the stage-2
 time level.
@@ -4874,6 +4944,25 @@ Controlled: both cards were re-run and their reports are identical to round
 26's, field by field, apart from the git sha and the two ratio keys.  Both LOCK
 plants still exit `1`.
 
+### Tests, and the ratchets
+
+The focused suite over the two modules this round touches plus its three new
+test files:
+
+```text
+5 failed, 70 passed in 1477.04s (0:24:37)
+```
+
+The five are `tests/ocean/unit/test_nemo_recipe.py::test_nemo_gyre_*` plus
+`test_surface_stress_implicit_wiring` — the SAME pre-existing set, needing the
+configuration decision in open question 2.  The OVERFLOW BBL liveness test is
+green, and so are the three new test files.
+
+The constant / dispatch / private-import / inline-coefficient ratchets give the
+IDENTICAL 9 failures at the round-27 starting tip `1af6ba2976dc` as at this tip,
+so none of them is round 27's; this tree passes 6 more tests than that one and
+fails none extra.
+
 ### Merge readiness
 
 `fidelity/nemo-testcases-l2-gyre-codex2` is **74 commits ahead of
@@ -4883,27 +4972,38 @@ this branch — so the integration is a FAST-FORWARD with zero conflicts by
 construction, not a merge to be resolved.
 
 Nothing in round 27 blocks that fast-forward.  What is stated honestly next to
-it: this round landed no model numerics at all (every change is a gate, a
-probe, a test or a record), the six pre-existing focused-test failures are
-unchanged in kind, and the campaign's own precondition — independent
-adversarial review of rounds 25, 26 and 27 — is still **OUTSTANDING**.  The
-merge decision itself is not made here.
+it: this round landed no model numerics at all — the only change under
+`packages/` is a one-line comment, verified by `git diff` — and the
+pre-existing focused-test failures are unchanged in kind.  Independent
+adversarial review of round 27 HAS now run and its findings are folded in
+above, including two retractions of this round's own claims; review of rounds
+25 and 26 remains **OUTSTANDING**.  The merge decision itself is not made
+here.
 
 ### Open questions
 
-1. **The `x/H` versus `x*(1/H)` association in the barotropic slow forcing.**
-   CONFIRMED as the whole of LOCK's external-mode residual.  Adopting NEMO's
-   precomputed-reciprocal form is a numerics change that moves every card's
-   rows and needs a Rule-12 walk on all four; it is NOT landed here.  Land it,
-   or leave the 1-ULP row as named debt?
+1. **The barotropic slow-forcing weighting and association.**  Two nested
+   questions, and review showed the smaller one cannot be answered alone.  The
+   `x/H` versus `x*(1/H)` association is the whole residual of LOCK's kt=1
+   frame; but NEMO weights that sum with REFERENCE `e3u_0`/`hu_0` where
+   legoESM uses LIVE thicknesses, a difference that is exactly zero at kt=1
+   (eta ≡ 0) and O(eta/H) afterwards.  Landing only the re-association would
+   leave the larger defect.  Measure the kt=2 arms first, or land both
+   together, or leave the row as named debt?
+2. **The signed-zero population in the kt=1 momentum-RHS frame.**  1260 / 2540
+   on LOCK and 16400 / 16900 on OVERFLOW, DEBT, CONFIRMED owner (NEMO's
+   zero-valued `dyn_vor` accumulation normalises `-0.0` to `+0.0`; legoESM has
+   no such addition).  Carry the zero, normalise it, or accept value-exactness
+   as the bar for this frame?
 2. **The native demo GYRE card's momentum program.**  Unchanged this round per
    the standing decision; the five `test_nemo_recipe` failures stay attributed
    to it.
-3. **The ORCA2 branch strategy.**  The probe answers the NUMERICAL question
+4. **The ORCA2 branch strategy.**  The probe answers the NUMERICAL question
    from a disposable worktree, so round 26's open question 1 is no longer
    blocking a measurement — but the two branches are still divergent and that
    is a decision, not a finding.
-4. **Independent adversarial review of rounds 25, 26 and 27** — OUTSTANDING.
+5. **Independent adversarial review of rounds 25 and 26** — OUTSTANDING;
+   round 27's has run and is folded in above.
 
 ### ASKED / UNASKED
 
@@ -4914,7 +5014,7 @@ merge decision itself is not made here.
 | correct the `stp2d` and `stprk3_stg` citations | not a scientific choice; corrected against the shipped source and gated |
 | add a citation gate with a committed symbol map | ASKED; landed, non-vacuous both ways |
 | point the BBL liveness test at `nemo_bbl_static_geometry`, drop the filter | ASKED; landed; the "open model question" is retracted |
-| separate LOCK's `:172` / `:185` owner offline | ASKED; `:172` REFUTED, `:185` CONFIRMED, walked to the divide-vs-reciprocal operation |
+| separate LOCK's `stp2d.F90:172` / `stp2d.F90:185` owner offline | ASKED; `:172` REFUTED, `:185` CONFIRMED for this frame, walked to the divide-vs-reciprocal operation and then SCOPED |
 | **land** the reciprocal association | NOT DONE — open question 1; it moves every card and was not asked for |
 | score ORCA2 from a disposable probe worktree | ASKED; AT-BAR on all six components; ORCA2 branch untouched |
 | null the undefined ratio; per-card trajectory provenance | ASKED; landed; both cards otherwise byte-identical to round 26 |

@@ -199,6 +199,33 @@ def assert_ppsrc_isolation(case: str, nemo_root: Path = NEMO_ROOT,
     }
 
 
+def bit_compare(oracle: np.ndarray, candidate: np.ndarray,
+                mask: np.ndarray) -> dict:
+    """Bit-level companion to the shared value scorer.
+
+    ``score()`` reports ``exact`` from ``np.array_equal``, which is VALUE
+    equality: ``-0.0 == 0.0``.  A campaign whose bar is bit equality cannot
+    take that as its headline, so this counts raw bit patterns and separates
+    the signed-zero population, which is the whole of the difference here.
+    """
+    a = np.asarray(candidate, dtype=np.float64)[np.asarray(mask, dtype=bool)]
+    b = np.asarray(oracle, dtype=np.float64)[np.asarray(mask, dtype=bool)]
+    unequal = a.view(np.uint64) != b.view(np.uint64)
+    signed_zero = (a == 0.0) & (b == 0.0) & (np.signbit(a) != np.signbit(b))
+    # NEMO's dyn_vor adds a term that is exactly 0.0 at a rest start, and
+    # IEEE 754 gives -0.0 + 0.0 = +0.0, so NEMO carries no negative zero here
+    # and legoESM does.  Adding that same zero is the discriminating check.
+    healed = int(((a + 0.0).view(np.uint64) != b.view(np.uint64)).sum())
+    return {
+        "n": int(a.size),
+        "bit_unequal": int(unequal.sum()),
+        "value_unequal": int((a != b).sum()),
+        "bit_unequal_that_are_signed_zero_only": int(signed_zero.sum()),
+        "bit_unequal_after_adding_nemo_zero_vorticity_term": healed,
+        "negative_zeros_candidate": int((np.signbit(a) & (a == 0.0)).sum()),
+        "negative_zeros_oracle": int((np.signbit(b) & (b == 0.0)).sum()),
+    }
+
 def read_rhs(path: Path, case: str) -> dict:
     """Read the stage-1 momentum RHS dump (``NEMO_L1_RHS___1``)."""
     with path.open("rb") as handle:
@@ -377,6 +404,7 @@ def run(case: str, root: Path, *, plant: bool = False,
     rows = [_relabel(score(f"{case}.kt1.stp2d.momentum_rhs.u",
                            rhs["u"][..., :nlev], candidate_u, masks["u"],
                            plant=plant))]
+    bits = bit_compare(rhs["u"][..., :nlev], candidate_u, masks["u"])
 
     # The V component: both tanks are single-wet-row channels, so the wet
     # V-face set is empty and a V row would compare masked zeros with masked
@@ -400,7 +428,12 @@ def run(case: str, root: Path, *, plant: bool = False,
         "format": "nemo-testcase-rule12-hpg-eligibility-v1",
         "case": case,
         "status": status,
-        "bit_exact_given_nemo_inputs": bool(exact and not plant),
+        # VALUE-exact is what score() measures; the bar is BITS, so both are
+        # published and the headline is the weaker of the two.
+        "value_exact_given_nemo_inputs": bool(exact and not plant),
+        "bit_exact_given_nemo_inputs": bool(
+            exact and not plant and bits["bit_unequal"] == 0),
+        "bit_comparison": bits,
         "execution_regime": "production_jit",
         "precision_policy": "fp64",
         "transcendentals": "libm",
@@ -429,12 +462,19 @@ def run(case: str, root: Path, *, plant: bool = False,
         ],
         "precondition_ppsrc_isolation": isolation,
         "frame_composition": (
-            "dyn_hpg ALONE. hpg_sco ASSIGNS the momentum RHS, so nothing "
-            "before stp2d.F90:128 survives; dyn_ldf is inert by namelist "
-            "(ln_dynldf_OFF); dyn_vor adds a product with an entry velocity "
-            "that is exactly 0.0; dyn_adv_up3 with pUe writes only the 2-D "
-            "RHS; dyn_drg_init takes puu/pvv INTENT(in); and the ppsrc "
-            "dynspg_ts.f90 this card compiles has ZERO puu/pvv assignments."
+            "dyn_hpg PLUS dyn_vor's exactly-zero accumulation. hpg_sco "
+            "ASSIGNS over ntsi..ntei x jk=1..jpkm1 -- which IS the scored set "
+            "(nn_hls=2, so the record reader's [2:-2] trim is the owned "
+            "interior, and the reader takes levels :jpkm1) -- so nothing "
+            "before stp2d.F90:128 reaches the comparison; dyn_ldf is inert by "
+            "namelist (ln_dynldf_OFF); dyn_adv_up3 with pUe writes only the "
+            "2-D RHS; dyn_drg_init takes puu/pvv INTENT(in); and the ppsrc "
+            "dynspg_ts.f90 this card compiles has ZERO puu/pvv assignments. "
+            "dyn_vor is NOT invisible: it adds exactly 0.0, and IEEE "
+            "-0.0 + 0.0 = +0.0, so it normalises NEMO's negative zeros away "
+            "while legoESM keeps its own. That is VALUE-invisible and "
+            "BIT-visible; see bit_comparison. The earlier 'dyn_hpg ALONE' "
+            "wording is retracted."
         ),
         "rows": rows,
         "planted_control": plant,

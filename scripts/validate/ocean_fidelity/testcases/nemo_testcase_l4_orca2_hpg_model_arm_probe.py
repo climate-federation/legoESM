@@ -31,6 +31,17 @@ stage-2 time level.  That builder is card-independent pure arithmetic pinned
 by ``test_nemo_qco_gdept_z0_oracle_bit_pattern``; this probe states that
 rather than claiming an ORCA2 measurement of it.
 
+WHAT THIS ROW DOES NOT COVER, stated up front.  The records are rank 0 of a
+two-rank run and the scored window is ``[3:-3, 3:-3, :30]``, so the ORCA2 NORTH
+FOLD, the cyclic east-west seam and level 31 are all outside it -- and those
+are exactly the topology ORCA2 alone could test.  The scored interior is, in
+that sense, a larger GYRE.  The horizontal metric is also RECONSTRUCTED: the
+record carries ``r1_e1u``/``r1_e2v`` and the probe inverts them for the grid,
+which the operator then inverts back.  That is the same association hazard the
+LOCK walk turned on, so it was measured rather than assumed -- the round trip
+is bit-exact on all 2035 and 2070 distinct nonzero values, so it does not bite
+here.
+
 Zero NEMO runs.  The ORCA2 branch is not modified: ``--model-root`` points at
 a DISPOSABLE detached worktree with ``d5a7f8169507`` cherry-picked, and the
 probe imports that checkout's ORCA2 gate module for its record readers rather
@@ -307,7 +318,13 @@ def run(oracle_root: Path, model_root: Path, *, plant: bool = False) -> dict:
         "jax_backend": jax.default_backend(),
         "comparison_domain": (
             "rank0 stencil-valid owned wet U/V core, 88x146x30; one owned-cell "
-            "band excluded because the canonical MPI halos are zero"),
+            "band excluded because the canonical MPI halos are zero. EXCLUDES "
+            "the ORCA2 north fold, the cyclic seam and level 31 -- the "
+            "topology this card alone could test"),
+        "metric_is_reconstructed": (
+            "dx_u/dy_v are 1/r1_e1u and 1/r1_e2v from the record; the operator "
+            "inverts them back. Round trip measured bit-exact on all 2035 and "
+            "2070 distinct nonzero values, so the association does not bite"),
         "artifacts": {operand_path.name: sha256(operand_path),
                       literal_path.name: sha256(literal_path)},
         "planted_control": plant,

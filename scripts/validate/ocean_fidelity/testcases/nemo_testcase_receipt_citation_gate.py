@@ -59,6 +59,7 @@ FILES = {
     "dynadv.F90": _DYN / "dynadv.F90",
     "trabbl.F90": _OCE / "TRA/trabbl.F90",
     "MY_SRC/stprk3.F90": LOCK / "MY_SRC/stprk3.F90",
+    "domain.F90": _OCE / "DOM/domain.F90",
     "usrdef_hgr.F90": LOCK / "MY_SRC/usrdef_hgr.F90",
     "namelist_cfg": LOCK / "EXP00/namelist_cfg",
     "namelist_ref": NEMO / "cfgs/SHARED/namelist_ref",
@@ -157,6 +158,8 @@ CITATION_MAP = {
     "BLD/ppsrc/nemo/dynvor.f90:655-656": "zwx(ji,jj) = e2u(ji,jj)",
     "BLD/ppsrc/nemo/dynvor.f90:665": "pu_rhs(ji,jj,jk) + zuav",
     "stprk3_stg.F90:453-598": "tra_zdf",
+    "BLD/ppsrc/nemo/dynhpg.f90:378,397": "DO jk= 2, jpkm1",
+    "domain.F90:159": "r1_hu_0(:,:) = ssumask(:,:)",
     "stp2d.F90:126": "hydrostatic pressure gradient",
     "stprk3_stg.F90:168-243": "r3v(:,:,Kaa)",
 }
