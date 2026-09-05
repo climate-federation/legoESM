@@ -124,13 +124,21 @@ class TestOneColumnExactStep:
         assert np.all(top1 < top0), "the top cell did not freshen"
         # exact to second order in F dt/h (the stretch is applied by the
         # z-star step, the transport by the helper; both first-order)
-        assert np.allclose(top1, exact, atol=2.0 * abs(exact - first_order).max() + 1e-12)
-        assert np.allclose(S1[sl][..., 1:], S0[sl][..., 1:], atol=1e-10), \
+        # rtol=0: numpy's default 1e-5 relative tolerance is 3.5e-4 PSU on S=35,
+        # 200x the signal -- with it this test passed on the pre-fix code
+        assert np.allclose(top1, exact, rtol=0.0, atol=2.0 * abs(exact - first_order).max() + 1e-12)
+        assert np.allclose(S1[sl][..., 1:], S0[sl][..., 1:], rtol=0.0, atol=1e-10), \
             "layers below the top cell must keep their salinity"
-        assert np.allclose(T1[sl], T0[sl], atol=1e-10), "temperature must not change"
+        # rain enters at 0 degC in the tracer equation (its heat content is
+        # carried by the surface heat flux, NEMO blk_oce_2 -- not applied in
+        # this bare step), so the top cell cools by T F dt/h1 and nothing else
+        # moves
+        exact_T = T0[sl][..., 0] * h0[sl][..., 0] / (h0[sl][..., 0] + F_dt)
+        assert np.allclose(T1[sl][..., 0], exact_T, rtol=0.0, atol=2.0 * abs(exact - first_order).max() + 1e-12)
+        assert np.allclose(T1[sl][..., 1:], T0[sl][..., 1:], rtol=0.0, atol=1e-10)
         # column salt is conserved: sum h S before == after
         m0 = np.sum(h0[sl] * S0[sl], axis=-1); m1 = np.sum(h1[sl] * S1[sl], axis=-1)
-        assert np.allclose(m1, m0, rtol=1e-10)
+        assert np.allclose(m1, m0, rtol=1e-12)
 
     def test_the_pre_fix_behaviour_is_what_the_test_rejects(self):
         """Non-vacuity: the uniform stretch alone (what the closure did before)
@@ -144,3 +152,101 @@ class TestOneColumnExactStep:
         stretch_only = S0[sl][..., 0] * (1.0 - F_dt / H)
         exact = S0[sl][..., 0] * h_top / (h_top + F_dt)
         assert np.all(np.abs(S1[sl][..., 0] - exact) < 0.1 * np.abs(stretch_only - exact))
+
+
+@pytest.mark.parametrize("F", [4.0e-8, -4.0e-8])
+def test_stratified_partial_column_both_signs_match_the_upwind_algebra(F):
+    """GLM review 2026-09-05: uniform profiles hide an off-by-one in
+    H_below (only the column total leaks) and the upwind choice (only a
+    stratified column tells cell-above from cell-below).  Non-uniform h with
+    a partial bottom cell, stratified S and T, both flux signs."""
+    h = np.array([[1.0, 3.0, 9.0, 27.0, 13.5, 0.0]])          # partial 5th cell, dry 6th
+    S = np.array([[33.0, 34.0, 34.6, 34.9, 35.0, 35.0]])
+    T = np.array([[25.0, 20.0, 12.0, 6.0, 3.0, 3.0]])
+    mask = np.ones(1)
+    dS, dT = (np.asarray(v) for v in real_freshwater_dilution_tendencies(np.array([F]), S, T, h, mask))
+    wet = h[0] > 0
+    H = h[0, wet].sum()
+    Hb = np.array([h[0, wet][k + 1:].sum() for k in range(wet.sum())])
+    W = F * Hb / H                                              # interface under cell k
+    Wa = np.concatenate([[F], W[:-1]])                          # interface above cell k
+    Sw, Tw = S[0, wet], T[0, wet]
+    up = lambda C, k: C[k] if W[k] >= 0 else C[min(k + 1, wet.sum() - 1)]
+    ref_S = np.array([((0.0 if k == 0 else W[k - 1] * up(Sw, k - 1)) - W[k] * up(Sw, k)) / h[0, k]
+                      for k in range(wet.sum())])
+    ref_T = np.array([((F * Tw[0] if k == 0 else W[k - 1] * up(Tw, k - 1)) - W[k] * up(Tw, k)) / h[0, k]
+                      for k in range(wet.sum())])
+    assert np.allclose(dS[0, wet], ref_S, rtol=1e-12, atol=1e-18)
+    assert np.allclose(dT[0, wet], ref_T, rtol=1e-12, atol=1e-18)
+    assert dS[0, ~wet].tolist() == [0.0] and dT[0, ~wet].tolist() == [0.0]
+    # (a) column salt conserved to round-off; (b) heat change = F T_1
+    assert abs(np.sum(h[0] * dS[0])) < 1e-15 * np.abs(F) * 35.0 * H
+    assert np.sum(h[0] * dT[0]) == pytest.approx(F * T[0, 0], rel=1e-12)
+    # (c) top cell with the z-star stretch (-S_1 F/H) = NEMO's -S_1 F/h_1 for
+    #     water entering; for water leaving the upwind value is S_2, so the
+    #     top cell salinifies by |F| (S_2 (H-h1)/H + S_1 h1/H)/h1 (mixing in
+    #     the water that replaces it), not by the local S_1 alone
+    top = dS[0, 0] - S[0, 0] * F / H
+    if F > 0:
+        assert top == pytest.approx(-S[0, 0] * F / h[0, 0], rel=1e-12)
+    else:
+        assert top == pytest.approx(-F * (S[0, 1] * (H - h[0, 0]) / H + S[0, 0] * h[0, 0] / H) / h[0, 0], rel=1e-12)
+        assert top > 0.0
+
+
+def test_runoff_entry_profile_dilutes_each_level_by_its_own_share():
+    """codex review 2026-09-05: runoff must enter over NEMO's h_rnf, not at the
+    surface.  A river of rate R spread over 8 m into levels of 1, 3, 9 m
+    (fractions 1/8, 3/8, 4/8 of the third level -> 4 m of it): with the
+    z-star stretch each level's dilution is -S R frac_k / h_k, the layers
+    below h_rnf are untouched, column salt conserved, heat = sum entry T."""
+    from legoesm.ocean.freshwater import FreshwaterForcing, runoff_entry_profile
+    # uniform S so "each level diluted by its own share" is the whole answer
+    # (a stratified S adds the resident-water transport between levels)
+    h = np.array([[1.0, 3.0, 9.0, 27.0]]); S = np.full((1, 4), 34.0)
+    T = np.array([[20.0, 15.0, 10.0, 5.0]]); mask = np.ones(1)
+    rho0 = 1025.0; R_kg = 2.0e-4
+    fw = FreshwaterForcing(precip=np.zeros(1), evap=np.zeros(1), runoff=np.array([R_kg]), ice_fw=np.zeros(1))
+    entry = np.asarray(runoff_entry_profile(fw, h, mask, rho0, 8.0))
+    R = R_kg / rho0
+    assert np.allclose(entry, R * np.array([[1, 3, 4, 0]]) / 8.0, rtol=1e-12)
+    dS, dT = (np.asarray(v) for v in real_freshwater_dilution_tendencies(
+        np.array([R]), S, T, h, mask, F_entry=entry))
+    H = h.sum()
+    total = dS[0] - S[0] * R / H                       # + z-star stretch
+    assert np.allclose(total, -S[0] * entry[0] / h[0], rtol=1e-12, atol=1e-18)
+    assert total[3] == pytest.approx(0.0, abs=1e-18)
+    assert abs(np.sum(h * dS)) < 1e-15 * R * 35.0 * H
+    assert np.sum(h * dT) == pytest.approx(np.sum(entry * T), rel=1e-12)
+    # T: water at the local temperature (default) -> only the resident-water
+    # transport between stratified layers remains; column heat = sum entry T
+    assert np.sum(h * dT) == pytest.approx(np.sum(entry * T), rel=1e-12)
+
+
+def test_entry_builder_channel_heat_conventions():
+    """Rain/evaporation/restoring water carries zero tracer temperature (heat
+    already in the surface heat flux); runoff and ice melt water enter at the
+    local temperature; the normalisation residual too."""
+    from legoesm.ocean.freshwater import FreshwaterForcing, real_freshwater_entry
+    h = np.array([[1.0, 3.0, 9.0]]); T = np.array([[20.0, 15.0, 10.0]]); mask = np.ones(1)
+    rho0 = 1025.0
+    def fw(**kw):
+        d = dict(precip=0.0, evap=0.0, runoff=0.0, ice_fw=0.0)
+        d.update(kw)
+        return FreshwaterForcing(**{k: np.array([v]) for k, v in d.items()})
+    # rain only: enters at the top, zero heat
+    F = 2e-4 / rho0
+    Fe, He = (np.asarray(v) for v in real_freshwater_entry(fw(precip=2e-4), F, h, mask, rho0, T))
+    assert np.allclose(Fe, [[F, 0, 0]]) and np.allclose(He, 0.0)
+    # evaporation only: negative entry at the top, zero heat
+    Fe, He = (np.asarray(v) for v in real_freshwater_entry(fw(evap=2e-4), -F, h, mask, rho0, T))
+    assert np.allclose(Fe, [[-F, 0, 0]]) and np.allclose(He, 0.0)
+    # ice melt: enters at the top at T_1
+    Fe, He = (np.asarray(v) for v in real_freshwater_entry(fw(ice_fw=2e-4), F, h, mask, rho0, T))
+    assert np.allclose(He, [[F * 20.0, 0, 0]])
+    # runoff spread over 4 m (1 m + 3 m): enters both levels at SST (NEMO rnf_tsc)
+    Fe, He = (np.asarray(v) for v in real_freshwater_entry(fw(runoff=2e-4), F, h, mask, rho0, T, runoff_spread_m=4.0))
+    assert np.allclose(Fe, [[F / 4, 3 * F / 4, 0]]) and np.allclose(He, [[F / 4 * 20.0, 3 * F / 4 * 20.0, 0]])
+    # normalisation residual (F_rate differs from the channel sum) enters at T_1
+    Fe, He = (np.asarray(v) for v in real_freshwater_entry(fw(precip=2e-4), 0.5 * F, h, mask, rho0, T))
+    assert np.allclose(Fe, [[0.5 * F, 0, 0]]) and np.allclose(He, [[-0.5 * F * 20.0, 0, 0]])

@@ -1109,9 +1109,15 @@ class MPASOceanModel:
             # stays on its own channel.  Shared helper with the lat-lon core.
             from legoesm.ocean.freshwater import (
                 real_freshwater_dilution_tendencies,
+                real_freshwater_entry,
+                resolve_runoff_spread_arg,
             )
+            _F_entry, _entry_heat = real_freshwater_entry(
+                freshwater, F_slow_eta, h_k_new, mask, config.rho_0,
+                T_corrected, runoff_spread_m=resolve_runoff_spread_arg(config))
             _dS_dil, _dT_dil = real_freshwater_dilution_tendencies(
-                F_slow_eta, S_corrected, T_corrected, h_k_new, mask)
+                F_slow_eta, S_corrected, T_corrected, h_k_new, mask,
+                F_entry=_F_entry, entry_heat=_entry_heat)
             S_corrected = S_corrected + (dt * _dS_dil).astype(S_corrected.dtype)
             T_corrected = T_corrected + (dt * _dT_dil).astype(T_corrected.dtype)
 

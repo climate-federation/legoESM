@@ -6689,11 +6689,20 @@ class LatLonCGridOceanModel:
             # surface_forcing.salt_flux.  Shared helper (MPAS core too).
             from legoesm.ocean.freshwater import (
                 real_freshwater_dilution_tendencies,
+                real_freshwater_entry,
+                resolve_runoff_spread_arg,
             )
             _S_dtype = state_new.S.data.dtype
+            # NEMO sbc_rnf_div: river water enters every level down to
+            # h_rnf (same depth map the virtual closure spreads over); the
+            # remaining channels enter at the surface.  Static config gate.
+            _F_entry, _entry_heat = real_freshwater_entry(
+                freshwater, _F_fw_rate_now, h_k_new, mask, _cfg_b.rho_0,
+                state_new.T.data,
+                runoff_spread_m=resolve_runoff_spread_arg(_cfg_b))
             _dS_dil, _dT_dil = real_freshwater_dilution_tendencies(
                 _F_fw_rate_now, state_new.S.data, state_new.T.data,
-                h_k_new, mask)
+                h_k_new, mask, F_entry=_F_entry, entry_heat=_entry_heat)
             state_new = state_new._replace(
                 S=state_new.S.replace(
                     data=state_new.S.data + (dt * _dS_dil).astype(_S_dtype)),
