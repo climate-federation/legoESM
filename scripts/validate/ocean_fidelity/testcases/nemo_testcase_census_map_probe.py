@@ -420,7 +420,7 @@ def command_bbl_scaling(args) -> None:
     """Source-operand scaling on already-certified midpoint/final states."""
     from legoesm.core.precision import PrecisionPolicy, set_policy
 
-    set_policy(PrecisionPolicy.fp64())
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     card = STATS.build_nemo_testcase_card(CASE)
     states = STATS.load_legoesm_states(CASE, "fp64", args.lego_root)[0]
     rows = []
@@ -435,6 +435,7 @@ def command_bbl_scaling(args) -> None:
         "git_sha": git_sha(),
         "preregistration_commit": OWNER_PREREG_COMMIT,
         "precision": "fp64",
+        "transcendentals": "libm",
         "reference": "NEMO 5.0.2 trabbl.F90:507-533,342-353",
         "geometry": {
             "legacy_active_u_faces": int(np.count_nonzero(legacy.u_active)),
@@ -465,7 +466,7 @@ def command_aimp_scaling(args) -> None:
     from legoesm.ocean.physics.vertical_mixing import nemo_e3w_kmm
     from legoesm.ocean.vertical import compute_layer_thickness
 
-    set_policy(PrecisionPolicy.fp64())
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     card = STATS.build_nemo_testcase_card(CASE)
     z = card.recipe.z_coord
@@ -533,6 +534,7 @@ def command_aimp_scaling(args) -> None:
         "git_sha": git_sha(),
         "preregistration_commit": W_METRIC_PREREG_COMMIT,
         "precision": "fp64",
+        "transcendentals": "libm",
         "backend": jax.default_backend(),
         "reference": (
             "usrdef_zgr.F90:157-168; domzgr_substitute.h90:131; "
@@ -569,7 +571,7 @@ def command_zdf_scaling(args) -> None:
     from legoesm.ocean.physics.vertical_mixing import build_dz_half, nemo_e3w_kmm
     from legoesm.ocean.vertical import compute_layer_thickness
 
-    set_policy(PrecisionPolicy.fp64())
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     card = STATS.build_nemo_testcase_card(CASE)
     states = STATS.load_legoesm_states(CASE, "fp64", args.lego_root)[0]
@@ -619,6 +621,7 @@ def command_zdf_scaling(args) -> None:
         "git_sha": git_sha(),
         "preregistration_commit": W_METRIC_PREREG_COMMIT,
         "precision": "fp64",
+        "transcendentals": "libm",
         "backend": jax.default_backend(),
         "reference": (
             "dynzdf.F90:180-195; domzgr_substitute.h90:131-133; "
@@ -674,8 +677,11 @@ def command_budget(args) -> None:
         _NEMOWSRK3TestHooks,
     )
 
-    set_policy(PrecisionPolicy.fp64())
-    require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(
+        get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+        "precision policy is not fp64 scalar-libm",
+    )
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     card = STATS.build_nemo_testcase_card(CASE)
     term_hooks = {
@@ -760,6 +766,7 @@ def command_budget(args) -> None:
         "git_sha": git_sha(),
         "preregistration_commit": OWNER_PREREG_COMMIT,
         "precision": "fp64",
+        "transcendentals": "libm",
         "backend": jax.default_backend(),
         "cadence_steps": args.cadence,
         "frame": (
@@ -803,7 +810,11 @@ def command_run_arm(args) -> None:
         _NEMOWSRK3TestHooks,
     )
 
-    policy = PrecisionPolicy.fp64() if args.precision == "fp64" else PrecisionPolicy.fp32()
+    policy = (
+        PrecisionPolicy.fp64(transcendentals="libm")
+        if args.precision == "fp64"
+        else PrecisionPolicy.fp32()
+    )
     set_policy(policy)
     require(get_policy() == policy, f"failed to set {args.precision}")
     require(bool(jax.config.jax_enable_x64) == (args.precision == "fp64"),
@@ -862,6 +873,7 @@ def command_run_arm(args) -> None:
         "git_sha": git_sha(),
         "case": CASE,
         "precision": args.precision,
+        "transcendentals": "libm" if args.precision == "fp64" else "native",
         "precision_policy": repr(policy),
         "jax_enable_x64": bool(jax.config.jax_enable_x64),
         "backend": jax.default_backend(),
@@ -1004,6 +1016,7 @@ def command_faces(args) -> None:
         "case": CASE,
         "git_sha": git_sha(),
         "precision": "fp64",
+        "transcendentals": "libm",
         "section_row": row,
         "mesh_mask": str(args.mesh_mask),
         "mesh_mask_sha256": sha256(Path(args.mesh_mask)),
@@ -1156,6 +1169,7 @@ def command_variance(args) -> None:
         "case": CASE,
         "git_sha": git_sha(),
         "precision": "fp64",
+        "transcendentals": "libm",
         "oracle_dir": str(args.oracle_dir),
         "reduction": (
             "volume-weighted variance of T over every wet cell, each arm on "
@@ -1273,6 +1287,7 @@ def command_chaos_null(args) -> None:
         "case": CASE,
         "git_sha": git_sha(),
         "precision": "fp64",
+        "transcendentals": "libm",
         "backend": jax.default_backend(),
         "seed": {
             "field": "u", "row": row, "model_face": face, "level": level,
@@ -1378,6 +1393,7 @@ def command_map(args) -> None:
         "case": CASE,
         "git_sha": git_sha(),
         "precision": "fp64",
+        "transcendentals": "libm",
         "class_names": list(CLASS_NAMES),
         "class_edges_C": [list(e) for e in CLASS_EDGES],
         "region": "wet cells with 500 m < H_bathy < 2000 m (the slope)",
