@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
-#SBATCH --time=11:55:00
+#SBATCH --time=9:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/trpviscr1_%j.out
 # VISCOSITY LADDER RUNG 1 (harmonization_plan_2026-09-05.md P1, codex/GLM
 # reviewed design): ONE variable vs the unified tripole card = the LATITUDINAL
@@ -14,7 +14,9 @@
 # --A-h 2e4 so that the schedule's A_h=1e4 keeps the mid-latitude background
 # UNCHANGED (1e4) and only the equatorial band drops (~500 at 0N).  The
 # Smagorinsky ramp, dt, and every other flag are byte-identical to
-# _trp_unified_180d.sbatch; 30 days on the short partition.
+# _trp_unified_180d.sbatch; 30 days on the short partition as TWO 15-day legs
+# (0.4 steps/s = 6.5 h per leg; a single 30-day leg overran 12 h) chained
+# with --restart-save/--restart-from (leg 2 = sbatch --dependency=afterok).
 #
 # WHY. Day-30 undercurrent probe (job 9648737) on the unified arm: thermocline
 # depth matches NEMO (Z20 gap -5 m, tilt 102%) but the undercurrent core is
@@ -30,7 +32,8 @@
 #   SST rmse       ctl 0.51               tripwire > 0.56 ; SH-mid bias > +0.5
 #   stability      max|u| < 2.5 m/s through day 30 (Smag-off twin ran away at 2.5)
 set -uo pipefail
-PIN=${1:?usage: sbatch _longrun_180d_merged.sbatch <pinned-sha>}
+PIN=${1:?usage: sbatch _trp_visc_r1_d30.sbatch <pinned-sha> [leg: 1|2]}
+LEG=${2:-1}
 ROOT=/burg-archive/glab/users/pg2328/_omip_wt; cd $ROOT || exit 1
 HEAD=$(git rev-parse HEAD)
 [ "$HEAD" = "$PIN" ] || { echo "FATAL: HEAD $HEAD != pinned $PIN"; exit 1; }
@@ -54,7 +57,8 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --sss-restore --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 \
   --sss-ice-gate-nemo --prognostic-sea-ice --prognostic-ice-dynamics free_drift \
   --ice-lead-freeze-source nemo_qlead \
-  --years 0.0822 --snapshot-every-days 15 --diag-every-days 5 \
+  --years $([ "$LEG" = 1 ] && echo 0.0411 || echo 0.0822) --snapshot-every-days 15 --diag-every-days 5 \
+  --restart-save $OUT/restart_leg$LEG.npz $([ "$LEG" = 2 ] && echo "--restart-from $OUT/restart_leg1.npz") \
   --tracer-advection superbee --runoff-depth-nemo-ini --river-mouth-restoring-gate \
   --bottom-drag-scheme nemo_quadratic \
   --iwm --iwm-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/zdfiwm_forcing_TRA.nc \
@@ -77,6 +81,7 @@ echo "=== run rc=$run_rc"
 export JAX_PLATFORMS=cpu
 GW_T=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GATEWAY/ORCA1_5d_20000101_20000331_grid_T.nc
 
+[ "$LEG" = 2 ] || { echo "leg 1 done (day 15); scoring runs in leg 2"; exit 0; }
 echo "=== nino3 trajectory (matched NEMO to day 90; our shape beyond) ==="
 for pair in "0030 5"; do
   set -- $pair
