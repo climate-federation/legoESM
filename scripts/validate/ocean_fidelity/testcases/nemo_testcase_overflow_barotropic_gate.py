@@ -543,7 +543,7 @@ def run(
         first[arm_name] = first_over_bar
 
     scaling = []
-    for jn in range(4):
+    for jn in range(EXPECTED[2]):
         ref = oracle["substeps"][jn]["u_exit"]
         old = baseline["substeps"][jn]["u_exit"]
         new = faithful["substeps"][jn]["u_exit"]
