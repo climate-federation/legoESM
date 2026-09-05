@@ -37,6 +37,13 @@ result cannot reach the scored value after the external endpoint substitution.
 The public card remains fail-closed and the guard is registered to its shared
 owner.
 
+The next constructor boundary is likewise shared and downstream-owned:
+EOS-80 TKE/EVD `bn2` is not implemented.  If it prevents the compiled step
+from reaching `_g0`, the diagnostic may substitute the already constructible
+TEOS-10 `bn2` only in the upstream tendency whose external result is then
+replaced.  No proxy result may enter `_g0`; the receipt must keep the EOS-80
+TKE/EVD entry `UNMEASURED` and name its owner.
+
 The discriminator is frozen:
 
 - **AT_BAR, 0 / n:** retract `GYRE_OWNER_SHARED_WZV_STAGE_CLOCK` under Rule

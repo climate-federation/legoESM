@@ -160,6 +160,21 @@ def validate(deck_root: Path, oracle_root: Path, *, plant: bool) -> dict[str, ob
     require(cfg.ke_gradient_scheme == "c2",
             "ORCA2 card does not select nn_dynkeg=0/C2")
 
+    # The card's selected EOS-80 TKE/EVD entry is itself a downstream
+    # UNMEASURED shared boundary: the shared bn2 closure currently refuses
+    # eos_form='eos80'.  Use the already constructible TEOS-10 bn2 only in
+    # upstream tendencies whose external result is replaced below.  No proxy
+    # value reaches _g0 or the exposed WZV value.
+    vmix = cfg.physics.vertical_mixing
+    tke = vmix.tke._replace(n2_eos_form="teos10")
+    convection = cfg.physics.convection._replace(
+        enhanced_diffusion=cfg.physics.convection.enhanced_diffusion._replace(
+            n2_eos_form="teos10"))
+    diagnostic_cfg = cfg._replace(
+        physics=cfg.physics._replace(
+            vertical_mixing=vmix._replace(tke=tke),
+            convection=convection))
+
     # The external mode is a registered upstream shared debt.  Substitute its
     # NEMO endpoint over the measured rank-zero slab, while retaining a full
     # global production card.  The east partition support column and north
@@ -185,7 +200,7 @@ def validate(deck_root: Path, oracle_root: Path, *, plant: bool) -> dict[str, ob
         expose_stage1_wzv=True,
     )
     model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, cfg,
+        card.recipe.grid, card.recipe.z_coord, diagnostic_cfg,
         _nemo_ws_test_hooks=hooks,
     )
     result = model.step(
@@ -233,6 +248,10 @@ def validate(deck_root: Path, oracle_root: Path, *, plant: bool) -> dict[str, ob
             "label": "ORACLE_SUPPLIED_EXTERNAL_MODE",
             "fields": ["final_ssh", "un_adv", "vn_adv"],
             "certifies_external_mode": False,
+            "ignored_upstream_constructibility_proxy": (
+                "TEOS-10 bn2 replaces unsupported EOS-80 bn2 only before the "
+                "oracle external endpoint; no proxy value reaches _g0"
+            ),
         },
         "comparison_domain": {
             "description": (
