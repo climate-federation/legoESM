@@ -3287,7 +3287,9 @@ generic cross-card state gate and its absent-face correction are
 The state API contains one pair only.  A NEMO identity recipe opts in; all
 other recipes retain `None/None`, so JAX sees no additional array leaves.
 Every direct constructor, `_replace`, bridge, restart pack/unpack and test
-constructor found by the repository-wide constructor census was updated.
+constructor found by the repository-wide census was audited: central NEMO
+constructors were opted in, while direct non-NEMO keyword constructors retain
+the pair's `None` defaults without edits.
 The generic NEMO restart reader maps `uu_n/vv_n` directly.  The bridge rejects
 a half-pair, and the legacy missing-field reconstruction requires the exact
 `e3u_0/e3v_0`, masks and `hu_0/hv_0` operands and emits a warning.  The C1D
@@ -3475,6 +3477,16 @@ hold.  No merge or push was performed.
 
 All Round-24 labels and measurements are Codex-internal.  Independent review
 of this round remains **OUTSTANDING**.
+
+Focused CPU verification is `168 passed, 1 warning in 78.92s`; the warning is
+the pre-existing negative precision-policy warning in the bridge test.  The
+selection covers both phase-3 gates, the new state gate, NEMO IO/bridges,
+restart persistence, and the no-scheme-duplication tripwire.  The machine
+manifest is
+`scripts/validate/ocean_fidelity/testcases/manifests/nemo_testcase_l2_gyre_round24.json`,
+SHA-256
+`25e7cd11a82b6c87c6120be1aba36b0ecae76a876466a9037570d282669882b4`.
+Session: `01a05cb9-7625-7f40-9e83-b3fa767b1945`.
 
 ### Restart and negative-state controls
 
