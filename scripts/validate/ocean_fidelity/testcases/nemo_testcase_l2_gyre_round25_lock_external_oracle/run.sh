@@ -39,8 +39,9 @@ sha256sum "$NEMO_ROOT/arch/arch-conda-scalarmath.fcm" \
 
 cd "$NEMO_ROOT"
 ./makenemo -a LOCK_EXCHANGE -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
-cp -a "$source_cfg/EXP00/." "$target_cfg/EXP00/"
-cp -a "$source_cfg/MY_SRC/." "$target_cfg/MY_SRC/"
+cp -r "$source_cfg/EXP00/." "$target_cfg/EXP00/"
+cp -r "$source_cfg/MY_SRC/." "$target_cfg/MY_SRC/"
+touch "$target_cfg"/MY_SRC/*.F90
 cp "$instrument" "$target_cfg/MY_SRC/dynspg_ts.F90"
 cp "$source_cfg/cpp_${SOURCE_CFG}.fcm" "$target_cfg/cpp_${TARGET_CFG}.fcm"
 ./makenemo -n "$TARGET_CFG" -m conda-scalarmath
@@ -77,8 +78,15 @@ cp "$work_manifest"/*.sha256 "$TARGET_RUN/"
 # identity records and the final state to remain byte-identical before admitting
 # the new substep record.  Its historical OVERFLOW filename is deliberately
 # retained so the existing parser can consume it through --oracle.
-for record in oracle_step_entry_kt*.bin oracle_bt_frames_kt*.bin; do
-  cmp "$SOURCE_RUN/$record" "$TARGET_RUN/$record"
+# Binding control against stale-timestamp builds: every MY_SRC writer must be
+# in the compiled preprocessed source, or the run cannot have written them.
+for writer in stprk3 stprk3_stg dynspg_ts; do
+  grep -q 'oracle_' "$target_cfg/BLD/ppsrc/nemo/$writer.f90" \
+    || { printf 'REFUSE: MY_SRC writer %s not compiled (stale build)\n' "$writer" >&2; exit 69; }
+done
+for source_record in "$SOURCE_RUN"/oracle_step_entry_kt*.bin "$SOURCE_RUN"/oracle_bt_frames_kt*.bin; do
+  record=${source_record##*/}
+  cmp "$source_record" "$TARGET_RUN/$record"
 done
 cmp "$SOURCE_RUN/LOCK_EXCHANGE_OMIP_L1_ZCO_00000010_restart.nc" \
     "$TARGET_RUN/LOCK_EXCHANGE_OMIP_L1_ZCO_00000010_restart.nc"
