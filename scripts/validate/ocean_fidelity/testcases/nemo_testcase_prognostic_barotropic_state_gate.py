@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import struct
 from pathlib import Path
@@ -135,7 +136,19 @@ def run(case: str, oracle_root: Path, *, plant: bool = False) -> dict:
     oracle = read_bt_pair(record_path)
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
-    after = model.step(state, dt=card.dt_s)
+    step_kwargs = {}
+    if case == "GYRE-zco":
+        gyre_gate_path = Path(__file__).with_name(
+            "nemo_testcase_l2_gyre_phase3_gate.py")
+        spec = importlib.util.spec_from_file_location(
+            "gyre_phase3_surface_forcing", gyre_gate_path)
+        require(spec is not None and spec.loader is not None,
+                "cannot load the certified GYRE surface-forcing adapter")
+        gyre_gate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gyre_gate)
+        freshwater, surface = gyre_gate._surface_forcings(card, state, 1)
+        step_kwargs = {"freshwater": freshwater, "surface_forcing": surface}
+    after = model.step(state, dt=card.dt_s, **step_kwargs)
     require(after.uu_b is not None and after.vv_b is not None,
             f"{case}: step dropped uu_b/vv_b")
     wet = np.asarray(state.land_mask.data) > 0.5
