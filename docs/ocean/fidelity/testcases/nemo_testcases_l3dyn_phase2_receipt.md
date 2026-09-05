@@ -1503,14 +1503,67 @@ ICE_RHEO C-grid aEVP velocity/stress chain at this input state, before
 transport.  The moment amplification is **CONFIRMED**; a narrower aEVP source
 operand is **UNMEASURED**.
 
-Consequently the preregistered requirement that steps 2--8 and the active
-window remain byte-exact is **REFUTED**, so no new ICE_RHEO 9--720 walk or
-restart score was run.  The old step-720 U/V/stress separation cannot be called
-pure amplification of eliminated roundoff: a remaining operator defect is
-already measured at the active oracle-entry state.  How much that specific
-operand contributes to the historical 24% `u_ice` / 77% `stress12_i` endpoint
-is **UNMEASURED**; the next action is a per-subcycle first-operand descent in
-the full-size aEVP arm.
+The earlier self-imposed condition that the active window also be byte-exact
+was stricter than the dispatch and is **WITHDRAWN before the long run** in the
+committed preregistration correction.  The user's actual condition was exact
+completed step 1, which is satisfied.  The production-JIT ICE_RHEO walk
+therefore ran continuously from the aligned step-8 state through the final
+step-720 restart.
+
+The corrected preregistered forecast is **CONFIRMED**: within the long-walk
+registry, completed step 9 is already over bar and `stress12_i` is the
+normalized owner at `1.2387066062187695e-14`; stress1 and stress2 are
+`5.0023523591146394e-15` and `3.92220897114362e-15`.  The first non-bit-exact
+ordinary rows at step 9 include `v_i` (`249816 / 1000000`) and `v_s`
+(`243161 / 1000000`); U/V are non-bit-exact in `928059 / 1000000` and
+`953428 / 1000000` cells.  This means the carried trajectory does not begin
+from a merely later amplified bit-exact operator sequence.
+
+Per-field first-over-bar coverage is complete:
+
+| fields | first completed step over bar |
+|---|---:|
+| `stress1_i`, `stress2_i`, `stress12_i` | 9 |
+| `e_s_l01`--`e_s_l05` | 11 |
+| `szv_i_l01`--`szv_i_l10` | 12 |
+| `e_i_l01`--`e_i_l10` | 13 |
+| `v_i` | 14 |
+| `u_ice` | 19 |
+| `v_ice` | 20 |
+| `a_i` | 24 |
+| `v_s` | 25 |
+| `t_su`, `sv_i` | never; byte-exact at restart |
+| `oa_i`, `a_ip`, `v_ip`, `v_il` | UNINFORMATIVE; oracle identically zero |
+
+The requested growth table reports `normalized / relative`; the immutable bar
+uses the first number, `max_abs/max(max|oracle|,1)`, while the second is a
+diagnostic:
+
+| step | `u_ice` | `v_ice` | `stress1_i` | `stress2_i` | `stress12_i` | `a_i` | `v_i` | `v_s` |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 9 | `8.841e-21 / 1.130e-14` | `6.194e-21 / 1.312e-14` | `5.002e-15 / 5.002e-15` | `3.922e-15 / 3.922e-15` | `1.239e-14 / 1.239e-14` | `0 / 0` | `1.121e-16 / 1.121e-16` | `1.388e-17 / 1.402e-16` |
+| 10 | `2.614e-20 / 2.591e-14` | `1.458e-20 / 2.445e-14` | `1.618e-14 / 1.618e-14` | `1.155e-14 / 1.155e-14` | `1.569e-14 / 1.569e-14` | `0 / 0` | `3.364e-16 / 3.364e-16` | `4.163e-17 / 4.205e-16` |
+| 50 | `8.056e-7 / 2.242e-2` | `4.328e-7 / 2.636e-2` | `3.838e-2 / 3.838e-2` | `3.501e-2 / 3.501e-2` | `4.789e-2 / 4.789e-2` | `5.064e-8 / 5.115e-8` | `6.259e-8 / 6.259e-8` | `6.196e-9 / 6.259e-8` |
+| 100 | `1.786e-8 / 1.030e-4` | `2.536e-8 / 3.430e-4` | `2.830e-4 / 2.830e-4` | `3.794e-4 / 3.794e-4` | `4.306e-4 / 4.306e-4` | `1.137e-7 / 1.149e-7` | `1.806e-7 / 1.806e-7` | `1.788e-8 / 1.806e-7` |
+| 200 | `8.457e-6 / 6.139e-3` | `1.450e-5 / 2.509e-2` | `2.404e-2 / 2.404e-2` | `1.155e-1 / 1.155e-1` | `5.882e-2 / 5.882e-2` | `1.518e-6 / 1.534e-6` | `1.549e-6 / 1.549e-6` | `1.534e-7 / 1.549e-6` |
+| 485 | `3.940e-3 / 2.620e-2` | `4.292e-3 / 4.086e-2` | `7.041e-2 / 7.041e-2` | `3.411e-1 / 3.411e-1` | `3.658e-1 / 3.658e-1` | `6.322e-3 / 6.342e-3` | `6.016e-3 / 6.016e-3` | `6.370e-4 / 6.016e-3` |
+| 720 | `8.380e-2 / 2.343e-1` | `8.239e-2 / 2.540e-1` | `1.375e-1 / 1.375e-1` | `2.266e-1 / 2.266e-1` | `7.460e-1 / 7.460e-1` | `4.072e-2 / 4.084e-2` | `2.807e-2 / 2.807e-2` | `3.736e-3 / 2.807e-2` |
+
+The final restart validation scores all 39 ordinary rows and all 160 Prather
+moment rows: 33/39 ordinary rows and 140/160 moments are DEBT; `t_su` and
+`sv_i` are byte-exact, and the four age/pond state rows remain UNINFORMATIVE.
+The final moment owner is `restart_moment.sxya`, normalized and relative
+`1.1916055671330519`, with `994065 / 1000000` non-bit-exact cells.  Thus the
+old endpoint scale is reproduced after removing the compiled Prather defect:
+`u_ice` is 23.427% relative and `stress12_i` 74.598% relative at step 720.
+
+This **CONFIRMS amplification of a remaining defect**, not amplification of
+only unavoidable roundoff: the isolated Prather operator is byte-exact with
+oracle U/V, but the full-size aEVP velocity/stress chain is already non-bit-
+exact/DEBT at the active step-8/long-walk step-9 boundary and grows into the
+reported endpoint.  The next owner is explicitly the first non-bit-exact
+full-size aEVP subcycle operand at the active oracle-entry state; its identity
+within strain/delta/viscosity/stress/divergence/velocity is **UNMEASURED**.
 
 Both plants bind at row level.  The Prather velocity plant makes
 `plant_delta.syye_l01` DEBT at `6.656046011101788e-7` normalized,
@@ -1525,12 +1578,13 @@ exact row and returns 1.  Independently, the active field plant moves
 | rung-3.3 completed-step-1 gate | `883db2d0aaaf3ecec39da1787de0ec2ccabec9c35fc8222c23e8fb9e668162fe` |
 | rung-3.3 independent-entry 485-step/restart sweep | `43aa822f971728421e4ac2605c0cee87e1985e0737f3107cdabdb6679f26f693` |
 | ICE_RHEO active step-8 gate / row plant | `8d06bc76b7ed3b6350b0180a51ddf1ac2a9d9507b50b692750b67eeb2c158edc` / `d6bd5840502763e996959a4082d970571981d8b898719ca8619decf074f5465f` |
+| ICE_RHEO production-JIT steps 9--720 + final restart | `0069a67d229b6f4e498cf47b161135af9e1f8a0f28ca5cd90f6e78870581a28b` |
 | shared ice transport / source-correction recipe | `ac26cca22c0ba3c4d8aaa0b60553d914af7e0a875f1f3aba5d64be0eb387f710` / `ce50898330c07db5794abd14a785e515af46c4add64e1ca57ed29f1cdec96678` |
 | H79 API / C-grid caller | `dacc1528d5660d8bc1c18b1fad7ade48ff2c5fbcd85e27d7697bb4ab04984174` / `aedfc926c3017c469d42402f4d2ff2406985784526feeab8f19a9dcec7f253c2` |
 | exact discriminator gate / association test | `f3a943dd03f44304035a48cef00ea475bd810ed2d6371da8ee51829111cd3982` / `bf430a12141411ca85b82546cff4158dfe470af15a4ad34d54c4247930d013e4` |
 
-The preregistration and implementation commits are
-`a1859b95d3b3` and `02dc6f312671`.  Focused CPU/fp64 verification is
+The preregistration, implementation, and pre-run condition-correction commits
+are `a1859b95d3b3`, `02dc6f312671`, and `9c265726375c`.  Focused CPU/fp64 verification is
 **63 passed in 654.33 s**, plus the new compiled-association tripwire
 **1 passed in 4.06 s**.  Every touched-file coefficient/constant ratchet node
 passes (**10 selected nodes**: nine in the implementation commit and the new
@@ -1589,7 +1643,7 @@ lost inside narrative:
 | 12 | Source-round the single shared SI3 Prather program in NEMO operand order and retain the old association only as a private arm | ASKED | Clean production JIT is 160/160 byte-exact; private identity arm is 20/160 exact, 140/160 nonexact, 60 DEBT |
 | 12 | Require byte-exact transported fields at completed step 1, then measure steps 2--8 and the active-ridging window | ASKED | Step 1 is 23/23 exact; first nonexact is step-2 `a_ip`; active window is 63/210 DEBT |
 | 12 | Bind plants to named scored rows and report `0 / n` denominators | ASKED | `plant_delta.syye_l01` and `active.step8.v_s` are asserted row transitions; exact discriminator rows are `0 / 1000000` |
-| 12 | Continue ICE_RHEO steps 9--720 only if steps 2--8 and the active window remain byte-exact | ASKED | Preregistered condition REFUTED; no new long walk or restart claim |
+| 12 | Continue ICE_RHEO steps 9--720 after the ordered step-1/steps-2--8/active measurements | ASKED | Over-strict local condition withdrawn before run; completed through the step-720 restart, 33/39 ordinary and 140/160 moment rows DEBT |
 | 12 | Rename/document the public H79 source-rounding keyword without changing its default | ASKED | `source_exact=False`; only the existing C-grid caller selects true |
 | 12 | Modify canonical core files, relax the bar, add a card switch/model, change defaults, edit shipped NEMO, use GPU/MPI, delete artifacts, commit large dumps, or push | UNASKED | None performed |
 
