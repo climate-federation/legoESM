@@ -377,6 +377,8 @@ def _friction_association_probe(
     plant: bool = False,
 ) -> dict[str, object]:
     """Non-vacuous replay of icesbc.F90:328-340 with a non-unit mask."""
+    from legoesm import constants
+
     kwargs = dict(
         ice_fraction=np.float64(0.8), ice_fraction_before=np.float64(0.8),
         ice_volume=np.float64(1.0), u_ice=np.float64(1.25),
@@ -389,7 +391,8 @@ def _friction_association_probe(
         ocean_layer_thickness=np.float64(1.0), sst_celsius=np.float64(-1.5),
         T_bottom=np.float64(271.5), dt=np.float64(3600.0),
         inverse_dt=np.float64(1.0 / 3600.0), rho_ocean=np.float64(1026.0),
-        c_ocean=np.float64(3991.86795711963), T0=np.float64(273.15),
+        c_ocean=np.float64(3991.86795711963),
+        T0=np.float64(constants.T_freeze),
         ice_epsilon=np.float64(1.0e-10), max_ice_fraction=np.float64(0.999),
         mask=np.float64(0.25),
     )
