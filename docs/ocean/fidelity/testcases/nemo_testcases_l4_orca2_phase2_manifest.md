@@ -63,6 +63,26 @@ The manifest deliberately does not hash itself. Git object IDs and the final
 bundle digest are reported in the handoff, providing the immutable review
 closure for all committed files.
 
+## Phase-2j reproducible V2 and downstream handoff
+
+Twin A is pinned as `VARIANT_ORACLE_V2` only after twin B reproduced all
+92 frozen streams byte-for-byte.  The complete record manifest, terminal
+restart/output manifest, identity gates, plants, V2 numerical rescores,
+retained failed diagnostic attempts, WZV scalar-math build, zero-`_ZGV`
+evidence and both prepared launchers are enumerated in
+`nemo_testcases_l4_orca2_phase2j_artifacts.sha256`, whose SHA-256 is
+`33ffce86fad37de6b8013c54a61c96f8fc48f213c21caa59ccb19a3b96b66426`.
+
+The precise first shared debt is the frozen EEN coefficient stream
+`oracle_bt_ene_coeff_kt00000001.bin`, SHA-256
+`e7282ddc105300f8ee101d00ba9859eeed487a9c480947ae55fd5aac9f2c9363`.
+Lane 4 makes no shared external-mode change.  With the external result supplied
+from the oracle, the stage-1 horizontal `zFu/zFv` products are exact.  The next
+user-shell acquisition adds one WRITE-only WZV/runoff operand stream; its
+executable SHA-256 is
+`78d0a06c2f21cd174579d60d65083e050fa396ec321ad33a6a69a8cbae89357a`.
+No new large artifact is committed.
+
 ## Phase-2b post-`sbc` exchange handoff
 
 This continuation stopped before legoESM arithmetic because the inherited SI3
