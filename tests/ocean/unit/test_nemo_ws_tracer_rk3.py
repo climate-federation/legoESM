@@ -696,7 +696,19 @@ def test_overflow_bbl_is_live_inside_real_rk3_stage3():
     geom = bbl_static_geometry(
         card.recipe.z_coord.h_partial,
         card.recipe.initial_state.land_mask.data)
-    active_faces = np.argwhere(np.asarray(geom.u_active) > 0.5)
+    # The face must carry a real bathymetric STEP.  bbl_static_geometry marks
+    # flat-bottom faces active too, and there ku_s == ku_d, so the two planted
+    # cells below are the SAME cell: the second .set() overwrites the first and
+    # there is no density contrast for the BBL to advect.  Measured on this
+    # card: the median active face (1, 94) has ku_s = ku_d = 99 and moves
+    # exactly 0.0, while stepped faces (1, 40) with (59, 64) and (1, 22) with
+    # (24, 25) move 0.173 and 0.320.  Aiming at a degenerate face made this
+    # liveness test fail against live BBL code.
+    ku_s = np.asarray(geom.ku_s)
+    ku_d = np.asarray(geom.ku_d)
+    stepped = np.asarray(geom.u_active) > 0.5
+    stepped &= ku_s != ku_d
+    active_faces = np.argwhere(stepped)
     assert active_faces.size
     j, i = active_faces[len(active_faces) // 2]
     slope = int(np.asarray(geom.mgrhu)[j, i])

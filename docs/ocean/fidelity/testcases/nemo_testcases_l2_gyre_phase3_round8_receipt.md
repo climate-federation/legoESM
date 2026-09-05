@@ -4333,3 +4333,174 @@ was not given.  `test_surface_stress_implicit_wiring` reveals nothing new: it
 never reaches its own `nemo_stage_mean_imposition` assertion, because
 construction now raises the momentum-program message instead — it is masked
 one guard deeper, not unmasked.
+
+### LOCK's external-mode bit, walked — preregistered prediction REFUTED
+
+The user-run acquisition supplies the 19-frame `NEMO_L1_OVBT_1` record LOCK
+never had.  Re-measured on a clean tree at `66f9145c951e`, production
+`nemo_flux_form_update` arm, substep 1 of 1:
+
+| frame | verdict | max abs | unequal / n |
+|---|---|---:|---:|
+| `eta_entry` | AT-BAR | 0 | 0 / 128 |
+| `u_entry` | AT-BAR | 0 | 0 / 127 |
+| `eta_mid` | AT-BAR | 0 | 0 / 128 |
+| `u_mid` | AT-BAR | 0 | 0 / 127 |
+| `transport_u` | AT-BAR | 0 | 0 / 127 |
+| `eta_continuity` | AT-BAR | 0 | 0 / 128 |
+| `eta_pgf` | AT-BAR | 0 | 0 / 128 |
+| `pgf_u` | AT-BAR | 0 | 0 / 127 |
+| **`slow_u`** | AT-BAR | **`2.1684043449710089e-19`** | **1 / 127** |
+| `drag_u` | AT-BAR | 0 | 0 / 127 |
+| `u_exit` | AT-BAR | `2.1684043449710089e-19` | 1 / 127 |
+| `eta_exit` | AT-BAR | 0 | 0 / 128 |
+
+Every V frame is UNMEASURED: LOCK has no active meridional face.  Both plants
+(`--plant-entry`, `--plant-exit`) exit `1`.
+
+**The preregistered prediction is REFUTED.**  It named the flux-form external
+velocity update as the first departure.  The first departure is `slow_u`, one
+frame earlier and OUTSIDE the substep loop; `u_exit` carries the identical
+value in the identical cell `[1, 64]` and therefore inherits it rather than
+producing it.  This is round 25's unlocalized LOCK bit (`1 / 127`,
+`2.168404344971009e-19`), now localized.
+
+The same shape was already recorded for OVERFLOW inside its own gate — its
+`u_exit` tail "is inherited from the slow forcing, not produced by the update"
+— so round 25's receipt text naming `dynspg_ts.F90:752-761` as OVERFLOW's
+producer is narrowed here to a boundary the update INHERITS.
+
+**Producing statement, read from the source, not assumed.**  LOCK compiles
+`key_qco key_vco_1d key_RK3`
+(`tests/LOCK_EXCHANGE_OMIP_L1_P3/cpp_LOCK_EXCHANGE_OMIP_L1_P3.fcm`), so the
+RK3 branch runs and the MLF branch is dead.  Under RK3 the slow forcing is one
+statement, `zu_frc(:,:) = Ue_rhs(:,:)` at `dynspg_ts.F90:282`; the
+`dyn_cor_2D` subtraction at `:296` contributes exactly zero because
+`usrdef_hgr.F90:103-104` sets `pff_f = pff_t = 0`.  So the bit is INHERITED
+and produced upstream in `stp2d.F90`.  LOCK resolves `ln_dynadv_up3 = .true.`
+(`namelist_cfg:85`) and therefore `np_FLX_up3`, which writes
+`Ue_rhs` twice: `dyn_adv_up3(..., pUe=Ue_rhs)` at `stp2d.F90:172` and the
+cumulated depth mean `Ue_rhs = Ue_rhs + SUM(e3u_0*uu(Krhs)*umask)*r1_hu_0` at
+`:185`.  Wind (`:200`) and drag (`:196`) contribute nothing on this card
+(`usrdef_sbc.F90` utau = 0, `ln_drg_OFF = .true.`).  **Which of those two
+statements owns the bit is PLAUSIBLE, not CONFIRMED — no dumped frame
+separates them**, and no arm was run to guess.
+
+Three report blocks would have become false records on LOCK and are now
+withheld by name (`NOT_APPLICABLE_ON_THIS_CARD`): `resolved_program` hardcodes
+OVERFLOW's `nn_bt_flt=1 / rn_bt_alpha=0.0 / nn_e=3 / actual_icycle=4` where
+LOCK's `namelist_cfg:105-106` says `nn_bt_flt=3, rn_bt_alpha=0.07`;
+`whole_step_kt2_causal_arm` scores against a hardcoded OVERFLOW prior triple;
+`ownership` is an OVERFLOW owner-label set.  The card's own resolved program
+was instantiated and printed rather than assumed: OVERFLOW
+`("nemo_boxcar1_ab3", 3)`, LOCK `("nemo_ab3am4", 1)`.
+
+The generalization is a bit-for-bit no-op on OVERFLOW.  A one-variable control
+ran the same gate on its defaults from a detached worktree at the round-25 tip
+`991f9f95047d`:
+
+| tip | status | `first_over_bar` (both arms) |
+|---|---|---|
+| `991f9f95047d` (before) | DEBT | `pgf_v`, substep 2, `3.1252342425882175e-4` |
+| `66f9145c951e` (after) | DEBT | `pgf_v`, substep 2, `3.1252342425882175e-4` |
+
+All 76 substep rows, the 19 substep-1 frames, `resolved_program` and the
+scaling block are identical.  (The much older
+`nemo-testcases-l1/barotropic_walk/overflow_barotropic_frame_gate.json`, which
+reports `u_exit` at `1.8735013540549517e-15`, is a stale-format report with no
+`legoesm_git_sha` and no substep-1 frame list; it is NOT a valid baseline and
+was not used as one.)
+
+### The six pre-existing failures — one fixed, five remain
+
+| failure | round-25 state | round-26 state |
+|---|---|---|
+| `test_nemo_gyre_native_builds_valid_model_and_dispatch` | fails: integrators not both `rk3_ws` | still fails, one guard deeper: incomplete `rk3_ws` momentum program |
+| `test_nemo_gyre_coordinate_is_consistent_clean_w_bc` | same | same |
+| `test_nemo_gyre_forced_trajectory_is_finite_and_stable` | same | same |
+| `test_nemo_gyre_wind_forcing_sign_chain_end_to_end` | same | same |
+| `test_surface_stress_implicit_wiring` | same | same; it still never reaches its own assertion |
+| `test_overflow_bbl_is_live_inside_real_rk3_stage3` | fails: movement measured `0.0` | **PASSES** (`1 passed in 428.34s`) |
+
+`tests/ocean/unit/test_nemo_recipe.py` after decision 15A: `5 failed, 19 passed
+in 49.39s`.  The five remaining need the configuration decision in open
+question 2 and are NOT round-26 regressions.
+
+### OVERFLOW's seven Rule-12 rows, against the same boundary
+
+The LOCK result generalizes what OVERFLOW's own gate had already recorded and
+round 25's receipt text had over-stated.  OVERFLOW's `u_exit` tail is
+"inherited from the slow forcing, not produced by the update" — its `ownership`
+block says so and prints the ratio (`u_exit` error equals `dt` times the
+`5.63e-16` `slow_u` input residual, ratio 0.998).  Round 25's sentence naming
+`dynspg_ts.F90:752-761` as the producer is therefore narrowed to a statement
+that INHERITS.  Re-run at this tip, OVERFLOW is unchanged in every substep row
+and its first over-bar frame is `pgf_v` at substep 2
+(`3.1252342425882175e-4`), a V frame LOCK cannot see because it has no active
+meridional face.  The seven OVERFLOW trajectory rows therefore stay registered
+behind the same slow-forcing boundary, and their arithmetic owner remains
+**UNMEASURED_AFTER_REFUTED_ARMS** from round 25's two refuted arms.  No new arm
+was run to guess it.
+
+### The OVERFLOW BBL liveness test aimed at a degenerate face
+
+`test_overflow_bbl_is_live_inside_real_rk3_stage3` plants a dense shelf cell
+over a light deep cell across an active BBL face and requires the step to
+move.  It measured exactly `0.0`.  The cause is the face it picked, not the
+BBL code: `bbl_static_geometry` marks flat-bottom faces active as well, and
+there `ku_s == ku_d`, so the test's two `.set()` calls address the SAME cell
+and the second overwrites the first.  No density contrast is planted at all.
+
+| face | `ku_s`, `ku_d` | movement |
+|---|---|---:|
+| `(1, 94)` — the median active face the test picked | 99, 99 | `0.0` |
+| `(1, 165)` — also flat | 99, 99 | `0.0` |
+| `(1, 40)` | 59, 64 | `0.17292126063998048` |
+| `(1, 22)` | 24, 25 | `0.3200974770662164` |
+
+The test now selects among active faces with `ku_s != ku_d`.  This is a TEST
+correction, not a model change; nothing in the BBL path was touched.
+
+### Open questions
+
+1. **ORCA2 cannot be scored without a branch decision.**  Do we back-port the
+   four symbols the ORCA2 gates need onto this branch, merge the two branches,
+   or forward-port the round-25 HPG/QCO fix onto the ORCA2 branch and score
+   there?  Until one is chosen, Rule-12 eligibility on ORCA2 stays UNMEASURED.
+2. **The native demo GYRE card's momentum program.**  It resolves
+   `vertical_momentum_scheme="upwind_perturbation"` and
+   `adaptive_implicit_vertadv=True`; NEMO's vector form is "keg + zad + vor"
+   (`dynadv.F90:144`) and `ln_zad_Aimp` is `.false.`
+   (`namelist_ref:1177`, not overridden by `GYRE_PISCES`).  Move both to NEMO's
+   values, or leave the card as it is and mark the five tests expected-fail?
+3. **Which `stp2d.F90` statement owns LOCK's external bit** — `:172` or `:185`.
+   Separating them needs one more instrumented frame; that is a NEMO run
+   request, not something to guess.
+
+### ASKED / UNASKED
+
+| choice | disposition |
+|---|---|
+| native GYRE card tracer integrator `euler` -> `rk3_ws` | ASKED (user decision 15A); landed; the deeper guard it exposes is reported, not silenced |
+| extend the Rule-12 exact-input row to LOCK and OVERFLOW | ASKED; landed as one committed gate; CONFIRMED bit-exact on both |
+| score ORCA2 as the fourth card | ASKED; BLOCKED; reported with the blocking symbols, no workaround invented |
+| close guard 5's `.body` hole | ASKED; landed; shown non-vacuous against a planted bypass |
+| cite the FMA fact, un-strike the bit-pattern pair, keep the census struck | ASKED; done; the stale comment quoting the census is rewritten |
+| admit the LOCK acquisition and make its reader consume it | ASKED; admitted by consumed-field identity; three reader/provenance defects fixed |
+| walk LOCK's external bit | ASKED; prediction REFUTED, boundary CONFIRMED, arithmetic owner left PLAUSIBLE |
+| Rule-12 register boundary/owner columns, V-count correction, struck label, footgun | ASKED; done |
+| OVERFLOW BBL liveness test target | ASKED; test corrected, model untouched |
+| change `vertical_momentum_scheme` / `adaptive_implicit_vertadv` on the demo card | FORBIDDEN this round; raised as open question 2 |
+| choose an ORCA2 branch strategy | FORBIDDEN this round; raised as open question 1 |
+| per-card HPG, external or BBL switch | UNASKED/FORBIDDEN; none added |
+| shipped NEMO edit, `makenemo`, `mpirun`, push, merge, deletion | forbidden; none performed |
+
+UNASKED list: empty.
+
+Two probe worktrees were created under `/tmp` and are FLAGGED, not deleted:
+`/tmp/codex-orca2-r26` (detached, ORCA2 branch, read-only) and
+`/tmp/codex-gyre-r25tip` (detached at `991f9f95047d`, the OVERFLOW control).
+
+Verdict stays **HOLD**.  Nothing is merged into the reconciled/integration
+line.  Independent adversarial review of round 26 is **OUTSTANDING**, as is
+round 25's.
