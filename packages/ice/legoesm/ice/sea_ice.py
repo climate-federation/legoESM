@@ -506,6 +506,7 @@ def _nemo_si3_ice_albedo(
     _preserve_subnormal_snow: bool = True,
     _source_round: bool = True,
     _exp_fn=None,
+    _log_fn=None,
 ) -> jnp.ndarray:
     """Active no-pond SI3 albedo, ``icealb.F90:124-185``.
 
@@ -514,6 +515,7 @@ def _nemo_si3_ice_albedo(
     """
     source_round = nemo_source_round if _source_round else lambda value: value
     exp_fn = transcendentals.exp if _exp_fn is None else _exp_fn
+    log_fn = transcendentals.log if _log_fn is None else _log_fn
     if _preserve_subnormal_snow:
         # XLA CPU flushes the smallest positive fp64 snow thickness to zero in
         # floating comparisons.  NEMO's scalar IEEE comparison does not.  A
@@ -532,10 +534,10 @@ def _nemo_si3_ice_albedo(
         bulk_config.albedo_ice_melt,
         bulk_config.albedo_ice_dry,
     )
-    pivot_log = source_round(jnp.log(bulk_config.albedo_ice_pivot))
+    pivot_log = source_round(log_fn(bulk_config.albedo_ice_pivot))
     inv_log_interval = source_round(
         1.0 / source_round(
-            pivot_log - jnp.log(constants.albedo_ice_thin_break_nemo)
+            pivot_log - log_fn(constants.albedo_ice_thin_break_nemo)
         )
     )
     bare_mid_increment = source_round(
@@ -543,7 +545,7 @@ def _nemo_si3_ice_albedo(
             source_round(constants.albedo_ice_thin_nemo - bare_thick)
             * inv_log_interval
         )
-        * source_round(pivot_log - jnp.log(h_ice))
+        * source_round(pivot_log - log_fn(h_ice))
     )
     bare_mid = source_round(bare_thick + bare_mid_increment)
     inv_thin_break = source_round(
@@ -638,6 +640,10 @@ def _nemo_si3_blk_ice_2(
     _preserve_subnormal_snow: bool = True,
     _source_round: bool = True,
     _exp_fn=None,
+    _albedo_log_fn=None,
+    _exner_pow_fn=None,
+    _saturation_log10_fn=None,
+    _saturation_pow_fn=None,
 ):
     """ORCA1-resolved ``ice_alb`` + ``blk_ice_2`` scalar identity.
 
@@ -652,15 +658,19 @@ def _nemo_si3_blk_ice_2(
         _preserve_subnormal_snow=_preserve_subnormal_snow,
         _source_round=_source_round,
         _exp_fn=_exp_fn,
+        _log_fn=_albedo_log_fn,
     )
     q_sat, dq_sat = nemo_si3_saturation_over_ice(
         T_surface, p_surface, _source_round=_source_round,
+        _log10_fn=_saturation_log10_fn,
+        _pow_fn=_saturation_pow_fn,
     )
     poisson = constants.poisson_dry_air_nemo
+    exner_pow_fn = transcendentals.pow if _exner_pow_fn is None else _exner_pow_fn
     theta_surface = source_round(
-        T_surface * source_round(
-            source_round(constants.p_ref / p_surface) ** poisson
-        )
+        T_surface * source_round(exner_pow_fn(
+            source_round(constants.p_ref / p_surface), poisson,
+        ))
     )
     inv_ocean_absorption = source_round(
         1.0 / source_round(1.0 - constants.albedo_ocean_nemo)

@@ -28,6 +28,8 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.transcendentals import log10 as policy_log10
+from legoesm.core.transcendentals import pow as policy_pow
 
 
 def saturation_vapor_pressure(T: jax.Array) -> jax.Array:
@@ -362,6 +364,8 @@ def nemo_si3_saturation_over_ice(
     p: jax.Array,
     *,
     _source_round: bool = True,
+    _log10_fn=None,
+    _pow_fn=None,
 ) -> tuple[jax.Array, jax.Array]:
     """NEMO 5.0.2 Goff-ice specific humidity and analytic ``dq/dT``.
 
@@ -373,6 +377,8 @@ def nemo_si3_saturation_over_ice(
     from legoesm.core.source_rounding import nemo_source_round
 
     source_round = nemo_source_round if _source_round else lambda value: value
+    log10_fn = policy_log10 if _log10_fn is None else _log10_fn
+    pow_fn = policy_pow if _pow_fn is None else _pow_fn
     # sbc_phy.F90:674-679.  Each named Fortran assignment is materialized and
     # the long zle expression retains its left-associated additions.
     zta = source_round(jnp.maximum(jnp.asarray(T), constants.T_goff_floor_nemo))
@@ -380,7 +386,7 @@ def nemo_si3_saturation_over_ice(
     term_a = source_round(
         constants.goff_ice_A_nemo * source_round(ztmp - 1.0)
     )
-    term_b = source_round(constants.goff_ice_B_nemo * jnp.log10(ztmp))
+    term_b = source_round(constants.goff_ice_B_nemo * log10_fn(ztmp))
     term_c = source_round(
         constants.goff_ice_C_nemo
         * source_round(1.0 - source_round(zta / constants.T_triple_nemo))
@@ -389,7 +395,7 @@ def nemo_si3_saturation_over_ice(
         source_round(source_round(term_a + term_b) + term_c)
         + constants.goff_ice_D_nemo
     )
-    e_sat = source_round(100.0 * source_round(10.0 ** zle))
+    e_sat = source_round(100.0 * source_round(pow_fn(10.0, zle)))
     # sbc_phy.F90:749,783-788 and 707-711.
     eps = constants.epsilon_air_nemo
     denom = source_round(

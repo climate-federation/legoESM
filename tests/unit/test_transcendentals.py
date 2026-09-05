@@ -156,13 +156,14 @@ def test_libm_log_log10_pow_have_pinned_system_bytes():
 
 def test_libm_pow_preserves_library_domain_results():
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
-    base = jnp.asarray([-2.0, 0.0], dtype=jnp.float64)
-    exponent = jnp.asarray([0.5, -1.0], dtype=jnp.float64)
+    base = jnp.asarray([-2.0, 0.0, 0.0], dtype=jnp.float64)
+    exponent = jnp.asarray([0.5, -1.0, 0.0], dtype=jnp.float64)
     observed = np.asarray(jax.jit(policy_pow)(base, exponent))
     expected = _libm_pow_reference(np.asarray(base), np.asarray(exponent))
     np.testing.assert_array_equal(observed.view(np.uint64), expected.view(np.uint64))
     assert np.isnan(observed[0])
     assert np.isposinf(observed[1])
+    assert observed.view(np.uint64)[2] == np.uint64(0x3FF0000000000000)
 
     _, tangent = jax.jvp(
         policy_pow, (base, exponent), (jnp.ones_like(base), jnp.ones_like(exponent))

@@ -242,6 +242,10 @@ def test_full_year_gate_and_all_plants() -> None:
         "folded_constant",
         "friction_association",
         "libm_return",
+        "libm_si3_albedo_log",
+        "libm_si3_exner",
+        "libm_si3_saturation_log10",
+        "libm_si3_saturation_pow",
     ):
         with pytest.raises(gate.GateError):
             gate.evaluate(plant=plant)

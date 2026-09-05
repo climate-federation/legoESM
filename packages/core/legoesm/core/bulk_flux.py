@@ -1551,6 +1551,9 @@ def nemo_si3_constant_fluxes(
     Ce: float,
     *,
     _source_round: bool = True,
+    _exner_pow_fn=None,
+    _saturation_log10_fn=None,
+    _saturation_pow_fn=None,
 ) -> tuple[jnp.ndarray, ...]:
     """Executing constant-coefficient SI3 air--ice bulk core.
 
@@ -1566,6 +1569,7 @@ def nemo_si3_constant_fluxes(
     from legoesm.thermo import nemo_si3_saturation_over_ice
 
     source_round = nemo_source_round if _source_round else lambda value: value
+    exner_pow_fn = policy_pow if _exner_pow_fn is None else _exner_pow_fn
     # sbcblk.F90:1090,1145-1147.  The two multiplications in zztmp are
     # one left-associated Fortran statement; putaui/pvtaui are separate.
     if _source_round:
@@ -1584,12 +1588,14 @@ def nemo_si3_constant_fluxes(
     # sbc_phy.F90:335 and sbcblk.F90:1254-1264.
     poisson = constants.poisson_dry_air_nemo
     theta_ice = source_round(
-        T_ice * source_round(
-            source_round(constants.p_ref / p_surface) ** poisson
-        )
+        T_ice * source_round(exner_pow_fn(
+            source_round(constants.p_ref / p_surface), poisson,
+        ))
     )
     q_sat, dq_sat_dT = nemo_si3_saturation_over_ice(
         T_ice, p_surface, _source_round=_source_round,
+        _log10_fn=_saturation_log10_fn,
+        _pow_fn=_saturation_pow_fn,
     )
     rho_wind = source_round(rho_air * wind)
     sensible_scale = source_round(

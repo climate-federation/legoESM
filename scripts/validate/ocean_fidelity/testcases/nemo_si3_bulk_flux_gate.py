@@ -620,6 +620,23 @@ def evaluate(
             1.0e-6, dtype=value.dtype,
         )
 
+    def poison_policy_log(value):
+        """Private planted violation in the SI3 albedo LOG provider."""
+        result = transcendentals.log(value)
+        # An additive constant cancels from this interpolation's log ratios;
+        # make the plant input-dependent so it binds the scored albedo row.
+        return result + jax.numpy.asarray(1.0e-6, dtype=result.dtype) * value
+
+    def poison_policy_log10(value):
+        """Private planted violation in the Goff-ice LOG10 provider."""
+        result = transcendentals.log10(value)
+        return result + jax.numpy.asarray(1.0e-6, dtype=result.dtype)
+
+    def poison_policy_pow(base, exponent):
+        """Private planted violation in one selected SI3 POW provider."""
+        result = transcendentals.pow(base, exponent)
+        return result + jax.numpy.asarray(1.0e-6, dtype=result.dtype)
+
     raw = nemo_si3_constant_fluxes(
         s0["u_air"], s0["v_air"], s0["theta_air"], s0["q_air"],
         s0["T_surface"], s0["p_surface"], s0["rho_air"],
@@ -648,6 +665,20 @@ def evaluate(
         ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
         bulk_config=bulk_config,
         _exp_fn=poison_policy_exp if plant == "libm_return" else None,
+        _albedo_log_fn=(
+            poison_policy_log if plant == "libm_si3_albedo_log" else None
+        ),
+        _exner_pow_fn=(
+            poison_policy_pow if plant == "libm_si3_exner" else None
+        ),
+        _saturation_log10_fn=(
+            poison_policy_log10
+            if plant == "libm_si3_saturation_log10" else None
+        ),
+        _saturation_pow_fn=(
+            poison_policy_pow
+            if plant == "libm_si3_saturation_pow" else None
+        ),
     )
     for name in STAGE1_NAMES[25:]:
         predictions[(1, name)] = flux2[name]
@@ -801,7 +832,13 @@ def evaluate(
         pass
     elif plant == "friction_association":
         pass
-    elif plant == "libm_return":
+    elif plant in {
+        "libm_return",
+        "libm_si3_albedo_log",
+        "libm_si3_exner",
+        "libm_si3_saturation_log10",
+        "libm_si3_saturation_pow",
+    }:
         pass
     elif plant is not None:
         raise GateError(f"unknown plant {plant}")
@@ -860,8 +897,7 @@ def evaluate(
             "rows": scalar_rows,
             "interpretation": (
                 "The independent scalar-glibc replay and the executing shared "
-                "library-exact policy are bit-identical for all three exp-owned "
-                "outputs."
+                "library-exact policy are bit-identical for all albedo outputs."
                 if bit_claim_valid
                 else "Bit-identity interpretation withheld under this runtime."
             ),
@@ -937,6 +973,10 @@ def main() -> int:
         "folded_constant",
         "friction_association",
         "libm_return",
+        "libm_si3_albedo_log",
+        "libm_si3_exner",
+        "libm_si3_saturation_log10",
+        "libm_si3_saturation_pow",
     ))
     args = parser.parse_args()
     result = evaluate(
