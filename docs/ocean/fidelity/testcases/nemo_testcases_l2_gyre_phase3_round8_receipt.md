@@ -1,4 +1,4 @@
-# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–21 boundary receipt
+# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–22 boundary receipt
 
 **Verdict: HOLD.**  Round 20 made GYRE's kt1 stage-transport composition
 bit-exact, but the required cross-card trajectories proved that legoESM does
@@ -2564,9 +2564,19 @@ Thus none of the ten contains a changed byte read by a scoring parser as a
 consumed operand.  The varying bytes are proven uninitialized/stale at this
 WRITE by the bounded producer statements, their variation across the two
 independent binaries, exact consumed projections, and the exact final restart.
+The diagnostic `zFw_nonfinite_count` is derived from those admitted changed
+bytes; it describes an uninitialized workspace sample and is not comparable
+between the Round-19 and Round-21 oracle binaries.
 The acquisition is **ADMITTED_WRITE_ONLY** under Rules 1 and 8.  `run.sh` now
 invokes the classifier; its original `EXP00` correction at `9019dc8e5ab` is
 preserved unchanged.
+
+For the size-changing `oracle_bt_ordered_operands` record specifically, the
+admission compared every one of the 43 common scalar/array operands and all
+barotropic weights in `BTORD_1` against their same-named `BTORD_2` fields;
+each owned consumed value was bit-identical.  The growth from 636,712 to
+726,824 bytes consists of eight newly appended EEN coefficient slots, not
+altered pre-existing operands.
 
 ### 21.5 production-JIT stage-W result
 
@@ -2665,5 +2675,79 @@ The source-rounding and reciprocal arms have that same latter hash, confirming
 zero additional move.  Final focused verification is `21 passed in 5.31 s`
 for the GYRE Phase-3 fidelity test module under CPU/x64.
 
-All Round-21 measurements and harness results are Codex-internal.  Independent
-Round-21 review remains outstanding; no dual-review claim is made.
+All Round-21 measurements and harness results were Codex-internal when first
+recorded.  The independent Round-21 review subsequently returned SHIP; Round
+22 records that verdict without relabelling the original internal passes.
+
+## Round 22 — ORCA2 shared-operator handoff
+
+Starting tip: `e2378f057ca814bbdc0b6a8c8ec0e768c78cbdb2`.  Independent Round-21 review verdict:
+**SHIP**.  It independently reproduced the consumed-field admission and WZV
+mechanism.  The ORCA2 lane has retracted its invalid mixed-clock claim under
+Rule 11 and is separately acquiring the EEN primitive operands requested in
+Section 21.7.  The unresolved prognostic `uu_b/vv_b` design remains an open
+user decision and is not implemented here.
+
+### 22.1 source-first FCT precursor preregistration
+
+A fresh detached probe worktree is pinned to ORCA2 handoff tip
+`ce0f353e25a282b80ce4d134d1f937af24d1ed5e`; the dirty Round-21 EEN probe is
+not read.  The ORCA2 production gate resolves `ln_traadv_fct=T`,
+`nn_fct_h=2`, `nn_fct_v=2`, `nn_fct_imp=1`, and `ln_zad_Aimp=F`, matching the
+GYRE card's collapsed FCT identity.  At RK3 stages 1 and 2,
+`traadv.F90:280-283,355-365` disables the limiter and dispatches the FCT card
+to the executed CEN2 precursor in `traadv_cen.F90:137-149,191-216`; the
+two-step limiter in `traadv_fct.F90:153-189` is stage 3 only.  This round
+therefore walks the actual CEN2 statements first rather than attributing a
+stage-1 row to the unexecuted limiter.
+
+The handed-off gate supplies NEMO's exact `zFu/zFv/zFw` and scores the stored
+stage-1 tracer accumulator: T is `180882 / 228641`, maximum
+`9.952637130238029e-21`; S is `190802 / 228641`, maximum
+`1.4558378780933287e-20`.  The ORCA2 review found approximately 79% mismatch
+at every level, including `6778 / 8613` bottom partial cells and
+`174104 / 220028` non-bottom cells, with the worst row fractions in interior
+latitudes 38–49.  This uniform localization refutes fold/coast/bottom-only
+ownership and makes source association on non-uniform metrics the ranked
+candidate.
+
+The one-variable arm will replace only the shared CEN2 accumulator with the
+written NEMO sequence: direct T-neighbour sums; left-associated
+`(0.5*pU)*sum`; separate U and V face differences; their parenthesized sum;
+multiplication by the precomputed `r1_e1e2t`; division by live `e3t(Kmm)`;
+then the written vertical-flux recurrence and subtraction.  Each Fortran
+assignment is guarded by `nemo_source_round`.  The arm holds the oracle
+transports, tracer input, masks, metrics and stage-update formula fixed.
+
+**CONFIRM:** ORCA2 reaches T/S `0 / 228641` against the supplied-input record;
+the one-ULP tracer plant still exits nonzero.  **REFUTE:** either row remains
+non-bit-exact, in which case the first differing statement/operand is named
+and no shared change lands.  Only after confirmation may the shared identity
+change be copied to this branch and subjected to GYRE kt=1–10 plus
+LOCK/OVERFLOW cellwise Rule-12 gates.  Movement is tabulated before any owner
+label.
+
+### 22.2 subsequent ordered boundary
+
+Only after the tracer precursor closes, walk
+`GYRE_OWNER_SHARED_STAGE_TRANSPORT_SOURCE_ASSOCIATION`: NEMO's
+`stprk3_stg.F90:259-275` `zub/zvb` and metric/e3/corrected-velocity products
+against `_nemo_ws_stage_transport`.  The ORCA2 production handoff is up to
+four ULP.  Its discriminator and Rule-12 gates are separate from the tracer
+change.  Stage-3 FCT, BBL, ZDF and TKE remain outside this round until both
+earlier boundaries clear.
+
+### Round-22 ASKED / UNASKED register
+
+| choice or action | origin | disposition at preregistration |
+|---|---|---|
+| fold two Round-21 admission clarifications | ASKED review minors | complete in Sections 21.4 and 21.7 |
+| fresh ORCA2 probe at `ce0f353e25a2` | ASKED | created; old dirty probe ignored |
+| source-literal stage-1 CEN2 precursor | ASKED item i | first ordered measurement |
+| shared stage-transport association | ASKED item ii | conditional second measurement |
+| ORCA2 per-level/bottom/row localization | ASKED if gate owned | recorded here as handoff; gate file remains ORCA2-owned unless the shared fix lands there |
+| prognostic `uu_b/vv_b` state | open USER DECISION | not implemented |
+| EEN primitive acquisition | ORCA2 lane in progress | not duplicated |
+| shipped NEMO edit, NEMO run, card fork, push, merge | forbidden | none |
+
+Round-22 measurements remain Codex-internal until independent review.

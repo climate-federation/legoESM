@@ -1,0 +1,21 @@
+{
+    "format": "nemo-testcase-l2-gyre-round22-manifest-v1",
+    "session_id": "01a05cb9-7625-7f40-9e83-b3fa767b1945",
+    "date": "2026-09-06",
+    "branch": "fidelity/nemo-testcases-l2-gyre-codex2",
+    "starting_git_sha": "e2378f057ca814bbdc0b6a8c8ec0e768c78cbdb2",
+    "orca2_probe_sha": "ce0f353e25a282b80ce4d134d1f937af24d1ed5e",
+    "regime": "production-jit/cpu/fp64/oracle-v2/scalar-libm",
+    "status": "PREREGISTERED_FCT_PRECURSOR",
+    "fct_precursor": {
+        "oracle_source": "traadv.F90:280-283,355-365 -> traadv_cen.F90:137-149,191-216",
+        "resolved": "ln_traadv_fct=T nn_fct_h=2 nn_fct_v=2 nn_fct_imp=1 ln_zad_Aimp=F",
+        "baseline_T": "180882 / 228641 max_abs=9.952637130238029e-21",
+        "baseline_S": "190802 / 228641 max_abs=1.4558378780933287e-20",
+        "prediction": "source-literal CEN2 accumulator gives T/S 0 / 228641 with oracle zFu/zFv/zFw",
+        "falsifier": "either T or S remains non-bit-exact",
+        "plant": "one ULP in one scored T cell must exit nonzero"
+    },
+    "ordered_next": "shared stage transport source association, only after FCT precursor clears",
+    "independent_review": "OUTSTANDING"
+}
