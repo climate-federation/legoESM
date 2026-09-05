@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from legoesm import constants
 import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as model_module
+import legoesm.ocean.dynamics.ocean_pe_latlon_cgrid as pe_module
 import legoesm.ocean.vertical as vertical_module
 import legoesm.ocean.eos as eos_module
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
@@ -256,12 +257,12 @@ def test_nemo_ws_eos_hpg_transport_are_bitwise_equal_eager_and_jit(monkeypatch):
         for a, b in zip(compiled[:13], reassociated[:13], strict=True)
     )
 
-    # Planted mutation: removing the literal-path barriers changes live r3u/r3v
-    # bits.  Consequently this test fails at the equality assertion if those
-    # barriers disappear instead of merely exercising a numerically inert arm.
+    # Planted mutation: removing the shared source-round materialization
+    # changes live r3u/r3v bits.  The old optimization_barrier-only plant is
+    # obsolete because XLA strips those barriers from optimized HLO.
     jax.clear_caches()
     with monkeypatch.context() as patch:
-        patch.setattr(vertical_module.lax, "optimization_barrier", lambda x: x)
+        patch.setattr(vertical_module, "nemo_source_round", lambda x: x)
         unbarriered = tuple(
             np.asarray(value) for value in jax.jit(operand_chain)())
     assert any(
@@ -333,6 +334,34 @@ def test_nemo_hpg_literal_component_exposure_is_the_production_sum():
         np.asarray(value) for value in values)
     np.testing.assert_array_equal(sum_u, zhpi_u + zuap_u)
     np.testing.assert_array_equal(sum_v, zhpj_v + zvap_v)
+
+
+def test_nemo_hpg_consumer_keeps_direct_acceleration_bits():
+    """dynhpg writes acceleration; a rho multiply/divide round trip is forbidden."""
+    direct = jnp.asarray([3.812364514570218e-06], dtype=jnp.float64)
+    pressure = -jnp.float64(1026.0) * direct
+    reconstructed = -pressure / jnp.float64(1026.0)
+    assert not np.array_equal(
+        np.asarray(reconstructed).view(np.uint64),
+        np.asarray(direct).view(np.uint64),
+    )
+    got = jax.jit(
+        pe_module._nemo_hpg_tendency_from_pressure_or_direct,
+    )(pressure, jnp.float64(1026.0), direct)
+    np.testing.assert_array_equal(
+        np.asarray(got).view(np.uint64), np.asarray(direct).view(np.uint64))
+
+
+def test_nemo_qco_gdept_z0_oracle_bit_pattern():
+    """Pin a live GYRE stage-2 cell where XLA fused multiply-subtract."""
+    t_depth = jnp.asarray([60.731977023408945], dtype=jnp.float64)
+    stretch = jnp.asarray([[0.9999998965725583]], dtype=jnp.float64)
+    eta = jnp.asarray([[-0.0004448114346508057]], dtype=jnp.float64)
+    got = jax.jit(pe_module._nemo_qco_gdept_z0)(t_depth, stretch, eta)
+    assert np.asarray(got).view(np.uint64).item() == 0x404E5DBFCAF8A971
+    fused = jax.jit(lambda z, r, ssh: z * r - ssh[..., None])(
+        t_depth, stretch, eta)
+    assert np.asarray(fused).view(np.uint64).item() == 0x404E5DBFCAF8A972
 
 
 def test_nemo_hpg_source_rounding_arm_is_non_vacuous():

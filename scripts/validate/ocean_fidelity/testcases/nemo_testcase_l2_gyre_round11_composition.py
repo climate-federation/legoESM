@@ -15,6 +15,8 @@ from nemo_testcase_l2_gyre_phase3_gate import (
     _surface_forcings,
     expected_masks,
     lego_fields,
+    read_stage,
+    read_stage2_terms,
     require,
     score,
     sha256,
@@ -127,6 +129,7 @@ def _redundant_faces(u: np.ndarray, v: np.ndarray) -> tuple[np.ndarray, np.ndarr
 
 def run(mode: str, oracle_root: Path, plant: bool = False) -> dict:
     import jax
+    import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
@@ -190,6 +193,47 @@ def run(mode: str, oracle_root: Path, plant: bool = False) -> dict:
             expose_stage2_raw_momentum=True,
         )
         reference_names = ("raw_Kaa_u", "raw_Kaa_v")
+    elif mode.startswith("oracle_input_"):
+        operator = mode.removeprefix("oracle_input_")
+        if operator not in ("hpg", "vorticity", "advection"):
+            raise ValueError(f"unknown source operator {operator!r}")
+        stage1 = read_stage(
+            oracle_root / "oracle_stage_kt00000001_s1.bin", 1)
+        stage2_terms = read_stage2_terms(
+            oracle_root / "oracle_rkstage2_terms_kt00000001.bin")
+        if operator == "hpg":
+            from nemo_testcase_l2_gyre_round11_hpg import read_hpg_literal
+            literal = read_hpg_literal(
+                oracle_root / "oracle_rkstage2_hpg_literal_kt00000001.bin")
+        oracle = {
+            **oracle,
+            f"{operator}_u": (
+                literal["sum_u"] if operator == "hpg" else
+                stage2_terms["after_vorticity_u"]
+                if operator == "vorticity" else
+                stage2_terms["after_advection_u"]),
+            f"{operator}_v": (
+                literal["sum_v"] if operator == "hpg" else
+                stage2_terms["after_vorticity_v"]
+                if operator == "vorticity" else
+                stage2_terms["after_advection_v"]),
+        }
+        cumulative_base = (
+            None if operator == "hpg" else
+            (stage2_terms["after_hpg_u"], stage2_terms["after_hpg_v"])
+            if operator == "vorticity" else
+            (stage2_terms["after_vorticity_u"],
+             stage2_terms["after_vorticity_v"])
+        )
+        hook_args.update(
+            stage2_thermodynamic_override=(
+                jnp.asarray(stage1["T"][..., :-1]),
+                jnp.asarray(stage1["S"][..., :-1]),
+                jnp.asarray(stage1["ssh"]),
+            ),
+            expose_momentum_operator=operator,
+        )
+        reference_names = (f"{operator}_u", f"{operator}_v")
     elif mode == "legacy_mean":
         hook_args.update(
             legacy_live_stage_mean_weights=True,
@@ -213,6 +257,13 @@ def run(mode: str, oracle_root: Path, plant: bool = False) -> dict:
     rows = []
     for component, reference_name in zip(("u", "v"), reference_names):
         candidate = fields[component]
+        if mode in ("oracle_input_vorticity", "oracle_input_advection"):
+            # Score the accumulated Krhs boundary, not a subtraction-recovered
+            # tendency contaminated by cancellation.  The preceding NEMO
+            # boundary is exact for this ordered walk; one host float64 add is
+            # the literal Fortran ``puu(Krhs) = puu(Krhs) + term`` statement.
+            candidate = cumulative_base[0 if component == "u" else 1][
+                ..., :candidate.shape[-1]] + candidate
         if plant and component == "u":
             candidate = candidate.copy()
             candidate[tuple(np.argwhere(masks[component])[0])] += 1.0
@@ -257,6 +308,8 @@ def main(argv=None) -> int:
         "rhs", "raw", "corrected", "oracle_rhs_raw",
         "oracle_rhs_corrected", "legacy_update", "legacy_mean",
         "nemo_order_accumulation_arm",
+        "oracle_input_hpg", "oracle_input_vorticity",
+        "oracle_input_advection",
     ))
     parser.add_argument("--oracle-root", type=Path, default=ORACLE_ROOT)
     parser.add_argument("--output", type=Path, required=True)

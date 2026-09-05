@@ -1696,6 +1696,12 @@ def nemo_qco_wzv_operands(
 _nemo_qco_zad_operands = nemo_qco_wzv_operands
 
 
+def _nemo_qco_gdept_z0(t_depth, stretch, eta):
+    """NEMO ``gdept_z0 = gdept_0*(1+r3t) - ssh`` source association."""
+    return nemo_source_round(
+        nemo_source_round(t_depth * stretch) - eta[..., jnp.newaxis])
+
+
 def _bc_ke_and_pressure_gradients(
     u, v, p_prime_filled, rho_prime, grid, config, z_coord,
     eta_safe, H_bathy, g_val, mask, legacy_hpg_algebraic=False,
@@ -1705,7 +1711,11 @@ def _bc_ke_and_pressure_gradients(
     Adcroft-Campin / SMC03 partial-cell PGF face correction.
 
     Pure verbatim extraction (Q8). Returns ``(dKE_dx, dp_dx, dKE_dy,
-    dp_dy)``."""
+    dp_dy, direct_hpg_u, direct_hpg_v)``.  The final pair is non-``None``
+    only for ``nemo_sco``: that operator natively produces acceleration and
+    must not be converted to pressure and divided back before Krhs insertion.
+    """
+    direct_hpg_u = direct_hpg_v = None
     # --- 6. Kinetic energy gradient (from TOTAL velocity, #160) ---
     # MOM6-style: KE from total u, not perturbation u'. The depth-mean
     # contribution enters F_slow for the barotropic solver; the
@@ -1986,8 +1996,13 @@ def _bc_ke_and_pressure_gradients(
                 H_bathy,
                 evaluation="nemo_reciprocal",
             )[..., jnp.newaxis]
-            gdept_z0 = (t_depth[jnp.newaxis, jnp.newaxis, :] * stretch
-                        - eta_safe[..., jnp.newaxis])
+            # domzgr_substitute.h90:145 (key_qco): the gdept_z0 operand read
+            # by dynhpg is formed as two source statements' operations,
+            # ``gdept_0 * (1+r3t) - ssh``.  Materialise the multiply before
+            # the subtraction; XLA otherwise reassociates 4,579 stage-2
+            # cells even though the supplied ssh and reference ladder match.
+            gdept_z0 = _nemo_qco_gdept_z0(
+                t_depth[jnp.newaxis, jnp.newaxis, :], stretch, eta_safe)
             # NEMO's rhd is masked below the seafloor (eosbn2 tmask); wet
             # faces never read those cells, dry faces are masked downstream.
             rho_m = jnp.where(z_coord.is_active, rho_prime,
@@ -2020,8 +2035,14 @@ def _bc_ke_and_pressure_gradients(
                 e3w_live = jnp.asarray(e3w0) * stretch
                 hpg_u, hpg_v = nemo_hpg_sco_literal_cgrid(
                     rhd, e3w_live, gdept_z0, grid, g_val)
-                dp_dx_sco = -config.rho_0 * hpg_u
-                dp_dy_sco = -config.rho_0 * hpg_v
+                direct_hpg_u, direct_hpg_v = hpg_u, hpg_v
+                # This arm has no pressure-gradient intermediate in NEMO:
+                # dynhpg writes acceleration straight into Krhs.  A synthetic
+                # ``-rho0*hpg`` value left in the graph lets XLA rediscover
+                # the algebraic pressure interface and lose the source bit at
+                # the consumer even when Python selects ``direct_hpg``.
+                dp_dx_sco = jnp.zeros_like(hpg_u)
+                dp_dy_sco = jnp.zeros_like(hpg_v)
             dp_dx = dp_dx_sco.astype(dp_dx.dtype)
             dp_dy = dp_dy_sco.astype(dp_dy.dtype)
         else:
@@ -2096,7 +2117,23 @@ def _bc_ke_and_pressure_gradients(
                 bottom_slope_2nd_order=True,
             ).astype(dp_dy.dtype)
 
-    return dKE_dx, dp_dx, dKE_dy, dp_dy
+    return dKE_dx, dp_dx, dKE_dy, dp_dy, direct_hpg_u, direct_hpg_v
+
+
+def _nemo_hpg_tendency_from_pressure_or_direct(
+    pressure_gradient, rho_0, direct_hpg,
+):
+    """Keep hpg_sco's source-native acceleration at the Krhs boundary.
+
+    ``dynhpg.F90:340-390`` accumulates ``zhpi + zuap`` directly into the
+    momentum RHS.  Multiplying that acceleration by ``-rho0`` merely to fit a
+    pressure-gradient interface, then dividing by ``rho0`` at the caller, is
+    algebraically neutral but not bitwise.  Other PGF schemes retain their
+    historical pressure-gradient route.
+    """
+    if direct_hpg is not None:
+        return direct_hpg
+    return -pressure_gradient / rho_0
 
 
 def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord):
@@ -4717,7 +4754,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # stage (None otherwise -> never dereferenced). The PV-flux stage computes
     # its own copy internally.
     _weno_order = {"weno5": 5, "weno7": 7, "weno9": 9}.get(_mom_adv)
-    dKE_dx, dp_dx, dKE_dy, dp_dy = _bc_ke_and_pressure_gradients(
+    (dKE_dx, dp_dx, dKE_dy, dp_dy,
+     direct_hpg_u, direct_hpg_v) = _bc_ke_and_pressure_gradients(
         u, v, p_prime_filled, rho_prime, grid, config, z_coord,
         eta_safe, H_bathy, g_val, mask,
         legacy_hpg_algebraic=legacy_hpg_algebraic,
@@ -4735,8 +4773,12 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # --- 7. Momentum tendencies (non-Coriolis only) ---
     # Capture each term as a named local so the same expression feeds
     # both the integration and the optional diagnostics path.
-    KE_PGF_u = -dKE_dx - dp_dx / rho_0
-    KE_PGF_v = -dKE_dy - dp_dy / rho_0
+    hpg_tendency_u = _nemo_hpg_tendency_from_pressure_or_direct(
+        dp_dx, rho_0, direct_hpg_u)
+    hpg_tendency_v = _nemo_hpg_tendency_from_pressure_or_direct(
+        dp_dy, rho_0, direct_hpg_v)
+    KE_PGF_u = -dKE_dx + hpg_tendency_u
+    KE_PGF_v = -dKE_dy + hpg_tendency_v
     _nemo_vector_order = (
         nemo_operator_association and _mom_adv != "flux_form")
     if _nemo_vector_order:
@@ -4744,8 +4786,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         # dyn_adv calls dyn_keg before dyn_zad.  Keep those routine boundaries
         # visible to XLA so the shared Krhs accumulator has NEMO's association.
         # Diagnostics retain their historical combined KE_PGF bucket below.
-        du_dt = jax.lax.optimization_barrier(-dp_dx / rho_0)
-        dv_dt = jax.lax.optimization_barrier(-dp_dy / rho_0)
+        du_dt = jax.lax.optimization_barrier(hpg_tendency_u)
+        dv_dt = jax.lax.optimization_barrier(hpg_tendency_v)
     else:
         du_dt = KE_PGF_u
         dv_dt = KE_PGF_v
@@ -5378,8 +5420,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         # dyn_hpg -> dyn_vor -> dyn_adv (stprk3_stg.F90:321-334).  These are
         # the already-computed production arrays, not re-evaluated numerics.
         return tendencies, diagnostics, {
-            "hpg_u": _mu(-dp_dx / rho_0),
-            "hpg_v": _mv(-dp_dy / rho_0),
+            "hpg_u": _mu(hpg_tendency_u),
+            "hpg_v": _mv(hpg_tendency_v),
             "vorticity_u": _mu(diag_vortcor_u),
             "vorticity_v": _mv(diag_vortcor_v),
             # In vector-invariant form NEMO dyn_adv owns KEG + ZAD.
