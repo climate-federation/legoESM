@@ -2961,3 +2961,58 @@ receipt forms.
 
 Round-22 measurements and labels are Codex-internal.  Independent review of
 this round remains **OUTSTANDING**.
+
+## Round 23 — CEN2 `wmask` closure and OVERFLOW Rule-12 walk
+
+### 23.1 preregistration (before measurement or implementation)
+
+Starting point: `b2702b318f7e`.  The production regime remains CPU,
+production JIT, fp64, scalar-libm, and GYRE oracle V2.  The open
+`uu_b/vv_b` carried-state design is a user decision and is not implemented in
+this round.  No state was read from the flagged ORCA2 probe worktrees; the
+discriminating ORCA2 probe starts clean at `b6a6189c9357`.
+
+The pre-implementation search found the single shared stage-1/2 CEN2 owner
+`_nemo_cen2_tracer_rhs` and the existing ORCA2 supplied-transport gate; no
+second advection implementation or scorer is introduced.  NEMO forms the
+interior vertical flux as
+`0.5*pW(k+1)*(pt(k+1)+pt(k))*wmask(k+1)` in
+`traadv_cen.F90:201-210`, while `dommsk.F90:176,180` defines the surface and
+interior W masks, with interior
+`wmask(k)=tmask(k)*tmask(k-1)`.  The shared helper presently omits that final
+factor.
+
+Preregistered `wmask` outcomes:
+
+- **CONFIRM_INERT_ON_OWNED_CELLS** if every ORCA2 and GYRE scored vertical
+  face with `wmask=0` already has an exactly zero supplied `pW`, the literal
+  factor moves zero owned/scored cells, and the ORCA2 supplied-input result
+  remains T/S `0 / 228641`.
+- **CONFIRM_LATENT_OMISSION** if any `wmask=0` face has nonzero `pW` or the
+  literal factor moves a scored cell.  The factor then lands in the one shared
+  CEN2 owner and must retain ORCA2 T/S `0 / 228641`; otherwise the first
+  departing flux statement is reported and work stops rather than tuning.
+- The direct behavioural plant removes or flips one W-mask cell and must fail.
+
+The GYRE sweep comparison is preregistered cellwise against a clean
+round-21b (`e2378f057ca8`) production run using the same diagnostic gate code.
+The expected first movement is no earlier than the stage-1 CEN2 result feeding
+kt2 T/S; kt1 initial/at-rest rows must remain `0 / n`, and first-over-bar must
+remain kt2 T/S/u/v.  Every moved row, including improvements, will be listed
+under Rules 8 and 12 with row-scale ulp provenance.  Any kt1 movement or an
+earlier first-over-bar refutes that expectation.
+
+The seven OVERFLOW trajectory violations are preregistered as a boundary
+localization, not an owner claim.  Ranked candidates are: (a) partial-cell
+bottom/adjacent-face use of the newly source-literal stored QCO reciprocal;
+(b) its rounded live face-thickness recurrence; (c) a later trajectory
+composition boundary, including the already open missing prognostic
+`uu_b/vv_b` state.  Candidate (a) is confirmed only if the failing and
+maximum-worsening cells cluster at zps bottom levels/columns and the first
+departure given NEMO inputs is the reciprocal statement.  A uniform
+interior-level distribution refutes it.  If the first departure is
+OVERFLOW-specific geometry, it is registered and the walk stops as directed;
+if it is the pending carried-state design, it remains HOLD and is not built.
+
+No lane-3b dry-face producer has been handed over at preregistration time; the
+NaN remains registered and no mask workaround is authorized.

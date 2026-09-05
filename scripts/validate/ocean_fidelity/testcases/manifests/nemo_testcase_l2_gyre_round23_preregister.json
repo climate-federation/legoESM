@@ -1,0 +1,38 @@
+{
+  "format": "nemo-testcase-l2-gyre-round23-preregister-v1",
+  "date": "2026-09-05",
+  "branch": "fidelity/nemo-testcases-l2-gyre-codex2",
+  "starting_git_sha": "b2702b318f7e734baf41487372787aed495bc723",
+  "orca2_probe_sha": "b6a6189c93577a54c7175eaca7018daa53ba9299",
+  "regime": "production-jit/cpu/fp64/oracle-v2/scalar-libm",
+  "measurements": [
+    {
+      "boundary": "shared_stage12_cen2_vertical_wmask",
+      "source": "traadv_cen.F90:201-210; dommsk.F90:176,180",
+      "confirm_inert": "all wmask=0 supplied pW faces are bit-zero; literal factor moves 0 owned cells; ORCA2 T/S remains 0/228641",
+      "confirm_omission": "any wmask=0 supplied pW face is nonzero or any scored output moves",
+      "control": "remove or flip one live W-mask factor; gate/test exits nonzero"
+    },
+    {
+      "boundary": "gyre_kt1_10_cellwise_round21b_to_round22_tip",
+      "baseline_git_sha": "e2378f057ca814bbdc0b6a8c8ec0e768c78cbdb2",
+      "expected": "kt1 stays 0/n; first movement no earlier than kt2 tracer propagation; first_over_bar remains kt2 T,S,u,v",
+      "refute": "any kt1 movement or earlier first_over_bar"
+    },
+    {
+      "boundary": "overflow_seven_rule12_trajectory_cells",
+      "ranked_candidates": [
+        "zps bottom/adjacent-face stored QCO reciprocal",
+        "rounded live face-thickness recurrence",
+        "later composition including open prognostic uu_b/vv_b state"
+      ],
+      "confirm_first": "violations cluster at partial-cell bottoms and first NEMO-input departure is reciprocal statement",
+      "refute_first": "uniform interior-level distribution or earlier different statement"
+    }
+  ],
+  "holds": [
+    "prognostic uu_b/vv_b carried state: open user decision, do not implement",
+    "lane-3b OVERFLOW dry-face NaN: no producer handoff yet, no mask workaround"
+  ],
+  "independent_review": "OUTSTANDING"
+}
