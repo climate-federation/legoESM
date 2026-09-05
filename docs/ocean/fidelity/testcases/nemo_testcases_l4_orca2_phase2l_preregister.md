@@ -44,6 +44,12 @@ TEOS-10 `bn2` only in the upstream tendency whose external result is then
 replaced.  No proxy result may enter `_g0`; the receipt must keep the EOS-80
 TKE/EVD entry `UNMEASURED` and name its owner.
 
+The same rule applies if the unimplemented ORCA2 tripolar `nemo_avg4` EEN
+momentum fold stops the upstream tendency: a constructible EEN thickness proxy
+may be used only before the substituted external endpoint.  The public card
+selection remains `nemo_avg4`; the fold stays `UNMEASURED` and no proxy value
+may enter `_g0`.
+
 The discriminator is frozen:
 
 - **AT_BAR, 0 / n:** retract `GYRE_OWNER_SHARED_WZV_STAGE_CLOCK` under Rule

@@ -171,6 +171,10 @@ def validate(deck_root: Path, oracle_root: Path, *, plant: bool) -> dict[str, ob
         enhanced_diffusion=cfg.physics.convection.enhanced_diffusion._replace(
             n2_eos_form="teos10"))
     diagnostic_cfg = cfg._replace(
+        # The production EEN momentum tendency has not yet acquired the
+        # ORCA2 tripolar avg4 fold.  It is upstream of the substituted
+        # external endpoint and cannot reach the exposed _g0 value.
+        een_e3f_scheme="min",
         physics=cfg.physics._replace(
             vertical_mixing=vmix._replace(tke=tke),
             convection=convection))
@@ -250,7 +254,8 @@ def validate(deck_root: Path, oracle_root: Path, *, plant: bool) -> dict[str, ob
             "certifies_external_mode": False,
             "ignored_upstream_constructibility_proxy": (
                 "TEOS-10 bn2 replaces unsupported EOS-80 bn2 only before the "
-                "oracle external endpoint; no proxy value reaches _g0"
+                "oracle external endpoint; EEN avg4 likewise uses the "
+                "constructible min fold upstream; no proxy value reaches _g0"
             ),
         },
         "comparison_domain": {
