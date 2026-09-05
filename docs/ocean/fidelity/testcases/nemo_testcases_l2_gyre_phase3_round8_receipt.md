@@ -2100,3 +2100,192 @@ plants each exit `1`.
 Round-17 independent review returned SHIP.  All Round-19 measurements are
 Codex-internal; Round-18 and Round-19 independent review remain outstanding,
 and no dual-review claim is made.
+
+## Round 20 — merged baseline, gate repair, stress handoff, and stage transport
+
+Round 20 started from reviewed merge `03c6e8d96ff7f69207abdee43ec28e223d083f4e`
+(Round-19 parent `c83f73c23ff8`, integration/census parent `b46e617d02a5`).
+The local Git directory was fetched and its branch ref was advanced to that
+merge before any edit; the mixed worktree status was empty.  Every number
+below is CPU, production JIT, binary64, Oracle V2, and explicit
+`PrecisionPolicy.fp64(transcendentals="libm")` unless a baseline is named.
+
+The merged-tree starting facts remain exactly as supplied: GYRE's register is
+bit-identical to Round 19; LOCK stage and trajectory gates PASS at zero ulp;
+OVERFLOW stage has zero violations.  OVERFLOW trajectory must be quoted
+against both baselines: versus Round 19 it FAILS in four rows at at most 5.5
+ulp with zero status changes, while versus the integration census table 49 / 50
+rows are identical and kt2 SSH improves from DEBT to AT-BAR.
+
+### 20.0 — production-JIT 19-frame gate repair
+
+The failure belonged to the gate, not the model.  The Round-10 route fix forces
+`LatLonCGridOceanModel.step` through `_step_jitted`, while the census gate had
+two outer `jax.disable_jit` contexts solely so its Python closure could call
+`np.asarray` on `_nemo_substep_trace_test_hook` operands.  The gate now uses the
+existing WRITE-only returned-pytree trace seam and materialises operands only
+after the production step returns.  Both eager wrappers are gone.
+
+The repaired tests are **13 passed in 287.60 s**.  The planted pre-entry
+control exits 1.  The 19-frame artifact retains the integration census verdict
+`DEBT`; no physics row or owner label moved.  Its SHA-256 is
+`ac2728dc4b9e1b4cec322dbf4cb3ef743417c68f0f3c56a30b9e9d95e360369f`.
+The first stored `pgf_v` row remains inventory-only because OVERFLOW's
+one-wet-row tank has no active V face; it is not presented as an alignment
+claim.
+
+### 20.1 — scalar-libm provenance convergence
+
+All nine NEMO-identity census-probe commands now set scalar-libm explicitly.
+Against a clean detached `03c6e8d96ff7` native-math worktree (retained and
+flagged, not deleted), the BBL, Aimp, and ZDF scaling payloads are identical,
+and all 15 `run-arm` arrays are bit-identical.  Both native and scalar-libm
+state NPZs hash to
+`1b4a98f2af4ae81815bbaf47775aa82408fad7d2efbb1b0a8f6b12c390cd0ac7`.
+This confirms the preregistered zero move for OVERFLOW, whose executed probe
+path has no per-step transcendental.  The full term-budget command was stopped
+at the 12-minute CPU budget before emitting a row and is **UNMEASURED**, not
+silently inferred from the other probes.
+
+### 20.2 — coastal U/V wind-stress handoff
+
+The shared handoff now transcribes `sbcmod.F90:539-546`, in particular the
+source statements at `:543-544`: the midpoint stress is multiplied by
+`(2-umask)` / `(2-vmask)` and by the maximum of the two adjacent T masks.
+Every written product uses the shared `nemo_source_round`; no public selector
+was added.  S-51 in the branch-isomorphism map records the one implementation.
+
+With GYRE's V2 operands the faithful face stresses are bit-exact: 0 / 704 U
+and 0 / 704 V cells differ.  The legacy ablation differs on 124 U and 102 V
+dry coastal cells (maximum `8.87866658e-2`), but on the dynamically active
+faces both variants are unchanged: 0 / 580 U and 0 / 570 V.  The apparently
+live coastal-owner prediction is therefore **REFUTED FOR GYRE DYNAMICS**;
+the faithful source identity still lands.  The one-ulp synthetic U-face plant
+exits 1.  Focused verification is 41 passed.
+
+The required cellwise cross-card gates completed after this shared change:
+
+```text
+ORACLE_RELATIVE_COMPARE PASS: rows=9 max_worsening_ulps=0 first_over_bar='<absent>'->'<absent>' plant=None
+ORACLE_RELATIVE_COMPARE PASS: rows=50 max_worsening_ulps=0 first_over_bar={'fields': ['T', 'u'], 'kt': 2}->{'fields': ['T', 'u'], 'kt': 2} plant=None
+ORACLE_RELATIVE_COMPARE PASS: rows=9 max_worsening_ulps=0 first_over_bar='<absent>'->'<absent>' plant=None
+ORACLE_RELATIVE_COMPARE PASS: rows=50 max_worsening_ulps=0 first_over_bar={'fields': ['u'], 'kt': 4}->{'fields': ['u'], 'kt': 4} plant=None
+```
+
+The order is OVERFLOW stage, OVERFLOW trajectory, LOCK stage, LOCK trajectory.
+Rule 8 and Rule 12 have zero moved rows for this change.
+
+### 20.3 — stage-1 tracer transport and stored barotropic mean
+
+The V2 ordered tracer record first proves the child boundary: after the stage-1
+QCO update T is 0 / 17,600 and S is 0 / 17,600 differing wet cells.  The raw
+V2 record contains two non-finite `zFw` values only in discarded NEMO halos;
+all transformed scored interiors are finite.  The earlier V1 comparison that
+showed one T/S cell is retained but flagged non-authoritative for this
+scalar-math round.
+
+The first primitive transport departure was source association at
+`stprk3_stg.F90:257-280`.  NEMO forms
+`zub=un_adv*r1_hu-uu_b(Kmm)` / its V analogue and then
+`zFu=(e2u*e3u(Kmm))*(uu(Kmm)+zub*umask)` (`:265-278`).  Before the fix,
+metric, masks, Kmm velocity, Kmm face thickness, and `un_adv/vn_adv` were
+bit-exact, but the corrected velocity differed in 4,650 U and 5,250 V cells
+(at most 1 ulp), and zF differed in 4,190 U and 4,705 V cells (at most 2 ulp).
+The production code was incorrectly re-reducing the 3-D Kmm velocity instead
+of consuming NEMO's separately stored `uu_b/vv_b(Kmm)`.
+
+The shared S-21 identity now carries that stored mean through all three RK3
+stage transports.  The old 3-D reduction is a private one-variable legacy
+ablation.  With the fix, corrected U/V and zFu/zFv are 0 / 17,400 and
+0 / 17,100 differing wet cells respectively; the legacy arm reproduces the
+old departures and makes one T and one S prognostic cell differ by one ulp.
+The owner is **CONFIRMED_STORED_BAROTROPIC_MEAN_ASSOCIATION**.  A fixed
+oracle-bit JIT consumer pin was added; three focused tests pass, all 35
+isomorphism tripwires pass, and the planted zFu cell exits 1.
+
+The child stage-2 composition does **not** clear.  Its source and scale table is:
+
+| boundary | U | V | disposition |
+|---|---:|---:|---|
+| stage-2 HPG primitive inputs (`rhd`,`e3w`,`gdept_z0`) | `0 / 21,120` each | `0 / 21,120` each | BIT-EXACT |
+| direct source-literal HPG recurrence on NEMO inputs | `0 / 17,400` | `0 / 17,100` | BIT-EXACT |
+| accumulated Krhs | `2.8731622268661884e-19` | `2.8731291396416863e-19` | AT-BAR, not exact |
+| raw Kaa | `2.0686848501566546e-15` | `2.0686441925751864e-15` | DEBT |
+| post-mean Kaa | `2.1986806906376666e-15` | `2.2380914396075147e-15` | DEBT |
+
+Multiplication by the stage-2 `rDt=7200 s` accounts for the raw-Kaa scale.
+The previously printed HPG term residual was reconstructed as
+`after_hpg-before`; like the QSR recovered-delta row, it contains subtraction
+cancellation and is not a direct operator mismatch.  Experiments that retained
+the direct anomaly ratio, added more statement guards, or changed the shared
+rounding helper did not move the live child and were all reverted.  No owner is
+claimed for the remaining Krhs accumulation debt.
+
+Because stage-2 Kaa is still the first unresolved boundary, stage-3
+`zFu/zFv/zFw`, `tra_zdf`/`dyn_zdf` matrix coefficients and solutions, and TKE
+are **UNMEASURED_UPSTREAM_STAGE2_DEBT** in this round.  This follows the
+preregistered ordering; none was tuned or exonerated.
+
+### Whole-step repin and Rule 8
+
+The production-JIT V2 sweep remains `first_over_bar=kt2` in T/S/u/v.  kt1 T/S
+are bit-exact; the at-rest kt1 u/v/SSH rows remain UNINFORMATIVE.  Every kt2
+maximum is unchanged from the merge (`T=1.3614736849003888e-12`,
+`S=2.2181101297999213e-14`, `u=9.484089954776408e-7`,
+`v=8.987992592542841e-7`, `SSH=4.336808689942018e-19`).  Across all 50
+rows, 20 improve, 20 worsen, and 10 are identical.  The 20 worsened Rule-8
+maxima are enumerated here; no status changes.
+
+| field | kt | merge `03c6e8d96` | Round 20 | ratio |
+|---|---:|---:|---:|---:|
+| S | 3 | `3.683246743167771e-5` | `3.6833248025036244e-5` | `1.0000211930780902` |
+| u | 3 | `9.311678913140553e-3` | `9.311918024754345e-3` | `1.0000256786790032` |
+| SSH | 3 | `7.074669630242024e-7` | `7.074669630674621e-7` | `1.0000000000611473` |
+| T | 4 | `1.0594738051818496e-3` | `1.0594757154853101e-3` | `1.0000018030681375` |
+| v | 4 | `1.5947842304474213e-2` | `1.594803608623198e-2` | `1.0000121509702733` |
+| SSH | 4 | `5.06042337723115e-7` | `5.299775777930019e-7` | `1.0472988884241998` |
+| u | 5 | `2.0733890435953528e-2` | `2.073403487719125e-2` | `1.0000069664319953` |
+| S | 6 | `1.287536238418589e-4` | `1.2875696502347874e-4` | `1.0000259501947995` |
+| v | 6 | `6.0219592087118606e-2` | `6.022050081599162e-2` | `1.0000150902528815` |
+| SSH | 6 | `1.631023907114217e-4` | `1.6312992706670428e-4` | `1.0001688286429309` |
+| S | 7 | `1.2244044884708371e-4` | `1.224430327208792e-4` | `1.0000211031062023` |
+| u | 7 | `4.004140471842379e-2` | `4.004166157574929e-2` | `1.00000641479307` |
+| v | 7 | `6.631577323114793e-2` | `6.631670463083134e-2` | `1.000014044919301` |
+| SSH | 7 | `2.087141815218642e-4` | `2.087569352508757e-4` | `1.0002048434308572` |
+| u | 8 | `4.718005909052282e-2` | `4.718072375983288e-2` | `1.0000140879287325` |
+| v | 8 | `2.4527161866119307e-2` | `2.4527890741688735e-2` | `1.0000297170774755` |
+| T | 9 | `5.445062142555964e-3` | `5.445067667597903e-3` | `1.0000010146885001` |
+| u | 9 | `5.256039760377703e-2` | `5.2561503561392935e-2` | `1.000021041652391` |
+| T | 10 | `5.636634494144276e-3` | `5.636643309707159e-3` | `1.0000015639763218` |
+| u | 10 | `5.6249869570541774e-2` | `5.6250884173481036e-2` | `1.000018037427411` |
+
+The mandatory post-S-21 cross-card rerun was attempted with the local Git
+directory exported so provenance resolved to `d6741f3b6`.  The OVERFLOW stage
+gate and then the isolated OVERFLOW trajectory gate each compiled for 20
+minutes without producing a report row and were interrupted; LOCK was not
+started after the preceding resource-bound boundary.  Therefore post-S-21
+cross-card status is **UNMEASURED_RESOURCE_BOUND**.  The four zero-ulp PASS
+lines above certify the preceding coastal-stress change only and are not reused
+as evidence for S-21.  No Rule-12 statement is made for the unmeasured rerun.
+
+### Round-20 ASKED / UNASKED register
+
+| choice or action | origin | disposition |
+|---|---|---|
+| sync local Git to reviewed merge `03c6e8d96` | ASKED | complete before edits |
+| production-JIT returned-pytree 19-frame trace | ASKED item 0 | complete; 13 tests, plant exit 1 |
+| explicit scalar-libm on every census probe | ASKED item 1 | complete; measured zero payload move |
+| full census term-budget rerun | ASKED item 1 | UNMEASURED after 12-minute CPU budget |
+| NEMO coastal stress factors | ASKED item 2 | source-exact shared change; dynamically inert on GYRE active faces |
+| stored `uu_b/vv_b` stage-transport operand | ASKED ordered item 3 | CONFIRMED shared S-21 owner; landed |
+| V2 halo-only non-finite tolerance after owned-cell transform | UNASKED measurement-integrity fix | two discarded halo values disclosed; scored interiors remain fail-closed |
+| direct-ratio / extra-rounding HPG experiments | UNASKED discriminators | refuted and reverted; no shipped change |
+| kt1–10 repin | ASKED conditional | complete; first_over_bar kt2 unchanged |
+| post-S-21 OVERFLOW/LOCK cross-card gates | ASKED process rule | attempted; UNMEASURED_RESOURCE_BOUND, no false PASS |
+| stage-3 transports, ZDF matrices/solutions, TKE | ASKED conditional | not entered because stage-2 Kaa remains DEBT |
+| GYRE-only arm, tuning, gate criterion change, shipped NEMO edit | forbidden | none |
+
+The machine-readable artifact ledger is
+`scripts/validate/ocean_fidelity/testcases/manifests/nemo_testcase_l2_gyre_round20.json`.
+All Round-20 review remains **independent review outstanding**; these are
+Codex-internal measurements and no dual-review claim is made.
