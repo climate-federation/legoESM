@@ -54,18 +54,18 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid fesom \
   --iwm --iwm-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/zdfiwm_forcing_TRA.nc \
   --forcing-ramp-days 5 \
   --dt 1800 --years 0.0822 --snapshot-every-days 15 \
-  --output $ROOT/results/omip_nemo/fesom_nemo75_d30 2>&1 | tail -14
+  --output $ROOT/results/omip_nemo/fesom_nemo75v_d30 2>&1 | tail -14
 echo "=== run rc=$? ==="
 export JAX_PLATFORMS=cpu
 GW_T=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GATEWAY/ORCA1_5d_20000101_20000331_grid_T.nc
 for pair in "30 5"; do
   set -- $pair; d=$1; rec=$2
-  SNAP=$ROOT/results/omip_nemo/fesom_nemo75_d30/snapshot_day00$d.npz
-  [ -f "$SNAP" ] || SNAP=$ROOT/results/omip_nemo/fesom_nemo75_d30/snapshot_final.npz
+  SNAP=$ROOT/results/omip_nemo/fesom_nemo75v_d30/snapshot_day00$d.npz
+  [ -f "$SNAP" ] || SNAP=$ROOT/results/omip_nemo/fesom_nemo75v_d30/snapshot_final.npz
   echo "=== day $d vs GATEWAY rec $rec ==="
   $PY scripts/validate/compare_omip_nemo.py --legoesm-snapshot "$SNAP" \
     --nemo-gridt "$GW_T" --nemo-time-idx $rec --freeze-clamp-C -1.8 \
     --sss-faithful --grid-label fesom_n75_d$d \
-    --output-dir $ROOT/results/omip_nemo/compare_gw_fesom_nemo75_d00$d 2>&1 | tail -38
+    --output-dir $ROOT/results/omip_nemo/compare_gw_fesom_nemo75v_d00$d 2>&1 | tail -38
 done
 echo DONE
