@@ -122,8 +122,11 @@ restart is consumed.  Whether that source path accepts `jpl=1` is
 **PLAUSIBLE_PENDING_RUN**, not silently assumed; a NEMO diagnostic will stop
 admission and be reported verbatim.
 
-**CONFIRMED WRITE-only instrumentation:** the frozen config-local sources are
-under `phase2w_orca1ice_MY_SRC/`.  `icethd.F90:118,235,331-380` writes
+**CONFIRMED WRITE-only instrumentation:** Phase 2x repository hygiene replaced
+the three once-committed full sources with unified patches against hash-pinned
+NEMO 5.0.2 bases.  The exact applied files are retained under
+`/data/abyssal/dbalwada/nemo-testcases-l4/build/phase2x_orca1ice/MY_SRC/`.
+In those files, `icethd.F90:118,235,331-380` writes
 thermodynamic entry/exit state, layered enthalpy/salinity, and atmosphere-ice
 flux operands.  `icedyn_rhg_evp.F90:377,1197-1270` writes dynamics-entry,
 strength, stresses, thickness, and Lemieux-2016 basal-stress operands before
