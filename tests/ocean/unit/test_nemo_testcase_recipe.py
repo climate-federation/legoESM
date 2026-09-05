@@ -48,6 +48,33 @@ def test_orca2_execution_guard_rejects_registered_unmeasured_arms():
             validate_nemo_testcase_card_for_execution(card)
 
 
+def test_orca2_structural_guard_rejects_iceberg_option_drift():
+    """The comparison card cannot silently revert to the shipped icb arm."""
+    set_policy(PrecisionPolicy.fp64())
+    # Reach the ORCA2 option check without constructing the external
+    # deck-backed state in this small unit test.
+    good = build_gyre_zco_card()
+    card = good._replace(
+        case="ORCA2-zps",
+        surface_boundary_condition="ncar_core_sbcblk",
+        icebergs_enabled=True,
+        iceberg_inputs=("icebergs_restart.nc",),
+        unmeasured_features=("si3_jpl5_layered_prather_state",),
+        recipe=good.recipe._replace(
+            model_config=good.recipe.model_config._replace(
+                eos="nemo_eos80",
+                vorticity_scheme="een_total",
+                barotropic=good.recipe.model_config.barotropic._replace(
+                    barotropic_coriolis="een_metric",
+                    n_barotropic_substeps=65,
+                ),
+            )
+        ),
+    )
+    with pytest.raises(ValueError, match="ln_icebergs=F"):
+        validate_nemo_testcase_card(card)
+
+
 @pytest.mark.parametrize(
     ("builder", "shape", "nlev", "dt", "cold", "warm"),
     [

@@ -63,6 +63,10 @@ class NEMOTestcaseCard(NamedTuple):
     # program.  This is deliberately card data: callers and gates can refuse a
     # partial card rather than silently substituting another scheme.
     unmeasured_features: tuple[str, ...] = ()
+    # Coupled-deck option, deliberately tri-state for legacy cards.  ORCA2
+    # must spell this out so no caller can inherit an implicit iceberg choice.
+    icebergs_enabled: bool | None = None
+    iceberg_inputs: tuple[str, ...] | None = None
 
 
 class GYRESurfaceBoundaryCondition(NamedTuple):
@@ -1178,8 +1182,9 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
             "spatial_lateral_viscosity",
             "freshwater_budget_carry",
             "si3_jpl5_layered_prather_state",
-            "iceberg_state",
         ),
+        icebergs_enabled=False,
+        iceberg_inputs=(),
     )
     validate_nemo_testcase_card(card)
     return card
@@ -1275,6 +1280,11 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
                 raise ValueError("ORCA2-zps requires EOS-80 and EEN vorticity")
             if card.surface_boundary_condition != "ncar_core_sbcblk":
                 raise ValueError("ORCA2-zps requires the NCAR/CORE sbcblk card")
+            if card.icebergs_enabled is not False or card.iceberg_inputs != ():
+                raise ValueError(
+                    "ORCA2-zps comparison card requires ln_icebergs=F and no "
+                    "iceberg inputs"
+                )
             if not card.unmeasured_features:
                 raise ValueError(
                     "ORCA2-zps must fail-closed while selected mechanisms "

@@ -27,7 +27,6 @@ EXPECTED_UNMEASURED = {
     "spatial_lateral_viscosity",
     "freshwater_budget_carry",
     "si3_jpl5_layered_prather_state",
-    "iceberg_state",
 }
 
 
@@ -93,6 +92,7 @@ def run_gate(
     *,
     plant: str | None = None,
 ) -> dict[str, object]:
+    import jax
     import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
@@ -102,9 +102,11 @@ def run_gate(
     )
     from netCDF4 import Dataset
 
-    set_policy(PrecisionPolicy.fp64())
-    require(get_policy() == PrecisionPolicy.fp64(), "fp64 policy not active")
+    policy = PrecisionPolicy.fp64(transcendentals="libm")
+    set_policy(policy)
+    require(get_policy() == policy, "fp64 + scalar-libm policy not active")
     require(jnp.ones(1).dtype == jnp.float64, "JAX x64 not active")
+    require(not jax.config.jax_disable_jit, "production JIT is disabled")
 
     hashes = {}
     for name, expected in EXPECTED_INPUT_SHA256.items():
@@ -125,10 +127,15 @@ def run_gate(
     require(card.recipe.model_config.tracer_time_integrator == "rk3_ws", "WS-RK3")
     require(card.recipe.model_config.barotropic.n_barotropic_substeps == 65,
             "barotropic substep count")
+    require(card.icebergs_enabled is False, "card must resolve ln_icebergs=F")
+    require(card.iceberg_inputs == (), "icebergs-off card must have no inputs")
 
     unresolved = set(card.unmeasured_features)
     if plant == "coverage":
-        unresolved.remove("iceberg_state")
+        unresolved.remove("si3_jpl5_layered_prather_state")
+    if plant == "iceberg_option":
+        card = card._replace(icebergs_enabled=True, iceberg_inputs=("planted",))
+        require(card.icebergs_enabled is False, "card must resolve ln_icebergs=F")
     require(unresolved == EXPECTED_UNMEASURED, "resolved-feature coverage registry")
     try:
         validate_nemo_testcase_card_for_execution(card)
@@ -258,6 +265,8 @@ def run_gate(
         "transcendentals": card.transcendentals,
         "execution_ready": False,
         "execution_guard": execution_guard,
+        "icebergs_enabled": card.icebergs_enabled,
+        "iceberg_inputs": list(card.iceberg_inputs),
         "comparison_domain": "rank0-owned y=148,x=90 after 2-cell halo strip",
         "input_sha256": hashes,
         "unmeasured_features": sorted(unresolved),
@@ -283,6 +292,7 @@ def main() -> int:
             "zero",
             "halo",
             "coverage",
+            "iceberg_option",
         ),
     )
     args = parser.parse_args()
