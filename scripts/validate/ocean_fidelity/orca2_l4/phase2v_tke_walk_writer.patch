@@ -68,20 +68,19 @@
           !
           !                     !<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
           !                     !  Surface boundary condition on tke
-@@ -299,6 +335,12 @@
+@@ -333,6 +369,11 @@
                 END_1D
+                !
              ENDIF
-             !
 +            IF( l4_tke_dump ) THEN
 +               DO ji = ntsi, ntei
 +                  IF( tmask(ji,jj,1) /= 0._wp ) l4_tke_zwlc2(ji,jj) = zWlc2(ji)
 +               END DO
 +            ENDIF
-+            !
-          ENDIF
-          !
-          !                     !<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-@@ -370,6 +412,19 @@
+             !
+             !                       !* Depth of the LC circulation  (Axell 2002, Eq.47)
+             !                             !- LHS of Eq.47
+@@ -370,6 +411,19 @@
              END_2D
              !
           ENDIF
@@ -101,7 +100,7 @@
           !
           !                     !<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
           !                     !  Now Turbulent kinetic energy (output in en)
-@@ -447,11 +502,41 @@
+@@ -447,11 +501,41 @@
  
              END SELECT
           ENDIF
@@ -143,7 +142,7 @@
  !XC : commented to allow for neumann boundary condition
  !      DO_2Dik( 0, 0, 2, jpkm1, 1 )
  !         zd_lw(ji,2) = en(ji,jj,2) - zd_lw(ji,2) * en(ji,jj,1)    ! Surface boudary conditions on tke
-@@ -459,6 +544,15 @@
+@@ -459,6 +543,15 @@
           DO_2Dik( 0, 0, 2, jpkm1, 1 )
              zd_lw(ji,jk) = en(ji,jj,jk) - zd_lw(ji,jk) / zdiag(ji,jk-1) * zd_lw(ji,jk-1)
           END_2D
@@ -159,7 +158,7 @@
           DO_1Di( 0, 0 )                               ! Third recurrence : Ek = ( Lk - Uk * Ek+1 ) / Dk
              en(ji,jj,jpkm1) = zd_lw(ji,jpkm1) / zdiag(ji,jpkm1)
           END_1D
-@@ -468,6 +562,15 @@
+@@ -468,6 +561,15 @@
           DO_2Dik( 0, 0, 2, jpkm1, 1 )                 ! Set the minimum value of tke
              en(ji,jj,jk) = MAX( en(ji,jj,jk), rn_emin ) * wmask(ji,jj,jk)
           END_2D
@@ -175,7 +174,7 @@
           !
           ! Kolmogorov energy of dissipation (W/kg)
           !    ediss = Ce*sqrt(en)/L*en
-@@ -509,6 +612,15 @@
+@@ -509,6 +611,15 @@
                    &                        * MAX( 0._wp, 1._wp - zice_fra(ji) ) * wmask(ji,jj,jk) * tmask(ji,jj,1)
              END_2D
           ENDIF
@@ -191,7 +190,7 @@
           !
           !                                            ! ================= !
        END_1D                                          !  i-k slices loop  !
-@@ -723,6 +835,19 @@
+@@ -723,6 +834,19 @@
                 p_avt(ji,jj,jk)   = MAX( p_pdlr(ji,jj,jk) * p_avt(ji,jj,jk), avtb_2d(ji,jj) * avtb(jk) ) * wmask(ji,jj,jk)
              END_2D
           ENDIF
@@ -211,7 +210,7 @@
           !                                            ! ================= !
        END_1D                                          !  i-k slices loop  !
        !                                               ! ================= !
-@@ -735,6 +860,96 @@
+@@ -735,6 +859,96 @@
     END SUBROUTINE tke_avn
  
  

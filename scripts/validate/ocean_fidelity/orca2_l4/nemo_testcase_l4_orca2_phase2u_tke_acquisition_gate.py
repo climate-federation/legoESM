@@ -66,13 +66,17 @@ def _canonical_masks(mesh: Path, jpi: int, jpj: int, jpk: int) -> tuple[np.ndarr
     require(native_t.shape == (jpi - 4, jpj - 4, jpk),
             f"unexpected rank-zero tmask shape {native_t.shape}")
     matrix = np.zeros((jpi, jpj, jpk), dtype=bool)
-    matrix[2:-2, 2:-2] = native_t
     water_column = np.zeros_like(matrix)
     bottom = np.count_nonzero(native_t, axis=2)
     for ii in range(native_t.shape[0]):
         for jj in range(native_t.shape[1]):
             if bottom[ii, jj]:
                 water_column[ii + 2, jj + 2, :min(bottom[ii, jj] + 1, jpk)] = True
+                # The writer's matrix-workspace ownership is its explicit
+                # surface-wet + jk<=mbkt copy loop.  Use that allocation
+                # contract, rather than a post-LBC mesh mask whose fold row
+                # can intentionally differ from the local loop domain.
+                matrix[ii + 2, jj + 2, :min(bottom[ii, jj], jpk - 1)] = True
     surface = matrix[..., :1]
     return matrix, water_column, surface
 
