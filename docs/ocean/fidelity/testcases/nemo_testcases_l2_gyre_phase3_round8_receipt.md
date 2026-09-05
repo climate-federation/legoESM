@@ -3045,6 +3045,10 @@ zero-move: LOCK stage `9 / 9` and trajectory `50 / 50` PASS, OVERFLOW stage
 `5992b7db...`, `524858b8...`, `c19b273f...`, and `ef076ec9...`; the residual
 NPZ hashes are unchanged from round 22, which independently proves bit
 identity.  Rules 8 and 12 therefore contain zero moved rows for this factor.
+The isolated GYRE b2702b3-to-current production comparison also PASSes all
+`50 / 50` rows with zero moved cells, zero worsening, no status changes, and
+unchanged first-over-bar kt2 T/S/u/v.  Its before and after residual sidecars
+are byte-identical (`459e6321...`); comparison SHA-256 is `c4831e1a...`.
 
 ### 23.3 GYRE production-JIT kt1--10 cellwise register
 
@@ -3219,4 +3223,4 @@ test, `ulp_move_gate`, the GYRE phase-3 gate tests, and the one-implementation
 tripwire.  The committed Round-23 manifest is
 `scripts/validate/ocean_fidelity/testcases/manifests/nemo_testcase_l2_gyre_round23.json`,
 SHA-256
-`cdb025a95c90676b5287deae92f6081cafe2a0638e1755fcbc8f099c5743e7b8`.
+`74936c85585699e215b5cade81bb9669024c2de059a3a0eb07ddf5a273f381b3`.
