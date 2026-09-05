@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import struct
 import sys
 from pathlib import Path
@@ -22,6 +23,9 @@ for package in (REPO_ROOT / "packages/core", REPO_ROOT / "packages/ocean"):
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.fidelity.nemo_testcase_recipe import build_orca2_zps_card
+from legoesm.ocean.physics.vertical_mixing.tke import (
+    nemo_tke_effective_ice_fraction,
+)
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_phase2p_zdf_acquisition_gate as schema,
 )
@@ -65,7 +69,7 @@ def score(candidate: np.ndarray, target: np.ndarray, mask: np.ndarray) -> dict:
     return row
 
 
-def validate(deck: Path, root: Path, mesh: Path, plant: bool) -> dict:
+def validate(deck: Path, root: Path, mesh: Path, plant: str | None) -> dict:
     jax.config.update("jax_enable_x64", True)
     policy = PrecisionPolicy.fp64(transcendentals="libm")
     set_policy(policy)
@@ -102,7 +106,7 @@ def validate(deck: Path, root: Path, mesh: Path, plant: bool) -> dict:
             "restored production bottom TKE operand is not source-exact")
 
     plants = {}
-    if plant:
+    if plant == "bottom":
         altered = target_bottom.copy()
         index = tuple(int(v) for v in np.argwhere(wet)[0])
         altered[index] = np.nextafter(altered[index], np.inf)
@@ -115,21 +119,35 @@ def validate(deck: Path, root: Path, mesh: Path, plant: bool) -> dict:
             plants["bottom_selector_false"] = "PASS_NONZERO"
         else:
             raise GateError("bottom selector plant did not fire")
+        raise GateError("bottom target one-bit plant rejected through production scorer")
 
-    # The first downstream executed departure is the under-ice attenuation
-    # operand. NEMO nn_eice=1 forms TANH(10*fr_i) (:253-258); the shared
-    # card still selects eice=0.  This is reported and the walk stops before
-    # Langmuir, matrix, solve, length, or coefficient arithmetic.
+    # NEMO nn_eice=1 forms TANH(10*fr_i) (:253-258).  Build the target with
+    # independent scalar libm calls and score the production shared helper.
     fr_i = owned2(kt2, "fr_i")
     wet2 = owned2(kt2, "mbkt_real") > 0
-    nemo_ice = np.tanh(np.float64(10.0) * fr_i)
-    card_ice = np.zeros_like(fr_i) if cfg.eice == 0 else fr_i
+    require(int(cfg.eice) == 1, "ORCA2 card did not restore nn_eice=1")
+    argument = np.float64(10.0) * fr_i
+    nemo_ice = np.fromiter(
+        (math.tanh(float(value)) for value in argument.flat),
+        dtype=np.float64, count=argument.size).reshape(argument.shape)
+    card_ice = np.asarray(jax.jit(
+        lambda value: nemo_tke_effective_ice_fraction(value, cfg.eice)
+    )(jnp.asarray(fr_i)))
+    if plant == "eice_target":
+        index = tuple(int(v) for v in np.argwhere(wet2)[0])
+        nemo_ice = nemo_ice.copy()
+        nemo_ice[index] = np.nextafter(nemo_ice[index], np.inf)
+    elif plant == "eice_selector":
+        card_ice = np.zeros_like(card_ice)
     ice_row = score(card_ice, nemo_ice, wet2)
-    require(ice_row["unequal"] > 0,
-            "nn_eice discriminator unexpectedly vacuous")
+    require(ice_row["unequal"] == 0,
+            "nn_eice target differs (binding plant fired)" if plant
+            else "production nn_eice=1 statement is not exact")
+    if plant in ("eice_target", "eice_selector"):
+        raise GateError("nn_eice plant failed to create a rejected target")
 
     return {
-        "status": "STOP_AT_ORCA2_TKE_EICE_SELECTOR",
+        "status": "STOP_TKE_INTERNAL_FRAME_REQUIRED",
         "execution": {"backend": jax.default_backend(), "jit": "production",
                       "dtype": "float64",
                       "transcendentals": get_policy().transcendentals},
@@ -152,19 +170,34 @@ def validate(deck: Path, root: Path, mesh: Path, plant: bool) -> dict:
                           "source": "zdftke.F90:279-288,841-844",
                           "kt1_Kbb_nonzero": zero_counts,
                           "disposition": "CONFIRMED"},
-        "first_departure": {
+        "ice_fraction_attenuation": {
             **ice_row,
             "boundary": "nn_eice=1 ice-fraction attenuation operand",
             "statement": "zdftke.F90:255 zice_fra=TANH(fr_i*10._wp)",
             "first_consumption": "zdftke.F90:359 zus3=MAX(0,1-zice_fra)*...",
-            "owner": "LANE4_ORCA2_FORCING_SELECTOR_THEN_GYRE_OWNER_SHARED_TKE",
-            "disposition": "CONFIRMED_CARD_SELECTOR_DEBT",
+            "owner": "LANE4_ORCA2_FORCING_SELECTOR",
+            "disposition": "CONFIRMED_AT_BAR",
+        },
+        "first_unmeasured_boundary": {
+            "statement": "zdftke.F90:332 zWlc2=zcsd*taum",
+            "owner": "GYRE_OWNER_SHARED_TKE",
+            "status": "UNMEASURED_NEEDS_WRITE_ONLY_INTERNAL_FRAME",
+            "reason": (
+                "the admitted kt=2 frame contains the statement inputs but no "
+                "zWlc2/Langmuir, matrix, solve, or post-closure oracle outputs"),
+            "required_fields": [
+                "zWlc2", "zpelc", "imlc", "zhlc", "zus3", "en_post_lc",
+                "zdiag_pre_solve", "zd_lw_pre_solve", "zd_up_pre_solve",
+                "en_rhs_pre_solve", "en_post_solve", "p_pdlr",
+                "mxlm", "mxld", "avm_k_post", "avt_k_post",
+            ],
         },
         "downstream": {
             "surface": "CONFIRMED previously 0/8794 (zdftke.F90:264-269)",
             "shear": "CONFIRMED 0/218024 record-complete kt=2 cells",
-            "buoyancy_dissipation_matrix_solve": "UNMEASURED_AFTER_FIRST_DEPARTURE",
-            "nn_etau_1": "UNMEASURED_AFTER_SOLVE_AND_SELECTOR_DEBT",
+            "ice_fraction": "CONFIRMED 0/8794 (zdftke.F90:255)",
+            "buoyancy_dissipation_matrix_solve": "UNMEASURED_NEEDS_INTERNAL_FRAME",
+            "nn_etau_1": "UNMEASURED_AFTER_SOLVE",
             "nn_mxl_3_avm_avt": "UNMEASURED_NO_POST_CLOSURE_TARGET",
         },
         "plants": plants,
@@ -176,7 +209,9 @@ def main() -> int:
     parser.add_argument("--deck-root", type=Path, required=True)
     parser.add_argument("--oracle-root", type=Path, required=True)
     parser.add_argument("--mesh", type=Path, required=True)
-    parser.add_argument("--plant", action="store_true")
+    parser.add_argument(
+        "--plant", nargs="?", const="bottom",
+        choices=("bottom", "eice_target", "eice_selector"))
     parser.add_argument("--json-out", type=Path)
     args = parser.parse_args()
     try:

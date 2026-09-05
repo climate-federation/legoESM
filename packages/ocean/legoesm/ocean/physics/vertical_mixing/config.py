@@ -776,12 +776,12 @@ class TKEConfig(NamedTuple):
     #   full wave TKE even under compact ice.  Nonzero modes thread
     #   ``surface_forcing.ice_concentration`` as an EFFECTIVE ``ice_frac``
     #   into the kernels' built-in ``(1-ice_frac)`` factor:
-    #     1 -> eff = fi            (factor (1-fi),        NEMO nn_eice=1)
+    #     1 -> eff = tanh(10*fi)   (factor 1-tanh(10*fi), NEMO nn_eice=1)
     #     3 -> eff = min(4*fi, 1)  (factor max(0,1-4*fi), NEMO nn_eice=3 —
     #          the ORCA1 namelist choice; wave TKE killed at fi >= 0.25).
     #   2026-07-18 audit: the kernels ALWAYS supported ``ice_frac`` but no
     #   caller supplied it — under-ice TKE injection over-mixed the Arctic.
-    eice: int = 0                        # 0 off | 1 (1-fi) | 3 max(0,1-4fi)  (NEMO nn_eice)
+    eice: int = 0                 # 0 off | 1 1-tanh(10fi) | 3 max(0,1-4fi)
 
 
 class KPPConfig(NamedTuple):

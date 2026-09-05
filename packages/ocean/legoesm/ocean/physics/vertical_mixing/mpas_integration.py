@@ -38,7 +38,10 @@ from legoesm.ocean.physics.mixing import (
 )
 from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
 from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
-from legoesm.ocean.physics.vertical_mixing.tke import tke_vertical_mixing
+from legoesm.ocean.physics.vertical_mixing.tke import (
+    nemo_tke_effective_ice_fraction,
+    tke_vertical_mixing,
+)
 from legoesm.ocean.physics.vertical_mixing._shared import surface_buoyancy_flux
 from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
@@ -836,8 +839,8 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
             # SAME pre-mapping the C-grid k_profiles path does (k_profiles
             # ~:533); passing raw fi under eice=3 would silently run the
             # mode-1 (1-fi) law (codex HIGH).
-            ice_frac = (ice_frac if _tke_eice == 1
-                        else jnp.minimum(4.0 * ice_frac, 1.0))
+            ice_frac = nemo_tke_effective_ice_fraction(
+                ice_frac, _tke_eice)
         lat_deg = jnp.degrees(mesh.latCell)
 
         # Veros tke_mxl_choice=1 distance-to-boundary cap (mirrors the lat-lon

@@ -109,6 +109,8 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.source_rounding import nemo_source_round
+from legoesm.core.transcendentals import tanh as precision_tanh
 from legoesm.ocean.physics.vertical_mixing._glibc234_exp_table import (
     GLIBC234_EXP_TABLE_BITS,
 )
@@ -1997,6 +1999,35 @@ def compute_K_from_tke(
 # ---------------------------------------------------------------------------
 
 
+def nemo_tke_effective_ice_fraction(
+    ice_fraction: jnp.ndarray,
+    nn_eice: int,
+) -> jnp.ndarray:
+    """Return NEMO ``zice_fra`` for the selected ``nn_eice`` arm.
+
+    This is the single shared transcription of ``zdftke.F90:246,253-258``.
+    In particular, mode 1 is ``TANH(fr_i*10._wp)``; it is *not* the raw ice
+    fraction (that is NEMO mode 2).  The multiplication is materialized at the
+    Fortran source-statement boundary and TANH follows the active scalar-libm
+    precision policy.  Modes 0 and 3 preserve their established expressions.
+    """
+    mode = int(nn_eice)
+    value = jnp.asarray(ice_fraction)
+    if mode == 0:
+        return jnp.zeros_like(value)
+    if mode == 1:
+        argument = nemo_source_round(
+            value * jnp.asarray(10.0, dtype=value.dtype))
+        return nemo_source_round(precision_tanh(argument))
+    if mode == 3:
+        return jnp.minimum(
+            jnp.asarray(4.0, dtype=value.dtype) * value,
+            jnp.asarray(1.0, dtype=value.dtype),
+        )
+    raise ValueError(
+        f"Unknown TKEConfig.eice={mode!r}; expected NEMO nn_eice 0, 1 or 3.")
+
+
 def _nemo_literal_langmuir_operands(
     taum: jnp.ndarray,
     N2: jnp.ndarray,
@@ -3602,6 +3633,7 @@ __all__ = (
     "compute_K_from_tke",
     "compute_mixing_lengths",
     "compute_surface_buoyancy_P_diss_v",
+    "nemo_tke_effective_ice_fraction",
     "realized_implicit_friction_dissipation",
     "tke_integrate_post_mixing",
     "tke_set_diffusivities",

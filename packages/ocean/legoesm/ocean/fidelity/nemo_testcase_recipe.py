@@ -125,6 +125,9 @@ def _model_config(
             tke_shear_production="nemo_face_native_nbb2",
             tke_shear_avm_weighting="nemo_face",
             tke_shear_metric_source="nemo_qco_live_face",
+            # namelist_ref:1255-1259; zdftke.F90:255.  Mode 1 is the shared
+            # source-literal tanh(10*fr_i) arm, not raw fr_i (mode 2).
+            eice=1,
         )
         convection = base.physics.convection._replace(
             enhanced_diffusion=base.physics.convection.enhanced_diffusion._replace(
@@ -1394,6 +1397,10 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
                 raise ValueError(
                     "ORCA2-zps requires the executed zdftke bottom-friction "
                     "Dirichlet boundary (ln_drg_OFF=.false.)")
+            if int(tke.eice) != 1:
+                raise ValueError(
+                    "ORCA2-zps requires NEMO nn_eice=1 ice attenuation "
+                    "(zdftke.F90:255 tanh(10*fr_i))")
             if card.surface_boundary_condition != "ncar_core_sbcblk":
                 raise ValueError("ORCA2-zps requires the NCAR/CORE sbcblk card")
             if card.surface_input_operator != "nemo_fld_read":

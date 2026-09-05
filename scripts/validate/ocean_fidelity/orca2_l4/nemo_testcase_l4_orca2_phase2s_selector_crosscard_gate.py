@@ -130,17 +130,21 @@ def validate(deck: Path, *, plant: bool) -> dict[str, object]:
     require(observed == expected, f"ORCA2 SH2 tuple {observed!r}")
     require(tke.bottom_tke_bc is True,
             "ORCA2 bottom-friction TKE Dirichlet selector is not restored")
+    require(int(tke.eice) == 1,
+            "ORCA2 nn_eice=1 selector is not restored")
     return {
         "status": "PASS",
         "execution": {"backend": jax.default_backend(), "dtype": "float64",
                       "transcendentals": get_policy().transcendentals},
         "orca2_sh2_tuple": list(observed),
         "orca2_bottom_tke_bc": bool(tke.bottom_tke_bc),
+        "orca2_nn_eice": int(tke.eice),
         "cross_card_kt1_entry": rows,
         "scope": (
             "actual NEMO kt=1 Nbb entry rows; no ocean step.  The production "
-            "change is confined to build_orca2_zps_card, so unchanged cards "
-            "enter the same production step from byte-identical state."),
+            "mode-1 TKE ice attenuation is statically unreachable on cards "
+            "whose eice selector remains zero, so unchanged cards enter the "
+            "same production step from byte-identical state."),
         "c1d": {
             "status": "CONSTRUCTIBILITY_PROXY_ONLY_PENDING_ICE_MERGE",
             "evidence": "tests/ice/unit/test_ice_transport_cgrid.py",

@@ -61,6 +61,7 @@ def test_orca2_structural_guard_rejects_iceberg_option_drift():
         tke_shear_evaluation_stage="step_entry",
         tke_shear_metric_source="nemo_qco_live_face",
         bottom_tke_bc=True,
+        eice=1,
     )
     card = good._replace(
         case="ORCA2-zps",

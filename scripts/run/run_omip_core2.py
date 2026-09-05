@@ -5168,7 +5168,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "mirror of --tke-eice). Compact ice scales w_m/w_s by "
                         "(1-eff) so BOTH the boundary-layer depth and mixing "
                         "shrink under ice. None/0 (default) = off; 1 = legoESM "
-                        "linear (1-fi) [NOT NEMO nn_eice=1]; 3 = max(0,1-4*fi) "
+                        "NEMO 1-tanh(10*fi); 3 = max(0,1-4*fi) "
                         "(matches NEMO nn_eice=3, killed at fi>=0.25). The KPP grids' "
                         "Arctic halocline-erosion lever (over-deep MLD + "
                         "Siberian salty) that --tke-eice fixed only on the TKE "

@@ -635,6 +635,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
 
     if scheme == "tke":
         from legoesm.ocean.physics.vertical_mixing.tke import (
+            nemo_tke_effective_ice_fraction,
             tke_vertical_mixing,
         )
         # Interpolate u, v to cell centres for the closure on C-grid;
@@ -883,7 +884,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         # ``TKEConfig.eice``).  The lc/etau kernels apply ``(1 - ice_frac)``
         # internally, so the mode maps onto an EFFECTIVE ice fraction:
         #   0 (default, bit-identical): no attenuation — ice_frac stays None;
-        #   1: eff = fi              -> kernel factor (1-fi)        (nn_eice=1);
+        #   1: eff = tanh(10*fi)     -> factor 1-tanh(10*fi)        (nn_eice=1);
         #   3: eff = min(4*fi, 1)    -> kernel factor max(0,1-4*fi) (nn_eice=3,
         #      the ORCA1 namelist choice — wave TKE fully killed at fi>=0.25).
         # Unknown values raise (dispatch hardening; static config value).
@@ -897,8 +898,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         if _eice != 0 and surface_forcing is not None:
             _fi = getattr(surface_forcing, "ice_concentration", None)
             if _fi is not None:
-                _tke_ice_fr = (_fi if _eice == 1
-                               else jnp.minimum(4.0 * _fi, 1.0))
+                _tke_ice_fr = nemo_tke_effective_ice_fraction(_fi, _eice)
         if prognostic:
             # PROGNOSTIC mode (Veros enable_tke): ONE backward-Euler step per
             # model step, seeded from the carried ``tke_old``, with dt = the

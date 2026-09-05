@@ -17,6 +17,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
 from legoesm.ocean.physics.vertical_mixing.tke import (
     _NEMO_TKE_EBB,
@@ -28,12 +29,34 @@ from legoesm.ocean.physics.vertical_mixing.tke import (
     nemo_etau_injection,
     nemo_langmuir_tke_source,
     nemo_literal_langmuir_tke_update,
+    nemo_tke_effective_ice_fraction,
     tke_vertical_mixing,
 )
 
 jax.config.update("jax_enable_x64", True)
 
 _RHO0 = 1026.0
+
+
+def test_nemo_nn_eice1_is_scalar_libm_tanh_not_linear_fraction():
+    """zdftke.F90:255: mode 1 is TANH(10*fr_i); mode 2 alone is raw fr_i."""
+    old = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+        fr_i = jnp.asarray([0.0, 0.01, 0.25, 0.9], dtype=jnp.float64)
+        got = np.asarray(jax.jit(
+            lambda value: nemo_tke_effective_ice_fraction(value, 1))(fr_i))
+        import math
+        target = np.asarray([math.tanh(float(value * 10.0))
+                             for value in np.asarray(fr_i)], dtype=np.float64)
+        np.testing.assert_array_equal(got.view(np.uint64), target.view(np.uint64))
+        assert not np.array_equal(got[1:].view(np.uint64),
+                                  np.asarray(fr_i)[1:].view(np.uint64))
+        tangent = jax.grad(lambda value: jnp.sum(
+            nemo_tke_effective_ice_fraction(value, 1)))(fr_i)
+        assert bool(jnp.all(jnp.isfinite(tangent)))
+    finally:
+        set_policy(old)
 
 
 # ---------------------------------------------------------------------------
