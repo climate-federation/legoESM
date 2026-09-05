@@ -220,18 +220,32 @@ def _finish_card_step(card, state, contents: np.ndarray, moments):
         apply_ice_adv2d_source_corrections,
         apply_ice_adv2d_zapsmall,
     )
+    from legoesm.ice.transport import (
+        si3_prather_pack_intensives,
+        si3_prather_unpack_intensives,
+    )
 
+    cell_area = jnp.full(state.contents.shape[:2], card.dx_m * card.dy_m, dtype=jnp.float64)
+    wet = jnp.ones(state.contents.shape[:2], dtype=bool)
+    entry_intensives = si3_prather_unpack_intensives(state.contents, cell_area, wet)
+    transported_intensives = si3_prather_unpack_intensives(
+        jnp.asarray(contents), cell_area, wet
+    )
     corrected = apply_ice_adv2d_source_corrections(
         card,
-        state.contents,
-        jnp.asarray(contents),
+        entry_intensives,
+        transported_intensives,
+        entry_intensive_contents=entry_intensives,
+        contents_are_intensive=True,
     )
-    return apply_ice_adv2d_zapsmall(
+    result = apply_ice_adv2d_zapsmall(
         card,
         state,
         corrected,
         tuple(jnp.asarray(value) for value in moments),
+        contents_are_intensive=True,
     )
+    return result._replace(contents=si3_prather_pack_intensives(result.contents, cell_area))
 
 
 def _ulp_distance(left: np.ndarray, right: np.ndarray) -> np.ndarray:

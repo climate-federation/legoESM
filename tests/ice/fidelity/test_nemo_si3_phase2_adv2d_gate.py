@@ -247,6 +247,34 @@ def test_source_rounding_changes_compiled_prather_association() -> None:
     )
 
 
+def test_nemo_intensive_correction_order_is_default_and_old_order_is_private() -> None:
+    """Decision 13 keeps the former association only as an ablation."""
+
+    card = _build_card()
+    default = step_ice_adv2d_card(card, completed_steps=0)
+    legacy = step_ice_adv2d_card(
+        card,
+        completed_steps=0,
+        _use_legacy_extensive_correction_order=True,
+    )
+    assert np.asarray(default.contents).tobytes() != np.asarray(legacy.contents).tobytes()
+
+    # The default is exactly one source-ordered recovery/correction/repack;
+    # calling the public wrapper without its private hook must select it too.
+    corrected_default = apply_ice_adv2d_source_corrections(
+        card,
+        card.initial_state.contents,
+        legacy.contents,
+    )
+    corrected_legacy = apply_ice_adv2d_source_corrections(
+        card,
+        card.initial_state.contents,
+        legacy.contents,
+        _use_legacy_extensive_order=True,
+    )
+    assert np.asarray(corrected_default).tobytes() != np.asarray(corrected_legacy).tobytes()
+
+
 def test_hsnow_and_pond_caps_are_non_vacuous():
     card = _build_card()
     area = card.dx_m * card.dy_m

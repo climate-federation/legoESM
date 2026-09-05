@@ -15,6 +15,8 @@ from legoesm.ice.transport import (
     SI3_PRATHER_MOMENT_NAMES,
     SI3PratherMoments,
     advect_si3_prather_2d,
+    si3_prather_pack_intensives,
+    si3_prather_unpack_intensives,
     zero_si3_prather_moments,
 )
 
@@ -620,8 +622,35 @@ def apply_ice_adv2d_source_corrections(
     *,
     entry_intensive_contents: jnp.ndarray | None = None,
     contents_are_intensive: bool = False,
+    _use_legacy_extensive_order: bool = False,
 ) -> jnp.ndarray:
-    """Rung-3.2 wrapper over the shared SI3 Prather correction ledger."""
+    """Rung-3.2 wrapper over the shared SI3 Prather correction ledger.
+
+    NEMO recovers intensives before corrections
+    (``icedyn_adv_pra.F90:355-381,405-421``).  The old extensive-ledger
+    association is retained only by the private one-variable ablation.
+    """
+
+    if not contents_are_intensive and not _use_legacy_extensive_order:
+        shape = transported_contents.shape[:2]
+        cell_area = jnp.full(shape, card.dx_m * card.dy_m, dtype=transported_contents.dtype)
+        wet = jnp.ones(shape, dtype=bool)
+        entry_intensives = si3_prather_unpack_intensives(entry_contents, cell_area, wet)
+        transported_intensives = si3_prather_unpack_intensives(
+            transported_contents, cell_area, wet
+        )
+        corrected = apply_si3_prather_source_corrections(
+            entry_intensives,
+            transported_intensives,
+            tracer_names=ICE_ADV2D_TRACERS,
+            nlay_i=card.nlay_i,
+            nlay_s=card.nlay_s,
+            cell_area_m2=card.dx_m * card.dy_m,
+            halo_width=card.halo_width,
+            entry_intensive_contents=entry_intensives,
+            contents_are_intensive=True,
+        )
+        return si3_prather_pack_intensives(corrected, cell_area)
 
     return apply_si3_prather_source_corrections(
         entry_contents,
@@ -641,6 +670,7 @@ def step_ice_adv2d_card(
     state: ICEAdv2DState | None = None,
     *,
     completed_steps: int,
+    _use_legacy_extensive_correction_order: bool = False,
 ) -> ICEAdv2DState:
     state = card.initial_state if state is None else state
     area = card.dx_m * card.dy_m
@@ -663,8 +693,36 @@ def step_ice_adv2d_card(
         concentration_index=ICE_ADV2D_TRACERS.index("a_i"),
         subcycles=card.subcycles,
     )
-    contents = apply_ice_adv2d_source_corrections(card, state.contents, contents)
-    return apply_ice_adv2d_zapsmall(card, state, contents, moments)
+    if _use_legacy_extensive_correction_order:
+        contents = apply_ice_adv2d_source_corrections(
+            card,
+            state.contents,
+            contents,
+            _use_legacy_extensive_order=True,
+        )
+        return apply_ice_adv2d_zapsmall(card, state, contents, moments)
+
+    # Default: reproduce NEMO's single extensive-to-intensive recovery before
+    # every post-advection correction (`icedyn_adv_pra.F90:355-421`).
+    intensives = si3_prather_unpack_intensives(contents, cell_area, wet)
+    entry_intensives = si3_prather_unpack_intensives(state.contents, cell_area, wet)
+    intensives = apply_ice_adv2d_source_corrections(
+        card,
+        entry_intensives,
+        intensives,
+        entry_intensive_contents=entry_intensives,
+        contents_are_intensive=True,
+    )
+    corrected = apply_ice_adv2d_zapsmall(
+        card,
+        state,
+        intensives,
+        moments,
+        contents_are_intensive=True,
+    )
+    return corrected._replace(
+        contents=si3_prather_pack_intensives(corrected.contents, cell_area)
+    )
 
 
 def save_ice_adv2d_restart(
