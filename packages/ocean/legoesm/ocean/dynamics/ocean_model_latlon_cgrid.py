@@ -1531,6 +1531,27 @@ def _nemo_qsr_stage3_rate(
     )
 
 
+def _nemo_ws_stage_barotropic_velocity(
+    stage: int,
+    kbb_velocity: tuple,
+    nnn_velocity: tuple,
+) -> tuple:
+    """Select NEMO's separately carried Kmm pair for one RK3 stage.
+
+    ``stprk3.F90:186`` computes ``uu_b/vv_b(Naa)`` once before all stages.
+    Stage 1 is called with ``Kmm=Nbb`` at :195, then :197 swaps that freshly
+    solved slot into ``Nnn``; stages 2 and 3 therefore read this-step ``Nnn``
+    at :200-207.  Only stage 1 reads the last-step ``Kbb`` pair.  Keeping this
+    choice in a tiny fail-closed helper makes the time-level contract directly
+    testable and prevents a same-step external target from leaking into S-21.
+    """
+    if stage == 1:
+        return kbb_velocity
+    if stage in (2, 3):
+        return nnn_velocity
+    raise ValueError(f"NEMO WS-RK3 stage must be 1, 2, or 3; got {stage}")
+
+
 def _nemo_ws_rk3_tracer_pair_step(
     tr_a: jnp.ndarray,
     tr_b: jnp.ndarray,
@@ -6013,12 +6034,15 @@ class LatLonCGridOceanModel:
                 (u0, v0), h_k_old, 0, eta_stage=state.eta.data,
                 dt=(dt / 3.0 if self._nemo_ws_test_hooks.source_stage_wzv_clock_arm
                     else dt),
-                barotropic_velocity=(None
-                    if _legacy_reduced_transport_mean_arm else (
-                        (state.uu_b.data, state.vv_b.data)
-                        if state.uu_b is not None and state.vv_b is not None
-                        else (jnp.zeros_like(target_u),
-                              jnp.zeros_like(target_v)))),
+                barotropic_velocity=(
+                    None if _legacy_reduced_transport_mean_arm else
+                    _nemo_ws_stage_barotropic_velocity(
+                        1,
+                        ((state.uu_b.data, state.vv_b.data)
+                         if state.uu_b is not None and state.vv_b is not None
+                         else (jnp.zeros_like(target_u),
+                               jnp.zeros_like(target_v))),
+                        (target_u, target_v))),
                 **_stage_transport_kw)
             _operand_name = (
                 self._nemo_ws_test_hooks.expose_stage1_transport_operand)
@@ -6127,9 +6151,15 @@ class LatLonCGridOceanModel:
                 eta_stage=_eta_live_one_third,
                 dt=(dt / 2.0 if self._nemo_ws_test_hooks.source_stage_wzv_clock_arm
                     else dt),
-                barotropic_velocity=(None
-                    if _legacy_reduced_transport_mean_arm
-                    else (target_u, target_v)),
+                barotropic_velocity=(
+                    None if _legacy_reduced_transport_mean_arm else
+                    _nemo_ws_stage_barotropic_velocity(
+                        2,
+                        ((state.uu_b.data, state.vv_b.data)
+                         if state.uu_b is not None and state.vv_b is not None
+                         else (jnp.zeros_like(target_u),
+                               jnp.zeros_like(target_v))),
+                        (target_u, target_v))),
                 **_stage_transport_kw)
             p1u_corr, p1v_corr = _mom_pert_ws(
                 u1_corr, v1_corr, True, _transport_target,
@@ -6165,9 +6195,15 @@ class LatLonCGridOceanModel:
                 (u2_corr, v2_corr), _h_live_one_half, 2,
                 eta_stage=_eta_live_one_half,
                 dt=dt,
-                barotropic_velocity=(None
-                    if _legacy_reduced_transport_mean_arm
-                    else (target_u, target_v)),
+                barotropic_velocity=(
+                    None if _legacy_reduced_transport_mean_arm else
+                    _nemo_ws_stage_barotropic_velocity(
+                        3,
+                        ((state.uu_b.data, state.vv_b.data)
+                         if state.uu_b is not None and state.vv_b is not None
+                         else (jnp.zeros_like(target_u),
+                               jnp.zeros_like(target_v))),
+                        (target_u, target_v))),
                 **_stage_transport_kw)
             _g2_override = self._nemo_ws_test_hooks.stage3_transport_override
             if _g2_override is not None:

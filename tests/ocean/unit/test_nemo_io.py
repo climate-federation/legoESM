@@ -176,6 +176,19 @@ def test_restart_rejects_half_depth_mean_pair(tmp_path):
         read_nemo_restart(str(p), nn_hls=1)
 
 
+def test_restart_malformed_depth_mean_does_not_use_missing_field_fallback(
+        tmp_path):
+    """restart.F90:311-323 falls back only when uu_n is absent, not unreadable."""
+    p = tmp_path / "restart_bad_baro.nc"
+    _write_restart(p, with_rhd=False, with_barotropic_velocity=True)
+    with xr.open_dataset(p, decode_times=False) as ds:
+        altered = ds.load()
+    altered["uu_n"] = (("y", "x"), np.full((NY, NX), "not-a-real"))
+    altered.to_netcdf(p, mode="w")
+    with pytest.raises((TypeError, ValueError)):
+        read_nemo_restart(str(p), nn_hls=1)
+
+
 def test_restart_before_reads_distinct_tb_sb_ub_vb(tmp_path):
     """#1317 --bridge-before: tb/sb/ub/vb read via the SAME halo-strip +
     axis-order path as tn/sn/un/vn, but from the distinct +1-offset pattern
