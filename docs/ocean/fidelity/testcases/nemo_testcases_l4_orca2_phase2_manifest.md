@@ -219,3 +219,42 @@ The synthetic walk derives two headers with 9 and 20 fields and a total of
 3,090,336 bytes; both header-count and digest-bound one-ULP plants return
 `PASS_NONZERO`.  The final handoff receipt, acquisition gate, and this
 self-excluding manifest are bound by the handoff commit and bundle digest.
+
+## Phase-2e malformed O1 record and schema-fix handoff
+
+The corrective preregistration is commit `6dba63974`.  The executed acquisition
+run is retained but retracted as an O1 oracle: frame 2 has 23,232 trailing
+bytes because three full-domain arrays were written under a reduced-domain
+header.  No O1 numerical comparison was made.
+
+Root: `/data/abyssal/dbalwada/nemo-testcases-l4/phase2e`
+
+| executed-run evidence | bytes | digest |
+|---|---:|---|
+| malformed O1 record | 3,113,568 | `982347ad6f617e388104c108a782b21e79d2ee95583872849cd865b8e24c4f31` |
+| `o1_gate_malformed.json` | 54 | `fd2e1c1cf015fe62be68b43e391b9b5fef37f3a29de518a2a7d2a968d40f8ee1` |
+| `o1_gate_malformed.stdout.log` | 54 | `fd2e1c1cf015fe62be68b43e391b9b5fef37f3a29de518a2a7d2a968d40f8ee1` |
+| `inherited_and_ordinary_identity.json` | 40,027 | `f3da75ce9657bd201734ec06eff397fc9e86acecdb2419f5b7005605a2044963` |
+| `non_o1_schema_summary.json` | 30,364 | `869857b953aed24c1f289eecba969068db01822960803737f9ff4137dc1c5e65` |
+| complete executed-run manifest, 188 items | 17,579 | `84f154edccfc9cb8c3e0303003f85d87000e87bd70fd2abae644bca949471196` |
+
+The ordinary-output gate reports 4 / 4 exact restart shards and 8 / 8 exact
+history payloads under the timestamp rule.  Strict inherited-record identity
+is 84 / 91; the gate retains all per-file digests and fails closed pending an
+explicit decision about source-undefined slots.
+
+### Schema-fixed build and prepared run
+
+| prepared artifact | bytes | digest |
+|---|---:|---|
+| `build/nemo_ORCA2_OMIP_L4_phase2e_o1_schemafix.exe` | 54,920,400 | `a39000462c7da6278faa197757ffa6fb78593e3001862054cc197d617b1aa20a` |
+| `build/build_ORCA2_OMIP_L4_phase2e_o1_schemafix.log` | 10,994 | `2b1b3f170c26165bde40035137cf67504db13509f670e41c277e6c21f5e54d64` |
+| `build/phase2e_o1_schemafix_MY_SRC.sha256` | 2,100 | `91bac34d01d7eb0517637e66ff7ebcaa74a9570a9785eeb413809d2828457cf3` |
+| `build/phase2e_o1_schemafix_ZGV.txt` | 0 | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| copied-config `MY_SRC/sbcblk.F90` | source | `fcb1d0add456f709b49c78e1e6a1c12fd79c59b80da81fe2f55ef7fe03d6c3ab` |
+| prepared 63-item run census | 5,343 | `121b3b7827ba64653178f93b150d217a10ced598342eb82f915d9611e08d2078` |
+| committed schema-fix launcher | 2,282 | `44b826fdea3b063e31242088755337093b5997e5232942d1280fa6a76662752c` |
+
+The acquisition gate and final receipt are hashed by the handoff commit.  This
+manifest deliberately excludes its own digest; the bundle digest closes the
+review artifact set.

@@ -7,12 +7,17 @@ import argparse
 import json
 import shutil
 import struct
+import sys
 import tempfile
 from pathlib import Path
 
 import numpy as np
 
-from scripts.validate.ocean_fidelity.orca2_l4 import (
+REPO_ROOT = Path(__file__).resolve().parents[4]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
     nemo_testcase_l4_orca2_phase2b_exchange_gate as exchange,
 )
 
@@ -108,6 +113,32 @@ def planted_controls(path: Path) -> dict[str, str]:
     return results
 
 
+def compare_inherited_records(run_dir: Path, accepted: Path) -> dict:
+    """Report strict raw-byte identity for every pre-existing oracle record."""
+    expected = exchange.phase1.expected_inventory() | {exchange.RECORD}
+    rows = []
+    for name in sorted(expected):
+        left = accepted / name
+        right = run_dir / name
+        require(left.is_file(), f"accepted inherited record missing: {name}")
+        require(right.is_file(), f"candidate inherited record missing: {name}")
+        left_digest = exchange.sha256(left)
+        right_digest = exchange.sha256(right)
+        rows.append({
+            "file": name,
+            "status": "EXACT_BYTES" if left_digest == right_digest else "DIFF_BYTES",
+            "accepted_sha256": left_digest,
+            "candidate_sha256": right_digest,
+        })
+    exact = sum(row["status"] == "EXACT_BYTES" for row in rows)
+    return {
+        "exact": exact,
+        "total": len(rows),
+        "differing": [row["file"] for row in rows if row["status"] != "EXACT_BYTES"],
+        "rows": rows,
+    }
+
+
 def validate(
     run_dir: Path,
     control: Path,
@@ -115,6 +146,7 @@ def validate(
     surface_sha256: str,
     o1_sha256: str | None,
     plants: bool,
+    accepted_instrumented: Path | None = None,
 ) -> dict:
     expected = exchange.phase1.expected_inventory() | {exchange.RECORD, RECORD}
     observed = {p.name for p in run_dir.glob("oracle_*.bin")}
@@ -123,15 +155,38 @@ def validate(
         f"record inventory missing={sorted(expected-observed)} "
         f"extra={sorted(observed-expected)}",
     )
+    legacy_manifest_for_candidate = (
+        None if accepted_instrumented is not None else legacy_manifest
+    )
     result = {
         "status": "PASS",
         "oracle_label": "VARIANT",
-        "legacy_records": exchange.validate_legacy_records(run_dir, legacy_manifest),
+        "legacy_records": exchange.validate_legacy_records(
+            run_dir, legacy_manifest_for_candidate),
         "surface_input": exchange.validate_surface(
-            run_dir / exchange.RECORD, surface_sha256, icebergs_off=True),
+            run_dir / exchange.RECORD,
+            None if accepted_instrumented is not None else surface_sha256,
+            icebergs_off=True,
+        ),
         "o1": read_o1(run_dir / RECORD, o1_sha256),
         "identity": exchange.phase1.validate_identity(control, run_dir),
     }
+    if accepted_instrumented is not None:
+        result["accepted_legacy_records"] = exchange.validate_legacy_records(
+            accepted_instrumented, legacy_manifest)
+        result["accepted_surface_input"] = exchange.validate_surface(
+            accepted_instrumented / exchange.RECORD,
+            surface_sha256,
+            icebergs_off=True,
+        )
+        inherited = compare_inherited_records(run_dir, accepted_instrumented)
+        result["inherited_record_identity"] = inherited
+        if inherited["exact"] != inherited["total"]:
+            result["status"] = "FAIL"
+            result["error"] = (
+                "strict inherited-record identity failed: "
+                f"{inherited['exact']} / {inherited['total']} exact"
+            )
     if plants:
         result["o1_planted_controls"] = planted_controls(run_dir / RECORD)
     return result
@@ -144,6 +199,7 @@ def main() -> int:
     parser.add_argument("--legacy-record-manifest", type=Path, required=True)
     parser.add_argument("--surface-sha256", required=True)
     parser.add_argument("--o1-sha256")
+    parser.add_argument("--accepted-instrumented", type=Path)
     parser.add_argument("--plant-controls", action="store_true")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -151,13 +207,15 @@ def main() -> int:
         result = validate(
             args.run_dir, args.control, args.legacy_record_manifest,
             args.surface_sha256, args.o1_sha256, args.plant_controls,
+            args.accepted_instrumented,
         )
-    except (GateError, exchange.GateError, OSError, UnicodeError,
+    except (GateError, exchange.GateError, exchange.phase1.GateError,
+            OSError, UnicodeError,
             struct.error, ValueError) as exc:
         result = {"status": "FAIL", "error": str(exc)}
         code = 1
     else:
-        code = 0
+        code = 0 if result["status"] == "PASS" else 1
     text = json.dumps(result, indent=2, sort_keys=True)
     print(text)
     if args.output is not None:
