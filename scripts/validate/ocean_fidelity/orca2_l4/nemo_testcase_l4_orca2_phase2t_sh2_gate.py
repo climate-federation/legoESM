@@ -51,8 +51,10 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def read_arrays(path: Path, mesh: Path) -> tuple[dict[str, np.ndarray], dict]:
-    metadata = acquisition.read_zdf_v2(path, mesh, require_shear=True)
+def read_arrays(path: Path, mesh: Path, *, require_shear: bool = True
+                ) -> tuple[dict[str, np.ndarray], dict]:
+    metadata = acquisition.read_zdf_v2(
+        path, mesh, require_shear=require_shear)
     extents = [tuple(row) for row in metadata["extent_table"]]
     fields = list(zip(
         schema.FIELDS_3D + schema.FIELDS_2D,

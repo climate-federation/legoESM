@@ -245,6 +245,7 @@ def test_orca2_card_selects_resolved_rk3_sh2():
         "nemo_face_native_now2", "nemo_face", "step_entry",
         "nemo_qco_live_face",
     )
+    assert tke.bottom_tke_bc is True
     validate_nemo_testcase_card(card)
 
     # Binding selector plant: the former tuple must be rejected by the real
@@ -263,6 +264,18 @@ def test_orca2_card_selects_resolved_rk3_sh2():
         recipe=card.recipe._replace(
             model_config=planted_cfg, physics_config=planted_cfg.physics))
     with pytest.raises(ValueError, match="NOW\\*NOW face-native selector"):
+        validate_nemo_testcase_card(planted)
+
+    bottom_off = tke._replace(bottom_tke_bc=False)
+    planted_cfg = card.recipe.model_config._replace(
+        physics=card.recipe.model_config.physics._replace(
+            vertical_mixing=(
+                card.recipe.model_config.physics.vertical_mixing._replace(
+                    tke=bottom_off))))
+    planted = card._replace(
+        recipe=card.recipe._replace(
+            model_config=planted_cfg, physics_config=planted_cfg.physics))
+    with pytest.raises(ValueError, match="bottom-friction Dirichlet"):
         validate_nemo_testcase_card(planted)
 
 

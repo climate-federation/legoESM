@@ -690,20 +690,10 @@ class TKEConfig(NamedTuple):
     #   BC — the prior legoESM behaviour).
     # ``True``: NEMO's bottom friction TKE source (zdftke.F90:279-288):
     #   en(mbkt+1) = max(0.001875·CdU_bot·|u_bot|, rn_emin)·ssmask, held as
-    #   a Dirichlet identity row at the ABSOLUTE-DEEPEST array interface
-    #   (``e_new[..., -1]``), not the per-column bathymetry-relative
-    #   ``bottom_level``-adjacent row. On a FLAT-BOTTOM column (every DINO
-    #   column here reaches the max depth) these coincide exactly; on
-    #   variable topography (a shallower column) the true seafloor
-    #   interface sits SHALLOWER than the array's last row, so the pin
-    #   lands one level below the real bottom (a masked/dry level there —
-    #   downstream wet-interface masking prevents any leak into wet cells,
-    #   so this is NOT a correctness bug, but the BC does not fire at the
-    #   physically correct row on shallow columns). Physics-validator
-    #   review 2026-07-24: acceptable for the Phase-2 kamm-card target
-    #   (deep/not entrainment-relevant per the Phase-1 ranking); a
-    #   bottom_level-relative scatter is the documented follow-up before
-    #   any abyssal-tendency certification.
+    #   a Dirichlet identity row at each column's bathymetry-relative
+    #   ``bottom_level``-adjacent W interface when the caller supplies a
+    #   partial-cell bottom index.  The legacy flat-bottom interface remains
+    #   supported by pinning ``e_new[..., -1]`` when no bottom index exists.
     #   Requires the model-step caller to thread the bottom-cell velocities
     #   + the NEMO bottom-drag rate (reusing
     #   ``nemo_effective_bottom_drag_r`` — single-owner doctrine, no

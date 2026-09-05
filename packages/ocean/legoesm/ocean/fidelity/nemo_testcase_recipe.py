@@ -1227,6 +1227,11 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     )
     tke_config = model_config.physics.vertical_mixing.tke._replace(
         tke_background=1.0e-10,
+        # ORCA2 resolves ln_drg_OFF=.false.; tke_tke therefore applies the
+        # bottom-friction Dirichlet value unconditionally at mbkt+1
+        # (zdftke.F90:279-288).  nn_bc_bot is read for wave coupling but does
+        # not guard this executed branch (declared/read only at :85/:762).
+        bottom_tke_bc=True,
     )
     model_config = model_config._replace(
         physics=model_config.physics._replace(
@@ -1384,6 +1389,10 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
                 raise ValueError(
                     "ORCA2-zps requires the RK3 zdf_sh2 NOW*NOW face-native "
                     f"selector tuple {expected_sh2!r}, got {sh2_tuple!r}")
+            if not tke.bottom_tke_bc:
+                raise ValueError(
+                    "ORCA2-zps requires the executed zdftke bottom-friction "
+                    "Dirichlet boundary (ln_drg_OFF=.false.)")
             if card.surface_boundary_condition != "ncar_core_sbcblk":
                 raise ValueError("ORCA2-zps requires the NCAR/CORE sbcblk card")
             if card.surface_input_operator != "nemo_fld_read":

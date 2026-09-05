@@ -128,11 +128,14 @@ def validate(deck: Path, *, plant: bool) -> dict[str, object]:
     expected = ("nemo_face_native_now2", "nemo_face", "step_entry",
                 "nemo_qco_live_face")
     require(observed == expected, f"ORCA2 SH2 tuple {observed!r}")
+    require(tke.bottom_tke_bc is True,
+            "ORCA2 bottom-friction TKE Dirichlet selector is not restored")
     return {
         "status": "PASS",
         "execution": {"backend": jax.default_backend(), "dtype": "float64",
                       "transcendentals": get_policy().transcendentals},
         "orca2_sh2_tuple": list(observed),
+        "orca2_bottom_tke_bc": bool(tke.bottom_tke_bc),
         "cross_card_kt1_entry": rows,
         "scope": (
             "actual NEMO kt=1 Nbb entry rows; no ocean step.  The production "
