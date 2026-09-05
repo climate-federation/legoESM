@@ -3224,3 +3224,46 @@ tripwire.  The committed Round-23 manifest is
 `scripts/validate/ocean_fidelity/testcases/manifests/nemo_testcase_l2_gyre_round23.json`,
 SHA-256
 `74936c85585699e215b5cade81bb9669024c2de059a3a0eb07ddf5a273f381b3`.
+
+## Round 24 preregistration — Decision 8 prognostic depth-mean state
+
+User Decision 8 (ASKED, 2026-09-05) authorizes exactly one U-face/V-face pair
+on NEMO-identity states: NEMO's prognostic `uu_b/vv_b`.  The source contract is
+`oce.F90:39,99` (declaration/allocation), `istate.F90:143-167` (rest-start
+depth mean and Kbb-to-Kmm copy), `dynspg_ts.F90:484-500` (Kmm/Kbb external-mode
+seed), `dynspg_ts.F90:857-897` (Kaa write),
+`stprk3_stg.F90:257-274` (Kmm S-21 transport correction),
+`stprk3_stg.F90:115-228` (stage Kaa ownership), and
+`stprk3.F90:195-213` (stage rotations and final Naa/Nbb swap).  Restart writes
+Kbb at `restart.F90:175-182`, reads it at `restart.F90:304-314`, and permits
+the depth-mean reconstruction only when `uu_n/vv_n` is missing at :316-330.
+The shared state will follow exactly that contract; reconstruction is a loud
+legacy-restart fallback, never the identity live-step route.
+
+The existing Rule-1d registry entry for
+`oracle_bt_frames_ktNNNNNNNN.bin` is `after`: the instrumented
+`stprk3.F90:344-352` writes explicit Kaa `uu_b/vv_b` plus `un_adv/vn_adv`
+after `stp_2D`.  The final `stprk3.F90:213` swap makes that Kaa pair the next
+step's Kbb.  Thus the existing ten oracle records are sufficient; no NEMO run
+is requested.
+
+The one-variable arm replaces live re-derivation by the carried pair.  A
+rest-start run has a strict causality control: kt1 consumes the same exact
+zero pair as the current implementation and merely produces Kaa; kt2 consumes
+that pair; therefore kt3 entry is the first ordinary prognostic frame allowed
+to move.  Consequently the preregistered kt1 stage-2 Kaa residuals
+(`2.1986806906376666e-15` U, `2.2380914396075147e-15` V) and the kt2
+first-over-bar T/S/u/v rows must remain unchanged.  A change in either is a
+failure of isolation, not an improvement.  The carried Kaa itself must be
+`0 / n` against every available oracle frame.  GYRE kt3--10 and the seven
+OVERFLOW Rule-12 rows are predicted to move toward NEMO, without presuming
+that unrelated open operators clear.  LOCK and any multi-step ORCA2 rows may
+first move at kt3; their rest-start single-stage rows must remain 0 ulp.  The
+C1D coupled-slab kt2 `PRE_SSM.u=1.1172865e-7` row is likewise predicted
+unchanged because it precedes the first carried-state effect.
+
+Non-NEMO constructors must retain `None/None`, adding no array pytree leaf.
+The paired-field validation, one-cell three-ulp plant, restart missing-field
+plant, and full-state restart continuation are the preregistered controls.
+The machine-readable preregistration is
+`scripts/validate/ocean_fidelity/testcases/manifests/nemo_testcase_l2_gyre_round24_preregister.json`.
