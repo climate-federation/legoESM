@@ -118,6 +118,10 @@ def test_nemo_card_builds_valid_latlon_model_and_is_setup_agnostic():
     assert rest.physics_config == rest.model_config.physics
     assert eady.physics_config == eady.model_config.physics
     assert rest.initial_state.T.data.shape != eady.initial_state.T.data.shape
+    assert rest.initial_state.uu_b is not None
+    assert rest.initial_state.vv_b is not None
+    assert eady.initial_state.uu_b is not None
+    assert eady.initial_state.vv_b is not None
 
 
 def test_nemo_card_one_step_rest_sanity_is_finite():

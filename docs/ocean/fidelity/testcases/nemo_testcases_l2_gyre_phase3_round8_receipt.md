@@ -1,4 +1,4 @@
-# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–24 boundary receipt
+# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–25 boundary receipt
 
 **Verdict: HOLD.**  User Decision 8 authorizes and Round 24 implements NEMO's
 separately prognostic `uu_b/vv_b` pair on NEMO-identity cards.  The equal-input
@@ -11,8 +11,9 @@ Kaa remains DEBT at `2.1986806906376666e-15` U and
 trajectory gates expose compensating-error debt even though no first-over-bar
 moves earlier.  Under Rule 12 the source-faithful state fix stays and those
 rows enter the ordered register.  ORCA2's cellwise production-W comparison
-passes (maximum worsening 1 row-scale ulp); the C1D kt2 PRE_SSM six-row vector
-is unchanged.  Stage-3/ZDF/TKE work is not entered across these boundaries,
+passes (maximum worsening 1 row-scale ulp).  The reported C1D kt2 control is
+retracted below because that probe never enabled the identity field and thus
+perturbed nothing.  Stage-3/ZDF/TKE work is not entered across these boundaries,
 and nothing is merged into the reconciled/integration line.
 
 Updated: 2026-09-05
@@ -3169,30 +3170,15 @@ owner.  The exact machine-readable census is
 SHA-256
 `1e8a70a2b6df820a31ab6432e902334692afea36a04ce5f1953241b4c0b13422`.
 
-The ordered source walk stops at a structural input boundary before another
-literal arithmetic statement can be tested.  NEMO declares `uu_b/vv_b` as
-prognostic state (`oce.F90:39,99`), writes and reads it in restart files
-(`restart.F90:175-182,304-320`), and updates the Kaa values in
-`dynspg_ts.F90:861-895`.  The first consuming statement is
-`stprk3_stg.F90:257-274`: for GYRE/OVERFLOW's HYB arm, lines 267-268 form
-`zub=un_adv*r1_hu(Kmm)-uu_b(Kmm)` and its V analogue before lines 272-274
-form `zFu/zFv`.  In the shared model, `_nemo_stage_corrected_velocity`
-contains the literal subtraction, but the stage-1 call supplies
-`zeros_like(target_u/v)` at
-`ocean_model_latlon_cgrid.py:6002-6010` because the carried model state has no
-NEMO `uu_b/vv_b(Kbb)` member.  Re-reducing the 3-D velocity is algebraically
-equivalent, not bit-exact, and was already rejected by review.
-
-The label is therefore
-**CONFIRMED_STRUCTURAL_BOUNDARY_NUMERIC_VALUE_UNMEASURED**: the required NEMO
-operand and its persistence are source-confirmed, while no kt6--10 NEMO dump
-of that operand exists from which to assign a numeric residual to the first
-subtraction.  This is neither an owner exoneration nor permission to infer the
-value.  Per the user's standing decision, prognostic `uu_b/vv_b` remains
-**HOLD / OPEN USER DECISION**; this round adds no state, rederivation, card
-fork, or literal “fix.”  The seven Rule-12 rows stay registered behind that
-boundary.  Because there is no eligible shared change, no additional
-LOCK/GYRE/ORCA2 cross-card run is claimed for this subsection.
+**Rule-11 retraction (Round 25):** the ordered-walk conclusion immediately
+above was **REFUTED AND ILL-POSED** for the stage-2 and kt1 rows.  Although
+`uu_b/vv_b` really is prognostic (`oce.F90:39,99`) and is read by S-21,
+`stp_2D` first writes Naa at `stprk3.F90:186`; the stage-1 swap at :197 makes
+that same-step result Nnn before stages 2 and 3 at :200-207.  Those stages
+never lacked their `uu_b/vv_b(Nnn)` operand.  The carried Kbb pair has live
+scope only at a subsequent step's seed and stage-1 S-21.  This dead attribution
+is retained next to the source-order fact that killed it and the localization
+probe now emits the same retraction instead of the obsolete boundary label.
 
 No lane-3b dry-face NaN producer was handed over during Round 23.  It remains
 registered; no downstream mask workaround was made.
@@ -3302,17 +3288,18 @@ required exhaustive restart inventory now classifies them as prognostic.  No
 TKE arithmetic changed; this is a necessary fail-closed policy closure exposed
 by adding the new pair.
 
-### Preregistered causality correction
+### Preregistered causality correction — Rule-11 retraction
 
-The preregistration above predicted no ordinary kt2 movement because the
-external window enters kt1 from a zero Kbb pair.  That prediction is
-**REFUTED** as a source-order claim: `dynspg_ts` writes Kaa before the same
-whole step reaches `stprk3_stg.F90:257-274`, and S-21 immediately consumes the
-new external target.  Thus same-step stage transports may move even though the
-window seed did not.  The evidence is card-discriminating: ORCA2 production
-stage transports move materially, C1D kt2 does not move, and GYRE's ordinary
-kt2 changes are at most one row-scale ulp (T/S) or `0.03125` row-scale ulp
-(u/v).  The historical preregistration is retained rather than rewritten.
+The preregistration above and Round 23's “first unavailable operand =
+`uu_b/vv_b(Kbb)`” claim for stage-2 and kt1 rows are **REFUTED AND
+ILL-POSED**.  `stp_2D` runs once before the stages and writes Naa
+(`stprk3.F90:186`); stage 1 is called with Kmm=Nbb at :195, then the :197 swap
+promotes the just-solved Naa slot to Nnn, which stages 2 and 3 read at :200-207.
+Stage 2 therefore consumes `uu_b/vv_b(Nnn)`, a same-step value that was never
+unavailable.  The carried Kbb pair can move only the next step's external-mode
+seed (`dynspg_ts.F90:484-500`) and stage-1 S-21 correction
+(`stprk3_stg.F90:257-274`).  The historical preregistration is retained next
+to this dead finding so it cannot be rediscovered.
 
 ### GYRE production-JIT register against oracle V2
 
@@ -3446,7 +3433,7 @@ is now:
 | LOCK kt2--10 trajectory | first-over-bar improves kt3 T/u to kt4 u; seven Rule-12 u rows | compensating error exposed; faithful state stays |
 | OVERFLOW kt2--10 trajectory | first-over-bar remains kt2 T/u; 23 Rule-12 rows | compensating error exposed; faithful state stays |
 | ORCA2 production W | still DEBT, cellwise Decision-8 comparison PASS | existing ORCA2 stage-transport/W owner remains with lane 4 |
-| C1D kt2 PRE_SSM | six rows unchanged; u `1.1172865415493005e-7` | Decision 8 refuted as that row's owner; lane-3 boundary remains |
+| ~~C1D kt2 PRE_SSM~~ | ~~six rows unchanged~~ | **RETRACTED invalid control**: the branch card never enabled `nemo_prognostic_barotropic_velocity`; the probe-only number perturbed nothing and is not evidence about Decision 8 |
 | OVERFLOW dry-face NaN producer | no lane-3b handoff received | registered only; no mask workaround |
 
 Before the Round-20 HOLD on a reconciled/integration merge can lift, the GYRE
@@ -3468,7 +3455,7 @@ hold.  No merge or push was performed.
 | GYRE kt1--10 and stage-2 Kaa | ASKED item 4 | measured; full tables above, prediction partly refuted |
 | LOCK and OVERFLOW stage/trajectory cross-card gates | ASKED item 4 / Rule 12 | stage PASS; trajectory FAIL without earlier first-over-bar; every moved row enumerated |
 | ORCA2 production-W and entry-stage gates | ASKED item 4 | fresh probe measured; cellwise Rule 12 PASS, production rows remain DEBT |
-| C1D kt2 PRE_SSM | ASKED item 4 | exact no-move control; first debt unchanged |
+| ~~C1D kt2 PRE_SSM~~ | ASKED item 4 | **RETRACTED invalid control**; no carried-state flag on this branch, so no lane-3 number is claimed |
 | kt5 restart then kt6--10 | ASKED item 4 | every returned pytree leaf bit-identical to unbroken run |
 | new NEMO acquisition | conditional | not needed; existing BTFRM records contain Kaa pair |
 | rederive live state from 3-D velocity | forbidden | removed from identity path; legacy missing-restart fallback only |
@@ -3633,8 +3620,8 @@ The independent cellwise Rule-12 replay nevertheless passes:
 | zFv | 1 | 1 | 0 / 228641 | 28933 / 19593 |
 
 The ORCA2 entry stage gate is still exact, and its one-cell production-W plant
-exits `1`.  The C1D fresh probe is based on `17693b92997`, with the same state
-API plus the one-column opt-in at `07f5a995e69`.  All six kt2 PRE_SSM rows are
-bit-for-bit unchanged from its last scalar-libm baseline; first-over-bar stays
-`CONTINUOUS.kt2_PRE_SSM.u = 1.1172865415493005e-7`.  Its trajectory plant
-exits `1`.
+exits `1`.  The former C1D paragraph is struck: its conflict-marked probe-only
+opt-in never existed on this branch, so the six-row no-move output was a
+control that perturbed nothing.  No C1D numerical result is claimed here;
+lane 3b must remeasure after opting its NEMO-identity card into the shared
+state field.

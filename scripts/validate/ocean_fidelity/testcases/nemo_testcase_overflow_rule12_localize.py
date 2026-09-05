@@ -188,19 +188,21 @@ def localize(before_path: Path, after_path: Path, *, plant: bool) -> dict:
             "non_bottom": total_interior,
             "classification": "REFUTED_PARTIAL_CELL_BOTTOM_CLUSTER",
         },
-        "first_unconstructible_operand": {
-            "classification": "CONFIRMED_STRUCTURAL_BOUNDARY_NUMERIC_VALUE_UNMEASURED",
-            "nemo_statement": (
-                "stprk3_stg.F90:257-274 forms zub=un_adv*r1_hu(Kmm)-uu_b(Kmm) "
-                "before zFu; the V statement is analogous"
+        "retracted_finding": {
+            "classification": "REFUTED_AND_ILL_POSED",
+            "dead_claim": (
+                "persistent uu_b/vv_b(Kbb) was the first unavailable operand "
+                "for the stage-2 and kt1 rows"
             ),
-            "legoesm_statement": (
-                "ocean_model_latlon_cgrid.py supplies zero/reduced barotropic_velocity "
-                "because persistent uu_b/vv_b(Kbb) is absent from carried state"
+            "killed_by": (
+                "stprk3.F90:186,195-207: stp_2D writes Naa before all stages; "
+                "the stage-1 swap promotes it to Nnn, so stages 2-3 read this-step "
+                "Nnn and never the carried Kbb pair"
             ),
-            "disposition": (
-                "HOLD: prognostic uu_b/vv_b state is an open user decision; no rederivation "
-                "or per-card arm is eligible"
+            "live_scope": (
+                "the carried Kbb pair can affect only a later step's external-mode "
+                "seed (dynspg_ts.F90:484-500) and stage-1 S-21 operand "
+                "(stprk3_stg.F90:257-274)"
             ),
         },
     }

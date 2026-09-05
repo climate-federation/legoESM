@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from typing import NamedTuple
 
 import numpy as np
+import jax.numpy as jnp
+from legoesm.core.field import Field
 from legoesm.core.transcendentals import cos as precision_cos
 from legoesm.core.transcendentals import sin as precision_sin
 from legoesm.core.transcendentals import tanh as precision_tanh
@@ -496,13 +498,31 @@ def build_nemo_eady_recipe(
 
     base = build_eady_uniform_setup(n_lat=n_lat, n_lon=n_lon, nlev=nlev)
     model_config = nemo_lat_lon_model_config(cfg)
+    # NEMO carries uu_b/vv_b on every configuration (oce.F90:39,99), not
+    # only on testcase cards.  This setup explicitly removes the depth mean
+    # from its initial shear, so istate.F90:143-167 yields an exact-zero pair.
+    # Keep the pair attached only to this NEMO recipe; the underlying Eady
+    # experiment remains a non-NEMO state with None leaves.
+    base_state = base.initial_state
+    initial_state = base_state._replace(
+        uu_b=Field(
+            data=jnp.zeros(base_state.u.data.shape[:-1],
+                           dtype=base_state.u.data.dtype),
+            name="uu_b", dims=base_state.u.dims[:-1], units="m/s",
+            staggering="edge"),
+        vv_b=Field(
+            data=jnp.zeros(base_state.v.data.shape[:-1],
+                           dtype=base_state.v.data.dtype),
+            name="vv_b", dims=base_state.v.dims[:-1], units="m/s",
+            staggering="edge"),
+    )
     return NEMORecipe(
         model_config=model_config,
         physics_config=model_config.physics,
         grid=base.grid,
         z_coord=base.z_coord,
         land_mask=base.wall_mask,
-        initial_state=base.initial_state,
+        initial_state=initial_state,
     )
 
 
