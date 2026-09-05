@@ -728,6 +728,96 @@ the stopping deliverable.
 | Produce an ORCA1-versus-certified-selector coverage table without implementing new arms | ASKED | Pending user scope decision |
 | Run NEMO from the sandbox, implement landfast/multi-category/thermodynamic arms, change canonical core/defaults/bar, edit shipped files, delete artifacts, use GPU/MPI, or push | UNASKED | Outside authorized scope |
 
+## Round-15 ORCA1 dynamics closure (registered before measurement or code)
+
+### Decision 13: source-order Prather corrections are the default
+
+NEMO first recovers each intensive tracer from its transported extensive
+content (`icedyn_adv_pra.F90:355-381`) and only then executes diagnostics,
+`Hbig_pra`, `Hsnow_pra`, and `ice_var_zapneg`
+(`icedyn_adv_pra.F90:383-421`).  The shared legoESM path will therefore recover
+the complete intensive vector before applying those corrections on **every**
+card.  Rung 3.2 will repack only at its pre-existing extensive outer-state
+boundary.  The former correct-while-extensive association remains reachable
+only through an underscore-prefixed test ablation and is never a default or
+card selector.
+
+The preregistered prediction is that the ordinary rung-3.2 register moves
+toward NEMO: its DEBT-row count or maximum error decreases, with no previously
+exact row becoming worse.  CONFIRM is that directional move; REFUTE is no
+movement; a regression is any previously exact row becoming nonexact or any
+maximum increasing.  Rungs 3.3 and 3.4 already use intensive correction order,
+so their registers are predicted byte-identical before/after.  The production
+ADV2D replay, all three scientific registers, and a private old-order
+one-variable arm will record the result under Rules 8 and 12.
+
+### Completed-step-8 dynamics carry census
+
+The five non-bit-exact completed-step-8 outputs (`u_ice`, `v_ice`,
+`stress1_i`, `stress2_i`, `stress12_i`) are traced from the oracle `kt=8`
+entry.  The ordered input register is: both current/before velocities; all
+three carried stresses; `a_i`, `v_i`, `v_s`, `v_ip`, and `v_il`; H79 strength;
+ocean U/V, SSH/slope, Coriolis, T/U/V masks; atmosphere and ocean stresses
+including their interpolation/rotation signs; aEVP alpha/beta inputs; and
+landfast/basal operands when selected.  `icestp.F90:151,158-159` and
+`icedyn.F90:130-135` define the outer order; `icedyn_rhg_evp.F90:249-374`
+defines setup and `:381-741` defines the subcycles.
+
+The prediction is that the first non-bit input is a source-association result
+formed before the aEVP subcycle, rather than a separately missing prior-
+velocity state: NEMO's `u_ice_b`/`v_ice_b` at
+`icedyn_rhg_evp.F90:559-562,610-613,665-668,717-720` are the same values saved
+at `icestp.F90:151`.  CONFIRM requires a named input and its producing source
+statement plus a one-variable downstream move.  REFUTE is every registered
+input bit-exact, which is a contradiction with the exact-input Round-13
+subcycle replay and must stop attribution.  If the required NEMO internal was
+not captured, the result is UNMEASURED and a copy-run `run.sh` is the only
+authorized oracle action.
+
+### Lemieux-2016 landfast arm
+
+The one shared C-grid solver gains the `ln_landfast_L16` arm while its default
+remains off.  The source-literal implementation covers: tensile factor `zkt`
+(`icedyn_rhg_evp.F90:254-260,457-489`); U/V ice thickness and critical-depth
+tests; U/V and diagnostic T basal coefficients (`:333-363`); bottom-drag
+speed, `zTauB`, and static-friction branches in both parity paths
+(`:530-741`); and the resolved ORCA1 coefficients from
+`ORCA1-omip/EXPREF/namelist_ice_ref:59-63`.  Every written arithmetic statement
+is guarded by `nemo_source_round`.  Hand-computed tests must bind the
+depth-triggered, iceberg-mask, tensile-stress, basal-denominator, and static-
+friction branches.  The future ORCA2-variant coverage register requires
+per-cell `at_i`/`v_i` (and hence thickness), U/V/T bathymetry, grounded-iceberg
+masks, fast masks, and all four resolved `rn_lf_*` values.
+
+This round makes **no certification claim** for landfast: the ORCA2 variant
+frames do not yet exist.  The predicted unit-test result is exact equality to
+the independently written scalar formulas for each branch, finite JIT output,
+and a nonzero row-level plant when basal stress is perturbed.  Those are
+implementation and control results only; oracle trajectory status stays
+UNMEASURED.
+
+### ORCA1 embedded-mass carry
+
+`snwice_mass` and `snwice_mass_b` are registered as distinct prognostic state
+needed by `ice_var_sshdyn` (`icedyn_rhg_evp.F90:265-268`), updated and restarted
+at `iceupdate.F90:187-193,457-480`, and initialized at
+`iceistate.F90:400-411`.  The ORCA1 ocean deck resolves
+`ln_ice_embd=.false.` (`ORCA1-omip/EXPREF/namelist_ref:199`), making their SSH
+correction inert in that deck but not removing the missing carry.  Until both
+levels are represented and covered by the ORCA2-variant frames, this is
+UNMEASURED state-design debt.
+
+### Round-15 ASKED / UNASKED choices
+
+| choice | disposition | reason |
+|---|---|---|
+| default old order -> NEMO order (user decision 13) | ASKED | Explicit user decision; applies to every card and rung |
+| Re-score rung 3.2/3.3/3.4 registers and ADV2D replay, with Rule 8/12 movement | ASKED | Mandatory evidence for the default change |
+| Census completed-step-8 dynamics inputs and name the first non-bit producer | ASKED | Primary attribution item |
+| Implement source-literal `ln_landfast_L16` in the shared C-grid arm, default off | ASKED | ORCA1 target decision 11 |
+| Register `snwice_mass`/`snwice_mass_b` as UNMEASURED state debt | ASKED | ORCA1 target state inventory |
+| Certify landfast before ORCA2-variant frames, run NEMO in this sandbox, restore the old order as a public/default selector, implement jpl=5, alter canonical core files/bar, edit shipped files, delete artifacts, use GPU/MPI, or push | UNASKED | Outside this round and the standing rules |
+
 ### Round-14 producer-arm correction (registered before the ledger arm)
 
 The first completed producer probe **REFUTED** the surface-stress prediction.
