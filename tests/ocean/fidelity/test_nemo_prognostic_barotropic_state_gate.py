@@ -43,3 +43,8 @@ def test_exact_pair_passes_and_three_ulp_plant_fails_once():
     planted = gate.score("plant", oracle, oracle.copy(), mask, plant=True)
     assert exact["status"] == "AT-BAR" and exact["unequal"] == 0
     assert planted["status"] == "DEBT" and planted["unequal"] == 1
+    absent = gate.score(
+        "absent", oracle, oracle.copy(), np.zeros_like(mask), plant=False,
+        allow_empty_no_active_face=True)
+    assert absent["status"] == "UNINFORMATIVE"
+    assert absent["unequal"] == 0

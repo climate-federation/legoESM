@@ -71,20 +71,26 @@ def read_bt_pair(path: Path) -> dict[str, np.ndarray | int]:
     }
 
 
-def score(name: str, oracle, candidate, mask, *, plant: bool) -> dict:
+def score(
+    name: str, oracle, candidate, mask, *, plant: bool,
+    allow_empty_no_active_face: bool = False,
+) -> dict:
     oracle = np.asarray(oracle, dtype=np.float64)
     candidate = np.asarray(candidate, dtype=np.float64)
     mask = np.asarray(mask, dtype=bool)
     require(oracle.shape == candidate.shape == mask.shape,
             f"{name}: shape mismatch")
-    require(mask.any(), f"{name}: empty wet-face mask")
+    no_active_face = not bool(mask.any())
+    if no_active_face:
+        require(allow_empty_no_active_face, f"{name}: empty wet-face mask")
+        mask = np.ones(oracle.shape, dtype=bool)
     if plant:
         candidate = candidate.copy()
         index = tuple(np.argwhere(mask)[0])
         scale = max(float(np.max(np.abs(oracle[mask]))), 1.0)
         candidate[index] += 3.0 * np.spacing(scale)
     unequal = oracle[mask].view(np.uint64) != candidate[mask].view(np.uint64)
-    return {
+    row = {
         "name": name,
         "status": "AT-BAR" if not unequal.any() else "DEBT",
         "unequal": int(unequal.sum()),
@@ -95,6 +101,12 @@ def score(name: str, oracle, candidate, mask, *, plant: bool) -> dict:
         "candidate_dtype": str(candidate.dtype),
         "criterion": "bit identity on equal-input kt1 Kaa",
     }
+    if no_active_face and row["status"] == "AT-BAR":
+        row["status"] = "UNINFORMATIVE"
+        row["reason"] = (
+            "no active meridional velocity face; all stored values were "
+            "nevertheless checked bitwise")
+    return row
 
 
 def run(case: str, oracle_root: Path, *, plant: bool = False) -> dict:
@@ -138,7 +150,8 @@ def run(case: str, oracle_root: Path, *, plant: bool = False) -> dict:
             np.asarray(after.uu_b.data)[:, 1:], u_mask, plant=plant),
         score(
             f"{case}.kt1.after.vv_b", oracle["vv_b"],
-            np.asarray(after.vv_b.data)[1:, :], v_mask, plant=False),
+            np.asarray(after.vv_b.data)[1:, :], v_mask, plant=False,
+            allow_empty_no_active_face=True),
     ]
     if plant:
         require(rows[0]["status"] == "DEBT" and rows[0]["unequal"] == 1,
@@ -148,7 +161,8 @@ def run(case: str, oracle_root: Path, *, plant: bool = False) -> dict:
             f"{rows[0]['n']})")
     return {
         "format": "nemo-prognostic-barotropic-state-gate-v1",
-        "status": "AT-BAR" if all(row["status"] == "AT-BAR" for row in rows)
+        "status": "AT-BAR" if all(
+            row["status"] in ("AT-BAR", "UNINFORMATIVE") for row in rows)
         else "DEBT",
         "case": case,
         "boundary": "kt1 external-mode Kaa uu_b/vv_b write",
