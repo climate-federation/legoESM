@@ -69,8 +69,12 @@ def test_orca2_structural_guard_rejects_iceberg_option_drift():
                     barotropic_coriolis="een_metric",
                     n_barotropic_substeps=65,
                 ),
+                bbl_diffusive_option=1,
+                bbl_aht_m2_s=1000.0,
             )
         ),
+        bbl_diffusive_option=1,
+        bbl_aht_m2_s=1000.0,
     )
     with pytest.raises(ValueError, match="ln_icebergs=F"):
         validate_nemo_testcase_card(card)
@@ -470,6 +474,8 @@ def test_testcase_cards_pin_the_certified_bbl_selectors():
     assert (overflow.bbl_adv_option, overflow.bbl_diffusive_option) == (2, 0)
     assert overflow.bbl_aht_m2_s == 1000.0
     assert overflow.bbl_gamma_s == 20.0
+    assert lock.recipe.model_config.bbl_aht_m2_s == 0.0
+    assert overflow.recipe.model_config.bbl_aht_m2_s == 1000.0
 
 
 def test_overflow_card_carries_source_exact_unmasked_bbl_mesh_operands():

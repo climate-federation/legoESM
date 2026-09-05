@@ -2086,6 +2086,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # removed RK3 micro-selectors, this is an actual NEMO namelist switch.
     bbl_adv_option: int = 0
     bbl_gamma_s: float = 0.0
+    # NEMO trabbl diffusive arm.  0 disables it; 1 selects nn_bbl_ldf=1.
+    # Kept beside the advective selector because NEMO permits the two arms
+    # independently, even though the certified ORCA2 deck selects only ldf=1.
+    bbl_diffusive_option: int = 0
+    bbl_aht_m2_s: float = 0.0
     ab2_epsilon: float = 0.1  # AB2 stabilization (MITgcm ABepsBar) — also the
     #   Adams-Bashforth ε for the OUTER integrator (Veros AB_eps=0.1).
     # Outer (baroclinic) time integrator. "forward_euler" (default) = the existing

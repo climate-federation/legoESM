@@ -379,6 +379,34 @@ def test_validate_config_accepts_bbl_in_stage_on_the_rk3_ws_lane():
     LatLonCGridOceanModel._validate_config(ok)  # must not raise
 
 
+def test_validate_config_guards_diffusive_bbl_selector_and_lane():
+    """NEMO ``nn_bbl_ldf=1`` is implemented only in the WS-RK3 stage-3 site."""
+    bad_lane = LatLonCGridOceanConfig.from_flat(
+        tracer_time_integrator="euler", bbl_diffusive_option=1,
+        bbl_aht_m2_s=1000.0,
+    )
+    with pytest.raises(ValueError, match="bbl_diffusive_option=1 is not honoured"):
+        LatLonCGridOceanModel._validate_config(bad_lane)
+
+    bad_coefficient = LatLonCGridOceanConfig.from_flat(
+        tracer_time_integrator="rk3_ws", momentum_time_integrator="rk3_ws",
+        tracer_advection="fct2", momentum_advection="flux_form",
+        momentum_flux_scheme="nemo_up3", vertical_momentum_scheme="nemo_up3",
+        bbl_diffusive_option=1,
+        bbl_aht_m2_s=0.0,
+    )
+    with pytest.raises(ValueError, match="requires bbl_aht_m2_s > 0"):
+        LatLonCGridOceanModel._validate_config(bad_coefficient)
+
+    ok = LatLonCGridOceanConfig.from_flat(
+        tracer_time_integrator="rk3_ws", momentum_time_integrator="rk3_ws",
+        tracer_advection="fct2", momentum_advection="flux_form",
+        momentum_flux_scheme="nemo_up3", vertical_momentum_scheme="nemo_up3",
+        bbl_diffusive_option=1, bbl_aht_m2_s=1000.0,
+    )
+    LatLonCGridOceanModel._validate_config(ok)
+
+
 def test_validate_config_accepts_bbl_off_on_any_lane():
     """bbl_adv_option=0 (the default, off) is lane-agnostic -- the new guard
     must not false-reject a config that simply never asked for in-model BBL."""

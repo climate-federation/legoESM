@@ -1614,15 +1614,24 @@ def _nemo_ws_rk3_tracer_pair_step(
             rhs_a = rhs_b = None
         if stage_index == 2 and bbl_context is not None:
             from legoesm.ocean.physics.bbl_adv import (
+                apply_bbl_diffusive_tendency,
                 apply_bbl_adv_tendency,
                 bbl_transports,
+                nemo_bbl_diffusive_coefficients,
             )
-            (geom, area, dy_u, dx_v, gamma_s, rho0,
-             nemo_reference_geometry) = bbl_context
-            if nemo_reference_geometry:
+            (adv_option, diffusive_option, geom, diffusive_geom,
+             area, dy_u, dx_v, gamma_s, aht_m2_s, rho0,
+             nemo_reference_geometry, bbl_grid, bbl_eos_form) = bbl_context
+            if diffusive_option == 1:
                 # trabbl.F90:348 reads gdept(bottom,Kmm).  Under key_qco that
                 # is gdept_0(bottom)*(1+r3t(Kmm)); the stage thickness sum is
                 # H*(1+r3t), so this ratio is the identical stage stretch.
+                reference_depth = jnp.sum(h_k_old, axis=-1)
+                stage_stretch = jnp.sum(h_stage, axis=-1) / jnp.maximum(
+                    reference_depth, jnp.asarray(1.0e-10, h_stage.dtype))
+                live_bottom_depth = (
+                    diffusive_geom.dep_bot_ref * stage_stretch)
+            elif nemo_reference_geometry:
                 reference_depth = jnp.sum(geom.h_ref, axis=-1)
                 stage_stretch = jnp.sum(h_stage, axis=-1) / jnp.maximum(
                     reference_depth, jnp.asarray(1.0e-10, h_stage.dtype))
@@ -1631,16 +1640,28 @@ def _nemo_ws_rk3_tracer_pair_step(
                 live_depth = jnp.cumsum(h_stage, axis=-1) - 0.5 * h_stage
                 live_bottom_depth = jnp.take_along_axis(
                     live_depth, geom.bot_k[..., None], axis=-1)[..., 0]
-            utr, vtr = bbl_transports(
-                tr_a, tr_b, geom, dy_u, dx_v,
-                gamma_s=gamma_s, rho_0=rho0,
-                bottom_depth_m=live_bottom_depth,
-            )
             zero_a, zero_b = jnp.zeros_like(tr_a), jnp.zeros_like(tr_b)
-            bbl_a, bbl_b = apply_bbl_adv_tendency(
-                zero_a, zero_b, tr_a, tr_b, h_stage, area, geom, utr, vtr,
-                nlev=tr_a.shape[-1],
-            )
+            bbl_a, bbl_b = zero_a, zero_b
+            if adv_option == 2:
+                utr, vtr = bbl_transports(
+                    tr_a, tr_b, geom, dy_u, dx_v,
+                    gamma_s=gamma_s, rho_0=rho0,
+                    bottom_depth_m=live_bottom_depth,
+                )
+                bbl_a, bbl_b = apply_bbl_adv_tendency(
+                    bbl_a, bbl_b, tr_a, tr_b, h_stage, area, geom, utr, vtr,
+                    nlev=tr_a.shape[-1],
+                )
+            if diffusive_option == 1:
+                ahu_bbl, ahv_bbl = nemo_bbl_diffusive_coefficients(
+                    tr_a, tr_b, diffusive_geom,
+                    bottom_depth_m=live_bottom_depth, rho_0=rho0,
+                    grid=bbl_grid, eos_form=bbl_eos_form,
+                )
+                bbl_a, bbl_b = apply_bbl_diffusive_tendency(
+                    bbl_a, bbl_b, tr_a, tr_b, h_stage, area,
+                    diffusive_geom, ahu_bbl, ahv_bbl, grid=bbl_grid,
+                )
             # tra_bbl adds a concentration tendency to Krhs using Kbb tracers
             # and Kmm volume (stprk3_stg.F90:588; trabbl.F90:129-136,243-284).
             # This helper evolves content, so convert h*Krhs to a negative
@@ -3846,8 +3867,21 @@ class LatLonCGridOceanModel:
                 "transport-selector arm) on this integrator.")
         if config.bbl_adv_option not in (0, 2):
             raise ValueError("bbl_adv_option must be 0 or 2")
+        if config.bbl_diffusive_option not in (0, 1):
+            raise ValueError("bbl_diffusive_option must be 0 or 1")
         if config.bbl_adv_option == 2 and config.bbl_gamma_s <= 0.0:
             raise ValueError("bbl_adv_option=2 requires bbl_gamma_s > 0")
+        if (config.bbl_diffusive_option == 1
+                and config.bbl_aht_m2_s <= 0.0):
+            raise ValueError(
+                "bbl_diffusive_option=1 requires bbl_aht_m2_s > 0")
+        if (config.bbl_diffusive_option == 1
+                and config.tracer_time_integrator != "rk3_ws"):
+            raise ValueError(
+                f"bbl_diffusive_option=1 is not honoured by "
+                f"tracer_time_integrator={config.tracer_time_integrator!r}: "
+                "NEMO tra_bbl_dif is wired at RK stage 3 only on the shared "
+                "tracer_time_integrator='rk3_ws' identity")
         if (config.bbl_adv_option == 2
                 and config.tracer_time_integrator != "rk3_ws"):
             # S-42 (docs/ocean/fidelity/nemo_branch_isomorphism_map.md): the
@@ -7156,10 +7190,12 @@ class LatLonCGridOceanModel:
                 _pair_divs = (None, None)
             elif _tti == "rk3_ws":
                 _bbl_context = None
-                if (_cfg_b.bbl_adv_option == 2
+                if ((_cfg_b.bbl_adv_option == 2
+                     or _cfg_b.bbl_diffusive_option == 1)
                         and not self._nemo_ws_test_hooks.disable_bbl):
                     from legoesm.ocean.physics.bbl_adv import (
                         bbl_static_geometry,
+                        nemo_bbl_diffusive_geometry,
                         nemo_bbl_static_geometry,
                     )
                     _h_ref = jnp.asarray(_zc.h_partial)
@@ -7167,7 +7203,8 @@ class LatLonCGridOceanModel:
                         _h_ref = jnp.broadcast_to(_h_ref, h_k_old.shape)
                     _nemo_bbl_geometry = not (
                         self._nemo_ws_test_hooks.legacy_bbl_partial_geometry)
-                    if _nemo_bbl_geometry:
+                    _bbl_geom = None
+                    if _cfg_b.bbl_adv_option == 2 and _nemo_bbl_geometry:
                         _gdept0 = getattr(_zc, "nemo_gdept_0", None)
                         _e3u0 = getattr(_zc, "nemo_bbl_e3u_0", None)
                         _e3v0 = getattr(_zc, "nemo_bbl_e3v_0", None)
@@ -7179,17 +7216,43 @@ class LatLonCGridOceanModel:
                         _bbl_geom = nemo_bbl_static_geometry(
                             _h_ref, state.land_mask.data,
                             _gdept0, _e3u0, _e3v0)
-                    else:
+                    elif _cfg_b.bbl_adv_option == 2:
                         _bbl_geom = bbl_static_geometry(
                             _h_ref, state.land_mask.data)
+                    _diffusive_geom = None
+                    if _cfg_b.bbl_diffusive_option == 1:
+                        _gdept0 = getattr(_zc, "nemo_gdept_0", None)
+                        _e3u0 = getattr(_zc, "nemo_bbl_e3u_0", None)
+                        _e3v0 = getattr(_zc, "nemo_bbl_e3v_0", None)
+                        _raw_bbl = getattr(_zc, "nemo_een_barotropic", None)
+                        if (any(value is None
+                                for value in (_gdept0, _e3u0, _e3v0))
+                                or _raw_bbl is None):
+                            raise ValueError(
+                                "NEMO diffusive BBL requires exact gdept_0, "
+                                "e3u_0/e3v_0, metrics, and U/V masks")
+                        _diffusive_geom = nemo_bbl_diffusive_geometry(
+                            _h_ref, state.land_mask.data,
+                            _gdept0, _e3u0, _e3v0,
+                            _raw_bbl.e1u, _raw_bbl.e2u,
+                            _raw_bbl.e1v, _raw_bbl.e2v,
+                            _raw_bbl.umask, _raw_bbl.vmask,
+                            aht_m2_s=_cfg_b.bbl_aht_m2_s, grid=_grid,
+                        )
                     _bbl_context = (
+                        _cfg_b.bbl_adv_option,
+                        _cfg_b.bbl_diffusive_option,
                         _bbl_geom,
+                        _diffusive_geom,
                         jnp.asarray(_grid.area_T),
                         jnp.asarray(_grid.dy_u)[:, 1:-1],
                         jnp.asarray(_grid.dx_v)[1:-1, :],
                         _cfg_b.bbl_gamma_s,
+                        _cfg_b.bbl_aht_m2_s,
                         _cfg_b.rho_0,
                         _nemo_bbl_geometry,
+                        _grid,
+                        _cfg_b.eos,
                     )
                 (T_corrected, S_corrected,
                  _nemo_ws_content_T, _nemo_ws_content_S,

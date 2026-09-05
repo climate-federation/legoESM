@@ -84,7 +84,9 @@ class GYRESurfaceBoundaryCondition(NamedTuple):
 
 def _model_config(
     *, barotropic_time_filter: str, n_barotropic_substeps: int,
-    bbl_adv_option: int, bbl_gamma_s: float, whole_step_identity: str,
+    bbl_adv_option: int, bbl_gamma_s: float,
+    bbl_diffusive_option: int, bbl_aht_m2_s: float,
+    whole_step_identity: str,
 ) -> LatLonCGridOceanConfig:
     """The selectors shared by both certified ``key_qco + key_RK3`` runs."""
 
@@ -106,6 +108,8 @@ def _model_config(
             n_barotropic_substeps=n_barotropic_substeps,
             bbl_adv_option=bbl_adv_option,
             bbl_gamma_s=bbl_gamma_s,
+            bbl_diffusive_option=bbl_diffusive_option,
+            bbl_aht_m2_s=bbl_aht_m2_s,
             whole_step_identity="gyre_vector_ene_c2",
         )
         tke = base.physics.vertical_mixing.tke._replace(n2_eos_form="eos80")
@@ -263,6 +267,8 @@ def _model_config(
             surface_stress_implicit=True,
             bbl_adv_option=bbl_adv_option,
             bbl_gamma_s=bbl_gamma_s,
+            bbl_diffusive_option=bbl_diffusive_option,
+            bbl_aht_m2_s=bbl_aht_m2_s,
             # NEMO's e3w(Kmm) implicit-solve divisor (trazdf.F90:219-221,
             # dynzdf.F90:200-203) comes WITH this identity -- it is not a
             # separate flag, because NEMO has no such switch.  Same removal as
@@ -349,6 +355,8 @@ def _model_config(
         barotropic_diffusion_alpha=0.0,
         bbl_adv_option=bbl_adv_option,
         bbl_gamma_s=bbl_gamma_s,
+        bbl_diffusive_option=bbl_diffusive_option,
+        bbl_aht_m2_s=bbl_aht_m2_s,
         adaptive_implicit_vertadv=True,
         implicit_vertical_mixing=True,
         # NEMO's e3w(Kmm) implicit-solve divisor (trazdf.F90:219-221,
@@ -651,6 +659,8 @@ def build_lock_exchange_zco_card() -> NEMOTestcaseCard:
         n_barotropic_substeps=_resolved_auto_substeps(grid, bathymetry, 1.0),
         bbl_adv_option=0,
         bbl_gamma_s=0.0,
+        bbl_diffusive_option=0,
+        bbl_aht_m2_s=0.0,
         whole_step_identity="lane1_flux_up3",
     )
     recipe = NEMORecipe(
@@ -739,6 +749,8 @@ def build_overflow_zps_card() -> NEMOTestcaseCard:
         ),
         bbl_adv_option=2,
         bbl_gamma_s=20.0,
+        bbl_diffusive_option=0,
+        bbl_aht_m2_s=1000.0,
         whole_step_identity="lane1_flux_up3",
     )
     recipe = NEMORecipe(
@@ -849,6 +861,8 @@ def build_gyre_zco_card() -> NEMOTestcaseCard:
         n_barotropic_substeps=50,
         bbl_adv_option=0,
         bbl_gamma_s=0.0,
+        bbl_diffusive_option=0,
+        bbl_aht_m2_s=0.0,
         whole_step_identity="gyre_vector_ene_c2",
     )
     recipe = NEMORecipe(
@@ -1154,6 +1168,8 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         n_barotropic_substeps=65,
         bbl_adv_option=0,
         bbl_gamma_s=0.0,
+        bbl_diffusive_option=1,
+        bbl_aht_m2_s=1000.0,
         whole_step_identity="orca2_vector_een_c2",
     )
     recipe = NEMORecipe(
@@ -1199,25 +1215,32 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
             f"got {card.transcendentals!r}"
         )
     expected = {
-        "LOCK_EXCHANGE-zco": ("nemo_ab3am4", 1, 0, 0.0),
-        "OVERFLOW-zps": ("nemo_boxcar1_ab3", 3, 2, 20.0),
-        "GYRE-zco": ("nemo_ab3am4", 50, 0, 0.0),
-        "ORCA2-zps": ("nemo_ab3am4", 65, 0, 0.0),
+        "LOCK_EXCHANGE-zco": ("nemo_ab3am4", 1, 0, 0.0, 0, 0.0),
+        "OVERFLOW-zps": ("nemo_boxcar1_ab3", 3, 2, 20.0, 0, 1000.0),
+        "GYRE-zco": ("nemo_ab3am4", 50, 0, 0.0, 0, 0.0),
+        "ORCA2-zps": ("nemo_ab3am4", 65, 0, 0.0, 1, 1000.0),
     }
     if card.case not in expected:
         raise ValueError(f"unknown NEMO testcase card {card.case!r}")
     cfg = card.recipe.model_config
-    filt, count, bbl_option, gamma = expected[card.case]
+    filt, count, bbl_option, gamma, diffusive, aht = expected[card.case]
     actual = (
         cfg.barotropic.barotropic_time_filter,
         cfg.barotropic.n_barotropic_substeps,
         cfg.bbl_adv_option,
         cfg.bbl_gamma_s,
+        cfg.bbl_diffusive_option,
+        cfg.bbl_aht_m2_s,
     )
-    if actual != (filt, count, bbl_option, gamma):
+    if actual != (filt, count, bbl_option, gamma, diffusive, aht):
         raise ValueError(
             f"{card.case} filter/substep/BBL composition {actual!r} does not "
-            f"match the executed oracle {(filt, count, bbl_option, gamma)!r}")
+            f"match the executed oracle "
+            f"{(filt, count, bbl_option, gamma, diffusive, aht)!r}")
+    if ((card.bbl_adv_option, card.bbl_gamma_s,
+         card.bbl_diffusive_option, card.bbl_aht_m2_s)
+            != (bbl_option, gamma, diffusive, aht)):
+        raise ValueError(f"{card.case} card BBL metadata disagrees with config")
     required = {
         "barotropic_face_depth": "nemo_ssh_avg",
         "barotropic_continuity_evaluation": "nemo_literal",
