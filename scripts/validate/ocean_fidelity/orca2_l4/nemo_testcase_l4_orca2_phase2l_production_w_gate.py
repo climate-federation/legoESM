@@ -24,6 +24,10 @@ from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (  # noqa: E402
     LatLonCGridOceanModel,
     _NEMOWSRK3TestHooks,
 )
+from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (  # noqa: E402
+    nemo_qco_wzv_recurrence,
+    nemo_transport_wzv_divergence_level,
+)
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (  # noqa: E402
     build_orca2_zps_card,
     validate_nemo_testcase_card,
@@ -63,6 +67,10 @@ def _xyz(values: np.ndarray) -> np.ndarray:
     return values.reshape((NX, NY, NZ), order="F")[2:-2, 2:-2].transpose(1, 0, 2)
 
 
+def _stencil(values: np.ndarray) -> np.ndarray:
+    return values.reshape((NX - 3, NY - 3, NZ), order="F").transpose(1, 0, 2)
+
+
 def read_wzv(path: Path) -> dict[str, np.ndarray]:
     with path.open("rb") as handle:
         magic = handle.read(16).decode("ascii").rstrip()
@@ -75,6 +83,8 @@ def read_wzv(path: Path) -> dict[str, np.ndarray]:
     )
     n2, n3, ns = NX * NY, NX * NY * NZ, (NX - 3) * (NY - 3) * NZ
     require(values.size == 2 * ns + 5 * n3 + 4 * n2, "bad WZV payload")
+    pfu = _stencil(values[:ns])
+    pfv = _stencil(values[ns:2 * ns])
     offset = 2 * ns
     e3t = _xyz(values[offset:offset + n3]); offset += n3
     e3t0 = _xyz(values[offset:offset + n3]); offset += n3
@@ -88,6 +98,7 @@ def read_wzv(path: Path) -> dict[str, np.ndarray]:
     require(offset == values.size, "WZV walk did not reach EOF")
     require(np.isfinite(values).all(), "non-finite WZV payload")
     return {
+        "pFu_stencil": pfu, "pFv_stencil": pfv,
         "e3t": e3t, "e3t0": e3t0, "tmask": tmask,
         "r3bb": r3bb, "r3aa": r3aa, "r1_area": r1_area,
         "runoff": runoff, "ww": ww, "pfw": pfw,
@@ -207,6 +218,7 @@ def validate(deck_root: Path, oracle_root: Path, *, plant: bool) -> dict[str, ob
         external_mode_result_override=(
             jnp.asarray(eta_after), jnp.asarray(hu_avg), jnp.asarray(hv_avg)),
         expose_stage1_wzv=True,
+        expose_tracer_transport_stage=1,
     )
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, diagnostic_cfg,
@@ -220,16 +232,64 @@ def validate(deck_root: Path, oracle_root: Path, *, plant: bool) -> dict[str, ob
     support = np.zeros((OWNED_NY, OWNED_NX), dtype=bool)
     support[:-1, 1:-1] = True
     mask = live & support[..., None]
-    if plant:
-        candidate = candidate.copy()
-        index = tuple(np.argwhere(mask)[0])
-        candidate[index] = np.nextafter(candidate[index], np.inf)
     row = score(candidate, oracle, mask)
+
+    pfu_oracle = wzv["pFu_stencil"][1:, 1:, :NLEV]
+    pfv_oracle = wzv["pFv_stencil"][1:, 1:, :NLEV]
+    pfu_candidate = np.asarray(result.u.data)[:, 1:OWNED_NX + 1, :NLEV]
+    pfv_candidate = np.asarray(result.v.data)[1:OWNED_NY + 1, :OWNED_NX, :NLEV]
+    # WZV's T-cell live mask is sufficient for the causal decomposition: score
+    # the east/north face consumed by each live T cell on the same safe slab.
+    transport_rows = {
+        "zFu": score(pfu_candidate, pfu_oracle, mask),
+        "zFv": score(pfv_candidate, pfv_oracle, mask),
+    }
+
+    # Clock-only discriminator.  Hold the recorded face transports, runoff,
+    # mask and geometry fixed, but use the production pair: full external SSH
+    # endpoint with the full 10,800 s denominator.  This is the composition the
+    # old Phase-2k ablation failed to measure.
+    fu = wzv["pFu_stencil"]
+    fv = wzv["pFv_stencil"]
+    fu_c, fu_w = fu[1:, 1:, :], fu[1:, :-1, :]
+    fv_c, fv_s = fv[1:, 1:, :], fv[:-1, 1:, :]
+
+    def clock_program(fu_, fuw_, fv_, fvs_, e3_, e30_, tmask_, area_, rnf_,
+                      eta_b_, eta_a_):
+        levels = []
+        for jk in range(NLEV):
+            levels.append(nemo_transport_wzv_divergence_level(
+                fu_[..., jk], fuw_[..., jk], fv_[..., jk], fvs_[..., jk],
+                area_, e3_[..., jk], tmask_[..., jk],
+                runoff_mass_flux=(rnf_ if jk == 0 else None)))
+        flux_div = jnp.stack(levels, axis=-1)
+        h0 = jnp.zeros_like(eta_b_)
+        for jk in range(NLEV):
+            h0 = jax.lax.optimization_barrier(
+                h0 + e30_[..., jk] * tmask_[..., jk])
+        r1_h0 = jax.lax.optimization_barrier(
+            1.0 / jnp.where(h0 > 0.0, h0, 1.0))
+        r3_b = jax.lax.optimization_barrier(eta_b_ * r1_h0)
+        r3_a = jax.lax.optimization_barrier(eta_a_ * r1_h0)
+        return nemo_qco_wzv_recurrence(
+            flux_div, e30_[..., :NLEV], r3_b, r3_a,
+            tmask_[..., :NLEV], jnp.asarray(10800.0, e3_.dtype))
+
+    eta_before_rank0 = np.asarray(card.recipe.initial_state.eta.data)[:, :OWNED_NX]
+    full_clock_w = np.asarray(jax.jit(clock_program)(
+        *map(jnp.asarray, (
+            fu_c, fu_w, fv_c, fv_s, wzv["e3t"], wzv["e3t0"], wzv["tmask"],
+            wzv["r1_area"], wzv["runoff"], eta_before_rank0, final_ssh))))
+    clock_row = score(full_clock_w, oracle, mask)
     if plant:
-        require(row["unequal"] == 1, "production-W plant did not fire once")
+        exact_control = oracle.copy()
+        index = tuple(np.argwhere(mask)[0])
+        exact_control[index] = np.nextafter(exact_control[index], np.inf)
+        planted = score(exact_control, oracle, mask)
+        require(planted["unequal"] == 1, "production-W plant did not fire once")
         raise GateError(
             "planted production stage-1 ww rejected through scorer "
-            f"({row['unequal']}/{row['count']})")
+            f"({planted['unequal']}/{planted['count']})")
 
     # Binding selector plant: validator must reject the alternative KEG arm.
     bad_cfg = cfg._replace(ke_gradient_scheme="hollingsworth")
@@ -246,6 +306,8 @@ def validate(deck_root: Path, oracle_root: Path, *, plant: bool) -> dict[str, ob
         "boundary": "O5-B/compiled-production-stage1-tracer-ww",
         "result": row["status"],
         "row": row,
+        "production_transport_rows": transport_rows,
+        "clock_only_full_endpoint_row": clock_row,
         "owner": (
             "CONFIRMED_PRODUCTION_WZV_AT_BAR"
             if row["status"] == "AT_BAR"
