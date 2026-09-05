@@ -34,6 +34,22 @@ from legoesm.ice.sea_ice import (
 
 
 BAR = 1.0e-15
+
+
+class GateError(RuntimeError):
+    """A fail-closed rung-3.6 input or schema error."""
+
+
+REQUIRED_STREAMS = (
+    "oracle_rung36_ssm_frames.bin",
+    "oracle_si3_zdf_inputs.bin",
+    "oracle_rung36_update_frames.bin",
+    "oracle_si3_bulk_operands.bin",
+    "oracle_rung36_fwb_frames.bin",
+    "oracle_rung36_trasbc_frames.bin",
+    "oracle_rung36_qsr_frames.bin",
+    "oracle_si3_exchange_frames.bin",
+)
 SSM_MAGIC = b"NEMO_L3SSM__001 "
 ZIN_MAGIC = b"NEMO_L3ZIN_002  "
 SSM_FIELDS = ("u", "v", "sst", "sss", "ssh", "e3t", "fraqsr")
@@ -367,6 +383,9 @@ def _summary(name: str, got, wanted) -> dict[str, object]:
 
 
 def evaluate(root: Path, plant: str | None = None) -> dict[str, object]:
+    missing = [name for name in REQUIRED_STREAMS if not (root / name).is_file()]
+    if missing:
+        raise GateError(f"missing required rung-3.6 stream(s): {missing}")
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     card = build_c1d_omip_l3_coupled_card(oracle_root=root)
     config = card.exchange

@@ -35,14 +35,21 @@ from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
 )
 from legoesm.ocean.physics.shortwave_penetration import nemo_rgb_one_layer_rhs
 from scripts.validate.ocean_fidelity.testcases.nemo_rung36_exchange_gate import (
+    GateError,
     _nemo_bilinear_months,
     _nemo_monthly_interp,
     _ssm,
+    evaluate as evaluate_exchange,
 )
 from scripts.validate.ocean_fidelity.testcases.nemo_rung36_ocean_gate import (
     STAGGER_FIELDS,
     _records as _ocean_records,
 )
+
+
+def test_rung36_exchange_gate_names_missing_stream(tmp_path) -> None:
+    with pytest.raises(GateError, match="missing required rung-3.6 stream"):
+        evaluate_exchange(tmp_path)
 
 
 def test_coupled_card_binds_decision_six_and_libm() -> None:
