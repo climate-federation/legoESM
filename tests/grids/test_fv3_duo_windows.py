@@ -24,7 +24,8 @@ def _rand(shape, seed=0):
 
 @pytest.mark.parametrize("partition,kt,pad", [
     ("compute", 1, 3), ("compute", 2, 5), ("compute", 2, 8),
-    ("compute", 3, 5), ("padded", 2, 5), ("padded", 3, 5), ("padded", 5, 4)])
+    ("compute", 3, 5), ("padded", 1, 99), ("padded", 2, 5), ("padded", 3, 5),
+    ("padded", 5, 4)])
 @pytest.mark.parametrize("extents", [(N + 2 * NG, N + 2 * NG),
                                      (N + 2 * NG + 1, N + 2 * NG),
                                      (N + 2 * NG, N + 2 * NG + 1),
@@ -56,6 +57,8 @@ def test_every_flat_cell_has_exactly_one_owner(partition, kt):
 def test_kt1_is_the_whole_face():
     lay = build_window_layout(N, NG, 1, 99)          # pad is forced to ng
     assert lay.W == N + 2 * NG and lay.nb == 6
+    lay = build_window_layout(N, NG, 1, 99, "padded")   # pad forced to 0
+    assert lay.pad == 0 and lay.W == N + 2 * NG and lay.nb == 6
     x = _rand((6, N + 2 * NG, N + 2 * NG + 1, 3))
     assert np.array_equal(np.asarray(gather_windows(lay, x)), np.asarray(x))
 

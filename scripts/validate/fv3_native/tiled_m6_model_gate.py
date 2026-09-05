@@ -88,6 +88,12 @@ def main(argv=None):
                          "WRONG, the bitwise gate is expected to fail and "
                          "the timing is printed as a decomposition arm, "
                          "never as a ladder row")
+    ap.add_argument("--profile", type=str, default=None,
+                    help="directory: jax.profiler trace (perfetto JSON) of "
+                         "2 extra steps run AFTER the timed ones on process "
+                         "0 (never inside the timing rows), summarised "
+                         "per op by scripts/validate/fv3_native/"
+                         "summarize_perfetto_trace.py")
     ap.add_argument("--timing", type=int, default=0,
                     help="after the gated steps, run this many more steps "
                          "and report wall time per step (max over ranks, "
@@ -101,6 +107,15 @@ def main(argv=None):
     jax.config.update("jax_enable_x64", True)
     from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
     rank0 = jax.process_index() == 0
+
+    def rss(stage):
+        """peak resident set of THIS process so far (MB) -- the 216-rank
+        C192 row was OOM-killed at 24.6 GB/rank (job 9648703); this says
+        which stage's cost scales with the GLOBAL grid on every rank"""
+        import resource
+        mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        if rank0:
+            print(f"[m6] rss {stage}: {mb:.0f} MB (rank 0 peak so far)")
 
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
         FV3DuoConfig, FV3DuoDynamicsModel)
@@ -126,7 +141,9 @@ def main(argv=None):
         print(f"[m6] REFUSED: need {ndev} devices")
         return 2
 
+    rss("start")
     grid = create_fv3_duo_grid(args.n)
+    rss("grid")
     cfg = FV3DuoConfig(km=args.km, hydrostatic=not args.nh,
                        n_split=args.n_split)
 
@@ -202,7 +219,9 @@ def main(argv=None):
         print("[m6] DIAGNOSTIC ARM: per-firing pad refresh OFF -- timing "
               "only, results not a ladder row")
     print(f"[m6] {lay}; barriers {win_model._window_comm.barrier_mode}")
+    rss("window model built")
     win = win_model.dcmip16_initial_state(do_pert=True)
+    rss("window IC")
 
     def flat_leaves(bundle_w):
         """(path, host array) of the window bundle scattered to faces --
@@ -251,6 +270,7 @@ def main(argv=None):
         win = win_model.step(win, args.dt)
         jax.block_until_ready(win)
         times.append(time.perf_counter() - t0)
+        rss(f"window step {it + 1}")
         # GLM 2026-09-05: the per-rank sub-cycle schedule must be IDENTICAL
         # on every process (a local max would silently under-advect) --
         # asserted with an allgather, not just printed
@@ -340,6 +360,19 @@ def main(argv=None):
                 win = win_model.step(win, args.dt)
                 jax.block_until_ready(win)
                 times.append(time.perf_counter() - t0)
+            if args.profile:
+                # 2 EXTRA steps after the timed ones (codex 2026-09-05:
+                # profiled steps must not enter the timing distribution)
+                if rank0:
+                    jax.profiler.start_trace(args.profile,
+                                             create_perfetto_trace=True)
+                for _ in range(2):
+                    win = win_model.step(win, args.dt)
+                    jax.block_until_ready(win)
+                if rank0:
+                    jax.profiler.stop_trace()
+                    print(f"[m6] profile trace (2 extra steps after the "
+                          f"timed ones, rank 0) -> {args.profile}")
             _report_timing(args, times, jax,
                            f"windows kt={args.kt} pad={args.pad}"
                            + (" DIAGNOSTIC no-per-firing-refresh (NOT a "

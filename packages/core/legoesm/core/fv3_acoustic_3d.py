@@ -436,12 +436,19 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
         # threaded from this function's own `check_state` flag, so the
         # eager entry can still ask for it and the traced lane cannot
         # accidentally get it.
+        # batched threaded (2026-09-05): without it this phase ran its
+        # per-face LOOP inside every batched step -- on a window-sharded
+        # state GSPMD then gathers every window to one device per
+        # iteration and all-reduces the stack back (the 4 x 117 ms
+        # all-reduces and 276 whole-window permutes per step of job
+        # 9648613, ~60% of the 54-rank step time).
         csw_press = cgrid_pressure_phase_3d(ctx, csw, km, dt2=dt2,
                                             ptop=ptop, akap=akap,
                                             cp_air=cp_air,
                                             a2b_ord=a2b_ord,
                                             remap_follows=remap_follows,
-                                            check_delpc=check_state)
+                                            check_delpc=check_state,
+                                            batched=batched)
     else:
         if first_substep:
             # :535-557 -- duo-exchange gz, then save zh = gz (padded).
@@ -458,7 +465,8 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
         csw_press = cgrid_nh_pressure_phase_3d(
             ctx, csw, nh["gz"], nh["ws3"], km, dt2=dt2, ptop=ptop,
             akap=akap, cp_air=cp_air, p_fac=p_fac, a_imp=a_imp,
-            dp0=dp0, zs6=nh["zs"], remap_follows=remap_follows)
+            dp0=dp0, zs6=nh["zs"], remap_follows=remap_follows,
+            batched=batched)
         # C4: the C stage comes back with the REBUILT geopotential gz
         # and the refilled ws3 -- thread both into the carry (the
         # in-place twin of the spec's mutation).

@@ -519,3 +519,49 @@ gate vacuity — every leaf scored, steps>=1, replication detected via
 `sharding.is_fully_replicated`), 2 CLEAN (the nb sweep; the Courant
 all-reduce replicates nsplt).  GLM: the first real-rank measurement is the
 per-rank nsplt read and its latency (barrier cost of the host guard).
+
+## M6 scaling finding (2026-09-05): the C-grid pressure phase ran its LOOP arm inside the batched window step
+
+The first real-rank ladder (job 9648613) scaled 1.42x for 9x ranks at C96.
+A perfetto profile put ~60 % of the 54-rank step in four ~117 ms all-reduces
+per step, and an HLO census (`scripts/cluster/fv3_native/tiled_m6_hlo_census.sbatch`)
+traced 276 whole-window `collective-permute`s (`{i->0}` pairs, `f64[1,49,49,10]`)
+and 3 tuple all-reduces per step to `fv3_cgrid_phase_3d.py:618/624/625` —
+the per-face loop arm (`csw_outs["delpc"][t]`, `["ptc"][t]`, `["uc"][t]`,
+`["vc"][t]`) and its `stack_faces`.  Cause: `cgrid_pressure_phase_3d` and
+`cgrid_nh_pressure_phase_3d` accept `batched` but `acoustic_substep_3d` never
+passed it, so every batched step ran the loop arm; on a window-sharded state
+GSPMD gathers each window to one device per iteration and all-reduces the
+restacked tuple.  Fix: pass `batched=batched` at both call sites (every other
+`batched:`-accepting phase already received it — grep of `batched=batched`
+across `fv3_acoustic_3d/fv3_dynamics/fv3_tracer2d/fv3_dsw_tail_3d`).
+
+After the fix the census shows one all-reduce per step (`f64[10]`, the Courant
+max) and no whole-window permutes.  Gates re-run bitwise: in-process M6 gate
+hydro + NH C48 kt=2 pad=11 vs the GSPMD face-sharded flat step (jobs
+9648696/9648697); real ranks vs 6-rank flat references regenerated with the
+fixed code (`ladder_ref_c{48,96,192}_v2.npz`).
+
+| row (CPU, XLA mpi collectives, --exclusive, p50 of 20 steps, cross-rank max) | 6 ranks flat | window ranks | s/step | speedup |
+|---|---|---|---|---|
+| C48 km=10 kt=2 pad=11  | 0.376 s | 24 (3 nodes)  | 0.184 s | 2.04x on 4x  |
+| C96 km=10 kt=3 pad=11  | 1.124 s | 54 (7 nodes)  | 0.258 s | 4.36x on 9x (was 1.42x) |
+| C192 km=10 kt=6 pad=11 | 3.752 s | 216 (27 nodes) | pending job 9648703 | |
+
+Remaining gap candidates (unmeasured): pad refresh of 2·pad rows per firing,
+~1306 halo-sized collectives per step, the per-step host readback of the
+Courant max; a diagnostic arm (`--diag-no-pad-refresh`) put the refresh at
+~5 % BEFORE the fix — re-measure after it.
+
+Lowering note after the fix (job 9649596 vs 9649094): the substep gate's
+window arm is still BITWISE against the GSPMD face-sharded flat step (the
+adopted reference), but no longer against the UNSHARDED single-device flat
+batched step (max rel 1e-11..1e-6 in u/v, diffuse) — before the fix both
+sides ran the per-face loop for the C-pressure phase, whose per-face ops
+lower identically sharded or not; the vmapped C-pressure arm fuses
+differently unsharded vs sharded.  The certified single-device production
+trace (batched=False) is untouched by the fix.  Memory: per-rank RSS is
+3.9 GB at C48/24 ranks (2.7 GB of it appears at the first step), 5.2 GB at
+C96/54, 24.6 GB at C192/216 (OOM at 8 ranks/node, job 9648703); compiled
+constants are only 55/162 MiB at C48/C96, so the growth is not literals —
+the gate now prints per-stage RSS to name it.

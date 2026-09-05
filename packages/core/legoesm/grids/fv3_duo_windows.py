@@ -97,8 +97,10 @@ class WindowLayout:
         else:
             raise ValueError(f"partition {partition!r}: 'compute' or 'padded'")
         if kt == 1:
-            pad = ng                       # the whole face, exactly
-        if pad < ng:
+            # the whole face, exactly: W == m_a (the compute partition's
+            # nl = n needs the ng ring back; the padded one already has it)
+            pad = ng if partition == "compute" else 0
+        elif pad < ng:
             raise ValueError(f"pad={pad} < ng={ng}: a window must carry at "
                              f"least the kernel's own halo")
         W = nl + 2 * pad
