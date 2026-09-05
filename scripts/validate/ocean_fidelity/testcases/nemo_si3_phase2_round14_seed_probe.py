@@ -438,7 +438,11 @@ def run_probe(
     if plant:
         planted = _candidate_fields(card, candidate)["a_i"].copy()
         planted[HALO + PLANT_OFFSET, HALO + PLANT_OFFSET] += PLANT_MAGNITUDE
-        planted_row = _score("entry.step9.a_i", _physical(target["a_i"]), _physical(planted))
+        planted_row = _score(
+            "entry.step9.a_i",
+            _physical(_target_field(target, "a_i")),
+            _physical(planted),
+        )
         plant_evidence = {
             "clean": clean_plant_row,
             "planted": planted_row,
