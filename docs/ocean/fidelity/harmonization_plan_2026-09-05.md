@@ -142,3 +142,21 @@ aux3d linkage and the minimum-level policy, not just counts.
   from +11 to >= +18 Sv; REFUTED if both within 3 Sv of control. If refuted the next lever is the interior
   vertical viscosity below the mixed layer (avm 65-300 m vs NEMO's avm in grid_W recs 2:3) — needs the K dump
   (--kprofile-snapshots) on the unified card: a config choice -> ASK.
+- 15:20 REAL-FW d90 CONCLUSION, dual-reviewed (codex job 9654158, GLM): the d90 result (SST equal, SSS
+  worse under real_freshwater) CANNOT rank the closures: the real arm is an incomplete port (no surface
+  dilution). Both: keep virtual salt PROVISIONALLY; the completed real-volume closure is the NEMO-faithful
+  target by construction. Corrections to my claim: (i) codex CRITICAL: NEMO trasbc has no emp*sss term,
+  sfx = ice salt only, emp enters volume; virtual salt is first-order equivalent ONLY with LOCAL S and live
+  h — our production card runs freshwater_salinity=s_ref (fixed 35, "legacy") => leading-order mismatch
+  at rivers/ice, not only at S->0. 'local' is rejected with the freshwater normalization (salt covariance)
+  => the real closure is the only way to have both normalization and NEMO dilution. (ii) GLM CRITICAL:
+  ice — NEMO freezing tendency ~ (S - S_ice) F_ice; the real arm supplies only the S_ice channel (~10%),
+  explaining the Arctic flip quantitatively; the fix must KEEP the ice salt flux (not "zero surface tracer
+  flux"); the virtual arm may double-count (S + S_ice) if the brine channel also fires — disambiguate.
+  (iii) GLM MAJOR: the global SSS degradation is plausibly polar-driven, so the fix should recover most of
+  it (my "local gain only" withdrawn). (iv) 0.004 PSU stretch term: present in BOTH arms, not a closure
+  difference; second-order term (F dt/(rho h1))^2 reaches % in thin cells (MINOR). (v) one-column test:
+  exact S_new = S_old h/(h + F dt/rho), both F signs, NEMO time-centering. FALSIFIER (GLM, cheap): regress
+  NEMO's dS_top over 30 d against -S_bar sum(F) dt/(rho h1) on ice-free non-plume points; slope ~1 confirms
+  top-cell dilution; then include ice points: slope (S-S_ice)/S vs (S+S_ice)/S exposes the double count.
+  RULE-3 note: freshwater_salinity default 's_ref' is documented "legacy" => a defect-report knob.
