@@ -24,7 +24,7 @@ scope:
 |---|---|---|---|
 | `oracle_slow_forcing` | `stp2d.F90` | owned wet T/U/V cells at each written level | rank-0 halo bands and masked land |
 | `oracle_ocean_surface_input` | `stprk3.F90` | owned wet T/U/V cells; allocated active components | rank-0 halo bands, masked land, and unallocated iceberg components |
-| `oracle_rkstage3_wzv` | `traadv.F90` | owned wet T cells for `ww` and `pFw` | rank-0 halo bands, masked land, and inactive `wi` because resolved `ln_zad_Aimp=.false.` |
+| `oracle_rkstage3_wzv` | `traadv.F90` | owned wet T cells for both `ww` frames and `pFw`; inactive unallocated `wi` has zero elements and no schema slot | rank-0 halo bands and masked land |
 | `oracle_bt_substeps` | `dynspg_ts.F90` | owned wet T/U/V cells | rank-0 halo bands and masked land |
 | `oracle_bt_drag_operands` | `dynspg_ts.F90` | owned wet U/V cells | rank-0 halo bands and masked land |
 | `oracle_bt_advmean_operands` | `dynspg_ts.F90` | scalar/weight values plus owned wet U/V cells | rank-0 halo bands and masked land |

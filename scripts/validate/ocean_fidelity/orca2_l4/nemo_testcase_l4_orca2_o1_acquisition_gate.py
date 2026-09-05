@@ -35,6 +35,231 @@ OUTPUT_FIELDS = (
     "qns", "emp", "utau", "vtau", "taum", "wndm",
 )
 
+HYGIENE_STREAMS = {
+    "oracle_bt_advmean_operands_kt00000001.bin",
+    "oracle_bt_drag_operands_kt00000001.bin",
+    "oracle_bt_ordered_operands_kt00000001.bin",
+    "oracle_bt_substeps_kt00000001.bin",
+    "oracle_ocean_surface_input_kt00000001.bin",
+    "oracle_rkstage3_wzv_kt00000001.bin",
+    "oracle_slow_forcing_kt00000001.bin",
+}
+
+
+class _PairReader:
+    """Byte-exact paired reader which scores only an explicit defined mask."""
+
+    def __init__(self, left: Path, right: Path):
+        self.left_path, self.right_path = left, right
+        self.left, self.right = left.open("rb"), right.open("rb")
+        self.rows: list[dict] = []
+
+    def close(self) -> None:
+        require(self.left.read(1) == b"" and self.right.read(1) == b"",
+                f"{self.left_path.name}: parser did not consume both records")
+        self.left.close()
+        self.right.close()
+
+    def exact_bytes(self, count: int, label: str) -> None:
+        a, b = self.left.read(count), self.right.read(count)
+        require(len(a) == count and len(b) == count, f"{label}: truncated")
+        require(a == b, f"{self.left_path.name}:{label}: metadata differs")
+
+    def field(self, count: int, label: str, defined: np.ndarray) -> None:
+        byte_offset = self.left.tell()
+        a = np.fromfile(self.left, dtype=np.float64, count=count)
+        b = np.fromfile(self.right, dtype=np.float64, count=count)
+        require(a.size == count and b.size == count, f"{label}: truncated")
+        mask = np.asarray(defined, dtype=bool).reshape(-1)
+        require(mask.size == count, f"{label}: mask has {mask.size}/{count} slots")
+        exact = np.frombuffer(np.ascontiguousarray(a[mask]).tobytes(), dtype=np.uint8)
+        other = np.frombuffer(np.ascontiguousarray(b[mask]).tobytes(), dtype=np.uint8)
+        require(np.array_equal(exact, other),
+                f"{self.left_path.name}:{label}: defined cells differ")
+        self.rows.append({
+            "field": label,
+            "defined_f64": int(mask.sum()),
+            "canonical_zero_f64": int((~mask).sum()),
+            "byte_offset": byte_offset,
+            "first_defined_index": int(np.flatnonzero(mask)[0]) if mask.any() else None,
+            "status": "EXACT_DEFINED_BYTES",
+        })
+
+
+def _defined_masks(root: Path) -> dict[str, dict[str, np.ndarray]]:
+    """Return masks in NEMO Fortran storage order for rank 0."""
+    from netCDF4 import Dataset
+
+    with Dataset(root / "mesh_mask_0000.nc") as dataset:
+        reduced3 = {
+            grid: np.asarray(dataset[f"{grid.lower()}mask"][0], dtype=bool).transpose(2, 1, 0)
+            for grid in "TUV"
+        }
+        # fmask is stored as a real array in this diagnostic file.
+        f3 = np.asarray(dataset["fmask"][0], dtype=bool).transpose(2, 1, 0)
+    reduced3["F"] = f3
+    reduced2 = {grid: values[:, :, 0] for grid, values in reduced3.items()}
+    full2: dict[str, np.ndarray] = {}
+    full3: dict[str, np.ndarray] = {}
+    for grid in "TUVF":
+        full2[grid] = np.zeros((94, 152), dtype=bool)
+        full2[grid][2:92, 2:150] = reduced2[grid]
+        full3[grid] = np.zeros((94, 152, reduced3[grid].shape[2]), dtype=bool)
+        full3[grid][2:92, 2:150, :] = reduced3[grid]
+    return {"reduced2": reduced2, "reduced3": reduced3,
+            "full2": full2, "full3": full3}
+
+
+def _flat(mask: np.ndarray) -> np.ndarray:
+    return np.asarray(mask, dtype=bool).ravel(order="F")
+
+
+def _compare_hygiene_record(
+    left: Path, right: Path, masks: dict[str, dict[str, np.ndarray]]
+) -> dict:
+    """Compare source-defined slots; enumerate every canonical-zero class."""
+    name = left.name
+    pair = _PairReader(left, right)
+    one = np.ones(1, dtype=bool)
+    try:
+        if name == "oracle_slow_forcing_kt00000001.bin":
+            pair.exact_bytes(16 + 15 * 4, "magic_and_header")
+            for field, grid in (("e3u_3d", "U"), ("uu_Krhs", "U"), ("umask", "U"),
+                                ("e3v_3d", "V"), ("vv_Krhs", "V"), ("vmask", "V")):
+                pair.field(94 * 152 * 31, field, _flat(masks["full3"][grid]))
+            for field, grid in (("Ue_rhs_after_average", "U"), ("Ve_rhs_after_average", "V")):
+                pair.field(90 * 148, field, _flat(masks["reduced2"][grid]))
+            for field, grid in (("r1_hu_0", "U"), ("r1_hv_0", "V")):
+                pair.field(94 * 152, field, _flat(masks["full2"][grid]))
+            for field, grid in (("Ue_rhs_after_drag", "U"), ("Ve_rhs_after_drag", "V")):
+                pair.field(90 * 148, field, _flat(masks["reduced2"][grid]))
+            for field, grid in (("CdU_u", "U"), ("CdU_v", "V")):
+                pair.field(94 * 152, field, _flat(masks["full2"][grid]))
+            pair.field(1, "r1_rho0", one)
+            for field, grid in (("utauU", "U"), ("vtauV", "V"),
+                                ("r1_hu_Kbb", "U"), ("r1_hv_Kbb", "V")):
+                pair.field(94 * 152, field, _flat(masks["full2"][grid]))
+            for field, grid in (("Ue_rhs_after_wind", "U"), ("Ve_rhs_after_wind", "V")):
+                pair.field(90 * 148, field, _flat(masks["reduced2"][grid]))
+        elif name == "oracle_rkstage3_wzv_kt00000001.bin":
+            pair.exact_bytes(16 + 8 * 4, "magic_and_header")
+            t3 = _flat(masks["full3"]["T"])
+            pair.field(94 * 152 * 31, "ww_after_wzv", t3)
+            pair.field(94 * 152 * 31, "ww_after_inactive_wAimp", t3)
+            pair.field(94 * 152 * 31, "pFw", t3)
+        elif name == "oracle_ocean_surface_input_kt00000001.bin":
+            pair.exact_bytes(16 + 13 * 4, "magic_and_header")
+            kinds = dict(exchange.FIELDS)
+            grids = {field: ("U" if field == "utauU" else "V" if field == "vtauV" else "T")
+                     for field, _ in exchange.FIELDS}
+            for field, allocation in exchange.FIELDS:
+                grid = grids[field]
+                if allocation == "full":
+                    count, mask = 94 * 152, _flat(masks["full2"][grid])
+                elif allocation == "reduced":
+                    count, mask = 90 * 148, _flat(masks["reduced2"][grid])
+                elif allocation == "halo1":
+                    count = 92 * 150
+                    halo1 = np.zeros((92, 150), dtype=bool)
+                    halo1[1:91, 1:149] = masks["reduced2"][grid]
+                    mask = _flat(halo1)
+                else:
+                    count = 2 * 90 * 148
+                    mask = _flat(np.broadcast_to(
+                        masks["reduced2"][grid][:, :, None], (90, 148, 2)))
+                if field in exchange.INACTIVE_ICEBERG_FIELDS:
+                    mask = np.zeros(count, dtype=bool)
+                pair.field(count, field, mask)
+        elif name.startswith("oracle_bt_"):
+            pair.exact_bytes(16 + 6 * 4, "magic_and_header")
+            full = {grid: _flat(masks["full2"][grid]) for grid in "TUVF"}
+            reduced = {grid: _flat(masks["reduced2"][grid]) for grid in "TUVF"}
+            if "substeps" in name:
+                fields = (("sshn_e", "T", "full"), ("un_e", "U", "full"),
+                          ("vn_e", "V", "full"), ("eta_mid", "T", "full"),
+                          ("u_mid", "U", "full"), ("v_mid", "V", "full"),
+                          ("ssha_e", "T", "full"), ("zsshp2_e", "T", "full"),
+                          ("zu_spg", "U", "full"), ("zv_spg", "V", "full"),
+                          ("u_cor", "U", "full"), ("v_cor", "V", "full"),
+                          ("zu_trd", "U", "full"), ("zv_trd", "V", "full"),
+                          ("zu_frc", "U", "reduced"), ("zv_frc", "V", "reduced"),
+                          ("ua_e", "U", "full"), ("va_e", "V", "full"),
+                          ("zhU", "U", "full"), ("zhV", "V", "full"))
+                for jn in range(1, 66):
+                    pair.exact_bytes(4, f"jn_{jn}")
+                    for field, grid, allocation in fields:
+                        mask = full[grid] if allocation == "full" else reduced[grid]
+                        pair.field(mask.size, f"jn{jn}.{field}", mask)
+            elif "drag" in name:
+                pair.field(full["U"].size, "zCdU_u", full["U"])
+                pair.field(full["V"].size, "zCdU_v", full["V"])
+                fields = (("un_e", "U"), ("vn_e", "V"), ("hur_e", "U"), ("hvr_e", "V"),
+                          ("product_u", "U"), ("product_v", "V"), ("drag_u", "U"),
+                          ("drag_v", "V"), ("u_cor", "U"), ("v_cor", "V"),
+                          ("zu_trd", "U"), ("zv_trd", "V"))
+                for jn in range(1, 66):
+                    pair.exact_bytes(4, f"jn_{jn}")
+                    for field, grid in fields:
+                        pair.field(full[grid].size, f"jn{jn}.{field}", full[grid])
+            elif "advmean" in name:
+                pair.field(1, "r1_wgt2s", one)
+                pair.field(65, "wgtbtp2", np.ones(65, dtype=bool))
+                pair.field(full["U"].size, "r1_e2u", full["U"])
+                pair.field(full["V"].size, "r1_e1v", full["V"])
+                fields = (("before_u", "U"), ("before_v", "V"), ("zhU", "U"),
+                          ("zhV", "V"), ("u_mid", "U"), ("v_mid", "V"),
+                          ("zhup2", "U"), ("zhvp2", "V"), ("un_adv", "U"), ("vn_adv", "V"))
+                for jn in range(1, 66):
+                    pair.exact_bytes(4, f"jn_{jn}")
+                    pair.field(1, f"jn{jn}.za2", one)
+                    for field, grid in fields:
+                        pair.field(full[grid].size, f"jn{jn}.{field}", full[grid])
+                for suffix in ("pre_lbc_u", "pre_lbc_v", "post_lbc_u", "post_lbc_v"):
+                    grid = "U" if suffix.endswith("u") else "V"
+                    pair.field(full[grid].size, suffix, full[grid])
+            else:
+                pair.field(1, "rDt_e", one)
+                fields = (
+                    [(f, g, "full") for f, g in (
+                        ("un_e","U"),("vn_e","V"),("ub_e","U"),("vb_e","V"),
+                        ("ubb_e","U"),("vbb_e","V"),("sshn_e","T"),("sshb_e","T"),
+                        ("sshbb_e","T"),("u_mid","U"),("v_mid","V"),("eta_mid","T"),
+                        ("zhup2","U"),("zhvp2","V"),("zhU","U"),("zhV","V"),
+                        ("e2u","U"),("e1v","V"),("r1_e1e2t","T"),("du","T"),
+                        ("dv","T"),("zhdiv","T"),("ssh_frc","T"),("ssha_e","T"),
+                        ("zsshu_a","U"),("zsshv_a","V"),("zsshp2_e","T"),
+                        ("r1_e1u","U"),("r1_e2v","V"),("zu_spg","U"),("zv_spg","V"),
+                        ("u_cor","U"),("v_cor","V"),("zu_trd","U"),("zv_trd","V"),
+                        ("ua_e","U"),("va_e","V"),("hu_e","U"),("hv_e","V"),
+                        ("hur_e","U"),("hvr_e","V"))] +
+                    [(f, g, "reduced") for f, g in (
+                        ("zu_frc","U"),("zv_frc","V"),("ffu_nw","U"),("ffu_ne","U"),
+                        ("ffu_sw","U"),("ffu_se","U"),("ffv_sw","V"),("ffv_se","V"),
+                        ("ffv_nw","V"),("ffv_ne","V"))]
+                )
+                for jn in range(1, 3):
+                    pair.exact_bytes(4, f"jn_{jn}")
+                    pair.field(7, f"jn{jn}.coefficients", np.ones(7, dtype=bool))
+                    for field, grid, allocation in fields:
+                        mask = full[grid] if allocation == "full" else reduced[grid]
+                        pair.field(mask.size, f"jn{jn}.{field}", mask)
+        else:
+            raise GateError(f"no hygiene schema for {name}")
+        pair.close()
+    except Exception:
+        pair.left.close()
+        pair.right.close()
+        raise
+    return {
+        "status": "EXACT_DEFINED_BYTES",
+        "defined_f64": sum(row["defined_f64"] for row in pair.rows),
+        "canonical_zero_f64": sum(row["canonical_zero_f64"] for row in pair.rows),
+        "undefined_classes": [
+            "rank0_halo_bands", "masked_land", "inactive_or_unallocated_components"
+        ],
+        "fields": pair.rows,
+    }
+
 
 class GateError(RuntimeError):
     pass
@@ -114,8 +339,9 @@ def planted_controls(path: Path) -> dict[str, str]:
 
 
 def compare_inherited_records(run_dir: Path, accepted: Path) -> dict:
-    """Report strict raw-byte identity for every pre-existing oracle record."""
+    """Require exact bytes except the preregistered source-undefined slots."""
     expected = exchange.phase1.expected_inventory() | {exchange.RECORD}
+    masks = _defined_masks(accepted)
     rows = []
     for name in sorted(expected):
         left = accepted / name
@@ -124,19 +350,58 @@ def compare_inherited_records(run_dir: Path, accepted: Path) -> dict:
         require(right.is_file(), f"candidate inherited record missing: {name}")
         left_digest = exchange.sha256(left)
         right_digest = exchange.sha256(right)
-        rows.append({
+        raw_exact = left_digest == right_digest
+        row = {
             "file": name,
-            "status": "EXACT_BYTES" if left_digest == right_digest else "DIFF_BYTES",
+            "raw_status": "EXACT_BYTES" if raw_exact else "DIFF_BYTES",
             "accepted_sha256": left_digest,
             "candidate_sha256": right_digest,
-        })
-    exact = sum(row["status"] == "EXACT_BYTES" for row in rows)
+        }
+        if raw_exact:
+            row["status"] = "EXACT_BYTES"
+        elif name in HYGIENE_STREAMS:
+            row["defined_cell_identity"] = _compare_hygiene_record(left, right, masks)
+            row["status"] = "EXACT_DEFINED_BYTES_UNDEFINED_SLOTS_EXCLUDED"
+        else:
+            row["status"] = "DIFF_DEFINED_BYTES"
+        rows.append(row)
+    raw_exact = sum(row["raw_status"] == "EXACT_BYTES" for row in rows)
+    defined_exact = sum(row["status"] in {
+        "EXACT_BYTES", "EXACT_DEFINED_BYTES_UNDEFINED_SLOTS_EXCLUDED"
+    } for row in rows)
     return {
-        "exact": exact,
+        "raw_exact": raw_exact,
+        "defined_exact": defined_exact,
         "total": len(rows),
-        "differing": [row["file"] for row in rows if row["status"] != "EXACT_BYTES"],
+        "raw_differing": [row["file"] for row in rows if row["raw_status"] != "EXACT_BYTES"],
+        "defined_differing": [row["file"] for row in rows if row["status"] == "DIFF_DEFINED_BYTES"],
         "rows": rows,
     }
+
+
+def defined_identity_planted_controls(run_dir: Path, accepted: Path) -> dict[str, str]:
+    """One binding one-ULP plant in a source-defined slot per stream family."""
+    masks = _defined_masks(accepted)
+    results: dict[str, str] = {}
+    for name in sorted(HYGIENE_STREAMS):
+        baseline = _compare_hygiene_record(accepted / name, run_dir / name, masks)
+        target = next(row for row in baseline["fields"] if row["first_defined_index"] is not None)
+        with tempfile.TemporaryDirectory(prefix="orca2-defined-identity-") as td:
+            altered = Path(td) / name
+            shutil.copyfile(run_dir / name, altered)
+            offset = target["byte_offset"] + 8 * target["first_defined_index"]
+            with altered.open("r+b") as handle:
+                handle.seek(offset)
+                value = struct.unpack("=d", handle.read(8))[0]
+                handle.seek(offset)
+                handle.write(struct.pack("=d", np.nextafter(value, np.inf)))
+            try:
+                _compare_hygiene_record(accepted / name, altered, masks)
+            except GateError:
+                results[name] = "PASS_NONZERO"
+            else:
+                raise GateError(f"defined-cell identity plant did not fail: {name}")
+    return results
 
 
 def validate(
@@ -181,14 +446,18 @@ def validate(
         )
         inherited = compare_inherited_records(run_dir, accepted_instrumented)
         result["inherited_record_identity"] = inherited
-        if inherited["exact"] != inherited["total"]:
+        if inherited["defined_exact"] != inherited["total"]:
             result["status"] = "FAIL"
             result["error"] = (
-                "strict inherited-record identity failed: "
-                f"{inherited['exact']} / {inherited['total']} exact"
+                "defined inherited-record identity failed: "
+                f"{inherited['defined_exact']} / {inherited['total']} exact"
             )
     if plants:
         result["o1_planted_controls"] = planted_controls(run_dir / RECORD)
+        if accepted_instrumented is not None:
+            result["defined_identity_planted_controls"] = (
+                defined_identity_planted_controls(run_dir, accepted_instrumented)
+            )
     return result
 
 
