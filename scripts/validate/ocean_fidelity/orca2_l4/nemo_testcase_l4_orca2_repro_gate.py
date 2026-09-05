@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed raw-byte reproducibility gate for the 92-record ORCA2 oracle."""
+"""Fail-closed raw-byte reproducibility gate for the extended ORCA2 oracle."""
 
 from __future__ import annotations
 
@@ -47,6 +47,7 @@ def inventory() -> set[str]:
     return exchange.phase1.expected_inventory() | {
         exchange.RECORD,
         "oracle_sbcblk_o1_kt00000001.bin",
+        "oracle_stage1_wzv_operands_kt00000001.bin",
     }
 
 
@@ -99,7 +100,7 @@ def validate(a: Path, b: Path, *, plant: str | None) -> tuple[dict, int]:
     status = "PASS" if complete and exact == len(expected) else "FAIL"
     result = {
         "status": status,
-        "rule": "92 / 92 oracle records raw-byte identical",
+        "rule": f"{len(expected)} / {len(expected)} oracle records raw-byte identical",
         "inventory_complete": complete,
         "expected_count": len(expected),
         "actual_count_a": len(names_a),
