@@ -18,7 +18,8 @@
     "verify/rule12_hpg_eligibility_OVERFLOW-zps_plant.json": "024013b5b3c2529fc643ae7b500fc822c4dd6f1378386cf947ea6012121ee757",
     "verify/rule12_stp2d_momentum_rhs_LOCK_EXCHANGE-zco.json": "32589404d0dad5e4e81898eb8ec40dea4406a27d2d8c32c40dfc4c15d8643d82",
     "verify/rule12_stp2d_momentum_rhs_LOCK_EXCHANGE-zco_plant.json": "8de4b5c86e8302e20e8ab291456c023ff558dadef3bab8d600a038a47c6f27dd",
-    "verify/rule12_stp2d_momentum_rhs_OVERFLOW-zps.json": "2eabb2ecc7d56ac65d0eb51f6120162dcbf2afd4f014b8532a8be667a58d0fc6"
+    "verify/rule12_stp2d_momentum_rhs_OVERFLOW-zps.json": "2eabb2ecc7d56ac65d0eb51f6120162dcbf2afd4f014b8532a8be667a58d0fc6",
+    "verify/rule12_stp2d_momentum_rhs_OVERFLOW-zps_plant.json": "b8dc264575fb6221d5f1d82e170a1a8aa3feb27c3e857c55a453d442cbba2764"
   },
   "bbl_test_correction": {
     "defect": "the test picked the MEDIAN bbl_static_geometry active face; flat-bottom faces are active too and there ku_s == ku_d, so both planted cells are the same cell and no density contrast exists",
@@ -65,7 +66,8 @@
     "e931d1fb62c3 fix(ocean): let the barotropic substep gate read LOCK without inventing records",
     "66f9145c951e fix(ocean): drive the substep scaling loop from the record's own cycle count",
     "9c89c9310550 docs(ocean): round-26 walk, BBL test correction, manifest",
-    "3689568c22e3 fix(ocean): retract the 'HPG alone' frame claim and three more review defects"
+    "3689568c22e3 fix(ocean): retract the 'HPG alone' frame claim and three more review defects",
+    "1cf9af39e52b docs(ocean): record the round-26 review, its four retractions and one refutation"
   ],
   "corrections": {
     "footgun": "pgf_scheme='nemo_sco' returns dp_dx/dp_dy as literal zeros (ocean_pe_latlon_cgrid.py:2045-2046); the acceleration is in direct_hpg_u/v",
