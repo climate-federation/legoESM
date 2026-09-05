@@ -1,0 +1,74 @@
+{
+  "format": "nemo-testcase-l2-gyre-round28-preregister-v1",
+  "date": "2026-09-05",
+  "starting_tip": "359c33c40ecc",
+  "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+  "oracle_roots": {
+    "GYRE-zco": [
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19_oracle_v2_external",
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round21_oracle_v2_stage_ww"
+    ],
+    "LOCK_EXCHANGE-zco": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_10",
+    "OVERFLOW-zps": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10",
+    "LOCK_EXCHANGE-zco.external": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round25_lock_external_oracle",
+    "ORCA2": "/tmp/codex-orca2-r27-probe (round-27 disposable probe, left as is)"
+  },
+
+  "read_before_this_preregistration_no_prediction_carried": {
+    "note": "Rule 0 source readings taken BEFORE this manifest was written. They carry no prediction; they fix WHICH statement GYRE executes, which changes the round-27 open question as posed.",
+    "r0_1": "stp2d.F90:159 and :177 are two SELECT CASE( n_dynadv ) blocks. The vertical-averaging block at :177 has TWO arms: :178 CASE( np_VEC_c2, np_LIN_dyn ) whose body is :180-181 an ASSIGNMENT, and :183 CASE( np_FLX_c2, np_FLX_up3 ) whose body is :185-186 a CUMULATION onto the 2-D advective RHS.",
+    "r0_2": "GYRE's namelist_cfg sets ln_dynadv_vec = .true., so GYRE executes stp2d.F90:180-181, NOT :185-186. LOCK/OVERFLOW set ln_dynadv_up3 = .true. and execute :185-186. The round-27 open question named :185 for GYRE; the correct GYRE statement is :180. BOTH arms weight with reference e3u_0/e3v_0 and multiply by reference r1_hu_0/r1_hv_0, so the reference-vs-live question is unchanged; only the citation is.",
+    "r0_3": "domain.F90:159 builds r1_hu_0 = ssumask/(hu_0 + 1 - ssumask), i.e. it is NOT 1/hu_0 on a face where the +1-1 shift rounds.",
+    "r0_4": "stprk3.F90:186 calls stp_2D( kstp, Nbb, Nbb, Naa, Nrhs ) exactly ONCE per timestep, before stage 1. So step kt's slow forcing is computed from the kt ENTRY (Nbb) state, and the state entering kt=2 is produced by the step whose slow forcing used the kt=1 entry state.",
+    "r0_5": "The GYRE oracle V2 record set contains oracle_bt_substeps_kt00000001.bin ONLY (kt=1) and oracle_rhs_kt00000001.bin ONLY. There is NO dumped GYRE slow_u/slow_v frame and NO dumped GYRE 3-D momentum RHS at kt=2. read_bt_substeps additionally REQUIRES kt == 1. So a kt=2 arm CANNOT be scored against a dumped GYRE frame with the records that exist; what is measurable at kt=2 is stated below and its limit is stated with it."
+  },
+
+  "item1_gyre_reference_vs_live_slow_forcing_weighting": {
+    "claim_under_test": "GYRE's kt2 first-over-bar (T/S/u/v) is owned by the reference-vs-live thickness weighting of the barotropic slow forcing: NEMO forms it with reference e3u_0 and reference r1_hu_0 (stp2d.F90:180; domain.F90:159) while legoESM weights with live thicknesses (min_cell_to_uface of compute_layer_thickness) and divides by the live column sum.",
+    "arms_at_kt1": [
+      "model_captured -- the production slow_u/slow_v frame from the model's own step, scored against the dumped substep-1 frame",
+      "statement_model_rhs -- this probe's reproduction of the model's depth-mean statement fed the model's own momentum tendency; CALIBRATION, must equal model_captured bit for bit or the probe reports UNMEASURED instead of a number",
+      "statement_nemo_rhs -- the same statement fed NEMO's dumped uu(:,:,:,Krhs)/vv(:,:,:,Krhs)",
+      "statement_nemo_rhs_reciprocal -- x * nemo_source_round(1/H_live) instead of x / H_live",
+      "statement_nemo_rhs_reference -- NEW ARM: SUM(e3u_0 * rhs * umask) * r1_hu_0 with NEMO's OWN mesh_mask e3u_0/e3v_0/umask/vmask and r1_hu_0/r1_hv_0 built literally from domain.F90:159"
+    ],
+    "predictions": [
+      "P1 GYRE's kt=1 entry ssh is exactly 0.0 on every cell. CONFIRM: max|ssh| == 0.0. REFUTE: any nonzero.",
+      "P2 Because of P1, the live and reference weightings COINCIDE BITWISE at kt=1, so statement_nemo_rhs_reference equals statement_nemo_rhs_reciprocal bit for bit and the new arm moves NO GYRE kt=1 row. CONFIRM: 0 bit-unequal between those two arms. REFUTE: any bit-unequal.",
+      "P3 The reference-vs-live weighting is NOT O(eta/H). Under z-star the live face thickness is h_u(k) = e3u_0(k) * s_u with s_u a SINGLE per-column scalar (min_cell_to_uface of dz_ref*(1+eta/H) picks the same column at every k because dz_ref > 0), so s_u cancels exactly between numerator and denominator of the depth mean. The residual is therefore ROUNDOFF, not O(eta/H). CONFIRM at kt=2: max relative |reference - live| <= 1.0e-14 while max|eta|/H is >= 1.0e-7, i.e. the difference is at least 6 decades BELOW the O(eta/H) sizing round 27 asserted. REFUTE: max relative |reference - live| within one decade of max|eta|/H.",
+      "P4 Given P1-P3 the reference-weighted arm CANNOT own GYRE's kt2 first-over-bar and the merge blocker as posed is REFUTED. Corroborating fact already in the register and not re-measured here: GYRE kt2 ssh is 4.33681e-19 / AT-BAR while u/v are 9.48e-07 / 8.99e-07 with every cell unequal -- the barotropic solution the slow forcing drives is at the bar while the 3-D velocity is not.",
+      "P5 If P2 or P3 is REFUTED, the arm is a landing candidate: it is then implemented source-literally as ONE shared option, its Rule-12 eligibility measured on LOCK/OVERFLOW/ORCA2-probe, and GYRE's kt=1..10 first-over-bar reported before/after."
+    ],
+    "landing_rule": "Nothing lands unless the reference arm is shown bit-exact given NEMO's own inputs AND moves a GYRE row toward NEMO. If it is bitwise identical to the current arm on the only frame the records can score, there is no measured basis to land it and it is NOT landed.",
+    "non_vacuity": "--plant adds 1.0 to the largest wet operand of the transplanted RHS; the reference arm must stop matching. A second, stronger control is the ARM SEPARATION itself: the reference arm is built from DIFFERENT operand arrays (NEMO's mesh_mask e3u_0/umask) than the live arm, so bitwise equality between them is a measured coincidence, not an identity of code.",
+    "measurable_limit_stated_up_front": "kt=2 cannot be SCORED against a dumped GYRE slow_u frame because none exists. The kt=2 measurement is the reference-minus-live DIFFERENCE on the model's own kt=2 entry state, which sizes the claim; it is not an oracle comparison and will be labelled as such."
+  },
+
+  "item2_citation_gate_second_defeat": {
+    "claim_under_test": "The round-27 citation gate still cannot catch the defect class it exists for: audit_shift_sensitivity shifts EVERY line of a citation together, so it never tests a changed range EXTENT, and terminal symbols (ENDIF, END DO, END_2D, #else) recur so often that both endpoints of a widened range still match.",
+    "method": "Re-run the named defeats against the CURRENT gate first and record which succeed; then shift each endpoint INDEPENDENTLY in the audit, refuse recurring terminal symbols as anchors, pin the range LENGTH in the map, guard the empty/negative range (line_numbers('309-300') currently raises IndexError), and add a test that calls run() on the REAL receipt.",
+    "prediction": "stprk3_stg.F90:309-334 -> :309-533 PASSES the current gate (both endpoints ENDIF); line_numbers('309-300') raises IndexError rather than failing cleanly; after the fix both are FAILURES and the whole map is re-audited under independent endpoint shifts.",
+    "coverage": "the audited heading range is extended backwards, or the receipt states in writing which rounds are UNAUDITED."
+  },
+
+  "item3_bit_bar_in_the_exit_code": {
+    "claim_under_test": "nemo_testcase_rule12_hpg_eligibility.py publishes bit_exact_given_nemo_inputs: false while exiting 0, so the campaign's exact bar is not in an exit code.",
+    "method": "Give the row a distinct status VALUE-AT-BAR that the exit code reflects, so a value-exact/bit-debt row can never be read as AT-BAR by a caller that only checks the exit status.",
+    "prediction": "LOCK and OVERFLOW both report status VALUE-AT-BAR and exit NONZERO; the two planted controls still exit nonzero; ORCA2's separate probe is unaffected."
+  },
+
+  "item4_receipt_corrections": [
+    "the round-27 merge-blocker text says independent review of rounds 25 and 26 is OUTSTANDING; it is not -- round 25 was independently reviewed and round 26 acted on it, and rounds 26 and 27 were reviewed too",
+    "commit count against 03c6e8d96ff7 restated from the measured value",
+    "the O(eta/H) sizing of the reference-vs-live weighting is labelled UNMEASURED where it is asserted, and replaced by this round's measurement",
+    "the LOCK card's vorticity_scheme='al81' comes from a module default where NEMO's LOCK resolves ln_dynvor_ens; registered as CARD DEBT with its inertness reason. The card is NOT changed -- that is a user decision"
+  ],
+
+  "forbidden_this_round": [
+    "landing the signed-zero dyn_vor accumulation (user decision 16 pending)",
+    "changing the demo card's vertical_momentum_scheme / adaptive_implicit_vertadv (decision 15C pending)",
+    "any edit under /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src",
+    "makenemo, mpirun, push, merge, deletion, git stash / reset --hard",
+    "any configuration choice"
+  ]
+}
