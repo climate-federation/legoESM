@@ -307,7 +307,20 @@ def compare_gate_reports(
             if old_status == "AT-BAR" and new_status == "DEBT":
                 violations.append(f"{name}: status crossed AT-BAR -> DEBT")
 
-        ignored = {"normalized_max_abs", "absolute_max", "exact", "status"}
+        # These are reductions derived from the persisted cell fields.  They
+        # are disclosed in each report but cannot be an independent admission
+        # criterion: the oracle-relative residual comparison above is the
+        # certified object and deliberately sees compensation hidden by a
+        # reduction.  Structural metadata (n, dtype, bar, staggering, etc.)
+        # remains fail-closed below.
+        ignored = {
+            "normalized_max_abs",
+            "absolute_max",
+            "relative_max_abs",
+            "n_unequal",
+            "exact",
+            "status",
+        }
         for key in sorted((set(before) | set(after)) - ignored):
             if key not in before or key not in after or before.get(key) != after.get(key):
                 violations.append(

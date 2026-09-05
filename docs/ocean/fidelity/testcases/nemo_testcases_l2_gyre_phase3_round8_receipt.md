@@ -3041,3 +3041,97 @@ zero-move: LOCK stage `9 / 9` and trajectory `50 / 50` PASS, OVERFLOW stage
 `5992b7db...`, `524858b8...`, `c19b273f...`, and `ef076ec9...`; the residual
 NPZ hashes are unchanged from round 22, which independently proves bit
 identity.  Rules 8 and 12 therefore contain zero moved rows for this factor.
+
+### 23.3 GYRE production-JIT kt1--10 cellwise register
+
+The GYRE gate now uses the shared residual recorder and `ulp_move_gate` for
+its own trajectory, persisting oracle, candidate, and absolute-residual cells
+in a compressed hashed NPZ.  Reduction-only metadata (`n_unequal` and the
+relative/max summaries) remains disclosed but is not a second admission
+criterion; structural metadata remains fail-closed.  A direct helper test
+pins that rule.  The round-21b baseline was reproduced from clean model code
+at `e2378f057ca8` while executing this exact diagnostic gate, so scorer
+evolution is not confounded with physics evolution.
+
+Here is the complete current register.  Each cell reads
+`unequal / owned ; normalized L-inf residual ; status`; every number is CPU,
+production-JIT, fp64, scalar-libm, against GYRE oracle V2:
+
+| kt | T | S | u | v | ssh |
+|---:|---|---|---|---|---|
+| 1 | `0/18000;0;AT-BAR` | `0/18000;0;AT-BAR` | `0/17400;0;UNINFORMATIVE` | `0/17100;0;UNINFORMATIVE` | `0/600;0;UNINFORMATIVE` |
+| 2 | `12016/18000;1.36147e-12;DEBT` | `11238/18000;2.21811e-14;DEBT` | `17400/17400;9.48409e-07;DEBT` | `17100/17100;8.98799e-07;DEBT` | `600/600;4.33681e-19;AT-BAR` |
+| 3 | `18000/18000;0.000372234;DEBT` | `17938/18000;3.68332e-05;DEBT` | `17400/17400;0.00931192;DEBT` | `17100/17100;0.00471784;DEBT` | `600/600;7.07467e-07;DEBT` |
+| 4 | `18000/18000;0.00105948;DEBT` | `17996/18000;8.22573e-05;DEBT` | `17400/17400;0.0141819;DEBT` | `17100/17100;0.015948;DEBT` | `600/600;5.29978e-07;DEBT` |
+| 5 | `18000/18000;0.00305374;DEBT` | `17999/18000;8.61133e-05;DEBT` | `17400/17400;0.020734;DEBT` | `17100/17100;0.0437975;DEBT` | `600/600;6.70106e-05;DEBT` |
+| 6 | `18000/18000;0.00381767;DEBT` | `17999/18000;0.000128757;DEBT` | `17400/17400;0.0311347;DEBT` | `17100/17100;0.0602205;DEBT` | `600/600;0.00016313;DEBT` |
+| 7 | `18000/18000;0.00454667;DEBT` | `18000/18000;0.000122443;DEBT` | `17400/17400;0.0400417;DEBT` | `17100/17100;0.0663167;DEBT` | `600/600;0.000208757;DEBT` |
+| 8 | `18000/18000;0.00509837;DEBT` | `18000/18000;0.000136098;DEBT` | `17400/17400;0.0471807;DEBT` | `17100/17100;0.0245279;DEBT` | `600/600;0.000251063;DEBT` |
+| 9 | `18000/18000;0.00544507;DEBT` | `18000/18000;0.000147117;DEBT` | `17400/17400;0.0525615;DEBT` | `17100/17100;0.0145327;DEBT` | `600/600;0.000212024;DEBT` |
+| 10 | `18000/18000;0.00563664;DEBT` | `18000/18000;0.000154831;DEBT` | `17400/17400;0.0562509;DEBT` | `17100/17100;0.0111719;DEBT` | `600/600;0.00021254;DEBT` |
+
+First-over-bar remains kt2 T/S/u/v.  The cellwise round-21b-to-current
+comparison is **FAIL**: 42 rows move, 39 contain at least one cell worsening
+by more than two row-scale ulp, no row changes status, and first-over-bar does
+not move.  The combined largest worsening is `140135.640625` row-scale ulp.
+The controlled intermediate at `2ec14108995e` attributes 34 moved / 29
+Rule-12 rows to source-literal CEN2 and the subsequent stored-QCO-reciprocal
+landing contributes movement in 42 / Rule-12 debt in 39 rows.  Both operators
+are bit-exact given NEMO's own ORCA2 inputs, so Rule 12 keeps both shared fixes
+and registers the exposed downstream GYRE debt.
+
+Every moved row is enumerated below.  `I/W` is the count of cells whose oracle
+residual improved/worsened; `>2` is the number violating Rule 12; the last
+column classifies each one-variable intermediate as `0`, sub-threshold
+`moved`, or `DEBT`:
+
+| kt | field | round-21b norm | current norm | I / W | >2 | max worsening ulp | CEN2 / stored QCO reciprocal |
+|---:|---|---:|---:|---:|---:|---:|---|
+| 2 | S | `2.21811013e-14` | `2.21811013e-14` | 1 / 3 | 0 | `1` | 0 / moved |
+| 2 | T | `1.36147368e-12` | `1.36147368e-12` | 1 / 2 | 0 | `1` | 0 / moved |
+| 3 | S | `3.6833248e-05` | `3.6833248e-05` | 12 / 17 | 2 | `3` | 0 / DEBT |
+| 3 | T | `0.000372234099` | `0.000372234099` | 21 / 27 | 2 | `5` | 0 / DEBT |
+| 3 | ssh | `7.07466963e-07` | `7.07466963e-07` | 317 / 281 | 0 | `0.508789` | 0 / moved |
+| 3 | u | `0.00931191802` | `0.00931191802` | 8349 / 8163 | 4 | `3.63281` | 0 / DEBT |
+| 3 | v | `0.00471783625` | `0.00471783625` | 7983 / 7717 | 6 | `4.0625` | 0 / DEBT |
+| 4 | S | `8.22572821e-05` | `8.22572821e-05` | 158 / 211 | 19 | `448` | moved / DEBT |
+| 4 | T | `0.00105947572` | `0.00105947572` | 305 / 318 | 79 | `559` | moved / DEBT |
+| 4 | ssh | `5.29977578e-07` | `5.29977577e-07` | 357 / 243 | 23 | `19.9434` | 0 / DEBT |
+| 4 | u | `0.0141819184` | `0.0141819184` | 6336 / 10872 | 348 | `329.401` | moved / DEBT |
+| 4 | v | `0.0159480361` | `0.0159480361` | 9371 / 7352 | 356 | `329.45` | moved / DEBT |
+| 5 | S | `8.61133488e-05` | `8.61133488e-05` | 630 / 655 | 276 | `4873` | DEBT / DEBT |
+| 5 | T | `0.00305373707` | `0.00305373707` | 1450 / 1329 | 611 | `5551` | DEBT / DEBT |
+| 5 | ssh | `6.7010559e-05` | `6.7010559e-05` | 276 / 324 | 278 | `352.645` | moved / DEBT |
+| 5 | u | `0.0207340349` | `0.0207340349` | 8130 / 9256 | 1938 | `1643.76` | DEBT / DEBT |
+| 5 | v | `0.0437975007` | `0.0437975007` | 9040 / 8039 | 1813 | `1643.87` | DEBT / DEBT |
+| 6 | S | `0.000128756965` | `0.000128756965` | 1860 / 1750 | 627 | `11554` | DEBT / DEBT |
+| 6 | T | `0.00381766932` | `0.00381766932` | 4685 / 4499 | 2638 | `14377` | DEBT / DEBT |
+| 6 | ssh | `0.000163129927` | `0.000163129927` | 292 / 308 | 295 | `2083.49` | DEBT / DEBT |
+| 6 | u | `0.0311346757` | `0.0311346757` | 8525 / 8866 | 6603 | `2033.95` | DEBT / DEBT |
+| 6 | v | `0.0602205008` | `0.0602205008` | 8533 / 8567 | 6520 | `2500.37` | DEBT / DEBT |
+| 7 | S | `0.000122443033` | `0.000122443033` | 3558 / 3559 | 1124 | `11052` | DEBT / DEBT |
+| 7 | T | `0.00454666567` | `0.00454666567` | 6747 / 7150 | 4949 | `15637` | DEBT / DEBT |
+| 7 | ssh | `0.000208756935` | `0.000208756936` | 333 / 267 | 263 | `4913.92` | DEBT / DEBT |
+| 7 | u | `0.0400416616` | `0.0400416616` | 8540 / 8860 | 8633 | `4724.72` | DEBT / DEBT |
+| 7 | v | `0.0663167046` | `0.0663167046` | 8616 / 8484 | 8262 | `17666.8` | DEBT / DEBT |
+| 8 | S | `0.000136097664` | `0.000136097664` | 5307 / 5373 | 2240 | `18292` | DEBT / DEBT |
+| 8 | T | `0.00509837336` | `0.00509837336` | 7744 / 8231 | 6477 | `47285` | DEBT / DEBT |
+| 8 | ssh | `0.000251062758` | `0.00025106276` | 310 / 290 | 289 | `7286.13` | DEBT / DEBT |
+| 8 | u | `0.0471807238` | `0.0471807238` | 8637 / 8763 | 8727 | `41486.2` | DEBT / DEBT |
+| 8 | v | `0.0245278907` | `0.0245278907` | 8604 / 8496 | 8456 | `140136` | DEBT / DEBT |
+| 9 | S | `0.000147117483` | `0.000147117483` | 6473 / 6324 | 3143 | `22484` | DEBT / DEBT |
+| 9 | T | `0.00544506767` | `0.00544506767` | 8392 / 8293 | 6807 | `33180` | DEBT / DEBT |
+| 9 | ssh | `0.000212024037` | `0.000212024039` | 305 / 295 | 295 | `10138.1` | DEBT / DEBT |
+| 9 | u | `0.0525615036` | `0.0525615036` | 8480 / 8920 | 8900 | `12681.9` | DEBT / DEBT |
+| 9 | v | `0.0145327417` | `0.0145327417` | 8656 / 8444 | 8420 | `43943.4` | DEBT / DEBT |
+| 10 | S | `0.0001548308` | `0.0001548308` | 7076 / 6897 | 3569 | `20561` | DEBT / DEBT |
+| 10 | T | `0.00563664331` | `0.00563664331` | 8696 / 8317 | 6759 | `47791` | DEBT / DEBT |
+| 10 | ssh | `0.000212540417` | `0.000212540417` | 308 / 292 | 290 | `17811.4` | DEBT / DEBT |
+| 10 | u | `0.0562508842` | `0.0562508842` | 8631 / 8769 | 8749 | `14499.6` | DEBT / DEBT |
+| 10 | v | `0.0111718962` | `0.0111718962` | 8511 / 8589 | 8572 | `91789.3` | DEBT / DEBT |
+
+Artifacts: baseline JSON/NPZ `f63c7be5...` / `aca765c0...`, post-CEN2
+JSON/NPZ `c14a3541...` / `4d6c6341...`, current JSON/NPZ `3cd8332f...` /
+`459e6321...`, combined comparison `c55dcfc7...`, and the isolated stored-QCO
+comparison `aaa7b220...`.  The baseline and both intermediates are retained
+outside git under the round-23 root.

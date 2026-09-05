@@ -591,6 +591,9 @@ def score(name: str, oracle, candidate, mask, *, plant=False) -> dict:
         candidate = candidate.copy()
         candidate[tuple(np.argwhere(active)[0])] += 1.0
     require(np.all(np.isfinite(candidate[active])), f"{name}: non-finite candidate")
+    from legoesm.ocean.fidelity.ulp_move_gate import record_residual_field
+
+    record_residual_field(name, oracle, candidate, active)
     n_unequal = int(np.count_nonzero(
         candidate[active].view(np.uint64) != oracle[active].view(np.uint64)))
     absolute = float(np.max(np.abs(candidate[active] - oracle[active])))
@@ -2595,38 +2598,62 @@ def main(argv=None) -> int:
               "is recorded as UNMEASURED; every other row and the DEBT "
               "verdict are unchanged. Required to score a tree against the "
               "oracle set that exists."))
+    from legoesm.ocean.fidelity.ulp_move_gate import (
+        add_ulp_compare_arguments,
+        capture_residual_fields,
+        comparison_exit_code,
+        persist_ulp_comparison,
+        run_ulp_comparison,
+        write_residual_artifact,
+    )
+
+    add_ulp_compare_arguments(parser)
     args = parser.parse_args(argv)
     try:
-        report = run(
-            args.oracle_root,
-            stage2_root=args.stage2_oracle_root,
-            stage3_root=args.stage3_oracle_root,
-            max_step=args.max_step,
-            plant_state=args.plant_state,
-            plant_registry=args.plant_registry,
-            plant_arm=args.plant_arm,
-            plant_coverage=args.plant_coverage,
-            plant_barotropic=args.plant_barotropic,
-            plant_ene_coefficient=args.plant_ene_coefficient,
-            plant_drag=args.plant_drag,
-            plant_stage2_thermodynamics=args.plant_stage2_thermodynamics,
-            plant_stage2_term=args.plant_stage2_term,
-            stage2_term_limit=args.stage2_term_limit,
-            stage2_term_only=args.stage2_term_only,
-            measure_stage2_update_arm=args.measure_stage2_update_arm,
-            measure_stage2_tracers=args.measure_stage2_tracers,
-            measure_stage3_completion=args.measure_stage3_completion,
-            without_oracle_ene_coefficients=(
-                args.without_oracle_ene_coefficients),
-            trajectory_only=args.trajectory_only,
-        )
+        with capture_residual_fields() as residuals:
+            report = run(
+                args.oracle_root,
+                stage2_root=args.stage2_oracle_root,
+                stage3_root=args.stage3_oracle_root,
+                max_step=args.max_step,
+                plant_state=args.plant_state,
+                plant_registry=args.plant_registry,
+                plant_arm=args.plant_arm,
+                plant_coverage=args.plant_coverage,
+                plant_barotropic=args.plant_barotropic,
+                plant_ene_coefficient=args.plant_ene_coefficient,
+                plant_drag=args.plant_drag,
+                plant_stage2_thermodynamics=args.plant_stage2_thermodynamics,
+                plant_stage2_term=args.plant_stage2_term,
+                stage2_term_limit=args.stage2_term_limit,
+                stage2_term_only=args.stage2_term_only,
+                measure_stage2_update_arm=args.measure_stage2_update_arm,
+                measure_stage2_tracers=args.measure_stage2_tracers,
+                measure_stage3_completion=args.measure_stage3_completion,
+                without_oracle_ene_coefficients=(
+                    args.without_oracle_ene_coefficients),
+                trajectory_only=args.trajectory_only,
+            )
     except (GateError, OSError, ValueError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
+        return 2
+    if args.output:
+        write_residual_artifact(report, args.output, residuals)
+    elif args.compare_to:
+        print(
+            "FAIL: --compare-to requires --output for the residual sidecar",
+            file=sys.stderr,
+        )
         return 2
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.write_text(text)
     print(text, end="")
+    if args.compare_to:
+        comparison = run_ulp_comparison(args, report)
+        print(json.dumps(comparison, indent=2, sort_keys=True))
+        print(persist_ulp_comparison(args, comparison))
+        return comparison_exit_code(comparison)
     return 0 if report["status"] == "AT-BAR" else 1
 
 

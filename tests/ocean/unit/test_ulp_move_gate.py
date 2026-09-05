@@ -157,6 +157,17 @@ def test_previous_legoesm_movement_is_disclosed_but_does_not_fail_improvement():
     assert result["largest_previous_legoesm_field_move_in_row_scale_oracle_ulps"] == 4.0
 
 
+def test_cell_fields_not_derived_reductions_decide_admission():
+    before = _report()
+    after = copy.deepcopy(before)
+    before_row = before["steps"][0]["rows"][0]
+    after_row = after["steps"][0]["rows"][0]
+    before_row.update(n_unequal=3, relative_max_abs=2.0e-16)
+    after_row.update(n_unequal=1, relative_max_abs=1.0e-16)
+    result = _compare(before, after, _payload(), _payload())
+    assert result["status"] == "PASS", result["violations"]
+
+
 def test_denormal_cell_uses_floored_row_scale_not_local_spacing():
     oracle = np.array([0.0, np.nextafter(0.0, np.inf), 0.5])
     candidate = oracle.copy()
