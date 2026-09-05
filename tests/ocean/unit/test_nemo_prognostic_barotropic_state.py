@@ -271,5 +271,18 @@ def test_every_stage_barotropic_operand_routes_through_the_time_level_selector()
                 f"stage operand bypasses the selector: {ast.dump(value.func)}")
             first = value.args[0]
             assert isinstance(first, ast.Constant), ast.dump(first)
+            # Checking only the stage number is not enough: the call
+            # `_nemo_ws_stage_barotropic_velocity(1, (target_u, target_v),
+            # (target_u, target_v))` routes through the selector, carries the
+            # literal stage, and still hands stage 1 the SAME-STEP target the
+            # selector exists to keep out.  Require the Kbb operand to read
+            # the carried pair and to differ from the Nnn operand.
+            assert len(value.args) == 3, ast.dump(value)
+            kbb_src, nnn_src = ast.dump(value.args[1]), ast.dump(value.args[2])
+            assert kbb_src != nnn_src, (
+                "stage operand passes the same expression as both the "
+                f"last-step and this-step pair: {kbb_src}")
+            assert "uu_b" in kbb_src and "vv_b" in kbb_src, (
+                f"the last-step operand does not read the carried pair: {kbb_src}")
             stages.append(first.value)
     assert sorted(stages) == [1, 2, 3], stages
