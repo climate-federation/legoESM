@@ -906,6 +906,13 @@ for _stage, _kaa, _kmm in ((1, 3, 1), (2, 2, 3), (3, 3, 2)):
         f"stprk3_stg.F90:257-319 writes stage-{_stage} Kmm={_kmm} "
         "advecting transports",
     )
+    _DUMP_TIME_LEVEL[f"oracle_rkstage_ww_kt00000001_s{_stage}.bin"] = (
+        "now",
+        "scripts/validate/ocean_fidelity/testcases/"
+        "nemo_testcase_l2_gyre_round21_oracle/traadv_round21.patch "
+        f"writes stage-{_stage} Kmm={_kmm} ww after the executed "
+        "tra_adv_trp wzv(np_transport) call at src/OCE/TRA/traadv.F90:220-235",
+    )
 _DUMP_TIME_LEVEL["oracle_rhs_kt00000001.bin"] = (
     "now",
     "scripts/validate/ocean_fidelity/testcases/nemo502_MY_SRC/"

@@ -29,6 +29,9 @@ STAGE2_ROOT = Path(
 STAGE3_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
     "gyre_kt1_10_stage3_walk")
+STAGE_WW_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+    "round21_oracle_v2_stage_ww")
 DIMS = (36, 26, 31)
 LEVELS = {1: {"Kaa": 3, "Kmm": 1}, 2: {"Kaa": 2, "Kmm": 3}, 3: {"Kaa": 3, "Kmm": 2}}
 BIT_IDENTITY_EXPECTED = {
@@ -228,6 +231,40 @@ def read_transport(path: Path, expected_stage: int) -> dict:
         "zFu": _xyz(values[:count], nx, ny, nz),
         "zFv": _xyz(values[count : 2 * count], nx, ny, nz),
         "zFw": _xyz(values[2 * count :], nx, ny, nz),
+    }
+
+
+def read_stage_ww(path: Path, expected_stage: int) -> dict:
+    """Read post-``tra_adv_trp`` ww/pFw at one RK3 stage.
+
+    Unlike ``oracle_transport_*``, this record is emitted after the executed
+    vector-invariant tracer path calls ``wzv(...,np_transport)``
+    (``traadv.F90:220-235``), so ``ww`` is defined at all three stages.
+    """
+    level = _registered(path, "now")
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii").rstrip()
+        header = struct.unpack("=10i", handle.read(40))
+        values = np.fromfile(handle, dtype=np.float64)
+    version, kt, stage, kbb, kmm, kaa, nx, ny, nz, bits = header
+    require(magic == "NEMO_L2_STGWW_1", f"{path}: bad magic {magic!r}")
+    require(
+        (version, kt, stage, kmm, kaa, nx, ny, nz, bits)
+        == (1, 1, expected_stage, LEVELS[expected_stage]["Kmm"],
+            LEVELS[expected_stage]["Kaa"], *DIMS, 64),
+        f"{path}: bad header {header}",
+    )
+    require(kbb == 1, f"{path}: expected Kbb=1, got {kbb}")
+    count = nx * ny * nz
+    require(values.size == 1 + 2 * count, f"{path}: bad payload")
+    require(np.all(np.isfinite(values)), f"{path}: non-finite payload")
+    return {
+        "stage": stage,
+        "Kmm": kmm,
+        "registry_level": level,
+        "rDt_s": float(values[0]),
+        "ww": _xyz(values[1 : 1 + count], nx, ny, nz),
+        "pFw": _xyz(values[1 + count :], nx, ny, nz),
     }
 
 
@@ -550,6 +587,8 @@ def score(name: str, oracle, candidate, mask, *, plant=False) -> dict:
         candidate = candidate.copy()
         candidate[tuple(np.argwhere(active)[0])] += 1.0
     require(np.all(np.isfinite(candidate[active])), f"{name}: non-finite candidate")
+    n_unequal = int(np.count_nonzero(
+        candidate[active].view(np.uint64) != oracle[active].view(np.uint64)))
     absolute = float(np.max(np.abs(candidate[active] - oracle[active])))
     reference = float(np.max(np.abs(oracle[active])))
     normalized = absolute / max(reference, 1.0)
@@ -557,6 +596,7 @@ def score(name: str, oracle, candidate, mask, *, plant=False) -> dict:
         "name": name,
         "status": "AT-BAR" if normalized <= BAR else "DEBT",
         "exact": bool(np.array_equal(candidate[active], oracle[active])),
+        "n_unequal": n_unequal,
         "absolute_max": absolute,
         "reference_max_abs": reference,
         "normalized_max_abs": normalized,

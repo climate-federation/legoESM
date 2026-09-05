@@ -1151,6 +1151,14 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # has no such switch -- it is one routine -- so this exists only to
     # measure the two arms against each other on the certified cards.
     literal_stage_wzv: bool = False
+    # Private one-variable discriminator for the WS-RK3 stage clock consumed
+    # only by sshwzv.F90:334-335.  Production currently passes rn_Dt to all
+    # three stages; this arm passes (rn_Dt/3,rn_Dt/2,rn_Dt), matching
+    # stprk3_stg.F90:123-124,177-178,221-222.  It is not a public selector.
+    source_stage_wzv_clock_arm: bool = False
+    # WRITE-only diagnostic companion to expose_tracer_transport_stage: place
+    # the raw stage ww in the returned T slot instead of area*ww (pFw).
+    expose_tracer_transport_as_ww: bool = False
     # One-variable ablation of the UP3 upwind-selector fix: restore the
     # transport-sign branch choice in the stage horizontal momentum
     # advection.  NEMO dynadv_up3.F90:166-170 has no switch -- the T-point
@@ -5733,7 +5741,7 @@ class LatLonCGridOceanModel:
                 h_ref=_h_ref_ws, Hu_avg=Hu_avg, Hv_avg=Hv_avg,
                 u_mask_3d=_u_live_mask,
                 v_mask_3d=_v_live_mask, grid=_grid, z_coord=_zc,
-                config=_cfg_b, dt=dt,
+                config=_cfg_b,
                 legacy_min_face_thickness=_legacy_min_faces,
                 # wzv's Kbb/Kaa ssh operands (sshwzv.F90:334): the step-entry
                 # level and the barotropic after-level, the same pair NEMO
@@ -5957,6 +5965,8 @@ class LatLonCGridOceanModel:
             # stage 1 (dt/3): Kmm = Kbb transport, full RHS incl. vertical UP3
             _g0 = _nemo_ws_stage_transport(
                 (u0, v0), h_k_old, 0, eta_stage=state.eta.data,
+                dt=(dt / 3.0 if self._nemo_ws_test_hooks.source_stage_wzv_clock_arm
+                    else dt),
                 barotropic_velocity=(None
                     if _legacy_reduced_transport_mean_arm else (
                         jnp.zeros_like(target_u), jnp.zeros_like(target_v))),
@@ -6066,6 +6076,8 @@ class LatLonCGridOceanModel:
             _g1 = _nemo_ws_stage_transport(
                 (u1_corr, v1_corr), _h_live_one_third, 1,
                 eta_stage=_eta_live_one_third,
+                dt=(dt / 2.0 if self._nemo_ws_test_hooks.source_stage_wzv_clock_arm
+                    else dt),
                 barotropic_velocity=(None
                     if _legacy_reduced_transport_mean_arm
                     else (target_u, target_v)),
@@ -6103,6 +6115,7 @@ class LatLonCGridOceanModel:
             _g2 = _nemo_ws_stage_transport(
                 (u2_corr, v2_corr), _h_live_one_half, 2,
                 eta_stage=_eta_live_one_half,
+                dt=dt,
                 barotropic_velocity=(None
                     if _legacy_reduced_transport_mean_arm
                     else (target_u, target_v)),
@@ -6142,7 +6155,10 @@ class LatLonCGridOceanModel:
                 _nemo_ws_exposed_tracer_transport = (
                     _exposed_geom[7],
                     _exposed_geom[8],
-                    _exposed_geom[2] * jnp.asarray(_grid.area_T)[..., None],
+                    (_exposed_geom[2]
+                     if self._nemo_ws_test_hooks.expose_tracer_transport_as_ww
+                     else _exposed_geom[2]
+                     * jnp.asarray(_grid.area_T)[..., None]),
                 )
             u3_corr = u3_corr.at[:, -1].set(u3_corr[:, 0])
             state_new = state_new._replace(

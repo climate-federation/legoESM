@@ -175,6 +175,30 @@ def test_ene_coefficient_reader_layout_and_planted_violation(tmp_path):
     assert "planted ENE coefficient did not fire" in source
 
 
+def test_stage_ww_reader_and_one_cell_plant(tmp_path):
+    nx, ny, nz = gate.DIMS
+    count = nx * ny * nz
+    ww = np.arange(count, dtype=np.float64)
+    pfw = ww + np.float64(0.25)
+    path = tmp_path / "oracle_rkstage_ww_kt00000001_s1.bin"
+    path.write_bytes(
+        b"NEMO_L2_STGWW_1 "
+        + struct.pack("=10i", 1, 1, 1, 1, 1, 3, nx, ny, nz, 64)
+        + np.asarray([4800.0], dtype=np.float64).tobytes()
+        + ww.tobytes()
+        + pfw.tobytes()
+    )
+    record = gate.read_stage_ww(path, 1)
+    assert record["rDt_s"] == 4800.0
+    expected = ww.reshape((nx, ny, nz), order="F")[2:-2, 2:-2].transpose(1, 0, 2)
+    np.testing.assert_array_equal(record["ww"], expected)
+    mask = np.ones(expected.shape, dtype=bool)
+    exact = gate.score("stage_ww", expected, record["ww"], mask)
+    planted = gate.score("stage_ww", expected, record["ww"], mask, plant=True)
+    assert exact["n_unequal"] == 0 and exact["status"] == "AT-BAR"
+    assert planted["n_unequal"] == 1 and planted["status"] == "DEBT"
+
+
 def test_bottom_drag_boundary_is_source_reconstructed_and_fail_closed():
     source = PATH.read_text()
     for token in (
