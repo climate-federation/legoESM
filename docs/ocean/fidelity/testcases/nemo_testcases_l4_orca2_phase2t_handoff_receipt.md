@@ -161,6 +161,21 @@ to GYRE.  Buoyancy production, dissipation, tridiagonal assembly/solve,
 **UNMEASURED_AFTER_FIRST_DEPARTURE**.  `nn_etau=1` also remains unwalked after
 this stop.  No proxy target was manufactured.
 
+The exact CPU reproducer attached to that boundary is:
+
+```text
+JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=.:packages/core:packages/ocean \
+  /home/dbalwada/legoESM/.venv/bin/python \
+  scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_phase2t_tke_entry_gate.py \
+  --deck-root /data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0 \
+  --oracle-root /data/abyssal/dbalwada/nemo-testcases-l4/runs/variant_icebergs_off_phase2s_zdf_een_a_10step_np2 \
+  --mesh /data/abyssal/dbalwada/nemo-testcases-l4/runs/variant_icebergs_off_phase2s_zdf_een_a_10step_np2/mesh_mask_0000.nc \
+  --json-out docs/ocean/fidelity/testcases/nemo_testcases_l4_orca2_phase2t_tke_entry.json
+```
+
+The same command with `--plant` exits nonzero.  The targeted constructibility
+and bottom-TKE unit selection also closes **2 passed, 72 deselected**.
+
 ### Coverage and time-level registry for the admitted ZDF frames
 
 | field group | allocation/grid | kt=1 levels | kt=2 levels | disposition |
