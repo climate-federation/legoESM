@@ -1713,6 +1713,141 @@ than being null. The correction is commit `3d57b234c6a3`; the complete
 post-correction focused set is **26 passed in 119.78 s**. No canonical core
 file changed.
 
+### Round-14 carried-seed producer and ORCA1 coverage boundary
+
+#### The `v_i` seed has a measured producer
+
+The first probe **REFUTED** its preregistered surface-stress prediction. A
+source-written `usrdef_sbc.F90:124-140` arm did not move `v_i`, `v_s`, energy,
+or salinity, made both velocity maxima larger, and reduced only two already-red
+stress maxima. The probe's initial permissive "any row improves" decision is
+**WITHDRAWN**; artifact `ice_rheo/round14/seed_probe.json` is retained as a
+rejected decision record, not cited as an ownership result.
+
+The corrected one-variable arm **CONFIRMS** the producer of the Round-13
+step-9 `v_i` seed. Starting from the oracle `kt=8` entry and step-7 restart
+moments, replacing only the completed step-8 U/V and three stresses by their
+oracle values makes source-exact Prather produce **160 / 160** exact moments.
+With the shared source-rounded redistribution ledger, all **40 / 40** next-
+entry fields and **160 / 160** moments are byte-exact. Disabling only the
+ledger rounding restores **27 / 40** non-bit-exact fields: `v_i`, `v_s`, five
+snow-energy layers, ten ice-energy layers, and ten option-4 salt layers. The
+`v_i` row is `248995 / 1000000` non-bit cells with normalized/relative maximum
+`1.1214373875196422e-16`; `a_i` remains `0 / 1000000` in both arms.
+
+The producer is therefore the jpl=1 donor/survivor/receiver inventory
+association at `icedyn_rdgrft.F90:715-720,734-741,779-792,874-890`: SI3
+separately forms ridge and raft inventories, writes the surviving inventory as
+`field * (1-afrdg-afrft)`, and adds the two receiver contributions in that
+order. The shared `packages/ice/legoesm/ice/ridging.py` arm now uses the
+canonical `nemo_source_round` at those source boundaries; there is no card
+switch or second implementation. Its private identity-rounding ablation is the
+one-variable control. This is a **CONFIRMED compiled-association defect**, not
+a stored-versus-rederived-state design gap.
+
+The source-exact ledger removes all 27 mean-inventory differences from the
+full completed-step-8 result. Five carried dynamics rows remain non-bit-exact
+(`u_ice`, `v_ice`, and three stresses), and the resulting Prather moments
+remain non-bit-exact when those velocities are used. The tested surface-stress
+arm does not own them. Their first internal step-8 forcing/aEVP source statement
+remains **UNMEASURED**; no claim that the entire 720-step seed has been removed
+is made, and no new 9--720 walk is claimed in this round.
+
+The complete carry census also finds a real state-coverage gap:
+`snwice_mass` and `snwice_mass_b` are nonzero in `996004 / 1000000` oracle
+cells, with maxima `1848.3300187678121` and `1848.3300186039578` kg/m2, but
+the card has no corresponding state leaves. NEMO explicitly carries and
+updates them at `iceupdate.F90:187-193`; legoESM currently reconstructs the
+instantaneous ice/snow mass inputs from volume fields and cannot represent the
+before level. That is **UNMEASURED design debt**, although it is dynamically
+inert for this oracle because resolved `ln_ice_embd=F`
+(`final/namelist_ref:199`, `final/ocean.output:410`).
+
+The row-level plant binds independently of the ordinary scientific debt:
+`entry.step9.a_i` moves from `0 / 1000000`, BIT-EXACT, to
+`1 / 1000000`, DEBT, normalized `1.000000082740371e-10`; planted mode asserts
+that transition and exits 1. The first plant attempt is **REJECTED**: a
+singleton category axis caused a fail-closed shape error before scoring and
+wrote no artifact. Commit `e3ccffa59f3e` routes the plant through the same
+category-collapsed oracle accessor as the clean row; the complete rerun supplies
+the evidence above.
+
+The queued immutable-array review finding was also **CONFIRMED and fixed**.
+The failing assignment was in `nemo_si3_phase2_adv2d_replay.py:158` (the named
+test file itself has only 41 lines): `np.asarray(...).copy()` now precedes
+NumPy in-place Hbig replay. The two-test replay suite passes. Its historical
+above-bar assertion had also become stale after source-exact Prather; the
+measured row is below the normalized bar but remains a nonzero 24-ULP owner,
+which is what the control now asserts. The secondary rung-3.3 `a_ip` item was
+already closed by the Round-13 source-order fix: all 485 `a_ip` boundary rows
+are exact and the whole ordinary register is **11155 / 11155** exact in
+`ice_adv2d_rhg/round13_trajectory_intensive_order.json`.
+
+#### ORCA1 dynamics selector coverage
+
+The comparison below distinguishes the actual ORCA1 cfg-over-ref result from
+the oracle namelist that ran. The latter is
+`ice_rheo/final/namelist_ice_cfg`; its resolved values are cross-checked in
+`ice_rheo/final/ocean.output:458-565,652-742`. "Covered" refers only to the
+measured jpl=1 CPU/fp64 card and its recorded oracle, never to an unrun selector
+cross-product. The shipped ICE_RHEO cfg itself selects `ln_rhg_EVP=F`,
+`ln_aEVP=F`, and EAP on (`tests/ICE_RHEO/EXPREF/namelist_ice_cfg:48-58`);
+the certified copy's aEVP values are the explicitly cited ORCA1 overlay, not a
+claim about that stale shipped selector.
+
+| selector | ORCA1 resolved value | certified oracle value | coverage |
+|---|---|---|---|
+| category count | `jpl=1` (`ORCA1 cfg:24`, overriding ref `:24=5`) | `1` (`final cfg:24`) | **COVERED**, jpl>1 rejected |
+| vertical ice/snow layers | `3 / 3` (`ORCA1 cfg:25-26`) | `10 / 5` (`final cfg:25-26`) | **UNCOVERED cross-product** |
+| thermodynamics | `ln_icethd=T` (`ORCA1 cfg:32`) | `F` (`final cfg:28`) | **UNCOVERED** |
+| outer dynamics | `ln_dynALL=T` (`ORCA1 cfg:44`) | `T` (`final cfg:37`) | **COVERED** for `rhg -> adv -> rdgrft -> cor` |
+| lateral boundary coefficient | `rn_ishlat=2` (ORCA1 ref `:57`) | `2` (`final cfg:41`) | **COVERED** on this all-wet periodic geometry |
+| landfast L16 | `T` (`ORCA1 cfg:46`), `rn_lf_*` from ref `:59-63` | `F` (`final cfg:42`; output `:658`) | **UNMEASURED / UNCOVERED** |
+| H79 strength | `T`, `rn_pstar=2.0e4`, `rn_crhg=20` (`ORCA1 cfg:52-54`) | same (`final cfg:47-49`; output `:687-689`) | **COVERED** in the landfast-off arm |
+| strength smoothing | `F` (`ORCA1 cfg:55`) | `F` (`final cfg:50`) | **COVERED** |
+| ridge distribution / participation | exponential / exponential (`ORCA1 cfg:57-60`) | same (`final cfg:51-58`) | **COVERED** for jpl=1 |
+| ridging / rafting | `T / T`, `rn_porordg=0` (`ORCA1 cfg:61-65`) | same (`final cfg:59-68`) | **COVERED** only with `ln_icethd=F`; thermodynamic retention coupling is uncovered |
+| EVP / aEVP | `EVP=T` (`ORCA1 cfg:70`), `aEVP=T`, `nn_nevp=100`, check off (ref `:108-116`) | same (`final cfg:73-81`; output `:723-727`) | **COVERED**, 100 subcycles |
+| EAP | `F` (ORCA1 ref `:109`) | `F` (`final cfg:80`) | selector exclusion covered; no EAP trajectory claim |
+| Prather advection | `T` (`ORCA1 cfg:75`) | `T` (`final cfg:90`; output `:742`) | **COVERED**, 32 tracers / 160 moments for this oracle |
+| ice-ocean drag | `rn_Cd_io=5.0e-3` (ORCA1 ref `:136`) | same (`final cfg:97`; output `:565`) | **COVERED** for the case forcing |
+| Coriolis field | normal ORCA1 spherical field; no ICE_RHEO `ln_corio=F` override | zero (`final/namelist_cfg:21`; `usrdef_hgr.F90:133-140`) | **UNCOVERED ORCA1 forcing arm** |
+| coupled ocean/atmosphere forcing fields | production ORCA1 inputs | ICE_RHEO analytic wind and zero prescribed ocean current | **UNCOVERED cross-product**; only the case forcing is scored |
+| melt ponds | `ln_pnd=F` (`ORCA1 cfg:151-152`) | resolved level ponds/lids on (`final/output:547-558`) | **UNINFORMATIVE / UNCOVERED**: pond state is zero here |
+| salinity option | `nn_icesal=2` (`ORCA1 cfg:108`) | option 4; ten carried layers | **UNCOVERED cross-product** |
+
+The shipped-test search is conclusive for the requested choice point:
+**0 / 10** shipped `tests/*/EXPREF/namelist_ice_cfg` files set
+`ln_landfast_L16`; no shipped NEMO test case exercises that selector. The L16
+terms themselves are the `zvU/zvV`, `zvCr`, `ztaux_base`, `ztauy_base`, and
+`tau_icebfr` branch at `icedyn_rhg_evp.F90:333-363`; the certified run takes
+the explicit zero branch at `:364-373`. A future user choice is therefore
+needed between a copied ICE_RHEO variant with an L16 namelist/input contract or
+an ORCA2-based variant using the ORCA1 ice deck. Neither new oracle arm was
+started here.
+
+| Round-14 artifact/file | SHA-256 |
+|---|---|
+| rejected first seed decision record | `07129b91d063303735763ec20e287ee7bd6b07e205ad98fd497f37deb66b1099` |
+| corrected seed-producer / private-ledger-ablation gate | `897af8e527dcbf33714a93736fb2473799d6b9b5b8aad1f44388bb86b70f345b` |
+| binding row plant | `99ef272ff61d642b11bf9d0af9bce0609d8b190f04cfc2fba8b48a327c743255` |
+| corrected rung-3.3 trajectory (`a_ip` closure) | `e6d937b408d7000802db4fb0952ca0cd93c5b793d452c5f2293f2528cb411074` |
+| shared ridging implementation | `22e1e6e98bd8fce6c493b463bb48082f431a6cddf001fd0122897479a7a0635d` |
+| committed Round-14 producer gate | `789fcfde9b9062dd3f3035bf7771346bdd0f6c414ab747d16f648908d3b081c2` |
+
+The Round-14 preregistration, revised prediction, implementation, immutable-
+array review fix, and row-plant repair commits are `26b62bcc966a`,
+`4dd73f9eb0f0`, `5909255ba06f`, `ce330724d9aa`, and `e3ccffa59f3e`; the replay
+constant-ratchet cleanup is `edd776582a0a`. Focused CPU/fp64 verification is
+**30 passed in 227.57 s** for both ridging suites plus the producer-probe
+controls, and **2 passed in 12.06 s** for the repaired ADV2D replay suite. The
+five selected inline/hardcoded ratchet nodes pass in 0.80 s; applying the same
+detectors directly to the two touched scripts reports zero hardcoded hits and
+zero inline hits. Ruff passes all six touched Python paths with only the
+campaign's established `N803`, `N806`, and `I001` exceptions. No NEMO
+executable was run in the sandbox, no shipped source/test was changed, no file
+was deleted, no canonical core file changed, and no handoff `run.sh` was needed.
+
 ## Loudly UNMEASURED / deferred
 
 Within-step x/y Prather split states; ORCA1
@@ -1723,9 +1858,10 @@ general production run-restart integration outside the
 opt-in card's now-verified restart path; coupled ice--ocean comparison; and
 landfast L16 (OFF here,
 **UNVERIFIED-deferred to lane 4**).  No legoESM claim is made for any item in
-this paragraph. The first full-card operation that creates the fp64-scale
-carried seed before the exact-input step-9 aEVP replay, and whether that seed
-is mathematically unavoidable, are also **UNMEASURED**.
+this paragraph. The jpl=1 redistribution statement producing the `v_i`
+component of the seed is now CONFIRMED above; the first source statement
+producing the remaining step-8 U/V/stress differences, and whether any residual
+seed is mathematically unavoidable, remain **UNMEASURED**.
 
 ## End-of-task ASKED / UNASKED choice list
 
@@ -1771,6 +1907,10 @@ lost inside narrative:
 | 13 | Rerun the ICE_RHEO steps 9--720 production-JIT walk and final restart after the discriminator | ASKED | Completed after crash recovery; first long-walk nonexact row is step-9 `v_i`, final debt is 33/39 ordinary plus 140/160 moments |
 | 13 | Correct the cross-rung test assertion exposed by the post-crash verification rerun | UNASKED, in-scope harness correction | Restored the rung-3.1 restart-moment first-divergence contract in `3d57b234c6a3`; post-fix focused set is 26/26 |
 | 13 | Modify canonical core files, change defaults/schemes, relax the bar, edit shipped NEMO, use GPU/MPI, commit multi-MB dumps, delete artifacts, or push | UNASKED | None performed; WRITE-only dumps and JSON stay external, shipped tree untouched |
+| 14 | Census the step-9 carry and name the step-8 producer of the `v_i` seed with preregistered one-variable arms | ASKED | Surface-stress prediction REFUTED; jpl=1 ridging inventory ledger CONFIRMED by 40/40 fields plus 160/160 exact moments and a 27-field private ablation |
+| 14 | Fix the immutable ADV2D replay mutation and close the secondary `a_ip` item | ASKED | NumPy copy landed; replay suite 2/2; `a_ip` is exact at all 485 corrected boundaries |
+| 14 | Compare ORCA1's resolved dynamics deck with the certified oracle and find a shipped landfast test | ASKED | Coverage table above; none of 10 shipped ice-test namelists enables L16 |
+| 14 | Add a new landfast, multi-category, thermodynamic, pond, or salinity arm; run NEMO in the sandbox; alter canonical core/defaults/bar; delete files; use GPU/MPI; push | UNASKED | None performed; the next landfast oracle requires a user scope choice |
 
 **ASKED choices:** resolve the rung-3.1 review HOLD in its own commit; implement
 rungs 3.1 and 3.2 against the pinned shipped cases; fp64/CPU only and `jpl=1`;
