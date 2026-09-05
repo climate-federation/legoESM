@@ -67,7 +67,10 @@
     "66f9145c951e fix(ocean): drive the substep scaling loop from the record's own cycle count",
     "9c89c9310550 docs(ocean): round-26 walk, BBL test correction, manifest",
     "3689568c22e3 fix(ocean): retract the 'HPG alone' frame claim and three more review defects",
-    "1cf9af39e52b docs(ocean): record the round-26 review, its four retractions and one refutation"
+    "1cf9af39e52b docs(ocean): record the round-26 review, its four retractions and one refutation",
+    "ee02b609bcbf docs(ocean): refresh the round-26 manifest for the renamed rows and their plants",
+    "28c3152a2ccb test(ocean): close the stage-operand guard's second hole, on the operands",
+    "aefdc9ef945e fix(ocean): make the admission --writer flag fail closed on mixed record kinds"
   ],
   "corrections": {
     "footgun": "pgf_scheme='nemo_sco' returns dp_dx/dp_dy as literal zeros (ocean_pe_latlon_cgrid.py:2045-2046); the acceleration is in direct_hpg_u/v",
@@ -172,9 +175,12 @@
       "run.sh: `diff | grep -q '^<'` under set -o pipefail could never fire (reproduced: a deleted-line instrument passed); now counted",
       "admission report published plant_applied: true on runs that planted nothing"
     ],
+    "nits_that_were_real_and_are_fixed": [
+      "AST guard checked only args[0]: a same-step operand passed through the selector with the right stage number. Second hole in this one guard this round.",
+      "round-21 --writer now fails closed on mixed record kinds (GYRE default PASSes without it, FAILs with it; LOCK single-kind run unaffected)"
+    ],
     "recorded_not_fixed": [
-      "AST guard checks only args[0] and walks the whole module, not the routine its docstring names",
-      "round-21 --writer stamps one provenance string on every record kind"
+      "the AST guard walks the whole module, not the routine its docstring names"
     ],
     "retractions": [
       "HPG-alone frame + stprk3_stg.F90:309-334 citation",

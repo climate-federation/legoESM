@@ -4499,12 +4499,28 @@ deleted-line instrument passed.  It now counts the `<` lines.  And the
 admission report published `plant_applied: true` on runs that planted nothing,
 because it printed a one-shot sentinel instead of the fact.
 
-Two reviewer NITs are recorded, not fixed: the stage-operand AST guard checks
-only `args[0]`, so `_nemo_ws_stage_barotropic_velocity(1, <same-step target>)`
-would pass, and it walks the whole module rather than the routine its
-docstring names; and round-21's `--writer` stamps one provenance string on
-every record kind (correct in this use, where all changed LOCK records are one
-kind, but a footgun).
+**Both reviewer NITs turned out to be real holes and are FIXED.**  The
+stage-operand AST guard checked only `args[0]`, so
+`_nemo_ws_stage_barotropic_velocity(1, (target_u, target_v), (target_u,
+target_v))` routes through the selector, carries the literal stage number, and
+still hands stage 1 the same-step pair the selector exists to keep out.
+Planted exactly that: the guard as landed earlier this round PASSES on it, the
+tightened guard fails.  The Kbb operand must now differ from the Nnn operand
+and must read the carried `uu_b/vv_b`.  That is the SECOND hole found in this
+one guard this round, which is itself the finding — an AST guard is only as
+good as the specific bypasses someone has tried against it.
+
+Round-21's `--writer` now fails closed when more than one record kind changed,
+so one instrument's `file:line` can never be stamped over records written by
+another.  Shown non-vacuous: GYRE's default run, whose ten changed records
+span several kinds, PASSES without `--writer` and FAILS with it, while the
+LOCK run that legitimately names one instrument still passes
+(`exact=24/27`, `restart_equal=True`).
+
+The guard still walks the whole module rather than the routine its docstring
+names; that remains recorded and unfixed, since narrowing it would need the
+enclosing-function walk the docstring promises and no bypass has been shown
+against it.
 
 ### The six pre-existing failures — one fixed, five remain
 
