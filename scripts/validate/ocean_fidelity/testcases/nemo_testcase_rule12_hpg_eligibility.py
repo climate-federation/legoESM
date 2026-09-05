@@ -1,27 +1,49 @@
 #!/usr/bin/env python3
-"""Rule-12 eligibility row for the changed HPG/QCO operator on the lane-1 tanks.
+"""Rule-12 exact-input row for the changed HPG/QCO operator on the lane-1 tanks.
 
 Round 25 landed two source associations inside NEMO's hydrostatic pressure
 gradient: the ``key_qco`` depth operand ``gdept_z0 = gdept_0*(1+r3t) - ssh``
 materialised as two statements (``domzgr_substitute.h90:139,145``), and the
 ``nemo_sco`` acceleration carried straight into the momentum RHS instead of
 through a pressure round trip (``dynhpg.F90:359,383``).  That change was shown
-bit-exact given NEMO's own inputs on GYRE only.
+bit-exact given NEMO's own inputs on GYRE only.  Rule 12 requires the same
+exact-input row on EVERY card that executes it, and
+``nemo_testcase_recipe.py:92,274,914`` pins ``pgf_scheme='nemo_sco'`` for all
+of them.  This gate supplies the row for ``LOCK_EXCHANGE-zco`` and
+``OVERFLOW-zps``.
 
-Rule 12 requires the same exact-input row on EVERY card that executes the
-changed operator, and ``nemo_testcase_recipe.py:92,274,914`` pins
-``pgf_scheme='nemo_sco'`` for all of them.  This gate supplies the row for
-``LOCK_EXCHANGE-zco`` and ``OVERFLOW-zps``.
+WHAT THE SCORED FRAME ACTUALLY IS -- read from the instrument, not assumed.
+``oracle_rhs_kt00000001.bin`` is written by ``l1_dump_rhs`` at
+``MY_SRC/stprk3.F90:206``, immediately after ``stp_2D`` at :204 and BEFORE
+stage 1 at :215.  It is therefore NOT a stage-1 frame and NOT the hydrostatic
+pressure gradient in isolation.  Its content, in ``stp2d.F90`` order:
 
-Why the dumped stage-1 RHS *is* the HPG frame on these cards: NEMO's RK3
-stage accumulates ``dyn_hpg``, ``dyn_vor`` and ``dyn_adv`` into a zeroed
-``puu(:,:,:,Krhs)`` (``stprk3_stg.F90:309-334``).  ``dyn_vor`` and ``dyn_adv``
-are bilinear in the velocity, and both lane-1 tanks start from rest, so at
-``u = v = 0`` those two contribute exactly zero and the dumped
-``oracle_rhs_kt00000001.bin`` frame is the hydrostatic pressure gradient
-alone.  Both preconditions are asserted here, so the row cannot pass by
-cancellation, and the two changed functions are counted as they execute so
-the row cannot pass on a card that never runs them.
+* ``:126`` ``dyn_hpg(kt, Kbb, uu, vv, Krhs)`` -- the changed operator, which
+  ASSIGNS over its loop range (the RHS is not pre-zeroed);
+* ``:129`` ``dyn_ldf`` -- called UNCONDITIONALLY, and inert here only because
+  both cards set ``ln_dynldf_OFF = .true.`` in their namelist, not because the
+  card is at rest.  The gate asserts the legoESM equivalent rather than
+  relying on that coincidence;
+* ``:190`` ``dyn_vor`` -- bilinear in the velocity, hence exactly zero at a
+  rest start;
+* 3-D momentum advection is NOT in this frame: both cards are flux form
+  (``ln_dynadv_up3 = .true.``), so ``stp2d.F90:172`` writes only the 2-D
+  ``pUe/pVe`` and the 3-D advection lands at ``stprk3_stg.F90:315``, after the
+  dump;
+* then ``dyn_spg_ts`` (``stp2d.F90:279``) REMOVES the vertical mean from
+  ``puu(:,:,:,Krhs)`` at ``dynspg_ts.F90:344-345`` and ADDS the barotropic
+  acceleration back at ``:938-975``.  Neither is zero at a rest start: the
+  dumped ``uu_b(Kaa)`` maxima are 1.135e-3 (LOCK) and 4.503e-2 (OVERFLOW).
+
+So the row is a COMPOSITE: baroclinic HPG with its depth mean removed, plus
+the barotropic acceleration.  It discharges Rule 12 in the sense that the
+changed operator is inside a frame that is bit-exact given NEMO's own inputs
+-- which is a STRONGER statement about how much of NEMO's step is reproduced
+bitwise, and a WEAKER isolation, since a bit-level compensating error between
+the pressure gradient and the mode split is not excluded by this row alone.
+The earlier "the dumped frame is dyn_hpg alone" claim, and its citation of
+``stprk3_stg.F90:309-334`` (which is the ``CASE(2,3)`` block and never runs at
+stage 1), are RETRACTED.
 """
 
 from __future__ import annotations
@@ -143,17 +165,35 @@ def run(case: str, root: Path, *, plant: bool = False,
     require(all(row["unequal"] == 0 for row in inputs),
             f"{case}: legoESM does not consume NEMO's own kt=1 inputs: {inputs}")
 
+    # Precondition B0: dyn_ldf is called UNCONDITIONALLY at stp2d.F90:129 and
+    # is inert on these cards only because their namelist sets
+    # ln_dynldf_OFF = .true.  That is a namelist fact, not a rest-state fact,
+    # so it is asserted rather than assumed.
+    lv = cfg.lateral_viscosity
+    ldf_coefficients = {
+        name: float(getattr(lv, name))
+        for name in ("A_h", "A_h_merid", "A_h_floor", "B_h", "B_h_barotropic",
+                     "C_smag", "C_smag_lap", "C_leith")
+    }
+    require(all(value == 0.0 for value in ldf_coefficients.values())
+            and cfg.lateral_friction_scheme == "none",
+            f"{case}: NEMO sets ln_dynldf_OFF=.true., but the card carries "
+            f"lateral momentum diffusion {ldf_coefficients} / "
+            f"lateral_friction_scheme={cfg.lateral_friction_scheme!r}; the "
+            "scored frame would then hold a dyn_ldf contribution NEMO's does "
+            "not")
+
     # Precondition B: NEMO's own entry velocity is IDENTICALLY zero, so the
-    # dumped stage-1 Krhs carries no dyn_vor or dyn_adv contribution and the
-    # row cannot pass by cancellation against a nonzero one.
+    # dumped frame carries no dyn_vor contribution and the row cannot pass by
+    # cancellation against a nonzero one.
     rest = {
         "oracle_entry_abs_max_u": float(np.max(np.abs(entry["u"]))),
         "oracle_entry_abs_max_v": float(np.max(np.abs(entry["v"]))),
     }
     require(rest["oracle_entry_abs_max_u"] == 0.0
             and rest["oracle_entry_abs_max_v"] == 0.0,
-            f"{case}: NEMO's kt=1 entry is not at rest: {rest}; the dumped "
-            "stage-1 RHS is then not the HPG frame and this row is void")
+            f"{case}: NEMO's kt=1 entry is not at rest: {rest}; dyn_vor would "
+            "then contribute and this row's composition statement is void")
 
     # Precondition C: the two functions round 25 changed actually execute on
     # this card.  A row measured on a card that never calls them proves
@@ -189,7 +229,7 @@ def run(case: str, root: Path, *, plant: bool = False,
         # score() stamps the Kaa-velocity frame of the trajectory gates.  This
         # row is a momentum TENDENCY frame, so the inherited label would be a
         # false claim about what is being compared.
-        row["frame"] = "instantaneous_stage1_momentum_rhs"
+        row["frame"] = "instantaneous_post_stp2d_momentum_rhs"
         row["staggering_and_reduction"] = (
             "NEMO puu(:,:,:,Nrhs) after the stage-1 accumulation and "
             "legoESM's momentum tendency are both instantaneous 3-D C-grid "
@@ -198,7 +238,7 @@ def run(case: str, root: Path, *, plant: bool = False,
             "frame is dyn_hpg alone")
         return row
 
-    rows = [_relabel(score(f"{case}.kt1.stage1.oracle_input_hpg.u",
+    rows = [_relabel(score(f"{case}.kt1.stp2d.momentum_rhs.u",
                            rhs["u"][..., :nlev], candidate_u, masks["u"],
                            plant=plant))]
 
@@ -210,7 +250,7 @@ def run(case: str, root: Path, *, plant: bool = False,
     v_mask[-1] = False
     v_wet = int(v_mask.sum())
     if v_wet:
-        rows.append(_relabel(score(f"{case}.kt1.stage1.oracle_input_hpg.v",
+        rows.append(_relabel(score(f"{case}.kt1.stp2d.momentum_rhs.v",
                                    rhs["v"][..., :nlev], candidate_v, v_mask)))
         v_disposition = "SCORED"
     else:
@@ -236,14 +276,24 @@ def run(case: str, root: Path, *, plant: bool = False,
                       entry_path.name: sha256(entry_path)},
         "precondition_equal_inputs": inputs,
         "precondition_oracle_at_rest": rest,
+        "precondition_lateral_viscosity_off": ldf_coefficients,
         "precondition_changed_operator_executed": calls,
         "v_component": v_disposition,
         "v_wet_faces": v_wet,
         "nemo_source": [
-            "stprk3_stg.F90:309-334 (dyn_hpg, dyn_vor, dyn_adv into Krhs)",
+            "MY_SRC/stprk3.F90:204,206 (dump is AFTER stp_2D, BEFORE stage 1)",
+            "stp2d.F90:126 dyn_hpg, :129 dyn_ldf (ln_dynldf_OFF), :190 dyn_vor",
+            "stp2d.F90:279 dyn_spg_ts -> dynspg_ts.F90:344-345 depth-mean "
+            "removal and :938-975 barotropic add-back",
             "dynhpg.F90:359,383 (nemo_sco acceleration into the RHS)",
             "domzgr_substitute.h90:139,145 (key_qco gdept_z0)",
         ],
+        "frame_composition": (
+            "COMPOSITE, not dyn_hpg alone: baroclinic HPG with its vertical "
+            "mean removed, plus the barotropic acceleration. dyn_ldf is inert "
+            "by namelist (ln_dynldf_OFF), dyn_vor is zero at rest, and the "
+            "3-D advection is not in this frame on a flux-form card."
+        ),
         "rows": rows,
         "planted_control": plant,
     }

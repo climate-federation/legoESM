@@ -40,8 +40,11 @@ for cfg in OVERFLOW_OMIP_L1_P3 "$SOURCE_CFG"; do
   fi
 done
 # A WRITE-only instrument may add lines; it may not delete or change one.
-# diff prints '<' for every shipped line absent from the instrument.
-if diff "$SHIPPED" "$instrument" | grep -q '^<'; then
+# diff prints '<' for every shipped line absent from the instrument.  Count
+# them: under `set -o pipefail` the pipeline `diff | grep -q` returns diff's
+# own exit 1 whenever the files differ, so the `if` could NEVER fire -- that
+# form passed a deliberately deleted-line instrument in a direct test.
+if [[ $(diff "$SHIPPED" "$instrument" | grep -c '^<') -ne 0 ]]; then
   printf 'REFUSE: the instrument deletes or changes a shipped line; it must only ADD\n' >&2
   exit 67
 fi

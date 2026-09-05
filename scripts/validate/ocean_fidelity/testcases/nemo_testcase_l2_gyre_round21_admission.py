@@ -273,7 +273,11 @@ def main() -> int:
         "baseline": str(args.baseline), "candidate": str(args.candidate),
         "baseline_oracle_records": len(baseline_names), "byte_identical_records": exact,
         "classified_changed_records": rows, "restart_byte_identical": restart_equal,
-        "plant_consumed": args.plant_consumed, "plant_applied": plant[0],
+        "plant_consumed": args.plant_consumed,
+        # plant[] is a one-shot SENTINEL that starts True when no plant was
+        # requested, so publishing it as "plant_applied" said `true` on runs
+        # that planted nothing.  Report the fact instead.
+        "plant_applied": bool(args.plant_consumed and plant[0]),
         "dims_with_halo": [NX, NY, NZ], "restart": restart,
         "verdict": "PASS" if not violations else "FAIL", "violations": violations,
         "artifacts": {"baseline_restart_sha256": _sha(args.baseline / restart),
