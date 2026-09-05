@@ -1,7 +1,7 @@
 {
   "artifacts_sha256": {
     "orca2/orca2_fourth_card_blocked_round26.json": "35e80a445bed1f1c0cf8bfe4459acf261b517d05c044f2eac9a74a1dc876a3de",
-    "verify/lock_external_admission.json": "487b189ebe7a817be1eafae3c085a0310d15d82503ff61cca1463bd8c7583275",
+    "verify/lock_external_admission.json": "6be537c1bb6e7d5d05c1f7743b32e39a79c6538ae6c86154f07ee6a0e782633f",
     "verify/lock_external_admission_plant.json": "3e69c1ded8be14393c5de3d1b6a0453051d78ceeb6d6dfc26d10eb861a8efd10",
     "verify/lock_external_walk_kt1.json": "3130a8c47de15e8115bf5ba2110a4371032f61939496d7a2fd3a7375335e5db3",
     "verify/lock_external_walk_kt1.log": "3130a8c47de15e8115bf5ba2110a4371032f61939496d7a2fd3a7375335e5db3",
@@ -15,7 +15,10 @@
     "verify/rule12_hpg_eligibility_LOCK_EXCHANGE-zco.json": "eb126433b177b0e8103aa15b0869544010dae4bb1fd9436527209bc692556782",
     "verify/rule12_hpg_eligibility_LOCK_EXCHANGE-zco_plant.json": "1ec1976d0793f769828911bcb0f1b30528416c0fad6a02d48b2793067420f9d3",
     "verify/rule12_hpg_eligibility_OVERFLOW-zps.json": "cca7238aa76ef30f244bbd5b313ceebcbefc41a8688e5df0392aa6e318b6fbb7",
-    "verify/rule12_hpg_eligibility_OVERFLOW-zps_plant.json": "024013b5b3c2529fc643ae7b500fc822c4dd6f1378386cf947ea6012121ee757"
+    "verify/rule12_hpg_eligibility_OVERFLOW-zps_plant.json": "024013b5b3c2529fc643ae7b500fc822c4dd6f1378386cf947ea6012121ee757",
+    "verify/rule12_stp2d_momentum_rhs_LOCK_EXCHANGE-zco.json": "32589404d0dad5e4e81898eb8ec40dea4406a27d2d8c32c40dfc4c15d8643d82",
+    "verify/rule12_stp2d_momentum_rhs_LOCK_EXCHANGE-zco_plant.json": "8de4b5c86e8302e20e8ab291456c023ff558dadef3bab8d600a038a47c6f27dd",
+    "verify/rule12_stp2d_momentum_rhs_OVERFLOW-zps.json": "2eabb2ecc7d56ac65d0eb51f6120162dcbf2afd4f014b8532a8be667a58d0fc6"
   },
   "bbl_test_correction": {
     "defect": "the test picked the MEDIAN bbl_static_geometry active face; flat-bottom faces are active too and there ku_s == ku_d, so both planted cells are the same cell and no density contrast exists",
@@ -60,7 +63,9 @@
     "a43e29d6a291 docs(ocean): cite the FMA fact at the QCO depth operand, drop the struck census",
     "59c9c6052894 docs(ocean): round-26 receipt -- eligibility discharged on LOCK and OVERFLOW",
     "e931d1fb62c3 fix(ocean): let the barotropic substep gate read LOCK without inventing records",
-    "66f9145c951e fix(ocean): drive the substep scaling loop from the record's own cycle count"
+    "66f9145c951e fix(ocean): drive the substep scaling loop from the record's own cycle count",
+    "9c89c9310550 docs(ocean): round-26 walk, BBL test correction, manifest",
+    "3689568c22e3 fix(ocean): retract the 'HPG alone' frame claim and three more review defects"
   ],
   "corrections": {
     "footgun": "pgf_scheme='nemo_sco' returns dp_dx/dp_dy as literal zeros (ocean_pe_latlon_cgrid.py:2045-2046); the acceleration is in direct_hpg_u/v",
@@ -115,8 +120,16 @@
       64
     ],
     "first_departure_frame": "slow_u",
+    "inheritance_counter_evidence": {
+      "discriminating_measurement_not_run": "transplant NEMO's dumped zu_frc into legoESM's substep and recompute u_exit; needs no NEMO run",
+      "exit_error": 2.168404344971009e-19,
+      "note": "pure inheritance through the flux-form update (dynspg_ts.F90:750-753, coefficient about rDt_e) predicts about 3 ULP at exit; 1 was measured. 2.168404344971009e-19 is exactly 2**-62, one ULP for any value in [2**-10, 2**-9), so same-value/same-cell is weak evidence.",
+      "ratio": 0.3,
+      "slow_error_times_dt": 7.228e-19
+    },
+    "inheritance_label": "DOWNGRADED_TO_PLAUSIBLE",
     "n": 127,
-    "owner": "PLAUSIBLE_NOT_CONFIRMED: stp2d.F90:172 (dyn_adv_up3 pUe) or stp2d.F90:185 (cumulated depth mean); no dumped frame separates them",
+    "owner": "PLAUSIBLE_NOT_CONFIRMED: stp2d.F90:172 (dyn_adv_up3 pUe) or stp2d.F90:185 (cumulated depth mean); no dumped frame separates them. Ue_rhs has four unconditional writers (:172, :185, :196, :200); the last two add exact zeros on this card",
     "plants": {
       "plant_entry": 1,
       "plant_exit": 1
@@ -151,6 +164,25 @@
   },
   "preregistration": "manifests/nemo_testcase_l2_gyre_round26_preregister.json",
   "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+  "review": {
+    "converged_on": "the HPG-alone frame claim",
+    "further_defects_fixed": [
+      "run.sh: `diff | grep -q '^<'` under set -o pipefail could never fire (reproduced: a deleted-line instrument passed); now counted",
+      "admission report published plant_applied: true on runs that planted nothing"
+    ],
+    "recorded_not_fixed": [
+      "AST guard checks only args[0] and walks the whole module, not the routine its docstring names",
+      "round-21 --writer stamps one provenance string on every record kind"
+    ],
+    "retractions": [
+      "HPG-alone frame + stprk3_stg.F90:309-334 citation",
+      "zFv consumed-identity argument is vacuous (zFv is identically zero on this card; the admission rests on the byte-identical restart plus 24/27 records)",
+      "LOCK u_exit inheritance downgraded CONFIRMED -> PLAUSIBLE",
+      "BBL comment's 'same cell' reason was false; shelf_i and deep_i are different columns"
+    ],
+    "reviewer_finding_refuted": "nn_bt_flt claim read the SHIPPED decks; the OVERFLOW oracle run has no nn_bt_flt line (namelist_ref:1092 default) and its ocean.output:875 prints nn_bt_flt = 1, while LOCK's namelist_cfg:105-106 sets 3 / 0.07. The per-card map is correct as landed.",
+    "reviewers": 2
+  },
   "rule12_eligibility": {
     "GYRE-zco": {
       "absolute_max": 0.0,
@@ -163,7 +195,7 @@
     "LOCK_EXCHANGE-zco": {
       "absolute_max": 0.0,
       "n": 2540,
-      "row": "kt1.stage1.oracle_input_hpg.u",
+      "row": "kt1.stp2d.momentum_rhs.u",
       "status": "bit-exact",
       "unequal": 0,
       "v": "WAIVED_STRUCTURALLY_ABSENT (0 wet V faces)"
@@ -175,16 +207,18 @@
     "OVERFLOW-zps": {
       "absolute_max": 0.0,
       "n": 16900,
-      "row": "kt1.stage1.oracle_input_hpg.u",
+      "row": "kt1.stp2d.momentum_rhs.u",
       "status": "bit-exact",
       "unequal": 0,
       "v": "WAIVED_STRUCTURALLY_ABSENT (0 wet V faces)"
     },
+    "frame_composition": "COMPOSITE, not dyn_hpg alone. l1_dump_rhs runs at MY_SRC/stprk3.F90:206, after stp_2D at :204 and BEFORE stage 1 at :215. Content in stp2d.F90 order: dyn_hpg :126 (assigns), dyn_ldf :129 (unconditional, inert only via ln_dynldf_OFF=.true.), dyn_vor :190 (zero at rest), then dyn_spg_ts :279 which removes the vertical mean at dynspg_ts.F90:344-345 and adds the barotropic acceleration back at :938-975 (dumped uu_b(Kaa) max 1.135e-3 LOCK, 4.503e-2 OVERFLOW). 3-D advection is at stprk3_stg.F90:315, after the dump.",
     "plants": {
       "LOCK_EXCHANGE-zco": 1,
       "OVERFLOW-zps": 1
     },
-    "prediction": "CONFIRMED on LOCK and OVERFLOW"
+    "prediction": "CONFIRMED on LOCK and OVERFLOW",
+    "retraction": "The round-26 'dumped frame is dyn_hpg alone' claim and its citation of stprk3_stg.F90:309-334 (the CASE(2,3) block, never run at stage 1) are REFUTED by two independent reviews and re-measured. The row value is unchanged; its isolation claim is withdrawn."
   },
   "starting_tip": "991f9f95047d"
 }

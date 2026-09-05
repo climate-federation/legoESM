@@ -4118,6 +4118,8 @@ barotropic substep against OVERFLOW's four.
 
 ### Rule-12 eligibility, discharged on the two lane-1 tanks
 
+> **RETRACTED IN PART — read "Round-26 independent review" below before using this subsection.**  The measured rows stand exactly as printed, but the frame is NOT `dyn_hpg` alone and the citation of `stprk3_stg.F90:309-334` is wrong; the dump is at `MY_SRC/stprk3.F90:206`, before stage 1 and after `dyn_spg_ts`.  The row is renamed `kt1.stp2d.momentum_rhs`.  The paragraph that follows is kept unedited as the dead claim, next to what killed it.
+
 Round 25 landed two source associations inside NEMO's hydrostatic pressure
 gradient and showed the changed operator bit-exact given NEMO's inputs on GYRE
 only.  Rule 12 asks for that row on every card that executes it, and the
@@ -4410,6 +4412,99 @@ scaling block are identical.  (The much older
 reports `u_exit` at `1.8735013540549517e-15`, is a stale-format report with no
 `legoesm_git_sha` and no substep-1 frame list; it is NOT a valid baseline and
 was not used as one.)
+
+### Round-26 independent review — two reviewers, four retractions
+
+Two independent reviews ran on the round-26 diff and on its claims.  They
+CONVERGED on the same defect, which is the strongest signal available, and
+they were right.  Every finding below was re-measured before being accepted or
+rejected.
+
+**RETRACTION 1 — "the dumped frame is the HPG alone": REFUTED.**  The frame is
+not a stage-1 frame at all.  `l1_dump_rhs` runs at `MY_SRC/stprk3.F90:206`,
+immediately after `stp_2D` at `:204` and BEFORE stage 1 at `:215`.  The cited
+`stprk3_stg.F90:309-334` is the `CASE(2,3)` block; `CASE(1)` calls only
+`dyn_adv`.  What the frame holds, in `stp2d.F90` order: `dyn_hpg` at `:126`
+(which ASSIGNS over its loop range — "a zeroed Krhs" was also wrong),
+`dyn_ldf` at `:129` called UNCONDITIONALLY, `dyn_vor` at `:190`, then
+`dyn_spg_ts` at `:279`, which REMOVES the vertical mean at
+`dynspg_ts.F90:344-345` and ADDS the barotropic acceleration back at
+`:938-975`.  Measured, so this is not a hypothetical: the dumped `uu_b(Kaa)`
+maximum is `1.135367194865404e-3` on LOCK and `4.5029698607113644e-2` on
+OVERFLOW.  The 3-D momentum advection is absent because both cards are flux
+form (`ln_dynadv_up3 = .true.`) and it lands at `stprk3_stg.F90:315`, after
+the dump.
+
+`dyn_ldf` is inert only because both cards set `ln_dynldf_OFF = .true.` — a
+NAMELIST fact, not a rest-state fact.  The row was right for a reason that was
+not stated, so the gate now asserts the legoESM equivalent (all eight lateral
+viscosity coefficients zero and `lateral_friction_scheme='none'`) instead of
+relying on the coincidence.
+
+**What survives.**  The measured row is unchanged — `0.0`, exact, on all 2540
+LOCK and 16900 OVERFLOW faces — and the changed operator is still counted
+executing inside it.  What changes is the STRENGTH of the claim, in both
+directions: it is a stronger statement about how much of NEMO's step is
+reproduced bitwise (the depth-mean removal and the barotropic add-back are
+inside it), and a weaker ISOLATION, because a bit-level compensating error
+between the pressure gradient and the mode split is not excluded by this row.
+The row is renamed `kt1.stp2d.momentum_rhs`; a row named for an operator it
+does not isolate is the false label this campaign exists to catch.
+
+**RETRACTION 2 — the `zFv` consumed-identity argument is VACUOUS.**  `zFv` is
+identically zero over the whole array on this card (maximum `2.759e-320`, the
+single uninitialised subnormal).  "Consumed-equal on a consumed slot" is
+therefore no evidence at all, and round 26's "stronger than round 25 claimed"
+is withdrawn.  What actually admits the acquisition is the byte-identical
+final restart plus 24 of 27 byte-identical records — trajectory identity, for
+which no projection argument is needed.  "Differs only outside our parser's
+projection" certifies OUR READER, not NEMO's run, and is not shipped as the
+rule.
+
+**RETRACTION 3 — LOCK's `u_exit` inheritance is downgraded to PLAUSIBLE.**  The
+receipt omitted a number from the run's own report that cuts against it:
+`scaling_check_before_owner_label` gives slow error times dt = `7.228e-19`
+against an exit error of `2.168e-19`, ratio **0.3**.  The flux-form update
+(`dynspg_ts.F90:750-753`) carries `zu_frc` with coefficient about `rDt_e`, so
+pure inheritance predicts roughly 3 ULP at exit and 1 was measured.
+Same-value/same-cell is weak evidence in any case: `2.168404344971009e-19` is
+exactly `2**-62`, one ULP for any value in `[2**-10, 2**-9)`.  The
+discriminating measurement is named and NOT run: transplant NEMO's dumped
+`zu_frc` into legoESM's substep and recompute `u_exit` — bit-exact means
+inherited, still-off means the update makes its own bit.  It needs no NEMO
+run.  Until then the boundary stays CONFIRMED and the inheritance PLAUSIBLE.
+
+**RETRACTION 4 — the BBL comment's stated reason was false.**  It said the
+test's two `.set()` calls hit the same cell; `shelf_i` and `deep_i` are
+different COLUMNS, so they do not collide.  The face gives `0.0` because the
+three-leg exchange degenerates when `ku_s == ku_d`.  On a zps card that is a
+partial-cell face, not a flat bottom, so **why it is marked BBL-active at all
+is an open model question** the filter does not settle — recorded rather than
+buried by the test fix.
+
+**One reviewer finding REFUTED, with its evidence.**  A reviewer reported that
+the gate's `resolved_program` block (`nn_bt_flt=1, rn_bt_alpha=0.0`) is false
+because both shipped decks carry `nn_bt_flt=3, rn_bt_alpha=0.07`.  That reads
+the SHIPPED decks, not what the oracle runs resolved.  The OVERFLOW oracle
+run's own `namelist_cfg` has no `nn_bt_flt` line at all (grep count 0), so it
+takes `namelist_ref:1092`'s default, and its `ocean.output:875` prints
+`Barotropic time filter => nn_bt_flt = 1`.  LOCK's oracle `namelist_cfg:105-106`
+does set `3` and `0.07`.  The per-card map is therefore correct as landed.
+
+**Two more defects fixed.**  The `run.sh` replacement provenance check was
+vacuous in the same way the check it replaced was: under `set -o pipefail`,
+`diff … | grep -q '^<'` returns diff's own exit `1` whenever the files differ,
+so the refusal could never fire — reproduced directly, a deliberately
+deleted-line instrument passed.  It now counts the `<` lines.  And the
+admission report published `plant_applied: true` on runs that planted nothing,
+because it printed a one-shot sentinel instead of the fact.
+
+Two reviewer NITs are recorded, not fixed: the stage-operand AST guard checks
+only `args[0]`, so `_nemo_ws_stage_barotropic_velocity(1, <same-step target>)`
+would pass, and it walks the whole module rather than the routine its
+docstring names; and round-21's `--writer` stamps one provenance string on
+every record kind (correct in this use, where all changed LOCK records are one
+kind, but a footgun).
 
 ### The six pre-existing failures — one fixed, five remain
 
