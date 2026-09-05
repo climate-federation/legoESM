@@ -58,7 +58,9 @@ rafting on, and Prather advection.  All ocean options, forcing, icebergs-off
 choice, scalar-math toolchain, and `(jpni,jpnj)=(2,1)` remain fixed.
 
 The WRITE-only instrument retains every V2 stream and adds self-describing,
-zero-first, rank-zero frames at ice calls `kt=1..3` for:
+zero-first, rank-zero frames at the first three executed ice calls.  With the
+unchanged ORCA2 `nn_fsbc=2`, those are ocean `kt=1,3,5`; there is no SI3
+operator call at ocean `kt=2` (`sbcmod.F90:477,604`).  The frames are:
 
 - thermodynamic entry/exit state and column operands in `icethd.F90` order,
   including categories, thickness/volume, surface temperature, layered ice
@@ -84,6 +86,7 @@ not choose it silently.
 | add NEMO `nn_eice=2` | ASKED, User Decision 12 | raw fraction; defaults and other selectors unchanged |
 | mode 1 semantic record | ASKED | old legoESM meaning raw fraction; restored NEMO meaning `tanh(10*fi)`; raw behaviour moves to mode 2 |
 | build ORCA1-ice ORCA2 variant | ASKED, User Decision 11 | exact listed ice selectors, everything else fixed |
+| interpret requested `kt=1..3` under ORCA2 cadence | source-resolved, no choice | first three executed SI3 calls are ocean kt 1/3/5; no synthetic kt=2 operator frame |
 | execute MPI/NEMO | forbidden in sandbox | prepare two hash-guarded launchers for user shell |
 | change shared TKE arithmetic after a non-bit row | Lane-4-forbidden | register reproducer and hand to GYRE |
 | enter EVD/IWM after an open TKE boundary | downstream/unasked | do not enter until TKE closes |

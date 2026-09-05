@@ -4,8 +4,8 @@ Date: 2026-09-06
 
 Parent: `26af77048a8b28f0d4f29bc9e36699919615d0a2`
 
-Status: **IN PROGRESS — Phase-2v replacement admitted; new ice-variant MPI
-twins still to be handed to the user shell.**
+Status: **STOPPED AT THE USER-SHELL MPI BOUNDARY — Phase-2v replacement
+admitted; ORCA1-ice variant twins built and staged, not executed.**
 
 ## 1. Phase-2v twin admission and V2 pin
 
@@ -95,6 +95,84 @@ likewise has no ocean-TKE call path, and its ice transport tests are unchanged.
 The ORCA1 CORE2 builder still resolves `eice=3`, whose established mode-3 bit
 test is unchanged.  Thus only the newly selected mode-2 branch moves.
 
+## 4. User Decision 11 — ORCA1-ice ORCA2 variant handoff
+
+**CONFIRMED deck construction:** `ORCA2_ORCA1ICE_OMIP_L4` is a `makenemo`
+copy of `ORCA2_ICE_PISCES`, built with `conda-scalarmath` and the same
+`key_top key_xios` exclusion as the accepted oracle.  The comparison ocean
+namelist is byte-identical to the pinned icebergs-off 10-step deck (SHA-256
+`76366c96fbfe3a65af72747b1231b5bd67a8515ff71f9270f4866aa632e7bb84`),
+including `ln_icebergs=F`, `nn_itend=10`, `nn_stock=10`, and `(jpni,jpnj)=(2,1)`.
+The first direct filesystem copy that `makenemo` could not recognize is
+retained, not deleted, at
+`/tmp/nemo-orca2-phase2p/cfgs/ORCA2_ORCA1ICE_OMIP_L4_pre_makenemo`.
+
+**CONFIRMED selector delta:** the config-local `namelist_ice_cfg` resolves the
+User-Decision-11 target: `jpl=1`, `nlay_i=nlay_s=3`, `ln_dynALL=T`,
+`ln_landfast_L16=T`, H79 strength with `rn_pstar=2e4` and `rn_crhg=20`,
+ridging and rafting on, EVP with inherited `ln_aEVP=T`, Prather on and UMx
+off, `ln_icedA=F`, `nn_icesal=2`, and `ln_pnd=F`.  These values are copied
+from `/data/abyssal/dbalwada/ORCA1-omip/EXPREF/namelist_ice_cfg:24-26,
+46,52-62,70,75-76,87,108,151`; the frozen lane copy is
+`phase2w_orca1ice_namelist_ice_cfg`.  Everything not enumerated by the user
+continues to inherit the ORCA2 variant/reference deck.  In particular,
+`namelist_ice_ref:262-263` resolves the existing ORCA2 analytic ice start
+(`ln_iceini=T`, `nn_iceini_file=0`), so no category-dimensioned ice input or
+restart is consumed.  Whether that source path accepts `jpl=1` is
+**PLAUSIBLE_PENDING_RUN**, not silently assumed; a NEMO diagnostic will stop
+admission and be reported verbatim.
+
+**CONFIRMED WRITE-only instrumentation:** the frozen config-local sources are
+under `phase2w_orca1ice_MY_SRC/`.  `icethd.F90:118,235,331-380` writes
+thermodynamic entry/exit state, layered enthalpy/salinity, and atmosphere-ice
+flux operands.  `icedyn_rhg_evp.F90:377,1197-1270` writes dynamics-entry,
+strength, stresses, thickness, and Lemieux-2016 basal-stress operands before
+the EVP iterations.  `icedyn_adv_pra.F90:112,491,504-578` adds a separate
+self-describing Prather entry/exit stream while retaining the legacy stream.
+Every model field is passed `INTENT(in)` or read directly; only local extent,
+canonical-copy, header, and I/O objects are assigned.  Canonical helpers zero
+halos, land, and inactive components before each write.  This is a
+**CONFIRMED WRITE-only source diff**, not a physics change.
+
+The headers are independently decodable: thermodynamics has 16 fields and a
+4-by-16 extent table, dynamics 28 fields plus five scalar parameters and a
+3-by-28 table, and Prather 35 fields and a 4-by-35 table.  Each carries
+magic/version/kt/frame or Kmm, `jpi/jpj/jpl/nlay_i/nlay_s`, binary64 width,
+field/scalar counts, and a SIZE-derived payload.  The allocation contracts are
+validation only; exact EOF comes from the header.  The synthetic schema gate
+accepts all three formats and its nine magic/truncation/trailing-byte plants
+bind.  Real-record schema, canonicality, twin identity, ordinary-output
+identity, and physics-selector admission remain **UNMEASURED_PENDING_MPI**.
+
+The unchanged ocean cadence resolves `nn_fsbc=2` (`namelist_cfg:81`), and
+`sbcmod.F90:477,604` calls SI3 only when that cadence is due.  Therefore the
+first three executed ice calls are ocean `kt=1,3,5`; no SI3 operator exists at
+ocean `kt=2`.  The new writers deliberately capture 1/3/5 rather than invent
+a non-executed frame.
+
+**CONFIRMED build/staging:** after correcting a writer-only rank declaration
+for the rank-2 `qprec_ice`, the final scalar-math build succeeded.  Binary
+SHA-256 is `2f3d162a0ce88bc429b5b511292ad1c0607c03eca402d621dcdb4739552d57da`;
+`nm -D` reports zero `_ZGV*` symbols.  Build log SHA-256 is
+`3631fdef41388f47c02a1087a9bcb3a21f8d9b74c3c49c860e89fc55d42f6d7a`.
+Both fresh run directories contain copied deck files, symlinks to the
+hash-pinned ORCA2 input tree, an absolute symlink to that binary, and a
+self-contained two-rank CPU launcher.  Their common deck-manifest SHA-256 is
+`ca6e31bb49ba1c1e939ad8c64c0bf672e0d46150673967666bbcda892d35274f`;
+their common input-manifest SHA-256 is
+`3dfe251754fa76c8b5053cda90a51ee10589d0fffc01a4e799c49cc36bbd17e5`.
+Launcher A/B SHA-256 values are respectively
+`ccc63b3bc241b01c7c0202fdef9fcbd1c59f5232c2913581c987ae9d5a2203dd`
+and `3b0ecefd1e2e4894db938b565ef474d44bb83ad91178d3563354e169967a066c`.
+
+Run these one at a time from the user shell, unchanged:
+
+1. `/data/abyssal/dbalwada/nemo-testcases-l4/runs/variant_orca1ice_phase2w_a_10step_np2/run.sh`
+2. `/data/abyssal/dbalwada/nemo-testcases-l4/runs/variant_orca1ice_phase2w_b_10step_np2/run.sh`
+
+Do not pin either root until the real schema gate, 1/3/5 stream inventory,
+raw twin identity, and ordinary-output identity pass.
+
 ## ASKED / UNASKED
 
 | action | classification | disposition |
@@ -107,6 +185,11 @@ test is unchanged.  Thus only the newly selected mode-2 branch moves.
 | keep NEMO selector numbering | ASKED, User Decision 12 | CONFIRMED 0/1/2/3 dispatcher; mode 2 is raw fraction |
 | meaning of mode 1 | ASKED semantic disclosure | old legoESM: raw `fr_i`; corrected: `tanh(10*fr_i)`; old behaviour selectable as mode 2 |
 | change a default or another card selector | UNASKED | not done; default remains 0, ORCA1 remains 3 |
+| construct ORCA1-target ice deck | ASKED, User Decision 11 | CONFIRMED exact enumerated selector delta; ocean deck unchanged |
+| preserve raw old mode-1 behavior | ASKED, User Decision 12 | CONFIRMED preserved as NEMO-numbered mode 2 |
+| create synthetic SI3 kt=2 state | UNASKED / non-executed | not done; `nn_fsbc=2` produces executed frames at 1/3/5 |
+| execute staged ORCA1-ice twins | ASKED, user shell only | UNMEASURED_PENDING_MPI; two launchers handed off |
+| change ORCA2 analytic ice initialization | decision-gated | not done; stop on an exact NEMO refusal if one occurs |
 | retain twin B and prior roots | ASKED | CONFIRMED retained and labelled |
 | pin Phase-2u TKE records | forbidden | rejected records remain flagged, never scored |
 | change shared arithmetic during admission | UNASKED | none |
