@@ -10,9 +10,11 @@ The accepted retained oracle prefix is
 `/data/abyssal/dbalwada/nemo-testcases-l3/c1d_omip_l3_coupled10m_r13_oracle_i`.
 It completed 8,760 hourly CPU steps (`STOP 0`) with a scalar-math executable
 containing zero dynamic `_ZGV*` symbols.  Geometry, all ten stream schemas,
-and 448,950 pointwise operator/input/bridge rows pass.  Of those rows, 448,949
-are bit-identical; the sole non-bit row is one `POST_FZP.t_bo` value with
-normalised error `2.0955593187140483e-16`, below the fixed `1e-15` bar.
+and 448,950 pointwise operator/input/bridge rows pass.  The current shared
+source-literal freezing-point implementation, re-scored by the round-13 review
+on both pinned roots, makes all **448,950/448,950 bit-identical**.  The former
+single `POST_FZP.t_bo` row at normalised error
+`2.0955593187140483e-16` was a stale pre-fix score and is retracted here.
 
 This is not a completed rung-3.6 verdict.  The measured execution prefix ends
 after `POST_TRA_QSR`.  `POST_SBC_STAGGER`, `POST_ZDF_DRG_COEFF`,
@@ -80,7 +82,7 @@ clock is not reused as the coupled ice cadence.
 | boundary | rows | bit-identical | maximum normalised error | status |
 |---|---:|---:|---:|---|
 | seven `POST_SSM` fields | 61,320 | 61,320 | 0 | AT_BAR |
-| `POST_FZP.t_bo` | 2,190 | 2,189 | `2.09556e-16` | AT_BAR |
+| `POST_FZP.t_bo` | 2,190 | 2,190 | `0` | AT_BAR, bit-identical |
 | 14 `POST_UPDATE_FLX` fields | 30,660 | 30,660 | 0 | AT_BAR |
 | seven `POST_UPDATE_TAU` fields | 61,320 | 61,320 | 0 | AT_BAR |
 | three `POST_FWB` fields | 26,280 | 26,280 | 0 | AT_BAR |
@@ -142,6 +144,10 @@ All eleven row-level plants exit nonzero and turn their named row red:
 `ssm_sample`, `fzp_operand`, `update_heat`, `fwb_mass`, `fwb_immediate`,
 `trasbc_heat`, `chl_input`, `qsr_flux`, `producer_bridge`, `fwb_bridge`, and
 `freshwater_sign`.
+
+The exchange gate now raises its named `GateError` before reading when any
+required stream is absent; the unit control asserts that failure rather than
+accepting the former incidental `UnboundLocalError`.
 
 Focused tests: **12 passed**.  The hard-coded-constant ratchet invoked on every
 touched Python file reports **7 passed, 1 skipped** (the skipped item is the

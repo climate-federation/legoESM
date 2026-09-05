@@ -3640,8 +3640,10 @@ def nemo_top_drag_rate_faces(rCdU_top, dtype):
 
     ``zdfdrg.F90:116-129`` stores ``rCdU_top <= 0`` at T points.  Its two
     executing consumers form ``0.5 * (right + centre)`` / ``0.5 * (north +
-    centre)`` in ``dynspg_ts.F90:1607-1610`` and ``dynzdf.F90:303-306,
-    480-483``.  The source-statement guard keeps that sum-and-half association;
+    centre)`` in ``dynspg_ts.F90:1611-1612`` and the top diagonal uses
+    ``zDt_2 * (right + centre) / e3u`` at ``dynzdf.F90:302`` (with the
+    v counterpart at `:478`).  The source-statement guard keeps that
+    sum-and-half association;
     the leading minus is the single conversion to legoESM's positive damping
     convention.  Longitude is cyclic.  Latitude boundary faces repeat their
     adjacent T-point coefficient, where the velocity mask makes the rate

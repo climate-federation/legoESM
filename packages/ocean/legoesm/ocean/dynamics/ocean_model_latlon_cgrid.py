@@ -8269,7 +8269,7 @@ class LatLonCGridOceanModel:
             _raw_top = (getattr(surface_forcing, "rCdU_top", None)
                         if surface_forcing is not None else None)
             if _raw_top is not None:
-                # NEMO dynzdf.F90:303-306,480-483.  The top index is level
+                # NEMO dynzdf.F90:302,478.  The top index is level
                 # zero in legoESM; in a one-wet-layer column the top and
                 # bottom diagonal increments intentionally accumulate.
                 _r_top_u, _r_top_v = nemo_top_drag_rate_faces(
