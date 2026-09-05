@@ -106,6 +106,7 @@ constant ratchet was also run across the tree: every file changed by this
 round passed its row.  Its full-tree result retains six unrelated pre-existing
 literal rows, plus five stale NCAR independent-mirror assertions exposed by
 the integration merge; none is used to promote a campaign result.
+The explicit touched-source ratchet rerun ends: `7 passed in 0.89s`.
 
 The `where` stabilizers introduced by `a200b4bd4a6` are absent.  The live
 stage path again uses multiplication by the 3-D velocity masks, literal to
@@ -249,4 +250,5 @@ Root: `/data/abyssal/dbalwada/nemo-testcases-l3/round19_cross_cards/`.
 
 Implementation commits after preregistration: merge `6ce33d2df36`, C1D
 reconciliation `8388053b3b5`, facade removal `f80e080e6f0`, and durable GYRE
-cell residuals `6f4d83509ff`.
+cell residuals `6f4d83509ff`.  The result/receipt commit is `8c001a25740`;
+the following documentation-only ledger commit records that hash.
