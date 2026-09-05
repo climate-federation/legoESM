@@ -1,5 +1,10 @@
 # NEMO testcase Lane 4 — ORCA2 Phase-2b exchange handoff receipt
 
+> **SUPERSEDED — DO NOT RUN.** User Decision 7 (2026-09-06) selects the
+> icebergs-off comparison variant.  This shipped-deck handoff remains the
+> `SHIPPED_DECK_RECORD`, but its launcher now exits 69 before MPI.  The active
+> handoff is `nemo_testcases_l4_orca2_phase2c_variant_handoff_receipt.md`.
+
 Date: 2026-09-04
 
 Base: `f4ac8a2a3a1f4deaf857ba1fa6ba1ee9b645a50f`

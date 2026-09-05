@@ -90,3 +90,75 @@ The Phase-2b preregistration commits are `109152161` and `383dcefdc`; the
 instrument/gate/launcher preparation commit is `9a816aaaa`.  The handoff
 receipt is intentionally hashed by the final Git commit rather than by this
 self-excluding manifest.
+
+## Phase-2c icebergs-off VARIANT handoff
+
+User Decision 7 supersedes the unexecuted icebergs-on Phase-2b handoff.  The
+old artifacts remain `SHIPPED_DECK_RECORD`; its retained launcher now exits 69
+and has SHA-256
+`895684724ca23e424f6c2991186f522f201f3b94697980b044b8087cc0761d3d`.
+The comparison arm changes only `ln_icebergs=.true.` to `.false.` and is
+labelled `VARIANT`.
+
+Preregistration is commit `82974b40d`, the Coriolis repair is `af54d11ef`,
+and the gate/launcher preparation is `ade8a9ffd`.
+
+### Geometry repair and retained CPU evidence
+
+| artifact | bytes | digest |
+|---|---:|---|
+| `phase2c/entry_baseline.log` | 1,538 | `d58e1f336eaa7910aa3a83a8d0a0bb7c5b032d7a3039f8cf0b60e8917b8d7703` |
+| `phase2c/orca2_phase2_entry_gate.json` | 1,538 | `d58e1f336eaa7910aa3a83a8d0a0bb7c5b032d7a3039f8cf0b60e8917b8d7703` |
+| `phase2c/plant_coriolis_swap.log` | 35 | `84fccf7d19dec25931c39584d667cf8836f8952fb95c0fb2e2a0397f9330269a` |
+| `phase2c/focused_tests.log` (`28 / 28`) | 521 | `55a3c3b4c29e698629b29cee539e384afe0f2fb16f71b85ff9079f2bba96b80d` |
+| `phase2c/synthetic_variant_surface_input.bin` (test only) | 4,101,508 | `8e4ab66260aa8ef324989bdc85efe6b5c20b4dd4ef0b405d55cc4481426c11a4` |
+| `phase2c/synthetic_variant_surface_gate.log` | 274 | `a9b602b34b9a3893cc6d1feb0516cd58e57c91e214632d3bef7c8e782320813c` |
+
+The repaired entry artifact is byte-identical to the Phase-2 entry baseline.
+The Coriolis swap plant exits 1.  The synthetic surface record passes the
+derived 35-field schema and all six mutations return `PASS_NONZERO`.
+
+| committed implementation/gate | digest before handoff-receipt commit |
+|---|---|
+| `packages/core/legoesm/grids/latlon.py` | `32e103185cded916807e74b065a60101aacd306f0faee6f1a277aa7edc911739` |
+| `packages/core/legoesm/grids/tripole.py` | `da42cfda711a232c44f19dc3cba21371f9766311c26f472bd609e1429f2fd502` |
+| `packages/core/legoesm/grids/halo_latlon.py` | `db7b830502ad6ea192eace5f9cd8245431c777539d3918bc3aed399ef6292afd` |
+| `packages/core/legoesm/parallel/latlon_mpi.py` | `d46c2eb69dc62544f5a8205d7247494c744c7fa5b76fffb7082da546f7ea037d` |
+| `packages/ocean/legoesm/ocean/dynamics/latlon_cgrid_operators.py` | `448c5f8a63c14c550e23e38d2f68117c95ba8d03ebdeb4ee4c4da46f99cb64f7` |
+| `packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py` | `c45f98296990e3196d02cf81f6d4d17a07a24d5725bef99f9ccbf21223083491` |
+| `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py` | `1a0494ac769c7229f2cbeaf264152693531f3754956790c19e9d804b88d08f4c` |
+| `packages/ocean/legoesm/ocean/state.py` | `a30bbd8e2182a56f70543b1a8a4dfe45419225ba111d1c60e02a7f17bcf50fef` |
+| `packages/ocean/legoesm/ocean/vertical.py` | `ab8f835f01fb5a23c8a824b839c703eaa645bb236c7f0d8603a1f1f8ba4709ae` |
+| `tests/ocean/unit/test_nemo_testcase_recipe.py` | `903ada0acc20c7175037095a7ae9b1c7cf79b3000a79a0f120c1d95f3101a4a1` |
+| `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_phase2_gate.py` | `e39ea6db689aa8f959d0df171911a526cd1133c4c81827a71fb7c089cb2b6c8a` |
+| `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_phase2b_exchange_gate.py` | `f834b1783a6ed4f1263f94c4fea917c264b4e6a1df847a670261951b5a416834` |
+
+### NEMO build and prepared runs
+
+| artifact | bytes | digest |
+|---|---:|---|
+| copied-config `MY_SRC/stprk3.F90` | source | `045ca27f0679bdbf4c11cd150e3ccd56ab0a84ac8b0c6beac733de09b3eb757f` |
+| `build/nemo_ORCA2_OMIP_L4_phase2c_variant.exe` | 54,904,016 | `b31fc33edd3109a41640f9fb59f915d90a52f1f0509fde7c33254cf46b896f28` |
+| `build/build_ORCA2_OMIP_L4_phase2c_variant.log` | 4,642 | `9777ab99e03c848eb3390ecf8cc362c17c82a18edc37d5b2d5b7e88c79dcf73d` |
+| `build/phase2c_variant_MY_SRC.sha256` | 2,100 | `54b3bff73af525906e1117cf26af23c75609de4307a44c169c9156ff001edfba` |
+| `build/phase2c_variant_ZGV.txt` | 0 | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| accepted uninstrumented scalar-math executable | 54,746,696 | `c4907e476cf3969052b44c5c7fa966f3dac493e8cfb563f6554c8f3a27186343` |
+| superseded icebergs-on current 63-item census | 11,265 | `72a4891487ade34553f0e3631c1fb8dab46d1e577251e50982ae611af38db649` |
+| instrumented ten-step 63-item census | 11,076 | `0229bc1e9b92427e6f6b107962453fa3eac6f33dd5b11cf008b15acf7c21eb5a` |
+| uninstrumented ten-step 63-item census | 11,202 | `28bb86dfd516ea826b2e308a5889eda61e0fb27c20af9f9736e1c080d7dd253e` |
+| uninstrumented 30-day 63-item census | 11,139 | `60493aa81a7c8188dba9821b9b877238a9f82285e92d49d77f5e4404e7ccc05e` |
+
+| committed launcher | digest |
+|---|---|
+| `run_variant_icebergs_off_instrumented_10step_np2.sh` | `e9f16a444616e14faefdb633adbe4f68981e4c04599829585e696935f9d1e63e` |
+| `run_variant_icebergs_off_uninstrumented_10step_np2.sh` | `b647d4a3c1f302f26d44bd078e1787e879828c8ea794807dbd96920e69b519a5` |
+| `run_variant_icebergs_off_uninstrumented_30day_np2.sh` | `af46ce7583c4d077a4db4f45ba6dd83bd229819bfb17d7aac7833bdbb471022a` |
+
+The two ten-step deck manifests are
+`e2cb4c552360491fa9dcea0649661e5f44a9d972769d40a4ecfc2aa70a097059`;
+the 30-day deck manifest is
+`2ce5f93ae9d6355e1d4d94e2f5e4576f98eec3ec0e61f3abb69d8c149028683a`;
+all three input manifests are
+`3dfe251754fa76c8b5053cda90a51ee10589d0fffc01a4e799c49cc36bbd17e5`.
+The final handoff receipt and this self-excluding manifest are bound by the
+final Git commit and bundle digest.
