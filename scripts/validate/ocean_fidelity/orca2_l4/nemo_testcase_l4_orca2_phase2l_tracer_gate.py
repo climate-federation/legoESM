@@ -116,6 +116,9 @@ def read_external_transports(path: Path) -> tuple[np.ndarray, np.ndarray]:
 
 
 def score(candidate: np.ndarray, oracle: np.ndarray, mask: np.ndarray) -> dict[str, object]:
+    candidate_grid = np.asarray(candidate, np.float64)
+    oracle_grid = np.asarray(oracle, np.float64)
+    unequal_grid = candidate_grid.view(np.uint64) != oracle_grid.view(np.uint64)
     actual = np.asarray(candidate, np.float64)[mask]
     expected = np.asarray(oracle, np.float64)[mask]
     require(actual.size and actual.shape == expected.shape, "empty tracer score")
@@ -125,11 +128,27 @@ def score(candidate: np.ndarray, oracle: np.ndarray, mask: np.ndarray) -> dict[s
     ia, ie = actual.view(np.int64), expected.view(np.int64)
     oa = ia ^ ((ia >> 63) & 0x7fffffffffffffff)
     oe = ie ^ ((ie >> 63) & 0x7fffffffffffffff)
+    bottom = mask & ~np.concatenate(
+        [mask[..., 1:], np.zeros_like(mask[..., :1])], axis=-1)
+    per_row_n = mask.sum(axis=(1, 2))
+    per_row_bad = (unequal_grid & mask).sum(axis=(1, 2))
     return {
         "status": "AT_BAR" if not unequal.any() else "DEBT",
         "unequal": int(unequal.sum()), "count": int(unequal.size),
         "max_abs": float(np.abs(actual - expected).max(initial=0.0)),
         "max_ulp": int(np.abs(oa - oe).max(initial=0)),
+        "localization": {
+            "per_level_unequal": (unequal_grid & mask).sum(axis=(0, 1)).tolist(),
+            "bottom_unequal": int(np.count_nonzero(unequal_grid & bottom)),
+            "interior_unequal": int(np.count_nonzero(
+                unequal_grid & mask & ~bottom)),
+            "per_row": [
+                {"j_zero_based": int(j), "unequal": int(per_row_bad[j]),
+                 "count": int(per_row_n[j]),
+                 "fraction": float(per_row_bad[j] / per_row_n[j])}
+                for j in range(mask.shape[0]) if per_row_n[j]
+            ],
+        },
     }
 
 
