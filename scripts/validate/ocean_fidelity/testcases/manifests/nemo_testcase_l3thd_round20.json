@@ -2,7 +2,8 @@
   "format": "nemo-testcase-l3thd-round20-manifest-v1",
   "parent_git_sha": "e98d8e642effaf83ae46d69d630246ac6dcdcd4c",
   "preregister_git_sha": "0ff0b95625688fa51ffe1ff37adc4ec9750ae5e4",
-  "orca2_admission_gate_git_sha": "9e4fe6f537f",
+  "orca2_admission_gate_git_sha": "9e4fe6f537f400fe7d592382cfe54413f0252e44",
+  "result_receipt_git_sha": "7c698bf9feaa35453763f3a504b98683f3ce8ebd",
   "environment": {
     "backend": "cpu",
     "precision": "binary64",

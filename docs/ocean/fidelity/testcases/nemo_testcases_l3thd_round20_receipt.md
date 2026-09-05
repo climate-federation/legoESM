@@ -239,5 +239,6 @@ retained but are not evidence.
 | `round20_orca2_si3/focused_fast_tests.log` | `a5c963535256bea8ba91436bb3ce962ef376784a8f459b9ebe3e0d2e3a5446be` |
 | `round20_orca2_si3/constants_ratchet_touched.log` | `e2cbfbaefa1437545a96825a80edee2130068ab59965b242f23352cf5ed008b1` |
 
-Result/receipt commit: recorded by the following documentation-only ledger
-commit so the receipt does not self-hash.
+Result/receipt commit: `7c698bf9feaa35453763f3a504b98683f3ce8ebd`.
+The following documentation-only ledger commit records this hash so the
+receipt does not self-hash.
