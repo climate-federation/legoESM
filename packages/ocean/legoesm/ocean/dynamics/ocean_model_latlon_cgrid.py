@@ -4705,6 +4705,7 @@ class LatLonCGridOceanModel:
 
         # Freshwater mass flux for barotropic continuity equation
         F_slow_eta = None
+        _F_fw_rate_now = None
         if freshwater is not None and _cfg_b.freshwater_closure != "none":
             F_slow_eta = freshwater_eta_tendency(
                 freshwater, _cfg_b.rho_0,
@@ -4762,6 +4763,9 @@ class LatLonCGridOceanModel:
             # F_slow_eta rate (same reduction, so the average is linear-exact
             # vs averaging the raw FreshwaterForcing first). None seeding:
             # same nit000 rule as the wind term above.
+            # The tracer dilution channel (block 8, real_freshwater) takes
+            # this NOW rate: NEMO centres only ssh_frc, tra_sbc stays at NOW.
+            _F_fw_rate_now = F_slow_eta
             if (getattr(_cfg_b, "barotropic_forcing_centred", False)
                     and getattr(state, "freshwater_eta_prev", None)
                     is not None):
@@ -6671,6 +6675,31 @@ class LatLonCGridOceanModel:
                 )
             state_new = state_new._replace(
                 S=state_new.S.replace(data=S_fw),
+            )
+        elif (freshwater is not None
+                and _cfg_b.freshwater_closure == "real_freshwater"
+                and _F_fw_rate_now is not None):
+            # 8-real. Surface dilution of the volume closure (2026-09-05):
+            # the water entered the TOP cell, the z-star step spread it over
+            # the column; pair that with the downward transport of the
+            # resident water so the top cell dilutes by -S_1 F/(rho h_1) and
+            # the layers below keep S and T (NEMO vvl: sshwzv/traadv, no
+            # emp*sss salt term).  Same NOW rate as the eta channel
+            # (normalised, restoring included); the ice SALT flux stays on
+            # surface_forcing.salt_flux.  Shared helper (MPAS core too).
+            from legoesm.ocean.freshwater import (
+                real_freshwater_dilution_tendencies,
+            )
+            _S_dtype = state_new.S.data.dtype
+            _dS_dil, _dT_dil = real_freshwater_dilution_tendencies(
+                _F_fw_rate_now, state_new.S.data, state_new.T.data,
+                h_k_new, mask)
+            state_new = state_new._replace(
+                S=state_new.S.replace(
+                    data=state_new.S.data + (dt * _dS_dil).astype(_S_dtype)),
+                T=state_new.T.replace(
+                    data=state_new.T.data + (dt * _dT_dil).astype(
+                        state_new.T.data.dtype)),
             )
 
         # 8a'. AB2 "advective" scope: apply the weight-1.0 DISSIPATIVE increment.

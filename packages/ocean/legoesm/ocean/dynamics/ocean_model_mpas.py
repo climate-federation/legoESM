@@ -1099,6 +1099,22 @@ class MPASOceanModel:
             else:
                 S_corrected = tr_new
 
+        if (freshwater is not None and F_slow_eta is not None
+                and config.freshwater_closure == "real_freshwater"):
+            # Surface dilution of the volume closure (2026-09-05): the eta
+            # channel above spread the surface water uniformly over the
+            # column; add the downward transport of the resident water so the
+            # top cell dilutes by -S_1 F/(rho h_1) and the layers below keep
+            # S and T (NEMO vvl).  Same normalised rate as eta; ice SALT flux
+            # stays on its own channel.  Shared helper with the lat-lon core.
+            from legoesm.ocean.freshwater import (
+                real_freshwater_dilution_tendencies,
+            )
+            _dS_dil, _dT_dil = real_freshwater_dilution_tendencies(
+                F_slow_eta, S_corrected, T_corrected, h_k_new, mask)
+            S_corrected = S_corrected + (dt * _dS_dil).astype(S_corrected.dtype)
+            T_corrected = T_corrected + (dt * _dT_dil).astype(T_corrected.dtype)
+
         # Final state construction with explicit land masking
         T_final = T_corrected
         # Clamp salinity >= 0.  The virtual_salt_flux closure uses a

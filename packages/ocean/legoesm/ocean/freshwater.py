@@ -152,6 +152,73 @@ def virtual_salt_flux(
         net_freshwater_flux(fw), S_ref, dz_0, rho_0)
 
 
+def real_freshwater_dilution_tendencies(
+    F_rate: jnp.ndarray,
+    S: jnp.ndarray,
+    T: jnp.ndarray,
+    h_k: jnp.ndarray,
+    mask: jnp.ndarray,
+    h_floor: float = 1e-10,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Surface-dilution tracer tendencies of the real (volume) freshwater
+    closure: the water enters the TOP cell, so the column stretch that the
+    z-star step spreads uniformly must be paired with a downward transport
+    of the resident water through every interface.
+
+    NEMO's non-linear free surface (``sshwzv``/``traadv`` with vvl, ``trasbc``
+    carrying no ``emp*sss`` term) dilutes the top cell by ``-S_1 F/(rho h_1)``
+    and leaves the layers below at constant salinity and temperature.  In a
+    z-star core the eta channel already thickens EVERY layer by
+    ``(h_k/H) F/rho`` and the tracer step keeps ``h S`` per layer, i.e. a
+    uniform dilution ``-S F/(rho H)`` that NEMO does not have.  The
+    difference is a vertical transport
+
+        W(k+1/2) = (F/rho) * H_below(k+1/2) / H        [m/s, downward]
+
+    (``H_below`` = thickness below the interface, so ``W`` = ``F/rho`` at the
+    surface and 0 at the bottom) carrying the tracer of the cell ABOVE
+    through each interface; the surface interface carries S = 0 (fresh
+    water) and T = T_1 (NEMO's ``emp`` heat convention: added/removed water
+    at the surface temperature).  Flux form per layer::
+
+        dC_k/dt = (W(k-1/2) C_{k-1} - W(k+1/2) C_k) / h_k
+
+    Column-integrated ``h S`` is unchanged (the fluxes telescope to the
+    zero-salt surface flux and the zero bottom flux); for a column of uniform
+    S the layers below the top keep S exactly and the top cell obtains
+    ``-S_1 F/(rho h_1)`` once the z-star stretch is added.  First-order
+    upwind in the vertical; the transport is ~1e-7 m/s so its CFL is ~1e-5.
+    ``F_rate`` is the SAME rate the eta channel receives (normalised,
+    including ice melt water and the water-flux SSS restoring); the ice SALT
+    flux stays on its own surface channel.
+
+    Parameters
+    ----------
+    F_rate : (...,) water flux into the ocean [m/s] (= ``freshwater_eta_tendency``)
+    S, T : (..., nlev) tracers AFTER the advective/z-star step
+    h_k : (..., nlev) live layer thickness (0 below the seafloor)
+    mask : (...,) wet mask (1 = ocean)
+
+    Returns
+    -------
+    (dS_dt, dT_dt) : (..., nlev) tendencies [PSU/s, K/s], zero on land
+    """
+    F = jnp.asarray(F_rate) * mask
+    h = jnp.where(h_k > h_floor, h_k, 0.0)
+    H = jnp.sum(h, axis=-1, keepdims=True)
+    # thickness below the interface UNDER cell k
+    H_below = jnp.cumsum(h[..., ::-1], axis=-1)[..., ::-1] - h
+    W_below = F[..., None] * H_below / jnp.maximum(H, h_floor)
+    W_above = jnp.concatenate(
+        [F[..., None], W_below[..., :-1]], axis=-1)
+    S_above = jnp.concatenate([jnp.zeros_like(S[..., :1]), S[..., :-1]], axis=-1)
+    T_above = jnp.concatenate([T[..., :1], T[..., :-1]], axis=-1)
+    inv_h = jnp.where(h > h_floor, 1.0 / jnp.maximum(h, h_floor), 0.0)
+    dS = (W_above * S_above - W_below * S) * inv_h
+    dT = (W_above * T_above - W_below * T) * inv_h
+    return dS * mask[..., None], dT * mask[..., None]
+
+
 def virtual_salt_flux_from_net(
     F_fw: jnp.ndarray,
     S_ref: float | jnp.ndarray,
