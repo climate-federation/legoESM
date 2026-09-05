@@ -4646,3 +4646,290 @@ Two probe worktrees were created under `/tmp` and are FLAGGED, not deleted:
 Verdict stays **HOLD**.  Nothing is merged into the reconciled/integration
 line.  Independent adversarial review of round 26 is **OUTSTANDING**, as is
 round 25's.
+
+## Round 27 — one retraction retracted, one open question retired, the fourth card scored
+
+Round 27 starts from `1af6ba2976dc` on a clean tree, same regime: CPU
+production JIT, fp64/x64, `transcendentals="libm"`, oracle V2.  The
+preregistration is `manifests/nemo_testcase_l2_gyre_round27_preregister.json`,
+committed at `9aba55fc9304` before any measurement below.  No NEMO executable
+was run.  Oracle roots are named per figure: GYRE `round19_oracle_v2_external`,
+LOCK `nemo-testcases-l1/phase3/lock_kt1_10`, OVERFLOW
+`nemo-testcases-l1/phase3/overflow_kt1_10`, the LOCK external-mode acquisition
+`nemo-testcases-l2/phase3/round25_lock_external_oracle`, and ORCA2
+`nemo-testcases-l4/runs/variant_icebergs_off_phase2v_tke_a_10step_np2`.
+
+### Rule-11 record — round 26's Retraction 1 is ITSELF RETRACTED
+
+**Dead claim (round 26).**  "The dumped kt=1 momentum-RHS frame on LOCK and
+OVERFLOW is a COMPOSITE: baroclinic HPG with its vertical mean removed, plus
+the barotropic acceleration added back."
+
+**What killed it.**  That read the SHIPPED `dynspg_ts.F90`.  Both cards compile
+`key_RK3`, and neither statement it names is in the object code.  The
+vertical-mean removal (`dynspg_ts.F90:344-345`) is inside the `#else` at
+`:303`; the barotropic add-back (`:938-975`) is inside a DIFFERENT `#else`, at
+`:910` — round 26 attributed both to the one at `:303`, which is also wrong.
+Both are the MLF arm.  In each card's `BLD/ppsrc/nemo/dynspg_ts.f90` there are
+**zero** assignments matching `^\s*(puu|pvv)\(`.
+
+At a rest start the frame is `dyn_hpg` ALONE, and the eligibility gate now
+proves it mechanically instead of arguing it, reporting every violated fact at
+once rather than the first:
+
+| fact | where it is checked, in the code the card COMPILES |
+|---|---|
+| the card compiles `key_RK3` | its `cpp_*.fcm` |
+| `dyn_spg_ts` writes nothing to the 3-D RHS | 0 `puu`/`pvv` assignments in ppsrc `dynspg_ts.f90` |
+| `dyn_drg_init` only reads it | `BLD/ppsrc/nemo/dynspg_ts.f90:1224` declares `puu, pvv` `INTENT(in)` |
+| `dyn_hpg` ASSIGNS, so nothing before `stp2d.F90:128` survives | `BLD/ppsrc/nemo/dynhpg.f90:393,412` |
+| `dyn_adv_up3` with `pUe` writes only the 2-D RHS | every 3-D write at `BLD/ppsrc/nemo/dynadv_up3.f90:213,336,357` sits in the `ELSE` at `:211,317,355` |
+| `dyn_ldf` is inert | `ln_dynldf_OFF = T`, `lock_kt1_10/ocean.output:615` and `overflow_kt1_10/ocean.output:727`; the gate asserts the legoESM equivalent, not the namelist |
+| `dyn_vor` adds exactly `0.0` | `BLD/ppsrc/nemo/dynvor.f90:655-656` builds `zwx`/`zwy` as products with the entry velocity and `:665` adds `zuav * (zwz + zwz)`; the gate asserts NEMO's dumped entry velocity is identically zero |
+
+Round 26's OTHER correction stands and is not disturbed: the dump is a
+`stp_2D` frame (`MY_SRC/stprk3.F90:206`, after `:204` and before `:215`), not a
+stage-1 frame, and its citation of `stprk3_stg.F90:309-334` was wrong.  So the
+row KEEPS the name `kt1.stp2d.momentum_rhs`; what is restored is the
+ISOLATION.
+
+**Measured rows are unchanged**, which is the preregistered prediction
+CONFIRMED:
+
+| card | U row | verdict |
+|---|---|---|
+| LOCK_EXCHANGE-zco | `0.0`, `0 / 2540` | bit-exact, FULL isolation |
+| OVERFLOW-zps | `0.0`, `0 / 16900` | bit-exact, FULL isolation |
+
+V stays WAIVED with its measured count (0 wet V faces on both one-wet-row
+tanks).  Controls: the numeric plant exits `1` on both cards, and
+`--plant-ppsrc cfgs/DINO` runs the same assertion against an MLF-compiled
+configuration and fires on three checks at once — including the contrast the
+whole argument rests on, that on MLF `hpg_sco` ACCUMULATES
+(`puu = puu + zhpi + zuap`) where under `key_RK3` it ASSIGNS.
+
+### Wrong citations, for the third round running — now gated
+
+In `stp2d.F90`, line 126 is a comment, 129 is blank, 190 is a banner and 279
+is blank; the calls are `:128` `dyn_hpg`, `:131` `dyn_ldf`, `:146` `dyn_vor`,
+`:281` `dyn_spg_ts`.  Separately, a code comment called
+`stprk3_stg.F90:168-243` "tracers"; that range is the `r3t/r3u/r3v` block and
+the "Dynamic : RHS" banner, and the tracer program is `stprk3_stg.F90:453-598`.
+
+Hand-checking has now failed three rounds in a row, so it is replaced by
+`nemo_testcase_receipt_citation_gate.py`.  It walks this receipt's inline code
+spans in order from a named heading, binds bare `:NNN` continuations to the
+last named file (mis-binding those was itself the round-26 defect — the
+`stp2d.F90` continuations were being read against `stprk3_stg.F90`), requires
+every citation to appear in a committed citation-to-symbol map, and greps the
+cited line range of the real file for that symbol.  An UNMAPPED citation
+fails, so a new claim cannot enter the receipt uninspected.
+
+On its first run it found four more things, all corrected: the four `stp2d`
+rows above; the map's own first draft naming the wrong symbol for
+`dynspg_ts.F90:870-895`; and two `ocean_pe_latlon_cgrid.py:NNNN` citations that
+had rotted with the tree, one of them pointing into a DIFFERENT branch.  Repo
+line numbers are not stable enough to cite, so both now name the symbol.
+
+Its blind spot is written into its docstring: it proves the symbol is AT the
+cited line, not that the prose's claim about that line is true.  Non-vacuity
+runs both ways — shifting one citation by two lines fails it (exit `1`), and
+so does appending an unmapped citation to a copy of the receipt.
+
+### Rule-11 record — the BBL "open model question" is RETRACTED
+
+**Dead claim (round 26).**  "On a zps card `ku_s == ku_d` is a partial-cell
+face, so why it is marked BBL-active at all is an open model question."
+
+**What killed it.**  The test called `bbl_static_geometry`.  The model calls
+`nemo_bbl_static_geometry`, which follows `trabbl.F90:519-527`: it signs
+`gdept_0(...,mbkt)` differences and leaves `mgrhu = 0` when they are equal, so
+an equal-`mbkt` face is never active.  Measured on OVERFLOW-zps:
+
+| builder | active U faces | of which `ku_s == ku_d` | stepped |
+|---|---:|---:|---:|
+| `bbl_static_geometry` (what the test called) | 141 | 112 | 29 |
+| `nemo_bbl_static_geometry` (what the model runs) | 29 | **0** | 29 |
+
+The 29 stepped faces are the same set in both.  The degenerate face the test
+drew never existed in the model, so there was no model question; and the
+`ku_s != ku_d` filter round 26 added to work around it was compensation, not a
+fix — it would have hidden exactly this disagreement.  The test now builds the
+NEMO geometry from the card's own three operands, asserts no active face is
+degenerate, and picks the median active face with NO filter.  It passes
+(`1 passed in 398.72s`).
+
+Non-vacuity, by planting and restoring: disabling BBL in the test's ON arm as
+well gives `assert np.float64(0.0) > 1e-12`, `1 failed in 381.78s`.  Restored
+with `git checkout --`; `git status --porcelain` empty.
+
+### LOCK's external-mode bit, walked to the producing operation
+
+Round 26 left the owner PLAUSIBLE between `stp2d.F90:172` and `:185` and said
+"no dumped frame separates them".  One does not have to.
+
+`stp2d.F90:172` is **REFUTED** from source plus one asserted precondition:
+`dyn_adv_up3` zeroes `pUe`/`pVe` on entry
+(`BLD/ppsrc/nemo/dynadv_up3.f90:138-141`) and every later write subtracts a
+term built from `zFu`/`zFv`/`puu(:,:,:,Kbb)`, each a product with the entry
+velocity; NEMO's dumped kt=1 entry velocity is exactly `0.0` on this card.  So
+`Ue_rhs` after `stp2d.F90:172` is exactly `0.0`.  `dyn_drg_init`
+(`stp2d.F90:196`) and wind (`stp2d.F90:199-202`) add exact zeros here.  `dynspg_ts.F90:282` then copies `Ue_rhs`
+into `zu_frc` verbatim, and `:296` subtracts exactly zero because
+`usrdef_hgr.F90:103-104` sets `f = 0`.
+
+`stp2d.F90:185`'s counterpart is **CONFIRMED**, in three arms differing in one
+variable,
+scored against the round-25 acquisition's 19-frame record:
+
+| arm | `slow_u` unequal / n | absolute max |
+|---|---:|---:|
+| `model_captured` (the production frame) | `1 / 127` | `2.168404344971009e-19` |
+| `statement_model_rhs` | `1 / 127` | `2.168404344971009e-19` |
+| `statement_nemo_rhs` (NEMO's own `uu(:,:,:,Krhs)` transplanted) | `1 / 127` | `2.168404344971009e-19` |
+| `statement_nemo_rhs_reciprocal` | **`0 / 127`** | **`0.0`** |
+
+The instrument is calibrated before its number is used: the reproduced
+statement equals the production frame bit for bit, and NEMO's dumped
+`uu(:,:,:,Krhs)` equals legoESM's momentum tendency on all wet faces, so the
+transplant changes nothing — the reduction makes the bit from NEMO's OWN 3-D
+RHS.
+
+**And it walks one operation deeper, where it lands.**  NEMO ends
+`stp2d.F90:185` with a multiply by `r1_hu_0`, a PRECOMPUTED reciprocal; legoESM divides by
+the live column sum.  `x*(1/H)` reproduces NEMO EXACTLY; `x/H` is the whole
+1-ULP residual.  That is reported as a **CONFIRMED** finding and NOT landed:
+adopting the association is a numerics change that moves every card's rows, so
+it is open question 1 below.
+
+Controls: the plant adds `1.0` to the largest wet operand and the reciprocal
+arm goes from bit-exact to `1 / 127` (exit `1`).  Two weaker plants were tried
+first and both are recorded in the probe, because each is a lesson — the first
+wet face carries an RHS of exactly `0.0` at kt=1, so a control there perturbs a
+zero; and one ULP even on the largest operand (`|RHS| ~ 2.2e-3`) moves the mean
+by `~2e-20`, below one ULP of the `~1.1e-3` mean.  That second number is this
+probe's operand resolution and it bounds what the probe can claim.
+
+### ORCA2 is the fourth Rule-12 card, and it is AT BAR
+
+Round 26 called ORCA2 BLOCKED on a branch decision.  It was not blocked
+numerically.  `/tmp/codex-orca2-r27-probe` is a DISPOSABLE detached checkout of
+`origin/fidelity/nemo-testcases-l4-orca2-codex` with `d5a7f8169507`
+cherry-picked; the ORCA2 branch itself is untouched and the worktree is FLAGGED,
+not deleted.  Zero NEMO runs.
+
+The existing ORCA2 HPG gate was deliberately not reused for scoring: it calls
+`nemo_hpg_sco_literal_cgrid` directly and is therefore blind to the half of the
+round-25 change that lives in the CONSUMER.  This probe imports that gate for
+its record readers (reuse, not a second copy) and routes the same dumped
+operands through the model's `nemo_sco` composition.  ORCA2 is not at rest, so
+the LOCK/OVERFLOW frame isolation does not transfer and the operands route is
+the only valid one.
+
+| component | unequal / n | verdict |
+|---|---:|---|
+| `sum_u`, `zhpi_u`, `zuap_u` | `0 / 221640` | AT-BAR |
+| `sum_v`, `zhpi_v`, `zuap_v` | `0 / 222048` | AT-BAR |
+
+**Rule-12 eligibility for the round-25 change is discharged on all four cards
+that execute it**: GYRE (round 25), LOCK and OVERFLOW (rounds 26 and 27), ORCA2
+(here).
+
+Two controls, because a bit-exact row is worthless if it cannot fail.  A
+one-variable ablation restores the `-rho0` pressure round trip on the SAME
+operands and `sum_u`/`sum_v` go to `79793` / `80268` unequal — the change is
+load-bearing on ORCA2, not inert.  A planted one-ULP `gdept_z0` perturbation on
+a wet, scored face moves 2 U and 4 V cells (exit `1`); the first draft planted
+an arbitrary index that turned out to be masked land, so the plant target is now
+derived from the mask.  The cherry-pick gives the fix a different sha, so
+ancestry cannot be tested; the probe checks the two changed functions BEHAVE
+instead — the pinned `gdept_z0` bit pattern and the acceleration pass-through —
+which a reverted or half-applied pick would fail.
+
+Declared scope limit, stated up front rather than discovered later: NEMO
+supplies `gdept_z0`, so this row exercises the CONSUMER and the operator given
+NEMO's own inputs, not the `_nemo_qco_gdept_z0` builder.  That builder is
+card-independent arithmetic pinned by `test_nemo_qco_gdept_z0_oracle_bit_pattern`,
+and no ORCA2 record carries the `(gdept_0, 1+r3t, ssh)` triple at the stage-2
+time level.
+
+### Two report defects, and one premise of the round-26 review REFUTED
+
+`exit_over_slow_dt_prediction` printed `1.559250241824e+290` on OVERFLOW.  Its
+denominator is exactly `0.0` there and the code divided by
+`np.finfo(float).tiny` rather than declining to answer.  It is `null` now with
+a field naming why the ratio does not exist.  LOCK's `0.3`, which has a real
+denominator, is unchanged.
+
+The round-26 review also reported that the LOCK walk names
+`overflow_kt1_10_flux_gate.json` as its `trajectory_gate`.  **That premise is
+REFUTED**: the round-26 LOCK record names LOCK's own
+`lock_trajectory_gate_kt10.json`, because the path was passed explicitly.  What
+is real is the LATENT hole behind it — the default was OVERFLOW's report for
+every case, so a LOCK run on gate defaults WOULD have stamped it.  Defaults are
+per card now, and the reader refuses a report whose `case` is not this run's, so
+an explicit wrong path cannot get through either.
+
+Controlled: both cards were re-run and their reports are identical to round
+26's, field by field, apart from the git sha and the two ratio keys.  Both LOCK
+plants still exit `1`.
+
+### Merge readiness
+
+`fidelity/nemo-testcases-l2-gyre-codex2` is **74 commits ahead of
+`03c6e8d96ff7`**, which is the tip of BOTH `origin/fidelity/nemo-gyre-integration-merge`
+and `origin/fidelity/nemo-testcases-l2-gyre-reconciled`, and is an ancestor of
+this branch — so the integration is a FAST-FORWARD with zero conflicts by
+construction, not a merge to be resolved.
+
+Nothing in round 27 blocks that fast-forward.  What is stated honestly next to
+it: this round landed no model numerics at all (every change is a gate, a
+probe, a test or a record), the six pre-existing focused-test failures are
+unchanged in kind, and the campaign's own precondition — independent
+adversarial review of rounds 25, 26 and 27 — is still **OUTSTANDING**.  The
+merge decision itself is not made here.
+
+### Open questions
+
+1. **The `x/H` versus `x*(1/H)` association in the barotropic slow forcing.**
+   CONFIRMED as the whole of LOCK's external-mode residual.  Adopting NEMO's
+   precomputed-reciprocal form is a numerics change that moves every card's
+   rows and needs a Rule-12 walk on all four; it is NOT landed here.  Land it,
+   or leave the 1-ULP row as named debt?
+2. **The native demo GYRE card's momentum program.**  Unchanged this round per
+   the standing decision; the five `test_nemo_recipe` failures stay attributed
+   to it.
+3. **The ORCA2 branch strategy.**  The probe answers the NUMERICAL question
+   from a disposable worktree, so round 26's open question 1 is no longer
+   blocking a measurement — but the two branches are still divergent and that
+   is a decision, not a finding.
+4. **Independent adversarial review of rounds 25, 26 and 27** — OUTSTANDING.
+
+### ASKED / UNASKED
+
+| choice | disposition |
+|---|---|
+| un-retract the `dyn_hpg`-alone frame, and prove it from the ppsrc | ASKED; landed; rows unchanged, plant fires on an MLF build |
+| keep round 26's row NAME while restoring its isolation | ASKED; the dump really is a `stp_2D` frame, so the name stays |
+| correct the `stp2d` and `stprk3_stg` citations | not a scientific choice; corrected against the shipped source and gated |
+| add a citation gate with a committed symbol map | ASKED; landed, non-vacuous both ways |
+| point the BBL liveness test at `nemo_bbl_static_geometry`, drop the filter | ASKED; landed; the "open model question" is retracted |
+| separate LOCK's `:172` / `:185` owner offline | ASKED; `:172` REFUTED, `:185` CONFIRMED, walked to the divide-vs-reciprocal operation |
+| **land** the reciprocal association | NOT DONE — open question 1; it moves every card and was not asked for |
+| score ORCA2 from a disposable probe worktree | ASKED; AT-BAR on all six components; ORCA2 branch untouched |
+| null the undefined ratio; per-card trajectory provenance | ASKED; landed; both cards otherwise byte-identical to round 26 |
+| change the demo GYRE card's `vertical_momentum_scheme` / `adaptive_implicit_vertadv` | FORBIDDEN this round; untouched |
+| shipped NEMO edit, `makenemo`, `mpirun`, push, merge, deletion | forbidden; none performed |
+
+UNASKED list: empty.
+
+Two probe worktrees are FLAGGED, not deleted: `/tmp/codex-orca2-r27-probe`
+(this round's, detached, cherry-picked) and round 26's
+`/tmp/codex-orca2-r26` and `/tmp/codex-gyre-r25tip`.
+
+Every figure above is pinned in `manifests/nemo_testcase_l2_gyre_round27.json`;
+the reports live under
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round27/` with SHA-256 in
+`artifacts.sha256`.
+
+Verdict stays **HOLD** on merging.  Nothing was merged or pushed.

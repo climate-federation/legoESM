@@ -63,6 +63,17 @@ FILES = {
     "namelist_cfg": LOCK / "EXP00/namelist_cfg",
     "namelist_ref": NEMO / "cfgs/SHARED/namelist_ref",
     "ocean.output": OVERFLOW_RUN / "ocean.output",
+    "overflow_kt1_10/ocean.output": OVERFLOW_RUN / "ocean.output",
+    "lock_kt1_10/ocean.output": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_10"
+        "/ocean.output"),
+    # The PREPROCESSED source LOCK compiles.  OVERFLOW's is the same body with
+    # its own line offsets, which is why the eligibility gate greps both cards
+    # programmatically instead of citing OVERFLOW's numbers here.
+    "BLD/ppsrc/nemo/dynspg_ts.f90": LOCK / "BLD/ppsrc/nemo/dynspg_ts.f90",
+    "BLD/ppsrc/nemo/dynhpg.f90": LOCK / "BLD/ppsrc/nemo/dynhpg.f90",
+    "BLD/ppsrc/nemo/dynadv_up3.f90": LOCK / "BLD/ppsrc/nemo/dynadv_up3.f90",
+    "BLD/ppsrc/nemo/dynvor.f90": LOCK / "BLD/ppsrc/nemo/dynvor.f90",
     "ocean_pe_latlon_cgrid.py":
         REPO / "packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py",
     "nemo_testcase_recipe.py":
@@ -135,6 +146,19 @@ CITATION_MAP = {
     "ocean_pe_latlon_cgrid.py:2005-2006": "gdept_z0",
     "ocean_pe_latlon_cgrid.py:2045-2046": "dp_dx_sco",
     "nemo_testcase_recipe.py:92,274,914": "nemo_sco",
+    # round 27
+    "lock_kt1_10/ocean.output:615": "ln_dynldf_OFF",
+    "overflow_kt1_10/ocean.output:727": "ln_dynldf_OFF",
+    "BLD/ppsrc/nemo/dynspg_ts.f90:1224": "INTENT(in",
+    "BLD/ppsrc/nemo/dynhpg.f90:393,412": "= zhpi(ji,jj) + zuap",
+    "BLD/ppsrc/nemo/dynadv_up3.f90:138-141": "pUe(ji,jj) = 0._wp",
+    "BLD/ppsrc/nemo/dynadv_up3.f90:211,317,355": "ELSE",
+    "BLD/ppsrc/nemo/dynadv_up3.f90:213,336,357": "puu(ji,jj",
+    "BLD/ppsrc/nemo/dynvor.f90:655-656": "zwx(ji,jj) = e2u(ji,jj)",
+    "BLD/ppsrc/nemo/dynvor.f90:665": "pu_rhs(ji,jj,jk) + zuav",
+    "stprk3_stg.F90:453-598": "tra_zdf",
+    "stp2d.F90:126": "hydrostatic pressure gradient",
+    "stprk3_stg.F90:168-243": "r3v(:,:,Kaa)",
 }
 
 DEFAULT_RECEIPT = (
@@ -143,7 +167,7 @@ DEFAULT_RECEIPT = (
 DEFAULT_HEADING = "## Round 25 —"
 
 _NAME = (r"[A-Za-z0-9_./]+\.(?:F90|f90|h90|py|fcm)"
-         r"|namelist_cfg|namelist_ref|ocean\.output")
+         r"|[A-Za-z0-9_./]*(?:namelist_cfg|namelist_ref|ocean\.output)")
 _SPAN = re.compile(r"`([^`\n]+)`")
 _FULL = re.compile(rf"^(?P<f>{_NAME}):(?P<l>\d[\d,\-]*)$")
 _ONLY = re.compile(rf"^(?P<f>{_NAME})$")

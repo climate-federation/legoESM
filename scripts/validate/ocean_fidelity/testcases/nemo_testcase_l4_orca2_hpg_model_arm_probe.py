@@ -53,9 +53,10 @@ COMPONENTS = ("sum_u", "sum_v", "zhpi_u", "zhpi_v", "zuap_u", "zuap_v")
 # nemo_hpg_sco_literal_cgrid(return_components=True) returns this order.
 COMPONENTS_IN_RETURN_ORDER = (
     "sum_u", "sum_v", "zhpi_u", "zhpi_v", "zuap_u", "zuap_v")
-RHO_0_NOMINAL = 1026.0
+# NEMO's own phycst values, from the shared preset -- never re-typed here.
+# rho_0 is load-bearing only for the legacy ablation arm (the landed arm
+# returns the acceleration and never touches it); g is load-bearing for both.
 FIX = "d5a7f816950713965e39361a1c605d7007868200"
-GRAVITY = 9.80665
 
 
 class ProbeError(RuntimeError):
@@ -112,7 +113,11 @@ def run(oracle_root: Path, model_root: Path, *, plant: bool = False) -> dict:
     from legoesm.ocean.dynamics.latlon_cgrid_operators import (
         nemo_hpg_sco_literal_cgrid,
     )
+    from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
     from netCDF4 import Dataset
+
+    gravity = NEMO_CONSTANTS_CONFIG.g
+    rho_0_nominal = NEMO_CONSTANTS_CONFIG.rho_0
 
     policy = PrecisionPolicy.fp64(transcendentals="libm")
     set_policy(policy)
@@ -210,12 +215,12 @@ def run(oracle_root: Path, model_root: Path, *, plant: bool = False) -> dict:
     # direct helper call cannot see.
     def model_arm(rhd, e3w, depth, legacy_round_trip):
         hpg_u, hpg_v, *rest = nemo_hpg_sco_literal_cgrid(
-            rhd, e3w, depth, grid, GRAVITY, return_components=True)
+            rhd, e3w, depth, grid, gravity, return_components=True)
         # NOMINAL reference density: on the landed arm the consumer returns
         # the acceleration and rho_0 never touches the result, so this value
         # cannot affect the scored row.  It is load-bearing only for the
         # legacy ablation arm below, which is why that arm is labelled.
-        rho_0 = jnp.asarray(RHO_0_NOMINAL, dtype=hpg_u.dtype)
+        rho_0 = jnp.asarray(rho_0_nominal, dtype=hpg_u.dtype)
         if legacy_round_trip:
             direct_u = direct_v = None
             dp_dx, dp_dy = -rho_0 * hpg_u, -rho_0 * hpg_v
@@ -261,6 +266,9 @@ def run(oracle_root: Path, model_root: Path, *, plant: bool = False) -> dict:
     report = {
         "format": "nemo-testcase-l4-orca2-hpg-model-arm-probe-v1",
         "case": "ORCA2",
+        "constants": {"g": gravity, "rho_0": rho_0_nominal,
+                      "source": "legoesm.ocean.constants_config."
+                                "NEMO_CONSTANTS_CONFIG"},
         "status": "AT-BAR" if first is None else "DEBT",
         "first_non_bit_operand": first,
         "rows": rows,
@@ -271,7 +279,7 @@ def run(oracle_root: Path, model_root: Path, *, plant: bool = False) -> dict:
         "legacy_pressure_round_trip_ablation": {
             "rows": legacy_rows,
             "changes_the_result_on_this_card": round_trip_differs,
-            "rho_0_used": RHO_0_NOMINAL,
+            "rho_0_used": rho_0_nominal,
             "note": "one-variable control: restoring the -rho0 round trip the "
                     "round-25 change removed must break bit-exactness here, "
                     "or the change would be inert on ORCA2 and the row would "
