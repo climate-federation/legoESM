@@ -25,6 +25,45 @@ assert SPEC and SPEC.loader
 gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
 
+ADMISSION_PATH = PATH.with_name("nemo_testcase_l2_gyre_round21_admission.py")
+ADMISSION_SPEC = importlib.util.spec_from_file_location(
+    "gyre_round21_admission", ADMISSION_PATH)
+assert ADMISSION_SPEC and ADMISSION_SPEC.loader
+admission = importlib.util.module_from_spec(ADMISSION_SPEC)
+ADMISSION_SPEC.loader.exec_module(admission)
+
+
+def test_round21_admission_ignores_only_preconsumer_zfw(tmp_path):
+    header = b"NEMO_L1_TRANSP_1" + struct.pack(
+        "=8i", 1, 1, 1, 1, admission.NX, admission.NY, admission.NZ, 64)
+    values = np.zeros(3 * admission.N3, dtype=np.float64)
+    baseline = tmp_path / "baseline.bin"
+    candidate = tmp_path / "candidate.bin"
+    baseline.write_bytes(header + values.tobytes())
+    changed = values.copy()
+    changed[2 * admission.N3 + 100] = 1.0
+    candidate.write_bytes(header + changed.tobytes())
+    assert admission._compare_layout(
+        baseline, candidate, "transport", [True])["consumed_equal"]
+    changed[100] = 1.0
+    candidate.write_bytes(header + changed.tobytes())
+    assert not admission._compare_layout(
+        baseline, candidate, "transport", [True])["consumed_equal"]
+
+
+def test_stage_ww_reader_discards_unowned_nonfinite_halo(tmp_path):
+    path = tmp_path / "oracle_rkstage_ww_kt00000001_s1.bin"
+    header = b"NEMO_L2_STGWW_1 " + struct.pack(
+        "=10i", 1, 1, 1, 1, 1, 3, gate.DIMS[0], gate.DIMS[1], gate.DIMS[2], 64)
+    values = np.zeros(1 + 2 * admission.N3, dtype=np.float64)
+    values[0] = 4800.0
+    values[1] = np.nan
+    values[1 + admission.N3] = np.nan
+    path.write_bytes(header + values.tobytes())
+    record = gate.read_stage_ww(path, 1)
+    assert np.all(np.isfinite(record["ww"]))
+    assert np.all(np.isfinite(record["pFw"]))
+
 
 def test_score_exact_and_planted_violation():
     values = np.array([1.0, 2.0], dtype=np.float64)

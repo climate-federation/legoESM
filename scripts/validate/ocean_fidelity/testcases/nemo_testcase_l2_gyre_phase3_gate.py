@@ -257,14 +257,18 @@ def read_stage_ww(path: Path, expected_stage: int) -> dict:
     require(kbb == 1, f"{path}: expected Kbb=1, got {kbb}")
     count = nx * ny * nz
     require(values.size == 1 + 2 * count, f"{path}: bad payload")
-    require(np.all(np.isfinite(values)), f"{path}: non-finite payload")
+    require(np.isfinite(values[0]), f"{path}: non-finite stage clock")
+    ww = _xyz(values[1 : 1 + count], nx, ny, nz)
+    p_fw = _xyz(values[1 + count :], nx, ny, nz)
+    require(np.all(np.isfinite(ww)) and np.all(np.isfinite(p_fw)),
+            f"{path}: non-finite parser-visible payload")
     return {
         "stage": stage,
         "Kmm": kmm,
         "registry_level": level,
         "rDt_s": float(values[0]),
-        "ww": _xyz(values[1 : 1 + count], nx, ny, nz),
-        "pFw": _xyz(values[1 + count :], nx, ny, nz),
+        "ww": ww,
+        "pFw": p_fw,
     }
 
 

@@ -8,6 +8,7 @@ readonly TARGET_CFG=GYRE_OMIP_L2_P3_SM_R21W
 readonly SOURCE_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19_oracle_v2_external
 readonly TARGET_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round21_oracle_v2_stage_ww
 readonly PATCH_FILE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)/traadv_round21.patch
+readonly ADMISSION=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/nemo_testcase_l2_gyre_round21_admission.py
 
 source_cfg=$NEMO_ROOT/cfgs/$SOURCE_CFG
 target_cfg=$NEMO_ROOT/cfgs/$TARGET_CFG
@@ -80,16 +81,10 @@ cp "$work_manifest"/*.sha256 "$TARGET_RUN/"
     >>run.user.time.log
 )
 
-# WRITE-only admission: every pre-existing oracle record and the final restart
-# must be byte-identical.  The new three stage-W records are the only allowed
-# additions.  Nothing is deleted if a comparison fails.
-for source in "$SOURCE_RUN"/oracle_*.bin; do
-  name=${source##*/}
-  [[ -f "$TARGET_RUN/$name" ]]
-  cmp "$source" "$TARGET_RUN/$name"
-done
-cmp "$SOURCE_RUN/GYRE_OMIP_L2_P3_00000010_restart.nc" \
-  "$TARGET_RUN/GYRE_OMIP_L2_P3_00000010_restart.nc"
+# WRITE-only admission compares every parser-visible consumed field and the
+# final restart.  Raw uninitialised workspace/halo bytes remain in the evidence
+# but cannot veto an otherwise bit-identical instrument extension.
+python "$ADMISSION" --baseline "$SOURCE_RUN" --candidate "$TARGET_RUN"
 for stage in 1 2 3; do
   test -s "$TARGET_RUN/oracle_rkstage_ww_kt00000001_s${stage}.bin"
 done

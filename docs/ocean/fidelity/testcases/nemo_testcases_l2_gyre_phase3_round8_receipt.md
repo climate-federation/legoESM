@@ -2537,5 +2537,34 @@ schema-aware consumed fields rather than zero-filling NEMO workspaces; this is
 the smaller authorized alternative and retains the evidence.  A planted
 change to one consumed value must make the admission command exit nonzero.
 
+The classifier confirms that prediction.  Search-before-build found no shared
+schema-aware admission utility; the existing readers were reused as the
+projection contract.  It reports `PASS: exact=39/49 changed=10
+restart_equal=True`; the consumed-bit plant reports `FAIL` and exits 1.  The
+ordinary kt10 restart is byte-identical (`6245d06d...`) and the Round-19
+coefficient twin agrees on every consumed projection.  Raw evidence is retained
+unchanged; no dump was zero-filled.
+
+| record | raw bytes / first byte (1-based) | changed slot(s) | writer and consumption finding |
+|---|---:|---|---|
+| `bt_ordered_operands` | `256507` / `15`, plus `90112` appended | schema `BTORD_1 -> BTORD_2`; eight EEN arrays | all 43 common fields and weights bit-exact; current `MY_SRC/dynspg_ts.F90:598-599,934-942` appends the coefficients; the BTORD_2 twin is raw-identical |
+| `rkstage1_transport_operands` | `826` / `472073` | `zub` 57 elements, `zvb` 54 | all changes outside the reader projection; the allocatables are assigned only on the bounded loops at `MY_SRC/stprk3_stg.F90:261-280` before the whole-array WRITE at `:297-302`; twin raw-identical |
+| `rkstage3_wzv` | `5445` / `51` | `ww_pre` 7, `ww_post` 7, `pFw` 690 | all changes are discarded halos: WZV assigns its bounded domain at `sshwzv.F90:308-336`, and `pFw` at `MY_SRC/traadv.F90:234-235`, before the whole-array writes at `:230-236`; twin consumed projection exact |
+| `rktracer_operands_s1` | `5371` / `1112885` | `zFw` 688 | discarded halo only; whole-array WRITE at `MY_SRC/stprk3_stg.F90:657-670`, after bounded `traadv.F90:229-235`; twin raw-identical |
+| `rktracer_operands_s2` | `5377` / `928575` | `zFw` 690 | same bounded-writer halo; twin consumed projection exact |
+| `slow_forcing` | `1660` / `1445335` | `utauU` 120, `vtauV` 120 | discarded halo only; `sbcmod.F90:542-547` assigns the bounded face arrays and `MY_SRC/stp2d.F90:219-230` writes the whole arrays; twin consumed projection exact |
+| `tracer_transport_s3` | `5377` / `464319` | `zFw` 690 | discarded halo only; writer `MY_SRC/stprk3_stg.F90:622-626`; twin consumed projection exact |
+| `transport_s1` | `42182` / `494890` | `zFw` 5456 | the entire slot is pre-consumer workspace (4034 changes even lie in the later parser projection): vector-invariant stage 1 skips WZV before the WRITE at `MY_SRC/stprk3_stg.F90:343-348`, and `tra_adv_trp` overwrites it later; the gate labels this row UNINFORMATIVE and never scores it; twin consumed fields exact |
+| `transport_s2` | `5377` / `464307` | `zFw` 690 | same pre-`tra_adv_trp` slot; changed bytes are halo; twin consumed fields exact |
+| `transport_s3` | `5377` / `464307` | `zFw` 690 | same pre-`tra_adv_trp` slot; changed bytes are halo; twin consumed fields exact |
+
+Thus none of the ten contains a changed byte read by a scoring parser as a
+consumed operand.  The varying bytes are proven uninitialized/stale at this
+WRITE by the bounded producer statements, their variation across the two
+independent binaries, exact consumed projections, and the exact final restart.
+The acquisition is **ADMITTED_WRITE_ONLY** under Rules 1 and 8.  `run.sh` now
+invokes the classifier; its original `EXP00` correction at `9019dc8e5ab` is
+preserved unchanged.
+
 All Round-21 measurements and harness results are Codex-internal.  Independent
 Round-21 review remains outstanding; no dual-review claim is made.
