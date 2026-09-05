@@ -1056,6 +1056,20 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # round-16 localization only.  Production configurations always leave it
     # false; NEMO has no such prognostic bypass.
     expose_pre_implicit_tracer: bool = False
+    # Return the WS-stage momentum immediately before dyn_spg_ts is entered.
+    # Diagnostic observation only: the ordinary step still executes in full,
+    # then this value is substituted into the returned u/v slots.
+    expose_pre_barotropic_momentum: bool = False
+    # Scale the correction from the superseded post-WS-stage external-mode
+    # seed to NEMO's distinct Kmm seed.  Production is exactly 1 and bypasses
+    # interpolation; 0 restores the old operand, while intermediate values
+    # exist only for the round-17 scaling experiment.  No public config owns
+    # this switch (NEMO dynspg_ts.F90:484-493 has none).
+    barotropic_kmm_seed_weight: float = 1.0
+    # Replace the selected quadratic bottom rate by its rest-state value at
+    # every shared consumer.  Private round-17 one-variable ablation only;
+    # the public card remains the resolved zdfdrg np_non_lin identity.
+    linearize_quadratic_bottom_drag: bool = False
 
 
 def _nemo_ws_rk3_tracer_pair_step(
@@ -3830,6 +3844,16 @@ class LatLonCGridOceanModel:
         """
         _zc = self.z_coord if z_coord is None else z_coord  # SPMD band override
         _cfg_b = self.config if config is None else config  # SPMD band override
+        if self._nemo_ws_test_hooks.linearize_quadratic_bottom_drag:
+            # zdfdrg.F90:189 at U=0 is Cd0*sqrt(ke0).  Replacing the live
+            # quadratic rate by that single rest value recreates the former
+            # erroneous arm consistently in stp2d, dynspg_ts and dynzdf.
+            _bd = _cfg_b.bottom_drag
+            _cfg_b = _cfg_b._replace(bottom_drag=_bd._replace(
+                bottom_drag_scheme="nemo_linear",
+                bottom_drag_r=(
+                    _bd.bottom_drag_cd0 * float(np.sqrt(_bd.bottom_drag_ke0))),
+            ))
         state = cast_pytree(state, None, "compute")
         # ``_ab2_scope_override`` (private): the leap-frog step (``_leapfrog_step``)
         # drives this method in "advective" scope to WITHHOLD the dissipative
@@ -4658,6 +4682,44 @@ class LatLonCGridOceanModel:
                     _eta_bef, _u_bef, _v_bef = _barotropic_before_state
                     _baro_seed = dict(
                         eta_init=_eta_bef, u_init=_u_bef, v_init=_v_bef)
+                elif (
+                    getattr(_cfg_b, "momentum_time_integrator", "euler")
+                    == "rk3_ws"
+                    and getattr(
+                        _cfg_b.barotropic, "nemo_stage_mean_imposition", False)
+                    and self._nemo_ws_test_hooks.barotropic_kmm_seed_weight
+                    != 0.0
+                ):
+                    # NEMO key_RK3, ln_bt_fw=.true.: stp_2D first computes the
+                    # 3-D stage-1 RHS, but dyn_spg_ts seeds its independent
+                    # external-mode carry from puu_b/vv_b/pssh(Kmm), not from
+                    # the post-RHS 3-D velocity (dynspg_ts.F90:484-493).  The
+                    # caller's ``state`` is that Kmm state; ``state_mid`` is
+                    # the later WS-stage workspace supplied as the solver's
+                    # ordinary state.  Thread the already-shared seed override
+                    # rather than creating a slab-specific barotropic path.
+                    _seed_weight = (
+                        self._nemo_ws_test_hooks.barotropic_kmm_seed_weight)
+                    if _seed_weight == 1.0:
+                        _seed_eta = state.eta.data
+                        _seed_u = state.u.data
+                        _seed_v = state.v.data
+                    else:
+                        # Private scaling arm only.  The two endpoints bypass
+                        # these operations, keeping both measured identities
+                        # source-literal and free of an extra rounding site.
+                        _w = jnp.asarray(_seed_weight, dtype=state.u.data.dtype)
+                        _seed_eta = nemo_source_round(
+                            state_mid.eta.data
+                            + _w * (state.eta.data - state_mid.eta.data))
+                        _seed_u = nemo_source_round(
+                            state_mid.u.data
+                            + _w * (state.u.data - state_mid.u.data))
+                        _seed_v = nemo_source_round(
+                            state_mid.v.data
+                            + _w * (state.v.data - state_mid.v.data))
+                    _baro_seed = dict(
+                        eta_init=_seed_eta, u_init=_seed_u, v_init=_seed_v)
                 else:
                     _baro_seed = {}
             # The MLF scale rescales the substep COUNT but must NOT widen the
@@ -6437,6 +6499,12 @@ class LatLonCGridOceanModel:
             state_new = state_new._replace(
                 u=state_new.u.replace(data=_post_u),
                 v=state_new.v.replace(data=_post_v),
+            )
+        if self._nemo_ws_test_hooks.expose_pre_barotropic_momentum:
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=state_mid.u.data),
+                v=state_new.v.replace(data=state_mid.v.data),
+                eta=state_new.eta.replace(data=state_mid.eta.data),
             )
 
         state_new = cast_pytree(state_new, None, "storage", allow_downcast=True)

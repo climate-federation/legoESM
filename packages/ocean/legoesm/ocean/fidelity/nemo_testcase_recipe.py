@@ -392,9 +392,14 @@ def build_c1d_omip_l3_slab_ocean_card() -> C1DSlabOceanCard:
         # the certified RK3 source program.
         freshwater_closure="real_freshwater",
         bottom_drag=cfg.bottom_drag._replace(
-            bottom_drag_r=5.0e-5,  # namdrg_bot resolved linear coefficient
+            # Resolved oracle: ln_non_lin=T, ln_lin=F, hence
+            # zdfdrg.F90:183-190 evaluates -rn_Cd0*sqrt(U^2+rn_ke0).
+            # The 0.05 m/s rest value happens to produce 5e-5 m/s, but that
+            # is not a linear coefficient and must evolve once U is nonzero.
+            bottom_drag_cd0=1.0e-3,  # ORCA1 namelist_cfg:264
+            bottom_drag_ke0=2.5e-3,  # ORCA1 namelist_cfg:267
             bottom_drag_bbl_thickness=0.0,
-            bottom_drag_scheme="nemo_linear",
+            bottom_drag_scheme="nemo_quadratic",
         ),
         zdf_drag_in_matrix=True,
         zdf_baroclinic_only=True,
