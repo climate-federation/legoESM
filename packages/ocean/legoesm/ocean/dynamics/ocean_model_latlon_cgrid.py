@@ -5912,19 +5912,26 @@ class LatLonCGridOceanModel:
 
                 _sr = nemo_source_round
                 _r1rho = _sr(
-                    jnp.asarray(1.0, dtype=T_mid.dtype)
-                    / jnp.asarray(_cfg_b.constants.rho_0, dtype=T_mid.dtype))
+                    jnp.asarray(1.0, dtype=state.T.data.dtype)
+                    / jnp.asarray(
+                        _cfg_b.constants.rho_0, dtype=state.T.data.dtype))
                 _r1cp = _sr(
-                    jnp.asarray(1.0, dtype=T_mid.dtype)
-                    / jnp.asarray(_cfg_b.constants.c_sw, dtype=T_mid.dtype))
+                    jnp.asarray(1.0, dtype=state.T.data.dtype)
+                    / jnp.asarray(
+                        _cfg_b.constants.c_sw, dtype=state.T.data.dtype))
                 _r1rhocp = _sr(_r1rho * _r1cp)
                 _source_scale = jnp.asarray(
                     self._nemo_ws_test_hooks.tracer_surface_source_scale,
-                    dtype=T_mid.dtype)
+                    dtype=state.T.data.dtype)
 
                 def _raw_stage_source(stage, h_stage):
-                    zt = jnp.zeros_like(T_mid)
-                    zs = jnp.zeros_like(S_mid)
+                    # The canonical interleaved WS path advances directly
+                    # from the Kbb state tracers.  The pre-integration lane
+                    # block lived after the generic ``T_mid`` assignment;
+                    # referring to that later workspace here was a merge-
+                    # placement error, not a NEMO time level.
+                    zt = jnp.zeros_like(state.T.data)
+                    zs = jnp.zeros_like(state.S.data)
                     h0 = h_stage[..., 0]
                     t0, s0 = nemo_tra_sbc_rk3_source(
                         tendency_t=zt[..., 0], tendency_s=zs[..., 0],

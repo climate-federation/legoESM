@@ -3738,8 +3738,15 @@ def nemo_bottom_drag_rate_faces(u, v, h_k, z_coord, config, grid):
     # interior value (v=0 there, so the coefficient is inert).
     r_u_inner = 0.5 * (jnp.roll(r_t, 1, axis=1) + r_t)
     r_eff_u = jnp.concatenate([r_u_inner, r_u_inner[:, 0:1]], axis=1)
-    r_v_int = 0.5 * (r_t[:-1, :] + r_t[1:, :])
-    r_eff_v = jnp.pad(r_v_int, ((1, 1), (0, 0)), mode="edge")
+    if r_t.shape[0] == 1:
+        # A one-row cyclic column has the same T point on both sides of each
+        # V face, so NEMO's literal 0.5*(south+north) is exactly r_t.  Avoid
+        # asking edge-padding to extrapolate an empty interior axis; this is
+        # the degenerate-grid form of the same shared face-average identity.
+        r_eff_v = jnp.concatenate([r_t, r_t], axis=0)
+    else:
+        r_v_int = 0.5 * (r_t[:-1, :] + r_t[1:, :])
+        r_eff_v = jnp.pad(r_v_int, ((1, 1), (0, 0)), mode="edge")
 
     # Partial-cell bottom-level indicator at u/v faces (face's bottom level
     # is the SHALLOWER of the two adjacent columns — see _bc_bottom_drag).

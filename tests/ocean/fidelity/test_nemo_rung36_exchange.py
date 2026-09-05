@@ -66,10 +66,32 @@ def test_coupled_card_binds_decision_six_and_libm() -> None:
     assert card.ice.precision_policy.transcendentals == "libm"
     ocean = build_c1d_omip_l3_slab_ocean_card()
     assert ocean.recipe.model_config.surface_stress_implicit is True
+    np.testing.assert_array_equal(
+        np.asarray(ocean.recipe.z_coord.nemo_e3w_0),
+        np.asarray((10.0, 10.0), dtype=np.float64),
+    )
     assert (
         ocean.recipe.model_config.barotropic.nemo_stage_mean_imposition
         is True
     )
+
+
+def test_one_row_bottom_drag_uses_the_shared_degenerate_face_average() -> None:
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        nemo_bottom_drag_rate_faces,
+    )
+    from legoesm.ocean.vertical import compute_layer_thickness
+
+    card = build_c1d_omip_l3_slab_ocean_card()
+    state = card.recipe.initial_state
+    h_k = compute_layer_thickness(
+        state.eta.data, state.H_bathy.data, card.recipe.z_coord)
+    r_u, r_v, _is_bot_u, _is_bot_v = nemo_bottom_drag_rate_faces(
+        state.u.data, state.v.data, h_k, card.recipe.z_coord,
+        card.recipe.model_config, card.recipe.grid)
+    assert r_u.shape == (1, 2)
+    assert r_v.shape == (2, 1)
+    np.testing.assert_array_equal(np.asarray(r_v[0]), np.asarray(r_v[1]))
 
 
 def test_rung36_freshwater_ssh_uses_stp2d_statement_order() -> None:

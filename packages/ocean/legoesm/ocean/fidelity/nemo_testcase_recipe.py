@@ -985,6 +985,11 @@ def build_c1d_omip_l3_slab_ocean_card() -> C1DSlabOceanCard:
     z_ref = create_z_star_from_thicknesses(
         jnp.asarray((10.0, 10.0), dtype=jnp.float64),  # Decision 6
         t_depth_ref_m=np.asarray((5.0, 15.0), dtype=np.float64),
+        # The accepted scalar-math oracle writes e3w_1d=(10,10) in
+        # mesh_mask.nc and prints the same ladder in ocean.output:314-316.
+        # Carry that raw NEMO mesh operand for the shared hpg_sco identity;
+        # reconstruction from T-level midpoints is intentionally forbidden.
+        nemo_e3w_0_m=np.asarray((10.0, 10.0), dtype=np.float64),
     )
     z_coord = create_full_step_coordinate(
         z_ref, jnp.zeros((1, 1), dtype=np.int32))
