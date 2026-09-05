@@ -9,8 +9,10 @@
 @@ -88,6 +90,7 @@
        INTEGER  ::   ji, jj, jk, jn, jtile    ! dummy loop indices
        INTEGER  ::   l1_unit, l1_ios, l2_tracer_unit, l2_tracer_ios
-+      INTEGER  ::   l4_bbl_n2, l4_bbl_n3
++      INTEGER  ::   l4_bbl_unit, l4_bbl_ios, l4_bbl_n2, l4_bbl_n3
        CHARACTER(LEN=96) :: l1_filename
++      CHARACTER(LEN=96) :: l4_bbl_filename
++      CHARACTER(LEN=16) :: l4_bbl_magic
 @@ -97,6 +100,7 @@
        REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) ::   zFu, zFv, zFw
        REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) ::   l2_qsr_before
@@ -24,8 +26,8 @@
 +               ! Lane-4 diffusive-BBL discriminator.  The writer-local copies
 +               ! bracket the ordinary call; no model array is assigned.
 +               IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) THEN
-+                  ALLOCATE( l4_bbl_before_t(jpi,jpj,jpk), l4_bbl_before_s(jpi,jpj,jpk), STAT=l1_ios )
-+                  IF( l1_ios /= 0 )   CALL ctl_stop( 'cannot allocate lane4 diffusive-BBL dump storage' )
++                  ALLOCATE( l4_bbl_before_t(jpi,jpj,jpk), l4_bbl_before_s(jpi,jpj,jpk), STAT=l4_bbl_ios )
++                  IF( l4_bbl_ios /= 0 )   CALL ctl_stop( 'cannot allocate lane4 diffusive-BBL dump storage' )
 +                  l4_bbl_before_t(:,:,:) = 0._wp
 +                  l4_bbl_before_s(:,:,:) = 0._wp
 +                  l4_bbl_before_t(:,:,:) = ts(:,:,:,jp_tem,Krhs)
@@ -33,24 +35,24 @@
 +               ENDIF
 +               CALL tra_bbl( kstp, Kbb, Kmm, ts, Krhs )
 +               IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) THEN
-+                  l1_filename = 'oracle_bbl_diffusive_kt00000001.bin'
-+                  OPEN( NEWUNIT=l1_unit, FILE=TRIM(l1_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
-+                     &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=l1_ios )
-+                  IF( l1_ios /= 0 )   CALL ctl_stop( 'cannot open lane4 diffusive-BBL dump' )
-+                  l1_magic = 'NEMO_L4_BBLDF_1'
++                  l4_bbl_filename = 'oracle_bbl_diffusive_kt00000001.bin'
++                  OPEN( NEWUNIT=l4_bbl_unit, FILE=TRIM(l4_bbl_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++                     &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=l4_bbl_ios )
++                  IF( l4_bbl_ios /= 0 )   CALL ctl_stop( 'cannot open lane4 diffusive-BBL dump' )
++                  l4_bbl_magic = 'NEMO_L4_BBLDF_1'
 +                  l4_bbl_n2 = jpi * jpj
 +                  l4_bbl_n3 = l4_bbl_n2 * jpk
-+                  WRITE(l1_unit) l1_magic, 1, kstp, kstg, Kbb, Kmm, Krhs, l4_nn_bbl_ldf, l4_nn_bbl_adv, &
++                  WRITE(l4_bbl_unit) l4_bbl_magic, 1, kstp, kstg, Kbb, Kmm, Krhs, l4_nn_bbl_ldf, l4_nn_bbl_adv, &
 +                     & jpi, jpj, jpk, STORAGE_SIZE(1._wp), 6*l4_bbl_n3 + 2*l4_bbl_n2
-+                  WRITE(l1_unit) l4_canon_3d(ts(:,:,:,jp_tem,Kbb),'T'), &
++                  WRITE(l4_bbl_unit) l4_canon_3d(ts(:,:,:,jp_tem,Kbb),'T'), &
 +                     & l4_canon_3d(ts(:,:,:,jp_sal,Kbb),'T'), &
 +                     & l4_canon_3d(l4_bbl_before_t,'T'), l4_canon_3d(l4_bbl_before_s,'T'), &
 +                     & l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
 +                     & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T'), &
 +                     & l4_canon_2d(ahu_bbl,'U'), l4_canon_2d(ahv_bbl,'V')
-+                  CLOSE(l1_unit)
++                  CLOSE(l4_bbl_unit)
 +                  DEALLOCATE( l4_bbl_before_t, l4_bbl_before_s )
-+                  WRITE(numout,*) 'LANE4_DIFFUSIVE_BBL_DUMP ', kstp, Kbb, Kmm, Krhs, TRIM(l1_filename)
++                  WRITE(numout,*) 'LANE4_DIFFUSIVE_BBL_DUMP ', kstp, Kbb, Kmm, Krhs, TRIM(l4_bbl_filename)
 +               ENDIF
 +            ENDIF
              IF( ln_tradmp  )   CALL tra_dmp( kstp, Kbb, Kmm, ts, Krhs )
