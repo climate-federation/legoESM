@@ -64,8 +64,14 @@ The binding ORCA2 entry plant separately exited 1 with
 Evidence:
 
 - `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_phase2t_combined_schema_gate.py`
-- `docs/ocean/fidelity/testcases/nemo_testcases_l4_orca2_phase2t_admission.json`
-- `docs/ocean/fidelity/testcases/nemo_testcases_l4_orca2_phase2t_schema_walk.json`
+- `/data/abyssal/dbalwada/nemo-testcases-l4/phase2t/nemo_testcases_l4_orca2_phase2t_admission.json`
+  (SHA-256 `8fc276f7e94462ba28fa5527b4da2ac3cd08b3bec4e43d83c4ae5b17d12c7525`)
+- `/data/abyssal/dbalwada/nemo-testcases-l4/phase2t/nemo_testcases_l4_orca2_phase2t_schema_walk.json`
+  (SHA-256 `f81732704ad249d62b4ad36c028cfb22357bf0125d3bece98252e5031cd1bcbf`)
+
+These two per-run outputs exceed 20 KiB and were relocated byte-for-byte from
+git to the Lane-4 data root in Phase 2v.  The small cited summaries remain in
+git; no artifact was deleted.
 
 ## 2. Executed SH2 arm and non-vacuous score
 
