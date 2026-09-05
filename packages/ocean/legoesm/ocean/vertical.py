@@ -194,7 +194,32 @@ def nemo_qco_live_face_geometry_from_operands(
     return NemoQCOLiveFaceGeometry(e3u, e3v, r1_hu, r1_hv, r3u, r3v)
 
 
-def nemo_qco_live_vorticity_e3f_cgrid(eta, z_coord, dtype, nn_e3f_typ=0):
+def _nemo_t_fold_f_owned(field, grid):
+    """Apply NEMO's owned-row T-pivot/F-point north-fold overwrite."""
+    fold = getattr(grid, "fold", None)
+    if fold is None or not bool(getattr(fold, "is_active", False)):
+        return field
+    from legoesm.grids.operators_latlon_cgrid import (
+        fold_is_local, north_fold_mask,
+    )
+    # lbc_nfd_generic.h90, c_NFtype='T', cd_nat='F': the final owned
+    # row takes the preceding row with ii2=Ni0glo-ji+1, i.e. (-1-i) mod N
+    # after stripping the two NEMO halos.  This is an F-origin permutation;
+    # it is intentionally independent of the T-origin convention detected
+    # for generic scalar halo exchange.
+    perm_f = jnp.arange(field.shape[1] - 1, -1, -1, dtype=jnp.int32)
+    folded = field[-2, perm_f]
+    if fold_is_local(grid):
+        return field.at[-1].set(folded)
+    nmask = north_fold_mask(grid)
+    if nmask is not None:
+        return field.at[-1].set(jnp.where(nmask, folded, field[-1]))
+    return field
+
+
+def nemo_qco_live_vorticity_e3f_cgrid(
+    eta, z_coord, dtype, nn_e3f_typ=0, *, grid=None,
+):
     """Build literal NEMO ``e3f_vor(Kmm)`` on legoESM's vertex layout.
 
     ``dyn_vor_init`` freezes ``e3f_0vor`` from masked reference T-cell
@@ -235,6 +260,10 @@ def nemo_qco_live_vorticity_e3f_cgrid(eta, z_coord, dtype, nn_e3f_typ=0):
     e3f0vor = b(ref_sum / divisor)
     e3f0vor = jnp.where(
         e3f0vor == 0.0, jnp.asarray(raw.e3f_0, dtype=dtype), e3f0vor)
+
+    # ORCA T-pivot north fold, F-point field.  Regular/closed grids retain the
+    # historical path byte-for-byte.
+    e3f0vor = _nemo_t_fold_f_owned(e3f0vor, grid)
 
     area_eta = b(
         b(jnp.asarray(raw.e1t, dtype=dtype)

@@ -146,6 +146,20 @@ def _round21_live_divisor_primitives(eta, z_coord):
     return (e3f0, live, q, *_triads(q))
 
 
+def _orca_fold_primitives(eta, z_coord, grid):
+    """Round-21 divisor plus NEMO's T-pivot F-field fold overwrite."""
+    base = _round21_live_divisor_primitives(eta, z_coord)
+    e3f0 = base[0]
+    perm_f = jnp.arange(e3f0.shape[1] - 1, -1, -1, dtype=jnp.int32)
+    e3f0 = e3f0.at[-1].set(e3f0[-2, perm_f])
+    live_vertex = nemo_qco_live_vorticity_e3f_cgrid(
+        eta, z_coord, jnp.float64, nn_e3f_typ=0, grid=grid)
+    live = live_vertex[1:, 1:]
+    q = nemo_source_round(
+        jnp.asarray(z_coord.nemo_een_barotropic.ff_f)[..., None] / live)
+    return (e3f0, live, q, *_triads(q))
+
+
 def _source_masks(raw) -> tuple[np.ndarray, np.ndarray]:
     umask = np.asarray(raw.umask, dtype=bool)[:, :90]
     vmask = np.asarray(raw.vmask, dtype=bool)[:, :90]
@@ -232,6 +246,8 @@ def validate(deck_root: Path, oracle_root: Path, plant: bool) -> dict[str, objec
         value, card.recipe.z_coord))(eta)
     live_arm = jax.jit(lambda value: _round21_live_divisor_primitives(
         value, card.recipe.z_coord))(eta)
+    orca_fold = jax.jit(lambda value: _orca_fold_primitives(
+        value, card.recipe.z_coord, card.recipe.grid))(eta)
     raw = card.recipe.z_coord.nemo_een_barotropic
     u_source, v_source = _source_masks(raw)
     full = np.ones_like(u_source, dtype=bool)
@@ -250,6 +266,7 @@ def validate(deck_root: Path, oracle_root: Path, plant: bool) -> dict[str, objec
             "operand": name,
             "production": score(production[index], expected, masks[index], wet[index]),
             "round21_live_divisor": score(live_arm[index], expected, masks[index], wet[index]),
+            "orca_fold_fixed": score(orca_fold[index], expected, masks[index], wet[index]),
         })
     if plant:
         # An oracle/oracle arm proves the scorer rejects one changed bit.
@@ -269,6 +286,7 @@ def validate(deck_root: Path, oracle_root: Path, plant: bool) -> dict[str, objec
         "boundary": "O4-EXT-A/EEN-primitive-first-divergence",
         "production_first": first("production"),
         "round21_live_divisor_first": first("round21_live_divisor"),
+        "orca_fold_fixed_first": first("orca_fold_fixed"),
         "rows": rows,
         "records": {name: {"path": str(path), "sha256": sha256(path)}
                     for name, path in paths.items()},
