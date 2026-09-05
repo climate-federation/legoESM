@@ -11,6 +11,23 @@ entry stream is built and staged in two independent run directories.  No
 MPI/NEMO command was run in the sandbox, no shipped NEMO file was changed,
 and no artifact was deleted or pushed.
 
+### Phase-2q disposition of the ZDF acquisition prediction
+
+**CONFIRMED / REFUTED PREDICTION (2026-09-06):** both Phase-2p twins ran
+successfully and were 95/95 raw-identical, but
+`oracle_zdf_sh2_operands_kt00000001.bin` is not schema-valid.  Its header
+claims 9,358,640 binary64 payload values while exact EOF contains 9,267,648.
+The 90,992-value difference is exactly three full-versus-A2D 3-D allocations
+(`sh2`, `avt_k`, `en`) plus one full-versus-A2D 2-D allocation (`taum`):
+`3*(94*152-90*148)*31 + (94*152-90*148)`.  Thus the 99-record/schema-admission
+prediction in section 3 below is retracted in the validating tool, not merely
+in prose.  These two successful runs are preserved as
+`REJECTED_MALFORMED_ZDF_HEADER`, not pinned as a V2 extension.  A Phase-2q
+WRITE-only replacement derives the header from the same `SIZE(...)`
+expressions as the write list.  The four absent EEN streams were also an
+unintended build-series omission; their accepted pins remain the Phase-2m
+twin-A records.
+
 All numerical claims below are **CONFIRMED** by the committed production-JIT
 gate or retained build artifacts.  Source/ownership claims marked
 **CONFIRMED** have the named executed NEMO statement and discriminator.

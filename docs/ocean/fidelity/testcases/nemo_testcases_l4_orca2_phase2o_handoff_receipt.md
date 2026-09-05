@@ -226,6 +226,7 @@ No new instrument or run directory was built this phase, as preregistered.
 
 | action | classification | disposition |
 |---|---|---|
+| `bbl_diffusive_option=0` / `bbl_aht_m2_s=0.0` | ASKED | current default `0` / `0.0` -> proposed `0` / `0.0` (NEMO reference namelist `ln_trabbl=.false.`); per-card values ORCA2 `1` / `1000`, OVERFLOW `0` / `1000` (`nn_bbl_adv=2`), GYRE and LOCK `0` / `0`; decision pending with the user |
 | admit and pin BBL twins | ASKED | PASS; A pinned, B witness |
 | state raw inherited identity | ASKED | 97 / 97 observed and recorded |
 | implement selected diffusive BBL | ASKED, ORCA2 owner | one shared selectable implementation; exact |
@@ -237,6 +238,17 @@ No new instrument or run directory was built this phase, as preregistered.
 | build a speculative NEMO instrument | excluded by preregistration | exact future frames listed; none built |
 | sandbox MPI/NEMO | forbidden | none |
 | shipped edit, deletion, push | forbidden | none |
+
+### Explicit claim-disposition register (Phase-2q review repair)
+
+| receipt claim | label |
+|---|---|
+| BBL twin admission, hashes, 97/97 inherited identity, schema, and plants | **CONFIRMED** |
+| resolved ORCA2/GYRE/LOCK/OVERFLOW BBL selectors and source ordering | **CONFIRMED** |
+| diffusive coefficient and RHS scores, source-statement localization, and Rule-12 no-movement rows | **CONFIRMED** |
+| current card coverage/time-level rows and first unscored `zdf_sh2` boundary | **CONFIRMED** |
+| a future WRITE-only ZDF frame can discriminate SH2/TKE/EVD/IWM | **PLAUSIBLE** until admitted records exist |
+| SI3 merge will provide the certified operator | **PLAUSIBLE**; remains `UNMEASURED_PENDING_ICE_MERGE` |
 
 ## Stop receipt
 
