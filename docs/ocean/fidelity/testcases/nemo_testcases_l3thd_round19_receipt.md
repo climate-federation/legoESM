@@ -110,7 +110,19 @@ The explicit touched-source ratchet rerun ends: `7 passed in 0.89s`.
 
 The `where` stabilizers introduced by `a200b4bd4a6` are absent.  The live
 stage path again uses multiplication by the 3-D velocity masks, literal to
-`stprk3_stg.F90:367,375,382`.  No non-finite value was hidden.
+`stprk3_stg.F90:367,375,382`.  No non-finite value was hidden.  Round 20
+closed the missing producer history: integration commit `7d66b7f37e8`
+replaced the 2-D state face mask broadcast in `_replace_stage_mean` with the
+3-D live face mask from `compute_face_masks_3d`.  Before that commit the
+barotropic mean increment survived below a staircase face's seabed; the UP3
+stencil then read that invalid workspace (`dynadv_up3.F90:142-143,160,
+166-176`).  NEMO instead multiplies every level by `umask(ji,jj,jk)` at
+`stprk3_stg.F90:367,375,382,444`.  The retained before/after discriminator
+changes stage-1 dry-face nonzeros from `524` (maximum
+`0.02737944122559207 m s-1`) to `0`, while the wet maximum remains exactly
+`0.06219808806021984 m s-1`.  This is the producer correction that makes the
+merged OVERFLOW path finite; the reverted `where` change was only a
+consumer-side mask.
 
 ### LOCK and OVERFLOW
 
@@ -136,10 +148,17 @@ from the stale-base `9.76564494417978e-11` to
 `legacy_up3_transport_sign_selector` arm reproduces
 `9.76564400092389e-11`, establishing lane-1 commit `60d0c542065a` as the
 owner.  OVERFLOW no longer becomes non-finite.  Its first remaining split is
-the shared WS-RK3/UP3 stage-2 boundary.  The GYRE lane owns the unresolved
-stage clock: NEMO assigns `rDt=rn_Dt/3` at `stprk3_stg.F90:123-124` and passes
-that value into the WZV construction at `sshwzv.F90:334-335`; this lane does
-not change it.
+the shared WS-RK3/UP3 stage-2 boundary.  **RULE-11 RETRACTION:** no stage-clock
+owner is assigned.  GYRE Round 21 measured the tracer-consumed
+post-`tra_adv_trp` `ww` AT_BAR at all three stages; using the stage-local
+denominator alone was red because legoESM's production pair uses the full-step
+surface increment with the full `dt`, the same rate as NEMO's stage-local
+increment and `rDt` (`stprk3_stg.F90:123-124,177-178,221-222`;
+`sshwzv.F90:334-335`).  The `1.5711182355104825e-12` row is the exact
+historical GYRE stage-2 instantaneous-u row recorded before GYRE Round 20; it
+is not one of Round 22's seven trajectory rows.  No Round-23 receipt or
+artifact exists at fetched GYRE tip `b2702b318f7`, so no Round-23 ownership is
+cited here.  The boundary is **OVERFLOW_KT1_STAGE2_U, OWNER_UNASSIGNED**.
 
 ### GYRE production-JIT Rule 8/12
 
@@ -191,7 +210,7 @@ withdrawn or reassigned here.
 |---|---|---|---|
 | ZDF input ordering before stage-3 mean imposition | WS-RK3 PRE_ZDF | canonical integration retained; GYRE 50-row cellwise comparison has 0 moved rows versus c83 | GYRE owner-of-record |
 | QCO layer-thickness path | WS-RK3 tracer/momentum stage geometry | canonical integration retained; same 0-move comparison | GYRE owner-of-record |
-| quadratic drag association | barotropic drag / implicit ZDF | canonical integration retained; LOCK stage 2 moves into bar, OVERFLOW is finite | GYRE owner-of-record; later OVERFLOW stage-clock debt remains |
+| quadratic drag association | barotropic drag / implicit ZDF | canonical integration retained; LOCK stage 2 moves into bar, OVERFLOW is finite | GYRE owner-of-record; later OVERFLOW stage-2 boundary has OWNER_UNASSIGNED (Rule-11 retraction above) |
 | UP3 transport-sign selector | LOCK stage 2 | `9.765644944e-11` to `4.336808690e-19` | lane 1 commit `60d0c542065a`, CONFIRMED |
 | round-17 Kmm seed | coupled C1D kt2 PRE_SSM.u | prior AT_BAR claim withdrawn; without invalid seed first debt is `1.117286542e-7` | **SUPERSEDED**; prognostic `uu_b/vv_b` carry belongs to GYRE integration |
 

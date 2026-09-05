@@ -1,0 +1,26 @@
+{
+  "format": "nemo-testcase-l3thd-round20-manifest-v1",
+  "parent_git_sha": "e98d8e642effaf83ae46d69d630246ac6dcdcd4c",
+  "preregister_git_sha": "0ff0b95625688fa51ffe1ff37adc4ec9750ae5e4",
+  "orca2_admission_gate_git_sha": "9e4fe6f537f",
+  "environment": {
+    "backend": "cpu",
+    "precision": "binary64",
+    "python": "3.13.0"
+  },
+  "results": {
+    "overflow_producer": "7d66b7f37e8: 2-D stage face-mask broadcast replaced by live 3-D mask",
+    "stage_clock": "RULE_11_RETRACTED_OWNER_UNASSIGNED",
+    "combined_drag_kt5": "1 / 1 bit-identical",
+    "orca2_si3": "STOP_SELECTOR_GAP; 0 physics rows scored; no bit claim"
+  },
+  "runtime_artifacts": {
+    "/data/abyssal/dbalwada/nemo-testcases-l3/round20_overflow_bisect/pre_phantom/census.json": "60cca559066789da62c00e5378c229274c060f3ec063ddfd7cc19e277395e601",
+    "/data/abyssal/dbalwada/nemo-testcases-l3/round20_overflow_bisect/post_phantom/census.json": "d521cbfbacabf9a7ae3dae27c01eeb455dffbe63bd725b51eafca89f3459f4c6",
+    "/data/abyssal/dbalwada/nemo-testcases-l3/round20_overflow_bisect/drag_merged_kt5.json": "855652b31f5db0e123a2a50b7e11b95877f3eb13376cfc00d5eb39fc93c3f26c",
+    "/data/abyssal/dbalwada/nemo-testcases-l3/round20_orca2_si3/si3_stream_headers.json": "741bb4b0f7bf41ead4875726c1c01ae35689bb4c95897b2960213b8576b5494d",
+    "/data/abyssal/dbalwada/nemo-testcases-l3/round20_orca2_si3/orca2_si3_admission.json": "c4bdf3141b35b565fb1b6ea2d9031158a5caa50674b8651445a23c9f906e3833",
+    "/data/abyssal/dbalwada/nemo-testcases-l3/round20_orca2_si3/focused_fast_tests.log": "a5c963535256bea8ba91436bb3ce962ef376784a8f459b9ebe3e0d2e3a5446be",
+    "/data/abyssal/dbalwada/nemo-testcases-l3/round20_orca2_si3/constants_ratchet_touched.log": "e2cbfbaefa1437545a96825a80edee2130068ab59965b242f23352cf5ed008b1"
+  }
+}
