@@ -1,8 +1,8 @@
 """Precision-policy transcendental functions.
 
 ``native`` delegates to JAX/XLA.  ``libm`` calls the scalar ``exp`` and
-``tanh``, ``sin``, ``cos``, ``log``, ``log10``, and ``pow`` entry points from ``libm.so.6`` through
-:func:`jax.pure_callback`.
+``tanh``, ``sin``, ``cos``, ``log``, ``log10``, and ``pow`` entry points from
+``libm.so.6`` through :func:`jax.pure_callback`.
 That is the soname linked by the NEMO certification executables on the
 campaign host (glibc 2.34).  The callback deliberately invokes the scalar C
 function once per element: NumPy ufuncs may dispatch their own vector math
