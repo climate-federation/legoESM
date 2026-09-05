@@ -358,15 +358,25 @@ def validate_records(root: Path, record_manifest: Path | None = None) -> dict:
             "append_streams": append}
 
 
-GENERATED_EXACT = (
-    [f"ORCA2_00000010_restart_{rank:04d}.nc" for rank in (0,1)]
-    + [f"ORCA2_00000010_restart_icb_{rank:04d}.nc" for rank in (0,1)]
-    + [f"ORCA2_00000010_restart_ice_{rank:04d}.nc" for rank in (0,1)]
-    + ["layout.dat", "layout.nc", "mesh_mask_0000.nc", "mesh_mask_0001.nc",
-       "output.init_0000.nc", "output.init_0001.nc", "output.init_ice_0000.nc",
-       "output.init_ice_0001.nc", "output.namelist.dyn", "output.namelist.ice",
-       "time.step", "trajectory_icebergs_00010101-00010102_0000.nc",
-       "trajectory_icebergs_00010101-00010102_0001.nc"])
+GENERATED_ALWAYS = [
+    "layout.dat", "layout.nc", "mesh_mask_0000.nc", "mesh_mask_0001.nc",
+    "output.init_0000.nc", "output.init_0001.nc", "output.init_ice_0000.nc",
+    "output.init_ice_0001.nc", "output.namelist.dyn", "output.namelist.ice",
+    "time.step",
+]
+OCEAN_RESTARTS = [
+    f"ORCA2_00000010_restart_{rank:04d}.nc" for rank in (0, 1)
+]
+ICE_RESTARTS = [
+    f"ORCA2_00000010_restart_ice_{rank:04d}.nc" for rank in (0, 1)
+]
+ICEBERG_RESTARTS = [
+    f"ORCA2_00000010_restart_icb_{rank:04d}.nc" for rank in (0, 1)
+]
+ICEBERG_TRAJECTORIES = [
+    f"trajectory_icebergs_00010101-00010102_{rank:04d}.nc"
+    for rank in (0, 1)
+]
 HISTORY = [f"ORCA2_30h_00010101_00010102_grid_{grid}_{rank:04d}.nc"
            for grid in "TUVW" for rank in (0,1)]
 TIMING_EXCLUDED = ["communication_report.txt", "timing.output", "timing_gnuplot.sh",
@@ -423,7 +433,51 @@ RESTART_VARIABLES = {
 }
 
 
-def _restart_inventory(root: Path) -> dict:
+def _resolved_icebergs(root: Path) -> bool:
+    values = []
+    for line in (root / "namelist_cfg").read_text().splitlines():
+        code = line.split("!", 1)[0]
+        match = re.match(
+            r"\s*ln_icebergs\s*=\s*(\.true\.|\.false\.)",
+            code,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            values.append(match.group(1).lower() == ".true.")
+    require(len(values) == 1, f"{root}: resolved ln_icebergs values {values}")
+    return values[0]
+
+
+def _identity_exact_files(control: Path, instrumented: Path) -> tuple[list[str], bool]:
+    control_icebergs = _resolved_icebergs(control)
+    instrumented_icebergs = _resolved_icebergs(instrumented)
+    require(
+        control_icebergs == instrumented_icebergs,
+        "identity pair resolves different ln_icebergs values",
+    )
+
+    def optional(root: Path) -> set[str]:
+        restarts = {p.name for p in root.glob("ORCA2_00000010_restart*.nc")}
+        trajectories = {p.name for p in root.glob("trajectory_icebergs_*.nc")}
+        return restarts | trajectories
+
+    expected = set(OCEAN_RESTARTS + ICE_RESTARTS)
+    if control_icebergs:
+        expected |= set(ICEBERG_RESTARTS + ICEBERG_TRAJECTORIES)
+    control_optional = optional(control)
+    instrumented_optional = optional(instrumented)
+    require(
+        control_optional == instrumented_optional,
+        "identity pair restart/trajectory inventories differ",
+    )
+    require(
+        control_optional == expected,
+        "restart/trajectory inventory differs from resolved ln_icebergs",
+    )
+    return GENERATED_ALWAYS + sorted(expected), control_icebergs
+
+
+def _restart_inventory(root: Path, icebergs_enabled: bool) -> dict:
     from netCDF4 import Dataset
     patterns = {
         "ocean": "ORCA2_00000010_restart_{rank:04d}.nc",
@@ -431,7 +485,11 @@ def _restart_inventory(root: Path) -> dict:
         "iceberg": "ORCA2_00000010_restart_icb_{rank:04d}.nc",
     }
     result = {}
-    for family, pattern in patterns.items():
+    active_families = ("ocean", "ice", "iceberg") if icebergs_enabled else (
+        "ocean", "ice"
+    )
+    for family in active_families:
+        pattern = patterns[family]
         wanted = RESTART_VARIABLES[family]
         shards = []
         for rank in (0, 1):
@@ -447,6 +505,13 @@ def _restart_inventory(root: Path) -> dict:
                     f"extra={sorted(set(found)-set(rank_wanted))}")
             shards.append({"file": path.name, "variables": len(found)})
         result[family] = {"count": len(wanted), "names": wanted, "shards": shards}
+    if not icebergs_enabled:
+        result["iceberg"] = {
+            "count": 0,
+            "names": [],
+            "shards": [],
+            "status": "INACTIVE_BY_RESOLVED_NAMELIST",
+        }
     return result
 
 
@@ -489,7 +554,8 @@ def validate_identity(control: Path, instrumented: Path) -> dict:
     rows = []
     restart_shards_exact = 0
     history_payloads_exact = 0
-    for name in GENERATED_EXACT:
+    exact_files, icebergs_enabled = _identity_exact_files(control, instrumented)
+    for name in exact_files:
         require((control/name).read_bytes() == (instrumented/name).read_bytes(),
                 f"identity mismatch: {name}")
         rows.append({"file": name, "status": "EXACT_BYTES", "sha256": sha256(control/name)})
@@ -511,7 +577,10 @@ def validate_identity(control: Path, instrumented: Path) -> dict:
     return {"status": "PASS", "rows": rows,
             "restart_shards_exact": restart_shards_exact,
             "history_payloads_exact": history_payloads_exact,
-            "restart_variable_inventory": _restart_inventory(instrumented)}
+            "icebergs_enabled": icebergs_enabled,
+            "restart_variable_inventory": _restart_inventory(
+                instrumented, icebergs_enabled
+            )}
 
 
 def planted_controls(root: Path, manifest: Path, control: Path, instrumented: Path) -> dict:
@@ -554,7 +623,8 @@ def planted_controls(root: Path, manifest: Path, control: Path, instrumented: Pa
 
     with tempfile.TemporaryDirectory(prefix="orca2-l4-identity-") as td:
         altered_root = Path(td)
-        for name in GENERATED_EXACT + HISTORY + ["ocean.output"]:
+        exact_files, _ = _identity_exact_files(control, instrumented)
+        for name in exact_files + HISTORY + ["ocean.output", "namelist_cfg"]:
             os.symlink(instrumented/name, altered_root/name)
         target = "ORCA2_00000010_restart_0000.nc"
         (altered_root/target).unlink()
@@ -566,6 +636,21 @@ def planted_controls(root: Path, manifest: Path, control: Path, instrumented: Pa
             results["restart_identity_byte"] = "PASS_NONZERO"
         else:
             raise GateError("validate_identity accepted planted restart byte")
+
+    with tempfile.TemporaryDirectory(prefix="orca2-l4-identity-inventory-") as td:
+        altered_root = Path(td)
+        for name in exact_files + HISTORY + ["ocean.output", "namelist_cfg"]:
+            os.symlink(instrumented/name, altered_root/name)
+        planted_extra = altered_root / ICEBERG_RESTARTS[0]
+        if planted_extra.is_symlink():
+            planted_extra.unlink()
+        planted_extra.write_bytes(b"planted")
+        try:
+            validate_identity(control, altered_root)
+        except GateError:
+            results["restart_inventory_asymmetry"] = "PASS_NONZERO"
+        else:
+            raise GateError("validate_identity accepted asymmetric restart inventory")
     return results
 
 

@@ -55,8 +55,6 @@ INACTIVE_ICEBERG_FIELDS = {
     "utau_icb", "vtau_icb", "icb_calving", "icb_calving_hflx",
     "icb_floating_melt", "icb_stored_heat",
 }
-
-
 class GateError(RuntimeError):
     pass
 
@@ -143,13 +141,15 @@ def validate_surface(
             "bytes": expected_bytes, "sha256": digest, "fields": fields}
 
 
-def validate_legacy_records(run_dir: Path) -> dict:
+def validate_legacy_records(
+    run_dir: Path, record_manifest: Path | None = None
+) -> dict:
     """Run the frozen 90-stream Phase-1 parser despite this run's one extra file."""
     with tempfile.TemporaryDirectory(prefix="orca2-l4-phase2b-legacy-") as td:
         view = Path(td)
         for name in phase1.expected_inventory():
             os.symlink(run_dir / name, view / name)
-        return phase1.validate_records(view)
+        return phase1.validate_records(view, record_manifest)
 
 
 def planted_controls(path: Path, *, icebergs_off: bool = False) -> dict[str, str]:
@@ -231,11 +231,205 @@ def validate_variant_namelist(path: Path) -> None:
     require(values == [".false."], f"variant ln_icebergs values {values}")
 
 
+def _kt1_prefix(path: Path, family: str) -> tuple[bytes, int]:
+    schemas = {
+        "bulk": ("NEMO_L3BULK_001", "=5i"),
+        "exchange": ("NEMO_L3XCHG_001", "=6i"),
+        "thermodynamics": ("NEMO_L3THD_001", "=11i"),
+        "zdf_inputs": ("NEMO_L3ZIN_002", "=6i"),
+    }
+    magic, fmt = schemas[family]
+    last = 0
+    frames = 0
+    with path.open("rb", buffering=0) as handle:
+        while True:
+            raw_magic = handle.read(16)
+            if not raw_magic:
+                break
+            require(len(raw_magic) == 16, f"{path.name}: truncated magic")
+            require(
+                raw_magic.decode("ascii").rstrip() == magic,
+                f"{path.name}: bad magic",
+            )
+            raw_header = handle.read(struct.calcsize(fmt))
+            require(
+                len(raw_header) == struct.calcsize(fmt),
+                f"{path.name}: truncated header",
+            )
+            header = struct.unpack(fmt, raw_header)
+            kt = header[1]
+            if family == "bulk":
+                count = header[3]
+            elif family == "exchange":
+                _, _, nx, ny, _, _ = header
+                interior = (nx - 4) * (ny - 4)
+                count = 78 * interior + 9 * nx * ny + (nx - 2) * (ny - 2)
+            elif family == "thermodynamics":
+                _, _, _, kind, nx, ny, jpl, nli, nls, npti, _ = header
+                count = (
+                    (4 + 2 * nli + nls) * npti
+                    if kind else (9 + 2 * nli + nls) * jpl * nx * ny
+                )
+            else:
+                count = header[5]
+            require(count >= 0, f"{path.name}: negative payload count")
+            payload = handle.read(count * 8)
+            require(len(payload) == count * 8, f"{path.name}: truncated payload")
+            if kt == 1:
+                last = handle.tell()
+                frames += 1
+            else:
+                break
+    require(frames > 0, f"{path.name}: no kt=1 frames")
+    return path.read_bytes()[:last], frames
+
+
+def _characterize_stage1_tracer(variant: Path, shipped: Path) -> dict[str, object]:
+    def payload(path: Path) -> np.ndarray:
+        with path.open("rb") as handle:
+            require(
+                handle.read(16).decode("ascii").rstrip() == "NEMO_L2_RKTRA_1",
+                f"{path.name}: bad magic",
+            )
+            header = struct.unpack("=11i", handle.read(44))
+            require(
+                header == (1, 1, 1, 1, 1, 3, 3, NX, NY, 31, 64),
+                f"{path.name}: bad header {header}",
+            )
+            values = np.fromfile(handle, dtype=np.float64)
+        require(
+            values.size == 15 * phase1.N3 + 3 * phase1.N2,
+            f"{path.name}: bad payload size",
+        )
+        return values
+
+    variant_values = payload(
+        variant / "oracle_rktracer_operands_kt00000001_s1.bin"
+    )
+    shipped_values = payload(
+        shipped / "oracle_rktracer_operands_kt00000001_s1.bin"
+    )
+    n3 = phase1.N3
+    n2 = phase1.N2
+    blocks = (
+        ("Krhs_entry_T", n3), ("Krhs_entry_S", n3),
+        ("zFu", n3), ("zFv", n3), ("zFw", n3),
+        ("Krhs_after_tra_adv_T", n3), ("Krhs_after_tra_adv_S", n3),
+        ("Krhs_after_tra_sbc_T", n3), ("Krhs_after_tra_sbc_S", n3),
+        ("Kbb_T", n3), ("Kbb_S", n3),
+        ("Kmm_T", n3), ("Kmm_S", n3),
+        ("Kaa_T", n3), ("Kaa_S", n3),
+        ("r3t_Kbb", n2), ("r3t_Kmm", n2), ("r3t_Kaa", n2),
+    )
+    rows = {}
+    cursor = 0
+    for name, count in blocks:
+        candidate = variant_values[cursor:cursor + count]
+        reference = shipped_values[cursor:cursor + count]
+        different = int(np.count_nonzero(candidate != reference))
+        delta = candidate - reference
+        rows[name] = {
+            "different": different,
+            "count": int(count),
+            "absolute_max": float(np.max(np.abs(delta), initial=0.0)),
+        }
+        cursor += count
+    require(cursor == variant_values.size, "stage-1 tracer block walk incomplete")
+    return {
+        "rows": rows,
+        "disposition": "POST_ICB_EFFECT_DIAGNOSTIC_NOT_AN_IDENTITY_GATE",
+        "source": "stprk3_stg.F90:669-679",
+    }
+
+
+def validate_variant_vs_shipped(variant: Path, shipped: Path) -> dict[str, object]:
+    exact_files = (
+        "oracle_step_entry_kt00000001.bin",
+        "oracle_si3_prather_kt00000001_s0.bin",
+        "oracle_si3_prather_kt00000001_s1.bin",
+    )
+    rows = {}
+    for name in exact_files:
+        variant_bytes = (variant / name).read_bytes()
+        shipped_bytes = (shipped / name).read_bytes()
+        require(variant_bytes == shipped_bytes, f"pre-icb record differs: {name}")
+        rows[name] = {
+            "status": "EXACT_BYTES",
+            "bytes": len(variant_bytes),
+            "sha256": sha256(variant / name),
+        }
+    for family, name in (
+        ("bulk", "oracle_si3_bulk_operands.bin"),
+        ("exchange", "oracle_si3_exchange_frames.bin"),
+        ("thermodynamics", "oracle_si3_thd_frames.bin"),
+        ("zdf_inputs", "oracle_si3_zdf_inputs.bin"),
+    ):
+        variant_prefix, variant_frames = _kt1_prefix(variant / name, family)
+        shipped_prefix, shipped_frames = _kt1_prefix(shipped / name, family)
+        require(variant_frames == shipped_frames, f"{name}: kt=1 frame count differs")
+        require(variant_prefix == shipped_prefix, f"pre-icb prefix differs: {name}")
+        rows[name] = {
+            "status": "KT1_PREFIX_EXACT_BYTES",
+            "frames": variant_frames,
+            "bytes": len(variant_prefix),
+            "sha256": hashlib.sha256(variant_prefix).hexdigest(),
+        }
+    common = sorted(
+        path.name for path in variant.glob("oracle_*.bin")
+        if (shipped / path.name).is_file()
+    )
+    post_effect = {
+        name: {
+            "status": (
+                "EXACT_BYTES"
+                if sha256(variant / name) == sha256(shipped / name)
+                else "DIFFERS_AFTER_ICB_BOUNDARY"
+            ),
+            "variant_sha256": sha256(variant / name),
+            "shipped_sha256": sha256(shipped / name),
+        }
+        for name in common
+    }
+    return {
+        "pre_icb": rows,
+        "post_effect_common_record_inventory": post_effect,
+        "stage1_tracer_diagnostic": _characterize_stage1_tracer(variant, shipped),
+        "shipped_surface_record": "ABSENT_NOT_IN_PHASE1_INVENTORY",
+        "interpretation": (
+            "Only records written before sbcmod's first possible icb_stp call are "
+            "identity-gated. Later records are diagnostics because the permitted "
+            "emp/qns perturbation propagates through the ocean step."
+        ),
+    }
+
+
+def variant_shipped_plant(variant: Path, shipped: Path) -> str:
+    with tempfile.TemporaryDirectory(prefix="orca2-l4-variant-plant-") as td:
+        view = Path(td)
+        for source in variant.glob("oracle_*.bin"):
+            os.symlink(source, view / source.name)
+        target = view / "oracle_step_entry_kt00000001.bin"
+        target.unlink()
+        shutil.copyfile(variant / target.name, target)
+        with target.open("r+b") as handle:
+            handle.seek(64)
+            value = struct.unpack("=d", handle.read(8))[0]
+            handle.seek(64)
+            handle.write(struct.pack("=d", np.nextafter(value, np.inf)))
+        try:
+            validate_variant_vs_shipped(view, shipped)
+        except (GateError, OSError, UnicodeError, struct.error, ValueError):
+            return "PASS_NONZERO"
+    raise GateError("variant-vs-shipped plant did not fail")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--control", type=Path)
     parser.add_argument("--expected-record-sha256")
+    parser.add_argument("--legacy-record-manifest", type=Path)
+    parser.add_argument("--shipped-record-root", type=Path)
     parser.add_argument("--plant-controls", action="store_true")
     parser.add_argument("--variant-icebergs-off", action="store_true")
     parser.add_argument("--output", type=Path)
@@ -253,14 +447,34 @@ def main() -> int:
                 args.expected_record_sha256,
                 icebergs_off=args.variant_icebergs_off,
             ),
-            "legacy_records": validate_legacy_records(args.run_dir),
+            "legacy_records": validate_legacy_records(
+                args.run_dir, args.legacy_record_manifest
+            ),
         }
         if args.control is not None:
             result["identity"] = phase1.validate_identity(args.control, args.run_dir)
+        if args.shipped_record_root is not None:
+            result["variant_vs_shipped"] = validate_variant_vs_shipped(
+                args.run_dir, args.shipped_record_root
+            )
         if args.plant_controls:
-            result["planted_controls"] = planted_controls(
+            phase1.require(
+                args.control is not None and args.legacy_record_manifest is not None,
+                "plants require --control and --legacy-record-manifest",
+            )
+            result["legacy_planted_controls"] = phase1.planted_controls(
+                args.run_dir,
+                args.legacy_record_manifest,
+                args.control,
+                args.run_dir,
+            )
+            result["surface_planted_controls"] = planted_controls(
                 record, icebergs_off=args.variant_icebergs_off
             )
+            if args.shipped_record_root is not None:
+                result["variant_shipped_planted_control"] = (
+                    variant_shipped_plant(args.run_dir, args.shipped_record_root)
+                )
         result["status"] = "PASS"
     except (GateError, phase1.GateError, OSError, UnicodeError, struct.error, ValueError) as exc:
         result = {"status": "FAIL", "error": str(exc)}
