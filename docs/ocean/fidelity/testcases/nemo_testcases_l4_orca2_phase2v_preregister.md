@@ -79,4 +79,3 @@ admissible from the rejected Phase-2u target.
 | change shared TKE arithmetic | Lane-4-forbidden | register and hand to GYRE after valid acquisition |
 | enter EVD/IWM or SI3 | downstream/unasked | not entered before TKE closes |
 | delete, edit shipped NEMO, add multi-MB git data, or push | forbidden | none planned |
-

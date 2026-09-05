@@ -3,7 +3,7 @@
 @@ -96,6 +96,17 @@
     REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:)   ::   htau    ! depth of tke penetration (nn_htau)
     REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   dissl   ! now mixing lenght of dissipation
- 
+
 +   ! Lane-4 WRITE-only TKE walk storage.  It exists only for the armed kt=2
 +   ! rank-zero acquisition and is never read by model arithmetic.
 +   LOGICAL, SAVE :: l4_tke_dump = .FALSE.
@@ -101,7 +101,7 @@
           !                     !<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
           !                     !  Now Turbulent kinetic energy (output in en)
 @@ -447,11 +501,41 @@
- 
+
              END SELECT
           ENDIF
 +         IF( l4_tke_dump ) THEN
@@ -212,8 +212,8 @@
        !                                               ! ================= !
 @@ -735,6 +859,96 @@
     END SUBROUTINE tke_avn
- 
- 
+
+
 +   SUBROUTINE l4_tke_begin( kt )
 +      INTEGER, INTENT(in) :: kt
 +      INTEGER :: l4_tke_ios

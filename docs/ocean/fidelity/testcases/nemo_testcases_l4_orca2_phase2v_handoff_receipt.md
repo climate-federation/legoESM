@@ -143,4 +143,3 @@ deleted; small cited JSON summaries remain in git.
 | edit shipped NEMO, delete artifacts, commit multi-MB data, push | forbidden | not done |
 
 Session: `01a06d99-f562-7b11-bc63-e9b112877f54`.
-
