@@ -1,5 +1,5 @@
---- a/src/ICE/icedyn_adv_pra.F90
-+++ b/MY_SRC/icedyn_adv_pra.F90
+--- shipped/src/ICE/icedyn_adv_pra.F90
++++ ORCA2_ORCA1ICE_OMIP_L4/MY_SRC/icedyn_adv_pra.F90
 @@ -16,6 +16,7 @@
     !!   adv_pra_rst     : read/write Prather field in ice restart file, or initialized to zero
     !!----------------------------------------------------------------------

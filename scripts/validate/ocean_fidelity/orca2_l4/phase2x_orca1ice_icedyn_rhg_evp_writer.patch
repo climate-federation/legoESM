@@ -1,5 +1,5 @@
---- a/src/ICE/icedyn_rhg_evp.F90
-+++ b/MY_SRC/icedyn_rhg_evp.F90
+--- shipped/src/ICE/icedyn_rhg_evp.F90
++++ ORCA2_ORCA1ICE_OMIP_L4/MY_SRC/icedyn_rhg_evp.F90
 @@ -373,6 +373,11 @@
           END_2D
        ENDIF
@@ -12,7 +12,7 @@
        !------------------------------------------------------------------------------!
        ! 3) Solution of the momentum equation, iterative procedure
        !------------------------------------------------------------------------------!
-@@ -1188,6 +1193,84 @@
+@@ -1188,6 +1193,93 @@
        !
     END SUBROUTINE rhg_upstream
  
@@ -27,7 +27,7 @@
 +      REAL(wp), DIMENSION(:,:), INTENT(in) :: ptaux_ai, ptauy_ai, pdragx, pdragy
 +      REAL(wp), DIMENSION(:,:), INTENT(in) :: ptaux_base, ptauy_base, pmU, pmV
 +      INTEGER :: l4_unit, l4_ios, l4_payload, jf
-+      INTEGER, PARAMETER :: l4_nf = 28, l4_ns = 5
++      INTEGER, PARAMETER :: l4_nf = 34, l4_ns = 5
 +      INTEGER, DIMENSION(3,l4_nf) :: l4_ext
 +      CHARACTER(LEN=16), PARAMETER :: l4_magic = 'NEMO_L4_O1IDYN1'
 +      CHARACTER(LEN=96) :: l4_name
@@ -61,6 +61,12 @@
 +      l4_ext(:,26) = (/ SHAPE(ps2), 1 /)
 +      l4_ext(:,27) = (/ SHAPE(ps12), 1 /)
 +      l4_ext(:,28) = SHAPE(a_i)
++      l4_ext(:,29) = (/ SHAPE(icb_umask), 1 /)
++      l4_ext(:,30) = (/ SHAPE(icb_vmask), 1 /)
++      l4_ext(:,31) = (/ SHAPE(fast_umask), 1 /)
++      l4_ext(:,32) = (/ SHAPE(fast_vmask), 1 /)
++      l4_ext(:,33) = SHAPE(v_i)
++      l4_ext(:,34) = SHAPE(v_s)
 +      l4_payload = l4_ns
 +      DO jf = 1, l4_nf
 +         l4_payload = l4_payload + PRODUCT(l4_ext(:,jf))
@@ -88,7 +94,10 @@
 +         & l4_canon_2d(pmV,'V'), l4_canon_2d(ht(:,:,Kmm),'T'), &
 +         & l4_canon_2d(hu(:,:,Kmm),'U'), l4_canon_2d(hv(:,:,Kmm),'V'), &
 +         & l4_canon_2d(ps1,'T'), l4_canon_2d(ps2,'T'), &
-+         & l4_canon_2d(ps12,'F'), l4_canon_3d(a_i,'T')
++         & l4_canon_2d(ps12,'F'), l4_canon_3d(a_i,'T'), &
++         & l4_canon_2d(icb_umask,'U'), l4_canon_2d(icb_vmask,'V'), &
++         & l4_canon_2d(fast_umask,'U'), l4_canon_2d(fast_vmask,'V'), &
++         & l4_canon_3d(v_i,'T'), l4_canon_3d(v_s,'T')
 +      CLOSE(l4_unit)
 +   END SUBROUTINE l4_orca1ice_dyn_dump
 +
