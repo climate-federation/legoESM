@@ -3,14 +3,18 @@
 **Verdict: HOLD.**  Round 20 made GYRE's kt1 stage-transport composition
 bit-exact, but the required cross-card trajectories proved that legoESM does
 not carry NEMO's prognostic `uu_b/vv_b(Kbb)` across steps.  Adding that state is
-an open user decision and is not undertaken in Round 21.  Independently, the
+an open user decision and is not undertaken in Rounds 21–22.  Independently, the
 stage-2 Kaa boundary remains DEBT at `2.1986806906376666e-15` U and
 `2.2380914396075147e-15` V.  Round 21 closes the previously unscored stage
 `ww` boundary AT-BAR at all three stages and refutes the proposed stage-clock
 change.  The next EEN coefficient arm confirms the live vorticity thickness
 divisor as a contributor but not the complete owner; its first primitive
-operand remains unmeasured.  No downstream result inherits a claim across
-these open boundaries.
+operand remains unmeasured.  Round 22 makes ORCA2's supplied-input CEN2
+precursor and `zFu/zFv` stage transports bit-exact, but exposes seven
+cellwise Rule-12 debts in the OVERFLOW trajectory (maximum `17.25` row-scale
+ulp).  The source-literal fixes stay; those downstream rows and the existing
+GYRE boundaries remain the HOLD register.  No downstream result inherits a
+claim across these open boundaries.
 
 Updated: 2026-09-05
 
@@ -2750,4 +2754,210 @@ earlier boundaries clear.
 | EEN primitive acquisition | ORCA2 lane in progress | not duplicated |
 | shipped NEMO edit, NEMO run, card fork, push, merge | forbidden | none |
 
-Round-22 measurements remain Codex-internal until independent review.
+### 22.3 CEN2 precursor result — confirmed shared owner
+
+The source-first prediction is **CONFIRMED**.  The fresh ORCA2 probe uses the
+committed phase-2l gate at `ce0f353e25a2`, with NEMO's recorded transports,
+tracer state, masks and metrics held fixed.  All figures below are
+production-JIT, CPU, binary64, scalar-libm:
+
+| one-variable boundary | T unequal / wet | S unequal / wet | T / S maximum absolute residual |
+|---|---:|---:|---:|
+| handoff baseline | `180882 / 228641` | `190802 / 228641` | `9.952637130238029e-21` / `1.4558378780933287e-20` |
+| source association and per-statement rounding only | `80034 / 228641` | `81277 / 228641` | `6.776263578034403e-21` / `6.776263578034403e-21` |
+| live `e3t(Kmm)` construction only | `176929 / 228641` | `187752 / 228641` | `9.952637130238029e-21` / `1.4558378780933287e-20` |
+| complete literal CEN2 statement | **`0 / 228641`** | **`0 / 228641`** | **`0` / `0`** |
+
+This is one shared operator identity, not a card arm: both individually
+required source operands were ablated separately, and neither alone closed
+the record.  The landed statement follows `traadv_cen.F90:137-149,191-216`
+and the live T-cell thickness follows `domain.F90:158`,
+`domqco.F90:159-161`, and `domzgr_substitute.h90:45-51,126`.  The code is
+`vertical.py:43-82` plus
+`ocean_model_latlon_cgrid.py:1328-1375`; the RK3 dispatch evidence remains
+`traadv.F90:280-283,355-365`.  The one-cell scored-T plant exits 1.  The
+baseline, final, and plant transcripts hash `3ea7c6d2...`, `7e1f1768...`, and
+`a3cbfa30...`, respectively.  Classification:
+**CONFIRMED_COMPLETE_OWNER_GIVEN_NEMO_TRANSPORTS**.
+
+The ORCA2 reviewer localization is handed back to that lane rather than
+duplicating its owned gate: approximately 79% mismatch at every level,
+`6778 / 8613` bottom partial cells versus `174104 / 220028` non-bottom cells,
+and the largest row fractions at interior `j=38..49`.  Those fifteen lines
+belong in the ORCA2 phase-2l tracer gate/receipt on its next owner round.
+
+The first cross-card run after this change is clean: LOCK stage `PASS 0 ulp`
+(`9` rows), LOCK trajectory `PASS 0 ulp` (`50` rows, first-over-bar kt3 T/u),
+OVERFLOW stage `PASS 0 ulp` (`9` rows), and OVERFLOW trajectory `PASS 0 ulp`
+(`50` rows, first-over-bar kt2 T/u).  Their comparison artifacts are
+`c540a87f...`, `0966173e...`, `3225a716...`, and `cc119217...`.
+
+Rule 8 still requires disclosure of the GYRE trajectory's last-bit movement.
+The following are every changed scored maximum from the Round-20 production
+sweep to the post-CEN2 sweep; all unlisted rows have identical maxima, every
+listed row remains DEBT, and first-over-bar remains kt2 T/S/u/v:
+
+| row | before | after |
+|---|---:|---:|
+| kt5 u | `0.020734034877191249` | `0.020734034877191242` |
+| kt5 ssh | `6.7010559036960113e-05` | `6.7010559036954909e-05` |
+| kt6 u | `0.031134675691760226` | `0.031134675691760198` |
+| kt6 ssh | `0.00016312992706670428` | `0.00016312992706689415` |
+| kt7 u | `0.040041661575749288` | `0.040041661575749413` |
+| kt7 v | `0.066316704630831336` | `0.066316704630831114` |
+| kt7 ssh | `0.00020875693525087570` | `0.00020875693525002396` |
+| kt8 u | `0.047180723759832878` | `0.047180723759818792` |
+| kt8 v | `0.024527890741688735` | `0.024527890741687930` |
+| kt8 ssh | `0.00025106275789497663` | `0.00025106275789159391` |
+| kt9 S | `0.0054193833238400657` | `0.0054193833238329603` |
+| kt9 u | `0.052561503561392935` | `0.052561503561377627` |
+| kt9 v | `0.014532741725458046` | `0.014532741725461922` |
+| kt9 ssh | `0.00021202403721123301` | `0.00021202403721025419` |
+| kt10 T | `0.13238632692936037` | `0.13238632692936392` |
+| kt10 S | `0.0057034654585876865` | `0.0057034654585805811` |
+| kt10 u | `0.056250884173481036` | `0.056250884173407428` |
+| kt10 v | `0.011171896160492037` | `0.011171896160381577` |
+| kt10 ssh | `0.00021254041670566888` | `0.00021254041676015568` |
+
+### 22.4 stage-transport source result — confirmed shared owner
+
+The second ordered boundary is also **CONFIRMED**, specifically for the U/V
+stage transports.  NEMO constructs stored QCO inverse depths at
+`domqco.F90:175-181,219-222`, then evaluates
+`zub=un_adv*r1_hu(Kmm)-uu_b` and
+`zFu=(e2u*e3u)*(uu+zub*umask)` (V analogously) at
+`stprk3_stg.F90:257-278`.  Reconstructing those statements directly with
+NumPy and the dumped operands matches the oracle transport record bit for
+bit; the alternative right-associated product differs in `78865` U and
+`79690` V cells.
+
+| one-variable boundary | zFu unequal / wet (max, ulp) | zFv unequal / wet (max, ulp) |
+|---|---:|---:|
+| post-CEN2 baseline | `102431 / 228641` (`4.656612873077393e-10`, 4) | `108307 / 228641` (`9.313225746154785e-10`, 4) |
+| corrected-velocity/source association only | `85175 / 228641` (4 ulp) | `93486 / 228641` (5 ulp) |
+| carry NEMO's stored QCO reciprocal | `14 / 228641` (`3.637978807091713e-12`, 1) | **`0 / 228641`** (`0`, 0) |
+| reciprocal plus source-rounded live-face recurrence | **`0 / 228641`** (`0`, 0) | **`0 / 228641`** (`0`, 0) |
+
+The source-rounded recurrence alone leaves the baseline transport rows
+unchanged; it is the final one-variable discriminator after the reciprocal
+handoff, closing the remaining fourteen U cells.  The implementation is
+shared in `vertical.py:185-238,482-552` and
+`ocean_model_latlon_cgrid.py:1273-1325,1390-1440`; S-21 in the branch
+isomorphism map records the one owner and its NEMO references.  The exact
+probe transcript hashes `7e2bf16f...`; its built-in vector/C2 selector plant
+is rejected.  Classification:
+**CONFIRMED_COMPLETE_OWNER_GIVEN_NEMO_STAGE_STATE**.
+
+This does not close W.  The independently scored stage-W row remains DEBT at
+`189969 / 228641`, maximum `3.48342299558331e-20`; it is retained as
+`UNASSIGNED_PRODUCTION_WZV_DEBT`, not attributed to the now-exact U/V source.
+
+The GYRE production-JIT sweep after this landing hashes `c5b231fb...`.
+At kt1 it remains exactly `0 / 18000` T/S and `0 / 17400`, `0 / 17100`,
+`0 / 600` for the three at-rest UNINFORMATIVE u/v/ssh rows.  At kt2 its
+scored maxima are unchanged (`3.1956659540810506e-11` T,
+`8.171241461241152e-13` S, `9.484089954776408e-7` u,
+`8.987992592542841e-7` v, `4.336808689942018e-19` ssh); only T's unequal
+count moves `12015 -> 12016`.  First-over-bar remains kt2 T/S/u/v.
+
+Every changed maximum relative to the immediately preceding CEN2 sweep is
+enumerated here for Rule 8; all statuses remain DEBT:
+
+| row | before | after |
+|---|---:|---:|
+| kt3 u | `0.009311918024754345` | `0.0093119180247543468` |
+| kt3 ssh | `7.0746696306746206e-7` | `7.0746696305163271e-7` |
+| kt4 u | `0.014181918360118145` | `0.014181918360118131` |
+| kt4 v | `0.015948036086231979` | `0.015948036086231965` |
+| kt4 ssh | `5.2997757779300186e-7` | `5.2997757738924497e-7` |
+| kt5 u | `0.020734034877191242` | `0.020734034877194454` |
+| kt5 v | `0.043797500736911535` | `0.043797500736911521` |
+| kt5 ssh | `6.7010559036954909e-5` | `6.7010559038582079e-5` |
+| kt6 u | `0.031134675691760198` | `0.031134675691760726` |
+| kt6 v | `0.060220500815991618` | `0.060220500815993450` |
+| kt6 ssh | `0.00016312992706689415` | `0.00016312992706647071` |
+| kt7 S | `0.0045105047068290105` | `0.0045105046992617304` |
+| kt7 u | `0.040041661575749413` | `0.040041661575748205` |
+| kt7 v | `0.066316704630831114` | `0.066316704630794060` |
+| kt7 ssh | `0.00020875693525002396` | `0.00020875693634198446` |
+| kt8 u | `0.047180723759818792` | `0.047180723759933117` |
+| kt8 v | `0.024527890741687930` | `0.024527890741623953` |
+| kt8 ssh | `0.00025106275789159391` | `0.00025106275951282181` |
+| kt9 S | `0.0054193833238329603` | `0.0054193833238400657` |
+| kt9 u | `0.052561503561377627` | `0.052561503561447530` |
+| kt9 v | `0.014532741725461922` | `0.014532741725734780` |
+| kt9 ssh | `0.00021202403721025419` | `0.00021202403923572025` |
+| kt10 S | `0.0057034654585805811` | `0.0057034654585876865` |
+| kt10 u | `0.056250884173407428` | `0.056250884172887441` |
+| kt10 v | `0.011171896160381577` | `0.011171896159946744` |
+| kt10 ssh | `0.00021254041676015568` | `0.00021254041667595740` |
+
+### 22.5 cellwise cross-card result and Rule-12 debt
+
+After the stage-transport landing, LOCK again passes stage (`9` rows) and
+trajectory (`50` rows) at `0` oracle-relative worsening ulp and `0` movement
+against the previous legoESM output; first-over-bar remains kt3 T/u.
+OVERFLOW's stage gate likewise passes `9` rows at `0` ulp.  OVERFLOW's
+trajectory gate is **FAIL**, with no status change and unchanged
+first-over-bar kt2 T/u, but seven cells exceed the two-row-scale-ulp limit:
+
+| newly registered boundary | first failing cell | oracle-residual worsening | row-scale ulp |
+|---|---:|---:|---:|
+| kt6 u | 500 | `4.51028103753969845e-16` | `2.031` |
+| kt7 u | 501 | `4.51028103753969845e-16` | `2.031` |
+| kt9 ssh | 19 | `1.38777878078144568e-15` | `6.250` |
+| kt9 u | 480 | `6.66133814775093924e-16` | `3.000` |
+| kt10 T | 606 | `1.42108547152020037e-14` | `4.000` |
+| kt10 ssh | 18 | `8.32667268468867405e-16` | `3.750` |
+| kt10 u | 478 | `4.99600361081320443e-16` | `2.250` |
+
+The full comparison's largest cellwise worsening is `17.25` row-scale ulp
+and its largest movement against the prior legoESM output is `41.875` ulp;
+those aggregates occur at cells other than the first failing cell printed for
+each row.  The comparison artifact enumerates all 22 rows with any movement,
+including sub-threshold and improving cells, plus improved/worsened counts.
+Its SHA-256 is `f6eec112...`; the residual NPZ is `9adeee2c...`.
+
+Rule 12 applies: CEN2 and the U/V stage-transport statements are bit-exact
+given NEMO's own ORCA2 inputs, so neither shared fix is reverted, hidden, or
+guarded by card.  These seven OVERFLOW rows are a second downstream error
+exposed at the trajectory boundary and are the next cross-card register.
+The other verdict hashes are LOCK stage `ee5ad37b...`, LOCK trajectory
+`76998204...`, and OVERFLOW stage `4f82b919...`.
+
+### 22.6 verification, artifacts, and disposition
+
+Focused tests pass: `44 passed in 347.46 s` across shared QCO faces,
+WS-RK3 face use, and the no-scheme-duplication tripwire; the two direct CEN2
+bit tests pass in `1.90 s`; and all 21 GYRE Phase-3 fidelity tests pass in
+`4.65 s`.  The ORCA2 exact rows use the committed `ce0f353e25a2` gate in a
+fresh probe worktree plus the two landed shared commits; diagnostic parser
+extensions affect only additional printed operands, not the committed zF/FCT
+scorers.  No NEMO executable was run and no shipped NEMO source was edited.
+
+Round-22 commits are preregistration `820374d2dde2`, shared CEN2
+`2ec14108995e`, and shared QCO reciprocal/source recurrence `8d679dee176e`.
+The external evidence root is
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round22/`; no multi-megabyte
+artifact is committed.  The ORCA2 probe JSONs are retained under
+`round22/orca2_probe`, the two GYRE sweeps under `round22/fct` and
+`round22/stage_transport`, and all cross-card residual NPZs sit beside their
+reports.  The manifest records full SHA-256 values rather than the abbreviated
+receipt forms.
+
+### Round-22 final ASKED / UNASKED register
+
+| choice or action | origin | final disposition |
+|---|---|---|
+| source-literal stage-1/2 CEN2 precursor | ASKED item i | CONFIRMED and landed shared; ORCA2 T/S `0 / 228641` |
+| source-literal U/V stage transport | ASKED item ii | CONFIRMED and landed shared; ORCA2 zFu/zFv `0 / 228641` |
+| ORCA2 localization rows | ASKED conditional | recorded as an explicit handoff; ORCA2 gate remains lane-owned |
+| cross-card gates after each shared change | ASKED / Rule 12 | run; CEN2 all PASS, final OVERFLOW trajectory FAIL and seven rows registered |
+| prognostic `uu_b/vv_b` state | open USER DECISION | HOLD; not implemented |
+| separate WZV recurrence | measured boundary | still DEBT; not mislabelled as U/V closure |
+| EEN primitive acquisition | ORCA2 lane in progress | not duplicated |
+| stage-3 FCT, BBL, ZDF, TKE | downstream | not entered across open boundaries |
+| shipped NEMO edit, NEMO run, card fork, push, merge | forbidden | none |
+
+Round-22 measurements and labels are Codex-internal.  Independent review of
+this round remains **OUTSTANDING**.
