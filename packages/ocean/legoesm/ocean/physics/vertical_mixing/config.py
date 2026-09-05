@@ -614,7 +614,7 @@ class TKEConfig(NamedTuple):
     tke_langmuir_evaluation: str = "vectorized"
     # Evaluation lifetime of NEMO's zdf_sh2 operand.  The historical path
     # evaluates from the state handed to the implicit solve.  Complete DINO
-    # NEMO cards instead freeze p_sh2 from the step-entry NOW/BEFORE faces and
+    # NEMO cards instead freeze p_sh2 from selected step-entry face levels and
     # carried avm_k, matching zdfphy.F90:268 before the explicit update reaches
     # zdftke.F90.  Kept legacy by default so all other cards remain unchanged.
     tke_shear_evaluation_stage: str = "implicit_solve_state"

@@ -8436,7 +8436,7 @@ class LatLonCGridOceanModel:
         self, state, *, eta_now=None, u_now=None, v_now=None,
         z_coord=None, config=None, grid=None,
     ):
-        """Freeze NEMO ``p_sh2`` from the step-entry NOW/BEFORE faces."""
+        """Freeze NEMO ``p_sh2`` from the selected step-entry face levels."""
         _zc = self.z_coord if z_coord is None else z_coord
         _cfg_b = self.config if config is None else config
         vmix = getattr(getattr(_cfg_b, "physics", None),
@@ -11476,7 +11476,7 @@ class LatLonCGridOceanModel:
         _grid = grid if grid is not None else self.grid
 
         # --- FIRST step: forward-Euler start (NEMO l_1st_euler), no RA filter.
-        #     Populate Nbb with the pre-step now-fields for the next step.
+        #     Populate Nbb with the whole-step-entry fields for the next step.
         if state.u_before is None:
             self._warn_euler_start_skips_after_reconcile()
             # NEMO's cold-start Euler step does NOT run with an undefined
@@ -11491,8 +11491,8 @@ class LatLonCGridOceanModel:
             # before==now seed on THIS call only -- a LOCAL copy, not written
             # back onto ``state``/``naa`` below, which must keep the ``None``
             # sentinel so this branch still fires (single-dt, no RA filter) and
-            # the real Nbb seed at :6656 still runs from the true pre-step now-
-            # fields. A bridged/restart state never reaches this branch (its
+            # the real Nbb seed at :6656 still runs from the true whole-step-
+            # entry fields. A bridged/restart state never reaches this branch (its
             # u_before is already populated), so this seed only ever applies to
             # a genuine from-rest / no-history state -- exactly NEMO's case.
             _entry = state._replace(

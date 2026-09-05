@@ -2707,7 +2707,7 @@ def tke_vertical_mixing(
         if precomputed_p_sh2 is None:
             raise ValueError(
                 "tke_shear_evaluation_stage='step_entry' requires "
-                "precomputed_p_sh2 from the step-entry NOW/BEFORE faces.")
+                "precomputed_p_sh2 from the selected step-entry face levels.")
         if precomputed_p_sh2.shape != tke_old.shape:
             raise ValueError(
                 "precomputed_p_sh2 must match tke_old shape; got "
