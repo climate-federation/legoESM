@@ -63,6 +63,29 @@ arrays/call site; do not infer closure from a precursor.  A shared arithmetic
 departure routes to `GYRE_OWNER_SHARED_TKE` with the reproducer.  An ORCA2 card
 selector or forcing operand remains Lane 4.
 
+That stop is reached at the no-Stokes Langmuir operand
+`zdftke.F90:332`, `zWlc2=zcsd*taum`: the admitted frame has `taum` but no
+oracle `zWlc2`.  Acquire one new kt=`nit000+1` rank-zero stream before making
+another arithmetic claim.  Its frozen self-describing schema is magic
+`NEMO_L4_TKEW_1`, base header `(version,kt,Kbb,Kmm,jpi,jpj,jpk,real_bits,
+n3,n2,payload,nn_eice,nn_etau,nn_mxl,nn_pdl)`, and one header-derived extent
+triple per field.  Payload order is:
+
+1. 3-D: `zpelc`, `en_post_lc`, `pdlr`, `zdiag_pre_solve`,
+   `zd_lw_pre_solve`, `zd_up_pre_solve`, `en_rhs_pre_solve`,
+   `zdiag_after_forward`, `zd_lw_after_forward`, `en_post_solve`,
+   `en_post_etau`, `mxlm`, `mxld`, `avm_post`, `avt_post`, `dissl_post`;
+2. 2-D: `zice_fra`, `zWlc2`, `imlc_real`, `zhlc`, `zus3`.
+
+The config-local writer is armed only on rank zero, at kt=2, outside tiles;
+it allocates only while armed, zeroes all storage first, copies only the owned
+wet water column, and assigns no model array.  Twin admission requires the
+existing 100 records to remain raw-identical to the Phase-2s V2 root, the new
+record to be raw-identical between independent twins, ordinary outputs to pass
+the existing identity gate, and magic/extent/count/truncation/trailing/
+canonical/twin plants all to exit nonzero.  This acquisition records targets;
+it does not pre-judge which TKE statement is first non-bit.
+
 ## P2U-4 — conditional EVD/IWM entry
 
 Only if TKE closes, continue through `zdfphy.F90:311-336`: copy closure Kz,
@@ -77,6 +100,7 @@ Otherwise EVD/IWM remain explicitly unentered after the first TKE stop.
 | restore ORCA2 `eice: 0 -> 1` | ASKED identity restoration | card-only selector; no choice/default change |
 | repair shared mode-1 mapping | ASKED missing faithful arm | one implementation, source-literal, scalar-libm |
 | walk TKE then EVD/IWM | ASKED | fail closed at first non-bit/unmeasured boundary |
+| acquire the registered TKE targets | normal in-scope follow-up to that stop | one WRITE-only rank-zero stream; twin MPI handed to user |
 | edit shared TKE arithmetic beyond the missing mode-1 statement | UNASKED / GYRE-owned | forbidden in Lane 4 |
 | alter GYRE/LOCK/OVERFLOW/KPP selections | UNASKED | must remain byte-identical |
 | run MPI/NEMO, edit shipped NEMO, delete, push | forbidden | not planned |
