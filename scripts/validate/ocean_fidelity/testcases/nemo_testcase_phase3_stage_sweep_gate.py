@@ -393,12 +393,16 @@ def classify_arm(
 
 def preregistered_prediction_check(
     case, scaling, rows, baroclinic_rows, stage_states, masks, arms,
+    *, plant_selector=False, live_u_face_mask=None,
 ) -> dict:
     """Score the frozen predictions of
-    ``nemo_testcases_l1_overflow_face_thickness_preregister.md``.
+    ``nemo_testcases_l1_overflow_face_thickness_preregister.md`` (P1-P4) and
+    ``nemo_testcases_l1_stage3_baroclinic_preregister.md`` (S1/S2).
 
     Nothing here is inferred at run time: the windows are the committed
     constants, and each is compared with the arm's own measured movement.
+    ``plant_selector`` inflates the faithful stage-3 residual 1000x so the
+    S1 predicate must flip to NOT-MET (the ``--plant-prediction`` control).
     """
     def _row(collection, name):
         return next(row for row in collection if row["name"] == name)
@@ -482,7 +486,126 @@ def preregistered_prediction_check(
                 "predicted_over_residual": (
                     predicted[3] / faithful_u if faithful_u else float("inf")),
                 "status": ("MET" if predicted[3] < 0.01 * faithful_u else "NOT-MET"),
+                "note": (
+                    "frozen against the pre-selector-fix kt=2 u residual "
+                    "(2.5988e-07); after the UP3 selector round (S1) that "
+                    "residual is gone and this predicate reads NOT-MET by "
+                    "construction -- STALE, kept for the record"),
             }
+    if "legacy_up3_transport_sign_selector" in arms:
+        # nemo_testcases_l1_stage3_baroclinic_preregister.md: the UP3 upwind
+        # selector (dynadv_up3.F90:166-170) owns the stage-3 baroclinic u
+        # debt; the legacy transport-sign arm must reproduce the pre-fix
+        # residual exactly (it IS the old code).
+        def _bc(stage, arm):
+            return _row(baroclinic_rows,
+                        f"{case}.kt1.stage{stage}.{arm}.baroclinic_u")["absolute_max"]
+        legacy = "legacy_up3_transport_sign_selector"
+        if case == "OVERFLOW-zps":
+            faithful3 = _bc(3, "faithful") * (1000.0 if plant_selector else 1.0)
+            legacy3 = _bc(3, legacy)
+            check["S1_up3_selector_owns_the_stage3_baroclinic_u"] = {
+                "predicate": (
+                    "faithful stage-3 baroclinic u < 1.0e-09 m/s (frozen: "
+                    "linearised replay 4.5e-10) and the legacy transport-sign "
+                    "arm reproduces the pre-fix 2.598798e-07 within 1%"),
+                "faithful_stage3_baroclinic_u_m_s": faithful3,
+                "legacy_selector_stage3_baroclinic_u_m_s": legacy3,
+                "status": ("MET" if (faithful3 < 1.0e-9
+                                     and abs(legacy3 - 2.598798e-7) < 2.6e-9)
+                           else "NOT-MET"),
+            }
+        else:
+            faithful2, faithful3 = _bc(2, "faithful"), _bc(3, "faithful")
+            legacy2, legacy3 = _bc(2, legacy), _bc(3, legacy)
+            check["S2_up3_selector_owns_the_LOCK_stage_debt"] = {
+                "predicate": (
+                    "faithful LOCK stage-2 and stage-3 baroclinic u <= 1e-15 "
+                    "and the legacy arm reproduces the pre-fix 9.7656e-11 / "
+                    "2.1388e-10 within 1%"),
+                "faithful_stage2_baroclinic_u_m_s": faithful2,
+                "faithful_stage3_baroclinic_u_m_s": faithful3,
+                "legacy_selector_stage2_baroclinic_u_m_s": legacy2,
+                "legacy_selector_stage3_baroclinic_u_m_s": legacy3,
+                "status": ("MET" if (max(faithful2, faithful3) <= 1.0e-15
+                                     and abs(legacy2 - 9.765645e-11) < 9.8e-13
+                                     and abs(legacy3 - 2.138804e-10) < 2.2e-12)
+                           else "NOT-MET"),
+            }
+    if "legacy_hadv_min_face_thickness" in arms and case == "OVERFLOW-zps":
+        # nemo_testcases_l1_stage3_remainder_preregister.md P1/P2/P4: the
+        # stage momentum-advection thickness owns the stage-3 remainder
+        # (frozen: linearised replay 7.1e-12) and the stage-2 residual; the
+        # legacy min-rule arm IS the pre-fix code and must reproduce
+        # 4.551736e-10 / 9.433404e-11 within 1%.
+        def _bc3(stage, arm):
+            return _row(baroclinic_rows,
+                        f"{case}.kt1.stage{stage}.{arm}.baroclinic_u")["absolute_max"]
+        legacy_h = "legacy_hadv_min_face_thickness"
+        f2, f3 = _bc3(2, "faithful"), _bc3(3, "faithful")
+        l2, l3 = _bc3(2, legacy_h), _bc3(3, legacy_h)
+        check["S3_hadv_face_thickness_owns_the_stage3_remainder"] = {
+            "predicate": (
+                "faithful stage-3 baroclinic u <= 1.0e-11 and stage-2 <= 3.0e-12 "
+                "m/s; the legacy min-rule arm reproduces the pre-fix "
+                "4.551736e-10 / 9.433404e-11 within 1%"),
+            "faithful_stage2_baroclinic_u_m_s": f2,
+            "faithful_stage3_baroclinic_u_m_s": f3,
+            "legacy_hadv_stage2_baroclinic_u_m_s": l2,
+            "legacy_hadv_stage3_baroclinic_u_m_s": l3,
+            "status": ("MET" if (f3 <= 1.0e-11 and f2 <= 3.0e-12
+                                 and abs(l3 - 4.551736e-10) < 4.6e-12
+                                 and abs(l2 - 9.433404e-11) < 9.5e-13)
+                       else "NOT-MET"),
+        }
+    if "legacy_2d_stage_face_mask" in arms and case == "OVERFLOW-zps":
+        # nemo_testcases_l1_phantom_velocity_preregister.md P3/P10: NEMO
+        # masks every stage velocity with the 3-D umask
+        # (stprk3_stg.F90:367,375,382) and the barotropic correction with the
+        # same array (:444), so uu is EXACTLY zero below the seabed and
+        # dyn_adv_up3's k-slab stencil reads that zero.  The 2-D arm IS the
+        # pre-fix code and must reproduce 7.064252e-12 / 1.566344e-12
+        # within 1%.
+        def _bc4(stage, arm):
+            return _row(baroclinic_rows,
+                        f"{case}.kt1.stage{stage}.{arm}.baroclinic_u")["absolute_max"]
+        legacy_m = "legacy_2d_stage_face_mask"
+        m2, m3 = _bc4(2, "faithful"), _bc4(3, "faithful")
+        n2, n3 = _bc4(2, legacy_m), _bc4(3, legacy_m)
+        # The scored MAXIMUM sits at a different face from the one the mask
+        # rank moves, so it is NOT the discriminator (measured: both arms
+        # report the same stage-3 max).  What NEMO's rule fixes is the value
+        # BELOW the seabed, which the gate's active mask never scores -- so
+        # score it directly, and require the wet stage-3 field to move.
+        require(live_u_face_mask is not None,
+                "S4 needs the 3-D live u-face mask")
+        _dry = np.asarray(live_u_face_mask)[:, 1:, :] == 0.0
+
+        def _below_seabed_max(arm, stage):
+            return float(np.max(np.abs(
+                np.asarray(stage_states[arm][stage].u.data)[:, 1:, :][_dry])))
+
+        check["S4_stage_velocity_carries_NEMOs_3d_umask"] = {
+            "predicate": (
+                "every stage velocity is EXACTLY zero below the live seabed "
+                "(stprk3_stg.F90:367,375,382,444,273 carry umask(ji,jj,jk)); the 2-D "
+                "arm leaves a finite velocity there; and the wet stage-3 "
+                "field moves between the two arms"),
+            "faithful_below_seabed_max_m_s": [
+                _below_seabed_max("faithful", k) for k in (1, 2, 3)],
+            "legacy_2d_mask_below_seabed_max_m_s": [
+                _below_seabed_max(legacy_m, k) for k in (1, 2, 3)],
+            "wet_stage3_movement_m_s": _stage_move(legacy_m, 3),
+            "faithful_stage2_baroclinic_u_m_s": m2,
+            "faithful_stage3_baroclinic_u_m_s": m3,
+            "legacy_2d_mask_stage2_baroclinic_u_m_s": n2,
+            "legacy_2d_mask_stage3_baroclinic_u_m_s": n3,
+            "status": ("MET" if (
+                all(_below_seabed_max("faithful", k) == 0.0 for k in (1, 2, 3))
+                and _below_seabed_max(legacy_m, 1) > 1.0e-3
+                and _stage_move(legacy_m, 3) > 0.0)
+                else "NOT-MET"),
+        }
     return check
 
 
@@ -552,6 +675,25 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
             "omit_stage_qco_factor": _NEMOWSRK3TestHooks(
                 omit_stage_qco_factor=True
             ),
+            # Stage-3 baroclinic round (preregistered in
+            # nemo_testcases_l1_stage3_baroclinic_preregister.md): ablate the
+            # UP3 upwind-selector fix (dynadv_up3.F90:166-170).
+            "legacy_up3_transport_sign_selector": _NEMOWSRK3TestHooks(
+                legacy_up3_transport_sign_selector=True
+            ),
+            # Stage-3 remainder round (preregistered in
+            # nemo_testcases_l1_stage3_remainder_preregister.md): ablate the
+            # NEMO e3u(Kmm) in the stage flux-form momentum advection.
+            "legacy_hadv_min_face_thickness": _NEMOWSRK3TestHooks(
+                legacy_hadv_min_face_thickness=True
+            ),
+            # Phantom-velocity round (preregistered in
+            # nemo_testcases_l1_phantom_velocity_preregister.md): ablate
+            # NEMO's 3-D umask on the stage velocity update
+            # (stprk3_stg.F90:367,375,382,444,273).
+            "legacy_2d_stage_face_mask": _NEMOWSRK3TestHooks(
+                legacy_2d_stage_face_mask=True
+            ),
         }
     else:
         arms = {
@@ -567,6 +709,19 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
             ),
             "omit_stage_qco_factor": _NEMOWSRK3TestHooks(
                 omit_stage_qco_factor=True
+            ),
+            "legacy_up3_transport_sign_selector": _NEMOWSRK3TestHooks(
+                legacy_up3_transport_sign_selector=True
+            ),
+            "legacy_hadv_min_face_thickness": _NEMOWSRK3TestHooks(
+                legacy_hadv_min_face_thickness=True
+            ),
+            # Phantom-velocity round (preregistered in
+            # nemo_testcases_l1_phantom_velocity_preregister.md): ablate
+            # NEMO's 3-D umask on the stage velocity update
+            # (stprk3_stg.F90:367,375,382,444,273).
+            "legacy_2d_stage_face_mask": _NEMOWSRK3TestHooks(
+                legacy_2d_stage_face_mask=True
             ),
         }
 
@@ -696,7 +851,10 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
         target = (
             "u" if arm in ("freeze_stage_hpg_operands", "freeze_stage_hpg_tracers",
                            "freeze_stage_hpg_eta", "omit_stage_vertical_up3",
-                           "omit_stage_qco_factor")
+                           "omit_stage_qco_factor",
+                           "legacy_up3_transport_sign_selector",
+                           "legacy_hadv_min_face_thickness",
+                           "legacy_2d_stage_face_mask")
             else "T" if case == "OVERFLOW-zps" else "u"
         )
         faithful_row = faithful_T if target == "T" else faithful_u
@@ -715,8 +873,11 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
         improving = control_row["absolute_max"] < faithful_row["absolute_max"]
         arm_results[arm] = classify_arm(faithful_row, control_row, arm_move, improving=improving)
         arm_results[arm]["target"] = target
-        if arm in ("legacy_stage_min_face_thickness", "omit_stage_qco_factor"):
-            # These two arms ABLATE a landed fix, so classify_arm's "does the
+        if arm in ("legacy_stage_min_face_thickness", "omit_stage_qco_factor",
+                   "legacy_up3_transport_sign_selector",
+                   "legacy_hadv_min_face_thickness",
+                   "legacy_2d_stage_face_mask"):
+            # These arms ABLATE a landed fix, so classify_arm's "does the
             # arm improve the residual" question is inverted: the meaningful
             # statement is whether REMOVING the NEMO rule makes the target
             # worse.  Recorded explicitly rather than by reading the inverted
@@ -754,6 +915,24 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
             one_variable = (
                 "qco weighting of the stage velocity update "
                 "(stprk3_stg.F90:373-378)")
+        elif arm == "legacy_up3_transport_sign_selector":
+            one_variable = (
+                "UP3 upwind selector of the stage horizontal momentum "
+                "advection: NEMO's advected-velocity pair sign "
+                "(dynadv_up3.F90:166-170) vs the stage-transport pair sign")
+        elif arm == "legacy_hadv_min_face_thickness":
+            one_variable = (
+                "face thickness of the stage flux-form momentum advection: "
+                "NEMO e3u(Kmm) = e3u_0*(1+r3u(Kmm)) (dynadv_up3.F90:160,"
+                "205-207; domzgr_substitute.h90:127) vs tendencies()' min of "
+                "the two stretched T cells")
+        elif arm == "legacy_2d_stage_face_mask":
+            one_variable = (
+                "rank of the mask applied to the WS-RK3 stage velocity "
+                "update and to the stage velocities the tracer transports "
+                "consume: NEMO's 3-D umask(ji,jj,jk) "
+                "(stprk3_stg.F90:367,375,382,444,273) vs the 2-D state.u_mask "
+                "broadcast over every level")
         elif arm == "legacy_velocity_primary_average":
             one_variable = "flux_form_primary_transport_average"
         elif "primary" in arm:
@@ -1042,10 +1221,19 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
         # the gate exits 2.
         for row in scaling["h2_qco_stage_factor"]:
             row["predicted_baroclinic_u_movement_m_s"] *= 1000.0
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        compute_face_masks_3d as _face_masks_3d)
     prediction_check = preregistered_prediction_check(
-        case, scaling, rows, baroclinic_rows, stage_states, masks, arms)
+        case, scaling, rows, baroclinic_rows, stage_states, masks, arms,
+        plant_selector=plant_prediction,
+        live_u_face_mask=np.asarray(_face_masks_3d(
+            card.recipe.z_coord.is_active, card.recipe.grid)[0]).astype(float))
     if plant_prediction:
-        gated = "P3_h2_is_refuted_as_the_stage3_owner"
+        # The gated predicate is the live round's owner claim (S1); the
+        # older P3 reads NOT-MET by construction since the selector round
+        # removed the residual it was scaled against, so it can no longer
+        # discriminate a plant.
+        gated = "S1_up3_selector_owns_the_stage3_baroclinic_u"
         require(gated in prediction_check,
                 f"planted prediction control needs {gated} (OVERFLOW only)")
         require(prediction_check[gated]["status"] == "NOT-MET",
@@ -1116,6 +1304,10 @@ def main(argv=None) -> int:
     parser.add_argument("--plant-prediction", action="store_true")
     parser.add_argument("--allow-dirty", action="store_true",
                         help="stamp '<sha>-dirty' instead of refusing a dirty tree")
+    from legoesm.ocean.fidelity.ulp_move_gate import (
+        add_ulp_compare_arguments, comparison_exit_code, run_ulp_comparison,
+    )
+    add_ulp_compare_arguments(parser)
     args = parser.parse_args(argv)
     # Exit codes: 0 AT-BAR, 1 DEBT (measured), 2 gate failure (a planted
     # control that did not land, a dirty tree, a bad oracle record).
@@ -1131,6 +1323,21 @@ def main(argv=None) -> int:
     if args.output:
         args.output.write_text(encoded)
     print(encoded, end="")
+    if args.compare_to:
+        # Exit status then reports the ULP COMPARISON against a committed
+        # reference, not this gate's own AT-BAR/DEBT verdict.  Every arm here
+        # other than "faithful" is a private ablation whose meaning a refactor
+        # may legitimately redefine, so a comparison of this gate normally
+        # passes --compare-rows-matching .faithful. and says so in the receipt.
+        comparison = run_ulp_comparison(args, report)
+        print(json.dumps(comparison, indent=2, sort_keys=True))
+        code = comparison_exit_code(comparison)
+        if code == 2:
+            print("PLANTED CONTROL DID NOT LAND: a planted "
+                  f"{comparison['planted_ulp_move']}-ulp move left the "
+                  "comparison green, so the comparison is inspecting nothing",
+                  file=sys.stderr)
+        return code
     return 0 if report["status"] == "AT-BAR" else 1
 
 
